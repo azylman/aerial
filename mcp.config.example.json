@@ -11,6 +11,9 @@
       "headers": {
         "Authorization": "Bearer ${GITHUB_PAT}"
       }
+    },
+    "ha-mcp": {
+      "serverUrl": "${HA_TOKEN}"
     }
   }
 }
