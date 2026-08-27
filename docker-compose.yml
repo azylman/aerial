@@ -118,8 +118,8 @@ services:
     ports:
       - "${AGENTSVIEW_HOST_PORT:-8089}:8080"
     volumes:
+      - aerial-agentsview-data:/data
       - aerial-brain-gemini:/root/.gemini:ro
-      - aerial-brain-data:/data:ro
     networks:
       - aerial-net
 
@@ -133,3 +133,5 @@ volumes:
     name: aerial-brain-data
   aerial-brain-gemini:
     name: aerial-brain-gemini
+  aerial-agentsview-data:
+    name: aerial-agentsview-data
