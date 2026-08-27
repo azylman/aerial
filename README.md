@@ -50,7 +50,7 @@ Aerial is designed to be fully extensible with zero code changes.
 If you don't provide a custom `mcp.config.json`, Aerial automatically enables:
 - **`discord`** (`http://discord-mcp:4001/mcp`)
 - **`docker`** (`http://docker-mcp:4002/mcp`)
-- **`github-mcp-server`** (if `GITHUB_PAT` is defined in `.env`)
+- **`github`** (if `GITHUB_PAT` is defined in `.env`)
 - **`ha-mcp`** (if `HA_TOKEN` is defined in `.env`)
 
 ### Custom MCP Configuration (`mcp.config.json`)
@@ -69,18 +69,10 @@ Aerial automatically expands all `${VARIABLE_NAME}` placeholders from your `.env
     "docker": {
       "serverUrl": "http://docker-mcp:4002/mcp"
     },
-    "github-mcp-server": {
-      "command": "docker",
-      "args": [
-        "run",
-        "-i",
-        "--rm",
-        "-e",
-        "GITHUB_PERSONAL_ACCESS_TOKEN",
-        "ghcr.io/github/github-mcp-server"
-      ],
-      "env": {
-        "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_PAT}"
+    "github": {
+      "serverUrl": "https://api.githubcopilot.com/mcp/",
+      "headers": {
+        "Authorization": "Bearer ${GITHUB_PAT}"
       }
     },
     "ha-mcp": {
