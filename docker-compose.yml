@@ -1,0 +1,108 @@
+services:
+  # ----------------------------------------------------------------------------
+  # 1. Inbound Event Gateway: Discord Funnel
+  #    Connects to Discord Gateway and forwards qualifying mentions/threads
+  #    to Gundam Brain.
+  # ----------------------------------------------------------------------------
+  discord-funnel:
+    image: ghcr.io/azylman/ha-discord-funnel-addon:latest
+    container_name: gundam-discord-funnel
+    restart: unless-stopped
+    environment:
+      - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN}
+      - TARGET_URL=http://gundam-brain:8080/api/prompt
+    networks:
+      - gundam-net
+    depends_on:
+      gundam-brain:
+        condition: service_healthy
+
+  # ----------------------------------------------------------------------------
+  # 2. Execution Brain: Gundam Brain
+  #    Runs headless Antigravity CLI agent prompts with multi-turn SQLite memory
+  #    and connects to remote MCP network servers.
+  # ----------------------------------------------------------------------------
+  gundam-brain:
+    image: ghcr.io/azylman/gundam-brain:latest
+    container_name: gundam-brain
+    restart: unless-stopped
+    environment:
+      - PORT=8080
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - AGY_MODEL=${AGY_MODEL:-Gemini 3.6 Flash (Low)}
+      - TIMEOUT_MINUTES=${TIMEOUT_MINUTES:-15}
+      - MCP_CONFIG={"mcpServers":{"ha":{"command":"ha-mcp","args":["run"],"env":{"HA_TOKEN":"${HA_TOKEN}"}},"github":{"url":"https://api.githubcopilot.com/mcp/","headers":{"Authorization":"Bearer ${GITHUB_PAT}"}},"discord":{"url":"http://discord-mcp:4001/mcp"},"docker":{"url":"http://docker-mcp:4002/mcp"}}}
+    volumes:
+      - gundam-brain-data:/data
+      - gundam-brain-gemini:/root/.gemini
+    ports:
+      - "${GUNDAM_BRAIN_HOST_PORT:-8088}:8080"
+    networks:
+      - gundam-net
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    depends_on:
+      discord-mcp:
+        condition: service_healthy
+      docker-mcp:
+        condition: service_healthy
+
+  # ----------------------------------------------------------------------------
+  # 3. Outbound MCP: Discord MCP Server
+  #    Provides Discord tools (send message, create thread, read history) over HTTP.
+  # ----------------------------------------------------------------------------
+  discord-mcp:
+    image: ghcr.io/azylman/ha-addon-discord-mcp:latest
+    container_name: gundam-discord-mcp
+    restart: unless-stopped
+    environment:
+      - PORT=4001
+      - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN}
+    ports:
+      - "${DISCORD_MCP_HOST_PORT:-4001}:4001"
+    networks:
+      - gundam-net
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:4001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  # ----------------------------------------------------------------------------
+  # 4. Outbound MCP: Docker Host MCP Server
+  #    Provides Docker host inspection & diagnostics over HTTP (/mcp).
+  # ----------------------------------------------------------------------------
+  docker-mcp:
+    image: ghcr.io/azylman/ha-docker-mcp-addon:latest
+    container_name: gundam-docker-mcp
+    restart: unless-stopped
+    environment:
+      - PORT=4002
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "${DOCKER_MCP_HOST_PORT:-4002}:4002"
+    networks:
+      - gundam-net
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:4002/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+networks:
+  gundam-net:
+    name: gundam-net
+    driver: bridge
+
+volumes:
+  gundam-brain-data:
+    name: gundam-brain-data
+  gundam-brain-gemini:
+    name: gundam-brain-gemini
