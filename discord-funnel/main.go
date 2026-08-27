@@ -127,6 +127,7 @@ func isBotTargeted(s *discordgo.Session, m *discordgo.MessageCreate) bool {
 	// 3. Raw content checks for mentions or bot names
 	contentLower := strings.ToLower(m.Content)
 	if strings.Contains(m.Content, "<@") ||
+		strings.Contains(contentLower, "aerial") ||
 		strings.Contains(contentLower, "gundam") ||
 		strings.Contains(contentLower, "brain") ||
 		strings.Contains(contentLower, "bot") {

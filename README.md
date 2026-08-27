@@ -1,8 +1,8 @@
-# Gundam Stack
+# Aerial Stack
 
-An autonomous personal AI assistant system running natively on Docker.
+An autonomous personal AI assistant system running natively on Docker, inspired by XVX-016 Gundam Aerial.
 
-Gundam provides a multi-agent, tool-enabled AI assistant accessible via Discord and HTTP API, with persistent multi-turn SQLite memory, GitHub workspace operations, and full host Docker infrastructure inspection.
+Aerial provides a multi-agent, tool-enabled AI assistant accessible via Discord and HTTP API, with persistent multi-turn SQLite memory, GitHub workspace operations, and host Docker infrastructure inspection.
 
 ---
 
@@ -20,7 +20,7 @@ Gundam provides a multi-agent, tool-enabled AI assistant accessible via Discord 
                                    ? POST /api/prompt
                                    ?
                        ???????????????????????????
-                       ?      gundam-brain       ? ??? (SQLite /data/gundam.db)
+                       ?          brain          ? ??? (SQLite /data/aerial.db)
                        ???????????????????????????
                            ?                 ?
              ???????????????                 ???????????????
@@ -52,13 +52,13 @@ Following the philosophy of writing minimal custom code and relying on translati
 
 ## 3. Component Modules
 
-1. **[Gundam Brain (`brain/`)](https://github.com/azylman/gundam/tree/main/brain)**:
-   Execution runner wrapping headless Antigravity CLI (`agy`) with SQLite-backed multi-turn thread memory (`/data/gundam.db`) and remote MCP client orchestration.
-2. **[Discord Funnel (`discord-funnel/`)](https://github.com/azylman/gundam/tree/main/discord-funnel)**:
-   Inbound event gateway connecting to Discord Gateway, generating deterministic conversation UUIDs, and forwarding prompts to Gundam Brain.
-3. **[Discord MCP Server (`discord-mcp/`)](https://github.com/azylman/gundam/tree/main/discord-mcp)**:
+1. **[Aerial Brain (`brain/`)](https://github.com/azylman/aerial/tree/main/brain)**:
+   Execution runner wrapping headless Antigravity CLI (`agy`) with SQLite-backed multi-turn thread memory (`/data/aerial.db`) and remote MCP client orchestration.
+2. **[Discord Funnel (`discord-funnel/`)](https://github.com/azylman/aerial/tree/main/discord-funnel)**:
+   Inbound event gateway connecting to Discord Gateway, generating deterministic conversation UUIDs, and forwarding prompts to Aerial Brain.
+3. **[Discord MCP Server (`discord-mcp/`)](https://github.com/azylman/aerial/tree/main/discord-mcp)**:
    Outbound Model Context Protocol (MCP) server over Streamable HTTP exposing Discord messaging, thread creation, and channel reading tools.
-4. **[Docker MCP Server (`docker-mcp/`)](https://github.com/azylman/gundam/tree/main/docker-mcp)**:
+4. **[Docker MCP Server (`docker-mcp/`)](https://github.com/azylman/aerial/tree/main/docker-mcp)**:
    Universal `supergateway` proxy wrapping the official Docker MCP server (`mcp/docker`) over the host Docker socket.
 
 ---
@@ -72,8 +72,8 @@ Following the philosophy of writing minimal custom code and relying on translati
 
 ### Step 1: Clone Repository
 ```bash
-git clone https://github.com/azylman/gundam.git
-cd gundam
+git clone https://github.com/azylman/aerial.git
+cd aerial
 ```
 
 ### Step 2: Configure Environment Variables
@@ -99,7 +99,7 @@ docker compose ps
 ```
 Check container logs:
 ```bash
-docker compose logs -f gundam-brain
+docker compose logs -f brain
 ```
 
 ---
@@ -112,7 +112,7 @@ docker compose logs -f gundam-brain
 | Stop all services | `docker compose down` |
 | View live logs | `docker compose logs -f` |
 | View transcripts & memory | `curl http://localhost:8088/api/transcripts` |
-| Restart single service | `docker compose restart gundam-brain` |
+| Restart single service | `docker compose restart brain` |
 | Update images & rebuild | `docker compose build && docker compose up -d` |
 
 ---
@@ -121,4 +121,4 @@ docker compose logs -f gundam-brain
 
 - **Never commit `.env`**: Secrets, API keys, and tokens belong only in the `.env` file, which is listed in `.gitignore`.
 - **Restrict File Permissions**: Run `chmod 600 .env` on the host to ensure only the host owner can read secrets.
-- **Isolated Bridge Network**: All container-to-container traffic operates on the private `gundam-net` bridge network.
+- **Isolated Bridge Network**: All container-to-container traffic operates on the private `aerial-net` bridge network.
