@@ -743,6 +743,139 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "healthy"})
 }
 
+func handleIndexUI(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		return
+	}
+	html := `<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Aerial Brain - Transcript Viewer</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>tailwind.config = { darkMode: 'class' }</script>
+</head>
+<body class="bg-slate-950 text-slate-100 font-sans antialiased min-h-screen flex flex-col">
+  <header class="border-b border-slate-800 bg-slate-900/80 backdrop-blur px-6 py-4 flex items-center justify-between sticky top-0 z-50">
+    <div class="flex items-center space-x-3">
+      <div class="w-8 h-8 rounded-lg bg-indigo-600 flex items-center justify-center font-bold text-white shadow-lg shadow-indigo-500/30">A</div>
+      <div>
+        <h1 class="text-lg font-bold tracking-tight text-white flex items-center gap-2">
+          Aerial Brain
+          <span class="text-xs px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">Live Dashboard</span>
+        </h1>
+      </div>
+    </div>
+    <div class="flex items-center space-x-3">
+      <button id="refreshBtn" onclick="fetchTranscripts()" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm font-medium border border-slate-700 transition">
+        Refresh
+      </button>
+      <a href="http://192.168.1.14:8089" target="_blank" class="px-3 py-1.5 rounded-lg bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-400 text-sm font-medium border border-indigo-500/30 transition flex items-center gap-1.5">
+        Agentsview ?
+      </a>
+    </div>
+  </header>
+  <div class="flex-1 flex overflow-hidden">
+    <aside class="w-80 border-r border-slate-800 bg-slate-900/40 flex flex-col">
+      <div class="p-3 border-b border-slate-800">
+        <input id="searchInput" type="text" placeholder="Filter sessions..." oninput="renderSidebar()" class="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-indigo-500">
+      </div>
+      <div id="sessionList" class="flex-1 overflow-y-auto p-2 space-y-1"></div>
+    </aside>
+    <main class="flex-1 flex flex-col bg-slate-950 overflow-hidden">
+      <div id="chatHeader" class="border-b border-slate-800 px-6 py-3 bg-slate-900/20 flex items-center justify-between text-sm text-slate-400">
+        <span>Select a conversation from the sidebar</span>
+      </div>
+      <div id="chatContent" class="flex-1 overflow-y-auto p-6 space-y-6 max-w-4xl w-full mx-auto"></div>
+    </main>
+  </div>
+  <script>
+    let sessions = [];
+    let selectedIdx = 0;
+    async function fetchTranscripts() {
+      try {
+        const res = await fetch('/api/transcripts');
+        sessions = await res.json();
+        sessions.reverse();
+        renderSidebar();
+        if (sessions.length > 0) selectSession(selectedIdx < sessions.length ? selectedIdx : 0);
+      } catch (err) { console.error(err); }
+    }
+    function renderSidebar() {
+      const q = (document.getElementById('searchInput').value || '').toLowerCase();
+      const el = document.getElementById('sessionList');
+      el.innerHTML = '';
+      sessions.forEach((s, idx) => {
+        const ext = s.external_id || 'Direct API';
+        if (!ext.toLowerCase().includes(q) && !s.path.toLowerCase().includes(q)) return;
+        const isSel = idx === selectedIdx;
+        const item = document.createElement('div');
+        item.className = 'p-3 rounded-lg cursor-pointer transition flex flex-col gap-1 border ' + (isSel ? 'bg-indigo-600/15 border-indigo-500/50 text-white' : 'hover:bg-slate-900 border-transparent text-slate-400');
+        item.onclick = () => selectSession(idx);
+        item.innerHTML = '<div class="flex items-center justify-between"><span class="font-semibold text-sm truncate ' + (isSel ? 'text-indigo-400' : 'text-slate-200') + '">' + escapeHtml(ext) + '</span><span class="text-xs text-slate-500">' + new Date(s.mod_time).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"}) + '</span></div><div class="flex items-center justify-between text-xs text-slate-500"><span>' + s.total_steps + ' steps</span><span class="px-1.5 py-0.5 rounded text-[10px] ' + (s.last_status === 'DONE' ? 'bg-emerald-500/10 text-emerald-400' : 'bg-red-500/10 text-red-400') + '">' + s.last_status + '</span></div>';
+        el.appendChild(item);
+      });
+    }
+    function selectSession(idx) {
+      selectedIdx = idx;
+      renderSidebar();
+      const s = sessions[idx];
+      if (!s) return;
+      document.getElementById('chatHeader').innerHTML = '<div class="flex items-center gap-3"><span class="font-semibold text-slate-200">Session ID:</span><code class="text-xs bg-slate-900 px-2 py-1 rounded text-slate-300 border border-slate-800">' + escapeHtml(s.external_id || s.path) + '</code></div><div class="text-xs text-slate-500">' + new Date(s.mod_time).toLocaleString() + '</div>';
+      const c = document.getElementById('chatContent');
+      c.innerHTML = '';
+      (s.raw_jsonl || '').trim().split('\n').forEach(line => {
+        if (!line.trim()) return;
+        try {
+          const step = JSON.parse(line);
+          const el = renderStep(step);
+          if (el) c.appendChild(el);
+        } catch(e){}
+      });
+      document.querySelectorAll('pre code').forEach(el => hljs.highlightElement(el));
+    }
+    function renderStep(step) {
+      const d = document.createElement('div');
+      if (step.type === 'USER_INPUT') {
+        d.className = 'flex justify-end';
+        let raw = (step.content || '').replace(/<\/?USER_REQUEST>/g, '').replace(/<ADDITIONAL_METADATA>[\s\S]*?<\/ADDITIONAL_METADATA>/g, '').trim();
+        d.innerHTML = '<div class="max-w-2xl bg-indigo-600/20 border border-indigo-500/30 rounded-2xl rounded-tr-sm px-5 py-3.5 text-slate-100 shadow-sm"><div class="text-xs font-semibold text-indigo-400 mb-1">User Request</div><div class="prose prose-invert prose-sm leading-relaxed">' + marked.parse(raw) + '</div></div>';
+        return d;
+      }
+      if (step.type === 'PLANNER_RESPONSE' || step.type === 'MCP_TOOL') {
+        d.className = 'space-y-3';
+        let h = '';
+        if (step.thinking) h += '<details class="bg-amber-950/20 border border-amber-500/30 rounded-xl p-3 text-xs text-amber-300"><summary class="font-semibold cursor-pointer select-none">Thinking / Chain of Thought</summary><div class="mt-2 text-slate-300 whitespace-pre-wrap leading-relaxed">' + escapeHtml(step.thinking) + '</div></details>';
+        if (step.tool_calls) {
+          step.tool_calls.forEach(tc => {
+            const name = tc.args?.ToolName || tc.name || 'tool';
+            h += '<div class="bg-slate-900 border border-slate-800 rounded-xl p-3 text-xs"><div class="flex items-center justify-between text-indigo-400 font-mono font-semibold mb-2"><span>?? Tool Call: ' + escapeHtml(name) + '</span><span class="text-slate-500 text-[11px]">' + (tc.args?.ServerName || 'mcp') + '</span></div><pre class="bg-slate-950 p-2.5 rounded border border-slate-800 overflow-x-auto text-slate-300 font-mono">' + escapeHtml(JSON.stringify(tc.args?.Arguments || tc.args || {}, null, 2)) + '</pre></div>';
+          });
+        }
+        if (step.content && step.type === 'MCP_TOOL') h += '<div class="bg-slate-900/60 border border-emerald-500/20 rounded-xl p-3 text-xs text-emerald-300"><div class="font-semibold text-emerald-400 mb-1">? Tool Result</div><pre class="whitespace-pre-wrap text-slate-300 font-mono bg-slate-950 p-2 rounded">' + escapeHtml(step.content) + '</pre></div>';
+        if (step.content && step.type === 'PLANNER_RESPONSE') h += '<div class="bg-slate-900 border border-slate-800 rounded-2xl rounded-tl-sm p-5 text-slate-100 shadow-sm"><div class="text-xs font-semibold text-slate-400 mb-2">?? Aerial Response</div><div class="prose prose-invert prose-sm max-w-none leading-relaxed">' + marked.parse(step.content) + '</div></div>';
+        if (step.error) h += '<div class="bg-red-950/30 border border-red-500/30 rounded-xl p-4 text-xs text-red-300"><div class="font-bold text-red-400 mb-1">? Error Detail</div><pre class="whitespace-pre-wrap font-mono">' + escapeHtml(typeof step.error === 'string' ? step.error : JSON.stringify(step.error, null, 2)) + '</pre></div>';
+        if (!h) return null;
+        d.innerHTML = h;
+        return d;
+      }
+      return null;
+    }
+    function escapeHtml(s) { if (!s) return ''; return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+    fetchTranscripts();
+    setInterval(fetchTranscripts, 8000);
+  </script>
+</body>
+</html>`
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(html))
+}
+
 func main() {
 	port, agyBin, apiKey, model, systemPrompt, timeoutMinutes, mcpConfig := loadConfig()
 
@@ -758,7 +891,8 @@ func main() {
 	promptHandler := handlePrompt(db, agyBin, apiKey, model, systemPrompt, timeoutMinutes, mcpConfig)
 	transcriptHandler := handleTranscripts(db)
 
-	mux.HandleFunc("POST /", promptHandler)
+	mux.HandleFunc("GET /", handleIndexUI)
+	mux.HandleFunc("GET /ui", handleIndexUI)
 	mux.HandleFunc("POST /prompt", promptHandler)
 	mux.HandleFunc("POST /api/prompt", promptHandler)
 	mux.HandleFunc("GET /transcripts", transcriptHandler)
