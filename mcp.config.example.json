@@ -1,18 +1,26 @@
 {
   "mcpServers": {
     "discord": {
-      "url": "http://discord-mcp:4001/mcp"
+      "serverUrl": "http://discord-mcp:4001/mcp"
     },
     "docker": {
-      "url": "http://docker-mcp:4002/mcp"
+      "serverUrl": "http://docker-mcp:4002/mcp"
     },
-    "github": {
-      "url": "https://api.githubcopilot.com/mcp/",
-      "headers": {
-        "Authorization": "Bearer ${GITHUB_PAT}"
+    "github-mcp-server": {
+      "command": "docker",
+      "args": [
+        "run",
+        "-i",
+        "--rm",
+        "-e",
+        "GITHUB_PERSONAL_ACCESS_TOKEN",
+        "ghcr.io/github/github-mcp-server"
+      ],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_PAT}"
       }
     },
-    "ha": {
+    "ha-mcp": {
       "serverUrl": "${HA_TOKEN}"
     }
   }
