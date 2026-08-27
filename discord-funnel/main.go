@@ -203,6 +203,9 @@ func main() {
 	if *discordToken == "" {
 		*discordToken = os.Getenv("DISCORD_TOKEN")
 	}
+	if *discordToken == "" {
+		*discordToken = os.Getenv("DISCORD_BOT_TOKEN")
+	}
 	if *targetURL == "" {
 		*targetURL = os.Getenv("TARGET_URL")
 	}
@@ -212,9 +215,12 @@ func main() {
 	if *tmplStr == "" {
 		*tmplStr = defaultTemplate
 	}
+	if !*mentionsOnly && os.Getenv("MENTIONS_ONLY") == "true" {
+		*mentionsOnly = true
+	}
 
 	if *discordToken == "" {
-		log.Fatal("discord-funnel: Discord bot token is required")
+		log.Fatal("discord-funnel: Discord bot token is required (set DISCORD_BOT_TOKEN or DISCORD_TOKEN)")
 	}
 	if *targetURL == "" {
 		log.Fatal("discord-funnel: Target URL is required")
@@ -297,6 +303,26 @@ func main() {
 		log.Fatalf("discord-funnel: failed to open Discord session: %v", err)
 	}
 	defer dg.Close()
+
+	// Start internal HTTP health server
+	healthPort := os.Getenv("HEALTH_PORT")
+	if healthPort == "" {
+		healthPort = "8085"
+	}
+	go func() {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status":  "healthy",
+				"service": "discord-funnel",
+			})
+		})
+		if err := http.ListenAndServe(":"+healthPort, mux); err != nil {
+			log.Printf("discord-funnel: health server error: %v", err)
+		}
+	}()
 
 	log.Printf("discord-funnel: connected to Discord, mentions_only=%t, forwarding messages to %s", *mentionsOnly, *targetURL)
 
