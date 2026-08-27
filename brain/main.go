@@ -200,6 +200,85 @@ func ensureSystemRules(customPrompt string) {
 	log.Printf("Configured custom user rules in %s", ruleFile)
 }
 
+func loadMCPConfig() json.RawMessage {
+	// 1. Check mounted / external config files
+	configPaths := []string{
+		"/config/mcp.config.json",
+		"/config/mcp.json",
+		"/data/mcp.config.json",
+		"./mcp.config.json",
+	}
+
+	var rawBytes []byte
+	for _, p := range configPaths {
+		if data, err := os.ReadFile(p); err == nil && len(bytes.TrimSpace(data)) > 0 {
+			log.Printf("Loaded MCP configuration from %s", p)
+			rawBytes = data
+			break
+		}
+	}
+
+	// 2. Check MCP_CONFIG environment variable if no file found
+	if len(rawBytes) == 0 {
+		if envVal := os.Getenv("MCP_CONFIG"); envVal != "" {
+			rawBytes = []byte(envVal)
+		}
+	}
+
+	// 3. Fallback to /data/options.json for Home Assistant add-on compatibility
+	if len(rawBytes) == 0 {
+		if data, err := os.ReadFile("/data/options.json"); err == nil {
+			var opts Options
+			if err := json.Unmarshal(data, &opts); err == nil && len(opts.McpConfig) > 0 {
+				var strVal string
+				if err := json.Unmarshal(opts.McpConfig, &strVal); err == nil && strVal != "" {
+					rawBytes = []byte(strVal)
+				} else {
+					rawBytes = opts.McpConfig
+				}
+			}
+		}
+	}
+
+	// 4. If still empty, construct default built-in configuration
+	if len(rawBytes) == 0 {
+		defaultConfig := map[string]interface{}{
+			"mcpServers": map[string]interface{}{
+				"discord": map[string]interface{}{
+					"url": "http://discord-mcp:4001/mcp",
+				},
+				"docker": map[string]interface{}{
+					"url": "http://docker-mcp:4002/mcp",
+				},
+			},
+		}
+		mcpServers := defaultConfig["mcpServers"].(map[string]interface{})
+		if pat := os.Getenv("GITHUB_PAT"); pat != "" {
+			mcpServers["github"] = map[string]interface{}{
+				"url": "https://api.githubcopilot.com/mcp/",
+				"headers": map[string]string{
+					"Authorization": "Bearer " + pat,
+				},
+			}
+		}
+		if haToken := os.Getenv("HA_TOKEN"); haToken != "" {
+			mcpServers["homeassistant"] = map[string]interface{}{
+				"command": "ha-mcp",
+				"args":    []string{"run"},
+				"env": map[string]string{
+					"HA_TOKEN": haToken,
+				},
+			}
+		}
+		b, _ := json.Marshal(defaultConfig)
+		rawBytes = b
+	}
+
+	// 5. Expand all environment variables (${VAR_NAME}) in the JSON
+	expanded := os.ExpandEnv(string(rawBytes))
+	return json.RawMessage(expanded)
+}
+
 func ensureMcpConfig(rawConfig json.RawMessage) {
 	if len(rawConfig) == 0 {
 		return
@@ -226,7 +305,13 @@ func ensureMcpConfig(rawConfig json.RawMessage) {
 	}
 
 	var js map[string]interface{}
+	var serverList []string
 	if err := json.Unmarshal(configContent, &js); err == nil {
+		if servers, ok := js["mcpServers"].(map[string]interface{}); ok {
+			for name := range servers {
+				serverList = append(serverList, name)
+			}
+		}
 		if formatted, err := json.MarshalIndent(js, "", "  "); err == nil {
 			configContent = formatted
 		}
@@ -235,7 +320,7 @@ func ensureMcpConfig(rawConfig json.RawMessage) {
 	if err := os.WriteFile(targetPath, configContent, 0644); err != nil {
 		log.Printf("Failed to write %s: %v", targetPath, err)
 	} else {
-		log.Printf("Configured MCP servers in %s", targetPath)
+		log.Printf("Configured %d MCP server(s) in %s: %v", len(serverList), targetPath, serverList)
 	}
 }
 
@@ -362,11 +447,10 @@ func loadConfig() (string, string, string, string, string, int, json.RawMessage)
 			if opts.TimeoutMinutes > 0 {
 				timeoutMinutes = opts.TimeoutMinutes
 			}
-			if len(opts.McpConfig) > 0 {
-				mcpConfig = opts.McpConfig
-			}
 		}
 	}
+
+	mcpConfig := loadMCPConfig()
 
 	if apiKey != "" {
 		ensureAgySettings(apiKey, model)

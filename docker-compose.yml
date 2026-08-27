@@ -31,7 +31,8 @@ services:
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - AGY_MODEL=${AGY_MODEL:-Gemini 3.6 Flash (Low)}
       - TIMEOUT_MINUTES=${TIMEOUT_MINUTES:-15}
-      - MCP_CONFIG={"mcpServers":{"discord":{"url":"http://discord-mcp:4001/mcp"},"docker":{"url":"http://docker-mcp:4002/mcp"},"github":{"url":"https://api.githubcopilot.com/mcp/","headers":{"Authorization":"Bearer ${GITHUB_PAT}"}}}}
+      - GITHUB_PAT=${GITHUB_PAT}
+      - HA_TOKEN=${HA_TOKEN}
     volumes:
       - aerial-brain-data:/data
       - aerial-brain-gemini:/root/.gemini

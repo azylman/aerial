@@ -42,7 +42,7 @@ This repository (`azylman/aerial`) is the root orchestration repository for the 
 2. **Execution Brain** (`brain/`):
    - Execution runner executing headless Antigravity CLI (`agy`).
    - SQLite-backed conversation mapping (`/data/aerial.db`) for multi-turn thread continuity.
-   - Discovers MCP servers via `MCP_CONFIG` environment variable.
+   - Dynamically loads and expands MCP configurations (`mcp.config.json` / environment variables with `os.ExpandEnv`).
 
 3. **Discord MCP Server** (`discord-mcp/`):
    - Remote Streamable HTTP endpoint (`http://discord-mcp:4001/mcp`).
@@ -53,6 +53,7 @@ This repository (`azylman/aerial`) is the root orchestration repository for the 
    - Uses `supergateway` to expose official `mcp/docker` over `/var/run/docker.sock` with zero custom code.
 
 ## 2. Invariants & Architectural Rules
+- **Extensible Configuration**: Custom MCP servers belong in `mcp.config.json` with `${ENV_VAR}` placeholders or via `.env` credentials.
 - **Translation Over Custom Code**: Wherever possible, rely on upstream packages and generic translation proxies (`supergateway`) rather than custom server implementations.
 - **Zero In-Image MCPs**: All MCP servers must run as standalone network endpoints; do not install local stdio MCP packages inside `brain`.
 - **Secrets Isolation**: Secrets (API keys, bot tokens, webhooks, PATs) must NEVER be committed to Git. They are configured via `.env` files and referenced via environment variables in `docker-compose.yml`.
