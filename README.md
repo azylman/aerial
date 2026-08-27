@@ -1,6 +1,6 @@
 # Aerial Stack
 
-An autonomous personal AI assistant system running natively on Docker, inspired by XVX-016 Gundam Aerial.
+An autonomous personal AI assistant system running natively on Docker, named after Gundam Aerial.
 
 Aerial provides a multi-agent, tool-enabled AI assistant accessible via Discord and HTTP API, with persistent multi-turn SQLite memory, GitHub workspace operations, host Docker infrastructure inspection, and extensible MCP server plugins.
 
@@ -51,7 +51,6 @@ If you don't provide a custom `mcp.config.json`, Aerial automatically enables:
 - **`discord`** (`http://discord-mcp:4001/mcp`)
 - **`docker`** (`http://docker-mcp:4002/mcp`)
 - **`github`** (if `GITHUB_PAT` is defined in `.env`)
-- **`ha-mcp`** (if `HA_TOKEN` is defined in `.env`)
 
 ### Custom MCP Configuration (`mcp.config.json`)
 To customize tools, copy the example template:
@@ -74,9 +73,6 @@ Aerial automatically expands all `${VARIABLE_NAME}` placeholders from your `.env
       "headers": {
         "Authorization": "Bearer ${GITHUB_PAT}"
       }
-    },
-    "ha-mcp": {
-      "serverUrl": "${HA_TOKEN}"
     }
   }
 }
@@ -134,7 +130,6 @@ Edit `.env` and provide your credentials:
 GEMINI_API_KEY=your_gemini_api_key_here
 DISCORD_BOT_TOKEN=your_discord_bot_token_here
 GITHUB_PAT=your_github_personal_access_token_here
-HA_TOKEN=http://192.168.1.14:8123/api/webhook/mcp_your_webhook_id
 ```
 
 ### Step 3: Launch Stack
@@ -171,3 +166,4 @@ docker compose logs -f brain
 - **Never commit `.env` or `mcp.config.json`**: Secrets, API keys, and custom tokens are listed in `.gitignore`.
 - **Restrict File Permissions**: Run `chmod 600 .env` on the host to ensure only the host owner can read secrets.
 - **Isolated Bridge Network**: All container-to-container traffic operates on the private `aerial-net` bridge network.
+

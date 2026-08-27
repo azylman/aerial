@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	defaultTemplate = `{"conversation_id": "{{.channel_id}}", "prompt": "Here's a message someone sent you from Discord:\n\n{{range $k, $v := .}}- {{$k}}: {{$v | escapeJSON}}\n{{end}}\nCRITICAL INSTRUCTIONS: You must always post your reply back to Discord using your Discord MCP tools:\n1. If this message is NOT already inside a thread, create a thread and send your reply using the ` + "`" + `discord_create_thread` + "`" + ` tool with parameters: {\"channelId\": \"{{.channel_id}}\", \"messageId\": \"{{.id}}\", \"name\": \"<thread title>\", \"message\": \"<your reply>\"}.\n2. If this message is ALREADY inside a thread, send your reply using the ` + "`" + `discord_send` + "`" + ` tool with parameters: {\"channelId\": \"{{.channel_id}}\", \"message\": \"<your reply>\", \"replyToMessageId\": \"{{.id}}\"}."}`
+	defaultTemplate = `{"conversation_id": "{{.channel_id}}", "prompt": "Here's a message someone sent you from Discord:\n\n{{range $k, $v := .}}- {{$k}}: {{$v | escapeJSON}}\n{{end}}\nCRITICAL INSTRUCTIONS: You must always post your reply back to Discord using your Discord MCP tools:\n1. If this message is NOT already inside a thread, create a thread and send your reply using the ` + "`" + `discord_create_thread` + "`" + ` tool with parameters: {\"channelId\": \"{{.channel_id}}\", \"messageId\": \"{{.id}}\", \"name\": \"<thread title>\", \"message\": \"<your reply>\"}.\n2. If this message is ALREADY inside a thread, send your reply using the ` + "`" + `discord_send` + "`" + ` tool with parameters: {\"channelId\": \"{{.channel_id}}\", \"message\": \"<your reply>\"}."}`
 	maxRetries      = 3
 	initialDelay    = 500 * time.Millisecond
 )
