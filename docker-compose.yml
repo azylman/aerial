@@ -9,10 +9,18 @@ services:
     container_name: aerial-discord-funnel
     restart: unless-stopped
     environment:
+      - DISCORD_TOKEN=${DISCORD_BOT_TOKEN}
       - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN}
       - TARGET_URL=http://brain:8080/api/prompt
+      - HEALTH_PORT=8085
     networks:
       - aerial-net
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8085/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
     depends_on:
       brain:
         condition: service_healthy
@@ -72,8 +80,8 @@ services:
       test: ["CMD", "curl", "-fsS", "http://localhost:4001/health"]
       interval: 10s
       timeout: 5s
-      retries: 3
-      start_period: 5s
+      retries: 5
+      start_period: 10s
 
   # ----------------------------------------------------------------------------
   # 4. Outbound MCP: Docker Host MCP Server

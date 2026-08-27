@@ -10,7 +10,7 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /discord-funnel .
 # --- Runtime stage -------------------------------------------------------
 FROM alpine:3.20
 
-RUN apk add --no-cache ca-certificates tzdata
+RUN apk add --no-cache ca-certificates tzdata curl
 
 COPY --from=builder /discord-funnel /usr/local/bin/discord-funnel
 
