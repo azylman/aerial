@@ -31,41 +31,35 @@ Gundam provides a multi-agent, tool-enabled AI assistant accessible via Discord 
 ???????????????????????????                   ???????????????????????????
              ?                                             ?
              ?                                             ?
-     Discord Platform                               /var/run/docker.sock
-                                                  (Containers, Logs, Stats)
+     Discord Platform                       supergateway (Translation Proxy)
+                                                           ?
+                                                           ?
+                                            Official Docker MCP (mcp/docker)
+                                                           ?
+                                                           ?
+                                                  /var/run/docker.sock
 ```
 
 ---
 
-## 2. How Docker Fits Into the Architecture
+## 2. Translation Layers & Zero Custom Code
 
-Docker serves two essential roles in the Gundam ecosystem:
-
-1. **The Application Runtime**:
-   - All Gundam microservices run as containerized services connected via an isolated, internal bridge network (`gundam-net`).
-   - Inter-service communication uses internal Docker DNS (`http://gundam-brain:8080`, `http://discord-mcp:4001`, `http://docker-mcp:4002`).
-
-2. **The Controlled Environment (Infrastructure as a Tool)**:
-   - Through `docker-mcp`, the host Docker socket (`/var/run/docker.sock`) is mounted into the MCP server container.
-   - Gundam Brain has direct native tool access to inspect, monitor, and diagnose the host Docker engine:
-     - `docker_list_containers`: Discover active/stopped containers on the host.
-     - `docker_inspect_container`: Read network settings, mount points, and environment metadata.
-     - `docker_get_container_logs`: Fetch live stdout/stderr streams from any container on the host.
-     - `docker_container_stats`: Monitor live CPU, RAM, and I/O consumption.
-     - `docker_system_df` & `docker_system_info`: Inspect disk usage, image layers, and Docker engine health.
+Following the philosophy of writing minimal custom code and relying on translation layers:
+- **`discord-mcp`**: Clones and builds upstream [`mcp-discord`](https://github.com/vianaz/mcp-discord) with thread support from `azylman/ha-addon-discord-mcp`.
+- **`docker-mcp`**: Uses **`supergateway`** to translate the official **`mcp/docker`** stdio container into a Streamable HTTP (`/mcp`) microservice over `/var/run/docker.sock`. Zero custom application code.
 
 ---
 
-## 3. Component Repositories
+## 3. Component Modules
 
-1. **[Gundam Brain (`azylman/gundam-brain`)](https://github.com/azylman/gundam-brain)**:
+1. **[Gundam Brain (`brain/`)](https://github.com/azylman/gundam/tree/main/brain)**:
    Execution runner wrapping headless Antigravity CLI (`agy`) with SQLite-backed multi-turn thread memory (`/data/gundam.db`) and remote MCP client orchestration.
-2. **[Discord Funnel (`azylman/ha-discord-funnel-addon`)](https://github.com/azylman/ha-discord-funnel-addon)**:
+2. **[Discord Funnel (`discord-funnel/`)](https://github.com/azylman/gundam/tree/main/discord-funnel)**:
    Inbound event gateway connecting to Discord Gateway, generating deterministic conversation UUIDs, and forwarding prompts to Gundam Brain.
-3. **[Discord MCP Server (`azylman/ha-addon-discord-mcp`)](https://github.com/azylman/ha-addon-discord-mcp)**:
+3. **[Discord MCP Server (`discord-mcp/`)](https://github.com/azylman/gundam/tree/main/discord-mcp)**:
    Outbound Model Context Protocol (MCP) server over Streamable HTTP exposing Discord messaging, thread creation, and channel reading tools.
-4. **[Docker MCP Server (`azylman/ha-docker-mcp-addon`)](https://github.com/azylman/ha-docker-mcp-addon)**:
-   Outbound MCP server connected to `/var/run/docker.sock` exposing host container inspection, resource stats, and log fetching.
+4. **[Docker MCP Server (`docker-mcp/`)](https://github.com/azylman/gundam/tree/main/docker-mcp)**:
+   Universal `supergateway` proxy wrapping the official Docker MCP server (`mcp/docker`) over the host Docker socket.
 
 ---
 
@@ -119,7 +113,7 @@ docker compose logs -f gundam-brain
 | View live logs | `docker compose logs -f` |
 | View transcripts & memory | `curl http://localhost:8088/api/transcripts` |
 | Restart single service | `docker compose restart gundam-brain` |
-| Update images | `docker compose pull && docker compose up -d` |
+| Update images & rebuild | `docker compose build && docker compose up -d` |
 
 ---
 
