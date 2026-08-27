@@ -1,4 +1,4 @@
-module github.com/azylman/gundam-brain
+module github.com/azylman/aerial/brain
 
 go 1.22
 

@@ -6,7 +6,7 @@ WORKDIR /build
 COPY go.mod ./
 COPY main.go ./
 RUN go mod tidy
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /gundam-brain .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /aerial-brain .
 
 # --- Runtime stage -------------------------------------------------------
 FROM ubuntu:24.04
@@ -27,9 +27,9 @@ RUN curl -fsSL https://antigravity.google/cli/install.sh | bash -s -- -d /usr/lo
 
 WORKDIR /app
 
-COPY --from=builder /gundam-brain /usr/local/bin/gundam-brain
+COPY --from=builder /aerial-brain /usr/local/bin/aerial-brain
 COPY GEMINI.md /app/GEMINI.md
 
 EXPOSE 8080
 
-CMD ["/usr/local/bin/gundam-brain"]
+CMD ["/usr/local/bin/aerial-brain"]

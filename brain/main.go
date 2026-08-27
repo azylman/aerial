@@ -45,13 +45,13 @@ func getEnv(key, defaultVal string) string {
 
 func getDBPath() string {
 	if _, err := os.Stat("/data"); err == nil {
-		return "/data/gundam.db"
+		return "/data/aerial.db"
 	}
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
-		return "./gundam.db"
+		return "./aerial.db"
 	}
-	return filepath.Join(homeDir, ".gemini", "gundam.db")
+	return filepath.Join(homeDir, ".gemini", "aerial.db")
 }
 
 func initDB(dbPath string) (*sql.DB, error) {
@@ -643,7 +643,7 @@ func main() {
 	if len(mcpConfig) > 0 {
 		mcpStatus = "custom MCP config loaded"
 	}
-	log.Printf("Gundam Brain server listening on %s (agy binary: %s, model: %s, timeout: %dm, auth: %s, mcp: %s, db: %s)",
+	log.Printf("Aerial Brain server listening on %s (agy binary: %s, model: %s, timeout: %dm, auth: %s, mcp: %s, db: %s)",
 		addr, agyBin, model, timeoutMinutes, authStatus, mcpStatus, dbPath)
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		log.Fatalf("Server error: %v", err)

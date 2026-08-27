@@ -2,29 +2,29 @@ services:
   # ----------------------------------------------------------------------------
   # 1. Inbound Event Gateway: Discord Funnel
   #    Connects to Discord Gateway and forwards qualifying mentions/threads
-  #    to Gundam Brain.
+  #    to Aerial Brain.
   # ----------------------------------------------------------------------------
   discord-funnel:
     build: ./discord-funnel
-    container_name: gundam-discord-funnel
+    container_name: aerial-discord-funnel
     restart: unless-stopped
     environment:
       - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN}
-      - TARGET_URL=http://gundam-brain:8080/api/prompt
+      - TARGET_URL=http://brain:8080/api/prompt
     networks:
-      - gundam-net
+      - aerial-net
     depends_on:
-      gundam-brain:
+      brain:
         condition: service_healthy
 
   # ----------------------------------------------------------------------------
-  # 2. Execution Brain: Gundam Brain
+  # 2. Execution Brain: Aerial Brain
   #    Runs headless Antigravity CLI agent prompts with multi-turn SQLite memory
   #    and connects to remote MCP network servers.
   # ----------------------------------------------------------------------------
-  gundam-brain:
+  brain:
     build: ./brain
-    container_name: gundam-brain
+    container_name: aerial-brain
     restart: unless-stopped
     environment:
       - PORT=8080
@@ -33,12 +33,12 @@ services:
       - TIMEOUT_MINUTES=${TIMEOUT_MINUTES:-15}
       - MCP_CONFIG={"mcpServers":{"discord":{"url":"http://discord-mcp:4001/mcp"},"docker":{"url":"http://docker-mcp:4002/mcp"},"github":{"url":"https://api.githubcopilot.com/mcp/","headers":{"Authorization":"Bearer ${GITHUB_PAT}"}}}}
     volumes:
-      - gundam-brain-data:/data
-      - gundam-brain-gemini:/root/.gemini
+      - aerial-brain-data:/data
+      - aerial-brain-gemini:/root/.gemini
     ports:
-      - "${GUNDAM_BRAIN_HOST_PORT:-8088}:8080"
+      - "${AERIAL_BRAIN_HOST_PORT:-8088}:8080"
     networks:
-      - gundam-net
+      - aerial-net
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
       interval: 10s
@@ -57,7 +57,7 @@ services:
   # ----------------------------------------------------------------------------
   discord-mcp:
     build: ./discord-mcp
-    container_name: gundam-discord-mcp
+    container_name: aerial-discord-mcp
     restart: unless-stopped
     environment:
       - PORT=4001
@@ -65,7 +65,7 @@ services:
     ports:
       - "${DISCORD_MCP_HOST_PORT:-4001}:4001"
     networks:
-      - gundam-net
+      - aerial-net
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:4001/health"]
       interval: 10s
@@ -75,12 +75,11 @@ services:
 
   # ----------------------------------------------------------------------------
   # 4. Outbound MCP: Docker Host MCP Server
-  #    Connected to host /var/run/docker.sock to provide container inspection,
-  #    logs, and resource statistics over HTTP (/mcp).
+  #    Wraps the official mcp/docker image with supergateway translation proxy.
   # ----------------------------------------------------------------------------
   docker-mcp:
     build: ./docker-mcp
-    container_name: gundam-docker-mcp
+    container_name: aerial-docker-mcp
     restart: unless-stopped
     environment:
       - PORT=4002
@@ -89,21 +88,21 @@ services:
     ports:
       - "${DOCKER_MCP_HOST_PORT:-4002}:4002"
     networks:
-      - gundam-net
+      - aerial-net
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:4002/health"]
+      test: ["CMD", "curl", "-fsS", "http://localhost:4002/mcp"]
       interval: 10s
       timeout: 5s
       retries: 3
       start_period: 5s
 
 networks:
-  gundam-net:
-    name: gundam-net
+  aerial-net:
+    name: aerial-net
     driver: bridge
 
 volumes:
-  gundam-brain-data:
-    name: gundam-brain-data
-  gundam-brain-gemini:
-    name: gundam-brain-gemini
+  aerial-brain-data:
+    name: aerial-brain-data
+  aerial-brain-gemini:
+    name: aerial-brain-gemini
