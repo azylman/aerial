@@ -1,8 +1,8 @@
 # Gundam Stack
 
-An autonomous personal AI assistant system running on Docker.
+An autonomous personal AI assistant system running natively on Docker.
 
-Gundam provides a multi-agent, tool-enabled AI assistant accessible via Discord and API, with persistent multi-turn memory, Home Assistant integration, GitHub operations, and host Docker diagnostics.
+Gundam provides a multi-agent, tool-enabled AI assistant accessible via Discord and HTTP API, with persistent multi-turn SQLite memory, GitHub workspace operations, and full host Docker infrastructure inspection.
 
 ---
 
@@ -21,17 +21,42 @@ Gundam provides a multi-agent, tool-enabled AI assistant accessible via Discord 
                                    ▼
                        ┌─────────────────────────┐
                        │      gundam-brain       │ ◄── (SQLite /data/gundam.db)
-                       └───┬───────────┬───────┬─┘
-                           │           │       │
-             ┌─────────────┘           │       └─────────────┐
-             ▼                         ▼                     ▼
-┌─────────────────────────┐ ┌────────────────────┐ ┌────────────────────┐
-│      ha-mcp-server      │ │    discord-mcp     │ │     docker-mcp     │
-│ (Home Assistant Webhook)│ │ (Port 4001 /mcp)   │ │  (Port 4002 /mcp)  │
-└─────────────────────────┘ └────────────────────┘ └────────────────────┘
+                       └───┬─────────────────┬───┘
+                           │                 │
+             ┌─────────────┘                 └─────────────┐
+             ▼                                             ▼
+┌─────────────────────────┐                   ┌─────────────────────────┐
+│       discord-mcp       │                   │       docker-mcp        │
+│ (Port 4001: Discord API)│                   │ (Port 4002: Docker Host)│
+└────────────┬────────────┘                   └────────────┬────────────┘
+             │                                             │
+             ▼                                             ▼
+     Discord Platform                               /var/run/docker.sock
+                                                  (Containers, Logs, Stats)
 ```
 
-### Component Repositories
+---
+
+## 2. How Docker Fits Into the Architecture
+
+Docker serves two essential roles in the Gundam ecosystem:
+
+1. **The Application Runtime**:
+   - All Gundam microservices run as containerized services connected via an isolated, internal bridge network (`gundam-net`).
+   - Inter-service communication uses internal Docker DNS (`http://gundam-brain:8080`, `http://discord-mcp:4001`, `http://docker-mcp:4002`).
+
+2. **The Controlled Environment (Infrastructure as a Tool)**:
+   - Through `docker-mcp`, the host Docker socket (`/var/run/docker.sock`) is mounted into the MCP server container.
+   - Gundam Brain has direct native tool access to inspect, monitor, and diagnose the host Docker engine:
+     - `docker_list_containers`: Discover active/stopped containers on the host.
+     - `docker_inspect_container`: Read network settings, mount points, and environment metadata.
+     - `docker_get_container_logs`: Fetch live stdout/stderr streams from any container on the host.
+     - `docker_container_stats`: Monitor live CPU, RAM, and I/O consumption.
+     - `docker_system_df` & `docker_system_info`: Inspect disk usage, image layers, and Docker engine health.
+
+---
+
+## 3. Component Repositories
 
 1. **[Gundam Brain (`azylman/gundam-brain`)](https://github.com/azylman/gundam-brain)**:
    Execution runner wrapping headless Antigravity CLI (`agy`) with SQLite-backed multi-turn thread memory (`/data/gundam.db`) and remote MCP client orchestration.
@@ -44,7 +69,7 @@ Gundam provides a multi-agent, tool-enabled AI assistant accessible via Discord 
 
 ---
 
-## 2. Quickstart Setup
+## 4. Quickstart Setup
 
 ### Prerequisites
 - Docker Engine 24+ & Docker Compose v2+
@@ -62,12 +87,11 @@ Copy the template file to `.env`:
 ```bash
 cp .env.example .env
 ```
-Edit `.env` and provide your secrets:
+Edit `.env` and provide your credentials:
 ```ini
-GEMINI_API_KEY=AQ.Ab8RN...
-DISCORD_BOT_TOKEN=MTU0Mj...
-GITHUB_PAT=github_pat_11AAG...
-HA_TOKEN=http://192.168.1.14:8123/api/webhook/mcp_...
+GEMINI_API_KEY=your_gemini_api_key_here
+DISCORD_BOT_TOKEN=your_discord_bot_token_here
+GITHUB_PAT=your_github_personal_access_token_here
 ```
 
 ### Step 3: Launch Stack
@@ -86,7 +110,7 @@ docker compose logs -f gundam-brain
 
 ---
 
-## 3. Operational Commands
+## 5. Operational Commands
 
 | Action | Command |
 | --- | --- |
@@ -99,7 +123,7 @@ docker compose logs -f gundam-brain
 
 ---
 
-## 4. Security & Best Practices
+## 6. Security & Best Practices
 
 - **Never commit `.env`**: Secrets, API keys, and tokens belong only in the `.env` file, which is listed in `.gitignore`.
 - **Restrict File Permissions**: Run `chmod 600 .env` on the host to ensure only the host owner can read secrets.
