@@ -1,0 +1,24 @@
+{
+  "name": "docker-mcp-server",
+  "version": "0.1.0",
+  "description": "Streamable HTTP Model Context Protocol server for Docker inspection and management",
+  "type": "module",
+  "main": "dist/app.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/app.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.6.0",
+    "dockerode": "^4.0.2",
+    "express": "^4.21.2",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/dockerode": "^3.3.34",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.13.5",
+    "typescript": "^5.7.3"
+  }
+}
+

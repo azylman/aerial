@@ -5,7 +5,7 @@ services:
   #    to Gundam Brain.
   # ----------------------------------------------------------------------------
   discord-funnel:
-    image: ghcr.io/azylman/ha-discord-funnel-addon:latest
+    build: ./discord-funnel
     container_name: gundam-discord-funnel
     restart: unless-stopped
     environment:
@@ -23,7 +23,7 @@ services:
   #    and connects to remote MCP network servers.
   # ----------------------------------------------------------------------------
   gundam-brain:
-    image: ghcr.io/azylman/gundam-brain:latest
+    build: ./brain
     container_name: gundam-brain
     restart: unless-stopped
     environment:
@@ -56,7 +56,7 @@ services:
   #    Provides Discord tools (send message, create thread, read history) over HTTP.
   # ----------------------------------------------------------------------------
   discord-mcp:
-    image: ghcr.io/azylman/ha-addon-discord-mcp:latest
+    build: ./discord-mcp
     container_name: gundam-discord-mcp
     restart: unless-stopped
     environment:
@@ -79,7 +79,7 @@ services:
   #    logs, and resource statistics over HTTP (/mcp).
   # ----------------------------------------------------------------------------
   docker-mcp:
-    image: ghcr.io/azylman/ha-docker-mcp-addon:latest
+    build: ./docker-mcp
     container_name: gundam-docker-mcp
     restart: unless-stopped
     environment:
