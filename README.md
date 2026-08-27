@@ -104,6 +104,8 @@ services:
    Outbound Model Context Protocol (MCP) server over Streamable HTTP exposing Discord messaging, thread creation, and channel reading tools.
 4. **[Docker MCP Server (`docker-mcp/`)](https://github.com/azylman/aerial/tree/main/docker-mcp)**:
    Universal `supergateway` proxy wrapping the official Docker MCP server (`mcp/docker`) over the host Docker socket.
+5. **[Agentsview (`kenn-io/agentsview`)](https://github.com/kenn-io/agentsview)**:
+   Local-first web UI running on port `8089` for searching, visualizing, and analyzing Antigravity session transcripts and step timelines.
 
 ---
 

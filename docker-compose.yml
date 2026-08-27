@@ -106,6 +106,23 @@ services:
       retries: 5
       start_period: 10s
 
+  # ----------------------------------------------------------------------------
+  # 5. Observability & Visualization: Agentsview Web Dashboard
+  #    Local-first web UI for searching, analyzing, and visually inspecting
+  #    Antigravity agent transcripts and session traces.
+  # ----------------------------------------------------------------------------
+  agentsview:
+    image: ghcr.io/kenn-io/agentsview:latest
+    container_name: aerial-agentsview
+    restart: unless-stopped
+    ports:
+      - "${AGENTSVIEW_HOST_PORT:-8089}:8080"
+    volumes:
+      - aerial-brain-gemini:/root/.gemini:ro
+      - aerial-brain-data:/data:ro
+    networks:
+      - aerial-net
+
 networks:
   aerial-net:
     name: aerial-net
