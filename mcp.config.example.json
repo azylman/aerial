@@ -12,12 +12,8 @@
         "Authorization": "Bearer ${GITHUB_PAT}"
       }
     },
-    "homeassistant": {
-      "command": "ha-mcp",
-      "args": ["run"],
-      "env": {
-        "HA_TOKEN": "${HA_TOKEN}"
-      }
+    "ha": {
+      "serverUrl": "${HA_TOKEN}"
     }
   }
 }

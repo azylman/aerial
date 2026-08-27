@@ -51,7 +51,7 @@ If you don't provide a custom `mcp.config.json`, Aerial automatically enables:
 - **`discord`** (`http://discord-mcp:4001/mcp`)
 - **`docker`** (`http://docker-mcp:4002/mcp`)
 - **`github`** (if `GITHUB_PAT` is defined in `.env`)
-- **`homeassistant`** (if `HA_TOKEN` is defined in `.env`)
+- **`ha`** (if `HA_TOKEN` is defined in `.env`)
 
 ### Custom MCP Configuration (`mcp.config.json`)
 To customize tools, copy the example template:
@@ -69,10 +69,8 @@ Aerial automatically expands all `${VARIABLE_NAME}` placeholders from your `.env
       "url": "https://api.githubcopilot.com/mcp/",
       "headers": { "Authorization": "Bearer ${GITHUB_PAT}" }
     },
-    "homeassistant": {
-      "command": "ha-mcp",
-      "args": ["run"],
-      "env": { "HA_TOKEN": "${HA_TOKEN}" }
+    "ha": {
+      "serverUrl": "${HA_TOKEN}"
     }
   }
 }
