@@ -52,6 +52,10 @@ This repository (`azylman/aerial`) is the root orchestration repository for the 
    - Remote Streamable HTTP endpoint (`http://docker-mcp:4002/mcp`).
    - Uses `supergateway` to expose official `mcp/docker` over `/var/run/docker.sock` with zero custom code.
 
+5. **Agentsview Dashboard** (`agentsview`):
+   - Web observability dashboard running on port `8089` (`http://192.168.1.14:8089`).
+   - Indexes and renders Antigravity session transcripts and step traces.
+
 ## 2. Invariants & Architectural Rules
 - **Extensible Configuration**: Custom MCP servers belong in `mcp.config.json` with `${ENV_VAR}` placeholders or via `.env` credentials.
 - **Translation Over Custom Code**: Wherever possible, rely on upstream packages and generic translation proxies (`supergateway`) rather than custom server implementations.
