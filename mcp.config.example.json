@@ -1,0 +1,23 @@
+{
+  "mcpServers": {
+    "discord": {
+      "url": "http://discord-mcp:4001/mcp"
+    },
+    "docker": {
+      "url": "http://docker-mcp:4002/mcp"
+    },
+    "github": {
+      "url": "https://api.githubcopilot.com/mcp/",
+      "headers": {
+        "Authorization": "Bearer ${GITHUB_PAT}"
+      }
+    },
+    "homeassistant": {
+      "command": "ha-mcp",
+      "args": ["run"],
+      "env": {
+        "HA_TOKEN": "${HA_TOKEN}"
+      }
+    }
+  }
+}

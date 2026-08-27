@@ -6,10 +6,15 @@
 *.pem
 *.token
 
+# User Custom Configurations & Overrides
+mcp.config.json
+!mcp.config.example.json
+docker-compose.override.yml
+
 # Local storage and persistent database mounts
 data/
 storage/
-brain/
+brain_storage/
 *.db
 *.db-journal
 *.db-wal

@@ -1,8 +1,8 @@
 # Aerial Stack
 
-An autonomous personal AI assistant system running natively on Docker, named after Gundam Aerial.
+An autonomous personal AI assistant system running natively on Docker, inspired by XVX-016 Gundam Aerial.
 
-Aerial provides a multi-agent, tool-enabled AI assistant accessible via Discord and HTTP API, with persistent multi-turn SQLite memory, GitHub workspace operations, and host Docker infrastructure inspection.
+Aerial provides a multi-agent, tool-enabled AI assistant accessible via Discord and HTTP API, with persistent multi-turn SQLite memory, GitHub workspace operations, host Docker infrastructure inspection, and extensible MCP server plugins.
 
 ---
 
@@ -42,18 +42,62 @@ Aerial provides a multi-agent, tool-enabled AI assistant accessible via Discord 
 
 ---
 
-## 2. Translation Layers & Zero Custom Code
+## 2. Extensibility: Adding Custom MCP Servers
 
-Following the philosophy of writing minimal custom code and relying on translation layers:
-- **`discord-mcp`**: Clones and builds upstream [`mcp-discord`](https://github.com/vianaz/mcp-discord) with thread support from `azylman/ha-addon-discord-mcp`.
-- **`docker-mcp`**: Uses **`supergateway`** to translate the official **`mcp/docker`** stdio container into a Streamable HTTP (`/mcp`) microservice over `/var/run/docker.sock`. Zero custom application code.
+Aerial is designed to be fully extensible with zero code changes.
+
+### Auto-Discovery (Zero Config)
+If you don't provide a custom `mcp.config.json`, Aerial automatically enables:
+- **`discord`** (`http://discord-mcp:4001/mcp`)
+- **`docker`** (`http://docker-mcp:4002/mcp`)
+- **`github`** (if `GITHUB_PAT` is defined in `.env`)
+- **`homeassistant`** (if `HA_TOKEN` is defined in `.env`)
+
+### Custom MCP Configuration (`mcp.config.json`)
+To customize tools, copy the example template:
+```bash
+cp mcp.config.example.json mcp.config.json
+```
+Aerial automatically expands all `${VARIABLE_NAME}` placeholders from your `.env` file at startup:
+
+```json
+{
+  "mcpServers": {
+    "discord": { "url": "http://discord-mcp:4001/mcp" },
+    "docker": { "url": "http://docker-mcp:4002/mcp" },
+    "github": {
+      "url": "https://api.githubcopilot.com/mcp/",
+      "headers": { "Authorization": "Bearer ${GITHUB_PAT}" }
+    },
+    "homeassistant": {
+      "command": "ha-mcp",
+      "args": ["run"],
+      "env": { "HA_TOKEN": "${HA_TOKEN}" }
+    }
+  }
+}
+```
+
+### Adding New Containerized MCPs (`docker-compose.override.yml`)
+You can add extra MCP containers to the `aerial-net` bridge network by creating `docker-compose.override.yml` (automatically loaded by Docker Compose and ignored by Git):
+
+```yaml
+services:
+  brave-mcp:
+    image: mcp/brave-search
+    restart: unless-stopped
+    environment:
+      - BRAVE_API_KEY=${BRAVE_API_KEY}
+    networks:
+      - aerial-net
+```
 
 ---
 
 ## 3. Component Modules
 
 1. **[Aerial Brain (`brain/`)](https://github.com/azylman/aerial/tree/main/brain)**:
-   Execution runner wrapping headless Antigravity CLI (`agy`) with SQLite-backed multi-turn thread memory (`/data/aerial.db`) and remote MCP client orchestration.
+   Execution runner wrapping headless Antigravity CLI (`agy`) with SQLite-backed multi-turn thread memory (`/data/aerial.db`) and dynamic MCP server discovery.
 2. **[Discord Funnel (`discord-funnel/`)](https://github.com/azylman/aerial/tree/main/discord-funnel)**:
    Inbound event gateway connecting to Discord Gateway, generating deterministic conversation UUIDs, and forwarding prompts to Aerial Brain.
 3. **[Discord MCP Server (`discord-mcp/`)](https://github.com/azylman/aerial/tree/main/discord-mcp)**:
@@ -86,6 +130,7 @@ Edit `.env` and provide your credentials:
 GEMINI_API_KEY=your_gemini_api_key_here
 DISCORD_BOT_TOKEN=your_discord_bot_token_here
 GITHUB_PAT=your_github_personal_access_token_here
+HA_TOKEN=http://192.168.1.14:8123/api/webhook/mcp_your_webhook_id
 ```
 
 ### Step 3: Launch Stack
@@ -119,6 +164,6 @@ docker compose logs -f brain
 
 ## 6. Security & Best Practices
 
-- **Never commit `.env`**: Secrets, API keys, and tokens belong only in the `.env` file, which is listed in `.gitignore`.
+- **Never commit `.env` or `mcp.config.json`**: Secrets, API keys, and custom tokens are listed in `.gitignore`.
 - **Restrict File Permissions**: Run `chmod 600 .env` on the host to ensure only the host owner can read secrets.
 - **Isolated Bridge Network**: All container-to-container traffic operates on the private `aerial-net` bridge network.
