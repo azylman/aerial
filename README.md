@@ -1,6 +1,6 @@
 # Aerial Stack
 
-An autonomous personal AI assistant system running natively on Docker, inspired by XVX-016 Gundam Aerial.
+An autonomous personal AI assistant system running natively on Docker, named after Gundam Aerial.
 
 Aerial provides a multi-agent, tool-enabled AI assistant accessible via Discord and HTTP API, with persistent multi-turn SQLite memory, GitHub workspace operations, host Docker infrastructure inspection, and extensible MCP server plugins.
 
