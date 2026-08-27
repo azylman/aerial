@@ -446,7 +446,7 @@ func loadConfig() (string, string, string, string, string, int, json.RawMessage)
 		}
 	}
 
-	mcpConfig := loadMCPConfig()
+	mcpConfig = loadMCPConfig()
 
 	if apiKey != "" {
 		ensureAgySettings(apiKey, model)
