@@ -1,0 +1,23 @@
+# Environment & Secrets (NEVER COMMIT SENSITIVE VALUES)
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.token
+
+# Local storage and persistent database mounts
+data/
+storage/
+brain/
+*.db
+*.db-journal
+*.db-wal
+
+# OS and Editor temp files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.bak
