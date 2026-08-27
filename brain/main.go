@@ -262,12 +262,8 @@ func loadMCPConfig() json.RawMessage {
 			}
 		}
 		if haToken := os.Getenv("HA_TOKEN"); haToken != "" {
-			mcpServers["homeassistant"] = map[string]interface{}{
-				"command": "ha-mcp",
-				"args":    []string{"run"},
-				"env": map[string]string{
-					"HA_TOKEN": haToken,
-				},
+			mcpServers["ha"] = map[string]interface{}{
+				"serverUrl": haToken,
 			}
 		}
 		b, _ := json.Marshal(defaultConfig)
