@@ -92,11 +92,11 @@ services:
     networks:
       - aerial-net
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:4002/mcp"]
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 4002 || exit 1"]
       interval: 10s
       timeout: 5s
-      retries: 3
-      start_period: 5s
+      retries: 5
+      start_period: 10s
 
 networks:
   aerial-net:
