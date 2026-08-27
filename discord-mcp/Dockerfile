@@ -1,24 +1,28 @@
-# Builds discord-mcp from upstream ha-addon-discord-mcp repository
+# 1. Fetch source code from upstream ha-addon-discord-mcp repository
 FROM alpine/git:latest AS source
 WORKDIR /src
 RUN git clone --depth=1 https://github.com/azylman/ha-addon-discord-mcp.git .
 
-FROM node:lts-alpine AS build
+# 2. Build TypeScript project
+FROM node:20-alpine AS build
 WORKDIR /app
-RUN apk add --no-cache git \
-  && git clone https://github.com/vianaz/mcp-discord.git . \
-  && git checkout 74ac920fbc6abb8e1f7d09aea84e530e12ad1d1d
-
-COPY --from=source /src/discord_mcp/thread_tool.patch /app/thread_tool.patch
-RUN git apply /app/thread_tool.patch
+COPY --from=source /src/discord_mcp/package.json /src/discord_mcp/tsconfig.json ./
 RUN npm install --ignore-scripts
+
+COPY --from=source /src/discord_mcp/src ./src
 RUN npm run build
 
-FROM node:lts-alpine
+# 3. Production Runtime Container
+FROM node:20-alpine
 WORKDIR /app
+
+RUN apk add --no-cache curl
+
 COPY --from=build /app/build ./build
-COPY --from=build /app/package.json /app/package-lock.json ./
+COPY --from=build /app/package.json ./
 RUN npm install --omit=dev --ignore-scripts
 
+ENV PORT=4001
 EXPOSE 4001
-CMD ["node", "build/app.js"]
+
+CMD ["node", "build/app.js", "--transport", "http", "--port", "4001"]
