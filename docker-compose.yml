@@ -115,10 +115,6 @@ services:
     image: ghcr.io/kenn-io/agentsview:latest
     container_name: aerial-agentsview
     restart: unless-stopped
-    command: ["serve", "--host", "0.0.0.0", "--port", "8080", "--no-browser"]
-    environment:
-      - HOST=0.0.0.0
-      - PORT=8080
     ports:
       - "${AGENTSVIEW_HOST_PORT:-8089}:8080"
     volumes:
