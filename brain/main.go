@@ -254,18 +254,10 @@ func loadMCPConfig() json.RawMessage {
 		}
 		mcpServers := defaultConfig["mcpServers"].(map[string]interface{})
 		if pat := os.Getenv("GITHUB_PAT"); pat != "" {
-			mcpServers["github-mcp-server"] = map[string]interface{}{
-				"command": "docker",
-				"args": []string{
-					"run",
-					"-i",
-					"--rm",
-					"-e",
-					"GITHUB_PERSONAL_ACCESS_TOKEN",
-					"ghcr.io/github/github-mcp-server",
-				},
-				"env": map[string]string{
-					"GITHUB_PERSONAL_ACCESS_TOKEN": pat,
+			mcpServers["github"] = map[string]interface{}{
+				"serverUrl": "https://api.githubcopilot.com/mcp/",
+				"headers": map[string]string{
+					"Authorization": "Bearer " + pat,
 				},
 			}
 		}
