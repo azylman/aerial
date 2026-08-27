@@ -320,6 +320,53 @@ func ensureMcpConfig(rawConfig json.RawMessage) {
 	}
 }
 
+func dumpSessionDiagnosticLogs(convID string) string {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		homeDir = "/root"
+	}
+
+	searchDirs := []string{
+		filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain", convID, ".system_generated", "logs"),
+		filepath.Join(homeDir, ".gemini", "antigravity", "brain", convID, ".system_generated", "logs"),
+		filepath.Join("/data", "brain", convID, ".system_generated", "logs"),
+		filepath.Join(homeDir, ".gemini", "antigravity-cli", "logs"),
+		filepath.Join(homeDir, ".gemini", "antigravity", "logs"),
+		filepath.Join("/data", "brain", convID),
+	}
+
+	var sb strings.Builder
+	for _, dir := range searchDirs {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			fPath := filepath.Join(dir, entry.Name())
+			data, err := os.ReadFile(fPath)
+			if err != nil || len(data) == 0 {
+				continue
+			}
+			sb.WriteString(fmt.Sprintf("\n--- FILE: %s (%d bytes) ---\n", fPath, len(data)))
+			lines := strings.Split(string(data), "\n")
+			start := 0
+			if len(lines) > 40 {
+				start = len(lines) - 40
+				sb.WriteString("[...showing last 40 lines...]\n")
+			}
+			for i := start; i < len(lines); i++ {
+				if strings.TrimSpace(lines[i]) != "" {
+					sb.WriteString(lines[i] + "\n")
+				}
+			}
+		}
+	}
+	return sb.String()
+}
+
 func extractResponseAndError(convID string) (string, string) {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
@@ -531,6 +578,10 @@ func handlePrompt(db *sql.DB, agyBin, apiKey, model, systemPrompt string, timeou
 			if apiKey != "" {
 				cmd.Env = append(os.Environ(),
 					"GEMINI_API_KEY="+apiKey,
+					"ANTIGRAVITY_API_KEY="+apiKey,
+					"GOOGLE_GENAI_API_KEY="+apiKey,
+					"AGY_LOG_LEVEL=debug",
+					"ANTIGRAVITY_LOG_LEVEL=debug",
 				)
 			}
 
@@ -572,13 +623,14 @@ func handlePrompt(db *sql.DB, agyBin, apiKey, model, systemPrompt string, timeou
 				outText = strings.TrimSpace(stdout.String())
 			}
 
-			logDetails := ""
-			if errDetail != "" {
-				logDetails = fmt.Sprintf("\n--- ERROR DETAILS ---\n%s", errDetail)
+			log.Printf("Execution finished | external_conv=%s internal_conv=%s exit_code=%d", extID, activeInternalID, exitCode)
+			if exitCode != 0 || strings.Contains(outText, "error") || strings.Contains(outText, "terminated") || errDetail != "" {
+				diagLogs := dumpSessionDiagnosticLogs(lookupID)
+				log.Printf("=== AGENT ERROR DIAGNOSTIC REPORT ===\nCommand: %s %v\nExit Code: %d\nStdout: %s\nStderr: %s\nParsed Error: %s\nTranscript & System Logs:\n%s\n=====================================",
+					agyBin, args, exitCode, stdout.String(), stderrStr, errDetail, diagLogs)
+			} else {
+				log.Printf("--- STDOUT / RESPONSE ---\n%s\n--- STDERR ---\n%s", outText, stderrStr)
 			}
-
-			log.Printf("Execution finished | external_conv=%s internal_conv=%s exit_code=%d\n--- STDOUT / RESPONSE ---\n%s\n--- STDERR ---\n%s%s",
-				extID, activeInternalID, exitCode, outText, stderrStr, logDetails)
 		}(req.Prompt, externalConvID, internalConvID)
 
 		w.Header().Set("Content-Type", "application/json")
