@@ -1,24 +1,22 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
-	"os/exec"
+	"os/signal"
 	"path/filepath"
-	"regexp"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
-	"github.com/azylman/aerial/brain/pkg/session"
+	"github.com/azylman/aerial/brain/pkg/queue"
 	"github.com/azylman/aerial/brain/pkg/skills"
 	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
@@ -30,175 +28,7 @@ type PromptRequest struct {
 	MessageID      string `json:"message_id,omitempty"`
 }
 
-func executePrompt(database *sql.DB, req PromptRequest, agyBin, apiKey, model, systemPrompt string, timeoutMinutes int, mcpConfig json.RawMessage, onComplete func()) string {
-	externalConvID := strings.TrimSpace(req.ConversationID)
-	if externalConvID == "" {
-		externalConvID = uuid.New().String()
-	}
-
-	internalConvID, err := db.GetInternalConversationID(database, externalConvID)
-	if err != nil {
-		log.Printf("Warning: GetInternalConversationID error for %s: %v", externalConvID, err)
-	}
-
-	go func(prompt, extID, intID, msgID string) {
-		if onComplete != nil {
-			defer onComplete()
-		}
-		if database != nil && extID != "" {
-			_ = db.SetTurnProcessing(database, extID, true, msgID)
-			defer func() {
-				_ = db.SetTurnProcessing(database, extID, false, "")
-			}()
-		}
-
-		maxAttempts := 3
-		currentIntID := intID
-
-		for attempt := 1; attempt <= maxAttempts; attempt++ {
-			startTime := time.Now().Add(-2 * time.Second)
-			_ = config.EnsureSystemRules(systemPrompt)
-			log.Printf("[Attempt %d/%d] Starting background execution for prompt: %q (external_conversation: %s, mapped_internal: %q, timeout: %d minutes)",
-				attempt, maxAttempts, prompt, extID, currentIntID, timeoutMinutes)
-
-			ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutMinutes)*time.Minute)
-
-			args := []string{"--dangerously-skip-permissions"}
-			if model != "" {
-				args = append(args, "--model", model)
-			}
-			if timeoutMinutes > 0 {
-				args = append(args, "--print-timeout", fmt.Sprintf("%dm", timeoutMinutes))
-			}
-			if currentIntID != "" {
-				args = append(args, "--conversation", currentIntID)
-			}
-			args = append(args, "-p", prompt)
-
-			cmd := exec.CommandContext(ctx, agyBin, args...)
-			if _, err := os.Stat("/share/aerial"); err == nil {
-				cmd.Dir = "/share/aerial"
-			} else {
-				cmd.Dir = "/app"
-			}
-			cmd.Stdin = strings.NewReader("")
-			if apiKey != "" {
-				cmd.Env = append(os.Environ(),
-					"GEMINI_API_KEY="+apiKey,
-					"ANTIGRAVITY_API_KEY="+apiKey,
-					"GOOGLE_GENAI_API_KEY="+apiKey,
-					"AGY_LOG_LEVEL=debug",
-					"ANTIGRAVITY_LOG_LEVEL=debug",
-				)
-			}
-
-			var stdout, stderr bytes.Buffer
-			cmd.Stdout = &stdout
-			cmd.Stderr = &stderr
-
-			err := cmd.Run()
-			cancel()
-
-			exitCode := 0
-			if err != nil {
-				if exitErr, ok := err.(*exec.ExitError); ok {
-					exitCode = exitErr.ExitCode()
-				} else {
-					exitCode = -1
-					log.Printf("Process error: %v", err)
-				}
-			}
-
-			stderrStr := stderr.String()
-			activeInternalID := currentIntID
-			if activeInternalID == "" {
-				re := regexp.MustCompile(`Starting conversation update stream for ([a-f0-9\-]+)`)
-				if match := re.FindStringSubmatch(stderrStr); len(match) > 1 {
-					activeInternalID = match[1]
-				} else {
-					activeInternalID = session.FindLatestSessionDir(startTime)
-				}
-			}
-
-			lookupID := activeInternalID
-			if lookupID == "" {
-				lookupID = extID
-			}
-			outText, errDetail := session.ExtractResponseAndError(lookupID)
-			if outText == "" {
-				outText = strings.TrimSpace(stdout.String())
-			}
-
-			hasToolActivity := session.HasSuccessfulToolCall(lookupID)
-
-			isFailure := exitCode != 0 ||
-				strings.Contains(strings.ToLower(outText), "agent execution terminated") ||
-				strings.Contains(strings.ToLower(stderrStr), "agent execution terminated") ||
-				strings.Contains(strings.ToLower(stderrStr), "error 503") ||
-				strings.Contains(strings.ToLower(stderrStr), "status: unavailable") ||
-				strings.Contains(strings.ToLower(stderrStr), "error in generator") ||
-				strings.Contains(strings.ToLower(stderrStr), "error encountered while processing planner output") ||
-				(outText == "" && !hasToolActivity)
-
-			log.Printf("Execution finished | attempt=%d/%d external_conv=%s internal_conv=%s exit_code=%d failure=%t",
-				attempt, maxAttempts, extID, activeInternalID, exitCode, isFailure)
-
-			if !isFailure {
-				if activeInternalID != "" && extID != "" {
-					if err := db.SaveConversationMapping(database, extID, activeInternalID); err != nil {
-						log.Printf("Failed to save conversation mapping: %v", err)
-					}
-				}
-				log.Printf("--- STDOUT / RESPONSE ---\n%s\n--- STDERR ---\n%s", outText, stderrStr)
-				return
-			}
-
-			// Differentiate transient API errors (e.g. 503 high demand, 429, timeout) from session corruption
-			isTransient := strings.Contains(strings.ToLower(stderrStr), "error 503") ||
-				strings.Contains(strings.ToLower(stderrStr), "status: unavailable") ||
-				strings.Contains(strings.ToLower(stderrStr), "high demand") ||
-				strings.Contains(strings.ToLower(stderrStr), "rate limit") ||
-				strings.Contains(strings.ToLower(stderrStr), "resource_exhausted") ||
-				strings.Contains(strings.ToLower(stderrStr), "deadline_exceeded") ||
-				strings.Contains(strings.ToLower(stderrStr), "context deadline exceeded")
-
-			if isTransient && attempt < maxAttempts {
-				log.Printf("Transient API error on attempt %d/%d. Preserving internal session %s for context continuity.",
-					attempt, maxAttempts, currentIntID)
-			} else if attempt == maxAttempts {
-				if extID != "" {
-					if _, err := database.Exec("DELETE FROM conversations WHERE external_id = ?", extID); err != nil {
-						log.Printf("Failed to evict broken conversation %s: %v", extID, err)
-					} else {
-						log.Printf("Evicted broken conversation mapping for external_conv: %s (internal_conv: %s) after exhausting all %d attempts", extID, activeInternalID, maxAttempts)
-					}
-				}
-				currentIntID = ""
-			} else {
-				log.Printf("Non-transient error on attempt %d/%d with session %s. Resetting to fresh conversation for next attempt.",
-					attempt, maxAttempts, currentIntID)
-				currentIntID = ""
-			}
-
-			diagLogs := session.DumpSessionDiagnosticLogs(lookupID)
-			log.Printf("=== AGENT ERROR DIAGNOSTIC REPORT (Attempt %d/%d) ===\nCommand: %s %v\nExit Code: %d\nStdout: %s\nStderr: %s\nParsed Error: %s\nTranscript & System Logs:\n%s\n=====================================",
-				attempt, maxAttempts, agyBin, args, exitCode, stdout.String(), stderrStr, errDetail, diagLogs)
-
-			if attempt < maxAttempts {
-				backoff := time.Duration(attempt*3) * time.Second
-				log.Printf("Retrying failed turn (attempt %d/%d) in %v...", attempt+1, maxAttempts, backoff)
-				time.Sleep(backoff)
-			} else {
-				log.Printf("All %d execution attempts exhausted for prompt %s (ext: %s)", maxAttempts, msgID, extID)
-				sendFallbackDiscordError(extID, stderrStr)
-			}
-		}
-	}(req.Prompt, externalConvID, internalConvID, req.MessageID)
-
-	return externalConvID
-}
-
-func handlePrompt(database *sql.DB, agyBin, apiKey, model, systemPrompt string, timeoutMinutes int, mcpConfig json.RawMessage) http.HandlerFunc {
+func handlePrompt(database *sql.DB, pool *queue.WorkerPool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
@@ -222,14 +52,43 @@ func handlePrompt(database *sql.DB, agyBin, apiKey, model, systemPrompt string, 
 			return
 		}
 
-		externalConvID := executePrompt(database, req, agyBin, apiKey, model, systemPrompt, timeoutMinutes, mcpConfig, nil)
+		msgID := strings.TrimSpace(req.MessageID)
+		if msgID == "" {
+			msgID = uuid.New().String()
+		}
+
+		threadID := strings.TrimSpace(req.ConversationID)
+		if threadID == "" {
+			threadID = uuid.New().String()
+		}
+
+		msg := db.Message{
+			ID:         msgID,
+			ThreadID:   threadID,
+			GuildID:    "",
+			AuthorID:   "http-client",
+			AuthorName: "HTTP Client",
+			Content:    req.Prompt,
+			Status:     db.StatusPending,
+			CreatedAt:  time.Now().UTC(),
+			UpdatedAt:  time.Now().UTC(),
+		}
+
+		if err := db.InsertMessage(database, msg); err != nil {
+			log.Printf("Failed to insert HTTP prompt message %s to DB: %v", msgID, err)
+		}
+
+		if pool != nil {
+			pool.Enqueue(msg)
+		}
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusAccepted)
 		_ = json.NewEncoder(w).Encode(map[string]string{
 			"status":          "accepted",
-			"conversation_id": externalConvID,
-			"message":         "Prompt execution started in background",
+			"conversation_id": threadID,
+			"message_id":      msgID,
+			"message":         "Prompt execution enqueued in background",
 		})
 	}
 }
@@ -340,34 +199,6 @@ func handleTranscripts(database *sql.DB) http.HandlerFunc {
 	}
 }
 
-func recoverStartupInterruptedTurns(database *sql.DB, agyBin, apiKey, model, systemPrompt string, timeoutMinutes int, mcpConfig json.RawMessage) {
-	interrupted, err := db.GetInterruptedTurns(database)
-	if err != nil {
-		log.Printf("[Startup Recovery] Error querying interrupted turns: %v", err)
-		return
-	}
-	if len(interrupted) == 0 {
-		log.Printf("[Startup Recovery] No interrupted turns found. System clean.")
-		return
-	}
-
-	log.Printf("[Startup Recovery] Found %d interrupted turn(s) from prior restart/crash. Resuming execution...", len(interrupted))
-	for _, turn := range interrupted {
-		log.Printf("[Startup Recovery] Resuming turn | target_thread=%s last_msg=%s updated_at=%s prompt_len=%d",
-			turn.ExternalID, turn.LastMessageID, turn.UpdatedAt.Format(time.RFC3339), len(turn.LastPrompt))
-		if strings.TrimSpace(turn.LastPrompt) != "" {
-			req := PromptRequest{
-				ConversationID: turn.ExternalID,
-				Prompt:         turn.LastPrompt,
-				MessageID:      turn.LastMessageID,
-			}
-			go executePrompt(database, req, agyBin, apiKey, model, systemPrompt, timeoutMinutes, mcpConfig, nil)
-		} else {
-			_ = db.SetTurnProcessing(database, turn.ExternalID, false, "")
-		}
-	}
-}
-
 func main() {
 	portStr, agyBin, apiKey, model, systemPrompt, timeoutMinutes, mcpConfig := config.LoadConfig()
 
@@ -410,7 +241,7 @@ func main() {
 	dbPath := db.GetDBPath()
 	database, err := db.InitDB(dbPath)
 	if err != nil {
-		log.Fatalf("Failed to initialize conversation database: %v", err)
+		log.Fatalf("Failed to initialize database: %v", err)
 	}
 	defer func() {
 		if err := database.Close(); err != nil {
@@ -418,20 +249,60 @@ func main() {
 		}
 	}()
 
-	recoverStartupInterruptedTurns(database, agyBin, apiKey, model, systemPrompt, timeoutMinutes, mcpConfig)
+	pool := queue.NewWorkerPool(queue.WorkerPoolConfig{
+		DB:             database,
+		AgyBin:         agyBin,
+		APIKey:         apiKey,
+		Model:          model,
+		SystemPrompt:   systemPrompt,
+		TimeoutMinutes: timeoutMinutes,
+	})
+	pool.Start()
+	defer pool.Stop()
 
-	go startDiscordFunnel(database, agyBin, apiKey, model, systemPrompt, timeoutMinutes, mcpConfig)
+	// Connect Discord Gateway session before startup crash recovery
+	dgSession := connectDiscordFunnel(database, pool)
+	if dgSession != nil {
+		defer func() {
+			_ = dgSession.Close()
+		}()
+	}
 
-	http.HandleFunc("/prompt", handlePrompt(database, agyBin, apiKey, model, systemPrompt, timeoutMinutes, mcpConfig))
-	http.HandleFunc("/transcripts", handleTranscripts(database))
-	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+	// Resume interrupted turns after Discord is attached
+	queue.RecoverInterrupted(database, pool)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/prompt", handlePrompt(database, pool))
+	mux.HandleFunc("/transcripts", handleTranscripts(database))
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
 
-	log.Printf("Aerial Brain listening on port %s (model=%s, timeout=%dm)", portStr, model, timeoutMinutes)
-	if err := http.ListenAndServe(":"+portStr, nil); err != nil {
-		log.Fatalf("Server failed: %v", err)
+	srv := &http.Server{
+		Addr:    ":" + portStr,
+		Handler: mux,
 	}
+
+	stopChan := make(chan os.Signal, 1)
+	signal.Notify(stopChan, os.Interrupt, syscall.SIGTERM)
+
+	go func() {
+		log.Printf("Aerial Brain listening on port %s (model=%s, timeout=%dm)", portStr, model, timeoutMinutes)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Server failed: %v", err)
+		}
+	}()
+
+	<-stopChan
+	log.Println("Shutting down Aerial Brain gracefully...")
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("HTTP shutdown error: %v", err)
+	}
+	log.Println("Aerial Brain shutdown complete")
 }

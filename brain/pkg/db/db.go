@@ -11,6 +11,28 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+const (
+	StatusPending    = "PENDING"
+	StatusProcessing = "PROCESSING"
+	StatusCompleted  = "COMPLETED"
+	StatusFailed     = "FAILED"
+)
+
+type Message struct {
+	ID           string    `json:"id"`
+	ThreadID     string    `json:"thread_id"`
+	GuildID      string    `json:"guild_id"`
+	AuthorID     string    `json:"author_id"`
+	AuthorName   string    `json:"author_name"`
+	Content      string    `json:"content"`
+	Status       string    `json:"status"`
+	RetryCount   int       `json:"retry_count"`
+	ErrorMessage string    `json:"error_message,omitempty"`
+	ResponseText string    `json:"response_text,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
 func GetDBPath() string {
 	if _, err := os.Stat("/data"); err == nil {
 		return "/data/aerial.db"
@@ -30,7 +52,42 @@ func InitDB(dbPath string) (*sql.DB, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// Configure SQLite PRAGMAs for performance and concurrency
+	pragmas := `
+	PRAGMA journal_mode = WAL;
+	PRAGMA busy_timeout = 5000;
+	PRAGMA synchronous = NORMAL;
+	`
+	if _, err := database.Exec(pragmas); err != nil {
+		log.Printf("Warning: failed to execute PRAGMAs: %v", err)
+	}
+
 	schema := `
+	CREATE TABLE IF NOT EXISTS messages (
+		id TEXT PRIMARY KEY,
+		thread_id TEXT NOT NULL,
+		guild_id TEXT NOT NULL,
+		author_id TEXT NOT NULL,
+		author_name TEXT NOT NULL,
+		content TEXT NOT NULL,
+		status TEXT NOT NULL DEFAULT 'PENDING',
+		retry_count INTEGER NOT NULL DEFAULT 0,
+		error_message TEXT,
+		response_text TEXT,
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_messages_thread_status ON messages(thread_id, status);
+	CREATE INDEX IF NOT EXISTS idx_messages_status ON messages(status);
+
+	CREATE TABLE IF NOT EXISTS sessions (
+		thread_id TEXT PRIMARY KEY,
+		internal_session_id TEXT NOT NULL,
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);
+
 	CREATE TABLE IF NOT EXISTS conversations (
 		external_id TEXT PRIMARY KEY,
 		internal_id TEXT NOT NULL,
@@ -66,62 +123,208 @@ func InitDB(dbPath string) (*sql.DB, error) {
 		return nil, err
 	}
 
-	migrations := []string{
-		"ALTER TABLE conversations ADD COLUMN is_processing BOOLEAN NOT NULL DEFAULT FALSE;",
-		"ALTER TABLE conversations ADD COLUMN last_message_id TEXT NOT NULL DEFAULT '';",
-		"ALTER TABLE conversations ADD COLUMN last_prompt TEXT NOT NULL DEFAULT '';",
-	}
-	for _, m := range migrations {
-		_, _ = database.Exec(m)
-	}
+	// Safe column migration for response_text on existing DBs
+	_, _ = database.Exec(`ALTER TABLE messages ADD COLUMN response_text TEXT;`)
 
-	log.Printf("SQLite conversation database initialized and migrated at %s", dbPath)
+	// Data migration from legacy conversations to sessions table if any exist
+	_, _ = database.Exec(`
+	INSERT OR IGNORE INTO sessions (thread_id, internal_session_id, created_at, updated_at)
+	SELECT external_id, internal_id, created_at, updated_at
+	FROM conversations
+	WHERE internal_id != ''
+	`)
+
+	log.Printf("SQLite database initialized and migrated at %s", dbPath)
 	return database, nil
 }
 
-func GetInternalConversationID(database *sql.DB, externalID string) (string, error) {
-	if database == nil || externalID == "" {
+// Message CRUD Operations
+
+func InsertMessage(database *sql.DB, msg Message) error {
+	if database == nil {
+		return fmt.Errorf("database is nil")
+	}
+	if msg.ID == "" {
+		return fmt.Errorf("message id cannot be empty")
+	}
+	if msg.Status == "" {
+		msg.Status = StatusPending
+	}
+	now := time.Now().UTC()
+	if msg.CreatedAt.IsZero() {
+		msg.CreatedAt = now
+	}
+	if msg.UpdatedAt.IsZero() {
+		msg.UpdatedAt = now
+	}
+
+	query := `
+	INSERT OR IGNORE INTO messages (id, thread_id, guild_id, author_id, author_name, content, status, retry_count, error_message, response_text, created_at, updated_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`
+	_, err := database.Exec(query, msg.ID, msg.ThreadID, msg.GuildID, msg.AuthorID, msg.AuthorName, msg.Content, msg.Status, msg.RetryCount, msg.ErrorMessage, msg.ResponseText, msg.CreatedAt, msg.UpdatedAt)
+	return err
+}
+
+func UpdateMessageStatus(database *sql.DB, id string, status string, errorMsg string) error {
+	if database == nil {
+		return fmt.Errorf("database is nil")
+	}
+	if id == "" {
+		return fmt.Errorf("message id cannot be empty")
+	}
+	now := time.Now().UTC()
+	query := `
+	UPDATE messages
+	SET status = ?, error_message = ?, updated_at = ?
+	WHERE id = ?
+	`
+	_, err := database.Exec(query, status, errorMsg, now, id)
+	return err
+}
+
+func UpdateMessageCompleted(database *sql.DB, id string, responseText string) error {
+	if database == nil {
+		return fmt.Errorf("database is nil")
+	}
+	if id == "" {
+		return fmt.Errorf("message id cannot be empty")
+	}
+	now := time.Now().UTC()
+	query := `
+	UPDATE messages
+	SET status = ?, response_text = ?, error_message = '', updated_at = ?
+	WHERE id = ?
+	`
+	_, err := database.Exec(query, StatusCompleted, responseText, now, id)
+	return err
+}
+
+func IncrementMessageRetry(database *sql.DB, id string, errorMsg string) error {
+	if database == nil {
+		return fmt.Errorf("database is nil")
+	}
+	if id == "" {
+		return fmt.Errorf("message id cannot be empty")
+	}
+	now := time.Now().UTC()
+	query := `
+	UPDATE messages
+	SET retry_count = retry_count + 1, error_message = ?, updated_at = ?
+	WHERE id = ?
+	`
+	_, err := database.Exec(query, errorMsg, now, id)
+	return err
+}
+
+func GetPendingOrProcessingMessages(database *sql.DB) ([]Message, error) {
+	if database == nil {
+		return nil, fmt.Errorf("database is nil")
+	}
+	query := `
+	SELECT id, thread_id, guild_id, author_id, author_name, content, status, retry_count, COALESCE(error_message, ''), COALESCE(response_text, ''), created_at, updated_at
+	FROM messages
+	WHERE status IN ('PENDING', 'PROCESSING')
+	ORDER BY created_at ASC
+	`
+	rows, err := database.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var results []Message
+	for rows.Next() {
+		var m Message
+		if err := rows.Scan(&m.ID, &m.ThreadID, &m.GuildID, &m.AuthorID, &m.AuthorName, &m.Content, &m.Status, &m.RetryCount, &m.ErrorMessage, &m.ResponseText, &m.CreatedAt, &m.UpdatedAt); err != nil {
+			return nil, err
+		}
+		results = append(results, m)
+	}
+	return results, nil
+}
+
+func GetMessage(database *sql.DB, id string) (*Message, error) {
+	if database == nil {
+		return nil, fmt.Errorf("database is nil")
+	}
+	if id == "" {
+		return nil, nil
+	}
+	query := `
+	SELECT id, thread_id, guild_id, author_id, author_name, content, status, retry_count, COALESCE(error_message, ''), COALESCE(response_text, ''), created_at, updated_at
+	FROM messages
+	WHERE id = ?
+	`
+	var m Message
+	err := database.QueryRow(query, id).Scan(&m.ID, &m.ThreadID, &m.GuildID, &m.AuthorID, &m.AuthorName, &m.Content, &m.Status, &m.RetryCount, &m.ErrorMessage, &m.ResponseText, &m.CreatedAt, &m.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &m, nil
+}
+
+// Session CRUD Operations
+
+func GetSessionID(database *sql.DB, threadID string) (string, error) {
+	if database == nil || threadID == "" {
 		return "", nil
 	}
-	var internalID string
-	err := database.QueryRow("SELECT internal_id FROM conversations WHERE external_id = ?", externalID).Scan(&internalID)
+	var sessionID string
+	err := database.QueryRow("SELECT internal_session_id FROM sessions WHERE thread_id = ?", threadID).Scan(&sessionID)
 	if err == sql.ErrNoRows {
 		return "", nil
 	}
-	return internalID, err
+	return sessionID, err
+}
+
+func SaveSessionID(database *sql.DB, threadID, sessionID string) error {
+	if database == nil || threadID == "" || sessionID == "" {
+		return nil
+	}
+	now := time.Now().UTC()
+	query := `
+	INSERT INTO sessions (thread_id, internal_session_id, created_at, updated_at)
+	VALUES (?, ?, ?, ?)
+	ON CONFLICT(thread_id) DO UPDATE SET
+		internal_session_id = excluded.internal_session_id,
+		updated_at = excluded.updated_at
+	`
+	_, err := database.Exec(query, threadID, sessionID, now, now)
+	return err
+}
+
+func DeleteSessionID(database *sql.DB, threadID string) error {
+	if database == nil || threadID == "" {
+		return nil
+	}
+	_, err := database.Exec("DELETE FROM sessions WHERE thread_id = ?", threadID)
+	return err
+}
+
+// Legacy conversation compatibility helpers
+
+func GetInternalConversationID(database *sql.DB, externalID string) (string, error) {
+	return GetSessionID(database, externalID)
 }
 
 func GetExternalConversationID(database *sql.DB, internalID string) (string, error) {
 	if database == nil || internalID == "" {
 		return "", nil
 	}
-	var externalID string
-	err := database.QueryRow("SELECT external_id FROM conversations WHERE internal_id = ?", internalID).Scan(&externalID)
+	var threadID string
+	err := database.QueryRow("SELECT thread_id FROM sessions WHERE internal_session_id = ?", internalID).Scan(&threadID)
 	if err == sql.ErrNoRows {
 		return "", nil
 	}
-	return externalID, err
+	return threadID, err
 }
 
 func SaveConversationMapping(database *sql.DB, externalID, internalID string) error {
-	if database == nil || externalID == "" || internalID == "" {
-		return nil
-	}
-	now := time.Now().UTC()
-	query := `
-	INSERT INTO conversations (external_id, internal_id, created_at, updated_at)
-	VALUES (?, ?, ?, ?)
-	ON CONFLICT(external_id) DO UPDATE SET
-		internal_id = excluded.internal_id,
-		updated_at = excluded.updated_at
-	`
-	_, err := database.Exec(query, externalID, internalID, now, now)
-	if err != nil {
-		log.Printf("Failed to save conversation mapping (%s -> %s): %v", externalID, internalID, err)
-	} else {
-		log.Printf("Saved conversation mapping: %s -> %s", externalID, internalID)
-	}
-	return err
+	return SaveSessionID(database, externalID, internalID)
 }
 
 type ConversationTurnState struct {
@@ -137,96 +340,88 @@ func RegisterTurn(database *sql.DB, externalID, messageID, prompt string) error 
 	if database == nil || externalID == "" {
 		return nil
 	}
-	now := time.Now().UTC()
-	query := `
-	INSERT INTO conversations (external_id, internal_id, is_processing, last_message_id, last_prompt, created_at, updated_at)
-	VALUES (?, '', TRUE, ?, ?, ?, ?)
-	ON CONFLICT(external_id) DO UPDATE SET
-		is_processing = TRUE,
-		last_message_id = excluded.last_message_id,
-		last_prompt = excluded.last_prompt,
-		updated_at = excluded.updated_at
-	`
-	_, err := database.Exec(query, externalID, messageID, prompt, now, now)
-	if err != nil {
-		log.Printf("Failed to register turn for %s: %v", externalID, err)
+	msg := Message{
+		ID:        messageID,
+		ThreadID:  externalID,
+		Content:   prompt,
+		Status:    StatusProcessing,
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
 	}
-	return err
+	return InsertMessage(database, msg)
 }
 
 func SetTurnProcessing(database *sql.DB, externalID string, isProcessing bool, lastMessageID string) error {
 	if database == nil || externalID == "" {
 		return nil
 	}
-	now := time.Now().UTC()
-	var query string
-	var err error
+	status := StatusCompleted
+	if isProcessing {
+		status = StatusProcessing
+	}
 	if lastMessageID != "" {
-		query = `
-		UPDATE conversations 
-		SET is_processing = ?, last_message_id = ?, updated_at = ?
-		WHERE external_id = ?
-		`
-		_, err = database.Exec(query, isProcessing, lastMessageID, now, externalID)
-	} else {
-		query = `
-		UPDATE conversations 
-		SET is_processing = ?, updated_at = ?
-		WHERE external_id = ?
-		`
-		_, err = database.Exec(query, isProcessing, now, externalID)
+		return UpdateMessageStatus(database, lastMessageID, status, "")
 	}
-	if err != nil {
-		log.Printf("Failed to update turn processing state for %s: %v", externalID, err)
-	}
-	return err
+	return nil
 }
 
 func GetTurnState(database *sql.DB, externalID string) (*ConversationTurnState, error) {
 	if database == nil || externalID == "" {
 		return nil, nil
 	}
-	var state ConversationTurnState
+	sessID, _ := GetSessionID(database, externalID)
+	var m Message
 	query := `
-	SELECT external_id, internal_id, is_processing, last_message_id, last_prompt, updated_at
-	FROM conversations
-	WHERE external_id = ?
+	SELECT id, thread_id, status, content, updated_at
+	FROM messages
+	WHERE thread_id = ?
+	ORDER BY created_at DESC
+	LIMIT 1
 	`
-	err := database.QueryRow(query, externalID).Scan(&state.ExternalID, &state.InternalID, &state.IsProcessing, &state.LastMessageID, &state.LastPrompt, &state.UpdatedAt)
+	err := database.QueryRow(query, externalID).Scan(&m.ID, &m.ThreadID, &m.Status, &m.Content, &m.UpdatedAt)
 	if err == sql.ErrNoRows {
-		return nil, nil
+		return &ConversationTurnState{
+			ExternalID: externalID,
+			InternalID: sessID,
+		}, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	return &state, nil
+	return &ConversationTurnState{
+		ExternalID:    externalID,
+		InternalID:    sessID,
+		IsProcessing:  m.Status == StatusProcessing,
+		LastMessageID: m.ID,
+		LastPrompt:    m.Content,
+		UpdatedAt:     m.UpdatedAt,
+	}, nil
 }
 
 func GetInterruptedTurns(database *sql.DB) ([]ConversationTurnState, error) {
 	if database == nil {
 		return nil, nil
 	}
-	query := `
-	SELECT external_id, internal_id, is_processing, last_message_id, last_prompt, updated_at
-	FROM conversations
-	WHERE is_processing = TRUE
-	`
-	rows, err := database.Query(query)
+	messages, err := GetPendingOrProcessingMessages(database)
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
-
 	var results []ConversationTurnState
-	for rows.Next() {
-		var state ConversationTurnState
-		if err := rows.Scan(&state.ExternalID, &state.InternalID, &state.IsProcessing, &state.LastMessageID, &state.LastPrompt, &state.UpdatedAt); err != nil {
-			return nil, err
-		}
-		results = append(results, state)
+	for _, m := range messages {
+		sessID, _ := GetSessionID(database, m.ThreadID)
+		results = append(results, ConversationTurnState{
+			ExternalID:    m.ThreadID,
+			InternalID:    sessID,
+			IsProcessing:  m.Status == StatusProcessing,
+			LastMessageID: m.ID,
+			LastPrompt:    m.Content,
+			UpdatedAt:     m.UpdatedAt,
+		})
 	}
 	return results, nil
 }
+
+// Scheduling definitions
 
 type OneShotSchedule struct {
 	ID        string
@@ -329,4 +524,3 @@ func UpdateCronNextRun(database *sql.DB, id string, nextRunAt time.Time) error {
 	_, err := database.Exec(`UPDATE cron_schedules SET next_run_at = ? WHERE id = ?`, nextRunAt, id)
 	return err
 }
-

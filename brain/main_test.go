@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/azylman/aerial/brain/pkg/db"
+	"github.com/azylman/aerial/brain/pkg/queue"
 )
 
 func TestHandlePromptValidation(t *testing.T) {
@@ -17,7 +18,13 @@ func TestHandlePromptValidation(t *testing.T) {
 	}
 	defer func() { _ = database.Close() }()
 
-	handler := handlePrompt(database, "echo", "", "", "", 1, nil)
+	pool := queue.NewWorkerPool(queue.WorkerPoolConfig{
+		DB: database,
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	handler := handlePrompt(database, pool)
 
 	// Test GET method not allowed
 	req := httptest.NewRequest(http.MethodGet, "/prompt", nil)
@@ -45,6 +52,29 @@ func TestHandlePromptValidation(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("Expected status 400 BadRequest for invalid JSON, got %d", w.Code)
+	}
+
+	// Test valid prompt payload accepted
+	validPayload, _ := json.Marshal(map[string]string{
+		"prompt":          "Test valid prompt",
+		"conversation_id": "test-conv-1",
+		"message_id":      "msg-123",
+	})
+	req = httptest.NewRequest(http.MethodPost, "/prompt", bytes.NewReader(validPayload))
+	w = httptest.NewRecorder()
+	handler(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Errorf("Expected status 202 StatusAccepted, got %d", w.Code)
+	}
+
+	// Verify message persisted to SQLite
+	msg, err := db.GetMessage(database, "msg-123")
+	if err != nil || msg == nil {
+		t.Fatalf("Failed to retrieve persisted message: %v", err)
+	}
+	if msg.ThreadID != "test-conv-1" || msg.Content != "Test valid prompt" {
+		t.Errorf("Unexpected message fields in DB: %+v", msg)
 	}
 }
 

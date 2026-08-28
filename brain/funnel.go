@@ -2,7 +2,6 @@ package main
 
 import (
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -13,6 +12,7 @@ import (
 
 	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
+	"github.com/azylman/aerial/brain/pkg/queue"
 	"github.com/bwmarrin/discordgo"
 )
 
@@ -87,10 +87,7 @@ func buildDiscordPrompt(m *discordgo.Message, targetThreadID string) string {
 		}
 	}
 	sb.WriteString(fmt.Sprintf("- attachments: %v\n\n", attachments))
-
-	sb.WriteString("CRITICAL REQUIREMENT: You MUST send your response back to Discord using the Discord MCP tool via `call_mcp_tool` with ServerName: \"discord\":\n")
-	sb.WriteString(fmt.Sprintf("Execute `call_mcp_tool` with ServerName: \"discord\", ToolName: \"discord_send\", and Arguments: {\"channelId\": %q, \"message\": \"<your response>\"}.\n", targetThreadID))
-	sb.WriteString("Execute the tool call now.\n</USER_REQUEST>")
+	sb.WriteString("Please formulate your response and output it clearly. It will be delivered directly to the Discord thread.\n</USER_REQUEST>")
 	return sb.String()
 }
 
@@ -144,32 +141,11 @@ func getGlobalDiscordSession() *discordgo.Session {
 	return globalDiscordSession
 }
 
-func sendFallbackDiscordError(channelOrThreadID string, errorDetail string) {
-	s := getGlobalDiscordSession()
-	if s == nil || channelOrThreadID == "" {
-		return
-	}
-	isSnowflake := len(channelOrThreadID) >= 17 && regexp.MustCompile(`^[0-9]+$`).MatchString(channelOrThreadID)
-	if !isSnowflake {
-		return
-	}
-	msg := "I'm so sorry, darling! ? I ran into a temporary hiccup with the AI service. Please try sending your message again in just a moment! ??"
-	if strings.Contains(strings.ToLower(errorDetail), "error 503") || strings.Contains(strings.ToLower(errorDetail), "unavailable") {
-		msg = "I'm so sorry, darling! ? The AI model is currently experiencing high demand (Error 503). Please try sending your message again in a minute! ??"
-	}
-	_, err := s.ChannelMessageSend(channelOrThreadID, msg)
-	if err != nil {
-		log.Printf("Failed to send fallback error message to Discord channel %s: %v", channelOrThreadID, err)
-	} else {
-		log.Printf("Sent fallback error notification to Discord channel %s", channelOrThreadID)
-	}
-}
-
-func startDiscordFunnel(database *sql.DB, agyBin, apiKey, model, systemPrompt string, timeoutMinutes int, mcpConfig json.RawMessage) {
+func connectDiscordFunnel(database *sql.DB, pool *queue.WorkerPool) *discordgo.Session {
 	token := config.GetEnv("DISCORD_TOKEN", config.GetEnv("DISCORD_BOT_TOKEN", ""))
 	if token == "" {
 		log.Println("Discord funnel disabled: DISCORD_BOT_TOKEN/DISCORD_TOKEN not configured")
-		return
+		return nil
 	}
 
 	mentionsOnly := os.Getenv("MENTIONS_ONLY") == "true"
@@ -177,9 +153,12 @@ func startDiscordFunnel(database *sql.DB, agyBin, apiKey, model, systemPrompt st
 	dg, err := discordgo.New("Bot " + token)
 	if err != nil {
 		log.Printf("Discord funnel failed to create session: %v", err)
-		return
+		return nil
 	}
 	setGlobalDiscordSession(dg)
+	if pool != nil {
+		pool.SetDiscordSession(dg)
+	}
 
 	dg.AddHandler(func(s *discordgo.Session, r *discordgo.Ready) {
 		log.Printf("Discord funnel gateway session ready as %s#%s (user ID %s)", r.User.Username, r.User.Discriminator, r.User.ID)
@@ -206,59 +185,66 @@ func startDiscordFunnel(database *sql.DB, agyBin, apiKey, model, systemPrompt st
 		targetThreadID, isThread := getOrCreateThreadID(s, m.Message)
 		prompt := buildDiscordPrompt(m.Message, targetThreadID)
 
-		_ = db.RegisterTurn(database, targetThreadID, m.ID, prompt)
-
-		req := PromptRequest{
-			ConversationID: targetThreadID,
-			Prompt:         prompt,
-			MessageID:      m.ID,
+		authorID := ""
+		authorName := "Discord User"
+		if m.Author != nil {
+			authorID = m.Author.ID
+			authorName = m.Author.Username
 		}
 
-		log.Printf("Discord funnel received message %s from %s (channel %s, target_thread: %s, is_thread: %t)",
-			m.ID, m.Author.Username, m.ChannelID, targetThreadID, isThread)
-
-		stopTyping := make(chan struct{})
-		var once sync.Once
-		onComplete := func() {
-			once.Do(func() {
-				close(stopTyping)
-			})
+		msg := db.Message{
+			ID:         m.ID,
+			ThreadID:   targetThreadID,
+			GuildID:    m.GuildID,
+			AuthorID:   authorID,
+			AuthorName: authorName,
+			Content:    prompt,
+			Status:     db.StatusPending,
+			CreatedAt:  time.Now().UTC(),
+			UpdatedAt:  time.Now().UTC(),
 		}
 
-		go func(channelID string) {
-			_ = s.ChannelTyping(channelID)
-			ticker := time.NewTicker(5 * time.Second)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ticker.C:
-					_ = s.ChannelTyping(channelID)
-				case <-stopTyping:
-					return
-				}
-			}
-		}(targetThreadID)
+		if err := db.InsertMessage(database, msg); err != nil {
+			log.Printf("Failed to persist Discord message %s to SQLite: %v", m.ID, err)
+		}
 
-		executePrompt(database, req, agyBin, apiKey, model, systemPrompt, timeoutMinutes, mcpConfig, onComplete)
+		log.Printf("Discord funnel received message %s from %s (channel %s, target_thread: %s, is_thread: %t). Enqueued to worker pool.",
+			m.ID, authorName, m.ChannelID, targetThreadID, isThread)
+
+		if pool != nil {
+			pool.Enqueue(msg)
+		}
 	})
 
 	dg.Identify.Intents = discordgo.IntentsGuildMessages | discordgo.IntentsDirectMessages | discordgo.IntentMessageContent
 	dg.SyncEvents = false
 
-	backoff := 1 * time.Second
-	maxBackoff := 60 * time.Second
-
-	for {
-		if err := dg.Open(); err != nil {
-			log.Printf("Discord funnel failed to open session: %v. Retrying in %v...", err, backoff)
-			time.Sleep(backoff)
-			backoff = backoff * 2
-			if backoff > maxBackoff {
-				backoff = maxBackoff
+	if err := dg.Open(); err != nil {
+		log.Printf("Warning: Discord funnel failed to open initial session: %v. Retrying in background...", err)
+		go func() {
+			backoff := 2 * time.Second
+			maxBackoff := 60 * time.Second
+			for {
+				if err := dg.Open(); err != nil {
+					log.Printf("Discord funnel retry failed: %v. Retrying in %v...", err, backoff)
+					time.Sleep(backoff)
+					backoff = backoff * 2
+					if backoff > maxBackoff {
+						backoff = maxBackoff
+					}
+					continue
+				}
+				log.Printf("Discord funnel worker started successfully inside Brain")
+				break
 			}
-			continue
-		}
-		log.Printf("Discord funnel worker started successfully inside Brain")
-		break
+		}()
+	} else {
+		log.Printf("Discord funnel worker connected successfully inside Brain")
 	}
+
+	return dg
+}
+
+func startDiscordFunnel(database *sql.DB, pool *queue.WorkerPool) {
+	_ = connectDiscordFunnel(database, pool)
 }
