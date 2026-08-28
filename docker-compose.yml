@@ -121,6 +121,7 @@ services:
     container_name: aerial-agentsview
     restart: unless-stopped
     command:
+      - "--host=0.0.0.0"
       - "--public-origin=${AGENTSVIEW_PUBLIC_ORIGINS:-http://192.168.1.14:8089,http://192.168.1.14,https://aerial.zylman.com,http://aerial.zylman.com}"
       - "--public-url=${AGENTSVIEW_PUBLIC_URL:-https://aerial.zylman.com}"
     ports:
