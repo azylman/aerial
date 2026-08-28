@@ -8,7 +8,31 @@ import (
 	"time"
 )
 
+func TestGetDefaultTimezone(t *testing.T) {
+	// 1. Fallback when both DEFAULT_TIMEZONE and TZ are unset
+	t.Setenv("DEFAULT_TIMEZONE", "")
+	t.Setenv("TZ", "")
+	if tz := GetDefaultTimezone(); tz != "America/Los_Angeles" {
+		t.Errorf("Expected fallback 'America/Los_Angeles', got %q", tz)
+	}
+
+	// 2. TZ environment variable fallback
+	t.Setenv("TZ", "America/Chicago")
+	if tz := GetDefaultTimezone(); tz != "America/Chicago" {
+		t.Errorf("Expected TZ 'America/Chicago', got %q", tz)
+	}
+
+	// 3. DEFAULT_TIMEZONE environment variable takes highest precedence
+	t.Setenv("DEFAULT_TIMEZONE", "America/New_York")
+	if tz := GetDefaultTimezone(); tz != "America/New_York" {
+		t.Errorf("Expected DEFAULT_TIMEZONE 'America/New_York', got %q", tz)
+	}
+}
+
 func TestParseRunAt(t *testing.T) {
+	t.Setenv("DEFAULT_TIMEZONE", "America/Los_Angeles")
+	t.Setenv("TZ", "")
+
 	baseTime := time.Date(2026, time.August, 28, 12, 0, 0, 0, time.UTC)
 
 	tests := []struct {
@@ -29,11 +53,15 @@ func TestParseRunAt(t *testing.T) {
 		{"1w", baseTime.Add(7 * 24 * time.Hour), false},
 		{"1h30m", baseTime.Add(90 * time.Minute), false},
 
-		// Absolute timestamps
+		// Explicit UTC / RFC3339 timestamps
 		{"2026-08-28T21:00:00Z", time.Date(2026, time.August, 28, 21, 0, 0, 0, time.UTC), false},
-		{"2026-08-28 21:00:00", time.Date(2026, time.August, 28, 21, 0, 0, 0, time.UTC), false},
-		{"2026-08-28T21:00", time.Date(2026, time.August, 28, 21, 0, 0, 0, time.UTC), false},
-		{"2026-08-28", time.Date(2026, time.August, 28, 0, 0, 0, 0, time.UTC), false},
+
+		// Absolute timestamps in default timezone America/Los_Angeles (PDT = UTC-7 in August)
+		// 21:00 PDT -> 04:00 UTC (Aug 29)
+		{"2026-08-28 21:00:00", time.Date(2026, time.August, 29, 4, 0, 0, 0, time.UTC), false},
+		{"2026-08-28T21:00", time.Date(2026, time.August, 29, 4, 0, 0, 0, time.UTC), false},
+		// 00:00 PDT -> 07:00 UTC
+		{"2026-08-28", time.Date(2026, time.August, 28, 7, 0, 0, 0, time.UTC), false},
 
 		// Errors
 		{"", time.Time{}, true},
@@ -53,7 +81,7 @@ func TestParseRunAt(t *testing.T) {
 }
 
 func TestCalculateNextCronRun(t *testing.T) {
-	// Friday Aug 28, 2026 12:00:00 UTC
+	// Friday Aug 28, 2026 12:00:00 UTC (05:00:00 PDT)
 	baseTime := time.Date(2026, time.August, 28, 12, 0, 0, 0, time.UTC)
 
 	// "0 20 * * 5" -> Friday at 20:00 UTC
@@ -66,7 +94,7 @@ func TestCalculateNextCronRun(t *testing.T) {
 		t.Errorf("Expected next run %s, got %s", expected, next)
 	}
 
-	// "@weekly" -> Sunday midnight
+	// "@weekly" -> Sunday midnight UTC
 	nextWeekly, err := CalculateNextCronRun("@weekly", "UTC", baseTime)
 	if err != nil {
 		t.Fatalf("CalculateNextCronRun @weekly failed: %v", err)
@@ -74,6 +102,40 @@ func TestCalculateNextCronRun(t *testing.T) {
 	expectedWeekly := time.Date(2026, time.August, 30, 0, 0, 0, 0, time.UTC)
 	if !nextWeekly.Equal(expectedWeekly) {
 		t.Errorf("Expected next weekly %s, got %s", expectedWeekly, nextWeekly)
+	}
+
+	// Timezone test with America/Los_Angeles (PDT = UTC-7 in August)
+	// "0 9 * * *" (9 AM PDT) from Aug 28 12:00 UTC (5:00 AM PDT) -> Aug 28 9:00 PDT (16:00 UTC)
+	nextLA, err := CalculateNextCronRun("0 9 * * *", "America/Los_Angeles", baseTime)
+	if err != nil {
+		t.Fatalf("CalculateNextCronRun America/Los_Angeles failed: %v", err)
+	}
+	expectedLA := time.Date(2026, time.August, 28, 16, 0, 0, 0, time.UTC)
+	if !nextLA.Equal(expectedLA) {
+		t.Errorf("Expected next LA run %s, got %s", expectedLA, nextLA)
+	}
+
+	// Empty timezone defaults to GetDefaultTimezone() ("America/Los_Angeles")
+	t.Setenv("DEFAULT_TIMEZONE", "America/Los_Angeles")
+	t.Setenv("TZ", "")
+	nextDefault, err := CalculateNextCronRun("0 9 * * *", "", baseTime)
+	if err != nil {
+		t.Fatalf("CalculateNextCronRun with empty timezone failed: %v", err)
+	}
+	if !nextDefault.Equal(expectedLA) {
+		t.Errorf("Expected default next run %s, got %s", expectedLA, nextDefault)
+	}
+
+	// Configurable DEFAULT_TIMEZONE override: America/New_York (EDT = UTC-4)
+	// 9 AM EDT from 12:00 UTC (8:00 AM EDT) -> Aug 28 9:00 EDT (13:00 UTC)
+	t.Setenv("DEFAULT_TIMEZONE", "America/New_York")
+	nextNYDefault, err := CalculateNextCronRun("0 9 * * *", "", baseTime)
+	if err != nil {
+		t.Fatalf("CalculateNextCronRun with DEFAULT_TIMEZONE override failed: %v", err)
+	}
+	expectedNY := time.Date(2026, time.August, 28, 13, 0, 0, 0, time.UTC)
+	if !nextNYDefault.Equal(expectedNY) {
+		t.Errorf("Expected next NY run %s, got %s", expectedNY, nextNYDefault)
 	}
 
 	// Invalid cron
@@ -84,6 +146,9 @@ func TestCalculateNextCronRun(t *testing.T) {
 }
 
 func TestToolHandlerOperations(t *testing.T) {
+	t.Setenv("DEFAULT_TIMEZONE", "America/Los_Angeles")
+	t.Setenv("TZ", "")
+
 	db, err := InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("InitDB failed: %v", err)
@@ -92,13 +157,13 @@ func TestToolHandlerOperations(t *testing.T) {
 
 	handler := NewToolHandler(db)
 
-	// 1. Schedule recurring
+	// 1. Schedule recurring (explicit timezone America/Los_Angeles)
 	recArgJSON := []byte(`{
 		"channel_id": "1542423172400291873",
 		"cron_expression": "0 20 * * 5",
 		"prompt": "Message me with a weekly meal plan",
 		"title_prefix": "Weekly Meal Plan",
-		"timezone": "America/New_York"
+		"timezone": "America/Los_Angeles"
 	}`)
 
 	recRes, err := handler.HandleScheduleRecurring(recArgJSON)
@@ -114,7 +179,7 @@ func TestToolHandlerOperations(t *testing.T) {
 		t.Fatalf("Expected schedule_id in response")
 	}
 
-	// 2. Schedule one-shot
+	// 2. Schedule one-shot (relative duration)
 	onceArgJSON := []byte(`{
 		"target_id": "thread-456",
 		"run_at": "30m",
@@ -144,6 +209,9 @@ func TestToolHandlerOperations(t *testing.T) {
 	onceList := listMap["one_shot"].([]OneShotSchedule)
 	if len(recList) != 1 || len(onceList) != 1 {
 		t.Errorf("Expected 1 recurring and 1 once, got %d, %d", len(recList), len(onceList))
+	}
+	if recList[0].Timezone != "America/Los_Angeles" {
+		t.Errorf("Expected timezone 'America/Los_Angeles', got %q", recList[0].Timezone)
 	}
 
 	// 4. List schedules filtered by target_id
@@ -188,6 +256,44 @@ func TestToolHandlerOperations(t *testing.T) {
 	}
 }
 
+func TestToolHandler_DefaultTimezoneFallback(t *testing.T) {
+	t.Setenv("DEFAULT_TIMEZONE", "America/Los_Angeles")
+	t.Setenv("TZ", "")
+
+	db, err := InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	handler := NewToolHandler(db)
+
+	// Omitted timezone in recurring schedule should default to America/Los_Angeles
+	recArgJSON := []byte(`{
+		"channel_id": "chan-default-tz",
+		"cron_expression": "0 9 * * *",
+		"prompt": "Morning routine without timezone"
+	}`)
+
+	recRes, err := handler.HandleScheduleRecurring(recArgJSON)
+	if err != nil {
+		t.Fatalf("HandleScheduleRecurring failed: %v", err)
+	}
+	recMap := recRes.(map[string]interface{})
+	schedID := recMap["schedule_id"].(string)
+
+	crons, err := ListCronSchedules(db, "chan-default-tz")
+	if err != nil || len(crons) != 1 {
+		t.Fatalf("Expected 1 cron in DB, got %v (err: %v)", crons, err)
+	}
+	if crons[0].ID != schedID {
+		t.Errorf("Expected schedule ID %s, got %s", schedID, crons[0].ID)
+	}
+	if crons[0].Timezone != "America/Los_Angeles" {
+		t.Errorf("Expected default Timezone 'America/Los_Angeles', got %q", crons[0].Timezone)
+	}
+}
+
 func TestToolHandlerValidationErrors(t *testing.T) {
 	db, _ := InitDB(":memory:")
 	defer func() { _ = db.Close() }()
@@ -221,6 +327,17 @@ func TestToolHandlerValidationErrors(t *testing.T) {
 func TestParseRunAtWithTimezone(t *testing.T) {
 	baseTime := time.Date(2026, time.August, 28, 12, 0, 0, 0, time.UTC)
 
+	// America/Los_Angeles (PDT = UTC-7 in August)
+	// 2026-08-28 15:00:00 PDT -> 2026-08-28 22:00:00 UTC
+	tLA, err := ParseRunAtWithTimezone("2026-08-28 15:00:00", "America/Los_Angeles", baseTime)
+	if err != nil {
+		t.Fatalf("ParseRunAtWithTimezone America/Los_Angeles failed: %v", err)
+	}
+	expectedLA := time.Date(2026, time.August, 28, 22, 0, 0, 0, time.UTC)
+	if !tLA.Equal(expectedLA) {
+		t.Errorf("Expected %s, got %s", expectedLA, tLA)
+	}
+
 	// America/New_York (EDT = UTC-4 in August)
 	// 2026-08-28 15:00:00 EDT -> 2026-08-28 19:00:00 UTC
 	tNY, err := ParseRunAtWithTimezone("2026-08-28 15:00:00", "America/New_York", baseTime)
@@ -244,7 +361,7 @@ func TestParseRunAtWithTimezone(t *testing.T) {
 	}
 
 	// Relative duration with timezone (should be relative from now)
-	tRel, err := ParseRunAtWithTimezone("45m", "America/New_York", baseTime)
+	tRel, err := ParseRunAtWithTimezone("45m", "America/Los_Angeles", baseTime)
 	if err != nil {
 		t.Fatalf("ParseRunAtWithTimezone relative failed: %v", err)
 	}
@@ -266,7 +383,7 @@ func TestHandleScheduleOnce_WithTimezone(t *testing.T) {
 		"target_id": "thread-tz-test",
 		"run_at": "2026-08-28 20:00:00",
 		"prompt": "Timezone reminder",
-		"timezone": "America/New_York"
+		"timezone": "America/Los_Angeles"
 	}`)
 
 	res, err := handler.HandleScheduleOnce(payload)
@@ -278,8 +395,8 @@ func TestHandleScheduleOnce_WithTimezone(t *testing.T) {
 		t.Errorf("Expected success, got %+v", resMap)
 	}
 
-	// 20:00 EDT = 00:00 UTC (Aug 29)
-	expectedUTC := "2026-08-29T00:00:00Z"
+	// 20:00 PDT = 03:00 UTC (Aug 29)
+	expectedUTC := "2026-08-29T03:00:00Z"
 	if resMap["run_at"] != expectedUTC {
 		t.Errorf("Expected run_at %s, got %v", expectedUTC, resMap["run_at"])
 	}

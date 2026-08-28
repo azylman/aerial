@@ -349,7 +349,7 @@ func TestSchedulesCompatibility(t *testing.T) {
 		TitlePrefix: "Weekly Meal Plan",
 		CronExpr:    "0 20 * * 5",
 		Prompt:      "Plan meals for the week",
-		Timezone:    "America/New_York",
+		Timezone:    "America/Los_Angeles",
 		NextRunAt:   now.Add(-5 * time.Minute),
 		Enabled:     true,
 		CreatedAt:   now,
@@ -358,13 +358,29 @@ func TestSchedulesCompatibility(t *testing.T) {
 		t.Fatalf("Failed to create cron schedule: %v", err)
 	}
 
+	// Test default timezone fallback when Timezone is empty
+	cronDefaultTZ := CronSchedule{
+		ID:          "cron-default-tz",
+		TargetID:    "channel-100",
+		TitlePrefix: "Default TZ Routine",
+		CronExpr:    "0 12 * * *",
+		Prompt:      "Routine with default timezone",
+		Timezone:    "",
+		NextRunAt:   now.Add(1 * time.Hour),
+		Enabled:     true,
+		CreatedAt:   now,
+	}
+	if err := CreateCronSchedule(database, cronDefaultTZ); err != nil {
+		t.Fatalf("Failed to create cron schedule with empty timezone: %v", err)
+	}
+
 	futureCronSched := CronSchedule{
 		ID:          "cron-2",
 		TargetID:    "channel-100",
 		TitlePrefix: "Daily Briefing",
 		CronExpr:    "0 9 * * *",
 		Prompt:      "Morning news update",
-		Timezone:    "America/New_York",
+		Timezone:    "America/Los_Angeles",
 		NextRunAt:   now.Add(2 * time.Hour),
 		Enabled:     true,
 		CreatedAt:   now,
@@ -383,8 +399,19 @@ func TestSchedulesCompatibility(t *testing.T) {
 	if dueCrons[0].TitlePrefix != "Weekly Meal Plan" {
 		t.Errorf("Expected TitlePrefix 'Weekly Meal Plan', got %q", dueCrons[0].TitlePrefix)
 	}
-	if dueCrons[0].Timezone != "America/New_York" {
-		t.Errorf("Expected Timezone 'America/New_York', got %q", dueCrons[0].Timezone)
+	if dueCrons[0].Timezone != "America/Los_Angeles" {
+		t.Errorf("Expected Timezone 'America/Los_Angeles', got %q", dueCrons[0].Timezone)
+	}
+
+	// Verify empty timezone was defaulted to America/Los_Angeles in DB
+	allCrons, err := GetAllCronSchedules(database, "channel-100")
+	if err != nil || len(allCrons) != 3 {
+		t.Fatalf("Expected 3 crons for channel-100, got %d (err: %v)", len(allCrons), err)
+	}
+	for _, c := range allCrons {
+		if c.ID == "cron-default-tz" && c.Timezone != "America/Los_Angeles" {
+			t.Errorf("Expected default timezone 'America/Los_Angeles' for cron-default-tz, got %q", c.Timezone)
+		}
 	}
 
 	// Update next run at
@@ -397,17 +424,12 @@ func TestSchedulesCompatibility(t *testing.T) {
 		t.Errorf("Expected 0 due cron schedules after next_run update, got %d", len(dueAfterUpdate))
 	}
 
-	allCrons, err := GetAllCronSchedules(database, "channel-100")
-	if err != nil || len(allCrons) != 2 {
-		t.Fatalf("Expected 2 crons for channel-100, got %d (err: %v)", len(allCrons), err)
-	}
-
 	if err := DeleteCronSchedule(database, "cron-1"); err != nil {
 		t.Fatalf("Failed to delete cron schedule: %v", err)
 	}
 	remainingCrons, _ := GetAllCronSchedules(database, "channel-100")
-	if len(remainingCrons) != 1 || remainingCrons[0].ID != "cron-2" {
-		t.Errorf("Expected 1 remaining cron (cron-2), got %d", len(remainingCrons))
+	if len(remainingCrons) != 2 {
+		t.Errorf("Expected 2 remaining crons, got %d", len(remainingCrons))
 	}
 }
 

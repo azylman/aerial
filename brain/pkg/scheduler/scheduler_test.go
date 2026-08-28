@@ -92,8 +92,29 @@ func TestFormatThreadTitle(t *testing.T) {
 	}
 }
 
+func TestGetDefaultTimezone(t *testing.T) {
+	// 1. Fallback when both DEFAULT_TIMEZONE and TZ are unset
+	t.Setenv("DEFAULT_TIMEZONE", "")
+	t.Setenv("TZ", "")
+	if tz := GetDefaultTimezone(); tz != "America/Los_Angeles" {
+		t.Errorf("Expected fallback 'America/Los_Angeles', got %q", tz)
+	}
+
+	// 2. TZ environment variable fallback
+	t.Setenv("TZ", "America/Chicago")
+	if tz := GetDefaultTimezone(); tz != "America/Chicago" {
+		t.Errorf("Expected TZ 'America/Chicago', got %q", tz)
+	}
+
+	// 3. DEFAULT_TIMEZONE environment variable takes highest precedence
+	t.Setenv("DEFAULT_TIMEZONE", "America/New_York")
+	if tz := GetDefaultTimezone(); tz != "America/New_York" {
+		t.Errorf("Expected DEFAULT_TIMEZONE 'America/New_York', got %q", tz)
+	}
+}
+
 func TestCalculateNextRun(t *testing.T) {
-	// Friday Aug 28, 2026 12:00:00 UTC
+	// Friday Aug 28, 2026 12:00:00 UTC (05:00:00 PDT)
 	baseTime := time.Date(2026, time.August, 28, 12, 0, 0, 0, time.UTC)
 
 	// "0 20 * * 5" -> Friday at 20:00 UTC
@@ -106,11 +127,34 @@ func TestCalculateNextRun(t *testing.T) {
 		t.Errorf("Expected next run %s, got %s", expected, next)
 	}
 
-	// Timezone test with embedded tzdata: America/New_York (EDT = UTC-4 in August)
-	// "0 9 * * *" (9 AM America/New_York) from Aug 28 12:00 UTC (8:00 AM EDT) -> Aug 28 9:00 EDT (13:00 UTC)
-	nextNY, err := CalculateNextRun("0 9 * * *", "America/New_York", baseTime)
+	// Timezone test with embedded tzdata: America/Los_Angeles (PDT = UTC-7 in August)
+	// "0 9 * * *" (9 AM America/Los_Angeles) from Aug 28 12:00 UTC (5:00 AM PDT) -> Aug 28 9:00 PDT (16:00 UTC)
+	nextLA, err := CalculateNextRun("0 9 * * *", "America/Los_Angeles", baseTime)
 	if err != nil {
-		t.Fatalf("CalculateNextRun America/New_York failed: %v", err)
+		t.Fatalf("CalculateNextRun America/Los_Angeles failed: %v", err)
+	}
+	expectedLA := time.Date(2026, time.August, 28, 16, 0, 0, 0, time.UTC)
+	if !nextLA.Equal(expectedLA) {
+		t.Errorf("Expected next LA run %s, got %s", expectedLA, nextLA)
+	}
+
+	// Empty timezone defaults to GetDefaultTimezone() ("America/Los_Angeles")
+	t.Setenv("DEFAULT_TIMEZONE", "America/Los_Angeles")
+	t.Setenv("TZ", "")
+	nextDefault, err := CalculateNextRun("0 9 * * *", "", baseTime)
+	if err != nil {
+		t.Fatalf("CalculateNextRun with empty timezone failed: %v", err)
+	}
+	if !nextDefault.Equal(expectedLA) {
+		t.Errorf("Expected default next run %s, got %s", expectedLA, nextDefault)
+	}
+
+	// Configurable DEFAULT_TIMEZONE override: America/New_York (EDT = UTC-4 in August)
+	// "0 9 * * *" (9 AM America/New_York) from Aug 28 12:00 UTC (8:00 AM EDT) -> Aug 28 9:00 EDT (13:00 UTC)
+	t.Setenv("DEFAULT_TIMEZONE", "America/New_York")
+	nextNY, err := CalculateNextRun("0 9 * * *", "", baseTime)
+	if err != nil {
+		t.Fatalf("CalculateNextRun America/New_York override failed: %v", err)
 	}
 	expectedNY := time.Date(2026, time.August, 28, 13, 0, 0, 0, time.UTC)
 	if !nextNY.Equal(expectedNY) {

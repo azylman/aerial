@@ -581,7 +581,7 @@ func CreateCronSchedule(database *sql.DB, c CronSchedule) error {
 		c.CreatedAt = time.Now().UTC()
 	}
 	if c.Timezone == "" {
-		c.Timezone = "UTC"
+		c.Timezone = "America/Los_Angeles"
 	}
 	query := `INSERT INTO cron_schedules (id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	_, err := database.Exec(query, c.ID, c.TargetID, c.TitlePrefix, c.CronExpr, c.Prompt, c.Timezone, c.NextRunAt, c.Enabled, c.CreatedAt)
