@@ -4,6 +4,7 @@ import (
 	"log"
 )
 
-func EnsureSkills() {
+func EnsureSkills() error {
 	log.Println("Skills subsystem initialized")
+	return nil
 }

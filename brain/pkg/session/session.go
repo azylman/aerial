@@ -124,28 +124,28 @@ func ExtractResponseAndError(convID string) (string, string) {
 			filepath.Join(homeDir, ".gemini", "antigravity", "brain", convID),
 			filepath.Join("/data", "brain", convID),
 		)
-	}
+	} else {
+		brainRoots := []string{
+			filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain"),
+			filepath.Join(homeDir, ".gemini", "antigravity", "brain"),
+			filepath.Join("/data", "brain"),
+		}
 
-	brainRoots := []string{
-		filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain"),
-		filepath.Join(homeDir, ".gemini", "antigravity", "brain"),
-		filepath.Join("/data", "brain"),
-	}
-
-	for _, root := range brainRoots {
-		if entries, err := os.ReadDir(root); err == nil {
-			var latestDir string
-			var latestTime time.Time
-			for _, entry := range entries {
-				if entry.IsDir() {
-					if info, err := entry.Info(); err == nil && info.ModTime().After(latestTime) {
-						latestTime = info.ModTime()
-						latestDir = filepath.Join(root, entry.Name())
+		for _, root := range brainRoots {
+			if entries, err := os.ReadDir(root); err == nil {
+				var latestDir string
+				var latestTime time.Time
+				for _, entry := range entries {
+					if entry.IsDir() {
+						if info, err := entry.Info(); err == nil && info.ModTime().After(latestTime) {
+							latestTime = info.ModTime()
+							latestDir = filepath.Join(root, entry.Name())
+						}
 					}
 				}
-			}
-			if latestDir != "" {
-				targetDirs = append(targetDirs, latestDir)
+				if latestDir != "" {
+					targetDirs = append(targetDirs, latestDir)
+				}
 			}
 		}
 	}
