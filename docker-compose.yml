@@ -41,6 +41,8 @@ services:
       - TIMEOUT_MINUTES=${TIMEOUT_MINUTES:-15}
       - GITHUB_PAT=${GITHUB_PAT}
       - HA_TOKEN=${HA_TOKEN}
+      - DISCORD_TOKEN=${DISCORD_BOT_TOKEN}
+      - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN}
     volumes:
       - aerial-brain-data:/data
       - aerial-brain-gemini:/root/.gemini
