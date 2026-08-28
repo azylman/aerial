@@ -7,7 +7,6 @@ import (
 	"os"
 	"regexp"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/azylman/aerial/brain/pkg/config"
@@ -138,7 +137,6 @@ func connectDiscordFunnel(database *sql.DB, pool *queue.WorkerPool) *discordgo.S
 		log.Printf("Discord funnel failed to create session: %v", err)
 		return nil
 	}
-	setGlobalDiscordSession(dg)
 	if pool != nil {
 		pool.SetDiscordSession(dg)
 	}
