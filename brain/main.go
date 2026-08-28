@@ -200,6 +200,51 @@ func ensureSystemRules(customPrompt string) {
 	log.Printf("Configured custom user rules in %s", ruleFile)
 }
 
+func ensureSkills() {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		homeDir = "/root"
+	}
+	globalSkillsDir := filepath.Join(homeDir, ".gemini", "config", "skills")
+	_ = os.MkdirAll(globalSkillsDir, 0755)
+
+	// Search paths for custom user skills
+	searchPaths := []string{
+		"/config/skills",
+		"/data/skills",
+		"./skills",
+		"/app/skills",
+	}
+
+	var loadedSkills []string
+	for _, p := range searchPaths {
+		entries, err := os.ReadDir(p)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			skillName := entry.Name()
+			srcSkillPath := filepath.Join(p, skillName)
+			destSkillPath := filepath.Join(globalSkillsDir, skillName)
+
+			// Verify skill contains a SKILL.md definition
+			if _, err := os.Stat(filepath.Join(srcSkillPath, "SKILL.md")); err == nil {
+				_ = os.Remove(destSkillPath)
+				if err := os.Symlink(srcSkillPath, destSkillPath); err == nil {
+					loadedSkills = append(loadedSkills, skillName)
+				}
+			}
+		}
+	}
+
+	if len(loadedSkills) > 0 {
+		log.Printf("Discovered and linked %d custom user skill(s) into global config: %v", len(loadedSkills), loadedSkills)
+	}
+}
+
 func loadMCPConfig() json.RawMessage {
 	// 1. Check mounted / external config files
 	configPaths := []string{
@@ -522,6 +567,7 @@ func loadConfig() (string, string, string, string, string, int, json.RawMessage)
 	if len(mcpConfig) > 0 {
 		ensureMcpConfig(mcpConfig)
 	}
+	ensureSkills()
 
 	// Symlink brain directory to /data/brain if /data exists
 	if _, err := os.Stat("/data"); err == nil {
