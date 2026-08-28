@@ -3,8 +3,8 @@ FROM golang:1.22-alpine AS builder
 
 WORKDIR /build
 
-COPY go.mod go.sum* ./
-COPY *.go ./
+COPY brain/go.mod brain/go.sum* ./
+COPY brain/*.go ./
 RUN go mod tidy
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /aerial-brain .
 
@@ -29,6 +29,7 @@ WORKDIR /app
 
 COPY --from=builder /aerial-brain /usr/local/bin/aerial-brain
 COPY GEMINI.md /app/GEMINI.md
+COPY .agents /app/.agents
 
 EXPOSE 8080
 
