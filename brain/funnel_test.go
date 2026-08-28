@@ -53,14 +53,14 @@ func TestRecoverStartupInterruptedTurns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to initialize database: %v", err)
 	}
-	defer database.Close()
+	defer func() { _ = database.Close() }()
 
 	// Case 1: Clean DB (0 interrupted turns)
 	recoverStartupInterruptedTurns(database)
 
 	// Case 2: Interrupted turn present
-	db.SaveConversationMapping(database, "thread-interrupted", "conv-int")
-	db.SetTurnProcessing(database, "thread-interrupted", true, "msg-100")
+	_ = db.SaveConversationMapping(database, "thread-interrupted", "conv-int")
+	_ = db.SetTurnProcessing(database, "thread-interrupted", true, "msg-100")
 
 	recoverStartupInterruptedTurns(database)
 

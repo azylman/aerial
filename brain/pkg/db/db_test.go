@@ -111,7 +111,7 @@ func TestPhase1SchedulesAndMigration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to initialize database: %v", err)
 	}
-	defer database.Close()
+	defer func() { _ = database.Close() }()
 
 	// Verify columns on conversations
 	var isProcessing bool
@@ -139,7 +139,7 @@ func TestPhase2TurnLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to initialize database: %v", err)
 	}
-	defer database.Close()
+	defer func() { _ = database.Close() }()
 
 	extID := "thread-phase2-123"
 	intID := "conv-phase2-abc"
@@ -195,13 +195,13 @@ func TestPhase3CrashRecoveryQuery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to initialize database: %v", err)
 	}
-	defer database.Close()
+	defer func() { _ = database.Close() }()
 
 	// 1. Create two conversations, one completed, one interrupted
-	SaveConversationMapping(database, "thread-1", "conv-1")
-	SaveConversationMapping(database, "thread-2", "conv-2")
+	_ = SaveConversationMapping(database, "thread-1", "conv-1")
+	_ = SaveConversationMapping(database, "thread-2", "conv-2")
 
-	SetTurnProcessing(database, "thread-2", true, "msg-interrupted-123")
+	_ = SetTurnProcessing(database, "thread-2", true, "msg-interrupted-123")
 
 	interrupted, err := GetInterruptedTurns(database)
 	if err != nil {
@@ -216,7 +216,7 @@ func TestPhase3CrashRecoveryQuery(t *testing.T) {
 	}
 
 	// 2. Clear lock
-	SetTurnProcessing(database, "thread-2", false, "")
+	_ = SetTurnProcessing(database, "thread-2", false, "")
 	interrupted, err = GetInterruptedTurns(database)
 	if err != nil {
 		t.Fatalf("Failed to query interrupted turns after clearing: %v", err)
@@ -231,7 +231,7 @@ func TestPhase4SchedulerQueries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to initialize database: %v", err)
 	}
-	defer database.Close()
+	defer func() { _ = database.Close() }()
 
 	// One-shot schedule test
 	oneShot := OneShotSchedule{

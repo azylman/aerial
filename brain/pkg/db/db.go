@@ -191,7 +191,7 @@ func GetInterruptedTurns(database *sql.DB) ([]ConversationTurnState, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var results []ConversationTurnState
 	for rows.Next() {
@@ -243,7 +243,7 @@ func GetDueOneShotSchedules(database *sql.DB) ([]OneShotSchedule, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var results []OneShotSchedule
 	for rows.Next() {
@@ -285,7 +285,7 @@ func GetDueCronSchedules(database *sql.DB) ([]CronSchedule, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var results []CronSchedule
 	for rows.Next() {
