@@ -1,33 +1,8 @@
 services:
   # ----------------------------------------------------------------------------
-  # 1. Inbound Event Gateway: Discord Funnel
-  #    Connects to Discord Gateway and forwards qualifying mentions/threads
-  #    to Aerial Brain.
-  # ----------------------------------------------------------------------------
-  discord-funnel:
-    build: ./discord-funnel
-    container_name: aerial-discord-funnel
-    restart: unless-stopped
-    environment:
-      - DISCORD_TOKEN=${DISCORD_BOT_TOKEN}
-      - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN}
-      - TARGET_URL=http://brain:8080/api/prompt
-      - HEALTH_PORT=8085
-    networks:
-      - aerial-net
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8085/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-      start_period: 5s
-    depends_on:
-      brain:
-        condition: service_healthy
-
-  # ----------------------------------------------------------------------------
-  # 2. Execution Brain: Aerial Brain
-  #    Runs headless Antigravity CLI agent prompts with multi-turn SQLite memory
+  # 1. Execution Brain: Aerial Brain
+  #    Runs headless Antigravity CLI agent prompts with multi-turn SQLite memory,
+  #    built-in Discord Gateway funnel with continuous typing indicator refresh,
   #    and connects to remote MCP network servers.
   # ----------------------------------------------------------------------------
   brain:
@@ -63,7 +38,7 @@ services:
         condition: service_healthy
 
   # ----------------------------------------------------------------------------
-  # 3. Outbound MCP: Discord MCP Server
+  # 2. Outbound MCP: Discord MCP Server
   #    Provides Discord tools (send message, create thread, read history) over HTTP.
   # ----------------------------------------------------------------------------
   discord-mcp:
@@ -86,7 +61,7 @@ services:
       start_period: 10s
 
   # ----------------------------------------------------------------------------
-  # 4. Outbound MCP: Docker Host MCP Server
+  # 3. Outbound MCP: Docker Host MCP Server
   #    Wraps the official mcp/docker image with supergateway translation proxy.
   # ----------------------------------------------------------------------------
   docker-mcp:
@@ -109,7 +84,7 @@ services:
       start_period: 10s
 
   # ----------------------------------------------------------------------------
-  # 5. Outbound MCP: GitHub MCP Server
+  # 4. Outbound MCP: GitHub MCP Server
   #    Wraps the official GitHub MCP server with supergateway translation proxy.
   # ----------------------------------------------------------------------------
   github-mcp:
