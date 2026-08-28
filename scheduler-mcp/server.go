@@ -271,7 +271,7 @@ func (s *Server) getToolsList() []map[string]interface{} {
 					},
 					"timezone": map[string]interface{}{
 						"type":        "string",
-						"description": "Timezone for evaluation (e.g. 'America/New_York' or 'UTC'). Defaults to 'America/New_York'.",
+						"description": "Timezone for evaluation (e.g. 'America/Los_Angeles', 'America/New_York', or 'UTC'). Defaults to configured server timezone ('America/Los_Angeles').",
 					},
 				},
 				"required": []string{"channel_id", "cron_expression", "prompt"},
@@ -297,7 +297,7 @@ func (s *Server) getToolsList() []map[string]interface{} {
 					},
 					"timezone": map[string]interface{}{
 						"type":        "string",
-						"description": "Timezone for absolute timestamp evaluation (e.g. 'America/New_York' or 'UTC'). Defaults to 'America/New_York'.",
+						"description": "Timezone for absolute timestamp evaluation (e.g. 'America/Los_Angeles', 'America/New_York', or 'UTC'). Defaults to configured server timezone ('America/Los_Angeles').",
 					},
 				},
 				"required": []string{"target_id", "run_at", "prompt"},

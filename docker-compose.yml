@@ -20,6 +20,8 @@ services:
       - HA_TOKEN=${HA_TOKEN}
       - DISCORD_TOKEN=${DISCORD_BOT_TOKEN}
       - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN}
+      - DEFAULT_TIMEZONE=${DEFAULT_TIMEZONE:-America/Los_Angeles}
+      - TZ=${DEFAULT_TIMEZONE:-America/Los_Angeles}
     volumes:
       - aerial-brain-data:/data
       - aerial-brain-gemini:/root/.gemini
@@ -53,6 +55,9 @@ services:
       dockerfile: Dockerfile
     container_name: aerial-scheduler-mcp
     restart: unless-stopped
+    environment:
+      - DEFAULT_TIMEZONE=${DEFAULT_TIMEZONE:-America/Los_Angeles}
+      - TZ=${DEFAULT_TIMEZONE:-America/Los_Angeles}
     volumes:
       - aerial-brain-data:/data
     networks:

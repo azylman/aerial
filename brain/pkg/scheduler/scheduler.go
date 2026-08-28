@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -64,6 +65,18 @@ func FormatThreadTitle(titlePrefix string, t time.Time) string {
 	return string(runes)
 }
 
+// GetDefaultTimezone returns the default timezone configured for the scheduler.
+// Reads DEFAULT_TIMEZONE -> TZ -> fallback "America/Los_Angeles".
+func GetDefaultTimezone() string {
+	if tz := strings.TrimSpace(os.Getenv("DEFAULT_TIMEZONE")); tz != "" {
+		return tz
+	}
+	if tz := strings.TrimSpace(os.Getenv("TZ")); tz != "" {
+		return tz
+	}
+	return "America/Los_Angeles"
+}
+
 // CalculateNextRun parses a standard 5-field cron or descriptor and computes the next run time in UTC.
 func CalculateNextRun(cronExpr, timezone string, from time.Time) (time.Time, error) {
 	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
@@ -72,13 +85,16 @@ func CalculateNextRun(cronExpr, timezone string, from time.Time) (time.Time, err
 		return time.Time{}, fmt.Errorf("invalid cron expression %q: %w", cronExpr, err)
 	}
 
+	tzTrimmed := strings.TrimSpace(timezone)
+	if tzTrimmed == "" {
+		tzTrimmed = GetDefaultTimezone()
+	}
+
 	loc := time.UTC
-	if strings.TrimSpace(timezone) != "" {
-		if l, err := time.LoadLocation(strings.TrimSpace(timezone)); err == nil {
-			loc = l
-		} else {
-			log.Printf("[Scheduler] Warning: unknown timezone %q, falling back to UTC", timezone)
-		}
+	if l, err := time.LoadLocation(tzTrimmed); err == nil {
+		loc = l
+	} else {
+		log.Printf("[Scheduler] Warning: unknown timezone %q, falling back to UTC", tzTrimmed)
 	}
 
 	fromInLoc := from.In(loc)

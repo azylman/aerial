@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -13,6 +14,18 @@ import (
 	"github.com/google/uuid"
 	"github.com/robfig/cron/v3"
 )
+
+// GetDefaultTimezone returns the configured default timezone for the server.
+// Reads DEFAULT_TIMEZONE -> TZ -> fallback "America/Los_Angeles".
+func GetDefaultTimezone() string {
+	if tz := strings.TrimSpace(os.Getenv("DEFAULT_TIMEZONE")); tz != "" {
+		return tz
+	}
+	if tz := strings.TrimSpace(os.Getenv("TZ")); tz != "" {
+		return tz
+	}
+	return "America/Los_Angeles"
+}
 
 var cronParser = cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
 
@@ -90,9 +103,9 @@ func ParseRunAtWithTimezone(input string, timezone string, now time.Time) (time.
 	return time.Time{}, fmt.Errorf("unrecognized run_at format %q: expected ISO timestamp (e.g. 2026-08-28T21:00:00Z) or relative duration (e.g. 30m, 2h, 1d)", raw)
 }
 
-// ParseRunAt parses relative durations or ISO timestamps using UTC.
+// ParseRunAt parses relative durations or ISO timestamps using default timezone.
 func ParseRunAt(input string, now time.Time) (time.Time, error) {
-	return ParseRunAtWithTimezone(input, "UTC", now)
+	return ParseRunAtWithTimezone(input, GetDefaultTimezone(), now)
 }
 
 func CalculateNextCronRun(cronExpr, timezone string, from time.Time) (time.Time, error) {
@@ -104,7 +117,7 @@ func CalculateNextCronRun(cronExpr, timezone string, from time.Time) (time.Time,
 	loc := time.UTC
 	tzTrimmed := strings.TrimSpace(timezone)
 	if tzTrimmed == "" {
-		tzTrimmed = "America/New_York"
+		tzTrimmed = GetDefaultTimezone()
 	}
 	if l, err := time.LoadLocation(tzTrimmed); err == nil {
 		loc = l
@@ -143,7 +156,7 @@ func (h *ToolHandler) HandleScheduleRecurring(rawArgs json.RawMessage) (interfac
 	args.TitlePrefix = strings.TrimSpace(args.TitlePrefix)
 	args.Timezone = strings.TrimSpace(args.Timezone)
 	if args.Timezone == "" {
-		args.Timezone = "America/New_York"
+		args.Timezone = GetDefaultTimezone()
 	}
 
 	if args.ChannelID == "" {
@@ -207,7 +220,7 @@ func (h *ToolHandler) HandleScheduleOnce(rawArgs json.RawMessage) (interface{}, 
 	args.Prompt = strings.TrimSpace(args.Prompt)
 	args.Timezone = strings.TrimSpace(args.Timezone)
 	if args.Timezone == "" {
-		args.Timezone = "America/New_York"
+		args.Timezone = GetDefaultTimezone()
 	}
 
 	if args.TargetID == "" {
