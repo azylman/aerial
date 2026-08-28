@@ -124,23 +124,6 @@ func isFunnelBotTargeted(s *discordgo.Session, m *discordgo.MessageCreate) bool 
 	return false
 }
 
-var (
-	globalDiscordSession *discordgo.Session
-	globalDiscordMu      sync.RWMutex
-)
-
-func setGlobalDiscordSession(s *discordgo.Session) {
-	globalDiscordMu.Lock()
-	defer globalDiscordMu.Unlock()
-	globalDiscordSession = s
-}
-
-func getGlobalDiscordSession() *discordgo.Session {
-	globalDiscordMu.RLock()
-	defer globalDiscordMu.RUnlock()
-	return globalDiscordSession
-}
-
 func connectDiscordFunnel(database *sql.DB, pool *queue.WorkerPool) *discordgo.Session {
 	token := config.GetEnv("DISCORD_TOKEN", config.GetEnv("DISCORD_BOT_TOKEN", ""))
 	if token == "" {
@@ -243,8 +226,4 @@ func connectDiscordFunnel(database *sql.DB, pool *queue.WorkerPool) *discordgo.S
 	}
 
 	return dg
-}
-
-func startDiscordFunnel(database *sql.DB, pool *queue.WorkerPool) {
-	_ = connectDiscordFunnel(database, pool)
 }
