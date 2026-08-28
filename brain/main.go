@@ -27,6 +27,7 @@ import (
 type PromptRequest struct {
 	Prompt         string `json:"prompt"`
 	ConversationID string `json:"conversation_id"`
+	MessageID      string `json:"message_id,omitempty"`
 }
 
 func executePrompt(database *sql.DB, req PromptRequest, agyBin, apiKey, model, systemPrompt string, timeoutMinutes int, mcpConfig json.RawMessage, onComplete func()) string {
@@ -40,9 +41,15 @@ func executePrompt(database *sql.DB, req PromptRequest, agyBin, apiKey, model, s
 		log.Printf("Warning: GetInternalConversationID error for %s: %v", externalConvID, err)
 	}
 
-	go func(prompt, extID, intID string) {
+	go func(prompt, extID, intID, msgID string) {
 		if onComplete != nil {
 			defer onComplete()
+		}
+		if database != nil && extID != "" {
+			_ = db.SetTurnProcessing(database, extID, true, msgID)
+			defer func() {
+				_ = db.SetTurnProcessing(database, extID, false, "")
+			}()
 		}
 
 		startTime := time.Now().Add(-2 * time.Second)
@@ -138,7 +145,7 @@ func executePrompt(database *sql.DB, req PromptRequest, agyBin, apiKey, model, s
 			}
 			log.Printf("--- STDOUT / RESPONSE ---\n%s\n--- STDERR ---\n%s", outText, stderrStr)
 		}
-	}(req.Prompt, externalConvID, internalConvID)
+	}(req.Prompt, externalConvID, internalConvID, req.MessageID)
 
 	return externalConvID
 }
@@ -285,6 +292,25 @@ func handleTranscripts(database *sql.DB) http.HandlerFunc {
 	}
 }
 
+func recoverStartupInterruptedTurns(database *sql.DB) {
+	interrupted, err := db.GetInterruptedTurns(database)
+	if err != nil {
+		log.Printf("[Startup Recovery] Error querying interrupted turns: %v", err)
+		return
+	}
+	if len(interrupted) == 0 {
+		log.Printf("[Startup Recovery] No interrupted turns found. System clean.")
+		return
+	}
+
+	log.Printf("[Startup Recovery] Found %d interrupted turn(s) from prior crash/restart:", len(interrupted))
+	for _, turn := range interrupted {
+		log.Printf("[Startup Recovery] - External Conversation: %s (Last Message ID: %s, Interrupted At: %s)",
+			turn.ExternalID, turn.LastMessageID, turn.UpdatedAt.Format(time.RFC3339))
+		_ = db.SetTurnProcessing(database, turn.ExternalID, false, "")
+	}
+}
+
 func main() {
 	portStr, agyBin, apiKey, model, systemPrompt, timeoutMinutes, mcpConfig := config.LoadConfig()
 
@@ -334,6 +360,8 @@ func main() {
 			log.Printf("Error closing database: %v", err)
 		}
 	}()
+
+	recoverStartupInterruptedTurns(database)
 
 	go startDiscordFunnel(database, agyBin, apiKey, model, systemPrompt, timeoutMinutes, mcpConfig)
 
