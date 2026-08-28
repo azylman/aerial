@@ -1,6 +1,6 @@
 ---
 name: self-improvement
-description: Use this skill whenever Aerial needs to modify, enhance, debug, or refactor its own codebase, commit changes, pull updates, or rebuild and redeploy its Docker containers.
+description: Use this skill whenever Aerial needs to modify, enhance, debug, or refactor its own codebase, skills, or system configuration, commit changes, pull updates, or rebuild and redeploy its Docker containers.
 ---
 
 # Aerial Self-Improvement & Continuous Deployment Runbook
