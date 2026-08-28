@@ -200,23 +200,64 @@ func ensureSystemRules(customPrompt string) {
 	log.Printf("Configured custom user rules in %s", ruleFile)
 }
 
+type SkillInfo struct {
+	Name        string
+	Description string
+	Path        string
+}
+
+func parseSkillFrontmatter(skillPath string) (SkillInfo, error) {
+	skillFile := filepath.Join(skillPath, "SKILL.md")
+	data, err := os.ReadFile(skillFile)
+	if err != nil {
+		return SkillInfo{}, err
+	}
+	info := SkillInfo{
+		Name:        filepath.Base(skillPath),
+		Path:        skillFile,
+		Description: "Specialized operational procedure guide.",
+	}
+	content := string(data)
+	if strings.HasPrefix(content, "---") {
+		parts := strings.SplitN(content, "---", 3)
+		if len(parts) >= 3 {
+			lines := strings.Split(parts[1], "\n")
+			for _, line := range lines {
+				line = strings.TrimSpace(line)
+				if strings.HasPrefix(line, "name:") {
+					info.Name = strings.TrimSpace(strings.TrimPrefix(line, "name:"))
+				} else if strings.HasPrefix(line, "description:") {
+					info.Description = strings.TrimSpace(strings.TrimPrefix(line, "description:"))
+				}
+			}
+		}
+	}
+	return info, nil
+}
+
 func ensureSkills() {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		homeDir = "/root"
 	}
+	rulesDir := filepath.Join(homeDir, ".gemini", "rules")
+	_ = os.MkdirAll(rulesDir, 0755)
+
 	globalSkillsDir := filepath.Join(homeDir, ".gemini", "config", "skills")
 	_ = os.MkdirAll(globalSkillsDir, 0755)
+	builtinSkillsDir := filepath.Join(homeDir, ".gemini", "antigravity-cli", "builtin", "skills")
+	_ = os.MkdirAll(builtinSkillsDir, 0755)
 
-	// Search paths for custom user skills
 	searchPaths := []string{
-		"/config/skills",
+		"/app/.agents/skills",
+		"/share/aerial/.agents/skills",
 		"/data/skills",
+		"/config/skills",
 		"./skills",
 		"/app/skills",
 	}
 
-	var loadedSkills []string
+	discoveredSkills := make(map[string]SkillInfo)
 	for _, p := range searchPaths {
 		entries, err := os.ReadDir(p)
 		if err != nil {
@@ -226,23 +267,32 @@ func ensureSkills() {
 			if !entry.IsDir() {
 				continue
 			}
-			skillName := entry.Name()
-			srcSkillPath := filepath.Join(p, skillName)
-			destSkillPath := filepath.Join(globalSkillsDir, skillName)
-
-			// Verify skill contains a SKILL.md definition
-			if _, err := os.Stat(filepath.Join(srcSkillPath, "SKILL.md")); err == nil {
-				_ = os.Remove(destSkillPath)
-				if err := os.Symlink(srcSkillPath, destSkillPath); err == nil {
-					loadedSkills = append(loadedSkills, skillName)
-				}
+			skillDir := filepath.Join(p, entry.Name())
+			if info, err := parseSkillFrontmatter(skillDir); err == nil {
+				discoveredSkills[info.Name] = info
+				_ = os.Remove(filepath.Join(globalSkillsDir, entry.Name()))
+				_ = os.Symlink(skillDir, filepath.Join(globalSkillsDir, entry.Name()))
+				_ = os.Remove(filepath.Join(builtinSkillsDir, entry.Name()))
+				_ = os.Symlink(skillDir, filepath.Join(builtinSkillsDir, entry.Name()))
 			}
 		}
 	}
 
-	if len(loadedSkills) > 0 {
-		log.Printf("Discovered and linked %d custom user skill(s) into global config: %v", len(loadedSkills), loadedSkills)
+	var sb strings.Builder
+	sb.WriteString("# Available Skills & Operational Runbooks\n\n")
+	sb.WriteString("You have access to specialized operational skills. If a task or query matches a skill's description, you MUST view its `SKILL.md` using `view_file` before proceeding:\n\n")
+	for name, info := range discoveredSkills {
+		sb.WriteString(fmt.Sprintf("- **%s** ([%s](file://%s)): %s\n", name, filepath.Base(info.Path), info.Path, info.Description))
 	}
+
+	ruleFile := filepath.Join(rulesDir, "skills_manifest.md")
+	_ = os.WriteFile(ruleFile, []byte(sb.String()), 0644)
+
+	var names []string
+	for n := range discoveredSkills {
+		names = append(names, n)
+	}
+	log.Printf("Discovered and registered %d skill(s) into system rules: %v", len(discoveredSkills), names)
 }
 
 func loadMCPConfig() json.RawMessage {
@@ -620,7 +670,11 @@ func executePrompt(db *sql.DB, req PromptRequest, agyBin, apiKey, model, systemP
 		args = append(args, "-p", prompt)
 
 		cmd := exec.CommandContext(ctx, agyBin, args...)
-		cmd.Dir = "/app"
+		if _, err := os.Stat("/share/aerial"); err == nil {
+			cmd.Dir = "/share/aerial"
+		} else {
+			cmd.Dir = "/app"
+		}
 		cmd.Stdin = strings.NewReader("")
 		if apiKey != "" {
 			cmd.Env = append(os.Environ(),
