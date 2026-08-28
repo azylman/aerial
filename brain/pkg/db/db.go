@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -22,7 +23,9 @@ func GetDBPath() string {
 }
 
 func InitDB(dbPath string) (*sql.DB, error) {
-	_ = os.MkdirAll(filepath.Dir(dbPath), 0755)
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
+		return nil, fmt.Errorf("failed to create db directory: %w", err)
+	}
 	database, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, err

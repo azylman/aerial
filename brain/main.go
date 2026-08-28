@@ -147,7 +147,7 @@ func handlePrompt(database *sql.DB, agyBin, apiKey, model, systemPrompt string, 
 			http.Error(w, `{"error":"Failed to read request body"}`, http.StatusBadRequest)
 			return
 		}
-		defer r.Body.Close()
+		_ = r.Body.Close()
 
 		var req PromptRequest
 		if err := json.Unmarshal(body, &req); err != nil || strings.TrimSpace(req.Prompt) == "" {
@@ -219,7 +219,10 @@ func handleTranscripts(database *sql.DB) http.HandlerFunc {
 					continue
 				}
 
-				info, _ := entry.Info()
+				info, err := entry.Info()
+				if err != nil {
+					continue
+				}
 				lines := strings.Split(string(data), "\n")
 				totalSteps := 0
 				lastStatus := "UNKNOWN"
@@ -249,7 +252,10 @@ func handleTranscripts(database *sql.DB) http.HandlerFunc {
 					}
 				}
 
-				extID, _ := db.GetExternalConversationID(database, internalID)
+				extID, err := db.GetExternalConversationID(database, internalID)
+				if err != nil {
+					log.Printf("Warning: GetExternalConversationID error for %s: %v", internalID, err)
+				}
 
 				item := TranscriptEntry{
 					Path:       tPath,
@@ -275,24 +281,38 @@ func main() {
 	portStr, agyBin, apiKey, model, systemPrompt, timeoutMinutes, mcpConfig := config.LoadConfig()
 
 	if apiKey != "" {
-		config.EnsureAgySettings(apiKey, model)
+		if err := config.EnsureAgySettings(apiKey, model); err != nil {
+			log.Printf("Warning: EnsureAgySettings error: %v", err)
+		}
 	}
-	config.EnsureSystemRules(systemPrompt)
+	if err := config.EnsureSystemRules(systemPrompt); err != nil {
+		log.Printf("Warning: EnsureSystemRules error: %v", err)
+	}
 	if len(mcpConfig) > 0 {
-		config.EnsureMcpConfig(mcpConfig)
+		if err := config.EnsureMcpConfig(mcpConfig); err != nil {
+			log.Printf("Warning: EnsureMcpConfig error: %v", err)
+		}
 	}
-	skills.EnsureSkills()
+	if err := skills.EnsureSkills(); err != nil {
+		log.Printf("Warning: EnsureSkills error: %v", err)
+	}
 
 	if _, err := os.Stat("/data"); err == nil {
-		_ = os.MkdirAll("/data/brain", 0755)
-		homeDir, _ := os.UserHomeDir()
-		if homeDir == "" {
+		if err := os.MkdirAll("/data/brain", 0755); err != nil {
+			log.Printf("Warning: MkdirAll /data/brain error: %v", err)
+		}
+		homeDir, err := os.UserHomeDir()
+		if err != nil || homeDir == "" {
 			homeDir = "/root"
 		}
 		cliBrainDir := filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain")
-		_ = os.MkdirAll(filepath.Dir(cliBrainDir), 0755)
+		if err := os.MkdirAll(filepath.Dir(cliBrainDir), 0755); err != nil {
+			log.Printf("Warning: MkdirAll cliBrainDir parent error: %v", err)
+		}
 		if _, err := os.Lstat(cliBrainDir); err != nil {
-			_ = os.Symlink("/data/brain", cliBrainDir)
+			if err := os.Symlink("/data/brain", cliBrainDir); err != nil {
+				log.Printf("Warning: Symlink /data/brain error: %v", err)
+			}
 		}
 	}
 
@@ -301,7 +321,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to initialize conversation database: %v", err)
 	}
-	defer database.Close()
+	defer func() {
+		if err := database.Close(); err != nil {
+			log.Printf("Error closing database: %v", err)
+		}
+	}()
 
 	go startDiscordFunnel(database, agyBin, apiKey, model, systemPrompt, timeoutMinutes, mcpConfig)
 

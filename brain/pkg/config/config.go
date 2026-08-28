@@ -28,16 +28,18 @@ func GetEnv(key, defaultVal string) string {
 	return defaultVal
 }
 
-func EnsureAgySettings(apiKey, model string) {
+func EnsureAgySettings(apiKey, model string) error {
 	if apiKey == "" {
-		return
+		return nil
 	}
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		homeDir = "/root"
 	}
 	configDir := filepath.Join(homeDir, ".gemini", "antigravity-cli")
-	_ = os.MkdirAll(configDir, 0755)
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		return fmt.Errorf("failed to create config directory: %w", err)
+	}
 
 	settingsPath := filepath.Join(configDir, "settings.json")
 	settings := map[string]interface{}{
@@ -45,32 +47,44 @@ func EnsureAgySettings(apiKey, model string) {
 		"model":         model,
 	}
 	if data, err := os.ReadFile(settingsPath); err == nil {
-		_ = json.Unmarshal(data, &settings)
+		if err := json.Unmarshal(data, &settings); err != nil {
+			log.Printf("Warning: failed to unmarshal existing settings from %s: %v", settingsPath, err)
+		}
 		settings["modelProvider"] = "gemini"
 		if model != "" {
 			settings["model"] = model
 		}
 	}
-	if out, err := json.MarshalIndent(settings, "", "  "); err == nil {
-		_ = os.WriteFile(settingsPath, out, 0644)
+	out, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal settings: %w", err)
 	}
+	if err := os.WriteFile(settingsPath, out, 0644); err != nil {
+		return fmt.Errorf("failed to write settings: %w", err)
+	}
+	return nil
 }
 
-func EnsureSystemRules(customPrompt string) {
+func EnsureSystemRules(customPrompt string) error {
 	if strings.TrimSpace(customPrompt) == "" {
-		return
+		return nil
 	}
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		homeDir = "/root"
 	}
 	rulesDir := filepath.Join(homeDir, ".gemini", "rules")
-	_ = os.MkdirAll(rulesDir, 0755)
+	if err := os.MkdirAll(rulesDir, 0755); err != nil {
+		return fmt.Errorf("failed to create rules directory: %w", err)
+	}
 
 	overrideContent := "# User Custom Instructions\n" + strings.TrimSpace(customPrompt) + "\n"
 	ruleFile := filepath.Join(rulesDir, "user_override.md")
-	_ = os.WriteFile(ruleFile, []byte(overrideContent), 0644)
+	if err := os.WriteFile(ruleFile, []byte(overrideContent), 0644); err != nil {
+		return fmt.Errorf("failed to write system rules: %w", err)
+	}
 	log.Printf("Configured custom user rules in %s", ruleFile)
+	return nil
 }
 
 func LoadMCPConfig() json.RawMessage {
@@ -132,21 +146,22 @@ func LoadMCPConfig() json.RawMessage {
 				"serverUrl": haToken,
 			}
 		}
-		b, _ := json.Marshal(defaultConfig)
-		rawBytes = b
+		if b, err := json.Marshal(defaultConfig); err == nil {
+			rawBytes = b
+		}
 	}
 
 	expanded := os.ExpandEnv(string(rawBytes))
 	return json.RawMessage(expanded)
 }
 
-func EnsureMcpConfig(rawConfig json.RawMessage) {
+func EnsureMcpConfig(rawConfig json.RawMessage) error {
 	if len(rawConfig) == 0 {
-		return
+		return nil
 	}
 	trimmed := strings.TrimSpace(string(rawConfig))
 	if trimmed == "" || trimmed == `""` || trimmed == "null" {
-		return
+		return nil
 	}
 
 	homeDir, err := os.UserHomeDir()
@@ -154,7 +169,9 @@ func EnsureMcpConfig(rawConfig json.RawMessage) {
 		homeDir = "/root"
 	}
 	configDir := filepath.Join(homeDir, ".gemini", "config")
-	_ = os.MkdirAll(configDir, 0755)
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		return fmt.Errorf("failed to create config directory: %w", err)
+	}
 	targetPath := filepath.Join(configDir, "mcp_config.json")
 
 	var configContent []byte
@@ -180,9 +197,10 @@ func EnsureMcpConfig(rawConfig json.RawMessage) {
 
 	if err := os.WriteFile(targetPath, configContent, 0644); err != nil {
 		log.Printf("Failed to write %s: %v", targetPath, err)
-	} else {
-		log.Printf("Configured %d MCP server(s) in %s: %v", len(serverList), targetPath, serverList)
+		return fmt.Errorf("failed to write mcp config: %w", err)
 	}
+	log.Printf("Configured %d MCP server(s) in %s: %v", len(serverList), targetPath, serverList)
+	return nil
 }
 
 func LoadConfig() (string, string, string, string, string, int, json.RawMessage) {

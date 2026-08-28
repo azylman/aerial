@@ -76,3 +76,30 @@ func TestDBNilHandling(t *testing.T) {
 		t.Errorf("Expected nil error for nil db save, got: %v", err)
 	}
 }
+
+func TestDBErrorCases(t *testing.T) {
+	// Test InitDB with invalid path
+	_, err := InitDB("/proc/invalid_path/aerial.db")
+	if err == nil {
+		t.Error("Expected error when creating DB in invalid directory, got nil")
+	}
+
+	// Test query on closed database
+	database, err := InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	_ = database.Close()
+
+	if _, err := GetInternalConversationID(database, "ext-1"); err == nil {
+		t.Error("Expected error querying closed database for GetInternalConversationID, got nil")
+	}
+
+	if _, err := GetExternalConversationID(database, "int-1"); err == nil {
+		t.Error("Expected error querying closed database for GetExternalConversationID, got nil")
+	}
+
+	if err := SaveConversationMapping(database, "ext-1", "int-1"); err == nil {
+		t.Error("Expected error saving mapping to closed database, got nil")
+	}
+}
