@@ -38,12 +38,24 @@ func TestScheduleTools(t *testing.T) {
 		t.Errorf("Expected non-empty response from ScheduleCron")
 	}
 
-	// Test CancelSchedule
-	cancelRes, err := tools.CancelSchedule(ctx, "one_shot", "sched-id")
+	// Test CancelSchedule for cron
+	cronCancelRes, err := tools.CancelSchedule(ctx, "cron", "cron-id")
 	if err != nil {
-		t.Fatalf("CancelSchedule failed: %v", err)
+		t.Fatalf("CancelSchedule for cron failed: %v", err)
 	}
-	if cancelRes == "" {
-		t.Errorf("Expected non-empty response from CancelSchedule")
+	if cronCancelRes == "" {
+		t.Errorf("Expected non-empty response from CancelSchedule cron")
+	}
+
+	// Test nil DB error handling
+	nilTools := NewScheduleTools(nil)
+	if _, err := nilTools.ScheduleOneShot(ctx, "t", "p", runAt); err == nil {
+		t.Errorf("Expected error for nil DB in ScheduleOneShot")
+	}
+	if _, err := nilTools.ScheduleCron(ctx, "t", "* * * * *", "p", nextRun); err == nil {
+		t.Errorf("Expected error for nil DB in ScheduleCron")
+	}
+	if _, err := nilTools.CancelSchedule(ctx, "one_shot", "id"); err == nil {
+		t.Errorf("Expected error for nil DB in CancelSchedule")
 	}
 }
