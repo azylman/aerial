@@ -52,82 +52,107 @@ func executePrompt(database *sql.DB, req PromptRequest, agyBin, apiKey, model, s
 			}()
 		}
 
-		startTime := time.Now().Add(-2 * time.Second)
-		_ = config.EnsureSystemRules(systemPrompt)
-		log.Printf("Starting background execution for prompt: %q (external_conversation: %s, mapped_internal: %q, timeout: %d minutes)",
-			prompt, extID, intID, timeoutMinutes)
+		maxAttempts := 3
+		currentIntID := intID
 
-		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutMinutes)*time.Minute)
-		defer cancel()
+		for attempt := 1; attempt <= maxAttempts; attempt++ {
+			startTime := time.Now().Add(-2 * time.Second)
+			_ = config.EnsureSystemRules(systemPrompt)
+			log.Printf("[Attempt %d/%d] Starting background execution for prompt: %q (external_conversation: %s, mapped_internal: %q, timeout: %d minutes)",
+				attempt, maxAttempts, prompt, extID, currentIntID, timeoutMinutes)
 
-		args := []string{"--dangerously-skip-permissions"}
-		if model != "" {
-			args = append(args, "--model", model)
-		}
-		if timeoutMinutes > 0 {
-			args = append(args, "--print-timeout", fmt.Sprintf("%dm", timeoutMinutes))
-		}
-		if intID != "" {
-			args = append(args, "--conversation", intID)
-		}
-		args = append(args, "-p", prompt)
+			ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutMinutes)*time.Minute)
 
-		cmd := exec.CommandContext(ctx, agyBin, args...)
-		if _, err := os.Stat("/share/aerial"); err == nil {
-			cmd.Dir = "/share/aerial"
-		} else {
-			cmd.Dir = "/app"
-		}
-		cmd.Stdin = strings.NewReader("")
-		if apiKey != "" {
-			cmd.Env = append(os.Environ(),
-				"GEMINI_API_KEY="+apiKey,
-				"ANTIGRAVITY_API_KEY="+apiKey,
-				"GOOGLE_GENAI_API_KEY="+apiKey,
-				"AGY_LOG_LEVEL=debug",
-				"ANTIGRAVITY_LOG_LEVEL=debug",
-			)
-		}
-
-		var stdout, stderr bytes.Buffer
-		cmd.Stdout = &stdout
-		cmd.Stderr = &stderr
-
-		err := cmd.Run()
-		exitCode := 0
-		if err != nil {
-			if exitErr, ok := err.(*exec.ExitError); ok {
-				exitCode = exitErr.ExitCode()
-			} else {
-				exitCode = -1
-				log.Printf("Process error: %v", err)
+			args := []string{"--dangerously-skip-permissions"}
+			if model != "" {
+				args = append(args, "--model", model)
 			}
-		}
-
-		stderrStr := stderr.String()
-		activeInternalID := intID
-		if activeInternalID == "" {
-			re := regexp.MustCompile(`Starting conversation update stream for ([a-f0-9\-]+)`)
-			if match := re.FindStringSubmatch(stderrStr); len(match) > 1 {
-				activeInternalID = match[1]
-			} else {
-				activeInternalID = session.FindLatestSessionDir(startTime)
+			if timeoutMinutes > 0 {
+				args = append(args, "--print-timeout", fmt.Sprintf("%dm", timeoutMinutes))
 			}
-		}
+			if currentIntID != "" {
+				args = append(args, "--conversation", currentIntID)
+			}
+			args = append(args, "-p", prompt)
 
-		lookupID := activeInternalID
-		if lookupID == "" {
-			lookupID = extID
-		}
-		outText, errDetail := session.ExtractResponseAndError(lookupID)
-		if outText == "" {
-			outText = strings.TrimSpace(stdout.String())
-		}
+			cmd := exec.CommandContext(ctx, agyBin, args...)
+			if _, err := os.Stat("/share/aerial"); err == nil {
+				cmd.Dir = "/share/aerial"
+			} else {
+				cmd.Dir = "/app"
+			}
+			cmd.Stdin = strings.NewReader("")
+			if apiKey != "" {
+				cmd.Env = append(os.Environ(),
+					"GEMINI_API_KEY="+apiKey,
+					"ANTIGRAVITY_API_KEY="+apiKey,
+					"GOOGLE_GENAI_API_KEY="+apiKey,
+					"AGY_LOG_LEVEL=debug",
+					"ANTIGRAVITY_LOG_LEVEL=debug",
+				)
+			}
 
-		isFailure := exitCode != 0 || strings.Contains(strings.ToLower(outText), "agent execution terminated")
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
 
-		log.Printf("Execution finished | external_conv=%s internal_conv=%s exit_code=%d failure=%t", extID, activeInternalID, exitCode, isFailure)
-		if isFailure {
+			err := cmd.Run()
+			cancel()
+
+			exitCode := 0
+			if err != nil {
+				if exitErr, ok := err.(*exec.ExitError); ok {
+					exitCode = exitErr.ExitCode()
+				} else {
+					exitCode = -1
+					log.Printf("Process error: %v", err)
+				}
+			}
+
+			stderrStr := stderr.String()
+			activeInternalID := currentIntID
+			if activeInternalID == "" {
+				re := regexp.MustCompile(`Starting conversation update stream for ([a-f0-9\-]+)`)
+				if match := re.FindStringSubmatch(stderrStr); len(match) > 1 {
+					activeInternalID = match[1]
+				} else {
+					activeInternalID = session.FindLatestSessionDir(startTime)
+				}
+			}
+
+			lookupID := activeInternalID
+			if lookupID == "" {
+				lookupID = extID
+			}
+			outText, errDetail := session.ExtractResponseAndError(lookupID)
+			if outText == "" {
+				outText = strings.TrimSpace(stdout.String())
+			}
+
+			hasToolActivity := session.HasSuccessfulToolCall(lookupID)
+
+			isFailure := exitCode != 0 ||
+				strings.Contains(strings.ToLower(outText), "agent execution terminated") ||
+				strings.Contains(strings.ToLower(stderrStr), "agent execution terminated") ||
+				strings.Contains(strings.ToLower(stderrStr), "error 503") ||
+				strings.Contains(strings.ToLower(stderrStr), "status: unavailable") ||
+				strings.Contains(strings.ToLower(stderrStr), "error in generator") ||
+				strings.Contains(strings.ToLower(stderrStr), "error encountered while processing planner output") ||
+				(outText == "" && !hasToolActivity)
+
+			log.Printf("Execution finished | attempt=%d/%d external_conv=%s internal_conv=%s exit_code=%d failure=%t",
+				attempt, maxAttempts, extID, activeInternalID, exitCode, isFailure)
+
+			if !isFailure {
+				if activeInternalID != "" && extID != "" {
+					if err := db.SaveConversationMapping(database, extID, activeInternalID); err != nil {
+						log.Printf("Failed to save conversation mapping: %v", err)
+					}
+				}
+				log.Printf("--- STDOUT / RESPONSE ---\n%s\n--- STDERR ---\n%s", outText, stderrStr)
+				return
+			}
+
 			if extID != "" {
 				if _, err := database.Exec("DELETE FROM conversations WHERE external_id = ?", extID); err != nil {
 					log.Printf("Failed to evict broken conversation %s: %v", extID, err)
@@ -135,16 +160,20 @@ func executePrompt(database *sql.DB, req PromptRequest, agyBin, apiKey, model, s
 					log.Printf("Evicted broken conversation mapping for external_conv: %s (internal_conv: %s) to prevent repeat failure loops", extID, activeInternalID)
 				}
 			}
+			currentIntID = ""
+
 			diagLogs := session.DumpSessionDiagnosticLogs(lookupID)
-			log.Printf("=== AGENT ERROR DIAGNOSTIC REPORT ===\nCommand: %s %v\nExit Code: %d\nStdout: %s\nStderr: %s\nParsed Error: %s\nTranscript & System Logs:\n%s\n=====================================",
-				agyBin, args, exitCode, stdout.String(), stderrStr, errDetail, diagLogs)
-		} else {
-			if activeInternalID != "" && extID != "" {
-				if err := db.SaveConversationMapping(database, extID, activeInternalID); err != nil {
-					log.Printf("Failed to save conversation mapping: %v", err)
-				}
+			log.Printf("=== AGENT ERROR DIAGNOSTIC REPORT (Attempt %d/%d) ===\nCommand: %s %v\nExit Code: %d\nStdout: %s\nStderr: %s\nParsed Error: %s\nTranscript & System Logs:\n%s\n=====================================",
+				attempt, maxAttempts, agyBin, args, exitCode, stdout.String(), stderrStr, errDetail, diagLogs)
+
+			if attempt < maxAttempts {
+				backoff := time.Duration(attempt*3) * time.Second
+				log.Printf("Retrying failed turn (attempt %d/%d) in %v...", attempt+1, maxAttempts, backoff)
+				time.Sleep(backoff)
+			} else {
+				log.Printf("All %d execution attempts exhausted for prompt %s (ext: %s)", maxAttempts, msgID, extID)
+				sendFallbackDiscordError(extID, stderrStr)
 			}
-			log.Printf("--- STDOUT / RESPONSE ---\n%s\n--- STDERR ---\n%s", outText, stderrStr)
 		}
 	}(req.Prompt, externalConvID, internalConvID, req.MessageID)
 

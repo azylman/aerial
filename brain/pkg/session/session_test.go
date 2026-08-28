@@ -44,6 +44,42 @@ func TestFindLatestSessionDirAndExtract(t *testing.T) {
 	}
 }
 
+func TestMultiTurnTurnScoping(t *testing.T) {
+	tmpDir := t.TempDir()
+	_ = os.Setenv("HOME", tmpDir)
+
+	convID := "test-multi-turn-456"
+	logsDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", convID, ".system_generated", "logs")
+	if err := os.MkdirAll(logsDir, 0755); err != nil {
+		t.Fatalf("Failed to create temp logs dir: %v", err)
+	}
+
+	// Turn 1 succeeded, Turn 2 crashed with no response
+	transcriptData := `{"step_index":0,"type":"USER_INPUT","content":"Turn 1"}
+{"step_index":1,"type":"PLANNER_RESPONSE","status":"DONE","content":"Turn 1 Response"}
+{"step_index":2,"type":"USER_INPUT","content":"Turn 2"}
+{"step_index":3,"type":"SYSTEM_MESSAGE","content":"Server restarted"}
+{"step_index":4,"type":"PLANNER_RESPONSE","status":"DONE","content":""}`
+
+	tPath := filepath.Join(logsDir, "transcript.jsonl")
+	if err := os.WriteFile(tPath, []byte(transcriptData), 0644); err != nil {
+		t.Fatalf("Failed to write transcript.jsonl: %v", err)
+	}
+
+	resp, errStr := ExtractResponseAndError(convID)
+	if resp != "" {
+		t.Errorf("Expected empty response for Turn 2, but got Turn 1 response '%s'", resp)
+	}
+	if errStr != "" {
+		t.Errorf("Expected empty error, got '%s'", errStr)
+	}
+
+	hasTool := HasSuccessfulToolCall(convID)
+	if hasTool {
+		t.Error("Expected HasSuccessfulToolCall = false for failed Turn 2")
+	}
+}
+
 func TestSessionErrorCases(t *testing.T) {
 	// Test non-existent conversation ID
 	resp, errStr := ExtractResponseAndError("nonexistent-conv-id-999")
@@ -63,3 +99,4 @@ func TestSessionErrorCases(t *testing.T) {
 		t.Errorf("Expected empty diag log for nonexistent conv, got: %s", diag)
 	}
 }
+

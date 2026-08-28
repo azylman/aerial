@@ -111,44 +111,49 @@ func DumpSessionDiagnosticLogs(convID string) string {
 	return sb.String()
 }
 
-func ExtractResponseAndError(convID string) (string, string) {
+func getTargetDirs(convID string) []string {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		homeDir = "/root"
 	}
 
-	var targetDirs []string
 	if convID != "" {
-		targetDirs = append(targetDirs,
+		return []string{
 			filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain", convID),
 			filepath.Join(homeDir, ".gemini", "antigravity", "brain", convID),
 			filepath.Join("/data", "brain", convID),
-		)
-	} else {
-		brainRoots := []string{
-			filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain"),
-			filepath.Join(homeDir, ".gemini", "antigravity", "brain"),
-			filepath.Join("/data", "brain"),
 		}
+	}
 
-		for _, root := range brainRoots {
-			if entries, err := os.ReadDir(root); err == nil {
-				var latestDir string
-				var latestTime time.Time
-				for _, entry := range entries {
-					if entry.IsDir() {
-						if info, err := entry.Info(); err == nil && info.ModTime().After(latestTime) {
-							latestTime = info.ModTime()
-							latestDir = filepath.Join(root, entry.Name())
-						}
+	brainRoots := []string{
+		filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain"),
+		filepath.Join(homeDir, ".gemini", "antigravity", "brain"),
+		filepath.Join("/data", "brain"),
+	}
+
+	var targetDirs []string
+	for _, root := range brainRoots {
+		if entries, err := os.ReadDir(root); err == nil {
+			var latestDir string
+			var latestTime time.Time
+			for _, entry := range entries {
+				if entry.IsDir() {
+					if info, err := entry.Info(); err == nil && info.ModTime().After(latestTime) {
+						latestTime = info.ModTime()
+						latestDir = filepath.Join(root, entry.Name())
 					}
 				}
-				if latestDir != "" {
-					targetDirs = append(targetDirs, latestDir)
-				}
+			}
+			if latestDir != "" {
+				targetDirs = append(targetDirs, latestDir)
 			}
 		}
 	}
+	return targetDirs
+}
+
+func ExtractResponseAndError(convID string) (string, string) {
+	targetDirs := getTargetDirs(convID)
 
 	var lastResponse string
 	var lastError string
@@ -162,7 +167,29 @@ func ExtractResponseAndError(convID string) (string, string) {
 			}
 
 			lines := strings.Split(string(data), "\n")
-			for i := len(lines) - 1; i >= 0; i-- {
+			lastUserInputIdx := -1
+			for i, rawLine := range lines {
+				line := strings.TrimSpace(rawLine)
+				if line == "" {
+					continue
+				}
+				var step struct {
+					Type string `json:"type"`
+				}
+				if err := json.Unmarshal([]byte(line), &step); err == nil {
+					if step.Type == "USER_INPUT" {
+						lastUserInputIdx = i
+					}
+				}
+			}
+
+			// Only search for responses and errors strictly AFTER the last USER_INPUT!
+			startIdx := 0
+			if lastUserInputIdx >= 0 {
+				startIdx = lastUserInputIdx + 1
+			}
+
+			for i := len(lines) - 1; i >= startIdx; i-- {
 				line := strings.TrimSpace(lines[i])
 				if line == "" {
 					continue
@@ -196,4 +223,57 @@ func ExtractResponseAndError(convID string) (string, string) {
 		}
 	}
 	return lastResponse, lastError
+}
+
+func HasSuccessfulToolCall(convID string) bool {
+	targetDirs := getTargetDirs(convID)
+
+	for _, dir := range targetDirs {
+		for _, name := range []string{"transcript_full.jsonl", "transcript.jsonl"} {
+			tPath := filepath.Join(dir, ".system_generated", "logs", name)
+			data, err := os.ReadFile(tPath)
+			if err != nil {
+				continue
+			}
+
+			lines := strings.Split(string(data), "\n")
+			lastUserInputIdx := -1
+			for i, rawLine := range lines {
+				line := strings.TrimSpace(rawLine)
+				if line == "" {
+					continue
+				}
+				var step struct {
+					Type string `json:"type"`
+				}
+				if err := json.Unmarshal([]byte(line), &step); err == nil {
+					if step.Type == "USER_INPUT" {
+						lastUserInputIdx = i
+					}
+				}
+			}
+
+			startIdx := 0
+			if lastUserInputIdx >= 0 {
+				startIdx = lastUserInputIdx + 1
+			}
+
+			for i := startIdx; i < len(lines); i++ {
+				line := strings.TrimSpace(lines[i])
+				if line == "" {
+					continue
+				}
+				var step struct {
+					Type   string `json:"type"`
+					Status string `json:"status"`
+				}
+				if err := json.Unmarshal([]byte(line), &step); err == nil {
+					if step.Status == "DONE" && (step.Type == "MCP_TOOL" || step.Type == "RUN_COMMAND" || step.Type == "CODE_ACTION" || step.Type == "WRITE_TO_FILE") {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
 }

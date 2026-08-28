@@ -127,6 +127,44 @@ func isFunnelBotTargeted(s *discordgo.Session, m *discordgo.MessageCreate) bool 
 	return false
 }
 
+var (
+	globalDiscordSession *discordgo.Session
+	globalDiscordMu      sync.RWMutex
+)
+
+func setGlobalDiscordSession(s *discordgo.Session) {
+	globalDiscordMu.Lock()
+	defer globalDiscordMu.Unlock()
+	globalDiscordSession = s
+}
+
+func getGlobalDiscordSession() *discordgo.Session {
+	globalDiscordMu.RLock()
+	defer globalDiscordMu.RUnlock()
+	return globalDiscordSession
+}
+
+func sendFallbackDiscordError(channelOrThreadID string, errorDetail string) {
+	s := getGlobalDiscordSession()
+	if s == nil || channelOrThreadID == "" {
+		return
+	}
+	isSnowflake := len(channelOrThreadID) >= 17 && regexp.MustCompile(`^[0-9]+$`).MatchString(channelOrThreadID)
+	if !isSnowflake {
+		return
+	}
+	msg := "I'm so sorry, darling! ? I ran into a temporary hiccup with the AI service. Please try sending your message again in just a moment! ??"
+	if strings.Contains(strings.ToLower(errorDetail), "error 503") || strings.Contains(strings.ToLower(errorDetail), "unavailable") {
+		msg = "I'm so sorry, darling! ? The AI model is currently experiencing high demand (Error 503). Please try sending your message again in a minute! ??"
+	}
+	_, err := s.ChannelMessageSend(channelOrThreadID, msg)
+	if err != nil {
+		log.Printf("Failed to send fallback error message to Discord channel %s: %v", channelOrThreadID, err)
+	} else {
+		log.Printf("Sent fallback error notification to Discord channel %s", channelOrThreadID)
+	}
+}
+
 func startDiscordFunnel(database *sql.DB, agyBin, apiKey, model, systemPrompt string, timeoutMinutes int, mcpConfig json.RawMessage) {
 	token := config.GetEnv("DISCORD_TOKEN", config.GetEnv("DISCORD_BOT_TOKEN", ""))
 	if token == "" {
@@ -141,6 +179,7 @@ func startDiscordFunnel(database *sql.DB, agyBin, apiKey, model, systemPrompt st
 		log.Printf("Discord funnel failed to create session: %v", err)
 		return
 	}
+	setGlobalDiscordSession(dg)
 
 	dg.AddHandler(func(s *discordgo.Session, r *discordgo.Ready) {
 		log.Printf("Discord funnel gateway session ready as %s#%s (user ID %s)", r.User.Username, r.User.Discriminator, r.User.ID)
