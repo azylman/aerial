@@ -201,7 +201,7 @@ func TestPhase3CrashRecoveryQuery(t *testing.T) {
 	_ = SaveConversationMapping(database, "thread-1", "conv-1")
 	_ = SaveConversationMapping(database, "thread-2", "conv-2")
 
-	_ = SetTurnProcessing(database, "thread-2", true, "msg-interrupted-123")
+	_ = RegisterTurn(database, "thread-2", "msg-interrupted-123", "User requested prompt test")
 
 	interrupted, err := GetInterruptedTurns(database)
 	if err != nil {
@@ -211,7 +211,7 @@ func TestPhase3CrashRecoveryQuery(t *testing.T) {
 		t.Fatalf("Expected 1 interrupted turn, got: %d", len(interrupted))
 	}
 
-	if interrupted[0].ExternalID != "thread-2" || interrupted[0].LastMessageID != "msg-interrupted-123" {
+	if interrupted[0].ExternalID != "thread-2" || interrupted[0].LastMessageID != "msg-interrupted-123" || interrupted[0].LastPrompt != "User requested prompt test" {
 		t.Errorf("Unexpected interrupted turn state: %+v", interrupted[0])
 	}
 

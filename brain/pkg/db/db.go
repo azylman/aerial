@@ -36,6 +36,7 @@ func InitDB(dbPath string) (*sql.DB, error) {
 		internal_id TEXT NOT NULL,
 		is_processing BOOLEAN NOT NULL DEFAULT FALSE,
 		last_message_id TEXT NOT NULL DEFAULT '',
+		last_prompt TEXT NOT NULL DEFAULT '',
 		created_at DATETIME NOT NULL,
 		updated_at DATETIME NOT NULL
 	);
@@ -68,6 +69,7 @@ func InitDB(dbPath string) (*sql.DB, error) {
 	migrations := []string{
 		"ALTER TABLE conversations ADD COLUMN is_processing BOOLEAN NOT NULL DEFAULT FALSE;",
 		"ALTER TABLE conversations ADD COLUMN last_message_id TEXT NOT NULL DEFAULT '';",
+		"ALTER TABLE conversations ADD COLUMN last_prompt TEXT NOT NULL DEFAULT '';",
 	}
 	for _, m := range migrations {
 		_, _ = database.Exec(m)
@@ -127,7 +129,29 @@ type ConversationTurnState struct {
 	InternalID    string
 	IsProcessing  bool
 	LastMessageID string
+	LastPrompt    string
 	UpdatedAt     time.Time
+}
+
+func RegisterTurn(database *sql.DB, externalID, messageID, prompt string) error {
+	if database == nil || externalID == "" {
+		return nil
+	}
+	now := time.Now().UTC()
+	query := `
+	INSERT INTO conversations (external_id, internal_id, is_processing, last_message_id, last_prompt, created_at, updated_at)
+	VALUES (?, '', TRUE, ?, ?, ?, ?)
+	ON CONFLICT(external_id) DO UPDATE SET
+		is_processing = TRUE,
+		last_message_id = excluded.last_message_id,
+		last_prompt = excluded.last_prompt,
+		updated_at = excluded.updated_at
+	`
+	_, err := database.Exec(query, externalID, messageID, prompt, now, now)
+	if err != nil {
+		log.Printf("Failed to register turn for %s: %v", externalID, err)
+	}
+	return err
 }
 
 func SetTurnProcessing(database *sql.DB, externalID string, isProcessing bool, lastMessageID string) error {
@@ -164,11 +188,11 @@ func GetTurnState(database *sql.DB, externalID string) (*ConversationTurnState, 
 	}
 	var state ConversationTurnState
 	query := `
-	SELECT external_id, internal_id, is_processing, last_message_id, updated_at
+	SELECT external_id, internal_id, is_processing, last_message_id, last_prompt, updated_at
 	FROM conversations
 	WHERE external_id = ?
 	`
-	err := database.QueryRow(query, externalID).Scan(&state.ExternalID, &state.InternalID, &state.IsProcessing, &state.LastMessageID, &state.UpdatedAt)
+	err := database.QueryRow(query, externalID).Scan(&state.ExternalID, &state.InternalID, &state.IsProcessing, &state.LastMessageID, &state.LastPrompt, &state.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -183,7 +207,7 @@ func GetInterruptedTurns(database *sql.DB) ([]ConversationTurnState, error) {
 		return nil, nil
 	}
 	query := `
-	SELECT external_id, internal_id, is_processing, last_message_id, updated_at
+	SELECT external_id, internal_id, is_processing, last_message_id, last_prompt, updated_at
 	FROM conversations
 	WHERE is_processing = TRUE
 	`
@@ -196,7 +220,7 @@ func GetInterruptedTurns(database *sql.DB) ([]ConversationTurnState, error) {
 	var results []ConversationTurnState
 	for rows.Next() {
 		var state ConversationTurnState
-		if err := rows.Scan(&state.ExternalID, &state.InternalID, &state.IsProcessing, &state.LastMessageID, &state.UpdatedAt); err != nil {
+		if err := rows.Scan(&state.ExternalID, &state.InternalID, &state.IsProcessing, &state.LastMessageID, &state.LastPrompt, &state.UpdatedAt); err != nil {
 			return nil, err
 		}
 		results = append(results, state)
