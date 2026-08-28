@@ -24,8 +24,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     docker-compose-v2 \
     && rm -rf /var/lib/apt/lists/*
 
-# Install official Antigravity CLI binary
-RUN curl -fsSL https://antigravity.google/cli/install.sh | bash -s -- -d /usr/local/bin
+# Install official Antigravity CLI binary and superpowers plugin
+RUN curl -fsSL https://antigravity.google/cli/install.sh | bash -s -- -d /usr/local/bin && \
+    agy plugin install https://github.com/obra/superpowers
 
 WORKDIR /app
 
