@@ -27,19 +27,19 @@ func TestFunnelHelpers(t *testing.T) {
 		},
 	}
 
-	convID, isThread := getFunnelConversationID(s, dmMsg)
-	if convID != "chan-dm" || isThread {
-		t.Errorf("Expected DM conversation ID 'chan-dm' and false, got: %s, %t", convID, isThread)
+	title := deriveThreadTitle("<@1542035925603713086> Write a python script for Home Assistant")
+	if title != "Write a python script for Home Assistant" {
+		t.Errorf("Expected title 'Write a python script for Home Assistant', got: %q", title)
 	}
 
-	prompt := buildDiscordPrompt(dmMsg, false)
+	targetThreadID, isThread := getOrCreateThreadID(s, dmMsg)
+	if targetThreadID != "chan-dm" || isThread {
+		t.Errorf("Expected DM targetThreadID 'chan-dm' and false, got: %s, %t", targetThreadID, isThread)
+	}
+
+	prompt := buildDiscordPrompt(dmMsg, "thread-12345")
 	if prompt == "" {
-		t.Errorf("Expected non-empty prompt for DM message")
-	}
-
-	promptThread := buildDiscordPrompt(dmMsg, true)
-	if promptThread == "" {
-		t.Errorf("Expected non-empty prompt for thread message")
+		t.Errorf("Expected non-empty prompt for message")
 	}
 
 	mCreate := &discordgo.MessageCreate{Message: dmMsg}
@@ -56,19 +56,19 @@ func TestRecoverStartupInterruptedTurns(t *testing.T) {
 	defer func() { _ = database.Close() }()
 
 	// Case 1: Clean DB (0 interrupted turns)
-	recoverStartupInterruptedTurns(database)
+	recoverStartupInterruptedTurns(database, "agy", "key", "model", "prompt", 15, nil)
 
-	// Case 2: Interrupted turn present
+	// Case 2: Interrupted turn present (without prompt payload, unlocks)
 	_ = db.SaveConversationMapping(database, "thread-interrupted", "conv-int")
 	_ = db.SetTurnProcessing(database, "thread-interrupted", true, "msg-100")
 
-	recoverStartupInterruptedTurns(database)
+	recoverStartupInterruptedTurns(database, "agy", "key", "model", "prompt", 15, nil)
 
 	state, err := db.GetTurnState(database, "thread-interrupted")
 	if err != nil || state == nil {
 		t.Fatalf("Failed to retrieve turn state: %v", err)
 	}
 	if state.IsProcessing {
-		t.Errorf("Expected IsProcessing to be false after startup recovery, got true")
+		t.Errorf("Expected IsProcessing to be false after startup recovery without prompt, got true")
 	}
 }

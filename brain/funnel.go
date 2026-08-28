@@ -6,15 +6,36 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/azylman/aerial/brain/pkg/config"
+	"github.com/azylman/aerial/brain/pkg/db"
 	"github.com/bwmarrin/discordgo"
 )
 
-func getFunnelConversationID(s *discordgo.Session, m *discordgo.Message) (string, bool) {
+func deriveThreadTitle(content string) string {
+	re := regexp.MustCompile(`<@!?[0-9]+>`)
+	cleaned := re.ReplaceAllString(content, "")
+	cleaned = strings.TrimSpace(cleaned)
+	lines := strings.Split(cleaned, "\n")
+	firstLine := strings.TrimSpace(lines[0])
+	if firstLine == "" && len(lines) > 1 {
+		firstLine = strings.TrimSpace(lines[1])
+	}
+	if firstLine == "" {
+		firstLine = "Aerial Discussion"
+	}
+	runes := []rune(firstLine)
+	if len(runes) > 60 {
+		return string(runes[:57]) + "..."
+	}
+	return string(runes)
+}
+
+func getOrCreateThreadID(s *discordgo.Session, m *discordgo.Message) (string, bool) {
 	if m.GuildID == "" {
 		return m.ChannelID, false
 	}
@@ -24,14 +45,23 @@ func getFunnelConversationID(s *discordgo.Session, m *discordgo.Message) (string
 	if ch, err := s.Channel(m.ChannelID); err == nil && ch != nil && ch.IsThread() {
 		return m.ChannelID, true
 	}
-	return m.ID, false
+
+	title := deriveThreadTitle(m.Content)
+	thread, err := s.MessageThreadStart(m.ChannelID, m.ID, title, 1440)
+	if err != nil {
+		log.Printf("Failed to create Discord thread for message %s (channel %s): %v", m.ID, m.ChannelID, err)
+		return m.ChannelID, false
+	}
+	log.Printf("Created new Discord thread %q (ID: %s) for message %s in channel %s", title, thread.ID, m.ID, m.ChannelID)
+	return thread.ID, true
 }
 
-func buildDiscordPrompt(m *discordgo.Message, isThread bool) string {
+func buildDiscordPrompt(m *discordgo.Message, targetThreadID string) string {
 	var sb strings.Builder
 	sb.WriteString("<USER_REQUEST>\nHere's a message someone sent you from Discord:\n\n")
 	sb.WriteString(fmt.Sprintf("- id: %s\n", m.ID))
 	sb.WriteString(fmt.Sprintf("- channel_id: %s\n", m.ChannelID))
+	sb.WriteString(fmt.Sprintf("- thread_id: %s\n", targetThreadID))
 	sb.WriteString(fmt.Sprintf("- guild_id: %s\n", m.GuildID))
 	if m.Author != nil {
 		sb.WriteString(fmt.Sprintf("- author_id: %s\n", m.Author.ID))
@@ -59,11 +89,7 @@ func buildDiscordPrompt(m *discordgo.Message, isThread bool) string {
 	sb.WriteString(fmt.Sprintf("- attachments: %v\n\n", attachments))
 
 	sb.WriteString("CRITICAL REQUIREMENT: You MUST send your response back to Discord using the Discord MCP tool via `call_mcp_tool` with ServerName: \"discord\":\n")
-	if isThread {
-		sb.WriteString(fmt.Sprintf("1. This message is ALREADY inside a thread: Execute `call_mcp_tool` with ServerName: \"discord\", ToolName: \"discord_send\", and Arguments: {\"channelId\": %q, \"message\": \"<your response>\"}.\n", m.ChannelID))
-	} else {
-		sb.WriteString(fmt.Sprintf("1. This message is a new inquiry (NOT inside a thread): Execute `call_mcp_tool` with ServerName: \"discord\", ToolName: \"discord_create_thread\", and Arguments: {\"channelId\": %q, \"messageId\": %q, \"name\": \"<concise thread title>\", \"message\": \"<your response>\"}.\n", m.ChannelID, m.ID))
-	}
+	sb.WriteString(fmt.Sprintf("Execute `call_mcp_tool` with ServerName: \"discord\", ToolName: \"discord_send\", and Arguments: {\"channelId\": %q, \"message\": \"<your response>\"}.\n", targetThreadID))
 	sb.WriteString("Execute the tool call now.\n</USER_REQUEST>")
 	return sb.String()
 }
@@ -140,17 +166,19 @@ func startDiscordFunnel(database *sql.DB, agyBin, apiKey, model, systemPrompt st
 				return
 			}
 
-			convID, isThread := getFunnelConversationID(s, m.Message)
-			prompt := buildDiscordPrompt(m.Message, isThread)
+			targetThreadID, isThread := getOrCreateThreadID(s, m.Message)
+			prompt := buildDiscordPrompt(m.Message, targetThreadID)
+
+			_ = db.RegisterTurn(database, targetThreadID, m.ID, prompt)
 
 			req := PromptRequest{
-				ConversationID: convID,
+				ConversationID: targetThreadID,
 				Prompt:         prompt,
 				MessageID:      m.ID,
 			}
 
-			log.Printf("Discord funnel received message %s from %s (channel %s, is_thread: %t, conversation_id: %s)",
-				m.ID, m.Author.Username, m.ChannelID, isThread, convID)
+			log.Printf("Discord funnel received message %s from %s (channel %s, target_thread: %s, is_thread: %t)",
+				m.ID, m.Author.Username, m.ChannelID, targetThreadID, isThread)
 
 			stopTyping := make(chan struct{})
 			var once sync.Once
@@ -172,7 +200,7 @@ func startDiscordFunnel(database *sql.DB, agyBin, apiKey, model, systemPrompt st
 						return
 					}
 				}
-			}(m.ChannelID)
+			}(targetThreadID)
 
 			executePrompt(database, req, agyBin, apiKey, model, systemPrompt, timeoutMinutes, mcpConfig, onComplete)
 		})
