@@ -146,6 +146,7 @@ func startDiscordFunnel(database *sql.DB, agyBin, apiKey, model, systemPrompt st
 			req := PromptRequest{
 				ConversationID: convID,
 				Prompt:         prompt,
+				MessageID:      m.ID,
 			}
 
 			log.Printf("Discord funnel received message %s from %s (channel %s, is_thread: %t, conversation_id: %s)",
