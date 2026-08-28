@@ -248,7 +248,7 @@ func loadMCPConfig() json.RawMessage {
 					"serverUrl": "http://discord-mcp:4001/mcp",
 				},
 				"docker": map[string]interface{}{
-					"serverUrl": "http://docker-mcp:4002/mcp",
+					"serverUrl": "http://docker-mcp:4002/sse",
 				},
 			},
 		}
