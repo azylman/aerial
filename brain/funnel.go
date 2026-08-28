@@ -136,87 +136,80 @@ func startDiscordFunnel(database *sql.DB, agyBin, apiKey, model, systemPrompt st
 
 	mentionsOnly := os.Getenv("MENTIONS_ONLY") == "true"
 
+	dg, err := discordgo.New("Bot " + token)
+	if err != nil {
+		log.Printf("Discord funnel failed to create session: %v", err)
+		return
+	}
+
+	dg.AddHandler(func(s *discordgo.Session, r *discordgo.Ready) {
+		log.Printf("Discord funnel gateway session ready as %s#%s (user ID %s)", r.User.Username, r.User.Discriminator, r.User.ID)
+	})
+
+	dg.AddHandler(func(s *discordgo.Session, d *discordgo.Disconnect) {
+		log.Printf("Discord funnel disconnected from gateway (discordgo will reconnect automatically)")
+	})
+
+	dg.AddHandler(func(s *discordgo.Session, r *discordgo.Resumed) {
+		log.Printf("Discord funnel gateway connection resumed successfully")
+	})
+
+	dg.AddHandler(func(s *discordgo.Session, m *discordgo.MessageCreate) {
+		if m.Author == nil || (s.State.User != nil && m.Author.ID == s.State.User.ID) {
+			return
+		}
+
+		if mentionsOnly && !isFunnelBotTargeted(s, m) {
+			log.Printf("Discord funnel ignoring message %s from %s: no trigger matched", m.ID, m.Author.Username)
+			return
+		}
+
+		targetThreadID, isThread := getOrCreateThreadID(s, m.Message)
+		prompt := buildDiscordPrompt(m.Message, targetThreadID)
+
+		_ = db.RegisterTurn(database, targetThreadID, m.ID, prompt)
+
+		req := PromptRequest{
+			ConversationID: targetThreadID,
+			Prompt:         prompt,
+			MessageID:      m.ID,
+		}
+
+		log.Printf("Discord funnel received message %s from %s (channel %s, target_thread: %s, is_thread: %t)",
+			m.ID, m.Author.Username, m.ChannelID, targetThreadID, isThread)
+
+		stopTyping := make(chan struct{})
+		var once sync.Once
+		onComplete := func() {
+			once.Do(func() {
+				close(stopTyping)
+			})
+		}
+
+		go func(channelID string) {
+			_ = s.ChannelTyping(channelID)
+			ticker := time.NewTicker(5 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					_ = s.ChannelTyping(channelID)
+				case <-stopTyping:
+					return
+				}
+			}
+		}(targetThreadID)
+
+		executePrompt(database, req, agyBin, apiKey, model, systemPrompt, timeoutMinutes, mcpConfig, onComplete)
+	})
+
+	dg.Identify.Intents = discordgo.IntentsGuildMessages | discordgo.IntentsDirectMessages | discordgo.IntentMessageContent
+	dg.SyncEvents = false
+
 	backoff := 1 * time.Second
 	maxBackoff := 60 * time.Second
 
 	for {
-		dg, err := discordgo.New("Bot " + token)
-		if err != nil {
-			log.Printf("Discord funnel failed to create session: %v. Retrying in %v...", err, backoff)
-			time.Sleep(backoff)
-			backoff = backoff * 2
-			if backoff > maxBackoff {
-				backoff = maxBackoff
-			}
-			continue
-		}
-
-		dg.AddHandler(func(s *discordgo.Session, r *discordgo.Ready) {
-			log.Printf("Discord funnel gateway session ready as %s#%s (user ID %s)", r.User.Username, r.User.Discriminator, r.User.ID)
-			backoff = 1 * time.Second
-		})
-
-		dg.AddHandler(func(s *discordgo.Session, m *discordgo.MessageCreate) {
-			if m.Author == nil || (s.State.User != nil && m.Author.ID == s.State.User.ID) {
-				return
-			}
-
-			if mentionsOnly && !isFunnelBotTargeted(s, m) {
-				log.Printf("Discord funnel ignoring message %s from %s: no trigger matched", m.ID, m.Author.Username)
-				return
-			}
-
-			targetThreadID, isThread := getOrCreateThreadID(s, m.Message)
-			prompt := buildDiscordPrompt(m.Message, targetThreadID)
-
-			_ = db.RegisterTurn(database, targetThreadID, m.ID, prompt)
-
-			req := PromptRequest{
-				ConversationID: targetThreadID,
-				Prompt:         prompt,
-				MessageID:      m.ID,
-			}
-
-			log.Printf("Discord funnel received message %s from %s (channel %s, target_thread: %s, is_thread: %t)",
-				m.ID, m.Author.Username, m.ChannelID, targetThreadID, isThread)
-
-			stopTyping := make(chan struct{})
-			var once sync.Once
-			onComplete := func() {
-				once.Do(func() {
-					close(stopTyping)
-				})
-			}
-
-			go func(channelID string) {
-				_ = s.ChannelTyping(channelID)
-				ticker := time.NewTicker(5 * time.Second)
-				defer ticker.Stop()
-				for {
-					select {
-					case <-ticker.C:
-						_ = s.ChannelTyping(channelID)
-					case <-stopTyping:
-						return
-					}
-				}
-			}(targetThreadID)
-
-			executePrompt(database, req, agyBin, apiKey, model, systemPrompt, timeoutMinutes, mcpConfig, onComplete)
-		})
-
-		dg.Identify.Intents = discordgo.IntentsGuildMessages | discordgo.IntentsDirectMessages | discordgo.IntentMessageContent
-		dg.SyncEvents = false
-
-		disconnectCh := make(chan struct{}, 1)
-		dg.AddHandler(func(s *discordgo.Session, d *discordgo.Disconnect) {
-			log.Printf("Discord funnel disconnected from gateway. Reconnecting...")
-			select {
-			case disconnectCh <- struct{}{}:
-			default:
-			}
-		})
-
 		if err := dg.Open(); err != nil {
 			log.Printf("Discord funnel failed to open session: %v. Retrying in %v...", err, backoff)
 			time.Sleep(backoff)
@@ -226,16 +219,7 @@ func startDiscordFunnel(database *sql.DB, agyBin, apiKey, model, systemPrompt st
 			}
 			continue
 		}
-
 		log.Printf("Discord funnel worker started successfully inside Brain")
-		<-disconnectCh
-		_ = dg.Close()
-
-		log.Printf("Discord funnel session closed. Attempting reconnect in %v...", backoff)
-		time.Sleep(backoff)
-		backoff = backoff * 2
-		if backoff > maxBackoff {
-			backoff = maxBackoff
-		}
+		break
 	}
 }
