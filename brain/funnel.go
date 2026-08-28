@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/bwmarrin/discordgo"
 )
 
@@ -23,11 +24,6 @@ func getFunnelConversationID(s *discordgo.Session, m *discordgo.Message) (string
 	if ch, err := s.Channel(m.ChannelID); err == nil && ch != nil && ch.IsThread() {
 		return m.ChannelID, true
 	}
-	// Root message in guild text channel:
-	// When Aerial replies by creating a thread from this root message,
-	// Discord will assign Thread ID = m.ID.
-	// Keying the conversation by m.ID ensures that when the user replies in the thread,
-	// the thread's ID (m.ID) will match this exact conversation session!
 	return m.ID, false
 }
 
@@ -105,8 +101,8 @@ func isFunnelBotTargeted(s *discordgo.Session, m *discordgo.MessageCreate) bool 
 	return false
 }
 
-func startDiscordFunnel(db *sql.DB, agyBin, apiKey, model, systemPrompt string, timeoutMinutes int, mcpConfig json.RawMessage) {
-	token := getEnv("DISCORD_TOKEN", getEnv("DISCORD_BOT_TOKEN", ""))
+func startDiscordFunnel(database *sql.DB, agyBin, apiKey, model, systemPrompt string, timeoutMinutes int, mcpConfig json.RawMessage) {
+	token := config.GetEnv("DISCORD_TOKEN", config.GetEnv("DISCORD_BOT_TOKEN", ""))
 	if token == "" {
 		log.Println("Discord funnel disabled: DISCORD_BOT_TOKEN/DISCORD_TOKEN not configured")
 		return
@@ -144,7 +140,6 @@ func startDiscordFunnel(db *sql.DB, agyBin, apiKey, model, systemPrompt string, 
 		log.Printf("Discord funnel received message %s from %s (channel %s, is_thread: %t, conversation_id: %s)",
 			m.ID, m.Author.Username, m.ChannelID, isThread, convID)
 
-		// Start continuous typing indicator ticker until agent completion
 		stopTyping := make(chan struct{})
 		var once sync.Once
 		onComplete := func() {
@@ -167,7 +162,7 @@ func startDiscordFunnel(db *sql.DB, agyBin, apiKey, model, systemPrompt string, 
 			}
 		}(m.ChannelID)
 
-		executePrompt(db, req, agyBin, apiKey, model, systemPrompt, timeoutMinutes, mcpConfig, onComplete)
+		executePrompt(database, req, agyBin, apiKey, model, systemPrompt, timeoutMinutes, mcpConfig, onComplete)
 	})
 
 	dg.Identify.Intents = discordgo.IntentsGuildMessages | discordgo.IntentsDirectMessages | discordgo.IntentMessageContent

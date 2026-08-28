@@ -1,0 +1,234 @@
+package config
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+)
+
+type Options struct {
+	Port           int             `json:"port"`
+	AgyBin         string          `json:"agy_bin"`
+	ApiKey         string          `json:"api_key"`
+	Model          string          `json:"model"`
+	SystemPrompt   string          `json:"system_prompt"`
+	TimeoutMinutes int             `json:"timeout_minutes"`
+	McpConfig      json.RawMessage `json:"mcp_config"`
+}
+
+func GetEnv(key, defaultVal string) string {
+	if val := os.Getenv(key); val != "" {
+		return val
+	}
+	return defaultVal
+}
+
+func EnsureAgySettings(apiKey, model string) {
+	if apiKey == "" {
+		return
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		homeDir = "/root"
+	}
+	configDir := filepath.Join(homeDir, ".gemini", "antigravity-cli")
+	_ = os.MkdirAll(configDir, 0755)
+
+	settingsPath := filepath.Join(configDir, "settings.json")
+	settings := map[string]interface{}{
+		"modelProvider": "gemini",
+		"model":         model,
+	}
+	if data, err := os.ReadFile(settingsPath); err == nil {
+		_ = json.Unmarshal(data, &settings)
+		settings["modelProvider"] = "gemini"
+		if model != "" {
+			settings["model"] = model
+		}
+	}
+	if out, err := json.MarshalIndent(settings, "", "  "); err == nil {
+		_ = os.WriteFile(settingsPath, out, 0644)
+	}
+}
+
+func EnsureSystemRules(customPrompt string) {
+	if strings.TrimSpace(customPrompt) == "" {
+		return
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		homeDir = "/root"
+	}
+	rulesDir := filepath.Join(homeDir, ".gemini", "rules")
+	_ = os.MkdirAll(rulesDir, 0755)
+
+	overrideContent := "# User Custom Instructions\n" + strings.TrimSpace(customPrompt) + "\n"
+	ruleFile := filepath.Join(rulesDir, "user_override.md")
+	_ = os.WriteFile(ruleFile, []byte(overrideContent), 0644)
+	log.Printf("Configured custom user rules in %s", ruleFile)
+}
+
+func LoadMCPConfig() json.RawMessage {
+	configPaths := []string{
+		"/config/mcp.config.json",
+		"/config/mcp.json",
+		"/data/mcp.config.json",
+		"./mcp.config.json",
+	}
+
+	var rawBytes []byte
+	for _, p := range configPaths {
+		if data, err := os.ReadFile(p); err == nil && len(bytes.TrimSpace(data)) > 0 {
+			log.Printf("Loaded MCP configuration from %s", p)
+			rawBytes = data
+			break
+		}
+	}
+
+	if len(rawBytes) == 0 {
+		if envVal := os.Getenv("MCP_CONFIG"); envVal != "" {
+			rawBytes = []byte(envVal)
+		}
+	}
+
+	if len(rawBytes) == 0 {
+		if data, err := os.ReadFile("/data/options.json"); err == nil {
+			var opts Options
+			if err := json.Unmarshal(data, &opts); err == nil && len(opts.McpConfig) > 0 {
+				var strVal string
+				if err := json.Unmarshal(opts.McpConfig, &strVal); err == nil && strVal != "" {
+					rawBytes = []byte(strVal)
+				} else {
+					rawBytes = opts.McpConfig
+				}
+			}
+		}
+	}
+
+	if len(rawBytes) == 0 {
+		defaultConfig := map[string]interface{}{
+			"mcpServers": map[string]interface{}{
+				"discord": map[string]interface{}{
+					"serverUrl": "http://discord-mcp:4001/mcp",
+				},
+				"docker": map[string]interface{}{
+					"serverUrl": "http://docker-mcp:4002/sse",
+				},
+			},
+		}
+		mcpServers := defaultConfig["mcpServers"].(map[string]interface{})
+		if pat := os.Getenv("GITHUB_PAT"); pat != "" {
+			mcpServers["github"] = map[string]interface{}{
+				"serverUrl": "http://github-mcp:4003/sse",
+			}
+		}
+		if haToken := os.Getenv("HA_TOKEN"); haToken != "" {
+			mcpServers["ha-mcp"] = map[string]interface{}{
+				"serverUrl": haToken,
+			}
+		}
+		b, _ := json.Marshal(defaultConfig)
+		rawBytes = b
+	}
+
+	expanded := os.ExpandEnv(string(rawBytes))
+	return json.RawMessage(expanded)
+}
+
+func EnsureMcpConfig(rawConfig json.RawMessage) {
+	if len(rawConfig) == 0 {
+		return
+	}
+	trimmed := strings.TrimSpace(string(rawConfig))
+	if trimmed == "" || trimmed == `""` || trimmed == "null" {
+		return
+	}
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		homeDir = "/root"
+	}
+	configDir := filepath.Join(homeDir, ".gemini", "config")
+	_ = os.MkdirAll(configDir, 0755)
+	targetPath := filepath.Join(configDir, "mcp_config.json")
+
+	var configContent []byte
+	var strVal string
+	if err := json.Unmarshal(rawConfig, &strVal); err == nil && strVal != "" {
+		configContent = []byte(strVal)
+	} else {
+		configContent = rawConfig
+	}
+
+	var js map[string]interface{}
+	var serverList []string
+	if err := json.Unmarshal(configContent, &js); err == nil {
+		if servers, ok := js["mcpServers"].(map[string]interface{}); ok {
+			for name := range servers {
+				serverList = append(serverList, name)
+			}
+		}
+		if formatted, err := json.MarshalIndent(js, "", "  "); err == nil {
+			configContent = formatted
+		}
+	}
+
+	if err := os.WriteFile(targetPath, configContent, 0644); err != nil {
+		log.Printf("Failed to write %s: %v", targetPath, err)
+	} else {
+		log.Printf("Configured %d MCP server(s) in %s: %v", len(serverList), targetPath, serverList)
+	}
+}
+
+func LoadConfig() (string, string, string, string, string, int, json.RawMessage) {
+	port := GetEnv("PORT", "8080")
+	agyBin := GetEnv("AGY_BIN", "agy")
+	apiKey := GetEnv("GEMINI_API_KEY", GetEnv("ANTIGRAVITY_API_KEY", ""))
+	model := GetEnv("AGY_MODEL", "Gemini 3.6 Flash (Low)")
+	systemPrompt := GetEnv("SYSTEM_PROMPT", "")
+	timeoutMinutes := 15
+	if tm := os.Getenv("TIMEOUT_MINUTES"); tm != "" {
+		if val, err := strconv.Atoi(tm); err == nil && val > 0 {
+			timeoutMinutes = val
+		}
+	}
+	var mcpConfig json.RawMessage
+
+	if data, err := os.ReadFile("/data/options.json"); err == nil {
+		var opts Options
+		if err := json.Unmarshal(data, &opts); err == nil {
+			if opts.Port != 0 {
+				port = fmt.Sprintf("%d", opts.Port)
+			}
+			if strings.TrimSpace(opts.AgyBin) != "" {
+				agyBin = opts.AgyBin
+			}
+			if strings.TrimSpace(opts.ApiKey) != "" {
+				apiKey = opts.ApiKey
+			}
+			if strings.TrimSpace(opts.Model) != "" {
+				model = opts.Model
+			}
+			if strings.TrimSpace(opts.SystemPrompt) != "" {
+				systemPrompt = opts.SystemPrompt
+			}
+			if opts.TimeoutMinutes > 0 {
+				timeoutMinutes = opts.TimeoutMinutes
+			}
+			if len(opts.McpConfig) > 0 {
+				mcpConfig = opts.McpConfig
+			}
+		}
+	}
+
+	if len(mcpConfig) == 0 {
+		mcpConfig = LoadMCPConfig()
+	}
+
+	return port, agyBin, apiKey, model, systemPrompt, timeoutMinutes, mcpConfig
+}

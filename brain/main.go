@@ -13,10 +13,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
+	"github.com/azylman/aerial/brain/pkg/config"
+	"github.com/azylman/aerial/brain/pkg/db"
+	"github.com/azylman/aerial/brain/pkg/session"
+	"github.com/azylman/aerial/brain/pkg/skills"
 	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
 )
@@ -26,625 +29,14 @@ type PromptRequest struct {
 	ConversationID string `json:"conversation_id"`
 }
 
-type Options struct {
-	Port           int             `json:"port"`
-	AgyBin         string          `json:"agy_bin"`
-	ApiKey         string          `json:"api_key"`
-	Model          string          `json:"model"`
-	SystemPrompt   string          `json:"system_prompt"`
-	TimeoutMinutes int             `json:"timeout_minutes"`
-	McpConfig      json.RawMessage `json:"mcp_config"`
-}
-
-func getEnv(key, defaultVal string) string {
-	if val := os.Getenv(key); val != "" {
-		return val
-	}
-	return defaultVal
-}
-
-func getDBPath() string {
-	if _, err := os.Stat("/data"); err == nil {
-		return "/data/aerial.db"
-	}
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return "./aerial.db"
-	}
-	return filepath.Join(homeDir, ".gemini", "aerial.db")
-}
-
-func initDB(dbPath string) (*sql.DB, error) {
-	_ = os.MkdirAll(filepath.Dir(dbPath), 0755)
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		return nil, err
-	}
-	schema := `
-	CREATE TABLE IF NOT EXISTS conversations (
-		external_id TEXT PRIMARY KEY,
-		internal_id TEXT NOT NULL,
-		created_at DATETIME NOT NULL,
-		updated_at DATETIME NOT NULL
-	);
-	CREATE INDEX IF NOT EXISTS idx_conversations_internal_id ON conversations(internal_id);
-	`
-	if _, err := db.Exec(schema); err != nil {
-		return nil, err
-	}
-	log.Printf("SQLite conversation database initialized at %s", dbPath)
-	return db, nil
-}
-
-func getInternalConversationID(db *sql.DB, externalID string) (string, error) {
-	if db == nil || externalID == "" {
-		return "", nil
-	}
-	var internalID string
-	err := db.QueryRow("SELECT internal_id FROM conversations WHERE external_id = ?", externalID).Scan(&internalID)
-	if err == sql.ErrNoRows {
-		return "", nil
-	}
-	return internalID, err
-}
-
-func getExternalConversationID(db *sql.DB, internalID string) (string, error) {
-	if db == nil || internalID == "" {
-		return "", nil
-	}
-	var externalID string
-	err := db.QueryRow("SELECT external_id FROM conversations WHERE internal_id = ?", internalID).Scan(&externalID)
-	if err == sql.ErrNoRows {
-		return "", nil
-	}
-	return externalID, err
-}
-
-func saveConversationMapping(db *sql.DB, externalID, internalID string) error {
-	if db == nil || externalID == "" || internalID == "" {
-		return nil
-	}
-	now := time.Now().UTC()
-	query := `
-	INSERT INTO conversations (external_id, internal_id, created_at, updated_at)
-	VALUES (?, ?, ?, ?)
-	ON CONFLICT(external_id) DO UPDATE SET
-		internal_id = excluded.internal_id,
-		updated_at = excluded.updated_at
-	`
-	_, err := db.Exec(query, externalID, internalID, now, now)
-	if err != nil {
-		log.Printf("Failed to save conversation mapping (%s -> %s): %v", externalID, internalID, err)
-	} else {
-		log.Printf("Saved conversation mapping: %s -> %s", externalID, internalID)
-	}
-	return err
-}
-
-func findLatestSessionDir(after time.Time) string {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		homeDir = "/root"
-	}
-	roots := []string{
-		"/data/brain",
-		filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain"),
-		filepath.Join(homeDir, ".gemini", "antigravity", "brain"),
-	}
-	var newestID string
-	var newestTime time.Time
-	for _, root := range roots {
-		entries, err := os.ReadDir(root)
-		if err != nil {
-			continue
-		}
-		for _, entry := range entries {
-			if !entry.IsDir() {
-				continue
-			}
-			info, err := entry.Info()
-			if err != nil {
-				continue
-			}
-			if info.ModTime().After(after) && info.ModTime().After(newestTime) {
-				newestTime = info.ModTime()
-				newestID = entry.Name()
-			}
-		}
-	}
-	return newestID
-}
-
-func ensureAgySettings(apiKey, model string) {
-	if apiKey == "" {
-		return
-	}
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		homeDir = "/root"
-	}
-	configDir := filepath.Join(homeDir, ".gemini", "antigravity-cli")
-	_ = os.MkdirAll(configDir, 0755)
-
-	settingsPath := filepath.Join(configDir, "settings.json")
-	settings := map[string]interface{}{
-		"modelProvider": "gemini",
-		"model":         model,
-	}
-	if data, err := os.ReadFile(settingsPath); err == nil {
-		_ = json.Unmarshal(data, &settings)
-		settings["modelProvider"] = "gemini"
-		if model != "" {
-			settings["model"] = model
-		}
-	}
-	if out, err := json.MarshalIndent(settings, "", "  "); err == nil {
-		_ = os.WriteFile(settingsPath, out, 0644)
-	}
-}
-
-func ensureSystemRules(customPrompt string) {
-	if strings.TrimSpace(customPrompt) == "" {
-		return
-	}
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		homeDir = "/root"
-	}
-	rulesDir := filepath.Join(homeDir, ".gemini", "rules")
-	_ = os.MkdirAll(rulesDir, 0755)
-
-	overrideContent := "# User Custom Instructions\n" + strings.TrimSpace(customPrompt) + "\n"
-	ruleFile := filepath.Join(rulesDir, "user_override.md")
-	_ = os.WriteFile(ruleFile, []byte(overrideContent), 0644)
-	log.Printf("Configured custom user rules in %s", ruleFile)
-}
-
-type SkillInfo struct {
-	Name        string
-	Description string
-	Path        string
-}
-
-func parseSkillFrontmatter(skillPath string) (SkillInfo, error) {
-	skillFile := filepath.Join(skillPath, "SKILL.md")
-	data, err := os.ReadFile(skillFile)
-	if err != nil {
-		return SkillInfo{}, err
-	}
-	info := SkillInfo{
-		Name:        filepath.Base(skillPath),
-		Path:        skillFile,
-		Description: "Specialized operational procedure guide.",
-	}
-	content := string(data)
-	if strings.HasPrefix(content, "---") {
-		parts := strings.SplitN(content, "---", 3)
-		if len(parts) >= 3 {
-			lines := strings.Split(parts[1], "\n")
-			for _, line := range lines {
-				line = strings.TrimSpace(line)
-				if strings.HasPrefix(line, "name:") {
-					info.Name = strings.TrimSpace(strings.TrimPrefix(line, "name:"))
-				} else if strings.HasPrefix(line, "description:") {
-					info.Description = strings.TrimSpace(strings.TrimPrefix(line, "description:"))
-				}
-			}
-		}
-	}
-	return info, nil
-}
-
-func ensureSkills() {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		homeDir = "/root"
-	}
-	rulesDir := filepath.Join(homeDir, ".gemini", "rules")
-	_ = os.MkdirAll(rulesDir, 0755)
-
-	globalSkillsDir := filepath.Join(homeDir, ".gemini", "config", "skills")
-	_ = os.MkdirAll(globalSkillsDir, 0755)
-	builtinSkillsDir := filepath.Join(homeDir, ".gemini", "antigravity-cli", "builtin", "skills")
-	_ = os.MkdirAll(builtinSkillsDir, 0755)
-
-	searchPaths := []string{
-		"/app/.agents/skills",
-		"/share/aerial/.agents/skills",
-		"/data/skills",
-		"/config/skills",
-		"./skills",
-		"/app/skills",
-	}
-
-	discoveredSkills := make(map[string]SkillInfo)
-	for _, p := range searchPaths {
-		entries, err := os.ReadDir(p)
-		if err != nil {
-			continue
-		}
-		for _, entry := range entries {
-			if !entry.IsDir() {
-				continue
-			}
-			skillDir := filepath.Join(p, entry.Name())
-			if info, err := parseSkillFrontmatter(skillDir); err == nil {
-				discoveredSkills[info.Name] = info
-				_ = os.Remove(filepath.Join(globalSkillsDir, entry.Name()))
-				_ = os.Symlink(skillDir, filepath.Join(globalSkillsDir, entry.Name()))
-				_ = os.Remove(filepath.Join(builtinSkillsDir, entry.Name()))
-				_ = os.Symlink(skillDir, filepath.Join(builtinSkillsDir, entry.Name()))
-			}
-		}
-	}
-
-	var sb strings.Builder
-	sb.WriteString("# Available Skills & Operational Runbooks\n\n")
-	sb.WriteString("You have access to specialized operational skills. If a task or query matches a skill's description, you MUST view its `SKILL.md` using `view_file` before proceeding:\n\n")
-	for name, info := range discoveredSkills {
-		sb.WriteString(fmt.Sprintf("- **%s** ([%s](file://%s)): %s\n", name, filepath.Base(info.Path), info.Path, info.Description))
-	}
-
-	ruleFile := filepath.Join(rulesDir, "skills_manifest.md")
-	_ = os.WriteFile(ruleFile, []byte(sb.String()), 0644)
-
-	var names []string
-	for n := range discoveredSkills {
-		names = append(names, n)
-	}
-	log.Printf("Discovered and registered %d skill(s) into system rules: %v", len(discoveredSkills), names)
-}
-
-func loadMCPConfig() json.RawMessage {
-	// 1. Check mounted / external config files
-	configPaths := []string{
-		"/config/mcp.config.json",
-		"/config/mcp.json",
-		"/data/mcp.config.json",
-		"./mcp.config.json",
-	}
-
-	var rawBytes []byte
-	for _, p := range configPaths {
-		if data, err := os.ReadFile(p); err == nil && len(bytes.TrimSpace(data)) > 0 {
-			log.Printf("Loaded MCP configuration from %s", p)
-			rawBytes = data
-			break
-		}
-	}
-
-	// 2. Check MCP_CONFIG environment variable if no file found
-	if len(rawBytes) == 0 {
-		if envVal := os.Getenv("MCP_CONFIG"); envVal != "" {
-			rawBytes = []byte(envVal)
-		}
-	}
-
-	// 3. Fallback to /data/options.json for Home Assistant add-on compatibility
-	if len(rawBytes) == 0 {
-		if data, err := os.ReadFile("/data/options.json"); err == nil {
-			var opts Options
-			if err := json.Unmarshal(data, &opts); err == nil && len(opts.McpConfig) > 0 {
-				var strVal string
-				if err := json.Unmarshal(opts.McpConfig, &strVal); err == nil && strVal != "" {
-					rawBytes = []byte(strVal)
-				} else {
-					rawBytes = opts.McpConfig
-				}
-			}
-		}
-	}
-
-	// 4. If still empty, construct default built-in configuration
-	if len(rawBytes) == 0 {
-		defaultConfig := map[string]interface{}{
-			"mcpServers": map[string]interface{}{
-				"discord": map[string]interface{}{
-					"serverUrl": "http://discord-mcp:4001/mcp",
-				},
-				"docker": map[string]interface{}{
-					"serverUrl": "http://docker-mcp:4002/sse",
-				},
-			},
-		}
-		mcpServers := defaultConfig["mcpServers"].(map[string]interface{})
-		if pat := os.Getenv("GITHUB_PAT"); pat != "" {
-			mcpServers["github"] = map[string]interface{}{
-				"serverUrl": "http://github-mcp:4003/sse",
-			}
-		}
-		if haToken := os.Getenv("HA_TOKEN"); haToken != "" {
-			mcpServers["ha-mcp"] = map[string]interface{}{
-				"serverUrl": haToken,
-			}
-		}
-		b, _ := json.Marshal(defaultConfig)
-		rawBytes = b
-	}
-
-	// 5. Expand all environment variables (${VAR_NAME}) in the JSON
-	expanded := os.ExpandEnv(string(rawBytes))
-	return json.RawMessage(expanded)
-}
-
-func ensureMcpConfig(rawConfig json.RawMessage) {
-	if len(rawConfig) == 0 {
-		return
-	}
-	trimmed := strings.TrimSpace(string(rawConfig))
-	if trimmed == "" || trimmed == `""` || trimmed == "null" {
-		return
-	}
-
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		homeDir = "/root"
-	}
-	configDir := filepath.Join(homeDir, ".gemini", "config")
-	_ = os.MkdirAll(configDir, 0755)
-	targetPath := filepath.Join(configDir, "mcp_config.json")
-
-	var configContent []byte
-	var strVal string
-	if err := json.Unmarshal(rawConfig, &strVal); err == nil && strVal != "" {
-		configContent = []byte(strVal)
-	} else {
-		configContent = rawConfig
-	}
-
-	var js map[string]interface{}
-	var serverList []string
-	if err := json.Unmarshal(configContent, &js); err == nil {
-		if servers, ok := js["mcpServers"].(map[string]interface{}); ok {
-			for name := range servers {
-				serverList = append(serverList, name)
-			}
-		}
-		if formatted, err := json.MarshalIndent(js, "", "  "); err == nil {
-			configContent = formatted
-		}
-	}
-
-	if err := os.WriteFile(targetPath, configContent, 0644); err != nil {
-		log.Printf("Failed to write %s: %v", targetPath, err)
-	} else {
-		log.Printf("Configured %d MCP server(s) in %s: %v", len(serverList), targetPath, serverList)
-	}
-}
-
-func dumpSessionDiagnosticLogs(convID string) string {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		homeDir = "/root"
-	}
-
-	searchDirs := []string{
-		filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain", convID, ".system_generated", "logs"),
-		filepath.Join(homeDir, ".gemini", "antigravity", "brain", convID, ".system_generated", "logs"),
-		filepath.Join("/data", "brain", convID, ".system_generated", "logs"),
-		filepath.Join(homeDir, ".gemini", "antigravity-cli", "log"),
-		filepath.Join(homeDir, ".gemini", "antigravity-cli", "crashes"),
-		filepath.Join(homeDir, ".gemini", "antigravity-cli", "logs"),
-		filepath.Join(homeDir, ".gemini", "antigravity", "logs"),
-		filepath.Join("/data", "brain", convID),
-	}
-
-	var sb strings.Builder
-	for _, dir := range searchDirs {
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			continue
-		}
-
-		// Sort by modification time descending to show newest files first
-		type fileInfo struct {
-			path    string
-			modTime time.Time
-			size    int64
-		}
-		var files []fileInfo
-		for _, entry := range entries {
-			if entry.IsDir() {
-				continue
-			}
-			info, err := entry.Info()
-			if err == nil {
-				files = append(files, fileInfo{
-					path:    filepath.Join(dir, entry.Name()),
-					modTime: info.ModTime(),
-					size:    info.Size(),
-				})
-			}
-		}
-
-		// Only inspect up to 2 newest files per log directory to prevent log bloat
-		for i := 0; i < len(files) && i < 2; i++ {
-			f := files[len(files)-1-i] // pick latest
-			data, err := os.ReadFile(f.path)
-			if err != nil || len(data) == 0 {
-				continue
-			}
-			sb.WriteString(fmt.Sprintf("\n--- FILE: %s (%d bytes, mod: %s) ---\n", f.path, f.size, f.modTime.Format(time.RFC3339)))
-			lines := strings.Split(string(data), "\n")
-			start := 0
-			if len(lines) > 50 {
-				start = len(lines) - 50
-				sb.WriteString("[...showing last 50 lines...]\n")
-			}
-			for j := start; j < len(lines); j++ {
-				line := lines[j]
-				if strings.TrimSpace(line) != "" {
-					sb.WriteString(line + "\n")
-				}
-			}
-		}
-	}
-	return sb.String()
-}
-
-func extractResponseAndError(convID string) (string, string) {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		homeDir = "/root"
-	}
-
-	var targetDirs []string
-	if convID != "" {
-		targetDirs = append(targetDirs,
-			filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain", convID),
-			filepath.Join(homeDir, ".gemini", "antigravity", "brain", convID),
-			filepath.Join("/data", "brain", convID),
-		)
-	}
-
-	brainRoots := []string{
-		filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain"),
-		filepath.Join(homeDir, ".gemini", "antigravity", "brain"),
-		filepath.Join("/data", "brain"),
-	}
-
-	for _, root := range brainRoots {
-		if entries, err := os.ReadDir(root); err == nil {
-			var latestDir string
-			var latestTime time.Time
-			for _, entry := range entries {
-				if entry.IsDir() {
-					if info, err := entry.Info(); err == nil && info.ModTime().After(latestTime) {
-						latestTime = info.ModTime()
-						latestDir = filepath.Join(root, entry.Name())
-					}
-				}
-			}
-			if latestDir != "" {
-				targetDirs = append(targetDirs, latestDir)
-			}
-		}
-	}
-
-	var lastResponse string
-	var lastError string
-
-	for _, dir := range targetDirs {
-		for _, name := range []string{"transcript_full.jsonl", "transcript.jsonl"} {
-			tPath := filepath.Join(dir, ".system_generated", "logs", name)
-			data, err := os.ReadFile(tPath)
-			if err != nil {
-				continue
-			}
-
-			lines := strings.Split(string(data), "\n")
-			for i := len(lines) - 1; i >= 0; i-- {
-				line := strings.TrimSpace(lines[i])
-				if line == "" {
-					continue
-				}
-				var step struct {
-					Type      string          `json:"type"`
-					Status    string          `json:"status"`
-					Error     json.RawMessage `json:"error"`
-					Content   string          `json:"content"`
-					Thinking  string          `json:"thinking"`
-					ToolCalls json.RawMessage `json:"tool_calls"`
-				}
-				if err := json.Unmarshal([]byte(line), &step); err == nil {
-					if (step.Status == "ERROR" || len(step.Error) > 0) && lastError == "" {
-						if errStr := strings.TrimSpace(string(step.Error)); errStr != "" && errStr != "null" {
-							lastError = errStr
-						}
-					}
-					if step.Type == "PLANNER_RESPONSE" && lastResponse == "" {
-						if strings.TrimSpace(step.Content) != "" {
-							lastResponse = step.Content
-						} else if len(step.ToolCalls) > 2 && string(step.ToolCalls) != "[]" && string(step.ToolCalls) != "null" {
-							lastResponse = fmt.Sprintf("[Tool Call Requested]: %s", string(step.ToolCalls))
-						}
-					}
-				}
-			}
-			if lastResponse != "" || lastError != "" {
-				return lastResponse, lastError
-			}
-		}
-	}
-	return lastResponse, lastError
-}
-
-func loadConfig() (string, string, string, string, string, int, json.RawMessage) {
-	port := getEnv("PORT", "8080")
-	agyBin := getEnv("AGY_BIN", "agy")
-	apiKey := getEnv("GEMINI_API_KEY", getEnv("ANTIGRAVITY_API_KEY", ""))
-	model := getEnv("AGY_MODEL", "Gemini 3.6 Flash (Low)")
-	systemPrompt := getEnv("SYSTEM_PROMPT", "")
-	timeoutMinutes := 15
-	if tm := os.Getenv("TIMEOUT_MINUTES"); tm != "" {
-		if val, err := strconv.Atoi(tm); err == nil && val > 0 {
-			timeoutMinutes = val
-		}
-	}
-	var mcpConfig json.RawMessage
-
-	// Read Home Assistant add-on options if available
-	if data, err := os.ReadFile("/data/options.json"); err == nil {
-		var opts Options
-		if err := json.Unmarshal(data, &opts); err == nil {
-			if opts.Port != 0 {
-				port = fmt.Sprintf("%d", opts.Port)
-			}
-			if strings.TrimSpace(opts.AgyBin) != "" {
-				agyBin = opts.AgyBin
-			}
-			if strings.TrimSpace(opts.ApiKey) != "" {
-				apiKey = opts.ApiKey
-			}
-			if strings.TrimSpace(opts.Model) != "" {
-				model = opts.Model
-			}
-			if strings.TrimSpace(opts.SystemPrompt) != "" {
-				systemPrompt = opts.SystemPrompt
-			}
-			if opts.TimeoutMinutes > 0 {
-				timeoutMinutes = opts.TimeoutMinutes
-			}
-		}
-	}
-
-	mcpConfig = loadMCPConfig()
-
-	if apiKey != "" {
-		ensureAgySettings(apiKey, model)
-	}
-	ensureSystemRules(systemPrompt)
-	if len(mcpConfig) > 0 {
-		ensureMcpConfig(mcpConfig)
-	}
-	ensureSkills()
-
-	// Symlink brain directory to /data/brain if /data exists
-	if _, err := os.Stat("/data"); err == nil {
-		_ = os.MkdirAll("/data/brain", 0755)
-		homeDir, _ := os.UserHomeDir()
-		if homeDir == "" {
-			homeDir = "/root"
-		}
-		cliBrainDir := filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain")
-		_ = os.MkdirAll(filepath.Dir(cliBrainDir), 0755)
-		if _, err := os.Lstat(cliBrainDir); err != nil {
-			_ = os.Symlink("/data/brain", cliBrainDir)
-		}
-	}
-
-	return port, agyBin, apiKey, model, systemPrompt, timeoutMinutes, mcpConfig
-}
-
-func executePrompt(db *sql.DB, req PromptRequest, agyBin, apiKey, model, systemPrompt string, timeoutMinutes int, mcpConfig json.RawMessage, onComplete func()) string {
+func executePrompt(database *sql.DB, req PromptRequest, agyBin, apiKey, model, systemPrompt string, timeoutMinutes int, mcpConfig json.RawMessage, onComplete func()) string {
 	externalConvID := strings.TrimSpace(req.ConversationID)
 	if externalConvID == "" {
 		externalConvID = uuid.New().String()
 	}
 
-	internalConvID, _ := getInternalConversationID(db, externalConvID)
+	internalConvID, _ := db.GetInternalConversationID(database, externalConvID)
 
-	// Spawn headless Antigravity CLI in a background goroutine with bounded execution timeout
 	go func(prompt, extID, intID string) {
 		if onComplete != nil {
 			defer onComplete()
@@ -708,7 +100,7 @@ func executePrompt(db *sql.DB, req PromptRequest, agyBin, apiKey, model, systemP
 			if match := re.FindStringSubmatch(stderrStr); len(match) > 1 {
 				activeInternalID = match[1]
 			} else {
-				activeInternalID = findLatestSessionDir(startTime)
+				activeInternalID = session.FindLatestSessionDir(startTime)
 			}
 		}
 
@@ -716,7 +108,7 @@ func executePrompt(db *sql.DB, req PromptRequest, agyBin, apiKey, model, systemP
 		if lookupID == "" {
 			lookupID = extID
 		}
-		outText, errDetail := extractResponseAndError(lookupID)
+		outText, errDetail := session.ExtractResponseAndError(lookupID)
 		if outText == "" {
 			outText = strings.TrimSpace(stdout.String())
 		}
@@ -726,15 +118,15 @@ func executePrompt(db *sql.DB, req PromptRequest, agyBin, apiKey, model, systemP
 		log.Printf("Execution finished | external_conv=%s internal_conv=%s exit_code=%d failure=%t", extID, activeInternalID, exitCode, isFailure)
 		if isFailure {
 			if extID != "" {
-				_, _ = db.Exec("DELETE FROM conversations WHERE external_id = ?", extID)
+				_, _ = database.Exec("DELETE FROM conversations WHERE external_id = ?", extID)
 				log.Printf("Evicted broken conversation mapping for external_conv: %s (internal_conv: %s) to prevent repeat failure loops", extID, activeInternalID)
 			}
-			diagLogs := dumpSessionDiagnosticLogs(lookupID)
+			diagLogs := session.DumpSessionDiagnosticLogs(lookupID)
 			log.Printf("=== AGENT ERROR DIAGNOSTIC REPORT ===\nCommand: %s %v\nExit Code: %d\nStdout: %s\nStderr: %s\nParsed Error: %s\nTranscript & System Logs:\n%s\n=====================================",
 				agyBin, args, exitCode, stdout.String(), stderrStr, errDetail, diagLogs)
 		} else {
 			if activeInternalID != "" && extID != "" {
-				_ = saveConversationMapping(db, extID, activeInternalID)
+				_ = db.SaveConversationMapping(database, extID, activeInternalID)
 			}
 			log.Printf("--- STDOUT / RESPONSE ---\n%s\n--- STDERR ---\n%s", outText, stderrStr)
 		}
@@ -743,7 +135,7 @@ func executePrompt(db *sql.DB, req PromptRequest, agyBin, apiKey, model, systemP
 	return externalConvID
 }
 
-func handlePrompt(db *sql.DB, agyBin, apiKey, model, systemPrompt string, timeoutMinutes int, mcpConfig json.RawMessage) http.HandlerFunc {
+func handlePrompt(database *sql.DB, agyBin, apiKey, model, systemPrompt string, timeoutMinutes int, mcpConfig json.RawMessage) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
@@ -767,7 +159,7 @@ func handlePrompt(db *sql.DB, agyBin, apiKey, model, systemPrompt string, timeou
 			return
 		}
 
-		externalConvID := executePrompt(db, req, agyBin, apiKey, model, systemPrompt, timeoutMinutes, mcpConfig, nil)
+		externalConvID := executePrompt(database, req, agyBin, apiKey, model, systemPrompt, timeoutMinutes, mcpConfig, nil)
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusAccepted)
@@ -779,7 +171,7 @@ func handlePrompt(db *sql.DB, agyBin, apiKey, model, systemPrompt string, timeou
 	}
 }
 
-func handleTranscripts(db *sql.DB) http.HandlerFunc {
+func handleTranscripts(database *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		homeDir, err := os.UserHomeDir()
 		if err != nil {
@@ -798,73 +190,79 @@ func handleTranscripts(db *sql.DB) http.HandlerFunc {
 
 		var results []TranscriptEntry
 		roots := []string{
-			filepath.Join("/data", "brain"),
+			"/data/brain",
 			filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain"),
 			filepath.Join(homeDir, ".gemini", "antigravity", "brain"),
 		}
 
-		seen := make(map[string]bool)
+		includeRaw := r.URL.Query().Get("include_raw") == "true"
+
 		for _, root := range roots {
 			entries, err := os.ReadDir(root)
 			if err != nil {
 				continue
 			}
+
 			for _, entry := range entries {
 				if !entry.IsDir() {
 					continue
 				}
-				convDir := entry.Name()
-				if seen[convDir] {
-					continue
-				}
-				seen[convDir] = true
 
-				tPath := filepath.Join(root, convDir, ".system_generated", "logs", "transcript_full.jsonl")
+				internalID := entry.Name()
+				tPath := filepath.Join(root, internalID, ".system_generated", "logs", "transcript_full.jsonl")
+				if _, err := os.Stat(tPath); err != nil {
+					tPath = filepath.Join(root, internalID, ".system_generated", "logs", "transcript.jsonl")
+				}
+
 				data, err := os.ReadFile(tPath)
 				if err != nil {
-					tPath = filepath.Join(root, convDir, ".system_generated", "logs", "transcript.jsonl")
-					data, err = os.ReadFile(tPath)
-					if err != nil {
-						continue
-					}
+					continue
 				}
 
-				info, _ := os.Stat(tPath)
-				modTime := ""
-				if info != nil {
-					modTime = info.ModTime().Format(time.RFC3339)
-				}
-
-				extID, _ := getExternalConversationID(db, convDir)
-
-				te := TranscriptEntry{
-					Path:       tPath,
-					ModTime:    modTime,
-					ExternalID: extID,
-					RawJSONL:   string(data),
-				}
-
+				info, _ := entry.Info()
 				lines := strings.Split(string(data), "\n")
+				totalSteps := 0
+				lastStatus := "UNKNOWN"
+				lastError := ""
+
 				for _, line := range lines {
 					line = strings.TrimSpace(line)
 					if line == "" {
 						continue
 					}
-					var m struct {
+					totalSteps++
+
+					var step struct {
 						Status string          `json:"status"`
 						Error  json.RawMessage `json:"error"`
 					}
-					if err := json.Unmarshal([]byte(line), &m); err == nil {
-						te.TotalSteps++
-						if m.Status != "" {
-							te.LastStatus = m.Status
+					if err := json.Unmarshal([]byte(line), &step); err == nil {
+						if step.Status != "" {
+							lastStatus = step.Status
 						}
-						if len(m.Error) > 0 && string(m.Error) != "null" {
-							te.LastError = string(m.Error)
+						if len(step.Error) > 0 {
+							errStr := string(step.Error)
+							if errStr != "null" && errStr != "" {
+								lastError = errStr
+							}
 						}
 					}
 				}
-				results = append(results, te)
+
+				extID, _ := db.GetExternalConversationID(database, internalID)
+
+				item := TranscriptEntry{
+					Path:       tPath,
+					ModTime:    info.ModTime().Format(time.RFC3339),
+					TotalSteps: totalSteps,
+					LastStatus: lastStatus,
+					LastError:  lastError,
+					ExternalID: extID,
+				}
+				if includeRaw {
+					item.RawJSONL = string(data)
+				}
+				results = append(results, item)
 			}
 		}
 
@@ -873,185 +271,50 @@ func handleTranscripts(db *sql.DB) http.HandlerFunc {
 	}
 }
 
-func handleHealth(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]string{"status": "healthy"})
-}
-
-func handleIndexUI(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodPost {
-		return
-	}
-	html := `<!DOCTYPE html>
-<html lang="en" class="dark">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Aerial Brain - Transcript Viewer</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
-  <script>tailwind.config = { darkMode: 'class' }</script>
-</head>
-<body class="bg-slate-950 text-slate-100 font-sans antialiased min-h-screen flex flex-col">
-  <header class="border-b border-slate-800 bg-slate-900/80 backdrop-blur px-6 py-4 flex items-center justify-between sticky top-0 z-50">
-    <div class="flex items-center space-x-3">
-      <div class="w-8 h-8 rounded-lg bg-indigo-600 flex items-center justify-center font-bold text-white shadow-lg shadow-indigo-500/30">A</div>
-      <div>
-        <h1 class="text-lg font-bold tracking-tight text-white flex items-center gap-2">
-          Aerial Brain
-          <span class="text-xs px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">Live Dashboard</span>
-        </h1>
-      </div>
-    </div>
-    <div class="flex items-center space-x-3">
-      <button id="refreshBtn" onclick="fetchTranscripts()" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm font-medium border border-slate-700 transition">
-        Refresh
-      </button>
-      <a href="http://192.168.1.14:8089" target="_blank" class="px-3 py-1.5 rounded-lg bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-400 text-sm font-medium border border-indigo-500/30 transition flex items-center gap-1.5">
-        Agentsview ?
-      </a>
-    </div>
-  </header>
-  <div class="flex-1 flex overflow-hidden">
-    <aside class="w-80 border-r border-slate-800 bg-slate-900/40 flex flex-col">
-      <div class="p-3 border-b border-slate-800">
-        <input id="searchInput" type="text" placeholder="Filter sessions..." oninput="renderSidebar()" class="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-indigo-500">
-      </div>
-      <div id="sessionList" class="flex-1 overflow-y-auto p-2 space-y-1"></div>
-    </aside>
-    <main class="flex-1 flex flex-col bg-slate-950 overflow-hidden">
-      <div id="chatHeader" class="border-b border-slate-800 px-6 py-3 bg-slate-900/20 flex items-center justify-between text-sm text-slate-400">
-        <span>Select a conversation from the sidebar</span>
-      </div>
-      <div id="chatContent" class="flex-1 overflow-y-auto p-6 space-y-6 max-w-4xl w-full mx-auto"></div>
-    </main>
-  </div>
-  <script>
-    let sessions = [];
-    let selectedIdx = 0;
-    async function fetchTranscripts() {
-      try {
-        const res = await fetch('/api/transcripts');
-        sessions = await res.json();
-        sessions.reverse();
-        renderSidebar();
-        if (sessions.length > 0) selectSession(selectedIdx < sessions.length ? selectedIdx : 0);
-      } catch (err) { console.error(err); }
-    }
-    function renderSidebar() {
-      const q = (document.getElementById('searchInput').value || '').toLowerCase();
-      const el = document.getElementById('sessionList');
-      el.innerHTML = '';
-      sessions.forEach((s, idx) => {
-        const ext = s.external_id || 'Direct API';
-        if (!ext.toLowerCase().includes(q) && !s.path.toLowerCase().includes(q)) return;
-        const isSel = idx === selectedIdx;
-        const item = document.createElement('div');
-        item.className = 'p-3 rounded-lg cursor-pointer transition flex flex-col gap-1 border ' + (isSel ? 'bg-indigo-600/15 border-indigo-500/50 text-white' : 'hover:bg-slate-900 border-transparent text-slate-400');
-        item.onclick = () => selectSession(idx);
-        item.innerHTML = '<div class="flex items-center justify-between"><span class="font-semibold text-sm truncate ' + (isSel ? 'text-indigo-400' : 'text-slate-200') + '">' + escapeHtml(ext) + '</span><span class="text-xs text-slate-500">' + new Date(s.mod_time).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"}) + '</span></div><div class="flex items-center justify-between text-xs text-slate-500"><span>' + s.total_steps + ' steps</span><span class="px-1.5 py-0.5 rounded text-[10px] ' + (s.last_status === 'DONE' ? 'bg-emerald-500/10 text-emerald-400' : 'bg-red-500/10 text-red-400') + '">' + s.last_status + '</span></div>';
-        el.appendChild(item);
-      });
-    }
-    function selectSession(idx) {
-      selectedIdx = idx;
-      renderSidebar();
-      const s = sessions[idx];
-      if (!s) return;
-      document.getElementById('chatHeader').innerHTML = '<div class="flex items-center gap-3"><span class="font-semibold text-slate-200">Session ID:</span><code class="text-xs bg-slate-900 px-2 py-1 rounded text-slate-300 border border-slate-800">' + escapeHtml(s.external_id || s.path) + '</code></div><div class="text-xs text-slate-500">' + new Date(s.mod_time).toLocaleString() + '</div>';
-      const c = document.getElementById('chatContent');
-      c.innerHTML = '';
-      (s.raw_jsonl || '').trim().split('\n').forEach(line => {
-        if (!line.trim()) return;
-        try {
-          const step = JSON.parse(line);
-          const el = renderStep(step);
-          if (el) c.appendChild(el);
-        } catch(e){}
-      });
-      document.querySelectorAll('pre code').forEach(el => hljs.highlightElement(el));
-    }
-    function renderStep(step) {
-      const d = document.createElement('div');
-      if (step.type === 'USER_INPUT') {
-        d.className = 'flex justify-end';
-        let raw = (step.content || '').replace(/<\/?USER_REQUEST>/g, '').replace(/<ADDITIONAL_METADATA>[\s\S]*?<\/ADDITIONAL_METADATA>/g, '').trim();
-        d.innerHTML = '<div class="max-w-2xl bg-indigo-600/20 border border-indigo-500/30 rounded-2xl rounded-tr-sm px-5 py-3.5 text-slate-100 shadow-sm"><div class="text-xs font-semibold text-indigo-400 mb-1">User Request</div><div class="prose prose-invert prose-sm leading-relaxed">' + marked.parse(raw) + '</div></div>';
-        return d;
-      }
-      if (step.type === 'PLANNER_RESPONSE' || step.type === 'MCP_TOOL') {
-        d.className = 'space-y-3';
-        let h = '';
-        if (step.thinking) h += '<details class="bg-amber-950/20 border border-amber-500/30 rounded-xl p-3 text-xs text-amber-300"><summary class="font-semibold cursor-pointer select-none">Thinking / Chain of Thought</summary><div class="mt-2 text-slate-300 whitespace-pre-wrap leading-relaxed">' + escapeHtml(step.thinking) + '</div></details>';
-        if (step.tool_calls) {
-          step.tool_calls.forEach(tc => {
-            const name = tc.args?.ToolName || tc.name || 'tool';
-            h += '<div class="bg-slate-900 border border-slate-800 rounded-xl p-3 text-xs"><div class="flex items-center justify-between text-indigo-400 font-mono font-semibold mb-2"><span>?? Tool Call: ' + escapeHtml(name) + '</span><span class="text-slate-500 text-[11px]">' + (tc.args?.ServerName || 'mcp') + '</span></div><pre class="bg-slate-950 p-2.5 rounded border border-slate-800 overflow-x-auto text-slate-300 font-mono">' + escapeHtml(JSON.stringify(tc.args?.Arguments || tc.args || {}, null, 2)) + '</pre></div>';
-          });
-        }
-        if (step.content && step.type === 'MCP_TOOL') h += '<div class="bg-slate-900/60 border border-emerald-500/20 rounded-xl p-3 text-xs text-emerald-300"><div class="font-semibold text-emerald-400 mb-1">? Tool Result</div><pre class="whitespace-pre-wrap text-slate-300 font-mono bg-slate-950 p-2 rounded">' + escapeHtml(step.content) + '</pre></div>';
-        if (step.content && step.type === 'PLANNER_RESPONSE') h += '<div class="bg-slate-900 border border-slate-800 rounded-2xl rounded-tl-sm p-5 text-slate-100 shadow-sm"><div class="text-xs font-semibold text-slate-400 mb-2">?? Aerial Response</div><div class="prose prose-invert prose-sm max-w-none leading-relaxed">' + marked.parse(step.content) + '</div></div>';
-        if (step.error) h += '<div class="bg-red-950/30 border border-red-500/30 rounded-xl p-4 text-xs text-red-300"><div class="font-bold text-red-400 mb-1">? Error Detail</div><pre class="whitespace-pre-wrap font-mono">' + escapeHtml(typeof step.error === 'string' ? step.error : JSON.stringify(step.error, null, 2)) + '</pre></div>';
-        if (!h) return null;
-        d.innerHTML = h;
-        return d;
-      }
-      return null;
-    }
-    function escapeHtml(s) { if (!s) return ''; return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
-    fetchTranscripts();
-    setInterval(fetchTranscripts, 8000);
-  </script>
-</body>
-</html>`
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(html))
-}
-
 func main() {
-	port, agyBin, apiKey, model, systemPrompt, timeoutMinutes, mcpConfig := loadConfig()
+	portStr, agyBin, apiKey, model, systemPrompt, timeoutMinutes, mcpConfig := config.LoadConfig()
 
-	dbPath := getDBPath()
-	db, err := initDB(dbPath)
-	if err != nil {
-		log.Printf("Warning: failed to initialize SQLite DB at %s: %v", dbPath, err)
-	} else {
-		defer db.Close()
-	}
-
-	mux := http.NewServeMux()
-	promptHandler := handlePrompt(db, agyBin, apiKey, model, systemPrompt, timeoutMinutes, mcpConfig)
-	transcriptHandler := handleTranscripts(db)
-
-	mux.HandleFunc("GET /", handleIndexUI)
-	mux.HandleFunc("GET /ui", handleIndexUI)
-	mux.HandleFunc("POST /prompt", promptHandler)
-	mux.HandleFunc("POST /api/prompt", promptHandler)
-	mux.HandleFunc("GET /transcripts", transcriptHandler)
-	mux.HandleFunc("GET /api/transcripts", transcriptHandler)
-	mux.HandleFunc("GET /health", handleHealth)
-	mux.HandleFunc("GET /api/health", handleHealth)
-
-	addr := ":" + port
-	authStatus := "no API key configured"
 	if apiKey != "" {
-		authStatus = "Gemini API key configured"
+		config.EnsureAgySettings(apiKey, model)
 	}
-	mcpStatus := "no MCP servers configured"
+	config.EnsureSystemRules(systemPrompt)
 	if len(mcpConfig) > 0 {
-		mcpStatus = "custom MCP config loaded"
+		config.EnsureMcpConfig(mcpConfig)
 	}
-	log.Printf("Aerial Brain server listening on %s (agy binary: %s, model: %s, timeout: %dm, auth: %s, mcp: %s, db: %s)",
-		addr, agyBin, model, timeoutMinutes, authStatus, mcpStatus, dbPath)
+	skills.EnsureSkills()
 
-	go startDiscordFunnel(db, agyBin, apiKey, model, systemPrompt, timeoutMinutes, mcpConfig)
+	if _, err := os.Stat("/data"); err == nil {
+		_ = os.MkdirAll("/data/brain", 0755)
+		homeDir, _ := os.UserHomeDir()
+		if homeDir == "" {
+			homeDir = "/root"
+		}
+		cliBrainDir := filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain")
+		_ = os.MkdirAll(filepath.Dir(cliBrainDir), 0755)
+		if _, err := os.Lstat(cliBrainDir); err != nil {
+			_ = os.Symlink("/data/brain", cliBrainDir)
+		}
+	}
 
-	if err := http.ListenAndServe(addr, mux); err != nil {
-		log.Fatalf("Server error: %v", err)
+	dbPath := db.GetDBPath()
+	database, err := db.InitDB(dbPath)
+	if err != nil {
+		log.Fatalf("Failed to initialize conversation database: %v", err)
+	}
+	defer database.Close()
+
+	go startDiscordFunnel(database, agyBin, apiKey, model, systemPrompt, timeoutMinutes, mcpConfig)
+
+	http.HandleFunc("/prompt", handlePrompt(database, agyBin, apiKey, model, systemPrompt, timeoutMinutes, mcpConfig))
+	http.HandleFunc("/transcripts", handleTranscripts(database))
+	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
+
+	log.Printf("Aerial Brain listening on port %s (model=%s, timeout=%dm)", portStr, model, timeoutMinutes)
+	if err := http.ListenAndServe(":"+portStr, nil); err != nil {
+		log.Fatalf("Server failed: %v", err)
 	}
 }
-
