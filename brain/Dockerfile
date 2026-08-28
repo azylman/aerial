@@ -11,7 +11,7 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /aerial-brain .
 # --- Runtime stage -------------------------------------------------------
 FROM ubuntu:24.04
 
-# Install base utilities, certificates, and CLI prerequisites
+# Install base utilities, certificates, Docker CLI, and CLI prerequisites
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
@@ -20,6 +20,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     jq \
     tar \
     gzip \
+    docker.io \
+    docker-compose-v2 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install official Antigravity CLI binary
