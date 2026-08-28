@@ -327,6 +327,8 @@ func dumpSessionDiagnosticLogs(convID string) string {
 		filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain", convID, ".system_generated", "logs"),
 		filepath.Join(homeDir, ".gemini", "antigravity", "brain", convID, ".system_generated", "logs"),
 		filepath.Join("/data", "brain", convID, ".system_generated", "logs"),
+		filepath.Join(homeDir, ".gemini", "antigravity-cli", "log"),
+		filepath.Join(homeDir, ".gemini", "antigravity-cli", "crashes"),
 		filepath.Join(homeDir, ".gemini", "antigravity-cli", "logs"),
 		filepath.Join(homeDir, ".gemini", "antigravity", "logs"),
 		filepath.Join("/data", "brain", convID),
@@ -338,25 +340,46 @@ func dumpSessionDiagnosticLogs(convID string) string {
 		if err != nil {
 			continue
 		}
+
+		// Sort by modification time descending to show newest files first
+		type fileInfo struct {
+			path    string
+			modTime time.Time
+			size    int64
+		}
+		var files []fileInfo
 		for _, entry := range entries {
 			if entry.IsDir() {
 				continue
 			}
-			fPath := filepath.Join(dir, entry.Name())
-			data, err := os.ReadFile(fPath)
+			info, err := entry.Info()
+			if err == nil {
+				files = append(files, fileInfo{
+					path:    filepath.Join(dir, entry.Name()),
+					modTime: info.ModTime(),
+					size:    info.Size(),
+				})
+			}
+		}
+
+		// Only inspect up to 2 newest files per log directory to prevent log bloat
+		for i := 0; i < len(files) && i < 2; i++ {
+			f := files[len(files)-1-i] // pick latest
+			data, err := os.ReadFile(f.path)
 			if err != nil || len(data) == 0 {
 				continue
 			}
-			sb.WriteString(fmt.Sprintf("\n--- FILE: %s (%d bytes) ---\n", fPath, len(data)))
+			sb.WriteString(fmt.Sprintf("\n--- FILE: %s (%d bytes, mod: %s) ---\n", f.path, f.size, f.modTime.Format(time.RFC3339)))
 			lines := strings.Split(string(data), "\n")
 			start := 0
-			if len(lines) > 40 {
-				start = len(lines) - 40
-				sb.WriteString("[...showing last 40 lines...]\n")
+			if len(lines) > 50 {
+				start = len(lines) - 50
+				sb.WriteString("[...showing last 50 lines...]\n")
 			}
-			for i := start; i < len(lines); i++ {
-				if strings.TrimSpace(lines[i]) != "" {
-					sb.WriteString(lines[i] + "\n")
+			for j := start; j < len(lines); j++ {
+				line := lines[j]
+				if strings.TrimSpace(line) != "" {
+					sb.WriteString(line + "\n")
 				}
 			}
 		}
@@ -606,9 +629,6 @@ func handlePrompt(db *sql.DB, agyBin, apiKey, model, systemPrompt string, timeou
 				} else {
 					activeInternalID = findLatestSessionDir(startTime)
 				}
-				if activeInternalID != "" {
-					_ = saveConversationMapping(db, extID, activeInternalID)
-				}
 			}
 
 			lookupID := activeInternalID
@@ -620,12 +640,21 @@ func handlePrompt(db *sql.DB, agyBin, apiKey, model, systemPrompt string, timeou
 				outText = strings.TrimSpace(stdout.String())
 			}
 
-			log.Printf("Execution finished | external_conv=%s internal_conv=%s exit_code=%d", extID, activeInternalID, exitCode)
-			if exitCode != 0 || strings.Contains(outText, "error") || strings.Contains(outText, "terminated") || errDetail != "" {
+			isFailure := exitCode != 0 || strings.Contains(strings.ToLower(outText), "agent execution terminated") || errDetail != "" || strings.Contains(strings.ToLower(stderrStr), "error encountered")
+
+			log.Printf("Execution finished | external_conv=%s internal_conv=%s exit_code=%d failure=%t", extID, activeInternalID, exitCode, isFailure)
+			if isFailure {
+				if extID != "" {
+					_, _ = db.Exec("DELETE FROM conversations WHERE external_id = ?", extID)
+					log.Printf("Evicted broken conversation mapping for external_conv: %s (internal_conv: %s) to prevent repeat failure loops", extID, activeInternalID)
+				}
 				diagLogs := dumpSessionDiagnosticLogs(lookupID)
 				log.Printf("=== AGENT ERROR DIAGNOSTIC REPORT ===\nCommand: %s %v\nExit Code: %d\nStdout: %s\nStderr: %s\nParsed Error: %s\nTranscript & System Logs:\n%s\n=====================================",
 					agyBin, args, exitCode, stdout.String(), stderrStr, errDetail, diagLogs)
 			} else {
+				if activeInternalID != "" && extID != "" {
+					_ = saveConversationMapping(db, extID, activeInternalID)
+				}
 				log.Printf("--- STDOUT / RESPONSE ---\n%s\n--- STDERR ---\n%s", outText, stderrStr)
 			}
 		}(req.Prompt, externalConvID, internalConvID)
