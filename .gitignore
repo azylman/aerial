@@ -10,6 +10,8 @@
 mcp.config.json
 !mcp.config.example.json
 /skills/
+AGENTS.md
+AGENTS.local.md
 docker-compose.override.yml
 
 # Local storage and persistent database mounts
