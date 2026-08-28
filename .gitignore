@@ -9,6 +9,7 @@
 # User Custom Configurations & Overrides
 mcp.config.json
 !mcp.config.example.json
+skills/
 docker-compose.override.yml
 
 # Local storage and persistent database mounts

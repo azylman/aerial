@@ -21,6 +21,8 @@ services:
     volumes:
       - aerial-brain-data:/data
       - aerial-brain-gemini:/root/.gemini
+      - ./.agents:/app/.agents
+      - ./skills:/data/skills
     ports:
       - "${AERIAL_BRAIN_HOST_PORT:-8088}:8080"
     networks:
