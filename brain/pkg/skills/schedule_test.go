@@ -13,7 +13,7 @@ func TestScheduleTools(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to initialize database: %v", err)
 	}
-	defer database.Close()
+	defer func() { _ = database.Close() }()
 
 	tools := NewScheduleTools(database)
 	ctx := context.Background()
