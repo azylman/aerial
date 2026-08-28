@@ -125,6 +125,20 @@ func EnsureSystemRules(customPrompt string) error {
 	if err := os.MkdirAll(primaryRulesDir, 0755); err != nil {
 		return fmt.Errorf("failed to create primary rules directory: %w", err)
 	}
+
+	// Clean up any legacy or conflicting rule files across rules directories
+	staleRuleFiles := []string{
+		filepath.Join(primaryRulesDir, "agents.md"),
+		filepath.Join(primaryRulesDir, "custom_instructions.md"),
+		filepath.Join(primaryRulesDir, "system.md"),
+		filepath.Join(homeDir, ".gemini", "config", "rules", "custom_instructions.md"),
+		filepath.Join(homeDir, ".gemini", "config", "rules", "agents.md"),
+		filepath.Join(homeDir, ".gemini", "config", "rules", "system.md"),
+	}
+	for _, stale := range staleRuleFiles {
+		_ = os.Remove(stale)
+	}
+
 	primaryRuleFile := filepath.Join(primaryRulesDir, "system_instructions.md")
 	if err := os.WriteFile(primaryRuleFile, []byte(content), 0644); err != nil {
 		return fmt.Errorf("failed to write primary system rules: %w", err)
