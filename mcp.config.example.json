@@ -1,5 +1,8 @@
 {
   "mcpServers": {
+    "scheduler": {
+      "serverUrl": "http://scheduler-mcp:8080/mcp"
+    },
     "discord": {
       "serverUrl": "http://discord-mcp:4001/mcp"
     },

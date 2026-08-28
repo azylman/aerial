@@ -25,6 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     jq \
     tar \
     gzip \
+    tzdata \
     docker.io \
     docker-compose-v2 \
     && rm -rf /var/lib/apt/lists/*
