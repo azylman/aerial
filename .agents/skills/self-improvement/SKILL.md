@@ -31,23 +31,37 @@ The root repository workspace is located at `/share/aerial`.
 
 ### Phase 1: Sync & Research
 1. **Brainstorming & Design**:
-   Before running any code or making modifications, **ALWAYS** run the `superpowers:brainstorming` skill to explore user intent, requirements, and design architecture.
-2. **Ensure Workspace is Up-to-Date**:
-   Before reading files or making changes, **ALWAYS** sync the local workspace with the remote upstream repository to avoid working on stale code:
+   Before modifying code, run `superpowers:brainstorming` to explore intent and design architecture.
+2. **Sync Workspace**:
+   **ALWAYS** pull latest upstream commits before making edits:
    ```bash
    cd /share/aerial && git pull --rebase origin main
    ```
-3. **Inspect Current Codebase**:
-   Locate the relevant source files under `/share/aerial`, inspect the latest code, and understand existing patterns before making modifications.
+3. **Inspect Workspace**:
+   Inspect existing code and dependencies under `/share/aerial`.
 
-### Phase 2: Edit & Verify Syntax
-1. Make surgical edits to code, Dockerfiles, or configs.
-2. Verify syntax and compilation before attempting deployment:
-   - For Go (`brain/`): `cd /share/aerial/brain && CGO_ENABLED=0 go vet ./...`
-   - For Docker Compose: `docker compose -f /share/aerial/docker-compose.yml config`
+---
 
-### Phase 3: Commit & Push Changes
-1. Check changed files:
+### Phase 2: Edit & Pre-Commit Build Verification (MANDATORY GATE)
+1. Make code edits, configuration changes, or skill additions.
+2. **VERIFY CONTAINER BUILD BEFORE COMMITTING**:
+   You MUST execute a full Docker build of the modified service(s) to run linters, unit tests, and compilation:
+   ```bash
+   docker compose -f /share/aerial/docker-compose.yml build <service_name>
+   ```
+   - For `brain`: `docker compose -f /share/aerial/docker-compose.yml build brain` (runs `golangci-lint`, `go test ./...`, and `go build`).
+   - For compose/config changes: `docker compose -f /share/aerial/docker-compose.yml config`
+3. **ZERO-FAILURE GATE**:
+   - If the build, linter, or tests exit with a non-zero code, **DO NOT COMMIT OR PUSH**.
+   - Read the error output, fix the code/lint violations, and re-run `docker compose build <service>` until it exits cleanly with code 0.
+   - If the task cannot be completed cleanly, rollback uncommitted changes with `git restore .`.
+
+---
+
+### Phase 3: Commit & Push Verified Changes
+*Only execute this phase after Phase 2 has passed with a 100% successful build.*
+
+1. Review changes:
    ```bash
    cd /share/aerial && git status && git diff
    ```
@@ -55,40 +69,43 @@ The root repository workspace is located at `/share/aerial`.
    ```bash
    cd /share/aerial && git add -A && git commit -m "feat(module): clear description of change"
    ```
-3. **MANDATORY**: Push to upstream GitHub repository immediately after committing:
+3. Push to upstream repository:
    ```bash
    cd /share/aerial && git push origin main
    ```
-   *Do NOT proceed to Phase 4 until `git push` has succeeded and working tree / branch status is clean.*
 
-### Phase 4: Rebuild & Redeploy
+---
+
+### Phase 4: Deploy & Restart
 
 #### A. Updating Non-Brain Services (`discord-mcp`, `docker-mcp`, `github-mcp`)
-Rebuild and recreate the target container without interrupting `brain`:
+Deploy the pre-built image:
 ```bash
-docker compose -f /share/aerial/docker-compose.yml up -d --build <service_name>
-```
-Verify container health:
-```bash
-docker compose -f /share/aerial/docker-compose.yml ps
+docker compose -f /share/aerial/docker-compose.yml up -d --no-build <service_name>
 ```
 
-#### B. Updating `brain` Itself (Self-Rebuild)
-Because recreating `aerial-brain` replaces the currently running process:
-1. **Pre-build image while alive**:
-   ```bash
-   docker compose -f /share/aerial/docker-compose.yml build brain
-   ```
-2. **Post Discord Reply**:
-   Send your complete response back to Discord explaining the changes made and notifying the user that `brain` is restarting.
-3. **Trigger Restart with Buffer**:
+#### B. Updating `brain` Itself (Self-Restart)
+Because recreating `aerial-brain` restarts the runner:
+1. Ensure the image was already built in Phase 2 (`docker compose build brain`).
+2. Post your complete response back to Discord explaining the changes and announcing the restart.
+3. Trigger the restart in the background with a delay buffer:
    ```bash
    (sleep 2 && docker compose -f /share/aerial/docker-compose.yml up -d --no-build brain) &
    ```
 
 ---
 
-## 3. Post-Deployment Verification
-After any microservice deployment:
-- Check running containers: `docker compose -f /share/aerial/docker-compose.yml ps`
-- Check container logs for errors: `docker compose -f /share/aerial/docker-compose.yml logs --tail 25 <service_name>`
+### Phase 5: Post-Deployment Verification & Rollback
+1. **Health Verification**:
+   ```bash
+   docker compose -f /share/aerial/docker-compose.yml ps
+   docker compose -f /share/aerial/docker-compose.yml logs --tail 30 <service_name>
+   ```
+2. **Automated Rollback Safeguard**:
+   If the container fails to start, crashes, or is unhealthy after deployment:
+   ```bash
+   git log -n 1 --oneline
+   git revert --no-edit HEAD
+   git push origin main
+   docker compose -f /share/aerial/docker-compose.yml up -d --build <service_name>
+   ```
