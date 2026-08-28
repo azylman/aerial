@@ -6,7 +6,9 @@ services:
   #    and connects to remote MCP network servers.
   # ----------------------------------------------------------------------------
   brain:
-    build: ./brain
+    build:
+      context: .
+      dockerfile: brain/Dockerfile
     container_name: aerial-brain
     restart: unless-stopped
     environment:
@@ -21,8 +23,7 @@ services:
     volumes:
       - aerial-brain-data:/data
       - aerial-brain-gemini:/root/.gemini
-      - ./.agents:/app/.agents
-      - ./skills:/data/skills
+      - /share/aerial/skills:/data/skills
     ports:
       - "${AERIAL_BRAIN_HOST_PORT:-8088}:8080"
     networks:
