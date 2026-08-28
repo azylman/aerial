@@ -9,7 +9,7 @@ func TestDBInitializationAndConversationMapping(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to initialize in-memory SQLite database: %v", err)
 	}
-	defer database.Close()
+	defer func() { _ = database.Close() }()
 
 	internalID, err := GetInternalConversationID(database, "ext-12345")
 	if err != nil {
