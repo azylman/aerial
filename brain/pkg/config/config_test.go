@@ -37,9 +37,9 @@ func TestEnsureAgySettingsAndRules(t *testing.T) {
 		t.Fatalf("EnsureSystemRules failed: %v", err)
 	}
 
-	rulesFile := filepath.Join(tmpDir, ".gemini", "rules", "user_override.md")
+	rulesFile := filepath.Join(tmpDir, ".gemini", "rules", "system_instructions.md")
 	if _, err := os.Stat(rulesFile); err != nil {
-		t.Errorf("Expected user_override.md to exist at %s", rulesFile)
+		t.Errorf("Expected system_instructions.md to exist at %s", rulesFile)
 	}
 }
 

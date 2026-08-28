@@ -53,6 +53,7 @@ func executePrompt(database *sql.DB, req PromptRequest, agyBin, apiKey, model, s
 		}
 
 		startTime := time.Now().Add(-2 * time.Second)
+		_ = config.EnsureSystemRules(systemPrompt)
 		log.Printf("Starting background execution for prompt: %q (external_conversation: %s, mapped_internal: %q, timeout: %d minutes)",
 			prompt, extID, intID, timeoutMinutes)
 
