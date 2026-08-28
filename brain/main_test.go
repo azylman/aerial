@@ -15,7 +15,7 @@ func TestHandlePromptValidation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InitDB failed: %v", err)
 	}
-	defer database.Close()
+	defer func() { _ = database.Close() }()
 
 	handler := handlePrompt(database, "echo", "", "", "", 1, nil)
 
@@ -53,7 +53,7 @@ func TestHandleTranscripts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InitDB failed: %v", err)
 	}
-	defer database.Close()
+	defer func() { _ = database.Close() }()
 
 	handler := handleTranscripts(database)
 

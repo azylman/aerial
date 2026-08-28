@@ -135,15 +135,16 @@ func LoadMCPConfig() json.RawMessage {
 				},
 			},
 		}
-		mcpServers := defaultConfig["mcpServers"].(map[string]interface{})
-		if pat := os.Getenv("GITHUB_PAT"); pat != "" {
-			mcpServers["github"] = map[string]interface{}{
-				"serverUrl": "http://github-mcp:4003/sse",
+		if mcpServers, ok := defaultConfig["mcpServers"].(map[string]interface{}); ok {
+			if pat := os.Getenv("GITHUB_PAT"); pat != "" {
+				mcpServers["github"] = map[string]interface{}{
+					"serverUrl": "http://github-mcp:4003/sse",
+				}
 			}
-		}
-		if haToken := os.Getenv("HA_TOKEN"); haToken != "" {
-			mcpServers["ha-mcp"] = map[string]interface{}{
-				"serverUrl": haToken,
+			if haToken := os.Getenv("HA_TOKEN"); haToken != "" {
+				mcpServers["ha-mcp"] = map[string]interface{}{
+					"serverUrl": haToken,
+				}
 			}
 		}
 		if b, err := json.Marshal(defaultConfig); err == nil {

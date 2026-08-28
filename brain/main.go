@@ -35,7 +35,10 @@ func executePrompt(database *sql.DB, req PromptRequest, agyBin, apiKey, model, s
 		externalConvID = uuid.New().String()
 	}
 
-	internalConvID, _ := db.GetInternalConversationID(database, externalConvID)
+	internalConvID, err := db.GetInternalConversationID(database, externalConvID)
+	if err != nil {
+		log.Printf("Warning: GetInternalConversationID error for %s: %v", externalConvID, err)
+	}
 
 	go func(prompt, extID, intID string) {
 		if onComplete != nil {
@@ -118,15 +121,20 @@ func executePrompt(database *sql.DB, req PromptRequest, agyBin, apiKey, model, s
 		log.Printf("Execution finished | external_conv=%s internal_conv=%s exit_code=%d failure=%t", extID, activeInternalID, exitCode, isFailure)
 		if isFailure {
 			if extID != "" {
-				_, _ = database.Exec("DELETE FROM conversations WHERE external_id = ?", extID)
-				log.Printf("Evicted broken conversation mapping for external_conv: %s (internal_conv: %s) to prevent repeat failure loops", extID, activeInternalID)
+				if _, err := database.Exec("DELETE FROM conversations WHERE external_id = ?", extID); err != nil {
+					log.Printf("Failed to evict broken conversation %s: %v", extID, err)
+				} else {
+					log.Printf("Evicted broken conversation mapping for external_conv: %s (internal_conv: %s) to prevent repeat failure loops", extID, activeInternalID)
+				}
 			}
 			diagLogs := session.DumpSessionDiagnosticLogs(lookupID)
 			log.Printf("=== AGENT ERROR DIAGNOSTIC REPORT ===\nCommand: %s %v\nExit Code: %d\nStdout: %s\nStderr: %s\nParsed Error: %s\nTranscript & System Logs:\n%s\n=====================================",
 				agyBin, args, exitCode, stdout.String(), stderrStr, errDetail, diagLogs)
 		} else {
 			if activeInternalID != "" && extID != "" {
-				_ = db.SaveConversationMapping(database, extID, activeInternalID)
+				if err := db.SaveConversationMapping(database, extID, activeInternalID); err != nil {
+					log.Printf("Failed to save conversation mapping: %v", err)
+				}
 			}
 			log.Printf("--- STDOUT / RESPONSE ---\n%s\n--- STDERR ---\n%s", outText, stderrStr)
 		}
