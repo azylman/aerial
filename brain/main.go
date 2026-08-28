@@ -253,6 +253,15 @@ func loadMCPConfig() json.RawMessage {
 			},
 		}
 		mcpServers := defaultConfig["mcpServers"].(map[string]interface{})
+		if pat := os.Getenv("GITHUB_PAT"); pat != "" {
+			mcpServers["github"] = map[string]interface{}{
+				"serverUrl": "https://api.githubcopilot.com/mcp/",
+				"headers": map[string]string{
+					"Authorization": "Bearer " + pat,
+					"Accept":        "application/json, text/event-stream",
+				},
+			}
+		}
 		if haToken := os.Getenv("HA_TOKEN"); haToken != "" {
 			mcpServers["ha-mcp"] = map[string]interface{}{
 				"serverUrl": haToken,
