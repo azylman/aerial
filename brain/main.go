@@ -17,6 +17,7 @@ import (
 	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
 	"github.com/azylman/aerial/brain/pkg/queue"
+	"github.com/azylman/aerial/brain/pkg/scheduler"
 	"github.com/azylman/aerial/brain/pkg/skills"
 	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
@@ -271,6 +272,10 @@ func main() {
 	// Resume interrupted turns after Discord is attached
 	queue.RecoverInterrupted(database, pool)
 
+	// Start background scheduler monitor for due cron and one-shot routines
+	stopScheduler := scheduler.Start(context.Background(), database, pool, dgSession)
+	defer stopScheduler()
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/prompt", handlePrompt(database, pool))
 	mux.HandleFunc("/transcripts", handleTranscripts(database))
@@ -304,5 +309,17 @@ func main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Printf("HTTP shutdown error: %v", err)
 	}
+
+	if stopScheduler != nil {
+		stopScheduler()
+	}
+	pool.Stop()
+	if dgSession != nil {
+		_ = dgSession.Close()
+	}
+	if err := database.Close(); err != nil {
+		log.Printf("Error closing database: %v", err)
+	}
+
 	log.Println("Aerial Brain shutdown complete")
 }

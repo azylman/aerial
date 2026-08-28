@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -45,10 +46,22 @@ func GetDBPath() string {
 }
 
 func InitDB(dbPath string) (*sql.DB, error) {
-	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
-		return nil, fmt.Errorf("failed to create db directory: %w", err)
+	if dbPath != ":memory:" {
+		if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
+			return nil, fmt.Errorf("failed to create db directory: %w", err)
+		}
 	}
-	database, err := sql.Open("sqlite", dbPath)
+
+	dsn := dbPath
+	if dbPath != ":memory:" && !strings.Contains(dbPath, "_pragma") {
+		if strings.Contains(dbPath, "?") {
+			dsn += "&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"
+		} else {
+			dsn += "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"
+		}
+	}
+
+	database, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
@@ -111,8 +124,10 @@ func InitDB(dbPath string) (*sql.DB, error) {
 	CREATE TABLE IF NOT EXISTS cron_schedules (
 		id TEXT PRIMARY KEY,
 		target_id TEXT NOT NULL,
+		title_prefix TEXT NOT NULL DEFAULT '',
 		cron_expr TEXT NOT NULL,
 		prompt TEXT NOT NULL,
+		timezone TEXT NOT NULL DEFAULT 'UTC',
 		next_run_at DATETIME NOT NULL,
 		enabled BOOLEAN NOT NULL DEFAULT TRUE,
 		created_at DATETIME NOT NULL
@@ -125,6 +140,10 @@ func InitDB(dbPath string) (*sql.DB, error) {
 
 	// Safe column migration for response_text on existing DBs
 	_, _ = database.Exec(`ALTER TABLE messages ADD COLUMN response_text TEXT;`)
+
+	// Safe column migrations for cron_schedules on existing DBs
+	_, _ = database.Exec(`ALTER TABLE cron_schedules ADD COLUMN title_prefix TEXT NOT NULL DEFAULT '';`)
+	_, _ = database.Exec(`ALTER TABLE cron_schedules ADD COLUMN timezone TEXT NOT NULL DEFAULT 'UTC';`)
 
 	// Data migration from legacy conversations to sessions table if any exist
 	_, _ = database.Exec(`
@@ -432,13 +451,15 @@ type OneShotSchedule struct {
 }
 
 type CronSchedule struct {
-	ID        string
-	TargetID  string
-	CronExpr  string
-	Prompt    string
-	NextRunAt time.Time
-	Enabled   bool
-	CreatedAt time.Time
+	ID          string    `json:"id"`
+	TargetID    string    `json:"target_id"`
+	TitlePrefix string    `json:"title_prefix"`
+	CronExpr    string    `json:"cron_expr"`
+	Prompt      string    `json:"prompt"`
+	Timezone    string    `json:"timezone"`
+	NextRunAt   time.Time `json:"next_run_at"`
+	Enabled     bool      `json:"enabled"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 func CreateOneShotSchedule(database *sql.DB, s OneShotSchedule) error {
@@ -483,6 +504,75 @@ func DeleteOneShotSchedule(database *sql.DB, id string) error {
 	return err
 }
 
+func InsertMessageAndConsumeOneShot(database *sql.DB, scheduleID string, msg Message) error {
+	if database == nil {
+		return fmt.Errorf("database is nil")
+	}
+	if msg.ID == "" {
+		return fmt.Errorf("message id cannot be empty")
+	}
+	if msg.Status == "" {
+		msg.Status = StatusPending
+	}
+	now := time.Now().UTC()
+	if msg.CreatedAt.IsZero() {
+		msg.CreatedAt = now
+	}
+	if msg.UpdatedAt.IsZero() {
+		msg.UpdatedAt = now
+	}
+
+	tx, err := database.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	insertQuery := `
+	INSERT OR IGNORE INTO messages (id, thread_id, guild_id, author_id, author_name, content, status, retry_count, error_message, response_text, created_at, updated_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`
+	if _, err := tx.Exec(insertQuery, msg.ID, msg.ThreadID, msg.GuildID, msg.AuthorID, msg.AuthorName, msg.Content, msg.Status, msg.RetryCount, msg.ErrorMessage, msg.ResponseText, msg.CreatedAt, msg.UpdatedAt); err != nil {
+		return err
+	}
+
+	if _, err := tx.Exec(`DELETE FROM one_shot_schedules WHERE id = ?`, scheduleID); err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+func GetAllOneShotSchedules(database *sql.DB, threadID string) ([]OneShotSchedule, error) {
+	if database == nil {
+		return nil, nil
+	}
+	query := `SELECT id, thread_id, prompt, run_at, created_at FROM one_shot_schedules`
+	var rows *sql.Rows
+	var err error
+	if threadID != "" {
+		query += ` WHERE thread_id = ? ORDER BY run_at ASC`
+		rows, err = database.Query(query, threadID)
+	} else {
+		query += ` ORDER BY run_at ASC`
+		rows, err = database.Query(query)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var results []OneShotSchedule
+	for rows.Next() {
+		var s OneShotSchedule
+		if err := rows.Scan(&s.ID, &s.ThreadID, &s.Prompt, &s.RunAt, &s.CreatedAt); err != nil {
+			return nil, err
+		}
+		results = append(results, s)
+	}
+	return results, nil
+}
+
 func CreateCronSchedule(database *sql.DB, c CronSchedule) error {
 	if database == nil {
 		return nil
@@ -490,8 +580,11 @@ func CreateCronSchedule(database *sql.DB, c CronSchedule) error {
 	if c.CreatedAt.IsZero() {
 		c.CreatedAt = time.Now().UTC()
 	}
-	query := `INSERT INTO cron_schedules (id, target_id, cron_expr, prompt, next_run_at, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`
-	_, err := database.Exec(query, c.ID, c.TargetID, c.CronExpr, c.Prompt, c.NextRunAt, c.Enabled, c.CreatedAt)
+	if c.Timezone == "" {
+		c.Timezone = "UTC"
+	}
+	query := `INSERT INTO cron_schedules (id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	_, err := database.Exec(query, c.ID, c.TargetID, c.TitlePrefix, c.CronExpr, c.Prompt, c.Timezone, c.NextRunAt, c.Enabled, c.CreatedAt)
 	return err
 }
 
@@ -499,7 +592,7 @@ func GetDueCronSchedules(database *sql.DB) ([]CronSchedule, error) {
 	if database == nil {
 		return nil, nil
 	}
-	query := `SELECT id, target_id, cron_expr, prompt, next_run_at, enabled, created_at FROM cron_schedules WHERE enabled = TRUE AND next_run_at <= ?`
+	query := `SELECT id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at FROM cron_schedules WHERE enabled = TRUE AND next_run_at <= ?`
 	rows, err := database.Query(query, time.Now().UTC())
 	if err != nil {
 		return nil, err
@@ -509,12 +602,50 @@ func GetDueCronSchedules(database *sql.DB) ([]CronSchedule, error) {
 	var results []CronSchedule
 	for rows.Next() {
 		var c CronSchedule
-		if err := rows.Scan(&c.ID, &c.TargetID, &c.CronExpr, &c.Prompt, &c.NextRunAt, &c.Enabled, &c.CreatedAt); err != nil {
+		if err := rows.Scan(&c.ID, &c.TargetID, &c.TitlePrefix, &c.CronExpr, &c.Prompt, &c.Timezone, &c.NextRunAt, &c.Enabled, &c.CreatedAt); err != nil {
 			return nil, err
 		}
 		results = append(results, c)
 	}
 	return results, nil
+}
+
+func GetAllCronSchedules(database *sql.DB, targetID string) ([]CronSchedule, error) {
+	if database == nil {
+		return nil, nil
+	}
+	query := `SELECT id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at FROM cron_schedules WHERE enabled = TRUE`
+	var rows *sql.Rows
+	var err error
+	if targetID != "" {
+		query += ` AND target_id = ? ORDER BY created_at ASC`
+		rows, err = database.Query(query, targetID)
+	} else {
+		query += ` ORDER BY created_at ASC`
+		rows, err = database.Query(query)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var results []CronSchedule
+	for rows.Next() {
+		var c CronSchedule
+		if err := rows.Scan(&c.ID, &c.TargetID, &c.TitlePrefix, &c.CronExpr, &c.Prompt, &c.Timezone, &c.NextRunAt, &c.Enabled, &c.CreatedAt); err != nil {
+			return nil, err
+		}
+		results = append(results, c)
+	}
+	return results, nil
+}
+
+func DeleteCronSchedule(database *sql.DB, id string) error {
+	if database == nil || id == "" {
+		return nil
+	}
+	_, err := database.Exec(`DELETE FROM cron_schedules WHERE id = ?`, id)
+	return err
 }
 
 func UpdateCronNextRun(database *sql.DB, id string, nextRunAt time.Time) error {

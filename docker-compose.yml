@@ -36,13 +36,35 @@ services:
       retries: 3
       start_period: 5s
     depends_on:
+      scheduler-mcp:
+        condition: service_healthy
       discord-mcp:
         condition: service_healthy
       docker-mcp:
         condition: service_healthy
 
   # ----------------------------------------------------------------------------
-  # 2. Outbound MCP: Discord MCP Server
+  # 2. Outbound MCP: Scheduler MCP Server
+  #    Provides persistent schedule registration & management tools over HTTP.
+  # ----------------------------------------------------------------------------
+  scheduler-mcp:
+    build:
+      context: ./scheduler-mcp
+      dockerfile: Dockerfile
+    container_name: aerial-scheduler-mcp
+    restart: unless-stopped
+    volumes:
+      - aerial-brain-data:/data
+    networks:
+      - aerial-net
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ----------------------------------------------------------------------------
+  # 3. Outbound MCP: Discord MCP Server
   #    Provides Discord tools (send message, create thread, read history) over HTTP.
   # ----------------------------------------------------------------------------
   discord-mcp:

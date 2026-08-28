@@ -178,7 +178,7 @@ func (p *WorkerPool) processMessage(msg db.Message) {
 
 	_ = db.UpdateMessageStatus(p.cfg.DB, msg.ID, db.StatusProcessing, "")
 
-	skipDiscord := msg.GuildID == "" || msg.AuthorID == "http-client"
+	skipDiscord := msg.AuthorID == "http-client"
 
 	var stopTyping func() = func() {}
 	if !skipDiscord {
@@ -339,7 +339,7 @@ func RecoverInterrupted(database *sql.DB, pool *WorkerPool) {
 				snippet = string([]rune(snippet)[:57]) + "..."
 			}
 			notif := notifier.GeneratePoisonPillMessage(pool.cfg.AgyBin, pool.cfg.APIKey, snippet)
-			if m.GuildID != "" && m.AuthorID != "http-client" {
+			if m.AuthorID != "http-client" {
 				if err := pool.cfg.DeliveryFunc(pool.getDiscordSession(), m.ThreadID, notif); err != nil {
 					log.Printf("[Startup Recovery] Failed to deliver poison pill notice for message %s: %v", m.ID, err)
 				}

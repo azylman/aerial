@@ -558,3 +558,99 @@ func TestRecoverInterruptedPoisonPill(t *testing.T) {
 		t.Errorf("Expected poison pill notice to be delivered, got none")
 	}
 }
+
+func TestQueueSkipDiscordLogic(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	var mu sync.Mutex
+	var deliveredTo []string
+	var wg sync.WaitGroup
+	wg.Add(3)
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    1,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			return "AI reply for " + prompt, "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			mu.Lock()
+			deliveredTo = append(deliveredTo, channelID)
+			mu.Unlock()
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			wg.Done()
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	// 1. Scheduler message (should be delivered to Discord)
+	msgScheduler := db.Message{
+		ID:         "msg-sched-1",
+		ThreadID:   "thread-scheduled-1",
+		GuildID:    "scheduled",
+		AuthorID:   "scheduler",
+		AuthorName: "Scheduler",
+		Content:    "Scheduled routine prompt",
+	}
+
+	// 2. HTTP client message (should SKIP Discord delivery)
+	msgHTTP := db.Message{
+		ID:         "msg-http-1",
+		ThreadID:   "thread-http-1",
+		GuildID:    "",
+		AuthorID:   "http-client",
+		AuthorName: "HTTP Client",
+		Content:    "HTTP prompt",
+	}
+
+	// 3. Normal user message (should be delivered to Discord)
+	msgUser := db.Message{
+		ID:         "msg-user-1",
+		ThreadID:   "thread-user-1",
+		GuildID:    "guild-100",
+		AuthorID:   "user-999",
+		AuthorName: "Alice",
+		Content:    "User prompt",
+	}
+
+	_ = db.InsertMessage(database, msgScheduler)
+	_ = db.InsertMessage(database, msgHTTP)
+	_ = db.InsertMessage(database, msgUser)
+
+	pool.Enqueue(msgScheduler)
+	pool.Enqueue(msgHTTP)
+	pool.Enqueue(msgUser)
+
+	wg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	// Delivered channels should contain thread-scheduled-1 and thread-user-1, but NOT thread-http-1
+	deliveredMap := make(map[string]bool)
+	for _, ch := range deliveredTo {
+		deliveredMap[ch] = true
+	}
+
+	if !deliveredMap["thread-scheduled-1"] {
+		t.Errorf("Expected scheduler message to be delivered to Discord, but it was skipped: %v", deliveredTo)
+	}
+	if deliveredMap["thread-http-1"] {
+		t.Errorf("Expected http-client message to SKIP Discord delivery, but it was delivered: %v", deliveredTo)
+	}
+	if !deliveredMap["thread-user-1"] {
+		t.Errorf("Expected user message to be delivered to Discord, but it was skipped: %v", deliveredTo)
+	}
+}

@@ -206,6 +206,9 @@ func LoadMCPConfig() json.RawMessage {
 	if len(rawBytes) == 0 {
 		defaultConfig := map[string]interface{}{
 			"mcpServers": map[string]interface{}{
+				"scheduler": map[string]interface{}{
+					"serverUrl": "http://scheduler-mcp:8080/mcp",
+				},
 				"discord": map[string]interface{}{
 					"serverUrl": "http://discord-mcp:4001/mcp",
 				},
