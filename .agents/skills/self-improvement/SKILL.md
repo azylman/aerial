@@ -30,12 +30,14 @@ The root repository workspace is located at `/share/aerial`.
 ## 2. The 5-Phase Self-Improvement Workflow
 
 ### Phase 1: Sync & Research
-1. **Ensure Workspace is Up-to-Date**:
+1. **Brainstorming & Design**:
+   Before running any code or making modifications, **ALWAYS** run the `superpowers:brainstorming` skill to explore user intent, requirements, and design architecture.
+2. **Ensure Workspace is Up-to-Date**:
    Before reading files or making changes, **ALWAYS** sync the local workspace with the remote upstream repository to avoid working on stale code:
    ```bash
    cd /share/aerial && git pull --rebase origin main
    ```
-2. **Inspect Current Codebase**:
+3. **Inspect Current Codebase**:
    Locate the relevant source files under `/share/aerial`, inspect the latest code, and understand existing patterns before making modifications.
 
 ### Phase 2: Edit & Verify Syntax
