@@ -153,14 +153,32 @@ func executePrompt(database *sql.DB, req PromptRequest, agyBin, apiKey, model, s
 				return
 			}
 
-			if extID != "" {
-				if _, err := database.Exec("DELETE FROM conversations WHERE external_id = ?", extID); err != nil {
-					log.Printf("Failed to evict broken conversation %s: %v", extID, err)
-				} else {
-					log.Printf("Evicted broken conversation mapping for external_conv: %s (internal_conv: %s) to prevent repeat failure loops", extID, activeInternalID)
+			// Differentiate transient API errors (e.g. 503 high demand, 429, timeout) from session corruption
+			isTransient := strings.Contains(strings.ToLower(stderrStr), "error 503") ||
+				strings.Contains(strings.ToLower(stderrStr), "status: unavailable") ||
+				strings.Contains(strings.ToLower(stderrStr), "high demand") ||
+				strings.Contains(strings.ToLower(stderrStr), "rate limit") ||
+				strings.Contains(strings.ToLower(stderrStr), "resource_exhausted") ||
+				strings.Contains(strings.ToLower(stderrStr), "deadline_exceeded") ||
+				strings.Contains(strings.ToLower(stderrStr), "context deadline exceeded")
+
+			if isTransient && attempt < maxAttempts {
+				log.Printf("Transient API error on attempt %d/%d. Preserving internal session %s for context continuity.",
+					attempt, maxAttempts, currentIntID)
+			} else if attempt == maxAttempts {
+				if extID != "" {
+					if _, err := database.Exec("DELETE FROM conversations WHERE external_id = ?", extID); err != nil {
+						log.Printf("Failed to evict broken conversation %s: %v", extID, err)
+					} else {
+						log.Printf("Evicted broken conversation mapping for external_conv: %s (internal_conv: %s) after exhausting all %d attempts", extID, activeInternalID, maxAttempts)
+					}
 				}
+				currentIntID = ""
+			} else {
+				log.Printf("Non-transient error on attempt %d/%d with session %s. Resetting to fresh conversation for next attempt.",
+					attempt, maxAttempts, currentIntID)
+				currentIntID = ""
 			}
-			currentIntID = ""
 
 			diagLogs := session.DumpSessionDiagnosticLogs(lookupID)
 			log.Printf("=== AGENT ERROR DIAGNOSTIC REPORT (Attempt %d/%d) ===\nCommand: %s %v\nExit Code: %d\nStdout: %s\nStderr: %s\nParsed Error: %s\nTranscript & System Logs:\n%s\n=====================================",
