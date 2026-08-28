@@ -124,7 +124,7 @@ func executePrompt(database *sql.DB, req PromptRequest, agyBin, apiKey, model, s
 			outText = strings.TrimSpace(stdout.String())
 		}
 
-		isFailure := exitCode != 0 || strings.Contains(strings.ToLower(outText), "agent execution terminated") || errDetail != "" || strings.Contains(strings.ToLower(stderrStr), "error encountered")
+		isFailure := exitCode != 0 || strings.Contains(strings.ToLower(outText), "agent execution terminated")
 
 		log.Printf("Execution finished | external_conv=%s internal_conv=%s exit_code=%d failure=%t", extID, activeInternalID, exitCode, isFailure)
 		if isFailure {
