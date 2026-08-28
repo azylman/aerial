@@ -53,10 +53,11 @@ The root repository workspace is located at `/share/aerial`.
    ```bash
    cd /share/aerial && git add -A && git commit -m "feat(module): clear description of change"
    ```
-3. Push to upstream if remote git access is configured:
+3. **MANDATORY**: Push to upstream GitHub repository immediately after committing:
    ```bash
    cd /share/aerial && git push origin main
    ```
+   *Do NOT proceed to Phase 4 until `git push` has succeeded and working tree / branch status is clean.*
 
 ### Phase 4: Rebuild & Redeploy
 
