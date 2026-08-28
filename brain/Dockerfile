@@ -4,7 +4,7 @@ FROM golang:1.22-alpine AS builder
 WORKDIR /build
 
 COPY brain/go.mod brain/go.sum* ./
-COPY brain/*.go ./
+COPY brain/ ./
 RUN go mod tidy
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /aerial-brain .
 
