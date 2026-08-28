@@ -540,6 +540,109 @@ func loadConfig() (string, string, string, string, string, int, json.RawMessage)
 	return port, agyBin, apiKey, model, systemPrompt, timeoutMinutes, mcpConfig
 }
 
+func executePrompt(db *sql.DB, req PromptRequest, agyBin, apiKey, model, systemPrompt string, timeoutMinutes int, mcpConfig json.RawMessage, onComplete func()) string {
+	externalConvID := strings.TrimSpace(req.ConversationID)
+	if externalConvID == "" {
+		externalConvID = uuid.New().String()
+	}
+
+	internalConvID, _ := getInternalConversationID(db, externalConvID)
+
+	// Spawn headless Antigravity CLI in a background goroutine with bounded execution timeout
+	go func(prompt, extID, intID string) {
+		if onComplete != nil {
+			defer onComplete()
+		}
+
+		startTime := time.Now().Add(-2 * time.Second)
+		log.Printf("Starting background execution for prompt: %q (external_conversation: %s, mapped_internal: %q, timeout: %d minutes)",
+			prompt, extID, intID, timeoutMinutes)
+
+		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutMinutes)*time.Minute)
+		defer cancel()
+
+		args := []string{"--dangerously-skip-permissions"}
+		if model != "" {
+			args = append(args, "--model", model)
+		}
+		if timeoutMinutes > 0 {
+			args = append(args, "--print-timeout", fmt.Sprintf("%dm", timeoutMinutes))
+		}
+		if intID != "" {
+			args = append(args, "--conversation", intID)
+		}
+		args = append(args, "-p", prompt)
+
+		cmd := exec.CommandContext(ctx, agyBin, args...)
+		cmd.Dir = "/app"
+		cmd.Stdin = strings.NewReader("")
+		if apiKey != "" {
+			cmd.Env = append(os.Environ(),
+				"GEMINI_API_KEY="+apiKey,
+				"ANTIGRAVITY_API_KEY="+apiKey,
+				"GOOGLE_GENAI_API_KEY="+apiKey,
+				"AGY_LOG_LEVEL=debug",
+				"ANTIGRAVITY_LOG_LEVEL=debug",
+			)
+		}
+
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+
+		err := cmd.Run()
+		exitCode := 0
+		if err != nil {
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				exitCode = exitErr.ExitCode()
+			} else {
+				exitCode = -1
+				log.Printf("Process error: %v", err)
+			}
+		}
+
+		stderrStr := stderr.String()
+		activeInternalID := intID
+		if activeInternalID == "" {
+			re := regexp.MustCompile(`Starting conversation update stream for ([a-f0-9\-]+)`)
+			if match := re.FindStringSubmatch(stderrStr); len(match) > 1 {
+				activeInternalID = match[1]
+			} else {
+				activeInternalID = findLatestSessionDir(startTime)
+			}
+		}
+
+		lookupID := activeInternalID
+		if lookupID == "" {
+			lookupID = extID
+		}
+		outText, errDetail := extractResponseAndError(lookupID)
+		if outText == "" {
+			outText = strings.TrimSpace(stdout.String())
+		}
+
+		isFailure := exitCode != 0 || strings.Contains(strings.ToLower(outText), "agent execution terminated") || errDetail != "" || strings.Contains(strings.ToLower(stderrStr), "error encountered")
+
+		log.Printf("Execution finished | external_conv=%s internal_conv=%s exit_code=%d failure=%t", extID, activeInternalID, exitCode, isFailure)
+		if isFailure {
+			if extID != "" {
+				_, _ = db.Exec("DELETE FROM conversations WHERE external_id = ?", extID)
+				log.Printf("Evicted broken conversation mapping for external_conv: %s (internal_conv: %s) to prevent repeat failure loops", extID, activeInternalID)
+			}
+			diagLogs := dumpSessionDiagnosticLogs(lookupID)
+			log.Printf("=== AGENT ERROR DIAGNOSTIC REPORT ===\nCommand: %s %v\nExit Code: %d\nStdout: %s\nStderr: %s\nParsed Error: %s\nTranscript & System Logs:\n%s\n=====================================",
+				agyBin, args, exitCode, stdout.String(), stderrStr, errDetail, diagLogs)
+		} else {
+			if activeInternalID != "" && extID != "" {
+				_ = saveConversationMapping(db, extID, activeInternalID)
+			}
+			log.Printf("--- STDOUT / RESPONSE ---\n%s\n--- STDERR ---\n%s", outText, stderrStr)
+		}
+	}(req.Prompt, externalConvID, internalConvID)
+
+	return externalConvID
+}
+
 func handlePrompt(db *sql.DB, agyBin, apiKey, model, systemPrompt string, timeoutMinutes int, mcpConfig json.RawMessage) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -564,100 +667,7 @@ func handlePrompt(db *sql.DB, agyBin, apiKey, model, systemPrompt string, timeou
 			return
 		}
 
-		externalConvID := strings.TrimSpace(req.ConversationID)
-		if externalConvID == "" {
-			externalConvID = uuid.New().String()
-		}
-
-		internalConvID, _ := getInternalConversationID(db, externalConvID)
-
-		// Spawn headless Antigravity CLI in a background goroutine with bounded execution timeout
-		go func(prompt, extID, intID string) {
-			startTime := time.Now().Add(-2 * time.Second)
-			log.Printf("Starting background execution for prompt: %q (external_conversation: %s, mapped_internal: %q, timeout: %d minutes)",
-				prompt, extID, intID, timeoutMinutes)
-
-			ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutMinutes)*time.Minute)
-			defer cancel()
-
-			args := []string{"--dangerously-skip-permissions"}
-			if model != "" {
-				args = append(args, "--model", model)
-			}
-			if timeoutMinutes > 0 {
-				args = append(args, "--print-timeout", fmt.Sprintf("%dm", timeoutMinutes))
-			}
-			if intID != "" {
-				args = append(args, "--conversation", intID)
-			}
-			args = append(args, "-p", prompt)
-
-			cmd := exec.CommandContext(ctx, agyBin, args...)
-			cmd.Dir = "/app"
-			cmd.Stdin = strings.NewReader("")
-			if apiKey != "" {
-				cmd.Env = append(os.Environ(),
-					"GEMINI_API_KEY="+apiKey,
-					"ANTIGRAVITY_API_KEY="+apiKey,
-					"GOOGLE_GENAI_API_KEY="+apiKey,
-					"AGY_LOG_LEVEL=debug",
-					"ANTIGRAVITY_LOG_LEVEL=debug",
-				)
-			}
-
-			var stdout, stderr bytes.Buffer
-			cmd.Stdout = &stdout
-			cmd.Stderr = &stderr
-
-			err := cmd.Run()
-			exitCode := 0
-			if err != nil {
-				if exitErr, ok := err.(*exec.ExitError); ok {
-					exitCode = exitErr.ExitCode()
-				} else {
-					exitCode = -1
-					log.Printf("Process error: %v", err)
-				}
-			}
-
-			stderrStr := stderr.String()
-			activeInternalID := intID
-			if activeInternalID == "" {
-				re := regexp.MustCompile(`Starting conversation update stream for ([a-f0-9\-]+)`)
-				if match := re.FindStringSubmatch(stderrStr); len(match) > 1 {
-					activeInternalID = match[1]
-				} else {
-					activeInternalID = findLatestSessionDir(startTime)
-				}
-			}
-
-			lookupID := activeInternalID
-			if lookupID == "" {
-				lookupID = extID
-			}
-			outText, errDetail := extractResponseAndError(lookupID)
-			if outText == "" {
-				outText = strings.TrimSpace(stdout.String())
-			}
-
-			isFailure := exitCode != 0 || strings.Contains(strings.ToLower(outText), "agent execution terminated") || errDetail != "" || strings.Contains(strings.ToLower(stderrStr), "error encountered")
-
-			log.Printf("Execution finished | external_conv=%s internal_conv=%s exit_code=%d failure=%t", extID, activeInternalID, exitCode, isFailure)
-			if isFailure {
-				if extID != "" {
-					_, _ = db.Exec("DELETE FROM conversations WHERE external_id = ?", extID)
-					log.Printf("Evicted broken conversation mapping for external_conv: %s (internal_conv: %s) to prevent repeat failure loops", extID, activeInternalID)
-				}
-				diagLogs := dumpSessionDiagnosticLogs(lookupID)
-				log.Printf("=== AGENT ERROR DIAGNOSTIC REPORT ===\nCommand: %s %v\nExit Code: %d\nStdout: %s\nStderr: %s\nParsed Error: %s\nTranscript & System Logs:\n%s\n=====================================",
-					agyBin, args, exitCode, stdout.String(), stderrStr, errDetail, diagLogs)
-			} else {
-				if activeInternalID != "" && extID != "" {
-					_ = saveConversationMapping(db, extID, activeInternalID)
-				}
-				log.Printf("--- STDOUT / RESPONSE ---\n%s\n--- STDERR ---\n%s", outText, stderrStr)
-			}
-		}(req.Prompt, externalConvID, internalConvID)
+		externalConvID := executePrompt(db, req, agyBin, apiKey, model, systemPrompt, timeoutMinutes, mcpConfig, nil)
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusAccepted)
@@ -937,6 +947,9 @@ func main() {
 	}
 	log.Printf("Aerial Brain server listening on %s (agy binary: %s, model: %s, timeout: %dm, auth: %s, mcp: %s, db: %s)",
 		addr, agyBin, model, timeoutMinutes, authStatus, mcpStatus, dbPath)
+
+	go startDiscordFunnel(db, agyBin, apiKey, model, systemPrompt, timeoutMinutes, mcpConfig)
+
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		log.Fatalf("Server error: %v", err)
 	}

@@ -3,8 +3,8 @@ FROM golang:1.22-alpine AS builder
 
 WORKDIR /build
 
-COPY go.mod ./
-COPY main.go ./
+COPY go.mod go.sum* ./
+COPY *.go ./
 RUN go mod tidy
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /aerial-brain .
 
