@@ -134,6 +134,12 @@ func EnsureSystemRules(customPrompt string) error {
 		filepath.Join(homeDir, ".gemini", "config", "rules", "custom_instructions.md"),
 		filepath.Join(homeDir, ".gemini", "config", "rules", "agents.md"),
 		filepath.Join(homeDir, ".gemini", "config", "rules", "system.md"),
+		"/share/aerial/.agents/rules/custom_instructions.md",
+		"/share/aerial/.agents/rules/agents.md",
+		"/share/aerial/.agents/rules/system.md",
+		"/app/.agents/rules/custom_instructions.md",
+		"/app/.agents/rules/agents.md",
+		"/app/.agents/rules/system.md",
 	}
 	for _, stale := range staleRuleFiles {
 		_ = os.Remove(stale)
