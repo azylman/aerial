@@ -76,12 +76,17 @@ func isFunnelBotTargeted(s *discordgo.Session, m *discordgo.MessageCreate) bool 
 	if m.GuildID == "" {
 		return true
 	}
-	if len(m.Mentions) > 0 {
+	if s.State != nil && s.State.User != nil {
+		for _, mention := range m.Mentions {
+			if mention != nil && mention.ID == s.State.User.ID {
+				return true
+			}
+		}
+	} else if len(m.Mentions) > 0 {
 		return true
 	}
 	contentLower := strings.ToLower(m.Content)
-	if strings.Contains(m.Content, "<@") ||
-		strings.Contains(contentLower, "aerial") ||
+	if strings.Contains(contentLower, "aerial") ||
 		strings.Contains(contentLower, "gundam") ||
 		strings.Contains(contentLower, "brain") ||
 		strings.Contains(contentLower, "bot") {
