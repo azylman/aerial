@@ -107,6 +107,30 @@ services:
       start_period: 10s
 
   # ----------------------------------------------------------------------------
+  # 5. Outbound MCP: GitHub MCP Server
+  #    Wraps the official GitHub MCP server with supergateway translation proxy.
+  # ----------------------------------------------------------------------------
+  github-mcp:
+    build: ./github-mcp
+    container_name: aerial-github-mcp
+    restart: unless-stopped
+    environment:
+      - PORT=4003
+      - GITHUB_PERSONAL_ACCESS_TOKEN=${GITHUB_PAT}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "${GITHUB_MCP_HOST_PORT:-4003}:4003"
+    networks:
+      - aerial-net
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 4003 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ----------------------------------------------------------------------------
   # 5. Observability & Visualization: Agentsview Web Dashboard
   #    Local-first web UI for searching, analyzing, and visually inspecting
   #    Antigravity agent transcripts and session traces.

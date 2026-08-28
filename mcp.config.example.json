@@ -7,11 +7,7 @@
       "serverUrl": "http://docker-mcp:4002/sse"
     },
     "github": {
-      "serverUrl": "https://api.githubcopilot.com/mcp/",
-      "headers": {
-        "Authorization": "Bearer ${GITHUB_PAT}",
-        "Accept": "application/json, text/event-stream"
-      }
+      "serverUrl": "http://github-mcp:4003/sse"
     }
   }
 }
