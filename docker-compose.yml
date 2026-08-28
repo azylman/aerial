@@ -24,7 +24,7 @@ services:
       - aerial-brain-data:/data
       - aerial-brain-gemini:/root/.gemini
       - /var/run/docker.sock:/var/run/docker.sock
-      - /share/aerial:/share/aerial
+      - ${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}:/share/aerial
     ports:
       - "${AERIAL_BRAIN_HOST_PORT:-8088}:8080"
     networks:
