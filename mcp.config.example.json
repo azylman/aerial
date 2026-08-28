@@ -9,7 +9,8 @@
     "github": {
       "serverUrl": "https://api.githubcopilot.com/mcp/",
       "headers": {
-        "Authorization": "Bearer ${GITHUB_PAT}"
+        "Authorization": "Bearer ${GITHUB_PAT}",
+        "Accept": "application/json, text/event-stream"
       }
     }
   }
