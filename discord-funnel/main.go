@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	defaultTemplate = `{"conversation_id": "{{.channel_id}}", "prompt": "Here's a message someone sent you from Discord:\n\n{{range $k, $v := .}}- {{$k}}: {{$v | escapeJSON}}\n{{end}}\nCRITICAL REQUIREMENT: You MUST send your response back to Discord using the Discord MCP tool via ` + "`" + `call_mcp_tool` + "`" + ` with ServerName: \"discord\":\n1. If this message is NOT already inside a thread: Execute ` + "`" + `call_mcp_tool` + "`" + ` with ServerName: \"discord\", ToolName: \"discord_create_thread\", and Arguments: {\"channelId\": \"{{.channel_id}}\", \"messageId\": \"{{.id}}\", \"name\": \"<concise thread title>\", \"message\": \"<your response>\"}.\n2. If this message is ALREADY inside a thread: Execute ` + "`" + `call_mcp_tool` + "`" + ` with ServerName: \"discord\", ToolName: \"discord_send\", and Arguments: {\"channelId\": \"{{.channel_id}}\", \"message\": \"<your response>\"}.\nExecute the tool call now."}`
+	defaultTemplate = `{"conversation_id": "{{.conversation_id}}", "prompt": "Here's a message someone sent you from Discord:\n\n{{range $k, $v := .}}- {{$k}}: {{$v | escapeJSON}}\n{{end}}\nCRITICAL REQUIREMENT: You MUST send your response back to Discord using the Discord MCP tool via ` + "`" + `call_mcp_tool` + "`" + ` with ServerName: \"discord\":\n{{if .is_thread}}1. This message is ALREADY inside a thread: Execute ` + "`" + `call_mcp_tool` + "`" + ` with ServerName: \"discord\", ToolName: \"discord_send\", and Arguments: {\"channelId\": \"{{.channel_id}}\", \"message\": \"<your response>\"}.\n{{else}}1. This message is a new inquiry (NOT inside a thread): Execute ` + "`" + `call_mcp_tool` + "`" + ` with ServerName: \"discord\", ToolName: \"discord_create_thread\", and Arguments: {\"channelId\": \"{{.channel_id}}\", \"messageId\": \"{{.id}}\", \"name\": \"<concise thread title>\", \"message\": \"<your response>\"}.\n{{end}}Execute the tool call now."}`
 	maxRetries      = 3
 	initialDelay    = 500 * time.Millisecond
 )
@@ -43,8 +43,31 @@ func toJSON(v any) string {
 	return string(b)
 }
 
-func buildMessageData(m *discordgo.Message) map[string]any {
+func getConversationID(s *discordgo.Session, m *discordgo.Message) (string, bool) {
+	if m.GuildID == "" {
+		return m.ChannelID, false
+	}
+	// Check if this channel is a thread
+	if ch, err := s.State.Channel(m.ChannelID); err == nil && ch != nil && ch.IsThread() {
+		return m.ChannelID, true
+	}
+	if ch, err := s.Channel(m.ChannelID); err == nil && ch != nil && ch.IsThread() {
+		return m.ChannelID, true
+	}
+	// Root message in guild text channel:
+	// When Aerial replies by creating a thread from this root message,
+	// Discord will assign Thread ID = m.ID.
+	// Keying the conversation by m.ID ensures that when the user replies in the thread,
+	// the thread's ID (m.ID) will match this exact conversation session!
+	return m.ID, false
+}
+
+func buildMessageData(s *discordgo.Session, m *discordgo.Message) map[string]any {
 	data := make(map[string]any)
+
+	convID, isThread := getConversationID(s, m)
+	data["conversation_id"] = convID
+	data["is_thread"] = isThread
 
 	// Top-level Discord fields
 	data["id"] = m.ID
@@ -278,7 +301,10 @@ func main() {
 			return
 		}
 
-		data := buildMessageData(m.Message)
+		// Trigger typing indicator immediately in Discord channel/thread
+		_ = s.ChannelTyping(m.ChannelID)
+
+		data := buildMessageData(s, m.Message)
 		var buf bytes.Buffer
 		if err := tmpl.Execute(&buf, data); err != nil {
 			log.Printf("discord-funnel: failed to execute template for message %s: %v", m.ID, err)
@@ -286,8 +312,8 @@ func main() {
 		}
 
 		payload := buf.Bytes()
-		log.Printf("discord-funnel: processing message %s from %s (channel %s, payload length %d bytes): %q",
-			m.ID, m.Author.Username, m.ChannelID, len(payload), m.Content)
+		log.Printf("discord-funnel: processing message %s from %s (channel %s, is_thread: %v, conv_id: %s, payload length %d bytes): %q",
+			m.ID, m.Author.Username, m.ChannelID, data["is_thread"], data["conversation_id"], len(payload), m.Content)
 
 		go func(msgID string, p []byte) {
 			if err := sendWithRetry(client, *targetURL, p); err != nil {
