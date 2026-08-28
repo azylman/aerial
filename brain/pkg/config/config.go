@@ -66,24 +66,77 @@ func EnsureAgySettings(apiKey, model string) error {
 }
 
 func EnsureSystemRules(customPrompt string) error {
-	if strings.TrimSpace(customPrompt) == "" {
-		return nil
-	}
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		homeDir = "/root"
-	}
-	rulesDir := filepath.Join(homeDir, ".gemini", "rules")
-	if err := os.MkdirAll(rulesDir, 0755); err != nil {
-		return fmt.Errorf("failed to create rules directory: %w", err)
+	var sb strings.Builder
+	sb.WriteString("---\ndescription: User custom instructions, persona, and system guidelines\ntrigger: always_on\n---\n\n")
+
+	foundInstructions := false
+
+	// Check instruction files on disk in priority order
+	searchPaths := []string{
+		"/share/aerial/AGENTS.local.md",
+		"/share/aerial/AGENTS.md",
+		"/app/AGENTS.local.md",
+		"/app/AGENTS.md",
+		"/data/AGENTS.md",
+		"./AGENTS.local.md",
+		"./AGENTS.md",
 	}
 
-	overrideContent := "# User Custom Instructions\n" + strings.TrimSpace(customPrompt) + "\n"
-	ruleFile := filepath.Join(rulesDir, "user_override.md")
-	if err := os.WriteFile(ruleFile, []byte(overrideContent), 0644); err != nil {
-		return fmt.Errorf("failed to write system rules: %w", err)
+	for _, p := range searchPaths {
+		if data, err := os.ReadFile(p); err == nil && len(bytes.TrimSpace(data)) > 0 {
+			sb.WriteString(fmt.Sprintf("# Instructions from %s\n\n%s\n\n", filepath.Base(p), string(data)))
+			foundInstructions = true
+			log.Printf("Loaded agent instructions from %s", p)
+			break
+		}
 	}
-	log.Printf("Configured custom user rules in %s", ruleFile)
+
+	// System guidelines (SYSTEM.md)
+	systemPaths := []string{
+		"/share/aerial/SYSTEM.md",
+		"/app/SYSTEM.md",
+		"./SYSTEM.md",
+	}
+	for _, p := range systemPaths {
+		if data, err := os.ReadFile(p); err == nil && len(bytes.TrimSpace(data)) > 0 {
+			sb.WriteString(fmt.Sprintf("# Base System Guidelines (%s)\n\n%s\n\n", filepath.Base(p), string(data)))
+			foundInstructions = true
+			log.Printf("Loaded base system guidelines from %s", p)
+			break
+		}
+	}
+
+	if strings.TrimSpace(customPrompt) != "" {
+		sb.WriteString(fmt.Sprintf("# Environment Prompt Override\n\n%s\n\n", strings.TrimSpace(customPrompt)))
+		foundInstructions = true
+	}
+
+	if !foundInstructions {
+		return nil
+	}
+
+	content := sb.String()
+	homeDir, err := os.UserHomeDir()
+	if err != nil || homeDir == "" {
+		homeDir = "/root"
+	}
+
+	targetDirs := []string{
+		filepath.Join(homeDir, ".gemini", "rules"),
+		filepath.Join(homeDir, ".gemini", "config", "rules"),
+		"/share/aerial/.agents/rules",
+		"/app/.agents/rules",
+	}
+
+	for _, dir := range targetDirs {
+		if err := os.MkdirAll(dir, 0755); err == nil {
+			ruleFile := filepath.Join(dir, "system_instructions.md")
+			if err := os.WriteFile(ruleFile, []byte(content), 0644); err == nil {
+				log.Printf("Configured always_on system instructions in %s", ruleFile)
+			}
+		}
+	}
+
 	return nil
 }
 
