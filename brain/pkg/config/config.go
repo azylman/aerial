@@ -121,19 +121,25 @@ func EnsureSystemRules(customPrompt string) error {
 		homeDir = "/root"
 	}
 
-	targetDirs := []string{
-		filepath.Join(homeDir, ".gemini", "rules"),
+	primaryRulesDir := filepath.Join(homeDir, ".gemini", "rules")
+	if err := os.MkdirAll(primaryRulesDir, 0755); err != nil {
+		return fmt.Errorf("failed to create primary rules directory: %w", err)
+	}
+	primaryRuleFile := filepath.Join(primaryRulesDir, "system_instructions.md")
+	if err := os.WriteFile(primaryRuleFile, []byte(content), 0644); err != nil {
+		return fmt.Errorf("failed to write primary system rules: %w", err)
+	}
+	log.Printf("Configured always_on system instructions in %s", primaryRuleFile)
+
+	additionalDirs := []string{
 		filepath.Join(homeDir, ".gemini", "config", "rules"),
 		"/share/aerial/.agents/rules",
 		"/app/.agents/rules",
 	}
 
-	for _, dir := range targetDirs {
+	for _, dir := range additionalDirs {
 		if err := os.MkdirAll(dir, 0755); err == nil {
-			ruleFile := filepath.Join(dir, "system_instructions.md")
-			if err := os.WriteFile(ruleFile, []byte(content), 0644); err == nil {
-				log.Printf("Configured always_on system instructions in %s", ruleFile)
-			}
+			_ = os.WriteFile(filepath.Join(dir, "system_instructions.md"), []byte(content), 0644)
 		}
 	}
 
