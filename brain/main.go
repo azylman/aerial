@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
+	"github.com/azylman/aerial/brain/pkg/delivery"
 	"github.com/azylman/aerial/brain/pkg/gitsync"
 	"github.com/azylman/aerial/brain/pkg/queue"
 	"github.com/azylman/aerial/brain/pkg/scheduler"
@@ -203,16 +205,25 @@ func handleTranscripts(database *sql.DB) http.HandlerFunc {
 }
 
 func main() {
-	portStr, agyBin, apiKey, model, systemPrompt, timeoutMinutes, mcpConfig := config.LoadConfig()
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		log.Printf("Warning: initial LoadConfig error: %v", err)
+	}
+
+	portStr := config.GetEnv("PORT", "8080")
+	agyBin := config.GetEnv("AGY_BIN", "agy")
+	apiKey := config.GetEnv("GEMINI_API_KEY", config.GetEnv("ANTIGRAVITY_API_KEY", ""))
+	systemPrompt := config.GetEnv("SYSTEM_PROMPT", "")
 
 	if apiKey != "" {
-		if err := config.EnsureAgySettings(apiKey, model); err != nil {
+		if err := config.EnsureAgySettings(apiKey, cfg.Model); err != nil {
 			log.Printf("Warning: EnsureAgySettings error: %v", err)
 		}
 	}
 	if err := config.EnsureSystemRules(systemPrompt); err != nil {
 		log.Printf("Warning: EnsureSystemRules error: %v", err)
 	}
+	mcpConfig := config.LoadMCPConfig()
 	if len(mcpConfig) > 0 {
 		if err := config.EnsureMcpConfig(mcpConfig); err != nil {
 			log.Printf("Warning: EnsureMcpConfig error: %v", err)
@@ -220,48 +231,6 @@ func main() {
 	}
 	if err := skills.EnsureSkills(); err != nil {
 		log.Printf("Warning: EnsureSkills error: %v", err)
-	}
-
-	// Start background file watcher for atomic hot-reloading of prompts and skills
-	fileWatcher, err := watcher.NewWatcher(
-		watcher.WithCallback(func() {
-			log.Println("[Hot-Reload] File changes detected. Reloading system rules and skills...")
-			if err := config.EnsureSystemRules(systemPrompt); err != nil {
-				log.Printf("Warning: hot-reload EnsureSystemRules error: %v", err)
-			}
-			if err := skills.EnsureSkills(); err != nil {
-				log.Printf("Warning: hot-reload EnsureSkills error: %v", err)
-			}
-		}),
-	)
-	if err != nil {
-		log.Printf("Warning: failed to create file watcher: %v", err)
-	} else {
-		homeDir, err := os.UserHomeDir()
-		if err != nil || homeDir == "" {
-			homeDir = "/root"
-		}
-
-		watchDirs := []string{
-			"/share/aerial-config",
-			"/share/aerial",
-			"/app/.agents/skills",
-			filepath.Join(homeDir, ".gemini", "skills"),
-			filepath.Join(homeDir, ".gemini", "config", "skills"),
-		}
-
-		for _, dir := range watchDirs {
-			if _, err := os.Stat(dir); err == nil {
-				if addErr := fileWatcher.AddRecursive(dir); addErr != nil {
-					log.Printf("Warning: failed to watch %s: %v", dir, addErr)
-				}
-			}
-		}
-
-		watcherCtx, watcherCancel := context.WithCancel(context.Background())
-		defer watcherCancel()
-		go fileWatcher.Start(watcherCtx)
-		defer func() { _ = fileWatcher.Close() }()
 	}
 
 	if _, err := os.Stat("/data"); err == nil {
@@ -298,9 +267,9 @@ func main() {
 		DB:             database,
 		AgyBin:         agyBin,
 		APIKey:         apiKey,
-		Model:          model,
+		Model:          cfg.Model,
 		SystemPrompt:   systemPrompt,
-		TimeoutMinutes: timeoutMinutes,
+		TimeoutMinutes: cfg.TimeoutMinutes,
 	})
 	pool.Start()
 	defer pool.Stop()
@@ -313,6 +282,78 @@ func main() {
 		}()
 	}
 
+	reloadConfig := func(source string) {
+		log.Printf("[%s] Changes detected. Reloading configuration, system rules, and skills...", source)
+		latestCfg, parseErr := config.LoadConfig()
+		if parseErr != nil {
+			log.Printf("[%s] Warning: Failed to parse config.yaml: %v", source, parseErr)
+			if dgSession != nil {
+				alertMsg := fmt.Sprintf("Failed to parse config.yaml:\n```\n%v\n```\nAerial has retained the Last Known Good Configuration (LKGC).", parseErr)
+				if alertErr := delivery.SendSystemAlert(dgSession, config.GetSystemChannel(), "Invalid Configuration File", alertMsg); alertErr != nil {
+					log.Printf("[%s] Warning: failed to send Discord alert: %v", source, alertErr)
+				}
+			}
+		}
+
+		latestModel := latestCfg.Model
+		latestTimeout := latestCfg.TimeoutMinutes
+		latestMcpConfig := config.LoadMCPConfig()
+
+		if apiKey != "" {
+			if err := config.EnsureAgySettings(apiKey, latestModel); err != nil {
+				log.Printf("[%s] Warning: EnsureAgySettings error: %v", source, err)
+			}
+		}
+		if len(latestMcpConfig) > 0 {
+			if err := config.EnsureMcpConfig(latestMcpConfig); err != nil {
+				log.Printf("[%s] Warning: EnsureMcpConfig error: %v", source, err)
+			}
+		}
+		pool.UpdateRuntimeConfig(latestModel, latestTimeout)
+		if err := config.EnsureSystemRules(systemPrompt); err != nil {
+			log.Printf("[%s] Warning: EnsureSystemRules error: %v", source, err)
+		}
+		if err := skills.EnsureSkills(); err != nil {
+			log.Printf("[%s] Warning: EnsureSkills error: %v", source, err)
+		}
+	}
+
+	// Start background file watcher for atomic hot-reloading of prompts and skills
+	fileWatcher, err := watcher.NewWatcher(
+		watcher.WithCallback(func() {
+			reloadConfig("Hot-Reload")
+		}),
+	)
+	if err != nil {
+		log.Printf("Warning: failed to create file watcher: %v", err)
+	} else {
+		homeDir, err := os.UserHomeDir()
+		if err != nil || homeDir == "" {
+			homeDir = "/root"
+		}
+
+		watchDirs := []string{
+			"/share/aerial-config",
+			"/share/aerial",
+			"/app/.agents/skills",
+			filepath.Join(homeDir, ".gemini", "skills"),
+			filepath.Join(homeDir, ".gemini", "config", "skills"),
+		}
+
+		for _, dir := range watchDirs {
+			if _, err := os.Stat(dir); err == nil {
+				if addErr := fileWatcher.AddRecursive(dir); addErr != nil {
+					log.Printf("Warning: failed to watch %s: %v", dir, addErr)
+				}
+			}
+		}
+
+		watcherCtx, watcherCancel := context.WithCancel(context.Background())
+		defer watcherCancel()
+		go fileWatcher.Start(watcherCtx)
+		defer func() { _ = fileWatcher.Close() }()
+	}
+
 	// Resume interrupted turns after Discord is attached
 	queue.RecoverInterrupted(database, pool)
 
@@ -321,22 +362,24 @@ func main() {
 	defer stopScheduler()
 
 	// Start background git synchronization worker for config & project repos
-	gitSyncRepos := []string{
-		"/share/aerial-config",
-		"/share/aerial",
+	gitSyncRepos := cfg.GitSync.Repositories
+	if len(gitSyncRepos) == 0 {
+		gitSyncRepos = []string{
+			"/share/aerial-config",
+			"/share/aerial",
+		}
 	}
+	syncInterval := 60 * time.Second
+	if d, err := time.ParseDuration(cfg.GitSync.Interval); err == nil && d > 0 {
+		syncInterval = d
+	}
+
 	stopGitSync := gitsync.StartPeriodicSync(
 		context.Background(),
-		60*time.Second,
+		syncInterval,
 		gitSyncRepos,
 		func(repo string) {
-			log.Printf("[GitSync] Updates detected in %s. Reloading system rules and skills...", repo)
-			if err := config.EnsureSystemRules(systemPrompt); err != nil {
-				log.Printf("Warning: gitsync EnsureSystemRules error: %v", err)
-			}
-			if err := skills.EnsureSkills(); err != nil {
-				log.Printf("Warning: gitsync EnsureSkills error: %v", err)
-			}
+			reloadConfig(fmt.Sprintf("GitSync: %s", filepath.Base(repo)))
 		},
 	)
 	defer stopGitSync()
@@ -359,7 +402,7 @@ func main() {
 	signal.Notify(stopChan, os.Interrupt, syscall.SIGTERM)
 
 	go func() {
-		log.Printf("Aerial Brain listening on port %s (model=%s, timeout=%dm)", portStr, model, timeoutMinutes)
+		log.Printf("Aerial Brain listening on port %s (model=%s, timeout=%dm)", portStr, cfg.Model, cfg.TimeoutMinutes)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Server failed: %v", err)
 		}

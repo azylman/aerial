@@ -167,4 +167,177 @@ func TestWriteAtomic(t *testing.T) {
 	}
 }
 
+func TestLoadConfigValidYAML(t *testing.T) {
+	tmpDir := t.TempDir()
+	yamlPath := filepath.Join(tmpDir, "config.yaml")
 
+	yamlContent := `
+model: "gemini-1.5-pro"
+timeout_minutes: 45
+timezone: "America/New_York"
+system_channel: "my-alerts"
+git_sync:
+  enabled: true
+  interval: "30s"
+  config_repo_url: "https://github.com/example/repo.git"
+  repositories:
+    - "/custom/path1"
+    - "/custom/path2"
+mcp_servers:
+  weather:
+    serverUrl: "http://weather:8080/mcp"
+`
+	if err := os.WriteFile(yamlPath, []byte(yamlContent), 0644); err != nil {
+		t.Fatalf("Failed to write test yaml: %v", err)
+	}
+
+	cfg, err := LoadConfigFromPaths(yamlPath)
+	if err != nil {
+		t.Fatalf("LoadConfigFromPaths failed: %v", err)
+	}
+
+	if cfg.Model != "gemini-1.5-pro" {
+		t.Errorf("Expected model 'gemini-1.5-pro', got %q", cfg.Model)
+	}
+	if cfg.TimeoutMinutes != 45 {
+		t.Errorf("Expected timeout 45, got %d", cfg.TimeoutMinutes)
+	}
+	if cfg.Timezone != "America/New_York" {
+		t.Errorf("Expected timezone 'America/New_York', got %q", cfg.Timezone)
+	}
+	if cfg.SystemChannel != "my-alerts" {
+		t.Errorf("Expected system channel 'my-alerts', got %q", cfg.SystemChannel)
+	}
+	if !cfg.GitSync.Enabled || cfg.GitSync.Interval != "30s" || cfg.GitSync.ConfigRepoUrl != "https://github.com/example/repo.git" {
+		t.Errorf("Unexpected GitSyncConfig: %+v", cfg.GitSync)
+	}
+	if len(cfg.GitSync.Repositories) != 2 || cfg.GitSync.Repositories[0] != "/custom/path1" {
+		t.Errorf("Unexpected GitSync Repositories: %v", cfg.GitSync.Repositories)
+	}
+	if len(cfg.McpServers) != 1 || cfg.McpServers["weather"] == nil {
+		t.Errorf("Unexpected McpServers: %v", cfg.McpServers)
+	}
+
+	// Verify getters
+	if GetTimezone() != "America/New_York" {
+		t.Errorf("GetTimezone expected 'America/New_York', got %q", GetTimezone())
+	}
+	if GetSystemChannel() != "my-alerts" {
+		t.Errorf("GetSystemChannel expected 'my-alerts', got %q", GetSystemChannel())
+	}
+	rtCfg := GetRuntimeConfig()
+	if rtCfg.Model != "gemini-1.5-pro" || rtCfg.TimeoutMinutes != 45 {
+		t.Errorf("GetRuntimeConfig returned unexpected struct: %+v", rtCfg)
+	}
+}
+
+func TestLoadConfigCorruptedYAML_LKGCFallback(t *testing.T) {
+	tmpDir := t.TempDir()
+	yamlPath := filepath.Join(tmpDir, "config.yaml")
+
+	// 1. Write initial valid YAML
+	validYAML := `
+model: "gemini-2.5-flash"
+timeout_minutes: 20
+system_channel: "dev-channel-1"
+`
+	if err := os.WriteFile(yamlPath, []byte(validYAML), 0644); err != nil {
+		t.Fatalf("Failed to write valid yaml: %v", err)
+	}
+
+	cfg, err := LoadConfigFromPaths(yamlPath)
+	if err != nil {
+		t.Fatalf("Initial LoadConfigFromPaths failed: %v", err)
+	}
+	if cfg.Model != "gemini-2.5-flash" || cfg.TimeoutMinutes != 20 {
+		t.Fatalf("Unexpected initial config: %+v", cfg)
+	}
+
+	// 2. Corrupt YAML with invalid syntax
+	corruptYAML := `
+model: [broken yaml invalid syntax: ::: {
+timeout_minutes:
+`
+	if err := os.WriteFile(yamlPath, []byte(corruptYAML), 0644); err != nil {
+		t.Fatalf("Failed to overwrite with corrupt yaml: %v", err)
+	}
+
+	cfgAfter, errAfter := LoadConfigFromPaths(yamlPath)
+	if errAfter == nil {
+		t.Fatal("Expected error on corrupted YAML, got nil")
+	}
+
+	// Verify LKGC is retained
+	if cfgAfter.Model != "gemini-2.5-flash" || cfgAfter.TimeoutMinutes != 20 {
+		t.Errorf("Expected retained LKGC model 'gemini-2.5-flash' and timeout 20, got model=%q timeout=%d",
+			cfgAfter.Model, cfgAfter.TimeoutMinutes)
+	}
+	rtCfg := GetRuntimeConfig()
+	if rtCfg.Model != "gemini-2.5-flash" || rtCfg.SystemChannel != "dev-channel-1" {
+		t.Errorf("Expected GetRuntimeConfig() to retain LKGC, got %+v", rtCfg)
+	}
+}
+
+func TestLoadConfigEnvInterpolation(t *testing.T) {
+	tmpDir := t.TempDir()
+	yamlPath := filepath.Join(tmpDir, "config.yaml")
+
+	t.Setenv("TEST_EXPAND_MODEL", "interpolated-gemini-model")
+	t.Setenv("TEST_EXPAND_CHAN", "interpolated-channel")
+	t.Setenv("TEST_EXPAND_REPO", "https://github.com/interpolated/repo.git")
+
+	yamlContent := `
+model: "${TEST_EXPAND_MODEL}"
+system_channel: "${TEST_EXPAND_CHAN}"
+git_sync:
+  config_repo_url: "${TEST_EXPAND_REPO}"
+`
+	if err := os.WriteFile(yamlPath, []byte(yamlContent), 0644); err != nil {
+		t.Fatalf("Failed to write yaml: %v", err)
+	}
+
+	cfg, err := LoadConfigFromPaths(yamlPath)
+	if err != nil {
+		t.Fatalf("LoadConfigFromPaths failed: %v", err)
+	}
+
+	if cfg.Model != "interpolated-gemini-model" {
+		t.Errorf("Expected interpolated model 'interpolated-gemini-model', got %q", cfg.Model)
+	}
+	if cfg.SystemChannel != "interpolated-channel" {
+		t.Errorf("Expected interpolated system_channel 'interpolated-channel', got %q", cfg.SystemChannel)
+	}
+	if cfg.GitSync.ConfigRepoUrl != "https://github.com/interpolated/repo.git" {
+		t.Errorf("Expected interpolated repo url, got %q", cfg.GitSync.ConfigRepoUrl)
+	}
+}
+
+func TestLoadConfigMissingFileFallbacks(t *testing.T) {
+	// Reset runtime config to clean defaults
+	runtimeConfigMu.Lock()
+	currentRuntimeConfig = Config{}
+	runtimeConfigMu.Unlock()
+
+	t.Setenv("AGY_MODEL", "env-model-fallback")
+	t.Setenv("TIMEOUT_MINUTES", "28")
+	t.Setenv("DEFAULT_TIMEZONE", "Europe/London")
+	t.Setenv("SYSTEM_CHANNEL", "env-system-chan")
+
+	cfg, err := LoadConfigFromPaths("/non/existent/file/for/sure/config.yaml")
+	if err != nil {
+		t.Fatalf("LoadConfigFromPaths failed for missing file: %v", err)
+	}
+
+	if cfg.Model != "env-model-fallback" {
+		t.Errorf("Expected fallback to env model 'env-model-fallback', got %q", cfg.Model)
+	}
+	if cfg.TimeoutMinutes != 28 {
+		t.Errorf("Expected fallback timeout 28, got %d", cfg.TimeoutMinutes)
+	}
+	if cfg.Timezone != "Europe/London" {
+		t.Errorf("Expected fallback timezone 'Europe/London', got %q", cfg.Timezone)
+	}
+	if cfg.SystemChannel != "env-system-chan" {
+		t.Errorf("Expected fallback channel 'env-system-chan', got %q", cfg.SystemChannel)
+	}
+}

@@ -3,6 +3,8 @@ package delivery
 import (
 	"strings"
 	"testing"
+
+	"github.com/bwmarrin/discordgo"
 )
 
 func TestSplitMessage(t *testing.T) {
@@ -128,3 +130,72 @@ func TestSplitMessageMarkdownFences(t *testing.T) {
 		t.Errorf("Expected second chunk to reopen with ```python, got %q", res[1])
 	}
 }
+
+func TestResolveChannelByNameOrID(t *testing.T) {
+	// 1. Nil session
+	if _, err := ResolveChannelByNameOrID(nil, "aerial-dev"); err == nil {
+		t.Error("Expected error for nil session, got nil")
+	}
+
+	// 2. Empty string
+	sess, _ := discordgo.New("Bot dummy-token")
+	if _, err := ResolveChannelByNameOrID(sess, ""); err == nil {
+		t.Error("Expected error for empty channel name, got nil")
+	}
+	if _, err := ResolveChannelByNameOrID(sess, "#"); err == nil {
+		t.Error("Expected error for '#' channel name, got nil")
+	}
+
+	// 3. Snowflake numeric ID
+	snowflake := "123456789012345678"
+	resolved, err := ResolveChannelByNameOrID(sess, snowflake)
+	if err != nil || resolved != snowflake {
+		t.Errorf("Expected snowflake %q, got %q (err: %v)", snowflake, resolved, err)
+	}
+
+	// 4. Channel in State.Guilds
+	sess.State.GuildAdd(&discordgo.Guild{
+		ID: "guild-1",
+		Channels: []*discordgo.Channel{
+			{ID: "chan-general", Name: "general"},
+			{ID: "chan-aerial-dev", Name: "aerial-dev"},
+		},
+	})
+
+	// Name without #
+	resolved, err = ResolveChannelByNameOrID(sess, "aerial-dev")
+	if err != nil || resolved != "chan-aerial-dev" {
+		t.Errorf("Expected chan-aerial-dev, got %q (err: %v)", resolved, err)
+	}
+
+	// Name with #
+	resolved, err = ResolveChannelByNameOrID(sess, "#aerial-dev")
+	if err != nil || resolved != "chan-aerial-dev" {
+		t.Errorf("Expected chan-aerial-dev, got %q (err: %v)", resolved, err)
+	}
+
+	// Case-insensitive name
+	resolved, err = ResolveChannelByNameOrID(sess, "#AERIAL-DEV")
+	if err != nil || resolved != "chan-aerial-dev" {
+		t.Errorf("Expected chan-aerial-dev for #AERIAL-DEV, got %q (err: %v)", resolved, err)
+	}
+
+	// Non-existent channel
+	if _, err := ResolveChannelByNameOrID(sess, "non-existent-channel"); err == nil {
+		t.Error("Expected error for non-existent channel name, got nil")
+	}
+}
+
+func TestSendSystemAlert(t *testing.T) {
+	// Nil session
+	if err := SendSystemAlert(nil, "aerial-dev", "Title", "Body"); err == nil {
+		t.Error("Expected error for nil session, got nil")
+	}
+
+	sess, _ := discordgo.New("Bot dummy-token")
+	// Channel not found
+	if err := SendSystemAlert(sess, "missing-chan", "Title", "Body"); err == nil {
+		t.Error("Expected error for missing channel, got nil")
+	}
+}
+
