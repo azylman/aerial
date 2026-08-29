@@ -15,49 +15,49 @@ The root repository workspace is located at `/share/aerial`.
 
 ```text
 /share/aerial/
-├── brain/               # Go backend (Discord gateway funnel, queue worker pool, agy runner, SQLite memory)
-├── discord-mcp/         # Discord MCP server (Streamable HTTP /mcp)
-├── docker-mcp/          # Docker socket MCP proxy (supergateway + mcp/docker)
-├── github-mcp/          # GitHub Copilot MCP proxy
-├── scheduler-mcp/       # Persistent SQLite task scheduler MCP
-├── .agents/skills/      # Built-in skills tracked in Git (baked into brain image)
-├── skills/              # User custom runtime skills (ignored by Git)
-├── docs/specs/          # Architectural specifications and design documents
-├── docker-compose.yml   # Multi-container orchestration
-└── GEMINI.md            # Topology and agent instructions
+â”œâ”€â”€ brain/               # Go backend (Discord gateway funnel, queue worker pool, agy runner, SQLite memory)
+â”œâ”€â”€ discord-mcp/         # Discord MCP server (Streamable HTTP /mcp)
+â”œâ”€â”€ docker-mcp/          # Docker socket MCP proxy (supergateway + mcp/docker)
+â”œâ”€â”€ github-mcp/          # GitHub Copilot MCP proxy
+â”œâ”€â”€ scheduler-mcp/       # Persistent SQLite task scheduler MCP
+â”œâ”€â”€ .agents/skills/      # Built-in skills tracked in Git (baked into brain image)
+â”œâ”€â”€ skills/              # User custom runtime skills (ignored by Git)
+â”œâ”€â”€ docs/specs/          # Architectural specifications and design documents
+â”œâ”€â”€ docker-compose.yml   # Multi-container orchestration
+â””â”€â”€ GEMINI.md            # Topology and agent instructions
 ```
 
 ---
 
-## 2. The 7-Step Engineering Workflow
+## 2. The 9-Step Engineering Workflow
 
 Whenever undertaking feature development, architectural changes, bug fixes, or system modifications, Aerial must follow this strict workflow:
 
 ```
 Step 1: Brainstorm & Design Spec (docs/specs/...)
-   │
-   ▼
+   â”‚
+   â–¼
 Step 2: Write Initial Code (Modular Packages)
-   │
-   ▼
+   â”‚
+   â–¼
 Step 3: Senior Code Review (Concurrency, Leaks, DB Safety)
-   │
-   ▼
+   â”‚
+   â–¼
 Step 4: Adversarial Critique / Devil's Advocate (Edge Cases, Cascades)
-   │
-   ▼
+   â”‚
+   â–¼
 Step 5: Human Review Checkpoint (Synthesize 3-way findings & get approval)
-   │
-   ▼
+   â”‚
+   â–¼
 Step 6: Implement Approved Refinements
-   │
-   ▼
+   â”‚
+   â–¼
 Step 7: Comprehensive Unit Tests & Complexity Comparison
-   │
-   ▼
+   â”‚
+   â–¼
 Step 8: Pre-Commit Test Verification Gate
-   │
-   ▼
+   â”‚
+   â–¼
 Step 9: Commit, Push & Continuous Deployment
 ```
 
