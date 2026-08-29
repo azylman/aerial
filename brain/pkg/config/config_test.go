@@ -341,3 +341,43 @@ func TestLoadConfigMissingFileFallbacks(t *testing.T) {
 		t.Errorf("Expected fallback channel 'env-system-chan', got %q", cfg.SystemChannel)
 	}
 }
+
+func TestLoadMCPConfig_MergeCustomWithDefaults(t *testing.T) {
+	// Set custom mcp_servers in runtime config
+	runtimeConfigMu.Lock()
+	currentRuntimeConfig = Config{
+		Model: "Gemini 3.6 Flash (Low)",
+		McpServers: map[string]json.RawMessage{
+			"brave-search": json.RawMessage(`{"serverUrl":"http://brave-mcp:4005/mcp"}`),
+			"custom-api":   json.RawMessage(`{"serverUrl":"https://mcp.example.com/mcp","headers":{"Authorization":"Bearer secret123"}}`),
+		},
+	}
+	runtimeConfigMu.Unlock()
+
+	raw := LoadMCPConfig()
+	var res struct {
+		McpServers map[string]interface{} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(raw, &res); err != nil {
+		t.Fatalf("Failed to unmarshal LoadMCPConfig output: %v", err)
+	}
+
+	// Must contain default servers
+	if _, ok := res.McpServers["discord"]; !ok {
+		t.Errorf("Expected built-in 'discord' server in merged config")
+	}
+	if _, ok := res.McpServers["scheduler"]; !ok {
+		t.Errorf("Expected built-in 'scheduler' server in merged config")
+	}
+	if _, ok := res.McpServers["docker"]; !ok {
+		t.Errorf("Expected built-in 'docker' server in merged config")
+	}
+
+	// Must contain custom servers
+	if _, ok := res.McpServers["brave-search"]; !ok {
+		t.Errorf("Expected custom 'brave-search' server in merged config")
+	}
+	if _, ok := res.McpServers["custom-api"]; !ok {
+		t.Errorf("Expected custom 'custom-api' server in merged config")
+	}
+}
