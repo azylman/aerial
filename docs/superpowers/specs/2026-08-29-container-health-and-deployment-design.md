@@ -6,11 +6,15 @@
 Aerial runs as a set of containerized services on a miniPC host (Home Assistant OS / Docker). The core orchestrator (`aerial-brain`) is an autonomous agent daemon that frequently modifies its own repository, dependencies, and configuration.
 
 ### 1.2 The Failure Mode (Root Cause)
-Previously, `aerial-brain` attempted to apply code updates by executing `docker compose up -d --build` directly from *inside* its own running container via a mounted `/var/run/docker.sock`. 
+Previously, Aerial's built-in skills (`.agents/skills/self-improvement/SKILL.md` and `.agents/skills/self-update/SKILL.md`) instructed the agent to apply code updates by executing:
+```bash
+(sleep 2 && docker compose -f /share/aerial/docker-compose.yml up -d --no-build brain) &
+```
+directly from *inside* its own running container via a mounted `/var/run/docker.sock`. 
 
 When Docker Compose reached the stage of recreating `aerial-brain`:
 1. It sent `SIGTERM` to the active `aerial-brain` container.
-2. Stopping the container immediately terminated the child `docker compose` process executing inside it.
+2. Stopping the container immediately terminated the background subshell and child `docker compose` process executing inside it.
 3. The termination occurred **before** Docker could issue the `docker start` commands for the newly created replacement container.
 4. The entire stack was left in an unstarted `Created` state, taking the Discord bot and all background automation offline until manual SSH intervention.
 
@@ -129,16 +133,23 @@ When Docker Compose reached the stage of recreating `aerial-brain`:
 
 ---
 
-## 4. Agent Operational Invariants
+## 4. Agent Operational Rules & Skill Updates
 
-Update `SYSTEM.md` and `.agents/rules/system_instructions.md` to establish the deployment invariant:
+Update all operational documentation and built-in agent skills to eliminate in-container `docker compose` execution:
 
-> **Stack Deployment Invariant**:
-> Aerial utilizes automated continuous deployment via GitHub Container Registry (GHCR) and Watchtower.
-> When implementing code changes, bug fixes, or enhancements:
-> 1. Verify all unit tests pass locally with `go test ./...`.
-> 2. Commit and push your changes to `origin/main`.
-> 3. **NEVER** run `docker compose build`, `docker compose up`, or `docker restart` from within the `aerial-brain` container. Watchtower on the host will automatically pull the new GHCR image and recreate the container within 60 seconds.
+1. **`.agents/skills/self-improvement/SKILL.md`**:
+   - Replace Step 9 with the GHCR + Watchtower continuous delivery workflow.
+   - Remove all instructions referencing `docker compose up -d brain` or `(sleep 2 && docker compose up)`.
+2. **`.agents/skills/self-update/SKILL.md`**:
+   - Update runbook: Self-update consists solely of verifying tests and pushing commits to `main`. Watchtower executes the container swap.
+3. **`SYSTEM.md` & `.agents/rules/system_instructions.md`**:
+   - Add the strict **Stack Deployment Invariant**:
+     > **Stack Deployment Invariant**:
+     > Aerial utilizes automated continuous deployment via GitHub Container Registry (GHCR) and Watchtower.
+     > When implementing code changes, bug fixes, or enhancements:
+     > 1. Verify all unit tests pass locally with `go test ./...`.
+     > 2. Commit and push your changes to `origin/main`.
+     > 3. **NEVER** run `docker compose build`, `docker compose up`, or `docker restart` from within the `aerial-brain` container. Watchtower on the host will automatically pull the new GHCR image and recreate the container within 60 seconds.
 
 ---
 
