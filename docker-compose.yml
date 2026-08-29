@@ -6,11 +6,15 @@ services:
   #    and connects to remote MCP network servers.
   # ----------------------------------------------------------------------------
   brain:
+    image: ghcr.io/azylman/aerial-brain:latest
     build:
       context: .
       dockerfile: brain/Dockerfile
     container_name: aerial-brain
     restart: unless-stopped
+    stop_grace_period: 60s
+    labels:
+      autoheal: "true"
     environment:
       - PORT=8080
       - GEMINI_API_KEY=${GEMINI_API_KEY}
@@ -22,9 +26,6 @@ services:
       - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN}
       - DEFAULT_TIMEZONE=${DEFAULT_TIMEZONE:-America/Los_Angeles}
       - TZ=${DEFAULT_TIMEZONE:-America/Los_Angeles}
-      - OLLAMA_URL=${OLLAMA_URL:-http://ollama:11434}
-      - MEMORY_MAX_FACTS=${MEMORY_MAX_FACTS:-10}
-      - MEMORY_EXTRACTION_CRON=${MEMORY_EXTRACTION_CRON:-0 * * * *}
     volumes:
       - aerial-brain-data:/data
       - aerial-brain-gemini:/root/.gemini
@@ -36,10 +37,10 @@ services:
       - aerial-net
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-      start_period: 5s
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
     depends_on:
       scheduler-mcp:
         condition: service_healthy
@@ -47,19 +48,54 @@ services:
         condition: service_healthy
       docker-mcp:
         condition: service_healthy
-      ollama:
-        condition: service_healthy
 
   # ----------------------------------------------------------------------------
-  # 2. Outbound MCP: Scheduler MCP Server
+  # 2. Automated Updates: Watchtower
+  #    Automatically monitors GHCR container images and performs rolling restarts.
+  # ----------------------------------------------------------------------------
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: aerial-watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - WATCHTOWER_POLL_INTERVAL=60
+      - WATCHTOWER_CLEANUP=true
+      - WATCHTOWER_INCLUDE_SELF=false
+      - WATCHTOWER_ROLLING_RESTART=true
+    networks:
+      - aerial-net
+
+  # ----------------------------------------------------------------------------
+  # 3. Container Auto-Healing: Autoheal
+  #    Monitors Docker healthchecks and restarts unhealthy containers automatically.
+  # ----------------------------------------------------------------------------
+  autoheal:
+    image: willfarrell/autoheal:latest
+    container_name: aerial-autoheal
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - AUTOHEAL_CONTAINER_LABEL=autoheal
+      - AUTOHEAL_INTERVAL=15
+      - AUTOHEAL_START_PERIOD=0
+      - AUTOHEAL_DEFAULT_STOP_TIMEOUT=20
+    networks:
+      - aerial-net
+
+  # ----------------------------------------------------------------------------
+  # 4. Outbound MCP: Scheduler MCP Server
   #    Provides persistent schedule registration & management tools over HTTP.
   # ----------------------------------------------------------------------------
   scheduler-mcp:
-    build:
-      context: ./scheduler-mcp
-      dockerfile: Dockerfile
+    image: ghcr.io/azylman/aerial-scheduler-mcp:latest
+    build: ./scheduler-mcp
     container_name: aerial-scheduler-mcp
     restart: unless-stopped
+    labels:
+      autoheal: "true"
     environment:
       - DEFAULT_TIMEZONE=${DEFAULT_TIMEZONE:-America/Los_Angeles}
       - TZ=${DEFAULT_TIMEZONE:-America/Los_Angeles}
@@ -69,18 +105,22 @@ services:
       - aerial-net
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
-      interval: 10s
+      interval: 15s
       timeout: 5s
       retries: 3
+      start_period: 30s
 
   # ----------------------------------------------------------------------------
-  # 3. Outbound MCP: Discord MCP Server
+  # 5. Outbound MCP: Discord MCP Server
   #    Provides Discord tools (send message, create thread, read history) over HTTP.
   # ----------------------------------------------------------------------------
   discord-mcp:
+    image: ghcr.io/azylman/aerial-discord-mcp:latest
     build: ./discord-mcp
     container_name: aerial-discord-mcp
     restart: unless-stopped
+    labels:
+      autoheal: "true"
     environment:
       - PORT=4001
       - DISCORD_TOKEN=${DISCORD_BOT_TOKEN}
@@ -91,19 +131,22 @@ services:
       - aerial-net
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:4001/health"]
-      interval: 10s
+      interval: 15s
       timeout: 5s
-      retries: 5
-      start_period: 10s
+      retries: 3
+      start_period: 30s
 
   # ----------------------------------------------------------------------------
-  # 3. Outbound MCP: Docker Host MCP Server
+  # 6. Outbound MCP: Docker Host MCP Server
   #    Wraps the official mcp/docker image with supergateway translation proxy.
   # ----------------------------------------------------------------------------
   docker-mcp:
+    image: ghcr.io/azylman/aerial-docker-mcp:latest
     build: ./docker-mcp
     container_name: aerial-docker-mcp
     restart: unless-stopped
+    labels:
+      autoheal: "true"
     environment:
       - PORT=4002
     volumes:
@@ -114,19 +157,22 @@ services:
       - aerial-net
     healthcheck:
       test: ["CMD-SHELL", "nc -z 127.0.0.1 4002 || exit 1"]
-      interval: 10s
+      interval: 15s
       timeout: 5s
-      retries: 5
-      start_period: 10s
+      retries: 3
+      start_period: 30s
 
   # ----------------------------------------------------------------------------
-  # 4. Outbound MCP: GitHub MCP Server
+  # 7. Outbound MCP: GitHub MCP Server
   #    Wraps the official GitHub MCP server with supergateway translation proxy.
   # ----------------------------------------------------------------------------
   github-mcp:
+    image: ghcr.io/azylman/aerial-github-mcp:latest
     build: ./github-mcp
     container_name: aerial-github-mcp
     restart: unless-stopped
+    labels:
+      autoheal: "true"
     environment:
       - PORT=4003
       - GITHUB_PERSONAL_ACCESS_TOKEN=${GITHUB_PAT}
@@ -138,13 +184,37 @@ services:
       - aerial-net
     healthcheck:
       test: ["CMD-SHELL", "nc -z 127.0.0.1 4003 || exit 1"]
-      interval: 10s
+      interval: 15s
       timeout: 5s
-      retries: 5
-      start_period: 10s
+      retries: 3
+      start_period: 30s
 
   # ----------------------------------------------------------------------------
-  # 5. Observability & Visualization: Agentsview Web Dashboard
+  # 8. Local LLM / Embeddings: Ollama Service
+  #    Provides local AI models & embedding generations with persistent storage.
+  # ----------------------------------------------------------------------------
+  ollama:
+    image: ghcr.io/azylman/aerial-ollama:latest
+    build: ./docker/ollama
+    container_name: aerial-ollama
+    restart: unless-stopped
+    labels:
+      autoheal: "true"
+    volumes:
+      - aerial-ollama-data:/root/.ollama
+    ports:
+      - "${OLLAMA_HOST_PORT:-11434}:11434"
+    networks:
+      - aerial-net
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:11434/api/version"]
+      interval: 30s
+      timeout: 10s
+      retries: 4
+      start_period: 180s
+
+  # ----------------------------------------------------------------------------
+  # 9. Observability & Visualization: Agentsview Web Dashboard
   #    Local-first web UI for searching, analyzing, and visually inspecting
   #    Antigravity agent transcripts and session traces.
   # ----------------------------------------------------------------------------
@@ -164,29 +234,6 @@ services:
     networks:
       - aerial-net
 
-  # ----------------------------------------------------------------------------
-  # 6. Local Embedding Service: Ollama (bge-small-en pre-baked)
-  #    Provides vector embeddings for Aerial's semantic memory RAG system.
-  # ----------------------------------------------------------------------------
-  ollama:
-    build:
-      context: ./docker/ollama
-      dockerfile: Dockerfile
-    container_name: aerial-ollama
-    restart: unless-stopped
-    ports:
-      - "${OLLAMA_HOST_PORT:-11434}:11434"
-    volumes:
-      - aerial-ollama-data:/root/.ollama
-    networks:
-      - aerial-net
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:11434/api/tags"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
-
 networks:
   aerial-net:
     name: aerial-net
@@ -197,7 +244,7 @@ volumes:
     name: aerial-brain-data
   aerial-brain-gemini:
     name: aerial-brain-gemini
-  aerial-agentsview-data:
-    name: aerial-agentsview-data
   aerial-ollama-data:
     name: aerial-ollama-data
+  aerial-agentsview-data:
+    name: aerial-agentsview-data
