@@ -2,6 +2,7 @@ package gitsync
 
 import (
 	"context"
+	"encoding/base64"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -334,4 +335,236 @@ func TestSyncRepo_SafeDirectory_Idempotent(t *testing.T) {
 		}
 	}
 }
+
+func TestSanitizeLog(t *testing.T) {
+	cases := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "clean log without tokens",
+			input:    "git clone completed successfully in /share/aerial-config",
+			expected: "git clone completed successfully in /share/aerial-config",
+		},
+		{
+			name:     "classic github PAT (ghp_)",
+			input:    "Error connecting with token ghp_1234567890abcdefABCDEF to repo",
+			expected: "Error connecting with token [REDACTED_TOKEN] to repo",
+		},
+		{
+			name:     "fine-grained PAT (github_pat_)",
+			input:    "fatal: authentication failed for github_pat_11ABCD_0123456789_abcdef",
+			expected: "fatal: authentication failed for [REDACTED_TOKEN]",
+		},
+		{
+			name:     "x-access-token embedded in URL",
+			input:    "fatal: unable to access 'https://x-access-token:ghp_secretToken123@github.com/org/repo.git/': 403",
+			expected: "fatal: unable to access 'https://[REDACTED_TOKEN]@github.com/org/repo.git/': 403",
+		},
+		{
+			name:     "basic authorization header",
+			input:    "-c http.extraHeader=AUTHORIZATION: basic eC1hY2Nlc3MtdG9rZW46Z2hwXzEyMzQ1",
+			expected: "-c http.extraHeader=AUTHORIZATION: [REDACTED_TOKEN]",
+		},
+		{
+			name:     "multiple tokens in string",
+			input:    "ghp_tokenA failed, trying github_pat_tokenB with basic dGVzdDp0ZXN0",
+			expected: "[REDACTED_TOKEN] failed, trying [REDACTED_TOKEN] with [REDACTED_TOKEN]",
+		},
+		{
+			name:     "oauth tokens (gho_ and ghu_)",
+			input:    "tokens gho_OAuthSecret123 and ghu_UserSecret456",
+			expected: "tokens [REDACTED_TOKEN] and [REDACTED_TOKEN]",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			actual := SanitizeLog(tc.input)
+			if actual != tc.expected {
+				t.Errorf("SanitizeLog(%q) =\n got:  %q\n want: %q", tc.input, actual, tc.expected)
+			}
+		})
+	}
+}
+
+func TestBuildAuthArgs(t *testing.T) {
+	// Empty PAT
+	if args := buildAuthArgs(""); len(args) != 0 {
+		t.Errorf("expected empty slice for empty pat, got %v", args)
+	}
+	if args := buildAuthArgs("   "); len(args) != 0 {
+		t.Errorf("expected empty slice for whitespace pat, got %v", args)
+	}
+
+	// Valid PAT
+	pat := "ghp_test12345"
+	args := buildAuthArgs(pat)
+	if len(args) != 2 || args[0] != "-c" {
+		t.Fatalf("unexpected auth args structure: %v", args)
+	}
+	expectedHeader := "http.extraHeader=AUTHORIZATION: basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:"+pat))
+	if args[1] != expectedHeader {
+		t.Errorf("expected header %q, got %q", expectedHeader, args[1])
+	}
+}
+
+func TestEnsureRepo_EmptyInputs(t *testing.T) {
+	if err := EnsureRepo(context.Background(), "", "https://github.com/example/repo.git", "pat"); err != nil {
+		t.Errorf("expected nil error for empty repoPath, got %v", err)
+	}
+	if err := EnsureRepo(context.Background(), "/some/path", "", "pat"); err != nil {
+		t.Errorf("expected nil error for empty repoUrl, got %v", err)
+	}
+}
+
+func TestEnsureRepo_CloneNewPath(t *testing.T) {
+	originDir, _, _ := setupGitRepos(t)
+
+	targetDir := filepath.Join(t.TempDir(), "cloned_new")
+	err := EnsureRepo(context.Background(), targetDir, originDir, "ghp_dummyToken")
+	if err != nil {
+		t.Fatalf("EnsureRepo failed for new path: %v", err)
+	}
+
+	// Verify README.md exists
+	readmePath := filepath.Join(targetDir, "README.md")
+	if data, err := os.ReadFile(readmePath); err != nil || !strings.Contains(string(data), "Initial commit") {
+		t.Fatalf("README.md not properly cloned: data=%s, err=%v", string(data), err)
+	}
+
+	// Verify .git/config does not contain PAT
+	gitConfigFile := filepath.Join(targetDir, ".git", "config")
+	configData, err := os.ReadFile(gitConfigFile)
+	if err != nil {
+		t.Fatalf("failed to read .git/config: %v", err)
+	}
+	if strings.Contains(string(configData), "ghp_dummyToken") {
+		t.Errorf("Plaintext token found in .git/config: %s", string(configData))
+	}
+
+	// Calling EnsureRepo again is a no-op / returns nil
+	if err := EnsureRepo(context.Background(), targetDir, originDir, "ghp_dummyToken"); err != nil {
+		t.Errorf("second EnsureRepo call failed: %v", err)
+	}
+}
+
+func TestEnsureRepo_AdoptionNonEmptyDir(t *testing.T) {
+	originDir, _, _ := setupGitRepos(t)
+
+	adoptDir := filepath.Join(t.TempDir(), "adopt_existing")
+	if err := os.MkdirAll(adoptDir, 0755); err != nil {
+		t.Fatalf("failed to create adopt dir: %v", err)
+	}
+
+	// Create local pre-existing files
+	localFile := filepath.Join(adoptDir, "AGENTS.md")
+	if err := os.WriteFile(localFile, []byte("# Local Custom Agents\n"), 0644); err != nil {
+		t.Fatalf("failed to create local file: %v", err)
+	}
+	customSkill := filepath.Join(adoptDir, "custom.txt")
+	if err := os.WriteFile(customSkill, []byte("local skill"), 0644); err != nil {
+		t.Fatalf("failed to create custom skill: %v", err)
+	}
+
+	err := EnsureRepo(context.Background(), adoptDir, originDir, "ghp_adoptToken")
+	if err != nil {
+		t.Fatalf("EnsureRepo adoption failed: %v", err)
+	}
+
+	// Check that local files are preserved intact
+	if data, err := os.ReadFile(localFile); err != nil || string(data) != "# Local Custom Agents\n" {
+		t.Errorf("Local AGENTS.md was corrupted or deleted: %s, %v", string(data), err)
+	}
+	if data, err := os.ReadFile(customSkill); err != nil || string(data) != "local skill" {
+		t.Errorf("Local custom.txt was corrupted or deleted: %s, %v", string(data), err)
+	}
+
+	// Check that .git exists
+	if _, err := os.Stat(filepath.Join(adoptDir, ".git")); err != nil {
+		t.Fatalf("Adopted directory missing .git: %v", err)
+	}
+
+	// Verify .git/config does not contain PAT
+	gitConfigFile := filepath.Join(adoptDir, ".git", "config")
+	configData, err := os.ReadFile(gitConfigFile)
+	if err != nil {
+		t.Fatalf("failed to read .git/config: %v", err)
+	}
+	if strings.Contains(string(configData), "ghp_adoptToken") {
+		t.Errorf("Plaintext token found in .git/config: %s", string(configData))
+	}
+
+	// Test that subsequent SyncRepo succeeds
+	hasChanges, err := SyncRepo(context.Background(), adoptDir)
+	if err != nil {
+		t.Errorf("SyncRepo failed on adopted directory: %v", err)
+	}
+	if hasChanges {
+		t.Errorf("Expected hasChanges=false on freshly adopted directory")
+	}
+}
+
+func TestEnsureRepo_ZeroPlaintextTokenInvariant_WithEmbeddedURL(t *testing.T) {
+	originDir, _, _ := setupGitRepos(t)
+
+	// Even if someone passes a URL with embedded credentials:
+	embeddedURL := "https://x-access-token:ghp_leakedSecret12345@github.com/azylman/aerial-config.git"
+	cleaned := cleanURL(embeddedURL)
+	if strings.Contains(cleaned, "ghp_leakedSecret12345") || strings.Contains(cleaned, "x-access-token") {
+		t.Errorf("cleanURL failed to strip credentials: %s", cleaned)
+	}
+	if cleaned != "https://github.com/azylman/aerial-config.git" {
+		t.Errorf("expected clean URL https://github.com/azylman/aerial-config.git, got %s", cleaned)
+	}
+
+	// Test EnsureRepo with originDir and PAT
+	targetDir := filepath.Join(t.TempDir(), "zero_token_check")
+	if err := EnsureRepo(context.Background(), targetDir, originDir, "ghp_secretTokenDiskCheck"); err != nil {
+		t.Fatalf("EnsureRepo failed: %v", err)
+	}
+
+	configBytes, err := os.ReadFile(filepath.Join(targetDir, ".git", "config"))
+	if err != nil {
+		t.Fatalf("failed to read .git/config: %v", err)
+	}
+	configStr := string(configBytes)
+	if strings.Contains(configStr, "ghp_secretTokenDiskCheck") {
+		t.Fatalf("FATAL: Token leaked into .git/config: %s", configStr)
+	}
+}
+
+func TestSyncRepo_AuthenticatedPull(t *testing.T) {
+	_, repoA, repoB := setupGitRepos(t)
+
+	// Set GITHUB_PAT env var
+	t.Setenv("GITHUB_PAT", "ghp_mockSyncPat123")
+
+	// Commit on repoA and push
+	f := filepath.Join(repoA, "auth_sync.txt")
+	if err := os.WriteFile(f, []byte("authenticated sync"), 0644); err != nil {
+		t.Fatalf("failed to write file: %v", err)
+	}
+	runGitCmd(t, repoA, "add", "auth_sync.txt")
+	runGitCmd(t, repoA, "commit", "-m", "authenticated commit")
+	runGitCmd(t, repoA, "push", "origin", "HEAD")
+
+	// SyncRepo on repoB should pull with auth args
+	hasChanges, err := SyncRepo(context.Background(), repoB)
+	if err != nil {
+		t.Fatalf("SyncRepo with GITHUB_PAT failed: %v", err)
+	}
+	if !hasChanges {
+		t.Errorf("Expected hasChanges=true after authenticated pull")
+	}
+
+	// Verify content
+	pulledFile := filepath.Join(repoB, "auth_sync.txt")
+	data, err := os.ReadFile(pulledFile)
+	if err != nil || string(data) != "authenticated sync" {
+		t.Errorf("Expected 'authenticated sync', got %q, err: %v", string(data), err)
+	}
+}
+
 

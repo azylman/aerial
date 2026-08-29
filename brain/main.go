@@ -205,6 +205,15 @@ func handleTranscripts(database *sql.DB) http.HandlerFunc {
 }
 
 func main() {
+	configRepoUrl := config.GetEnv("AERIAL_CONFIG_REPO_URL", "https://github.com/azylman/aerial-config.git")
+	pat := config.GetEnv("GITHUB_PAT", "")
+
+	bootCtx, bootCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	if err := gitsync.EnsureRepo(bootCtx, "/share/aerial-config", configRepoUrl, pat); err != nil {
+		log.Printf("[Startup Bootstrapping] Warning: Failed to ensure /share/aerial-config: %v. Proceeding with local configuration.", err)
+	}
+	bootCancel()
+
 	cfg, err := config.LoadConfig()
 	if err != nil {
 		log.Printf("Warning: initial LoadConfig error: %v", err)
