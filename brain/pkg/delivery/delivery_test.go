@@ -154,7 +154,7 @@ func TestResolveChannelByNameOrID(t *testing.T) {
 	}
 
 	// 4. Channel in State.Guilds
-	sess.State.GuildAdd(&discordgo.Guild{
+	_ = sess.State.GuildAdd(&discordgo.Guild{
 		ID: "guild-1",
 		Channels: []*discordgo.Channel{
 			{ID: "chan-general", Name: "general"},
