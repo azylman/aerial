@@ -79,8 +79,12 @@ func RankFacts(queryVector []float32, facts []db.FactWithEmbedding, minScore flo
 // RetrieveRelevantFacts fetches relevant stored facts for a given query string.
 // If vector embedding generation fails or times out (1s timeout + 1 retry), logs warning and returns empty slice gracefully.
 func RetrieveRelevantFacts(ctx context.Context, database *sql.DB, client *Client, queryText string, maxFacts int) ([]db.Fact, error) {
-	if database == nil || client == nil || strings.TrimSpace(queryText) == "" {
+	queryText = strings.TrimSpace(queryText)
+	if database == nil || client == nil || queryText == "" {
 		return nil, nil
+	}
+	if len(queryText) > 1000 {
+		queryText = queryText[:1000]
 	}
 
 	// Generate query embedding with BGE query prefix and 1 retry
