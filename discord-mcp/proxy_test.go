@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -131,7 +130,7 @@ func TestProxyHandlerEndToEnd(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{
 				"jsonrpc": "2.0",
-				"id": req.ID,
+				"id": 1,
 				"result": {
 					"tools": [
 						{"name": "discord_send", "description": "send"},
@@ -143,7 +142,7 @@ func TestProxyHandlerEndToEnd(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{
 				"jsonrpc": "2.0",
-				"id": req.ID,
+				"id": 1,
 				"result": {"content": [{"type": "text", "text": "executed"}]}
 			}`))
 		default:

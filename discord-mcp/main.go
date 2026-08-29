@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 )
@@ -114,3 +113,4 @@ func main() {
 	}
 	log.Println("[Discord-MCP] Server stopped.")
 }
+
