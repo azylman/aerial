@@ -3,59 +3,59 @@
 ## 1. System Overview & Component Topology
 This repository (`azylman/aerial`) is the root orchestration repository for the Aerial AI Assistant system, defining the standalone Docker Compose multi-container topology:
 
-```
-                       ???????????????????????????
-                       ?     Discord Gateway     ?
-                       ???????????????????????????
-                                   ? Mentions / Thread messages
-                                   ?
-                       ???????????????????????????
-                       ?          brain          ? ??? (SQLite /data/aerial.db)
-                       ? (Built-in Discord Funnel)
-                       ???????????????????????????
-                           ?                 ?
-             ???????????????                 ???????????????
-             ?                                             ?
-???????????????????????????                   ???????????????????????????
-?       discord-mcp       ?                   ?       docker-mcp        ?
-? (Port 4001: Discord API)?                   ? (Port 4002: Docker Host)?
-???????????????????????????                   ???????????????????????????
-             ?                                             ?
-             ?                                             ?
-     Discord Platform                       supergateway (Translation Proxy)
-                                                           ?
-                                                           ?
-                                            Official Docker MCP (mcp/docker)
-                                                           ?
-                                                           ?
-                                                  /var/run/docker.sock
+```text
+                               ┌──────────────────────────┐
+                               │     Discord Gateway      │
+                               └──────────────────────────┘
+                                             │ Mentions & Threads
+                                             ▼
+                               ┌──────────────────────────┐
+                               │       aerial-brain       │ ◄──► SQLite WAL (/data/aerial.db)
+                               │  - Built-in Gateway      │
+                               │  - Queue Worker Pool     │
+                               │  - Background Scheduler  │
+                               │  - Semantic Memory RAG   │
+                               └──────────────────────────┘
+                                             │
+                       ┌─────────────────────┼─────────────────────┐
+                       │                     │                     │
+         ┌─────────────▼─────────┐ ┌─────────▼─────────┐ ┌─────────▼─────────┐
+         │     scheduler-mcp     │ │    discord-mcp    │ │    docker-mcp     │
+         │ (Port 8080: Schedule) │ │(Port 4001: Discord│ │(Port 4002: Docker)│
+         └───────────────────────┘ └───────────────────┘ └───────────────────┘
+                       │                     │                     │
+         ┌─────────────▼─────────┐ ┌─────────▼─────────┐ ┌─────────▼─────────┐
+         │      github-mcp       │ │    aerial-ollama  │ │ aerial-agentsview │
+         │ (Port 4003: GitHub)   │ │(Port 11434: Embed)│ │(Port 8089: Web UI)│
+         └───────────────────────┘ └───────────────────┘ └───────────────────┘
+                       │                     │                     │
+         ┌─────────────▼─────────┐ ┌─────────▼─────────┐                   │
+         │   aerial-watchtower   │ │  aerial-autoheal  │ ──────────────────┘
+         │ (GHCR CD Supervisor)  │ │ (Health Supervisor│
+         └───────────────────────┘ └───────────────────┘
 ```
 
 1. **Execution Brain & Built-in Funnel** (`brain/`):
    - Execution runner executing headless Antigravity CLI (`agy`).
-   - Integrated Discord Gateway worker (`brain/funnel.go`) with continuous typing indicator refresh until response generation finishes.
-   - SQLite-backed conversation mapping (`/data/aerial.db`) for multi-turn thread continuity.
-   - Dynamically loads and expands MCP configurations (`mcp.config.json` / environment variables with `os.ExpandEnv`).
+   - Integrated Discord Gateway worker (`brain/funnel.go`) with continuous typing indicator refresh.
+   - SQLite-backed conversation mapping and message queue state machine (`/data/aerial.db`).
+   - Background scheduler monitor evaluating due crons and one-shots every 30s.
+   - Semantic memory RAG querying embeddings from `aerial-ollama`.
 
-2. **Discord MCP Server** (`discord-mcp/`):
-   - Remote Streamable HTTP endpoint (`http://discord-mcp:4001/mcp`).
-   - Clones upstream `mcp-discord` with thread tools from `azylman/ha-addon-discord-mcp`.
+2. **Outbound Model Context Protocol (MCP) Microservices**:
+   - `scheduler-mcp` (`scheduler-mcp/`): Persistent task scheduling server on port 8080.
+   - `discord-mcp` (`discord-mcp/`): Discord API tools on port 4001.
+   - `docker-mcp` (`docker-mcp/`): Container diagnostics via `supergateway` and `mcp/docker` on port 4002.
+   - `github-mcp` (`github-mcp/`): Repository operations via `supergateway` and `github-mcp-server` on port 4003.
 
-3. **Docker MCP Server** (`docker-mcp/`):
-   - Remote Streamable HTTP endpoint (`http://docker-mcp:4002/mcp`).
-   - Uses `supergateway` to expose official `mcp/docker` over `/var/run/docker.sock` with zero custom code.
-
-4. **GitHub MCP Server** (`github-mcp/`):
-   - Remote Streamable HTTP endpoint (`http://github-mcp:4003/mcp`).
-   - Exposes GitHub operations via `supergateway` and `ghcr.io/github/github-mcp-server`.
-
-5. **Agentsview Dashboard** (`agentsview`):
-   - Web observability dashboard running on port `8089` (`http://192.168.1.14:8089`).
-   - Indexes and renders Antigravity session transcripts and step traces.
+3. **Supervision & Observability**:
+   - `ollama` (`docker/ollama`): Local embeddings on port 11434.
+   - `agentsview`: Antigravity transcript and session visualizer on port 8089.
+   - `watchtower`: Polls GHCR every 60s for automatic rolling container updates.
+   - `autoheal`: Probes container healthchecks every 15s and auto-restarts unhealthy services.
 
 ## 2. Invariants & Architectural Rules
-- **Extensible Configuration**: Custom MCP servers belong in `mcp.config.json` with `${ENV_VAR}` placeholders or via `.env` credentials.
-- **Translation Over Custom Code**: Wherever possible, rely on upstream packages and generic translation proxies (`supergateway`) rather than custom server implementations.
-- **Zero In-Image MCPs**: All MCP servers must run as standalone network endpoints; do not install local stdio MCP packages inside `brain`.
-- **Secrets Isolation**: Secrets (API keys, bot tokens, webhooks, PATs) must NEVER be committed to Git. They are configured via `.env` files and referenced via environment variables in `docker-compose.yml`.
-- **Private Bridge Networking**: All inter-service communication happens over the `aerial-net` Docker bridge network using container service DNS names (`http://brain:8080`, `http://discord-mcp:4001`, `http://docker-mcp:4002`).
+- **Continuous Delivery Invariant**: All stack updates are deployed strictly by committing and pushing to `origin/main`. Watchtower handles container recreations out-of-band. Never run `docker compose` inside containers.
+- **Zero In-Image MCPs**: All MCP servers must run as standalone network endpoints on `aerial-net`.
+- **Private Bridge Networking**: All inter-service communication happens over `aerial-net` using container DNS names (`http://brain:8080`, `http://scheduler-mcp:8080`, `http://discord-mcp:4001`).
+- **Secrets Isolation**: API keys, bot tokens, and PATs are configured via `.env` files and referenced via environment variables in `docker-compose.yml`.
