@@ -1,7 +1,7 @@
 # Design Spec: Semantic Memory RAG System
 
 **Date**: 2026-08-28  
-**Status**: Approved / Refined  
+**Status**: Approved & Finalized  
 **Author**: Aerial AI  
 
 ---
@@ -12,30 +12,29 @@ The goal of this feature is to equip Aerial with a persistent, vector-search pow
 
 ---
 
-## 2. Key Architectural Decisions
+## 2. Key Architectural Decisions (Approved by Arcane)
 
 1. **Pre-Baked Ollama Docker Container**:
    - Ollama runs in a custom container image (`docker/ollama/Dockerfile`).
-   - The vector embedding model (`bge-small-en`) is pulled at Docker build time using a health-check readiness loop.
+   - The vector embedding model (`bge-small-en`) is pulled at Docker build time using a health-check readiness loop (`until curl -s http://localhost:11434/api/tags...`).
    - Aerial's `brain` service requires zero startup model downloads or warm-up calls.
 
 2. **Hourly Single-Flight Batch Extraction**:
    - A background cron worker runs every hour (`0 * * * *`).
+   - Uses Aerial's primary configured LLM (Gemini/Claude) to perform high-quality extraction of atomic facts from transcripts.
    - Protected by a Go single-flight mutex lock (`sync/mutex`) to prevent overlapping execution.
    - Scopes to conversations active in the last 12 hours where `last_fact_extracted_at < updated_at`.
-   - Tracks `last_fact_extracted_at DATETIME` on conversations to avoid duplicate processing.
 
-3. **Number-of-Facts Limit & Non-Blocking Timeout**:
+3. **Number-of-Facts Limit & Retry Timeout Guardrail**:
    - Context injection limits top $N$ facts (`MEMORY_MAX_FACTS`, default: `10`).
-   - Pre-message retrieval enforces a strict **800ms context timeout**. If Ollama is slow/offline, Aerial falls back gracefully without injected context.
+   - Pre-message retrieval uses a **1.0s timeout per attempt with 1 retry** (favoring retrieval accuracy over strict millisecond latency). If both attempts fail, Aerial proceeds gracefully without injected context.
 
 4. **Pure Go Vector Search & BGE Instruction Formatting**:
    - Calculates dot product over normalized $L_2$ `float32` embedding arrays in pure Go.
    - Asymmetric query embeddings prepend the BGE instruction prefix: `Represent this sentence for searching relevant passages:`.
 
-5. **Fact Rot Protection (Superseding)**:
-   - Facts include an `is_active BOOLEAN DEFAULT 1` column.
-   - When extracting new facts, vector similarity $> 0.85$ against older facts of the same category triggers an update marking outdated facts as inactive.
+5. **Simple Storage (No Superseding)**:
+   - Facts are stored straightforwardly without complex soft-deletion or vector superseding logic.
 
 ---
 
@@ -63,7 +62,7 @@ services:
   brain:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: brain/Dockerfile
     container_name: aerial-brain
     restart: unless-stopped
     environment:
@@ -106,7 +105,6 @@ CREATE TABLE IF NOT EXISTS facts (
     category TEXT NOT NULL,           -- e.g. 'user_preference', 'system_config', 'project_state'
     fact_text TEXT NOT NULL,          -- Atomic fact statement (1-2 sentences)
     importance_score REAL DEFAULT 1.0,-- Weight multiplier (0.1 - 1.0)
-    is_active INTEGER DEFAULT 1,      -- 1 = Active, 0 = Superseded / Inactive
     conversation_id TEXT,             -- Originating conversation ID
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
@@ -118,7 +116,6 @@ CREATE TABLE IF NOT EXISTS fact_embeddings (
     PRIMARY KEY (fact_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_facts_active_cat ON facts(is_active, category);
 CREATE INDEX IF NOT EXISTS idx_facts_conversation ON facts(conversation_id);
 ```
 
@@ -150,9 +147,8 @@ CREATE INDEX IF NOT EXISTS idx_facts_conversation ON facts(conversation_id);
      }
      ```
 
-3. **Embedding & Superseding Workflow**:
+3. **Embedding Generation & Storage**:
    - Call Ollama POST `http://ollama:11434/api/embeddings` (`model: "bge-small-en"`).
-   - Compute vector similarity against existing active facts in the same category. If similarity $> 0.85$, update existing fact `is_active = 0`.
    - Store new fact and embedding in SQLite transaction.
    - Update `conversations.last_fact_extracted_at = CURRENT_TIMESTAMP`.
 
@@ -163,10 +159,10 @@ CREATE INDEX IF NOT EXISTS idx_facts_conversation ON facts(conversation_id);
 1. **Query Embedding**:
    - Call Ollama POST `/api/embeddings` with prompt:  
      `Represent this sentence for searching relevant passages: <user_message>`
-   - Executed within an 800ms `context.WithTimeout`.
+   - Executed within a 1.0s `context.WithTimeout` with 1 retry on error/timeout.
 
 2. **Vector Ranking**:
-   - Query `facts` where `is_active = 1`.
+   - Query stored `facts` and `fact_embeddings`.
    - Compute dot product against query vector in pure Go:
      $$\text{Score} = \sum_{i=1}^{384} (Q_i \cdot F_i) \times \text{importance\_score}$$
    - Filter Score $> 0.45$, pick Top $N$ (`MEMORY_MAX_FACTS`).
@@ -184,7 +180,10 @@ CREATE INDEX IF NOT EXISTS idx_facts_conversation ON facts(conversation_id);
 
 ## 7. Next Steps in Workflow
 
-1. Human review of updated design spec (`docs/specs/2026-08-28-semantic-memory-rag.md`).
-2. Write modular package code (`pkg/memory`, schema migrations, Dockerfile).
-3. Senior Code Review & Verification.
-4. Pre-commit Docker build verification gate & deployment.
+1. Implement code:
+   - `docker/ollama/Dockerfile`
+   - `brain/pkg/db/db.go` (schema updates)
+   - `brain/pkg/memory/` (Ollama client, vector search, fact store, extraction pipeline)
+2. Comprehensive unit tests & test suite verification (`*_test.go`).
+3. Pre-commit Docker build verification gate (`docker compose build brain`).
+4. Deployment & health check.
