@@ -15,6 +15,7 @@ services:
     stop_grace_period: 60s
     labels:
       autoheal: "true"
+      com.centurylinklabs.watchtower.enable: "true"
     environment:
       - PORT=8080
       - GEMINI_API_KEY=${GEMINI_API_KEY}
@@ -64,6 +65,7 @@ services:
       - WATCHTOWER_CLEANUP=true
       - WATCHTOWER_INCLUDE_SELF=false
       - WATCHTOWER_ROLLING_RESTART=true
+      - WATCHTOWER_LABEL_ENABLE=true
     networks:
       - aerial-net
 
@@ -76,7 +78,7 @@ services:
     container_name: aerial-autoheal
     restart: unless-stopped
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - AUTOHEAL_CONTAINER_LABEL=autoheal
       - AUTOHEAL_INTERVAL=15
@@ -96,6 +98,7 @@ services:
     restart: unless-stopped
     labels:
       autoheal: "true"
+      com.centurylinklabs.watchtower.enable: "true"
     environment:
       - DEFAULT_TIMEZONE=${DEFAULT_TIMEZONE:-America/Los_Angeles}
       - TZ=${DEFAULT_TIMEZONE:-America/Los_Angeles}
@@ -121,6 +124,7 @@ services:
     restart: unless-stopped
     labels:
       autoheal: "true"
+      com.centurylinklabs.watchtower.enable: "true"
     environment:
       - PORT=4001
       - DISCORD_TOKEN=${DISCORD_BOT_TOKEN}
@@ -147,6 +151,7 @@ services:
     restart: unless-stopped
     labels:
       autoheal: "true"
+      com.centurylinklabs.watchtower.enable: "true"
     environment:
       - PORT=4002
     volumes:
@@ -173,6 +178,7 @@ services:
     restart: unless-stopped
     labels:
       autoheal: "true"
+      com.centurylinklabs.watchtower.enable: "true"
     environment:
       - PORT=4003
       - GITHUB_PERSONAL_ACCESS_TOKEN=${GITHUB_PAT}
@@ -200,6 +206,7 @@ services:
     restart: unless-stopped
     labels:
       autoheal: "true"
+      com.centurylinklabs.watchtower.enable: "true"
     volumes:
       - aerial-ollama-data:/root/.ollama
     ports:
