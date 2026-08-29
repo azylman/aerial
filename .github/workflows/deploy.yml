@@ -2,8 +2,9 @@ name: Continuous Delivery
 
 on:
   push:
-    branches:
-      - main
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
 
 permissions:
   contents: read
@@ -22,6 +23,9 @@ jobs:
         with:
           go-version: '1.22'
           cache: true
+          cache-dependency-path: |
+            brain/go.sum
+            scheduler-mcp/go.sum
 
       - name: Test Brain
         run: |
@@ -43,38 +47,45 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         include:
           - service: brain
             context: .
             file: ./brain/Dockerfile
-            image: ghcr.io/azylman/aerial-brain
+            image_name: aerial-brain
           - service: scheduler-mcp
             context: ./scheduler-mcp
             file: ./scheduler-mcp/Dockerfile
-            image: ghcr.io/azylman/aerial-scheduler-mcp
+            image_name: aerial-scheduler-mcp
           - service: discord-mcp
             context: ./discord-mcp
             file: ./discord-mcp/Dockerfile
-            image: ghcr.io/azylman/aerial-discord-mcp
+            image_name: aerial-discord-mcp
           - service: docker-mcp
             context: ./docker-mcp
             file: ./docker-mcp/Dockerfile
-            image: ghcr.io/azylman/aerial-docker-mcp
+            image_name: aerial-docker-mcp
           - service: github-mcp
             context: ./github-mcp
             file: ./github-mcp/Dockerfile
-            image: ghcr.io/azylman/aerial-github-mcp
+            image_name: aerial-github-mcp
           - service: ollama
             context: ./docker/ollama
             file: ./docker/ollama/Dockerfile
-            image: ghcr.io/azylman/aerial-ollama
+            image_name: aerial-ollama
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+
+      - name: Lowercase Repository Owner
+        id: repo_owner
+        run: echo "owner=${OWNER,,}" >> $GITHUB_OUTPUT
+        env:
+          OWNER: ${{ github.repository_owner }}
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
@@ -88,9 +99,9 @@ jobs:
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.file }}
-          push: true
+          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           tags: |
-            ${{ matrix.image }}:latest
-            ${{ matrix.image }}:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+            ghcr.io/${{ steps.repo_owner.outputs.owner }}/${{ matrix.image_name }}:latest
+            ghcr.io/${{ steps.repo_owner.outputs.owner }}/${{ matrix.image_name }}:${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
