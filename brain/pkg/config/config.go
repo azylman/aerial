@@ -427,18 +427,33 @@ func EnsureSystemRules(customPrompt string) error {
 }
 
 func LoadMCPConfig() json.RawMessage {
-	cfg := GetRuntimeConfig()
-	if len(cfg.McpServers) > 0 {
-		mcpRoot := map[string]interface{}{
-			"mcpServers": cfg.McpServers,
+	// 1. Start with built-in default MCP microservices
+	mergedServers := map[string]interface{}{
+		"scheduler": map[string]interface{}{
+			"serverUrl": "http://scheduler-mcp:8080/mcp",
+		},
+		"discord": map[string]interface{}{
+			"serverUrl": "http://discord-mcp:4001/mcp",
+		},
+		"docker": map[string]interface{}{
+			"serverUrl": "http://docker-mcp:4002/sse",
+		},
+	}
+	if pat := os.Getenv("GITHUB_PAT"); pat != "" {
+		mergedServers["github"] = map[string]interface{}{
+			"serverUrl": "http://github-mcp:4003/sse",
 		}
-		if b, err := json.Marshal(mcpRoot); err == nil {
-			expanded := os.ExpandEnv(string(b))
-			return json.RawMessage(expanded)
+	}
+	if haToken := os.Getenv("HA_TOKEN"); haToken != "" {
+		mergedServers["ha-mcp"] = map[string]interface{}{
+			"serverUrl": haToken,
 		}
 	}
 
+	// 2. Check for file-based overrides (e.g. /share/aerial-config/mcp.config.json)
 	configPaths := []string{
+		"/share/aerial-config/mcp.config.json",
+		"/share/aerial-config/mcp.json",
 		"/config/mcp.config.json",
 		"/config/mcp.json",
 		"/data/mcp.config.json",
@@ -474,38 +489,41 @@ func LoadMCPConfig() json.RawMessage {
 		}
 	}
 
-	if len(rawBytes) == 0 {
-		defaultConfig := map[string]interface{}{
-			"mcpServers": map[string]interface{}{
-				"scheduler": map[string]interface{}{
-					"serverUrl": "http://scheduler-mcp:8080/mcp",
-				},
-				"discord": map[string]interface{}{
-					"serverUrl": "http://discord-mcp:4001/mcp",
-				},
-				"docker": map[string]interface{}{
-					"serverUrl": "http://docker-mcp:4002/sse",
-				},
-			},
-		}
-		if mcpServers, ok := defaultConfig["mcpServers"].(map[string]interface{}); ok {
-			if pat := os.Getenv("GITHUB_PAT"); pat != "" {
-				mcpServers["github"] = map[string]interface{}{
-					"serverUrl": "http://github-mcp:4003/sse",
+	if len(rawBytes) > 0 {
+		var parsed map[string]interface{}
+		if err := json.Unmarshal(rawBytes, &parsed); err == nil {
+			if servers, ok := parsed["mcpServers"].(map[string]interface{}); ok {
+				for k, v := range servers {
+					mergedServers[k] = v
 				}
 			}
-			if haToken := os.Getenv("HA_TOKEN"); haToken != "" {
-				mcpServers["ha-mcp"] = map[string]interface{}{
-					"serverUrl": haToken,
-				}
-			}
-		}
-		if b, err := json.Marshal(defaultConfig); err == nil {
-			rawBytes = b
 		}
 	}
 
-	expanded := os.ExpandEnv(string(rawBytes))
+	// 3. Overlay custom MCP servers from config.yaml
+	cfg := GetRuntimeConfig()
+	if len(cfg.McpServers) > 0 {
+		for k, v := range cfg.McpServers {
+			var parsedVal interface{}
+			if err := json.Unmarshal(v, &parsedVal); err == nil {
+				mergedServers[k] = parsedVal
+			} else {
+				mergedServers[k] = v
+			}
+		}
+	}
+
+	finalConfig := map[string]interface{}{
+		"mcpServers": mergedServers,
+	}
+
+	outBytes, err := json.Marshal(finalConfig)
+	if err != nil {
+		log.Printf("Error marshaling merged MCP config: %v", err)
+		return json.RawMessage(`{"mcpServers":{}}`)
+	}
+
+	expanded := os.ExpandEnv(string(outBytes))
 	return json.RawMessage(expanded)
 }
 
