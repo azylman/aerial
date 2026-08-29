@@ -2,8 +2,10 @@ package db
 
 import (
 	"database/sql"
+	"encoding/binary"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -133,6 +135,22 @@ func InitDB(dbPath string) (*sql.DB, error) {
 		created_at DATETIME NOT NULL
 	);
 	CREATE INDEX IF NOT EXISTS idx_cron_schedules_next_run_at ON cron_schedules(enabled, next_run_at);
+
+	CREATE TABLE IF NOT EXISTS facts (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		category TEXT NOT NULL,
+		fact_text TEXT NOT NULL,
+		importance_score REAL DEFAULT 1.0,
+		conversation_id TEXT,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+
+	CREATE TABLE IF NOT EXISTS fact_embeddings (
+		fact_id INTEGER NOT NULL REFERENCES facts(id) ON DELETE CASCADE,
+		embedding BLOB NOT NULL,
+		PRIMARY KEY (fact_id)
+	);
+	CREATE INDEX IF NOT EXISTS idx_facts_conversation ON facts(conversation_id);
 	`
 	if _, err := database.Exec(schema); err != nil {
 		return nil, err
@@ -144,6 +162,10 @@ func InitDB(dbPath string) (*sql.DB, error) {
 	// Safe column migrations for cron_schedules on existing DBs
 	_, _ = database.Exec(`ALTER TABLE cron_schedules ADD COLUMN title_prefix TEXT NOT NULL DEFAULT '';`)
 	_, _ = database.Exec(`ALTER TABLE cron_schedules ADD COLUMN timezone TEXT NOT NULL DEFAULT 'UTC';`)
+
+	// Safe column migration for last_fact_extracted_at on conversations/sessions
+	_, _ = database.Exec(`ALTER TABLE conversations ADD COLUMN last_fact_extracted_at DATETIME;`)
+	_, _ = database.Exec(`ALTER TABLE sessions ADD COLUMN last_fact_extracted_at DATETIME;`)
 
 	// Data migration from legacy conversations to sessions table if any exist
 	_, _ = database.Exec(`
@@ -655,3 +677,157 @@ func UpdateCronNextRun(database *sql.DB, id string, nextRunAt time.Time) error {
 	_, err := database.Exec(`UPDATE cron_schedules SET next_run_at = ? WHERE id = ?`, nextRunAt, id)
 	return err
 }
+
+// Fact RAG Storage Structs & Helpers
+
+type Fact struct {
+	ID             int64     `json:"id"`
+	Category       string    `json:"category"`
+	FactText       string    `json:"fact_text"`
+	Importance     float64   `json:"importance_score"`
+	ConversationID string    `json:"conversation_id"`
+	CreatedAt      time.Time `json:"created_at"`
+}
+
+type FactWithEmbedding struct {
+	Fact      Fact
+	Embedding []float32
+}
+
+func Float32ToBytes(floats []float32) []byte {
+	buf := make([]byte, len(floats)*4)
+	for i, f := range floats {
+		bits := math.Float32bits(f)
+		binary.LittleEndian.PutUint32(buf[i*4:], bits)
+	}
+	return buf
+}
+
+func BytesToFloat32(b []byte) []float32 {
+	floats := make([]float32, len(b)/4)
+	for i := range floats {
+		bits := binary.LittleEndian.Uint32(b[i*4:])
+		floats[i] = math.Float32frombits(bits)
+	}
+	return floats
+}
+
+func InsertFact(database *sql.DB, category, factText string, importance float64, conversationID string, embedding []float32) (int64, error) {
+	if database == nil {
+		return 0, fmt.Errorf("database is nil")
+	}
+	if factText == "" {
+		return 0, fmt.Errorf("fact text cannot be empty")
+	}
+	if category == "" {
+		category = "general"
+	}
+	if importance <= 0 {
+		importance = 1.0
+	}
+
+	tx, err := database.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	now := time.Now().UTC()
+	res, err := tx.Exec(`
+		INSERT INTO facts (category, fact_text, importance_score, conversation_id, created_at)
+		VALUES (?, ?, ?, ?, ?)
+	`, category, factText, importance, conversationID, now)
+	if err != nil {
+		return 0, fmt.Errorf("failed to insert fact: %w", err)
+	}
+
+	factID, err := res.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get last insert id: %w", err)
+	}
+
+	if len(embedding) > 0 {
+		blob := Float32ToBytes(embedding)
+		_, err = tx.Exec(`
+			INSERT INTO fact_embeddings (fact_id, embedding)
+			VALUES (?, ?)
+		`, factID, blob)
+		if err != nil {
+			return 0, fmt.Errorf("failed to insert fact embedding: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return factID, nil
+}
+
+func GetAllFactsWithEmbeddings(database *sql.DB) ([]FactWithEmbedding, error) {
+	if database == nil {
+		return nil, nil
+	}
+	query := `
+		SELECT f.id, f.category, f.fact_text, f.importance_score, COALESCE(f.conversation_id, ''), f.created_at, fe.embedding
+		FROM facts f
+		JOIN fact_embeddings fe ON f.id = fe.fact_id
+		ORDER BY f.created_at DESC
+	`
+	rows, err := database.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var results []FactWithEmbedding
+	for rows.Next() {
+		var fe FactWithEmbedding
+		var blob []byte
+		if err := rows.Scan(&fe.Fact.ID, &fe.Fact.Category, &fe.Fact.FactText, &fe.Fact.Importance, &fe.Fact.ConversationID, &fe.Fact.CreatedAt, &blob); err != nil {
+			return nil, err
+		}
+		fe.Embedding = BytesToFloat32(blob)
+		results = append(results, fe)
+	}
+	return results, nil
+}
+
+func GetActiveConversationsForExtraction(database *sql.DB, activeHours int) ([]string, error) {
+	if database == nil {
+		return nil, nil
+	}
+	if activeHours <= 0 {
+		activeHours = 12
+	}
+	cutoff := time.Now().UTC().Add(-time.Duration(activeHours) * time.Hour)
+
+	query := `
+		SELECT thread_id FROM sessions
+		WHERE updated_at >= ? AND (last_fact_extracted_at IS NULL OR last_fact_extracted_at < updated_at)
+	`
+	rows, err := database.Query(query, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var threadIDs []string
+	for rows.Next() {
+		var tid string
+		if err := rows.Scan(&tid); err != nil {
+			return nil, err
+		}
+		threadIDs = append(threadIDs, tid)
+	}
+	return threadIDs, nil
+}
+
+func UpdateConversationFactExtractedAt(database *sql.DB, threadID string) error {
+	if database == nil || threadID == "" {
+		return nil
+	}
+	now := time.Now().UTC()
+	_, err := database.Exec(`UPDATE sessions SET last_fact_extracted_at = ? WHERE thread_id = ?`, now, threadID)
+	return err
+}
+
