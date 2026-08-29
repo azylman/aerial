@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -36,10 +38,19 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// 1. Launch upstream Node.js MCP server
-	log.Printf("[Discord-MCP] Starting upstream %s on 127.0.0.1:%s...", appPath, upstreamPort)
+	// 1. Prepare Node environment with upstream PORT
+	nodeEnv := make([]string, 0, len(os.Environ()))
+	for _, e := range os.Environ() {
+		if !strings.HasPrefix(e, "PORT=") {
+			nodeEnv = append(nodeEnv, e)
+		}
+	}
+	nodeEnv = append(nodeEnv, "PORT="+upstreamPort)
+
+	// 2. Launch upstream Node.js MCP server
+	log.Printf("[Discord-MCP] Starting upstream %s on 127.0.0.1:%s (PORT=%s)...", appPath, upstreamPort, upstreamPort)
 	cmd := exec.CommandContext(ctx, nodeBin, appPath, "--transport", "http", "--port", upstreamPort)
-	cmd.Env = os.Environ()
+	cmd.Env = nodeEnv
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
@@ -47,27 +58,25 @@ func main() {
 		log.Fatalf("[Discord-MCP] Failed to start upstream Node MCP server: %v", err)
 	}
 
-	// 2. Poll upstream readiness
+	// 3. Poll upstream readiness via TCP socket connection
 	upstreamBase := fmt.Sprintf("http://127.0.0.1:%s", upstreamPort)
 	ready := false
-	for i := 0; i < 30; i++ {
-		time.Sleep(500 * time.Millisecond)
-		resp, err := http.Get(upstreamBase + "/health")
+	for i := 0; i < 60; i++ {
+		time.Sleep(100 * time.Millisecond)
+		conn, err := net.DialTimeout("tcp", "127.0.0.1:"+upstreamPort, 200*time.Millisecond)
 		if err == nil {
-			_ = resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				ready = true
-				break
-			}
+			_ = conn.Close()
+			ready = true
+			break
 		}
 	}
 	if !ready {
-		log.Printf("[Discord-MCP] Warning: upstream /health did not return 200 within 15s. Continuing to start proxy.")
+		log.Printf("[Discord-MCP] Warning: upstream port %s not open after 6s. Continuing to start proxy.", upstreamPort)
 	} else {
-		log.Printf("[Discord-MCP] Upstream Node server is healthy and ready.")
+		log.Printf("[Discord-MCP] Upstream Node server is ready on port %s.", upstreamPort)
 	}
 
-	// 3. Initialize Proxy Handler
+	// 4. Initialize Proxy Handler
 	proxyHandler, err := NewProxyHandler(upstreamBase, BlockedToolNames)
 	if err != nil {
 		log.Fatalf("[Discord-MCP] Failed to initialize proxy handler: %v", err)
@@ -113,4 +122,3 @@ func main() {
 	}
 	log.Println("[Discord-MCP] Server stopped.")
 }
-

@@ -12,7 +12,9 @@ import (
 	_ "time/tzdata"
 
 	"github.com/azylman/aerial/brain/pkg/db"
+	"github.com/azylman/aerial/brain/pkg/memory"
 	"github.com/azylman/aerial/brain/pkg/queue"
+	"github.com/azylman/aerial/brain/pkg/runner"
 	"github.com/bwmarrin/discordgo"
 	"github.com/google/uuid"
 	"github.com/robfig/cron/v3"
@@ -253,19 +255,46 @@ func Run(ctx context.Context, database *sql.DB, enqueuer MessageEnqueuer, thread
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
+	ollamaClient := memory.NewClient("")
+	llmFunc := func(ctx context.Context, prompt string) (string, error) {
+		stdout, _, exitCode, err := runner.RunAgy(ctx, "agy", prompt, "", os.Getenv("GEMINI_API_KEY"), os.Getenv("MODEL"), 5)
+		if exitCode != 0 || err != nil {
+			return "", fmt.Errorf("agy fact extraction exitCode=%d err=%v", exitCode, err)
+		}
+		return stdout, nil
+	}
+
 	// Initial evaluation on start
 	if err := ProcessDueSchedules(ctx, database, enqueuer, threadCreator); err != nil {
 		log.Printf("[Scheduler] Error in initial schedule check: %v", err)
 	}
 
+	// Trigger initial background fact extraction asynchronously
+	go func() {
+		if err := memory.ExtractActiveConversationFacts(ctx, database, ollamaClient, llmFunc, 12); err != nil {
+			log.Printf("[Memory] Fact extraction error: %v", err)
+		}
+	}()
+
+	var tickCount int
 	for {
 		select {
 		case <-ctx.Done():
 			log.Println("[Scheduler] Background scheduler monitor stopped cleanly")
 			return
 		case <-ticker.C:
+			tickCount++
 			if err := ProcessDueSchedules(ctx, database, enqueuer, threadCreator); err != nil {
 				log.Printf("[Scheduler] Error in schedule tick evaluation: %v", err)
+			}
+
+			// Run fact extraction hourly (every 120 ticks at 30s interval)
+			if tickCount%120 == 0 {
+				go func() {
+					if err := memory.ExtractActiveConversationFacts(ctx, database, ollamaClient, llmFunc, 12); err != nil {
+						log.Printf("[Memory] Fact extraction error: %v", err)
+					}
+				}()
 			}
 		}
 	}
