@@ -66,6 +66,7 @@ services:
       - WATCHTOWER_INCLUDE_SELF=false
       - WATCHTOWER_ROLLING_RESTART=true
       - WATCHTOWER_LABEL_ENABLE=true
+      - DOCKER_API_VERSION=1.45
     networks:
       - aerial-net
 
@@ -84,6 +85,7 @@ services:
       - AUTOHEAL_INTERVAL=15
       - AUTOHEAL_START_PERIOD=0
       - AUTOHEAL_DEFAULT_STOP_TIMEOUT=20
+      - DOCKER_API_VERSION=1.45
     networks:
       - aerial-net
 
@@ -255,3 +257,4 @@ volumes:
     name: aerial-ollama-data
   aerial-agentsview-data:
     name: aerial-agentsview-data
+
