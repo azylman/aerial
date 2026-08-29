@@ -9,4 +9,4 @@ RUN npm install -g supergateway
 ENV PORT=4002
 EXPOSE 4002
 
-CMD ["supergateway", "--host", "0.0.0.0", "--port", "4002", "--streamableHttpPath", "/mcp", "--cors", "--stdio", "docker run -i --rm -v /var/run/docker.sock:/var/run/docker.sock mcp/docker"]
+CMD ["supergateway", "--host", "0.0.0.0", "--port", "4002", "--outputTransport", "sse", "--ssePath", "/sse", "--messagePath", "/message", "--cors", "--stdio", "docker run -i --rm -v /var/run/docker.sock:/var/run/docker.sock mcp/docker"]
