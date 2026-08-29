@@ -50,6 +50,7 @@ func buildAuthArgs(pat string) []string {
 
 // cleanURL removes embedded userinfo/credentials from a URL to maintain zero plaintext token on disk.
 func cleanURL(rawURL string) string {
+	rawURL = strings.TrimSpace(rawURL)
 	if strings.HasPrefix(rawURL, "http://") || strings.HasPrefix(rawURL, "https://") || strings.HasPrefix(rawURL, "ssh://") || strings.HasPrefix(rawURL, "git://") {
 		if u, err := url.Parse(rawURL); err == nil {
 			u.User = nil
