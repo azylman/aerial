@@ -6,101 +6,127 @@ Aerial provides a multi-agent, tool-enabled AI assistant accessible via Discord 
 
 ---
 
-## 1. System Architecture
+## 1. System Architecture & Topology
+
+Aerial uses a decoupled **Two-Repository Architecture**:
+- **Engine Repo (`azylman/aerial`)**: Core Go backend (`aerial-brain`), MCP microservices, and Docker Compose topology.
+- **Config Repo (`azylman/aerial-config`)**: Private user configuration (`config.yaml`), persona guidelines (`AGENTS.md`), and custom skills (`custom-skills/`).
 
 ```text
-???????????????????????????????????????????????????????????????????????????????
-?                               Discord Gateway                               ?
-???????????????????????????????????????????????????????????????????????????????
-                                       ? Realtime Gateway Events & Mentions
-                                       ? Continuous Typing Indicator Refresh
-???????????????????????????????????????????????????????????????????????????????
-?                                Aerial Brain                                 ?
-?  . In-process Discord Funnel & Gateway Worker                               ?
-?  . Headless Antigravity Agent Engine (agy)                                  ?
-?  . SQLite Multi-Turn Thread Memory (/data/aerial.db)                         ?
-?  . Dynamic Built-in & User Custom Skills Discovery                          ?
-?  . Docker-out-of-Docker (DooD) & Self-Update Runner                          ?
-???????????????????????????????????????????????????????????????????????????????
-               ?                       ?                      ?
-??????????????????????????? ??????????????????????? ?????????????????????????
-?       discord-mcp       ? ?       docker-mcp    ? ?       github-mcp      ?
-? (Port 4001: Streamable) ? ? (Port 4002: Proxy)  ? ? (Port 4003: Proxy)    ?
-??????????????????????????? ??????????????????????? ?????????????????????????
-               ?                       ?                      ?
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                               Discord Gateway                               │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                       │ Realtime Gateway Events & Mentions
+                                       │ Continuous Typing Indicator Refresh
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                Aerial Brain                                 │
+│  • In-process Discord Funnel & Gateway Worker                               │
+│  • Headless Antigravity Agent Engine (agy)                                  │
+│  • In-process Mutex-Guarded GitSync (/share/aerial-config & /share/aerial)  │
+│  • Recursive File Watcher (fsnotify) with Hot-Reloading & LKGC Fallback     │
+│  • SQLite Multi-Turn Thread Memory (/data/aerial.db)                        │
+│  • Dynamic Built-in & User Custom Skills Discovery                          │
+│  • Semantic Memory Vector Embeddings via Ollama (all-minilm:latest)         │
+└─────────────────────────────────────────────────────────────────────────────┘
+               │                       │                      │
+┌───────────────────────────┐ ┌───────────────────────┐ ┌─────────────────────┐
+│        discord-mcp        │ │       docker-mcp      │ │     github-mcp      │
+│  (Port 4001: Streamable)  │ │ (Port 4002: Proxy)    │ │ (Port 4003: Proxy)  │
+└───────────────────────────┘ └───────────────────────┘ └─────────────────────┘
+               │                       │                      │
        Discord REST API        Host Docker Socket       GitHub Copilot MCP
                            (/var/run/docker.sock)
+               │                       │                      │
+┌───────────────────────────┐ ┌───────────────────────┐ ┌─────────────────────┐
+│       scheduler-mcp       │ │     aerial-ollama     │ │  aerial-agentsview  │
+│  (Port 8080: Internal)    │ │ (Port 11434: Embed)   │ │ (Port 8089: Web UI) │
+└───────────────────────────┘ └───────────────────────┘ └─────────────────────┘
+               │                       │
+┌───────────────────────────┐ ┌───────────────────────┐
+│     aerial-watchtower     │ │    aerial-autoheal    │
+│  (GHCR CD Supervisor)     │ │  (Health Supervisor)  │
+└───────────────────────────┘ └───────────────────────┘
 ```
 
 ---
 
 ## 2. Extensibility Guide
 
-Aerial is designed to be easily extended across four layers: **Instructions/Persona**, **Skills**, **MCP Servers**, and **Containers**.
+Aerial is designed to be easily extended across four distinct layers:
 
 ```text
-???????????????????????????????????????????????????????????????????????????????????????????????
-?                                  4 WAYS TO EXTEND AERIAL                                    ?
-???????????????????????????????????????????????????????????????????????????????????????????????
-? 1. INSTRUCTIONS/PERSONA    ? 2. SKILLS              ? 3. MCP SERVERS        ? 4. CONTAINERS ?
-? AGENTS.md user overrides   ? Teaching procedures    ? Connecting APIs/SDKs  ? Adding sidecars
-???????????????????????????????????????????????????????????????????????????????????????????????
+┌─────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                  4 WAYS TO EXTEND AERIAL                                    │
+├─────────────────────────────┬──────────────────────────┬────────────────────┬───────────────┤
+│ 1. CONFIG & PERSONA         │ 2. CUSTOM SKILLS         │ 3. MCP SERVERS     │ 4. CONTAINERS │
+│ config.yaml & AGENTS.md     │ Runbooks in config repo  │ Connecting APIs    │ Extra sidecars│
+└─────────────────────────────┴──────────────────────────┴────────────────────┴───────────────┘
 ```
 
 ---
 
-### Layer 1: Custom Instructions & Persona (`AGENTS.md`)
+### Layer 1: Configuration & Persona (`config.yaml` & `AGENTS.md`)
 
-Aerial loads workspace instructions from two key files:
-- **`SYSTEM.md`** (Tracked in Git): Contains default system specifications, core capabilities, and safety guidelines.
-- **`AGENTS.md`** (Gitignored User Override): Create `AGENTS.md` in the repository root to define custom persona rules, tone preferences, or private operational context. Instructions in `AGENTS.md` take priority over `SYSTEM.md`.
+User configuration and persona rules live in the private `aerial-config` repository:
+
+1. **`config.yaml`** (Non-secret options):
+   ```yaml
+   model: "Gemini 3.6 Flash (Low)"
+   timeout_minutes: 15
+   timezone: "America/Los_Angeles"
+   system_channel: "aerial-dev"
+
+   git_sync:
+     enabled: true
+     interval: "60s"
+     config_repo_url: "https://github.com/azylman/aerial-config.git"
+     repositories:
+       - "/share/aerial-config"
+       - "/share/aerial"
+   ```
+   - **Hot-Reloading**: Changes to `config.yaml` are detected instantly via `fsnotify` and reconfigured in-memory without restarting the daemon.
+   - **Last Known Good Configuration (LKGC) & Discord Alerts**: If an invalid YAML file is saved, Aerial retains the previous valid settings in memory and posts a diagnostic alert to `#aerial-dev` in Discord.
+
+2. **`AGENTS.md`** (Persona & Tone Overrides):
+   Define custom persona rules, tone guidelines, or private operational context. Instructions in `AGENTS.md` take priority over base `SYSTEM.md` rules.
 
 ---
 
 ### Layer 2: Adding Custom Skills
 
-Skills use **Progressive Disclosure**-Aerial only loads skill titles and descriptions into context, reading full runbooks on-demand when relevant.
+Skills use **Progressive Disclosure**—Aerial only loads skill titles and descriptions into context, reading full runbooks on-demand when relevant.
 
-#### A. Built-in Skills (Tracked in Git)
-Place skills in `.agents/skills/` in your repository:
+#### A. User Custom Skills (`aerial-config/custom-skills/`)
+Place custom skill directories inside `custom-skills/` in your `aerial-config` repository:
 ```text
-.agents/skills/
-??? ha-operations/
-?   ??? SKILL.md
-??? self-improvement/
-    ??? SKILL.md
+custom-skills/
+└── smart-home/
+    └── SKILL.md
 ```
-These are baked into the `brain` image during build and tracked in version control.
+`aerial-brain` automatically discovers custom skills and symlinks them into `/root/.gemini/skills/` with highest priority. Orphaned or dead symlinks are automatically swept when skills are renamed or removed.
 
-#### B. User Custom Skills (Runtime / Drop-in)
-Drop new skill folders directly into `./skills/` on your host machine (or `/data/skills/` inside the container):
-```text
-skills/
-??? my-custom-runbook/
-    ??? SKILL.md
-    ??? scripts/
-```
-On startup, `brain` automatically discovers and links all custom skills in `/data/skills/` without requiring code changes or image rebuilds.
+#### B. Built-in Skills (`azylman/aerial/.agents/skills/`)
+Core system skills (such as `self-improvement` and `self-update`) are baked into the `brain` image during build.
 
 #### Skill File Structure (`SKILL.md`)
 ```markdown
 ---
-name: my-custom-skill
-description: Use this skill whenever the user asks to perform XYZ operations.
+name: smart-home
+description: "Control smart home devices, lights, and scenes via Home Assistant MCP."
 ---
 
-# My Custom Skill Runbook
+# Smart Home Operations Runbook
 
 ## Steps
-1. Execute query tool with parameters...
-2. Verify results...
+1. Query entity state using Home Assistant MCP tools.
+2. Verify target entity before executing state changes.
 ```
 
 ---
 
 ### Layer 3: Adding Custom MCP Servers
 
-Aerial connects to external Model Context Protocol (MCP) servers over Streamable HTTP / SSE.
+Aerial connects to external Model Context Protocol (MCP) servers over Streamable HTTP / SSE:
 
 #### Built-in Tool Autodiscovery
 By default, Aerial automatically mounts:
@@ -108,29 +134,20 @@ By default, Aerial automatically mounts:
 - **`docker`** (`http://docker-mcp:4002/mcp`)
 - **`github`** (`http://github-mcp:4003/mcp` when `GITHUB_PAT` is set)
 - **`ha-mcp`** (Home Assistant webhook tools when `HA_TOKEN` is configured)
+- **`scheduler`** (`http://scheduler-mcp:8080/mcp`)
 
-#### Custom MCP Overrides (`mcp.config.json`)
-To define additional MCP tools, copy `mcp.config.example.json` to `mcp.config.json` (ignored by Git):
-```bash
-cp mcp.config.example.json mcp.config.json
+#### Custom MCP Servers (`config.yaml`)
+Define additional MCP tools directly in `aerial-config/config.yaml`:
+```yaml
+mcp_servers:
+  brave-search:
+    serverUrl: "http://brave-mcp:4005/mcp"
+  custom-remote-api:
+    serverUrl: "https://mcp.example.com/mcp"
+    headers:
+      Authorization: "Bearer ${CUSTOM_API_KEY}"
 ```
-Aerial automatically interpolates `${VARIABLE_NAME}` from your `.env` file at startup:
-
-```json
-{
-  "mcpServers": {
-    "brave-search": {
-      "serverUrl": "http://brave-mcp:4005/mcp"
-    },
-    "custom-remote-api": {
-      "serverUrl": "https://mcp.example.com/mcp",
-      "headers": {
-        "Authorization": "Bearer ${CUSTOM_API_KEY}"
-      }
-    }
-  }
-}
-```
+Environment variables `${VAR}` are interpolated dynamically at runtime.
 
 ---
 
@@ -152,18 +169,13 @@ services:
 
 ---
 
-## 3. Self-Update & Self-Improvement
+## 3. Continuous Deployment & Self-Improvement
 
-Aerial has Docker-out-of-Docker (DooD) enabled and can update itself or other containers autonomously when prompted in Discord:
-
-```text
-User: "Aerial, pull the latest code updates and rebuild"
-Aerial:
-  1. Runs git pull on /share/aerial
-  2. Inspects git diffs to detect changed services
-  3. Rebuilds modified microservices (docker compose up -d --build <service>)
-  4. If brain changed: builds image, sends Discord response, and cleanly restarts container
-```
+Aerial uses an automated GitOps deployment pipeline:
+1. **GitHub Actions Matrix Builds**: Triggers dynamic matrix builds only for modified microservices and publishes them to GitHub Container Registry (`ghcr.io/azylman/aerial-*`).
+2. **Watchtower Supervisor**: Polls GHCR every 60 seconds out-of-band and performs zero-downtime rolling container updates.
+3. **In-Process GitSync**: Automatically pulls updates from `azylman/aerial-config` and `azylman/aerial` every 60 seconds.
+4. **Self-Improvement Protocol**: When prompted to make code changes or fixes in Discord, Aerial uses `.agents/skills/self-improvement/SKILL.md` to run local tests, commit, and push directly to `origin/main`.
 
 ---
 
@@ -171,11 +183,15 @@ Aerial:
 
 | Service | Port | Description |
 | --- | --- | --- |
-| **`brain`** | `8088` | Go execution daemon running `agy`, SQLite memory, Discord funnel, and Docker controller. |
-| **`discord-mcp`** | `4001` | Outbound MCP server providing Discord messaging, thread creation, and channel reading tools. |
-| **`docker-mcp`** | `4002` | `supergateway` proxy wrapping official Docker MCP (`mcp/docker`) over the host socket. |
-| **`github-mcp`** | `4003` | `supergateway` proxy wrapping GitHub MCP server with PAT authentication. |
-| **`agentsview`** | `8089` | Web UI for visualizing agent transcripts, session history, and execution timelines. |
+| **`aerial-brain`** | `8088` | Go execution daemon running `agy`, SQLite memory, Discord funnel, GitSync, and file watcher. |
+| **`aerial-scheduler-mcp`**| `8080` (Internal) | SQLite-backed cron and one-shot reminder management server. |
+| **`aerial-discord-mcp`** | `4001` | Outbound MCP server providing Discord messaging, thread creation, and channel tools. |
+| **`aerial-docker-mcp`** | `4002` | `supergateway` proxy wrapping official Docker MCP (`mcp/docker`) over the host socket. |
+| **`aerial-github-mcp`** | `4003` | `supergateway` proxy wrapping GitHub MCP server with PAT authentication. |
+| **`aerial-ollama`** | `11434` | Local LLM and embedding server for vector memory retrieval (`all-minilm:latest`). |
+| **`aerial-agentsview`** | `8089` | Web UI for visualizing agent transcripts, session history, and execution timelines. |
+| **`aerial-watchtower`** | - | Out-of-band continuous deployment supervisor polling GHCR every 60 seconds. |
+| **`aerial-autoheal`** | - | Health supervisor probing container healthchecks every 15s and auto-restarting unhealthy containers. |
 
 ---
 
@@ -185,8 +201,9 @@ Aerial:
 - Docker Engine 24+ & Docker Compose v2+
 - Gemini API Key (from [Google AI Studio](https://aistudio.google.com/))
 - Discord Bot Token (with Message Content and Server Members intents enabled)
+- GitHub Personal Access Token (for private `aerial-config` synchronization)
 
-### Step 1: Clone Repository
+### Step 1: Clone Repositories
 ```bash
 git clone https://github.com/azylman/aerial.git
 cd aerial
@@ -196,7 +213,7 @@ cd aerial
 ```bash
 cp .env.example .env
 ```
-Edit `.env` and provide your credentials:
+Edit `.env` and configure your secret credentials:
 ```ini
 GEMINI_API_KEY=your_gemini_api_key_here
 DISCORD_BOT_TOKEN=your_discord_bot_token_here
@@ -208,6 +225,7 @@ HA_TOKEN=http://192.168.1.14:8123/api/webhook/mcp_your_id
 ```bash
 docker compose up -d
 ```
+On boot, `aerial-brain` will automatically adopt or clone your private `aerial-config` repository into `/share/aerial-config` and load your `config.yaml` settings.
 
 ### Step 4: Verify Health
 ```bash
@@ -232,6 +250,8 @@ docker compose logs -f brain
 
 ## 7. Security & Best Practices
 
-- **Never commit `.env` or `mcp.config.json`**: Secrets, API keys, and custom tokens are listed in `.gitignore`.
-- **Restrict File Permissions**: Run `chmod 600 .env` on the host to ensure only the host owner can read secrets.
+- **Zero Plaintext Tokens**: GitHub PATs are passed in-memory ephemerally and never written to `.git/config` on disk.
+- **Log Sanitization**: All subprocess logs are passed through regex sanitizers to mask sensitive tokens.
+- **Never commit `.env`**: Secrets and tokens are strictly ignored by `.gitignore`.
+- **Restricted File Permissions**: Run `chmod 600 .env` on the host to protect credentials.
 - **Isolated Bridge Network**: All container-to-container traffic operates on the private `aerial-net` bridge network.
