@@ -654,3 +654,79 @@ func TestQueueSkipDiscordLogic(t *testing.T) {
 		t.Errorf("Expected user message to be delivered to Discord, but it was skipped: %v", deliveredTo)
 	}
 }
+
+func TestWorkerPoolUpdateRuntimeConfig(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	var receivedModel string
+	var receivedTimeout int
+	var mu sync.Mutex
+	doneCh := make(chan struct{})
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		Model:          "initial-model-v1",
+		TimeoutMinutes: 10,
+		MaxAttempts:    1,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			mu.Lock()
+			receivedModel = model
+			receivedTimeout = timeoutMinutes
+			mu.Unlock()
+			return "OK", "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			close(doneCh)
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	// Initial check
+	m, tm := pool.GetRuntimeConfig()
+	if m != "initial-model-v1" || tm != 10 {
+		t.Errorf("Expected initial-model-v1 and 10, got model=%s timeout=%d", m, tm)
+	}
+
+	// Update runtime config
+	pool.UpdateRuntimeConfig("updated-model-v2", 35)
+
+	m2, tm2 := pool.GetRuntimeConfig()
+	if m2 != "updated-model-v2" || tm2 != 35 {
+		t.Errorf("Expected updated-model-v2 and 35, got model=%s timeout=%d", m2, tm2)
+	}
+
+	msg := db.Message{
+		ID:         "msg-update-test",
+		ThreadID:   "thread-update-test",
+		Content:    "Hello update",
+		Status:     db.StatusPending,
+		CreatedAt:  time.Now().UTC(),
+		UpdatedAt:  time.Now().UTC(),
+	}
+	_ = db.InsertMessage(database, msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Timeout waiting for message processing")
+	}
+
+	mu.Lock()
+	if receivedModel != "updated-model-v2" || receivedTimeout != 35 {
+		t.Errorf("Runner received unexpected runtime config: model=%q timeout=%d", receivedModel, receivedTimeout)
+	}
+	mu.Unlock()
+}
+

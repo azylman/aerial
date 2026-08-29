@@ -11,6 +11,7 @@ import (
 	"time"
 	_ "time/tzdata"
 
+	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
 	"github.com/azylman/aerial/brain/pkg/queue"
 	"github.com/bwmarrin/discordgo"
@@ -66,8 +67,11 @@ func FormatThreadTitle(titlePrefix string, t time.Time) string {
 }
 
 // GetDefaultTimezone returns the default timezone configured for the scheduler.
-// Reads DEFAULT_TIMEZONE -> TZ -> fallback "America/Los_Angeles".
+// Reads config.GetTimezone() -> DEFAULT_TIMEZONE -> TZ -> fallback "America/Los_Angeles".
 func GetDefaultTimezone() string {
+	if tz := strings.TrimSpace(config.GetTimezone()); tz != "" {
+		return tz
+	}
 	if tz := strings.TrimSpace(os.Getenv("DEFAULT_TIMEZONE")); tz != "" {
 		return tz
 	}

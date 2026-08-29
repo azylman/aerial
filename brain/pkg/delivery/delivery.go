@@ -229,3 +229,79 @@ func StartTyping(s *discordgo.Session, channelID string) (stop func()) {
 		})
 	}
 }
+
+func isSnowflake(str string) bool {
+	if str == "" {
+		return false
+	}
+	for _, r := range str {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// ResolveChannelByNameOrID resolves a channel name (e.g. "aerial-dev" or "#aerial-dev") or snowflake ID to a channel ID.
+func ResolveChannelByNameOrID(s *discordgo.Session, nameOrID string) (string, error) {
+	if s == nil {
+		return "", fmt.Errorf("discord session is nil")
+	}
+	trimmed := strings.TrimSpace(nameOrID)
+	trimmed = strings.TrimPrefix(trimmed, "#")
+	if trimmed == "" {
+		return "", fmt.Errorf("channel name or ID cannot be empty")
+	}
+
+	if isSnowflake(trimmed) {
+		return trimmed, nil
+	}
+
+	// 1. Check in-memory session State if available
+	if s.State != nil {
+		s.State.RLock()
+		for _, g := range s.State.Guilds {
+			for _, ch := range g.Channels {
+				if strings.EqualFold(ch.Name, trimmed) {
+					s.State.RUnlock()
+					return ch.ID, nil
+				}
+			}
+		}
+		s.State.RUnlock()
+	}
+
+	// 2. Query guilds and guild channels via Discord API fallback if token and client are initialized
+	if s.Ratelimiter != nil && s.Token != "" {
+		userGuilds, err := s.UserGuilds(100, "", "", false)
+		if err == nil {
+			for _, g := range userGuilds {
+				channels, err := s.GuildChannels(g.ID)
+				if err != nil {
+					continue
+				}
+				for _, ch := range channels {
+					if strings.EqualFold(ch.Name, trimmed) {
+						return ch.ID, nil
+					}
+				}
+			}
+		}
+	}
+
+	return "", fmt.Errorf("channel %q not found in any connected guild", nameOrID)
+}
+
+// SendSystemAlert resolves the target channel by name or ID and delivers an alert message formatted with markdown warnings.
+func SendSystemAlert(s *discordgo.Session, channelNameOrID, title, alertBody string) error {
+	if s == nil {
+		return fmt.Errorf("discord session is nil")
+	}
+	resolvedID, err := ResolveChannelByNameOrID(s, channelNameOrID)
+	if err != nil {
+		return fmt.Errorf("failed to resolve system alert channel %q: %w", channelNameOrID, err)
+	}
+
+	formatted := fmt.Sprintf("⚠️ **Aerial System Alert: %s**\n\n%s", strings.TrimSpace(title), strings.TrimSpace(alertBody))
+	return SendMessage(s, resolvedID, formatted)
+}

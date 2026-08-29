@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -86,6 +87,24 @@ func (p *WorkerPool) getDiscordSession() *discordgo.Session {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.cfg.DiscordSession
+}
+
+func (p *WorkerPool) UpdateRuntimeConfig(model string, timeoutMinutes int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if strings.TrimSpace(model) != "" {
+		p.cfg.Model = model
+	}
+	if timeoutMinutes > 0 {
+		p.cfg.TimeoutMinutes = timeoutMinutes
+	}
+	log.Printf("[WorkerPool] Runtime config updated: model=%s, timeout=%dm", p.cfg.Model, p.cfg.TimeoutMinutes)
+}
+
+func (p *WorkerPool) GetRuntimeConfig() (model string, timeoutMinutes int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.cfg.Model, p.cfg.TimeoutMinutes
 }
 
 func (p *WorkerPool) Start() {
@@ -192,17 +211,24 @@ func (p *WorkerPool) processMessage(msg db.Message) {
 	lastErrDetail := ""
 
 	for attempt := msg.RetryCount + 1; attempt <= maxAttempts; attempt++ {
+		p.mu.Lock()
+		currentModel := p.cfg.Model
+		currentTimeout := p.cfg.TimeoutMinutes
+		currentAgyBin := p.cfg.AgyBin
+		currentAPIKey := p.cfg.APIKey
+		p.mu.Unlock()
+
 		startTime := time.Now().Add(-2 * time.Second)
-		runCtx, runCancel := context.WithTimeout(p.ctx, time.Duration(p.cfg.TimeoutMinutes)*time.Minute)
+		runCtx, runCancel := context.WithTimeout(p.ctx, time.Duration(currentTimeout)*time.Minute)
 
 		stdout, stderr, exitCode, err := p.cfg.RunnerFunc(
 			runCtx,
-			p.cfg.AgyBin,
+			currentAgyBin,
 			msg.Content,
 			currentSessionID,
-			p.cfg.APIKey,
-			p.cfg.Model,
-			p.cfg.TimeoutMinutes,
+			currentAPIKey,
+			currentModel,
+			currentTimeout,
 		)
 		runCancel()
 
