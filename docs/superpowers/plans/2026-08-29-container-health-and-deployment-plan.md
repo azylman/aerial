@@ -392,7 +392,7 @@ git commit -m "feat(compose): add watchtower and autoheal, configure restart pol
 - Consumes: Operational deployment invariant.
 - Produces: Updated guidelines preventing agent self-termination.
 
-- [ ] **Step 1: Update `.agents/skills/self-improvement/SKILL.md`**
+- [x] **Step 1: Update `.agents/skills/self-improvement/SKILL.md`**
 
 Replace Step 8 and Step 9 in `.agents/skills/self-improvement/SKILL.md` with:
 ```markdown
@@ -430,7 +430,7 @@ Replace Step 8 and Step 9 in `.agents/skills/self-improvement/SKILL.md` with:
    - Watchtower on the host automatically detects the new image and performs an out-of-band container swap within 60 seconds without interrupting execution or causing downtime.
 ```
 
-- [ ] **Step 2: Update `.agents/skills/self-update/SKILL.md`**
+- [x] **Step 2: Update `.agents/skills/self-update/SKILL.md`**
 
 Replace the runbook in `.agents/skills/self-update/SKILL.md` to:
 ```markdown
@@ -462,7 +462,7 @@ cd /share/aerial && git add -A && git commit -m "feat: description of update" &&
 3. Inform the user in Discord that changes have been pushed to `main` and will be automatically applied by Watchtower.
 ```
 
-- [ ] **Step 3: Update `SYSTEM.md` and `.agents/rules/system_instructions.md`**
+- [x] **Step 3: Update `SYSTEM.md` and `.agents/rules/system_instructions.md`**
 
 Append the **Stack Deployment Invariant**:
 ```markdown
@@ -474,7 +474,7 @@ When implementing code changes, bug fixes, or enhancements:
 3. **NEVER** run `docker compose build`, `docker compose up`, or `docker restart` from within the `aerial-brain` container. Watchtower on the host will automatically pull the new GHCR image and recreate the container within 60 seconds.
 ```
 
-- [ ] **Step 4: Commit Task 3**
+- [x] **Step 4: Commit Task 3**
 
 ```bash
 git add .agents/skills/self-improvement/SKILL.md .agents/skills/self-update/SKILL.md SYSTEM.md .agents/rules/system_instructions.md

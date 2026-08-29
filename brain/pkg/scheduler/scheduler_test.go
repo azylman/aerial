@@ -58,13 +58,13 @@ func TestFormatThreadTitle(t *testing.T) {
 	testTime := time.Date(2026, time.August, 28, 20, 0, 0, 0, time.UTC)
 
 	title := FormatThreadTitle("Weekly Meal Plan", testTime)
-	expected := "Weekly Meal Plan - Aug 28, 2026"
+	expected := "Weekly Meal Plan – Aug 28, 2026"
 	if title != expected {
 		t.Errorf("Expected %q, got %q", expected, title)
 	}
 
 	defaultTitle := FormatThreadTitle("", testTime)
-	expectedDefault := "Scheduled Routine - Aug 28, 2026"
+	expectedDefault := "Scheduled Routine – Aug 28, 2026"
 	if defaultTitle != expectedDefault {
 		t.Errorf("Expected %q, got %q", expectedDefault, defaultTitle)
 	}
@@ -81,7 +81,7 @@ func TestFormatThreadTitle(t *testing.T) {
 	}
 
 	// Unicode multi-byte runes test (> 100 runes)
-	unicodePrefix := "???? ???????????????????????????????????????????????????????????100???????????????????????????????????"
+	unicodePrefix := "🔥🚀 非常に長いルーチンのプレフィックスで、制限を超えるマルチバイト文字列のテストを行っています。さらに文章を追加して確実に100文字を超えるように長文の日本語テキストを追加配置します。テストテスト。"
 	unicodeTitle := FormatThreadTitle(unicodePrefix, testTime)
 	uRunes := []rune(unicodeTitle)
 	if len(uRunes) != 100 {

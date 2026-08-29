@@ -1,4 +1,4 @@
----
+﻿---
 name: self-improvement
 description: Use this skill whenever Aerial needs to modify, enhance, debug, or refactor its own codebase, skills, or system configuration, commit changes, pull updates, or deploy updates via CI/CD.
 ---

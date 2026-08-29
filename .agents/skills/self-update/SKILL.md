@@ -1,4 +1,4 @@
----
+﻿---
 name: self-update
 description: Use this skill when the user asks Aerial to update itself, pull latest code from git, or deploy system updates.
 ---

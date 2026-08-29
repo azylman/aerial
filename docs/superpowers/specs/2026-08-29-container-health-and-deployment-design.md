@@ -1,4 +1,4 @@
-# Container Health Monitoring & Automated Deployment Specification
+﻿# Container Health Monitoring & Automated Deployment Specification
 
 ## 1. Problem Statement & Background
 

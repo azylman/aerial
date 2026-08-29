@@ -1,4 +1,4 @@
-# Aerial System Architecture & Repository Guidelines
+﻿# Aerial System Architecture & Repository Guidelines
 
 ## 1. System Overview & Component Topology
 This repository (`azylman/aerial`) is the root orchestration repository for the Aerial AI Assistant system, defining the standalone Docker Compose multi-container topology:

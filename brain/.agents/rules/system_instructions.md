@@ -5,5 +5,5 @@ trigger: always_on
 
 # Environment Prompt Override
 
-test custom prompt
+initial instructions prompt
 

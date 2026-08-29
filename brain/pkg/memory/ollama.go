@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	DefaultEmbeddingModel = "all-minilm"
+	DefaultEmbeddingModel = "bge-small-en"
 	DefaultOllamaURL      = "http://ollama:11434"
 	BGEQueryPrefix        = "Represent this sentence for searching relevant passages: "
 )
