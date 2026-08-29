@@ -22,9 +22,6 @@ services:
       - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN}
       - DEFAULT_TIMEZONE=${DEFAULT_TIMEZONE:-America/Los_Angeles}
       - TZ=${DEFAULT_TIMEZONE:-America/Los_Angeles}
-      - OLLAMA_URL=${OLLAMA_URL:-http://ollama:11434}
-      - MEMORY_MAX_FACTS=${MEMORY_MAX_FACTS:-10}
-      - MEMORY_EXTRACTION_CRON=${MEMORY_EXTRACTION_CRON:-0 * * * *}
     volumes:
       - aerial-brain-data:/data
       - aerial-brain-gemini:/root/.gemini
@@ -46,8 +43,6 @@ services:
       discord-mcp:
         condition: service_healthy
       docker-mcp:
-        condition: service_healthy
-      ollama:
         condition: service_healthy
 
   # ----------------------------------------------------------------------------
@@ -164,29 +159,6 @@ services:
     networks:
       - aerial-net
 
-  # ----------------------------------------------------------------------------
-  # 6. Local Embedding Service: Ollama (bge-small-en pre-baked)
-  #    Provides vector embeddings for Aerial's semantic memory RAG system.
-  # ----------------------------------------------------------------------------
-  ollama:
-    build:
-      context: ./docker/ollama
-      dockerfile: Dockerfile
-    container_name: aerial-ollama
-    restart: unless-stopped
-    ports:
-      - "${OLLAMA_HOST_PORT:-11434}:11434"
-    volumes:
-      - aerial-ollama-data:/root/.ollama
-    networks:
-      - aerial-net
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:11434/api/tags"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
-
 networks:
   aerial-net:
     name: aerial-net
@@ -199,5 +171,3 @@ volumes:
     name: aerial-brain-gemini
   aerial-agentsview-data:
     name: aerial-agentsview-data
-  aerial-ollama-data:
-    name: aerial-ollama-data
