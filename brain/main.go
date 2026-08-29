@@ -205,7 +205,7 @@ func handleTranscripts(database *sql.DB) http.HandlerFunc {
 }
 
 func main() {
-	configRepoUrl := config.GetEnv("AERIAL_CONFIG_REPO_URL", "https://github.com/azylman/aerial-config.git")
+	configRepoUrl := config.GetEnv("AERIAL_CONFIG_REPO_URL", "")
 	pat := config.GetEnv("GITHUB_PAT", "")
 
 	bootCtx, bootCancel := context.WithTimeout(context.Background(), 15*time.Second)
