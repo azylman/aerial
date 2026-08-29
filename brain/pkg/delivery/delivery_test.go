@@ -198,4 +198,3 @@ func TestSendSystemAlert(t *testing.T) {
 		t.Error("Expected error for missing channel, got nil")
 	}
 }
-
