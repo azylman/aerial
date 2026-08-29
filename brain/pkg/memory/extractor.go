@@ -91,8 +91,9 @@ func ExtractActiveConversationFacts(ctx context.Context, database *sql.DB, clien
 }
 
 func processThreadFacts(ctx context.Context, database *sql.DB, client *Client, llmFunc LLMClientFunc, threadID string) error {
-	transcript, err := loadThreadTranscript(threadID)
+	transcript, err := loadThreadTranscript(database, threadID)
 	if err != nil || strings.TrimSpace(transcript) == "" {
+		log.Printf("[Memory] No transcript found for thread %s (err=%v), marking extracted.", threadID, err)
 		// Mark extracted so we don't repeatedly try missing transcripts
 		_ = db.UpdateConversationFactExtractedAt(database, threadID)
 		return nil
@@ -130,18 +131,42 @@ func processThreadFacts(ctx context.Context, database *sql.DB, client *Client, l
 	return db.UpdateConversationFactExtractedAt(database, threadID)
 }
 
-func loadThreadTranscript(threadID string) (string, error) {
-	// Transcript log path
-	logPath := filepath.Join("/root/.gemini/antigravity-cli/brain", threadID, ".system_generated", "logs", "transcript.jsonl")
-	data, err := os.ReadFile(logPath)
+func loadThreadTranscript(database *sql.DB, threadID string) (string, error) {
+	homeDir, err := os.UserHomeDir()
 	if err != nil {
-		return "", err
+		homeDir = "/root"
 	}
-	text := string(data)
-	if len(text) > 20000 {
-		text = text[len(text)-20000:]
+
+	roots := []string{
+		"/data/brain",
+		filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain"),
+		filepath.Join(homeDir, ".gemini", "antigravity", "brain"),
 	}
-	return text, nil
+
+	idCandidates := []string{threadID}
+	if database != nil {
+		if sessID, err := db.GetSessionID(database, threadID); err == nil && sessID != "" {
+			idCandidates = append([]string{sessID}, idCandidates...)
+		}
+	}
+
+	for _, root := range roots {
+		for _, id := range idCandidates {
+			for _, file := range []string{"transcript_full.jsonl", "transcript.jsonl"} {
+				p := filepath.Join(root, id, ".system_generated", "logs", file)
+				data, err := os.ReadFile(p)
+				if err == nil && len(data) > 0 {
+					text := string(data)
+					if len(text) > 20000 {
+						text = text[len(text)-20000:]
+					}
+					return text, nil
+				}
+			}
+		}
+	}
+
+	return "", fmt.Errorf("transcript file not found for thread %s", threadID)
 }
 
 func parseFactsJSON(raw string) (*ExtractedFactsPayload, error) {
