@@ -37,12 +37,28 @@ func EnsureSkills() error {
 		}
 	}
 
+	// Orphaned Symlink Sweeper: Clean up dead links before scanning
+	sweepOrphanedSymlinks(targetSkillDirs)
+
 	sourceDirs := []string{
+		"/share/aerial-config/custom-skills",
 		filepath.Join(pluginDir, "skills"),
 		"/share/aerial/.agents/skills",
 		"/app/.agents/skills",
 	}
 
+	installedCount := LinkSkills(targetSkillDirs, sourceDirs)
+
+	// Final sweep to remove any remaining broken symlinks
+	sweepOrphanedSymlinks(targetSkillDirs)
+
+	log.Printf("Skills subsystem initialized: %d skill links verified across target directories", installedCount)
+	return nil
+}
+
+// LinkSkills iterates through sourceDirs in priority order, symlinking non-duplicate skills to targetSkillDirs.
+func LinkSkills(targetSkillDirs, sourceDirs []string) int {
+	seenSkills := make(map[string]bool)
 	installedCount := 0
 	for _, srcDir := range sourceDirs {
 		entries, err := os.ReadDir(srcDir)
@@ -54,11 +70,16 @@ func EnsureSkills() error {
 				continue
 			}
 			skillName := entry.Name()
+			if seenSkills[skillName] {
+				continue
+			}
 			srcPath := filepath.Join(srcDir, skillName)
 
 			if _, err := os.Stat(filepath.Join(srcPath, "SKILL.md")); err != nil {
 				continue
 			}
+
+			seenSkills[skillName] = true
 
 			for _, targetDir := range targetSkillDirs {
 				destPath := filepath.Join(targetDir, skillName)
@@ -73,8 +94,28 @@ func EnsureSkills() error {
 			}
 		}
 	}
+	return installedCount
+}
 
-	log.Printf("Skills subsystem initialized: %d skill links verified across target directories", installedCount)
-	return nil
+func sweepOrphanedSymlinks(targetSkillDirs []string) {
+	for _, dir := range targetSkillDirs {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			linkPath := filepath.Join(dir, entry.Name())
+			fi, err := os.Lstat(linkPath)
+			if err != nil {
+				continue
+			}
+			if fi.Mode()&os.ModeSymlink != 0 {
+				if _, err := os.Stat(linkPath); os.IsNotExist(err) {
+					log.Printf("[Skills] Removing orphaned symlink: %s", linkPath)
+					_ = os.Remove(linkPath)
+				}
+			}
+		}
+	}
 }
 

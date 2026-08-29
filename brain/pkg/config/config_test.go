@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -90,3 +91,80 @@ func TestEnsureConfigErrorCases(t *testing.T) {
 		t.Error("Expected error when writing mcp config to uncreated directory, got nil")
 	}
 }
+
+func TestEnsureSystemRules_LKGCAndOrdering(t *testing.T) {
+	tmpDir := t.TempDir()
+	_ = os.Setenv("HOME", tmpDir)
+
+	// Test writing initial instructions
+	if err := EnsureSystemRules("initial instructions prompt"); err != nil {
+		t.Fatalf("EnsureSystemRules failed: %v", err)
+	}
+
+	rulesFile := filepath.Join(tmpDir, ".gemini", "rules", "system_instructions.md")
+	data, err := os.ReadFile(rulesFile)
+	if err != nil {
+		t.Fatalf("Failed to read generated rules: %v", err)
+	}
+	if !strings.Contains(string(data), "initial instructions prompt") {
+		t.Errorf("Expected rules to contain 'initial instructions prompt', got: %s", string(data))
+	}
+
+	// Test LKGC fallback when calling with empty prompt and no files
+	if err := EnsureSystemRules(""); err != nil {
+		t.Fatalf("EnsureSystemRules with LKGC failed: %v", err)
+	}
+
+	dataAfter, err := os.ReadFile(rulesFile)
+	if err != nil {
+		t.Fatalf("Failed to read rules after LKGC fallback: %v", err)
+	}
+	if !strings.Contains(string(dataAfter), "initial instructions prompt") {
+		t.Errorf("Expected rules to retain LKGC 'initial instructions prompt', got: %s", string(dataAfter))
+	}
+}
+
+func TestWriteAtomic(t *testing.T) {
+	tmpDir := t.TempDir()
+	targetFile := filepath.Join(tmpDir, "sub", "config.json")
+
+	content1 := `{"version": 1}`
+	if err := writeAtomic(targetFile, content1); err != nil {
+		t.Fatalf("writeAtomic failed: %v", err)
+	}
+
+	data, err := os.ReadFile(targetFile)
+	if err != nil {
+		t.Fatalf("Failed to read written atomic file: %v", err)
+	}
+	if string(data) != content1 {
+		t.Errorf("Expected content %s, got %s", content1, string(data))
+	}
+
+	// Test overwriting
+	content2 := `{"version": 2}`
+	if err := writeAtomic(targetFile, content2); err != nil {
+		t.Fatalf("writeAtomic overwrite failed: %v", err)
+	}
+
+	data2, err := os.ReadFile(targetFile)
+	if err != nil {
+		t.Fatalf("Failed to read overwritten atomic file: %v", err)
+	}
+	if string(data2) != content2 {
+		t.Errorf("Expected content %s, got %s", content2, string(data2))
+	}
+
+	// Verify no temporary files remain in the directory
+	entries, err := os.ReadDir(filepath.Dir(targetFile))
+	if err != nil {
+		t.Fatalf("Failed to read directory: %v", err)
+	}
+	for _, entry := range entries {
+		if strings.Contains(entry.Name(), ".tmp.") {
+			t.Errorf("Found dangling tempfile: %s", entry.Name())
+		}
+	}
+}
+
+

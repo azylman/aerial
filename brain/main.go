@@ -16,9 +16,11 @@ import (
 
 	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
+	"github.com/azylman/aerial/brain/pkg/gitsync"
 	"github.com/azylman/aerial/brain/pkg/queue"
 	"github.com/azylman/aerial/brain/pkg/scheduler"
 	"github.com/azylman/aerial/brain/pkg/skills"
+	"github.com/azylman/aerial/brain/pkg/watcher"
 	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
 )
@@ -220,6 +222,48 @@ func main() {
 		log.Printf("Warning: EnsureSkills error: %v", err)
 	}
 
+	// Start background file watcher for atomic hot-reloading of prompts and skills
+	fileWatcher, err := watcher.NewWatcher(
+		watcher.WithCallback(func() {
+			log.Println("[Hot-Reload] File changes detected. Reloading system rules and skills...")
+			if err := config.EnsureSystemRules(systemPrompt); err != nil {
+				log.Printf("Warning: hot-reload EnsureSystemRules error: %v", err)
+			}
+			if err := skills.EnsureSkills(); err != nil {
+				log.Printf("Warning: hot-reload EnsureSkills error: %v", err)
+			}
+		}),
+	)
+	if err != nil {
+		log.Printf("Warning: failed to create file watcher: %v", err)
+	} else {
+		homeDir, err := os.UserHomeDir()
+		if err != nil || homeDir == "" {
+			homeDir = "/root"
+		}
+
+		watchDirs := []string{
+			"/share/aerial-config",
+			"/share/aerial",
+			"/app/.agents/skills",
+			filepath.Join(homeDir, ".gemini", "skills"),
+			filepath.Join(homeDir, ".gemini", "config", "skills"),
+		}
+
+		for _, dir := range watchDirs {
+			if _, err := os.Stat(dir); err == nil {
+				if addErr := fileWatcher.AddRecursive(dir); addErr != nil {
+					log.Printf("Warning: failed to watch %s: %v", dir, addErr)
+				}
+			}
+		}
+
+		watcherCtx, watcherCancel := context.WithCancel(context.Background())
+		defer watcherCancel()
+		go fileWatcher.Start(watcherCtx)
+		defer func() { _ = fileWatcher.Close() }()
+	}
+
 	if _, err := os.Stat("/data"); err == nil {
 		if err := os.MkdirAll("/data/brain", 0755); err != nil {
 			log.Printf("Warning: MkdirAll /data/brain error: %v", err)
@@ -276,6 +320,27 @@ func main() {
 	stopScheduler := scheduler.Start(context.Background(), database, pool, dgSession)
 	defer stopScheduler()
 
+	// Start background git synchronization worker for config & project repos
+	gitSyncRepos := []string{
+		"/share/aerial-config",
+		"/share/aerial",
+	}
+	stopGitSync := gitsync.StartPeriodicSync(
+		context.Background(),
+		60*time.Second,
+		gitSyncRepos,
+		func(repo string) {
+			log.Printf("[GitSync] Updates detected in %s. Reloading system rules and skills...", repo)
+			if err := config.EnsureSystemRules(systemPrompt); err != nil {
+				log.Printf("Warning: gitsync EnsureSystemRules error: %v", err)
+			}
+			if err := skills.EnsureSkills(); err != nil {
+				log.Printf("Warning: gitsync EnsureSkills error: %v", err)
+			}
+		},
+	)
+	defer stopGitSync()
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/prompt", handlePrompt(database, pool))
 	mux.HandleFunc("/transcripts", handleTranscripts(database))
@@ -310,6 +375,9 @@ func main() {
 		log.Printf("HTTP shutdown error: %v", err)
 	}
 
+	if stopGitSync != nil {
+		stopGitSync()
+	}
 	if stopScheduler != nil {
 		stopScheduler()
 	}

@@ -9,6 +9,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+)
+
+var (
+	lkgcMutex          sync.RWMutex
+	lastKnownGoodRules string
 )
 
 type Options struct {
@@ -59,8 +65,37 @@ func EnsureAgySettings(apiKey, model string) error {
 	if err != nil {
 		return fmt.Errorf("failed to marshal settings: %w", err)
 	}
-	if err := os.WriteFile(settingsPath, out, 0644); err != nil {
+	if err := writeAtomic(settingsPath, string(out)); err != nil {
 		return fmt.Errorf("failed to write settings: %w", err)
+	}
+	return nil
+}
+
+func writeAtomic(targetPath, content string) error {
+	dir := filepath.Dir(targetPath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	pattern := fmt.Sprintf(".%s.tmp.*", filepath.Base(targetPath))
+	f, err := os.CreateTemp(dir, pattern)
+	if err != nil {
+		return err
+	}
+	tmpName := f.Name()
+	defer func() {
+		_ = os.Remove(tmpName)
+	}()
+
+	if _, err := f.WriteString(content); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+
+	if err := os.Rename(tmpName, targetPath); err != nil {
+		return err
 	}
 	return nil
 }
@@ -71,27 +106,7 @@ func EnsureSystemRules(customPrompt string) error {
 
 	foundInstructions := false
 
-	// Check instruction files on disk in priority order
-	searchPaths := []string{
-		"/share/aerial/AGENTS.local.md",
-		"/share/aerial/AGENTS.md",
-		"/app/AGENTS.local.md",
-		"/app/AGENTS.md",
-		"/data/AGENTS.md",
-		"./AGENTS.local.md",
-		"./AGENTS.md",
-	}
-
-	for _, p := range searchPaths {
-		if data, err := os.ReadFile(p); err == nil && len(bytes.TrimSpace(data)) > 0 {
-			sb.WriteString(fmt.Sprintf("# Instructions from %s\n\n%s\n\n", filepath.Base(p), string(data)))
-			foundInstructions = true
-			log.Printf("Loaded agent instructions from %s", p)
-			break
-		}
-	}
-
-	// System guidelines (SYSTEM.md)
+	// 1. Base system guidelines (SYSTEM.md) placed FIRST
 	systemPaths := []string{
 		"/share/aerial/SYSTEM.md",
 		"/app/SYSTEM.md",
@@ -106,16 +121,48 @@ func EnsureSystemRules(customPrompt string) error {
 		}
 	}
 
+	// 2. User persona overrides (AGENTS.md) in priority order
+	searchPaths := []string{
+		"/share/aerial-config/AGENTS.local.md",
+		"/share/aerial-config/AGENTS.md",
+		"/share/aerial/AGENTS.md",
+		"/app/AGENTS.md",
+		"/data/AGENTS.md",
+		"./AGENTS.local.md",
+		"./AGENTS.md",
+	}
+
+	for _, p := range searchPaths {
+		if data, err := os.ReadFile(p); err == nil && len(bytes.TrimSpace(data)) > 0 {
+			sb.WriteString(fmt.Sprintf("# User Persona Overrides (%s)\n\n%s\n\n", filepath.Base(p), string(data)))
+			foundInstructions = true
+			log.Printf("Loaded agent instructions from %s", p)
+			break
+		}
+	}
+
+	// 3. Environment Prompt Override
 	if strings.TrimSpace(customPrompt) != "" {
 		sb.WriteString(fmt.Sprintf("# Environment Prompt Override\n\n%s\n\n", strings.TrimSpace(customPrompt)))
 		foundInstructions = true
 	}
 
-	if !foundInstructions {
-		return nil
+	var content string
+	if foundInstructions {
+		content = sb.String()
+		lkgcMutex.Lock()
+		lastKnownGoodRules = content
+		lkgcMutex.Unlock()
+	} else {
+		lkgcMutex.RLock()
+		content = lastKnownGoodRules
+		lkgcMutex.RUnlock()
+		if content == "" {
+			return nil
+		}
+		log.Printf("Using Last Known Good Configuration (LKGC) for system rules")
 	}
 
-	content := sb.String()
 	homeDir, err := os.UserHomeDir()
 	if err != nil || homeDir == "" {
 		homeDir = "/root"
@@ -146,7 +193,7 @@ func EnsureSystemRules(customPrompt string) error {
 	}
 
 	primaryRuleFile := filepath.Join(primaryRulesDir, "system_instructions.md")
-	if err := os.WriteFile(primaryRuleFile, []byte(content), 0644); err != nil {
+	if err := writeAtomic(primaryRuleFile, content); err != nil {
 		return fmt.Errorf("failed to write primary system rules: %w", err)
 	}
 	log.Printf("Configured always_on system instructions in %s", primaryRuleFile)
@@ -158,9 +205,7 @@ func EnsureSystemRules(customPrompt string) error {
 	}
 
 	for _, dir := range additionalDirs {
-		if err := os.MkdirAll(dir, 0755); err == nil {
-			_ = os.WriteFile(filepath.Join(dir, "system_instructions.md"), []byte(content), 0644)
-		}
+		_ = writeAtomic(filepath.Join(dir, "system_instructions.md"), content)
 	}
 
 	return nil
@@ -278,7 +323,7 @@ func EnsureMcpConfig(rawConfig json.RawMessage) error {
 		}
 	}
 
-	if err := os.WriteFile(targetPath, configContent, 0644); err != nil {
+	if err := writeAtomic(targetPath, string(configContent)); err != nil {
 		log.Printf("Failed to write %s: %v", targetPath, err)
 		return fmt.Errorf("failed to write mcp config: %w", err)
 	}

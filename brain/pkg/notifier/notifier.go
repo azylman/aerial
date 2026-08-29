@@ -21,12 +21,12 @@ func StaticFallback(contextDescription string) string {
 		return ModelUnavailableMessage()
 	}
 	if strings.Contains(lower, "poison") || strings.Contains(lower, "crash") || strings.Contains(lower, "dropped") {
-		return "I'm so sorry, darling! ? Your message caused repeated crashes and had to be skipped to restore normal operation. Please try rephrasing your request! ??"
+		return "I'm so sorry, darling! ✨ Your message caused repeated crashes and had to be skipped to restore normal operation. Please try rephrasing your request! 🌸"
 	}
 	if strings.Contains(lower, "reset") || strings.Contains(lower, "corrupt") || strings.Contains(lower, "session") {
-		return "I ran into an issue with our previous session context, so I've refreshed our conversation! ? Please try sending your message again! ??"
+		return "I ran into an issue with our previous session context, so I've refreshed our conversation! ✨ Please try sending your message again! 🌸"
 	}
-	return "I'm so sorry, darling! ? I ran into a temporary hiccup with the AI service. Please try sending your message again in just a moment! ??"
+	return "I'm so sorry, darling! ✨ I ran into a temporary hiccup with the AI service. Please try sending your message again in just a moment! 🌸"
 }
 
 // GenerateSessionResetMessage uses a lightweight agy call to synthesize a persona-aligned reset notice, with static fallback.
@@ -51,7 +51,7 @@ func GenerateDynamicNotification(agyBin, apiKey, contextDescription string) stri
 		return fallback
 	}
 
-	prompt := fmt.Sprintf("You are Aerial. Generate a single, short, warm, and friendly Discord notification message (1-2 sentences with sparkle emojis ???) explaining the following situation to the user:\nSituation: %s\nOutput ONLY the final message text without markdown fences or quotes.", contextDescription)
+	prompt := fmt.Sprintf("You are Aerial. Generate a single, short, warm, and friendly Discord notification message (1-2 sentences with sparkle emojis ✨🌸) explaining the following situation to the user:\nSituation: %s\nOutput ONLY the final message text without markdown fences or quotes.", contextDescription)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()

@@ -287,7 +287,7 @@ func TestQueueSessionCorruptionRecovery(t *testing.T) {
 			return "Clean output after session reset", "Starting conversation update stream for fresh-uuid-999\nDone", 0, nil
 		},
 		NotifierFunc: func(agyBin, apiKey, contextDescription string) string {
-			return "I refreshed our conversation! ?"
+			return "I refreshed our conversation! ✨"
 		},
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
 			mu.Lock()

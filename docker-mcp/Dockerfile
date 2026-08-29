@@ -1,4 +1,4 @@
-FROM node:22-alpine
+﻿FROM node:22-alpine
 
 # Install Docker CLI to talk to host socket, netcat and curl for healthchecks
 RUN apk add --no-cache docker-cli curl netcat-openbsd
