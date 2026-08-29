@@ -73,6 +73,7 @@ func InitDB(dbPath string) (*sql.DB, error) {
 	PRAGMA journal_mode = WAL;
 	PRAGMA busy_timeout = 5000;
 	PRAGMA synchronous = NORMAL;
+	PRAGMA foreign_keys = ON;
 	`
 	if _, err := database.Exec(pragmas); err != nil {
 		log.Printf("Warning: failed to execute PRAGMAs: %v", err)
