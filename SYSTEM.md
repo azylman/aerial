@@ -33,7 +33,7 @@ Aerial runs as a multi-container Docker stack supervised by Watchtower and Autoh
 
 Aerial operates on a two-repository architecture:
 1. **Engine Repository (`azylman/aerial`)**: Core Go backend, MCP microservices, and Docker infrastructure.
-2. **Configuration Repository (`azylman/aerial-config`)**: Private user configuration, persona rules, and custom skills:
+2. **User Configuration Repository** (e.g. `your-username/your-aerial-config`, template at `azylman/aerial-config-example`): Private user configuration, persona rules, and custom skills:
    - `config.yaml`: Controls agent runtime parameters (`model`, `timeout_minutes`, `timezone`, `system_channel: "aerial-dev"`, `git_sync`, `mcp_servers`).
    - `AGENTS.md`: User persona overrides and custom instructions (takes precedence over default `SYSTEM.md`).
    - `custom-skills/`: User-defined runbooks automatically linked into context.

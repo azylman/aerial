@@ -10,7 +10,7 @@ Aerial provides a multi-agent, tool-enabled AI assistant accessible via Discord 
 
 Aerial uses a decoupled **Two-Repository Architecture**:
 - **Engine Repo (`azylman/aerial`)**: Core Go backend (`aerial-brain`), MCP microservices, and Docker Compose topology.
-- **Config Repo (`azylman/aerial-config`)**: Private user configuration (`config.yaml`), persona guidelines (`AGENTS.md`), and custom skills (`custom-skills/`).
+- **User Config Repo (e.g. `your-username/your-aerial-config`)**: Private user configuration (`config.yaml`), persona guidelines (`AGENTS.md`), and custom skills (`custom-skills/`). Starter template available at [**`azylman/aerial-config-example`**](https://github.com/azylman/aerial-config-example).
 
 ```text
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -67,7 +67,7 @@ Aerial is designed to be easily extended across four distinct layers:
 
 ### Layer 1: Configuration & Persona (`config.yaml` & `AGENTS.md`)
 
-User configuration and persona rules live in the private `aerial-config` repository:
+User configuration and persona rules live in your private configuration repository (see [aerial-config-example](https://github.com/azylman/aerial-config-example)):
 
 1. **`config.yaml`** (Non-secret options):
    ```yaml
@@ -79,7 +79,7 @@ User configuration and persona rules live in the private `aerial-config` reposit
    git_sync:
      enabled: true
      interval: "60s"
-     config_repo_url: "https://github.com/azylman/aerial-config.git"
+     config_repo_url: "https://github.com/your-username/your-aerial-config.git"
      repositories:
        - "/share/aerial-config"
        - "/share/aerial"
@@ -96,14 +96,14 @@ User configuration and persona rules live in the private `aerial-config` reposit
 
 Skills use **Progressive Disclosure**—Aerial only loads skill titles and descriptions into context, reading full runbooks on-demand when relevant.
 
-#### A. User Custom Skills (`aerial-config/custom-skills/`)
-Place custom skill directories inside `custom-skills/` in your `aerial-config` repository:
+#### A. User Custom Skills (`custom-skills/` in your config repo)
+Place custom skill directories inside `custom-skills/` in your private configuration repository:
 ```text
 custom-skills/
 └── smart-home/
     └── SKILL.md
 ```
-`aerial-brain` automatically discovers custom skills and symlinks them into `/root/.gemini/skills/` with highest priority. Orphaned or dead symlinks are automatically swept when skills are renamed or removed.
+`aerial-brain` automatically discovers custom skills in `/share/aerial-config/custom-skills` and symlinks them into `/root/.gemini/skills/` with highest priority. Orphaned or dead symlinks are automatically swept when skills are renamed or removed.
 
 #### B. Built-in Skills (`azylman/aerial/.agents/skills/`)
 Core system skills (such as `self-improvement` and `self-update`) are baked into the `brain` image during build.
@@ -137,7 +137,7 @@ By default, Aerial automatically mounts:
 - **`scheduler`** (`http://scheduler-mcp:8080/mcp`)
 
 #### Custom MCP Servers (`config.yaml`)
-Define additional MCP tools directly in `aerial-config/config.yaml`:
+Define additional MCP tools directly in your `config.yaml`:
 ```yaml
 mcp_servers:
   brave-search:
@@ -147,7 +147,7 @@ mcp_servers:
     headers:
       Authorization: "Bearer ${CUSTOM_API_KEY}"
 ```
-Environment variables `${VAR}` are interpolated dynamically at runtime.
+Environment variables `${VAR}` are interpolated dynamically at runtime from your host `.env`.
 
 ---
 
@@ -174,7 +174,7 @@ services:
 Aerial uses an automated GitOps deployment pipeline:
 1. **GitHub Actions Matrix Builds**: Triggers dynamic matrix builds only for modified microservices and publishes them to GitHub Container Registry (`ghcr.io/azylman/aerial-*`).
 2. **Watchtower Supervisor**: Polls GHCR every 60 seconds out-of-band and performs zero-downtime rolling container updates.
-3. **In-Process GitSync**: Automatically pulls updates from `azylman/aerial-config` and `azylman/aerial` every 60 seconds.
+3. **In-Process GitSync**: Automatically pulls updates from your configuration repository and `azylman/aerial` every 60 seconds.
 4. **Self-Improvement Protocol**: When prompted to make code changes or fixes in Discord, Aerial uses `.agents/skills/self-improvement/SKILL.md` to run local tests, commit, and push directly to `origin/main`.
 
 ---
@@ -201,33 +201,41 @@ Aerial uses an automated GitOps deployment pipeline:
 - Docker Engine 24+ & Docker Compose v2+
 - Gemini API Key (from [Google AI Studio](https://aistudio.google.com/))
 - Discord Bot Token (with Message Content and Server Members intents enabled)
-- GitHub Personal Access Token (for private `aerial-config` synchronization)
+- GitHub Personal Access Token (for private configuration repository synchronization)
 
-### Step 1: Clone Repositories
+### Step 1: Create Your Private Configuration Repository
+1. Create a private repository on GitHub (e.g. `your-username/my-aerial-config`).
+2. Copy or fork the template files from [**`azylman/aerial-config-example`**](https://github.com/azylman/aerial-config-example) into your private repository.
+3. Customize `config.yaml` and `AGENTS.md` as desired.
+
+### Step 2: Clone Aerial Engine
 ```bash
 git clone https://github.com/azylman/aerial.git
 cd aerial
 ```
 
-### Step 2: Configure Environment Variables
+### Step 3: Configure Environment Variables
 ```bash
 cp .env.example .env
 ```
-Edit `.env` and configure your secret credentials:
+Edit `.env` and configure your secret credentials and config repo URL:
 ```ini
 GEMINI_API_KEY=your_gemini_api_key_here
 DISCORD_BOT_TOKEN=your_discord_bot_token_here
 GITHUB_PAT=your_github_personal_access_token_here
 HA_TOKEN=http://192.168.1.14:8123/api/webhook/mcp_your_id
+
+# Private Configuration Repository URL
+AERIAL_CONFIG_REPO_URL=https://github.com/your-username/my-aerial-config.git
 ```
 
-### Step 3: Launch Stack
+### Step 4: Launch Stack
 ```bash
 docker compose up -d
 ```
-On boot, `aerial-brain` will automatically adopt or clone your private `aerial-config` repository into `/share/aerial-config` and load your `config.yaml` settings.
+On boot, `aerial-brain` will automatically adopt or clone your private repository into `/share/aerial-config` using `GITHUB_PAT` and load your `config.yaml` settings.
 
-### Step 4: Verify Health
+### Step 5: Verify Health
 ```bash
 docker compose ps
 docker compose logs -f brain
