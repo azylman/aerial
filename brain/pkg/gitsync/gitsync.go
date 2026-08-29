@@ -74,7 +74,7 @@ func SyncRepo(ctx context.Context, repoPath string) (bool, error) {
 	defer cancel()
 
 	// 4. Configure safe.directory to prevent dubious ownership issues across host/container UIDs
-	cmdSafe := exec.CommandContext(opCtx, "git", "-C", repoPath, "config", "--global", "safe.directory", "*")
+	cmdSafe := exec.CommandContext(opCtx, "git", "config", "--global", "safe.directory", "*")
 	_ = cmdSafe.Run()
 
 	// 5. Rev-parse HEAD before pull
