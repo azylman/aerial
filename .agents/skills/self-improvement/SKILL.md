@@ -1,6 +1,6 @@
 ---
 name: self-improvement
-description: Use this skill whenever Aerial needs to modify, enhance, debug, or refactor its own codebase, skills, or system configuration, commit changes, pull updates, or rebuild and redeploy its Docker containers.
+description: Use this skill whenever Aerial needs to modify, enhance, debug, or refactor its own codebase, skills, or system configuration, commit changes, pull updates, or deploy updates via CI/CD.
 ---
 
 # Aerial Self-Improvement & Continuous Engineering Workflow
@@ -15,49 +15,50 @@ The root repository workspace is located at `/share/aerial`.
 
 ```text
 /share/aerial/
-??? brain/               # Go backend (Discord gateway funnel, queue worker pool, agy runner, SQLite memory)
-??? discord-mcp/         # Discord MCP server (Streamable HTTP /mcp)
-??? docker-mcp/          # Docker socket MCP proxy (supergateway + mcp/docker)
-??? github-mcp/          # GitHub Copilot MCP proxy
-??? .agents/skills/      # Built-in skills tracked in Git (baked into brain image)
-??? skills/              # User custom runtime skills (ignored by Git)
-??? docs/specs/          # Architectural specifications and design documents
-??? docker-compose.yml   # Multi-container orchestration
-??? GEMINI.md            # Topology and agent instructions
+├── brain/               # Go backend (Discord gateway funnel, queue worker pool, agy runner, SQLite memory)
+├── discord-mcp/         # Discord MCP server (Streamable HTTP /mcp)
+├── docker-mcp/          # Docker socket MCP proxy (supergateway + mcp/docker)
+├── github-mcp/          # GitHub Copilot MCP proxy
+├── scheduler-mcp/       # Persistent SQLite task scheduler MCP
+├── .agents/skills/      # Built-in skills tracked in Git (baked into brain image)
+├── skills/              # User custom runtime skills (ignored by Git)
+├── docs/specs/          # Architectural specifications and design documents
+├── docker-compose.yml   # Multi-container orchestration
+└── GEMINI.md            # Topology and agent instructions
 ```
 
 ---
 
 ## 2. The 7-Step Engineering Workflow
 
-Whenever undertaking feature development, architectural changes, bug fixes, or system modifications, Aerial must follow this strict 7-step process:
+Whenever undertaking feature development, architectural changes, bug fixes, or system modifications, Aerial must follow this strict workflow:
 
 ```
 Step 1: Brainstorm & Design Spec (docs/specs/...)
-   ?
-   ?
+   │
+   ▼
 Step 2: Write Initial Code (Modular Packages)
-   ?
-   ?
+   │
+   ▼
 Step 3: Senior Code Review (Concurrency, Leaks, DB Safety)
-   ?
-   ?
+   │
+   ▼
 Step 4: Adversarial Critique / Devil's Advocate (Edge Cases, Cascades)
-   ?
-   ?
+   │
+   ▼
 Step 5: Human Review Checkpoint (Synthesize 3-way findings & get approval)
-   ?
-   ?
+   │
+   ▼
 Step 6: Implement Approved Refinements
-   ?
-   ?
+   │
+   ▼
 Step 7: Comprehensive Unit Tests & Complexity Comparison
-   ?
-   ?
-Step 8: Pre-Commit Docker Build Verification Gate
-   ?
-   ?
-Step 9: Commit, Push, Deploy & Health Verification
+   │
+   ▼
+Step 8: Pre-Commit Test Verification Gate
+   │
+   ▼
+Step 9: Commit, Push & Continuous Deployment
 ```
 
 ---
@@ -126,23 +127,21 @@ Present a structured 3-way synthesis to the human user:
 
 ---
 
-### Step 8: Pre-Commit Docker Build Verification (Zero-Failure Gate)
+### Step 8: Pre-Commit Test Verification (Zero-Failure Gate)
 *MANDATORY: Never commit or push unverified code.*
 
-1. **Execute Docker Container Build**:
-   ```bash
-   docker compose -f /share/aerial/docker-compose.yml build brain
-   ```
-   - Verifies `golangci-lint run ./...`
-   - Verifies `go test ./...`
-   - Verifies compilation `go build`
+1. **Execute Unit Tests**:
+   - For Go services (`brain`, `scheduler-mcp`, `discord-mcp`):
+     ```bash
+     cd /share/aerial/<service> && go test -v ./...
+     ```
 2. **Zero-Failure Rule**:
-   - If linter, tests, or compilation fail with any non-zero exit code, **DO NOT COMMIT OR PUSH**.
-   - Read error logs, fix violations, and re-run until the build succeeds with exit code 0.
+   - If tests fail, **DO NOT COMMIT OR PUSH**.
+   - Read error logs, fix violations, and re-run until all tests pass with exit code 0.
 
 ---
 
-### Step 9: Commit, Push, Deploy & Post-Deployment Health Check
+### Step 9: Commit, Push & Continuous Deployment
 
 1. **Review Diffs & Status**:
    ```bash
@@ -156,24 +155,7 @@ Present a structured 3-way synthesis to the human user:
    ```bash
    cd /share/aerial && git push origin main
    ```
-4. **Deploy & Restart**:
-   - **For Non-Brain Services** (`discord-mcp`, `docker-mcp`, `github-mcp`):
-     ```bash
-     docker compose -f /share/aerial/docker-compose.yml up -d --no-build <service_name>
-     ```
-   - **For `brain` (Self-Restart)**:
-     Post explanation to Discord, then trigger restart in background:
-     ```bash
-     (sleep 2 && docker compose -f /share/aerial/docker-compose.yml up -d --no-build brain) &
-     ```
-5. **Post-Deployment Verification**:
-   ```bash
-   docker compose -f /share/aerial/docker-compose.yml ps
-   docker compose -f /share/aerial/docker-compose.yml logs --tail 30 brain
-   ```
-6. **Automated Rollback**:
-   If the container crashes or fails health checks:
-   ```bash
-   git revert --no-edit HEAD && git push origin main
-   docker compose -f /share/aerial/docker-compose.yml up -d --build brain
-   ```
+4. **Continuous Deployment Invariant**:
+   - **DO NOT run `docker compose up`, `docker compose build`, or `docker restart` from inside the container.**
+   - Pushing to `origin/main` triggers the GitHub Actions CI pipeline to build and publish the image to GitHub Container Registry (`ghcr.io`).
+   - Watchtower on the host automatically detects the new image and performs an out-of-band container swap within 60 seconds without interrupting execution or causing downtime.

@@ -1,45 +1,31 @@
 ---
 name: self-update
-description: Use this skill when the user asks Aerial to update itself, pull latest code from git, rebuild containers, or check for repository updates.
+description: Use this skill when the user asks Aerial to update itself, pull latest code from git, check for updates, or deploy updates.
 ---
 
 # Self-Update & Microservice Deployment Runbook
 
-This skill outlines how Aerial safely updates code and redeploys its Docker services.
+This skill outlines how Aerial safely updates code and deploys changes via GitHub Actions and Watchtower.
 
-## Working Directory
-The root project directory is `/share/aerial`. Always operate from this directory or pass `-f /share/aerial/docker-compose.yml`.
+## Continuous Deployment Invariant
+
+Aerial uses automated Continuous Deployment (CD) powered by GitHub Actions and Watchtower.
+**NEVER execute `docker compose up`, `docker compose build`, or `docker restart` directly from inside `aerial-brain`.**
 
 ## Step-by-Step Update Workflow
 
-### 1. Pull Latest Changes
-Run git pull in `/share/aerial`:
+### 1. Verify Unit Tests
+Ensure all unit tests pass locally before committing:
 ```bash
-cd /share/aerial && git pull
-```
-Inspect what changed:
-```bash
-cd /share/aerial && git log -n 1 --stat
+cd /share/aerial/brain && go test ./...
 ```
 
-### 2. Updating Non-Brain Microservices
-If changes affect `discord-mcp`, `docker-mcp`, `github-mcp`, or `agentsview`:
+### 2. Push Changes to Git
 ```bash
-docker compose -f /share/aerial/docker-compose.yml up -d --build <service_name>
+cd /share/aerial && git add -A && git commit -m "feat: description of update" && git push origin main
 ```
-These rebuild with zero interruption to `brain`. Report completion directly.
 
-### 3. Updating Brain Itself
-If changes affect `brain/` or `docker-compose.yml`:
-1. **Compile First**:
-   ```bash
-   docker compose -f /share/aerial/docker-compose.yml build brain
-   ```
-2. **Send Discord Response**:
-   Post your response to Discord summarizing the updates pulled and letting the user know the brain is restarting to apply the changes.
-3. **Trigger Container Restart**:
-   Trigger the restart with a brief 2-second buffer so your Discord message packet finishes sending:
-   ```bash
-   (sleep 2 && docker compose -f /share/aerial/docker-compose.yml up -d --no-build brain) &
-   ```
-   The new `brain` will boot up and reconnect to Discord automatically.
+### 3. Automated Deployment
+1. GitHub Actions automatically builds the Docker image and publishes it to GitHub Container Registry (`ghcr.io/azylman/aerial-<service>:latest`).
+2. Watchtower on the miniPC detects the updated image and replaces the running container gracefully within 60 seconds.
+3. Inform the user in Discord that changes have been pushed to `main` and will be automatically applied by Watchtower.
