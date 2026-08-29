@@ -81,11 +81,11 @@ func InitDB(dbPath string) (*sql.DB, error) {
 	schema := `
 	CREATE TABLE IF NOT EXISTS messages (
 		id TEXT PRIMARY KEY,
-		thread_id TEXT NOT NULL,
-		guild_id TEXT NOT NULL,
-		author_id TEXT NOT NULL,
-		author_name TEXT NOT NULL,
-		content TEXT NOT NULL,
+		thread_id TEXT NOT NULL DEFAULT '',
+		guild_id TEXT NOT NULL DEFAULT '',
+		author_id TEXT NOT NULL DEFAULT '',
+		author_name TEXT NOT NULL DEFAULT '',
+		content TEXT NOT NULL DEFAULT '',
 		status TEXT NOT NULL DEFAULT 'PENDING',
 		retry_count INTEGER NOT NULL DEFAULT 0,
 		error_message TEXT,
@@ -93,8 +93,6 @@ func InitDB(dbPath string) (*sql.DB, error) {
 		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 		updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 	);
-	CREATE INDEX IF NOT EXISTS idx_messages_thread_status ON messages(thread_id, status);
-	CREATE INDEX IF NOT EXISTS idx_messages_status ON messages(status);
 
 	CREATE TABLE IF NOT EXISTS sessions (
 		thread_id TEXT PRIMARY KEY,
@@ -112,7 +110,6 @@ func InitDB(dbPath string) (*sql.DB, error) {
 		created_at DATETIME NOT NULL,
 		updated_at DATETIME NOT NULL
 	);
-	CREATE INDEX IF NOT EXISTS idx_conversations_internal_id ON conversations(internal_id);
 
 	CREATE TABLE IF NOT EXISTS one_shot_schedules (
 		id TEXT PRIMARY KEY,
@@ -121,7 +118,6 @@ func InitDB(dbPath string) (*sql.DB, error) {
 		run_at DATETIME NOT NULL,
 		created_at DATETIME NOT NULL
 	);
-	CREATE INDEX IF NOT EXISTS idx_one_shot_schedules_run_at ON one_shot_schedules(run_at);
 
 	CREATE TABLE IF NOT EXISTS cron_schedules (
 		id TEXT PRIMARY KEY,
@@ -134,7 +130,6 @@ func InitDB(dbPath string) (*sql.DB, error) {
 		enabled BOOLEAN NOT NULL DEFAULT TRUE,
 		created_at DATETIME NOT NULL
 	);
-	CREATE INDEX IF NOT EXISTS idx_cron_schedules_next_run_at ON cron_schedules(enabled, next_run_at);
 
 	CREATE TABLE IF NOT EXISTS facts (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -145,14 +140,35 @@ func InitDB(dbPath string) (*sql.DB, error) {
 		embedding BLOB,
 		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 	);
-	CREATE INDEX IF NOT EXISTS idx_facts_thread_id ON facts(thread_id);
 	`
 	if _, err := database.Exec(schema); err != nil {
 		return nil, err
 	}
 
-	// Safe column migration for response_text on existing DBs
+	// Safe column migrations for messages on existing DBs
+	_, _ = database.Exec(`ALTER TABLE messages ADD COLUMN thread_id TEXT NOT NULL DEFAULT '';`)
+	_, _ = database.Exec(`ALTER TABLE messages ADD COLUMN guild_id TEXT NOT NULL DEFAULT '';`)
+	_, _ = database.Exec(`ALTER TABLE messages ADD COLUMN author_id TEXT NOT NULL DEFAULT '';`)
+	_, _ = database.Exec(`ALTER TABLE messages ADD COLUMN author_name TEXT NOT NULL DEFAULT '';`)
+	_, _ = database.Exec(`ALTER TABLE messages ADD COLUMN content TEXT NOT NULL DEFAULT '';`)
+	_, _ = database.Exec(`ALTER TABLE messages ADD COLUMN status TEXT NOT NULL DEFAULT 'PENDING';`)
+	_, _ = database.Exec(`ALTER TABLE messages ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0;`)
+	_, _ = database.Exec(`ALTER TABLE messages ADD COLUMN error_message TEXT;`)
 	_, _ = database.Exec(`ALTER TABLE messages ADD COLUMN response_text TEXT;`)
+
+	// Create indices after migrations
+	indices := `
+	CREATE INDEX IF NOT EXISTS idx_messages_thread_status ON messages(thread_id, status);
+	CREATE INDEX IF NOT EXISTS idx_messages_status ON messages(status);
+	CREATE INDEX IF NOT EXISTS idx_conversations_internal_id ON conversations(internal_id);
+	CREATE INDEX IF NOT EXISTS idx_one_shot_schedules_run_at ON one_shot_schedules(run_at);
+	CREATE INDEX IF NOT EXISTS idx_cron_schedules_next_run_at ON cron_schedules(enabled, next_run_at);
+	`
+	_, _ = database.Exec(indices)
+
+	// Safe column migration for facts on existing DBs
+	_, _ = database.Exec(`ALTER TABLE facts ADD COLUMN thread_id TEXT NOT NULL DEFAULT '';`)
+	_, _ = database.Exec(`CREATE INDEX IF NOT EXISTS idx_facts_thread_id ON facts(thread_id);`)
 
 	// Safe column migrations for cron_schedules on existing DBs
 	_, _ = database.Exec(`ALTER TABLE cron_schedules ADD COLUMN title_prefix TEXT NOT NULL DEFAULT '';`)
