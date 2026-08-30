@@ -1,3 +1,4 @@
+// Package main implements the Aerial Permet HUD status dashboard and telemetry viewer.
 package main
 
 import (
