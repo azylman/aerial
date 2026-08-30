@@ -774,7 +774,7 @@ func setupTestDB(t *testing.T) *sql.DB {
 
 func TestScheduleRunsCRUD(t *testing.T) {
 	db := setupTestDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	now := time.Now().UTC()
 	run := ScheduleRun{
@@ -832,7 +832,7 @@ func TestScheduleRunsCRUD(t *testing.T) {
 
 func TestReconcileOrphanedScheduleRuns(t *testing.T) {
 	db := setupTestDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	now := time.Now().UTC()
 	_ = CreateScheduleRun(db, ScheduleRun{ID: "run-stuck-1", ScheduleID: "cron-1", ScheduleType: "cron", TargetID: "c1", ThreadID: "t1", Prompt: "p1", Status: "running", StartedAt: now})
@@ -863,7 +863,7 @@ func TestReconcileOrphanedScheduleRuns(t *testing.T) {
 
 func TestScheduleSummaryMetrics(t *testing.T) {
 	db := setupTestDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	now := time.Now().UTC()
 
@@ -947,7 +947,7 @@ func TestScheduleSummaryMetrics(t *testing.T) {
 
 func TestPruneScheduleRuns(t *testing.T) {
 	db := setupTestDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	now := time.Now().UTC()
 
