@@ -237,13 +237,57 @@ services:
       - "--host=0.0.0.0"
       - "--public-origin=${AGENTSVIEW_PUBLIC_ORIGINS:-http://192.168.1.14:8089,http://192.168.1.14,https://aerial.zylman.com,http://aerial.zylman.com}"
       - "--public-url=${AGENTSVIEW_PUBLIC_URL:-https://aerial.zylman.com}"
-    ports:
-      - "${AGENTSVIEW_HOST_PORT:-8089}:8080"
     volumes:
       - aerial-agentsview-data:/data
       - aerial-brain-gemini:/root/.gemini:ro
     networks:
       - aerial-net
+
+  # ----------------------------------------------------------------------------
+  # 10. Core Status Dashboard: Aerial Status Microservice
+  #     Monitors Docker container health and serves Cyberpunk status HUD.
+  # ----------------------------------------------------------------------------
+  dashboard:
+    image: ghcr.io/azylman/aerial-dashboard:latest
+    build: ./dashboard
+    container_name: aerial-dashboard
+    restart: unless-stopped
+    labels:
+      autoheal: "true"
+      com.centurylinklabs.watchtower.enable: "true"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - aerial-net
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ----------------------------------------------------------------------------
+  # 11. Edge Reverse Proxy Gateway: Aerial Proxy Gateway
+  #     Routes traffic for / (status dashboard) and /conversations (agentsview).
+  # ----------------------------------------------------------------------------
+  proxy:
+    image: ghcr.io/azylman/aerial-proxy:latest
+    build: ./proxy
+    container_name: aerial-proxy
+    restart: unless-stopped
+    labels:
+      autoheal: "true"
+      com.centurylinklabs.watchtower.enable: "true"
+    ports:
+      - "${AGENTSVIEW_HOST_PORT:-8089}:80"
+    networks:
+      - aerial-net
+    depends_on:
+      dashboard:
+        condition: service_healthy
+      agentsview:
+        condition: service_started
+
 
 networks:
   aerial-net:
