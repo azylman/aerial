@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/azylman/aerial/brain/pkg/db"
 	"github.com/azylman/aerial/brain/pkg/queue"
@@ -95,3 +97,273 @@ func TestHandleTranscripts(t *testing.T) {
 		t.Errorf("Expected status 200 OK, got %d", w.Code)
 	}
 }
+
+func TestFormatCronDescription(t *testing.T) {
+	tests := []struct {
+		expr     string
+		expected string
+	}{
+		{"0 9 * * 1-5", "Weekdays (Mon–Fri) at 09:00"},
+		{"0 9 * * *", "Every day at 09:00"},
+		{"*/15 * * * *", "Every 15 minutes"},
+		{"0 */2 * * *", "Every 2 hours"},
+		{"0 0 * * *", "Every day at 00:00"},
+		{"30 8 * * 0", "Every Sunday at 08:30"},
+		{"0 12 1 * *", "1st of every month at 12:00"},
+		{"* * * * *", "Every minute"},
+		{"@daily", "Every day at 00:00"},
+		{"@hourly", "Every hour"},
+	}
+
+	for _, tt := range tests {
+		got := FormatCronDescription(tt.expr)
+		if got != tt.expected {
+			t.Errorf("FormatCronDescription(%q) = %q, want %q", tt.expr, got, tt.expected)
+		}
+	}
+}
+
+func TestSanitizeString(t *testing.T) {
+	tests := []struct {
+		input       string
+		mustNotHave string
+		mustHave    string
+	}{
+		{
+			input:       "Execute prompt with token ghp_1234567890abcdefABCDEF123456",
+			mustNotHave: "ghp_1234567890abcdefABCDEF123456",
+			mustHave:    "[REDACTED]",
+		},
+		{
+			input:       "Error: failed with github_pat_11ABCD1234_abcdef5678",
+			mustNotHave: "github_pat_11ABCD1234_abcdef5678",
+			mustHave:    "[REDACTED]",
+		},
+		{
+			input:       "Clean prompt with no tokens to redact",
+			mustNotHave: "[REDACTED]",
+			mustHave:    "Clean prompt with no tokens to redact",
+		},
+	}
+
+	for _, tt := range tests {
+		got := SanitizeString(tt.input)
+		if tt.mustNotHave != "" && strings.Contains(got, tt.mustNotHave) {
+			t.Errorf("SanitizeString(%q) leaked token %q: %s", tt.input, tt.mustNotHave, got)
+		}
+		if tt.mustHave != "" && !strings.Contains(got, tt.mustHave) {
+			t.Errorf("SanitizeString(%q) = %q, expected to contain %q", tt.input, got, tt.mustHave)
+		}
+	}
+}
+
+func TestSchedulesEndpoints(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	now := time.Now().UTC()
+
+	// 1. Seed cron schedule
+	cron1 := db.CronSchedule{
+		ID:          "cron-1",
+		TargetID:    "chan-123",
+		TitlePrefix: "Morning Brief",
+		CronExpr:    "0 9 * * 1-5",
+		Prompt:      "Check status with secret token ghp_secretToken1234567890",
+		Timezone:    "America/Los_Angeles",
+		NextRunAt:   now.Add(1 * time.Hour),
+		Enabled:     true,
+		CreatedAt:   now,
+	}
+	if err := db.CreateCronSchedule(database, cron1); err != nil {
+		t.Fatalf("CreateCronSchedule failed: %v", err)
+	}
+
+	// 2. Seed one-shot schedule
+	once1 := db.OneShotSchedule{
+		ID:        "once-1",
+		ThreadID:  "thread-456",
+		Prompt:    "Reminder with secret key github_pat_1234567890abcdef",
+		RunAt:     now.Add(30 * time.Minute),
+		CreatedAt: now,
+	}
+	if err := db.CreateOneShotSchedule(database, once1); err != nil {
+		t.Fatalf("CreateOneShotSchedule failed: %v", err)
+	}
+
+	// 3. Seed schedule runs
+	runCompleted := db.ScheduleRun{
+		ID:           "run-1",
+		ScheduleID:   "cron-1",
+		ScheduleType: "cron",
+		MessageID:    "msg-1",
+		TargetID:     "chan-123",
+		ThreadID:     "th-1",
+		Title:        "Morning Brief",
+		Prompt:       "Check status with secret token ghp_secretToken1234567890",
+		Status:       "completed",
+		StartedAt:    now.Add(-2 * time.Hour),
+		DurationMs:   4500,
+	}
+	if err := db.CreateScheduleRun(database, runCompleted); err != nil {
+		t.Fatalf("CreateScheduleRun failed: %v", err)
+	}
+
+	runFailed := db.ScheduleRun{
+		ID:           "run-2",
+		ScheduleID:   "cron-1",
+		ScheduleType: "cron",
+		MessageID:    "msg-2",
+		TargetID:     "chan-123",
+		ThreadID:     "th-2",
+		Title:        "Morning Brief",
+		Prompt:       "Run routine",
+		Status:       "failed",
+		StartedAt:    now.Add(-1 * time.Hour),
+		DurationMs:   1200,
+		Error:        "Failed auth with token ghp_errorToken99999999",
+	}
+	if err := db.CreateScheduleRun(database, runFailed); err != nil {
+		t.Fatalf("CreateScheduleRun failed: %v", err)
+	}
+
+	// Test GET /schedules
+	schedulesHandler := handleSchedules(database)
+	req := httptest.NewRequest(http.MethodGet, "/schedules", nil)
+	w := httptest.NewRecorder()
+	schedulesHandler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected status 200 OK from /schedules, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var schedResp SchedulesResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &schedResp); err != nil {
+		t.Fatalf("Failed to parse /schedules response JSON: %v", err)
+	}
+
+	if schedResp.Status != "ok" {
+		t.Errorf("Expected status ok, got %s", schedResp.Status)
+	}
+	if schedResp.Summary.TotalActive != 2 || schedResp.Summary.CronCount != 1 || schedResp.Summary.OneShotCount != 1 {
+		t.Errorf("Unexpected summary metrics: %+v", schedResp.Summary)
+	}
+	if len(schedResp.Crons) != 1 {
+		t.Fatalf("Expected 1 cron schedule, got %d", len(schedResp.Crons))
+	}
+	cronItem := schedResp.Crons[0]
+	if cronItem.ID != "cron-1" || cronItem.ChannelID != "chan-123" {
+		t.Errorf("Unexpected cron item fields: %+v", cronItem)
+	}
+	if cronItem.CronDescription != "Weekdays (Mon–Fri) at 09:00" {
+		t.Errorf("Expected cron_description 'Weekdays (Mon–Fri) at 09:00', got %q", cronItem.CronDescription)
+	}
+	if strings.Contains(cronItem.Prompt, "ghp_secretToken1234567890") {
+		t.Errorf("Prompt token not redacted in /schedules: %s", cronItem.Prompt)
+	}
+	if !strings.Contains(cronItem.Prompt, "[REDACTED]") {
+		t.Errorf("Expected [REDACTED] in sanitized prompt, got %s", cronItem.Prompt)
+	}
+
+	if len(schedResp.OneShots) != 1 {
+		t.Fatalf("Expected 1 one-shot schedule, got %d", len(schedResp.OneShots))
+	}
+	oneShotItem := schedResp.OneShots[0]
+	if oneShotItem.ID != "once-1" || oneShotItem.ThreadID != "thread-456" {
+		t.Errorf("Unexpected one-shot item fields: %+v", oneShotItem)
+	}
+	if strings.Contains(oneShotItem.Prompt, "github_pat_1234567890abcdef") {
+		t.Errorf("Prompt token not redacted in one_shots: %s", oneShotItem.Prompt)
+	}
+
+	// Test Caching: Adding another schedule directly in DB should not change cached output immediately
+	cron2 := db.CronSchedule{
+		ID:          "cron-2",
+		TargetID:    "chan-999",
+		TitlePrefix: "Nightly",
+		CronExpr:    "0 0 * * *",
+		Prompt:      "Nightly check",
+		NextRunAt:   now.Add(12 * time.Hour),
+		Enabled:     true,
+		CreatedAt:   now,
+	}
+	_ = db.CreateCronSchedule(database, cron2)
+
+	wCached := httptest.NewRecorder()
+	schedulesHandler(wCached, req)
+	var cachedResp SchedulesResponse
+	_ = json.Unmarshal(wCached.Body.Bytes(), &cachedResp)
+	if len(cachedResp.Crons) != 1 {
+		t.Errorf("Expected cached 1 cron schedule within 5s TTL, got %d", len(cachedResp.Crons))
+	}
+
+	// Test GET /schedules/runs
+	runsHandler := handleScheduleRuns(database)
+	reqRuns := httptest.NewRequest(http.MethodGet, "/schedules/runs", nil)
+	wRuns := httptest.NewRecorder()
+	runsHandler(wRuns, reqRuns)
+
+	if wRuns.Code != http.StatusOK {
+		t.Fatalf("Expected status 200 OK from /schedules/runs, got %d: %s", wRuns.Code, wRuns.Body.String())
+	}
+
+	var runsResp ScheduleRunsResponse
+	if err := json.Unmarshal(wRuns.Body.Bytes(), &runsResp); err != nil {
+		t.Fatalf("Failed to parse /schedules/runs response JSON: %v", err)
+	}
+
+	if runsResp.Status != "ok" || runsResp.Total != 2 || len(runsResp.Runs) != 2 {
+		t.Errorf("Unexpected runs response: total=%d, len=%d", runsResp.Total, len(runsResp.Runs))
+	}
+
+	// Check token sanitization in error and prompt
+	for _, r := range runsResp.Runs {
+		if strings.Contains(r.Prompt, "ghp_secretToken1234567890") {
+			t.Errorf("Run prompt token leaked: %s", r.Prompt)
+		}
+		if strings.Contains(r.Error, "ghp_errorToken99999999") {
+			t.Errorf("Run error token leaked: %s", r.Error)
+		}
+	}
+
+	// Test filtering /schedules/runs?status=failed
+	reqFiltered := httptest.NewRequest(http.MethodGet, "/schedules/runs?status=failed", nil)
+	wFiltered := httptest.NewRecorder()
+	runsHandler(wFiltered, reqFiltered)
+
+	var filteredResp ScheduleRunsResponse
+	_ = json.Unmarshal(wFiltered.Body.Bytes(), &filteredResp)
+	if filteredResp.Total != 1 || len(filteredResp.Runs) != 1 || filteredResp.Runs[0].Status != "failed" {
+		t.Errorf("Unexpected filtered runs: %+v", filteredResp)
+	}
+
+	// Test pagination /schedules/runs?limit=1&offset=0
+	reqPaginated := httptest.NewRequest(http.MethodGet, "/schedules/runs?limit=1&offset=0", nil)
+	wPaginated := httptest.NewRecorder()
+	runsHandler(wPaginated, reqPaginated)
+
+	var paginatedResp ScheduleRunsResponse
+	_ = json.Unmarshal(wPaginated.Body.Bytes(), &paginatedResp)
+	if paginatedResp.Total != 2 || len(paginatedResp.Runs) != 1 || paginatedResp.Limit != 1 {
+		t.Errorf("Unexpected paginated runs: %+v", paginatedResp)
+	}
+
+	// Test MethodNotAllowed for POST
+	reqPost := httptest.NewRequest(http.MethodPost, "/schedules", nil)
+	wPost := httptest.NewRecorder()
+	schedulesHandler(wPost, reqPost)
+	if wPost.Code != http.StatusMethodNotAllowed {
+		t.Errorf("Expected 405 MethodNotAllowed for POST /schedules, got %d", wPost.Code)
+	}
+
+	reqPostRuns := httptest.NewRequest(http.MethodPost, "/schedules/runs", nil)
+	wPostRuns := httptest.NewRecorder()
+	runsHandler(wPostRuns, reqPostRuns)
+	if wPostRuns.Code != http.StatusMethodNotAllowed {
+		t.Errorf("Expected 405 MethodNotAllowed for POST /schedules/runs, got %d", wPostRuns.Code)
+	}
+}
+

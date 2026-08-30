@@ -614,11 +614,11 @@ func GetInterruptedTurns(database *sql.DB) ([]ConversationTurnState, error) {
 // Scheduling definitions
 
 type OneShotSchedule struct {
-	ID        string
-	ThreadID  string
-	Prompt    string
-	RunAt     time.Time
-	CreatedAt time.Time
+	ID        string    `json:"id"`
+	ThreadID  string    `json:"thread_id"`
+	Prompt    string    `json:"prompt"`
+	RunAt     time.Time `json:"run_at"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 type CronSchedule struct {
