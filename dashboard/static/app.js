@@ -76,9 +76,9 @@ function startLiveTimerLoop() {
 }
 
 function renderActiveTasks(tasks) {
-    const container = document.getElementById('active-tasks-container');
-    const badge = document.getElementById('tasks-count-badge');
-    const summaryVal = document.getElementById('summary-tasks-val');
+    const container = document.getElementById('active-tasks-list');
+    const badge = document.getElementById('active-tasks-badge') || document.getElementById('tasks-count-badge');
+    const summaryVal = document.getElementById('summary-active-tasks') || document.getElementById('summary-tasks-val');
     const summarySub = document.getElementById('summary-tasks-sub');
 
     const activeList = Array.isArray(tasks) ? tasks : [];
@@ -103,7 +103,6 @@ function renderActiveTasks(tasks) {
         summarySub.textContent = totalCount > 0 ? `${totalCount} ACTIVE IN QUEUE` : 'REAL-TIME DISPATCH';
     }
 
-    // Update Section Badge
     if (badge) {
         if (runningCount > 0) {
             badge.textContent = `⚡ ${runningCount} RUNNING` + (pendingCount > 0 ? ` (+${pendingCount} QUEUED)` : '');
@@ -122,21 +121,23 @@ function renderActiveTasks(tasks) {
     if (activeList.length === 0) {
         container.innerHTML = `
             <div class="task-idle-card">
-                <div class="idle-indicator">
-                    <span class="pulse-dot healthy"></span>
-                    <span>ALL WORKERS IDLE // NO PENDING TURNS</span>
+                <div class="task-idle-left">
+                    <span class="task-idle-indicator"></span>
+                    <span class="task-idle-text">AUTONOMOUS QUEUE IDLE // STANDING BY FOR DISCORD OR CRON TRIGGERS</span>
                 </div>
-                <div>DISPATCH POLLING SQLITE QUEUE (1s)</div>
+                <div class="task-idle-meta">
+                    <span class="task-idle-clock">AERIAL SYSTEM NOMINAL</span>
+                </div>
             </div>
         `;
         return;
     }
 
     const now = Date.now();
-    container.innerHTML = activeList.map(task => {
+
+    container.innerHTML = tasks.map(task => {
         const isProcessing = task.status === 'PROCESSING';
-        const isPending = task.status === 'PENDING';
-        const statusClass = isProcessing ? 'status-processing' : 'status-pending';
+        const statusClass = isProcessing ? 'task-processing' : 'task-pending';
         const statusBadge = isProcessing ? '⚡ RUNNING' : '⏳ QUEUED';
 
         const authorSafe = escapeHtml(task.author_name || 'System');
@@ -162,8 +163,9 @@ function renderActiveTasks(tasks) {
             ? `<span class="task-retry-badge" title="Retry Attempt">🔄 RETRY #${escapeHtml(task.retry_count)}</span>` 
             : '';
 
+        const inspectUrl = formatAgentsviewSessionUrl(task.session_id);
         const inspectHTML = task.session_id 
-            ? `<a href="/sessions/${encodeURIComponent(task.session_id)}" target="_blank" rel="noopener noreferrer" class="task-inspect-btn active">💬 INSPECT IN AGENTSVIEW ↗</a>`
+            ? `<a href="${inspectUrl}" target="_blank" rel="noopener noreferrer" class="task-inspect-btn active">💬 INSPECT IN AGENTSVIEW ↗</a>`
             : `<a href="/conversations/" target="_blank" rel="noopener noreferrer" class="task-inspect-btn active" title="Session allocating - Click to open Agentsview">💬 OPEN AGENTSVIEW ↗</a>`;
 
         return `
