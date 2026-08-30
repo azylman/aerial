@@ -593,6 +593,107 @@ func TestMergeClusterDeployments_Idle(t *testing.T) {
 	}
 }
 
+func TestMergeClusterDeployments_AdversarialNilLabelsAndNilHealth(t *testing.T) {
+	now := time.Now().UTC()
+	// Containers with nil Labels map, nil Health pointer, but running state
+	containers := []DockerContainerJSON{
+		{
+			ID:      "c1",
+			Names:   []string{"/aerial-brain"},
+			State:   "running",
+			Created: now.Add(-30 * time.Second).Unix(),
+			Labels:  nil,
+			Health:  nil,
+		},
+		{
+			ID:      "c2",
+			Names:   []string{"/aerial-dashboard"},
+			State:   "running",
+			Created: now.Add(-30 * time.Second).Unix(),
+			Labels:  nil,
+			Health:  nil,
+		},
+	}
+
+	deploys := mergeClusterDeployments(containers, nil, nil, "test1234")
+	if len(deploys) != 1 {
+		t.Fatalf("expected 1 deployment, got %d", len(deploys))
+	}
+	dep := deploys[0]
+	if dep.Stage != "swapping" {
+		t.Errorf("expected swapping stage, got %s", dep.Stage)
+	}
+	if len(dep.MatrixJobs) != 2 {
+		t.Errorf("expected 2 container chips, got %d", len(dep.MatrixJobs))
+	}
+}
+
+func TestMergeClusterDeployments_AdversarialClockSkewFutureTimestamp(t *testing.T) {
+	now := time.Now().UTC()
+	futureRun := []GitHubRun{
+		{
+			ID:         999,
+			Name:       "Continuous Delivery",
+			HeadSHA:    "future1234",
+			Status:     "completed",
+			Conclusion: "success",
+			CreatedAt:  now.Add(10 * time.Second),
+			UpdatedAt:  now.Add(15 * time.Second), // In future due to clock skew
+			HTMLURL:    "https://github.com/azylman/aerial/actions/runs/999",
+		},
+	}
+
+	// Local containers running older version
+	containers := []DockerContainerJSON{
+		{
+			ID:      "c1",
+			Names:   []string{"/aerial-brain"},
+			State:   "running",
+			Created: now.Add(-2 * time.Hour).Unix(),
+			Labels:  map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"},
+		},
+	}
+
+	deploys := mergeClusterDeployments(containers, futureRun, nil, "old1234")
+	if len(deploys) != 1 {
+		t.Fatalf("expected 1 deployment, got %d", len(deploys))
+	}
+	dep := deploys[0]
+	if dep.Stage != "awaiting_pull" {
+		t.Errorf("expected stage 'awaiting_pull' despite future timestamp, got %s", dep.Stage)
+	}
+}
+
+func TestParseMatrixJobChips_LintAndTests(t *testing.T) {
+	jobs := []GitHubJob{
+		{
+			ID:          201,
+			Name:        "Run Service Unit Tests",
+			Status:      "completed",
+			Conclusion:  "success",
+			StartedAt:   time.Now().Add(-30 * time.Second),
+			CompletedAt: time.Now().Add(-5 * time.Second),
+		},
+		{
+			ID:          202,
+			Name:        "Lint Go Microservices",
+			Status:      "in_progress",
+			StartedAt:   time.Now().Add(-10 * time.Second),
+		},
+	}
+
+	chips := parseMatrixJobChips(jobs)
+	if len(chips) != 2 {
+		t.Fatalf("expected 2 chips (unit-tests, lint), got %d", len(chips))
+	}
+	if chips[0].Name != "unit-tests" || chips[0].Status != "completed" {
+		t.Errorf("unexpected chip 0: %+v", chips[0])
+	}
+	if chips[1].Name != "lint" || chips[1].Status != "active" {
+		t.Errorf("unexpected chip 1: %+v", chips[1])
+	}
+}
+
 
 func TestSchedulesHandler_Success(t *testing.T) {
 	mockBrain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

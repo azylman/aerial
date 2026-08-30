@@ -576,6 +576,9 @@ func extractServiceNameFromJobName(jobName string) string {
 	if strings.Contains(lower, "unit test") || strings.Contains(lower, "test") {
 		return "unit-tests"
 	}
+	if strings.Contains(lower, "lint") {
+		return "lint"
+	}
 	return ""
 }
 
