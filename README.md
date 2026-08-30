@@ -198,7 +198,7 @@ Aerial uses an automated GitOps deployment pipeline:
 
 ### Prerequisites
 - Docker Engine 24+ & Docker Compose v2+
-- Gemini API Key (from [Google AI Studio](https://aistudio.google.com/))
+- Google Account for OAuth authentication (recommended to avoid API key rate limits and 503 overload errors) OR Gemini API Key (from [Google AI Studio](https://aistudio.google.com/))
 - Discord Bot Token (with Message Content and Server Members intents enabled)
 - GitHub Personal Access Token (for private configuration repository synchronization)
 
@@ -217,9 +217,11 @@ cd aerial
 ```bash
 cp .env.example .env
 ```
-Edit `.env` and configure your secret credentials and config repo URL:
+Edit `.env` and configure your credentials and config repo URL:
 ```ini
-GEMINI_API_KEY=your_gemini_api_key_here
+# Recommended: Leave GEMINI_API_KEY commented out for Google OAuth authentication!
+# GEMINI_API_KEY=your_gemini_api_key_here
+
 DISCORD_BOT_TOKEN=your_discord_bot_token_here
 GITHUB_PAT=your_github_personal_access_token_here
 
@@ -233,7 +235,17 @@ docker compose up -d
 ```
 On boot, `aerial-brain` will automatically adopt or clone your private repository into `/share/aerial-config` using `GITHUB_PAT` and load your `config.yaml` settings.
 
-### Step 5: Verify Health
+### Step 5: Authenticate via Google OAuth (Recommended)
+If using OAuth (with `GEMINI_API_KEY` commented out):
+1. Run the interactive `agy` CLI inside the running container:
+   ```bash
+   docker exec -it aerial-brain agy
+   ```
+2. Copy the displayed Google OAuth login URL into your web browser and sign in.
+3. Paste the authorization code back into the terminal prompt and hit Enter.
+4. Press `Ctrl+C` to exit once authenticated. Aerial will store the OAuth session token in `/data` and automatically refresh access tokens in the background!
+
+### Step 6: Verify Health
 ```bash
 docker compose ps
 docker compose logs -f brain
