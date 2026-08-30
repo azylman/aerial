@@ -255,3 +255,82 @@ func TestProcessThreadFactsDeduplicationAndWatermark(t *testing.T) {
 	}
 }
 
+func TestExtractQueryText(t *testing.T) {
+	// Case 1: Discord prompt format
+	discordPrompt := `<USER_REQUEST>
+Here's a message someone sent you from Discord:
+
+- id: 1543706746294509568
+- channel_id: 1542423172400291873
+- thread_id: 1543706746294509568
+- author_id: 123456789
+- author_username: testuser
+- content: What office do I work from on Thursdays?
+- timestamp: 2026-08-30T19:39:29Z
+- mentions: [Aerial]
+- attachments: []
+
+Please formulate your response and output it clearly. It will be delivered directly to the Discord thread.
+</USER_REQUEST>`
+
+	extracted := ExtractQueryText(discordPrompt)
+	expected := "What office do I work from on Thursdays?"
+	if extracted != expected {
+		t.Errorf("expected %q, got %q", expected, extracted)
+	}
+
+	// Case 2: XML envelope format
+	xmlPrompt := "<USER_REQUEST>\n  Show me system status\n</USER_REQUEST>"
+	extractedXML := ExtractQueryText(xmlPrompt)
+	if extractedXML != "Show me system status" {
+		t.Errorf("expected 'Show me system status', got %q", extractedXML)
+	}
+
+	// Case 3: Plain text
+	plain := "What is the weather today?"
+	extractedPlain := ExtractQueryText(plain)
+	if extractedPlain != plain {
+		t.Errorf("expected %q, got %q", plain, extractedPlain)
+	}
+
+	// Case 4: Empty
+	if ExtractQueryText("") != "" {
+		t.Errorf("expected empty string for empty input")
+	}
+}
+
+func TestRetrieveRelevantFacts(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("failed to init in-memory db: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(EmbeddingResponse{
+			Embedding: []float32{1.0, 0.0, 0.0},
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL)
+
+	// Insert facts into DB
+	_, _ = db.InsertFact(database, "system_config", "Server port is 8080", 1.0, "thread-1", []float32{0.9, 0.1, 0.0})
+	_, _ = db.InsertFact(database, "routine", "Low scoring fact", 1.0, "thread-1", []float32{0.1, 0.9, 0.0})
+
+	facts, err := RetrieveRelevantFacts(context.Background(), database, client, "What port is the server?", 5)
+	if err != nil {
+		t.Fatalf("RetrieveRelevantFacts failed: %v", err)
+	}
+
+	if len(facts) != 1 {
+		t.Fatalf("expected 1 relevant fact, got %d", len(facts))
+	}
+	if facts[0].FactText != "Server port is 8080" {
+		t.Errorf("expected 'Server port is 8080', got %q", facts[0].FactText)
+	}
+}
+
+

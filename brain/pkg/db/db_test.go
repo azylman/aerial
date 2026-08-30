@@ -1057,7 +1057,7 @@ func TestGetActiveTasks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InitDB failed: %v", err)
 	}
-	defer database.Close()
+	defer func() { _ = database.Close() }()
 
 	// Insert test messages with various statuses
 	now := time.Now().UTC()
@@ -1066,7 +1066,7 @@ func TestGetActiveTasks(t *testing.T) {
 			ID:          "msg-1",
 			ThreadID:    "thread-1",
 			AuthorID:    "user-123",
-			AuthorName:  "Arcane",
+			AuthorName:  "UserA",
 			Content:     "Hello agent",
 			Status:      StatusPending,
 			CreatedAt:   now.Add(-2 * time.Minute),

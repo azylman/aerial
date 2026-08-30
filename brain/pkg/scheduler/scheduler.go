@@ -323,6 +323,11 @@ func Run(ctx context.Context, database *sql.DB, enqueuer MessageEnqueuer, thread
 			log.Printf("[Scheduler] Initial retention pruning removed %d old schedule runs", pruned)
 		}
 	}()
+	go func() {
+		if err := memory.ExtractActiveConversationFacts(ctx, database, ollamaClient, llmFunc, 12); err != nil {
+			log.Printf("[Scheduler] Initial fact extraction error: %v", err)
+		}
+	}()
 
 	var tickCount int
 	for {
