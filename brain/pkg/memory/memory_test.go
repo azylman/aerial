@@ -112,7 +112,7 @@ func TestMockOllamaClient(t *testing.T) {
 
 	client := NewClient(server.URL)
 
-	// Test query embedding (should prepend BGE prefix)
+	// Test query embedding without prefix configured (default for all-minilm)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
@@ -123,11 +123,25 @@ func TestMockOllamaClient(t *testing.T) {
 	if len(emb) != 3 {
 		t.Errorf("expected embedding len 3, got %d", len(emb))
 	}
-	if !strings.HasPrefix(receivedPrompt, BGEQueryPrefix) {
-		t.Errorf("expected prompt to start with BGE prefix, got: %s", receivedPrompt)
+	if receivedPrompt != "test query" {
+		t.Errorf("expected clean prompt 'test query', got: %s", receivedPrompt)
 	}
 
-	// Test document embedding (should NOT prepend BGE prefix)
+	// Test query embedding with EMBEDDING_QUERY_PREFIX configured
+	t.Setenv("EMBEDDING_QUERY_PREFIX", "Represent this query: ")
+
+	embPrefixed, err := client.GenerateEmbedding(ctx, "test query 2", true, 1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(embPrefixed) != 3 {
+		t.Errorf("expected embedding len 3, got %d", len(embPrefixed))
+	}
+	if receivedPrompt != "Represent this query: test query 2" {
+		t.Errorf("expected prefixed prompt, got: %s", receivedPrompt)
+	}
+
+	// Test document embedding (should NOT prepend prefix)
 	embDoc, err := client.GenerateEmbedding(ctx, "test doc", false, 1)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -135,8 +149,8 @@ func TestMockOllamaClient(t *testing.T) {
 	if len(embDoc) != 3 {
 		t.Errorf("expected embedding len 3, got %d", len(embDoc))
 	}
-	if strings.HasPrefix(receivedPrompt, BGEQueryPrefix) {
-		t.Errorf("expected document prompt NOT to have BGE prefix, got: %s", receivedPrompt)
+	if receivedPrompt != "test doc" {
+		t.Errorf("expected document prompt 'test doc', got: %s", receivedPrompt)
 	}
 }
 
@@ -256,7 +270,7 @@ func TestProcessThreadFactsDeduplicationAndWatermark(t *testing.T) {
 }
 
 func TestExtractQueryText(t *testing.T) {
-	// Case 1: Discord prompt format
+	// Case 1: Discord prompt format with mention
 	discordPrompt := `<USER_REQUEST>
 Here's a message someone sent you from Discord:
 
@@ -265,7 +279,7 @@ Here's a message someone sent you from Discord:
 - thread_id: 1543706746294509568
 - author_id: 123456789
 - author_username: testuser
-- content: What office do I work from on Thursdays?
+- content: <@1542035925603713086> What office do I work from on Thursdays?
 - timestamp: 2026-08-30T19:39:29Z
 - mentions: [Aerial]
 - attachments: []
@@ -296,6 +310,51 @@ Please formulate your response and output it clearly. It will be delivered direc
 	// Case 4: Empty
 	if ExtractQueryText("") != "" {
 		t.Errorf("expected empty string for empty input")
+	}
+}
+
+func TestBackfillMissingEmbeddings(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("failed to init in-memory db: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(EmbeddingResponse{
+			Embedding: []float32{0.5, 0.5, 0.7071},
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL)
+
+	// Insert facts: 1 with embedding, 2 without embedding
+	_, _ = db.InsertFact(database, "system_config", "Fact 1 with emb", 1.0, "thread-1", []float32{0.1, 0.2, 0.3})
+	_, _ = db.InsertFact(database, "system_config", "Fact 2 missing emb", 1.0, "thread-1", nil)
+	_, _ = db.InsertFact(database, "user_pref", "Fact 3 missing emb", 0.9, "thread-1", nil)
+
+	backfilled, err := BackfillMissingEmbeddings(context.Background(), database, client)
+	if err != nil {
+		t.Fatalf("BackfillMissingEmbeddings failed: %v", err)
+	}
+	if backfilled != 2 {
+		t.Fatalf("expected 2 backfilled facts, got %d", backfilled)
+	}
+
+	// Verify all 3 facts now have valid embeddings
+	facts, err := db.GetAllFactsWithEmbeddings(database)
+	if err != nil {
+		t.Fatalf("GetAllFactsWithEmbeddings failed: %v", err)
+	}
+	if len(facts) != 3 {
+		t.Fatalf("expected 3 facts, got %d", len(facts))
+	}
+	for _, f := range facts {
+		if len(f.Embedding) != 3 {
+			t.Errorf("expected embedding of length 3 for fact %d, got %d", f.Fact.ID, len(f.Embedding))
+		}
 	}
 }
 

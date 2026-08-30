@@ -50,6 +50,72 @@ Requirements:
 TRANSCRIPT:
 `
 
+// BackfillMissingEmbeddings iterates through any facts with NULL or empty embedding BLOBs
+// and generates vector embeddings via Ollama.
+func BackfillMissingEmbeddings(ctx context.Context, database *sql.DB, client *Client) (int, error) {
+	if database == nil || client == nil {
+		return 0, fmt.Errorf("nil database or ollama client")
+	}
+
+	rows, err := database.QueryContext(ctx, "SELECT id, fact_text FROM facts WHERE embedding IS NULL OR length(embedding) = 0")
+	if err != nil {
+		return 0, fmt.Errorf("failed to query facts missing embeddings: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	type missingFact struct {
+		id   int64
+		text string
+	}
+	var toUpdate []missingFact
+
+	for rows.Next() {
+		var mf missingFact
+		if err := rows.Scan(&mf.id, &mf.text); err != nil {
+			return 0, err
+		}
+		if strings.TrimSpace(mf.text) != "" {
+			toUpdate = append(toUpdate, mf)
+		}
+	}
+
+	if len(toUpdate) == 0 {
+		return 0, nil
+	}
+
+	log.Printf("[Memory] Backfilling vector embeddings for %d legacy fact(s)...", len(toUpdate))
+	backfilled := 0
+
+	for _, item := range toUpdate {
+		select {
+		case <-ctx.Done():
+			return backfilled, ctx.Err()
+		default:
+		}
+
+		emb, err := client.GenerateEmbedding(ctx, item.text, false, 1)
+		if err != nil {
+			log.Printf("[Memory] Warning: Failed to generate embedding for fact ID %d: %v", item.id, err)
+			continue
+		}
+		if len(emb) == 0 {
+			continue
+		}
+
+		embBytes := db.Float32ToBytes(emb)
+		if _, err := database.ExecContext(ctx, "UPDATE facts SET embedding = ? WHERE id = ?", embBytes, item.id); err != nil {
+			log.Printf("[Memory] Error updating embedding for fact ID %d: %v", item.id, err)
+		} else {
+			backfilled++
+		}
+	}
+
+	if backfilled > 0 {
+		log.Printf("[Memory] Successfully backfilled %d vector embedding(s)", backfilled)
+	}
+	return backfilled, nil
+}
+
 // ExtractActiveConversationFacts queries conversations modified in the last activeHours,
 // extracts facts via the primary LLM, generates vector embeddings via Ollama, and stores them in SQLite.
 // Single-flight protected via extractionMutex.

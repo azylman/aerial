@@ -331,6 +331,11 @@ func Run(ctx context.Context, database *sql.DB, enqueuer MessageEnqueuer, thread
 		}
 	}()
 	go func() {
+		if backfilled, err := memory.BackfillMissingEmbeddings(ctx, database, ollamaClient); err != nil {
+			log.Printf("[Scheduler] Initial embedding backfill error: %v", err)
+		} else if backfilled > 0 {
+			log.Printf("[Scheduler] Initial embedding backfill completed for %d facts", backfilled)
+		}
 		if err := memory.ExtractActiveConversationFacts(ctx, database, ollamaClient, llmFunc, 12); err != nil {
 			log.Printf("[Scheduler] Initial fact extraction error: %v", err)
 		}

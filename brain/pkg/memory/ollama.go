@@ -50,7 +50,7 @@ type EmbeddingResponse struct {
 }
 
 // GenerateEmbedding generates an embedding for a text string.
-// If isQuery is true, prepends the BGE query instruction prefix.
+// If isQuery is true and EMBEDDING_QUERY_PREFIX is configured, prepends the query instruction prefix.
 // Enforces a 1.0s timeout per attempt with up to maxRetries attempts (default 1 retry = 2 total attempts).
 func (c *Client) GenerateEmbedding(ctx context.Context, text string, isQuery bool, maxRetries int) ([]float32, error) {
 	if text == "" {
@@ -59,7 +59,9 @@ func (c *Client) GenerateEmbedding(ctx context.Context, text string, isQuery boo
 
 	prompt := text
 	if isQuery {
-		prompt = BGEQueryPrefix + text
+		if prefix := os.Getenv("EMBEDDING_QUERY_PREFIX"); prefix != "" {
+			prompt = prefix + text
+		}
 	}
 
 	model := os.Getenv("EMBEDDING_MODEL")
