@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -201,6 +202,59 @@ func handleTranscripts(database *sql.DB) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(results)
+	}
+}
+
+func handleFacts(database *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Method not allowed"})
+			return
+		}
+
+		q := r.URL.Query()
+		limit := 50
+		if lStr := q.Get("limit"); lStr != "" {
+			if l, err := strconv.Atoi(lStr); err == nil && l > 0 && l <= 100 {
+				limit = l
+			}
+		}
+
+		offset := 0
+		if oStr := q.Get("offset"); oStr != "" {
+			if o, err := strconv.Atoi(oStr); err == nil && o >= 0 {
+				offset = o
+			}
+		}
+
+		category := strings.TrimSpace(q.Get("category"))
+		search := strings.TrimSpace(q.Get("q"))
+		if runes := []rune(search); len(runes) > 64 {
+			search = string(runes[:64])
+		}
+
+		filter := db.FactsFilter{
+			Category: category,
+			Query:    search,
+			Limit:    limit,
+			Offset:   offset,
+		}
+
+		result, err := db.GetFactsPaginated(database, filter)
+		if err != nil {
+			log.Printf("[HTTP] Error fetching facts: %v", err)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to fetch facts"})
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(result)
 	}
 }
 
@@ -400,6 +454,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/prompt", handlePrompt(database, pool))
 	mux.HandleFunc("/transcripts", handleTranscripts(database))
+	mux.HandleFunc("/facts", handleFacts(database))
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)

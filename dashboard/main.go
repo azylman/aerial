@@ -1,13 +1,18 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -84,6 +89,42 @@ type ClusterResponse struct {
 	Deployments   []DeploymentStatus `json:"deployments"`
 }
 
+// FactItem represents a semantic memory item received from brain
+type FactItem struct {
+	ID         int64     `json:"id"`
+	Category   string    `json:"category"`
+	FactText   string    `json:"fact_text"`
+	Importance float64   `json:"importance"`
+	ThreadID   string    `json:"thread_id"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+type FactsAPIResponse struct {
+	Facts  []FactItem `json:"facts"`
+	Total  int        `json:"total"`
+	Limit  int        `json:"limit"`
+	Offset int        `json:"offset"`
+	Status string     `json:"status,omitempty"`
+	Error  string     `json:"error,omitempty"`
+}
+
+// Singleton tuned HTTP client for upstream brain communication
+var brainHTTPClient = &http.Client{
+	Timeout: 5 * time.Second,
+	Transport: &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   2 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		MaxIdleConns:          50,
+		MaxIdleConnsPerHost:   20,
+		IdleConnTimeout:       90 * time.Second,
+		ResponseHeaderTimeout: 4 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	},
+}
+
 func statusHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
@@ -157,7 +198,118 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-	json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func factsHandler(brainBaseURL string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, `{"error":"Method Not Allowed"}`, http.StatusMethodNotAllowed)
+			return
+		}
+
+		inQuery := r.URL.Query()
+		targetURL, err := url.Parse(brainBaseURL + "/facts")
+		if err != nil {
+			http.Error(w, `{"error":"Invalid upstream URL configuration"}`, http.StatusInternalServerError)
+			return
+		}
+
+		outQuery := targetURL.Query()
+		limit := 50
+		if lStr := inQuery.Get("limit"); lStr != "" {
+			if n, err := strconv.Atoi(lStr); err == nil && n > 0 && n <= 100 {
+				limit = n
+			}
+		}
+		outQuery.Set("limit", strconv.Itoa(limit))
+
+		offset := 0
+		if oStr := inQuery.Get("offset"); oStr != "" {
+			if n, err := strconv.Atoi(oStr); err == nil && n >= 0 {
+				offset = n
+			}
+		}
+		outQuery.Set("offset", strconv.Itoa(offset))
+
+		if cat := strings.TrimSpace(inQuery.Get("category")); cat != "" {
+			outQuery.Set("category", cat)
+		}
+		if search := strings.TrimSpace(inQuery.Get("q")); search != "" {
+			if runes := []rune(search); len(runes) > 64 {
+				search = string(runes[:64])
+			}
+			outQuery.Set("q", search)
+		}
+		targetURL.RawQuery = outQuery.Encode()
+
+		ctx, cancel := context.WithTimeout(r.Context(), 4*time.Second)
+		defer cancel()
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL.String(), nil)
+		if err != nil {
+			http.Error(w, `{"error":"Failed to create upstream request"}`, http.StatusInternalServerError)
+			return
+		}
+		req.Header.Set("Accept", "application/json")
+
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+
+		resp, err := brainHTTPClient.Do(req)
+		if err != nil {
+			log.Printf("[Dashboard] Upstream brain request failed (%s): %v", targetURL.String(), err)
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(FactsAPIResponse{
+				Facts:  []FactItem{},
+				Total:  0,
+				Limit:  limit,
+				Offset: offset,
+				Status: "degraded",
+				Error:  "Brain service unreachable. Retrying...",
+			})
+			return
+		}
+		defer func() {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+		}()
+
+		if resp.StatusCode != http.StatusOK {
+			log.Printf("[Dashboard] Upstream brain returned status %d", resp.StatusCode)
+			w.WriteHeader(resp.StatusCode)
+			_ = json.NewEncoder(w).Encode(FactsAPIResponse{
+				Facts:  []FactItem{},
+				Total:  0,
+				Limit:  limit,
+				Offset: offset,
+				Status: "error",
+				Error:  "Upstream brain error occurred",
+			})
+			return
+		}
+
+		var data FactsAPIResponse
+		if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+			w.WriteHeader(http.StatusBadGateway)
+			_ = json.NewEncoder(w).Encode(FactsAPIResponse{
+				Facts:  []FactItem{},
+				Total:  0,
+				Limit:  limit,
+				Offset: offset,
+				Status: "error",
+				Error:  "Failed to decode upstream brain response",
+			})
+			return
+		}
+
+		if data.Facts == nil {
+			data.Facts = []FactItem{}
+		}
+
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(data)
+	}
 }
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
@@ -166,7 +318,16 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("OK"))
+	_, _ = w.Write([]byte("OK"))
+}
+
+func securityHeadersMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("X-XSS-Protection", "1; mode=block")
+		next.ServeHTTP(w, r)
+	})
 }
 
 func main() {
@@ -175,11 +336,18 @@ func main() {
 		log.Fatalf("failed to create static sub filesystem: %v", err)
 	}
 
-	http.HandleFunc("/health", healthHandler)
-	http.HandleFunc("/api/status", statusHandler)
-	
+	brainURL := os.Getenv("BRAIN_URL")
+	if brainURL == "" {
+		brainURL = "http://brain:8080"
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", healthHandler)
+	mux.HandleFunc("/api/status", statusHandler)
+	mux.HandleFunc("/api/facts", factsHandler(brainURL))
+
 	fileServer := http.FileServer(http.FS(staticFS))
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 		w.Header().Set("Pragma", "no-cache")
 		w.Header().Set("Expires", "0")
@@ -191,8 +359,13 @@ func main() {
 		port = "8080"
 	}
 
-	log.Printf("aerial-dashboard server starting on :%s", port)
-	if err := http.ListenAndServe(":"+port, nil); err != nil {
+	log.Printf("aerial-dashboard server starting on :%s (upstream brain=%s)", port, brainURL)
+	srv := &http.Server{
+		Addr:    ":" + port,
+		Handler: securityHeadersMiddleware(mux),
+	}
+
+	if err := srv.ListenAndServe(); err != nil {
 		log.Fatalf("server failed: %v", err)
 	}
 }
