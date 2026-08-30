@@ -1,3 +1,12 @@
+function escapeHtml(str) {
+    return String(str)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+}
+
 async function fetchStatus() {
     try {
         const res = await fetch('/api/status');
@@ -5,7 +14,7 @@ async function fetchStatus() {
         const data = await res.json();
 
         document.getElementById('last-refresh').textContent = new Date(data.system_time).toLocaleTimeString();
-        document.getElementById('overall-status').textContent = data.cluster_status.toUpperCase();
+        document.getElementById('overall-status').textContent = escapeHtml(data.cluster_status.toUpperCase());
         
         const grid = document.getElementById('services-grid');
         grid.innerHTML = '';
@@ -14,12 +23,15 @@ async function fetchStatus() {
         data.services.forEach(svc => {
             if (svc.status === 'healthy') activeCount++;
             
+            const safeName = escapeHtml(svc.name);
+            const safeStatus = escapeHtml(svc.status);
+            
             const card = document.createElement('div');
             card.className = 'service-card';
             card.innerHTML = `
                 <div class="header">
-                    <span class="title">${svc.name}</span>
-                    <span class="badge ${svc.status}">${svc.status.toUpperCase()}</span>
+                    <span class="title">${safeName}</span>
+                    <span class="badge ${safeStatus}">${safeStatus.toUpperCase()}</span>
                 </div>
                 <div style="font-size: 0.85rem; color: #8892b0; margin-top: 0.5rem;">
                     Uptime: ${Math.floor(svc.uptime_seconds / 3600)}h ${Math.floor((svc.uptime_seconds % 3600) / 60)}m
