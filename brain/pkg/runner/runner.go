@@ -95,12 +95,14 @@ func ExtractSessionID(stderr string, startTime time.Time) string {
 // ClassifyError categorizes execution results into failure, transient, and session corruption states.
 func ClassifyError(exitCode int, stdout, stderr string) (isFailure bool, isTransient bool, isSessionCorruption bool, errDetail string) {
 	trimmedStdout := strings.TrimSpace(stdout)
+	trimmedStderr := strings.TrimSpace(stderr)
 
-	// If exitCode == 0 and stdout is non-empty, this is a clean success regardless of keywords in stdout (e.g. model discussing error codes or session corrupt in generated code).
-	if exitCode == 0 && trimmedStdout != "" {
+	// Clean success condition: exit code 0, non-empty stdout, and empty stderr.
+	if exitCode == 0 && trimmedStderr == "" && trimmedStdout != "" {
 		return false, false, false, ""
 	}
 
+	isFailure = true
 	combined := strings.ToLower(stdout + "\n" + stderr)
 
 	transientKeywords := []string{
@@ -131,18 +133,9 @@ func ClassifyError(exitCode int, stdout, stderr string) (isFailure bool, isTrans
 		"failed to parse session",
 	}
 
-	failureKeywords := []string{
-		"agent execution terminated",
-		"error in generator",
-		"error encountered while processing planner output",
-		"panic:",
-		"fatal error:",
-	}
-
 	for _, kw := range transientKeywords {
 		if strings.Contains(combined, kw) {
 			isTransient = true
-			isFailure = true
 			break
 		}
 	}
@@ -150,42 +143,31 @@ func ClassifyError(exitCode int, stdout, stderr string) (isFailure bool, isTrans
 	for _, kw := range corruptionKeywords {
 		if strings.Contains(combined, kw) {
 			isSessionCorruption = true
-			isFailure = true
 			break
 		}
 	}
 
-	for _, kw := range failureKeywords {
-		if strings.Contains(combined, kw) {
-			isFailure = true
+	// Extract meaningful detail line from stderr or stdout
+	lines := strings.Split(stderr, "\n")
+	for _, l := range lines {
+		lTrim := strings.TrimSpace(l)
+		if lTrim != "" && (strings.Contains(strings.ToLower(lTrim), "error") || strings.Contains(strings.ToLower(lTrim), "fail") || strings.Contains(strings.ToLower(lTrim), "503")) {
+			errDetail = lTrim
 			break
 		}
 	}
-
-	if exitCode != 0 {
-		isFailure = true
-	}
-
-	if isFailure {
-		// Extract meaningful detail line from stderr or stdout
-		lines := strings.Split(stderr, "\n")
-		for _, l := range lines {
-			lTrim := strings.TrimSpace(l)
-			if lTrim != "" && (strings.Contains(strings.ToLower(lTrim), "error") || strings.Contains(strings.ToLower(lTrim), "fail") || strings.Contains(strings.ToLower(lTrim), "503")) {
-				errDetail = lTrim
-				break
-			}
-		}
-		if errDetail == "" {
-			if strings.TrimSpace(stderr) != "" {
-				errDetail = strings.TrimSpace(stderr)
-			} else if trimmedStdout != "" && exitCode != 0 {
-				errDetail = trimmedStdout
-			} else {
-				errDetail = fmt.Sprintf("execution failed with exit code %d", exitCode)
-			}
+	if errDetail == "" {
+		if trimmedStderr != "" {
+			errDetail = trimmedStderr
+		} else if trimmedStdout != "" && exitCode != 0 {
+			errDetail = trimmedStdout
+		} else if trimmedStdout == "" && exitCode == 0 {
+			errDetail = "process produced empty stdout"
+		} else {
+			errDetail = fmt.Sprintf("execution failed with exit code %d", exitCode)
 		}
 	}
 
 	return isFailure, isTransient, isSessionCorruption, errDetail
 }
+
