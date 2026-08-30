@@ -287,6 +287,12 @@ services:
       - "${AGENTSVIEW_HOST_PORT:-8089}:80"
     networks:
       - aerial-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     depends_on:
       dashboard:
         condition: service_healthy
