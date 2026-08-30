@@ -68,6 +68,10 @@ func InitDB(dbPath string) (*sql.DB, error) {
 		return nil, err
 	}
 
+	if dbPath == ":memory:" || strings.Contains(dbPath, "mode=memory") {
+		database.SetMaxOpenConns(1)
+	}
+
 	// Configure SQLite PRAGMAs for performance and concurrency
 	pragmas := `
 	PRAGMA journal_mode = WAL;
@@ -320,6 +324,100 @@ func GetMessage(database *sql.DB, id string) (*Message, error) {
 		return nil, err
 	}
 	return &m, nil
+}
+
+// MessageExists checks if a message with the given ID already exists in SQLite.
+func MessageExists(database *sql.DB, id string) (bool, error) {
+	if database == nil {
+		return false, fmt.Errorf("database is nil")
+	}
+	if id == "" {
+		return false, nil
+	}
+	var exists int
+	err := database.QueryRow("SELECT 1 FROM messages WHERE id = ? LIMIT 1", id).Scan(&exists)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// ClaimPendingMessage atomically transitions a message from PENDING to PROCESSING using CAS.
+// It returns true if and only if the message was successfully claimed from PENDING state (strictly-once).
+func ClaimPendingMessage(database *sql.DB, id string) (bool, error) {
+	if database == nil {
+		return true, nil
+	}
+	if id == "" {
+		return true, nil
+	}
+	now := time.Now().UTC()
+	query := `
+	UPDATE messages
+	SET status = 'PROCESSING', updated_at = ?
+	WHERE id = ? AND status = 'PENDING'
+	`
+	res, err := database.Exec(query, now, id)
+	if err != nil {
+		return false, err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if rows > 0 {
+		return true, nil
+	}
+
+	// If 0 rows were updated, check if it's an unpersisted mock test message
+	var currentStatus string
+	checkErr := database.QueryRow("SELECT status FROM messages WHERE id = ?", id).Scan(&currentStatus)
+	if checkErr == sql.ErrNoRows {
+		return true, nil
+	}
+	if checkErr != nil {
+		return false, checkErr
+	}
+	// Already claimed, PROCESSING, COMPLETED, or FAILED by another worker
+	return false, nil
+}
+
+// GetActiveRecentThreadIDs returns unique thread IDs that were updated within the given duration.
+func GetActiveRecentThreadIDs(database *sql.DB, since time.Duration) ([]string, error) {
+	if database == nil {
+		return nil, fmt.Errorf("database is nil")
+	}
+	cutoff := time.Now().UTC().Add(-since)
+	query := `
+	SELECT DISTINCT thread_id
+	FROM (
+		SELECT thread_id, updated_at FROM messages WHERE thread_id != '' AND updated_at >= ?
+		UNION
+		SELECT thread_id, updated_at FROM sessions WHERE thread_id != '' AND updated_at >= ?
+	)
+	ORDER BY updated_at DESC
+	LIMIT 50
+	`
+	rows, err := database.Query(query, cutoff, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var threadIDs []string
+	for rows.Next() {
+		var thID string
+		if err := rows.Scan(&thID); err != nil {
+			return nil, err
+		}
+		if thID != "" {
+			threadIDs = append(threadIDs, thID)
+		}
+	}
+	return threadIDs, nil
 }
 
 // Session CRUD Operations

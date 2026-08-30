@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log"
 	"os"
 	"regexp"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/azylman/aerial/brain/pkg/config"
@@ -34,25 +37,58 @@ func deriveThreadTitle(content string) string {
 	return string(runes)
 }
 
+func resolveGuildID(s *discordgo.Session, m *discordgo.Message) string {
+	if m == nil {
+		return ""
+	}
+	if m.GuildID != "" {
+		return m.GuildID
+	}
+	if s != nil {
+		if s.State != nil {
+			if ch, err := s.State.Channel(m.ChannelID); err == nil && ch != nil && ch.GuildID != "" {
+				return ch.GuildID
+			}
+		}
+		if s.Ratelimiter != nil && s.Token != "" {
+			if ch, err := s.Channel(m.ChannelID); err == nil && ch != nil && ch.GuildID != "" {
+				return ch.GuildID
+			}
+		}
+	}
+	return ""
+}
+
 func getOrCreateThreadID(s *discordgo.Session, m *discordgo.Message) (string, bool) {
-	if m.GuildID == "" {
+	if m == nil {
+		return "", false
+	}
+	guildID := resolveGuildID(s, m)
+	if guildID == "" {
 		return m.ChannelID, false
 	}
-	if ch, err := s.State.Channel(m.ChannelID); err == nil && ch != nil && ch.IsThread() {
-		return m.ChannelID, true
+	if s != nil && s.State != nil {
+		if ch, err := s.State.Channel(m.ChannelID); err == nil && ch != nil && ch.IsThread() {
+			return m.ChannelID, true
+		}
 	}
-	if ch, err := s.Channel(m.ChannelID); err == nil && ch != nil && ch.IsThread() {
-		return m.ChannelID, true
+	if s != nil && s.Ratelimiter != nil && s.Token != "" {
+		if ch, err := s.Channel(m.ChannelID); err == nil && ch != nil && ch.IsThread() {
+			return m.ChannelID, true
+		}
 	}
 
 	title := deriveThreadTitle(m.Content)
-	thread, err := s.MessageThreadStart(m.ChannelID, m.ID, title, 1440)
-	if err != nil {
-		log.Printf("Failed to create Discord thread for message %s (channel %s): %v", m.ID, m.ChannelID, err)
-		return m.ChannelID, false
+	if s != nil && s.Ratelimiter != nil && s.Token != "" {
+		thread, err := s.MessageThreadStart(m.ChannelID, m.ID, title, 1440)
+		if err != nil {
+			log.Printf("Failed to create Discord thread for message %s (channel %s): %v", m.ID, m.ChannelID, err)
+			return m.ChannelID, false
+		}
+		log.Printf("Created new Discord thread %q (ID: %s) for message %s in channel %s", title, thread.ID, m.ID, m.ChannelID)
+		return thread.ID, true
 	}
-	log.Printf("Created new Discord thread %q (ID: %s) for message %s in channel %s", title, thread.ID, m.ID, m.ChannelID)
-	return thread.ID, true
+	return m.ChannelID, false
 }
 
 func buildDiscordPrompt(m *discordgo.Message, targetThreadID string) string {
@@ -91,7 +127,11 @@ func buildDiscordPrompt(m *discordgo.Message, targetThreadID string) string {
 }
 
 func isFunnelBotTargeted(s *discordgo.Session, m *discordgo.MessageCreate) bool {
-	if m.GuildID == "" {
+	if m == nil || m.Message == nil {
+		return false
+	}
+	guildID := resolveGuildID(s, m.Message)
+	if guildID == "" {
 		return true
 	}
 	if len(m.Mentions) > 0 {
@@ -111,13 +151,20 @@ func isFunnelBotTargeted(s *discordgo.Session, m *discordgo.MessageCreate) bool 
 	if len(m.MentionRoles) > 0 {
 		return true
 	}
-	if ch, err := s.State.Channel(m.ChannelID); err == nil && ch != nil {
-		if ch.IsThread() {
-			return true
+	if s != nil {
+		if s.State != nil {
+			if ch, err := s.State.Channel(m.ChannelID); err == nil && ch != nil {
+				if ch.IsThread() {
+					return true
+				}
+			}
 		}
-	} else if ch, err := s.Channel(m.ChannelID); err == nil && ch != nil {
-		if ch.IsThread() {
-			return true
+		if s.Ratelimiter != nil && s.Token != "" {
+			if ch, err := s.Channel(m.ChannelID); err == nil && ch != nil {
+				if ch.IsThread() {
+					return true
+				}
+			}
 		}
 	}
 	return false
@@ -143,6 +190,7 @@ func connectDiscordFunnel(database *sql.DB, pool *queue.WorkerPool) *discordgo.S
 
 	dg.AddHandler(func(s *discordgo.Session, r *discordgo.Ready) {
 		log.Printf("Discord funnel gateway session ready as %s#%s (user ID %s)", r.User.Username, r.User.Discriminator, r.User.ID)
+		go RunStartupCatchUpSweep(context.Background(), database, pool, s)
 	})
 
 	dg.AddHandler(func(s *discordgo.Session, d *discordgo.Disconnect) {
@@ -224,4 +272,223 @@ func connectDiscordFunnel(database *sql.DB, pool *queue.WorkerPool) *discordgo.S
 	}
 
 	return dg
+}
+
+var (
+	sweepMu     sync.Mutex
+	isSweeping  atomic.Bool
+	lastSweepAt time.Time
+)
+
+func isMessageableChannel(chType discordgo.ChannelType) bool {
+	switch chType {
+	case discordgo.ChannelTypeGuildText,
+		discordgo.ChannelTypeGuildNews,
+		discordgo.ChannelTypeGuildNewsThread,
+		discordgo.ChannelTypeGuildPublicThread,
+		discordgo.ChannelTypeGuildPrivateThread:
+		return true
+	default:
+		return false
+	}
+}
+
+// RunStartupCatchUpSweep safely sweeps active channels and threads for missed messages during downtime.
+func RunStartupCatchUpSweep(ctx context.Context, database *sql.DB, pool *queue.WorkerPool, s *discordgo.Session) {
+	if s == nil || database == nil || pool == nil {
+		return
+	}
+
+	sweepMu.Lock()
+	if !isSweeping.CompareAndSwap(false, true) {
+		sweepMu.Unlock()
+		log.Println("[CatchUpSweep] Sweep already in progress. Skipping duplicate run.")
+		return
+	}
+	if time.Since(lastSweepAt) < 2*time.Minute {
+		isSweeping.Store(false)
+		sweepMu.Unlock()
+		log.Printf("[CatchUpSweep] Sweep executed recently (%v ago). Skipping.", time.Since(lastSweepAt))
+		return
+	}
+	lastSweepAt = time.Now()
+	sweepMu.Unlock()
+
+	defer isSweeping.Store(false)
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[CatchUpSweep] Panic recovered during sweep: %v", r)
+		}
+	}()
+
+	sweepCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+
+	lookbackHours := 2
+	lookbackCutoff := time.Now().UTC().Add(-time.Duration(lookbackHours) * time.Hour)
+	log.Printf("[CatchUpSweep] Starting startup message catch-up sweep (cutoff=%s)...", lookbackCutoff.Format(time.RFC3339))
+
+	botUserID := ""
+	if s.State != nil && s.State.User != nil {
+		botUserID = s.State.User.ID
+	}
+
+	// 1. Gather target candidate channels:
+	// Prioritize: recent active threads from SQLite DB, active guild threads, and top-level guild text channels.
+	targetMap := make(map[string]bool)
+
+	// A. Recent threads from DB (last 48 hours)
+	if recentThreadIDs, err := db.GetActiveRecentThreadIDs(database, 48*time.Hour); err == nil {
+		for _, thID := range recentThreadIDs {
+			if thID != "" {
+				targetMap[thID] = true
+			}
+		}
+	}
+
+	// B. Active Guild Threads & Guild Channels from state / REST
+	var guilds []*discordgo.Guild
+	if s.State != nil {
+		guilds = s.State.Guilds
+	}
+	if len(guilds) == 0 {
+		if userGuilds, err := s.UserGuilds(100, "", "", false); err == nil {
+			for _, ug := range userGuilds {
+				guilds = append(guilds, &discordgo.Guild{ID: ug.ID})
+			}
+		}
+	}
+
+	for _, g := range guilds {
+		// Active threads in guild
+		if activeThreads, err := s.GuildThreadsActive(g.ID); err == nil && activeThreads != nil {
+			for _, th := range activeThreads.Threads {
+				if th != nil && isMessageableChannel(th.Type) {
+					targetMap[th.ID] = true
+				}
+			}
+		}
+
+		// Top-level guild channels
+		if channels, err := s.GuildChannels(g.ID); err == nil {
+			for _, ch := range channels {
+				if ch != nil && isMessageableChannel(ch.Type) {
+					targetMap[ch.ID] = true
+				}
+			}
+		}
+	}
+
+	var targetChannels []string
+	for chID := range targetMap {
+		targetChannels = append(targetChannels, chID)
+	}
+
+	log.Printf("[CatchUpSweep] Found %d candidate channels/threads to check.", len(targetChannels))
+
+	recoveredCount := 0
+	skippedCount := 0
+	consecutiveErrors := 0
+
+	for _, chID := range targetChannels {
+		select {
+		case <-sweepCtx.Done():
+			log.Println("[CatchUpSweep] Sweep aborted: context deadline exceeded.")
+			return
+		default:
+		}
+
+		// Pre-flight permission check if available in state
+		if botUserID != "" && s.State != nil {
+			if perms, err := s.State.UserChannelPermissions(botUserID, chID); err == nil {
+				hasView := (perms & discordgo.PermissionViewChannel) != 0
+				hasHistory := (perms & discordgo.PermissionReadMessageHistory) != 0
+				if !hasView || !hasHistory {
+					continue
+				}
+			}
+		}
+
+		// Fetch latest messages from Discord REST API
+		fetched, err := s.ChannelMessages(chID, 50, "", "", "")
+		if err != nil {
+			consecutiveErrors++
+			if consecutiveErrors >= 5 {
+				log.Printf("[CatchUpSweep] Circuit breaker tripped (5 consecutive errors). Aborting sweep.")
+				break
+			}
+			continue
+		}
+		consecutiveErrors = 0
+
+		if len(fetched) == 0 {
+			continue
+		}
+
+		// Reverse slice to restore chronological FIFO order (oldest -> newest)
+		for i, j := 0, len(fetched)-1; i < j; i, j = i+1, j-1 {
+			fetched[i], fetched[j] = fetched[j], fetched[i]
+		}
+
+		for _, m := range fetched {
+			if m == nil || m.Author == nil || m.Author.Bot {
+				continue
+			}
+			if botUserID != "" && m.Author.ID == botUserID {
+				continue
+			}
+
+			msgTime := m.Timestamp
+			if msgTime.Before(lookbackCutoff) {
+				skippedCount++
+				continue
+			}
+
+			// Check if message is targeted at the bot
+			if !isFunnelBotTargeted(s, &discordgo.MessageCreate{Message: m}) {
+				skippedCount++
+				continue
+			}
+
+			// Check if already in SQLite DB
+			exists, _ := db.MessageExists(database, m.ID)
+			if exists {
+				skippedCount++
+				continue
+			}
+
+			targetThreadID, isThread := getOrCreateThreadID(s, m)
+			prompt := buildDiscordPrompt(m, targetThreadID)
+
+			authorID := m.Author.ID
+			authorName := m.Author.Username
+			resolvedGuildID := resolveGuildID(s, m)
+
+			msg := db.Message{
+				ID:         m.ID,
+				ThreadID:   targetThreadID,
+				GuildID:    resolvedGuildID,
+				AuthorID:   authorID,
+				AuthorName: authorName,
+				Content:    prompt,
+				Status:     db.StatusPending,
+				CreatedAt:  msgTime,
+				UpdatedAt:  time.Now().UTC(),
+			}
+
+			if err := db.InsertMessage(database, msg); err != nil {
+				log.Printf("[CatchUpSweep] Failed to insert missed message %s: %v", m.ID, err)
+				continue
+			}
+
+			log.Printf("[CatchUpSweep] Recovered missed message %s from %s (channel %s, target_thread: %s, is_thread: %t). Enqueued to worker pool.",
+				m.ID, authorName, m.ChannelID, targetThreadID, isThread)
+
+			pool.Enqueue(msg)
+			recoveredCount++
+		}
+	}
+
+	log.Printf("[CatchUpSweep] Catch-up sweep completed: scanned %d channels, recovered %d messages, skipped %d.",
+		len(targetChannels), recoveredCount, skippedCount)
 }

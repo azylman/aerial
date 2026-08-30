@@ -537,6 +537,7 @@ func TestFileDBInitializationAndPragmas(t *testing.T) {
 	}
 }
 
+<<<<<<< HEAD
 func TestGetFactsPaginated(t *testing.T) {
 	database, err := InitDB(":memory:")
 	if err != nil {
@@ -622,4 +623,87 @@ func TestFactsMigrationOnExistingDB(t *testing.T) {
 	}
 }
 
+func TestMessageExistsAndClaimPending(t *testing.T) {
+	database, err := InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to init DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	exists, err := MessageExists(database, "msg-test-1")
+	if err != nil || exists {
+		t.Fatalf("Expected msg-test-1 not to exist, got exists=%t, err=%v", exists, err)
+	}
+
+	msg := Message{
+		ID:         "msg-test-1",
+		ThreadID:   "th-1",
+		GuildID:    "g-1",
+		AuthorID:   "u-1",
+		AuthorName: "Alice",
+		Content:    "Hello",
+		Status:     StatusPending,
+	}
+	if err := InsertMessage(database, msg); err != nil {
+		t.Fatalf("InsertMessage failed: %v", err)
+	}
+
+	exists, err = MessageExists(database, "msg-test-1")
+	if err != nil || !exists {
+		t.Fatalf("Expected msg-test-1 to exist, got exists=%t, err=%v", exists, err)
+	}
+
+	// First claim: should succeed (PENDING -> PROCESSING)
+	claimed, err := ClaimPendingMessage(database, "msg-test-1")
+	if err != nil || !claimed {
+		t.Fatalf("Expected ClaimPendingMessage to succeed, got claimed=%t, err=%v", claimed, err)
+	}
+
+	// Second claim (e.g. concurrent race): should return false because it's already in PROCESSING
+	claimed, err = ClaimPendingMessage(database, "msg-test-1")
+	if err != nil || claimed {
+		t.Fatalf("Expected subsequent concurrent claim on PROCESSING message to return false, got %t, err=%v", claimed, err)
+	}
+
+	// Complete message
+	_ = UpdateMessageCompleted(database, "msg-test-1", "Done")
+
+	// Third claim on COMPLETED message: should return false
+	claimed, err = ClaimPendingMessage(database, "msg-test-1")
+	if err != nil || claimed {
+		t.Fatalf("Expected claim on COMPLETED message to fail, got %t, err=%v", claimed, err)
+	}
+}
+
+func TestGetActiveRecentThreadIDs(t *testing.T) {
+	database, err := InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to init DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	// Insert messages in different threads
+	now := time.Now().UTC()
+	_ = InsertMessage(database, Message{
+		ID: "m1", ThreadID: "th-recent-1", Status: StatusCompleted, UpdatedAt: now,
+	})
+	_ = InsertMessage(database, Message{
+		ID: "m2", ThreadID: "th-recent-2", Status: StatusCompleted, UpdatedAt: now.Add(-10 * time.Minute),
+	})
+	_ = InsertMessage(database, Message{
+		ID: "m3", ThreadID: "th-old-3", Status: StatusCompleted, UpdatedAt: now.Add(-5 * time.Hour),
+	})
+
+	threadIDs, err := GetActiveRecentThreadIDs(database, 2*time.Hour)
+	if err != nil {
+		t.Fatalf("GetActiveRecentThreadIDs failed: %v", err)
+	}
+
+	if len(threadIDs) != 2 {
+		t.Fatalf("Expected 2 recent thread IDs, got %d: %v", len(threadIDs), threadIDs)
+	}
+	if threadIDs[0] != "th-recent-1" || threadIDs[1] != "th-recent-2" {
+		t.Errorf("Unexpected thread IDs order: %v", threadIDs)
+	}
+}
 
