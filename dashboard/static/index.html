@@ -3,49 +3,101 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AERIAL // SYSTEM COMMAND HUD</title>
+    <title>AERIAL // SYSTEM COMMAND HUD v2.0</title>
     <link rel="stylesheet" href="style.css">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Space+Grotesk:wght@500;700;800&display=swap" rel="stylesheet">
 </head>
 <body>
+    <div class="cyber-bg"></div>
+    <div class="grid-overlay"></div>
     <div class="scanline"></div>
+
     <div class="hud-container">
+        <!-- HEADER -->
         <header class="hud-header">
             <div class="brand">
-                <span class="logo-icon">⚡</span>
-                <h1>AERIAL <span class="sub">STATUS HUD</span></h1>
+                <div class="logo-badge">
+                    <span class="logo-icon">⚡</span>
+                </div>
+                <div>
+                    <h1>AERIAL <span class="version">v2.0</span></h1>
+                    <div class="sub">SYSTEM COMMAND HUD // PERMET NETWORK</div>
+                </div>
             </div>
+
+            <!-- PERMET SCORE STATUS -->
+            <div class="permet-gauge">
+                <div class="permet-header">
+                    <span class="permet-label">PERMET SCORE</span>
+                    <span class="permet-value" id="permet-score-val">LVL 5 // ACTIVE</span>
+                </div>
+                <div class="permet-bar-bg">
+                    <div class="permet-bar-fill" id="permet-bar-fill" style="width: 85%;"></div>
+                </div>
+            </div>
+
             <nav class="hud-nav">
-                <a href="/" class="nav-btn active">[⚡ SYSTEM STATUS]</a>
-                <a href="/conversations/" class="nav-btn highlight">[💬 CONVERSATIONS / AGENTSVIEW]</a>
+                <a href="/" class="nav-btn active">
+                    <span class="btn-glow"></span>
+                    <span class="btn-text">⚡ TELEMETRY</span>
+                </a>
+                <a href="/conversations/" class="nav-btn highlight">
+                    <span class="btn-glow"></span>
+                    <span class="btn-text">💬 AGENTSVIEW</span>
+                </a>
             </nav>
         </header>
 
+        <!-- STATS / SUMMARY BAR -->
         <section class="summary-bar">
             <div class="summary-card">
-                <span class="label">SYSTEM STATUS</span>
+                <div class="card-glow"></div>
+                <span class="label">CLUSTER STATUS</span>
                 <span class="value text-success" id="overall-status">OPTIMAL</span>
+                <span class="sub-label" id="cluster-sub">100% OPERATIONAL</span>
             </div>
             <div class="summary-card">
+                <div class="card-glow"></div>
                 <span class="label">ACTIVE SERVICES</span>
                 <span class="value" id="active-count">10 / 10</span>
+                <span class="sub-label">STACK HEALTHY</span>
             </div>
             <div class="summary-card">
-                <span class="label">TIMEZONE</span>
-                <span class="value">America/Los_Angeles</span>
+                <div class="card-glow"></div>
+                <span class="label">REGION / TIMEZONE</span>
+                <span class="value">US-WEST</span>
+                <span class="sub-label">America/Los_Angeles</span>
             </div>
             <div class="summary-card">
-                <span class="label">LAST REFRESH</span>
+                <div class="card-glow"></div>
+                <span class="label">LAST SYNCHRONIZED</span>
                 <span class="value" id="last-refresh">--:--:--</span>
+                <span class="sub-label" id="refresh-interval">SYNCED (5s)</span>
             </div>
         </section>
 
+        <!-- SERVICES GRID -->
         <main class="services-grid" id="services-grid">
-            <!-- Dynamically populated via JS -->
+            <!-- Dynamically populated via app.js -->
         </main>
     </div>
+
+    <!-- DIAGNOSTIC DRAWER / CONSOLE SLIDE-OUT -->
+    <div class="drawer-overlay" id="drawer-overlay"></div>
+    <aside class="diagnostic-drawer" id="diagnostic-drawer">
+        <div class="drawer-header">
+            <div class="drawer-title">
+                <span class="drawer-icon">⚡</span>
+                <h3 id="drawer-service-name">SERVICE DIAGNOSTICS</h3>
+            </div>
+            <button class="drawer-close" id="drawer-close-btn">&times;</button>
+        </div>
+        <div class="drawer-body" id="drawer-body">
+            <!-- Dynamic diagnostic content -->
+        </div>
+    </aside>
 
     <script src="app.js"></script>
 </body>
