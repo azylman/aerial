@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -28,6 +29,7 @@ type Message struct {
 	AuthorID      string    `json:"author_id"`
 	AuthorName    string    `json:"author_name"`
 	Content       string    `json:"content"`
+	Summary       string    `json:"summary"`
 	Status        string    `json:"status"`
 	RetryCount    int       `json:"retry_count"`
 	ErrorMessage  string    `json:"error_message,omitempty"`
@@ -91,6 +93,7 @@ func InitDB(dbPath string) (*sql.DB, error) {
 		author_id TEXT NOT NULL DEFAULT '',
 		author_name TEXT NOT NULL DEFAULT '',
 		content TEXT NOT NULL DEFAULT '',
+		summary TEXT NOT NULL DEFAULT '',
 		status TEXT NOT NULL DEFAULT 'PENDING',
 		retry_count INTEGER NOT NULL DEFAULT 0,
 		error_message TEXT,
@@ -175,6 +178,7 @@ func InitDB(dbPath string) (*sql.DB, error) {
 	_, _ = database.Exec(`ALTER TABLE messages ADD COLUMN author_id TEXT NOT NULL DEFAULT '';`)
 	_, _ = database.Exec(`ALTER TABLE messages ADD COLUMN author_name TEXT NOT NULL DEFAULT '';`)
 	_, _ = database.Exec(`ALTER TABLE messages ADD COLUMN content TEXT NOT NULL DEFAULT '';`)
+	_, _ = database.Exec(`ALTER TABLE messages ADD COLUMN summary TEXT NOT NULL DEFAULT '';`)
 	_, _ = database.Exec(`ALTER TABLE messages ADD COLUMN status TEXT NOT NULL DEFAULT 'PENDING';`)
 	_, _ = database.Exec(`ALTER TABLE messages ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0;`)
 	_, _ = database.Exec(`ALTER TABLE messages ADD COLUMN error_message TEXT;`)
@@ -247,6 +251,9 @@ func InsertMessage(database *sql.DB, msg Message) error {
 	if msg.Status == "" {
 		msg.Status = StatusPending
 	}
+	if strings.TrimSpace(msg.Summary) == "" {
+		msg.Summary = CleanTaskSummary(msg.Content)
+	}
 	now := time.Now().UTC()
 	if msg.CreatedAt.IsZero() {
 		msg.CreatedAt = now
@@ -256,10 +263,10 @@ func InsertMessage(database *sql.DB, msg Message) error {
 	}
 
 	query := `
-	INSERT OR IGNORE INTO messages (id, thread_id, guild_id, author_id, author_name, content, status, retry_count, error_message, response_text, schedule_run_id, created_at, updated_at)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	INSERT OR IGNORE INTO messages (id, thread_id, guild_id, author_id, author_name, content, summary, status, retry_count, error_message, response_text, schedule_run_id, created_at, updated_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
-	_, err := database.Exec(query, msg.ID, msg.ThreadID, msg.GuildID, msg.AuthorID, msg.AuthorName, msg.Content, msg.Status, msg.RetryCount, msg.ErrorMessage, msg.ResponseText, msg.ScheduleRunID, msg.CreatedAt, msg.UpdatedAt)
+	_, err := database.Exec(query, msg.ID, msg.ThreadID, msg.GuildID, msg.AuthorID, msg.AuthorName, msg.Content, msg.Summary, msg.Status, msg.RetryCount, msg.ErrorMessage, msg.ResponseText, msg.ScheduleRunID, msg.CreatedAt, msg.UpdatedAt)
 	return err
 }
 
@@ -319,7 +326,7 @@ func GetPendingOrProcessingMessages(database *sql.DB) ([]Message, error) {
 		return nil, fmt.Errorf("database is nil")
 	}
 	query := `
-	SELECT id, thread_id, guild_id, author_id, author_name, content, status, retry_count, COALESCE(error_message, ''), COALESCE(response_text, ''), COALESCE(schedule_run_id, ''), created_at, updated_at
+	SELECT id, thread_id, guild_id, author_id, author_name, content, COALESCE(summary, ''), status, retry_count, COALESCE(error_message, ''), COALESCE(response_text, ''), COALESCE(schedule_run_id, ''), created_at, updated_at
 	FROM messages
 	WHERE status IN ('PENDING', 'PROCESSING')
 	ORDER BY created_at ASC
@@ -333,8 +340,11 @@ func GetPendingOrProcessingMessages(database *sql.DB) ([]Message, error) {
 	var results []Message
 	for rows.Next() {
 		var m Message
-		if err := rows.Scan(&m.ID, &m.ThreadID, &m.GuildID, &m.AuthorID, &m.AuthorName, &m.Content, &m.Status, &m.RetryCount, &m.ErrorMessage, &m.ResponseText, &m.ScheduleRunID, &m.CreatedAt, &m.UpdatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.ThreadID, &m.GuildID, &m.AuthorID, &m.AuthorName, &m.Content, &m.Summary, &m.Status, &m.RetryCount, &m.ErrorMessage, &m.ResponseText, &m.ScheduleRunID, &m.CreatedAt, &m.UpdatedAt); err != nil {
 			return nil, err
+		}
+		if m.Summary == "" {
+			m.Summary = CleanTaskSummary(m.Content)
 		}
 		results = append(results, m)
 	}
@@ -348,12 +358,84 @@ type ActiveTask struct {
 	AuthorName    string    `json:"author_name"`
 	AuthorID      string    `json:"author_id"`
 	Prompt        string    `json:"prompt"`
+	Summary       string    `json:"summary"`
 	Status        string    `json:"status"`
 	RetryCount    int       `json:"retry_count"`
 	ScheduleRunID string    `json:"schedule_run_id,omitempty"`
 	TriggerType   string    `json:"trigger_type"`
 	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`
+}
+
+// CleanTaskSummary extracts a clean, human-readable 1-line summary from a raw prompt or message.
+func CleanTaskSummary(content string) string {
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return "Agent Task"
+	}
+
+	// 1. If it's a Discord or Scheduler XML envelope, parse out the actual content/prompt
+	if strings.Contains(trimmed, "<USER_REQUEST>") {
+		lines := strings.Split(trimmed, "\n")
+		var extracted string
+		for i, line := range lines {
+			lineTrimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(lineTrimmed, "- content:") {
+				val := strings.TrimSpace(strings.TrimPrefix(lineTrimmed, "- content:"))
+				if val != "" {
+					extracted = val
+					break
+				}
+			}
+			if strings.HasPrefix(lineTrimmed, "Prompt:") {
+				val := strings.TrimSpace(strings.TrimPrefix(lineTrimmed, "Prompt:"))
+				if val != "" {
+					extracted = val
+					break
+				} else if i+1 < len(lines) {
+					// Prompt is on the next line
+					for j := i + 1; j < len(lines); j++ {
+						nextTrimmed := strings.TrimSpace(lines[j])
+						if nextTrimmed != "" && !strings.HasPrefix(nextTrimmed, "</USER_REQUEST>") {
+							extracted = nextTrimmed
+							break
+						}
+					}
+					if extracted != "" {
+						break
+					}
+				}
+			}
+		}
+		if extracted != "" {
+			trimmed = extracted
+		}
+	}
+
+	// 2. Strip XML/HTML-like tags
+	tagRegex := regexp.MustCompile(`(?s)<[A-Za-z0-9_-]+.*?>.*?</[A-Za-z0-9_-]+>|<[^>]+>`)
+	cleaned := tagRegex.ReplaceAllString(trimmed, " ")
+
+	// 3. Strip Discord user mentions like <@123456> or <!@123456>
+	mentionRegex := regexp.MustCompile(`<@!?[0-9]+>`)
+	cleaned = mentionRegex.ReplaceAllString(cleaned, "")
+
+	// 4. Strip markdown formatting characters
+	cleaned = regexp.MustCompile(`[#*_` + "`" + `>]+`).ReplaceAllString(cleaned, "")
+
+	// 5. Replace multiple whitespace/newlines with a single space
+	spaceRegex := regexp.MustCompile(`\s+`)
+	cleaned = strings.TrimSpace(spaceRegex.ReplaceAllString(cleaned, " "))
+
+	if cleaned == "" {
+		cleaned = "Agent Task"
+	}
+
+	runes := []rune(cleaned)
+	if len(runes) > 140 {
+		return strings.TrimSpace(string(runes[:137])) + "..."
+	}
+	return cleaned
 }
 
 func InferTriggerType(authorID, scheduleRunID string) string {
@@ -382,6 +464,7 @@ func GetActiveTasks(database *sql.DB) ([]ActiveTask, error) {
 		m.author_name,
 		m.author_id,
 		m.content,
+		COALESCE(m.summary, '') AS summary,
 		m.status,
 		m.retry_count,
 		m.schedule_run_id,
@@ -409,6 +492,7 @@ func GetActiveTasks(database *sql.DB) ([]ActiveTask, error) {
 			&t.AuthorName,
 			&t.AuthorID,
 			&t.Prompt,
+			&t.Summary,
 			&t.Status,
 			&t.RetryCount,
 			&t.ScheduleRunID,
@@ -416,6 +500,9 @@ func GetActiveTasks(database *sql.DB) ([]ActiveTask, error) {
 			&t.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan active task: %w", err)
+		}
+		if t.Summary == "" {
+			t.Summary = CleanTaskSummary(t.Prompt)
 		}
 		t.TriggerType = InferTriggerType(t.AuthorID, t.ScheduleRunID)
 		tasks = append(tasks, t)
@@ -434,17 +521,20 @@ func GetMessage(database *sql.DB, id string) (*Message, error) {
 		return nil, nil
 	}
 	query := `
-	SELECT id, thread_id, guild_id, author_id, author_name, content, status, retry_count, COALESCE(error_message, ''), COALESCE(response_text, ''), COALESCE(schedule_run_id, ''), created_at, updated_at
+	SELECT id, thread_id, guild_id, author_id, author_name, content, COALESCE(summary, ''), status, retry_count, COALESCE(error_message, ''), COALESCE(response_text, ''), COALESCE(schedule_run_id, ''), created_at, updated_at
 	FROM messages
 	WHERE id = ?
 	`
 	var m Message
-	err := database.QueryRow(query, id).Scan(&m.ID, &m.ThreadID, &m.GuildID, &m.AuthorID, &m.AuthorName, &m.Content, &m.Status, &m.RetryCount, &m.ErrorMessage, &m.ResponseText, &m.ScheduleRunID, &m.CreatedAt, &m.UpdatedAt)
+	err := database.QueryRow(query, id).Scan(&m.ID, &m.ThreadID, &m.GuildID, &m.AuthorID, &m.AuthorName, &m.Content, &m.Summary, &m.Status, &m.RetryCount, &m.ErrorMessage, &m.ResponseText, &m.ScheduleRunID, &m.CreatedAt, &m.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
+	}
+	if m.Summary == "" {
+		m.Summary = CleanTaskSummary(m.Content)
 	}
 	return &m, nil
 }

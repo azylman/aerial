@@ -188,6 +188,10 @@ func ProcessDueSchedules(ctx context.Context, database *sql.DB, enqueuer Message
 		}
 
 		// Create and persist PENDING message
+		cronSummary := db.CleanTaskSummary(c.Prompt)
+		if c.TitlePrefix != "" {
+			cronSummary = fmt.Sprintf("[%s] %s", c.TitlePrefix, cronSummary)
+		}
 		msg := db.Message{
 			ID:            msgID,
 			ThreadID:      targetThreadID,
@@ -195,6 +199,7 @@ func ProcessDueSchedules(ctx context.Context, database *sql.DB, enqueuer Message
 			AuthorID:      "scheduler",
 			AuthorName:    "Scheduler",
 			Content:       c.Prompt,
+			Summary:       cronSummary,
 			Status:        db.StatusPending,
 			ScheduleRunID: runID,
 			CreatedAt:     now,
@@ -227,6 +232,7 @@ func ProcessDueSchedules(ctx context.Context, database *sql.DB, enqueuer Message
 
 		runID := uuid.New().String()
 		msgID := uuid.New().String()
+		oneShotSummary := fmt.Sprintf("[Reminder] %s", db.CleanTaskSummary(s.Prompt))
 		msg := db.Message{
 			ID:            msgID,
 			ThreadID:      s.ThreadID,
@@ -234,6 +240,7 @@ func ProcessDueSchedules(ctx context.Context, database *sql.DB, enqueuer Message
 			AuthorID:      "scheduler",
 			AuthorName:    "Scheduler",
 			Content:       s.Prompt,
+			Summary:       oneShotSummary,
 			Status:        db.StatusPending,
 			ScheduleRunID: runID,
 			CreatedAt:     now,

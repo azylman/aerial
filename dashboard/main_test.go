@@ -73,8 +73,9 @@ func TestStatusHandlerActiveTasks(t *testing.T) {
 						"id": "task-abc",
 						"thread_id": "thread-123",
 						"session_id": "session-456",
-						"author_name": "Arcane",
+						"author_name": "UserA",
 						"prompt": "Test execution prompt",
+						"summary": "Test execution prompt summary",
 						"status": "PROCESSING",
 						"retry_count": 0,
 						"trigger_type": "discord",
@@ -107,10 +108,10 @@ func TestStatusHandlerActiveTasks(t *testing.T) {
 		t.Fatalf("expected 1 active task, got %d: %+v", resp.ActiveTasksCount, resp.ActiveTasks)
 	}
 
-	if resp.ActiveTasks[0].ID != "task-abc" || resp.ActiveTasks[0].SessionID != "session-456" || resp.ActiveTasks[0].TriggerType != "discord" {
+	if resp.ActiveTasks[0].ID != "task-abc" || resp.ActiveTasks[0].SessionID != "session-456" || resp.ActiveTasks[0].TriggerType != "discord" || resp.ActiveTasks[0].Summary != "Test execution prompt summary" {
 		t.Errorf("unexpected task contents: %+v", resp.ActiveTasks[0])
 	}
-	if resp.ActiveTasks[0].Status != "PROCESSING" || resp.ActiveTasks[0].AuthorName != "Arcane" {
+	if resp.ActiveTasks[0].Status != "PROCESSING" || resp.ActiveTasks[0].AuthorName != "UserA" {
 		t.Errorf("unexpected task status/author: %+v", resp.ActiveTasks[0])
 	}
 
