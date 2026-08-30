@@ -76,16 +76,16 @@ describe('Permet HUD Pure Logic Unit Tests', () => {
     describe('formatAgentsviewSessionUrl(sessionId)', () => {
         it('formats a raw session UUID into an antigravity-cli path', () => {
             const uuid = '7a874a91-3afb-4eb0-bb62-8d96b9a3ae0b';
-            assert.equal(formatAgentsviewSessionUrl(uuid), `/sessions/${uuid}`);
+            assert.equal(formatAgentsviewSessionUrl(uuid), `/sessions/antigravity-cli%3A${uuid}`);
         });
 
-        it('preserves multi-segment path hierarchy while encoding special characters', () => {
-            const sessionPath = 'threads/123/session 456';
-            assert.equal(formatAgentsviewSessionUrl(sessionPath), '/sessions/threads/123/session%20456');
+        it('preserves already prefixed session IDs while encoding special characters', () => {
+            const sessionPath = 'antigravity-cli:7a874a91-3afb-4eb0-bb62-8d96b9a3ae0b';
+            assert.equal(formatAgentsviewSessionUrl(sessionPath), '/sessions/antigravity-cli%3A7a874a91-3afb-4eb0-bb62-8d96b9a3ae0b');
         });
 
         it('strips leading and trailing slashes safely', () => {
-            assert.equal(formatAgentsviewSessionUrl('/sessions/abc/'), '/sessions/sessions/abc');
+            assert.equal(formatAgentsviewSessionUrl('/sessions/abc/'), '/sessions/antigravity-cli%3Asessions%2Fabc');
         });
 
         it('falls back to /conversations/ for null, undefined, or whitespace', () => {
