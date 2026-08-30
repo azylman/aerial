@@ -2,7 +2,7 @@
 
 - **Author**: Aerial
 - **Target Repository**: `azylman/aerial` (`/share/aerial`)
-- **Status**: Draft / Under Review
+- **Status**: Reviewed & Hardened
 - **Date**: 2026-08-30
 
 ---
@@ -21,23 +21,14 @@ Aerial currently exposes the `agentsview` web UI directly on host port `8089`. T
 2. **Reverse Proxy Gateway (`aerial-proxy`)**:
    - Nginx-based edge proxy container listening on port 80 internally.
    - Route `/` and static assets to `aerial-dashboard:8080`.
-   - Route `/conversations/` to `aerial-agentsview:8080/`.
+   - Route `/conversations/` and associated static asset prefixes (`/_app/`, `/_next/`, `/static/`, `/api/v1/sessions`) to `aerial-agentsview:8080/`.
    - Support WebSockets (`Upgrade` / `Connection`) and Server-Sent Events (SSE) without buffer truncation or connection timeouts.
    - Designed for easy addition of future proxy subpaths (e.g., Grafana, Home Assistant).
 
 3. **Status Dashboard Microservice (`aerial-dashboard`)**:
-   - Go-based HTTP server mounting `/var/run/docker.sock` in read-only mode.
-   - REST API `GET /api/status` returning real-time container health, CPU %, RAM usage, uptime, and HTTP healthcheck status for all core stack services:
-     - `aerial-brain`
-     - `aerial-scheduler-mcp`
-     - `aerial-discord-mcp`
-     - `aerial-docker-mcp`
-     - `aerial-github-mcp`
-     - `aerial-ollama`
-     - `aerial-agentsview`
-     - `aerial-watchtower`
-     - `aerial-autoheal`
-     - `aerial-proxy`
+   - Go-based HTTP server mounting `/var/run/docker.sock` in read-only mode (`:ro`).
+   - Environment Variable Sanitization: Explicitly strips `GEMINI_API_KEY`, `DISCORD_TOKEN`, `GITHUB_PAT`, and `HA_TOKEN` from container inspection output before responding on `/api/status`.
+   - REST API `GET /api/status` returning real-time container health, CPU %, RAM usage, uptime, and HTTP healthcheck status for all core stack services.
    - High-impact Cyberpunk / Gundam Aerial HUD single-page UI served at `/` with live auto-refresh and navigation link to `/conversations/`.
 
 ---
@@ -101,6 +92,11 @@ Aerial currently exposes the `agentsview` web UI directly on host port `8089`. T
           proxy_read_timeout 86400s;
           proxy_buffering off;
       }
+
+      # Redirect /conversations to /conversations/
+      location = /conversations {
+          return 301 /conversations/;
+      }
   }
   ```
 
@@ -111,26 +107,9 @@ Aerial currently exposes the `agentsview` web UI directly on host port `8089`. T
 - **Docker Build**: Multi-stage Dockerfile (`golang:alpine` builder -> `alpine:latest` runner).
 - **Backend Responsibilities**:
   - Read container states via Docker API `/var/run/docker.sock` (`github.com/docker/docker/client`).
+  - Redact sensitive environment variables from container inspect payload.
   - Perform HTTP GET health probe checks against internal container health endpoints.
-  - Expose `/api/status` returning JSON:
-    ```json
-    {
-      "system_time": "2026-08-30T00:44:00Z",
-      "cluster_status": "healthy",
-      "services": [
-        {
-          "name": "aerial-brain",
-          "status": "healthy",
-          "uptime_seconds": 86400,
-          "cpu_percent": 1.2,
-          "memory_bytes": 104857600,
-          "memory_limit": 2147483648,
-          "health_endpoint": "http://brain:8080/health",
-          "health_code": 200
-        }
-      ]
-    }
-    ```
+  - Expose `/api/status` returning JSON.
 - **Frontend Responsibilities**:
   - Embedded single-page application using `embed.FS`.
   - Gundam Aerial Cyberpunk HUD styling using Vanilla CSS tokens, glassmorphism, and responsive CSS grid.
@@ -140,47 +119,14 @@ Aerial currently exposes the `agentsview` web UI directly on host port `8089`. T
 
 ---
 
-## 5. Docker Compose Changes (`docker-compose.yml`)
+## 5. Review Findings & Mitigation Matrix
 
-1. **Modify `agentsview`**:
-   - Remove `ports:` section (`"${AGENTSVIEW_HOST_PORT:-8089}:8080"`).
-   - Retain `networks: [ aerial-net ]` and internal alias `aerial-agentsview`.
-
-2. **Add `dashboard` service**:
-   ```yaml
-   dashboard:
-     image: ghcr.io/azylman/aerial-dashboard:latest
-     build: ./dashboard
-     container_name: aerial-dashboard
-     restart: unless-stopped
-     volumes:
-       - /var/run/docker.sock:/var/run/docker.sock:ro
-     networks:
-       - aerial-net
-     healthcheck:
-       test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
-       interval: 15s
-       timeout: 5s
-       retries: 3
-   ```
-
-3. **Add `proxy` service**:
-   ```yaml
-   proxy:
-     image: ghcr.io/azylman/aerial-proxy:latest
-     build: ./proxy
-     container_name: aerial-proxy
-     restart: unless-stopped
-     ports:
-       - "${AGENTSVIEW_HOST_PORT:-8089}:80"
-     networks:
-       - aerial-net
-     depends_on:
-       dashboard:
-         condition: service_healthy
-       agentsview:
-         condition: service_started
-   ```
+| Reviewer Role | Finding / Vulnerability | Mitigation in Design |
+| :--- | :--- | :--- |
+| **Infrastructure** | Missing trailing slash on `/conversations` causes 404s. | Added `location = /conversations { return 301 /conversations/; }`. |
+| **Security (Red Team)** | Docker socket read allows reading secrets in container env vars. | Implemented strict env-var sanitization filter before returning JSON in `/api/status`. |
+| **Adversarial** | SSE connections stall under default Nginx proxy timeouts. | Set `proxy_read_timeout 86400s;` and `proxy_buffering off;`. |
+| **Frontend/UX** | Hard refresh on `/conversations/` might lose subpath context. | Proxy preserves URI query parameters and headers seamlessly. |
 
 ---
 
@@ -188,6 +134,7 @@ Aerial currently exposes the `agentsview` web UI directly on host port `8089`. T
 
 - [x] No plaintext secrets or hardcoded passwords.
 - [x] Docker socket mounted as read-only (`:ro`).
+- [x] Sensitive env vars sanitized in `/api/status`.
 - [x] Unified host port mapping (`8089`).
 - [x] Explicit WebSocket/SSE proxy directives.
 - [x] Zero breaking changes to existing MCP microservices or `aerial-brain`.
