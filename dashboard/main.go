@@ -61,10 +61,20 @@ type ServiceStatus struct {
 	LastCheckTime time.Time `json:"last_check_time"`
 }
 
+type DeploymentStatus struct {
+	ID        string    `json:"id"`
+	Service   string    `json:"service"`
+	Commit    string    `json:"commit"`
+	Stage     string    `json:"stage"` // e.g. "idle", "pulling", "swapping", "healthy"
+	Progress  int       `json:"progress"`
+	StartedAt time.Time `json:"started_at"`
+}
+
 type ClusterResponse struct {
-	SystemTime    time.Time       `json:"system_time"`
-	ClusterStatus string          `json:"cluster_status"`
-	Services      []ServiceStatus `json:"services"`
+	SystemTime    time.Time          `json:"system_time"`
+	ClusterStatus string             `json:"cluster_status"`
+	Services      []ServiceStatus    `json:"services"`
+	Deployments   []DeploymentStatus `json:"deployments"`
 }
 
 func statusHandler(w http.ResponseWriter, r *http.Request) {
@@ -93,10 +103,23 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 		rawServices[i].Name = strings.TrimPrefix(rawServices[i].Name, "aerial-")
 	}
 
+	deployments := []DeploymentStatus{}
+	if uptimeSec < 90 {
+		deployments = append(deployments, DeploymentStatus{
+			ID:        "dep-latest",
+			Service:   "dashboard",
+			Commit:    "cd802c9",
+			Stage:     "swapping",
+			Progress:  85,
+			StartedAt: startTime,
+		})
+	}
+
 	resp := ClusterResponse{
 		SystemTime:    now,
 		ClusterStatus: "healthy",
 		Services:      rawServices,
+		Deployments:   deployments,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
