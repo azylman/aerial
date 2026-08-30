@@ -250,9 +250,6 @@ func GetEnv(key, defaultVal string) string {
 }
 
 func EnsureAgySettings(apiKey, model string) error {
-	if apiKey == "" {
-		return nil
-	}
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		homeDir = "/root"
@@ -263,19 +260,21 @@ func EnsureAgySettings(apiKey, model string) error {
 	}
 
 	settingsPath := filepath.Join(configDir, "settings.json")
-	settings := map[string]interface{}{
-		"modelProvider": "gemini",
-		"model":         model,
-	}
+	settings := map[string]interface{}{}
 	if data, err := os.ReadFile(settingsPath); err == nil {
 		if err := json.Unmarshal(data, &settings); err != nil {
 			log.Printf("Warning: failed to unmarshal existing settings from %s: %v", settingsPath, err)
 		}
-		settings["modelProvider"] = "gemini"
-		if model != "" {
-			settings["model"] = model
-		}
 	}
+	if model != "" {
+		settings["model"] = model
+	}
+	if apiKey != "" {
+		settings["modelProvider"] = "gemini"
+	} else {
+		delete(settings, "modelProvider")
+	}
+
 	out, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal settings: %w", err)
@@ -565,3 +564,4 @@ func EnsureMcpConfig(rawConfig json.RawMessage) error {
 	log.Printf("Configured %d MCP server(s) in %s: %v", len(serverList), targetPath, serverList)
 	return nil
 }
+

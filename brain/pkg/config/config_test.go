@@ -25,13 +25,41 @@ func TestEnsureAgySettingsAndRules(t *testing.T) {
 	tmpDir := t.TempDir()
 	_ = os.Setenv("HOME", tmpDir)
 
+	// Test with API key
 	if err := EnsureAgySettings("test_key", "test_model"); err != nil {
 		t.Fatalf("EnsureAgySettings failed: %v", err)
 	}
 
 	settingsFile := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "settings.json")
-	if _, err := os.Stat(settingsFile); err != nil {
-		t.Errorf("Expected settings.json to exist at %s", settingsFile)
+	data, err := os.ReadFile(settingsFile)
+	if err != nil {
+		t.Fatalf("Expected settings.json to exist at %s: %v", settingsFile, err)
+	}
+	var parsedSettings map[string]interface{}
+	if err := json.Unmarshal(data, &parsedSettings); err != nil {
+		t.Fatalf("Failed to parse settings: %v", err)
+	}
+	if parsedSettings["modelProvider"] != "gemini" {
+		t.Errorf("Expected modelProvider=gemini with apiKey, got %v", parsedSettings["modelProvider"])
+	}
+
+	// Test without API key (OAuth mode)
+	if err := EnsureAgySettings("", "test_model_oauth"); err != nil {
+		t.Fatalf("EnsureAgySettings failed without apiKey: %v", err)
+	}
+	data, err = os.ReadFile(settingsFile)
+	if err != nil {
+		t.Fatalf("Failed to read settings: %v", err)
+	}
+	parsedSettings = nil
+	if err := json.Unmarshal(data, &parsedSettings); err != nil {
+		t.Fatalf("Failed to parse settings: %v", err)
+	}
+	if _, ok := parsedSettings["modelProvider"]; ok {
+		t.Errorf("Expected modelProvider to be deleted when apiKey is empty, but found: %v", parsedSettings["modelProvider"])
+	}
+	if parsedSettings["model"] != "test_model_oauth" {
+		t.Errorf("Expected model=test_model_oauth, got %v", parsedSettings["model"])
 	}
 
 	if err := EnsureSystemRules("test custom prompt"); err != nil {
@@ -381,3 +409,4 @@ func TestLoadMCPConfig_MergeCustomWithDefaults(t *testing.T) {
 		t.Errorf("Expected custom 'custom-api' server in merged config")
 	}
 }
+
