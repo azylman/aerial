@@ -45,7 +45,6 @@ Requirements:
 }
 2. If no new important facts are present in the transcript, return {"facts": []}.
 3. Do NOT include markdown text formatting outside the JSON block.
-4. The primary user is Alex (Discord handle: Arcane / arcane103). Consistently refer to the user as "Alex" in fact statements.
 
 TRANSCRIPT:
 `
