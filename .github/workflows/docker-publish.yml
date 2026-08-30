@@ -1,53 +1,93 @@
-name: Continuous Integration & Delivery
+name: Continuous Delivery
 
 on:
   push:
-    branches:
-      - main
+    branches: [ main ]
   pull_request:
-    branches:
-      - main
+    branches: [ main ]
 
 permissions:
   contents: read
   packages: write
 
 jobs:
+  test:
+    name: Run Service Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Go 1.22
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
+          cache-dependency-path: |
+            brain/go.sum
+            scheduler-mcp/go.sum
+            dashboard/go.mod
+
+      - name: Test Brain
+        run: |
+          cd brain
+          go test -v ./...
+
+      - name: Test Scheduler MCP
+        run: |
+          cd scheduler-mcp
+          go test -v ./...
+
+      - name: Test Discord MCP
+        run: |
+          cd discord-mcp
+          go test -v ./...
+
+      - name: Test Status Dashboard
+        run: |
+          cd dashboard
+          go test -v ./...
+
   build-and-push:
-    name: Build & Publish Containers to GHCR
+    name: Build & Push Images to GHCR
+    needs: test
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-          - name: brain
+          - service: brain
             context: .
-            dockerfile: brain/Dockerfile
-            image: ghcr.io/${{ github.repository_owner }}/aerial-brain
-          - name: scheduler-mcp
+            file: ./brain/Dockerfile
+            image_name: aerial-brain
+          - service: scheduler-mcp
             context: ./scheduler-mcp
-            dockerfile: ./scheduler-mcp/Dockerfile
-            image: ghcr.io/${{ github.repository_owner }}/aerial-scheduler-mcp
-          - name: discord-mcp
+            file: ./scheduler-mcp/Dockerfile
+            image_name: aerial-scheduler-mcp
+          - service: discord-mcp
             context: ./discord-mcp
-            dockerfile: ./discord-mcp/Dockerfile
-            image: ghcr.io/${{ github.repository_owner }}/aerial-discord-mcp
-          - name: docker-mcp
+            file: ./discord-mcp/Dockerfile
+            image_name: aerial-discord-mcp
+          - service: docker-mcp
             context: ./docker-mcp
-            dockerfile: ./docker-mcp/Dockerfile
-            image: ghcr.io/${{ github.repository_owner }}/aerial-docker-mcp
-          - name: github-mcp
+            file: ./docker-mcp/Dockerfile
+            image_name: aerial-docker-mcp
+          - service: github-mcp
             context: ./github-mcp
-            dockerfile: ./github-mcp/Dockerfile
-            image: ghcr.io/${{ github.repository_owner }}/aerial-github-mcp
-          - name: dashboard
+            file: ./github-mcp/Dockerfile
+            image_name: aerial-github-mcp
+          - service: dashboard
             context: ./dashboard
-            dockerfile: ./dashboard/Dockerfile
-            image: ghcr.io/${{ github.repository_owner }}/aerial-dashboard
-          - name: proxy
+            file: ./dashboard/Dockerfile
+            image_name: aerial-dashboard
+          - service: proxy
             context: ./proxy
-            dockerfile: ./proxy/Dockerfile
-            image: ghcr.io/${{ github.repository_owner }}/aerial-proxy
+            file: ./proxy/Dockerfile
+            image_name: aerial-proxy
+          - service: ollama
+            context: ./docker/ollama
+            file: ./docker/ollama/Dockerfile
+            image_name: aerial-ollama
 
     steps:
       - name: Checkout Repository
@@ -55,6 +95,12 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+
+      - name: Lowercase Repository Owner
+        id: repo_owner
+        run: echo "owner=${OWNER,,}" >> $GITHUB_OUTPUT
+        env:
+          OWNER: ${{ github.repository_owner }}
 
       - name: Log in to GitHub Container Registry
         if: github.event_name != 'pull_request'
@@ -64,14 +110,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and Push Docker Image
+      - name: Build and Push ${{ matrix.service }}
         uses: docker/build-push-action@v5
         with:
           context: ${{ matrix.context }}
-          file: ${{ matrix.dockerfile }}
-          push: ${{ github.event_name != 'pull_request' }}
+          file: ${{ matrix.file }}
+          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           tags: |
-            ${{ matrix.image }}:latest
-            ${{ matrix.image }}:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+            ghcr.io/${{ steps.repo_owner.outputs.owner }}/${{ matrix.image_name }}:latest
+            ghcr.io/${{ steps.repo_owner.outputs.owner }}/${{ matrix.image_name }}:${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
