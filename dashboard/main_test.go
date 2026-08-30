@@ -144,3 +144,141 @@ func TestGetGitCommit(t *testing.T) {
 	}
 }
 
+func TestParseMatrixJobChips(t *testing.T) {
+	jobs := []GitHubJob{
+		{
+			ID:          101,
+			Name:        "Build & Push Images to GHCR (brain, ., ./brain/Dockerfile, aerial-brain)",
+			Status:      "in_progress",
+			StartedAt:   time.Now().Add(-45 * time.Second),
+			CompletedAt: time.Time{},
+		},
+		{
+			ID:          102,
+			Name:        "Build & Push Images to GHCR (dashboard, ./dashboard, ./dashboard/Dockerfile, aerial-dashboard)",
+			Status:      "completed",
+			Conclusion:  "success",
+			StartedAt:   time.Now().Add(-60 * time.Second),
+			CompletedAt: time.Now().Add(-10 * time.Second),
+		},
+		{
+			ID:         103,
+			Name:       "Build & Push Images to GHCR (proxy, ./proxy, ./proxy/Dockerfile, aerial-proxy)",
+			Status:     "queued",
+			Conclusion: "",
+		},
+	}
+
+	chips := parseMatrixJobChips(jobs)
+	if len(chips) != 3 {
+		t.Fatalf("expected 3 chips, got %d", len(chips))
+	}
+
+	for _, c := range chips {
+		if c.Name == "brain" {
+			if c.Status != "active" {
+				t.Errorf("expected brain status 'active', got %s", c.Status)
+			}
+			if c.Duration == "" {
+				t.Errorf("expected brain duration to be calculated, got empty")
+			}
+		} else if c.Name == "dashboard" {
+			if c.Status != "completed" || c.Conclusion != "success" {
+				t.Errorf("expected dashboard completed/success, got %s/%s", c.Status, c.Conclusion)
+			}
+		} else if c.Name == "proxy" {
+			if c.Status != "pending" {
+				t.Errorf("expected proxy status 'pending', got %s", c.Status)
+			}
+		}
+	}
+}
+
+func TestMergeClusterDeployments_ActiveCIRun(t *testing.T) {
+	now := time.Now().UTC()
+	runs := []GitHubRun{
+		{
+			ID:         481,
+			Name:       "Continuous Delivery",
+			HeadSHA:    "7a9f1b234567",
+			Status:     "in_progress",
+			Conclusion: "",
+			CreatedAt:  now.Add(-2 * time.Minute),
+			UpdatedAt:  now.Add(-10 * time.Second),
+			HTMLURL:    "https://github.com/azylman/aerial/actions/runs/481",
+			HeadCommit: &struct {
+				Message string `json:"message"`
+			}{Message: "feat(brain): live github actions tracking"},
+		},
+	}
+
+	jobs := map[int64][]GitHubJob{
+		481: {
+			{
+				ID:         1,
+				Name:       "Build & Push Images to GHCR (brain, ., ./brain/Dockerfile, aerial-brain)",
+				Status:     "in_progress",
+				StartedAt:  now.Add(-40 * time.Second),
+				Conclusion: "",
+			},
+			{
+				ID:          2,
+				Name:        "Build & Push Images to GHCR (dashboard, ./dashboard, ./dashboard/Dockerfile, aerial-dashboard)",
+				Status:      "completed",
+				Conclusion:  "success",
+				StartedAt:   now.Add(-60 * time.Second),
+				CompletedAt: now.Add(-10 * time.Second),
+			},
+		},
+	}
+
+	deploys := mergeClusterDeployments(nil, runs, jobs, "7a9f1b2")
+	if len(deploys) != 1 {
+		t.Fatalf("expected 1 active deployment, got %d", len(deploys))
+	}
+
+	dep := deploys[0]
+	if dep.Stage != "building" {
+		t.Errorf("expected stage 'building', got %s", dep.Stage)
+	}
+	if dep.Commit != "7a9f1b2" {
+		t.Errorf("expected commit '7a9f1b2', got %s", dep.Commit)
+	}
+	if len(dep.MatrixJobs) != 2 {
+		t.Errorf("expected 2 matrix jobs, got %d", len(dep.MatrixJobs))
+	}
+	if dep.HTMLURL != "https://github.com/azylman/aerial/actions/runs/481" {
+		t.Errorf("expected HTMLURL to match, got %s", dep.HTMLURL)
+	}
+}
+
+func TestMergeClusterDeployments_FailedCIRun(t *testing.T) {
+	now := time.Now().UTC()
+	runs := []GitHubRun{
+		{
+			ID:         482,
+			Name:       "Continuous Delivery",
+			HeadSHA:    "abc1234567",
+			Status:     "completed",
+			Conclusion: "failure",
+			CreatedAt:  now.Add(-5 * time.Minute),
+			UpdatedAt:  now.Add(-4 * time.Minute),
+			HTMLURL:    "https://github.com/azylman/aerial/actions/runs/482",
+		},
+	}
+
+	deploys := mergeClusterDeployments(nil, runs, nil, "abc1234")
+	if len(deploys) != 1 {
+		t.Fatalf("expected 1 deployment on failed run, got %d", len(deploys))
+	}
+
+	dep := deploys[0]
+	if dep.Stage != "failed" {
+		t.Errorf("expected stage 'failed', got %s", dep.Stage)
+	}
+	if dep.Steps[1].Status != "failed" {
+		t.Errorf("expected CI Build step status 'failed', got %s", dep.Steps[1].Status)
+	}
+}
+
+
