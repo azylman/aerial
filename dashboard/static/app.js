@@ -30,7 +30,21 @@ async function fetchStatus() {
         const deployBadge = document.getElementById('deploy-count-badge');
         const deploys = data.deployments || [];
 
-        if (deployBadge) deployBadge.textContent = `${deploys.length} IN PROGRESS`;
+        const activeDeploys = deploys.filter(dep => dep.stage !== 'live' && dep.stage !== 'completed');
+
+        if (deployBadge) {
+            if (activeDeploys.length > 0) {
+                deployBadge.textContent = `${activeDeploys.length} IN PROGRESS`;
+                deployBadge.className = 'section-badge active';
+            } else if (deploys.length > 0) {
+                deployBadge.textContent = `ALL SERVICES LIVE (${deploys.length} SYNCED)`;
+                deployBadge.className = 'section-badge live';
+            } else {
+                deployBadge.textContent = 'SYSTEM IN SYNC';
+                deployBadge.className = 'section-badge';
+            }
+        }
+
         if (deploysContainer) {
             deploysContainer.innerHTML = '';
 
@@ -39,19 +53,20 @@ async function fetchStatus() {
                     <div class="deploy-idle-card">
                         <div class="idle-indicator">
                             <span class="pulse-dot healthy"></span>
-                            <span>SYSTEM IN SYNC // NO PENDING DEPLOYS</span>
+                            <span>ALL SERVICES IN SYNC // NO PENDING DEPLOYS</span>
                         </div>
                         <div>WATCHTOWER POLLING GHCR (60s)</div>
                     </div>
                 `;
             } else {
                 deploys.forEach(dep => {
+                    const isLive = dep.stage === 'live';
                     const steps = dep.steps || [
-                        { name: "Commit Trigger", icon: "📦", status: dep.progress >= 20 ? "completed" : "active" },
-                        { name: "CI Build & GHCR", icon: "⚙️", status: dep.progress >= 40 ? "completed" : dep.progress >= 20 ? "active" : "pending" },
-                        { name: "Image Pull", icon: "⬇️", status: dep.progress >= 60 ? "completed" : dep.progress >= 40 ? "active" : "pending" },
-                        { name: "Container Swap", icon: "🔄", status: dep.progress >= 85 ? "completed" : dep.progress >= 60 ? "active" : "pending" },
-                        { name: "Health Check", icon: "🩺", status: dep.progress >= 100 ? "completed" : dep.progress >= 85 ? "active" : "pending" }
+                        { name: "Commit Trigger", icon: "📦", status: "completed" },
+                        { name: "CI Build & GHCR", icon: "⚙️", status: "completed" },
+                        { name: "Image Pull", icon: "⬇️", status: "completed" },
+                        { name: "Container Swap", icon: "🔄", status: isLive ? "completed" : "active" },
+                        { name: "Health Check", icon: "🩺", status: isLive ? "completed" : "pending" }
                     ];
 
                     const stepsHTML = steps.map(step => `
@@ -64,15 +79,20 @@ async function fetchStatus() {
                         </div>
                     `).join('');
 
+                    const safeCommit = escapeHtml(dep.commit || 'latest');
+                    const commitMarkup = dep.commit && dep.commit !== 'latest'
+                        ? `<a href="https://github.com/azylman/aerial/commit/${safeCommit}" target="_blank" rel="noopener" class="deploy-commit-link" title="View commit on GitHub">${safeCommit} ↗</a>`
+                        : `<span class="deploy-commit">${safeCommit}</span>`;
+
                     const card = document.createElement('div');
-                    card.className = 'deploy-card';
+                    card.className = `deploy-card ${isLive ? 'stage-live' : 'stage-active'}`;
                     card.innerHTML = `
                         <div class="deploy-card-header">
                             <div class="deploy-target">
                                 <span class="deploy-service-name">${escapeHtml(dep.service.toUpperCase())}</span>
-                                <span class="deploy-commit">${escapeHtml(dep.commit)}</span>
+                                ${commitMarkup}
                             </div>
-                            <span class="deploy-stage-badge ${dep.stage === 'live' ? 'live' : ''}">⚡ ${escapeHtml(dep.stage.toUpperCase())}</span>
+                            <span class="deploy-stage-badge ${isLive ? 'live' : 'active'}">⚡ ${escapeHtml(dep.stage.toUpperCase())}</span>
                         </div>
                         <div class="deploy-steps-grid">
                             ${stepsHTML}
@@ -82,7 +102,7 @@ async function fetchStatus() {
                         </div>
                         <div class="deploy-footer">
                             <span>STAGE: ${escapeHtml(dep.stage.toUpperCase())} (${dep.progress}%)</span>
-                            <span>STARTED: ${new Date(dep.started_at).toLocaleTimeString()}</span>
+                            <span>DEPLOYED: ${new Date(dep.started_at).toLocaleTimeString()}</span>
                         </div>
                     `;
                     deploysContainer.appendChild(card);
