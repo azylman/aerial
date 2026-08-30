@@ -7,17 +7,25 @@ help: ## Display available targets
 	@echo "Aerial Monorepo Development Commands:"
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
 
-test: ## Run unit tests across all Go microservices
+test: ## Run unit tests across all Go microservices and Frontend
 	@for svc in $(SERVICES); do \
 		echo "=== Testing $$svc ==="; \
 		(cd $$svc && go test -v ./...) || exit 1; \
 	done
+	@if command -v node >/dev/null 2>&1 && [ -f "dashboard/app.test.js" ]; then \
+		echo "=== Testing Permet HUD Frontend ==="; \
+		node --test dashboard/*.test.js || exit 1; \
+	fi
 
-lint: ## Run golangci-lint across all Go microservices
+lint: ## Run golangci-lint across all Go microservices and Frontend
 	@for svc in $(SERVICES); do \
 		echo "=== Linting $$svc ==="; \
 		(cd $$svc && golangci-lint run ./...) || exit 1; \
 	done
+	@if command -v node >/dev/null 2>&1 && [ -f "dashboard/static/app.js" ]; then \
+		echo "=== Linting Permet HUD Frontend Syntax ==="; \
+		node --check dashboard/static/app.js || exit 1; \
+	fi
 
 tidy: ## Run go mod tidy across all Go microservices
 	@for svc in $(SERVICES); do \

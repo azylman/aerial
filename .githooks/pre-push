@@ -38,6 +38,10 @@ else
             (cd "$svc" && go test -v ./...) || exit 1
         fi
     done
+    if command -v node >/dev/null 2>&1 && [ -f "dashboard/app.test.js" ]; then
+        echo "=== Testing Permet HUD Frontend ==="
+        node --test dashboard/*.test.js || exit 1
+    fi
 fi
 
 echo "✅ [Aerial Pre-Push Hook] All linters and unit tests passed cleanly!"

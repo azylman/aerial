@@ -100,14 +100,15 @@ jobs:
           cd discord-mcp
           go test -v ./...
 
-      - name: Test Status Dashboard
+      - name: Test Status Dashboard (Go Backend & Permet HUD Frontend)
         if: needs.changes.outputs.dashboard == 'true'
         run: |
           cd dashboard
           go test -v ./...
+          node --test *.test.js
 
   lint:
-    name: Lint Go Microservices
+    name: Lint Microservices & Frontend
     needs: changes
     runs-on: ubuntu-latest
     steps:
@@ -144,12 +145,17 @@ jobs:
           version: v1.59.1
           working-directory: discord-mcp
 
-      - name: Lint Status Dashboard
+      - name: Lint Status Dashboard Go Backend
         if: needs.changes.outputs.dashboard == 'true'
         uses: golangci/golangci-lint-action@v6
         with:
           version: v1.59.1
           working-directory: dashboard
+
+      - name: Lint Permet HUD Frontend Syntax
+        if: needs.changes.outputs.dashboard == 'true'
+        run: |
+          node --check dashboard/static/app.js
 
   build-and-push:
     name: Build & Push Images to GHCR
