@@ -195,7 +195,15 @@ func (p *WorkerPool) runThreadWorker(threadID string, ch chan db.Message) {
 func (p *WorkerPool) processMessage(msg db.Message) {
 	log.Printf("[WorkerPool] Processing message %s for thread %s (retry_count=%d)", msg.ID, msg.ThreadID, msg.RetryCount)
 
-	_ = db.UpdateMessageStatus(p.cfg.DB, msg.ID, db.StatusProcessing, "")
+	claimed, claimErr := db.ClaimPendingMessage(p.cfg.DB, msg.ID)
+	if claimErr != nil {
+		log.Printf("[WorkerPool] Failed to claim message %s: %v", msg.ID, claimErr)
+		return
+	}
+	if !claimed {
+		log.Printf("[WorkerPool] Skipping message %s: already claimed or completed", msg.ID)
+		return
+	}
 
 	skipDiscord := msg.AuthorID == "http-client"
 
@@ -374,6 +382,13 @@ func RecoverInterrupted(database *sql.DB, pool *WorkerPool) {
 			}
 			_ = db.UpdateMessageStatus(database, m.ID, db.StatusFailed, "poison pill: exceeded retry limit during crash recovery")
 			continue
+		}
+
+		if m.Status == db.StatusProcessing {
+			_ = db.IncrementMessageRetry(database, m.ID, "interrupted during restart")
+			_ = db.UpdateMessageStatus(database, m.ID, db.StatusPending, "interrupted during restart")
+			m.Status = db.StatusPending
+			m.RetryCount++
 		}
 
 		log.Printf("[Startup Recovery] Enqueuing message %s (thread: %s, status: %s, retry_count: %d)",

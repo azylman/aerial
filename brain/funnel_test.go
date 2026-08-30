@@ -65,3 +65,59 @@ func TestFunnelStartupRecovery(t *testing.T) {
 	// Should run cleanly on empty DB
 	queue.RecoverInterrupted(database, pool)
 }
+
+func TestIsMessageableChannel(t *testing.T) {
+	valid := []discordgo.ChannelType{
+		discordgo.ChannelTypeGuildText,
+		discordgo.ChannelTypeGuildNews,
+		discordgo.ChannelTypeGuildNewsThread,
+		discordgo.ChannelTypeGuildPublicThread,
+		discordgo.ChannelTypeGuildPrivateThread,
+	}
+	for _, vt := range valid {
+		if !isMessageableChannel(vt) {
+			t.Errorf("Expected channel type %d to be messageable", vt)
+		}
+	}
+
+	invalid := []discordgo.ChannelType{
+		discordgo.ChannelTypeGuildVoice,
+		discordgo.ChannelTypeGuildCategory,
+		discordgo.ChannelTypeGuildForum,
+		discordgo.ChannelTypeGuildStageVoice,
+	}
+	for _, it := range invalid {
+		if isMessageableChannel(it) {
+			t.Errorf("Expected channel type %d NOT to be messageable", it)
+		}
+	}
+}
+
+func TestRunStartupCatchUpSweep_NilAndEmptySafeguards(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to init DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	pool := queue.NewWorkerPool(queue.WorkerPoolConfig{DB: database})
+
+	// 1. Nil session / DB / pool should be safe no-op
+	RunStartupCatchUpSweep(nil, nil, nil, nil)
+	RunStartupCatchUpSweep(nil, database, pool, nil)
+
+	// 2. Valid empty session should complete without panic
+	s := &discordgo.Session{
+		State: discordgo.NewState(),
+	}
+	s.State.User = &discordgo.User{ID: "bot-123", Username: "Aerial"}
+
+	// Force lastSweepAt to zero for test
+	sweepMu.Lock()
+	lastSweepAt = time.Time{}
+	isSweeping.Store(false)
+	sweepMu.Unlock()
+
+	RunStartupCatchUpSweep(nil, database, pool, s)
+}
+
