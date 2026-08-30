@@ -537,7 +537,6 @@ func TestFileDBInitializationAndPragmas(t *testing.T) {
 	}
 }
 
-<<<<<<< HEAD
 func TestGetFactsPaginated(t *testing.T) {
 	database, err := InitDB(":memory:")
 	if err != nil {
