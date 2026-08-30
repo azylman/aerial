@@ -15,7 +15,19 @@ import (
 var (
 	reDiscordContent = regexp.MustCompile(`(?s)(?:^|\n)- content:\s*(.+?)(?:\n- timestamp:|\n- mentions:|\n- attachments:|\n</USER_REQUEST>|\z)`)
 	reUserRequest    = regexp.MustCompile(`(?s)<USER_REQUEST>(.*?)</USER_REQUEST>`)
+	reDiscordMention = regexp.MustCompile(`<@!?[0-9]+>|<@&[0-9]+>|<#[0-9]+>`)
+	reWhitespace     = regexp.MustCompile(`\s+`)
 )
+
+func sanitizeQueryText(text string) string {
+	cleaned := reDiscordMention.ReplaceAllString(text, "")
+	cleaned = reWhitespace.ReplaceAllString(cleaned, " ")
+	cleaned = strings.TrimSpace(cleaned)
+	if len(cleaned) > 1000 {
+		cleaned = cleaned[:1000]
+	}
+	return cleaned
+}
 
 // ExtractQueryText extracts the core user utterance from structured prompt envelopes (e.g. Discord funnel or XML blocks).
 func ExtractQueryText(content string) string {
@@ -28,10 +40,7 @@ func ExtractQueryText(content string) string {
 	if m := reDiscordContent.FindStringSubmatch(clean); len(m) > 1 {
 		userText := strings.TrimSpace(m[1])
 		if userText != "" {
-			if len(userText) > 1000 {
-				userText = userText[:1000]
-			}
-			return userText
+			return sanitizeQueryText(userText)
 		}
 	}
 
@@ -39,23 +48,16 @@ func ExtractQueryText(content string) string {
 	if m := reUserRequest.FindStringSubmatch(clean); len(m) > 1 {
 		inner := strings.TrimSpace(m[1])
 		if inner != "" {
-			if len(inner) > 1000 {
-				inner = inner[:1000]
-			}
-			return inner
+			return sanitizeQueryText(inner)
 		}
 	}
 
 	// 3. Raw text fallback
-	if len(clean) > 1000 {
-		clean = clean[:1000]
-	}
-	return clean
+	return sanitizeQueryText(clean)
 }
 
-
 const (
-	DefaultMinScoreThreshold = 0.45
+	DefaultMinScoreThreshold = 0.20
 	DefaultMaxFacts          = 10
 )
 
