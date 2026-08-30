@@ -680,4 +680,40 @@ func TestSyncComposeOverride_EmptyInputs(t *testing.T) {
 	}
 }
 
+func TestEnsureGitHooks(t *testing.T) {
+	_, repoA, _ := setupGitRepos(t)
+
+	// 1. Repo without .githooks - should return nil without setting core.hooksPath
+	if err := EnsureGitHooks(context.Background(), repoA); err != nil {
+		t.Fatalf("EnsureGitHooks on repo without .githooks failed: %v", err)
+	}
+
+	// 2. Create .githooks dir and pre-push hook
+	hooksDir := filepath.Join(repoA, ".githooks")
+	if err := os.MkdirAll(hooksDir, 0755); err != nil {
+		t.Fatalf("Failed to create .githooks dir: %v", err)
+	}
+	hookScript := filepath.Join(hooksDir, "pre-push")
+	if err := os.WriteFile(hookScript, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatalf("Failed to write hook script: %v", err)
+	}
+
+	// 3. EnsureGitHooks should configure core.hooksPath
+	if err := EnsureGitHooks(context.Background(), repoA); err != nil {
+		t.Fatalf("EnsureGitHooks on repo with .githooks failed: %v", err)
+	}
+
+	// Verify git config value
+	val := runGitCmd(t, repoA, "config", "--get", "core.hooksPath")
+	if strings.TrimSpace(val) != ".githooks" {
+		t.Errorf("Expected core.hooksPath to be '.githooks', got %q", val)
+	}
+
+	// 4. Empty path
+	if err := EnsureGitHooks(context.Background(), ""); err != nil {
+		t.Errorf("Expected nil error for empty repoPath, got %v", err)
+	}
+}
+
+
 

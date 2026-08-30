@@ -870,6 +870,13 @@ func main() {
 		syncInterval = d
 	}
 
+	// Configure git core.hooksPath for tracked repos with .githooks directory
+	for _, repo := range gitSyncRepos {
+		if hookErr := gitsync.EnsureGitHooks(context.Background(), repo); hookErr != nil {
+			log.Printf("[GitSync] Warning: EnsureGitHooks failed for %s: %v", repo, hookErr)
+		}
+	}
+
 	stopGitSync := gitsync.StartPeriodicSync(
 		context.Background(),
 		syncInterval,

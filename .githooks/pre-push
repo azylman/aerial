@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "⚡ [Aerial Pre-Push Hook] Running pre-land verification checks..."
+
+# Check prerequisites
+if ! command -v go >/dev/null 2>&1; then
+    echo "🚨 [Pre-Push] Fatal: Go compiler ('go') not found in PATH." >&2
+    echo "   Local pre-flight checks require Go 1.22+ to verify builds & tests." >&2
+    exit 1
+fi
+
+if ! command -v golangci-lint >/dev/null 2>&1; then
+    echo "🚨 [Pre-Push] Fatal: 'golangci-lint' not found in PATH." >&2
+    echo "   Please install golangci-lint (v1.59.1+) or run within aerial-brain container." >&2
+    exit 1
+fi
+
+# Run linting across all services
+echo "🔍 [Pre-Push] Running golangci-lint across Go microservices..."
+if command -v make >/dev/null 2>&1; then
+    make lint || {
+        echo "🚨 [Pre-Push] 'make lint' failed. Fix linter violations before pushing." >&2
+        exit 1
+    }
+    echo "🧪 [Pre-Push] Running unit test suite across Go microservices..."
+    make test || {
+        echo "🚨 [Pre-Push] 'make test' failed. Fix failing unit tests before pushing." >&2
+        exit 1
+    }
+else
+    SERVICES="brain scheduler-mcp discord-mcp dashboard"
+    for svc in $SERVICES; do
+        if [ -d "$svc" ]; then
+            echo "=== Linting $svc ==="
+            (cd "$svc" && golangci-lint run ./...) || exit 1
+            echo "=== Testing $svc ==="
+            (cd "$svc" && go test -v ./...) || exit 1
+        fi
+    done
+fi
+
+echo "✅ [Aerial Pre-Push Hook] All linters and unit tests passed cleanly!"
+exit 0

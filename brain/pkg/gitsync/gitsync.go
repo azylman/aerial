@@ -389,3 +389,19 @@ func SyncComposeOverride(configDir, projectDir string) error {
 
 	return nil
 }
+
+// EnsureGitHooks checks if repoPath contains a .githooks directory, and if so, configures git core.hooksPath.
+func EnsureGitHooks(ctx context.Context, repoPath string) error {
+	if repoPath == "" {
+		return nil
+	}
+	hooksDir := filepath.Join(repoPath, ".githooks")
+	if fi, err := os.Stat(hooksDir); err == nil && fi.IsDir() {
+		cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "config", "core.hooksPath", ".githooks")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("failed to configure git core.hooksPath for %s: %w (output: %s)", repoPath, err, SanitizeLog(string(out)))
+		}
+	}
+	return nil
+}
+
