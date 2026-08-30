@@ -385,9 +385,89 @@ body {
     animation: pulse-border 1.5s infinite alternate;
 }
 
-@keyframes pulse-border {
-    0% { box-shadow: 0 0 5px var(--neon-magenta); }
-    100% { box-shadow: 0 0 20px var(--neon-magenta); }
+.deploy-stage-badge.live {
+    background: rgba(0, 255, 135, 0.2);
+    color: var(--neon-green);
+    border-color: var(--neon-green);
+    animation: none;
+    box-shadow: 0 0 10px rgba(0, 255, 135, 0.3);
+}
+
+/* STEP PANELS GRID */
+.deploy-steps-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+    gap: 0.75rem;
+    margin: 1.25rem 0;
+}
+
+.step-panel {
+    background: rgba(0, 0, 0, 0.35);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 8px;
+    padding: 0.75rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    transition: all 0.3s ease;
+}
+
+.step-panel.step-completed {
+    border-color: var(--neon-green);
+    background: rgba(0, 255, 135, 0.08);
+    box-shadow: 0 0 10px rgba(0, 255, 135, 0.15);
+}
+
+.step-panel.step-active {
+    border-color: var(--neon-magenta);
+    background: rgba(255, 0, 127, 0.12);
+    box-shadow: 0 0 15px rgba(255, 0, 127, 0.3);
+    animation: pulse-panel 1.5s infinite alternate;
+}
+
+@keyframes pulse-panel {
+    0% { border-color: var(--neon-cyan); box-shadow: 0 0 5px var(--neon-cyan); }
+    100% { border-color: var(--neon-magenta); box-shadow: 0 0 18px var(--neon-magenta); }
+}
+
+.step-panel.step-pending {
+    opacity: 0.45;
+    border-style: dashed;
+}
+
+.step-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.step-icon {
+    font-size: 1.1rem;
+}
+
+.step-status-badge {
+    font-size: 0.65rem;
+    font-weight: 800;
+    letter-spacing: 0.5px;
+}
+
+.step-completed .step-status-badge {
+    color: var(--neon-green);
+}
+
+.step-active .step-status-badge {
+    color: var(--neon-magenta);
+}
+
+.step-pending .step-status-badge {
+    color: var(--text-muted);
+}
+
+.step-name {
+    font-size: 0.75rem;
+    font-weight: 700;
+    color: #fff;
+    line-height: 1.2;
 }
 
 .deploy-progress-bg {
