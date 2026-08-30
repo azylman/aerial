@@ -31,6 +31,9 @@ jobs:
           filters: |
             brain:
               - 'brain/**'
+              - 'SYSTEM.md'
+              - 'GEMINI.md'
+              - '.agents/**'
               - 'docker-compose.yml'
               - '.github/workflows/**'
             scheduler-mcp:
@@ -76,9 +79,8 @@ jobs:
           go-version: '1.22'
           cache: true
           cache-dependency-path: |
-            brain/go.sum
-            scheduler-mcp/go.sum
-            dashboard/go.mod
+            **/go.sum
+            **/go.mod
 
       - name: Test Brain
         if: needs.changes.outputs.brain == 'true'
@@ -118,9 +120,8 @@ jobs:
           go-version: '1.22'
           cache: true
           cache-dependency-path: |
-            brain/go.sum
-            scheduler-mcp/go.sum
-            dashboard/go.mod
+            **/go.sum
+            **/go.mod
 
       - name: Lint Brain
         if: needs.changes.outputs.brain == 'true'
