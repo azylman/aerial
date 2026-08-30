@@ -23,8 +23,33 @@ function formatUptime(seconds) {
 // ==========================================
 // TELEMETRY STATE & LOGIC
 // ==========================================
+// TELEMETRY STATE & LOGIC
+// ==========================================
 let activeServicesCache = [];
 let statusPollInterval = null;
+let liveTimerInterval = null;
+
+function startLiveTimerLoop() {
+    if (liveTimerInterval) clearInterval(liveTimerInterval);
+
+    function tick() {
+        const timerEls = document.querySelectorAll('.timer-text[data-started]');
+        if (timerEls.length === 0) return;
+        const now = Date.now();
+
+        timerEls.forEach(el => {
+            const startedAt = new Date(el.getAttribute('data-started')).getTime();
+            if (isNaN(startedAt)) return;
+
+            const elapsedSec = Math.max(0, Math.floor((now - startedAt) / 1000));
+            const mins = String(Math.floor(elapsedSec / 60)).padStart(2, '0');
+            const secs = String(elapsedSec % 60).padStart(2, '0');
+            el.textContent = `⏱ ${mins}:${secs}s`;
+        });
+    }
+
+    liveTimerInterval = setInterval(tick, 1000);
+}
 
 async function fetchStatus() {
     try {
@@ -43,10 +68,26 @@ async function fetchStatus() {
         const deployBadge = document.getElementById('deploy-count-badge');
         const deploys = data.deployments || [];
 
+        const hasFailed = deploys.some(dep => dep.stage === 'failed');
+        const isBuilding = deploys.some(dep => dep.stage === 'building' || dep.stage === 'queued');
+        const isSwapping = deploys.some(dep => dep.stage === 'swapping');
+        const isAwaitingPull = deploys.some(dep => dep.stage === 'awaiting_pull');
         const activeDeploys = deploys.filter(dep => dep.stage !== 'live' && dep.stage !== 'completed');
 
         if (deployBadge) {
-            if (activeDeploys.length > 0) {
+            if (hasFailed) {
+                deployBadge.textContent = `🚨 CI BUILD FAILED`;
+                deployBadge.className = 'section-badge failed';
+            } else if (isBuilding) {
+                deployBadge.textContent = `⚡ 1 CI BUILD ACTIVE`;
+                deployBadge.className = 'section-badge building';
+            } else if (isSwapping) {
+                deployBadge.textContent = `🔄 WATCHTOWER SWAPPING`;
+                deployBadge.className = 'section-badge swapping';
+            } else if (isAwaitingPull) {
+                deployBadge.textContent = `⬇️ AWAITING WATCHTOWER PULL`;
+                deployBadge.className = 'section-badge active';
+            } else if (activeDeploys.length > 0) {
                 deployBadge.textContent = `${activeDeploys.length} IN PROGRESS`;
                 deployBadge.className = 'section-badge active';
             } else if (deploys.length > 0) {
@@ -74,38 +115,83 @@ async function fetchStatus() {
             } else {
                 deploys.forEach(dep => {
                     const isLive = dep.stage === 'live';
+                    const isFailed = dep.stage === 'failed';
+                    const isBuildingStage = dep.stage === 'building' || dep.stage === 'queued';
+
                     const steps = dep.steps || [
                         { name: "Commit Trigger", icon: "📦", status: "completed" },
                         { name: "CI Build & GHCR", icon: "⚙️", status: "completed" },
-                        { name: "Image Pull", icon: "⬇️", status: "completed" },
+                        { name: "Watchtower Pull", icon: "⬇️", status: "completed" },
                         { name: "Container Swap", icon: "🔄", status: isLive ? "completed" : "active" },
                         { name: "Health Check", icon: "🩺", status: isLive ? "completed" : "pending" }
                     ];
 
-                    const stepsHTML = steps.map(step => `
-                        <div class="step-panel step-${escapeHtml(step.status)}">
-                            <div class="step-header">
-                                <span class="step-icon">${escapeHtml(step.icon)}</span>
-                                <span class="step-status-badge">${step.status === 'completed' ? '✓ DONE' : step.status === 'active' ? '⚡ RUNNING' : '○ PENDING'}</span>
+                    const stepsHTML = steps.map(step => {
+                        let matrixHTML = '';
+                        if (step.name.includes("CI Build") && Array.isArray(dep.matrix_jobs) && dep.matrix_jobs.length > 0) {
+                            matrixHTML = `
+                                <div class="matrix-chips-container">
+                                    ${dep.matrix_jobs.map(chip => {
+                                        const chipClass = chip.status === 'completed' ? 'chip-done' : chip.status === 'active' ? 'chip-running' : chip.status === 'failed' ? 'chip-failed' : 'chip-queued';
+                                        const chipIcon = chip.status === 'completed' ? '✓' : chip.status === 'active' ? '⚡' : chip.status === 'failed' ? '✕' : '○';
+                                        return `<span class="matrix-chip ${chipClass}" title="${escapeHtml(chip.name)}: ${chip.status}">${escapeHtml(chip.name)} ${chipIcon}</span>`;
+                                    }).join('')}
+                                </div>
+                            `;
+                        }
+
+                        const statusBadge = step.status === 'completed' ? '✓ DONE' : step.status === 'active' ? '⚡ RUNNING' : step.status === 'failed' ? '✕ FAILED' : '○ PENDING';
+
+                        return `
+                            <div class="step-panel step-${escapeHtml(step.status)}">
+                                <div class="step-header">
+                                    <span class="step-icon">${escapeHtml(step.icon)}</span>
+                                    <span class="step-status-badge">${statusBadge}</span>
+                                </div>
+                                <div class="step-name">${escapeHtml(step.name)}</div>
+                                ${matrixHTML}
                             </div>
-                            <div class="step-name">${escapeHtml(step.name)}</div>
-                        </div>
-                    `).join('');
+                        `;
+                    }).join('');
 
                     const safeCommit = escapeHtml(dep.commit || 'latest');
                     const commitMarkup = dep.commit && dep.commit !== 'latest'
                         ? `<a href="https://github.com/azylman/aerial/commit/${safeCommit}" target="_blank" rel="noopener" class="deploy-commit-link" title="View commit on GitHub">${safeCommit} ↗</a>`
                         : `<span class="deploy-commit">${safeCommit}</span>`;
 
+                    let runLinkMarkup = '';
+                    if (dep.html_url && typeof dep.html_url === 'string' && dep.html_url.startsWith('https://github.com/')) {
+                        const safeUrl = escapeHtml(dep.html_url);
+                        runLinkMarkup = `<a href="${safeUrl}" target="_blank" rel="noopener" class="deploy-run-link" title="Open GitHub Actions Run">RUN LOGS ↗</a>`;
+                    }
+
+                    let timerMarkup = '';
+                    if (isBuildingStage && dep.started_at) {
+                        timerMarkup = `
+                            <div class="deploy-timer-badge">
+                                <span class="pulse-indicator"></span>
+                                <span class="timer-text" data-started="${escapeHtml(dep.started_at)}">⏱ 00:00s</span>
+                            </div>
+                        `;
+                    }
+
+                    const cardClass = isLive ? 'stage-live' : isFailed ? 'stage-failed' : isBuildingStage ? 'stage-building' : 'stage-active';
+                    const badgeClass = isLive ? 'live' : isFailed ? 'failed' : 'active';
+
                     const card = document.createElement('div');
-                    card.className = `deploy-card ${isLive ? 'stage-live' : 'stage-active'}`;
+                    card.className = `deploy-card ${cardClass}`;
                     card.innerHTML = `
+                        ${isBuildingStage ? '<div class="deploy-card-laser"></div>' : ''}
                         <div class="deploy-card-header">
                             <div class="deploy-target">
                                 <span class="deploy-service-name">${escapeHtml(dep.service.toUpperCase())}</span>
                                 ${commitMarkup}
+                                ${runLinkMarkup}
                             </div>
-                            <span class="deploy-stage-badge ${isLive ? 'live' : 'active'}">⚡ ${escapeHtml(dep.stage.toUpperCase())}</span>
+                            <div style="display: flex; align-items: center; gap: 8px;">
+                                ${timerMarkup}
+                                <span class="deploy-stage-badge ${badgeClass}">⚡ ${escapeHtml(dep.stage.toUpperCase())}</span>
+                            </div>
                         </div>
                         <div class="deploy-steps-grid">
                             ${stepsHTML}
@@ -114,8 +200,8 @@ async function fetchStatus() {
                             <div class="deploy-progress-fill" style="width: ${dep.progress}%;"></div>
                         </div>
                         <div class="deploy-footer">
-                            <span>STAGE: ${escapeHtml(dep.stage.toUpperCase())} (${dep.progress}%)</span>
-                            <span>DEPLOYED: ${new Date(dep.started_at).toLocaleTimeString()}</span>
+                            <span>${dep.commit_msg ? `"${escapeHtml(dep.commit_msg)}"` : `STAGE: ${escapeHtml(dep.stage.toUpperCase())} (${dep.progress}%)`}</span>
+                            <span>STARTED: ${new Date(dep.started_at).toLocaleTimeString()}</span>
                         </div>
                     `;
                     deploysContainer.appendChild(card);
@@ -632,3 +718,4 @@ function setupMemoryControls() {
 // Initial bootstrap
 setupTabs();
 setupMemoryControls();
+startLiveTimerLoop();

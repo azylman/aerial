@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -67,20 +68,30 @@ type ServiceStatus struct {
 	LastCheckTime time.Time `json:"last_check_time"`
 }
 
+type MatrixJobChip struct {
+	Name       string `json:"name"`                 // e.g. "brain", "dashboard", "proxy"
+	Status     string `json:"status"`               // "completed", "active", "pending", "failed"
+	Conclusion string `json:"conclusion,omitempty"` // "success", "failure", "skipped", ""
+	Duration   string `json:"duration,omitempty"`   // e.g. "45s"
+}
+
 type DeploymentStep struct {
 	Name   string `json:"name"`
 	Icon   string `json:"icon"`
-	Status string `json:"status"` // "completed", "active", "pending"
+	Status string `json:"status"` // "completed", "active", "pending", "failed"
 }
 
 type DeploymentStatus struct {
-	ID        string           `json:"id"`
-	Service   string           `json:"service"`
-	Commit    string           `json:"commit"`
-	Stage     string           `json:"stage"` // e.g. "idle", "pulling", "swapping", "live"
-	Progress  int              `json:"progress"`
-	Steps     []DeploymentStep `json:"steps"`
-	StartedAt time.Time        `json:"started_at"`
+	ID         string           `json:"id"`
+	Service    string           `json:"service"`
+	Commit     string           `json:"commit"`
+	CommitMsg  string           `json:"commit_msg,omitempty"`
+	Stage      string           `json:"stage"` // "queued", "building", "failed", "awaiting_pull", "swapping", "live", "degraded"
+	Progress   int              `json:"progress"`
+	Steps      []DeploymentStep `json:"steps"`
+	MatrixJobs []MatrixJobChip  `json:"matrix_jobs,omitempty"`
+	HTMLURL    string           `json:"html_url,omitempty"`
+	StartedAt  time.Time        `json:"started_at"`
 }
 
 type ClusterResponse struct {
@@ -89,6 +100,59 @@ type ClusterResponse struct {
 	Services      []ServiceStatus    `json:"services"`
 	Deployments   []DeploymentStatus `json:"deployments"`
 }
+
+type GitHubRun struct {
+	ID         int64     `json:"id"`
+	Name       string    `json:"name"`
+	HeadSHA    string    `json:"head_sha"`
+	HeadBranch string    `json:"head_branch"`
+	HeadCommit *struct {
+		Message string `json:"message"`
+	} `json:"head_commit,omitempty"`
+	Status     string    `json:"status"`     // "queued", "in_progress", "completed"
+	Conclusion string    `json:"conclusion"` // "success", "failure", "cancelled"
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
+	HTMLURL    string    `json:"html_url"`
+}
+
+type GitHubJob struct {
+	ID          int64     `json:"id"`
+	RunID       int64     `json:"run_id"`
+	Name        string    `json:"name"`
+	Status      string    `json:"status"`     // "queued", "in_progress", "completed"
+	Conclusion  string    `json:"conclusion"` // "success", "failure", "skipped"
+	StartedAt   time.Time `json:"started_at"`
+	CompletedAt time.Time `json:"completed_at"`
+	HTMLURL     string    `json:"html_url"`
+}
+
+type GitHubRunsResponse struct {
+	TotalCount   int         `json:"total_count"`
+	WorkflowRuns []GitHubRun `json:"workflow_runs"`
+}
+
+type GitHubJobsResponse struct {
+	TotalCount int         `json:"total_count"`
+	Jobs       []GitHubJob `json:"jobs"`
+}
+
+type GitHubPoller struct {
+	repo         string
+	token        string
+	client       *http.Client
+	runsETag     string
+	jobsETagMap  map[int64]string
+
+	mu           sync.RWMutex
+	cachedRuns   []GitHubRun
+	cachedJobs   map[int64][]GitHubJob
+	lastPollTime time.Time
+	lastError    error
+	stopCh       chan struct{}
+}
+
+var globalGHPoller *GitHubPoller
 
 // FactItem represents a semantic memory item received from brain
 type FactItem struct {
@@ -183,7 +247,435 @@ func getGitCommit() string {
 	return "latest"
 }
 
-func fetchDockerClusterState(ctx context.Context) ([]ServiceStatus, []DeploymentStatus, error) {
+func NewGitHubPoller(repo, token string) *GitHubPoller {
+	return &GitHubPoller{
+		repo:        repo,
+		token:       token,
+		jobsETagMap: make(map[int64]string),
+		cachedJobs:  make(map[int64][]GitHubJob),
+		client: &http.Client{
+			Timeout: 4 * time.Second,
+			Transport: &http.Transport{
+				MaxIdleConns:        10,
+				IdleConnTimeout:     60 * time.Second,
+				TLSHandshakeTimeout: 3 * time.Second,
+			},
+		},
+		stopCh: make(chan struct{}),
+	}
+}
+
+func (p *GitHubPoller) Start(ctx context.Context) {
+	if p.repo == "" {
+		return
+	}
+	go func() {
+		// Initial immediate poll
+		p.pollOnce(ctx)
+
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-p.stopCh:
+				return
+			case <-ticker.C:
+				hasActive := p.pollOnce(ctx)
+				if hasActive {
+					ticker.Reset(15 * time.Second)
+				} else {
+					ticker.Reset(45 * time.Second)
+				}
+			}
+		}
+	}()
+}
+
+func (p *GitHubPoller) pollOnce(ctx context.Context) bool {
+	reqURL := fmt.Sprintf("https://api.github.com/repos/%s/actions/runs?per_page=3&event=push", p.repo)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return false
+	}
+
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	if p.token != "" {
+		req.Header.Set("Authorization", "Bearer "+p.token)
+	}
+	if p.runsETag != "" {
+		req.Header.Set("If-None-Match", p.runsETag)
+	}
+
+	resp, err := p.client.Do(req)
+	if err != nil {
+		p.mu.Lock()
+		p.lastError = err
+		p.mu.Unlock()
+		return false
+	}
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
+
+	if resp.StatusCode == http.StatusNotModified {
+		p.mu.RLock()
+		defer p.mu.RUnlock()
+		for _, r := range p.cachedRuns {
+			if r.Status == "in_progress" || r.Status == "queued" {
+				return true
+			}
+		}
+		return false
+	}
+
+	if resp.StatusCode == http.StatusOK {
+		p.runsETag = resp.Header.Get("ETag")
+		var runData GitHubRunsResponse
+		if err := json.NewDecoder(resp.Body).Decode(&runData); err == nil {
+			// Sanitize commit messages
+			for i := range runData.WorkflowRuns {
+				if runData.WorkflowRuns[i].HeadCommit != nil {
+					rawMsg := runData.WorkflowRuns[i].HeadCommit.Message
+					firstLine := strings.SplitN(rawMsg, "\n", 2)[0]
+					// Truncate to 72 runes
+					runes := []rune(firstLine)
+					if len(runes) > 72 {
+						firstLine = string(runes[:72]) + "…"
+					}
+					// Strip any token-like substrings
+					for _, sens := range sensitiveKeys {
+						firstLine = strings.ReplaceAll(firstLine, sens, "[REDACTED]")
+					}
+					runData.WorkflowRuns[i].HeadCommit.Message = firstLine
+				}
+			}
+
+			p.mu.Lock()
+			p.cachedRuns = runData.WorkflowRuns
+			p.lastPollTime = time.Now().UTC()
+			p.lastError = nil
+
+			// Prune old jobs and ETags not in current active runs
+			activeIDs := make(map[int64]bool)
+			for _, r := range runData.WorkflowRuns {
+				activeIDs[r.ID] = true
+			}
+			for id := range p.cachedJobs {
+				if !activeIDs[id] {
+					delete(p.cachedJobs, id)
+				}
+			}
+			for id := range p.jobsETagMap {
+				if !activeIDs[id] {
+					delete(p.jobsETagMap, id)
+				}
+			}
+			p.mu.Unlock()
+
+			hasActive := false
+			for _, r := range runData.WorkflowRuns {
+				if r.Status == "in_progress" || r.Status == "queued" || time.Since(r.UpdatedAt) < 10*time.Minute {
+					p.fetchJobsForRun(ctx, r.ID)
+				}
+				if r.Status == "in_progress" || r.Status == "queued" {
+					hasActive = true
+				}
+			}
+			return hasActive
+		}
+	}
+
+	return false
+}
+
+func (p *GitHubPoller) fetchJobsForRun(ctx context.Context, runID int64) {
+	reqURL := fmt.Sprintf("https://api.github.com/repos/%s/actions/runs/%d/jobs", p.repo, runID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return
+	}
+
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	if p.token != "" {
+		req.Header.Set("Authorization", "Bearer "+p.token)
+	}
+	if etag, ok := p.jobsETagMap[runID]; ok && etag != "" {
+		req.Header.Set("If-None-Match", etag)
+	}
+
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return
+	}
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
+
+	if resp.StatusCode == http.StatusNotModified {
+		return
+	}
+
+	if resp.StatusCode == http.StatusOK {
+		p.jobsETagMap[runID] = resp.Header.Get("ETag")
+		var jobData GitHubJobsResponse
+		if err := json.NewDecoder(resp.Body).Decode(&jobData); err == nil {
+			p.mu.Lock()
+			p.cachedJobs[runID] = jobData.Jobs
+			p.mu.Unlock()
+		}
+	}
+}
+
+func (p *GitHubPoller) GetSnapshot() ([]GitHubRun, map[int64][]GitHubJob) {
+	if p == nil {
+		return nil, nil
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	runs := make([]GitHubRun, len(p.cachedRuns))
+	copy(runs, p.cachedRuns)
+
+	jobs := make(map[int64][]GitHubJob, len(p.cachedJobs))
+	for k, v := range p.cachedJobs {
+		jobsCopy := make([]GitHubJob, len(v))
+		copy(jobsCopy, v)
+		jobs[k] = jobsCopy
+	}
+	return runs, jobs
+}
+
+func extractServiceNameFromJobName(jobName string) string {
+	lower := strings.ToLower(jobName)
+	services := []string{
+		"brain",
+		"dashboard",
+		"proxy",
+		"scheduler-mcp",
+		"discord-mcp",
+		"docker-mcp",
+		"github-mcp",
+		"ollama",
+		"agentsview",
+	}
+	for _, s := range services {
+		if strings.Contains(lower, s) {
+			return s
+		}
+	}
+	if strings.Contains(lower, "unit test") || strings.Contains(lower, "test") {
+		return "unit-tests"
+	}
+	return ""
+}
+
+func parseMatrixJobChips(jobs []GitHubJob) []MatrixJobChip {
+	var chips []MatrixJobChip
+	seen := make(map[string]bool)
+
+	for _, j := range jobs {
+		svc := extractServiceNameFromJobName(j.Name)
+		if svc == "" || seen[svc] {
+			continue
+		}
+		seen[svc] = true
+
+		chipStatus := "pending"
+		if j.Status == "in_progress" {
+			chipStatus = "active"
+		} else if j.Status == "completed" {
+			if j.Conclusion == "success" {
+				chipStatus = "completed"
+			} else if j.Conclusion == "failure" {
+				chipStatus = "failed"
+			} else {
+				chipStatus = "pending"
+			}
+		}
+
+		var durStr string
+		if !j.StartedAt.IsZero() {
+			end := j.CompletedAt
+			if end.IsZero() {
+				end = time.Now().UTC()
+			}
+			sec := int(end.Sub(j.StartedAt).Seconds())
+			if sec > 0 {
+				durStr = fmt.Sprintf("%ds", sec)
+			}
+		}
+
+		chips = append(chips, MatrixJobChip{
+			Name:       svc,
+			Status:     chipStatus,
+			Conclusion: j.Conclusion,
+			Duration:   durStr,
+		})
+	}
+	return chips
+}
+
+func mergeClusterDeployments(
+	rawContainers []DockerContainerJSON,
+	runs []GitHubRun,
+	jobs map[int64][]GitHubJob,
+	currentCommit string,
+) []DeploymentStatus {
+	var deployments []DeploymentStatus
+	now := time.Now().UTC()
+
+	// 1. Check for Active or Recent Cloud Runs in GitHub Actions (inspect latest run first)
+	if len(runs) > 0 {
+		latestRun := runs[0]
+		shortSHA := latestRun.HeadSHA
+		if len(shortSHA) > 7 {
+			shortSHA = shortSHA[:7]
+		}
+		commitMsg := ""
+		if latestRun.HeadCommit != nil {
+			commitMsg = latestRun.HeadCommit.Message
+		}
+
+		runJobs := jobs[latestRun.ID]
+		matrixChips := parseMatrixJobChips(runJobs)
+
+		if latestRun.Status == "queued" || latestRun.Status == "in_progress" {
+			stage := "building"
+			progress := 35
+			ciStatus := "active"
+			if latestRun.Status == "queued" {
+				stage = "queued"
+				progress = 15
+				ciStatus = "pending"
+			}
+
+			// Calculate progress based on matrix chips
+			if len(matrixChips) > 0 {
+				doneCount := 0
+				for _, c := range matrixChips {
+					if c.Status == "completed" {
+						doneCount++
+					}
+				}
+				progress = 20 + int(float64(doneCount)/float64(len(matrixChips))*30)
+			}
+
+			deployments = append(deployments, DeploymentStatus{
+				ID:        fmt.Sprintf("gh-run-%d", latestRun.ID),
+				Service:   "aerial-stack",
+				Commit:    shortSHA,
+				CommitMsg: commitMsg,
+				Stage:     stage,
+				Progress:  progress,
+				HTMLURL:   latestRun.HTMLURL,
+				Steps: []DeploymentStep{
+					{Name: "Commit Trigger", Icon: "📦", Status: "completed"},
+					{Name: "CI Build & GHCR", Icon: "⚙️", Status: ciStatus},
+					{Name: "Watchtower Pull", Icon: "⬇️", Status: "pending"},
+					{Name: "Container Swap", Icon: "🔄", Status: "pending"},
+					{Name: "Health Check", Icon: "🩺", Status: "pending"},
+				},
+				MatrixJobs: matrixChips,
+				StartedAt:  latestRun.CreatedAt,
+			})
+			return deployments
+		}
+
+		if latestRun.Conclusion == "failure" && time.Since(latestRun.UpdatedAt) < 30*time.Minute {
+			deployments = append(deployments, DeploymentStatus{
+				ID:        fmt.Sprintf("gh-run-%d", latestRun.ID),
+				Service:   "aerial-stack",
+				Commit:    shortSHA,
+				CommitMsg: commitMsg,
+				Stage:     "failed",
+				Progress:  40,
+				HTMLURL:   latestRun.HTMLURL,
+				Steps: []DeploymentStep{
+					{Name: "Commit Trigger", Icon: "📦", Status: "completed"},
+					{Name: "CI Build & GHCR", Icon: "⚙️", Status: "failed"},
+					{Name: "Watchtower Pull", Icon: "⬇️", Status: "pending"},
+					{Name: "Container Swap", Icon: "🔄", Status: "pending"},
+					{Name: "Health Check", Icon: "🩺", Status: "pending"},
+				},
+				MatrixJobs: matrixChips,
+				StartedAt:  latestRun.CreatedAt,
+			})
+			return deployments
+		}
+	}
+
+	// 2. Check for Local Containers recently deployed/restarted (< 20 mins)
+	for _, c := range rawContainers {
+		isAerial := false
+		var svcName string
+
+		if proj, ok := c.Labels["com.docker.compose.project"]; ok && proj == "aerial" {
+			isAerial = true
+			svcName = c.Labels["com.docker.compose.service"]
+		} else if len(c.Names) > 0 {
+			name := strings.TrimPrefix(c.Names[0], "/")
+			if strings.HasPrefix(name, "aerial-") {
+				isAerial = true
+				svcName = strings.TrimPrefix(name, "aerial-")
+			}
+		}
+
+		if !isAerial || svcName == "" {
+			continue
+		}
+
+		createdAt := time.Unix(c.Created, 0).UTC()
+		uptimeSec := int64(now.Sub(createdAt).Seconds())
+		if uptimeSec < 0 {
+			uptimeSec = 0
+		}
+
+		if uptimeSec < 1200 {
+			stage := "live"
+			progress := 100
+			stepStatus := "completed"
+			healthStatus := "completed"
+
+			if c.Health != nil && c.Health.Status == "starting" {
+				stage = "swapping"
+				progress = 85
+				stepStatus = "completed"
+				healthStatus = "active"
+			} else if c.State != "running" || (c.Health != nil && c.Health.Status == "unhealthy") {
+				stage = "degraded"
+				progress = 85
+				healthStatus = "pending"
+			}
+
+			deployments = append(deployments, DeploymentStatus{
+				ID:        "dep-" + svcName,
+				Service:   svcName,
+				Commit:    currentCommit,
+				Stage:     stage,
+				Progress:  progress,
+				StartedAt: createdAt,
+				Steps: []DeploymentStep{
+					{Name: "Commit Trigger", Icon: "📦", Status: "completed"},
+					{Name: "CI Build & GHCR", Icon: "⚙️", Status: "completed"},
+					{Name: "Watchtower Pull", Icon: "⬇️", Status: "completed"},
+					{Name: "Container Swap", Icon: "🔄", Status: stepStatus},
+					{Name: "Health Check", Icon: "🩺", Status: healthStatus},
+				},
+			})
+		}
+	}
+
+	return deployments
+}
+
+func fetchDockerClusterState(ctx context.Context) ([]ServiceStatus, []DockerContainerJSON, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://localhost/containers/json", nil)
 	if err != nil {
 		return nil, nil, err
@@ -208,10 +700,7 @@ func fetchDockerClusterState(ctx context.Context) ([]ServiceStatus, []Deployment
 	}
 
 	now := time.Now().UTC()
-	currentCommit := getGitCommit()
-
 	var services []ServiceStatus
-	var deployments []DeploymentStatus
 
 	for _, c := range rawContainers {
 		isAerial := false
@@ -257,44 +746,9 @@ func fetchDockerClusterState(ctx context.Context) ([]ServiceStatus, []Deployment
 			UptimeSeconds: uptimeSec,
 			LastCheckTime: now,
 		})
-
-		// Check if this container was deployed/restarted within the last 20 minutes
-		if uptimeSec < 1200 {
-			stage := "live"
-			progress := 100
-			stepStatus := "completed"
-			healthStatus := "completed"
-
-			if status == "starting" {
-				stage = "swapping"
-				progress = 85
-				stepStatus = "completed"
-				healthStatus = "active"
-			} else if status == "unhealthy" {
-				stage = "degraded"
-				progress = 85
-				healthStatus = "pending"
-			}
-
-			deployments = append(deployments, DeploymentStatus{
-				ID:       "dep-" + svcName,
-				Service:  svcName,
-				Commit:   currentCommit,
-				Stage:    stage,
-				Progress: progress,
-				Steps: []DeploymentStep{
-					{Name: "Commit Trigger", Icon: "📦", Status: "completed"},
-					{Name: "CI Build & GHCR", Icon: "⚙️", Status: "completed"},
-					{Name: "Image Pull", Icon: "⬇️", Status: "completed"},
-					{Name: "Container Swap", Icon: "🔄", Status: stepStatus},
-					{Name: "Health Check", Icon: "🩺", Status: healthStatus},
-				},
-				StartedAt: createdAt,
-			})
-		}
 	}
 
-	return services, deployments, nil
+	return services, rawContainers, nil
 }
 
 func statusHandler(w http.ResponseWriter, r *http.Request) {
@@ -307,7 +761,16 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	now := time.Now().UTC()
-	services, deployments, err := fetchDockerClusterState(ctx)
+	services, rawContainers, err := fetchDockerClusterState(ctx)
+	currentCommit := getGitCommit()
+
+	var ghRuns []GitHubRun
+	var ghJobs map[int64][]GitHubJob
+	if globalGHPoller != nil {
+		ghRuns, ghJobs = globalGHPoller.GetSnapshot()
+	}
+
+	deployments := mergeClusterDeployments(rawContainers, ghRuns, ghJobs, currentCommit)
 
 	if err != nil || len(services) == 0 {
 		uptimeSec := int64(time.Since(startTime).Seconds())
@@ -324,7 +787,6 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 			{Name: "proxy", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
 			{Name: "dashboard", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
 		}
-		deployments = []DeploymentStatus{}
 	}
 
 	clusterStatus := "healthy"
@@ -485,6 +947,17 @@ func main() {
 	if brainURL == "" {
 		brainURL = "http://brain:8080"
 	}
+
+	ghRepo := os.Getenv("GITHUB_REPO")
+	if ghRepo == "" {
+		ghRepo = "azylman/aerial"
+	}
+	ghToken := os.Getenv("GITHUB_PAT")
+	if ghToken == "" {
+		ghToken = os.Getenv("GITHUB_PERSONAL_ACCESS_TOKEN")
+	}
+	globalGHPoller = NewGitHubPoller(ghRepo, ghToken)
+	globalGHPoller.Start(context.Background())
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthHandler)

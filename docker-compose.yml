@@ -258,6 +258,8 @@ services:
     environment:
       - PORT=8080
       - BRAIN_URL=http://brain:8080
+      - GITHUB_PAT=${GITHUB_PAT}
+      - GITHUB_REPO=${GITHUB_REPO:-azylman/aerial}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
