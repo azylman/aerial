@@ -20,8 +20,34 @@ function formatUptime(seconds) {
     return `${secs}s`;
 }
 
-// ==========================================
-// TELEMETRY STATE & LOGIC
+function formatElapsedTicker(seconds) {
+    if (seconds == null || isNaN(seconds) || seconds < 0) return '⏱ 00:00s';
+    const hrs = Math.floor(seconds / 3600);
+    const mins = Math.floor((seconds % 3600) / 60);
+    const secs = Math.floor(seconds % 60);
+
+    if (hrs > 0) {
+        return `⏱ ${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+    }
+    return `⏱ ${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}s`;
+}
+
+function getTriggerBadge(triggerType) {
+    const t = String(triggerType || 'discord').toLowerCase();
+    switch (t) {
+        case 'cron':
+            return { icon: '⏰', text: 'CRON', css: 'cron' };
+        case 'reminder':
+            return { icon: '⏱️', text: 'REMINDER', css: 'reminder' };
+        case 'http':
+        case 'api':
+            return { icon: '⚡', text: 'API', css: 'http' };
+        case 'discord':
+        default:
+            return { icon: '💬', text: 'DISCORD', css: 'discord' };
+    }
+}
+
 // ==========================================
 // TELEMETRY STATE & LOGIC
 // ==========================================
@@ -42,13 +68,128 @@ function startLiveTimerLoop() {
             if (isNaN(startedAt)) return;
 
             const elapsedSec = Math.max(0, Math.floor((now - startedAt) / 1000));
-            const mins = String(Math.floor(elapsedSec / 60)).padStart(2, '0');
-            const secs = String(elapsedSec % 60).padStart(2, '0');
-            el.textContent = `⏱ ${mins}:${secs}s`;
+            el.textContent = formatElapsedTicker(elapsedSec);
         });
     }
 
     liveTimerInterval = setInterval(tick, 1000);
+}
+
+function renderActiveTasks(tasks) {
+    const container = document.getElementById('active-tasks-container');
+    const badge = document.getElementById('tasks-count-badge');
+    const summaryVal = document.getElementById('summary-tasks-val');
+    const summarySub = document.getElementById('summary-tasks-sub');
+
+    const activeList = Array.isArray(tasks) ? tasks : [];
+    const runningCount = activeList.filter(t => t.status === 'PROCESSING').length;
+    const pendingCount = activeList.filter(t => t.status === 'PENDING').length;
+    const totalCount = activeList.length;
+
+    // Update Summary Bar
+    if (summaryVal) {
+        if (runningCount > 0) {
+            summaryVal.textContent = `${runningCount} RUNNING`;
+            summaryVal.className = 'value text-cyan';
+        } else if (pendingCount > 0) {
+            summaryVal.textContent = `${pendingCount} QUEUED`;
+            summaryVal.className = 'value text-warning';
+        } else {
+            summaryVal.textContent = '0 IDLE';
+            summaryVal.className = 'value text-success';
+        }
+    }
+    if (summarySub) {
+        summarySub.textContent = totalCount > 0 ? `${totalCount} ACTIVE IN QUEUE` : 'REAL-TIME DISPATCH';
+    }
+
+    // Update Section Badge
+    if (badge) {
+        if (runningCount > 0) {
+            badge.textContent = `⚡ ${runningCount} RUNNING` + (pendingCount > 0 ? ` (+${pendingCount} QUEUED)` : '');
+            badge.className = 'section-badge active';
+        } else if (pendingCount > 0) {
+            badge.textContent = `⏳ ${pendingCount} IN QUEUE`;
+            badge.className = 'section-badge building';
+        } else {
+            badge.textContent = '0 IN PROGRESS';
+            badge.className = 'section-badge';
+        }
+    }
+
+    if (!container) return;
+
+    if (activeList.length === 0) {
+        container.innerHTML = `
+            <div class="task-idle-card">
+                <div class="idle-indicator">
+                    <span class="pulse-dot healthy"></span>
+                    <span>ALL WORKERS IDLE // NO PENDING TURNS</span>
+                </div>
+                <div>DISPATCH POLLING SQLITE QUEUE (1s)</div>
+            </div>
+        `;
+        return;
+    }
+
+    const now = Date.now();
+    container.innerHTML = activeList.map(task => {
+        const isProcessing = task.status === 'PROCESSING';
+        const isPending = task.status === 'PENDING';
+        const statusClass = isProcessing ? 'status-processing' : 'status-pending';
+        const statusBadge = isProcessing ? '⚡ RUNNING' : '⏳ QUEUED';
+
+        const authorSafe = escapeHtml(task.author_name || 'System');
+        const promptSafe = escapeHtml(task.prompt || '');
+        const trigger = getTriggerBadge(task.trigger_type);
+        const threadSafe = escapeHtml(task.thread_id || '');
+
+        let timerHTML = '';
+        if (isProcessing && (task.started_at || task.created_at)) {
+            const startTimeStr = task.started_at || task.created_at;
+            const startedMs = new Date(startTimeStr).getTime();
+            const initialSec = !isNaN(startedMs) ? Math.max(0, Math.floor((now - startedMs) / 1000)) : 0;
+            const formattedTime = formatElapsedTicker(initialSec);
+            timerHTML = `
+                <div class="deploy-timer-badge">
+                    <span class="pulse-indicator"></span>
+                    <span class="timer-text" data-started="${escapeHtml(startTimeStr)}">${formattedTime}</span>
+                </div>
+            `;
+        }
+
+        const retryHTML = task.retry_count > 0 
+            ? `<span class="task-retry-badge" title="Retry Attempt">🔄 RETRY #${escapeHtml(task.retry_count)}</span>` 
+            : '';
+
+        const inspectHTML = task.session_id 
+            ? `<a href="/conversations/?session=${encodeURIComponent(task.session_id)}" target="_blank" rel="noopener noreferrer" class="task-inspect-btn active">💬 INSPECT IN AGENTSVIEW ↗</a>`
+            : `<span class="task-inspect-btn disabled">⏳ QUEUE ALLOCATING SESSION</span>`;
+
+        return `
+            <div class="task-card ${statusClass}">
+                ${isProcessing ? '<div class="task-card-laser"></div>' : ''}
+                <div class="task-card-header">
+                    <div class="task-meta-left">
+                        <span class="task-trigger-badge ${trigger.css}" data-trigger="${trigger.css}">${trigger.icon} ${escapeHtml(trigger.text)}</span>
+                        <span class="task-author">${authorSafe}</span>
+                        ${retryHTML}
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        ${timerHTML}
+                        <span class="task-status-pill ${isProcessing ? 'processing' : 'pending'}">${statusBadge}</span>
+                    </div>
+                </div>
+                <div class="task-prompt-box">
+                    &gt; ${promptSafe}
+                </div>
+                <div class="task-card-footer">
+                    <span style="font-size: 0.75rem; color: var(--text-dim); font-family: var(--font-mono);">THREAD: ${threadSafe || 'N/A'}</span>
+                    ${inspectHTML}
+                </div>
+            </div>
+        `;
+    }).join('');
 }
 
 function getApiBase() {
@@ -68,6 +209,9 @@ async function fetchStatus() {
         const overallStatusEl = document.getElementById('overall-status');
         if (overallStatusEl) overallStatusEl.textContent = escapeHtml(data.cluster_status.toUpperCase());
         
+        // --- 0. RENDER LIVE AGENT EXECUTION QUEUE ---
+        renderActiveTasks(data.active_tasks || []);
+
         // --- 1. RENDER DEPLOYMENT PIPELINE ---
         const deploysContainer = document.getElementById('deployments-container');
         const deployBadge = document.getElementById('deploy-count-badge');
@@ -286,6 +430,11 @@ async function fetchStatus() {
         }
         const clusterSubEl = document.getElementById('cluster-sub');
         if (clusterSubEl) clusterSubEl.textContent = 'SYSTEM DISCONNECTED';
+        const summaryTasksVal = document.getElementById('summary-tasks-val');
+        if (summaryTasksVal) {
+            summaryTasksVal.textContent = 'OFFLINE';
+            summaryTasksVal.className = 'value text-danger';
+        }
     }
 }
 
