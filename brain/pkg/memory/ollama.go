@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	DefaultEmbeddingModel = "bge-small-en"
+	DefaultEmbeddingModel = "all-minilm"
 	DefaultOllamaURL      = "http://ollama:11434"
 	BGEQueryPrefix        = "Represent this sentence for searching relevant passages: "
 )
@@ -62,8 +62,16 @@ func (c *Client) GenerateEmbedding(ctx context.Context, text string, isQuery boo
 		prompt = BGEQueryPrefix + text
 	}
 
+	model := os.Getenv("EMBEDDING_MODEL")
+	if model == "" {
+		model = os.Getenv("OLLAMA_EMBEDDING_MODEL")
+	}
+	if model == "" {
+		model = DefaultEmbeddingModel
+	}
+
 	reqBody, err := json.Marshal(EmbeddingRequest{
-		Model:  DefaultEmbeddingModel,
+		Model:  model,
 		Prompt: prompt,
 	})
 	if err != nil {
