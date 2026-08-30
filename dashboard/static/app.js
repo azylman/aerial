@@ -596,84 +596,930 @@ async function copyFactText(index, btnElement) {
 
 
 // ==========================================
-// SPA TAB NAVIGATION & ROUTING
+// SCHEDULES & EXECUTION TELEMETRY STATE & LOGIC
 // ==========================================
-function setupTabs() {
-    const telemetryBtn = document.getElementById('tab-telemetry-btn');
-    const memoryBtn = document.getElementById('tab-memory-btn');
-    const telemetryView = document.getElementById('telemetry-view');
-    const memoryView = document.getElementById('memory-view');
+let schedulesPollInterval = null;
+let schedulesTickerInterval = null;
 
-    function switchView(tab) {
-        if (tab === 'memory') {
-            if (telemetryBtn) {
-                telemetryBtn.classList.remove('active');
-                telemetryBtn.setAttribute('aria-selected', 'false');
-            }
-            if (memoryBtn) {
-                memoryBtn.classList.add('active');
-                memoryBtn.setAttribute('aria-selected', 'true');
-            }
-            if (telemetryView) telemetryView.style.display = 'none';
-            if (memoryView) memoryView.style.display = 'block';
+const schedulesState = {
+    crons: [],
+    oneShots: [],
+    runs: [],
+    runsTotal: 0,
+    summary: {
+        total_active: 0,
+        cron_count: 0,
+        one_shot_count: 0,
+        total_runs_24h: 0,
+        success_rate_24h: 100.0,
+        next_run_at: null
+    },
+    selectedFilter: 'ALL', // 'ALL' | 'CRON' | 'ONE_SHOT' | 'RUNS'
+    searchQuery: '',
+    isLoading: false,
+    isRunsLoading: false,
+    error: null,
+    serverClockSkewMs: 0,
+    systemTime: null,
+    lastSync: null
+};
 
-            // Pause status polling while browsing memory
+function formatCronExpression(cronExpr, tz) {
+    if (!cronExpr) return '';
+    const expr = String(cronExpr).trim();
+    if (!expr) return '';
+
+    const lower = expr.toLowerCase();
+    switch (lower) {
+        case '@yearly':
+        case '@annually':
+            return 'Every year on Jan 1st at 00:00';
+        case '@monthly':
+            return '1st of every month at 00:00';
+        case '@weekly':
+            return 'Every week on Sunday at 00:00';
+        case '@daily':
+        case '@midnight':
+            return 'Every day at 00:00';
+        case '@hourly':
+            return 'Every hour';
+    }
+
+    const fields = expr.split(/\s+/);
+    if (fields.length !== 5) {
+        return expr;
+    }
+
+    const [minStr, hourStr, domStr, monStr, dowStr] = fields;
+
+    // Case: Every minute (* * * * *)
+    if (minStr === '*' && hourStr === '*' && domStr === '*' && monStr === '*' && dowStr === '*') {
+        return 'Every minute';
+    }
+
+    // Case: Every X minutes (*/N * * * *)
+    if (minStr.startsWith('*/') && hourStr === '*' && domStr === '*' && monStr === '*' && dowStr === '*') {
+        const interval = minStr.slice(2);
+        return `Every ${interval} minutes`;
+    }
+
+    // Case: Every X hours (0 */N * * *)
+    if (minStr === '0' && hourStr.startsWith('*/') && domStr === '*' && monStr === '*' && dowStr === '*') {
+        const interval = hourStr.slice(2);
+        return `Every ${interval} hours`;
+    }
+
+    const m = parseInt(minStr, 10);
+    const h = parseInt(hourStr, 10);
+
+    const cronMonthNames = {
+        1: 'Jan', 2: 'Feb', 3: 'Mar', 4: 'Apr', 5: 'May', 6: 'Jun',
+        7: 'Jul', 8: 'Aug', 9: 'Sep', 10: 'Oct', 11: 'Nov', 12: 'Dec'
+    };
+
+    const cronDayNames = {
+        0: 'Sunday', 1: 'Monday', 2: 'Tuesday', 3: 'Wednesday', 4: 'Thursday', 5: 'Friday', 6: 'Saturday', 7: 'Sunday'
+    };
+
+    const cronDayShortNames = {
+        0: 'Sun', 1: 'Mon', 2: 'Tue', 3: 'Wed', 4: 'Thu', 5: 'Fri', 6: 'Sat', 7: 'Sun'
+    };
+
+    function ordinal(n) {
+        if (n >= 11 && n <= 13) return `${n}th`;
+        switch (n % 10) {
+            case 1: return `${n}st`;
+            case 2: return `${n}nd`;
+            case 3: return `${n}rd`;
+            default: return `${n}th`;
+        }
+    }
+
+    if (!isNaN(m) && !isNaN(h)) {
+        const timeStr = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+
+        // 1. Every day at HH:MM (0 9 * * *)
+        if (domStr === '*' && monStr === '*' && dowStr === '*') {
+            return `Every day at ${timeStr}`;
+        }
+
+        // 2. Specific day of week (0 9 * * 1-5, etc.)
+        if (domStr === '*' && monStr === '*' && dowStr !== '*') {
+            const dowUpper = dowStr.toUpperCase();
+            if (dowUpper === '1-5' || dowUpper === 'MON-FRI') {
+                return `Weekdays (Mon–Fri) at ${timeStr}`;
+            }
+            if (dowUpper === '0,6' || dowUpper === '6,0' || dowUpper === 'SAT,SUN' || dowUpper === 'SUN,SAT') {
+                return `Weekends (Sat–Sun) at ${timeStr}`;
+            }
+
+            const dowNum = parseInt(dowStr, 10);
+            if (!isNaN(dowNum) && dowNum >= 0 && dowNum <= 7) {
+                return `Every ${cronDayNames[dowNum]} at ${timeStr}`;
+            }
+
+            const parts = dowStr.split(',');
+            const names = parts.map(p => {
+                const pTrim = p.trim();
+                const dNum = parseInt(pTrim, 10);
+                if (!isNaN(dNum) && dNum >= 0 && dNum <= 7) {
+                    return cronDayShortNames[dNum];
+                }
+                return pTrim;
+            });
+            if (names.length > 0) {
+                return `${names.join(', ')} at ${timeStr}`;
+            }
+        }
+
+        // 3. Specific day of month (0 12 1 * *)
+        if (domStr !== '*' && monStr === '*' && dowStr === '*') {
+            const domNum = parseInt(domStr, 10);
+            if (!isNaN(domNum) && domNum >= 1 && domNum <= 31) {
+                return `${ordinal(domNum)} of every month at ${timeStr}`;
+            }
+        }
+
+        // 4. Specific month and day (0 0 1 1 *)
+        if (domStr !== '*' && monStr !== '*' && dowStr === '*') {
+            const domNum = parseInt(domStr, 10);
+            const monNum = parseInt(monStr, 10);
+            if (!isNaN(domNum) && !isNaN(monNum) && monNum >= 1 && monNum <= 12) {
+                return `Every year on ${cronMonthNames[monNum]} ${ordinal(domNum)} at ${timeStr}`;
+            }
+        }
+
+        return `At ${timeStr} (${expr})`;
+    }
+
+    return expr;
+}
+
+function formatCountdown(targetDateStr) {
+    if (!targetDateStr) {
+        return { text: '--:--:--', cssClass: '', isTriggering: false, isUrgent: false, isOverdue: false };
+    }
+    const targetMs = new Date(targetDateStr).getTime();
+    if (isNaN(targetMs)) {
+        return { text: '--:--:--', cssClass: '', isTriggering: false, isUrgent: false, isOverdue: false };
+    }
+
+    const normalizedNow = Date.now() + (schedulesState.serverClockSkewMs || 0);
+    const diffSec = Math.floor((targetMs - normalizedNow) / 1000);
+
+    if (diffSec > 86400) {
+        const days = Math.floor(diffSec / 86400);
+        const hrs = Math.floor((diffSec % 86400) / 3600);
+        return { text: `⏱ in ${days}d ${hrs}h`, cssClass: 'countdown-normal', isTriggering: false, isUrgent: false, isOverdue: false };
+    }
+    if (diffSec >= 3600) {
+        const hrs = Math.floor(diffSec / 3600);
+        const mins = Math.floor((diffSec % 3600) / 60);
+        return { text: `⏱ in ${hrs}h ${mins}m`, cssClass: 'countdown-normal', isTriggering: false, isUrgent: false, isOverdue: false };
+    }
+    if (diffSec > 60) {
+        const mins = Math.floor(diffSec / 60);
+        const secs = diffSec % 60;
+        return { text: `⏱ in ${mins}m ${secs}s`, cssClass: 'countdown-normal', isTriggering: false, isUrgent: false, isOverdue: false };
+    }
+    if (diffSec >= 1) {
+        return { text: `⏱ in ${diffSec}s`, cssClass: 'countdown-urgent', isTriggering: false, isUrgent: true, isOverdue: false };
+    }
+    if (diffSec >= -15) {
+        return { text: `⚡ TRIGGERING...`, cssClass: 'countdown-triggering', isTriggering: true, isUrgent: false, isOverdue: false };
+    }
+    return { text: `⏱ OVERDUE (SYNCING...)`, cssClass: 'countdown-overdue', isTriggering: false, isUrgent: false, isOverdue: true };
+}
+
+function formatDuration(durationMs) {
+    if (durationMs == null || isNaN(durationMs) || durationMs <= 0) return '0ms';
+    if (durationMs < 1000) return `${durationMs}ms`;
+    const sec = (durationMs / 1000).toFixed(1);
+    if (durationMs < 60000) return `${sec}s`;
+    const mins = Math.floor(durationMs / 60000);
+    const remSec = Math.floor((durationMs % 60000) / 1000);
+    return `${mins}m ${remSec}s`;
+}
+
+function formatTimestamp(dateStr) {
+    if (!dateStr) return '--';
+    const date = new Date(dateStr);
+    if (isNaN(date.getTime())) return '--';
+    return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ' ' + date.toLocaleTimeString();
+}
+
+async function fetchSchedules() {
+    if (schedulesState.isLoading) return;
+    schedulesState.isLoading = true;
+
+    if (schedulesState.crons.length === 0 && schedulesState.oneShots.length === 0) {
+        renderSchedulesSkeleton();
+    }
+
+    try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 6000);
+
+        const res = await fetch(getApiBase() + '/api/schedules', { signal: controller.signal });
+        clearTimeout(timeoutId);
+
+        const data = await res.json();
+        if (!res.ok) {
+            throw new Error(data.error || `HTTP ${res.status}: Brain schedules proxy unavailable`);
+        }
+
+        if (data.system_time) {
+            schedulesState.serverClockSkewMs = Date.parse(data.system_time) - Date.now();
+            schedulesState.systemTime = data.system_time;
+        }
+
+        schedulesState.crons = Array.isArray(data.crons) ? data.crons : [];
+        schedulesState.oneShots = Array.isArray(data.one_shots) ? data.one_shots : [];
+        schedulesState.summary = data.summary || {
+            total_active: schedulesState.crons.length + schedulesState.oneShots.length,
+            cron_count: schedulesState.crons.length,
+            one_shot_count: schedulesState.oneShots.length,
+            total_runs_24h: 0,
+            success_rate_24h: 100.0,
+            next_run_at: null
+        };
+        schedulesState.isLoading = false;
+        schedulesState.error = null;
+        schedulesState.lastSync = new Date();
+
+        const banner = document.getElementById('schedules-reconnect-banner');
+        if (banner) banner.style.display = 'none';
+
+        updateScheduleMetrics();
+        renderSchedulePills();
+        renderScheduleCards();
+
+    } catch (err) {
+        console.warn('Failed to fetch active schedules:', err);
+        schedulesState.isLoading = false;
+        schedulesState.error = err.message || 'Brain service unreachable';
+
+        // Stale-While-Revalidate: If we have existing cached schedules, retain them and show banner
+        if (schedulesState.crons.length > 0 || schedulesState.oneShots.length > 0) {
+            const banner = document.getElementById('schedules-reconnect-banner');
+            if (banner) banner.style.display = 'flex';
+        } else {
+            renderSchedulesError(schedulesState.error);
+        }
+    }
+}
+
+async function fetchScheduleRuns() {
+    if (schedulesState.isRunsLoading) return;
+    schedulesState.isRunsLoading = true;
+
+    try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 6000);
+
+        const res = await fetch(getApiBase() + '/api/schedules/runs?limit=50&offset=0', { signal: controller.signal });
+        clearTimeout(timeoutId);
+
+        const data = await res.json();
+        if (res.ok) {
+            schedulesState.runs = Array.isArray(data.runs) ? data.runs : [];
+            schedulesState.runsTotal = typeof data.total === 'number' ? data.total : schedulesState.runs.length;
+            renderScheduleRuns();
+            renderSchedulePills();
+        }
+        schedulesState.isRunsLoading = false;
+    } catch (err) {
+        console.warn('Failed to fetch schedule runs:', err);
+        schedulesState.isRunsLoading = false;
+    }
+}
+
+function updateScheduleMetrics() {
+    const summary = schedulesState.summary;
+
+    const cronsCountEl = document.getElementById('schedules-crons-count');
+    if (cronsCountEl) cronsCountEl.textContent = summary.cron_count ?? schedulesState.crons.length;
+
+    const oneshotCountEl = document.getElementById('schedules-oneshot-count');
+    if (oneshotCountEl) oneshotCountEl.textContent = summary.one_shot_count ?? schedulesState.oneShots.length;
+
+    const successRateEl = document.getElementById('schedules-success-rate');
+    if (successRateEl) {
+        const rate = typeof summary.success_rate_24h === 'number' ? summary.success_rate_24h : 100.0;
+        successRateEl.textContent = `${rate.toFixed(1)}%`;
+        if (rate >= 90) {
+            successRateEl.className = 'value text-success';
+        } else if (rate >= 75) {
+            successRateEl.className = 'value';
+            successRateEl.style.color = 'var(--neon-amber)';
+        } else {
+            successRateEl.className = 'value text-danger';
+        }
+    }
+
+    const successSubEl = document.getElementById('schedules-success-sub');
+    if (successSubEl) {
+        successSubEl.textContent = `${summary.total_runs_24h || 0} RUNS LOGGED (24H)`;
+    }
+
+    const activeBadgeEl = document.getElementById('schedules-active-badge');
+    if (activeBadgeEl) {
+        activeBadgeEl.textContent = `${summary.total_active ?? (schedulesState.crons.length + schedulesState.oneShots.length)} ACTIVE`;
+    }
+}
+
+function renderSchedulePills() {
+    const totalActive = schedulesState.crons.length + schedulesState.oneShots.length;
+    const cronsCount = schedulesState.crons.length;
+    const oneshotsCount = schedulesState.oneShots.length;
+    const runsCount = schedulesState.runsTotal || schedulesState.runs.length;
+
+    const pillAll = document.getElementById('pill-count-schedules-all');
+    if (pillAll) pillAll.textContent = totalActive;
+
+    const pillCrons = document.getElementById('pill-count-crons');
+    if (pillCrons) pillCrons.textContent = cronsCount;
+
+    const pillOneshots = document.getElementById('pill-count-oneshots');
+    if (pillOneshots) pillOneshots.textContent = oneshotsCount;
+
+    const pillRuns = document.getElementById('pill-count-runs');
+    if (pillRuns) pillRuns.textContent = runsCount;
+
+    const pillsBar = document.getElementById('schedules-filter-pills');
+    if (pillsBar) {
+        pillsBar.querySelectorAll('.cat-pill').forEach(pill => {
+            const filterVal = pill.getAttribute('data-filter');
+            if (filterVal === schedulesState.selectedFilter) {
+                pill.classList.add('active');
+            } else {
+                pill.classList.remove('active');
+            }
+        });
+    }
+}
+
+function renderScheduleCards() {
+    const grid = document.getElementById('schedules-grid');
+    const gridSection = document.getElementById('schedules-grid-section');
+    if (!grid || !gridSection) return;
+
+    const filter = schedulesState.selectedFilter;
+    const query = schedulesState.searchQuery.toLowerCase().trim();
+
+    // If RUNS filter is selected, hide active schedules section
+    if (filter === 'RUNS') {
+        gridSection.style.display = 'none';
+        return;
+    } else {
+        gridSection.style.display = 'block';
+    }
+
+    // Filter crons
+    const matchingCrons = (filter === 'ONE_SHOT') ? [] : schedulesState.crons.filter(c => {
+        if (!query) return true;
+        const title = (c.title_prefix || '').toLowerCase();
+        const expr = (c.cron_expr || '').toLowerCase();
+        const desc = (c.cron_description || '').toLowerCase();
+        const prompt = (c.prompt || '').toLowerCase();
+        const chan = (c.channel_id || c.target_id || '').toLowerCase();
+        const tz = (c.timezone || '').toLowerCase();
+        const id = (c.id || '').toLowerCase();
+        return title.includes(query) || expr.includes(query) || desc.includes(query) || prompt.includes(query) || chan.includes(query) || tz.includes(query) || id.includes(query);
+    });
+
+    // Filter one-shots
+    const matchingOneShots = (filter === 'CRON') ? [] : schedulesState.oneShots.filter(s => {
+        if (!query) return true;
+        const prompt = (s.prompt || '').toLowerCase();
+        const thread = (s.thread_id || '').toLowerCase();
+        const id = (s.id || '').toLowerCase();
+        return prompt.includes(query) || thread.includes(query) || id.includes(query);
+    });
+
+    schedulesState.filteredCrons = matchingCrons;
+    schedulesState.filteredOneShots = matchingOneShots;
+    const totalMatching = matchingCrons.length + matchingOneShots.length;
+
+    const counterEl = document.getElementById('schedules-results-count');
+    if (counterEl) {
+        const totalItems = schedulesState.crons.length + schedulesState.oneShots.length;
+        counterEl.textContent = `SHOWING ${totalMatching} / ${totalItems} ACTIVE ROUTINES`;
+    }
+
+    if (totalMatching === 0) {
+        grid.innerHTML = `
+            <div class="empty-state-box">
+                <div style="font-size: 1.6rem; margin-bottom: 0.6rem;">⏱</div>
+                <div style="font-weight: 700; color: #fff;">NO ACTIVE SCHEDULED ROUTINES MATCH CRITERIA</div>
+                <div style="font-size: 0.75rem; color: var(--text-dim); margin-top: 6px;">Try adjusting your keyword filter or switching category pills.</div>
+            </div>
+        `;
+        return;
+    }
+
+    let cardsHTML = '';
+
+    // Render Crons
+    matchingCrons.forEach((cron, idx) => {
+        const rawTitle = cron.title_prefix || 'RECURRING ROUTINE';
+        const highlightedTitle = query ? highlightSearch(rawTitle, query) : escapeHtml(rawTitle);
+        const rawPrompt = cron.prompt || '';
+        const highlightedPrompt = query ? highlightSearch(rawPrompt, query) : escapeHtml(rawPrompt);
+        const humanCron = cron.cron_description || formatCronExpression(cron.cron_expr, cron.timezone);
+        const countdown = formatCountdown(cron.next_run_at);
+        const targetId = cron.channel_id || cron.target_id || 'N/A';
+
+        cardsHTML += `
+            <div class="schedule-card cron-card">
+                <div class="schedule-card-header">
+                    <div class="schedule-badge-group">
+                        <span class="schedule-type-badge cron">⏰ CRON</span>
+                        <span class="schedule-tz-badge">${escapeHtml(cron.timezone || 'UTC')}</span>
+                    </div>
+                    <div class="schedule-status-group">
+                        <span class="pulse-dot ${cron.enabled ? 'healthy' : 'unhealthy'}" title="${cron.enabled ? 'Active & Enabled' : 'Disabled'}"></span>
+                        <span class="schedule-countdown-badge ${countdown.cssClass}" data-next-run="${escapeHtml(cron.next_run_at || '')}">${countdown.text}</span>
+                    </div>
+                </div>
+                <div class="schedule-title-bar">
+                    <h3 class="schedule-title">${highlightedTitle}</h3>
+                    <div class="schedule-cron-human">📅 ${escapeHtml(humanCron)}</div>
+                </div>
+                <div class="schedule-meta-bar">
+                    <span class="schedule-meta-item"><strong>CRON:</strong> <code>${escapeHtml(cron.cron_expr)}</code></span>
+                    <span class="schedule-meta-item"><strong>TARGET:</strong> <code>${escapeHtml(targetId)}</code></span>
+                </div>
+                <div class="schedule-prompt-wrap">
+                    <div class="schedule-prompt-header">
+                        <span class="prompt-lbl">PROMPT DIRECTIVE</span>
+                        <button class="prompt-copy-btn" onclick="copyCronPrompt(${idx}, this)" aria-label="Copy prompt text">📋 COPY</button>
+                    </div>
+                    <div class="schedule-prompt-body" id="cron-prompt-${idx}">
+                        ${highlightedPrompt}
+                    </div>
+                </div>
+                <div class="schedule-card-footer">
+                    <span>NEXT: ${formatTimestamp(cron.next_run_at)}</span>
+                    <span class="schedule-id-chip">ID: <code>${escapeHtml(cron.id)}</code></span>
+                </div>
+            </div>
+        `;
+    });
+
+    // Render One-Shots
+    matchingOneShots.forEach((s, idx) => {
+        const rawPrompt = s.prompt || '';
+        const highlightedPrompt = query ? highlightSearch(rawPrompt, query) : escapeHtml(rawPrompt);
+        const countdown = formatCountdown(s.run_at);
+        const threadId = s.thread_id || 'N/A';
+
+        let threadMarkup = `<code>${escapeHtml(threadId)}</code>`;
+        if (/^\d+$/.test(threadId.trim())) {
+            const safeThread = escapeHtml(threadId.trim());
+            threadMarkup = `<a href="/conversations/?thread=${safeThread}" class="schedule-thread-link" target="_blank" rel="noopener">#${safeThread.slice(0, 8)} ↗</a>`;
+        }
+
+        cardsHTML += `
+            <div class="schedule-card oneshot-card">
+                <div class="schedule-card-header">
+                    <div class="schedule-badge-group">
+                        <span class="schedule-type-badge oneshot">⚡ ONE-SHOT</span>
+                    </div>
+                    <div class="schedule-status-group">
+                        <span class="pulse-dot healthy" title="Pending execution"></span>
+                        <span class="schedule-countdown-badge ${countdown.cssClass}" data-next-run="${escapeHtml(s.run_at || '')}">${countdown.text}</span>
+                    </div>
+                </div>
+                <div class="schedule-title-bar">
+                    <h3 class="schedule-title">ONE-TIME REMINDER</h3>
+                    <div class="schedule-cron-human">🎯 Single Execution Timer</div>
+                </div>
+                <div class="schedule-meta-bar">
+                    <span class="schedule-meta-item"><strong>THREAD:</strong> ${threadMarkup}</span>
+                </div>
+                <div class="schedule-prompt-wrap">
+                    <div class="schedule-prompt-header">
+                        <span class="prompt-lbl">PROMPT DIRECTIVE</span>
+                        <button class="prompt-copy-btn" onclick="copyOneShotPrompt(${idx}, this)" aria-label="Copy prompt text">📋 COPY</button>
+                    </div>
+                    <div class="schedule-prompt-body" id="oneshot-prompt-${idx}">
+                        ${highlightedPrompt}
+                    </div>
+                </div>
+                <div class="schedule-card-footer">
+                    <span>RUN AT: ${formatTimestamp(s.run_at)}</span>
+                    <span class="schedule-id-chip">ID: <code>${escapeHtml(s.id)}</code></span>
+                </div>
+            </div>
+        `;
+    });
+
+    grid.innerHTML = cardsHTML;
+}
+
+function renderScheduleRuns() {
+    const feedContainer = document.getElementById('runs-feed-container');
+    const feedSection = document.getElementById('runs-feed-section');
+    const badgeEl = document.getElementById('runs-count-badge');
+    if (!feedContainer || !feedSection) return;
+
+    const filter = schedulesState.selectedFilter;
+    const query = schedulesState.searchQuery.toLowerCase().trim();
+
+    // In CRON or ONE_SHOT mode, hide runs feed to focus on active schedules
+    if (filter === 'CRON' || filter === 'ONE_SHOT') {
+        feedSection.style.display = 'none';
+        return;
+    } else {
+        feedSection.style.display = 'block';
+    }
+
+    const matchingRuns = schedulesState.runs.filter(r => {
+        if (!query) return true;
+        const p = (r.prompt || '').toLowerCase();
+        const t = (r.title || '').toLowerCase();
+        const sId = (r.schedule_id || '').toLowerCase();
+        const thId = (r.thread_id || '').toLowerCase();
+        const tgId = (r.target_id || '').toLowerCase();
+        const st = (r.status || '').toLowerCase();
+        const err = (r.error || '').toLowerCase();
+        return p.includes(query) || t.includes(query) || sId.includes(query) || thId.includes(query) || tgId.includes(query) || st.includes(query) || err.includes(query);
+    });
+
+    if (badgeEl) {
+        badgeEl.textContent = `${matchingRuns.length} RUNS`;
+    }
+
+    if (matchingRuns.length === 0) {
+        feedContainer.innerHTML = `
+            <div class="empty-state-box">
+                <div style="font-size: 1.6rem; margin-bottom: 0.6rem;">📋</div>
+                <div style="font-weight: 700; color: #fff;">NO RECENT EXECUTION RUNS</div>
+                <div style="font-size: 0.75rem; color: var(--text-dim); margin-top: 6px;">Schedule execution history and outcome logs will appear here.</div>
+            </div>
+        `;
+        return;
+    }
+
+    feedContainer.innerHTML = matchingRuns.map((run, idx) => {
+        const rawTitle = run.title || run.schedule_id || 'Schedule Run';
+        const highlightedTitle = query ? highlightSearch(rawTitle, query) : escapeHtml(rawTitle);
+        const rawPrompt = run.prompt || '';
+        const highlightedPrompt = query ? highlightSearch(rawPrompt, query) : escapeHtml(rawPrompt);
+        const rawError = run.error || '';
+        const highlightedError = query ? highlightSearch(rawError, query) : escapeHtml(rawError);
+
+        const statusLower = (run.status || 'unknown').toLowerCase();
+        let statusIcon = '✓';
+        let chipClass = 'chip-completed';
+        if (statusLower === 'running') {
+            statusIcon = '🔄';
+            chipClass = 'chip-running';
+        } else if (statusLower === 'enqueued') {
+            statusIcon = '⏳';
+            chipClass = 'chip-enqueued';
+        } else if (statusLower === 'failed') {
+            statusIcon = '🚨';
+            chipClass = 'chip-failed';
+        } else if (statusLower === 'completed' || statusLower === 'success') {
+            statusIcon = '⚡';
+            chipClass = 'chip-completed';
+        }
+
+        const durationStr = formatDuration(run.duration_ms);
+        const timeAgo = formatTimeAgo(run.started_at || run.triggered_at);
+
+        let threadMarkup = '';
+        if (run.thread_id && /^\d+$/.test(run.thread_id.trim())) {
+            const safeThread = escapeHtml(run.thread_id.trim());
+            threadMarkup = ` • <a href="/conversations/?thread=${safeThread}" class="run-thread-link" target="_blank" rel="noopener">THREAD #${safeThread.slice(0, 8)} ↗</a>`;
+        }
+
+        let errorBox = '';
+        if (run.error) {
+            errorBox = `
+                <div class="run-error-box">
+                    <span class="run-error-label">ERROR:</span>
+                    <span class="run-error-text">${highlightedError}</span>
+                </div>
+            `;
+        }
+
+        return `
+            <div class="run-card run-${escapeHtml(statusLower)}">
+                <div class="run-card-header">
+                    <div class="run-header-left">
+                        <span class="run-status-chip ${chipClass}">${statusIcon} ${escapeHtml(statusLower.toUpperCase())}</span>
+                        <span class="run-title">${highlightedTitle}</span>
+                        <span class="run-type-tag">${escapeHtml((run.schedule_type || 'cron').toUpperCase())}</span>
+                    </div>
+                    <div class="run-header-right">
+                        ${run.duration_ms ? `<span class="run-duration-badge">⏱ ${durationStr}</span>` : ''}
+                        <span class="run-time-badge">${timeAgo}</span>
+                    </div>
+                </div>
+                <div class="run-prompt-preview">
+                    <div class="run-prompt-text">${highlightedPrompt}</div>
+                    ${errorBox}
+                </div>
+                <div class="run-card-footer">
+                    <div class="run-meta-left">
+                        <span>TARGET: <code>${escapeHtml(run.target_id || run.thread_id || 'N/A')}</code>${threadMarkup}</span>
+                    </div>
+                    <div class="run-meta-right">
+                        <span>RUN ID: <code>${escapeHtml(String(run.id))}</code></span>
+                    </div>
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+function renderSchedulesSkeleton() {
+    const grid = document.getElementById('schedules-grid');
+    if (grid) {
+        grid.innerHTML = Array(4).fill(0).map(() => `
+            <div class="fact-card-skeleton">
+                <div class="skeleton-box" style="width: 40%; height: 18px;"></div>
+                <div class="skeleton-box" style="width: 100%; height: 60px; margin: 12px 0;"></div>
+                <div class="skeleton-box" style="width: 50%; height: 14px;"></div>
+            </div>
+        `).join('');
+    }
+}
+
+function renderSchedulesError(errMsg) {
+    const grid = document.getElementById('schedules-grid');
+    if (!grid) return;
+    grid.innerHTML = `
+        <div class="permet-alert-box">
+            <h3>⚡ PERMET LINK SEVERED // BRAIN OFFLINE</h3>
+            <p>${escapeHtml(errMsg)}</p>
+            <button class="cyber-btn-secondary" onclick="fetchSchedules(); fetchScheduleRuns();" style="margin: 0 auto;">
+                <span class="refresh-icon">⚡</span> RETRY SYNCHRONIZATION
+            </button>
+        </div>
+    `;
+}
+
+async function copyCronPrompt(index, btnElement) {
+    const cron = schedulesState.filteredCrons && schedulesState.filteredCrons[index];
+    if (!cron || !cron.prompt) return;
+    try {
+        await navigator.clipboard.writeText(cron.prompt);
+        btnElement.textContent = '✓ COPIED';
+        btnElement.classList.add('copied');
+        setTimeout(() => {
+            btnElement.textContent = '📋 COPY';
+            btnElement.classList.remove('copied');
+        }, 1800);
+    } catch (e) {
+        console.warn('Clipboard write failed:', e);
+    }
+}
+
+async function copyOneShotPrompt(index, btnElement) {
+    const oneshot = schedulesState.filteredOneShots && schedulesState.filteredOneShots[index];
+    if (!oneshot || !oneshot.prompt) return;
+    try {
+        await navigator.clipboard.writeText(oneshot.prompt);
+        btnElement.textContent = '✓ COPIED';
+        btnElement.classList.add('copied');
+        setTimeout(() => {
+            btnElement.textContent = '📋 COPY';
+            btnElement.classList.remove('copied');
+        }, 1800);
+    } catch (e) {
+        console.warn('Clipboard write failed:', e);
+    }
+}
+
+function startSchedulesTicker() {
+    if (schedulesTickerInterval) clearInterval(schedulesTickerInterval);
+
+    function tick() {
+        // 1. Update summary card next trigger
+        const nextTriggerEl = document.getElementById('schedules-next-trigger');
+        if (nextTriggerEl) {
+            let earliestTime = null;
+            if (schedulesState.summary && schedulesState.summary.next_run_at) {
+                earliestTime = schedulesState.summary.next_run_at;
+            } else {
+                const candidateTimes = [];
+                schedulesState.crons.forEach(c => { if (c.enabled && c.next_run_at) candidateTimes.push(c.next_run_at); });
+                schedulesState.oneShots.forEach(o => { if (o.run_at) candidateTimes.push(o.run_at); });
+                if (candidateTimes.length > 0) {
+                    candidateTimes.sort((a, b) => new Date(a).getTime() - new Date(b).getTime());
+                    earliestTime = candidateTimes[0];
+                }
+            }
+
+            if (earliestTime) {
+                const cd = formatCountdown(earliestTime);
+                nextTriggerEl.textContent = cd.text;
+                nextTriggerEl.className = `value ${cd.cssClass}`;
+            } else {
+                nextTriggerEl.textContent = 'NO UPCOMING';
+                nextTriggerEl.className = 'value';
+            }
+        }
+
+        // 2. Update individual card badges
+        const countdownEls = document.querySelectorAll('.schedule-countdown-badge[data-next-run]');
+        countdownEls.forEach(el => {
+            const dateStr = el.getAttribute('data-next-run');
+            if (!dateStr) return;
+            const cd = formatCountdown(dateStr);
+            el.textContent = cd.text;
+            el.className = `schedule-countdown-badge ${cd.cssClass}`;
+        });
+    }
+
+    tick();
+    schedulesTickerInterval = setInterval(tick, 1000);
+}
+
+function stopSchedulesTicker() {
+    if (schedulesTickerInterval) {
+        clearInterval(schedulesTickerInterval);
+        schedulesTickerInterval = null;
+    }
+}
+
+function setupSchedulesControls() {
+    const searchInput = document.getElementById('schedules-search-input');
+    const clearBtn = document.getElementById('schedules-search-clear');
+    const refreshBtn = document.getElementById('schedules-refresh-btn');
+    const pillsBar = document.getElementById('schedules-filter-pills');
+
+    let debounceTimer = null;
+    if (searchInput) {
+        searchInput.addEventListener('input', (e) => {
+            schedulesState.searchQuery = e.target.value;
+            if (clearBtn) clearBtn.style.display = schedulesState.searchQuery ? 'block' : 'none';
+            clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(() => {
+                renderScheduleCards();
+                renderScheduleRuns();
+            }, 150);
+        });
+    }
+
+    if (clearBtn) {
+        clearBtn.addEventListener('click', () => {
+            if (searchInput) searchInput.value = '';
+            schedulesState.searchQuery = '';
+            clearBtn.style.display = 'none';
+            renderScheduleCards();
+            renderScheduleRuns();
+            if (searchInput) searchInput.focus();
+        });
+    }
+
+    if (refreshBtn) {
+        refreshBtn.addEventListener('click', () => {
+            fetchSchedules();
+            fetchScheduleRuns();
+        });
+    }
+
+    if (pillsBar) {
+        pillsBar.querySelectorAll('.cat-pill').forEach(pill => {
+            pill.addEventListener('click', () => {
+                schedulesState.selectedFilter = pill.getAttribute('data-filter') || 'ALL';
+                renderSchedulePills();
+                renderScheduleCards();
+                renderScheduleRuns();
+            });
+        });
+    }
+}
+
+
+// ==========================================
+// DECLARATIVE MULTI-TAB SPA ROUTER
+// ==========================================
+let currentTabKey = null;
+
+const TABS = {
+    telemetry: {
+        btnId: 'tab-telemetry-btn',
+        viewId: 'telemetry-view',
+        hash: '#telemetry',
+        onEnter: () => {
+            fetchStatus();
+            if (!statusPollInterval) {
+                statusPollInterval = setInterval(fetchStatus, 5000);
+            }
+        },
+        onLeave: () => {
             if (statusPollInterval) {
                 clearInterval(statusPollInterval);
                 statusPollInterval = null;
             }
-
+        }
+    },
+    schedules: {
+        btnId: 'tab-schedules-btn',
+        viewId: 'schedules-view',
+        hash: '#schedules',
+        onEnter: () => {
+            fetchSchedules();
+            fetchScheduleRuns();
+            if (!schedulesPollInterval) {
+                schedulesPollInterval = setInterval(() => {
+                    fetchSchedules();
+                    fetchScheduleRuns();
+                }, 10000);
+            }
+            startSchedulesTicker();
+        },
+        onLeave: () => {
+            if (schedulesPollInterval) {
+                clearInterval(schedulesPollInterval);
+                schedulesPollInterval = null;
+            }
+            stopSchedulesTicker();
+        }
+    },
+    memory: {
+        btnId: 'tab-memory-btn',
+        viewId: 'memory-view',
+        hash: '#memory',
+        onEnter: () => {
             if (memoryState.facts.length === 0) {
                 fetchFacts();
             }
+        },
+        onLeave: () => {}
+    }
+};
+
+function navigateTab(tabKey) {
+    if (!TABS[tabKey]) {
+        tabKey = 'telemetry';
+    }
+
+    if (currentTabKey && currentTabKey !== tabKey && TABS[currentTabKey]) {
+        TABS[currentTabKey].onLeave();
+    }
+
+    currentTabKey = tabKey;
+
+    Object.keys(TABS).forEach(key => {
+        const tab = TABS[key];
+        const btn = document.getElementById(tab.btnId);
+        const view = document.getElementById(tab.viewId);
+
+        if (key === tabKey) {
+            if (btn) {
+                btn.classList.add('active');
+                btn.setAttribute('aria-selected', 'true');
+            }
+            if (view) {
+                view.classList.add('active');
+                view.style.display = 'block';
+            }
         } else {
-            if (memoryBtn) {
-                memoryBtn.classList.remove('active');
-                memoryBtn.setAttribute('aria-selected', 'false');
+            if (btn) {
+                btn.classList.remove('active');
+                btn.setAttribute('aria-selected', 'false');
             }
-            if (telemetryBtn) {
-                telemetryBtn.classList.add('active');
-                telemetryBtn.setAttribute('aria-selected', 'true');
+            if (view) {
+                view.classList.remove('active');
+                view.style.display = 'none';
             }
-            if (memoryView) memoryView.style.display = 'none';
-            if (telemetryView) telemetryView.style.display = 'block';
-
-            // Resume status polling
-            if (!statusPollInterval) {
-                fetchStatus();
-                statusPollInterval = setInterval(fetchStatus, 5000);
-            }
-        }
-    }
-
-    if (telemetryBtn) {
-        telemetryBtn.addEventListener('click', () => {
-            window.location.hash = '#telemetry';
-            switchView('telemetry');
-        });
-    }
-
-    if (memoryBtn) {
-        memoryBtn.addEventListener('click', () => {
-            window.location.hash = '#memory';
-            switchView('memory');
-        });
-    }
-
-    window.addEventListener('hashchange', () => {
-        if (window.location.hash === '#memory') {
-            switchView('memory');
-        } else {
-            switchView('telemetry');
         }
     });
 
-    // Check initial hash on load
-    if (window.location.hash === '#memory') {
-        switchView('memory');
-    } else {
-        switchView('telemetry');
+    if (window.location.hash !== TABS[tabKey].hash) {
+        window.location.hash = TABS[tabKey].hash;
     }
+
+    TABS[tabKey].onEnter();
+}
+
+function setupTabs() {
+    Object.keys(TABS).forEach(key => {
+        const tab = TABS[key];
+        const btn = document.getElementById(tab.btnId);
+        if (btn) {
+            btn.addEventListener('click', () => {
+                navigateTab(key);
+            });
+        }
+    });
+
+    window.addEventListener('hashchange', () => {
+        const hash = window.location.hash;
+        const matchingKey = Object.keys(TABS).find(k => TABS[k].hash === hash);
+        navigateTab(matchingKey || 'telemetry');
+    });
+
+    const initialHash = window.location.hash;
+    const initialKey = Object.keys(TABS).find(k => TABS[k].hash === initialHash);
+    navigateTab(initialKey || 'telemetry');
 }
 
 function setupMemoryControls() {
@@ -704,18 +1550,39 @@ function setupMemoryControls() {
     if (refreshBtn) {
         refreshBtn.addEventListener('click', fetchFacts);
     }
+}
 
+function setupGlobalKeyboardShortcuts() {
     window.addEventListener('keydown', (e) => {
-        if (e.key === '/' && document.activeElement !== searchInput && window.location.hash === '#memory') {
-            e.preventDefault();
-            if (searchInput) searchInput.focus();
+        const memorySearch = document.getElementById('memory-search-input');
+        const schedulesSearch = document.getElementById('schedules-search-input');
+
+        if (e.key === '/') {
+            if (currentTabKey === 'memory' && memorySearch && document.activeElement !== memorySearch) {
+                e.preventDefault();
+                memorySearch.focus();
+            } else if (currentTabKey === 'schedules' && schedulesSearch && document.activeElement !== schedulesSearch) {
+                e.preventDefault();
+                schedulesSearch.focus();
+            }
         }
-        if (e.key === 'Escape' && document.activeElement === searchInput) {
-            if (searchInput) searchInput.value = '';
-            memoryState.searchQuery = '';
-            if (clearBtn) clearBtn.style.display = 'none';
-            applyFilters();
-            if (searchInput) searchInput.blur();
+        if (e.key === 'Escape') {
+            if (currentTabKey === 'memory' && memorySearch && document.activeElement === memorySearch) {
+                memorySearch.value = '';
+                memoryState.searchQuery = '';
+                const clearBtn = document.getElementById('memory-search-clear');
+                if (clearBtn) clearBtn.style.display = 'none';
+                applyFilters();
+                memorySearch.blur();
+            } else if (currentTabKey === 'schedules' && schedulesSearch && document.activeElement === schedulesSearch) {
+                schedulesSearch.value = '';
+                schedulesState.searchQuery = '';
+                const clearBtn = document.getElementById('schedules-search-clear');
+                if (clearBtn) clearBtn.style.display = 'none';
+                renderScheduleCards();
+                renderScheduleRuns();
+                schedulesSearch.blur();
+            }
         }
     });
 }
@@ -723,4 +1590,7 @@ function setupMemoryControls() {
 // Initial bootstrap
 setupTabs();
 setupMemoryControls();
+setupSchedulesControls();
+setupGlobalKeyboardShortcuts();
 startLiveTimerLoop();
+
