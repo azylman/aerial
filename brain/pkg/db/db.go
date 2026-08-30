@@ -169,6 +169,8 @@ func InitDB(dbPath string) (*sql.DB, error) {
 	// Safe column migration for facts on existing DBs
 	_, _ = database.Exec(`ALTER TABLE facts ADD COLUMN thread_id TEXT NOT NULL DEFAULT '';`)
 	_, _ = database.Exec(`CREATE INDEX IF NOT EXISTS idx_facts_thread_id ON facts(thread_id);`)
+	_, _ = database.Exec(`CREATE INDEX IF NOT EXISTS idx_facts_category_created_at ON facts(category, created_at DESC);`)
+	_, _ = database.Exec(`CREATE INDEX IF NOT EXISTS idx_facts_created_at ON facts(created_at DESC);`)
 
 	// Safe column migrations for cron_schedules on existing DBs
 	_, _ = database.Exec(`ALTER TABLE cron_schedules ADD COLUMN title_prefix TEXT NOT NULL DEFAULT '';`)
@@ -810,3 +812,98 @@ func UpdateConversationFactExtractedAt(database *sql.DB, threadID string) error 
 	}
 	return nil
 }
+
+type FactsFilter struct {
+	Category string `json:"category"`
+	Query    string `json:"query"`
+	Limit    int    `json:"limit"`
+	Offset   int    `json:"offset"`
+}
+
+type FactsResult struct {
+	Facts  []Fact `json:"facts"`
+	Total  int    `json:"total"`
+	Limit  int    `json:"limit"`
+	Offset int    `json:"offset"`
+}
+
+// EscapeSQLLike escapes SQLite LIKE wildcards % and _
+func EscapeSQLLike(s string) string {
+	s = strings.ReplaceAll(s, "\\", "\\\\")
+	s = strings.ReplaceAll(s, "%", "\\%")
+	s = strings.ReplaceAll(s, "_", "\\_")
+	return s
+}
+
+// GetFactsPaginated queries facts with parameterized filtering, counting, and pagination.
+func GetFactsPaginated(database *sql.DB, filter FactsFilter) (*FactsResult, error) {
+	if database == nil {
+		return nil, fmt.Errorf("database is nil")
+	}
+
+	if filter.Limit <= 0 || filter.Limit > 100 {
+		filter.Limit = 50
+	}
+	if filter.Offset < 0 {
+		filter.Offset = 0
+	}
+
+	var whereClauses []string
+	var args []interface{}
+
+	if strings.TrimSpace(filter.Category) != "" {
+		whereClauses = append(whereClauses, "category = ?")
+		args = append(args, strings.TrimSpace(filter.Category))
+	}
+
+	if strings.TrimSpace(filter.Query) != "" {
+		escaped := EscapeSQLLike(strings.TrimSpace(filter.Query))
+		whereClauses = append(whereClauses, "fact_text LIKE ? ESCAPE '\\'")
+		args = append(args, "%"+escaped+"%")
+	}
+
+	whereSQL := ""
+	if len(whereClauses) > 0 {
+		whereSQL = " WHERE " + strings.Join(whereClauses, " AND ")
+	}
+
+	// 1. Get total matching count
+	countQuery := "SELECT COUNT(*) FROM facts" + whereSQL
+	var total int
+	if err := database.QueryRow(countQuery, args...).Scan(&total); err != nil {
+		return nil, fmt.Errorf("failed to count facts: %w", err)
+	}
+
+	// 2. Query paginated results (excluding embedding BLOB)
+	selectQuery := fmt.Sprintf(`
+		SELECT id, category, fact_text, importance, thread_id, created_at
+		FROM facts
+		%s
+		ORDER BY created_at DESC, id DESC
+		LIMIT ? OFFSET ?
+	`, whereSQL)
+
+	queryArgs := append(args, filter.Limit, filter.Offset)
+	rows, err := database.Query(selectQuery, queryArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query facts: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	facts := make([]Fact, 0)
+	for rows.Next() {
+		var f Fact
+		if err := rows.Scan(&f.ID, &f.Category, &f.FactText, &f.Importance, &f.ThreadID, &f.CreatedAt); err != nil {
+			return nil, fmt.Errorf("failed to scan fact: %w", err)
+		}
+		facts = append(facts, f)
+	}
+
+	return &FactsResult{
+		Facts:  facts,
+		Total:  total,
+		Limit:  filter.Limit,
+		Offset: filter.Offset,
+	}, nil
+}
+

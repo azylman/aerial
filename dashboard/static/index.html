@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AERIAL // SYSTEM COMMAND HUD v2.0</title>
-    <link rel="stylesheet" href="style.css?v=2.3">
+    <link rel="stylesheet" href="style.css?v=2.4">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Space+Grotesk:wght@500;700;800&display=swap" rel="stylesheet">
@@ -38,72 +38,141 @@
                 </div>
             </div>
 
-            <nav class="hud-nav">
-                <a href="/" class="nav-btn active">
+            <!-- NAVIGATION -->
+            <nav class="hud-nav" role="tablist">
+                <button class="nav-btn active" id="tab-telemetry-btn" role="tab" aria-selected="true" aria-controls="telemetry-view">
                     <span class="btn-glow"></span>
                     <span class="btn-text">⚡ TELEMETRY</span>
-                </a>
-                <a href="/conversations/" class="nav-btn highlight">
+                </button>
+                <button class="nav-btn" id="tab-memory-btn" role="tab" aria-selected="false" aria-controls="memory-view">
+                    <span class="btn-glow"></span>
+                    <span class="btn-text">🧠 MEMORY ARCHIVE</span>
+                </button>
+                <a href="/conversations/" class="nav-btn highlight" target="_blank" rel="noopener">
                     <span class="btn-glow"></span>
                     <span class="btn-text">💬 AGENTSVIEW</span>
                 </a>
             </nav>
         </header>
 
-        <!-- STATS / SUMMARY BAR -->
-        <section class="summary-bar">
-            <div class="summary-card">
-                <div class="card-glow"></div>
-                <span class="label">CLUSTER STATUS</span>
-                <span class="value text-success" id="overall-status">OPTIMAL</span>
-                <span class="sub-label" id="cluster-sub">100% OPERATIONAL</span>
-            </div>
-            <div class="summary-card">
-                <div class="card-glow"></div>
-                <span class="label">ACTIVE SERVICES</span>
-                <span class="value" id="active-count">10 / 10</span>
-                <span class="sub-label">STACK HEALTHY</span>
-            </div>
-            <div class="summary-card">
-                <div class="card-glow"></div>
-                <span class="label">REGION / TIMEZONE</span>
-                <span class="value">US-WEST</span>
-                <span class="sub-label">America/Los_Angeles</span>
-            </div>
-            <div class="summary-card">
-                <div class="card-glow"></div>
-                <span class="label">LAST SYNCHRONIZED</span>
-                <span class="value" id="last-refresh">--:--:--</span>
-                <span class="sub-label" id="refresh-interval">SYNCED (5s)</span>
-            </div>
-        </section>
-
-        <!-- LIVE DEPLOYMENT PIPELINE SECTION -->
-        <section class="deployment-pipeline-section">
-            <div class="section-title-bar">
-                <div class="section-title">
-                    <span class="title-icon">🚀</span>
-                    <h2>DEPLOYMENT PIPELINE</h2>
+        <!-- VIEW 1: TELEMETRY -->
+        <div id="telemetry-view" class="view-panel active" role="tabpanel">
+            <!-- STATS / SUMMARY BAR -->
+            <section class="summary-bar">
+                <div class="summary-card">
+                    <div class="card-glow"></div>
+                    <span class="label">CLUSTER STATUS</span>
+                    <span class="value text-success" id="overall-status">OPTIMAL</span>
+                    <span class="sub-label" id="cluster-sub">100% OPERATIONAL</span>
                 </div>
-                <span class="section-badge" id="deploy-count-badge">0 IN PROGRESS</span>
-            </div>
-            <div class="deployments-container" id="deployments-container">
-                <!-- Dynamically populated via app.js -->
-            </div>
-        </section>
-
-        <!-- SERVICES GRID -->
-        <main class="services-grid-section">
-            <div class="section-title-bar">
-                <div class="section-title">
-                    <span class="title-icon">⚡</span>
-                    <h2>ACTIVE STACK COMPONENTS</h2>
+                <div class="summary-card">
+                    <div class="card-glow"></div>
+                    <span class="label">ACTIVE SERVICES</span>
+                    <span class="value" id="active-count">10 / 10</span>
+                    <span class="sub-label">STACK HEALTHY</span>
                 </div>
+                <div class="summary-card">
+                    <div class="card-glow"></div>
+                    <span class="label">REGION / TIMEZONE</span>
+                    <span class="value">US-WEST</span>
+                    <span class="sub-label">America/Los_Angeles</span>
+                </div>
+                <div class="summary-card">
+                    <div class="card-glow"></div>
+                    <span class="label">LAST SYNCHRONIZED</span>
+                    <span class="value" id="last-refresh">--:--:--</span>
+                    <span class="sub-label" id="refresh-interval">SYNCED (5s)</span>
+                </div>
+            </section>
+
+            <!-- LIVE DEPLOYMENT PIPELINE SECTION -->
+            <section class="deployment-pipeline-section">
+                <div class="section-title-bar">
+                    <div class="section-title">
+                        <span class="title-icon">🚀</span>
+                        <h2>DEPLOYMENT PIPELINE</h2>
+                    </div>
+                    <span class="section-badge" id="deploy-count-badge">0 IN PROGRESS</span>
+                </div>
+                <div class="deployments-container" id="deployments-container">
+                    <!-- Dynamically populated via app.js -->
+                </div>
+            </section>
+
+            <!-- SERVICES GRID -->
+            <main class="services-grid-section">
+                <div class="section-title-bar">
+                    <div class="section-title">
+                        <span class="title-icon">⚡</span>
+                        <h2>ACTIVE STACK COMPONENTS</h2>
+                    </div>
+                </div>
+                <div class="services-grid" id="services-grid">
+                    <!-- Dynamically populated via app.js -->
+                </div>
+            </main>
+        </div>
+
+        <!-- VIEW 2: PERMET MEMORY ARCHIVE -->
+        <div id="memory-view" class="view-panel" role="tabpanel" style="display: none;">
+            <!-- MEMORY SUMMARY BAR -->
+            <section class="summary-bar">
+                <div class="summary-card">
+                    <div class="card-glow"></div>
+                    <span class="label">TOTAL MEMORY NODES</span>
+                    <span class="value" id="memory-total-count">--</span>
+                    <span class="sub-label" id="memory-category-count">-- CATEGORIES</span>
+                </div>
+                <div class="summary-card">
+                    <div class="card-glow"></div>
+                    <span class="label">PERMET SYNAPSE STORE</span>
+                    <span class="value text-success" id="memory-status-badge">OPTIMAL</span>
+                    <span class="sub-label" id="memory-last-sync">SYNCED</span>
+                </div>
+                <div class="summary-card">
+                    <div class="card-glow"></div>
+                    <span class="label">AVG IMPORTANCE WEIGHT</span>
+                    <span class="value" id="memory-avg-importance">--</span>
+                    <span class="sub-label">PERMET SCORE WEIGHT</span>
+                </div>
+                <div class="summary-card">
+                    <div class="card-glow"></div>
+                    <span class="label">VECTOR EMBEDDING MODEL</span>
+                    <span class="value">OLLAMA</span>
+                    <span class="sub-label">all-minilm:latest (384d)</span>
+                </div>
+            </section>
+
+            <!-- SEARCH & ACTIONS TOOLBAR -->
+            <section class="memory-toolbar-card">
+                <div class="toolbar-search-wrap">
+                    <span class="search-icon">🔍</span>
+                    <input type="text" id="memory-search-input" class="cyber-input" placeholder="SEARCH FACTS, CATEGORIES, OR THREAD IDs (PRESS '/' TO FOCUS)..." autocomplete="off" spellcheck="false">
+                    <button id="memory-search-clear" class="search-clear-btn" style="display: none;">&times;</button>
+                </div>
+                <div class="toolbar-actions">
+                    <button id="memory-refresh-btn" class="cyber-btn-secondary" title="Sync memory from brain">
+                        <span class="refresh-icon">⟳</span> SYNC ARCHIVE
+                    </button>
+                </div>
+            </section>
+
+            <!-- CATEGORY FILTER PILLS -->
+            <div class="category-pills-bar" id="category-pills-bar" role="toolbar" aria-label="Category Filters">
+                <button class="cat-pill active" data-category="ALL">ALL <span class="pill-count" id="pill-count-all">0</span></button>
             </div>
-            <div class="services-grid" id="services-grid">
-                <!-- Dynamically populated via app.js -->
+
+            <!-- RESULTS TELEMETRY BAR -->
+            <div class="results-telemetry-bar">
+                <span id="results-count-text">SHOWING 0 / 0 NODES</span>
+                <span class="telemetry-hint">PRESS [ESC] TO CLEAR SEARCH</span>
             </div>
-        </main>
+
+            <!-- FACTS GRID -->
+            <div class="memory-grid" id="memory-cards-grid" aria-live="polite">
+                <!-- Dynamically populated or skeleton loaded -->
+            </div>
+        </div>
     </div>
 
     <!-- DIAGNOSTIC DRAWER / CONSOLE SLIDE-OUT -->

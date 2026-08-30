@@ -536,3 +536,68 @@ func TestFileDBInitializationAndPragmas(t *testing.T) {
 		t.Errorf("Expected journal_mode=wal, got %s", journalMode)
 	}
 }
+
+func TestGetFactsPaginated(t *testing.T) {
+	database, err := InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize database: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	// Insert test facts
+	_, err = InsertFact(database, "user_preference", "User prefers dark mode UI", 0.95, "thread-1", []float32{0.1, 0.2})
+	if err != nil {
+		t.Fatalf("InsertFact 1 failed: %v", err)
+	}
+	_, err = InsertFact(database, "system_config", "Home Assistant token is active", 0.8, "thread-1", nil)
+	if err != nil {
+		t.Fatalf("InsertFact 2 failed: %v", err)
+	}
+	_, err = InsertFact(database, "user_preference", "User drinks green tea with 50% sugar", 0.7, "thread-2", nil)
+	if err != nil {
+		t.Fatalf("InsertFact 3 failed: %v", err)
+	}
+
+	// 1. Test pagination without filter
+	res, err := GetFactsPaginated(database, FactsFilter{Limit: 2, Offset: 0})
+	if err != nil {
+		t.Fatalf("GetFactsPaginated failed: %v", err)
+	}
+	if res.Total != 3 {
+		t.Errorf("Expected total 3, got %d", res.Total)
+	}
+	if len(res.Facts) != 2 {
+		t.Errorf("Expected 2 facts, got %d", len(res.Facts))
+	}
+
+	// 2. Test category filter
+	resCat, err := GetFactsPaginated(database, FactsFilter{Category: "user_preference", Limit: 10})
+	if err != nil {
+		t.Fatalf("GetFactsPaginated with category failed: %v", err)
+	}
+	if resCat.Total != 2 {
+		t.Errorf("Expected total 2 for user_preference, got %d", resCat.Total)
+	}
+
+	// 3. Test text search
+	resQuery, err := GetFactsPaginated(database, FactsFilter{Query: "dark mode", Limit: 10})
+	if err != nil {
+		t.Fatalf("GetFactsPaginated with query failed: %v", err)
+	}
+	if resQuery.Total != 1 {
+		t.Errorf("Expected total 1 for 'dark mode', got %d", resQuery.Total)
+	}
+	if len(resQuery.Facts) != 1 || resQuery.Facts[0].Category != "user_preference" {
+		t.Errorf("Unexpected fact retrieved: %+v", resQuery.Facts)
+	}
+
+	// 4. Test wildcard search safety (50% should not match 500)
+	resWildcard, err := GetFactsPaginated(database, FactsFilter{Query: "50%", Limit: 10})
+	if err != nil {
+		t.Fatalf("GetFactsPaginated with wildcard failed: %v", err)
+	}
+	if resWildcard.Total != 1 {
+		t.Errorf("Expected total 1 for literal '50%%', got %d", resWildcard.Total)
+	}
+}
+
