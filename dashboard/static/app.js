@@ -18,6 +18,49 @@ async function fetchStatus() {
         document.getElementById('last-refresh').textContent = new Date(data.system_time).toLocaleTimeString();
         document.getElementById('overall-status').textContent = escapeHtml(data.cluster_status.toUpperCase());
         
+        // --- 1. RENDER DEPLOYMENT PIPELINE ---
+        const deploysContainer = document.getElementById('deployments-container');
+        const deployBadge = document.getElementById('deploy-count-badge');
+        const deploys = data.deployments || [];
+
+        deployBadge.textContent = `${deploys.length} IN PROGRESS`;
+        deploysContainer.innerHTML = '';
+
+        if (deploys.length === 0) {
+            deploysContainer.innerHTML = `
+                <div class="deploy-idle-card">
+                    <div class="idle-indicator">
+                        <span class="pulse-dot healthy"></span>
+                        <span>SYSTEM IN SYNC // NO PENDING DEPLOYS</span>
+                    </div>
+                    <div>WATCHTOWER POLLING GHCR (60s)</div>
+                </div>
+            `;
+        } else {
+            deploys.forEach(dep => {
+                const card = document.createElement('div');
+                card.className = 'deploy-card';
+                card.innerHTML = `
+                    <div class="deploy-card-header">
+                        <div class="deploy-target">
+                            <span class="deploy-service-name">${escapeHtml(dep.service.toUpperCase())}</span>
+                            <span class="deploy-commit">${escapeHtml(dep.commit)}</span>
+                        </div>
+                        <span class="deploy-stage-badge">⚡ ${escapeHtml(dep.stage.toUpperCase())}</span>
+                    </div>
+                    <div class="deploy-progress-bg">
+                        <div class="deploy-progress-fill" style="width: ${dep.progress}%;"></div>
+                    </div>
+                    <div class="deploy-footer">
+                        <span>STAGE: ${escapeHtml(dep.stage.toUpperCase())} (${dep.progress}%)</span>
+                        <span>STARTED: ${new Date(dep.started_at).toLocaleTimeString()}</span>
+                    </div>
+                `;
+                deploysContainer.appendChild(card);
+            });
+        }
+
+        // --- 2. RENDER SERVICES GRID ---
         activeServicesCache = data.services || [];
         const grid = document.getElementById('services-grid');
         grid.innerHTML = '';
