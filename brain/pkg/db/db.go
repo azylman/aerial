@@ -101,6 +101,8 @@ func InitDB(dbPath string) (*sql.DB, error) {
 	CREATE TABLE IF NOT EXISTS sessions (
 		thread_id TEXT PRIMARY KEY,
 		internal_session_id TEXT NOT NULL,
+		last_extracted_rowid INTEGER NOT NULL DEFAULT 0,
+		fact_extracted_at DATETIME,
 		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 		updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 	);
@@ -160,10 +162,15 @@ func InitDB(dbPath string) (*sql.DB, error) {
 	_, _ = database.Exec(`ALTER TABLE messages ADD COLUMN error_message TEXT;`)
 	_, _ = database.Exec(`ALTER TABLE messages ADD COLUMN response_text TEXT;`)
 
+	// Safe column migrations for sessions on existing DBs
+	_, _ = database.Exec(`ALTER TABLE sessions ADD COLUMN last_extracted_rowid INTEGER NOT NULL DEFAULT 0;`)
+	_, _ = database.Exec(`ALTER TABLE sessions ADD COLUMN fact_extracted_at DATETIME;`)
+
 	// Create indices after migrations
 	indices := `
 	CREATE INDEX IF NOT EXISTS idx_messages_thread_status ON messages(thread_id, status);
 	CREATE INDEX IF NOT EXISTS idx_messages_status ON messages(status);
+	CREATE INDEX IF NOT EXISTS idx_sessions_fact_extracted ON sessions(last_extracted_rowid, fact_extracted_at);
 	CREATE INDEX IF NOT EXISTS idx_conversations_internal_id ON conversations(internal_id);
 	CREATE INDEX IF NOT EXISTS idx_one_shot_schedules_run_at ON one_shot_schedules(run_at);
 	CREATE INDEX IF NOT EXISTS idx_cron_schedules_next_run_at ON cron_schedules(enabled, next_run_at);
@@ -877,6 +884,60 @@ func GetAllFactsWithEmbeddings(database *sql.DB) ([]FactWithEmbedding, error) {
 	return results, nil
 }
 
+func GetFactsByThreadWithEmbeddings(database *sql.DB, threadID string) ([]FactWithEmbedding, error) {
+	if database == nil {
+		return nil, nil
+	}
+	query := `SELECT id, category, fact_text, importance, thread_id, embedding, created_at FROM facts`
+	var rows *sql.Rows
+	var err error
+	if threadID != "" {
+		query += ` WHERE thread_id = ?`
+		rows, err = database.Query(query, threadID)
+	} else {
+		rows, err = database.Query(query)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var results []FactWithEmbedding
+	for rows.Next() {
+		var f Fact
+		var embBytes []byte
+		if err := rows.Scan(&f.ID, &f.Category, &f.FactText, &f.Importance, &f.ThreadID, &embBytes, &f.CreatedAt); err != nil {
+			return nil, err
+		}
+		var emb []float32
+		if len(embBytes) > 0 {
+			emb = BytesToFloat32(embBytes)
+		}
+		results = append(results, FactWithEmbedding{
+			Fact:      f,
+			Embedding: emb,
+		})
+	}
+	return results, nil
+}
+
+// GetMaxMessageRowID returns the maximum rowid for COMPLETED messages in the specified thread.
+func GetMaxMessageRowID(database *sql.DB, threadID string) (int64, error) {
+	if database == nil || threadID == "" {
+		return 0, nil
+	}
+	var maxRowID sql.NullInt64
+	query := `SELECT MAX(rowid) FROM messages WHERE thread_id = ? AND status = 'COMPLETED'`
+	err := database.QueryRow(query, threadID).Scan(&maxRowID)
+	if err != nil && err != sql.ErrNoRows {
+		return 0, err
+	}
+	if maxRowID.Valid {
+		return maxRowID.Int64, nil
+	}
+	return 0, nil
+}
+
 func GetActiveConversationsForExtraction(database *sql.DB, activeHours int) ([]string, error) {
 	if database == nil {
 		return nil, nil
@@ -885,10 +946,17 @@ func GetActiveConversationsForExtraction(database *sql.DB, activeHours int) ([]s
 		activeHours = 24
 	}
 	cutoff := time.Now().UTC().Add(-time.Duration(activeHours) * time.Hour)
+	// Select threads with completed messages in the active window where messages exist newer than the watermark
 	query := `
-	SELECT DISTINCT thread_id
-	FROM messages
-	WHERE created_at >= ?
+	SELECT DISTINCT m.thread_id
+	FROM messages m
+	LEFT JOIN sessions s ON m.thread_id = s.thread_id
+	WHERE m.thread_id != ''
+	  AND m.created_at >= ?
+	  AND m.status = 'COMPLETED'
+	  AND (s.last_extracted_rowid IS NULL OR m.rowid > s.last_extracted_rowid)
+	ORDER BY m.created_at DESC
+	LIMIT 20
 	`
 	rows, err := database.Query(query, cutoff)
 	if err != nil {
@@ -909,11 +977,26 @@ func GetActiveConversationsForExtraction(database *sql.DB, activeHours int) ([]s
 	return tids, nil
 }
 
-func UpdateConversationFactExtractedAt(database *sql.DB, threadID string) error {
+func UpdateConversationFactWatermark(database *sql.DB, threadID string, maxRowID int64) error {
 	if database == nil || threadID == "" {
 		return nil
 	}
-	return nil
+	now := time.Now().UTC()
+	query := `
+	INSERT INTO sessions (thread_id, internal_session_id, last_extracted_rowid, fact_extracted_at, created_at, updated_at)
+	VALUES (?, '', ?, ?, ?, ?)
+	ON CONFLICT(thread_id) DO UPDATE SET
+		last_extracted_rowid = CASE WHEN excluded.last_extracted_rowid > sessions.last_extracted_rowid THEN excluded.last_extracted_rowid ELSE sessions.last_extracted_rowid END,
+		fact_extracted_at = excluded.fact_extracted_at,
+		updated_at = excluded.updated_at
+	`
+	_, err := database.Exec(query, threadID, maxRowID, now, now, now)
+	return err
+}
+
+func UpdateConversationFactExtractedAt(database *sql.DB, threadID string) error {
+	maxRowID, _ := GetMaxMessageRowID(database, threadID)
+	return UpdateConversationFactWatermark(database, threadID, maxRowID)
 }
 
 type FactsFilter struct {

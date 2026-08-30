@@ -706,3 +706,61 @@ func TestGetActiveRecentThreadIDs(t *testing.T) {
 	}
 }
 
+func TestFactExtractionWatermarkAndFiltering(t *testing.T) {
+	database, err := InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to init DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	now := time.Now().UTC()
+	// Insert completed message in thread-1
+	_ = InsertMessage(database, Message{
+		ID: "m1", ThreadID: "thread-1", Status: StatusCompleted, CreatedAt: now, UpdatedAt: now,
+	})
+
+	// 1. Thread-1 should be eligible for extraction
+	tids, err := GetActiveConversationsForExtraction(database, 12)
+	if err != nil {
+		t.Fatalf("GetActiveConversationsForExtraction failed: %v", err)
+	}
+	if len(tids) != 1 || tids[0] != "thread-1" {
+		t.Fatalf("Expected thread-1 to be eligible, got %v", tids)
+	}
+
+	maxRowID, err := GetMaxMessageRowID(database, "thread-1")
+	if err != nil || maxRowID == 0 {
+		t.Fatalf("Expected valid maxRowID > 0, got %d, err=%v", maxRowID, err)
+	}
+
+	// 2. Advance watermark for thread-1
+	err = UpdateConversationFactWatermark(database, "thread-1", maxRowID)
+	if err != nil {
+		t.Fatalf("UpdateConversationFactWatermark failed: %v", err)
+	}
+
+	// 3. Thread-1 should now be skipped (watermarked)
+	tids, err = GetActiveConversationsForExtraction(database, 12)
+	if err != nil {
+		t.Fatalf("GetActiveConversationsForExtraction failed: %v", err)
+	}
+	if len(tids) != 0 {
+		t.Fatalf("Expected 0 eligible threads after watermark advance, got %v", tids)
+	}
+
+	// 4. Insert new completed message in thread-1
+	_ = InsertMessage(database, Message{
+		ID: "m2", ThreadID: "thread-1", Status: StatusCompleted, CreatedAt: now.Add(time.Minute), UpdatedAt: now.Add(time.Minute),
+	})
+
+	// 5. Thread-1 should become eligible again
+	tids, err = GetActiveConversationsForExtraction(database, 12)
+	if err != nil {
+		t.Fatalf("GetActiveConversationsForExtraction failed: %v", err)
+	}
+	if len(tids) != 1 || tids[0] != "thread-1" {
+		t.Fatalf("Expected thread-1 to be eligible after new message, got %v", tids)
+	}
+}
+
+

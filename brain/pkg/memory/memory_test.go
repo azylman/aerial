@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -187,3 +189,69 @@ func TestDBFactInsertionAndRetrieval(t *testing.T) {
 		t.Errorf("embedding mismatch: %v", facts[0].Embedding)
 	}
 }
+
+func TestProcessThreadFactsDeduplicationAndWatermark(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("failed to init db: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(EmbeddingResponse{
+			Embedding: []float32{1.0, 0.0, 0.0},
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL)
+
+	// Mock LLM function returning the same fact
+	llmFunc := func(ctx context.Context, prompt string) (string, error) {
+		return `{"facts":[{"category":"user_pref","fact_text":"User likes matcha","importance_score":1.0}]}`, nil
+	}
+
+	now := time.Now().UTC()
+	_ = db.InsertMessage(database, db.Message{
+		ID: "m1", ThreadID: "thread-test-1", Status: db.StatusCompleted, CreatedAt: now, UpdatedAt: now,
+	})
+
+	// Pre-insert an existing identical/similar fact with same vector
+	_, _ = db.InsertFact(database, "user_pref", "User likes matcha", 1.0, "thread-test-1", []float32{1.0, 0.0, 0.0})
+
+	// Create a dummy transcript file for thread-test-1
+	homeDir, _ := os.UserHomeDir()
+	if homeDir == "" {
+		homeDir = "/root"
+	}
+	logDir := filepath.Join(homeDir, ".gemini", "antigravity", "brain", "thread-test-1", ".system_generated", "logs")
+	_ = os.MkdirAll(logDir, 0755)
+	_ = os.WriteFile(filepath.Join(logDir, "transcript.jsonl"), []byte("{\"step\":1,\"content\":\"User likes matcha\"}\n"), 0644)
+	defer os.RemoveAll(filepath.Join(homeDir, ".gemini", "antigravity", "brain", "thread-test-1"))
+
+	ctx := context.Background()
+	err = processThreadFacts(ctx, database, client, llmFunc, "thread-test-1")
+	if err != nil {
+		t.Fatalf("processThreadFacts failed: %v", err)
+	}
+
+	// Verify that duplicate fact was NOT inserted (count remains 1)
+	facts, err := db.GetFactsByThreadWithEmbeddings(database, "thread-test-1")
+	if err != nil {
+		t.Fatalf("GetFactsByThreadWithEmbeddings failed: %v", err)
+	}
+	if len(facts) != 1 {
+		t.Fatalf("Expected exactly 1 fact due to semantic deduplication, got %d", len(facts))
+	}
+
+	// Verify watermark was updated and thread is no longer eligible for extraction
+	eligible, err := db.GetActiveConversationsForExtraction(database, 12)
+	if err != nil {
+		t.Fatalf("GetActiveConversationsForExtraction failed: %v", err)
+	}
+	if len(eligible) != 0 {
+		t.Fatalf("Expected 0 eligible threads after extraction watermark, got %v", eligible)
+	}
+}
+
