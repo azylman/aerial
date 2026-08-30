@@ -1,0 +1,77 @@
+name: Continuous Integration & Delivery
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    name: Build & Publish Containers to GHCR
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: brain
+            context: .
+            dockerfile: brain/Dockerfile
+            image: ghcr.io/${{ github.repository_owner }}/aerial-brain
+          - name: scheduler-mcp
+            context: ./scheduler-mcp
+            dockerfile: ./scheduler-mcp/Dockerfile
+            image: ghcr.io/${{ github.repository_owner }}/aerial-scheduler-mcp
+          - name: discord-mcp
+            context: ./discord-mcp
+            dockerfile: ./discord-mcp/Dockerfile
+            image: ghcr.io/${{ github.repository_owner }}/aerial-discord-mcp
+          - name: docker-mcp
+            context: ./docker-mcp
+            dockerfile: ./docker-mcp/Dockerfile
+            image: ghcr.io/${{ github.repository_owner }}/aerial-docker-mcp
+          - name: github-mcp
+            context: ./github-mcp
+            dockerfile: ./github-mcp/Dockerfile
+            image: ghcr.io/${{ github.repository_owner }}/aerial-github-mcp
+          - name: dashboard
+            context: ./dashboard
+            dockerfile: ./dashboard/Dockerfile
+            image: ghcr.io/${{ github.repository_owner }}/aerial-dashboard
+          - name: proxy
+            context: ./proxy
+            dockerfile: ./proxy/Dockerfile
+            image: ghcr.io/${{ github.repository_owner }}/aerial-proxy
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and Push Docker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ${{ matrix.image }}:latest
+            ${{ matrix.image }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
