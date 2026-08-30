@@ -625,6 +625,92 @@ func parseMatrixJobChips(jobs []GitHubJob) []MatrixJobChip {
 	return chips
 }
 
+func getContainerCommit(containers []DockerContainerJSON) string {
+	for _, c := range containers {
+		if rev, ok := c.Labels["org.opencontainers.image.revision"]; ok && rev != "" {
+			if len(rev) > 7 {
+				return rev[:7]
+			}
+			return rev
+		}
+		if rev, ok := c.Labels["aerial.commit_sha"]; ok && rev != "" {
+			if len(rev) > 7 {
+				return rev[:7]
+			}
+			return rev
+		}
+		if rev, ok := c.Labels["vcs-ref"]; ok && rev != "" {
+			if len(rev) > 7 {
+				return rev[:7]
+			}
+			return rev
+		}
+	}
+	return ""
+}
+
+func formatUptimeString(sec int) string {
+	if sec < 60 {
+		return fmt.Sprintf("%ds", sec)
+	}
+	if sec < 3600 {
+		return fmt.Sprintf("%dm", sec/60)
+	}
+	return fmt.Sprintf("%dh", sec/3600)
+}
+
+func buildContainerChips(rawContainers []DockerContainerJSON) []MatrixJobChip {
+	var chips []MatrixJobChip
+	now := time.Now().UTC()
+	seen := make(map[string]bool)
+
+	for _, c := range rawContainers {
+		isAerial := false
+		var svcName string
+
+		if proj, ok := c.Labels["com.docker.compose.project"]; ok && proj == "aerial" {
+			isAerial = true
+			svcName = c.Labels["com.docker.compose.service"]
+		} else if len(c.Names) > 0 {
+			name := strings.TrimPrefix(c.Names[0], "/")
+			if strings.HasPrefix(name, "aerial-") {
+				isAerial = true
+				svcName = strings.TrimPrefix(name, "aerial-")
+			}
+		}
+
+		if !isAerial || svcName == "" || seen[svcName] {
+			continue
+		}
+		seen[svcName] = true
+
+		status := "completed"
+		conclusion := "success"
+		if c.Health != nil && c.Health.Status == "starting" {
+			status = "active"
+			conclusion = ""
+		} else if c.State != "running" || (c.Health != nil && c.Health.Status == "unhealthy") {
+			status = "failed"
+			conclusion = "failure"
+		}
+
+		createdAt := time.Unix(c.Created, 0).UTC()
+		durSec := int(now.Sub(createdAt).Seconds())
+		if durSec < 0 {
+			durSec = 0
+		}
+		durStr := formatUptimeString(durSec)
+
+		chips = append(chips, MatrixJobChip{
+			Name:       svcName,
+			Status:     status,
+			Conclusion: conclusion,
+			Duration:   durStr,
+		})
+	}
+	return chips
+}
+
 func mergeClusterDeployments(
 	rawContainers []DockerContainerJSON,
 	runs []GitHubRun,
@@ -649,18 +735,16 @@ func mergeClusterDeployments(
 		runJobs := jobs[latestRun.ID]
 		matrixChips := parseMatrixJobChips(runJobs)
 
+		// State 1 & 2: CI Queued or In Progress
 		if latestRun.Status == "queued" || latestRun.Status == "in_progress" {
 			stage := "building"
-			progress := 35
+			progress := 25
 			ciStatus := "active"
 			if latestRun.Status == "queued" {
 				stage = "queued"
 				progress = 15
 				ciStatus = "pending"
-			}
-
-			// Calculate progress based on matrix chips
-			if len(matrixChips) > 0 {
+			} else if len(matrixChips) > 0 {
 				doneCount := 0
 				for _, c := range matrixChips {
 					if c.Status == "completed" {
@@ -691,6 +775,7 @@ func mergeClusterDeployments(
 			return deployments
 		}
 
+		// State 3: CI Failed within last 30 minutes
 		if latestRun.Conclusion == "failure" && time.Since(latestRun.UpdatedAt) < 30*time.Minute {
 			deployments = append(deployments, DeploymentStatus{
 				ID:        fmt.Sprintf("gh-run-%d", latestRun.ID),
@@ -712,9 +797,77 @@ func mergeClusterDeployments(
 			})
 			return deployments
 		}
+
+		// State 4: CI Succeeded, check if containers have pulled/swapped or if in awaiting_pull / timeout
+		if latestRun.Conclusion == "success" && time.Since(latestRun.UpdatedAt) < 30*time.Minute {
+			ciElapsed := time.Since(latestRun.UpdatedAt)
+
+			// Check if any container was created after or around the CI run
+			hasRecentContainerSwap := false
+			for _, c := range rawContainers {
+				createdAt := time.Unix(c.Created, 0).UTC()
+				if createdAt.After(latestRun.CreatedAt.Add(-30*time.Second)) || (c.Health != nil && c.Health.Status == "starting") {
+					hasRecentContainerSwap = true
+					break
+				}
+			}
+
+			if !hasRecentContainerSwap {
+				// If within 120s Watchtower polling window -> awaiting_pull
+				if ciElapsed <= 120*time.Second {
+					deployments = append(deployments, DeploymentStatus{
+						ID:        fmt.Sprintf("gh-run-%d", latestRun.ID),
+						Service:   "aerial-stack",
+						Commit:    shortSHA,
+						CommitMsg: commitMsg,
+						Stage:     "awaiting_pull",
+						Progress:  55,
+						HTMLURL:   latestRun.HTMLURL,
+						Steps: []DeploymentStep{
+							{Name: "Commit Trigger", Icon: "📦", Status: "completed"},
+							{Name: "CI Build & GHCR", Icon: "⚙️", Status: "completed"},
+							{Name: "Watchtower Pull", Icon: "⬇️", Status: "active"},
+							{Name: "Container Swap", Icon: "🔄", Status: "pending"},
+							{Name: "Health Check", Icon: "🩺", Status: "pending"},
+						},
+						MatrixJobs: matrixChips,
+						StartedAt:  latestRun.CreatedAt,
+					})
+					return deployments
+				}
+
+				// If exceeded 120s without any container updating -> Watchtower pull timeout failure!
+				deployments = append(deployments, DeploymentStatus{
+					ID:        fmt.Sprintf("gh-run-%d", latestRun.ID),
+					Service:   "aerial-stack",
+					Commit:    shortSHA,
+					CommitMsg: "Watchtower pull timed out (>120s)",
+					Stage:     "failed",
+					Progress:  55,
+					HTMLURL:   latestRun.HTMLURL,
+					Steps: []DeploymentStep{
+						{Name: "Commit Trigger", Icon: "📦", Status: "completed"},
+						{Name: "CI Build & GHCR", Icon: "⚙️", Status: "completed"},
+						{Name: "Watchtower Pull", Icon: "⬇️", Status: "failed"},
+						{Name: "Container Swap", Icon: "🔄", Status: "pending"},
+						{Name: "Health Check", Icon: "🩺", Status: "pending"},
+					},
+					MatrixJobs: matrixChips,
+					StartedAt:  latestRun.CreatedAt,
+				})
+				return deployments
+			}
+		}
 	}
 
-	// 2. Check for Local Containers recently deployed/restarted (< 20 mins)
+	// 2. Check for Local Containers (States 5, 6, 7: Swapping, Degraded, Synced Grace, or Idle)
+	var aerialContainers []DockerContainerJSON
+	var latestCreatedAt time.Time
+	minUptimeSec := int64(999999999)
+	hasStarting := false
+	hasDegraded := false
+	healthyCount := 0
+
 	for _, c := range rawContainers {
 		isAerial := false
 		var svcName string
@@ -734,47 +887,112 @@ func mergeClusterDeployments(
 			continue
 		}
 
+		aerialContainers = append(aerialContainers, c)
 		createdAt := time.Unix(c.Created, 0).UTC()
+		if createdAt.After(latestCreatedAt) {
+			latestCreatedAt = createdAt
+		}
+
 		uptimeSec := int64(now.Sub(createdAt).Seconds())
 		if uptimeSec < 0 {
 			uptimeSec = 0
 		}
+		if uptimeSec < minUptimeSec {
+			minUptimeSec = uptimeSec
+		}
 
-		if uptimeSec < 1200 {
-			stage := "live"
-			progress := 100
-			stepStatus := "completed"
-			healthStatus := "completed"
-
-			if c.Health != nil && c.Health.Status == "starting" {
-				stage = "swapping"
-				progress = 85
-				stepStatus = "completed"
-				healthStatus = "active"
-			} else if c.State != "running" || (c.Health != nil && c.Health.Status == "unhealthy") {
-				stage = "degraded"
-				progress = 85
-				healthStatus = "pending"
-			}
-
-			deployments = append(deployments, DeploymentStatus{
-				ID:        "dep-" + svcName,
-				Service:   svcName,
-				Commit:    currentCommit,
-				Stage:     stage,
-				Progress:  progress,
-				StartedAt: createdAt,
-				Steps: []DeploymentStep{
-					{Name: "Commit Trigger", Icon: "📦", Status: "completed"},
-					{Name: "CI Build & GHCR", Icon: "⚙️", Status: "completed"},
-					{Name: "Watchtower Pull", Icon: "⬇️", Status: "completed"},
-					{Name: "Container Swap", Icon: "🔄", Status: stepStatus},
-					{Name: "Health Check", Icon: "🩺", Status: healthStatus},
-				},
-			})
+		if c.Health != nil && c.Health.Status == "starting" {
+			hasStarting = true
+		} else if c.State != "running" || (c.Health != nil && c.Health.Status == "unhealthy") {
+			hasDegraded = true
+		} else {
+			healthyCount++
 		}
 	}
 
+	if len(aerialContainers) == 0 {
+		return deployments
+	}
+
+	// Resolve commit SHA from container labels or fallback to currentCommit
+	resolvedCommit := getContainerCommit(aerialContainers)
+	if resolvedCommit == "" {
+		resolvedCommit = currentCommit
+	}
+	if len(resolvedCommit) > 7 {
+		resolvedCommit = resolvedCommit[:7]
+	}
+
+	containerChips := buildContainerChips(aerialContainers)
+
+	// State: Degraded
+	if hasDegraded {
+		deployments = append(deployments, DeploymentStatus{
+			ID:        "dep-aerial-stack",
+			Service:   "aerial-stack",
+			Commit:    resolvedCommit,
+			Stage:     "degraded",
+			Progress:  85,
+			StartedAt: latestCreatedAt,
+			Steps: []DeploymentStep{
+				{Name: "Commit Trigger", Icon: "📦", Status: "completed"},
+				{Name: "CI Build & GHCR", Icon: "⚙️", Status: "completed"},
+				{Name: "Watchtower Pull", Icon: "⬇️", Status: "completed"},
+				{Name: "Container Swap", Icon: "🔄", Status: "completed"},
+				{Name: "Health Check", Icon: "🩺", Status: "failed"},
+			},
+			MatrixJobs: containerChips,
+		})
+		return deployments
+	}
+
+	// State 5: Rolling Swap
+	if hasStarting || minUptimeSec < 120 {
+		progress := 60
+		if len(aerialContainers) > 0 {
+			progress = 60 + int(float64(healthyCount)/float64(len(aerialContainers))*25)
+		}
+		deployments = append(deployments, DeploymentStatus{
+			ID:        "dep-aerial-stack",
+			Service:   "aerial-stack",
+			Commit:    resolvedCommit,
+			Stage:     "swapping",
+			Progress:  progress,
+			StartedAt: latestCreatedAt,
+			Steps: []DeploymentStep{
+				{Name: "Commit Trigger", Icon: "📦", Status: "completed"},
+				{Name: "CI Build & GHCR", Icon: "⚙️", Status: "completed"},
+				{Name: "Watchtower Pull", Icon: "⬇️", Status: "completed"},
+				{Name: "Container Swap", Icon: "🔄", Status: "active"},
+				{Name: "Health Check", Icon: "🩺", Status: "active"},
+			},
+			MatrixJobs: containerChips,
+		})
+		return deployments
+	}
+
+	// State 6: Synced Grace (< 600s / 10 minutes)
+	if minUptimeSec < 600 {
+		deployments = append(deployments, DeploymentStatus{
+			ID:        "dep-aerial-stack",
+			Service:   "aerial-stack",
+			Commit:    resolvedCommit,
+			Stage:     "live",
+			Progress:  100,
+			StartedAt: latestCreatedAt,
+			Steps: []DeploymentStep{
+				{Name: "Commit Trigger", Icon: "📦", Status: "completed"},
+				{Name: "CI Build & GHCR", Icon: "⚙️", Status: "completed"},
+				{Name: "Watchtower Pull", Icon: "⬇️", Status: "completed"},
+				{Name: "Container Swap", Icon: "🔄", Status: "completed"},
+				{Name: "Health Check", Icon: "🩺", Status: "completed"},
+			},
+			MatrixJobs: containerChips,
+		})
+		return deployments
+	}
+
+	// State 7: Idle (all containers > 10m uptime, return empty slice)
 	return deployments
 }
 

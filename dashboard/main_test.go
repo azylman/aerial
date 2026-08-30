@@ -369,6 +369,231 @@ func TestMergeClusterDeployments_FailedCIRun(t *testing.T) {
 	}
 }
 
+func TestMergeClusterDeployments_AwaitingWatchtowerPull(t *testing.T) {
+	now := time.Now().UTC()
+	runs := []GitHubRun{
+		{
+			ID:         483,
+			Name:       "Continuous Delivery",
+			HeadSHA:    "def5678901",
+			Status:     "completed",
+			Conclusion: "success",
+			CreatedAt:  now.Add(-4 * time.Minute),
+			UpdatedAt:  now.Add(-45 * time.Second), // <= 120s
+			HTMLURL:    "https://github.com/azylman/aerial/actions/runs/483",
+		},
+	}
+
+	// Local containers running older version (created 10 hours ago)
+	containers := []DockerContainerJSON{
+		{
+			ID:      "c1",
+			Names:   []string{"/aerial-brain"},
+			State:   "running",
+			Created: now.Add(-10 * time.Hour).Unix(),
+			Labels:  map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"},
+		},
+	}
+
+	deploys := mergeClusterDeployments(containers, runs, nil, "old1234")
+	if len(deploys) != 1 {
+		t.Fatalf("expected 1 deployment in awaiting_pull stage, got %d", len(deploys))
+	}
+
+	dep := deploys[0]
+	if dep.Stage != "awaiting_pull" {
+		t.Errorf("expected stage 'awaiting_pull', got %s", dep.Stage)
+	}
+	if dep.Steps[2].Status != "active" {
+		t.Errorf("expected Watchtower Pull step status 'active', got %s", dep.Steps[2].Status)
+	}
+}
+
+func TestMergeClusterDeployments_WatchtowerPullTimeout(t *testing.T) {
+	now := time.Now().UTC()
+	runs := []GitHubRun{
+		{
+			ID:         484,
+			Name:       "Continuous Delivery",
+			HeadSHA:    "timeout1234",
+			Status:     "completed",
+			Conclusion: "success",
+			CreatedAt:  now.Add(-10 * time.Minute),
+			UpdatedAt:  now.Add(-150 * time.Second), // > 120s timeout
+			HTMLURL:    "https://github.com/azylman/aerial/actions/runs/484",
+		},
+	}
+
+	// Local containers still not updated
+	containers := []DockerContainerJSON{
+		{
+			ID:      "c1",
+			Names:   []string{"/aerial-brain"},
+			State:   "running",
+			Created: now.Add(-10 * time.Hour).Unix(),
+			Labels:  map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"},
+		},
+	}
+
+	deploys := mergeClusterDeployments(containers, runs, nil, "old1234")
+	if len(deploys) != 1 {
+		t.Fatalf("expected 1 deployment on pull timeout, got %d", len(deploys))
+	}
+
+	dep := deploys[0]
+	if dep.Stage != "failed" {
+		t.Errorf("expected stage 'failed' on Watchtower pull timeout, got %s", dep.Stage)
+	}
+	if dep.Steps[2].Status != "failed" {
+		t.Errorf("expected Watchtower Pull step status 'failed', got %s", dep.Steps[2].Status)
+	}
+}
+
+func TestMergeClusterDeployments_RollingSwap(t *testing.T) {
+	now := time.Now().UTC()
+	containers := []DockerContainerJSON{
+		{
+			ID:      "c1",
+			Names:   []string{"/aerial-brain"},
+			State:   "running",
+			Created: now.Add(-30 * time.Second).Unix(),
+			Labels:  map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain", "org.opencontainers.image.revision": "abc9999999"},
+			Health:  &struct {
+				Status string `json:"Status"`
+			}{Status: "starting"},
+		},
+		{
+			ID:      "c2",
+			Names:   []string{"/aerial-dashboard"},
+			State:   "running",
+			Created: now.Add(-10 * time.Second).Unix(),
+			Labels:  map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "dashboard"},
+		},
+	}
+
+	deploys := mergeClusterDeployments(containers, nil, nil, "abc9999")
+	if len(deploys) != 1 {
+		t.Fatalf("expected 1 unified deployment on rolling swap, got %d", len(deploys))
+	}
+
+	dep := deploys[0]
+	if dep.Stage != "swapping" {
+		t.Errorf("expected stage 'swapping', got %s", dep.Stage)
+	}
+	if dep.Commit != "abc9999" {
+		t.Errorf("expected commit resolved from image label 'abc9999', got %s", dep.Commit)
+	}
+	if len(dep.MatrixJobs) != 2 {
+		t.Errorf("expected 2 container chips, got %d", len(dep.MatrixJobs))
+	}
+}
+
+func TestMergeClusterDeployments_SyncedGrace(t *testing.T) {
+	now := time.Now().UTC()
+	containers := []DockerContainerJSON{
+		{
+			ID:      "c1",
+			Names:   []string{"/aerial-brain"},
+			State:   "running",
+			Created: now.Add(-3 * time.Minute).Unix(),
+			Labels:  map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"},
+			Health:  &struct {
+				Status string `json:"Status"`
+			}{Status: "healthy"},
+		},
+		{
+			ID:      "c2",
+			Names:   []string{"/aerial-dashboard"},
+			State:   "running",
+			Created: now.Add(-3 * time.Minute).Unix(),
+			Labels:  map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "dashboard"},
+			Health:  &struct {
+				Status string `json:"Status"`
+			}{Status: "healthy"},
+		},
+	}
+
+	deploys := mergeClusterDeployments(containers, nil, nil, "live123")
+	if len(deploys) != 1 {
+		t.Fatalf("expected 1 unified deployment in synced grace, got %d", len(deploys))
+	}
+
+	dep := deploys[0]
+	if dep.Stage != "live" {
+		t.Errorf("expected stage 'live', got %s", dep.Stage)
+	}
+	if dep.Progress != 100 {
+		t.Errorf("expected progress 100, got %d", dep.Progress)
+	}
+	for i, s := range dep.Steps {
+		if s.Status != "completed" {
+			t.Errorf("expected step %d (%s) to be completed, got %s", i, s.Name, s.Status)
+		}
+	}
+}
+
+func TestMergeClusterDeployments_DegradedState(t *testing.T) {
+	now := time.Now().UTC()
+	containers := []DockerContainerJSON{
+		{
+			ID:      "c1",
+			Names:   []string{"/aerial-brain"},
+			State:   "running",
+			Created: now.Add(-2 * time.Minute).Unix(),
+			Labels:  map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"},
+			Health:  &struct {
+				Status string `json:"Status"`
+			}{Status: "unhealthy"},
+		},
+		{
+			ID:      "c2",
+			Names:   []string{"/aerial-dashboard"},
+			State:   "running",
+			Created: now.Add(-2 * time.Minute).Unix(),
+			Labels:  map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "dashboard"},
+			Health:  &struct {
+				Status string `json:"Status"`
+			}{Status: "healthy"},
+		},
+	}
+
+	deploys := mergeClusterDeployments(containers, nil, nil, "deg1234")
+	if len(deploys) != 1 {
+		t.Fatalf("expected 1 unified deployment on degraded state, got %d", len(deploys))
+	}
+
+	dep := deploys[0]
+	if dep.Stage != "degraded" {
+		t.Errorf("expected stage 'degraded', got %s", dep.Stage)
+	}
+	if dep.Steps[4].Status != "failed" {
+		t.Errorf("expected Health Check step status 'failed', got %s", dep.Steps[4].Status)
+	}
+}
+
+func TestMergeClusterDeployments_Idle(t *testing.T) {
+	now := time.Now().UTC()
+	// Containers up for 2 hours with no active CI
+	containers := []DockerContainerJSON{
+		{
+			ID:      "c1",
+			Names:   []string{"/aerial-brain"},
+			State:   "running",
+			Created: now.Add(-2 * time.Hour).Unix(),
+			Labels:  map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"},
+			Health:  &struct {
+				Status string `json:"Status"`
+			}{Status: "healthy"},
+		},
+	}
+
+	deploys := mergeClusterDeployments(containers, nil, nil, "idle123")
+	if len(deploys) != 0 {
+		t.Fatalf("expected 0 deployments (idle), got %d", len(deploys))
+	}
+}
+
+
 func TestSchedulesHandler_Success(t *testing.T) {
 	mockBrain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/schedules" {

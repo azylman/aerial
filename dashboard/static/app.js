@@ -220,6 +220,7 @@ async function fetchStatus() {
         const deploys = data.deployments || [];
 
         const hasFailed = deploys.some(dep => dep.stage === 'failed');
+        const hasDegraded = deploys.some(dep => dep.stage === 'degraded');
         const isBuilding = deploys.some(dep => dep.stage === 'building' || dep.stage === 'queued');
         const isSwapping = deploys.some(dep => dep.stage === 'swapping');
         const isAwaitingPull = deploys.some(dep => dep.stage === 'awaiting_pull');
@@ -228,6 +229,9 @@ async function fetchStatus() {
         if (deployBadge) {
             if (hasFailed) {
                 deployBadge.textContent = `🚨 CI BUILD FAILED`;
+                deployBadge.className = 'section-badge failed';
+            } else if (hasDegraded) {
+                deployBadge.textContent = `⚠️ STACK DEGRADED`;
                 deployBadge.className = 'section-badge failed';
             } else if (isBuilding) {
                 deployBadge.textContent = `⚡ 1 CI BUILD ACTIVE`;
@@ -242,7 +246,7 @@ async function fetchStatus() {
                 deployBadge.textContent = `${activeDeploys.length} IN PROGRESS`;
                 deployBadge.className = 'section-badge active';
             } else if (deploys.length > 0) {
-                deployBadge.textContent = `ALL SERVICES LIVE (${deploys.length} SYNCED)`;
+                deployBadge.textContent = `ALL SERVICES LIVE (STACK SYNCED)`;
                 deployBadge.className = 'section-badge live';
             } else {
                 deployBadge.textContent = 'SYSTEM IN SYNC';
@@ -267,6 +271,9 @@ async function fetchStatus() {
                 deploys.forEach(dep => {
                     const isLive = dep.stage === 'live';
                     const isFailed = dep.stage === 'failed';
+                    const isDegraded = dep.stage === 'degraded';
+                    const isSwapping = dep.stage === 'swapping';
+                    const isAwaitingPull = dep.stage === 'awaiting_pull';
                     const isBuildingStage = dep.stage === 'building' || dep.stage === 'queued';
 
                     const steps = dep.steps || [
@@ -277,15 +284,33 @@ async function fetchStatus() {
                         { name: "Health Check", icon: "🩺", status: isLive ? "completed" : "pending" }
                     ];
 
+                    const isHostPhase = isSwapping || isLive || isDegraded;
+                    const allChips = Array.isArray(dep.matrix_jobs) ? dep.matrix_jobs : [];
+                    const gateChips = allChips.filter(c => c.name.includes('test') || c.name.includes('lint'));
+                    const serviceChips = allChips.filter(c => !c.name.includes('test') && !c.name.includes('lint'));
+
                     const stepsHTML = steps.map(step => {
                         let matrixHTML = '';
-                        if (step.name.includes("CI Build") && Array.isArray(dep.matrix_jobs) && dep.matrix_jobs.length > 0) {
+                        let targetChips = [];
+
+                        if (step.name.includes("CI Build")) {
+                            if (isBuildingStage || (isFailed && step.status === 'failed')) {
+                                targetChips = allChips;
+                            } else if (gateChips.length > 0) {
+                                targetChips = gateChips;
+                            }
+                        } else if (step.name.includes("Container Swap") && isHostPhase) {
+                            targetChips = serviceChips.length > 0 ? serviceChips : allChips;
+                        }
+
+                        if (targetChips.length > 0) {
                             matrixHTML = `
                                 <div class="matrix-chips-container">
-                                    ${dep.matrix_jobs.map(chip => {
+                                    ${targetChips.map(chip => {
                                         const chipClass = chip.status === 'completed' ? 'chip-done' : chip.status === 'active' ? 'chip-running' : chip.status === 'failed' ? 'chip-failed' : 'chip-queued';
                                         const chipIcon = chip.status === 'completed' ? '✓' : chip.status === 'active' ? '⚡' : chip.status === 'failed' ? '✕' : '○';
-                                        return `<span class="matrix-chip ${chipClass}" title="${escapeHtml(chip.name)}: ${chip.status}">${escapeHtml(chip.name)} ${chipIcon}</span>`;
+                                        const durText = chip.duration ? ` (${escapeHtml(chip.duration)})` : '';
+                                        return `<span class="matrix-chip ${chipClass}" onclick="openDiagnosticDrawerByName('${escapeHtml(chip.name)}'); event.stopPropagation();" title="${escapeHtml(chip.name)}: ${chip.status}${durText} • Click for diagnostics">${escapeHtml(chip.name)}${durText} ${chipIcon}</span>`;
                                     }).join('')}
                                 </div>
                             `;
@@ -317,7 +342,7 @@ async function fetchStatus() {
                     }
 
                     let timerMarkup = '';
-                    if (isBuildingStage && dep.started_at) {
+                    if ((isBuildingStage || isSwapping || isAwaitingPull) && dep.started_at) {
                         timerMarkup = `
                             <div class="deploy-timer-badge">
                                 <span class="pulse-indicator"></span>
@@ -326,13 +351,13 @@ async function fetchStatus() {
                         `;
                     }
 
-                    const cardClass = isLive ? 'stage-live' : isFailed ? 'stage-failed' : isBuildingStage ? 'stage-building' : 'stage-active';
-                    const badgeClass = isLive ? 'live' : isFailed ? 'failed' : 'active';
+                    const cardClass = isLive ? 'stage-live' : (isFailed || isDegraded) ? 'stage-failed' : isSwapping ? 'stage-swapping' : (isBuildingStage || isAwaitingPull) ? 'stage-building' : 'stage-active';
+                    const badgeClass = isLive ? 'live' : (isFailed || isDegraded) ? 'failed' : isSwapping ? 'swapping' : 'active';
 
                     const card = document.createElement('div');
                     card.className = `deploy-card ${cardClass}`;
                     card.innerHTML = `
-                        ${isBuildingStage ? '<div class="deploy-card-laser"></div>' : ''}
+                        ${(isBuildingStage || isSwapping || isAwaitingPull) ? '<div class="deploy-card-laser"></div>' : ''}
                         <div class="deploy-card-header">
                             <div class="deploy-target">
                                 <span class="deploy-service-name">${escapeHtml(dep.service.toUpperCase())}</span>
@@ -441,6 +466,17 @@ async function fetchStatus() {
 }
 
 // Drawer functionality
+function openDiagnosticDrawerByName(serviceName) {
+    const clean = String(serviceName || '').toLowerCase().replace(/^aerial-/, '');
+    const idx = activeServicesCache.findIndex(s => {
+        const sClean = String(s.name || '').toLowerCase().replace(/^aerial-/, '');
+        return sClean === clean || sClean.includes(clean);
+    });
+    if (idx !== -1) {
+        openDiagnosticDrawer(idx);
+    }
+}
+
 function openDiagnosticDrawer(serviceIndex) {
     const svc = activeServicesCache[serviceIndex];
     if (!svc) return;
