@@ -56,12 +56,8 @@ function formatAgentsviewSessionUrl(sessionId) {
     if (!cleanId) {
         return '/conversations/';
     }
-    const encodedPath = cleanId
-        .split('/')
-        .map(segment => encodeURIComponent(segment))
-        .join('/');
-
-    return `/sessions/${encodedPath}`;
+    const fullId = cleanId.includes(':') ? cleanId : `antigravity-cli:${cleanId}`;
+    return `/sessions/${encodeURIComponent(fullId)}`;
 }
 
 function parseValidTimestampMs(dateStr) {
