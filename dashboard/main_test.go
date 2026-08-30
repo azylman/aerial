@@ -36,7 +36,8 @@ func TestStatusHandler(t *testing.T) {
 	req := httptest.NewRequest("GET", "/api/status", nil)
 	rr := httptest.NewRecorder()
 
-	statusHandler(rr, req)
+	handler := statusHandler("")
+	handler.ServeHTTP(rr, req)
 
 	if status := rr.Code; status != http.StatusOK {
 		t.Errorf("handler returned wrong status code: got %v want %v", status, http.StatusOK)
@@ -55,6 +56,92 @@ func TestStatusHandler(t *testing.T) {
 		if svc.UptimeSeconds < 0 {
 			t.Errorf("service %s has negative uptime: %d", svc.Name, svc.UptimeSeconds)
 		}
+	}
+}
+
+func TestStatusHandlerActiveTasks(t *testing.T) {
+	// 1. Successful active task aggregation
+	brainMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/tasks" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{
+				"status": "ok",
+				"total": 1,
+				"tasks": [
+					{
+						"id": "task-abc",
+						"thread_id": "thread-123",
+						"session_id": "session-456",
+						"author_name": "Arcane",
+						"prompt": "Test execution prompt",
+						"status": "PROCESSING",
+						"retry_count": 0,
+						"trigger_type": "discord",
+						"created_at": "2026-08-30T12:00:00Z",
+						"updated_at": "2026-08-30T12:00:10Z"
+					}
+				]
+			}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer brainMock.Close()
+
+	handler := statusHandler(brainMock.URL)
+	req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", rr.Code)
+	}
+
+	var resp ClusterResponse
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode status response: %v", err)
+	}
+
+	if resp.ActiveTasksCount != 1 || len(resp.ActiveTasks) != 1 {
+		t.Fatalf("expected 1 active task, got %d: %+v", resp.ActiveTasksCount, resp.ActiveTasks)
+	}
+
+	if resp.ActiveTasks[0].ID != "task-abc" || resp.ActiveTasks[0].SessionID != "session-456" || resp.ActiveTasks[0].TriggerType != "discord" {
+		t.Errorf("unexpected task contents: %+v", resp.ActiveTasks[0])
+	}
+	if resp.ActiveTasks[0].Status != "PROCESSING" || resp.ActiveTasks[0].AuthorName != "Arcane" {
+		t.Errorf("unexpected task status/author: %+v", resp.ActiveTasks[0])
+	}
+
+	// 2. Graceful degradation on brain error / offline
+	degradedHandler := statusHandler("http://127.0.0.1:54321")
+	reqDegraded := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	rrDegraded := httptest.NewRecorder()
+	degradedHandler.ServeHTTP(rrDegraded, reqDegraded)
+
+	if rrDegraded.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on degraded status, got %d", rrDegraded.Code)
+	}
+
+	var degradedResp ClusterResponse
+	if err := json.NewDecoder(rrDegraded.Body).Decode(&degradedResp); err != nil {
+		t.Fatalf("failed to decode degraded status response: %v", err)
+	}
+
+	if degradedResp.ActiveTasksCount != 0 {
+		t.Errorf("expected 0 active tasks on degraded brain, got %d", degradedResp.ActiveTasksCount)
+	}
+	if degradedResp.ActiveTasks == nil || len(degradedResp.ActiveTasks) != 0 {
+		t.Errorf("expected non-nil empty ActiveTasks slice on degraded brain, got %+v", degradedResp.ActiveTasks)
+	}
+
+	// 3. Method Not Allowed
+	reqPost := httptest.NewRequest(http.MethodPost, "/api/status", nil)
+	rrPost := httptest.NewRecorder()
+	handler.ServeHTTP(rrPost, reqPost)
+	if rrPost.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405 Method Not Allowed, got %d", rrPost.Code)
 	}
 }
 
