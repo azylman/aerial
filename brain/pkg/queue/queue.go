@@ -320,6 +320,7 @@ func (p *WorkerPool) processMessage(msg db.Message) {
 		if currentSessionID == "" {
 			if extSess := runner.ExtractSessionID(stderr, startTime); extSess != "" {
 				currentSessionID = extSess
+				_ = db.SaveSessionID(p.cfg.DB, msg.ThreadID, currentSessionID)
 			}
 		}
 

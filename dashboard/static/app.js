@@ -164,7 +164,7 @@ function renderActiveTasks(tasks) {
 
         const inspectHTML = task.session_id 
             ? `<a href="/sessions/${encodeURIComponent(task.session_id)}" target="_blank" rel="noopener noreferrer" class="task-inspect-btn active">💬 INSPECT IN AGENTSVIEW ↗</a>`
-            : `<span class="task-inspect-btn disabled">⏳ QUEUE ALLOCATING SESSION</span>`;
+            : `<a href="/conversations/" target="_blank" rel="noopener noreferrer" class="task-inspect-btn active" title="Session allocating - Click to open Agentsview">💬 OPEN AGENTSVIEW ↗</a>`;
 
         return `
             <div class="task-card ${statusClass}">
