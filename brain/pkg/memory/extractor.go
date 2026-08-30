@@ -92,11 +92,17 @@ func ExtractActiveConversationFacts(ctx context.Context, database *sql.DB, clien
 }
 
 func processThreadFacts(ctx context.Context, database *sql.DB, client *Client, llmFunc LLMClientFunc, threadID string) error {
-	maxRowID, _ := db.GetMaxMessageRowID(database, threadID)
+	maxRowID, err := db.GetMaxMessageRowID(database, threadID)
+	if err != nil {
+		return fmt.Errorf("failed to get max message rowid for thread %s: %w", threadID, err)
+	}
 
 	transcript, err := loadThreadTranscript(database, threadID)
-	if err != nil || strings.TrimSpace(transcript) == "" {
-		log.Printf("[Memory] No transcript found for thread %s (err=%v), marking watermark.", threadID, err)
+	if err != nil {
+		return fmt.Errorf("transcript unavailable for thread %s: %w", threadID, err)
+	}
+	if strings.TrimSpace(transcript) == "" {
+		log.Printf("[Memory] Empty transcript for thread %s, marking watermark.", threadID)
 		_ = db.UpdateConversationFactWatermark(database, threadID, maxRowID)
 		return nil
 	}
@@ -131,9 +137,9 @@ func processThreadFacts(ctx context.Context, database *sql.DB, client *Client, l
 		isDuplicate := false
 		if len(emb) > 0 && len(existingFacts) > 0 {
 			for _, ef := range existingFacts {
-				if ef.Fact.Category == item.Category && len(ef.Embedding) == len(emb) {
+				if len(ef.Embedding) == len(emb) {
 					sim := DotProduct(emb, ef.Embedding)
-					if sim >= 0.88 {
+					if (ef.Fact.Category == item.Category && sim >= 0.88) || sim >= 0.90 {
 						log.Printf("[Memory] Duplicate fact detected (%q ~ %q, sim=%.2f). Skipping duplicate row.",
 							item.FactText, ef.Fact.FactText, sim)
 						isDuplicate = true
@@ -195,6 +201,9 @@ func loadThreadTranscript(database *sql.DB, threadID string) (string, error) {
 					text := string(data)
 					if len(text) > 20000 {
 						text = text[len(text)-20000:]
+						if idx := strings.Index(text, "\n"); idx != -1 && idx < len(text)-1 {
+							text = text[idx+1:]
+						}
 					}
 					return text, nil
 				}
