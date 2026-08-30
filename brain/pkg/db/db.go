@@ -195,6 +195,7 @@ func InitDB(dbPath string) (*sql.DB, error) {
 	indices := `
 	CREATE INDEX IF NOT EXISTS idx_messages_thread_status ON messages(thread_id, status);
 	CREATE INDEX IF NOT EXISTS idx_messages_status ON messages(status);
+	CREATE INDEX IF NOT EXISTS idx_messages_status_created ON messages(status, created_at);
 	CREATE INDEX IF NOT EXISTS idx_messages_status_created_at ON messages(status, created_at DESC);
 	CREATE INDEX IF NOT EXISTS idx_sessions_fact_extracted ON sessions(last_extracted_rowid, fact_extracted_at);
 	CREATE INDEX IF NOT EXISTS idx_conversations_internal_id ON conversations(internal_id);
@@ -338,6 +339,91 @@ func GetPendingOrProcessingMessages(database *sql.DB) ([]Message, error) {
 		results = append(results, m)
 	}
 	return results, nil
+}
+
+type ActiveTask struct {
+	ID            string    `json:"id"`
+	ThreadID      string    `json:"thread_id"`
+	SessionID     string    `json:"session_id,omitempty"`
+	AuthorName    string    `json:"author_name"`
+	AuthorID      string    `json:"author_id"`
+	Prompt        string    `json:"prompt"`
+	Status        string    `json:"status"`
+	RetryCount    int       `json:"retry_count"`
+	ScheduleRunID string    `json:"schedule_run_id,omitempty"`
+	TriggerType   string    `json:"trigger_type"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+}
+
+func InferTriggerType(authorID, scheduleRunID string) string {
+	if authorID == "http-client" {
+		return "http"
+	}
+	if scheduleRunID != "" {
+		if strings.HasPrefix(scheduleRunID, "cron-") {
+			return "cron"
+		}
+		return "reminder"
+	}
+	return "discord"
+}
+
+func GetActiveTasks(database *sql.DB) ([]ActiveTask, error) {
+	if database == nil {
+		return nil, fmt.Errorf("database is nil")
+	}
+
+	query := `
+	SELECT 
+		m.id,
+		m.thread_id,
+		COALESCE(s.internal_session_id, '') AS session_id,
+		m.author_name,
+		m.author_id,
+		m.content,
+		m.status,
+		m.retry_count,
+		m.schedule_run_id,
+		m.created_at,
+		m.updated_at
+	FROM messages m
+	LEFT JOIN sessions s ON m.thread_id = s.thread_id
+	WHERE m.status IN ('PENDING', 'PROCESSING')
+	ORDER BY m.created_at ASC
+	LIMIT 50;
+	`
+	rows, err := database.Query(query)
+	if err != nil {
+		return nil, fmt.Errorf("query active tasks: %w", err)
+	}
+	defer rows.Close()
+
+	tasks := make([]ActiveTask, 0)
+	for rows.Next() {
+		var t ActiveTask
+		if err := rows.Scan(
+			&t.ID,
+			&t.ThreadID,
+			&t.SessionID,
+			&t.AuthorName,
+			&t.AuthorID,
+			&t.Prompt,
+			&t.Status,
+			&t.RetryCount,
+			&t.ScheduleRunID,
+			&t.CreatedAt,
+			&t.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan active task: %w", err)
+		}
+		t.TriggerType = InferTriggerType(t.AuthorID, t.ScheduleRunID)
+		tasks = append(tasks, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate active tasks: %w", err)
+	}
+	return tasks, nil
 }
 
 func GetMessage(database *sql.DB, id string) (*Message, error) {
