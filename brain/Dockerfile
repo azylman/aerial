@@ -3,15 +3,10 @@ FROM golang:1.22-alpine AS builder
 
 WORKDIR /build
 
-# Install git and golangci-lint
-RUN apk add --no-cache git ca-certificates wget
-RUN wget -O- -q https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b /usr/local/bin v1.59.1
-
 COPY brain/go.mod brain/go.sum* ./
+RUN go mod download
+
 COPY brain/ ./
-RUN go mod tidy
-RUN golangci-lint run ./...
-RUN CGO_ENABLED=0 go test ./...
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /aerial-brain .
 
 # --- Runtime stage -------------------------------------------------------

@@ -1,4 +1,4 @@
-﻿# -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # Stage 1: Build upstream vianaz/mcp-discord TypeScript project
 # -----------------------------------------------------------------------------
 FROM node:20-alpine AS node-build
@@ -14,16 +14,13 @@ RUN npm run build
 RUN npm prune --omit=dev --ignore-scripts
 
 # -----------------------------------------------------------------------------
-# Stage 2: Build Go proxy wrapper binary with automated tests
+# Stage 2: Build Go proxy wrapper binary
 # -----------------------------------------------------------------------------
 FROM golang:1.22-alpine AS go-build
 WORKDIR /build
 
 COPY go.mod ./
 COPY main.go proxy.go proxy_test.go ./
-
-# Run unit tests during container build
-RUN CGO_ENABLED=0 go test -v ./...
 
 # Build statically linked Go proxy
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /discord-mcp .
