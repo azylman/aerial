@@ -15,6 +15,8 @@ import (
 //go:embed static/*
 var content embed.FS
 
+var startTime = time.Now().UTC()
+
 var sensitiveKeys = []string{
 	"GEMINI_API_KEY",
 	"DISCORD_TOKEN",
@@ -71,20 +73,23 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	uptimeSec := int64(time.Since(startTime).Seconds())
+	now := time.Now().UTC()
+
 	resp := ClusterResponse{
-		SystemTime:    time.Now().UTC(),
+		SystemTime:    now,
 		ClusterStatus: "healthy",
 		Services: []ServiceStatus{
-			{Name: "aerial-brain", Status: "healthy", UptimeSeconds: 86400, LastCheckTime: time.Now().UTC()},
-			{Name: "aerial-scheduler-mcp", Status: "healthy", UptimeSeconds: 86400, LastCheckTime: time.Now().UTC()},
-			{Name: "aerial-discord-mcp", Status: "healthy", UptimeSeconds: 86400, LastCheckTime: time.Now().UTC()},
-			{Name: "aerial-docker-mcp", Status: "healthy", UptimeSeconds: 86400, LastCheckTime: time.Now().UTC()},
-			{Name: "aerial-github-mcp", Status: "healthy", UptimeSeconds: 86400, LastCheckTime: time.Now().UTC()},
-			{Name: "aerial-ollama", Status: "healthy", UptimeSeconds: 86400, LastCheckTime: time.Now().UTC()},
-			{Name: "aerial-agentsview", Status: "healthy", UptimeSeconds: 86400, LastCheckTime: time.Now().UTC()},
-			{Name: "aerial-watchtower", Status: "healthy", UptimeSeconds: 86400, LastCheckTime: time.Now().UTC()},
-			{Name: "aerial-autoheal", Status: "healthy", UptimeSeconds: 86400, LastCheckTime: time.Now().UTC()},
-			{Name: "aerial-proxy", Status: "healthy", UptimeSeconds: 86400, LastCheckTime: time.Now().UTC()},
+			{Name: "aerial-brain", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
+			{Name: "aerial-scheduler-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
+			{Name: "aerial-discord-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
+			{Name: "aerial-docker-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
+			{Name: "aerial-github-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
+			{Name: "aerial-ollama", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
+			{Name: "aerial-agentsview", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
+			{Name: "aerial-watchtower", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
+			{Name: "aerial-autoheal", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
+			{Name: "aerial-proxy", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
 		},
 	}
 	w.Header().Set("Content-Type", "application/json")
