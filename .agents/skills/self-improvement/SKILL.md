@@ -1,4 +1,4 @@
-﻿---
+---
 name: self-improvement
 description: Use this skill whenever Aerial needs to modify, enhance, debug, or refactor its own codebase, skills, or system configuration, commit changes, pull updates, or deploy updates via CI/CD.
 ---
@@ -9,23 +9,21 @@ This skill defines the mandatory, rigorous development workflow Aerial must foll
 
 ---
 
-## 1. Project Directory & Workspace Layout
+## 1. Two-Repository Separation of Concerns & Scope Gate
 
-The root repository workspace is located at `/share/aerial`.
+Before making any changes, Aerial MUST determine the target repository:
 
-```text
-/share/aerial/
-â”œâ”€â”€ brain/               # Go backend (Discord gateway funnel, queue worker pool, agy runner, SQLite memory)
-â”œâ”€â”€ discord-mcp/         # Discord MCP server (Streamable HTTP /mcp)
-â”œâ”€â”€ docker-mcp/          # Docker socket MCP proxy (supergateway + mcp/docker)
-â”œâ”€â”€ github-mcp/          # GitHub Copilot MCP proxy
-â”œâ”€â”€ scheduler-mcp/       # Persistent SQLite task scheduler MCP
-â”œâ”€â”€ .agents/skills/      # Built-in skills tracked in Git (baked into brain image)
-â”œâ”€â”€ skills/              # User custom runtime skills (ignored by Git)
-â”œâ”€â”€ docs/specs/          # Architectural specifications and design documents
-â”œâ”€â”€ docker-compose.yml   # Multi-container orchestration
-â””â”€â”€ GEMINI.md            # Topology and agent instructions
-```
+### 1.1 Core Engine Repository (`azylman/aerial` at `/share/aerial`)
+- **Scope**: Generic Go execution engine (`brain/`), built-in MCP microservices (`scheduler-mcp`, `discord-mcp`, `docker-mcp`, `github-mcp`), base system skills, Docker topology, and core architecture docs.
+- **Strict Invariants**:
+  - **100% Generic & Domain-Agnostic**: All prompts, code, error handlers, and schemas must remain completely generic and reusable for any user.
+  - **Zero Personal Data Invariant**: **NEVER** commit user names (e.g., "Alex"), user handles (e.g., "Arcane", "arcane103"), family members, personal home locations, private device/entity IDs, or user-specific business logic into this repository.
+  - **Zero Plaintext Secrets Invariant**: NEVER commit API keys, tokens, private webhook URLs, or GitHub PATs to disk.
+- **Deploy Path**: Commit and push to `azylman/aerial:main`. Watchtower builds & deploys container updates out-of-band.
+
+### 1.2 User Configuration Repository (e.g. `azylman/aerial-config` at `/share/aerial-config`)
+- **Scope**: User options (`config.yaml`), persona overrides & user identity/aliases (`AGENTS.md`), private smart home/domain workflows (`custom-skills/`), sidecar containers (`docker-compose.override.yml`), and host environment secrets (`.env`).
+- **Deploy Path**: Commit and push to the user's private configuration repository. Hot-reloaded automatically in-process.
 
 ---
 
@@ -35,29 +33,29 @@ Whenever undertaking feature development, architectural changes, bug fixes, or s
 
 ```
 Step 1: Brainstorm & Design Spec (docs/specs/...)
-   â”‚
-   â–¼
+   │
+   ▼
 Step 2: Write Initial Code (Modular Packages)
-   â”‚
-   â–¼
-Step 3: Senior Code Review (Concurrency, Leaks, DB Safety)
-   â”‚
-   â–¼
-Step 4: Adversarial Critique / Devil's Advocate (Edge Cases, Cascades)
-   â”‚
-   â–¼
+   │
+   ▼
+Step 3: Senior Code Review (Concurrency, Leaks, DB Safety, Repo Boundary)
+   │
+   ▼
+Step 4: Adversarial Critique / Devil's Advocate (Edge Cases, Personal Data Leakage)
+   │
+   ▼
 Step 5: Human Review Checkpoint (Synthesize 3-way findings & get approval)
-   â”‚
-   â–¼
+   │
+   ▼
 Step 6: Implement Approved Refinements
-   â”‚
-   â–¼
+   │
+   ▼
 Step 7: Comprehensive Unit Tests & Complexity Comparison
-   â”‚
-   â–¼
+   │
+   ▼
 Step 8: Pre-Commit Test Verification Gate
-   â”‚
-   â–¼
+   │
+   ▼
 Step 9: Commit, Push & Continuous Deployment
 ```
 
@@ -87,6 +85,7 @@ Step 9: Commit, Push & Continuous Deployment
 
 ### Step 3: Senior Code Review
 Conduct a thorough, deep technical code review inspecting:
+- **Repository Boundary & Generic Invariant**: Ensure no user-specific names (e.g. "Alex"), Discord handles (e.g. "Arcane"), family members, private devices, or home locations are hardcoded in code, comments, or prompts for `/share/aerial`.
 - **Concurrency & Goroutine Lifecycle**: Mutex lock scope, race conditions, channel deadlocks, and worker idle teardown.
 - **Database Safety**: SQLite WAL mode (`PRAGMA journal_mode = WAL;`), busy timeout (`PRAGMA busy_timeout = 5000;`), and connection pool constraints.
 - **Subprocess Management**: Context cancellation, zombie process prevention, stream buffer capture, and exit code handling.
@@ -96,6 +95,7 @@ Conduct a thorough, deep technical code review inspecting:
 
 ### Step 4: Adversarial Critique & Devil's Advocate
 Aggressively challenge the design and code. Specifically analyze and argue why the implementation could fail:
+- **Personal Data / Logic Leakage**: Did any private user business logic, personal aliases, or private secrets leak into the public core engine repository?
 - **Cascading Failures (Apology Cascades)**: Are we calling an external service (e.g. an LLM API) to report that the external service is down?
 - **Poison-Pill Death Spirals**: Will an invalid message or crash loop restart infinitely on boot recovery?
 - **Burst Traffic & Backpressure**: What happens if 50 messages arrive in 10 seconds? Is there stale backlog accumulation or unbounded channel buffering?

@@ -33,21 +33,22 @@ Aerial runs as a multi-container Docker stack supervised by Watchtower and Autoh
 Aerial operates on a strict **Two-Repository Separation of Concerns**:
 
 ### 1. Core Engine Repository (`azylman/aerial` at `/share/aerial`)
-- **Purpose**: Generic, public, domain-agnostic foundation.
+- **Purpose**: Generic, public, domain-agnostic open-source foundation.
 - **Contents**:
   - Core Go execution engine (`brain/`), queue state machine, SQLite memory WAL, and Discord Gateway funnel.
   - Built-in MCP microservices (`scheduler-mcp`, `discord-mcp`, `docker-mcp`, `github-mcp`).
   - Base system skills (`.agents/skills/self-improvement`, `self-update`).
-  - Core Docker topology (`docker-compose.yml`, Dockerfiles) and system documentation.
-- **Invariants**:
-  - Must remain 100% generic, reusable, and open-source ready.
-  - **NEVER** commit user secrets, private webhook URLs, personal devices/entities, or user-specific business logic into this repository.
+  - Core Docker topology (`docker-compose.yml`, Dockerfiles), system architecture specs, and documentation.
+- **Strict Invariants**:
+  - **100% Generic & Domain-Agnostic**: All prompts, code, error handlers, and schemas must remain completely generic and reusable for any user.
+  - **Zero Personal Data Invariant**: **NEVER** commit user names (e.g., "Alex"), user handles (e.g., "Arcane", "arcane103"), family members, personal home locations, private device/entity IDs, or user-specific business logic into this repository.
+  - **Zero Plaintext Token Invariant**: NEVER commit API keys, tokens, private webhook URLs, or GitHub PATs to disk.
 
 ### 2. User Configuration Repository (e.g. `azylman/aerial-config` at `/share/aerial-config`)
-- **Purpose**: Private user customization, personal persona, domain skills, and environment-specific integrations. Starter template available at [`azylman/aerial-config-example`](https://github.com/azylman/aerial-config-example).
+- **Purpose**: Private user customization, personal persona, user identity/aliases, domain skills, and environment-specific integrations. Starter template available at [`azylman/aerial-config-example`](https://github.com/azylman/aerial-config-example).
 - **Contents**:
   - **`config.yaml`**: Non-secret user options (`model`, `timeout_minutes`, `timezone`, `system_channel`, `git_sync`, `mcp_servers`).
-  - **`AGENTS.md`**: User persona overrides, personal preferences, and communication style.
+  - **`AGENTS.md`**: User persona overrides, personal preferences, communication style, and user identity/alias definitions (e.g., "The user is Alex / Arcane").
   - **`custom-skills/`**: Private operational runbooks and domain-specific workflows (e.g., smart home, private APIs).
   - **`docker-compose.override.yml`**: User-defined sidecar containers or extra local MCP servers connected to `aerial-net`.
   - **`.env` (on host)**: Private secrets (`GEMINI_API_KEY`, `DISCORD_BOT_TOKEN`, `GITHUB_PAT`, custom tokens).
@@ -59,10 +60,11 @@ Aerial operates on a strict **Two-Repository Separation of Concerns**:
 - **Compose Override Sync**: `docker-compose.override.yml` in `/share/aerial-config` is automatically symlinked to `/share/aerial/docker-compose.override.yml` by the in-process file watcher and GitSync.
 
 ### 4. Task Routing & Change Guidelines
-- When Arcane asks to **fix bugs, enhance core engine features, add built-in MCPs, or update core documentation**:
+- When the user asks to **fix engine bugs, enhance core engine features, add built-in MCPs, refactor engine code, or update core documentation**:
   - Make changes in the core engine repository (`/share/aerial`).
   - Follow the `self-improvement` skill (`.agents/skills/self-improvement/SKILL.md`), verify unit tests locally (`go test ./...`), commit, and push to `azylman/aerial:main`.
-- When Arcane asks to **add private skills, configure personal MCP integrations, adjust personal persona, or declare custom sidecars**:
+  - **VERIFY**: Ensure no user-specific names, aliases, or private logic leaked into code or prompts.
+- When the user asks to **add private skills, configure personal MCP integrations, adjust personal persona, define user aliases, or declare custom sidecars**:
   - Make changes in the user configuration repository (`/share/aerial-config`).
   - Commit and push changes directly to the user's private configuration repository.
 
