@@ -281,4 +281,216 @@ func TestMergeClusterDeployments_FailedCIRun(t *testing.T) {
 	}
 }
 
+func TestSchedulesHandler_Success(t *testing.T) {
+	mockBrain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/schedules" {
+			http.NotFound(w, r)
+			return
+		}
+		resp := SchedulesAPIResponse{
+			Status: "ok",
+			Summary: ScheduleSummaryMetrics{
+				TotalActive:    3,
+				CronCount:      2,
+				OneShotCount:   1,
+				TotalRuns24h:   15,
+				SuccessRate24h: 93.3,
+			},
+			Crons: []CronSchedule{
+				{
+					ID:              "cron-1",
+					ChannelID:       "chan-1",
+					TitlePrefix:     "Morning Brief",
+					CronExpr:        "0 9 * * *",
+					CronDescription: "Every day at 9:00 AM",
+					Prompt:          "Generate morning brief",
+					Timezone:        "America/Los_Angeles",
+					Enabled:         true,
+				},
+			},
+			OneShots: []OneShotSchedule{
+				{
+					ID:       "oneshot-1",
+					ThreadID: "thread-1",
+					Prompt:   "Remind about tea",
+					RunAt:    time.Now().UTC().Add(10 * time.Minute),
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer mockBrain.Close()
+
+	handler := schedulesHandler(mockBrain.URL)
+	req := httptest.NewRequest("GET", "/api/schedules", nil)
+	rr := httptest.NewRecorder()
+
+	handler(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", rr.Code)
+	}
+
+	var data SchedulesAPIResponse
+	if err := json.NewDecoder(rr.Body).Decode(&data); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if data.Status != "ok" {
+		t.Errorf("expected status 'ok', got %s", data.Status)
+	}
+	if data.Summary.TotalActive != 3 || data.Summary.CronCount != 2 || data.Summary.OneShotCount != 1 {
+		t.Errorf("unexpected summary in response: %+v", data.Summary)
+	}
+	if len(data.Crons) != 1 || data.Crons[0].TitlePrefix != "Morning Brief" {
+		t.Errorf("unexpected crons in response: %+v", data.Crons)
+	}
+	if len(data.OneShots) != 1 || data.OneShots[0].Prompt != "Remind about tea" {
+		t.Errorf("unexpected one_shots in response: %+v", data.OneShots)
+	}
+}
+
+func TestSchedulesHandler_DegradedFallback(t *testing.T) {
+	handler := schedulesHandler("http://127.0.0.1:54321")
+	req := httptest.NewRequest("GET", "/api/schedules", nil)
+	rr := httptest.NewRecorder()
+
+	handler(rr, req)
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 Service Unavailable on brain offline, got %d", rr.Code)
+	}
+
+	var data SchedulesAPIResponse
+	if err := json.NewDecoder(rr.Body).Decode(&data); err != nil {
+		t.Fatalf("failed to decode degraded response: %v", err)
+	}
+
+	if data.Status != "degraded" {
+		t.Errorf("expected status 'degraded', got %s", data.Status)
+	}
+	if data.Error != "Brain service unreachable. Retrying..." {
+		t.Errorf("expected fallback error message, got %s", data.Error)
+	}
+	if data.Summary.TotalActive != 0 || data.Summary.SuccessRate24h != 100.0 {
+		t.Errorf("expected fallback summary with TotalActive=0, SuccessRate24h=100.0, got %+v", data.Summary)
+	}
+	if data.Crons == nil || len(data.Crons) != 0 {
+		t.Errorf("expected non-nil empty crons array")
+	}
+	if data.OneShots == nil || len(data.OneShots) != 0 {
+		t.Errorf("expected non-nil empty one_shots array")
+	}
+}
+
+func TestSchedulesHandler_MethodNotAllowed(t *testing.T) {
+	handler := schedulesHandler("http://127.0.0.1:54321")
+	req := httptest.NewRequest("POST", "/api/schedules", nil)
+	rr := httptest.NewRecorder()
+
+	handler(rr, req)
+
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405 Method Not Allowed, got %d", rr.Code)
+	}
+}
+
+func TestScheduleRunsHandler_Success(t *testing.T) {
+	mockBrain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/schedules/runs" {
+			http.NotFound(w, r)
+			return
+		}
+		q := r.URL.Query()
+		if q.Get("limit") != "10" || q.Get("offset") != "5" || q.Get("schedule_id") != "cron-1" || q.Get("status") != "success" {
+			t.Errorf("unexpected upstream query params: %s", r.URL.RawQuery)
+		}
+		resp := ScheduleRunsAPIResponse{
+			Status: "ok",
+			Total:  42,
+			Limit:  10,
+			Offset: 5,
+			Runs: []ScheduleRun{
+				{
+					ID:           101,
+					ScheduleID:   "cron-1",
+					ScheduleType: "cron",
+					Prompt:       "Daily summary",
+					Title:        "Morning Brief #101",
+					Status:       "success",
+					TriggeredAt:  time.Now().UTC().Add(-1 * time.Hour),
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer mockBrain.Close()
+
+	handler := scheduleRunsHandler(mockBrain.URL)
+	req := httptest.NewRequest("GET", "/api/schedules/runs?limit=10&offset=5&schedule_id=cron-1&status=success", nil)
+	rr := httptest.NewRecorder()
+
+	handler(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", rr.Code)
+	}
+
+	var data ScheduleRunsAPIResponse
+	if err := json.NewDecoder(rr.Body).Decode(&data); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if data.Status != "ok" || data.Total != 42 || data.Limit != 10 || data.Offset != 5 {
+		t.Errorf("unexpected metadata in response: %+v", data)
+	}
+	if len(data.Runs) != 1 || data.Runs[0].ID != 101 || data.Runs[0].Status != "success" {
+		t.Errorf("unexpected runs in response: %+v", data.Runs)
+	}
+}
+
+func TestScheduleRunsHandler_DegradedFallback(t *testing.T) {
+	handler := scheduleRunsHandler("http://127.0.0.1:54321")
+	req := httptest.NewRequest("GET", "/api/schedules/runs?limit=20&offset=10", nil)
+	rr := httptest.NewRecorder()
+
+	handler(rr, req)
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 Service Unavailable on brain offline, got %d", rr.Code)
+	}
+
+	var data ScheduleRunsAPIResponse
+	if err := json.NewDecoder(rr.Body).Decode(&data); err != nil {
+		t.Fatalf("failed to decode degraded response: %v", err)
+	}
+
+	if data.Status != "degraded" {
+		t.Errorf("expected status 'degraded', got %s", data.Status)
+	}
+	if data.Error != "Brain service unreachable. Retrying..." {
+		t.Errorf("expected fallback error message, got %s", data.Error)
+	}
+	if data.Total != 0 || data.Limit != 20 || data.Offset != 10 {
+		t.Errorf("expected Total=0, Limit=20, Offset=10, got %+v", data)
+	}
+	if data.Runs == nil || len(data.Runs) != 0 {
+		t.Errorf("expected non-nil empty runs array")
+	}
+}
+
+func TestScheduleRunsHandler_MethodNotAllowed(t *testing.T) {
+	handler := scheduleRunsHandler("http://127.0.0.1:54321")
+	req := httptest.NewRequest("DELETE", "/api/schedules/runs", nil)
+	rr := httptest.NewRecorder()
+
+	handler(rr, req)
+
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405 Method Not Allowed, got %d", rr.Code)
+	}
+}
+
 
