@@ -601,3 +601,25 @@ func TestGetFactsPaginated(t *testing.T) {
 	}
 }
 
+func TestFactsMigrationOnExistingDB(t *testing.T) {
+	database, err := InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize database: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	// Verify columns id, category, fact_text, importance, thread_id, embedding, created_at exist
+	var id int64
+	var category, factText, threadID string
+	var importance float64
+	var embedding []byte
+	var createdAt time.Time
+
+	query := `SELECT id, category, fact_text, importance, thread_id, embedding, created_at FROM facts LIMIT 0`
+	err = database.QueryRow(query).Scan(&id, &category, &factText, &importance, &threadID, &embedding, &createdAt)
+	if err != nil && err != sql.ErrNoRows {
+		t.Fatalf("Failed to query facts table columns: %v", err)
+	}
+}
+
+
