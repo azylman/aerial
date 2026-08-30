@@ -38,6 +38,24 @@ async function fetchStatus() {
             `;
         } else {
             deploys.forEach(dep => {
+                const steps = dep.steps || [
+                    { name: "Commit Trigger", icon: "📦", status: dep.progress >= 20 ? "completed" : "active" },
+                    { name: "CI Build & GHCR", icon: "⚙️", status: dep.progress >= 40 ? "completed" : dep.progress >= 20 ? "active" : "pending" },
+                    { name: "Image Pull", icon: "⬇️", status: dep.progress >= 60 ? "completed" : dep.progress >= 40 ? "active" : "pending" },
+                    { name: "Container Swap", icon: "🔄", status: dep.progress >= 85 ? "completed" : dep.progress >= 60 ? "active" : "pending" },
+                    { name: "Health Check", icon: "🩺", status: dep.progress >= 100 ? "completed" : dep.progress >= 85 ? "active" : "pending" }
+                ];
+
+                const stepsHTML = steps.map(step => `
+                    <div class="step-panel step-${escapeHtml(step.status)}">
+                        <div class="step-header">
+                            <span class="step-icon">${escapeHtml(step.icon)}</span>
+                            <span class="step-status-badge">${step.status === 'completed' ? '✓ DONE' : step.status === 'active' ? '⚡ RUNNING' : '○ PENDING'}</span>
+                        </div>
+                        <div class="step-name">${escapeHtml(step.name)}</div>
+                    </div>
+                `).join('');
+
                 const card = document.createElement('div');
                 card.className = 'deploy-card';
                 card.innerHTML = `
@@ -46,7 +64,10 @@ async function fetchStatus() {
                             <span class="deploy-service-name">${escapeHtml(dep.service.toUpperCase())}</span>
                             <span class="deploy-commit">${escapeHtml(dep.commit)}</span>
                         </div>
-                        <span class="deploy-stage-badge">⚡ ${escapeHtml(dep.stage.toUpperCase())}</span>
+                        <span class="deploy-stage-badge ${dep.stage === 'live' ? 'live' : ''}">⚡ ${escapeHtml(dep.stage.toUpperCase())}</span>
+                    </div>
+                    <div class="deploy-steps-grid">
+                        ${stepsHTML}
                     </div>
                     <div class="deploy-progress-bg">
                         <div class="deploy-progress-fill" style="width: ${dep.progress}%;"></div>

@@ -61,13 +61,20 @@ type ServiceStatus struct {
 	LastCheckTime time.Time `json:"last_check_time"`
 }
 
+type DeploymentStep struct {
+	Name   string `json:"name"`
+	Icon   string `json:"icon"`
+	Status string `json:"status"` // "completed", "active", "pending"
+}
+
 type DeploymentStatus struct {
-	ID        string    `json:"id"`
-	Service   string    `json:"service"`
-	Commit    string    `json:"commit"`
-	Stage     string    `json:"stage"` // e.g. "idle", "pulling", "swapping", "healthy"
-	Progress  int       `json:"progress"`
-	StartedAt time.Time `json:"started_at"`
+	ID        string           `json:"id"`
+	Service   string           `json:"service"`
+	Commit    string           `json:"commit"`
+	Stage     string           `json:"stage"` // e.g. "idle", "pulling", "swapping", "live"
+	Progress  int              `json:"progress"`
+	Steps     []DeploymentStep `json:"steps"`
+	StartedAt time.Time        `json:"started_at"`
 }
 
 type ClusterResponse struct {
@@ -112,18 +119,32 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 		deployments = append(deployments, DeploymentStatus{
 			ID:        "dep-latest",
 			Service:   "dashboard",
-			Commit:    "118fff3",
+			Commit:    "669d5b7",
 			Stage:     "swapping",
 			Progress:  progress,
+			Steps: []DeploymentStep{
+				{Name: "Commit Trigger", Icon: "📦", Status: "completed"},
+				{Name: "CI Build & GHCR", Icon: "⚙️", Status: "completed"},
+				{Name: "Image Pull", Icon: "⬇️", Status: "completed"},
+				{Name: "Container Swap", Icon: "🔄", Status: "active"},
+				{Name: "Health Check", Icon: "🩺", Status: "pending"},
+			},
 			StartedAt: startTime,
 		})
 	} else if uptimeSec < 900 {
 		deployments = append(deployments, DeploymentStatus{
 			ID:        "dep-latest",
 			Service:   "dashboard",
-			Commit:    "118fff3",
+			Commit:    "669d5b7",
 			Stage:     "live",
 			Progress:  100,
+			Steps: []DeploymentStep{
+				{Name: "Commit Trigger", Icon: "📦", Status: "completed"},
+				{Name: "CI Build & GHCR", Icon: "⚙️", Status: "completed"},
+				{Name: "Image Pull", Icon: "⬇️", Status: "completed"},
+				{Name: "Container Swap", Icon: "🔄", Status: "completed"},
+				{Name: "Health Check", Icon: "🩺", Status: "completed"},
+			},
 			StartedAt: startTime,
 		})
 	}
