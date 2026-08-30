@@ -101,6 +101,7 @@ type ActiveTaskStatus struct {
 	SessionID   string    `json:"session_id,omitempty"`
 	AuthorName  string    `json:"author_name"`
 	Prompt      string    `json:"prompt"`
+	Summary     string    `json:"summary"`
 	Status      string    `json:"status"`
 	RetryCount  int       `json:"retry_count"`
 	TriggerType string    `json:"trigger_type"`
@@ -117,6 +118,7 @@ type BrainTasksAPIResponse struct {
 		SessionID   string    `json:"session_id"`
 		AuthorName  string    `json:"author_name"`
 		Prompt      string    `json:"prompt"`
+		Summary     string    `json:"summary"`
 		Status      string    `json:"status"`
 		RetryCount  int       `json:"retry_count"`
 		TriggerType string    `json:"trigger_type"`
@@ -885,12 +887,17 @@ func fetchActiveTasksFromBrain(ctx context.Context, brainURL string) ([]ActiveTa
 		if t.Status == "PENDING" || startedAt.IsZero() {
 			startedAt = t.CreatedAt
 		}
+		summary := strings.TrimSpace(t.Summary)
+		if summary == "" {
+			summary = t.Prompt
+		}
 		tasks = append(tasks, ActiveTaskStatus{
 			ID:          t.ID,
 			ThreadID:    t.ThreadID,
 			SessionID:   t.SessionID,
 			AuthorName:  t.AuthorName,
 			Prompt:      t.Prompt,
+			Summary:     summary,
 			Status:      t.Status,
 			RetryCount:  t.RetryCount,
 			TriggerType: t.TriggerType,

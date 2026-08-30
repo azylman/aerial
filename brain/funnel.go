@@ -228,6 +228,7 @@ func connectDiscordFunnel(database *sql.DB, pool *queue.WorkerPool) *discordgo.S
 			AuthorID:   authorID,
 			AuthorName: authorName,
 			Content:    prompt,
+			Summary:    db.CleanTaskSummary(m.Content),
 			Status:     db.StatusPending,
 			CreatedAt:  time.Now().UTC(),
 			UpdatedAt:  time.Now().UTC(),

@@ -77,6 +77,7 @@ func handlePrompt(database *sql.DB, pool *queue.WorkerPool) http.HandlerFunc {
 			AuthorID:   "http-client",
 			AuthorName: "HTTP Client",
 			Content:    req.Prompt,
+			Summary:    db.CleanTaskSummary(req.Prompt),
 			Status:     db.StatusPending,
 			CreatedAt:  time.Now().UTC(),
 			UpdatedAt:  time.Now().UTC(),
@@ -762,6 +763,7 @@ func handleTasks(database *sql.DB) http.HandlerFunc {
 				sanitizedPrompt = string(runes[:500]) + "..."
 			}
 			task.Prompt = sanitizedPrompt
+			task.Summary = SanitizeString(task.Summary)
 			task.AuthorName = SanitizeString(task.AuthorName)
 			tasks = append(tasks, task)
 		}

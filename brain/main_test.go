@@ -412,9 +412,15 @@ func TestHandleTasks(t *testing.T) {
 		t.Fatalf("unexpected response payload: %+v", resp)
 	}
 
-	// 2. Verify token was redacted in prompt and author name
+	// 2. Verify token was redacted in prompt, summary, and author name
 	if strings.Contains(resp.Tasks[0].Prompt, "ghp_123456") {
 		t.Errorf("token was not redacted from prompt: %s", resp.Tasks[0].Prompt)
+	}
+	if strings.Contains(resp.Tasks[0].Summary, "ghp_123456") {
+		t.Errorf("token was not redacted from summary: %s", resp.Tasks[0].Summary)
+	}
+	if resp.Tasks[0].Summary == "" {
+		t.Errorf("expected summary to be populated, got empty")
 	}
 	if strings.Contains(resp.Tasks[0].AuthorName, "ghp_999999") {
 		t.Errorf("token was not redacted from author name: %s", resp.Tasks[0].AuthorName)

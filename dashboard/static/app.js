@@ -140,7 +140,7 @@ function renderActiveTasks(tasks) {
         const statusBadge = isProcessing ? '⚡ RUNNING' : '⏳ QUEUED';
 
         const authorSafe = escapeHtml(task.author_name || 'System');
-        const promptSafe = escapeHtml(task.prompt || '');
+        const summarySafe = escapeHtml(task.summary || task.prompt || 'Agent Task');
         const trigger = getTriggerBadge(task.trigger_type);
         const threadSafe = escapeHtml(task.thread_id || '');
 
@@ -163,7 +163,7 @@ function renderActiveTasks(tasks) {
             : '';
 
         const inspectHTML = task.session_id 
-            ? `<a href="/conversations/?session=${encodeURIComponent(task.session_id)}" target="_blank" rel="noopener noreferrer" class="task-inspect-btn active">💬 INSPECT IN AGENTSVIEW ↗</a>`
+            ? `<a href="/sessions/${encodeURIComponent(task.session_id)}" target="_blank" rel="noopener noreferrer" class="task-inspect-btn active">💬 INSPECT IN AGENTSVIEW ↗</a>`
             : `<span class="task-inspect-btn disabled">⏳ QUEUE ALLOCATING SESSION</span>`;
 
         return `
@@ -181,7 +181,7 @@ function renderActiveTasks(tasks) {
                     </div>
                 </div>
                 <div class="task-prompt-box">
-                    &gt; ${promptSafe}
+                    &gt; ${summarySafe}
                 </div>
                 <div class="task-card-footer">
                     <span style="font-size: 0.75rem; color: var(--text-dim); font-family: var(--font-mono);">THREAD: ${threadSafe || 'N/A'}</span>

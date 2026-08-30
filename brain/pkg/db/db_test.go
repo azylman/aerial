@@ -1126,12 +1126,70 @@ func TestGetActiveTasks(t *testing.T) {
 	}
 
 	// Verify FIFO ordering by created_at ASC
-	if tasks[0].ID != "msg-1" || tasks[0].Status != StatusPending || tasks[0].TriggerType != "discord" || tasks[0].SessionID != "" {
+	if tasks[0].ID != "msg-1" || tasks[0].Status != StatusPending || tasks[0].TriggerType != "discord" || tasks[0].SessionID != "" || tasks[0].Summary != "Hello agent" {
 		t.Errorf("unexpected task[0]: %+v", tasks[0])
 	}
 
-	if tasks[1].ID != "msg-2" || tasks[1].Status != StatusProcessing || tasks[1].TriggerType != "cron" || tasks[1].SessionID != "sess-uuid-456" {
+	if tasks[1].ID != "msg-2" || tasks[1].Status != StatusProcessing || tasks[1].TriggerType != "cron" || tasks[1].SessionID != "sess-uuid-456" || tasks[1].Summary != "Daily backup check" {
 		t.Errorf("unexpected task[1]: %+v", tasks[1])
+	}
+}
+
+func TestCleanTaskSummary(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "Empty input",
+			input:    "",
+			expected: "Agent Task",
+		},
+		{
+			name:     "Simple text",
+			input:    "Deploy latest update",
+			expected: "Deploy latest update",
+		},
+		{
+			name: "Discord XML wrapper",
+			input: `<USER_REQUEST>
+Here's a message someone sent you from Discord:
+- id: 123456
+- author_username: tester
+- content: What is the current system status?
+- timestamp: 2026-08-30T12:00:00Z
+</USER_REQUEST>`,
+			expected: "What is the current system status?",
+		},
+		{
+			name: "Cron prompt wrapper",
+			input: `<USER_REQUEST>
+Scheduled trigger: Daily News Summary
+Prompt:
+Fetch and summarize today's political, tech, and AI news.
+</USER_REQUEST>`,
+			expected: "Fetch and summarize today's political, tech, and AI news.",
+		},
+		{
+			name:     "Markdown and mentions",
+			input:    "<@!123456789> ### Check *server* `status` > now!",
+			expected: "Check server status now!",
+		},
+		{
+			name:     "Long text truncation",
+			input:    "This is an extremely long prompt designed to test whether the CleanTaskSummary function correctly caps the rune length to at most one hundred and forty runes without breaking or panicking or truncating multibyte characters inappropriately in Go.",
+			expected: "This is an extremely long prompt designed to test whether the CleanTaskSummary function correctly caps the rune length to at most one hun...",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := CleanTaskSummary(tc.input)
+			if got != tc.expected {
+				t.Errorf("CleanTaskSummary(%q) = %q; want %q", tc.input, got, tc.expected)
+			}
+		})
 	}
 }
 
