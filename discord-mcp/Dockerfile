@@ -5,8 +5,9 @@ FROM node:20-alpine AS node-build
 WORKDIR /app
 RUN apk add --no-cache git
 
-# Clone vianaz/mcp-discord fix branch
-RUN git clone --depth=1 --branch fix/http-per-session-mcp-server https://github.com/vianaz/mcp-discord.git .
+# Clone vianaz/mcp-discord pinned commit
+RUN git clone https://github.com/vianaz/mcp-discord.git . && \
+    git checkout 74ac920fbc6abb8e1f7d09aea84e530e12ad1d1d
 
 # Install dependencies and build TypeScript
 RUN npm install --ignore-scripts
@@ -19,8 +20,10 @@ RUN npm prune --omit=dev --ignore-scripts
 FROM golang:1.22-alpine AS go-build
 WORKDIR /build
 
-COPY go.mod ./
-COPY main.go proxy.go proxy_test.go ./
+COPY go.mod go.sum* ./
+RUN go mod download
+
+COPY main.go proxy.go ./
 
 # Build statically linked Go proxy
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /discord-mcp .
@@ -48,7 +51,7 @@ ENV APP_PATH=build/app.js
 
 EXPOSE 4001
 
-HEALTHCHECK --interval=10s --timeout=5s --retries=3 \
+HEALTHCHECK --interval=10s --timeout=5s --start-period=5s --retries=3 \
   CMD curl -fsS http://localhost:4001/health || exit 1
 
 CMD ["/app/discord-mcp"]
