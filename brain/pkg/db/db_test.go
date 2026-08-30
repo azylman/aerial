@@ -1023,5 +1023,118 @@ func TestScheduleRunsNilDB(t *testing.T) {
 	}
 }
 
+func TestInferTriggerType(t *testing.T) {
+	tests := []struct {
+		authorID      string
+		scheduleRunID string
+		expected      string
+	}{
+		{"http-client", "", "http"},
+		{"http-client", "cron-123", "http"},
+		{"user-123", "cron-run-456", "cron"},
+		{"scheduler", "cron-999", "cron"},
+		{"scheduler", "rem-123", "reminder"},
+		{"scheduler", "once-456", "reminder"},
+		{"user-123", "", "discord"},
+		{"", "", "discord"},
+	}
+
+	for _, tc := range tests {
+		got := InferTriggerType(tc.authorID, tc.scheduleRunID)
+		if got != tc.expected {
+			t.Errorf("InferTriggerType(%q, %q) = %q; want %q", tc.authorID, tc.scheduleRunID, got, tc.expected)
+		}
+	}
+}
+
+func TestGetActiveTasks(t *testing.T) {
+	// Nil DB check
+	if _, err := GetActiveTasks(nil); err == nil {
+		t.Error("expected error for GetActiveTasks with nil DB, got nil")
+	}
+
+	database, err := InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer database.Close()
+
+	// Insert test messages with various statuses
+	now := time.Now().UTC()
+	msgs := []Message{
+		{
+			ID:          "msg-1",
+			ThreadID:    "thread-1",
+			AuthorID:    "user-123",
+			AuthorName:  "Arcane",
+			Content:     "Hello agent",
+			Status:      StatusPending,
+			CreatedAt:   now.Add(-2 * time.Minute),
+			UpdatedAt:   now.Add(-2 * time.Minute),
+		},
+		{
+			ID:            "msg-2",
+			ThreadID:      "thread-2",
+			AuthorID:      "scheduler",
+			AuthorName:    "Scheduler",
+			Content:       "Daily backup check",
+			Status:        StatusProcessing,
+			ScheduleRunID: "cron-abc-123",
+			CreatedAt:     now.Add(-1 * time.Minute),
+			UpdatedAt:     now.Add(-30 * time.Second),
+		},
+		{
+			ID:          "msg-3",
+			ThreadID:    "thread-3",
+			AuthorID:    "http-client",
+			AuthorName:  "HTTP Client",
+			Content:     "API prompt",
+			Status:      StatusCompleted,
+			CreatedAt:   now.Add(-5 * time.Minute),
+			UpdatedAt:   now.Add(-4 * time.Minute),
+		},
+		{
+			ID:          "msg-4",
+			ThreadID:    "thread-4",
+			AuthorID:    "user-456",
+			AuthorName:  "User456",
+			Content:     "Failed task",
+			Status:      StatusFailed,
+			CreatedAt:   now.Add(-10 * time.Minute),
+			UpdatedAt:   now.Add(-9 * time.Minute),
+		},
+	}
+
+	for _, m := range msgs {
+		if err := InsertMessage(database, m); err != nil {
+			t.Fatalf("InsertMessage failed: %v", err)
+		}
+	}
+
+	// Save session for thread-2
+	if err := SaveSessionID(database, "thread-2", "sess-uuid-456"); err != nil {
+		t.Fatalf("SaveSessionID failed: %v", err)
+	}
+
+	tasks, err := GetActiveTasks(database)
+	if err != nil {
+		t.Fatalf("GetActiveTasks failed: %v", err)
+	}
+
+	if len(tasks) != 2 {
+		t.Fatalf("expected 2 active tasks, got %d", len(tasks))
+	}
+
+	// Verify FIFO ordering by created_at ASC
+	if tasks[0].ID != "msg-1" || tasks[0].Status != StatusPending || tasks[0].TriggerType != "discord" || tasks[0].SessionID != "" {
+		t.Errorf("unexpected task[0]: %+v", tasks[0])
+	}
+
+	if tasks[1].ID != "msg-2" || tasks[1].Status != StatusProcessing || tasks[1].TriggerType != "cron" || tasks[1].SessionID != "sess-uuid-456" {
+		t.Errorf("unexpected task[1]: %+v", tasks[1])
+	}
+}
+
+
 
 
