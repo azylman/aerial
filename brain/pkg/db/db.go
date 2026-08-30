@@ -168,6 +168,11 @@ func InitDB(dbPath string) (*sql.DB, error) {
 
 	// Safe column migration for facts on existing DBs
 	_, _ = database.Exec(`ALTER TABLE facts ADD COLUMN thread_id TEXT NOT NULL DEFAULT '';`)
+	_, _ = database.Exec(`ALTER TABLE facts ADD COLUMN importance REAL NOT NULL DEFAULT 1.0;`)
+	_, _ = database.Exec(`ALTER TABLE facts ADD COLUMN category TEXT NOT NULL DEFAULT 'general';`)
+	_, _ = database.Exec(`ALTER TABLE facts ADD COLUMN fact_text TEXT NOT NULL DEFAULT '';`)
+	_, _ = database.Exec(`ALTER TABLE facts ADD COLUMN embedding BLOB;`)
+	_, _ = database.Exec(`ALTER TABLE facts ADD COLUMN created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP;`)
 	_, _ = database.Exec(`CREATE INDEX IF NOT EXISTS idx_facts_thread_id ON facts(thread_id);`)
 	_, _ = database.Exec(`CREATE INDEX IF NOT EXISTS idx_facts_category_created_at ON facts(category, created_at DESC);`)
 	_, _ = database.Exec(`CREATE INDEX IF NOT EXISTS idx_facts_created_at ON facts(created_at DESC);`)
