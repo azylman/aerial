@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -15,6 +16,12 @@ import (
 	"github.com/azylman/aerial/brain/pkg/runner"
 	"github.com/bwmarrin/discordgo"
 )
+
+var sensitivePattern = regexp.MustCompile(`(?i)(?:bearer\s+[a-zA-Z0-9_\-\.]+|ghp_[a-zA-Z0-9]+|gho_[a-zA-Z0-9]+|ghu_[a-zA-Z0-9]+|github_pat_[a-zA-Z0-9_]+|x-access-token:[^@\s]+|antigravity_[a-zA-Z0-9_\-]+|gemini_[a-zA-Z0-9_\-]+|aiza[0-9a-za-z-_]{35})`)
+
+func sanitizeErrorText(errStr string) string {
+	return sensitivePattern.ReplaceAllString(errStr, "[REDACTED_TOKEN]")
+}
 
 type WorkerPoolConfig struct {
 	DB             *sql.DB
@@ -205,6 +212,15 @@ func (p *WorkerPool) processMessage(msg db.Message) {
 		return
 	}
 
+	execStart := time.Now().UTC()
+	if msg.ScheduleRunID != "" {
+		_ = db.UpdateScheduleRunStatus(p.cfg.DB, db.UpdateRunParams{
+			RunID:     msg.ScheduleRunID,
+			MessageID: msg.ID,
+			Status:    "running",
+		})
+	}
+
 	skipDiscord := msg.AuthorID == "http-client"
 
 	var stopTyping func() = func() {}
@@ -212,6 +228,28 @@ func (p *WorkerPool) processMessage(msg db.Message) {
 		stopTyping = p.cfg.TypingFunc(p.getDiscordSession(), msg.ThreadID)
 	}
 	defer stopTyping()
+
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[WorkerPool] Panic in processMessage for message %s: %v", msg.ID, r)
+			stopTyping()
+			errMsg := sanitizeErrorText(fmt.Sprintf("panic: %v", r))
+			_ = db.UpdateMessageStatus(p.cfg.DB, msg.ID, db.StatusFailed, errMsg)
+			if msg.ScheduleRunID != "" {
+				_ = db.UpdateScheduleRunStatus(p.cfg.DB, db.UpdateRunParams{
+					RunID:       msg.ScheduleRunID,
+					MessageID:   msg.ID,
+					Status:      "failed",
+					CompletedAt: time.Now().UTC(),
+					DurationMs:  time.Since(execStart).Milliseconds(),
+					Error:       errMsg,
+				})
+			}
+			if p.cfg.OnMessageCompleted != nil {
+				p.cfg.OnMessageCompleted(msg, db.StatusFailed)
+			}
+		}
+	}()
 
 	currentSessionID, _ := db.GetSessionID(p.cfg.DB, msg.ThreadID)
 
@@ -264,6 +302,15 @@ func (p *WorkerPool) processMessage(msg db.Message) {
 			}
 			_ = db.UpdateMessageCompleted(p.cfg.DB, msg.ID, stdout)
 			log.Printf("[WorkerPool] Message %s completed successfully on attempt %d/%d", msg.ID, attempt, maxAttempts)
+			if msg.ScheduleRunID != "" {
+				_ = db.UpdateScheduleRunStatus(p.cfg.DB, db.UpdateRunParams{
+					RunID:       msg.ScheduleRunID,
+					MessageID:   msg.ID,
+					Status:      "completed",
+					CompletedAt: time.Now().UTC(),
+					DurationMs:  time.Since(execStart).Milliseconds(),
+				})
+			}
 			if p.cfg.OnMessageCompleted != nil {
 				p.cfg.OnMessageCompleted(msg, db.StatusCompleted)
 			}
@@ -289,6 +336,16 @@ func (p *WorkerPool) processMessage(msg db.Message) {
 				select {
 				case <-time.After(backoff):
 				case <-p.ctx.Done():
+					if msg.ScheduleRunID != "" {
+						_ = db.UpdateScheduleRunStatus(p.cfg.DB, db.UpdateRunParams{
+							RunID:       msg.ScheduleRunID,
+							MessageID:   msg.ID,
+							Status:      "failed",
+							CompletedAt: time.Now().UTC(),
+							DurationMs:  time.Since(execStart).Milliseconds(),
+							Error:       "context cancelled during execution",
+						})
+					}
 					return
 				}
 			}
@@ -303,6 +360,16 @@ func (p *WorkerPool) processMessage(msg db.Message) {
 				select {
 				case <-time.After(backoff):
 				case <-p.ctx.Done():
+					if msg.ScheduleRunID != "" {
+						_ = db.UpdateScheduleRunStatus(p.cfg.DB, db.UpdateRunParams{
+							RunID:       msg.ScheduleRunID,
+							MessageID:   msg.ID,
+							Status:      "failed",
+							CompletedAt: time.Now().UTC(),
+							DurationMs:  time.Since(execStart).Milliseconds(),
+							Error:       "context cancelled during execution",
+						})
+					}
 					return
 				}
 			}
@@ -317,6 +384,16 @@ func (p *WorkerPool) processMessage(msg db.Message) {
 			select {
 			case <-time.After(backoff):
 			case <-p.ctx.Done():
+				if msg.ScheduleRunID != "" {
+					_ = db.UpdateScheduleRunStatus(p.cfg.DB, db.UpdateRunParams{
+						RunID:       msg.ScheduleRunID,
+						MessageID:   msg.ID,
+						Status:      "failed",
+						CompletedAt: time.Now().UTC(),
+						DurationMs:  time.Since(execStart).Milliseconds(),
+						Error:       "context cancelled during execution",
+					})
+				}
 				return
 			}
 		}
@@ -335,8 +412,19 @@ func (p *WorkerPool) processMessage(msg db.Message) {
 			log.Printf("[WorkerPool] Failed to deliver exhaustion notice for message %s: %v", msg.ID, err)
 		}
 	}
-	_ = db.UpdateMessageStatus(p.cfg.DB, msg.ID, db.StatusFailed, lastErrDetail)
+	sanitizedErr := sanitizeErrorText(lastErrDetail)
+	_ = db.UpdateMessageStatus(p.cfg.DB, msg.ID, db.StatusFailed, sanitizedErr)
 	log.Printf("[WorkerPool] Message %s marked FAILED after exhausting all %d attempts", msg.ID, maxAttempts)
+	if msg.ScheduleRunID != "" {
+		_ = db.UpdateScheduleRunStatus(p.cfg.DB, db.UpdateRunParams{
+			RunID:       msg.ScheduleRunID,
+			MessageID:   msg.ID,
+			Status:      "failed",
+			CompletedAt: time.Now().UTC(),
+			DurationMs:  time.Since(execStart).Milliseconds(),
+			Error:       sanitizedErr,
+		})
+	}
 	if p.cfg.OnMessageCompleted != nil {
 		p.cfg.OnMessageCompleted(msg, db.StatusFailed)
 	}
@@ -353,6 +441,12 @@ func runnerIsTransient(errDetail string) bool {
 func RecoverInterrupted(database *sql.DB, pool *WorkerPool) {
 	if database == nil || pool == nil {
 		return
+	}
+
+	if reconciled, err := db.ReconcileOrphanedScheduleRuns(database); err != nil {
+		log.Printf("[Startup Recovery] Error reconciling orphaned schedule runs: %v", err)
+	} else if reconciled > 0 {
+		log.Printf("[Startup Recovery] Reconciled %d orphaned schedule run(s) from previous run", reconciled)
 	}
 
 	messages, err := db.GetPendingOrProcessingMessages(database)

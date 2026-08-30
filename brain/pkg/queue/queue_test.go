@@ -748,4 +748,350 @@ func TestWorkerPoolUpdateRuntimeConfig(t *testing.T) {
 	mu.Unlock()
 }
 
+func TestQueueScheduleRunLifecycle_Success(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	doneCh := make(chan struct{})
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    1,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			time.Sleep(10 * time.Millisecond)
+			return "Success output", "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			close(doneCh)
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	runID := "run-lifecycle-success-1"
+	run := db.ScheduleRun{
+		ID:           runID,
+		ScheduleID:   "cron-s-1",
+		ScheduleType: "cron",
+		TargetID:     "chan-1",
+		ThreadID:     "thread-sched-s",
+		Title:        "Morning Sync",
+		Prompt:       "Sync prompt",
+		Status:       "enqueued",
+		StartedAt:    time.Now().UTC().Add(-1 * time.Second),
+	}
+	if err := db.CreateScheduleRun(database, run); err != nil {
+		t.Fatalf("Failed to create schedule run: %v", err)
+	}
+
+	msg := db.Message{
+		ID:            "msg-sched-s-1",
+		ThreadID:      "thread-sched-s",
+		GuildID:       "scheduled",
+		AuthorID:      "scheduler",
+		Content:       "Sync prompt",
+		Status:        db.StatusPending,
+		ScheduleRunID: runID,
+		CreatedAt:     time.Now().UTC(),
+	}
+	if err := db.InsertMessage(database, msg); err != nil {
+		t.Fatalf("Failed to insert message: %v", err)
+	}
+
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Timeout waiting for schedule message execution")
+	}
+
+	// Verify schedule run status transitioned to completed
+	runs, total, err := db.GetScheduleRunsPaginated(database, 10, 0, "cron-s-1", "")
+	if err != nil || total != 1 || len(runs) != 1 {
+		t.Fatalf("Failed to get schedule run: %v (total=%d)", err, total)
+	}
+
+	r := runs[0]
+	if r.Status != "completed" {
+		t.Errorf("Expected status 'completed', got %q", r.Status)
+	}
+	if r.MessageID != "msg-sched-s-1" {
+		t.Errorf("Expected message_id 'msg-sched-s-1', got %q", r.MessageID)
+	}
+	if r.CompletedAt == nil {
+		t.Errorf("Expected CompletedAt to be set, got nil")
+	}
+	if r.DurationMs <= 0 {
+		t.Errorf("Expected DurationMs > 0, got %d", r.DurationMs)
+	}
+	if r.Error != "" {
+		t.Errorf("Expected Error to be empty, got %q", r.Error)
+	}
+}
+
+func TestQueueScheduleRunLifecycle_Failure(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	doneCh := make(chan struct{})
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    2,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			return "", "Fatal execution error: out of memory", 1, fmt.Errorf("out of memory")
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			close(doneCh)
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	runID := "run-lifecycle-fail-1"
+	run := db.ScheduleRun{
+		ID:           runID,
+		ScheduleID:   "cron-f-1",
+		ScheduleType: "cron",
+		TargetID:     "chan-1",
+		ThreadID:     "thread-sched-f",
+		Title:        "Failing Routine",
+		Prompt:       "Fail prompt",
+		Status:       "enqueued",
+		StartedAt:    time.Now().UTC().Add(-1 * time.Second),
+	}
+	if err := db.CreateScheduleRun(database, run); err != nil {
+		t.Fatalf("Failed to create schedule run: %v", err)
+	}
+
+	msg := db.Message{
+		ID:            "msg-sched-f-1",
+		ThreadID:      "thread-sched-f",
+		GuildID:       "scheduled",
+		AuthorID:      "scheduler",
+		Content:       "Fail prompt",
+		Status:        db.StatusPending,
+		ScheduleRunID: runID,
+		CreatedAt:     time.Now().UTC(),
+	}
+	if err := db.InsertMessage(database, msg); err != nil {
+		t.Fatalf("Failed to insert message: %v", err)
+	}
+
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Timeout waiting for failing message processing")
+	}
+
+	// Verify schedule run status transitioned to failed with error
+	runs, total, err := db.GetScheduleRunsPaginated(database, 10, 0, "cron-f-1", "")
+	if err != nil || total != 1 || len(runs) != 1 {
+		t.Fatalf("Failed to get schedule run: %v (total=%d)", err, total)
+	}
+
+	r := runs[0]
+	if r.Status != "failed" {
+		t.Errorf("Expected status 'failed', got %q", r.Status)
+	}
+	if r.CompletedAt == nil {
+		t.Errorf("Expected CompletedAt to be set, got nil")
+	}
+	if r.Error == "" {
+		t.Errorf("Expected Error to be set on failure, got empty string")
+	}
+}
+
+func TestQueueScheduleRunLifecycle_PanicRecovery(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	doneCh := make(chan struct{})
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    1,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			panic("simulated critical worker panic")
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			close(doneCh)
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	runID := "run-panic-1"
+	run := db.ScheduleRun{
+		ID:           runID,
+		ScheduleID:   "cron-panic-sched",
+		ScheduleType: "cron",
+		TargetID:     "chan-1",
+		ThreadID:     "thread-panic",
+		Title:        "Panic Routine",
+		Prompt:       "Panic prompt",
+		Status:       "enqueued",
+		StartedAt:    time.Now().UTC(),
+	}
+	if err := db.CreateScheduleRun(database, run); err != nil {
+		t.Fatalf("Failed to create schedule run: %v", err)
+	}
+
+	msg := db.Message{
+		ID:            "msg-panic-1",
+		ThreadID:      "thread-panic",
+		GuildID:       "scheduled",
+		AuthorID:      "scheduler",
+		Content:       "Panic prompt",
+		Status:        db.StatusPending,
+		ScheduleRunID: runID,
+		CreatedAt:     time.Now().UTC(),
+	}
+	if err := db.InsertMessage(database, msg); err != nil {
+		t.Fatalf("Failed to insert message: %v", err)
+	}
+
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Timeout waiting for panic recovery")
+	}
+
+	// Verify message in DB was marked FAILED
+	dbMsg, err := db.GetMessage(database, "msg-panic-1")
+	if err != nil || dbMsg == nil {
+		t.Fatalf("Failed to get message: %v", err)
+	}
+	if dbMsg.Status != db.StatusFailed {
+		t.Errorf("Expected message status FAILED, got %s", dbMsg.Status)
+	}
+
+	// Verify schedule run was marked failed with panic info
+	runs, _, err := db.GetScheduleRunsPaginated(database, 10, 0, "cron-panic-sched", "")
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("Failed to get schedule run: %v", err)
+	}
+	if runs[0].Status != "failed" {
+		t.Errorf("Expected schedule run status 'failed', got %q", runs[0].Status)
+	}
+	if runs[0].Error == "" || runs[0].CompletedAt == nil {
+		t.Errorf("Expected Error and CompletedAt to be set on panic, got error=%q completedAt=%v", runs[0].Error, runs[0].CompletedAt)
+	}
+}
+
+func TestRecoverInterrupted_ReconcilesOrphanedScheduleRuns(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	// Insert orphaned runs stuck in 'enqueued' and 'running'
+	orphanedEnqueued := db.ScheduleRun{
+		ID:           "run-orphan-enqueued",
+		ScheduleID:   "cron-1",
+		ScheduleType: "cron",
+		TargetID:     "chan-1",
+		ThreadID:     "thread-1",
+		Prompt:       "Orphan prompt 1",
+		Status:       "enqueued",
+		StartedAt:    time.Now().UTC().Add(-1 * time.Hour),
+	}
+	orphanedRunning := db.ScheduleRun{
+		ID:           "run-orphan-running",
+		ScheduleID:   "cron-2",
+		ScheduleType: "cron",
+		TargetID:     "chan-2",
+		ThreadID:     "thread-2",
+		Prompt:       "Orphan prompt 2",
+		Status:       "running",
+		StartedAt:    time.Now().UTC().Add(-1 * time.Hour),
+	}
+	completedRun := db.ScheduleRun{
+		ID:           "run-already-completed",
+		ScheduleID:   "cron-3",
+		ScheduleType: "cron",
+		TargetID:     "chan-3",
+		ThreadID:     "thread-3",
+		Prompt:       "Completed prompt",
+		Status:       "completed",
+		StartedAt:    time.Now().UTC().Add(-2 * time.Hour),
+	}
+
+	_ = db.CreateScheduleRun(database, orphanedEnqueued)
+	_ = db.CreateScheduleRun(database, orphanedRunning)
+	_ = db.CreateScheduleRun(database, completedRun)
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB: database,
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	RecoverInterrupted(database, pool)
+
+	// Verify orphaned runs are reconciled to 'failed'
+	runs, _, err := db.GetScheduleRunsPaginated(database, 10, 0, "", "")
+	if err != nil {
+		t.Fatalf("Failed to query schedule runs: %v", err)
+	}
+
+	for _, r := range runs {
+		if r.ID == "run-orphan-enqueued" || r.ID == "run-orphan-running" {
+			if r.Status != "failed" {
+				t.Errorf("Expected run %s to be 'failed', got %q", r.ID, r.Status)
+			}
+			if r.Error != "Interrupted by server restart" {
+				t.Errorf("Expected error 'Interrupted by server restart', got %q", r.Error)
+			}
+			if r.CompletedAt == nil {
+				t.Errorf("Expected CompletedAt to be set for reconciled run %s", r.ID)
+			}
+		} else if r.ID == "run-already-completed" {
+			if r.Status != "completed" {
+				t.Errorf("Expected run %s to remain 'completed', got %q", r.ID, r.Status)
+			}
+		}
+	}
+}
+
+
 
