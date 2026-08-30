@@ -44,6 +44,10 @@
                     <span class="btn-glow"></span>
                     <span class="btn-text">⚡ TELEMETRY</span>
                 </button>
+                <button class="nav-btn" id="tab-schedules-btn" role="tab" aria-selected="false" aria-controls="schedules-view">
+                    <span class="btn-glow"></span>
+                    <span class="btn-text">⏰ SCHEDULES</span>
+                </button>
                 <button class="nav-btn" id="tab-memory-btn" role="tab" aria-selected="false" aria-controls="memory-view">
                     <span class="btn-glow"></span>
                     <span class="btn-text">🧠 MEMORY ARCHIVE</span>
@@ -113,7 +117,100 @@
             </main>
         </div>
 
-        <!-- VIEW 2: PERMET MEMORY ARCHIVE -->
+        <!-- VIEW 2: SCHEDULES & EXECUTION TELEMETRY -->
+        <div id="schedules-view" class="view-panel" role="tabpanel" style="display: none;">
+            <!-- RECONNECTION / DEGRADED WARNING BANNER -->
+            <div id="schedules-reconnect-banner" class="reconnect-banner" style="display: none;">
+                <span class="reconnect-icon">⚡</span>
+                <span class="reconnect-text">RECONNECTING TO BRAIN // STALE-WHILE-REVALIDATE ACTIVE</span>
+            </div>
+
+            <!-- SCHEDULES SUMMARY BAR -->
+            <section class="summary-bar">
+                <div class="summary-card">
+                    <div class="card-glow"></div>
+                    <span class="label">ACTIVE CRONS</span>
+                    <span class="value" id="schedules-crons-count">--</span>
+                    <span class="sub-label" id="schedules-crons-sub">RECURRING ROUTINES</span>
+                </div>
+                <div class="summary-card">
+                    <div class="card-glow"></div>
+                    <span class="label">PENDING ONCE</span>
+                    <span class="value" id="schedules-oneshot-count">--</span>
+                    <span class="sub-label" id="schedules-oneshot-sub">ONE-SHOT REMINDERS</span>
+                </div>
+                <div class="summary-card">
+                    <div class="card-glow"></div>
+                    <span class="label">NEXT TRIGGER</span>
+                    <span class="value" id="schedules-next-trigger">--:--:--</span>
+                    <span class="sub-label" id="schedules-next-sub">UPCOMING RUN</span>
+                </div>
+                <div class="summary-card">
+                    <div class="card-glow"></div>
+                    <span class="label">24H SUCCESS RATE</span>
+                    <span class="value text-success" id="schedules-success-rate">100.0%</span>
+                    <span class="sub-label" id="schedules-success-sub">0 RUNS LOGGED</span>
+                </div>
+            </section>
+
+            <!-- SEARCH & ACTIONS TOOLBAR -->
+            <section class="schedules-toolbar-card">
+                <div class="toolbar-search-wrap">
+                    <span class="search-icon">🔍</span>
+                    <input type="text" id="schedules-search-input" class="cyber-input" placeholder="SEARCH SCHEDULES, PROMPTS, TARGET IDs (PRESS '/' TO FOCUS)..." autocomplete="off" spellcheck="false">
+                    <button id="schedules-search-clear" class="search-clear-btn" style="display: none;">&times;</button>
+                </div>
+                <div class="toolbar-actions">
+                    <button id="schedules-refresh-btn" class="cyber-btn-secondary" title="Sync schedules from brain">
+                        <span class="refresh-icon">⟳</span> SYNC SCHEDULES
+                    </button>
+                </div>
+            </section>
+
+            <!-- CATEGORY FILTER PILLS -->
+            <div class="category-pills-bar" id="schedules-filter-pills" role="toolbar" aria-label="Schedule Category Filters">
+                <button class="cat-pill active" data-filter="ALL">ALL <span class="pill-count" id="pill-count-schedules-all">0</span></button>
+                <button class="cat-pill" data-filter="CRON">CRON ROUTINES <span class="pill-count" id="pill-count-crons">0</span></button>
+                <button class="cat-pill" data-filter="ONE_SHOT">ONE-SHOT <span class="pill-count" id="pill-count-oneshots">0</span></button>
+                <button class="cat-pill" data-filter="RUNS">RUN AUDIT LOG <span class="pill-count" id="pill-count-runs">0</span></button>
+            </div>
+
+            <!-- RESULTS TELEMETRY BAR -->
+            <div class="results-telemetry-bar">
+                <span id="schedules-results-count">SHOWING 0 / 0 ITEMS</span>
+                <span class="telemetry-hint">PRESS [ESC] TO CLEAR SEARCH</span>
+            </div>
+
+            <!-- ACTIVE SCHEDULES GRID SECTION -->
+            <section id="schedules-grid-section" class="schedules-grid-section">
+                <div class="section-title-bar">
+                    <div class="section-title">
+                        <span class="title-icon">⏰</span>
+                        <h2>ACTIVE SCHEDULED ROUTINES</h2>
+                    </div>
+                    <span class="section-badge" id="schedules-active-badge">0 ACTIVE</span>
+                </div>
+                <div class="schedules-grid" id="schedules-grid" aria-live="polite">
+                    <!-- Dynamically populated via app.js -->
+                </div>
+            </section>
+
+            <!-- EXECUTION RUN AUDIT FEED SECTION -->
+            <section id="runs-feed-section" class="runs-feed-section">
+                <div class="section-title-bar">
+                    <div class="section-title">
+                        <span class="title-icon">📋</span>
+                        <h2>EXECUTION RUN AUDIT LOG</h2>
+                    </div>
+                    <span class="section-badge" id="runs-count-badge">0 RUNS</span>
+                </div>
+                <div class="runs-feed-container" id="runs-feed-container" aria-live="polite">
+                    <!-- Dynamically populated via app.js -->
+                </div>
+            </section>
+        </div>
+
+        <!-- VIEW 3: PERMET MEMORY ARCHIVE -->
         <div id="memory-view" class="view-panel" role="tabpanel" style="display: none;">
             <!-- MEMORY SUMMARY BAR -->
             <section class="summary-bar">
