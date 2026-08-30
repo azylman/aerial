@@ -1,4 +1,4 @@
-# Aerial Stack
+# Aerial
 
 An autonomous personal AI assistant system running natively on Docker, named after Gundam Aerial.
 
