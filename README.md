@@ -2,7 +2,7 @@
 
 An autonomous personal AI assistant system running natively on Docker, named after Gundam Aerial.
 
-Aerial provides a multi-agent, tool-enabled AI assistant accessible via Discord and HTTP API, with persistent multi-turn SQLite memory, Home Assistant integration, GitHub operations, host Docker infrastructure inspection, and an extensible architecture for custom skills, MCP tools, and sidecar containers.
+Aerial provides a multi-agent, tool-enabled AI assistant accessible via Discord and HTTP API, with persistent multi-turn SQLite memory, GitHub operations, host Docker infrastructure inspection, and an extensible architecture for custom skills, MCP tools, and sidecar containers.
 
 ---
 
@@ -100,7 +100,7 @@ Skills use **Progressive Disclosure**—Aerial only loads skill titles and descr
 Place custom skill directories inside `custom-skills/` in your private configuration repository:
 ```text
 custom-skills/
-└── smart-home/
+└── weather-alerts/
     └── SKILL.md
 ```
 `aerial-brain` automatically discovers custom skills in `/share/aerial-config/custom-skills` and symlinks them into `/root/.gemini/skills/` with highest priority. Orphaned or dead symlinks are automatically swept when skills are renamed or removed.
@@ -111,15 +111,15 @@ Core system skills (such as `self-improvement` and `self-update`) are baked into
 #### Skill File Structure (`SKILL.md`)
 ```markdown
 ---
-name: smart-home
-description: "Control smart home devices, lights, and scenes via Home Assistant MCP."
+name: weather-alerts
+description: "Check regional weather forecasts and send alert summaries via Discord."
 ---
 
-# Smart Home Operations Runbook
+# Weather Alerts Runbook
 
 ## Steps
-1. Query entity state using Home Assistant MCP tools.
-2. Verify target entity before executing state changes.
+1. Query weather API using MCP tools.
+2. Format forecast summary.
 ```
 
 ---
@@ -133,7 +133,6 @@ By default, Aerial automatically mounts:
 - **`discord`** (`http://discord-mcp:4001/mcp`)
 - **`docker`** (`http://docker-mcp:4002/mcp`)
 - **`github`** (`http://github-mcp:4003/mcp` when `GITHUB_PAT` is set)
-- **`ha-mcp`** (Home Assistant webhook tools when `HA_TOKEN` is configured)
 - **`scheduler`** (`http://scheduler-mcp:8080/mcp`)
 
 #### Custom MCP Servers (`config.yaml`)
@@ -153,7 +152,7 @@ Environment variables `${VAR}` are interpolated dynamically at runtime from your
 
 ### Layer 4: Adding Custom Containers (`docker-compose.override.yml`)
 
-You can add extra services or MCP containers to the `aerial-net` bridge network by creating `docker-compose.override.yml` (automatically merged by Docker Compose and ignored by Git):
+You can add extra services or MCP containers to the `aerial-net` bridge network by placing `docker-compose.override.yml` in your private configuration repository. `aerial-brain` automatically synchronizes it to the project root on startup and on git sync:
 
 ```yaml
 services:
@@ -223,7 +222,6 @@ Edit `.env` and configure your secret credentials and config repo URL:
 GEMINI_API_KEY=your_gemini_api_key_here
 DISCORD_BOT_TOKEN=your_discord_bot_token_here
 GITHUB_PAT=your_github_personal_access_token_here
-HA_TOKEN=http://192.168.1.14:8123/api/webhook/mcp_your_id
 
 # Private Configuration Repository URL
 AERIAL_CONFIG_REPO_URL=https://github.com/your-username/my-aerial-config.git

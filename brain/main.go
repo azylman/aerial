@@ -214,6 +214,8 @@ func main() {
 	}
 	bootCancel()
 
+	_ = gitsync.SyncComposeOverride("/share/aerial-config", "/share/aerial")
+
 	cfg, err := config.LoadConfig()
 	if err != nil {
 		log.Printf("Warning: initial LoadConfig error: %v", err)
@@ -293,6 +295,7 @@ func main() {
 
 	reloadConfig := func(source string) {
 		log.Printf("[%s] Changes detected. Reloading configuration, system rules, and skills...", source)
+		_ = gitsync.SyncComposeOverride("/share/aerial-config", "/share/aerial")
 		latestCfg, parseErr := config.LoadConfig()
 		if parseErr != nil {
 			log.Printf("[%s] Warning: Failed to parse config.yaml: %v", source, parseErr)
@@ -388,6 +391,7 @@ func main() {
 		syncInterval,
 		gitSyncRepos,
 		func(repo string) {
+			_ = gitsync.SyncComposeOverride("/share/aerial-config", "/share/aerial")
 			reloadConfig(fmt.Sprintf("GitSync: %s", filepath.Base(repo)))
 		},
 	)

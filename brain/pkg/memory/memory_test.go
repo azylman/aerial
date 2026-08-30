@@ -76,14 +76,14 @@ func TestRankFacts(t *testing.T) {
 func TestFormatMemoryContext(t *testing.T) {
 	facts := []db.Fact{
 		{Category: "user_preference", FactText: "Prefers Pacific Time"},
-		{Category: "system_config", FactText: "Home Assistant at http://homeassistant:8123"},
+		{Category: "system_config", FactText: "Docker Daemon at unix:///var/run/docker.sock"},
 	}
 
 	formatted := FormatMemoryContext(facts)
 	expectedSubstrings := []string{
 		"<retrieved_memory>",
 		"- [user_preference] Prefers Pacific Time",
-		"- [system_config] Home Assistant at http://homeassistant:8123",
+		"- [system_config] Docker Daemon at unix:///var/run/docker.sock",
 		"</retrieved_memory>",
 	}
 
