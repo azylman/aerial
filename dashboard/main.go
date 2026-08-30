@@ -173,6 +173,74 @@ type FactsAPIResponse struct {
 	Error  string     `json:"error,omitempty"`
 }
 
+// ScheduleSummaryMetrics represents aggregated schedule execution metrics
+type ScheduleSummaryMetrics struct {
+	TotalActive    int     `json:"total_active"`
+	CronCount      int     `json:"cron_count"`
+	OneShotCount   int     `json:"one_shot_count"`
+	TotalRuns24h   int     `json:"total_runs_24h"`
+	SuccessRate24h float64 `json:"success_rate_24h"`
+}
+
+// CronSchedule represents a recurring cron schedule
+type CronSchedule struct {
+	ID              string    `json:"id"`
+	TargetID        string    `json:"target_id,omitempty"`
+	ChannelID       string    `json:"channel_id"`
+	TitlePrefix     string    `json:"title_prefix"`
+	CronExpr        string    `json:"cron_expr"`
+	CronDescription string    `json:"cron_description"`
+	Prompt          string    `json:"prompt"`
+	Timezone        string    `json:"timezone"`
+	NextRunAt       time.Time `json:"next_run_at"`
+	Enabled         bool      `json:"enabled"`
+	CreatedAt       time.Time `json:"created_at"`
+}
+
+// OneShotSchedule represents a one-time scheduled reminder
+type OneShotSchedule struct {
+	ID        string    `json:"id"`
+	ThreadID  string    `json:"thread_id"`
+	Prompt    string    `json:"prompt"`
+	RunAt     time.Time `json:"run_at"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// SchedulesAPIResponse represents the response payload for schedules and summary metrics
+type SchedulesAPIResponse struct {
+	Status     string                 `json:"status"`
+	SystemTime time.Time              `json:"system_time,omitempty"`
+	Summary    ScheduleSummaryMetrics `json:"summary"`
+	Crons      []CronSchedule         `json:"crons"`
+	OneShots   []OneShotSchedule      `json:"one_shots"`
+	Error      string                 `json:"error,omitempty"`
+}
+
+// ScheduleRun represents a logged schedule execution run
+type ScheduleRun struct {
+	ID           int64     `json:"id"`
+	ScheduleID   string    `json:"schedule_id"`
+	ScheduleType string    `json:"schedule_type"`
+	Prompt       string    `json:"prompt"`
+	Title        string    `json:"title,omitempty"`
+	TriggeredAt  time.Time `json:"triggered_at"`
+	Status       string    `json:"status"`
+	Error        string    `json:"error,omitempty"`
+	ThreadID     string    `json:"thread_id,omitempty"`
+	MessageID    string    `json:"message_id,omitempty"`
+}
+
+// ScheduleRunsAPIResponse represents paginated execution run logs
+type ScheduleRunsAPIResponse struct {
+	Status string        `json:"status"`
+	Total  int           `json:"total"`
+	Limit  int           `json:"limit"`
+	Offset int           `json:"offset"`
+	Runs   []ScheduleRun `json:"runs"`
+	Error  string        `json:"error,omitempty"`
+}
+
+
 // Singleton tuned HTTP client for upstream brain communication
 var brainHTTPClient = &http.Client{
 	Timeout: 5 * time.Second,
@@ -916,6 +984,216 @@ func factsHandler(brainBaseURL string) http.HandlerFunc {
 	}
 }
 
+func schedulesHandler(brainBaseURL string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			http.Error(w, `{"error":"Method Not Allowed"}`, http.StatusMethodNotAllowed)
+			return
+		}
+
+		targetURL, err := url.Parse(brainBaseURL + "/schedules")
+		if err != nil {
+			http.Error(w, `{"error":"Invalid upstream URL configuration"}`, http.StatusInternalServerError)
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), 4*time.Second)
+		defer cancel()
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL.String(), nil)
+		if err != nil {
+			http.Error(w, `{"error":"Failed to create upstream request"}`, http.StatusInternalServerError)
+			return
+		}
+		req.Header.Set("Accept", "application/json")
+
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+
+		resp, err := brainHTTPClient.Do(req)
+		if err != nil {
+			log.Printf("[Dashboard] Upstream brain request failed (%s): %v", targetURL.String(), err)
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(SchedulesAPIResponse{
+				Status: "degraded",
+				Error:  "Brain service unreachable. Retrying...",
+				Summary: ScheduleSummaryMetrics{
+					TotalActive:    0,
+					CronCount:      0,
+					OneShotCount:   0,
+					TotalRuns24h:   0,
+					SuccessRate24h: 100.0,
+				},
+				Crons:    []CronSchedule{},
+				OneShots: []OneShotSchedule{},
+			})
+			return
+		}
+		defer func() {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+		}()
+
+		if resp.StatusCode != http.StatusOK {
+			log.Printf("[Dashboard] Upstream brain returned status %d", resp.StatusCode)
+			w.WriteHeader(resp.StatusCode)
+			_ = json.NewEncoder(w).Encode(SchedulesAPIResponse{
+				Status: "error",
+				Error:  "Upstream brain error occurred",
+				Summary: ScheduleSummaryMetrics{
+					TotalActive:    0,
+					CronCount:      0,
+					OneShotCount:   0,
+					TotalRuns24h:   0,
+					SuccessRate24h: 100.0,
+				},
+				Crons:    []CronSchedule{},
+				OneShots: []OneShotSchedule{},
+			})
+			return
+		}
+
+		var data SchedulesAPIResponse
+		if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+			w.WriteHeader(http.StatusBadGateway)
+			_ = json.NewEncoder(w).Encode(SchedulesAPIResponse{
+				Status: "error",
+				Error:  "Failed to decode upstream brain response",
+				Summary: ScheduleSummaryMetrics{
+					TotalActive:    0,
+					CronCount:      0,
+					OneShotCount:   0,
+					TotalRuns24h:   0,
+					SuccessRate24h: 100.0,
+				},
+				Crons:    []CronSchedule{},
+				OneShots: []OneShotSchedule{},
+			})
+			return
+		}
+
+		if data.Crons == nil {
+			data.Crons = []CronSchedule{}
+		}
+		if data.OneShots == nil {
+			data.OneShots = []OneShotSchedule{}
+		}
+
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(data)
+	}
+}
+
+func scheduleRunsHandler(brainBaseURL string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			http.Error(w, `{"error":"Method Not Allowed"}`, http.StatusMethodNotAllowed)
+			return
+		}
+
+		inQuery := r.URL.Query()
+		targetURL, err := url.Parse(brainBaseURL + "/schedules/runs")
+		if err != nil {
+			http.Error(w, `{"error":"Invalid upstream URL configuration"}`, http.StatusInternalServerError)
+			return
+		}
+
+		outQuery := targetURL.Query()
+		limit := 50
+		if lStr := inQuery.Get("limit"); lStr != "" {
+			if n, err := strconv.Atoi(lStr); err == nil && n > 0 && n <= 100 {
+				limit = n
+			}
+		}
+		outQuery.Set("limit", strconv.Itoa(limit))
+
+		offset := 0
+		if oStr := inQuery.Get("offset"); oStr != "" {
+			if n, err := strconv.Atoi(oStr); err == nil && n >= 0 {
+				offset = n
+			}
+		}
+		outQuery.Set("offset", strconv.Itoa(offset))
+
+		if schedID := strings.TrimSpace(inQuery.Get("schedule_id")); schedID != "" {
+			outQuery.Set("schedule_id", schedID)
+		}
+		if status := strings.TrimSpace(inQuery.Get("status")); status != "" {
+			outQuery.Set("status", status)
+		}
+		targetURL.RawQuery = outQuery.Encode()
+
+		ctx, cancel := context.WithTimeout(r.Context(), 4*time.Second)
+		defer cancel()
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL.String(), nil)
+		if err != nil {
+			http.Error(w, `{"error":"Failed to create upstream request"}`, http.StatusInternalServerError)
+			return
+		}
+		req.Header.Set("Accept", "application/json")
+
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+
+		resp, err := brainHTTPClient.Do(req)
+		if err != nil {
+			log.Printf("[Dashboard] Upstream brain request failed (%s): %v", targetURL.String(), err)
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(ScheduleRunsAPIResponse{
+				Status: "degraded",
+				Error:  "Brain service unreachable. Retrying...",
+				Total:  0,
+				Limit:  limit,
+				Offset: offset,
+				Runs:   []ScheduleRun{},
+			})
+			return
+		}
+		defer func() {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+		}()
+
+		if resp.StatusCode != http.StatusOK {
+			log.Printf("[Dashboard] Upstream brain returned status %d", resp.StatusCode)
+			w.WriteHeader(resp.StatusCode)
+			_ = json.NewEncoder(w).Encode(ScheduleRunsAPIResponse{
+				Status: "error",
+				Error:  "Upstream brain error occurred",
+				Total:  0,
+				Limit:  limit,
+				Offset: offset,
+				Runs:   []ScheduleRun{},
+			})
+			return
+		}
+
+		var data ScheduleRunsAPIResponse
+		if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+			w.WriteHeader(http.StatusBadGateway)
+			_ = json.NewEncoder(w).Encode(ScheduleRunsAPIResponse{
+				Status: "error",
+				Error:  "Failed to decode upstream brain response",
+				Total:  0,
+				Limit:  limit,
+				Offset: offset,
+				Runs:   []ScheduleRun{},
+			})
+			return
+		}
+
+		if data.Runs == nil {
+			data.Runs = []ScheduleRun{}
+		}
+
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(data)
+	}
+}
+
 func healthHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
@@ -963,6 +1241,11 @@ func main() {
 	mux.HandleFunc("/dashboard/api/status", statusHandler)
 	mux.HandleFunc("/api/facts", factsHandler(brainURL))
 	mux.HandleFunc("/dashboard/api/facts", factsHandler(brainURL))
+	mux.HandleFunc("/api/schedules", schedulesHandler(brainURL))
+	mux.HandleFunc("/dashboard/api/schedules", schedulesHandler(brainURL))
+	mux.HandleFunc("/api/schedules/runs", scheduleRunsHandler(brainURL))
+	mux.HandleFunc("/dashboard/api/schedules/runs", scheduleRunsHandler(brainURL))
+
 
 	fileServer := http.FileServer(http.FS(staticFS))
 	staticHandler := func(w http.ResponseWriter, r *http.Request) {
