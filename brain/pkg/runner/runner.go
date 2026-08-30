@@ -40,15 +40,19 @@ func RunAgy(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string
 		cmd.Dir = "."
 	}
 	cmd.Stdin = strings.NewReader("")
+	env := append(os.Environ(),
+		"GIT_TERMINAL_PROMPT=0",
+		"AGY_LOG_LEVEL=debug",
+		"ANTIGRAVITY_LOG_LEVEL=debug",
+	)
 	if apiKey != "" {
-		cmd.Env = append(os.Environ(),
+		env = append(env,
 			"GEMINI_API_KEY="+apiKey,
 			"ANTIGRAVITY_API_KEY="+apiKey,
 			"GOOGLE_GENAI_API_KEY="+apiKey,
-			"AGY_LOG_LEVEL=debug",
-			"ANTIGRAVITY_LOG_LEVEL=debug",
 		)
 	}
+	cmd.Env = env
 
 	var outBuf, errBuf bytes.Buffer
 	cmd.Stdout = &outBuf
