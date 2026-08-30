@@ -397,7 +397,7 @@ func GetActiveTasks(database *sql.DB) ([]ActiveTask, error) {
 	if err != nil {
 		return nil, fmt.Errorf("query active tasks: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	tasks := make([]ActiveTask, 0)
 	for rows.Next() {

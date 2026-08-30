@@ -2,14 +2,17 @@ package queue
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/azylman/aerial/brain/pkg/db"
+	"github.com/azylman/aerial/brain/pkg/memory"
 	"github.com/azylman/aerial/brain/pkg/notifier"
 	"github.com/bwmarrin/discordgo"
 )
@@ -1092,6 +1095,139 @@ func TestRecoverInterrupted_ReconcilesOrphanedScheduleRuns(t *testing.T) {
 		}
 	}
 }
+
+func TestWorkerPool_InjectsSemanticMemoryFacts(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	var capturedPrompt string
+	doneCh := make(chan struct{})
+
+	mockRetriever := func(ctx context.Context, database *sql.DB, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+		return []db.Fact{
+			{Category: "system_config", FactText: "Server runs on port 8080", Importance: 1.0},
+		}, nil
+	}
+
+	mockRunner := func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+		capturedPrompt = prompt
+		return "Response text", "", 0, nil
+	}
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:                  database,
+		MemoryRetrieverFunc: mockRetriever,
+		RunnerFunc:          mockRunner,
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) func() {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			close(doneCh)
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	originalContent := "What port does the server run on?"
+	msg := db.Message{
+		ID:        "msg-mem-1",
+		ThreadID:  "thread-mem-1",
+		AuthorID:  "user-1",
+		Content:   originalContent,
+		Status:    db.StatusPending,
+		CreatedAt: time.Now().UTC(),
+	}
+	_ = db.InsertMessage(database, msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Timeout waiting for message execution")
+	}
+
+	// Verify capturedPrompt contains memory block
+	expectedBlock := "<retrieved_memory>\n- [system_config] Server runs on port 8080\n</retrieved_memory>"
+	if !strings.Contains(capturedPrompt, expectedBlock) {
+		t.Errorf("Expected capturedPrompt to contain %q, got: %s", expectedBlock, capturedPrompt)
+	}
+	if !strings.Contains(capturedPrompt, originalContent) {
+		t.Errorf("Expected capturedPrompt to contain %q, got: %s", originalContent, capturedPrompt)
+	}
+
+	// Verify DB message content was preserved as original
+	dbMsg, _ := db.GetMessage(database, "msg-mem-1")
+	if dbMsg.Content != originalContent {
+		t.Errorf("Expected DB message content to be %q, got %q", originalContent, dbMsg.Content)
+	}
+}
+
+func TestWorkerPool_SemanticMemoryGracefulFallbackOnError(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	var capturedPrompt string
+	doneCh := make(chan struct{})
+
+	mockRetriever := func(ctx context.Context, database *sql.DB, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+		return nil, fmt.Errorf("ollama connection refused")
+	}
+
+	mockRunner := func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+		capturedPrompt = prompt
+		return "Response text", "", 0, nil
+	}
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:                  database,
+		MemoryRetrieverFunc: mockRetriever,
+		RunnerFunc:          mockRunner,
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) func() {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			close(doneCh)
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	originalContent := "What port does the server run on?"
+	msg := db.Message{
+		ID:        "msg-mem-2",
+		ThreadID:  "thread-mem-2",
+		AuthorID:  "user-1",
+		Content:   originalContent,
+		Status:    db.StatusPending,
+		CreatedAt: time.Now().UTC(),
+	}
+	_ = db.InsertMessage(database, msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Timeout waiting for message execution")
+	}
+
+	// Verify capturedPrompt equals originalContent without injected block
+	if capturedPrompt != originalContent {
+		t.Errorf("Expected capturedPrompt to equal %q, got: %s", originalContent, capturedPrompt)
+	}
+}
+
 
 
 

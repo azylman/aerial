@@ -5,11 +5,54 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"regexp"
 	"sort"
 	"strings"
 
 	"github.com/azylman/aerial/brain/pkg/db"
 )
+
+var (
+	reDiscordContent = regexp.MustCompile(`(?s)(?:^|\n)- content:\s*(.+?)(?:\n- timestamp:|\n- mentions:|\n- attachments:|\n</USER_REQUEST>|\z)`)
+	reUserRequest    = regexp.MustCompile(`(?s)<USER_REQUEST>(.*?)</USER_REQUEST>`)
+)
+
+// ExtractQueryText extracts the core user utterance from structured prompt envelopes (e.g. Discord funnel or XML blocks).
+func ExtractQueryText(content string) string {
+	clean := strings.TrimSpace(content)
+	if clean == "" {
+		return ""
+	}
+
+	// 1. Check for Discord funnel format: "- content: <user utterance>"
+	if m := reDiscordContent.FindStringSubmatch(clean); len(m) > 1 {
+		userText := strings.TrimSpace(m[1])
+		if userText != "" {
+			if len(userText) > 1000 {
+				userText = userText[:1000]
+			}
+			return userText
+		}
+	}
+
+	// 2. Check for XML wrapper <USER_REQUEST>...</USER_REQUEST>
+	if m := reUserRequest.FindStringSubmatch(clean); len(m) > 1 {
+		inner := strings.TrimSpace(m[1])
+		if inner != "" {
+			if len(inner) > 1000 {
+				inner = inner[:1000]
+			}
+			return inner
+		}
+	}
+
+	// 3. Raw text fallback
+	if len(clean) > 1000 {
+		clean = clean[:1000]
+	}
+	return clean
+}
+
 
 const (
 	DefaultMinScoreThreshold = 0.45

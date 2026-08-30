@@ -12,6 +12,7 @@ import (
 
 	"github.com/azylman/aerial/brain/pkg/db"
 	"github.com/azylman/aerial/brain/pkg/delivery"
+	"github.com/azylman/aerial/brain/pkg/memory"
 	"github.com/azylman/aerial/brain/pkg/notifier"
 	"github.com/azylman/aerial/brain/pkg/runner"
 	"github.com/bwmarrin/discordgo"
@@ -23,6 +24,8 @@ func sanitizeErrorText(errStr string) string {
 	return sensitivePattern.ReplaceAllString(errStr, "[REDACTED_TOKEN]")
 }
 
+type MemoryRetrieverFunc func(ctx context.Context, database *sql.DB, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error)
+
 type WorkerPoolConfig struct {
 	DB             *sql.DB
 	DiscordSession *discordgo.Session
@@ -33,14 +36,17 @@ type WorkerPoolConfig struct {
 	TimeoutMinutes int
 	BackoffBase    time.Duration
 	MaxAttempts    int
+	MemoryClient   *memory.Client
 
 	// Optional hooks for testing/custom overrides
-	RunnerFunc         func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error)
-	NotifierFunc       func(agyBin, apiKey, contextDescription string) string
-	DeliveryFunc       func(s *discordgo.Session, channelID, text string) error
-	TypingFunc         func(s *discordgo.Session, channelID string) (stop func())
-	OnMessageCompleted func(msg db.Message, finalStatus string)
+	RunnerFunc          func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error)
+	NotifierFunc        func(agyBin, apiKey, contextDescription string) string
+	DeliveryFunc        func(s *discordgo.Session, channelID, text string) error
+	TypingFunc          func(s *discordgo.Session, channelID string) (stop func())
+	OnMessageCompleted  func(msg db.Message, finalStatus string)
+	MemoryRetrieverFunc MemoryRetrieverFunc
 }
+
 
 type WorkerPool struct {
 	cfg       WorkerPoolConfig
@@ -74,8 +80,15 @@ func NewWorkerPool(cfg WorkerPoolConfig) *WorkerPool {
 	if cfg.TypingFunc == nil {
 		cfg.TypingFunc = delivery.StartTyping
 	}
+	if cfg.MemoryClient == nil {
+		cfg.MemoryClient = memory.NewClient("")
+	}
+	if cfg.MemoryRetrieverFunc == nil {
+		cfg.MemoryRetrieverFunc = memory.RetrieveRelevantFacts
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+
 	return &WorkerPool{
 		cfg:       cfg,
 		threadChs: make(map[string]chan db.Message),
@@ -253,6 +266,26 @@ func (p *WorkerPool) processMessage(msg db.Message) {
 
 	currentSessionID, _ := db.GetSessionID(p.cfg.DB, msg.ThreadID)
 
+	// Dynamically retrieve relevant semantic memory facts for the incoming prompt
+	queryText := memory.ExtractQueryText(msg.Content)
+	prompt := msg.Content
+
+	if p.cfg.MemoryRetrieverFunc != nil && p.cfg.DB != nil && strings.TrimSpace(queryText) != "" {
+		retrievalCtx, retrievalCancel := context.WithTimeout(p.ctx, 2500*time.Millisecond)
+		facts, err := p.cfg.MemoryRetrieverFunc(retrievalCtx, p.cfg.DB, p.cfg.MemoryClient, queryText, 10)
+		retrievalCancel()
+
+		if err != nil {
+			log.Printf("[WorkerPool] Warning: Semantic memory retrieval failed for message %s: %v. Proceeding without injected facts.", msg.ID, err)
+		} else if len(facts) > 0 {
+			memoryBlock := memory.FormatMemoryContext(facts)
+			if memoryBlock != "" {
+				prompt = memoryBlock + "\n\n" + msg.Content
+				log.Printf("[WorkerPool] Injected %d semantic memory fact(s) into message %s", len(facts), msg.ID)
+			}
+		}
+	}
+
 	maxAttempts := p.cfg.MaxAttempts
 	lastErrDetail := ""
 
@@ -270,7 +303,7 @@ func (p *WorkerPool) processMessage(msg db.Message) {
 		stdout, stderr, exitCode, err := p.cfg.RunnerFunc(
 			runCtx,
 			currentAgyBin,
-			msg.Content,
+			prompt,
 			currentSessionID,
 			currentAPIKey,
 			currentModel,
