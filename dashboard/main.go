@@ -76,21 +76,27 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 	uptimeSec := int64(time.Since(startTime).Seconds())
 	now := time.Now().UTC()
 
+	rawServices := []ServiceStatus{
+		{Name: "brain", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
+		{Name: "scheduler-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
+		{Name: "discord-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
+		{Name: "docker-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
+		{Name: "github-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
+		{Name: "ollama", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
+		{Name: "agentsview", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
+		{Name: "watchtower", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
+		{Name: "autoheal", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
+		{Name: "proxy", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
+	}
+
+	for i := range rawServices {
+		rawServices[i].Name = strings.TrimPrefix(rawServices[i].Name, "aerial-")
+	}
+
 	resp := ClusterResponse{
 		SystemTime:    now,
 		ClusterStatus: "healthy",
-		Services: []ServiceStatus{
-			{Name: "aerial-brain", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
-			{Name: "aerial-scheduler-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
-			{Name: "aerial-discord-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
-			{Name: "aerial-docker-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
-			{Name: "aerial-github-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
-			{Name: "aerial-ollama", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
-			{Name: "aerial-agentsview", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
-			{Name: "aerial-watchtower", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
-			{Name: "aerial-autoheal", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
-			{Name: "aerial-proxy", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
-		},
+		Services:      rawServices,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
