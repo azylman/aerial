@@ -279,13 +279,6 @@ func Run(ctx context.Context, database *sql.DB, enqueuer MessageEnqueuer, thread
 		log.Printf("[Scheduler] Error in initial schedule check: %v", err)
 	}
 
-	// Trigger initial background fact extraction asynchronously on startup
-	go func() {
-		if err := memory.ExtractActiveConversationFacts(ctx, database, ollamaClient, llmFunc, 12); err != nil {
-			log.Printf("[Memory] Fact extraction error: %v", err)
-		}
-	}()
-
 	var tickCount int
 	for {
 		select {

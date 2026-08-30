@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/azylman/aerial/brain/pkg/db"
 )
@@ -91,11 +92,12 @@ func ExtractActiveConversationFacts(ctx context.Context, database *sql.DB, clien
 }
 
 func processThreadFacts(ctx context.Context, database *sql.DB, client *Client, llmFunc LLMClientFunc, threadID string) error {
+	maxRowID, _ := db.GetMaxMessageRowID(database, threadID)
+
 	transcript, err := loadThreadTranscript(database, threadID)
 	if err != nil || strings.TrimSpace(transcript) == "" {
-		log.Printf("[Memory] No transcript found for thread %s (err=%v), marking extracted.", threadID, err)
-		// Mark extracted so we don't repeatedly try missing transcripts
-		_ = db.UpdateConversationFactExtractedAt(database, threadID)
+		log.Printf("[Memory] No transcript found for thread %s (err=%v), marking watermark.", threadID, err)
+		_ = db.UpdateConversationFactWatermark(database, threadID, maxRowID)
 		return nil
 	}
 
@@ -110,6 +112,9 @@ func processThreadFacts(ctx context.Context, database *sql.DB, client *Client, l
 		return fmt.Errorf("failed to parse extracted facts JSON: %w", err)
 	}
 
+	// Fetch existing facts for deduplication
+	existingFacts, _ := db.GetFactsByThreadWithEmbeddings(database, threadID)
+
 	for _, item := range factsPayload.Facts {
 		if strings.TrimSpace(item.FactText) == "" {
 			continue
@@ -122,15 +127,44 @@ func processThreadFacts(ctx context.Context, database *sql.DB, client *Client, l
 			continue
 		}
 
-		_, err = db.InsertFact(database, item.Category, item.FactText, item.Importance, threadID, emb)
-		if err != nil {
-			log.Printf("[Memory] Error inserting fact into DB: %v", err)
-		} else {
-			log.Printf("[Memory] Extracted and stored new fact [%s]: %s", item.Category, item.FactText)
+		// Semantic deduplication: Check if a similar fact already exists
+		isDuplicate := false
+		if len(emb) > 0 && len(existingFacts) > 0 {
+			for _, ef := range existingFacts {
+				if ef.Fact.Category == item.Category && len(ef.Embedding) == len(emb) {
+					sim := DotProduct(emb, ef.Embedding)
+					if sim >= 0.88 {
+						log.Printf("[Memory] Duplicate fact detected (%q ~ %q, sim=%.2f). Skipping duplicate row.",
+							item.FactText, ef.Fact.FactText, sim)
+						isDuplicate = true
+						break
+					}
+				}
+			}
+		}
+
+		if !isDuplicate {
+			id, err := db.InsertFact(database, item.Category, item.FactText, item.Importance, threadID, emb)
+			if err != nil {
+				log.Printf("[Memory] Error inserting fact into DB: %v", err)
+			} else {
+				log.Printf("[Memory] Extracted and stored new fact [%s] (id=%d): %s", item.Category, id, item.FactText)
+				existingFacts = append(existingFacts, db.FactWithEmbedding{
+					Fact: db.Fact{
+						ID:         id,
+						Category:   item.Category,
+						FactText:   item.FactText,
+						Importance: item.Importance,
+						ThreadID:   threadID,
+						CreatedAt:  time.Now().UTC(),
+					},
+					Embedding: emb,
+				})
+			}
 		}
 	}
 
-	return db.UpdateConversationFactExtractedAt(database, threadID)
+	return db.UpdateConversationFactWatermark(database, threadID, maxRowID)
 }
 
 func loadThreadTranscript(database *sql.DB, threadID string) (string, error) {
