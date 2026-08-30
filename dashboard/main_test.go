@@ -74,7 +74,7 @@ func TestFactsHandler_Success(t *testing.T) {
 				{
 					ID:         1,
 					Category:   "user_preference",
-					FactText:   "Arcane likes tea",
+					FactText:   "User prefers dark mode",
 					Importance: 0.9,
 					ThreadID:   "thread-123",
 					CreatedAt:  time.Now().UTC(),
@@ -104,7 +104,7 @@ func TestFactsHandler_Success(t *testing.T) {
 		t.Fatalf("failed to decode response: %v", err)
 	}
 
-	if len(data.Facts) != 1 || data.Facts[0].FactText != "Arcane likes tea" {
+	if len(data.Facts) != 1 || data.Facts[0].FactText != "User prefers dark mode" {
 		t.Errorf("unexpected facts in response: %+v", data.Facts)
 	}
 }

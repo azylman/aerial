@@ -12,7 +12,7 @@ The goal of this feature is to equip Aerial with a persistent, vector-search pow
 
 ---
 
-## 2. Key Architectural Decisions (Approved by Arcane)
+## 2. Key Architectural Decisions (Approved Architecture)
 
 1. **Pre-Baked Ollama Docker Container**:
    - Ollama runs in a custom container image (`docker/ollama/Dockerfile`).
@@ -140,7 +140,7 @@ CREATE INDEX IF NOT EXISTS idx_facts_conversation ON facts(conversation_id);
        "facts": [
          {
            "category": "user_preference",
-           "fact_text": "Arcane prefers Pacific Time (America/Los_Angeles)",
+           "fact_text": "User prefers Pacific Time (America/Los_Angeles)",
            "importance_score": 1.0
          }
        ]
@@ -148,7 +148,7 @@ CREATE INDEX IF NOT EXISTS idx_facts_conversation ON facts(conversation_id);
      ```
 
 3. **Embedding Generation & Storage**:
-   - Call Ollama POST `http://ollama:11434/api/embeddings` (`model: "bge-small-en"`).
+   - Call Ollama POST `http://ollama:11434/api/embeddings` (`model: "all-minilm"`).
    - Store new fact and embedding in SQLite transaction.
    - Update `conversations.last_fact_extracted_at = CURRENT_TIMESTAMP`.
 
@@ -171,7 +171,7 @@ CREATE INDEX IF NOT EXISTS idx_facts_conversation ON facts(conversation_id);
    - Prepend matching facts under `<retrieved_memory>` block in prompt context:
      ```markdown
      <retrieved_memory>
-     - [user_preference] Arcane prefers Pacific Time (America/Los_Angeles)
+     - [user_preference] User prefers Pacific Time (America/Los_Angeles)
      - [system_config] Home Assistant runs at http://homeassistant:8123
      </retrieved_memory>
      ```

@@ -1,4 +1,4 @@
-﻿# K3s & GitOps Platform Migration Implementation Plan
+# K3s & GitOps Platform Migration Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -8,7 +8,7 @@
 
 **Tech Stack:** K3s (`rancher/k3s:v1.30.2-k3s1`), FluxCD v2, Kustomize, Mozilla SOPS + Age, Traefik Ingress, Local-Path Storage, GitHub Actions, GHCR.
 
-**Spec:** [`docs/superpowers/specs/2026-08-29-k3s-gitops-architecture-design.md`](file:///C:/Users/alexz/.gemini/antigravity/scratch/gundam/docs/superpowers/specs/2026-08-29-k3s-gitops-architecture-design.md)
+**Spec:** [`docs/superpowers/specs/2026-08-29-k3s-gitops-architecture-design.md`](file:///share/aerial/docs/superpowers/specs/2026-08-29-k3s-gitops-architecture-design.md)
 
 ## Global Constraints
 - `aerial-brain` must run with `replicas: 1` and `strategy: Recreate` to prevent dual-gateway Discord collisions.

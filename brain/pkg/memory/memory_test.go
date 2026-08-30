@@ -161,7 +161,7 @@ func TestDBFactInsertionAndRetrieval(t *testing.T) {
 	defer func() { _ = database.Close() }()
 
 	emb := []float32{0.5, 0.5, 0.7071}
-	id, err := db.InsertFact(database, "user_pref", "Arcane likes Go", 1.0, "thread-123", emb)
+	id, err := db.InsertFact(database, "user_pref", "User prefers dark mode", 1.0, "thread-123", emb)
 	if err != nil {
 		t.Fatalf("failed to insert fact: %v", err)
 	}
@@ -177,8 +177,8 @@ func TestDBFactInsertionAndRetrieval(t *testing.T) {
 		t.Fatalf("expected 1 fact, got %d", len(facts))
 	}
 
-	if facts[0].Fact.FactText != "Arcane likes Go" {
-		t.Errorf("expected fact text 'Arcane likes Go', got %q", facts[0].Fact.FactText)
+	if facts[0].Fact.FactText != "User prefers dark mode" {
+		t.Errorf("expected fact text 'User prefers dark mode', got %q", facts[0].Fact.FactText)
 	}
 	if len(facts[0].Embedding) != 3 {
 		t.Fatalf("expected embedding len 3, got %d", len(facts[0].Embedding))
