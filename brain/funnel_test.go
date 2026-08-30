@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -103,8 +104,8 @@ func TestRunStartupCatchUpSweep_NilAndEmptySafeguards(t *testing.T) {
 	pool := queue.NewWorkerPool(queue.WorkerPoolConfig{DB: database})
 
 	// 1. Nil session / DB / pool should be safe no-op
-	RunStartupCatchUpSweep(nil, nil, nil, nil)
-	RunStartupCatchUpSweep(nil, database, pool, nil)
+	RunStartupCatchUpSweep(context.Background(), nil, nil, nil)
+	RunStartupCatchUpSweep(context.Background(), database, pool, nil)
 
 	// 2. Valid empty session should complete without panic
 	s := &discordgo.Session{
@@ -118,6 +119,6 @@ func TestRunStartupCatchUpSweep_NilAndEmptySafeguards(t *testing.T) {
 	isSweeping.Store(false)
 	sweepMu.Unlock()
 
-	RunStartupCatchUpSweep(nil, database, pool, s)
+	RunStartupCatchUpSweep(context.Background(), database, pool, s)
 }
 
