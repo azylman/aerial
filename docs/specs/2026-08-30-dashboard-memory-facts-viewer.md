@@ -2,7 +2,7 @@
 
 **Date**: 2026-08-30  
 **Status**: APPROVED & IMPLEMENTING  
-**Authors**: Aerial Engineering Squad, Arcane, Distributed Systems Architect, Cyberpunk UX Lead, Devil's Advocate  
+**Authors**: Aerial Engineering Squad, Distributed Systems Architect, Cyberpunk UX Lead, Devil's Advocate  
 
 ---
 
@@ -81,7 +81,7 @@ CREATE INDEX IF NOT EXISTS idx_facts_created_at ON facts(created_at DESC);
     {
       "id": 1,
       "category": "user_preference",
-      "fact_text": "Arcane prefers concise responses and dark mode aesthetics",
+      "fact_text": "User prefers concise responses and dark mode aesthetics",
       "importance": 0.95,
       "thread_id": "1543513328691707944",
       "created_at": "2026-08-30T06:50:54Z"

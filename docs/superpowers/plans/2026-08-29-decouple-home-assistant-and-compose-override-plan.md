@@ -1,4 +1,4 @@
-﻿# Decouple Home Assistant to Private Config & Add Config-Driven Docker Compose Override Plan
+# Decouple Home Assistant to Private Config & Add Config-Driven Docker Compose Override Plan
 
 **Goal:** Decouple the Home Assistant MCP connection and `ha-operations` skill into the private `azylman/aerial-config` repository, strip all Home Assistant/smart-home references from the public repositories (`azylman/aerial` and `azylman/aerial-config-example`), and enable `docker-compose.override.yml` synchronization directly from the config repository.
 
@@ -57,7 +57,7 @@
 ## Verification Plan
 
 ### Automated Tests
-- `docker run --rm -v "C:\Users\alexz\.gemini\antigravity\scratch\gundam\brain:/app" -w /app golang:1.22 go test -race -v ./...`
+- `docker run --rm -v "/share/aerial/brain:/app" -w /app golang:1.22 go test -race -v ./...`
 - Assert `LoadMCPConfig` only loads default core services (`scheduler`, `discord`, `docker`, `github`) unless overridden in `config.yaml`.
 - Assert `SyncComposeOverride` handles symlinking, updates, and removal cleanly.
 

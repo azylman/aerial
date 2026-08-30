@@ -32,7 +32,7 @@ cd /share/aerial && git pull --rebase origin main
 ```
 
 ### Step 2: Verify Strict Invariants
-- **Zero Personal Data Check**: Confirm NO user names (e.g. "Alex"), Discord handles (e.g. "Arcane"), private locations, or personal logic are included in code, comments, or prompts.
+- **Zero Personal Data Check**: Confirm NO real names, Discord handles, usernames, private locations, or personal logic are included in code, comments, or prompts.
 - **Zero Plaintext Secrets**: Confirm no API keys or tokens are written to disk.
 
 ### Step 3: Run Full Unit Test Verification

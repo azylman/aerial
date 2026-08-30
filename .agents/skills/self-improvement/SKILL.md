@@ -17,7 +17,7 @@ Before making any changes, Aerial MUST determine the target repository:
 - **Scope**: Generic Go execution engine (`brain/`), built-in MCP microservices (`scheduler-mcp`, `discord-mcp`, `docker-mcp`, `github-mcp`), base system skills, Docker topology, and core architecture docs.
 - **Strict Invariants**:
   - **100% Generic & Domain-Agnostic**: All prompts, code, error handlers, and schemas must remain completely generic and reusable for any user.
-  - **Zero Personal Data Invariant**: **NEVER** commit user names (e.g., "Alex"), user handles (e.g., "Arcane", "arcane103"), family members, personal home locations, private device/entity IDs, or user-specific business logic into this repository.
+  - **Zero Personal Data Invariant**: **NEVER** commit real names, Discord handles, usernames, family members, home addresses/locations, private device/entity IDs, or user-specific business logic into this repository.
   - **Zero Plaintext Secrets Invariant**: NEVER commit API keys, tokens, private webhook URLs, or GitHub PATs to disk.
 - **Deploy Path**: Commit and push to `azylman/aerial:main`. Watchtower builds & deploys container updates out-of-band.
 
@@ -85,7 +85,7 @@ Step 9: Commit, Push & Continuous Deployment
 
 ### Step 3: Senior Code Review
 Conduct a thorough, deep technical code review inspecting:
-- **Repository Boundary & Generic Invariant**: Ensure no user-specific names (e.g. "Alex"), Discord handles (e.g. "Arcane"), family members, private devices, or home locations are hardcoded in code, comments, or prompts for `/share/aerial`.
+- **Repository Boundary & Generic Invariant**: Ensure no real names, personal Discord handles, family members, private devices, or home locations are hardcoded in code, comments, or prompts for `/share/aerial`.
 - **Concurrency & Goroutine Lifecycle**: Mutex lock scope, race conditions, channel deadlocks, and worker idle teardown.
 - **Database Safety**: SQLite WAL mode (`PRAGMA journal_mode = WAL;`), busy timeout (`PRAGMA busy_timeout = 5000;`), and connection pool constraints.
 - **Subprocess Management**: Context cancellation, zombie process prevention, stream buffer capture, and exit code handling.

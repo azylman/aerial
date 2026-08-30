@@ -8,7 +8,7 @@
 
 **Tech Stack:** GitHub Actions, GHCR (`ghcr.io`), Docker Compose, `containrrr/watchtower:latest`, `willfarrell/autoheal:latest`, Go / Docker.
 
-**Spec:** [`docs/superpowers/specs/2026-08-29-container-health-and-deployment-design.md`](file:///C:/Users/alexz/.gemini/antigravity/scratch/gundam/docs/superpowers/specs/2026-08-29-container-health-and-deployment-design.md)
+**Spec:** [`docs/superpowers/specs/2026-08-29-container-health-and-deployment-design.md`](file:///share/aerial/docs/superpowers/specs/2026-08-29-container-health-and-deployment-design.md)
 
 ## Global Constraints
 - `aerial-brain` must never invoke `docker compose` on itself or sibling containers.
@@ -133,7 +133,7 @@ jobs:
 Run:
 ```powershell
 # Verify YAML loads properly
-Get-Content "C:\Users\alexz\.gemini\antigravity\scratch\gundam\.github\workflows\deploy.yml" | Out-Null
+Get-Content ".github/workflows/deploy.yml" | Out-Null
 ```
 
 - [ ] **Step 3: Commit Task 1**
