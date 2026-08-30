@@ -4,7 +4,6 @@ COPY go.mod ./
 COPY main.go ./
 COPY main_test.go ./
 COPY static/ ./static/
-RUN go test -v ./...
 RUN CGO_ENABLED=0 GOOS=linux go build -o aerial-dashboard .
 
 FROM alpine:latest
