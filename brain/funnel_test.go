@@ -28,9 +28,9 @@ func TestFunnelHelpers(t *testing.T) {
 		},
 	}
 
-	title := deriveThreadTitle("<@1542035925603713086> Write a python script for Home Assistant")
-	if title != "Write a python script for Home Assistant" {
-		t.Errorf("Expected title 'Write a python script for Home Assistant', got: %q", title)
+	title := deriveThreadTitle("<@1542035925603713086> Write a python script for Docker")
+	if title != "Write a python script for Docker" {
+		t.Errorf("Expected title 'Write a python script for Docker', got: %q", title)
 	}
 
 	targetThreadID, isThread := getOrCreateThreadID(s, dmMsg)

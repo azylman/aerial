@@ -444,11 +444,6 @@ func LoadMCPConfig() json.RawMessage {
 			"serverUrl": "http://github-mcp:4003/sse",
 		}
 	}
-	if haToken := os.Getenv("HA_TOKEN"); haToken != "" {
-		mergedServers["ha-mcp"] = map[string]interface{}{
-			"serverUrl": haToken,
-		}
-	}
 
 	// 2. Check for file-based overrides (e.g. /share/aerial-config/mcp.config.json)
 	configPaths := []string{
