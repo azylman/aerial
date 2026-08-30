@@ -367,3 +367,102 @@ func TestSchedulesEndpoints(t *testing.T) {
 	}
 }
 
+func TestHandleTasks(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	now := time.Now().UTC()
+	longPrompt := strings.Repeat("A", 600) + " ghp_123456789012345678901234567890123456"
+
+	_ = db.InsertMessage(database, db.Message{
+		ID:         "msg-test-task",
+		ThreadID:   "thread-1",
+		AuthorID:   "user-1",
+		AuthorName: "Tester with token ghp_999999999999999999999999999999999999",
+		Content:    "Secret token ghp_123456789012345678901234567890123456 in prompt " + longPrompt,
+		Status:     db.StatusProcessing,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	})
+
+	handler := handleTasks(database)
+
+	// 1. Test GET request returns 200 OK
+	req := httptest.NewRequest(http.MethodGet, "/tasks", nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp struct {
+		Status string          `json:"status"`
+		Total  int             `json:"total"`
+		Tasks  []db.ActiveTask `json:"tasks"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode json: %v", err)
+	}
+
+	if resp.Status != "ok" || resp.Total != 1 || len(resp.Tasks) != 1 {
+		t.Fatalf("unexpected response payload: %+v", resp)
+	}
+
+	// 2. Verify token was redacted in prompt and author name
+	if strings.Contains(resp.Tasks[0].Prompt, "ghp_123456") {
+		t.Errorf("token was not redacted from prompt: %s", resp.Tasks[0].Prompt)
+	}
+	if strings.Contains(resp.Tasks[0].AuthorName, "ghp_999999") {
+		t.Errorf("token was not redacted from author name: %s", resp.Tasks[0].AuthorName)
+	}
+
+	// Verify truncation to <= 503 runes (500 + "...")
+	promptRunes := []rune(resp.Tasks[0].Prompt)
+	if len(promptRunes) > 503 || !strings.HasSuffix(resp.Tasks[0].Prompt, "...") {
+		t.Errorf("prompt was not properly truncated to 500 chars with ellipsis: len=%d, text=%s", len(promptRunes), resp.Tasks[0].Prompt)
+	}
+
+	// 3. Test 1s TTL Caching: inserting another active message should not appear immediately
+	_ = db.InsertMessage(database, db.Message{
+		ID:         "msg-test-task-2",
+		ThreadID:   "thread-2",
+		AuthorID:   "user-2",
+		AuthorName: "Tester 2",
+		Content:    "Second prompt",
+		Status:     db.StatusPending,
+		CreatedAt:  now.Add(time.Second),
+		UpdatedAt:  now.Add(time.Second),
+	})
+
+	rrCached := httptest.NewRecorder()
+	handler.ServeHTTP(rrCached, req)
+	if rrCached.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from cached call, got %d", rrCached.Code)
+	}
+
+	var cachedResp struct {
+		Status string          `json:"status"`
+		Total  int             `json:"total"`
+		Tasks  []db.ActiveTask `json:"tasks"`
+	}
+	if err := json.NewDecoder(rrCached.Body).Decode(&cachedResp); err != nil {
+		t.Fatalf("failed to decode cached json: %v", err)
+	}
+	if cachedResp.Total != 1 || len(cachedResp.Tasks) != 1 {
+		t.Errorf("expected 1 cached task within 1s TTL, got %d", cachedResp.Total)
+	}
+
+	// 4. Test Method Not Allowed (e.g. POST)
+	reqPost := httptest.NewRequest(http.MethodPost, "/tasks", nil)
+	rrPost := httptest.NewRecorder()
+	handler.ServeHTTP(rrPost, reqPost)
+	if rrPost.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405 Method Not Allowed, got %d", rrPost.Code)
+	}
+}
+
+

@@ -688,6 +688,98 @@ func handleScheduleRuns(database *sql.DB) http.HandlerFunc {
 	}
 }
 
+type TasksResponse struct {
+	Status string          `json:"status"`
+	Total  int             `json:"total"`
+	Tasks  []db.ActiveTask `json:"tasks"`
+}
+
+type tasksCache struct {
+	mu        sync.RWMutex
+	tasks     []db.ActiveTask
+	expiresAt time.Time
+}
+
+func handleTasks(database *sql.DB) http.HandlerFunc {
+	cache := &tasksCache{}
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Method not allowed"})
+			return
+		}
+
+		now := time.Now().UTC()
+
+		cache.mu.RLock()
+		if now.Before(cache.expiresAt) && cache.tasks != nil {
+			cached := cache.tasks
+			cache.mu.RUnlock()
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(TasksResponse{
+				Status: "ok",
+				Total:  len(cached),
+				Tasks:  cached,
+			})
+			return
+		}
+		cache.mu.RUnlock()
+
+		cache.mu.Lock()
+		defer cache.mu.Unlock()
+
+		// Double-check under write lock
+		if now.Before(cache.expiresAt) && cache.tasks != nil {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(TasksResponse{
+				Status: "ok",
+				Total:  len(cache.tasks),
+				Tasks:  cache.tasks,
+			})
+			return
+		}
+
+		rawTasks, err := db.GetActiveTasks(database)
+		if err != nil {
+			log.Printf("[HTTP] Error fetching active tasks: %v", err)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to fetch active tasks"})
+			return
+		}
+
+		tasks := make([]db.ActiveTask, 0, len(rawTasks))
+		for _, task := range rawTasks {
+			sanitizedPrompt := SanitizeString(task.Prompt)
+			runes := []rune(sanitizedPrompt)
+			if len(runes) > 500 {
+				sanitizedPrompt = string(runes[:500]) + "..."
+			}
+			task.Prompt = sanitizedPrompt
+			task.AuthorName = SanitizeString(task.AuthorName)
+			tasks = append(tasks, task)
+		}
+
+		cache.tasks = tasks
+		cache.expiresAt = now.Add(1 * time.Second)
+
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(TasksResponse{
+			Status: "ok",
+			Total:  len(tasks),
+			Tasks:  tasks,
+		})
+	}
+}
+
 func main() {
 	configRepoUrl := config.GetEnv("AERIAL_CONFIG_REPO_URL", "")
 	pat := config.GetEnv("GITHUB_PAT", "")
@@ -891,6 +983,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/prompt", handlePrompt(database, pool))
 	mux.HandleFunc("/transcripts", handleTranscripts(database))
+	mux.HandleFunc("/tasks", handleTasks(database))
 	mux.HandleFunc("/facts", handleFacts(database))
 	mux.HandleFunc("/schedules", handleSchedules(database))
 	mux.HandleFunc("/schedules/runs", handleScheduleRuns(database))
