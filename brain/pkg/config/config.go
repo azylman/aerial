@@ -29,6 +29,24 @@ var ConfigSearchPaths = []string{
 	"/share/aerial/config.yaml",
 }
 
+var SystemGuidelinesSearchPaths = []string{
+	"/share/aerial-config/SYSTEM.local.md",
+	"/share/aerial-config/SYSTEM.md",
+	"/share/aerial/SYSTEM.md",
+	"/app/SYSTEM.md",
+	"./SYSTEM.md",
+}
+
+var AgentInstructionsSearchPaths = []string{
+	"/share/aerial-config/AGENTS.local.md",
+	"/share/aerial-config/AGENTS.md",
+	"/share/aerial/AGENTS.md",
+	"/app/AGENTS.md",
+	"/data/AGENTS.md",
+	"./AGENTS.local.md",
+	"./AGENTS.md",
+}
+
 type GitSyncConfig struct {
 	Enabled       bool     `yaml:"enabled" json:"enabled"`
 	Interval      string   `yaml:"interval" json:"interval"`
@@ -321,12 +339,7 @@ func EnsureSystemRules(customPrompt string) error {
 	foundInstructions := false
 
 	// 1. Base system guidelines (SYSTEM.md) placed FIRST
-	systemPaths := []string{
-		"/share/aerial/SYSTEM.md",
-		"/app/SYSTEM.md",
-		"./SYSTEM.md",
-	}
-	for _, p := range systemPaths {
+	for _, p := range SystemGuidelinesSearchPaths {
 		if data, err := os.ReadFile(p); err == nil && len(bytes.TrimSpace(data)) > 0 {
 			sb.WriteString(fmt.Sprintf("# Base System Guidelines (%s)\n\n%s\n\n", filepath.Base(p), string(data)))
 			foundInstructions = true
@@ -336,17 +349,7 @@ func EnsureSystemRules(customPrompt string) error {
 	}
 
 	// 2. User persona overrides (AGENTS.md) in priority order
-	searchPaths := []string{
-		"/share/aerial-config/AGENTS.local.md",
-		"/share/aerial-config/AGENTS.md",
-		"/share/aerial/AGENTS.md",
-		"/app/AGENTS.md",
-		"/data/AGENTS.md",
-		"./AGENTS.local.md",
-		"./AGENTS.md",
-	}
-
-	for _, p := range searchPaths {
+	for _, p := range AgentInstructionsSearchPaths {
 		if data, err := os.ReadFile(p); err == nil && len(bytes.TrimSpace(data)) > 0 {
 			sb.WriteString(fmt.Sprintf("# User Persona Overrides (%s)\n\n%s\n\n", filepath.Base(p), string(data)))
 			foundInstructions = true

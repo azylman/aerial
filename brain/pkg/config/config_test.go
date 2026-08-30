@@ -124,6 +124,15 @@ func TestEnsureSystemRules_LKGCAndOrdering(t *testing.T) {
 	tmpDir := t.TempDir()
 	_ = os.Setenv("HOME", tmpDir)
 
+	oldSys := SystemGuidelinesSearchPaths
+	oldAgent := AgentInstructionsSearchPaths
+	SystemGuidelinesSearchPaths = []string{filepath.Join(tmpDir, "non_existent_system.md")}
+	AgentInstructionsSearchPaths = []string{filepath.Join(tmpDir, "non_existent_agents.md")}
+	defer func() {
+		SystemGuidelinesSearchPaths = oldSys
+		AgentInstructionsSearchPaths = oldAgent
+	}()
+
 	// Test writing initial instructions
 	if err := EnsureSystemRules("initial instructions prompt"); err != nil {
 		t.Fatalf("EnsureSystemRules failed: %v", err)
