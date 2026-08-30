@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -125,75 +126,219 @@ var brainHTTPClient = &http.Client{
 	},
 }
 
+// Unix socket client for Docker daemon status inspection
+var dockerSocketClient = &http.Client{
+	Timeout: 2 * time.Second,
+	Transport: &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{Timeout: 1 * time.Second}).DialContext(ctx, "unix", "/var/run/docker.sock")
+		},
+	},
+}
+
+type DockerContainerJSON struct {
+	ID      string            `json:"Id"`
+	Names   []string          `json:"Names"`
+	Image   string            `json:"Image"`
+	Created int64             `json:"Created"`
+	State   string            `json:"State"`
+	Status  string            `json:"Status"`
+	Labels  map[string]string `json:"Labels"`
+	Health  *struct {
+		Status string `json:"Status"`
+	} `json:"Health,omitempty"`
+}
+
+func getGitCommit() string {
+	if envCommit := os.Getenv("GIT_COMMIT"); envCommit != "" {
+		if len(envCommit) > 7 {
+			return envCommit[:7]
+		}
+		return envCommit
+	}
+
+	paths := []string{
+		"/share/aerial/.git/refs/heads/main",
+		"/share/aerial/.git/refs/heads/master",
+		"/share/aerial/.git/HEAD",
+	}
+
+	for _, p := range paths {
+		if data, err := os.ReadFile(p); err == nil {
+			trimmed := strings.TrimSpace(string(data))
+			if strings.HasPrefix(trimmed, "ref: ") {
+				refPath := filepath.Join("/share/aerial/.git", strings.TrimPrefix(trimmed, "ref: "))
+				if refData, err := os.ReadFile(refPath); err == nil {
+					refTrimmed := strings.TrimSpace(string(refData))
+					if len(refTrimmed) >= 7 {
+						return refTrimmed[:7]
+					}
+				}
+			} else if len(trimmed) >= 7 {
+				return trimmed[:7]
+			}
+		}
+	}
+
+	return "latest"
+}
+
+func fetchDockerClusterState(ctx context.Context) ([]ServiceStatus, []DeploymentStatus, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://localhost/containers/json", nil)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	resp, err := dockerSocketClient.Do(req)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, nil, fmt.Errorf("docker API status %d", resp.StatusCode)
+	}
+
+	var rawContainers []DockerContainerJSON
+	if err := json.NewDecoder(resp.Body).Decode(&rawContainers); err != nil {
+		return nil, nil, err
+	}
+
+	now := time.Now().UTC()
+	currentCommit := getGitCommit()
+
+	var services []ServiceStatus
+	var deployments []DeploymentStatus
+
+	for _, c := range rawContainers {
+		isAerial := false
+		var svcName string
+
+		if proj, ok := c.Labels["com.docker.compose.project"]; ok && proj == "aerial" {
+			isAerial = true
+			svcName = c.Labels["com.docker.compose.service"]
+		} else if len(c.Names) > 0 {
+			name := strings.TrimPrefix(c.Names[0], "/")
+			if strings.HasPrefix(name, "aerial-") {
+				isAerial = true
+				svcName = strings.TrimPrefix(name, "aerial-")
+			}
+		}
+
+		if !isAerial || svcName == "" {
+			continue
+		}
+
+		createdAt := time.Unix(c.Created, 0).UTC()
+		uptimeSec := int64(now.Sub(createdAt).Seconds())
+		if uptimeSec < 0 {
+			uptimeSec = 0
+		}
+
+		status := "healthy"
+		if c.Health != nil && c.Health.Status != "" {
+			if c.Health.Status == "healthy" {
+				status = "healthy"
+			} else if c.Health.Status == "starting" {
+				status = "starting"
+			} else {
+				status = "unhealthy"
+			}
+		} else if c.State != "running" {
+			status = "unhealthy"
+		}
+
+		services = append(services, ServiceStatus{
+			Name:          svcName,
+			Status:        status,
+			UptimeSeconds: uptimeSec,
+			LastCheckTime: now,
+		})
+
+		// Check if this container was deployed/restarted within the last 20 minutes
+		if uptimeSec < 1200 {
+			stage := "live"
+			progress := 100
+			stepStatus := "completed"
+			healthStatus := "completed"
+
+			if status == "starting" {
+				stage = "swapping"
+				progress = 85
+				stepStatus = "completed"
+				healthStatus = "active"
+			} else if status == "unhealthy" {
+				stage = "degraded"
+				progress = 85
+				healthStatus = "pending"
+			}
+
+			deployments = append(deployments, DeploymentStatus{
+				ID:       "dep-" + svcName,
+				Service:  svcName,
+				Commit:   currentCommit,
+				Stage:    stage,
+				Progress: progress,
+				Steps: []DeploymentStep{
+					{Name: "Commit Trigger", Icon: "📦", Status: "completed"},
+					{Name: "CI Build & GHCR", Icon: "⚙️", Status: "completed"},
+					{Name: "Image Pull", Icon: "⬇️", Status: "completed"},
+					{Name: "Container Swap", Icon: "🔄", Status: stepStatus},
+					{Name: "Health Check", Icon: "🩺", Status: healthStatus},
+				},
+				StartedAt: createdAt,
+			})
+		}
+	}
+
+	return services, deployments, nil
+}
+
 func statusHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	uptimeSec := int64(time.Since(startTime).Seconds())
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+
 	now := time.Now().UTC()
+	services, deployments, err := fetchDockerClusterState(ctx)
 
-	rawServices := []ServiceStatus{
-		{Name: "brain", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
-		{Name: "scheduler-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
-		{Name: "discord-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
-		{Name: "docker-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
-		{Name: "github-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
-		{Name: "ollama", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
-		{Name: "agentsview", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
-		{Name: "watchtower", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
-		{Name: "autoheal", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
-		{Name: "proxy", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
-	}
-
-	for i := range rawServices {
-		rawServices[i].Name = strings.TrimPrefix(rawServices[i].Name, "aerial-")
-	}
-
-	deployments := []DeploymentStatus{}
-	if uptimeSec < 120 {
-		progress := 20 + int(uptimeSec*75/120)
-		if progress > 95 {
-			progress = 95
+	if err != nil || len(services) == 0 {
+		uptimeSec := int64(time.Since(startTime).Seconds())
+		services = []ServiceStatus{
+			{Name: "brain", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
+			{Name: "scheduler-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
+			{Name: "discord-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
+			{Name: "docker-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
+			{Name: "github-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
+			{Name: "ollama", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
+			{Name: "agentsview", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
+			{Name: "watchtower", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
+			{Name: "autoheal", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
+			{Name: "proxy", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
+			{Name: "dashboard", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
 		}
-		deployments = append(deployments, DeploymentStatus{
-			ID:        "dep-latest",
-			Service:   "dashboard",
-			Commit:    "669d5b7",
-			Stage:     "swapping",
-			Progress:  progress,
-			Steps: []DeploymentStep{
-				{Name: "Commit Trigger", Icon: "📦", Status: "completed"},
-				{Name: "CI Build & GHCR", Icon: "⚙️", Status: "completed"},
-				{Name: "Image Pull", Icon: "⬇️", Status: "completed"},
-				{Name: "Container Swap", Icon: "🔄", Status: "active"},
-				{Name: "Health Check", Icon: "🩺", Status: "pending"},
-			},
-			StartedAt: startTime,
-		})
-	} else if uptimeSec < 900 {
-		deployments = append(deployments, DeploymentStatus{
-			ID:        "dep-latest",
-			Service:   "dashboard",
-			Commit:    "669d5b7",
-			Stage:     "live",
-			Progress:  100,
-			Steps: []DeploymentStep{
-				{Name: "Commit Trigger", Icon: "📦", Status: "completed"},
-				{Name: "CI Build & GHCR", Icon: "⚙️", Status: "completed"},
-				{Name: "Image Pull", Icon: "⬇️", Status: "completed"},
-				{Name: "Container Swap", Icon: "🔄", Status: "completed"},
-				{Name: "Health Check", Icon: "🩺", Status: "completed"},
-			},
-			StartedAt: startTime,
-		})
+		deployments = []DeploymentStatus{}
+	}
+
+	clusterStatus := "healthy"
+	for _, s := range services {
+		if s.Status == "unhealthy" {
+			clusterStatus = "degraded"
+			break
+		}
 	}
 
 	resp := ClusterResponse{
 		SystemTime:    now,
-		ClusterStatus: "healthy",
-		Services:      rawServices,
+		ClusterStatus: clusterStatus,
+		Services:      services,
 		Deployments:   deployments,
 	}
 	w.Header().Set("Content-Type", "application/json")

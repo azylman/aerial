@@ -133,3 +133,14 @@ func TestFactsHandler_DegradedFallback(t *testing.T) {
 		t.Errorf("expected non-nil empty facts array")
 	}
 }
+
+func TestGetGitCommit(t *testing.T) {
+	commit := getGitCommit()
+	if commit == "" {
+		t.Errorf("expected non-empty git commit")
+	}
+	if len(commit) > 7 {
+		t.Errorf("expected short commit <= 7 chars, got %s", commit)
+	}
+}
+
