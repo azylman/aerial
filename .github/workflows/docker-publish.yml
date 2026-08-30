@@ -11,8 +11,60 @@ permissions:
   packages: write
 
 jobs:
+  changes:
+    name: Detect Changed Microservices
+    runs-on: ubuntu-latest
+    outputs:
+      brain: ${{ steps.filter.outputs.brain }}
+      scheduler-mcp: ${{ steps.filter.outputs.scheduler-mcp }}
+      discord-mcp: ${{ steps.filter.outputs.discord-mcp }}
+      docker-mcp: ${{ steps.filter.outputs.docker-mcp }}
+      github-mcp: ${{ steps.filter.outputs.github-mcp }}
+      dashboard: ${{ steps.filter.outputs.dashboard }}
+      proxy: ${{ steps.filter.outputs.proxy }}
+      ollama: ${{ steps.filter.outputs.ollama }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            brain:
+              - 'brain/**'
+              - 'docker-compose.yml'
+              - '.github/workflows/**'
+            scheduler-mcp:
+              - 'scheduler-mcp/**'
+              - 'docker-compose.yml'
+              - '.github/workflows/**'
+            discord-mcp:
+              - 'discord-mcp/**'
+              - 'docker-compose.yml'
+              - '.github/workflows/**'
+            docker-mcp:
+              - 'docker-mcp/**'
+              - 'docker-compose.yml'
+              - '.github/workflows/**'
+            github-mcp:
+              - 'github-mcp/**'
+              - 'docker-compose.yml'
+              - '.github/workflows/**'
+            dashboard:
+              - 'dashboard/**'
+              - 'docker-compose.yml'
+              - '.github/workflows/**'
+            proxy:
+              - 'proxy/**'
+              - 'docker-compose.yml'
+              - '.github/workflows/**'
+            ollama:
+              - 'docker/ollama/**'
+              - 'docker-compose.yml'
+              - '.github/workflows/**'
+
   test:
     name: Run Service Unit Tests
+    needs: changes
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
@@ -29,28 +81,32 @@ jobs:
             dashboard/go.mod
 
       - name: Test Brain
+        if: needs.changes.outputs.brain == 'true'
         run: |
           cd brain
           go test -v ./...
 
       - name: Test Scheduler MCP
+        if: needs.changes.outputs.scheduler-mcp == 'true'
         run: |
           cd scheduler-mcp
           go test -v ./...
 
       - name: Test Discord MCP
+        if: needs.changes.outputs.discord-mcp == 'true'
         run: |
           cd discord-mcp
           go test -v ./...
 
       - name: Test Status Dashboard
+        if: needs.changes.outputs.dashboard == 'true'
         run: |
           cd dashboard
           go test -v ./...
 
   build-and-push:
     name: Build & Push Images to GHCR
-    needs: test
+    needs: [changes, test]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -91,19 +147,22 @@ jobs:
 
     steps:
       - name: Checkout Repository
+        if: needs.changes.outputs[matrix.service] == 'true'
         uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
+        if: needs.changes.outputs[matrix.service] == 'true'
         uses: docker/setup-buildx-action@v3
 
       - name: Lowercase Repository Owner
+        if: needs.changes.outputs[matrix.service] == 'true'
         id: repo_owner
         run: echo "owner=${OWNER,,}" >> $GITHUB_OUTPUT
         env:
           OWNER: ${{ github.repository_owner }}
 
       - name: Log in to GitHub Container Registry
-        if: github.event_name != 'pull_request'
+        if: needs.changes.outputs[matrix.service] == 'true' && github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -111,6 +170,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and Push ${{ matrix.service }}
+        if: needs.changes.outputs[matrix.service] == 'true'
         uses: docker/build-push-action@v5
         with:
           context: ${{ matrix.context }}
