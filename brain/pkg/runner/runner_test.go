@@ -97,6 +97,26 @@ func TestClassifyError(t *testing.T) {
 			errDetailMustContain: "command not found",
 		},
 		{
+			name:                 "Exit Code 0 With Partial Stdout And 503 In Stderr (Truncated Stream)",
+			exitCode:             0,
+			stdout:               "The\n",
+			stderr:               "Agent execution terminated due to error. agent executor error: Error 503, Message: This model is currently experiencing high demand., Status: UNAVAILABLE",
+			wantFailure:          true,
+			wantTransient:        true,
+			wantCorrupt:          false,
+			errDetailMustContain: "503",
+		},
+		{
+			name:                 "Exit Code 0 With Partial Stdout And Generic Error In Stderr",
+			exitCode:             0,
+			stdout:               "The\n",
+			stderr:               "Agent execution terminated due to error: panic: runtime error",
+			wantFailure:          true,
+			wantTransient:        false,
+			wantCorrupt:          false,
+			errDetailMustContain: "terminated",
+		},
+		{
 			name:                 "Empty Stdout with Exit Code 0",
 			exitCode:             0,
 			stdout:               "",
@@ -157,3 +177,4 @@ func TestRunAgyWithEcho(t *testing.T) {
 		t.Errorf("Expected stdout to contain 'Hello aerial', got: %q (stderr: %q)", stdout, stderr)
 	}
 }
+

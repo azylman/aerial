@@ -238,8 +238,10 @@ func (p *WorkerPool) processMessage(msg db.Message) {
 		}
 		lastErrDetail = errDetail
 
-		if extSess := runner.ExtractSessionID(stderr, startTime); extSess != "" {
-			currentSessionID = extSess
+		if currentSessionID == "" {
+			if extSess := runner.ExtractSessionID(stderr, startTime); extSess != "" {
+				currentSessionID = extSess
+			}
 		}
 
 		if !isFailure {
@@ -379,3 +381,4 @@ func RecoverInterrupted(database *sql.DB, pool *WorkerPool) {
 		pool.Enqueue(m)
 	}
 }
+

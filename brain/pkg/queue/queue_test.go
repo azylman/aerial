@@ -3,6 +3,8 @@ package queue
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -31,7 +33,15 @@ func TestQueueSuccessLifecycleAndSessionSaving(t *testing.T) {
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
-			return "Clean output response", "Starting conversation update stream for session-uuid-123\nDone", 0, nil
+			homeDir, _ := os.UserHomeDir()
+			if homeDir == "" {
+				homeDir = "/root"
+			}
+			sessDir := filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain", "session-uuid-123")
+			_ = os.MkdirAll(sessDir, 0755)
+			now := time.Now()
+			_ = os.Chtimes(sessDir, now, now)
+			return "Clean output response", "", 0, nil
 		},
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
 			mu.Lock()
@@ -284,10 +294,18 @@ func TestQueueSessionCorruptionRecovery(t *testing.T) {
 			if sessionID == "broken-session-uuid" {
 				return "", "Error: failed to load conversation: session corrupted", 1, fmt.Errorf("corrupt")
 			}
-			return "Clean output after session reset", "Starting conversation update stream for fresh-uuid-999\nDone", 0, nil
+			homeDir, _ := os.UserHomeDir()
+			if homeDir == "" {
+				homeDir = "/root"
+			}
+			sessDir := filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain", "fresh-uuid-999")
+			_ = os.MkdirAll(sessDir, 0755)
+			now := time.Now()
+			_ = os.Chtimes(sessDir, now, now)
+			return "Clean output after session reset", "", 0, nil
 		},
 		NotifierFunc: func(agyBin, apiKey, contextDescription string) string {
-			return "I refreshed our conversation! ✨"
+			return "I refreshed our conversation! ???"
 		},
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
 			mu.Lock()
@@ -729,4 +747,5 @@ func TestWorkerPoolUpdateRuntimeConfig(t *testing.T) {
 	}
 	mu.Unlock()
 }
+
 
