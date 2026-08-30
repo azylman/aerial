@@ -763,4 +763,265 @@ func TestFactExtractionWatermarkAndFiltering(t *testing.T) {
 	}
 }
 
+func setupTestDB(t *testing.T) *sql.DB {
+	t.Helper()
+	database, err := InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize test database: %v", err)
+	}
+	return database
+}
+
+func TestScheduleRunsCRUD(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	now := time.Now().UTC()
+	run := ScheduleRun{
+		ID:           "run-test-1",
+		ScheduleID:   "cron-123",
+		ScheduleType: "cron",
+		MessageID:    "msg-123",
+		TargetID:     "chan-1",
+		ThreadID:     "thread-1",
+		Title:        "Morning Brief",
+		Prompt:       "Check systems",
+		Status:       "enqueued",
+		StartedAt:    now,
+	}
+
+	if err := CreateScheduleRun(db, run); err != nil {
+		t.Fatalf("CreateScheduleRun failed: %v", err)
+	}
+
+	// Update status to running then completed
+	updateParams := UpdateRunParams{
+		RunID:       "run-test-1",
+		Status:      "completed",
+		CompletedAt: now.Add(5 * time.Second),
+		DurationMs:  5000,
+		Error:       "",
+	}
+	if err := UpdateScheduleRunStatus(db, updateParams); err != nil {
+		t.Fatalf("UpdateScheduleRunStatus failed: %v", err)
+	}
+
+	runs, total, err := GetScheduleRunsPaginated(db, 10, 0, "", "")
+	if err != nil || total != 1 || len(runs) != 1 {
+		t.Fatalf("GetScheduleRunsPaginated failed: %v (total=%d, len=%d)", err, total, len(runs))
+	}
+	if runs[0].Status != "completed" || runs[0].DurationMs != 5000 {
+		t.Errorf("Unexpected run fields: %+v", runs[0])
+	}
+	if runs[0].CompletedAt == nil || runs[0].CompletedAt.IsZero() {
+		t.Errorf("Expected CompletedAt to be set, got nil or zero")
+	}
+
+	// Filter by schedule_id
+	runsSched, totalSched, err := GetScheduleRunsPaginated(db, 10, 0, "cron-123", "")
+	if err != nil || totalSched != 1 || len(runsSched) != 1 {
+		t.Errorf("Expected 1 run for cron-123, got %d (err: %v)", totalSched, err)
+	}
+
+	// Filter by non-matching status
+	runsFailed, totalFailed, err := GetScheduleRunsPaginated(db, 10, 0, "", "failed")
+	if err != nil || totalFailed != 0 || len(runsFailed) != 0 {
+		t.Errorf("Expected 0 runs for failed status, got %d", totalFailed)
+	}
+}
+
+func TestReconcileOrphanedScheduleRuns(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	now := time.Now().UTC()
+	_ = CreateScheduleRun(db, ScheduleRun{ID: "run-stuck-1", ScheduleID: "cron-1", ScheduleType: "cron", TargetID: "c1", ThreadID: "t1", Prompt: "p1", Status: "running", StartedAt: now})
+	_ = CreateScheduleRun(db, ScheduleRun{ID: "run-stuck-2", ScheduleID: "cron-2", ScheduleType: "cron", TargetID: "c2", ThreadID: "t2", Prompt: "p2", Status: "enqueued", StartedAt: now})
+	_ = CreateScheduleRun(db, ScheduleRun{ID: "run-ok-3", ScheduleID: "cron-3", ScheduleType: "cron", TargetID: "c3", ThreadID: "t3", Prompt: "p3", Status: "completed", StartedAt: now})
+
+	reconciled, err := ReconcileOrphanedScheduleRuns(db)
+	if err != nil {
+		t.Fatalf("ReconcileOrphanedScheduleRuns failed: %v", err)
+	}
+	if reconciled != 2 {
+		t.Errorf("Expected 2 reconciled runs, got %d", reconciled)
+	}
+
+	runs, _, _ := GetScheduleRunsPaginated(db, 10, 0, "", "")
+	for _, r := range runs {
+		if (r.ID == "run-stuck-1" || r.ID == "run-stuck-2") && r.Status != "failed" {
+			t.Errorf("Run %s expected status failed, got %s", r.ID, r.Status)
+		}
+		if (r.ID == "run-stuck-1" || r.ID == "run-stuck-2") && r.Error != "Interrupted by server restart" {
+			t.Errorf("Run %s expected crash recovery error message, got %q", r.ID, r.Error)
+		}
+		if r.ID == "run-ok-3" && r.Status != "completed" {
+			t.Errorf("Run run-ok-3 status should remain completed, got %s", r.Status)
+		}
+	}
+}
+
+func TestScheduleSummaryMetrics(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	now := time.Now().UTC()
+
+	// Initial metrics with empty DB
+	metrics, err := GetScheduleSummaryMetrics(db)
+	if err != nil {
+		t.Fatalf("GetScheduleSummaryMetrics on empty DB failed: %v", err)
+	}
+	if metrics.TotalActive != 0 || metrics.CronCount != 0 || metrics.OneShotCount != 0 || metrics.TotalRuns24h != 0 || metrics.SuccessRate24h != 100.0 || metrics.NextRunAt != nil {
+		t.Errorf("Unexpected empty DB metrics: %+v", metrics)
+	}
+
+	// Insert enabled cron schedule
+	cron1Next := now.Add(2 * time.Hour)
+	_ = CreateCronSchedule(db, CronSchedule{
+		ID:          "cron-m1",
+		TargetID:    "chan-1",
+		TitlePrefix: "Cron 1",
+		CronExpr:    "0 * * * *",
+		Prompt:      "hourly prompt",
+		NextRunAt:   cron1Next,
+		Enabled:     true,
+	})
+
+	// Insert disabled cron schedule (should not count towards active or next run)
+	_ = CreateCronSchedule(db, CronSchedule{
+		ID:          "cron-disabled",
+		TargetID:    "chan-1",
+		TitlePrefix: "Disabled",
+		CronExpr:    "0 * * * *",
+		Prompt:      "disabled prompt",
+		NextRunAt:   now.Add(10 * time.Minute),
+		Enabled:     false,
+	})
+
+	// Insert one-shot schedule earlier than cron1
+	oneShotNext := now.Add(30 * time.Minute)
+	_ = CreateOneShotSchedule(db, OneShotSchedule{
+		ID:       "once-m1",
+		ThreadID: "th-1",
+		Prompt:   "one-shot prompt",
+		RunAt:    oneShotNext,
+	})
+
+	// Insert runs in the last 24h
+	_ = CreateScheduleRun(db, ScheduleRun{ID: "run-m1", ScheduleID: "cron-m1", ScheduleType: "cron", TargetID: "c1", ThreadID: "t1", Prompt: "p1", Status: "completed", StartedAt: now.Add(-2 * time.Hour)})
+	_ = CreateScheduleRun(db, ScheduleRun{ID: "run-m2", ScheduleID: "cron-m1", ScheduleType: "cron", TargetID: "c1", ThreadID: "t1", Prompt: "p1", Status: "completed", StartedAt: now.Add(-1 * time.Hour)})
+	_ = CreateScheduleRun(db, ScheduleRun{ID: "run-m3", ScheduleID: "cron-m1", ScheduleType: "cron", TargetID: "c1", ThreadID: "t1", Prompt: "p1", Status: "failed", StartedAt: now.Add(-30 * time.Minute)})
+
+	// Insert run older than 24h (should not count towards 24h stats)
+	_ = CreateScheduleRun(db, ScheduleRun{ID: "run-old", ScheduleID: "cron-m1", ScheduleType: "cron", TargetID: "c1", ThreadID: "t1", Prompt: "p1", Status: "failed", StartedAt: now.Add(-25 * time.Hour)})
+
+	metrics, err = GetScheduleSummaryMetrics(db)
+	if err != nil {
+		t.Fatalf("GetScheduleSummaryMetrics failed: %v", err)
+	}
+
+	if metrics.CronCount != 1 {
+		t.Errorf("Expected CronCount=1, got %d", metrics.CronCount)
+	}
+	if metrics.OneShotCount != 1 {
+		t.Errorf("Expected OneShotCount=1, got %d", metrics.OneShotCount)
+	}
+	if metrics.TotalActive != 2 {
+		t.Errorf("Expected TotalActive=2, got %d", metrics.TotalActive)
+	}
+	if metrics.TotalRuns24h != 3 {
+		t.Errorf("Expected TotalRuns24h=3, got %d", metrics.TotalRuns24h)
+	}
+	// 2 completed out of 3 runs = 66.666...% -> rounded to ~66.7%
+	if metrics.SuccessRate24h < 66.0 || metrics.SuccessRate24h > 67.0 {
+		t.Errorf("Expected SuccessRate24h ~66.7, got %f", metrics.SuccessRate24h)
+	}
+	if metrics.NextRunAt == nil {
+		t.Fatal("Expected NextRunAt to not be nil")
+	}
+	if metrics.NextRunAt.Sub(oneShotNext).Abs() > time.Second {
+		t.Errorf("Expected NextRunAt to match earliest oneShotNext (%v), got %v", oneShotNext, *metrics.NextRunAt)
+	}
+}
+
+func TestPruneScheduleRuns(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	now := time.Now().UTC()
+
+	// Insert 10 runs
+	for i := 1; i <= 10; i++ {
+		started := now.Add(time.Duration(-i) * time.Hour)
+		_ = CreateScheduleRun(db, ScheduleRun{
+			ID:           "run-prune-" + string(rune('a'+i-1)),
+			ScheduleID:   "cron-1",
+			ScheduleType: "cron",
+			TargetID:     "c1",
+			ThreadID:     "t1",
+			Prompt:       "prompt",
+			Status:       "completed",
+			StartedAt:    started,
+		})
+	}
+
+	// Prune to keep only 5 newest runs
+	pruned, err := PruneScheduleRuns(db, 5, 30*24*time.Hour)
+	if err != nil {
+		t.Fatalf("PruneScheduleRuns failed: %v", err)
+	}
+	if pruned != 5 {
+		t.Errorf("Expected 5 runs pruned, got %d", pruned)
+	}
+
+	runs, total, err := GetScheduleRunsPaginated(db, 20, 0, "", "")
+	if err != nil || total != 5 || len(runs) != 5 {
+		t.Fatalf("Expected 5 remaining runs, got total=%d, len=%d (err: %v)", total, len(runs), err)
+	}
+
+	// Insert a very old run (>30 days)
+	_ = CreateScheduleRun(db, ScheduleRun{
+		ID:           "run-very-old",
+		ScheduleID:   "cron-1",
+		ScheduleType: "cron",
+		TargetID:     "c1",
+		ThreadID:     "t1",
+		Prompt:       "old prompt",
+		Status:       "completed",
+		StartedAt:    now.Add(-40 * 24 * time.Hour),
+	})
+
+	// Prune by age (maxAge = 30 days, maxCount = 100)
+	prunedOld, err := PruneScheduleRuns(db, 100, 30*24*time.Hour)
+	if err != nil {
+		t.Fatalf("PruneScheduleRuns by age failed: %v", err)
+	}
+	if prunedOld != 1 {
+		t.Errorf("Expected 1 old run pruned, got %d", prunedOld)
+	}
+}
+
+func TestScheduleRunsNilDB(t *testing.T) {
+	if err := CreateScheduleRun(nil, ScheduleRun{ID: "r1"}); err == nil {
+		t.Error("Expected error for CreateScheduleRun with nil DB")
+	}
+	if err := UpdateScheduleRunStatus(nil, UpdateRunParams{RunID: "r1"}); err == nil {
+		t.Error("Expected error for UpdateScheduleRunStatus with nil DB")
+	}
+	if _, _, err := GetScheduleRunsPaginated(nil, 10, 0, "", ""); err == nil {
+		t.Error("Expected error for GetScheduleRunsPaginated with nil DB")
+	}
+	if _, err := GetScheduleSummaryMetrics(nil); err == nil {
+		t.Error("Expected error for GetScheduleSummaryMetrics with nil DB")
+	}
+	if _, err := ReconcileOrphanedScheduleRuns(nil); err == nil {
+		t.Error("Expected error for ReconcileOrphanedScheduleRuns with nil DB")
+	}
+	if _, err := PruneScheduleRuns(nil, 10, time.Hour); err == nil {
+		t.Error("Expected error for PruneScheduleRuns with nil DB")
+	}
+}
+
+
 

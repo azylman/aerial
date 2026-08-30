@@ -22,18 +22,19 @@ const (
 )
 
 type Message struct {
-	ID           string    `json:"id"`
-	ThreadID     string    `json:"thread_id"`
-	GuildID      string    `json:"guild_id"`
-	AuthorID     string    `json:"author_id"`
-	AuthorName   string    `json:"author_name"`
-	Content      string    `json:"content"`
-	Status       string    `json:"status"`
-	RetryCount   int       `json:"retry_count"`
-	ErrorMessage string    `json:"error_message,omitempty"`
-	ResponseText string    `json:"response_text,omitempty"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ID            string    `json:"id"`
+	ThreadID      string    `json:"thread_id"`
+	GuildID       string    `json:"guild_id"`
+	AuthorID      string    `json:"author_id"`
+	AuthorName    string    `json:"author_name"`
+	Content       string    `json:"content"`
+	Status        string    `json:"status"`
+	RetryCount    int       `json:"retry_count"`
+	ErrorMessage  string    `json:"error_message,omitempty"`
+	ResponseText  string    `json:"response_text,omitempty"`
+	ScheduleRunID string    `json:"schedule_run_id,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 func GetDBPath() string {
@@ -94,6 +95,7 @@ func InitDB(dbPath string) (*sql.DB, error) {
 		retry_count INTEGER NOT NULL DEFAULT 0,
 		error_message TEXT,
 		response_text TEXT,
+		schedule_run_id TEXT NOT NULL DEFAULT '',
 		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 		updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 	);
@@ -137,6 +139,22 @@ func InitDB(dbPath string) (*sql.DB, error) {
 		created_at DATETIME NOT NULL
 	);
 
+	CREATE TABLE IF NOT EXISTS schedule_runs (
+		id TEXT PRIMARY KEY,
+		schedule_id TEXT NOT NULL,
+		schedule_type TEXT NOT NULL,
+		message_id TEXT NOT NULL DEFAULT '',
+		target_id TEXT NOT NULL,
+		thread_id TEXT NOT NULL,
+		title TEXT NOT NULL DEFAULT '',
+		prompt TEXT NOT NULL,
+		status TEXT NOT NULL DEFAULT 'enqueued',
+		started_at DATETIME NOT NULL,
+		completed_at DATETIME,
+		duration_ms INTEGER DEFAULT 0,
+		error TEXT NOT NULL DEFAULT ''
+	);
+
 	CREATE TABLE IF NOT EXISTS facts (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		category TEXT NOT NULL,
@@ -161,10 +179,17 @@ func InitDB(dbPath string) (*sql.DB, error) {
 	_, _ = database.Exec(`ALTER TABLE messages ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0;`)
 	_, _ = database.Exec(`ALTER TABLE messages ADD COLUMN error_message TEXT;`)
 	_, _ = database.Exec(`ALTER TABLE messages ADD COLUMN response_text TEXT;`)
+	_, _ = database.Exec(`ALTER TABLE messages ADD COLUMN schedule_run_id TEXT NOT NULL DEFAULT '';`)
 
 	// Safe column migrations for sessions on existing DBs
 	_, _ = database.Exec(`ALTER TABLE sessions ADD COLUMN last_extracted_rowid INTEGER NOT NULL DEFAULT 0;`)
 	_, _ = database.Exec(`ALTER TABLE sessions ADD COLUMN fact_extracted_at DATETIME;`)
+
+	// Safe column migrations for schedule_runs on existing DBs
+	_, _ = database.Exec(`ALTER TABLE schedule_runs ADD COLUMN message_id TEXT NOT NULL DEFAULT '';`)
+	_, _ = database.Exec(`ALTER TABLE schedule_runs ADD COLUMN title TEXT NOT NULL DEFAULT '';`)
+	_, _ = database.Exec(`ALTER TABLE schedule_runs ADD COLUMN duration_ms INTEGER DEFAULT 0;`)
+	_, _ = database.Exec(`ALTER TABLE schedule_runs ADD COLUMN error TEXT NOT NULL DEFAULT '';`)
 
 	// Create indices after migrations
 	indices := `
@@ -175,6 +200,10 @@ func InitDB(dbPath string) (*sql.DB, error) {
 	CREATE INDEX IF NOT EXISTS idx_conversations_internal_id ON conversations(internal_id);
 	CREATE INDEX IF NOT EXISTS idx_one_shot_schedules_run_at ON one_shot_schedules(run_at);
 	CREATE INDEX IF NOT EXISTS idx_cron_schedules_next_run_at ON cron_schedules(enabled, next_run_at);
+	CREATE INDEX IF NOT EXISTS idx_schedule_runs_started_at ON schedule_runs(started_at DESC);
+	CREATE INDEX IF NOT EXISTS idx_schedule_runs_schedule_started ON schedule_runs(schedule_id, started_at DESC);
+	CREATE INDEX IF NOT EXISTS idx_schedule_runs_status_started ON schedule_runs(status, started_at DESC);
+	CREATE INDEX IF NOT EXISTS idx_schedule_runs_message_id ON schedule_runs(message_id);
 	`
 	_, _ = database.Exec(indices)
 
@@ -226,10 +255,10 @@ func InsertMessage(database *sql.DB, msg Message) error {
 	}
 
 	query := `
-	INSERT OR IGNORE INTO messages (id, thread_id, guild_id, author_id, author_name, content, status, retry_count, error_message, response_text, created_at, updated_at)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	INSERT OR IGNORE INTO messages (id, thread_id, guild_id, author_id, author_name, content, status, retry_count, error_message, response_text, schedule_run_id, created_at, updated_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
-	_, err := database.Exec(query, msg.ID, msg.ThreadID, msg.GuildID, msg.AuthorID, msg.AuthorName, msg.Content, msg.Status, msg.RetryCount, msg.ErrorMessage, msg.ResponseText, msg.CreatedAt, msg.UpdatedAt)
+	_, err := database.Exec(query, msg.ID, msg.ThreadID, msg.GuildID, msg.AuthorID, msg.AuthorName, msg.Content, msg.Status, msg.RetryCount, msg.ErrorMessage, msg.ResponseText, msg.ScheduleRunID, msg.CreatedAt, msg.UpdatedAt)
 	return err
 }
 
@@ -289,7 +318,7 @@ func GetPendingOrProcessingMessages(database *sql.DB) ([]Message, error) {
 		return nil, fmt.Errorf("database is nil")
 	}
 	query := `
-	SELECT id, thread_id, guild_id, author_id, author_name, content, status, retry_count, COALESCE(error_message, ''), COALESCE(response_text, ''), created_at, updated_at
+	SELECT id, thread_id, guild_id, author_id, author_name, content, status, retry_count, COALESCE(error_message, ''), COALESCE(response_text, ''), COALESCE(schedule_run_id, ''), created_at, updated_at
 	FROM messages
 	WHERE status IN ('PENDING', 'PROCESSING')
 	ORDER BY created_at ASC
@@ -303,7 +332,7 @@ func GetPendingOrProcessingMessages(database *sql.DB) ([]Message, error) {
 	var results []Message
 	for rows.Next() {
 		var m Message
-		if err := rows.Scan(&m.ID, &m.ThreadID, &m.GuildID, &m.AuthorID, &m.AuthorName, &m.Content, &m.Status, &m.RetryCount, &m.ErrorMessage, &m.ResponseText, &m.CreatedAt, &m.UpdatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.ThreadID, &m.GuildID, &m.AuthorID, &m.AuthorName, &m.Content, &m.Status, &m.RetryCount, &m.ErrorMessage, &m.ResponseText, &m.ScheduleRunID, &m.CreatedAt, &m.UpdatedAt); err != nil {
 			return nil, err
 		}
 		results = append(results, m)
@@ -319,12 +348,12 @@ func GetMessage(database *sql.DB, id string) (*Message, error) {
 		return nil, nil
 	}
 	query := `
-	SELECT id, thread_id, guild_id, author_id, author_name, content, status, retry_count, COALESCE(error_message, ''), COALESCE(response_text, ''), created_at, updated_at
+	SELECT id, thread_id, guild_id, author_id, author_name, content, status, retry_count, COALESCE(error_message, ''), COALESCE(response_text, ''), COALESCE(schedule_run_id, ''), created_at, updated_at
 	FROM messages
 	WHERE id = ?
 	`
 	var m Message
-	err := database.QueryRow(query, id).Scan(&m.ID, &m.ThreadID, &m.GuildID, &m.AuthorID, &m.AuthorName, &m.Content, &m.Status, &m.RetryCount, &m.ErrorMessage, &m.ResponseText, &m.CreatedAt, &m.UpdatedAt)
+	err := database.QueryRow(query, id).Scan(&m.ID, &m.ThreadID, &m.GuildID, &m.AuthorID, &m.AuthorName, &m.Content, &m.Status, &m.RetryCount, &m.ErrorMessage, &m.ResponseText, &m.ScheduleRunID, &m.CreatedAt, &m.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -671,10 +700,10 @@ func InsertMessageAndConsumeOneShot(database *sql.DB, scheduleID string, msg Mes
 	defer func() { _ = tx.Rollback() }()
 
 	insertQuery := `
-	INSERT OR IGNORE INTO messages (id, thread_id, guild_id, author_id, author_name, content, status, retry_count, error_message, response_text, created_at, updated_at)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	INSERT OR IGNORE INTO messages (id, thread_id, guild_id, author_id, author_name, content, status, retry_count, error_message, response_text, schedule_run_id, created_at, updated_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
-	if _, err := tx.Exec(insertQuery, msg.ID, msg.ThreadID, msg.GuildID, msg.AuthorID, msg.AuthorName, msg.Content, msg.Status, msg.RetryCount, msg.ErrorMessage, msg.ResponseText, msg.CreatedAt, msg.UpdatedAt); err != nil {
+	if _, err := tx.Exec(insertQuery, msg.ID, msg.ThreadID, msg.GuildID, msg.AuthorID, msg.AuthorName, msg.Content, msg.Status, msg.RetryCount, msg.ErrorMessage, msg.ResponseText, msg.ScheduleRunID, msg.CreatedAt, msg.UpdatedAt); err != nil {
 		return err
 	}
 
@@ -796,6 +825,294 @@ func UpdateCronNextRun(database *sql.DB, id string, nextRunAt time.Time) error {
 	}
 	_, err := database.Exec(`UPDATE cron_schedules SET next_run_at = ? WHERE id = ?`, nextRunAt, id)
 	return err
+}
+
+// Schedule Execution Run definitions and CRUD
+
+type ScheduleRun struct {
+	ID           string     `json:"id"`
+	ScheduleID   string     `json:"schedule_id"`
+	ScheduleType string     `json:"schedule_type"`
+	MessageID    string     `json:"message_id"`
+	TargetID     string     `json:"target_id"`
+	ThreadID     string     `json:"thread_id"`
+	Title        string     `json:"title"`
+	Prompt       string     `json:"prompt"`
+	Status       string     `json:"status"`
+	StartedAt    time.Time  `json:"started_at"`
+	CompletedAt  *time.Time `json:"completed_at,omitempty"`
+	DurationMs   int64      `json:"duration_ms"`
+	Error        string     `json:"error,omitempty"`
+}
+
+type UpdateRunParams struct {
+	RunID       string    `json:"run_id"`
+	MessageID   string    `json:"message_id"`
+	Status      string    `json:"status"`
+	CompletedAt time.Time `json:"completed_at"`
+	DurationMs  int64     `json:"duration_ms"`
+	Error       string    `json:"error"`
+}
+
+type ScheduleSummaryMetrics struct {
+	TotalActive    int        `json:"total_active"`
+	CronCount      int        `json:"cron_count"`
+	OneShotCount   int        `json:"one_shot_count"`
+	TotalRuns24h   int        `json:"total_runs_24h"`
+	NextRunAt      *time.Time `json:"next_run_at"`
+	SuccessRate24h float64    `json:"success_rate_24h"`
+}
+
+func CreateScheduleRun(database *sql.DB, run ScheduleRun) error {
+	if database == nil {
+		return fmt.Errorf("database is nil")
+	}
+	if run.ID == "" {
+		return fmt.Errorf("schedule run id cannot be empty")
+	}
+	if run.Status == "" {
+		run.Status = "enqueued"
+	}
+	if run.StartedAt.IsZero() {
+		run.StartedAt = time.Now().UTC()
+	}
+
+	var completedAtVal interface{}
+	if run.CompletedAt != nil && !run.CompletedAt.IsZero() {
+		completedAtVal = *run.CompletedAt
+	}
+
+	query := `
+	INSERT INTO schedule_runs (id, schedule_id, schedule_type, message_id, target_id, thread_id, title, prompt, status, started_at, completed_at, duration_ms, error)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`
+	_, err := database.Exec(query,
+		run.ID,
+		run.ScheduleID,
+		run.ScheduleType,
+		run.MessageID,
+		run.TargetID,
+		run.ThreadID,
+		run.Title,
+		run.Prompt,
+		run.Status,
+		run.StartedAt,
+		completedAtVal,
+		run.DurationMs,
+		run.Error,
+	)
+	return err
+}
+
+func UpdateScheduleRunStatus(database *sql.DB, params UpdateRunParams) error {
+	if database == nil {
+		return fmt.Errorf("database is nil")
+	}
+	if params.RunID == "" {
+		return fmt.Errorf("schedule run id cannot be empty")
+	}
+
+	var completedAtVal interface{}
+	if !params.CompletedAt.IsZero() {
+		completedAtVal = params.CompletedAt
+	}
+
+	query := `
+	UPDATE schedule_runs
+	SET status = CASE WHEN ? != '' THEN ? ELSE status END,
+	    message_id = CASE WHEN ? != '' THEN ? ELSE message_id END,
+	    completed_at = CASE WHEN ? IS NOT NULL THEN ? ELSE completed_at END,
+	    duration_ms = CASE WHEN ? != 0 THEN ? ELSE duration_ms END,
+	    error = CASE WHEN ? = 'completed' THEN '' WHEN ? != '' THEN ? ELSE error END
+	WHERE id = ?
+	`
+	_, err := database.Exec(query,
+		params.Status, params.Status,
+		params.MessageID, params.MessageID,
+		completedAtVal, completedAtVal,
+		params.DurationMs, params.DurationMs,
+		params.Status, params.Error, params.Error,
+		params.RunID,
+	)
+	return err
+}
+
+func GetScheduleRunsPaginated(database *sql.DB, limit, offset int, scheduleID, status string) ([]ScheduleRun, int, error) {
+	if database == nil {
+		return nil, 0, fmt.Errorf("database is nil")
+	}
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	var whereClauses []string
+	var args []interface{}
+
+	if strings.TrimSpace(scheduleID) != "" {
+		whereClauses = append(whereClauses, "schedule_id = ?")
+		args = append(args, strings.TrimSpace(scheduleID))
+	}
+	if strings.TrimSpace(status) != "" {
+		whereClauses = append(whereClauses, "status = ?")
+		args = append(args, strings.TrimSpace(status))
+	}
+
+	whereSQL := ""
+	if len(whereClauses) > 0 {
+		whereSQL = " WHERE " + strings.Join(whereClauses, " AND ")
+	}
+
+	countQuery := "SELECT COUNT(*) FROM schedule_runs" + whereSQL
+	var total int
+	if err := database.QueryRow(countQuery, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("failed to count schedule runs: %w", err)
+	}
+
+	selectQuery := fmt.Sprintf(`
+		SELECT id, schedule_id, schedule_type, message_id, target_id, thread_id, title, prompt, status, started_at, completed_at, duration_ms, error
+		FROM schedule_runs
+		%s
+		ORDER BY started_at DESC, id DESC
+		LIMIT ? OFFSET ?
+	`, whereSQL)
+
+	queryArgs := append(args, limit, offset)
+	rows, err := database.Query(selectQuery, queryArgs...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to query schedule runs: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	runs := make([]ScheduleRun, 0)
+	for rows.Next() {
+		var r ScheduleRun
+		var completedAt sql.NullTime
+		if err := rows.Scan(&r.ID, &r.ScheduleID, &r.ScheduleType, &r.MessageID, &r.TargetID, &r.ThreadID, &r.Title, &r.Prompt, &r.Status, &r.StartedAt, &completedAt, &r.DurationMs, &r.Error); err != nil {
+			return nil, 0, fmt.Errorf("failed to scan schedule run: %w", err)
+		}
+		if completedAt.Valid {
+			r.CompletedAt = &completedAt.Time
+		}
+		runs = append(runs, r)
+	}
+
+	return runs, total, nil
+}
+
+func GetScheduleSummaryMetrics(database *sql.DB) (ScheduleSummaryMetrics, error) {
+	if database == nil {
+		return ScheduleSummaryMetrics{}, fmt.Errorf("database is nil")
+	}
+
+	var metrics ScheduleSummaryMetrics
+
+	// 1. Cron count (enabled only)
+	if err := database.QueryRow("SELECT COUNT(*) FROM cron_schedules WHERE enabled = TRUE").Scan(&metrics.CronCount); err != nil {
+		return metrics, fmt.Errorf("failed to count cron schedules: %w", err)
+	}
+
+	// 2. One-shot count
+	if err := database.QueryRow("SELECT COUNT(*) FROM one_shot_schedules").Scan(&metrics.OneShotCount); err != nil {
+		return metrics, fmt.Errorf("failed to count one-shot schedules: %w", err)
+	}
+
+	metrics.TotalActive = metrics.CronCount + metrics.OneShotCount
+
+	// 3. Next run timestamp (earliest across enabled crons and pending one-shots)
+	var cronNext, oneShotNext sql.NullTime
+	errCron := database.QueryRow("SELECT next_run_at FROM cron_schedules WHERE enabled = TRUE ORDER BY next_run_at ASC LIMIT 1").Scan(&cronNext)
+	if errCron != nil && errCron != sql.ErrNoRows {
+		return metrics, fmt.Errorf("failed to query next cron run: %w", errCron)
+	}
+	errOneShot := database.QueryRow("SELECT run_at FROM one_shot_schedules ORDER BY run_at ASC LIMIT 1").Scan(&oneShotNext)
+	if errOneShot != nil && errOneShot != sql.ErrNoRows {
+		return metrics, fmt.Errorf("failed to query next one-shot run: %w", errOneShot)
+	}
+
+	if cronNext.Valid && oneShotNext.Valid {
+		if cronNext.Time.Before(oneShotNext.Time) {
+			metrics.NextRunAt = &cronNext.Time
+		} else {
+			metrics.NextRunAt = &oneShotNext.Time
+		}
+	} else if cronNext.Valid {
+		metrics.NextRunAt = &cronNext.Time
+	} else if oneShotNext.Valid {
+		metrics.NextRunAt = &oneShotNext.Time
+	}
+
+	// 4. 24-hour run stats and success rate
+	cutoff24h := time.Now().UTC().Add(-24 * time.Hour)
+	runs24hQuery := `
+	SELECT 
+		COUNT(*),
+		COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0)
+	FROM schedule_runs
+	WHERE started_at >= ?
+	`
+	var totalRuns, completedRuns int
+	if err := database.QueryRow(runs24hQuery, cutoff24h).Scan(&totalRuns, &completedRuns); err != nil {
+		return metrics, fmt.Errorf("failed to query 24h run metrics: %w", err)
+	}
+
+	metrics.TotalRuns24h = totalRuns
+	if totalRuns == 0 {
+		metrics.SuccessRate24h = 100.0
+	} else {
+		metrics.SuccessRate24h = math.Round((float64(completedRuns)/float64(totalRuns))*1000.0) / 10.0
+	}
+
+	return metrics, nil
+}
+
+func ReconcileOrphanedScheduleRuns(database *sql.DB) (int64, error) {
+	if database == nil {
+		return 0, fmt.Errorf("database is nil")
+	}
+	now := time.Now().UTC()
+	query := `
+	UPDATE schedule_runs
+	SET status = 'failed',
+	    error = 'Interrupted by server restart',
+	    completed_at = ?
+	WHERE status IN ('enqueued', 'running')
+	`
+	res, err := database.Exec(query, now)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+func PruneScheduleRuns(database *sql.DB, maxCount int, maxAge time.Duration) (int64, error) {
+	if database == nil {
+		return 0, fmt.Errorf("database is nil")
+	}
+	if maxCount <= 0 {
+		maxCount = 1000
+	}
+	if maxAge <= 0 {
+		maxAge = 30 * 24 * time.Hour
+	}
+	cutoff := time.Now().UTC().Add(-maxAge)
+
+	query := `
+	DELETE FROM schedule_runs
+	WHERE started_at < ?
+	   OR id NOT IN (
+		   SELECT id FROM schedule_runs
+		   ORDER BY started_at DESC, id DESC
+		   LIMIT ?
+	   )
+	`
+	res, err := database.Exec(query, cutoff, maxCount)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 // Memory and Fact definitions
