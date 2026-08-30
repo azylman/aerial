@@ -95,11 +95,43 @@ type DeploymentStatus struct {
 	StartedAt  time.Time        `json:"started_at"`
 }
 
+type ActiveTaskStatus struct {
+	ID          string    `json:"id"`
+	ThreadID    string    `json:"thread_id"`
+	SessionID   string    `json:"session_id,omitempty"`
+	AuthorName  string    `json:"author_name"`
+	Prompt      string    `json:"prompt"`
+	Status      string    `json:"status"`
+	RetryCount  int       `json:"retry_count"`
+	TriggerType string    `json:"trigger_type"`
+	CreatedAt   time.Time `json:"created_at"`
+	StartedAt   time.Time `json:"started_at"`
+}
+
+type BrainTasksAPIResponse struct {
+	Status string `json:"status"`
+	Total  int    `json:"total"`
+	Tasks  []struct {
+		ID          string    `json:"id"`
+		ThreadID    string    `json:"thread_id"`
+		SessionID   string    `json:"session_id"`
+		AuthorName  string    `json:"author_name"`
+		Prompt      string    `json:"prompt"`
+		Status      string    `json:"status"`
+		RetryCount  int       `json:"retry_count"`
+		TriggerType string    `json:"trigger_type"`
+		CreatedAt   time.Time `json:"created_at"`
+		UpdatedAt   time.Time `json:"updated_at"`
+	} `json:"tasks"`
+}
+
 type ClusterResponse struct {
-	SystemTime    time.Time          `json:"system_time"`
-	ClusterStatus string             `json:"cluster_status"`
-	Services      []ServiceStatus    `json:"services"`
-	Deployments   []DeploymentStatus `json:"deployments"`
+	SystemTime       time.Time          `json:"system_time"`
+	ClusterStatus    string             `json:"cluster_status"`
+	ActiveTasksCount int                `json:"active_tasks_count"`
+	ActiveTasks      []ActiveTaskStatus `json:"active_tasks"`
+	Services         []ServiceStatus    `json:"services"`
+	Deployments      []DeploymentStatus `json:"deployments"`
 }
 
 type GitHubRun struct {
@@ -817,61 +849,126 @@ func fetchDockerClusterState(ctx context.Context) ([]ServiceStatus, []DockerCont
 	return services, rawContainers, nil
 }
 
-func statusHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
-		return
+func fetchActiveTasksFromBrain(ctx context.Context, brainURL string) ([]ActiveTaskStatus, error) {
+	if brainURL == "" {
+		return []ActiveTaskStatus{}, nil
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
-	defer cancel()
+	reqURL := strings.TrimRight(brainURL, "/") + "/tasks"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return []ActiveTaskStatus{}, err
+	}
+	req.Header.Set("Accept", "application/json")
 
-	now := time.Now().UTC()
-	services, rawContainers, err := fetchDockerClusterState(ctx)
-	currentCommit := getGitCommit()
+	resp, err := brainHTTPClient.Do(req)
+	if err != nil {
+		return []ActiveTaskStatus{}, err
+	}
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
 
-	var ghRuns []GitHubRun
-	var ghJobs map[int64][]GitHubJob
-	if globalGHPoller != nil {
-		ghRuns, ghJobs = globalGHPoller.GetSnapshot()
+	if resp.StatusCode != http.StatusOK {
+		return []ActiveTaskStatus{}, fmt.Errorf("brain returned HTTP %d", resp.StatusCode)
 	}
 
-	deployments := mergeClusterDeployments(rawContainers, ghRuns, ghJobs, currentCommit)
+	var apiResp BrainTasksAPIResponse
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		return []ActiveTaskStatus{}, err
+	}
 
-	if err != nil || len(services) == 0 {
-		uptimeSec := int64(time.Since(startTime).Seconds())
-		services = []ServiceStatus{
-			{Name: "brain", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
-			{Name: "scheduler-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
-			{Name: "discord-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
-			{Name: "docker-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
-			{Name: "github-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
-			{Name: "ollama", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
-			{Name: "agentsview", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
-			{Name: "watchtower", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
-			{Name: "autoheal", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
-			{Name: "proxy", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
-			{Name: "dashboard", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
+	tasks := make([]ActiveTaskStatus, 0, len(apiResp.Tasks))
+	for _, t := range apiResp.Tasks {
+		startedAt := t.UpdatedAt
+		if t.Status == "PENDING" || startedAt.IsZero() {
+			startedAt = t.CreatedAt
 		}
+		tasks = append(tasks, ActiveTaskStatus{
+			ID:          t.ID,
+			ThreadID:    t.ThreadID,
+			SessionID:   t.SessionID,
+			AuthorName:  t.AuthorName,
+			Prompt:      t.Prompt,
+			Status:      t.Status,
+			RetryCount:  t.RetryCount,
+			TriggerType: t.TriggerType,
+			CreatedAt:   t.CreatedAt,
+			StartedAt:   startedAt,
+		})
 	}
+	return tasks, nil
+}
 
-	clusterStatus := "healthy"
-	for _, s := range services {
-		if s.Status == "unhealthy" {
-			clusterStatus = "degraded"
-			break
+func statusHandler(brainURL string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			return
 		}
-	}
 
-	resp := ClusterResponse{
-		SystemTime:    now,
-		ClusterStatus: clusterStatus,
-		Services:      services,
-		Deployments:   deployments,
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+
+		now := time.Now().UTC()
+		services, rawContainers, err := fetchDockerClusterState(ctx)
+		currentCommit := getGitCommit()
+
+		var ghRuns []GitHubRun
+		var ghJobs map[int64][]GitHubJob
+		if globalGHPoller != nil {
+			ghRuns, ghJobs = globalGHPoller.GetSnapshot()
+		}
+
+		deployments := mergeClusterDeployments(rawContainers, ghRuns, ghJobs, currentCommit)
+
+		activeTasks, taskErr := fetchActiveTasksFromBrain(ctx, brainURL)
+		if taskErr != nil {
+			log.Printf("[Dashboard] Failed to fetch active tasks from brain (%s): %v", brainURL, taskErr)
+			activeTasks = []ActiveTaskStatus{}
+		}
+		if activeTasks == nil {
+			activeTasks = []ActiveTaskStatus{}
+		}
+
+		if err != nil || len(services) == 0 {
+			uptimeSec := int64(time.Since(startTime).Seconds())
+			services = []ServiceStatus{
+				{Name: "brain", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
+				{Name: "scheduler-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
+				{Name: "discord-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
+				{Name: "docker-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
+				{Name: "github-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
+				{Name: "ollama", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
+				{Name: "agentsview", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
+				{Name: "watchtower", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
+				{Name: "autoheal", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
+				{Name: "proxy", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
+				{Name: "dashboard", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
+			}
+		}
+
+		clusterStatus := "healthy"
+		for _, s := range services {
+			if s.Status == "unhealthy" {
+				clusterStatus = "degraded"
+				break
+			}
+		}
+
+		resp := ClusterResponse{
+			SystemTime:       now,
+			ClusterStatus:    clusterStatus,
+			ActiveTasksCount: len(activeTasks),
+			ActiveTasks:      activeTasks,
+			Services:         services,
+			Deployments:      deployments,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		_ = json.NewEncoder(w).Encode(resp)
 	}
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-	_ = json.NewEncoder(w).Encode(resp)
 }
 
 func factsHandler(brainBaseURL string) http.HandlerFunc {
@@ -1238,8 +1335,8 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/dashboard/health", healthHandler)
-	mux.HandleFunc("/api/status", statusHandler)
-	mux.HandleFunc("/dashboard/api/status", statusHandler)
+	mux.HandleFunc("/api/status", statusHandler(brainURL))
+	mux.HandleFunc("/dashboard/api/status", statusHandler(brainURL))
 	mux.HandleFunc("/api/facts", factsHandler(brainURL))
 	mux.HandleFunc("/dashboard/api/facts", factsHandler(brainURL))
 	mux.HandleFunc("/api/schedules", schedulesHandler(brainURL))
