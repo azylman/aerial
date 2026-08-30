@@ -170,6 +170,7 @@ func InitDB(dbPath string) (*sql.DB, error) {
 	indices := `
 	CREATE INDEX IF NOT EXISTS idx_messages_thread_status ON messages(thread_id, status);
 	CREATE INDEX IF NOT EXISTS idx_messages_status ON messages(status);
+	CREATE INDEX IF NOT EXISTS idx_messages_status_created_at ON messages(status, created_at DESC);
 	CREATE INDEX IF NOT EXISTS idx_sessions_fact_extracted ON sessions(last_extracted_rowid, fact_extracted_at);
 	CREATE INDEX IF NOT EXISTS idx_conversations_internal_id ON conversations(internal_id);
 	CREATE INDEX IF NOT EXISTS idx_one_shot_schedules_run_at ON one_shot_schedules(run_at);
