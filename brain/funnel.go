@@ -16,6 +16,7 @@ import (
 	"github.com/azylman/aerial/brain/pkg/db"
 	"github.com/azylman/aerial/brain/pkg/queue"
 	"github.com/bwmarrin/discordgo"
+	"github.com/google/uuid"
 )
 
 func deriveThreadTitle(content string) string {
@@ -213,6 +214,11 @@ func connectDiscordFunnel(database *sql.DB, pool *queue.WorkerPool) *discordgo.S
 
 		targetThreadID, isThread := getOrCreateThreadID(s, m.Message)
 		prompt := buildDiscordPrompt(m.Message, targetThreadID)
+
+		// Pre-allocate and persist session ID for the thread upfront so active tasks immediately have session links
+		if sessID, _ := db.GetSessionID(database, targetThreadID); sessID == "" {
+			_ = db.SaveSessionID(database, targetThreadID, uuid.New().String())
+		}
 
 		authorID := ""
 		authorName := "Discord User"
