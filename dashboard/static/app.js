@@ -7,6 +7,19 @@ function escapeHtml(str) {
         .replace(/'/g, "&#039;");
 }
 
+function formatUptime(seconds) {
+    if (seconds == null || isNaN(seconds) || seconds < 0) return '0s';
+    const days = Math.floor(seconds / 86400);
+    const hrs = Math.floor((seconds % 86400) / 3600);
+    const mins = Math.floor((seconds % 3600) / 60);
+    const secs = Math.floor(seconds % 60);
+
+    if (days > 0) return `${days}d ${hrs}h ${mins}m`;
+    if (hrs > 0) return `${hrs}h ${mins}m`;
+    if (mins > 0) return `${mins}m ${secs}s`;
+    return `${secs}s`;
+}
+
 // ==========================================
 // TELEMETRY STATE & LOGIC
 // ==========================================
@@ -121,8 +134,7 @@ async function fetchStatus() {
                 
                 const safeName = escapeHtml(svc.name);
                 const safeStatus = escapeHtml(svc.status);
-                const hours = Math.floor(svc.uptime_seconds / 3600);
-                const mins = Math.floor((svc.uptime_seconds % 3600) / 60);
+                const formattedUptime = formatUptime(svc.uptime_seconds);
 
                 const card = document.createElement('div');
                 card.className = 'service-card';
@@ -137,7 +149,7 @@ async function fetchStatus() {
                         </div>
                     </div>
                     <div class="service-metrics">
-                        <span>UPTIME: ${hours}h ${mins}m</span>
+                        <span>UPTIME: ${formattedUptime}</span>
                         <span>PORT: READY</span>
                     </div>
                     <div class="card-action-hint">
@@ -215,7 +227,7 @@ function openDiagnosticDrawer(serviceIndex) {
                 </div>
                 <div class="diag-item">
                     <span class="lbl">UPTIME CONTEXT</span>
-                    <span class="val">${hours}h ${mins}m ${secs}s</span>
+                    <span class="val">${formatUptime(svc.uptime_seconds)}</span>
                 </div>
                 <div class="diag-item">
                     <span class="lbl">DISCOVERY NODE</span>
