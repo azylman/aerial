@@ -30,3 +30,8 @@ build: ## Build all Go service binaries locally
 		echo "=== Building $$svc ==="; \
 		(cd $$svc && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" ./...) || exit 1; \
 	done
+
+setup-hooks: ## Configure git to use monorepo .githooks directory
+	@git config core.hooksPath .githooks
+	@echo "Configured git core.hooksPath -> .githooks"
+
