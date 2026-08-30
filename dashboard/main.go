@@ -958,16 +958,22 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthHandler)
+	mux.HandleFunc("/dashboard/health", healthHandler)
 	mux.HandleFunc("/api/status", statusHandler)
+	mux.HandleFunc("/dashboard/api/status", statusHandler)
 	mux.HandleFunc("/api/facts", factsHandler(brainURL))
+	mux.HandleFunc("/dashboard/api/facts", factsHandler(brainURL))
 
 	fileServer := http.FileServer(http.FS(staticFS))
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	staticHandler := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 		w.Header().Set("Pragma", "no-cache")
 		w.Header().Set("Expires", "0")
 		fileServer.ServeHTTP(w, r)
-	})
+	}
+
+	mux.HandleFunc("/", staticHandler)
+	mux.Handle("/dashboard/", http.StripPrefix("/dashboard", http.HandlerFunc(staticHandler)))
 
 	port := os.Getenv("PORT")
 	if port == "" {

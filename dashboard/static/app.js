@@ -51,9 +51,14 @@ function startLiveTimerLoop() {
     liveTimerInterval = setInterval(tick, 1000);
 }
 
+function getApiBase() {
+    const path = window.location.pathname.replace(/\/+$/, '');
+    return path.endsWith('/dashboard') ? path : (path + '/dashboard').replace(/\/+/g, '/').replace(/\/+$/, '');
+}
+
 async function fetchStatus() {
     try {
-        const res = await fetch('/api/status');
+        const res = await fetch(getApiBase() + '/api/status');
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
 
@@ -368,7 +373,7 @@ async function fetchFacts() {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 6000);
 
-        const res = await fetch('/api/facts?limit=100', { signal: controller.signal });
+        const res = await fetch(getApiBase() + '/api/facts?limit=100', { signal: controller.signal });
         clearTimeout(timeoutId);
 
         const data = await res.json();
