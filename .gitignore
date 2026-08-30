@@ -1,1 +1,7 @@
 .env
+.env.*
+.agents/rules/
+*.tmp
+*.tmp.*
+*.swp
+.DS_Store

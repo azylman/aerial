@@ -388,7 +388,7 @@ func EnsureSystemRules(customPrompt string) error {
 		return fmt.Errorf("failed to create primary rules directory: %w", err)
 	}
 
-	// Clean up any legacy or conflicting rule files across rules directories
+	// Clean up any legacy, conflicting, or repository-level generated rule files
 	staleRuleFiles := []string{
 		filepath.Join(primaryRulesDir, "agents.md"),
 		filepath.Join(primaryRulesDir, "custom_instructions.md"),
@@ -396,9 +396,11 @@ func EnsureSystemRules(customPrompt string) error {
 		filepath.Join(homeDir, ".gemini", "config", "rules", "custom_instructions.md"),
 		filepath.Join(homeDir, ".gemini", "config", "rules", "agents.md"),
 		filepath.Join(homeDir, ".gemini", "config", "rules", "system.md"),
+		"/share/aerial/.agents/rules/system_instructions.md",
 		"/share/aerial/.agents/rules/custom_instructions.md",
 		"/share/aerial/.agents/rules/agents.md",
 		"/share/aerial/.agents/rules/system.md",
+		"/app/.agents/rules/system_instructions.md",
 		"/app/.agents/rules/custom_instructions.md",
 		"/app/.agents/rules/agents.md",
 		"/app/.agents/rules/system.md",
@@ -413,15 +415,9 @@ func EnsureSystemRules(customPrompt string) error {
 	}
 	log.Printf("Configured always_on system instructions in %s", primaryRuleFile)
 
-	additionalDirs := []string{
-		filepath.Join(homeDir, ".gemini", "config", "rules"),
-		"/share/aerial/.agents/rules",
-		"/app/.agents/rules",
-	}
-
-	for _, dir := range additionalDirs {
-		_ = writeAtomic(filepath.Join(dir, "system_instructions.md"), content)
-	}
+	// Also sync to ~/.gemini/config/rules for compatibility
+	configRulesDir := filepath.Join(homeDir, ".gemini", "config", "rules")
+	_ = writeAtomic(filepath.Join(configRulesDir, "system_instructions.md"), content)
 
 	return nil
 }
