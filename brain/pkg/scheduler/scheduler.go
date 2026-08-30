@@ -167,18 +167,38 @@ func ProcessDueSchedules(ctx context.Context, database *sql.DB, enqueuer Message
 			}
 		}
 
-		// Create and persist PENDING message
+		// Create run record and message
+		runID := uuid.New().String()
 		msgID := uuid.New().String()
+
+		run := db.ScheduleRun{
+			ID:           runID,
+			ScheduleID:   c.ID,
+			ScheduleType: "cron",
+			MessageID:    msgID,
+			TargetID:     c.TargetID,
+			ThreadID:     targetThreadID,
+			Title:        title,
+			Prompt:       c.Prompt,
+			Status:       "enqueued",
+			StartedAt:    now,
+		}
+		if err := db.CreateScheduleRun(database, run); err != nil {
+			log.Printf("[Scheduler] Error creating schedule run %s for cron %s: %v", runID, c.ID, err)
+		}
+
+		// Create and persist PENDING message
 		msg := db.Message{
-			ID:         msgID,
-			ThreadID:   targetThreadID,
-			GuildID:    "scheduled",
-			AuthorID:   "scheduler",
-			AuthorName: "Scheduler",
-			Content:    c.Prompt,
-			Status:     db.StatusPending,
-			CreatedAt:  now,
-			UpdatedAt:  now,
+			ID:            msgID,
+			ThreadID:      targetThreadID,
+			GuildID:       "scheduled",
+			AuthorID:      "scheduler",
+			AuthorName:    "Scheduler",
+			Content:       c.Prompt,
+			Status:        db.StatusPending,
+			ScheduleRunID: runID,
+			CreatedAt:     now,
+			UpdatedAt:     now,
 		}
 
 		if err := db.InsertMessage(database, msg); err != nil {
@@ -205,22 +225,40 @@ func ProcessDueSchedules(ctx context.Context, database *sql.DB, enqueuer Message
 		default:
 		}
 
+		runID := uuid.New().String()
 		msgID := uuid.New().String()
 		msg := db.Message{
-			ID:         msgID,
-			ThreadID:   s.ThreadID,
-			GuildID:    "scheduled",
-			AuthorID:   "scheduler",
-			AuthorName: "Scheduler",
-			Content:    s.Prompt,
-			Status:     db.StatusPending,
-			CreatedAt:  now,
-			UpdatedAt:  now,
+			ID:            msgID,
+			ThreadID:      s.ThreadID,
+			GuildID:       "scheduled",
+			AuthorID:      "scheduler",
+			AuthorName:    "Scheduler",
+			Content:       s.Prompt,
+			Status:        db.StatusPending,
+			ScheduleRunID: runID,
+			CreatedAt:     now,
+			UpdatedAt:     now,
 		}
 
 		if err := db.InsertMessageAndConsumeOneShot(database, s.ID, msg); err != nil {
 			log.Printf("[Scheduler] Error atomically processing one-shot schedule %s (message %s): %v", s.ID, msgID, err)
 			continue
+		}
+
+		run := db.ScheduleRun{
+			ID:           runID,
+			ScheduleID:   s.ID,
+			ScheduleType: "one_shot",
+			MessageID:    msgID,
+			TargetID:     s.ThreadID,
+			ThreadID:     s.ThreadID,
+			Title:        "One-shot Reminder",
+			Prompt:       s.Prompt,
+			Status:       "enqueued",
+			StartedAt:    now,
+		}
+		if err := db.CreateScheduleRun(database, run); err != nil {
+			log.Printf("[Scheduler] Error creating schedule run %s for one-shot %s: %v", runID, s.ID, err)
 		}
 
 		if enqueuer != nil {
@@ -278,6 +316,13 @@ func Run(ctx context.Context, database *sql.DB, enqueuer MessageEnqueuer, thread
 	if err := ProcessDueSchedules(ctx, database, enqueuer, threadCreator); err != nil {
 		log.Printf("[Scheduler] Error in initial schedule check: %v", err)
 	}
+	go func() {
+		if pruned, err := db.PruneScheduleRuns(database, 1000, 30*24*time.Hour); err != nil {
+			log.Printf("[Scheduler] Initial retention pruning error: %v", err)
+		} else if pruned > 0 {
+			log.Printf("[Scheduler] Initial retention pruning removed %d old schedule runs", pruned)
+		}
+	}()
 
 	var tickCount int
 	for {
@@ -296,6 +341,17 @@ func Run(ctx context.Context, database *sql.DB, enqueuer MessageEnqueuer, thread
 				go func() {
 					if err := memory.ExtractActiveConversationFacts(ctx, database, ollamaClient, llmFunc, 12); err != nil {
 						log.Printf("[Memory] Fact extraction error: %v", err)
+					}
+				}()
+			}
+
+			// Run retention pruning daily (every 2880 ticks at 30s interval = 24 hours)
+			if tickCount%2880 == 0 {
+				go func() {
+					if pruned, err := db.PruneScheduleRuns(database, 1000, 30*24*time.Hour); err != nil {
+						log.Printf("[Scheduler] Retention pruning error: %v", err)
+					} else if pruned > 0 {
+						log.Printf("[Scheduler] Pruned %d old schedule runs", pruned)
 					}
 				}()
 			}

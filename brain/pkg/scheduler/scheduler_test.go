@@ -454,3 +454,166 @@ func TestSchedulerRunContextCancellation(t *testing.T) {
 		t.Fatal("Scheduler did not stop cleanly within 1s after context cancellation")
 	}
 }
+
+func TestProcessDueCronSchedules_CreatesScheduleRun(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to init DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	now := time.Now().UTC()
+	cronSched := db.CronSchedule{
+		ID:          "cron-run-test",
+		TargetID:    "chan-cron-test",
+		TitlePrefix: "Daily Standup",
+		CronExpr:    "0 9 * * *",
+		Prompt:      "Post daily standup",
+		Timezone:    "UTC",
+		NextRunAt:   now.Add(-10 * time.Second),
+		Enabled:     true,
+		CreatedAt:   now.Add(-1 * time.Hour),
+	}
+	if err := db.CreateCronSchedule(database, cronSched); err != nil {
+		t.Fatalf("Failed to create cron schedule: %v", err)
+	}
+
+	threadCreator := newMockThreadCreator()
+	enqueuer := newMockEnqueuer()
+
+	if err := ProcessDueSchedules(context.Background(), database, enqueuer, threadCreator); err != nil {
+		t.Fatalf("ProcessDueSchedules error: %v", err)
+	}
+
+	msgs := enqueuer.getMessages()
+	if len(msgs) != 1 {
+		t.Fatalf("Expected 1 message enqueued, got %d", len(msgs))
+	}
+	if msgs[0].ScheduleRunID == "" {
+		t.Fatalf("Expected ScheduleRunID to be populated on enqueued message, got empty string")
+	}
+
+	// Verify schedule run entry exists in DB
+	runs, total, err := db.GetScheduleRunsPaginated(database, 10, 0, cronSched.ID, "")
+	if err != nil {
+		t.Fatalf("GetScheduleRunsPaginated error: %v", err)
+	}
+	if total != 1 || len(runs) != 1 {
+		t.Fatalf("Expected 1 schedule run created, got total=%d, len=%d", total, len(runs))
+	}
+
+	run := runs[0]
+	if run.ID != msgs[0].ScheduleRunID {
+		t.Errorf("Expected run ID %q to match message ScheduleRunID %q", run.ID, msgs[0].ScheduleRunID)
+	}
+	if run.ScheduleID != cronSched.ID {
+		t.Errorf("Expected schedule ID %q, got %q", cronSched.ID, run.ScheduleID)
+	}
+	if run.ScheduleType != "cron" {
+		t.Errorf("Expected schedule type 'cron', got %q", run.ScheduleType)
+	}
+	if run.MessageID != msgs[0].ID {
+		t.Errorf("Expected message ID %q, got %q", msgs[0].ID, run.MessageID)
+	}
+	if run.TargetID != cronSched.TargetID {
+		t.Errorf("Expected target ID %q, got %q", cronSched.TargetID, run.TargetID)
+	}
+	if run.ThreadID != msgs[0].ThreadID {
+		t.Errorf("Expected thread ID %q, got %q", msgs[0].ThreadID, run.ThreadID)
+	}
+	if run.Status != "enqueued" {
+		t.Errorf("Expected status 'enqueued', got %q", run.Status)
+	}
+	if run.Prompt != cronSched.Prompt {
+		t.Errorf("Expected prompt %q, got %q", cronSched.Prompt, run.Prompt)
+	}
+}
+
+func TestProcessDueOneShotSchedules_CreatesScheduleRun(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to init DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	now := time.Now().UTC()
+	oneShot := db.OneShotSchedule{
+		ID:        "oneshot-run-test",
+		ThreadID:  "thread-oneshot-target",
+		Prompt:    "Water the plants",
+		RunAt:     now.Add(-5 * time.Second),
+		CreatedAt: now.Add(-30 * time.Minute),
+	}
+	if err := db.CreateOneShotSchedule(database, oneShot); err != nil {
+		t.Fatalf("Failed to create one shot schedule: %v", err)
+	}
+
+	threadCreator := newMockThreadCreator()
+	enqueuer := newMockEnqueuer()
+
+	if err := ProcessDueSchedules(context.Background(), database, enqueuer, threadCreator); err != nil {
+		t.Fatalf("ProcessDueSchedules error: %v", err)
+	}
+
+	msgs := enqueuer.getMessages()
+	if len(msgs) != 1 {
+		t.Fatalf("Expected 1 message enqueued, got %d", len(msgs))
+	}
+	if msgs[0].ScheduleRunID == "" {
+		t.Fatalf("Expected ScheduleRunID to be populated on enqueued message, got empty string")
+	}
+
+	runs, total, err := db.GetScheduleRunsPaginated(database, 10, 0, oneShot.ID, "")
+	if err != nil {
+		t.Fatalf("GetScheduleRunsPaginated error: %v", err)
+	}
+	if total != 1 || len(runs) != 1 {
+		t.Fatalf("Expected 1 schedule run created, got total=%d, len=%d", total, len(runs))
+	}
+
+	run := runs[0]
+	if run.ID != msgs[0].ScheduleRunID {
+		t.Errorf("Expected run ID %q to match message ScheduleRunID %q", run.ID, msgs[0].ScheduleRunID)
+	}
+	if run.ScheduleID != oneShot.ID {
+		t.Errorf("Expected schedule ID %q, got %q", oneShot.ID, run.ScheduleID)
+	}
+	if run.ScheduleType != "one_shot" {
+		t.Errorf("Expected schedule type 'one_shot', got %q", run.ScheduleType)
+	}
+	if run.Status != "enqueued" {
+		t.Errorf("Expected status 'enqueued', got %q", run.Status)
+	}
+	if run.Prompt != oneShot.Prompt {
+		t.Errorf("Expected prompt %q, got %q", oneShot.Prompt, run.Prompt)
+	}
+}
+
+func TestInsertMessageAndConsumeOneShot_RollbackOnCancelled(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to init DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	msg := db.Message{
+		ID:        "msg-cancelled-1",
+		ThreadID:  "thread-1",
+		Content:   "Reminder prompt",
+		Status:    db.StatusPending,
+		CreatedAt: time.Now().UTC(),
+	}
+
+	// Schedule does not exist in DB (e.g. was cancelled concurrently)
+	err = db.InsertMessageAndConsumeOneShot(database, "non-existent-sched-id", msg)
+	if err == nil {
+		t.Fatal("Expected error when consuming non-existent one-shot schedule, got nil")
+	}
+
+	// Verify message was NOT inserted due to rollback
+	dbMsg, _ := db.GetMessage(database, "msg-cancelled-1")
+	if dbMsg != nil {
+		t.Errorf("Expected message to NOT exist in DB after transaction rollback, but found: %+v", dbMsg)
+	}
+}
+

@@ -707,8 +707,16 @@ func InsertMessageAndConsumeOneShot(database *sql.DB, scheduleID string, msg Mes
 		return err
 	}
 
-	if _, err := tx.Exec(`DELETE FROM one_shot_schedules WHERE id = ?`, scheduleID); err != nil {
+	res, err := tx.Exec(`DELETE FROM one_shot_schedules WHERE id = ?`, scheduleID)
+	if err != nil {
 		return err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return fmt.Errorf("one-shot schedule %s not found or already consumed", scheduleID)
 	}
 
 	return tx.Commit()
