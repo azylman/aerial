@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -906,5 +907,104 @@ func TestScheduleRunsHandler_MethodNotAllowed(t *testing.T) {
 		t.Fatalf("expected 405 Method Not Allowed, got %d", rr.Code)
 	}
 }
+
+func TestEmbeddedStaticAssetsIntegrity(t *testing.T) {
+	requiredFiles := []string{
+		"static/index.html",
+		"static/style.css",
+		"static/app.js",
+	}
+
+	for _, reqFile := range requiredFiles {
+		data, err := content.ReadFile(reqFile)
+		if err != nil {
+			t.Errorf("failed to read required embedded file %s: %v", reqFile, err)
+			continue
+		}
+		if len(data) == 0 {
+			t.Errorf("embedded file %s is empty", reqFile)
+		}
+	}
+}
+
+func TestAppJSDeclaredFunctions(t *testing.T) {
+	data, err := content.ReadFile("static/app.js")
+	if err != nil {
+		t.Fatalf("failed to read static/app.js: %v", err)
+	}
+	contentStr := string(data)
+
+	requiredFunctions := []string{
+		"function formatAgentsviewSessionUrl",
+		"function parseValidTimestampMs",
+		"function formatElapsedTicker",
+		"function escapeHtml",
+		"function formatUptime",
+		"function getTriggerBadge",
+		"function renderActiveTasks",
+		"function renderDeployments",
+		"function renderServicesGrid",
+		"async function fetchStatus",
+	}
+
+	for _, fn := range requiredFunctions {
+		if !strings.Contains(contentStr, fn) {
+			t.Errorf("critical function definition missing in app.js: %q", fn)
+		}
+	}
+}
+
+func TestIndexHTMLRequiredDOMBindings(t *testing.T) {
+	data, err := content.ReadFile("static/index.html")
+	if err != nil {
+		t.Fatalf("failed to read static/index.html: %v", err)
+	}
+	htmlStr := string(data)
+
+	requiredIDs := []string{
+		`id="overall-status"`,
+		`id="cluster-sub"`,
+		`id="summary-tasks-val"`,
+		`id="summary-tasks-sub"`,
+		`id="tasks-count-badge"`,
+		`id="active-tasks-container"`,
+		`id="deployments-container"`,
+		`id="deploy-count-badge"`,
+		`id="services-grid"`,
+		`id="active-count"`,
+		`id="permet-score-val"`,
+		`id="permet-bar-fill"`,
+		`id="tab-telemetry-btn"`,
+		`id="tab-schedules-btn"`,
+		`id="tab-memory-btn"`,
+	}
+
+	for _, idAttr := range requiredIDs {
+		if !strings.Contains(htmlStr, idAttr) {
+			t.Errorf("required DOM ID binding missing in index.html: %q", idAttr)
+		}
+	}
+}
+
+func TestZeroPersonalDataAndHardcodedIPs(t *testing.T) {
+	files := []string{"static/app.js", "static/index.html", "static/style.css"}
+
+	for _, f := range files {
+		data, err := content.ReadFile(f)
+		if err != nil {
+			t.Fatalf("failed to read %s: %v", f, err)
+		}
+		str := string(data)
+
+		// Assert zero private LAN IP leaks
+		if strings.Contains(str, "192.168.") {
+			t.Errorf("found private LAN IP (192.168.x.x) in %s", f)
+		}
+		if strings.Contains(str, "10.0.") {
+			t.Errorf("found private LAN IP (10.0.x.x) in %s", f)
+		}
+	}
+}
+
 
 
