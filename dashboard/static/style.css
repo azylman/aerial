@@ -322,7 +322,9 @@ body {
 
 /* --- DEPLOYMENT PIPELINE SECTION --- */
 .deployment-pipeline-section {
-    margin-bottom: 2.5rem;
+    margin-bottom: 3.5rem;
+    padding-bottom: 1.5rem;
+    border-bottom: 1px dashed rgba(0, 242, 254, 0.15);
 }
 
 .deployments-container {
@@ -595,7 +597,7 @@ body {
     position: fixed;
     bottom: 0;
     left: 50%;
-    transform: translateX(-50%) translateY(100%);
+    transform: translateX(-50%) translateY(120%);
     width: 90%;
     max-width: 900px;
     height: 420px;
@@ -606,13 +608,19 @@ body {
     backdrop-filter: blur(20px);
     box-shadow: 0 -10px 40px rgba(0, 242, 254, 0.25);
     z-index: 201;
-    transition: transform 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+    transition: transform 0.35s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.3s ease, visibility 0.3s ease;
     display: flex;
     flex-direction: column;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
 }
 
 .diagnostic-drawer.active {
     transform: translateX(-50%) translateY(0);
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
 }
 
 .drawer-header {
