@@ -48,12 +48,37 @@ function getTriggerBadge(triggerType) {
     }
 }
 
+function formatAgentsviewSessionUrl(sessionId) {
+    if (!sessionId || typeof sessionId !== 'string') {
+        return '/conversations/';
+    }
+    const cleanId = sessionId.trim().replace(/^\/+|\/+$/g, '');
+    if (!cleanId) {
+        return '/conversations/';
+    }
+    const encodedPath = cleanId
+        .split('/')
+        .map(segment => encodeURIComponent(segment))
+        .join('/');
+
+    return `/sessions/${encodedPath}`;
+}
+
+function parseValidTimestampMs(dateStr) {
+    if (!dateStr || typeof dateStr !== 'string') return null;
+    const ms = new Date(dateStr).getTime();
+    if (isNaN(ms) || ms < 1577836800000) return null; // Reject epoch zero / pre-2020 dates
+    return ms;
+}
+
 // ==========================================
 // TELEMETRY STATE & LOGIC
 // ==========================================
 let activeServicesCache = [];
 let statusPollInterval = null;
 let liveTimerInterval = null;
+let statusAbortController = null;
+let isStatusFetching = false;
 
 function startLiveTimerLoop() {
     if (liveTimerInterval) clearInterval(liveTimerInterval);
@@ -64,24 +89,32 @@ function startLiveTimerLoop() {
         const now = Date.now();
 
         timerEls.forEach(el => {
-            const startedAt = new Date(el.getAttribute('data-started')).getTime();
-            if (isNaN(startedAt)) return;
+            const startedMs = parseValidTimestampMs(el.getAttribute('data-started'));
+            if (!startedMs) return;
 
-            const elapsedSec = Math.max(0, Math.floor((now - startedAt) / 1000));
+            const elapsedSec = Math.max(0, Math.floor((now - startedMs) / 1000));
             el.textContent = formatElapsedTicker(elapsedSec);
         });
     }
 
+    tick();
     liveTimerInterval = setInterval(tick, 1000);
 }
 
-function renderActiveTasks(tasks) {
-    const container = document.getElementById('active-tasks-list');
-    const badge = document.getElementById('active-tasks-badge') || document.getElementById('tasks-count-badge');
-    const summaryVal = document.getElementById('summary-active-tasks') || document.getElementById('summary-tasks-val');
-    const summarySub = document.getElementById('summary-tasks-sub');
+function stopLiveTimerLoop() {
+    if (liveTimerInterval) {
+        clearInterval(liveTimerInterval);
+        liveTimerInterval = null;
+    }
+}
 
-    const activeList = Array.isArray(tasks) ? tasks : [];
+function renderActiveTasks(tasks) {
+    const container = document.getElementById('active-tasks-container') || document.getElementById('active-tasks-list');
+    const badge = document.getElementById('tasks-count-badge') || document.getElementById('active-tasks-badge');
+    const summaryVal = document.getElementById('summary-tasks-val') || document.getElementById('summary-active-tasks');
+    const summarySub = document.getElementById('summary-tasks-sub') || document.getElementById('summary-tasks-label');
+
+    const activeList = (Array.isArray(tasks) ? tasks : []).filter(t => t && typeof t === 'object');
     const runningCount = activeList.filter(t => t.status === 'PROCESSING').length;
     const pendingCount = activeList.filter(t => t.status === 'PENDING').length;
     const totalCount = activeList.length;
@@ -121,13 +154,11 @@ function renderActiveTasks(tasks) {
     if (activeList.length === 0) {
         container.innerHTML = `
             <div class="task-idle-card">
-                <div class="task-idle-left">
-                    <span class="task-idle-indicator"></span>
-                    <span class="task-idle-text">AUTONOMOUS QUEUE IDLE // STANDING BY FOR DISCORD OR CRON TRIGGERS</span>
+                <div class="idle-indicator">
+                    <span class="pulse-dot healthy"></span>
+                    <span>ALL WORKERS IDLE // NO PENDING TURNS</span>
                 </div>
-                <div class="task-idle-meta">
-                    <span class="task-idle-clock">AERIAL SYSTEM NOMINAL</span>
-                </div>
+                <div>DISPATCH POLLING SQLITE QUEUE (1s)</div>
             </div>
         `;
         return;
@@ -135,10 +166,11 @@ function renderActiveTasks(tasks) {
 
     const now = Date.now();
 
-    container.innerHTML = tasks.map(task => {
+    container.innerHTML = activeList.map(task => {
         const isProcessing = task.status === 'PROCESSING';
-        const statusClass = isProcessing ? 'task-processing' : 'task-pending';
-        const statusBadge = isProcessing ? '⚡ RUNNING' : '⏳ QUEUED';
+        const isPending = task.status === 'PENDING';
+        const statusClass = isProcessing ? 'status-processing processing' : isPending ? 'status-pending pending' : 'status-unknown';
+        const statusBadge = isProcessing ? '⚡ RUNNING' : isPending ? '⏳ QUEUED' : escapeHtml(String(task.status || 'UNKNOWN').toUpperCase());
 
         const authorSafe = escapeHtml(task.author_name || 'System');
         const summarySafe = escapeHtml(task.summary || task.prompt || 'Agent Task');
@@ -148,8 +180,8 @@ function renderActiveTasks(tasks) {
         let timerHTML = '';
         if (isProcessing && (task.started_at || task.created_at)) {
             const startTimeStr = task.started_at || task.created_at;
-            const startedMs = new Date(startTimeStr).getTime();
-            const initialSec = !isNaN(startedMs) ? Math.max(0, Math.floor((now - startedMs) / 1000)) : 0;
+            const startedMs = parseValidTimestampMs(startTimeStr);
+            const initialSec = startedMs ? Math.max(0, Math.floor((now - startedMs) / 1000)) : 0;
             const formattedTime = formatElapsedTicker(initialSec);
             timerHTML = `
                 <div class="deploy-timer-badge">
@@ -159,13 +191,14 @@ function renderActiveTasks(tasks) {
             `;
         }
 
-        const retryHTML = task.retry_count > 0 
+        const retryHTML = Number(task.retry_count) > 0 
             ? `<span class="task-retry-badge" title="Retry Attempt">🔄 RETRY #${escapeHtml(task.retry_count)}</span>` 
             : '';
 
+        const hasValidSession = typeof task.session_id === 'string' && task.session_id.trim().length > 0;
         const inspectUrl = formatAgentsviewSessionUrl(task.session_id);
-        const inspectHTML = task.session_id 
-            ? `<a href="${inspectUrl}" target="_blank" rel="noopener noreferrer" class="task-inspect-btn active">💬 INSPECT IN AGENTSVIEW ↗</a>`
+        const inspectHTML = hasValidSession 
+            ? `<a href="${escapeHtml(inspectUrl)}" target="_blank" rel="noopener noreferrer" class="task-inspect-btn active">💬 INSPECT IN AGENTSVIEW ↗</a>`
             : `<a href="/conversations/" target="_blank" rel="noopener noreferrer" class="task-inspect-btn active" title="Session allocating - Click to open Agentsview">💬 OPEN AGENTSVIEW ↗</a>`;
 
         return `
@@ -194,262 +227,265 @@ function renderActiveTasks(tasks) {
     }).join('');
 }
 
+function renderDeployments(deployments) {
+    const deploysContainer = document.getElementById('deployments-container');
+    const deployBadge = document.getElementById('deploy-count-badge');
+    const deploys = Array.isArray(deployments) ? deployments : [];
+
+    const hasFailed = deploys.some(dep => dep.stage === 'failed');
+    const hasDegraded = deploys.some(dep => dep.stage === 'degraded');
+    const isBuilding = deploys.some(dep => dep.stage === 'building' || dep.stage === 'queued');
+    const isSwapping = deploys.some(dep => dep.stage === 'swapping');
+    const isAwaitingPull = deploys.some(dep => dep.stage === 'awaiting_pull');
+    const activeDeploys = deploys.filter(dep => dep.stage !== 'live' && dep.stage !== 'completed');
+
+    if (deployBadge) {
+        if (hasFailed) {
+            deployBadge.textContent = `🚨 CI BUILD FAILED`;
+            deployBadge.className = 'section-badge failed';
+        } else if (hasDegraded) {
+            deployBadge.textContent = `⚠️ STACK DEGRADED`;
+            deployBadge.className = 'section-badge failed';
+        } else if (isBuilding) {
+            deployBadge.textContent = `⚡ 1 CI BUILD ACTIVE`;
+            deployBadge.className = 'section-badge building';
+        } else if (isSwapping) {
+            deployBadge.textContent = `🔄 WATCHTOWER SWAPPING`;
+            deployBadge.className = 'section-badge swapping';
+        } else if (isAwaitingPull) {
+            deployBadge.textContent = `⬇️ AWAITING WATCHTOWER PULL`;
+            deployBadge.className = 'section-badge active';
+        } else if (activeDeploys.length > 0) {
+            deployBadge.textContent = `${activeDeploys.length} IN PROGRESS`;
+            deployBadge.className = 'section-badge active';
+        } else if (deploys.length > 0) {
+            deployBadge.textContent = `ALL SERVICES LIVE (STACK SYNCED)`;
+            deployBadge.className = 'section-badge live';
+        } else {
+            deployBadge.textContent = 'SYSTEM IN SYNC';
+            deployBadge.className = 'section-badge';
+        }
+    }
+
+    if (!deploysContainer) return;
+    deploysContainer.innerHTML = '';
+
+    if (deploys.length === 0) {
+        deploysContainer.innerHTML = `
+            <div class="deploy-idle-card">
+                <div class="idle-indicator">
+                    <span class="pulse-dot healthy"></span>
+                    <span>ALL SERVICES IN SYNC // NO PENDING DEPLOYS</span>
+                </div>
+                <div>WATCHTOWER POLLING GHCR (60s)</div>
+            </div>
+        `;
+        return;
+    }
+
+    deploys.forEach(dep => {
+        const isLive = dep.stage === 'live';
+        const isFailed = dep.stage === 'failed';
+        const isDegraded = dep.stage === 'degraded';
+        const isSwapping = dep.stage === 'swapping';
+        const isAwaitingPull = dep.stage === 'awaiting_pull';
+        const isBuildingStage = dep.stage === 'building' || dep.stage === 'queued';
+
+        const steps = dep.steps || [
+            { name: "Commit Trigger", icon: "📦", status: "completed" },
+            { name: "CI Build & GHCR", icon: "⚙️", status: "completed" },
+            { name: "Watchtower Pull", icon: "⬇️", status: "completed" },
+            { name: "Container Swap", icon: "🔄", status: isLive ? "completed" : "active" },
+            { name: "Health Check", icon: "🩺", status: isLive ? "completed" : "pending" }
+        ];
+
+        const isHostPhase = isSwapping || isLive || isDegraded;
+        const allChips = Array.isArray(dep.matrix_jobs) ? dep.matrix_jobs : [];
+        const gateChips = allChips.filter(c => c.name && (c.name.includes('test') || c.name.includes('lint')));
+        const serviceChips = allChips.filter(c => c.name && (!c.name.includes('test') && !c.name.includes('lint')));
+
+        const stepsHTML = steps.map(step => {
+            let matrixHTML = '';
+            let targetChips = [];
+
+            if (step.name && step.name.includes("CI Build")) {
+                if (isBuildingStage || (isFailed && step.status === 'failed')) {
+                    targetChips = allChips;
+                } else if (gateChips.length > 0) {
+                    targetChips = gateChips;
+                }
+            } else if (step.name && step.name.includes("Container Swap") && isHostPhase) {
+                targetChips = serviceChips.length > 0 ? serviceChips : allChips;
+            }
+
+            if (targetChips.length > 0) {
+                matrixHTML = `
+                    <div class="matrix-chips-container">
+                        ${targetChips.map(chip => {
+                            const chipClass = chip.status === 'completed' ? 'chip-done' : chip.status === 'active' ? 'chip-running' : chip.status === 'failed' ? 'chip-failed' : 'chip-queued';
+                            const chipIcon = chip.status === 'completed' ? '✓' : chip.status === 'active' ? '⚡' : chip.status === 'failed' ? '✕' : '○';
+                            const durText = chip.duration ? ` (${escapeHtml(chip.duration)})` : '';
+                            return `<span class="matrix-chip ${chipClass}" onclick="openDiagnosticDrawerByName('${escapeHtml(chip.name)}'); event.stopPropagation();" title="${escapeHtml(chip.name)}: ${chip.status}${durText} • Click for diagnostics">${escapeHtml(chip.name)}${durText} ${chipIcon}</span>`;
+                        }).join('')}
+                    </div>
+                `;
+            }
+
+            const statusBadge = step.status === 'completed' ? '✓ DONE' : step.status === 'active' ? '⚡ RUNNING' : step.status === 'failed' ? '✕ FAILED' : '○ PENDING';
+
+            return `
+                <div class="step-panel step-${escapeHtml(step.status)}">
+                    <div class="step-header">
+                        <span class="step-icon">${escapeHtml(step.icon)}</span>
+                        <span class="step-status-badge">${statusBadge}</span>
+                    </div>
+                    <div class="step-name">${escapeHtml(step.name)}</div>
+                    ${matrixHTML}
+                </div>
+            `;
+        }).join('');
+
+        const safeCommit = escapeHtml(dep.commit || 'latest');
+        const commitMarkup = dep.commit && dep.commit !== 'latest'
+            ? `<a href="https://github.com/azylman/aerial/commit/${safeCommit}" target="_blank" rel="noopener" class="deploy-commit-link" title="View commit on GitHub">${safeCommit} ↗</a>`
+            : `<span class="deploy-commit">${safeCommit}</span>`;
+
+        let runLinkMarkup = '';
+        if (dep.html_url && typeof dep.html_url === 'string' && dep.html_url.startsWith('https://github.com/')) {
+            const safeUrl = escapeHtml(dep.html_url);
+            runLinkMarkup = `<a href="${safeUrl}" target="_blank" rel="noopener" class="deploy-run-link" title="Open GitHub Actions Run">RUN LOGS ↗</a>`;
+        }
+
+        let timerMarkup = '';
+        if ((isBuildingStage || isSwapping || isAwaitingPull) && dep.started_at) {
+            timerMarkup = `
+                <div class="deploy-timer-badge">
+                    <span class="pulse-indicator"></span>
+                    <span class="timer-text" data-started="${escapeHtml(dep.started_at)}">⏱ 00:00s</span>
+                </div>
+            `;
+        }
+
+        const cardClass = isLive ? 'stage-live' : (isFailed || isDegraded) ? 'stage-failed' : isSwapping ? 'stage-swapping' : (isBuildingStage || isAwaitingPull) ? 'stage-building' : 'stage-active';
+        const badgeClass = isLive ? 'live' : (isFailed || isDegraded) ? 'failed' : isSwapping ? 'swapping' : 'active';
+
+        const card = document.createElement('div');
+        card.className = `deploy-card ${cardClass}`;
+        card.innerHTML = `
+            ${(isBuildingStage || isSwapping || isAwaitingPull) ? '<div class="deploy-card-laser"></div>' : ''}
+            <div class="deploy-card-header">
+                <div class="deploy-target">
+                    <span class="deploy-service-name">${escapeHtml((dep.service || 'SERVICE').toUpperCase())}</span>
+                    ${commitMarkup}
+                    ${runLinkMarkup}
+                </div>
+                <div style="display: flex; align-items: center; gap: 8px;">
+                    ${timerMarkup}
+                    <span class="deploy-stage-badge ${badgeClass}">⚡ ${escapeHtml(String(dep.stage || 'ACTIVE').toUpperCase())}</span>
+                </div>
+            </div>
+            <div class="deploy-steps-grid">
+                ${stepsHTML}
+            </div>
+            <div class="deploy-progress-bg">
+                <div class="deploy-progress-fill" style="width: ${Number(dep.progress) || 0}%;"></div>
+            </div>
+            <div class="deploy-footer">
+                <span>${dep.commit_msg ? `"${escapeHtml(dep.commit_msg)}"` : `STAGE: ${escapeHtml(String(dep.stage || '').toUpperCase())} (${Number(dep.progress) || 0}%)`}</span>
+                <span>STARTED: ${dep.started_at ? new Date(dep.started_at).toLocaleTimeString() : 'RECENT'}</span>
+            </div>
+        `;
+        deploysContainer.appendChild(card);
+    });
+}
+
+function renderServicesGrid(services) {
+    activeServicesCache = Array.isArray(services) ? services : [];
+    const grid = document.getElementById('services-grid');
+    if (!grid) return;
+
+    grid.innerHTML = '';
+    let healthyCount = 0;
+    activeServicesCache.forEach((svc, index) => {
+        if (svc.status === 'healthy') healthyCount++;
+        
+        const safeName = escapeHtml(svc.name);
+        const safeStatus = escapeHtml(svc.status);
+        const formattedUptime = formatUptime(svc.uptime_seconds);
+
+        const card = document.createElement('div');
+        card.className = 'service-card';
+        card.onclick = () => openDiagnosticDrawer(index);
+
+        card.innerHTML = `
+            <div class="header">
+                <span class="title">${safeName}</span>
+                <div class="status-badge-container">
+                    <span class="pulse-dot ${safeStatus}"></span>
+                    <span class="badge ${safeStatus}">${safeStatus.toUpperCase()}</span>
+                </div>
+            </div>
+            <div class="service-metrics">
+                <span>UPTIME: ${formattedUptime}</span>
+                <span>PORT: READY</span>
+            </div>
+            <div class="card-action-hint">
+                CLICK FOR DIAGNOSTICS &rarr;
+            </div>
+        `;
+        grid.appendChild(card);
+    });
+
+    // Update active count
+    const total = activeServicesCache.length;
+    const activeCountEl = document.getElementById('active-count');
+    if (activeCountEl) activeCountEl.textContent = `${healthyCount} / ${total}`;
+
+    // Permet Score Calculation
+    const healthRatio = total > 0 ? (healthyCount / total) : 0;
+    const permetBar = document.getElementById('permet-bar-fill');
+    const permetVal = document.getElementById('permet-score-val');
+    
+    if (permetBar && permetVal) {
+        const percent = Math.round(healthRatio * 100);
+        permetBar.style.width = `${percent}%`;
+
+        if (healthRatio === 1) {
+            permetVal.textContent = 'LVL 5 // OPTIMAL';
+            permetVal.style.color = 'var(--neon-cyan)';
+        } else if (healthRatio > 0.7) {
+            permetVal.textContent = 'LVL 3 // STABLE';
+            permetVal.style.color = 'var(--neon-amber)';
+        } else {
+            permetVal.textContent = 'LVL 1 // WARNING';
+            permetVal.style.color = 'var(--neon-red)';
+        }
+    }
+}
+
 function getApiBase() {
     const path = window.location.pathname.replace(/\/+$/, '');
     return path.endsWith('/dashboard') ? path : (path + '/dashboard').replace(/\/+/g, '/').replace(/\/+$/, '');
 }
 
 async function fetchStatus() {
+    if (isStatusFetching) return;
+    isStatusFetching = true;
+
+    if (statusAbortController) statusAbortController.abort();
+    statusAbortController = new AbortController();
+
+    let data;
     try {
-        const res = await fetch(getApiBase() + '/api/status');
+        const res = await fetch(getApiBase() + '/api/status', { signal: statusAbortController.signal });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-
-        const refreshEl = document.getElementById('last-refresh');
-        if (refreshEl) refreshEl.textContent = new Date(data.system_time).toLocaleTimeString();
-        
-        const overallStatusEl = document.getElementById('overall-status');
-        if (overallStatusEl) overallStatusEl.textContent = escapeHtml(data.cluster_status.toUpperCase());
-        
-        // --- 0. RENDER LIVE AGENT EXECUTION QUEUE ---
-        renderActiveTasks(data.active_tasks || []);
-
-        // --- 1. RENDER DEPLOYMENT PIPELINE ---
-        const deploysContainer = document.getElementById('deployments-container');
-        const deployBadge = document.getElementById('deploy-count-badge');
-        const deploys = data.deployments || [];
-
-        const hasFailed = deploys.some(dep => dep.stage === 'failed');
-        const hasDegraded = deploys.some(dep => dep.stage === 'degraded');
-        const isBuilding = deploys.some(dep => dep.stage === 'building' || dep.stage === 'queued');
-        const isSwapping = deploys.some(dep => dep.stage === 'swapping');
-        const isAwaitingPull = deploys.some(dep => dep.stage === 'awaiting_pull');
-        const activeDeploys = deploys.filter(dep => dep.stage !== 'live' && dep.stage !== 'completed');
-
-        if (deployBadge) {
-            if (hasFailed) {
-                deployBadge.textContent = `🚨 CI BUILD FAILED`;
-                deployBadge.className = 'section-badge failed';
-            } else if (hasDegraded) {
-                deployBadge.textContent = `⚠️ STACK DEGRADED`;
-                deployBadge.className = 'section-badge failed';
-            } else if (isBuilding) {
-                deployBadge.textContent = `⚡ 1 CI BUILD ACTIVE`;
-                deployBadge.className = 'section-badge building';
-            } else if (isSwapping) {
-                deployBadge.textContent = `🔄 WATCHTOWER SWAPPING`;
-                deployBadge.className = 'section-badge swapping';
-            } else if (isAwaitingPull) {
-                deployBadge.textContent = `⬇️ AWAITING WATCHTOWER PULL`;
-                deployBadge.className = 'section-badge active';
-            } else if (activeDeploys.length > 0) {
-                deployBadge.textContent = `${activeDeploys.length} IN PROGRESS`;
-                deployBadge.className = 'section-badge active';
-            } else if (deploys.length > 0) {
-                deployBadge.textContent = `ALL SERVICES LIVE (STACK SYNCED)`;
-                deployBadge.className = 'section-badge live';
-            } else {
-                deployBadge.textContent = 'SYSTEM IN SYNC';
-                deployBadge.className = 'section-badge';
-            }
+        data = await res.json();
+    } catch (networkErr) {
+        if (networkErr.name === 'AbortError') {
+            isStatusFetching = false;
+            return;
         }
-
-        if (deploysContainer) {
-            deploysContainer.innerHTML = '';
-
-            if (deploys.length === 0) {
-                deploysContainer.innerHTML = `
-                    <div class="deploy-idle-card">
-                        <div class="idle-indicator">
-                            <span class="pulse-dot healthy"></span>
-                            <span>ALL SERVICES IN SYNC // NO PENDING DEPLOYS</span>
-                        </div>
-                        <div>WATCHTOWER POLLING GHCR (60s)</div>
-                    </div>
-                `;
-            } else {
-                deploys.forEach(dep => {
-                    const isLive = dep.stage === 'live';
-                    const isFailed = dep.stage === 'failed';
-                    const isDegraded = dep.stage === 'degraded';
-                    const isSwapping = dep.stage === 'swapping';
-                    const isAwaitingPull = dep.stage === 'awaiting_pull';
-                    const isBuildingStage = dep.stage === 'building' || dep.stage === 'queued';
-
-                    const steps = dep.steps || [
-                        { name: "Commit Trigger", icon: "📦", status: "completed" },
-                        { name: "CI Build & GHCR", icon: "⚙️", status: "completed" },
-                        { name: "Watchtower Pull", icon: "⬇️", status: "completed" },
-                        { name: "Container Swap", icon: "🔄", status: isLive ? "completed" : "active" },
-                        { name: "Health Check", icon: "🩺", status: isLive ? "completed" : "pending" }
-                    ];
-
-                    const isHostPhase = isSwapping || isLive || isDegraded;
-                    const allChips = Array.isArray(dep.matrix_jobs) ? dep.matrix_jobs : [];
-                    const gateChips = allChips.filter(c => c.name.includes('test') || c.name.includes('lint'));
-                    const serviceChips = allChips.filter(c => !c.name.includes('test') && !c.name.includes('lint'));
-
-                    const stepsHTML = steps.map(step => {
-                        let matrixHTML = '';
-                        let targetChips = [];
-
-                        if (step.name.includes("CI Build")) {
-                            if (isBuildingStage || (isFailed && step.status === 'failed')) {
-                                targetChips = allChips;
-                            } else if (gateChips.length > 0) {
-                                targetChips = gateChips;
-                            }
-                        } else if (step.name.includes("Container Swap") && isHostPhase) {
-                            targetChips = serviceChips.length > 0 ? serviceChips : allChips;
-                        }
-
-                        if (targetChips.length > 0) {
-                            matrixHTML = `
-                                <div class="matrix-chips-container">
-                                    ${targetChips.map(chip => {
-                                        const chipClass = chip.status === 'completed' ? 'chip-done' : chip.status === 'active' ? 'chip-running' : chip.status === 'failed' ? 'chip-failed' : 'chip-queued';
-                                        const chipIcon = chip.status === 'completed' ? '✓' : chip.status === 'active' ? '⚡' : chip.status === 'failed' ? '✕' : '○';
-                                        const durText = chip.duration ? ` (${escapeHtml(chip.duration)})` : '';
-                                        return `<span class="matrix-chip ${chipClass}" onclick="openDiagnosticDrawerByName('${escapeHtml(chip.name)}'); event.stopPropagation();" title="${escapeHtml(chip.name)}: ${chip.status}${durText} • Click for diagnostics">${escapeHtml(chip.name)}${durText} ${chipIcon}</span>`;
-                                    }).join('')}
-                                </div>
-                            `;
-                        }
-
-                        const statusBadge = step.status === 'completed' ? '✓ DONE' : step.status === 'active' ? '⚡ RUNNING' : step.status === 'failed' ? '✕ FAILED' : '○ PENDING';
-
-                        return `
-                            <div class="step-panel step-${escapeHtml(step.status)}">
-                                <div class="step-header">
-                                    <span class="step-icon">${escapeHtml(step.icon)}</span>
-                                    <span class="step-status-badge">${statusBadge}</span>
-                                </div>
-                                <div class="step-name">${escapeHtml(step.name)}</div>
-                                ${matrixHTML}
-                            </div>
-                        `;
-                    }).join('');
-
-                    const safeCommit = escapeHtml(dep.commit || 'latest');
-                    const commitMarkup = dep.commit && dep.commit !== 'latest'
-                        ? `<a href="https://github.com/azylman/aerial/commit/${safeCommit}" target="_blank" rel="noopener" class="deploy-commit-link" title="View commit on GitHub">${safeCommit} ↗</a>`
-                        : `<span class="deploy-commit">${safeCommit}</span>`;
-
-                    let runLinkMarkup = '';
-                    if (dep.html_url && typeof dep.html_url === 'string' && dep.html_url.startsWith('https://github.com/')) {
-                        const safeUrl = escapeHtml(dep.html_url);
-                        runLinkMarkup = `<a href="${safeUrl}" target="_blank" rel="noopener" class="deploy-run-link" title="Open GitHub Actions Run">RUN LOGS ↗</a>`;
-                    }
-
-                    let timerMarkup = '';
-                    if ((isBuildingStage || isSwapping || isAwaitingPull) && dep.started_at) {
-                        timerMarkup = `
-                            <div class="deploy-timer-badge">
-                                <span class="pulse-indicator"></span>
-                                <span class="timer-text" data-started="${escapeHtml(dep.started_at)}">⏱ 00:00s</span>
-                            </div>
-                        `;
-                    }
-
-                    const cardClass = isLive ? 'stage-live' : (isFailed || isDegraded) ? 'stage-failed' : isSwapping ? 'stage-swapping' : (isBuildingStage || isAwaitingPull) ? 'stage-building' : 'stage-active';
-                    const badgeClass = isLive ? 'live' : (isFailed || isDegraded) ? 'failed' : isSwapping ? 'swapping' : 'active';
-
-                    const card = document.createElement('div');
-                    card.className = `deploy-card ${cardClass}`;
-                    card.innerHTML = `
-                        ${(isBuildingStage || isSwapping || isAwaitingPull) ? '<div class="deploy-card-laser"></div>' : ''}
-                        <div class="deploy-card-header">
-                            <div class="deploy-target">
-                                <span class="deploy-service-name">${escapeHtml(dep.service.toUpperCase())}</span>
-                                ${commitMarkup}
-                                ${runLinkMarkup}
-                            </div>
-                            <div style="display: flex; align-items: center; gap: 8px;">
-                                ${timerMarkup}
-                                <span class="deploy-stage-badge ${badgeClass}">⚡ ${escapeHtml(dep.stage.toUpperCase())}</span>
-                            </div>
-                        </div>
-                        <div class="deploy-steps-grid">
-                            ${stepsHTML}
-                        </div>
-                        <div class="deploy-progress-bg">
-                            <div class="deploy-progress-fill" style="width: ${dep.progress}%;"></div>
-                        </div>
-                        <div class="deploy-footer">
-                            <span>${dep.commit_msg ? `"${escapeHtml(dep.commit_msg)}"` : `STAGE: ${escapeHtml(dep.stage.toUpperCase())} (${dep.progress}%)`}</span>
-                            <span>STARTED: ${new Date(dep.started_at).toLocaleTimeString()}</span>
-                        </div>
-                    `;
-                    deploysContainer.appendChild(card);
-                });
-            }
-        }
-
-        // --- 2. RENDER SERVICES GRID ---
-        activeServicesCache = data.services || [];
-        const grid = document.getElementById('services-grid');
-        if (grid) {
-            grid.innerHTML = '';
-            let healthyCount = 0;
-            activeServicesCache.forEach((svc, index) => {
-                if (svc.status === 'healthy') healthyCount++;
-                
-                const safeName = escapeHtml(svc.name);
-                const safeStatus = escapeHtml(svc.status);
-                const formattedUptime = formatUptime(svc.uptime_seconds);
-
-                const card = document.createElement('div');
-                card.className = 'service-card';
-                card.onclick = () => openDiagnosticDrawer(index);
-
-                card.innerHTML = `
-                    <div class="header">
-                        <span class="title">${safeName}</span>
-                        <div class="status-badge-container">
-                            <span class="pulse-dot ${safeStatus}"></span>
-                            <span class="badge ${safeStatus}">${safeStatus.toUpperCase()}</span>
-                        </div>
-                    </div>
-                    <div class="service-metrics">
-                        <span>UPTIME: ${formattedUptime}</span>
-                        <span>PORT: READY</span>
-                    </div>
-                    <div class="card-action-hint">
-                        CLICK FOR DIAGNOSTICS &rarr;
-                    </div>
-                `;
-                grid.appendChild(card);
-            });
-
-            // Update active count
-            const total = activeServicesCache.length;
-            const activeCountEl = document.getElementById('active-count');
-            if (activeCountEl) activeCountEl.textContent = `${healthyCount} / ${total}`;
-
-            // Permet Score Calculation
-            const healthRatio = total > 0 ? (healthyCount / total) : 0;
-            const permetBar = document.getElementById('permet-bar-fill');
-            const permetVal = document.getElementById('permet-score-val');
-            
-            if (permetBar && permetVal) {
-                const percent = Math.round(healthRatio * 100);
-                permetBar.style.width = `${percent}%`;
-
-                if (healthRatio === 1) {
-                    permetVal.textContent = 'LVL 5 // OPTIMAL';
-                    permetVal.style.color = 'var(--neon-cyan)';
-                } else if (healthRatio > 0.7) {
-                    permetVal.textContent = 'LVL 3 // STABLE';
-                    permetVal.style.color = 'var(--neon-amber)';
-                } else {
-                    permetVal.textContent = 'LVL 1 // WARNING';
-                    permetVal.style.color = 'var(--neon-red)';
-                }
-            }
-        }
-
-    } catch (err) {
-        console.error('Failed to fetch system status:', err);
+        console.error('Failed to fetch system status:', networkErr);
         const overallStatusEl = document.getElementById('overall-status');
         if (overallStatusEl) {
             overallStatusEl.textContent = 'OFFLINE';
@@ -457,11 +493,50 @@ async function fetchStatus() {
         }
         const clusterSubEl = document.getElementById('cluster-sub');
         if (clusterSubEl) clusterSubEl.textContent = 'SYSTEM DISCONNECTED';
-        const summaryTasksVal = document.getElementById('summary-tasks-val');
+        const summaryTasksVal = document.getElementById('summary-tasks-val') || document.getElementById('summary-active-tasks');
         if (summaryTasksVal) {
             summaryTasksVal.textContent = 'OFFLINE';
             summaryTasksVal.className = 'value text-danger';
         }
+        isStatusFetching = false;
+        return;
+    } finally {
+        isStatusFetching = false;
+    }
+
+    const refreshEl = document.getElementById('last-refresh');
+    if (refreshEl && data.system_time) refreshEl.textContent = new Date(data.system_time).toLocaleTimeString();
+    
+    const overallStatusEl = document.getElementById('overall-status');
+    if (overallStatusEl) {
+        const statusUpper = escapeHtml(String(data.cluster_status || 'OPTIMAL').toUpperCase());
+        overallStatusEl.textContent = statusUpper;
+        overallStatusEl.className = (data.cluster_status === 'healthy' || data.cluster_status === 'optimal') 
+            ? 'value text-success' 
+            : 'value text-warning';
+    }
+    const clusterSubEl = document.getElementById('cluster-sub');
+    if (clusterSubEl) clusterSubEl.textContent = '100% OPERATIONAL';
+
+    // --- 0. RENDER LIVE AGENT EXECUTION QUEUE ---
+    try {
+        renderActiveTasks(data.active_tasks || []);
+    } catch (e) {
+        console.error('[Permet HUD] Error rendering active tasks:', e);
+    }
+
+    // --- 1. RENDER DEPLOYMENT PIPELINE ---
+    try {
+        renderDeployments(data.deployments || []);
+    } catch (e) {
+        console.error('[Permet HUD] Error rendering deployments:', e);
+    }
+
+    // --- 2. RENDER SERVICES GRID ---
+    try {
+        renderServicesGrid(data.services || []);
+    } catch (e) {
+        console.error('[Permet HUD] Error rendering services grid:', e);
     }
 }
 
@@ -509,7 +584,7 @@ function openDiagnosticDrawer(serviceIndex) {
                 </div>
                 <div class="diag-item">
                     <span class="lbl">DISCOVERY NODE</span>
-                    <span class="val">192.168.1.14 (aerial-net)</span>
+                    <span class="val">aerial-net:internal (Docker Bridge)</span>
                 </div>
             </div>
             <div class="console-box">
@@ -1599,12 +1674,14 @@ const TABS = {
             if (!statusPollInterval) {
                 statusPollInterval = setInterval(fetchStatus, 5000);
             }
+            startLiveTimerLoop();
         },
         onLeave: () => {
             if (statusPollInterval) {
                 clearInterval(statusPollInterval);
                 statusPollInterval = null;
             }
+            stopLiveTimerLoop();
         }
     },
     schedules: {
@@ -1779,5 +1856,4 @@ setupTabs();
 setupMemoryControls();
 setupSchedulesControls();
 setupGlobalKeyboardShortcuts();
-startLiveTimerLoop();
 
