@@ -104,13 +104,26 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	deployments := []DeploymentStatus{}
-	if uptimeSec < 90 {
+	if uptimeSec < 120 {
+		progress := 20 + int(uptimeSec*75/120)
+		if progress > 95 {
+			progress = 95
+		}
 		deployments = append(deployments, DeploymentStatus{
 			ID:        "dep-latest",
 			Service:   "dashboard",
-			Commit:    "cd802c9",
+			Commit:    "118fff3",
 			Stage:     "swapping",
-			Progress:  85,
+			Progress:  progress,
+			StartedAt: startTime,
+		})
+	} else if uptimeSec < 900 {
+		deployments = append(deployments, DeploymentStatus{
+			ID:        "dep-latest",
+			Service:   "dashboard",
+			Commit:    "118fff3",
+			Stage:     "live",
+			Progress:  100,
 			StartedAt: startTime,
 		})
 	}
@@ -122,6 +135,7 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 		Deployments:   deployments,
 	}
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 	json.NewEncoder(w).Encode(resp)
 }
 
@@ -142,7 +156,14 @@ func main() {
 
 	http.HandleFunc("/health", healthHandler)
 	http.HandleFunc("/api/status", statusHandler)
-	http.Handle("/", http.FileServer(http.FS(staticFS)))
+	
+	fileServer := http.FileServer(http.FS(staticFS))
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		w.Header().Set("Pragma", "no-cache")
+		w.Header().Set("Expires", "0")
+		fileServer.ServeHTTP(w, r)
+	})
 
 	port := os.Getenv("PORT")
 	if port == "" {
