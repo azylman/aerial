@@ -672,6 +672,13 @@ body {
     box-shadow: 0 0 20px rgba(0, 255, 135, 0.08);
 }
 
+.deploy-card.stage-swapping, .deploy-card.stage-awaiting_pull {
+    border-color: rgba(0, 242, 254, 0.35);
+    box-shadow: 0 0 25px rgba(0, 242, 254, 0.15);
+    position: relative;
+    overflow: hidden;
+}
+
 .deploy-card.stage-active, .deploy-card.stage-building {
     border-color: rgba(255, 0, 127, 0.4);
     box-shadow: 0 0 25px rgba(255, 0, 127, 0.18);
@@ -679,7 +686,7 @@ body {
     overflow: hidden;
 }
 
-.deploy-card.stage-failed {
+.deploy-card.stage-failed, .deploy-card.stage-degraded {
     border-color: var(--neon-red);
     box-shadow: 0 0 30px rgba(255, 42, 109, 0.35);
     animation: hud-glitch 0.4s ease-out;
@@ -769,10 +776,18 @@ body {
 .matrix-chip {
     font-size: 0.62rem;
     font-weight: 700;
-    padding: 1px 5px;
+    padding: 1px 6px;
     border-radius: 3px;
     letter-spacing: 0.5px;
     text-transform: uppercase;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    user-select: none;
+}
+
+.matrix-chip:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 0 8px rgba(0, 242, 254, 0.4);
 }
 
 .matrix-chip.chip-done {
@@ -798,6 +813,7 @@ body {
     background: rgba(255, 42, 109, 0.25);
     color: var(--neon-red);
     border: 1px solid var(--neon-red);
+    box-shadow: 0 0 8px rgba(255, 42, 109, 0.4);
 }
 
 .deploy-stage-badge {
@@ -818,6 +834,13 @@ body {
     border-color: var(--neon-green);
     animation: none;
     box-shadow: 0 0 10px rgba(0, 255, 135, 0.3);
+}
+
+.deploy-stage-badge.swapping {
+    background: rgba(0, 242, 254, 0.2);
+    color: var(--neon-cyan);
+    border-color: var(--neon-cyan);
+    animation: pulse-border 1.5s infinite alternate;
 }
 
 .deploy-stage-badge.failed {
