@@ -228,7 +228,7 @@ func TestProcessThreadFactsDeduplicationAndWatermark(t *testing.T) {
 	logDir := filepath.Join(homeDir, ".gemini", "antigravity", "brain", "thread-test-1", ".system_generated", "logs")
 	_ = os.MkdirAll(logDir, 0755)
 	_ = os.WriteFile(filepath.Join(logDir, "transcript.jsonl"), []byte("{\"step\":1,\"content\":\"User likes matcha\"}\n"), 0644)
-	defer os.RemoveAll(filepath.Join(homeDir, ".gemini", "antigravity", "brain", "thread-test-1"))
+	defer func() { _ = os.RemoveAll(filepath.Join(homeDir, ".gemini", "antigravity", "brain", "thread-test-1")) }()
 
 	ctx := context.Background()
 	err = processThreadFacts(ctx, database, client, llmFunc, "thread-test-1")

@@ -1,4 +1,4 @@
-﻿package main
+package main
 
 import (
 	"bytes"
@@ -10,7 +10,6 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
-	"sync"
 )
 
 // BlockedToolNames defines the set of tools that should be hidden and disallowed.
@@ -128,7 +127,6 @@ type ProxyHandler struct {
 	reverseProxy *httputil.ReverseProxy
 	httpClient   *http.Client
 	blockedTools map[string]bool
-	mu           sync.RWMutex
 }
 
 // NewProxyHandler creates a new ProxyHandler targeting the given upstream URL.

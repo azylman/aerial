@@ -298,6 +298,9 @@ func RunStartupCatchUpSweep(ctx context.Context, database *sql.DB, pool *queue.W
 	if s == nil || database == nil || pool == nil {
 		return
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
 	sweepMu.Lock()
 	if !isSweeping.CompareAndSwap(false, true) {
