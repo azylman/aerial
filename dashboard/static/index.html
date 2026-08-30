@@ -69,6 +69,12 @@
                     <span class="value text-success" id="overall-status">OPTIMAL</span>
                     <span class="sub-label" id="cluster-sub">100% OPERATIONAL</span>
                 </div>
+                <div class="summary-card" id="summary-card-tasks">
+                    <div class="card-glow"></div>
+                    <span class="label">AGENT QUEUE</span>
+                    <span class="value text-success" id="summary-tasks-val"><span id="summary-active-tasks">0 IDLE</span></span>
+                    <span class="sub-label" id="summary-tasks-sub"><span id="summary-tasks-label">REAL-TIME DISPATCH</span></span>
+                </div>
                 <div class="summary-card">
                     <div class="card-glow"></div>
                     <span class="label">ACTIVE SERVICES</span>
@@ -86,6 +92,28 @@
                     <span class="label">LAST SYNCHRONIZED</span>
                     <span class="value" id="last-refresh">--:--:--</span>
                     <span class="sub-label" id="refresh-interval">SYNCED (5s)</span>
+                </div>
+            </section>
+
+            <!-- LIVE AGENT EXECUTION QUEUE SECTION -->
+            <section class="active-tasks-section" aria-live="polite">
+                <div class="section-title-bar">
+                    <div class="section-title">
+                        <span class="title-icon">⚡</span>
+                        <h2>LIVE AGENT EXECUTION QUEUE</h2>
+                    </div>
+                    <span class="section-badge" id="tasks-count-badge"><span id="active-tasks-badge">0 IN PROGRESS</span></span>
+                </div>
+                <div class="active-tasks-container" id="active-tasks-container">
+                    <div id="active-tasks-list">
+                        <div class="task-idle-card">
+                            <div class="idle-indicator">
+                                <span class="pulse-dot healthy"></span>
+                                <span>ALL WORKERS IDLE // NO PENDING TURNS</span>
+                            </div>
+                            <div>DISPATCH POLLING SQLITE QUEUE (1s)</div>
+                        </div>
+                    </div>
                 </div>
             </section>
 

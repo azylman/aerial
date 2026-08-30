@@ -281,6 +281,8 @@ body {
 
 .text-success { color: var(--neon-green) !important; text-shadow: 0 0 10px rgba(0, 255, 135, 0.4); }
 .text-danger { color: var(--neon-red) !important; text-shadow: 0 0 10px rgba(255, 42, 109, 0.4); }
+.text-cyan { color: var(--neon-cyan) !important; text-shadow: 0 0 10px rgba(0, 242, 254, 0.4); }
+.text-warning { color: var(--neon-amber) !important; text-shadow: 0 0 10px rgba(255, 183, 0, 0.4); }
 
 /* --- SECTION TITLE BAR --- */
 .section-title-bar {
@@ -318,6 +320,248 @@ body {
     background: rgba(0, 242, 254, 0.1);
     color: var(--neon-cyan);
     border: 1px solid rgba(0, 242, 254, 0.3);
+}
+
+/* --- LIVE AGENT TASK QUEUE --- */
+.active-tasks-section {
+    margin-bottom: 2.5rem;
+    padding-bottom: 1.5rem;
+    border-bottom: 1px dashed rgba(0, 242, 254, 0.15);
+}
+
+.active-tasks-container,
+#active-tasks-list {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.task-card {
+    background: var(--card-bg);
+    border: 1px solid rgba(0, 242, 254, 0.25);
+    border-radius: 12px;
+    padding: 1.25rem 1.5rem;
+    backdrop-filter: var(--glass-backdrop);
+    box-shadow: 0 0 20px rgba(0, 242, 254, 0.08);
+    position: relative;
+    overflow: hidden;
+    transition: all 0.25s ease;
+}
+
+.task-card:hover {
+    border-color: var(--neon-cyan);
+    box-shadow: 0 0 25px rgba(0, 242, 254, 0.2);
+}
+
+.task-card.status-processing,
+.task-card.processing {
+    border-color: var(--neon-cyan);
+    box-shadow: 0 0 25px rgba(0, 242, 254, 0.18);
+}
+
+.task-card.status-pending,
+.task-card.pending {
+    border-color: rgba(255, 183, 0, 0.3);
+    box-shadow: 0 0 15px rgba(255, 183, 0, 0.08);
+}
+
+.task-card-laser {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 2px;
+    background: linear-gradient(90deg, transparent, var(--neon-cyan), var(--neon-purple), transparent);
+    animation: laser-sweep 2.5s infinite linear;
+}
+
+.task-card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    margin-bottom: 0.75rem;
+}
+
+.task-meta-left {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+}
+
+.task-trigger-badge {
+    font-size: 0.75rem;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 4px;
+    background: rgba(0, 242, 254, 0.1);
+    color: var(--neon-cyan);
+    border: 1px solid rgba(0, 242, 254, 0.3);
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+}
+
+.task-trigger-badge.discord,
+.task-trigger-badge[data-trigger="discord"] {
+    background: rgba(88, 101, 242, 0.15);
+    color: #5865f2;
+    border-color: rgba(88, 101, 242, 0.4);
+}
+
+.task-trigger-badge.cron,
+.task-trigger-badge[data-trigger="cron"] {
+    background: rgba(255, 183, 0, 0.15);
+    color: var(--neon-amber);
+    border-color: rgba(255, 183, 0, 0.4);
+}
+
+.task-trigger-badge.reminder,
+.task-trigger-badge[data-trigger="reminder"] {
+    background: rgba(157, 0, 255, 0.15);
+    color: var(--neon-purple);
+    border-color: rgba(157, 0, 255, 0.4);
+}
+
+.task-trigger-badge.http,
+.task-trigger-badge[data-trigger="http"] {
+    background: rgba(0, 255, 135, 0.15);
+    color: var(--neon-green);
+    border-color: rgba(0, 255, 135, 0.4);
+}
+
+.task-author {
+    font-size: 0.85rem;
+    font-weight: 700;
+    color: #fff;
+    font-family: var(--font-heading);
+}
+
+.task-status-pill,
+.task-status-badge {
+    font-size: 0.75rem;
+    font-weight: 700;
+    padding: 3px 8px;
+    border-radius: 4px;
+    letter-spacing: 0.5px;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.task-status-pill.processing,
+.task-status-badge.processing {
+    background: rgba(0, 242, 254, 0.15);
+    color: var(--neon-cyan);
+    border: 1px solid var(--neon-cyan);
+    box-shadow: 0 0 10px rgba(0, 242, 254, 0.3);
+}
+
+.task-status-pill.pending,
+.task-status-badge.pending {
+    background: rgba(255, 183, 0, 0.15);
+    color: var(--neon-amber);
+    border: 1px solid rgba(255, 183, 0, 0.4);
+}
+
+.task-retry-badge {
+    font-size: 0.75rem;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 4px;
+    background: rgba(255, 42, 109, 0.15);
+    color: var(--neon-red);
+    border: 1px solid rgba(255, 42, 109, 0.4);
+}
+
+.task-timer {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: rgba(0, 0, 0, 0.5);
+    border: 1px solid var(--neon-cyan);
+    padding: 3px 8px;
+    border-radius: 6px;
+    font-size: 0.75rem;
+    color: #fff;
+    box-shadow: 0 0 10px rgba(0, 242, 254, 0.3);
+}
+
+.task-prompt-box {
+    background: rgba(0, 0, 0, 0.4);
+    border-left: 3px solid var(--neon-cyan);
+    padding: 0.75rem 1rem;
+    margin: 0.75rem 0;
+    font-family: var(--font-mono);
+    font-size: 0.82rem;
+    line-height: 1.45;
+    color: var(--text-primary);
+    border-radius: 0 6px 6px 0;
+    max-height: 4.8rem;
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+}
+
+.task-card-footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    margin-top: 0.75rem;
+    padding-top: 0.75rem;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.task-inspect-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0.45rem 1rem;
+    border-radius: 6px;
+    font-size: 0.8rem;
+    font-weight: 700;
+    text-decoration: none;
+    transition: all 0.2s ease;
+}
+
+.task-inspect-btn.active {
+    background: rgba(0, 242, 254, 0.12);
+    border: 1px solid var(--neon-cyan);
+    color: var(--neon-cyan);
+}
+
+.task-inspect-btn.active:hover {
+    background: rgba(0, 242, 254, 0.25);
+    color: #fff;
+    box-shadow: 0 0 15px rgba(0, 242, 254, 0.4);
+}
+
+.task-inspect-btn.disabled {
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    color: var(--text-dim);
+    cursor: not-allowed;
+}
+
+.task-idle-card,
+.task-queue-idle {
+    background: var(--card-bg);
+    border: 1px dashed rgba(255, 255, 255, 0.15);
+    border-radius: 12px;
+    padding: 1.5rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    backdrop-filter: var(--glass-backdrop);
+    color: var(--text-muted);
+    font-size: 0.85rem;
+    letter-spacing: 1px;
 }
 
 /* --- DEPLOYMENT PIPELINE SECTION --- */
@@ -1916,6 +2160,21 @@ body {
         flex-direction: column;
         align-items: flex-start;
         gap: 4px;
+    }
+    .task-card-header {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+    .task-card-footer {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 8px;
+    }
+    .task-idle-card,
+    .task-queue-idle {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 8px;
     }
 }
 
