@@ -87,6 +87,11 @@ jobs:
             **/go.sum
             **/go.mod
 
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
       - name: Test Brain
         if: needs.changes.outputs.brain == 'true'
         run: |
@@ -128,6 +133,11 @@ jobs:
           cache-dependency-path: |
             **/go.sum
             **/go.mod
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
 
       - name: Lint Brain
         if: needs.changes.outputs.brain == 'true'
