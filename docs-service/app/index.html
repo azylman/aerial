@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Aerial Docs // Data Matrix</title>
+  <meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+  <meta name="description" content="Aerial Assistant Documentation & Architecture Diagrams">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=1.0">
+  <link rel="stylesheet" href="assets/css/dark.css">
+  <link rel="stylesheet" href="assets/css/cyberpunk-docs.css">
+</head>
+<body>
+  <div id="app">Initializing Aerial Docs Matrix...</div>
+
+  <script>
+    window.$docsify = {
+      name: 'AERIAL // DOCS',
+      repo: '',
+      loadSidebar: true,
+      subMaxLevel: 3,
+      auto2top: true,
+      homepage: 'README.md',
+      notFoundPage: '_404.md',
+      relativePath: false,
+      executeScript: false,
+      alias: {
+        '/.*/_sidebar.md': '/_sidebar.md'
+      },
+      search: {
+        maxAge: 86400000,
+        paths: 'auto',
+        placeholder: 'Search docs matrix...',
+        noData: 'No matching records found',
+        depth: 3,
+        hideOtherSidebarContent: false
+      },
+      copyCode: {
+        buttonText: 'COPY',
+        errorText: 'ERROR',
+        successText: 'COPIED'
+      }
+    };
+  </script>
+
+  <!-- Vendored Core & Plugins -->
+  <script src="assets/js/docsify.min.js"></script>
+  <script src="assets/js/plugins/search.min.js"></script>
+  <script src="assets/js/plugins/docsify-copy-code.min.js"></script>
+  <script src="assets/js/plugins/zoom-image.min.js"></script>
+
+  <!-- Vendored Prism Language Components -->
+  <script src="assets/js/prism/prism-bash.min.js"></script>
+  <script src="assets/js/prism/prism-yaml.min.js"></script>
+  <script src="assets/js/prism/prism-json.min.js"></script>
+  <script src="assets/js/prism/prism-go.min.js"></script>
+  <script src="assets/js/prism/prism-python.min.js"></script>
+  <script src="assets/js/prism/prism-docker.min.js"></script>
+
+  <!-- Mermaid.js Engine & Aerial Cyberpunk Plugin -->
+  <script src="assets/js/mermaid.min.js"></script>
+  <script src="assets/js/plugins/docsify-mermaid-cyberpunk.js"></script>
+</body>
+</html>

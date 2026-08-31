@@ -21,6 +21,7 @@ jobs:
       docker-mcp: ${{ steps.filter.outputs.docker-mcp }}
       github-mcp: ${{ steps.filter.outputs.github-mcp }}
       dashboard: ${{ steps.filter.outputs.dashboard }}
+      docs: ${{ steps.filter.outputs.docs }}
       proxy: ${{ steps.filter.outputs.proxy }}
       ollama: ${{ steps.filter.outputs.ollama }}
     steps:
@@ -54,6 +55,10 @@ jobs:
               - '.github/workflows/**'
             dashboard:
               - 'dashboard/**'
+              - 'docker-compose.yml'
+              - '.github/workflows/**'
+            docs:
+              - 'docs-service/**'
               - 'docker-compose.yml'
               - '.github/workflows/**'
             proxy:
@@ -157,6 +162,11 @@ jobs:
         run: |
           node --check dashboard/static/app.js
 
+      - name: Lint Docsify Custom Plugins
+        if: needs.changes.outputs.docs == 'true'
+        run: |
+          node --check docs-service/app/assets/js/plugins/docsify-mermaid-cyberpunk.js
+
   build-and-push:
     name: Build & Push Images to GHCR
     needs: [changes, test, lint]
@@ -189,6 +199,10 @@ jobs:
             context: ./dashboard
             file: ./dashboard/Dockerfile
             image_name: aerial-dashboard
+          - service: docs
+            context: ./docs-service
+            file: ./docs-service/Dockerfile
+            image_name: aerial-docs
           - service: proxy
             context: ./proxy
             file: ./proxy/Dockerfile

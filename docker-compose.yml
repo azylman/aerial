@@ -273,8 +273,31 @@ services:
       start_period: 10s
 
   # ----------------------------------------------------------------------------
-  # 11. Edge Reverse Proxy Gateway: Aerial Proxy Gateway
-  #     Routes traffic for / (status dashboard) and /conversations (agentsview).
+  # 11. Documentation Engine: Aerial Docs (Docsify + Mermaid.js)
+  #     Renders user markdown documentation and Mermaid diagrams from config repo.
+  # ----------------------------------------------------------------------------
+  docs:
+    image: ghcr.io/azylman/aerial-docs:latest
+    build: ./docs-service
+    container_name: aerial-docs
+    restart: unless-stopped
+    labels:
+      autoheal: "true"
+      com.centurylinklabs.watchtower.enable: "true"
+    volumes:
+      - ${AERIAL_CONFIG_DIR:-/mnt/data/supervisor/share/aerial-config}:/share/aerial-config:ro
+    networks:
+      - aerial-net
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:80/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ----------------------------------------------------------------------------
+  # 12. Edge Reverse Proxy Gateway: Aerial Proxy Gateway
+  #     Routes traffic for / (status dashboard), /docs (docsify), and /conversations (agentsview).
   # ----------------------------------------------------------------------------
   proxy:
     image: ghcr.io/azylman/aerial-proxy:latest
@@ -296,6 +319,8 @@ services:
       start_period: 10s
     depends_on:
       dashboard:
+        condition: service_healthy
+      docs:
         condition: service_healthy
       agentsview:
         condition: service_started

@@ -1,0 +1,268 @@
+/* ==========================================================================
+   Aerial Docsify Cyberpunk Permet Theme
+   ========================================================================== */
+
+:root {
+  --docs-bg: #080a0f;
+  --docs-sidebar-bg: #0e121c;
+  --docs-card-bg: rgba(14, 18, 28, 0.85);
+  --docs-border: rgba(0, 242, 254, 0.2);
+  --docs-border-hover: rgba(0, 242, 254, 0.6);
+
+  --neon-cyan: #00f2fe;
+  --neon-magenta: #ff007f;
+  --neon-purple: #9d00ff;
+  --neon-green: #00ff87;
+  --neon-amber: #ffb700;
+
+  --text-primary: #f0f4f8;
+  --text-muted: #8292a8;
+  --text-code: #00ff87;
+
+  --font-heading: 'Space Grotesk', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', Menlo, Consolas, monospace;
+}
+
+body {
+  background-color: var(--docs-bg) !important;
+  color: var(--text-primary) !important;
+  font-family: var(--font-mono) !important;
+  font-size: 14px !important;
+  line-height: 1.6 !important;
+}
+
+/* Sidebar Styles */
+.sidebar {
+  background-color: var(--docs-sidebar-bg) !important;
+  border-right: 1px solid var(--docs-border) !important;
+  color: var(--text-muted) !important;
+}
+
+.sidebar .app-name {
+  font-family: var(--font-heading) !important;
+  font-size: 1.15rem !important;
+  font-weight: 700 !important;
+  letter-spacing: 0.12em !important;
+  text-transform: uppercase !important;
+  color: var(--neon-cyan) !important;
+  text-shadow: 0 0 10px rgba(0, 242, 254, 0.4);
+  padding: 1.5rem 0.5rem 0.5rem 0.5rem;
+}
+
+.sidebar .search {
+  border-bottom: 1px solid var(--docs-border) !important;
+  padding: 0.75rem 1rem !important;
+}
+
+.sidebar .search input {
+  background: #080a0f !important;
+  border: 1px solid var(--docs-border) !important;
+  color: var(--text-primary) !important;
+  border-radius: 4px !important;
+  font-family: var(--font-mono) !important;
+  font-size: 0.85rem !important;
+  padding: 6px 10px !important;
+  outline: none !important;
+}
+
+.sidebar .search input:focus {
+  border-color: var(--neon-cyan) !important;
+  box-shadow: 0 0 8px rgba(0, 242, 254, 0.3) !important;
+}
+
+.sidebar ul li a {
+  color: var(--text-muted) !important;
+  font-size: 0.9rem !important;
+  transition: all 0.2s ease !important;
+}
+
+.sidebar ul li a:hover,
+.sidebar ul li.active > a {
+  color: var(--neon-cyan) !important;
+  border-right: 2px solid var(--neon-cyan) !important;
+  text-shadow: 0 0 8px rgba(0, 242, 254, 0.4) !important;
+  font-weight: 600 !important;
+}
+
+/* Main Content Styles */
+.content {
+  background-color: var(--docs-bg) !important;
+}
+
+.markdown-section {
+  max-width: 900px !important;
+  padding: 2rem 2.5rem !important;
+}
+
+.markdown-section h1,
+.markdown-section h2,
+.markdown-section h3,
+.markdown-section h4 {
+  font-family: var(--font-heading) !important;
+  color: var(--neon-cyan) !important;
+  letter-spacing: 0.05em !important;
+  margin-top: 2rem !important;
+  border-bottom: 1px solid var(--docs-border) !important;
+  padding-bottom: 0.4rem !important;
+}
+
+.markdown-section h1 {
+  font-size: 2rem !important;
+  text-shadow: 0 0 12px rgba(0, 242, 254, 0.3);
+}
+
+.markdown-section h2 {
+  font-size: 1.5rem !important;
+}
+
+.markdown-section h3 {
+  font-size: 1.2rem !important;
+  color: var(--neon-magenta) !important;
+  border-bottom: none !important;
+}
+
+.markdown-section a {
+  color: var(--neon-cyan) !important;
+  text-decoration: none !important;
+  border-bottom: 1px dashed rgba(0, 242, 254, 0.5);
+  transition: border-color 0.2s ease;
+}
+
+.markdown-section a:hover {
+  border-bottom-style: solid;
+  text-shadow: 0 0 6px rgba(0, 242, 254, 0.5);
+}
+
+.markdown-section code {
+  color: var(--neon-green) !important;
+  background: rgba(0, 255, 135, 0.08) !important;
+  border: 1px solid rgba(0, 255, 135, 0.2) !important;
+  border-radius: 4px !important;
+  padding: 2px 6px !important;
+  font-family: var(--font-mono) !important;
+  font-size: 0.88em !important;
+}
+
+.markdown-section pre[class*="language-"] {
+  background: #0e121c !important;
+  border: 1px solid var(--docs-border) !important;
+  border-radius: 6px !important;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4) !important;
+  padding: 1.25rem !important;
+}
+
+.markdown-section blockquote {
+  border-left: 3px solid var(--neon-cyan) !important;
+  background: rgba(0, 242, 254, 0.05) !important;
+  padding: 0.75rem 1.25rem !important;
+  color: var(--text-primary) !important;
+  border-radius: 0 4px 4px 0 !important;
+}
+
+.markdown-section table {
+  border-collapse: collapse !important;
+  width: 100% !important;
+  margin: 1.5rem 0 !important;
+}
+
+.markdown-section th,
+.markdown-section td {
+  border: 1px solid var(--docs-border) !important;
+  padding: 10px 14px !important;
+}
+
+.markdown-section th {
+  background: #0e121c !important;
+  color: var(--neon-cyan) !important;
+  font-family: var(--font-heading) !important;
+}
+
+.markdown-section tr:nth-child(even) {
+  background: rgba(14, 18, 28, 0.5) !important;
+}
+
+/* Mermaid Wrapper */
+.mermaid-diagram {
+  background: var(--docs-card-bg);
+  border: 1px solid var(--docs-border);
+  border-radius: 8px;
+  padding: 1.5rem;
+  margin: 1.5rem 0;
+  overflow-x: auto;
+  text-align: center;
+  backdrop-filter: blur(8px);
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.5);
+}
+
+.mermaid-loading {
+  color: var(--neon-cyan);
+  font-size: 0.85rem;
+  letter-spacing: 0.1em;
+  padding: 1rem;
+}
+
+/* Mermaid Error Card */
+.mermaid-error-card {
+  background: rgba(255, 42, 109, 0.1);
+  border: 1px solid rgba(255, 42, 109, 0.4);
+  border-radius: 8px;
+  padding: 1.25rem;
+  text-align: left;
+  margin: 1.5rem 0;
+}
+
+.mermaid-error-card .error-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.mermaid-error-card .error-title {
+  color: var(--neon-magenta);
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  font-family: var(--font-heading);
+}
+
+.mermaid-error-card .error-msg {
+  color: #ff99bb;
+  font-size: 0.88rem;
+  margin-bottom: 0.75rem;
+}
+
+.mermaid-error-card .error-raw summary {
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 0.8rem;
+}
+
+.mermaid-error-card .error-raw pre {
+  margin-top: 0.5rem;
+  background: #080a0f !important;
+}
+
+/* Copy Code Button */
+.docsify-copy-code-button {
+  background: #141c2b !important;
+  color: var(--neon-cyan) !important;
+  border: 1px solid var(--docs-border) !important;
+  border-radius: 4px !important;
+  font-family: var(--font-mono) !important;
+  font-size: 0.75rem !important;
+  font-weight: 600 !important;
+  padding: 4px 8px !important;
+  transition: all 0.2s ease !important;
+}
+
+.docsify-copy-code-button:hover {
+  background: var(--neon-cyan) !important;
+  color: #080a0f !important;
+}
+
+/* Responsive adjustments */
+@media screen and (max-width: 768px) {
+  .markdown-section {
+    padding: 1.5rem !important;
+  }
+}
