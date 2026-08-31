@@ -26,6 +26,10 @@ lint: ## Run golangci-lint across all Go microservices and Frontend
 		echo "=== Linting Permet HUD Frontend Syntax ==="; \
 		node --check dashboard/static/app.js || exit 1; \
 	fi
+	@if command -v node >/dev/null 2>&1 && [ -f "docs-service/app/assets/js/plugins/docsify-mermaid-cyberpunk.js" ]; then \
+		echo "=== Linting Docsify Custom Plugin Syntax ==="; \
+		node --check docs-service/app/assets/js/plugins/docsify-mermaid-cyberpunk.js || exit 1; \
+	fi
 
 tidy: ## Run go mod tidy across all Go microservices
 	@for svc in $(SERVICES); do \
