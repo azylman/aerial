@@ -273,7 +273,7 @@ services:
       start_period: 10s
 
   # ----------------------------------------------------------------------------
-  # 11. Documentation Engine: Aerial Docs (Docsify + Mermaid.js)
+  # 11. Documentation Engine: Aerial Docs v1.0.0 (Docsify + Mermaid.js)
   #     Renders user markdown documentation and Mermaid diagrams from config repo.
   # ----------------------------------------------------------------------------
   docs:
