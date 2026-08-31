@@ -45,7 +45,7 @@ Aerial operates on a strict **Two-Repository Separation of Concerns**:
   - **Zero Plaintext Token Invariant**: NEVER commit API keys, tokens, private webhook URLs, or GitHub PATs to disk.
 
 ### 2. User Configuration Repository (e.g. `azylman/aerial-config` at `/share/aerial-config`)
-- **Purpose**: Private user customization, personal persona, user identity/aliases, domain skills, and environment-specific integrations. Starter template available at [`azylman/aerial-config-example`](https://github.com/azylman/aerial-config-example).
+- **Purpose**: Private user customization, personal persona, user identity/aliases, domain skills, and environment-specific integrations. Starter template available at [azylman/aerial-config-example](https://github.com/azylman/aerial-config-example).
 - **Contents**:
   - **`config.yaml`**: Non-secret user options (`model`, `timeout_minutes`, `timezone`, `system_channel`, `git_sync`, `mcp_servers`).
   - **`AGENTS.md`**: User persona overrides, personal preferences, communication style, and user identity/alias definitions.
