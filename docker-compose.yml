@@ -234,6 +234,9 @@ services:
     image: ghcr.io/azylman/agentsview:latest
     container_name: aerial-agentsview
     restart: unless-stopped
+    labels:
+      autoheal: "true"
+      com.centurylinklabs.watchtower.enable: "true"
     command:
       - "--host=0.0.0.0"
       - "--base-path=/conversations"
