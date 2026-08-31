@@ -20,7 +20,11 @@ const appJsCode = fs.readFileSync(appJsPath, 'utf8');
 
 // Mock browser global environment for app.js evaluation
 const sandbox = {
-    window: {},
+    window: {
+        addEventListener: () => {},
+        removeEventListener: () => {},
+        location: { hash: '', search: '', pathname: '/' }
+    },
     document: {
         getElementById: () => null,
         querySelectorAll: () => [],
