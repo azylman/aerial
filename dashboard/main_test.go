@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -1005,6 +1006,155 @@ func TestZeroPersonalDataAndHardcodedIPs(t *testing.T) {
 		}
 	}
 }
+
+func TestMatchesETag(t *testing.T) {
+	cases := []struct {
+		name        string
+		ifNoneMatch string
+		targetETag  string
+		targetHash  string
+		wantMatch   bool
+	}{
+		{"exact strong match", `"abc1234"`, `"abc1234"`, "abc1234", true},
+		{"client weak vs server strong", `W/"abc1234"`, `"abc1234"`, "abc1234", true},
+		{"client strong vs server weak", `"abc1234"`, `W/"abc1234"`, "abc1234", true},
+		{"client weak vs server weak", `W/"abc1234"`, `W/"abc1234"`, "abc1234", true},
+		{"wildcard match", `*`, `"abc1234"`, "abc1234", true},
+		{"comma separated list with match", `"other", W/"abc1234", "xyz"`, `"abc1234"`, "abc1234", true},
+		{"comma separated list without match", `"other", W/"nomatch", "xyz"`, `"abc1234"`, "abc1234", false},
+		{"empty header", "", `"abc1234"`, "abc1234", false},
+		{"mismatch", `"diff"`, `"abc1234"`, "abc1234", false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := MatchesETag(tc.ifNoneMatch, tc.targetETag, tc.targetHash)
+			if got != tc.wantMatch {
+				t.Errorf("MatchesETag(%q, %q, %q) = %v; want %v", tc.ifNoneMatch, tc.targetETag, tc.targetHash, got, tc.wantMatch)
+			}
+		})
+	}
+}
+
+func TestAssetRegistry_ServeHTTP(t *testing.T) {
+	staticFS, err := fs.Sub(content, "static")
+	if err != nil {
+		t.Fatalf("failed to create sub filesystem: %v", err)
+	}
+
+	reg, err := NewAssetRegistry(staticFS, "testcommit123")
+	if err != nil {
+		t.Fatalf("failed to create AssetRegistry: %v", err)
+	}
+
+	t.Run("serves index.html on root / with ETag and no-cache", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/", nil)
+		rec := httptest.NewRecorder()
+		reg.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected status 200, got %d", rec.Code)
+		}
+		etag := rec.Header().Get("ETag")
+		if etag == "" {
+			t.Errorf("expected ETag header to be set")
+		}
+		cc := rec.Header().Get("Cache-Control")
+		if !strings.Contains(cc, "no-cache") {
+			t.Errorf("expected Cache-Control to contain no-cache, got %q", cc)
+		}
+		body := rec.Body.String()
+		if !strings.Contains(body, "app.js?v=testcommit123") {
+			t.Errorf("expected index.html to contain injected asset version, got: %s", body)
+		}
+	})
+
+	t.Run("serves 304 Not Modified when If-None-Match matches ETag", func(t *testing.T) {
+		req1 := httptest.NewRequest("GET", "/app.js", nil)
+		rec1 := httptest.NewRecorder()
+		reg.ServeHTTP(rec1, req1)
+		etag := rec1.Header().Get("ETag")
+
+		req2 := httptest.NewRequest("GET", "/app.js", nil)
+		req2.Header.Set("If-None-Match", etag)
+		rec2 := httptest.NewRecorder()
+		reg.ServeHTTP(rec2, req2)
+
+		if rec2.Code != http.StatusNotModified {
+			t.Fatalf("expected status 304, got %d", rec2.Code)
+		}
+		if rec2.Body.Len() != 0 {
+			t.Errorf("expected empty body on 304, got %d bytes", rec2.Body.Len())
+		}
+	})
+
+	t.Run("serves 304 on weak ETag If-None-Match", func(t *testing.T) {
+		req1 := httptest.NewRequest("GET", "/style.css", nil)
+		rec1 := httptest.NewRecorder()
+		reg.ServeHTTP(rec1, req1)
+		etag := rec1.Header().Get("ETag")
+
+		req2 := httptest.NewRequest("GET", "/style.css", nil)
+		req2.Header.Set("If-None-Match", "W/"+etag)
+		rec2 := httptest.NewRecorder()
+		reg.ServeHTTP(rec2, req2)
+
+		if rec2.Code != http.StatusNotModified {
+			t.Fatalf("expected status 304 for weak ETag, got %d", rec2.Code)
+		}
+	})
+
+	t.Run("sets immutable cache-control when version query param is present", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/app.js?v=testcommit123", nil)
+		rec := httptest.NewRecorder()
+		reg.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected status 200, got %d", rec.Code)
+		}
+		cc := rec.Header().Get("Cache-Control")
+		if !strings.Contains(cc, "immutable") || !strings.Contains(cc, "public") {
+			t.Errorf("expected immutable public Cache-Control, got %q", cc)
+		}
+	})
+
+	t.Run("handles HEAD request with headers and empty body", func(t *testing.T) {
+		req := httptest.NewRequest("HEAD", "/app.js", nil)
+		rec := httptest.NewRecorder()
+		reg.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected status 200, got %d", rec.Code)
+		}
+		if rec.Header().Get("Content-Type") == "" {
+			t.Errorf("expected Content-Type to be set on HEAD")
+		}
+		if rec.Body.Len() != 0 {
+			t.Errorf("expected empty body on HEAD, got %d bytes", rec.Body.Len())
+		}
+	})
+
+	t.Run("returns 404 for nonexistent asset", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/nonexistent.js", nil)
+		rec := httptest.NewRecorder()
+		reg.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("expected status 404, got %d", rec.Code)
+		}
+	})
+
+	t.Run("returns 405 for POST request", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/app.js", nil)
+		rec := httptest.NewRecorder()
+		reg.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("expected status 405, got %d", rec.Code)
+		}
+	})
+}
+
 
 
 
