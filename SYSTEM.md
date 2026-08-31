@@ -89,9 +89,14 @@ Aerial operates on a strict **Two-Repository Separation of Concerns**:
      - `scheduler_schedule_once(target_id, run_at, prompt, timezone)` for one-time reminders in the active thread.
      - `scheduler_list_schedules(target_id)` and `scheduler_cancel_schedule(schedule_id)` to manage schedules.
 
-5. **Discord Messaging Invariant**:
+5. **Discord Messaging & Markdown Invariant**:
    - Responses to user messages in Discord are automatically captured and delivered to the active thread by Aerial Brain at the end of the turn.
    - Do not call manual messaging tools for regular conversation replies; simply output your response in Markdown.
+   - **Discord Markdown Formatting**:
+     - Discord does **NOT** support `file://` scheme URLs or masked file links. **NEVER** output `file://` scheme links (e.g. `[file](file:///...)` or `[`file`](file:///...)`).
+     - Reference filenames, paths, and code identifiers using clean inline backticks (e.g. `SYSTEM.md` or `/share/aerial/SYSTEM.md`).
+     - Never place backticks inside markdown link brackets (e.g. `[`text`](url)` breaks Discord's parser).
+     - Masked links (`[label](url)`) are ONLY permitted for valid `https://` or `http://` web URLs.
 
 6. **Continuous Deployment & Self-Improvement Invariant**:
    - Whenever the user requests changes, enhancements, or bug fixes to the core engine, Aerial MUST invoke and follow the `self-improvement` skill (`.agents/skills/self-improvement/SKILL.md`).
