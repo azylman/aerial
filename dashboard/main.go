@@ -3,17 +3,21 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
 	"log"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -1538,10 +1542,188 @@ func securityHeadersMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+type StaticAsset struct {
+	Data        []byte
+	Hash        string
+	ETag        string
+	ContentType string
+}
+
+type AssetRegistry struct {
+	assets map[string]StaticAsset
+}
+
+var mimeFallbacks = map[string]string{
+	".html":  "text/html; charset=utf-8",
+	".css":   "text/css; charset=utf-8",
+	".js":    "application/javascript; charset=utf-8",
+	".json":  "application/json; charset=utf-8",
+	".svg":   "image/svg+xml",
+	".ico":   "image/x-icon",
+	".png":   "image/png",
+	".woff2": "font/woff2",
+	".woff":  "font/woff",
+}
+
+func getMimeType(filename string) string {
+	ext := strings.ToLower(filepath.Ext(filename))
+	if ct := mime.TypeByExtension(ext); ct != "" {
+		return ct
+	}
+	if ct, ok := mimeFallbacks[ext]; ok {
+		return ct
+	}
+	return "application/octet-stream"
+}
+
+// MatchesETag implements RFC 7232 §2.3.2 / RFC 9110 §13.1.2 weak comparison
+func MatchesETag(ifNoneMatch, targetETag, targetHash string) bool {
+	if ifNoneMatch == "" {
+		return false
+	}
+	if strings.TrimSpace(ifNoneMatch) == "*" {
+		return true
+	}
+	cleanTargetETag := strings.Trim(strings.TrimPrefix(targetETag, "W/"), "\"")
+	parts := strings.Split(ifNoneMatch, ",")
+	for _, part := range parts {
+		token := strings.TrimSpace(part)
+		token = strings.TrimPrefix(token, "W/")
+		token = strings.Trim(token, "\"")
+		if token == cleanTargetETag || token == targetHash {
+			return true
+		}
+	}
+	return false
+}
+
+func NewAssetRegistry(fsys fs.FS, versionToken string) (*AssetRegistry, error) {
+	reg := &AssetRegistry{
+		assets: make(map[string]StaticAsset),
+	}
+
+	// 1. Read app.js to compute fallback content hash
+	var appJSHash string
+	if data, err := fs.ReadFile(fsys, "app.js"); err == nil {
+		h := sha256.Sum256(data)
+		appJSHash = hex.EncodeToString(h[:])
+	}
+
+	// Determine asset version string to inject
+	assetVersion := versionToken
+	if assetVersion == "" || assetVersion == "latest" || assetVersion == "dev" || assetVersion == "unknown" {
+		if len(appJSHash) >= 10 {
+			assetVersion = appJSHash[:10]
+		} else {
+			assetVersion = "v1"
+		}
+	}
+
+	// 2. Walk the embedded filesystem and populate registry
+	err := fs.WalkDir(fsys, ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+
+		rawBytes, err := fs.ReadFile(fsys, path)
+		if err != nil {
+			return err
+		}
+
+		cleanPath := filepath.ToSlash(path)
+		cleanPath = strings.TrimPrefix(cleanPath, "./")
+
+		var finalBytes []byte
+		if cleanPath == "index.html" {
+			htmlStr := string(rawBytes)
+			reJS := regexp.MustCompile(`src="app\.js(?:\?[^"]*)?"`)
+			htmlStr = reJS.ReplaceAllString(htmlStr, fmt.Sprintf(`src="app.js?v=%s"`, assetVersion))
+
+			reCSS := regexp.MustCompile(`href="style\.css(?:\?[^"]*)?"`)
+			htmlStr = reCSS.ReplaceAllString(htmlStr, fmt.Sprintf(`href="style.css?v=%s"`, assetVersion))
+
+			finalBytes = []byte(htmlStr)
+		} else {
+			finalBytes = rawBytes
+		}
+
+		hash := sha256.Sum256(finalBytes)
+		hashStr := hex.EncodeToString(hash[:])
+		etag := fmt.Sprintf(`"%s"`, hashStr[:16])
+
+		reg.assets[cleanPath] = StaticAsset{
+			Data:        finalBytes,
+			Hash:        hashStr,
+			ETag:        etag,
+			ContentType: getMimeType(cleanPath),
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	return reg, nil
+}
+
+func (ar *AssetRegistry) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	reqPath := strings.TrimPrefix(r.URL.Path, "/dashboard")
+	reqPath = strings.TrimPrefix(reqPath, "/")
+	if reqPath == "" || reqPath == "index.html" {
+		reqPath = "index.html"
+	}
+
+	asset, exists := ar.assets[reqPath]
+	if !exists {
+		http.NotFound(w, r)
+		return
+	}
+
+	// Bifurcated Cache Policy:
+	// - index.html / unversioned: no-cache, must-revalidate + ETag
+	// - Versioned assets (?v=...): public, max-age=31536000, immutable + ETag
+	isVersioned := r.URL.Query().Get("v") != "" && reqPath != "index.html"
+	if isVersioned {
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	} else {
+		w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+	}
+
+	w.Header().Set("ETag", asset.ETag)
+	w.Header().Set("Content-Type", asset.ContentType)
+	w.Header().Set("Content-Length", strconv.Itoa(len(asset.Data)))
+
+	// Check conditional validation (If-None-Match)
+	if MatchesETag(r.Header.Get("If-None-Match"), asset.ETag, asset.Hash) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	if r.Method == http.MethodHead {
+		return
+	}
+	_, _ = w.Write(asset.Data)
+}
+
 func main() {
 	staticFS, err := fs.Sub(content, "static")
 	if err != nil {
 		log.Fatalf("failed to create static sub filesystem: %v", err)
+	}
+
+	gitCommit := getGitCommit()
+	assetReg, err := NewAssetRegistry(staticFS, gitCommit)
+	if err != nil {
+		log.Fatalf("failed to initialize asset registry: %v", err)
 	}
 
 	brainURL := os.Getenv("BRAIN_URL")
@@ -1572,17 +1754,8 @@ func main() {
 	mux.HandleFunc("/api/schedules/runs", scheduleRunsHandler(brainURL))
 	mux.HandleFunc("/dashboard/api/schedules/runs", scheduleRunsHandler(brainURL))
 
-
-	fileServer := http.FileServer(http.FS(staticFS))
-	staticHandler := func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-		w.Header().Set("Pragma", "no-cache")
-		w.Header().Set("Expires", "0")
-		fileServer.ServeHTTP(w, r)
-	}
-
-	mux.HandleFunc("/", staticHandler)
-	mux.Handle("/dashboard/", http.StripPrefix("/dashboard", http.HandlerFunc(staticHandler)))
+	mux.HandleFunc("/", assetReg.ServeHTTP)
+	mux.Handle("/dashboard/", http.StripPrefix("/dashboard", http.HandlerFunc(assetReg.ServeHTTP)))
 
 	port := os.Getenv("PORT")
 	if port == "" {
