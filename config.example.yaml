@@ -25,6 +25,16 @@ admin_users:
   # - 987654321098765432 # Secondary Admin
 
 # ------------------------------------------------------------------------------
+# Ignored Channels List (Optional Convenience)
+# ------------------------------------------------------------------------------
+# List of channel names (with or without '#') or snowflake IDs to ignore completely.
+# In ignored channels, Aerial ignores all messages, mentions, and startup sweeps.
+ignored_channels:
+  - spam
+  - off-topic
+  # - 123456789012345678
+
+# ------------------------------------------------------------------------------
 # Channel Policies
 # ------------------------------------------------------------------------------
 # Configure interaction mode and behavior per Discord channel.
@@ -33,6 +43,7 @@ admin_users:
 # Available Modes:
 #   - threads: Non-thread messages spawn/route to a Discord thread (default).
 #   - channel: Messages are evaluated directly in-channel without threads.
+#   - ignore (or disabled): Channel is completely ignored by Aerial.
 #
 # Available Typing Indicator Options:
 #   - always: Send typing indicator on every evaluated turn (default for threads).
@@ -41,6 +52,10 @@ admin_users:
 #
 # Session Rotation:
 #   - max_session_turns: Number of turns before rotating internal conversation ID (default: 50).
+#
+# Whitelisting / Default-Deny:
+#   You can set default.mode: ignore to have Aerial ignore all channels in the
+#   server by default, and only respond in explicitly declared channels.
 channels:
   # The 'default' block is REQUIRED and acts as the fallback for all channels.
   default:
@@ -57,6 +72,10 @@ channels:
     ignore_bots: true
     allow_system_ops: false
     max_session_turns: 50
+
+  # Example channel-specific override to completely ignore a channel:
+  memes:
+    mode: ignore
 
   # Example channel-specific override by channel snowflake ID:
   1543668253363150928:
