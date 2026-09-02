@@ -342,6 +342,119 @@ channels:
 	}
 }
 
+func TestIsFunnelBotTargeted_IgnoredChannels(t *testing.T) {
+	yamlContent := `
+model: "gemini-2.5-flash"
+ignored_channels:
+  - "spam"
+  - "111999"
+channels:
+  default:
+    mode: "threads"
+  muted-room:
+    mode: "ignore"
+  disabled-room:
+    mode: "disabled"
+`
+	setupTestConfig(t, yamlContent)
+
+	s := &discordgo.Session{
+		State: discordgo.NewState(),
+	}
+	s.State.User = &discordgo.User{ID: "bot-self-id", Username: "AerialBot"}
+	_ = s.State.GuildAdd(&discordgo.Guild{ID: "guild-1"})
+
+	chanSpam := &discordgo.Channel{
+		ID:      "chan-spam",
+		GuildID: "guild-1",
+		Name:    "spam",
+		Type:    discordgo.ChannelTypeGuildText,
+	}
+	chanMuted := &discordgo.Channel{
+		ID:      "chan-muted",
+		GuildID: "guild-1",
+		Name:    "muted-room",
+		Type:    discordgo.ChannelTypeGuildText,
+	}
+	chanSnowflakeIgnored := &discordgo.Channel{
+		ID:      "111999",
+		GuildID: "guild-1",
+		Name:    "random-snowflake",
+		Type:    discordgo.ChannelTypeGuildText,
+	}
+	chanAllowed := &discordgo.Channel{
+		ID:      "chan-allowed",
+		GuildID: "guild-1",
+		Name:    "general",
+		Type:    discordgo.ChannelTypeGuildText,
+	}
+
+	_ = s.State.ChannelAdd(chanSpam)
+	_ = s.State.ChannelAdd(chanMuted)
+	_ = s.State.ChannelAdd(chanSnowflakeIgnored)
+	_ = s.State.ChannelAdd(chanAllowed)
+
+	// 1. Direct mention in ignored channel (via ignored_channels) -> false
+	msgInSpam := &discordgo.MessageCreate{
+		Message: &discordgo.Message{
+			ID:        "msg-spam-1",
+			ChannelID: "chan-spam",
+			GuildID:   "guild-1",
+			Content:   "Hey aerial help me here",
+			Mentions:  []*discordgo.User{{ID: "bot-self-id", Username: "AerialBot"}},
+			Author:    &discordgo.User{ID: "user-1", Username: "alice", Bot: false},
+		},
+	}
+	if isFunnelBotTargeted(s, msgInSpam) {
+		t.Errorf("Expected message in ignored channel 'spam' to return false even with mention")
+	}
+
+	// 2. Message in channel with mode: "ignore" -> false
+	msgInMuted := &discordgo.MessageCreate{
+		Message: &discordgo.Message{
+			ID:        "msg-muted-1",
+			ChannelID: "chan-muted",
+			GuildID:   "guild-1",
+			Content:   "Hey aerial help me here",
+			Mentions:  []*discordgo.User{{ID: "bot-self-id", Username: "AerialBot"}},
+			Author:    &discordgo.User{ID: "user-1", Username: "alice", Bot: false},
+		},
+	}
+	if isFunnelBotTargeted(s, msgInMuted) {
+		t.Errorf("Expected message in channel with mode: ignore to return false")
+	}
+
+	// 3. Message in channel with snowflake ID ignored -> false
+	msgInSnowflake := &discordgo.MessageCreate{
+		Message: &discordgo.Message{
+			ID:        "msg-snow-1",
+			ChannelID: "111999",
+			GuildID:   "guild-1",
+			Content:   "Hey aerial help me here",
+			Mentions:  []*discordgo.User{{ID: "bot-self-id", Username: "AerialBot"}},
+			Author:    &discordgo.User{ID: "user-1", Username: "alice", Bot: false},
+		},
+	}
+	if isFunnelBotTargeted(s, msgInSnowflake) {
+		t.Errorf("Expected message in channel with ignored snowflake ID to return false")
+	}
+
+	// 4. Message in non-ignored channel with mention -> true
+	msgInAllowed := &discordgo.MessageCreate{
+		Message: &discordgo.Message{
+			ID:        "msg-allowed-1",
+			ChannelID: "chan-allowed",
+			GuildID:   "guild-1",
+			Content:   "Hey aerial help me here",
+			Mentions:  []*discordgo.User{{ID: "bot-self-id", Username: "AerialBot"}},
+			Author:    &discordgo.User{ID: "user-1", Username: "alice", Bot: false},
+		},
+	}
+	if !isFunnelBotTargeted(s, msgInAllowed) {
+		t.Errorf("Expected message in allowed channel with mention to return true")
+	}
+}
+
 func TestBuildDiscordPrompt_AdminFlag_ReplyContext_NoReplyGuidance(t *testing.T) {
 	yamlContent := `
 model: "gemini-2.5-flash"
