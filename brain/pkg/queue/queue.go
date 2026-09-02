@@ -10,12 +10,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
 	"github.com/azylman/aerial/brain/pkg/delivery"
 	"github.com/azylman/aerial/brain/pkg/memory"
 	"github.com/azylman/aerial/brain/pkg/notifier"
 	"github.com/azylman/aerial/brain/pkg/runner"
 	"github.com/bwmarrin/discordgo"
+	"github.com/google/uuid"
 )
 
 var sensitivePattern = regexp.MustCompile(`(?i)(?:bearer\s+[a-zA-Z0-9_\-\.]+|ghp_[a-zA-Z0-9]+|gho_[a-zA-Z0-9]+|ghu_[a-zA-Z0-9]+|github_pat_[a-zA-Z0-9_]+|x-access-token:[^@\s]+|antigravity_[a-zA-Z0-9_\-]+|gemini_[a-zA-Z0-9_\-]+|aiza[0-9a-za-z-_]{35})`)
@@ -39,14 +41,14 @@ type WorkerPoolConfig struct {
 	MemoryClient   *memory.Client
 
 	// Optional hooks for testing/custom overrides
-	RunnerFunc          func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error)
-	NotifierFunc        func(agyBin, apiKey, contextDescription string) string
-	DeliveryFunc        func(s *discordgo.Session, channelID, text string) error
-	TypingFunc          func(s *discordgo.Session, channelID string) (stop func())
-	OnMessageCompleted  func(msg db.Message, finalStatus string)
-	MemoryRetrieverFunc MemoryRetrieverFunc
+	RunnerFunc           func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error)
+	NotifierFunc         func(agyBin, apiKey, contextDescription string) string
+	DeliveryFunc         func(s *discordgo.Session, channelID, text string) error
+	TypingFunc           func(s *discordgo.Session, channelID string) (stop func())
+	OnMessageCompleted   func(msg db.Message, finalStatus string)
+	MemoryRetrieverFunc  MemoryRetrieverFunc
+	ResolveChannelPolicy func(channelID, channelName string) config.ChannelPolicy
 }
-
 
 type WorkerPool struct {
 	cfg       WorkerPoolConfig
@@ -85,6 +87,11 @@ func NewWorkerPool(cfg WorkerPoolConfig) *WorkerPool {
 	}
 	if cfg.MemoryRetrieverFunc == nil {
 		cfg.MemoryRetrieverFunc = memory.RetrieveRelevantFacts
+	}
+	if cfg.ResolveChannelPolicy == nil {
+		cfg.ResolveChannelPolicy = func(channelID, channelName string) config.ChannelPolicy {
+			return config.GetRuntimeConfig().ResolveChannelPolicy(channelID, channelName)
+		}
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -181,7 +188,17 @@ func (p *WorkerPool) runThreadWorker(threadID string, ch chan db.Message) {
 			if !ok {
 				return
 			}
-			p.processMessage(msg)
+			burst := []db.Message{msg}
+		DrainLoop:
+			for len(burst) < 5 {
+				select {
+				case extra := <-ch:
+					burst = append(burst, extra)
+				default:
+					break DrainLoop
+				}
+			}
+			p.processBurst(burst)
 		case <-time.After(30 * time.Second):
 			p.mu.Lock()
 			if len(ch) == 0 {
@@ -194,7 +211,17 @@ func (p *WorkerPool) runThreadWorker(threadID string, ch chan db.Message) {
 					if !ok {
 						return
 					}
-					p.processMessage(msg)
+					burst := []db.Message{msg}
+				DrainLoop2:
+					for len(burst) < 5 {
+						select {
+						case extra := <-ch:
+							burst = append(burst, extra)
+						default:
+							break DrainLoop2
+						}
+					}
+					p.processBurst(burst)
 					p.mu.Lock()
 					if _, exists := p.threadChs[threadID]; !exists {
 						p.threadChs[threadID] = ch
@@ -212,76 +239,211 @@ func (p *WorkerPool) runThreadWorker(threadID string, ch chan db.Message) {
 	}
 }
 
-func (p *WorkerPool) processMessage(msg db.Message) {
-	log.Printf("[WorkerPool] Processing message %s for thread %s (retry_count=%d)", msg.ID, msg.ThreadID, msg.RetryCount)
+func extractMessageBody(content string) string {
+	trimmed := strings.TrimSpace(content)
+	if strings.HasPrefix(trimmed, "<USER_REQUEST>") && strings.HasSuffix(trimmed, "</USER_REQUEST>") {
+		inner := strings.TrimPrefix(trimmed, "<USER_REQUEST>")
+		inner = strings.TrimSuffix(inner, "</USER_REQUEST>")
+		return strings.TrimSpace(inner)
+	}
+	return trimmed
+}
 
-	claimed, claimErr := db.ClaimPendingMessage(p.cfg.DB, msg.ID)
-	if claimErr != nil {
-		log.Printf("[WorkerPool] Failed to claim message %s: %v", msg.ID, claimErr)
+// CoalesceBurstPrompt formats a burst of messages into a single coalesced multi-message prompt turn.
+func CoalesceBurstPrompt(burst []db.Message) string {
+	if len(burst) == 0 {
+		return ""
+	}
+	if len(burst) == 1 {
+		return burst[0].Content
+	}
+
+	var sb strings.Builder
+	sb.WriteString("<USER_REQUEST>\n[Multiple messages received in channel]\n")
+	for i, m := range burst {
+		author := m.AuthorName
+		if author == "" {
+			author = "user"
+		}
+		if !strings.HasPrefix(author, "@") {
+			author = "@" + author
+		}
+		timeStr := m.CreatedAt.Format("15:04:05")
+		if m.CreatedAt.IsZero() {
+			timeStr = time.Now().UTC().Format("15:04:05")
+		}
+		body := extractMessageBody(m.Content)
+		sb.WriteString(fmt.Sprintf("--- Message %d (by %s at %s) ---\n%s\n\n", i+1, author, timeStr, body))
+	}
+	sb.WriteString("</USER_REQUEST>")
+	return strings.TrimSpace(sb.String())
+}
+
+func isMentionOrReply(burst []db.Message) bool {
+	for _, m := range burst {
+		c := m.Content
+		cLower := strings.ToLower(c)
+		if strings.Contains(c, "<@") ||
+			strings.Contains(cLower, "aerial") ||
+			strings.Contains(cLower, "gundam") ||
+			strings.Contains(cLower, "brain") ||
+			strings.Contains(cLower, "bot") {
+			return true
+		}
+		if idx := strings.Index(c, "- mentions: ["); idx != -1 {
+			endIdx := strings.Index(c[idx:], "]")
+			if endIdx != -1 {
+				inside := strings.TrimSpace(c[idx+len("- mentions: [") : idx+endIdx])
+				if inside != "" {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func resolveTypingStarter(policy config.ChannelPolicy, burst []db.Message, skipDiscord bool, typingFunc func(s *discordgo.Session, channelID string) func(), getSession func() *discordgo.Session, threadID string) func() {
+	if skipDiscord || typingFunc == nil {
+		return func() {}
+	}
+	switch policy.TypingIndicator {
+	case "never":
+		return func() {}
+	case "on_mention":
+		if isMentionOrReply(burst) {
+			return typingFunc(getSession(), threadID)
+		}
+		return func() {}
+	case "always":
+		fallthrough
+	default:
+		return typingFunc(getSession(), threadID)
+	}
+}
+
+func (p *WorkerPool) processMessage(msg db.Message) {
+	p.processBurst([]db.Message{msg})
+}
+
+func (p *WorkerPool) processBurst(burst []db.Message) {
+	if len(burst) == 0 {
 		return
 	}
-	if !claimed {
-		log.Printf("[WorkerPool] Skipping message %s: already claimed or completed", msg.ID)
+
+	threadID := burst[0].ThreadID
+	log.Printf("[WorkerPool] Processing burst of %d message(s) for thread %s", len(burst), threadID)
+
+	// 1. Claim messages from PENDING to PROCESSING
+	var claimedBurst []db.Message
+	for _, m := range burst {
+		claimed, claimErr := db.ClaimPendingMessage(p.cfg.DB, m.ID)
+		if claimErr != nil {
+			log.Printf("[WorkerPool] Failed to claim message %s: %v", m.ID, claimErr)
+			continue
+		}
+		if !claimed {
+			log.Printf("[WorkerPool] Skipping message %s: already claimed or completed", m.ID)
+			continue
+		}
+		claimedBurst = append(claimedBurst, m)
+	}
+	if len(claimedBurst) == 0 {
+		return
+	}
+	burst = claimedBurst
+
+	// 2. 5-Minute Staleness TTL check (for burst, check latest message)
+	latestMsg := burst[len(burst)-1]
+	if !latestMsg.CreatedAt.IsZero() && time.Since(latestMsg.CreatedAt) > 5*time.Minute {
+		log.Printf("[WorkerPool] Dropping stale message(s) in thread %s (age > 5m). Marked [EXPIRED_STALE].", threadID)
+		for _, m := range burst {
+			_ = db.UpdateMessageCompleted(p.cfg.DB, m.ID, "[EXPIRED_STALE]")
+			if m.ScheduleRunID != "" {
+				_ = db.UpdateScheduleRunStatus(p.cfg.DB, db.UpdateRunParams{
+					RunID:       m.ScheduleRunID,
+					MessageID:   m.ID,
+					Status:      "completed",
+					CompletedAt: time.Now().UTC(),
+					DurationMs:  0,
+					Error:       "[EXPIRED_STALE]",
+				})
+			}
+			if p.cfg.OnMessageCompleted != nil {
+				p.cfg.OnMessageCompleted(m, db.StatusCompleted)
+			}
+		}
 		return
 	}
 
 	execStart := time.Now().UTC()
-	if msg.ScheduleRunID != "" {
-		_ = db.UpdateScheduleRunStatus(p.cfg.DB, db.UpdateRunParams{
-			RunID:     msg.ScheduleRunID,
-			MessageID: msg.ID,
-			Status:    "running",
-		})
+	for _, m := range burst {
+		if m.ScheduleRunID != "" {
+			_ = db.UpdateScheduleRunStatus(p.cfg.DB, db.UpdateRunParams{
+				RunID:     m.ScheduleRunID,
+				MessageID: m.ID,
+				Status:    "running",
+			})
+		}
 	}
 
-	skipDiscord := msg.AuthorID == "http-client"
+	// Resolve Channel Policy
+	policy := p.cfg.ResolveChannelPolicy(threadID, "")
 
-	var stopTyping func() = func() {}
-	if !skipDiscord {
-		stopTyping = p.cfg.TypingFunc(p.getDiscordSession(), msg.ThreadID)
+	skipDiscord := true
+	for _, m := range burst {
+		if m.AuthorID != "http-client" {
+			skipDiscord = false
+			break
+		}
 	}
+
+	stopTyping := resolveTypingStarter(policy, burst, skipDiscord, p.cfg.TypingFunc, p.getDiscordSession, threadID)
 	defer stopTyping()
 
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("[WorkerPool] Panic in processMessage for message %s: %v", msg.ID, r)
+			log.Printf("[WorkerPool] Panic in processBurst for thread %s: %v", threadID, r)
 			stopTyping()
 			errMsg := sanitizeErrorText(fmt.Sprintf("panic: %v", r))
-			_ = db.UpdateMessageStatus(p.cfg.DB, msg.ID, db.StatusFailed, errMsg)
-			if msg.ScheduleRunID != "" {
-				_ = db.UpdateScheduleRunStatus(p.cfg.DB, db.UpdateRunParams{
-					RunID:       msg.ScheduleRunID,
-					MessageID:   msg.ID,
-					Status:      "failed",
-					CompletedAt: time.Now().UTC(),
-					DurationMs:  time.Since(execStart).Milliseconds(),
-					Error:       errMsg,
-				})
-			}
-			if p.cfg.OnMessageCompleted != nil {
-				p.cfg.OnMessageCompleted(msg, db.StatusFailed)
+			for _, m := range burst {
+				_ = db.UpdateMessageStatus(p.cfg.DB, m.ID, db.StatusFailed, errMsg)
+				if m.ScheduleRunID != "" {
+					_ = db.UpdateScheduleRunStatus(p.cfg.DB, db.UpdateRunParams{
+						RunID:       m.ScheduleRunID,
+						MessageID:   m.ID,
+						Status:      "failed",
+						CompletedAt: time.Now().UTC(),
+						DurationMs:  time.Since(execStart).Milliseconds(),
+						Error:       errMsg,
+					})
+				}
+				if p.cfg.OnMessageCompleted != nil {
+					p.cfg.OnMessageCompleted(m, db.StatusFailed)
+				}
 			}
 		}
 	}()
 
-	currentSessionID, _ := db.GetSessionID(p.cfg.DB, msg.ThreadID)
+	currentSessionID, _ := db.GetSessionID(p.cfg.DB, threadID)
+
+	// Format coalesced prompt
+	prompt := CoalesceBurstPrompt(burst)
 
 	// Dynamically retrieve relevant semantic memory facts for the incoming prompt
-	queryText := memory.ExtractQueryText(msg.Content)
-	prompt := msg.Content
-
+	queryText := memory.ExtractQueryText(prompt)
 	if p.cfg.MemoryRetrieverFunc != nil && p.cfg.DB != nil && strings.TrimSpace(queryText) != "" {
 		retrievalCtx, retrievalCancel := context.WithTimeout(p.ctx, 2500*time.Millisecond)
 		facts, err := p.cfg.MemoryRetrieverFunc(retrievalCtx, p.cfg.DB, p.cfg.MemoryClient, queryText, 10)
 		retrievalCancel()
 
 		if err != nil {
-			log.Printf("[WorkerPool] Warning: Semantic memory retrieval failed for message %s: %v. Proceeding without injected facts.", msg.ID, err)
+			log.Printf("[WorkerPool] Warning: Semantic memory retrieval failed for thread %s: %v. Proceeding without injected facts.", threadID, err)
 		} else if len(facts) > 0 {
 			memoryBlock := memory.FormatMemoryContext(facts)
 			if memoryBlock != "" {
-				prompt = memoryBlock + "\n\n" + msg.Content
-				log.Printf("[WorkerPool] Injected %d semantic memory fact(s) into message %s", len(facts), msg.ID)
+				prompt = memoryBlock + "\n\n" + prompt
+				log.Printf("[WorkerPool] Injected %d semantic memory fact(s) into prompt for thread %s", len(facts), threadID)
 			}
 		}
 	}
@@ -289,7 +451,9 @@ func (p *WorkerPool) processMessage(msg db.Message) {
 	maxAttempts := p.cfg.MaxAttempts
 	lastErrDetail := ""
 
-	for attempt := msg.RetryCount + 1; attempt <= maxAttempts; attempt++ {
+	initialRetryCount := burst[0].RetryCount
+
+	for attempt := initialRetryCount + 1; attempt <= maxAttempts; attempt++ {
 		p.mu.Lock()
 		currentModel := p.cfg.Model
 		currentTimeout := p.cfg.TimeoutMinutes
@@ -320,49 +484,76 @@ func (p *WorkerPool) processMessage(msg db.Message) {
 		if currentSessionID == "" {
 			if extSess := runner.ExtractSessionID(stderr, startTime); extSess != "" {
 				currentSessionID = extSess
-				_ = db.SaveSessionID(p.cfg.DB, msg.ThreadID, currentSessionID)
+				_ = db.SaveSessionID(p.cfg.DB, threadID, currentSessionID)
 			}
 		}
 
 		if !isFailure {
 			if currentSessionID != "" {
-				_ = db.SaveSessionID(p.cfg.DB, msg.ThreadID, currentSessionID)
+				_ = db.SaveSessionID(p.cfg.DB, threadID, currentSessionID)
 			}
 			stopTyping()
-			if !skipDiscord {
-				if err := p.cfg.DeliveryFunc(p.getDiscordSession(), msg.ThreadID, stdout); err != nil {
-					log.Printf("[WorkerPool] Failed to deliver response for message %s to thread %s: %v", msg.ID, msg.ThreadID, err)
+
+			isSilent := runner.IsSilentSentinel(stdout)
+			if isSilent {
+				log.Printf("[Queue] Output is silent sentinel ([NO_REPLY] or empty). Skipping Discord delivery.")
+			} else {
+				if !skipDiscord {
+					if err := p.cfg.DeliveryFunc(p.getDiscordSession(), threadID, stdout); err != nil {
+						log.Printf("[WorkerPool] Failed to deliver response for thread %s: %v", threadID, err)
+					}
 				}
 			}
-			_ = db.UpdateMessageCompleted(p.cfg.DB, msg.ID, stdout)
-			log.Printf("[WorkerPool] Message %s completed successfully on attempt %d/%d", msg.ID, attempt, maxAttempts)
-			if msg.ScheduleRunID != "" {
-				_ = db.UpdateScheduleRunStatus(p.cfg.DB, db.UpdateRunParams{
-					RunID:       msg.ScheduleRunID,
-					MessageID:   msg.ID,
-					Status:      "completed",
-					CompletedAt: time.Now().UTC(),
-					DurationMs:  time.Since(execStart).Milliseconds(),
-				})
+
+			// Turn-Count Session Rotation
+			if policy.Mode == "channel" && policy.MaxSessionTurns > 0 {
+				newTurns, incErr := db.IncrementSessionTurnCount(p.cfg.DB, threadID)
+				if incErr != nil {
+					log.Printf("[Queue] Error incrementing turn count for thread %s: %v", threadID, incErr)
+				} else if newTurns >= policy.MaxSessionTurns {
+					log.Printf("[Queue] Channel session reached turn limit (%d/%d). Rotating session ID.", newTurns, policy.MaxSessionTurns)
+					newSessionID := uuid.New().String()
+					if rotErr := db.RotateSessionID(p.cfg.DB, threadID, newSessionID); rotErr != nil {
+						log.Printf("[Queue] Error rotating session ID for thread %s: %v", threadID, rotErr)
+					}
+				}
 			}
-			if p.cfg.OnMessageCompleted != nil {
-				p.cfg.OnMessageCompleted(msg, db.StatusCompleted)
+
+			// Mark all messages in the burst as completed
+			for _, m := range burst {
+				_ = db.UpdateMessageCompleted(p.cfg.DB, m.ID, stdout)
+				if m.ScheduleRunID != "" {
+					_ = db.UpdateScheduleRunStatus(p.cfg.DB, db.UpdateRunParams{
+						RunID:       m.ScheduleRunID,
+						MessageID:   m.ID,
+						Status:      "completed",
+						CompletedAt: time.Now().UTC(),
+						DurationMs:  time.Since(execStart).Milliseconds(),
+					})
+				}
+				if p.cfg.OnMessageCompleted != nil {
+					p.cfg.OnMessageCompleted(m, db.StatusCompleted)
+				}
 			}
+			log.Printf("[WorkerPool] %d message(s) in thread %s completed successfully on attempt %d/%d", len(burst), threadID, attempt, maxAttempts)
+
 			return
 		}
 
-		log.Printf("[WorkerPool] Message %s failed on attempt %d/%d (transient=%t, corrupt=%t): %s",
-			msg.ID, attempt, maxAttempts, isTransient, isSessionCorruption, errDetail)
+		log.Printf("[WorkerPool] Burst for thread %s failed on attempt %d/%d (transient=%t, corrupt=%t): %s",
+			threadID, attempt, maxAttempts, isTransient, isSessionCorruption, errDetail)
 
 		if isSessionCorruption {
-			_ = db.IncrementMessageRetry(p.cfg.DB, msg.ID, errDetail)
+			for _, m := range burst {
+				_ = db.IncrementMessageRetry(p.cfg.DB, m.ID, errDetail)
+			}
 			notif := notifier.GenerateSessionResetMessage(p.cfg.AgyBin, p.cfg.APIKey)
 			if !skipDiscord {
-				if err := p.cfg.DeliveryFunc(p.getDiscordSession(), msg.ThreadID, notif); err != nil {
-					log.Printf("[WorkerPool] Failed to deliver session reset notice for message %s: %v", msg.ID, err)
+				if err := p.cfg.DeliveryFunc(p.getDiscordSession(), threadID, notif); err != nil {
+					log.Printf("[WorkerPool] Failed to deliver session reset notice for thread %s: %v", threadID, err)
 				}
 			}
-			_ = db.DeleteSessionID(p.cfg.DB, msg.ThreadID)
+			_ = db.DeleteSessionID(p.cfg.DB, threadID)
 			currentSessionID = ""
 
 			if attempt < maxAttempts {
@@ -370,15 +561,17 @@ func (p *WorkerPool) processMessage(msg db.Message) {
 				select {
 				case <-time.After(backoff):
 				case <-p.ctx.Done():
-					if msg.ScheduleRunID != "" {
-						_ = db.UpdateScheduleRunStatus(p.cfg.DB, db.UpdateRunParams{
-							RunID:       msg.ScheduleRunID,
-							MessageID:   msg.ID,
-							Status:      "failed",
-							CompletedAt: time.Now().UTC(),
-							DurationMs:  time.Since(execStart).Milliseconds(),
-							Error:       "context cancelled during execution",
-						})
+					for _, m := range burst {
+						if m.ScheduleRunID != "" {
+							_ = db.UpdateScheduleRunStatus(p.cfg.DB, db.UpdateRunParams{
+								RunID:       m.ScheduleRunID,
+								MessageID:   m.ID,
+								Status:      "failed",
+								CompletedAt: time.Now().UTC(),
+								DurationMs:  time.Since(execStart).Milliseconds(),
+								Error:       "context cancelled during execution",
+							})
+						}
 					}
 					return
 				}
@@ -387,22 +580,26 @@ func (p *WorkerPool) processMessage(msg db.Message) {
 		}
 
 		if isTransient {
-			_ = db.IncrementMessageRetry(p.cfg.DB, msg.ID, errDetail)
+			for _, m := range burst {
+				_ = db.IncrementMessageRetry(p.cfg.DB, m.ID, errDetail)
+			}
 			if attempt < maxAttempts {
 				backoff := time.Duration(attempt) * p.cfg.BackoffBase
 				log.Printf("[WorkerPool] Retrying transient error in %v (preserving session %s)", backoff, currentSessionID)
 				select {
 				case <-time.After(backoff):
 				case <-p.ctx.Done():
-					if msg.ScheduleRunID != "" {
-						_ = db.UpdateScheduleRunStatus(p.cfg.DB, db.UpdateRunParams{
-							RunID:       msg.ScheduleRunID,
-							MessageID:   msg.ID,
-							Status:      "failed",
-							CompletedAt: time.Now().UTC(),
-							DurationMs:  time.Since(execStart).Milliseconds(),
-							Error:       "context cancelled during execution",
-						})
+					for _, m := range burst {
+						if m.ScheduleRunID != "" {
+							_ = db.UpdateScheduleRunStatus(p.cfg.DB, db.UpdateRunParams{
+								RunID:       m.ScheduleRunID,
+								MessageID:   m.ID,
+								Status:      "failed",
+								CompletedAt: time.Now().UTC(),
+								DurationMs:  time.Since(execStart).Milliseconds(),
+								Error:       "context cancelled during execution",
+							})
+						}
 					}
 					return
 				}
@@ -411,22 +608,26 @@ func (p *WorkerPool) processMessage(msg db.Message) {
 		}
 
 		// Non-transient general failure
-		_ = db.IncrementMessageRetry(p.cfg.DB, msg.ID, errDetail)
+		for _, m := range burst {
+			_ = db.IncrementMessageRetry(p.cfg.DB, m.ID, errDetail)
+		}
 		currentSessionID = ""
 		if attempt < maxAttempts {
 			backoff := time.Duration(attempt) * p.cfg.BackoffBase
 			select {
 			case <-time.After(backoff):
 			case <-p.ctx.Done():
-				if msg.ScheduleRunID != "" {
-					_ = db.UpdateScheduleRunStatus(p.cfg.DB, db.UpdateRunParams{
-						RunID:       msg.ScheduleRunID,
-						MessageID:   msg.ID,
-						Status:      "failed",
-						CompletedAt: time.Now().UTC(),
-						DurationMs:  time.Since(execStart).Milliseconds(),
-						Error:       "context cancelled during execution",
-					})
+				for _, m := range burst {
+					if m.ScheduleRunID != "" {
+						_ = db.UpdateScheduleRunStatus(p.cfg.DB, db.UpdateRunParams{
+							RunID:       m.ScheduleRunID,
+							MessageID:   m.ID,
+							Status:      "failed",
+							CompletedAt: time.Now().UTC(),
+							DurationMs:  time.Since(execStart).Milliseconds(),
+							Error:       "context cancelled during execution",
+						})
+					}
 				}
 				return
 			}
@@ -442,26 +643,28 @@ func (p *WorkerPool) processMessage(msg db.Message) {
 		notif = notifier.StaticFallback(fmt.Sprintf("execution failed after exhausting %d attempts: %s", maxAttempts, lastErrDetail))
 	}
 	if !skipDiscord {
-		if err := p.cfg.DeliveryFunc(p.getDiscordSession(), msg.ThreadID, notif); err != nil {
-			log.Printf("[WorkerPool] Failed to deliver exhaustion notice for message %s: %v", msg.ID, err)
+		if err := p.cfg.DeliveryFunc(p.getDiscordSession(), threadID, notif); err != nil {
+			log.Printf("[WorkerPool] Failed to deliver exhaustion notice for thread %s: %v", threadID, err)
 		}
 	}
 	sanitizedErr := sanitizeErrorText(lastErrDetail)
-	_ = db.UpdateMessageStatus(p.cfg.DB, msg.ID, db.StatusFailed, sanitizedErr)
-	log.Printf("[WorkerPool] Message %s marked FAILED after exhausting all %d attempts", msg.ID, maxAttempts)
-	if msg.ScheduleRunID != "" {
-		_ = db.UpdateScheduleRunStatus(p.cfg.DB, db.UpdateRunParams{
-			RunID:       msg.ScheduleRunID,
-			MessageID:   msg.ID,
-			Status:      "failed",
-			CompletedAt: time.Now().UTC(),
-			DurationMs:  time.Since(execStart).Milliseconds(),
-			Error:       sanitizedErr,
-		})
+	for _, m := range burst {
+		_ = db.UpdateMessageStatus(p.cfg.DB, m.ID, db.StatusFailed, sanitizedErr)
+		if m.ScheduleRunID != "" {
+			_ = db.UpdateScheduleRunStatus(p.cfg.DB, db.UpdateRunParams{
+				RunID:       m.ScheduleRunID,
+				MessageID:   m.ID,
+				Status:      "failed",
+				CompletedAt: time.Now().UTC(),
+				DurationMs:  time.Since(execStart).Milliseconds(),
+				Error:       sanitizedErr,
+			})
+		}
+		if p.cfg.OnMessageCompleted != nil {
+			p.cfg.OnMessageCompleted(m, db.StatusFailed)
+		}
 	}
-	if p.cfg.OnMessageCompleted != nil {
-		p.cfg.OnMessageCompleted(msg, db.StatusFailed)
-	}
+	log.Printf("[WorkerPool] %d message(s) in thread %s marked FAILED after exhausting all %d attempts", len(burst), threadID, maxAttempts)
 }
 
 func runnerIsTransient(errDetail string) bool {

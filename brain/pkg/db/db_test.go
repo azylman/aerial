@@ -251,6 +251,97 @@ func TestSessionCRUD(t *testing.T) {
 	}
 }
 
+func TestIncrementSessionTurnCountAndRotation(t *testing.T) {
+	database, err := InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize database: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	sessionKey := "channel-rotation-test"
+
+	// 1. Initial increment on non-existent record should return 1
+	c1, err := IncrementSessionTurnCount(database, sessionKey)
+	if err != nil {
+		t.Fatalf("IncrementSessionTurnCount 1 failed: %v", err)
+	}
+	if c1 != 1 {
+		t.Errorf("Expected turn_count=1, got %d", c1)
+	}
+
+	// 2. Increments should be atomic and sequential
+	c2, err := IncrementSessionTurnCount(database, sessionKey)
+	if err != nil || c2 != 2 {
+		t.Fatalf("Expected turn_count=2, got %d (err: %v)", c2, err)
+	}
+	c3, err := IncrementSessionTurnCount(database, sessionKey)
+	if err != nil || c3 != 3 {
+		t.Fatalf("Expected turn_count=3, got %d (err: %v)", c3, err)
+	}
+
+	// 3. Set a session ID and semantic memory watermarks
+	if err := SaveSessionID(database, sessionKey, "sess-old-uuid"); err != nil {
+		t.Fatalf("SaveSessionID failed: %v", err)
+	}
+	if err := UpdateConversationFactWatermark(database, sessionKey, 42); err != nil {
+		t.Fatalf("UpdateConversationFactWatermark failed: %v", err)
+	}
+
+	// Verify pre-rotation state
+	countBefore, _ := GetSessionTurnCount(database, sessionKey)
+	if countBefore != 3 {
+		t.Errorf("Expected turn_count=3 before rotation, got %d", countBefore)
+	}
+	sessBefore, _ := GetSessionID(database, sessionKey)
+	if sessBefore != "sess-old-uuid" {
+		t.Errorf("Expected sess-old-uuid before rotation, got %s", sessBefore)
+	}
+
+	// 4. Rotate session ID
+	newSessionID := "sess-new-uuid"
+	if err := RotateSessionID(database, sessionKey, newSessionID); err != nil {
+		t.Fatalf("RotateSessionID failed: %v", err)
+	}
+
+	// Verify post-rotation state: new session ID, turn_count reset to 0
+	sessAfter, err := GetSessionID(database, sessionKey)
+	if err != nil || sessAfter != newSessionID {
+		t.Errorf("Expected rotated session ID %s, got %s (err: %v)", newSessionID, sessAfter, err)
+	}
+	countAfter, err := GetSessionTurnCount(database, sessionKey)
+	if err != nil || countAfter != 0 {
+		t.Errorf("Expected turn_count=0 after rotation, got %d (err: %v)", countAfter, err)
+	}
+
+	// 5. Verify semantic memory watermarks are PRESERVED after rotation!
+	var lastRowID int64
+	var factExtractedAt sql.NullTime
+	err = database.QueryRow("SELECT last_extracted_rowid, fact_extracted_at FROM sessions WHERE thread_id = ?", sessionKey).Scan(&lastRowID, &factExtractedAt)
+	if err != nil {
+		t.Fatalf("Failed to query sessions table for watermarks: %v", err)
+	}
+	if lastRowID != 42 {
+		t.Errorf("Expected last_extracted_rowid=42 preserved after rotation, got %d", lastRowID)
+	}
+	if !factExtractedAt.Valid {
+		t.Errorf("Expected fact_extracted_at to be preserved after rotation, got NULL")
+	}
+
+	// 6. Test rotation on completely new session key
+	newKey := "brand-new-channel"
+	if err := RotateSessionID(database, newKey, "brand-new-uuid"); err != nil {
+		t.Fatalf("RotateSessionID on new key failed: %v", err)
+	}
+	newSess, _ := GetSessionID(database, newKey)
+	if newSess != "brand-new-uuid" {
+		t.Errorf("Expected brand-new-uuid, got %s", newSess)
+	}
+	newCount, _ := GetSessionTurnCount(database, newKey)
+	if newCount != 0 {
+		t.Errorf("Expected turn_count=0 on brand new rotated session, got %d", newCount)
+	}
+}
+
 func TestDBNilAndErrorHandling(t *testing.T) {
 	// Nil DB handling
 	if err := InsertMessage(nil, Message{ID: "1"}); err == nil {
@@ -277,9 +368,22 @@ func TestDBNilAndErrorHandling(t *testing.T) {
 	if err := DeleteSessionID(nil, "1"); err != nil {
 		t.Errorf("Expected nil error for DeleteSessionID with nil DB, got: %v", err)
 	}
+	if _, err := IncrementSessionTurnCount(nil, "1"); err == nil {
+		t.Error("Expected error for IncrementSessionTurnCount with nil DB")
+	}
+	if err := RotateSessionID(nil, "1", "s"); err == nil {
+		t.Error("Expected error for RotateSessionID with nil DB")
+	}
 
 	// Closed DB handling
 	database, _ := InitDB(":memory:")
+	if _, err := IncrementSessionTurnCount(database, ""); err == nil {
+		t.Error("Expected error for IncrementSessionTurnCount with empty key")
+	}
+	if err := RotateSessionID(database, "", "s"); err == nil {
+		t.Error("Expected error for RotateSessionID with empty key")
+	}
+
 	_ = database.Close()
 
 	if err := InsertMessage(database, Message{ID: "1"}); err == nil {
