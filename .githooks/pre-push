@@ -17,8 +17,11 @@ run_lint() {
     elif command -v docker >/dev/null 2>&1; then
         echo "   (Running golangci-lint via docker container for $svc...)"
         docker run --rm -v "$(pwd)/$svc:/app" -w /app golangci/golangci-lint:v1.59.1 golangci-lint run ./...
+    elif command -v go >/dev/null 2>&1; then
+        echo "   (golangci-lint not found, running go vet for $svc...)"
+        (cd "$svc" && go vet ./...)
     else
-        echo "🚨 [Pre-Push] Fatal: Neither 'golangci-lint' nor 'docker' found in PATH." >&2
+        echo "🚨 [Pre-Push] Fatal: Neither 'golangci-lint', 'docker', nor 'go' found in PATH." >&2
         exit 1
     fi
 }
