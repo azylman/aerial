@@ -29,7 +29,14 @@ func IsSilentSentinel(stdout string) bool {
 		return true
 	}
 	lower := strings.ToLower(trimmed)
-	return strings.HasPrefix(lower, "[no_reply]")
+	if strings.HasPrefix(lower, "[no_reply]") {
+		rem := strings.TrimPrefix(lower, "[no_reply]")
+		rem = strings.TrimFunc(rem, func(r rune) bool {
+			return unicode.IsSpace(r) || unicode.IsPunct(r) || unicode.IsSymbol(r)
+		})
+		return rem == ""
+	}
+	return false
 }
 
 // RunAgy executes the agy binary with the given parameters, capturing stdout and stderr.

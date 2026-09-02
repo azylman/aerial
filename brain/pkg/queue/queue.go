@@ -388,7 +388,20 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 	}
 
 	// Resolve Channel Policy
-	policy := p.cfg.ResolveChannelPolicy(threadID, "")
+	var channelName string
+	if sess := p.getDiscordSession(); sess != nil {
+		if sess.State != nil {
+			if ch, err := sess.State.Channel(threadID); err == nil && ch != nil {
+				channelName = ch.Name
+			}
+		}
+		if channelName == "" && sess.Ratelimiter != nil && sess.Token != "" {
+			if ch, err := sess.Channel(threadID); err == nil && ch != nil {
+				channelName = ch.Name
+			}
+		}
+	}
+	policy := p.cfg.ResolveChannelPolicy(threadID, channelName)
 
 	skipDiscord := true
 	for _, m := range burst {
