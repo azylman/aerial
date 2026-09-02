@@ -322,10 +322,6 @@ func resolveTypingStarter(policy config.ChannelPolicy, burst []db.Message, skipD
 	}
 }
 
-func (p *WorkerPool) processMessage(msg db.Message) {
-	p.processBurst([]db.Message{msg})
-}
-
 func (p *WorkerPool) processBurst(burst []db.Message) {
 	if len(burst) == 0 {
 		return
