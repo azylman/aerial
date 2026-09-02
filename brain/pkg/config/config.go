@@ -54,23 +54,35 @@ type GitSyncConfig struct {
 	Repositories  []string `yaml:"repositories" json:"repositories"`
 }
 
+type ChannelPolicy struct {
+	Mode            string `yaml:"mode" json:"mode"`
+	TypingIndicator string `yaml:"typing_indicator" json:"typing_indicator"`
+	IgnoreBots      bool   `yaml:"ignore_bots" json:"ignore_bots"`
+	AllowSystemOps  bool   `yaml:"allow_system_ops" json:"allow_system_ops"`
+	MaxSessionTurns int    `yaml:"max_session_turns" json:"max_session_turns"`
+}
+
 type Config struct {
 	Model          string                     `yaml:"model" json:"model"`
 	TimeoutMinutes int                        `yaml:"timeout_minutes" json:"timeout_minutes"`
 	Timezone       string                     `yaml:"timezone" json:"timezone"`
 	SystemChannel  string                     `yaml:"system_channel" json:"system_channel"`
+	AdminUsers     []string                   `yaml:"admin_users" json:"admin_users"`
+	Channels       map[string]ChannelPolicy   `yaml:"channels" json:"channels"`
 	GitSync        GitSyncConfig              `yaml:"git_sync" json:"git_sync"`
 	McpServers     map[string]json.RawMessage `yaml:"mcp_servers,omitempty" json:"mcp_servers,omitempty"`
 }
 
 func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	type rawConfigHelper struct {
-		Model          string                 `yaml:"model"`
-		TimeoutMinutes int                    `yaml:"timeout_minutes"`
-		Timezone       string                 `yaml:"timezone"`
-		SystemChannel  string                 `yaml:"system_channel"`
-		GitSync        GitSyncConfig          `yaml:"git_sync"`
-		McpServers     map[string]interface{} `yaml:"mcp_servers"`
+		Model          string                   `yaml:"model"`
+		TimeoutMinutes int                      `yaml:"timeout_minutes"`
+		Timezone       string                   `yaml:"timezone"`
+		SystemChannel  string                   `yaml:"system_channel"`
+		AdminUsers     []string                 `yaml:"admin_users"`
+		Channels       map[string]ChannelPolicy `yaml:"channels"`
+		GitSync        GitSyncConfig            `yaml:"git_sync"`
+		McpServers     map[string]interface{}   `yaml:"mcp_servers"`
 	}
 
 	var raw rawConfigHelper
@@ -82,6 +94,8 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	c.TimeoutMinutes = raw.TimeoutMinutes
 	c.Timezone = raw.Timezone
 	c.SystemChannel = raw.SystemChannel
+	c.AdminUsers = raw.AdminUsers
+	c.Channels = raw.Channels
 	c.GitSync = raw.GitSync
 
 	if raw.McpServers != nil {
@@ -113,6 +127,16 @@ func DefaultConfig() Config {
 		TimeoutMinutes: 15,
 		Timezone:       "America/Los_Angeles",
 		SystemChannel:  "aerial-dev",
+		AdminUsers:     []string{},
+		Channels: map[string]ChannelPolicy{
+			"default": {
+				Mode:            "threads",
+				TypingIndicator: "always",
+				IgnoreBots:      true,
+				AllowSystemOps:  false,
+				MaxSessionTurns: 0,
+			},
+		},
 		GitSync: GitSyncConfig{
 			Enabled:       true,
 			Interval:      "60s",
@@ -228,6 +252,64 @@ func LoadConfigFromPaths(paths ...string) (Config, error) {
 		return GetRuntimeConfig(), fmt.Errorf("failed to parse %s: %w", targetPath, err)
 	}
 
+	// Validate channels.default existence
+	if parsed.Channels == nil {
+		log.Printf("[Config] Validation error: channels.default is required in %s. Retaining Last Known Good Configuration (LKGC).", targetPath)
+		return GetRuntimeConfig(), fmt.Errorf("channels.default is required")
+	}
+
+	defPolicy, hasDefault := parsed.Channels["default"]
+	if !hasDefault {
+		for k, v := range parsed.Channels {
+			if strings.TrimPrefix(strings.ToLower(strings.TrimSpace(k)), "#") == "default" {
+				defPolicy = v
+				hasDefault = true
+				break
+			}
+		}
+	}
+
+	if !hasDefault {
+		log.Printf("[Config] Validation error: channels.default is required in %s. Retaining Last Known Good Configuration (LKGC).", targetPath)
+		return GetRuntimeConfig(), fmt.Errorf("channels.default is required")
+	}
+
+	if defPolicy.Mode != "threads" && defPolicy.Mode != "channel" {
+		log.Printf("[Config] Validation error: channels.default mode must be 'threads' or 'channel', got %q in %s. Retaining Last Known Good Configuration (LKGC).", defPolicy.Mode, targetPath)
+		return GetRuntimeConfig(), fmt.Errorf("channels.default mode must be 'threads' or 'channel', got %q", defPolicy.Mode)
+	}
+
+	// Normalize channels.default
+	if defPolicy.TypingIndicator == "" {
+		if defPolicy.Mode == "channel" {
+			defPolicy.TypingIndicator = "on_mention"
+		} else {
+			defPolicy.TypingIndicator = "always"
+		}
+	}
+	if defPolicy.Mode == "channel" && defPolicy.MaxSessionTurns <= 0 {
+		defPolicy.MaxSessionTurns = 50
+	}
+	parsed.Channels["default"] = defPolicy
+
+	// Normalize other channels
+	for k, policy := range parsed.Channels {
+		if k == "default" {
+			continue
+		}
+		if policy.TypingIndicator == "" {
+			if policy.Mode == "channel" {
+				policy.TypingIndicator = "on_mention"
+			} else if policy.Mode == "threads" {
+				policy.TypingIndicator = "always"
+			}
+		}
+		if policy.Mode == "channel" && policy.MaxSessionTurns <= 0 {
+			policy.MaxSessionTurns = 50
+		}
+		parsed.Channels[k] = policy
+	}
+
 	if strings.TrimSpace(parsed.Model) == "" {
 		parsed.Model = fallback.Model
 	}
@@ -249,6 +331,9 @@ func LoadConfigFromPaths(paths ...string) (Config, error) {
 	if len(parsed.GitSync.Repositories) == 0 {
 		parsed.GitSync.Repositories = fallback.GitSync.Repositories
 	}
+	if parsed.AdminUsers == nil {
+		parsed.AdminUsers = []string{}
+	}
 
 	runtimeConfigMu.Lock()
 	currentRuntimeConfig = parsed
@@ -258,6 +343,107 @@ func LoadConfigFromPaths(paths ...string) (Config, error) {
 		targetPath, parsed.Model, parsed.TimeoutMinutes, parsed.Timezone, parsed.SystemChannel)
 
 	return parsed, nil
+}
+
+// ResolveChannelPolicy resolves the effective ChannelPolicy for a given channel ID or name.
+// Lookup hierarchy: Channel Snowflake ID -> Channel Name (case-insensitive, '#' stripped) -> channels["default"].
+// Any unspecified field inherits from channels["default"].
+func (c Config) ResolveChannelPolicy(channelID, channelName string) ChannelPolicy {
+	def, hasDef := c.getChannelPolicyRaw("default")
+	if !hasDef {
+		def = ChannelPolicy{
+			Mode:            "threads",
+			TypingIndicator: "always",
+			IgnoreBots:      true,
+			AllowSystemOps:  false,
+			MaxSessionTurns: 0,
+		}
+	} else {
+		if def.Mode == "" {
+			def.Mode = "threads"
+		}
+		if def.TypingIndicator == "" {
+			if def.Mode == "channel" {
+				def.TypingIndicator = "on_mention"
+			} else {
+				def.TypingIndicator = "always"
+			}
+		}
+		if def.Mode == "channel" && def.MaxSessionTurns <= 0 {
+			def.MaxSessionTurns = 50
+		}
+	}
+
+	var matched ChannelPolicy
+	var found bool
+
+	// 1. Match by Snowflake ID
+	if normID := strings.TrimSpace(channelID); normID != "" {
+		matched, found = c.getChannelPolicyRaw(normID)
+	}
+
+	// 2. Match by Channel Name
+	if !found {
+		if normName := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(channelName)), "#"); normName != "" {
+			matched, found = c.getChannelPolicyRaw(normName)
+		}
+	}
+
+	// 3. Fallback to default
+	if !found {
+		return def
+	}
+
+	// Apply inheritance from def to matched
+	res := matched
+	if res.Mode == "" {
+		res.Mode = def.Mode
+	}
+	if res.TypingIndicator == "" {
+		if res.Mode == "channel" {
+			if def.Mode == "channel" && def.TypingIndicator != "" {
+				res.TypingIndicator = def.TypingIndicator
+			} else {
+				res.TypingIndicator = "on_mention"
+			}
+		} else {
+			if def.TypingIndicator != "" {
+				res.TypingIndicator = def.TypingIndicator
+			} else {
+				res.TypingIndicator = "always"
+			}
+		}
+	}
+	if !res.IgnoreBots && def.IgnoreBots {
+		res.IgnoreBots = true
+	}
+	if !res.AllowSystemOps && def.AllowSystemOps {
+		res.AllowSystemOps = true
+	}
+	if res.MaxSessionTurns <= 0 {
+		if def.MaxSessionTurns > 0 {
+			res.MaxSessionTurns = def.MaxSessionTurns
+		} else if res.Mode == "channel" {
+			res.MaxSessionTurns = 50
+		}
+	}
+	return res
+}
+
+func (c Config) getChannelPolicyRaw(key string) (ChannelPolicy, bool) {
+	if len(c.Channels) == 0 || key == "" {
+		return ChannelPolicy{}, false
+	}
+	if p, ok := c.Channels[key]; ok {
+		return p, true
+	}
+	normKey := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(key)), "#")
+	for k, v := range c.Channels {
+		if strings.TrimPrefix(strings.ToLower(strings.TrimSpace(k)), "#") == normKey {
+			return v, true
+		}
+	}
+	return ChannelPolicy{}, false
 }
 
 func GetEnv(key, defaultVal string) string {

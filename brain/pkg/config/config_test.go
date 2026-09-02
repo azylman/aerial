@@ -213,6 +213,9 @@ model: "gemini-1.5-pro"
 timeout_minutes: 45
 timezone: "America/New_York"
 system_channel: "my-alerts"
+channels:
+  default:
+    mode: "threads"
 git_sync:
   enabled: true
   interval: "30s"
@@ -277,6 +280,9 @@ func TestLoadConfigCorruptedYAML_LKGCFallback(t *testing.T) {
 model: "gemini-2.5-flash"
 timeout_minutes: 20
 system_channel: "dev-channel-1"
+channels:
+  default:
+    mode: "threads"
 `
 	if err := os.WriteFile(yamlPath, []byte(validYAML), 0644); err != nil {
 		t.Fatalf("Failed to write valid yaml: %v", err)
@@ -326,6 +332,9 @@ func TestLoadConfigEnvInterpolation(t *testing.T) {
 	yamlContent := `
 model: "${TEST_EXPAND_MODEL}"
 system_channel: "${TEST_EXPAND_CHAN}"
+channels:
+  default:
+    mode: "threads"
 git_sync:
   config_repo_url: "${TEST_EXPAND_REPO}"
 `
@@ -418,4 +427,224 @@ func TestLoadMCPConfig_MergeCustomWithDefaults(t *testing.T) {
 		t.Errorf("Expected custom 'custom-api' server in merged config")
 	}
 }
+
+func TestChannelPolicy_Parsing(t *testing.T) {
+	tmpDir := t.TempDir()
+	yamlPath := filepath.Join(tmpDir, "config.yaml")
+
+	yamlContent := `
+model: "gemini-2.5-flash"
+admin_users:
+  - "169260920550195200"
+  - "999888777666"
+channels:
+  default:
+    mode: "threads"
+    typing_indicator: "always"
+    ignore_bots: true
+    allow_system_ops: false
+    max_session_turns: 0
+  aerial-dev:
+    mode: "threads"
+    typing_indicator: "always"
+    ignore_bots: true
+    allow_system_ops: true
+  general:
+    mode: "channel"
+    typing_indicator: "on_mention"
+    ignore_bots: true
+    allow_system_ops: false
+    max_session_turns: 50
+  "123456789012345678":
+    mode: "channel"
+    typing_indicator: "never"
+    ignore_bots: false
+    allow_system_ops: true
+    max_session_turns: 20
+`
+	if err := os.WriteFile(yamlPath, []byte(yamlContent), 0644); err != nil {
+		t.Fatalf("Failed to write yaml: %v", err)
+	}
+
+	cfg, err := LoadConfigFromPaths(yamlPath)
+	if err != nil {
+		t.Fatalf("LoadConfigFromPaths failed: %v", err)
+	}
+
+	if len(cfg.AdminUsers) != 2 || cfg.AdminUsers[0] != "169260920550195200" || cfg.AdminUsers[1] != "999888777666" {
+		t.Errorf("Unexpected AdminUsers: %v", cfg.AdminUsers)
+	}
+
+	if len(cfg.Channels) != 4 {
+		t.Fatalf("Expected 4 channel policies, got %d", len(cfg.Channels))
+	}
+
+	def := cfg.Channels["default"]
+	if def.Mode != "threads" || def.TypingIndicator != "always" || !def.IgnoreBots || def.AllowSystemOps || def.MaxSessionTurns != 0 {
+		t.Errorf("Unexpected default policy: %+v", def)
+	}
+
+	dev := cfg.Channels["aerial-dev"]
+	if dev.Mode != "threads" || dev.TypingIndicator != "always" || !dev.AllowSystemOps {
+		t.Errorf("Unexpected aerial-dev policy: %+v", dev)
+	}
+
+	gen := cfg.Channels["general"]
+	if gen.Mode != "channel" || gen.TypingIndicator != "on_mention" || gen.MaxSessionTurns != 50 {
+		t.Errorf("Unexpected general policy: %+v", gen)
+	}
+
+	sn := cfg.Channels["123456789012345678"]
+	if sn.Mode != "channel" || sn.TypingIndicator != "never" || sn.IgnoreBots || !sn.AllowSystemOps || sn.MaxSessionTurns != 20 {
+		t.Errorf("Unexpected snowflake channel policy: %+v", sn)
+	}
+}
+
+func TestChannelPolicy_Validation_MissingDefault(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// 1. Missing channels entirely
+	yamlPath1 := filepath.Join(tmpDir, "config1.yaml")
+	yamlNoChannels := `
+model: "gemini-2.5-flash"
+`
+	if err := os.WriteFile(yamlPath1, []byte(yamlNoChannels), 0644); err != nil {
+		t.Fatalf("Failed to write yaml: %v", err)
+	}
+	_, err := LoadConfigFromPaths(yamlPath1)
+	if err == nil {
+		t.Error("Expected error when channels.default is missing, got nil")
+	}
+
+	// 2. channels present but no default
+	yamlPath2 := filepath.Join(tmpDir, "config2.yaml")
+	yamlNoDefault := `
+model: "gemini-2.5-flash"
+channels:
+  general:
+    mode: "channel"
+`
+	if err := os.WriteFile(yamlPath2, []byte(yamlNoDefault), 0644); err != nil {
+		t.Fatalf("Failed to write yaml: %v", err)
+	}
+	_, err = LoadConfigFromPaths(yamlPath2)
+	if err == nil {
+		t.Error("Expected error when channels.default is missing from channels map, got nil")
+	}
+}
+
+func TestChannelPolicy_Validation_InvalidMode(t *testing.T) {
+	tmpDir := t.TempDir()
+	yamlPath := filepath.Join(tmpDir, "config.yaml")
+
+	yamlInvalidMode := `
+model: "gemini-2.5-flash"
+channels:
+  default:
+    mode: "unsupported_mode"
+`
+	if err := os.WriteFile(yamlPath, []byte(yamlInvalidMode), 0644); err != nil {
+		t.Fatalf("Failed to write yaml: %v", err)
+	}
+	_, err := LoadConfigFromPaths(yamlPath)
+	if err == nil {
+		t.Error("Expected error when channels.default has invalid mode, got nil")
+	}
+}
+
+func TestChannelPolicy_DefaultsAndNormalization(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// 1. Test default in threads mode gets typing_indicator: "always"
+	yamlPath1 := filepath.Join(tmpDir, "config_threads.yaml")
+	yamlThreads := `
+model: "gemini-2.5-flash"
+channels:
+  default:
+    mode: "threads"
+`
+	if err := os.WriteFile(yamlPath1, []byte(yamlThreads), 0644); err != nil {
+		t.Fatalf("Failed to write yaml: %v", err)
+	}
+	cfg, err := LoadConfigFromPaths(yamlPath1)
+	if err != nil {
+		t.Fatalf("LoadConfigFromPaths failed: %v", err)
+	}
+	if cfg.Channels["default"].TypingIndicator != "always" {
+		t.Errorf("Expected default typing_indicator='always' for threads mode, got %q", cfg.Channels["default"].TypingIndicator)
+	}
+
+	// 2. Test default in channel mode gets typing_indicator: "on_mention" and max_session_turns: 50
+	yamlPath2 := filepath.Join(tmpDir, "config_channel.yaml")
+	yamlChannel := `
+model: "gemini-2.5-flash"
+channels:
+  default:
+    mode: "channel"
+`
+	if err := os.WriteFile(yamlPath2, []byte(yamlChannel), 0644); err != nil {
+		t.Fatalf("Failed to write yaml: %v", err)
+	}
+	cfg, err = LoadConfigFromPaths(yamlPath2)
+	if err != nil {
+		t.Fatalf("LoadConfigFromPaths failed: %v", err)
+	}
+	if cfg.Channels["default"].TypingIndicator != "on_mention" {
+		t.Errorf("Expected default typing_indicator='on_mention' for channel mode, got %q", cfg.Channels["default"].TypingIndicator)
+	}
+	if cfg.Channels["default"].MaxSessionTurns != 50 {
+		t.Errorf("Expected default max_session_turns=50 for channel mode, got %d", cfg.Channels["default"].MaxSessionTurns)
+	}
+}
+
+func TestResolveChannelPolicy(t *testing.T) {
+	cfg := Config{
+		Channels: map[string]ChannelPolicy{
+			"default": {
+				Mode:            "threads",
+				TypingIndicator: "always",
+				IgnoreBots:      true,
+				AllowSystemOps:  false,
+				MaxSessionTurns: 0,
+			},
+			"general": {
+				Mode: "channel",
+			},
+			"aerial-dev": {
+				AllowSystemOps: true,
+			},
+			"1543668253363150928": {
+				Mode:            "channel",
+				TypingIndicator: "never",
+				AllowSystemOps:  true,
+				MaxSessionTurns: 100,
+			},
+		},
+	}
+
+	// 1. Match by Snowflake ID
+	p1 := cfg.ResolveChannelPolicy("1543668253363150928", "aerial-dev")
+	if p1.Mode != "channel" || p1.TypingIndicator != "never" || !p1.AllowSystemOps || p1.MaxSessionTurns != 100 || !p1.IgnoreBots {
+		t.Errorf("Unexpected policy for snowflake ID match: %+v", p1)
+	}
+
+	// 2. Match by Channel Name with leading '#' and uppercase
+	p2 := cfg.ResolveChannelPolicy("999999", "#General")
+	if p2.Mode != "channel" || p2.TypingIndicator != "on_mention" || p2.MaxSessionTurns != 50 || !p2.IgnoreBots || p2.AllowSystemOps {
+		t.Errorf("Unexpected policy for #General match: %+v", p2)
+	}
+
+	// 3. Match by Channel Name without '#'
+	p3 := cfg.ResolveChannelPolicy("999999", "aerial-dev")
+	if p3.Mode != "threads" || p3.TypingIndicator != "always" || !p3.AllowSystemOps || !p3.IgnoreBots {
+		t.Errorf("Unexpected policy for aerial-dev match with default inheritance: %+v", p3)
+	}
+
+	// 4. Fallback to default when neither ID nor name match
+	p4 := cfg.ResolveChannelPolicy("999999", "unknown-channel")
+	if p4.Mode != "threads" || p4.TypingIndicator != "always" || p4.AllowSystemOps || !p4.IgnoreBots {
+		t.Errorf("Unexpected policy for fallback: %+v", p4)
+	}
+}
+
 
