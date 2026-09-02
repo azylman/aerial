@@ -403,6 +403,23 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 	}
 	policy := p.cfg.ResolveChannelPolicy(threadID, channelName)
 
+	if policy.IsIgnored() {
+		log.Printf("[WorkerPool] Channel %s policy is ignored (mode=%s). Marking %d message(s) completed without execution.", threadID, policy.Mode, len(burst))
+		for _, m := range burst {
+			_ = db.UpdateMessageStatus(p.cfg.DB, m.ID, db.StatusCompleted, fmt.Sprintf("[%s]", strings.ToUpper(policy.Mode)))
+			if m.ScheduleRunID != "" {
+				_ = db.UpdateScheduleRunStatus(p.cfg.DB, db.UpdateRunParams{
+					RunID:       m.ScheduleRunID,
+					MessageID:   m.ID,
+					Status:      "completed",
+					CompletedAt: time.Now().UTC(),
+				})
+			}
+			p.cfg.OnMessageCompleted(m, db.StatusCompleted)
+		}
+		return
+	}
+
 	skipDiscord := true
 	for _, m := range burst {
 		if m.AuthorID != "http-client" {

@@ -1714,6 +1714,86 @@ func TestQueueTypingIndicatorPolicies(t *testing.T) {
 	mu.Unlock()
 }
 
+func TestQueueIgnoredChannelPolicy(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	var mu sync.Mutex
+	runnerCalls := 0
+	deliveryCalls := 0
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    1,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			mu.Lock()
+			runnerCalls++
+			mu.Unlock()
+			return "Should not execute", "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			mu.Lock()
+			deliveryCalls++
+			mu.Unlock()
+			return nil
+		},
+		ResolveChannelPolicy: func(threadID, channelName string) config.ChannelPolicy {
+			if threadID == "chan-ignored-123" {
+				return config.ChannelPolicy{Mode: "ignore"}
+			}
+			return config.ChannelPolicy{Mode: "threads"}
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	doneCh := make(chan struct{})
+	pool.cfg.OnMessageCompleted = func(msg db.Message, finalStatus string) {
+		close(doneCh)
+	}
+
+	msg := db.Message{
+		ID:        "msg-ignored-1",
+		ThreadID:  "chan-ignored-123",
+		Content:   "Hello ignored room",
+		CreatedAt: time.Now().UTC(),
+	}
+	_ = db.InsertMessage(database, msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("Timed out waiting for message completion in ignored channel")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if runnerCalls != 0 {
+		t.Errorf("Expected 0 runner calls for ignored channel, got %d", runnerCalls)
+	}
+	if deliveryCalls != 0 {
+		t.Errorf("Expected 0 delivery calls for ignored channel, got %d", deliveryCalls)
+	}
+
+	savedMsg, err := db.GetMessage(database, "msg-ignored-1")
+	if err != nil || savedMsg == nil {
+		t.Fatalf("Failed to retrieve message: %v", err)
+	}
+	if savedMsg.Status != db.StatusCompleted {
+		t.Errorf("Expected message status COMPLETED, got %s", savedMsg.Status)
+	}
+	if savedMsg.ErrorMessage != "[IGNORE]" {
+		t.Errorf("Expected message error detail '[IGNORE]', got %q", savedMsg.ErrorMessage)
+	}
+}
+
+
 
 
 

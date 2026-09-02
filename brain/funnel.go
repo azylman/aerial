@@ -205,6 +205,9 @@ func isFunnelBotTargeted(s *discordgo.Session, m *discordgo.MessageCreate) bool 
 	}
 
 	policy := config.GetRuntimeConfig().ResolveChannelPolicy(m.ChannelID, channelName)
+	if policy.IsIgnored() {
+		return false
+	}
 	if policy.IgnoreBots && m.Author.Bot {
 		return false
 	}
@@ -474,6 +477,23 @@ func RunStartupCatchUpSweep(ctx context.Context, database *sql.DB, pool *queue.W
 			log.Println("[CatchUpSweep] Sweep aborted: context deadline exceeded.")
 			return
 		default:
+		}
+
+		var channelName string
+		if s.State != nil {
+			if ch, err := s.State.Channel(chID); err == nil && ch != nil {
+				channelName = ch.Name
+			}
+		}
+		if channelName == "" && s.Ratelimiter != nil && s.Token != "" {
+			if ch, err := s.Channel(chID); err == nil && ch != nil {
+				channelName = ch.Name
+			}
+		}
+		policy := config.GetRuntimeConfig().ResolveChannelPolicy(chID, channelName)
+		if policy.IsIgnored() {
+			log.Printf("[CatchUpSweep] Skipping ignored channel #%s (%s)", channelName, chID)
+			continue
 		}
 
 		// Pre-flight permission check if available in state
