@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
 	"github.com/azylman/aerial/brain/pkg/memory"
 	"github.com/azylman/aerial/brain/pkg/notifier"
@@ -1227,6 +1228,492 @@ func TestWorkerPool_SemanticMemoryGracefulFallbackOnError(t *testing.T) {
 		t.Errorf("Expected capturedPrompt to equal %q, got: %s", originalContent, capturedPrompt)
 	}
 }
+
+func TestQueueSilentSentinelSuppression(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	var deliveryCalls int
+	var mu sync.Mutex
+	doneCh := make(chan struct{})
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    1,
+		MemoryRetrieverFunc: func(ctx context.Context, database *sql.DB, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+			return nil, nil
+		},
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			return "[NO_REPLY]", "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			mu.Lock()
+			deliveryCalls++
+			mu.Unlock()
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) func() {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			close(doneCh)
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{
+		ID:        "msg-sentinel-1",
+		ThreadID:  "thread-sentinel",
+		AuthorID:  "user-1",
+		Content:   "Silent prompt",
+		Status:    db.StatusPending,
+		CreatedAt: time.Now().UTC(),
+	}
+	_ = db.InsertMessage(database, msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Timeout waiting for sentinel message processing")
+	}
+
+	mu.Lock()
+	if deliveryCalls != 0 {
+		t.Errorf("Expected 0 delivery calls for silent sentinel [NO_REPLY], got %d", deliveryCalls)
+	}
+	mu.Unlock()
+
+	// Verify message in SQLite is COMPLETED
+	dbMsg, err := db.GetMessage(database, "msg-sentinel-1")
+	if err != nil || dbMsg == nil {
+		t.Fatalf("Failed to query message: %v", err)
+	}
+	if dbMsg.Status != db.StatusCompleted {
+		t.Errorf("Expected status COMPLETED, got %s", dbMsg.Status)
+	}
+	if dbMsg.ResponseText != "[NO_REPLY]" {
+		t.Errorf("Expected response text '[NO_REPLY]', got %q", dbMsg.ResponseText)
+	}
+}
+
+func TestQueueBurstCoalescing(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	var capturedPrompt string
+	var deliveredTexts []string
+	var mu sync.Mutex
+	var completedCount int
+	doneCh := make(chan struct{})
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    1,
+		MemoryRetrieverFunc: func(ctx context.Context, database *sql.DB, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+			return nil, nil
+		},
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			mu.Lock()
+			capturedPrompt = prompt
+			mu.Unlock()
+			return "Coalesced reply from agent", "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			mu.Lock()
+			deliveredTexts = append(deliveredTexts, text)
+			mu.Unlock()
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) func() {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			mu.Lock()
+			completedCount++
+			if completedCount == 3 {
+				close(doneCh)
+			}
+			mu.Unlock()
+		},
+	})
+
+	t0 := time.Now().UTC().Add(-10 * time.Second)
+	t1 := t0.Add(3 * time.Second)
+	t2 := t0.Add(6 * time.Second)
+	msg1 := db.Message{ID: "m-b-1", ThreadID: "thread-burst", AuthorName: "Alice", Content: "Hello from Alice", Status: db.StatusPending, CreatedAt: t0}
+	msg2 := db.Message{ID: "m-b-2", ThreadID: "thread-burst", AuthorName: "Bob", Content: "Hello from Bob", Status: db.StatusPending, CreatedAt: t1}
+	msg3 := db.Message{ID: "m-b-3", ThreadID: "thread-burst", AuthorName: "Charlie", Content: "Hello from Charlie", Status: db.StatusPending, CreatedAt: t2}
+
+	_ = db.InsertMessage(database, msg1)
+	_ = db.InsertMessage(database, msg2)
+	_ = db.InsertMessage(database, msg3)
+
+	// Enqueue all 3 in rapid succession to form a burst
+	pool.Enqueue(msg1)
+	pool.Enqueue(msg2)
+	pool.Enqueue(msg3)
+
+	pool.Start()
+	defer pool.Stop()
+
+	select {
+	case <-doneCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Timeout waiting for burst execution")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	// 1. Verify prompt coalescing format
+	if !strings.Contains(capturedPrompt, "<USER_REQUEST>") || !strings.Contains(capturedPrompt, "[Multiple messages received in channel]") {
+		t.Errorf("Expected coalesced prompt header, got: %s", capturedPrompt)
+	}
+	expectedM1 := fmt.Sprintf("--- Message 1 (by @Alice at %s) ---", t0.Format("15:04:05"))
+	if !strings.Contains(capturedPrompt, expectedM1) || !strings.Contains(capturedPrompt, "Hello from Alice") {
+		t.Errorf("Expected message 1 (%s) in coalesced prompt, got: %s", expectedM1, capturedPrompt)
+	}
+	expectedM2 := fmt.Sprintf("--- Message 2 (by @Bob at %s) ---", t1.Format("15:04:05"))
+	if !strings.Contains(capturedPrompt, expectedM2) || !strings.Contains(capturedPrompt, "Hello from Bob") {
+		t.Errorf("Expected message 2 (%s) in coalesced prompt, got: %s", expectedM2, capturedPrompt)
+	}
+	expectedM3 := fmt.Sprintf("--- Message 3 (by @Charlie at %s) ---", t2.Format("15:04:05"))
+	if !strings.Contains(capturedPrompt, expectedM3) || !strings.Contains(capturedPrompt, "Hello from Charlie") {
+		t.Errorf("Expected message 3 (%s) in coalesced prompt, got: %s", expectedM3, capturedPrompt)
+	}
+
+	// 2. Verify all messages marked COMPLETED in SQLite
+	for _, id := range []string{"m-b-1", "m-b-2", "m-b-3"} {
+		m, err := db.GetMessage(database, id)
+		if err != nil || m == nil || m.Status != db.StatusCompleted {
+			t.Errorf("Expected message %s to be COMPLETED, got: %+v (err: %v)", id, m, err)
+		}
+	}
+
+	// 3. Verify single delivery call for the combined turn
+	if len(deliveredTexts) != 1 || deliveredTexts[0] != "Coalesced reply from agent" {
+		t.Errorf("Expected 1 delivery with agent reply, got: %v", deliveredTexts)
+	}
+}
+
+func TestQueueStalenessDrop(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	var runnerCalls int
+	var deliveryCalls int
+	var mu sync.Mutex
+	doneCh := make(chan struct{})
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    1,
+		MemoryRetrieverFunc: func(ctx context.Context, database *sql.DB, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+			return nil, nil
+		},
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			mu.Lock()
+			runnerCalls++
+			mu.Unlock()
+			return "Should not run", "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			mu.Lock()
+			deliveryCalls++
+			mu.Unlock()
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) func() {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			close(doneCh)
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	// 6-minute old message
+	staleCreatedAt := time.Now().UTC().Add(-6 * time.Minute)
+	msg := db.Message{
+		ID:        "msg-stale-1",
+		ThreadID:  "thread-stale",
+		AuthorID:  "user-1",
+		Content:   "Old stale prompt",
+		Status:    db.StatusPending,
+		CreatedAt: staleCreatedAt,
+	}
+	_ = db.InsertMessage(database, msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Timeout waiting for stale message processing")
+	}
+
+	mu.Lock()
+	if runnerCalls != 0 {
+		t.Errorf("Expected 0 runner calls for stale message, got %d", runnerCalls)
+	}
+	if deliveryCalls != 0 {
+		t.Errorf("Expected 0 delivery calls for stale message, got %d", deliveryCalls)
+	}
+	mu.Unlock()
+
+	// Verify message marked COMPLETED with [EXPIRED_STALE]
+	dbMsg, err := db.GetMessage(database, "msg-stale-1")
+	if err != nil || dbMsg == nil {
+		t.Fatalf("Failed to query stale message: %v", err)
+	}
+	if dbMsg.Status != db.StatusCompleted {
+		t.Errorf("Expected status COMPLETED, got %s", dbMsg.Status)
+	}
+	if dbMsg.ResponseText != "[EXPIRED_STALE]" {
+		t.Errorf("Expected response text '[EXPIRED_STALE]', got %q", dbMsg.ResponseText)
+	}
+}
+
+func TestQueueTurnCountSessionRotation(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	channelID := "channel-rotation-test"
+	initialSessionID := "sess-channel-init-123"
+	_ = db.SaveSessionID(database, channelID, initialSessionID)
+
+	var mu sync.Mutex
+	var completedCh chan struct{}
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    1,
+		ResolveChannelPolicy: func(cID, cName string) config.ChannelPolicy {
+			return config.ChannelPolicy{
+				Mode:            "channel",
+				MaxSessionTurns: 3,
+				TypingIndicator: "always",
+			}
+		},
+		MemoryRetrieverFunc: func(ctx context.Context, database *sql.DB, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+			return nil, nil
+		},
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			return "OK response", "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) func() {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			mu.Lock()
+			ch := completedCh
+			mu.Unlock()
+			if ch != nil {
+				select {
+				case ch <- struct{}{}:
+				default:
+				}
+			}
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	// Send turn 1
+	completedCh = make(chan struct{}, 1)
+	msg1 := db.Message{ID: "m-rot-1", ThreadID: channelID, Content: "Turn 1", CreatedAt: time.Now().UTC()}
+	_ = db.InsertMessage(database, msg1)
+	pool.Enqueue(msg1)
+	<-completedCh
+
+	c1, _ := db.GetSessionTurnCount(database, channelID)
+	s1, _ := db.GetSessionID(database, channelID)
+	if c1 != 1 || s1 != initialSessionID {
+		t.Fatalf("Expected turn_count=1 and initial session ID after turn 1, got count=%d, sess=%s", c1, s1)
+	}
+
+	// Send turn 2
+	completedCh = make(chan struct{}, 1)
+	msg2 := db.Message{ID: "m-rot-2", ThreadID: channelID, Content: "Turn 2", CreatedAt: time.Now().UTC()}
+	_ = db.InsertMessage(database, msg2)
+	pool.Enqueue(msg2)
+	<-completedCh
+
+	c2, _ := db.GetSessionTurnCount(database, channelID)
+	s2, _ := db.GetSessionID(database, channelID)
+	if c2 != 2 || s2 != initialSessionID {
+		t.Fatalf("Expected turn_count=2 and initial session ID after turn 2, got count=%d, sess=%s", c2, s2)
+	}
+
+	// Send turn 3 (reaches limit of 3 turns)
+	completedCh = make(chan struct{}, 1)
+	msg3 := db.Message{ID: "m-rot-3", ThreadID: channelID, Content: "Turn 3", CreatedAt: time.Now().UTC()}
+	_ = db.InsertMessage(database, msg3)
+	pool.Enqueue(msg3)
+	<-completedCh
+
+	// Verify post-3-turns state:
+	// Session ID should be rotated to a new UUID (not initialSessionID)
+	// turn_count should be reset to 0
+	finalSessionID, err := db.GetSessionID(database, channelID)
+	if err != nil {
+		t.Fatalf("Failed to query session ID: %v", err)
+	}
+	if finalSessionID == "" || finalSessionID == initialSessionID {
+		t.Errorf("Expected session ID to be rotated from %s, got: %s", initialSessionID, finalSessionID)
+	}
+
+	finalTurnCount, err := db.GetSessionTurnCount(database, channelID)
+	if err != nil {
+		t.Fatalf("Failed to query turn count: %v", err)
+	}
+	if finalTurnCount != 0 {
+		t.Errorf("Expected turn_count=0 after rotation, got %d", finalTurnCount)
+	}
+}
+
+func TestQueueTypingIndicatorPolicies(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	var typingCalls int
+	var mu sync.Mutex
+	var currentPolicy config.ChannelPolicy
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    1,
+		ResolveChannelPolicy: func(cID, cName string) config.ChannelPolicy {
+			mu.Lock()
+			defer mu.Unlock()
+			return currentPolicy
+		},
+		MemoryRetrieverFunc: func(ctx context.Context, database *sql.DB, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+			return nil, nil
+		},
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			return "OK", "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) func() {
+			mu.Lock()
+			typingCalls++
+			mu.Unlock()
+			return func() {}
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	// 1. Policy: TypingIndicator = "never"
+	mu.Lock()
+	currentPolicy = config.ChannelPolicy{Mode: "channel", TypingIndicator: "never"}
+	typingCalls = 0
+	mu.Unlock()
+
+	doneCh1 := make(chan struct{})
+	pool.cfg.OnMessageCompleted = func(msg db.Message, finalStatus string) { close(doneCh1) }
+	msg1 := db.Message{ID: "m-type-1", ThreadID: "th-never", Content: "Hello @Aerial", CreatedAt: time.Now().UTC()}
+	_ = db.InsertMessage(database, msg1)
+	pool.Enqueue(msg1)
+	<-doneCh1
+
+	mu.Lock()
+	if typingCalls != 0 {
+		t.Errorf("Expected 0 typing calls for policy 'never', got %d", typingCalls)
+	}
+	mu.Unlock()
+
+	// 2. Policy: TypingIndicator = "on_mention", without mention
+	mu.Lock()
+	currentPolicy = config.ChannelPolicy{Mode: "channel", TypingIndicator: "on_mention"}
+	typingCalls = 0
+	mu.Unlock()
+
+	doneCh2 := make(chan struct{})
+	pool.cfg.OnMessageCompleted = func(msg db.Message, finalStatus string) { close(doneCh2) }
+	msg2 := db.Message{ID: "m-type-2", ThreadID: "th-mention-no", Content: "Just talking to friends", CreatedAt: time.Now().UTC()}
+	_ = db.InsertMessage(database, msg2)
+	pool.Enqueue(msg2)
+	<-doneCh2
+
+	mu.Lock()
+	if typingCalls != 0 {
+		t.Errorf("Expected 0 typing calls for policy 'on_mention' without mention, got %d", typingCalls)
+	}
+	mu.Unlock()
+
+	// 3. Policy: TypingIndicator = "on_mention", with mention
+	mu.Lock()
+	currentPolicy = config.ChannelPolicy{Mode: "channel", TypingIndicator: "on_mention"}
+	typingCalls = 0
+	mu.Unlock()
+
+	doneCh3 := make(chan struct{})
+	pool.cfg.OnMessageCompleted = func(msg db.Message, finalStatus string) { close(doneCh3) }
+	msg3 := db.Message{ID: "m-type-3", ThreadID: "th-mention-yes", Content: "Hey @Aerial help me", CreatedAt: time.Now().UTC()}
+	_ = db.InsertMessage(database, msg3)
+	pool.Enqueue(msg3)
+	<-doneCh3
+
+	mu.Lock()
+	if typingCalls != 1 {
+		t.Errorf("Expected 1 typing call for policy 'on_mention' with mention, got %d", typingCalls)
+	}
+	mu.Unlock()
+
+	// 4. Policy: TypingIndicator = "always"
+	mu.Lock()
+	currentPolicy = config.ChannelPolicy{Mode: "threads", TypingIndicator: "always"}
+	typingCalls = 0
+	mu.Unlock()
+
+	doneCh4 := make(chan struct{})
+	pool.cfg.OnMessageCompleted = func(msg db.Message, finalStatus string) { close(doneCh4) }
+	msg4 := db.Message{ID: "m-type-4", ThreadID: "th-always", Content: "Any prompt", CreatedAt: time.Now().UTC()}
+	_ = db.InsertMessage(database, msg4)
+	pool.Enqueue(msg4)
+	<-doneCh4
+
+	mu.Lock()
+	if typingCalls != 1 {
+		t.Errorf("Expected 1 typing call for policy 'always', got %d", typingCalls)
+	}
+	mu.Unlock()
+}
+
 
 
 

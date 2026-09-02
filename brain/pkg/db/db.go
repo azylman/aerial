@@ -106,6 +106,7 @@ func InitDB(dbPath string) (*sql.DB, error) {
 	CREATE TABLE IF NOT EXISTS sessions (
 		thread_id TEXT PRIMARY KEY,
 		internal_session_id TEXT NOT NULL,
+		turn_count INTEGER NOT NULL DEFAULT 0,
 		last_extracted_rowid INTEGER NOT NULL DEFAULT 0,
 		fact_extracted_at DATETIME,
 		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -186,6 +187,7 @@ func InitDB(dbPath string) (*sql.DB, error) {
 	_, _ = database.Exec(`ALTER TABLE messages ADD COLUMN schedule_run_id TEXT NOT NULL DEFAULT '';`)
 
 	// Safe column migrations for sessions on existing DBs
+	_, _ = database.Exec(`ALTER TABLE sessions ADD COLUMN turn_count INTEGER NOT NULL DEFAULT 0;`)
 	_, _ = database.Exec(`ALTER TABLE sessions ADD COLUMN last_extracted_rowid INTEGER NOT NULL DEFAULT 0;`)
 	_, _ = database.Exec(`ALTER TABLE sessions ADD COLUMN fact_extracted_at DATETIME;`)
 
@@ -669,6 +671,68 @@ func DeleteSessionID(database *sql.DB, threadID string) error {
 	}
 	_, err := database.Exec("DELETE FROM sessions WHERE thread_id = ?", threadID)
 	return err
+}
+
+// IncrementSessionTurnCount atomically increments turn_count in sessions table and returns the new turn_count.
+// If record does not exist, it inserts a new record with turn_count = 1.
+func IncrementSessionTurnCount(database *sql.DB, sessionKey string) (int, error) {
+	if database == nil {
+		return 0, fmt.Errorf("database is nil")
+	}
+	if sessionKey == "" {
+		return 0, fmt.Errorf("session key cannot be empty")
+	}
+	now := time.Now().UTC()
+	query := `
+	INSERT INTO sessions (thread_id, internal_session_id, turn_count, created_at, updated_at)
+	VALUES (?, '', 1, ?, ?)
+	ON CONFLICT(thread_id) DO UPDATE SET
+		turn_count = sessions.turn_count + 1,
+		updated_at = excluded.updated_at
+	RETURNING turn_count;
+	`
+	var turnCount int
+	err := database.QueryRow(query, sessionKey, now, now).Scan(&turnCount)
+	if err != nil {
+		return 0, err
+	}
+	return turnCount, nil
+}
+
+// RotateSessionID updates internal_session_id = newSessionID, resets turn_count = 0,
+// and updates updated_at = CURRENT_TIMESTAMP for sessionKey,
+// WITHOUT modifying or wiping last_extracted_rowid or fact_extracted_at (preserving memory watermarks).
+func RotateSessionID(database *sql.DB, sessionKey, newSessionID string) error {
+	if database == nil {
+		return fmt.Errorf("database is nil")
+	}
+	if sessionKey == "" {
+		return fmt.Errorf("session key cannot be empty")
+	}
+	now := time.Now().UTC()
+	query := `
+	INSERT INTO sessions (thread_id, internal_session_id, turn_count, created_at, updated_at)
+	VALUES (?, ?, 0, ?, ?)
+	ON CONFLICT(thread_id) DO UPDATE SET
+		internal_session_id = excluded.internal_session_id,
+		turn_count = 0,
+		updated_at = excluded.updated_at;
+	`
+	_, err := database.Exec(query, sessionKey, newSessionID, now, now)
+	return err
+}
+
+// GetSessionTurnCount returns the current turn_count for a session.
+func GetSessionTurnCount(database *sql.DB, sessionKey string) (int, error) {
+	if database == nil || sessionKey == "" {
+		return 0, nil
+	}
+	var count int
+	err := database.QueryRow("SELECT turn_count FROM sessions WHERE thread_id = ?", sessionKey).Scan(&count)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	return count, err
 }
 
 // Legacy conversation compatibility helpers
