@@ -647,4 +647,27 @@ func TestResolveChannelPolicy(t *testing.T) {
 	}
 }
 
+func TestIsAdmin(t *testing.T) {
+	cfg := Config{
+		AdminUsers: []string{"admin-user-1", "admin-user-2"},
+	}
+
+	if !cfg.IsAdmin("admin-user-1") {
+		t.Errorf("Expected admin-user-1 to be admin")
+	}
+	if !cfg.IsAdmin("admin-user-2") {
+		t.Errorf("Expected admin-user-2 to be admin")
+	}
+	if cfg.IsAdmin("regular-user") {
+		t.Errorf("Expected regular-user NOT to be admin")
+	}
+	if cfg.IsAdmin("") {
+		t.Errorf("Expected empty user ID NOT to be admin")
+	}
+	if cfg.IsAdmin("   ") {
+		t.Errorf("Expected whitespace user ID NOT to be admin")
+	}
+}
+
+
 
