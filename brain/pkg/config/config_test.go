@@ -669,5 +669,134 @@ func TestIsAdmin(t *testing.T) {
 	}
 }
 
+func TestChannelPolicy_IsIgnored(t *testing.T) {
+	cases := []struct {
+		mode     string
+		expected bool
+	}{
+		{"ignore", true},
+		{"disabled", true},
+		{"IGNORE", true},
+		{"DISABLED", true},
+		{" Ignore ", true},
+		{" Disabled ", true},
+		{"threads", false},
+		{"channel", false},
+		{"", false},
+	}
+
+	for _, tc := range cases {
+		p := ChannelPolicy{Mode: tc.mode}
+		if p.IsIgnored() != tc.expected {
+			t.Errorf("ChannelPolicy{Mode: %q}.IsIgnored() = %v, expected %v", tc.mode, p.IsIgnored(), tc.expected)
+		}
+	}
+}
+
+func TestChannelPolicy_IgnoredChannels_YAML(t *testing.T) {
+	tmpDir := t.TempDir()
+	yamlPath := filepath.Join(tmpDir, "config_ignored.yaml")
+
+	yamlContent := `
+model: "gemini-2.5-flash"
+ignored_channels:
+  - "#random"
+  - "123456789"
+channels:
+  default:
+    mode: "threads"
+  muted-channel:
+    mode: "ignore"
+  disabled-channel:
+    mode: "disabled"
+`
+	if err := os.WriteFile(yamlPath, []byte(yamlContent), 0644); err != nil {
+		t.Fatalf("Failed to write yaml: %v", err)
+	}
+
+	cfg, err := LoadConfigFromPaths(yamlPath)
+	if err != nil {
+		t.Fatalf("LoadConfigFromPaths failed: %v", err)
+	}
+
+	if len(cfg.IgnoredChannels) != 2 || cfg.IgnoredChannels[0] != "#random" || cfg.IgnoredChannels[1] != "123456789" {
+		t.Errorf("Unexpected IgnoredChannels: %v", cfg.IgnoredChannels)
+	}
+
+	// Verify ignored channels from list are mapped to Channels map with mode "ignore"
+	pRandom := cfg.ResolveChannelPolicy("99999", "random")
+	if !pRandom.IsIgnored() || pRandom.Mode != "ignore" {
+		t.Errorf("Expected 'random' channel to be ignored, got %+v", pRandom)
+	}
+
+	pRandomHash := cfg.ResolveChannelPolicy("99999", "#random")
+	if !pRandomHash.IsIgnored() || pRandomHash.Mode != "ignore" {
+		t.Errorf("Expected '#random' channel to be ignored, got %+v", pRandomHash)
+	}
+
+	pSnowflake := cfg.ResolveChannelPolicy("123456789", "some-name")
+	if !pSnowflake.IsIgnored() || pSnowflake.Mode != "ignore" {
+		t.Errorf("Expected snowflake '123456789' to be ignored, got %+v", pSnowflake)
+	}
+
+	// Verify explicit channel overrides with mode "ignore" and "disabled"
+	pMuted := cfg.ResolveChannelPolicy("88888", "muted-channel")
+	if !pMuted.IsIgnored() || pMuted.Mode != "ignore" {
+		t.Errorf("Expected 'muted-channel' to be ignored, got %+v", pMuted)
+	}
+
+	pDisabled := cfg.ResolveChannelPolicy("77777", "disabled-channel")
+	if !pDisabled.IsIgnored() || pDisabled.Mode != "disabled" {
+		t.Errorf("Expected 'disabled-channel' to be ignored, got %+v", pDisabled)
+	}
+
+	// Verify un-ignored channel falls back to default threads mode
+	pOther := cfg.ResolveChannelPolicy("66666", "general")
+	if pOther.IsIgnored() || pOther.Mode != "threads" {
+		t.Errorf("Expected 'general' channel to not be ignored, got %+v", pOther)
+	}
+}
+
+func TestChannelPolicy_DefaultDeny_IgnoreMode(t *testing.T) {
+	tmpDir := t.TempDir()
+	yamlPath := filepath.Join(tmpDir, "config_default_ignore.yaml")
+
+	yamlContent := `
+model: "gemini-2.5-flash"
+channels:
+  default:
+    mode: "ignore"
+  aerial-dev:
+    mode: "threads"
+`
+	if err := os.WriteFile(yamlPath, []byte(yamlContent), 0644); err != nil {
+		t.Fatalf("Failed to write yaml: %v", err)
+	}
+
+	cfg, err := LoadConfigFromPaths(yamlPath)
+	if err != nil {
+		t.Fatalf("LoadConfigFromPaths failed with default mode: ignore: %v", err)
+	}
+
+	// Default channel should be ignored
+	defPolicy := cfg.Channels["default"]
+	if !defPolicy.IsIgnored() || defPolicy.Mode != "ignore" {
+		t.Errorf("Expected default policy mode=ignore, got %+v", defPolicy)
+	}
+
+	// Unmatched channel should inherit default deny / ignore
+	pUnmatched := cfg.ResolveChannelPolicy("11111", "random-general")
+	if !pUnmatched.IsIgnored() {
+		t.Errorf("Expected unmatched channel to be ignored under default-deny, got %+v", pUnmatched)
+	}
+
+	// Explicit override should work
+	pDev := cfg.ResolveChannelPolicy("22222", "aerial-dev")
+	if pDev.IsIgnored() || pDev.Mode != "threads" {
+		t.Errorf("Expected aerial-dev to be threads mode and not ignored, got %+v", pDev)
+	}
+}
+
+
 
 
