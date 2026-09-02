@@ -1,0 +1,92 @@
+﻿# ==============================================================================
+# Aerial Configuration (config.yaml)
+# ==============================================================================
+
+# LLM Model Name used by Antigravity CLI (e.g. gemini-2.5-flash, gemini-2.5-pro)
+model: gemini-2.5-flash
+
+# Timeout per conversational turn in minutes
+timeout_minutes: 15
+
+# Timezone for scheduled cron routines and timestamp rendering
+timezone: America/Los_Angeles
+
+# Discord system channel name or snowflake ID for startup and error alerts
+system_channel: aerial-dev
+
+# ------------------------------------------------------------------------------
+# Administrator Allowlist
+# ------------------------------------------------------------------------------
+# List of Discord user Snowflake IDs who are authorized to perform system-level
+# changes (modifying SYSTEM.md, AGENTS.md, config.yaml, Docker containers, crons).
+# Messages from these users are tagged with is_admin: true.
+admin_users:
+  - 1542035925603713086 # Primary Admin
+  # - 987654321098765432 # Secondary Admin
+
+# ------------------------------------------------------------------------------
+# Channel Policies
+# ------------------------------------------------------------------------------
+# Configure interaction mode and behavior per Discord channel.
+# Lookup order: Channel Snowflake ID -> Channel Name (without '#') -> default.
+#
+# Available Modes:
+#   - threads: Non-thread messages spawn/route to a Discord thread (default).
+#   - channel: Messages are evaluated directly in-channel without threads.
+#
+# Available Typing Indicator Options:
+#   - always: Send typing indicator on every evaluated turn (default for threads).
+#   - on_mention: Only send typing indicator when the bot is mentioned/replied to (default for channel).
+#   - never: Never send typing indicator.
+#
+# Session Rotation:
+#   - max_session_turns: Number of turns before rotating internal conversation ID (default: 50).
+channels:
+  # The 'default' block is REQUIRED and acts as the fallback for all channels.
+  default:
+    mode: threads
+    typing_indicator: always
+    ignore_bots: true
+    allow_system_ops: false
+    max_session_turns: 0
+
+  # Example channel-specific override by channel name:
+  general:
+    mode: channel
+    typing_indicator: on_mention
+    ignore_bots: true
+    allow_system_ops: false
+    max_session_turns: 50
+
+  # Example channel-specific override by channel snowflake ID:
+  1543668253363150928:
+    mode: channel
+    typing_indicator: on_mention
+    ignore_bots: false
+    allow_system_ops: true
+    max_session_turns: 50
+
+# ------------------------------------------------------------------------------
+# GitSync Configuration
+# ------------------------------------------------------------------------------
+git_sync:
+  enabled: true
+  interval: 1m
+  config_repo_url: https://github.com/your-username/aerial-config
+  repositories:
+    - /share/aerial-config
+    - /share/aerial
+
+# ------------------------------------------------------------------------------
+# Semantic Memory & Fact Extraction
+# ------------------------------------------------------------------------------
+memory:
+  fact_extraction:
+    enabled: true
+    interval: 6h
+
+# ------------------------------------------------------------------------------
+# Custom MCP Servers
+# ------------------------------------------------------------------------------
+# Additional MCP servers to merge into ~/.gemini/config/mcp_config.json
+mcp_servers: {}
