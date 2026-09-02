@@ -65,7 +65,7 @@ channels:
 		t.Errorf("Expected DM targetThreadID 'chan-dm' and false, got: %s, %t", targetThreadID, isThread)
 	}
 
-	prompt := buildDiscordPrompt(dmMsg, "thread-12345")
+	prompt := buildDiscordPrompt(dmMsg, "thread-12345", config.ChannelPolicy{Mode: "threads"})
 	if prompt == "" {
 		t.Errorf("Expected non-empty prompt for message")
 	}
@@ -483,7 +483,7 @@ channels:
 		},
 	}
 
-	promptAdmin := buildDiscordPrompt(adminMsg, "thread-admin-1")
+	promptAdmin := buildDiscordPrompt(adminMsg, "thread-admin-1", config.ChannelPolicy{Mode: "threads"})
 	if !strings.Contains(promptAdmin, "- is_admin: true") {
 		t.Errorf("Expected prompt to contain '- is_admin: true', got:\n%s", promptAdmin)
 	}
@@ -517,7 +517,7 @@ channels:
 		},
 	}
 
-	promptNonAdmin := buildDiscordPrompt(nonAdminMsg, "chan-channel-mode")
+	promptNonAdmin := buildDiscordPrompt(nonAdminMsg, "chan-channel-mode", config.ChannelPolicy{Mode: "channel"})
 	if !strings.Contains(promptNonAdmin, "- is_admin: false") {
 		t.Errorf("Expected prompt to contain '- is_admin: false', got:\n%s", promptNonAdmin)
 	}
@@ -529,6 +529,93 @@ channels:
 	}
 	if !strings.Contains(promptNonAdmin, "Discord channel") {
 		t.Errorf("Expected channel mode prompt to mention 'Discord channel', got:\n%s", promptNonAdmin)
+	}
+}
+
+func TestIsFunnelBotTargeted_ThreadInheritsParentChannelPolicy(t *testing.T) {
+	yamlContent := `
+model: "gemini-2.5-flash"
+channels:
+  default:
+    mode: "ignore"
+  aerial-dev:
+    mode: "threads"
+  spam-room:
+    mode: "ignore"
+`
+	setupTestConfig(t, yamlContent)
+
+	s := &discordgo.Session{
+		State: discordgo.NewState(),
+	}
+	s.State.User = &discordgo.User{ID: "bot-self-id", Username: "AerialBot"}
+	_ = s.State.GuildAdd(&discordgo.Guild{ID: "guild-1"})
+
+	// Parent channel 1: #aerial-dev (whitelisted)
+	chanDev := &discordgo.Channel{
+		ID:      "chan-dev-101",
+		GuildID: "guild-1",
+		Name:    "aerial-dev",
+		Type:    discordgo.ChannelTypeGuildText,
+	}
+	_ = s.State.ChannelAdd(chanDev)
+
+	// Thread inside #aerial-dev
+	threadDev := &discordgo.Channel{
+		ID:       "thread-dev-999",
+		GuildID:  "guild-1",
+		ParentID: "chan-dev-101",
+		Name:     "Discussion on Features",
+		Type:     discordgo.ChannelTypeGuildPublicThread,
+	}
+	_ = s.State.ChannelAdd(threadDev)
+
+	// Parent channel 2: #spam-room (explicitly ignored)
+	chanSpam := &discordgo.Channel{
+		ID:      "chan-spam-202",
+		GuildID: "guild-1",
+		Name:    "spam-room",
+		Type:    discordgo.ChannelTypeGuildText,
+	}
+	_ = s.State.ChannelAdd(chanSpam)
+
+	// Thread inside #spam-room
+	threadSpam := &discordgo.Channel{
+		ID:       "thread-spam-888",
+		GuildID:  "guild-1",
+		ParentID: "chan-spam-202",
+		Name:     "Spam Discussion Thread",
+		Type:     discordgo.ChannelTypeGuildPublicThread,
+	}
+	_ = s.State.ChannelAdd(threadSpam)
+
+	// A. Thread inside #aerial-dev (under default-deny) should inherit mode: "threads" and be targeted!
+	msgInDevThread := &discordgo.MessageCreate{
+		Message: &discordgo.Message{
+			ID:        "msg-dev-thread-1",
+			ChannelID: "thread-dev-999",
+			GuildID:   "guild-1",
+			Content:   "Continuing discussion in whitelisted thread",
+			Author:    &discordgo.User{ID: "user-1", Username: "alice", Bot: false},
+		},
+	}
+	if !isFunnelBotTargeted(s, msgInDevThread) {
+		t.Errorf("Expected thread inside whitelisted #aerial-dev to be targeted under default-deny")
+	}
+
+	// B. Thread inside #spam-room should inherit mode: "ignore" and NOT be targeted even with mention!
+	msgInSpamThread := &discordgo.MessageCreate{
+		Message: &discordgo.Message{
+			ID:        "msg-spam-thread-1",
+			ChannelID: "thread-spam-888",
+			GuildID:   "guild-1",
+			Content:   "Hey aerial answer me in spam thread",
+			Mentions:  []*discordgo.User{{ID: "bot-self-id", Username: "AerialBot"}},
+			Author:    &discordgo.User{ID: "user-1", Username: "alice", Bot: false},
+		},
+	}
+	if isFunnelBotTargeted(s, msgInSpamThread) {
+		t.Errorf("Expected thread inside ignored #spam-room to return false")
 	}
 }
 

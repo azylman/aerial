@@ -1793,6 +1793,159 @@ func TestQueueIgnoredChannelPolicy(t *testing.T) {
 	}
 }
 
+func TestQueueIgnoredChannelPolicy_NilCallback(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    1,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			return "Should not execute", "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		ResolveChannelPolicy: func(threadID, channelName string) config.ChannelPolicy {
+			return config.ChannelPolicy{Mode: "ignore"}
+		},
+		// OnMessageCompleted is intentionally nil (matching production default)
+		OnMessageCompleted: nil,
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{
+		ID:        "msg-nil-cb-1",
+		ThreadID:  "chan-ignored-nil-cb",
+		Content:   "Testing nil callback safety",
+		CreatedAt: time.Now().UTC(),
+	}
+	_ = db.InsertMessage(database, msg)
+	pool.Enqueue(msg)
+
+	// Poll database for completion
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		m, err := db.GetMessage(database, "msg-nil-cb-1")
+		if err == nil && m != nil && m.Status == db.StatusCompleted {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	savedMsg, err := db.GetMessage(database, "msg-nil-cb-1")
+	if err != nil || savedMsg == nil {
+		t.Fatalf("Failed to retrieve message: %v", err)
+	}
+	if savedMsg.Status != db.StatusCompleted {
+		t.Errorf("Expected message status COMPLETED, got %s", savedMsg.Status)
+	}
+}
+
+func TestQueueThreadInheritsParentChannelPolicy(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	dg := &discordgo.Session{
+		State: discordgo.NewState(),
+	}
+	_ = dg.State.GuildAdd(&discordgo.Guild{ID: "guild-1"})
+
+	// Parent channel #spam (ignored)
+	chanSpam := &discordgo.Channel{
+		ID:      "parent-spam-id",
+		GuildID: "guild-1",
+		Name:    "spam",
+		Type:    discordgo.ChannelTypeGuildText,
+	}
+	_ = dg.State.ChannelAdd(chanSpam)
+
+	// Thread spawned inside #spam
+	threadInSpam := &discordgo.Channel{
+		ID:       "thread-in-spam-id",
+		GuildID:  "guild-1",
+		ParentID: "parent-spam-id",
+		Name:     "Spam Discussion Thread",
+		Type:     discordgo.ChannelTypeGuildPublicThread,
+	}
+	_ = dg.State.ChannelAdd(threadInSpam)
+
+	var mu sync.Mutex
+	runnerCalls := 0
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    1,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			mu.Lock()
+			runnerCalls++
+			mu.Unlock()
+			return "Should not execute", "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		ResolveChannelPolicy: func(threadID, channelName string) config.ChannelPolicy {
+			if threadID == "parent-spam-id" || channelName == "spam" {
+				return config.ChannelPolicy{Mode: "ignore"}
+			}
+			return config.ChannelPolicy{Mode: "threads"}
+		},
+	})
+	pool.SetDiscordSession(dg)
+	pool.Start()
+	defer pool.Stop()
+
+	doneCh := make(chan struct{})
+	pool.cfg.OnMessageCompleted = func(msg db.Message, finalStatus string) {
+		close(doneCh)
+	}
+
+	msg := db.Message{
+		ID:        "msg-thread-spam-1",
+		ThreadID:  "thread-in-spam-id",
+		Content:   "Hello in thread in spam",
+		CreatedAt: time.Now().UTC(),
+	}
+	_ = db.InsertMessage(database, msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("Timed out waiting for message completion")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if runnerCalls != 0 {
+		t.Errorf("Expected 0 runner calls because thread parent #spam is ignored, got %d", runnerCalls)
+	}
+
+	savedMsg, err := db.GetMessage(database, "msg-thread-spam-1")
+	if err != nil || savedMsg == nil {
+		t.Fatalf("Failed to retrieve message: %v", err)
+	}
+	if savedMsg.Status != db.StatusCompleted {
+		t.Errorf("Expected message status COMPLETED, got %s", savedMsg.Status)
+	}
+	if savedMsg.ErrorMessage != "[IGNORE]" {
+		t.Errorf("Expected message error detail '[IGNORE]', got %q", savedMsg.ErrorMessage)
+	}
+}
+
+
 
 
 
