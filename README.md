@@ -69,12 +69,38 @@ Aerial is designed to be easily extended across four distinct layers:
 
 User configuration and persona rules live in your private configuration repository (see [aerial-config-example](https://github.com/azylman/aerial-config-example)):
 
-1. **`config.yaml`** (Non-secret options):
+1. **`config.yaml`** (Agent Options, Channel Policies, & MCP Tools):
    ```yaml
-   model: "Gemini 3.6 Flash (Low)"
+   model: "Gemini 2.5 Flash"
    timeout_minutes: 15
    timezone: "America/Los_Angeles"
    system_channel: "aerial-dev"
+
+   # Administrator Allowlist
+   # User IDs authorized to perform system-level operations (SYSTEM.md, config.yaml, Docker)
+   admin_users:
+     - "1542035925603713086"
+
+   # Channel Policies & Interaction Modes
+   channels:
+     # Default fallback (Required)
+     default:
+       mode: "threads"           # "threads" | "channel" | "ignore"
+       typing_indicator: "always" # "always" | "on_mention" | "never"
+       ignore_bots: true
+       allow_system_ops: false
+       max_session_turns: 0
+
+     # In-Channel Direct Interaction (no threads spawned)
+     general:
+       mode: "channel"
+       typing_indicator: "on_mention"
+       ignore_bots: true
+       max_session_turns: 50
+
+     # Ignore specific noisy channels
+     memes:
+       mode: "ignore"
 
    git_sync:
      enabled: true
@@ -84,6 +110,11 @@ User configuration and persona rules live in your private configuration reposito
        - "/share/aerial-config"
        - "/share/aerial"
    ```
+   - **Interaction Modes**:
+     - `threads`: Direct messages or mentions spawn and route to a Discord thread (default).
+     - `channel`: Messages are evaluated directly in-channel without spawning threads. Aerial uses the `[NO_REPLY]` silent sentinel to remain silent on casual chatter not directed at her.
+     - `ignore` (or `disabled`): Channel is completely ignored (no messages evaluated, no startup sweeps).
+   - **Server Whitelisting (Default-Deny)**: Set `channels.default.mode: "ignore"` to ignore the entire server by default, responding only in explicitly declared channels.
    - **Hot-Reloading**: Changes to `config.yaml` are detected instantly via `fsnotify` and reconfigured in-memory without restarting the daemon.
    - **Last Known Good Configuration (LKGC) & Discord Alerts**: If an invalid YAML file is saved, Aerial retains the previous valid settings in memory and posts a diagnostic alert to `#aerial-dev` in Discord.
 
@@ -268,6 +299,8 @@ docker compose logs -f brain
 
 ## 7. Security & Best Practices
 
+- **Multi-User Security & Admin Privilege Enforcement**: In shared or multi-user channels, messages from users are automatically checked against `admin_users` in `config.yaml`. Only authorized admins (`is_admin: true`) can modify system instructions (`SYSTEM.md`, `AGENTS.md`), edit system configuration (`config.yaml`), manage Docker containers, or alter cron schedules.
+- **Fail-Closed Default-Deny Server Containment**: Set `channels.default.mode: "ignore"` to contain Aerial exclusively to allowlisted channels on shared Discord servers.
 - **Zero Plaintext Tokens**: GitHub PATs are passed in-memory ephemerally and never written to `.git/config` on disk.
 - **Log Sanitization**: All subprocess logs are passed through regex sanitizers to mask sensitive tokens.
 - **Never commit `.env`**: Secrets and tokens are strictly ignored by `.gitignore`.
