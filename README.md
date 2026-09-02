@@ -88,8 +88,6 @@ User configuration and persona rules live in your private configuration reposito
        mode: "threads"           # "threads" | "channel" | "ignore"
        typing_indicator: "always" # "always" | "on_mention" | "never"
        ignore_bots: true
-       allow_system_ops: false
-       max_session_turns: 0
 
      # In-Channel Direct Interaction (no threads spawned)
      general:
