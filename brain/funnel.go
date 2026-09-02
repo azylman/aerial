@@ -499,20 +499,9 @@ func RunStartupCatchUpSweep(ctx context.Context, database *sql.DB, pool *queue.W
 		default:
 		}
 
-		var channelName string
-		if s.State != nil {
-			if ch, err := s.State.Channel(chID); err == nil && ch != nil {
-				channelName = ch.Name
-			}
-		}
-		if channelName == "" && s.Ratelimiter != nil && s.Token != "" {
-			if ch, err := s.Channel(chID); err == nil && ch != nil {
-				channelName = ch.Name
-			}
-		}
-		policy := config.GetRuntimeConfig().ResolveChannelPolicy(chID, channelName)
+		policy, isThread := resolveEffectiveChannelPolicy(s, chID)
 		if policy.IsIgnored() {
-			log.Printf("[CatchUpSweep] Skipping ignored channel #%s (%s)", channelName, chID)
+			log.Printf("[CatchUpSweep] Skipping ignored channel/thread %s (is_thread=%t)", chID, isThread)
 			continue
 		}
 

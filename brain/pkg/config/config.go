@@ -300,10 +300,18 @@ func LoadConfigFromPaths(paths ...string) (Config, error) {
 	parsed.Channels["default"] = defPolicy
 
 
-	// Normalize other channels
+	// Normalize and validate other channels
 	for k, policy := range parsed.Channels {
 		if k == "default" {
 			continue
+		}
+		if policy.Mode != "" {
+			modeLower := strings.ToLower(strings.TrimSpace(policy.Mode))
+			if modeLower != "threads" && modeLower != "channel" && modeLower != "ignore" && modeLower != "disabled" {
+				log.Printf("[Config] Validation error: channel %q mode must be 'threads', 'channel', 'ignore', or 'disabled', got %q in %s. Retaining Last Known Good Configuration (LKGC).", k, policy.Mode, targetPath)
+				return GetRuntimeConfig(), fmt.Errorf("channel %q mode must be 'threads', 'channel', 'ignore', or 'disabled', got %q", k, policy.Mode)
+			}
+			policy.Mode = modeLower
 		}
 		if policy.TypingIndicator == "" {
 			if policy.Mode == "channel" {
