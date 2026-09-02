@@ -361,14 +361,21 @@ func LoadConfigFromPaths(paths ...string) (Config, error) {
 	return parsed, nil
 }
 
-// IsAdmin checks if the given userID is in cfg.AdminUsers.
-func (c Config) IsAdmin(userID string) bool {
-	if strings.TrimSpace(userID) == "" {
+// IsAdmin checks if any of the given identifiers (userID, username, globalName) match cfg.AdminUsers.
+func (c Config) IsAdmin(identifiers ...string) bool {
+	if len(c.AdminUsers) == 0 {
 		return false
 	}
-	for _, admin := range c.AdminUsers {
-		if strings.TrimSpace(admin) == strings.TrimSpace(userID) {
-			return true
+	for _, id := range identifiers {
+		trimmedID := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(id)), "@")
+		if trimmedID == "" {
+			continue
+		}
+		for _, admin := range c.AdminUsers {
+			trimmedAdmin := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(admin)), "@")
+			if trimmedAdmin == trimmedID {
+				return true
+			}
 		}
 	}
 	return false

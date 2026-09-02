@@ -649,23 +649,44 @@ func TestResolveChannelPolicy(t *testing.T) {
 
 func TestIsAdmin(t *testing.T) {
 	cfg := Config{
-		AdminUsers: []string{"admin-user-1", "admin-user-2"},
+		AdminUsers: []string{"1542035925603713086", "arcane103", "@Alex"},
 	}
 
-	if !cfg.IsAdmin("admin-user-1") {
-		t.Errorf("Expected admin-user-1 to be admin")
+	// 1. Exact snowflake ID
+	if !cfg.IsAdmin("1542035925603713086") {
+		t.Errorf("Expected snowflake ID to be admin")
 	}
-	if !cfg.IsAdmin("admin-user-2") {
-		t.Errorf("Expected admin-user-2 to be admin")
+
+	// 2. Exact username
+	if !cfg.IsAdmin("arcane103") {
+		t.Errorf("Expected arcane103 to be admin")
 	}
+
+	// 3. Username with @ prefix and case variations
+	if !cfg.IsAdmin("@Arcane103") {
+		t.Errorf("Expected @Arcane103 to be admin")
+	}
+	if !cfg.IsAdmin("alex") {
+		t.Errorf("Expected alex to be admin matching @Alex")
+	}
+	if !cfg.IsAdmin("@ALEX") {
+		t.Errorf("Expected @ALEX to be admin")
+	}
+
+	// 4. Variadic check (ID, Username, GlobalName) where one matches
+	if !cfg.IsAdmin("some-random-id", "arcane103", "Alex") {
+		t.Errorf("Expected variadic check with matching username to be admin")
+	}
+
+	// 5. Non-admins and empty/whitespace
 	if cfg.IsAdmin("regular-user") {
 		t.Errorf("Expected regular-user NOT to be admin")
 	}
-	if cfg.IsAdmin("") {
-		t.Errorf("Expected empty user ID NOT to be admin")
+	if cfg.IsAdmin("", "  ", "@") {
+		t.Errorf("Expected empty/whitespace/bare @ NOT to be admin")
 	}
-	if cfg.IsAdmin("   ") {
-		t.Errorf("Expected whitespace user ID NOT to be admin")
+	if cfg.IsAdmin() {
+		t.Errorf("Expected empty variadic call NOT to be admin")
 	}
 }
 
