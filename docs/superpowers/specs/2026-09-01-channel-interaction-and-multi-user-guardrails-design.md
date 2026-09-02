@@ -2,8 +2,8 @@
 
 - **Author**: Antigravity & User Pair Programming
 - **Date**: 2026-09-01
-- **Status**: Draft / Awaiting Approval
-- **Target Component**: `aerial-brain` (`brain/pkg/config`, `brain/funnel.go`, `brain/pkg/queue`, `brain/pkg/delivery`, `SYSTEM.md`)
+- **Status**: Ready for Implementation
+- **Target Component**: `aerial-brain` (`brain/pkg/config`, `brain/funnel.go`, `brain/pkg/queue`, `brain/pkg/delivery`, `brain/pkg/runner`, `SYSTEM.md`)
 
 ---
 
@@ -19,10 +19,16 @@ This specification introduces:
    - In channel mode, Aerial evaluates whether her input is helpful or requested.
    - If no response is warranted, Aerial outputs a silent sentinel (`[NO_REPLY]`), which the delivery pipeline absorbs without sending any message to Discord, while preserving the turn in the Antigravity conversation transcript for full ambient context.
    - If Aerial chooses to respond, her output is posted directly into the channel.
-3. **Multi-User Security Guardrails & Admin Privilege Model**:
-   - In shared channels with multiple humans and bots, Discord author IDs are evaluated against an `admin_users` allowlist in `config.yaml`.
+3. **Queue Resilience, Message Coalescing & Staleness Guards**:
+   - **Message Coalescing**: If multiple messages queue up in a channel while a turn is evaluating, the worker drains pending messages and batches them chronologically into a single consolidated turn.
+   - **Staleness TTL (5 Minutes)**: Any ambient message waiting behind a backlog longer than 300 seconds is expired silently without invoking LLM tokens.
+   - **Turn-Based Session Rotation (50 Turns)**: To prevent runaway context windows and API token inflation, channel sessions rotate after reaching 50 turns. Long-term preferences and facts remain permanently indexed in the semantic memory database.
+4. **Typing Indicators (`typing_indicator`)**:
+   - For `mode: channel`, typing indicator defaults to `"on_mention"` (only pulses typing when explicitly @mentioned or replied to, keeping ambient channel evaluation silent).
+5. **Multi-User Security Guardrails & Admin Privilege Model**:
+   - Discord author IDs are evaluated against an `admin_users` allowlist in `config.yaml`.
    - The message payload flags `is_admin: true/false`.
-   - Non-admins are strictly prevented from modifying system instructions, altering config files (`SYSTEM.md`, `AGENTS.md`, `config.yaml`), or executing host infrastructure commands, while retaining full access to conversational chat, smart home/domain tools, and the semantic memory system.
+   - Non-admins are instructed to not perform system config changes or host operations, while retaining full access to conversational chat, smart home/domain tools, and the semantic memory system.
    - Other bots are ignored by default (`ignore_bots: true`) to prevent recursive bot-to-bot ping loops.
 
 ---
@@ -48,33 +54,36 @@ admin_users:
 # Per-Channel Interaction Policies (REQUIRED: channels.default)
 channels:
   default:
-    mode: "threads"           # "threads" | "channel"
-    typing_indicator: true     # Send Discord typing indicator while evaluating
-    ignore_bots: true          # Ignore messages authored by other bots
-    allow_system_ops: false   # Disallow non-admins from changing engine files or running host commands
+    mode: "threads"            # "threads" | "channel"
+    typing_indicator: "always" # "always" | "on_mention" | "never"
+    ignore_bots: true           # Ignore messages authored by other bots
+    allow_system_ops: false    # Disallow non-admins from changing engine files or running host commands
+    max_session_turns: 50      # Rotate session after 50 turns (0 = unlimited)
 
   # Channel-specific overrides (keyed by channel name or Discord channel ID)
   aerial-dev:
     mode: "threads"
-    typing_indicator: true
+    typing_indicator: "always"
     ignore_bots: true
     allow_system_ops: true
 
   general:
     mode: "channel"
-    typing_indicator: true
+    typing_indicator: "on_mention"  # Ambient turns evaluate silently without phantom typing
     ignore_bots: true
     allow_system_ops: false
+    max_session_turns: 50
 ```
 
 ### 2.2 Go Data Structures
 
 ```go
 type ChannelPolicy struct {
-	Mode            string `yaml:"mode" json:"mode"`                         // "threads" or "channel"
-	TypingIndicator bool   `yaml:"typing_indicator" json:"typing_indicator"` // send typing pulse
-	IgnoreBots      bool   `yaml:"ignore_bots" json:"ignore_bots"`           // drop messages from bots
-	AllowSystemOps  bool   `yaml:"allow_system_ops" json:"allow_system_ops"` // allow admin ops in this channel
+	Mode             string `yaml:"mode" json:"mode"`                           // "threads" or "channel"
+	TypingIndicator  string `yaml:"typing_indicator" json:"typing_indicator"`   // "always", "on_mention", "never"
+	IgnoreBots       bool   `yaml:"ignore_bots" json:"ignore_bots"`             // drop messages from bots
+	AllowSystemOps   bool   `yaml:"allow_system_ops" json:"allow_system_ops"`   // allow admin ops in this channel
+	MaxSessionTurns  int    `yaml:"max_session_turns" json:"max_session_turns"` // rotate session after N turns (default 50)
 }
 
 type UserConfig struct {
@@ -91,7 +100,7 @@ type UserConfig struct {
 
 ### 2.3 Policy Resolution Order
 1. Match channel by explicit Discord `ChannelID`.
-2. Match channel by Discord channel name (e.g. `general`).
+2. Match channel by Discord channel name (case-insensitive, e.g. `general`).
 3. Fall back to `channels["default"]`.
 4. Validation requirement: `channels.default` must be defined with a valid `mode` (`"threads"` or `"channel"`).
 
@@ -169,19 +178,48 @@ Please formulate your response and output it on stdout.
 
 ---
 
-## 4. Execution, Sentinel Suppression & Delivery (`brain/pkg/queue`, `brain/pkg/delivery`)
+## 4. Execution, Queueing, Coalescing & Sentinel Suppression (`brain/pkg/queue`, `brain/pkg/delivery`, `brain/pkg/runner`)
 
-### 4.1 Channel-Level FIFO Queueing
+### 4.1 Channel-Level FIFO Queueing & Message Coalescing
 * In `mode: channel`, `msg.ThreadID` is set to `ChannelID`.
-* `WorkerPool` assigns a dedicated worker goroutine per `msg.ThreadID`. Therefore, messages in the same channel are processed in **strict chronological order**, preventing session collision and out-of-order responses.
+* `WorkerPool` assigns a dedicated worker goroutine per channel.
+* **Burst Draining / Coalescing**: When a worker starts processing, if multiple messages have queued up in `ch` during the previous turn, the worker drains up to 5 pending messages and coalesces them chronologically into a single turn prompt:
+  ```markdown
+  <USER_REQUEST>
+  [Recent In-Channel Messages Burst (Chronological)]
+  - User A (10:01:05): "Is the API down?"
+  - User B (10:01:12): "Never mind, it was just a local network hiccup."
 
-### 4.2 Sentinel Detection & Suppression Gate
+  [Channel Interaction Directive]
+  Evaluate whether your input is needed or requested. If no response is warranted, output solely "[NO_REPLY]".
+  </USER_REQUEST>
+  ```
+* All coalesced messages are marked `COMPLETED` in SQLite in a single transaction.
+
+### 4.2 Message Staleness TTL (5 Minutes)
+* If an ambient message (`mode: channel`) has been in the queue for longer than 300 seconds (`5 * time.Minute`):
+  ```go
+  if policy.Mode == "channel" && time.Since(msg.CreatedAt) > 5*time.Minute {
+      _ = db.UpdateMessageCompleted(p.cfg.DB, msg.ID, "[EXPIRED_STALE]")
+      log.Printf("[WorkerPool] Dropped stale ambient message %s (age=%v)", msg.ID, time.Since(msg.CreatedAt))
+      return
+  }
+  ```
+
+### 4.3 Turn-Based Session Rotation (50 Turns)
+* In `sessions` table, track `turn_count INTEGER NOT NULL DEFAULT 0`.
+* When a channel session reaches `policy.MaxSessionTurns` (default 50 turns), `WorkerPool` deletes the active `internal_session_id` and starts a fresh Antigravity session on the next turn.
+* This caps context window token growth to ~25k tokens while the semantic memory system preserves long-term domain knowledge.
+
+### 4.4 Sentinel Detection & Clean Empty Stdout Handling
+
+In `brain/pkg/runner/runner.go` (`ClassifyError`):
+* Update `ClassifyError` so that `exitCode == 0` with empty `stdout` is treated as clean success (`isFailure = false`) instead of hard failure.
 
 In `brain/pkg/queue/queue.go` (`processMessage`):
-
 ```go
 trimmed := strings.TrimSpace(stdout)
-isSilent := trimmed == "[NO_REPLY]" || trimmed == ""
+isSilent := trimmed == "" || strings.HasPrefix(strings.ToUpper(trimmed), "[NO_REPLY]")
 
 if isSilent {
     stopTyping()
@@ -203,9 +241,10 @@ if !skipDiscord {
 _ = db.UpdateMessageCompleted(p.cfg.DB, msg.ID, stdout)
 ```
 
-### 4.3 Response Delivery Layer
-* When `mode: channel`: `delivery.SendChannelResponse` (or existing `DeliveryFunc`) posts the message directly to the Discord channel using `s.ChannelMessageSend` (chunking safely across code fences if $>2000$ characters).
-* When `mode: threads`: `delivery.SendThreadResponse` posts into the Discord thread.
+### 4.5 Typing Indicator Lifecycle
+* In `mode: channel` with `typing_indicator: "on_mention"`:
+  - If message contains `@Aerial` or is a reply to an Aerial message $\to$ pulse typing immediately.
+  - For unmentioned ambient messages $\to$ evaluate silently without pulsing typing.
 
 ---
 
@@ -237,6 +276,7 @@ _ = db.UpdateMessageCompleted(p.cfg.DB, msg.ID, stdout)
    - Test parsing `admin_users` and `channels` policy map from `config.yaml`.
    - Test validation error when `channels.default` is missing.
    - Test channel policy fallback hierarchy (channel ID $\to$ channel name $\to$ default).
+   - Test `typing_indicator: "on_mention"` parsing.
 2. **`brain/funnel_test.go`**:
    - Test bot message drop when `ignore_bots: true`.
    - Test `is_admin: true` vs `is_admin: false` resolution against `admin_users`.
@@ -245,8 +285,12 @@ _ = db.UpdateMessageCompleted(p.cfg.DB, msg.ID, stdout)
    - Test prompt construction with `[Channel Interaction Directive]` vs `[Thread Interaction Directive]`.
 3. **`brain/pkg/queue/queue_test.go`**:
    - Test `[NO_REPLY]` output suppression: message marked `COMPLETED` in SQLite, `DeliveryFunc` is called 0 times.
-   - Test visible response delivery: message delivered to channel, marked `COMPLETED` with response text.
-   - Test typing indicator enable/disable per policy.
+   - Test message coalescing: pending messages in queue drained and batched into single turn.
+   - Test 5-minute staleness expiration: old messages dropped as `[EXPIRED_STALE]`.
+   - Test 50-turn session rotation: new session created when turn threshold exceeded.
+   - Test typing indicator on_mention vs always.
+4. **`brain/pkg/runner/runner_test.go`**:
+   - Test `ClassifyError` with exit code 0 and empty stdout returning clean success (`isFailure: false`).
 
 ### Manual Live Stack Verification
 - In `#general` (`mode: channel`): Send ambient chat $\to$ verify Aerial evaluates and remains silent with `[NO_REPLY]` when not addressed, and responds directly in the channel when asked a question.
@@ -257,10 +301,11 @@ _ = db.UpdateMessageCompleted(p.cfg.DB, msg.ID, stdout)
 
 ## 7. Migration & Rollout Plan
 
-1. Update `brain/pkg/config/config.go` with `ChannelPolicy` structures and validation.
-2. Update `brain/funnel.go` with policy resolution, bot filtering, admin checking, and directive prompts.
-3. Update `brain/pkg/queue/queue.go` with sentinel `[NO_REPLY]` detection and delivery suppression.
-4. Update `SYSTEM.md` with the Security & Privilege Boundary.
-5. Update `aerial-config/config.yaml` and `aerial-config-example/config.yaml` to include `admin_users:` and `channels.default:`.
-6. Run full unit tests (`go test -race ./...`).
-7. Commit, push, and let GHCR + Watchtower deploy to the MiniPC.
+1. Update `brain/pkg/config/config.go` with `ChannelPolicy` structures, `admin_users`, and validation.
+2. Update `brain/pkg/runner/runner.go` to support clean empty stdout.
+3. Update `brain/funnel.go` with policy resolution, bot filtering, admin checking, and directive prompts.
+4. Update `brain/pkg/queue/queue.go` with coalescing, 5m TTL, 50-turn rotation, and `[NO_REPLY]` suppression.
+5. Update `SYSTEM.md` with the Security & Privilege Boundary.
+6. Update `aerial-config/config.yaml` and `aerial-config-example/config.yaml` to include `admin_users:` and `channels.default:`.
+7. Run full unit tests (`go test -race ./...`).
+8. Commit, push, and let GHCR + Watchtower deploy to the MiniPC.
