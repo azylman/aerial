@@ -9,6 +9,8 @@ run_lint() {
         (cd $svc && golangci-lint run ./...)
     elif command -v docker >/dev/null 2>&1; then
         docker run --rm -v $(pwd)/$svc:/app -w /app golangci/golangci-lint:v1.59.1 golangci-lint run ./...
+    elif command -v go >/dev/null 2>&1; then
+        (cd $svc && go vet ./...)
     fi
 }
 
