@@ -345,6 +345,19 @@ func LoadConfigFromPaths(paths ...string) (Config, error) {
 	return parsed, nil
 }
 
+// IsAdmin checks if the given userID is in cfg.AdminUsers.
+func (c Config) IsAdmin(userID string) bool {
+	if strings.TrimSpace(userID) == "" {
+		return false
+	}
+	for _, admin := range c.AdminUsers {
+		if strings.TrimSpace(admin) == strings.TrimSpace(userID) {
+			return true
+		}
+	}
+	return false
+}
+
 // ResolveChannelPolicy resolves the effective ChannelPolicy for a given channel ID or name.
 // Lookup hierarchy: Channel Snowflake ID -> Channel Name (case-insensitive, '#' stripped) -> channels["default"].
 // Any unspecified field inherits from channels["default"].

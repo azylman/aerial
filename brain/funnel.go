@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
-	"os"
 	"regexp"
 	"strings"
 	"sync"
@@ -68,15 +67,36 @@ func getOrCreateThreadID(s *discordgo.Session, m *discordgo.Message) (string, bo
 	if guildID == "" {
 		return m.ChannelID, false
 	}
-	if s != nil && s.State != nil {
-		if ch, err := s.State.Channel(m.ChannelID); err == nil && ch != nil && ch.IsThread() {
-			return m.ChannelID, true
+
+	var channelName string
+	var isAlreadyThread bool
+
+	if s != nil {
+		if s.State != nil {
+			if ch, err := s.State.Channel(m.ChannelID); err == nil && ch != nil {
+				channelName = ch.Name
+				if ch.IsThread() {
+					isAlreadyThread = true
+				}
+			}
+		}
+		if !isAlreadyThread && channelName == "" && s.Ratelimiter != nil && s.Token != "" {
+			if ch, err := s.Channel(m.ChannelID); err == nil && ch != nil {
+				channelName = ch.Name
+				if ch.IsThread() {
+					isAlreadyThread = true
+				}
+			}
 		}
 	}
-	if s != nil && s.Ratelimiter != nil && s.Token != "" {
-		if ch, err := s.Channel(m.ChannelID); err == nil && ch != nil && ch.IsThread() {
-			return m.ChannelID, true
-		}
+
+	if isAlreadyThread {
+		return m.ChannelID, true
+	}
+
+	policy := config.GetRuntimeConfig().ResolveChannelPolicy(m.ChannelID, channelName)
+	if policy.Mode == "channel" {
+		return m.ChannelID, false
 	}
 
 	title := deriveThreadTitle(m.Content)
@@ -99,12 +119,25 @@ func buildDiscordPrompt(m *discordgo.Message, targetThreadID string) string {
 	sb.WriteString(fmt.Sprintf("- channel_id: %s\n", m.ChannelID))
 	sb.WriteString(fmt.Sprintf("- thread_id: %s\n", targetThreadID))
 	sb.WriteString(fmt.Sprintf("- guild_id: %s\n", m.GuildID))
+
+	isAdmin := false
 	if m.Author != nil {
+		isAdmin = config.GetRuntimeConfig().IsAdmin(m.Author.ID)
 		sb.WriteString(fmt.Sprintf("- author_id: %s\n", m.Author.ID))
 		sb.WriteString(fmt.Sprintf("- author_username: %s\n", m.Author.Username))
 		sb.WriteString(fmt.Sprintf("- author_global_name: %s\n", m.Author.GlobalName))
 		sb.WriteString(fmt.Sprintf("- author_bot: %t\n", m.Author.Bot))
+		sb.WriteString(fmt.Sprintf("- is_admin: %t\n", isAdmin))
+	} else {
+		sb.WriteString(fmt.Sprintf("- is_admin: %t\n", false))
 	}
+
+	if m.ReferencedMessage != nil && m.ReferencedMessage.Author != nil {
+		sb.WriteString("- replying_to:\n")
+		sb.WriteString(fmt.Sprintf("    author: \"@%s\"\n", m.ReferencedMessage.Author.Username))
+		sb.WriteString(fmt.Sprintf("    content: %q\n", m.ReferencedMessage.Content))
+	}
+
 	sb.WriteString(fmt.Sprintf("- content: %s\n", m.Content))
 	sb.WriteString(fmt.Sprintf("- timestamp: %s\n", m.Timestamp.Format(time.RFC3339)))
 
@@ -123,18 +156,66 @@ func buildDiscordPrompt(m *discordgo.Message, targetThreadID string) string {
 		}
 	}
 	sb.WriteString(fmt.Sprintf("- attachments: %v\n\n", attachments))
-	sb.WriteString("Please formulate your response and output it clearly. It will be delivered directly to the Discord thread.\n</USER_REQUEST>")
+
+	policy := config.GetRuntimeConfig().ResolveChannelPolicy(m.ChannelID, "")
+	if policy.Mode == "channel" {
+		sb.WriteString("Please formulate your response and output it clearly. It will be delivered directly to the Discord channel.\n")
+		sb.WriteString("If this message does not require your response or is general banter not directed at you, output [NO_REPLY] as your entire response.\n")
+	} else {
+		sb.WriteString("Please formulate your response and output it clearly. It will be delivered directly to the Discord thread.\n")
+	}
+	sb.WriteString("</USER_REQUEST>")
 	return sb.String()
 }
 
 func isFunnelBotTargeted(s *discordgo.Session, m *discordgo.MessageCreate) bool {
-	if m == nil || m.Message == nil {
+	if m == nil || m.Message == nil || m.Author == nil {
 		return false
 	}
+
+	var botUserID string
+	if s != nil && s.State != nil && s.State.User != nil {
+		botUserID = s.State.User.ID
+	}
+	if botUserID != "" && m.Author.ID == botUserID {
+		return false
+	}
+
+	var channelName string
+	var isThread bool
+	if s != nil {
+		if s.State != nil {
+			if ch, err := s.State.Channel(m.ChannelID); err == nil && ch != nil {
+				channelName = ch.Name
+				if ch.IsThread() {
+					isThread = true
+				}
+			}
+		}
+		if channelName == "" && s.Ratelimiter != nil && s.Token != "" {
+			if ch, err := s.Channel(m.ChannelID); err == nil && ch != nil {
+				channelName = ch.Name
+				if ch.IsThread() {
+					isThread = true
+				}
+			}
+		}
+	}
+
+	policy := config.GetRuntimeConfig().ResolveChannelPolicy(m.ChannelID, channelName)
+	if policy.IgnoreBots && m.Author.Bot {
+		return false
+	}
+
 	guildID := resolveGuildID(s, m.Message)
 	if guildID == "" {
 		return true
 	}
+
+	if policy.Mode == "channel" {
+		return true
+	}
+
 	if len(m.Mentions) > 0 {
 		return true
 	}
@@ -152,21 +233,8 @@ func isFunnelBotTargeted(s *discordgo.Session, m *discordgo.MessageCreate) bool 
 	if len(m.MentionRoles) > 0 {
 		return true
 	}
-	if s != nil {
-		if s.State != nil {
-			if ch, err := s.State.Channel(m.ChannelID); err == nil && ch != nil {
-				if ch.IsThread() {
-					return true
-				}
-			}
-		}
-		if s.Ratelimiter != nil && s.Token != "" {
-			if ch, err := s.Channel(m.ChannelID); err == nil && ch != nil {
-				if ch.IsThread() {
-					return true
-				}
-			}
-		}
+	if isThread {
+		return true
 	}
 	return false
 }
@@ -177,8 +245,6 @@ func connectDiscordFunnel(database *sql.DB, pool *queue.WorkerPool) *discordgo.S
 		log.Println("Discord funnel disabled: DISCORD_BOT_TOKEN/DISCORD_TOKEN not configured")
 		return nil
 	}
-
-	mentionsOnly := os.Getenv("MENTIONS_ONLY") == "true"
 
 	dg, err := discordgo.New("Bot " + token)
 	if err != nil {
@@ -203,11 +269,11 @@ func connectDiscordFunnel(database *sql.DB, pool *queue.WorkerPool) *discordgo.S
 	})
 
 	dg.AddHandler(func(s *discordgo.Session, m *discordgo.MessageCreate) {
-		if m.Author == nil || (s.State.User != nil && m.Author.ID == s.State.User.ID) {
+		if m.Author == nil || (s.State != nil && s.State.User != nil && m.Author.ID == s.State.User.ID) {
 			return
 		}
 
-		if mentionsOnly && !isFunnelBotTargeted(s, m) {
+		if !isFunnelBotTargeted(s, m) {
 			log.Printf("Discord funnel ignoring message %s from %s: no trigger matched", m.ID, m.Author.Username)
 			return
 		}
