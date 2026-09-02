@@ -809,8 +809,17 @@ func mergeClusterDeployments(
 		if latestRun.Conclusion == "success" && time.Since(latestRun.UpdatedAt) < 30*time.Minute {
 			ciElapsed := time.Since(latestRun.UpdatedAt)
 
-			// Check if any container was created after or around the CI run
+			// Check if any container was created after or around the CI run,
+			// or if local repository / container metadata already matches the CI commit SHA
 			hasRecentContainerSwap := false
+			if currentCommit != "" && (currentCommit == shortSHA || strings.HasPrefix(latestRun.HeadSHA, currentCommit)) {
+				hasRecentContainerSwap = true
+			}
+			containerCommit := getContainerCommit(rawContainers)
+			if containerCommit != "" && (containerCommit == shortSHA || strings.HasPrefix(latestRun.HeadSHA, containerCommit)) {
+				hasRecentContainerSwap = true
+			}
+
 			for _, c := range rawContainers {
 				createdAt := time.Unix(c.Created, 0).UTC()
 				if createdAt.After(latestRun.CreatedAt.Add(-30*time.Second)) || (c.Health != nil && c.Health.Status == "starting") {
