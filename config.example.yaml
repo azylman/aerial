@@ -52,28 +52,17 @@ channels:
     mode: threads
     typing_indicator: always
     ignore_bots: true
-    allow_system_ops: false
-    max_session_turns: 0
 
   # Example channel-specific override by channel name:
   general:
     mode: channel
     typing_indicator: on_mention
     ignore_bots: true
-    allow_system_ops: false
     max_session_turns: 50
 
   # Example channel-specific override to completely ignore a channel:
   memes:
     mode: ignore
-
-  # Example channel-specific override by channel snowflake ID:
-  1543668253363150928:
-    mode: channel
-    typing_indicator: on_mention
-    ignore_bots: false
-    allow_system_ops: true
-    max_session_turns: 50
 
 # ------------------------------------------------------------------------------
 # GitSync Configuration
