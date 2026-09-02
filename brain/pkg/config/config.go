@@ -62,27 +62,35 @@ type ChannelPolicy struct {
 	MaxSessionTurns int    `yaml:"max_session_turns" json:"max_session_turns"`
 }
 
+// IsIgnored reports whether the channel policy specifies an ignored/disabled channel.
+func (p ChannelPolicy) IsIgnored() bool {
+	m := strings.ToLower(strings.TrimSpace(p.Mode))
+	return m == "ignore" || m == "disabled"
+}
+
 type Config struct {
-	Model          string                     `yaml:"model" json:"model"`
-	TimeoutMinutes int                        `yaml:"timeout_minutes" json:"timeout_minutes"`
-	Timezone       string                     `yaml:"timezone" json:"timezone"`
-	SystemChannel  string                     `yaml:"system_channel" json:"system_channel"`
-	AdminUsers     []string                   `yaml:"admin_users" json:"admin_users"`
-	Channels       map[string]ChannelPolicy   `yaml:"channels" json:"channels"`
-	GitSync        GitSyncConfig              `yaml:"git_sync" json:"git_sync"`
-	McpServers     map[string]json.RawMessage `yaml:"mcp_servers,omitempty" json:"mcp_servers,omitempty"`
+	Model           string                     `yaml:"model" json:"model"`
+	TimeoutMinutes  int                        `yaml:"timeout_minutes" json:"timeout_minutes"`
+	Timezone        string                     `yaml:"timezone" json:"timezone"`
+	SystemChannel   string                     `yaml:"system_channel" json:"system_channel"`
+	AdminUsers      []string                   `yaml:"admin_users" json:"admin_users"`
+	IgnoredChannels []string                   `yaml:"ignored_channels" json:"ignored_channels"`
+	Channels        map[string]ChannelPolicy   `yaml:"channels" json:"channels"`
+	GitSync         GitSyncConfig              `yaml:"git_sync" json:"git_sync"`
+	McpServers      map[string]json.RawMessage `yaml:"mcp_servers,omitempty" json:"mcp_servers,omitempty"`
 }
 
 func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	type rawConfigHelper struct {
-		Model          string                   `yaml:"model"`
-		TimeoutMinutes int                      `yaml:"timeout_minutes"`
-		Timezone       string                   `yaml:"timezone"`
-		SystemChannel  string                   `yaml:"system_channel"`
-		AdminUsers     []string                 `yaml:"admin_users"`
-		Channels       map[string]ChannelPolicy `yaml:"channels"`
-		GitSync        GitSyncConfig            `yaml:"git_sync"`
-		McpServers     map[string]interface{}   `yaml:"mcp_servers"`
+		Model           string                   `yaml:"model"`
+		TimeoutMinutes  int                      `yaml:"timeout_minutes"`
+		Timezone        string                   `yaml:"timezone"`
+		SystemChannel   string                   `yaml:"system_channel"`
+		AdminUsers      []string                 `yaml:"admin_users"`
+		IgnoredChannels []string                 `yaml:"ignored_channels"`
+		Channels        map[string]ChannelPolicy `yaml:"channels"`
+		GitSync         GitSyncConfig            `yaml:"git_sync"`
+		McpServers      map[string]interface{}   `yaml:"mcp_servers"`
 	}
 
 	var raw rawConfigHelper
@@ -95,6 +103,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	c.Timezone = raw.Timezone
 	c.SystemChannel = raw.SystemChannel
 	c.AdminUsers = raw.AdminUsers
+	c.IgnoredChannels = raw.IgnoredChannels
 	c.Channels = raw.Channels
 	c.GitSync = raw.GitSync
 
@@ -123,11 +132,12 @@ type Options struct {
 
 func DefaultConfig() Config {
 	return Config{
-		Model:          "Gemini 3.6 Flash (Low)",
-		TimeoutMinutes: 15,
-		Timezone:       "America/Los_Angeles",
-		SystemChannel:  "aerial-dev",
-		AdminUsers:     []string{},
+		Model:           "Gemini 3.6 Flash (Low)",
+		TimeoutMinutes:  15,
+		Timezone:        "America/Los_Angeles",
+		SystemChannel:   "aerial-dev",
+		AdminUsers:      []string{},
+		IgnoredChannels: []string{},
 		Channels: map[string]ChannelPolicy{
 			"default": {
 				Mode:            "threads",
@@ -274,16 +284,17 @@ func LoadConfigFromPaths(paths ...string) (Config, error) {
 		return GetRuntimeConfig(), fmt.Errorf("channels.default is required")
 	}
 
-	if defPolicy.Mode != "threads" && defPolicy.Mode != "channel" {
-		log.Printf("[Config] Validation error: channels.default mode must be 'threads' or 'channel', got %q in %s. Retaining Last Known Good Configuration (LKGC).", defPolicy.Mode, targetPath)
-		return GetRuntimeConfig(), fmt.Errorf("channels.default mode must be 'threads' or 'channel', got %q", defPolicy.Mode)
+	defMode := strings.ToLower(strings.TrimSpace(defPolicy.Mode))
+	if defMode != "threads" && defMode != "channel" && defMode != "ignore" && defMode != "disabled" {
+		log.Printf("[Config] Validation error: channels.default mode must be 'threads', 'channel', 'ignore', or 'disabled', got %q in %s. Retaining Last Known Good Configuration (LKGC).", defPolicy.Mode, targetPath)
+		return GetRuntimeConfig(), fmt.Errorf("channels.default mode must be 'threads', 'channel', 'ignore', or 'disabled', got %q", defPolicy.Mode)
 	}
 
 	// Normalize channels.default
 	if defPolicy.TypingIndicator == "" {
 		if defPolicy.Mode == "channel" {
 			defPolicy.TypingIndicator = "on_mention"
-		} else {
+		} else if defPolicy.Mode == "threads" {
 			defPolicy.TypingIndicator = "always"
 		}
 	}
@@ -291,6 +302,14 @@ func LoadConfigFromPaths(paths ...string) (Config, error) {
 		defPolicy.MaxSessionTurns = 50
 	}
 	parsed.Channels["default"] = defPolicy
+
+	// Map IgnoredChannels to parsed.Channels
+	for _, ign := range parsed.IgnoredChannels {
+		norm := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(ign)), "#")
+		if norm != "" {
+			parsed.Channels[norm] = ChannelPolicy{Mode: "ignore"}
+		}
+	}
 
 	// Normalize other channels
 	for k, policy := range parsed.Channels {
@@ -333,6 +352,9 @@ func LoadConfigFromPaths(paths ...string) (Config, error) {
 	}
 	if parsed.AdminUsers == nil {
 		parsed.AdminUsers = []string{}
+	}
+	if parsed.IgnoredChannels == nil {
+		parsed.IgnoredChannels = []string{}
 	}
 
 	runtimeConfigMu.Lock()
@@ -378,7 +400,7 @@ func (c Config) ResolveChannelPolicy(channelID, channelName string) ChannelPolic
 		if def.TypingIndicator == "" {
 			if def.Mode == "channel" {
 				def.TypingIndicator = "on_mention"
-			} else {
+			} else if def.Mode == "threads" {
 				def.TypingIndicator = "always"
 			}
 		}
@@ -411,6 +433,9 @@ func (c Config) ResolveChannelPolicy(channelID, channelName string) ChannelPolic
 	res := matched
 	if res.Mode == "" {
 		res.Mode = def.Mode
+	}
+	if res.IsIgnored() {
+		return res
 	}
 	if res.TypingIndicator == "" {
 		if res.Mode == "channel" {
