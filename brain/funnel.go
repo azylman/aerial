@@ -122,7 +122,7 @@ func buildDiscordPrompt(m *discordgo.Message, targetThreadID string, policy conf
 
 	isAdmin := false
 	if m.Author != nil {
-		isAdmin = config.GetRuntimeConfig().IsAdmin(m.Author.ID)
+		isAdmin = config.GetRuntimeConfig().IsAdmin(m.Author.ID, m.Author.Username, m.Author.GlobalName)
 		sb.WriteString(fmt.Sprintf("- author_id: %s\n", m.Author.ID))
 		sb.WriteString(fmt.Sprintf("- author_username: %s\n", m.Author.Username))
 		sb.WriteString(fmt.Sprintf("- author_global_name: %s\n", m.Author.GlobalName))
