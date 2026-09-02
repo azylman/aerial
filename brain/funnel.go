@@ -112,7 +112,7 @@ func getOrCreateThreadID(s *discordgo.Session, m *discordgo.Message) (string, bo
 	return m.ChannelID, false
 }
 
-func buildDiscordPrompt(m *discordgo.Message, targetThreadID string) string {
+func buildDiscordPrompt(m *discordgo.Message, targetThreadID string, policy config.ChannelPolicy) string {
 	var sb strings.Builder
 	sb.WriteString("<USER_REQUEST>\nHere's a message someone sent you from Discord:\n\n")
 	sb.WriteString(fmt.Sprintf("- id: %s\n", m.ID))
@@ -159,7 +159,6 @@ func buildDiscordPrompt(m *discordgo.Message, targetThreadID string) string {
 	}
 	sb.WriteString(fmt.Sprintf("- attachments: %v\n\n", attachments))
 
-	policy := config.GetRuntimeConfig().ResolveChannelPolicy(m.ChannelID, "")
 	if policy.Mode == "channel" {
 		sb.WriteString("Please formulate your response and output it clearly. It will be delivered directly to the Discord channel.\n")
 		sb.WriteString("If this message does not require your response or is general banter not directed at you, output [NO_REPLY] as your entire response.\n")
@@ -170,12 +169,53 @@ func buildDiscordPrompt(m *discordgo.Message, targetThreadID string) string {
 	return sb.String()
 }
 
+// resolveEffectiveChannelPolicy resolves the ChannelPolicy for a channel or thread.
+// If channelID is a Discord thread, it resolves the parent channel's policy so threads
+// inherit ignore/whitelisting rules from their parent channel.
+func resolveEffectiveChannelPolicy(s *discordgo.Session, channelID string) (config.ChannelPolicy, bool) {
+	var ch *discordgo.Channel
+	if s != nil {
+		if s.State != nil {
+			ch, _ = s.State.Channel(channelID)
+		}
+		if ch == nil && s.Ratelimiter != nil && s.Token != "" {
+			ch, _ = s.Channel(channelID)
+		}
+	}
+
+	isThread := false
+	if ch != nil && ch.IsThread() {
+		isThread = true
+		if ch.ParentID != "" {
+			var parentCh *discordgo.Channel
+			if s.State != nil {
+				parentCh, _ = s.State.Channel(ch.ParentID)
+			}
+			if parentCh == nil && s.Ratelimiter != nil && s.Token != "" {
+				parentCh, _ = s.Channel(ch.ParentID)
+			}
+			parentName := ""
+			if parentCh != nil {
+				parentName = parentCh.Name
+			}
+			return config.GetRuntimeConfig().ResolveChannelPolicy(ch.ParentID, parentName), isThread
+		}
+	}
+
+	name := ""
+	if ch != nil {
+		name = ch.Name
+	}
+	return config.GetRuntimeConfig().ResolveChannelPolicy(channelID, name), isThread
+}
+
+// isFunnelBotTargeted returns true if the message should trigger the funnel worker pool.
 func isFunnelBotTargeted(s *discordgo.Session, m *discordgo.MessageCreate) bool {
 	if m == nil || m.Message == nil || m.Author == nil {
 		return false
 	}
 
-	var botUserID string
+	botUserID := ""
 	if s != nil && s.State != nil && s.State.User != nil {
 		botUserID = s.State.User.ID
 	}
@@ -183,28 +223,7 @@ func isFunnelBotTargeted(s *discordgo.Session, m *discordgo.MessageCreate) bool 
 		return false
 	}
 
-	var channelName string
-	var isThread bool
-	if s != nil {
-		if s.State != nil {
-			if ch, err := s.State.Channel(m.ChannelID); err == nil && ch != nil {
-				channelName = ch.Name
-				if ch.IsThread() {
-					isThread = true
-				}
-			}
-		}
-		if channelName == "" && s.Ratelimiter != nil && s.Token != "" {
-			if ch, err := s.Channel(m.ChannelID); err == nil && ch != nil {
-				channelName = ch.Name
-				if ch.IsThread() {
-					isThread = true
-				}
-			}
-		}
-	}
-
-	policy := config.GetRuntimeConfig().ResolveChannelPolicy(m.ChannelID, channelName)
+	policy, isThread := resolveEffectiveChannelPolicy(s, m.ChannelID)
 	if policy.IsIgnored() {
 		return false
 	}
@@ -285,7 +304,8 @@ func connectDiscordFunnel(database *sql.DB, pool *queue.WorkerPool) *discordgo.S
 			}
 
 			targetThreadID, isThread := getOrCreateThreadID(s, m.Message)
-			prompt := buildDiscordPrompt(m.Message, targetThreadID)
+			policy, _ := resolveEffectiveChannelPolicy(s, m.ChannelID)
+			prompt := buildDiscordPrompt(m.Message, targetThreadID, policy)
 
 			// Pre-allocate and persist session ID for the thread upfront so active tasks immediately have session links
 			if sessID, _ := db.GetSessionID(database, targetThreadID); sessID == "" {
@@ -556,7 +576,8 @@ func RunStartupCatchUpSweep(ctx context.Context, database *sql.DB, pool *queue.W
 			}
 
 			targetThreadID, isThread := getOrCreateThreadID(s, m)
-			prompt := buildDiscordPrompt(m, targetThreadID)
+			sweepPolicy, _ := resolveEffectiveChannelPolicy(s, m.ChannelID)
+			prompt := buildDiscordPrompt(m, targetThreadID, sweepPolicy)
 
 			authorID := m.Author.ID
 			authorName := m.Author.Username

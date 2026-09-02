@@ -387,26 +387,49 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		}
 	}
 
-	// Resolve Channel Policy
-	var channelName string
-	if sess := p.getDiscordSession(); sess != nil {
-		if sess.State != nil {
-			if ch, err := sess.State.Channel(threadID); err == nil && ch != nil {
-				channelName = ch.Name
+	// Resolve Channel Policy (inheriting parent channel policy if in a thread)
+	var policy config.ChannelPolicy
+	if p.cfg.ResolveChannelPolicy != nil {
+		var ch *discordgo.Channel
+		if sess := p.getDiscordSession(); sess != nil {
+			if sess.State != nil {
+				ch, _ = sess.State.Channel(threadID)
+			}
+			if ch == nil && sess.Ratelimiter != nil && sess.Token != "" {
+				ch, _ = sess.Channel(threadID)
 			}
 		}
-		if channelName == "" && sess.Ratelimiter != nil && sess.Token != "" {
-			if ch, err := sess.Channel(threadID); err == nil && ch != nil {
-				channelName = ch.Name
+
+		if ch != nil && ch.IsThread() && ch.ParentID != "" {
+			var parentCh *discordgo.Channel
+			if sess := p.getDiscordSession(); sess != nil {
+				if sess.State != nil {
+					parentCh, _ = sess.State.Channel(ch.ParentID)
+				}
+				if parentCh == nil && sess.Ratelimiter != nil && sess.Token != "" {
+					parentCh, _ = sess.Channel(ch.ParentID)
+				}
 			}
+			parentName := ""
+			if parentCh != nil {
+				parentName = parentCh.Name
+			}
+			policy = p.cfg.ResolveChannelPolicy(ch.ParentID, parentName)
+		} else {
+			name := ""
+			if ch != nil {
+				name = ch.Name
+			}
+			policy = p.cfg.ResolveChannelPolicy(threadID, name)
 		}
+	} else {
+		policy = config.GetRuntimeConfig().ResolveChannelPolicy(threadID, "")
 	}
-	policy := p.cfg.ResolveChannelPolicy(threadID, channelName)
 
 	if policy.IsIgnored() {
 		log.Printf("[WorkerPool] Channel %s policy is ignored (mode=%s). Marking %d message(s) completed without execution.", threadID, policy.Mode, len(burst))
 		for _, m := range burst {
-			_ = db.UpdateMessageStatus(p.cfg.DB, m.ID, db.StatusCompleted, fmt.Sprintf("[%s]", strings.ToUpper(policy.Mode)))
+			_ = db.UpdateMessageStatus(p.cfg.DB, m.ID, db.StatusCompleted, fmt.Sprintf("[%s]", strings.ToUpper(strings.TrimSpace(policy.Mode))))
 			if m.ScheduleRunID != "" {
 				_ = db.UpdateScheduleRunStatus(p.cfg.DB, db.UpdateRunParams{
 					RunID:       m.ScheduleRunID,
@@ -415,7 +438,9 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 					CompletedAt: time.Now().UTC(),
 				})
 			}
-			p.cfg.OnMessageCompleted(m, db.StatusCompleted)
+			if p.cfg.OnMessageCompleted != nil {
+				p.cfg.OnMessageCompleted(m, db.StatusCompleted)
+			}
 		}
 		return
 	}
