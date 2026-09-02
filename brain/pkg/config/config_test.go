@@ -693,19 +693,18 @@ func TestChannelPolicy_IsIgnored(t *testing.T) {
 	}
 }
 
-func TestChannelPolicy_IgnoredChannels_YAML(t *testing.T) {
+func TestChannelPolicy_IgnoredMode_YAML(t *testing.T) {
 	tmpDir := t.TempDir()
-	yamlPath := filepath.Join(tmpDir, "config_ignored.yaml")
+	yamlPath := filepath.Join(tmpDir, "config_ignored_channels.yaml")
 
 	yamlContent := `
 model: "gemini-2.5-flash"
-ignored_channels:
-  - "#random"
-  - "123456789"
 channels:
   default:
     mode: "threads"
-  muted-channel:
+  random:
+    mode: "ignore"
+  "123456789":
     mode: "ignore"
   disabled-channel:
     mode: "disabled"
@@ -719,19 +718,10 @@ channels:
 		t.Fatalf("LoadConfigFromPaths failed: %v", err)
 	}
 
-	if len(cfg.IgnoredChannels) != 2 || cfg.IgnoredChannels[0] != "#random" || cfg.IgnoredChannels[1] != "123456789" {
-		t.Errorf("Unexpected IgnoredChannels: %v", cfg.IgnoredChannels)
-	}
-
-	// Verify ignored channels from list are mapped to Channels map with mode "ignore"
+	// Verify ignored channels with mode "ignore"
 	pRandom := cfg.ResolveChannelPolicy("99999", "random")
 	if !pRandom.IsIgnored() || pRandom.Mode != "ignore" {
 		t.Errorf("Expected 'random' channel to be ignored, got %+v", pRandom)
-	}
-
-	pRandomHash := cfg.ResolveChannelPolicy("99999", "#random")
-	if !pRandomHash.IsIgnored() || pRandomHash.Mode != "ignore" {
-		t.Errorf("Expected '#random' channel to be ignored, got %+v", pRandomHash)
 	}
 
 	pSnowflake := cfg.ResolveChannelPolicy("123456789", "some-name")
@@ -739,18 +729,10 @@ channels:
 		t.Errorf("Expected snowflake '123456789' to be ignored, got %+v", pSnowflake)
 	}
 
-	// Verify explicit channel overrides with mode "ignore" and "disabled"
-	pMuted := cfg.ResolveChannelPolicy("88888", "muted-channel")
-	if !pMuted.IsIgnored() || pMuted.Mode != "ignore" {
-		t.Errorf("Expected 'muted-channel' to be ignored, got %+v", pMuted)
-	}
-
 	pDisabled := cfg.ResolveChannelPolicy("77777", "disabled-channel")
 	if !pDisabled.IsIgnored() || pDisabled.Mode != "disabled" {
 		t.Errorf("Expected 'disabled-channel' to be ignored, got %+v", pDisabled)
 	}
-
-	// Verify un-ignored channel falls back to default threads mode
 	pOther := cfg.ResolveChannelPolicy("66666", "general")
 	if pOther.IsIgnored() || pOther.Mode != "threads" {
 		t.Errorf("Expected 'general' channel to not be ignored, got %+v", pOther)

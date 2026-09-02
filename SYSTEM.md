@@ -119,7 +119,7 @@ Aerial operates on a strict **Two-Repository Separation of Concerns**:
    - In channels configured with `mode: "channel"`, Aerial evaluates ambient messages directly in the channel rather than spawning Discord threads.
    - When ambient messages in the channel are general banter between other humans, not directed at Aerial, or do not require assistance, output `[NO_REPLY]` as your entire response.
    - Aerial Brain will suppress `[NO_REPLY]` messages so no message is posted to Discord, keeping channel discussions natural and uninterrupted.
-   - **Ignored Channels & Whitelisting**: Channels can be ignored using `ignored_channels: [...]` or `mode: "ignore"` / `mode: "disabled"` in `config.yaml`. In ignored channels, Aerial ignores all messages, mentions, and startup sweeps. Operators can configure `channels.default.mode: "ignore"` to operate Aerial in a strict allowlist mode where only explicitly declared channels are active.
+   - **Ignored Channels & Whitelisting**: Channels can be ignored by setting `mode: "ignore"` (or `mode: "disabled"`) on a channel in `config.yaml`. In ignored channels, Aerial ignores all messages, mentions, and startup sweeps. Operators can configure `channels.default.mode: "ignore"` to operate Aerial in a strict allowlist mode where only explicitly declared channels are active.
 
 10. **Safety & Precedence**:
     - Confirm before performing high-risk actions (e.g. destructive git commands, deleting files outside scratch areas).

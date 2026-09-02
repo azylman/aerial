@@ -345,12 +345,13 @@ channels:
 func TestIsFunnelBotTargeted_IgnoredChannels(t *testing.T) {
 	yamlContent := `
 model: "gemini-2.5-flash"
-ignored_channels:
-  - "spam"
-  - "111999"
 channels:
   default:
     mode: "threads"
+  spam:
+    mode: "ignore"
+  "111999":
+    mode: "ignore"
   muted-room:
     mode: "ignore"
   disabled-room:

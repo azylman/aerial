@@ -69,28 +69,26 @@ func (p ChannelPolicy) IsIgnored() bool {
 }
 
 type Config struct {
-	Model           string                     `yaml:"model" json:"model"`
-	TimeoutMinutes  int                        `yaml:"timeout_minutes" json:"timeout_minutes"`
-	Timezone        string                     `yaml:"timezone" json:"timezone"`
-	SystemChannel   string                     `yaml:"system_channel" json:"system_channel"`
-	AdminUsers      []string                   `yaml:"admin_users" json:"admin_users"`
-	IgnoredChannels []string                   `yaml:"ignored_channels" json:"ignored_channels"`
-	Channels        map[string]ChannelPolicy   `yaml:"channels" json:"channels"`
-	GitSync         GitSyncConfig              `yaml:"git_sync" json:"git_sync"`
-	McpServers      map[string]json.RawMessage `yaml:"mcp_servers,omitempty" json:"mcp_servers,omitempty"`
+	Model          string                     `yaml:"model" json:"model"`
+	TimeoutMinutes int                        `yaml:"timeout_minutes" json:"timeout_minutes"`
+	Timezone       string                     `yaml:"timezone" json:"timezone"`
+	SystemChannel  string                     `yaml:"system_channel" json:"system_channel"`
+	AdminUsers     []string                   `yaml:"admin_users" json:"admin_users"`
+	Channels       map[string]ChannelPolicy   `yaml:"channels" json:"channels"`
+	GitSync        GitSyncConfig              `yaml:"git_sync" json:"git_sync"`
+	McpServers     map[string]json.RawMessage `yaml:"mcp_servers,omitempty" json:"mcp_servers,omitempty"`
 }
 
 func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	type rawConfigHelper struct {
-		Model           string                   `yaml:"model"`
-		TimeoutMinutes  int                      `yaml:"timeout_minutes"`
-		Timezone        string                   `yaml:"timezone"`
-		SystemChannel   string                   `yaml:"system_channel"`
-		AdminUsers      []string                 `yaml:"admin_users"`
-		IgnoredChannels []string                 `yaml:"ignored_channels"`
-		Channels        map[string]ChannelPolicy `yaml:"channels"`
-		GitSync         GitSyncConfig            `yaml:"git_sync"`
-		McpServers      map[string]interface{}   `yaml:"mcp_servers"`
+		Model          string                   `yaml:"model"`
+		TimeoutMinutes int                      `yaml:"timeout_minutes"`
+		Timezone       string                   `yaml:"timezone"`
+		SystemChannel  string                   `yaml:"system_channel"`
+		AdminUsers     []string                 `yaml:"admin_users"`
+		Channels       map[string]ChannelPolicy `yaml:"channels"`
+		GitSync        GitSyncConfig            `yaml:"git_sync"`
+		McpServers     map[string]interface{}   `yaml:"mcp_servers"`
 	}
 
 	var raw rawConfigHelper
@@ -103,7 +101,6 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	c.Timezone = raw.Timezone
 	c.SystemChannel = raw.SystemChannel
 	c.AdminUsers = raw.AdminUsers
-	c.IgnoredChannels = raw.IgnoredChannels
 	c.Channels = raw.Channels
 	c.GitSync = raw.GitSync
 
@@ -132,12 +129,11 @@ type Options struct {
 
 func DefaultConfig() Config {
 	return Config{
-		Model:           "Gemini 3.6 Flash (Low)",
-		TimeoutMinutes:  15,
-		Timezone:        "America/Los_Angeles",
-		SystemChannel:   "aerial-dev",
-		AdminUsers:      []string{},
-		IgnoredChannels: []string{},
+		Model:          "Gemini 3.6 Flash (Low)",
+		TimeoutMinutes: 15,
+		Timezone:       "America/Los_Angeles",
+		SystemChannel:  "aerial-dev",
+		AdminUsers:     []string{},
 		Channels: map[string]ChannelPolicy{
 			"default": {
 				Mode:            "threads",
@@ -303,13 +299,6 @@ func LoadConfigFromPaths(paths ...string) (Config, error) {
 	}
 	parsed.Channels["default"] = defPolicy
 
-	// Map IgnoredChannels to parsed.Channels
-	for _, ign := range parsed.IgnoredChannels {
-		norm := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(ign)), "#")
-		if norm != "" {
-			parsed.Channels[norm] = ChannelPolicy{Mode: "ignore"}
-		}
-	}
 
 	// Normalize other channels
 	for k, policy := range parsed.Channels {
@@ -352,9 +341,6 @@ func LoadConfigFromPaths(paths ...string) (Config, error) {
 	}
 	if parsed.AdminUsers == nil {
 		parsed.AdminUsers = []string{}
-	}
-	if parsed.IgnoredChannels == nil {
-		parsed.IgnoredChannels = []string{}
 	}
 
 	runtimeConfigMu.Lock()
