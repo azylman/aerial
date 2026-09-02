@@ -7,6 +7,40 @@ import (
 	"time"
 )
 
+func TestIsSilentSentinel(t *testing.T) {
+	tests := []struct {
+		name     string
+		stdout   string
+		expected bool
+	}{
+		{name: "Empty string", stdout: "", expected: true},
+		{name: "Whitespace only", stdout: "   \n\t\r  ", expected: true},
+		{name: "Exact [NO_REPLY]", stdout: "[NO_REPLY]", expected: true},
+		{name: "Lowercase [no_reply]", stdout: "[no_reply]", expected: true},
+		{name: "Mixed case [No_Reply]", stdout: "[No_Reply]", expected: true},
+		{name: "Trailing period [NO_REPLY].", stdout: "[NO_REPLY].", expected: true},
+		{name: "Markdown bold **[NO_REPLY]**", stdout: "**[NO_REPLY]**", expected: true},
+		{name: "Inline code `[NO_REPLY]`", stdout: "`[NO_REPLY]`", expected: true},
+		{name: "Fenced code block ```[NO_REPLY]```", stdout: "```[NO_REPLY]```", expected: true},
+		{name: "Whitespace padded", stdout: "  [NO_REPLY]  ", expected: true},
+		{name: "Quoted \"[NO_REPLY]\"", stdout: "\"[NO_REPLY]\"", expected: true},
+		{name: "Single quoted '[NO_REPLY]'", stdout: "'[NO_REPLY]'", expected: true},
+		{name: "Punctuation wrapped !?[NO_REPLY]!?", stdout: "!?[NO_REPLY]!?", expected: true},
+		{name: "Visible text", stdout: "Hello world!", expected: false},
+		{name: "Visible conversational text", stdout: "Here is your requested answer.", expected: false},
+		{name: "Conversational text ending with sentinel", stdout: "I am replying and here is [NO_REPLY]", expected: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := IsSilentSentinel(tt.stdout)
+			if got != tt.expected {
+				t.Errorf("IsSilentSentinel(%q) = %v, want %v", tt.stdout, got, tt.expected)
+			}
+		})
+	}
+}
+
 func TestClassifyError(t *testing.T) {
 	tests := []struct {
 		name                 string
@@ -22,6 +56,51 @@ func TestClassifyError(t *testing.T) {
 			name:          "Clean Success",
 			exitCode:      0,
 			stdout:        "Hello there!",
+			stderr:        "",
+			wantFailure:   false,
+			wantTransient: false,
+			wantCorrupt:   false,
+		},
+		{
+			name:          "Clean Success With Empty Stdout",
+			exitCode:      0,
+			stdout:        "",
+			stderr:        "",
+			wantFailure:   false,
+			wantTransient: false,
+			wantCorrupt:   false,
+		},
+		{
+			name:          "Clean Success With Whitespace Stdout",
+			exitCode:      0,
+			stdout:        "   \n  ",
+			stderr:        "",
+			wantFailure:   false,
+			wantTransient: false,
+			wantCorrupt:   false,
+		},
+		{
+			name:          "Clean Success With [NO_REPLY]",
+			exitCode:      0,
+			stdout:        "[NO_REPLY]",
+			stderr:        "",
+			wantFailure:   false,
+			wantTransient: false,
+			wantCorrupt:   false,
+		},
+		{
+			name:          "Clean Success With Lowercase [no_reply]",
+			exitCode:      0,
+			stdout:        "[no_reply]",
+			stderr:        "",
+			wantFailure:   false,
+			wantTransient: false,
+			wantCorrupt:   false,
+		},
+		{
+			name:          "Clean Success With Markdown Formatted [NO_REPLY]",
+			exitCode:      0,
+			stdout:        "**[NO_REPLY]**",
 			stderr:        "",
 			wantFailure:   false,
 			wantTransient: false,
@@ -77,6 +156,26 @@ func TestClassifyError(t *testing.T) {
 			errDetailMustContain: "failed to load",
 		},
 		{
+			name:                 "Exit Code 0 With [NO_REPLY] And Session Corruption In Stderr",
+			exitCode:             0,
+			stdout:               "[NO_REPLY]",
+			stderr:               "Error: failed to load conversation: session corrupted",
+			wantFailure:          true,
+			wantTransient:        false,
+			wantCorrupt:          true,
+			errDetailMustContain: "failed to load",
+		},
+		{
+			name:                 "Exit Code 0 With Empty Stdout And Session Corruption In Stderr",
+			exitCode:             0,
+			stdout:               "",
+			stderr:               "Error: failed to load conversation: session corrupted",
+			wantFailure:          true,
+			wantTransient:        false,
+			wantCorrupt:          true,
+			errDetailMustContain: "failed to load",
+		},
+		{
 			name:                 "Database Locked - Not Session Corruption",
 			exitCode:             1,
 			stdout:               "",
@@ -117,7 +216,7 @@ func TestClassifyError(t *testing.T) {
 			errDetailMustContain: "terminated",
 		},
 		{
-			name:                 "Empty Stdout with Exit Code 0",
+			name:                 "Empty Stdout with Panic in Stderr and Exit Code 0",
 			exitCode:             0,
 			stdout:               "",
 			stderr:               "panic: internal null pointer",

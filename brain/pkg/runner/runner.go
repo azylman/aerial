@@ -9,9 +9,28 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/azylman/aerial/brain/pkg/session"
 )
+
+// IsSilentSentinel checks whether stdout is empty or represents a silent sentinel like [NO_REPLY].
+// It strips leading/trailing whitespace, backticks, quotes, asterisks, and punctuation.
+// Returns true if empty string or if the normalized string starts with [NO_REPLY] (case-insensitive).
+// Returns false for visible conversational responses.
+func IsSilentSentinel(stdout string) bool {
+	trimmed := strings.TrimFunc(stdout, func(r rune) bool {
+		if r == '[' || r == ']' {
+			return false
+		}
+		return unicode.IsSpace(r) || unicode.IsPunct(r) || unicode.IsSymbol(r)
+	})
+	if trimmed == "" {
+		return true
+	}
+	lower := strings.ToLower(trimmed)
+	return strings.HasPrefix(lower, "[no_reply]")
+}
 
 // RunAgy executes the agy binary with the given parameters, capturing stdout and stderr.
 func RunAgy(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
@@ -101,14 +120,6 @@ func ClassifyError(exitCode int, stdout, stderr string) (isFailure bool, isTrans
 	trimmedStdout := strings.TrimSpace(stdout)
 	trimmedStderr := strings.TrimSpace(stderr)
 
-	// Clean success condition: exit code 0, non-empty stdout, and empty stderr.
-	if exitCode == 0 && trimmedStderr == "" && trimmedStdout != "" {
-		return false, false, false, ""
-	}
-
-	isFailure = true
-	combined := strings.ToLower(stdout + "\n" + stderr)
-
 	transientKeywords := []string{
 		"error 503",
 		"503 service unavailable",
@@ -137,25 +148,47 @@ func ClassifyError(exitCode int, stdout, stderr string) (isFailure bool, isTrans
 		"failed to parse session",
 	}
 
+	combined := strings.ToLower(stdout + "\n" + stderr)
+	searchTarget := combined
+	if exitCode == 0 {
+		searchTarget = strings.ToLower(stderr)
+	}
+
 	for _, kw := range transientKeywords {
-		if strings.Contains(combined, kw) {
+		if strings.Contains(searchTarget, kw) {
 			isTransient = true
 			break
 		}
 	}
 
 	for _, kw := range corruptionKeywords {
-		if strings.Contains(combined, kw) {
+		if strings.Contains(searchTarget, kw) {
 			isSessionCorruption = true
 			break
 		}
+	}
+
+	if exitCode == 0 {
+		if isSessionCorruption {
+			isFailure = true
+		} else if isTransient {
+			isFailure = true
+		} else if trimmedStderr != "" && containsFatalStderrError(trimmedStderr) {
+			isFailure = true
+		} else if IsSilentSentinel(stdout) || trimmedStderr == "" {
+			return false, false, false, ""
+		} else {
+			return false, false, false, ""
+		}
+	} else {
+		isFailure = true
 	}
 
 	// Extract meaningful detail line from stderr or stdout
 	lines := strings.Split(stderr, "\n")
 	for _, l := range lines {
 		lTrim := strings.TrimSpace(l)
-		if lTrim != "" && (strings.Contains(strings.ToLower(lTrim), "error") || strings.Contains(strings.ToLower(lTrim), "fail") || strings.Contains(strings.ToLower(lTrim), "503")) {
+		if lTrim != "" && (strings.Contains(strings.ToLower(lTrim), "error") || strings.Contains(strings.ToLower(lTrim), "fail") || strings.Contains(strings.ToLower(lTrim), "503") || strings.Contains(strings.ToLower(lTrim), "panic") || strings.Contains(strings.ToLower(lTrim), "terminated")) {
 			errDetail = lTrim
 			break
 		}
@@ -173,5 +206,22 @@ func ClassifyError(exitCode int, stdout, stderr string) (isFailure bool, isTrans
 	}
 
 	return isFailure, isTransient, isSessionCorruption, errDetail
+}
+
+func containsFatalStderrError(stderr string) bool {
+	lower := strings.ToLower(stderr)
+	fatalIndicators := []string{
+		"panic:",
+		"runtime error",
+		"fatal error",
+		"agent execution terminated",
+		"fatal:",
+	}
+	for _, ind := range fatalIndicators {
+		if strings.Contains(lower, ind) {
+			return true
+		}
+	}
+	return false
 }
 
