@@ -779,6 +779,32 @@ channels:
 	}
 }
 
+func TestChannelPolicy_Validation_InvalidNonDefaultMode(t *testing.T) {
+	tmpDir := t.TempDir()
+	yamlPath := filepath.Join(tmpDir, "config_invalid_nondefault_mode.yaml")
+
+	yamlContent := `
+model: "gemini-2.5-flash"
+channels:
+  default:
+    mode: "threads"
+  some-channel:
+    mode: "invalid_mode_name"
+`
+	if err := os.WriteFile(yamlPath, []byte(yamlContent), 0644); err != nil {
+		t.Fatalf("Failed to write yaml: %v", err)
+	}
+
+	_, err := LoadConfigFromPaths(yamlPath)
+	if err == nil {
+		t.Fatalf("Expected error for invalid channel mode, got nil")
+	}
+	if !strings.Contains(err.Error(), "mode must be 'threads', 'channel', 'ignore', or 'disabled'") {
+		t.Errorf("Expected descriptive mode validation error, got: %v", err)
+	}
+}
+
+
 
 
 

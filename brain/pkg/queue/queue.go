@@ -426,7 +426,15 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		policy = config.GetRuntimeConfig().ResolveChannelPolicy(threadID, "")
 	}
 
-	if policy.IsIgnored() {
+	skipDiscord := true
+	for _, m := range burst {
+		if m.AuthorID != "http-client" {
+			skipDiscord = false
+			break
+		}
+	}
+
+	if !skipDiscord && policy.IsIgnored() {
 		log.Printf("[WorkerPool] Channel %s policy is ignored (mode=%s). Marking %d message(s) completed without execution.", threadID, policy.Mode, len(burst))
 		for _, m := range burst {
 			_ = db.UpdateMessageStatus(p.cfg.DB, m.ID, db.StatusCompleted, fmt.Sprintf("[%s]", strings.ToUpper(strings.TrimSpace(policy.Mode))))
@@ -443,14 +451,6 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 			}
 		}
 		return
-	}
-
-	skipDiscord := true
-	for _, m := range burst {
-		if m.AuthorID != "http-client" {
-			skipDiscord = false
-			break
-		}
 	}
 
 	stopTyping := resolveTypingStarter(policy, burst, skipDiscord, p.cfg.TypingFunc, p.getDiscordSession, threadID)

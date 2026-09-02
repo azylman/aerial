@@ -1945,6 +1945,78 @@ func TestQueueThreadInheritsParentChannelPolicy(t *testing.T) {
 	}
 }
 
+func TestQueueHTTPClient_NotDroppedByDefaultDenyIgnore(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	var mu sync.Mutex
+	runnerCalls := 0
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    1,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			mu.Lock()
+			runnerCalls++
+			mu.Unlock()
+			return "HTTP prompt execution response", "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		ResolveChannelPolicy: func(threadID, channelName string) config.ChannelPolicy {
+			// In default-deny mode, all unrecognized Discord channels resolve to ignore
+			return config.ChannelPolicy{Mode: "ignore"}
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	doneCh := make(chan struct{})
+	pool.cfg.OnMessageCompleted = func(msg db.Message, finalStatus string) {
+		close(doneCh)
+	}
+
+	msg := db.Message{
+		ID:        "msg-http-prompt-1",
+		ThreadID:  "synthetic-http-thread-uuid",
+		AuthorID:  "http-client",
+		Content:   "Explain Kubernetes architecture",
+		CreatedAt: time.Now().UTC(),
+	}
+	_ = db.InsertMessage(database, msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("Timed out waiting for HTTP prompt message completion")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if runnerCalls != 1 {
+		t.Errorf("Expected 1 runner call for HTTP prompt client despite default-deny ignore mode, got %d", runnerCalls)
+	}
+
+	savedMsg, err := db.GetMessage(database, "msg-http-prompt-1")
+	if err != nil || savedMsg == nil {
+		t.Fatalf("Failed to retrieve message: %v", err)
+	}
+	if savedMsg.Status != db.StatusCompleted {
+		t.Errorf("Expected message status COMPLETED, got %s", savedMsg.Status)
+	}
+	if savedMsg.ResponseText != "HTTP prompt execution response" {
+		t.Errorf("Expected response text 'HTTP prompt execution response', got %q", savedMsg.ResponseText)
+	}
+}
+
+
 
 
 
