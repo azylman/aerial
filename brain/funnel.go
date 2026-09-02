@@ -37,21 +37,46 @@ func deriveThreadTitle(content string) string {
 	return string(runes)
 }
 
+var (
+	channelCacheMu sync.RWMutex
+	channelCache   = make(map[string]*discordgo.Channel)
+)
+
+func cacheDiscordChannel(ch *discordgo.Channel) {
+	if ch == nil || ch.ID == "" {
+		return
+	}
+	channelCacheMu.Lock()
+	channelCache[ch.ID] = ch
+	channelCacheMu.Unlock()
+}
+
 func getDiscordChannel(s *discordgo.Session, channelID string) *discordgo.Channel {
-	if s == nil || channelID == "" {
+	if channelID == "" {
 		return nil
 	}
-	if s.State != nil {
-		if ch, err := s.State.Channel(channelID); err == nil && ch != nil {
-			return ch
-		}
+	channelCacheMu.RLock()
+	if ch, ok := channelCache[channelID]; ok && ch != nil {
+		channelCacheMu.RUnlock()
+		return ch
 	}
-	if s.Token != "" {
-		if ch, err := s.Channel(channelID); err == nil && ch != nil {
-			if s.State != nil {
-				_ = s.State.ChannelAdd(ch)
+	channelCacheMu.RUnlock()
+
+	if s != nil {
+		if s.State != nil {
+			if ch, err := s.State.Channel(channelID); err == nil && ch != nil {
+				cacheDiscordChannel(ch)
+				return ch
 			}
-			return ch
+		}
+		if s.Token != "" {
+			if ch, err := s.Channel(channelID); err == nil && ch != nil {
+				cacheDiscordChannel(ch)
+				if s.State != nil {
+					_ = s.State.ChannelAdd(ch)
+				}
+				return ch
+			}
 		}
 	}
 	return nil
@@ -266,7 +291,54 @@ func connectDiscordFunnel(database *sql.DB, pool *queue.WorkerPool) *discordgo.S
 
 	dg.AddHandler(func(s *discordgo.Session, r *discordgo.Ready) {
 		log.Printf("Discord funnel gateway session ready as %s#%s (user ID %s)", r.User.Username, r.User.Discriminator, r.User.ID)
+		if s.State != nil {
+			for _, g := range s.State.Guilds {
+				if g != nil {
+					for _, ch := range g.Channels {
+						cacheDiscordChannel(ch)
+					}
+					for _, th := range g.Threads {
+						cacheDiscordChannel(th)
+					}
+				}
+			}
+		}
 		go RunStartupCatchUpSweep(context.Background(), database, pool, s)
+	})
+
+	dg.AddHandler(func(s *discordgo.Session, g *discordgo.GuildCreate) {
+		if g != nil && g.Guild != nil {
+			for _, ch := range g.Channels {
+				cacheDiscordChannel(ch)
+			}
+			for _, th := range g.Threads {
+				cacheDiscordChannel(th)
+			}
+		}
+	})
+
+	dg.AddHandler(func(s *discordgo.Session, c *discordgo.ChannelCreate) {
+		if c != nil && c.Channel != nil {
+			cacheDiscordChannel(c.Channel)
+		}
+	})
+
+	dg.AddHandler(func(s *discordgo.Session, c *discordgo.ChannelUpdate) {
+		if c != nil && c.Channel != nil {
+			cacheDiscordChannel(c.Channel)
+		}
+	})
+
+	dg.AddHandler(func(s *discordgo.Session, t *discordgo.ThreadCreate) {
+		if t != nil && t.Channel != nil {
+			cacheDiscordChannel(t.Channel)
+		}
+	})
+
+	dg.AddHandler(func(s *discordgo.Session, t *discordgo.ThreadUpdate) {
+		if t != nil && t.Channel != nil {
+			cacheDiscordChannel(t.Channel)
+		}
 	})
 
 	dg.AddHandler(func(s *discordgo.Session, d *discordgo.Disconnect) {

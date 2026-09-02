@@ -391,8 +391,13 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 			if sess.State != nil {
 				ch, _ = sess.State.Channel(threadID)
 			}
-			if ch == nil && sess.Ratelimiter != nil && sess.Token != "" {
-				ch, _ = sess.Channel(threadID)
+			if ch == nil && sess.Token != "" {
+				if fetched, err := sess.Channel(threadID); err == nil && fetched != nil {
+					ch = fetched
+					if sess.State != nil {
+						_ = sess.State.ChannelAdd(ch)
+					}
+				}
 			}
 		}
 
@@ -402,8 +407,13 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 				if sess.State != nil {
 					parentCh, _ = sess.State.Channel(ch.ParentID)
 				}
-				if parentCh == nil && sess.Ratelimiter != nil && sess.Token != "" {
-					parentCh, _ = sess.Channel(ch.ParentID)
+				if parentCh == nil && sess.Token != "" {
+					if fetched, err := sess.Channel(ch.ParentID); err == nil && fetched != nil {
+						parentCh = fetched
+						if sess.State != nil {
+							_ = sess.State.ChannelAdd(parentCh)
+						}
+					}
 				}
 			}
 			parentName := ""
