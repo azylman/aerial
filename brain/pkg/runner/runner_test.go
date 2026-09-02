@@ -26,9 +26,11 @@ func TestIsSilentSentinel(t *testing.T) {
 		{name: "Quoted \"[NO_REPLY]\"", stdout: "\"[NO_REPLY]\"", expected: true},
 		{name: "Single quoted '[NO_REPLY]'", stdout: "'[NO_REPLY]'", expected: true},
 		{name: "Punctuation wrapped !?[NO_REPLY]!?", stdout: "!?[NO_REPLY]!?", expected: true},
-		{name: "Visible text", stdout: "Hello world!", expected: false},
+		{name: "Visible conversational text", stdout: "Hello world!", expected: false},
 		{name: "Visible conversational text", stdout: "Here is your requested answer.", expected: false},
 		{name: "Conversational text ending with sentinel", stdout: "I am replying and here is [NO_REPLY]", expected: false},
+		{name: "Prefix sentinel with trailing conversational text", stdout: "[NO_REPLY] but here is my answer", expected: false},
+		{name: "Bold sentinel with trailing conversational text", stdout: "**[NO_REPLY]** However please note this", expected: false},
 	}
 
 	for _, tt := range tests {

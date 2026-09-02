@@ -138,7 +138,9 @@ func buildDiscordPrompt(m *discordgo.Message, targetThreadID string) string {
 		sb.WriteString(fmt.Sprintf("    content: %q\n", m.ReferencedMessage.Content))
 	}
 
-	sb.WriteString(fmt.Sprintf("- content: %s\n", m.Content))
+	sanitizedContent := strings.ReplaceAll(m.Content, "</USER_REQUEST>", "<\\/USER_REQUEST>")
+	sanitizedContent = strings.ReplaceAll(sanitizedContent, "<USER_REQUEST>", "<\\USER_REQUEST>")
+	sb.WriteString(fmt.Sprintf("- content: %s\n", sanitizedContent))
 	sb.WriteString(fmt.Sprintf("- timestamp: %s\n", m.Timestamp.Format(time.RFC3339)))
 
 	var mentions []string
@@ -273,49 +275,49 @@ func connectDiscordFunnel(database *sql.DB, pool *queue.WorkerPool) *discordgo.S
 			return
 		}
 
-		if !isFunnelBotTargeted(s, m) {
-			log.Printf("Discord funnel ignoring message %s from %s: no trigger matched", m.ID, m.Author.Username)
-			return
-		}
+		go func() {
+			if !isFunnelBotTargeted(s, m) {
+				log.Printf("Discord funnel ignoring message %s from %s: no trigger matched", m.ID, m.Author.Username)
+				return
+			}
 
-		targetThreadID, isThread := getOrCreateThreadID(s, m.Message)
-		prompt := buildDiscordPrompt(m.Message, targetThreadID)
+			targetThreadID, isThread := getOrCreateThreadID(s, m.Message)
+			prompt := buildDiscordPrompt(m.Message, targetThreadID)
 
-		// Pre-allocate and persist session ID for the thread upfront so active tasks immediately have session links
-		if sessID, _ := db.GetSessionID(database, targetThreadID); sessID == "" {
-			_ = db.SaveSessionID(database, targetThreadID, uuid.New().String())
-		}
+			// Pre-allocate and persist session ID for the thread upfront so active tasks immediately have session links
+			if sessID, _ := db.GetSessionID(database, targetThreadID); sessID == "" {
+				_ = db.SaveSessionID(database, targetThreadID, uuid.New().String())
+			}
 
-		authorID := ""
-		authorName := "Discord User"
-		if m.Author != nil {
-			authorID = m.Author.ID
-			authorName = m.Author.Username
-		}
+			authorID := ""
+			authorName := "Discord User"
+			if m.Author != nil {
+				authorID = m.Author.ID
+				authorName = m.Author.Username
+			}
 
-		msg := db.Message{
-			ID:         m.ID,
-			ThreadID:   targetThreadID,
-			GuildID:    m.GuildID,
-			AuthorID:   authorID,
-			AuthorName: authorName,
-			Content:    prompt,
-			Summary:    db.CleanTaskSummary(m.Content),
-			Status:     db.StatusPending,
-			CreatedAt:  time.Now().UTC(),
-			UpdatedAt:  time.Now().UTC(),
-		}
+			msg := db.Message{
+				ID:         m.ID,
+				ThreadID:   targetThreadID,
+				GuildID:    m.GuildID,
+				AuthorID:   authorID,
+				AuthorName: authorName,
+				Content:    prompt,
+				Status:     db.StatusPending,
+				CreatedAt:  m.Timestamp,
+				UpdatedAt:  time.Now().UTC(),
+			}
 
-		if err := db.InsertMessage(database, msg); err != nil {
-			log.Printf("Failed to persist Discord message %s to SQLite: %v", m.ID, err)
-		}
+			if err := db.InsertMessage(database, msg); err != nil {
+				log.Printf("Failed to insert message %s: %v", m.ID, err)
+				return
+			}
 
-		log.Printf("Discord funnel received message %s from %s (channel %s, target_thread: %s, is_thread: %t). Enqueued to worker pool.",
-			m.ID, authorName, m.ChannelID, targetThreadID, isThread)
-
-		if pool != nil {
-			pool.Enqueue(msg)
-		}
+			log.Printf("Discord funnel enqueued message %s from %s (thread: %s, is_thread: %t)", m.ID, authorName, targetThreadID, isThread)
+			if pool != nil {
+				pool.Enqueue(msg)
+			}
+		}()
 	})
 
 	dg.Identify.Intents = discordgo.IntentsGuildMessages | discordgo.IntentsDirectMessages | discordgo.IntentMessageContent
