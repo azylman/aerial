@@ -1,4 +1,4 @@
-﻿# ==============================================================================
+# ==============================================================================
 # Aerial Configuration (config.yaml)
 # ==============================================================================
 
@@ -23,16 +23,6 @@ system_channel: aerial-dev
 admin_users:
   - 1542035925603713086 # Primary Admin
   # - 987654321098765432 # Secondary Admin
-
-# ------------------------------------------------------------------------------
-# Ignored Channels List (Optional Convenience)
-# ------------------------------------------------------------------------------
-# List of channel names (with or without '#') or snowflake IDs to ignore completely.
-# In ignored channels, Aerial ignores all messages, mentions, and startup sweeps.
-ignored_channels:
-  - spam
-  - off-topic
-  # - 123456789012345678
 
 # ------------------------------------------------------------------------------
 # Channel Policies
