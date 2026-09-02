@@ -37,6 +37,26 @@ func deriveThreadTitle(content string) string {
 	return string(runes)
 }
 
+func getDiscordChannel(s *discordgo.Session, channelID string) *discordgo.Channel {
+	if s == nil || channelID == "" {
+		return nil
+	}
+	if s.State != nil {
+		if ch, err := s.State.Channel(channelID); err == nil && ch != nil {
+			return ch
+		}
+	}
+	if s.Token != "" {
+		if ch, err := s.Channel(channelID); err == nil && ch != nil {
+			if s.State != nil {
+				_ = s.State.ChannelAdd(ch)
+			}
+			return ch
+		}
+	}
+	return nil
+}
+
 func resolveGuildID(s *discordgo.Session, m *discordgo.Message) string {
 	if m == nil {
 		return ""
@@ -44,17 +64,8 @@ func resolveGuildID(s *discordgo.Session, m *discordgo.Message) string {
 	if m.GuildID != "" {
 		return m.GuildID
 	}
-	if s != nil {
-		if s.State != nil {
-			if ch, err := s.State.Channel(m.ChannelID); err == nil && ch != nil && ch.GuildID != "" {
-				return ch.GuildID
-			}
-		}
-		if s.Ratelimiter != nil && s.Token != "" {
-			if ch, err := s.Channel(m.ChannelID); err == nil && ch != nil && ch.GuildID != "" {
-				return ch.GuildID
-			}
-		}
+	if ch := getDiscordChannel(s, m.ChannelID); ch != nil && ch.GuildID != "" {
+		return ch.GuildID
 	}
 	return ""
 }
@@ -71,22 +82,10 @@ func getOrCreateThreadID(s *discordgo.Session, m *discordgo.Message) (string, bo
 	var channelName string
 	var isAlreadyThread bool
 
-	if s != nil {
-		if s.State != nil {
-			if ch, err := s.State.Channel(m.ChannelID); err == nil && ch != nil {
-				channelName = ch.Name
-				if ch.IsThread() {
-					isAlreadyThread = true
-				}
-			}
-		}
-		if !isAlreadyThread && channelName == "" && s.Ratelimiter != nil && s.Token != "" {
-			if ch, err := s.Channel(m.ChannelID); err == nil && ch != nil {
-				channelName = ch.Name
-				if ch.IsThread() {
-					isAlreadyThread = true
-				}
-			}
+	if ch := getDiscordChannel(s, m.ChannelID); ch != nil {
+		channelName = ch.Name
+		if ch.IsThread() {
+			isAlreadyThread = true
 		}
 	}
 
@@ -100,7 +99,7 @@ func getOrCreateThreadID(s *discordgo.Session, m *discordgo.Message) (string, bo
 	}
 
 	title := deriveThreadTitle(m.Content)
-	if s != nil && s.Ratelimiter != nil && s.Token != "" {
+	if s != nil && s.Token != "" {
 		thread, err := s.MessageThreadStart(m.ChannelID, m.ID, title, 1440)
 		if err != nil {
 			log.Printf("Failed to create Discord thread for message %s (channel %s): %v", m.ID, m.ChannelID, err)
@@ -173,27 +172,13 @@ func buildDiscordPrompt(m *discordgo.Message, targetThreadID string, policy conf
 // If channelID is a Discord thread, it resolves the parent channel's policy so threads
 // inherit ignore/whitelisting rules from their parent channel.
 func resolveEffectiveChannelPolicy(s *discordgo.Session, channelID string) (config.ChannelPolicy, bool) {
-	var ch *discordgo.Channel
-	if s != nil {
-		if s.State != nil {
-			ch, _ = s.State.Channel(channelID)
-		}
-		if ch == nil && s.Ratelimiter != nil && s.Token != "" {
-			ch, _ = s.Channel(channelID)
-		}
-	}
+	ch := getDiscordChannel(s, channelID)
 
 	isThread := false
 	if ch != nil && ch.IsThread() {
 		isThread = true
 		if ch.ParentID != "" {
-			var parentCh *discordgo.Channel
-			if s.State != nil {
-				parentCh, _ = s.State.Channel(ch.ParentID)
-			}
-			if parentCh == nil && s.Ratelimiter != nil && s.Token != "" {
-				parentCh, _ = s.Channel(ch.ParentID)
-			}
+			parentCh := getDiscordChannel(s, ch.ParentID)
 			parentName := ""
 			if parentCh != nil {
 				parentName = parentCh.Name
