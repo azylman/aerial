@@ -3,9 +3,11 @@ package session
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -395,5 +397,135 @@ func TestEnsureSessionDir(t *testing.T) {
 		t.Errorf("EnsureSessionDir wiped existing transcript data: %s", string(readBack))
 	}
 }
+
+func TestAppendAmbientTurn_SanitizationAndNormalization(t *testing.T) {
+	tmpDir := t.TempDir()
+	_ = os.Setenv("HOME", tmpDir)
+
+	sessionID := "session-sanitization"
+	sessDir, err := EnsureSessionDir(sessionID)
+	if err != nil {
+		t.Fatalf("EnsureSessionDir failed: %v", err)
+	}
+
+	// Non-UTC timezone (e.g. UTC-7)
+	loc := time.FixedZone("PDT", -7*60*60)
+	localTime := time.Date(2026, 9, 2, 10, 30, 0, 0, loc)
+
+	// Channel with extra spaces and #, author with @ and spaces
+	err = AppendAmbientTurn(sessionID, "  ###special-room  ", "  @BobTheBuilder  ", "Sanitized content", localTime)
+	if err != nil {
+		t.Fatalf("AppendAmbientTurn failed: %v", err)
+	}
+
+	tPath := filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl")
+	data, err := os.ReadFile(tPath)
+	if err != nil {
+		t.Fatalf("failed to read transcript.jsonl: %v", err)
+	}
+
+	var step TranscriptStep
+	if err := json.Unmarshal(bytes.TrimSpace(data), &step); err != nil {
+		t.Fatalf("failed to unmarshal step: %v", err)
+	}
+
+	// Timestamp must be normalized to UTC (10:30 PDT = 17:30 UTC)
+	if step.CreatedAt != "2026-09-02T17:30:00Z" {
+		t.Errorf("expected UTC timestamp 2026-09-02T17:30:00Z, got %s", step.CreatedAt)
+	}
+
+	// Content must have clean channel and clean author without double @
+	expectedContent := "[Chat #special-room] @BobTheBuilder (2026-09-02T17:30:00Z): Sanitized content"
+	if step.Content != expectedContent {
+		t.Errorf("expected content %q, got %q", expectedContent, step.Content)
+	}
+}
+
+func TestAppendAmbientTurn_LargeLineSeek(t *testing.T) {
+	tmpDir := t.TempDir()
+	_ = os.Setenv("HOME", tmpDir)
+
+	sessionID := "session-large-line"
+	sessDir, err := EnsureSessionDir(sessionID)
+	if err != nil {
+		t.Fatalf("EnsureSessionDir failed: %v", err)
+	}
+
+	logsDir := filepath.Join(sessDir, ".system_generated", "logs")
+
+	// Create a huge line (>70KB) that has step_index: 42
+	hugePadding := strings.Repeat("x", 80000)
+	hugeStep := fmt.Sprintf(`{"step_index":42,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-09-02T12:00:00Z","content":%q}`+"\n", hugePadding)
+
+	for _, name := range []string{"transcript.jsonl", "transcript_full.jsonl"} {
+		if err := os.WriteFile(filepath.Join(logsDir, name), []byte(hugeStep), 0644); err != nil {
+			t.Fatalf("failed to write %s: %v", name, err)
+		}
+	}
+
+	// Now append an ambient turn: it should scan past the 80KB line and find step_index: 42, making next index 43!
+	err = AppendAmbientTurn(sessionID, "general", "Alice", "After large step", time.Now())
+	if err != nil {
+		t.Fatalf("AppendAmbientTurn failed: %v", err)
+	}
+
+	lastIdx, err := getLastStepIndex(filepath.Join(logsDir, "transcript.jsonl"))
+	if err != nil {
+		t.Fatalf("getLastStepIndex failed: %v", err)
+	}
+	if lastIdx != 43 {
+		t.Errorf("expected step_index 43, got %d", lastIdx)
+	}
+}
+
+func TestAppendAmbientTurn_Concurrent(t *testing.T) {
+	tmpDir := t.TempDir()
+	_ = os.Setenv("HOME", tmpDir)
+
+	sessionID := "session-concurrent"
+	sessDir, err := EnsureSessionDir(sessionID)
+	if err != nil {
+		t.Fatalf("EnsureSessionDir failed: %v", err)
+	}
+
+	const n = 10
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			_ = AppendAmbientTurn(sessionID, "lounge", fmt.Sprintf("User%d", idx), fmt.Sprintf("Msg %d", idx), time.Now())
+		}(i)
+	}
+	wg.Wait()
+
+	tPath := filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl")
+	data, err := os.ReadFile(tPath)
+	if err != nil {
+		t.Fatalf("failed to read transcript.jsonl: %v", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != n {
+		t.Fatalf("expected %d lines, got %d", n, len(lines))
+	}
+
+	// Verify all step indexes from 0 to n-1 are present without duplicates or gaps
+	seen := make(map[int]bool)
+	for _, line := range lines {
+		var step TranscriptStep
+		if err := json.Unmarshal([]byte(line), &step); err != nil {
+			t.Fatalf("failed to unmarshal line: %v", err)
+		}
+		seen[step.StepIndex] = true
+	}
+
+	for i := 0; i < n; i++ {
+		if !seen[i] {
+			t.Errorf("expected step_index %d to be present", i)
+		}
+	}
+}
+
 
 

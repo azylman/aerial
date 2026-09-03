@@ -7,8 +7,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
+
 
 
 func FindLatestSessionDir(after time.Time) string {
@@ -350,11 +352,16 @@ type TranscriptStep struct {
 	Content   string `json:"content"`
 }
 
+var appendTurnMu sync.Mutex
+
 // AppendAmbientTurn quietly appends an unaddressed ambient chat message to the session's transcripts.
 func AppendAmbientTurn(sessionID, channelName, authorName, text string, timestamp time.Time) error {
 	if strings.TrimSpace(sessionID) == "" {
 		return nil
 	}
+
+	appendTurnMu.Lock()
+	defer appendTurnMu.Unlock()
 
 	var logsDir string
 	for _, dir := range getTargetDirs(sessionID) {
@@ -387,10 +394,13 @@ func AppendAmbientTurn(sessionID, channelName, authorName, text string, timestam
 
 	if timestamp.IsZero() {
 		timestamp = time.Now().UTC()
+	} else {
+		timestamp = timestamp.UTC()
 	}
 	timeStr := timestamp.Format(time.RFC3339)
-	cleanChannel := strings.TrimLeft(channelName, "#")
-	content := fmt.Sprintf("[Chat #%s] @%s (%s): %s", cleanChannel, authorName, timeStr, text)
+	cleanChannel := strings.TrimLeft(strings.TrimSpace(channelName), "#")
+	cleanAuthor := strings.TrimPrefix(strings.TrimSpace(authorName), "@")
+	content := fmt.Sprintf("[Chat #%s] @%s (%s): %s", cleanChannel, cleanAuthor, timeStr, text)
 
 	step := TranscriptStep{
 		StepIndex: nextIndex,
@@ -470,16 +480,25 @@ func getLastStepIndex(filePath string) (int, error) {
 		return -1, nil
 	}
 
-	seekOffsets := []int64{4096, 65536}
-	for _, seekOffset := range seekOffsets {
-		if fi.Size() < seekOffset {
-			seekOffset = fi.Size()
+	fileSize := fi.Size()
+	chunkSize := int64(65536)
+	seekSizes := []int64{4096}
+	for offset := chunkSize; ; offset += chunkSize {
+		seekSizes = append(seekSizes, offset)
+		if offset >= fileSize {
+			break
 		}
-		if _, err := f.Seek(-seekOffset, io.SeekEnd); err != nil {
+	}
+
+	for _, seekSize := range seekSizes {
+		if seekSize > fileSize {
+			seekSize = fileSize
+		}
+		if _, err := f.Seek(-seekSize, io.SeekEnd); err != nil {
 			return -1, err
 		}
 
-		buf := make([]byte, seekOffset)
+		buf := make([]byte, seekSize)
 		n, err := io.ReadFull(f, buf)
 		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
 			return -1, err
@@ -499,11 +518,12 @@ func getLastStepIndex(filePath string) (int, error) {
 			}
 		}
 
-		if seekOffset >= fi.Size() {
+		if seekSize >= fileSize {
 			break
 		}
 	}
 
 	return -1, nil
 }
+
 
