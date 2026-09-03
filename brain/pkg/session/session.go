@@ -526,4 +526,36 @@ func getLastStepIndex(filePath string) (int, error) {
 	return -1, nil
 }
 
+// SessionExistsOnDisk checks if the session has a valid agy conversation
+// protobuf or non-empty transcript on disk.
+func SessionExistsOnDisk(sessionID string) bool {
+	trimmed := strings.TrimSpace(sessionID)
+	if trimmed == "" || strings.ContainsAny(trimmed, `/\:`) || strings.Contains(trimmed, "..") {
+		return false
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil || homeDir == "" {
+		homeDir = "/root"
+	}
+
+	// 1. Check agy conversation protobufs
+	cliConvPb := filepath.Join(homeDir, ".gemini", "antigravity-cli", "conversations", trimmed+".pb")
+	if fi, err := os.Stat(cliConvPb); err == nil && !fi.IsDir() && fi.Size() > 0 {
+		return true
+	}
+	agyConvPb := filepath.Join(homeDir, ".gemini", "antigravity", "conversations", trimmed+".pb")
+	if fi, err := os.Stat(agyConvPb); err == nil && !fi.IsDir() && fi.Size() > 0 {
+		return true
+	}
+
+	// 2. Check transcript.jsonl non-empty status
+	for _, dir := range getTargetDirs(trimmed) {
+		tPath := filepath.Join(dir, ".system_generated", "logs", "transcript.jsonl")
+		if fi, err := os.Stat(tPath); err == nil && !fi.IsDir() && fi.Size() > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 
