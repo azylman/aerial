@@ -27,107 +27,92 @@ Before making any changes, Aerial MUST determine the target repository:
 
 ---
 
-## 2. The 9-Step Engineering Workflow
+## 2. The 6-Stage Multi-Agent Engineering Workflow
 
 Whenever undertaking feature development, architectural changes, bug fixes, or system modifications, Aerial must follow this strict workflow:
 
 ```
-Step 1: Brainstorm & Design Spec (docs/specs/...)
+Stage 1: Brainstorming & Formal Implementation Plan
    │
    ▼
-Step 2: Write Initial Code (Modular Packages)
+Stage 2: The 4-Expert Review Panel ("The Girl Gang") — Plan Audit
+   │     • 3 Domain Specialists tailored to the problem
+   │     • 1 Dedicated Adversarial Systems Critic / Devil's Advocate
    │
    ▼
-Step 3: Senior Code Review (Concurrency, Leaks, DB Safety, Repo Boundary)
+Stage 3: Human Review Checkpoint (Mandatory Gate)
+   │     • Synthesize Girl Gang findings, trade-offs, and consensus
+   │     • STOP and obtain explicit user approval before touching code
    │
    ▼
-Step 4: Adversarial Critique / Devil's Advocate (Edge Cases, Personal Data Leakage)
+Stage 4: Implementation with Per-Task Expert Review
+   │     • Break plan into discrete, modular tasks (TDD)
+   │     • For EACH task: consult the 4-expert panel to audit code & tests
+   │     • Verify invariants, race safety, and error paths before next task
    │
    ▼
-Step 5: Human Review Checkpoint (Synthesize 3-way findings & get approval)
+Stage 5: Pre-Flight Verification Gate (The New Path)
+   │     • Execute monorepo verification runner (verify.sh / verify.ps1)
+   │     • ZERO-BYPASS INVARIANT: --no-verify strictly forbidden
    │
    ▼
-Step 6: Implement Approved Refinements
-   │
-   ▼
-Step 7: Comprehensive Unit Tests & Complexity Comparison
-   │
-   ▼
-Step 8: Pre-Commit Test Verification Gate
-   │
-   ▼
-Step 9: Commit, Push & Continuous Deployment
+Stage 6: Commit, Push & Continuous Deployment
+         • Fast-path pre-commit & comprehensive pre-push hooks
+         • Automated PR auto-merge (if branch protection active)
+         • Watchtower out-of-band rolling deployment on main (60s)
 ```
 
 ---
 
-### Step 1: Brainstorming & Architectural Specification
-1. **Explore Intent & Architecture**:
+### Stage 1: Brainstorming & Architectural Specification
+1. **Explore Intent & Scope**:
    - Activate the `brainstorming` skill.
    - Clarify scope, system constraints, persistence schemas, concurrency boundaries, and failure modes before writing code.
 2. **Sync Workspace**:
    ```bash
-   cd /share/aerial && git pull --rebase origin main
+   git pull --rebase origin main
    ```
-3. **Draft Formal Design Spec**:
-   - Write a complete specification in `docs/specs/YYYY-MM-DD-<feature-name>.md`.
+3. **Draft Formal Implementation Plan**:
+   - Write a complete design document in `implementation_plan.md` (or `docs/specs/YYYY-MM-DD-<feature-name>.md`).
    - Define exact schemas, state machines, component interactions, and API signatures.
 
 ---
 
-### Step 2: Implementation (Modular Architecture)
-1. Write the initial implementation code cleanly across modular packages with single responsibilities.
-2. Follow strict isolation:
-   - Separate database persistence (`pkg/db`), message delivery (`pkg/delivery`), runner execution (`pkg/runner`), and queue scheduling (`pkg/queue`).
-3. **DO NOT COMMIT OR PUSH TO GIT YET**. All work remains local for review and comparison.
+### Stage 2: The 4-Expert Review Panel ("The Girl Gang") — Plan Audit
+Before modifying source code, Aerial MUST assemble and consult a dynamic review panel of **four independent expert subagents**:
+1. **Three Domain Specialists**: Dynamically chosen and tailored to the technical requirements of the task (e.g. CI/CD & DevOps Specialist, Distributed Systems & Concurrency Engineer, Discord Gateway & UX Specialist, Git Tooling Specialist, etc.).
+2. **One Dedicated Adversarial Systems Critic / Devil's Advocate**: Tasked specifically with aggressively challenging assumptions, probing edge cases, failure modes, race conditions, memory leaks, and personal data leakage.
+
+**Action**:
+- Concurrently dispatch all four subagents using `invoke_subagent`.
+- Collect and synthesize their structured audit reports and verdicts.
 
 ---
 
-### Step 3: Senior Code Review
-Conduct a thorough, deep technical code review inspecting:
-- **Repository Boundary & Generic Invariant**: Ensure no real names, personal Discord handles, family members, private devices, or home locations are hardcoded in code, comments, or prompts for `/share/aerial`.
-- **Concurrency & Goroutine Lifecycle**: Mutex lock scope, race conditions, channel deadlocks, and worker idle teardown.
-- **Database Safety**: SQLite WAL mode (`PRAGMA journal_mode = WAL;`), busy timeout (`PRAGMA busy_timeout = 5000;`), and connection pool constraints.
-- **Subprocess Management**: Context cancellation, zombie process prevention, stream buffer capture, and exit code handling.
-- **Error Handling**: Complete error path coverage and operational logging.
+### Stage 3: Human Review Checkpoint (Mandatory Gate)
+Present a structured synthesis of the Girl Gang's audit to the human user:
+1. **Consensus & Contentions**: Highlight where the domain specialists and Devil's Advocate agreed and where they clashed.
+2. **Key Decisions & Trade-Offs**: Outline architectural trade-offs, risk mitigations, and plan remediations.
+3. **MANDATORY STOP**: Wait for explicit human approval before writing or modifying any implementation code.
 
 ---
 
-### Step 4: Adversarial Critique & Devil's Advocate
-Aggressively challenge the design and code. Specifically analyze and argue why the implementation could fail:
-- **Personal Data / Logic Leakage**: Did any private user business logic, personal aliases, or private secrets leak into the public core engine repository?
-- **Cascading Failures (Apology Cascades)**: Are we calling an external service (e.g. an LLM API) to report that the external service is down?
-- **Poison-Pill Death Spirals**: Will an invalid message or crash loop restart infinitely on boot recovery?
-- **Burst Traffic & Backpressure**: What happens if 50 messages arrive in 10 seconds? Is there stale backlog accumulation or unbounded channel buffering?
-- **Data Mangling**: Does message splitting cut through Markdown code blocks or JSON formatting?
-- **Session Corruption**: Could transient errors falsely trigger session deletion?
+### Stage 4: Implementation with Per-Task Expert Review
+1. **Modular Task Execution (TDD)**:
+   - Break implementation into discrete, sequential components/tasks.
+   - Implement following Test-Driven Development (write tests first, then implementation).
+   - Verify task unit tests pass with race detection (`-race`).
+2. **Per-Task Expert Review Gate**:
+   - **For EACH task completed**, consult the 4-expert panel (or dispatch a dedicated Devil's Advocate subagent from the panel) to audit the task's code changes.
+   - Inspect:
+     - Strict adherence to repository invariants (zero personal data, zero plaintext secrets).
+     - Concurrency safety, lock lifecycles, and deadlocks.
+     - Error path coverage and defensive nil guards.
+   - **Remediation**: Resolve all identified P0/P1 bugs and audit objections before proceeding to subsequent tasks.
 
 ---
 
-### Step 5: Human Review Checkpoint (Mandatory Gate)
-Present a structured 3-way synthesis to the human user:
-1. **Plan vs. Reviewer vs. Devil's Advocate**: Highlight where the initial plan, code reviewer, and devil's advocate agree and where they clash.
-2. **Explicit Decisions Required**: Outline architectural trade-offs (e.g. static fallback vs dynamic generation, poison-pill thresholds, schema changes).
-3. **STOP and wait for human approval** before making final code refinements.
-
----
-
-### Step 6: Implement Approved Refinements
-1. Incorporate all decisions and resolutions approved during the Human Review Checkpoint.
-2. Fix identified P0/P1 bugs, race conditions, error misclassifications, and locking issues.
-
----
-
-### Step 7: Comprehensive Unit Tests & Complexity Comparison
-1. **Unit Test Coverage**:
-   - Write comprehensive unit tests in `*_test.go` covering clean success paths, transient errors, corruption recovery, poison-pill quarantine, and boundary conditions.
-2. **Codebase & Complexity Comparison**:
-   - Compare Lines of Code (LOC) for production vs test suites.
-   - Compare algorithmic time and space complexity against the legacy implementation.
-
----
-
-### Step 8: Pre-Commit Test & Lint Verification (Zero-Failure Gate)
+### Stage 5: Pre-Flight Verification Gate (The New Path)
 *MANDATORY: Never commit or push unverified code.*
 
 1. **Execute Pre-Flight Verification Runner**:
@@ -140,7 +125,7 @@ Present a structured 3-way synthesis to the human user:
      ```powershell
      powershell -ExecutionPolicy Bypass -File scripts/verify.ps1
      ```
-   - **Container Fallback**: If local Go/Node tools are not installed, the runner automatically delegates to deterministic Docker containers (`golangci/golangci-lint:v1.59.1`, `golang:1.22`, `node:20`).
+   - **Container Fallback**: If local Go or Node tools are not installed in `PATH`, the runner automatically delegates to deterministic Docker containers (`golangci/golangci-lint:v1.59.1`, `golang:1.22`, `node:20`).
 
 2. **Full CI Parity Verification**:
    The runner validates all microservices (`brain`, `scheduler-mcp`, `discord-mcp`, `dashboard`):
@@ -160,7 +145,7 @@ Present a structured 3-way synthesis to the human user:
 
 ---
 
-### Step 9: Commit, Push & Continuous Deployment
+### Stage 6: Commit, Push & Continuous Deployment
 
 1. **Review Diffs & Status**:
    ```bash
