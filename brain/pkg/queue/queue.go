@@ -624,7 +624,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 					}
 					var res classifier.ClassificationResult
 					if p.cfg.Classifier != nil {
-						res = p.cfg.Classifier.Classify(p.ctx, m, recentContext)
+						res = p.cfg.Classifier.Classify(p.ctx, m, recentContext, policy.GetAmbientWakePrompt())
 					} else {
 						res = classifier.ClassificationResult{Confidence: 0.0, Reason: "no classifier configured"}
 					}

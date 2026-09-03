@@ -61,6 +61,7 @@ type ChannelPolicy struct {
 	AllowSystemOps       bool     `yaml:"allow_system_ops" json:"allow_system_ops"`
 	MaxSessionTurns      int      `yaml:"max_session_turns" json:"max_session_turns"`
 	AmbientWakeThreshold *float64 `yaml:"ambient_wake_threshold,omitempty" json:"ambient_wake_threshold,omitempty"`
+	AmbientWakePrompt    string   `yaml:"ambient_wake_prompt,omitempty" json:"ambient_wake_prompt,omitempty"`
 }
 
 // IsIgnored reports whether the channel policy specifies an ignored/disabled channel.
@@ -78,6 +79,11 @@ func (p ChannelPolicy) GetAmbientWakeThreshold() float64 {
 		return 0.80
 	}
 	return 0.0
+}
+
+// GetAmbientWakePrompt returns the trimmed ambient wake prompt for this channel policy.
+func (p ChannelPolicy) GetAmbientWakePrompt() string {
+	return strings.TrimSpace(p.AmbientWakePrompt)
 }
 
 // IsBotIgnored reports whether bot messages should be ignored for this channel policy.
@@ -109,6 +115,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 		Channels             map[string]ChannelPolicy `yaml:"channels"`
 		GitSync              GitSyncConfig            `yaml:"git_sync"`
 		McpServers           map[string]interface{}   `yaml:"mcp_servers"`
+		AmbientWakePrompt    string                   `yaml:"ambient_wake_prompt,omitempty"`
 	}
 
 	var raw rawConfigHelper
@@ -495,6 +502,9 @@ func (c Config) ResolveChannelPolicy(channelID, channelName string) ChannelPolic
 	if res.AmbientWakeThreshold == nil && def.AmbientWakeThreshold != nil {
 		val := *def.AmbientWakeThreshold
 		res.AmbientWakeThreshold = &val
+	}
+	if res.AmbientWakePrompt == "" && def.AmbientWakePrompt != "" {
+		res.AmbientWakePrompt = def.AmbientWakePrompt
 	}
 	if !res.AllowSystemOps && def.AllowSystemOps {
 		res.AllowSystemOps = true
