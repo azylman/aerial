@@ -32,7 +32,6 @@ jobs:
           filters: |
             brain:
               - 'brain/**'
-              - 'SYSTEM.md'
               - 'GEMINI.md'
               - '.agents/**'
               - 'docker-compose.yml'
