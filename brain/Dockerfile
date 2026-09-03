@@ -42,7 +42,6 @@ WORKDIR /app
 
 COPY --from=builder /aerial-brain /usr/local/bin/aerial-brain
 COPY GEMINI.md /app/GEMINI.md
-COPY SYSTEM.md /app/SYSTEM.md
 COPY .agents /app/.agents
 
 ENV GIT_TERMINAL_PROMPT=0
