@@ -22,7 +22,7 @@ Aerial uses a decoupled **Two-Repository Architecture**:
 │                                Aerial Brain                                 │
 │  • In-process Discord Funnel & Gateway Worker                               │
 │  • Headless Antigravity Agent Engine (agy)                                  │
-│  • In-process Mutex-Guarded GitSync (/share/aerial-config & /share/aerial)  │
+│  • Read-Only Kernel Mounts (/share/aerial-config:ro, /share/aerial:ro)      │
 │  • Recursive File Watcher (fsnotify) with Hot-Reloading & LKGC Fallback     │
 │  • SQLite Multi-Turn Thread Memory (/data/aerial.db)                        │
 │  • Dynamic Built-in & User Custom Skills Discovery                          │
@@ -30,8 +30,8 @@ Aerial uses a decoupled **Two-Repository Architecture**:
 └─────────────────────────────────────────────────────────────────────────────┘
                │                       │                      │
 ┌───────────────────────────┐ ┌───────────────────────┐ ┌─────────────────────┐
-│        discord-mcp        │ │       docker-mcp      │ │     github-mcp      │
-│  (Port 4001: Streamable)  │ │ (Port 4002: Proxy)    │ │ (Port 4003: Proxy)  │
+│       aerial-gitsync      │ │       docker-mcp      │ │     github-mcp      │
+│ (Port 8080: Sidecar :rw)  │ │ (Port 4002: Proxy)    │ │ (Port 4003: Proxy)  │
 └───────────────────────────┘ └───────────────────────┘ └─────────────────────┘
                │                       │                      │
        Discord REST API        Host Docker Socket       GitHub Copilot MCP
@@ -215,7 +215,7 @@ Environment variables `${VAR}` are interpolated dynamically at runtime from your
 
 ### Layer 4: Adding Custom Containers (`docker-compose.override.yml`)
 
-You can add extra services or MCP containers to the `aerial-net` bridge network by placing `docker-compose.override.yml` in your private configuration repository. `aerial-brain` automatically synchronizes it to the project root on startup and on git sync:
+You can add extra services or MCP containers to the `aerial-net` bridge network by placing `docker-compose.override.yml` in your private configuration repository. Docker Compose natively includes and merges this file on the host via the top-level `include:` directive in `docker-compose.yml`:
 
 ```yaml
 services:
@@ -233,11 +233,12 @@ services:
 
 ## 3. Continuous Deployment & Self-Improvement
 
-Aerial uses an automated GitOps deployment pipeline:
+Aerial uses an automated GitOps deployment and configuration pipeline:
 1. **GitHub Actions Matrix Builds**: Triggers dynamic matrix builds only for modified microservices and publishes them to GitHub Container Registry (`ghcr.io/azylman/aerial-*`).
 2. **Watchtower Supervisor**: Polls GHCR every 60 seconds out-of-band and performs zero-downtime rolling container updates.
-3. **In-Process GitSync**: Automatically pulls updates from your configuration repository and `azylman/aerial` every 60 seconds.
-4. **Self-Improvement Protocol**: When prompted to make code changes or fixes in Discord, Aerial uses `.agents/skills/self-improvement/SKILL.md` to run local tests, commit, and push directly to `origin/main`.
+3. **Dedicated GitSync Sidecar (`aerial-gitsync`)**: A dedicated background daemon holding read-write mounts on `/share/aerial-config` and `/share/aerial`, pulling updates via singleflight fast-forward syncs every 60s and exposing a `POST /sync` trigger.
+4. **Physical Immutability & Two-Phase PR Workflow**: The `aerial-brain` execution container mounts repositories strictly **read-only (`:ro`)**. When making configuration or skill adjustments, Aerial uses `scripts/aerial-config-pr.sh` to clone into an ephemeral `/dev/shm` scratch directory, run pre-flight syntax checks, push a branch, open a GitHub PR, verify CI, squash merge into `main`, and trigger fast-path sync via `aerial-gitsync`.
+5. **Core Engine Self-Improvement**: For changes to the Go monorepo (`azylman/aerial`), Aerial uses `.agents/skills/self-improvement/SKILL.md` to run local tests, commit, push a branch, and open a PR with required CI status checks.
 
 ---
 
@@ -245,7 +246,8 @@ Aerial uses an automated GitOps deployment pipeline:
 
 | Service | Port | Description |
 | --- | --- | --- |
-| **`aerial-brain`** | `8088` | Go execution daemon running `agy`, SQLite memory, Discord funnel, GitSync, and file watcher. |
+| **`aerial-brain`** | `8088` | Go execution daemon running `agy`, SQLite memory, Discord funnel, and inotify file watcher. Mounted `:ro`. |
+| **`aerial-gitsync`** | `8080` (Internal) | Dedicated GitSync sidecar daemon managing automated repository synchronization and `/sync` webhooks. Mounted `:rw`. |
 | **`aerial-scheduler-mcp`**| `8080` (Internal) | SQLite-backed cron and one-shot reminder management server. |
 | **`aerial-discord-mcp`** | `4001` | Outbound MCP server providing Discord messaging, thread creation, and channel tools. |
 | **`aerial-docker-mcp`** | `4002` | `supergateway` proxy wrapping official Docker MCP (`mcp/docker`) over the host socket. |
