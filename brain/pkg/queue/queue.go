@@ -19,7 +19,6 @@ import (
 	"github.com/azylman/aerial/brain/pkg/runner"
 	"github.com/azylman/aerial/brain/pkg/session"
 	"github.com/bwmarrin/discordgo"
-	"github.com/google/uuid"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -177,6 +176,7 @@ type WorkerPoolConfig struct {
 	OnMessageCompleted   func(msg db.Message, finalStatus string)
 	MemoryRetrieverFunc  MemoryRetrieverFunc
 	ResolveChannelPolicy func(channelID, channelName string) config.ChannelPolicy
+	HistoryFetcher       HistoryFetcherFunc
 }
 
 type WorkerPool struct {
@@ -234,12 +234,21 @@ func NewWorkerPool(cfg WorkerPoolConfig) *WorkerPool {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	return &WorkerPool{
+	p := &WorkerPool{
 		cfg:       cfg,
 		threadChs: make(map[string]chan db.Message),
 		ctx:       ctx,
 		cancel:    cancel,
 	}
+
+	if p.cfg.HistoryFetcher == nil {
+		p.cfg.HistoryFetcher = func(ctx context.Context, channelID string, beforeID string, limit int) ([]HistoryMessage, error) {
+			fetcher := DefaultHistoryFetcher(p.getDiscordSession(), p.cfg.DB)
+			return fetcher(ctx, channelID, beforeID, limit)
+		}
+	}
+
+	return p
 }
 
 func (p *WorkerPool) SetDiscordSession(s *discordgo.Session) {
@@ -671,6 +680,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 	}()
 
 	currentSessionID, _ := db.GetSessionID(p.cfg.DB, threadID)
+	var turnCount int
 
 	if strings.ToLower(policy.Mode) == "channel" {
 		botUserID := ""
@@ -821,17 +831,18 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 
 		if wakeIdx == -1 {
 			// ALL messages in burst are ambient
-			if currentSessionID == "" {
-				currentSessionID = uuid.New().String()
-				_ = db.SaveSessionID(p.cfg.DB, threadID, currentSessionID)
+			hasDiskSession := currentSessionID != "" && session.SessionExistsOnDisk(currentSessionID)
+			if hasDiskSession {
+				_, _ = session.EnsureSessionDir(currentSessionID)
 			}
-			_, _ = session.EnsureSessionDir(currentSessionID)
 
 			for i, m := range burst {
 				info := wakeInfos[i]
-				rawBody := extractMessageBody(m.Content)
-				if err := session.AppendAmbientTurn(currentSessionID, channelName, m.AuthorName, rawBody, m.CreatedAt); err != nil {
-					log.Printf("[WorkerPool] Failed to append ambient turn for %s: %v", m.ID, err)
+				if hasDiskSession {
+					rawBody := extractMessageBody(m.Content)
+					if err := session.AppendAmbientTurn(currentSessionID, channelName, m.AuthorName, rawBody, m.CreatedAt); err != nil {
+						log.Printf("[WorkerPool] Failed to append ambient turn for %s: %v", m.ID, err)
+					}
 				}
 				telemetry := fmt.Sprintf("[AMBIENT score=%.2f/%.2f reason=%q]", info.score, info.threshold, info.reason)
 				_ = db.UpdateMessageStatus(p.cfg.DB, m.ID, db.StatusCompleted, telemetry)
@@ -852,36 +863,36 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 
 		// wakeIdx >= 0
 		// Check session rotation timing before Phase 1:
-		// If current turn_count + 1 >= policy.MaxSessionTurns, rotate session ID and ensure dir NOW
-		// so leading ambient messages are preserved in the new session transcript.
 		if policy.MaxSessionTurns > 0 {
 			currentTurns, _ := db.GetSessionTurnCount(p.cfg.DB, threadID)
-			if currentTurns+1 >= policy.MaxSessionTurns {
-				log.Printf("[Queue] Channel session will reach turn limit (%d+1 >= %d). Rotating session ID before burst ingestion.", currentTurns, policy.MaxSessionTurns)
-				newSessID := uuid.New().String()
-				_ = db.RotateSessionID(p.cfg.DB, threadID, newSessID)
-				_, _ = session.EnsureSessionDir(newSessID)
-				currentSessionID = newSessID
+			if currentTurns >= policy.MaxSessionTurns || (wakeIdx > 0 && currentTurns+1 >= policy.MaxSessionTurns) {
+				log.Printf("[Queue] Channel session reached turn limit. Resetting to cold state for fresh session initialization.")
+				_ = db.RotateSessionID(p.cfg.DB, threadID, "")
+				currentSessionID = ""
 			}
 		}
 
 		if currentSessionID == "" {
 			currentSessionID, _ = db.GetSessionID(p.cfg.DB, threadID)
-			if currentSessionID == "" {
-				currentSessionID = uuid.New().String()
-				_ = db.SaveSessionID(p.cfg.DB, threadID, currentSessionID)
-			}
 		}
-		_, _ = session.EnsureSessionDir(currentSessionID)
+		if currentSessionID != "" && !session.SessionExistsOnDisk(currentSessionID) {
+			log.Printf("[Queue] Session %s for thread %s not found on disk. Clearing for fresh Turn 1.", currentSessionID, threadID)
+			currentSessionID = ""
+		}
+		if currentSessionID != "" {
+			_, _ = session.EnsureSessionDir(currentSessionID)
+		}
 
 		// Phase 1 (Leading ambient messages)
 		if wakeIdx > 0 {
 			for i := 0; i < wakeIdx; i++ {
 				m := burst[i]
 				info := wakeInfos[i]
-				rawBody := extractMessageBody(m.Content)
-				if err := session.AppendAmbientTurn(currentSessionID, channelName, m.AuthorName, rawBody, m.CreatedAt); err != nil {
-					log.Printf("[WorkerPool] Failed to append ambient turn for %s: %v", m.ID, err)
+				if currentSessionID != "" && session.SessionExistsOnDisk(currentSessionID) {
+					rawBody := extractMessageBody(m.Content)
+					if err := session.AppendAmbientTurn(currentSessionID, channelName, m.AuthorName, rawBody, m.CreatedAt); err != nil {
+						log.Printf("[WorkerPool] Failed to append ambient turn for %s: %v", m.ID, err)
+					}
 				}
 				telemetry := fmt.Sprintf("[AMBIENT score=%.2f/%.2f reason=%q]", info.score, info.threshold, info.reason)
 				_ = db.UpdateMessageStatus(p.cfg.DB, m.ID, db.StatusCompleted, telemetry)
@@ -907,16 +918,10 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		}
 		burst = []db.Message{burst[wakeIdx]}
 
-		turnCount, incErr := db.IncrementSessionTurnCount(p.cfg.DB, threadID)
+		var incErr error
+		turnCount, incErr = db.IncrementSessionTurnCount(p.cfg.DB, threadID)
 		if incErr != nil {
 			log.Printf("[Queue] Error incrementing turn count for thread %s: %v", threadID, incErr)
-		}
-		if policy.MaxSessionTurns > 0 && turnCount >= policy.MaxSessionTurns {
-			log.Printf("[Queue] Channel session reached turn limit (%d/%d). Rotating session ID.", turnCount, policy.MaxSessionTurns)
-			newSessID := uuid.New().String()
-			_ = db.RotateSessionID(p.cfg.DB, threadID, newSessID)
-			_, _ = session.EnsureSessionDir(newSessID)
-			currentSessionID = newSessID
 		}
 
 		var handledTrailing bool
@@ -928,10 +933,12 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 			for i, m := range trailingMsgs {
 				info := trailingInfos[i]
 				if !info.isWake {
-					rawBody := extractMessageBody(m.Content)
-					cName := channelName
-					if err := session.AppendAmbientTurn(currentSessionID, cName, m.AuthorName, rawBody, m.CreatedAt); err != nil {
-						log.Printf("[WorkerPool] Failed to append ambient turn for trailing message %s: %v", m.ID, err)
+					if currentSessionID != "" && session.SessionExistsOnDisk(currentSessionID) {
+						rawBody := extractMessageBody(m.Content)
+						cName := channelName
+						if err := session.AppendAmbientTurn(currentSessionID, cName, m.AuthorName, rawBody, m.CreatedAt); err != nil {
+							log.Printf("[WorkerPool] Failed to append ambient turn for trailing message %s: %v", m.ID, err)
+						}
 					}
 					telemetry := fmt.Sprintf("[AMBIENT score=%.2f/%.2f reason=%q]", info.score, info.threshold, info.reason)
 					_ = db.UpdateMessageStatus(p.cfg.DB, m.ID, db.StatusCompleted, telemetry)
@@ -960,6 +967,19 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 
 	// Format coalesced prompt
 	basePrompt := CoalesceBurstPrompt(burst)
+	if strings.ToLower(policy.Mode) == "channel" && currentSessionID == "" {
+		if p.cfg.HistoryFetcher != nil {
+			fetchCtx, fetchCancel := context.WithTimeout(p.ctx, 2500*time.Millisecond)
+			histMsgs, err := p.cfg.HistoryFetcher(fetchCtx, threadID, burst[0].ID, 10)
+			fetchCancel()
+			if err != nil {
+				log.Printf("[WorkerPool] Warning: History fetch failed for thread %s: %v", threadID, err)
+			} else if formattedHist := FormatChannelHistory(histMsgs); formattedHist != "" {
+				basePrompt = formattedHist + "\n\n" + basePrompt
+				log.Printf("[WorkerPool] Injected channel history into Turn 1 prompt for thread %s", threadID)
+			}
+		}
+	}
 	queryText := memory.ExtractQueryText(basePrompt)
 	if p.cfg.MemoryRetrieverFunc != nil && p.cfg.DB != nil && strings.TrimSpace(queryText) != "" {
 		retrievalCtx, retrievalCancel := context.WithTimeout(p.ctx, 2500*time.Millisecond)
@@ -1015,16 +1035,13 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		}
 		lastErrDetail = errDetail
 
-		if currentSessionID == "" {
-			if extSess := runner.ExtractSessionID(stderr, startTime); extSess != "" {
-				currentSessionID = extSess
-				_ = db.SaveSessionID(p.cfg.DB, threadID, currentSessionID)
-			}
-		}
-
 		if !isFailure {
-			if currentSessionID != "" {
-				_ = db.SaveSessionID(p.cfg.DB, threadID, currentSessionID)
+			if extSess := runner.ExtractSessionID(stderr, startTime); extSess != "" && session.SessionExistsOnDisk(extSess) {
+				if extSess != currentSessionID {
+					log.Printf("[Queue] Active session synchronized for thread %s: %s -> %s", threadID, currentSessionID, extSess)
+					currentSessionID = extSess
+					_ = db.SaveSessionID(p.cfg.DB, threadID, currentSessionID)
+				}
 			}
 			stopTyping()
 
@@ -1056,6 +1073,12 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 				}
 			}
 			log.Printf("[WorkerPool] %d message(s) in thread %s completed successfully on attempt %d/%d", len(burst), threadID, attempt, maxAttempts)
+
+			if policy.MaxSessionTurns > 0 && turnCount >= policy.MaxSessionTurns {
+				log.Printf("[Queue] Channel session reached turn limit (%d/%d). Resetting to cold state for fresh session initialization.", turnCount, policy.MaxSessionTurns)
+				_ = db.RotateSessionID(p.cfg.DB, threadID, "")
+				currentSessionID = ""
+			}
 
 			return
 		}

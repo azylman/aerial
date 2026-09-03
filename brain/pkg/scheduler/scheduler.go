@@ -206,11 +206,6 @@ func ProcessDueSchedules(ctx context.Context, database *sql.DB, enqueuer Message
 			UpdatedAt:     now,
 		}
 
-		// Ensure thread has a session ID allocated upfront for immediate Agentsview inspection
-		if sessID, _ := db.GetSessionID(database, targetThreadID); sessID == "" {
-			_ = db.SaveSessionID(database, targetThreadID, uuid.New().String())
-		}
-
 		if err := db.InsertMessage(database, msg); err != nil {
 			log.Printf("[Scheduler] Error inserting recurring message %s for cron %s: %v", msgID, c.ID, err)
 		}
@@ -233,11 +228,6 @@ func ProcessDueSchedules(ctx context.Context, database *sql.DB, enqueuer Message
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
-		}
-
-		// Ensure thread has a session ID allocated upfront for immediate Agentsview inspection
-		if sessID, _ := db.GetSessionID(database, s.ThreadID); sessID == "" {
-			_ = db.SaveSessionID(database, s.ThreadID, uuid.New().String())
 		}
 
 		runID := uuid.New().String()
