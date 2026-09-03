@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,6 +22,11 @@ var (
 
 	runtimeConfigMu      sync.RWMutex
 	currentRuntimeConfig Config
+
+	instructionsCacheMu sync.RWMutex
+	instructionsCache   = make(map[string]string)
+
+	reChannelInstructionsTag = regexp.MustCompile(`(?i)</channel_instructions\s*>`)
 )
 
 var ConfigSearchPaths = []string{
@@ -467,9 +473,9 @@ func (c Config) ResolveChannelPolicy(channelID, channelName string) ChannelPolic
 		matched, found = c.getChannelPolicyRaw(normID)
 	}
 
-	// 2. Match by Channel Name
+	// 2. Match by Channel Name (in-memory map key normalization)
 	if !found {
-		if normName := NormalizeChannelName(channelName); normName != "" {
+		if normName := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(channelName)), "#"); normName != "" {
 			matched, found = c.getChannelPolicyRaw(normName)
 		}
 	}
@@ -543,11 +549,14 @@ func (c Config) getChannelPolicyRaw(key string) (ChannelPolicy, bool) {
 }
 
 // NormalizeChannelName standardizes channel names for config key and file lookups.
-// It trims whitespace, strips any leading '#', lowercases, and prevents directory traversal.
+// It trims whitespace, strips any leading '#', lowercases, and strictly blocks directory traversal.
 func NormalizeChannelName(channelName string) string {
 	s := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(channelName)), "#")
+	if strings.Contains(s, "..") || strings.Contains(s, "/") || strings.Contains(s, "\\") {
+		return ""
+	}
 	s = filepath.Base(s)
-	if s == "." || s == "/" || s == "\\" || strings.Contains(s, "..") {
+	if s == "." || s == "/" || s == "\\" || s == "" {
 		return ""
 	}
 	return s
@@ -594,8 +603,19 @@ func LoadChannelInstructions(channelName string) string {
 			trimmed := strings.TrimSpace(string(data))
 			if len(trimmed) > 0 {
 				// Defensively escape any closing delimiter tag to prevent breakout
-				sanitized := strings.ReplaceAll(trimmed, "</CHANNEL_INSTRUCTIONS>", "<\\/CHANNEL_INSTRUCTIONS>")
+				sanitized := reChannelInstructionsTag.ReplaceAllString(trimmed, "<\\/CHANNEL_INSTRUCTIONS>")
+				instructionsCacheMu.Lock()
+				instructionsCache[normName] = sanitized
+				instructionsCacheMu.Unlock()
 				return sanitized
+			}
+
+			instructionsCacheMu.RLock()
+			cached, hasCached := instructionsCache[normName]
+			instructionsCacheMu.RUnlock()
+			if hasCached && cached != "" {
+				log.Printf("[Config] Active file is empty (possible GitSync torn read), using cached instructions for %q", normName)
+				return cached
 			}
 		}
 	}
