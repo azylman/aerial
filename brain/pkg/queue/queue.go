@@ -218,7 +218,13 @@ func NewWorkerPool(cfg WorkerPoolConfig) *WorkerPool {
 		cfg.MemoryRetrieverFunc = memory.RetrieveRelevantFacts
 	}
 	if cfg.Classifier == nil {
-		cfg.Classifier = classifier.NewClassifier()
+		runnerFn := cfg.RunnerFunc
+		if runnerFn == nil {
+			runnerFn = runner.RunAgy
+		}
+		cfg.Classifier = classifier.NewClassifier(
+			classifier.WithLLMFunc(classifier.NewAgyLLMFunc(cfg.AgyBin, cfg.APIKey, runnerFn)),
+		)
 	}
 	if cfg.ResolveChannelPolicy == nil {
 		cfg.ResolveChannelPolicy = func(channelID, channelName string) config.ChannelPolicy {
@@ -679,6 +685,11 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 			reason    string
 		}
 		wakeInfos := make([]wakeInfo, len(burst))
+		var trailingMsgs []db.Message
+		var trailingInfos []wakeInfo
+		wakeIdx := -1
+
+		// Safeguard 1: Tier-1 Pre-Scan (Zero-Latency Priority)
 		for i, m := range burst {
 			if isTier1Wake(m, botUserID) {
 				wakeInfos[i] = wakeInfo{
@@ -687,14 +698,42 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 					threshold: policy.GetAmbientWakeThreshold(),
 					reason:    "direct_address",
 				}
-			} else {
-				threshold := policy.GetAmbientWakeThreshold()
-				if threshold <= 0.0 {
+				if wakeIdx == -1 {
+					wakeIdx = i
+				}
+			}
+		}
+
+		if wakeIdx != -1 {
+			// Direct Tier-1 wake found!
+			// Any leading ambient messages [0..wakeIdx-1] are marked ambient with zero classifier delay.
+			for i := 0; i < wakeIdx; i++ {
+				wakeInfos[i] = wakeInfo{
+					isWake:    false,
+					score:     0.0,
+					threshold: policy.GetAmbientWakeThreshold(),
+					reason:    "burst_prescan_leading",
+				}
+			}
+			// Trailing messages after wakeIdx:
+			// If Tier-1, mark isWake: true so handleTrailing re-enqueues it for the next turn.
+			// Otherwise mark ambient (or classify if threshold > 0).
+			threshold := policy.GetAmbientWakeThreshold()
+			for i := wakeIdx + 1; i < len(burst); i++ {
+				m := burst[i]
+				if isTier1Wake(m, botUserID) {
+					wakeInfos[i] = wakeInfo{
+						isWake:    true,
+						score:     1.0,
+						threshold: threshold,
+						reason:    "direct_address",
+					}
+				} else if threshold <= 0.0 || classifier.IsHeuristicSkip(extractMessageBody(m.Content)) {
 					wakeInfos[i] = wakeInfo{
 						isWake:    false,
 						score:     0.0,
 						threshold: threshold,
-						reason:    "classifier disabled",
+						reason:    "heuristic_skip",
 					}
 				} else {
 					var recentContext []db.Message
@@ -707,27 +746,71 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 					} else {
 						res = classifier.ClassificationResult{Confidence: 0.0, Reason: "no classifier configured"}
 					}
-					isWake := res.Confidence >= threshold
-					log.Printf("[AmbientClassifier] Channel %s | Msg %s | Author %s | Score: %.2f (Threshold: %.2f) | Wake: %t | Reason: %s",
-						threadID, m.ID, m.AuthorName, res.Confidence, threshold, isWake, res.Reason)
 					wakeInfos[i] = wakeInfo{
-						isWake:    isWake,
+						isWake:    res.Confidence >= threshold,
 						score:     res.Confidence,
 						threshold: threshold,
 						reason:    res.Reason,
 					}
 				}
 			}
-		}
+		} else {
+			// Safeguard 2: Coalesced Burst Ambient Evaluation
+			threshold := policy.GetAmbientWakeThreshold()
+			if threshold <= 0.0 {
+				for i := range burst {
+					wakeInfos[i] = wakeInfo{
+						isWake:    false,
+						score:     0.0,
+						threshold: threshold,
+						reason:    "classifier disabled",
+					}
+				}
+			} else {
+				// Fast pre-filter: if all messages in burst are banter/emojis/commands, skip without LLM
+				allSkip := true
+				for _, m := range burst {
+					if !classifier.IsHeuristicSkip(extractMessageBody(m.Content)) {
+						allSkip = false
+						break
+					}
+				}
+				if allSkip {
+					for i := range burst {
+						wakeInfos[i] = wakeInfo{
+							isWake:    false,
+							score:     0.0,
+							threshold: threshold,
+							reason:    "heuristic_skip",
+						}
+					}
+				} else {
+					var recentContext []db.Message
+					if p.cfg.DB != nil {
+						recentContext, _ = db.GetRecentThreadMessages(p.cfg.DB, threadID, 10)
+					}
+					var res classifier.ClassificationResult
+					if p.cfg.Classifier != nil {
+						res = p.cfg.Classifier.ClassifyBurst(p.ctx, burst, recentContext, policy.GetAmbientWakePrompt())
+					} else {
+						res = classifier.ClassificationResult{Confidence: 0.0, Reason: "no classifier configured"}
+					}
+					isWake := res.Confidence >= threshold
+					log.Printf("[AmbientClassifier] Channel %s | BurstSize %d | Score: %.2f (Threshold: %.2f) | Wake: %t | Reason: %s",
+						threadID, len(burst), res.Confidence, threshold, isWake, res.Reason)
 
-		var trailingMsgs []db.Message
-		var trailingInfos []wakeInfo
-
-		wakeIdx := -1
-		for i, info := range wakeInfos {
-			if info.isWake {
-				wakeIdx = i
-				break
+					for i := range burst {
+						wakeInfos[i] = wakeInfo{
+							isWake:    isWake,
+							score:     res.Confidence,
+							threshold: threshold,
+							reason:    res.Reason,
+						}
+					}
+					if isWake {
+						wakeIdx = 0
+					}
+				}
 			}
 		}
 
