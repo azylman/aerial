@@ -318,77 +318,7 @@ func StartPeriodicSync(ctx context.Context, interval time.Duration, repos []stri
 	return cancel
 }
 
-// SyncComposeOverride synchronizes docker-compose.override.yml from configDir to projectDir via symlink (or copy fallback).
-// If the source override file in configDir is removed, it automatically cleans up the stale symlink.
-func SyncComposeOverride(configDir, projectDir string) error {
-	if configDir == "" || projectDir == "" {
-		return nil
-	}
 
-	target := filepath.Join(projectDir, "docker-compose.override.yml")
-
-	sourceYml := filepath.Join(configDir, "docker-compose.override.yml")
-	sourceYaml := filepath.Join(configDir, "docker-compose.override.yaml")
-
-	var sourcePath string
-	if _, err := os.Stat(sourceYml); err == nil {
-		sourcePath = sourceYml
-	} else if _, err := os.Stat(sourceYaml); err == nil {
-		sourcePath = sourceYaml
-	}
-
-	if sourcePath != "" {
-		// Ensure target directory exists
-		if err := os.MkdirAll(projectDir, 0755); err != nil {
-			return fmt.Errorf("failed to create project directory %s: %w", projectDir, err)
-		}
-
-		// Check if target already exists as a symlink or file
-		if fi, err := os.Lstat(target); err == nil {
-			if fi.Mode()&os.ModeSymlink != 0 {
-				if link, readErr := os.Readlink(target); readErr == nil && (link == sourcePath || filepath.Clean(link) == filepath.Clean(sourcePath)) {
-					// Already correctly symlinked to sourcePath
-					return nil
-				}
-			}
-			// Remove existing target (dead symlink, old symlink, or regular file)
-			_ = os.Remove(target)
-		}
-
-		// Create symlink target -> source
-		if err := os.Symlink(sourcePath, target); err != nil {
-			// Fallback to copy if symlink fails across filesystems or due to OS permissions
-			data, readErr := os.ReadFile(sourcePath)
-			if readErr != nil {
-				return fmt.Errorf("failed to read source compose override %s: %w", sourcePath, readErr)
-			}
-			if writeErr := os.WriteFile(target, data, 0644); writeErr != nil {
-				return fmt.Errorf("failed to copy compose override to %s: %w", target, writeErr)
-			}
-		}
-
-		log.Printf("[Compose-Override] Synchronized docker-compose.override.yml from %s to %s", configDir, projectDir)
-		return nil
-	}
-
-	// Source does not exist: cleanup obsolete symlink if target is a symlink pointing to source
-	if fi, err := os.Lstat(target); err == nil {
-		if fi.Mode()&os.ModeSymlink != 0 {
-			link, readErr := os.Readlink(target)
-			if readErr == nil {
-				cleanLink := filepath.Clean(link)
-				if cleanLink == filepath.Clean(sourceYml) || cleanLink == filepath.Clean(sourceYaml) || strings.HasPrefix(cleanLink, filepath.Clean(configDir)) {
-					if err := os.Remove(target); err != nil {
-						return fmt.Errorf("failed to remove obsolete compose override: %w", err)
-					}
-					log.Printf("[Compose-Override] Cleaned up obsolete docker-compose.override.yml")
-				}
-			}
-		}
-	}
-
-	return nil
-}
 
 // EnsureGitHooks checks if repoPath contains a .githooks directory, and if so, configures git core.hooksPath.
 func EnsureGitHooks(ctx context.Context, repoPath string) error {

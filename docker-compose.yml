@@ -1,3 +1,10 @@
+# ----------------------------------------------------------------------------
+# Optional External Configuration Overrides (Decoupled from Monorepo)
+# Evaluated natively on the host when executing docker compose
+# ----------------------------------------------------------------------------
+include:
+  - path: "${AERIAL_CONFIG_DIR:-../aerial-config}/docker-compose.override.yml"
+
 services:
   # ----------------------------------------------------------------------------
   # 1. Execution Brain: Aerial Brain
