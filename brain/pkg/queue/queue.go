@@ -252,15 +252,32 @@ func (p *WorkerPool) runThreadWorker(threadID string, ch chan db.Message) {
 func extractMessageBody(content string) string {
 	trimmed := strings.TrimSpace(content)
 	if strings.Contains(trimmed, "<USER_REQUEST>") {
-		lines := strings.Split(trimmed, "\n")
-		for _, line := range lines {
-			lineTrimmed := strings.TrimSpace(line)
-			if strings.HasPrefix(lineTrimmed, "- content:") {
-				val := strings.TrimSpace(strings.TrimPrefix(lineTrimmed, "- content:"))
-				val = strings.ReplaceAll(val, "<\\/USER_REQUEST>", "</USER_REQUEST>")
-				val = strings.ReplaceAll(val, "<\\USER_REQUEST>", "<USER_REQUEST>")
-				return val
+		contentMarker := "- content:"
+		idx := strings.Index(trimmed, contentMarker)
+		if idx != -1 {
+			start := idx + len(contentMarker)
+			rest := trimmed[start:]
+
+			// Find boundary of next envelope field
+			endIdx := -1
+			markers := []string{"\n- timestamp:", "\n- mentions:", "\n- attachments:", "\n- ", "\n</USER_REQUEST>"}
+			for _, m := range markers {
+				if pos := strings.Index(rest, m); pos != -1 {
+					if endIdx == -1 || pos < endIdx {
+						endIdx = pos
+					}
+				}
 			}
+			var val string
+			if endIdx != -1 {
+				val = rest[:endIdx]
+			} else {
+				val = rest
+			}
+			val = strings.TrimSpace(val)
+			val = strings.ReplaceAll(val, "<\\/USER_REQUEST>", "</USER_REQUEST>")
+			val = strings.ReplaceAll(val, "<\\USER_REQUEST>", "<USER_REQUEST>")
+			return val
 		}
 		inner := strings.TrimPrefix(trimmed, "<USER_REQUEST>")
 		inner = strings.TrimSuffix(inner, "</USER_REQUEST>")
@@ -291,15 +308,21 @@ func isTier1Wake(m db.Message, botUserID string) bool {
 		}
 	}
 
-	// Explicit reply to Aerial: replying_to with author Aerial
+	// Explicit reply to Aerial: check ONLY the author line under - replying_to:
 	if idx := strings.Index(m.Content, "- replying_to:"); idx != -1 {
-		replySection := m.Content[idx:]
-		if end := strings.Index(replySection, "- content:"); end != -1 {
-			replySection = replySection[:end]
-		}
-		replyLower := strings.ToLower(replySection)
-		if strings.Contains(replyLower, "aerial") || (botUserID != "" && strings.Contains(replyLower, strings.ToLower(botUserID))) {
-			return true
+		lines := strings.Split(m.Content[idx:], "\n")
+		for _, line := range lines {
+			lineTrimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(lineTrimmed, "author:") {
+				authorVal := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(lineTrimmed, "author:")))
+				if strings.Contains(authorVal, "aerial") || (botUserID != "" && strings.Contains(authorVal, strings.ToLower(botUserID))) {
+					return true
+				}
+				break
+			}
+			if lineTrimmed != "- replying_to:" && strings.HasPrefix(lineTrimmed, "- ") {
+				break
+			}
 		}
 	}
 
@@ -618,6 +641,9 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 			}
 		}
 
+		var trailingMsgs []db.Message
+		var trailingInfos []wakeInfo
+
 		wakeIdx := -1
 		for i, info := range wakeInfos {
 			if info.isWake {
@@ -642,7 +668,9 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 			for i, m := range burst {
 				info := wakeInfos[i]
 				rawBody := extractMessageBody(m.Content)
-				_ = session.AppendAmbientTurn(currentSessionID, channelName, m.AuthorName, rawBody, m.CreatedAt)
+				if err := session.AppendAmbientTurn(currentSessionID, channelName, m.AuthorName, rawBody, m.CreatedAt); err != nil {
+					log.Printf("[WorkerPool] Failed to append ambient turn for %s: %v", m.ID, err)
+				}
 				telemetry := fmt.Sprintf("[AMBIENT score=%.2f/%.2f reason=%q]", info.score, info.threshold, info.reason)
 				_ = db.UpdateMessageStatus(p.cfg.DB, m.ID, db.StatusCompleted, telemetry)
 				if m.ScheduleRunID != "" {
@@ -661,19 +689,38 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		}
 
 		// wakeIdx >= 0
-		// Phase 1 (Leading ambient messages)
-		if wakeIdx > 0 {
+		// Check session rotation timing before Phase 1:
+		// If current turn_count + 1 >= policy.MaxSessionTurns, rotate session ID and ensure dir NOW
+		// so leading ambient messages are preserved in the new session transcript.
+		if policy.MaxSessionTurns > 0 {
+			currentTurns, _ := db.GetSessionTurnCount(p.cfg.DB, threadID)
+			if currentTurns+1 >= policy.MaxSessionTurns {
+				log.Printf("[Queue] Channel session will reach turn limit (%d+1 >= %d). Rotating session ID before burst ingestion.", currentTurns, policy.MaxSessionTurns)
+				newSessID := uuid.New().String()
+				_ = db.RotateSessionID(p.cfg.DB, threadID, newSessID)
+				_, _ = session.EnsureSessionDir(newSessID)
+				currentSessionID = newSessID
+			}
+		}
+
+		if currentSessionID == "" {
+			currentSessionID, _ = db.GetSessionID(p.cfg.DB, threadID)
 			if currentSessionID == "" {
 				currentSessionID = uuid.New().String()
 				_ = db.SaveSessionID(p.cfg.DB, threadID, currentSessionID)
 			}
-			_, _ = session.EnsureSessionDir(currentSessionID)
+		}
+		_, _ = session.EnsureSessionDir(currentSessionID)
 
+		// Phase 1 (Leading ambient messages)
+		if wakeIdx > 0 {
 			for i := 0; i < wakeIdx; i++ {
 				m := burst[i]
 				info := wakeInfos[i]
 				rawBody := extractMessageBody(m.Content)
-				_ = session.AppendAmbientTurn(currentSessionID, channelName, m.AuthorName, rawBody, m.CreatedAt)
+				if err := session.AppendAmbientTurn(currentSessionID, channelName, m.AuthorName, rawBody, m.CreatedAt); err != nil {
+					log.Printf("[WorkerPool] Failed to append ambient turn for %s: %v", m.ID, err)
+				}
 				telemetry := fmt.Sprintf("[AMBIENT score=%.2f/%.2f reason=%q]", info.score, info.threshold, info.reason)
 				_ = db.UpdateMessageStatus(p.cfg.DB, m.ID, db.StatusCompleted, telemetry)
 				if m.ScheduleRunID != "" {
@@ -688,10 +735,16 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 					p.cfg.OnMessageCompleted(m, db.StatusCompleted)
 				}
 			}
-			burst = burst[wakeIdx:]
 		}
 
-		// Phase 2 (Active wake batch burst[wakeIdx:])
+		// Phase 2 (Active wake batch)
+		// Partition trailing messages after the wake message
+		if wakeIdx+1 < len(burst) {
+			trailingMsgs = burst[wakeIdx+1:]
+			trailingInfos = wakeInfos[wakeIdx+1:]
+		}
+		burst = []db.Message{burst[wakeIdx]}
+
 		turnCount, incErr := db.IncrementSessionTurnCount(p.cfg.DB, threadID)
 		if incErr != nil {
 			log.Printf("[Queue] Error incrementing turn count for thread %s: %v", threadID, incErr)
@@ -702,16 +755,46 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 			_ = db.RotateSessionID(p.cfg.DB, threadID, newSessID)
 			_, _ = session.EnsureSessionDir(newSessID)
 			currentSessionID = newSessID
-		} else {
-			if currentSessionID == "" {
-				currentSessionID, _ = db.GetSessionID(p.cfg.DB, threadID)
-				if currentSessionID == "" {
-					currentSessionID = uuid.New().String()
-					_ = db.SaveSessionID(p.cfg.DB, threadID, currentSessionID)
+		}
+
+		var handledTrailing bool
+		handleTrailing := func() {
+			if handledTrailing {
+				return
+			}
+			handledTrailing = true
+			for i, m := range trailingMsgs {
+				info := trailingInfos[i]
+				if !info.isWake {
+					rawBody := extractMessageBody(m.Content)
+					cName := threadID
+					if ch != nil && ch.Name != "" {
+						cName = ch.Name
+					}
+					if err := session.AppendAmbientTurn(currentSessionID, cName, m.AuthorName, rawBody, m.CreatedAt); err != nil {
+						log.Printf("[WorkerPool] Failed to append ambient turn for trailing message %s: %v", m.ID, err)
+					}
+					telemetry := fmt.Sprintf("[AMBIENT score=%.2f/%.2f reason=%q]", info.score, info.threshold, info.reason)
+					_ = db.UpdateMessageStatus(p.cfg.DB, m.ID, db.StatusCompleted, telemetry)
+					if m.ScheduleRunID != "" {
+						_ = db.UpdateScheduleRunStatus(p.cfg.DB, db.UpdateRunParams{
+							RunID:       m.ScheduleRunID,
+							MessageID:   m.ID,
+							Status:      "completed",
+							CompletedAt: time.Now().UTC(),
+						})
+					}
+					if p.cfg.OnMessageCompleted != nil {
+						p.cfg.OnMessageCompleted(m, db.StatusCompleted)
+					}
+				} else {
+					_ = db.UpdateMessageStatus(p.cfg.DB, m.ID, db.StatusPending, "")
+					m.Status = db.StatusPending
+					p.Enqueue(m)
 				}
 			}
-			_, _ = session.EnsureSessionDir(currentSessionID)
 		}
+		defer handleTrailing()
 	}
 
 	stopTyping = resolveTypingStarter(policy, burst, skipDiscord, p.cfg.TypingFunc, p.getDiscordSession, threadID)

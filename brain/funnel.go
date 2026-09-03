@@ -508,7 +508,7 @@ func RunStartupCatchUpSweep(ctx context.Context, database *sql.DB, pool *queue.W
 	if s.State != nil {
 		guilds = s.State.Guilds
 	}
-	if len(guilds) == 0 {
+	if len(guilds) == 0 && s.Token != "" {
 		if userGuilds, err := s.UserGuilds(100, "", "", false); err == nil {
 			for _, ug := range userGuilds {
 				guilds = append(guilds, &discordgo.Guild{ID: ug.ID})
@@ -517,6 +517,9 @@ func RunStartupCatchUpSweep(ctx context.Context, database *sql.DB, pool *queue.W
 	}
 
 	for _, g := range guilds {
+		if s.Token == "" {
+			break
+		}
 		// Active threads in guild
 		if activeThreads, err := s.GuildThreadsActive(g.ID); err == nil && activeThreads != nil {
 			for _, th := range activeThreads.Threads {

@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -691,5 +694,111 @@ func TestRunStartupCatchUpSweep_NilAndEmptySafeguards(t *testing.T) {
 	sweepMu.Unlock()
 
 	RunStartupCatchUpSweep(context.Background(), database, pool, s)
+}
+
+type mockCatchUpRoundTripper func(*http.Request) (*http.Response, error)
+
+func (m mockCatchUpRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return m(req)
+}
+
+func TestRunStartupCatchUpSweep_BotPolicy(t *testing.T) {
+	setupTestConfig(t, `
+channels:
+  default:
+    mode: "ignore"
+  chan-bot-allowed:
+    mode: "channel"
+    ignore_bots: false
+  chan-bot-ignored:
+    mode: "channel"
+    ignore_bots: true
+`)
+
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to init DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	pool := queue.NewWorkerPool(queue.WorkerPoolConfig{DB: database})
+	defer pool.Stop()
+
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+	s, err := discordgo.New("Bot mock-token")
+	if err != nil {
+		t.Fatalf("Failed to create session: %v", err)
+	}
+	s.Client = &http.Client{
+		Transport: mockCatchUpRoundTripper(func(req *http.Request) (*http.Response, error) {
+			var body []byte
+			if strings.Contains(req.URL.Path, "threads/active") {
+				body = []byte(`{"threads":[]}`)
+			} else if strings.Contains(req.URL.Path, "guilds/") && strings.Contains(req.URL.Path, "/channels") {
+				body = []byte(`[{"id":"chan-bot-allowed","guild_id":"guild-1","type":0},{"id":"chan-bot-ignored","guild_id":"guild-1","type":0}]`)
+			} else if strings.Contains(req.URL.Path, "chan-bot-allowed") {
+				body = []byte(`[{"id":"msg-bot-allowed","channel_id":"chan-bot-allowed","content":"Hey Aerial please help","timestamp":"` + nowStr + `","author":{"id":"peer-bot-1","username":"PeerBot","bot":true}}]`)
+			} else if strings.Contains(req.URL.Path, "chan-bot-ignored") {
+				body = []byte(`[{"id":"msg-bot-ignored","channel_id":"chan-bot-ignored","content":"Hey Aerial please help","timestamp":"` + nowStr + `","author":{"id":"peer-bot-2","username":"PeerBot","bot":true}}]`)
+			} else {
+				body = []byte(`[]`)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(bytes.NewReader(body)),
+			}, nil
+		}),
+	}
+	s.State.User = &discordgo.User{ID: "bot-aerial-id", Username: "Aerial"}
+
+	guild := &discordgo.Guild{
+		ID: "guild-1",
+		Channels: []*discordgo.Channel{
+			{ID: "chan-bot-allowed", GuildID: "guild-1", Type: discordgo.ChannelTypeGuildText},
+			{ID: "chan-bot-ignored", GuildID: "guild-1", Type: discordgo.ChannelTypeGuildText},
+		},
+		Roles: []*discordgo.Role{
+			{
+				ID:          "guild-1",
+				Permissions: discordgo.PermissionViewChannel | discordgo.PermissionReadMessageHistory,
+			},
+		},
+		Members: []*discordgo.Member{
+			{
+				GuildID:     "guild-1",
+				User:        &discordgo.User{ID: "bot-aerial-id", Username: "Aerial"},
+				Permissions: discordgo.PermissionViewChannel | discordgo.PermissionReadMessageHistory,
+			},
+		},
+	}
+	_ = s.State.GuildAdd(guild)
+	s.State.Guilds = []*discordgo.Guild{guild}
+	_ = s.State.ChannelAdd(guild.Channels[0])
+	_ = s.State.ChannelAdd(guild.Channels[1])
+	_ = s.State.MemberAdd(guild.Members[0])
+
+	sweepMu.Lock()
+	lastSweepAt = time.Time{}
+	isSweeping.Store(false)
+	sweepMu.Unlock()
+
+	RunStartupCatchUpSweep(context.Background(), database, pool, s)
+
+	existsAllowed, err := db.MessageExists(database, "msg-bot-allowed")
+	if err != nil {
+		t.Fatalf("Failed to check message existence: %v", err)
+	}
+	if !existsAllowed {
+		t.Errorf("Expected msg-bot-allowed to be retained and inserted into DB when ignore_bots is false")
+	}
+
+	existsIgnored, err := db.MessageExists(database, "msg-bot-ignored")
+	if err != nil {
+		t.Fatalf("Failed to check message existence: %v", err)
+	}
+	if existsIgnored {
+		t.Errorf("Expected msg-bot-ignored to be skipped when ignore_bots is true")
+	}
 }
 
