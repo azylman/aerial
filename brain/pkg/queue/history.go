@@ -21,9 +21,9 @@ const (
 )
 
 var (
-	reChannelHistoryClose      = regexp.MustCompile(`(?i)</channel_history\s*>`)
-	reUserRequestClose         = regexp.MustCompile(`(?i)</user_request\s*>`)
-	reChannelInstructionsClose = regexp.MustCompile(`(?i)</channel_instructions\s*>`)
+	reChannelHistoryTag      = regexp.MustCompile(`(?i)<\s*/?\s*channel_history\s*>`)
+	reUserRequestTag         = regexp.MustCompile(`(?i)<\s*/?\s*user_request\s*>`)
+	reChannelInstructionsTag = regexp.MustCompile(`(?i)<\s*/?\s*channel_instructions\s*>`)
 )
 
 // HistoryMessage represents a normalized message retrieved for channel context.
@@ -38,12 +38,12 @@ type HistoryMessage struct {
 // HistoryFetcherFunc defines the function signature for fetching historical messages for Turn 1 context bootstrapping.
 type HistoryFetcherFunc func(ctx context.Context, channelID string, beforeID string, limit int) ([]HistoryMessage, error)
 
-// SanitizeHistoryContent escapes XML delimiter closing tags in history message content
-// to prevent prompt breakout and early closing of prompt framing blocks.
+// SanitizeHistoryContent escapes XML delimiter opening and closing tags in history message content
+// to prevent prompt breakout, opening fake instruction blocks, or early closing of prompt framing blocks.
 func SanitizeHistoryContent(s string) string {
-	s = reChannelHistoryClose.ReplaceAllString(s, "<\\/CHANNEL_HISTORY>")
-	s = reUserRequestClose.ReplaceAllString(s, "<\\/USER_REQUEST>")
-	s = reChannelInstructionsClose.ReplaceAllString(s, "<\\/CHANNEL_INSTRUCTIONS>")
+	s = reChannelHistoryTag.ReplaceAllString(s, "<\\/CHANNEL_HISTORY>")
+	s = reUserRequestTag.ReplaceAllString(s, "<\\/USER_REQUEST>")
+	s = reChannelInstructionsTag.ReplaceAllString(s, "<\\/CHANNEL_INSTRUCTIONS>")
 	return s
 }
 
@@ -88,6 +88,12 @@ func FormatChannelHistory(messages []HistoryMessage) string {
 		}
 
 		author := strings.TrimSpace(m.AuthorName)
+		author = strings.Map(func(r rune) rune {
+			if r == '\n' || r == '\r' || r == '[' || r == ']' {
+				return -1
+			}
+			return r
+		}, author)
 		role := strings.TrimSpace(m.Role)
 		if role == "" {
 			role = "User"
