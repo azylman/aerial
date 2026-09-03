@@ -864,7 +864,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		// Check session rotation timing before Phase 1:
 		if policy.MaxSessionTurns > 0 {
 			currentTurns, _ := db.GetSessionTurnCount(p.cfg.DB, threadID)
-			if currentTurns+1 >= policy.MaxSessionTurns {
+			if currentTurns >= policy.MaxSessionTurns || (wakeIdx > 0 && currentTurns+1 >= policy.MaxSessionTurns) {
 				log.Printf("[Queue] Channel session reached turn limit. Resetting to cold state for fresh session initialization.")
 				_ = db.RotateSessionID(p.cfg.DB, threadID, "")
 				currentSessionID = ""
