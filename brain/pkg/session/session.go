@@ -431,7 +431,7 @@ func appendTranscriptStep(filePath string, lineBytes []byte) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	fi, err := f.Stat()
 	if err != nil {
@@ -470,7 +470,7 @@ func getLastStepIndex(filePath string) (int, error) {
 		}
 		return -1, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	fi, err := f.Stat()
 	if err != nil {

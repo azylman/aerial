@@ -461,11 +461,7 @@ func isTier1Wake(m db.Message, botUserID string) bool {
 	// Keyword trigger matching word boundary regex (?i)\b(aerial|gundam)\b in extractMessageBody(m.Content)
 	// excluding "aerial view" and "aerial photo"
 	cleanedBody := aerialExclusionRegex.ReplaceAllString(body, "")
-	if tier1KeywordRegex.MatchString(cleanedBody) {
-		return true
-	}
-
-	return false
+	return tier1KeywordRegex.MatchString(cleanedBody)
 }
 
 // CoalesceBurstPrompt formats a burst of messages into a single coalesced multi-message prompt turn.
