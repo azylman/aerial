@@ -480,7 +480,7 @@ channels:
 	}
 
 	def := cfg.Channels["default"]
-	if def.Mode != "threads" || def.TypingIndicator != "always" || !def.IgnoreBots || def.AllowSystemOps || def.MaxSessionTurns != 0 {
+	if def.Mode != "threads" || def.TypingIndicator != "always" || !def.IsBotIgnored() || def.AllowSystemOps || def.MaxSessionTurns != 0 {
 		t.Errorf("Unexpected default policy: %+v", def)
 	}
 
@@ -495,7 +495,7 @@ channels:
 	}
 
 	sn := cfg.Channels["123456789012345678"]
-	if sn.Mode != "channel" || sn.TypingIndicator != "never" || sn.IgnoreBots || !sn.AllowSystemOps || sn.MaxSessionTurns != 20 {
+	if sn.Mode != "channel" || sn.TypingIndicator != "never" || sn.IsBotIgnored() || !sn.AllowSystemOps || sn.MaxSessionTurns != 20 {
 		t.Errorf("Unexpected snowflake channel policy: %+v", sn)
 	}
 }
@@ -598,12 +598,13 @@ channels:
 }
 
 func TestResolveChannelPolicy(t *testing.T) {
+	trueVal := true
 	cfg := Config{
 		Channels: map[string]ChannelPolicy{
 			"default": {
 				Mode:            "threads",
 				TypingIndicator: "always",
-				IgnoreBots:      true,
+				IgnoreBots:      &trueVal,
 				AllowSystemOps:  false,
 				MaxSessionTurns: 0,
 			},
@@ -624,25 +625,25 @@ func TestResolveChannelPolicy(t *testing.T) {
 
 	// 1. Match by Snowflake ID
 	p1 := cfg.ResolveChannelPolicy("1543668253363150928", "aerial-dev")
-	if p1.Mode != "channel" || p1.TypingIndicator != "never" || !p1.AllowSystemOps || p1.MaxSessionTurns != 100 || !p1.IgnoreBots {
+	if p1.Mode != "channel" || p1.TypingIndicator != "never" || !p1.AllowSystemOps || p1.MaxSessionTurns != 100 || !p1.IsBotIgnored() {
 		t.Errorf("Unexpected policy for snowflake ID match: %+v", p1)
 	}
 
 	// 2. Match by Channel Name with leading '#' and uppercase
 	p2 := cfg.ResolveChannelPolicy("999999", "#General")
-	if p2.Mode != "channel" || p2.TypingIndicator != "on_mention" || p2.MaxSessionTurns != 50 || !p2.IgnoreBots || p2.AllowSystemOps {
+	if p2.Mode != "channel" || p2.TypingIndicator != "on_mention" || p2.MaxSessionTurns != 50 || !p2.IsBotIgnored() || p2.AllowSystemOps {
 		t.Errorf("Unexpected policy for #General match: %+v", p2)
 	}
 
 	// 3. Match by Channel Name without '#'
 	p3 := cfg.ResolveChannelPolicy("999999", "aerial-dev")
-	if p3.Mode != "threads" || p3.TypingIndicator != "always" || !p3.AllowSystemOps || !p3.IgnoreBots {
+	if p3.Mode != "threads" || p3.TypingIndicator != "always" || !p3.AllowSystemOps || !p3.IsBotIgnored() {
 		t.Errorf("Unexpected policy for aerial-dev match with default inheritance: %+v", p3)
 	}
 
 	// 4. Fallback to default when neither ID nor name match
 	p4 := cfg.ResolveChannelPolicy("999999", "unknown-channel")
-	if p4.Mode != "threads" || p4.TypingIndicator != "always" || p4.AllowSystemOps || !p4.IgnoreBots {
+	if p4.Mode != "threads" || p4.TypingIndicator != "always" || p4.AllowSystemOps || !p4.IsBotIgnored() {
 		t.Errorf("Unexpected policy for fallback: %+v", p4)
 	}
 }
@@ -824,6 +825,177 @@ channels:
 		t.Errorf("Expected descriptive mode validation error, got: %v", err)
 	}
 }
+
+func TestChannelPolicy_AmbientWakeThreshold(t *testing.T) {
+	tmpDir := t.TempDir()
+	yamlPath := filepath.Join(tmpDir, "config_ambient.yaml")
+	yamlContent := `
+model: "gemini-2.5-flash"
+channels:
+  default:
+    mode: "ignore"
+  lounge:
+    mode: "channel"
+    ambient_wake_threshold: 0.75
+  silent:
+    mode: "channel"
+    ambient_wake_threshold: 0.0
+  auto:
+    mode: "channel"
+  threads_chan:
+    mode: "threads"
+`
+	if err := os.WriteFile(yamlPath, []byte(yamlContent), 0644); err != nil {
+		t.Fatalf("Failed to write yaml: %v", err)
+	}
+
+	cfg, err := LoadConfigFromPaths(yamlPath)
+	if err != nil {
+		t.Fatalf("LoadConfigFromPaths failed: %v", err)
+	}
+
+	pLounge := cfg.ResolveChannelPolicy("123", "lounge")
+	if pLounge.AmbientWakeThreshold == nil || *pLounge.AmbientWakeThreshold != 0.75 {
+		t.Errorf("expected AmbientWakeThreshold 0.75, got %v", pLounge.AmbientWakeThreshold)
+	}
+	if pLounge.GetAmbientWakeThreshold() != 0.75 {
+		t.Errorf("expected GetAmbientWakeThreshold() 0.75, got %f", pLounge.GetAmbientWakeThreshold())
+	}
+
+	pSilent := cfg.ResolveChannelPolicy("456", "silent")
+	if pSilent.AmbientWakeThreshold == nil || *pSilent.AmbientWakeThreshold != 0.0 {
+		t.Errorf("expected AmbientWakeThreshold 0.0, got %v", pSilent.AmbientWakeThreshold)
+	}
+	if pSilent.GetAmbientWakeThreshold() != 0.0 {
+		t.Errorf("expected GetAmbientWakeThreshold() 0.0, got %f", pSilent.GetAmbientWakeThreshold())
+	}
+
+	pAuto := cfg.ResolveChannelPolicy("789", "auto")
+	if pAuto.AmbientWakeThreshold != nil {
+		t.Errorf("expected AmbientWakeThreshold nil for auto channel, got %v", pAuto.AmbientWakeThreshold)
+	}
+	if pAuto.GetAmbientWakeThreshold() != 0.80 {
+		t.Errorf("expected default 0.80 for channel mode, got %f", pAuto.GetAmbientWakeThreshold())
+	}
+
+	pThreads := cfg.ResolveChannelPolicy("101", "threads_chan")
+	if pThreads.GetAmbientWakeThreshold() != 0.0 {
+		t.Errorf("expected 0.0 for non-channel mode, got %f", pThreads.GetAmbientWakeThreshold())
+	}
+}
+
+func TestChannelPolicy_AmbientWakeThreshold_Inheritance(t *testing.T) {
+	tmpDir := t.TempDir()
+	yamlPath := filepath.Join(tmpDir, "config_ambient_inherit.yaml")
+	yamlContent := `
+model: "gemini-2.5-flash"
+channels:
+  default:
+    mode: "threads"
+    ambient_wake_threshold: 0.65
+  lounge:
+    mode: "channel"
+`
+	if err := os.WriteFile(yamlPath, []byte(yamlContent), 0644); err != nil {
+		t.Fatalf("Failed to write yaml: %v", err)
+	}
+	cfg, err := LoadConfigFromPaths(yamlPath)
+	if err != nil {
+		t.Fatalf("LoadConfigFromPaths failed: %v", err)
+	}
+	pLounge := cfg.ResolveChannelPolicy("123", "lounge")
+	if pLounge.AmbientWakeThreshold == nil || *pLounge.AmbientWakeThreshold != 0.65 {
+		t.Errorf("expected inherited AmbientWakeThreshold 0.65, got %v", pLounge.AmbientWakeThreshold)
+	}
+	if pLounge.GetAmbientWakeThreshold() != 0.65 {
+		t.Errorf("expected GetAmbientWakeThreshold() 0.65, got %f", pLounge.GetAmbientWakeThreshold())
+	}
+}
+
+func TestChannelPolicy_Validation_InvalidAmbientWakeThreshold(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Negative threshold in default
+	yamlPath1 := filepath.Join(tmpDir, "config_neg.yaml")
+	yamlNeg := `
+model: "gemini-2.5-flash"
+channels:
+  default:
+    mode: "threads"
+    ambient_wake_threshold: -0.1
+`
+	if err := os.WriteFile(yamlPath1, []byte(yamlNeg), 0644); err != nil {
+		t.Fatalf("Failed to write yaml: %v", err)
+	}
+	if _, err := LoadConfigFromPaths(yamlPath1); err == nil {
+		t.Errorf("Expected error for ambient_wake_threshold < 0.0, got nil")
+	}
+
+	// Threshold > 1.0 in channel
+	yamlPath2 := filepath.Join(tmpDir, "config_gt1.yaml")
+	yamlGt1 := `
+model: "gemini-2.5-flash"
+channels:
+  default:
+    mode: "threads"
+  lounge:
+    mode: "channel"
+    ambient_wake_threshold: 1.5
+`
+	if err := os.WriteFile(yamlPath2, []byte(yamlGt1), 0644); err != nil {
+		t.Fatalf("Failed to write yaml: %v", err)
+	}
+	if _, err := LoadConfigFromPaths(yamlPath2); err == nil {
+		t.Errorf("Expected error for ambient_wake_threshold > 1.0, got nil")
+	}
+}
+
+func TestChannelPolicy_IgnoreBotsInheritance(t *testing.T) {
+	tmpDir := t.TempDir()
+	yamlPath := filepath.Join(tmpDir, "config_ignore_bots.yaml")
+	yamlContent := `
+model: "gemini-2.5-flash"
+channels:
+  default:
+    mode: "ignore"
+    ignore_bots: true
+  lounge:
+    mode: "channel"
+    ignore_bots: false
+  bot_allowed:
+    mode: "threads"
+    ignore_bots: false
+  inherits_true:
+    mode: "channel"
+`
+	if err := os.WriteFile(yamlPath, []byte(yamlContent), 0644); err != nil {
+		t.Fatalf("Failed to write yaml: %v", err)
+	}
+
+	cfg, err := LoadConfigFromPaths(yamlPath)
+	if err != nil {
+		t.Fatalf("LoadConfigFromPaths failed: %v", err)
+	}
+
+	pLounge := cfg.ResolveChannelPolicy("123", "lounge")
+	if pLounge.IsBotIgnored() {
+		t.Errorf("expected lounge ignore_bots: false to override default ignore_bots: true")
+	}
+	if pLounge.IgnoreBots == nil || *pLounge.IgnoreBots != false {
+		t.Errorf("expected pLounge.IgnoreBots pointer to be &false, got %v", pLounge.IgnoreBots)
+	}
+
+	pBotAllowed := cfg.ResolveChannelPolicy("456", "bot_allowed")
+	if pBotAllowed.IsBotIgnored() {
+		t.Errorf("expected bot_allowed ignore_bots: false to override default ignore_bots: true")
+	}
+
+	pInherits := cfg.ResolveChannelPolicy("789", "inherits_true")
+	if !pInherits.IsBotIgnored() {
+		t.Errorf("expected inherits_true to inherit ignore_bots: true from default")
+	}
+}
+
 
 
 

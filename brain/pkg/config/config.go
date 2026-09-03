@@ -55,17 +55,37 @@ type GitSyncConfig struct {
 }
 
 type ChannelPolicy struct {
-	Mode            string `yaml:"mode" json:"mode"`
-	TypingIndicator string `yaml:"typing_indicator" json:"typing_indicator"`
-	IgnoreBots      bool   `yaml:"ignore_bots" json:"ignore_bots"`
-	AllowSystemOps  bool   `yaml:"allow_system_ops" json:"allow_system_ops"`
-	MaxSessionTurns int    `yaml:"max_session_turns" json:"max_session_turns"`
+	Mode                 string   `yaml:"mode" json:"mode"`
+	TypingIndicator      string   `yaml:"typing_indicator" json:"typing_indicator"`
+	IgnoreBots           *bool    `yaml:"ignore_bots,omitempty" json:"ignore_bots,omitempty"`
+	AllowSystemOps       bool     `yaml:"allow_system_ops" json:"allow_system_ops"`
+	MaxSessionTurns      int      `yaml:"max_session_turns" json:"max_session_turns"`
+	AmbientWakeThreshold *float64 `yaml:"ambient_wake_threshold,omitempty" json:"ambient_wake_threshold,omitempty"`
 }
 
 // IsIgnored reports whether the channel policy specifies an ignored/disabled channel.
 func (p ChannelPolicy) IsIgnored() bool {
 	m := strings.ToLower(strings.TrimSpace(p.Mode))
 	return m == "ignore" || m == "disabled"
+}
+
+// GetAmbientWakeThreshold returns the ambient wake threshold, defaulting to 0.80 for channel mode and 0.0 otherwise.
+func (p ChannelPolicy) GetAmbientWakeThreshold() float64 {
+	if p.AmbientWakeThreshold != nil {
+		return *p.AmbientWakeThreshold
+	}
+	if strings.ToLower(strings.TrimSpace(p.Mode)) == "channel" {
+		return 0.80
+	}
+	return 0.0
+}
+
+// IsBotIgnored reports whether bot messages should be ignored for this channel policy.
+func (p ChannelPolicy) IsBotIgnored() bool {
+	if p.IgnoreBots != nil {
+		return *p.IgnoreBots
+	}
+	return false
 }
 
 type Config struct {
@@ -81,14 +101,16 @@ type Config struct {
 
 func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	type rawConfigHelper struct {
-		Model          string                   `yaml:"model"`
-		TimeoutMinutes int                      `yaml:"timeout_minutes"`
-		Timezone       string                   `yaml:"timezone"`
-		SystemChannel  string                   `yaml:"system_channel"`
-		AdminUsers     []string                 `yaml:"admin_users"`
-		Channels       map[string]ChannelPolicy `yaml:"channels"`
-		GitSync        GitSyncConfig            `yaml:"git_sync"`
-		McpServers     map[string]interface{}   `yaml:"mcp_servers"`
+		Model                string                   `yaml:"model"`
+		TimeoutMinutes       int                      `yaml:"timeout_minutes"`
+		Timezone             string                   `yaml:"timezone"`
+		SystemChannel        string                   `yaml:"system_channel"`
+		AdminUsers           []string                 `yaml:"admin_users"`
+		Channels             map[string]ChannelPolicy `yaml:"channels"`
+		GitSync              GitSyncConfig            `yaml:"git_sync"`
+		McpServers           map[string]interface{}   `yaml:"mcp_servers"`
+		AmbientWakeThreshold *float64                 `yaml:"ambient_wake_threshold,omitempty"`
+		IgnoreBots           *bool                    `yaml:"ignore_bots,omitempty"`
 	}
 
 	var raw rawConfigHelper
@@ -128,6 +150,7 @@ type Options struct {
 }
 
 func DefaultConfig() Config {
+	defaultIgnoreBots := true
 	return Config{
 		Model:          "Gemini 3.6 Flash (Low)",
 		TimeoutMinutes: 15,
@@ -138,7 +161,7 @@ func DefaultConfig() Config {
 			"default": {
 				Mode:            "threads",
 				TypingIndicator: "always",
-				IgnoreBots:      true,
+				IgnoreBots:      &defaultIgnoreBots,
 				AllowSystemOps:  false,
 				MaxSessionTurns: 0,
 			},
@@ -286,6 +309,13 @@ func LoadConfigFromPaths(paths ...string) (Config, error) {
 		return GetRuntimeConfig(), fmt.Errorf("channels.default mode must be 'threads', 'channel', 'ignore', or 'disabled', got %q", defPolicy.Mode)
 	}
 
+	if defPolicy.AmbientWakeThreshold != nil {
+		if *defPolicy.AmbientWakeThreshold < 0.0 || *defPolicy.AmbientWakeThreshold > 1.0 {
+			log.Printf("[Config] Validation error: channels.default ambient_wake_threshold must be between 0.0 and 1.0, got %f in %s. Retaining Last Known Good Configuration (LKGC).", *defPolicy.AmbientWakeThreshold, targetPath)
+			return GetRuntimeConfig(), fmt.Errorf("channels.default ambient_wake_threshold must be between 0.0 and 1.0, got %f", *defPolicy.AmbientWakeThreshold)
+		}
+	}
+
 	// Normalize channels.default
 	if defPolicy.TypingIndicator == "" {
 		if defPolicy.Mode == "channel" {
@@ -312,6 +342,12 @@ func LoadConfigFromPaths(paths ...string) (Config, error) {
 				return GetRuntimeConfig(), fmt.Errorf("channel %q mode must be 'threads', 'channel', 'ignore', or 'disabled', got %q", k, policy.Mode)
 			}
 			policy.Mode = modeLower
+		}
+		if policy.AmbientWakeThreshold != nil {
+			if *policy.AmbientWakeThreshold < 0.0 || *policy.AmbientWakeThreshold > 1.0 {
+				log.Printf("[Config] Validation error: channel %q ambient_wake_threshold must be between 0.0 and 1.0, got %f in %s. Retaining Last Known Good Configuration (LKGC).", k, *policy.AmbientWakeThreshold, targetPath)
+				return GetRuntimeConfig(), fmt.Errorf("channel %q ambient_wake_threshold must be between 0.0 and 1.0, got %f", k, *policy.AmbientWakeThreshold)
+			}
 		}
 		if policy.TypingIndicator == "" {
 			if policy.Mode == "channel" {
@@ -387,10 +423,11 @@ func (c Config) IsAdmin(identifiers ...string) bool {
 func (c Config) ResolveChannelPolicy(channelID, channelName string) ChannelPolicy {
 	def, hasDef := c.getChannelPolicyRaw("default")
 	if !hasDef {
+		defaultIgnoreBots := true
 		def = ChannelPolicy{
 			Mode:            "threads",
 			TypingIndicator: "always",
-			IgnoreBots:      true,
+			IgnoreBots:      &defaultIgnoreBots,
 			AllowSystemOps:  false,
 			MaxSessionTurns: 0,
 		}
@@ -453,8 +490,13 @@ func (c Config) ResolveChannelPolicy(channelID, channelName string) ChannelPolic
 			}
 		}
 	}
-	if !res.IgnoreBots && def.IgnoreBots {
-		res.IgnoreBots = true
+	if res.IgnoreBots == nil && def.IgnoreBots != nil {
+		val := *def.IgnoreBots
+		res.IgnoreBots = &val
+	}
+	if res.AmbientWakeThreshold == nil && def.AmbientWakeThreshold != nil {
+		val := *def.AmbientWakeThreshold
+		res.AmbientWakeThreshold = &val
 	}
 	if !res.AllowSystemOps && def.AllowSystemOps {
 		res.AllowSystemOps = true
