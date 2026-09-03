@@ -145,6 +145,13 @@ User configuration and persona rules live in your private configuration reposito
    - **Normalized Lookups**: Channel names are normalized case-insensitively, strip leading `#`, and interoperate between spaces and hyphens (e.g., `#Dev Chat` resolves `dev-chat.md` or `dev chat.md`).
    - **Prompt Injection & Safety**: Instructions are framed inside `<CHANNEL_INSTRUCTIONS>` prior to `<USER_REQUEST>`, escaped against XML delimiter breakouts, capped at 64KB, and defended against directory traversal.
    - **Clean Default Fallback**: If no instructions file exists for a channel, Aerial cleanly omits the `<CHANNEL_INSTRUCTIONS>` block and relies on base `SYSTEM.md` and `AGENTS.md` guidelines.
+   - **Example (`channels/dev-alerts.md`)**:
+     ```markdown
+     # Dev Alerts Channel Guidelines
+     - Focus strictly on CI/CD pipeline failures, production errors, and service health.
+     - Provide actionable remediation steps and relevant logs.
+     - Keep responses concise and technical.
+     ```
 
 ---
 
