@@ -28,6 +28,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tzdata \
     docker.io \
     docker-compose-v2 \
+    python3 \
+    python3-yaml \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy Go SDK and golangci-lint from builder to provide local compiler and linting parity
@@ -41,6 +43,8 @@ RUN curl -fsSL https://antigravity.google/cli/install.sh | bash -s -- -d /usr/lo
 WORKDIR /app
 
 COPY --from=builder /aerial-brain /usr/local/bin/aerial-brain
+COPY scripts/ /usr/local/bin/
+RUN chmod +x /usr/local/bin/*.sh || true
 COPY GEMINI.md /app/GEMINI.md
 COPY .agents /app/.agents
 

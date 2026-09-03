@@ -29,12 +29,13 @@ services:
       - DEFAULT_TIMEZONE=${DEFAULT_TIMEZONE:-America/Los_Angeles}
       - TZ=${DEFAULT_TIMEZONE:-America/Los_Angeles}
       - GIT_TERMINAL_PROMPT=0
+    shm_size: '512mb'
     volumes:
       - aerial-brain-data:/data
       - aerial-brain-gemini:/root/.gemini
       - /var/run/docker.sock:/var/run/docker.sock
-      - ${AERIAL_CONFIG_DIR:-/mnt/data/supervisor/share/aerial-config}:/share/aerial-config
-      - ${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}:/share/aerial
+      - ${AERIAL_CONFIG_DIR:-/mnt/data/supervisor/share/aerial-config}:/share/aerial-config:ro
+      - ${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}:/share/aerial:ro
     ports:
       - "${AERIAL_BRAIN_HOST_PORT:-8088}:8080"
     networks:
@@ -46,12 +47,43 @@ services:
       retries: 5
       start_period: 60s
     depends_on:
+      gitsync:
+        condition: service_healthy
       scheduler-mcp:
         condition: service_healthy
-      discord-mcp:
-        condition: service_healthy
-      docker-mcp:
-        condition: service_healthy
+
+  # ----------------------------------------------------------------------------
+  # 1b. GitSync Sidecar: Aerial GitSync
+  #     Performs automated, single-flight Git synchronization for live repositories
+  #     and exposes on-demand sync webhook. Holds write volume mounts to prevent
+  #     unpushed commits from ever touching the execution brain.
+  # ----------------------------------------------------------------------------
+  gitsync:
+    image: ghcr.io/azylman/aerial-gitsync:latest
+    build:
+      context: .
+      dockerfile: sidecars/gitsync/Dockerfile
+    container_name: aerial-gitsync
+    restart: unless-stopped
+    labels:
+      autoheal: "true"
+      com.centurylinklabs.watchtower.enable: "true"
+    environment:
+      - PORT=8080
+      - GITHUB_PAT=${GITHUB_PAT}
+      - AERIAL_CONFIG_REPO_URL=${AERIAL_CONFIG_REPO_URL}
+      - SYNC_INTERVAL=60s
+      - SYNC_REPOS=/share/aerial-config,/share/aerial
+    volumes:
+      - ${AERIAL_CONFIG_DIR:-/mnt/data/supervisor/share/aerial-config}:/share/aerial-config:rw
+      - ${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}:/share/aerial:rw
+    networks:
+      - aerial-net
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
 
   # ----------------------------------------------------------------------------
   # 2. Automated Updates: Watchtower
