@@ -35,13 +35,13 @@ Whenever undertaking feature development, architectural changes, bug fixes, or s
 Stage 1: Brainstorming & Formal Implementation Plan
    │
    ▼
-Stage 2: The 4-Expert Review Panel ("The Girl Gang") — Plan Audit
+Stage 2: The 4-Expert Review Panel — Plan Audit
    │     • 3 Domain Specialists tailored to the problem
    │     • 1 Dedicated Adversarial Systems Critic / Devil's Advocate
    │
    ▼
 Stage 3: Human Review Checkpoint (Mandatory Gate)
-   │     • Synthesize Girl Gang findings, trade-offs, and consensus
+   │     • Synthesize expert panel findings, trade-offs, and consensus
    │     • STOP and obtain explicit user approval before touching code
    │
    ▼
@@ -78,7 +78,7 @@ Stage 6: Commit, Push & Continuous Deployment
 
 ---
 
-### Stage 2: The 4-Expert Review Panel ("The Girl Gang") — Plan Audit
+### Stage 2: The 4-Expert Review Panel — Plan Audit
 Before modifying source code, Aerial MUST assemble and consult a dynamic review panel of **four independent expert subagents**:
 1. **Three Domain Specialists**: Dynamically chosen and tailored to the technical requirements of the task (e.g. CI/CD & DevOps Specialist, Distributed Systems & Concurrency Engineer, Discord Gateway & UX Specialist, Git Tooling Specialist, etc.).
 2. **One Dedicated Adversarial Systems Critic / Devil's Advocate**: Tasked specifically with aggressively challenging assumptions, probing edge cases, failure modes, race conditions, memory leaks, and personal data leakage.
@@ -90,7 +90,7 @@ Before modifying source code, Aerial MUST assemble and consult a dynamic review 
 ---
 
 ### Stage 3: Human Review Checkpoint (Mandatory Gate)
-Present a structured synthesis of the Girl Gang's audit to the human user:
+Present a structured synthesis of the expert panel's audit to the human user:
 1. **Consensus & Contentions**: Highlight where the domain specialists and Devil's Advocate agreed and where they clashed.
 2. **Key Decisions & Trade-Offs**: Outline architectural trade-offs, risk mitigations, and plan remediations.
 3. **MANDATORY STOP**: Wait for explicit human approval before writing or modifying any implementation code.
