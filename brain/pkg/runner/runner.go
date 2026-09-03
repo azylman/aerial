@@ -84,6 +84,8 @@ func RunAgy(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string
 	cmd.Stdout = &outBuf
 	cmd.Stderr = &errBuf
 
+	configureSysProcAttr(cmd)
+
 	runErr := cmd.Run()
 	stdout = outBuf.String()
 	stderr = errBuf.String()

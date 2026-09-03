@@ -18,10 +18,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/azylman/aerial/brain/pkg/classifier"
 	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
 	"github.com/azylman/aerial/brain/pkg/delivery"
 	"github.com/azylman/aerial/brain/pkg/queue"
+	"github.com/azylman/aerial/brain/pkg/runner"
 	"github.com/azylman/aerial/brain/pkg/scheduler"
 	"github.com/azylman/aerial/brain/pkg/skills"
 	"github.com/azylman/aerial/brain/pkg/watcher"
@@ -845,6 +847,12 @@ func main() {
 		}
 	}()
 
+	clsModel := config.GetEnv("AMBIENT_CLASSIFIER_MODEL", "3.8 Flash (Low)")
+	cls := classifier.NewClassifier(
+		classifier.WithModel(clsModel),
+		classifier.WithLLMFunc(classifier.NewAgyLLMFunc(agyBin, apiKey, runner.RunAgy)),
+	)
+
 	pool := queue.NewWorkerPool(queue.WorkerPoolConfig{
 		DB:             database,
 		AgyBin:         agyBin,
@@ -852,6 +860,7 @@ func main() {
 		Model:          cfg.Model,
 		SystemPrompt:   systemPrompt,
 		TimeoutMinutes: cfg.TimeoutMinutes,
+		Classifier:     cls,
 	})
 	pool.Start()
 	defer pool.Stop()

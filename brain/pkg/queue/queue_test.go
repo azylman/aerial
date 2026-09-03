@@ -3302,3 +3302,136 @@ func TestProcessBurst_NoDuplicationOnRetry(t *testing.T) {
 		}
 	}
 }
+
+func TestProcessBurst_Tier1PreScan_SkipsClassifier(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to init db: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	var classifierCalls int
+	cls := classifier.NewClassifier(
+		classifier.WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
+			classifierCalls++
+			return `{"confidence": 0.0, "reason": "should not be called"}`, nil
+		}),
+	)
+
+	var runnerCalls int
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:         database,
+		Classifier: cls,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			runnerCalls++
+			return "Hello there!", "", 0, nil
+		},
+		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
+			return config.ChannelPolicy{
+				Mode:                 "channel",
+				AmbientWakeThreshold: ptrFloat(0.80),
+			}
+		},
+	})
+
+	now := time.Now().UTC()
+	// Burst: [Ambient1, Tier1Wake, Ambient3]
+	m1 := db.Message{
+		ID:         "msg-prescan-1",
+		ThreadID:   "chan-lounge",
+		AuthorName: "Alice",
+		Content:    "just hanging out",
+		CreatedAt:  now,
+	}
+	m2 := db.Message{
+		ID:         "msg-prescan-2",
+		ThreadID:   "chan-lounge",
+		AuthorName: "Bob",
+		Content:    "@Aerial what's up?",
+		CreatedAt:  now.Add(1 * time.Second),
+	}
+	m3 := db.Message{
+		ID:         "msg-prescan-3",
+		ThreadID:   "chan-lounge",
+		AuthorName: "Charlie",
+		Content:    "lol",
+		CreatedAt:  now.Add(2 * time.Second),
+	}
+	_ = db.InsertMessage(database, m1)
+	_ = db.InsertMessage(database, m2)
+	_ = db.InsertMessage(database, m3)
+
+	pool.processBurst([]db.Message{m1, m2, m3})
+
+	if classifierCalls != 0 {
+		t.Errorf("Expected 0 classifier calls due to Tier-1 pre-scan fast path, got %d", classifierCalls)
+	}
+	if runnerCalls != 1 {
+		t.Errorf("Expected 1 runner call for Tier-1 wake message, got %d", runnerCalls)
+	}
+}
+
+func TestProcessBurst_CoalescedAmbientBurst(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to init db: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	var classifierCalls int
+	var capturedPrompt string
+	cls := classifier.NewClassifier(
+		classifier.WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
+			classifierCalls++
+			capturedPrompt = prompt
+			return `{"confidence": 0.95, "reason": "urgent issue needing answer"}`, nil
+		}),
+	)
+
+	var runnerCalls int
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:         database,
+		Classifier: cls,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			runnerCalls++
+			return "I can help with that database error!", "", 0, nil
+		},
+		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
+			return config.ChannelPolicy{
+				Mode:                 "channel",
+				AmbientWakeThreshold: ptrFloat(0.80),
+			}
+		},
+	})
+
+	now := time.Now().UTC()
+	m1 := db.Message{
+		ID:         "msg-coalesce-1",
+		ThreadID:   "chan-lounge",
+		AuthorName: "Alice",
+		Content:    "Does anyone know why postgres crashed?",
+		CreatedAt:  now,
+	}
+	m2 := db.Message{
+		ID:         "msg-coalesce-2",
+		ThreadID:   "chan-lounge",
+		AuthorName: "Bob",
+		Content:    "brb grabbing coffee",
+		CreatedAt:  now.Add(1 * time.Second),
+	}
+	_ = db.InsertMessage(database, m1)
+	_ = db.InsertMessage(database, m2)
+
+	pool.processBurst([]db.Message{m1, m2})
+
+	if classifierCalls != 1 {
+		t.Errorf("Expected exactly 1 coalesced classifier call for burst of 2 ambient messages, got %d", classifierCalls)
+	}
+	if !strings.Contains(capturedPrompt, "<target_burst>") {
+		t.Errorf("Expected prompt to contain <target_burst>, got:\n%s", capturedPrompt)
+	}
+	if runnerCalls != 1 {
+		t.Errorf("Expected 1 runner call for woken burst, got %d", runnerCalls)
+	}
+}
+
