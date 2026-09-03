@@ -185,7 +185,6 @@ func buildDiscordPrompt(m *discordgo.Message, targetThreadID string, policy conf
 
 	if policy.Mode == "channel" {
 		sb.WriteString("Please formulate your response and output it clearly. It will be delivered directly to the Discord channel.\n")
-		sb.WriteString("If this message does not require your response or is general banter not directed at you, output [NO_REPLY] as your entire response.\n")
 	} else {
 		sb.WriteString("Please formulate your response and output it clearly. It will be delivered directly to the Discord thread.\n")
 	}
@@ -595,7 +594,10 @@ func RunStartupCatchUpSweep(ctx context.Context, database *sql.DB, pool *queue.W
 		}
 
 		for _, m := range fetched {
-			if m == nil || m.Author == nil || m.Author.Bot {
+			if m == nil || m.Author == nil {
+				continue
+			}
+			if m.Author.Bot && policy.IsBotIgnored() {
 				continue
 			}
 			if botUserID != "" && m.Author.ID == botUserID {
