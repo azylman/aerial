@@ -1581,7 +1581,7 @@ func TestQueueTurnCountSessionRotation(t *testing.T) {
 
 	// Verify post-3-turns state:
 	// Session ID should be rotated to a new UUID (not initialSessionID)
-	// turn_count should be reset to 0
+	// turn_count should be 1 for the new session
 	finalSessionID, err := db.GetSessionID(database, channelID)
 	if err != nil {
 		t.Fatalf("Failed to query session ID: %v", err)
@@ -1594,8 +1594,8 @@ func TestQueueTurnCountSessionRotation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to query turn count: %v", err)
 	}
-	if finalTurnCount != 0 {
-		t.Errorf("Expected turn_count=0 after rotation, got %d", finalTurnCount)
+	if finalTurnCount != 1 {
+		t.Errorf("Expected turn_count=1 after rotation, got %d", finalTurnCount)
 	}
 }
 
@@ -2470,6 +2470,283 @@ func TestProcessBurst_MixedBurst(t *testing.T) {
 	turnCount, _ := db.GetSessionTurnCount(database, "chan-lounge")
 	if turnCount != 1 {
 		t.Errorf("Expected turn_count = 1 after mixed burst, got %d", turnCount)
+	}
+}
+
+func TestExtractMessageBody_Multiline(t *testing.T) {
+	prompt := `<USER_REQUEST>
+Here's a message someone sent you from Discord:
+
+- id: 12345
+- channel_id: chan-1
+- thread_id: thread-1
+- guild_id: guild-1
+- author_id: user-1
+- author_username: alice
+- author_global_name: Alice
+- author_bot: false
+- is_admin: false
+- content: First line of message
+Second line of message
+Third line of message
+- timestamp: 2026-09-02T12:00:00Z
+- mentions: []
+- attachments: []
+
+Please formulate your response and output it clearly.
+</USER_REQUEST>`
+
+	extracted := extractMessageBody(prompt)
+	expected := "First line of message\nSecond line of message\nThird line of message"
+	if extracted != expected {
+		t.Errorf("Expected multiline extraction:\n%q\ngot:\n%q", expected, extracted)
+	}
+}
+
+func TestIsTier1Wake_ReplyingToNonAerialWithAerialContent(t *testing.T) {
+	// A message replying to @bob, where bob's quoted content mentions "aerial photo"
+	// and the user's content is "Nice shot!"
+	prompt := `<USER_REQUEST>
+Here's a message someone sent you from Discord:
+
+- id: msg-reply-1
+- channel_id: chan-1
+- thread_id: thread-1
+- guild_id: guild-1
+- author_id: user-1
+- author_username: alice
+- author_global_name: Alice
+- author_bot: false
+- is_admin: false
+- replying_to:
+    author: "@bob"
+    content: "Look at this aerial photo of the bridge"
+- content: Nice shot!
+- timestamp: 2026-09-02T12:00:00Z
+- mentions: []
+- attachments: []
+
+Please formulate your response and output it clearly.
+</USER_REQUEST>`
+
+	msg := db.Message{
+		ID:        "msg-reply-1",
+		ThreadID:  "chan-1",
+		Content:   prompt,
+		CreatedAt: time.Now().UTC(),
+	}
+
+	if isTier1Wake(msg, "bot-aerial-id") {
+		t.Errorf("Expected isTier1Wake to be FALSE when replying to @bob whose content contains 'aerial photo'")
+	}
+}
+
+func TestProcessBurst_SessionRotationBeforeLeadingAmbient(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	channelID := "chan-rot-ambient"
+	initialSessionID := "sess-old-123"
+	_ = db.SaveSessionID(database, channelID, initialSessionID)
+	_, _ = session.EnsureSessionDir(initialSessionID)
+
+	// Set turn_count to 2, with MaxSessionTurns = 3.
+	// The incoming burst has [Ambient1, Wake2].
+	// Wake2 will increment turn_count to 3, triggering rotation.
+	// Ambient1 MUST be written to the NEW session directory, not the old one!
+	_, _ = db.IncrementSessionTurnCount(database, channelID) // turn 1
+	_, _ = db.IncrementSessionTurnCount(database, channelID) // turn 2
+
+	var mu sync.Mutex
+	runnerCalls := 0
+
+	cls := classifier.NewClassifier(classifier.WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
+		return `{"confidence": 0.10, "reason": "ambient banter"}`, nil
+	}))
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		Classifier:     cls,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			mu.Lock()
+			runnerCalls++
+			mu.Unlock()
+			return "I am answering your question!", "", 0, nil
+		},
+		DeliveryFunc: func(sess *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		TypingFunc: func(sess *discordgo.Session, channelID string) func() {
+			return func() {}
+		},
+		MemoryRetrieverFunc: func(ctx context.Context, database *sql.DB, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+			return nil, nil
+		},
+		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
+			return config.ChannelPolicy{
+				Mode:                 "channel",
+				MaxSessionTurns:      3,
+				AmbientWakeThreshold: ptrFloat(0.80),
+			}
+		},
+	})
+
+	now := time.Now().UTC()
+	msg1 := db.Message{
+		ID:         "msg-rot-amb-1",
+		ThreadID:   channelID,
+		AuthorName: "Alice",
+		Content:    "Random ambient chatter before question",
+		Status:     db.StatusPending,
+		CreatedAt:  now,
+	}
+	msg2 := db.Message{
+		ID:         "msg-rot-wake-2",
+		ThreadID:   channelID,
+		AuthorName: "Bob",
+		Content:    "Hey Aerial, what is 2+2?",
+		Status:     db.StatusPending,
+		CreatedAt:  now.Add(2 * time.Second),
+	}
+	_ = db.InsertMessage(database, msg1)
+	_ = db.InsertMessage(database, msg2)
+
+	pool.processBurst([]db.Message{msg1, msg2})
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if runnerCalls != 1 {
+		t.Errorf("Expected 1 runner call, got %d", runnerCalls)
+	}
+
+	newSessionID, err := db.GetSessionID(database, channelID)
+	if err != nil || newSessionID == initialSessionID || newSessionID == "" {
+		t.Fatalf("Expected session to rotate to a new session ID, got %s (old=%s)", newSessionID, initialSessionID)
+	}
+
+	// Verify that Ambient1 was written to the NEW session directory, NOT the old session directory!
+	newTranscriptPath := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", newSessionID, ".system_generated", "logs", "transcript.jsonl")
+	dataNew, err := os.ReadFile(newTranscriptPath)
+	if err != nil {
+		t.Fatalf("Failed to read new session transcript: %v", err)
+	}
+	if !strings.Contains(string(dataNew), "Random ambient chatter before question") {
+		t.Errorf("Expected leading ambient message to be preserved in new session transcript:\n%s", string(dataNew))
+	}
+
+	oldTranscriptPath := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", initialSessionID, ".system_generated", "logs", "transcript.jsonl")
+	dataOld, _ := os.ReadFile(oldTranscriptPath)
+	if strings.Contains(string(dataOld), "Random ambient chatter before question") {
+		t.Errorf("Ambient message should NOT have been written to old session directory")
+	}
+}
+
+func TestProcessBurst_TrailingAmbient(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	sessionID := "trailing-ambient-sess"
+	_ = db.SaveSessionID(database, "chan-lounge", sessionID)
+	sessDir, _ := session.EnsureSessionDir(sessionID)
+
+	var mu sync.Mutex
+	runnerCalls := 0
+	var receivedPrompt string
+
+	cls := classifier.NewClassifier(classifier.WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
+		return `{"confidence": 0.10, "reason": "ambient banter"}`, nil
+	}))
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		Classifier:     cls,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			mu.Lock()
+			runnerCalls++
+			receivedPrompt = prompt
+			mu.Unlock()
+			return "Aerial answer", "", 0, nil
+		},
+		DeliveryFunc: func(sess *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		TypingFunc: func(sess *discordgo.Session, channelID string) func() {
+			return func() {}
+		},
+		MemoryRetrieverFunc: func(ctx context.Context, database *sql.DB, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+			return nil, nil
+		},
+		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
+			return config.ChannelPolicy{
+				Mode:                 "channel",
+				AmbientWakeThreshold: ptrFloat(0.80),
+			}
+		},
+	})
+
+	now := time.Now().UTC()
+	// Burst: [Wake1, Ambient2]
+	msg1 := db.Message{
+		ID:         "msg-trail-wake-1",
+		ThreadID:   "chan-lounge",
+		AuthorName: "Alice",
+		Content:    "Hey Aerial, explain gravity",
+		Status:     db.StatusPending,
+		CreatedAt:  now,
+	}
+	msg2 := db.Message{
+		ID:         "msg-trail-amb-2",
+		ThreadID:   "chan-lounge",
+		AuthorName: "Bob",
+		Content:    "I love physics too",
+		Status:     db.StatusPending,
+		CreatedAt:  now.Add(2 * time.Second),
+	}
+	_ = db.InsertMessage(database, msg1)
+	_ = db.InsertMessage(database, msg2)
+
+	pool.processBurst([]db.Message{msg1, msg2})
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if runnerCalls != 1 {
+		t.Errorf("Expected 1 runner call for wake message, got %d", runnerCalls)
+	}
+	// Prompt should only contain Wake1, NOT Ambient2!
+	if strings.Contains(receivedPrompt, "I love physics too") {
+		t.Errorf("Runner prompt should NOT contain trailing ambient message, got: %s", receivedPrompt)
+	}
+
+	// Ambient2 should be recorded as ambient turn in transcript
+	logsPath := filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl")
+	data, err := os.ReadFile(logsPath)
+	if err != nil {
+		t.Fatalf("Failed to read transcript: %v", err)
+	}
+	if !strings.Contains(string(data), "I love physics too") {
+		t.Errorf("Expected trailing ambient message in transcript.jsonl, got:\n%s", string(data))
+	}
+
+	// Ambient2 in DB should have [AMBIENT score=...]
+	m2Saved, _ := db.GetMessage(database, "msg-trail-amb-2")
+	if m2Saved == nil || m2Saved.Status != db.StatusCompleted || !strings.Contains(m2Saved.ErrorMessage, "[AMBIENT score=") {
+		t.Errorf("Expected trailing ambient msg to be COMPLETED with [AMBIENT score=...], got: %+v", m2Saved)
 	}
 }
 
