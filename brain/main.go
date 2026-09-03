@@ -797,6 +797,12 @@ func main() {
 	}
 	bootCancel()
 
+	aerialSyncCtx, aerialSyncCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	if _, err := gitsync.SyncRepo(aerialSyncCtx, "/share/aerial"); err != nil {
+		log.Printf("[Startup Bootstrapping] Notice: Bootstrapping sync for /share/aerial returned: %v (continuing with local tree)", err)
+	}
+	aerialSyncCancel()
+
 	_ = gitsync.SyncComposeOverride("/share/aerial-config", "/share/aerial")
 
 	cfg, err := config.LoadConfig()

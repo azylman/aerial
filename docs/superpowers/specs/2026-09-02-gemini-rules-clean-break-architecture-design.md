@@ -1,3 +1,73 @@
+﻿# Design Document: Standardized GEMINI.md Clean Break & Lean Core Architecture
+
+- **Date**: 2026-09-02
+- **Status**: Approved (Audited & Remediated by 4-Expert Review Panel)
+- **Target Repository**: `azylman/aerial` (`/share/aerial`)
+
+---
+
+## 1. Executive Summary
+
+This architecture design standardizes Aerial's core system guidelines by executing a **clean-break migration from `SYSTEM.md` to `GEMINI.md`**. It eliminates custom, non-standard rule naming in favor of native Antigravity root rule discovery, resolves the **Rule Duplication Trap** by decoupling native workspace discovery from global persona rules, keeps prompt rules free of brittle hardcoded ports, and offloads heavy procedural engineering runbooks to on-demand skills.
+
+---
+
+## 2. Motivation & Problem Statement
+
+1. **Non-Standard Rule Naming (`SYSTEM.md`)**:
+   Antigravity CLI (`agy`) and the Antigravity IDE natively look for `GEMINI.md`, `AGENTS.md`, or `.agents/rules/*.md`. Antigravity does not recognize `SYSTEM.md`. Previously, running `agy` standalone or inspecting the codebase outside the Docker runtime left `SYSTEM.md` completely undiscovered.
+2. **The Rule Duplication Trap (Audited by Panel)**:
+   If `GEMINI.md` is placed at `/share/aerial/GEMINI.md` (which is `agy`'s working directory), Antigravity natively loads it as the workspace context. If `EnsureSystemRules` also concatenates `GEMINI.md` into `~/.gemini/rules/system_instructions.md`, `agy` injects the entire ~85 lines of core system instructions **twice** into every turn (~1,500 wasted tokens per turn) and risks precedence inversion.
+3. **Prompt Drift & Hardcoded Ports**:
+   Every host port in `docker-compose.yml` is configurable via `.env` (`${AERIAL_BRAIN_HOST_PORT:-8088}`, `${AGENTSVIEW_HOST_PORT:-8089}`). Hardcoding static port numbers in prompt rules creates prompt drift. When asked about ports, Aerial should inspect `docker-compose.yml` or container state dynamically.
+4. **Procedural Runbook Tangling**:
+   Detailed step-by-step engineering workflows (the 6-stage lifecycle, 4-expert subagent prompt templates, test execution scripts) were duplicated inside the always-on system prompt, inflating prompt tokens on every turn. In modern Antigravity design, procedural workflows belong in on-demand skills (`self-improvement`), while rules must remain lean, immutable invariants.
+
+---
+
+## 3. Architecture & Separation of Concerns
+
+```text
+/share/aerial/ (Core Engine Repo)
+├── GEMINI.md                          <-- Lean Core Invariants (Native Workspace Discovery, ~85 lines)
+│                                          • Gundam Aerial identity & origin
+│                                          • Full 11-service topology (by role, zero hardcoded ports)
+│                                          • Two-repository separation rules
+│                                          • System invariants (Discord markdown, scheduler MCP, admin auth)
+│                                          • Fallback tone & self-improvement pointer
+│
+└── .agents/skills/                    <-- Procedural Workflows (Progressive Disclosure)
+    ├── self-improvement/SKILL.md          • 6-stage engineering process, 4-expert panel,
+    │                                        verify runner, branch protection auto-merge
+    └── self-update/SKILL.md               • Deployment & container rolling restart runbook
+
+/share/aerial-config/ (User Config Repo)
+├── AGENTS.md                          <-- Persona & Identity (Compiled to ~/.gemini/rules/user_persona.md)
+│                                          • ABG aesthetic + Aggretsuko death metal mode
+│                                          • Gen Z girlie vibe & dynamic emoji rotation
+│                                          • Alex identity & "girl gang" moniker
+│
+├── channels/<name>.md                 <-- Local Channel Overrides (Injected per-turn in -p)
+│                                          • #lounge occupants & boomer roast rules
+│
+└── config.yaml                        <-- Runtime Engine Settings
+                                           • Timezone, system_channel, admin_users, channel modes
+```
+
+### Context Loading Architecture (Decoupled, Zero Duplication)
+- **Workspace Context Slot**: `/share/aerial/GEMINI.md` (Core Engine Invariants & Topology, loaded natively by `agy`).
+- **Global Rules Slot**: `~/.gemini/rules/user_persona.md` (User Persona & Preferences from `/share/aerial-config/AGENTS.md`, compiled by `EnsureSystemRules` with `trigger: always_on`).
+- **Turn Prompt Slot (`-p`)**: `<CHANNEL_INSTRUCTIONS>` (Dynamic per-channel rules) + `<USER_REQUEST>` (Discord message).
+- **On-Demand Skills Slot**: `self-improvement`, `self-update`, `ha-operations` (loaded only when triggered).
+
+---
+
+## 4. Component Changes
+
+### 4.1. Core Engine: `GEMINI.md` Specification
+Rename `SYSTEM.md` -> `GEMINI.md`. Replace contents with clean, canonical invariants:
+
+```markdown
 # GEMINI.md - Aerial AI Personal Assistant
 
 ## Identity & Role
@@ -103,3 +173,45 @@ Aerial operates on a strict **Two-Repository Separation of Concerns**:
 
 10. **Default Tone**:
     - Succinct, direct, and helpful. Avoid corporate fluff, robotic hedging, or obsequiousness (used only as fallback if `AGENTS.md` is absent).
+```
+
+### 4.2. Configuration Compiler: `brain/pkg/config/config.go`
+- **Decoupling Native `GEMINI.md` from `EnsureSystemRules`**:
+  - `EnsureSystemRules` will compile **ONLY** `/share/aerial-config/AGENTS.md` and custom prompt overrides into `~/.gemini/rules/user_persona.md`.
+  - It does **not** concatenate `GEMINI.md`, allowing Antigravity to discover `GEMINI.md` natively in `cmd.Dir` without double-injection.
+  - If `AGENTS.md` reads 0 bytes (torn read during git sync), retain the cached LKGC persona.
+- **Stale Rule Cleanup**:
+  - Clean up legacy files on disk: `system.md`, `system_instructions.md`, uppercase variants (`SYSTEM.md`), and any repository-level `.agents/rules/gemini.md`.
+- **Purge Orphaned Root File**:
+  - Delete obsolete `brain/GEMINI.md` (30-line legacy file) so it never shadows the root during local execution or unit tests.
+
+### 4.3. Startup Bootstrapping in `brain/main.go`
+- In `main.go`, perform a synchronous startup sync for `/share/aerial`:
+  ```go
+  _ = gitsync.SyncRepo(bootCtx, "/share/aerial")
+  ```
+  before calling `EnsureSystemRules`. This eliminates the 60-second cold-boot lag during Watchtower rolling restarts.
+
+### 4.4. Docker & CI Infrastructure
+- `brain/Dockerfile`:
+  - Change line 44 to `COPY GEMINI.md /app/GEMINI.md`.
+  - **DELETE line 45** (`COPY SYSTEM.md /app/SYSTEM.md`) to prevent build failure once `SYSTEM.md` is removed.
+- `.github/workflows/docker-publish.yml`:
+  - Update path trigger under `brain` from `SYSTEM.md` -> `GEMINI.md`.
+
+### 4.5. Documentation & Config Templates
+- `README.md`: Update 4 references from `SYSTEM.md` -> `GEMINI.md`.
+- `config.example.yaml`: Update comments from `SYSTEM.md` -> `GEMINI.md`.
+
+---
+
+## 5. Verification Plan
+
+1. **Unit Testing**:
+   - `brain/pkg/config/config_test.go`: Assert resolution of `AGENTS.md` into `user_persona.md` without duplicating `GEMINI.md`.
+   - `brain/pkg/watcher/watcher_test.go`: Assert file change watcher triggers on `GEMINI.md` and `AGENTS.md` updates.
+2. **Pre-Flight Verification Gate**:
+   - Run `./scripts/verify.sh` (or `verify.ps1` on Windows) to verify all Go microservices, dashboard unit tests, and linters with 0 exit code.
+3. **CI/CD Build & Land**:
+   - Push to feature branch `refactor/clean-break-gemini-rules`.
+   - Open Pull Request via GitHub MCP, verify status checks, and squash merge to `main`.

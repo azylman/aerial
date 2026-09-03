@@ -77,7 +77,7 @@ User configuration and persona rules live in your private configuration reposito
    system_channel: "aerial-dev"
 
    # Administrator Allowlist
-   # User IDs authorized to perform system-level operations (SYSTEM.md, config.yaml, Docker)
+   # User IDs authorized to perform system-level operations (GEMINI.md, config.yaml, Docker)
    admin_users:
      - "1542035925603713086"
 
@@ -136,7 +136,7 @@ User configuration and persona rules live in your private configuration reposito
    - **Last Known Good Configuration (LKGC) & Discord Alerts**: If an invalid YAML file is saved, Aerial retains the previous valid settings in memory and posts a diagnostic alert to `#aerial-dev` in Discord.
 
 2. **`AGENTS.md`** (Persona & Tone Overrides):
-   Define custom persona rules, tone guidelines, or private operational context. Instructions in `AGENTS.md` take priority over base `SYSTEM.md` rules.
+   Define custom persona rules, tone guidelines, or private operational context. Instructions in `AGENTS.md` take priority over base `GEMINI.md` rules.
 
 3. **Per-Channel Instructions (`channels/<channel-name>.md`)**:
    Define dedicated guidelines and operational personas tailored to specific Discord channels:
@@ -144,7 +144,7 @@ User configuration and persona rules live in your private configuration reposito
    - **Thread Inheritance**: Conversations in Discord threads automatically resolve and apply instructions from their parent channel (`channels/<parent-channel-name>.md`). Thread names are never used for file lookups.
    - **Normalized Lookups**: Channel names are normalized case-insensitively, strip leading `#`, and interoperate between spaces and hyphens (e.g., `#Dev Chat` resolves `dev-chat.md` or `dev chat.md`).
    - **Prompt Injection & Safety**: Instructions are framed inside `<CHANNEL_INSTRUCTIONS>` prior to `<USER_REQUEST>`, escaped against XML delimiter breakouts, capped at 64KB, and defended against directory traversal.
-   - **Clean Default Fallback**: If no instructions file exists for a channel, Aerial cleanly omits the `<CHANNEL_INSTRUCTIONS>` block and relies on base `SYSTEM.md` and `AGENTS.md` guidelines.
+   - **Clean Default Fallback**: If no instructions file exists for a channel, Aerial cleanly omits the `<CHANNEL_INSTRUCTIONS>` block and relies on base `GEMINI.md` and `AGENTS.md` guidelines.
    - **Example (`channels/dev-alerts.md`)**:
      ```markdown
      # Dev Alerts Channel Guidelines
@@ -331,7 +331,7 @@ docker compose logs -f brain
 
 ## 7. Security & Best Practices
 
-- **Multi-User Security & Admin Privilege Enforcement**: In shared or multi-user channels, messages from users are automatically checked against `admin_users` in `config.yaml`. Only authorized admins (`is_admin: true`) can modify system instructions (`SYSTEM.md`, `AGENTS.md`), edit system configuration (`config.yaml`), manage Docker containers, or alter cron schedules.
+- **Multi-User Security & Admin Privilege Enforcement**: In shared or multi-user channels, messages from users are automatically checked against `admin_users` in `config.yaml`. Only authorized admins (`is_admin: true`) can modify system instructions (`GEMINI.md`, `AGENTS.md`), edit system configuration (`config.yaml`), manage Docker containers, or alter cron schedules.
 - **Fail-Closed Default-Deny Server Containment**: Set `channels.default.mode: "ignore"` to contain Aerial exclusively to allowlisted channels on shared Discord servers.
 - **Zero Plaintext Tokens**: GitHub PATs are passed in-memory ephemerally and never written to `.git/config` on disk.
 - **Log Sanitization**: All subprocess logs are passed through regex sanitizers to mask sensitive tokens.
