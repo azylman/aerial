@@ -67,8 +67,8 @@ func GetCachedChannel(channelID string) (ChannelSnapshot, bool) {
 	return snap, ok
 }
 
-// isNumericSnowflake returns true if id != "" and contains only ASCII digits [0-9].
-func isNumericSnowflake(id string) bool {
+// IsNumericSnowflake returns true if id != "" and contains only ASCII digits [0-9].
+func IsNumericSnowflake(id string) bool {
 	if id == "" {
 		return false
 	}
@@ -98,7 +98,7 @@ func resolveChannelSnapshot(s *discordgo.Session, channelID string) (ChannelSnap
 			}
 		}
 	}
-	if s.Token != "" && isNumericSnowflake(channelID) {
+	if s.Token != "" && IsNumericSnowflake(channelID) {
 		res, err, _ := restSingleFlight.Do(channelID, func() (interface{}, error) {
 			return s.Channel(channelID)
 		})

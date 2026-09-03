@@ -138,6 +138,14 @@ User configuration and persona rules live in your private configuration reposito
 2. **`AGENTS.md`** (Persona & Tone Overrides):
    Define custom persona rules, tone guidelines, or private operational context. Instructions in `AGENTS.md` take priority over base `SYSTEM.md` rules.
 
+3. **Per-Channel Instructions (`channels/<channel-name>.md`)**:
+   Define dedicated guidelines and operational personas tailored to specific Discord channels:
+   - **Convention Auto-Discovery**: Place Markdown files in `channels/<channel-name>.md` within your configuration repository (e.g., `/share/aerial-config/channels/general.md` or `/share/aerial-config/channels/dev-alerts.md`). Aerial automatically discovers and injects them without requiring explicit path configuration in `config.yaml`.
+   - **Thread Inheritance**: Conversations in Discord threads automatically resolve and apply instructions from their parent channel (`channels/<parent-channel-name>.md`). Thread names are never used for file lookups.
+   - **Normalized Lookups**: Channel names are normalized case-insensitively, strip leading `#`, and interoperate between spaces and hyphens (e.g., `#Dev Chat` resolves `dev-chat.md` or `dev chat.md`).
+   - **Prompt Injection & Safety**: Instructions are framed inside `<CHANNEL_INSTRUCTIONS>` prior to `<USER_REQUEST>`, escaped against XML delimiter breakouts, capped at 64KB, and defended against directory traversal.
+   - **Clean Default Fallback**: If no instructions file exists for a channel, Aerial cleanly omits the `<CHANNEL_INSTRUCTIONS>` block and relies on base `SYSTEM.md` and `AGENTS.md` guidelines.
+
 ---
 
 ### Layer 2: Adding Custom Skills

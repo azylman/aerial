@@ -55,6 +55,13 @@ admin_users:
 # Whitelisting / Default-Deny:
 #   You can set default.mode: ignore to have Aerial ignore all channels in the
 #   server by default, and only respond in explicitly declared channels.
+#
+# Per-Channel Instructions (Convention Auto-Discovery):
+#   To customize Aerial's instructions or persona for a specific channel, place a
+#   Markdown file at channels/<channel-name>.md in your config repository (e.g.
+#   channels/general.md or channels/dev-alerts.md). Aerial automatically auto-discovers
+#   these files by convention (no path needed in config.yaml). For conversations in
+#   Discord threads, instructions from the parent channel are automatically inherited.
 channels:
   # The 'default' block is REQUIRED and acts as the fallback for all channels.
   default:

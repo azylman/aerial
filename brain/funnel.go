@@ -59,7 +59,7 @@ func getDiscordChannel(s *discordgo.Session, channelID string) *discordgo.Channe
 			Type:     chType,
 		}
 	}
-	if s != nil && s.Token != "" {
+	if s != nil && s.Token != "" && queue.IsNumericSnowflake(channelID) {
 		if ch, err := s.Channel(channelID); err == nil && ch != nil {
 			queue.CacheDiscordChannel(ch)
 			if s.State != nil {
@@ -119,6 +119,9 @@ func getOrCreateThreadID(s *discordgo.Session, m *discordgo.Message) (string, bo
 			log.Printf("Failed to create Discord thread for message %s (channel %s): %v", m.ID, m.ChannelID, err)
 			return m.ChannelID, false
 		} else if thread != nil {
+			if thread.ParentID == "" {
+				thread.ParentID = m.ChannelID
+			}
 			queue.CacheDiscordChannel(thread)
 		}
 		log.Printf("Created new Discord thread %q (ID: %s) for message %s in channel %s", title, thread.ID, m.ID, m.ChannelID)
