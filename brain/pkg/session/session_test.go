@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 func TestFindLatestSessionDirAndExtract(t *testing.T) {
@@ -135,11 +137,12 @@ func TestAppendAmbientTurn_EmptyFiles(t *testing.T) {
 	tmpDir := t.TempDir()
 	_ = os.Setenv("HOME", tmpDir)
 
-	sessionID := "session-empty-files"
+	sessionID := uuid.New().String()
 	sessDir, err := EnsureSessionDir(sessionID)
 	if err != nil {
 		t.Fatalf("EnsureSessionDir failed: %v", err)
 	}
+	t.Cleanup(func() { _ = os.RemoveAll(sessDir) })
 
 	fixedTime := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
 	err = AppendAmbientTurn(sessionID, "#lounge", "Alice", "Hello ambient world", fixedTime)
@@ -188,11 +191,12 @@ func TestAppendAmbientTurn_Monotonic(t *testing.T) {
 	tmpDir := t.TempDir()
 	_ = os.Setenv("HOME", tmpDir)
 
-	sessionID := "session-monotonic"
+	sessionID := uuid.New().String()
 	sessDir, err := EnsureSessionDir(sessionID)
 	if err != nil {
 		t.Fatalf("EnsureSessionDir failed: %v", err)
 	}
+	t.Cleanup(func() { _ = os.RemoveAll(sessDir) })
 
 	logsDir := filepath.Join(sessDir, ".system_generated", "logs")
 	seedData := `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-09-02T10:00:00Z","content":"Seed 0"}
@@ -240,11 +244,12 @@ func TestAppendAmbientTurn_DualSync(t *testing.T) {
 	tmpDir := t.TempDir()
 	_ = os.Setenv("HOME", tmpDir)
 
-	sessionID := "session-dual-sync"
+	sessionID := uuid.New().String()
 	sessDir, err := EnsureSessionDir(sessionID)
 	if err != nil {
 		t.Fatalf("EnsureSessionDir failed: %v", err)
 	}
+	t.Cleanup(func() { _ = os.RemoveAll(sessDir) })
 
 	now := time.Now().UTC()
 	turns := []struct {
@@ -294,11 +299,12 @@ func TestAppendAmbientTurn_MissingTrailingNewline(t *testing.T) {
 	tmpDir := t.TempDir()
 	_ = os.Setenv("HOME", tmpDir)
 
-	sessionID := "session-missing-newline"
+	sessionID := uuid.New().String()
 	sessDir, err := EnsureSessionDir(sessionID)
 	if err != nil {
 		t.Fatalf("EnsureSessionDir failed: %v", err)
 	}
+	t.Cleanup(func() { _ = os.RemoveAll(sessDir) })
 
 	logsDir := filepath.Join(sessDir, ".system_generated", "logs")
 	rawLine := `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-09-02T12:00:00Z","content":"Line without newline"}`
@@ -350,11 +356,12 @@ func TestEnsureSessionDir(t *testing.T) {
 		t.Error("expected error for empty sessionID, got nil")
 	}
 
-	sessionID := "session-bootstrap-check"
+	sessionID := uuid.New().String()
 	sessDir, err := EnsureSessionDir(sessionID)
 	if err != nil {
 		t.Fatalf("EnsureSessionDir failed: %v", err)
 	}
+	t.Cleanup(func() { _ = os.RemoveAll(sessDir) })
 
 	if !strings.Contains(sessDir, sessionID) {
 		t.Errorf("expected sessDir to contain %s, got %s", sessionID, sessDir)
@@ -402,11 +409,12 @@ func TestAppendAmbientTurn_SanitizationAndNormalization(t *testing.T) {
 	tmpDir := t.TempDir()
 	_ = os.Setenv("HOME", tmpDir)
 
-	sessionID := "session-sanitization"
+	sessionID := uuid.New().String()
 	sessDir, err := EnsureSessionDir(sessionID)
 	if err != nil {
 		t.Fatalf("EnsureSessionDir failed: %v", err)
 	}
+	t.Cleanup(func() { _ = os.RemoveAll(sessDir) })
 
 	// Non-UTC timezone (e.g. UTC-7)
 	loc := time.FixedZone("PDT", -7*60*60)
@@ -445,11 +453,12 @@ func TestAppendAmbientTurn_LargeLineSeek(t *testing.T) {
 	tmpDir := t.TempDir()
 	_ = os.Setenv("HOME", tmpDir)
 
-	sessionID := "session-large-line"
+	sessionID := uuid.New().String()
 	sessDir, err := EnsureSessionDir(sessionID)
 	if err != nil {
 		t.Fatalf("EnsureSessionDir failed: %v", err)
 	}
+	t.Cleanup(func() { _ = os.RemoveAll(sessDir) })
 
 	logsDir := filepath.Join(sessDir, ".system_generated", "logs")
 
@@ -482,11 +491,12 @@ func TestAppendAmbientTurn_Concurrent(t *testing.T) {
 	tmpDir := t.TempDir()
 	_ = os.Setenv("HOME", tmpDir)
 
-	sessionID := "session-concurrent"
+	sessionID := uuid.New().String()
 	sessDir, err := EnsureSessionDir(sessionID)
 	if err != nil {
 		t.Fatalf("EnsureSessionDir failed: %v", err)
 	}
+	t.Cleanup(func() { _ = os.RemoveAll(sessDir) })
 
 	const n = 10
 	var wg sync.WaitGroup

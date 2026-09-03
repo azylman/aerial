@@ -237,13 +237,16 @@ services:
     labels:
       autoheal: "true"
       com.centurylinklabs.watchtower.enable: "true"
+    environment:
+      - AGENTSVIEW_DATA_DIR=/agentsview-data
     command:
       - "--host=0.0.0.0"
       - "--base-path=/conversations"
       - "--public-origin=${AGENTSVIEW_PUBLIC_ORIGINS:-http://192.168.1.14:8089,http://192.168.1.14,https://aerial.zylman.com,http://aerial.zylman.com}"
       - "--public-url=${AGENTSVIEW_PUBLIC_URL:-https://aerial.zylman.com}"
     volumes:
-      - aerial-agentsview-data:/data
+      - aerial-agentsview-data:/agentsview-data
+      - aerial-brain-data:/data:ro
       - aerial-brain-gemini:/root/.gemini:ro
     networks:
       - aerial-net
