@@ -257,27 +257,6 @@ func (d *SyncDaemon) SyncRepo(ctx context.Context, repoPath string) RepoSyncResu
 	return res
 }
 
-// SyncComposeOverride copies or symlinks docker-compose.override.yml from configDir to projectDir.
-func SyncComposeOverride(configDir, projectDir string) {
-	sourceYml := filepath.Join(configDir, "docker-compose.override.yml")
-	sourceYaml := filepath.Join(configDir, "docker-compose.override.yaml")
-	var source string
-	if _, err := os.Stat(sourceYml); err == nil {
-		source = sourceYml
-	} else if _, err := os.Stat(sourceYaml); err == nil {
-		source = sourceYaml
-	}
-
-	target := filepath.Join(projectDir, "docker-compose.override.yml")
-	if source != "" {
-		data, err := os.ReadFile(source)
-		if err == nil {
-			_ = os.WriteFile(target, data, 0644)
-			log.Printf("[GitSync] Synchronized docker-compose.override.yml to %s", projectDir)
-		}
-	}
-}
-
 // TriggerSync runs a synchronous singleflight sync across all managed repositories.
 func (d *SyncDaemon) TriggerSync() ([]RepoSyncResult, error) {
 	val, err, _ := d.sfg.Do("sync", func() (interface{}, error) {
@@ -293,17 +272,8 @@ func (d *SyncDaemon) TriggerSync() ([]RepoSyncResult, error) {
 		defer cancel()
 
 		results := make([]RepoSyncResult, 0, len(d.repos))
-		var anyChanged bool
 		for _, repo := range d.repos {
-			r := d.SyncRepo(syncCtx, repo)
-			if r.Changed {
-				anyChanged = true
-			}
-			results = append(results, r)
-		}
-
-		if anyChanged {
-			SyncComposeOverride("/share/aerial-config", "/share/aerial")
+			results = append(results, d.SyncRepo(syncCtx, repo))
 		}
 
 		return results, nil
