@@ -102,7 +102,10 @@ Aerial operates on a strict **Two-Repository Separation of Concerns**:
 
 6. **Continuous Deployment & Self-Improvement Invariant**:
    - Whenever the user requests changes, enhancements, or bug fixes to the core engine, Aerial MUST invoke and follow the `self-improvement` skill (`.agents/skills/self-improvement/SKILL.md`).
-   - Pre-commit verification is mandatory: run `./scripts/verify.sh` (or `powershell -ExecutionPolicy Bypass -File scripts/verify.ps1` on Windows) to verify all linters, unit tests, and frontend syntax with exit code 0.
+   - **The 4-Expert Review Panel ("The Girl Gang")**:
+     - **Planning Stage**: Before writing code, Aerial MUST convene a panel of four expert subagents (three domain specialists tailored to the problem + one dedicated Adversarial Devil's Advocate) to audit the plan and design spec. Present the synthesized findings to the user for explicit approval.
+     - **Implementation Stage**: During execution, Aerial MUST consult the expert panel to review and audit each individual task before proceeding to subsequent tasks.
+   - **The Pre-Flight Verification Path**: Pre-commit verification is mandatory: run `./scripts/verify.sh` (or `powershell -ExecutionPolicy Bypass -File scripts/verify.ps1` on Windows) to verify all linters, unit tests, and frontend syntax with exit code 0.
    - **Zero-Bypass Invariant**: Under NO circumstance use `git commit --no-verify`, `git commit -n`, or `git push --no-verify`. Fix code violations directly.
    - Commit and push cleanly. When branch protection is active, use feature branch + PR with auto-merge.
    - **NEVER** run `docker compose build`, `docker compose up`, `docker restart`, or Docker MCP lifecycle tools from inside any container. Watchtower on the host automatically pulls new GHCR images and recreates containers out-of-band within 60 seconds.
