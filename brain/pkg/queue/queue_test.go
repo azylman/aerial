@@ -2750,6 +2750,79 @@ func TestProcessBurst_TrailingAmbient(t *testing.T) {
 	}
 }
 
+func TestProcessBurst_CustomAmbientWakePrompt(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	var capturedPrompt string
+	var mu sync.Mutex
+
+	customPrompt := "Wake up only when aerospace or aviation topics are discussed."
+
+	cls := classifier.NewClassifier(classifier.WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
+		mu.Lock()
+		capturedPrompt = prompt
+		mu.Unlock()
+		return `{"confidence": 0.95, "reason": "matches aviation directive"}`, nil
+	}))
+
+	runnerCalls := 0
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		Classifier:     cls,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			mu.Lock()
+			runnerCalls++
+			mu.Unlock()
+			return "Aviation response", "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) func() {
+			return func() {}
+		},
+		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
+			return config.ChannelPolicy{
+				Mode:                 "channel",
+				AmbientWakeThreshold: ptrFloat(0.80),
+				AmbientWakePrompt:    customPrompt,
+			}
+		},
+	})
+
+	now := time.Now().UTC()
+	msg := db.Message{
+		ID:         "msg-aviation-1",
+		ThreadID:   "chan-aviation",
+		AuthorName: "Pilot",
+		Content:    "What is the stall speed of a Cessna 172?",
+		Status:     db.StatusPending,
+		CreatedAt:  now,
+	}
+	_ = db.InsertMessage(database, msg)
+
+	pool.processBurst([]db.Message{msg})
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if !strings.Contains(capturedPrompt, customPrompt) {
+		t.Errorf("Expected classifier prompt to contain custom prompt %q, got:\n%s", customPrompt, capturedPrompt)
+	}
+	if strings.Contains(capturedPrompt, classifier.DefaultAmbientWakePrompt) {
+		t.Errorf("Expected classifier prompt NOT to contain DefaultAmbientWakePrompt when custom directive is provided")
+	}
+	if runnerCalls != 1 {
+		t.Errorf("Expected 1 runner call, got %d", runnerCalls)
+	}
+}
+
+
 
 
 

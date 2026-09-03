@@ -996,6 +996,59 @@ channels:
 	}
 }
 
+func TestChannelPolicy_AmbientWakePromptInheritance(t *testing.T) {
+	tmpDir := t.TempDir()
+	yamlPath := filepath.Join(tmpDir, "config_ambient_wake_prompt.yaml")
+	yamlContent := `
+model: "gemini-2.5-flash"
+channels:
+  default:
+    mode: "channel"
+    ambient_wake_prompt: "Default prompt directive"
+  lounge:
+    mode: "channel"
+    ambient_wake_prompt: "Custom lounge prompt directive"
+  dev:
+    mode: "channel"
+`
+	if err := os.WriteFile(yamlPath, []byte(yamlContent), 0644); err != nil {
+		t.Fatalf("Failed to write yaml: %v", err)
+	}
+
+	cfg, err := LoadConfigFromPaths(yamlPath)
+	if err != nil {
+		t.Fatalf("LoadConfigFromPaths failed: %v", err)
+	}
+
+	// 1. Channel override
+	pLounge := cfg.ResolveChannelPolicy("123", "lounge")
+	if pLounge.AmbientWakePrompt != "Custom lounge prompt directive" {
+		t.Errorf("expected lounge AmbientWakePrompt 'Custom lounge prompt directive', got %q", pLounge.AmbientWakePrompt)
+	}
+	if pLounge.GetAmbientWakePrompt() != "Custom lounge prompt directive" {
+		t.Errorf("expected lounge GetAmbientWakePrompt() 'Custom lounge prompt directive', got %q", pLounge.GetAmbientWakePrompt())
+	}
+
+	// 2. Channel inheriting default
+	pDev := cfg.ResolveChannelPolicy("456", "dev")
+	if pDev.AmbientWakePrompt != "Default prompt directive" {
+		t.Errorf("expected dev AmbientWakePrompt inherited 'Default prompt directive', got %q", pDev.AmbientWakePrompt)
+	}
+	if pDev.GetAmbientWakePrompt() != "Default prompt directive" {
+		t.Errorf("expected dev GetAmbientWakePrompt() 'Default prompt directive', got %q", pDev.GetAmbientWakePrompt())
+	}
+
+	// 3. Fallback to default
+	pDefault := cfg.ResolveChannelPolicy("999", "unknown-channel")
+	if pDefault.AmbientWakePrompt != "Default prompt directive" {
+		t.Errorf("expected default fallback AmbientWakePrompt 'Default prompt directive', got %q", pDefault.AmbientWakePrompt)
+	}
+	if pDefault.GetAmbientWakePrompt() != "Default prompt directive" {
+		t.Errorf("expected default fallback GetAmbientWakePrompt() 'Default prompt directive', got %q", pDefault.GetAmbientWakePrompt())
+	}
+}
+
+
 
 
 
