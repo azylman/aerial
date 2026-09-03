@@ -38,6 +38,7 @@ var ConfigSearchPaths = []string{
 	"/share/aerial-config/config.yml",
 	"/app/config.yaml",
 	"/share/aerial/config.yaml",
+	"/data/.config.yaml.lkgc",
 }
 
 // Deprecated: SystemGuidelinesSearchPaths is no longer used by EnsureSystemRules
@@ -56,6 +57,7 @@ var AgentInstructionsSearchPaths = []string{
 	"/share/aerial/AGENTS.md",
 	"/app/AGENTS.md",
 	"/data/AGENTS.md",
+	"/data/.AGENTS.md.lkgc",
 	"./AGENTS.local.md",
 	"./AGENTS.md",
 }
@@ -415,6 +417,11 @@ func LoadConfigFromPaths(paths ...string) (Config, error) {
 	currentRuntimeConfig = parsed
 	runtimeConfigMu.Unlock()
 
+	// Persist durable on-disk LKGC to survive cold starts and container recycles
+	if targetPath != "/data/.config.yaml.lkgc" {
+		_ = writeAtomic("/data/.config.yaml.lkgc", string(rawData))
+	}
+
 	log.Printf("[Config] Successfully loaded configuration from %s (model=%s, timeout=%dm, timezone=%s, channel=%s)",
 		targetPath, parsed.Model, parsed.TimeoutMinutes, parsed.Timezone, parsed.SystemChannel)
 
@@ -747,6 +754,10 @@ func EnsureSystemRules(customPrompt string) error {
 		lastKnownGoodPersona = personaContent
 		lastKnownGoodPersonaSource = personaSource
 		lkgcMutex.Unlock()
+
+		if personaSource != ".AGENTS.md.lkgc" {
+			_ = writeAtomic("/data/.AGENTS.md.lkgc", personaContent)
+		}
 	}
 
 	foundInstructions := false
@@ -812,11 +823,6 @@ func EnsureSystemRules(customPrompt string) error {
 		filepath.Join(configRulesDir, "agents.md"),
 		filepath.Join(configRulesDir, "custom_instructions.md"),
 
-		"/share/aerial/.agents/rules/system_instructions.md",
-		"/share/aerial/.agents/rules/custom_instructions.md",
-		"/share/aerial/.agents/rules/agents.md",
-		"/share/aerial/.agents/rules/system.md",
-		"/share/aerial/.agents/rules/gemini.md",
 		"/app/.agents/rules/system_instructions.md",
 		"/app/.agents/rules/custom_instructions.md",
 		"/app/.agents/rules/agents.md",
