@@ -2,9 +2,11 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -66,9 +68,19 @@ func TestEnsureAgySettingsAndRules(t *testing.T) {
 		t.Fatalf("EnsureSystemRules failed: %v", err)
 	}
 
-	rulesFile := filepath.Join(tmpDir, ".gemini", "rules", "system_instructions.md")
-	if _, err := os.Stat(rulesFile); err != nil {
-		t.Errorf("Expected system_instructions.md to exist at %s", rulesFile)
+	personaFile := filepath.Join(tmpDir, ".gemini", "rules", "user_persona.md")
+	personaData, err := os.ReadFile(personaFile)
+	if err != nil {
+		t.Fatalf("Expected user_persona.md to exist at %s: %v", personaFile, err)
+	}
+	expectedFrontmatter := "---\ndescription: User persona, tone, and identity overrides\ntrigger: always_on\n---"
+	if !strings.Contains(string(personaData), expectedFrontmatter) {
+		t.Errorf("Expected frontmatter %q in %s, got:\n%s", expectedFrontmatter, personaFile, string(personaData))
+	}
+
+	oldRulesFile := filepath.Join(tmpDir, ".gemini", "rules", "system_instructions.md")
+	if _, err := os.Stat(oldRulesFile); !os.IsNotExist(err) {
+		t.Errorf("Expected system_instructions.md to not exist at %s", oldRulesFile)
 	}
 }
 
@@ -138,13 +150,22 @@ func TestEnsureSystemRules_LKGCAndOrdering(t *testing.T) {
 		t.Fatalf("EnsureSystemRules failed: %v", err)
 	}
 
-	rulesFile := filepath.Join(tmpDir, ".gemini", "rules", "system_instructions.md")
-	data, err := os.ReadFile(rulesFile)
+	personaFile := filepath.Join(tmpDir, ".gemini", "rules", "user_persona.md")
+	data, err := os.ReadFile(personaFile)
 	if err != nil {
-		t.Fatalf("Failed to read generated rules: %v", err)
+		t.Fatalf("Failed to read generated persona: %v", err)
+	}
+	expectedFrontmatter := "---\ndescription: User persona, tone, and identity overrides\ntrigger: always_on\n---"
+	if !strings.Contains(string(data), expectedFrontmatter) {
+		t.Errorf("Expected frontmatter %q, got:\n%s", expectedFrontmatter, string(data))
 	}
 	if !strings.Contains(string(data), "initial instructions prompt") {
-		t.Errorf("Expected rules to contain 'initial instructions prompt', got: %s", string(data))
+		t.Errorf("Expected persona to contain 'initial instructions prompt', got: %s", string(data))
+	}
+
+	oldRulesFile := filepath.Join(tmpDir, ".gemini", "rules", "system_instructions.md")
+	if _, err := os.Stat(oldRulesFile); !os.IsNotExist(err) {
+		t.Errorf("Expected system_instructions.md to not exist at %s", oldRulesFile)
 	}
 
 	// Test LKGC fallback when calling with empty prompt and no files
@@ -152,12 +173,292 @@ func TestEnsureSystemRules_LKGCAndOrdering(t *testing.T) {
 		t.Fatalf("EnsureSystemRules with LKGC failed: %v", err)
 	}
 
-	dataAfter, err := os.ReadFile(rulesFile)
+	dataAfter, err := os.ReadFile(personaFile)
 	if err != nil {
-		t.Fatalf("Failed to read rules after LKGC fallback: %v", err)
+		t.Fatalf("Failed to read persona after LKGC fallback: %v", err)
 	}
 	if !strings.Contains(string(dataAfter), "initial instructions prompt") {
-		t.Errorf("Expected rules to retain LKGC 'initial instructions prompt', got: %s", string(dataAfter))
+		t.Errorf("Expected persona to retain LKGC 'initial instructions prompt', got: %s", string(dataAfter))
+	}
+	if _, err := os.Stat(oldRulesFile); !os.IsNotExist(err) {
+		t.Errorf("Expected system_instructions.md to still not exist at %s after LKGC fallback", oldRulesFile)
+	}
+}
+
+func TestEnsureSystemRules_PersonaCompilation(t *testing.T) {
+	tmpDir := t.TempDir()
+	_ = os.Setenv("HOME", tmpDir)
+
+	agentsFile := filepath.Join(tmpDir, "AGENTS.md")
+	geminiFile := filepath.Join(tmpDir, "GEMINI.md")
+
+	agentsContent := "You are Aerial, a helpful personal AI assistant."
+	geminiContent := "CRITICAL SYSTEM INVARIANT: DO NOT CONCATENATE ME DIRECTLY"
+
+	if err := os.WriteFile(agentsFile, []byte(agentsContent), 0644); err != nil {
+		t.Fatalf("Failed to write test AGENTS.md: %v", err)
+	}
+	if err := os.WriteFile(geminiFile, []byte(geminiContent), 0644); err != nil {
+		t.Fatalf("Failed to write test GEMINI.md: %v", err)
+	}
+
+	oldAgents := AgentInstructionsSearchPaths
+	oldSys := SystemGuidelinesSearchPaths
+	AgentInstructionsSearchPaths = []string{agentsFile}
+	SystemGuidelinesSearchPaths = []string{geminiFile}
+	defer func() {
+		AgentInstructionsSearchPaths = oldAgents
+		SystemGuidelinesSearchPaths = oldSys
+	}()
+
+	if err := EnsureSystemRules("custom runtime prompt"); err != nil {
+		t.Fatalf("EnsureSystemRules failed: %v", err)
+	}
+
+	personaFile := filepath.Join(tmpDir, ".gemini", "rules", "user_persona.md")
+	data, err := os.ReadFile(personaFile)
+	if err != nil {
+		t.Fatalf("Expected user_persona.md to exist: %v", err)
+	}
+
+	content := string(data)
+
+	expectedFrontmatter := "---\ndescription: User persona, tone, and identity overrides\ntrigger: always_on\n---"
+	if !strings.Contains(content, expectedFrontmatter) {
+		t.Errorf("Expected frontmatter %q, got:\n%s", expectedFrontmatter, content)
+	}
+
+	if !strings.Contains(content, "# User Persona Overrides (AGENTS.md)") {
+		t.Errorf("Expected '# User Persona Overrides (AGENTS.md)', got:\n%s", content)
+	}
+	if !strings.Contains(content, agentsContent) {
+		t.Errorf("Expected AGENTS.md content %q in persona, got:\n%s", agentsContent, content)
+	}
+	if !strings.Contains(content, "# Environment Prompt Override") {
+		t.Errorf("Expected '# Environment Prompt Override', got:\n%s", content)
+	}
+	if !strings.Contains(content, "custom runtime prompt") {
+		t.Errorf("Expected 'custom runtime prompt' in persona, got:\n%s", content)
+	}
+
+	// Must NOT concatenate GEMINI.md
+	if strings.Contains(content, geminiContent) {
+		t.Errorf("Expected user_persona.md NOT to contain GEMINI.md content, but found: %s", content)
+	}
+	if strings.Contains(content, "Base System Guidelines") {
+		t.Errorf("Expected user_persona.md NOT to contain 'Base System Guidelines', but found: %s", content)
+	}
+
+	// system_instructions.md must not exist
+	staleFile := filepath.Join(tmpDir, ".gemini", "rules", "system_instructions.md")
+	if _, err := os.Stat(staleFile); !os.IsNotExist(err) {
+		t.Errorf("Expected system_instructions.md to not exist")
+	}
+
+	// Check compatibility copy in ~/.gemini/config/rules/user_persona.md
+	configPersonaFile := filepath.Join(tmpDir, ".gemini", "config", "rules", "user_persona.md")
+	configData, err := os.ReadFile(configPersonaFile)
+	if err != nil {
+		t.Fatalf("Expected config copy user_persona.md to exist: %v", err)
+	}
+	if string(configData) != content {
+		t.Errorf("Expected config copy to match primary rule content")
+	}
+}
+
+func TestEnsureSystemRules_LKGCProtectionOnTornRead(t *testing.T) {
+	tmpDir := t.TempDir()
+	_ = os.Setenv("HOME", tmpDir)
+
+	primaryAgents := filepath.Join(tmpDir, "primary_AGENTS.md")
+	secondaryAgents := filepath.Join(tmpDir, "secondary_AGENTS.md")
+
+	initialValidPersona := "Persona v1: You are a sharp and succinct engineer."
+	fallbackPersona := "GENERIC FALLBACK THAT SHOULD NEVER BE REACHED"
+
+	if err := os.WriteFile(primaryAgents, []byte(initialValidPersona), 0644); err != nil {
+		t.Fatalf("Failed to write primary AGENTS.md: %v", err)
+	}
+	if err := os.WriteFile(secondaryAgents, []byte(fallbackPersona), 0644); err != nil {
+		t.Fatalf("Failed to write secondary AGENTS.md: %v", err)
+	}
+
+	oldAgents := AgentInstructionsSearchPaths
+	AgentInstructionsSearchPaths = []string{primaryAgents, secondaryAgents}
+	defer func() {
+		AgentInstructionsSearchPaths = oldAgents
+	}()
+
+	// 1. Initial valid load
+	if err := EnsureSystemRules(""); err != nil {
+		t.Fatalf("Initial EnsureSystemRules failed: %v", err)
+	}
+
+	personaFile := filepath.Join(tmpDir, ".gemini", "rules", "user_persona.md")
+	data, err := os.ReadFile(personaFile)
+	if err != nil {
+		t.Fatalf("Failed to read user_persona.md: %v", err)
+	}
+	if !strings.Contains(string(data), initialValidPersona) {
+		t.Fatalf("Expected %q in user_persona.md", initialValidPersona)
+	}
+	if lastKnownGoodPersona != initialValidPersona {
+		t.Fatalf("Expected lastKnownGoodPersona to be %q, got %q", initialValidPersona, lastKnownGoodPersona)
+	}
+
+	// 2. Simulate 0-byte torn read of AGENTS.md (without customPrompt)
+	if err := os.WriteFile(primaryAgents, []byte(""), 0644); err != nil {
+		t.Fatalf("Failed to simulate 0-byte file: %v", err)
+	}
+
+	if err := EnsureSystemRules(""); err != nil {
+		t.Fatalf("EnsureSystemRules on 0-byte read failed: %v", err)
+	}
+
+	data, err = os.ReadFile(personaFile)
+	if err != nil {
+		t.Fatalf("Failed to read user_persona.md after 0-byte read: %v", err)
+	}
+	if !strings.Contains(string(data), initialValidPersona) {
+		t.Errorf("Expected user_persona.md to retain LKGC persona after 0-byte read, got:\n%s", string(data))
+	}
+	if strings.Contains(string(data), fallbackPersona) {
+		t.Errorf("Torn read must NOT fall through to secondary fallback search paths")
+	}
+	if lastKnownGoodPersona != initialValidPersona {
+		t.Errorf("Expected lastKnownGoodPersona to remain %q, got %q", initialValidPersona, lastKnownGoodPersona)
+	}
+
+	// 3. Simulate whitespace-only torn read of AGENTS.md (WITH customPrompt)
+	if err := os.WriteFile(primaryAgents, []byte("   \n\t  \n  "), 0644); err != nil {
+		t.Fatalf("Failed to simulate whitespace-only file: %v", err)
+	}
+
+	if err := EnsureSystemRules("special custom prompt"); err != nil {
+		t.Fatalf("EnsureSystemRules on whitespace read with customPrompt failed: %v", err)
+	}
+
+	data, err = os.ReadFile(personaFile)
+	if err != nil {
+		t.Fatalf("Failed to read user_persona.md after whitespace read: %v", err)
+	}
+	if !strings.Contains(string(data), initialValidPersona) {
+		t.Errorf("Expected user_persona.md to retain LKGC persona after whitespace read, got:\n%s", string(data))
+	}
+	if !strings.Contains(string(data), "special custom prompt") {
+		t.Errorf("Expected user_persona.md to contain 'special custom prompt', got:\n%s", string(data))
+	}
+	if strings.Contains(string(data), fallbackPersona) {
+		t.Errorf("Whitespace torn read must NOT fall through to secondary fallback search paths")
+	}
+	if lastKnownGoodPersona != initialValidPersona {
+		t.Errorf("Expected lastKnownGoodPersona to remain %q, got %q", initialValidPersona, lastKnownGoodPersona)
+	}
+}
+
+func TestEnsureSystemRules_StaleRuleCleanup(t *testing.T) {
+	tmpDir := t.TempDir()
+	_ = os.Setenv("HOME", tmpDir)
+
+	primaryRulesDir := filepath.Join(tmpDir, ".gemini", "rules")
+	configRulesDir := filepath.Join(tmpDir, ".gemini", "config", "rules")
+
+	if err := os.MkdirAll(primaryRulesDir, 0755); err != nil {
+		t.Fatalf("Failed to create primaryRulesDir: %v", err)
+	}
+	if err := os.MkdirAll(configRulesDir, 0755); err != nil {
+		t.Fatalf("Failed to create configRulesDir: %v", err)
+	}
+
+	staleFiles := []string{
+		filepath.Join(primaryRulesDir, "system_instructions.md"),
+		filepath.Join(primaryRulesDir, "SYSTEM_INSTRUCTIONS.md"),
+		filepath.Join(primaryRulesDir, "system.md"),
+		filepath.Join(primaryRulesDir, "SYSTEM.md"),
+		filepath.Join(primaryRulesDir, "gemini.md"),
+		filepath.Join(primaryRulesDir, "GEMINI.md"),
+		filepath.Join(primaryRulesDir, "agents.md"),
+		filepath.Join(primaryRulesDir, "custom_instructions.md"),
+
+		filepath.Join(configRulesDir, "system_instructions.md"),
+		filepath.Join(configRulesDir, "SYSTEM_INSTRUCTIONS.md"),
+		filepath.Join(configRulesDir, "system.md"),
+		filepath.Join(configRulesDir, "SYSTEM.md"),
+		filepath.Join(configRulesDir, "gemini.md"),
+		filepath.Join(configRulesDir, "GEMINI.md"),
+		filepath.Join(configRulesDir, "agents.md"),
+		filepath.Join(configRulesDir, "custom_instructions.md"),
+	}
+
+	for _, sf := range staleFiles {
+		if err := os.WriteFile(sf, []byte("stale legacy rule content"), 0644); err != nil {
+			t.Fatalf("Failed to write stale file %s: %v", sf, err)
+		}
+	}
+
+	if err := EnsureSystemRules("valid active prompt"); err != nil {
+		t.Fatalf("EnsureSystemRules failed: %v", err)
+	}
+
+	for _, sf := range staleFiles {
+		if _, err := os.Stat(sf); !os.IsNotExist(err) {
+			t.Errorf("Expected stale rule file %s to be removed, but it still exists", sf)
+		}
+	}
+
+	primaryPersona := filepath.Join(primaryRulesDir, "user_persona.md")
+	if _, err := os.Stat(primaryPersona); err != nil {
+		t.Errorf("Expected primary user_persona.md to exist: %v", err)
+	}
+	configPersona := filepath.Join(configRulesDir, "user_persona.md")
+	if _, err := os.Stat(configPersona); err != nil {
+		t.Errorf("Expected config user_persona.md to exist: %v", err)
+	}
+}
+
+func TestEnsureSystemRules_ConcurrentReload(t *testing.T) {
+	tmpDir := t.TempDir()
+	_ = os.Setenv("HOME", tmpDir)
+
+	agentsFile := filepath.Join(tmpDir, "AGENTS.md")
+	if err := os.WriteFile(agentsFile, []byte("Concurrent reload persona"), 0644); err != nil {
+		t.Fatalf("Failed to write AGENTS.md: %v", err)
+	}
+
+	oldAgents := AgentInstructionsSearchPaths
+	AgentInstructionsSearchPaths = []string{agentsFile}
+	defer func() {
+		AgentInstructionsSearchPaths = oldAgents
+	}()
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, 10)
+
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			prompt := fmt.Sprintf("concurrent prompt iteration %d", idx)
+			if err := EnsureSystemRules(prompt); err != nil {
+				errCh <- fmt.Errorf("goroutine %d failed: %w", idx, err)
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		t.Errorf("Concurrent reload error: %v", err)
+	}
+
+	personaFile := filepath.Join(tmpDir, ".gemini", "rules", "user_persona.md")
+	data, err := os.ReadFile(personaFile)
+	if err != nil {
+		t.Fatalf("Expected user_persona.md to exist after concurrent reload: %v", err)
+	}
+	if !strings.Contains(string(data), "Concurrent reload persona") {
+		t.Errorf("Expected persona content in user_persona.md")
 	}
 }
 
