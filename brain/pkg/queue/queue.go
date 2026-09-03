@@ -10,17 +10,23 @@ import (
 	"sync"
 	"time"
 
+	"github.com/azylman/aerial/brain/pkg/classifier"
 	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
 	"github.com/azylman/aerial/brain/pkg/delivery"
 	"github.com/azylman/aerial/brain/pkg/memory"
 	"github.com/azylman/aerial/brain/pkg/notifier"
 	"github.com/azylman/aerial/brain/pkg/runner"
+	"github.com/azylman/aerial/brain/pkg/session"
 	"github.com/bwmarrin/discordgo"
 	"github.com/google/uuid"
 )
 
 var sensitivePattern = regexp.MustCompile(`(?i)(?:bearer\s+[a-zA-Z0-9_\-\.]+|ghp_[a-zA-Z0-9]+|gho_[a-zA-Z0-9]+|ghu_[a-zA-Z0-9]+|github_pat_[a-zA-Z0-9_]+|x-access-token:[^@\s]+|antigravity_[a-zA-Z0-9_\-]+|gemini_[a-zA-Z0-9_\-]+|aiza[0-9a-za-z-_]{35})`)
+var (
+	aerialExclusionRegex = regexp.MustCompile(`(?i)\baerial\s+(?:view|photo)s?\b`)
+	tier1KeywordRegex    = regexp.MustCompile(`(?i)\b(aerial|gundam)\b`)
+)
 
 func sanitizeErrorText(errStr string) string {
 	return sensitivePattern.ReplaceAllString(errStr, "[REDACTED_TOKEN]")
@@ -39,6 +45,7 @@ type WorkerPoolConfig struct {
 	BackoffBase    time.Duration
 	MaxAttempts    int
 	MemoryClient   *memory.Client
+	Classifier     *classifier.Classifier
 
 	// Optional hooks for testing/custom overrides
 	RunnerFunc           func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error)
@@ -87,6 +94,9 @@ func NewWorkerPool(cfg WorkerPoolConfig) *WorkerPool {
 	}
 	if cfg.MemoryRetrieverFunc == nil {
 		cfg.MemoryRetrieverFunc = memory.RetrieveRelevantFacts
+	}
+	if cfg.Classifier == nil {
+		cfg.Classifier = classifier.NewClassifier()
 	}
 	if cfg.ResolveChannelPolicy == nil {
 		cfg.ResolveChannelPolicy = func(channelID, channelName string) config.ChannelPolicy {
@@ -241,12 +251,76 @@ func (p *WorkerPool) runThreadWorker(threadID string, ch chan db.Message) {
 
 func extractMessageBody(content string) string {
 	trimmed := strings.TrimSpace(content)
-	if strings.HasPrefix(trimmed, "<USER_REQUEST>") && strings.HasSuffix(trimmed, "</USER_REQUEST>") {
+	if strings.Contains(trimmed, "<USER_REQUEST>") {
+		lines := strings.Split(trimmed, "\n")
+		for _, line := range lines {
+			lineTrimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(lineTrimmed, "- content:") {
+				val := strings.TrimSpace(strings.TrimPrefix(lineTrimmed, "- content:"))
+				val = strings.ReplaceAll(val, "<\\/USER_REQUEST>", "</USER_REQUEST>")
+				val = strings.ReplaceAll(val, "<\\USER_REQUEST>", "<USER_REQUEST>")
+				return val
+			}
+		}
 		inner := strings.TrimPrefix(trimmed, "<USER_REQUEST>")
 		inner = strings.TrimSuffix(inner, "</USER_REQUEST>")
 		return strings.TrimSpace(inner)
 	}
 	return trimmed
+}
+
+func isTier1Wake(m db.Message, botUserID string) bool {
+	if m.AuthorID == "http-client" {
+		return true
+	}
+
+	// Direct mentions: <@botUserID>, <@!botUserID>
+	if botUserID != "" {
+		if strings.Contains(m.Content, "<@"+botUserID+">") || strings.Contains(m.Content, "<@!"+botUserID+">") {
+			return true
+		}
+	}
+
+	// Mentions list in Discord prompt envelope containing bot name or botUserID
+	if idx := strings.Index(m.Content, "- mentions: ["); idx != -1 {
+		if endIdx := strings.Index(m.Content[idx:], "]"); endIdx != -1 {
+			inside := strings.ToLower(m.Content[idx+len("- mentions: [") : idx+endIdx])
+			if strings.Contains(inside, "aerial") || (botUserID != "" && strings.Contains(inside, strings.ToLower(botUserID))) {
+				return true
+			}
+		}
+	}
+
+	// Explicit reply to Aerial: replying_to with author Aerial
+	if idx := strings.Index(m.Content, "- replying_to:"); idx != -1 {
+		replySection := m.Content[idx:]
+		if end := strings.Index(replySection, "- content:"); end != -1 {
+			replySection = replySection[:end]
+		}
+		replyLower := strings.ToLower(replySection)
+		if strings.Contains(replyLower, "aerial") || (botUserID != "" && strings.Contains(replyLower, strings.ToLower(botUserID))) {
+			return true
+		}
+	}
+
+	// Check message body
+	body := extractMessageBody(m.Content)
+	if botUserID != "" && (strings.Contains(body, "<@"+botUserID+">") || strings.Contains(body, "<@!"+botUserID+">")) {
+		return true
+	}
+	bodyLower := strings.ToLower(body)
+	if strings.Contains(bodyLower, "<@aerial") || strings.Contains(bodyLower, "<@!aerial") {
+		return true
+	}
+
+	// Keyword trigger matching word boundary regex (?i)\b(aerial|gundam)\b in extractMessageBody(m.Content)
+	// excluding "aerial view" and "aerial photo"
+	cleanedBody := aerialExclusionRegex.ReplaceAllString(body, "")
+	if tier1KeywordRegex.MatchString(cleanedBody) {
+		return true
+	}
+
+	return false
 }
 
 // CoalesceBurstPrompt formats a burst of messages into a single coalesced multi-message prompt turn.
@@ -385,8 +459,8 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 
 	// Resolve Channel Policy (inheriting parent channel policy if in a thread)
 	var policy config.ChannelPolicy
+	var ch *discordgo.Channel
 	if p.cfg.ResolveChannelPolicy != nil {
-		var ch *discordgo.Channel
 		if sess := p.getDiscordSession(); sess != nil {
 			if sess.State != nil {
 				ch, _ = sess.State.Channel(threadID)
@@ -459,8 +533,10 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		return
 	}
 
-	stopTyping := resolveTypingStarter(policy, burst, skipDiscord, p.cfg.TypingFunc, p.getDiscordSession, threadID)
-	defer stopTyping()
+	stopTyping := func() {}
+	defer func() {
+		stopTyping()
+	}()
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -487,6 +563,158 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 	}()
 
 	currentSessionID, _ := db.GetSessionID(p.cfg.DB, threadID)
+
+	if strings.ToLower(policy.Mode) == "channel" {
+		botUserID := ""
+		if sess := p.getDiscordSession(); sess != nil && sess.State != nil && sess.State.User != nil {
+			botUserID = sess.State.User.ID
+		}
+
+		type wakeInfo struct {
+			isWake    bool
+			score     float64
+			threshold float64
+			reason    string
+		}
+		wakeInfos := make([]wakeInfo, len(burst))
+		for i, m := range burst {
+			if isTier1Wake(m, botUserID) {
+				wakeInfos[i] = wakeInfo{
+					isWake:    true,
+					score:     1.0,
+					threshold: policy.GetAmbientWakeThreshold(),
+					reason:    "direct_address",
+				}
+			} else {
+				threshold := policy.GetAmbientWakeThreshold()
+				if threshold <= 0.0 {
+					wakeInfos[i] = wakeInfo{
+						isWake:    false,
+						score:     0.0,
+						threshold: threshold,
+						reason:    "classifier disabled",
+					}
+				} else {
+					var recentContext []db.Message
+					if p.cfg.DB != nil {
+						recentContext, _ = db.GetRecentThreadMessages(p.cfg.DB, threadID, 10)
+					}
+					var res classifier.ClassificationResult
+					if p.cfg.Classifier != nil {
+						res = p.cfg.Classifier.Classify(p.ctx, m, recentContext)
+					} else {
+						res = classifier.ClassificationResult{Confidence: 0.0, Reason: "no classifier configured"}
+					}
+					isWake := res.Confidence >= threshold
+					log.Printf("[AmbientClassifier] Channel %s | Msg %s | Author %s | Score: %.2f (Threshold: %.2f) | Wake: %t | Reason: %s",
+						threadID, m.ID, m.AuthorName, res.Confidence, threshold, isWake, res.Reason)
+					wakeInfos[i] = wakeInfo{
+						isWake:    isWake,
+						score:     res.Confidence,
+						threshold: threshold,
+						reason:    res.Reason,
+					}
+				}
+			}
+		}
+
+		wakeIdx := -1
+		for i, info := range wakeInfos {
+			if info.isWake {
+				wakeIdx = i
+				break
+			}
+		}
+
+		channelName := threadID
+		if ch != nil && ch.Name != "" {
+			channelName = ch.Name
+		}
+
+		if wakeIdx == -1 {
+			// ALL messages in burst are ambient
+			if currentSessionID == "" {
+				currentSessionID = uuid.New().String()
+				_ = db.SaveSessionID(p.cfg.DB, threadID, currentSessionID)
+			}
+			_, _ = session.EnsureSessionDir(currentSessionID)
+
+			for i, m := range burst {
+				info := wakeInfos[i]
+				rawBody := extractMessageBody(m.Content)
+				_ = session.AppendAmbientTurn(currentSessionID, channelName, m.AuthorName, rawBody, m.CreatedAt)
+				telemetry := fmt.Sprintf("[AMBIENT score=%.2f/%.2f reason=%q]", info.score, info.threshold, info.reason)
+				_ = db.UpdateMessageStatus(p.cfg.DB, m.ID, db.StatusCompleted, telemetry)
+				if m.ScheduleRunID != "" {
+					_ = db.UpdateScheduleRunStatus(p.cfg.DB, db.UpdateRunParams{
+						RunID:       m.ScheduleRunID,
+						MessageID:   m.ID,
+						Status:      "completed",
+						CompletedAt: time.Now().UTC(),
+					})
+				}
+				if p.cfg.OnMessageCompleted != nil {
+					p.cfg.OnMessageCompleted(m, db.StatusCompleted)
+				}
+			}
+			return
+		}
+
+		// wakeIdx >= 0
+		// Phase 1 (Leading ambient messages)
+		if wakeIdx > 0 {
+			if currentSessionID == "" {
+				currentSessionID = uuid.New().String()
+				_ = db.SaveSessionID(p.cfg.DB, threadID, currentSessionID)
+			}
+			_, _ = session.EnsureSessionDir(currentSessionID)
+
+			for i := 0; i < wakeIdx; i++ {
+				m := burst[i]
+				info := wakeInfos[i]
+				rawBody := extractMessageBody(m.Content)
+				_ = session.AppendAmbientTurn(currentSessionID, channelName, m.AuthorName, rawBody, m.CreatedAt)
+				telemetry := fmt.Sprintf("[AMBIENT score=%.2f/%.2f reason=%q]", info.score, info.threshold, info.reason)
+				_ = db.UpdateMessageStatus(p.cfg.DB, m.ID, db.StatusCompleted, telemetry)
+				if m.ScheduleRunID != "" {
+					_ = db.UpdateScheduleRunStatus(p.cfg.DB, db.UpdateRunParams{
+						RunID:       m.ScheduleRunID,
+						MessageID:   m.ID,
+						Status:      "completed",
+						CompletedAt: time.Now().UTC(),
+					})
+				}
+				if p.cfg.OnMessageCompleted != nil {
+					p.cfg.OnMessageCompleted(m, db.StatusCompleted)
+				}
+			}
+			burst = burst[wakeIdx:]
+		}
+
+		// Phase 2 (Active wake batch burst[wakeIdx:])
+		turnCount, incErr := db.IncrementSessionTurnCount(p.cfg.DB, threadID)
+		if incErr != nil {
+			log.Printf("[Queue] Error incrementing turn count for thread %s: %v", threadID, incErr)
+		}
+		if policy.MaxSessionTurns > 0 && turnCount >= policy.MaxSessionTurns {
+			log.Printf("[Queue] Channel session reached turn limit (%d/%d). Rotating session ID.", turnCount, policy.MaxSessionTurns)
+			newSessID := uuid.New().String()
+			_ = db.RotateSessionID(p.cfg.DB, threadID, newSessID)
+			_, _ = session.EnsureSessionDir(newSessID)
+			currentSessionID = newSessID
+		} else {
+			if currentSessionID == "" {
+				currentSessionID, _ = db.GetSessionID(p.cfg.DB, threadID)
+				if currentSessionID == "" {
+					currentSessionID = uuid.New().String()
+					_ = db.SaveSessionID(p.cfg.DB, threadID, currentSessionID)
+				}
+			}
+			_, _ = session.EnsureSessionDir(currentSessionID)
+		}
+	}
+
+	stopTyping = resolveTypingStarter(policy, burst, skipDiscord, p.cfg.TypingFunc, p.getDiscordSession, threadID)
 
 	// Format coalesced prompt
 	prompt := CoalesceBurstPrompt(burst)
@@ -562,20 +790,6 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 				if !skipDiscord {
 					if err := p.cfg.DeliveryFunc(p.getDiscordSession(), threadID, stdout); err != nil {
 						log.Printf("[WorkerPool] Failed to deliver response for thread %s: %v", threadID, err)
-					}
-				}
-			}
-
-			// Turn-Count Session Rotation
-			if policy.Mode == "channel" && policy.MaxSessionTurns > 0 {
-				newTurns, incErr := db.IncrementSessionTurnCount(p.cfg.DB, threadID)
-				if incErr != nil {
-					log.Printf("[Queue] Error incrementing turn count for thread %s: %v", threadID, incErr)
-				} else if newTurns >= policy.MaxSessionTurns {
-					log.Printf("[Queue] Channel session reached turn limit (%d/%d). Rotating session ID.", newTurns, policy.MaxSessionTurns)
-					newSessionID := uuid.New().String()
-					if rotErr := db.RotateSessionID(p.cfg.DB, threadID, newSessionID); rotErr != nil {
-						log.Printf("[Queue] Error rotating session ID for thread %s: %v", threadID, rotErr)
 					}
 				}
 			}

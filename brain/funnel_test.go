@@ -525,8 +525,8 @@ channels:
 	if !strings.Contains(promptNonAdmin, "- replying_to:\n    author: \"@alice\"\n    content: \"Should we migrate the database?\"") {
 		t.Errorf("Expected prompt to contain formatted reply reference, got:\n%s", promptNonAdmin)
 	}
-	if !strings.Contains(promptNonAdmin, "If this message does not require your response or is general banter not directed at you, output [NO_REPLY] as your entire response.") {
-		t.Errorf("Expected channel mode prompt to include [NO_REPLY] guidance, got:\n%s", promptNonAdmin)
+	if strings.Contains(promptNonAdmin, "[NO_REPLY]") {
+		t.Errorf("Expected channel mode prompt NOT to contain [NO_REPLY] guidance, got:\n%s", promptNonAdmin)
 	}
 	if !strings.Contains(promptNonAdmin, "Discord channel") {
 		t.Errorf("Expected channel mode prompt to mention 'Discord channel', got:\n%s", promptNonAdmin)

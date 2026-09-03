@@ -11,10 +11,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/azylman/aerial/brain/pkg/classifier"
 	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
 	"github.com/azylman/aerial/brain/pkg/memory"
 	"github.com/azylman/aerial/brain/pkg/notifier"
+	"github.com/azylman/aerial/brain/pkg/session"
 	"github.com/bwmarrin/discordgo"
 )
 
@@ -1546,7 +1548,7 @@ func TestQueueTurnCountSessionRotation(t *testing.T) {
 
 	// Send turn 1
 	completedCh = make(chan struct{}, 1)
-	msg1 := db.Message{ID: "m-rot-1", ThreadID: channelID, Content: "Turn 1", CreatedAt: time.Now().UTC()}
+	msg1 := db.Message{ID: "m-rot-1", ThreadID: channelID, Content: "Aerial Turn 1", CreatedAt: time.Now().UTC()}
 	_ = db.InsertMessage(database, msg1)
 	pool.Enqueue(msg1)
 	<-completedCh
@@ -1559,7 +1561,7 @@ func TestQueueTurnCountSessionRotation(t *testing.T) {
 
 	// Send turn 2
 	completedCh = make(chan struct{}, 1)
-	msg2 := db.Message{ID: "m-rot-2", ThreadID: channelID, Content: "Turn 2", CreatedAt: time.Now().UTC()}
+	msg2 := db.Message{ID: "m-rot-2", ThreadID: channelID, Content: "Aerial Turn 2", CreatedAt: time.Now().UTC()}
 	_ = db.InsertMessage(database, msg2)
 	pool.Enqueue(msg2)
 	<-completedCh
@@ -1572,7 +1574,7 @@ func TestQueueTurnCountSessionRotation(t *testing.T) {
 
 	// Send turn 3 (reaches limit of 3 turns)
 	completedCh = make(chan struct{}, 1)
-	msg3 := db.Message{ID: "m-rot-3", ThreadID: channelID, Content: "Turn 3", CreatedAt: time.Now().UTC()}
+	msg3 := db.Message{ID: "m-rot-3", ThreadID: channelID, Content: "Aerial Turn 3", CreatedAt: time.Now().UTC()}
 	_ = db.InsertMessage(database, msg3)
 	pool.Enqueue(msg3)
 	<-completedCh
@@ -2015,6 +2017,462 @@ func TestQueueHTTPClient_NotDroppedByDefaultDenyIgnore(t *testing.T) {
 		t.Errorf("Expected response text 'HTTP prompt execution response', got %q", savedMsg.ResponseText)
 	}
 }
+
+func ptrFloat(f float64) *float64 {
+	return &f
+}
+
+func TestProcessBurst_PureAmbient(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	sessionID := "pure-ambient-sess-1"
+	if err := db.SaveSessionID(database, "chan-lounge", sessionID); err != nil {
+		t.Fatalf("Failed to save session ID: %v", err)
+	}
+	sessDir, err := session.EnsureSessionDir(sessionID)
+	if err != nil {
+		t.Fatalf("EnsureSessionDir failed: %v", err)
+	}
+
+	var mu sync.Mutex
+	runnerCalls := 0
+	deliveryCalls := 0
+	typingCalls := 0
+
+	cls := classifier.NewClassifier(classifier.WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
+		return `{"confidence": 0.25, "reason": "casual chit-chat"}`, nil
+	}))
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		Classifier:     cls,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			mu.Lock()
+			runnerCalls++
+			mu.Unlock()
+			return "Should not run", "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			mu.Lock()
+			deliveryCalls++
+			mu.Unlock()
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) func() {
+			mu.Lock()
+			typingCalls++
+			mu.Unlock()
+			return func() {}
+		},
+		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
+			return config.ChannelPolicy{
+				Mode:                 "channel",
+				AmbientWakeThreshold: ptrFloat(0.80),
+			}
+		},
+	})
+
+	now := time.Now().UTC()
+	msg1 := db.Message{
+		ID:         "msg-amb-1",
+		ThreadID:   "chan-lounge",
+		AuthorName: "Alice",
+		Content:    "Hello everyone",
+		Status:     db.StatusPending,
+		CreatedAt:  now,
+	}
+	msg2 := db.Message{
+		ID:         "msg-amb-2",
+		ThreadID:   "chan-lounge",
+		AuthorName: "Bob",
+		Content:    "Nice weather today",
+		Status:     db.StatusPending,
+		CreatedAt:  now.Add(5 * time.Second),
+	}
+	_ = db.InsertMessage(database, msg1)
+	_ = db.InsertMessage(database, msg2)
+
+	pool.processBurst([]db.Message{msg1, msg2})
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if runnerCalls != 0 {
+		t.Errorf("Expected 0 runner calls for pure ambient burst, got %d", runnerCalls)
+	}
+	if deliveryCalls != 0 {
+		t.Errorf("Expected 0 delivery calls for pure ambient burst, got %d", deliveryCalls)
+	}
+	if typingCalls != 0 {
+		t.Errorf("Expected 0 typing calls for pure ambient burst, got %d", typingCalls)
+	}
+
+	turnCount, err := db.GetSessionTurnCount(database, "chan-lounge")
+	if err != nil {
+		t.Fatalf("GetSessionTurnCount error: %v", err)
+	}
+	if turnCount != 0 {
+		t.Errorf("Expected turn_count to remain 0, got %d", turnCount)
+	}
+
+	for _, id := range []string{"msg-amb-1", "msg-amb-2"} {
+		saved, err := db.GetMessage(database, id)
+		if err != nil || saved == nil {
+			t.Fatalf("Failed to retrieve %s: %v", id, err)
+		}
+		if saved.Status != db.StatusCompleted {
+			t.Errorf("Expected status COMPLETED for %s, got %s", id, saved.Status)
+		}
+		if !strings.Contains(saved.ErrorMessage, "[AMBIENT score=0.25/0.80 reason=\"casual chit-chat\"]") {
+			t.Errorf("Expected telemetry in error_message for %s, got %q", id, saved.ErrorMessage)
+		}
+	}
+
+	// Verify transcript.jsonl has the 2 ambient turns
+	logsPath := filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl")
+	data, err := os.ReadFile(logsPath)
+	if err != nil {
+		t.Fatalf("Failed to read transcript: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("Expected 2 ambient lines in transcript, got %d. Content:\n%s", len(lines), string(data))
+	}
+	if !strings.Contains(lines[0], "Hello everyone") || !strings.Contains(lines[1], "Nice weather today") {
+		t.Errorf("Transcript missing expected text:\n%s", string(data))
+	}
+}
+
+func TestProcessBurst_Tier1Wake(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	sessionID := "tier1-wake-sess"
+	_ = db.SaveSessionID(database, "chan-lounge", sessionID)
+	_, _ = session.EnsureSessionDir(sessionID)
+
+	var mu sync.Mutex
+	runnerCalls := 0
+	deliveryCalls := 0
+	deliveredText := ""
+	typingCalls := 0
+
+	s := &discordgo.Session{
+		State: discordgo.NewState(),
+	}
+	s.State.User = &discordgo.User{ID: "bot-aerial-id", Username: "Aerial"}
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		DiscordSession: s,
+		TimeoutMinutes: 1,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			mu.Lock()
+			runnerCalls++
+			mu.Unlock()
+			return "I am Aerial, here to help!", "", 0, nil
+		},
+		DeliveryFunc: func(sess *discordgo.Session, channelID, text string) error {
+			mu.Lock()
+			deliveryCalls++
+			deliveredText = text
+			mu.Unlock()
+			return nil
+		},
+		TypingFunc: func(sess *discordgo.Session, channelID string) func() {
+			mu.Lock()
+			typingCalls++
+			mu.Unlock()
+			return func() {}
+		},
+		MemoryRetrieverFunc: func(ctx context.Context, database *sql.DB, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+			return nil, nil
+		},
+		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
+			return config.ChannelPolicy{
+				Mode:                 "channel",
+				AmbientWakeThreshold: ptrFloat(0.80),
+			}
+		},
+	})
+
+	now := time.Now().UTC()
+	msg := db.Message{
+		ID:         "msg-tier1-1",
+		ThreadID:   "chan-lounge",
+		AuthorName: "Alice",
+		Content:    "<@bot-aerial-id> can you help me with this bug?",
+		Status:     db.StatusPending,
+		CreatedAt:  now,
+	}
+	_ = db.InsertMessage(database, msg)
+
+	pool.processBurst([]db.Message{msg})
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if runnerCalls != 1 {
+		t.Errorf("Expected 1 runner call for Tier 1 wake, got %d", runnerCalls)
+	}
+	if typingCalls == 0 {
+		t.Errorf("Expected typing indicator to be started for Tier 1 wake")
+	}
+	if deliveryCalls != 1 || deliveredText != "I am Aerial, here to help!" {
+		t.Errorf("Expected 1 delivery with response, got calls=%d, text=%q", deliveryCalls, deliveredText)
+	}
+
+	turnCount, err := db.GetSessionTurnCount(database, "chan-lounge")
+	if err != nil {
+		t.Fatalf("GetSessionTurnCount error: %v", err)
+	}
+	if turnCount != 1 {
+		t.Errorf("Expected turn_count to increment to 1, got %d", turnCount)
+	}
+
+	saved, err := db.GetMessage(database, "msg-tier1-1")
+	if err != nil || saved == nil {
+		t.Fatalf("Failed to retrieve message: %v", err)
+	}
+	if saved.Status != db.StatusCompleted {
+		t.Errorf("Expected status COMPLETED, got %s", saved.Status)
+	}
+	if saved.ResponseText != "I am Aerial, here to help!" {
+		t.Errorf("Expected response text, got %q", saved.ResponseText)
+	}
+}
+
+func TestProcessBurst_Tier2Wake(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	sessionID := "tier2-wake-sess"
+	_ = db.SaveSessionID(database, "chan-lounge", sessionID)
+	_, _ = session.EnsureSessionDir(sessionID)
+
+	var mu sync.Mutex
+	runnerCalls := 0
+	deliveryCalls := 0
+	deliveredText := ""
+	typingCalls := 0
+
+	cls := classifier.NewClassifier(classifier.WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
+		return `{"confidence": 0.90, "reason": "user is asking for system health report"}`, nil
+	}))
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		Classifier:     cls,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			mu.Lock()
+			runnerCalls++
+			mu.Unlock()
+			return "All systems operational.", "", 0, nil
+		},
+		DeliveryFunc: func(sess *discordgo.Session, channelID, text string) error {
+			mu.Lock()
+			deliveryCalls++
+			deliveredText = text
+			mu.Unlock()
+			return nil
+		},
+		TypingFunc: func(sess *discordgo.Session, channelID string) func() {
+			mu.Lock()
+			typingCalls++
+			mu.Unlock()
+			return func() {}
+		},
+		MemoryRetrieverFunc: func(ctx context.Context, database *sql.DB, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+			return nil, nil
+		},
+		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
+			return config.ChannelPolicy{
+				Mode:                 "channel",
+				AmbientWakeThreshold: ptrFloat(0.80),
+			}
+		},
+	})
+
+	now := time.Now().UTC()
+	// Unaddressed message: no mention, no keyword
+	msg := db.Message{
+		ID:         "msg-tier2-1",
+		ThreadID:   "chan-lounge",
+		AuthorName: "Alice",
+		Content:    "Does anyone know if all services are healthy?",
+		Status:     db.StatusPending,
+		CreatedAt:  now,
+	}
+	_ = db.InsertMessage(database, msg)
+
+	pool.processBurst([]db.Message{msg})
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if runnerCalls != 1 {
+		t.Errorf("Expected 1 runner call for Tier 2 wake, got %d", runnerCalls)
+	}
+	if typingCalls == 0 {
+		t.Errorf("Expected typing indicator to be started for Tier 2 wake")
+	}
+	if deliveryCalls != 1 || deliveredText != "All systems operational." {
+		t.Errorf("Expected 1 delivery, got calls=%d, text=%q", deliveryCalls, deliveredText)
+	}
+
+	turnCount, err := db.GetSessionTurnCount(database, "chan-lounge")
+	if err != nil {
+		t.Fatalf("GetSessionTurnCount error: %v", err)
+	}
+	if turnCount != 1 {
+		t.Errorf("Expected turn_count to increment to 1, got %d", turnCount)
+	}
+
+	saved, err := db.GetMessage(database, "msg-tier2-1")
+	if err != nil || saved == nil {
+		t.Fatalf("Failed to retrieve message: %v", err)
+	}
+	if saved.Status != db.StatusCompleted {
+		t.Errorf("Expected status COMPLETED, got %s", saved.Status)
+	}
+}
+
+func TestProcessBurst_MixedBurst(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	sessionID := "mixed-burst-sess"
+	_ = db.SaveSessionID(database, "chan-lounge", sessionID)
+	sessDir, _ := session.EnsureSessionDir(sessionID)
+
+	var mu sync.Mutex
+	runnerCalls := 0
+	var receivedPrompt string
+
+	cls := classifier.NewClassifier(classifier.WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
+		// msg1 is ambient banter
+		return `{"confidence": 0.15, "reason": "unrelated lunch discussion"}`, nil
+	}))
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		Classifier:     cls,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			mu.Lock()
+			runnerCalls++
+			receivedPrompt = prompt
+			mu.Unlock()
+			return "Done deploying!", "", 0, nil
+		},
+		DeliveryFunc: func(sess *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		TypingFunc: func(sess *discordgo.Session, channelID string) func() {
+			return func() {}
+		},
+		MemoryRetrieverFunc: func(ctx context.Context, database *sql.DB, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+			return nil, nil
+		},
+		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
+			return config.ChannelPolicy{
+				Mode:                 "channel",
+				AmbientWakeThreshold: ptrFloat(0.80),
+			}
+		},
+	})
+
+	now := time.Now().UTC()
+	// Ambient1
+	msg1 := db.Message{
+		ID:         "msg-mixed-1",
+		ThreadID:   "chan-lounge",
+		AuthorName: "Alice",
+		Content:    "I had tacos for lunch today",
+		Status:     db.StatusPending,
+		CreatedAt:  now,
+	}
+	// Wake2 (Tier 1 keyword wake)
+	msg2 := db.Message{
+		ID:         "msg-mixed-2",
+		ThreadID:   "chan-lounge",
+		AuthorName: "Bob",
+		Content:    "Hey Aerial, please deploy the backend",
+		Status:     db.StatusPending,
+		CreatedAt:  now.Add(2 * time.Second),
+	}
+	_ = db.InsertMessage(database, msg1)
+	_ = db.InsertMessage(database, msg2)
+
+	pool.processBurst([]db.Message{msg1, msg2})
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if runnerCalls != 1 {
+		t.Errorf("Expected exactly 1 runner call for mixed burst, got %d", runnerCalls)
+	}
+	// The prompt passed to runner should only be for Wake2 (or Wake2 batch), not coalescing Ambient1
+	if strings.Contains(receivedPrompt, "I had tacos for lunch today") {
+		t.Errorf("Runner prompt should NOT contain leading ambient message, got: %s", receivedPrompt)
+	}
+	if !strings.Contains(receivedPrompt, "please deploy the backend") {
+		t.Errorf("Runner prompt should contain Wake2, got: %s", receivedPrompt)
+	}
+
+	// Verify Ambient1 was recorded in transcript.jsonl
+	logsPath := filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl")
+	data, err := os.ReadFile(logsPath)
+	if err != nil {
+		t.Fatalf("Failed to read transcript: %v", err)
+	}
+	if !strings.Contains(string(data), "I had tacos for lunch today") {
+		t.Errorf("Expected Ambient1 to be appended to transcript.jsonl, got:\n%s", string(data))
+	}
+
+	// Verify SQLite statuses
+	m1Saved, _ := db.GetMessage(database, "msg-mixed-1")
+	if m1Saved == nil || m1Saved.Status != db.StatusCompleted || !strings.Contains(m1Saved.ErrorMessage, "[AMBIENT score=") {
+		t.Errorf("Expected msg1 to be COMPLETED with [AMBIENT score=...], got: %+v", m1Saved)
+	}
+	m2Saved, _ := db.GetMessage(database, "msg-mixed-2")
+	if m2Saved == nil || m2Saved.Status != db.StatusCompleted || m2Saved.ResponseText != "Done deploying!" {
+		t.Errorf("Expected msg2 to be COMPLETED with response text, got: %+v", m2Saved)
+	}
+
+	turnCount, _ := db.GetSessionTurnCount(database, "chan-lounge")
+	if turnCount != 1 {
+		t.Errorf("Expected turn_count = 1 after mixed burst, got %d", turnCount)
+	}
+}
+
 
 
 
