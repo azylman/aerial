@@ -3,11 +3,13 @@ package session
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 )
+
 
 func FindLatestSessionDir(after time.Time) string {
 	homeDir, err := os.UserHomeDir()
@@ -277,3 +279,231 @@ func HasSuccessfulToolCall(convID string) bool {
 	}
 	return false
 }
+
+// resolveBaseDir locates the appropriate brain base directory for sessions.
+func resolveBaseDir(sessionID string) string {
+	if fi, err := os.Stat("/data/brain"); err == nil && fi.IsDir() {
+		return "/data/brain"
+	}
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		homeDir = "/root"
+	}
+
+	// Check if session directory already exists under any known target dir
+	for _, targetDir := range getTargetDirs(sessionID) {
+		if fi, err := os.Stat(targetDir); err == nil && fi.IsDir() {
+			return filepath.Dir(targetDir)
+		}
+	}
+
+	// Check existing parent root dirs from getTargetDirs
+	brainRoots := []string{
+		filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain"),
+		filepath.Join(homeDir, ".gemini", "antigravity", "brain"),
+		"/data/brain",
+	}
+	for _, root := range brainRoots {
+		if fi, err := os.Stat(root); err == nil && fi.IsDir() {
+			return root
+		}
+	}
+
+	// Fallback to primary root under homeDir
+	return filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain")
+}
+
+// EnsureSessionDir bootstraps the session directory and transcript files if they do not exist.
+func EnsureSessionDir(sessionID string) (string, error) {
+	if strings.TrimSpace(sessionID) == "" {
+		return "", fmt.Errorf("sessionID cannot be empty")
+	}
+
+	baseDir := resolveBaseDir(sessionID)
+	sessionDir := filepath.Join(baseDir, sessionID)
+	logsDir := filepath.Join(sessionDir, ".system_generated", "logs")
+
+	if err := os.MkdirAll(logsDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create session logs directory: %w", err)
+	}
+
+	for _, name := range []string{"transcript.jsonl", "transcript_full.jsonl"} {
+		filePath := filepath.Join(logsDir, name)
+		f, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			return "", fmt.Errorf("failed to ensure %s: %w", name, err)
+		}
+		_ = f.Close()
+	}
+
+	return sessionDir, nil
+}
+
+// TranscriptStep represents a canonical Antigravity transcript step.
+type TranscriptStep struct {
+	StepIndex int    `json:"step_index"`
+	Source    string `json:"source"`
+	Type      string `json:"type"`
+	Status    string `json:"status"`
+	CreatedAt string `json:"created_at"`
+	Content   string `json:"content"`
+}
+
+// AppendAmbientTurn quietly appends an unaddressed ambient chat message to the session's transcripts.
+func AppendAmbientTurn(sessionID, channelName, authorName, text string, timestamp time.Time) error {
+	if strings.TrimSpace(sessionID) == "" {
+		return nil
+	}
+
+	var logsDir string
+	for _, dir := range getTargetDirs(sessionID) {
+		c1 := filepath.Join(dir, ".system_generated", "logs")
+		if _, err := os.Stat(filepath.Join(c1, "transcript.jsonl")); err == nil {
+			logsDir = c1
+			break
+		}
+		c2 := filepath.Join(dir, sessionID, ".system_generated", "logs")
+		if _, err := os.Stat(filepath.Join(c2, "transcript.jsonl")); err == nil {
+			logsDir = c2
+			break
+		}
+	}
+
+	if logsDir == "" {
+		return nil
+	}
+
+	transcriptPath := filepath.Join(logsDir, "transcript.jsonl")
+	lastIndex, err := getLastStepIndex(transcriptPath)
+	if err != nil {
+		return fmt.Errorf("failed to read last step index: %w", err)
+	}
+
+	nextIndex := 0
+	if lastIndex >= 0 {
+		nextIndex = lastIndex + 1
+	}
+
+	if timestamp.IsZero() {
+		timestamp = time.Now().UTC()
+	}
+	timeStr := timestamp.Format(time.RFC3339)
+	cleanChannel := strings.TrimLeft(channelName, "#")
+	content := fmt.Sprintf("[Chat #%s] @%s (%s): %s", cleanChannel, authorName, timeStr, text)
+
+	step := TranscriptStep{
+		StepIndex: nextIndex,
+		Source:    "USER_EXPLICIT",
+		Type:      "USER_INPUT",
+		Status:    "DONE",
+		CreatedAt: timeStr,
+		Content:   content,
+	}
+
+	lineBytes, err := json.Marshal(step)
+	if err != nil {
+		return fmt.Errorf("failed to marshal transcript step: %w", err)
+	}
+
+	for _, name := range []string{"transcript.jsonl", "transcript_full.jsonl"} {
+		filePath := filepath.Join(logsDir, name)
+		if err := appendTranscriptStep(filePath, lineBytes); err != nil {
+			return fmt.Errorf("failed to append to %s: %w", name, err)
+		}
+	}
+
+	return nil
+}
+
+func appendTranscriptStep(filePath string, lineBytes []byte) error {
+	f, err := os.OpenFile(filePath, os.O_CREATE|os.O_RDWR, 0644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	fi, err := f.Stat()
+	if err != nil {
+		return err
+	}
+
+	var writeBuf []byte
+	if fi.Size() > 0 {
+		lastByte := make([]byte, 1)
+		if _, err := f.ReadAt(lastByte, fi.Size()-1); err == nil {
+			if lastByte[0] != '\n' {
+				writeBuf = append(writeBuf, '\n')
+			}
+		}
+	}
+
+	writeBuf = append(writeBuf, lineBytes...)
+	writeBuf = append(writeBuf, '\n')
+
+	if _, err := f.Seek(0, io.SeekEnd); err != nil {
+		return err
+	}
+
+	if _, err := f.Write(writeBuf); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func getLastStepIndex(filePath string) (int, error) {
+	f, err := os.Open(filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return -1, nil
+		}
+		return -1, err
+	}
+	defer f.Close()
+
+	fi, err := f.Stat()
+	if err != nil {
+		return -1, err
+	}
+	if fi.Size() == 0 {
+		return -1, nil
+	}
+
+	seekOffsets := []int64{4096, 65536}
+	for _, seekOffset := range seekOffsets {
+		if fi.Size() < seekOffset {
+			seekOffset = fi.Size()
+		}
+		if _, err := f.Seek(-seekOffset, io.SeekEnd); err != nil {
+			return -1, err
+		}
+
+		buf := make([]byte, seekOffset)
+		n, err := io.ReadFull(f, buf)
+		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+			return -1, err
+		}
+
+		lines := strings.Split(strings.TrimRight(string(buf[:n]), "\r\n"), "\n")
+		for i := len(lines) - 1; i >= 0; i-- {
+			line := strings.TrimSpace(lines[i])
+			if line == "" {
+				continue
+			}
+			var hdr struct {
+				StepIndex *int `json:"step_index"`
+			}
+			if err := json.Unmarshal([]byte(line), &hdr); err == nil && hdr.StepIndex != nil {
+				return *hdr.StepIndex, nil
+			}
+		}
+
+		if seekOffset >= fi.Size() {
+			break
+		}
+	}
+
+	return -1, nil
+}
+
