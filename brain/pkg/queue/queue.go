@@ -81,7 +81,7 @@ func isNumericSnowflake(id string) bool {
 }
 
 func resolveChannelSnapshot(s *discordgo.Session, channelID string) (ChannelSnapshot, bool) {
-	if channelID == "" || !isNumericSnowflake(channelID) {
+	if channelID == "" {
 		return ChannelSnapshot{}, false
 	}
 	if snap, ok := GetCachedChannel(channelID); ok {
@@ -98,7 +98,7 @@ func resolveChannelSnapshot(s *discordgo.Session, channelID string) (ChannelSnap
 			}
 		}
 	}
-	if s.Token != "" {
+	if s.Token != "" && isNumericSnowflake(channelID) {
 		res, err, _ := restSingleFlight.Do(channelID, func() (interface{}, error) {
 			return s.Channel(channelID)
 		})
@@ -124,9 +124,6 @@ func resolveChannelSnapshot(s *discordgo.Session, channelID string) (ChannelSnap
 func ResolveEffectiveChannel(s *discordgo.Session, channelID string) (effectiveID string, effectiveName string, isThread bool) {
 	if channelID == "" {
 		return "", "", false
-	}
-	if !isNumericSnowflake(channelID) || s == nil {
-		return channelID, "", false
 	}
 
 	snap, ok := resolveChannelSnapshot(s, channelID)
@@ -607,51 +604,12 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 
 	// Resolve Channel Policy (inheriting parent channel policy if in a thread)
 	var policy config.ChannelPolicy
-	var ch *discordgo.Channel
+	effectiveID, effectiveName, isThread := ResolveEffectiveChannel(p.getDiscordSession(), threadID)
+	_ = isThread
 	if p.cfg.ResolveChannelPolicy != nil {
-		if sess := p.getDiscordSession(); sess != nil {
-			if sess.State != nil {
-				ch, _ = sess.State.Channel(threadID)
-			}
-			if ch == nil && sess.Token != "" {
-				if fetched, err := sess.Channel(threadID); err == nil && fetched != nil {
-					ch = fetched
-					if sess.State != nil {
-						_ = sess.State.ChannelAdd(ch)
-					}
-				}
-			}
-		}
-
-		if ch != nil && ch.IsThread() && ch.ParentID != "" {
-			var parentCh *discordgo.Channel
-			if sess := p.getDiscordSession(); sess != nil {
-				if sess.State != nil {
-					parentCh, _ = sess.State.Channel(ch.ParentID)
-				}
-				if parentCh == nil && sess.Token != "" {
-					if fetched, err := sess.Channel(ch.ParentID); err == nil && fetched != nil {
-						parentCh = fetched
-						if sess.State != nil {
-							_ = sess.State.ChannelAdd(parentCh)
-						}
-					}
-				}
-			}
-			parentName := ""
-			if parentCh != nil {
-				parentName = parentCh.Name
-			}
-			policy = p.cfg.ResolveChannelPolicy(ch.ParentID, parentName)
-		} else {
-			name := ""
-			if ch != nil {
-				name = ch.Name
-			}
-			policy = p.cfg.ResolveChannelPolicy(threadID, name)
-		}
+		policy = p.cfg.ResolveChannelPolicy(effectiveID, effectiveName)
 	} else {
-		policy = config.GetRuntimeConfig().ResolveChannelPolicy(threadID, "")
+		policy = config.GetRuntimeConfig().ResolveChannelPolicy(effectiveID, effectiveName)
 	}
 
 	skipDiscord := true
@@ -777,9 +735,9 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 			}
 		}
 
-		channelName := threadID
-		if ch != nil && ch.Name != "" {
-			channelName = ch.Name
+		channelName := effectiveName
+		if channelName == "" {
+			channelName = threadID
 		}
 
 		if wakeIdx == -1 {
@@ -892,10 +850,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 				info := trailingInfos[i]
 				if !info.isWake {
 					rawBody := extractMessageBody(m.Content)
-					cName := threadID
-					if ch != nil && ch.Name != "" {
-						cName = ch.Name
-					}
+					cName := channelName
 					if err := session.AppendAmbientTurn(currentSessionID, cName, m.AuthorName, rawBody, m.CreatedAt); err != nil {
 						log.Printf("[WorkerPool] Failed to append ambient turn for trailing message %s: %v", m.ID, err)
 					}
@@ -925,24 +880,27 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 	stopTyping = resolveTypingStarter(policy, burst, skipDiscord, p.cfg.TypingFunc, p.getDiscordSession, threadID)
 
 	// Format coalesced prompt
-	prompt := CoalesceBurstPrompt(burst)
-
-	// Dynamically retrieve relevant semantic memory facts for the incoming prompt
-	queryText := memory.ExtractQueryText(prompt)
+	basePrompt := CoalesceBurstPrompt(burst)
+	queryText := memory.ExtractQueryText(basePrompt)
 	if p.cfg.MemoryRetrieverFunc != nil && p.cfg.DB != nil && strings.TrimSpace(queryText) != "" {
 		retrievalCtx, retrievalCancel := context.WithTimeout(p.ctx, 2500*time.Millisecond)
 		facts, err := p.cfg.MemoryRetrieverFunc(retrievalCtx, p.cfg.DB, p.cfg.MemoryClient, queryText, 10)
 		retrievalCancel()
-
 		if err != nil {
 			log.Printf("[WorkerPool] Warning: Semantic memory retrieval failed for thread %s: %v. Proceeding without injected facts.", threadID, err)
 		} else if len(facts) > 0 {
 			memoryBlock := memory.FormatMemoryContext(facts)
 			if memoryBlock != "" {
-				prompt = memoryBlock + "\n\n" + prompt
+				basePrompt = memoryBlock + "\n\n" + basePrompt
 				log.Printf("[WorkerPool] Injected %d semantic memory fact(s) into prompt for thread %s", len(facts), threadID)
 			}
 		}
+	}
+
+	turnPrompt := basePrompt
+	if instructions := config.LoadChannelInstructions(effectiveName); instructions != "" {
+		turnPrompt = fmt.Sprintf("<CHANNEL_INSTRUCTIONS>\nChannel-specific guidelines for this conversation:\n\n%s\n</CHANNEL_INSTRUCTIONS>\n\n%s", instructions, basePrompt)
+		log.Printf("[WorkerPool] Injected channel instructions for #%s into prompt", effectiveName)
 	}
 
 	maxAttempts := p.cfg.MaxAttempts
@@ -964,7 +922,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		stdout, stderr, exitCode, err := p.cfg.RunnerFunc(
 			runCtx,
 			currentAgyBin,
-			prompt,
+			turnPrompt,
 			currentSessionID,
 			currentAPIKey,
 			currentModel,
