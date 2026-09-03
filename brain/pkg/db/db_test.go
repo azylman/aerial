@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -1297,6 +1298,139 @@ Fetch and summarize today's political, tech, and AI news.
 	}
 }
 
+func TestGetRecentThreadMessages(t *testing.T) {
+	database, err := InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer database.Close()
 
+	// 1. Edge case: nil database
+	if _, err := GetRecentThreadMessages(nil, "thread-lounge", 10); err == nil {
+		t.Error("expected error when querying with nil database, got nil")
+	}
 
+	// 2. Edge case: non-existent thread returns empty slice without error
+	nonExistent, err := GetRecentThreadMessages(database, "thread-nonexistent", 10)
+	if err != nil {
+		t.Fatalf("unexpected error for non-existent thread: %v", err)
+	}
+	if len(nonExistent) != 0 {
+		t.Errorf("expected 0 messages for non-existent thread, got %d", len(nonExistent))
+	}
 
+	// Seed 15 messages for thread-lounge
+	now := time.Now().UTC()
+	for i := 1; i <= 15; i++ {
+		msg := Message{
+			ID:         fmt.Sprintf("msg-%d", i),
+			ThreadID:   "thread-lounge",
+			GuildID:    "guild-1",
+			AuthorID:   "user-1",
+			AuthorName: "Alice",
+			Content:    fmt.Sprintf("Message number %d", i),
+			Status:     StatusCompleted,
+			CreatedAt:  now.Add(time.Duration(i) * time.Minute),
+			UpdatedAt:  now.Add(time.Duration(i) * time.Minute),
+		}
+		if i%3 == 0 {
+			msg.ErrorMessage = fmt.Sprintf("error %d", i)
+			msg.ResponseText = fmt.Sprintf("response %d", i)
+			msg.ScheduleRunID = fmt.Sprintf("sched-%d", i)
+		}
+		if err := InsertMessage(database, msg); err != nil {
+			t.Fatalf("InsertMessage failed: %v", err)
+		}
+	}
+
+	// Seed 3 messages for another thread to test isolation and fewer messages than limit
+	for i := 1; i <= 3; i++ {
+		msg := Message{
+			ID:         fmt.Sprintf("other-msg-%d", i),
+			ThreadID:   "thread-other",
+			GuildID:    "guild-1",
+			AuthorID:   "user-2",
+			AuthorName: "Bob",
+			Content:    fmt.Sprintf("Other message %d", i),
+			Status:     StatusCompleted,
+			CreatedAt:  now.Add(time.Duration(i) * time.Minute),
+			UpdatedAt:  now.Add(time.Duration(i) * time.Minute),
+		}
+		if err := InsertMessage(database, msg); err != nil {
+			t.Fatalf("InsertMessage failed for other thread: %v", err)
+		}
+	}
+
+	// 3. Normal fetch: fetch recent 10 messages from thread-lounge
+	recent, err := GetRecentThreadMessages(database, "thread-lounge", 10)
+	if err != nil {
+		t.Fatalf("GetRecentThreadMessages failed: %v", err)
+	}
+	if len(recent) != 10 {
+		t.Fatalf("expected 10 messages, got %d", len(recent))
+	}
+	// Verify ascending chronological order: msg-6 to msg-15
+	for idx, expectedNum := range []int{6, 7, 8, 9, 10, 11, 12, 13, 14, 15} {
+		expectedID := fmt.Sprintf("msg-%d", expectedNum)
+		if recent[idx].ID != expectedID {
+			t.Errorf("at index %d: expected ID %s, got %s", idx, expectedID, recent[idx].ID)
+		}
+		// Verify null handling / set values
+		if expectedNum%3 == 0 {
+			if recent[idx].ErrorMessage != fmt.Sprintf("error %d", expectedNum) {
+				t.Errorf("expected ErrorMessage 'error %d', got %q", expectedNum, recent[idx].ErrorMessage)
+			}
+			if recent[idx].ResponseText != fmt.Sprintf("response %d", expectedNum) {
+				t.Errorf("expected ResponseText 'response %d', got %q", expectedNum, recent[idx].ResponseText)
+			}
+			if recent[idx].ScheduleRunID != fmt.Sprintf("sched-%d", expectedNum) {
+				t.Errorf("expected ScheduleRunID 'sched-%d', got %q", expectedNum, recent[idx].ScheduleRunID)
+			}
+		} else {
+			if recent[idx].ErrorMessage != "" {
+				t.Errorf("expected empty ErrorMessage, got %q", recent[idx].ErrorMessage)
+			}
+			if recent[idx].ResponseText != "" {
+				t.Errorf("expected empty ResponseText, got %q", recent[idx].ResponseText)
+			}
+			if recent[idx].ScheduleRunID != "" {
+				t.Errorf("expected empty ScheduleRunID, got %q", recent[idx].ScheduleRunID)
+			}
+		}
+	}
+
+	// 4. Edge case: thread with fewer messages than limit returns all messages in ascending order
+	otherMsgs, err := GetRecentThreadMessages(database, "thread-other", 10)
+	if err != nil {
+		t.Fatalf("GetRecentThreadMessages for fewer messages failed: %v", err)
+	}
+	if len(otherMsgs) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(otherMsgs))
+	}
+	if otherMsgs[0].ID != "other-msg-1" || otherMsgs[1].ID != "other-msg-2" || otherMsgs[2].ID != "other-msg-3" {
+		t.Errorf("expected other-msg-1..3 in order, got %s, %s, %s", otherMsgs[0].ID, otherMsgs[1].ID, otherMsgs[2].ID)
+	}
+
+	// 5. Edge case: limit <= 0 defaults to 10
+	limitZero, err := GetRecentThreadMessages(database, "thread-lounge", 0)
+	if err != nil {
+		t.Fatalf("GetRecentThreadMessages with limit 0 failed: %v", err)
+	}
+	if len(limitZero) != 10 {
+		t.Fatalf("expected 10 messages for limit 0, got %d", len(limitZero))
+	}
+	if limitZero[0].ID != "msg-6" || limitZero[9].ID != "msg-15" {
+		t.Errorf("expected msg-6 to msg-15 for limit 0, got %s to %s", limitZero[0].ID, limitZero[9].ID)
+	}
+
+	limitNegative, err := GetRecentThreadMessages(database, "thread-lounge", -5)
+	if err != nil {
+		t.Fatalf("GetRecentThreadMessages with negative limit failed: %v", err)
+	}
+	if len(limitNegative) != 10 {
+		t.Fatalf("expected 10 messages for limit -5, got %d", len(limitNegative))
+	}
+	if limitNegative[0].ID != "msg-6" || limitNegative[9].ID != "msg-15" {
+		t.Errorf("expected msg-6 to msg-15 for limit -5, got %s to %s", limitNegative[0].ID, limitNegative[9].ID)
+	}
+}
