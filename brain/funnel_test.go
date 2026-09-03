@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"os"
@@ -801,4 +802,170 @@ channels:
 		t.Errorf("Expected msg-bot-ignored to be skipped when ignore_bots is true")
 	}
 }
+
+func TestGetDiscordChannel_QueueCacheIntegration(t *testing.T) {
+	chanID := "100200300400500802"
+	queue.InvalidateChannelCache(chanID)
+	defer queue.InvalidateChannelCache(chanID)
+
+	s := &discordgo.Session{
+		State: discordgo.NewState(),
+	}
+	_ = s.State.GuildAdd(&discordgo.Guild{ID: "guild-1"})
+
+	// 1. Channel in state -> cached into queue and returned
+	chState := &discordgo.Channel{
+		ID:      chanID,
+		Name:    "state-cached-channel",
+		Type:    discordgo.ChannelTypeGuildText,
+		GuildID: "guild-1",
+	}
+	_ = s.State.ChannelAdd(chState)
+
+	ch := getDiscordChannel(s, chanID)
+	if ch == nil || ch.Name != "state-cached-channel" {
+		t.Fatalf("Expected channel from state, got: %+v", ch)
+	}
+
+	snap, ok := queue.GetCachedChannel(chanID)
+	if !ok || snap.Name != "state-cached-channel" {
+		t.Fatalf("Expected channel to be cached into queue cache, got: %+v", snap)
+	}
+
+	// 2. Remove from state, getDiscordChannel should retrieve from queue cache
+	_ = s.State.ChannelRemove(chState)
+	chCached := getDiscordChannel(s, chanID)
+	if chCached == nil || chCached.Name != "state-cached-channel" {
+		t.Fatalf("Expected reconstructed channel from queue cache, got: %+v", chCached)
+	}
+
+	// 3. Invalidate cache -> now returns nil when state is empty and no REST
+	queue.InvalidateChannelCache(chanID)
+	if chNone := getDiscordChannel(s, chanID); chNone != nil {
+		t.Errorf("Expected nil when cache and state are empty, got: %+v", chNone)
+	}
+
+	// 4. REST fetch populates cache and state
+	sRest, _ := discordgo.New("Bot fake-token")
+	sRest.Client = &http.Client{
+		Transport: mockCatchUpRoundTripper(func(req *http.Request) (*http.Response, error) {
+			restCh := &discordgo.Channel{
+				ID:   chanID,
+				Name: "rest-fetched-channel",
+				Type: discordgo.ChannelTypeGuildText,
+			}
+			data, _ := json.Marshal(restCh)
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(bytes.NewReader(data)),
+			}, nil
+		}),
+	}
+	chRest := getDiscordChannel(sRest, chanID)
+	if chRest == nil || chRest.Name != "rest-fetched-channel" {
+		t.Fatalf("Expected channel fetched via REST, got: %+v", chRest)
+	}
+	if snap, ok := queue.GetCachedChannel(chanID); !ok || snap.Name != "rest-fetched-channel" {
+		t.Fatalf("Expected REST-fetched channel to be in queue cache, got: %+v", snap)
+	}
+}
+
+func TestGetOrCreateThreadID_CachesSpawnedThread(t *testing.T) {
+	setupTestConfig(t, `
+channels:
+  default:
+    mode: "threads"
+`)
+
+	threadID := "100200300400500801"
+	s, err := discordgo.New("Bot mock-token")
+	if err != nil {
+		t.Fatalf("Failed to create session: %v", err)
+	}
+	s.Client = &http.Client{
+		Transport: mockCatchUpRoundTripper(func(req *http.Request) (*http.Response, error) {
+			if strings.Contains(req.URL.Path, "/threads") {
+				ch := &discordgo.Channel{
+					ID:       threadID,
+					GuildID:  "guild-1",
+					ParentID: "100200300400500800",
+					Name:     "Test Discussion Thread",
+					Type:     discordgo.ChannelTypeGuildPublicThread,
+				}
+				data, _ := json.Marshal(ch)
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(bytes.NewReader(data)),
+				}, nil
+			}
+			return &http.Response{
+				StatusCode: http.StatusNotFound,
+				Body:       io.NopCloser(bytes.NewReader([]byte("{}"))),
+			}, nil
+		}),
+	}
+	_ = s.State.GuildAdd(&discordgo.Guild{ID: "guild-1"})
+	_ = s.State.ChannelAdd(&discordgo.Channel{
+		ID:      "100200300400500800",
+		GuildID: "guild-1",
+		Name:    "threads-parent",
+		Type:    discordgo.ChannelTypeGuildText,
+	})
+
+	m := &discordgo.Message{
+		ID:        "msg-thread-spawn-1",
+		ChannelID: "100200300400500800",
+		GuildID:   "guild-1",
+		Content:   "Start thread test",
+		Author:    &discordgo.User{ID: "user-1", Username: "alice"},
+	}
+
+	queue.InvalidateChannelCache(threadID)
+	defer queue.InvalidateChannelCache(threadID)
+
+	thID, isThread := getOrCreateThreadID(s, m)
+	if thID != threadID || !isThread {
+		t.Fatalf("Expected spawned thread ID %q and true, got %q, %v", threadID, thID, isThread)
+	}
+
+	// Verify the spawned thread is now in queue cache!
+	snap, ok := queue.GetCachedChannel(threadID)
+	if !ok {
+		t.Fatalf("Expected spawned thread %q to be in queue cache", threadID)
+	}
+	if snap.Name != "Test Discussion Thread" || !snap.IsThread || snap.ParentID != "100200300400500800" {
+		t.Errorf("Unexpected snapshot in queue cache: %+v", snap)
+	}
+}
+
+func TestConnectDiscordFunnel_Registration(t *testing.T) {
+	t.Setenv("DISCORD_TOKEN", "mock-gateway-token")
+	s := connectDiscordFunnel(nil, nil)
+	if s == nil {
+		t.Fatal("Expected connectDiscordFunnel to return non-nil session")
+	}
+
+	chanID := "100200300400500803"
+	queue.InvalidateChannelCache(chanID)
+	defer queue.InvalidateChannelCache(chanID)
+
+	ch := &discordgo.Channel{
+		ID:   chanID,
+		Name: "gateway-channel",
+		Type: discordgo.ChannelTypeGuildText,
+	}
+	queue.CacheDiscordChannel(ch)
+	snap, ok := queue.GetCachedChannel(chanID)
+	if !ok || snap.Name != "gateway-channel" {
+		t.Fatalf("Expected channel in cache")
+	}
+
+	queue.InvalidateChannelCache(chanID)
+	if _, ok := queue.GetCachedChannel(chanID); ok {
+		t.Fatalf("Expected channel to be removed from cache on invalidation")
+	}
+}
+
 

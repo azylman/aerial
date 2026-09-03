@@ -3054,14 +3054,248 @@ func TestResolveEffectiveChannel_SingleFlightREST(t *testing.T) {
 	}
 }
 
+func TestProcessBurst_ChannelInstructionsInjection(t *testing.T) {
+	tmpDir := t.TempDir()
+	channelsDir := filepath.Join(tmpDir, "channels")
+	if err := os.MkdirAll(channelsDir, 0755); err != nil {
+		t.Fatalf("Failed to create channels dir: %v", err)
+	}
+	devInstructions := "Follow Go idioms and test thoroughly."
+	if err := os.WriteFile(filepath.Join(channelsDir, "dev.md"), []byte(devInstructions), 0644); err != nil {
+		t.Fatalf("Failed to write dev.md: %v", err)
+	}
 
+	oldDirs := config.ChannelInstructionsDirs
+	config.ChannelInstructionsDirs = []string{channelsDir}
+	defer func() { config.ChannelInstructionsDirs = oldDirs }()
 
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to init DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
 
+	channelID := "100200300400500701"
+	CacheDiscordChannel(&discordgo.Channel{
+		ID:   channelID,
+		Name: "dev",
+		Type: discordgo.ChannelTypeGuildText,
+	})
+	defer InvalidateChannelCache(channelID)
 
+	var capturedPrompt string
+	var mu sync.Mutex
 
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    1,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			mu.Lock()
+			capturedPrompt = prompt
+			mu.Unlock()
+			return "Success", "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) func() {
+			return func() {}
+		},
+	})
 
+	msg := db.Message{
+		ID:        "msg-inject-1",
+		ThreadID:  channelID,
+		Content:   "Build the queue worker",
+		Status:    db.StatusPending,
+		CreatedAt: time.Now().UTC(),
+	}
+	_ = db.InsertMessage(database, msg)
 
+	pool.processBurst([]db.Message{msg})
 
+	mu.Lock()
+	defer mu.Unlock()
 
+	expectedHeader := "<CHANNEL_INSTRUCTIONS>\nChannel-specific guidelines for this conversation:\n\n" + devInstructions + "\n</CHANNEL_INSTRUCTIONS>"
+	if !strings.HasPrefix(capturedPrompt, expectedHeader) {
+		t.Fatalf("Expected prompt to start with channel instructions block, got:\n%s", capturedPrompt)
+	}
+	if !strings.Contains(capturedPrompt, "Build the queue worker") {
+		t.Fatalf("Expected prompt to contain base prompt content, got:\n%s", capturedPrompt)
+	}
+}
 
+func TestProcessBurst_ChannelInstructionsThreadInheritance(t *testing.T) {
+	tmpDir := t.TempDir()
+	channelsDir := filepath.Join(tmpDir, "channels")
+	if err := os.MkdirAll(channelsDir, 0755); err != nil {
+		t.Fatalf("Failed to create channels dir: %v", err)
+	}
+	devInstructions := "Guidelines for dev channel discussions."
+	if err := os.WriteFile(filepath.Join(channelsDir, "dev.md"), []byte(devInstructions), 0644); err != nil {
+		t.Fatalf("Failed to write dev.md: %v", err)
+	}
 
+	oldDirs := config.ChannelInstructionsDirs
+	config.ChannelInstructionsDirs = []string{channelsDir}
+	defer func() { config.ChannelInstructionsDirs = oldDirs }()
+
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to init DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	parentID := "100200300400500702"
+	threadID := "100200300400500703"
+
+	CacheDiscordChannel(&discordgo.Channel{
+		ID:   parentID,
+		Name: "dev",
+		Type: discordgo.ChannelTypeGuildText,
+	})
+	CacheDiscordChannel(&discordgo.Channel{
+		ID:       threadID,
+		Name:     "feature-thread",
+		ParentID: parentID,
+		Type:     discordgo.ChannelTypeGuildPublicThread,
+	})
+	defer InvalidateChannelCache(parentID)
+	defer InvalidateChannelCache(threadID)
+
+	var capturedPrompt string
+	var mu sync.Mutex
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    1,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			mu.Lock()
+			capturedPrompt = prompt
+			mu.Unlock()
+			return "Success", "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) func() {
+			return func() {}
+		},
+	})
+
+	msg := db.Message{
+		ID:        "msg-thread-inherit-1",
+		ThreadID:  threadID,
+		Content:   "Thread discussion prompt",
+		Status:    db.StatusPending,
+		CreatedAt: time.Now().UTC(),
+	}
+	_ = db.InsertMessage(database, msg)
+
+	pool.processBurst([]db.Message{msg})
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	expectedHeader := "<CHANNEL_INSTRUCTIONS>\nChannel-specific guidelines for this conversation:\n\n" + devInstructions + "\n</CHANNEL_INSTRUCTIONS>"
+	if !strings.HasPrefix(capturedPrompt, expectedHeader) {
+		t.Fatalf("Expected thread prompt to inherit channel instructions from parent #dev, got:\n%s", capturedPrompt)
+	}
+}
+
+func TestProcessBurst_NoDuplicationOnRetry(t *testing.T) {
+	tmpDir := t.TempDir()
+	channelsDir := filepath.Join(tmpDir, "channels")
+	if err := os.MkdirAll(channelsDir, 0755); err != nil {
+		t.Fatalf("Failed to create channels dir: %v", err)
+	}
+	devInstructions := "Channel instructions for retry test."
+	if err := os.WriteFile(filepath.Join(channelsDir, "dev.md"), []byte(devInstructions), 0644); err != nil {
+		t.Fatalf("Failed to write dev.md: %v", err)
+	}
+
+	oldDirs := config.ChannelInstructionsDirs
+	config.ChannelInstructionsDirs = []string{channelsDir}
+	defer func() { config.ChannelInstructionsDirs = oldDirs }()
+
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to init DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	channelID := "100200300400500704"
+	CacheDiscordChannel(&discordgo.Channel{
+		ID:   channelID,
+		Name: "dev",
+		Type: discordgo.ChannelTypeGuildText,
+	})
+	defer InvalidateChannelCache(channelID)
+
+	var attemptCount int
+	var capturedPrompts []string
+	var mu sync.Mutex
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    5 * time.Millisecond,
+		MaxAttempts:    2,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			mu.Lock()
+			attemptCount++
+			capturedPrompts = append(capturedPrompts, prompt)
+			currentAttempt := attemptCount
+			mu.Unlock()
+
+			if currentAttempt == 1 {
+				// Simulate transient failure on attempt 1
+				return "", "Error 503: high demand unavailable", 1, nil
+			}
+			return "Success on retry", "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) func() {
+			return func() {}
+		},
+	})
+
+	msg := db.Message{
+		ID:        "msg-retry-1",
+		ThreadID:  channelID,
+		Content:   "Retry test prompt",
+		Status:    db.StatusPending,
+		CreatedAt: time.Now().UTC(),
+	}
+	_ = db.InsertMessage(database, msg)
+
+	pool.processBurst([]db.Message{msg})
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if attemptCount != 2 {
+		t.Fatalf("Expected 2 attempts, got %d", attemptCount)
+	}
+	if len(capturedPrompts) != 2 {
+		t.Fatalf("Expected 2 captured prompts, got %d", len(capturedPrompts))
+	}
+
+	for i, p := range capturedPrompts {
+		count := strings.Count(p, "<CHANNEL_INSTRUCTIONS>")
+		if count != 1 {
+			t.Errorf("Attempt %d: expected exactly 1 <CHANNEL_INSTRUCTIONS> block, got %d. Prompt:\n%s", i+1, count, p)
+		}
+		closingCount := strings.Count(p, "</CHANNEL_INSTRUCTIONS>")
+		if closingCount != 1 {
+			t.Errorf("Attempt %d: expected exactly 1 </CHANNEL_INSTRUCTIONS> closing tag, got %d", i+1, closingCount)
+		}
+	}
+}
