@@ -31,7 +31,7 @@ func FindLatestSessionDir(after time.Time) string {
 			continue
 		}
 		for _, entry := range entries {
-			if !entry.IsDir() {
+			if !entry.IsDir() || strings.HasPrefix(entry.Name(), "ambient-eval-") {
 				continue
 			}
 			info, err := entry.Info()
