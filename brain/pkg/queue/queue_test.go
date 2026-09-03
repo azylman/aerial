@@ -1502,6 +1502,9 @@ func TestQueueStalenessDrop(t *testing.T) {
 }
 
 func TestQueueTurnCountSessionRotation(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -1511,6 +1514,11 @@ func TestQueueTurnCountSessionRotation(t *testing.T) {
 	channelID := "channel-rotation-test"
 	initialSessionID := "sess-channel-init-123"
 	_ = db.SaveSessionID(database, channelID, initialSessionID)
+
+	_, _ = session.EnsureSessionDir(initialSessionID)
+	cliPbDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "conversations")
+	_ = os.MkdirAll(cliPbDir, 0755)
+	_ = os.WriteFile(filepath.Join(cliPbDir, initialSessionID+".pb"), []byte("mock-pb"), 0644)
 
 	var mu sync.Mutex
 	var completedCh chan struct{}

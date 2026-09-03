@@ -680,6 +680,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 	}()
 
 	currentSessionID, _ := db.GetSessionID(p.cfg.DB, threadID)
+	var turnCount int
 
 	if strings.ToLower(policy.Mode) == "channel" {
 		botUserID := ""
@@ -917,14 +918,10 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		}
 		burst = []db.Message{burst[wakeIdx]}
 
-		turnCount, incErr := db.IncrementSessionTurnCount(p.cfg.DB, threadID)
+		var incErr error
+		turnCount, incErr = db.IncrementSessionTurnCount(p.cfg.DB, threadID)
 		if incErr != nil {
 			log.Printf("[Queue] Error incrementing turn count for thread %s: %v", threadID, incErr)
-		}
-		if policy.MaxSessionTurns > 0 && turnCount >= policy.MaxSessionTurns {
-			log.Printf("[Queue] Channel session reached turn limit. Resetting to cold state for fresh session initialization.")
-			_ = db.RotateSessionID(p.cfg.DB, threadID, "")
-			currentSessionID = ""
 		}
 
 		var handledTrailing bool
@@ -1076,6 +1073,12 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 				}
 			}
 			log.Printf("[WorkerPool] %d message(s) in thread %s completed successfully on attempt %d/%d", len(burst), threadID, attempt, maxAttempts)
+
+			if policy.MaxSessionTurns > 0 && turnCount >= policy.MaxSessionTurns {
+				log.Printf("[Queue] Channel session reached turn limit (%d/%d). Resetting to cold state for fresh session initialization.", turnCount, policy.MaxSessionTurns)
+				_ = db.RotateSessionID(p.cfg.DB, threadID, "")
+				currentSessionID = ""
+			}
 
 			return
 		}
