@@ -20,7 +20,132 @@ import (
 	"github.com/azylman/aerial/brain/pkg/session"
 	"github.com/bwmarrin/discordgo"
 	"github.com/google/uuid"
+	"golang.org/x/sync/singleflight"
 )
+
+// ChannelSnapshot holds immutable channel metadata to avoid cross-goroutine pointer races.
+type ChannelSnapshot struct {
+	ID       string
+	Name     string
+	ParentID string
+	IsThread bool
+}
+
+var (
+	channelCacheMu   sync.RWMutex
+	channelCache     = make(map[string]ChannelSnapshot)
+	restSingleFlight singleflight.Group
+)
+
+// CacheDiscordChannel stores an immutable snapshot of a discordgo.Channel.
+func CacheDiscordChannel(ch *discordgo.Channel) {
+	if ch == nil || ch.ID == "" {
+		return
+	}
+	channelCacheMu.Lock()
+	channelCache[ch.ID] = ChannelSnapshot{
+		ID:       ch.ID,
+		Name:     ch.Name,
+		ParentID: ch.ParentID,
+		IsThread: ch.IsThread(),
+	}
+	channelCacheMu.Unlock()
+}
+
+// InvalidateChannelCache removes a channel from the internal cache.
+func InvalidateChannelCache(channelID string) {
+	channelCacheMu.Lock()
+	delete(channelCache, channelID)
+	channelCacheMu.Unlock()
+}
+
+// GetCachedChannel returns a cached channel snapshot if available.
+func GetCachedChannel(channelID string) (ChannelSnapshot, bool) {
+	channelCacheMu.RLock()
+	snap, ok := channelCache[channelID]
+	channelCacheMu.RUnlock()
+	return snap, ok
+}
+
+// isNumericSnowflake returns true if id != "" and contains only ASCII digits [0-9].
+func isNumericSnowflake(id string) bool {
+	if id == "" {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		if id[i] < '0' || id[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func resolveChannelSnapshot(s *discordgo.Session, channelID string) (ChannelSnapshot, bool) {
+	if channelID == "" || !isNumericSnowflake(channelID) {
+		return ChannelSnapshot{}, false
+	}
+	if snap, ok := GetCachedChannel(channelID); ok {
+		return snap, true
+	}
+	if s == nil {
+		return ChannelSnapshot{}, false
+	}
+	if s.State != nil {
+		if ch, err := s.State.Channel(channelID); err == nil && ch != nil {
+			CacheDiscordChannel(ch)
+			if snap, ok := GetCachedChannel(channelID); ok {
+				return snap, true
+			}
+		}
+	}
+	if s.Token != "" {
+		res, err, _ := restSingleFlight.Do(channelID, func() (interface{}, error) {
+			return s.Channel(channelID)
+		})
+		if err == nil && res != nil {
+			if ch, ok := res.(*discordgo.Channel); ok && ch != nil {
+				CacheDiscordChannel(ch)
+				if s.State != nil {
+					_ = s.State.ChannelAdd(ch)
+				}
+				if snap, ok := GetCachedChannel(channelID); ok {
+					return snap, true
+				}
+			}
+		}
+	}
+	return ChannelSnapshot{}, false
+}
+
+// ResolveEffectiveChannel resolves a Discord channel or thread to its effective channel ID and name.
+// If channelID is a Discord thread, it resolves the parent channel ID and parent channel name.
+// It uses the centralized ChannelSnapshot cache, live Discord State, and singleflight REST queries.
+// For non-numeric or synthetic channel IDs (e.g. HTTP client UUIDs), it immediately returns without REST calls.
+func ResolveEffectiveChannel(s *discordgo.Session, channelID string) (effectiveID string, effectiveName string, isThread bool) {
+	if channelID == "" {
+		return "", "", false
+	}
+	if !isNumericSnowflake(channelID) || s == nil {
+		return channelID, "", false
+	}
+
+	snap, ok := resolveChannelSnapshot(s, channelID)
+	if !ok {
+		return channelID, "", false
+	}
+
+	if snap.IsThread {
+		if snap.ParentID != "" {
+			parentSnap, parentOk := resolveChannelSnapshot(s, snap.ParentID)
+			if parentOk {
+				return snap.ParentID, parentSnap.Name, true
+			}
+			return snap.ParentID, "", true
+		}
+		return snap.ID, snap.Name, true
+	}
+	return snap.ID, snap.Name, false
+}
 
 var sensitivePattern = regexp.MustCompile(`(?i)(?:bearer\s+[a-zA-Z0-9_\-\.]+|ghp_[a-zA-Z0-9]+|gho_[a-zA-Z0-9]+|ghu_[a-zA-Z0-9]+|github_pat_[a-zA-Z0-9_]+|x-access-token:[^@\s]+|antigravity_[a-zA-Z0-9_\-]+|gemini_[a-zA-Z0-9_\-]+|aiza[0-9a-za-z-_]{35})`)
 var (

@@ -1,13 +1,18 @@
 package queue
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -2821,6 +2826,235 @@ func TestProcessBurst_CustomAmbientWakePrompt(t *testing.T) {
 		t.Errorf("Expected 1 runner call, got %d", runnerCalls)
 	}
 }
+
+func TestResolveEffectiveChannel_NilSession(t *testing.T) {
+	// Empty channel ID
+	effID, effName, isThread := ResolveEffectiveChannel(nil, "")
+	if effID != "" || effName != "" || isThread {
+		t.Errorf("Expected empty channel ID to return \"\", \"\", false; got %q, %q, %v", effID, effName, isThread)
+	}
+
+	// Non-numeric ID with nil session
+	effID, effName, isThread = ResolveEffectiveChannel(nil, "uuid-test-123")
+	if effID != "uuid-test-123" || effName != "" || isThread {
+		t.Errorf("Expected non-numeric ID with nil session to return input ID, \"\", false; got %q, %q, %v", effID, effName, isThread)
+	}
+
+	// Numeric snowflake with nil session
+	effID, effName, isThread = ResolveEffectiveChannel(nil, "123456789012345678")
+	if effID != "123456789012345678" || effName != "" || isThread {
+		t.Errorf("Expected snowflake with nil session to return input ID, \"\", false without panic; got %q, %q, %v", effID, effName, isThread)
+	}
+}
+
+func TestResolveEffectiveChannel_SyntheticNonNumericID(t *testing.T) {
+	s := &discordgo.Session{
+		Token: "fake-token",
+		State: discordgo.NewState(),
+	}
+
+	syntheticIDs := []string{
+		"http-client-session-1234",
+		"abc-def-ghi",
+		"1234-5678",
+		"channel_name_test",
+	}
+
+	for _, id := range syntheticIDs {
+		effID, effName, isThread := ResolveEffectiveChannel(s, id)
+		if effID != id || effName != "" || isThread {
+			t.Errorf("Synthetic ID %q: expected %q, \"\", false; got %q, %q, %v", id, id, effID, effName, isThread)
+		}
+	}
+}
+
+func TestResolveEffectiveChannel_NormalChannel(t *testing.T) {
+	channelID := "100200300400500601"
+	channelName := "general-chat"
+
+	CacheDiscordChannel(&discordgo.Channel{
+		ID:   channelID,
+		Name: channelName,
+		Type: discordgo.ChannelTypeGuildText,
+	})
+	defer InvalidateChannelCache(channelID)
+
+	s := &discordgo.Session{}
+	effID, effName, isThread := ResolveEffectiveChannel(s, channelID)
+	if effID != channelID || effName != channelName || isThread {
+		t.Errorf("Expected %q, %q, false; got %q, %q, %v", channelID, channelName, effID, effName, isThread)
+	}
+}
+
+func TestResolveEffectiveChannel_ThreadParent(t *testing.T) {
+	parentID := "100200300400500600"
+	parentName := "announcements"
+	threadID := "100200300400500602"
+	threadName := "v1.2-discussion"
+
+	CacheDiscordChannel(&discordgo.Channel{
+		ID:   parentID,
+		Name: parentName,
+		Type: discordgo.ChannelTypeGuildText,
+	})
+	defer InvalidateChannelCache(parentID)
+
+	CacheDiscordChannel(&discordgo.Channel{
+		ID:       threadID,
+		Name:     threadName,
+		ParentID: parentID,
+		Type:     discordgo.ChannelTypeGuildPublicThread,
+	})
+	defer InvalidateChannelCache(threadID)
+
+	s := &discordgo.Session{}
+	effID, effName, isThread := ResolveEffectiveChannel(s, threadID)
+	if effID != parentID {
+		t.Errorf("Expected effectiveID = %q (parent ID), got %q", parentID, effID)
+	}
+	if effName != parentName {
+		t.Errorf("Expected effectiveName = %q (parent name), got %q", parentName, effName)
+	}
+	if !isThread {
+		t.Errorf("Expected isThread = true, got %v", isThread)
+	}
+}
+
+func TestResolveEffectiveChannel_ThreadMissingParent(t *testing.T) {
+	parentID := "999888777666555444"
+	threadID := "100200300400500603"
+	threadName := "isolated-thread"
+
+	CacheDiscordChannel(&discordgo.Channel{
+		ID:       threadID,
+		Name:     threadName,
+		ParentID: parentID,
+		Type:     discordgo.ChannelTypeGuildPublicThread,
+	})
+	defer InvalidateChannelCache(threadID)
+
+	s := &discordgo.Session{}
+	effID, effName, isThread := ResolveEffectiveChannel(s, threadID)
+	if effID != parentID {
+		t.Errorf("Expected parentID %q, got %q", parentID, effID)
+	}
+	if effName != "" {
+		t.Errorf("Expected empty parent name when unresolvable, got %q", effName)
+	}
+	if !isThread {
+		t.Errorf("Expected isThread = true, got %v", isThread)
+	}
+}
+
+func TestResolveEffectiveChannel_InvalidateCache(t *testing.T) {
+	channelID := "100200300400500604"
+	ch := &discordgo.Channel{
+		ID:   channelID,
+		Name: "temporary-channel",
+		Type: discordgo.ChannelTypeGuildText,
+	}
+
+	CacheDiscordChannel(ch)
+	snap, ok := GetCachedChannel(channelID)
+	if !ok || snap.Name != "temporary-channel" {
+		t.Fatalf("Expected channel to be in cache")
+	}
+
+	InvalidateChannelCache(channelID)
+	_, ok = GetCachedChannel(channelID)
+	if ok {
+		t.Errorf("Expected channel %q to be removed from cache after InvalidateChannelCache", channelID)
+	}
+}
+
+func TestResolveEffectiveChannel_StateFallback(t *testing.T) {
+	channelID := "100200300400500605"
+	InvalidateChannelCache(channelID)
+	defer InvalidateChannelCache(channelID)
+
+	state := discordgo.NewState()
+	_ = state.GuildAdd(&discordgo.Guild{ID: "guild-1"})
+	_ = state.ChannelAdd(&discordgo.Channel{
+		ID:      channelID,
+		GuildID: "guild-1",
+		Name:    "state-channel",
+		Type:    discordgo.ChannelTypeGuildText,
+	})
+
+	s := &discordgo.Session{
+		State: state,
+	}
+
+	effID, effName, isThread := ResolveEffectiveChannel(s, channelID)
+	if effID != channelID || effName != "state-channel" || isThread {
+		t.Errorf("Expected %q, \"state-channel\", false; got %q, %q, %v", channelID, effID, effName, isThread)
+	}
+
+	// Verify it was populated into cache
+	snap, ok := GetCachedChannel(channelID)
+	if !ok || snap.Name != "state-channel" {
+		t.Errorf("Expected channel to be cached from State")
+	}
+}
+
+type roundTripFunc func(req *http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func TestResolveEffectiveChannel_SingleFlightREST(t *testing.T) {
+	channelID := "100200300400500606"
+	InvalidateChannelCache(channelID)
+	defer InvalidateChannelCache(channelID)
+
+	var reqCount int32
+	client := &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			atomic.AddInt32(&reqCount, 1)
+			time.Sleep(20 * time.Millisecond)
+			ch := &discordgo.Channel{
+				ID:   channelID,
+				Name: "singleflight-rest-channel",
+				Type: discordgo.ChannelTypeGuildText,
+			}
+			data, _ := json.Marshal(ch)
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(bytes.NewReader(data)),
+				Header:     make(http.Header),
+			}, nil
+		}),
+	}
+
+	s, _ := discordgo.New("Bot fake-token")
+	s.Client = client
+
+	var wg sync.WaitGroup
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			effID, effName, isThread := ResolveEffectiveChannel(s, channelID)
+			if effID != channelID || effName != "singleflight-rest-channel" || isThread {
+				t.Errorf("Unexpected result: %q, %q, %v", effID, effName, isThread)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if count := atomic.LoadInt32(&reqCount); count != 1 {
+		t.Errorf("Expected exactly 1 REST request due to singleflight deduplication, got %d", count)
+	}
+
+	// Verify cached
+	snap, ok := GetCachedChannel(channelID)
+	if !ok || snap.Name != "singleflight-rest-channel" {
+		t.Errorf("Expected channel to be cached after REST fetch")
+	}
+}
+
+
 
 
 
