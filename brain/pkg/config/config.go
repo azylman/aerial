@@ -109,8 +109,6 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 		Channels             map[string]ChannelPolicy `yaml:"channels"`
 		GitSync              GitSyncConfig            `yaml:"git_sync"`
 		McpServers           map[string]interface{}   `yaml:"mcp_servers"`
-		AmbientWakeThreshold *float64                 `yaml:"ambient_wake_threshold,omitempty"`
-		IgnoreBots           *bool                    `yaml:"ignore_bots,omitempty"`
 	}
 
 	var raw rawConfigHelper
