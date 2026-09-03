@@ -71,11 +71,6 @@ func handlePrompt(database *sql.DB, pool *queue.WorkerPool) http.HandlerFunc {
 			threadID = uuid.New().String()
 		}
 
-		// Pre-allocate session ID for the thread upfront so active tasks immediately have session links
-		if sessID, _ := db.GetSessionID(database, threadID); sessID == "" {
-			_ = db.SaveSessionID(database, threadID, uuid.New().String())
-		}
-
 		msg := db.Message{
 			ID:         msgID,
 			ThreadID:   threadID,
