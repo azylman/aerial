@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -45,6 +46,13 @@ var AgentInstructionsSearchPaths = []string{
 	"/data/AGENTS.md",
 	"./AGENTS.local.md",
 	"./AGENTS.md",
+}
+
+var ChannelInstructionsDirs = []string{
+	"/share/aerial-config/channels",
+	"/share/aerial/channels",
+	"/app/channels",
+	"./channels",
 }
 
 type GitSyncConfig struct {
@@ -461,7 +469,7 @@ func (c Config) ResolveChannelPolicy(channelID, channelName string) ChannelPolic
 
 	// 2. Match by Channel Name
 	if !found {
-		if normName := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(channelName)), "#"); normName != "" {
+		if normName := NormalizeChannelName(channelName); normName != "" {
 			matched, found = c.getChannelPolicyRaw(normName)
 		}
 	}
@@ -532,6 +540,66 @@ func (c Config) getChannelPolicyRaw(key string) (ChannelPolicy, bool) {
 		}
 	}
 	return ChannelPolicy{}, false
+}
+
+// NormalizeChannelName standardizes channel names for config key and file lookups.
+// It trims whitespace, strips any leading '#', lowercases, and prevents directory traversal.
+func NormalizeChannelName(channelName string) string {
+	s := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(channelName)), "#")
+	s = filepath.Base(s)
+	if s == "." || s == "/" || s == "\\" || strings.Contains(s, "..") {
+		return ""
+	}
+	return s
+}
+
+// LoadChannelInstructions loads per-channel instructions from convention-based markdown files.
+// It normalizes the channel name, searches ChannelInstructionsDirs with path confinement,
+// enforces regular file checks, caps reading at 64KB, and sanitizes instructions closing tags.
+func LoadChannelInstructions(channelName string) string {
+	normName := NormalizeChannelName(channelName)
+	if normName == "" {
+		return ""
+	}
+
+	candidateNames := []string{normName}
+	if strings.Contains(normName, " ") {
+		candidateNames = append(candidateNames, strings.ReplaceAll(normName, " ", "-"))
+	}
+	if strings.Contains(normName, "-") {
+		candidateNames = append(candidateNames, strings.ReplaceAll(normName, "-", " "))
+	}
+
+	for _, dir := range ChannelInstructionsDirs {
+		cleanDir := filepath.Clean(dir)
+		for _, cand := range candidateNames {
+			targetPath := filepath.Join(cleanDir, cand+".md")
+			cleanTarget := filepath.Clean(targetPath)
+			if !strings.HasPrefix(cleanTarget, cleanDir+string(filepath.Separator)) {
+				continue
+			}
+			info, err := os.Stat(cleanTarget)
+			if err != nil || !info.Mode().IsRegular() {
+				continue
+			}
+			f, err := os.Open(cleanTarget)
+			if err != nil {
+				continue
+			}
+			data, err := io.ReadAll(io.LimitReader(f, 64*1024))
+			_ = f.Close()
+			if err != nil {
+				continue
+			}
+			trimmed := strings.TrimSpace(string(data))
+			if len(trimmed) > 0 {
+				// Defensively escape any closing delimiter tag to prevent breakout
+				sanitized := strings.ReplaceAll(trimmed, "</CHANNEL_INSTRUCTIONS>", "<\\/CHANNEL_INSTRUCTIONS>")
+				return sanitized
+			}
+		}
+	}
+	return ""
 }
 
 func GetEnv(key, defaultVal string) string {
