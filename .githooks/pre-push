@@ -1,74 +1,17 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+set -eu
 
-echo "⚡ [Aerial Pre-Push Hook] Running pre-land verification checks..."
+# Prevent MSYS2 from mangling Docker volume path colons on Windows
+export MSYS_NO_PATHCONV=1
 
-# Check prerequisites
-if ! command -v go >/dev/null 2>&1; then
-    echo "🚨 [Pre-Push] Fatal: Go compiler ('go') not found in PATH." >&2
-    echo "   Local pre-flight checks require Go 1.22+ to verify builds & tests." >&2
-    exit 1
+echo "⚡ [Aerial Pre-Push Hook] Running full pre-flight verification gate..."
+
+# Comprehensive pre-push verification (full lint, unit tests, and syntax checks)
+if [ -f "./scripts/verify.sh" ]; then
+    ./scripts/verify.sh --full
+elif [ -f "scripts/verify.sh" ]; then
+    sh scripts/verify.sh --full
 fi
 
-run_lint() {
-    local svc="$1"
-    if command -v golangci-lint >/dev/null 2>&1; then
-        (cd "$svc" && golangci-lint run ./...)
-    elif command -v docker >/dev/null 2>&1; then
-        echo "   (Running golangci-lint via docker container for $svc...)"
-        docker run --rm -v "$(pwd)/$svc:/app" -w /app golangci/golangci-lint:v1.59.1 golangci-lint run ./...
-    elif command -v go >/dev/null 2>&1; then
-        echo "   (golangci-lint not found, running go vet for $svc...)"
-        (cd "$svc" && go vet ./...)
-    else
-        echo "🚨 [Pre-Push] Fatal: Neither 'golangci-lint', 'docker', nor 'go' found in PATH." >&2
-        exit 1
-    fi
-}
-
-run_test() {
-    local svc="$1"
-    if command -v go >/dev/null 2>&1; then
-        (cd "$svc" && go test -v ./...)
-    elif command -v docker >/dev/null 2>&1; then
-        echo "   (Running go test via docker container for $svc...)"
-        docker run --rm -v "$(pwd)/$svc:/app" -w /app golang:1.22 go test -v ./...
-    else
-        echo "🚨 [Pre-Push] Fatal: Neither 'go' nor 'docker' found in PATH." >&2
-        exit 1
-    fi
-}
-
-SERVICES="brain scheduler-mcp discord-mcp dashboard"
-
-# Run linting across all services
-echo "🔍 [Pre-Push] Running golangci-lint across Go microservices..."
-for svc in $SERVICES; do
-    if [ -d "$svc" ]; then
-        echo "=== Linting $svc ==="
-        run_lint "$svc" || {
-            echo "🚨 [Pre-Push] Linting failed on $svc. Fix linter violations before pushing." >&2
-            exit 1
-        }
-    fi
-done
-
-# Run unit tests across all services
-echo "🧪 [Pre-Push] Running unit test suite across Go microservices..."
-for svc in $SERVICES; do
-    if [ -d "$svc" ]; then
-        echo "=== Testing $svc ==="
-        run_test "$svc" || {
-            echo "🚨 [Pre-Push] Unit tests failed on $svc. Fix failing tests before pushing." >&2
-            exit 1
-        }
-    fi
-done
-
-if command -v node >/dev/null 2>&1 && [ -f "dashboard/app.test.js" ]; then
-    echo "=== Testing Permet HUD Frontend ==="
-    node --test dashboard/*.test.js || exit 1
-fi
-
-echo "✅ [Aerial Pre-Push Hook] All linters and unit tests passed cleanly!"
+echo "✅ [Aerial Pre-Push Hook] All checks passed. Safe to push to remote."
 exit 0

@@ -1,4 +1,4 @@
-﻿# Aerial System Architecture & Repository Guidelines
+# Aerial System Architecture & Repository Guidelines
 
 ## 1. System Overview & Component Topology
 This repository (`azylman/aerial`) is the root orchestration repository for the Aerial AI Assistant system, defining the standalone Docker Compose multi-container topology:
@@ -55,7 +55,8 @@ This repository (`azylman/aerial`) is the root orchestration repository for the 
    - `autoheal`: Probes container healthchecks every 15s and auto-restarts unhealthy services.
 
 ## 2. Invariants & Architectural Rules
-- **Continuous Delivery Invariant**: All stack updates are deployed strictly by committing and pushing to `origin/main`. Watchtower handles container recreations out-of-band. Never run `docker compose` inside containers.
+- **Continuous Delivery Invariant**: Stack updates are deployed strictly by committing and pushing to `origin/main` (or merging via PR). Watchtower handles container recreations out-of-band. Never run `docker compose` inside containers.
+- **Zero-Bypass Verification Invariant**: Pre-commit verification is mandatory. Always run `./scripts/verify.sh` (or `scripts/verify.ps1` on Windows) to verify all linters, unit tests, and frontend syntax with exit code 0. Under NO circumstances may an agent or developer use `git commit --no-verify`, `git commit -n`, or `git push --no-verify`.
 - **Zero In-Image MCPs**: All MCP servers must run as standalone network endpoints on `aerial-net`.
 - **Private Bridge Networking**: All inter-service communication happens over `aerial-net` using container DNS names (`http://brain:8080`, `http://scheduler-mcp:8080`, `http://discord-mcp:4001`).
 - **Secrets Isolation**: API keys, bot tokens, and PATs are configured via `.env` files and referenced via environment variables in `docker-compose.yml`.

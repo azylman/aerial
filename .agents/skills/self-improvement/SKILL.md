@@ -127,17 +127,36 @@ Present a structured 3-way synthesis to the human user:
 
 ---
 
-### Step 8: Pre-Commit Test Verification (Zero-Failure Gate)
+### Step 8: Pre-Commit Test & Lint Verification (Zero-Failure Gate)
 *MANDATORY: Never commit or push unverified code.*
 
-1. **Execute Unit Tests**:
-   - For Go services (`brain`, `scheduler-mcp`, `discord-mcp`):
+1. **Execute Pre-Flight Verification Runner**:
+   Always execute the monorepo verification runner before committing:
+   - **Linux / Container**:
      ```bash
-     cd /share/aerial/<service> && go test -v ./...
+     ./scripts/verify.sh
      ```
-2. **Zero-Failure Rule**:
-   - If tests fail, **DO NOT COMMIT OR PUSH**.
-   - Read error logs, fix violations, and re-run until all tests pass with exit code 0.
+   - **Windows Host**:
+     ```powershell
+     powershell -ExecutionPolicy Bypass -File scripts/verify.ps1
+     ```
+   - **Container Fallback**: If local Go/Node tools are not installed, the runner automatically delegates to deterministic Docker containers (`golangci/golangci-lint:v1.59.1`, `golang:1.22`, `node:20`).
+
+2. **Full CI Parity Verification**:
+   The runner validates all microservices (`brain`, `scheduler-mcp`, `discord-mcp`, `dashboard`):
+   - **Static Analysis & Linting**: `golangci-lint run ./...`
+   - **Unit Test Suites**: `go test -v ./...`
+   - **Frontend & Documentation Syntax**: `node --check dashboard/static/app.js` and `docs-service/...`
+   - **Frontend Unit Tests**: `node --test dashboard/app.test.js`
+
+3. **ZERO-BYPASS INVARIANT**:
+   - **Under NO CIRCUMSTANCE is an agent permitted to use `git commit --no-verify`, `git commit -n`, or `git push --no-verify`.**
+   - Any attempt to bypass pre-commit or pre-push verification is classified as a Critical System Invariant Violation.
+   - If a hook or test fails:
+     1. Read the hook failure log from stderr.
+     2. Fix the reported code violations, linter errors, or failing unit tests in the source files.
+     3. Re-run `./scripts/verify.sh` until exit code is 0.
+     4. Retry the commit.
 
 ---
 
@@ -145,17 +164,28 @@ Present a structured 3-way synthesis to the human user:
 
 1. **Review Diffs & Status**:
    ```bash
-   cd /share/aerial && git status && git diff
+   git status && git diff
    ```
-2. **Commit with Conventional Messages**:
+2. **Commit with Conventional Messages (WITHOUT `--no-verify`)**:
    ```bash
-   cd /share/aerial && git add -A && git commit -m "feat(module): clear description of changes"
+   git add -A && git commit -m "feat(module): clear description of changes"
    ```
-3. **Push to Remote**:
-   ```bash
-   cd /share/aerial && git push origin main
-   ```
+   *The fast-path pre-commit hook verifies staged changes automatically.*
+
+3. **Push to Remote & Branch Protection Awareness**:
+   - When pushing directly to `main`:
+     ```bash
+     git push origin main
+     ```
+     *The pre-push hook runs full monorepo verification before egress.*
+   - When branch protection is active on `main`:
+     ```bash
+     git checkout -b fix/<topic>
+     git push origin fix/<topic>
+     ```
+     Open a Pull Request via GitHub MCP (`create_pull_request`), enable auto-merge (`gh pr merge --auto --squash`), and let CI verify and merge asynchronously into `main`.
+
 4. **Continuous Deployment Invariant**:
    - **DO NOT run `docker compose up`, `docker compose build`, or `docker restart` from inside the container.**
-   - Pushing to `origin/main` triggers the GitHub Actions CI pipeline to build and publish the image to GitHub Container Registry (`ghcr.io`).
+   - Pushing/merging to `origin/main` triggers GitHub Actions CI (`docker-publish.yml`) to build and publish container images to GitHub Container Registry (`ghcr.io`).
    - Watchtower on the host automatically detects the new image and performs an out-of-band container swap within 60 seconds without interrupting execution or causing downtime.

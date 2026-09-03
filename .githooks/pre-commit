@@ -1,30 +1,13 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+set -eu
 
-echo '⚡ [Aerial Pre-Commit Hook] Running fast pre-commit checks...'
+# Prevent MSYS2 from mangling Docker volume path colons on Windows
+export MSYS_NO_PATHCONV=1
 
-run_lint() {
-    local svc=$1
-    if command -v golangci-lint >/dev/null 2>&1; then
-        (cd $svc && golangci-lint run ./...)
-    elif command -v docker >/dev/null 2>&1; then
-        docker run --rm -v $(pwd)/$svc:/app -w /app golangci/golangci-lint:v1.59.1 golangci-lint run ./...
-    elif command -v go >/dev/null 2>&1; then
-        (cd $svc && go vet ./...)
-    fi
-}
-
-SERVICES=$(git diff --cached --name-only | grep -E '^(brain|scheduler-mcp|discord-mcp|dashboard)/' | cut -d/ -f1 | sort -u || true)
-
-for svc in $SERVICES; do
-    if [ -d $svc ]; then
-        echo 🔍 [Pre-Commit] Linting $svc...
-        run_lint $svc || {
-            echo 🚨 [Pre-Commit] Linting failed on $svc. Fix linter violations before committing. >&2
-            exit 1
-        }
-    fi
-done
-
-echo '✅ [Aerial Pre-Commit Hook] Pre-commit verification passed.'
+# Fast-path pre-commit verification (< 3s, only checks staged changes)
+if [ -f "./scripts/verify.sh" ]; then
+    ./scripts/verify.sh --staged
+elif [ -f "scripts/verify.sh" ]; then
+    sh scripts/verify.sh --staged
+fi
 exit 0
