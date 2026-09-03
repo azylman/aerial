@@ -537,5 +537,98 @@ func TestAppendAmbientTurn_Concurrent(t *testing.T) {
 	}
 }
 
+func TestSessionExistsOnDisk(t *testing.T) {
+	tmpDir := t.TempDir()
+	_ = os.Setenv("HOME", tmpDir)
 
+	// 1. Empty or whitespace session ID -> returns false
+	emptyCases := []string{"", "   ", "\t", "\n", " \t \n "}
+	for _, id := range emptyCases {
+		if SessionExistsOnDisk(id) {
+			t.Errorf("expected SessionExistsOnDisk(%q) to be false", id)
+		}
+	}
 
+	// 2. Path traversal attempts -> returns false
+	traversalCases := []string{
+		"../../etc/passwd",
+		"foo/bar",
+		`foo\bar`,
+		"../foo",
+		"foo/../bar",
+		`..\foo`,
+		"/etc/passwd",
+		`C:\Windows`,
+	}
+	for _, id := range traversalCases {
+		if SessionExistsOnDisk(id) {
+			t.Errorf("expected SessionExistsOnDisk(%q) to be false", id)
+		}
+	}
+
+	// 3. Non-existent session ID -> returns false
+	if SessionExistsOnDisk("non-existent-session-id-999") {
+		t.Errorf("expected SessionExistsOnDisk for non-existent session to be false")
+	}
+
+	// 4. Directory with 0-byte transcript.jsonl -> returns false
+	zeroByteID := "session-zero-byte"
+	zeroDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", zeroByteID, ".system_generated", "logs")
+	if err := os.MkdirAll(zeroDir, 0755); err != nil {
+		t.Fatalf("failed to create zeroDir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(zeroDir, "transcript.jsonl"), []byte{}, 0644); err != nil {
+		t.Fatalf("failed to write 0-byte transcript: %v", err)
+	}
+	if SessionExistsOnDisk(zeroByteID) {
+		t.Errorf("expected SessionExistsOnDisk(%q) with 0-byte transcript to be false", zeroByteID)
+	}
+
+	// 5. Directory with valid non-empty transcript.jsonl -> returns true
+	validTranscriptID := "session-valid-transcript"
+	validDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", validTranscriptID, ".system_generated", "logs")
+	if err := os.MkdirAll(validDir, 0755); err != nil {
+		t.Fatalf("failed to create validDir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(validDir, "transcript.jsonl"), []byte(`{"step_index":0}`+"\n"), 0644); err != nil {
+		t.Fatalf("failed to write valid transcript: %v", err)
+	}
+	if !SessionExistsOnDisk(validTranscriptID) {
+		t.Errorf("expected SessionExistsOnDisk(%q) with valid transcript to be true", validTranscriptID)
+	}
+
+	// 6. Existing non-empty .pb file in ~/.gemini/antigravity-cli/conversations/<id>.pb -> returns true
+	pbCliID := "session-valid-cli-pb"
+	cliPbDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "conversations")
+	if err := os.MkdirAll(cliPbDir, 0755); err != nil {
+		t.Fatalf("failed to create cliPbDir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cliPbDir, pbCliID+".pb"), []byte("mock-protobuf-cli"), 0644); err != nil {
+		t.Fatalf("failed to write cli .pb: %v", err)
+	}
+	if !SessionExistsOnDisk(pbCliID) {
+		t.Errorf("expected SessionExistsOnDisk(%q) with cli .pb to be true", pbCliID)
+	}
+
+	// 7. Existing non-empty .pb file in ~/.gemini/antigravity/conversations/<id>.pb -> returns true
+	pbAgyID := "session-valid-agy-pb"
+	agyPbDir := filepath.Join(tmpDir, ".gemini", "antigravity", "conversations")
+	if err := os.MkdirAll(agyPbDir, 0755); err != nil {
+		t.Fatalf("failed to create agyPbDir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(agyPbDir, pbAgyID+".pb"), []byte("mock-protobuf-agy"), 0644); err != nil {
+		t.Fatalf("failed to write agy .pb: %v", err)
+	}
+	if !SessionExistsOnDisk(pbAgyID) {
+		t.Errorf("expected SessionExistsOnDisk(%q) with agy .pb to be true", pbAgyID)
+	}
+
+	// 8. 0-byte .pb file -> returns false
+	pbZeroID := "session-zero-pb"
+	if err := os.WriteFile(filepath.Join(cliPbDir, pbZeroID+".pb"), []byte{}, 0644); err != nil {
+		t.Fatalf("failed to write zero-byte cli .pb: %v", err)
+	}
+	if SessionExistsOnDisk(pbZeroID) {
+		t.Errorf("expected SessionExistsOnDisk(%q) with 0-byte .pb to be false", pbZeroID)
+	}
+}
