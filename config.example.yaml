@@ -18,7 +18,7 @@ system_channel: aerial-dev
 # Administrator Allowlist
 # ------------------------------------------------------------------------------
 # List of Discord user Snowflake IDs who are authorized to perform system-level
-# changes (modifying SYSTEM.md, AGENTS.md, config.yaml, Docker containers, crons).
+# changes (modifying GEMINI.md, AGENTS.md, config.yaml, Docker containers, crons).
 # Messages from these users are tagged with is_admin: true.
 admin_users:
   - 1542035925603713086 # Primary Admin

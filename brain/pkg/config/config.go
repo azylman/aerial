@@ -17,8 +17,12 @@ import (
 )
 
 var (
-	lkgcMutex          sync.RWMutex
-	lastKnownGoodRules string
+	lkgcMutex                   sync.RWMutex
+	lastKnownGoodRules          string
+	lastKnownGoodPersona        string
+	lastKnownGoodPersonaSource  string
+
+	systemRulesMu sync.Mutex
 
 	runtimeConfigMu      sync.RWMutex
 	currentRuntimeConfig Config
@@ -36,6 +40,8 @@ var ConfigSearchPaths = []string{
 	"/share/aerial/config.yaml",
 }
 
+// Deprecated: SystemGuidelinesSearchPaths is no longer used by EnsureSystemRules
+// because Antigravity CLI discovers GEMINI.md natively in cmd.Dir.
 var SystemGuidelinesSearchPaths = []string{
 	"/share/aerial-config/SYSTEM.local.md",
 	"/share/aerial-config/SYSTEM.md",
@@ -695,32 +701,61 @@ func writeAtomic(targetPath, content string) error {
 }
 
 func EnsureSystemRules(customPrompt string) error {
+	systemRulesMu.Lock()
+	defer systemRulesMu.Unlock()
+
 	var sb strings.Builder
-	sb.WriteString("---\ndescription: User custom instructions, persona, and system guidelines\ntrigger: always_on\n---\n\n")
+	sb.WriteString("---\ndescription: User persona, tone, and identity overrides\ntrigger: always_on\n---\n\n")
 
-	foundInstructions := false
+	foundPersona := false
+	tornRead := false
+	var personaContent string
+	var personaSource string
 
-	// 1. Base system guidelines (SYSTEM.md) placed FIRST
-	for _, p := range SystemGuidelinesSearchPaths {
-		if data, err := os.ReadFile(p); err == nil && len(bytes.TrimSpace(data)) > 0 {
-			sb.WriteString(fmt.Sprintf("# Base System Guidelines (%s)\n\n%s\n\n", filepath.Base(p), string(data)))
-			foundInstructions = true
-			log.Printf("Loaded base system guidelines from %s", p)
-			break
-		}
-	}
-
-	// 2. User persona overrides (AGENTS.md) in priority order
+	// User persona overrides (AGENTS.md) in priority order
 	for _, p := range AgentInstructionsSearchPaths {
-		if data, err := os.ReadFile(p); err == nil && len(bytes.TrimSpace(data)) > 0 {
-			sb.WriteString(fmt.Sprintf("# User Persona Overrides (%s)\n\n%s\n\n", filepath.Base(p), string(data)))
-			foundInstructions = true
+		data, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		if len(bytes.TrimSpace(data)) > 0 {
+			personaContent = string(data)
+			personaSource = filepath.Base(p)
+			foundPersona = true
 			log.Printf("Loaded agent instructions from %s", p)
 			break
 		}
+		// File exists but is 0-bytes or whitespace-only (torn read during git sync)
+		log.Printf("[Config] Active agent instructions file %s is empty (possible GitSync torn read), engaging Last Known Good Persona (LKGC)", p)
+		tornRead = true
+		break
 	}
 
-	// 3. Environment Prompt Override
+	if tornRead {
+		lkgcMutex.RLock()
+		personaContent = lastKnownGoodPersona
+		personaSource = lastKnownGoodPersonaSource
+		lkgcMutex.RUnlock()
+		if personaSource == "" {
+			personaSource = "AGENTS.md"
+		}
+		if personaContent != "" {
+			foundPersona = true
+		}
+	} else if foundPersona {
+		lkgcMutex.Lock()
+		lastKnownGoodPersona = personaContent
+		lastKnownGoodPersonaSource = personaSource
+		lkgcMutex.Unlock()
+	}
+
+	foundInstructions := false
+	if foundPersona && personaContent != "" {
+		sb.WriteString(fmt.Sprintf("# User Persona Overrides (%s)\n\n%s\n\n", personaSource, personaContent))
+		foundInstructions = true
+	}
+
+	// Environment Prompt Override
 	if strings.TrimSpace(customPrompt) != "" {
 		sb.WriteString(fmt.Sprintf("# Environment Prompt Override\n\n%s\n\n", strings.TrimSpace(customPrompt)))
 		foundInstructions = true
@@ -752,36 +787,55 @@ func EnsureSystemRules(customPrompt string) error {
 		return fmt.Errorf("failed to create primary rules directory: %w", err)
 	}
 
+	configRulesDir := filepath.Join(homeDir, ".gemini", "config", "rules")
+	if err := os.MkdirAll(configRulesDir, 0755); err != nil {
+		return fmt.Errorf("failed to create config rules directory: %w", err)
+	}
+
 	// Clean up any legacy, conflicting, or repository-level generated rule files
 	staleRuleFiles := []string{
+		filepath.Join(primaryRulesDir, "system_instructions.md"),
+		filepath.Join(primaryRulesDir, "SYSTEM_INSTRUCTIONS.md"),
+		filepath.Join(primaryRulesDir, "system.md"),
+		filepath.Join(primaryRulesDir, "SYSTEM.md"),
+		filepath.Join(primaryRulesDir, "gemini.md"),
+		filepath.Join(primaryRulesDir, "GEMINI.md"),
 		filepath.Join(primaryRulesDir, "agents.md"),
 		filepath.Join(primaryRulesDir, "custom_instructions.md"),
-		filepath.Join(primaryRulesDir, "system.md"),
-		filepath.Join(homeDir, ".gemini", "config", "rules", "custom_instructions.md"),
-		filepath.Join(homeDir, ".gemini", "config", "rules", "agents.md"),
-		filepath.Join(homeDir, ".gemini", "config", "rules", "system.md"),
+
+		filepath.Join(configRulesDir, "system_instructions.md"),
+		filepath.Join(configRulesDir, "SYSTEM_INSTRUCTIONS.md"),
+		filepath.Join(configRulesDir, "system.md"),
+		filepath.Join(configRulesDir, "SYSTEM.md"),
+		filepath.Join(configRulesDir, "gemini.md"),
+		filepath.Join(configRulesDir, "GEMINI.md"),
+		filepath.Join(configRulesDir, "agents.md"),
+		filepath.Join(configRulesDir, "custom_instructions.md"),
+
 		"/share/aerial/.agents/rules/system_instructions.md",
 		"/share/aerial/.agents/rules/custom_instructions.md",
 		"/share/aerial/.agents/rules/agents.md",
 		"/share/aerial/.agents/rules/system.md",
+		"/share/aerial/.agents/rules/gemini.md",
 		"/app/.agents/rules/system_instructions.md",
 		"/app/.agents/rules/custom_instructions.md",
 		"/app/.agents/rules/agents.md",
 		"/app/.agents/rules/system.md",
+		"/app/.agents/rules/gemini.md",
 	}
 	for _, stale := range staleRuleFiles {
 		_ = os.Remove(stale)
 	}
 
-	primaryRuleFile := filepath.Join(primaryRulesDir, "system_instructions.md")
+	primaryRuleFile := filepath.Join(primaryRulesDir, "user_persona.md")
 	if err := writeAtomic(primaryRuleFile, content); err != nil {
 		return fmt.Errorf("failed to write primary system rules: %w", err)
 	}
-	log.Printf("Configured always_on system instructions in %s", primaryRuleFile)
+	log.Printf("Configured always_on user persona in %s", primaryRuleFile)
 
 	// Also sync to ~/.gemini/config/rules for compatibility
-	configRulesDir := filepath.Join(homeDir, ".gemini", "config", "rules")
-	_ = writeAtomic(filepath.Join(configRulesDir, "system_instructions.md"), content)
+	configRuleFile := filepath.Join(configRulesDir, "user_persona.md")
+	_ = writeAtomic(configRuleFile, content)
 
 	return nil
 }
