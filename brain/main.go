@@ -21,7 +21,6 @@ import (
 	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
 	"github.com/azylman/aerial/brain/pkg/delivery"
-	"github.com/azylman/aerial/brain/pkg/gitsync"
 	"github.com/azylman/aerial/brain/pkg/queue"
 	"github.com/azylman/aerial/brain/pkg/scheduler"
 	"github.com/azylman/aerial/brain/pkg/skills"
@@ -788,23 +787,6 @@ func handleTasks(database *sql.DB) http.HandlerFunc {
 }
 
 func main() {
-	configRepoUrl := config.GetEnv("AERIAL_CONFIG_REPO_URL", "")
-	pat := config.GetEnv("GITHUB_PAT", "")
-
-	bootCtx, bootCancel := context.WithTimeout(context.Background(), 15*time.Second)
-	if err := gitsync.EnsureRepo(bootCtx, "/share/aerial-config", configRepoUrl, pat); err != nil {
-		log.Printf("[Startup Bootstrapping] Warning: Failed to ensure /share/aerial-config: %v. Proceeding with local configuration.", err)
-	}
-	bootCancel()
-
-	aerialSyncCtx, aerialSyncCancel := context.WithTimeout(context.Background(), 15*time.Second)
-	if _, err := gitsync.SyncRepo(aerialSyncCtx, "/share/aerial"); err != nil {
-		log.Printf("[Startup Bootstrapping] Notice: Bootstrapping sync for /share/aerial returned: %v (continuing with local tree)", err)
-	}
-	aerialSyncCancel()
-
-	_ = gitsync.SyncComposeOverride("/share/aerial-config", "/share/aerial")
-
 	cfg, err := config.LoadConfig()
 	if err != nil {
 		log.Printf("Warning: initial LoadConfig error: %v", err)
@@ -884,7 +866,6 @@ func main() {
 
 	reloadConfig := func(source string) {
 		log.Printf("[%s] Changes detected. Reloading configuration, system rules, and skills...", source)
-		_ = gitsync.SyncComposeOverride("/share/aerial-config", "/share/aerial")
 		latestCfg, parseErr := config.LoadConfig()
 		if parseErr != nil {
 			log.Printf("[%s] Warning: Failed to parse config.yaml: %v", source, parseErr)
@@ -962,37 +943,6 @@ func main() {
 	stopScheduler := scheduler.Start(context.Background(), database, pool, dgSession)
 	defer stopScheduler()
 
-	// Start background git synchronization worker for config & project repos
-	gitSyncRepos := cfg.GitSync.Repositories
-	if len(gitSyncRepos) == 0 {
-		gitSyncRepos = []string{
-			"/share/aerial-config",
-			"/share/aerial",
-		}
-	}
-	syncInterval := 60 * time.Second
-	if d, err := time.ParseDuration(cfg.GitSync.Interval); err == nil && d > 0 {
-		syncInterval = d
-	}
-
-	// Configure git core.hooksPath for tracked repos with .githooks directory
-	for _, repo := range gitSyncRepos {
-		if hookErr := gitsync.EnsureGitHooks(context.Background(), repo); hookErr != nil {
-			log.Printf("[GitSync] Warning: EnsureGitHooks failed for %s: %v", repo, hookErr)
-		}
-	}
-
-	stopGitSync := gitsync.StartPeriodicSync(
-		context.Background(),
-		syncInterval,
-		gitSyncRepos,
-		func(repo string) {
-			_ = gitsync.SyncComposeOverride("/share/aerial-config", "/share/aerial")
-			reloadConfig(fmt.Sprintf("GitSync: %s", filepath.Base(repo)))
-		},
-	)
-	defer stopGitSync()
-
 	mux := http.NewServeMux()
 	mux.HandleFunc("/prompt", handlePrompt(database, pool))
 	mux.HandleFunc("/transcripts", handleTranscripts(database))
@@ -1000,6 +950,16 @@ func main() {
 	mux.HandleFunc("/facts", handleFacts(database))
 	mux.HandleFunc("/schedules", handleSchedules(database))
 	mux.HandleFunc("/schedules/runs", handleScheduleRuns(database))
+	mux.HandleFunc("/internal/reload", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
+			return
+		}
+		reloadConfig("Internal Sidecar Trigger")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"reloaded"}`))
+	})
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -1031,9 +991,6 @@ func main() {
 		log.Printf("HTTP shutdown error: %v", err)
 	}
 
-	if stopGitSync != nil {
-		stopGitSync()
-	}
 	if stopScheduler != nil {
 		stopScheduler()
 	}
