@@ -1303,7 +1303,7 @@ func TestGetRecentThreadMessages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InitDB failed: %v", err)
 	}
-	defer database.Close()
+	defer func() { _ = database.Close() }()
 
 	// 1. Edge case: nil database
 	if _, err := GetRecentThreadMessages(nil, "thread-lounge", 10); err == nil {

@@ -240,8 +240,9 @@ func TestClassifier_NilContext(t *testing.T) {
 		}),
 	)
 
-	// Passing nil context must not panic
-	res := c.Classify(nil, db.Message{Content: "test"}, nil, "")
+	// Passing nil context must not panic (defensive nil check)
+	var nilCtx context.Context
+	res := c.Classify(nilCtx, db.Message{Content: "test"}, nil, "") //nolint:staticcheck // intentionally testing nil context resilience
 	if res.Confidence != 0.5 {
 		t.Errorf("expected confidence 0.5, got %f", res.Confidence)
 	}
