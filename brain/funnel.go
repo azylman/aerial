@@ -237,7 +237,7 @@ func isFunnelBotTargeted(s *discordgo.Session, m *discordgo.MessageCreate) bool 
 	if policy.IsIgnored() {
 		return false
 	}
-	if policy.IgnoreBots && m.Author.Bot {
+	if policy.IsBotIgnored() && m.Author.Bot {
 		return false
 	}
 
