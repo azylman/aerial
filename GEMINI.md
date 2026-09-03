@@ -10,11 +10,16 @@ Aerial runs as a multi-container Docker stack supervised by Watchtower and Autoh
   - Headless Antigravity CLI (`agy`) execution runner with multi-turn conversation memory.
   - Integrated Discord Gateway event funnel capturing mentions and thread messages.
   - In-memory serialized thread worker pool with SQLite WAL state persistence (`/data/aerial.db`).
+  - Kernel-enforced read-only filesystem mounts on `/share/aerial-config:ro` and `/share/aerial:ro` with `shm_size: 512mb` to prevent unpushed repository corruption.
   - Automatic turn-end Markdown output delivery directly to the active Discord thread.
   - In-process file watcher dynamically hot-reloading rules, skills, and configuration without process restarts.
-  - In-process mutex-guarded `gitsync` worker synchronizing `/share/aerial-config` and `/share/aerial`.
   - Background scheduler monitor evaluating recurring crons and one-shot reminders every 30 seconds.
   - Semantic memory RAG subsystem extracting conversation facts and querying embeddings via Ollama.
+
+- **Infrastructure & Git Synchronization (`aerial-gitsync`)**:
+  - Dedicated sidecar container holding read-write (`:rw`) volume mounts on `/share/aerial-config` and `/share/aerial`.
+  - Performs singleflight periodic and webhook-triggered (`POST /sync`) Git synchronization with credential scrubbing and POSIX base64 tokens.
+  - Fast-forward pulls with safe reset recovery to `FETCH_HEAD`, keeping running code cleanly decoupled from the execution engine.
 
 - **Outbound Model Context Protocol (MCP) Microservices (`aerial-net`)**:
   - `scheduler-mcp`: SQLite-backed recurring cron and one-shot reminder management.
@@ -55,9 +60,18 @@ Aerial operates on a strict **Two-Repository Separation of Concerns**:
   - **`AGENTS.md`**: User persona overrides, personal preferences, communication style, and user identity/alias definitions.
   - **`channels/<channel-name>.md`**: Dedicated instructions and operating constraints for specific Discord channels (auto-discovered; inherited by threads).
   - **`custom-skills/`**: Private operational runbooks and domain-specific workflows (e.g., smart home).
-  - **`docker-compose.override.yml`**: User-defined sidecar containers or extra local MCP servers connected to `aerial-net`.
+  - **`docker-compose.override.yml`**: User-defined sidecar containers or extra local MCP servers, natively merged by Docker Compose on the host via the top-level `include:` directive.
 
-### 3. Extensibility & Precedence Rules
+### 3. Physical Immutability & Two-Phase PR Workflow
+- **Kernel Read-Only Invariant**: `/share/aerial-config` and `/share/aerial` are mounted strictly **read-only (`:ro`)** into `aerial-brain`. Any direct file writes or local git operations targeting `/share/aerial-config` or `/share/aerial` will fail with `EROFS: Read-only file system`.
+- **Automated Two-Phase PR Workflow (`aerial-config-pr.sh`)**:
+  All configuration, persona, and skill updates must follow the automated PR workflow:
+  1. `aerial-config-pr.sh init`: Creates an isolated, shallow clone in `/dev/shm` on an ephemeral branch.
+  2. Edit files inside the returned scratch path using standard editing tools.
+  3. `aerial-config-pr.sh submit <scratch_dir> "<commit message>"`: Performs pre-flight YAML validation, pushes the branch, opens a Pull Request on GitHub, waits for CI checks to pass, squash merges into `main`, triggers fast-path sync via `aerial-gitsync`, and discards the scratch clone.
+- **Evidence-Before-Assertion**: Never report completion or assert that configuration changes are active until `aerial-config-pr.sh submit` completes successfully with exit code 0 and confirms the squash merge.
+
+### 4. Extensibility & Precedence Rules
 - **Persona Precedence**: Instructions in `aerial-config/AGENTS.md` strictly take precedence over default persona instructions in `GEMINI.md`.
 - **Per-Channel Instructions**: Markdown files placed in `/share/aerial-config/channels/<channel-name>.md` are auto-discovered and injected dynamically into `<CHANNEL_INSTRUCTIONS>` on each turn.
 - **Skill Precedence**: Custom skills in `/share/aerial-config/custom-skills/` take highest priority, shadowing built-in skills of the same name.
