@@ -115,7 +115,6 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 		Channels             map[string]ChannelPolicy `yaml:"channels"`
 		GitSync              GitSyncConfig            `yaml:"git_sync"`
 		McpServers           map[string]interface{}   `yaml:"mcp_servers"`
-		AmbientWakePrompt    string                   `yaml:"ambient_wake_prompt,omitempty"`
 	}
 
 	var raw rawConfigHelper
