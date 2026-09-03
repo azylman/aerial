@@ -88,13 +88,24 @@ User configuration and persona rules live in your private configuration reposito
        mode: "threads"           # "threads" | "channel" | "ignore"
        typing_indicator: "always" # "always" | "on_mention" | "never"
        ignore_bots: true
+       ambient_wake_threshold: 0.80
 
      # In-Channel Direct Interaction (no threads spawned)
      general:
        mode: "channel"
        typing_indicator: "on_mention"
        ignore_bots: true
+       ambient_wake_threshold: 0.80
+       ambient_wake_prompt: "Determine whether the target message is relevant to Aerial and warrants Aerial waking up and responding, based on the recent channel context."
        max_session_turns: 50
+
+     # Custom ambient prompt per channel
+     dev-alerts:
+       mode: "channel"
+       typing_indicator: "on_mention"
+       ignore_bots: false # Allow bot alerts
+       ambient_wake_threshold: 0.70
+       ambient_wake_prompt: "Only wake up and respond if the user is asking about Kubernetes deployments, CI/CD pipeline failures, or production outages."
 
      # Ignore specific noisy channels
      memes:
@@ -110,8 +121,16 @@ User configuration and persona rules live in your private configuration reposito
    ```
    - **Interaction Modes**:
      - `threads`: Direct messages or mentions spawn and route to a Discord thread (default).
-     - `channel`: Messages are evaluated directly in-channel without spawning threads. Aerial uses the `[NO_REPLY]` silent sentinel to remain silent on casual chatter not directed at her.
+     - `channel`: Messages are evaluated directly in-channel without spawning threads using a **Two-Tier Wake Model**:
+       - **Tier 1 (Direct Wake)**: Direct mentions (`@Aerial`), replies to Aerial, and keywords (`\b(aerial|gundam)\b`) trigger immediate wake and response.
+       - **Tier 2 (Ambient Relevance Scorer)**: Ambient messages are scored (0.0 to 1.0) by a fast classifier with the previous 10 messages of channel context against `ambient_wake_prompt`.
+       - **Native Lookback Transcripts**: Unaddressed ambient messages scoring below `ambient_wake_threshold` are silently appended to Antigravity's native `transcript.jsonl` without typing indicators or LLM execution, building conversational memory so Aerial has full context when subsequently woken.
      - `ignore` (or `disabled`): Channel is completely ignored (no messages evaluated, no startup sweeps).
+   - **Channel-Level Configuration Options**:
+     - `ambient_wake_threshold`: Confidence threshold (0.0 to 1.0) to wake Aerial on ambient messages (default `0.80` for channel mode; `0.0` disables ambient wake).
+     - `ambient_wake_prompt`: Custom directive/criteria for the fast ambient relevance classifier in that channel (inherits from `channels.default.ambient_wake_prompt`).
+     - `ignore_bots`: Set to `false` on specific channels to enable peer bot interactions while keeping default `ignore_bots: true`.
+     - `max_session_turns`: Turn count threshold before rotating the internal conversation ID (default `50`).
    - **Server Whitelisting (Default-Deny)**: Set `channels.default.mode: "ignore"` to ignore the entire server by default, responding only in explicitly declared channels.
    - **Hot-Reloading**: Changes to `config.yaml` are detected instantly via `fsnotify` and reconfigured in-memory without restarting the daemon.
    - **Last Known Good Configuration (LKGC) & Discord Alerts**: If an invalid YAML file is saved, Aerial retains the previous valid settings in memory and posts a diagnostic alert to `#aerial-dev` in Discord.
