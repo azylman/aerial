@@ -50,7 +50,8 @@ func TestQueueSuccessLifecycleAndSessionSaving(t *testing.T) {
 				homeDir = "/root"
 			}
 			sessDir := filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain", "session-uuid-123")
-			_ = os.MkdirAll(sessDir, 0755)
+			_ = os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs"), 0755)
+			_ = os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte(`{"step_index":0}`+"\n"), 0644)
 			now := time.Now()
 			_ = os.Chtimes(sessDir, now, now)
 			return "Clean output response", "", 0, nil
@@ -311,7 +312,8 @@ func TestQueueSessionCorruptionRecovery(t *testing.T) {
 				homeDir = "/root"
 			}
 			sessDir := filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain", "fresh-uuid-999")
-			_ = os.MkdirAll(sessDir, 0755)
+			_ = os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs"), 0755)
+			_ = os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte(`{"step_index":0}`+"\n"), 0644)
 			now := time.Now()
 			_ = os.Chtimes(sessDir, now, now)
 			return "Clean output after session reset", "", 0, nil
@@ -1586,22 +1588,22 @@ func TestQueueTurnCountSessionRotation(t *testing.T) {
 	<-completedCh
 
 	// Verify post-3-turns state:
-	// Session ID should be rotated to a new UUID (not initialSessionID)
-	// turn_count should be 1 for the new session
+	// Session ID should be rotated to cold state ""
+	// turn_count should be reset to 0
 	finalSessionID, err := db.GetSessionID(database, channelID)
 	if err != nil {
 		t.Fatalf("Failed to query session ID: %v", err)
 	}
-	if finalSessionID == "" || finalSessionID == initialSessionID {
-		t.Errorf("Expected session ID to be rotated from %s, got: %s", initialSessionID, finalSessionID)
+	if finalSessionID != "" {
+		t.Errorf("Expected session ID to be reset to cold state \"\", got: %s", finalSessionID)
 	}
 
 	finalTurnCount, err := db.GetSessionTurnCount(database, channelID)
 	if err != nil {
 		t.Fatalf("Failed to query turn count: %v", err)
 	}
-	if finalTurnCount != 1 {
-		t.Errorf("Expected turn_count=1 after rotation, got %d", finalTurnCount)
+	if finalTurnCount != 0 {
+		t.Errorf("Expected turn_count=0 after rotation, got %d", finalTurnCount)
 	}
 }
 
@@ -2046,6 +2048,9 @@ func TestProcessBurst_PureAmbient(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnsureSessionDir failed: %v", err)
 	}
+	cliPbDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "conversations")
+	_ = os.MkdirAll(cliPbDir, 0755)
+	_ = os.WriteFile(filepath.Join(cliPbDir, sessionID+".pb"), []byte("mock-pb"), 0644)
 
 	var mu sync.Mutex
 	runnerCalls := 0
@@ -2377,6 +2382,9 @@ func TestProcessBurst_MixedBurst(t *testing.T) {
 	sessionID := uuid.New().String()
 	_ = db.SaveSessionID(database, "chan-lounge", sessionID)
 	sessDir, _ := session.EnsureSessionDir(sessionID)
+	cliPbDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "conversations")
+	_ = os.MkdirAll(cliPbDir, 0755)
+	_ = os.WriteFile(filepath.Join(cliPbDir, sessionID+".pb"), []byte("mock-pb"), 0644)
 
 	var mu sync.Mutex
 	runnerCalls := 0
@@ -2561,6 +2569,9 @@ func TestProcessBurst_SessionRotationBeforeLeadingAmbient(t *testing.T) {
 	initialSessionID := uuid.New().String()
 	_ = db.SaveSessionID(database, channelID, initialSessionID)
 	_, _ = session.EnsureSessionDir(initialSessionID)
+	cliPbDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "conversations")
+	_ = os.MkdirAll(cliPbDir, 0755)
+	_ = os.WriteFile(filepath.Join(cliPbDir, initialSessionID+".pb"), []byte("mock-pb"), 0644)
 
 	// Set turn_count to 2, with MaxSessionTurns = 3.
 	// The incoming burst has [Ambient1, Wake2].
@@ -2571,6 +2582,7 @@ func TestProcessBurst_SessionRotationBeforeLeadingAmbient(t *testing.T) {
 
 	var mu sync.Mutex
 	runnerCalls := 0
+	var passedSessID string
 
 	cls := classifier.NewClassifier(classifier.WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
 		return `{"confidence": 0.10, "reason": "ambient banter"}`, nil
@@ -2583,6 +2595,7 @@ func TestProcessBurst_SessionRotationBeforeLeadingAmbient(t *testing.T) {
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			mu.Lock()
 			runnerCalls++
+			passedSessID = sessID
 			mu.Unlock()
 			return "I am answering your question!", "", 0, nil
 		},
@@ -2633,27 +2646,21 @@ func TestProcessBurst_SessionRotationBeforeLeadingAmbient(t *testing.T) {
 		t.Errorf("Expected 1 runner call, got %d", runnerCalls)
 	}
 
-	newSessionID, err := db.GetSessionID(database, channelID)
-	if err != nil || newSessionID == initialSessionID || newSessionID == "" {
-		t.Fatalf("Expected session to rotate to a new session ID, got %s (old=%s)", newSessionID, initialSessionID)
+	if passedSessID != "" {
+		t.Errorf("Expected RunnerFunc to be called with empty session ID on rotated turn, got %q", passedSessID)
 	}
 
-	// Verify that Ambient1 was written to the NEW session directory, NOT the old session directory!
-	newSessDir, _ := session.EnsureSessionDir(newSessionID)
-	newTranscriptPath := filepath.Join(newSessDir, ".system_generated", "logs", "transcript.jsonl")
-	dataNew, err := os.ReadFile(newTranscriptPath)
-	if err != nil {
-		t.Fatalf("Failed to read new session transcript: %v", err)
-	}
-	if !strings.Contains(string(dataNew), "Random ambient chatter before question") {
-		t.Errorf("Expected leading ambient message to be preserved in new session transcript:\n%s", string(dataNew))
-	}
-
+	// Verify that Ambient1 was NOT written to the old session directory, but marked COMPLETED in SQLite!
 	oldSessDir, _ := session.EnsureSessionDir(initialSessionID)
 	oldTranscriptPath := filepath.Join(oldSessDir, ".system_generated", "logs", "transcript.jsonl")
 	dataOld, _ := os.ReadFile(oldTranscriptPath)
 	if strings.Contains(string(dataOld), "Random ambient chatter before question") {
 		t.Errorf("Ambient message should NOT have been written to old session directory")
+	}
+
+	m1Saved, _ := db.GetMessage(database, "msg-rot-amb-1")
+	if m1Saved == nil || m1Saved.Status != db.StatusCompleted || !strings.Contains(m1Saved.ErrorMessage, "[AMBIENT score=") {
+		t.Errorf("Expected leading ambient message to be marked COMPLETED with [AMBIENT score=...], got: %+v", m1Saved)
 	}
 }
 
@@ -2670,6 +2677,9 @@ func TestProcessBurst_TrailingAmbient(t *testing.T) {
 	sessionID := uuid.New().String()
 	_ = db.SaveSessionID(database, "chan-lounge", sessionID)
 	sessDir, _ := session.EnsureSessionDir(sessionID)
+	cliPbDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "conversations")
+	_ = os.MkdirAll(cliPbDir, 0755)
+	_ = os.WriteFile(filepath.Join(cliPbDir, sessionID+".pb"), []byte("mock-pb"), 0644)
 
 	var mu sync.Mutex
 	runnerCalls := 0
@@ -3434,4 +3444,538 @@ func TestProcessBurst_CoalescedAmbientBurst(t *testing.T) {
 		t.Errorf("Expected 1 runner call for woken burst, got %d", runnerCalls)
 	}
 }
+
+func TestProcessBurst_GhostSessionRecovery(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	channelID := "chan-lounge"
+	_ = db.SaveSessionID(database, channelID, "stale-ghost-uuid")
+
+	// Create mock session dir on disk with non-empty transcript.jsonl for "real-new-uuid"
+	sessDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", "real-new-uuid")
+	_ = os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs"), 0755)
+	_ = os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte(`{"step_index":0}`+"\n"), 0644)
+
+	var mu sync.Mutex
+	runnerCalls := 0
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB: database,
+		MemoryRetrieverFunc: func(ctx context.Context, database *sql.DB, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+			return nil, nil
+		},
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			mu.Lock()
+			runnerCalls++
+			mu.Unlock()
+			stderr := "warning: conversation \"stale-ghost-uuid\" not found\nStarting conversation update stream for real-new-uuid\n"
+			return "Hello! I am ready to help.", stderr, 0, nil
+		},
+		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
+			return config.ChannelPolicy{
+				Mode: "channel",
+			}
+		},
+	})
+
+	now := time.Now().UTC()
+	msg := db.Message{
+		ID:         "msg-ghost-recovery-1",
+		ThreadID:   channelID,
+		AuthorName: "Alice",
+		Content:    "Hey Aerial, are you awake?",
+		Status:     db.StatusPending,
+		CreatedAt:  now,
+	}
+	_ = db.InsertMessage(database, msg)
+
+	pool.processBurst([]db.Message{msg})
+
+	mu.Lock()
+	calls := runnerCalls
+	mu.Unlock()
+
+	if calls != 1 {
+		t.Fatalf("Expected 1 runner call, got %d", calls)
+	}
+
+	savedSessionID, err := db.GetSessionID(database, channelID)
+	if err != nil {
+		t.Fatalf("Failed to get session ID: %v", err)
+	}
+	if savedSessionID != "real-new-uuid" {
+		t.Errorf("Expected db.GetSessionID to equal 'real-new-uuid', got %q", savedSessionID)
+	}
+}
+
+func TestProcessBurst_MultiTurnContinuity_AfterRecovery(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	channelID := "chan-lounge"
+	_ = db.SaveSessionID(database, channelID, "stale-ghost-uuid")
+
+	sessDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", "real-new-uuid")
+	_ = os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs"), 0755)
+	_ = os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte(`{"step_index":0}`+"\n"), 0644)
+
+	var mu sync.Mutex
+	var receivedSessionIDs []string
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB: database,
+		MemoryRetrieverFunc: func(ctx context.Context, database *sql.DB, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+			return nil, nil
+		},
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			mu.Lock()
+			receivedSessionIDs = append(receivedSessionIDs, sessionID)
+			mu.Unlock()
+			stderr := "warning: conversation \"stale-ghost-uuid\" not found\nStarting conversation update stream for real-new-uuid\n"
+			return "Clean reply", stderr, 0, nil
+		},
+		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
+			return config.ChannelPolicy{
+				Mode: "channel",
+			}
+		},
+	})
+
+	now := time.Now().UTC()
+	// Turn 1 (triggers recovery)
+	msg1 := db.Message{
+		ID:         "msg-recov-turn-1",
+		ThreadID:   channelID,
+		AuthorName: "Alice",
+		Content:    "Hello Aerial",
+		Status:     db.StatusPending,
+		CreatedAt:  now,
+	}
+	_ = db.InsertMessage(database, msg1)
+	pool.processBurst([]db.Message{msg1})
+
+	// Turn 2 (multi-turn follow-up)
+	msg2 := db.Message{
+		ID:         "msg-recov-turn-2",
+		ThreadID:   channelID,
+		AuthorName: "Alice",
+		Content:    "Hey Aerial, what did I just say?",
+		Status:     db.StatusPending,
+		CreatedAt:  now.Add(2 * time.Second),
+	}
+	_ = db.InsertMessage(database, msg2)
+	pool.processBurst([]db.Message{msg2})
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if len(receivedSessionIDs) != 2 {
+		t.Fatalf("Expected 2 runner calls, got %d", len(receivedSessionIDs))
+	}
+	if receivedSessionIDs[1] != "real-new-uuid" {
+		t.Errorf("Expected Turn 2 to receive sessionID == 'real-new-uuid', got %q", receivedSessionIDs[1])
+	}
+}
+
+func TestProcessBurst_ColdChannel_NoStubDirectory(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	channelID := "chan-cold-123"
+
+	cls := classifier.NewClassifier(classifier.WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
+		return `{"confidence": 0.05, "reason": "ambient chatter"}`, nil
+	}))
+
+	var runnerCalls int
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:         database,
+		Classifier: cls,
+		MemoryRetrieverFunc: func(ctx context.Context, database *sql.DB, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+			return nil, nil
+		},
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			runnerCalls++
+			return "", "", 0, nil
+		},
+		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
+			return config.ChannelPolicy{
+				Mode:                 "channel",
+				AmbientWakeThreshold: ptrFloat(0.80),
+			}
+		},
+	})
+
+	now := time.Now().UTC()
+	msg := db.Message{
+		ID:         "msg-cold-ambient-1",
+		ThreadID:   channelID,
+		AuthorName: "Alice",
+		Content:    "just saying hello to everyone in the room",
+		Status:     db.StatusPending,
+		CreatedAt:  now,
+	}
+	_ = db.InsertMessage(database, msg)
+
+	pool.processBurst([]db.Message{msg})
+
+	if runnerCalls != 0 {
+		t.Errorf("Expected 0 runner calls for pure ambient burst, got %d", runnerCalls)
+	}
+
+	sessID, err := db.GetSessionID(database, channelID)
+	if err != nil {
+		t.Fatalf("GetSessionID failed: %v", err)
+	}
+	if sessID != "" {
+		t.Errorf("Expected db.GetSessionID to be empty \"\", got %q", sessID)
+	}
+
+	// Assert no directory was created for "chan-cold-123" in /data/brain or home brain roots
+	roots := []string{
+		"/data/brain/" + channelID,
+		filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", channelID),
+		filepath.Join(tmpDir, ".gemini", "antigravity", "brain", channelID),
+	}
+	for _, root := range roots {
+		if fi, err := os.Stat(root); err == nil {
+			t.Errorf("Found unexpected directory created for cold channel at %s (isDir=%t)", root, fi.IsDir())
+		}
+	}
+}
+
+func TestProcessBurst_Turn1ContextInjection(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	channelID := "chan-history"
+
+	// Mock session dir for Turn 1 synchronized session
+	sessDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", "warm-uuid-hist")
+	_ = os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs"), 0755)
+	_ = os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte(`{"step_index":0}`+"\n"), 0644)
+
+	var mu sync.Mutex
+	var capturedPrompts []string
+	var receivedSessionIDs []string
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB: database,
+		MemoryRetrieverFunc: func(ctx context.Context, database *sql.DB, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+			return nil, nil
+		},
+		HistoryFetcher: func(ctx context.Context, cID string, beforeID string, limit int) ([]HistoryMessage, error) {
+			return []HistoryMessage{
+				{
+					ID:         "hist-1",
+					AuthorName: "Alice",
+					Role:       "User",
+					Content:    "First historical message",
+					CreatedAt:  time.Now().UTC().Add(-15 * time.Minute),
+				},
+				{
+					ID:         "hist-2",
+					AuthorName: "Bob",
+					Role:       "User",
+					Content:    "Second historical message",
+					CreatedAt:  time.Now().UTC().Add(-10 * time.Minute),
+				},
+			}, nil
+		},
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			mu.Lock()
+			capturedPrompts = append(capturedPrompts, prompt)
+			receivedSessionIDs = append(receivedSessionIDs, sessID)
+			mu.Unlock()
+			stderr := "Starting conversation update stream for warm-uuid-hist\n"
+			return "Answering wake question!", stderr, 0, nil
+		},
+		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
+			return config.ChannelPolicy{
+				Mode: "channel",
+			}
+		},
+	})
+
+	now := time.Now().UTC()
+	// Turn 1 on cold channel
+	msg1 := db.Message{
+		ID:         "msg-hist-turn-1",
+		ThreadID:   channelID,
+		AuthorName: "Charlie",
+		Content:    "Hey Aerial, turn 1 wake question",
+		Status:     db.StatusPending,
+		CreatedAt:  now,
+	}
+	_ = db.InsertMessage(database, msg1)
+	pool.processBurst([]db.Message{msg1})
+
+	// Turn 2 on now-warm channel
+	msg2 := db.Message{
+		ID:         "msg-hist-turn-2",
+		ThreadID:   channelID,
+		AuthorName: "Charlie",
+		Content:    "Hey Aerial, turn 2 follow-up question",
+		Status:     db.StatusPending,
+		CreatedAt:  now.Add(5 * time.Second),
+	}
+	_ = db.InsertMessage(database, msg2)
+	pool.processBurst([]db.Message{msg2})
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if len(capturedPrompts) != 2 {
+		t.Fatalf("Expected 2 runner prompts, got %d", len(capturedPrompts))
+	}
+
+	// Turn 1 assertions
+	turn1Prompt := capturedPrompts[0]
+	if !strings.Contains(turn1Prompt, "<CHANNEL_HISTORY>") {
+		t.Errorf("Expected Turn 1 prompt to contain <CHANNEL_HISTORY>, got:\n%s", turn1Prompt)
+	}
+	if !strings.Contains(turn1Prompt, "First historical message") || !strings.Contains(turn1Prompt, "Second historical message") {
+		t.Errorf("Expected Turn 1 prompt to contain formatted historical messages, got:\n%s", turn1Prompt)
+	}
+	if receivedSessionIDs[0] != "" {
+		t.Errorf("Expected Turn 1 to have empty sessionID, got %q", receivedSessionIDs[0])
+	}
+
+	// Turn 2 assertions
+	turn2Prompt := capturedPrompts[1]
+	if strings.Contains(turn2Prompt, "<CHANNEL_HISTORY>") {
+		t.Errorf("Expected Turn 2 prompt to NOT contain <CHANNEL_HISTORY>, got:\n%s", turn2Prompt)
+	}
+	if receivedSessionIDs[1] != "warm-uuid-hist" {
+		t.Errorf("Expected Turn 2 to have sessionID == 'warm-uuid-hist', got %q", receivedSessionIDs[1])
+	}
+}
+
+func TestProcessBurst_SessionRotation_ResetsToColdState(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	channelID := "chan-rotation-cold"
+
+	// Mock session dir for Turn 1
+	sessDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", "sess-rot-1")
+	_ = os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs"), 0755)
+	_ = os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte(`{"step_index":0}`+"\n"), 0644)
+	past := time.Now().Add(-10 * time.Second)
+	_ = os.Chtimes(sessDir, past, past)
+
+	var mu sync.Mutex
+	var capturedPrompts []string
+	var receivedSessionIDs []string
+	historyFetchCalls := 0
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB: database,
+		MemoryRetrieverFunc: func(ctx context.Context, database *sql.DB, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+			return nil, nil
+		},
+		HistoryFetcher: func(ctx context.Context, cID string, beforeID string, limit int) ([]HistoryMessage, error) {
+			mu.Lock()
+			historyFetchCalls++
+			mu.Unlock()
+			return []HistoryMessage{
+				{
+					ID:         "hist-boot-1",
+					AuthorName: "Alice",
+					Role:       "User",
+					Content:    "Historical message before bootstrap",
+					CreatedAt:  time.Now().UTC().Add(-5 * time.Minute),
+				},
+			}, nil
+		},
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			mu.Lock()
+			capturedPrompts = append(capturedPrompts, prompt)
+			receivedSessionIDs = append(receivedSessionIDs, sessID)
+			callNum := len(receivedSessionIDs)
+			mu.Unlock()
+
+			if callNum == 1 {
+				// Turn 1 mints genuine session
+				stderr := "Starting conversation update stream for sess-rot-1\n"
+				return "Turn 1 answer", stderr, 0, nil
+			}
+			return "Subsequent turn answer", "", 0, nil
+		},
+		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
+			return config.ChannelPolicy{
+				Mode:            "channel",
+				MaxSessionTurns: 2,
+			}
+		},
+	})
+
+	now := time.Now().UTC()
+
+	// 1. Process Turn 1 -> turnCount becomes 1
+	msg1 := db.Message{
+		ID:         "msg-turn-1",
+		ThreadID:   channelID,
+		AuthorName: "Alice",
+		Content:    "Aerial Turn 1",
+		Status:     db.StatusPending,
+		CreatedAt:  now,
+	}
+	_ = db.InsertMessage(database, msg1)
+	pool.processBurst([]db.Message{msg1})
+
+	tc1, err := db.GetSessionTurnCount(database, channelID)
+	if err != nil {
+		t.Fatalf("Failed to get turn count after turn 1: %v", err)
+	}
+	if tc1 != 1 {
+		t.Errorf("Expected turnCount to become 1 after Turn 1, got %d", tc1)
+	}
+	s1, _ := db.GetSessionID(database, channelID)
+	if s1 != "sess-rot-1" {
+		t.Errorf("Expected session ID 'sess-rot-1' after Turn 1, got %q", s1)
+	}
+
+	// 2. Process Turn 2 -> turnCount hits 2, rotates session_id to ""
+	msg2 := db.Message{
+		ID:         "msg-turn-2",
+		ThreadID:   channelID,
+		AuthorName: "Alice",
+		Content:    "Aerial Turn 2",
+		Status:     db.StatusPending,
+		CreatedAt:  now.Add(2 * time.Second),
+	}
+	_ = db.InsertMessage(database, msg2)
+	pool.processBurst([]db.Message{msg2})
+
+	s2, err := db.GetSessionID(database, channelID)
+	if err != nil {
+		t.Fatalf("Failed to get session ID after turn 2: %v", err)
+	}
+	if s2 != "" {
+		t.Errorf("Expected db.GetSessionID to be empty \"\" after Turn 2 rotation, got %q", s2)
+	}
+
+	// 3. Process Turn 3 -> executes as Turn 1 cold bootstrap (fetches history, passes sessionID = "")
+	msg3 := db.Message{
+		ID:         "msg-turn-3",
+		ThreadID:   channelID,
+		AuthorName: "Alice",
+		Content:    "Aerial Turn 3",
+		Status:     db.StatusPending,
+		CreatedAt:  now.Add(4 * time.Second),
+	}
+	_ = db.InsertMessage(database, msg3)
+	pool.processBurst([]db.Message{msg3})
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if len(receivedSessionIDs) != 3 {
+		t.Fatalf("Expected 3 runner calls, got %d", len(receivedSessionIDs))
+	}
+	if receivedSessionIDs[2] != "" {
+		t.Errorf("Expected Turn 3 runner call to receive empty sessionID = \"\", got %q", receivedSessionIDs[2])
+	}
+	if !strings.Contains(capturedPrompts[2], "<CHANNEL_HISTORY>") {
+		t.Errorf("Expected Turn 3 to execute as cold bootstrap and contain <CHANNEL_HISTORY>, got:\n%s", capturedPrompts[2])
+	}
+	if !strings.Contains(capturedPrompts[2], "Historical message before bootstrap") {
+		t.Errorf("Expected Turn 3 prompt to contain fetched history message, got:\n%s", capturedPrompts[2])
+	}
+	if historyFetchCalls < 2 {
+		t.Errorf("Expected HistoryFetcher to be called at least twice (Turn 1 and Turn 3), got %d", historyFetchCalls)
+	}
+}
+
+func TestProcessBurst_Turn1Crash_DoesNotPersistGhostUUID(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	channelID := "chan-crash"
+
+	var runnerCalls int
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:          database,
+		MaxAttempts: 1,
+		MemoryRetrieverFunc: func(ctx context.Context, database *sql.DB, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+			return nil, nil
+		},
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			runnerCalls++
+			stderr := "Starting conversation update stream for crash-uuid-999\nError: fatal process crash\n"
+			return "", stderr, 1, fmt.Errorf("exit status 1")
+		},
+		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
+			return config.ChannelPolicy{
+				Mode: "channel",
+			}
+		},
+	})
+
+	now := time.Now().UTC()
+	msg := db.Message{
+		ID:         "msg-crash-1",
+		ThreadID:   channelID,
+		AuthorName: "Alice",
+		Content:    "Hey Aerial, please do something risky",
+		Status:     db.StatusPending,
+		CreatedAt:  now,
+	}
+	_ = db.InsertMessage(database, msg)
+
+	pool.processBurst([]db.Message{msg})
+
+	if runnerCalls != 1 {
+		t.Errorf("Expected 1 runner call, got %d", runnerCalls)
+	}
+
+	sessID, err := db.GetSessionID(database, channelID)
+	if err != nil {
+		t.Fatalf("GetSessionID failed: %v", err)
+	}
+	if sessID == "crash-uuid-999" {
+		t.Errorf("Expected db.GetSessionID to NOT equal 'crash-uuid-999', but got 'crash-uuid-999'")
+	}
+	if sessID != "" {
+		t.Errorf("Expected db.GetSessionID to be empty \"\", got %q", sessID)
+	}
+}
+
 
