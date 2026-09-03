@@ -200,6 +200,7 @@ func InitDB(dbPath string) (*sql.DB, error) {
 	// Create indices after migrations
 	indices := `
 	CREATE INDEX IF NOT EXISTS idx_messages_thread_status ON messages(thread_id, status);
+	CREATE INDEX IF NOT EXISTS idx_messages_thread_created_at ON messages(thread_id, created_at DESC);
 	CREATE INDEX IF NOT EXISTS idx_messages_status ON messages(status);
 	CREATE INDEX IF NOT EXISTS idx_messages_status_created ON messages(status, created_at);
 	CREATE INDEX IF NOT EXISTS idx_messages_status_created_at ON messages(status, created_at DESC);
@@ -633,6 +634,59 @@ func GetActiveRecentThreadIDs(database *sql.DB, since time.Duration) ([]string, 
 		}
 	}
 	return threadIDs, nil
+}
+
+// GetRecentThreadMessages retrieves the most recent messages for a thread in ascending chronological order.
+// If limit <= 0, it defaults to 10.
+func GetRecentThreadMessages(database *sql.DB, threadID string, limit int) ([]Message, error) {
+	if database == nil {
+		return nil, fmt.Errorf("database is nil")
+	}
+	if limit <= 0 {
+		limit = 10
+	}
+	query := `
+	SELECT id, thread_id, guild_id, author_id, author_name, content, summary, status,
+	       retry_count, error_message, response_text, schedule_run_id, created_at, updated_at
+	FROM (
+		SELECT * FROM messages
+		WHERE thread_id = ?
+		ORDER BY created_at DESC
+		LIMIT ?
+	)
+	ORDER BY created_at ASC
+	`
+	rows, err := database.Query(query, threadID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query recent thread messages: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	msgs := make([]Message, 0)
+	for rows.Next() {
+		var m Message
+		var errMsg, respText, schedID sql.NullString
+		if err := rows.Scan(
+			&m.ID, &m.ThreadID, &m.GuildID, &m.AuthorID, &m.AuthorName, &m.Content, &m.Summary,
+			&m.Status, &m.RetryCount, &errMsg, &respText, &schedID, &m.CreatedAt, &m.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("failed to scan recent message: %w", err)
+		}
+		if errMsg.Valid {
+			m.ErrorMessage = errMsg.String
+		}
+		if respText.Valid {
+			m.ResponseText = respText.String
+		}
+		if schedID.Valid {
+			m.ScheduleRunID = schedID.String
+		}
+		msgs = append(msgs, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate recent messages: %w", err)
+	}
+	return msgs, nil
 }
 
 // Session CRUD Operations
