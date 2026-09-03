@@ -78,7 +78,7 @@ run_node_syntax() {
         if has_cmd node; then
             node --check "$file"
         elif has_cmd docker; then
-            docker run --rm -v "$(pwd):/app" -w /app node:20 node --check "$file"
+            cat "$file" | docker run --rm -i node:20 node --check
         fi
     fi
 }
@@ -91,7 +91,7 @@ run_node_test() {
         if has_cmd node; then
             (cd "$dir" && node --test $test_pattern)
         elif has_cmd docker; then
-            docker run --rm -v "$(pwd)/$dir:/app" -w /app node:20 sh -c "node --test $test_pattern"
+            tar -cf - "$dir" | docker run --rm -i node:20 sh -c "tar -xf - && cd $dir && node --test $test_pattern"
         fi
     fi
 }

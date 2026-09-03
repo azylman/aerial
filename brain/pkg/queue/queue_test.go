@@ -23,6 +23,7 @@ import (
 	"github.com/azylman/aerial/brain/pkg/notifier"
 	"github.com/azylman/aerial/brain/pkg/session"
 	"github.com/bwmarrin/discordgo"
+	"github.com/google/uuid"
 )
 
 func TestQueueSuccessLifecycleAndSessionSaving(t *testing.T) {
@@ -2037,7 +2038,7 @@ func TestProcessBurst_PureAmbient(t *testing.T) {
 	}
 	defer func() { _ = database.Close() }()
 
-	sessionID := "pure-ambient-sess-1"
+	sessionID := uuid.New().String()
 	if err := db.SaveSessionID(database, "chan-lounge", sessionID); err != nil {
 		t.Fatalf("Failed to save session ID: %v", err)
 	}
@@ -2166,7 +2167,7 @@ func TestProcessBurst_Tier1Wake(t *testing.T) {
 	}
 	defer func() { _ = database.Close() }()
 
-	sessionID := "tier1-wake-sess"
+	sessionID := uuid.New().String()
 	_ = db.SaveSessionID(database, "chan-lounge", sessionID)
 	_, _ = session.EnsureSessionDir(sessionID)
 
@@ -2271,7 +2272,7 @@ func TestProcessBurst_Tier2Wake(t *testing.T) {
 	}
 	defer func() { _ = database.Close() }()
 
-	sessionID := "tier2-wake-sess"
+	sessionID := uuid.New().String()
 	_ = db.SaveSessionID(database, "chan-lounge", sessionID)
 	_, _ = session.EnsureSessionDir(sessionID)
 
@@ -2373,7 +2374,7 @@ func TestProcessBurst_MixedBurst(t *testing.T) {
 	}
 	defer func() { _ = database.Close() }()
 
-	sessionID := "mixed-burst-sess"
+	sessionID := uuid.New().String()
 	_ = db.SaveSessionID(database, "chan-lounge", sessionID)
 	sessDir, _ := session.EnsureSessionDir(sessionID)
 
@@ -2557,7 +2558,7 @@ func TestProcessBurst_SessionRotationBeforeLeadingAmbient(t *testing.T) {
 	defer func() { _ = database.Close() }()
 
 	channelID := "chan-rot-ambient"
-	initialSessionID := "sess-old-123"
+	initialSessionID := uuid.New().String()
 	_ = db.SaveSessionID(database, channelID, initialSessionID)
 	_, _ = session.EnsureSessionDir(initialSessionID)
 
@@ -2638,7 +2639,8 @@ func TestProcessBurst_SessionRotationBeforeLeadingAmbient(t *testing.T) {
 	}
 
 	// Verify that Ambient1 was written to the NEW session directory, NOT the old session directory!
-	newTranscriptPath := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", newSessionID, ".system_generated", "logs", "transcript.jsonl")
+	newSessDir, _ := session.EnsureSessionDir(newSessionID)
+	newTranscriptPath := filepath.Join(newSessDir, ".system_generated", "logs", "transcript.jsonl")
 	dataNew, err := os.ReadFile(newTranscriptPath)
 	if err != nil {
 		t.Fatalf("Failed to read new session transcript: %v", err)
@@ -2647,7 +2649,8 @@ func TestProcessBurst_SessionRotationBeforeLeadingAmbient(t *testing.T) {
 		t.Errorf("Expected leading ambient message to be preserved in new session transcript:\n%s", string(dataNew))
 	}
 
-	oldTranscriptPath := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", initialSessionID, ".system_generated", "logs", "transcript.jsonl")
+	oldSessDir, _ := session.EnsureSessionDir(initialSessionID)
+	oldTranscriptPath := filepath.Join(oldSessDir, ".system_generated", "logs", "transcript.jsonl")
 	dataOld, _ := os.ReadFile(oldTranscriptPath)
 	if strings.Contains(string(dataOld), "Random ambient chatter before question") {
 		t.Errorf("Ambient message should NOT have been written to old session directory")
@@ -2664,7 +2667,7 @@ func TestProcessBurst_TrailingAmbient(t *testing.T) {
 	}
 	defer func() { _ = database.Close() }()
 
-	sessionID := "trailing-ambient-sess"
+	sessionID := uuid.New().String()
 	_ = db.SaveSessionID(database, "chan-lounge", sessionID)
 	sessDir, _ := session.EnsureSessionDir(sessionID)
 
