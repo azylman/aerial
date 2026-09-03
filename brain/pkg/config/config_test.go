@@ -1046,6 +1046,12 @@ channels:
 	if pDefault.GetAmbientWakePrompt() != "Default prompt directive" {
 		t.Errorf("expected default fallback GetAmbientWakePrompt() 'Default prompt directive', got %q", pDefault.GetAmbientWakePrompt())
 	}
+
+	// 4. Whitespace trimming
+	pWhitespace := ChannelPolicy{AmbientWakePrompt: "  padded prompt directive \n\t"}
+	if pWhitespace.GetAmbientWakePrompt() != "padded prompt directive" {
+		t.Errorf("expected whitespace-trimmed prompt 'padded prompt directive', got %q", pWhitespace.GetAmbientWakePrompt())
+	}
 }
 
 
