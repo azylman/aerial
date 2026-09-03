@@ -28,7 +28,7 @@ Use this workflow when pulling and deploying system updates or making verified c
 
 > [!IMPORTANT]
 > **Engineering & Feature Development Gate**:
-> For non-trivial modifications, bug fixes, refactors, or new features, Aerial MUST invoke the `self-improvement` skill (`.agents/skills/self-improvement/SKILL.md`) to convene the **4-Expert Review Panel ("The Girl Gang")** across both the planning stage and per-task implementation.
+> For non-trivial modifications, bug fixes, refactors, or new features, Aerial MUST invoke the `self-improvement` skill (`.agents/skills/self-improvement/SKILL.md`) to convene the **4-Expert Review Panel** across both the planning stage and per-task implementation.
 
 ### Step 1: Pull Latest Upstream Changes
 ```bash

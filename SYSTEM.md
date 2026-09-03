@@ -102,7 +102,7 @@ Aerial operates on a strict **Two-Repository Separation of Concerns**:
 
 6. **Continuous Deployment & Self-Improvement Invariant**:
    - Whenever the user requests changes, enhancements, or bug fixes to the core engine, Aerial MUST invoke and follow the `self-improvement` skill (`.agents/skills/self-improvement/SKILL.md`).
-   - **The 4-Expert Review Panel ("The Girl Gang")**:
+   - **The 4-Expert Review Panel**:
      - **Planning Stage**: Before writing code, Aerial MUST convene a panel of four expert subagents (three domain specialists tailored to the problem + one dedicated Adversarial Devil's Advocate) to audit the plan and design spec. Present the synthesized findings to the user for explicit approval.
      - **Implementation Stage**: During execution, Aerial MUST consult the expert panel to review and audit each individual task before proceeding to subsequent tasks.
    - **The Pre-Flight Verification Path**: Pre-commit verification is mandatory: run `./scripts/verify.sh` (or `powershell -ExecutionPolicy Bypass -File scripts/verify.ps1` on Windows) to verify all linters, unit tests, and frontend syntax with exit code 0.
