@@ -78,8 +78,8 @@ submit_scratch() {
     cd "$scratch_dir"
 
     # 1. Pre-flight verification (syntax and basic schema checks)
-    if [ -f "config.yaml" ]; then
-        if command -v python3 >/dev/null 2>&1; then
+    if command -v python3 >/dev/null 2>&1; then
+        if [ -f "config.yaml" ]; then
             python3 -c "
 import yaml
 with open('config.yaml') as f:
@@ -92,6 +92,21 @@ assert 'default' in cfg['channels'], 'channels.default is required'
                 exit 1
             }
         fi
+
+        for cf in docker-compose.override.yml docker-compose.override.yaml; do
+            if [ -f "$cf" ]; then
+                python3 -c "
+import yaml
+with open('$cf') as f:
+    data = yaml.safe_load(f)
+if data is not None:
+    assert isinstance(data, dict), '$cf must be a YAML mapping'
+" || {
+                    echo "ERROR: $cf failed pre-flight YAML validation." >&2
+                    exit 1
+                }
+            fi
+        done
     fi
 
     # 2. Check for modifications
