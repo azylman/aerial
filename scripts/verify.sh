@@ -24,7 +24,7 @@ has_cmd() {
 }
 
 # Go services in the monorepo
-GO_SERVICES="brain scheduler-mcp discord-mcp dashboard"
+GO_SERVICES="brain scheduler-mcp discord-mcp dashboard sidecars/gitsync"
 
 run_go_vet() {
     svc="$1"
