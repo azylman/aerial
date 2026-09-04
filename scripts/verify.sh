@@ -33,7 +33,7 @@ run_go_vet() {
         if has_cmd go; then
             (cd "$svc" && go vet ./...)
         elif has_cmd docker; then
-            docker run --rm -v "$(pwd)/$svc:/app" -w /app golang:1.22 go vet ./...
+            docker run --rm -v "$(pwd)/$svc:/app" -w /app golang:1.24 go vet ./...
         fi
     fi
 }
@@ -63,7 +63,7 @@ run_go_test() {
         if has_cmd go; then
             (cd "$svc" && go test -v -p 1 ./...)
         elif has_cmd docker; then
-            docker run --rm -v "$(pwd)/$svc:/app" -w /app golang:1.22 go test -v -p 1 ./...
+            docker run --rm -v "$(pwd)/$svc:/app" -w /app golang:1.24 go test -v -p 1 ./...
         else
             echo "🚨 [Aerial Verify] Error: Neither go nor docker found in PATH." >&2
             exit 1
