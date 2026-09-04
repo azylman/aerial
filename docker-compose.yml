@@ -411,6 +411,158 @@ services:
         condition: service_healthy
       agentsview:
         condition: service_started
+      grafana:
+        condition: service_healthy
+
+  # ----------------------------------------------------------------------------
+  # 13. Observability: cAdvisor Container Metrics Collector
+  #     Gathers per-container CPU, memory, network, and disk telemetry.
+  # ----------------------------------------------------------------------------
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    container_name: aerial-cadvisor
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      autoheal: "true"
+      com.centurylinklabs.watchtower.enable: "true"
+    command:
+      - "--docker_only=true"
+      - "--housekeeping_interval=15s"
+      - "--disable_metrics=percpu,sched,tcp,udp,advtcp,process"
+      - "--store_container_labels=false"
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /sys/fs/cgroup:/sys/fs/cgroup:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - aerial-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:8080/healthz || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # ----------------------------------------------------------------------------
+  # 14. Observability: Node Exporter Host Telemetry
+  #     Gathers host CPU loads, memory, storage, thermals, and network metrics.
+  # ----------------------------------------------------------------------------
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    container_name: aerial-node-exporter
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      autoheal: "true"
+      com.centurylinklabs.watchtower.enable: "true"
+    command:
+      - "--path.procfs=/host/proc"
+      - "--path.sysfs=/host/sys"
+      - "--path.rootfs=/rootfs"
+      - "--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)"
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    networks:
+      - aerial-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:9100/metrics || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ----------------------------------------------------------------------------
+  # 15. Observability: VictoriaMetrics Single-Node TSDB
+  #     Lightweight time-series database with long-term retention & downsampling.
+  # ----------------------------------------------------------------------------
+  victoriametrics:
+    image: victoriametrics/victoria-metrics:v1.101.0-enterprise
+    container_name: aerial-victoriametrics
+    restart: unless-stopped
+    stop_grace_period: 30s
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      autoheal: "true"
+      com.centurylinklabs.watchtower.enable: "true"
+    command:
+      - "-storageDataPath=/victoria-metrics-data"
+      - "-promscrape.config=/etc/victoriametrics/scrape.yml"
+      - "-promscrape.configCheckInterval=15s"
+      - "-retentionPeriod=${VICTORIAMETRICS_RETENTION_PERIOD:-5y}"
+      - "-downsampling.period=${VICTORIAMETRICS_DOWNSAMPLING_PERIOD:-30d:5m,180d:1h}"
+    volumes:
+      - aerial-victoriametrics-data:/victoria-metrics-data
+      - ./victoriametrics/scrape.yml:/etc/victoriametrics/scrape.yml:ro
+    networks:
+      - aerial-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:8428/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    depends_on:
+      cadvisor:
+        condition: service_healthy
+      node-exporter:
+        condition: service_healthy
+
+  # ----------------------------------------------------------------------------
+  # 16. Observability: Grafana Visual Dashboards
+  #     Serves system HUD & container metrics with PostgreSQL persistent backend.
+  # ----------------------------------------------------------------------------
+  grafana:
+    image: grafana/grafana:11.1.0
+    container_name: aerial-grafana
+    restart: unless-stopped
+    stop_grace_period: 20s
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      autoheal: "true"
+      com.centurylinklabs.watchtower.enable: "true"
+    environment:
+      - GF_DATABASE_TYPE=postgres
+      - GF_DATABASE_HOST=postgres:5432
+      - GF_DATABASE_NAME=${POSTGRES_DB:-aerial}
+      - GF_DATABASE_USER=${POSTGRES_USER:-aerial}
+      - GF_DATABASE_PASSWORD=${POSTGRES_PASSWORD:-aerial_secure_pass}
+      - GF_DATABASE_SSL_MODE=disable
+      - GF_SERVER_ROOT_URL=%(protocol)s://%(domain)s:%(http_port)s/grafana/
+      - GF_SERVER_SERVE_FROM_SUB_PATH=true
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-aerial_metrics_pass}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_AUTH_ANONYMOUS_ENABLED=${GRAFANA_ANONYMOUS_ENABLED:-false}
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+      - GF_AUTH_ANONYMOUS_HIDE_VERSION=true
+      - GF_PANELS_DISABLE_SANITIZE_HTML=true
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    networks:
+      - aerial-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:3000/api/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      victoriametrics:
+        condition: service_healthy
 
 networks:
   aerial-net:
@@ -428,6 +580,8 @@ volumes:
     name: aerial-agentsview-data
   aerial-postgres-data:
     name: aerial-postgres-data
+  aerial-victoriametrics-data:
+    name: aerial-victoriametrics-data
 
 
 

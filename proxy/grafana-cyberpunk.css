@@ -1,0 +1,83 @@
+/* ==========================================================================
+   AERIAL CYBERPUNK HUD THEME FOR GRAFANA (IMMERSIVE HUD OVERLAY)
+   Matches Aerial Dashboard HUD Palette: Dark Void (#080a0f), Neon Cyan (#00f2fe), Neon Magenta (#ff007f)
+   ========================================================================== */
+
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Space+Grotesk:wght@500;700&display=swap');
+
+:root {
+    --aerial-bg-dark: #080a0f !important;
+    --aerial-card-bg: rgba(14, 18, 28, 0.75) !important;
+    --aerial-card-border: rgba(0, 242, 254, 0.22) !important;
+    --aerial-card-border-hover: rgba(0, 242, 254, 0.75) !important;
+    --aerial-neon-cyan: #00f2fe !important;
+    --aerial-neon-magenta: #ff007f !important;
+    --aerial-neon-purple: #9d00ff !important;
+    --aerial-neon-green: #00ff87 !important;
+    --aerial-text-primary: #f0f4f8 !important;
+    --aerial-text-muted: #8292a8 !important;
+    --aerial-font-mono: 'JetBrains Mono', monospace !important;
+    --aerial-font-heading: 'Space Grotesk', sans-serif !important;
+}
+
+/* Global Body & Backgrounds */
+body, .grafana-app, [data-testid="dashboard-grid"] {
+    background-color: var(--aerial-bg-dark) !important;
+    color: var(--aerial-text-primary) !important;
+    font-family: var(--aerial-font-mono) !important;
+}
+
+/* Panels & Glassmorphism */
+.panel-container, [data-testid^="panel-container"] {
+    background: var(--aerial-card-bg) !important;
+    border: 1px solid var(--aerial-card-border) !important;
+    border-radius: 8px !important;
+    backdrop-filter: blur(14px) !important;
+    -webkit-backdrop-filter: blur(14px) !important;
+    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.55), inset 0 0 12px rgba(0, 242, 254, 0.03) !important;
+    transition: border-color 0.25s ease, box-shadow 0.25s ease !important;
+}
+
+.panel-container:hover, [data-testid^="panel-container"]:hover {
+    border-color: var(--aerial-card-border-hover) !important;
+    box-shadow: 0 6px 30px rgba(0, 242, 254, 0.12), inset 0 0 16px rgba(0, 242, 254, 0.05) !important;
+}
+
+/* Panel Header / Titles */
+.panel-title, [data-testid^="panel-header"] h2, [data-testid^="panel-header"] h6 {
+    font-family: var(--aerial-font-heading) !important;
+    font-weight: 700 !important;
+    color: var(--aerial-neon-cyan) !important;
+    letter-spacing: 0.04em !important;
+    text-shadow: 0 0 12px rgba(0, 242, 254, 0.4) !important;
+}
+
+/* Navigation Bar & Top Header */
+header[aria-label="Navigation header"], nav[aria-label="Main menu"], [data-testid="navbar"] {
+    background: rgba(10, 13, 20, 0.95) !important;
+    border-bottom: 1px solid var(--aerial-card-border) !important;
+    backdrop-filter: blur(16px) !important;
+}
+
+/* Buttons & Interactive Elements */
+button[class*="css-"], .css-button {
+    font-family: var(--aerial-font-mono) !important;
+    border-radius: 6px !important;
+}
+
+/* Custom Glowing Cyber Scrollbars */
+::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+::-webkit-scrollbar-track {
+    background: rgba(8, 10, 15, 0.95);
+}
+::-webkit-scrollbar-thumb {
+    background: rgba(0, 242, 254, 0.35);
+    border-radius: 3px;
+    box-shadow: 0 0 8px rgba(0, 242, 254, 0.4);
+}
+::-webkit-scrollbar-thumb:hover {
+    background: var(--aerial-neon-cyan);
+}
