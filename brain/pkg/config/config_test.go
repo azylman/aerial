@@ -1611,6 +1611,108 @@ func TestLoadChannelInstructions_ForumHyphenation(t *testing.T) {
 	}
 }
 
+func TestChannelPolicy_WakeMode(t *testing.T) {
+	// 1. Test GetWakeMode defaults
+	pChannel := ChannelPolicy{Mode: "channel"}
+	if pChannel.GetWakeMode() != "classifier" {
+		t.Errorf("expected default wake_mode for channel mode to be 'classifier', got %q", pChannel.GetWakeMode())
+	}
+
+	pThreads := ChannelPolicy{Mode: "threads"}
+	if pThreads.GetWakeMode() != "all" {
+		t.Errorf("expected default wake_mode for threads mode to be 'all', got %q", pThreads.GetWakeMode())
+	}
+
+	// 2. Test GetWakeMode canonicalization & aliases
+	tests := []struct {
+		input    string
+		mode     string
+		expected string
+	}{
+		{"mention", "channel", "mention"},
+		{"Mentions", "channel", "mention"},
+		{"DIRECT", "channel", "mention"},
+		{"classifier", "threads", "classifier"},
+		{"ambient", "threads", "classifier"},
+		{"all", "channel", "all"},
+		{"always", "channel", "all"},
+	}
+
+	for _, tc := range tests {
+		p := ChannelPolicy{Mode: tc.mode, WakeMode: tc.input}
+		if got := p.GetWakeMode(); got != tc.expected {
+			t.Errorf("ChannelPolicy{Mode: %q, WakeMode: %q}.GetWakeMode() = %q, want %q", tc.mode, tc.input, got, tc.expected)
+		}
+	}
+
+	// 3. Test LoadConfigFromPaths with valid wake_mode YAML
+	tmpDir := t.TempDir()
+	yamlPath := filepath.Join(tmpDir, "config.yaml")
+	yamlContent := `
+model: "gemini-3.7-flash"
+channels:
+  default:
+    mode: "channel"
+    wake_mode: "mention"
+  lounge:
+    mode: "channel"
+    wake_mode: "mention"
+  alerts:
+    mode: "channel"
+    wake_mode: "classifier"
+  threads-room:
+    mode: "threads"
+`
+	if err := os.WriteFile(yamlPath, []byte(yamlContent), 0644); err != nil {
+		t.Fatalf("Failed to write test yaml: %v", err)
+	}
+
+	cfg, err := LoadConfigFromPaths(yamlPath)
+	if err != nil {
+		t.Fatalf("LoadConfigFromPaths failed: %v", err)
+	}
+
+	if cfg.Channels["default"].WakeMode != "mention" {
+		t.Errorf("expected default.wake_mode to be 'mention', got %q", cfg.Channels["default"].WakeMode)
+	}
+	if cfg.Channels["lounge"].WakeMode != "mention" {
+		t.Errorf("expected lounge.wake_mode to be 'mention', got %q", cfg.Channels["lounge"].WakeMode)
+	}
+	if cfg.Channels["alerts"].WakeMode != "classifier" {
+		t.Errorf("expected alerts.wake_mode to be 'classifier', got %q", cfg.Channels["alerts"].WakeMode)
+	}
+
+	// 4. Test ResolveChannelPolicy inheritance of WakeMode
+	resolvedLounge := cfg.ResolveChannelPolicy("111", "lounge")
+	if resolvedLounge.GetWakeMode() != "mention" {
+		t.Errorf("expected resolved lounge wake_mode 'mention', got %q", resolvedLounge.GetWakeMode())
+	}
+
+	// Test unlisted channel inherits from default
+	resolvedUnlisted := cfg.ResolveChannelPolicy("999", "unlisted")
+	if resolvedUnlisted.GetWakeMode() != "mention" {
+		t.Errorf("expected unlisted channel to inherit default wake_mode 'mention', got %q", resolvedUnlisted.GetWakeMode())
+	}
+
+	// 5. Test invalid wake_mode triggers LKGC fallback
+	badYAML := `
+model: "gemini-3.7-flash"
+channels:
+  default:
+    mode: "channel"
+    wake_mode: "invalid_wake_value_xyz"
+`
+	if err := os.WriteFile(yamlPath, []byte(badYAML), 0644); err != nil {
+		t.Fatalf("Failed to write bad yaml: %v", err)
+	}
+
+	_, errBad := LoadConfigFromPaths(yamlPath)
+	if errBad == nil {
+		t.Errorf("expected error on invalid wake_mode, got nil")
+	}
+}
+
+
 
 
 

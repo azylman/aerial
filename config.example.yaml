@@ -32,19 +32,22 @@ admin_users:
 #
 # Available Modes:
 #   - threads: Non-thread messages spawn/route to a Discord thread (default).
-#   - channel: Messages are evaluated directly in-channel without threads using a Two-Tier Wake model:
-#       * Tier 1 (Direct Wake): Mentions (@Aerial), replies to Aerial, and keywords wake immediately.
-#       * Tier 2 (Ambient Relevance Scorer): Unaddressed messages are scored (0.0 - 1.0) with recent context.
-#       * Lookback Logging: Ambient messages below threshold are silently recorded in the session transcript
-#         so Aerial has full conversational lookback when woken.
+#   - channel: Messages are evaluated directly in-channel without threads.
 #   - ignore (or disabled): Channel is completely ignored by Aerial.
+#
+# Available Wake Modes (for interaction sensitivity):
+#   - mention (or mentions, direct): Only wake up when explicitly @mentioned (<@botID> / @Aerial)
+#     or directly replied to. Bare plaintext keywords ("aerial", "gundam") and LLM classifier are bypassed.
+#     Ambient channel chatter is silently recorded in the session transcript for full conversational lookback.
+#   - classifier (or ambient): Direct mentions, replies, keywords, AND ambient relevance scoring (default for mode: channel).
+#   - all (or always): Respond to every message (default for mode: threads inside a thread).
 #
 # Available Typing Indicator Options:
 #   - always: Send typing indicator on every evaluated turn (default for threads).
 #   - on_mention: Only send typing indicator when the bot is mentioned/replied to (default for channel).
 #   - never: Never send typing indicator.
 #
-# Ambient Wake & Classification (for mode: channel):
+# Ambient Wake & Classification (for wake_mode: classifier):
 #   - ambient_wake_threshold: Confidence score threshold (0.0 to 1.0) for ambient messages to wake Aerial (default: 0.80).
 #   - ambient_wake_prompt: Custom criteria/prompt directive for the ambient relevance classifier in this channel.
 #   - ignore_bots: Ignore messages from bot users (default: true). Set to false to allow peer bot interactions.
@@ -70,18 +73,28 @@ channels:
     ignore_bots: true
     ambient_wake_threshold: 0.80
 
-  # Example channel-specific override for in-channel direct & ambient interaction:
+  # Example channel-specific override for in-channel direct & ambient interaction with classifier:
   general:
     mode: channel
+    wake_mode: classifier
     typing_indicator: on_mention
     ignore_bots: true
     ambient_wake_threshold: 0.80
     ambient_wake_prompt: "Determine whether the target message is relevant to Aerial and warrants Aerial waking up and responding, based on the recent channel context."
     max_session_turns: 50
 
+  # Example channel with mention-only wake (listens ambiently, responds ONLY on explicit @mention or direct reply):
+  lounge:
+    mode: channel
+    wake_mode: mention
+    typing_indicator: on_mention
+    ignore_bots: false
+    max_session_turns: 50
+
   # Example channel with custom wake prompt:
   dev-alerts:
     mode: channel
+    wake_mode: classifier
     typing_indicator: on_mention
     ignore_bots: false # Allow alerts from bot integrations
     ambient_wake_threshold: 0.70

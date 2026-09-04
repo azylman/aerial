@@ -78,6 +78,7 @@ type GitSyncConfig struct {
 
 type ChannelPolicy struct {
 	Mode                 string   `yaml:"mode" json:"mode"`
+	WakeMode             string   `yaml:"wake_mode,omitempty" json:"wake_mode,omitempty"`
 	TypingIndicator      string   `yaml:"typing_indicator" json:"typing_indicator"`
 	IgnoreBots           *bool    `yaml:"ignore_bots,omitempty" json:"ignore_bots,omitempty"`
 	AllowSystemOps       bool     `yaml:"allow_system_ops" json:"allow_system_ops"`
@@ -90,6 +91,26 @@ type ChannelPolicy struct {
 func (p ChannelPolicy) IsIgnored() bool {
 	m := strings.ToLower(strings.TrimSpace(p.Mode))
 	return m == "ignore" || m == "disabled"
+}
+
+// GetWakeMode returns the effective wake mode for this channel policy.
+// Supported canonical values: "mention", "classifier", "all".
+// Accepted aliases: "mentions"/"direct" -> "mention", "ambient" -> "classifier", "always" -> "all".
+// If unspecified, defaults to "classifier" for channel mode and "all" for threads mode.
+func (p ChannelPolicy) GetWakeMode() string {
+	m := strings.ToLower(strings.TrimSpace(p.WakeMode))
+	switch m {
+	case "mention", "mentions", "direct":
+		return "mention"
+	case "classifier", "ambient":
+		return "classifier"
+	case "all", "always":
+		return "all"
+	}
+	if strings.ToLower(strings.TrimSpace(p.Mode)) == "channel" {
+		return "classifier"
+	}
+	return "all"
 }
 
 // GetAmbientWakeThreshold returns the ambient wake threshold, defaulting to 0.80 for channel mode and 0.0 otherwise.
@@ -342,6 +363,17 @@ func LoadConfigFromPaths(paths ...string) (Config, error) {
 		}
 	}
 
+	if defPolicy.WakeMode != "" {
+		wLower := strings.ToLower(strings.TrimSpace(defPolicy.WakeMode))
+		if wLower != "mention" && wLower != "mentions" && wLower != "direct" &&
+			wLower != "classifier" && wLower != "ambient" &&
+			wLower != "all" && wLower != "always" {
+			log.Printf("[Config] Validation error: channels.default wake_mode must be 'mention', 'classifier', or 'all', got %q in %s. Retaining Last Known Good Configuration (LKGC).", defPolicy.WakeMode, targetPath)
+			return GetRuntimeConfig(), fmt.Errorf("channels.default wake_mode must be 'mention', 'classifier', or 'all', got %q", defPolicy.WakeMode)
+		}
+		defPolicy.WakeMode = defPolicy.GetWakeMode()
+	}
+
 	// Normalize channels.default
 	if defPolicy.TypingIndicator == "" {
 		if defPolicy.Mode == "channel" {
@@ -354,7 +386,6 @@ func LoadConfigFromPaths(paths ...string) (Config, error) {
 		defPolicy.MaxSessionTurns = 50
 	}
 	parsed.Channels["default"] = defPolicy
-
 
 	// Normalize and validate other channels
 	for k, policy := range parsed.Channels {
@@ -374,6 +405,16 @@ func LoadConfigFromPaths(paths ...string) (Config, error) {
 				log.Printf("[Config] Validation error: channel %q ambient_wake_threshold must be between 0.0 and 1.0, got %f in %s. Retaining Last Known Good Configuration (LKGC).", k, *policy.AmbientWakeThreshold, targetPath)
 				return GetRuntimeConfig(), fmt.Errorf("channel %q ambient_wake_threshold must be between 0.0 and 1.0, got %f", k, *policy.AmbientWakeThreshold)
 			}
+		}
+		if policy.WakeMode != "" {
+			wLower := strings.ToLower(strings.TrimSpace(policy.WakeMode))
+			if wLower != "mention" && wLower != "mentions" && wLower != "direct" &&
+				wLower != "classifier" && wLower != "ambient" &&
+				wLower != "all" && wLower != "always" {
+				log.Printf("[Config] Validation error: channel %q wake_mode must be 'mention', 'classifier', or 'all', got %q in %s. Retaining Last Known Good Configuration (LKGC).", k, policy.WakeMode, targetPath)
+				return GetRuntimeConfig(), fmt.Errorf("channel %q wake_mode must be 'mention', 'classifier', or 'all', got %q", k, policy.WakeMode)
+			}
+			policy.WakeMode = policy.GetWakeMode()
 		}
 		if policy.TypingIndicator == "" {
 			if policy.Mode == "channel" {
@@ -520,6 +561,9 @@ func (c Config) ResolveChannelPolicy(channelID, channelName string) ChannelPolic
 				res.TypingIndicator = "always"
 			}
 		}
+	}
+	if res.WakeMode == "" && def.WakeMode != "" {
+		res.WakeMode = def.WakeMode
 	}
 	if res.IgnoreBots == nil && def.IgnoreBots != nil {
 		val := *def.IgnoreBots

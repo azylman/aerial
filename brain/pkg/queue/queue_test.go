@@ -2674,7 +2674,7 @@ Please formulate your response and output it clearly.
 		CreatedAt: time.Now().UTC(),
 	}
 
-	if isTier1Wake(msg, "bot-aerial-id") {
+	if isTier1Wake(msg, "bot-aerial-id", "classifier") {
 		t.Errorf("Expected isTier1Wake to be FALSE when replying to @bob whose content contains 'aerial photo'")
 	}
 }
@@ -4188,3 +4188,213 @@ func TestQueue_ClassifierParseErrorTriggersSystemAlert(t *testing.T) {
 		t.Errorf("expected alert channel %q, got %q", config.GetSystemChannel(), alertChannel)
 	}
 }
+
+func TestIsTier1Wake_WakeModeMention(t *testing.T) {
+	botID := "bot-12345"
+
+	// 1. Direct mention <@bot-12345>
+	msgMention := db.Message{Content: "Hey <@" + botID + "> how are you?"}
+	if !isTier1Wake(msgMention, botID, "mention") {
+		t.Errorf("expected isTier1Wake to be TRUE for direct mention in mention mode")
+	}
+
+	// 2. Direct reply to Aerial in envelope
+	msgReply := db.Message{Content: `<USER_REQUEST>
+- replying_to:
+    author: "@aerial"
+    content: "previous response"
+- content: What was that?
+</USER_REQUEST>`}
+	if !isTier1Wake(msgReply, botID, "mention") {
+		t.Errorf("expected isTier1Wake to be TRUE for reply to Aerial in mention mode")
+	}
+
+	// 3. Mentions envelope containing Aerial
+	msgEnvelopeMention := db.Message{Content: `<USER_REQUEST>
+- mentions: [Aerial]
+- content: Hello there!
+</USER_REQUEST>`}
+	if !isTier1Wake(msgEnvelopeMention, botID, "mention") {
+		t.Errorf("expected isTier1Wake to be TRUE for mentions envelope in mention mode")
+	}
+
+	// 4. Plaintext name drop "aerial is great"
+	msgBareKeyword := db.Message{Content: "I think aerial is a great anime"}
+	if isTier1Wake(msgBareKeyword, botID, "mention") {
+		t.Errorf("expected isTier1Wake to be FALSE for bare keyword in mention mode")
+	}
+	if !isTier1Wake(msgBareKeyword, botID, "classifier") {
+		t.Errorf("expected isTier1Wake to be TRUE for bare keyword in classifier mode")
+	}
+
+	// 5. Plaintext keyword "gundam"
+	msgGundam := db.Message{Content: "I love gundam models"}
+	if isTier1Wake(msgGundam, botID, "mention") {
+		t.Errorf("expected isTier1Wake to be FALSE for 'gundam' in mention mode")
+	}
+}
+
+func TestProcessBurst_WakeModeMention_BypassClassifier(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	sessionID := uuid.New().String()
+	channelID := "chan-lounge-mention"
+	_ = db.SaveSessionID(database, channelID, sessionID)
+	_, _ = session.EnsureSessionDir(sessionID)
+	cliPbDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "conversations")
+	_ = os.MkdirAll(cliPbDir, 0755)
+	_ = os.WriteFile(filepath.Join(cliPbDir, sessionID+".pb"), []byte("mock-pb"), 0644)
+
+	var classifierCalls int
+	var runnerCalls int
+	var deliveredMsgs []string
+	var mu sync.Mutex
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB: database,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			mu.Lock()
+			runnerCalls++
+			mu.Unlock()
+			return `{"conversation_id": "` + sID + `", "response": "Response!"}`, "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, chID, text string) error {
+			mu.Lock()
+			deliveredMsgs = append(deliveredMsgs, text)
+			mu.Unlock()
+			return nil
+		},
+		ResolveChannelPolicy: func(chID, chName string) config.ChannelPolicy {
+			return config.ChannelPolicy{
+				Mode:     "channel",
+				WakeMode: "mention",
+			}
+		},
+	})
+	pool.cfg.Classifier = classifier.NewClassifier(
+		classifier.WithLLMFunc(func(ctx context.Context, model string, prompt string) (string, error) {
+			mu.Lock()
+			classifierCalls++
+			mu.Unlock()
+			return `{"confidence": 0.95, "reason": "classifier should not be called"}`, nil
+		}),
+	)
+	pool.Start()
+	defer pool.Stop()
+
+	// 1. Send ambient message (no mention)
+	msgAmbient := db.Message{
+		ID:         "msg-amb-1",
+		ThreadID:   channelID,
+		AuthorName: "Alice",
+		Content:    "Just talking about aerial views and drones",
+		Status:     db.StatusPending,
+		CreatedAt:  time.Now().UTC(),
+	}
+	_ = db.InsertMessage(database, msgAmbient)
+
+	pool.processBurst([]db.Message{msgAmbient})
+
+	mu.Lock()
+	if classifierCalls != 0 {
+		t.Errorf("expected 0 classifier calls in mention mode, got %d", classifierCalls)
+	}
+	if runnerCalls != 0 {
+		t.Errorf("expected 0 runner calls for ambient message in mention mode, got %d", runnerCalls)
+	}
+	if len(deliveredMsgs) != 0 {
+		t.Errorf("expected 0 delivered messages, got %d", len(deliveredMsgs))
+	}
+	mu.Unlock()
+
+	// Verify ambient turn was written to transcript.jsonl
+	sessionDir, _ := session.EnsureSessionDir(sessionID)
+	transcriptPath := filepath.Join(sessionDir, ".system_generated", "logs", "transcript.jsonl")
+	data, err := os.ReadFile(transcriptPath)
+	if err != nil {
+		t.Fatalf("Failed to read transcript.jsonl: %v", err)
+	}
+	if !strings.Contains(string(data), "Just talking about aerial views and drones") {
+		t.Errorf("expected ambient message in transcript, got:\n%s", string(data))
+	}
+}
+
+func TestProcessBurst_WakeModeMention_DirectMentionWakes(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	sessionID := uuid.New().String()
+	channelID := "chan-lounge-wake"
+	_ = db.SaveSessionID(database, channelID, sessionID)
+	_, _ = session.EnsureSessionDir(sessionID)
+	cliPbDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "conversations")
+	_ = os.MkdirAll(cliPbDir, 0755)
+	_ = os.WriteFile(filepath.Join(cliPbDir, sessionID+".pb"), []byte("mock-pb"), 0644)
+
+	var runnerCalls int
+	var deliveredMsgs []string
+	var mu sync.Mutex
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB: database,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			mu.Lock()
+			runnerCalls++
+			mu.Unlock()
+			return `{"conversation_id": "` + sID + `", "response": "Hello Alice!"}`, "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, chID, text string) error {
+			mu.Lock()
+			deliveredMsgs = append(deliveredMsgs, text)
+			mu.Unlock()
+			return nil
+		},
+		ResolveChannelPolicy: func(chID, chName string) config.ChannelPolicy {
+			return config.ChannelPolicy{
+				Mode:     "channel",
+				WakeMode: "mention",
+			}
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	// Direct mention message
+	msgMention := db.Message{
+		ID:         "msg-mention-1",
+		ThreadID:   channelID,
+		AuthorName: "Alice",
+		Content:    `<USER_REQUEST>
+- mentions: [Aerial]
+- content: @Aerial what is the plan today?
+</USER_REQUEST>`,
+		Status:    db.StatusPending,
+		CreatedAt: time.Now().UTC(),
+	}
+	_ = db.InsertMessage(database, msgMention)
+
+	pool.processBurst([]db.Message{msgMention})
+
+	mu.Lock()
+	if runnerCalls != 1 {
+		t.Errorf("expected 1 runner call for direct mention, got %d", runnerCalls)
+	}
+	if len(deliveredMsgs) != 1 || deliveredMsgs[0] != "Hello Alice!" {
+		t.Errorf("expected delivered message 'Hello Alice!', got %v", deliveredMsgs)
+	}
+	mu.Unlock()
+}
+
