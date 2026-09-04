@@ -9,20 +9,23 @@ Aerial runs as a multi-container Docker stack supervised by Watchtower and Autoh
 - **Execution Brain (`aerial-brain`)**:
   - Headless Antigravity CLI (`agy`) execution runner with multi-turn conversation memory.
   - Integrated Discord Gateway event funnel capturing mentions and thread messages.
+  - Hardened turn ingestion with 30-minute message staleness TTL and Error 160004 thread deduplication recovery.
+  - Fast ambient relevance classifier standardized on canonical `Gemini 3.8 Flash (Low)`.
   - In-memory serialized thread worker pool with PostgreSQL 16 and pgvector state persistence.
   - Kernel-enforced read-only filesystem mounts on `/share/aerial-config:ro` and `/share/aerial:ro` with `shm_size: 512mb` to prevent unpushed repository corruption.
   - Automatic turn-end Markdown output delivery directly to the active Discord thread.
   - In-process file watcher dynamically hot-reloading rules, skills, and configuration without process restarts.
   - Background scheduler monitor evaluating recurring crons and one-shot reminders every 30 seconds.
-  - Semantic memory RAG subsystem extracting conversation facts and querying embeddings via Ollama.
+  - Semantic memory RAG subsystem extracting conversation facts and querying 384-dimensional vector embeddings via Ollama.
 
 - **Persistence Layer (`aerial-postgres`)**:
   - PostgreSQL 16 relational database with `pgvector` extension.
-  - Centralized store for Discord messages, session tracking, atomic task queues, recurring and one-shot schedules, and semantic memory facts with 384-dimensional vector embeddings.
+  - Centralized store for Discord messages, session tracking, atomic CAS task queues, recurring and one-shot schedules, vector embeddings, and Grafana dashboard persistence.
 
-- **Infrastructure & Git Synchronization (`aerial-gitsync`)**:
+- **Infrastructure, GitOps & Synchronization (`aerial-gitsync`)**:
   - Dedicated sidecar container holding read-write (`:rw`) volume mounts on `/share/aerial-config` and `/share/aerial`.
   - Performs singleflight periodic and webhook-triggered (`POST /sync`) Git synchronization with credential scrubbing and POSIX base64 tokens.
+  - Automated Declarative GitOps Docker Compose Reconciler: pre-flight validates and executes `docker compose up -d` upon git sync or webhook trigger, keeping container topologies declaratively aligned.
   - Fast-forward pulls with safe reset recovery to `FETCH_HEAD`, keeping running code cleanly decoupled from the execution engine.
 
 - **Outbound Model Context Protocol (MCP) Microservices (`aerial-net`)**:
@@ -31,15 +34,21 @@ Aerial runs as a multi-container Docker stack supervised by Watchtower and Autoh
   - `docker-mcp`: Docker host daemon diagnostics and container inspection.
   - `github-mcp`: GitHub API and repository operations.
 
-- **Web, Observability & Documentation Services**:
-  - `aerial-proxy`: Edge reverse proxy routing external web traffic to the Dashboard, Documentation, and Agentsview.
+- **Web, Gateway & Documentation Services**:
+  - `aerial-proxy`: Edge reverse proxy routing external web traffic to Dashboard (`/`), Documentation (`/docs`), Agentsview (`/conversations`), and Grafana (`/grafana/`).
   - `aerial-dashboard`: Web status HUD rendering live queue state, recent turns, and health.
   - `aerial-docs`: Documentation service serving architectural specifications and runbooks via Docsify and Mermaid.
   - `agentsview`: Web observability dashboard rendering Antigravity session transcripts and tool traces.
 
+- **Observability & Telemetry Stack**:
+  - `aerial-cadvisor`: Container metrics collector gathering per-container CPU, memory, network, and disk telemetry.
+  - `aerial-node-exporter`: Host telemetry collector gathering host CPU loads, memory, storage, thermals, and network metrics.
+  - `aerial-victoriametrics`: Single-node TSDB scraping Prometheus metrics with long-term retention and downsampling.
+  - `aerial-grafana`: Cyberpunk-themed visual telemetry dashboards with PostgreSQL persistent backend, anonymous admin access, and pre-provisioned Docker and host dashboards.
+
 - **Supporting Services & Supervision**:
-  - `ollama`: Local LLM and vector embedding server for semantic memory.
-  - `watchtower`: Out-of-band continuous deployment supervisor polling GHCR every 60s for rolling zero-downtime container updates.
+  - `ollama`: Local LLM and vector embedding server for semantic memory (`all-minilm:latest` / 384-dim).
+  - `watchtower`: Out-of-band continuous deployment supervisor polling GHCR every 60s for rolling zero-downtime container updates across core services.
   - `autoheal`: Process supervisor probing container healthchecks every 15s and restarting unhealthy containers.
 
 - **Networking & Ports**:
@@ -91,6 +100,7 @@ Aerial operates on a strict **Two-Repository Separation of Concerns**:
 
 3. **Zero Plaintext Token Invariant**:
    - `GITHUB_PAT` credentials must NEVER be written to `.git/config` on disk. Authentication is passed in-memory via ephemeral HTTP basic auth headers.
+   - All log streams and GitOps reconcile outputs pass through regex sanitizers to mask sensitive tokens.
 
 4. **Scheduling Invariant**:
    - **NEVER** use the built-in ephemeral CLI `schedule` tool (it will hang the turn).
@@ -98,7 +108,7 @@ Aerial operates on a strict **Two-Repository Separation of Concerns**:
 
 5. **Discord Messaging & Markdown Invariant**:
    - Deliver responses via Markdown directly in Discord at the end of the turn. The user only receives the final result message so do not bother to send intermediate status updates.
-   - **Silent Multi-Step Execution (No Self-Narration / Task Chatter)**: When executing multi-step tool calls, commands, or background tasks, NEVER emit intermediate play-by-play status chatter (*"I have initiated a search..."*, *"I will review results when the task finishes..."*). Execute intermediate tool steps completely silently and deliver strictly the final substantive answer or deliverable.
+   - **Silent Multi-Step Execution (No Self-Narration / Task Chatter)**: When executing multi-step tool calls, commands, or background tasks, NEVER emit intermediate play-by-play status chatter ("I have initiated a search...", "I will review results when the task finishes..."). Execute intermediate tool steps completely silently and deliver strictly the final substantive answer or deliverable.
    - **GitHub Web Links Only (No `file:///` Links)**: When linking to files, Aerial MUST always provide a web link to the files in GitHub (e.g. `https://github.com/azylman/aerial/blob/main/...` or `https://github.com/azylman/aerial-config/blob/main/...`) rather than a `file:///` link to the local copy. Local filesystem paths and `file:///` URIs are completely inaccessible from Discord.
    - **NEVER** output `file://` or `file:///` scheme URLs or masked file links (e.g. `[file](file:///...)`).
    - Reference filenames, paths, and code identifiers using clean inline backticks (e.g. `GEMINI.md`) when not providing a GitHub web link.
@@ -110,19 +120,26 @@ Aerial operates on a strict **Two-Repository Separation of Concerns**:
    - Pre-commit verification is mandatory via `./scripts/verify.sh` (or `scripts/verify.ps1`).
    - **Zero-Bypass Invariant**: Under NO circumstance use `git commit --no-verify`, `git commit -n`, or `git push --no-verify`.
 
-7. **Multi-User Security & Admin Privilege Enforcement**:
+7. **Multi-Agent Review Panel ("The Girl Gang")**:
+   - The subagent review panel is called **the girl gang** (or **the gang**).
+   - During self-improvement workflows, the 4-expert review panel audits plans and task implementations to guard against race conditions, regressions, and invariant violations.
+
+8. **Multi-User Security & Admin Privilege Enforcement**:
    - Messages from Discord include `- is_admin: true` or `- is_admin: false` (resolved against `admin_users` in `config.yaml`).
    - Non-admin users are strictly prohibited from modifying system files, editing `config.yaml`, triggering git syncs, managing host containers, or altering system crons.
 
-8. **In-Channel Interaction & Two-Tier Wake**:
-   - In channels configured with `mode: "channel"`, Tier 1 (Direct Wake: mention, reply, keywords) wakes immediately. Tier 2 (Ambient Relevance Scorer) evaluates ambient messages against `ambient_wake_prompt`.
+9. **In-Channel Interaction & Two-Tier Wake**:
+   - In channels configured with `mode: "channel"`, Tier 1 (Direct Wake: mention, reply, keywords) wakes immediately. Tier 2 (Ambient Relevance Scorer) evaluates ambient messages against `ambient_wake_prompt` using `Gemini 3.8 Flash (Low)`.
 
-9. **Instruction Precedence Hierarchy**:
-   1. Dynamic `<CHANNEL_INSTRUCTIONS>` (channel-specific guidelines for active channel/thread).
-   2. User instructions in `aerial-config/AGENTS.md` (personal persona, tone, and identity).
-   3. Base system guidelines in `GEMINI.md` (core architecture, security boundaries, and operational rules).
+10. **Discord Funnel Hardening**:
+    - Thread deduplication automatically recovers existing thread IDs on Discord error 160004.
+    - Message staleness check TTL is set to 30 minutes to prevent premature expiration during deployment or backlog bursts.
 
-10. **Default Tone**:
+11. **Instruction Precedence Hierarchy**:
+    1. Dynamic `<CHANNEL_INSTRUCTIONS>` (channel-specific guidelines for active channel/thread).
+    2. User instructions in `aerial-config/AGENTS.md` (personal persona, tone, and identity).
+    3. Base system guidelines in `GEMINI.md` (core architecture, security boundaries, and operational rules).
+
+12. **Default Tone**:
     - Succinct, direct, and helpful. Avoid corporate fluff, robotic hedging, or obsequiousness (used only as fallback if `AGENTS.md` is absent).
-    - **Zero Validation-Seeking**: Completely banish corporate subservience. Never say *"I hope this helps!"*, *"Does that look good?"*, or *"Let me know if you need anything else!"* The work speaks for itself.
-
+    - **Zero Validation-Seeking**: Completely banish corporate subservience. Never say "I hope this helps!", "Does that look good?", or "Let me know if you need anything else!" The work speaks for itself.
