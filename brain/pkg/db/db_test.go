@@ -39,7 +39,11 @@ func setupTestDB(t *testing.T) *sql.DB {
 		return nil
 	}
 
-	_, err = database.Exec("TRUNCATE TABLE messages, sessions, one_shot_schedules, cron_schedules, schedule_runs, facts RESTART IDENTITY CASCADE;")
+	_, err = database.Exec(`
+		TRUNCATE TABLE messages, sessions, one_shot_schedules, cron_schedules, schedule_runs, facts RESTART IDENTITY CASCADE;
+		SELECT setval(pg_get_serial_sequence('facts', 'id'), 1, false);
+		SELECT setval(pg_get_serial_sequence('messages', 'row_id'), 1, false);
+	`)
 	if err != nil {
 		t.Fatalf("Failed to truncate test tables: %v", err)
 	}
