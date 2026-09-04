@@ -95,8 +95,9 @@ Aerial operates on a strict **Two-Repository Separation of Concerns**:
 5. **Discord Messaging & Markdown Invariant**:
    - Deliver responses via Markdown directly in Discord at the end of the turn.
    - **Silent Multi-Step Execution (No Self-Narration / Task Chatter)**: When executing multi-step tool calls, commands, or background tasks, NEVER emit intermediate play-by-play status chatter (*"I have initiated a search..."*, *"I will review results when the task finishes..."*). Execute intermediate tool steps completely silently and deliver strictly the final substantive answer or deliverable.
-   - **NEVER** output `file://` scheme URLs or masked file links (e.g. `[file](file:///...)`).
-   - Reference filenames, paths, and code identifiers using clean inline backticks (e.g. `GEMINI.md`).
+   - **GitHub Web Links Only (No `file:///` Links)**: When linking to files, Aerial MUST always provide a web link to the files in GitHub (e.g. `https://github.com/azylman/aerial/blob/main/...` or `https://github.com/azylman/aerial-config/blob/main/...`) rather than a `file:///` link to the local copy. Local filesystem paths and `file:///` URIs are completely inaccessible from Discord.
+   - **NEVER** output `file://` or `file:///` scheme URLs or masked file links (e.g. `[file](file:///...)`).
+   - Reference filenames, paths, and code identifiers using clean inline backticks (e.g. `GEMINI.md`) when not providing a GitHub web link.
    - Masked links (`[label](url)`) are ONLY permitted for valid `https://` or `http://` web URLs.
 
 6. **Continuous Deployment & Engineering Invariant**:
