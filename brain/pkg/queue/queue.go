@@ -167,6 +167,7 @@ type WorkerPoolConfig struct {
 	MaxAttempts    int
 	MemoryClient   *memory.Client
 	Classifier     *classifier.Classifier
+	StalenessTTL   time.Duration
 
 	// Optional hooks for testing/custom overrides
 	RunnerFunc           func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error)
@@ -199,6 +200,9 @@ func NewWorkerPool(cfg WorkerPoolConfig) *WorkerPool {
 	}
 	if cfg.BackoffBase <= 0 {
 		cfg.BackoffBase = 3 * time.Second
+	}
+	if cfg.StalenessTTL <= 0 {
+		cfg.StalenessTTL = 30 * time.Minute
 	}
 	if cfg.RunnerFunc == nil {
 		cfg.RunnerFunc = runner.RunAgy
@@ -630,10 +634,14 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 	}
 	burst = claimedBurst
 
-	// 2. 5-Minute Staleness TTL check (for burst, check latest message)
+	// 2. Staleness TTL check (for burst, check latest message, default 30m)
+	stalenessTTL := p.cfg.StalenessTTL
+	if stalenessTTL <= 0 {
+		stalenessTTL = 30 * time.Minute
+	}
 	latestMsg := burst[len(burst)-1]
-	if !latestMsg.CreatedAt.IsZero() && time.Since(latestMsg.CreatedAt) > 5*time.Minute {
-		log.Printf("[WorkerPool] Dropping stale message(s) in thread %s (age > 5m). Marked [EXPIRED_STALE].", threadID)
+	if !latestMsg.CreatedAt.IsZero() && time.Since(latestMsg.CreatedAt) > stalenessTTL {
+		log.Printf("[WorkerPool] Dropping stale message(s) in thread %s (age > %v). Marked [EXPIRED_STALE].", threadID, stalenessTTL)
 		for _, m := range burst {
 			_ = db.UpdateMessageCompleted(p.cfg.DB, m.ID, "[EXPIRED_STALE]")
 			if m.ScheduleRunID != "" {

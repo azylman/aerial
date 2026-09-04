@@ -1474,9 +1474,41 @@ func TestQueueStalenessDrop(t *testing.T) {
 	pool.Start()
 	defer pool.Stop()
 
-	// 6-minute old message
-	staleCreatedAt := time.Now().UTC().Add(-6 * time.Minute)
-	msg := db.Message{
+	// 1. Message created 10 minutes ago should NOT be dropped with default 30-minute TTL
+	validCreatedAt := time.Now().UTC().Add(-10 * time.Minute)
+	msgValid := db.Message{
+		ID:        "msg-valid-1",
+		ThreadID:  "thread-valid",
+		AuthorID:  "user-1",
+		Content:   "Recent prompt within 30m window",
+		Status:    db.StatusPending,
+		CreatedAt: validCreatedAt,
+	}
+	_ = db.InsertMessage(database, msgValid)
+	pool.Enqueue(msgValid)
+
+	select {
+	case <-doneCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Timeout waiting for valid message processing")
+	}
+
+	mu.Lock()
+	if runnerCalls != 1 {
+		t.Errorf("Expected 1 runner call for 10-minute-old message (within 30m TTL), got %d", runnerCalls)
+	}
+	mu.Unlock()
+
+	// 2. Message created 31 minutes ago SHOULD be dropped as [EXPIRED_STALE]
+	doneChStale := make(chan struct{})
+	pool.mu.Lock()
+	pool.cfg.OnMessageCompleted = func(msg db.Message, finalStatus string) {
+		close(doneChStale)
+	}
+	pool.mu.Unlock()
+
+	staleCreatedAt := time.Now().UTC().Add(-31 * time.Minute)
+	msgStale := db.Message{
 		ID:        "msg-stale-1",
 		ThreadID:  "thread-stale",
 		AuthorID:  "user-1",
@@ -1484,21 +1516,18 @@ func TestQueueStalenessDrop(t *testing.T) {
 		Status:    db.StatusPending,
 		CreatedAt: staleCreatedAt,
 	}
-	_ = db.InsertMessage(database, msg)
-	pool.Enqueue(msg)
+	_ = db.InsertMessage(database, msgStale)
+	pool.Enqueue(msgStale)
 
 	select {
-	case <-doneCh:
+	case <-doneChStale:
 	case <-time.After(3 * time.Second):
 		t.Fatal("Timeout waiting for stale message processing")
 	}
 
 	mu.Lock()
-	if runnerCalls != 0 {
-		t.Errorf("Expected 0 runner calls for stale message, got %d", runnerCalls)
-	}
-	if deliveryCalls != 0 {
-		t.Errorf("Expected 0 delivery calls for stale message, got %d", deliveryCalls)
+	if runnerCalls != 1 {
+		t.Errorf("Expected runner calls to remain 1 after stale message, got %d", runnerCalls)
 	}
 	mu.Unlock()
 
@@ -1509,6 +1538,75 @@ func TestQueueStalenessDrop(t *testing.T) {
 	}
 	if dbMsg.Status != db.StatusCompleted {
 		t.Errorf("Expected status COMPLETED, got %s", dbMsg.Status)
+	}
+	if dbMsg.ResponseText != "[EXPIRED_STALE]" {
+		t.Errorf("Expected response text '[EXPIRED_STALE]', got %q", dbMsg.ResponseText)
+	}
+}
+
+func TestQueueCustomStalenessTTL(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	var runnerCalls int
+	var mu sync.Mutex
+	doneCh := make(chan struct{})
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    1,
+		StalenessTTL:   10 * time.Minute,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			mu.Lock()
+			runnerCalls++
+			mu.Unlock()
+			return mockJSONResponse("", "OK"), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) func() {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			close(doneCh)
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	// 12-minute old message with 10-minute StalenessTTL should be dropped
+	msg := db.Message{
+		ID:        "msg-custom-stale",
+		ThreadID:  "thread-custom-stale",
+		AuthorID:  "user-1",
+		Content:   "Should be stale for 10m TTL",
+		Status:    db.StatusPending,
+		CreatedAt: time.Now().UTC().Add(-12 * time.Minute),
+	}
+	_ = db.InsertMessage(database, msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Timeout waiting for custom stale message processing")
+	}
+
+	mu.Lock()
+	if runnerCalls != 0 {
+		t.Errorf("Expected 0 runner calls for custom stale message, got %d", runnerCalls)
+	}
+	mu.Unlock()
+
+	dbMsg, err := db.GetMessage(database, "msg-custom-stale")
+	if err != nil || dbMsg == nil {
+		t.Fatalf("Failed to query custom stale message: %v", err)
 	}
 	if dbMsg.ResponseText != "[EXPIRED_STALE]" {
 		t.Errorf("Expected response text '[EXPIRED_STALE]', got %q", dbMsg.ResponseText)
