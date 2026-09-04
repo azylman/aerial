@@ -1,9 +1,12 @@
 package main
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -455,13 +458,42 @@ func TestFileDBDSNPragmasAndIndices(t *testing.T) {
 	}
 }
 
+func isProductionDSN(dsn string) bool {
+	lower := strings.ToLower(dsn)
+	if strings.Contains(lower, "aerial_test") || strings.Contains(lower, "test_") || strings.Contains(lower, "_test") {
+		return false
+	}
+	return strings.Contains(lower, "@postgres:5432/aerial") ||
+		strings.Contains(lower, "@127.0.0.1:5432/aerial") ||
+		strings.Contains(lower, "@localhost:5432/aerial") ||
+		strings.Contains(lower, ":5432/aerial") ||
+		strings.Contains(lower, "/aerial")
+}
+
 func TestPostgresSchedules(t *testing.T) {
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {
-		dsn = os.Getenv("DATABASE_URL")
+		dsn = "postgres://postgres:aerial_test@127.0.0.1:54329/aerial_test?sslmode=disable"
 	}
-	if dsn == "" {
-		t.Skip("Skipping postgres test: TEST_DATABASE_URL not set")
+
+	// Defensive invariant: Refuse to run test setup or truncate tables if DSN targets production
+	if isProductionDSN(dsn) {
+		t.Fatalf("CRITICAL SAFETY CHECK: TestPostgresSchedules detected production database in DSN %q; refusing to truncate", dsn)
+		return
+	}
+
+	// Quick connectivity probe (200ms) to avoid multi-minute retry delays in offline test runners
+	quickDB, openErr := sql.Open("pgx", dsn)
+	if openErr != nil {
+		t.Skipf("Skipping postgres test: database driver error: %v", openErr)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	pingErr := quickDB.PingContext(ctx)
+	cancel()
+	_ = quickDB.Close()
+	if pingErr != nil {
+		t.Skipf("Skipping postgres test: PostgreSQL not reachable at %s: %v", dsn, pingErr)
 		return
 	}
 
