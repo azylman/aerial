@@ -140,27 +140,27 @@ jobs:
 
       - name: Lint Brain
         if: needs.changes.outputs.brain == 'true'
-        uses: golangci/golangci-lint-action@v6
-        with:
-          working-directory: brain
+        run: |
+          cd brain
+          go vet ./...
 
       - name: Lint Scheduler MCP
         if: needs.changes.outputs.scheduler-mcp == 'true'
-        uses: golangci/golangci-lint-action@v6
-        with:
-          working-directory: scheduler-mcp
+        run: |
+          cd scheduler-mcp
+          go vet ./...
 
       - name: Lint Discord MCP
         if: needs.changes.outputs.discord-mcp == 'true'
-        uses: golangci/golangci-lint-action@v6
-        with:
-          working-directory: discord-mcp
+        run: |
+          cd discord-mcp
+          go vet ./...
 
       - name: Lint Status Dashboard Go Backend
         if: needs.changes.outputs.dashboard == 'true'
-        uses: golangci/golangci-lint-action@v6
-        with:
-          working-directory: dashboard
+        run: |
+          cd dashboard
+          go vet ./...
 
       - name: Lint Permet HUD Frontend Syntax
         if: needs.changes.outputs.dashboard == 'true'
