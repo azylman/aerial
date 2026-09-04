@@ -78,22 +78,8 @@ func TestIsSilentSentinel(t *testing.T) {
 	}{
 		{name: "Empty string", stdout: "", expected: true},
 		{name: "Whitespace only", stdout: "   \n\t\r  ", expected: true},
-		{name: "Exact [NO_REPLY]", stdout: "[NO_REPLY]", expected: true},
-		{name: "Lowercase [no_reply]", stdout: "[no_reply]", expected: true},
-		{name: "Mixed case [No_Reply]", stdout: "[No_Reply]", expected: true},
-		{name: "Trailing period [NO_REPLY].", stdout: "[NO_REPLY].", expected: true},
-		{name: "Markdown bold **[NO_REPLY]**", stdout: "**[NO_REPLY]**", expected: true},
-		{name: "Inline code `[NO_REPLY]`", stdout: "`[NO_REPLY]`", expected: true},
-		{name: "Fenced code block ```[NO_REPLY]```", stdout: "```[NO_REPLY]```", expected: true},
-		{name: "Whitespace padded", stdout: "  [NO_REPLY]  ", expected: true},
-		{name: "Quoted \"[NO_REPLY]\"", stdout: "\"[NO_REPLY]\"", expected: true},
-		{name: "Single quoted '[NO_REPLY]'", stdout: "'[NO_REPLY]'", expected: true},
-		{name: "Punctuation wrapped !?[NO_REPLY]!?", stdout: "!?[NO_REPLY]!?", expected: true},
 		{name: "Visible conversational text", stdout: "Hello world!", expected: false},
 		{name: "Visible conversational text", stdout: "Here is your requested answer.", expected: false},
-		{name: "Conversational text ending with sentinel", stdout: "I am replying and here is [NO_REPLY]", expected: false},
-		{name: "Prefix sentinel with trailing conversational text", stdout: "[NO_REPLY] but here is my answer", expected: false},
-		{name: "Bold sentinel with trailing conversational text", stdout: "**[NO_REPLY]** However please note this", expected: false},
 	}
 
 	for _, tt := range tests {
@@ -127,9 +113,9 @@ func TestClassifyError(t *testing.T) {
 			wantCorrupt:   false,
 		},
 		{
-			name:          "Clean Success With [NO_REPLY] In JSON Response",
+			name:          "Clean Success With Empty Response In JSON Envelope",
 			exitCode:      0,
-			stdout:        `{"conversation_id":"abc","status":"SUCCESS","response":"[NO_REPLY]"}`,
+			stdout:        `{"conversation_id":"abc","status":"SUCCESS","response":""}`,
 			stderr:        "",
 			wantFailure:   false,
 			wantTransient: false,

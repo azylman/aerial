@@ -10,7 +10,6 @@ import (
 	"regexp"
 	"strings"
 	"time"
-	"unicode"
 )
 
 // AgyResponse models the top-level structured output of agy --output-format json.
@@ -46,29 +45,11 @@ func ParseAgyOutput(stdout string) (*AgyResponse, error) {
 	return &resp, nil
 }
 
-// IsSilentSentinel checks whether stdout is empty or represents a silent sentinel like [NO_REPLY].
-// It strips leading/trailing whitespace, backticks, quotes, asterisks, and punctuation.
-// Returns true if empty string or if the normalized string starts with [NO_REPLY] (case-insensitive).
+// IsSilentSentinel checks whether stdout is empty or consists solely of whitespace.
+// Returns true if empty string or whitespace.
 // Returns false for visible conversational responses.
 func IsSilentSentinel(stdout string) bool {
-	trimmed := strings.TrimFunc(stdout, func(r rune) bool {
-		if r == '[' || r == ']' {
-			return false
-		}
-		return unicode.IsSpace(r) || unicode.IsPunct(r) || unicode.IsSymbol(r)
-	})
-	if trimmed == "" {
-		return true
-	}
-	lower := strings.ToLower(trimmed)
-	if strings.HasPrefix(lower, "[no_reply]") {
-		rem := strings.TrimPrefix(lower, "[no_reply]")
-		rem = strings.TrimFunc(rem, func(r rune) bool {
-			return unicode.IsSpace(r) || unicode.IsPunct(r) || unicode.IsSymbol(r)
-		})
-		return rem == ""
-	}
-	return false
+	return strings.TrimSpace(stdout) == ""
 }
 
 // RunAgy executes the agy binary with the given parameters, capturing stdout and stderr.

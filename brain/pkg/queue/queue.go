@@ -1125,7 +1125,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 				responseText := resp.Response
 				isSilent := runner.IsSilentSentinel(responseText)
 				if isSilent {
-					log.Printf("[Queue] Output is silent sentinel ([NO_REPLY] or empty). Skipping Discord delivery.")
+					log.Printf("[Queue] Output is empty. Skipping Discord delivery.")
 				} else {
 					if !skipDiscord {
 						if err := p.cfg.DeliveryFunc(p.getDiscordSession(), threadID, responseText); err != nil {
