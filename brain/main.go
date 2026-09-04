@@ -842,7 +842,7 @@ func main() {
 		}
 	}()
 
-	clsModel := config.GetEnv("AMBIENT_CLASSIFIER_MODEL", "3.8 Flash (Low)")
+	clsModel := config.GetEnv("AMBIENT_CLASSIFIER_MODEL", "Gemini 3.8 Flash (Low)")
 	cls := classifier.NewClassifier(
 		classifier.WithModel(clsModel),
 		classifier.WithLLMFunc(classifier.NewAgyLLMFunc(agyBin, apiKey, runner.RunAgy)),

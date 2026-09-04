@@ -99,7 +99,7 @@ func WithClock(clock func() time.Time) Option {
 // NewClassifier constructs a Classifier with defaults.
 func NewClassifier(opts ...Option) *Classifier {
 	c := &Classifier{
-		Model:            "3.8 Flash (Low)",
+		Model:            "Gemini 3.8 Flash (Low)",
 		Timeout:          12 * time.Second,
 		FailureThreshold: 3,
 		CooldownDuration: 60 * time.Second,
@@ -395,7 +395,7 @@ func (c *Classifier) classifyWithPrompt(ctx context.Context, prompt string) Clas
 
 	model := c.Model
 	if model == "" {
-		model = "3.8 Flash (Low)"
+		model = "Gemini 3.8 Flash (Low)"
 	}
 
 	resp, err := c.LLMFunc(callCtx, model, prompt)
