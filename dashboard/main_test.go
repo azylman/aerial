@@ -297,8 +297,9 @@ func TestMergeClusterDeployments_ActiveCIRun(t *testing.T) {
 			UpdatedAt:  now.Add(-10 * time.Second),
 			HTMLURL:    "https://github.com/azylman/aerial/actions/runs/481",
 			HeadCommit: &struct {
-				Message string `json:"message"`
-			}{Message: "feat(brain): live github actions tracking"},
+				Message   string    `json:"message"`
+				Timestamp time.Time `json:"timestamp"`
+			}{Message: "feat(brain): live github actions tracking", Timestamp: now.Add(-2 * time.Minute)},
 		},
 	}
 
@@ -1153,6 +1154,203 @@ func TestAssetRegistry_ServeHTTP(t *testing.T) {
 			t.Fatalf("expected status 405, got %d", rec.Code)
 		}
 	})
+}
+
+func TestGetContainerCommit_IgnoreAuxiliarySidecars(t *testing.T) {
+	containers := []DockerContainerJSON{
+		{
+			ID:    "c-agentsview",
+			Names: []string{"/aerial-agentsview"},
+			Image: "ghcr.io/azylman/agentsview:latest",
+			Labels: map[string]string{
+				"com.docker.compose.project": "aerial",
+				"com.docker.compose.service": "agentsview",
+				"org.opencontainers.image.revision": "080b49fb7a7c1d8f206549e8ee4eaf9cf50a5c20",
+			},
+		},
+		{
+			ID:    "c-watchtower",
+			Names: []string{"/aerial-watchtower"},
+			Image: "containrrr/watchtower:latest",
+			Labels: map[string]string{
+				"com.docker.compose.project": "aerial",
+				"com.docker.compose.service": "watchtower",
+				"org.opencontainers.image.revision": "ace93994711edfe47036e2d2ee5f5d531df013ed",
+			},
+		},
+		{
+			ID:    "c-autoheal",
+			Names: []string{"/aerial-autoheal"},
+			Image: "willfarrell/autoheal:latest",
+			Labels: map[string]string{
+				"com.docker.compose.project": "aerial",
+				"com.docker.compose.service": "autoheal",
+				"org.opencontainers.image.revision": "autohealsha1234",
+			},
+		},
+		{
+			ID:    "c-brain",
+			Names: []string{"/aerial-brain"},
+			Image: "ghcr.io/azylman/aerial-brain:latest",
+			Labels: map[string]string{
+				"com.docker.compose.project": "aerial",
+				"com.docker.compose.service": "brain",
+				"aerial.commit_sha":          "e056544d32a5f9d8a4cc50915a20db5eaea7db1e",
+			},
+		},
+	}
+
+	commit := getContainerCommit(containers)
+	if commit != "e056544" {
+		t.Fatalf("expected brain commit 'e056544', got %q", commit)
+	}
+}
+
+func TestMergeClusterDeployments_CommitTimeAcrossAllStages(t *testing.T) {
+	now := time.Now().UTC()
+	commitTime := now.Add(-10 * time.Minute)
+
+	// 1. CI Queued
+	runsQueued := []GitHubRun{
+		{
+			ID:         501,
+			Name:       "Continuous Delivery",
+			HeadSHA:    "1111aaa",
+			Status:     "queued",
+			Conclusion: "",
+			CreatedAt:  now.Add(-2 * time.Minute),
+			HeadCommit: &struct {
+				Message   string    `json:"message"`
+				Timestamp time.Time `json:"timestamp"`
+			}{
+				Message:   "feat: queued",
+				Timestamp: commitTime,
+			},
+		},
+	}
+	deploysQueued := mergeClusterDeployments(nil, runsQueued, nil, "1111aaa")
+	if len(deploysQueued) != 1 || deploysQueued[0].CommitTime == nil || !deploysQueued[0].CommitTime.Equal(commitTime) {
+		t.Errorf("expected queued stage to have valid CommitTime")
+	}
+
+	// 2. CI Building
+	runsBuilding := []GitHubRun{
+		{
+			ID:         502,
+			Name:       "Continuous Delivery",
+			HeadSHA:    "2222bbb",
+			Status:     "in_progress",
+			Conclusion: "",
+			CreatedAt:  now.Add(-1 * time.Minute),
+			HeadCommit: &struct {
+				Message   string    `json:"message"`
+				Timestamp time.Time `json:"timestamp"`
+			}{
+				Message:   "feat: building",
+				Timestamp: commitTime,
+			},
+		},
+	}
+	deploysBuilding := mergeClusterDeployments(nil, runsBuilding, nil, "2222bbb")
+	if len(deploysBuilding) != 1 || deploysBuilding[0].CommitTime == nil || !deploysBuilding[0].CommitTime.Equal(commitTime) {
+		t.Errorf("expected building stage to have valid CommitTime")
+	}
+
+	// 3. CI Failed
+	runsFailed := []GitHubRun{
+		{
+			ID:         503,
+			Name:       "Continuous Delivery",
+			HeadSHA:    "3333ccc",
+			Status:     "completed",
+			Conclusion: "failure",
+			CreatedAt:  now.Add(-5 * time.Minute),
+			UpdatedAt:  now.Add(-4 * time.Minute),
+			HeadCommit: &struct {
+				Message   string    `json:"message"`
+				Timestamp time.Time `json:"timestamp"`
+			}{
+				Message:   "feat: failed",
+				Timestamp: commitTime,
+			},
+		},
+	}
+	deploysFailed := mergeClusterDeployments(nil, runsFailed, nil, "3333ccc")
+	if len(deploysFailed) != 1 || deploysFailed[0].CommitTime == nil || !deploysFailed[0].CommitTime.Equal(commitTime) {
+		t.Errorf("expected failed stage to have valid CommitTime")
+	}
+
+	// 4. Local Swapping & Live with GH poller cache
+	containersSwapping := []DockerContainerJSON{
+		{
+			ID:      "c-brain",
+			Names:   []string{"/aerial-brain"},
+			State:   "running",
+			Created: now.Add(-30 * time.Second).Unix(),
+			Labels:  map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"},
+			Health:  &struct {
+				Status string `json:"Status"`
+			}{Status: "starting"},
+		},
+	}
+	runsSuccess := []GitHubRun{
+		{
+			ID:         504,
+			Name:       "Continuous Delivery",
+			HeadSHA:    "4444ddd",
+			Status:     "completed",
+			Conclusion: "success",
+			CreatedAt:  now.Add(-2 * time.Minute),
+			UpdatedAt:  now.Add(-1 * time.Minute),
+			HeadCommit: &struct {
+				Message   string    `json:"message"`
+				Timestamp time.Time `json:"timestamp"`
+			}{
+				Message:   "feat: success",
+				Timestamp: commitTime,
+			},
+		},
+	}
+	deploysSwapping := mergeClusterDeployments(containersSwapping, runsSuccess, nil, "4444ddd")
+	if len(deploysSwapping) != 1 || deploysSwapping[0].Commit != "4444ddd" || deploysSwapping[0].CommitTime == nil || !deploysSwapping[0].CommitTime.Equal(commitTime) {
+		t.Errorf("expected swapping stage to resolve commit and CommitTime from runs")
+	}
+}
+
+func TestDeploymentStatus_CommitTimeJSONSerialization(t *testing.T) {
+	now := time.Date(2026, 9, 4, 4, 15, 0, 0, time.UTC)
+	depWithTime := DeploymentStatus{
+		ID:         "dep-1",
+		Service:    "aerial-stack",
+		Commit:     "abc1234",
+		CommitTime: &now,
+		Stage:      "live",
+		Progress:   100,
+	}
+
+	data, err := json.Marshal(depWithTime)
+	if err != nil {
+		t.Fatalf("failed to marshal DeploymentStatus with time: %v", err)
+	}
+	if !strings.Contains(string(data), `"commit_time":"2026-09-04T04:15:00Z"`) {
+		t.Errorf("expected JSON to contain formatted commit_time, got: %s", string(data))
+	}
+
+	depWithoutTime := DeploymentStatus{
+		ID:       "dep-2",
+		Service:  "aerial-stack",
+		Commit:   "abc1234",
+		Stage:    "live",
+		Progress: 100,
+	}
+
+	dataNil, err := json.Marshal(depWithoutTime)
+	if err != nil {
+		t.Fatalf("failed to marshal DeploymentStatus with nil time: %v", err)
+	}
+	if strings.Contains(string(dataNil), `"commit_time"`) {
+		t.Errorf("expected JSON to omit commit_time when nil, got: %s", string(dataNil))
+	}
 }
 
 
