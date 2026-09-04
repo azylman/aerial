@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"regexp"
@@ -16,6 +17,29 @@ import (
 	"github.com/azylman/aerial/brain/pkg/queue"
 	"github.com/bwmarrin/discordgo"
 )
+
+const discordErrCodeThreadAlreadyCreated = 160004
+
+func isThreadAlreadyExistsError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var restErr *discordgo.RESTError
+	if errors.As(err, &restErr) && restErr != nil {
+		if restErr.Message != nil && restErr.Message.Code == discordErrCodeThreadAlreadyCreated {
+			return true
+		}
+		if len(restErr.ResponseBody) > 0 {
+			bodyStr := strings.ToLower(string(restErr.ResponseBody))
+			if strings.Contains(bodyStr, "160004") || strings.Contains(bodyStr, "already been created") {
+				return true
+			}
+		}
+		return false
+	}
+	errStr := strings.ToLower(err.Error())
+	return strings.Contains(errStr, "160004") || strings.Contains(errStr, "already been created")
+}
 
 func deriveThreadTitle(content string) string {
 	re := regexp.MustCompile(`<@!?[0-9]+>`)
@@ -111,17 +135,59 @@ func getOrCreateThreadID(s *discordgo.Session, m *discordgo.Message) (string, bo
 		return m.ChannelID, false
 	}
 
+	// Fast in-memory cache check: if this message ID was already cached or stored in session state as a thread
+	if snap, ok := queue.GetCachedChannel(m.ID); ok && snap.IsThread {
+		return m.ID, true
+	}
+	if s != nil && s.State != nil {
+		if ch, err := s.State.Channel(m.ID); err == nil && ch != nil && ch.IsThread() {
+			queue.CacheDiscordChannel(ch)
+			return m.ID, true
+		}
+	}
+
 	title := deriveThreadTitle(m.Content)
 	if s != nil && s.Token != "" {
 		thread, err := s.MessageThreadStart(m.ChannelID, m.ID, title, 1440)
 		if err != nil {
+			if isThreadAlreadyExistsError(err) && queue.IsNumericSnowflake(m.ID) {
+				log.Printf("Thread already exists for message %s in channel %s (code 160004); resolving thread ID %s", m.ID, m.ChannelID, m.ID)
+				var existingThread *discordgo.Channel
+				if ch, fetchErr := s.Channel(m.ID); fetchErr == nil && ch != nil {
+					existingThread = ch
+				} else {
+					existingThread = &discordgo.Channel{
+						ID:       m.ID,
+						GuildID:  guildID,
+						ParentID: m.ChannelID,
+						Type:     discordgo.ChannelTypeGuildPublicThread,
+					}
+				}
+				if existingThread.ParentID == "" {
+					existingThread.ParentID = m.ChannelID
+				}
+				if existingThread.GuildID == "" {
+					existingThread.GuildID = guildID
+				}
+				queue.CacheDiscordChannel(existingThread)
+				if s.State != nil {
+					_ = s.State.ChannelAdd(existingThread)
+				}
+				return m.ID, true
+			}
 			log.Printf("Failed to create Discord thread for message %s (channel %s): %v", m.ID, m.ChannelID, err)
 			return m.ChannelID, false
 		} else if thread != nil {
 			if thread.ParentID == "" {
 				thread.ParentID = m.ChannelID
 			}
+			if thread.GuildID == "" {
+				thread.GuildID = guildID
+			}
 			queue.CacheDiscordChannel(thread)
+			if s.State != nil {
+				_ = s.State.ChannelAdd(thread)
+			}
 		}
 		log.Printf("Created new Discord thread %q (ID: %s) for message %s in channel %s", title, thread.ID, m.ID, m.ChannelID)
 		return thread.ID, true
