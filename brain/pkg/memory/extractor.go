@@ -116,7 +116,7 @@ func BackfillMissingEmbeddings(ctx context.Context, database *sql.DB, client *Cl
 }
 
 // ExtractActiveConversationFacts queries conversations modified in the last activeHours,
-// extracts facts via the primary LLM, generates vector embeddings via Ollama, and stores them in SQLite.
+// extracts facts via the primary LLM, generates vector embeddings via Ollama, and stores them in persistent DB.
 // Single-flight protected via extractionMutex.
 func ExtractActiveConversationFacts(ctx context.Context, database *sql.DB, client *Client, llmFunc LLMClientFunc, activeHours int) error {
 	if database == nil || client == nil || llmFunc == nil {

@@ -118,11 +118,11 @@ func FormatChannelHistory(messages []HistoryMessage) string {
 }
 
 // DefaultHistoryFetcher returns a HistoryFetcherFunc that fetches recent messages
-// from the Discord REST API (with a 2-second timeout) and falls back to SQLite
+// from the Discord REST API (with a 2-second timeout) and falls back to persistent DB
 // if the channel is non-numeric, the session is nil, or the API request fails/times out.
 func DefaultHistoryFetcher(dg *discordgo.Session, database *sql.DB) HistoryFetcherFunc {
 	return func(ctx context.Context, channelID string, beforeID string, limit int) ([]HistoryMessage, error) {
-		// Non-snowflake check, nil session, or empty channelID -> fallback directly to SQLite
+		// Non-snowflake check, nil session, or empty channelID -> fallback directly to database
 		if channelID == "" || !IsNumericSnowflake(channelID) || dg == nil {
 			return fetchHistoryFromDB(database, channelID, limit)
 		}
@@ -142,7 +142,7 @@ func DefaultHistoryFetcher(dg *discordgo.Session, database *sql.DB) HistoryFetch
 
 		discordMsgs, err := dg.ChannelMessages(channelID, limit, before, "", "", discordgo.WithContext(fetchCtx))
 		if err != nil {
-			log.Printf("[Queue] Discord ChannelMessages failed for %s (falling back to SQLite): %v", channelID, err)
+			log.Printf("[Queue] Discord ChannelMessages failed for %s (falling back to database): %v", channelID, err)
 			return fetchHistoryFromDB(database, channelID, limit)
 		}
 

@@ -473,7 +473,7 @@ func RunStartupCatchUpSweep(ctx context.Context, database *sql.DB, pool *queue.W
 	}
 
 	// 1. Gather target candidate channels:
-	// Prioritize: recent active threads from SQLite DB, active guild threads, and top-level guild text channels.
+	// Prioritize: recent active threads from DB, active guild threads, and top-level guild text channels.
 	targetMap := make(map[string]bool)
 
 	// A. Recent threads from DB (last 48 hours)
@@ -601,7 +601,7 @@ func RunStartupCatchUpSweep(ctx context.Context, database *sql.DB, pool *queue.W
 				continue
 			}
 
-			// Check if already in SQLite DB
+			// Check if already in DB
 			exists, _ := db.MessageExists(database, m.ID)
 			if exists {
 				skippedCount++

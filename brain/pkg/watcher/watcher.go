@@ -93,7 +93,7 @@ func ShouldIgnore(path string) bool {
 		return true
 	}
 
-	// SQLite database files
+	// Database files
 	if strings.Contains(base, ".db") {
 		return true
 	}
