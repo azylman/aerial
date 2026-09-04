@@ -1460,31 +1460,49 @@ func UpdateScheduleRunStatus(database *sql.DB, params UpdateRunParams) error {
 		return fmt.Errorf("schedule run id cannot be empty")
 	}
 
-	var completedAtVal interface{}
-	if !params.CompletedAt.IsZero() {
-		completedAtVal = params.CompletedAt
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	query := `
-	UPDATE schedule_runs
-	SET status = CASE WHEN $1 != '' THEN $2 ELSE status END,
-	    message_id = CASE WHEN $3 != '' THEN $4 ELSE message_id END,
-	    completed_at = CASE WHEN $5 IS NOT NULL THEN $6 ELSE completed_at END,
-	    duration_ms = CASE WHEN $7 != 0 THEN $8 ELSE duration_ms END,
-	    error = CASE WHEN $9 = 'completed' THEN '' WHEN $10 != '' THEN $11 ELSE error END
-	WHERE id = $12
-	`
-	_, err := database.ExecContext(ctx, query,
-		params.Status, params.Status,
-		params.MessageID, params.MessageID,
-		completedAtVal, completedAtVal,
-		params.DurationMs, params.DurationMs,
-		params.Status, params.Error, params.Error,
-		params.RunID,
-	)
+	var sets []string
+	var args []interface{}
+	idx := 1
+
+	if params.Status != "" {
+		sets = append(sets, fmt.Sprintf("status = $%d", idx))
+		args = append(args, params.Status)
+		idx++
+	}
+	if params.MessageID != "" {
+		sets = append(sets, fmt.Sprintf("message_id = $%d", idx))
+		args = append(args, params.MessageID)
+		idx++
+	}
+	if !params.CompletedAt.IsZero() {
+		sets = append(sets, fmt.Sprintf("completed_at = $%d", idx))
+		args = append(args, params.CompletedAt)
+		idx++
+	}
+	if params.DurationMs != 0 {
+		sets = append(sets, fmt.Sprintf("duration_ms = $%d", idx))
+		args = append(args, params.DurationMs)
+		idx++
+	}
+	if params.Status == "completed" {
+		sets = append(sets, "error = ''")
+	} else if params.Error != "" {
+		sets = append(sets, fmt.Sprintf("error = $%d", idx))
+		args = append(args, params.Error)
+		idx++
+	}
+
+	if len(sets) == 0 {
+		return nil
+	}
+
+	query := fmt.Sprintf("UPDATE schedule_runs SET %s WHERE id = $%d", strings.Join(sets, ", "), idx)
+	args = append(args, params.RunID)
+
+	_, err := database.ExecContext(ctx, query, args...)
 	return err
 }
 
