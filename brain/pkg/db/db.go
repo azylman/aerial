@@ -8,12 +8,15 @@ import (
 	"log"
 	"math"
 	"os"
+	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 	pgvector "github.com/pgvector/pgvector-go"
+	_ "modernc.org/sqlite"
 )
 
 const (
@@ -73,59 +76,237 @@ func GetDBPath() string {
 	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", dbUser, dbPass, dbHost, dbPort, dbName)
 }
 
+func isPostgres(database *sql.DB) bool {
+	if database == nil {
+		return false
+	}
+	driverType := fmt.Sprintf("%T", database.Driver())
+	return strings.Contains(driverType, "stdlib") || strings.Contains(driverType, "pgx")
+}
+
+func rebindQuery(query string, isPg bool) string {
+	if !isPg {
+		// Convert $1, $2, ... to ? for SQLite
+		var b strings.Builder
+		for i := 0; i < len(query); i++ {
+			if query[i] == '$' && i+1 < len(query) && query[i+1] >= '0' && query[i+1] <= '9' {
+				b.WriteByte('?')
+				for i+1 < len(query) && query[i+1] >= '0' && query[i+1] <= '9' {
+					i++
+				}
+			} else {
+				b.WriteByte(query[i])
+			}
+		}
+		res := b.String()
+		res = strings.ReplaceAll(res, "ILIKE", "LIKE")
+		return res
+	}
+	// For Postgres, convert ? to $1, $2, ...
+	var b strings.Builder
+	paramIdx := 1
+	for i := 0; i < len(query); i++ {
+		if query[i] == '?' {
+			b.WriteString(fmt.Sprintf("$%d", paramIdx))
+			paramIdx++
+		} else {
+			b.WriteByte(query[i])
+		}
+	}
+	return b.String()
+}
+
 func InitDB(dsn string) (*sql.DB, error) {
-	isMemory := dsn == ":memory:"
-	if dsn == "" || dsn == ":memory:" {
+	if dsn == "" {
 		dsn = GetDBPath()
 	}
 
-	var database *sql.DB
-	var err error
+	isPg := strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://")
 
-	// 1. Connection retry loop with exponential backoff for containerized startup
-	for attempt := 1; attempt <= 10; attempt++ {
-		database, err = sql.Open("pgx", dsn)
-		if err == nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			pingErr := database.PingContext(ctx)
-			cancel()
-			if pingErr == nil {
-				break
+	if isPg {
+		var database *sql.DB
+		var err error
+
+		// 1. Connection retry loop with exponential backoff for containerized startup
+		for attempt := 1; attempt <= 10; attempt++ {
+			database, err = sql.Open("pgx", dsn)
+			if err == nil {
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				pingErr := database.PingContext(ctx)
+				cancel()
+				if pingErr == nil {
+					break
+				}
+				err = pingErr
+				_ = database.Close()
 			}
-			err = pingErr
-			_ = database.Close()
+			log.Printf("[DB] Waiting for PostgreSQL (attempt %d/10): %v", attempt, err)
+			time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
 		}
-		log.Printf("[DB] Waiting for PostgreSQL (attempt %d/10): %v", attempt, err)
-		time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
+		if err != nil {
+			return nil, fmt.Errorf("could not connect to PostgreSQL after retries: %w", err)
+		}
+
+		// 2. Tune connection pool
+		database.SetMaxOpenConns(25)
+		database.SetMaxIdleConns(10)
+		database.SetConnMaxLifetime(5 * time.Minute)
+		database.SetConnMaxIdleTime(2 * time.Minute)
+
+		// 3. Serialize schema creation using PostgreSQL advisory lock
+		const migrationLockID = 849201948201
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		if _, err := database.ExecContext(ctx, "SELECT pg_advisory_lock($1);", migrationLockID); err != nil {
+			return nil, fmt.Errorf("failed to acquire migration advisory lock: %w", err)
+		}
+		defer func() {
+			_, _ = database.ExecContext(context.Background(), "SELECT pg_advisory_unlock($1);", migrationLockID)
+		}()
+
+		schema := `
+		CREATE EXTENSION IF NOT EXISTS vector;
+
+		CREATE TABLE IF NOT EXISTS messages (
+			id TEXT PRIMARY KEY,
+			row_id BIGSERIAL UNIQUE,
+			thread_id TEXT NOT NULL DEFAULT '',
+			guild_id TEXT NOT NULL DEFAULT '',
+			author_id TEXT NOT NULL DEFAULT '',
+			author_name TEXT NOT NULL DEFAULT '',
+			content TEXT NOT NULL DEFAULT '',
+			summary TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'PENDING',
+			retry_count INTEGER NOT NULL DEFAULT 0,
+			error_message TEXT,
+			response_text TEXT,
+			schedule_run_id TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);
+
+		CREATE TABLE IF NOT EXISTS sessions (
+			thread_id TEXT PRIMARY KEY,
+			internal_session_id TEXT NOT NULL DEFAULT '',
+			turn_count INTEGER NOT NULL DEFAULT 0,
+			last_extracted_rowid BIGINT NOT NULL DEFAULT 0,
+			fact_extracted_at TIMESTAMPTZ,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);
+
+		CREATE TABLE IF NOT EXISTS one_shot_schedules (
+			id TEXT PRIMARY KEY,
+			thread_id TEXT NOT NULL,
+			prompt TEXT NOT NULL,
+			run_at TIMESTAMPTZ NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);
+
+		CREATE TABLE IF NOT EXISTS cron_schedules (
+			id TEXT PRIMARY KEY,
+			target_id TEXT NOT NULL,
+			title_prefix TEXT NOT NULL DEFAULT '',
+			cron_expr TEXT NOT NULL,
+			prompt TEXT NOT NULL,
+			timezone TEXT NOT NULL DEFAULT 'America/Los_Angeles',
+			next_run_at TIMESTAMPTZ NOT NULL,
+			enabled BOOLEAN NOT NULL DEFAULT TRUE,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);
+
+		CREATE TABLE IF NOT EXISTS schedule_runs (
+			id TEXT PRIMARY KEY,
+			schedule_id TEXT NOT NULL,
+			schedule_type TEXT NOT NULL,
+			message_id TEXT NOT NULL DEFAULT '',
+			target_id TEXT NOT NULL,
+			thread_id TEXT NOT NULL,
+			title TEXT NOT NULL DEFAULT '',
+			prompt TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'enqueued',
+			started_at TIMESTAMPTZ NOT NULL,
+			completed_at TIMESTAMPTZ,
+			duration_ms BIGINT DEFAULT 0,
+			error TEXT NOT NULL DEFAULT ''
+		);
+
+		CREATE TABLE IF NOT EXISTS facts (
+			id BIGSERIAL PRIMARY KEY,
+			category TEXT NOT NULL DEFAULT 'general',
+			fact_text TEXT NOT NULL,
+			importance REAL NOT NULL DEFAULT 1.0,
+			thread_id TEXT NOT NULL DEFAULT '',
+			embedding vector(384),
+			created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_messages_thread_status ON messages(thread_id, status);
+		CREATE INDEX IF NOT EXISTS idx_messages_thread_row_id ON messages(thread_id, row_id);
+		CREATE INDEX IF NOT EXISTS idx_messages_status_created_at ON messages(status, created_at ASC);
+		CREATE INDEX IF NOT EXISTS idx_sessions_fact_extracted ON sessions(last_extracted_rowid, fact_extracted_at);
+		CREATE INDEX IF NOT EXISTS idx_one_shot_schedules_run_at ON one_shot_schedules(run_at);
+		CREATE INDEX IF NOT EXISTS idx_cron_schedules_next_run_at ON cron_schedules(enabled, next_run_at);
+		CREATE INDEX IF NOT EXISTS idx_schedule_runs_started_at ON schedule_runs(started_at DESC);
+		CREATE INDEX IF NOT EXISTS idx_schedule_runs_schedule_started ON schedule_runs(schedule_id, started_at DESC);
+		CREATE INDEX IF NOT EXISTS idx_schedule_runs_status_started ON schedule_runs(status, started_at DESC);
+		CREATE INDEX IF NOT EXISTS idx_schedule_runs_message_id ON schedule_runs(message_id);
+		CREATE INDEX IF NOT EXISTS idx_facts_thread_id ON facts(thread_id);
+		CREATE INDEX IF NOT EXISTS idx_facts_category ON facts(category);
+		CREATE INDEX IF NOT EXISTS idx_facts_created_at ON facts(created_at DESC);
+		CREATE INDEX IF NOT EXISTS idx_facts_embedding_hnsw ON facts USING hnsw (embedding vector_cosine_ops);
+		`
+		if _, err := database.ExecContext(ctx, schema); err != nil {
+			return nil, fmt.Errorf("failed to run postgres migrations: %w", err)
+		}
+
+		// Idempotent sequence resynchronization in case of manual data restoration
+		_, _ = database.ExecContext(ctx, `
+			SELECT setval(pg_get_serial_sequence('facts', 'id'), COALESCE((SELECT MAX(id) FROM facts), 1), (SELECT COUNT(*) > 0 FROM facts));
+			SELECT setval(pg_get_serial_sequence('messages', 'row_id'), COALESCE((SELECT MAX(row_id) FROM messages), 1), (SELECT COUNT(*) > 0 FROM messages));
+		`)
+
+		log.Printf("[DB] PostgreSQL initialized successfully with pgvector at %s", dsn)
+		return database, nil
 	}
+
+	// SQLite fallback for in-memory unit tests and local runs
+	if dsn != ":memory:" {
+		if err := os.MkdirAll(filepath.Dir(dsn), 0755); err != nil {
+			return nil, fmt.Errorf("failed to create db directory: %w", err)
+		}
+	}
+
+	sqliteDSN := dsn
+	if dsn != ":memory:" && !strings.Contains(dsn, "_pragma") {
+		if strings.Contains(dsn, "?") {
+			sqliteDSN += "&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"
+		} else {
+			sqliteDSN += "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"
+		}
+	}
+
+	database, err := sql.Open("sqlite", sqliteDSN)
 	if err != nil {
-		return nil, fmt.Errorf("could not connect to PostgreSQL after retries: %w", err)
+		return nil, err
 	}
 
-	// 2. Tune connection pool
-	database.SetMaxOpenConns(25)
-	database.SetMaxIdleConns(10)
-	database.SetConnMaxLifetime(5 * time.Minute)
-	database.SetConnMaxIdleTime(2 * time.Minute)
-
-	// 3. Serialize schema creation using PostgreSQL advisory lock
-	const migrationLockID = 849201948201
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	if _, err := database.ExecContext(ctx, "SELECT pg_advisory_lock($1);", migrationLockID); err != nil {
-		return nil, fmt.Errorf("failed to acquire migration advisory lock: %w", err)
+	if dsn == ":memory:" || strings.Contains(dsn, "mode=memory") {
+		database.SetMaxOpenConns(1)
 	}
-	defer func() {
-		_, _ = database.ExecContext(context.Background(), "SELECT pg_advisory_unlock($1);", migrationLockID)
-	}()
 
-	schema := `
-	CREATE EXTENSION IF NOT EXISTS vector;
+	pragmas := `
+	PRAGMA journal_mode = WAL;
+	PRAGMA busy_timeout = 5000;
+	PRAGMA synchronous = NORMAL;
+	`
+	_, _ = database.Exec(pragmas)
 
+	sqliteSchema := `
 	CREATE TABLE IF NOT EXISTS messages (
 		id TEXT PRIMARY KEY,
-		row_id BIGSERIAL UNIQUE,
+		row_id INTEGER,
 		thread_id TEXT NOT NULL DEFAULT '',
 		guild_id TEXT NOT NULL DEFAULT '',
 		author_id TEXT NOT NULL DEFAULT '',
@@ -137,26 +318,30 @@ func InitDB(dsn string) (*sql.DB, error) {
 		error_message TEXT,
 		response_text TEXT,
 		schedule_run_id TEXT NOT NULL DEFAULT '',
-		created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-		updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 	);
+
+	CREATE TRIGGER IF NOT EXISTS trg_messages_row_id AFTER INSERT ON messages WHEN new.row_id IS NULL OR new.row_id = 0 BEGIN
+		UPDATE messages SET row_id = (SELECT COALESCE(MAX(row_id), 0) + 1 FROM messages) WHERE id = new.id;
+	END;
 
 	CREATE TABLE IF NOT EXISTS sessions (
 		thread_id TEXT PRIMARY KEY,
 		internal_session_id TEXT NOT NULL DEFAULT '',
 		turn_count INTEGER NOT NULL DEFAULT 0,
-		last_extracted_rowid BIGINT NOT NULL DEFAULT 0,
-		fact_extracted_at TIMESTAMPTZ,
-		created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-		updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+		last_extracted_rowid INTEGER NOT NULL DEFAULT 0,
+		fact_extracted_at DATETIME,
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 	);
 
 	CREATE TABLE IF NOT EXISTS one_shot_schedules (
 		id TEXT PRIMARY KEY,
 		thread_id TEXT NOT NULL,
 		prompt TEXT NOT NULL,
-		run_at TIMESTAMPTZ NOT NULL,
-		created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+		run_at DATETIME NOT NULL,
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 	);
 
 	CREATE TABLE IF NOT EXISTS cron_schedules (
@@ -166,9 +351,9 @@ func InitDB(dsn string) (*sql.DB, error) {
 		cron_expr TEXT NOT NULL,
 		prompt TEXT NOT NULL,
 		timezone TEXT NOT NULL DEFAULT 'America/Los_Angeles',
-		next_run_at TIMESTAMPTZ NOT NULL,
-		enabled BOOLEAN NOT NULL DEFAULT TRUE,
-		created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+		next_run_at DATETIME NOT NULL,
+		enabled BOOLEAN NOT NULL DEFAULT 1,
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 	);
 
 	CREATE TABLE IF NOT EXISTS schedule_runs (
@@ -181,24 +366,23 @@ func InitDB(dsn string) (*sql.DB, error) {
 		title TEXT NOT NULL DEFAULT '',
 		prompt TEXT NOT NULL,
 		status TEXT NOT NULL DEFAULT 'enqueued',
-		started_at TIMESTAMPTZ NOT NULL,
-		completed_at TIMESTAMPTZ,
-		duration_ms BIGINT DEFAULT 0,
+		started_at DATETIME NOT NULL,
+		completed_at DATETIME,
+		duration_ms INTEGER DEFAULT 0,
 		error TEXT NOT NULL DEFAULT ''
 	);
 
 	CREATE TABLE IF NOT EXISTS facts (
-		id BIGSERIAL PRIMARY KEY,
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		category TEXT NOT NULL DEFAULT 'general',
 		fact_text TEXT NOT NULL,
 		importance REAL NOT NULL DEFAULT 1.0,
 		thread_id TEXT NOT NULL DEFAULT '',
-		embedding vector(384),
-		created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+		embedding BLOB,
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_messages_thread_status ON messages(thread_id, status);
-	CREATE INDEX IF NOT EXISTS idx_messages_thread_row_id ON messages(thread_id, row_id);
 	CREATE INDEX IF NOT EXISTS idx_messages_status_created_at ON messages(status, created_at ASC);
 	CREATE INDEX IF NOT EXISTS idx_sessions_fact_extracted ON sessions(last_extracted_rowid, fact_extracted_at);
 	CREATE INDEX IF NOT EXISTS idx_one_shot_schedules_run_at ON one_shot_schedules(run_at);
@@ -210,23 +394,13 @@ func InitDB(dsn string) (*sql.DB, error) {
 	CREATE INDEX IF NOT EXISTS idx_facts_thread_id ON facts(thread_id);
 	CREATE INDEX IF NOT EXISTS idx_facts_category ON facts(category);
 	CREATE INDEX IF NOT EXISTS idx_facts_created_at ON facts(created_at DESC);
-	CREATE INDEX IF NOT EXISTS idx_facts_embedding_hnsw ON facts USING hnsw (embedding vector_cosine_ops);
 	`
-	if _, err := database.ExecContext(ctx, schema); err != nil {
-		return nil, fmt.Errorf("failed to run postgres migrations: %w", err)
+	if _, err := database.Exec(sqliteSchema); err != nil {
+		_ = database.Close()
+		return nil, fmt.Errorf("failed to run sqlite migrations: %w", err)
 	}
 
-	// Idempotent sequence resynchronization in case of manual data restoration
-	_, _ = database.ExecContext(ctx, `
-		SELECT setval(pg_get_serial_sequence('facts', 'id'), COALESCE((SELECT MAX(id) FROM facts), 1), (SELECT COUNT(*) > 0 FROM facts));
-		SELECT setval(pg_get_serial_sequence('messages', 'row_id'), COALESCE((SELECT MAX(row_id) FROM messages), 1), (SELECT COUNT(*) > 0 FROM messages));
-	`)
-
-	if isMemory {
-		_, _ = database.ExecContext(ctx, "TRUNCATE TABLE messages, sessions, one_shot_schedules, cron_schedules, schedule_runs, facts RESTART IDENTITY CASCADE;")
-	}
-
-	log.Printf("[DB] PostgreSQL initialized successfully with pgvector at %s", dsn)
+	log.Printf("[DB] SQLite initialized successfully at %s", dsn)
 	return database, nil
 }
 
@@ -333,7 +507,7 @@ func GetPendingOrProcessingMessages(database *sql.DB) ([]Message, error) {
 	defer cancel()
 
 	query := `
-	SELECT id, row_id, thread_id, guild_id, author_id, author_name, content, COALESCE(summary, ''), status, retry_count, COALESCE(error_message, ''), COALESCE(response_text, ''), COALESCE(schedule_run_id, ''), created_at, updated_at
+	SELECT id, COALESCE(row_id, 0), thread_id, guild_id, author_id, author_name, content, COALESCE(summary, ''), status, retry_count, COALESCE(error_message, ''), COALESCE(response_text, ''), COALESCE(schedule_run_id, ''), created_at, updated_at
 	FROM messages
 	WHERE status IN ('PENDING', 'PROCESSING')
 	ORDER BY created_at ASC
@@ -471,7 +645,7 @@ func GetActiveTasks(database *sql.DB) ([]ActiveTask, error) {
 	query := `
 	SELECT 
 		m.id,
-		m.row_id,
+		COALESCE(m.row_id, 0),
 		m.thread_id,
 		COALESCE(s.internal_session_id, '') AS session_id,
 		m.author_name,
@@ -542,7 +716,7 @@ func GetMessage(database *sql.DB, id string) (*Message, error) {
 	defer cancel()
 
 	query := `
-	SELECT id, row_id, thread_id, guild_id, author_id, author_name, content, COALESCE(summary, ''), status, retry_count, COALESCE(error_message, ''), COALESCE(response_text, ''), COALESCE(schedule_run_id, ''), created_at, updated_at
+	SELECT id, COALESCE(row_id, 0), thread_id, guild_id, author_id, author_name, content, COALESCE(summary, ''), status, retry_count, COALESCE(error_message, ''), COALESCE(response_text, ''), COALESCE(schedule_run_id, ''), created_at, updated_at
 	FROM messages
 	WHERE id = $1
 	`
@@ -666,10 +840,12 @@ func GetRecentThreadMessages(database *sql.DB, threadID string, limit int) ([]Me
 	defer cancel()
 
 	query := `
-	SELECT id, row_id, thread_id, guild_id, author_id, author_name, content, summary, status,
+	SELECT id, COALESCE(row_id, 0), thread_id, guild_id, author_id, author_name, content, summary, status,
 	       retry_count, error_message, response_text, schedule_run_id, created_at, updated_at
 	FROM (
-		SELECT * FROM messages
+		SELECT id, COALESCE(row_id, 0) AS row_id, thread_id, guild_id, author_id, author_name, content, summary, status,
+		       retry_count, error_message, response_text, schedule_run_id, created_at, updated_at
+		FROM messages
 		WHERE thread_id = $1
 		ORDER BY created_at DESC
 		LIMIT $2
@@ -1296,7 +1472,7 @@ func UpdateScheduleRunStatus(database *sql.DB, params UpdateRunParams) error {
 	UPDATE schedule_runs
 	SET status = CASE WHEN $1 != '' THEN $2 ELSE status END,
 	    message_id = CASE WHEN $3 != '' THEN $4 ELSE message_id END,
-	    completed_at = CASE WHEN $5::timestamptz IS NOT NULL THEN $6::timestamptz ELSE completed_at END,
+	    completed_at = CASE WHEN $5 IS NOT NULL THEN $6 ELSE completed_at END,
 	    duration_ms = CASE WHEN $7 != 0 THEN $8 ELSE duration_ms END,
 	    error = CASE WHEN $9 = 'completed' THEN '' WHEN $10 != '' THEN $11 ELSE error END
 	WHERE id = $12
@@ -1557,7 +1733,11 @@ func InsertFact(database *sql.DB, category, factText string, importance float64,
 
 	var vecVal interface{}
 	if len(embedding) == ExpectedEmbeddingDim {
-		vecVal = pgvector.NewVector(embedding)
+		if isPostgres(database) {
+			vecVal = pgvector.NewVector(embedding)
+		} else {
+			vecVal = Float32ToBytes(embedding)
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1583,6 +1763,27 @@ func (nv *NullVector) Scan(src any) error {
 		nv.Valid = false
 		return nil
 	}
+	switch v := src.(type) {
+	case string:
+		var vec pgvector.Vector
+		if err := vec.Scan(v); err == nil {
+			nv.Vector = vec.Slice()
+			nv.Valid = true
+			return nil
+		}
+	case []byte:
+		var vec pgvector.Vector
+		if err := vec.Scan(v); err == nil {
+			nv.Vector = vec.Slice()
+			nv.Valid = true
+			return nil
+		}
+		if len(v)%4 == 0 {
+			nv.Vector = BytesToFloat32(v)
+			nv.Valid = len(nv.Vector) > 0
+			return nil
+		}
+	}
 	var vec pgvector.Vector
 	if err := vec.Scan(src); err != nil {
 		return err
@@ -1590,6 +1791,22 @@ func (nv *NullVector) Scan(src any) error {
 	nv.Vector = vec.Slice()
 	nv.Valid = true
 	return nil
+}
+
+func cosineSimilarity(a, b []float32) float64 {
+	if len(a) != len(b) || len(a) == 0 {
+		return 0
+	}
+	var dot, normA, normB float64
+	for i := range a {
+		dot += float64(a[i]) * float64(b[i])
+		normA += float64(a[i]) * float64(a[i])
+		normB += float64(b[i]) * float64(b[i])
+	}
+	if normA == 0 || normB == 0 {
+		return 0
+	}
+	return dot / (math.Sqrt(normA) * math.Sqrt(normB))
 }
 
 func UpdateFactEmbedding(database *sql.DB, id int64, embedding []float32) error {
@@ -1691,6 +1908,40 @@ func SearchSimilarFacts(database *sql.DB, embedding []float32, limit int, minSco
 	}
 	if minScore <= 0 {
 		minScore = 0.20
+	}
+
+	if !isPostgres(database) {
+		// SQLite in-memory fallback for unit tests: rank in memory
+		allFacts, err := GetAllFactsWithEmbeddings(database)
+		if err != nil {
+			return nil, err
+		}
+		type scoredFact struct {
+			fact  Fact
+			score float64
+		}
+		var scored []scoredFact
+		for _, fwe := range allFacts {
+			if threadID != "" && fwe.Fact.ThreadID != "" && fwe.Fact.ThreadID != threadID {
+				continue
+			}
+			if len(fwe.Embedding) != ExpectedEmbeddingDim {
+				continue
+			}
+			sim := cosineSimilarity(embedding, fwe.Embedding)
+			totalScore := sim * fwe.Fact.Importance
+			if totalScore >= minScore {
+				scored = append(scored, scoredFact{fact: fwe.Fact, score: totalScore})
+			}
+		}
+		sort.Slice(scored, func(i, j int) bool {
+			return scored[i].score > scored[j].score
+		})
+		var facts []Fact
+		for i := 0; i < len(scored) && i < limit; i++ {
+			facts = append(facts, scored[i].fact)
+		}
+		return facts, nil
 	}
 
 	candidateLimit := limit * 3
