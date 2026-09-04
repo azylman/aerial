@@ -35,6 +35,7 @@ type Classifier struct {
 	FailureThreshold int
 	CooldownDuration time.Duration
 	Clock            func() time.Time
+	OnParseError     func(model, raw string, err error)
 
 	mu                  sync.Mutex
 	consecutiveFailures int
@@ -44,6 +45,13 @@ type Classifier struct {
 
 // Option configures a Classifier instance.
 type Option func(*Classifier)
+
+// WithOnParseError sets the callback invoked when classification JSON parsing fails.
+func WithOnParseError(fn func(model, raw string, err error)) Option {
+	return func(c *Classifier) {
+		c.OnParseError = fn
+	}
+}
 
 // WithLLMFunc sets the LLM invocation function.
 func WithLLMFunc(fn func(ctx context.Context, model, prompt string) (string, error)) Option {
@@ -238,7 +246,7 @@ func BuildBurstPrompt(targetBurst []db.Message, recentContext []db.Message, cust
 	sb.WriteString("- 0.8 to 1.0: Clear requests for assistance, direct questions, open questions to the room, or follow-ups to Aerial.\n\n")
 
 	sb.WriteString("Evaluate whether Aerial should participate or respond to any topic, question, or discussion contained in the target message or burst.\n")
-	sb.WriteString("Respond ONLY with a JSON object in the following format:\n")
+	sb.WriteString("Respond ONLY with a valid, raw JSON object. Do NOT wrap in markdown code fences (no ``` or ```json). Do NOT include any explanations, preamble, or trailing text outside the JSON object.\n")
 	sb.WriteString("{\n")
 	sb.WriteString("  \"confidence\": <float between 0.0 and 1.0>,\n")
 	sb.WriteString("  \"reason\": \"<brief explanation for score>\"\n")
@@ -248,27 +256,9 @@ func BuildBurstPrompt(targetBurst []db.Message, recentContext []db.Message, cust
 }
 
 // parseClassificationResponse parses and clamps the JSON response from the LLM.
-// It searches for the "confidence" key first to avoid being tricked by braces in preambles.
 func parseClassificationResponse(raw string) (ClassificationResult, error) {
-	trimmed := strings.TrimSpace(raw)
-
-	keyIdx := strings.Index(trimmed, `"confidence"`)
-	if keyIdx == -1 {
-		start := strings.Index(trimmed, "{")
-		if start == -1 {
-			return ClassificationResult{}, fmt.Errorf("failed to find JSON object in response")
-		}
-		keyIdx = start + 1
-	}
-
-	start := strings.LastIndex(trimmed[:keyIdx], "{")
-	if start == -1 {
-		return ClassificationResult{}, fmt.Errorf("failed to find JSON object start")
-	}
-
 	var result ClassificationResult
-	decoder := json.NewDecoder(strings.NewReader(trimmed[start:]))
-	if err := decoder.Decode(&result); err != nil {
+	if err := json.Unmarshal([]byte(strings.TrimSpace(raw)), &result); err != nil {
 		return ClassificationResult{}, fmt.Errorf("failed to parse JSON: %w", err)
 	}
 
@@ -415,6 +405,9 @@ func (c *Classifier) classifyWithPrompt(ctx context.Context, prompt string) Clas
 	result, parseErr := parseClassificationResponse(resp)
 	if parseErr != nil {
 		c.recordFailure()
+		if c.OnParseError != nil {
+			c.OnParseError(model, resp, parseErr)
+		}
 		return ClassificationResult{
 			Confidence: 0.0,
 			Reason:     fmt.Sprintf("classifier error: %v", parseErr),

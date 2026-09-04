@@ -1539,7 +1539,8 @@ func TestQueueTurnCountSessionRotation(t *testing.T) {
 			return nil, nil
 		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
-			return "OK response", "", 0, nil
+			stderr = fmt.Sprintf("Starting conversation update stream for %s\n", sessionID)
+			return "OK response", stderr, 0, nil
 		},
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
 			return nil
@@ -3986,4 +3987,89 @@ func TestProcessBurst_Turn1Crash_DoesNotPersistGhostUUID(t *testing.T) {
 	}
 }
 
+func TestQueue_ClassifierParseErrorTriggersSystemAlert(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
 
+	var mu sync.Mutex
+	var alertChannel string
+	var alertTitle string
+	var alertBody string
+	alertReceived := make(chan struct{}, 1)
+
+	cls := classifier.NewClassifier(
+		classifier.WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
+			return "```json\n{\"confidence\": 0.85}\n```", nil // markdown fence triggers strict parse error
+		}),
+	)
+
+	// Mock Discord Session with state
+	dgSession := &discordgo.Session{
+		State: &discordgo.State{
+			Ready: discordgo.Ready{
+				User: &discordgo.User{ID: "bot-999"},
+			},
+		},
+	}
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		DiscordSession: dgSession,
+		TimeoutMinutes: 1,
+		Classifier:     cls,
+		SystemAlertFunc: func(s *discordgo.Session, channelNameOrID, title, body string) error {
+			mu.Lock()
+			alertChannel = channelNameOrID
+			alertTitle = title
+			alertBody = body
+			mu.Unlock()
+			select {
+			case alertReceived <- struct{}{}:
+			default:
+			}
+			return nil
+		},
+		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
+			return config.ChannelPolicy{
+				Mode:                 "channel",
+				AmbientWakeThreshold: ptrFloat(0.80),
+			}
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{
+		ID:         "msg-parse-err-1",
+		ThreadID:   "chan-lounge",
+		AuthorName: "Alice",
+		Content:    "Hello is anybody there?",
+		Status:     db.StatusPending,
+		CreatedAt:  time.Now().UTC(),
+	}
+	_ = db.InsertMessage(database, msg)
+
+	pool.processBurst([]db.Message{msg})
+
+	select {
+	case <-alertReceived:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for classifier parse error alert")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if alertTitle != "Classifier JSON Parse Error" {
+		t.Errorf("expected alert title 'Classifier JSON Parse Error', got %q", alertTitle)
+	}
+	if !strings.Contains(alertBody, "Parse Error") || !strings.Contains(alertBody, "Raw Output") {
+		t.Errorf("expected alert body to contain parse error and raw output, got %q", alertBody)
+	}
+	if alertChannel != config.GetSystemChannel() {
+		t.Errorf("expected alert channel %q, got %q", config.GetSystemChannel(), alertChannel)
+	}
+}
