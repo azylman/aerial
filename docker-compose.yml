@@ -17,7 +17,7 @@ services:
     stop_grace_period: 30s
     labels:
       autoheal: "true"
-      com.centurylinklabs.watchtower.enable: "false"
+      com.centurylinklabs.watchtower.enable: "true"
     environment:
       - POSTGRES_DB=${POSTGRES_DB:-aerial}
       - POSTGRES_USER=${POSTGRES_USER:-aerial}
@@ -134,6 +134,8 @@ services:
     image: ghcr.io/nicholas-fedor/watchtower:latest
     container_name: aerial-watchtower
     restart: unless-stopped
+    labels:
+      autoheal: "true"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
@@ -154,6 +156,9 @@ services:
     image: willfarrell/autoheal:latest
     container_name: aerial-autoheal
     restart: unless-stopped
+    labels:
+      autoheal: "true"
+      com.centurylinklabs.watchtower.enable: "true"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
