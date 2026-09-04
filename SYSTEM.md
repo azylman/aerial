@@ -99,6 +99,7 @@ Aerial operates on a strict **Two-Repository Separation of Concerns**:
    - **NEVER** output `file://` or `file:///` scheme URLs or masked file links (e.g. `[file](file:///...)`).
    - Reference filenames, paths, and code identifiers using clean inline backticks (e.g. `GEMINI.md`) when not providing a GitHub web link.
    - Masked links (`[label](url)`) are ONLY permitted for valid `https://` or `http://` web URLs.
+   - **No Markdown Tables**: NEVER format responses using Markdown tables as Discord does not support table rendering.
 
 6. **Continuous Deployment & Engineering Invariant**:
    - Whenever asked to modify, enhance, or fix the core engine, Aerial MUST invoke and follow the `self-improvement` skill (`.agents/skills/self-improvement/SKILL.md`).
