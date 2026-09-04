@@ -454,3 +454,80 @@ func TestFileDBDSNPragmasAndIndices(t *testing.T) {
 		t.Errorf("Expected idx_one_shot_schedules_run_at to exist in DB, got indices: %v", indexMap)
 	}
 }
+
+func TestPostgresSchedules(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		dsn = os.Getenv("DATABASE_URL")
+	}
+	if dsn == "" {
+		t.Skip("Skipping postgres test: TEST_DATABASE_URL not set")
+		return
+	}
+
+	database, err := InitDB(dsn)
+	if err != nil {
+		t.Skipf("Skipping postgres test: failed to connect: %v", err)
+		return
+	}
+	defer func() { _ = database.Close() }()
+
+	_, err = database.Exec("TRUNCATE TABLE cron_schedules, one_shot_schedules RESTART IDENTITY CASCADE;")
+	if err != nil {
+		t.Fatalf("Failed to truncate tables: %v", err)
+	}
+
+	now := time.Now().UTC()
+	cron := CronSchedule{
+		ID:          "cron-pg-1",
+		TargetID:    "chan-123",
+		TitlePrefix: "Weather",
+		CronExpr:    "0 6 * * *",
+		Prompt:      "Morning forecast",
+		Timezone:    "America/Los_Angeles",
+		NextRunAt:   now.Add(1 * time.Hour),
+		Enabled:     true,
+		CreatedAt:   now,
+	}
+	if err := InsertCronSchedule(database, cron); err != nil {
+		t.Fatalf("InsertCronSchedule failed: %v", err)
+	}
+
+	cList, err := ListCronSchedules(database, "chan-123")
+	if err != nil {
+		t.Fatalf("ListCronSchedules failed: %v", err)
+	}
+	if len(cList) != 1 || cList[0].ID != "cron-pg-1" {
+		t.Fatalf("Unexpected cron list: %+v", cList)
+	}
+
+	oneshot := OneShotSchedule{
+		ID:        "oneshot-pg-1",
+		ThreadID:  "thread-456",
+		Prompt:    "Reminder prompt",
+		RunAt:     now.Add(10 * time.Minute),
+		CreatedAt: now,
+	}
+	if err := InsertOneShotSchedule(database, oneshot); err != nil {
+		t.Fatalf("InsertOneShotSchedule failed: %v", err)
+	}
+
+	oList, err := ListOneShotSchedules(database, "thread-456")
+	if err != nil {
+		t.Fatalf("ListOneShotSchedules failed: %v", err)
+	}
+	if len(oList) != 1 || oList[0].ID != "oneshot-pg-1" {
+		t.Fatalf("Unexpected oneshot list: %+v", oList)
+	}
+
+	deleted, err := DeleteSchedule(database, "cron-pg-1")
+	if err != nil || !deleted {
+		t.Fatalf("DeleteSchedule cron failed: deleted=%v, err=%v", deleted, err)
+	}
+
+	deleted, err = DeleteSchedule(database, "oneshot-pg-1")
+	if err != nil || !deleted {
+		t.Fatalf("DeleteSchedule oneshot failed: deleted=%v, err=%v", deleted, err)
+	}
+}
+

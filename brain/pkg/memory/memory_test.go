@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -169,14 +170,62 @@ func TestParseFactsJSON(t *testing.T) {
 	}
 }
 
-func TestDBFactInsertionAndRetrieval(t *testing.T) {
-	database, err := db.InitDB(":memory:")
+func setupTestDB(t *testing.T) *sql.DB {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		dsn = os.Getenv("DATABASE_URL")
+	}
+	if dsn == "" {
+		dsn = "postgres://postgres:aerial_test@127.0.0.1:54329/aerial_test?sslmode=disable"
+	}
+
+	// Quick connectivity probe (200ms) to avoid multi-minute retry delays in offline test runners
+	quickDB, openErr := sql.Open("pgx", dsn)
+	if openErr != nil {
+		t.Skipf("Skipping memory db integration test: database driver error: %v", openErr)
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	pingErr := quickDB.PingContext(ctx)
+	cancel()
+	_ = quickDB.Close()
+	if pingErr != nil {
+		t.Skipf("Skipping memory db integration test: PostgreSQL not reachable at %s: %v", dsn, pingErr)
+		return nil
+	}
+
+	database, err := db.InitDB(dsn)
 	if err != nil {
-		t.Fatalf("failed to init in-memory db: %v", err)
+		t.Skipf("Skipping memory db integration test: PostgreSQL not reachable at %s: %v", dsn, err)
+		return nil
+	}
+
+	_, err = database.Exec(`
+		TRUNCATE TABLE messages, sessions, one_shot_schedules, cron_schedules, schedule_runs, facts RESTART IDENTITY CASCADE;
+		SELECT setval(pg_get_serial_sequence('facts', 'id'), 1, false);
+		SELECT setval(pg_get_serial_sequence('messages', 'row_id'), 1, false);
+	`)
+	if err != nil {
+		t.Fatalf("Failed to truncate test tables: %v", err)
+	}
+	return database
+}
+
+func makeDimVector(x, y float32) []float32 {
+	v := make([]float32, db.ExpectedEmbeddingDim)
+	v[0] = x
+	v[1] = y
+	return v
+}
+
+func TestDBFactInsertionAndRetrieval(t *testing.T) {
+	database := setupTestDB(t)
+	if database == nil {
+		return
 	}
 	defer func() { _ = database.Close() }()
 
-	emb := []float32{0.5, 0.5, 0.7071}
+	emb := makeDimVector(0.5, 0.5)
 	id, err := db.InsertFact(database, "user_pref", "User prefers dark mode", 1.0, "thread-123", emb)
 	if err != nil {
 		t.Fatalf("failed to insert fact: %v", err)
@@ -196,25 +245,25 @@ func TestDBFactInsertionAndRetrieval(t *testing.T) {
 	if facts[0].Fact.FactText != "User prefers dark mode" {
 		t.Errorf("expected fact text 'User prefers dark mode', got %q", facts[0].Fact.FactText)
 	}
-	if len(facts[0].Embedding) != 3 {
-		t.Fatalf("expected embedding len 3, got %d", len(facts[0].Embedding))
+	if len(facts[0].Embedding) != db.ExpectedEmbeddingDim {
+		t.Fatalf("expected embedding len %d, got %d", db.ExpectedEmbeddingDim, len(facts[0].Embedding))
 	}
 	if facts[0].Embedding[0] != 0.5 || facts[0].Embedding[1] != 0.5 {
-		t.Errorf("embedding mismatch: %v", facts[0].Embedding)
+		t.Errorf("embedding mismatch: %v", facts[0].Embedding[:5])
 	}
 }
 
 func TestProcessThreadFactsDeduplicationAndWatermark(t *testing.T) {
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("failed to init db: %v", err)
+	database := setupTestDB(t)
+	if database == nil {
+		return
 	}
 	defer func() { _ = database.Close() }()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(EmbeddingResponse{
-			Embedding: []float32{1.0, 0.0, 0.0},
+			Embedding: makeDimVector(1.0, 0.0),
 		})
 	}))
 	defer server.Close()
@@ -232,7 +281,7 @@ func TestProcessThreadFactsDeduplicationAndWatermark(t *testing.T) {
 	})
 
 	// Pre-insert an existing identical/similar fact with same vector
-	_, _ = db.InsertFact(database, "user_pref", "User likes matcha", 1.0, "thread-test-1", []float32{1.0, 0.0, 0.0})
+	_, _ = db.InsertFact(database, "user_pref", "User likes matcha", 1.0, "thread-test-1", makeDimVector(1.0, 0.0))
 
 	// Create a dummy transcript file for thread-test-1
 	homeDir, _ := os.UserHomeDir()
@@ -245,7 +294,7 @@ func TestProcessThreadFactsDeduplicationAndWatermark(t *testing.T) {
 	defer func() { _ = os.RemoveAll(filepath.Join(homeDir, ".gemini", "antigravity", "brain", "thread-test-1")) }()
 
 	ctx := context.Background()
-	err = processThreadFacts(ctx, database, client, llmFunc, "thread-test-1")
+	err := processThreadFacts(ctx, database, client, llmFunc, "thread-test-1")
 	if err != nil {
 		t.Fatalf("processThreadFacts failed: %v", err)
 	}
@@ -314,16 +363,16 @@ Please formulate your response and output it clearly. It will be delivered direc
 }
 
 func TestBackfillMissingEmbeddings(t *testing.T) {
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("failed to init in-memory db: %v", err)
+	database := setupTestDB(t)
+	if database == nil {
+		return
 	}
 	defer func() { _ = database.Close() }()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(EmbeddingResponse{
-			Embedding: []float32{0.5, 0.5, 0.7071},
+			Embedding: makeDimVector(0.5, 0.5),
 		})
 	}))
 	defer server.Close()
@@ -331,7 +380,7 @@ func TestBackfillMissingEmbeddings(t *testing.T) {
 	client := NewClient(server.URL)
 
 	// Insert facts: 1 with embedding, 2 without embedding
-	_, _ = db.InsertFact(database, "system_config", "Fact 1 with emb", 1.0, "thread-1", []float32{0.1, 0.2, 0.3})
+	_, _ = db.InsertFact(database, "system_config", "Fact 1 with emb", 1.0, "thread-1", makeDimVector(0.1, 0.2))
 	_, _ = db.InsertFact(database, "system_config", "Fact 2 missing emb", 1.0, "thread-1", nil)
 	_, _ = db.InsertFact(database, "user_pref", "Fact 3 missing emb", 0.9, "thread-1", nil)
 
@@ -352,23 +401,23 @@ func TestBackfillMissingEmbeddings(t *testing.T) {
 		t.Fatalf("expected 3 facts, got %d", len(facts))
 	}
 	for _, f := range facts {
-		if len(f.Embedding) != 3 {
-			t.Errorf("expected embedding of length 3 for fact %d, got %d", f.Fact.ID, len(f.Embedding))
+		if len(f.Embedding) != db.ExpectedEmbeddingDim {
+			t.Errorf("expected embedding of length %d for fact %d, got %d", db.ExpectedEmbeddingDim, f.Fact.ID, len(f.Embedding))
 		}
 	}
 }
 
 func TestRetrieveRelevantFacts(t *testing.T) {
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("failed to init in-memory db: %v", err)
+	database := setupTestDB(t)
+	if database == nil {
+		return
 	}
 	defer func() { _ = database.Close() }()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(EmbeddingResponse{
-			Embedding: []float32{1.0, 0.0, 0.0},
+			Embedding: makeDimVector(1.0, 0.0),
 		})
 	}))
 	defer server.Close()
@@ -376,8 +425,8 @@ func TestRetrieveRelevantFacts(t *testing.T) {
 	client := NewClient(server.URL)
 
 	// Insert facts into DB
-	_, _ = db.InsertFact(database, "system_config", "Server port is 8080", 1.0, "thread-1", []float32{0.9, 0.1, 0.0})
-	_, _ = db.InsertFact(database, "routine", "Low scoring fact", 1.0, "thread-1", []float32{0.1, 0.9, 0.0})
+	_, _ = db.InsertFact(database, "system_config", "Server port is 8080", 1.0, "thread-1", makeDimVector(0.9, 0.1))
+	_, _ = db.InsertFact(database, "routine", "Low scoring fact", 1.0, "thread-1", makeDimVector(0.1, 0.9))
 
 	facts, err := RetrieveRelevantFacts(context.Background(), database, client, "What port is the server?", 5)
 	if err != nil {
@@ -391,5 +440,7 @@ func TestRetrieveRelevantFacts(t *testing.T) {
 		t.Errorf("expected 'Server port is 8080', got %q", facts[0].FactText)
 	}
 }
+
+
 
 

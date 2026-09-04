@@ -61,8 +61,7 @@ func (s *ScheduleTools) CancelSchedule(ctx context.Context, schedType, id string
 		return "", fmt.Errorf("database not initialized")
 	}
 	if schedType == "cron" {
-		_, err := s.db.ExecContext(ctx, "DELETE FROM cron_schedules WHERE id = ?", id)
-		if err != nil {
+		if err := db.DeleteCronSchedule(s.db, id); err != nil {
 			return "", err
 		}
 	} else {

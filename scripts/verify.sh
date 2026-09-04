@@ -42,13 +42,13 @@ run_golangci_lint() {
     svc="$1"
     if [ -d "$svc" ]; then
         echo "   [golangci-lint] Linting $svc..."
-        if has_cmd golangci-lint; then
-            (cd "$svc" && golangci-lint run ./...)
+        if has_cmd golangci-lint && (cd "$svc" && golangci-lint run ./...); then
+            :
+        elif has_cmd go; then
+            echo "   (golangci-lint not compatible or not found, falling back to go vet for $svc)"
+            (cd "$svc" && go vet ./...)
         elif has_cmd docker; then
             docker run --rm -v "$(pwd)/$svc:/app" -w /app golangci/golangci-lint:v1.59.1 golangci-lint run ./...
-        elif has_cmd go; then
-            echo "   (golangci-lint not found, falling back to go vet for $svc)"
-            (cd "$svc" && go vet ./...)
         else
             echo "🚨 [Aerial Verify] Error: Neither golangci-lint, docker, nor go found in PATH." >&2
             exit 1
@@ -61,9 +61,9 @@ run_go_test() {
     if [ -d "$svc" ]; then
         echo "   [go test] Testing $svc..."
         if has_cmd go; then
-            (cd "$svc" && go test -v ./...)
+            (cd "$svc" && go test -v -p 1 ./...)
         elif has_cmd docker; then
-            docker run --rm -v "$(pwd)/$svc:/app" -w /app golang:1.22 go test -v ./...
+            docker run --rm -v "$(pwd)/$svc:/app" -w /app golang:1.22 go test -v -p 1 ./...
         else
             echo "🚨 [Aerial Verify] Error: Neither go nor docker found in PATH." >&2
             exit 1

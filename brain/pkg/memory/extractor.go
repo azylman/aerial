@@ -57,7 +57,7 @@ func BackfillMissingEmbeddings(ctx context.Context, database *sql.DB, client *Cl
 		return 0, fmt.Errorf("nil database or ollama client")
 	}
 
-	rows, err := database.QueryContext(ctx, "SELECT id, fact_text FROM facts WHERE embedding IS NULL OR length(embedding) = 0")
+	rows, err := database.QueryContext(ctx, "SELECT id, fact_text FROM facts WHERE embedding IS NULL")
 	if err != nil {
 		return 0, fmt.Errorf("failed to query facts missing embeddings: %w", err)
 	}
@@ -102,8 +102,7 @@ func BackfillMissingEmbeddings(ctx context.Context, database *sql.DB, client *Cl
 			continue
 		}
 
-		embBytes := db.Float32ToBytes(emb)
-		if _, err := database.ExecContext(ctx, "UPDATE facts SET embedding = ? WHERE id = ?", embBytes, item.id); err != nil {
+		if err := db.UpdateFactEmbedding(database, item.id, emb); err != nil {
 			log.Printf("[Memory] Error updating embedding for fact ID %d: %v", item.id, err)
 		} else {
 			backfilled++

@@ -7,8 +7,38 @@ include:
 
 services:
   # ----------------------------------------------------------------------------
+  # 0. Persistence Layer: PostgreSQL with pgvector
+  #    Persistent relational storage, CAS task queues, and vector memory.
+  # ----------------------------------------------------------------------------
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: aerial-postgres
+    restart: unless-stopped
+    stop_grace_period: 30s
+    labels:
+      autoheal: "true"
+      com.centurylinklabs.watchtower.enable: "false"
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-aerial}
+      - POSTGRES_USER=${POSTGRES_USER:-aerial}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-aerial_secure_pass}
+      - PGDATA=/var/lib/postgresql/data/pgdata
+    volumes:
+      - aerial-postgres-data:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_HOST_PORT:-127.0.0.1:5432}:5432"
+    networks:
+      - aerial-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-aerial} -d $${POSTGRES_DB:-aerial} || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # ----------------------------------------------------------------------------
   # 1. Execution Brain: Aerial Brain
-  #    Runs headless Antigravity CLI agent prompts with multi-turn SQLite memory,
+  #    Runs headless Antigravity CLI agent prompts with PostgreSQL & pgvector memory,
   #    built-in Discord Gateway funnel with continuous typing indicator refresh,
   #    and connects to remote MCP network servers.
   # ----------------------------------------------------------------------------
@@ -26,6 +56,7 @@ services:
       com.centurylinklabs.watchtower.enable: "true"
     environment:
       - PORT=8080
+      - DATABASE_URL=${DATABASE_URL:-postgres://${POSTGRES_USER:-aerial}:${POSTGRES_PASSWORD:-aerial_secure_pass}@postgres:5432/${POSTGRES_DB:-aerial}?sslmode=disable}
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - AGY_MODEL=${AGY_MODEL:-Gemini 3.6 Flash (Low)}
       - TIMEOUT_MINUTES=${TIMEOUT_MINUTES:-15}
@@ -55,6 +86,8 @@ services:
       retries: 5
       start_period: 60s
     depends_on:
+      postgres:
+        condition: service_healthy
       gitsync:
         condition: service_healthy
       scheduler-mcp:
@@ -145,10 +178,9 @@ services:
       autoheal: "true"
       com.centurylinklabs.watchtower.enable: "true"
     environment:
+      - DATABASE_URL=${DATABASE_URL:-postgres://${POSTGRES_USER:-aerial}:${POSTGRES_PASSWORD:-aerial_secure_pass}@postgres:5432/${POSTGRES_DB:-aerial}?sslmode=disable}
       - DEFAULT_TIMEZONE=${DEFAULT_TIMEZONE:-America/Los_Angeles}
       - TZ=${DEFAULT_TIMEZONE:-America/Los_Angeles}
-    volumes:
-      - aerial-brain-data:/data
     networks:
       - aerial-net
     healthcheck:
@@ -157,6 +189,9 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   # ----------------------------------------------------------------------------
   # 5. Outbound MCP: Discord MCP Server
@@ -386,6 +421,8 @@ volumes:
     name: aerial-ollama-data
   aerial-agentsview-data:
     name: aerial-agentsview-data
+  aerial-postgres-data:
+    name: aerial-postgres-data
 
 
 
