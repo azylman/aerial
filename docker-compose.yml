@@ -485,7 +485,7 @@ services:
   #     Lightweight time-series database with long-term retention & downsampling.
   # ----------------------------------------------------------------------------
   victoriametrics:
-    image: victoriametrics/victoria-metrics:v1.101.0-enterprise
+    image: victoriametrics/victoria-metrics:v1.101.0
     container_name: aerial-victoriametrics
     restart: unless-stopped
     stop_grace_period: 30s
@@ -499,7 +499,6 @@ services:
       - "-promscrape.config=/etc/victoriametrics/scrape.yml"
       - "-promscrape.configCheckInterval=15s"
       - "-retentionPeriod=${VICTORIAMETRICS_RETENTION_PERIOD:-5y}"
-      - "-downsampling.period=${VICTORIAMETRICS_DOWNSAMPLING_PERIOD:-30d:5m,180d:1h}"
     volumes:
       - aerial-victoriametrics-data:/victoria-metrics-data
       - ${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}/victoriametrics/scrape.yml:/etc/victoriametrics/scrape.yml:ro
