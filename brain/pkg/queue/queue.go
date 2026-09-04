@@ -478,7 +478,7 @@ func extractMessageBody(content string) string {
 	return trimmed
 }
 
-func isTier1Wake(m db.Message, botUserID string) bool {
+func isTier1Wake(m db.Message, botUserID string, wakeMode string) bool {
 	if m.AuthorID == "http-client" {
 		return true
 	}
@@ -518,7 +518,7 @@ func isTier1Wake(m db.Message, botUserID string) bool {
 		}
 	}
 
-	// Check message body
+	// Check message body direct mentions
 	body := extractMessageBody(m.Content)
 	if botUserID != "" && (strings.Contains(body, "<@"+botUserID+">") || strings.Contains(body, "<@!"+botUserID+">")) {
 		return true
@@ -526,6 +526,11 @@ func isTier1Wake(m db.Message, botUserID string) bool {
 	bodyLower := strings.ToLower(body)
 	if strings.Contains(bodyLower, "<@aerial") || strings.Contains(bodyLower, "<@!aerial") {
 		return true
+	}
+
+	// If wake_mode is "mention", plaintext keywords / name drops do NOT trigger a wake.
+	if strings.ToLower(strings.TrimSpace(wakeMode)) == "mention" {
+		return false
 	}
 
 	// Keyword trigger matching word boundary regex (?i)\b(aerial|gundam)\b in extractMessageBody(m.Content)
@@ -564,25 +569,10 @@ func CoalesceBurstPrompt(burst []db.Message) string {
 	return strings.TrimSpace(sb.String())
 }
 
-func isMentionOrReply(burst []db.Message) bool {
+func isMentionOrReply(burst []db.Message, botUserID string, wakeMode string) bool {
 	for _, m := range burst {
-		c := m.Content
-		cLower := strings.ToLower(c)
-		if strings.Contains(c, "<@") ||
-			strings.Contains(cLower, "aerial") ||
-			strings.Contains(cLower, "gundam") ||
-			strings.Contains(cLower, "brain") ||
-			strings.Contains(cLower, "bot") {
+		if isTier1Wake(m, botUserID, wakeMode) {
 			return true
-		}
-		if idx := strings.Index(c, "- mentions: ["); idx != -1 {
-			endIdx := strings.Index(c[idx:], "]")
-			if endIdx != -1 {
-				inside := strings.TrimSpace(c[idx+len("- mentions: [") : idx+endIdx])
-				if inside != "" {
-					return true
-				}
-			}
 		}
 	}
 	return false
@@ -596,7 +586,11 @@ func resolveTypingStarter(policy config.ChannelPolicy, burst []db.Message, skipD
 	case "never":
 		return func() {}
 	case "on_mention":
-		if isMentionOrReply(burst) {
+		botUserID := ""
+		if sess := getSession(); sess != nil && sess.State != nil && sess.State.User != nil {
+			botUserID = sess.State.User.ID
+		}
+		if isMentionOrReply(burst, botUserID, policy.GetWakeMode()) {
 			return typingFunc(getSession(), threadID)
 		}
 		return func() {}
@@ -747,6 +741,8 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 			botUserID = sess.State.User.ID
 		}
 
+		wakeMode := policy.GetWakeMode()
+
 		type wakeInfo struct {
 			isWake    bool
 			score     float64
@@ -760,7 +756,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 
 		// Safeguard 1: Tier-1 Pre-Scan (Zero-Latency Priority)
 		for i, m := range burst {
-			if isTier1Wake(m, botUserID) {
+			if isTier1Wake(m, botUserID, wakeMode) {
 				wakeInfos[i] = wakeInfo{
 					isWake:    true,
 					score:     1.0,
@@ -786,18 +782,18 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 			}
 			// Trailing messages after wakeIdx:
 			// If Tier-1, mark isWake: true so handleTrailing re-enqueues it for the next turn.
-			// Otherwise mark ambient (or classify if threshold > 0).
+			// Otherwise mark ambient (or classify if threshold > 0 and wakeMode == "classifier").
 			threshold := policy.GetAmbientWakeThreshold()
 			for i := wakeIdx + 1; i < len(burst); i++ {
 				m := burst[i]
-				if isTier1Wake(m, botUserID) {
+				if isTier1Wake(m, botUserID, wakeMode) {
 					wakeInfos[i] = wakeInfo{
 						isWake:    true,
 						score:     1.0,
 						threshold: threshold,
 						reason:    "direct_address",
 					}
-				} else if threshold <= 0.0 || classifier.IsHeuristicSkip(extractMessageBody(m.Content)) {
+				} else if wakeMode == "mention" || threshold <= 0.0 || classifier.IsHeuristicSkip(extractMessageBody(m.Content)) {
 					wakeInfos[i] = wakeInfo{
 						isWake:    false,
 						score:     0.0,
@@ -823,8 +819,28 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 					}
 				}
 			}
+		} else if wakeMode == "mention" {
+			// Mention-only mode: all non-mention messages are ambient without running classifier
+			for i := range burst {
+				wakeInfos[i] = wakeInfo{
+					isWake:    false,
+					score:     0.0,
+					threshold: 0.0,
+					reason:    "mention_mode_ambient",
+				}
+			}
+		} else if wakeMode == "all" {
+			for i := range burst {
+				wakeInfos[i] = wakeInfo{
+					isWake:    i == 0,
+					score:     1.0,
+					threshold: 0.0,
+					reason:    "all_wake",
+				}
+			}
+			wakeIdx = 0
 		} else {
-			// Safeguard 2: Coalesced Burst Ambient Evaluation
+			// Safeguard 2: Coalesced Burst Ambient Evaluation (classifier mode)
 			threshold := policy.GetAmbientWakeThreshold()
 			if threshold <= 0.0 {
 				for i := range burst {
