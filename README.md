@@ -2,14 +2,14 @@
 
 An autonomous personal AI assistant system running natively on Docker, named after Gundam Aerial.
 
-Aerial provides a multi-agent, tool-enabled AI assistant accessible via Discord and HTTP API, with persistent multi-turn PostgreSQL & pgvector memory, GitHub operations, host Docker infrastructure inspection, and an extensible architecture for custom skills, MCP tools, and sidecar containers.
+Aerial provides a multi-agent, tool-enabled AI assistant accessible via Discord and HTTP API, with persistent multi-turn PostgreSQL & pgvector memory, full-stack observability with VictoriaMetrics and Grafana, declarative GitOps Docker Compose reconciliation, GitHub operations, host Docker infrastructure inspection, and an extensible architecture for custom skills, MCP tools, and sidecar containers.
 
 ---
 
 ## 1. System Architecture & Topology
 
 Aerial uses a decoupled **Two-Repository Architecture**:
-- **Engine Repo (`azylman/aerial`)**: Core Go backend (`aerial-brain`), MCP microservices, and Docker Compose topology.
+- **Engine Repo (`azylman/aerial`)**: Core Go backend (`aerial-brain`), MCP microservices, observability telemetry stack, and Docker Compose topology.
 - **User Config Repo (e.g. `your-username/your-aerial-config`)**: Private user configuration (`config.yaml`), persona guidelines (`AGENTS.md`), and custom skills (`custom-skills/`). Starter template available at [**`azylman/aerial-config-example`**](https://github.com/azylman/aerial-config-example).
 
 ```text
@@ -20,32 +20,40 @@ Aerial uses a decoupled **Two-Repository Architecture**:
                                        │ Continuous Typing Indicator Refresh
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                                Aerial Brain                                 │
-│  • In-process Discord Funnel & Gateway Worker                               │
+│  • In-process Discord Funnel & Gateway Worker (30m TTL / Dedup Recovery)    │
 │  • Headless Antigravity Agent Engine (agy)                                  │
+│  • Fast Ambient Relevance Classifier (Gemini 3.8 Flash Low)                 │
 │  • Read-Only Kernel Mounts (/share/aerial-config:ro, /share/aerial:ro)      │
 │  • Recursive File Watcher (fsnotify) with Hot-Reloading & LKGC Fallback     │
-│  • PostgreSQL Multi-Turn Thread Memory & CAS Task State                     │
-│  • Dynamic Built-in & User Custom Skills Discovery                          │
+│  • PostgreSQL 16 Multi-Turn Thread Memory & Atomic CAS Task State           │
 │  • Semantic Memory Native pgvector RAG (HNSW Cosine ops / 384-dim)          │
+│  • Dynamic Built-in & User Custom Skills Discovery                          │
 └─────────────────────────────────────────────────────────────────────────────┘
                │                       │                      │
 ┌───────────────────────────┐ ┌───────────────────────┐ ┌─────────────────────┐
 │       aerial-gitsync      │ │       docker-mcp      │ │     github-mcp      │
-│ (Port 8080: Sidecar :rw)  │ │ (Port 4002: Proxy)    │ │ (Port 4003: Proxy)  │
-└───────────────────────────┘ └───────────────────────┘ └─────────────────────┘
-               │                       │                      │
-       Discord REST API        Host Docker Socket       GitHub Copilot MCP
-                           (/var/run/docker.sock)
+│  (Port 8080: Sidecar :rw) │ │  (Port 4002: Proxy)   │ │ (Port 4003: Proxy)  │
+│  • Declarative GitOps     │ └───────────────────────┘ └─────────────────────┘
+│    Compose Reconciler     │          │                      │
+│  • Singleflight Git Sync  │  Host Docker Socket       GitHub Copilot MCP
+└───────────────────────────┘      (/var/run/docker.sock)
                │                       │                      │
 ┌───────────────────────────┐ ┌───────────────────────┐ ┌─────────────────────┐
-│       scheduler-mcp       │ │     aerial-ollama     │ │  aerial-agentsview  │
-│  (Port 8080: Internal)    │ │ (Port 11434: Embed)   │ │ (Port 8089: Web UI) │
-└───────────────────────────┘ └───────────────────────┘ └─────────────────────┘
-               │                       │
-┌───────────────────────────┐ ┌───────────────────────┐
-│     aerial-watchtower     │ │    aerial-autoheal    │
-│  (GHCR CD Supervisor)     │ │  (Health Supervisor)  │
-└───────────────────────────┘ └───────────────────────┘
+│       scheduler-mcp       │ │     aerial-ollama     │ │    aerial-proxy     │
+│  (Port 8080: Internal)    │ │ (Port 11434: Embed)   │ │ (Port 8089: Edge)   │
+└───────────────────────────┘ └───────────────────────┘ └──────────┬──────────┘
+               │                       │                           │
+┌───────────────────────────┐ ┌───────────────────────┐           │
+│      aerial-postgres      │ │   aerial-watchtower   │           ├─ / -> Dashboard
+│   (Port 5432: pgvector)   │ │ (GHCR CD Supervisor)  │           ├─ /docs -> Docsify
+└───────────────────────────┘ └───────────────────────┘           ├─ /conversations -> Agentsview
+               │                       │                          └─ /grafana -> Grafana
+┌──────────────────────────────────────────────────────────────────┐
+│              Full Observability & Telemetry Stack                │
+│  • cAdvisor (Container Metrics)   • Node Exporter (Host Metrics) │
+│  • VictoriaMetrics TSDB           • Grafana Dashboards           │
+│  • aerial-autoheal (Health Supervisor)                           │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -71,7 +79,7 @@ User configuration and persona rules live in your private configuration reposito
 
 1. **`config.yaml`** (Agent Options, Channel Policies, & MCP Tools):
    ```yaml
-   model: "Gemini 2.5 Flash"
+   model: "Gemini 3.7 Flash"
    timeout_minutes: 15
    timezone: "America/Los_Angeles"
    system_channel: "aerial-dev"
@@ -122,8 +130,8 @@ User configuration and persona rules live in your private configuration reposito
    - **Interaction Modes**:
      - `threads`: Direct messages or mentions spawn and route to a Discord thread (default).
      - `channel`: Messages are evaluated directly in-channel without spawning threads using a **Two-Tier Wake Model**:
-       - **Tier 1 (Direct Wake)**: Direct mentions (`@Aerial`), replies to Aerial, and keywords (`\b(aerial|gundam)\b`) trigger immediate wake and response.
-       - **Tier 2 (Ambient Relevance Scorer)**: Ambient messages are scored (0.0 to 1.0) by a fast classifier with the previous 10 messages of channel context against `ambient_wake_prompt`.
+       - **Tier 1 (Direct Wake)**: Direct mentions (`@Aerial`), replies to Aerial, and keywords (`(aerial|gundam)`) trigger immediate wake and response.
+       - **Tier 2 (Ambient Relevance Scorer)**: Ambient messages are scored (0.0 to 1.0) by a fast classifier (`Gemini 3.8 Flash (Low)`) with the previous 10 messages of channel context against `ambient_wake_prompt`.
        - **Native Lookback Transcripts**: Unaddressed ambient messages scoring below `ambient_wake_threshold` are silently appended to Antigravity's native `transcript.jsonl` without typing indicators or LLM execution, building conversational memory so Aerial has full context when subsequently woken.
      - `ignore` (or `disabled`): Channel is completely ignored (no messages evaluated, no startup sweeps).
    - **Channel-Level Configuration Options**:
@@ -145,13 +153,6 @@ User configuration and persona rules live in your private configuration reposito
    - **Normalized Lookups**: Channel names are normalized case-insensitively, strip leading `#`, and interoperate between spaces and hyphens (e.g., `#Dev Chat` resolves `dev-chat.md` or `dev chat.md`).
    - **Prompt Injection & Safety**: Instructions are framed inside `<CHANNEL_INSTRUCTIONS>` prior to `<USER_REQUEST>`, escaped against XML delimiter breakouts, capped at 64KB, and defended against directory traversal.
    - **Clean Default Fallback**: If no instructions file exists for a channel, Aerial cleanly omits the `<CHANNEL_INSTRUCTIONS>` block and relies on base `GEMINI.md` and `AGENTS.md` guidelines.
-   - **Example (`channels/dev-alerts.md`)**:
-     ```markdown
-     # Dev Alerts Channel Guidelines
-     - Focus strictly on CI/CD pipeline failures, production errors, and service health.
-     - Provide actionable remediation steps and relevant logs.
-     - Keep responses concise and technical.
-     ```
 
 ---
 
@@ -231,14 +232,15 @@ services:
 
 ---
 
-## 3. Continuous Deployment & Self-Improvement
+## 3. Continuous Deployment, GitOps & Self-Improvement
 
 Aerial uses an automated GitOps deployment and configuration pipeline:
 1. **GitHub Actions Matrix Builds**: Triggers dynamic matrix builds only for modified microservices and publishes them to GitHub Container Registry (`ghcr.io/azylman/aerial-*`).
-2. **Watchtower Supervisor**: Polls GHCR every 60 seconds out-of-band and performs zero-downtime rolling container updates.
+2. **Watchtower Supervisor**: Polls GHCR every 60 seconds out-of-band and performs zero-downtime rolling container updates across core services.
 3. **Dedicated GitSync Sidecar (`aerial-gitsync`)**: A dedicated background daemon holding read-write mounts on `/share/aerial-config` and `/share/aerial`, pulling updates via singleflight fast-forward syncs every 60s and exposing a `POST /sync` trigger.
-4. **Physical Immutability & Two-Phase PR Workflow**: The `aerial-brain` execution container mounts repositories strictly **read-only (`:ro`)**. When making configuration or skill adjustments, Aerial uses `scripts/aerial-config-pr.sh` to clone into an ephemeral `/dev/shm` scratch directory, run pre-flight syntax checks, push a branch, open a GitHub PR, verify CI, squash merge into `main`, and trigger fast-path sync via `aerial-gitsync`.
-5. **Core Engine Self-Improvement**: For changes to the Go monorepo (`azylman/aerial`), Aerial uses `.agents/skills/self-improvement/SKILL.md` to run local tests, commit, push a branch, and open a PR with required CI status checks.
+4. **Declarative GitOps Compose Reconciler**: Whenever repository updates are synchronized (periodically or via webhook), `aerial-gitsync` automatically pre-flight validates and executes `docker compose up -d` with strict timeouts and token sanitization, reconciling any topology changes declaratively without manual container intervention.
+5. **Physical Immutability & Two-Phase PR Workflow**: The `aerial-brain` execution container mounts repositories strictly **read-only (`:ro`)**. When making configuration or skill adjustments, Aerial uses `scripts/aerial-config-pr.sh` to clone into an ephemeral `/dev/shm` scratch directory, run pre-flight syntax checks, push a branch, open a GitHub PR, verify CI, squash merge into `main`, and trigger fast-path sync via `aerial-gitsync`.
+6. **Core Engine Self-Improvement**: For changes to the Go monorepo (`azylman/aerial`), Aerial uses `.agents/skills/self-improvement/SKILL.md` to run local tests and static analysis (`./scripts/verify.sh`), commit, push a branch, and open a PR with required CI status checks.
 
 ---
 
@@ -246,15 +248,22 @@ Aerial uses an automated GitOps deployment and configuration pipeline:
 
 | Service | Port | Description |
 | --- | --- | --- |
-| **`aerial-postgres`** | `5432` (Internal) | PostgreSQL 16 relational database with `pgvector` extension for state and vector memory. |
+| **`aerial-postgres`** | `5432` (Internal) | PostgreSQL 16 relational database with `pgvector` extension for state, CAS task queues, vector memory, and Grafana storage. |
 | **`aerial-brain`** | `8088` | Go execution daemon running `agy`, PostgreSQL memory, Discord funnel, and inotify file watcher. Mounted `:ro`. |
-| **`aerial-gitsync`** | `8080` (Internal) | Dedicated GitSync sidecar daemon managing automated repository synchronization and `/sync` webhooks. Mounted `:rw`. |
-| **`aerial-scheduler-mcp`**| `8080` (Internal) | PostgreSQL-backed cron and one-shot reminder management server. |
+| **`aerial-gitsync`** | `8080` (Internal) | Dedicated GitSync sidecar daemon managing automated repository synchronization, `/sync` webhooks, and declarative GitOps compose reconciliation. Mounted `:rw`. |
+| **`aerial-scheduler-mcp`**| `8080` (Internal) | PostgreSQL-backed cron and one-shot reminder management server over HTTP MCP. |
 | **`aerial-discord-mcp`** | `4001` | Outbound MCP server providing Discord messaging, thread creation, and channel tools. |
 | **`aerial-docker-mcp`** | `4002` | `supergateway` proxy wrapping official Docker MCP (`mcp/docker`) over the host socket. |
 | **`aerial-github-mcp`** | `4003` | `supergateway` proxy wrapping GitHub MCP server with PAT authentication. |
-| **`aerial-ollama`** | `11434` | Local LLM and embedding server for vector memory retrieval (`all-minilm:latest`). |
-| **`aerial-agentsview`** | `8089` | Web UI for visualizing agent transcripts, session history, and execution timelines. |
+| **`aerial-ollama`** | `11434` | Local LLM and embedding server for vector memory retrieval (`all-minilm:latest` / 384-dim). |
+| **`aerial-agentsview`** | `8089` (via proxy) | Web UI for visualizing agent transcripts, session history, and execution timelines. |
+| **`aerial-dashboard`** | `8089` (via proxy) | Status microservice serving Cyberpunk status HUD. |
+| **`aerial-docs`** | `8089` (via proxy) | Documentation engine rendering Markdown and Mermaid diagrams from config repo via Docsify. |
+| **`aerial-proxy`** | `8089` | Edge reverse proxy gateway routing traffic for `/` (HUD), `/docs` (Docsify), `/conversations` (Agentsview), and `/grafana` (Grafana). |
+| **`aerial-cadvisor`** | - (Internal) | cAdvisor container metrics collector gathering per-container CPU, memory, network, and disk telemetry. |
+| **`aerial-node-exporter`**| - (Internal) | Node Exporter host telemetry gathering host CPU loads, memory, storage, thermals, and network metrics. |
+| **`aerial-victoriametrics`**| - (Internal) | VictoriaMetrics single-node TSDB scraping Prometheus metrics from cAdvisor and Node Exporter with long-term retention. |
+| **`aerial-grafana`** | `8089` (via proxy) | Grafana visual dashboards serving system HUD & container metrics with PostgreSQL persistent backend and pre-provisioned dashboards. |
 | **`aerial-watchtower`** | - | Out-of-band continuous deployment supervisor polling GHCR every 60 seconds. |
 | **`aerial-autoheal`** | - | Health supervisor probing container healthchecks every 15s and auto-restarting unhealthy containers. |
 
@@ -299,7 +308,7 @@ AERIAL_CONFIG_REPO_URL=https://github.com/your-username/my-aerial-config.git
 ```bash
 docker compose up -d
 ```
-On boot, `aerial-brain` will automatically adopt or clone your private repository into `/share/aerial-config` using `GITHUB_PAT` and load your `config.yaml` settings.
+On boot, `aerial-brain` and `aerial-gitsync` will automatically adopt or clone your private repository into `/share/aerial-config` using `GITHUB_PAT` and load your `config.yaml` settings.
 
 ### Step 5: Authenticate via Google OAuth (Recommended)
 If using OAuth (with `GEMINI_API_KEY` commented out):
@@ -319,14 +328,19 @@ docker compose logs -f brain
 
 ---
 
-## 6. Operational Commands
+## 6. Operational Commands & Endpoints
 
-| Action | Command |
+| Action / Service | URL / Command |
 | --- | --- |
+| Status Dashboard (HUD) | `http://localhost:8089/` |
+| Documentation (Docsify) | `http://localhost:8089/docs/` |
+| Agent Transcripts (Agentsview) | `http://localhost:8089/conversations/` |
+| System Telemetry (Grafana) | `http://localhost:8089/grafana/` |
 | Start all services | `docker compose up -d` |
 | Stop all services | `docker compose down` |
 | View live logs | `docker compose logs -f` |
-| View transcripts & memory | `curl http://localhost:8088/api/transcripts` |
+| View transcripts & memory API | `curl http://localhost:8088/api/transcripts` |
+| Trigger GitSync & GitOps Reconcile | `curl -X POST http://localhost:8080/sync` |
 | Restart single service | `docker compose restart brain` |
 | Update images & rebuild | `docker compose build && docker compose up -d` |
 
@@ -336,8 +350,9 @@ docker compose logs -f brain
 
 - **Multi-User Security & Admin Privilege Enforcement**: In shared or multi-user channels, messages from users are automatically checked against `admin_users` in `config.yaml`. Only authorized admins (`is_admin: true`) can modify system instructions (`GEMINI.md`, `AGENTS.md`), edit system configuration (`config.yaml`), manage Docker containers, or alter cron schedules.
 - **Fail-Closed Default-Deny Server Containment**: Set `channels.default.mode: "ignore"` to contain Aerial exclusively to allowlisted channels on shared Discord servers.
-- **Zero Plaintext Tokens**: GitHub PATs are passed in-memory ephemerally and never written to `.git/config` on disk.
-- **Log Sanitization**: All subprocess logs are passed through regex sanitizers to mask sensitive tokens.
+- **Discord Funnel Hardening**: Thread ID deduplication recovery resolves Discord error 160004 race conditions seamlessly, and message staleness TTL is set to 30 minutes to prevent dropped messages during deployment bursts.
+- **Zero Plaintext Tokens**: GitHub PATs and database secrets are passed in-memory ephemerally and never written to `.git/config` on disk.
+- **Automated Token Redaction**: All subprocess logs, errors, and GitOps reconcile streams pass through multi-pattern token sanitizers to redact sensitive credentials.
 - **Never commit `.env`**: Secrets and tokens are strictly ignored by `.gitignore`.
 - **Restricted File Permissions**: Run `chmod 600 .env` on the host to protect credentials.
 - **Isolated Bridge Network**: All container-to-container traffic operates on the private `aerial-net` bridge network.
