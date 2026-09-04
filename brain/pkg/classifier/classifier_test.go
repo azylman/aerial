@@ -14,8 +14,8 @@ import (
 
 func TestClassifier_Defaults(t *testing.T) {
 	c := NewClassifier()
-	if c.Model != "3.8 Flash (Low)" {
-		t.Errorf("expected default model '3.8 Flash (Low)', got %q", c.Model)
+	if c.Model != "Gemini 3.8 Flash (Low)" {
+		t.Errorf("expected default model 'Gemini 3.8 Flash (Low)', got %q", c.Model)
 	}
 	if c.Timeout != 12*time.Second {
 		t.Errorf("expected default timeout 12s, got %v", c.Timeout)
@@ -698,7 +698,7 @@ func TestClassifier_NewAgyLLMFunc(t *testing.T) {
 	}
 
 	fn := NewAgyLLMFunc("agy", "test-key", mockRunner)
-	stdout, err := fn(context.Background(), "3.8 Flash (Low)", "test prompt")
+	stdout, err := fn(context.Background(), "Gemini 3.8 Flash (Low)", "test prompt")
 	if err != nil {
 		t.Fatalf("unexpected error from NewAgyLLMFunc: %v", err)
 	}
@@ -708,8 +708,8 @@ func TestClassifier_NewAgyLLMFunc(t *testing.T) {
 	if !strings.HasPrefix(capturedSessionID, "ambient-eval-") {
 		t.Errorf("expected ephemeral session ID prefix 'ambient-eval-', got %q", capturedSessionID)
 	}
-	if capturedModel != "3.8 Flash (Low)" {
-		t.Errorf("expected model '3.8 Flash (Low)', got %q", capturedModel)
+	if capturedModel != "Gemini 3.8 Flash (Low)" {
+		t.Errorf("expected model 'Gemini 3.8 Flash (Low)', got %q", capturedModel)
 	}
 }
 
