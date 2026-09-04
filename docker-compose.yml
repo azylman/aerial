@@ -500,9 +500,12 @@ services:
       - "-promscrape.config=/etc/victoriametrics/scrape.yml"
       - "-promscrape.configCheckInterval=15s"
       - "-retentionPeriod=${VICTORIAMETRICS_RETENTION_PERIOD:-5y}"
+    environment:
+      - HA_METRICS_TOKEN=${HA_METRICS_TOKEN:-}
     volumes:
       - aerial-victoriametrics-data:/victoria-metrics-data
       - ${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}/victoriametrics/scrape.yml:/etc/victoriametrics/scrape.yml:ro
+      - ${AERIAL_CONFIG_DIR:-/mnt/data/supervisor/share/aerial-config}/victoriametrics:/etc/victoriametrics/scrape.d:ro
     networks:
       - aerial-net
     healthcheck:
