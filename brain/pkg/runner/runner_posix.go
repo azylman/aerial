@@ -16,5 +16,5 @@ func configureSysProcAttr(cmd *exec.Cmd) {
 		}
 		return nil
 	}
-	cmd.WaitDelay = 2 * time.Second
+	cmd.WaitDelay = 3 * time.Second
 }

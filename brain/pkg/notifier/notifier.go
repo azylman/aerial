@@ -66,7 +66,12 @@ func GenerateDynamicNotification(agyBin, apiKey, contextDescription string) stri
 		return fallback
 	}
 
-	result := strings.TrimSpace(stdout)
+	resp, parseErr := runner.ParseAgyOutput(stdout)
+	if parseErr != nil {
+		return fallback
+	}
+
+	result := strings.TrimSpace(resp.Response)
 	result = strings.Trim(result, "\"'\n\r ")
 	if result == "" {
 		return fallback
