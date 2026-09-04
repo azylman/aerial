@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -967,5 +968,132 @@ func TestConnectDiscordFunnel_Registration(t *testing.T) {
 		t.Fatalf("Expected channel to be removed from cache on invalidation")
 	}
 }
+
+func TestIsThreadAlreadyExistsError(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		{
+			name:     "nil error",
+			err:      nil,
+			expected: false,
+		},
+		{
+			name: "discordgo RESTError with code 160004",
+			err: &discordgo.RESTError{
+				Message: &discordgo.APIErrorMessage{
+					Code:    160004,
+					Message: "A thread has already been created for this message",
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "discordgo RESTError with raw response body containing 160004",
+			err: &discordgo.RESTError{
+				ResponseBody: []byte(`{"message": "A thread has already been created for this message", "code": 160004}`),
+			},
+			expected: true,
+		},
+		{
+			name: "discordgo RESTError with 50001 Missing Access",
+			err: &discordgo.RESTError{
+				Message: &discordgo.APIErrorMessage{
+					Code:    50001,
+					Message: "Missing Access",
+				},
+			},
+			expected: false,
+		},
+		{
+			name:     "wrapped string error with 160004 code",
+			err:      errors.New("HTTP 400 Bad Request, code 160004: A thread has already been created for this message"),
+			expected: true,
+		},
+		{
+			name:     "generic system error",
+			err:      errors.New("network connection timeout"),
+			expected: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := isThreadAlreadyExistsError(tc.err)
+			if got != tc.expected {
+				t.Errorf("isThreadAlreadyExistsError() = %v; want %v", got, tc.expected)
+			}
+		})
+	}
+}
+
+func TestGetOrCreateThreadID_ThreadAlreadyExists(t *testing.T) {
+	setupTestConfig(t, `
+channels:
+  default:
+    mode: "threads"
+`)
+
+	messageID := "200300400500600701"
+	parentChanID := "200300400500600700"
+	guildID := "guild-alpha-1"
+
+	queue.InvalidateChannelCache(messageID)
+	defer queue.InvalidateChannelCache(messageID)
+
+	s, err := discordgo.New("Bot mock-token")
+	if err != nil {
+		t.Fatalf("Failed to create session: %v", err)
+	}
+
+	s.Client = &http.Client{
+		Transport: mockCatchUpRoundTripper(func(req *http.Request) (*http.Response, error) {
+			if strings.Contains(req.URL.Path, "/threads") {
+				errBody := []byte(`{"message": "A thread has already been created for this message", "code": 160004}`)
+				return &http.Response{
+					StatusCode: http.StatusBadRequest,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(bytes.NewReader(errBody)),
+				}, nil
+			}
+			return &http.Response{
+				StatusCode: http.StatusNotFound,
+				Body:       io.NopCloser(bytes.NewReader([]byte("{}"))),
+			}, nil
+		}),
+	}
+
+	_ = s.State.GuildAdd(&discordgo.Guild{ID: guildID})
+	_ = s.State.ChannelAdd(&discordgo.Channel{
+		ID:      parentChanID,
+		GuildID: guildID,
+		Name:    "feature-requests",
+		Type:    discordgo.ChannelTypeGuildText,
+	})
+
+	m := &discordgo.Message{
+		ID:        messageID,
+		ChannelID: parentChanID,
+		GuildID:   guildID,
+		Content:   "Build an automated test suite",
+		Author:    &discordgo.User{ID: "user-42", Username: "alex"},
+	}
+
+	targetID, isThread := getOrCreateThreadID(s, m)
+	if targetID != messageID || !isThread {
+		t.Fatalf("getOrCreateThreadID() = (%q, %t); want (%q, true)", targetID, isThread, messageID)
+	}
+
+	snap, ok := queue.GetCachedChannel(messageID)
+	if !ok {
+		t.Fatalf("Expected thread %q to be in queue cache", messageID)
+	}
+	if !snap.IsThread || snap.ParentID != parentChanID {
+		t.Errorf("Unexpected cached thread metadata: %+v", snap)
+	}
+}
+
 
 
