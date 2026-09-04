@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"os"
 	"strings"
@@ -16,6 +17,22 @@ func setupTestDB(t *testing.T) *sql.DB {
 	if dsn == "" {
 		dsn = "postgres://postgres:aerial_test@127.0.0.1:54329/aerial_test?sslmode=disable"
 	}
+
+	// Quick connectivity probe (200ms) to avoid multi-minute retry delays in offline test runners
+	quickDB, openErr := sql.Open("pgx", dsn)
+	if openErr != nil {
+		t.Skipf("Skipping integration test: database driver error: %v", openErr)
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	pingErr := quickDB.PingContext(ctx)
+	cancel()
+	_ = quickDB.Close()
+	if pingErr != nil {
+		t.Skipf("Skipping integration test: PostgreSQL not reachable at %s: %v", dsn, pingErr)
+		return nil
+	}
+
 	database, err := InitDB(dsn)
 	if err != nil {
 		t.Skipf("Skipping integration test: PostgreSQL not reachable at %s: %v", dsn, err)

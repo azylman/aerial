@@ -73,6 +73,23 @@ jobs:
     name: Run Service Unit Tests
     needs: changes
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: aerial_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: aerial_test_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgres://postgres:aerial_test_password@localhost:5432/aerial_test?sslmode=disable
+      TEST_DATABASE_URL: postgres://postgres:aerial_test_password@localhost:5432/aerial_test?sslmode=disable
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
