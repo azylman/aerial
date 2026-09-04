@@ -118,6 +118,7 @@ services:
     volumes:
       - ${AERIAL_CONFIG_DIR:-/mnt/data/supervisor/share/aerial-config}:/share/aerial-config:rw
       - ${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}:/share/aerial:rw
+      - /var/run/docker.sock:/var/run/docker.sock
     networks:
       - aerial-net
     healthcheck:
