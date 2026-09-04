@@ -502,7 +502,7 @@ services:
       - "-downsampling.period=${VICTORIAMETRICS_DOWNSAMPLING_PERIOD:-30d:5m,180d:1h}"
     volumes:
       - aerial-victoriametrics-data:/victoria-metrics-data
-      - ./victoriametrics/scrape.yml:/etc/victoriametrics/scrape.yml:ro
+      - ${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}/victoriametrics/scrape.yml:/etc/victoriametrics/scrape.yml:ro
     networks:
       - aerial-net
     healthcheck:
@@ -548,8 +548,8 @@ services:
       - GF_AUTH_ANONYMOUS_HIDE_VERSION=true
       - GF_PANELS_DISABLE_SANITIZE_HTML=true
     volumes:
-      - ./grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - ${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}/grafana/dashboards:/var/lib/grafana/dashboards:ro
     networks:
       - aerial-net
     healthcheck:
