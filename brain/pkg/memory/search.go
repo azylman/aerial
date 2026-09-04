@@ -139,12 +139,11 @@ func RetrieveRelevantFacts(ctx context.Context, database *sql.DB, client *Client
 		return nil, nil
 	}
 
-	allFacts, err := db.GetAllFactsWithEmbeddings(database)
+	// Native vector search in PostgreSQL using HNSW index and pgvector
+	ranked, err := db.SearchSimilarFacts(database, queryVector, maxFacts, DefaultMinScoreThreshold, "")
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch facts from db: %w", err)
+		return nil, fmt.Errorf("failed to search similar facts: %w", err)
 	}
-
-	ranked := RankFacts(queryVector, allFacts, DefaultMinScoreThreshold, maxFacts)
 	return ranked, nil
 }
 

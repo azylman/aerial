@@ -2,7 +2,7 @@
 
 An autonomous personal AI assistant system running natively on Docker, named after Gundam Aerial.
 
-Aerial provides a multi-agent, tool-enabled AI assistant accessible via Discord and HTTP API, with persistent multi-turn SQLite memory, GitHub operations, host Docker infrastructure inspection, and an extensible architecture for custom skills, MCP tools, and sidecar containers.
+Aerial provides a multi-agent, tool-enabled AI assistant accessible via Discord and HTTP API, with persistent multi-turn PostgreSQL & pgvector memory, GitHub operations, host Docker infrastructure inspection, and an extensible architecture for custom skills, MCP tools, and sidecar containers.
 
 ---
 
@@ -24,9 +24,9 @@ Aerial uses a decoupled **Two-Repository Architecture**:
 │  • Headless Antigravity Agent Engine (agy)                                  │
 │  • Read-Only Kernel Mounts (/share/aerial-config:ro, /share/aerial:ro)      │
 │  • Recursive File Watcher (fsnotify) with Hot-Reloading & LKGC Fallback     │
-│  • SQLite Multi-Turn Thread Memory (/data/aerial.db)                        │
+│  • PostgreSQL Multi-Turn Thread Memory & CAS Task State                     │
 │  • Dynamic Built-in & User Custom Skills Discovery                          │
-│  • Semantic Memory Vector Embeddings via Ollama (all-minilm:latest)         │
+│  • Semantic Memory Native pgvector RAG (HNSW Cosine ops / 384-dim)          │
 └─────────────────────────────────────────────────────────────────────────────┘
                │                       │                      │
 ┌───────────────────────────┐ ┌───────────────────────┐ ┌─────────────────────┐
@@ -246,9 +246,10 @@ Aerial uses an automated GitOps deployment and configuration pipeline:
 
 | Service | Port | Description |
 | --- | --- | --- |
-| **`aerial-brain`** | `8088` | Go execution daemon running `agy`, SQLite memory, Discord funnel, and inotify file watcher. Mounted `:ro`. |
+| **`aerial-postgres`** | `5432` (Internal) | PostgreSQL 16 relational database with `pgvector` extension for state and vector memory. |
+| **`aerial-brain`** | `8088` | Go execution daemon running `agy`, PostgreSQL memory, Discord funnel, and inotify file watcher. Mounted `:ro`. |
 | **`aerial-gitsync`** | `8080` (Internal) | Dedicated GitSync sidecar daemon managing automated repository synchronization and `/sync` webhooks. Mounted `:rw`. |
-| **`aerial-scheduler-mcp`**| `8080` (Internal) | SQLite-backed cron and one-shot reminder management server. |
+| **`aerial-scheduler-mcp`**| `8080` (Internal) | PostgreSQL-backed cron and one-shot reminder management server. |
 | **`aerial-discord-mcp`** | `4001` | Outbound MCP server providing Discord messaging, thread creation, and channel tools. |
 | **`aerial-docker-mcp`** | `4002` | `supergateway` proxy wrapping official Docker MCP (`mcp/docker`) over the host socket. |
 | **`aerial-github-mcp`** | `4003` | `supergateway` proxy wrapping GitHub MCP server with PAT authentication. |
