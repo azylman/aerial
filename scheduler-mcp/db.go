@@ -35,20 +35,36 @@ type OneShotSchedule struct {
 }
 
 func GetDBPath() string {
+	if testURL := os.Getenv("TEST_DATABASE_URL"); testURL != "" {
+		return testURL
+	}
 	if envURL := os.Getenv("DATABASE_URL"); envURL != "" {
 		return envURL
 	}
 	if envPath := os.Getenv("DB_PATH"); envPath != "" {
 		return envPath
 	}
-	if _, err := os.Stat("/data"); err == nil {
-		return "/data/aerial.db"
+	dbUser := os.Getenv("POSTGRES_USER")
+	if dbUser == "" {
+		dbUser = "aerial"
 	}
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return "./aerial.db"
+	dbPass := os.Getenv("POSTGRES_PASSWORD")
+	if dbPass == "" {
+		dbPass = "aerial_secure_pass"
 	}
-	return filepath.Join(homeDir, ".gemini", "aerial.db")
+	dbHost := os.Getenv("POSTGRES_HOST")
+	if dbHost == "" {
+		dbHost = "postgres"
+	}
+	dbPort := os.Getenv("POSTGRES_PORT")
+	if dbPort == "" {
+		dbPort = "5432"
+	}
+	dbName := os.Getenv("POSTGRES_DB")
+	if dbName == "" {
+		dbName = "aerial"
+	}
+	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", dbUser, dbPass, dbHost, dbPort, dbName)
 }
 
 func isPostgres(database *sql.DB) bool {

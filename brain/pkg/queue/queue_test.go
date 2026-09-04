@@ -1314,7 +1314,7 @@ func TestQueueSilentSentinelSuppression(t *testing.T) {
 	}
 	mu.Unlock()
 
-	// Verify message in SQLite is COMPLETED
+	// Verify message in DB is COMPLETED
 	dbMsg, err := db.GetMessage(database, "msg-sentinel-1")
 	if err != nil || dbMsg == nil {
 		t.Fatalf("Failed to query message: %v", err)
@@ -1418,7 +1418,7 @@ func TestQueueBurstCoalescing(t *testing.T) {
 		t.Errorf("Expected message 3 (%s) in coalesced prompt, got: %s", expectedM3, capturedPrompt)
 	}
 
-	// 2. Verify all messages marked COMPLETED in SQLite
+	// 2. Verify all messages marked COMPLETED in DB
 	for _, id := range []string{"m-b-1", "m-b-2", "m-b-3"} {
 		m, err := db.GetMessage(database, id)
 		if err != nil || m == nil || m.Status != db.StatusCompleted {
@@ -2595,7 +2595,7 @@ func TestProcessBurst_MixedBurst(t *testing.T) {
 		t.Errorf("Expected Ambient1 to be appended to transcript.jsonl, got:\n%s", string(data))
 	}
 
-	// Verify SQLite statuses
+	// Verify DB statuses
 	m1Saved, _ := db.GetMessage(database, "msg-mixed-1")
 	if m1Saved == nil || m1Saved.Status != db.StatusCompleted || !strings.Contains(m1Saved.ErrorMessage, "[AMBIENT score=") {
 		t.Errorf("Expected msg1 to be COMPLETED with [AMBIENT score=...], got: %+v", m1Saved)
@@ -2774,7 +2774,7 @@ func TestProcessBurst_SessionRotationBeforeLeadingAmbient(t *testing.T) {
 		t.Errorf("Expected RunnerFunc to be called with empty session ID on rotated turn, got %q", passedSessID)
 	}
 
-	// Verify that Ambient1 was NOT written to the old session directory, but marked COMPLETED in SQLite!
+	// Verify that Ambient1 was NOT written to the old session directory, but marked COMPLETED in DB!
 	oldSessDir, _ := session.EnsureSessionDir(initialSessionID)
 	oldTranscriptPath := filepath.Join(oldSessDir, ".system_generated", "logs", "transcript.jsonl")
 	dataOld, _ := os.ReadFile(oldTranscriptPath)

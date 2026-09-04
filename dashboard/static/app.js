@@ -163,7 +163,7 @@ function renderActiveTasks(tasks) {
                     <span class="pulse-dot healthy"></span>
                     <span>ALL WORKERS IDLE // NO PENDING TURNS</span>
                 </div>
-                <div>DISPATCH POLLING SQLITE QUEUE (1s)</div>
+                <div>DISPATCH POLLING QUEUE (1s)</div>
             </div>
         `;
         return;

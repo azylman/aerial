@@ -9,12 +9,16 @@ Aerial runs as a multi-container Docker stack supervised by Watchtower and Autoh
 - **Execution Brain (`aerial-brain`)**:
   - Headless Antigravity CLI (`agy`) execution runner with multi-turn conversation memory.
   - Integrated Discord Gateway event funnel capturing mentions and thread messages.
-  - In-memory serialized thread worker pool with SQLite WAL state persistence (`/data/aerial.db`).
+  - In-memory serialized thread worker pool with PostgreSQL 16 and pgvector state persistence.
   - Kernel-enforced read-only filesystem mounts on `/share/aerial-config:ro` and `/share/aerial:ro` with `shm_size: 512mb` to prevent unpushed repository corruption.
   - Automatic turn-end Markdown output delivery directly to the active Discord thread.
   - In-process file watcher dynamically hot-reloading rules, skills, and configuration without process restarts.
   - Background scheduler monitor evaluating recurring crons and one-shot reminders every 30 seconds.
   - Semantic memory RAG subsystem extracting conversation facts and querying embeddings via Ollama.
+
+- **Persistence Layer (`aerial-postgres`)**:
+  - PostgreSQL 16 relational database with `pgvector` extension.
+  - Centralized store for Discord messages, session tracking, atomic task queues, recurring and one-shot schedules, and semantic memory facts with 384-dimensional vector embeddings.
 
 - **Infrastructure & Git Synchronization (`aerial-gitsync`)**:
   - Dedicated sidecar container holding read-write (`:rw`) volume mounts on `/share/aerial-config` and `/share/aerial`.
@@ -22,7 +26,7 @@ Aerial runs as a multi-container Docker stack supervised by Watchtower and Autoh
   - Fast-forward pulls with safe reset recovery to `FETCH_HEAD`, keeping running code cleanly decoupled from the execution engine.
 
 - **Outbound Model Context Protocol (MCP) Microservices (`aerial-net`)**:
-  - `scheduler-mcp`: SQLite-backed recurring cron and one-shot reminder management.
+  - `scheduler-mcp`: PostgreSQL-backed recurring cron and one-shot reminder management.
   - `discord-mcp`: Outbound Discord API operations (history, thread creation, channel management).
   - `docker-mcp`: Docker host daemon diagnostics and container inspection.
   - `github-mcp`: GitHub API and repository operations.
@@ -121,8 +125,4 @@ Aerial operates on a strict **Two-Repository Separation of Concerns**:
 10. **Default Tone**:
     - Succinct, direct, and helpful. Avoid corporate fluff, robotic hedging, or obsequiousness (used only as fallback if `AGENTS.md` is absent).
     - **Zero Validation-Seeking**: Completely banish corporate subservience. Never say *"I hope this helps!"*, *"Does that look good?"*, or *"Let me know if you need anything else!"* The work speaks for itself.
-
-11. **Silent Multi-Step Execution (No Self-Narration / Task Chatter)**:
-    - The user only receives the final result message so do not bother to send intermediate status updates.
-    - When executing multi-step tool calls, commands, or background tasks, NEVER emit intermediate play-by-play status chatter (*"I have initiated a search..."*, *"I will review results when the task finishes..."*). Execute intermediate tool steps completely silently and deliver strictly the final substantive answer or deliverable.
 

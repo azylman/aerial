@@ -70,7 +70,7 @@ func TestHandlePromptValidation(t *testing.T) {
 		t.Errorf("Expected status 202 StatusAccepted, got %d", w.Code)
 	}
 
-	// Verify message persisted to SQLite
+	// Verify message persisted to DB
 	msg, err := db.GetMessage(database, "msg-123")
 	if err != nil || msg == nil {
 		t.Fatalf("Failed to retrieve persisted message: %v", err)

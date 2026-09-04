@@ -1278,7 +1278,7 @@ func runnerIsTransient(errDetail string) bool {
 	return isTransient
 }
 
-// RecoverInterrupted resumes all PENDING and PROCESSING messages from SQLite on startup in chronological order.
+// RecoverInterrupted resumes all PENDING and PROCESSING messages from the database on startup in chronological order.
 // If a message in PROCESSING has retry_count >= 3 (poison pill), it is not re-enqueued;
 // instead, a poison pill notification is sent and the message is marked FAILED.
 func RecoverInterrupted(database *sql.DB, pool *WorkerPool) {

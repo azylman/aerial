@@ -250,7 +250,7 @@ func TestDefaultHistoryFetcher_NonSnowflakeFallback(t *testing.T) {
 		ThreadID:   "chan-test",
 		AuthorID:   "user-1",
 		AuthorName: "Alice",
-		Content:    "Hello from SQLite 1",
+		Content:    "Hello from database 1",
 		CreatedAt:  now.Add(-20 * time.Minute),
 	})
 	if err != nil {
@@ -277,9 +277,9 @@ func TestDefaultHistoryFetcher_NonSnowflakeFallback(t *testing.T) {
 	}
 
 	if len(history) != 2 {
-		t.Fatalf("expected 2 messages from SQLite, got %d", len(history))
+		t.Fatalf("expected 2 messages from database, got %d", len(history))
 	}
-	if history[0].AuthorName != "Alice" || history[0].Role != "User" || history[0].Content != "Hello from SQLite 1" {
+	if history[0].AuthorName != "Alice" || history[0].Role != "User" || history[0].Content != "Hello from database 1" {
 		t.Errorf("unexpected message 0: %+v", history[0])
 	}
 	if history[1].AuthorName != "MusicBot" || history[1].Role != "Bot" || history[1].Content != "Playing track" {
@@ -385,11 +385,11 @@ func TestDefaultHistoryFetcher_DiscordAPIErrorFallback(t *testing.T) {
 
 	now := time.Now().UTC()
 	err = db.InsertMessage(database, db.Message{
-		ID:         "msg-sqlite-1",
+		ID:         "msg-db-1",
 		ThreadID:   "123456789012345678",
 		AuthorID:   "user-1",
 		AuthorName: "Bob",
-		Content:    "Fallback message from SQLite",
+		Content:    "Fallback message from database",
 		CreatedAt:  now.Add(-5 * time.Minute),
 	})
 	if err != nil {
@@ -414,7 +414,7 @@ func TestDefaultHistoryFetcher_DiscordAPIErrorFallback(t *testing.T) {
 	if len(history) != 1 {
 		t.Fatalf("expected 1 fallback message, got %d", len(history))
 	}
-	if history[0].Content != "Fallback message from SQLite" || history[0].AuthorName != "Bob" {
+	if history[0].Content != "Fallback message from database" || history[0].AuthorName != "Bob" {
 		t.Errorf("unexpected fallback message content: %+v", history[0])
 	}
 }
