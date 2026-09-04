@@ -26,6 +26,20 @@ import (
 	"github.com/google/uuid"
 )
 
+func mockJSONResponse(convID, responseText string) string {
+	if convID == "" {
+		convID = "sess-" + uuid.New().String()
+	}
+	payload, _ := json.Marshal(map[string]interface{}{
+		"conversation_id":  convID,
+		"status":           "SUCCESS",
+		"response":         responseText,
+		"duration_seconds": 1.0,
+		"num_turns":        1,
+	})
+	return string(payload)
+}
+
 func TestQueueSuccessLifecycleAndSessionSaving(t *testing.T) {
 	database, err := db.InitDB(":memory:")
 	if err != nil {
@@ -54,7 +68,7 @@ func TestQueueSuccessLifecycleAndSessionSaving(t *testing.T) {
 			_ = os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte(`{"step_index":0}`+"\n"), 0644)
 			now := time.Now()
 			_ = os.Chtimes(sessDir, now, now)
-			return "Clean output response", "", 0, nil
+			return mockJSONResponse("session-uuid-123", "Clean output response"), "", 0, nil
 		},
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
 			mu.Lock()
@@ -150,7 +164,7 @@ func TestQueueMultiThreadConcurrencyAndSingleThreadFIFO(t *testing.T) {
 			mu.Lock()
 			executionOrder = append(executionOrder, prompt+"_end")
 			mu.Unlock()
-			return "OK", "", 0, nil
+			return mockJSONResponse("", "OK"), "", 0, nil
 		},
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
 			return nil
@@ -238,7 +252,7 @@ func TestQueueTransientRetryPreservesSession(t *testing.T) {
 			if curAttempt < 3 {
 				return "", "Error 503: high demand unavailable", 1, fmt.Errorf("503")
 			}
-			return "Success after retries!", "", 0, nil
+			return mockJSONResponse("session-transient-123", "Success after retries!"), "", 0, nil
 		},
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
 			return nil
@@ -316,7 +330,7 @@ func TestQueueSessionCorruptionRecovery(t *testing.T) {
 			_ = os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte(`{"step_index":0}`+"\n"), 0644)
 			now := time.Now()
 			_ = os.Chtimes(sessDir, now, now)
-			return "Clean output after session reset", "", 0, nil
+			return mockJSONResponse("fresh-uuid-999", "Clean output after session reset"), "", 0, nil
 		},
 		NotifierFunc: func(agyBin, apiKey, contextDescription string) string {
 			return "I refreshed our conversation! ???"
@@ -458,7 +472,7 @@ func TestRecoverInterrupted(t *testing.T) {
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    1,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
-			return "OK", "", 0, nil
+			return mockJSONResponse("", "OK"), "", 0, nil
 		},
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
 			return nil
@@ -540,7 +554,7 @@ func TestRecoverInterruptedPoisonPill(t *testing.T) {
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    1,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
-			return "OK", "", 0, nil
+			return mockJSONResponse("", "OK"), "", 0, nil
 		},
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
 			mu.Lock()
@@ -609,7 +623,7 @@ func TestQueueSkipDiscordLogic(t *testing.T) {
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    1,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
-			return "AI reply for " + prompt, "", 0, nil
+			return mockJSONResponse("", "AI reply for " + prompt), "", 0, nil
 		},
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
 			mu.Lock()
@@ -709,7 +723,7 @@ func TestWorkerPoolUpdateRuntimeConfig(t *testing.T) {
 			receivedModel = model
 			receivedTimeout = timeoutMinutes
 			mu.Unlock()
-			return "OK", "", 0, nil
+			return mockJSONResponse("", "OK"), "", 0, nil
 		},
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
 			return nil
@@ -778,7 +792,7 @@ func TestQueueScheduleRunLifecycle_Success(t *testing.T) {
 		MaxAttempts:    1,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
 			time.Sleep(10 * time.Millisecond)
-			return "Success output", "", 0, nil
+			return mockJSONResponse("", "Success output"), "", 0, nil
 		},
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
 			return nil
@@ -1125,7 +1139,7 @@ func TestWorkerPool_InjectsSemanticMemoryFacts(t *testing.T) {
 
 	mockRunner := func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
 		capturedPrompt = prompt
-		return "Response text", "", 0, nil
+		return mockJSONResponse("", "Response text"), "", 0, nil
 	}
 
 	pool := NewWorkerPool(WorkerPoolConfig{
@@ -1195,7 +1209,7 @@ func TestWorkerPool_SemanticMemoryGracefulFallbackOnError(t *testing.T) {
 
 	mockRunner := func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
 		capturedPrompt = prompt
-		return "Response text", "", 0, nil
+		return mockJSONResponse("", "Response text"), "", 0, nil
 	}
 
 	pool := NewWorkerPool(WorkerPoolConfig{
@@ -1259,7 +1273,7 @@ func TestQueueSilentSentinelSuppression(t *testing.T) {
 			return nil, nil
 		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
-			return "[NO_REPLY]", "", 0, nil
+			return mockJSONResponse("", "[NO_REPLY]"), "", 0, nil
 		},
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
 			mu.Lock()
@@ -1338,7 +1352,7 @@ func TestQueueBurstCoalescing(t *testing.T) {
 			mu.Lock()
 			capturedPrompt = prompt
 			mu.Unlock()
-			return "Coalesced reply from agent", "", 0, nil
+			return mockJSONResponse("", "Coalesced reply from agent"), "", 0, nil
 		},
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
 			mu.Lock()
@@ -1442,7 +1456,7 @@ func TestQueueStalenessDrop(t *testing.T) {
 			mu.Lock()
 			runnerCalls++
 			mu.Unlock()
-			return "Should not run", "", 0, nil
+			return mockJSONResponse("", "Should not run"), "", 0, nil
 		},
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
 			mu.Lock()
@@ -1539,8 +1553,11 @@ func TestQueueTurnCountSessionRotation(t *testing.T) {
 			return nil, nil
 		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			if sessionID == "" {
+				sessionID = "sess-turn-" + uuid.New().String()
+			}
 			stderr = fmt.Sprintf("Starting conversation update stream for %s\n", sessionID)
-			return "OK response", stderr, 0, nil
+			return mockJSONResponse(sessionID, "OK response"), stderr, 0, nil
 		},
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
 			return nil
@@ -1641,7 +1658,7 @@ func TestQueueTypingIndicatorPolicies(t *testing.T) {
 			return nil, nil
 		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
-			return "OK", "", 0, nil
+			return mockJSONResponse("", "OK"), "", 0, nil
 		},
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
 			return nil
@@ -1753,7 +1770,7 @@ func TestQueueIgnoredChannelPolicy(t *testing.T) {
 			mu.Lock()
 			runnerCalls++
 			mu.Unlock()
-			return "Should not execute", "", 0, nil
+			return mockJSONResponse("", "Should not execute"), "", 0, nil
 		},
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
 			mu.Lock()
@@ -1825,7 +1842,7 @@ func TestQueueIgnoredChannelPolicy_NilCallback(t *testing.T) {
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    1,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			return "Should not execute", "", 0, nil
+			return mockJSONResponse("", "Should not execute"), "", 0, nil
 		},
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
 			return nil
@@ -1910,7 +1927,7 @@ func TestQueueThreadInheritsParentChannelPolicy(t *testing.T) {
 			mu.Lock()
 			runnerCalls++
 			mu.Unlock()
-			return "Should not execute", "", 0, nil
+			return mockJSONResponse("", "Should not execute"), "", 0, nil
 		},
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
 			return nil
@@ -1983,7 +2000,7 @@ func TestQueueHTTPClient_NotDroppedByDefaultDenyIgnore(t *testing.T) {
 			mu.Lock()
 			runnerCalls++
 			mu.Unlock()
-			return "HTTP prompt execution response", "", 0, nil
+			return mockJSONResponse("", "HTTP prompt execution response"), "", 0, nil
 		},
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
 			return nil
@@ -2078,7 +2095,7 @@ func TestProcessBurst_PureAmbient(t *testing.T) {
 			mu.Lock()
 			runnerCalls++
 			mu.Unlock()
-			return "Should not run", "", 0, nil
+			return mockJSONResponse("", "Should not run"), "", 0, nil
 		},
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
 			mu.Lock()
@@ -2204,7 +2221,7 @@ func TestProcessBurst_Tier1Wake(t *testing.T) {
 			mu.Lock()
 			runnerCalls++
 			mu.Unlock()
-			return "I am Aerial, here to help!", "", 0, nil
+			return mockJSONResponse("", "I am Aerial, here to help!"), "", 0, nil
 		},
 		DeliveryFunc: func(sess *discordgo.Session, channelID, text string) error {
 			mu.Lock()
@@ -2308,7 +2325,7 @@ func TestProcessBurst_Tier2Wake(t *testing.T) {
 			mu.Lock()
 			runnerCalls++
 			mu.Unlock()
-			return "All systems operational.", "", 0, nil
+			return mockJSONResponse("", "All systems operational."), "", 0, nil
 		},
 		DeliveryFunc: func(sess *discordgo.Session, channelID, text string) error {
 			mu.Lock()
@@ -2413,7 +2430,7 @@ func TestProcessBurst_MixedBurst(t *testing.T) {
 			runnerCalls++
 			receivedPrompt = prompt
 			mu.Unlock()
-			return "Done deploying!", "", 0, nil
+			return mockJSONResponse("", "Done deploying!"), "", 0, nil
 		},
 		DeliveryFunc: func(sess *discordgo.Session, channelID, text string) error {
 			return nil
@@ -2606,7 +2623,7 @@ func TestProcessBurst_SessionRotationBeforeLeadingAmbient(t *testing.T) {
 			runnerCalls++
 			passedSessID = sessID
 			mu.Unlock()
-			return "I am answering your question!", "", 0, nil
+			return mockJSONResponse("sess-rot-1", "I am answering your question!"), "", 0, nil
 		},
 		DeliveryFunc: func(sess *discordgo.Session, channelID, text string) error {
 			return nil
@@ -2707,7 +2724,7 @@ func TestProcessBurst_TrailingAmbient(t *testing.T) {
 			runnerCalls++
 			receivedPrompt = prompt
 			mu.Unlock()
-			return "Aerial answer", "", 0, nil
+			return mockJSONResponse(sessionID, "Aerial answer"), "", 0, nil
 		},
 		DeliveryFunc: func(sess *discordgo.Session, channelID, text string) error {
 			return nil
@@ -2805,7 +2822,7 @@ func TestProcessBurst_CustomAmbientWakePrompt(t *testing.T) {
 			mu.Lock()
 			runnerCalls++
 			mu.Unlock()
-			return "Aviation response", "", 0, nil
+			return mockJSONResponse("", "Aviation response"), "", 0, nil
 		},
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
 			return nil
@@ -3117,7 +3134,7 @@ func TestProcessBurst_ChannelInstructionsInjection(t *testing.T) {
 			mu.Lock()
 			capturedPrompt = prompt
 			mu.Unlock()
-			return "Success", "", 0, nil
+			return mockJSONResponse("", "Success"), "", 0, nil
 		},
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
 			return nil
@@ -3200,7 +3217,7 @@ func TestProcessBurst_ChannelInstructionsThreadInheritance(t *testing.T) {
 			mu.Lock()
 			capturedPrompt = prompt
 			mu.Unlock()
-			return "Success", "", 0, nil
+			return mockJSONResponse("", "Success"), "", 0, nil
 		},
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
 			return nil
@@ -3279,7 +3296,7 @@ func TestProcessBurst_NoDuplicationOnRetry(t *testing.T) {
 				// Simulate transient failure on attempt 1
 				return "", "Error 503: high demand unavailable", 1, nil
 			}
-			return "Success on retry", "", 0, nil
+			return mockJSONResponse("session-retry-123", "Success on retry"), "", 0, nil
 		},
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
 			return nil
@@ -3343,7 +3360,7 @@ func TestProcessBurst_Tier1PreScan_SkipsClassifier(t *testing.T) {
 		Classifier: cls,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			runnerCalls++
-			return "Hello there!", "", 0, nil
+			return mockJSONResponse("", "Hello there!"), "", 0, nil
 		},
 		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
 			return config.ChannelPolicy{
@@ -3413,7 +3430,7 @@ func TestProcessBurst_CoalescedAmbientBurst(t *testing.T) {
 		Classifier: cls,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			runnerCalls++
-			return "I can help with that database error!", "", 0, nil
+			return mockJSONResponse("", "I can help with that database error!"), "", 0, nil
 		},
 		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
 			return config.ChannelPolicy{
@@ -3484,7 +3501,7 @@ func TestProcessBurst_GhostSessionRecovery(t *testing.T) {
 			runnerCalls++
 			mu.Unlock()
 			stderr := "warning: conversation \"stale-ghost-uuid\" not found\nStarting conversation update stream for real-new-uuid\n"
-			return "Hello! I am ready to help.", stderr, 0, nil
+			return mockJSONResponse("real-new-uuid", "Hello! I am ready to help."), stderr, 0, nil
 		},
 		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
 			return config.ChannelPolicy{
@@ -3553,7 +3570,7 @@ func TestProcessBurst_MultiTurnContinuity_AfterRecovery(t *testing.T) {
 			receivedSessionIDs = append(receivedSessionIDs, sessionID)
 			mu.Unlock()
 			stderr := "warning: conversation \"stale-ghost-uuid\" not found\nStarting conversation update stream for real-new-uuid\n"
-			return "Clean reply", stderr, 0, nil
+			return mockJSONResponse("real-new-uuid", "Clean reply"), stderr, 0, nil
 		},
 		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
 			return config.ChannelPolicy{
@@ -3623,7 +3640,7 @@ func TestProcessBurst_ColdChannel_NoStubDirectory(t *testing.T) {
 		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			runnerCalls++
-			return "", "", 0, nil
+			return mockJSONResponse("", ""), "", 0, nil
 		},
 		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
 			return config.ChannelPolicy{
@@ -3721,7 +3738,7 @@ func TestProcessBurst_Turn1ContextInjection(t *testing.T) {
 			receivedSessionIDs = append(receivedSessionIDs, sessID)
 			mu.Unlock()
 			stderr := "Starting conversation update stream for warm-uuid-hist\n"
-			return "Answering wake question!", stderr, 0, nil
+			return mockJSONResponse("warm-uuid-hist", "Answering wake question!"), stderr, 0, nil
 		},
 		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
 			return config.ChannelPolicy{
@@ -3837,9 +3854,9 @@ func TestProcessBurst_SessionRotation_ResetsToColdState(t *testing.T) {
 			if callNum == 1 {
 				// Turn 1 mints genuine session
 				stderr := "Starting conversation update stream for sess-rot-1\n"
-				return "Turn 1 answer", stderr, 0, nil
+				return mockJSONResponse("sess-rot-1", "Turn 1 answer"), stderr, 0, nil
 			}
-			return "Subsequent turn answer", "", 0, nil
+			return mockJSONResponse("sess-rot-1", "Subsequent turn answer"), "", 0, nil
 		},
 		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
 			return config.ChannelPolicy{

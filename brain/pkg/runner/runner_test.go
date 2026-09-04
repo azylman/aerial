@@ -7,6 +7,69 @@ import (
 	"time"
 )
 
+func TestParseAgyOutput(t *testing.T) {
+	tests := []struct {
+		name        string
+		stdout      string
+		wantErr     bool
+		wantConvID  string
+		wantStatus  string
+		wantResp    string
+		wantTokens  int
+	}{
+		{
+			name:        "Valid Success Response",
+			stdout:      `{"conversation_id":"11111111-2222-3333-4444-555555555555","status":"SUCCESS","response":"Hello world!","duration_seconds":1.25,"num_turns":1,"usage":{"total_tokens":42}}`,
+			wantErr:     false,
+			wantConvID:  "11111111-2222-3333-4444-555555555555",
+			wantStatus:  "SUCCESS",
+			wantResp:    "Hello world!",
+			wantTokens:  42,
+		},
+		{
+			name:        "Valid Error Response",
+			stdout:      `{"conversation_id":"11111111-2222-3333-4444-555555555555","status":"ERROR","error":"context window exceeded","duration_seconds":0.5}`,
+			wantErr:     false,
+			wantConvID:  "11111111-2222-3333-4444-555555555555",
+			wantStatus:  "ERROR",
+			wantResp:    "",
+		},
+		{
+			name:        "Empty Stdout",
+			stdout:      "",
+			wantErr:     true,
+		},
+		{
+			name:        "Invalid JSON",
+			stdout:      "plain text without json formatting",
+			wantErr:     true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp, err := ParseAgyOutput(tt.stdout)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("ParseAgyOutput() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if !tt.wantErr {
+				if resp.ConversationID != tt.wantConvID {
+					t.Errorf("ConversationID = %q, want %q", resp.ConversationID, tt.wantConvID)
+				}
+				if resp.Status != tt.wantStatus {
+					t.Errorf("Status = %q, want %q", resp.Status, tt.wantStatus)
+				}
+				if resp.Response != tt.wantResp {
+					t.Errorf("Response = %q, want %q", resp.Response, tt.wantResp)
+				}
+				if tt.wantTokens > 0 && resp.Usage.TotalTokens != tt.wantTokens {
+					t.Errorf("TotalTokens = %d, want %d", resp.Usage.TotalTokens, tt.wantTokens)
+				}
+			}
+		})
+	}
+}
+
 func TestIsSilentSentinel(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -55,67 +118,79 @@ func TestClassifyError(t *testing.T) {
 		errDetailMustContain string
 	}{
 		{
-			name:          "Clean Success",
+			name:          "Clean Success With JSON Envelope",
 			exitCode:      0,
-			stdout:        "Hello there!",
+			stdout:        `{"conversation_id":"abc","status":"SUCCESS","response":"Hello there!"}`,
 			stderr:        "",
 			wantFailure:   false,
 			wantTransient: false,
 			wantCorrupt:   false,
 		},
 		{
-			name:          "Clean Success With Empty Stdout",
+			name:          "Clean Success With [NO_REPLY] In JSON Response",
 			exitCode:      0,
-			stdout:        "",
+			stdout:        `{"conversation_id":"abc","status":"SUCCESS","response":"[NO_REPLY]"}`,
 			stderr:        "",
 			wantFailure:   false,
 			wantTransient: false,
 			wantCorrupt:   false,
 		},
 		{
-			name:          "Clean Success With Whitespace Stdout",
+			name:          "Clean Success: Conversational response discussing maximum context length and 503 errors",
 			exitCode:      0,
-			stdout:        "   \n  ",
+			stdout:        `{"conversation_id":"abc","status":"SUCCESS","response":"The model's maximum context length is 1M tokens. When context window exceeded occurs, handle error 503."}`,
 			stderr:        "",
 			wantFailure:   false,
 			wantTransient: false,
 			wantCorrupt:   false,
 		},
 		{
-			name:          "Clean Success With [NO_REPLY]",
+			name:          "Clean Success: Benign debug stderr with timeout and rate limit logs",
 			exitCode:      0,
-			stdout:        "[NO_REPLY]",
-			stderr:        "",
+			stdout:        `{"conversation_id":"abc","status":"SUCCESS","response":"Processed your request cleanly."}`,
+			stderr:        "[DEBUG] rate limit check passed, timeout set to 30s",
 			wantFailure:   false,
 			wantTransient: false,
 			wantCorrupt:   false,
 		},
 		{
-			name:          "Clean Success With Lowercase [no_reply]",
+			name:          "Self-Healing: Exit 0 with conversation not found warning on stderr",
 			exitCode:      0,
-			stdout:        "[no_reply]",
-			stderr:        "",
+			stdout:        `{"conversation_id":"new-uuid","status":"SUCCESS","response":"Hello fresh session!"}`,
+			stderr:        `warning: conversation "stale-uuid" not found`,
 			wantFailure:   false,
 			wantTransient: false,
 			wantCorrupt:   false,
 		},
 		{
-			name:          "Clean Success With Markdown Formatted [NO_REPLY]",
-			exitCode:      0,
-			stdout:        "**[NO_REPLY]**",
-			stderr:        "",
-			wantFailure:   false,
-			wantTransient: false,
-			wantCorrupt:   false,
+			name:                 "Exit Code 0 With Empty Stdout Is Flagged As Failure",
+			exitCode:             0,
+			stdout:               "",
+			stderr:               "",
+			wantFailure:          true,
+			wantTransient:        false,
+			wantCorrupt:          false,
+			errDetailMustContain: "process produced empty stdout",
 		},
 		{
-			name:          "Clean Success With Code Containing Error Keywords In Stdout",
-			exitCode:      0,
-			stdout:        "Here is the python code to handle 'session corrupt', 'database is locked', and 'error 503':\n```python\nprint('handled')\n```",
-			stderr:        "",
-			wantFailure:   false,
-			wantTransient: false,
-			wantCorrupt:   false,
+			name:                 "Exit Code 0 With Non-JSON Stdout",
+			exitCode:             0,
+			stdout:               "not a valid json output",
+			stderr:               "",
+			wantFailure:          true,
+			wantTransient:        false,
+			wantCorrupt:          false,
+			errDetailMustContain: "invalid json response",
+		},
+		{
+			name:                 "Exit Code 0 With Context Window Exceeded In JSON",
+			exitCode:             0,
+			stdout:               `{"conversation_id":"abc","status":"ERROR","error":"context length exceeded: max context length is 1000000"}`,
+			stderr:               "",
+			wantFailure:          true,
+			wantTransient:        false,
+			wantCorrupt:          true,
+			errDetailMustContain: "context length exceeded",
 		},
 		{
 			name:                 "Transient 503 Unavailable",
@@ -158,26 +233,6 @@ func TestClassifyError(t *testing.T) {
 			errDetailMustContain: "failed to load",
 		},
 		{
-			name:                 "Exit Code 0 With [NO_REPLY] And Session Corruption In Stderr",
-			exitCode:             0,
-			stdout:               "[NO_REPLY]",
-			stderr:               "Error: failed to load conversation: session corrupted",
-			wantFailure:          true,
-			wantTransient:        false,
-			wantCorrupt:          true,
-			errDetailMustContain: "failed to load",
-		},
-		{
-			name:                 "Exit Code 0 With Empty Stdout And Session Corruption In Stderr",
-			exitCode:             0,
-			stdout:               "",
-			stderr:               "Error: failed to load conversation: session corrupted",
-			wantFailure:          true,
-			wantTransient:        false,
-			wantCorrupt:          true,
-			errDetailMustContain: "failed to load",
-		},
-		{
 			name:                 "Database Locked - Not Session Corruption",
 			exitCode:             1,
 			stdout:               "",
@@ -200,7 +255,7 @@ func TestClassifyError(t *testing.T) {
 		{
 			name:                 "Exit Code 0 With Partial Stdout And 503 In Stderr (Truncated Stream)",
 			exitCode:             0,
-			stdout:               "The\n",
+			stdout:               `{"conversation_id":"abc","status":"ERROR","error":"503 service unavailable"}`,
 			stderr:               "Agent execution terminated due to error. agent executor error: Error 503, Message: This model is currently experiencing high demand., Status: UNAVAILABLE",
 			wantFailure:          true,
 			wantTransient:        true,
@@ -210,7 +265,7 @@ func TestClassifyError(t *testing.T) {
 		{
 			name:                 "Exit Code 0 With Partial Stdout And Generic Error In Stderr",
 			exitCode:             0,
-			stdout:               "The\n",
+			stdout:               `{"conversation_id":"abc","status":"SUCCESS","response":"partial"}`,
 			stderr:               "Agent execution terminated due to error: panic: runtime error",
 			wantFailure:          true,
 			wantTransient:        false,

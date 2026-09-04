@@ -53,9 +53,12 @@ func TestGenerateSessionResetAndPoisonPillFallback(t *testing.T) {
 }
 
 func TestGenerateDynamicNotificationWithMock(t *testing.T) {
-	// Using echo as the agy binary simulator
+	// Using echo as the agy binary simulator (fails JSON parse and returns fallback)
 	res := GenerateDynamicNotification("echo", "test-api-key", "Test description")
 	if res == "" {
 		t.Error("Expected non-empty dynamic notification from mock")
+	}
+	if !strings.Contains(res, "✨") && !strings.Contains(res, "🌸") {
+		t.Errorf("Expected fallback notification with emojis, got: %q", res)
 	}
 }

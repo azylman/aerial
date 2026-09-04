@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/azylman/aerial/brain/pkg/db"
+	"github.com/azylman/aerial/brain/pkg/runner"
 )
 
 var (
@@ -327,7 +328,11 @@ func NewAgyLLMFunc(agyBin, apiKey string, runnerFn func(ctx context.Context, agy
 		if err != nil || exitCode != 0 {
 			return "", fmt.Errorf("agy classification failed (exit %d): %v, stderr: %s", exitCode, err, stderr)
 		}
-		return stdout, nil
+		resp, parseErr := runner.ParseAgyOutput(stdout)
+		if parseErr != nil {
+			return "", fmt.Errorf("failed to parse agy json output in classifier: %w (raw: %q)", parseErr, stdout)
+		}
+		return resp.Response, nil
 	}
 }
 

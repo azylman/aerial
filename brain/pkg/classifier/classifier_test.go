@@ -694,7 +694,7 @@ func TestClassifier_NewAgyLLMFunc(t *testing.T) {
 	mockRunner := func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 		capturedSessionID = sessionID
 		capturedModel = model
-		return `{"confidence": 0.95, "reason": "high priority question"}`, "", 0, nil
+		return `{"conversation_id":"ambient-eval-123","status":"SUCCESS","response":"{\"confidence\": 0.95, \"reason\": \"high priority question\"}"}`, "", 0, nil
 	}
 
 	fn := NewAgyLLMFunc("agy", "test-key", mockRunner)

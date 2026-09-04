@@ -862,7 +862,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 
 					for i := range burst {
 						wakeInfos[i] = wakeInfo{
-							isWake:    isWake,
+							isWake:    i == 0 && isWake,
 							score:     res.Confidence,
 							threshold: threshold,
 							reason:    res.Reason,
@@ -1066,7 +1066,6 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		currentAPIKey := p.cfg.APIKey
 		p.mu.Unlock()
 
-		startTime := time.Now().Add(-2 * time.Second)
 		runCtx, runCancel := context.WithTimeout(p.ctx, time.Duration(currentTimeout)*time.Minute)
 
 		stdout, stderr, exitCode, err := p.cfg.RunnerFunc(
@@ -1087,51 +1086,56 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		lastErrDetail = errDetail
 
 		if !isFailure {
-			if extSess := runner.ExtractSessionID(stderr, startTime); extSess != "" && session.SessionExistsOnDisk(extSess) {
-				if extSess != currentSessionID {
-					log.Printf("[Queue] Active session synchronized for thread %s: %s -> %s", threadID, currentSessionID, extSess)
-					currentSessionID = extSess
+			resp, parseErr := runner.ParseAgyOutput(stdout)
+			if parseErr != nil {
+				log.Printf("[Queue] Failed to parse runner output despite exit 0: %v", parseErr)
+				lastErrDetail = parseErr.Error()
+			} else {
+				if resp.ConversationID != "" && resp.ConversationID != currentSessionID {
+					log.Printf("[Queue] Active session synchronized for thread %s: %s -> %s", threadID, currentSessionID, resp.ConversationID)
+					currentSessionID = resp.ConversationID
 					_ = db.SaveSessionID(p.cfg.DB, threadID, currentSessionID)
 				}
-			}
-			stopTyping()
+				stopTyping()
 
-			isSilent := runner.IsSilentSentinel(stdout)
-			if isSilent {
-				log.Printf("[Queue] Output is silent sentinel ([NO_REPLY] or empty). Skipping Discord delivery.")
-			} else {
-				if !skipDiscord {
-					if err := p.cfg.DeliveryFunc(p.getDiscordSession(), threadID, stdout); err != nil {
-						log.Printf("[WorkerPool] Failed to deliver response for thread %s: %v", threadID, err)
+				responseText := resp.Response
+				isSilent := runner.IsSilentSentinel(responseText)
+				if isSilent {
+					log.Printf("[Queue] Output is silent sentinel ([NO_REPLY] or empty). Skipping Discord delivery.")
+				} else {
+					if !skipDiscord {
+						if err := p.cfg.DeliveryFunc(p.getDiscordSession(), threadID, responseText); err != nil {
+							log.Printf("[WorkerPool] Failed to deliver response for thread %s: %v", threadID, err)
+						}
 					}
 				}
-			}
 
-			if policy.MaxSessionTurns > 0 && turnCount >= policy.MaxSessionTurns {
-				log.Printf("[Queue] Channel session reached turn limit (%d/%d). Resetting to cold state for fresh session initialization.", turnCount, policy.MaxSessionTurns)
-				_ = db.RotateSessionID(p.cfg.DB, threadID, "")
-				currentSessionID = ""
-			}
-
-			// Mark all messages in the burst as completed
-			for _, m := range burst {
-				_ = db.UpdateMessageCompleted(p.cfg.DB, m.ID, stdout)
-				if m.ScheduleRunID != "" {
-					_ = db.UpdateScheduleRunStatus(p.cfg.DB, db.UpdateRunParams{
-						RunID:       m.ScheduleRunID,
-						MessageID:   m.ID,
-						Status:      "completed",
-						CompletedAt: time.Now().UTC(),
-						DurationMs:  time.Since(execStart).Milliseconds(),
-					})
+				if policy.MaxSessionTurns > 0 && turnCount >= policy.MaxSessionTurns {
+					log.Printf("[Queue] Channel session reached turn limit (%d/%d). Resetting to cold state for fresh session initialization.", turnCount, policy.MaxSessionTurns)
+					_ = db.RotateSessionID(p.cfg.DB, threadID, "")
+					currentSessionID = ""
 				}
-				if p.cfg.OnMessageCompleted != nil {
-					p.cfg.OnMessageCompleted(m, db.StatusCompleted)
-				}
-			}
-			log.Printf("[WorkerPool] %d message(s) in thread %s completed successfully on attempt %d/%d", len(burst), threadID, attempt, maxAttempts)
 
-			return
+				// Mark all messages in the burst as completed with unpacked response text
+				for _, m := range burst {
+					_ = db.UpdateMessageCompleted(p.cfg.DB, m.ID, responseText)
+					if m.ScheduleRunID != "" {
+						_ = db.UpdateScheduleRunStatus(p.cfg.DB, db.UpdateRunParams{
+							RunID:       m.ScheduleRunID,
+							MessageID:   m.ID,
+							Status:      "completed",
+							CompletedAt: time.Now().UTC(),
+							DurationMs:  time.Since(execStart).Milliseconds(),
+						})
+					}
+					if p.cfg.OnMessageCompleted != nil {
+						p.cfg.OnMessageCompleted(m, db.StatusCompleted)
+					}
+				}
+				log.Printf("[WorkerPool] %d message(s) in thread %s completed successfully on attempt %d/%d", len(burst), threadID, attempt, maxAttempts)
+
+				return
+			}
 		}
 
 		log.Printf("[WorkerPool] Burst for thread %s failed on attempt %d/%d (transient=%t, corrupt=%t): %s",
@@ -1147,7 +1151,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 					log.Printf("[WorkerPool] Failed to deliver session reset notice for thread %s: %v", threadID, err)
 				}
 			}
-			_ = db.DeleteSessionID(p.cfg.DB, threadID)
+			_ = db.RotateSessionID(p.cfg.DB, threadID, "")
 			currentSessionID = ""
 
 			if attempt < maxAttempts {
