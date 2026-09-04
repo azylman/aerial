@@ -9,13 +9,29 @@ import (
 	"time"
 )
 
+func isProductionDSN(dsn string) bool {
+	lower := strings.ToLower(dsn)
+	if strings.Contains(lower, "aerial_test") || strings.Contains(lower, "test_") || strings.Contains(lower, "_test") {
+		return false
+	}
+	return strings.Contains(lower, "@postgres:5432/aerial") ||
+		strings.Contains(lower, "@127.0.0.1:5432/aerial") ||
+		strings.Contains(lower, "@localhost:5432/aerial") ||
+		strings.Contains(lower, ":5432/aerial") ||
+		strings.Contains(lower, "/aerial")
+}
+
+
 func setupTestDB(t *testing.T) *sql.DB {
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {
-		dsn = os.Getenv("DATABASE_URL")
-	}
-	if dsn == "" {
 		dsn = "postgres://postgres:aerial_test@127.0.0.1:54329/aerial_test?sslmode=disable"
+	}
+
+	// Defensive invariant: Refuse to run test setup or truncate tables if DSN targets production
+	if isProductionDSN(dsn) {
+		t.Fatalf("CRITICAL SAFETY CHECK: setupTestDB detected production database in DSN %q; refusing to truncate", dsn)
+		return nil
 	}
 
 	// Quick connectivity probe (200ms) to avoid multi-minute retry delays in offline test runners
@@ -564,3 +580,29 @@ func TestNativeVectorSearchHNSW(t *testing.T) {
 		t.Errorf("Expected top result to be dark roast coffee, got %s", results[0].FactText)
 	}
 }
+
+func TestIsProductionDSN(t *testing.T) {
+	prodDSNs := []string{
+		"postgres://aerial:aerial_secure_pass@postgres:5432/aerial?sslmode=disable",
+		"postgres://aerial:pass@127.0.0.1:5432/aerial?sslmode=disable",
+		"postgres://aerial:pass@localhost:5432/aerial?sslmode=disable",
+		"postgres://aerial:pass@postgres:5432/aerial",
+	}
+	for _, dsn := range prodDSNs {
+		if !isProductionDSN(dsn) {
+			t.Errorf("Expected isProductionDSN(%q) to be true", dsn)
+		}
+	}
+
+	testDSNs := []string{
+		"postgres://postgres:aerial_test@127.0.0.1:54329/aerial_test?sslmode=disable",
+		"postgres://postgres:aerial_test_password@localhost:5432/aerial_test?sslmode=disable",
+		"postgres://postgres:aerial_test_password@postgres:5432/aerial_test?sslmode=disable",
+	}
+	for _, dsn := range testDSNs {
+		if isProductionDSN(dsn) {
+			t.Errorf("Expected isProductionDSN(%q) to be false", dsn)
+		}
+	}
+}
+
