@@ -77,10 +77,10 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Setup Go 1.22
+      - name: Setup Go 1.25
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: '1.25'
           cache: true
           cache-dependency-path: |
             **/go.sum
@@ -124,10 +124,10 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Setup Go 1.22
+      - name: Setup Go 1.25
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: '1.25'
           cache: true
           cache-dependency-path: |
             **/go.sum
@@ -142,28 +142,24 @@ jobs:
         if: needs.changes.outputs.brain == 'true'
         uses: golangci/golangci-lint-action@v6
         with:
-          version: v1.59.1
           working-directory: brain
 
       - name: Lint Scheduler MCP
         if: needs.changes.outputs.scheduler-mcp == 'true'
         uses: golangci/golangci-lint-action@v6
         with:
-          version: v1.59.1
           working-directory: scheduler-mcp
 
       - name: Lint Discord MCP
         if: needs.changes.outputs.discord-mcp == 'true'
         uses: golangci/golangci-lint-action@v6
         with:
-          version: v1.59.1
           working-directory: discord-mcp
 
       - name: Lint Status Dashboard Go Backend
         if: needs.changes.outputs.dashboard == 'true'
         uses: golangci/golangci-lint-action@v6
         with:
-          version: v1.59.1
           working-directory: dashboard
 
       - name: Lint Permet HUD Frontend Syntax
