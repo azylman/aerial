@@ -177,6 +177,7 @@ type WorkerPoolConfig struct {
 	MemoryRetrieverFunc  MemoryRetrieverFunc
 	ResolveChannelPolicy func(channelID, channelName string) config.ChannelPolicy
 	HistoryFetcher       HistoryFetcherFunc
+	SystemAlertFunc      func(s *discordgo.Session, channelNameOrID, title, alertBody string) error
 }
 
 type WorkerPool struct {
@@ -231,6 +232,9 @@ func NewWorkerPool(cfg WorkerPoolConfig) *WorkerPool {
 			return config.GetRuntimeConfig().ResolveChannelPolicy(channelID, channelName)
 		}
 	}
+	if cfg.SystemAlertFunc == nil {
+		cfg.SystemAlertFunc = delivery.SendSystemAlert
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -245,6 +249,53 @@ func NewWorkerPool(cfg WorkerPoolConfig) *WorkerPool {
 		p.cfg.HistoryFetcher = func(ctx context.Context, channelID string, beforeID string, limit int) ([]HistoryMessage, error) {
 			fetcher := DefaultHistoryFetcher(p.getDiscordSession(), p.cfg.DB)
 			return fetcher(ctx, channelID, beforeID, limit)
+		}
+	}
+
+	var lastAlertMu sync.Mutex
+	var lastClassifierAlertTime time.Time
+
+	if p.cfg.Classifier != nil && p.cfg.Classifier.OnParseError == nil {
+		p.cfg.Classifier.OnParseError = func(model, raw string, parseErr error) {
+			go func(model, raw string, parseErr error) {
+				defer func() {
+					if r := recover(); r != nil {
+						log.Printf("[WorkerPool] Panic in classifier OnParseError alert handler: %v", r)
+					}
+				}()
+
+				lastAlertMu.Lock()
+				if !lastClassifierAlertTime.IsZero() && time.Since(lastClassifierAlertTime) < 15*time.Second {
+					lastAlertMu.Unlock()
+					log.Printf("[WorkerPool] Debouncing rapid classifier JSON parse alert to prevent system channel flooding: %v", parseErr)
+					return
+				}
+				lastClassifierAlertTime = time.Now()
+				lastAlertMu.Unlock()
+
+				sess := p.getDiscordSession()
+				if sess == nil {
+					return
+				}
+				sysChan := config.GetSystemChannel()
+
+				// Defensively sanitize snippet: rune-slice to 600 runes, escape code fences, and neutralize mentions
+				snippet := raw
+				runes := []rune(snippet)
+				if len(runes) > 600 {
+					snippet = string(runes[:590]) + "\n... (truncated)"
+				}
+				snippet = strings.ReplaceAll(snippet, "```", "'''")
+				snippet = strings.ReplaceAll(snippet, "@everyone", "@\u200beveryone")
+				snippet = strings.ReplaceAll(snippet, "@here", "@\u200bhere")
+
+				alertMsg := fmt.Sprintf("**Model**: `%s`\n**Parse Error**:\n```\n%v\n```\n**Raw Output**:\n```\n%s\n```",
+					model, parseErr, snippet)
+				sanitizedAlert := sanitizeErrorText(alertMsg)
+				if err := p.cfg.SystemAlertFunc(sess, sysChan, "Classifier JSON Parse Error", sanitizedAlert); err != nil {
+					log.Printf("[WorkerPool] Warning: failed to send JSON parse error alert to system channel %q: %v", sysChan, err)
+				}
+			}(model, raw, parseErr)
 		}
 	}
 
@@ -1056,6 +1107,12 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 				}
 			}
 
+			if policy.MaxSessionTurns > 0 && turnCount >= policy.MaxSessionTurns {
+				log.Printf("[Queue] Channel session reached turn limit (%d/%d). Resetting to cold state for fresh session initialization.", turnCount, policy.MaxSessionTurns)
+				_ = db.RotateSessionID(p.cfg.DB, threadID, "")
+				currentSessionID = ""
+			}
+
 			// Mark all messages in the burst as completed
 			for _, m := range burst {
 				_ = db.UpdateMessageCompleted(p.cfg.DB, m.ID, stdout)
@@ -1073,12 +1130,6 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 				}
 			}
 			log.Printf("[WorkerPool] %d message(s) in thread %s completed successfully on attempt %d/%d", len(burst), threadID, attempt, maxAttempts)
-
-			if policy.MaxSessionTurns > 0 && turnCount >= policy.MaxSessionTurns {
-				log.Printf("[Queue] Channel session reached turn limit (%d/%d). Resetting to cold state for fresh session initialization.", turnCount, policy.MaxSessionTurns)
-				_ = db.RotateSessionID(p.cfg.DB, threadID, "")
-				currentSessionID = ""
-			}
 
 			return
 		}

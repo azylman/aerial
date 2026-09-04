@@ -154,43 +154,48 @@ func TestClassifier_JSONParsing(t *testing.T) {
 		llmOutput      string
 		wantConfidence float64
 		wantReason     string
+		wantSuccess    bool
 	}{
 		{
 			name:           "raw JSON",
 			llmOutput:      `{"confidence": 0.85, "reason": "direct question directed at assistant"}`,
 			wantConfidence: 0.85,
 			wantReason:     "direct question directed at assistant",
+			wantSuccess:    true,
 		},
 		{
-			name: "markdown fenced JSON",
+			name:           "raw JSON with whitespace",
+			llmOutput:      "  \n\t{\"confidence\": 0.45, \"reason\": \"general chatter\"}\n\t  ",
+			wantConfidence: 0.45,
+			wantReason:     "general chatter",
+			wantSuccess:    true,
+		},
+		{
+			name: "markdown fenced JSON fails strict parsing",
 			llmOutput: "```json\n" +
 				"{\n" +
 				`  "confidence": 0.72,` + "\n" +
 				`  "reason": "relevant technical inquiry"` + "\n" +
 				"}\n" +
 				"```",
-			wantConfidence: 0.72,
-			wantReason:     "relevant technical inquiry",
+			wantSuccess: false,
 		},
 		{
-			name: "markdown fence without json tag",
+			name: "markdown fence without json tag fails strict parsing",
 			llmOutput: "```\n" +
 				`{"confidence": 0.65, "reason": "partial match"}` + "\n" +
 				"```",
-			wantConfidence: 0.65,
-			wantReason:     "partial match",
+			wantSuccess: false,
 		},
 		{
-			name:           "extra whitespace and surrounding commentary",
-			llmOutput:      "  \n\tHere is the evaluation:\n\t{\"confidence\": 0.45, \"reason\": \"general chatter\"}\nHope this helps!  \n",
-			wantConfidence: 0.45,
-			wantReason:     "general chatter",
+			name:           "surrounding commentary fails strict parsing",
+			llmOutput:      "Here is the evaluation:\n{\"confidence\": 0.45, \"reason\": \"general chatter\"}\nHope this helps!",
+			wantSuccess:    false,
 		},
 		{
-			name:           "trailing commentary containing braces",
+			name:           "trailing commentary containing braces fails strict parsing",
 			llmOutput:      "{\"confidence\": 0.85, \"reason\": \"ok\"}\nNote: schema is {confidence, reason}",
-			wantConfidence: 0.85,
-			wantReason:     "ok",
+			wantSuccess:    false,
 		},
 	}
 
@@ -202,13 +207,58 @@ func TestClassifier_JSONParsing(t *testing.T) {
 				}),
 			)
 			res := c.Classify(context.Background(), db.Message{Content: "test"}, nil, "")
-			if res.Confidence != tc.wantConfidence {
-				t.Errorf("expected confidence %f, got %f", tc.wantConfidence, res.Confidence)
-			}
-			if res.Reason != tc.wantReason {
-				t.Errorf("expected reason %q, got %q", tc.wantReason, res.Reason)
+			if tc.wantSuccess {
+				if res.Confidence != tc.wantConfidence {
+					t.Errorf("expected confidence %f, got %f", tc.wantConfidence, res.Confidence)
+				}
+				if res.Reason != tc.wantReason {
+					t.Errorf("expected reason %q, got %q", tc.wantReason, res.Reason)
+				}
+			} else {
+				if res.Confidence != 0.0 {
+					t.Errorf("expected failure (confidence 0.0), got %f", res.Confidence)
+				}
+				if !strings.Contains(res.Reason, "classifier error") {
+					t.Errorf("expected classifier error, got %q", res.Reason)
+				}
 			}
 		})
+	}
+}
+
+func TestClassifier_OnParseErrorCallback(t *testing.T) {
+	var capturedModel string
+	var capturedRaw string
+	var capturedErr error
+	var callbackCalled bool
+
+	c := NewClassifier(
+		WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
+			return "```json\n{\"confidence\": 0.9}\n```", nil
+		}),
+		WithOnParseError(func(model, raw string, err error) {
+			capturedModel = model
+			capturedRaw = raw
+			capturedErr = err
+			callbackCalled = true
+		}),
+	)
+
+	res := c.Classify(context.Background(), db.Message{Content: "test"}, nil, "")
+	if res.Confidence != 0.0 {
+		t.Errorf("expected confidence 0.0 on parse error, got %f", res.Confidence)
+	}
+	if !callbackCalled {
+		t.Errorf("expected OnParseError callback to be invoked")
+	}
+	if capturedModel == "" {
+		t.Errorf("expected captured model to be non-empty")
+	}
+	if !strings.Contains(capturedRaw, "confidence") {
+		t.Errorf("unexpected captured raw: %q", capturedRaw)
+	}
+	if capturedErr == nil {
+		t.Errorf("expected non-nil captured error")
 	}
 }
 
