@@ -235,6 +235,7 @@ services:
     build: ./docker-mcp
     container_name: aerial-docker-mcp
     restart: unless-stopped
+    init: true
     labels:
       autoheal: "true"
       com.centurylinklabs.watchtower.enable: "true"
@@ -262,14 +263,13 @@ services:
     build: ./github-mcp
     container_name: aerial-github-mcp
     restart: unless-stopped
+    init: true
     labels:
       autoheal: "true"
       com.centurylinklabs.watchtower.enable: "true"
     environment:
       - PORT=4003
       - GITHUB_PERSONAL_ACCESS_TOKEN=${GITHUB_PAT}
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
     ports:
       - "${GITHUB_MCP_HOST_PORT:-4003}:4003"
     networks:
