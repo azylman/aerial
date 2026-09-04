@@ -91,6 +91,7 @@ type DeploymentStatus struct {
 	Service    string           `json:"service"`
 	Commit     string           `json:"commit"`
 	CommitMsg  string           `json:"commit_msg,omitempty"`
+	CommitTime *time.Time       `json:"commit_time,omitempty"`
 	Stage      string           `json:"stage"` // "queued", "building", "failed", "awaiting_pull", "swapping", "live", "degraded"
 	Progress   int              `json:"progress"`
 	Steps      []DeploymentStep `json:"steps"`
@@ -146,7 +147,8 @@ type GitHubRun struct {
 	HeadSHA    string    `json:"head_sha"`
 	HeadBranch string    `json:"head_branch"`
 	HeadCommit *struct {
-		Message string `json:"message"`
+		Message   string    `json:"message"`
+		Timestamp time.Time `json:"timestamp"`
 	} `json:"head_commit,omitempty"`
 	Status     string    `json:"status"`     // "queued", "in_progress", "completed"
 	Conclusion string    `json:"conclusion"` // "success", "failure", "cancelled"
@@ -402,7 +404,7 @@ func (p *GitHubPoller) Start(ctx context.Context) {
 }
 
 func (p *GitHubPoller) pollOnce(ctx context.Context) bool {
-	reqURL := fmt.Sprintf("https://api.github.com/repos/%s/actions/runs?per_page=3&event=push", p.repo)
+	reqURL := fmt.Sprintf("https://api.github.com/repos/%s/actions/runs?per_page=3&event=push&branch=main", p.repo)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
 		return false
@@ -512,7 +514,12 @@ func (p *GitHubPoller) fetchJobsForRun(ctx context.Context, runID int64) {
 	if p.token != "" {
 		req.Header.Set("Authorization", "Bearer "+p.token)
 	}
-	if etag, ok := p.jobsETagMap[runID]; ok && etag != "" {
+
+	p.mu.RLock()
+	etag := p.jobsETagMap[runID]
+	p.mu.RUnlock()
+
+	if etag != "" {
 		req.Header.Set("If-None-Match", etag)
 	}
 
@@ -530,10 +537,13 @@ func (p *GitHubPoller) fetchJobsForRun(ctx context.Context, runID int64) {
 	}
 
 	if resp.StatusCode == http.StatusOK {
-		p.jobsETagMap[runID] = resp.Header.Get("ETag")
+		jobETag := resp.Header.Get("ETag")
 		var jobData GitHubJobsResponse
 		if err := json.NewDecoder(resp.Body).Decode(&jobData); err == nil {
 			p.mu.Lock()
+			if jobETag != "" {
+				p.jobsETagMap[runID] = jobETag
+			}
 			p.cachedJobs[runID] = jobData.Jobs
 			p.mu.Unlock()
 		}
@@ -632,8 +642,51 @@ func parseMatrixJobChips(jobs []GitHubJob) []MatrixJobChip {
 	return chips
 }
 
+var ignoredContainerServices = map[string]bool{
+	"agentsview": true,
+	"watchtower": true,
+	"autoheal":   true,
+	"ollama":     true,
+}
+
+func isCoreAerialContainer(c DockerContainerJSON) bool {
+	svcName := ""
+	if c.Labels != nil {
+		svcName = c.Labels["com.docker.compose.service"]
+	}
+	if svcName == "" && len(c.Names) > 0 {
+		name := strings.TrimPrefix(c.Names[0], "/")
+		svcName = strings.TrimPrefix(name, "aerial-")
+	}
+	svcName = strings.ToLower(svcName)
+	if ignoredContainerServices[svcName] {
+		return false
+	}
+
+	img := strings.ToLower(c.Image)
+	if strings.Contains(img, "watchtower") ||
+		strings.Contains(img, "autoheal") ||
+		strings.Contains(img, "ollama") ||
+		strings.Contains(img, "agentsview") {
+		return false
+	}
+
+	if c.Labels != nil {
+		if src, ok := c.Labels["org.opencontainers.image.source"]; ok && src != "" {
+			if !strings.Contains(strings.ToLower(src), "azylman/aerial") {
+				return false
+			}
+		}
+	}
+
+	return true
+}
+
 func getContainerCommit(containers []DockerContainerJSON) string {
 	for _, c := range containers {
+		if !isCoreAerialContainer(c) || c.Labels == nil {
+			continue
+		}
 		if rev, ok := c.Labels["org.opencontainers.image.revision"]; ok && rev != "" {
 			if len(rev) > 7 {
 				return rev[:7]
@@ -735,8 +788,16 @@ func mergeClusterDeployments(
 			shortSHA = shortSHA[:7]
 		}
 		commitMsg := ""
+		var commitTime *time.Time
 		if latestRun.HeadCommit != nil {
 			commitMsg = latestRun.HeadCommit.Message
+			if !latestRun.HeadCommit.Timestamp.IsZero() {
+				t := latestRun.HeadCommit.Timestamp
+				commitTime = &t
+			}
+		} else if !latestRun.CreatedAt.IsZero() {
+			t := latestRun.CreatedAt
+			commitTime = &t
 		}
 
 		runJobs := jobs[latestRun.ID]
@@ -762,13 +823,14 @@ func mergeClusterDeployments(
 			}
 
 			deployments = append(deployments, DeploymentStatus{
-				ID:        fmt.Sprintf("gh-run-%d", latestRun.ID),
-				Service:   "aerial-stack",
-				Commit:    shortSHA,
-				CommitMsg: commitMsg,
-				Stage:     stage,
-				Progress:  progress,
-				HTMLURL:   latestRun.HTMLURL,
+				ID:         fmt.Sprintf("gh-run-%d", latestRun.ID),
+				Service:    "aerial-stack",
+				Commit:     shortSHA,
+				CommitMsg:  commitMsg,
+				CommitTime: commitTime,
+				Stage:      stage,
+				Progress:   progress,
+				HTMLURL:    latestRun.HTMLURL,
 				Steps: []DeploymentStep{
 					{Name: "Commit Trigger", Icon: "📦", Status: "completed"},
 					{Name: "CI Build & GHCR", Icon: "⚙️", Status: ciStatus},
@@ -785,13 +847,14 @@ func mergeClusterDeployments(
 		// State 3: CI Failed within last 30 minutes
 		if latestRun.Conclusion == "failure" && time.Since(latestRun.UpdatedAt) < 30*time.Minute {
 			deployments = append(deployments, DeploymentStatus{
-				ID:        fmt.Sprintf("gh-run-%d", latestRun.ID),
-				Service:   "aerial-stack",
-				Commit:    shortSHA,
-				CommitMsg: commitMsg,
-				Stage:     "failed",
-				Progress:  40,
-				HTMLURL:   latestRun.HTMLURL,
+				ID:         fmt.Sprintf("gh-run-%d", latestRun.ID),
+				Service:    "aerial-stack",
+				Commit:     shortSHA,
+				CommitMsg:  commitMsg,
+				CommitTime: commitTime,
+				Stage:      "failed",
+				Progress:   40,
+				HTMLURL:    latestRun.HTMLURL,
 				Steps: []DeploymentStep{
 					{Name: "Commit Trigger", Icon: "📦", Status: "completed"},
 					{Name: "CI Build & GHCR", Icon: "⚙️", Status: "failed"},
@@ -832,13 +895,14 @@ func mergeClusterDeployments(
 				// If within 120s Watchtower polling window -> awaiting_pull
 				if ciElapsed <= 120*time.Second {
 					deployments = append(deployments, DeploymentStatus{
-						ID:        fmt.Sprintf("gh-run-%d", latestRun.ID),
-						Service:   "aerial-stack",
-						Commit:    shortSHA,
-						CommitMsg: commitMsg,
-						Stage:     "awaiting_pull",
-						Progress:  55,
-						HTMLURL:   latestRun.HTMLURL,
+						ID:         fmt.Sprintf("gh-run-%d", latestRun.ID),
+						Service:    "aerial-stack",
+						Commit:     shortSHA,
+						CommitMsg:  commitMsg,
+						CommitTime: commitTime,
+						Stage:      "awaiting_pull",
+						Progress:   55,
+						HTMLURL:    latestRun.HTMLURL,
 						Steps: []DeploymentStep{
 							{Name: "Commit Trigger", Icon: "📦", Status: "completed"},
 							{Name: "CI Build & GHCR", Icon: "⚙️", Status: "completed"},
@@ -854,13 +918,14 @@ func mergeClusterDeployments(
 
 				// If exceeded 120s without any container updating -> Watchtower pull timeout failure!
 				deployments = append(deployments, DeploymentStatus{
-					ID:        fmt.Sprintf("gh-run-%d", latestRun.ID),
-					Service:   "aerial-stack",
-					Commit:    shortSHA,
-					CommitMsg: "Watchtower pull timed out (>120s)",
-					Stage:     "failed",
-					Progress:  55,
-					HTMLURL:   latestRun.HTMLURL,
+					ID:         fmt.Sprintf("gh-run-%d", latestRun.ID),
+					Service:    "aerial-stack",
+					Commit:     shortSHA,
+					CommitMsg:  "Watchtower pull timed out (>120s)",
+					CommitTime: commitTime,
+					Stage:      "failed",
+					Progress:   55,
+					HTMLURL:    latestRun.HTMLURL,
 					Steps: []DeploymentStep{
 						{Name: "Commit Trigger", Icon: "📦", Status: "completed"},
 						{Name: "CI Build & GHCR", Icon: "⚙️", Status: "completed"},
@@ -930,8 +995,31 @@ func mergeClusterDeployments(
 		return deployments
 	}
 
-	// Resolve commit SHA from container labels or fallback to currentCommit
-	resolvedCommit := getContainerCommit(aerialContainers)
+	// Resolve commit SHA: Primary from successful GH run, fallback to core container label, then currentCommit
+	resolvedCommit := ""
+	var commitTime *time.Time
+	resolvedCommitMsg := ""
+
+	if len(runs) > 0 {
+		latest := runs[0]
+		if latest.Conclusion == "success" && latest.HeadSHA != "" {
+			resolvedCommit = latest.HeadSHA
+		}
+		if latest.HeadCommit != nil {
+			resolvedCommitMsg = latest.HeadCommit.Message
+			if !latest.HeadCommit.Timestamp.IsZero() {
+				t := latest.HeadCommit.Timestamp
+				commitTime = &t
+			}
+		} else if !latest.CreatedAt.IsZero() {
+			t := latest.CreatedAt
+			commitTime = &t
+		}
+	}
+
+	if resolvedCommit == "" {
+		resolvedCommit = getContainerCommit(aerialContainers)
+	}
 	if resolvedCommit == "" {
 		resolvedCommit = currentCommit
 	}
@@ -944,12 +1032,14 @@ func mergeClusterDeployments(
 	// State: Degraded
 	if hasDegraded {
 		deployments = append(deployments, DeploymentStatus{
-			ID:        "dep-aerial-stack",
-			Service:   "aerial-stack",
-			Commit:    resolvedCommit,
-			Stage:     "degraded",
-			Progress:  85,
-			StartedAt: latestCreatedAt,
+			ID:         "dep-aerial-stack",
+			Service:    "aerial-stack",
+			Commit:     resolvedCommit,
+			CommitMsg:  resolvedCommitMsg,
+			CommitTime: commitTime,
+			Stage:      "degraded",
+			Progress:   85,
+			StartedAt:  latestCreatedAt,
 			Steps: []DeploymentStep{
 				{Name: "Commit Trigger", Icon: "📦", Status: "completed"},
 				{Name: "CI Build & GHCR", Icon: "⚙️", Status: "completed"},
@@ -969,12 +1059,14 @@ func mergeClusterDeployments(
 			progress = 60 + int(float64(healthyCount)/float64(len(aerialContainers))*25)
 		}
 		deployments = append(deployments, DeploymentStatus{
-			ID:        "dep-aerial-stack",
-			Service:   "aerial-stack",
-			Commit:    resolvedCommit,
-			Stage:     "swapping",
-			Progress:  progress,
-			StartedAt: latestCreatedAt,
+			ID:         "dep-aerial-stack",
+			Service:    "aerial-stack",
+			Commit:     resolvedCommit,
+			CommitMsg:  resolvedCommitMsg,
+			CommitTime: commitTime,
+			Stage:      "swapping",
+			Progress:   progress,
+			StartedAt:  latestCreatedAt,
 			Steps: []DeploymentStep{
 				{Name: "Commit Trigger", Icon: "📦", Status: "completed"},
 				{Name: "CI Build & GHCR", Icon: "⚙️", Status: "completed"},
@@ -990,12 +1082,14 @@ func mergeClusterDeployments(
 	// State 6: Synced Grace (< 600s / 10 minutes)
 	if minUptimeSec < 600 {
 		deployments = append(deployments, DeploymentStatus{
-			ID:        "dep-aerial-stack",
-			Service:   "aerial-stack",
-			Commit:    resolvedCommit,
-			Stage:     "live",
-			Progress:  100,
-			StartedAt: latestCreatedAt,
+			ID:         "dep-aerial-stack",
+			Service:    "aerial-stack",
+			Commit:     resolvedCommit,
+			CommitMsg:  resolvedCommitMsg,
+			CommitTime: commitTime,
+			Stage:      "live",
+			Progress:   100,
+			StartedAt:  latestCreatedAt,
 			Steps: []DeploymentStep{
 				{Name: "Commit Trigger", Icon: "📦", Status: "completed"},
 				{Name: "CI Build & GHCR", Icon: "⚙️", Status: "completed"},
@@ -1163,6 +1257,9 @@ func statusHandler(brainURL string) http.HandlerFunc {
 		}
 
 		deployments := mergeClusterDeployments(rawContainers, ghRuns, ghJobs, currentCommit)
+		if deployments == nil {
+			deployments = []DeploymentStatus{}
+		}
 
 		activeTasks, taskErr := fetchActiveTasksFromBrain(ctx, brainURL)
 		if taskErr != nil {

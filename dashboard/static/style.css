@@ -598,7 +598,8 @@ body {
 .deploy-target {
     display: flex;
     align-items: center;
-    gap: 0.8rem;
+    gap: 0.6rem;
+    flex-wrap: wrap;
 }
 
 .deploy-service-name {
@@ -606,6 +607,20 @@ body {
     font-size: 1.2rem;
     font-weight: 800;
     color: #fff;
+}
+
+.deploy-commit-time {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    color: var(--text-dim);
+    background: rgba(0, 242, 254, 0.05);
+    border: 1px solid rgba(0, 242, 254, 0.18);
+    padding: 2px 7px;
+    border-radius: 4px;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    white-space: nowrap;
 }
 
 .deploy-commit {

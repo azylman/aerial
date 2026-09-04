@@ -255,5 +255,10 @@ jobs:
           tags: |
             ghcr.io/${{ steps.repo_owner.outputs.owner }}/${{ matrix.image_name }}:latest
             ghcr.io/${{ steps.repo_owner.outputs.owner }}/${{ matrix.image_name }}:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            aerial.commit_sha=${{ github.sha }}
+            aerial.service=${{ matrix.service }}
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}

@@ -57,6 +57,7 @@ const {
     getTriggerBadge,
     formatAgentsviewSessionUrl,
     parseValidTimestampMs,
+    formatCommitTimestamp,
     formatDuration,
     formatTimestamp,
     formatTimeAgo,
@@ -219,6 +220,44 @@ describe('Permet HUD Pure Logic Unit Tests', () => {
                 assert.equal(formatDuration(65000), '1m 5s');
             });
         }
+    });
+
+    describe('formatCommitTimestamp(dateStr)', () => {
+        it('formats valid ISO timestamp into localized date and time', () => {
+            const iso = '2026-09-04T04:00:22Z';
+            const formatted = formatCommitTimestamp(iso);
+            assert.ok(typeof formatted === 'string' && formatted.length > 0);
+            assert.ok(formatted.includes(':'));
+        });
+
+        it('returns empty string for Go zero-time and pre-2020 dates', () => {
+            assert.equal(formatCommitTimestamp('0001-01-01T00:00:00Z'), '');
+            assert.equal(formatCommitTimestamp('1970-01-01T00:00:00Z'), '');
+        });
+
+        it('returns empty string for null, undefined, or empty date', () => {
+            assert.equal(formatCommitTimestamp(null), '');
+            assert.equal(formatCommitTimestamp(undefined), '');
+            assert.equal(formatCommitTimestamp(''), '');
+            assert.equal(formatCommitTimestamp('invalid'), '');
+        });
+    });
+
+    describe('Deployment Pipeline Link & Header Invariants', () => {
+        it('verifies app.js no longer renders deploy-service-name header', () => {
+            assert.equal(appJsCode.includes('deploy-service-name'), false, 'Found deploy-service-name in app.js');
+        });
+
+        it('validates hex SHA regex correctly identifies commit hashes', () => {
+            const isHexSha = (commit) => /^[0-9a-f]{7,40}$/i.test(String(commit || '').trim());
+            assert.equal(isHexSha('e056544'), true);
+            assert.equal(isHexSha('e056544d32a5f9d8a4cc50915a20db5eaea7db1e'), true);
+            assert.equal(isHexSha('latest'), false);
+            assert.equal(isHexSha('dirty'), false);
+            assert.equal(isHexSha(''), false);
+            assert.equal(isHexSha(null), false);
+            assert.equal(isHexSha(undefined), false);
+        });
     });
 
     describe('Privacy & Zero-Hardcoded IP Guarantee', () => {

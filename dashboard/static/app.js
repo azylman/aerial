@@ -67,6 +67,15 @@ function parseValidTimestampMs(dateStr) {
     return ms;
 }
 
+function formatCommitTimestamp(dateStr) {
+    const validMs = parseValidTimestampMs(dateStr);
+    if (!validMs) return '';
+    const d = new Date(validMs);
+    const datePart = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    const timePart = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    return `${datePart}, ${timePart}`;
+}
+
 // ==========================================
 // TELEMETRY STATE & LOGIC
 // ==========================================
@@ -341,10 +350,20 @@ function renderDeployments(deployments) {
             `;
         }).join('');
 
+        const isHexSha = /^[0-9a-f]{7,40}$/i.test(String(dep.commit || '').trim());
         const safeCommit = escapeHtml(dep.commit || 'latest');
-        const commitMarkup = dep.commit && dep.commit !== 'latest'
-            ? `<a href="https://github.com/azylman/aerial/commit/${safeCommit}" target="_blank" rel="noopener" class="deploy-commit-link" title="View commit on GitHub">${safeCommit} ↗</a>`
+        const commitMarkup = isHexSha
+            ? `<a href="https://github.com/azylman/aerial/commit/${encodeURIComponent(dep.commit.trim())}" target="_blank" rel="noopener" class="deploy-commit-link" title="View commit on GitHub">${safeCommit} ↗</a>`
             : `<span class="deploy-commit">${safeCommit}</span>`;
+
+        let commitTimeMarkup = '';
+        const rawTimeStr = dep.commit_time || dep.started_at;
+        const validMs = parseValidTimestampMs(rawTimeStr);
+        if (validMs) {
+            const formattedTime = formatCommitTimestamp(rawTimeStr);
+            const isoStr = new Date(validMs).toISOString();
+            commitTimeMarkup = `<span class="deploy-commit-time" title="Committed: ${escapeHtml(isoStr)}">🕒 ${escapeHtml(formattedTime)}</span>`;
+        }
 
         let runLinkMarkup = '';
         if (dep.html_url && typeof dep.html_url === 'string' && dep.html_url.startsWith('https://github.com/')) {
@@ -371,8 +390,8 @@ function renderDeployments(deployments) {
             ${(isBuildingStage || isSwapping || isAwaitingPull) ? '<div class="deploy-card-laser"></div>' : ''}
             <div class="deploy-card-header">
                 <div class="deploy-target">
-                    <span class="deploy-service-name">${escapeHtml((dep.service || 'SERVICE').toUpperCase())}</span>
                     ${commitMarkup}
+                    ${commitTimeMarkup}
                     ${runLinkMarkup}
                 </div>
                 <div style="display: flex; align-items: center; gap: 8px;">
