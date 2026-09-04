@@ -1273,7 +1273,7 @@ func TestQueueSilentSentinelSuppression(t *testing.T) {
 			return nil, nil
 		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
-			return mockJSONResponse("", "[NO_REPLY]"), "", 0, nil
+			return mockJSONResponse("", ""), "", 0, nil
 		},
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
 			mu.Lock()
@@ -1310,7 +1310,7 @@ func TestQueueSilentSentinelSuppression(t *testing.T) {
 
 	mu.Lock()
 	if deliveryCalls != 0 {
-		t.Errorf("Expected 0 delivery calls for silent sentinel [NO_REPLY], got %d", deliveryCalls)
+		t.Errorf("Expected 0 delivery calls for empty response, got %d", deliveryCalls)
 	}
 	mu.Unlock()
 
@@ -1322,8 +1322,8 @@ func TestQueueSilentSentinelSuppression(t *testing.T) {
 	if dbMsg.Status != db.StatusCompleted {
 		t.Errorf("Expected status COMPLETED, got %s", dbMsg.Status)
 	}
-	if dbMsg.ResponseText != "[NO_REPLY]" {
-		t.Errorf("Expected response text '[NO_REPLY]', got %q", dbMsg.ResponseText)
+	if dbMsg.ResponseText != "" {
+		t.Errorf("Expected empty response text, got %q", dbMsg.ResponseText)
 	}
 }
 
