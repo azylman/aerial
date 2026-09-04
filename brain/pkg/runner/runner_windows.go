@@ -8,5 +8,5 @@ import (
 )
 
 func configureSysProcAttr(cmd *exec.Cmd) {
-	cmd.WaitDelay = 2 * time.Second
+	cmd.WaitDelay = 3 * time.Second
 }

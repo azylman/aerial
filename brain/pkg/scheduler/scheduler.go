@@ -316,7 +316,11 @@ func Run(ctx context.Context, database *sql.DB, enqueuer MessageEnqueuer, thread
 		if exitCode != 0 || err != nil {
 			return "", fmt.Errorf("agy fact extraction exitCode=%d err=%v", exitCode, err)
 		}
-		return stdout, nil
+		resp, parseErr := runner.ParseAgyOutput(stdout)
+		if parseErr != nil {
+			return "", fmt.Errorf("failed to parse agy json output in scheduler: %w (raw: %q)", parseErr, stdout)
+		}
+		return resp.Response, nil
 	}
 
 	// Initial evaluation on start
