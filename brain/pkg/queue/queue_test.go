@@ -4562,18 +4562,10 @@ func TestWorkerPoolShutdown_PreservesProcessingMessageWithoutApology(t *testing.
 	mu.Unlock()
 
 	// Verify database state: message should remain in PROCESSING (not FAILED), and retry_count should NOT have incremented
-	rows, err := database.Query("SELECT status, retry_count FROM messages WHERE id = $1", msg.ID)
-	if err != nil {
-		t.Fatalf("Query failed: %v", err)
-	}
-	defer rows.Close()
-	if !rows.Next() {
-		t.Fatalf("Message %s not found in DB", msg.ID)
-	}
 	var status string
 	var retryCount int
-	if err := rows.Scan(&status, &retryCount); err != nil {
-		t.Fatalf("Scan failed: %v", err)
+	if err := database.QueryRow("SELECT status, retry_count FROM messages WHERE id = $1", msg.ID).Scan(&status, &retryCount); err != nil {
+		t.Fatalf("Query failed: %v", err)
 	}
 
 	if status != db.StatusProcessing {
@@ -4734,6 +4726,12 @@ func TestWorkerPoolShutdown_AmbientClassifierCancellationPreserved(t *testing.T)
 		DB:             database,
 		TimeoutMinutes: 1,
 		Classifier:     cls,
+		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
+			return config.ChannelPolicy{
+				Mode:                 "channel",
+				AmbientWakeThreshold: ptrFloat(0.75),
+			}
+		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
 			return mockJSONResponse(sessionID, "late"), "", 0, nil
 		},
@@ -4764,7 +4762,11 @@ func TestWorkerPoolShutdown_AmbientClassifierCancellationPreserved(t *testing.T)
 
 	pool.Enqueue(msg)
 
-	<-classifyStarted
+	select {
+	case <-classifyStarted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Timeout waiting for classifier to start")
+	}
 	pool.Stop()
 
 	// Verify database state: message should NOT be marked COMPLETED [AMBIENT]
