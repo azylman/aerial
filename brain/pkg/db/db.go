@@ -2177,8 +2177,8 @@ func GetFactsPaginated(database *sql.DB, filter FactsFilter) (*FactsResult, erro
 		return nil, fmt.Errorf("database is nil")
 	}
 
-	if filter.Limit <= 0 || filter.Limit > 100 {
-		filter.Limit = 50
+	if filter.Limit <= 0 {
+		filter.Limit = 500
 	}
 	if filter.Offset < 0 {
 		filter.Offset = 0
