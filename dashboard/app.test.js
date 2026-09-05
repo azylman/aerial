@@ -65,6 +65,8 @@ const {
     formatGitSyncDelta,
     renderGitSyncBadge,
     renderQuickLaunchDock,
+    parseFactImportance,
+    compareFactsImportanceDesc,
     TABS
 } = sandbox;
 
@@ -539,6 +541,151 @@ describe('Permet HUD Pure Logic Unit Tests', () => {
 
         it('verifies eager metrics fetch on bootstrap in app.js', () => {
             assert.ok(appJsCode.includes('fetchSchedules();\nfetchFacts();') || appJsCode.includes('fetchSchedules();\r\nfetchFacts();') || (appJsCode.includes('fetchSchedules()') && appJsCode.includes('fetchFacts()')), 'app.js should include eager metrics bootstrap');
+        });
+    });
+
+    describe('Permet Memory Importance Sorting & Pipeline Invariants', () => {
+        describe('parseFactImportance(val)', () => {
+            it('parses valid numeric and floating point values', () => {
+                assert.equal(parseFactImportance(1.0), 1.0);
+                assert.equal(parseFactImportance(0.85), 0.85);
+                assert.equal(parseFactImportance('0.95'), 0.95);
+                assert.equal(parseFactImportance('1'), 1.0);
+            });
+
+            it('preserves valid 0.0 importance and does NOT coerce to 1.0', () => {
+                assert.equal(parseFactImportance(0), 0.0);
+                assert.equal(parseFactImportance(0.0), 0.0);
+                assert.equal(parseFactImportance('0'), 0.0);
+                assert.equal(parseFactImportance('0.0'), 0.0);
+            });
+
+            it('clamps importance values to [0.0, 1.0]', () => {
+                assert.equal(parseFactImportance(1.5), 1.0);
+                assert.equal(parseFactImportance(-0.5), 0.0);
+            });
+
+            it('handles null, undefined, empty string, and NaN safely with 0.0 fallback', () => {
+                assert.equal(parseFactImportance(null), 0.0);
+                assert.equal(parseFactImportance(undefined), 0.0);
+                assert.equal(parseFactImportance(''), 0.0);
+                assert.equal(parseFactImportance('invalid-number'), 0.0);
+                assert.equal(parseFactImportance(NaN), 0.0);
+            });
+        });
+
+        describe('compareFactsImportanceDesc(a, b)', () => {
+            it('sorts facts in strictly descending order of importance', () => {
+                const facts = [
+                    { id: 1, fact_text: 'low', importance: 0.2 },
+                    { id: 2, fact_text: 'max', importance: 1.0 },
+                    { id: 3, fact_text: 'mid', importance: 0.5 },
+                    { id: 4, fact_text: 'high', importance: 0.8 },
+                    { id: 5, fact_text: 'very high', importance: 0.95 }
+                ];
+
+                const sorted = facts.slice().sort(compareFactsImportanceDesc);
+                const order = sorted.map(f => f.importance);
+                assert.deepEqual(order, [1.0, 0.95, 0.8, 0.5, 0.2]);
+            });
+
+            it('applies secondary tie-breaking by recency (created_at DESC)', () => {
+                const facts = [
+                    { id: 1, fact_text: 'older', importance: 0.8, created_at: '2026-09-04T12:00:00Z' },
+                    { id: 2, fact_text: 'newer', importance: 0.8, created_at: '2026-09-05T12:00:00Z' }
+                ];
+
+                const sorted = facts.slice().sort(compareFactsImportanceDesc);
+                assert.equal(sorted[0].id, 2);
+                assert.equal(sorted[1].id, 1);
+            });
+
+            it('applies tertiary tie-breaking by numeric and alphanumeric ID (id DESC)', () => {
+                const numericFacts = [
+                    { id: 42, fact_text: 'lower id', importance: 0.8, created_at: '2026-09-05T12:00:00Z' },
+                    { id: 105, fact_text: 'higher id', importance: 0.8, created_at: '2026-09-05T12:00:00Z' }
+                ];
+                const sortedNumeric = numericFacts.slice().sort(compareFactsImportanceDesc);
+                assert.equal(sortedNumeric[0].id, 105);
+                assert.equal(sortedNumeric[1].id, 42);
+
+                const stringFacts = [
+                    { id: 'fact-01', fact_text: 'lower id', importance: 0.8, created_at: '2026-09-05T12:00:00Z' },
+                    { id: 'fact-99', fact_text: 'higher id', importance: 0.8, created_at: '2026-09-05T12:00:00Z' }
+                ];
+                const sortedString = stringFacts.slice().sort(compareFactsImportanceDesc);
+                assert.equal(sortedString[0].id, 'fact-99');
+                assert.equal(sortedString[1].id, 'fact-01');
+            });
+
+            it('handles missing, null, or string importance scores in sorting', () => {
+                const facts = [
+                    { id: 1, fact_text: 'missing', created_at: '2026-09-05T10:00:00Z' },
+                    { id: 2, fact_text: 'string high', importance: '0.9', created_at: '2026-09-05T10:00:00Z' },
+                    { id: 3, fact_text: 'zero', importance: 0, created_at: '2026-09-05T10:00:00Z' }
+                ];
+
+                const sorted = facts.slice().sort(compareFactsImportanceDesc);
+                assert.equal(sorted[0].id, 2); // 0.9
+                // Both id 1 (null -> 0.0) and id 3 (0 -> 0.0) tie on importance, sort by ID DESC
+                assert.equal(sorted[1].id, 3);
+                assert.equal(sorted[2].id, 1);
+            });
+        });
+
+        describe('Filter Pipeline & Metrics Integration', () => {
+            it('preserves descending importance sorting across category and query filtering', () => {
+                const elements = {};
+                sandbox.document.getElementById = (id) => {
+                    if (!elements[id]) {
+                        elements[id] = { textContent: '', className: '', style: {}, innerHTML: '' };
+                    }
+                    return elements[id];
+                };
+
+                const filtered = vm.runInContext(`
+                    memoryState.facts = [
+                        { id: 1, category: 'USER_PREFERENCE', fact_text: 'Alex prefers dark mode', importance: 0.5 },
+                        { id: 2, category: 'USER_PREFERENCE', fact_text: 'Alex loves matcha latte', importance: 0.95 },
+                        { id: 3, category: 'SYSTEM_CONFIG', fact_text: 'Ollama model setting', importance: 0.8 },
+                        { id: 4, category: 'USER_PREFERENCE', fact_text: 'Alex drinks espresso', importance: 0.7 }
+                    ].sort(compareFactsImportanceDesc);
+
+                    memoryState.selectedCategory = 'USER_PREFERENCE';
+                    memoryState.searchQuery = 'alex';
+                    applyFilters();
+                    memoryState.filteredFacts;
+                `, sandbox);
+
+                assert.equal(filtered.length, 3);
+                assert.equal(filtered[0].id, 2); // 0.95
+                assert.equal(filtered[1].id, 4); // 0.7
+                assert.equal(filtered[2].id, 1); // 0.5
+            });
+
+            it('computes average importance correctly without corrupting 0.0 importance facts', () => {
+                const elements = {};
+                sandbox.document.getElementById = (id) => {
+                    if (!elements[id]) {
+                        elements[id] = { textContent: '', className: '', style: {}, innerHTML: '' };
+                    }
+                    return elements[id];
+                };
+
+                vm.runInContext(`
+                    memoryState.totalCount = 4;
+                    memoryState.facts = [
+                        { id: 1, importance: 1.0 },
+                        { id: 2, importance: 0.5 },
+                        { id: 3, importance: 0.0 },
+                        { id: 4, importance: 0.5 }
+                    ];
+                    updateMemoryMetrics();
+                `, sandbox);
+
+                // Total sum = 1.0 + 0.5 + 0.0 + 0.5 = 2.0. Avg = 2.0 / 4 = 0.50
+                assert.equal(elements['memory-avg-importance'].textContent, '0.50');
+            });
         });
     });
 });

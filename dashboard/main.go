@@ -1470,21 +1470,23 @@ func factsHandler(brainBaseURL string) http.HandlerFunc {
 		}
 
 		outQuery := targetURL.Query()
-		limit := 50
+		limit := 0
 		if lStr := inQuery.Get("limit"); lStr != "" {
-			if n, err := strconv.Atoi(lStr); err == nil && n > 0 && n <= 100 {
+			if n, err := strconv.Atoi(lStr); err == nil && n > 0 {
 				limit = n
+				outQuery.Set("limit", strconv.Itoa(limit))
 			}
 		}
-		outQuery.Set("limit", strconv.Itoa(limit))
 
 		offset := 0
 		if oStr := inQuery.Get("offset"); oStr != "" {
 			if n, err := strconv.Atoi(oStr); err == nil && n >= 0 {
 				offset = n
+				if offset > 0 {
+					outQuery.Set("offset", strconv.Itoa(offset))
+				}
 			}
 		}
-		outQuery.Set("offset", strconv.Itoa(offset))
 
 		if cat := strings.TrimSpace(inQuery.Get("category")); cat != "" {
 			outQuery.Set("category", cat)
