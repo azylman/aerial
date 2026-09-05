@@ -362,4 +362,183 @@ describe('Permet HUD Pure Logic Unit Tests', () => {
             assert.equal(TABS.tasks.hash, '#tasks');
         });
     });
+
+    describe('Header Tab Badge Metrics Synchronization', () => {
+        it('updates #schedules-badge-count correctly from summary.total_active', () => {
+            const elements = {};
+            sandbox.document.getElementById = (id) => {
+                if (!elements[id]) {
+                    elements[id] = { textContent: '', className: '', style: {} };
+                }
+                return elements[id];
+            };
+
+            vm.runInContext(`
+                schedulesState.summary = { total_active: 7, cron_count: 4, one_shot_count: 3 };
+                schedulesState.crons = [1, 2, 3, 4];
+                schedulesState.oneShots = [5, 6, 7];
+                updateScheduleMetrics();
+            `, sandbox);
+
+            assert.equal(elements['schedules-badge-count'].textContent, '7');
+            assert.equal(elements['schedules-active-badge'].textContent, '7 ACTIVE');
+            assert.equal(elements['schedules-crons-count'].textContent, 4);
+            assert.equal(elements['schedules-oneshot-count'].textContent, 3);
+        });
+
+        it('falls back to crons + oneShots length when summary is null or missing total_active', () => {
+            const elements = {};
+            sandbox.document.getElementById = (id) => {
+                if (!elements[id]) {
+                    elements[id] = { textContent: '', className: '', style: {} };
+                }
+                return elements[id];
+            };
+
+            vm.runInContext(`
+                schedulesState.summary = null;
+                schedulesState.crons = [{ id: 'cron-1' }, { id: 'cron-2' }];
+                schedulesState.oneShots = [{ id: 'once-1' }];
+                updateScheduleMetrics();
+            `, sandbox);
+
+            assert.equal(elements['schedules-badge-count'].textContent, '3');
+            assert.equal(elements['schedules-active-badge'].textContent, '3 ACTIVE');
+        });
+
+        it('preserves string "0" for schedules when 0 active schedules exist', () => {
+            const elements = {};
+            sandbox.document.getElementById = (id) => {
+                if (!elements[id]) {
+                    elements[id] = { textContent: '', className: '', style: {} };
+                }
+                return elements[id];
+            };
+
+            vm.runInContext(`
+                schedulesState.summary = { total_active: 0, cron_count: 0, one_shot_count: 0 };
+                schedulesState.crons = [];
+                schedulesState.oneShots = [];
+                updateScheduleMetrics();
+            `, sandbox);
+
+            assert.equal(elements['schedules-badge-count'].textContent, '0');
+            assert.equal(elements['schedules-active-badge'].textContent, '0 ACTIVE');
+        });
+
+        it('updates #memory-badge-count correctly from memoryState.totalCount', () => {
+            const elements = {};
+            sandbox.document.getElementById = (id) => {
+                if (!elements[id]) {
+                    elements[id] = { textContent: '', className: '', style: {} };
+                }
+                return elements[id];
+            };
+
+            vm.runInContext(`
+                memoryState.totalCount = 42;
+                memoryState.facts = [{ id: 'f1', category: 'core', importance: 1.0 }];
+                updateMemoryMetrics();
+            `, sandbox);
+
+            assert.equal(elements['memory-badge-count'].textContent, '42');
+            assert.equal(elements['memory-total-count'].textContent, 42);
+        });
+
+        it('falls back to facts.length when memoryState.totalCount is undefined or null', () => {
+            const elements = {};
+            sandbox.document.getElementById = (id) => {
+                if (!elements[id]) {
+                    elements[id] = { textContent: '', className: '', style: {} };
+                }
+                return elements[id];
+            };
+
+            vm.runInContext(`
+                memoryState.totalCount = null;
+                memoryState.facts = [
+                    { id: 'f1', category: 'core', importance: 1.0 },
+                    { id: 'f2', category: 'infra', importance: 0.8 }
+                ];
+                updateMemoryMetrics();
+            `, sandbox);
+
+            assert.equal(elements['memory-badge-count'].textContent, '2');
+            assert.equal(elements['memory-total-count'].textContent, 2);
+        });
+
+        it('preserves string "0" for memory when 0 facts exist in memoryState', () => {
+            const elements = {};
+            sandbox.document.getElementById = (id) => {
+                if (!elements[id]) {
+                    elements[id] = { textContent: '', className: '', style: {} };
+                }
+                return elements[id];
+            };
+
+            vm.runInContext(`
+                memoryState.totalCount = 0;
+                memoryState.facts = [];
+                updateMemoryMetrics();
+            `, sandbox);
+
+            assert.equal(elements['memory-badge-count'].textContent, '0');
+            assert.equal(elements['memory-total-count'].textContent, 0);
+        });
+
+        it('gracefully handles missing DOM elements without throwing errors', () => {
+            sandbox.document.getElementById = () => null;
+
+            assert.doesNotThrow(() => {
+                vm.runInContext(`
+                    schedulesState.summary = { total_active: 5 };
+                    updateScheduleMetrics();
+                    memoryState.totalCount = 10;
+                    updateMemoryMetrics();
+                `, sandbox);
+            });
+        });
+
+        it('updates #tasks-badge-count correctly in renderActiveTasks', () => {
+            const elements = {};
+            sandbox.document.getElementById = (id) => {
+                if (!elements[id]) {
+                    elements[id] = { textContent: '', className: '', style: {}, innerHTML: '' };
+                }
+                return elements[id];
+            };
+
+            vm.runInContext(`
+                renderActiveTasks([
+                    { id: 'task-1', status: 'PROCESSING' },
+                    { id: 'task-2', status: 'PENDING' }
+                ]);
+            `, sandbox);
+
+            assert.equal(elements['tasks-badge-count'].textContent, '2');
+        });
+
+        it('ensures TABS.memory.onEnter respects hasLoaded flag to avoid redundant fetches', () => {
+            let fetchFactsCalled = 0;
+            sandbox.fetchFacts = () => { fetchFactsCalled++; };
+
+            vm.runInContext(`
+                memoryState.hasLoaded = true;
+                memoryState.facts = [];
+                TABS.memory.onEnter();
+            `, sandbox);
+            assert.equal(fetchFactsCalled, 0, 'fetchFacts should not be called when hasLoaded is true');
+
+            vm.runInContext(`
+                memoryState.hasLoaded = false;
+                memoryState.facts = [];
+                TABS.memory.onEnter();
+            `, sandbox);
+            assert.equal(fetchFactsCalled, 1, 'fetchFacts should be called when hasLoaded is false');
+        });
+
+        it('verifies eager metrics fetch on bootstrap in app.js', () => {
+            assert.ok(appJsCode.includes('fetchSchedules();\nfetchFacts();') || appJsCode.includes('fetchSchedules();\r\nfetchFacts();') || (appJsCode.includes('fetchSchedules()') && appJsCode.includes('fetchFacts()')), 'app.js should include eager metrics bootstrap');
+        });
+    });
 });

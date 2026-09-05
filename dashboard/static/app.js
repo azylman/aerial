@@ -750,6 +750,7 @@ const memoryState = {
     selectedCategory: 'ALL',
     searchQuery: '',
     isLoading: false,
+    hasLoaded: false,
     error: null
 };
 
@@ -774,6 +775,7 @@ async function fetchFacts() {
         memoryState.facts = Array.isArray(data.facts) ? data.facts : [];
         memoryState.totalCount = typeof data.total === 'number' ? data.total : memoryState.facts.length;
         memoryState.isLoading = false;
+        memoryState.hasLoaded = true;
 
         updateMemoryMetrics();
         renderCategoryPills();
@@ -819,16 +821,23 @@ function renderMemoryError(errMsg) {
 }
 
 function updateMemoryMetrics() {
-    const total = (memoryState.totalCount !== undefined && memoryState.totalCount !== null) ? memoryState.totalCount : memoryState.facts.length;
+    const factsList = Array.isArray(memoryState.facts) ? memoryState.facts : [];
+    const total = (memoryState.totalCount !== undefined && memoryState.totalCount !== null) ? memoryState.totalCount : factsList.length;
+    
+    const tabBadge = document.getElementById('memory-badge-count');
+    if (tabBadge) {
+        tabBadge.textContent = String(total);
+    }
+
     const totalCountEl = document.getElementById('memory-total-count');
     if (totalCountEl) totalCountEl.textContent = total;
 
-    const categories = new Set(memoryState.facts.map(f => (f.category || 'general').toLowerCase()));
+    const categories = new Set(factsList.map(f => (f.category || 'general').toLowerCase()));
     const catCountEl = document.getElementById('memory-category-count');
     if (catCountEl) catCountEl.textContent = `${categories.size} CATEGORIES`;
 
     const avgImp = total > 0
-        ? (memoryState.facts.reduce((acc, f) => acc + (f.importance || 1.0), 0) / total).toFixed(2)
+        ? (factsList.reduce((acc, f) => acc + (f.importance || 1.0), 0) / total).toFixed(2)
         : '0.00';
     const avgImpEl = document.getElementById('memory-avg-importance');
     if (avgImpEl) avgImpEl.textContent = avgImp;
@@ -1286,13 +1295,21 @@ async function fetchScheduleRuns() {
 }
 
 function updateScheduleMetrics() {
-    const summary = schedulesState.summary;
+    const summary = schedulesState.summary || {};
+    const cronsList = Array.isArray(schedulesState.crons) ? schedulesState.crons : [];
+    const oneShotsList = Array.isArray(schedulesState.oneShots) ? schedulesState.oneShots : [];
+    const totalActive = summary.total_active ?? (cronsList.length + oneShotsList.length);
+
+    const tabBadge = document.getElementById('schedules-badge-count');
+    if (tabBadge) {
+        tabBadge.textContent = String(totalActive);
+    }
 
     const cronsCountEl = document.getElementById('schedules-crons-count');
-    if (cronsCountEl) cronsCountEl.textContent = summary.cron_count ?? schedulesState.crons.length;
+    if (cronsCountEl) cronsCountEl.textContent = summary.cron_count ?? cronsList.length;
 
     const oneshotCountEl = document.getElementById('schedules-oneshot-count');
-    if (oneshotCountEl) oneshotCountEl.textContent = summary.one_shot_count ?? schedulesState.oneShots.length;
+    if (oneshotCountEl) oneshotCountEl.textContent = summary.one_shot_count ?? oneShotsList.length;
 
     const successRateEl = document.getElementById('schedules-success-rate');
     if (successRateEl) {
@@ -1315,7 +1332,7 @@ function updateScheduleMetrics() {
 
     const activeBadgeEl = document.getElementById('schedules-active-badge');
     if (activeBadgeEl) {
-        activeBadgeEl.textContent = `${summary.total_active ?? (schedulesState.crons.length + schedulesState.oneShots.length)} ACTIVE`;
+        activeBadgeEl.textContent = `${totalActive} ACTIVE`;
     }
 }
 
@@ -1860,7 +1877,7 @@ var TABS = {
         viewId: 'memory-view',
         hash: '#memory',
         onEnter: () => {
-            if (memoryState.facts.length === 0) {
+            if (!memoryState.hasLoaded) {
                 fetchFacts();
             }
         },
@@ -2011,4 +2028,8 @@ setupTabs();
 setupMemoryControls();
 setupSchedulesControls();
 setupGlobalKeyboardShortcuts();
+
+// Eagerly populate badge counts across tabs on initial load
+fetchSchedules();
+fetchFacts();
 
