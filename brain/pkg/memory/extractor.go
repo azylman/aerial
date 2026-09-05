@@ -157,7 +157,19 @@ func ExtractActiveConversationFacts(ctx context.Context, database *sql.DB, clien
 	return nil
 }
 
-func processThreadFacts(ctx context.Context, database *sql.DB, client *Client, llmFunc LLMClientFunc, threadID string) error {
+func processThreadFacts(ctx context.Context, database *sql.DB, client *Client, llmFunc LLMClientFunc, threadID string) (err error) {
+	start := time.Now()
+	var factCount int
+	defer func() {
+		status := "extracted"
+		if err != nil {
+			status = "error"
+		} else if factCount == 0 {
+			status = "empty"
+		}
+		metrics.RecordFactExtraction(status, time.Since(start))
+	}()
+
 	maxRowID, err := db.GetMaxMessageRowID(database, threadID)
 	if err != nil {
 		return fmt.Errorf("failed to get max message rowid for thread %s: %w", threadID, err)
@@ -183,6 +195,8 @@ func processThreadFacts(ctx context.Context, database *sql.DB, client *Client, l
 	if err != nil {
 		return fmt.Errorf("failed to parse extracted facts JSON: %w", err)
 	}
+
+	factCount = len(factsPayload.Facts)
 
 	// Fetch existing facts for deduplication
 	existingFacts, _ := db.GetFactsByThreadWithEmbeddings(database, threadID)

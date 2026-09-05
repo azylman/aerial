@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/azylman/aerial/brain/pkg/metrics"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	pgvector "github.com/pgvector/pgvector-go"
 	_ "modernc.org/sqlite"
@@ -268,6 +269,7 @@ func InitDB(dsn string) (*sql.DB, error) {
 		`)
 
 		log.Printf("[DB] PostgreSQL initialized successfully with pgvector at %s", dsn)
+		metrics.RegisterDBStats(database)
 		return database, nil
 	}
 
@@ -401,12 +403,21 @@ func InitDB(dsn string) (*sql.DB, error) {
 	}
 
 	log.Printf("[DB] SQLite initialized successfully at %s", dsn)
+	metrics.RegisterDBStats(database)
 	return database, nil
 }
 
 // Message CRUD Operations
 
-func InsertMessage(database *sql.DB, msg Message) error {
+func InsertMessage(database *sql.DB, msg Message) (err error) {
+	start := time.Now()
+	defer func() {
+		status := "success"
+		if err != nil {
+			status = "error"
+		}
+		metrics.RecordDBQuery("insert_message", status, time.Since(start))
+	}()
 	if database == nil {
 		return fmt.Errorf("database is nil")
 	}
@@ -435,7 +446,7 @@ func InsertMessage(database *sql.DB, msg Message) error {
 	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 	ON CONFLICT (id) DO NOTHING;
 	`
-	_, err := database.ExecContext(ctx, query, msg.ID, msg.ThreadID, msg.GuildID, msg.AuthorID, msg.AuthorName, msg.Content, msg.Summary, msg.Status, msg.RetryCount, msg.ErrorMessage, msg.ResponseText, msg.ScheduleRunID, msg.CreatedAt, msg.UpdatedAt)
+	_, err = database.ExecContext(ctx, query, msg.ID, msg.ThreadID, msg.GuildID, msg.AuthorID, msg.AuthorName, msg.Content, msg.Summary, msg.Status, msg.RetryCount, msg.ErrorMessage, msg.ResponseText, msg.ScheduleRunID, msg.CreatedAt, msg.UpdatedAt)
 	return err
 }
 
@@ -499,7 +510,15 @@ func IncrementMessageRetry(database *sql.DB, id string, errorMsg string) error {
 	return err
 }
 
-func GetPendingOrProcessingMessages(database *sql.DB) ([]Message, error) {
+func GetPendingOrProcessingMessages(database *sql.DB) (msgs []Message, err error) {
+	start := time.Now()
+	defer func() {
+		status := "success"
+		if err != nil {
+			status = "error"
+		}
+		metrics.RecordDBQuery("get_pending_messages", status, time.Since(start))
+	}()
 	if database == nil {
 		return nil, fmt.Errorf("database is nil")
 	}
@@ -767,7 +786,15 @@ func MessageExists(database *sql.DB, id string) (bool, error) {
 
 // ClaimPendingMessage atomically transitions a message from PENDING to PROCESSING using CAS.
 // It returns true if and only if the message was successfully claimed from PENDING state (strictly-once).
-func ClaimPendingMessage(database *sql.DB, id string) (bool, error) {
+func ClaimPendingMessage(database *sql.DB, id string) (claimed bool, err error) {
+	start := time.Now()
+	defer func() {
+		status := "success"
+		if err != nil {
+			status = "error"
+		}
+		metrics.RecordDBQuery("claim_message", status, time.Since(start))
+	}()
 	if database == nil || id == "" {
 		return false, nil
 	}
@@ -782,7 +809,7 @@ func ClaimPendingMessage(database *sql.DB, id string) (bool, error) {
 	RETURNING id;
 	`
 	var claimedID string
-	err := database.QueryRowContext(ctx, query, now, id).Scan(&claimedID)
+	err = database.QueryRowContext(ctx, query, now, id).Scan(&claimedID)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
@@ -829,7 +856,15 @@ func GetActiveRecentThreadIDs(database *sql.DB, since time.Duration) ([]string, 
 	return threadIDs, nil
 }
 
-func GetRecentThreadMessages(database *sql.DB, threadID string, limit int) ([]Message, error) {
+func GetRecentThreadMessages(database *sql.DB, threadID string, limit int) (msgs []Message, err error) {
+	start := time.Now()
+	defer func() {
+		status := "success"
+		if err != nil {
+			status = "error"
+		}
+		metrics.RecordDBQuery("get_recent_thread_messages", status, time.Since(start))
+	}()
 	if database == nil {
 		return nil, fmt.Errorf("database is nil")
 	}
@@ -858,7 +893,7 @@ func GetRecentThreadMessages(database *sql.DB, threadID string, limit int) ([]Me
 	}
 	defer func() { _ = rows.Close() }()
 
-	msgs := make([]Message, 0)
+	msgs = make([]Message, 0)
 	for rows.Next() {
 		var m Message
 		var errMsg, respText, schedID sql.NullString
@@ -1734,7 +1769,15 @@ func BytesToFloat32(buf []byte) []float32 {
 	return slice
 }
 
-func InsertFact(database *sql.DB, category, factText string, importance float64, threadID string, embedding []float32) (int64, error) {
+func InsertFact(database *sql.DB, category, factText string, importance float64, threadID string, embedding []float32) (id int64, err error) {
+	start := time.Now()
+	defer func() {
+		status := "success"
+		if err != nil {
+			status = "error"
+		}
+		metrics.RecordDBQuery("insert_fact", status, time.Since(start))
+	}()
 	if database == nil {
 		return 0, fmt.Errorf("database is nil")
 	}
@@ -1763,7 +1806,7 @@ func InsertFact(database *sql.DB, category, factText string, importance float64,
 
 	query := `INSERT INTO facts (category, fact_text, importance, thread_id, embedding, created_at) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`
 	var insertedID int64
-	err := database.QueryRowContext(ctx, query, category, factText, importance, threadID, vecVal, now).Scan(&insertedID)
+	err = database.QueryRowContext(ctx, query, category, factText, importance, threadID, vecVal, now).Scan(&insertedID)
 	if err != nil {
 		return 0, err
 	}

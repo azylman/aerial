@@ -152,6 +152,7 @@ func getOrCreateThreadID(s *discordgo.Session, m *discordgo.Message) (string, bo
 		thread, err := s.MessageThreadStart(m.ChannelID, m.ID, title, 1440)
 		if err != nil {
 			if isThreadAlreadyExistsError(err) && queue.IsNumericSnowflake(m.ID) {
+				metrics.RecordThreadCreated("already_exists")
 				log.Printf("Thread already exists for message %s in channel %s (code 160004); resolving thread ID %s", m.ID, m.ChannelID, m.ID)
 				var existingThread *discordgo.Channel
 				if ch, fetchErr := s.Channel(m.ID); fetchErr == nil && ch != nil {
@@ -176,9 +177,11 @@ func getOrCreateThreadID(s *discordgo.Session, m *discordgo.Message) (string, bo
 				}
 				return m.ID, true
 			}
+			metrics.RecordThreadCreated("error")
 			log.Printf("Failed to create Discord thread for message %s (channel %s): %v", m.ID, m.ChannelID, err)
 			return m.ChannelID, false
 		} else if thread != nil {
+			metrics.RecordThreadCreated("created")
 			if thread.ParentID == "" {
 				thread.ParentID = m.ChannelID
 			}
@@ -404,11 +407,13 @@ func connectDiscordFunnel(database *sql.DB, pool *queue.WorkerPool) *discordgo.S
 
 	dg.AddHandler(func(s *discordgo.Session, d *discordgo.Disconnect) {
 		metrics.DiscordEventsTotal.WithLabelValues("disconnect").Inc()
+		metrics.RecordGatewayReconnect()
 		log.Printf("Discord funnel disconnected from gateway (discordgo will reconnect automatically)")
 	})
 
 	dg.AddHandler(func(s *discordgo.Session, r *discordgo.Resumed) {
 		metrics.DiscordEventsTotal.WithLabelValues("resumed").Inc()
+		metrics.RecordGatewayReconnect()
 		log.Printf("Discord funnel gateway connection resumed successfully")
 	})
 
@@ -486,6 +491,16 @@ func connectDiscordFunnel(database *sql.DB, pool *queue.WorkerPool) *discordgo.S
 	} else {
 		log.Printf("Discord funnel worker connected successfully inside Brain")
 	}
+
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			if dg != nil {
+				metrics.RecordGatewayLatency(dg.HeartbeatLatency())
+			}
+		}
+	}()
 
 	return dg
 }

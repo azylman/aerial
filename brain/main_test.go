@@ -514,3 +514,61 @@ func TestMetricsEndpoint(t *testing.T) {
 }
 
 
+
+func TestNormalizeRoute(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"/prompt", "/prompt"},
+		{"/transcripts", "/transcripts"},
+		{"/transcripts/abc-123", "/transcripts"},
+		{"/tasks", "/tasks"},
+		{"/tasks/456", "/tasks"},
+		{"/facts", "/facts"},
+		{"/facts/789", "/facts"},
+		{"/schedules", "/schedules"},
+		{"/schedules/runs", "/schedules/runs"},
+		{"/internal/reload", "/internal/reload"},
+		{"/health", "/health"},
+		{"/metrics", "/metrics"},
+		{"/unknown/path", "unmatched"},
+		{"/random", "unmatched"},
+	}
+
+	for _, tt := range tests {
+		got := normalizeRoute(tt.input)
+		if got != tt.expected {
+			t.Errorf("normalizeRoute(%q) = %q; want %q", tt.input, got, tt.expected)
+		}
+	}
+}
+
+func TestMetricsMiddleware(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
+	mux.HandleFunc("/unknown", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+
+	handler := metricsMiddleware(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rec.Code)
+	}
+
+	req404 := httptest.NewRequest(http.MethodGet, "/unknown", nil)
+	rec404 := httptest.NewRecorder()
+	handler.ServeHTTP(rec404, req404)
+
+	if rec404.Code != http.StatusNotFound {
+		t.Fatalf("expected status 404, got %d", rec404.Code)
+	}
+}

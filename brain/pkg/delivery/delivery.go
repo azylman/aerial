@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/azylman/aerial/brain/pkg/metrics"
 	"github.com/bwmarrin/discordgo"
 )
 
@@ -176,7 +177,18 @@ func SplitMessage(text string, limit int) []string {
 }
 
 // SendMessage delivers text to the target Discord channel/thread, chunking at the 2000-character limit.
-func SendMessage(s *discordgo.Session, channelID, text string) error {
+func SendMessage(s *discordgo.Session, channelID, text string) (err error) {
+	start := time.Now()
+	defer func() {
+		status := "success"
+		if err != nil {
+			status = "error"
+		} else if strings.TrimSpace(text) == "" {
+			status = "empty"
+		}
+		metrics.RecordDelivery(status, time.Since(start))
+	}()
+
 	if s == nil {
 		return fmt.Errorf("discord session is nil")
 	}
@@ -189,12 +201,15 @@ func SendMessage(s *discordgo.Session, channelID, text string) error {
 	}
 
 	chunks := SplitMessage(text, MaxDiscordMessageLength)
+	if len(chunks) > 1 {
+		metrics.RecordMessageChunked()
+	}
 	for _, chunk := range chunks {
 		if strings.TrimSpace(chunk) == "" {
 			continue
 		}
-		if _, err := s.ChannelMessageSend(channelID, chunk); err != nil {
-			return fmt.Errorf("failed to send message chunk: %w", err)
+		if _, sendErr := s.ChannelMessageSend(channelID, chunk); sendErr != nil {
+			return fmt.Errorf("failed to send message chunk: %w", sendErr)
 		}
 	}
 	return nil
@@ -206,6 +221,7 @@ func StartTyping(s *discordgo.Session, channelID string) (stop func()) {
 		return func() {}
 	}
 
+	metrics.DiscordTypingSessionsActive.Inc()
 	_ = s.ChannelTyping(channelID)
 	stopChan := make(chan struct{})
 	var once sync.Once
@@ -226,6 +242,7 @@ func StartTyping(s *discordgo.Session, channelID string) (stop func()) {
 	return func() {
 		once.Do(func() {
 			close(stopChan)
+			metrics.DiscordTypingSessionsActive.Dec()
 		})
 	}
 }

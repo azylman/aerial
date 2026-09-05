@@ -1136,6 +1136,16 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		}
 		lastErrDetail = errDetail
 
+		if isFailure {
+			errCat := "process_error"
+			if isTransient {
+				errCat = "transient"
+			} else if isSessionCorruption {
+				errCat = "session_corrupt"
+			}
+			metrics.RecordRunnerError(errCat, currentModel)
+		}
+
 		if !isFailure {
 			resp, parseErr := runner.ParseAgyOutput(stdout)
 			if parseErr != nil {

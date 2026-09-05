@@ -10,6 +10,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/azylman/aerial/brain/pkg/metrics"
 )
 
 // AgyResponse models the top-level structured output of agy --output-format json.
@@ -54,6 +56,15 @@ func IsSilentSentinel(stdout string) bool {
 
 // RunAgy executes the agy binary with the given parameters, capturing stdout and stderr.
 func RunAgy(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+	start := time.Now()
+	defer func() {
+		status := "success"
+		if err != nil || exitCode != 0 {
+			status = "error"
+		}
+		metrics.RecordRunnerExecution(status, model, time.Since(start))
+	}()
+
 	if agyBin == "" {
 		agyBin = "agy"
 	}
@@ -272,7 +283,7 @@ func ClassifyError(exitCode int, stdout, stderr string) (isFailure bool, isTrans
 		return false, false, false, ""
 	}
 
-	// Exit code != 0
+	// Non-zero exit code
 	isFailure = true
 	combined := strings.ToLower(stdout + "\n" + stderr)
 
@@ -313,35 +324,45 @@ func ClassifyError(exitCode int, stdout, stderr string) (isFailure bool, isTrans
 	return isFailure, isTransient, isSessionCorruption, errDetail
 }
 
-func extractErrorDetail(stderr string, exitCode int) string {
-	lines := strings.Split(stderr, "\n")
-	for _, l := range lines {
-		lTrim := strings.TrimSpace(l)
-		if lTrim != "" && (strings.Contains(strings.ToLower(lTrim), "error") || strings.Contains(strings.ToLower(lTrim), "fail") || strings.Contains(strings.ToLower(lTrim), "503") || strings.Contains(strings.ToLower(lTrim), "panic") || strings.Contains(strings.ToLower(lTrim), "terminated")) {
-			return lTrim
-		}
-	}
-	trimmedStderr := strings.TrimSpace(stderr)
-	if trimmedStderr != "" {
-		return trimmedStderr
-	}
-	return fmt.Sprintf("execution failed with exit code %d", exitCode)
-}
+var (
+	reFatalError = regexp.MustCompile(`(?i)(?:fatal|panic|traceback|terminated due to error|error:\s+[^\n\r]+)`)
+)
 
 func containsFatalStderrError(stderr string) bool {
-	lower := strings.ToLower(stderr)
-	fatalIndicators := []string{
-		"panic:",
-		"runtime error",
-		"fatal error",
-		"agent execution terminated",
-		"fatal:",
+	if stderr == "" {
+		return false
 	}
-	for _, ind := range fatalIndicators {
-		if strings.Contains(lower, ind) {
-			return true
-		}
-	}
-	return false
+	return reFatalError.MatchString(stderr)
 }
 
+func extractErrorDetail(stderr string, exitCode int) string {
+	if stderr == "" {
+		return fmt.Sprintf("execution failed with exit code %d", exitCode)
+	}
+
+	lines := strings.Split(stderr, "\n")
+	var significantLines []string
+	for _, l := range lines {
+		trimmed := strings.TrimSpace(l)
+		if trimmed == "" {
+			continue
+		}
+		if strings.Contains(trimmed, "Starting conversation update stream") {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "DEBUG") || strings.HasPrefix(trimmed, "INFO") {
+			continue
+		}
+		significantLines = append(significantLines, trimmed)
+	}
+
+	if len(significantLines) > 0 {
+		lastLine := significantLines[len(significantLines)-1]
+		if len(lastLine) > 200 {
+			return lastLine[:197] + "..."
+		}
+		return lastLine
+	}
+
+	return fmt.Sprintf("execution failed with exit code %d", exitCode)
+}

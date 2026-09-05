@@ -10,6 +10,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/azylman/aerial/brain/pkg/metrics"
 )
 
 const (
@@ -52,7 +54,7 @@ type EmbeddingResponse struct {
 // GenerateEmbedding generates an embedding for a text string.
 // If isQuery is true and EMBEDDING_QUERY_PREFIX is configured, prepends the query instruction prefix.
 // Enforces a 1.0s timeout per attempt with up to maxRetries attempts (default 1 retry = 2 total attempts).
-func (c *Client) GenerateEmbedding(ctx context.Context, text string, isQuery bool, maxRetries int) ([]float32, error) {
+func (c *Client) GenerateEmbedding(ctx context.Context, text string, isQuery bool, maxRetries int) (result []float32, retErr error) {
 	if text == "" {
 		return nil, fmt.Errorf("text cannot be empty")
 	}
@@ -72,12 +74,27 @@ func (c *Client) GenerateEmbedding(ctx context.Context, text string, isQuery boo
 		model = DefaultEmbeddingModel
 	}
 
+	embedType := "document"
+	if isQuery {
+		embedType = "query"
+	}
+
+	start := time.Now()
+	defer func() {
+		status := "success"
+		if retErr != nil || len(result) == 0 {
+			status = "error"
+		}
+		metrics.RecordEmbedding(model, embedType, status, time.Since(start))
+	}()
+
 	reqBody, err := json.Marshal(EmbeddingRequest{
 		Model:  model,
 		Prompt: prompt,
 	})
 	if err != nil {
-		return nil, err
+		retErr = err
+		return nil, retErr
 	}
 
 	if maxRetries < 0 {
@@ -92,16 +109,19 @@ func (c *Client) GenerateEmbedding(ctx context.Context, text string, isQuery boo
 		cancel()
 
 		if err == nil && len(emb) > 0 {
-			return emb, nil
+			result = emb
+			return result, nil
 		}
 
 		lastErr = err
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			retErr = ctx.Err()
+			return nil, retErr
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	return nil, fmt.Errorf("failed after %d attempts: %w", totalAttempts, lastErr)
+	retErr = fmt.Errorf("failed after %d attempts: %w", totalAttempts, lastErr)
+	return nil, retErr
 }
 
 func (c *Client) doRequest(ctx context.Context, body []byte) ([]float32, error) {

@@ -784,6 +784,67 @@ func handleTasks(database *sql.DB) http.HandlerFunc {
 	}
 }
 
+type statusRecorder struct {
+	http.ResponseWriter
+	statusCode int
+}
+
+func (rec *statusRecorder) WriteHeader(code int) {
+	rec.statusCode = code
+	rec.ResponseWriter.WriteHeader(code)
+}
+
+func (rec *statusRecorder) Flush() {
+	if f, ok := rec.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func normalizeRoute(path string) string {
+	switch {
+	case path == "/prompt":
+		return "/prompt"
+	case path == "/transcripts" || strings.HasPrefix(path, "/transcripts/"):
+		return "/transcripts"
+	case path == "/tasks" || strings.HasPrefix(path, "/tasks/"):
+		return "/tasks"
+	case path == "/facts" || strings.HasPrefix(path, "/facts/"):
+		return "/facts"
+	case path == "/schedules":
+		return "/schedules"
+	case path == "/schedules/runs":
+		return "/schedules/runs"
+	case path == "/internal/reload":
+		return "/internal/reload"
+	case path == "/health":
+		return "/health"
+	case path == "/metrics":
+		return "/metrics"
+	default:
+		return "unmatched"
+	}
+}
+
+func metricsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		metrics.HTTPInFlightRequests.Inc()
+		defer metrics.HTTPInFlightRequests.Dec()
+
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w, statusCode: http.StatusOK}
+		next.ServeHTTP(rec, r)
+
+		endpoint := normalizeRoute(r.URL.Path)
+		method := r.Method
+		if method == "" {
+			method = "GET"
+		}
+		statusStr := strconv.Itoa(rec.statusCode)
+
+		metrics.RecordHTTPRequest(endpoint, method, statusStr, time.Since(start))
+	})
+}
+
 func main() {
 	cfg, err := config.LoadConfig()
 	if err != nil {
@@ -977,7 +1038,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:    ":" + portStr,
-		Handler: mux,
+		Handler: metricsMiddleware(mux),
 	}
 
 	stopChan := make(chan os.Signal, 1)
