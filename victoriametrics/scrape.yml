@@ -3,8 +3,8 @@ global:
   scrape_timeout: 10s
 
 scrape_config_files:
-  - "/etc/victoriametrics/scrape.d/*.yml"
-  - "/etc/victoriametrics/scrape.d/*.yaml"
+  - "/share/aerial-config/victoriametrics/*.yml"
+  - "/share/aerial-config/victoriametrics/*.yaml"
 
 scrape_configs:
   - job_name: "cadvisor"
