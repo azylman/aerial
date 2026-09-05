@@ -54,7 +54,7 @@ init_scratch() {
     cd "$scratch_dir"
     git checkout -b "$branch_name" >/dev/null 2>&1
     git config user.name "Aerial"
-    git config user.email "aerial@arcane.local"
+    git config user.email "aerial@noreply.github.com"
 
     echo "{\"status\":\"initialized\",\"scratch_dir\":\"${scratch_dir}\",\"branch\":\"${branch_name}\"}"
 }
