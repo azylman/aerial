@@ -1,10 +1,3 @@
-# ----------------------------------------------------------------------------
-# Optional External Configuration Overrides (Decoupled from Monorepo)
-# Evaluated natively on the host when executing docker compose
-# ----------------------------------------------------------------------------
-include:
-  - path: "${AERIAL_CONFIG_DIR:-../aerial-config}/docker-compose.override.yml"
-
 services:
   # ----------------------------------------------------------------------------
   # 0. Persistence Layer: PostgreSQL with pgvector
@@ -115,6 +108,8 @@ services:
       - AERIAL_CONFIG_REPO_URL=${AERIAL_CONFIG_REPO_URL}
       - SYNC_INTERVAL=60s
       - SYNC_REPOS=/share/aerial-config,/share/aerial
+      - AERIAL_PROJECT_DIR=/share/aerial
+      - AERIAL_CONFIG_DIR=/share/aerial-config
     volumes:
       - ${AERIAL_CONFIG_DIR:-/mnt/data/supervisor/share/aerial-config}:/share/aerial-config:rw
       - ${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}:/share/aerial:rw

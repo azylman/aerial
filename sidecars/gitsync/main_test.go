@@ -237,3 +237,109 @@ func TestGetStatus(t *testing.T) {
 		t.Errorf("expected json status 'synced', got %q", jsonResp.Status)
 	}
 }
+
+func TestGetComposeArgs_BaseOnly(t *testing.T) {
+	composeDir := t.TempDir()
+	configDir := t.TempDir()
+
+	baseFile := filepath.Join(composeDir, "docker-compose.yml")
+	if err := os.WriteFile(baseFile, []byte("services: {}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	daemon := &SyncDaemon{
+		composeDir: composeDir,
+		configDir:  configDir,
+	}
+
+	args := daemon.getComposeArgs(composeDir, "config", "--quiet")
+
+	expectedPrefix := []string{
+		"--project-name", "aerial",
+		"--project-directory", composeDir,
+		"-f", baseFile,
+		"config", "--quiet",
+	}
+
+	if len(args) != len(expectedPrefix) {
+		t.Fatalf("expected %d args, got %d: %v", len(expectedPrefix), len(args), args)
+	}
+	for i := range expectedPrefix {
+		if args[i] != expectedPrefix[i] {
+			t.Errorf("arg[%d] = %q, want %q", i, args[i], expectedPrefix[i])
+		}
+	}
+}
+
+func TestGetComposeArgs_WithConfigOverride(t *testing.T) {
+	composeDir := t.TempDir()
+	configDir := t.TempDir()
+
+	baseFile := filepath.Join(composeDir, "docker-compose.yml")
+	if err := os.WriteFile(baseFile, []byte("services: {}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	overrideFile := filepath.Join(configDir, "docker-compose.override.yml")
+	if err := os.WriteFile(overrideFile, []byte("services: { brain: {} }"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	daemon := &SyncDaemon{
+		composeDir: composeDir,
+		configDir:  configDir,
+	}
+
+	args := daemon.getComposeArgs(composeDir, "up", "-d", "--no-recreate", "gitsync")
+
+	expectedArgs := []string{
+		"--project-name", "aerial",
+		"--project-directory", composeDir,
+		"-f", baseFile,
+		"-f", filepath.Clean(overrideFile),
+		"up", "-d", "--no-recreate", "gitsync",
+	}
+
+	if len(args) != len(expectedArgs) {
+		t.Fatalf("expected %d args, got %d: %v", len(expectedArgs), len(args), args)
+	}
+	for i := range expectedArgs {
+		if args[i] != expectedArgs[i] {
+			t.Errorf("arg[%d] = %q, want %q", i, args[i], expectedArgs[i])
+		}
+	}
+}
+
+func TestGetComposeArgs_Deduplication(t *testing.T) {
+	composeDir := t.TempDir()
+
+	baseFile := filepath.Join(composeDir, "docker-compose.yml")
+	if err := os.WriteFile(baseFile, []byte("services: {}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	overrideFile := filepath.Join(composeDir, "docker-compose.override.yml")
+	if err := os.WriteFile(overrideFile, []byte("services: { brain: {} }"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Set configDir to the same directory as composeDir
+	daemon := &SyncDaemon{
+		composeDir: composeDir,
+		configDir:  composeDir,
+	}
+
+	args := daemon.getComposeArgs(composeDir, "config")
+
+	fCount := 0
+	for _, a := range args {
+		if a == "-f" {
+			fCount++
+		}
+	}
+
+	if fCount != 2 {
+		t.Fatalf("expected exactly 2 -f flags (base + deduplicated override), got %d: %v", fCount, args)
+	}
+}
+
