@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/brain/pkg/db"
+	"github.com/azylman/aerial/brain/pkg/metrics"
 	"github.com/bwmarrin/discordgo"
 )
 
@@ -122,6 +123,8 @@ func FormatChannelHistory(messages []HistoryMessage) string {
 // if the channel is non-numeric, the session is nil, or the API request fails/times out.
 func DefaultHistoryFetcher(dg *discordgo.Session, database *sql.DB) HistoryFetcherFunc {
 	return func(ctx context.Context, channelID string, beforeID string, limit int) ([]HistoryMessage, error) {
+		start := time.Now()
+
 		// Non-snowflake check, nil session, or empty channelID -> fallback directly to database
 		if channelID == "" || !IsNumericSnowflake(channelID) || dg == nil {
 			return fetchHistoryFromDB(database, channelID, limit)
@@ -142,6 +145,7 @@ func DefaultHistoryFetcher(dg *discordgo.Session, database *sql.DB) HistoryFetch
 
 		discordMsgs, err := dg.ChannelMessages(channelID, limit, before, "", "", discordgo.WithContext(fetchCtx))
 		if err != nil {
+			metrics.RecordChannelHistoryFetch("discord_api", "fallback", time.Since(start), 0)
 			log.Printf("[Queue] Discord ChannelMessages failed for %s (falling back to database): %v", channelID, err)
 			return fetchHistoryFromDB(database, channelID, limit)
 		}
@@ -190,16 +194,19 @@ func DefaultHistoryFetcher(dg *discordgo.Session, database *sql.DB) HistoryFetch
 			})
 		}
 
+		metrics.RecordChannelHistoryFetch("discord_api", "success", time.Since(start), len(results))
 		return results, nil
 	}
 }
 
 func fetchHistoryFromDB(database *sql.DB, channelID string, limit int) ([]HistoryMessage, error) {
+	start := time.Now()
 	if database == nil {
 		return nil, nil
 	}
 	msgs, err := db.GetRecentThreadMessages(database, channelID, limit)
 	if err != nil {
+		metrics.RecordChannelHistoryFetch("database", "error", time.Since(start), 0)
 		return nil, err
 	}
 
@@ -220,5 +227,7 @@ func fetchHistoryFromDB(database *sql.DB, channelID string, limit int) ([]Histor
 			CreatedAt:  m.CreatedAt,
 		})
 	}
+
+	metrics.RecordChannelHistoryFetch("database", "success", time.Since(start), len(results))
 	return results, nil
 }

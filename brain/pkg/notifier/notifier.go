@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/azylman/aerial/brain/pkg/metrics"
 	"github.com/azylman/aerial/brain/pkg/runner"
 )
 
@@ -46,6 +47,22 @@ func GeneratePoisonPillMessage(agyBin, apiKey, promptSnippet string) string {
 // GenerateDynamicNotification attempts to generate a persona-compliant message using a lightweight agy call,
 // falling back to static predefined persona messages on error or timeout.
 func GenerateDynamicNotification(agyBin, apiKey, contextDescription string) string {
+	start := time.Now()
+	trigger := "error"
+	lowerDesc := strings.ToLower(contextDescription)
+	if strings.Contains(lowerDesc, "session reset") {
+		trigger = "session_reset"
+	} else if strings.Contains(lowerDesc, "poison") || strings.Contains(lowerDesc, "dropped") {
+		trigger = "poison_pill"
+	} else if strings.Contains(lowerDesc, "503") || strings.Contains(lowerDesc, "unavailable") {
+		trigger = "outage"
+	}
+
+	outcome := "static_fallback"
+	defer func() {
+		metrics.RecordFallbackNotification(trigger, outcome, time.Since(start))
+	}()
+
 	fallback := StaticFallback(contextDescription)
 	if agyBin == "" || apiKey == "" {
 		return fallback
@@ -77,5 +94,6 @@ func GenerateDynamicNotification(agyBin, apiKey, contextDescription string) stri
 		return fallback
 	}
 
+	outcome = "dynamic"
 	return result
 }

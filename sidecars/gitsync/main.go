@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/azylman/aerial/sidecars/gitsync/pkg/metrics"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -171,17 +173,22 @@ func (d *SyncDaemon) ValidateCompose(ctx context.Context, composeDir string) err
 	return nil
 }
 
-// ReconcileCompose executes docker compose up -d with timeout and output sanitization.
-func (d *SyncDaemon) ReconcileCompose(parentCtx context.Context) error {
+// ReconcileCompose executes docker compose up -d with timeout, metrics observation, and output sanitization.
+func (d *SyncDaemon) ReconcileCompose(parentCtx context.Context) (err error) {
 	d.composeMu.Lock()
 	defer d.composeMu.Unlock()
+
+	start := time.Now()
+	defer func() {
+		metrics.RecordReconciliation(metrics.SanitizeStatus(err), time.Since(start))
+	}()
 
 	composeDir := d.composeDir
 	if composeDir == "" {
 		composeDir = "/share/aerial"
 	}
 
-	if _, err := os.Stat(filepath.Join(composeDir, "docker-compose.yml")); err != nil {
+	if _, statErr := os.Stat(filepath.Join(composeDir, "docker-compose.yml")); statErr != nil {
 		log.Printf("[GitSync:GitOps] Notice: No docker-compose.yml found in %s, skipping reconciliation", composeDir)
 		return nil
 	}
@@ -190,9 +197,9 @@ func (d *SyncDaemon) ReconcileCompose(parentCtx context.Context) error {
 	valCtx, valCancel := context.WithTimeout(parentCtx, 30*time.Second)
 	defer valCancel()
 
-	if err := d.ValidateCompose(valCtx, composeDir); err != nil {
-		log.Printf("[GitSync:GitOps] ERROR: Pre-flight validation failed: %v. Aborting compose reconciliation.", err)
-		return err
+	if valErr := d.ValidateCompose(valCtx, composeDir); valErr != nil {
+		log.Printf("[GitSync:GitOps] ERROR: Pre-flight validation failed: %v. Aborting compose reconciliation.", valErr)
+		return valErr
 	}
 
 	// 2. Bounded compose execution
@@ -219,12 +226,12 @@ func (d *SyncDaemon) ReconcileCompose(parentCtx context.Context) error {
 	}
 	cmd.WaitDelay = 10 * time.Second
 
-	out, err := cmd.CombinedOutput()
+	out, cmdErr := cmd.CombinedOutput()
 	sanitized := SanitizeLog(strings.TrimSpace(string(out)))
 
-	if err != nil {
-		log.Printf("[GitSync:GitOps] ERROR: docker compose up failed: %s (%v)", sanitized, err)
-		return fmt.Errorf("compose up failed: %s (%w)", sanitized, err)
+	if cmdErr != nil {
+		log.Printf("[GitSync:GitOps] ERROR: docker compose up failed: %s (%v)", sanitized, cmdErr)
+		return fmt.Errorf("compose up failed: %s (%w)", sanitized, cmdErr)
 	}
 
 	if sanitized != "" {
@@ -314,12 +321,24 @@ func (d *SyncDaemon) EnsureRepo(ctx context.Context, repoPath, repoURL string) e
 }
 
 // SyncRepo synchronizes a single repository via git pull --ff-only with fallback to reset --hard FETCH_HEAD.
-func (d *SyncDaemon) SyncRepo(ctx context.Context, repoPath string) RepoSyncResult {
-	res := RepoSyncResult{Repo: repoPath}
+func (d *SyncDaemon) SyncRepo(ctx context.Context, repoPath string) (res RepoSyncResult) {
+	res = RepoSyncResult{Repo: repoPath}
 
 	if repoPath == "" {
 		return res
 	}
+
+	start := time.Now()
+	defer func() {
+		status := "success"
+		if res.Error != "" {
+			status = "error"
+		}
+		metrics.RecordPull(repoPath, status, res.Changed, time.Since(start))
+		if status == "success" {
+			metrics.RecordLastSync(repoPath, time.Now())
+		}
+	}()
 
 	if repoURL, ok := d.repoUrls[repoPath]; ok && repoURL != "" {
 		if err := d.EnsureRepo(ctx, repoPath, repoURL); err != nil {
@@ -432,9 +451,27 @@ func (d *SyncDaemon) TriggerSync() ([]RepoSyncResult, error) {
 		defer cancel()
 
 		results := make([]RepoSyncResult, 0, len(d.repos))
+		hasError := false
+		anyChanged := false
+
 		for _, repo := range d.repos {
-			results = append(results, d.SyncRepo(syncCtx, repo))
+			res := d.SyncRepo(syncCtx, repo)
+			if res.Error != "" {
+				hasError = true
+			}
+			if res.Changed {
+				anyChanged = true
+			}
+			results = append(results, res)
 		}
+
+		status := "no_change"
+		if hasError {
+			status = "error"
+		} else if anyChanged {
+			status = "synced"
+		}
+		metrics.RecordSyncRequest("periodic", status)
 
 		return results, nil
 	})
@@ -524,12 +561,16 @@ func main() {
 	daemon.StartReconcilerLoop(ctx)
 	log.Printf("[GitSync] Sidecar GitOps daemon started on :%s (interval: %v, repos: %v, composeDir: %s)", port, interval, repos, composeDir)
 
-	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+	mux := http.NewServeMux()
+
+	mux.Handle("/metrics", metrics.Handler())
+
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
 
-	http.HandleFunc("/sync", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/sync", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
 			return
@@ -537,12 +578,14 @@ func main() {
 
 		results, err := daemon.TriggerSync()
 		if err != nil {
+			metrics.RecordSyncRequest("webhook", "error")
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusInternalServerError)
 			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
 		}
 
+		metrics.RecordSyncRequest("webhook", "synced")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -553,11 +596,28 @@ func main() {
 
 	server := &http.Server{
 		Addr:         ":" + port,
+		Handler:      mux,
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 60 * time.Second,
 	}
 
-	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Fatalf("[GitSync] HTTP server fatal error: %v", err)
+	stopChan := make(chan os.Signal, 1)
+	signal.Notify(stopChan, os.Interrupt, syscall.SIGTERM)
+
+	go func() {
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("[GitSync] HTTP server fatal error: %v", err)
+		}
+	}()
+
+	<-stopChan
+	log.Println("[GitSync] Shutting down GitSync sidecar gracefully...")
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		log.Printf("[GitSync] HTTP server shutdown error: %v", err)
 	}
+	log.Println("[GitSync] GitSync sidecar stopped cleanly")
 }
