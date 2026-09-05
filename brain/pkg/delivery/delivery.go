@@ -177,13 +177,19 @@ func SplitMessage(text string, limit int) []string {
 }
 
 // SendMessage delivers text to the target Discord channel/thread, chunking at the 2000-character limit.
-func SendMessage(s *discordgo.Session, channelID, text string) (err error) {
+func SendMessage(s *discordgo.Session, channelID, text string) error {
+	return SendMessageWithAttachments(s, channelID, text, nil)
+}
+
+// SendMessageWithAttachments delivers text to the target Discord channel/thread, chunking at 2000 characters,
+// and binding any provided file attachments strictly to the final (last) message chunk.
+func SendMessageWithAttachments(s *discordgo.Session, channelID, text string, attachments []*Attachment) (err error) {
 	start := time.Now()
 	defer func() {
 		status := "success"
 		if err != nil {
 			status = "error"
-		} else if strings.TrimSpace(text) == "" {
+		} else if strings.TrimSpace(text) == "" && len(attachments) == 0 {
 			status = "empty"
 		}
 		metrics.RecordDelivery(status, time.Since(start))
@@ -195,21 +201,45 @@ func SendMessage(s *discordgo.Session, channelID, text string) (err error) {
 	if channelID == "" {
 		return fmt.Errorf("channelID cannot be empty")
 	}
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return nil
-	}
 
 	chunks := SplitMessage(text, MaxDiscordMessageLength)
+	if len(chunks) == 0 && len(attachments) == 0 {
+		return nil
+	}
 	if len(chunks) > 1 {
 		metrics.RecordMessageChunked()
 	}
-	for _, chunk := range chunks {
-		if strings.TrimSpace(chunk) == "" {
+
+	var discordFiles []*discordgo.File
+	for _, att := range attachments {
+		if att != nil && len(att.Data) > 0 {
+			discordFiles = append(discordFiles, att.ToDiscordFile())
+		}
+	}
+
+	if len(chunks) == 0 && len(discordFiles) > 0 {
+		msg := &discordgo.MessageSend{
+			Files: discordFiles,
+		}
+		if _, sendErr := s.ChannelMessageSendComplex(channelID, msg); sendErr != nil {
+			return fmt.Errorf("failed to send attachments: %w", sendErr)
+		}
+		return nil
+	}
+
+	for i, chunk := range chunks {
+		if strings.TrimSpace(chunk) == "" && (i != len(chunks)-1 || len(discordFiles) == 0) {
 			continue
 		}
-		if _, sendErr := s.ChannelMessageSend(channelID, chunk); sendErr != nil {
-			return fmt.Errorf("failed to send message chunk: %w", sendErr)
+		msg := &discordgo.MessageSend{
+			Content: chunk,
+		}
+		if i == len(chunks)-1 && len(discordFiles) > 0 {
+			msg.Files = discordFiles
+		}
+
+		if _, sendErr := s.ChannelMessageSendComplex(channelID, msg); sendErr != nil {
+			return fmt.Errorf("failed to send message chunk %d: %w", i, sendErr)
 		}
 	}
 	return nil

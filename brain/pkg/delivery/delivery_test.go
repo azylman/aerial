@@ -198,3 +198,20 @@ func TestSendSystemAlert(t *testing.T) {
 		t.Error("Expected error for missing channel, got nil")
 	}
 }
+
+func TestSendMessageWithAttachmentsNilSession(t *testing.T) {
+	err := SendMessageWithAttachments(nil, "12345", "hello", nil)
+	if err == nil {
+		t.Error("Expected error when sending message with nil session")
+	}
+
+	att := &Attachment{
+		Filename:    "test.png",
+		ContentType: "image/png",
+		Data:        []byte("fake png data"),
+	}
+	err = SendMessageWithAttachments(nil, "12345", "hello", []*Attachment{att})
+	if err == nil {
+		t.Error("Expected error when sending message with nil session and attachments")
+	}
+}
