@@ -1854,20 +1854,30 @@ func NewAssetRegistry(fsys fs.FS, versionToken string) (*AssetRegistry, error) {
 		assets: make(map[string]StaticAsset),
 	}
 
-	// 1. Read app.js to compute fallback content hash
-	var appJSHash string
+	// 1. Compute content hashes for individual assets
+	var appJSHash, styleCSSHash string
 	if data, err := fs.ReadFile(fsys, "app.js"); err == nil {
 		h := sha256.Sum256(data)
 		appJSHash = hex.EncodeToString(h[:])
 	}
+	if data, err := fs.ReadFile(fsys, "style.css"); err == nil {
+		h := sha256.Sum256(data)
+		styleCSSHash = hex.EncodeToString(h[:])
+	}
 
-	// Determine asset version string to inject
-	assetVersion := versionToken
-	if assetVersion == "" || assetVersion == "latest" || assetVersion == "dev" || assetVersion == "unknown" {
+	// Determine asset version strings to inject
+	jsVersion := versionToken
+	cssVersion := versionToken
+	if versionToken == "" || versionToken == "latest" || versionToken == "dev" || versionToken == "unknown" {
 		if len(appJSHash) >= 10 {
-			assetVersion = appJSHash[:10]
+			jsVersion = appJSHash[:10]
 		} else {
-			assetVersion = "v1"
+			jsVersion = "v1"
+		}
+		if len(styleCSSHash) >= 10 {
+			cssVersion = styleCSSHash[:10]
+		} else {
+			cssVersion = "v1"
 		}
 	}
 
@@ -1889,10 +1899,10 @@ func NewAssetRegistry(fsys fs.FS, versionToken string) (*AssetRegistry, error) {
 		if cleanPath == "index.html" {
 			htmlStr := string(rawBytes)
 			reJS := regexp.MustCompile(`src="app\.js(?:\?[^"]*)?"`)
-			htmlStr = reJS.ReplaceAllString(htmlStr, fmt.Sprintf(`src="app.js?v=%s"`, assetVersion))
+			htmlStr = reJS.ReplaceAllString(htmlStr, fmt.Sprintf(`src="app.js?v=%s"`, jsVersion))
 
 			reCSS := regexp.MustCompile(`href="style\.css(?:\?[^"]*)?"`)
-			htmlStr = reCSS.ReplaceAllString(htmlStr, fmt.Sprintf(`href="style.css?v=%s"`, assetVersion))
+			htmlStr = reCSS.ReplaceAllString(htmlStr, fmt.Sprintf(`href="style.css?v=%s"`, cssVersion))
 
 			finalBytes = []byte(htmlStr)
 		} else {

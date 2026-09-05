@@ -1070,6 +1070,24 @@ func TestAssetRegistry_ServeHTTP(t *testing.T) {
 		if !strings.Contains(body, "app.js?v=testcommit123") {
 			t.Errorf("expected index.html to contain injected asset version, got: %s", body)
 		}
+		if !strings.Contains(body, "style.css?v=testcommit123") {
+			t.Errorf("expected index.html to contain injected style version, got: %s", body)
+		}
+	})
+
+	t.Run("injects independent content hashes for app.js and style.css when versionToken is empty", func(t *testing.T) {
+		regFallback, err := NewAssetRegistry(staticFS, "")
+		if err != nil {
+			t.Fatalf("failed to create AssetRegistry with fallback: %v", err)
+		}
+		req := httptest.NewRequest("GET", "/", nil)
+		rec := httptest.NewRecorder()
+		regFallback.ServeHTTP(rec, req)
+
+		body := rec.Body.String()
+		if !strings.Contains(body, "app.js?v=") || !strings.Contains(body, "style.css?v=") {
+			t.Errorf("expected versioned links for both app.js and style.css, got: %s", body)
+		}
 	})
 
 	t.Run("serves 304 Not Modified when If-None-Match matches ETag", func(t *testing.T) {
