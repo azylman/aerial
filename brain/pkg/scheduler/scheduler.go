@@ -14,6 +14,7 @@ import (
 	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
 	"github.com/azylman/aerial/brain/pkg/memory"
+	"github.com/azylman/aerial/brain/pkg/metrics"
 	"github.com/azylman/aerial/brain/pkg/queue"
 	"github.com/azylman/aerial/brain/pkg/runner"
 	"github.com/bwmarrin/discordgo"
@@ -213,6 +214,7 @@ func ProcessDueSchedules(ctx context.Context, database *sql.DB, enqueuer Message
 		if enqueuer != nil {
 			enqueuer.Enqueue(msg)
 		}
+		metrics.SchedulerExecutionsTotal.WithLabelValues("cron", "enqueued").Inc()
 		log.Printf("[Scheduler] Enqueued recurring turn for cron %s (message ID: %s, target thread: %s, next_run: %s)",
 			c.ID, msgID, targetThreadID, nextRun.Format(time.RFC3339))
 	}
@@ -271,6 +273,7 @@ func ProcessDueSchedules(ctx context.Context, database *sql.DB, enqueuer Message
 		if enqueuer != nil {
 			enqueuer.Enqueue(msg)
 		}
+		metrics.SchedulerExecutionsTotal.WithLabelValues("one_shot", "enqueued").Inc()
 
 		log.Printf("[Scheduler] Enqueued one-shot reminder for schedule %s (message ID: %s, thread: %s)",
 			s.ID, msgID, s.ThreadID)

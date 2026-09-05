@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/azylman/aerial/brain/pkg/db"
+	"github.com/azylman/aerial/brain/pkg/metrics"
 	"github.com/azylman/aerial/brain/pkg/runner"
 )
 
@@ -365,10 +366,16 @@ func (c *Classifier) classifyWithPrompt(ctx context.Context, prompt string) Clas
 		now = c.Clock()
 	}
 
+	model := c.Model
+	if model == "" {
+		model = "Gemini 3.8 Flash (Low)"
+	}
+
 	c.mu.Lock()
 	if c.circuitOpen {
 		if now.Before(c.circuitOpenUntil) {
 			c.mu.Unlock()
+			metrics.ClassifierDecisionsTotal.WithLabelValues("circuit_open", model).Inc()
 			return ClassificationResult{
 				Confidence: 0.0,
 				Reason:     "circuit breaker open",
@@ -387,20 +394,19 @@ func (c *Classifier) classifyWithPrompt(ctx context.Context, prompt string) Clas
 
 	if c.LLMFunc == nil {
 		c.recordFailure()
+		metrics.RecordClassifierRun("error", model, 0, -1, "error")
 		return ClassificationResult{
 			Confidence: 0.0,
 			Reason:     "classifier error: no LLMFunc configured",
 		}
 	}
 
-	model := c.Model
-	if model == "" {
-		model = "Gemini 3.8 Flash (Low)"
-	}
-
+	start := time.Now()
 	resp, err := c.LLMFunc(callCtx, model, prompt)
+	duration := time.Since(start)
 	if err != nil {
 		c.recordFailure()
+		metrics.RecordClassifierRun("error", model, duration, -1, "error")
 		return ClassificationResult{
 			Confidence: 0.0,
 			Reason:     fmt.Sprintf("classifier error: %v", err),
@@ -413,6 +419,7 @@ func (c *Classifier) classifyWithPrompt(ctx context.Context, prompt string) Clas
 		if c.OnParseError != nil {
 			c.OnParseError(model, resp, parseErr)
 		}
+		metrics.RecordClassifierRun("parse_error", model, duration, -1, "parse_error")
 		return ClassificationResult{
 			Confidence: 0.0,
 			Reason:     fmt.Sprintf("classifier error: %v", parseErr),
@@ -420,6 +427,7 @@ func (c *Classifier) classifyWithPrompt(ctx context.Context, prompt string) Clas
 	}
 
 	c.recordSuccess()
+	metrics.RecordClassifierRun("success", model, duration, result.Confidence, "evaluated")
 	return result
 }
 

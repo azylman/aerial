@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/brain/pkg/db"
+	"github.com/azylman/aerial/brain/pkg/metrics"
 	"github.com/azylman/aerial/brain/pkg/queue"
 )
 
@@ -468,6 +469,47 @@ func TestHandleTasks(t *testing.T) {
 	handler.ServeHTTP(rrPost, reqPost)
 	if rrPost.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("expected 405 Method Not Allowed, got %d", rrPost.Code)
+	}
+}
+
+func TestMetricsEndpoint(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", metrics.Handler())
+
+	// Record sample metrics to instantiate metric vectors
+	metrics.RecordTurnCompleted("success", "discord", "Gemini 3.8 Flash (Low)", 2*time.Second)
+	metrics.RecordClassifierRun("success", "Gemini 3.8 Flash (Low)", 500*time.Millisecond, 0.95, "wake")
+	metrics.DiscordEventsTotal.WithLabelValues("ready").Inc()
+	metrics.DiscordMessagesProcessedTotal.WithLabelValues("false", "enqueued").Inc()
+	metrics.SchedulerExecutionsTotal.WithLabelValues("cron", "enqueued").Inc()
+
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200 OK from /metrics, got %d", rec.Code)
+	}
+
+	body := rec.Body.String()
+	requiredSubstrings := []string{
+		"aerial_brain_turns_total",
+		"aerial_brain_turn_duration_seconds",
+		"aerial_brain_active_workers",
+		"aerial_brain_queue_depth",
+		"aerial_brain_classifier_duration_seconds",
+		"aerial_brain_classifier_decisions_total",
+		"aerial_brain_classifier_confidence_score",
+		"aerial_brain_discord_events_total",
+		"aerial_brain_discord_messages_processed_total",
+		"aerial_brain_scheduler_executions_total",
+		"aerial_brain_build_info",
+	}
+
+	for _, sub := range requiredSubstrings {
+		if !strings.Contains(body, sub) {
+			t.Errorf("expected /metrics output to contain %q, body:\n%s", sub, body)
+		}
 	}
 }
 
