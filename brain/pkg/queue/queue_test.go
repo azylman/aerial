@@ -3,6 +3,8 @@ package queue
 import (
 	"bytes"
 	"context"
+	"image"
+	"image/png"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -19,6 +21,7 @@ import (
 	"github.com/azylman/aerial/brain/pkg/classifier"
 	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
+	"github.com/azylman/aerial/brain/pkg/delivery"
 	"github.com/azylman/aerial/brain/pkg/memory"
 	"github.com/azylman/aerial/brain/pkg/notifier"
 	"github.com/azylman/aerial/brain/pkg/session"
@@ -4398,3 +4401,89 @@ func TestProcessBurst_WakeModeMention_DirectMentionWakes(t *testing.T) {
 	mu.Unlock()
 }
 
+
+func TestWorkerPool_ImageDeliveryAndSanitization(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer database.Close()
+
+	tempDir := t.TempDir()
+	// Create a valid test PNG in tempDir
+	img := image.NewRGBA(image.Rect(0, 0, 10, 10))
+	var imgBuf bytes.Buffer
+	_ = png.Encode(&imgBuf, img)
+	testImgPath := filepath.Join(tempDir, "metrics_chart.png")
+	_ = os.WriteFile(testImgPath, imgBuf.Bytes(), 0600)
+
+	var deliveredText string
+	var deliveredAttachments []*delivery.Attachment
+	var mu sync.Mutex
+	doneCh := make(chan struct{})
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    3,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			respText := "Telemetry Summary:\n\n![Daily Chart](" + testImgPath + ")\n\nAll systems nominal."
+			return mockJSONResponse("session-uuid-img", respText), "", 0, nil
+		},
+		DeliveryWithAttachmentsFunc: func(s *discordgo.Session, channelID, text string, attachments []*delivery.Attachment) error {
+			mu.Lock()
+			deliveredText = text
+			deliveredAttachments = attachments
+			mu.Unlock()
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			close(doneCh)
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{
+		ID:         "msg-img-1",
+		ThreadID:   "thread-img-1",
+		GuildID:    "guild-img-1",
+		AuthorID:   "user-img-1",
+		AuthorName: "User",
+		Content:    "Show me the metrics chart",
+		Status:     db.StatusPending,
+		CreatedAt:  time.Now().UTC(),
+		UpdatedAt:  time.Now().UTC(),
+	}
+	if err := db.InsertMessage(database, msg); err != nil {
+		t.Fatalf("InsertMessage failed: %v", err)
+	}
+
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Timeout waiting for message processing")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if len(deliveredAttachments) != 1 {
+		t.Fatalf("Expected 1 attachment delivered, got %d", len(deliveredAttachments))
+	}
+	if deliveredAttachments[0].Filename != "metrics_chart.png" {
+		t.Errorf("Expected attachment filename metrics_chart.png, got %s", deliveredAttachments[0].Filename)
+	}
+	if strings.Contains(deliveredText, testImgPath) {
+		t.Errorf("Delivered text should not contain local filepath %q", testImgPath)
+	}
+	if !strings.Contains(deliveredText, "**Daily Chart**") {
+		t.Errorf("Expected caption **Daily Chart** in delivered text, got: %s", deliveredText)
+	}
+}

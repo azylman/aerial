@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"regexp"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -173,7 +174,8 @@ type WorkerPoolConfig struct {
 	// Optional hooks for testing/custom overrides
 	RunnerFunc           func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error)
 	NotifierFunc         func(agyBin, apiKey, contextDescription string) string
-	DeliveryFunc         func(s *discordgo.Session, channelID, text string) error
+	DeliveryFunc                func(s *discordgo.Session, channelID, text string) error
+	DeliveryWithAttachmentsFunc func(s *discordgo.Session, channelID, text string, attachments []*delivery.Attachment) error
 	TypingFunc           func(s *discordgo.Session, channelID string) (stop func())
 	OnMessageCompleted   func(msg db.Message, finalStatus string)
 	MemoryRetrieverFunc  MemoryRetrieverFunc
@@ -210,6 +212,15 @@ func NewWorkerPool(cfg WorkerPoolConfig) *WorkerPool {
 	}
 	if cfg.NotifierFunc == nil {
 		cfg.NotifierFunc = notifier.GenerateDynamicNotification
+	}
+	if cfg.DeliveryWithAttachmentsFunc == nil {
+		if cfg.DeliveryFunc != nil {
+			cfg.DeliveryWithAttachmentsFunc = func(s *discordgo.Session, channelID, text string, attachments []*delivery.Attachment) error {
+				return cfg.DeliveryFunc(s, channelID, text)
+			}
+		} else {
+			cfg.DeliveryWithAttachmentsFunc = delivery.SendMessageWithAttachments
+		}
 	}
 	if cfg.DeliveryFunc == nil {
 		cfg.DeliveryFunc = delivery.SendMessage
@@ -1160,13 +1171,25 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 				stopTyping()
 
 				responseText := resp.Response
-				isSilent := runner.IsSilentSentinel(responseText)
+				baseDir := "/root/.gemini/antigravity-cli/brain"
+				if currentSessionID != "" {
+					baseDir = filepath.Join(baseDir, currentSessionID)
+				}
+				cleanText, attachments := delivery.ExtractAndSanitizeMedia(responseText, baseDir)
+
+				isSilent := runner.IsSilentSentinel(cleanText) && len(attachments) == 0
 				if isSilent {
 					log.Printf("[Queue] Output is empty. Skipping Discord delivery.")
 				} else {
 					if !skipDiscord {
-						if err := p.cfg.DeliveryFunc(p.getDiscordSession(), threadID, responseText); err != nil {
-							log.Printf("[WorkerPool] Failed to deliver response for thread %s: %v", threadID, err)
+						var deliveryErr error
+						if p.cfg.DeliveryWithAttachmentsFunc != nil {
+							deliveryErr = p.cfg.DeliveryWithAttachmentsFunc(p.getDiscordSession(), threadID, cleanText, attachments)
+						} else if p.cfg.DeliveryFunc != nil {
+							deliveryErr = p.cfg.DeliveryFunc(p.getDiscordSession(), threadID, cleanText)
+						}
+						if deliveryErr != nil {
+							log.Printf("[WorkerPool] Failed to deliver response for thread %s: %v", threadID, deliveryErr)
 						}
 					}
 				}
@@ -1177,10 +1200,10 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 					currentSessionID = ""
 				}
 
-				// Mark all messages in the burst as completed with unpacked response text
+				// Mark all messages in the burst as completed with unpacked clean text
 				metrics.RecordTurnCompleted("success", triggerType, currentModel, time.Since(execStart))
 				for _, m := range burst {
-					_ = db.UpdateMessageCompleted(p.cfg.DB, m.ID, responseText)
+					_ = db.UpdateMessageCompleted(p.cfg.DB, m.ID, cleanText)
 					if m.ScheduleRunID != "" {
 						_ = db.UpdateScheduleRunStatus(p.cfg.DB, db.UpdateRunParams{
 							RunID:       m.ScheduleRunID,
