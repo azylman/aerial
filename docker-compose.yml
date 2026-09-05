@@ -347,10 +347,12 @@ services:
     environment:
       - PORT=8080
       - BRAIN_URL=http://brain:8080
+      - GITSYNC_URL=http://gitsync:8080
       - GITHUB_PAT=${GITHUB_PAT}
       - GITHUB_REPO=${GITHUB_REPO:-azylman/aerial}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ${AERIAL_CONFIG_DIR:-/mnt/data/supervisor/share/aerial-config}:/share/aerial-config:ro
     networks:
       - aerial-net
     healthcheck:

@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -964,19 +967,18 @@ func TestIndexHTMLRequiredDOMBindings(t *testing.T) {
 	htmlStr := string(data)
 
 	requiredIDs := []string{
-		`id="overall-status"`,
-		`id="cluster-sub"`,
-		`id="summary-tasks-val"`,
-		`id="summary-tasks-sub"`,
+		`id="quick-launch-dock"`,
 		`id="tasks-count-badge"`,
 		`id="active-tasks-container"`,
 		`id="deployments-container"`,
 		`id="deploy-count-badge"`,
+		`id="gitsync-badge"`,
 		`id="services-grid"`,
 		`id="active-count"`,
 		`id="permet-score-val"`,
 		`id="permet-bar-fill"`,
 		`id="tab-telemetry-btn"`,
+		`id="tab-tasks-btn"`,
 		`id="tab-schedules-btn"`,
 		`id="tab-memory-btn"`,
 	}
@@ -1353,6 +1355,204 @@ func TestDeploymentStatus_CommitTimeJSONSerialization(t *testing.T) {
 	}
 }
 
+func TestLoadQuickLaunchLinks(t *testing.T) {
+	// 1. Missing or empty path returns default core links
+	defaults := DefaultQuickLaunchLinks()
+	if len(defaults) != 4 {
+		t.Fatalf("expected 4 default quick launch links, got %d", len(defaults))
+	}
 
+	linksEmpty := loadQuickLaunchLinks("/non/existent/path/config.yaml")
+	if len(linksEmpty) != 4 {
+		t.Errorf("expected 4 links for non-existent file, got %d", len(linksEmpty))
+	}
+	for _, l := range linksEmpty {
+		if !l.IsCore {
+			t.Errorf("expected default link to have IsCore=true: %+v", l)
+		}
+	}
 
+	// 2. Custom links in dashboard.quick_launch_links
+	tempDir := t.TempDir()
+	cfgFile1 := filepath.Join(tempDir, "config1.yaml")
+	yamlContent1 := `
+dashboard:
+  quick_launch_links:
+    - name: "HOME"
+      url: "https://home.zylman.com"
+      icon: "🏠"
+      description: "Home Infrastructure Hub"
+    - name: ""
+      url: "https://skip.com"
+    - name: "NO_URL"
+      url: ""
+`
+	if err := os.WriteFile(cfgFile1, []byte(yamlContent1), 0644); err != nil {
+		t.Fatal(err)
+	}
 
+	links1 := loadQuickLaunchLinks(cfgFile1)
+	if len(links1) != 5 {
+		t.Fatalf("expected 5 links (4 core + 1 custom), got %d", len(links1))
+	}
+	customLink := links1[4]
+	if customLink.Name != "HOME" || customLink.URL != "https://home.zylman.com" || customLink.Icon != "🏠" {
+		t.Errorf("unexpected custom link: %+v", customLink)
+	}
+	if customLink.Target != "_blank" || !customLink.IsCustom {
+		t.Errorf("expected target '_blank' and IsCustom=true: %+v", customLink)
+	}
+
+	// 3. Custom links in root quick_links
+	cfgFile2 := filepath.Join(tempDir, "config2.yaml")
+	yamlContent2 := `
+quick_links:
+  - name: "INTERNAL"
+    url: "http://internal.lan"
+    target: "_self"
+`
+	if err := os.WriteFile(cfgFile2, []byte(yamlContent2), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	links2 := loadQuickLaunchLinks(cfgFile2)
+	if len(links2) != 5 {
+		t.Fatalf("expected 5 links (4 core + 1 custom), got %d", len(links2))
+	}
+	if links2[4].Name != "INTERNAL" || links2[4].Target != "_self" {
+		t.Errorf("unexpected root custom link: %+v", links2[4])
+	}
+
+	// 4. Malformed YAML
+	cfgFile3 := filepath.Join(tempDir, "config3.yaml")
+	if err := os.WriteFile(cfgFile3, []byte("invalid: [yaml: broken"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	links3 := loadQuickLaunchLinks(cfgFile3)
+	if len(links3) != 4 {
+		t.Errorf("expected 4 links on malformed YAML, got %d", len(links3))
+	}
+}
+
+func TestFetchGitSyncStatus(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. Empty URL
+	fb := fetchGitSyncStatus(ctx, "")
+	if fb.Status != "synced" || fb.MaxLagSeconds != 0 {
+		t.Errorf("expected default fallback for empty URL, got %+v", fb)
+	}
+
+	// 2. Successful upstream response
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/status" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(GitSyncStatusResponse{
+			Status:        "lagging",
+			MaxLagSeconds: 42,
+			LastSyncTime:  time.Date(2026, 9, 5, 0, 0, 0, 0, time.UTC),
+			Repos: map[string]RepoStatus{
+				"/share/aerial": {
+					Repo:           "/share/aerial",
+					DiskCommit:     "commit1",
+					RemoteCommit:   "commit2",
+					TimeLagSeconds: 42,
+					SyncStatus:     "lagging",
+				},
+			},
+		})
+	}))
+	defer mockServer.Close()
+
+	resp := fetchGitSyncStatus(ctx, mockServer.URL)
+	if resp.Status != "lagging" || resp.MaxLagSeconds != 42 {
+		t.Errorf("unexpected response from mock server: %+v", resp)
+	}
+	if len(resp.Repos) != 1 || resp.Repos["/share/aerial"].DiskCommit != "commit1" {
+		t.Errorf("unexpected repo status: %+v", resp.Repos)
+	}
+
+	// 3. Upstream 500 error returns fallback
+	errorServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer errorServer.Close()
+
+	errResp := fetchGitSyncStatus(ctx, errorServer.URL)
+	if errResp.Status != "synced" {
+		t.Errorf("expected fallback status 'synced' on error, got %q", errResp.Status)
+	}
+
+	// 4. Invalid JSON returns fallback
+	badJSONServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{not-json`))
+	}))
+	defer badJSONServer.Close()
+
+	badResp := fetchGitSyncStatus(ctx, badJSONServer.URL)
+	if badResp.Status != "synced" {
+		t.Errorf("expected fallback status 'synced' on bad JSON, got %q", badResp.Status)
+	}
+}
+
+func TestStatusHandler_EnrichedFields(t *testing.T) {
+	tempDir := t.TempDir()
+	cfgFile := filepath.Join(tempDir, "config.yaml")
+	cfgContent := `
+dashboard:
+  quick_launch_links:
+    - name: "HOME"
+      url: "https://home.zylman.com"
+`
+	if err := os.WriteFile(cfgFile, []byte(cfgContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AERIAL_CONFIG_PATH", cfgFile)
+
+	gitsyncMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(GitSyncStatusResponse{
+			Status:        "synced",
+			MaxLagSeconds: 0,
+			LastSyncTime:  time.Now().UTC(),
+		})
+	}))
+	defer gitsyncMock.Close()
+
+	handler := statusHandler("", gitsyncMock.URL)
+	req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", rr.Code)
+	}
+
+	var resp ClusterResponse
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	// Verify QuickLaunchLinks
+	if len(resp.QuickLaunchLinks) != 5 {
+		t.Fatalf("expected 5 quick launch links, got %d", len(resp.QuickLaunchLinks))
+	}
+	hasHome := false
+	for _, l := range resp.QuickLaunchLinks {
+		if l.Name == "HOME" && l.URL == "https://home.zylman.com" {
+			hasHome = true
+		}
+	}
+	if !hasHome {
+		t.Errorf("expected 'HOME' link in QuickLaunchLinks: %+v", resp.QuickLaunchLinks)
+	}
+
+	// Verify GitSync
+	if resp.GitSync.Status != "synced" {
+		t.Errorf("expected GitSync status 'synced', got %q", resp.GitSync.Status)
+	}
+}

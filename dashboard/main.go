@@ -22,6 +22,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 //go:embed static/*
@@ -132,13 +134,44 @@ type BrainTasksAPIResponse struct {
 	} `json:"tasks"`
 }
 
+type QuickLaunchLink struct {
+	Name        string `json:"name" yaml:"name"`
+	URL         string `json:"url" yaml:"url"`
+	Icon        string `json:"icon,omitempty" yaml:"icon,omitempty"`
+	Description string `json:"description,omitempty" yaml:"description,omitempty"`
+	Target      string `json:"target,omitempty" yaml:"target,omitempty"`
+	IsCore      bool   `json:"is_core,omitempty" yaml:"is_core,omitempty"`
+	IsCustom    bool   `json:"is_custom,omitempty" yaml:"is_custom,omitempty"`
+}
+
+type RepoStatus struct {
+	Repo             string     `json:"repo"`
+	DiskCommit       string     `json:"disk_commit"`
+	DiskCommitTime   *time.Time `json:"disk_commit_time,omitempty"`
+	RemoteCommit     string     `json:"remote_commit"`
+	RemoteCommitTime *time.Time `json:"remote_commit_time,omitempty"`
+	TimeLagSeconds   int64      `json:"time_lag_seconds"`
+	SyncStatus       string     `json:"sync_status"` // "synced", "lagging", "error"
+	LastSyncTime     time.Time  `json:"last_sync_time"`
+	Error            string     `json:"error,omitempty"`
+}
+
+type GitSyncStatusResponse struct {
+	Status        string                `json:"status"` // "synced", "lagging", "error"
+	MaxLagSeconds int64                 `json:"max_lag_seconds"`
+	LastSyncTime  time.Time             `json:"last_sync_time"`
+	Repos         map[string]RepoStatus `json:"repos,omitempty"`
+}
+
 type ClusterResponse struct {
-	SystemTime       time.Time          `json:"system_time"`
-	ClusterStatus    string             `json:"cluster_status"`
-	ActiveTasksCount int                `json:"active_tasks_count"`
-	ActiveTasks      []ActiveTaskStatus `json:"active_tasks"`
-	Services         []ServiceStatus    `json:"services"`
-	Deployments      []DeploymentStatus `json:"deployments"`
+	SystemTime       time.Time             `json:"system_time"`
+	ClusterStatus    string                `json:"cluster_status"`
+	ActiveTasksCount int                   `json:"active_tasks_count"`
+	ActiveTasks      []ActiveTaskStatus    `json:"active_tasks"`
+	Services         []ServiceStatus       `json:"services"`
+	Deployments      []DeploymentStatus    `json:"deployments"`
+	QuickLaunchLinks []QuickLaunchLink     `json:"quick_launch_links"`
+	GitSync          GitSyncStatusResponse `json:"git_sync"`
 }
 
 type GitHubRun struct {
@@ -1236,7 +1269,105 @@ func fetchActiveTasksFromBrain(ctx context.Context, brainURL string) ([]ActiveTa
 	return tasks, nil
 }
 
-func statusHandler(brainURL string) http.HandlerFunc {
+// DefaultQuickLaunchLinks returns the core default gateway launch targets.
+func DefaultQuickLaunchLinks() []QuickLaunchLink {
+	return []QuickLaunchLink{
+		{Name: "💬 LLM SESSIONS", URL: "/conversations/", Target: "_blank", IsCore: true},
+		{Name: "📚 DOCS", URL: "/docs/", Target: "_blank", IsCore: true},
+		{Name: "📊 OBSERVABILITY", URL: "/grafana/", Target: "_blank", IsCore: true},
+		{Name: "🧪 UI TESTING", URL: "/ui-testing/", Target: "_self", IsCore: true},
+	}
+}
+
+type rawUserConfig struct {
+	Dashboard struct {
+		QuickLinks       []QuickLaunchLink `yaml:"quick_links"`
+		QuickLaunchLinks []QuickLaunchLink `yaml:"quick_launch_links"`
+	} `yaml:"dashboard"`
+	QuickLinks []QuickLaunchLink `yaml:"quick_links"`
+}
+
+// loadQuickLaunchLinks merges default core links with custom links defined in config.yaml.
+func loadQuickLaunchLinks(configPath string) []QuickLaunchLink {
+	links := DefaultQuickLaunchLinks()
+
+	if configPath == "" {
+		configPath = os.Getenv("AERIAL_CONFIG_PATH")
+	}
+	if configPath == "" {
+		configPath = "/share/aerial-config/config.yaml"
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return links
+	}
+
+	var cfg rawUserConfig
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		log.Printf("[Dashboard] Warning: failed to parse %s for quick links: %v", configPath, err)
+		return links
+	}
+
+	custom := cfg.Dashboard.QuickLinks
+	if len(custom) == 0 {
+		custom = cfg.Dashboard.QuickLaunchLinks
+	}
+	if len(custom) == 0 {
+		custom = cfg.QuickLinks
+	}
+
+	for _, l := range custom {
+		if l.Name == "" || l.URL == "" {
+			continue
+		}
+		if l.Target == "" {
+			l.Target = "_blank"
+		}
+		l.IsCustom = true
+		links = append(links, l)
+	}
+
+	return links
+}
+
+// fetchGitSyncStatus queries the GitSync sidecar for real-time repository checkout and lag metadata.
+func fetchGitSyncStatus(ctx context.Context, gitsyncURL string) GitSyncStatusResponse {
+	fallback := GitSyncStatusResponse{
+		Status:        "synced",
+		MaxLagSeconds: 0,
+		LastSyncTime:  time.Now().UTC(),
+	}
+
+	if gitsyncURL == "" {
+		return fallback
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(gitsyncURL, "/")+"/status", nil)
+	if err != nil {
+		return fallback
+	}
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fallback
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fallback
+	}
+
+	var status GitSyncStatusResponse
+	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+		return fallback
+	}
+
+	return status
+}
+
+func statusHandler(brainURL string, gitsyncURL ...string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
@@ -1270,6 +1401,19 @@ func statusHandler(brainURL string) http.HandlerFunc {
 			activeTasks = []ActiveTaskStatus{}
 		}
 
+		gURL := ""
+		if len(gitsyncURL) > 0 {
+			gURL = gitsyncURL[0]
+		} else {
+			gURL = os.Getenv("GITSYNC_URL")
+			if gURL == "" {
+				gURL = "http://gitsync:8080"
+			}
+		}
+
+		gitSync := fetchGitSyncStatus(ctx, gURL)
+		quickLinks := loadQuickLaunchLinks("")
+
 		if err != nil || len(services) == 0 {
 			uptimeSec := int64(time.Since(startTime).Seconds())
 			services = []ServiceStatus{
@@ -1302,6 +1446,8 @@ func statusHandler(brainURL string) http.HandlerFunc {
 			ActiveTasks:      activeTasks,
 			Services:         services,
 			Deployments:      deployments,
+			QuickLaunchLinks: quickLinks,
+			GitSync:          gitSync,
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")

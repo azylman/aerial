@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -159,5 +162,78 @@ func TestHasComposeChanges(t *testing.T) {
 	changed, err = daemon.HasComposeChanges(ctx, tempDir, c3, c4)
 	if err != nil || !changed {
 		t.Errorf("expected true for .env change, got changed=%v, err=%v", changed, err)
+	}
+}
+
+func TestGetStatus(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// Initialize git repo
+	cmdInit := exec.Command("git", "init", "-b", "main", tempDir)
+	if out, err := cmdInit.CombinedOutput(); err != nil {
+		t.Fatalf("git init failed: %s (%v)", out, err)
+	}
+
+	_ = exec.Command("git", "-C", tempDir, "config", "user.name", "Test").Run()
+	_ = exec.Command("git", "-C", tempDir, "config", "user.email", "test@example.com").Run()
+
+	readmePath := filepath.Join(tempDir, "README.md")
+	if err := os.WriteFile(readmePath, []byte("# Initial"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	_ = exec.Command("git", "-C", tempDir, "add", "-A").Run()
+	_ = exec.Command("git", "-C", tempDir, "commit", "-m", "initial commit").Run()
+
+	daemon := &SyncDaemon{
+		repos: []string{tempDir},
+	}
+
+	ctx := context.Background()
+	status := daemon.GetStatus(ctx)
+
+	if status.Status != "synced" {
+		t.Errorf("expected status 'synced', got %q", status.Status)
+	}
+	if status.MaxLagSeconds != 0 {
+		t.Errorf("expected max_lag_seconds 0, got %d", status.MaxLagSeconds)
+	}
+	repoSt, ok := status.Repos[tempDir]
+	if !ok {
+		t.Fatalf("expected repo %s in status response", tempDir)
+	}
+	if repoSt.DiskCommit == "" {
+		t.Errorf("expected non-empty disk commit")
+	}
+	if repoSt.SyncStatus != "synced" {
+		t.Errorf("expected repo sync_status 'synced', got %q", repoSt.SyncStatus)
+	}
+
+	// Test HTTP Endpoint
+	mux := http.NewServeMux()
+	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(daemon.GetStatus(r.Context()))
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/status")
+	if err != nil {
+		t.Fatalf("GET /status failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected status 200, got %d", resp.StatusCode)
+	}
+
+	var jsonResp GitSyncStatusResponse
+	if err := json.NewDecoder(resp.Body).Decode(&jsonResp); err != nil {
+		t.Fatalf("failed to decode JSON: %v", err)
+	}
+
+	if jsonResp.Status != "synced" {
+		t.Errorf("expected json status 'synced', got %q", jsonResp.Status)
 	}
 }

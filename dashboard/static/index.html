@@ -3,110 +3,83 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AERIAL // SYSTEM COMMAND HUD v2.0</title>
-    <link rel="stylesheet" href="style.css?v=2.4">
+    <title>AERIAL // PERMET COMMAND HUD v3.0</title>
+    <link rel="stylesheet" href="style.css?v=3.0">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Space+Grotesk:wght@500;700;800&display=swap" rel="stylesheet">
 </head>
 <body>
-    <div class="cyber-bg"></div>
-    <div class="grid-overlay"></div>
     <div class="scanline"></div>
 
     <div class="hud-container">
         <!-- HEADER -->
         <header class="hud-header">
-            <div class="brand">
-                <div class="logo-badge">
-                    <span class="logo-icon">⚡</span>
+            <div class="header-top">
+                <div class="brand-block">
+                    <div class="brand-badge">⚡</div>
+                    <div class="brand-text">
+                        <h1>AERIAL <span class="version">v3.0</span></h1>
+                        <div class="sub">PERMET COMMAND HUD // TACTICAL GATEWAY</div>
+                    </div>
                 </div>
-                <div>
-                    <h1>AERIAL <span class="version">v2.0</span></h1>
-                    <div class="sub">SYSTEM COMMAND HUD // PERMET NETWORK</div>
+
+                <!-- PERMET SCORE STATUS -->
+                <div class="permet-gauge">
+                    <div class="permet-gauge-header">
+                        <span class="permet-label">PERMET SCORE</span>
+                        <span class="permet-value" id="permet-score-val">LVL 5 // ACTIVE</span>
+                    </div>
+                    <div class="permet-bar-bg">
+                        <div class="permet-bar-fill" id="permet-bar-fill" style="width: 88%;"></div>
+                    </div>
                 </div>
             </div>
 
-            <!-- PERMET SCORE STATUS -->
-            <div class="permet-gauge">
-                <div class="permet-header">
-                    <span class="permet-label">PERMET SCORE</span>
-                    <span class="permet-value" id="permet-score-val">LVL 5 // ACTIVE</span>
-                </div>
-                <div class="permet-bar-bg">
-                    <div class="permet-bar-fill" id="permet-bar-fill" style="width: 85%;"></div>
-                </div>
-            </div>
+            <!-- PRIMARY 4-VIEW NAVIGATION TABS -->
+            <nav class="hud-view-tabs" role="tablist" aria-label="Command Center Views">
+                <button class="view-tab-btn active" id="tab-telemetry-btn" role="tab" aria-selected="true" aria-controls="telemetry-view">
+                    <span class="tab-icon">⚡</span>
+                    <span>TELEMETRY</span>
+                </button>
+                <button class="view-tab-btn" id="tab-tasks-btn" role="tab" aria-selected="false" aria-controls="tasks-view">
+                    <span class="tab-icon">🎯</span>
+                    <span>ACTIVE TASKS</span>
+                    <span class="tab-badge" id="tasks-badge-count">0</span>
+                </button>
+                <button class="view-tab-btn" id="tab-schedules-btn" role="tab" aria-selected="false" aria-controls="schedules-view">
+                    <span class="tab-icon">⏰</span>
+                    <span>SCHEDULES</span>
+                    <span class="tab-badge" id="schedules-badge-count">0</span>
+                </button>
+                <button class="view-tab-btn" id="tab-memory-btn" role="tab" aria-selected="false" aria-controls="memory-view">
+                    <span class="tab-icon">🧠</span>
+                    <span>MEMORY ARCHIVE</span>
+                    <span class="tab-badge" id="memory-badge-count">0</span>
+                </button>
+            </nav>
 
-            <!-- NAVIGATION -->
-            <nav class="hud-nav" role="tablist">
-                <button class="nav-btn active" id="tab-telemetry-btn" role="tab" aria-selected="true" aria-controls="telemetry-view">
-                    <span class="btn-glow"></span>
-                    <span class="btn-text">⚡ TELEMETRY</span>
-                </button>
-                <button class="nav-btn" id="tab-schedules-btn" role="tab" aria-selected="false" aria-controls="schedules-view">
-                    <span class="btn-glow"></span>
-                    <span class="btn-text">⏰ SCHEDULES</span>
-                </button>
-                <button class="nav-btn" id="tab-memory-btn" role="tab" aria-selected="false" aria-controls="memory-view">
-                    <span class="btn-glow"></span>
-                    <span class="btn-text">🧠 MEMORY ARCHIVE</span>
-                </button>
-                <a href="/docs/" class="nav-btn highlight" target="_blank" rel="noopener">
-                    <span class="btn-glow"></span>
-                    <span class="btn-text">📚 DOCS</span>
-                </a>
-                <a href="/conversations/" class="nav-btn highlight" target="_blank" rel="noopener">
-                    <span class="btn-glow"></span>
-                    <span class="btn-text">💬 AGENTSVIEW</span>
-                </a>
+            <!-- TACTICAL QUICK-LAUNCH DOCK -->
+            <nav class="quick-launch-dock" id="quick-launch-dock" aria-label="Tactical Gateway Launcher">
+                <!-- Dynamically populated via app.js -->
             </nav>
         </header>
 
         <!-- VIEW 1: TELEMETRY -->
         <div id="telemetry-view" class="view-panel active" role="tabpanel">
-            <!-- STATS / SUMMARY BAR -->
-            <section class="summary-bar">
-                <div class="summary-card">
-                    <div class="card-glow"></div>
-                    <span class="label">CLUSTER STATUS</span>
-                    <span class="value text-success" id="overall-status">OPTIMAL</span>
-                    <span class="sub-label" id="cluster-sub">100% OPERATIONAL</span>
-                </div>
-                <div class="summary-card" id="summary-card-tasks">
-                    <div class="card-glow"></div>
-                    <span class="label">AGENT QUEUE</span>
-                    <span class="value text-success" id="summary-tasks-val">0 IDLE</span>
-                    <span class="sub-label" id="summary-tasks-sub">REAL-TIME DISPATCH</span>
-                </div>
-                <div class="summary-card">
-                    <div class="card-glow"></div>
-                    <span class="label">ACTIVE SERVICES</span>
-                    <span class="value" id="active-count">10 / 10</span>
-                    <span class="sub-label">STACK HEALTHY</span>
-                </div>
-                <div class="summary-card">
-                    <div class="card-glow"></div>
-                    <span class="label">REGION / TIMEZONE</span>
-                    <span class="value">US-WEST</span>
-                    <span class="sub-label">America/Los_Angeles</span>
-                </div>
-                <div class="summary-card">
-                    <div class="card-glow"></div>
-                    <span class="label">LAST SYNCHRONIZED</span>
-                    <span class="value" id="last-refresh">--:--:--</span>
-                    <span class="sub-label" id="refresh-interval">SYNCED (5s)</span>
-                </div>
-            </section>
-
             <!-- LIVE AGENT EXECUTION QUEUE SECTION -->
-            <section class="active-tasks-section" aria-live="polite">
+            <section class="active-tasks-section" id="active-tasks-telemetry-section" aria-live="polite">
                 <div class="section-title-bar">
                     <div class="section-title">
                         <span class="title-icon">⚡</span>
                         <h2>LIVE AGENT EXECUTION QUEUE</h2>
                     </div>
-                    <span class="section-badge" id="tasks-count-badge">0 IN PROGRESS</span>
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <span class="section-badge" id="tasks-count-badge">0 IN PROGRESS</span>
+                        <button class="task-inspect-btn" id="expand-tasks-btn" style="cursor: pointer; padding: 4px 10px; font-size: 0.72rem; border-color: var(--border-glow);">
+                            <span>EXPAND VIEW ↗</span>
+                        </button>
+                    </div>
                 </div>
                 <div class="active-tasks-container" id="active-tasks-container">
                     <div id="active-tasks-list">
@@ -128,7 +101,13 @@
                         <span class="title-icon">🚀</span>
                         <h2>DEPLOYMENT PIPELINE</h2>
                     </div>
-                    <span class="section-badge" id="deploy-count-badge">0 IN PROGRESS</span>
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <span class="section-badge" id="deploy-count-badge">IN SYNC</span>
+                        <div class="gitsync-pill" id="gitsync-badge">
+                            <span style="font-size: 0.8rem;">🟢</span>
+                            <span>GIT SYNC: IN SYNC (Δ 0s)</span>
+                        </div>
+                    </div>
                 </div>
                 <div class="deployments-container" id="deployments-container">
                     <!-- Dynamically populated via app.js -->
@@ -142,6 +121,7 @@
                         <span class="title-icon">⚡</span>
                         <h2>ACTIVE STACK COMPONENTS</h2>
                     </div>
+                    <span class="section-badge" id="active-count">0 / 0 HEALTHY</span>
                 </div>
                 <div class="services-grid" id="services-grid">
                     <!-- Dynamically populated via app.js -->
@@ -149,8 +129,69 @@
             </main>
         </div>
 
-        <!-- VIEW 2: SCHEDULES & EXECUTION TELEMETRY -->
-        <div id="schedules-view" class="view-panel" role="tabpanel" style="display: none;">
+        <!-- VIEW 2: ACTIVE TASKS COCKPIT -->
+        <div id="tasks-view" class="view-panel" role="tabpanel">
+            <!-- TASKS KPI SUMMARY BAR -->
+            <section class="summary-bar">
+                <div class="summary-card">
+                    <span class="summary-label">Queue Concurrency</span>
+                    <span class="summary-value text-cyan" id="tasks-kpi-workers">0 / 4 WORKERS</span>
+                    <span class="summary-sub" id="tasks-kpi-workers-sub">REAL-TIME DISPATCH</span>
+                </div>
+                <div class="summary-card">
+                    <span class="summary-label">Queued Backlog</span>
+                    <span class="summary-value" id="tasks-kpi-queued" style="color: var(--neon-amber);">0 TURNS</span>
+                    <span class="summary-sub">FIFO DISPATCH READY</span>
+                </div>
+                <div class="summary-card">
+                    <span class="summary-label">Active Channel Funnel</span>
+                    <span class="summary-value text-success">ONLINE</span>
+                    <span class="summary-sub">DISCORD GATEWAY OK</span>
+                </div>
+                <div class="summary-card">
+                    <span class="summary-label">Engine Architecture</span>
+                    <span class="summary-value" style="font-size: 1.15rem; color: var(--permet-purple);">AGY DUAL-ENGINE</span>
+                    <span class="summary-sub">OLLAMA + GEMINI 3.8</span>
+                </div>
+            </section>
+
+            <!-- LIVE DISPATCH STREAM -->
+            <section class="active-tasks-section">
+                <div class="section-title-bar">
+                    <div class="section-title">
+                        <span class="title-icon">⚡</span>
+                        <h2>LIVE DISPATCH STREAM</h2>
+                    </div>
+                    <span class="section-badge" id="tasks-view-badge">0 IN PROGRESS</span>
+                </div>
+                <div class="active-tasks-container" id="tasks-view-container">
+                    <!-- Dynamically populated via app.js -->
+                </div>
+            </section>
+
+            <!-- RECENT TASK EXECUTION HISTORY -->
+            <section class="active-tasks-section">
+                <div class="section-title-bar">
+                    <div class="section-title">
+                        <span class="title-icon">📋</span>
+                        <h2>RECENT TASK EXECUTION HISTORY</h2>
+                    </div>
+                    <span class="section-badge" style="background: rgba(5, 255, 161, 0.12); color: var(--neon-green); border-color: rgba(5, 255, 161, 0.3);">PASSED</span>
+                </div>
+                <div class="active-tasks-container" id="tasks-history-container">
+                    <div class="task-idle-card">
+                        <div class="idle-indicator">
+                            <span class="pulse-dot healthy"></span>
+                            <span>RECENT RUN TURNS AUDITED // NO FAILURES RECORDED</span>
+                        </div>
+                        <div>HISTORY BUFFER (SQLITE)</div>
+                    </div>
+                </div>
+            </section>
+        </div>
+
+        <!-- VIEW 3: SCHEDULES & EXECUTION TELEMETRY -->
+        <div id="schedules-view" class="view-panel" role="tabpanel">
             <!-- RECONNECTION / DEGRADED WARNING BANNER -->
             <div id="schedules-reconnect-banner" class="reconnect-banner" style="display: none;">
                 <span class="reconnect-icon">⚡</span>
@@ -242,8 +283,8 @@
             </section>
         </div>
 
-        <!-- VIEW 3: PERMET MEMORY ARCHIVE -->
-        <div id="memory-view" class="view-panel" role="tabpanel" style="display: none;">
+        <!-- VIEW 4: PERMET MEMORY ARCHIVE -->
+        <div id="memory-view" class="view-panel" role="tabpanel">
             <!-- MEMORY SUMMARY BAR -->
             <section class="summary-bar">
                 <div class="summary-card">
@@ -319,6 +360,6 @@
         </div>
     </aside>
 
-    <script src="app.js?v=2.5"></script>
+    <script src="app.js?v=3.0"></script>
 </body>
 </html>

@@ -61,7 +61,11 @@ const {
     formatDuration,
     formatTimestamp,
     formatTimeAgo,
-    formatCountdown
+    formatCountdown,
+    formatGitSyncDelta,
+    renderGitSyncBadge,
+    renderQuickLaunchDock,
+    TABS
 } = sandbox;
 
 describe('Permet HUD Pure Logic Unit Tests', () => {
@@ -265,6 +269,97 @@ describe('Permet HUD Pure Logic Unit Tests', () => {
             const privateIpPattern = /192\.168\.\d+\.\d+/g;
             const matches = appJsCode.match(privateIpPattern);
             assert.equal(matches, null, `Found private IP leak in app.js: ${JSON.stringify(matches)}`);
+        });
+    });
+
+    describe('formatGitSyncDelta(seconds)', () => {
+        it('formats seconds correctly', () => {
+            assert.equal(formatGitSyncDelta(0), 'Δ 0s');
+            assert.equal(formatGitSyncDelta(45), 'Δ 45s');
+            assert.equal(formatGitSyncDelta(60), 'Δ 1m');
+            assert.equal(formatGitSyncDelta(125), 'Δ 2m 5s');
+            assert.equal(formatGitSyncDelta(3600), 'Δ 1h');
+            assert.equal(formatGitSyncDelta(3665), 'Δ 1h 1m');
+        });
+
+        it('handles negative, null, or invalid seconds safely', () => {
+            assert.equal(formatGitSyncDelta(null), 'Δ 0s');
+            assert.equal(formatGitSyncDelta(undefined), 'Δ 0s');
+            assert.equal(formatGitSyncDelta(NaN), 'Δ 0s');
+            assert.equal(formatGitSyncDelta(-10), 'Δ 0s');
+        });
+    });
+
+    describe('renderQuickLaunchDock(links)', () => {
+        it('renders quick launch chips and sets target and rel attributes', () => {
+            const mockDock = { style: {}, innerHTML: '' };
+            sandbox.document.getElementById = (id) => id === 'quick-launch-dock' ? mockDock : null;
+
+            const links = [
+                { name: 'DOCS', url: '/docs/', icon: '📚', target: '_blank', is_core: true },
+                { name: 'HOME', url: 'https://home.zylman.com', icon: '🏠', target: '_blank', is_custom: true, description: 'Home Hub' },
+                { name: 'TEST', url: '/ui-testing/', target: '_self' }
+            ];
+
+            renderQuickLaunchDock(links);
+
+            assert.equal(mockDock.style.display, 'flex');
+            assert.ok(mockDock.innerHTML.includes('href="/docs/"'));
+            assert.ok(mockDock.innerHTML.includes('rel="noopener noreferrer"'));
+            assert.ok(mockDock.innerHTML.includes('href="https://home.zylman.com"'));
+            assert.ok(mockDock.innerHTML.includes('ping-dot custom'));
+            assert.ok(mockDock.innerHTML.includes('title="Home Hub"'));
+            assert.ok(mockDock.innerHTML.includes('target="_self"'));
+        });
+
+        it('hides dock when links list is empty', () => {
+            const mockDock = { style: {}, innerHTML: '' };
+            sandbox.document.getElementById = (id) => id === 'quick-launch-dock' ? mockDock : null;
+
+            renderQuickLaunchDock([]);
+            assert.equal(mockDock.style.display, 'none');
+        });
+    });
+
+    describe('renderGitSyncBadge(gitSync)', () => {
+        it('renders in-sync pill when status is synced and lag is 0', () => {
+            const mockBadge = { className: '', innerHTML: '' };
+            sandbox.document.getElementById = (id) => id === 'gitsync-badge' ? mockBadge : null;
+
+            renderGitSyncBadge({ status: 'synced', max_lag_seconds: 0 });
+            assert.equal(mockBadge.className, 'gitsync-pill');
+            assert.ok(mockBadge.innerHTML.includes('IN SYNC (Δ 0s)'));
+        });
+
+        it('renders lagging pill when lag > 0', () => {
+            const mockBadge = { className: '', innerHTML: '' };
+            sandbox.document.getElementById = (id) => id === 'gitsync-badge' ? mockBadge : null;
+
+            renderGitSyncBadge({ status: 'lagging', max_lag_seconds: 45 });
+            assert.equal(mockBadge.className, 'gitsync-pill lagging');
+            assert.ok(mockBadge.innerHTML.includes('BEHIND (Δ 45s)'));
+        });
+
+        it('renders error pill when status is error', () => {
+            const mockBadge = { className: '', innerHTML: '' };
+            sandbox.document.getElementById = (id) => id === 'gitsync-badge' ? mockBadge : null;
+
+            renderGitSyncBadge({ status: 'error' });
+            assert.equal(mockBadge.className, 'gitsync-pill error');
+            assert.ok(mockBadge.innerHTML.includes('ERROR'));
+        });
+    });
+
+    describe('4-View Navigation Architecture (TABS)', () => {
+        it('includes telemetry, tasks, schedules, and memory tabs', () => {
+            assert.ok(TABS.telemetry, 'Missing telemetry tab');
+            assert.ok(TABS.tasks, 'Missing tasks tab');
+            assert.ok(TABS.schedules, 'Missing schedules tab');
+            assert.ok(TABS.memory, 'Missing memory tab');
+
+            assert.equal(TABS.tasks.btnId, 'tab-tasks-btn');
+            assert.equal(TABS.tasks.viewId, 'tasks-view');
+            assert.equal(TABS.tasks.hash, '#tasks');
         });
     });
 });
