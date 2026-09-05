@@ -13,6 +13,8 @@ Aerial runs as a multi-container Docker stack supervised by Watchtower and Autoh
   - Fast ambient relevance classifier standardized on canonical `Gemini 3.8 Flash (Low)`.
   - In-memory serialized thread worker pool with PostgreSQL 16 and pgvector state persistence.
   - Kernel-enforced read-only filesystem mounts on `/share/aerial-config:ro` and `/share/aerial:ro` with `shm_size: 512mb` to prevent unpushed repository corruption.
+  - Deep Prometheus metrics telemetry exposed on internal port `8080/metrics` (host `8088/metrics`).
+  - Empty response suppression: turns with empty or whitespace-only stdout silently skip Discord delivery (purged legacy `[NO_REPLY]` sentinels).
   - Automatic turn-end Markdown output delivery directly to the active Discord thread.
   - In-process file watcher dynamically hot-reloading rules, skills, and configuration without process restarts.
   - Background scheduler monitor evaluating recurring crons and one-shot reminders every 30 seconds.
@@ -26,16 +28,17 @@ Aerial runs as a multi-container Docker stack supervised by Watchtower and Autoh
   - Dedicated sidecar container holding read-write (`:rw`) volume mounts on `/share/aerial-config` and `/share/aerial`.
   - Performs singleflight periodic and webhook-triggered (`POST /sync`) Git synchronization with credential scrubbing and POSIX base64 tokens.
   - Automated Declarative GitOps Docker Compose Reconciler: pre-flight validates and executes `docker compose up -d` upon git sync or webhook trigger, keeping container topologies declaratively aligned.
+  - Exposes Prometheus metrics on internal port `8080/metrics`.
   - Fast-forward pulls with safe reset recovery to `FETCH_HEAD`, keeping running code cleanly decoupled from the execution engine.
 
 - **Outbound Model Context Protocol (MCP) Microservices (`aerial-net`)**:
-  - `scheduler-mcp`: PostgreSQL-backed recurring cron and one-shot reminder management.
+  - `scheduler-mcp`: PostgreSQL-backed recurring cron and one-shot reminder management server over HTTP MCP.
   - `discord-mcp`: Outbound Discord API operations (history, thread creation, channel management).
-  - `docker-mcp`: Docker host daemon diagnostics and container inspection.
-  - `github-mcp`: GitHub API and repository operations.
+  - `docker-mcp`: Native in-image Docker MCP stdio server with translation proxy over host `/var/run/docker.sock`.
+  - `github-mcp`: Native in-image GitHub MCP stdio server with translation proxy and PAT authentication.
 
 - **Web, Gateway & Documentation Services**:
-  - `aerial-proxy`: Edge reverse proxy routing external web traffic to Dashboard (`/`), Documentation (`/docs`), Agentsview (`/conversations`), and Grafana (`/grafana/`).
+  - `aerial-proxy`: Edge reverse proxy routing external web traffic to Dashboard (`/` 302 redirect and `/dashboard/`), Documentation (`/docs/`), Agentsview (`/conversations/`), and Grafana (`/grafana/`).
   - `aerial-dashboard`: Web status HUD rendering live queue state, recent turns, and health.
   - `aerial-docs`: Documentation service serving architectural specifications and runbooks via Docsify and Mermaid.
   - `agentsview`: Web observability dashboard rendering Antigravity session transcripts and tool traces.
@@ -43,8 +46,9 @@ Aerial runs as a multi-container Docker stack supervised by Watchtower and Autoh
 - **Observability & Telemetry Stack**:
   - `aerial-cadvisor`: Container metrics collector gathering per-container CPU, memory, network, and disk telemetry.
   - `aerial-node-exporter`: Host telemetry collector gathering host CPU loads, memory, storage, thermals, and network metrics.
-  - `aerial-victoriametrics`: Single-node TSDB scraping Prometheus metrics with long-term retention and downsampling.
-  - `aerial-grafana`: Cyberpunk-themed visual telemetry dashboards with PostgreSQL persistent backend, anonymous admin access, and pre-provisioned Docker and host dashboards.
+  - `aerial-postgres-exporter`: PostgreSQL database metrics exporter collecting connection pool status, transactions, lock contention, table stats, and buffer cache hit ratios on internal port `9187`.
+  - `aerial-victoriametrics`: Single-node TSDB scraping Prometheus metrics with long-term retention (5 years), 15s scrape interval, and modular scrape configs mounted from `/share/aerial-config/victoriametrics/*.yml`.
+  - `aerial-grafana`: Cyberpunk-themed visual telemetry dashboards with PostgreSQL persistent backend, anonymous admin access, and pre-provisioned core telemetry, database, host, and Docker dashboards.
 
 - **Supporting Services & Supervision**:
   - `ollama`: Local LLM and vector embedding server for semantic memory (`all-minilm:latest` / 384-dim).
@@ -73,6 +77,8 @@ Aerial operates on a strict **Two-Repository Separation of Concerns**:
   - **`AGENTS.md`**: User persona overrides, personal preferences, communication style, and user identity/alias definitions.
   - **`channels/<channel-name>.md`**: Dedicated instructions and operating constraints for specific Discord channels (auto-discovered; inherited by threads).
   - **`custom-skills/`**: Private operational runbooks and domain-specific workflows (e.g., smart home).
+  - **`victoriametrics/`**: Custom Prometheus scrape configurations (e.g., Home Assistant metrics).
+  - **`docs/`**: Living Docsify documentation portal served dynamically at `/docs/`.
   - **`docker-compose.override.yml`**: User-defined sidecar containers or extra local MCP servers, natively merged by Docker Compose on the host via the top-level `include:` directive.
 
 ### 3. Physical Immutability & Two-Phase PR Workflow
@@ -108,6 +114,7 @@ Aerial operates on a strict **Two-Repository Separation of Concerns**:
 
 5. **Discord Messaging & Markdown Invariant**:
    - Deliver responses via Markdown directly in Discord at the end of the turn. The user only receives the final result message so do not bother to send intermediate status updates.
+   - **Empty Response Suppression**: Pure whitespace or empty stdout triggers silent delivery suppression. Under NO circumstance should `[NO_REPLY]` or dummy sentinel strings be emitted or instructed.
    - **Silent Multi-Step Execution (No Self-Narration / Task Chatter)**: When executing multi-step tool calls, commands, or background tasks, NEVER emit intermediate play-by-play status chatter ("I have initiated a search...", "I will review results when the task finishes..."). Execute intermediate tool steps completely silently and deliver strictly the final substantive answer or deliverable.
    - **GitHub Web Links Only (No `file:///` Links)**: When linking to files, Aerial MUST always provide a web link to the files in GitHub (e.g. `https://github.com/azylman/aerial/blob/main/...` or `https://github.com/azylman/aerial-config/blob/main/...`) rather than a `file:///` link to the local copy. Local filesystem paths and `file:///` URIs are completely inaccessible from Discord.
    - **NEVER** output `file://` or `file:///` scheme URLs or masked file links (e.g. `[file](file:///...)`).
@@ -128,8 +135,12 @@ Aerial operates on a strict **Two-Repository Separation of Concerns**:
    - Messages from Discord include `- is_admin: true` or `- is_admin: false` (resolved against `admin_users` in `config.yaml`).
    - Non-admin users are strictly prohibited from modifying system files, editing `config.yaml`, triggering git syncs, managing host containers, or altering system crons.
 
-9. **In-Channel Interaction & Two-Tier Wake**:
-   - In channels configured with `mode: "channel"`, Tier 1 (Direct Wake: mention, reply, keywords) wakes immediately. Tier 2 (Ambient Relevance Scorer) evaluates ambient messages against `ambient_wake_prompt` using `Gemini 3.8 Flash (Low)`.
+9. **In-Channel Interaction & Wake Modes**:
+   - Channel policies support three sensitivity levels via `wake_mode`:
+     - `wake_mode: "mention"`: Aerial only wakes on explicit mentions (`@Aerial`) or direct replies. Bare keywords and LLM classifier are bypassed. Ambient channel messages are silently recorded into `transcript.jsonl`, accumulating conversational context so Aerial has complete history when pinged.
+     - `wake_mode: "classifier"` (or `"ambient"`): Direct mentions, replies, keywords, AND ambient relevance scoring via `Gemini 3.8 Flash (Low)` against `ambient_wake_prompt`.
+     - `wake_mode: "all"` (or `"always"`): Responds to every message (default for active threads).
+   - Typing indicators are dynamically governed per channel policy (`always`, `on_mention`, `never`).
 
 10. **Discord Funnel Hardening**:
     - Thread deduplication automatically recovers existing thread IDs on Discord error 160004.
