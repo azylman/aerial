@@ -4487,3 +4487,297 @@ func TestWorkerPool_ImageDeliveryAndSanitization(t *testing.T) {
 		t.Errorf("Expected caption **Daily Chart** in delivered text, got: %s", deliveredText)
 	}
 }
+
+func TestWorkerPoolShutdown_PreservesProcessingMessageWithoutApology(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	var deliveredMessages []string
+	var mu sync.Mutex
+
+	runnerStarted := make(chan struct{})
+	runnerBlock := make(chan struct{})
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    3,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			close(runnerStarted)
+			// Wait until shutdown cancels ctx or runnerBlock is closed
+			select {
+			case <-ctx.Done():
+				return "", "process killed by signal", -1, ctx.Err()
+			case <-runnerBlock:
+				return mockJSONResponse(sessionID, "late response"), "", 0, nil
+			}
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			mu.Lock()
+			deliveredMessages = append(deliveredMessages, text)
+			mu.Unlock()
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+			return func() {}
+		},
+	})
+	pool.Start()
+
+	msg := db.Message{
+		ID:         "msg-shutdown-1",
+		ThreadID:   "thread-shutdown-1",
+		GuildID:    "guild-shutdown-1",
+		AuthorID:   "user-shutdown-1",
+		AuthorName: "User",
+		Content:    "Hello during shutdown",
+		Status:     db.StatusPending,
+		CreatedAt:  time.Now().UTC(),
+		UpdatedAt:  time.Now().UTC(),
+	}
+	if err := db.InsertMessage(database, msg); err != nil {
+		t.Fatalf("InsertMessage failed: %v", err)
+	}
+
+	pool.Enqueue(msg)
+
+	// Wait for runner to begin execution
+	select {
+	case <-runnerStarted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Timeout waiting for runner to start")
+	}
+
+	// Trigger shutdown while runner is running
+	pool.Stop()
+
+	mu.Lock()
+	if len(deliveredMessages) > 0 {
+		t.Errorf("Expected 0 apology/error messages delivered on shutdown, got %d: %v", len(deliveredMessages), deliveredMessages)
+	}
+	mu.Unlock()
+
+	// Verify database state: message should remain in PROCESSING (not FAILED), and retry_count should NOT have incremented
+	rows, err := database.Query("SELECT status, retry_count FROM messages WHERE id = $1", msg.ID)
+	if err != nil {
+		t.Fatalf("Query failed: %v", err)
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		t.Fatalf("Message %s not found in DB", msg.ID)
+	}
+	var status string
+	var retryCount int
+	if err := rows.Scan(&status, &retryCount); err != nil {
+		t.Fatalf("Scan failed: %v", err)
+	}
+
+	if status != db.StatusProcessing {
+		t.Errorf("Expected message status %q in DB on shutdown, got %q", db.StatusProcessing, status)
+	}
+	if retryCount != 0 {
+		t.Errorf("Expected retry_count 0 on shutdown exit, got %d", retryCount)
+	}
+
+	// Now simulate fresh container boot and startup recovery
+	newDoneCh := make(chan struct{})
+	var finalDeliveredText string
+	newPool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    3,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			return mockJSONResponse("recovered-sess", "Successfully processed on new container!"), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			mu.Lock()
+			finalDeliveredText = text
+			mu.Unlock()
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+			return func() {}
+		},
+		OnMessageCompleted: func(m db.Message, finalStatus string) {
+			close(newDoneCh)
+		},
+	})
+	newPool.Start()
+	defer newPool.Stop()
+
+	// Run RecoverInterrupted on fresh pool
+	RecoverInterrupted(database, newPool)
+
+	select {
+	case <-newDoneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Timeout waiting for recovered message to complete on new pool")
+	}
+
+	mu.Lock()
+	if !strings.Contains(finalDeliveredText, "Successfully processed on new container!") {
+		t.Errorf("Expected recovery response delivered, got: %s", finalDeliveredText)
+	}
+	mu.Unlock()
+
+	// Verify final DB status
+	var finalStatus string
+	var finalRetryCount int
+	if err := database.QueryRow("SELECT status, retry_count FROM messages WHERE id = $1", msg.ID).Scan(&finalStatus, &finalRetryCount); err != nil {
+		t.Fatalf("Final DB query failed: %v", err)
+	}
+	if finalStatus != db.StatusCompleted {
+		t.Errorf("Expected final message status %q, got %q", db.StatusCompleted, finalStatus)
+	}
+	if finalRetryCount != 1 {
+		t.Errorf("Expected final retry_count 1 (incremented during startup recovery), got %d", finalRetryCount)
+	}
+}
+
+func TestWorkerPoolShutdown_RunnerSuccessPreserved(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	var deliveredText string
+	var mu sync.Mutex
+
+	runnerStarted := make(chan struct{})
+	doneCh := make(chan struct{})
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    3,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			close(runnerStarted)
+			// Small sleep, then return success even if ctx is cancelling
+			time.Sleep(50 * time.Millisecond)
+			return mockJSONResponse("sess-success-shutdown", "Finished just before pool stopped"), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			mu.Lock()
+			deliveredText = text
+			mu.Unlock()
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			close(doneCh)
+		},
+	})
+	pool.Start()
+
+	msg := db.Message{
+		ID:         "msg-success-shutdown-1",
+		ThreadID:   "thread-success-shutdown-1",
+		GuildID:    "guild-success-shutdown-1",
+		AuthorID:   "user-1",
+		AuthorName: "User",
+		Content:    "Complete fast",
+		Status:     db.StatusPending,
+		CreatedAt:  time.Now().UTC(),
+		UpdatedAt:  time.Now().UTC(),
+	}
+	if err := db.InsertMessage(database, msg); err != nil {
+		t.Fatalf("InsertMessage failed: %v", err)
+	}
+
+	pool.Enqueue(msg)
+
+	<-runnerStarted
+	// Stop pool while runner is in-flight; runner returns exit 0
+	pool.Stop()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if deliveredText != "Finished just before pool stopped" {
+		t.Errorf("Expected successful response delivered despite shutdown, got: %s", deliveredText)
+	}
+
+	var status string
+	if err := database.QueryRow("SELECT status FROM messages WHERE id = $1", msg.ID).Scan(&status); err != nil {
+		t.Fatalf("DB query failed: %v", err)
+	}
+	if status != db.StatusCompleted {
+		t.Errorf("Expected status %q, got %q", db.StatusCompleted, status)
+	}
+}
+
+func TestWorkerPoolShutdown_AmbientClassifierCancellationPreserved(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	classifyStarted := make(chan struct{})
+
+	cls := classifier.NewClassifier(classifier.WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
+		close(classifyStarted)
+		<-ctx.Done()
+		return "", ctx.Err()
+	}))
+
+	// We configure a pool with a classifier that blocks until context is cancelled
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		Classifier:     cls,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			return mockJSONResponse(sessionID, "late"), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+			return func() {}
+		},
+	})
+	pool.Start()
+
+	// Channel mode message (ThreadID == GuildID)
+	msg := db.Message{
+		ID:         "msg-ambient-shutdown-1",
+		ThreadID:   "channel-shutdown-1",
+		GuildID:    "channel-shutdown-1",
+		AuthorID:   "user-1",
+		AuthorName: "User",
+		Content:    "hey did anyone see that movie?",
+		Status:     db.StatusPending,
+		CreatedAt:  time.Now().UTC(),
+		UpdatedAt:  time.Now().UTC(),
+	}
+	if err := db.InsertMessage(database, msg); err != nil {
+		t.Fatalf("InsertMessage failed: %v", err)
+	}
+
+	pool.Enqueue(msg)
+
+	<-classifyStarted
+	pool.Stop()
+
+	// Verify database state: message should NOT be marked COMPLETED [AMBIENT]
+	var status string
+	if err := database.QueryRow("SELECT status FROM messages WHERE id = $1", msg.ID).Scan(&status); err != nil {
+		t.Fatalf("DB query failed: %v", err)
+	}
+	if status == db.StatusCompleted {
+		t.Errorf("Message was mistakenly marked COMPLETED [AMBIENT] during shutdown cancellation")
+	}
+	if status != db.StatusProcessing {
+		t.Errorf("Expected message status %q in DB on shutdown, got %q", db.StatusProcessing, status)
+	}
+}
+
+

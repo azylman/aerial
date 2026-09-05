@@ -622,6 +622,9 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 	if len(burst) == 0 {
 		return
 	}
+	if p.ctx.Err() != nil {
+		return
+	}
 
 	metrics.ActiveWorkers.Inc()
 	defer metrics.ActiveWorkers.Dec()
@@ -935,6 +938,12 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		}
 
 		if wakeIdx == -1 {
+			if p.ctx.Err() != nil {
+				log.Printf("[WorkerPool] Context cancelled during ambient classification for thread %s. Preserving burst in PROCESSING for startup recovery.", threadID)
+				metrics.RecordTurnCompleted("cancelled", triggerType, "classifier", time.Since(execStart))
+				return
+			}
+
 			// ALL messages in burst are ambient
 			hasDiskSession := currentSessionID != "" && session.SessionExistsOnDisk(currentSessionID)
 			if hasDiskSession {
@@ -1223,6 +1232,16 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 			}
 		}
 
+		// If execution failed because the pool context was cancelled (SIGTERM/shutdown),
+		// suppress Discord error notifications and do NOT mark FAILED or increment retries.
+		// Leave messages in PROCESSING for RecoverInterrupted on container restart.
+		if p.ctx.Err() != nil {
+			log.Printf("[WorkerPool] Turn execution cancelled due to pool shutdown (thread: %s, attempt: %d/%d). Preserving PROCESSING state for startup recovery.", threadID, attempt, maxAttempts)
+			stopTyping()
+			metrics.RecordTurnCompleted("cancelled", triggerType, currentModel, time.Since(execStart))
+			return
+		}
+
 		log.Printf("[WorkerPool] Burst for thread %s failed on attempt %d/%d (transient=%t, corrupt=%t): %s",
 			threadID, attempt, maxAttempts, isTransient, isSessionCorruption, errDetail)
 
@@ -1322,6 +1341,12 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 
 	// Total exhaustion after all attempts
 	stopTyping()
+
+	if p.ctx.Err() != nil {
+		log.Printf("[WorkerPool] Pool shutting down during turn for thread %s. Suppressing exhaustion alert and preserving state.", threadID)
+		metrics.RecordTurnCompleted("cancelled", triggerType, currentModel, time.Since(execStart))
+		return
+	}
 	var notif string
 	if lastErrDetail != "" && (runnerIsTransient(lastErrDetail)) {
 		notif = notifier.ModelUnavailableMessage()
