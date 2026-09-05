@@ -32,9 +32,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-yaml \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy Go SDK and golangci-lint from builder to provide local compiler and linting parity
+# Copy Go SDK, Node.js 20 LTS runtime, and golangci-lint from builders for local tool parity
 COPY --from=builder /usr/local/go /usr/local/go
 COPY --from=builder /usr/local/bin/golangci-lint /usr/local/bin/golangci-lint
+COPY --from=node:20-bookworm-slim /usr/local/bin/node /usr/local/bin/node
 ENV PATH="/usr/local/go/bin:/root/go/bin:${PATH}"
 
 # Install official Antigravity CLI binary
