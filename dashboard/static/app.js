@@ -32,6 +32,76 @@ function formatElapsedTicker(seconds) {
     return `⏱ ${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}s`;
 }
 
+function formatGitSyncDelta(seconds) {
+    if (seconds == null || isNaN(seconds) || seconds < 0) return 'Δ 0s';
+    const s = Math.floor(Number(seconds));
+    if (s < 60) return `Δ ${s}s`;
+    const mins = Math.floor(s / 60);
+    const secs = s % 60;
+    if (mins < 60) {
+        return secs > 0 ? `Δ ${mins}m ${secs}s` : `Δ ${mins}m`;
+    }
+    const hrs = Math.floor(mins / 60);
+    const remMins = mins % 60;
+    return remMins > 0 ? `Δ ${hrs}h ${remMins}m` : `Δ ${hrs}h`;
+}
+
+function renderGitSyncBadge(gitSync) {
+    const badge = document.getElementById('gitsync-badge');
+    if (!badge) return;
+
+    if (!gitSync || typeof gitSync !== 'object') {
+        badge.className = 'gitsync-pill';
+        badge.innerHTML = '<span style="font-size: 0.8rem;">🟢</span><span>GIT SYNC: IN SYNC (Δ 0s)</span>';
+        return;
+    }
+
+    const status = String(gitSync.status || 'synced').toLowerCase();
+    const lagSec = Number(gitSync.max_lag_seconds) || 0;
+    const deltaStr = formatGitSyncDelta(lagSec);
+
+    if (status === 'error') {
+        badge.className = 'gitsync-pill error';
+        badge.innerHTML = '<span style="font-size: 0.8rem;">🚨</span><span>GIT SYNC: ERROR</span>';
+    } else if (status === 'lagging' || lagSec > 0) {
+        badge.className = 'gitsync-pill lagging';
+        badge.innerHTML = `<span style="font-size: 0.8rem;">🟡</span><span>GIT SYNC: BEHIND (${deltaStr})</span>`;
+    } else {
+        badge.className = 'gitsync-pill';
+        badge.innerHTML = `<span style="font-size: 0.8rem;">🟢</span><span>GIT SYNC: IN SYNC (${deltaStr})</span>`;
+    }
+}
+
+function renderQuickLaunchDock(links) {
+    const dock = document.getElementById('quick-launch-dock');
+    if (!dock) return;
+
+    const list = (Array.isArray(links) ? links : []).filter(l => l && typeof l === 'object' && l.name && l.url);
+    if (list.length === 0) {
+        dock.style.display = 'none';
+        return;
+    }
+    dock.style.display = 'flex';
+
+    const currentPath = (window.location && window.location.pathname) || '/';
+
+    dock.innerHTML = list.map(l => {
+        const nameSafe = escapeHtml(l.name);
+        const urlSafe = escapeHtml(l.url);
+        const iconSafe = l.icon ? escapeHtml(l.icon) + ' ' : '';
+        const target = l.target === '_self' ? '_self' : '_blank';
+        const rel = target === '_blank' ? 'rel="noopener noreferrer"' : '';
+        const isCustom = Boolean(l.is_custom);
+        const titleSafe = l.description ? `title="${escapeHtml(l.description)}"` : '';
+        const isActive = l.url === currentPath || (l.url !== '/' && currentPath.startsWith(l.url));
+
+        return `<a href="${urlSafe}" class="dock-chip ${isActive ? 'active' : ''}" target="${target}" ${rel} ${titleSafe}>` +
+            `<span class="ping-dot ${isCustom ? 'custom' : ''}"></span>` +
+            `<span>${iconSafe}${nameSafe}</span>` +
+        `</a>`;
+    }).join('');
+}
+
 function getTriggerBadge(triggerType) {
     const t = String(triggerType || 'discord').toLowerCase();
     switch (t) {
@@ -115,32 +185,25 @@ function stopLiveTimerLoop() {
 
 function renderActiveTasks(tasks) {
     const container = document.getElementById('active-tasks-container') || document.getElementById('active-tasks-list');
+    const tasksViewContainer = document.getElementById('tasks-view-container');
     const badge = document.getElementById('tasks-count-badge') || document.getElementById('active-tasks-badge');
-    const summaryVal = document.getElementById('summary-tasks-val') || document.getElementById('summary-active-tasks');
-    const summarySub = document.getElementById('summary-tasks-sub') || document.getElementById('summary-tasks-label');
+    const tabBadge = document.getElementById('tasks-badge-count');
+    const tasksViewBadge = document.getElementById('tasks-view-badge');
+    const tasksKpiWorkers = document.getElementById('tasks-kpi-workers');
+    const tasksKpiWorkersSub = document.getElementById('tasks-kpi-workers-sub');
+    const tasksKpiQueued = document.getElementById('tasks-kpi-queued');
 
     const activeList = (Array.isArray(tasks) ? tasks : []).filter(t => t && typeof t === 'object');
     const runningCount = activeList.filter(t => t.status === 'PROCESSING').length;
     const pendingCount = activeList.filter(t => t.status === 'PENDING').length;
     const totalCount = activeList.length;
 
-    // Update Summary Bar
-    if (summaryVal) {
-        if (runningCount > 0) {
-            summaryVal.textContent = `${runningCount} RUNNING`;
-            summaryVal.className = 'value text-cyan';
-        } else if (pendingCount > 0) {
-            summaryVal.textContent = `${pendingCount} QUEUED`;
-            summaryVal.className = 'value text-warning';
-        } else {
-            summaryVal.textContent = '0 IDLE';
-            summaryVal.className = 'value text-success';
-        }
-    }
-    if (summarySub) {
-        summarySub.textContent = totalCount > 0 ? `${totalCount} ACTIVE IN QUEUE` : 'REAL-TIME DISPATCH';
+    // Update Tab Badge Count
+    if (tabBadge) {
+        tabBadge.textContent = String(totalCount);
     }
 
+    // Update Telemetry Header Badge
     if (badge) {
         if (runningCount > 0) {
             badge.textContent = `⚡ ${runningCount} RUNNING` + (pendingCount > 0 ? ` (+${pendingCount} QUEUED)` : '');
@@ -154,82 +217,120 @@ function renderActiveTasks(tasks) {
         }
     }
 
-    if (!container) return;
+    // Update Dedicated Tasks View Header Badge
+    if (tasksViewBadge) {
+        if (runningCount > 0) {
+            tasksViewBadge.textContent = `⚡ ${runningCount} RUNNING` + (pendingCount > 0 ? ` (+${pendingCount} QUEUED)` : '');
+            tasksViewBadge.className = 'section-badge active';
+        } else if (pendingCount > 0) {
+            tasksViewBadge.textContent = `⏳ ${pendingCount} IN QUEUE`;
+            tasksViewBadge.className = 'section-badge building';
+        } else {
+            tasksViewBadge.textContent = '0 IN PROGRESS';
+            tasksViewBadge.className = 'section-badge';
+        }
+    }
 
-    if (activeList.length === 0) {
-        container.innerHTML = `
-            <div class="task-idle-card">
-                <div class="idle-indicator">
-                    <span class="pulse-dot healthy"></span>
-                    <span>ALL WORKERS IDLE // NO PENDING TURNS</span>
-                </div>
-                <div>DISPATCH POLLING QUEUE (1s)</div>
-            </div>
-        `;
-        return;
+    // Update Tasks Cockpit KPIs
+    if (tasksKpiWorkers) {
+        tasksKpiWorkers.textContent = `${runningCount} / 4 WORKERS`;
+        tasksKpiWorkers.className = runningCount > 0 ? 'summary-value text-cyan' : 'summary-value text-success';
+    }
+    if (tasksKpiWorkersSub) {
+        tasksKpiWorkersSub.textContent = runningCount > 0 ? `${runningCount} PROCESSING TURN${runningCount > 1 ? 'S' : ''}` : 'REAL-TIME DISPATCH';
+    }
+    if (tasksKpiQueued) {
+        tasksKpiQueued.textContent = `${pendingCount} TURN${pendingCount === 1 ? '' : 'S'}`;
     }
 
     const now = Date.now();
 
-    container.innerHTML = activeList.map(task => {
-        const isProcessing = task.status === 'PROCESSING';
-        const isPending = task.status === 'PENDING';
-        const statusClass = isProcessing ? 'status-processing processing' : isPending ? 'status-pending pending' : 'status-unknown';
-        const statusBadge = isProcessing ? '⚡ RUNNING' : isPending ? '⏳ QUEUED' : escapeHtml(String(task.status || 'UNKNOWN').toUpperCase());
-
-        const authorSafe = escapeHtml(task.author_name || 'System');
-        const summarySafe = escapeHtml(task.summary || task.prompt || 'Agent Task');
-        const trigger = getTriggerBadge(task.trigger_type);
-        const threadSafe = escapeHtml(task.thread_id || '');
-
-        let timerHTML = '';
-        if (isProcessing && (task.started_at || task.created_at)) {
-            const startTimeStr = task.started_at || task.created_at;
-            const startedMs = parseValidTimestampMs(startTimeStr);
-            const initialSec = startedMs ? Math.max(0, Math.floor((now - startedMs) / 1000)) : 0;
-            const formattedTime = formatElapsedTicker(initialSec);
-            timerHTML = `
-                <div class="deploy-timer-badge">
-                    <span class="pulse-indicator"></span>
-                    <span class="timer-text" data-started="${escapeHtml(startTimeStr)}">${formattedTime}</span>
+    const generateHTML = () => {
+        if (activeList.length === 0) {
+            return `
+                <div class="task-idle-card">
+                    <div class="idle-indicator">
+                        <span class="pulse-dot healthy"></span>
+                        <span>ALL WORKERS IDLE // NO PENDING TURNS</span>
+                    </div>
+                    <div>DISPATCH POLLING QUEUE (1s)</div>
                 </div>
             `;
         }
 
-        const retryHTML = Number(task.retry_count) > 0 
-            ? `<span class="task-retry-badge" title="Retry Attempt">🔄 RETRY #${escapeHtml(task.retry_count)}</span>` 
-            : '';
+        return activeList.map(task => {
+            const isProcessing = task.status === 'PROCESSING';
+            const isPending = task.status === 'PENDING';
+            const statusClass = isProcessing ? 'status-processing processing' : isPending ? 'status-pending pending' : 'status-unknown';
+            const statusBadge = isProcessing ? '⚡ RUNNING' : isPending ? '⏳ QUEUED' : escapeHtml(String(task.status || 'UNKNOWN').toUpperCase());
 
-        const hasValidSession = typeof task.session_id === 'string' && task.session_id.trim().length > 0;
-        const inspectUrl = formatAgentsviewSessionUrl(task.session_id);
-        const inspectHTML = hasValidSession 
-            ? `<a href="${escapeHtml(inspectUrl)}" target="_blank" rel="noopener noreferrer" class="task-inspect-btn active">💬 INSPECT IN AGENTSVIEW ↗</a>`
-            : `<a href="/conversations/" target="_blank" rel="noopener noreferrer" class="task-inspect-btn active" title="Session allocating - Click to open Agentsview">💬 OPEN AGENTSVIEW ↗</a>`;
+            const authorSafe = escapeHtml(task.author_name || 'System');
+            const summarySafe = escapeHtml(task.summary || task.prompt || 'Agent Task');
+            const trigger = getTriggerBadge(task.trigger_type);
+            const threadSafe = escapeHtml(task.thread_id || '');
 
-        return `
-            <div class="task-card ${statusClass}">
-                ${isProcessing ? '<div class="task-card-laser"></div>' : ''}
-                <div class="task-card-header">
-                    <div class="task-meta-left">
-                        <span class="task-trigger-badge ${trigger.css}" data-trigger="${trigger.css}">${trigger.icon} ${escapeHtml(trigger.text)}</span>
-                        <span class="task-author">${authorSafe}</span>
-                        ${retryHTML}
+            let timerHTML = '';
+            if (isProcessing && (task.started_at || task.created_at)) {
+                const startTimeStr = task.started_at || task.created_at;
+                const startedMs = parseValidTimestampMs(startTimeStr);
+                const initialSec = startedMs ? Math.max(0, Math.floor((now - startedMs) / 1000)) : 0;
+                const formattedTime = formatElapsedTicker(initialSec);
+                timerHTML = `
+                    <div class="deploy-timer-badge">
+                        <span class="pulse-indicator"></span>
+                        <span class="timer-text" data-started="${escapeHtml(startTimeStr)}">${formattedTime}</span>
                     </div>
-                    <div style="display: flex; align-items: center; gap: 8px;">
-                        ${timerHTML}
-                        <span class="task-status-pill ${isProcessing ? 'processing' : 'pending'}">${statusBadge}</span>
+                `;
+            }
+
+            const retryHTML = Number(task.retry_count) > 0 
+                ? `<span class="task-retry-badge" title="Retry Attempt">🔄 RETRY #${escapeHtml(task.retry_count)}</span>` 
+                : '';
+
+            const hasValidSession = typeof task.session_id === 'string' && task.session_id.trim().length > 0;
+            const inspectUrl = formatAgentsviewSessionUrl(task.session_id);
+            const inspectHTML = hasValidSession 
+                ? `<a href="${escapeHtml(inspectUrl)}" target="_blank" rel="noopener noreferrer" class="task-inspect-btn active">💬 INSPECT IN AGENTSVIEW ↗</a>`
+                : `<a href="/conversations/" target="_blank" rel="noopener noreferrer" class="task-inspect-btn active" title="Session allocating - Click to open Agentsview">💬 OPEN AGENTSVIEW ↗</a>`;
+
+            const sessionInfo = hasValidSession ? `SESSION: <code style="color: var(--permet-purple);">${escapeHtml(task.session_id)}</code>` : '';
+
+            return `
+                <div class="task-card ${statusClass}">
+                    ${isProcessing ? '<div class="task-card-laser"></div>' : ''}
+                    <div class="task-card-header">
+                        <div class="task-meta-left">
+                            <span class="task-trigger-badge ${trigger.css}" data-trigger="${trigger.css}">${trigger.icon} ${escapeHtml(trigger.text)}</span>
+                            <span class="task-author">${authorSafe}</span>
+                            ${retryHTML}
+                        </div>
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            ${timerHTML}
+                            <span class="task-status-pill ${isProcessing ? 'processing' : 'pending'}">${statusBadge}</span>
+                        </div>
+                    </div>
+                    <div class="task-prompt-box">
+                        &gt; ${summarySafe}
+                    </div>
+                    <div class="task-card-footer">
+                        <div>
+                            <span>THREAD: ${threadSafe ? `<code style="color: var(--permet-cyan);">${threadSafe}</code>` : 'N/A'}</span>
+                            ${sessionInfo ? `<span style="margin-left: 12px;">${sessionInfo}</span>` : ''}
+                        </div>
+                        ${inspectHTML}
                     </div>
                 </div>
-                <div class="task-prompt-box">
-                    &gt; ${summarySafe}
-                </div>
-                <div class="task-card-footer">
-                    <span style="font-size: 0.75rem; color: var(--text-dim); font-family: var(--font-mono);">THREAD: ${threadSafe || 'N/A'}</span>
-                    ${inspectHTML}
-                </div>
-            </div>
-        `;
-    }).join('');
+            `;
+        }).join('');
+    };
+
+    const renderedHTML = generateHTML();
+    if (container) {
+        container.innerHTML = renderedHTML;
+    }
+    if (tasksViewContainer) {
+        tasksViewContainer.innerHTML = renderedHTML;
+    }
 }
 
 function renderDeployments(deployments) {
@@ -531,9 +632,21 @@ async function fetchStatus() {
             : 'value text-warning';
     }
     const clusterSubEl = document.getElementById('cluster-sub');
-    if (clusterSubEl) clusterSubEl.textContent = '100% OPERATIONAL';
+    // --- 0. RENDER TACTICAL QUICK-LAUNCH DOCK ---
+    try {
+        renderQuickLaunchDock(data.quick_launch_links || []);
+    } catch (e) {
+        console.error('[Permet HUD] Error rendering quick launch dock:', e);
+    }
 
-    // --- 0. RENDER LIVE AGENT EXECUTION QUEUE ---
+    // --- 1. RENDER GITSYNC STATUS BADGE ---
+    try {
+        renderGitSyncBadge(data.git_sync);
+    } catch (e) {
+        console.error('[Permet HUD] Error rendering gitsync badge:', e);
+    }
+
+    // --- 2. RENDER LIVE AGENT EXECUTION QUEUE ---
     try {
         renderActiveTasks(data.active_tasks || []);
     } catch (e) {
@@ -1680,11 +1793,30 @@ function setupSchedulesControls() {
 // ==========================================
 let currentTabKey = null;
 
-const TABS = {
+var TABS = {
     telemetry: {
         btnId: 'tab-telemetry-btn',
         viewId: 'telemetry-view',
         hash: '#telemetry',
+        onEnter: () => {
+            fetchStatus();
+            if (!statusPollInterval) {
+                statusPollInterval = setInterval(fetchStatus, 5000);
+            }
+            startLiveTimerLoop();
+        },
+        onLeave: () => {
+            if (statusPollInterval) {
+                clearInterval(statusPollInterval);
+                statusPollInterval = null;
+            }
+            stopLiveTimerLoop();
+        }
+    },
+    tasks: {
+        btnId: 'tab-tasks-btn',
+        viewId: 'tasks-view',
+        hash: '#tasks',
         onEnter: () => {
             fetchStatus();
             if (!statusPollInterval) {
@@ -1759,7 +1891,7 @@ function navigateTab(tabKey) {
             }
             if (view) {
                 view.classList.add('active');
-                view.style.display = 'block';
+                view.style.removeProperty('display');
             }
         } else {
             if (btn) {
@@ -1768,7 +1900,7 @@ function navigateTab(tabKey) {
             }
             if (view) {
                 view.classList.remove('active');
-                view.style.display = 'none';
+                view.style.removeProperty('display');
             }
         }
     });
@@ -1790,6 +1922,13 @@ function setupTabs() {
             });
         }
     });
+
+    const expandTasksBtn = document.getElementById('expand-tasks-btn');
+    if (expandTasksBtn) {
+        expandTasksBtn.addEventListener('click', () => {
+            navigateTab('tasks');
+        });
+    }
 
     window.addEventListener('hashchange', () => {
         const hash = window.location.hash;

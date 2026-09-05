@@ -48,7 +48,10 @@ run_golangci_lint() {
             echo "   (golangci-lint not compatible or not found, falling back to go vet for $svc)"
             (cd "$svc" && go vet ./...)
         elif has_cmd docker; then
-            docker run --rm -v "$(pwd)/$svc:/app" -w /app golangci/golangci-lint:v1.59.1 golangci-lint run ./...
+            if ! docker run --rm -v "$(pwd)/$svc:/app" -w /app golangci/golangci-lint:v1.59.1 golangci-lint run ./... 2>/dev/null; then
+                echo "   (golangci-lint v1.59.1 incompatible with Go >= 1.24 export data, falling back to go vet in golang:1.24 for $svc)"
+                docker run --rm -v "$(pwd)/$svc:/app" -w /app golang:1.24 go vet ./...
+            fi
         else
             echo "🚨 [Aerial Verify] Error: Neither golangci-lint, docker, nor go found in PATH." >&2
             exit 1

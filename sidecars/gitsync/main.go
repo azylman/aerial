@@ -56,6 +56,27 @@ type RepoSyncResult struct {
 	Error          string `json:"error,omitempty"`
 }
 
+// RepoStatus holds git commit and timestamp metadata for an individual repository.
+type RepoStatus struct {
+	Repo             string     `json:"repo"`
+	DiskCommit       string     `json:"disk_commit"`
+	DiskCommitTime   *time.Time `json:"disk_commit_time,omitempty"`
+	RemoteCommit     string     `json:"remote_commit"`
+	RemoteCommitTime *time.Time `json:"remote_commit_time,omitempty"`
+	TimeLagSeconds   int64      `json:"time_lag_seconds"`
+	SyncStatus       string     `json:"sync_status"` // "synced", "lagging", "error"
+	LastSyncTime     time.Time  `json:"last_sync_time"`
+	Error            string     `json:"error,omitempty"`
+}
+
+// GitSyncStatusResponse is the aggregated telemetry payload returned by GET /status.
+type GitSyncStatusResponse struct {
+	Status        string                `json:"status"` // "synced", "lagging", "error"
+	MaxLagSeconds int64                 `json:"max_lag_seconds"`
+	LastSyncTime  time.Time             `json:"last_sync_time"`
+	Repos         map[string]RepoStatus `json:"repos"`
+}
+
 // SyncDaemon coordinates periodic and on-demand repository synchronizations.
 type SyncDaemon struct {
 	sfg           singleflight.Group
@@ -69,6 +90,8 @@ type SyncDaemon struct {
 	reconcileCh   chan struct{}
 	composeMu     sync.Mutex
 	lastReconcile time.Time
+	lastSyncTimes map[string]time.Time
+	statusMu      sync.RWMutex
 }
 
 // resolveGitDir checks if repoPath contains a .git directory or a .git file (e.g., worktree/submodule).
@@ -336,7 +359,14 @@ func (d *SyncDaemon) SyncRepo(ctx context.Context, repoPath string) (res RepoSyn
 		}
 		metrics.RecordPull(repoPath, status, res.Changed, time.Since(start))
 		if status == "success" {
-			metrics.RecordLastSync(repoPath, time.Now())
+			now := time.Now()
+			metrics.RecordLastSync(repoPath, now)
+			d.statusMu.Lock()
+			if d.lastSyncTimes == nil {
+				d.lastSyncTimes = make(map[string]time.Time)
+			}
+			d.lastSyncTimes[repoPath] = now
+			d.statusMu.Unlock()
 		}
 	}()
 
@@ -502,6 +532,119 @@ func (d *SyncDaemon) StartPeriodicLoop(ctx context.Context) {
 	}()
 }
 
+// getRepoCommit extracts the commit SHA and author timestamp for a given ref in a repository.
+func getRepoCommit(ctx context.Context, repoPath, ref, pat string) (string, *time.Time, error) {
+	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "log", "-1", "--format=%H%x00%aI", ref)
+	if pat != "" {
+		cmd.Env = buildGitEnv(pat)
+	}
+	out, err := cmd.Output()
+	if err != nil {
+		return "", nil, err
+	}
+	parts := strings.Split(strings.TrimSpace(string(out)), "\x00")
+	if len(parts) < 2 {
+		return strings.TrimSpace(string(out)), nil, nil
+	}
+	sha := strings.TrimSpace(parts[0])
+	t, err := time.Parse(time.RFC3339, strings.TrimSpace(parts[1]))
+	if err != nil {
+		return sha, nil, nil
+	}
+	return sha, &t, nil
+}
+
+// GetStatus computes real-time synchronization telemetry across all configured repositories.
+func (d *SyncDaemon) GetStatus(ctx context.Context) GitSyncStatusResponse {
+	resp := GitSyncStatusResponse{
+		Status: "synced",
+		Repos:  make(map[string]RepoStatus),
+	}
+
+	d.statusMu.RLock()
+	syncTimes := make(map[string]time.Time, len(d.lastSyncTimes))
+	for k, v := range d.lastSyncTimes {
+		syncTimes[k] = v
+	}
+	d.statusMu.RUnlock()
+
+	var maxLag int64
+	var latestSync time.Time
+	hasError := false
+	hasLag := false
+
+	for _, repo := range d.repos {
+		st := RepoStatus{
+			Repo:       repo,
+			SyncStatus: "synced",
+		}
+
+		if t, ok := syncTimes[repo]; ok {
+			st.LastSyncTime = t
+			if t.After(latestSync) {
+				latestSync = t
+			}
+		}
+
+		// Check disk HEAD
+		diskSha, diskTime, err := getRepoCommit(ctx, repo, "HEAD", d.pat)
+		if err != nil {
+			st.SyncStatus = "error"
+			st.Error = fmt.Sprintf("failed to get disk HEAD: %v", SanitizeLog(err.Error()))
+			hasError = true
+			resp.Repos[repo] = st
+			continue
+		}
+		st.DiskCommit = diskSha
+		st.DiskCommitTime = diskTime
+
+		// Check remote commit: try origin/main, fallback to FETCH_HEAD
+		remoteSha, remoteTime, err := getRepoCommit(ctx, repo, "origin/main", d.pat)
+		if err != nil || remoteSha == "" {
+			remoteSha, remoteTime, err = getRepoCommit(ctx, repo, "FETCH_HEAD", d.pat)
+		}
+		if err != nil || remoteSha == "" {
+			remoteSha = diskSha
+			remoteTime = diskTime
+		}
+		st.RemoteCommit = remoteSha
+		st.RemoteCommitTime = remoteTime
+
+		if diskTime != nil && remoteTime != nil {
+			lag := int64(remoteTime.Sub(*diskTime).Seconds())
+			if lag < 0 {
+				lag = 0
+			}
+			st.TimeLagSeconds = lag
+			if lag > maxLag {
+				maxLag = lag
+			}
+			if diskSha != remoteSha && lag > 0 {
+				st.SyncStatus = "lagging"
+				hasLag = true
+			}
+		}
+
+		resp.Repos[repo] = st
+	}
+
+	resp.MaxLagSeconds = maxLag
+	resp.LastSyncTime = latestSync
+	if resp.LastSyncTime.IsZero() {
+		resp.LastSyncTime = time.Now()
+	}
+
+	if hasError {
+		resp.Status = "error"
+	} else if hasLag {
+		resp.Status = "lagging"
+	} else {
+		resp.Status = "synced"
+	}
+
+	return resp
+}
+
 func main() {
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -568,6 +711,20 @@ func main() {
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	})
+
+	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+
+		status := daemon.GetStatus(ctx)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(status)
 	})
 
 	mux.HandleFunc("/sync", func(w http.ResponseWriter, r *http.Request) {
