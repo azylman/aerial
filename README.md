@@ -1,6 +1,6 @@
 # Aerial
 
-An autonomous personal AI assistant system running natively on Docker, named after Gundam Aerial.
+An over-engineered, meticulously designed, AI slop, Discord personal assistant from a professional software engineer. All gas, no breaks (code reviews). Named after Gundam Aerial. Runs on Docker. Observability, CI/CD, reliability, extensibility, etc. are core concerns.
 
 Aerial provides a multi-agent, tool-enabled AI assistant accessible via Discord and HTTP API, with persistent multi-turn PostgreSQL & pgvector memory, full-stack observability with VictoriaMetrics and Grafana, deep Prometheus telemetry instrumentation, declarative GitOps Docker Compose reconciliation, GitHub operations, host Docker infrastructure inspection, and an extensible architecture for custom skills, MCP tools, and sidecar containers.
 
