@@ -220,7 +220,7 @@ func handleFacts(database *sql.DB) http.HandlerFunc {
 		}
 
 		q := r.URL.Query()
-		limit := 500
+		limit := 0
 		if lStr := q.Get("limit"); lStr != "" {
 			if l, err := strconv.Atoi(lStr); err == nil && l > 0 {
 				limit = l

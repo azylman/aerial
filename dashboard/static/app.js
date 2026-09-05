@@ -744,6 +744,32 @@ if (drawerOverlay) drawerOverlay.addEventListener('click', closeDiagnosticDrawer
 // ==========================================
 // PERMET MEMORY ARCHIVE STATE & LOGIC
 // ==========================================
+function parseFactImportance(val) {
+    if (val === null || val === undefined || val === '') return 0.0;
+    const num = Number(val);
+    if (isNaN(num)) return 0.0;
+    return Math.max(0.0, Math.min(1.0, num));
+}
+
+function compareFactsImportanceDesc(a, b) {
+    const impA = parseFactImportance(a ? a.importance : null);
+    const impB = parseFactImportance(b ? b.importance : null);
+    if (impB !== impA) return impB - impA;
+
+    const dateA = a && a.created_at ? (parseValidTimestampMs(a.created_at) || 0) : 0;
+    const dateB = b && b.created_at ? (parseValidTimestampMs(b.created_at) || 0) : 0;
+    if (dateB !== dateA) return dateB - dateA;
+
+    const idA = a && a.id != null ? a.id : 0;
+    const idB = b && b.id != null ? b.id : 0;
+    const numA = Number(idA);
+    const numB = Number(idB);
+    if (!isNaN(numA) && !isNaN(numB)) {
+        return numB - numA;
+    }
+    return String(idB).localeCompare(String(idA));
+}
+
 const memoryState = {
     facts: [],
     filteredFacts: [],
@@ -764,7 +790,7 @@ async function fetchFacts() {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 6000);
 
-        const res = await fetch(getApiBase() + '/api/facts?limit=500', { signal: controller.signal });
+        const res = await fetch(getApiBase() + '/api/facts', { signal: controller.signal });
         clearTimeout(timeoutId);
 
         const data = await res.json();
@@ -772,7 +798,8 @@ async function fetchFacts() {
             throw new Error(data.error || `HTTP ${res.status}: Brain proxy unavailable`);
         }
 
-        memoryState.facts = Array.isArray(data.facts) ? data.facts : [];
+        const rawFacts = Array.isArray(data.facts) ? data.facts : [];
+        memoryState.facts = rawFacts.slice().sort(compareFactsImportanceDesc);
         memoryState.totalCount = typeof data.total === 'number' ? data.total : memoryState.facts.length;
         memoryState.isLoading = false;
         memoryState.hasLoaded = true;
@@ -836,8 +863,8 @@ function updateMemoryMetrics() {
     const catCountEl = document.getElementById('memory-category-count');
     if (catCountEl) catCountEl.textContent = `${categories.size} CATEGORIES`;
 
-    const avgImp = total > 0
-        ? (factsList.reduce((acc, f) => acc + (f.importance || 1.0), 0) / total).toFixed(2)
+    const avgImp = factsList.length > 0
+        ? (factsList.reduce((acc, f) => acc + parseFactImportance(f.importance), 0) / factsList.length).toFixed(2)
         : '0.00';
     const avgImpEl = document.getElementById('memory-avg-importance');
     if (avgImpEl) avgImpEl.textContent = avgImp;
@@ -891,7 +918,7 @@ function applyFilters() {
         const category = (f.category || '').toLowerCase();
         const thread = (f.thread_id || '').toLowerCase();
         return text.includes(query) || category.includes(query) || thread.includes(query);
-    });
+    }).sort(compareFactsImportanceDesc);
 
     const counterEl = document.getElementById('results-count-text');
     if (counterEl) {
@@ -919,14 +946,14 @@ function renderFactCards() {
     const query = memoryState.searchQuery.trim();
 
     grid.innerHTML = memoryState.filteredFacts.map((f, idx) => {
-        const importance = Number(f.importance) || 1.0;
+        const importance = parseFactImportance(f.importance);
         const isHigh = importance >= 0.8;
         const cat = (f.category || 'GENERAL').toUpperCase();
         const catSlug = (f.category || 'general').toLowerCase().replace(/[^a-z0-9_-]/g, '_');
         const timeAgo = formatTimeAgo(f.created_at);
         const rawText = f.fact_text || '';
         const highlightedText = query ? highlightSearch(rawText, query) : escapeHtml(rawText);
-        const importancePct = Math.min(100, Math.round(importance * 100));
+        const importancePct = Math.min(100, Math.max(0, Math.round(importance * 100)));
 
         let threadMarkup = '';
         if (f.thread_id && /^\d+$/.test(f.thread_id.trim())) {

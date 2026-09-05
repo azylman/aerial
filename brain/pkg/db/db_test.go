@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -36,32 +37,33 @@ func setupTestDB(t *testing.T) *sql.DB {
 
 	// Quick connectivity probe (200ms) to avoid multi-minute retry delays in offline test runners
 	quickDB, openErr := sql.Open("pgx", dsn)
-	if openErr != nil {
-		t.Skipf("Skipping integration test: database driver error: %v", openErr)
-		return nil
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	pingErr := quickDB.PingContext(ctx)
-	cancel()
-	_ = quickDB.Close()
-	if pingErr != nil {
-		t.Skipf("Skipping integration test: PostgreSQL not reachable at %s: %v", dsn, pingErr)
-		return nil
+	if openErr == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		pingErr := quickDB.PingContext(ctx)
+		cancel()
+		_ = quickDB.Close()
+		if pingErr == nil {
+			database, err := InitDB(dsn)
+			if err == nil {
+				_, err = database.Exec(`
+					TRUNCATE TABLE messages, sessions, one_shot_schedules, cron_schedules, schedule_runs, facts RESTART IDENTITY CASCADE;
+					SELECT setval(pg_get_serial_sequence('facts', 'id'), 1, false);
+					SELECT setval(pg_get_serial_sequence('messages', 'row_id'), 1, false);
+				`)
+				if err == nil {
+					return database
+				}
+				_ = database.Close()
+			}
+		}
 	}
 
-	database, err := InitDB(dsn)
+	// Hermetic SQLite temporary database fallback
+	sqlitePath := filepath.Join(t.TempDir(), "aerial_test.db")
+	database, err := InitDB(sqlitePath)
 	if err != nil {
-		t.Skipf("Skipping integration test: PostgreSQL not reachable at %s: %v", dsn, err)
+		t.Fatalf("Failed to initialize hermetic SQLite test database at %s: %v", sqlitePath, err)
 		return nil
-	}
-
-	_, err = database.Exec(`
-		TRUNCATE TABLE messages, sessions, one_shot_schedules, cron_schedules, schedule_runs, facts RESTART IDENTITY CASCADE;
-		SELECT setval(pg_get_serial_sequence('facts', 'id'), 1, false);
-		SELECT setval(pg_get_serial_sequence('messages', 'row_id'), 1, false);
-	`)
-	if err != nil {
-		t.Fatalf("Failed to truncate test tables: %v", err)
 	}
 	return database
 }
@@ -413,6 +415,80 @@ func TestGetFactsPaginatedCaseInsensitive(t *testing.T) {
 	}
 	if res2.Total != 1 {
 		t.Errorf("Expected 1 matching fact for uppercase 'ALEX', got %d (check ILIKE)", res2.Total)
+	}
+}
+
+func TestGetFactsPaginatedImportanceDescending(t *testing.T) {
+	database := setupTestDB(t)
+	defer func() { _ = database.Close() }()
+
+	emb := make([]float32, 384)
+
+	// Insert facts with different importance and timestamps
+	idLow, err := InsertFact(database, "general", "Low importance fact", 0.2, "t1", emb)
+	if err != nil {
+		t.Fatalf("InsertFact failed: %v", err)
+	}
+	idMax, err := InsertFact(database, "core", "Max importance fact", 1.0, "t1", emb)
+	if err != nil {
+		t.Fatalf("InsertFact failed: %v", err)
+	}
+	idMid, err := InsertFact(database, "infra", "Mid importance fact", 0.5, "t1", emb)
+	if err != nil {
+		t.Fatalf("InsertFact failed: %v", err)
+	}
+	idHigh1, err := InsertFact(database, "preference", "High importance fact 1", 0.8, "t1", emb)
+	if err != nil {
+		t.Fatalf("InsertFact failed: %v", err)
+	}
+	idHigh2, err := InsertFact(database, "preference", "High importance fact 2", 0.8, "t1", emb)
+	if err != nil {
+		t.Fatalf("InsertFact failed: %v", err)
+	}
+	idVeryHigh, err := InsertFact(database, "system", "Very high importance fact", 0.95, "t1", emb)
+	if err != nil {
+		t.Fatalf("InsertFact failed: %v", err)
+	}
+
+	// 1. Unlimited fetch: verify all 6 are returned in exact descending order of importance
+	resAll, err := GetFactsPaginated(database, FactsFilter{Limit: 0})
+	if err != nil {
+		t.Fatalf("GetFactsPaginated unlimited failed: %v", err)
+	}
+	if resAll.Total != 6 || len(resAll.Facts) != 6 {
+		t.Fatalf("Expected 6 total facts, got total=%d, len=%d", resAll.Total, len(resAll.Facts))
+	}
+
+	expectedOrder := []int64{idMax, idVeryHigh, idHigh2, idHigh1, idMid, idLow}
+	for i, expectedID := range expectedOrder {
+		if resAll.Facts[i].ID != expectedID {
+			t.Errorf("Index %d: expected fact ID %d (imp=%f), got ID %d (imp=%f, text=%q)",
+				i, expectedID, resAll.Facts[i].Importance, resAll.Facts[i].ID, resAll.Facts[i].Importance, resAll.Facts[i].FactText)
+		}
+	}
+
+	// 2. Pagination fetch: page 1 (Limit: 3, Offset: 0)
+	resPage1, err := GetFactsPaginated(database, FactsFilter{Limit: 3, Offset: 0})
+	if err != nil {
+		t.Fatalf("GetFactsPaginated page 1 failed: %v", err)
+	}
+	if len(resPage1.Facts) != 3 || resPage1.Total != 6 {
+		t.Fatalf("Expected 3 facts on page 1, got %d (total=%d)", len(resPage1.Facts), resPage1.Total)
+	}
+	if resPage1.Facts[0].ID != idMax || resPage1.Facts[1].ID != idVeryHigh || resPage1.Facts[2].ID != idHigh2 {
+		t.Errorf("Page 1 mismatch: got IDs [%d, %d, %d]", resPage1.Facts[0].ID, resPage1.Facts[1].ID, resPage1.Facts[2].ID)
+	}
+
+	// 3. Pagination fetch: page 2 (Limit: 3, Offset: 3)
+	resPage2, err := GetFactsPaginated(database, FactsFilter{Limit: 3, Offset: 3})
+	if err != nil {
+		t.Fatalf("GetFactsPaginated page 2 failed: %v", err)
+	}
+	if len(resPage2.Facts) != 3 || resPage2.Total != 6 {
+		t.Fatalf("Expected 3 facts on page 2, got %d (total=%d)", len(resPage2.Facts), resPage2.Total)
+	}
+	if resPage2.Facts[0].ID != idHigh1 || resPage2.Facts[1].ID != idMid || resPage2.Facts[2].ID != idLow {
+		t.Errorf("Page 2 mismatch: got IDs [%d, %d, %d]", resPage2.Facts[0].ID, resPage2.Facts[1].ID, resPage2.Facts[2].ID)
 	}
 }
 

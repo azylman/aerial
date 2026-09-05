@@ -256,6 +256,7 @@ func InitDB(dsn string) (*sql.DB, error) {
 		CREATE INDEX IF NOT EXISTS idx_facts_thread_id ON facts(thread_id);
 		CREATE INDEX IF NOT EXISTS idx_facts_category ON facts(category);
 		CREATE INDEX IF NOT EXISTS idx_facts_created_at ON facts(created_at DESC);
+		CREATE INDEX IF NOT EXISTS idx_facts_importance_created_at ON facts(importance DESC, created_at DESC);
 		CREATE INDEX IF NOT EXISTS idx_facts_embedding_hnsw ON facts USING hnsw (embedding vector_cosine_ops);
 		`
 		if _, err := database.ExecContext(ctx, schema); err != nil {
@@ -396,6 +397,7 @@ func InitDB(dsn string) (*sql.DB, error) {
 	CREATE INDEX IF NOT EXISTS idx_facts_thread_id ON facts(thread_id);
 	CREATE INDEX IF NOT EXISTS idx_facts_category ON facts(category);
 	CREATE INDEX IF NOT EXISTS idx_facts_created_at ON facts(created_at DESC);
+	CREATE INDEX IF NOT EXISTS idx_facts_importance_created_at ON facts(importance DESC, created_at DESC);
 	`
 	if _, err := database.Exec(sqliteSchema); err != nil {
 		_ = database.Close()
@@ -2177,9 +2179,6 @@ func GetFactsPaginated(database *sql.DB, filter FactsFilter) (*FactsResult, erro
 		return nil, fmt.Errorf("database is nil")
 	}
 
-	if filter.Limit <= 0 {
-		filter.Limit = 500
-	}
 	if filter.Offset < 0 {
 		filter.Offset = 0
 	}
@@ -2196,7 +2195,7 @@ func GetFactsPaginated(database *sql.DB, filter FactsFilter) (*FactsResult, erro
 
 	if strings.TrimSpace(filter.Query) != "" {
 		escaped := EscapeSQLLike(strings.TrimSpace(filter.Query))
-		whereClauses = append(whereClauses, fmt.Sprintf("fact_text ILIKE $%d ESCAPE '\\'", argIdx))
+		whereClauses = append(whereClauses, fmt.Sprintf("LOWER(fact_text) LIKE LOWER($%d) ESCAPE '\\'", argIdx))
 		args = append(args, "%"+escaped+"%")
 		argIdx++
 	}
@@ -2215,15 +2214,24 @@ func GetFactsPaginated(database *sql.DB, filter FactsFilter) (*FactsResult, erro
 		return nil, fmt.Errorf("failed to count facts: %w", err)
 	}
 
+	var paginationSQL string
+	queryArgs := append([]interface{}{}, args...)
+	if filter.Limit > 0 {
+		paginationSQL = fmt.Sprintf("LIMIT $%d OFFSET $%d", argIdx, argIdx+1)
+		queryArgs = append(queryArgs, filter.Limit, filter.Offset)
+	} else if filter.Offset > 0 {
+		paginationSQL = fmt.Sprintf("OFFSET $%d", argIdx)
+		queryArgs = append(queryArgs, filter.Offset)
+	}
+
 	selectQuery := fmt.Sprintf(`
-		SELECT id, category, fact_text, importance, thread_id, created_at
+		SELECT id, category, fact_text, COALESCE(importance, 1.0) AS importance, thread_id, created_at
 		FROM facts
 		%s
-		ORDER BY created_at DESC, id DESC
-		LIMIT $%d OFFSET $%d
-	`, whereSQL, argIdx, argIdx+1)
+		ORDER BY COALESCE(importance, 1.0) DESC, created_at DESC, id DESC
+		%s
+	`, whereSQL, paginationSQL)
 
-	queryArgs := append(args, filter.Limit, filter.Offset)
 	rows, err := database.QueryContext(ctx, selectQuery, queryArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query facts: %w", err)

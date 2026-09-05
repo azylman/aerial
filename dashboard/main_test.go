@@ -202,6 +202,54 @@ func TestFactsHandler_Success(t *testing.T) {
 	}
 }
 
+func TestFactsHandler_UnlimitedAndHighLimit(t *testing.T) {
+	var capturedLimit string
+	mockBrain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedLimit = r.URL.Query().Get("limit")
+		resp := FactsAPIResponse{
+			Facts: []FactItem{
+				{
+					ID:         1,
+					Category:   "user_preference",
+					FactText:   "Fact 1",
+					Importance: 1.0,
+					CreatedAt:  time.Now().UTC(),
+				},
+			},
+			Total:  1,
+			Limit:  0,
+			Offset: 0,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer mockBrain.Close()
+
+	handler := factsHandler(mockBrain.URL)
+
+	// 1. Unlimited request (no limit param)
+	req1 := httptest.NewRequest("GET", "/api/facts", nil)
+	rr1 := httptest.NewRecorder()
+	handler(rr1, req1)
+	if rr1.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", rr1.Code)
+	}
+	if capturedLimit != "" {
+		t.Errorf("expected empty limit forwarded for unlimited request, got %q", capturedLimit)
+	}
+
+	// 2. High limit request (limit=500)
+	req2 := httptest.NewRequest("GET", "/api/facts?limit=500", nil)
+	rr2 := httptest.NewRecorder()
+	handler(rr2, req2)
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", rr2.Code)
+	}
+	if capturedLimit != "500" {
+		t.Errorf("expected limit=500 forwarded to brain, got %q", capturedLimit)
+	}
+}
+
 func TestFactsHandler_DegradedFallback(t *testing.T) {
 	// Offline / unreachable brain upstream
 	handler := factsHandler("http://127.0.0.1:54321")
