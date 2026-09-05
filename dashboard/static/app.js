@@ -650,7 +650,7 @@ async function fetchFacts() {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 6000);
 
-        const res = await fetch(getApiBase() + '/api/facts?limit=100', { signal: controller.signal });
+        const res = await fetch(getApiBase() + '/api/facts?limit=500', { signal: controller.signal });
         clearTimeout(timeoutId);
 
         const data = await res.json();
@@ -659,6 +659,7 @@ async function fetchFacts() {
         }
 
         memoryState.facts = Array.isArray(data.facts) ? data.facts : [];
+        memoryState.totalCount = typeof data.total === 'number' ? data.total : memoryState.facts.length;
         memoryState.isLoading = false;
 
         updateMemoryMetrics();
@@ -705,7 +706,7 @@ function renderMemoryError(errMsg) {
 }
 
 function updateMemoryMetrics() {
-    const total = memoryState.facts.length;
+    const total = (memoryState.totalCount !== undefined && memoryState.totalCount !== null) ? memoryState.totalCount : memoryState.facts.length;
     const totalCountEl = document.getElementById('memory-total-count');
     if (totalCountEl) totalCountEl.textContent = total;
 
