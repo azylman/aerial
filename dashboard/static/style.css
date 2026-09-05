@@ -46,15 +46,89 @@
 
 body {
     background-color: var(--bg-base);
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120' viewBox='0 0 120 120'%3E%3Cpath d='M0 20 H40 L60 40 H120 M60 40 V80 L40 100 H0 M60 80 H100 L120 100 M90 0 V30 M30 90 V120' fill='none' stroke='rgba(168,85,247,0.22)' stroke-width='1.5'/%3E%3Ccircle cx='40' cy='20' r='3' fill='rgba(192,132,252,0.6)'/%3E%3Ccircle cx='100' cy='40' r='3.5' fill='rgba(0,240,255,0.7)'/%3E%3Ccircle cx='60' cy='80' r='3' fill='rgba(192,132,252,0.6)'/%3E%3Ccircle cx='40' cy='100' r='3' fill='rgba(168,85,247,0.6)'/%3E%3C/svg%3E");
-    background-size: 120px 120px;
-    background-attachment: fixed;
     color: var(--text-primary);
     font-family: var(--font-mono);
     min-height: 100vh;
     padding: 24px 16px;
     overflow-x: hidden;
     position: relative;
+}
+
+/* --- ANIMATED BACKGROUND CIRCUIT TRACES & AMBIENT ENERGY --- */
+body::before {
+    content: '';
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background-color: var(--bg-base);
+    background-image: 
+        radial-gradient(ellipse 70% 50% at 50% 0%, rgba(192, 132, 252, 0.12), transparent 75%),
+        radial-gradient(ellipse 60% 40% at 85% 70%, rgba(0, 240, 255, 0.08), transparent 70%),
+        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120' viewBox='0 0 120 120'%3E%3Cpath d='M0 20 H40 L60 40 H120 M60 40 V80 L40 100 H0 M60 80 H100 L120 100 M90 0 V30 M30 90 V120' fill='none' stroke='rgba(168,85,247,0.22)' stroke-width='1.5'/%3E%3Ccircle cx='40' cy='20' r='3' fill='rgba(192,132,252,0.6)'/%3E%3Ccircle cx='100' cy='40' r='3.5' fill='rgba(0,240,255,0.7)'/%3E%3Ccircle cx='60' cy='80' r='3' fill='rgba(192,132,252,0.6)'/%3E%3Ccircle cx='40' cy='100' r='3' fill='rgba(168,85,247,0.6)'/%3E%3C/svg%3E");
+    background-size: 100% 100%, 100% 100%, 120px 120px;
+    background-repeat: no-repeat, no-repeat, repeat;
+    pointer-events: none;
+    z-index: -2;
+    animation: circuit-flow 90s linear infinite, circuit-glow-breathe 12s ease-in-out infinite;
+    will-change: background-position, opacity;
+}
+
+body::after {
+    content: '';
+    position: fixed;
+    top: -50%;
+    left: -50%;
+    width: 200%;
+    height: 200%;
+    background: radial-gradient(circle at center, rgba(168, 85, 247, 0.07) 0%, rgba(0, 240, 255, 0.03) 35%, transparent 65%);
+    pointer-events: none;
+    z-index: -1;
+    animation: circuit-energy-surge 18s ease-in-out infinite alternate;
+}
+
+@keyframes circuit-flow {
+    0% {
+        background-position: 0 0, 0 0, 0 0;
+    }
+    100% {
+        background-position: 0 0, 0 0, 120px 120px;
+    }
+}
+
+@keyframes circuit-glow-breathe {
+    0%, 100% {
+        filter: drop-shadow(0 0 0px transparent);
+        opacity: 0.85;
+    }
+    50% {
+        filter: drop-shadow(0 0 3px rgba(192, 132, 252, 0.4));
+        opacity: 1;
+    }
+}
+
+@keyframes circuit-energy-surge {
+    0% {
+        transform: translate(-3%, -3%) scale(0.96);
+        opacity: 0.45;
+    }
+    50% {
+        transform: translate(2%, 3%) scale(1.04);
+        opacity: 0.8;
+    }
+    100% {
+        transform: translate(-1%, 2%) scale(1.0);
+        opacity: 0.5;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    body::before,
+    body::after,
+    .scanline {
+        animation: none !important;
+    }
 }
 
 /* --- SCANLINE & GRID OVERLAYS --- */
@@ -2319,8 +2393,20 @@ body {
 @media (max-width: 768px) {
     body {
         padding: 1rem 0.75rem;
-        background-size: 90px 90px;
     }
+    body::before {
+        background-size: 100% 100%, 100% 100%, 90px 90px;
+        animation: circuit-flow-mobile 70s linear infinite, circuit-glow-breathe 12s ease-in-out infinite;
+    }
+
+@keyframes circuit-flow-mobile {
+    0% {
+        background-position: 0 0, 0 0, 0 0;
+    }
+    100% {
+        background-position: 0 0, 0 0, 90px 90px;
+    }
+}
     .hud-header {
         flex-direction: column;
         align-items: flex-start;
