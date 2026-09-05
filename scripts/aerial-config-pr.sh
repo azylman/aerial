@@ -179,7 +179,7 @@ EOF
     local pr_url
     pr_url=$(echo "$pr_resp" | jq -r '.html_url')
 
-    # 6. Poll CI check runs (bounded timeout: 180s)
+    # 6. Poll CI workflow runs (bounded timeout: 180s)
     local max_wait=180
     local elapsed=0
     local poll_interval=5
@@ -191,7 +191,7 @@ EOF
         check_raw=$(curl -s -w "\n%{http_code}" -X GET \
             -H "Authorization: token ${GITHUB_PAT}" \
             -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/commits/${commit_sha}/check-runs")
+            "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/actions/runs?head_sha=${commit_sha}")
 
         local check_code
         check_code=$(echo "$check_raw" | tail -n1)
@@ -206,12 +206,12 @@ EOF
                 has_registered_checks=1
 
                 local pending_count
-                pending_count=$(echo "$check_resp" | jq '[.check_runs[]? | select(.status != "completed")] | length')
+                pending_count=$(echo "$check_resp" | jq '[.workflow_runs[]? | select(.status != "completed")] | length')
                 local failure_count
-                failure_count=$(echo "$check_resp" | jq '[.check_runs[]? | select(.conclusion != null and .conclusion != "success" and .conclusion != "neutral" and .conclusion != "skipped")] | length')
+                failure_count=$(echo "$check_resp" | jq '[.workflow_runs[]? | select(.conclusion != null and .conclusion != "success" and .conclusion != "neutral" and .conclusion != "skipped")] | length')
 
                 if [ "$failure_count" -gt 0 ]; then
-                    echo "ERROR: GitHub Actions check runs failed on PR #${pr_num}." >&2
+                    echo "ERROR: GitHub Actions workflow runs failed on PR #${pr_num}." >&2
                     # Post comment to issues endpoint (general PR comments)
                     curl -s -X POST \
                         -H "Authorization: token ${GITHUB_PAT}" \
