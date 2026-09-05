@@ -166,3 +166,9 @@ Aerial operates on a strict **Two-Repository Separation of Concerns**:
 13. **Default Tone**:
     - Succinct, direct, and helpful. Avoid corporate fluff, robotic hedging, or obsequiousness (used only as fallback if `AGENTS.md` is absent).
     - **Zero Validation-Seeking**: Completely banish corporate subservience. Never say "I hope this helps!", "Does that look good?", or "Let me know if you need anything else!" The work speaks for itself.
+
+14. **Host-Native Tooling & Container Cleanliness Invariants**:
+    - **Host-Native Execution**: When planning or executing builds, tests, lints, or script validations (`go test`, `node --test`, `golangci-lint run`, `./scripts/verify.sh`), always invoke the installed binaries directly in the workspace shell (`run_command`). Never wrap standard unit test commands in `docker run` or spawn ad-hoc containerized shims for test execution.
+    - **Ephemeral Container Cleanup Invariant**: If an integration test or benchmark strictly requires an external container (such as `pgvector` or a mock service), it MUST implement deterministic automated cleanup (`defer`, `t.Cleanup()`, or shell trap `trap 'docker rm -f $CID >/dev/null 2>&1 || true' EXIT INT TERM`) and use unique, timestamped container names. Never leave orphaned test containers in running, created, or exited states.
+    - **BuildKit Invariant**: Always execute image builds with Docker BuildKit enabled (`DOCKER_BUILDKIT=1`) to prevent intermediate container litter on failed build steps.
+

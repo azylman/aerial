@@ -3,6 +3,7 @@ set -eu
 
 # Prevent MSYS2 from mangling Docker volume path colons on Windows
 export MSYS_NO_PATHCONV=1
+export DOCKER_BUILDKIT=1
 
 MODE="full"
 for arg in "$@"; do
