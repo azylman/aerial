@@ -87,6 +87,7 @@ type SyncDaemon struct {
 	repoUrls      map[string]string
 	pat           string
 	composeDir    string
+	configDir     string
 	reconcileCh   chan struct{}
 	composeMu     sync.Mutex
 	lastReconcile time.Time
@@ -177,6 +178,45 @@ func (d *SyncDaemon) HasComposeChanges(ctx context.Context, repoPath, prevHead, 
 	return len(strings.TrimSpace(string(out))) > 0, nil
 }
 
+// getComposeArgs constructs the compose CLI flags with base docker-compose.yml and any present overrides.
+func (d *SyncDaemon) getComposeArgs(composeDir string, subCmd ...string) []string {
+	baseFile := filepath.Join(composeDir, "docker-compose.yml")
+	args := []string{
+		"--project-name", "aerial",
+		"--project-directory", composeDir,
+		"-f", baseFile,
+	}
+
+	configDir := d.configDir
+	if configDir == "" {
+		configDir = os.Getenv("AERIAL_CONFIG_DIR")
+		if configDir == "" {
+			configDir = "/share/aerial-config"
+		}
+	}
+
+	overrideCandidates := []string{
+		filepath.Join(composeDir, "docker-compose.override.yml"),
+		filepath.Join(composeDir, "docker-compose.override.yaml"),
+		filepath.Join(configDir, "docker-compose.override.yml"),
+		filepath.Join(configDir, "docker-compose.override.yaml"),
+	}
+
+	seen := make(map[string]bool)
+	for _, cand := range overrideCandidates {
+		cleaned := filepath.Clean(cand)
+		if seen[cleaned] {
+			continue
+		}
+		seen[cleaned] = true
+		if _, err := os.Stat(cleaned); err == nil {
+			args = append(args, "-f", cleaned)
+		}
+	}
+
+	return append(args, subCmd...)
+}
+
 // ValidateCompose executes docker compose config --quiet to verify valid syntax and schema before apply.
 func (d *SyncDaemon) ValidateCompose(ctx context.Context, composeDir string) error {
 	composeFile := filepath.Join(composeDir, "docker-compose.yml")
@@ -184,7 +224,8 @@ func (d *SyncDaemon) ValidateCompose(ctx context.Context, composeDir string) err
 		return fmt.Errorf("compose file not found: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, "docker", "compose", "--project-name", "aerial", "--project-directory", composeDir, "-f", composeFile, "config", "--quiet")
+	args := append([]string{"compose"}, d.getComposeArgs(composeDir, "config", "--quiet")...)
+	cmd := exec.CommandContext(ctx, "docker", args...)
 	cmd.Dir = composeDir
 	var errBuf bytes.Buffer
 	cmd.Stderr = &errBuf
@@ -231,14 +272,8 @@ func (d *SyncDaemon) ReconcileCompose(parentCtx context.Context) (err error) {
 
 	log.Printf("[GitSync:GitOps] Reconciling Docker Compose state in %s...", composeDir)
 
-	composeFile := filepath.Join(composeDir, "docker-compose.yml")
-	cmd := exec.CommandContext(ctx, "docker", "compose",
-		"--project-name", "aerial",
-		"--project-directory", composeDir,
-		"-f", composeFile,
-		"up", "-d",
-		"--no-recreate", "gitsync",
-	)
+	args := append([]string{"compose"}, d.getComposeArgs(composeDir, "up", "-d", "--no-recreate", "gitsync")...)
+	cmd := exec.CommandContext(ctx, "docker", args...)
 	cmd.Dir = composeDir
 	cmd.Cancel = func() error {
 		log.Printf("[GitSync:GitOps] Compose apply timeout reached, sending SIGTERM...")
@@ -683,9 +718,14 @@ func main() {
 		composeDir = "/share/aerial"
 	}
 
+	configDir := os.Getenv("AERIAL_CONFIG_DIR")
+	if configDir == "" {
+		configDir = "/share/aerial-config"
+	}
+
 	repoUrls := map[string]string{
-		"/share/aerial-config": configRepoURL,
-		"/share/aerial":        "https://github.com/azylman/aerial.git",
+		configDir:  configRepoURL,
+		composeDir: "https://github.com/azylman/aerial.git",
 	}
 
 	daemon := &SyncDaemon{
@@ -694,6 +734,7 @@ func main() {
 		interval:    interval,
 		pat:         pat,
 		composeDir:  composeDir,
+		configDir:   configDir,
 		reconcileCh: make(chan struct{}, 1),
 	}
 
