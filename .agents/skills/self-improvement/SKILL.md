@@ -104,11 +104,15 @@ Present a structured synthesis of the expert panel's audit to the human user:
    - Verify task unit tests pass with race detection (`-race`).
 2. **Per-Task Expert Review Gate**:
    - **For EACH task completed**, consult the 4-expert panel (or dispatch a dedicated Devil's Advocate subagent from the panel) to audit the task's code changes.
-   - Inspect:
-     - Strict adherence to repository invariants (zero personal data, zero plaintext secrets).
-     - Concurrency safety, lock lifecycles, and deadlocks.
-     - Error path coverage and defensive nil guards.
-   - **Remediation**: Resolve all identified P0/P1 bugs and audit objections before proceeding to subsequent tasks.
+   - **Core Software Engineering Principles Audit (Beyond Plan Conformity)**:
+     - **Code Re-use & DRY**: Actively identify duplicated logic, copy-pasted helpers, and inline ad-hoc patterns; require extracting reusable, testable utility functions or shared packages.
+     - **Package Boundaries & Separation of Concerns**: Enforce clean architectural boundaries between database persistence, API orchestration/proxying, and frontend presentation state; strictly forbid leaky abstractions or tight cross-package coupling.
+     - **Single Responsibility Principle (SRP) & High Cohesion**: Ensure modules, structs, handlers, and functions have a focused, single responsibility without monolithic god-objects.
+     - **Interface & Abstraction Hygiene**: Design small, consumer-driven interfaces (idiomatic Go / JS); avoid premature over-engineering or unnecessary abstraction layers.
+     - **Idiomatic Code & Maintainability**: Enforce language-specific idioms, clear domain naming, self-documenting code, and zero dead code.
+     - **Defensive Error Handling & Resource Lifecycles**: Comprehensive error wrapping, defensive nil guards, context cancellation propagation, and explicit cleanup of timers, intervals, and sockets.
+     - **Repository Invariants**: Strict adherence to zero personal data and zero plaintext secrets.
+   - **Remediation**: Resolve all identified P0/P1 bugs, architectural antipatterns, and audit objections before proceeding to subsequent tasks.
 
 ---
 
