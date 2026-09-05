@@ -3,12 +3,16 @@ package scheduler
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
 	"github.com/azylman/aerial/brain/pkg/queue"
+	"github.com/bwmarrin/discordgo"
 	"github.com/google/uuid"
 )
 
@@ -616,4 +620,233 @@ func TestInsertMessageAndConsumeOneShot_RollbackOnCancelled(t *testing.T) {
 		t.Errorf("Expected message to NOT exist in DB after transaction rollback, but found: %+v", dbMsg)
 	}
 }
+
+func TestProcessDueCronSchedules_ChannelMode_NoThreadCreated(t *testing.T) {
+	tmpDir := t.TempDir()
+	yamlPath := filepath.Join(tmpDir, "config.yaml")
+	cfgContent := `
+channels:
+  default:
+    mode: "threads"
+  general:
+    mode: "channel"
+`
+	if err := os.WriteFile(yamlPath, []byte(cfgContent), 0644); err != nil {
+		t.Fatalf("Failed to write test config: %v", err)
+	}
+	if _, err := config.LoadConfigFromPaths(yamlPath); err != nil {
+		t.Fatalf("Failed to load test config: %v", err)
+	}
+
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to init DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	chanID := "1464358486849622120"
+	queue.CacheDiscordChannel(&discordgo.Channel{
+		ID:   chanID,
+		Name: "general",
+		Type: discordgo.ChannelTypeGuildText,
+	})
+
+	now := time.Now().UTC()
+	cronSched := db.CronSchedule{
+		ID:          "cron-general-channel-mode",
+		TargetID:    chanID,
+		TitlePrefix: "Daily Weather Forecast",
+		CronExpr:    "0 6 * * *",
+		Prompt:      "Post daily weather",
+		Timezone:    "UTC",
+		NextRunAt:   now.Add(-10 * time.Second),
+		Enabled:     true,
+		CreatedAt:   now.Add(-1 * time.Hour),
+	}
+	if err := db.CreateCronSchedule(database, cronSched); err != nil {
+		t.Fatalf("Failed to create cron schedule: %v", err)
+	}
+
+	threadCreator := newMockThreadCreator()
+	enqueuer := newMockEnqueuer()
+
+	if err := ProcessDueSchedules(context.Background(), database, enqueuer, threadCreator); err != nil {
+		t.Fatalf("ProcessDueSchedules error: %v", err)
+	}
+
+	// 1. Thread creator should NOT have been invoked for chanID
+	if thID, exists := threadCreator.createdThreads[chanID]; exists {
+		t.Fatalf("Expected NO thread to be created in channel mode, but thread %q was created", thID)
+	}
+
+	// 2. Enqueued message ThreadID must match channel ID
+	msgs := enqueuer.getMessages()
+	if len(msgs) != 1 {
+		t.Fatalf("Expected 1 message enqueued, got %d", len(msgs))
+	}
+	if msgs[0].ThreadID != chanID {
+		t.Errorf("Expected message ThreadID %q (channel ID), got %q", chanID, msgs[0].ThreadID)
+	}
+
+	// 3. Schedule run record ThreadID must match channel ID
+	runs, total, err := db.GetScheduleRunsPaginated(database, 10, 0, cronSched.ID, "")
+	if err != nil {
+		t.Fatalf("GetScheduleRunsPaginated error: %v", err)
+	}
+	if total != 1 || len(runs) != 1 {
+		t.Fatalf("Expected 1 schedule run created, got total=%d", total)
+	}
+	if runs[0].ThreadID != chanID {
+		t.Errorf("Expected run ThreadID %q, got %q", chanID, runs[0].ThreadID)
+	}
+}
+
+func TestProcessDueCronSchedules_ThreadsMode_ThreadCreated(t *testing.T) {
+	tmpDir := t.TempDir()
+	yamlPath := filepath.Join(tmpDir, "config.yaml")
+	cfgContent := `
+channels:
+  default:
+    mode: "ignore"
+  aerial-dev:
+    mode: "threads"
+`
+	if err := os.WriteFile(yamlPath, []byte(cfgContent), 0644); err != nil {
+		t.Fatalf("Failed to write test config: %v", err)
+	}
+	if _, err := config.LoadConfigFromPaths(yamlPath); err != nil {
+		t.Fatalf("Failed to load test config: %v", err)
+	}
+
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to init DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	chanID := "chan-aerial-dev-123"
+	queue.CacheDiscordChannel(&discordgo.Channel{
+		ID:   chanID,
+		Name: "aerial-dev",
+		Type: discordgo.ChannelTypeGuildText,
+	})
+
+	now := time.Now().UTC()
+	cronSched := db.CronSchedule{
+		ID:          "cron-aerial-dev-threads-mode",
+		TargetID:    chanID,
+		TitlePrefix: "System Health Report",
+		CronExpr:    "0 12 * * *",
+		Prompt:      "Post health report",
+		Timezone:    "UTC",
+		NextRunAt:   now.Add(-10 * time.Second),
+		Enabled:     true,
+		CreatedAt:   now.Add(-1 * time.Hour),
+	}
+	if err := db.CreateCronSchedule(database, cronSched); err != nil {
+		t.Fatalf("Failed to create cron schedule: %v", err)
+	}
+
+	threadCreator := newMockThreadCreator()
+	enqueuer := newMockEnqueuer()
+
+	if err := ProcessDueSchedules(context.Background(), database, enqueuer, threadCreator); err != nil {
+		t.Fatalf("ProcessDueSchedules error: %v", err)
+	}
+
+	// 1. Thread creator SHOULD have been invoked for chanID
+	createdThID, exists := threadCreator.createdThreads[chanID]
+	if !exists || createdThID == "" {
+		t.Fatalf("Expected thread to be created in threads mode, but none found")
+	}
+
+	// 2. Enqueued message ThreadID must match created thread ID
+	msgs := enqueuer.getMessages()
+	if len(msgs) != 1 {
+		t.Fatalf("Expected 1 message enqueued, got %d", len(msgs))
+	}
+	if msgs[0].ThreadID != createdThID {
+		t.Errorf("Expected message ThreadID %q, got %q", createdThID, msgs[0].ThreadID)
+	}
+
+	// 3. Schedule run record ThreadID must match created thread ID
+	runs, total, err := db.GetScheduleRunsPaginated(database, 10, 0, cronSched.ID, "")
+	if err != nil {
+		t.Fatalf("GetScheduleRunsPaginated error: %v", err)
+	}
+	if total != 1 || len(runs) != 1 {
+		t.Fatalf("Expected 1 schedule run created, got total=%d", total)
+	}
+	if runs[0].ThreadID != createdThID {
+		t.Errorf("Expected run ThreadID %q, got %q", createdThID, runs[0].ThreadID)
+	}
+}
+
+func TestProcessDueCronSchedules_TargetAlreadyThread_NoThreadCreated(t *testing.T) {
+	tmpDir := t.TempDir()
+	yamlPath := filepath.Join(tmpDir, "config.yaml")
+	cfgContent := `
+channels:
+  default:
+    mode: "threads"
+`
+	if err := os.WriteFile(yamlPath, []byte(cfgContent), 0644); err != nil {
+		t.Fatalf("Failed to write test config: %v", err)
+	}
+	if _, err := config.LoadConfigFromPaths(yamlPath); err != nil {
+		t.Fatalf("Failed to load test config: %v", err)
+	}
+
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to init DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	threadTargetID := "thread-existing-target-999"
+	queue.CacheDiscordChannel(&discordgo.Channel{
+		ID:       threadTargetID,
+		Name:     "Existing Discussion Thread",
+		ParentID: "parent-chan-111",
+		Type:     discordgo.ChannelTypeGuildPublicThread,
+	})
+
+	now := time.Now().UTC()
+	cronSched := db.CronSchedule{
+		ID:          "cron-existing-thread-target",
+		TargetID:    threadTargetID,
+		TitlePrefix: "Thread Update",
+		CronExpr:    "0 15 * * *",
+		Prompt:      "Update existing thread",
+		Timezone:    "UTC",
+		NextRunAt:   now.Add(-10 * time.Second),
+		Enabled:     true,
+		CreatedAt:   now.Add(-1 * time.Hour),
+	}
+	if err := db.CreateCronSchedule(database, cronSched); err != nil {
+		t.Fatalf("Failed to create cron schedule: %v", err)
+	}
+
+	threadCreator := newMockThreadCreator()
+	enqueuer := newMockEnqueuer()
+
+	if err := ProcessDueSchedules(context.Background(), database, enqueuer, threadCreator); err != nil {
+		t.Fatalf("ProcessDueSchedules error: %v", err)
+	}
+
+	// 1. Thread creator should NOT have been invoked because target is already a thread
+	if thID, exists := threadCreator.createdThreads[threadTargetID]; exists {
+		t.Fatalf("Expected NO nested thread to be created, but thread %q was created", thID)
+	}
+
+	// 2. Enqueued message ThreadID must match threadTargetID
+	msgs := enqueuer.getMessages()
+	if len(msgs) != 1 {
+		t.Fatalf("Expected 1 message enqueued, got %d", len(msgs))
+	}
+	if msgs[0].ThreadID != threadTargetID {
+		t.Errorf("Expected message ThreadID %q, got %q", threadTargetID, msgs[0].ThreadID)
+	}
+}
+
 

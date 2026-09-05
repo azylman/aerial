@@ -155,10 +155,26 @@ func ProcessDueSchedules(ctx context.Context, database *sql.DB, enqueuer Message
 			log.Printf("[Scheduler] Failed to update next_run_at for cron %s: %v", c.ID, err)
 		}
 
-		// Create fresh public Discord thread
+		// Resolve channel policy and metadata for the target channel
 		title := FormatThreadTitle(c.TitlePrefix, now)
 		targetThreadID := c.TargetID
-		if threadCreator != nil {
+
+		var channelName string
+		var isAlreadyThread bool
+		if snap, ok := queue.GetCachedChannel(c.TargetID); ok {
+			channelName = snap.Name
+			if snap.IsThread {
+				isAlreadyThread = true
+			}
+		}
+
+		policy := config.GetRuntimeConfig().ResolveChannelPolicy(c.TargetID, channelName)
+
+		// Create fresh public Discord thread only if:
+		// 1. Target is not already a thread, AND
+		// 2. Channel policy mode is NOT "channel" (i.e. it is "threads" or default), AND
+		// 3. Thread creator is provided.
+		if !isAlreadyThread && policy.Mode != "channel" && threadCreator != nil {
 			thID, err := threadCreator.CreatePublicThread(c.TargetID, title)
 			if err != nil {
 				log.Printf("[Scheduler] Failed to create Discord thread %q in channel %s: %v. Fallback to channel ID.", title, c.TargetID, err)
