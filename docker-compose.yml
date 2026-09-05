@@ -497,15 +497,15 @@ services:
       com.centurylinklabs.watchtower.enable: "true"
     command:
       - "-storageDataPath=/victoria-metrics-data"
-      - "-promscrape.config=/etc/victoriametrics/scrape.yml"
+      - "-promscrape.config=/share/aerial/victoriametrics/scrape.yml"
       - "-promscrape.configCheckInterval=15s"
       - "-retentionPeriod=${VICTORIAMETRICS_RETENTION_PERIOD:-5y}"
     environment:
       - HA_METRICS_TOKEN=${HA_METRICS_TOKEN:-}
     volumes:
       - aerial-victoriametrics-data:/victoria-metrics-data
-      - ${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}/victoriametrics/scrape.yml:/etc/victoriametrics/scrape.yml:ro
-      - ${AERIAL_CONFIG_DIR:-/mnt/data/supervisor/share/aerial-config}/victoriametrics:/etc/victoriametrics/scrape.d:ro
+      - ${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}:/share/aerial:ro
+      - ${AERIAL_CONFIG_DIR:-/mnt/data/supervisor/share/aerial-config}:/share/aerial-config:ro
     networks:
       - aerial-net
     healthcheck:
@@ -537,6 +537,7 @@ services:
       autoheal: "true"
       com.centurylinklabs.watchtower.enable: "true"
     environment:
+      - GF_PATHS_PROVISIONING=/share/aerial/grafana/provisioning
       - GF_DATABASE_TYPE=postgres
       - GF_DATABASE_HOST=postgres:5432
       - GF_DATABASE_NAME=${POSTGRES_DB:-aerial}
@@ -556,8 +557,8 @@ services:
       - GF_AUTH_DISABLE_SIGNOUT_MENU=true
       - GF_PANELS_DISABLE_SANITIZE_HTML=true
     volumes:
-      - ${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}/grafana/provisioning:/etc/grafana/provisioning:ro
-      - ${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - ${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}:/share/aerial:ro
+      - ${AERIAL_CONFIG_DIR:-/mnt/data/supervisor/share/aerial-config}:/share/aerial-config:ro
     networks:
       - aerial-net
     healthcheck:
