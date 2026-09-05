@@ -399,6 +399,7 @@ services:
       com.centurylinklabs.watchtower.enable: "true"
     volumes:
       - ${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}/proxy/grafana-cyberpunk.css:/etc/nginx/grafana-cyberpunk.css:ro
+      - ${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}/proxy/agentsview-cyberpunk.css:/etc/nginx/agentsview-cyberpunk.css:ro
     ports:
       - "${AGENTSVIEW_HOST_PORT:-8089}:80"
     networks:
