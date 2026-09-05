@@ -376,6 +376,7 @@ services:
       com.centurylinklabs.watchtower.enable: "true"
     volumes:
       - ${AERIAL_CONFIG_DIR:-/mnt/data/supervisor/share/aerial-config}:/share/aerial-config:ro
+      - ${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}/docs-service/app:/usr/share/nginx/html:ro
     networks:
       - aerial-net
     healthcheck:
