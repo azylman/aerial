@@ -22,6 +22,7 @@ import (
 	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
 	"github.com/azylman/aerial/brain/pkg/delivery"
+	"github.com/azylman/aerial/brain/pkg/metrics"
 	"github.com/azylman/aerial/brain/pkg/queue"
 	"github.com/azylman/aerial/brain/pkg/runner"
 	"github.com/azylman/aerial/brain/pkg/scheduler"
@@ -872,6 +873,7 @@ func main() {
 		log.Printf("[%s] Changes detected. Reloading configuration, system rules, and skills...", source)
 		latestCfg, parseErr := config.LoadConfig()
 		if parseErr != nil {
+			metrics.ConfigReloadsTotal.WithLabelValues(source, "failure").Inc()
 			log.Printf("[%s] Warning: Failed to parse config.yaml: %v", source, parseErr)
 			if dgSession != nil {
 				alertMsg := fmt.Sprintf("Failed to parse config.yaml:\n```\n%v\n```\nAerial has retained the Last Known Good Configuration (LKGC).", parseErr)
@@ -879,6 +881,8 @@ func main() {
 					log.Printf("[%s] Warning: failed to send Discord alert: %v", source, alertErr)
 				}
 			}
+		} else {
+			metrics.ConfigReloadsTotal.WithLabelValues(source, "success").Inc()
 		}
 
 		latestModel := latestCfg.Model
@@ -948,6 +952,7 @@ func main() {
 	defer stopScheduler()
 
 	mux := http.NewServeMux()
+	mux.Handle("/metrics", metrics.Handler())
 	mux.HandleFunc("/prompt", handlePrompt(database, pool))
 	mux.HandleFunc("/transcripts", handleTranscripts(database))
 	mux.HandleFunc("/tasks", handleTasks(database))

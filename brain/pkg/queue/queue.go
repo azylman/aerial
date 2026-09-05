@@ -15,6 +15,7 @@ import (
 	"github.com/azylman/aerial/brain/pkg/db"
 	"github.com/azylman/aerial/brain/pkg/delivery"
 	"github.com/azylman/aerial/brain/pkg/memory"
+	"github.com/azylman/aerial/brain/pkg/metrics"
 	"github.com/azylman/aerial/brain/pkg/notifier"
 	"github.com/azylman/aerial/brain/pkg/runner"
 	"github.com/azylman/aerial/brain/pkg/session"
@@ -374,6 +375,7 @@ func (p *WorkerPool) Enqueue(msg db.Message) {
 
 	select {
 	case ch <- msg:
+		metrics.QueueDepth.Inc()
 	case <-p.ctx.Done():
 		log.Printf("[WorkerPool] Context cancelled while enqueuing message %s", msg.ID)
 	}
@@ -390,11 +392,13 @@ func (p *WorkerPool) runThreadWorker(threadID string, ch chan db.Message) {
 			if !ok {
 				return
 			}
+			metrics.QueueDepth.Dec()
 			burst := []db.Message{msg}
 		DrainLoop:
 			for len(burst) < 5 {
 				select {
 				case extra := <-ch:
+					metrics.QueueDepth.Dec()
 					burst = append(burst, extra)
 				default:
 					break DrainLoop
@@ -413,11 +417,13 @@ func (p *WorkerPool) runThreadWorker(threadID string, ch chan db.Message) {
 					if !ok {
 						return
 					}
+					metrics.QueueDepth.Dec()
 					burst := []db.Message{msg}
 				DrainLoop2:
 					for len(burst) < 5 {
 						select {
 						case extra := <-ch:
+							metrics.QueueDepth.Dec()
 							burst = append(burst, extra)
 						default:
 							break DrainLoop2
@@ -606,8 +612,18 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		return
 	}
 
+	metrics.ActiveWorkers.Inc()
+	defer metrics.ActiveWorkers.Dec()
+
 	threadID := burst[0].ThreadID
 	log.Printf("[WorkerPool] Processing burst of %d message(s) for thread %s", len(burst), threadID)
+
+	triggerType := "discord"
+	if burst[0].ScheduleRunID != "" {
+		triggerType = "schedule"
+	} else if burst[0].AuthorID == "http-client" {
+		triggerType = "http"
+	}
 
 	// 1. Claim messages from PENDING to PROCESSING
 	var claimedBurst []db.Message
@@ -636,6 +652,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 	latestMsg := burst[len(burst)-1]
 	if !latestMsg.CreatedAt.IsZero() && time.Since(latestMsg.CreatedAt) > stalenessTTL {
 		log.Printf("[WorkerPool] Dropping stale message(s) in thread %s (age > %v). Marked [EXPIRED_STALE].", threadID, stalenessTTL)
+		metrics.RecordTurnCompleted("stale", triggerType, "none", time.Since(latestMsg.CreatedAt))
 		for _, m := range burst {
 			_ = db.UpdateMessageCompleted(p.cfg.DB, m.ID, "[EXPIRED_STALE]")
 			if m.ScheduleRunID != "" {
@@ -686,6 +703,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 
 	if !skipDiscord && policy.IsIgnored() {
 		log.Printf("[WorkerPool] Channel %s policy is ignored (mode=%s). Marking %d message(s) completed without execution.", threadID, policy.Mode, len(burst))
+		metrics.RecordTurnCompleted("ignored", triggerType, "none", time.Since(execStart))
 		for _, m := range burst {
 			_ = db.UpdateMessageStatus(p.cfg.DB, m.ID, db.StatusCompleted, fmt.Sprintf("[%s]", strings.ToUpper(strings.TrimSpace(policy.Mode))))
 			if m.ScheduleRunID != "" {
@@ -712,6 +730,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		if r := recover(); r != nil {
 			log.Printf("[WorkerPool] Panic in processBurst for thread %s: %v", threadID, r)
 			stopTyping()
+			metrics.RecordTurnCompleted("panic", triggerType, p.cfg.Model, time.Since(execStart))
 			errMsg := sanitizeErrorText(fmt.Sprintf("panic: %v", r))
 			for _, m := range burst {
 				_ = db.UpdateMessageStatus(p.cfg.DB, m.ID, db.StatusFailed, errMsg)
@@ -911,8 +930,11 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 				_, _ = session.EnsureSessionDir(currentSessionID)
 			}
 
+			metrics.RecordTurnCompleted("ambient", triggerType, "classifier", time.Since(execStart))
+
 			for i, m := range burst {
 				info := wakeInfos[i]
+				metrics.DiscordMessagesProcessedTotal.WithLabelValues("true", "ambient").Inc()
 				if hasDiskSession {
 					rawBody := extractMessageBody(m.Content)
 					if err := session.AppendAmbientTurn(currentSessionID, channelName, m.AuthorName, rawBody, m.CreatedAt); err != nil {
@@ -963,6 +985,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 			for i := 0; i < wakeIdx; i++ {
 				m := burst[i]
 				info := wakeInfos[i]
+				metrics.DiscordMessagesProcessedTotal.WithLabelValues("true", "ambient").Inc()
 				if currentSessionID != "" && session.SessionExistsOnDisk(currentSessionID) {
 					rawBody := extractMessageBody(m.Content)
 					if err := session.AppendAmbientTurn(currentSessionID, channelName, m.AuthorName, rawBody, m.CreatedAt); err != nil {
@@ -992,6 +1015,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 			trailingInfos = wakeInfos[wakeIdx+1:]
 		}
 		burst = []db.Message{burst[wakeIdx]}
+		metrics.DiscordMessagesProcessedTotal.WithLabelValues("false", "wake").Inc()
 
 		var incErr error
 		turnCount, incErr = db.IncrementSessionTurnCount(p.cfg.DB, threadID)
@@ -1008,6 +1032,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 			for i, m := range trailingMsgs {
 				info := trailingInfos[i]
 				if !info.isWake {
+					metrics.DiscordMessagesProcessedTotal.WithLabelValues("true", "ambient").Inc()
 					if currentSessionID != "" && session.SessionExistsOnDisk(currentSessionID) {
 						rawBody := extractMessageBody(m.Content)
 						cName := channelName
@@ -1029,6 +1054,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 						p.cfg.OnMessageCompleted(m, db.StatusCompleted)
 					}
 				} else {
+					metrics.DiscordMessagesProcessedTotal.WithLabelValues("false", "wake").Inc()
 					_ = db.UpdateMessageStatus(p.cfg.DB, m.ID, db.StatusPending, "")
 					m.Status = db.StatusPending
 					p.Enqueue(m)
@@ -1079,12 +1105,13 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 
 	maxAttempts := p.cfg.MaxAttempts
 	lastErrDetail := ""
+	currentModel := p.cfg.Model
 
 	initialRetryCount := burst[0].RetryCount
 
 	for attempt := initialRetryCount + 1; attempt <= maxAttempts; attempt++ {
 		p.mu.Lock()
-		currentModel := p.cfg.Model
+		currentModel = p.cfg.Model
 		currentTimeout := p.cfg.TimeoutMinutes
 		currentAgyBin := p.cfg.AgyBin
 		currentAPIKey := p.cfg.APIKey
@@ -1141,6 +1168,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 				}
 
 				// Mark all messages in the burst as completed with unpacked response text
+				metrics.RecordTurnCompleted("success", triggerType, currentModel, time.Since(execStart))
 				for _, m := range burst {
 					_ = db.UpdateMessageCompleted(p.cfg.DB, m.ID, responseText)
 					if m.ScheduleRunID != "" {
@@ -1183,6 +1211,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 				select {
 				case <-time.After(backoff):
 				case <-p.ctx.Done():
+					metrics.RecordTurnCompleted("cancelled", triggerType, currentModel, time.Since(execStart))
 					for _, m := range burst {
 						if m.ScheduleRunID != "" {
 							_ = db.UpdateScheduleRunStatus(p.cfg.DB, db.UpdateRunParams{
@@ -1211,6 +1240,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 				select {
 				case <-time.After(backoff):
 				case <-p.ctx.Done():
+					metrics.RecordTurnCompleted("cancelled", triggerType, currentModel, time.Since(execStart))
 					for _, m := range burst {
 						if m.ScheduleRunID != "" {
 							_ = db.UpdateScheduleRunStatus(p.cfg.DB, db.UpdateRunParams{
@@ -1239,6 +1269,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 			select {
 			case <-time.After(backoff):
 			case <-p.ctx.Done():
+				metrics.RecordTurnCompleted("cancelled", triggerType, currentModel, time.Since(execStart))
 				for _, m := range burst {
 					if m.ScheduleRunID != "" {
 						_ = db.UpdateScheduleRunStatus(p.cfg.DB, db.UpdateRunParams{
@@ -1270,6 +1301,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		}
 	}
 	sanitizedErr := sanitizeErrorText(lastErrDetail)
+	metrics.RecordTurnCompleted("failed", triggerType, currentModel, time.Since(execStart))
 	for _, m := range burst {
 		_ = db.UpdateMessageStatus(p.cfg.DB, m.ID, db.StatusFailed, sanitizedErr)
 		if m.ScheduleRunID != "" {
@@ -1344,6 +1376,7 @@ func RecoverInterrupted(database *sql.DB, pool *WorkerPool) {
 			m.RetryCount++
 		}
 
+		metrics.InterruptedTurnsRecovered.Inc()
 		log.Printf("[Startup Recovery] Enqueuing message %s (thread: %s, status: %s, retry_count: %d)",
 			m.ID, m.ThreadID, m.Status, m.RetryCount)
 		pool.Enqueue(m)

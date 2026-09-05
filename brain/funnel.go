@@ -14,6 +14,7 @@ import (
 
 	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
+	"github.com/azylman/aerial/brain/pkg/metrics"
 	"github.com/azylman/aerial/brain/pkg/queue"
 	"github.com/bwmarrin/discordgo"
 )
@@ -330,6 +331,7 @@ func connectDiscordFunnel(database *sql.DB, pool *queue.WorkerPool) *discordgo.S
 	}
 
 	dg.AddHandler(func(s *discordgo.Session, r *discordgo.Ready) {
+		metrics.DiscordEventsTotal.WithLabelValues("ready").Inc()
 		log.Printf("Discord funnel gateway session ready as %s#%s (user ID %s)", r.User.Username, r.User.Discriminator, r.User.ID)
 		if s.State != nil {
 			for _, g := range s.State.Guilds {
@@ -347,6 +349,7 @@ func connectDiscordFunnel(database *sql.DB, pool *queue.WorkerPool) *discordgo.S
 	})
 
 	dg.AddHandler(func(s *discordgo.Session, g *discordgo.GuildCreate) {
+		metrics.DiscordEventsTotal.WithLabelValues("guild_create").Inc()
 		if g != nil && g.Guild != nil {
 			for _, ch := range g.Channels {
 				queue.CacheDiscordChannel(ch)
@@ -358,46 +361,54 @@ func connectDiscordFunnel(database *sql.DB, pool *queue.WorkerPool) *discordgo.S
 	})
 
 	dg.AddHandler(func(s *discordgo.Session, c *discordgo.ChannelCreate) {
+		metrics.DiscordEventsTotal.WithLabelValues("channel_create").Inc()
 		if c != nil && c.Channel != nil {
 			queue.CacheDiscordChannel(c.Channel)
 		}
 	})
 
 	dg.AddHandler(func(s *discordgo.Session, c *discordgo.ChannelUpdate) {
+		metrics.DiscordEventsTotal.WithLabelValues("channel_update").Inc()
 		if c != nil && c.Channel != nil {
 			queue.CacheDiscordChannel(c.Channel)
 		}
 	})
 
 	dg.AddHandler(func(s *discordgo.Session, c *discordgo.ChannelDelete) {
+		metrics.DiscordEventsTotal.WithLabelValues("channel_delete").Inc()
 		if c != nil && c.Channel != nil {
 			queue.InvalidateChannelCache(c.Channel.ID)
 		}
 	})
 
 	dg.AddHandler(func(s *discordgo.Session, t *discordgo.ThreadCreate) {
+		metrics.DiscordEventsTotal.WithLabelValues("thread_create").Inc()
 		if t != nil && t.Channel != nil {
 			queue.CacheDiscordChannel(t.Channel)
 		}
 	})
 
 	dg.AddHandler(func(s *discordgo.Session, t *discordgo.ThreadUpdate) {
+		metrics.DiscordEventsTotal.WithLabelValues("thread_update").Inc()
 		if t != nil && t.Channel != nil {
 			queue.CacheDiscordChannel(t.Channel)
 		}
 	})
 
 	dg.AddHandler(func(s *discordgo.Session, t *discordgo.ThreadDelete) {
+		metrics.DiscordEventsTotal.WithLabelValues("thread_delete").Inc()
 		if t != nil && t.Channel != nil {
 			queue.InvalidateChannelCache(t.Channel.ID)
 		}
 	})
 
 	dg.AddHandler(func(s *discordgo.Session, d *discordgo.Disconnect) {
+		metrics.DiscordEventsTotal.WithLabelValues("disconnect").Inc()
 		log.Printf("Discord funnel disconnected from gateway (discordgo will reconnect automatically)")
 	})
 
 	dg.AddHandler(func(s *discordgo.Session, r *discordgo.Resumed) {
+		metrics.DiscordEventsTotal.WithLabelValues("resumed").Inc()
 		log.Printf("Discord funnel gateway connection resumed successfully")
 	})
 
@@ -405,9 +416,11 @@ func connectDiscordFunnel(database *sql.DB, pool *queue.WorkerPool) *discordgo.S
 		if m.Author == nil || (s.State != nil && s.State.User != nil && m.Author.ID == s.State.User.ID) {
 			return
 		}
+		metrics.DiscordEventsTotal.WithLabelValues("message_create").Inc()
 
 		go func() {
 			if !isFunnelBotTargeted(s, m) {
+				metrics.DiscordMessagesProcessedTotal.WithLabelValues("false", "ignored").Inc()
 				log.Printf("Discord funnel ignoring message %s from %s: no trigger matched", m.ID, m.Author.Username)
 				return
 			}
@@ -440,6 +453,7 @@ func connectDiscordFunnel(database *sql.DB, pool *queue.WorkerPool) *discordgo.S
 				return
 			}
 
+			metrics.DiscordMessagesProcessedTotal.WithLabelValues("false", "enqueued").Inc()
 			log.Printf("Discord funnel enqueued message %s from %s (thread: %s, is_thread: %t)", m.ID, authorName, targetThreadID, isThread)
 			if pool != nil {
 				pool.Enqueue(msg)

@@ -8,8 +8,10 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/azylman/aerial/brain/pkg/db"
+	"github.com/azylman/aerial/brain/pkg/metrics"
 )
 
 var (
@@ -132,9 +134,15 @@ func RetrieveRelevantFacts(ctx context.Context, database *sql.DB, client *Client
 		queryText = queryText[:1000]
 	}
 
+	start := time.Now()
+	defer func() {
+		metrics.MemorySearchDurationSeconds.Observe(time.Since(start).Seconds())
+	}()
+
 	// Generate query embedding with BGE query prefix and 1 retry
 	queryVector, err := client.GenerateEmbedding(ctx, queryText, true, 1)
 	if err != nil {
+		metrics.MemoryOperationsTotal.WithLabelValues("search", "error").Inc()
 		log.Printf("[Memory] Warning: Vector search embedding failed/timed out: %v. Proceeding without RAG context.", err)
 		return nil, nil
 	}
@@ -142,8 +150,10 @@ func RetrieveRelevantFacts(ctx context.Context, database *sql.DB, client *Client
 	// Native vector search in PostgreSQL using HNSW index and pgvector
 	ranked, err := db.SearchSimilarFacts(database, queryVector, maxFacts, DefaultMinScoreThreshold, "")
 	if err != nil {
+		metrics.MemoryOperationsTotal.WithLabelValues("search", "error").Inc()
 		return nil, fmt.Errorf("failed to search similar facts: %w", err)
 	}
+	metrics.MemoryOperationsTotal.WithLabelValues("search", "success").Inc()
 	return ranked, nil
 }
 

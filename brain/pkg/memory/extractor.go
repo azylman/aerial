@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/brain/pkg/db"
+	"github.com/azylman/aerial/brain/pkg/metrics"
 )
 
 type LLMClientFunc func(ctx context.Context, prompt string) (string, error)
@@ -208,6 +209,7 @@ func processThreadFacts(ctx context.Context, database *sql.DB, client *Client, l
 						log.Printf("[Memory] Duplicate fact detected (%q ~ %q, sim=%.2f). Skipping duplicate row.",
 							item.FactText, ef.Fact.FactText, sim)
 						isDuplicate = true
+						metrics.MemoryOperationsTotal.WithLabelValues("extract", "duplicate").Inc()
 						break
 					}
 				}
@@ -217,8 +219,10 @@ func processThreadFacts(ctx context.Context, database *sql.DB, client *Client, l
 		if !isDuplicate {
 			id, err := db.InsertFact(database, item.Category, item.FactText, item.Importance, threadID, emb)
 			if err != nil {
+				metrics.MemoryOperationsTotal.WithLabelValues("extract", "error").Inc()
 				log.Printf("[Memory] Error inserting fact into DB: %v", err)
 			} else {
+				metrics.MemoryOperationsTotal.WithLabelValues("extract", "stored").Inc()
 				log.Printf("[Memory] Extracted and stored new fact [%s] (id=%d): %s", item.Category, id, item.FactText)
 				existingFacts = append(existingFacts, db.FactWithEmbedding{
 					Fact: db.Fact{
