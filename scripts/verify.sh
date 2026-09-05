@@ -96,6 +96,18 @@ run_node_test() {
     fi
 }
 
+run_json_syntax() {
+    file="$1"
+    if [ -f "$file" ]; then
+        echo "   [json-check] Validating syntax of $file..."
+        if has_cmd node; then
+            node -e "JSON.parse(require('fs').readFileSync('$file', 'utf8'))"
+        elif has_cmd docker; then
+            cat "$file" | docker run --rm -i node:20 node -e "let d=''; process.stdin.on('data', c => d += c); process.stdin.on('end', () => JSON.parse(d));"
+        fi
+    fi
+}
+
 if [ "$MODE" = "staged" ]; then
     # Fast path: check only services that have staged changes
     STAGED_FILES=$(git diff --cached --name-only 2>/dev/null || true)
@@ -124,6 +136,13 @@ if [ "$MODE" = "staged" ]; then
         run_node_syntax "docs-service/app/assets/js/plugins/docsify-mermaid-cyberpunk.js"
     fi
 
+    # Check grafana dashboard JSON syntax
+    if echo "$STAGED_FILES" | grep -q "^grafana/dashboards/"; then
+        for jf in grafana/dashboards/*.json; do
+            run_json_syntax "$jf"
+        done
+    fi
+
     echo "✅ [Aerial Verify] Fast pre-commit checks passed cleanly."
     exit 0
 fi
@@ -137,6 +156,9 @@ done
 echo "=== 2. Frontend & Script Syntax Checks ==="
 run_node_syntax "dashboard/static/app.js"
 run_node_syntax "docs-service/app/assets/js/plugins/docsify-mermaid-cyberpunk.js"
+for jf in grafana/dashboards/*.json; do
+    run_json_syntax "$jf"
+done
 
 echo "=== 3. Unit Test Suites ==="
 for svc in $GO_SERVICES; do

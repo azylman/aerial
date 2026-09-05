@@ -278,10 +278,10 @@ Aerial includes an enterprise-grade, out-of-the-box observability matrix with si
 - **Single-Click Anonymous Admin Access**: Instant dashboard access without login friction.
 - **Persistent Backend**: Dashboards and user settings persist directly in PostgreSQL 16 (`GF_DATABASE_TYPE=postgres`).
 - **Pre-Provisioned Dashboard Suite**:
-  - **`⚡ Aerial Brain & GitSync Operations` (`aerial/core-telemetry.json`)**: Live turn execution latency (p50/p90/p95/p99), token usage, active worker pool depth, CAS task states, runner error taxonomy, Discord gateway ping, classifier triage decisions, Ollama vector search durations, and GitSync reconcile runs.
-  - **`🐘 PostgreSQL Overview` (`postgres/overview.json`)**: Active backends, connection pool state, buffer cache hit ratio (>99%), commits/rollbacks, tuple read/write velocity, and lock contention.
-  - **`🐳 Docker Containers Overview` (`docker/overview.json`)**: Per-container CPU %, working set memory curves, network RX/TX, and CFS CPU throttling periods.
-  - **`🖥️ Host System & Hardware Overview` (`host/system-overview.json`)**: Host CPU load breakdown, thermal sensors per core, RAM utilization, root disk space, and load averages.
+  - **`⚡ Aerial Brain & GitSync Operations` (`core-telemetry.json`)**: Live turn execution latency (p50/p90/p95/p99), token usage, active worker pool depth, CAS task states, runner error taxonomy, Discord gateway ping, classifier triage decisions, Ollama vector search durations, and GitSync reconcile runs.
+  - **`🐘 PostgreSQL Overview` (`postgres-overview.json`)**: Active backends, connection pool state, buffer cache hit ratio (>99%), commits/rollbacks, tuple read/write velocity, and lock contention.
+  - **`🐳 Docker Containers Overview` (`docker-overview.json`)**: Per-container CPU %, working set memory curves, network RX/TX, and CFS CPU throttling periods.
+  - **`🖥️ Host System & Hardware Overview` (`host-system-overview.json`)**: Host CPU load breakdown, thermal sensors per core, RAM utilization, root disk space, and load averages.
 
 ### 3. Deep Go Prometheus Metrics Instrumentation
 - **`aerial-brain`** (Exposed on internal `:8080/metrics` / host `:8088/metrics`):
