@@ -519,6 +519,8 @@ services:
         condition: service_healthy
       node-exporter:
         condition: service_healthy
+      postgres-exporter:
+        condition: service_healthy
 
   # ----------------------------------------------------------------------------
   # 16. Observability: Grafana Visual Dashboards
@@ -568,6 +570,35 @@ services:
       postgres:
         condition: service_healthy
       victoriametrics:
+        condition: service_healthy
+
+  # ----------------------------------------------------------------------------
+  # 17. Observability: PostgreSQL Metrics Exporter
+  #     Gathers database connection pools, locks, query stats, and buffer metrics.
+  # ----------------------------------------------------------------------------
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.16.0
+    container_name: aerial-postgres-exporter
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      autoheal: "true"
+      com.centurylinklabs.watchtower.enable: "true"
+    environment:
+      - DATA_SOURCE_NAME=postgresql://${POSTGRES_USER:-aerial}:${POSTGRES_PASSWORD:-aerial_secure_pass}@postgres:5432/${POSTGRES_DB:-aerial}?sslmode=disable
+      - PG_EXPORTER_DISABLE_SETTINGS_METRICS=true
+      - PG_EXPORTER_AUTO_DISCOVER_DATABASES=false
+    networks:
+      - aerial-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:9187/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    depends_on:
+      postgres:
         condition: service_healthy
 
 networks:
