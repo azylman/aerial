@@ -856,10 +856,8 @@ func main() {
 	apiKey := config.GetEnv("GEMINI_API_KEY", config.GetEnv("ANTIGRAVITY_API_KEY", ""))
 	systemPrompt := config.GetEnv("SYSTEM_PROMPT", "")
 
-	if apiKey != "" {
-		if err := config.EnsureAgySettings(apiKey, cfg.Model); err != nil {
-			log.Printf("Warning: EnsureAgySettings error: %v", err)
-		}
+	if err := config.EnsureAgySettings(apiKey, cfg.Model); err != nil {
+		log.Printf("Warning: EnsureAgySettings error: %v", err)
 	}
 	if err := config.EnsureSystemRules(systemPrompt); err != nil {
 		log.Printf("Warning: EnsureSystemRules error: %v", err)
@@ -950,10 +948,8 @@ func main() {
 		latestTimeout := latestCfg.TimeoutMinutes
 		latestMcpConfig := config.LoadMCPConfig()
 
-		if apiKey != "" {
-			if err := config.EnsureAgySettings(apiKey, latestModel); err != nil {
-				log.Printf("[%s] Warning: EnsureAgySettings error: %v", source, err)
-			}
+		if err := config.EnsureAgySettings(apiKey, latestModel); err != nil {
+			log.Printf("[%s] Warning: EnsureAgySettings error: %v", source, err)
 		}
 		if len(latestMcpConfig) > 0 {
 			if err := config.EnsureMcpConfig(latestMcpConfig); err != nil {
