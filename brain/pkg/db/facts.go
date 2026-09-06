@@ -482,7 +482,11 @@ func GetFactsPaginated(database *sql.DB, filter FactsFilter) (*FactsResult, erro
 		paginationSQL = fmt.Sprintf("LIMIT $%d OFFSET $%d", argIdx, argIdx+1)
 		queryArgs = append(queryArgs, filter.Limit, filter.Offset)
 	} else if filter.Offset > 0 {
-		paginationSQL = fmt.Sprintf("OFFSET $%d", argIdx)
+		if isPostgres(database) {
+			paginationSQL = fmt.Sprintf("OFFSET $%d", argIdx)
+		} else {
+			paginationSQL = fmt.Sprintf("LIMIT -1 OFFSET $%d", argIdx)
+		}
 		queryArgs = append(queryArgs, filter.Offset)
 	}
 

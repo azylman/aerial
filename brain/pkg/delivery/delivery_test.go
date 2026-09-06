@@ -1,8 +1,11 @@
 package delivery
 
 import (
+	"io"
+	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 )
@@ -213,5 +216,130 @@ func TestSendMessageWithAttachmentsNilSession(t *testing.T) {
 	err = SendMessageWithAttachments(nil, "12345", "hello", []*Attachment{att})
 	if err == nil {
 		t.Error("Expected error when sending message with nil session and attachments")
+	}
+}
+
+type mockRoundTripper struct {
+	roundTrip func(req *http.Request) (*http.Response, error)
+}
+
+func (m *mockRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return m.roundTrip(req)
+}
+
+func newMockDiscordSession(handler func(req *http.Request) (*http.Response, error)) *discordgo.Session {
+	s, _ := discordgo.New("Bot mock_token")
+	s.Client = &http.Client{
+		Transport: &mockRoundTripper{roundTrip: handler},
+	}
+	return s
+}
+
+func mockJSONResponse(status int, body string) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: status,
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Header:     make(http.Header),
+	}, nil
+}
+
+func TestSendMessageWithAttachments_MockSession(t *testing.T) {
+	sess := newMockDiscordSession(func(req *http.Request) (*http.Response, error) {
+		return mockJSONResponse(http.StatusOK, `{"id":"msg-123","channel_id":"12345","content":"ok"}`)
+	})
+
+	// 1. Single message
+	if err := SendMessage(sess, "12345", "Hello world"); err != nil {
+		t.Fatalf("SendMessage failed: %v", err)
+	}
+
+	// 2. Multi-chunk message with attachment
+	longText := strings.Repeat("A", 2500)
+	att := &Attachment{
+		Filename:    "img.png",
+		ContentType: "image/png",
+		Data:        []byte("fake png"),
+	}
+	if err := SendMessageWithAttachments(sess, "12345", longText, []*Attachment{att}); err != nil {
+		t.Fatalf("SendMessageWithAttachments multi-chunk failed: %v", err)
+	}
+
+	// 3. Attachments only (empty text)
+	if err := SendMessageWithAttachments(sess, "12345", "", []*Attachment{att}); err != nil {
+		t.Fatalf("SendMessageWithAttachments attachments only failed: %v", err)
+	}
+
+	// 4. Empty text and empty attachments -> returns nil
+	if err := SendMessageWithAttachments(sess, "12345", "", nil); err != nil {
+		t.Fatalf("SendMessageWithAttachments empty text failed: %v", err)
+	}
+
+	// 5. Send error from API
+	errSess := newMockDiscordSession(func(req *http.Request) (*http.Response, error) {
+		return mockJSONResponse(http.StatusBadRequest, `{"message":"Missing permissions","code":50013}`)
+	})
+	if err := SendMessage(errSess, "12345", "Hello fail"); err == nil {
+		t.Error("expected error from API failure, got nil")
+	}
+}
+
+func TestStartTyping_MockSession(t *testing.T) {
+	sess := newMockDiscordSession(func(req *http.Request) (*http.Response, error) {
+		return mockJSONResponse(http.StatusNoContent, "")
+	})
+
+	stop := StartTyping(sess, "12345")
+	time.Sleep(20 * time.Millisecond)
+	stop()
+}
+
+func TestSendSystemAlert_Success(t *testing.T) {
+	sess := newMockDiscordSession(func(req *http.Request) (*http.Response, error) {
+		return mockJSONResponse(http.StatusOK, `{"id":"alert-msg-123","channel_id":"chan-alerts"}`)
+	})
+
+	_ = sess.State.GuildAdd(&discordgo.Guild{
+		ID: "g1",
+		Channels: []*discordgo.Channel{
+			{ID: "chan-alerts", Name: "aerial-alerts"},
+		},
+	})
+
+	if err := SendSystemAlert(sess, "aerial-alerts", "System Alert", "Everything operational"); err != nil {
+		t.Fatalf("SendSystemAlert failed: %v", err)
+	}
+}
+
+func TestResolveChannelByNameOrID_APIFallback(t *testing.T) {
+	sess := newMockDiscordSession(func(req *http.Request) (*http.Response, error) {
+		if strings.Contains(req.URL.Path, "/users/@me/guilds") {
+			return mockJSONResponse(http.StatusOK, `[{"id":"g100","name":"My Guild"}]`)
+		}
+		if strings.Contains(req.URL.Path, "/guilds/g100/channels") {
+			return mockJSONResponse(http.StatusOK, `[{"id":"chan-remote-999","name":"remote-channel"}]`)
+		}
+		return mockJSONResponse(http.StatusNotFound, `{"message":"Not found"}`)
+	})
+	sess.Token = "Bot mock_token"
+
+	// Channel is not in state, so it queries API
+	chanID, err := ResolveChannelByNameOrID(sess, "remote-channel")
+	if err != nil || chanID != "chan-remote-999" {
+		t.Errorf("expected chan-remote-999 from API fallback, got %q (err: %v)", chanID, err)
+	}
+}
+
+func TestSplitMessage_ZeroLimitAndCodeBlockOverflow(t *testing.T) {
+	// 1. limit <= 0 defaults to MaxDiscordMessageLength
+	res := SplitMessage("Hello world with zero limit", 0)
+	if len(res) != 1 || res[0] != "Hello world with zero limit" {
+		t.Errorf("unexpected SplitMessage output for 0 limit: %v", res)
+	}
+
+	// 2. Giant continuous line inside a code block that exceeds limit
+	giantCode := "```go\n" + strings.Repeat("x", 100) + "\n```"
+	resCode := SplitMessage(giantCode, 40)
+	if len(resCode) < 3 {
+		t.Errorf("expected multiple chunks for giant line inside code block, got %d", len(resCode))
 	}
 }

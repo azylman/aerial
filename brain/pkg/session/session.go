@@ -282,10 +282,12 @@ func HasSuccessfulToolCall(convID string) bool {
 	return false
 }
 
+var brainDataDir = "/data/brain"
+
 // resolveBaseDir locates the appropriate brain base directory for sessions.
 func resolveBaseDir(sessionID string) string {
-	if fi, err := os.Stat("/data/brain"); err == nil && fi.IsDir() {
-		return "/data/brain"
+	if fi, err := os.Stat(brainDataDir); err == nil && fi.IsDir() {
+		return brainDataDir
 	}
 
 	homeDir, err := os.UserHomeDir()
@@ -304,7 +306,7 @@ func resolveBaseDir(sessionID string) string {
 	brainRoots := []string{
 		filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain"),
 		filepath.Join(homeDir, ".gemini", "antigravity", "brain"),
-		"/data/brain",
+		brainDataDir,
 	}
 	for _, root := range brainRoots {
 		if fi, err := os.Stat(root); err == nil && fi.IsDir() {

@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -70,18 +69,8 @@ func FormatThreadTitle(titlePrefix string, t time.Time) string {
 }
 
 // GetDefaultTimezone returns the default timezone configured for the scheduler.
-// Reads config.GetTimezone() -> DEFAULT_TIMEZONE -> TZ -> fallback "America/Los_Angeles".
 func GetDefaultTimezone() string {
-	if tz := strings.TrimSpace(config.GetTimezone()); tz != "" {
-		return tz
-	}
-	if tz := strings.TrimSpace(os.Getenv("DEFAULT_TIMEZONE")); tz != "" {
-		return tz
-	}
-	if tz := strings.TrimSpace(os.Getenv("TZ")); tz != "" {
-		return tz
-	}
-	return "America/Los_Angeles"
+	return config.GetTimezone()
 }
 
 // CalculateNextRun parses a standard 5-field cron or descriptor and computes the next run time in UTC.
@@ -318,51 +307,67 @@ func Start(ctx context.Context, database *sql.DB, pool *queue.WorkerPool, dg *di
 }
 
 // Run executes the monitoring loop with ticker interval and context cancellation.
+// ExtractFactsLLM extracts facts using the primary LLM via runner.RunAgy.
+func ExtractFactsLLM(ctx context.Context, prompt string) (string, error) {
+	apiKey := config.GetEnv("GEMINI_API_KEY", config.GetEnv("ANTIGRAVITY_API_KEY", ""))
+	model := config.GetRuntimeConfig().Model
+	if model == "" {
+		model = config.GetEnv("AGY_MODEL", "gemini-2.5-flash")
+	}
+	agyBin := config.GetEnv("AGY_BIN", "agy")
+	stdout, _, exitCode, err := runner.RunAgy(ctx, agyBin, prompt, "", apiKey, model, 5)
+	if exitCode != 0 || err != nil {
+		return "", fmt.Errorf("agy fact extraction exitCode=%d err=%v", exitCode, err)
+	}
+	resp, parseErr := runner.ParseAgyOutput(stdout)
+	if parseErr != nil {
+		return "", fmt.Errorf("failed to parse agy json output in scheduler: %w (raw: %q)", parseErr, stdout)
+	}
+	return resp.Response, nil
+}
+
+// RunPruneRetention executes schedule run retention cleanup.
+func RunPruneRetention(database *sql.DB) {
+	if database == nil {
+		return
+	}
+	if pruned, err := db.PruneScheduleRuns(database, 1000, 30*24*time.Hour); err != nil {
+		log.Printf("[Scheduler] Retention pruning error: %v", err)
+	} else if pruned > 0 {
+		log.Printf("[Scheduler] Retention pruning removed %d old schedule runs", pruned)
+	}
+}
+
+// RunFactExtraction triggers embedding backfill and active conversation fact extraction.
+func RunFactExtraction(ctx context.Context, database *sql.DB, client *memory.Client, llmFunc memory.LLMClientFunc) {
+	if database == nil || client == nil || llmFunc == nil {
+		return
+	}
+	if backfilled, err := memory.BackfillMissingEmbeddings(ctx, database, client); err != nil {
+		log.Printf("[Scheduler] Embedding backfill error: %v", err)
+	} else if backfilled > 0 {
+		log.Printf("[Scheduler] Embedding backfill completed for %d facts", backfilled)
+	}
+	if err := memory.ExtractActiveConversationFacts(ctx, database, client, llmFunc, 12); err != nil {
+		log.Printf("[Scheduler] Fact extraction error: %v", err)
+	}
+}
+
+// Run executes the monitoring loop with ticker interval and context cancellation.
 func Run(ctx context.Context, database *sql.DB, enqueuer MessageEnqueuer, threadCreator ThreadCreator, interval time.Duration) {
 	log.Printf("[Scheduler] Background scheduler monitor started (interval=%v)", interval)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	ollamaClient := memory.NewClient("")
-	llmFunc := func(ctx context.Context, prompt string) (string, error) {
-		apiKey := config.GetEnv("GEMINI_API_KEY", config.GetEnv("ANTIGRAVITY_API_KEY", ""))
-		model := config.GetRuntimeConfig().Model
-		if model == "" {
-			model = config.GetEnv("AGY_MODEL", "gemini-2.5-flash")
-		}
-		agyBin := config.GetEnv("AGY_BIN", "agy")
-		stdout, _, exitCode, err := runner.RunAgy(ctx, agyBin, prompt, "", apiKey, model, 5)
-		if exitCode != 0 || err != nil {
-			return "", fmt.Errorf("agy fact extraction exitCode=%d err=%v", exitCode, err)
-		}
-		resp, parseErr := runner.ParseAgyOutput(stdout)
-		if parseErr != nil {
-			return "", fmt.Errorf("failed to parse agy json output in scheduler: %w (raw: %q)", parseErr, stdout)
-		}
-		return resp.Response, nil
-	}
+	llmFunc := ExtractFactsLLM
 
 	// Initial evaluation on start
 	if err := ProcessDueSchedules(ctx, database, enqueuer, threadCreator); err != nil {
 		log.Printf("[Scheduler] Error in initial schedule check: %v", err)
 	}
-	go func() {
-		if pruned, err := db.PruneScheduleRuns(database, 1000, 30*24*time.Hour); err != nil {
-			log.Printf("[Scheduler] Initial retention pruning error: %v", err)
-		} else if pruned > 0 {
-			log.Printf("[Scheduler] Initial retention pruning removed %d old schedule runs", pruned)
-		}
-	}()
-	go func() {
-		if backfilled, err := memory.BackfillMissingEmbeddings(ctx, database, ollamaClient); err != nil {
-			log.Printf("[Scheduler] Initial embedding backfill error: %v", err)
-		} else if backfilled > 0 {
-			log.Printf("[Scheduler] Initial embedding backfill completed for %d facts", backfilled)
-		}
-		if err := memory.ExtractActiveConversationFacts(ctx, database, ollamaClient, llmFunc, 12); err != nil {
-			log.Printf("[Scheduler] Initial fact extraction error: %v", err)
-		}
-	}()
+	go RunPruneRetention(database)
+	go RunFactExtraction(ctx, database, ollamaClient, llmFunc)
 
 	var tickCount int
 	for {
@@ -378,22 +383,12 @@ func Run(ctx context.Context, database *sql.DB, enqueuer MessageEnqueuer, thread
 
 			// Run fact extraction hourly (every 120 ticks at 30s interval = 1 hour)
 			if tickCount%120 == 0 {
-				go func() {
-					if err := memory.ExtractActiveConversationFacts(ctx, database, ollamaClient, llmFunc, 12); err != nil {
-						log.Printf("[Memory] Fact extraction error: %v", err)
-					}
-				}()
+				go RunFactExtraction(ctx, database, ollamaClient, llmFunc)
 			}
 
 			// Run retention pruning daily (every 2880 ticks at 30s interval = 24 hours)
 			if tickCount%2880 == 0 {
-				go func() {
-					if pruned, err := db.PruneScheduleRuns(database, 1000, 30*24*time.Hour); err != nil {
-						log.Printf("[Scheduler] Retention pruning error: %v", err)
-					} else if pruned > 0 {
-						log.Printf("[Scheduler] Pruned %d old schedule runs", pruned)
-					}
-				}()
+				go RunPruneRetention(database)
 			}
 		}
 	}

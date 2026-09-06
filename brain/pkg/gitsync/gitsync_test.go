@@ -600,6 +600,88 @@ func TestEnsureGitHooks(t *testing.T) {
 	if err := EnsureGitHooks(context.Background(), ""); err != nil {
 		t.Errorf("Expected nil error for empty repoPath, got %v", err)
 	}
+
+	// 5. EnsureGitHooks error in non-git directory with .githooks folder
+	nonGitWithHooks := filepath.Join(t.TempDir(), "non_git_hooks")
+	_ = os.MkdirAll(filepath.Join(nonGitWithHooks, ".githooks"), 0755)
+	if err := EnsureGitHooks(context.Background(), nonGitWithHooks); err == nil {
+		t.Error("Expected error from EnsureGitHooks in non-git directory")
+	}
+}
+
+func TestResolveGitDir_EdgeCases(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// 1. .git file without gitdir: prefix
+	noPrefixDir := filepath.Join(tmpDir, "no_prefix")
+	_ = os.MkdirAll(noPrefixDir, 0755)
+	gitFile := filepath.Join(noPrefixDir, ".git")
+	_ = os.WriteFile(gitFile, []byte("random text not a gitdir"), 0644)
+
+	res, err := resolveGitDir(noPrefixDir)
+	if err != nil {
+		t.Errorf("resolveGitDir failed: %v", err)
+	}
+	if res != gitFile {
+		t.Errorf("expected %s, got %s", gitFile, res)
+	}
+
+	// 2. .git file with relative gitdir
+	relDir := filepath.Join(tmpDir, "rel_git")
+	_ = os.MkdirAll(relDir, 0755)
+	_ = os.WriteFile(filepath.Join(relDir, ".git"), []byte("gitdir: ../somewhere/.git"), 0644)
+	resRel, err := resolveGitDir(relDir)
+	if err != nil {
+		t.Errorf("resolveGitDir with relative failed: %v", err)
+	}
+	expectedRel := filepath.Clean(filepath.Join(relDir, "../somewhere/.git"))
+	if resRel != expectedRel {
+		t.Errorf("expected %s, got %s", expectedRel, resRel)
+	}
+}
+
+func TestEnsureRepo_ErrorsAndAdoptionRemoteSet(t *testing.T) {
+	// 1. Clone failure with non-existent remote URL
+	tmpDir := t.TempDir()
+	targetDir := filepath.Join(tmpDir, "non_existent_clone")
+	err := EnsureRepo(context.Background(), targetDir, "https://127.0.0.1:9999/non_existent.git", "")
+	if err == nil {
+		t.Error("expected error for failed clone, got nil")
+	}
+
+	// 2. Adoption on directory with remote already configured
+	originDir, _, _ := setupGitRepos(t)
+	adoptDir := filepath.Join(tmpDir, "adopt_with_remote")
+	_ = os.MkdirAll(adoptDir, 0755)
+	_ = os.WriteFile(filepath.Join(adoptDir, "initial.txt"), []byte("data"), 0644)
+	// Initialize git and set a dummy remote
+	runGitCmd(t, adoptDir, "init")
+	runGitCmd(t, adoptDir, "remote", "add", "origin", "https://example.com/old.git")
+
+	err = EnsureRepo(context.Background(), adoptDir, originDir, "")
+	if err != nil {
+		t.Errorf("EnsureRepo adoption on existing remote failed: %v", err)
+	}
+}
+
+func TestStartPeriodicSync_ZeroInterval(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stop := StartPeriodicSync(ctx, 0, []string{"/tmp/test"}, nil)
+	stop()
+}
+
+func TestSyncRepo_CorruptedGitDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	// Create a fake .git directory without HEAD
+	_ = os.MkdirAll(filepath.Join(tmpDir, ".git"), 0755)
+	hasChanges, err := SyncRepo(context.Background(), tmpDir)
+	if err == nil {
+		t.Error("expected error for corrupted git repo, got nil")
+	}
+	if hasChanges {
+		t.Error("expected hasChanges=false on error")
+	}
 }
 
 

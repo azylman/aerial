@@ -7,6 +7,7 @@ import (
 	"embed"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -16,11 +17,13 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -217,6 +220,8 @@ type GitHubPoller struct {
 	client       *http.Client
 	runsETag     string
 	jobsETagMap  map[int64]string
+	apiBaseURL   string
+	pollInterval time.Duration
 
 	mu           sync.RWMutex
 	cachedRuns   []GitHubRun
@@ -358,7 +363,13 @@ type DockerContainerJSON struct {
 	} `json:"Health,omitempty"`
 }
 
-func getGitCommit() string {
+var defaultGitCommitPaths = []string{
+	"/share/aerial/.git/refs/heads/main",
+	"/share/aerial/.git/refs/heads/master",
+	"/share/aerial/.git/HEAD",
+}
+
+func getGitCommit(customPaths ...string) string {
 	if envCommit := os.Getenv("GIT_COMMIT"); envCommit != "" {
 		if len(envCommit) > 7 {
 			return envCommit[:7]
@@ -366,17 +377,16 @@ func getGitCommit() string {
 		return envCommit
 	}
 
-	paths := []string{
-		"/share/aerial/.git/refs/heads/main",
-		"/share/aerial/.git/refs/heads/master",
-		"/share/aerial/.git/HEAD",
+	paths := defaultGitCommitPaths
+	if len(customPaths) > 0 {
+		paths = customPaths
 	}
 
 	for _, p := range paths {
 		if data, err := os.ReadFile(p); err == nil {
 			trimmed := strings.TrimSpace(string(data))
 			if strings.HasPrefix(trimmed, "ref: ") {
-				refPath := filepath.Join("/share/aerial/.git", strings.TrimPrefix(trimmed, "ref: "))
+				refPath := filepath.Join(filepath.Dir(p), strings.TrimPrefix(trimmed, "ref: "))
 				if refData, err := os.ReadFile(refPath); err == nil {
 					refTrimmed := strings.TrimSpace(string(refData))
 					if len(refTrimmed) >= 7 {
@@ -418,7 +428,11 @@ func (p *GitHubPoller) Start(ctx context.Context) {
 		// Initial immediate poll
 		p.pollOnce(ctx)
 
-		ticker := time.NewTicker(30 * time.Second)
+		interval := p.pollInterval
+		if interval <= 0 {
+			interval = 30 * time.Second
+		}
+		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 
 		for {
@@ -429,10 +443,12 @@ func (p *GitHubPoller) Start(ctx context.Context) {
 				return
 			case <-ticker.C:
 				hasActive := p.pollOnce(ctx)
-				if hasActive {
-					ticker.Reset(15 * time.Second)
-				} else {
-					ticker.Reset(45 * time.Second)
+				if p.pollInterval <= 0 {
+					if hasActive {
+						ticker.Reset(15 * time.Second)
+					} else {
+						ticker.Reset(45 * time.Second)
+					}
 				}
 			}
 		}
@@ -440,7 +456,11 @@ func (p *GitHubPoller) Start(ctx context.Context) {
 }
 
 func (p *GitHubPoller) pollOnce(ctx context.Context) bool {
-	reqURL := fmt.Sprintf("https://api.github.com/repos/%s/actions/runs?per_page=3&event=push&branch=main", p.repo)
+	baseURL := p.apiBaseURL
+	if baseURL == "" {
+		baseURL = "https://api.github.com"
+	}
+	reqURL := fmt.Sprintf("%s/repos/%s/actions/runs?per_page=3&event=push&branch=main", baseURL, p.repo)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
 		return false
@@ -539,7 +559,11 @@ func (p *GitHubPoller) pollOnce(ctx context.Context) bool {
 }
 
 func (p *GitHubPoller) fetchJobsForRun(ctx context.Context, runID int64) {
-	reqURL := fmt.Sprintf("https://api.github.com/repos/%s/actions/runs/%d/jobs", p.repo, runID)
+	baseURL := p.apiBaseURL
+	if baseURL == "" {
+		baseURL = "https://api.github.com"
+	}
+	reqURL := fmt.Sprintf("%s/repos/%s/actions/runs/%d/jobs", baseURL, p.repo, runID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
 		return
@@ -1980,18 +2004,18 @@ func (ar *AssetRegistry) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(asset.Data)
 }
 
-func main() {
-	staticFS, err := fs.Sub(content, "static")
-	if err != nil {
-		log.Fatalf("failed to create static sub filesystem: %v", err)
-	}
+// DashboardConfig holds configuration settings for the dashboard web server.
+type DashboardConfig struct {
+	Port       string
+	BrainURL   string
+	GHRepo     string
+	GHToken    string
+	GitCommit  string
+	APIBaseURL string
+}
 
-	gitCommit := getGitCommit()
-	assetReg, err := NewAssetRegistry(staticFS, gitCommit)
-	if err != nil {
-		log.Fatalf("failed to initialize asset registry: %v", err)
-	}
-
+// NewDashboardConfigFromEnv parses DashboardConfig from environment variables.
+func NewDashboardConfigFromEnv() DashboardConfig {
 	brainURL := os.Getenv("BRAIN_URL")
 	if brainURL == "" {
 		brainURL = "http://brain:8080"
@@ -2005,9 +2029,23 @@ func main() {
 	if ghToken == "" {
 		ghToken = os.Getenv("GITHUB_PERSONAL_ACCESS_TOKEN")
 	}
-	globalGHPoller = NewGitHubPoller(ghRepo, ghToken)
-	globalGHPoller.Start(context.Background())
 
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	return DashboardConfig{
+		Port:      port,
+		BrainURL:  brainURL,
+		GHRepo:    ghRepo,
+		GHToken:   ghToken,
+		GitCommit: getGitCommit(),
+	}
+}
+
+// SetupDashboardMux configures the HTTP router and route handlers.
+func SetupDashboardMux(brainURL string, assetReg *AssetRegistry) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/dashboard/health", healthHandler)
@@ -2020,21 +2058,70 @@ func main() {
 	mux.HandleFunc("/api/schedules/runs", scheduleRunsHandler(brainURL))
 	mux.HandleFunc("/dashboard/api/schedules/runs", scheduleRunsHandler(brainURL))
 
-	mux.HandleFunc("/", assetReg.ServeHTTP)
-	mux.Handle("/dashboard/", http.StripPrefix("/dashboard", http.HandlerFunc(assetReg.ServeHTTP)))
-
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
+	if assetReg != nil {
+		mux.HandleFunc("/", assetReg.ServeHTTP)
+		mux.Handle("/dashboard/", http.StripPrefix("/dashboard", http.HandlerFunc(assetReg.ServeHTTP)))
 	}
 
-	log.Printf("aerial-dashboard server starting on :%s (upstream brain=%s)", port, brainURL)
+	return securityHeadersMiddleware(mux)
+}
+
+// RunDashboardServer starts the GitHub poller, creates the asset registry, and listens on the configured port.
+func RunDashboardServer(ctx context.Context, cfg DashboardConfig) error {
+	staticFS, err := fs.Sub(content, "static")
+	if err != nil {
+		return fmt.Errorf("failed to create static sub filesystem: %w", err)
+	}
+
+	gitCommit := cfg.GitCommit
+	if gitCommit == "" {
+		gitCommit = getGitCommit()
+	}
+	assetReg, err := NewAssetRegistry(staticFS, gitCommit)
+	if err != nil {
+		return fmt.Errorf("failed to initialize asset registry: %w", err)
+	}
+
+	if cfg.GHRepo != "" {
+		globalGHPoller = NewGitHubPoller(cfg.GHRepo, cfg.GHToken)
+		if cfg.APIBaseURL != "" {
+			globalGHPoller.apiBaseURL = cfg.APIBaseURL
+		}
+		globalGHPoller.Start(ctx)
+	}
+
+	handler := SetupDashboardMux(cfg.BrainURL, assetReg)
+
+	log.Printf("aerial-dashboard server starting on :%s (upstream brain=%s)", cfg.Port, cfg.BrainURL)
 	srv := &http.Server{
-		Addr:    ":" + port,
-		Handler: securityHeadersMiddleware(mux),
+		Addr:    ":" + cfg.Port,
+		Handler: handler,
 	}
 
-	if err := srv.ListenAndServe(); err != nil {
-		log.Fatalf("server failed: %v", err)
+	serverErr := make(chan error, 1)
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serverErr <- err
+		}
+	}()
+
+	select {
+	case <-ctx.Done():
+		log.Println("Shutting down aerial-dashboard server gracefully...")
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		return srv.Shutdown(shutdownCtx)
+	case err := <-serverErr:
+		return fmt.Errorf("server fatal error: %w", err)
+	}
+}
+
+func main() {
+	cfg := NewDashboardConfigFromEnv()
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	if err := RunDashboardServer(ctx, cfg); err != nil {
+		log.Fatalf("dashboard failed: %v", err)
 	}
 }

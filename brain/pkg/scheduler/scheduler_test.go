@@ -3,14 +3,18 @@ package scheduler
 import (
 	"context"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
+	"github.com/azylman/aerial/brain/pkg/memory"
 	"github.com/azylman/aerial/brain/pkg/queue"
 	"github.com/bwmarrin/discordgo"
 	"github.com/google/uuid"
@@ -97,27 +101,51 @@ func TestFormatThreadTitle(t *testing.T) {
 }
 
 func TestGetDefaultTimezone(t *testing.T) {
-	// 1. Fallback when both DEFAULT_TIMEZONE and TZ are unset
-	t.Setenv("DEFAULT_TIMEZONE", "")
+	tmpDir := t.TempDir()
+	yamlPath := filepath.Join(tmpDir, "config.yaml")
+
+	// 0. Test with runtime config timezone set
+	_ = os.WriteFile(yamlPath, []byte("timezone: 'Europe/Paris'\nchannels:\n  default:\n    mode: 'threads'\n"), 0644)
+	_, _ = config.LoadConfigFromPaths(yamlPath)
+
+	if tz := GetDefaultTimezone(); tz != "Europe/Paris" {
+		t.Errorf("Expected runtime config 'Europe/Paris', got %q", tz)
+	}
+
+	// 1. DEFAULT_TIMEZONE environment variable takes precedence when config timezone is empty
+	t.Setenv("DEFAULT_TIMEZONE", "America/New_York")
 	t.Setenv("TZ", "")
-	if tz := GetDefaultTimezone(); tz != "America/Los_Angeles" {
-		t.Errorf("Expected fallback 'America/Los_Angeles', got %q", tz)
+	_ = os.WriteFile(yamlPath, []byte("channels:\n  default:\n    mode: 'threads'\n"), 0644)
+	_, _ = config.LoadConfigFromPaths(yamlPath)
+
+	if tz := GetDefaultTimezone(); tz != "America/New_York" {
+		t.Errorf("Expected DEFAULT_TIMEZONE 'America/New_York', got %q", tz)
 	}
 
 	// 2. TZ environment variable fallback
+	t.Setenv("DEFAULT_TIMEZONE", "")
 	t.Setenv("TZ", "America/Chicago")
+	_, _ = config.LoadConfigFromPaths(yamlPath)
+
 	if tz := GetDefaultTimezone(); tz != "America/Chicago" {
 		t.Errorf("Expected TZ 'America/Chicago', got %q", tz)
 	}
 
-	// 3. DEFAULT_TIMEZONE environment variable takes highest precedence
-	t.Setenv("DEFAULT_TIMEZONE", "America/New_York")
-	if tz := GetDefaultTimezone(); tz != "America/New_York" {
-		t.Errorf("Expected DEFAULT_TIMEZONE 'America/New_York', got %q", tz)
+	// 3. Fallback when both DEFAULT_TIMEZONE and TZ are unset
+	t.Setenv("DEFAULT_TIMEZONE", "")
+	t.Setenv("TZ", "")
+	_, _ = config.LoadConfigFromPaths(yamlPath)
+
+	if tz := GetDefaultTimezone(); tz != "America/Los_Angeles" {
+		t.Errorf("Expected fallback 'America/Los_Angeles', got %q", tz)
 	}
 }
 
 func TestCalculateNextRun(t *testing.T) {
+	tmpDir := t.TempDir()
+	yamlPath := filepath.Join(tmpDir, "config.yaml")
+	_ = os.WriteFile(yamlPath, []byte("channels:\n  default:\n    mode: 'threads'\n"), 0644)
+
 	// Friday Aug 28, 2026 12:00:00 UTC (05:00:00 PDT)
 	baseTime := time.Date(2026, time.August, 28, 12, 0, 0, 0, time.UTC)
 
@@ -145,6 +173,8 @@ func TestCalculateNextRun(t *testing.T) {
 	// Empty timezone defaults to GetDefaultTimezone() ("America/Los_Angeles")
 	t.Setenv("DEFAULT_TIMEZONE", "America/Los_Angeles")
 	t.Setenv("TZ", "")
+	_, _ = config.LoadConfigFromPaths(yamlPath)
+
 	nextDefault, err := CalculateNextRun("0 9 * * *", "", baseTime)
 	if err != nil {
 		t.Fatalf("CalculateNextRun with empty timezone failed: %v", err)
@@ -156,6 +186,8 @@ func TestCalculateNextRun(t *testing.T) {
 	// Configurable DEFAULT_TIMEZONE override: America/New_York (EDT = UTC-4 in August)
 	// "0 9 * * *" (9 AM America/New_York) from Aug 28 12:00 UTC (8:00 AM EDT) -> Aug 28 9:00 EDT (13:00 UTC)
 	t.Setenv("DEFAULT_TIMEZONE", "America/New_York")
+	_, _ = config.LoadConfigFromPaths(yamlPath)
+
 	nextNY, err := CalculateNextRun("0 9 * * *", "", baseTime)
 	if err != nil {
 		t.Fatalf("CalculateNextRun America/New_York override failed: %v", err)
@@ -848,5 +880,475 @@ channels:
 		t.Errorf("Expected message ThreadID %q, got %q", threadTargetID, msgs[0].ThreadID)
 	}
 }
+
+type mockRoundTripper struct {
+	roundTrip func(req *http.Request) (*http.Response, error)
+}
+
+func (m *mockRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return m.roundTrip(req)
+}
+
+func TestDiscordThreadCreator_CreatePublicThread(t *testing.T) {
+	// 1. Nil receiver / nil session
+	var nilCreator *DiscordThreadCreator
+	th, err := nilCreator.CreatePublicThread("chan1", "title")
+	if err != nil || th != "chan1" {
+		t.Errorf("expected channelID fallback for nil creator, got %q, %v", th, err)
+	}
+
+	creatorNilSess := NewDiscordThreadCreator(nil)
+	th2, err := creatorNilSess.CreatePublicThread("chan1", "title")
+	if err != nil || th2 != "chan1" {
+		t.Errorf("expected channelID fallback for creator with nil session, got %q, %v", th2, err)
+	}
+
+	// 2. Mock Discord session success
+	dg, _ := discordgo.New("Bot mock_token")
+	dg.Client = &http.Client{
+		Transport: &mockRoundTripper{
+			roundTrip: func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(`{"id":"th-mock-999","name":"mock title"}`)),
+					Header:     make(http.Header),
+				}, nil
+			},
+		},
+	}
+	creator := NewDiscordThreadCreator(dg)
+	thID, err := creator.CreatePublicThread("chan1", "mock title")
+	if err != nil || thID != "th-mock-999" {
+		t.Errorf("expected th-mock-999, got %q (err: %v)", thID, err)
+	}
+
+	// 3. Mock Discord session error
+	dgErr, _ := discordgo.New("Bot mock_token")
+	dgErr.Client = &http.Client{
+		Transport: &mockRoundTripper{
+			roundTrip: func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusBadRequest,
+					Body:       io.NopCloser(strings.NewReader(`{"message":"Bad request"}`)),
+					Header:     make(http.Header),
+				}, nil
+			},
+		},
+	}
+	creatorErr := NewDiscordThreadCreator(dgErr)
+	_, err = creatorErr.CreatePublicThread("chan1", "title")
+	if err == nil {
+		t.Error("expected error from Discord API failure, got nil")
+	}
+}
+
+func TestCalculateNextRun_UnknownTimezone(t *testing.T) {
+	now := time.Now().UTC()
+	next, err := CalculateNextRun("0 9 * * *", "Unknown/Invalid_Zone_12345", now)
+	if err != nil {
+		t.Fatalf("expected fallback to UTC on unknown timezone, got error: %v", err)
+	}
+	if next.IsZero() {
+		t.Errorf("expected non-zero next run")
+	}
+}
+
+func TestProcessDueSchedules_NilDBAndCancelledCtx(t *testing.T) {
+	// 1. Nil DB
+	if err := ProcessDueSchedules(context.Background(), nil, nil, nil); err != nil {
+		t.Errorf("expected nil error for nil DB, got %v", err)
+	}
+
+	// 2. Cancelled context
+	database, _ := db.InitDB(":memory:")
+	defer database.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+	_ = ProcessDueSchedules(ctx, database, nil, nil)
+}
+
+func TestSchedulerRun_TickLoop(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer database.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	enqueuer := newMockEnqueuer()
+	threadCreator := newMockThreadCreator()
+
+	// Run with 100 microseconds interval for 350ms so it ticks > 3000 times (exercising 120 and 2880 tick branches)
+	go func() {
+		time.Sleep(350 * time.Millisecond)
+		cancel()
+	}()
+
+	Run(ctx, database, enqueuer, threadCreator, 100*time.Microsecond)
+}
+
+func TestProcessDueSchedules_ClosedDBAndErrors(t *testing.T) {
+	database, err := db.InitDB(filepath.Join(t.TempDir(), "test_closed.db"))
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	_ = database.Close()
+
+	// Closed DB returns query error
+	err = ProcessDueSchedules(context.Background(), database, nil, nil)
+	if err == nil {
+		t.Error("expected error for closed DB in ProcessDueSchedules")
+	}
+}
+
+type errThreadCreator struct{}
+
+func (e *errThreadCreator) CreatePublicThread(channelID, name string) (string, error) {
+	return "", fmt.Errorf("failed to create thread")
+}
+
+func TestProcessDueCronSchedules_EmptyTitlePrefixAndThreadCreationError(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer database.Close()
+
+	now := time.Now().UTC()
+	cronSched := db.CronSchedule{
+		ID:          "cron-empty-title",
+		TargetID:    "chan-threads-target",
+		TitlePrefix: "", // empty title prefix
+		CronExpr:    "0 9 * * *",
+		Prompt:      "Routine prompt",
+		Timezone:    "UTC",
+		NextRunAt:   now.Add(-10 * time.Second),
+		Enabled:     true,
+		CreatedAt:   now.Add(-1 * time.Hour),
+	}
+	_ = db.CreateCronSchedule(database, cronSched)
+
+	enqueuer := newMockEnqueuer()
+	errCreator := &errThreadCreator{}
+
+	// When thread creation fails, it falls back to target channel ID
+	if err := ProcessDueSchedules(context.Background(), database, enqueuer, errCreator); err != nil {
+		t.Fatalf("ProcessDueSchedules error: %v", err)
+	}
+
+	msgs := enqueuer.getMessages()
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 message enqueued, got %d", len(msgs))
+	}
+	if msgs[0].ThreadID != "chan-threads-target" {
+		t.Errorf("expected fallback ThreadID chan-threads-target, got %q", msgs[0].ThreadID)
+	}
+}
+
+func TestSchedulerRun_WithActiveConversationsAndFactExtraction(t *testing.T) {
+	tmpDir := t.TempDir()
+	mockAgy := filepath.Join(tmpDir, "mock_agy.sh")
+	_ = os.WriteFile(mockAgy, []byte("#!/bin/sh\necho '{\"status\":\"SUCCESS\",\"response\":\"[{\\\"subject\\\":\\\"Alex\\\",\\\"predicate\\\":\\\"likes\\\",\\\"object\\\":\\\"matcha\\\",\\\"category\\\":\\\"preference\\\",\\\"confidence\\\":0.9}]\"}'\n"), 0755)
+	t.Setenv("AGY_BIN", mockAgy)
+	t.Setenv("GEMINI_API_KEY", "mock_key")
+
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer database.Close()
+
+	now := time.Now().UTC()
+	_ = db.InsertMessage(database, db.Message{
+		ID:         "msg-active-1",
+		ThreadID:   "thread-active-facts",
+		AuthorID:   "user-100",
+		AuthorName: "Alex",
+		Content:    "I love drinking iced matcha in the morning",
+		Status:     db.StatusCompleted,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	enqueuer := newMockEnqueuer()
+	threadCreator := newMockThreadCreator()
+
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+
+	Run(ctx, database, enqueuer, threadCreator, 10*time.Millisecond)
+}
+
+func TestSchedulerStart_Stop(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer database.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	stop := Start(ctx, database, nil, nil)
+	time.Sleep(20 * time.Millisecond)
+	stop()
+	// Calling stop second time should be safe
+	stop()
+}
+
+func TestProcessDueSchedules_ContextCancellationInLoops(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer database.Close()
+
+	now := time.Now().UTC()
+	// Insert 2 due crons
+	for i := 1; i <= 2; i++ {
+		_ = db.CreateCronSchedule(database, db.CronSchedule{
+			ID:          fmt.Sprintf("cron-cancel-%d", i),
+			TargetID:    "chan-test",
+			TitlePrefix: "Cancel Test",
+			CronExpr:    "0 9 * * *",
+			Prompt:      "test",
+			Timezone:    "UTC",
+			NextRunAt:   now.Add(-10 * time.Minute),
+			Enabled:     true,
+			CreatedAt:   now.Add(-1 * time.Hour),
+		})
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // pre-cancel context
+
+	err = ProcessDueSchedules(ctx, database, nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "context canceled") {
+		t.Errorf("expected context canceled error, got %v", err)
+	}
+
+	// Insert 2 due one-shots
+	for i := 1; i <= 2; i++ {
+		_ = db.CreateOneShotSchedule(database, db.OneShotSchedule{
+			ID:        fmt.Sprintf("oneshot-cancel-%d", i),
+			ThreadID:  "th-test",
+			Prompt:    "test",
+			RunAt:     now.Add(-10 * time.Minute),
+			CreatedAt: now.Add(-1 * time.Hour),
+		})
+	}
+
+	err = ProcessDueSchedules(ctx, database, nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "context canceled") {
+		t.Errorf("expected context canceled error, got %v", err)
+	}
+}
+
+func TestProcessDueSchedules_StaleCronWithInvalidCronExpr(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer database.Close()
+
+	now := time.Now().UTC()
+	// Overdue by > 24 hours with invalid cron expr
+	cronSched := db.CronSchedule{
+		ID:          "cron-stale-invalid",
+		TargetID:    "chan-test",
+		TitlePrefix: "Stale Invalid",
+		CronExpr:    "invalid-cron-syntax",
+		Prompt:      "stale prompt",
+		Timezone:    "UTC",
+		NextRunAt:   now.Add(-48 * time.Hour),
+		Enabled:     true,
+		CreatedAt:   now.Add(-72 * time.Hour),
+	}
+	_ = db.CreateCronSchedule(database, cronSched)
+
+	enqueuer := newMockEnqueuer()
+	if err := ProcessDueSchedules(context.Background(), database, enqueuer, nil); err != nil {
+		t.Fatalf("ProcessDueSchedules error: %v", err)
+	}
+
+	// It should NOT enqueue a message since it's stale
+	msgs := enqueuer.getMessages()
+	if len(msgs) != 0 {
+		t.Errorf("expected 0 messages for stale cron, got %d", len(msgs))
+	}
+}
+
+func TestProcessDueSchedules_DueCronWithInvalidCronExpr(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer database.Close()
+
+	now := time.Now().UTC()
+	// Overdue by 5 minutes with invalid cron expr (not stale >24h, but invalid)
+	cronSched := db.CronSchedule{
+		ID:          "cron-due-invalid",
+		TargetID:    "chan-test",
+		TitlePrefix: "Due Invalid",
+		CronExpr:    "invalid-cron-syntax",
+		Prompt:      "due prompt",
+		Timezone:    "UTC",
+		NextRunAt:   now.Add(-5 * time.Minute),
+		Enabled:     true,
+		CreatedAt:   now.Add(-1 * time.Hour),
+	}
+	_ = db.CreateCronSchedule(database, cronSched)
+
+	enqueuer := newMockEnqueuer()
+	if err := ProcessDueSchedules(context.Background(), database, enqueuer, nil); err != nil {
+		t.Fatalf("ProcessDueSchedules error: %v", err)
+	}
+
+	msgs := enqueuer.getMessages()
+	if len(msgs) != 1 {
+		t.Errorf("expected 1 message for due cron, got %d", len(msgs))
+	}
+}
+
+func TestExtractFactsLLM_SuccessAndModelOverride(t *testing.T) {
+	tmpDir := t.TempDir()
+	yamlPath := filepath.Join(tmpDir, "config.yaml")
+	cfgContent := `
+model: "gemini-1.5-pro-custom"
+`
+	_ = os.WriteFile(yamlPath, []byte(cfgContent), 0644)
+	_, _ = config.LoadConfigFromPaths(yamlPath)
+
+	mockAgy := filepath.Join(tmpDir, "mock_agy.sh")
+	_ = os.WriteFile(mockAgy, []byte("#!/bin/sh\necho '{\"status\":\"SUCCESS\",\"response\":\"extracted facts json\"}'\n"), 0755)
+	t.Setenv("AGY_BIN", mockAgy)
+	t.Setenv("GEMINI_API_KEY", "mock_key")
+
+	res, err := ExtractFactsLLM(context.Background(), "test prompt")
+	if err != nil {
+		t.Fatalf("ExtractFactsLLM failed: %v", err)
+	}
+	if res != "extracted facts json" {
+		t.Errorf("expected 'extracted facts json', got %q", res)
+	}
+}
+
+func TestExtractFactsLLM_DefaultModel(t *testing.T) {
+	tmpDir := t.TempDir()
+	yamlPath := filepath.Join(tmpDir, "config.yaml")
+	_ = os.WriteFile(yamlPath, []byte("channels:\n  default:\n    mode: 'threads'\n"), 0644)
+	_, _ = config.LoadConfigFromPaths(yamlPath)
+
+	mockAgy := filepath.Join(tmpDir, "mock_agy.sh")
+	_ = os.WriteFile(mockAgy, []byte("#!/bin/sh\necho '{\"status\":\"SUCCESS\",\"response\":\"default model result\"}'\n"), 0755)
+	t.Setenv("AGY_BIN", mockAgy)
+	t.Setenv("AGY_MODEL", "gemini-2.5-flash")
+	t.Setenv("GEMINI_API_KEY", "mock_key")
+
+	res, err := ExtractFactsLLM(context.Background(), "test prompt")
+	if err != nil {
+		t.Fatalf("ExtractFactsLLM failed: %v", err)
+	}
+	if res != "default model result" {
+		t.Errorf("expected 'default model result', got %q", res)
+	}
+}
+
+func TestExtractFactsLLM_Errors(t *testing.T) {
+	tmpDir := t.TempDir()
+	// 1. Script fails with exit code 1
+	mockFailAgy := filepath.Join(tmpDir, "mock_fail_agy.sh")
+	_ = os.WriteFile(mockFailAgy, []byte("#!/bin/sh\necho 'fatal error' >&2\nexit 1\n"), 0755)
+	t.Setenv("AGY_BIN", mockFailAgy)
+
+	_, err := ExtractFactsLLM(context.Background(), "prompt")
+	if err == nil {
+		t.Error("expected error on nonzero exit code")
+	}
+
+	// 2. Script returns invalid JSON
+	mockBadJsonAgy := filepath.Join(tmpDir, "mock_bad_json.sh")
+	_ = os.WriteFile(mockBadJsonAgy, []byte("#!/bin/sh\necho 'not-json'\n"), 0755)
+	t.Setenv("AGY_BIN", mockBadJsonAgy)
+
+	_, err = ExtractFactsLLM(context.Background(), "prompt")
+	if err == nil {
+		t.Error("expected error on invalid JSON output")
+	}
+}
+
+func TestRunPruneRetention(t *testing.T) {
+	// 1. Nil DB
+	RunPruneRetention(nil)
+
+	// 2. Closed DB (error branch)
+	database, err := db.InitDB(filepath.Join(t.TempDir(), "closed.db"))
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	_ = database.Close()
+	RunPruneRetention(database)
+
+	// 3. Valid DB with old runs pruned
+	dbValid, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer dbValid.Close()
+
+	oldTime := time.Now().UTC().Add(-60 * 24 * time.Hour)
+	_ = db.CreateScheduleRun(dbValid, db.ScheduleRun{
+		ID:           "old-run-1",
+		ScheduleID:   "sched-1",
+		ScheduleType: "cron",
+		MessageID:    "msg-1",
+		TargetID:     "chan-1",
+		ThreadID:     "th-1",
+		Title:        "Old Run",
+		Prompt:       "Old Prompt",
+		Status:       "completed",
+		StartedAt:    oldTime,
+		CompletedAt:  &oldTime,
+	})
+
+	RunPruneRetention(dbValid)
+}
+
+func TestRunFactExtraction(t *testing.T) {
+	// 1. Nil arguments
+	RunFactExtraction(nil, nil, nil, nil)
+
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer database.Close()
+
+	client := memory.NewClient("")
+	llmFunc := func(ctx context.Context, prompt string) (string, error) {
+		return "[]", nil
+	}
+
+	// 2. Valid execution
+	RunFactExtraction(context.Background(), database, client, llmFunc)
+
+	// 3. Closed DB error
+	closedDB, err := db.InitDB(filepath.Join(t.TempDir(), "fact_closed.db"))
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	_ = closedDB.Close()
+	RunFactExtraction(context.Background(), closedDB, client, llmFunc)
+}
+
 
 
