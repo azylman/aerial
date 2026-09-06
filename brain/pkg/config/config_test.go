@@ -856,7 +856,7 @@ channels:
 func TestChannelPolicy_DefaultsAndNormalization(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	// 1. Test default in threads mode gets typing_indicator: "always"
+	// 1. Test default in threads mode gets mode: "threads"
 	yamlPath1 := filepath.Join(tmpDir, "config_threads.yaml")
 	yamlThreads := `
 model: "gemini-2.5-flash"
@@ -965,36 +965,46 @@ func TestResolveChannelPolicy(t *testing.T) {
 
 func TestIsAdmin(t *testing.T) {
 	cfg := Config{
-		AdminUsers: []string{"1542035925603713086", "arcane103", "@Alex"},
+		AdminUsers: []string{"123456789012345678", "testadmin", "@AliceAdmin"},
 	}
 
 	// 1. Exact snowflake ID
-	if !cfg.IsAdmin("1542035925603713086") {
+	if !cfg.IsAdmin("123456789012345678") {
 		t.Errorf("Expected snowflake ID to be admin")
 	}
 
 	// 2. Exact username
-	if !cfg.IsAdmin("arcane103") {
-		t.Errorf("Expected arcane103 to be admin")
+	if !cfg.IsAdmin("testadmin") {
+		t.Errorf("Expected testadmin to be admin")
 	}
 
 	// 3. Username with @ prefix and case variations
-	if !cfg.IsAdmin("@Arcane103") {
-		t.Errorf("Expected @Arcane103 to be admin")
+	if !cfg.IsAdmin("@TestAdmin") {
+		t.Errorf("Expected @TestAdmin to be admin")
 	}
-	if !cfg.IsAdmin("alex") {
-		t.Errorf("Expected alex to be admin matching @Alex")
+	if !cfg.IsAdmin("aliceadmin") {
+		t.Errorf("Expected aliceadmin to be admin")
 	}
-	if !cfg.IsAdmin("@ALEX") {
-		t.Errorf("Expected @ALEX to be admin")
+	if !cfg.IsAdmin("@AliceAdmin") {
+		t.Errorf("Expected @AliceAdmin to be admin")
 	}
 
-	// 4. Variadic check (ID, Username, GlobalName) where one matches
-	if !cfg.IsAdmin("some-random-id", "arcane103", "Alex") {
+	// 4. Non-admin users
+	if cfg.IsAdmin("random_user") {
+		t.Errorf("Expected random_user to not be admin")
+	}
+	if cfg.IsAdmin("987654321098765432") {
+		t.Errorf("Expected unknown snowflake ID to not be admin")
+	}
+	if cfg.IsAdmin("") {
+		t.Errorf("Expected empty string to not be admin")
+	}
+
+	// 5. Variadic check (ID, Username, GlobalName) where one matches
+	if !cfg.IsAdmin("some-random-id", "testadmin", "Bob") {
 		t.Errorf("Expected variadic check with matching username to be admin")
 	}
 
-	// 5. Non-admins and empty/whitespace
 	if cfg.IsAdmin("regular-user") {
 		t.Errorf("Expected regular-user NOT to be admin")
 	}
