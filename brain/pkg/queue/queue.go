@@ -40,8 +40,8 @@ var (
 )
 
 const (
-	DefaultMaxSessionTurns = 50
-	DefaultTimeoutMinutes  = 15
+	DefaultMaxSessionTurns = 25
+	DefaultTimeoutMinutes  = 60
 )
 
 // CacheDiscordChannel stores an immutable snapshot of a discordgo.Channel.
@@ -1149,6 +1149,17 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 				errCat = "session_corrupt"
 			}
 			metrics.RecordRunnerError(errCat, currentModel)
+
+			// Cold-Start Dynamic Session Latching:
+			// If this was a cold start (currentSessionID was empty), extract the active conversation UUID
+			// discovered in stderr during execution so retries can resume on the existing transcript.
+			if currentSessionID == "" && !isSessionCorruption {
+				if extSess := runner.ExtractSessionID(stderr, execStart); extSess != "" && session.SessionExistsOnDisk(extSess) {
+					log.Printf("[Queue] Latched active session from stderr on failure (attempt %d/%d) for thread %s: %s", attempt, maxAttempts, threadID, extSess)
+					currentSessionID = extSess
+					_ = db.SaveSessionID(p.cfg.DB, threadID, currentSessionID)
+				}
+			}
 
 			if isWatchdog {
 				for _, m := range burst {
