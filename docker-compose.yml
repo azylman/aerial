@@ -249,7 +249,7 @@ services:
     networks:
       - aerial-net
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS -I http://127.0.0.1:4002/sse || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS -X OPTIONS http://127.0.0.1:4002/mcp || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -277,7 +277,7 @@ services:
     networks:
       - aerial-net
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS -I http://127.0.0.1:4003/sse || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS -X OPTIONS http://127.0.0.1:4003/mcp || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 3
