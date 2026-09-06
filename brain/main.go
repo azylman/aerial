@@ -1044,6 +1044,8 @@ func RunBrainApp(ctx context.Context, bCfg BrainConfig) error {
 	}
 }
 
+var runBrainApp = RunBrainApp
+
 func main() {
 	cfg, err := config.LoadConfig()
 	if err != nil {
@@ -1063,7 +1065,8 @@ func main() {
 		cancel()
 	}()
 
-	if err := RunBrainApp(ctx, bCfg); err != nil && err != http.ErrServerClosed {
+	if err := runBrainApp(ctx, bCfg); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("Server failed: %v", err)
 	}
 }
+

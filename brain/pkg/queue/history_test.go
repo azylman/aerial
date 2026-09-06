@@ -418,3 +418,92 @@ func TestDefaultHistoryFetcher_DiscordAPIErrorFallback(t *testing.T) {
 		t.Errorf("unexpected fallback message content: %+v", history[0])
 	}
 }
+
+func TestDefaultHistoryFetcher_DiscordAPISuccessAndRoles(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	dg, err := discordgo.New("Bot test-token")
+	if err != nil {
+		t.Fatalf("discordgo.New failed: %v", err)
+	}
+	dg.State = discordgo.NewState()
+	dg.State.User = &discordgo.User{
+		ID:       "bot-aerial-id",
+		Username: "aerial",
+	}
+
+	rawMsgs := []*discordgo.Message{
+		nil, // Test nil message filter
+		{
+			ID:      "1546240750529019944",
+			Content: "Webhook notification",
+			Author:  nil,
+			WebhookID: "webhook-123",
+		},
+		{
+			ID:      "1546240750529019945",
+			Content: "Bot alert",
+			Author: &discordgo.User{
+				ID:       "bot-other",
+				Username: "OtherBot",
+				Bot:      true,
+			},
+		},
+		{
+			ID:      "1546240750529019946",
+			Content: "Aerial response",
+			Author: &discordgo.User{
+				ID:       "bot-aerial-id",
+				Username: "aerial",
+			},
+		},
+		{
+			ID:      "1546240750529019947",
+			Content: "User question",
+			Author: &discordgo.User{
+				ID:       "user-123",
+				Username: "Alex",
+			},
+		},
+	}
+	data, _ := json.Marshal(rawMsgs)
+
+	dg.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: 200,
+			Body:       io.NopCloser(bytes.NewReader(data)),
+			Header:     make(http.Header),
+		}, nil
+	})
+
+	fetcher := DefaultHistoryFetcher(dg, database)
+
+	// Test with invalid limit and non-numeric beforeID
+	history, err := fetcher(context.Background(), "123456789012345678", "non-numeric-before", -5)
+	if err != nil {
+		t.Fatalf("fetcher returned unexpected error: %v", err)
+	}
+	if len(history) != 4 {
+		t.Fatalf("expected 4 history items, got %d", len(history))
+	}
+	if history[0].Role != "Bot" || history[0].AuthorName != "Webhook" {
+		t.Errorf("expected Webhook Bot role, got: %+v", history[0])
+	}
+	if history[1].Role != "Bot" || history[1].AuthorName != "OtherBot" {
+		t.Errorf("expected Bot role, got: %+v", history[1])
+	}
+	if history[2].Role != "Assistant" || history[2].AuthorName != "aerial" {
+		t.Errorf("expected Assistant role for aerial, got: %+v", history[2])
+	}
+	if history[3].Role != "User" || history[3].AuthorName != "Alex" {
+		t.Errorf("expected User role for Alex, got: %+v", history[3])
+	}
+
+	// Test with limit > 100
+	_, _ = fetcher(context.Background(), "123456789012345678", "123456789", 200)
+}
+

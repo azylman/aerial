@@ -4,18 +4,33 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+
+
+
 	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
 	"github.com/azylman/aerial/brain/pkg/metrics"
 	"github.com/azylman/aerial/brain/pkg/queue"
+	"github.com/bwmarrin/discordgo"
 )
+
+type roundTripperFunc func(req *http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
 
 func TestHandlePromptValidation(t *testing.T) {
 	database, err := db.InitDB(":memory:")
@@ -114,10 +129,24 @@ func TestFormatCronDescription(t *testing.T) {
 		{"0 0 * * *", "Every day at 00:00"},
 		{"30 8 * * 0", "Every Sunday at 08:30"},
 		{"0 12 1 * *", "1st of every month at 12:00"},
+		{"0 9 2 * *", "2nd of every month at 09:00"},
+		{"0 9 3 * *", "3rd of every month at 09:00"},
+		{"0 9 11 * *", "11th of every month at 09:00"},
+		{"0 9 12 * *", "12th of every month at 09:00"},
+		{"0 9 13 * *", "13th of every month at 09:00"},
+		{"0 9 21 * *", "21st of every month at 09:00"},
+		{"0 9 22 * *", "22nd of every month at 09:00"},
+		{"0 9 23 * *", "23rd of every month at 09:00"},
+		{"0 9 31 * *", "31st of every month at 09:00"},
+		{"0 9 * * Mon,Wed,Fri", "Mon, Wed, Fri at 09:00"},
+		{"0 9 1 1 1", "At 09:00 (cron: 0 9 1 1 1)"},
+		{"foo bar * * *", "foo bar * * *"},
 		{"* * * * *", "Every minute"},
 		{"@daily", "Every day at 00:00"},
 		{"@hourly", "Every hour"},
 	}
+
+
 
 	for _, tt := range tests {
 		got := FormatCronDescription(tt.expr)
@@ -835,3 +864,665 @@ func TestRunBrainApp_Lifecycle(t *testing.T) {
 	defer badCancel()
 	_ = RunBrainApp(badCtx, badCfg)
 }
+
+func TestHandleSchedules_Endpoints(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	_ = db.CreateCronSchedule(database, db.CronSchedule{
+		ID:          "cron-1",
+		TargetID:    "chan-1",
+		TitlePrefix: "Daily news",
+		CronExpr:    "0 8 * * *",
+		Prompt:      "Morning briefing",
+		Timezone:    "America/Los_Angeles",
+		Enabled:     true,
+	})
+	_ = db.CreateOneShotSchedule(database, db.OneShotSchedule{
+		ID:        "one-1",
+		ThreadID:  "chan-1",
+		Prompt:    "Remind me",
+		RunAt:     time.Now().UTC().Add(1 * time.Hour),
+		CreatedAt: time.Now().UTC(),
+	})
+
+	handler := handleSchedules(database)
+
+	// 1. Method not allowed
+	reqPost := httptest.NewRequest(http.MethodPost, "/schedules", nil)
+	wPost := httptest.NewRecorder()
+	handler(wPost, reqPost)
+	if wPost.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405 for POST /schedules, got %d", wPost.Code)
+	}
+
+	// 2. Successful GET
+	reqGet := httptest.NewRequest(http.MethodGet, "/schedules", nil)
+	wGet := httptest.NewRecorder()
+	handler(wGet, reqGet)
+	if wGet.Code != http.StatusOK {
+		t.Errorf("expected 200 for GET /schedules, got %d", wGet.Code)
+	}
+
+	// 3. Cached GET
+	wGetCached := httptest.NewRecorder()
+	handler(wGetCached, reqGet)
+	if wGetCached.Code != http.StatusOK {
+		t.Errorf("expected 200 for cached GET /schedules, got %d", wGetCached.Code)
+	}
+
+	// 4. Closed DB returns error
+	closedDB, _ := db.InitDB(":memory:")
+	_ = closedDB.Close()
+	handlerClosed := handleSchedules(closedDB)
+	wClosed := httptest.NewRecorder()
+	handlerClosed(wClosed, reqGet)
+	if wClosed.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 for closed DB schedules, got %d", wClosed.Code)
+	}
+}
+
+func TestHandleTasks_Endpoints(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	longPrompt := strings.Repeat("Task description that is very long. ", 30)
+	_ = db.InsertMessage(database, db.Message{
+		ID:         "task-msg-1",
+		ThreadID:   "th-task-1",
+		AuthorID:   "u1",
+		AuthorName: "User",
+		Content:    longPrompt,
+		Status:     db.StatusProcessing,
+		CreatedAt:  time.Now().UTC(),
+		UpdatedAt:  time.Now().UTC(),
+	})
+
+	handler := handleTasks(database)
+
+	// 1. Method not allowed
+	reqPost := httptest.NewRequest(http.MethodPost, "/tasks", nil)
+	wPost := httptest.NewRecorder()
+	handler(wPost, reqPost)
+	if wPost.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405 for POST /tasks, got %d", wPost.Code)
+	}
+
+	// 2. Successful GET
+	reqGet := httptest.NewRequest(http.MethodGet, "/tasks", nil)
+	wGet := httptest.NewRecorder()
+	handler(wGet, reqGet)
+	if wGet.Code != http.StatusOK {
+		t.Errorf("expected 200 for GET /tasks, got %d", wGet.Code)
+	}
+
+	// 3. Cached GET
+	wGetCached := httptest.NewRecorder()
+	handler(wGetCached, reqGet)
+	if wGetCached.Code != http.StatusOK {
+		t.Errorf("expected 200 for cached GET /tasks, got %d", wGetCached.Code)
+	}
+
+	// 4. Closed DB error
+	closedDB, _ := db.InitDB(":memory:")
+	_ = closedDB.Close()
+	handlerClosed := handleTasks(closedDB)
+	wClosed := httptest.NewRecorder()
+	handlerClosed(wClosed, reqGet)
+	if wClosed.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 for closed DB tasks, got %d", wClosed.Code)
+	}
+}
+
+func TestHandleTranscripts_WithIncludeRaw(t *testing.T) {
+	tmpHome := t.TempDir()
+	_ = os.Setenv("HOME", tmpHome)
+
+	logDir := filepath.Join(tmpHome, ".gemini", "antigravity-cli", "brain", "conv-raw-test", ".system_generated", "logs")
+	_ = os.MkdirAll(logDir, 0755)
+	logContent := `{"step_index":0,"status":"RUNNING"}` + "\n" + `{"step_index":1,"status":"ERROR","error":"rate limit exceeded"}` + "\n"
+	_ = os.WriteFile(filepath.Join(logDir, "transcript_full.jsonl"), []byte(logContent), 0644)
+
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	_ = db.SaveSessionID(database, "th-ext-1", "conv-raw-test")
+
+	handler := handleTranscripts(database)
+	req := httptest.NewRequest(http.MethodGet, "/transcripts?include_raw=true", nil)
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200 for /transcripts?include_raw=true, got %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "conv-raw-test") {
+		t.Errorf("expected transcript response to contain conv-raw-test, got: %s", w.Body.String())
+	}
+}
+
+func TestHandlePrompt_AutoGeneratedIDsAndClosedDB(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	pool := queue.NewWorkerPool(queue.WorkerPoolConfig{DB: database})
+	pool.Start()
+	defer pool.Stop()
+
+	handler := handlePrompt(database, pool)
+
+	// 1. Auto-generate message_id and conversation_id
+	payload, _ := json.Marshal(map[string]string{"prompt": "Auto ID prompt"})
+	req := httptest.NewRequest(http.MethodPost, "/prompt", bytes.NewReader(payload))
+	w := httptest.NewRecorder()
+	handler(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Errorf("expected 202 for prompt without IDs, got %d", w.Code)
+	}
+
+	// 2. Closed DB logging error
+	closedDB, _ := db.InitDB(":memory:")
+	_ = closedDB.Close()
+	handlerClosed := handlePrompt(closedDB, nil)
+	req2 := httptest.NewRequest(http.MethodPost, "/prompt", bytes.NewReader(payload))
+	w2 := httptest.NewRecorder()
+	handlerClosed(w2, req2)
+	if w2.Code != http.StatusAccepted {
+		t.Errorf("expected 202 even when DB insert fails, got %d", w2.Code)
+	}
+}
+
+func TestCreateReloadConfigFunc_InvalidYAMLAndAlert(t *testing.T) {
+	tmpDir := t.TempDir()
+	badConfigPath := filepath.Join(tmpDir, "config.yaml")
+	_ = os.WriteFile(badConfigPath, []byte("invalid: [yaml: content"), 0644)
+	_ = os.Setenv("CONFIG_PATH", badConfigPath)
+	defer func() { _ = os.Unsetenv("CONFIG_PATH") }()
+
+	dg, _ := discordgo.New("Bot test-token")
+	dg.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: 200,
+			Body:       io.NopCloser(bytes.NewReader([]byte("{}"))),
+			Header:     make(http.Header),
+		}, nil
+	})
+
+	database, _ := db.InitDB(":memory:")
+	defer func() { _ = database.Close() }()
+	pool := queue.NewWorkerPool(queue.WorkerPoolConfig{DB: database})
+
+	reloadFn := CreateReloadConfigFunc(pool, "test-key", "test prompt", dg)
+	reloadFn("TestReload")
+}
+
+func TestInitializeBrainEnvironment_AllBranches(t *testing.T) {
+	tmpDir := t.TempDir()
+	_ = os.Setenv("HOME", tmpDir)
+	_ = os.MkdirAll(filepath.Join(tmpDir, ".gemini", "config", "plugins", "superpowers", ".git"), 0755)
+
+	// Test with non-empty apiKey, model, systemPrompt
+	InitializeBrainEnvironment("test-key", "gemini-model-xyz", "Test system prompt")
+}
+
+func TestHandleScheduleRuns_Endpoints(t *testing.T) {
+
+	database, _ := db.InitDB(":memory:")
+	defer func() { _ = database.Close() }()
+
+	handler := handleScheduleRuns(database)
+
+	// 1. Method not allowed
+	req := httptest.NewRequest(http.MethodPost, "/schedules/runs", nil)
+	w := httptest.NewRecorder()
+	handler(w, req)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", w.Code)
+	}
+
+	// 2. Valid GET with query params
+	req = httptest.NewRequest(http.MethodGet, "/schedules/runs?limit=10&schedule_id=sched-123", nil)
+	w = httptest.NewRecorder()
+	handler(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+
+	// 3. Closed DB error
+	closedDB, _ := db.InitDB(":memory:")
+	_ = closedDB.Close()
+	handlerClosed := handleScheduleRuns(closedDB)
+	req = httptest.NewRequest(http.MethodGet, "/schedules/runs", nil)
+	w = httptest.NewRecorder()
+	handlerClosed(w, req)
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 on closed DB, got %d", w.Code)
+	}
+}
+
+func TestHandleSchedules_CacheAndErrors(t *testing.T) {
+	database, _ := db.InitDB(":memory:")
+	defer func() { _ = database.Close() }()
+
+	handler := handleSchedules(database)
+
+	// 1. First fetch (populates cache)
+	req := httptest.NewRequest(http.MethodGet, "/schedules", nil)
+	w := httptest.NewRecorder()
+	handler(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+
+	// 2. Second fetch immediately (hits cache)
+	req = httptest.NewRequest(http.MethodGet, "/schedules", nil)
+	w = httptest.NewRecorder()
+	handler(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200 from cache, got %d", w.Code)
+	}
+
+	// 3. Closed DB error
+	closedDB, _ := db.InitDB(":memory:")
+	_ = closedDB.Close()
+	handlerClosed := handleSchedules(closedDB)
+	req = httptest.NewRequest(http.MethodGet, "/schedules", nil)
+	w = httptest.NewRecorder()
+	handlerClosed(w, req)
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 on closed DB, got %d", w.Code)
+	}
+}
+
+func TestHandleTasks_LongPromptAndCache(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	longPrompt := strings.Repeat("a", 600)
+	_ = db.InsertMessage(database, db.Message{
+		ID:        "msg-long-task",
+		ThreadID:  "th-task-1",
+		Content:   longPrompt,
+		Status:    db.StatusProcessing,
+		CreatedAt: time.Now().UTC(),
+	})
+
+	handler := handleTasks(database)
+
+	// 1. Method not allowed
+	req := httptest.NewRequest(http.MethodPost, "/tasks", nil)
+	w := httptest.NewRecorder()
+	handler(w, req)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", w.Code)
+	}
+
+	// 2. First fetch (formats long prompt and populates cache)
+	req = httptest.NewRequest(http.MethodGet, "/tasks", nil)
+	w = httptest.NewRecorder()
+	handler(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+
+	// 3. Cache hit fetch
+	req = httptest.NewRequest(http.MethodGet, "/tasks", nil)
+	w = httptest.NewRecorder()
+	handler(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200 from cache, got %d", w.Code)
+	}
+
+	// 4. Closed DB error
+	closedDB, _ := db.InitDB(":memory:")
+	_ = closedDB.Close()
+	closedHandler := handleTasks(closedDB)
+	req = httptest.NewRequest(http.MethodGet, "/tasks", nil)
+	w = httptest.NewRecorder()
+	closedHandler(w, req)
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 on closed DB, got %d", w.Code)
+	}
+}
+
+
+func TestHandleSchedules_WithPopulatedRows(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	_ = db.CreateCronSchedule(database, db.CronSchedule{
+		ID:          "cron-pop-1",
+		TargetID:    "chan-pop-1",
+		TitlePrefix: "Populated cron",
+		CronExpr:    "0 9 * * 1-5",
+		Prompt:      "Morning standup briefing",
+		Timezone:    "America/Los_Angeles",
+		Enabled:     true,
+	})
+
+	_ = db.CreateOneShotSchedule(database, db.OneShotSchedule{
+		ID:       "oneshot-pop-1",
+		ThreadID: "th-pop-1",
+		Prompt:   "Remind me in 10 minutes",
+		RunAt:    time.Now().UTC().Add(10 * time.Minute),
+	})
+
+	handler := handleSchedules(database)
+	req := httptest.NewRequest(http.MethodGet, "/schedules", nil)
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+
+	var resp SchedulesResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode schedules response: %v", err)
+	}
+	if len(resp.Crons) != 1 || len(resp.OneShots) != 1 {
+		t.Errorf("expected 1 cron and 1 one-shot, got %d and %d", len(resp.Crons), len(resp.OneShots))
+	}
+}
+
+func TestMetricsMiddleware_FlushAndNormalizeRoutes(t *testing.T) {
+	routes := []string{
+		"/prompt",
+		"/transcripts",
+		"/transcripts/raw",
+		"/tasks",
+		"/tasks/active",
+		"/facts",
+		"/facts/recent",
+		"/schedules",
+		"/schedules/runs",
+		"/internal/reload",
+		"/health",
+		"/metrics",
+		"/unknown/route",
+	}
+
+	for _, r := range routes {
+		_ = normalizeRoute(r)
+	}
+
+	rec := &statusRecorder{
+		ResponseWriter: httptest.NewRecorder(),
+		statusCode:     200,
+	}
+	rec.WriteHeader(http.StatusAccepted)
+	rec.Flush()
+	if rec.statusCode != http.StatusAccepted {
+		t.Errorf("expected 202, got %d", rec.statusCode)
+	}
+}
+
+func TestFormatCronDescription_Fallback(t *testing.T) {
+
+	invalidExpr := "invalid cron expression string"
+	if desc := FormatCronDescription(invalidExpr); desc != invalidExpr {
+		t.Errorf("expected %q, got %q", invalidExpr, desc)
+	}
+}
+
+func TestCreateReloadConfigFunc_SuccessBranches(t *testing.T) {
+	tmpDir := t.TempDir()
+	_ = os.Setenv("HOME", tmpDir)
+	_ = os.MkdirAll(filepath.Join(tmpDir, ".gemini", "config", "plugins", "superpowers", ".git"), 0755)
+
+	validConfig := `
+model: "gemini-2.5-pro"
+`
+	validConfigPath := filepath.Join(tmpDir, "config.yaml")
+	_ = os.WriteFile(validConfigPath, []byte(validConfig), 0644)
+	_ = os.Setenv("CONFIG_PATH", validConfigPath)
+	defer func() { _ = os.Unsetenv("CONFIG_PATH") }()
+
+	dg, _ := discordgo.New("Bot test-token")
+	database, _ := db.InitDB(":memory:")
+	defer func() { _ = database.Close() }()
+	pool := queue.NewWorkerPool(queue.WorkerPoolConfig{DB: database})
+
+	reloadFn := CreateReloadConfigFunc(pool, "test-api-key", "Test reload prompt", dg)
+	reloadFn("TestSuccessReload")
+}
+
+func TestRunBrainApp_PortConflict(t *testing.T) {
+	tmpDB := filepath.Join(t.TempDir(), "brain_port_test.db")
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen on test port: %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	_, portStr, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		t.Fatalf("failed to split host port: %v", err)
+	}
+
+	bCfg := BrainConfig{
+		Port:         portStr, // Conflicting port
+		AgyBin:       "echo",
+		Model:        "gemini-2.5-flash",
+		DBPath:       tmpDB,
+		DiscordToken: "",
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	err = RunBrainApp(ctx, bCfg)
+	if err == nil {
+		t.Errorf("expected error running on conflicting port, got nil")
+	}
+}
+
+func TestMetricsMiddleware_EmptyMethodAndNotFound(t *testing.T) {
+	mux := http.NewServeMux()
+	handler := metricsMiddleware(mux)
+
+	req := httptest.NewRequest("", "/health", nil)
+	req.Method = ""
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+}
+
+func TestCreateReloadConfigFunc_EmptyAPIKeyAndNilPool(t *testing.T) {
+	tmpDir := t.TempDir()
+	_ = os.Setenv("HOME", tmpDir)
+	_ = os.MkdirAll(filepath.Join(tmpDir, ".gemini", "config", "plugins", "superpowers", ".git"), 0755)
+
+	reloadFn := CreateReloadConfigFunc(nil, "", "Test prompt", nil)
+	reloadFn("TestNilPoolEmptyAPIKey")
+}
+
+func TestConcurrentCache_SchedulesAndTasks(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	_ = db.InsertMessage(database, db.Message{
+		ID:        "msg-concurrent-1",
+		ThreadID:  "th-1",
+		Content:   "task content",
+		Status:    db.StatusProcessing,
+		CreatedAt: time.Now().UTC(),
+	})
+
+	schedulesHandler := handleSchedules(database)
+	tasksHandler := handleTasks(database)
+
+	for i := 0; i < 5; i++ {
+		go func() {
+			req := httptest.NewRequest(http.MethodGet, "/schedules", nil)
+			w := httptest.NewRecorder()
+			schedulesHandler(w, req)
+		}()
+		go func() {
+			req := httptest.NewRequest(http.MethodGet, "/tasks", nil)
+			w := httptest.NewRecorder()
+			tasksHandler(w, req)
+		}()
+	}
+}
+
+func TestMainFunction(t *testing.T) {
+	orig := runBrainApp
+	defer func() { runBrainApp = orig }()
+
+	called := false
+	runBrainApp = func(ctx context.Context, bCfg BrainConfig) error {
+		called = true
+		return nil
+	}
+
+	main()
+	if !called {
+		t.Errorf("expected runBrainApp to be called from main")
+	}
+}
+
+func TestHandleFacts_AdvancedParams(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	_, _ = db.InsertFact(database, "general", "Test fact statement", 0.5, "test-conv-1", nil)
+
+	handler := handleFacts(database)
+
+	// 1. Method not allowed
+	req := httptest.NewRequest(http.MethodPost, "/facts", nil)
+	w := httptest.NewRecorder()
+	handler(w, req)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", w.Code)
+	}
+
+	// 2. Query with limit, offset, category, and long search term
+	longQuery := "query-that-exceeds-64-characters-0123456789012345678901234567890123456789"
+	req = httptest.NewRequest(http.MethodGet, fmt.Sprintf("/facts?limit=10&offset=0&category=general&q=%s", longQuery), nil)
+	w = httptest.NewRecorder()
+	handler(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+}
+
+func TestHandleTranscripts_ComprehensiveParsing(t *testing.T) {
+	tmpHome := t.TempDir()
+	_ = os.Setenv("HOME", tmpHome)
+
+	transcriptDir := filepath.Join(tmpHome, ".gemini", "antigravity-cli", "brain", "conv-test-1", ".system_generated", "logs")
+	_ = os.MkdirAll(transcriptDir, 0755)
+
+	transcriptContent := `{"status": "PROCESSING", "error": null}
+{"status": "ERROR", "error": "test fatal error occurred"}
+`
+	_ = os.WriteFile(filepath.Join(transcriptDir, "transcript_full.jsonl"), []byte(transcriptContent), 0644)
+
+	database, _ := db.InitDB(":memory:")
+	defer func() { _ = database.Close() }()
+
+	handler := handleTranscripts(database)
+
+	// Request with include_raw=true
+	req := httptest.NewRequest(http.MethodGet, "/transcripts?include_raw=true", nil)
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+}
+
+type errTestReader struct{}
+
+func (errTestReader) Read(p []byte) (n int, err error) {
+	return 0, errors.New("simulated body read failure")
+}
+
+func (errTestReader) Close() error {
+	return nil
+}
+
+func TestHandlePrompt_ErrReaderAndPoolNil(t *testing.T) {
+	database, _ := db.InitDB(":memory:")
+	defer func() { _ = database.Close() }()
+
+	handler := handlePrompt(database, nil)
+
+	// 1. Error reading request body
+	req := httptest.NewRequest(http.MethodPost, "/prompt", errTestReader{})
+	w := httptest.NewRecorder()
+	handler(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 on errReader, got %d", w.Code)
+	}
+
+	// 2. Valid payload with pool == nil
+	payload, _ := json.Marshal(map[string]string{"prompt": "Hello with nil pool"})
+	req = httptest.NewRequest(http.MethodPost, "/prompt", bytes.NewReader(payload))
+	w = httptest.NewRecorder()
+	handler(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Errorf("expected 202 on valid payload, got %d", w.Code)
+	}
+}
+
+func TestHandleTranscripts_CompactLogs(t *testing.T) {
+	tmpHome := t.TempDir()
+	_ = os.Setenv("HOME", tmpHome)
+
+	transcriptDir := filepath.Join(tmpHome, ".gemini", "antigravity-cli", "brain", "conv-compact-1", ".system_generated", "logs")
+	_ = os.MkdirAll(transcriptDir, 0755)
+
+	transcriptContent := `{"status": "DONE", "error": null}`
+	_ = os.WriteFile(filepath.Join(transcriptDir, "transcript.jsonl"), []byte(transcriptContent), 0644)
+
+	database, _ := db.InitDB(":memory:")
+	defer func() { _ = database.Close() }()
+
+	handler := handleTranscripts(database)
+
+	req := httptest.NewRequest(http.MethodGet, "/transcripts", nil)
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+}
+
+
+
+
+
+
+
+
+
+
+

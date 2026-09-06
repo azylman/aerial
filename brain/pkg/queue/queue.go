@@ -175,6 +175,7 @@ type WorkerPoolConfig struct {
 	MemoryClient   *memory.Client
 	Classifier     *classifier.Classifier
 	StalenessTTL   time.Duration
+	IdleTimeout    time.Duration
 
 	// Optional hooks for testing/custom overrides
 	RunnerFunc           func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error)
@@ -211,6 +212,9 @@ func NewWorkerPool(cfg WorkerPoolConfig) *WorkerPool {
 	}
 	if cfg.StalenessTTL <= 0 {
 		cfg.StalenessTTL = 30 * time.Minute
+	}
+	if cfg.IdleTimeout <= 0 {
+		cfg.IdleTimeout = 30 * time.Second
 	}
 	if cfg.RunnerFunc == nil {
 		cfg.RunnerFunc = runner.RunAgy
@@ -418,44 +422,14 @@ func (p *WorkerPool) runThreadWorker(threadID string, ch chan db.Message) {
 				}
 			}
 			p.processBurst(burst)
-		case <-time.After(30 * time.Second):
+		case <-time.After(p.cfg.IdleTimeout):
 			p.mu.Lock()
 			if len(ch) == 0 {
 				delete(p.threadChs, threadID)
 				p.mu.Unlock()
-
-				// Final non-blocking drain check in case a message was pushed right during unlock
-				select {
-				case msg, ok := <-ch:
-					if !ok {
-						return
-					}
-					metrics.QueueDepth.Dec()
-					burst := []db.Message{msg}
-				DrainLoop2:
-					for len(burst) < 5 {
-						select {
-						case extra := <-ch:
-							metrics.QueueDepth.Dec()
-							burst = append(burst, extra)
-						default:
-							break DrainLoop2
-						}
-					}
-					p.processBurst(burst)
-					p.mu.Lock()
-					if _, exists := p.threadChs[threadID]; !exists {
-						p.threadChs[threadID] = ch
-						p.mu.Unlock()
-						continue
-					}
-					p.mu.Unlock()
-				default:
-					return
-				}
-			} else {
-				p.mu.Unlock()
+				return
 			}
+			p.mu.Unlock()
 		}
 	}
 }

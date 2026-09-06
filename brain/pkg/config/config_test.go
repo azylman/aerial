@@ -2110,7 +2110,127 @@ ambient_wake_prompt: "Wake on high priority"
 			t.Error("expected error for impossible writeAtomic directory")
 		}
 	})
+
+	// Test getFallbackDefaults with env vars
+	t.Run("getFallbackDefaults_EnvVars", func(t *testing.T) {
+		origModel := os.Getenv("AGY_MODEL")
+		origDefTz := os.Getenv("DEFAULT_TIMEZONE")
+		origTz := os.Getenv("TZ")
+		origChan := os.Getenv("SYSTEM_CHANNEL")
+		defer func() {
+			_ = os.Setenv("AGY_MODEL", origModel)
+			_ = os.Setenv("DEFAULT_TIMEZONE", origDefTz)
+			_ = os.Setenv("TZ", origTz)
+			_ = os.Setenv("SYSTEM_CHANNEL", origChan)
+		}()
+
+		_ = os.Setenv("AGY_MODEL", "gemini-2.5-pro")
+		_ = os.Setenv("DEFAULT_TIMEZONE", "America/New_York")
+		_ = os.Setenv("SYSTEM_CHANNEL", "123456789")
+
+		cfg := getFallbackDefaults()
+		if cfg.Model != "gemini-2.5-pro" {
+			t.Errorf("expected model gemini-2.5-pro, got %s", cfg.Model)
+		}
+		if cfg.Timezone != "America/New_York" {
+			t.Errorf("expected timezone America/New_York, got %s", cfg.Timezone)
+		}
+		if cfg.SystemChannel != "123456789" {
+			t.Errorf("expected system channel 123456789, got %s", cfg.SystemChannel)
+		}
+
+		_ = os.Unsetenv("DEFAULT_TIMEZONE")
+		_ = os.Setenv("TZ", "Europe/London")
+		cfg2 := getFallbackDefaults()
+		if cfg2.Timezone != "Europe/London" {
+			t.Errorf("expected timezone Europe/London from TZ, got %s", cfg2.Timezone)
+		}
+	})
+
+	// Test LoadMCPConfig with MCP_CONFIG env var and SSE normalization
+	t.Run("LoadMCPConfig_EnvAndSSENormalization", func(t *testing.T) {
+		origMcpEnv := os.Getenv("MCP_CONFIG")
+		origPat := os.Getenv("GITHUB_PAT")
+		defer func() {
+			_ = os.Setenv("MCP_CONFIG", origMcpEnv)
+			_ = os.Setenv("GITHUB_PAT", origPat)
+		}()
+
+		_ = os.Setenv("GITHUB_PAT", "ghp_test12345")
+		_ = os.Setenv("MCP_CONFIG", `{"mcpServers": {"docker": {"serverUrl": "http://docker-mcp:4002/sse"}}}`)
+
+		raw := LoadMCPConfig()
+		if !strings.Contains(string(raw), "http://docker-mcp:4002/mcp") {
+			t.Errorf("expected SSE to be normalized to /mcp, got: %s", string(raw))
+		}
+		if !strings.Contains(string(raw), "github") {
+			t.Errorf("expected github server when GITHUB_PAT is set, got: %s", string(raw))
+		}
+	})
+
+	// Test EnsureMcpConfig with empty/null/valid inputs
+	t.Run("EnsureMcpConfig_Variants", func(t *testing.T) {
+		tmpHome := t.TempDir()
+		_ = os.Setenv("HOME", tmpHome)
+
+		if err := EnsureMcpConfig(nil); err != nil {
+			t.Errorf("expected nil for nil rawConfig, got %v", err)
+		}
+		if err := EnsureMcpConfig(json.RawMessage("")); err != nil {
+			t.Errorf("expected nil for empty rawConfig, got %v", err)
+		}
+		if err := EnsureMcpConfig(json.RawMessage(`""`)); err != nil {
+			t.Errorf("expected nil for quoted empty string, got %v", err)
+		}
+		if err := EnsureMcpConfig(json.RawMessage("null")); err != nil {
+			t.Errorf("expected nil for null string, got %v", err)
+		}
+
+		validJSON := json.RawMessage(`{"mcpServers": {"server1": {"command": "test"}}}`)
+		if err := EnsureMcpConfig(validJSON); err != nil {
+			t.Errorf("expected success for valid JSON, got %v", err)
+		}
+	})
+
+	t.Run("SetRuntimeConfigForTesting", func(t *testing.T) {
+		orig := GetRuntimeConfig()
+		defer SetRuntimeConfigForTesting(orig)
+
+		custom := Config{Model: "custom-test-model-xyz"}
+		SetRuntimeConfigForTesting(custom)
+		if got := GetRuntimeConfig(); got.Model != "custom-test-model-xyz" {
+			t.Errorf("expected custom model, got %s", got.Model)
+		}
+	})
+
+	t.Run("EnsureAgySettings_InvalidExistingAndOptions", func(t *testing.T) {
+		tmpHome := t.TempDir()
+		_ = os.Setenv("HOME", tmpHome)
+
+		cfgDir := filepath.Join(tmpHome, ".gemini", "antigravity-cli")
+		_ = os.MkdirAll(cfgDir, 0755)
+		_ = os.WriteFile(filepath.Join(cfgDir, "settings.json"), []byte("{invalid-json"), 0644)
+
+		if err := EnsureAgySettings("api-key-123", "model-456"); err != nil {
+			t.Fatalf("unexpected error with invalid existing JSON: %v", err)
+		}
+
+		if err := EnsureAgySettings("", ""); err != nil {
+			t.Fatalf("unexpected error with empty options: %v", err)
+		}
+	})
+
+	t.Run("WriteAtomic_DirCreateFail", func(t *testing.T) {
+		tmpFile := filepath.Join(t.TempDir(), "blocker")
+		_ = os.WriteFile(tmpFile, []byte("file"), 0644)
+		// trying to create directory inside a file path fails
+		err := writeAtomic(filepath.Join(tmpFile, "nested", "target.json"), "content")
+		if err == nil {
+			t.Errorf("expected error writing atomic into file as dir")
+		}
+	})
 }
+
 
 
 

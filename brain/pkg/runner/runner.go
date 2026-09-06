@@ -608,7 +608,7 @@ func ClassifyError(exitCode int, stdout, stderr string) (isFailure bool, isTrans
 	}
 
 	errDetail = extractErrorDetail(stderr, exitCode)
-	if errDetail == "" && trimmedStdout != "" {
+	if (errDetail == "" || errDetail == fmt.Sprintf("execution failed with exit code %d", exitCode)) && trimmedStdout != "" {
 		errDetail = trimmedStdout
 	}
 	if errDetail == "" {

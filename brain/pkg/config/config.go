@@ -249,6 +249,14 @@ func GetRuntimeConfig() Config {
 	return currentRuntimeConfig
 }
 
+// SetRuntimeConfigForTesting overrides currentRuntimeConfig for unit tests.
+func SetRuntimeConfigForTesting(cfg Config) {
+	runtimeConfigMu.Lock()
+	defer runtimeConfigMu.Unlock()
+	currentRuntimeConfig = cfg
+}
+
+
 func GetTimezone() string {
 	cfg := GetRuntimeConfig()
 	if strings.TrimSpace(cfg.Timezone) != "" {

@@ -46,11 +46,11 @@ func deriveThreadTitle(content string) string {
 	re := regexp.MustCompile(`<@!?[0-9]+>`)
 	cleaned := re.ReplaceAllString(content, "")
 	cleaned = strings.TrimSpace(cleaned)
+	if cleaned == "" {
+		return "Aerial Discussion"
+	}
 	lines := strings.Split(cleaned, "\n")
 	firstLine := strings.TrimSpace(lines[0])
-	if firstLine == "" && len(lines) > 1 {
-		firstLine = strings.TrimSpace(lines[1])
-	}
 	if firstLine == "" {
 		firstLine = "Aerial Discussion"
 	}
@@ -60,6 +60,7 @@ func deriveThreadTitle(content string) string {
 	}
 	return string(runes)
 }
+
 
 func getDiscordChannel(s *discordgo.Session, channelID string) *discordgo.Channel {
 	if channelID == "" {
@@ -337,136 +338,19 @@ func connectDiscordFunnel(ctx context.Context, database *sql.DB, pool *queue.Wor
 	}
 
 	dg.AddHandler(func(s *discordgo.Session, r *discordgo.Ready) {
-		metrics.DiscordEventsTotal.WithLabelValues("ready").Inc()
-		log.Printf("Discord funnel gateway session ready as %s#%s (user ID %s)", r.User.Username, r.User.Discriminator, r.User.ID)
-		if s.State != nil {
-			for _, g := range s.State.Guilds {
-				if g != nil {
-					for _, ch := range g.Channels {
-						queue.CacheDiscordChannel(ch)
-					}
-					for _, th := range g.Threads {
-						queue.CacheDiscordChannel(th)
-					}
-				}
-			}
-		}
-		go RunStartupCatchUpSweep(ctx, database, pool, s)
+		handleDiscordReady(ctx, database, pool, s, r)
 	})
-
-	dg.AddHandler(func(s *discordgo.Session, g *discordgo.GuildCreate) {
-		metrics.DiscordEventsTotal.WithLabelValues("guild_create").Inc()
-		if g != nil && g.Guild != nil {
-			for _, ch := range g.Channels {
-				queue.CacheDiscordChannel(ch)
-			}
-			for _, th := range g.Threads {
-				queue.CacheDiscordChannel(th)
-			}
-		}
-	})
-
-	dg.AddHandler(func(s *discordgo.Session, c *discordgo.ChannelCreate) {
-		metrics.DiscordEventsTotal.WithLabelValues("channel_create").Inc()
-		if c != nil && c.Channel != nil {
-			queue.CacheDiscordChannel(c.Channel)
-		}
-	})
-
-	dg.AddHandler(func(s *discordgo.Session, c *discordgo.ChannelUpdate) {
-		metrics.DiscordEventsTotal.WithLabelValues("channel_update").Inc()
-		if c != nil && c.Channel != nil {
-			queue.CacheDiscordChannel(c.Channel)
-		}
-	})
-
-	dg.AddHandler(func(s *discordgo.Session, c *discordgo.ChannelDelete) {
-		metrics.DiscordEventsTotal.WithLabelValues("channel_delete").Inc()
-		if c != nil && c.Channel != nil {
-			queue.InvalidateChannelCache(c.Channel.ID)
-		}
-	})
-
-	dg.AddHandler(func(s *discordgo.Session, t *discordgo.ThreadCreate) {
-		metrics.DiscordEventsTotal.WithLabelValues("thread_create").Inc()
-		if t != nil && t.Channel != nil {
-			queue.CacheDiscordChannel(t.Channel)
-		}
-	})
-
-	dg.AddHandler(func(s *discordgo.Session, t *discordgo.ThreadUpdate) {
-		metrics.DiscordEventsTotal.WithLabelValues("thread_update").Inc()
-		if t != nil && t.Channel != nil {
-			queue.CacheDiscordChannel(t.Channel)
-		}
-	})
-
-	dg.AddHandler(func(s *discordgo.Session, t *discordgo.ThreadDelete) {
-		metrics.DiscordEventsTotal.WithLabelValues("thread_delete").Inc()
-		if t != nil && t.Channel != nil {
-			queue.InvalidateChannelCache(t.Channel.ID)
-		}
-	})
-
-	dg.AddHandler(func(s *discordgo.Session, d *discordgo.Disconnect) {
-		metrics.DiscordEventsTotal.WithLabelValues("disconnect").Inc()
-		metrics.RecordGatewayReconnect()
-		log.Printf("Discord funnel disconnected from gateway (discordgo will reconnect automatically)")
-	})
-
-	dg.AddHandler(func(s *discordgo.Session, r *discordgo.Resumed) {
-		metrics.DiscordEventsTotal.WithLabelValues("resumed").Inc()
-		metrics.RecordGatewayReconnect()
-		log.Printf("Discord funnel gateway connection resumed successfully")
-	})
-
+	dg.AddHandler(handleDiscordGuildCreate)
+	dg.AddHandler(handleDiscordChannelCreate)
+	dg.AddHandler(handleDiscordChannelUpdate)
+	dg.AddHandler(handleDiscordChannelDelete)
+	dg.AddHandler(handleDiscordThreadCreate)
+	dg.AddHandler(handleDiscordThreadUpdate)
+	dg.AddHandler(handleDiscordThreadDelete)
+	dg.AddHandler(handleDiscordDisconnect)
+	dg.AddHandler(handleDiscordResumed)
 	dg.AddHandler(func(s *discordgo.Session, m *discordgo.MessageCreate) {
-		if m.Author == nil || (s.State != nil && s.State.User != nil && m.Author.ID == s.State.User.ID) {
-			return
-		}
-		metrics.DiscordEventsTotal.WithLabelValues("message_create").Inc()
-
-		go func() {
-			if !isFunnelBotTargeted(s, m) {
-				metrics.DiscordMessagesProcessedTotal.WithLabelValues("false", "ignored").Inc()
-				log.Printf("Discord funnel ignoring message %s from %s: no trigger matched", m.ID, m.Author.Username)
-				return
-			}
-
-			targetThreadID, isThread := getOrCreateThreadID(s, m.Message)
-			policy, _ := resolveEffectiveChannelPolicy(s, m.ChannelID)
-			prompt := buildDiscordPrompt(m.Message, targetThreadID, policy)
-
-			authorID := ""
-			authorName := "Discord User"
-			if m.Author != nil {
-				authorID = m.Author.ID
-				authorName = m.Author.Username
-			}
-
-			msg := db.Message{
-				ID:         m.ID,
-				ThreadID:   targetThreadID,
-				GuildID:    m.GuildID,
-				AuthorID:   authorID,
-				AuthorName: authorName,
-				Content:    prompt,
-				Status:     db.StatusPending,
-				CreatedAt:  m.Timestamp,
-				UpdatedAt:  time.Now().UTC(),
-			}
-
-			if err := db.InsertMessage(database, msg); err != nil {
-				log.Printf("Failed to insert message %s: %v", m.ID, err)
-				return
-			}
-
-			metrics.DiscordMessagesProcessedTotal.WithLabelValues("false", "enqueued").Inc()
-			log.Printf("Discord funnel enqueued message %s from %s (thread: %s, is_thread: %t)", m.ID, authorName, targetThreadID, isThread)
-			if pool != nil {
-				pool.Enqueue(msg)
-			}
-		}()
+		handleDiscordMessageCreate(database, pool, s, m)
 	})
 
 	dg.Identify.Intents = discordgo.IntentsGuildMessages | discordgo.IntentsDirectMessages | discordgo.IntentMessageContent
@@ -515,6 +399,139 @@ func connectDiscordFunnel(ctx context.Context, database *sql.DB, pool *queue.Wor
 	}()
 
 	return dg
+}
+
+func handleDiscordReady(ctx context.Context, database *sql.DB, pool *queue.WorkerPool, s *discordgo.Session, r *discordgo.Ready) {
+	metrics.DiscordEventsTotal.WithLabelValues("ready").Inc()
+	if r != nil && r.User != nil {
+		log.Printf("Discord funnel gateway session ready as %s#%s (user ID %s)", r.User.Username, r.User.Discriminator, r.User.ID)
+	}
+	if s != nil && s.State != nil {
+		for _, g := range s.State.Guilds {
+			if g != nil {
+				for _, ch := range g.Channels {
+					queue.CacheDiscordChannel(ch)
+				}
+				for _, th := range g.Threads {
+					queue.CacheDiscordChannel(th)
+				}
+			}
+		}
+	}
+	go RunStartupCatchUpSweep(ctx, database, pool, s)
+}
+
+func handleDiscordGuildCreate(s *discordgo.Session, g *discordgo.GuildCreate) {
+	metrics.DiscordEventsTotal.WithLabelValues("guild_create").Inc()
+	if g != nil && g.Guild != nil {
+		for _, ch := range g.Channels {
+			queue.CacheDiscordChannel(ch)
+		}
+		for _, th := range g.Threads {
+			queue.CacheDiscordChannel(th)
+		}
+	}
+}
+
+func handleDiscordChannelCreate(s *discordgo.Session, c *discordgo.ChannelCreate) {
+	metrics.DiscordEventsTotal.WithLabelValues("channel_create").Inc()
+	if c != nil && c.Channel != nil {
+		queue.CacheDiscordChannel(c.Channel)
+	}
+}
+
+func handleDiscordChannelUpdate(s *discordgo.Session, c *discordgo.ChannelUpdate) {
+	metrics.DiscordEventsTotal.WithLabelValues("channel_update").Inc()
+	if c != nil && c.Channel != nil {
+		queue.CacheDiscordChannel(c.Channel)
+	}
+}
+
+func handleDiscordChannelDelete(s *discordgo.Session, c *discordgo.ChannelDelete) {
+	metrics.DiscordEventsTotal.WithLabelValues("channel_delete").Inc()
+	if c != nil && c.Channel != nil {
+		queue.InvalidateChannelCache(c.Channel.ID)
+	}
+}
+
+func handleDiscordThreadCreate(s *discordgo.Session, t *discordgo.ThreadCreate) {
+	metrics.DiscordEventsTotal.WithLabelValues("thread_create").Inc()
+	if t != nil && t.Channel != nil {
+		queue.CacheDiscordChannel(t.Channel)
+	}
+}
+
+func handleDiscordThreadUpdate(s *discordgo.Session, t *discordgo.ThreadUpdate) {
+	metrics.DiscordEventsTotal.WithLabelValues("thread_update").Inc()
+	if t != nil && t.Channel != nil {
+		queue.CacheDiscordChannel(t.Channel)
+	}
+}
+
+func handleDiscordThreadDelete(s *discordgo.Session, t *discordgo.ThreadDelete) {
+	metrics.DiscordEventsTotal.WithLabelValues("thread_delete").Inc()
+	if t != nil && t.Channel != nil {
+		queue.InvalidateChannelCache(t.Channel.ID)
+	}
+}
+
+func handleDiscordDisconnect(s *discordgo.Session, d *discordgo.Disconnect) {
+	metrics.DiscordEventsTotal.WithLabelValues("disconnect").Inc()
+	metrics.RecordGatewayReconnect()
+	log.Printf("Discord funnel disconnected from gateway (discordgo will reconnect automatically)")
+}
+
+func handleDiscordResumed(s *discordgo.Session, r *discordgo.Resumed) {
+	metrics.DiscordEventsTotal.WithLabelValues("resumed").Inc()
+	metrics.RecordGatewayReconnect()
+	log.Printf("Discord funnel gateway connection resumed successfully")
+}
+
+func handleDiscordMessageCreate(database *sql.DB, pool *queue.WorkerPool, s *discordgo.Session, m *discordgo.MessageCreate) {
+	if m == nil || m.Author == nil || (s != nil && s.State != nil && s.State.User != nil && m.Author.ID == s.State.User.ID) {
+		return
+	}
+	metrics.DiscordEventsTotal.WithLabelValues("message_create").Inc()
+
+	if !isFunnelBotTargeted(s, m) {
+		metrics.DiscordMessagesProcessedTotal.WithLabelValues("false", "ignored").Inc()
+		log.Printf("Discord funnel ignoring message %s from %s: no trigger matched", m.ID, m.Author.Username)
+		return
+	}
+
+	targetThreadID, isThread := getOrCreateThreadID(s, m.Message)
+	policy, _ := resolveEffectiveChannelPolicy(s, m.ChannelID)
+	prompt := buildDiscordPrompt(m.Message, targetThreadID, policy)
+
+	authorID := ""
+	authorName := "Discord User"
+	if m.Author != nil {
+		authorID = m.Author.ID
+		authorName = m.Author.Username
+	}
+
+	msg := db.Message{
+		ID:         m.ID,
+		ThreadID:   targetThreadID,
+		GuildID:    m.GuildID,
+		AuthorID:   authorID,
+		AuthorName: authorName,
+		Content:    prompt,
+		Status:     db.StatusPending,
+		CreatedAt:  m.Timestamp,
+		UpdatedAt:  time.Now().UTC(),
+	}
+
+	if err := db.InsertMessage(database, msg); err != nil {
+		log.Printf("Failed to insert message %s: %v", m.ID, err)
+		return
+	}
+
+	metrics.DiscordMessagesProcessedTotal.WithLabelValues("false", "enqueued").Inc()
+	log.Printf("Discord funnel enqueued message %s from %s (thread: %s, is_thread: %t)", m.ID, authorName, targetThreadID, isThread)
+	if pool != nil {
+		pool.Enqueue(msg)
+	}
 }
 
 var (

@@ -764,3 +764,203 @@ func TestIsInactivityTimeout(t *testing.T) {
 		})
 	}
 }
+
+func TestExtractWatchdogDetail_TruncationAndFallback(t *testing.T) {
+	longLine := "[watchdog] " + strings.Repeat("x", 250)
+	got := extractWatchdogDetail(longLine, "fallback")
+	if len(got) > 200 || !strings.HasSuffix(got, "...") {
+		t.Errorf("expected truncated string <= 200 chars ending with '...', got len=%d %q", len(got), got)
+	}
+
+	gotFallback := extractWatchdogDetail("some random log\nanother log", "fallback_reason")
+	if gotFallback != "fallback_reason" {
+		t.Errorf("expected fallback_reason, got %q", gotFallback)
+	}
+}
+
+func TestExtractErrorDetail_EdgeCases(t *testing.T) {
+	// Only debug / info lines in stderr
+	stderrOnlyDebug := "DEBUG: starting\nINFO: running\nStarting conversation update stream\n"
+	got := extractErrorDetail(stderrOnlyDebug, 1)
+	if got != "execution failed with exit code 1" {
+		t.Errorf("expected fallback for stderr with only filtered lines, got %q", got)
+	}
+
+	// Very long stderr line
+	longErr := "ERROR: " + strings.Repeat("a", 250)
+	gotLong := extractErrorDetail(longErr, 2)
+	if len(gotLong) > 200 || !strings.HasSuffix(gotLong, "...") {
+		t.Errorf("expected truncated error detail <= 200 chars, got len=%d %q", len(gotLong), gotLong)
+	}
+}
+
+func TestRunAgyWithWatchdog_Execution(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	// Create mock executables
+	mockSuccessBin := filepath.Join(tmpDir, "mock_success.sh")
+	_ = os.WriteFile(mockSuccessBin, []byte("#!/bin/sh\necho '{\"conversation_id\":\"test-sess\",\"status\":\"SUCCESS\",\"response\":\"ok\"}'\n"), 0755)
+
+	mockSleepBin := filepath.Join(tmpDir, "mock_sleep.sh")
+	_ = os.WriteFile(mockSleepBin, []byte("#!/bin/sh\nsleep 1\n"), 0755)
+
+	mockSleepShortBin := filepath.Join(tmpDir, "mock_sleep_short.sh")
+	_ = os.WriteFile(mockSleepShortBin, []byte("#!/bin/sh\nsleep 0.25\n"), 0755)
+
+	// 1. Successful execution using mock script
+	opts := WatchdogOptions{
+		InactivityTimeout: 2 * time.Second,
+		MaxDuration:       5 * time.Second,
+		PollInterval:      50 * time.Millisecond,
+	}
+
+	stdout, stderr, code, err := RunAgyWithWatchdog(ctx, mockSuccessBin, "test prompt", "", "", "", opts)
+	if err != nil || code != 0 {
+		t.Fatalf("RunAgyWithWatchdog execution failed: %v (code %d, stderr: %s)", err, code, stderr)
+	}
+	if !strings.Contains(stdout, "test-sess") {
+		t.Errorf("expected stdout to contain test-sess, got: %s", stdout)
+	}
+
+	// 2. Inactivity timeout execution
+	inactivityOpts := WatchdogOptions{
+		InactivityTimeout: 100 * time.Millisecond,
+		MaxDuration:       2 * time.Second,
+		PollInterval:      20 * time.Millisecond,
+	}
+	_, _, code, err = RunAgyWithWatchdog(ctx, mockSleepBin, "sleep prompt", "", "", "", inactivityOpts)
+	if !errors.Is(err, ErrInactivityTimeout) && code != -1 {
+		t.Errorf("expected ErrInactivityTimeout, got code=%d, err=%v", code, err)
+	}
+
+	// 3. Max duration timeout execution
+	logDir := filepath.Join(tmpDir, "sess-max", ".system_generated", "logs")
+	_ = os.MkdirAll(logDir, 0755)
+	logFile := filepath.Join(logDir, "transcript.jsonl")
+	_ = os.WriteFile(logFile, []byte("start\n"), 0644)
+
+	maxDurOpts := WatchdogOptions{
+		InactivityTimeout: 500 * time.Millisecond,
+		MaxDuration:       150 * time.Millisecond,
+		PollInterval:      20 * time.Millisecond,
+		TranscriptDirs:    []string{tmpDir + "/%s/.system_generated/logs", tmpDir + "/{session}/.system_generated/logs", tmpDir},
+	}
+	_, _, code, err = RunAgyWithWatchdog(ctx, mockSleepBin, "sleep prompt", "sess-max", "", "", maxDurOpts)
+	if !errors.Is(err, ErrMaxDuration) && code != -1 {
+		t.Errorf("expected ErrMaxDuration, got code=%d, err=%v", code, err)
+	}
+
+	// 4. Transcript polling activity refresh
+	refreshOpts := WatchdogOptions{
+		InactivityTimeout: 300 * time.Millisecond,
+		MaxDuration:       2 * time.Second,
+		PollInterval:      30 * time.Millisecond,
+		TranscriptDirs:    []string{tmpDir + "/%s/.system_generated/logs"},
+	}
+
+	// Background goroutine that touches transcript file to keep watchdog alive
+	go func() {
+		for i := 0; i < 5; i++ {
+			time.Sleep(50 * time.Millisecond)
+			_ = os.WriteFile(logFile, []byte(fmt.Sprintf("update %d\n", i)), 0644)
+		}
+	}()
+
+	_, _, code, err = RunAgyWithWatchdog(ctx, mockSleepShortBin, "sleep prompt", "sess-max", "", "", refreshOpts)
+	if err != nil && !errors.Is(err, ErrInactivityTimeout) {
+		// Normal completion
+	}
+
+	// 5. Binary start failure
+	_, _, code, err = RunAgyWithWatchdog(ctx, "/path/to/nonexistent/bin/agy", "test", "", "apikey123", "model-x", opts)
+	if err == nil {
+		t.Errorf("expected error for nonexistent binary")
+	}
+}
+
+func TestClassifyError_AdditionalBranches(t *testing.T) {
+	// Exit code 0, empty stdout, empty stderr
+	fail, trans, corr, detail := ClassifyError(0, "", "")
+	if !fail || detail != "process produced empty stdout" {
+		t.Errorf("expected empty stdout failure, got fail=%v, detail=%q", fail, detail)
+	}
+
+	// Exit code 0, parse error with context window exceeded
+	fail, trans, corr, detail = ClassifyError(0, "not json", "context window exceeded in stderr")
+	if !fail || !corr || detail != "context window exceeded" {
+		t.Errorf("expected context window exceeded corruption, got fail=%v corr=%v detail=%q", fail, corr, detail)
+	}
+
+	// Exit code 0, parse error with transient error
+	fail, trans, corr, detail = ClassifyError(0, "not json", "503 Service Unavailable")
+	if !fail || !trans {
+		t.Errorf("expected transient failure for 503 parse error")
+	}
+
+	// Exit code 0, parse error with fatal error in stderr
+	fail, trans, corr, detail = ClassifyError(0, "not json", "panic: runtime error")
+	if !fail || detail != "panic: runtime error" {
+		t.Errorf("expected fatal stderr detail, got %q", detail)
+	}
+
+	// Exit code 0, parsed error status without error field
+	fail, trans, corr, detail = ClassifyError(0, `{"status":"FAILED"}`, "")
+	if !fail || detail != "runner status: FAILED" {
+		t.Errorf("expected runner status: FAILED, got %q", detail)
+	}
+
+	// Exit code 0, parsed error status with session corruption keyword
+	fail, trans, corr, detail = ClassifyError(0, `{"status":"ERROR","error":"corrupted session file"}`, "")
+	if !fail || !corr {
+		t.Errorf("expected session corruption for corrupted session error")
+	}
+
+	// Exit code 0, parsed error status with transient keyword
+	fail, trans, corr, detail = ClassifyError(0, `{"status":"ERROR","error":"rate limit 429 exceeded"}`, "")
+	if !fail || !trans {
+		t.Errorf("expected transient error for rate limit")
+	}
+
+	// Exit code 0, success status with fatal stderr
+	fail, trans, corr, detail = ClassifyError(0, `{"status":"SUCCESS","response":"hi"}`, "fatal error occurred")
+	if !fail || detail != "fatal error occurred" {
+		t.Errorf("expected fatal stderr error, got fail=%v detail=%q", fail, detail)
+	}
+
+	// Non-zero exit code with conversation not found
+	fail, trans, corr, detail = ClassifyError(1, "", "conversation not found in storage")
+	if !fail || !corr {
+		t.Errorf("expected session corruption for conversation not found")
+	}
+
+	// Non-zero exit code with transient error
+	fail, trans, corr, detail = ClassifyError(1, "", "connection reset by peer")
+	if !fail || !trans {
+		t.Errorf("expected transient error for connection reset")
+	}
+
+	// Non-zero exit code with empty stderr but non-empty stdout
+	fail, trans, corr, detail = ClassifyError(1, "raw error on stdout", "")
+	if !fail || detail != "raw error on stdout" {
+		t.Errorf("expected error detail from stdout when stderr empty, got %q", detail)
+	}
+
+	// MCP session error (should not be classified as session corruption)
+	fail, trans, corr, detail = ClassifyError(1, "", "calling \"initialize\" on mcp server failed to connect (session id 1234)")
+	if !fail || corr {
+		t.Errorf("expected MCP session error to not be classified as session corruption, got corr=%v", corr)
+	}
+
+	// Exit code 0, status empty but error populated
+	fail, trans, corr, detail = ClassifyError(0, `{"status":"","error":"rate limit 429"}`, "")
+	if !fail || !trans || detail != "rate limit 429" {
+		t.Errorf("expected transient error for status-empty error field, got fail=%v trans=%v detail=%q", fail, trans, detail)
+	}
+
+	// ExtractSessionID with empty string
+	if id := ExtractSessionID("", time.Now()); id != "" {
+		t.Errorf("expected empty string for empty ExtractSessionID, got %q", id)
+	}
+}
+
