@@ -5025,5 +5025,244 @@ func TestQueue_WatchdogInactivityRetryAndRecovery(t *testing.T) {
 	}
 }
 
+func TestDefaultTimeoutMinutes_Is60(t *testing.T) {
+	if DefaultTimeoutMinutes != 60 {
+		t.Errorf("Expected DefaultTimeoutMinutes to be 60, got %d", DefaultTimeoutMinutes)
+	}
+}
+
+func TestProcessBurst_ColdStartWatchdogRecoveryAndContinuation(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	var runnerCalls int32
+	var promptsSeen []string
+	var sessionsSeen []string
+	var mu sync.Mutex
+	doneCh := make(chan struct{})
+
+	var deliveredText string
+	var deliveredChannel string
+
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	coldSessID := "dynamic-cold-uuid-707"
+	sessDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", coldSessID)
+	_ = os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs"), 0755)
+	if err := os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte("mock transcript data\n"), 0600); err != nil {
+		t.Fatalf("failed to write mock transcript: %v", err)
+	}
+
+	// NOTE: We do NOT seed db.SaveSessionID here; this is a cold start turn!
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    3,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			call := atomic.AddInt32(&runnerCalls, 1)
+			mu.Lock()
+			promptsSeen = append(promptsSeen, prompt)
+			sessionsSeen = append(sessionsSeen, sessionID)
+			mu.Unlock()
+
+			if call == 1 {
+				// Cold start: sessionID must be empty
+				if sessionID != "" {
+					t.Errorf("Attempt 1: expected empty sessionID on cold start, got %q", sessionID)
+				}
+				// Attempt 1 discovers coldSessID in stderr before watchdog kill
+				return "", fmt.Sprintf("Starting conversation update stream for %s\n[watchdog] inactivity timeout exceeded (5m without output)", coldSessID), -1, fmt.Errorf("exit status 255")
+			}
+
+			// Attempt 2 should attach to the latched coldSessID and receive continuation prompt
+			return fmt.Sprintf(`{"conversation_id":%q,"status":"SUCCESS","response":"Cold start recovered successfully on retry!"}`, sessionID), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			mu.Lock()
+			deliveredChannel = channelID
+			deliveredText = text
+			mu.Unlock()
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			close(doneCh)
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{
+		ID:         "msg-cold-101",
+		ThreadID:   "thread-cold-606",
+		GuildID:    "guild-303",
+		AuthorID:   "user-404",
+		AuthorName: "User",
+		Content:    "Execute initial task cold",
+		Status:     db.StatusPending,
+		CreatedAt:  time.Now().UTC(),
+		UpdatedAt:  time.Now().UTC(),
+	}
+	if err := db.InsertMessage(database, msg); err != nil {
+		t.Fatalf("Failed to insert message: %v", err)
+	}
+
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Timeout waiting for cold-start message processing")
+	}
+
+	calls := atomic.LoadInt32(&runnerCalls)
+	if calls != 2 {
+		t.Errorf("Expected RunnerFunc to be called exactly 2 times (failure then success), got: %d", calls)
+	}
+
+	mu.Lock()
+	if len(sessionsSeen) >= 2 {
+		if sessionsSeen[0] != "" {
+			t.Errorf("Attempt 1 should have empty sessionID, got: %q", sessionsSeen[0])
+		}
+		if sessionsSeen[1] != coldSessID {
+			t.Errorf("Attempt 2 should have latched sessionID %q, got: %q", coldSessID, sessionsSeen[1])
+		}
+	}
+	if len(promptsSeen) >= 2 {
+		// Attempt 1 should contain user request
+		if !strings.Contains(promptsSeen[0], "Execute initial task cold") {
+			t.Errorf("Attempt 1 prompt missing original user request: %q", promptsSeen[0])
+		}
+		// Attempt 2 should contain continuation prompt
+		if !strings.Contains(promptsSeen[1], "timed out or was interrupted") {
+			t.Errorf("Attempt 2 prompt missing continuation instruction: %q", promptsSeen[1])
+		}
+	}
+	if deliveredChannel != "thread-cold-606" || !strings.Contains(deliveredText, "Cold start recovered successfully on retry!") {
+		t.Errorf("Unexpected delivery: channel=%q, text=%q", deliveredChannel, deliveredText)
+	}
+	mu.Unlock()
+
+	// Verify database has latched the session ID
+	savedSess, err := db.GetSessionID(database, "thread-cold-606")
+	if err != nil || savedSess != coldSessID {
+		t.Errorf("Expected latched session %q in DB for thread, got: %q (err: %v)", coldSessID, savedSess, err)
+	}
+}
+
+func TestProcessBurst_ColdStartTransientRecoveryAndContinuation(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	var runnerCalls int32
+	var promptsSeen []string
+	var sessionsSeen []string
+	var mu sync.Mutex
+	doneCh := make(chan struct{})
+
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	transientSessID := "dynamic-transient-uuid-808"
+	sessDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", transientSessID)
+	_ = os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs"), 0755)
+	if err := os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte("mock transcript data\n"), 0600); err != nil {
+		t.Fatalf("failed to write mock transcript: %v", err)
+	}
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    3,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			call := atomic.AddInt32(&runnerCalls, 1)
+			mu.Lock()
+			promptsSeen = append(promptsSeen, prompt)
+			sessionsSeen = append(sessionsSeen, sessionID)
+			mu.Unlock()
+
+			if call == 1 {
+				return "", fmt.Sprintf("Starting conversation update stream for %s\nError 503: high demand service unavailable", transientSessID), 1, fmt.Errorf("exit status 1")
+			}
+
+			return fmt.Sprintf(`{"conversation_id":%q,"status":"SUCCESS","response":"Transient error recovered on retry!"}`, sessionID), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			close(doneCh)
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{
+		ID:         "msg-transient-101",
+		ThreadID:   "thread-transient-707",
+		GuildID:    "guild-303",
+		AuthorID:   "user-404",
+		AuthorName: "User",
+		Content:    "Run transient task cold",
+		Status:     db.StatusPending,
+		CreatedAt:  time.Now().UTC(),
+		UpdatedAt:  time.Now().UTC(),
+	}
+	if err := db.InsertMessage(database, msg); err != nil {
+		t.Fatalf("Failed to insert message: %v", err)
+	}
+
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Timeout waiting for message processing")
+	}
+
+	calls := atomic.LoadInt32(&runnerCalls)
+	if calls != 2 {
+		t.Errorf("Expected RunnerFunc to be called exactly 2 times, got: %d", calls)
+	}
+
+	mu.Lock()
+	if len(sessionsSeen) >= 2 {
+		if sessionsSeen[0] != "" {
+			t.Errorf("Attempt 1 should have empty sessionID, got: %q", sessionsSeen[0])
+		}
+		if sessionsSeen[1] != transientSessID {
+			t.Errorf("Attempt 2 should have latched sessionID %q, got: %q", transientSessID, sessionsSeen[1])
+		}
+	}
+	if len(promptsSeen) >= 2 {
+		if !strings.Contains(promptsSeen[1], "timed out or was interrupted") {
+			t.Errorf("Attempt 2 prompt missing continuation instruction: %q", promptsSeen[1])
+		}
+	}
+	mu.Unlock()
+
+	savedSess, err := db.GetSessionID(database, "thread-transient-707")
+	if err != nil || savedSess != transientSessID {
+		t.Errorf("Expected latched session %q in DB, got: %q (err: %v)", transientSessID, savedSess, err)
+	}
+}
+
+
 
 
