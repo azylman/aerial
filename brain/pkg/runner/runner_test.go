@@ -2,6 +2,10 @@ package runner
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -340,3 +344,423 @@ func TestRunAgyWithEcho(t *testing.T) {
 	}
 }
 
+
+func TestActivityWriter_ThreadSafetyAndSessionDiscovery(t *testing.T) {
+	w := NewActivityWriter("")
+	if w.SessionID() != "" {
+		t.Errorf("expected empty initial session ID, got %q", w.SessionID())
+	}
+	startNano := w.LastActivity().UnixNano()
+
+	// Write session start log chunk
+	chunk := []byte("INFO: Starting conversation update stream for 12345-abcd-6789\n")
+	n, err := w.Write(chunk)
+	if err != nil || n != len(chunk) {
+		t.Fatalf("Write failed: n=%d, err=%v", n, err)
+	}
+
+	if w.SessionID() != "12345-abcd-6789" {
+		t.Errorf("expected session ID 12345-abcd-6789, got %q", w.SessionID())
+	}
+	if w.LastActivity().UnixNano() < startNano {
+		t.Errorf("expected lastActivity to advance")
+	}
+	if w.String() != string(chunk) {
+		t.Errorf("expected buffered output %q, got %q", string(chunk), w.String())
+	}
+
+	// Test empty write does nothing
+	nZero, errZero := w.Write([]byte{})
+	if nZero != 0 || errZero != nil {
+		t.Errorf("expected 0, nil from empty write, got %d, %v", nZero, errZero)
+	}
+
+	// Test initialized session ID retains value
+	wPre := NewActivityWriter("pre-existing-uuid")
+	if wPre.SessionID() != "pre-existing-uuid" {
+		t.Errorf("expected pre-existing-uuid, got %q", wPre.SessionID())
+	}
+	_, _ = wPre.Write([]byte("INFO: Starting conversation update stream for different-uuid\n"))
+	if wPre.SessionID() != "pre-existing-uuid" {
+		t.Errorf("expected pre-existing session ID to not be overwritten, got %q", wPre.SessionID())
+	}
+
+	// Test general session regex discovery
+	wGen := NewActivityWriter("")
+	_, _ = wGen.Write([]byte("Initialized conversation_id: general-session-uuid-999\n"))
+	if wGen.SessionID() != "general-session-uuid-999" {
+		t.Errorf("expected general-session-uuid-999, got %q", wGen.SessionID())
+	}
+
+	// Concurrent writes and reads
+	wConc := NewActivityWriter("")
+	done := make(chan struct{})
+	for i := 0; i < 10; i++ {
+		go func(id int) {
+			for j := 0; j < 50; j++ {
+				_, _ = wConc.Write([]byte(fmt.Sprintf("log line from worker %d turn %d\n", id, j)))
+				_ = wConc.LastActivity()
+				_ = wConc.SessionID()
+				_ = wConc.String()
+			}
+			done <- struct{}{}
+		}(i)
+	}
+
+	for i := 0; i < 10; i++ {
+		<-done
+	}
+
+	if wConc.LastActivity().IsZero() {
+		t.Errorf("expected non-zero LastActivity")
+	}
+	if len(wConc.String()) == 0 {
+		t.Errorf("expected non-empty String buffer")
+	}
+}
+
+func TestRunAgyWithWatchdog_InactivityTimeout(t *testing.T) {
+	ctx := context.Background()
+	opts := WatchdogOptions{
+		InactivityTimeout: 50 * time.Millisecond,
+		MaxDuration:       2 * time.Second,
+		PollInterval:      10 * time.Millisecond,
+	}
+
+	mockAgy := filepath.Join(t.TempDir(), "mock-agy")
+	script := "#!/bin/sh\nsleep 1\n"
+	if err := os.WriteFile(mockAgy, []byte(script), 0755); err != nil {
+		t.Fatalf("failed to write mock script: %v", err)
+	}
+
+	stdout, stderr, exitCode, err := RunAgyWithWatchdog(
+		ctx,
+		mockAgy,
+		"prompt",
+		"",
+		"",
+		"",
+		opts,
+	)
+
+	if exitCode == 0 {
+		t.Errorf("expected non-zero exit code on inactivity timeout, got 0")
+	}
+	if !errors.Is(err, ErrInactivityTimeout) {
+		t.Errorf("expected ErrInactivityTimeout, got: %v", err)
+	}
+	if !strings.Contains(stderr, "[watchdog]") || !strings.Contains(stderr, "inactivity timeout exceeded") {
+		t.Errorf("expected [watchdog] inactivity timeout diagnosis in stderr, got: %s", stderr)
+	}
+	_ = stdout
+}
+
+func TestRunAgyWithWatchdog_ActiveStderrHeartbeat(t *testing.T) {
+	ctx := context.Background()
+	opts := WatchdogOptions{
+		InactivityTimeout: 100 * time.Millisecond,
+		MaxDuration:       2 * time.Second,
+		PollInterval:      15 * time.Millisecond,
+	}
+
+	mockAgy := filepath.Join(t.TempDir(), "mock-agy")
+	// 5 pulses 30ms apart = ~150ms total execution time, beating the 100ms inactivity timeout
+	script := "#!/bin/sh\nfor i in 1 2 3 4 5; do\n  echo \"pulse $i\" >&2\n  sleep 0.03\ndone\necho '{\"status\":\"SUCCESS\",\"response\":\"done\"}'\n"
+	if err := os.WriteFile(mockAgy, []byte(script), 0755); err != nil {
+		t.Fatalf("failed to write mock script: %v", err)
+	}
+
+	stdout, stderr, exitCode, err := RunAgyWithWatchdog(
+		ctx,
+		mockAgy,
+		"prompt",
+		"",
+		"",
+		"",
+		opts,
+	)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if exitCode != 0 {
+		t.Errorf("expected exit code 0, got %d (stderr: %s)", exitCode, stderr)
+	}
+	if strings.Contains(stderr, "[watchdog]") {
+		t.Errorf("unexpected watchdog intervention in stderr: %s", stderr)
+	}
+	if !strings.Contains(stdout, `"SUCCESS"`) {
+		t.Errorf("expected stdout to contain SUCCESS, got %q", stdout)
+	}
+}
+
+func TestRunAgyWithWatchdog_ActiveStdoutHeartbeat(t *testing.T) {
+	ctx := context.Background()
+	opts := WatchdogOptions{
+		InactivityTimeout: 100 * time.Millisecond,
+		MaxDuration:       2 * time.Second,
+		PollInterval:      15 * time.Millisecond,
+	}
+
+	mockAgy := filepath.Join(t.TempDir(), "mock-agy")
+	// 5 stdout pulses 30ms apart = ~150ms total execution time, beating the 100ms inactivity timeout
+	script := "#!/bin/sh\nfor i in 1 2 3 4 5; do\n  echo \"stdout pulse $i\"\n  sleep 0.03\ndone\necho '{\"status\":\"SUCCESS\",\"response\":\"done\"}'\n"
+	if err := os.WriteFile(mockAgy, []byte(script), 0755); err != nil {
+		t.Fatalf("failed to write mock script: %v", err)
+	}
+
+	stdout, stderr, exitCode, err := RunAgyWithWatchdog(
+		ctx,
+		mockAgy,
+		"prompt",
+		"",
+		"",
+		"",
+		opts,
+	)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if exitCode != 0 {
+		t.Errorf("expected exit code 0, got %d (stderr: %s)", exitCode, stderr)
+	}
+	if strings.Contains(stderr, "[watchdog]") {
+		t.Errorf("unexpected watchdog intervention in stderr: %s", stderr)
+	}
+	if !strings.Contains(stdout, "stdout pulse 5") {
+		t.Errorf("expected stdout to contain stdout pulses, got: %q", stdout)
+	}
+}
+
+func TestRunAgyWithWatchdog_CustomTranscriptDirs(t *testing.T) {
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	testSessionID := "custom-sess-9988"
+	customLogDir := filepath.Join(tempDir, "custom-logs", testSessionID, ".system_generated", "logs")
+	if err := os.MkdirAll(customLogDir, 0755); err != nil {
+		t.Fatalf("failed to create custom log dir: %v", err)
+	}
+	transcriptFile := filepath.Join(customLogDir, "transcript.jsonl")
+
+	opts := WatchdogOptions{
+		InactivityTimeout: 100 * time.Millisecond,
+		MaxDuration:       2 * time.Second,
+		PollInterval:      15 * time.Millisecond,
+		TranscriptDirs:    []string{filepath.Join(tempDir, "custom-logs")},
+	}
+
+	mockAgy := filepath.Join(t.TempDir(), "mock-agy")
+	script := fmt.Sprintf("#!/bin/sh\nfor i in 1 2 3 4 5; do\n  echo \"{\\\"step\\\": $i}\" >> %s\n  sleep 0.03\ndone\necho '{\"status\":\"SUCCESS\",\"response\":\"done\"}'\n", transcriptFile)
+	if err := os.WriteFile(mockAgy, []byte(script), 0755); err != nil {
+		t.Fatalf("failed to write mock script: %v", err)
+	}
+
+	stdout, stderr, exitCode, err := RunAgyWithWatchdog(
+		ctx,
+		mockAgy,
+		"prompt",
+		testSessionID,
+		"",
+		"",
+		opts,
+	)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if exitCode != 0 {
+		t.Errorf("expected exit code 0, got %d (stderr: %s)", exitCode, stderr)
+	}
+	if strings.Contains(stderr, "[watchdog]") {
+		t.Errorf("unexpected watchdog intervention in stderr: %s", stderr)
+	}
+	if !strings.Contains(stdout, `"SUCCESS"`) {
+		t.Errorf("expected stdout to contain SUCCESS, got %q", stdout)
+	}
+}
+
+func TestRunAgyWithWatchdog_TranscriptHeartbeat(t *testing.T) {
+	ctx := context.Background()
+	testSessionID := "test-transcript-session-12345"
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		homeDir = "/root"
+	}
+	logDir := filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain", testSessionID, ".system_generated", "logs")
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		t.Fatalf("failed to create mock log dir: %v", err)
+	}
+	defer os.RemoveAll(filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain", testSessionID))
+
+	transcriptFile := filepath.Join(logDir, "transcript.jsonl")
+
+	opts := WatchdogOptions{
+		InactivityTimeout: 100 * time.Millisecond,
+		MaxDuration:       2 * time.Second,
+		PollInterval:      15 * time.Millisecond,
+	}
+
+	mockAgy := filepath.Join(t.TempDir(), "mock-agy")
+	// Writes to transcript.jsonl every 30ms for 5 pulses (~150ms > 100ms inactivity timeout)
+	script := fmt.Sprintf("#!/bin/sh\nfor i in 1 2 3 4 5; do\n  echo \"{\\\"step\\\": $i}\" >> %s\n  sleep 0.03\ndone\necho '{\"status\":\"SUCCESS\",\"response\":\"done\"}'\n", transcriptFile)
+	if err := os.WriteFile(mockAgy, []byte(script), 0755); err != nil {
+		t.Fatalf("failed to write mock script: %v", err)
+	}
+
+	stdout, stderr, exitCode, err := RunAgyWithWatchdog(
+		ctx,
+		mockAgy,
+		"prompt",
+		testSessionID,
+		"",
+		"",
+		opts,
+	)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if exitCode != 0 {
+		t.Errorf("expected exit code 0, got %d (stderr: %s)", exitCode, stderr)
+	}
+	if strings.Contains(stderr, "[watchdog]") {
+		t.Errorf("unexpected watchdog intervention in stderr: %s", stderr)
+	}
+	if !strings.Contains(stdout, `"SUCCESS"`) {
+		t.Errorf("expected stdout to contain SUCCESS, got %q", stdout)
+	}
+}
+
+func TestRunAgyWithWatchdog_MaxDuration(t *testing.T) {
+	ctx := context.Background()
+	opts := WatchdogOptions{
+		InactivityTimeout: 500 * time.Millisecond,
+		MaxDuration:       50 * time.Millisecond,
+		PollInterval:      10 * time.Millisecond,
+	}
+
+	mockAgy := filepath.Join(t.TempDir(), "mock-agy")
+	script := "#!/bin/sh\nsleep 1\n"
+	if err := os.WriteFile(mockAgy, []byte(script), 0755); err != nil {
+		t.Fatalf("failed to write mock script: %v", err)
+	}
+
+	stdout, stderr, exitCode, err := RunAgyWithWatchdog(
+		ctx,
+		mockAgy,
+		"prompt",
+		"",
+		"",
+		"",
+		opts,
+	)
+
+	if exitCode == 0 {
+		t.Errorf("expected non-zero exit code on max duration exceeded, got 0")
+	}
+	if !errors.Is(err, ErrMaxDuration) {
+		t.Errorf("expected ErrMaxDuration, got: %v", err)
+	}
+	if !strings.Contains(stderr, "[watchdog]") || !strings.Contains(stderr, "max duration exceeded") {
+		t.Errorf("expected [watchdog] max duration exceeded in stderr, got: %s", stderr)
+	}
+	_ = stdout
+}
+
+func TestClassifyError_WatchdogInactivityNotTransient(t *testing.T) {
+	stderr := "Starting conversation update stream for uuid-123\n[watchdog] inactivity timeout exceeded (5m without output or transcript update)"
+	isFailure, isTransient, isSessionCorruption, errDetail := ClassifyError(-1, "", stderr)
+
+	if !isFailure {
+		t.Errorf("expected isFailure=true")
+	}
+	if isTransient {
+		t.Errorf("expected isTransient=false for inactivity watchdog stall")
+	}
+	if isSessionCorruption {
+		t.Errorf("expected isSessionCorruption=false")
+	}
+	if !strings.Contains(errDetail, "inactivity timeout exceeded") {
+		t.Errorf("expected errDetail to contain inactivity timeout, got %q", errDetail)
+	}
+}
+
+func TestClassifyError_WatchdogMaxDurationNotTransient(t *testing.T) {
+	stderr := "Starting conversation update stream for uuid-123\n[watchdog] max duration exceeded (60m total duration cap)"
+	isFailure, isTransient, isSessionCorruption, errDetail := ClassifyError(-1, "", stderr)
+
+	if !isFailure {
+		t.Errorf("expected isFailure=true")
+	}
+	if isTransient {
+		t.Errorf("expected isTransient=false for max duration watchdog kill")
+	}
+	if isSessionCorruption {
+		t.Errorf("expected isSessionCorruption=false")
+	}
+	if !strings.Contains(errDetail, "max duration exceeded") {
+		t.Errorf("expected errDetail to contain max duration exceeded, got %q", errDetail)
+	}
+}
+
+func TestIsInactivityTimeout(t *testing.T) {
+	tests := []struct {
+		name      string
+		errDetail string
+		stderr    string
+		want      bool
+	}{
+		{
+			name:      "Inactivity in errDetail",
+			errDetail: "[watchdog] inactivity timeout exceeded (5m without output)",
+			stderr:    "",
+			want:      true,
+		},
+		{
+			name:      "Inactivity in stderr",
+			errDetail: "some other detail",
+			stderr:    "logs...\n[watchdog] inactivity timeout exceeded (5m0s without output or transcript update)",
+			want:      true,
+		},
+		{
+			name:      "Case insensitivity",
+			errDetail: "[WATCHDOG] Inactivity Timeout Exceeded",
+			stderr:    "",
+			want:      true,
+		},
+		{
+			name:      "Max duration is not inactivity timeout",
+			errDetail: "[watchdog] max duration exceeded (60m0s total duration cap)",
+			stderr:    "",
+			want:      false,
+		},
+		{
+			name:      "Transient context deadline exceeded is not watchdog inactivity",
+			errDetail: "context deadline exceeded",
+			stderr:    "",
+			want:      false,
+		},
+		{
+			name:      "Generic timeout is not watchdog inactivity",
+			errDetail: "",
+			stderr:    "request timed out",
+			want:      false,
+		},
+		{
+			name:      "Empty strings",
+			errDetail: "",
+			stderr:    "",
+			want:      false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := IsInactivityTimeout(tt.errDetail, tt.stderr)
+			if got != tt.want {
+				t.Errorf("IsInactivityTimeout(%q, %q) = %v, want %v", tt.errDetail, tt.stderr, got, tt.want)
+			}
+		})
+	}
+}

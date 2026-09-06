@@ -4824,4 +4824,90 @@ func TestWorkerPoolShutdown_AmbientClassifierCancellationPreserved(t *testing.T)
 	}
 }
 
+func TestQueue_WatchdogInactivityFatalNoRetry(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	var runnerCalls int32
+	doneCh := make(chan struct{})
+
+	var deliveredText string
+	var deliveredChannel string
+	var mu sync.Mutex
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    3,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			atomic.AddInt32(&runnerCalls, 1)
+			return "", "[watchdog] inactivity timeout exceeded (5m without output)", -1, fmt.Errorf("exit status 255")
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			mu.Lock()
+			deliveredChannel = channelID
+			deliveredText = text
+			mu.Unlock()
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			close(doneCh)
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{
+		ID:         "msg-watchdog-101",
+		ThreadID:   "thread-watchdog-202",
+		GuildID:    "guild-303",
+		AuthorID:   "user-404",
+		AuthorName: "User",
+		Content:    "Run a long task",
+		Status:     db.StatusPending,
+		CreatedAt:  time.Now().UTC(),
+		UpdatedAt:  time.Now().UTC(),
+	}
+	if err := db.InsertMessage(database, msg); err != nil {
+		t.Fatalf("Failed to insert message: %v", err)
+	}
+
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Timeout waiting for message processing")
+	}
+
+	calls := atomic.LoadInt32(&runnerCalls)
+	if calls != 1 {
+		t.Errorf("Expected RunnerFunc to be called exactly 1 time, got: %d", calls)
+	}
+
+	dbMsg, err := db.GetMessage(database, "msg-watchdog-101")
+	if err != nil || dbMsg == nil {
+		t.Fatalf("Failed to get message from DB: %v", err)
+	}
+	if dbMsg.Status != db.StatusFailed {
+		t.Errorf("Expected message status %s, got: %s", db.StatusFailed, dbMsg.Status)
+	}
+	if !strings.Contains(dbMsg.ErrorMessage, "watchdog") && !strings.Contains(dbMsg.ErrorMessage, "inactivity timeout exceeded") {
+		t.Errorf("Expected db error_message to mention watchdog error, got: %q", dbMsg.ErrorMessage)
+	}
+
+	mu.Lock()
+	if deliveredChannel != "thread-watchdog-202" || (!strings.Contains(deliveredText, "terminated by watchdog") && !strings.Contains(deliveredText, "hiccup")) {
+		t.Errorf("Unexpected delivery: channel=%q, text=%q", deliveredChannel, deliveredText)
+	}
+	mu.Unlock()
+}
+
 
