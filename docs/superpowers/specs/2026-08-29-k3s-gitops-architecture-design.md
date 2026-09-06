@@ -1,4 +1,4 @@
-﻿# Architectural Specification: Aerial K3s & GitOps Platform Architecture
+# Architectural Specification: Aerial K3s & GitOps Platform Architecture
 
 **Date:** 2026-08-29  
 **Status:** DRAFT / UNDER REVIEW  

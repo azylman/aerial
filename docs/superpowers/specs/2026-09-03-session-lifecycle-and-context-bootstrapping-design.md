@@ -1,4 +1,4 @@
-﻿# Design Spec: Session Lifecycle, Cold/Warm State Management, & Turn 1 Context Bootstrapping
+# Design Spec: Session Lifecycle, Cold/Warm State Management, & Turn 1 Context Bootstrapping
 
 **Date:** 2026-09-03  
 **Status:** Approved by 4-Expert Review Panel (Go Systems, Queue, AI, Adversarial Critic)  

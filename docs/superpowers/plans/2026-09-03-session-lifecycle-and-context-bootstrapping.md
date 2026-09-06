@@ -1,4 +1,4 @@
-﻿# Session Lifecycle, Cold/Warm State Management, & Turn 1 Context Bootstrapping Implementation Plan
+# Session Lifecycle, Cold/Warm State Management, & Turn 1 Context Bootstrapping Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
