@@ -10,8 +10,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
+
+	"github.com/azylman/aerial/brain/pkg/sanitizer"
 	"sync"
 	"time"
 )
@@ -19,22 +20,9 @@ import (
 // SyncMutex is exported so runner or agent turns can coordinate with gitsync if needed.
 var SyncMutex sync.Mutex
 
-var sanitizePatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)basic\s+[a-zA-Z0-9+/=]+`),
-	regexp.MustCompile(`(?i)x-access-token:[^@\s]+`),
-	regexp.MustCompile(`(?i)github_pat_[a-zA-Z0-9_]+`),
-	regexp.MustCompile(`(?i)ghp_[a-zA-Z0-9]+`),
-	regexp.MustCompile(`(?i)gho_[a-zA-Z0-9]+`),
-	regexp.MustCompile(`(?i)ghu_[a-zA-Z0-9]+`),
-}
-
 // SanitizeLog uses regex to replace any personal access tokens or auth headers with [REDACTED_TOKEN].
 func SanitizeLog(input string) string {
-	out := input
-	for _, re := range sanitizePatterns {
-		out = re.ReplaceAllString(out, "[REDACTED_TOKEN]")
-	}
-	return out
+	return sanitizer.SanitizeLog(input)
 }
 
 // buildAuthArgs returns git command-line arguments to inject HTTP basic auth headers

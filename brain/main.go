@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,6 +26,7 @@ import (
 	"github.com/azylman/aerial/brain/pkg/runner"
 	"github.com/azylman/aerial/brain/pkg/scheduler"
 	"github.com/azylman/aerial/brain/pkg/skills"
+	"github.com/azylman/aerial/brain/pkg/sanitizer"
 	"github.com/azylman/aerial/brain/pkg/watcher"
 	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
@@ -263,61 +263,9 @@ func handleFacts(database *sql.DB) http.HandlerFunc {
 	}
 }
 
-// Token & Secret Redaction
-
-var tokenPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)basic\s+[a-zA-Z0-9+/=]+`),
-	regexp.MustCompile(`(?i)x-access-token:[^@\s]+`),
-	regexp.MustCompile(`(?i)github_pat_[a-zA-Z0-9_]+`),
-	regexp.MustCompile(`(?i)ghp_[a-zA-Z0-9]+`),
-	regexp.MustCompile(`(?i)gho_[a-zA-Z0-9]+`),
-	regexp.MustCompile(`(?i)ghu_[a-zA-Z0-9]+`),
-	regexp.MustCompile(`(?i)AIza[0-9A-Za-z-_]{35}`),
-	regexp.MustCompile(`(?i)(GEMINI_API_KEY|DISCORD_BOT_TOKEN|DISCORD_TOKEN|GITHUB_PAT|HA_TOKEN|PASSWORD|SECRET|TOKEN|KEY)\s*[:=]\s*([^\s,;]+)`),
-}
-
 // SanitizeString scrubs sensitive tokens, PATs, passwords, and credentials from text.
 func SanitizeString(input string) string {
-	if input == "" {
-		return ""
-	}
-	out := input
-
-	// 1. Redact known sensitive environment variable values if set
-	envKeys := []string{
-		"GEMINI_API_KEY",
-		"ANTIGRAVITY_API_KEY",
-		"DISCORD_BOT_TOKEN",
-		"DISCORD_TOKEN",
-		"GITHUB_PAT",
-		"GITHUB_PERSONAL_ACCESS_TOKEN",
-		"HA_TOKEN",
-	}
-	for _, k := range envKeys {
-		val := os.Getenv(k)
-		if len(val) >= 4 {
-			out = strings.ReplaceAll(out, val, "[REDACTED]")
-		}
-	}
-
-	// 2. Redact any other env vars with sensitive key names
-	for _, env := range os.Environ() {
-		parts := strings.SplitN(env, "=", 2)
-		if len(parts) == 2 {
-			kUpper := strings.ToUpper(parts[0])
-			val := parts[1]
-			if len(val) >= 6 && (strings.Contains(kUpper, "TOKEN") || strings.Contains(kUpper, "KEY") || strings.Contains(kUpper, "SECRET") || strings.Contains(kUpper, "PASSWORD") || strings.Contains(kUpper, "PAT") || strings.Contains(kUpper, "AUTH")) {
-				out = strings.ReplaceAll(out, val, "[REDACTED]")
-			}
-		}
-	}
-
-	// 3. Apply regex pattern sanitization
-	for _, re := range tokenPatterns {
-		out = re.ReplaceAllString(out, "[REDACTED]")
-	}
-
-	return out
+	return sanitizer.SanitizeString(input)
 }
 
 func ordinal(n int) string {

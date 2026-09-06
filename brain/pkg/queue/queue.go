@@ -19,6 +19,7 @@ import (
 	"github.com/azylman/aerial/brain/pkg/metrics"
 	"github.com/azylman/aerial/brain/pkg/notifier"
 	"github.com/azylman/aerial/brain/pkg/runner"
+	"github.com/azylman/aerial/brain/pkg/sanitizer"
 	"github.com/azylman/aerial/brain/pkg/session"
 	"github.com/bwmarrin/discordgo"
 	"golang.org/x/sync/singleflight"
@@ -150,14 +151,13 @@ func ResolveEffectiveChannel(s *discordgo.Session, channelID string) (effectiveI
 	return snap.ID, snap.Name, false
 }
 
-var sensitivePattern = regexp.MustCompile(`(?i)(?:bearer\s+[a-zA-Z0-9_\-\.]+|ghp_[a-zA-Z0-9]+|gho_[a-zA-Z0-9]+|ghu_[a-zA-Z0-9]+|github_pat_[a-zA-Z0-9_]+|x-access-token:[^@\s]+|antigravity_[a-zA-Z0-9_\-]+|gemini_[a-zA-Z0-9_\-]+|aiza[0-9a-za-z-_]{35})`)
 var (
 	aerialExclusionRegex = regexp.MustCompile(`(?i)\baerial\s+(?:view|photo)s?\b`)
 	tier1KeywordRegex    = regexp.MustCompile(`(?i)\b(aerial|gundam)\b`)
 )
 
 func sanitizeErrorText(errStr string) string {
-	return sensitivePattern.ReplaceAllString(errStr, "[REDACTED_TOKEN]")
+	return sanitizer.SanitizeLog(errStr)
 }
 
 type MemoryRetrieverFunc func(ctx context.Context, database *sql.DB, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error)
