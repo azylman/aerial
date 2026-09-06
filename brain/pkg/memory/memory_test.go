@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -499,6 +500,371 @@ func TestExtractActiveConversationFacts(t *testing.T) {
 		t.Fatalf("ExtractActiveConversationFacts failed: %v", err)
 	}
 }
+
+func TestMemory_ClientCreationAndEnv(t *testing.T) {
+	// 1. Explicit baseURL
+	c1 := NewClient("http://custom:11434/")
+	if c1.BaseURL != "http://custom:11434" {
+		t.Errorf("expected trimmed baseURL, got %q", c1.BaseURL)
+	}
+
+	// 2. OLLAMA_URL env
+	t.Setenv("OLLAMA_URL", "http://env-ollama:11434/")
+	c2 := NewClient("")
+	if c2.BaseURL != "http://env-ollama:11434" {
+		t.Errorf("expected env baseURL, got %q", c2.BaseURL)
+	}
+
+	// 3. Fallback default
+	t.Setenv("OLLAMA_URL", "")
+	c3 := NewClient("")
+	if c3.BaseURL != DefaultOllamaURL {
+		t.Errorf("expected DefaultOllamaURL %q, got %q", DefaultOllamaURL, c3.BaseURL)
+	}
+}
+
+func TestMemory_GenerateEmbedding_ErrorsAndRetries(t *testing.T) {
+	client := NewClient("http://127.0.0.1:59999") // closed port
+
+	// 1. Empty text
+	_, err := client.GenerateEmbedding(context.Background(), "", false, 1)
+	if err == nil {
+		t.Error("expected error for empty text")
+	}
+
+	// 2. Negative retries should be clamped
+	_, err = client.GenerateEmbedding(context.Background(), "hello", false, -1)
+	if err == nil {
+		t.Error("expected connection error")
+	}
+
+	// 3. Context cancellation
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = client.GenerateEmbedding(ctx, "hello", false, 1)
+	if err == nil {
+		t.Error("expected context canceled error")
+	}
+
+	// 4. Server error 500
+	server500 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+	}))
+	defer server500.Close()
+
+	c500 := NewClient(server500.URL)
+	_, err = c500.GenerateEmbedding(context.Background(), "hello", false, 0)
+	if err == nil {
+		t.Error("expected error on HTTP 500")
+	}
+
+	// 5. Server returns error in JSON
+	serverErrJson := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(EmbeddingResponse{
+			Error: "model not loaded",
+		})
+	}))
+	defer serverErrJson.Close()
+
+	cErrJson := NewClient(serverErrJson.URL)
+	_, err = cErrJson.GenerateEmbedding(context.Background(), "hello", false, 0)
+	if err == nil || !strings.Contains(err.Error(), "model not loaded") {
+		t.Errorf("expected 'model not loaded' error, got %v", err)
+	}
+
+	// 6. Server returns empty embedding array
+	serverEmptyEmb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(EmbeddingResponse{
+			Embedding: []float32{},
+		})
+	}))
+	defer serverEmptyEmb.Close()
+
+	cEmptyEmb := NewClient(serverEmptyEmb.URL)
+	_, err = cEmptyEmb.GenerateEmbedding(context.Background(), "hello", false, 0)
+	if err == nil || !strings.Contains(err.Error(), "empty embedding returned") {
+		t.Errorf("expected 'empty embedding returned' error, got %v", err)
+	}
+
+	// 7. Server returns non-JSON invalid payload
+	serverBadJson := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("not valid json"))
+	}))
+	defer serverBadJson.Close()
+
+	cBadJson := NewClient(serverBadJson.URL)
+	_, err = cBadJson.GenerateEmbedding(context.Background(), "hello", false, 0)
+	if err == nil {
+		t.Error("expected JSON unmarshal error")
+	}
+
+	// 8. Custom EMBEDDING_MODEL vs OLLAMA_EMBEDDING_MODEL
+	t.Setenv("EMBEDDING_MODEL", "custom-bge-model")
+	t.Setenv("OLLAMA_EMBEDDING_MODEL", "other-model")
+	var receivedModel string
+	serverModel := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req EmbeddingRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		receivedModel = req.Model
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(EmbeddingResponse{
+			Embedding: []float32{1.0, 2.0},
+		})
+	}))
+	defer serverModel.Close()
+
+	cModel := NewClient(serverModel.URL)
+	_, _ = cModel.GenerateEmbedding(context.Background(), "hello", false, 0)
+	if receivedModel != "custom-bge-model" {
+		t.Errorf("expected custom-bge-model, got %q", receivedModel)
+	}
+}
+
+func TestMemory_BackfillMissingEmbeddings_EdgeCases(t *testing.T) {
+	// 1. Nil args
+	if _, err := BackfillMissingEmbeddings(context.Background(), nil, nil); err == nil {
+		t.Error("expected error for nil args")
+	}
+
+	// 2. Closed DB
+	closedDB, err := db.InitDB(filepath.Join(t.TempDir(), "closed.db"))
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	_ = closedDB.Close()
+	c := NewClient("http://127.0.0.1:11434")
+	if _, err := BackfillMissingEmbeddings(context.Background(), closedDB, c); err == nil {
+		t.Error("expected error for closed DB")
+	}
+
+	// 3. 0 missing facts
+	memDB, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer memDB.Close()
+
+	n, err := BackfillMissingEmbeddings(context.Background(), memDB, c)
+	if err != nil || n != 0 {
+		t.Errorf("expected 0 backfilled, got %d, err: %v", n, err)
+	}
+
+	// 4. Backfill with embedding error (should continue without panic)
+	_, _ = db.InsertFact(memDB, "user_pref", "Test fact", 1.0, "th-1", nil)
+	nFail, _ := BackfillMissingEmbeddings(context.Background(), memDB, c)
+	if nFail != 0 {
+		t.Errorf("expected 0 backfilled on ollama failure, got %d", nFail)
+	}
+
+	// 5. Backfill with context cancel during loop
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, _ = BackfillMissingEmbeddings(ctx, memDB, c)
+}
+
+func TestMemory_ExtractActiveConversationFacts_EdgeCases(t *testing.T) {
+	// 1. Nil args
+	if err := ExtractActiveConversationFacts(context.Background(), nil, nil, nil, 12); err == nil {
+		t.Error("expected error for nil args")
+	}
+
+	// 2. Mutex contention / TryLock already locked
+	dummyDB, _ := db.InitDB(":memory:")
+	defer dummyDB.Close()
+	extractionMutex.Lock()
+	err := ExtractActiveConversationFacts(context.Background(), dummyDB, NewClient(""), func(ctx context.Context, p string) (string, error) { return "", nil }, 12)
+	extractionMutex.Unlock()
+	if err != nil {
+		t.Errorf("expected nil error on overlapping execution, got %v", err)
+	}
+
+	// 3. Closed DB
+	closedDB, _ := db.InitDB(filepath.Join(t.TempDir(), "closed_extract.db"))
+	_ = closedDB.Close()
+	if err := ExtractActiveConversationFacts(context.Background(), closedDB, NewClient(""), func(ctx context.Context, p string) (string, error) { return "", nil }, 12); err == nil {
+		t.Error("expected error for closed DB")
+	}
+
+	// 4. 0 active conversations
+	memDB, _ := db.InitDB(":memory:")
+	defer memDB.Close()
+	if err := ExtractActiveConversationFacts(context.Background(), memDB, NewClient(""), func(ctx context.Context, p string) (string, error) { return "", nil }, 12); err != nil {
+		t.Errorf("expected nil for 0 conversations, got %v", err)
+	}
+
+	// 5. Context cancelled in loop
+	now := time.Now().UTC()
+	_ = db.InsertMessage(memDB, db.Message{
+		ID: "m-cancel-1", ThreadID: "th-cancel", Status: db.StatusCompleted, CreatedAt: now, UpdatedAt: now,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_ = ExtractActiveConversationFacts(ctx, memDB, NewClient(""), func(ctx context.Context, p string) (string, error) { return "", nil }, 12)
+}
+
+func TestMemory_ProcessThreadFacts_EdgeCases(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer database.Close()
+
+	client := NewClient("http://127.0.0.1:11434")
+	now := time.Now().UTC()
+	_ = db.InsertMessage(database, db.Message{
+		ID: "m-pf-1", ThreadID: "th-pf-1", Status: db.StatusCompleted, CreatedAt: now, UpdatedAt: now,
+	})
+
+	// 1. Transcript file missing
+	err = processThreadFacts(context.Background(), database, client, func(ctx context.Context, prompt string) (string, error) { return "", nil }, "th-pf-1")
+	if err == nil || !strings.Contains(err.Error(), "transcript unavailable") {
+		t.Errorf("expected transcript unavailable error, got %v", err)
+	}
+
+	// 2. Empty transcript file
+	homeDir, _ := os.UserHomeDir()
+	if homeDir == "" {
+		homeDir = "/root"
+	}
+	logDir := filepath.Join(homeDir, ".gemini", "antigravity", "brain", "th-pf-empty", ".system_generated", "logs")
+	_ = os.MkdirAll(logDir, 0755)
+	_ = os.WriteFile(filepath.Join(logDir, "transcript.jsonl"), []byte("   \n"), 0644)
+	defer func() { _ = os.RemoveAll(filepath.Join(homeDir, ".gemini", "antigravity", "brain", "th-pf-empty")) }()
+
+	_ = db.InsertMessage(database, db.Message{
+		ID: "m-pf-empty", ThreadID: "th-pf-empty", Status: db.StatusCompleted, CreatedAt: now, UpdatedAt: now,
+	})
+	err = processThreadFacts(context.Background(), database, client, func(ctx context.Context, prompt string) (string, error) { return "", nil }, "th-pf-empty")
+	if err != nil {
+		t.Errorf("expected nil error for empty transcript, got %v", err)
+	}
+
+	// 3. Transcript exists, but LLM call fails
+	logDir2 := filepath.Join(homeDir, ".gemini", "antigravity", "brain", "th-pf-llm-fail", ".system_generated", "logs")
+	_ = os.MkdirAll(logDir2, 0755)
+	_ = os.WriteFile(filepath.Join(logDir2, "transcript.jsonl"), []byte("{\"step\":1,\"content\":\"hello\"}\n"), 0644)
+	defer func() { _ = os.RemoveAll(filepath.Join(homeDir, ".gemini", "antigravity", "brain", "th-pf-llm-fail")) }()
+
+	_ = db.InsertMessage(database, db.Message{
+		ID: "m-pf-fail", ThreadID: "th-pf-llm-fail", Status: db.StatusCompleted, CreatedAt: now, UpdatedAt: now,
+	})
+	err = processThreadFacts(context.Background(), database, client, func(ctx context.Context, prompt string) (string, error) {
+		return "", fmt.Errorf("llm rate limited")
+	}, "th-pf-llm-fail")
+	if err == nil || !strings.Contains(err.Error(), "LLM fact extraction call failed") {
+		t.Errorf("expected LLM failure error, got %v", err)
+	}
+
+	// 4. Transcript exists, LLM returns invalid JSON
+	err = processThreadFacts(context.Background(), database, client, func(ctx context.Context, prompt string) (string, error) {
+		return "invalid json output", nil
+	}, "th-pf-llm-fail")
+	if err == nil || !strings.Contains(err.Error(), "failed to parse extracted facts JSON") {
+		t.Errorf("expected JSON parse error, got %v", err)
+	}
+
+	// 5. Transcript exists, LLM returns facts with empty text and embedding failure
+	err = processThreadFacts(context.Background(), database, client, func(ctx context.Context, prompt string) (string, error) {
+		return `{"facts":[{"category":"user_pref","fact_text":"","importance_score":1.0},{"category":"user_pref","fact_text":"Valid fact","importance_score":1.0}]}`, nil
+	}, "th-pf-llm-fail")
+	if err != nil {
+		t.Errorf("expected nil error when embedding fails (logged warning), got %v", err)
+	}
+}
+
+func TestMemory_LoadThreadTranscript_LongFileAndSessionLookup(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer database.Close()
+
+	homeDir, _ := os.UserHomeDir()
+	if homeDir == "" {
+		homeDir = "/root"
+	}
+
+	sessID := "sess-custom-guid-12345"
+	threadID := "thread-mapped-999"
+	_ = db.SaveSessionID(database, threadID, sessID)
+
+	// Create long transcript > 20000 bytes in sessID directory under transcript_full.jsonl
+	logDir := filepath.Join(homeDir, ".gemini", "antigravity", "brain", sessID, ".system_generated", "logs")
+	_ = os.MkdirAll(logDir, 0755)
+	longContent := strings.Repeat("{\"step\":1,\"content\":\"long conversation message snippet\"}\n", 500)
+	_ = os.WriteFile(filepath.Join(logDir, "transcript_full.jsonl"), []byte(longContent), 0644)
+	defer func() { _ = os.RemoveAll(filepath.Join(homeDir, ".gemini", "antigravity", "brain", sessID)) }()
+
+	text, err := loadThreadTranscript(database, threadID)
+	if err != nil {
+		t.Fatalf("loadThreadTranscript failed: %v", err)
+	}
+	if len(text) == 0 || len(text) > 20000 {
+		t.Errorf("expected truncated transcript <= 20000 bytes, got %d", len(text))
+	}
+}
+
+func TestMemory_Search_EdgeCases(t *testing.T) {
+	// 1. sanitizeQueryText long text > 1000
+	longQuery := strings.Repeat("word ", 300)
+	sanitized := sanitizeQueryText(longQuery)
+	if len(sanitized) > 1000 {
+		t.Errorf("expected length <= 1000, got %d", len(sanitized))
+	}
+
+	// 2. DotProduct edge cases
+	if DotProduct(nil, []float32{1.0}) != 0 {
+		t.Error("expected 0 for nil slice")
+	}
+	if DotProduct([]float32{1.0}, []float32{1.0, 2.0}) != 0 {
+		t.Error("expected 0 for mismatched lengths")
+	}
+
+	// 3. RankFacts edge cases
+	if RankFacts(nil, nil, 0, 0) != nil {
+		t.Error("expected nil for empty inputs")
+	}
+	facts := []db.FactWithEmbedding{
+		{
+			Fact:      db.Fact{ID: 1, Category: "user_pref", FactText: "Fact 1", Importance: 1.0},
+			Embedding: []float32{1.0}, // mismatched len with queryVec len 2
+		},
+	}
+	ranked := RankFacts([]float32{1.0, 0.0}, facts, -1, -1)
+	if len(ranked) != 0 {
+		t.Errorf("expected 0 ranked facts due to dimension mismatch, got %d", len(ranked))
+	}
+
+	// 4. RetrieveRelevantFacts nil args and long text
+	res, err := RetrieveRelevantFacts(context.Background(), nil, nil, "", 5)
+	if res != nil || err != nil {
+		t.Error("expected nil, nil for nil args")
+	}
+
+	// 5. RetrieveRelevantFacts with Ollama failure (graceful fallback)
+	memDB, _ := db.InitDB(":memory:")
+	defer memDB.Close()
+	cFail := NewClient("http://127.0.0.1:59999")
+	resFail, errFail := RetrieveRelevantFacts(context.Background(), memDB, cFail, "What is my name?", 5)
+	if resFail != nil || errFail != nil {
+		t.Errorf("expected nil, nil on vector embedding failure, got %v, %v", resFail, errFail)
+	}
+
+	// 6. FormatMemoryContext with empty category defaulting to 'general'
+	fmtOut := FormatMemoryContext([]db.Fact{
+		{Category: "", FactText: "Fact with no category"},
+	})
+	if !strings.Contains(fmtOut, "- [general] Fact with no category") {
+		t.Errorf("expected '[general]', got %q", fmtOut)
+	}
+	if FormatMemoryContext(nil) != "" {
+		t.Error("expected empty string for nil facts")
+	}
+}
+
 
 
 

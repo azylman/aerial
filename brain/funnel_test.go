@@ -942,11 +942,14 @@ channels:
 }
 
 func TestConnectDiscordFunnel_Registration(t *testing.T) {
-	t.Setenv("DISCORD_TOKEN", "mock-gateway-token")
-	s := connectDiscordFunnel(nil, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	s := connectDiscordFunnel(ctx, nil, nil, "mock-gateway-token")
 	if s == nil {
 		t.Fatal("Expected connectDiscordFunnel to return non-nil session")
 	}
+	defer func() { _ = s.Close() }()
 
 	chanID := "100200300400500803"
 	queue.InvalidateChannelCache(chanID)

@@ -126,5 +126,57 @@ func TestEnsureSkills_PriorityOrder(t *testing.T) {
 	}
 }
 
+func TestEnsureSkills_CloneAttempt(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	// Do NOT create .git so clone path is triggered
+	_ = EnsureSkills()
+}
+
+func TestSweepOrphanedSymlinks_ValidSymlink(t *testing.T) {
+	tmpDir := t.TempDir()
+	targetDir := filepath.Join(tmpDir, "target_dir")
+	linkDir := filepath.Join(tmpDir, "link_dir")
+	_ = os.MkdirAll(targetDir, 0755)
+	_ = os.MkdirAll(linkDir, 0755)
+
+	// Create valid real file and symlink to it
+	realFile := filepath.Join(targetDir, "real.txt")
+	_ = os.WriteFile(realFile, []byte("real content"), 0644)
+	validLink := filepath.Join(linkDir, "valid_link")
+	_ = os.Symlink(realFile, validLink)
+
+	// Also add a non-symlink regular file in linkDir
+	_ = os.WriteFile(filepath.Join(linkDir, "regular.txt"), []byte("reg"), 0644)
+
+	sweepOrphanedSymlinks([]string{linkDir})
+
+	// Valid link should still exist
+	if _, err := os.Lstat(validLink); err != nil {
+		t.Errorf("Valid symlink was incorrectly removed: %v", err)
+	}
+}
+
+func TestLinkSkills_EdgeCases(t *testing.T) {
+	tmpDir := t.TempDir()
+	targetDir := filepath.Join(tmpDir, "target")
+	srcDir := filepath.Join(tmpDir, "src")
+	_ = os.MkdirAll(targetDir, 0755)
+	_ = os.MkdirAll(srcDir, 0755)
+
+	// 1. Directory with non-directory entry (file)
+	_ = os.WriteFile(filepath.Join(srcDir, "not_a_dir.txt"), []byte("file"), 0644)
+
+	// 2. Directory without SKILL.md
+	_ = os.MkdirAll(filepath.Join(srcDir, "no_skill_md"), 0755)
+
+	// 3. Non-existent source directory in list
+	count := LinkSkills([]string{targetDir}, []string{srcDir, filepath.Join(tmpDir, "non_existent_src")})
+	if count != 0 {
+		t.Errorf("expected 0 linked skills, got %d", count)
+	}
+}
+
 
 
