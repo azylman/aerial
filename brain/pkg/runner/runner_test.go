@@ -268,6 +268,26 @@ func TestClassifyError(t *testing.T) {
 			wantCorrupt:          false,
 			errDetailMustContain: "panic:",
 		},
+		{
+			name:                 "MCP SSE Handshake Drop Does Not Corrupt Session (Exit Code 0 with Error)",
+			exitCode:             0,
+			stdout:               `{"conversation_id":"abc","status":"ERROR","error":"server name github failed to load: calling \"initialize\": sending \"initialize\": failed to connect (session ID: ): session not found"}`,
+			stderr:               "",
+			wantFailure:          true,
+			wantTransient:        false,
+			wantCorrupt:          false,
+			errDetailMustContain: "session not found",
+		},
+		{
+			name:                 "MCP SSE Handshake Drop in Non-Zero Exit Does Not Corrupt Session",
+			exitCode:             1,
+			stdout:               "",
+			stderr:               "server name docker failed to load: calling \"initialize\": sending \"initialize\": failed to connect (session ID: ): session not found",
+			wantFailure:          true,
+			wantTransient:        false,
+			wantCorrupt:          false,
+			errDetailMustContain: "session not found",
+		},
 	}
 
 	for _, tt := range tests {

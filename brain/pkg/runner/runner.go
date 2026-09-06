@@ -186,6 +186,32 @@ func ClassifyError(exitCode int, stdout, stderr string) (isFailure bool, isTrans
 		"prompt is too long",
 	}
 
+	isMCPSessionError := func(s string) bool {
+		lower := strings.ToLower(s)
+		return strings.Contains(lower, "failed to connect (session id") ||
+			strings.Contains(lower, "calling \"initialize\"") ||
+			strings.Contains(lower, "server name") ||
+			strings.Contains(lower, "mcp server")
+	}
+
+	checkCorruption := func(s string) bool {
+		lower := strings.ToLower(s)
+		for _, kw := range contextWindowKeywords {
+			if strings.Contains(lower, kw) {
+				return true
+			}
+		}
+		if isMCPSessionError(lower) {
+			return false
+		}
+		for _, kw := range corruptionKeywords {
+			if strings.Contains(lower, kw) {
+				return true
+			}
+		}
+		return false
+	}
+
 	if exitCode == 0 {
 		if trimmedStdout == "" {
 			errDetail := extractErrorDetail(trimmedStderr, exitCode)
@@ -203,10 +229,8 @@ func ClassifyError(exitCode int, stdout, stderr string) (isFailure bool, isTrans
 					return true, false, true, "context window exceeded"
 				}
 			}
-			for _, kw := range corruptionKeywords {
-				if strings.Contains(combined, kw) {
-					return true, false, true, extractErrorDetail(trimmedStderr, exitCode)
-				}
+			if checkCorruption(combined) {
+				return true, false, true, extractErrorDetail(trimmedStderr, exitCode)
 			}
 			for _, kw := range transientKeywords {
 				if strings.Contains(combined, kw) {
@@ -223,19 +247,8 @@ func ClassifyError(exitCode int, stdout, stderr string) (isFailure bool, isTrans
 		if resp.Status != "" && strings.ToUpper(resp.Status) != "SUCCESS" {
 			isFailure = true
 			errTarget := strings.ToLower(resp.Error + " " + resp.Response + " " + trimmedStderr)
-			for _, kw := range contextWindowKeywords {
-				if strings.Contains(errTarget, kw) {
-					isSessionCorruption = true
-					break
-				}
-			}
-			if !isSessionCorruption {
-				for _, kw := range corruptionKeywords {
-					if strings.Contains(errTarget, kw) {
-						isSessionCorruption = true
-						break
-					}
-				}
+			if checkCorruption(errTarget) {
+				isSessionCorruption = true
 			}
 			for _, kw := range transientKeywords {
 				if strings.Contains(errTarget, kw) {
@@ -253,19 +266,8 @@ func ClassifyError(exitCode int, stdout, stderr string) (isFailure bool, isTrans
 		if resp.Error != "" {
 			isFailure = true
 			errTarget := strings.ToLower(resp.Error + " " + trimmedStderr)
-			for _, kw := range contextWindowKeywords {
-				if strings.Contains(errTarget, kw) {
-					isSessionCorruption = true
-					break
-				}
-			}
-			if !isSessionCorruption {
-				for _, kw := range corruptionKeywords {
-					if strings.Contains(errTarget, kw) {
-						isSessionCorruption = true
-						break
-					}
-				}
+			if checkCorruption(errTarget) {
+				isSessionCorruption = true
 			}
 			for _, kw := range transientKeywords {
 				if strings.Contains(errTarget, kw) {
@@ -287,23 +289,8 @@ func ClassifyError(exitCode int, stdout, stderr string) (isFailure bool, isTrans
 	isFailure = true
 	combined := strings.ToLower(stdout + "\n" + stderr)
 
-	for _, kw := range contextWindowKeywords {
-		if strings.Contains(combined, kw) {
-			isSessionCorruption = true
-			break
-		}
-	}
-
-	if !isSessionCorruption {
-		for _, kw := range corruptionKeywords {
-			if strings.Contains(combined, kw) {
-				isSessionCorruption = true
-				break
-			}
-		}
-		if strings.Contains(combined, "conversation not found") {
-			isSessionCorruption = true
-		}
+	if checkCorruption(combined) || (!isMCPSessionError(combined) && strings.Contains(combined, "conversation not found")) {
+		isSessionCorruption = true
 	}
 
 	for _, kw := range transientKeywords {
