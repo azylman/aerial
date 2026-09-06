@@ -292,16 +292,19 @@ type SchedulesAPIResponse struct {
 
 // ScheduleRun represents a logged schedule execution run
 type ScheduleRun struct {
-	ID           int64     `json:"id"`
-	ScheduleID   string    `json:"schedule_id"`
-	ScheduleType string    `json:"schedule_type"`
-	Prompt       string    `json:"prompt"`
-	Title        string    `json:"title,omitempty"`
-	TriggeredAt  time.Time `json:"triggered_at"`
-	Status       string    `json:"status"`
-	Error        string    `json:"error,omitempty"`
-	ThreadID     string    `json:"thread_id,omitempty"`
-	MessageID    string    `json:"message_id,omitempty"`
+	ID           string     `json:"id"`
+	ScheduleID   string     `json:"schedule_id"`
+	ScheduleType string     `json:"schedule_type"`
+	MessageID    string     `json:"message_id,omitempty"`
+	TargetID     string     `json:"target_id,omitempty"`
+	ThreadID     string     `json:"thread_id,omitempty"`
+	Title        string     `json:"title,omitempty"`
+	Prompt       string     `json:"prompt"`
+	Status       string     `json:"status"`
+	StartedAt    time.Time  `json:"started_at"`
+	CompletedAt  *time.Time `json:"completed_at,omitempty"`
+	DurationMs   int64      `json:"duration_ms"`
+	Error        string     `json:"error,omitempty"`
 }
 
 // ScheduleRunsAPIResponse represents paginated execution run logs
@@ -1275,7 +1278,6 @@ func DefaultQuickLaunchLinks() []QuickLaunchLink {
 		{Name: "💬 LLM SESSIONS", URL: "/conversations/", Target: "_blank", IsCore: true},
 		{Name: "📚 DOCS", URL: "/docs/", Target: "_blank", IsCore: true},
 		{Name: "📊 OBSERVABILITY", URL: "/grafana/", Target: "_blank", IsCore: true},
-		{Name: "🧪 UI TESTING", URL: "/ui-testing/", Target: "_self", IsCore: true},
 	}
 }
 

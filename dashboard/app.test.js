@@ -300,7 +300,7 @@ describe('Permet HUD Pure Logic Unit Tests', () => {
             const links = [
                 { name: 'DOCS', url: '/docs/', icon: '📚', target: '_blank', is_core: true },
                 { name: 'HOME', url: 'https://home.zylman.com', icon: '🏠', target: '_blank', is_custom: true, description: 'Home Hub' },
-                { name: 'TEST', url: '/ui-testing/', target: '_self' }
+                { name: 'OBSERVABILITY', url: '/grafana/', target: '_self' }
             ];
 
             renderQuickLaunchDock(links);
