@@ -905,4 +905,194 @@ func TestFactEmbeddingAndThreadLookup(t *testing.T) {
 	}
 }
 
+func TestGetDBPath_Precedence(t *testing.T) {
+	// 1. TEST_DATABASE_URL highest precedence
+	t.Setenv("TEST_DATABASE_URL", "postgres://test:test@127.0.0.1:5432/test_db")
+	t.Setenv("DATABASE_URL", "postgres://prod:prod@prod:5432/prod_db")
+	if p := GetDBPath(); p != "postgres://test:test@127.0.0.1:5432/test_db" {
+		t.Errorf("expected TEST_DATABASE_URL precedence, got %q", p)
+	}
+
+	// 2. DATABASE_URL fallback
+	t.Setenv("TEST_DATABASE_URL", "")
+	if p := GetDBPath(); p != "postgres://prod:prod@prod:5432/prod_db" {
+		t.Errorf("expected DATABASE_URL fallback, got %q", p)
+	}
+
+	// 3. Custom POSTGRES environment variables
+	t.Setenv("DATABASE_URL", "")
+	t.Setenv("POSTGRES_USER", "custom_user")
+	t.Setenv("POSTGRES_PASSWORD", "custom_pass")
+	t.Setenv("POSTGRES_HOST", "custom_host")
+	t.Setenv("POSTGRES_PORT", "5433")
+	t.Setenv("POSTGRES_DB", "custom_db")
+	expected := "postgres://custom_user:custom_pass@custom_host:5433/custom_db?sslmode=disable"
+	if p := GetDBPath(); p != expected {
+		t.Errorf("expected %q, got %q", expected, p)
+	}
+
+	// 4. Default fallbacks
+	t.Setenv("POSTGRES_USER", "")
+	t.Setenv("POSTGRES_PASSWORD", "")
+	t.Setenv("POSTGRES_HOST", "")
+	t.Setenv("POSTGRES_PORT", "")
+	t.Setenv("POSTGRES_DB", "")
+	defaultExpected := "postgres://aerial:aerial_secure_pass@postgres:5432/aerial?sslmode=disable"
+	if p := GetDBPath(); p != defaultExpected {
+		t.Errorf("expected %q, got %q", defaultExpected, p)
+	}
+}
+
+func TestCleanTaskSummary(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "empty input",
+			input:    "",
+			expected: "Agent Task",
+		},
+		{
+			name:     "whitespace only",
+			input:    "   \n\t  ",
+			expected: "Agent Task",
+		},
+		{
+			name:     "user request tag with content prefix",
+			input:    "<USER_REQUEST>\n- id: 123\n- content: Deploy new feature\n</USER_REQUEST>",
+			expected: "Deploy new feature",
+		},
+		{
+			name:     "user request tag with multiline prompt",
+			input:    "<USER_REQUEST>\nPrompt:\nGenerate quarterly report\n</USER_REQUEST>",
+			expected: "Generate quarterly report",
+		},
+		{
+			name:     "markdown formatting and mentions stripped",
+			input:    "**Hello** <@123456789> `code block`",
+			expected: "Hello code block",
+		},
+		{
+			name:     "long text truncated to 140 chars",
+			input:    "This is an extraordinarily long prompt designed specifically to verify that the CleanTaskSummary helper properly cuts off strings exceeding one hundred and forty runes with an ellipsis suffix accurately.",
+			expected: "This is an extraordinarily long prompt designed specifically to verify that the CleanTaskSummary helper properly cuts off strings exceedi...",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := CleanTaskSummary(tt.input)
+			if got != tt.expected {
+				t.Errorf("CleanTaskSummary() = %q, want %q", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestInferTriggerType(t *testing.T) {
+	if tt := InferTriggerType("http-client", ""); tt != "http" {
+		t.Errorf("expected 'http', got %q", tt)
+	}
+	if tt := InferTriggerType("user-1", "cron-run-123"); tt != "cron" {
+		t.Errorf("expected 'cron', got %q", tt)
+	}
+	if tt := InferTriggerType("user-1", "reminder-run-456"); tt != "reminder" {
+		t.Errorf("expected 'reminder', got %q", tt)
+	}
+	if tt := InferTriggerType("user-1", ""); tt != "discord" {
+		t.Errorf("expected 'discord', got %q", tt)
+	}
+}
+
+func TestSQLiteExplicitSchemaAndMigrations(t *testing.T) {
+	sqlitePath := filepath.Join(t.TempDir(), "aerial_sqlite_explicit.db")
+	database, err := InitDB(sqlitePath)
+	if err != nil {
+		t.Fatalf("InitDB failed for SQLite: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	// Test SQLite message insert and query
+	msg := Message{
+		ID:         "msg-sqlite-1",
+		ThreadID:   "th-sqlite-1",
+		GuildID:    "g-sqlite-1",
+		AuthorID:   "author-1",
+		AuthorName: "Alice",
+		Content:    "Hello SQLite",
+		Status:     StatusPending,
+	}
+	if err := InsertMessage(database, msg); err != nil {
+		t.Fatalf("InsertMessage failed on SQLite: %v", err)
+	}
+
+	m, err := GetMessage(database, "msg-sqlite-1")
+	if err != nil || m == nil {
+		t.Fatalf("GetMessage failed on SQLite: %v", err)
+	}
+
+	// Test SQLite facts insert and vector search
+	vec := make([]float32, ExpectedEmbeddingDim)
+	vec[0] = 1.0
+	factID, err := InsertFact(database, "pref", "User likes tea", 0.9, "th-sqlite-1", vec)
+	if err != nil {
+		t.Fatalf("InsertFact on SQLite failed: %v", err)
+	}
+	if factID <= 0 {
+		t.Errorf("expected positive factID, got %d", factID)
+	}
+
+	simFacts, err := SearchSimilarFacts(database, vec, 5, 0.5, "th-sqlite-1")
+	if err != nil {
+		t.Fatalf("SearchSimilarFacts on SQLite failed: %v", err)
+	}
+	if len(simFacts) == 0 {
+		t.Errorf("expected similar facts returned on SQLite")
+	}
+
+	// Test SQLite active tasks query
+	tasks, err := GetActiveTasks(database)
+	if err != nil {
+		t.Fatalf("GetActiveTasks on SQLite failed: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Errorf("expected 1 active task, got %d", len(tasks))
+	}
+}
+
+func TestVectorHelpersEdgeCases(t *testing.T) {
+	// 1. Float32ToBytes and BytesToFloat32 empty
+	b := Float32ToBytes(nil)
+	if len(b) != 0 {
+		t.Errorf("expected empty bytes for nil slice")
+	}
+	f := BytesToFloat32(nil)
+	if len(f) != 0 {
+		t.Errorf("expected empty float slice for nil bytes")
+	}
+
+	// 2. BytesToFloat32 invalid length
+	invalidBytes := []byte{1, 2, 3}
+	fInv := BytesToFloat32(invalidBytes)
+	if len(fInv) != 0 {
+		t.Errorf("expected empty slice for misaligned byte slice")
+	}
+
+	// 3. cosineSimilarity zero vectors
+	sim := cosineSimilarity(nil, nil)
+	if sim != 0.0 {
+		t.Errorf("expected 0.0 for nil vectors, got %f", sim)
+	}
+	vZero := make([]float32, 10)
+	vOne := make([]float32, 10)
+	vOne[0] = 1.0
+	sim = cosineSimilarity(vZero, vOne)
+	if sim != 0.0 {
+		t.Errorf("expected 0.0 when one vector is zero, got %f", sim)
+	}
+}
+
+
 
