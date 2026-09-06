@@ -84,6 +84,12 @@ services:
         condition: service_healthy
       scheduler-mcp:
         condition: service_healthy
+      docker-mcp:
+        condition: service_started
+      github-mcp:
+        condition: service_started
+      discord-mcp:
+        condition: service_started
 
   # ----------------------------------------------------------------------------
   # 1b. GitSync Sidecar: Aerial GitSync
@@ -218,7 +224,8 @@ services:
       interval: 15s
       timeout: 5s
       retries: 3
-      start_period: 30s
+      start_period: 10s
+      start_interval: 2s
 
   # ----------------------------------------------------------------------------
   # 6. Outbound MCP: Docker Host MCP Server
@@ -242,11 +249,12 @@ services:
     networks:
       - aerial-net
     healthcheck:
-      test: ["CMD-SHELL", "nc -z 127.0.0.1 4002 || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS -I http://127.0.0.1:4002/sse || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 3
-      start_period: 30s
+      start_period: 10s
+      start_interval: 2s
 
   # ----------------------------------------------------------------------------
   # 7. Outbound MCP: GitHub MCP Server
@@ -269,11 +277,12 @@ services:
     networks:
       - aerial-net
     healthcheck:
-      test: ["CMD-SHELL", "nc -z 127.0.0.1 4003 || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS -I http://127.0.0.1:4003/sse || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 3
-      start_period: 30s
+      start_period: 10s
+      start_interval: 2s
 
   # ----------------------------------------------------------------------------
   # 8. Local LLM / Embeddings: Ollama Service
