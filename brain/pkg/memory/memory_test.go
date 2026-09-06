@@ -196,32 +196,33 @@ func setupTestDB(t *testing.T) *sql.DB {
 
 	// Quick connectivity probe (200ms) to avoid multi-minute retry delays in offline test runners
 	quickDB, openErr := sql.Open("pgx", dsn)
-	if openErr != nil {
-		t.Skipf("Skipping memory db integration test: database driver error: %v", openErr)
-		return nil
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	pingErr := quickDB.PingContext(ctx)
-	cancel()
-	_ = quickDB.Close()
-	if pingErr != nil {
-		t.Skipf("Skipping memory db integration test: PostgreSQL not reachable at %s: %v", dsn, pingErr)
-		return nil
+	if openErr == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		pingErr := quickDB.PingContext(ctx)
+		cancel()
+		_ = quickDB.Close()
+		if pingErr == nil {
+			database, err := db.InitDB(dsn)
+			if err == nil {
+				_, err = database.Exec(`
+					TRUNCATE TABLE messages, sessions, one_shot_schedules, cron_schedules, schedule_runs, facts RESTART IDENTITY CASCADE;
+					SELECT setval(pg_get_serial_sequence('facts', 'id'), 1, false);
+					SELECT setval(pg_get_serial_sequence('messages', 'row_id'), 1, false);
+				`)
+				if err == nil {
+					return database
+				}
+				_ = database.Close()
+			}
+		}
 	}
 
-	database, err := db.InitDB(dsn)
+	// Hermetic SQLite fallback
+	sqlitePath := filepath.Join(t.TempDir(), "aerial_test_mem.db")
+	database, err := db.InitDB(sqlitePath)
 	if err != nil {
-		t.Skipf("Skipping memory db integration test: PostgreSQL not reachable at %s: %v", dsn, err)
+		t.Fatalf("Failed to initialize hermetic SQLite test DB: %v", err)
 		return nil
-	}
-
-	_, err = database.Exec(`
-		TRUNCATE TABLE messages, sessions, one_shot_schedules, cron_schedules, schedule_runs, facts RESTART IDENTITY CASCADE;
-		SELECT setval(pg_get_serial_sequence('facts', 'id'), 1, false);
-		SELECT setval(pg_get_serial_sequence('messages', 'row_id'), 1, false);
-	`)
-	if err != nil {
-		t.Fatalf("Failed to truncate test tables: %v", err)
 	}
 	return database
 }
@@ -455,6 +456,50 @@ func TestRetrieveRelevantFacts(t *testing.T) {
 		t.Errorf("expected 'Server port is 8080', got %q", facts[0].FactText)
 	}
 }
+
+func TestExtractActiveConversationFacts(t *testing.T) {
+	database := setupTestDB(t)
+	if database == nil {
+		return
+	}
+	defer func() { _ = database.Close() }()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(EmbeddingResponse{
+			Embedding: makeDimVector(1.0, 0.0),
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL)
+
+	llmFunc := func(ctx context.Context, prompt string) (string, error) {
+		return `{"facts":[{"category":"user_preference","fact_text":"User prefers vim keybindings","importance_score":0.9}]}`, nil
+	}
+
+	now := time.Now().UTC()
+	_ = db.InsertMessage(database, db.Message{
+		ID: "m-extract-1", ThreadID: "thread-active-1", Status: db.StatusCompleted, CreatedAt: now, UpdatedAt: now,
+	})
+
+	// Create dummy transcript
+	homeDir, _ := os.UserHomeDir()
+	if homeDir == "" {
+		homeDir = "/root"
+	}
+	logDir := filepath.Join(homeDir, ".gemini", "antigravity", "brain", "thread-active-1", ".system_generated", "logs")
+	_ = os.MkdirAll(logDir, 0755)
+	_ = os.WriteFile(filepath.Join(logDir, "transcript.jsonl"), []byte("{\"step\":1,\"content\":\"I love vim keybindings\"}\n"), 0644)
+	defer func() { _ = os.RemoveAll(filepath.Join(homeDir, ".gemini", "antigravity", "brain", "thread-active-1")) }()
+
+	ctx := context.Background()
+	err := ExtractActiveConversationFacts(ctx, database, client, llmFunc, 12)
+	if err != nil {
+		t.Fatalf("ExtractActiveConversationFacts failed: %v", err)
+	}
+}
+
 
 
 

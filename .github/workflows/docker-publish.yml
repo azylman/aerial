@@ -24,6 +24,7 @@ jobs:
       docs: ${{ steps.filter.outputs.docs }}
       proxy: ${{ steps.filter.outputs.proxy }}
       ollama: ${{ steps.filter.outputs.ollama }}
+      gitsync: ${{ steps.filter.outputs.gitsync }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -66,6 +67,10 @@ jobs:
               - '.github/workflows/**'
             ollama:
               - 'docker/ollama/**'
+              - 'docker-compose.yml'
+              - '.github/workflows/**'
+            gitsync:
+              - 'sidecars/gitsync/**'
               - 'docker-compose.yml'
               - '.github/workflows/**'
 
@@ -133,6 +138,16 @@ jobs:
           go test -v ./...
           node --test *.test.js
 
+      - name: Test Sidecars GitSync
+        if: needs.changes.outputs.gitsync == 'true'
+        run: |
+          cd sidecars/gitsync
+          go test -v ./...
+
+      - name: Verify Monorepo Test Coverage & Gating
+        run: |
+          sh scripts/check-coverage.sh --check --summary
+
   lint:
     name: Lint Microservices & Frontend
     needs: changes
@@ -177,6 +192,12 @@ jobs:
         if: needs.changes.outputs.dashboard == 'true'
         run: |
           cd dashboard
+          go vet ./...
+
+      - name: Lint Sidecars GitSync
+        if: needs.changes.outputs.gitsync == 'true'
+        run: |
+          cd sidecars/gitsync
           go vet ./...
 
       - name: Lint Permet HUD Frontend Syntax
@@ -233,6 +254,10 @@ jobs:
             context: ./docker/ollama
             file: ./docker/ollama/Dockerfile
             image_name: aerial-ollama
+          - service: gitsync
+            context: .
+            file: ./sidecars/gitsync/Dockerfile
+            image_name: aerial-gitsync
 
     steps:
       - name: Checkout Repository

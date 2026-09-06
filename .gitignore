@@ -5,3 +5,5 @@
 *.tmp.*
 *.swp
 .DS_Store
+coverage.out
+*.out

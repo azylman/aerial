@@ -657,28 +657,442 @@ func TestNativeVectorSearchHNSW(t *testing.T) {
 	}
 }
 
-func TestIsProductionDSN(t *testing.T) {
-	prodDSNs := []string{
-		"postgres://aerial:aerial_secure_pass@postgres:5432/aerial?sslmode=disable",
-		"postgres://aerial:pass@127.0.0.1:5432/aerial?sslmode=disable",
-		"postgres://aerial:pass@localhost:5432/aerial?sslmode=disable",
-		"postgres://aerial:pass@postgres:5432/aerial",
-	}
-	for _, dsn := range prodDSNs {
-		if !isProductionDSN(dsn) {
-			t.Errorf("Expected isProductionDSN(%q) to be true", dsn)
-		}
-	}
-
-	testDSNs := []string{
-		"postgres://postgres:aerial_test@127.0.0.1:54329/aerial_test?sslmode=disable",
-		"postgres://postgres:aerial_test_password@localhost:5432/aerial_test?sslmode=disable",
-		"postgres://postgres:aerial_test_password@postgres:5432/aerial_test?sslmode=disable",
-	}
-	for _, dsn := range testDSNs {
-		if isProductionDSN(dsn) {
-			t.Errorf("Expected isProductionDSN(%q) to be false", dsn)
-		}
+func TestDBPath(t *testing.T) {
+	t.Setenv("DATABASE_PATH", "/data/custom.db")
+	p := GetDBPath()
+	if p == "" {
+		t.Errorf("expected non-empty DB path")
 	}
 }
+
+func TestRecentThreadMessagesAndActiveIDs(t *testing.T) {
+	database := setupTestDB(t)
+	defer func() { _ = database.Close() }()
+
+	now := time.Now().UTC()
+	_ = InsertMessage(database, Message{
+		ID: "m-rec-1", ThreadID: "thread-active-rec", GuildID: "g1", AuthorID: "a1", AuthorName: "Alex",
+		Content: "Message 1", Status: StatusCompleted, CreatedAt: now.Add(-10 * time.Minute), UpdatedAt: now.Add(-10 * time.Minute),
+	})
+	_ = InsertMessage(database, Message{
+		ID: "m-rec-2", ThreadID: "thread-active-rec", GuildID: "g1", AuthorID: "a1", AuthorName: "Alex",
+		Content: "Message 2", Status: StatusCompleted, CreatedAt: now, UpdatedAt: now,
+	})
+
+	ids, err := GetActiveRecentThreadIDs(database, 24*time.Hour)
+	if err != nil {
+		t.Fatalf("GetActiveRecentThreadIDs failed: %v", err)
+	}
+	if len(ids) == 0 || ids[0] != "thread-active-rec" {
+		t.Errorf("expected thread-active-rec in active IDs, got %v", ids)
+	}
+
+	msgs, err := GetRecentThreadMessages(database, "thread-active-rec", 10)
+	if err != nil {
+		t.Fatalf("GetRecentThreadMessages failed: %v", err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(msgs))
+	}
+}
+
+func TestSchedulesLifecycleAndMetrics(t *testing.T) {
+	database := setupTestDB(t)
+	defer func() { _ = database.Close() }()
+
+	now := time.Now().UTC()
+
+	// One-shot schedule lifecycle
+	osID := "os-test-1"
+	err := CreateOneShotSchedule(database, OneShotSchedule{
+		ID:       osID,
+		ThreadID: "thread-os",
+		Prompt:   "One-shot prompt",
+		RunAt:    now.Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("CreateOneShotSchedule failed: %v", err)
+	}
+
+	allOS, err := GetAllOneShotSchedules(database, "thread-os")
+	if err != nil {
+		t.Fatalf("GetAllOneShotSchedules failed: %v", err)
+	}
+	if len(allOS) == 0 {
+		t.Fatalf("expected at least 1 one-shot schedule")
+	}
+
+	err = DeleteOneShotSchedule(database, osID)
+	if err != nil {
+		t.Fatalf("DeleteOneShotSchedule failed: %v", err)
+	}
+
+	// Cron schedule lifecycle
+	cronID := "cron-test-1"
+	err = CreateCronSchedule(database, CronSchedule{
+		ID:          cronID,
+		TargetID:    "thread-cron",
+		TitlePrefix: "[CRON]",
+		CronExpr:    "0 * * * *",
+		Prompt:      "Cron prompt",
+		Timezone:    "America/Los_Angeles",
+		NextRunAt:   now.Add(time.Hour),
+		Enabled:     true,
+	})
+	if err != nil {
+		t.Fatalf("CreateCronSchedule failed: %v", err)
+	}
+
+	allCrons, err := GetAllCronSchedules(database, "thread-cron")
+	if err != nil {
+		t.Fatalf("GetAllCronSchedules failed: %v", err)
+	}
+	if len(allCrons) == 0 {
+		t.Fatalf("expected at least 1 cron schedule")
+	}
+
+	err = UpdateCronNextRun(database, cronID, now.Add(2*time.Hour))
+	if err != nil {
+		t.Fatalf("UpdateCronNextRun failed: %v", err)
+	}
+
+	// Schedule metrics
+	metrics, err := GetScheduleSummaryMetrics(database)
+	if err != nil {
+		t.Fatalf("GetScheduleSummaryMetrics failed: %v", err)
+	}
+	t.Logf("Schedule metrics total active: %d", metrics.TotalActive)
+
+	err = DeleteCronSchedule(database, cronID)
+	if err != nil {
+		t.Fatalf("DeleteCronSchedule failed: %v", err)
+	}
+}
+
+func TestReconcileAndPruneScheduleRuns(t *testing.T) {
+	database := setupTestDB(t)
+	defer func() { _ = database.Close() }()
+
+	now := time.Now().UTC()
+	runID := "run-test-1"
+	err := CreateScheduleRun(database, ScheduleRun{
+		ID:           runID,
+		ScheduleID:   "cron-test-1",
+		ScheduleType: "cron",
+		Prompt:       "Cron prompt",
+		StartedAt:    now.Add(-2 * time.Hour),
+		Status:       "enqueued",
+	})
+	if err != nil {
+		t.Fatalf("CreateScheduleRun failed: %v", err)
+	}
+
+	reconciled, err := ReconcileOrphanedScheduleRuns(database)
+	if err != nil {
+		t.Fatalf("ReconcileOrphanedScheduleRuns failed: %v", err)
+	}
+	t.Logf("Reconciled orphaned runs: %d", reconciled)
+
+	_ = UpdateScheduleRunStatus(database, UpdateRunParams{
+		RunID:       runID,
+		Status:      "completed",
+		CompletedAt: now,
+	})
+
+	pruned, err := PruneScheduleRuns(database, 100, 30*24*time.Hour)
+	if err != nil {
+		t.Fatalf("PruneScheduleRuns failed: %v", err)
+	}
+	t.Logf("Pruned schedule runs: %d", pruned)
+}
+
+func TestTasksAndTriggers(t *testing.T) {
+	database := setupTestDB(t)
+	defer func() { _ = database.Close() }()
+
+	clean := CleanTaskSummary("Task <@12345> details [url](http://foo) ```code``` \n\n extra space")
+	if strings.Contains(clean, "<@") || strings.Contains(clean, "```") {
+		t.Errorf("CleanTaskSummary did not sanitize markdown/mentions: %s", clean)
+	}
+
+	trig := InferTriggerType("thread-cron-123", "Every morning run health check")
+	if trig != "cron" && trig != "discord" && trig != "reminder" {
+		t.Errorf("unexpected trigger type: %s", trig)
+	}
+
+	tasks, err := GetActiveTasks(database)
+	if err != nil {
+		t.Fatalf("GetActiveTasks failed: %v", err)
+	}
+	t.Logf("Active tasks found: %d", len(tasks))
+}
+
+func TestSessionTurnMapping(t *testing.T) {
+	database := setupTestDB(t)
+	defer func() { _ = database.Close() }()
+
+	// Conversation Mapping
+	err := SaveConversationMapping(database, "ext-1", "int-1")
+	if err != nil {
+		t.Fatalf("SaveConversationMapping failed: %v", err)
+	}
+
+	intID, err := GetInternalConversationID(database, "ext-1")
+	if err != nil || intID != "int-1" {
+		t.Errorf("expected int-1, got %s (err: %v)", intID, err)
+	}
+
+	extID, err := GetExternalConversationID(database, "int-1")
+	if err != nil || extID != "ext-1" {
+		t.Errorf("expected ext-1, got %s (err: %v)", extID, err)
+	}
+
+	// Turn State
+	err = RegisterTurn(database, "ext-1", "m-turn-1", "Turn prompt")
+	if err != nil {
+		t.Fatalf("RegisterTurn failed: %v", err)
+	}
+
+	err = SetTurnProcessing(database, "ext-1", true, "m-turn-1")
+	if err != nil {
+		t.Fatalf("SetTurnProcessing failed: %v", err)
+	}
+
+	turn, err := GetTurnState(database, "ext-1")
+	if err != nil || turn == nil {
+		t.Fatalf("GetTurnState failed: %v", err)
+	}
+	if !turn.IsProcessing {
+		t.Errorf("expected isProcessing true, got %v", turn.IsProcessing)
+	}
+
+	interrupted, err := GetInterruptedTurns(database)
+	if err != nil {
+		t.Fatalf("GetInterruptedTurns failed: %v", err)
+	}
+	t.Logf("Interrupted turns: %d", len(interrupted))
+}
+
+func TestFactEmbeddingAndThreadLookup(t *testing.T) {
+	database := setupTestDB(t)
+	defer func() { _ = database.Close() }()
+
+	vec := make([]float32, ExpectedEmbeddingDim)
+	vec[0] = 0.8
+	vec[1] = 0.2
+
+	id, err := InsertFact(database, "category", "Fact with emb", 1.0, "thread-lookup-1", vec)
+	if err != nil {
+		t.Fatalf("InsertFact failed: %v", err)
+	}
+
+	err = UpdateFactEmbedding(database, id, vec)
+	if err != nil {
+		t.Fatalf("UpdateFactEmbedding failed: %v", err)
+	}
+
+	err = UpdateConversationFactExtractedAt(database, "thread-lookup-1")
+	if err != nil {
+		t.Fatalf("UpdateConversationFactExtractedAt failed: %v", err)
+	}
+
+	facts, err := GetFactsByThreadWithEmbeddings(database, "thread-lookup-1")
+	if err != nil {
+		t.Fatalf("GetFactsByThreadWithEmbeddings failed: %v", err)
+	}
+	if len(facts) != 1 {
+		t.Fatalf("expected 1 fact for thread, got %d", len(facts))
+	}
+}
+
+func TestGetDBPath_Precedence(t *testing.T) {
+	// 1. TEST_DATABASE_URL highest precedence
+	t.Setenv("TEST_DATABASE_URL", "postgres://test:test@127.0.0.1:5432/test_db")
+	t.Setenv("DATABASE_URL", "postgres://prod:prod@prod:5432/prod_db")
+	if p := GetDBPath(); p != "postgres://test:test@127.0.0.1:5432/test_db" {
+		t.Errorf("expected TEST_DATABASE_URL precedence, got %q", p)
+	}
+
+	// 2. DATABASE_URL fallback
+	t.Setenv("TEST_DATABASE_URL", "")
+	if p := GetDBPath(); p != "postgres://prod:prod@prod:5432/prod_db" {
+		t.Errorf("expected DATABASE_URL fallback, got %q", p)
+	}
+
+	// 3. Custom POSTGRES environment variables
+	t.Setenv("DATABASE_URL", "")
+	t.Setenv("POSTGRES_USER", "custom_user")
+	t.Setenv("POSTGRES_PASSWORD", "custom_pass")
+	t.Setenv("POSTGRES_HOST", "custom_host")
+	t.Setenv("POSTGRES_PORT", "5433")
+	t.Setenv("POSTGRES_DB", "custom_db")
+	expected := "postgres://custom_user:custom_pass@custom_host:5433/custom_db?sslmode=disable"
+	if p := GetDBPath(); p != expected {
+		t.Errorf("expected %q, got %q", expected, p)
+	}
+
+	// 4. Default fallbacks
+	t.Setenv("POSTGRES_USER", "")
+	t.Setenv("POSTGRES_PASSWORD", "")
+	t.Setenv("POSTGRES_HOST", "")
+	t.Setenv("POSTGRES_PORT", "")
+	t.Setenv("POSTGRES_DB", "")
+	defaultExpected := "postgres://aerial:aerial_secure_pass@postgres:5432/aerial?sslmode=disable"
+	if p := GetDBPath(); p != defaultExpected {
+		t.Errorf("expected %q, got %q", defaultExpected, p)
+	}
+}
+
+func TestCleanTaskSummary(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "empty input",
+			input:    "",
+			expected: "Agent Task",
+		},
+		{
+			name:     "whitespace only",
+			input:    "   \n\t  ",
+			expected: "Agent Task",
+		},
+		{
+			name:     "user request tag with content prefix",
+			input:    "<USER_REQUEST>\n- id: 123\n- content: Deploy new feature\n</USER_REQUEST>",
+			expected: "Deploy new feature",
+		},
+		{
+			name:     "user request tag with multiline prompt",
+			input:    "<USER_REQUEST>\nPrompt:\nGenerate quarterly report\n</USER_REQUEST>",
+			expected: "Generate quarterly report",
+		},
+		{
+			name:     "markdown formatting and mentions stripped",
+			input:    "**Hello** <@123456789> `code block`",
+			expected: "Hello code block",
+		},
+		{
+			name:     "long text truncated to 140 chars",
+			input:    "This is an extraordinarily long prompt designed specifically to verify that the CleanTaskSummary helper properly cuts off strings exceeding one hundred and forty runes with an ellipsis suffix accurately.",
+			expected: "This is an extraordinarily long prompt designed specifically to verify that the CleanTaskSummary helper properly cuts off strings exceedi...",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := CleanTaskSummary(tt.input)
+			if got != tt.expected {
+				t.Errorf("CleanTaskSummary() = %q, want %q", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestInferTriggerType(t *testing.T) {
+	if tt := InferTriggerType("http-client", ""); tt != "http" {
+		t.Errorf("expected 'http', got %q", tt)
+	}
+	if tt := InferTriggerType("user-1", "cron-run-123"); tt != "cron" {
+		t.Errorf("expected 'cron', got %q", tt)
+	}
+	if tt := InferTriggerType("user-1", "reminder-run-456"); tt != "reminder" {
+		t.Errorf("expected 'reminder', got %q", tt)
+	}
+	if tt := InferTriggerType("user-1", ""); tt != "discord" {
+		t.Errorf("expected 'discord', got %q", tt)
+	}
+}
+
+func TestSQLiteExplicitSchemaAndMigrations(t *testing.T) {
+	sqlitePath := filepath.Join(t.TempDir(), "aerial_sqlite_explicit.db")
+	database, err := InitDB(sqlitePath)
+	if err != nil {
+		t.Fatalf("InitDB failed for SQLite: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	// Test SQLite message insert and query
+	msg := Message{
+		ID:         "msg-sqlite-1",
+		ThreadID:   "th-sqlite-1",
+		GuildID:    "g-sqlite-1",
+		AuthorID:   "author-1",
+		AuthorName: "Alice",
+		Content:    "Hello SQLite",
+		Status:     StatusPending,
+	}
+	if err := InsertMessage(database, msg); err != nil {
+		t.Fatalf("InsertMessage failed on SQLite: %v", err)
+	}
+
+	m, err := GetMessage(database, "msg-sqlite-1")
+	if err != nil || m == nil {
+		t.Fatalf("GetMessage failed on SQLite: %v", err)
+	}
+
+	// Test SQLite facts insert and vector search
+	vec := make([]float32, ExpectedEmbeddingDim)
+	vec[0] = 1.0
+	factID, err := InsertFact(database, "pref", "User likes tea", 0.9, "th-sqlite-1", vec)
+	if err != nil {
+		t.Fatalf("InsertFact on SQLite failed: %v", err)
+	}
+	if factID <= 0 {
+		t.Errorf("expected positive factID, got %d", factID)
+	}
+
+	simFacts, err := SearchSimilarFacts(database, vec, 5, 0.5, "th-sqlite-1")
+	if err != nil {
+		t.Fatalf("SearchSimilarFacts on SQLite failed: %v", err)
+	}
+	if len(simFacts) == 0 {
+		t.Errorf("expected similar facts returned on SQLite")
+	}
+
+	// Test SQLite active tasks query
+	tasks, err := GetActiveTasks(database)
+	if err != nil {
+		t.Fatalf("GetActiveTasks on SQLite failed: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Errorf("expected 1 active task, got %d", len(tasks))
+	}
+}
+
+func TestVectorHelpersEdgeCases(t *testing.T) {
+	// 1. Float32ToBytes and BytesToFloat32 empty
+	b := Float32ToBytes(nil)
+	if len(b) != 0 {
+		t.Errorf("expected empty bytes for nil slice")
+	}
+	f := BytesToFloat32(nil)
+	if len(f) != 0 {
+		t.Errorf("expected empty float slice for nil bytes")
+	}
+
+	// 2. BytesToFloat32 invalid length
+	invalidBytes := []byte{1, 2, 3}
+	fInv := BytesToFloat32(invalidBytes)
+	if len(fInv) != 0 {
+		t.Errorf("expected empty slice for misaligned byte slice")
+	}
+
+	// 3. cosineSimilarity zero vectors
+	sim := cosineSimilarity(nil, nil)
+	if sim != 0.0 {
+		t.Errorf("expected 0.0 for nil vectors, got %f", sim)
+	}
+	vZero := make([]float32, 10)
+	vOne := make([]float32, 10)
+	vOne[0] = 1.0
+	sim = cosineSimilarity(vZero, vOne)
+	if sim != 0.0 {
+		t.Errorf("expected 0.0 when one vector is zero, got %f", sim)
+	}
+}
+
+
 

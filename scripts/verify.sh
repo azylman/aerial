@@ -17,11 +17,26 @@ for arg in "$@"; do
     esac
 done
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
 echo "⚡ [Aerial Verify] Running $MODE verification checks..."
 
 # Helper to check command availability
 has_cmd() {
     command -v "$1" >/dev/null 2>&1
+}
+
+# Check for UTF-8 BOM (\xef\xbb\xbf)
+check_utf8_bom() {
+    if has_cmd git; then
+        BOM_HEX=$(printf '\357\273\277')
+        BOM_FILES=$(git grep -I -l "^$BOM_HEX" 2>/dev/null || true)
+        if [ -n "$BOM_FILES" ]; then
+            echo "🚨 [Aerial Verify] Error: Invalid UTF-8 BOM detected in tracked files:" >&2
+            echo "$BOM_FILES" | sed 's/^/   • /' >&2
+            exit 1
+        fi
+    fi
 }
 
 # Go services in the monorepo
@@ -114,6 +129,8 @@ run_json_syntax() {
 
 if [ "$MODE" = "staged" ]; then
     # Fast path: check only services that have staged changes
+    check_utf8_bom
+
     STAGED_FILES=$(git diff --cached --name-only 2>/dev/null || true)
     if [ -z "$STAGED_FILES" ]; then
         echo "✅ [Aerial Verify] No staged files to verify."
@@ -152,6 +169,9 @@ if [ "$MODE" = "staged" ]; then
 fi
 
 # Full verification: Run entire CI-equivalent verification suite
+echo "=== 0. Encoding & BOM Hygiene ==="
+check_utf8_bom
+
 echo "=== 1. Static Analysis & Linting ==="
 for svc in $GO_SERVICES; do
     run_golangci_lint "$svc"
@@ -173,5 +193,10 @@ if [ -f "dashboard/app.test.js" ]; then
     run_node_test "dashboard" "*.test.js"
 fi
 
-echo "✅ [Aerial Verify] All unit tests, linters, and syntax checks passed with 100% success!"
+echo "=== 4. Test Coverage Gating ==="
+if [ -f "$SCRIPT_DIR/check-coverage.sh" ]; then
+    sh "$SCRIPT_DIR/check-coverage.sh" --check
+fi
+
+echo "✅ [Aerial Verify] All unit tests, linters, coverage gates, and syntax checks passed with 100% success!"
 exit 0

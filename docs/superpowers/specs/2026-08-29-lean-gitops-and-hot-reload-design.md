@@ -1,4 +1,4 @@
-﻿# Architectural Specification: Hardened Lean GitOps, Hot-Reloading & Decoupled Configuration Architecture
+# Architectural Specification: Hardened Lean GitOps, Hot-Reloading & Decoupled Configuration Architecture
 
 **Date:** 2026-08-29  
 **Status:** APPROVED WITH ADVERSARIAL HARDENING  

@@ -299,13 +299,17 @@ func GetActiveRecentThreadIDs(database *sql.DB, since time.Duration) ([]string, 
 	defer cancel()
 
 	query := `
-	SELECT DISTINCT thread_id
+	SELECT thread_id
 	FROM (
-		SELECT thread_id, updated_at FROM messages WHERE thread_id != '' AND updated_at >= $1
-		UNION
-		SELECT thread_id, updated_at FROM sessions WHERE thread_id != '' AND updated_at >= $2
+		SELECT thread_id, MAX(updated_at) AS max_updated_at
+		FROM (
+			SELECT thread_id, updated_at FROM messages WHERE thread_id != '' AND updated_at >= $1
+			UNION ALL
+			SELECT thread_id, updated_at FROM sessions WHERE thread_id != '' AND updated_at >= $2
+		) sub
+		GROUP BY thread_id
 	) combined
-	ORDER BY updated_at DESC
+	ORDER BY max_updated_at DESC
 	LIMIT 50
 	`
 	rows, err := database.QueryContext(ctx, query, cutoff, cutoff)

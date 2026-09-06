@@ -164,5 +164,17 @@ if (Test-Path (Join-Path $repoRoot "dashboard/app.test.js")) {
     Run-NodeTest "dashboard" "*.test.js"
 }
 
-Write-Host "✅ [Aerial Verify] All unit tests, linters, and syntax checks passed with 100% success!" -ForegroundColor Green
+Write-Host "=== 4. Test Coverage Gating ===" -ForegroundColor Yellow
+$checkCovScript = Join-Path $repoRoot "scripts\check-coverage.sh"
+if (Test-Path $checkCovScript) {
+    if (Get-Command "sh" -ErrorAction SilentlyContinue) {
+        & sh $checkCovScript --check
+        if ($LASTEXITCODE -ne 0) { throw "Coverage threshold verification failed" }
+    } elseif ($hasDocker) {
+        docker run --rm -v "${repoRoot}:/app" -w /app golang:1.24 sh scripts/check-coverage.sh --check
+        if ($LASTEXITCODE -ne 0) { throw "Coverage threshold verification (docker) failed" }
+    }
+}
+
+Write-Host "✅ [Aerial Verify] All unit tests, linters, coverage gates, and syntax checks passed with 100% success!" -ForegroundColor Green
 exit 0

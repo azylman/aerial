@@ -1,4 +1,4 @@
-﻿# SDD ledger � plan: docs/superpowers/plans/2026-09-02-channel-ambient-lookback-and-relevance-scorer.md
+# SDD ledger � plan: docs/superpowers/plans/2026-09-02-channel-ambient-lookback-and-relevance-scorer.md
 
 Base commit: c3d529da11a2f6fbbe4c60a1dbbe9d784a0d9fef
 

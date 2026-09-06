@@ -1,4 +1,4 @@
-﻿# Design Document: Standardized GEMINI.md Clean Break & Lean Core Architecture
+# Design Document: Standardized GEMINI.md Clean Break & Lean Core Architecture
 
 - **Date**: 2026-09-02
 - **Status**: Approved (Audited & Remediated by 4-Expert Review Panel)
