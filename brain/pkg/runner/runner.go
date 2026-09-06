@@ -442,20 +442,15 @@ func ClassifyError(exitCode int, stdout, stderr string) (isFailure bool, isTrans
 	trimmedStderr := strings.TrimSpace(stderr)
 	combined := strings.ToLower(trimmedStderr + "\n" + trimmedStdout)
 
-	// 1. Intercept watchdog timeout diagnoses FIRST across all exit codes (non-transient, non-corruption failure)
-	if isWatchdogInactivity(combined) {
-		source := stderr
-		if source == "" {
-			source = stdout
+	// 1. Intercept watchdog timeout diagnoses FIRST on non-zero exit codes (watchdog kills with SIGKILL / exit code -1)
+	// Watchdog diagnostic markers are strictly emitted to stderr by the runner harness and must NEVER inspect stdout.
+	if exitCode != 0 {
+		if isWatchdogInactivity(trimmedStderr) {
+			return true, false, false, extractWatchdogDetail(trimmedStderr, "inactivity timeout exceeded")
 		}
-		return true, false, false, extractWatchdogDetail(source, "inactivity timeout exceeded")
-	}
-	if isWatchdogMaxDuration(combined) {
-		source := stderr
-		if source == "" {
-			source = stdout
+		if isWatchdogMaxDuration(trimmedStderr) {
+			return true, false, false, extractWatchdogDetail(trimmedStderr, "max duration exceeded")
 		}
-		return true, false, false, extractWatchdogDetail(source, "max duration exceeded")
 	}
 
 	transientKeywords := []string{
@@ -471,6 +466,10 @@ func ClassifyError(exitCode int, stdout, stderr string) (isFailure bool, isTrans
 		"timeout",
 		"connection reset by peer",
 		"temporary failure in name resolution",
+		"quota exceeded",
+		"exceeded your current quota",
+		"insufficient_quota",
+		"too many requests",
 	}
 
 	corruptionKeywords := []string{
@@ -608,8 +607,12 @@ func ClassifyError(exitCode int, stdout, stderr string) (isFailure bool, isTrans
 	}
 
 	errDetail = extractErrorDetail(stderr, exitCode)
-	if errDetail == "" && trimmedStdout != "" {
-		errDetail = trimmedStdout
+	if (errDetail == "" || errDetail == fmt.Sprintf("execution failed with exit code %d", exitCode)) && trimmedStdout != "" {
+		if resp, err := ParseAgyOutput(stdout); err == nil && resp.Error != "" {
+			errDetail = resp.Error
+		} else if len(trimmedStdout) < 300 {
+			errDetail = trimmedStdout
+		}
 	}
 	if errDetail == "" {
 		errDetail = fmt.Sprintf("execution failed with exit code %d", exitCode)
