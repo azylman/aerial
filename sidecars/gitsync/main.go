@@ -24,16 +24,14 @@ import (
 )
 
 var sanitizePatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)basic\s+[a-zA-Z0-9+/=]+`),
+	regexp.MustCompile(`(?i)\b(?:basic\s+[a-zA-Z0-9+/]{8,}={1,2}|basic\s+[a-zA-Z0-9+/]{10,}|basic\s+[a-zA-Z0-9+/=]+|bearer\s+[a-zA-Z0-9_\-\.]{12,})`),
 	regexp.MustCompile(`(?i)x-access-token:[^@\s]+`),
-	regexp.MustCompile(`(?i)github_pat_[a-zA-Z0-9_]+`),
-	regexp.MustCompile(`(?i)ghp_[a-zA-Z0-9]+`),
-	regexp.MustCompile(`(?i)gho_[a-zA-Z0-9]+`),
-	regexp.MustCompile(`(?i)ghu_[a-zA-Z0-9]+`),
-	regexp.MustCompile(`sk-ant-[a-zA-Z0-9_-]+`),
-	regexp.MustCompile(`sk-[a-zA-Z0-9_-]{20,}`),
-	regexp.MustCompile(`AIza[0-9A-Za-z-_]{35}`),
-	regexp.MustCompile(`(?i)mfa\.[a-z0-9_-]{20,}|[a-z0-9_-]{24}\.[a-z0-9_-]{6}\.[a-z0-9_-]{27}`),
+	regexp.MustCompile(`(?i)https://(?:canary\.|ptb\.)?discord(?:app)?\.com/api/webhooks/\d+/[a-zA-Z0-9_-]+`),
+	regexp.MustCompile(`(?i)(?:gh[pousr]_[a-zA-Z0-9_]+|github_pat_[a-zA-Z0-9_]+)`),
+	regexp.MustCompile(`\bsk-(?:proj-|ant-|svcacct-)?[a-zA-Z0-9_-]{16,}`),
+	regexp.MustCompile(`(?i)(?:AIza[0-9A-Za-z-_]{35,}|(?:antigravity|gemini)_[a-zA-Z0-9_\-]{16,})`),
+	regexp.MustCompile(`\b(?:mfa\.[a-zA-Z0-9_-]{20,}|[a-zA-Z0-9_-]{24,28}\.[a-zA-Z0-9_-]{6}\.[a-zA-Z0-9_-]{27,38})`),
+	regexp.MustCompile(`\beyJ[a-zA-Z0-9_-]{10,}\.eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}`),
 	regexp.MustCompile(`postgres://[^:]+:[^@]+@[^/]+/[^?]+`),
 }
 
