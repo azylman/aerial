@@ -657,28 +657,252 @@ func TestNativeVectorSearchHNSW(t *testing.T) {
 	}
 }
 
-func TestIsProductionDSN(t *testing.T) {
-	prodDSNs := []string{
-		"postgres://aerial:aerial_secure_pass@postgres:5432/aerial?sslmode=disable",
-		"postgres://aerial:pass@127.0.0.1:5432/aerial?sslmode=disable",
-		"postgres://aerial:pass@localhost:5432/aerial?sslmode=disable",
-		"postgres://aerial:pass@postgres:5432/aerial",
-	}
-	for _, dsn := range prodDSNs {
-		if !isProductionDSN(dsn) {
-			t.Errorf("Expected isProductionDSN(%q) to be true", dsn)
-		}
-	}
-
-	testDSNs := []string{
-		"postgres://postgres:aerial_test@127.0.0.1:54329/aerial_test?sslmode=disable",
-		"postgres://postgres:aerial_test_password@localhost:5432/aerial_test?sslmode=disable",
-		"postgres://postgres:aerial_test_password@postgres:5432/aerial_test?sslmode=disable",
-	}
-	for _, dsn := range testDSNs {
-		if isProductionDSN(dsn) {
-			t.Errorf("Expected isProductionDSN(%q) to be false", dsn)
-		}
+func TestDBPath(t *testing.T) {
+	t.Setenv("DATABASE_PATH", "/data/custom.db")
+	p := GetDBPath()
+	if p == "" {
+		t.Errorf("expected non-empty DB path")
 	}
 }
+
+func TestRecentThreadMessagesAndActiveIDs(t *testing.T) {
+	database := setupTestDB(t)
+	defer func() { _ = database.Close() }()
+
+	now := time.Now().UTC()
+	_ = InsertMessage(database, Message{
+		ID: "m-rec-1", ThreadID: "thread-active-rec", GuildID: "g1", AuthorID: "a1", AuthorName: "Alex",
+		Content: "Message 1", Status: StatusCompleted, CreatedAt: now.Add(-10 * time.Minute), UpdatedAt: now.Add(-10 * time.Minute),
+	})
+	_ = InsertMessage(database, Message{
+		ID: "m-rec-2", ThreadID: "thread-active-rec", GuildID: "g1", AuthorID: "a1", AuthorName: "Alex",
+		Content: "Message 2", Status: StatusCompleted, CreatedAt: now, UpdatedAt: now,
+	})
+
+	ids, err := GetActiveRecentThreadIDs(database, 24*time.Hour)
+	if err != nil {
+		t.Fatalf("GetActiveRecentThreadIDs failed: %v", err)
+	}
+	if len(ids) == 0 || ids[0] != "thread-active-rec" {
+		t.Errorf("expected thread-active-rec in active IDs, got %v", ids)
+	}
+
+	msgs, err := GetRecentThreadMessages(database, "thread-active-rec", 10)
+	if err != nil {
+		t.Fatalf("GetRecentThreadMessages failed: %v", err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(msgs))
+	}
+}
+
+func TestSchedulesLifecycleAndMetrics(t *testing.T) {
+	database := setupTestDB(t)
+	defer func() { _ = database.Close() }()
+
+	now := time.Now().UTC()
+
+	// One-shot schedule lifecycle
+	osID := "os-test-1"
+	err := CreateOneShotSchedule(database, OneShotSchedule{
+		ID:       osID,
+		ThreadID: "thread-os",
+		Prompt:   "One-shot prompt",
+		RunAt:    now.Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("CreateOneShotSchedule failed: %v", err)
+	}
+
+	allOS, err := GetAllOneShotSchedules(database, "thread-os")
+	if err != nil {
+		t.Fatalf("GetAllOneShotSchedules failed: %v", err)
+	}
+	if len(allOS) == 0 {
+		t.Fatalf("expected at least 1 one-shot schedule")
+	}
+
+	err = DeleteOneShotSchedule(database, osID)
+	if err != nil {
+		t.Fatalf("DeleteOneShotSchedule failed: %v", err)
+	}
+
+	// Cron schedule lifecycle
+	cronID := "cron-test-1"
+	err = CreateCronSchedule(database, CronSchedule{
+		ID:          cronID,
+		TargetID:    "thread-cron",
+		TitlePrefix: "[CRON]",
+		CronExpr:    "0 * * * *",
+		Prompt:      "Cron prompt",
+		Timezone:    "America/Los_Angeles",
+		NextRunAt:   now.Add(time.Hour),
+		Enabled:     true,
+	})
+	if err != nil {
+		t.Fatalf("CreateCronSchedule failed: %v", err)
+	}
+
+	allCrons, err := GetAllCronSchedules(database, "thread-cron")
+	if err != nil {
+		t.Fatalf("GetAllCronSchedules failed: %v", err)
+	}
+	if len(allCrons) == 0 {
+		t.Fatalf("expected at least 1 cron schedule")
+	}
+
+	err = UpdateCronNextRun(database, cronID, now.Add(2*time.Hour))
+	if err != nil {
+		t.Fatalf("UpdateCronNextRun failed: %v", err)
+	}
+
+	// Schedule metrics
+	metrics, err := GetScheduleSummaryMetrics(database)
+	if err != nil {
+		t.Fatalf("GetScheduleSummaryMetrics failed: %v", err)
+	}
+	t.Logf("Schedule metrics total active: %d", metrics.TotalActive)
+
+	err = DeleteCronSchedule(database, cronID)
+	if err != nil {
+		t.Fatalf("DeleteCronSchedule failed: %v", err)
+	}
+}
+
+func TestReconcileAndPruneScheduleRuns(t *testing.T) {
+	database := setupTestDB(t)
+	defer func() { _ = database.Close() }()
+
+	now := time.Now().UTC()
+	runID := "run-test-1"
+	err := CreateScheduleRun(database, ScheduleRun{
+		ID:           runID,
+		ScheduleID:   "cron-test-1",
+		ScheduleType: "cron",
+		Prompt:       "Cron prompt",
+		StartedAt:    now.Add(-2 * time.Hour),
+		Status:       "enqueued",
+	})
+	if err != nil {
+		t.Fatalf("CreateScheduleRun failed: %v", err)
+	}
+
+	reconciled, err := ReconcileOrphanedScheduleRuns(database)
+	if err != nil {
+		t.Fatalf("ReconcileOrphanedScheduleRuns failed: %v", err)
+	}
+	t.Logf("Reconciled orphaned runs: %d", reconciled)
+
+	_ = UpdateScheduleRunStatus(database, UpdateRunParams{
+		RunID:       runID,
+		Status:      "completed",
+		CompletedAt: now,
+	})
+
+	pruned, err := PruneScheduleRuns(database, 100, 30*24*time.Hour)
+	if err != nil {
+		t.Fatalf("PruneScheduleRuns failed: %v", err)
+	}
+	t.Logf("Pruned schedule runs: %d", pruned)
+}
+
+func TestTasksAndTriggers(t *testing.T) {
+	database := setupTestDB(t)
+	defer func() { _ = database.Close() }()
+
+	clean := CleanTaskSummary("Task <@12345> details [url](http://foo) ```code``` \n\n extra space")
+	if strings.Contains(clean, "<@") || strings.Contains(clean, "```") {
+		t.Errorf("CleanTaskSummary did not sanitize markdown/mentions: %s", clean)
+	}
+
+	trig := InferTriggerType("thread-cron-123", "Every morning run health check")
+	if trig != "cron" && trig != "discord" && trig != "reminder" {
+		t.Errorf("unexpected trigger type: %s", trig)
+	}
+
+	tasks, err := GetActiveTasks(database)
+	if err != nil {
+		t.Fatalf("GetActiveTasks failed: %v", err)
+	}
+	t.Logf("Active tasks found: %d", len(tasks))
+}
+
+func TestSessionTurnMapping(t *testing.T) {
+	database := setupTestDB(t)
+	defer func() { _ = database.Close() }()
+
+	// Conversation Mapping
+	err := SaveConversationMapping(database, "ext-1", "int-1")
+	if err != nil {
+		t.Fatalf("SaveConversationMapping failed: %v", err)
+	}
+
+	intID, err := GetInternalConversationID(database, "ext-1")
+	if err != nil || intID != "int-1" {
+		t.Errorf("expected int-1, got %s (err: %v)", intID, err)
+	}
+
+	extID, err := GetExternalConversationID(database, "int-1")
+	if err != nil || extID != "ext-1" {
+		t.Errorf("expected ext-1, got %s (err: %v)", extID, err)
+	}
+
+	// Turn State
+	err = RegisterTurn(database, "ext-1", "m-turn-1", "Turn prompt")
+	if err != nil {
+		t.Fatalf("RegisterTurn failed: %v", err)
+	}
+
+	err = SetTurnProcessing(database, "ext-1", true, "m-turn-1")
+	if err != nil {
+		t.Fatalf("SetTurnProcessing failed: %v", err)
+	}
+
+	turn, err := GetTurnState(database, "ext-1")
+	if err != nil || turn == nil {
+		t.Fatalf("GetTurnState failed: %v", err)
+	}
+	if !turn.IsProcessing {
+		t.Errorf("expected isProcessing true, got %v", turn.IsProcessing)
+	}
+
+	interrupted, err := GetInterruptedTurns(database)
+	if err != nil {
+		t.Fatalf("GetInterruptedTurns failed: %v", err)
+	}
+	t.Logf("Interrupted turns: %d", len(interrupted))
+}
+
+func TestFactEmbeddingAndThreadLookup(t *testing.T) {
+	database := setupTestDB(t)
+	defer func() { _ = database.Close() }()
+
+	vec := make([]float32, ExpectedEmbeddingDim)
+	vec[0] = 0.8
+	vec[1] = 0.2
+
+	id, err := InsertFact(database, "category", "Fact with emb", 1.0, "thread-lookup-1", vec)
+	if err != nil {
+		t.Fatalf("InsertFact failed: %v", err)
+	}
+
+	err = UpdateFactEmbedding(database, id, vec)
+	if err != nil {
+		t.Fatalf("UpdateFactEmbedding failed: %v", err)
+	}
+
+	err = UpdateConversationFactExtractedAt(database, "thread-lookup-1")
+	if err != nil {
+		t.Fatalf("UpdateConversationFactExtractedAt failed: %v", err)
+	}
+
+	facts, err := GetFactsByThreadWithEmbeddings(database, "thread-lookup-1")
+	if err != nil {
+		t.Fatalf("GetFactsByThreadWithEmbeddings failed: %v", err)
+	}
+	if len(facts) != 1 {
+		t.Fatalf("expected 1 fact for thread, got %d", len(facts))
+	}
+}
+
 

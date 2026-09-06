@@ -396,3 +396,206 @@ func TestParseComposeServices(t *testing.T) {
 	}
 }
 
+func TestGetRepoCommitAndStatus(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// Initialize git repo and make a commit
+	cmdInit := exec.Command("git", "init", "-b", "main", tempDir)
+	_ = cmdInit.Run()
+	_ = exec.Command("git", "-C", tempDir, "config", "user.name", "Test").Run()
+	_ = exec.Command("git", "-C", tempDir, "config", "user.email", "test@example.com").Run()
+
+	testFile := filepath.Join(tempDir, "README.md")
+	_ = os.WriteFile(testFile, []byte("# Test Repo\n"), 0644)
+	_ = exec.Command("git", "-C", tempDir, "add", "-A").Run()
+	_ = exec.Command("git", "-C", tempDir, "commit", "-m", "Initial commit").Run()
+
+	ctx := context.Background()
+	sha, ts, err := getRepoCommit(ctx, tempDir, "HEAD", "")
+	if err != nil {
+		t.Fatalf("getRepoCommit failed: %v", err)
+	}
+	if sha == "" || ts == nil {
+		t.Fatalf("expected non-empty sha and timestamp, got sha=%q, ts=%v", sha, ts)
+	}
+
+	daemon := &SyncDaemon{
+		interval:      time.Minute,
+		repos:         []string{tempDir},
+		lastSyncTimes: make(map[string]time.Time),
+	}
+	status := daemon.GetStatus(ctx)
+	if status.Status == "" {
+		t.Errorf("expected valid status string")
+	}
+	if len(status.Repos) != 1 {
+		t.Errorf("expected 1 repo status, got %d", len(status.Repos))
+	}
+}
+
+func TestResolveGitDir(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// 1. Directory does not exist
+	_, err := resolveGitDir(filepath.Join(tempDir, "nonexistent"))
+	if err == nil {
+		t.Errorf("expected error for nonexistent directory, got nil")
+	}
+
+	// 2. Standard .git directory
+	standardRepo := filepath.Join(tempDir, "standard")
+	_ = os.MkdirAll(filepath.Join(standardRepo, ".git"), 0755)
+	gitDir, err := resolveGitDir(standardRepo)
+	if err != nil {
+		t.Fatalf("resolveGitDir failed on standard repo: %v", err)
+	}
+	if gitDir != filepath.Join(standardRepo, ".git") {
+		t.Errorf("expected %s, got %s", filepath.Join(standardRepo, ".git"), gitDir)
+	}
+
+	// 3. Worktree .git file with absolute target
+	worktreeRepo := filepath.Join(tempDir, "worktree")
+	_ = os.MkdirAll(worktreeRepo, 0755)
+	targetGitDir := filepath.Join(tempDir, "target-git-dir")
+	_ = os.MkdirAll(targetGitDir, 0755)
+	_ = os.WriteFile(filepath.Join(worktreeRepo, ".git"), []byte("gitdir: "+targetGitDir+"\n"), 0644)
+	gitDir, err = resolveGitDir(worktreeRepo)
+	if err != nil {
+		t.Fatalf("resolveGitDir failed on worktree repo: %v", err)
+	}
+	if gitDir != targetGitDir {
+		t.Errorf("expected %s, got %s", targetGitDir, gitDir)
+	}
+
+	// 4. Worktree .git file with relative target
+	relWorktreeRepo := filepath.Join(tempDir, "relworktree")
+	_ = os.MkdirAll(relWorktreeRepo, 0755)
+	_ = os.WriteFile(filepath.Join(relWorktreeRepo, ".git"), []byte("gitdir: ../target-git-dir\n"), 0644)
+	gitDir, err = resolveGitDir(relWorktreeRepo)
+	if err != nil {
+		t.Fatalf("resolveGitDir failed on relative worktree repo: %v", err)
+	}
+	if gitDir != targetGitDir {
+		t.Errorf("expected %s, got %s", targetGitDir, gitDir)
+	}
+}
+
+func TestValidateCompose(t *testing.T) {
+	tempDir := t.TempDir()
+	daemon := &SyncDaemon{}
+	ctx := context.Background()
+
+	// Missing compose file returns error
+	err := daemon.ValidateCompose(ctx, tempDir)
+	if err == nil {
+		t.Errorf("expected error when compose file missing, got nil")
+	}
+}
+
+func TestReconcileCompose_NoFile(t *testing.T) {
+	tempDir := t.TempDir()
+	daemon := &SyncDaemon{
+		composeDir: tempDir,
+	}
+	ctx := context.Background()
+	err := daemon.ReconcileCompose(ctx)
+	if err != nil {
+		t.Errorf("expected nil error when docker-compose.yml not found, got %v", err)
+	}
+}
+
+func TestEnsureRepoAndSync(t *testing.T) {
+	tempBase := t.TempDir()
+	bareRemote := filepath.Join(tempBase, "remote.git")
+	localClone := filepath.Join(tempBase, "local")
+
+	// 1. Initialize bare remote repository
+	cmdBare := exec.Command("git", "init", "--bare", "-b", "main", bareRemote)
+	if out, err := cmdBare.CombinedOutput(); err != nil {
+		t.Fatalf("failed to init bare remote: %s (%v)", out, err)
+	}
+
+	// 2. Initialize temporary seed repo and push to bare remote
+	seedRepo := filepath.Join(tempBase, "seed")
+	_ = exec.Command("git", "init", "-b", "main", seedRepo).Run()
+	_ = exec.Command("git", "-C", seedRepo, "config", "user.name", "Seed").Run()
+	_ = exec.Command("git", "-C", seedRepo, "config", "user.email", "seed@example.com").Run()
+	_ = os.WriteFile(filepath.Join(seedRepo, "file.txt"), []byte("hello v1\n"), 0644)
+	_ = exec.Command("git", "-C", seedRepo, "add", "-A").Run()
+	_ = exec.Command("git", "-C", seedRepo, "commit", "-m", "initial").Run()
+	_ = exec.Command("git", "-C", seedRepo, "remote", "add", "origin", bareRemote).Run()
+	_ = exec.Command("git", "-C", seedRepo, "push", "-u", "origin", "main").Run()
+
+	// 3. EnsureRepo test on empty directory (clones from bareRemote)
+	daemon := &SyncDaemon{
+		repos:    []string{localClone},
+		repoUrls: map[string]string{localClone: bareRemote},
+	}
+	ctx := context.Background()
+	if err := daemon.EnsureRepo(ctx, localClone, bareRemote); err != nil {
+		t.Fatalf("EnsureRepo failed: %v", err)
+	}
+
+	// Calling EnsureRepo again should be a no-op
+	if err := daemon.EnsureRepo(ctx, localClone, bareRemote); err != nil {
+		t.Fatalf("EnsureRepo second call failed: %v", err)
+	}
+	// Calling EnsureRepo with empty strings
+	if err := daemon.EnsureRepo(ctx, "", ""); err != nil {
+		t.Errorf("EnsureRepo with empty strings failed: %v", err)
+	}
+
+	// 4. SyncRepo test when up to date
+	res := daemon.SyncRepo(ctx, localClone)
+	if res.Error != "" {
+		t.Fatalf("SyncRepo failed: %s", res.Error)
+	}
+	if res.Changed {
+		t.Errorf("expected changed=false when up to date")
+	}
+
+	// 5. Commit change to seedRepo and push to bareRemote
+	_ = os.WriteFile(filepath.Join(seedRepo, "file.txt"), []byte("hello v2\n"), 0644)
+	_ = exec.Command("git", "-C", seedRepo, "add", "-A").Run()
+	_ = exec.Command("git", "-C", seedRepo, "commit", "-m", "update v2").Run()
+	_ = exec.Command("git", "-C", seedRepo, "push", "origin", "main").Run()
+
+	// 6. SyncRepo test when changes exist
+	res2 := daemon.SyncRepo(ctx, localClone)
+	if res2.Error != "" {
+		t.Fatalf("SyncRepo failed on update: %s", res2.Error)
+	}
+	if !res2.Changed {
+		t.Errorf("expected changed=true after remote update")
+	}
+	if res2.PreviousHead == res2.CurrentHead {
+		t.Errorf("expected PreviousHead != CurrentHead, got %s == %s", res2.PreviousHead, res2.CurrentHead)
+	}
+
+	// 7. Test index.lock guard
+	lockFile := filepath.Join(localClone, ".git", "index.lock")
+	_ = os.WriteFile(lockFile, []byte(""), 0644)
+	resLock := daemon.SyncRepo(ctx, localClone)
+	if resLock.Error != "index.lock active" {
+		t.Errorf("expected 'index.lock active', got %q", resLock.Error)
+	}
+	_ = os.Remove(lockFile)
+
+	// 8. Test TriggerSync
+	results, err := daemon.TriggerSync()
+	if err != nil {
+		t.Fatalf("TriggerSync failed: %v", err)
+	}
+	if len(results) != 1 {
+		t.Errorf("expected 1 result from TriggerSync, got %d", len(results))
+	}
+
+	// 9. Test SyncRepo empty repo path
+	emptyRes := daemon.SyncRepo(ctx, "")
+	if emptyRes.Repo != "" {
+		t.Errorf("expected empty repo result")
+	}
+}
+
+
+

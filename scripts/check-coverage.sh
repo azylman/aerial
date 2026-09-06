@@ -217,8 +217,8 @@ if [ -f "dashboard/app.test.js" ] && { [ -z "$TARGET_SERVICE" ] || [ "$TARGET_SE
     if command -v node >/dev/null 2>&1; then
         node_out=$( (cd dashboard && node --test --experimental-test-coverage *.test.js 2>&1) || true )
         
-        # Parse coverage table from node output
-        cov_line=$(echo "$node_out" | grep -E "ℹ all files\s+\|" | head -n 1)
+        # Parse coverage table from node output (handles both TTY 'ℹ' and non-TTY '#' prefixes)
+        cov_line=$(echo "$node_out" | grep -E "(#|ℹ)?[[:space:]]*all files[[:space:]]*\|" | head -n 1)
         if [ -n "$cov_line" ]; then
             FRONTEND_LINE_PCT=$(echo "$cov_line" | awk -F'|' '{gsub(/[ %]/, "", $2); print $2}')
             FRONTEND_BRANCH_PCT=$(echo "$cov_line" | awk -F'|' '{gsub(/[ %]/, "", $3); print $3}')
