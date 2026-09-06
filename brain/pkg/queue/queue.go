@@ -1138,6 +1138,30 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		lastErrDetail = errDetail
 
 		if isFailure {
+			// Cold-Start Dynamic Session Latching:
+			// If this was a cold start (currentSessionID was empty), extract the active conversation UUID
+			// discovered in stderr during execution so retries can resume on the existing transcript.
+			if currentSessionID == "" && !isSessionCorruption {
+				if extSess := runner.ExtractSessionID(stderr, execStart); extSess != "" && session.SessionExistsOnDisk(extSess) {
+					log.Printf("[Queue] Latched active session from stderr on failure (attempt %d/%d) for thread %s: %s", attempt, maxAttempts, threadID, extSess)
+					currentSessionID = extSess
+					_ = db.SaveSessionID(p.cfg.DB, threadID, currentSessionID)
+				}
+			}
+
+			// Transcript Recovery on Empty Stdout:
+			// If agy completed with exit code 0 but produced empty stdout (e.g. buffering or background yield),
+			// check if the session transcript on disk contains a valid PLANNER_RESPONSE turn.
+			if exitCode == 0 && strings.TrimSpace(stdout) == "" && currentSessionID != "" && session.SessionExistsOnDisk(currentSessionID) {
+				if respText, _ := session.ExtractResponseAndError(currentSessionID); respText != "" {
+					log.Printf("[Queue] Recovered response directly from session %s transcript after empty stdout on exit 0", currentSessionID)
+					isFailure = false
+					stdout = fmt.Sprintf(`{"conversation_id":%q,"status":"SUCCESS","response":%q}`, currentSessionID, respText)
+				}
+			}
+		}
+
+		if isFailure {
 			isWatchdog := runner.IsInactivityTimeout(errDetail, stderr) || strings.Contains(errDetail, "[watchdog]") || strings.Contains(errDetail, "inactivity timeout exceeded") || strings.Contains(errDetail, "max duration exceeded")
 
 			errCat := "process_error"
@@ -1149,17 +1173,6 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 				errCat = "session_corrupt"
 			}
 			metrics.RecordRunnerError(errCat, currentModel)
-
-			// Cold-Start Dynamic Session Latching:
-			// If this was a cold start (currentSessionID was empty), extract the active conversation UUID
-			// discovered in stderr during execution so retries can resume on the existing transcript.
-			if currentSessionID == "" && !isSessionCorruption {
-				if extSess := runner.ExtractSessionID(stderr, execStart); extSess != "" && session.SessionExistsOnDisk(extSess) {
-					log.Printf("[Queue] Latched active session from stderr on failure (attempt %d/%d) for thread %s: %s", attempt, maxAttempts, threadID, extSess)
-					currentSessionID = extSess
-					_ = db.SaveSessionID(p.cfg.DB, threadID, currentSessionID)
-				}
-			}
 
 			if isWatchdog {
 				for _, m := range burst {
@@ -1372,7 +1385,9 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		for _, m := range burst {
 			_ = db.IncrementMessageRetry(p.cfg.DB, m.ID, errDetail)
 		}
-		currentSessionID = ""
+		if currentSessionID != "" && !session.SessionExistsOnDisk(currentSessionID) {
+			currentSessionID = ""
+		}
 		if attempt < maxAttempts {
 			backoff := time.Duration(attempt) * p.cfg.BackoffBase
 			select {

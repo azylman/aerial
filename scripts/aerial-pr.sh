@@ -29,9 +29,14 @@ init_scratch() {
     local auth_header
     auth_header=$(build_auth_header)
 
-    local base_dir="/dev/shm"
-    if [ ! -d "$base_dir" ] || [ ! -w "$base_dir" ]; then
-        base_dir="${TMPDIR:-/tmp}"
+    local base_dir="/data/scratch"
+    if [ ! -d "/data" ] || [ ! -w "/data" ]; then
+        base_dir="/dev/shm"
+        if [ ! -d "$base_dir" ] || [ ! -w "$base_dir" ]; then
+            base_dir="${TMPDIR:-/tmp}"
+        fi
+    else
+        mkdir -p "$base_dir"
     fi
 
     local scratch_dir

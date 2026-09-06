@@ -470,6 +470,8 @@ func ClassifyError(exitCode int, stdout, stderr string) (isFailure bool, isTrans
 		"exceeded your current quota",
 		"insufficient_quota",
 		"too many requests",
+		"process produced empty stdout",
+		"empty stdout",
 	}
 
 	corruptionKeywords := []string{
@@ -522,7 +524,10 @@ func ClassifyError(exitCode int, stdout, stderr string) (isFailure bool, isTrans
 			if errDetail == fmt.Sprintf("execution failed with exit code %d", exitCode) || trimmedStderr == "" {
 				errDetail = "process produced empty stdout"
 			}
-			return true, false, false, errDetail
+			if containsFatalStderrError(trimmedStderr) {
+				return true, false, false, errDetail
+			}
+			return true, true, false, errDetail
 		}
 
 		resp, parseErr := ParseAgyOutput(stdout)
