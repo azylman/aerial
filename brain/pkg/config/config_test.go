@@ -540,9 +540,6 @@ mcp_servers:
 	if cfg.Model != "gemini-1.5-pro" {
 		t.Errorf("Expected model 'gemini-1.5-pro', got %q", cfg.Model)
 	}
-	if cfg.TimeoutMinutes != 45 {
-		t.Errorf("Expected timeout 45, got %d", cfg.TimeoutMinutes)
-	}
 	if cfg.Timezone != "America/New_York" {
 		t.Errorf("Expected timezone 'America/New_York', got %q", cfg.Timezone)
 	}
@@ -567,7 +564,7 @@ mcp_servers:
 		t.Errorf("GetSystemChannel expected 'my-alerts', got %q", GetSystemChannel())
 	}
 	rtCfg := GetRuntimeConfig()
-	if rtCfg.Model != "gemini-1.5-pro" || rtCfg.TimeoutMinutes != 45 {
+	if rtCfg.Model != "gemini-1.5-pro" {
 		t.Errorf("GetRuntimeConfig returned unexpected struct: %+v", rtCfg)
 	}
 }
@@ -579,7 +576,6 @@ func TestLoadConfigCorruptedYAML_LKGCFallback(t *testing.T) {
 	// 1. Write initial valid YAML
 	validYAML := `
 model: "gemini-2.5-flash"
-timeout_minutes: 20
 system_channel: "dev-channel-1"
 channels:
   default:
@@ -593,14 +589,13 @@ channels:
 	if err != nil {
 		t.Fatalf("Initial LoadConfigFromPaths failed: %v", err)
 	}
-	if cfg.Model != "gemini-2.5-flash" || cfg.TimeoutMinutes != 20 {
+	if cfg.Model != "gemini-2.5-flash" {
 		t.Fatalf("Unexpected initial config: %+v", cfg)
 	}
 
 	// 2. Corrupt YAML with invalid syntax
 	corruptYAML := `
 model: [broken yaml invalid syntax: ::: {
-timeout_minutes:
 `
 	if err := os.WriteFile(yamlPath, []byte(corruptYAML), 0644); err != nil {
 		t.Fatalf("Failed to overwrite with corrupt yaml: %v", err)
@@ -612,9 +607,9 @@ timeout_minutes:
 	}
 
 	// Verify LKGC is retained
-	if cfgAfter.Model != "gemini-2.5-flash" || cfgAfter.TimeoutMinutes != 20 {
-		t.Errorf("Expected retained LKGC model 'gemini-2.5-flash' and timeout 20, got model=%q timeout=%d",
-			cfgAfter.Model, cfgAfter.TimeoutMinutes)
+	if cfgAfter.Model != "gemini-2.5-flash" {
+		t.Errorf("Expected retained LKGC model 'gemini-2.5-flash', got model=%q",
+			cfgAfter.Model)
 	}
 	rtCfg := GetRuntimeConfig()
 	if rtCfg.Model != "gemini-2.5-flash" || rtCfg.SystemChannel != "dev-channel-1" {
@@ -666,7 +661,6 @@ func TestLoadConfigMissingFileFallbacks(t *testing.T) {
 	runtimeConfigMu.Unlock()
 
 	t.Setenv("AGY_MODEL", "env-model-fallback")
-	t.Setenv("TIMEOUT_MINUTES", "28")
 	t.Setenv("DEFAULT_TIMEZONE", "Europe/London")
 	t.Setenv("SYSTEM_CHANNEL", "env-system-chan")
 
@@ -677,9 +671,6 @@ func TestLoadConfigMissingFileFallbacks(t *testing.T) {
 
 	if cfg.Model != "env-model-fallback" {
 		t.Errorf("Expected fallback to env model 'env-model-fallback', got %q", cfg.Model)
-	}
-	if cfg.TimeoutMinutes != 28 {
-		t.Errorf("Expected fallback timeout 28, got %d", cfg.TimeoutMinutes)
 	}
 	if cfg.Timezone != "Europe/London" {
 		t.Errorf("Expected fallback timezone 'Europe/London', got %q", cfg.Timezone)
@@ -733,6 +724,7 @@ func TestChannelPolicy_Parsing(t *testing.T) {
 	tmpDir := t.TempDir()
 	yamlPath := filepath.Join(tmpDir, "config.yaml")
 
+	thresh := 0.85
 	yamlContent := `
 model: "gemini-2.5-flash"
 admin_users:
@@ -741,27 +733,20 @@ admin_users:
 channels:
   default:
     mode: "threads"
-    typing_indicator: "always"
     ignore_bots: true
-    allow_system_ops: false
-    max_session_turns: 0
   aerial-dev:
     mode: "threads"
-    typing_indicator: "always"
     ignore_bots: true
-    allow_system_ops: true
   general:
     mode: "channel"
-    typing_indicator: "on_mention"
+    wake_mode: "classifier"
     ignore_bots: true
-    allow_system_ops: false
-    max_session_turns: 50
+    ambient_wake_threshold: 0.85
+    ambient_wake_prompt: "Channel relevance directive"
   "123456789012345678":
     mode: "channel"
-    typing_indicator: "never"
+    wake_mode: "mention"
     ignore_bots: false
-    allow_system_ops: true
-    max_session_turns: 20
 `
 	if err := os.WriteFile(yamlPath, []byte(yamlContent), 0644); err != nil {
 		t.Fatalf("Failed to write yaml: %v", err)
@@ -781,22 +766,22 @@ channels:
 	}
 
 	def := cfg.Channels["default"]
-	if def.Mode != "threads" || !def.IsBotIgnored() || def.AllowSystemOps || def.MaxSessionTurns != 0 {
+	if def.Mode != "threads" || !def.IsBotIgnored() {
 		t.Errorf("Unexpected default policy: %+v", def)
 	}
 
 	dev := cfg.Channels["aerial-dev"]
-	if dev.Mode != "threads" || !dev.AllowSystemOps {
+	if dev.Mode != "threads" || !dev.IsBotIgnored() {
 		t.Errorf("Unexpected aerial-dev policy: %+v", dev)
 	}
 
 	gen := cfg.Channels["general"]
-	if gen.Mode != "channel" || gen.MaxSessionTurns != 50 {
+	if gen.Mode != "channel" || gen.GetWakeMode() != "classifier" || !gen.IsBotIgnored() || gen.GetAmbientWakeThreshold() != thresh || gen.GetAmbientWakePrompt() != "Channel relevance directive" {
 		t.Errorf("Unexpected general policy: %+v", gen)
 	}
 
 	sn := cfg.Channels["123456789012345678"]
-	if sn.Mode != "channel" || sn.IsBotIgnored() || !sn.AllowSystemOps || sn.MaxSessionTurns != 20 {
+	if sn.Mode != "channel" || sn.GetWakeMode() != "mention" || sn.IsBotIgnored() {
 		t.Errorf("Unexpected snowflake channel policy: %+v", sn)
 	}
 }
@@ -875,7 +860,7 @@ channels:
 		t.Errorf("Expected default mode='threads', got %q", cfg.Channels["default"].Mode)
 	}
 
-	// 2. Test default in channel mode gets max_session_turns: 50
+	// 2. Test default in channel mode gets mode: "channel"
 	yamlPath2 := filepath.Join(tmpDir, "config_channel.yaml")
 	yamlChannel := `
 model: "gemini-2.5-flash"
@@ -893,26 +878,25 @@ channels:
 	if cfg.Channels["default"].Mode != "channel" {
 		t.Errorf("Expected default mode='channel', got %q", cfg.Channels["default"].Mode)
 	}
-	if cfg.Channels["default"].MaxSessionTurns != 50 {
-		t.Errorf("Expected default max_session_turns=50 for channel mode, got %d", cfg.Channels["default"].MaxSessionTurns)
-	}
 }
 
 func TestResolveChannelPolicy(t *testing.T) {
 	trueVal := true
+	falseVal := false
+	thresh := 0.75
 	cfg := Config{
 		Channels: map[string]ChannelPolicy{
 			"default": {
-				Mode:            "threads",
-				IgnoreBots:      &trueVal,
-				AllowSystemOps:  false,
-				MaxSessionTurns: 0,
+				Mode:       "threads",
+				IgnoreBots: &trueVal,
 			},
 			"general": {
-				Mode: "channel",
+				Mode:                 "channel",
+				WakeMode:             "classifier",
+				AmbientWakeThreshold: &thresh,
 			},
 			"aerial-dev": {
-				AllowSystemOps: true,
+				IgnoreBots: &falseVal,
 			},
 			"release..v2": {
 				Mode: "channel",
@@ -921,28 +905,27 @@ func TestResolveChannelPolicy(t *testing.T) {
 				Mode: "channel",
 			},
 			"1543668253363150928": {
-				Mode:            "channel",
-				AllowSystemOps:  true,
-				MaxSessionTurns: 100,
+				Mode:       "channel",
+				IgnoreBots: &falseVal,
 			},
 		},
 	}
 
 	// 1. Match by Snowflake ID
 	p1 := cfg.ResolveChannelPolicy("1543668253363150928", "aerial-dev")
-	if p1.Mode != "channel" || !p1.AllowSystemOps || p1.MaxSessionTurns != 100 || !p1.IsBotIgnored() {
+	if p1.Mode != "channel" || p1.IsBotIgnored() {
 		t.Errorf("Unexpected policy for snowflake ID match: %+v", p1)
 	}
 
 	// 2. Match by Channel Name with leading '#' and uppercase
 	p2 := cfg.ResolveChannelPolicy("999999", "#General")
-	if p2.Mode != "channel" || p2.MaxSessionTurns != 50 || !p2.IsBotIgnored() || p2.AllowSystemOps {
+	if p2.Mode != "channel" || !p2.IsBotIgnored() || p2.GetWakeMode() != "classifier" || p2.GetAmbientWakeThreshold() != 0.75 {
 		t.Errorf("Unexpected policy for #General match: %+v", p2)
 	}
 
 	// 3. Match by Channel Name without '#'
 	p3 := cfg.ResolveChannelPolicy("999999", "aerial-dev")
-	if p3.Mode != "threads" || !p3.AllowSystemOps || !p3.IsBotIgnored() {
+	if p3.Mode != "threads" || p3.IsBotIgnored() {
 		t.Errorf("Unexpected policy for aerial-dev match with default inheritance: %+v", p3)
 	}
 
@@ -958,8 +941,59 @@ func TestResolveChannelPolicy(t *testing.T) {
 
 	// 5. Fallback to default when neither ID nor name match
 	p4 := cfg.ResolveChannelPolicy("999999", "unknown-channel")
-	if p4.Mode != "threads" || p4.AllowSystemOps || !p4.IsBotIgnored() {
+	if p4.Mode != "threads" || !p4.IsBotIgnored() {
 		t.Errorf("Unexpected policy for fallback: %+v", p4)
+	}
+}
+
+func TestLoadConfigLegacyYAML_BackwardsCompatibility(t *testing.T) {
+	tmpDir := t.TempDir()
+	yamlPath := filepath.Join(tmpDir, "config_legacy.yaml")
+
+	legacyYAML := `
+model: "gemini-3.7-flash"
+timeout_minutes: 20
+timezone: "America/Los_Angeles"
+system_channel: "aerial-dev"
+channels:
+  default:
+    mode: "threads"
+    allow_system_ops: false
+    max_session_turns: 0
+    typing_indicator: "always"
+  general:
+    mode: "channel"
+    wake_mode: "classifier"
+    allow_system_ops: true
+    max_session_turns: 50
+    typing_indicator: "on_mention"
+memory:
+  fact_extraction:
+    enabled: true
+    interval: "6h"
+`
+	if err := os.WriteFile(yamlPath, []byte(legacyYAML), 0644); err != nil {
+		t.Fatalf("Failed to write legacy yaml: %v", err)
+	}
+
+	cfg, err := LoadConfigFromPaths(yamlPath)
+	if err != nil {
+		t.Fatalf("Expected legacy YAML to unmarshal cleanly with zero errors, got: %v", err)
+	}
+
+	if cfg.Model != "gemini-3.7-flash" {
+		t.Errorf("Expected model 'gemini-3.7-flash', got %q", cfg.Model)
+	}
+	if cfg.Timezone != "America/Los_Angeles" {
+		t.Errorf("Expected timezone 'America/Los_Angeles', got %q", cfg.Timezone)
+	}
+	if cfg.SystemChannel != "aerial-dev" {
+		t.Errorf("Expected system_channel 'aerial-dev', got %q", cfg.SystemChannel)
+	}
+
+	genPolicy := cfg.ResolveChannelPolicy("99999", "general")
+	if genPolicy.Mode != "channel" || genPolicy.GetWakeMode() != "classifier" {
+		t.Errorf("Unexpected resolved general policy from legacy YAML: %+v", genPolicy)
 	}
 }
 

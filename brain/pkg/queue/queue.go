@@ -38,6 +38,11 @@ var (
 	restSingleFlight singleflight.Group
 )
 
+const (
+	DefaultMaxSessionTurns = 50
+	DefaultTimeoutMinutes  = 15
+)
+
 // CacheDiscordChannel stores an immutable snapshot of a discordgo.Channel.
 func CacheDiscordChannel(ch *discordgo.Channel) {
 	if ch == nil || ch.ID == "" {
@@ -196,7 +201,7 @@ type WorkerPool struct {
 
 func NewWorkerPool(cfg WorkerPoolConfig) *WorkerPool {
 	if cfg.TimeoutMinutes <= 0 {
-		cfg.TimeoutMinutes = 15
+		cfg.TimeoutMinutes = DefaultTimeoutMinutes
 	}
 	if cfg.MaxAttempts <= 0 {
 		cfg.MaxAttempts = 3
@@ -330,22 +335,19 @@ func (p *WorkerPool) getDiscordSession() *discordgo.Session {
 	return p.cfg.DiscordSession
 }
 
-func (p *WorkerPool) UpdateRuntimeConfig(model string, timeoutMinutes int) {
+func (p *WorkerPool) UpdateRuntimeConfig(model string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if strings.TrimSpace(model) != "" {
 		p.cfg.Model = model
 	}
-	if timeoutMinutes > 0 {
-		p.cfg.TimeoutMinutes = timeoutMinutes
-	}
-	log.Printf("[WorkerPool] Runtime config updated: model=%s, timeout=%dm", p.cfg.Model, p.cfg.TimeoutMinutes)
+	log.Printf("[WorkerPool] Runtime config updated: model=%s", p.cfg.Model)
 }
 
-func (p *WorkerPool) GetRuntimeConfig() (model string, timeoutMinutes int) {
+func (p *WorkerPool) GetRuntimeConfig() string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.cfg.Model, p.cfg.TimeoutMinutes
+	return p.cfg.Model
 }
 
 func (p *WorkerPool) Start() {
@@ -949,10 +951,10 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 
 		// wakeIdx >= 0
 		// Check session rotation timing before Phase 1:
-		if policy.MaxSessionTurns > 0 {
+		if strings.ToLower(policy.Mode) == "channel" {
 			currentTurns, _ := db.GetSessionTurnCount(p.cfg.DB, threadID)
-			if currentTurns >= policy.MaxSessionTurns || (wakeIdx > 0 && currentTurns+1 >= policy.MaxSessionTurns) {
-				log.Printf("[Queue] Channel session reached turn limit. Resetting to cold state for fresh session initialization.")
+			if currentTurns >= DefaultMaxSessionTurns || (wakeIdx > 0 && currentTurns+1 >= DefaultMaxSessionTurns) {
+				log.Printf("[Queue] Channel session reached turn limit (%d/%d). Resetting to cold state for fresh session initialization.", currentTurns, DefaultMaxSessionTurns)
 				_ = db.RotateSessionID(p.cfg.DB, threadID, "")
 				currentSessionID = ""
 			}
@@ -1176,8 +1178,8 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 					}
 				}
 
-				if policy.MaxSessionTurns > 0 && turnCount >= policy.MaxSessionTurns {
-					log.Printf("[Queue] Channel session reached turn limit (%d/%d). Resetting to cold state for fresh session initialization.", turnCount, policy.MaxSessionTurns)
+				if strings.ToLower(policy.Mode) == "channel" && turnCount >= DefaultMaxSessionTurns {
+					log.Printf("[Queue] Channel session reached turn limit (%d/%d). Resetting to cold state for fresh session initialization.", turnCount, DefaultMaxSessionTurns)
 					_ = db.RotateSessionID(p.cfg.DB, threadID, "")
 					currentSessionID = ""
 				}

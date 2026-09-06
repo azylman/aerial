@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 
@@ -80,8 +79,6 @@ type ChannelPolicy struct {
 	Mode                 string   `yaml:"mode" json:"mode"`
 	WakeMode             string   `yaml:"wake_mode,omitempty" json:"wake_mode,omitempty"`
 	IgnoreBots           *bool    `yaml:"ignore_bots,omitempty" json:"ignore_bots,omitempty"`
-	AllowSystemOps       bool     `yaml:"allow_system_ops" json:"allow_system_ops"`
-	MaxSessionTurns      int      `yaml:"max_session_turns" json:"max_session_turns"`
 	AmbientWakeThreshold *float64 `yaml:"ambient_wake_threshold,omitempty" json:"ambient_wake_threshold,omitempty"`
 	AmbientWakePrompt    string   `yaml:"ambient_wake_prompt,omitempty" json:"ambient_wake_prompt,omitempty"`
 }
@@ -137,26 +134,24 @@ func (p ChannelPolicy) IsBotIgnored() bool {
 }
 
 type Config struct {
-	Model          string                     `yaml:"model" json:"model"`
-	TimeoutMinutes int                        `yaml:"timeout_minutes" json:"timeout_minutes"`
-	Timezone       string                     `yaml:"timezone" json:"timezone"`
-	SystemChannel  string                     `yaml:"system_channel" json:"system_channel"`
-	AdminUsers     []string                   `yaml:"admin_users" json:"admin_users"`
-	Channels       map[string]ChannelPolicy   `yaml:"channels" json:"channels"`
-	GitSync        GitSyncConfig              `yaml:"git_sync" json:"git_sync"`
-	McpServers     map[string]json.RawMessage `yaml:"mcp_servers,omitempty" json:"mcp_servers,omitempty"`
+	Model         string                     `yaml:"model" json:"model"`
+	Timezone      string                     `yaml:"timezone" json:"timezone"`
+	SystemChannel string                     `yaml:"system_channel" json:"system_channel"`
+	AdminUsers    []string                   `yaml:"admin_users" json:"admin_users"`
+	Channels      map[string]ChannelPolicy   `yaml:"channels" json:"channels"`
+	GitSync       GitSyncConfig              `yaml:"git_sync" json:"git_sync"`
+	McpServers    map[string]json.RawMessage `yaml:"mcp_servers,omitempty" json:"mcp_servers,omitempty"`
 }
 
 func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	type rawConfigHelper struct {
-		Model                string                   `yaml:"model"`
-		TimeoutMinutes       int                      `yaml:"timeout_minutes"`
-		Timezone             string                   `yaml:"timezone"`
-		SystemChannel        string                   `yaml:"system_channel"`
-		AdminUsers           []string                 `yaml:"admin_users"`
-		Channels             map[string]ChannelPolicy `yaml:"channels"`
-		GitSync              GitSyncConfig            `yaml:"git_sync"`
-		McpServers           map[string]interface{}   `yaml:"mcp_servers"`
+		Model         string                   `yaml:"model"`
+		Timezone      string                   `yaml:"timezone"`
+		SystemChannel string                   `yaml:"system_channel"`
+		AdminUsers    []string                 `yaml:"admin_users"`
+		Channels      map[string]ChannelPolicy `yaml:"channels"`
+		GitSync       GitSyncConfig            `yaml:"git_sync"`
+		McpServers    map[string]interface{}   `yaml:"mcp_servers"`
 	}
 
 	var raw rawConfigHelper
@@ -165,7 +160,6 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	}
 
 	c.Model = raw.Model
-	c.TimeoutMinutes = raw.TimeoutMinutes
 	c.Timezone = raw.Timezone
 	c.SystemChannel = raw.SystemChannel
 	c.AdminUsers = raw.AdminUsers
@@ -186,29 +180,25 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 }
 
 type Options struct {
-	Port           int             `json:"port"`
-	AgyBin         string          `json:"agy_bin"`
-	ApiKey         string          `json:"api_key"`
-	Model          string          `json:"model"`
-	SystemPrompt   string          `json:"system_prompt"`
-	TimeoutMinutes int             `json:"timeout_minutes"`
-	McpConfig      json.RawMessage `json:"mcp_config"`
+	Port         int             `json:"port"`
+	AgyBin       string          `json:"agy_bin"`
+	ApiKey       string          `json:"api_key"`
+	Model        string          `json:"model"`
+	SystemPrompt string          `json:"system_prompt"`
+	McpConfig    json.RawMessage `json:"mcp_config"`
 }
 
 func DefaultConfig() Config {
 	defaultIgnoreBots := true
 	return Config{
-		Model:          "Gemini 3.6 Flash (Low)",
-		TimeoutMinutes: 15,
-		Timezone:       "America/Los_Angeles",
-		SystemChannel:  "aerial-dev",
-		AdminUsers:     []string{},
+		Model:         "Gemini 3.6 Flash (Low)",
+		Timezone:      "America/Los_Angeles",
+		SystemChannel: "aerial-dev",
+		AdminUsers:    []string{},
 		Channels: map[string]ChannelPolicy{
 			"default": {
-				Mode:            "threads",
-				IgnoreBots:      &defaultIgnoreBots,
-				AllowSystemOps:  false,
-				MaxSessionTurns: 0,
+				Mode:       "threads",
+				IgnoreBots: &defaultIgnoreBots,
 			},
 		},
 		GitSync: GitSyncConfig{
@@ -231,20 +221,12 @@ func getFallbackDefaults() Config {
 			if strings.TrimSpace(opts.Model) != "" {
 				cfg.Model = opts.Model
 			}
-			if opts.TimeoutMinutes > 0 {
-				cfg.TimeoutMinutes = opts.TimeoutMinutes
-			}
 		}
 	}
 
 	// 2. Check environment variables
 	if m := strings.TrimSpace(os.Getenv("AGY_MODEL")); m != "" {
 		cfg.Model = m
-	}
-	if tm := strings.TrimSpace(os.Getenv("TIMEOUT_MINUTES")); tm != "" {
-		if val, err := strconv.Atoi(tm); err == nil && val > 0 {
-			cfg.TimeoutMinutes = val
-		}
 	}
 	if tz := strings.TrimSpace(os.Getenv("DEFAULT_TIMEZONE")); tz != "" {
 		cfg.Timezone = tz
@@ -372,10 +354,6 @@ func LoadConfigFromPaths(paths ...string) (Config, error) {
 		defPolicy.WakeMode = defPolicy.GetWakeMode()
 	}
 
-	// Normalize channels.default
-	if defPolicy.Mode == "channel" && defPolicy.MaxSessionTurns <= 0 {
-		defPolicy.MaxSessionTurns = 50
-	}
 	parsed.Channels["default"] = defPolicy
 
 	// Normalize and validate other channels
@@ -407,17 +385,11 @@ func LoadConfigFromPaths(paths ...string) (Config, error) {
 			}
 			policy.WakeMode = policy.GetWakeMode()
 		}
-		if policy.Mode == "channel" && policy.MaxSessionTurns <= 0 {
-			policy.MaxSessionTurns = 50
-		}
 		parsed.Channels[k] = policy
 	}
 
 	if strings.TrimSpace(parsed.Model) == "" {
 		parsed.Model = fallback.Model
-	}
-	if parsed.TimeoutMinutes <= 0 {
-		parsed.TimeoutMinutes = fallback.TimeoutMinutes
 	}
 	if strings.TrimSpace(parsed.Timezone) == "" {
 		parsed.Timezone = fallback.Timezone
@@ -447,8 +419,8 @@ func LoadConfigFromPaths(paths ...string) (Config, error) {
 		_ = writeAtomic("/data/.config.yaml.lkgc", string(rawData))
 	}
 
-	log.Printf("[Config] Successfully loaded configuration from %s (model=%s, timeout=%dm, timezone=%s, channel=%s)",
-		targetPath, parsed.Model, parsed.TimeoutMinutes, parsed.Timezone, parsed.SystemChannel)
+	log.Printf("[Config] Successfully loaded configuration from %s (model=%s, timezone=%s, channel=%s)",
+		targetPath, parsed.Model, parsed.Timezone, parsed.SystemChannel)
 
 	return parsed, nil
 }
@@ -481,17 +453,12 @@ func (c Config) ResolveChannelPolicy(channelID, channelName string) ChannelPolic
 	if !hasDef {
 		defaultIgnoreBots := true
 		def = ChannelPolicy{
-			Mode:            "threads",
-			IgnoreBots:      &defaultIgnoreBots,
-			AllowSystemOps:  false,
-			MaxSessionTurns: 0,
+			Mode:       "threads",
+			IgnoreBots: &defaultIgnoreBots,
 		}
 	} else {
 		if def.Mode == "" {
 			def.Mode = "threads"
-		}
-		if def.Mode == "channel" && def.MaxSessionTurns <= 0 {
-			def.MaxSessionTurns = 50
 		}
 	}
 
@@ -536,16 +503,6 @@ func (c Config) ResolveChannelPolicy(channelID, channelName string) ChannelPolic
 	}
 	if res.AmbientWakePrompt == "" && def.AmbientWakePrompt != "" {
 		res.AmbientWakePrompt = def.AmbientWakePrompt
-	}
-	if !res.AllowSystemOps && def.AllowSystemOps {
-		res.AllowSystemOps = true
-	}
-	if res.MaxSessionTurns <= 0 {
-		if def.MaxSessionTurns > 0 {
-			res.MaxSessionTurns = def.MaxSessionTurns
-		} else if res.Mode == "channel" {
-			res.MaxSessionTurns = 50
-		}
 	}
 	return res
 }

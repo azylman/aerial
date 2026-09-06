@@ -85,7 +85,6 @@ User configuration and persona rules live in your private configuration reposito
 1. **`config.yaml`** (Agent Options, Channel Policies, & MCP Tools):
    ```yaml
    model: "Gemini 3.7 Flash (High)"
-   timeout_minutes: 15
    timezone: "America/Los_Angeles"
    system_channel: "aerial-dev"
 
@@ -109,14 +108,12 @@ User configuration and persona rules live in your private configuration reposito
        ignore_bots: true
        ambient_wake_threshold: 0.80
        ambient_wake_prompt: "Determine whether the target message is relevant to Aerial and warrants Aerial waking up and responding, based on the recent channel context."
-       max_session_turns: 50
 
      # Mention-Only Channel (listens ambiently, responds ONLY on explicit @mention or direct reply)
      lounge:
        mode: "channel"
        wake_mode: "mention"
        ignore_bots: false
-       max_session_turns: 50
 
      # Custom ambient prompt per channel
      dev-alerts:
@@ -137,11 +134,6 @@ User configuration and persona rules live in your private configuration reposito
      repositories:
        - "/share/aerial-config"
        - "/share/aerial"
-
-   memory:
-     fact_extraction:
-       enabled: true
-       interval: "6h"
    ```
    - **Interaction Modes (`mode`)**:
      - `threads`: Direct messages or mentions spawn and route to a Discord thread (default).

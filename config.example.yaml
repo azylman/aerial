@@ -5,9 +5,6 @@
 # LLM Model Name used by Antigravity CLI (e.g. gemini-2.5-flash, gemini-2.5-pro)
 model: gemini-2.5-flash
 
-# Timeout per conversational turn in minutes
-timeout_minutes: 15
-
 # Timezone for scheduled cron routines and timestamp rendering
 timezone: America/Los_Angeles
 
@@ -47,9 +44,6 @@ admin_users:
 #   - ambient_wake_prompt: Custom criteria/prompt directive for the ambient relevance classifier in this channel.
 #   - ignore_bots: Ignore messages from bot users (default: true). Set to false to allow peer bot interactions.
 #
-# Session Rotation:
-#   - max_session_turns: Number of turns before rotating internal conversation ID (default: 50).
-#
 # Whitelisting / Default-Deny:
 #   You can set default.mode: ignore to have Aerial ignore all channels in the
 #   server by default, and only respond in explicitly declared channels.
@@ -74,14 +68,12 @@ channels:
     ignore_bots: true
     ambient_wake_threshold: 0.80
     ambient_wake_prompt: "Determine whether the target message is relevant to Aerial and warrants Aerial waking up and responding, based on the recent channel context."
-    max_session_turns: 50
 
   # Example channel with mention-only wake (listens ambiently, responds ONLY on explicit @mention or direct reply):
   lounge:
     mode: channel
     wake_mode: mention
     ignore_bots: false
-    max_session_turns: 50
 
   # Example channel with custom wake prompt:
   dev-alerts:
@@ -105,14 +97,6 @@ git_sync:
   repositories:
     - /share/aerial-config
     - /share/aerial
-
-# ------------------------------------------------------------------------------
-# Semantic Memory & Fact Extraction
-# ------------------------------------------------------------------------------
-memory:
-  fact_extraction:
-    enabled: true
-    interval: 6h
 
 # ------------------------------------------------------------------------------
 # Custom MCP Servers
