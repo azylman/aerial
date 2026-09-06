@@ -2,6 +2,7 @@ package delivery
 
 import (
 	"bytes"
+	"fmt"
 	"image"
 	"image/color"
 	"image/png"
@@ -107,5 +108,83 @@ func TestResolveAndValidateLocalImage_SecuritySandboxing(t *testing.T) {
 	_, err = ResolveAndValidateLocalImage(traversal, tempDir)
 	if err == nil {
 		t.Errorf("Expected error for directory traversal attempt, got nil")
+	}
+
+	// 4. Zero byte file
+	zeroFile := filepath.Join(tempDir, "zero.png")
+	_ = os.WriteFile(zeroFile, []byte{}, 0600)
+	_, err = ResolveAndValidateLocalImage(zeroFile, tempDir)
+	if err == nil {
+		t.Errorf("Expected error for 0-byte file, got nil")
+	}
+
+	// 5. Directory passed instead of regular file
+	_, err = ResolveAndValidateLocalImage(tempDir, "")
+	if err == nil {
+		t.Errorf("Expected error when target is a directory, got nil")
+	}
+
+	// 6. file:// URI prefix resolution
+	validImg := createTestPNG(t, tempDir, "uri_test.png")
+	att, err := ResolveAndValidateLocalImage("file://"+validImg, "")
+	if err != nil || att == nil || att.Filename != "uri_test.png" {
+		t.Errorf("failed to resolve file:// URI: %v, %+v", err, att)
+	}
+
+	// 7. Relative path with baseDir
+	attRel, err := ResolveAndValidateLocalImage("uri_test.png", tempDir)
+	if err != nil || attRel == nil || attRel.Filename != "uri_test.png" {
+		t.Errorf("failed to resolve relative path with baseDir: %v, %+v", err, attRel)
+	}
+}
+
+func TestToDiscordFile(t *testing.T) {
+	att := &Attachment{
+		Filename:    "chart.png",
+		ContentType: "image/png",
+		Data:        []byte("fake png bytes"),
+	}
+	df := att.ToDiscordFile()
+	if df.Name != "chart.png" || df.ContentType != "image/png" || df.Reader == nil {
+		t.Errorf("unexpected discordgo.File: %+v", df)
+	}
+}
+
+func TestExtractAndSanitizeMedia_EdgeCases(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// 1. Empty string
+	if text, atts := ExtractAndSanitizeMedia("", tempDir); text != "" || len(atts) != 0 {
+		t.Errorf("expected empty text and nil atts for empty input")
+	}
+
+	// 2. Image without alt text
+	img1 := createTestPNG(t, tempDir, "no_alt.png")
+	text1, atts1 := ExtractAndSanitizeMedia("Check this:\n![]("+img1+")", tempDir)
+	if len(atts1) != 1 || strings.Contains(text1, "no_alt.png") {
+		t.Errorf("unexpected output for image without alt text: %q", text1)
+	}
+
+	// 3. Missing image without alt text
+	text2, atts2 := ExtractAndSanitizeMedia("Check this:\n![]("+filepath.Join(tempDir, "missing_no_alt.png")+")", tempDir)
+	if len(atts2) != 0 || !strings.Contains(text2, "Image attachment unavailable: missing_no_alt.png") {
+		t.Errorf("unexpected output for missing image without alt: %q", text2)
+	}
+
+	// 4. Multiple duplicate blank lines
+	cleaned := cleanDuplicateBlankLines("line1\n\n\n\n\nline2")
+	if cleaned != "line1\n\nline2" {
+		t.Errorf("expected collapsed blank lines, got: %q", cleaned)
+	}
+
+	// 5. Exceed MaxAttachmentsPerMessage (10 attachments limit)
+	var sb strings.Builder
+	for i := 0; i < 12; i++ {
+		imgPath := createTestPNG(t, tempDir, fmt.Sprintf("img_%d.png", i))
+		sb.WriteString("![img](" + imgPath + ")\n")
+	}
+	_, attsMany := ExtractAndSanitizeMedia(sb.String(), tempDir)
+	if len(attsMany) != MaxAttachmentsPerMessage {
+		t.Errorf("expected max %d attachments, got %d", MaxAttachmentsPerMessage, len(attsMany))
 	}
 }

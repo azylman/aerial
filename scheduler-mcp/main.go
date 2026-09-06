@@ -10,16 +10,18 @@ import (
 	"time"
 )
 
-func main() {
-	port := os.Getenv("PORT")
+// RunApp bootstraps the scheduler MCP HTTP server with graceful shutdown.
+func RunApp(ctx context.Context, port, dbPath string) error {
 	if port == "" {
 		port = "8080"
 	}
+	if dbPath == "" {
+		dbPath = GetDBPath()
+	}
 
-	dbPath := GetDBPath()
 	database, err := InitDB(dbPath)
 	if err != nil {
-		log.Fatalf("Failed to initialize database at %s: %v", dbPath, err)
+		return err
 	}
 	defer func() {
 		_ = database.Close()
@@ -33,24 +35,42 @@ func main() {
 		Handler: server.Routes(),
 	}
 
-	stopChan := make(chan os.Signal, 1)
-	signal.Notify(stopChan, os.Interrupt, syscall.SIGTERM)
-
+	errChan := make(chan error, 1)
 	go func() {
 		log.Printf("Scheduler MCP Server listening on port %s (db: %s)", port, dbPath)
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("HTTP server failure: %v", err)
+			errChan <- err
 		}
+		close(errChan)
 	}()
 
-	<-stopChan
-	log.Println("Shutting down Scheduler MCP server gracefully...")
+	select {
+	case <-ctx.Done():
+	case err := <-errChan:
+		return err
+	}
 
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	log.Println("Shutting down Scheduler MCP server gracefully...")
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer shutdownCancel()
 
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		log.Printf("HTTP server shutdown error: %v", err)
+		return err
 	}
 	log.Println("Scheduler MCP server stopped cleanly")
+	return nil
 }
+
+func main() {
+	port := os.Getenv("PORT")
+	dbPath := GetDBPath()
+
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	if err := RunApp(ctx, port, dbPath); err != nil && err != http.ErrServerClosed {
+		log.Fatalf("Server failure: %v", err)
+	}
+}
+

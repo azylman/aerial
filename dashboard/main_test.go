@@ -1624,3 +1624,534 @@ dashboard:
 		t.Errorf("expected GitSync status 'synced', got %q", resp.GitSync.Status)
 	}
 }
+
+func TestHealthHandler(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	rr := httptest.NewRecorder()
+	healthHandler(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("expected 200 OK, got %d", rr.Code)
+	}
+	if rr.Body.String() != "OK" {
+		t.Errorf("unexpected body: %s", rr.Body.String())
+	}
+
+	// 405 Method Not Allowed
+	reqPost := httptest.NewRequest(http.MethodPost, "/health", nil)
+	rrPost := httptest.NewRecorder()
+	healthHandler(rrPost, reqPost)
+	if rrPost.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405 on POST /health, got %d", rrPost.Code)
+	}
+}
+
+func TestSecurityHeadersMiddleware(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+
+	handler := securityHeadersMiddleware(inner)
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Header().Get("X-Content-Type-Options") != "nosniff" {
+		t.Errorf("expected X-Content-Type-Options: nosniff")
+	}
+	if rr.Header().Get("X-Frame-Options") != "DENY" {
+		t.Errorf("expected X-Frame-Options: DENY")
+	}
+	if rr.Header().Get("X-XSS-Protection") != "1; mode=block" {
+		t.Errorf("expected X-XSS-Protection header")
+	}
+}
+
+func TestGetMimeType(t *testing.T) {
+	tests := []struct {
+		path     string
+		expected string
+	}{
+		{"index.html", "text/html; charset=utf-8"},
+		{"style.css", "text/css; charset=utf-8"},
+		{"data.json", "application/json"},
+		{"logo.svg", "image/svg+xml"},
+		{"image.png", "image/png"},
+		{"custom.woff2", "font/woff2"},
+		{"unknown.nonexistent123456", "application/octet-stream"},
+	}
+
+	for _, tt := range tests {
+		got := getMimeType(tt.path)
+		if got != tt.expected {
+			t.Errorf("getMimeType(%q) = %q, want %q", tt.path, got, tt.expected)
+		}
+	}
+}
+
+func TestGetContainerCommit_AllLabels(t *testing.T) {
+	// 1. Non-aerial container or nil labels
+	emptyCommit := getContainerCommit([]DockerContainerJSON{
+		{Names: []string{"/other"}, Labels: nil},
+	})
+	if emptyCommit != "" {
+		t.Errorf("expected empty string from getContainerCommit, got %q", emptyCommit)
+	}
+
+	// 2. org.opencontainers.image.revision short & long
+	revShort := getContainerCommit([]DockerContainerJSON{
+		{
+			Names:  []string{"/aerial-brain"},
+			Labels: map[string]string{"com.docker.compose.project": "aerial", "org.opencontainers.image.revision": "123456"},
+		},
+	})
+	if revShort != "123456" {
+		t.Errorf("expected '123456', got %q", revShort)
+	}
+
+	revLong := getContainerCommit([]DockerContainerJSON{
+		{
+			Names:  []string{"/aerial-brain"},
+			Labels: map[string]string{"com.docker.compose.project": "aerial", "org.opencontainers.image.revision": "1234567890"},
+		},
+	})
+	if revLong != "1234567" {
+		t.Errorf("expected '1234567', got %q", revLong)
+	}
+
+	// 3. aerial.commit_sha short & long
+	shaShort := getContainerCommit([]DockerContainerJSON{
+		{
+			Names:  []string{"/aerial-brain"},
+			Labels: map[string]string{"com.docker.compose.project": "aerial", "aerial.commit_sha": "abcdef"},
+		},
+	})
+	if shaShort != "abcdef" {
+		t.Errorf("expected 'abcdef', got %q", shaShort)
+	}
+
+	shaLong := getContainerCommit([]DockerContainerJSON{
+		{
+			Names:  []string{"/aerial-brain"},
+			Labels: map[string]string{"com.docker.compose.project": "aerial", "aerial.commit_sha": "abcdef012345"},
+		},
+	})
+	if shaLong != "abcdef0" {
+		t.Errorf("expected 'abcdef0', got %q", shaLong)
+	}
+
+	// 4. vcs-ref short & long
+	vcsShort := getContainerCommit([]DockerContainerJSON{
+		{
+			Names:  []string{"/aerial-brain"},
+			Labels: map[string]string{"com.docker.compose.project": "aerial", "vcs-ref": "987654"},
+		},
+	})
+	if vcsShort != "987654" {
+		t.Errorf("expected '987654', got %q", vcsShort)
+	}
+
+	vcsLong := getContainerCommit([]DockerContainerJSON{
+		{
+			Names:  []string{"/aerial-brain"},
+			Labels: map[string]string{"com.docker.compose.project": "aerial", "vcs-ref": "9876543210"},
+		},
+	})
+	if vcsLong != "9876543" {
+		t.Errorf("expected '9876543', got %q", vcsLong)
+	}
+}
+
+func TestGetGitCommitVariations(t *testing.T) {
+	// 1. Env commit short
+	t.Setenv("GIT_COMMIT", "abcdef")
+	if c := getGitCommit(); c != "abcdef" {
+		t.Errorf("expected 'abcdef', got %q", c)
+	}
+
+	// 2. Env commit long
+	t.Setenv("GIT_COMMIT", "abcdef0123456789")
+	if c := getGitCommit(); c != "abcdef0" {
+		t.Errorf("expected 'abcdef0', got %q", c)
+	}
+
+	// 3. From ref file
+	t.Setenv("GIT_COMMIT", "")
+	tempDir := t.TempDir()
+	headFile := filepath.Join(tempDir, "HEAD")
+	mainRefFile := filepath.Join(tempDir, "refs", "heads", "main")
+	_ = os.MkdirAll(filepath.Dir(mainRefFile), 0755)
+	_ = os.WriteFile(headFile, []byte("ref: refs/heads/main\n"), 0644)
+	_ = os.WriteFile(mainRefFile, []byte("1234567890abcdef\n"), 0644)
+
+	if c := getGitCommit(headFile); c != "1234567" {
+		t.Errorf("expected '1234567', got %q", c)
+	}
+
+	// 4. From direct SHA file
+	directFile := filepath.Join(tempDir, "direct")
+	_ = os.WriteFile(directFile, []byte("fedcba9876543210\n"), 0644)
+	if c := getGitCommit(directFile); c != "fedcba9" {
+		t.Errorf("expected 'fedcba9', got %q", c)
+	}
+
+	// 5. Fallback to latest
+	if c := getGitCommit(filepath.Join(tempDir, "nonexistent")); c != "latest" {
+		t.Errorf("expected 'latest', got %q", c)
+	}
+}
+
+func TestNewDashboardConfigFromEnv_Defaults(t *testing.T) {
+	t.Setenv("PORT", "")
+	t.Setenv("BRAIN_URL", "")
+	t.Setenv("GITHUB_REPO", "")
+	t.Setenv("GITHUB_PAT", "")
+	t.Setenv("GITHUB_PERSONAL_ACCESS_TOKEN", "fallback_token_123")
+
+	cfg := NewDashboardConfigFromEnv()
+	if cfg.Port != "8080" {
+		t.Errorf("expected default port 8080, got %q", cfg.Port)
+	}
+	if cfg.BrainURL != "http://brain:8080" {
+		t.Errorf("expected default brain URL, got %q", cfg.BrainURL)
+	}
+	if cfg.GHRepo != "azylman/aerial" {
+		t.Errorf("expected default repo, got %q", cfg.GHRepo)
+	}
+	if cfg.GHToken != "fallback_token_123" {
+		t.Errorf("expected fallback token, got %q", cfg.GHToken)
+	}
+}
+
+func TestGitHubPoller_FullLifecycle(t *testing.T) {
+	runID := int64(987654)
+	mockGH := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "/actions/runs/") && strings.HasSuffix(r.URL.Path, "/jobs"):
+			if r.Header.Get("If-None-Match") == "job-etag-1" {
+				w.WriteHeader(http.StatusNotModified)
+				return
+			}
+			w.Header().Set("ETag", "job-etag-1")
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(GitHubJobsResponse{
+				TotalCount: 1,
+				Jobs: []GitHubJob{
+					{
+						ID:         111,
+						RunID:      runID,
+						Name:       "build-backend (brain)",
+						Status:     "completed",
+						Conclusion: "success",
+						StartedAt:  time.Now().Add(-5 * time.Minute),
+					},
+				},
+			})
+		case strings.HasSuffix(r.URL.Path, "/actions/runs"):
+			if r.Header.Get("If-None-Match") == "runs-etag-1" {
+				w.WriteHeader(http.StatusNotModified)
+				return
+			}
+			w.Header().Set("ETag", "runs-etag-1")
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(GitHubRunsResponse{
+				TotalCount: 1,
+				WorkflowRuns: []GitHubRun{
+					{
+						ID:         runID,
+						Name:       "CI",
+						HeadBranch: "main",
+						HeadSHA:    "abcdef012345",
+						Status:     "in_progress",
+						Conclusion: "",
+						HTMLURL:    "https://github.com/azylman/aerial/actions/runs/987654",
+						CreatedAt:  time.Now().Add(-10 * time.Minute),
+						UpdatedAt:  time.Now(),
+						HeadCommit: &struct {
+							Message   string    `json:"message"`
+							Timestamp time.Time `json:"timestamp"`
+						}{
+							Message:   "feat: add feature\n\nDetailed commit message with token ghp_secret",
+							Timestamp: time.Now(),
+						},
+					},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer mockGH.Close()
+
+	poller := NewGitHubPoller("azylman/aerial", "token123")
+	poller.apiBaseURL = mockGH.URL
+	poller.pollInterval = 10 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Initial poll
+	hasActive := poller.pollOnce(ctx)
+	if !hasActive {
+		t.Errorf("expected hasActive=true for in_progress run")
+	}
+
+	runs, jobs := poller.GetSnapshot()
+	if len(runs) != 1 || runs[0].ID != runID {
+		t.Fatalf("expected 1 run with ID %d, got %+v", runID, runs)
+	}
+	if len(jobs[runID]) != 1 {
+		t.Fatalf("expected 1 job for run %d, got %+v", runID, jobs)
+	}
+
+	// 304 Not Modified poll
+	hasActive2 := poller.pollOnce(ctx)
+	if !hasActive2 {
+		t.Errorf("expected hasActive=true on 304 for in_progress run")
+	}
+
+	// Nil poller GetSnapshot check
+	var nilPoller *GitHubPoller
+	nilRuns, nilJobs := nilPoller.GetSnapshot()
+	if nilRuns != nil || nilJobs != nil {
+		t.Errorf("expected nil from nilPoller.GetSnapshot")
+	}
+
+	// Empty repo Start check
+	emptyPoller := NewGitHubPoller("", "")
+	emptyPoller.Start(ctx)
+
+	// Network error pollOnce check
+	badPoller := NewGitHubPoller("azylman/aerial", "")
+	badPoller.apiBaseURL = "http://127.0.0.1:54321"
+	if badPoller.pollOnce(ctx) {
+		t.Errorf("expected false on bad poller network error")
+	}
+	badPoller.fetchJobsForRun(ctx, 123)
+
+	// Start background loop and test stopCh
+	poller.Start(ctx)
+	time.Sleep(20 * time.Millisecond)
+	close(poller.stopCh)
+	time.Sleep(10 * time.Millisecond)
+}
+
+func TestFactsSchedulesRuns_ErrorBranches(t *testing.T) {
+	// 1. Facts Handler - 405 Method Not Allowed
+	reqPost := httptest.NewRequest(http.MethodPost, "/api/facts", nil)
+	rrPost := httptest.NewRecorder()
+	handlerFacts := factsHandler("http://127.0.0.1:54321")
+	handlerFacts(rrPost, reqPost)
+	if rrPost.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405 on POST /api/facts, got %d", rrPost.Code)
+	}
+
+	// Facts Handler - Upstream 500 error pass-through
+	mockErrBrain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"db failure"}`))
+	}))
+	defer mockErrBrain.Close()
+
+	rrErr := httptest.NewRecorder()
+	reqGet := httptest.NewRequest(http.MethodGet, "/api/facts", nil)
+	handlerFactsErr := factsHandler(mockErrBrain.URL)
+	handlerFactsErr(rrErr, reqGet)
+	if rrErr.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 on upstream 500, got %d", rrErr.Code)
+	}
+
+	// Facts Handler - Bad Gateway on invalid json
+	mockBadJSONBrain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`not-valid-json`))
+	}))
+	defer mockBadJSONBrain.Close()
+
+	rrBadJSON := httptest.NewRecorder()
+	handlerFactsBadJSON := factsHandler(mockBadJSONBrain.URL)
+	handlerFactsBadJSON(rrBadJSON, reqGet)
+	if rrBadJSON.Code != http.StatusBadGateway {
+		t.Errorf("expected 502 on invalid upstream JSON, got %d", rrBadJSON.Code)
+	}
+
+	// 2. Schedules Handler - 405 Method Not Allowed
+	handlerSchedules := schedulesHandler(mockErrBrain.URL)
+	rrSchedPost := httptest.NewRecorder()
+	handlerSchedules(rrSchedPost, reqPost)
+	if rrSchedPost.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405 on POST /api/schedules, got %d", rrSchedPost.Code)
+	}
+
+	// Schedules Handler - Upstream 500 error pass-through
+	rrSchedErr := httptest.NewRecorder()
+	handlerSchedules(rrSchedErr, reqGet)
+	if rrSchedErr.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 on schedules upstream 500, got %d", rrSchedErr.Code)
+	}
+
+	// Schedules Handler - Bad Gateway on invalid json
+	rrSchedBadJSON := httptest.NewRecorder()
+	handlerSchedBadJSON := schedulesHandler(mockBadJSONBrain.URL)
+	handlerSchedBadJSON(rrSchedBadJSON, reqGet)
+	if rrSchedBadJSON.Code != http.StatusBadGateway {
+		t.Errorf("expected 502 on schedules bad JSON, got %d", rrSchedBadJSON.Code)
+	}
+
+	// 3. Schedule Runs Handler - 405 Method Not Allowed
+	handlerRuns := scheduleRunsHandler(mockErrBrain.URL)
+	rrRunsPost := httptest.NewRecorder()
+	handlerRuns(rrRunsPost, reqPost)
+	if rrRunsPost.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405 on POST /api/schedules/runs, got %d", rrRunsPost.Code)
+	}
+
+	// Schedule Runs Handler - Upstream 500 error pass-through
+	rrRunsErr := httptest.NewRecorder()
+	handlerRuns(rrRunsErr, reqGet)
+	if rrRunsErr.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 on schedule runs upstream 500, got %d", rrRunsErr.Code)
+	}
+
+	// Schedule Runs Handler - Bad Gateway on invalid json
+	rrRunsBadJSON := httptest.NewRecorder()
+	handlerRunsBadJSON := scheduleRunsHandler(mockBadJSONBrain.URL)
+	handlerRunsBadJSON(rrRunsBadJSON, reqGet)
+	if rrRunsBadJSON.Code != http.StatusBadGateway {
+		t.Errorf("expected 502 on schedule runs bad JSON, got %d", rrRunsBadJSON.Code)
+	}
+}
+
+func TestDashboardServerLifecycle(t *testing.T) {
+	t.Setenv("PORT", "8080")
+	t.Setenv("BRAIN_URL", "http://brain:8080")
+	t.Setenv("GITHUB_REPO", "azylman/aerial")
+	t.Setenv("GITHUB_PAT", "my_pat")
+
+	cfg := NewDashboardConfigFromEnv()
+	if cfg.Port != "8080" || cfg.BrainURL != "http://brain:8080" || cfg.GHRepo != "azylman/aerial" {
+		t.Errorf("unexpected parsed config: %+v", cfg)
+	}
+
+	// RunDashboardServer with ephemeral port and cancellation
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+
+	go func() {
+		done <- RunDashboardServer(ctx, DashboardConfig{
+			Port:      "0",
+			BrainURL:  "http://127.0.0.1:54321",
+			GHRepo:    "",
+			GitCommit: "testcommit",
+		})
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("RunDashboardServer returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("RunDashboardServer did not shut down in time")
+	}
+
+	// RunDashboardServer bad port error
+	errBadPort := RunDashboardServer(context.Background(), DashboardConfig{
+		Port: "bad-port-string",
+	})
+	if errBadPort == nil {
+		t.Errorf("expected error on bad port in RunDashboardServer")
+	}
+}
+
+func TestFactsSchedulesRuns_SuccessParams(t *testing.T) {
+	mockBrain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/facts":
+			_ = json.NewEncoder(w).Encode(FactsAPIResponse{
+				Facts:  nil, // tests data.Facts == nil -> []
+				Total:  0,
+				Limit:  10,
+				Offset: 5,
+				Status: "ok",
+			})
+		case "/schedules":
+			_ = json.NewEncoder(w).Encode(SchedulesAPIResponse{
+				Crons:    nil, // tests data.Crons == nil -> []
+				OneShots: nil, // tests data.OneShots == nil -> []
+				Status:   "ok",
+			})
+		case "/schedules/runs":
+			_ = json.NewEncoder(w).Encode(ScheduleRunsAPIResponse{
+				Runs:   nil, // tests data.Runs == nil -> []
+				Total:  0,
+				Limit:  10,
+				Offset: 5,
+				Status: "ok",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer mockBrain.Close()
+
+	// 1. Facts with all query parameters
+	longQuery := strings.Repeat("searchterm", 10)
+	reqFacts := httptest.NewRequest(http.MethodGet, "/api/facts?limit=10&offset=5&category=user&q="+longQuery, nil)
+	rrFacts := httptest.NewRecorder()
+	handlerFacts := factsHandler(mockBrain.URL)
+	handlerFacts(rrFacts, reqFacts)
+	if rrFacts.Code != http.StatusOK {
+		t.Errorf("expected 200 OK on facts with query params, got %d", rrFacts.Code)
+	}
+
+	// 2. Schedules with active=true, active=false, search, limit, offset
+	reqSched := httptest.NewRequest(http.MethodGet, "/api/schedules?limit=5&offset=2&active=true&q=weather", nil)
+	rrSched := httptest.NewRecorder()
+	handlerSched := schedulesHandler(mockBrain.URL)
+	handlerSched(rrSched, reqSched)
+	if rrSched.Code != http.StatusOK {
+		t.Errorf("expected 200 OK on schedules active=true, got %d", rrSched.Code)
+	}
+
+	reqSchedFalse := httptest.NewRequest(http.MethodGet, "/api/schedules?active=false", nil)
+	rrSchedFalse := httptest.NewRecorder()
+	handlerSched(rrSchedFalse, reqSchedFalse)
+	if rrSchedFalse.Code != http.StatusOK {
+		t.Errorf("expected 200 OK on schedules active=false, got %d", rrSchedFalse.Code)
+	}
+
+	// 3. Schedule runs with status, schedule_id, limit, offset
+	reqRuns := httptest.NewRequest(http.MethodGet, "/api/schedules/runs?limit=10&offset=5&status=SUCCESS&schedule_id=42", nil)
+	rrRuns := httptest.NewRecorder()
+	handlerRuns := scheduleRunsHandler(mockBrain.URL)
+	handlerRuns(rrRuns, reqRuns)
+	if rrRuns.Code != http.StatusOK {
+		t.Errorf("expected 200 OK on runs with params, got %d", rrRuns.Code)
+	}
+
+	// 4. Offline degradation for all 3 handlers
+	offlineURL := "http://127.0.0.1:54321"
+	rrOfflineFacts := httptest.NewRecorder()
+	factsHandler(offlineURL)(rrOfflineFacts, reqFacts)
+	if rrOfflineFacts.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 on offline brain facts, got %d", rrOfflineFacts.Code)
+	}
+
+	rrOfflineSched := httptest.NewRecorder()
+	schedulesHandler(offlineURL)(rrOfflineSched, reqSched)
+	if rrOfflineSched.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 on offline brain schedules, got %d", rrOfflineSched.Code)
+	}
+
+	rrOfflineRuns := httptest.NewRecorder()
+	scheduleRunsHandler(offlineURL)(rrOfflineRuns, reqRuns)
+	if rrOfflineRuns.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 on offline brain runs, got %d", rrOfflineRuns.Code)
+	}
+}

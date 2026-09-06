@@ -605,18 +605,9 @@ func GetEnv(key, defaultVal string) string {
 }
 
 func EnsureAgySettings(apiKey, model string) error {
-	homeDir := os.Getenv("HOME")
-	if homeDir == "" {
-		var err error
-		homeDir, err = os.UserHomeDir()
-		if err != nil || homeDir == "" {
-			homeDir = "/root"
-		}
-	}
-	// Test isolation guard: if running within a test binary and homeDir is unset or points to /root,
-	// isolate to a temporary directory so un-sandboxed tests never clobber production settings.json.
-	if (strings.HasSuffix(os.Args[0], ".test") || strings.HasSuffix(os.Args[0], ".test.exe")) && (homeDir == "/root" || homeDir == "") {
-		homeDir = filepath.Join(os.TempDir(), "aerial-test-gemini-home")
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		homeDir = "/root"
 	}
 	configDir := filepath.Join(homeDir, ".gemini", "antigravity-cli")
 	if err := os.MkdirAll(configDir, 0755); err != nil {

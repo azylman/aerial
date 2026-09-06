@@ -2,6 +2,7 @@ package skills
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -47,6 +48,15 @@ func TestScheduleTools(t *testing.T) {
 		t.Errorf("Expected non-empty response from CancelSchedule cron")
 	}
 
+	// Test CancelSchedule for one_shot
+	oneShotCancelRes, err := tools.CancelSchedule(ctx, "one_shot", "oneshot-id")
+	if err != nil {
+		t.Fatalf("CancelSchedule for one_shot failed: %v", err)
+	}
+	if oneShotCancelRes == "" {
+		t.Errorf("Expected non-empty response from CancelSchedule one_shot")
+	}
+
 	// Test nil DB error handling
 	nilTools := NewScheduleTools(nil)
 	if _, err := nilTools.ScheduleOneShot(ctx, "t", "p", runAt); err == nil {
@@ -57,5 +67,16 @@ func TestScheduleTools(t *testing.T) {
 	}
 	if _, err := nilTools.CancelSchedule(ctx, "one_shot", "id"); err == nil {
 		t.Errorf("Expected error for nil DB in CancelSchedule")
+	}
+
+	// Test closed DB error handling
+	closedDB, err := db.InitDB(filepath.Join(t.TempDir(), "closed.db"))
+	if err == nil {
+		_ = closedDB.Close()
+		closedTools := NewScheduleTools(closedDB)
+		_, _ = closedTools.ScheduleOneShot(ctx, "t", "p", runAt)
+		_, _ = closedTools.ScheduleCron(ctx, "t", "* * * * *", "p", nextRun)
+		_, _ = closedTools.CancelSchedule(ctx, "cron", "id")
+		_, _ = closedTools.CancelSchedule(ctx, "one_shot", "id")
 	}
 }

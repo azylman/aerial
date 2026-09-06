@@ -28,6 +28,7 @@ import (
 	"github.com/azylman/aerial/brain/pkg/skills"
 	"github.com/azylman/aerial/brain/pkg/sanitizer"
 	"github.com/azylman/aerial/brain/pkg/watcher"
+	"github.com/bwmarrin/discordgo"
 	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
 )
@@ -793,19 +794,62 @@ func metricsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func main() {
-	cfg, err := config.LoadConfig()
-	if err != nil {
-		log.Printf("Warning: initial LoadConfig error: %v", err)
+func SetupBrainMux(database *sql.DB, pool *queue.WorkerPool, reloadFn func(string)) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", metrics.Handler())
+	mux.HandleFunc("/prompt", handlePrompt(database, pool))
+	mux.HandleFunc("/transcripts", handleTranscripts(database))
+	mux.HandleFunc("/tasks", handleTasks(database))
+	mux.HandleFunc("/facts", handleFacts(database))
+	mux.HandleFunc("/schedules", handleSchedules(database))
+	mux.HandleFunc("/schedules/runs", handleScheduleRuns(database))
+	mux.HandleFunc("/internal/reload", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
+			return
+		}
+		if reloadFn != nil {
+			reloadFn("Internal Sidecar Trigger")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"reloaded"}`))
+	})
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
+	return mux
+}
+
+type BrainConfig struct {
+	Port         string
+	AgyBin       string
+	APIKey       string
+	SystemPrompt string
+	Model        string
+	DBPath       string
+	DiscordToken string
+}
+
+func NewBrainConfigFromEnv(cfg config.Config) BrainConfig {
+	return BrainConfig{
+		Port:         config.GetEnv("PORT", "8080"),
+		AgyBin:       config.GetEnv("AGY_BIN", "agy"),
+		APIKey:       config.GetEnv("GEMINI_API_KEY", config.GetEnv("ANTIGRAVITY_API_KEY", "")),
+		SystemPrompt: config.GetEnv("SYSTEM_PROMPT", ""),
+		Model:        cfg.Model,
+		DBPath:       db.GetDBPath(),
+		DiscordToken: config.GetEnv("DISCORD_TOKEN", config.GetEnv("DISCORD_BOT_TOKEN", "")),
 	}
+}
 
-	portStr := config.GetEnv("PORT", "8080")
-	agyBin := config.GetEnv("AGY_BIN", "agy")
-	apiKey := config.GetEnv("GEMINI_API_KEY", config.GetEnv("ANTIGRAVITY_API_KEY", ""))
-	systemPrompt := config.GetEnv("SYSTEM_PROMPT", "")
-
-	if err := config.EnsureAgySettings(apiKey, cfg.Model); err != nil {
-		log.Printf("Warning: EnsureAgySettings error: %v", err)
+func InitializeBrainEnvironment(apiKey, model, systemPrompt string) {
+	if apiKey != "" {
+		if err := config.EnsureAgySettings(apiKey, model); err != nil {
+			log.Printf("Warning: EnsureAgySettings error: %v", err)
+		}
 	}
 	if err := config.EnsureSystemRules(systemPrompt); err != nil {
 		log.Printf("Warning: EnsureSystemRules error: %v", err)
@@ -838,44 +882,10 @@ func main() {
 			}
 		}
 	}
+}
 
-	dbPath := db.GetDBPath()
-	database, err := db.InitDB(dbPath)
-	if err != nil {
-		log.Fatalf("Failed to initialize database: %v", err)
-	}
-	defer func() {
-		if err := database.Close(); err != nil {
-			log.Printf("Error closing database: %v", err)
-		}
-	}()
-
-	clsModel := config.GetEnv("AMBIENT_CLASSIFIER_MODEL", "Gemini 3.8 Flash (Low)")
-	cls := classifier.NewClassifier(
-		classifier.WithModel(clsModel),
-		classifier.WithLLMFunc(classifier.NewAgyLLMFunc(agyBin, apiKey, runner.RunAgy)),
-	)
-
-	pool := queue.NewWorkerPool(queue.WorkerPoolConfig{
-		DB:           database,
-		AgyBin:       agyBin,
-		APIKey:       apiKey,
-		Model:        cfg.Model,
-		SystemPrompt: systemPrompt,
-		Classifier:   cls,
-	})
-	pool.Start()
-	defer pool.Stop()
-
-	// Connect Discord Gateway session before startup crash recovery
-	dgSession := connectDiscordFunnel(database, pool)
-	if dgSession != nil {
-		defer func() {
-			_ = dgSession.Close()
-		}()
-	}
-
-	reloadConfig := func(source string) {
+func CreateReloadConfigFunc(pool *queue.WorkerPool, apiKey, systemPrompt string, dgSession *discordgo.Session) func(source string) {
+	return func(source string) {
 		log.Printf("[%s] Changes detected. Reloading configuration, system rules, and skills...", source)
 		latestCfg, parseErr := config.LoadConfig()
 		if parseErr != nil {
@@ -894,15 +904,19 @@ func main() {
 		latestModel := latestCfg.Model
 		latestMcpConfig := config.LoadMCPConfig()
 
-		if err := config.EnsureAgySettings(apiKey, latestModel); err != nil {
-			log.Printf("[%s] Warning: EnsureAgySettings error: %v", source, err)
+		if apiKey != "" {
+			if err := config.EnsureAgySettings(apiKey, latestModel); err != nil {
+				log.Printf("[%s] Warning: EnsureAgySettings error: %v", source, err)
+			}
 		}
 		if len(latestMcpConfig) > 0 {
 			if err := config.EnsureMcpConfig(latestMcpConfig); err != nil {
 				log.Printf("[%s] Warning: EnsureMcpConfig error: %v", source, err)
 			}
 		}
-		pool.UpdateRuntimeConfig(latestModel)
+		if pool != nil {
+			pool.UpdateRuntimeConfig(latestModel)
+		}
 		if err := config.EnsureSystemRules(systemPrompt); err != nil {
 			log.Printf("[%s] Warning: EnsureSystemRules error: %v", source, err)
 		}
@@ -910,6 +924,51 @@ func main() {
 			log.Printf("[%s] Warning: EnsureSkills error: %v", source, err)
 		}
 	}
+}
+
+func RunBrainApp(ctx context.Context, bCfg BrainConfig) error {
+	InitializeBrainEnvironment(bCfg.APIKey, bCfg.Model, bCfg.SystemPrompt)
+
+	dbPath := bCfg.DBPath
+	if dbPath == "" {
+		dbPath = db.GetDBPath()
+	}
+	database, err := db.InitDB(dbPath)
+	if err != nil {
+		return fmt.Errorf("failed to initialize database: %w", err)
+	}
+	defer func() {
+		if err := database.Close(); err != nil {
+			log.Printf("Error closing database: %v", err)
+		}
+	}()
+
+	clsModel := config.GetEnv("AMBIENT_CLASSIFIER_MODEL", "Gemini 3.8 Flash (Low)")
+	cls := classifier.NewClassifier(
+		classifier.WithModel(clsModel),
+		classifier.WithLLMFunc(classifier.NewAgyLLMFunc(bCfg.AgyBin, bCfg.APIKey, runner.RunAgy)),
+	)
+
+	pool := queue.NewWorkerPool(queue.WorkerPoolConfig{
+		DB:           database,
+		AgyBin:       bCfg.AgyBin,
+		APIKey:       bCfg.APIKey,
+		Model:        bCfg.Model,
+		SystemPrompt: bCfg.SystemPrompt,
+		Classifier:   cls,
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	// Connect Discord Gateway session before startup crash recovery
+	dgSession := connectDiscordFunnel(ctx, database, pool, bCfg.DiscordToken)
+	if dgSession != nil {
+		defer func() {
+			_ = dgSession.Close()
+		}()
+	}
+
+	reloadConfig := CreateReloadConfigFunc(pool, bCfg.APIKey, bCfg.SystemPrompt, dgSession)
 
 	// Start background file watcher for atomic hot-reloading of prompts and skills
 	fileWatcher, err := watcher.NewWatcher(
@@ -933,17 +992,18 @@ func main() {
 			filepath.Join(homeDir, ".gemini", "config", "skills"),
 		}
 
-		for _, dir := range watchDirs {
-			if _, err := os.Stat(dir); err == nil {
-				if addErr := fileWatcher.AddRecursive(dir); addErr != nil {
-					log.Printf("Warning: failed to watch %s: %v", dir, addErr)
+		watcherCtx, watcherCancel := context.WithCancel(ctx)
+		defer watcherCancel()
+		go func() {
+			for _, dir := range watchDirs {
+				if _, err := os.Stat(dir); err == nil {
+					if addErr := fileWatcher.AddRecursive(dir); addErr != nil {
+						log.Printf("Warning: failed to watch %s: %v", dir, addErr)
+					}
 				}
 			}
-		}
-
-		watcherCtx, watcherCancel := context.WithCancel(context.Background())
-		defer watcherCancel()
-		go fileWatcher.Start(watcherCtx)
+			fileWatcher.Start(watcherCtx)
+		}()
 		defer func() { _ = fileWatcher.Close() }()
 	}
 
@@ -951,68 +1011,59 @@ func main() {
 	queue.RecoverInterrupted(database, pool)
 
 	// Start background scheduler monitor for due cron and one-shot routines
-	stopScheduler := scheduler.Start(context.Background(), database, pool, dgSession)
+	stopScheduler := scheduler.Start(ctx, database, pool, dgSession)
 	defer stopScheduler()
 
-	mux := http.NewServeMux()
-	mux.Handle("/metrics", metrics.Handler())
-	mux.HandleFunc("/prompt", handlePrompt(database, pool))
-	mux.HandleFunc("/transcripts", handleTranscripts(database))
-	mux.HandleFunc("/tasks", handleTasks(database))
-	mux.HandleFunc("/facts", handleFacts(database))
-	mux.HandleFunc("/schedules", handleSchedules(database))
-	mux.HandleFunc("/schedules/runs", handleScheduleRuns(database))
-	mux.HandleFunc("/internal/reload", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
-			return
-		}
-		reloadConfig("Internal Sidecar Trigger")
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"reloaded"}`))
-	})
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
-	})
+	mux := SetupBrainMux(database, pool, reloadConfig)
 
 	srv := &http.Server{
-		Addr:    ":" + portStr,
+		Addr:    ":" + bCfg.Port,
 		Handler: metricsMiddleware(mux),
 	}
+
+	errChan := make(chan error, 1)
+	go func() {
+		log.Printf("Aerial Brain listening on port %s (model=%s, timeout=%dm)", bCfg.Port, bCfg.Model, queue.DefaultTimeoutMinutes)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			errChan <- err
+		}
+	}()
+
+	select {
+	case <-ctx.Done():
+		log.Println("Shutting down Aerial Brain gracefully...")
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			log.Printf("HTTP shutdown error: %v", err)
+		}
+		log.Println("Aerial Brain shutdown complete")
+		return nil
+	case err := <-errChan:
+		return err
+	}
+}
+
+func main() {
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		log.Printf("Warning: initial LoadConfig error: %v", err)
+	}
+
+	bCfg := NewBrainConfigFromEnv(cfg)
 
 	stopChan := make(chan os.Signal, 1)
 	signal.Notify(stopChan, os.Interrupt, syscall.SIGTERM)
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	go func() {
-		log.Printf("Aerial Brain listening on port %s (model=%s, timeout=%dm)", portStr, cfg.Model, queue.DefaultTimeoutMinutes)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Server failed: %v", err)
-		}
+		<-stopChan
+		cancel()
 	}()
 
-	<-stopChan
-	log.Println("Shutting down Aerial Brain gracefully...")
-
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer shutdownCancel()
-
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		log.Printf("HTTP shutdown error: %v", err)
+	if err := RunBrainApp(ctx, bCfg); err != nil && err != http.ErrServerClosed {
+		log.Fatalf("Server failed: %v", err)
 	}
-
-	if stopScheduler != nil {
-		stopScheduler()
-	}
-	pool.Stop()
-	if dgSession != nil {
-		_ = dgSession.Close()
-	}
-	if err := database.Close(); err != nil {
-		log.Printf("Error closing database: %v", err)
-	}
-
-	log.Println("Aerial Brain shutdown complete")
 }

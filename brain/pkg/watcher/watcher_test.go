@@ -294,3 +294,46 @@ func TestWatcher_ConcurrentCallbacks(t *testing.T) {
 		t.Errorf("Expected max concurrent executions to be 1, got %d", maxVal)
 	}
 }
+
+func TestAddCallbackAndClose(t *testing.T) {
+	w, err := NewWatcher()
+	if err != nil {
+		t.Fatalf("Failed to create watcher: %v", err)
+	}
+
+	var called bool
+	w.AddCallback(func() {
+		called = true
+	})
+
+	w.executeCallbacks()
+	if !called {
+		t.Errorf("expected callback added with AddCallback to be called")
+	}
+
+	// Close twice to test idempotency
+	if err := w.Close(); err != nil {
+		t.Errorf("expected Close to succeed, got %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Errorf("expected second Close to succeed, got %v", err)
+	}
+
+	// triggerDebounced and executeCallbacks after close should be no-op
+	w.triggerDebounced()
+	w.executeCallbacks()
+}
+
+func TestWatcher_NonExistentDir(t *testing.T) {
+	w, err := NewWatcher()
+	if err != nil {
+		t.Fatalf("Failed to create watcher: %v", err)
+	}
+	defer func() { _ = w.Close() }()
+
+	err = w.AddRecursive("/path/to/definitely/nonexistent/directory")
+	if err == nil {
+		t.Errorf("expected error when adding non-existent directory")
+	}
+}
+

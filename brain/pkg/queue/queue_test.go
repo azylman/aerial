@@ -4824,4 +4824,1072 @@ func TestWorkerPoolShutdown_AmbientClassifierCancellationPreserved(t *testing.T)
 	}
 }
 
+func TestQueue_IdleWorkerShutdownAndReactivation(t *testing.T) {
+	origTimeout := threadWorkerIdleTimeout
+	threadWorkerIdleTimeout = 15 * time.Millisecond
+	defer func() { threadWorkerIdleTimeout = origTimeout }()
+
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer database.Close()
+
+	var completedCount int32
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB: database,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			return mockJSONResponse("sess-idle-1", "response"), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			atomic.AddInt32(&completedCount, 1)
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	// 1. Send first message
+	now := time.Now().UTC()
+	msg1 := db.Message{
+		ID:         "msg-idle-1",
+		ThreadID:   "thread-idle-1",
+		GuildID:    "guild-idle-1",
+		AuthorID:   "user-1",
+		AuthorName: "User",
+		Content:    "first message",
+		Status:     db.StatusPending,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	_ = db.InsertMessage(database, msg1)
+	pool.Enqueue(msg1)
+
+	// Wait for msg1 to complete
+	deadline := time.Now().Add(2 * time.Second)
+	for atomic.LoadInt32(&completedCount) < 1 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if atomic.LoadInt32(&completedCount) < 1 {
+		t.Fatal("Timeout waiting for msg1")
+	}
+
+	// 2. Sleep past idle timeout to let thread worker exit
+	time.Sleep(60 * time.Millisecond)
+
+	pool.mu.Lock()
+	numWorkers := len(pool.threadChs)
+	pool.mu.Unlock()
+	if numWorkers != 0 {
+		t.Errorf("Expected 0 active thread channels after idle timeout, got %d", numWorkers)
+	}
+
+	// 3. Send second message on same thread, verifying new worker spins up and processes
+	msg2 := db.Message{
+		ID:         "msg-idle-2",
+		ThreadID:   "thread-idle-1",
+		GuildID:    "guild-idle-1",
+		AuthorID:   "user-1",
+		AuthorName: "User",
+		Content:    "second message",
+		Status:     db.StatusPending,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	_ = db.InsertMessage(database, msg2)
+	pool.Enqueue(msg2)
+
+	for atomic.LoadInt32(&completedCount) < 2 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if atomic.LoadInt32(&completedCount) < 2 {
+		t.Fatal("Timeout waiting for msg2 on resurrected worker")
+	}
+}
+
+type queueRoundTripper struct {
+	roundTrip func(req *http.Request) (*http.Response, error)
+}
+
+func (q *queueRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return q.roundTrip(req)
+}
+
+func TestQueue_DefaultHistoryFetcher_EdgeCases(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer database.Close()
+
+	// 1. Non-numeric channelID / nil session fallback to DB
+	fetcherNilSess := DefaultHistoryFetcher(nil, database)
+	msgs, err := fetcherNilSess(context.Background(), "non-numeric-chan", "", 0)
+	if err != nil {
+		t.Fatalf("unexpected error for nil session: %v", err)
+	}
+	if len(msgs) != 0 {
+		t.Errorf("expected 0 msgs, got %d", len(msgs))
+	}
+
+	// 2. Empty channelID
+	msgsEmpty, err := fetcherNilSess(context.Background(), "", "", 10)
+	if err != nil || len(msgsEmpty) != 0 {
+		t.Errorf("expected empty results for empty channelID")
+	}
+
+	// 3. Mock Discord session with various message roles, limits, and timestamps
+	dg, _ := discordgo.New("Bot mock_token")
+	dg.State = discordgo.NewState()
+	dg.State.User = &discordgo.User{ID: "bot-123456", Username: "aerial"}
+
+	// JSON response with:
+	// - Message from aerial bot (Assistant)
+	// - Message from webhook (Bot)
+	// - Message with empty timestamp (SnowflakeTimestamp)
+	// - Message with nil Author
+	jsonMsgs := `[
+		{"id":"1545815162324263001","channel_id":"1545815162324263002","content":"hello from bot","author":{"id":"bot-123456","username":"aerial","bot":true},"timestamp":"2026-09-06T12:00:00Z"},
+		{"id":"1545815162324263002","channel_id":"1545815162324263002","content":"hello from webhook","webhook_id":"webhook-999","timestamp":"2026-09-06T12:01:00Z"},
+		{"id":"1545815162324263003","channel_id":"1545815162324263002","content":"hello from user","author":{"id":"user-999","username":"alex","bot":false}},
+		null
+	]`
+	dg.Client = &http.Client{
+		Transport: &queueRoundTripper{
+			roundTrip: func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(jsonMsgs)),
+					Header:     make(http.Header),
+				}, nil
+			},
+		},
+	}
+
+	fetcher := DefaultHistoryFetcher(dg, database)
+	// Test limit clamp > 100 -> 100, before as non-snowflake -> ""
+	res, err := fetcher(context.Background(), "1545815162324263002", "not-a-snowflake", 200)
+	if err != nil {
+		t.Fatalf("fetcher failed: %v", err)
+	}
+	if len(res) != 3 {
+		t.Fatalf("expected 3 parsed history messages, got %d", len(res))
+	}
+	if res[0].Role != "Assistant" {
+		t.Errorf("expected Assistant role for aerial, got %q", res[0].Role)
+	}
+	if res[1].Role != "Bot" || res[1].AuthorName != "Webhook" {
+		t.Errorf("expected Webhook Bot role, got %s / %s", res[1].Role, res[1].AuthorName)
+	}
+	if res[2].Role != "User" {
+		t.Errorf("expected User role for user-999, got %q", res[2].Role)
+	}
+
+	// 4. Discord API returns HTTP 500 -> falls back to DB
+	dgErr, _ := discordgo.New("Bot mock_token")
+	dgErr.Client = &http.Client{
+		Transport: &queueRoundTripper{
+			roundTrip: func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusInternalServerError,
+					Body:       io.NopCloser(strings.NewReader("server error")),
+					Header:     make(http.Header),
+				}, nil
+			},
+		},
+	}
+	fetcherFallback := DefaultHistoryFetcher(dgErr, database)
+	resFallback, err := fetcherFallback(context.Background(), "1545815162324263002", "", 10)
+	if err != nil {
+		t.Fatalf("expected fallback to DB without error, got %v", err)
+	}
+	if len(resFallback) != 0 {
+		t.Errorf("expected 0 DB fallback msgs, got %d", len(resFallback))
+	}
+}
+
+func TestQueue_FetchHistoryFromDB_EdgeCases(t *testing.T) {
+	// 1. Nil database
+	resNil, err := fetchHistoryFromDB(nil, "chan1", 10)
+	if resNil != nil || err != nil {
+		t.Error("expected nil, nil for nil DB")
+	}
+
+	// 2. Closed database (error)
+	closedDB, _ := db.InitDB(filepath.Join(t.TempDir(), "closed_hist.db"))
+	_ = closedDB.Close()
+	_, err = fetchHistoryFromDB(closedDB, "chan1", 10)
+	if err == nil {
+		t.Error("expected error for closed DB")
+	}
+
+	// 3. Various author roles
+	database, _ := db.InitDB(":memory:")
+	defer database.Close()
+	now := time.Now().UTC()
+
+	_ = db.InsertMessage(database, db.Message{
+		ID: "m1", ThreadID: "th-roles", AuthorID: "assistant", AuthorName: "aerial", Content: "hello", Status: db.StatusCompleted, CreatedAt: now, UpdatedAt: now,
+	})
+	_ = db.InsertMessage(database, db.Message{
+		ID: "m2", ThreadID: "th-roles", AuthorID: "scheduler", AuthorName: "Scheduler", Content: "daily news", Status: db.StatusCompleted, CreatedAt: now.Add(1 * time.Second), UpdatedAt: now.Add(1 * time.Second),
+	})
+	_ = db.InsertMessage(database, db.Message{
+		ID: "m3", ThreadID: "th-roles", AuthorID: "bot-custom", AuthorName: "Bot", Content: "alert", Status: db.StatusCompleted, CreatedAt: now.Add(2 * time.Second), UpdatedAt: now.Add(2 * time.Second),
+	})
+	_ = db.InsertMessage(database, db.Message{
+		ID: "m4", ThreadID: "th-roles", AuthorID: "user-100", AuthorName: "Alex", Content: "hey", Status: db.StatusCompleted, CreatedAt: now.Add(3 * time.Second), UpdatedAt: now.Add(3 * time.Second),
+	})
+
+	hist, err := fetchHistoryFromDB(database, "th-roles", 10)
+	if err != nil {
+		t.Fatalf("fetchHistoryFromDB failed: %v", err)
+	}
+	if len(hist) != 4 {
+		t.Fatalf("expected 4 history msgs, got %d", len(hist))
+	}
+}
+
+func TestQueue_ProcessBurst_StaleAndIgnoredWithScheduleRun(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer database.Close()
+
+	// 1. Stale message with schedule run
+	staleTime := time.Now().UTC().Add(-2 * time.Hour)
+	schedRunID := "run-stale-999"
+	_ = db.CreateScheduleRun(database, db.ScheduleRun{
+		ID:           schedRunID,
+		ScheduleID:   "sched-1",
+		ScheduleType: "cron",
+		MessageID:    "msg-stale-1",
+		TargetID:     "chan-1",
+		ThreadID:     "th-1",
+		Title:        "Stale Title",
+		Prompt:       "Stale Prompt",
+		Status:       "enqueued",
+		StartedAt:    staleTime,
+	})
+
+	staleMsg := db.Message{
+		ID:            "msg-stale-1",
+		ThreadID:      "th-stale-1",
+		GuildID:       "guild-1",
+		AuthorID:      "scheduler",
+		AuthorName:    "Scheduler",
+		Content:       "stale prompt",
+		Status:        db.StatusPending,
+		ScheduleRunID: schedRunID,
+		CreatedAt:     staleTime,
+		UpdatedAt:     staleTime,
+	}
+	_ = db.InsertMessage(database, staleMsg)
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:           database,
+		StalenessTTL: 10 * time.Minute,
+	})
+	pool.processBurst([]db.Message{staleMsg})
+
+	// Verify schedule run marked completed with [EXPIRED_STALE]
+	runs, _, _ := db.GetScheduleRunsPaginated(database, 10, 0, "sched-1", "")
+	if len(runs) > 0 && runs[0].Error != "[EXPIRED_STALE]" {
+		t.Errorf("expected [EXPIRED_STALE], got %q", runs[0].Error)
+	}
+
+	// 2. Ignored policy with schedule run
+	now := time.Now().UTC()
+	ignoreRunID := "run-ignore-999"
+	_ = db.CreateScheduleRun(database, db.ScheduleRun{
+		ID:           ignoreRunID,
+		ScheduleID:   "sched-2",
+		ScheduleType: "cron",
+		MessageID:    "msg-ignore-1",
+		TargetID:     "chan-ignore",
+		ThreadID:     "th-ignore",
+		Title:        "Ignore Title",
+		Prompt:       "Ignore Prompt",
+		Status:       "enqueued",
+		StartedAt:    now,
+	})
+
+	ignoreMsg := db.Message{
+		ID:            "msg-ignore-1",
+		ThreadID:      "chan-ignore",
+		GuildID:       "chan-ignore",
+		AuthorID:      "user-1",
+		AuthorName:    "User",
+		Content:       "ignored prompt",
+		Status:        db.StatusPending,
+		ScheduleRunID: ignoreRunID,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}
+	_ = db.InsertMessage(database, ignoreMsg)
+
+	poolIgnore := NewWorkerPool(WorkerPoolConfig{
+		DB: database,
+		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
+			return config.ChannelPolicy{Mode: "ignore"}
+		},
+	})
+	poolIgnore.processBurst([]db.Message{ignoreMsg})
+
+	// 3. Panic in runner with schedule run
+	panicRunID := "run-panic-999"
+	_ = db.CreateScheduleRun(database, db.ScheduleRun{
+		ID:           panicRunID,
+		ScheduleID:   "sched-3",
+		ScheduleType: "cron",
+		MessageID:    "msg-panic-1",
+		TargetID:     "chan-panic",
+		ThreadID:     "th-panic",
+		Title:        "Panic Title",
+		Prompt:       "Panic Prompt",
+		Status:       "enqueued",
+		StartedAt:    now,
+	})
+
+	panicMsg := db.Message{
+		ID:            "msg-panic-1",
+		ThreadID:      "th-panic",
+		GuildID:       "guild-1",
+		AuthorID:      "user-1",
+		AuthorName:    "User",
+		Content:       "panic prompt",
+		Status:        db.StatusPending,
+		ScheduleRunID: panicRunID,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}
+	_ = db.InsertMessage(database, panicMsg)
+
+	poolPanic := NewWorkerPool(WorkerPoolConfig{
+		DB: database,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			panic("simulated runner explosion")
+		},
+	})
+	poolPanic.processBurst([]db.Message{panicMsg})
+}
+
+func TestQueue_CacheDiscordChannel_Nil(t *testing.T) {
+	CacheDiscordChannel(nil)
+	CacheDiscordChannel(&discordgo.Channel{ID: ""})
+}
+
+func TestQueue_RecoverInterrupted_EdgeCases(t *testing.T) {
+	// 1. Nil args
+	RecoverInterrupted(nil, nil)
+
+	// 2. Closed DB error handling
+	closedDB, _ := db.InitDB(filepath.Join(t.TempDir(), "closed_recover.db"))
+	_ = closedDB.Close()
+	poolClosed := NewWorkerPool(WorkerPoolConfig{DB: closedDB})
+	RecoverInterrupted(closedDB, poolClosed)
+
+	// 3. Valid DB with interrupted processing messages, poison pills, and schedule runs
+	memDB, _ := db.InitDB(":memory:")
+	defer memDB.Close()
+
+	now := time.Now().UTC()
+	// Message 1: Normal processing message (should be reset to pending and enqueued)
+	_ = db.InsertMessage(memDB, db.Message{
+		ID:            "m-proc-1",
+		ThreadID:      "th-proc-1",
+		AuthorID:      "user-1",
+		AuthorName:    "Alex",
+		Content:       "in progress",
+		Status:        db.StatusProcessing,
+		RetryCount:    0,
+		ScheduleRunID: "run-proc-1",
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	})
+	_ = db.CreateScheduleRun(memDB, db.ScheduleRun{
+		ID:           "run-proc-1",
+		ScheduleID:   "sched-1",
+		ScheduleType: "cron",
+		MessageID:    "m-proc-1",
+		TargetID:     "th-proc-1",
+		ThreadID:     "th-proc-1",
+		Title:        "Proc Title",
+		Prompt:       "Proc Prompt",
+		Status:       "running",
+		StartedAt:    now,
+	})
+
+	// Message 2: Poison pill message (RetryCount >= 3 in processing, should be marked failed)
+	longSnippet := strings.Repeat("poison content text ", 10)
+	_ = db.InsertMessage(memDB, db.Message{
+		ID:         "m-poison-1",
+		ThreadID:   "th-proc-1",
+		AuthorID:   "user-1",
+		AuthorName: "Alex",
+		Content:    longSnippet,
+		Status:     db.StatusProcessing,
+		RetryCount: 3,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	})
+
+	var enqueued []db.Message
+	var deliveredPoison string
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB: memDB,
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			deliveredPoison = text
+			return nil
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	RecoverInterrupted(memDB, pool)
+
+	// Verify poison message marked failed in DB
+	msgPoison, err := db.GetMessage(memDB, "m-poison-1")
+	if err != nil || msgPoison == nil {
+		t.Fatalf("GetMessage failed: %v", err)
+	}
+	if msgPoison.Status != db.StatusFailed {
+		t.Errorf("expected poison pill status FAILED, got %s", msgPoison.Status)
+	}
+	_ = enqueued
+	_ = deliveredPoison
+}
+
+func TestQueue_StopTwice_EnqueueStopped_ContextCancelled(t *testing.T) {
+	database, _ := db.InitDB(":memory:")
+	defer database.Close()
+
+	pool := NewWorkerPool(WorkerPoolConfig{DB: database})
+	pool.Start()
+	pool.Stop()
+	// Stop second time
+	pool.Stop()
+
+	// Enqueue to stopped pool
+	pool.Enqueue(db.Message{ID: "msg-stopped", ThreadID: "th-stopped"})
+
+	// Enqueue with cancelled pool context but unstopped flag
+	pool2 := NewWorkerPool(WorkerPoolConfig{DB: database})
+	pool2.cancel() // cancel context
+	pool2.Enqueue(db.Message{ID: "msg-ctx-done", ThreadID: "th-ctx-done"})
+}
+
+func TestQueue_ExtractMessageBody_EdgeCases(t *testing.T) {
+	// 1. XML wrapper without - content:
+	res1 := extractMessageBody("<USER_REQUEST>\n  Inner content text  \n</USER_REQUEST>")
+	if res1 != "Inner content text" {
+		t.Errorf("expected 'Inner content text', got %q", res1)
+	}
+
+	// 2. Content with no ending markers
+	res2 := extractMessageBody("<USER_REQUEST>\n- content: just content text")
+	if res2 != "just content text" {
+		t.Errorf("expected 'just content text', got %q", res2)
+	}
+
+	// 3. Escaped tags
+	res3 := extractMessageBody("<USER_REQUEST>\n- content: escaped <\\/USER_REQUEST> and <\\USER_REQUEST>\n- timestamp: 2026-09-06")
+	if !strings.Contains(res3, "</USER_REQUEST>") || !strings.Contains(res3, "<USER_REQUEST>") {
+		t.Errorf("expected unescaped tags, got %q", res3)
+	}
+}
+
+func TestQueue_RunThreadWorker_ClosedChannelAndMultiDrain(t *testing.T) {
+	database, _ := db.InitDB(":memory:")
+	defer database.Close()
+
+	var processedCount int32
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB: database,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			return mockJSONResponse("sess-multi", "resp"), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
+		TypingFunc:   func(s *discordgo.Session, channelID string) (stop func()) { return func() {} },
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			atomic.AddInt32(&processedCount, 1)
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	// Fill channel with 5 messages immediately to exercise DrainLoop
+	ch := make(chan db.Message, 10)
+	now := time.Now().UTC()
+	for i := 1; i <= 5; i++ {
+		m := db.Message{
+			ID:         fmt.Sprintf("msg-burst-%d", i),
+			ThreadID:   "th-burst-multi",
+			GuildID:    "guild-1",
+			AuthorID:   "user-1",
+			AuthorName: "User",
+			Content:    fmt.Sprintf("burst msg %d", i),
+			Status:     db.StatusPending,
+			CreatedAt:  now,
+			UpdatedAt:  now,
+		}
+		_ = db.InsertMessage(database, m)
+		ch <- m
+	}
+
+	pool.wg.Add(1)
+	go pool.runThreadWorker("th-burst-multi", ch)
+
+	// Wait for all 5 to complete
+	deadline := time.Now().Add(3 * time.Second)
+	for atomic.LoadInt32(&processedCount) < 5 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if atomic.LoadInt32(&processedCount) < 5 {
+		t.Errorf("expected 5 processed burst messages, got %d", atomic.LoadInt32(&processedCount))
+	}
+
+	// Close channel to test worker clean exit on !ok
+	close(ch)
+}
+
+func TestQueue_ProcessBurst_WakeModeAllAndMention(t *testing.T) {
+	database, _ := db.InitDB(":memory:")
+	defer database.Close()
+
+	// 1. wakeMode == "all"
+	poolAll := NewWorkerPool(WorkerPoolConfig{
+		DB: database,
+		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
+			return config.ChannelPolicy{Mode: "channel", WakeMode: "all"}
+		},
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			return mockJSONResponse("sess-all", "resp"), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
+		TypingFunc:   func(s *discordgo.Session, channelID string) (stop func()) { return func() {} },
+	})
+
+	now := time.Now().UTC()
+	msgAll := db.Message{
+		ID:         "msg-all-1",
+		ThreadID:   "chan-wake-all",
+		GuildID:    "chan-wake-all",
+		AuthorID:   "user-1",
+		AuthorName: "User",
+		Content:    "hello anyone",
+		Status:     db.StatusPending,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	_ = db.InsertMessage(database, msgAll)
+	poolAll.processBurst([]db.Message{msgAll})
+
+	// 2. wakeMode == "mention" with no mention (ambient)
+	poolMention := NewWorkerPool(WorkerPoolConfig{
+		DB: database,
+		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
+			return config.ChannelPolicy{Mode: "channel", WakeMode: "mention"}
+		},
+	})
+	msgMention := db.Message{
+		ID:         "msg-mention-ambient",
+		ThreadID:   "chan-wake-mention",
+		GuildID:    "chan-wake-mention",
+		AuthorID:   "user-1",
+		AuthorName: "User",
+		Content:    "chitchat without mention",
+		Status:     db.StatusPending,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	_ = db.InsertMessage(database, msgMention)
+	poolMention.processBurst([]db.Message{msgMention})
+
+	mResult, _ := db.GetMessage(database, "msg-mention-ambient")
+	if mResult != nil && !strings.Contains(mResult.ErrorMessage, "mention_mode_ambient") {
+		t.Errorf("expected mention_mode_ambient telemetry in ErrorMessage, got %q", mResult.ErrorMessage)
+	}
+}
+
+func TestQueue_ProcessBurst_LeadingAndTrailingWakeAndMemoryInjection(t *testing.T) {
+	database, _ := db.InitDB(":memory:")
+	defer database.Close()
+
+	var deliveredPrompt string
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB: database,
+		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
+			return config.ChannelPolicy{Mode: "channel", WakeMode: "mention"}
+		},
+		MemoryRetrieverFunc: func(ctx context.Context, dbConn *sql.DB, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+			return []db.Fact{
+				{Category: "user_pref", FactText: "Alex loves coffee"},
+			}, nil
+		},
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			deliveredPrompt = prompt
+			return mockJSONResponse("sess-lead-trail", "resp"), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
+		TypingFunc:   func(s *discordgo.Session, channelID string) (stop func()) { return func() {} },
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	// Burst with 3 messages:
+	// 1. leading ambient (no mention)
+	// 2. middle wake (contains mention)
+	// 3. trailing wake (contains mention)
+	now := time.Now().UTC()
+	m1 := db.Message{
+		ID:         "m-lead-ambient",
+		ThreadID:   "chan-lead-trail",
+		GuildID:    "chan-lead-trail",
+		AuthorID:   "user-1",
+		AuthorName: "User",
+		Content:    "ambient chatter",
+		Status:     db.StatusPending,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	m2 := db.Message{
+		ID:         "m-mid-wake",
+		ThreadID:   "chan-lead-trail",
+		GuildID:    "chan-lead-trail",
+		AuthorID:   "user-1",
+		AuthorName: "User",
+		Content:    "<@aerial> wake middle",
+		Status:     db.StatusPending,
+		CreatedAt:  now.Add(1 * time.Second),
+		UpdatedAt:  now.Add(1 * time.Second),
+	}
+	m3 := db.Message{
+		ID:         "m-trail-wake",
+		ThreadID:   "chan-lead-trail",
+		GuildID:    "chan-lead-trail",
+		AuthorID:   "user-1",
+		AuthorName: "User",
+		Content:    "<@aerial> wake trailing",
+		Status:     db.StatusPending,
+		CreatedAt:  now.Add(2 * time.Second),
+		UpdatedAt:  now.Add(2 * time.Second),
+	}
+
+	_ = db.InsertMessage(database, m1)
+	_ = db.InsertMessage(database, m2)
+	_ = db.InsertMessage(database, m3)
+
+	pool.processBurst([]db.Message{m1, m2, m3})
+
+	// Verify memory fact injection
+	if !strings.Contains(deliveredPrompt, "Alex loves coffee") {
+		t.Errorf("expected memory context in prompt, got: %s", deliveredPrompt)
+	}
+
+	// Verify m1 marked completed ambient
+	m1Res, _ := db.GetMessage(database, "m-lead-ambient")
+	if m1Res != nil && m1Res.Status != db.StatusCompleted {
+		t.Errorf("expected m1 COMPLETED, got %s", m1Res.Status)
+	}
+}
+
+func TestQueue_ProcessBurst_DeliveryWithAttachmentsAndParseError(t *testing.T) {
+	database, _ := db.InitDB(":memory:")
+	defer database.Close()
+
+	var deliveredAttachments int
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB: database,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			return mockJSONResponse("sess-att", "Here is your response"), "", 0, nil
+		},
+		DeliveryWithAttachmentsFunc: func(s *discordgo.Session, channelID, text string, files []*delivery.Attachment) error {
+			deliveredAttachments = len(files)
+			return fmt.Errorf("simulated delivery error")
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) { return func() {} },
+	})
+
+	now := time.Now().UTC()
+	msg := db.Message{
+		ID:         "msg-att-1",
+		ThreadID:   "thread-att-1",
+		GuildID:    "guild-att-1",
+		AuthorID:   "user-1",
+		AuthorName: "Alex",
+		Content:    "test attachments",
+		Status:     db.StatusPending,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	_ = db.InsertMessage(database, msg)
+	pool.processBurst([]db.Message{msg})
+	_ = deliveredAttachments
+
+	// 2. Test exit 0 but invalid JSON output (parseErr branch)
+	var retryCount int32
+	poolParseErr := NewWorkerPool(WorkerPoolConfig{
+		DB:          database,
+		MaxAttempts: 2,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			atomic.AddInt32(&retryCount, 1)
+			if atomic.LoadInt32(&retryCount) == 1 {
+				return "invalid-json-output", "", 0, nil
+			}
+			return mockJSONResponse("sess-retry", "recovered output"), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
+		TypingFunc:   func(s *discordgo.Session, channelID string) (stop func()) { return func() {} },
+	})
+	msgParseErr := db.Message{
+		ID:         "msg-parse-err-1",
+		ThreadID:   "thread-parse-1",
+		GuildID:    "guild-parse-1",
+		AuthorID:   "user-1",
+		AuthorName: "Alex",
+		Content:    "test parse err",
+		Status:     db.StatusPending,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	_ = db.InsertMessage(database, msgParseErr)
+	poolParseErr.processBurst([]db.Message{msgParseErr})
+
+	// Verify retry occurred
+	if atomic.LoadInt32(&retryCount) < 2 {
+		t.Errorf("expected runner to retry after parseErr, got %d attempts", atomic.LoadInt32(&retryCount))
+	}
+}
+
+func TestQueue_NewWorkerPool_DefaultConfig(t *testing.T) {
+	// 1. All nil / default configs
+	pool := NewWorkerPool(WorkerPoolConfig{
+		TimeoutMinutes: -1,
+		BackoffBase:    -1,
+		MaxAttempts:    -1,
+	})
+	if pool.cfg.TimeoutMinutes != DefaultTimeoutMinutes {
+		t.Errorf("expected default timeout %d, got %d", DefaultTimeoutMinutes, pool.cfg.TimeoutMinutes)
+	}
+	if pool.cfg.MaxAttempts != 3 {
+		t.Errorf("expected default 3 max attempts, got %d", pool.cfg.MaxAttempts)
+	}
+	// Exercise default ResolveChannelPolicy
+	pol := pool.cfg.ResolveChannelPolicy("123", "general")
+	if pol.Mode == "" {
+		// valid
+	}
+
+	// 2. DeliveryFunc non-nil but DeliveryWithAttachmentsFunc nil
+	var calledDelivery bool
+	pool2 := NewWorkerPool(WorkerPoolConfig{
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			calledDelivery = true
+			return nil
+		},
+	})
+	_ = pool2.cfg.DeliveryWithAttachmentsFunc(nil, "chan1", "text", nil)
+	if !calledDelivery {
+		t.Error("expected DeliveryFunc fallback to be called")
+	}
+}
+
+func TestQueue_FormatChannelHistory_EdgeCases(t *testing.T) {
+	// 1. Empty input
+	if FormatChannelHistory(nil) != "" {
+		t.Error("expected empty string for nil messages")
+	}
+
+	// 2. Messages older than maxHistoryAge or zero CreatedAt
+	oldTime := time.Now().UTC().Add(-48 * time.Hour)
+	histOld := FormatChannelHistory([]HistoryMessage{
+		{CreatedAt: oldTime, Content: "too old"},
+		{CreatedAt: time.Time{}, Content: "zero time"},
+	})
+	if histOld != "" {
+		t.Errorf("expected empty string for old/zero messages, got %q", histOld)
+	}
+
+	// 3. Message with empty role, empty author (Assistant), long content > 1000 runes
+	now := time.Now().UTC()
+	longContent := strings.Repeat("a", 1200)
+	histValid := FormatChannelHistory([]HistoryMessage{
+		{
+			CreatedAt:  now.Add(-1 * time.Minute),
+			Role:       "Assistant",
+			AuthorName: "", // empty author for Assistant -> Aerial
+			Content:    "assistant response",
+		},
+		{
+			CreatedAt:  now,
+			Role:       "", // empty role -> User
+			AuthorName: "", // empty author for User -> @User
+			Content:    longContent,
+		},
+	})
+	if !strings.Contains(histValid, "[Aerial (Assistant)]") {
+		t.Errorf("expected '[Aerial (Assistant)]', got: %s", histValid)
+	}
+	if !strings.Contains(histValid, "[@User (User)]") {
+		t.Errorf("expected '[@User (User)]', got: %s", histValid)
+	}
+	if !strings.Contains(histValid, "... [truncated]") {
+		t.Errorf("expected truncation marker in: %s", histValid)
+	}
+}
+
+func TestQueue_RunThreadWorker_DirectExecution(t *testing.T) {
+	database, _ := db.InitDB(":memory:")
+	defer database.Close()
+
+	var processed int32
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB: database,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			return mockJSONResponse("sess-direct", "resp"), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
+		TypingFunc:   func(s *discordgo.Session, channelID string) (stop func()) { return func() {} },
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			atomic.AddInt32(&processed, 1)
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	ch := make(chan db.Message, 10)
+	now := time.Now().UTC()
+	m1 := db.Message{
+		ID:         "msg-direct-1",
+		ThreadID:   "th-direct-1",
+		GuildID:    "guild-1",
+		AuthorID:   "user-1",
+		AuthorName: "User",
+		Content:    "direct msg 1",
+		Status:     db.StatusPending,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	_ = db.InsertMessage(database, m1)
+	ch <- m1
+
+	pool.wg.Add(1)
+	go pool.runThreadWorker("th-direct-1", ch)
+
+	// Wait for processing
+	deadline := time.Now().Add(2 * time.Second)
+	for atomic.LoadInt32(&processed) < 1 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if atomic.LoadInt32(&processed) < 1 {
+		t.Errorf("expected 1 message processed, got %d", atomic.LoadInt32(&processed))
+	}
+}
+
+func TestQueue_ProcessBurst_ChannelSessionRotationAtTurnLimit(t *testing.T) {
+	database, _ := db.InitDB(":memory:")
+	defer database.Close()
+
+	threadID := "chan-turn-limit"
+	// Set turn count to 50
+	for i := 0; i < 50; i++ {
+		_, _ = db.IncrementSessionTurnCount(database, threadID)
+	}
+	_ = db.SaveSessionID(database, threadID, "sess-old-50")
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB: database,
+		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
+			return config.ChannelPolicy{Mode: "channel", WakeMode: "all"}
+		},
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			return mockJSONResponse("sess-new-fresh", "fresh response"), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
+		TypingFunc:   func(s *discordgo.Session, channelID string) (stop func()) { return func() {} },
+	})
+
+	now := time.Now().UTC()
+	msg := db.Message{
+		ID:         "msg-rotate-50",
+		ThreadID:   threadID,
+		GuildID:    threadID,
+		AuthorID:   "user-1",
+		AuthorName: "User",
+		Content:    "hello after 50 turns",
+		Status:     db.StatusPending,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	_ = db.InsertMessage(database, msg)
+	pool.processBurst([]db.Message{msg})
+
+	// Verify session was rotated and saved
+	sessAfter, _ := db.GetSessionID(database, threadID)
+	if sessAfter != "sess-new-fresh" {
+		t.Errorf("expected rotated session 'sess-new-fresh', got %q", sessAfter)
+	}
+}
+
+func TestQueue_NewWorkerPool_AllNilConfig(t *testing.T) {
+	p := NewWorkerPool(WorkerPoolConfig{})
+	if p == nil || p.cfg.Classifier == nil || p.cfg.SystemAlertFunc == nil {
+		t.Fatal("expected non-nil defaults")
+	}
+	_ = p.cfg.SystemAlertFunc(nil, "chan1", "warning", "alert text")
+}
+
+func TestQueue_RunThreadWorker_ClosedChannelImmediate(t *testing.T) {
+	pool := NewWorkerPool(WorkerPoolConfig{})
+	ch := make(chan db.Message)
+	close(ch)
+	pool.wg.Add(1)
+	pool.runThreadWorker("th-closed-immediate", ch)
+}
+
+func TestQueue_ProcessBurst_SessionCorruptionRetry(t *testing.T) {
+	database, _ := db.InitDB(":memory:")
+	defer database.Close()
+
+	var attempts int32
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:          database,
+		MaxAttempts: 2,
+		BackoffBase: 5 * time.Millisecond,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			atomic.AddInt32(&attempts, 1)
+			if atomic.LoadInt32(&attempts) == 1 {
+				// Exit with session corruption
+				return "", "Error: session corrupt cannot load history", 1, fmt.Errorf("session corrupted")
+			}
+			return mockJSONResponse("sess-fresh-corrupt", "recovered"), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
+		TypingFunc:   func(s *discordgo.Session, channelID string) (stop func()) { return func() {} },
+	})
+
+	now := time.Now().UTC()
+	msg := db.Message{
+		ID:         "msg-corrupt-1",
+		ThreadID:   "th-corrupt-1",
+		GuildID:    "guild-1",
+		AuthorID:   "user-1",
+		AuthorName: "User",
+		Content:    "corrupt test",
+		Status:     db.StatusPending,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	_ = db.InsertMessage(database, msg)
+	pool.processBurst([]db.Message{msg})
+
+	if atomic.LoadInt32(&attempts) != 2 {
+		t.Errorf("expected 2 attempts for session corruption recovery, got %d", atomic.LoadInt32(&attempts))
+	}
+}
+
+func TestQueue_ProcessBurst_ExhaustionTransientMessage(t *testing.T) {
+	database, _ := db.InitDB(":memory:")
+	defer database.Close()
+
+	var deliveredExhaustion string
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:          database,
+		MaxAttempts: 1,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			return "", "RESOURCE_EXHAUSTED: rate limit 429", 1, fmt.Errorf("rate limited")
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			deliveredExhaustion = text
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) { return func() {} },
+	})
+
+	now := time.Now().UTC()
+	msg := db.Message{
+		ID:         "msg-exhaust-1",
+		ThreadID:   "th-exhaust-1",
+		GuildID:    "guild-1",
+		AuthorID:   "user-1",
+		AuthorName: "User",
+		Content:    "exhaust test",
+		Status:     db.StatusPending,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	_ = db.InsertMessage(database, msg)
+	pool.processBurst([]db.Message{msg})
+
+	if deliveredExhaustion == "" {
+		t.Error("expected exhaustion notification delivered")
+	}
+}
+
+func TestQueue_ProcessBurst_BackoffCancellation(t *testing.T) {
+	database, _ := db.InitDB(":memory:")
+	defer database.Close()
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:          database,
+		MaxAttempts: 3,
+		BackoffBase: 100 * time.Millisecond,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			return "", "transient network error", 1, fmt.Errorf("network reset")
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
+		TypingFunc:   func(s *discordgo.Session, channelID string) (stop func()) { return func() {} },
+	})
+
+	now := time.Now().UTC()
+	msg := db.Message{
+		ID:            "msg-backoff-cancel",
+		ThreadID:      "th-backoff-cancel",
+		GuildID:       "guild-1",
+		AuthorID:      "user-1",
+		AuthorName:    "User",
+		Content:       "cancel test",
+		Status:        db.StatusPending,
+		ScheduleRunID: "run-cancel-1",
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}
+	_ = db.InsertMessage(database, msg)
+	_ = db.CreateScheduleRun(database, db.ScheduleRun{
+		ID:           "run-cancel-1",
+		ScheduleID:   "sched-1",
+		ScheduleType: "cron",
+		MessageID:    "msg-backoff-cancel",
+		TargetID:     "th-backoff-cancel",
+		ThreadID:     "th-backoff-cancel",
+		Title:        "Cancel Title",
+		Prompt:       "Cancel Prompt",
+		Status:       "running",
+		StartedAt:    now,
+	})
+
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		pool.cancel() // cancel context during backoff
+	}()
+
+	pool.processBurst([]db.Message{msg})
+}
+
+
+
+
+
+
+
+
+
+
 

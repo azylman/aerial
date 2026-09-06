@@ -1,6 +1,8 @@
 package notifier
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -50,6 +52,11 @@ func TestGenerateSessionResetAndPoisonPillFallback(t *testing.T) {
 	if !strings.Contains(resPoison, "repeated crashes") {
 		t.Errorf("Expected poison fallback when apiKey is empty, got: %q", resPoison)
 	}
+
+	resPoisonEmpty := GeneratePoisonPillMessage("agy", "", "")
+	if !strings.Contains(resPoisonEmpty, "repeated crashes") {
+		t.Errorf("Expected poison fallback when snippet is empty, got: %q", resPoisonEmpty)
+	}
 }
 
 func TestGenerateDynamicNotificationWithMock(t *testing.T) {
@@ -60,5 +67,35 @@ func TestGenerateDynamicNotificationWithMock(t *testing.T) {
 	}
 	if !strings.Contains(res, "✨") && !strings.Contains(res, "🌸") {
 		t.Errorf("Expected fallback notification with emojis, got: %q", res)
+	}
+}
+
+func TestGenerateDynamicNotification_SuccessfulAgyRun(t *testing.T) {
+	tmpDir := t.TempDir()
+	mockBin := filepath.Join(tmpDir, "mock_agy.sh")
+	scriptContent := `#!/bin/sh
+cat << 'EOF'
+{"response": "Hey bestie! ✨ Everything is running smoothly now! 🌸"}
+EOF
+`
+	if err := os.WriteFile(mockBin, []byte(scriptContent), 0755); err != nil {
+		t.Fatalf("failed to write mock script: %v", err)
+	}
+
+	res := GenerateDynamicNotification(mockBin, "valid_key", "session reset due to context corruption")
+	if !strings.Contains(res, "bestie") {
+		t.Errorf("Expected dynamic notification from mock agy, got: %q", res)
+	}
+
+	// Test with poison pill context description
+	resPoison := GenerateDynamicNotification(mockBin, "valid_key", "a message caused repeated crashes and had to be dropped")
+	if !strings.Contains(resPoison, "bestie") {
+		t.Errorf("Expected dynamic notification for poison pill, got: %q", resPoison)
+	}
+
+	// Test with 503 outage context description
+	res503 := GenerateDynamicNotification(mockBin, "valid_key", "Error 503: unavailable")
+	if !strings.Contains(res503, "bestie") {
+		t.Errorf("Expected dynamic notification for 503 outage, got: %q", res503)
 	}
 }

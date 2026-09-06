@@ -88,3 +88,10 @@ func TestSanitizeStatus(t *testing.T) {
 		}
 	}
 }
+
+func TestEmptyMetricsEdgeCases(t *testing.T) {
+	RecordPull("", "", false, 100*time.Millisecond)
+	RecordSyncRequest("", "")
+	RecordReconciliation("", 200*time.Millisecond)
+	RecordLastSync("", time.Time{})
+}

@@ -105,3 +105,21 @@ func TestMetricsRegistryAndHandler(t *testing.T) {
 		}
 	}
 }
+
+func TestMetricsDefaultFallbackBranches(t *testing.T) {
+	// Call every recorder with empty strings / negative numbers to exercise fallback defaults
+	RecordTurnCompleted("", "", "", 10*time.Millisecond)
+	RecordRunnerExecution("", "", 10*time.Millisecond)
+	RecordRunnerError("", "")
+	RecordClassifierRun("", "", 10*time.Millisecond, -1.0, "")
+	RecordDelivery("", 10*time.Millisecond)
+	RecordGatewayLatency(0)
+	RecordGatewayLatency(-5 * time.Millisecond)
+	RecordThreadCreated("")
+	RecordEmbedding("", "", "", 10*time.Millisecond)
+	RecordFactExtraction("", 10*time.Millisecond)
+	RecordDBQuery("", "", 10*time.Millisecond)
+	RecordHTTPRequest("", "", "", 10*time.Millisecond)
+	RecordChannelHistoryFetch("", "", 10*time.Millisecond, 0)
+	RecordFallbackNotification("", "", 10*time.Millisecond)
+}
