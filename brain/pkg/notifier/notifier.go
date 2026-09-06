@@ -27,6 +27,9 @@ func StaticFallback(contextDescription string) string {
 	if strings.Contains(lower, "reset") || strings.Contains(lower, "corrupt") || strings.Contains(lower, "session") {
 		return "I ran into an issue with our previous session context, so I've refreshed our conversation! ✨ Please try sending your message again! 🌸"
 	}
+	if strings.Contains(lower, "watchdog") || strings.Contains(lower, "inactivity") || strings.Contains(lower, "max duration") {
+		return "I'm so sorry, darling! ✨ My execution timed out while working on your request. Please try again or break your request into smaller steps! 🌸"
+	}
 	return "I'm so sorry, darling! ✨ I ran into a temporary hiccup with the AI service. Please try sending your message again in just a moment! 🌸"
 }
 

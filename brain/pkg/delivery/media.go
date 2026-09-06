@@ -109,9 +109,69 @@ func ExtractAndSanitizeMedia(text string, baseDir string) (string, []*Attachment
 	}
 
 	cleanedText := strings.Join(processedLines, "\n")
+	cleanedText = SanitizeIntermediateStatus(cleanedText)
 	cleanedText = cleanDuplicateBlankLines(cleanedText)
 
 	return cleanedText, attachments
+}
+
+var intermediateStatusPhrases = []string{
+	"Everything is running smoothly! I'll keep working on this and check in shortly.",
+	"Everything is running smoothly! I'll keep working on this and check in shortly!",
+	"Everything is running smoothly! I'll keep working on this and check in shortly",
+}
+
+func isSubstantiveContent(s string) bool {
+	clean := strings.Trim(strings.TrimSpace(s), " \t\r\n.!?*-_~`")
+	return len(clean) > 0
+}
+
+// SanitizeIntermediateStatus strips repetitive intermediate task status preambles
+// when followed by substantive response content, and deduplicates consecutive identical lines.
+func SanitizeIntermediateStatus(s string) string {
+	trimmed := strings.TrimSpace(s)
+	if trimmed == "" {
+		return ""
+	}
+
+	// 1. If the message starts with one or more intermediate status phrases followed by other content,
+	// strip them off so the final substantive response is not cluttered with status updates.
+	working := trimmed
+	for {
+		stripped := false
+		for _, phrase := range intermediateStatusPhrases {
+			trimmedWorking := strings.TrimSpace(working)
+			if strings.HasPrefix(trimmedWorking, phrase) {
+				remainder := strings.TrimSpace(strings.TrimPrefix(trimmedWorking, phrase))
+				// Only strip if there is substantive remainder (not just punctuation or empty)
+				if isSubstantiveContent(remainder) {
+					working = remainder
+					stripped = true
+					break
+				}
+			}
+		}
+		if !stripped {
+			break
+		}
+	}
+
+	// 2. Deduplicate consecutive identical lines
+	lines := strings.Split(working, "\n")
+	var deduped []string
+	var prevLine string
+	for _, l := range lines {
+		trimmedLine := strings.TrimSpace(l)
+		if trimmedLine != "" && trimmedLine == prevLine {
+			continue
+		}
+		deduped = append(deduped, l)
+		if trimmedLine != "" {
+			prevLine = trimmedLine
+		}
+	}
+
+	return strings.TrimSpace(strings.Join(deduped, "\n"))
 }
 
 func cleanDuplicateBlankLines(s string) string {

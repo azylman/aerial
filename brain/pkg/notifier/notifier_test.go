@@ -34,6 +34,12 @@ func TestStaticFallback(t *testing.T) {
 		t.Errorf("Expected poison pill fallback message, got: %q", msgPoison)
 	}
 
+	// Watchdog timeout
+	msgWatchdog := StaticFallback("execution terminated by watchdog: inactivity timeout exceeded")
+	if !strings.Contains(msgWatchdog, "timed out") {
+		t.Errorf("Expected watchdog timeout fallback message, got: %q", msgWatchdog)
+	}
+
 	// General error
 	msgGeneral := StaticFallback("Fatal unknown error")
 	if !strings.Contains(msgGeneral, "hiccup") {

@@ -1112,12 +1112,18 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		currentAPIKey := p.cfg.APIKey
 		p.mu.Unlock()
 
-		runCtx, runCancel := context.WithTimeout(p.ctx, time.Duration(currentTimeout)*time.Minute)
+		promptToSend := turnPrompt
+		if attempt > 1 && currentSessionID != "" && session.SessionExistsOnDisk(currentSessionID) {
+			promptToSend = "Your previous execution timed out or was interrupted while working. Please inspect where you left off in the conversation transcript and continue the task to completion."
+		}
+
+		// Pad Go context by +1 minute relative to runner watchdog ceiling so the runner watchdog always fires cleanly
+		runCtx, runCancel := context.WithTimeout(p.ctx, time.Duration(currentTimeout+1)*time.Minute)
 
 		stdout, stderr, exitCode, err := p.cfg.RunnerFunc(
 			runCtx,
 			currentAgyBin,
-			turnPrompt,
+			promptToSend,
 			currentSessionID,
 			currentAPIKey,
 			currentModel,
@@ -1132,13 +1138,49 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		lastErrDetail = errDetail
 
 		if isFailure {
-			if runner.IsInactivityTimeout(errDetail, stderr) || strings.Contains(errDetail, "[watchdog]") || strings.Contains(errDetail, "inactivity timeout exceeded") || strings.Contains(errDetail, "max duration exceeded") {
-				stopTyping()
+			isWatchdog := runner.IsInactivityTimeout(errDetail, stderr) || strings.Contains(errDetail, "[watchdog]") || strings.Contains(errDetail, "inactivity timeout exceeded") || strings.Contains(errDetail, "max duration exceeded")
+
+			errCat := "process_error"
+			if isWatchdog {
+				errCat = "watchdog_timeout"
+			} else if isTransient {
+				errCat = "transient"
+			} else if isSessionCorruption {
+				errCat = "session_corrupt"
+			}
+			metrics.RecordRunnerError(errCat, currentModel)
+
+			if isWatchdog {
 				for _, m := range burst {
 					_ = db.IncrementMessageRetry(p.cfg.DB, m.ID, errDetail)
 				}
+				if attempt < maxAttempts {
+					backoff := time.Duration(attempt) * p.cfg.BackoffBase
+					log.Printf("[WorkerPool] Retrying watchdog timeout in %v (attempt %d/%d, preserving session %s)", backoff, attempt, maxAttempts, currentSessionID)
+					select {
+					case <-time.After(backoff):
+					case <-p.ctx.Done():
+						metrics.RecordTurnCompleted("cancelled", triggerType, currentModel, time.Since(execStart))
+						for _, m := range burst {
+							if m.ScheduleRunID != "" {
+								_ = db.UpdateScheduleRunStatus(p.cfg.DB, db.UpdateRunParams{
+									RunID:       m.ScheduleRunID,
+									MessageID:   m.ID,
+									Status:      "failed",
+									CompletedAt: time.Now().UTC(),
+									DurationMs:  time.Since(execStart).Milliseconds(),
+									Error:       "context cancelled during execution",
+								})
+							}
+						}
+						return
+					}
+					continue
+				}
+
+				// Exhausted all attempts on watchdog timeout
+				stopTyping()
 				_ = db.RotateSessionID(p.cfg.DB, threadID, "")
-				metrics.RecordRunnerError("watchdog_timeout", currentModel)
 				metrics.RecordTurnCompleted("watchdog_timeout", triggerType, currentModel, time.Since(execStart))
 
 				if !skipDiscord {
@@ -1165,17 +1207,9 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 						p.cfg.OnMessageCompleted(m, db.StatusFailed)
 					}
 				}
-				log.Printf("[WorkerPool] %d message(s) in thread %s marked FAILED immediately due to watchdog timeout without retries: %s", len(burst), threadID, errDetail)
+				log.Printf("[WorkerPool] %d message(s) in thread %s marked FAILED after exhausting %d attempts on watchdog timeout: %s", len(burst), threadID, maxAttempts, errDetail)
 				return
 			}
-
-			errCat := "process_error"
-			if isTransient {
-				errCat = "transient"
-			} else if isSessionCorruption {
-				errCat = "session_corrupt"
-			}
-			metrics.RecordRunnerError(errCat, currentModel)
 		}
 
 		if !isFailure {

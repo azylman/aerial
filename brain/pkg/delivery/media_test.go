@@ -188,3 +188,28 @@ func TestExtractAndSanitizeMedia_EdgeCases(t *testing.T) {
 		t.Errorf("expected max %d attachments, got %d", MaxAttachmentsPerMessage, len(attsMany))
 	}
 }
+
+func TestSanitizeIntermediateStatus(t *testing.T) {
+	// 1. Multiple repetitive intermediate status preambles before actual response
+	input := "Everything is running smoothly! I'll keep working on this and check in shortly.\nEverything is running smoothly! I'll keep working on this and check in shortly.\nEverything is running smoothly! I'll keep working on this and check in shortly.\nThe girl gang ran a full 4-expert architectural audit."
+	got := SanitizeIntermediateStatus(input)
+	want := "The girl gang ran a full 4-expert architectural audit."
+	if got != want {
+		t.Errorf("Expected %q, got %q", want, got)
+	}
+
+	// 2. Single intermediate status with no other content is preserved
+	single := "Everything is running smoothly! I'll keep working on this and check in shortly."
+	if gotSingle := SanitizeIntermediateStatus(single); gotSingle != single {
+		t.Errorf("Expected single status preserved %q, got %q", single, gotSingle)
+	}
+
+	// 3. Consecutive identical lines deduplicated
+	dupLines := "Header line\nSame detail line\nSame detail line\nFooter line"
+	gotDup := SanitizeIntermediateStatus(dupLines)
+	wantDup := "Header line\nSame detail line\nFooter line"
+	if gotDup != wantDup {
+		t.Errorf("Expected %q, got %q", wantDup, gotDup)
+	}
+}
+

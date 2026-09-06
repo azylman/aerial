@@ -4824,7 +4824,7 @@ func TestWorkerPoolShutdown_AmbientClassifierCancellationPreserved(t *testing.T)
 	}
 }
 
-func TestQueue_WatchdogInactivityFatalNoRetry(t *testing.T) {
+func TestQueue_WatchdogInactivityRetryAndExhaustion(t *testing.T) {
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -4883,13 +4883,13 @@ func TestQueue_WatchdogInactivityFatalNoRetry(t *testing.T) {
 
 	select {
 	case <-doneCh:
-	case <-time.After(3 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("Timeout waiting for message processing")
 	}
 
 	calls := atomic.LoadInt32(&runnerCalls)
-	if calls != 1 {
-		t.Errorf("Expected RunnerFunc to be called exactly 1 time, got: %d", calls)
+	if calls != 3 {
+		t.Errorf("Expected RunnerFunc to be retried exactly 3 times, got: %d", calls)
 	}
 
 	dbMsg, err := db.GetMessage(database, "msg-watchdog-101")
@@ -4904,10 +4904,126 @@ func TestQueue_WatchdogInactivityFatalNoRetry(t *testing.T) {
 	}
 
 	mu.Lock()
-	if deliveredChannel != "thread-watchdog-202" || (!strings.Contains(deliveredText, "terminated by watchdog") && !strings.Contains(deliveredText, "hiccup")) {
+	if deliveredChannel != "thread-watchdog-202" || !strings.Contains(deliveredText, "timed out") {
 		t.Errorf("Unexpected delivery: channel=%q, text=%q", deliveredChannel, deliveredText)
 	}
 	mu.Unlock()
 }
+
+func TestQueue_WatchdogInactivityRetryAndRecovery(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	var runnerCalls int32
+	var promptsSeen []string
+	var mu sync.Mutex
+	doneCh := make(chan struct{})
+
+	var deliveredText string
+	var deliveredChannel string
+
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	mockSessID := "recovery-uuid-505"
+	sessDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", mockSessID)
+	_ = os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs"), 0755)
+	if err := os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte("mock transcript data\n"), 0600); err != nil {
+		t.Fatalf("failed to write mock transcript: %v", err)
+	}
+	_ = db.SaveSessionID(database, "thread-recovery-505", mockSessID)
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    3,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			call := atomic.AddInt32(&runnerCalls, 1)
+			mu.Lock()
+			promptsSeen = append(promptsSeen, prompt)
+			mu.Unlock()
+
+			if call == 1 {
+				// Attempt 1 fails due to watchdog inactivity timeout
+				return "", "[watchdog] inactivity timeout exceeded (5m without output)", -1, fmt.Errorf("exit status 255")
+			}
+
+			// Attempt 2 recovers and succeeds cleanly
+			return fmt.Sprintf(`{"conversation_id":%q,"status":"SUCCESS","response":"Recovered successfully on retry!"}`, sessionID), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			mu.Lock()
+			deliveredChannel = channelID
+			deliveredText = text
+			mu.Unlock()
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			close(doneCh)
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{
+		ID:         "msg-recovery-101",
+		ThreadID:   "thread-recovery-505",
+		GuildID:    "guild-303",
+		AuthorID:   "user-404",
+		AuthorName: "User",
+		Content:    "Run a long task",
+		Status:     db.StatusPending,
+		CreatedAt:  time.Now().UTC(),
+		UpdatedAt:  time.Now().UTC(),
+	}
+	if err := db.InsertMessage(database, msg); err != nil {
+		t.Fatalf("Failed to insert message: %v", err)
+	}
+
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Timeout waiting for message processing")
+	}
+
+	calls := atomic.LoadInt32(&runnerCalls)
+	if calls != 2 {
+		t.Errorf("Expected RunnerFunc to be called exactly 2 times (failure then success), got: %d", calls)
+	}
+
+	mu.Lock()
+	if len(promptsSeen) >= 2 {
+		// Attempt 1 should contain user request
+		if !strings.Contains(promptsSeen[0], "Run a long task") {
+			t.Errorf("Attempt 1 prompt missing original user request: %q", promptsSeen[0])
+		}
+		// Attempt 2 should contain continuation prompt
+		if !strings.Contains(promptsSeen[1], "timed out or was interrupted") {
+			t.Errorf("Attempt 2 prompt missing continuation instruction: %q", promptsSeen[1])
+		}
+	}
+	if deliveredChannel != "thread-recovery-505" || !strings.Contains(deliveredText, "Recovered successfully on retry!") {
+		t.Errorf("Unexpected delivery: channel=%q, text=%q", deliveredChannel, deliveredText)
+	}
+	mu.Unlock()
+
+	dbMsg, err := db.GetMessage(database, "msg-recovery-101")
+	if err != nil || dbMsg == nil {
+		t.Fatalf("Failed to get message from DB: %v", err)
+	}
+	if dbMsg.Status != db.StatusCompleted {
+		t.Errorf("Expected message status %s, got: %s", db.StatusCompleted, dbMsg.Status)
+	}
+}
+
 
 
