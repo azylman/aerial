@@ -1132,6 +1132,43 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		lastErrDetail = errDetail
 
 		if isFailure {
+			if runner.IsInactivityTimeout(errDetail, stderr) || strings.Contains(errDetail, "[watchdog]") || strings.Contains(errDetail, "inactivity timeout exceeded") || strings.Contains(errDetail, "max duration exceeded") {
+				stopTyping()
+				for _, m := range burst {
+					_ = db.IncrementMessageRetry(p.cfg.DB, m.ID, errDetail)
+				}
+				_ = db.RotateSessionID(p.cfg.DB, threadID, "")
+				metrics.RecordRunnerError("watchdog_timeout", currentModel)
+				metrics.RecordTurnCompleted("watchdog_timeout", triggerType, currentModel, time.Since(execStart))
+
+				if !skipDiscord {
+					notif := notifier.StaticFallback("execution terminated by watchdog: " + errDetail)
+					if err := p.cfg.DeliveryFunc(p.getDiscordSession(), threadID, notif); err != nil {
+						log.Printf("[WorkerPool] Failed to deliver watchdog notice for thread %s: %v", threadID, err)
+					}
+				}
+
+				sanitizedErr := sanitizeErrorText(errDetail)
+				for _, m := range burst {
+					_ = db.UpdateMessageStatus(p.cfg.DB, m.ID, db.StatusFailed, sanitizedErr)
+					if m.ScheduleRunID != "" {
+						_ = db.UpdateScheduleRunStatus(p.cfg.DB, db.UpdateRunParams{
+							RunID:       m.ScheduleRunID,
+							MessageID:   m.ID,
+							Status:      "failed",
+							CompletedAt: time.Now().UTC(),
+							DurationMs:  time.Since(execStart).Milliseconds(),
+							Error:       sanitizedErr,
+						})
+					}
+					if p.cfg.OnMessageCompleted != nil {
+						p.cfg.OnMessageCompleted(m, db.StatusFailed)
+					}
+				}
+				log.Printf("[WorkerPool] %d message(s) in thread %s marked FAILED immediately due to watchdog timeout without retries: %s", len(burst), threadID, errDetail)
+				return
+			}
+
 			errCat := "process_error"
 			if isTransient {
 				errCat = "transient"

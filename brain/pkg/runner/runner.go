@@ -4,15 +4,84 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/azylman/aerial/brain/pkg/metrics"
 )
+
+// ActivityWriter is a thread-safe buffer that tracks write activity timestamps
+// and sniffs conversation UUIDs from stderr streams.
+type ActivityWriter struct {
+	mu           sync.Mutex
+	buf          bytes.Buffer
+	lastActivity atomic.Int64 // UnixNano
+	sessionID    atomic.Pointer[string]
+}
+
+// NewActivityWriter initializes an ActivityWriter with an optional initial session ID.
+func NewActivityWriter(initialSessionID string) *ActivityWriter {
+	w := &ActivityWriter{}
+	w.lastActivity.Store(time.Now().UnixNano())
+	if initialSessionID != "" {
+		w.sessionID.Store(&initialSessionID)
+	}
+	return w
+}
+
+// Write appends bytes to the internal buffer, updates the activity timestamp,
+// and extracts the conversation session ID if not already discovered.
+func (w *ActivityWriter) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	w.lastActivity.Store(time.Now().UnixNano())
+
+	w.mu.Lock()
+	n, err := w.buf.Write(p)
+	if w.sessionID.Load() == nil {
+		if match := reUpdateStream.FindSubmatch(p); len(match) > 1 {
+			sess := strings.TrimSpace(string(match[1]))
+			w.sessionID.Store(&sess)
+		} else if match := reGeneralSession.FindSubmatch(p); len(match) > 1 {
+			sess := strings.TrimSpace(string(match[1]))
+			w.sessionID.Store(&sess)
+		}
+	}
+	w.mu.Unlock()
+
+	return n, err
+}
+
+// String returns the accumulated buffered output under mutex protection.
+func (w *ActivityWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.String()
+}
+
+// LastActivity returns the timestamp of the most recent write.
+func (w *ActivityWriter) LastActivity() time.Time {
+	return time.Unix(0, w.lastActivity.Load())
+}
+
+// SessionID returns the dynamically extracted or initial session UUID.
+func (w *ActivityWriter) SessionID() string {
+	ptr := w.sessionID.Load()
+	if ptr == nil {
+		return ""
+	}
+	return *ptr
+}
 
 // AgyResponse models the top-level structured output of agy --output-format json.
 type AgyResponse struct {
@@ -54,8 +123,57 @@ func IsSilentSentinel(stdout string) bool {
 	return strings.TrimSpace(stdout) == ""
 }
 
-// RunAgy executes the agy binary with the given parameters, capturing stdout and stderr.
-func RunAgy(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+var (
+	ErrInactivityTimeout = errors.New("watchdog: inactivity timeout exceeded")
+	ErrMaxDuration       = errors.New("watchdog: max duration exceeded")
+)
+
+// WatchdogOptions configures execution timeouts and activity polling behavior.
+type WatchdogOptions struct {
+	InactivityTimeout time.Duration
+	MaxDuration       time.Duration
+	PollInterval      time.Duration
+	TranscriptDirs    []string
+}
+
+// activityTap wraps an io.Writer and bumps the ActivityWriter timestamp on every write.
+type activityTap struct {
+	w         io.Writer
+	actWriter *ActivityWriter
+}
+
+func (t *activityTap) Write(p []byte) (int, error) {
+	if len(p) > 0 {
+		t.actWriter.lastActivity.Store(time.Now().UnixNano())
+	}
+	return t.w.Write(p)
+}
+
+// DefaultWatchdogOptions returns sensible defaults for watchdog liveness tracking.
+func DefaultWatchdogOptions(timeoutMinutes int) WatchdogOptions {
+	maxDur := 60 * time.Minute
+	if timeoutMinutes > 0 {
+		maxDur = time.Duration(timeoutMinutes) * time.Minute
+	}
+	return WatchdogOptions{
+		InactivityTimeout: 5 * time.Minute,
+		MaxDuration:       maxDur,
+		PollInterval:      3 * time.Second,
+	}
+}
+
+// RunAgyWithWatchdog executes the agy binary with dynamic stderr, stdout, and transcript liveness monitoring.
+func RunAgyWithWatchdog(parentCtx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts WatchdogOptions) (stdout, stderr string, exitCode int, err error) {
+	if opts.InactivityTimeout <= 0 {
+		opts.InactivityTimeout = 5 * time.Minute
+	}
+	if opts.MaxDuration <= 0 {
+		opts.MaxDuration = 60 * time.Minute
+	}
+	if opts.PollInterval <= 0 {
+		opts.PollInterval = 3 * time.Second
+	}
+
 	start := time.Now()
 	defer func() {
 		status := "success"
@@ -73,15 +191,22 @@ func RunAgy(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string
 	if model != "" {
 		args = append(args, "--model", model)
 	}
-	if timeoutMinutes > 0 {
-		args = append(args, "--print-timeout", fmt.Sprintf("%dm", timeoutMinutes))
+	if opts.MaxDuration > 0 {
+		if opts.MaxDuration >= time.Minute {
+			args = append(args, "--print-timeout", fmt.Sprintf("%dm", int(opts.MaxDuration.Minutes())))
+		} else {
+			args = append(args, "--print-timeout", fmt.Sprintf("%ds", int(opts.MaxDuration.Seconds())))
+		}
 	}
 	if sessionID != "" {
 		args = append(args, "--conversation", sessionID)
 	}
 	args = append(args, "-p", prompt)
 
-	cmd := exec.CommandContext(ctx, agyBin, args...)
+	runCtx, runCancel := context.WithCancel(parentCtx)
+	defer runCancel()
+
+	cmd := exec.CommandContext(runCtx, agyBin, args...)
 	if _, statErr := os.Stat("/share/aerial"); statErr == nil {
 		cmd.Dir = "/share/aerial"
 	} else if _, statErr := os.Stat("/app"); statErr == nil {
@@ -104,15 +229,135 @@ func RunAgy(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string
 	}
 	cmd.Env = env
 
-	var outBuf, errBuf bytes.Buffer
-	cmd.Stdout = &outBuf
-	cmd.Stderr = &errBuf
+	var outBuf bytes.Buffer
+	actWriter := NewActivityWriter(sessionID)
+	cmd.Stdout = &activityTap{w: &outBuf, actWriter: actWriter}
+	cmd.Stderr = actWriter
 
 	configureSysProcAttr(cmd)
 
-	runErr := cmd.Run()
+	if startErr := cmd.Start(); startErr != nil {
+		return "", actWriter.String(), -1, startErr
+	}
+
+	var watchdogReason atomic.Pointer[string]
+	done := make(chan struct{})
+	var doneOnce sync.Once
+	stopWatchdog := func() {
+		doneOnce.Do(func() {
+			close(done)
+		})
+	}
+	defer stopWatchdog()
+
+	go func() {
+		ticker := time.NewTicker(opts.PollInterval)
+		defer ticker.Stop()
+
+		type fileState struct {
+			modTime time.Time
+			size    int64
+		}
+		lastFileStates := make(map[string]fileState)
+
+		homeDir, _ := os.UserHomeDir()
+		if homeDir == "" {
+			homeDir = "/root"
+		}
+
+		for {
+			select {
+			case <-done:
+				return
+			case <-runCtx.Done():
+				return
+			case <-ticker.C:
+				activeSess := actWriter.SessionID()
+				if activeSess != "" {
+					var candidateDirs []string
+					if len(opts.TranscriptDirs) > 0 {
+						for _, d := range opts.TranscriptDirs {
+							if strings.Contains(d, "%s") {
+								candidateDirs = append(candidateDirs, fmt.Sprintf(d, activeSess))
+							} else if strings.Contains(d, "{session}") {
+								candidateDirs = append(candidateDirs, strings.ReplaceAll(d, "{session}", activeSess))
+							} else {
+								candidateDirs = append(candidateDirs, filepath.Join(d, activeSess, ".system_generated", "logs"))
+							}
+						}
+					} else {
+						candidateDirs = []string{
+							filepath.Join("/data", "brain", activeSess, ".system_generated", "logs"),
+							filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain", activeSess, ".system_generated", "logs"),
+							filepath.Join(homeDir, ".gemini", "antigravity", "brain", activeSess, ".system_generated", "logs"),
+						}
+					}
+					for _, dir := range candidateDirs {
+						for _, filename := range []string{"transcript.jsonl", "transcript_full.jsonl"} {
+							filePath := filepath.Join(dir, filename)
+							info, statErr := os.Stat(filePath)
+							if statErr == nil {
+								prevState, exists := lastFileStates[filePath]
+								if !exists {
+									lastFileStates[filePath] = fileState{
+										modTime: info.ModTime(),
+										size:    info.Size(),
+									}
+									if info.ModTime().After(start) || info.Size() > 0 {
+										actWriter.lastActivity.Store(time.Now().UnixNano())
+									}
+								} else if info.ModTime().After(prevState.modTime) || info.Size() != prevState.size {
+									lastFileStates[filePath] = fileState{
+										modTime: info.ModTime(),
+										size:    info.Size(),
+									}
+									actWriter.lastActivity.Store(time.Now().UnixNano())
+								}
+							}
+						}
+					}
+				}
+
+				// Check inactivity timeout
+				if time.Since(actWriter.LastActivity()) > opts.InactivityTimeout {
+					reason := fmt.Sprintf("inactivity timeout exceeded (%v without output or transcript update)", opts.InactivityTimeout)
+					watchdogReason.Store(&reason)
+					runCancel()
+					return
+				}
+
+				// Check max duration cap
+				if time.Since(start) > opts.MaxDuration {
+					reason := fmt.Sprintf("max duration exceeded (%v total duration cap)", opts.MaxDuration)
+					watchdogReason.Store(&reason)
+					runCancel()
+					return
+				}
+			}
+		}
+	}()
+
+	runErr := cmd.Wait()
+	stopWatchdog()
 	stdout = outBuf.String()
-	stderr = errBuf.String()
+	stderr = actWriter.String()
+
+	if reasonPtr := watchdogReason.Load(); reasonPtr != nil {
+		reason := *reasonPtr
+		if stderr != "" && !strings.HasSuffix(stderr, "\n") {
+			stderr += "\n"
+		}
+		stderr += fmt.Sprintf("[watchdog] %s\n", reason)
+		exitCode = -1
+		if strings.Contains(reason, "inactivity timeout exceeded") {
+			err = ErrInactivityTimeout
+		} else if strings.Contains(reason, "max duration exceeded") {
+			err = ErrMaxDuration
+		} else {
+			err = fmt.Errorf("watchdog: %s", reason)
+		}
+		return stdout, stderr, exitCode, err
+	}
 
 	if runErr != nil {
 		if exitErr, ok := runErr.(*exec.ExitError); ok {
@@ -126,6 +371,11 @@ func RunAgy(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string
 	}
 
 	return stdout, stderr, exitCode, err
+}
+
+// RunAgy executes the agy binary with the given parameters, capturing stdout and stderr.
+func RunAgy(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+	return RunAgyWithWatchdog(ctx, agyBin, prompt, sessionID, apiKey, model, DefaultWatchdogOptions(timeoutMinutes))
 }
 
 var (
@@ -148,10 +398,65 @@ func ExtractSessionID(stderr string, _ time.Time) string {
 	return ""
 }
 
+// IsInactivityTimeout checks if the error message or stderr indicates an inactivity watchdog timeout.
+func IsInactivityTimeout(errDetail, stderr string) bool {
+	combined := strings.ToLower(errDetail + "\n" + stderr)
+	if strings.Contains(combined, "inactivity timeout exceeded") {
+		return true
+	}
+	if strings.Contains(combined, "[watchdog]") && strings.Contains(combined, "inactivity") {
+		return true
+	}
+	return false
+}
+
+func isWatchdogInactivity(s string) bool {
+	lower := strings.ToLower(s)
+	return strings.Contains(lower, "inactivity timeout exceeded") ||
+		(strings.Contains(lower, "[watchdog]") && strings.Contains(lower, "inactivity"))
+}
+
+func isWatchdogMaxDuration(s string) bool {
+	lower := strings.ToLower(s)
+	return strings.Contains(lower, "max duration exceeded") ||
+		(strings.Contains(lower, "[watchdog]") && strings.Contains(lower, "max duration"))
+}
+
+func extractWatchdogDetail(source string, fallbackKeyword string) string {
+	lines := strings.Split(source, "\n")
+	for _, l := range lines {
+		trimmed := strings.TrimSpace(l)
+		if strings.Contains(trimmed, "[watchdog]") || strings.Contains(strings.ToLower(trimmed), fallbackKeyword) {
+			if len(trimmed) > 200 {
+				return trimmed[:197] + "..."
+			}
+			return trimmed
+		}
+	}
+	return fallbackKeyword
+}
+
 // ClassifyError categorizes execution results into failure, transient, and session corruption states.
 func ClassifyError(exitCode int, stdout, stderr string) (isFailure bool, isTransient bool, isSessionCorruption bool, errDetail string) {
 	trimmedStdout := strings.TrimSpace(stdout)
 	trimmedStderr := strings.TrimSpace(stderr)
+	combined := strings.ToLower(trimmedStderr + "\n" + trimmedStdout)
+
+	// 1. Intercept watchdog timeout diagnoses FIRST across all exit codes (non-transient, non-corruption failure)
+	if isWatchdogInactivity(combined) {
+		source := stderr
+		if source == "" {
+			source = stdout
+		}
+		return true, false, false, extractWatchdogDetail(source, "inactivity timeout exceeded")
+	}
+	if isWatchdogMaxDuration(combined) {
+		source := stderr
+		if source == "" {
+			source = stdout
+		}
+		return true, false, false, extractWatchdogDetail(source, "max duration exceeded")
+	}
 
 	transientKeywords := []string{
 		"error 503",
@@ -223,7 +528,6 @@ func ClassifyError(exitCode int, stdout, stderr string) (isFailure bool, isTrans
 
 		resp, parseErr := ParseAgyOutput(stdout)
 		if parseErr != nil {
-			combined := strings.ToLower(trimmedStderr)
 			for _, kw := range contextWindowKeywords {
 				if strings.Contains(combined, kw) {
 					return true, false, true, "context window exceeded"
@@ -246,12 +550,13 @@ func ClassifyError(exitCode int, stdout, stderr string) (isFailure bool, isTrans
 		// Parsed JSON successfully
 		if resp.Status != "" && strings.ToUpper(resp.Status) != "SUCCESS" {
 			isFailure = true
-			errTarget := strings.ToLower(resp.Error + " " + resp.Response + " " + trimmedStderr)
-			if checkCorruption(errTarget) {
+			errTarget := resp.Error + " " + resp.Response + " " + trimmedStderr
+			errTargetLower := strings.ToLower(errTarget)
+			if checkCorruption(errTargetLower) {
 				isSessionCorruption = true
 			}
 			for _, kw := range transientKeywords {
-				if strings.Contains(errTarget, kw) {
+				if strings.Contains(errTargetLower, kw) {
 					isTransient = true
 					break
 				}
@@ -265,12 +570,13 @@ func ClassifyError(exitCode int, stdout, stderr string) (isFailure bool, isTrans
 
 		if resp.Error != "" {
 			isFailure = true
-			errTarget := strings.ToLower(resp.Error + " " + trimmedStderr)
-			if checkCorruption(errTarget) {
+			errTarget := resp.Error + " " + trimmedStderr
+			errTargetLower := strings.ToLower(errTarget)
+			if checkCorruption(errTargetLower) {
 				isSessionCorruption = true
 			}
 			for _, kw := range transientKeywords {
-				if strings.Contains(errTarget, kw) {
+				if strings.Contains(errTargetLower, kw) {
 					isTransient = true
 					break
 				}
@@ -278,8 +584,10 @@ func ClassifyError(exitCode int, stdout, stderr string) (isFailure bool, isTrans
 			return isFailure, isTransient, isSessionCorruption, resp.Error
 		}
 
-		if trimmedStderr != "" && containsFatalStderrError(trimmedStderr) {
-			return true, false, false, extractErrorDetail(trimmedStderr, exitCode)
+		if trimmedStderr != "" {
+			if containsFatalStderrError(trimmedStderr) {
+				return true, false, false, extractErrorDetail(trimmedStderr, exitCode)
+			}
 		}
 
 		return false, false, false, ""
@@ -287,7 +595,6 @@ func ClassifyError(exitCode int, stdout, stderr string) (isFailure bool, isTrans
 
 	// Non-zero exit code
 	isFailure = true
-	combined := strings.ToLower(stdout + "\n" + stderr)
 
 	if checkCorruption(combined) || (!isMCPSessionError(combined) && strings.Contains(combined, "conversation not found")) {
 		isSessionCorruption = true
