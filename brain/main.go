@@ -846,10 +846,8 @@ func NewBrainConfigFromEnv(cfg config.Config) BrainConfig {
 }
 
 func InitializeBrainEnvironment(apiKey, model, systemPrompt string) {
-	if apiKey != "" {
-		if err := config.EnsureAgySettings(apiKey, model); err != nil {
-			log.Printf("Warning: EnsureAgySettings error: %v", err)
-		}
+	if err := config.EnsureAgySettings(apiKey, model); err != nil {
+		log.Printf("Warning: EnsureAgySettings error: %v", err)
 	}
 	if err := config.EnsureSystemRules(systemPrompt); err != nil {
 		log.Printf("Warning: EnsureSystemRules error: %v", err)
@@ -904,10 +902,8 @@ func CreateReloadConfigFunc(pool *queue.WorkerPool, apiKey, systemPrompt string,
 		latestModel := latestCfg.Model
 		latestMcpConfig := config.LoadMCPConfig()
 
-		if apiKey != "" {
-			if err := config.EnsureAgySettings(apiKey, latestModel); err != nil {
-				log.Printf("[%s] Warning: EnsureAgySettings error: %v", source, err)
-			}
+		if err := config.EnsureAgySettings(apiKey, latestModel); err != nil {
+			log.Printf("[%s] Warning: EnsureAgySettings error: %v", source, err)
 		}
 		if len(latestMcpConfig) > 0 {
 			if err := config.EnsureMcpConfig(latestMcpConfig); err != nil {

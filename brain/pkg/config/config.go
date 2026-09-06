@@ -3,6 +3,7 @@ package config
 import (
 	"bytes"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -604,7 +605,15 @@ func GetEnv(key, defaultVal string) string {
 	return defaultVal
 }
 
-func EnsureAgySettings(apiKey, model string) error {
+func isTestEnvironment() bool {
+	if flag.Lookup("test.v") != nil {
+		return true
+	}
+	base := filepath.Base(os.Args[0])
+	return strings.HasSuffix(base, ".test") || strings.HasSuffix(base, ".test.exe") || strings.Contains(base, "test")
+}
+
+func getGeminiHomeDir() string {
 	homeDir := os.Getenv("HOME")
 	if homeDir == "" {
 		var err error
@@ -614,10 +623,15 @@ func EnsureAgySettings(apiKey, model string) error {
 		}
 	}
 	// Test isolation guard: if running within a test binary and homeDir is unset or points to /root,
-	// isolate to a temporary directory so un-sandboxed tests never clobber production settings.json.
-	if (strings.HasSuffix(os.Args[0], ".test") || strings.HasSuffix(os.Args[0], ".test.exe")) && (homeDir == "/root" || homeDir == "") {
+	// isolate to a temporary directory so un-sandboxed tests never clobber production settings.
+	if isTestEnvironment() && (homeDir == "/root" || homeDir == "") {
 		homeDir = filepath.Join(os.TempDir(), "aerial-test-gemini-home")
 	}
+	return homeDir
+}
+
+func EnsureAgySettings(apiKey, model string) error {
+	homeDir := getGeminiHomeDir()
 	configDir := filepath.Join(homeDir, ".gemini", "antigravity-cli")
 	if err := os.MkdirAll(configDir, 0755); err != nil {
 		return fmt.Errorf("failed to create config directory: %w", err)
@@ -759,10 +773,7 @@ func EnsureSystemRules(customPrompt string) error {
 		log.Printf("Using Last Known Good Configuration (LKGC) for system rules")
 	}
 
-	homeDir, err := os.UserHomeDir()
-	if err != nil || homeDir == "" {
-		homeDir = "/root"
-	}
+	homeDir := getGeminiHomeDir()
 
 	primaryRulesDir := filepath.Join(homeDir, ".gemini", "rules")
 	if err := os.MkdirAll(primaryRulesDir, 0755); err != nil {
@@ -937,10 +948,7 @@ func EnsureMcpConfig(rawConfig json.RawMessage) error {
 		return nil
 	}
 
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		homeDir = "/root"
-	}
+	homeDir := getGeminiHomeDir()
 	configDir := filepath.Join(homeDir, ".gemini", "config")
 	if err := os.MkdirAll(configDir, 0755); err != nil {
 		return fmt.Errorf("failed to create config directory: %w", err)

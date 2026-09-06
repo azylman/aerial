@@ -1872,6 +1872,8 @@ func TestLoadMCPConfigAndEnsure(t *testing.T) {
 	}
 
 	// Test EnsureAgySettings with and without API key
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
 	if err := EnsureAgySettings("test_key", "gemini-2.5-flash"); err != nil {
 		t.Errorf("EnsureAgySettings failed: %v", err)
 	}
@@ -1971,14 +1973,86 @@ func TestConfigPolicyRawAndBotIgnored(t *testing.T) {
 	}
 
 	// Test EnsureAgySettings with existing settings
-	homeDir, _ := os.UserHomeDir()
-	if homeDir != "" {
-		settingsPath := filepath.Join(homeDir, ".gemini", "antigravity-cli", "settings.json")
+	t.Run("EnsureAgySettings_WithExistingSettings", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		t.Setenv("HOME", tmpDir)
+		settingsPath := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "settings.json")
 		_ = writeAtomic(settingsPath, `{"existingKey":"existingVal"}`)
 		if err := EnsureAgySettings("key2", "model2"); err != nil {
 			t.Errorf("EnsureAgySettings with existing settings failed: %v", err)
 		}
-	}
+	})
+
+	// Test EnsureAgySettings heals corrupted modelProvider
+	t.Run("EnsureAgySettings_HealsCorruptedModelProvider", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		t.Setenv("HOME", tmpDir)
+
+		settingsDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli")
+		if err := os.MkdirAll(settingsDir, 0755); err != nil {
+			t.Fatalf("Failed to create settings dir: %v", err)
+		}
+
+		// Corrupt settings with modelProvider: gemini but no API key present in env
+		corrupted := map[string]interface{}{
+			"model":         "old-model",
+			"modelProvider": "gemini",
+			"someOtherKey":  "preserved_value",
+		}
+		raw, _ := json.Marshal(corrupted)
+		settingsPath := filepath.Join(settingsDir, "settings.json")
+		if err := os.WriteFile(settingsPath, raw, 0644); err != nil {
+			t.Fatalf("Failed to write corrupted settings: %v", err)
+		}
+
+		// Call EnsureAgySettings in OAuth mode (empty apiKey)
+		if err := EnsureAgySettings("", "Gemini 3.7 Flash (High)"); err != nil {
+			t.Fatalf("EnsureAgySettings failed: %v", err)
+		}
+
+		data, err := os.ReadFile(settingsPath)
+		if err != nil {
+			t.Fatalf("Failed to read healed settings: %v", err)
+		}
+		var healed map[string]interface{}
+		if err := json.Unmarshal(data, &healed); err != nil {
+			t.Fatalf("Failed to parse healed settings: %v", err)
+		}
+
+		if _, ok := healed["modelProvider"]; ok {
+			t.Fatalf("Expected modelProvider to be purged by EnsureAgySettings, but it still exists: %v", healed["modelProvider"])
+		}
+		if healed["model"] != "Gemini 3.7 Flash (High)" {
+			t.Errorf("Expected model=Gemini 3.7 Flash (High), got %v", healed["model"])
+		}
+		if healed["someOtherKey"] != "preserved_value" {
+			t.Errorf("Expected other settings keys to be preserved, got %v", healed["someOtherKey"])
+		}
+	})
+
+	// Test EnsureAgySettings test isolation guard
+	t.Run("EnsureAgySettings_TestIsolationGuard", func(t *testing.T) {
+		oldHome := os.Getenv("HOME")
+		defer func() {
+			_ = os.Setenv("HOME", oldHome)
+		}()
+		_ = os.Setenv("HOME", "/root")
+
+		isolationDir := filepath.Join(os.TempDir(), "aerial-test-gemini-home")
+		_ = os.RemoveAll(isolationDir)
+		defer func() {
+			_ = os.RemoveAll(isolationDir)
+		}()
+
+		if err := EnsureAgySettings("key", "isolated-model"); err != nil {
+			t.Fatalf("EnsureAgySettings failed with isolation: %v", err)
+		}
+
+		isolatedSettings := filepath.Join(isolationDir, ".gemini", "antigravity-cli", "settings.json")
+		if _, err := os.Stat(isolatedSettings); os.IsNotExist(err) {
+			t.Errorf("Expected test isolation guard to redirect write to %s, but file does not exist", isolatedSettings)
+		}
+	})
 	// Test LoadChannelInstructions edge cases
 	t.Run("LoadChannelInstructions_EdgeCases", func(t *testing.T) {
 		tmpDir := t.TempDir()

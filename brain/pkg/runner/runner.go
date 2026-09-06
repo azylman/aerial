@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/metrics"
 )
 
@@ -236,6 +237,9 @@ func RunAgyWithWatchdog(parentCtx context.Context, agyBin, prompt, sessionID, ap
 
 	configureSysProcAttr(cmd)
 
+	// Pre-flight: ensure settings.json matches authentication mode prior to executing agy
+	_ = config.EnsureAgySettings(apiKey, model)
+
 	if startErr := cmd.Start(); startErr != nil {
 		return "", actWriter.String(), -1, startErr
 	}
@@ -366,6 +370,9 @@ func RunAgyWithWatchdog(parentCtx context.Context, agyBin, prompt, sessionID, ap
 			exitCode = -1
 		}
 		err = runErr
+		if strings.Contains(strings.ToLower(stderr), "modelprovider is set to \"gemini\"") && apiKey == "" {
+			_ = config.EnsureAgySettings("", model)
+		}
 	} else {
 		exitCode = 0
 	}
@@ -472,6 +479,8 @@ func ClassifyError(exitCode int, stdout, stderr string) (isFailure bool, isTrans
 		"too many requests",
 		"process produced empty stdout",
 		"empty stdout",
+		"modelprovider is set to \"gemini\"",
+		"modelprovider",
 	}
 
 	corruptionKeywords := []string{

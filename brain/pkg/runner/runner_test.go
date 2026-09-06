@@ -320,6 +320,16 @@ func TestClassifyError(t *testing.T) {
 			wantCorrupt:          false,
 			errDetailMustContain: "session not found",
 		},
+		{
+			name:                 "Transient ModelProvider Missing API Key Mismatch",
+			exitCode:             1,
+			stdout:               "",
+			stderr:               `modelProvider is set to "gemini" in settings.json, but the GEMINI_API_KEY environment variable is not set. Set GEMINI_API_KEY to your Gemini API key, or remove "modelProvider" from settings.json to use the default backend.`,
+			wantFailure:          true,
+			wantTransient:        true,
+			wantCorrupt:          false,
+			errDetailMustContain: "modelProvider is set to \"gemini\"",
+		},
 	}
 
 	for _, tt := range tests {
