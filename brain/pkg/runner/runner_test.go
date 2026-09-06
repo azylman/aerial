@@ -186,7 +186,7 @@ func TestClassifyError(t *testing.T) {
 			stdout:               "",
 			stderr:               "",
 			wantFailure:          true,
-			wantTransient:        false,
+			wantTransient:        true,
 			wantCorrupt:          false,
 			errDetailMustContain: "process produced empty stdout",
 		},

@@ -5263,6 +5263,308 @@ func TestProcessBurst_ColdStartTransientRecoveryAndContinuation(t *testing.T) {
 	}
 }
 
+func TestProcessBurst_EmptyStdout_TranscriptRecovery(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	testSessID := "sess-transcript-recovery-999"
+	sessDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", testSessID)
+	_ = os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs"), 0755)
+
+	transcriptContent := `{"step_index":1,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-09-06T12:00:00Z","content":"Finish it"}
+{"step_index":2,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-09-06T12:01:00Z","content":"Finished the task with 100% coverage!"}
+`
+	if err := os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte(transcriptContent), 0600); err != nil {
+		t.Fatalf("failed to write mock transcript: %v", err)
+	}
+
+	_ = db.SaveSessionID(database, "thread-empty-stdout-1", testSessID)
+
+	var deliveredText string
+	var mu sync.Mutex
+	doneCh := make(chan struct{})
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    3,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			// agy exits 0 with empty stdout (buffering or background task yield), but response is on disk
+			return "", "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			mu.Lock()
+			deliveredText = text
+			mu.Unlock()
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			close(doneCh)
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{
+		ID:         "msg-empty-1",
+		ThreadID:   "thread-empty-stdout-1",
+		GuildID:    "guild-1",
+		AuthorID:   "user-1",
+		AuthorName: "User",
+		Content:    "Finish it",
+		Status:     db.StatusPending,
+		CreatedAt:  time.Now().UTC(),
+		UpdatedAt:  time.Now().UTC(),
+	}
+	if err := db.InsertMessage(database, msg); err != nil {
+		t.Fatalf("Failed to insert message: %v", err)
+	}
+
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Timeout waiting for message processing")
+	}
+
+	mu.Lock()
+	if !strings.Contains(deliveredText, "Finished the task with 100% coverage!") {
+		t.Errorf("Expected recovered transcript response to be delivered, got: %q", deliveredText)
+	}
+	mu.Unlock()
+
+	dbMsg, err := db.GetMessage(database, "msg-empty-1")
+	if err != nil || dbMsg == nil {
+		t.Fatalf("Failed to retrieve message: %v", err)
+	}
+	if dbMsg.Status != db.StatusCompleted {
+		t.Errorf("Expected message status COMPLETED, got: %s", dbMsg.Status)
+	}
+}
+
+func TestProcessBurst_EmptyStdout_TransientRetryAndContinuation(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	testSessID := "sess-empty-retry-888"
+	sessDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", testSessID)
+	_ = os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs"), 0755)
+
+	// No PLANNER_RESPONSE after USER_INPUT on disk
+	transcriptContent := `{"step_index":1,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-09-06T12:00:00Z","content":"Finish it"}
+`
+	if err := os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte(transcriptContent), 0600); err != nil {
+		t.Fatalf("failed to write mock transcript: %v", err)
+	}
+
+	_ = db.SaveSessionID(database, "thread-empty-retry-2", testSessID)
+
+	var runnerCalls int32
+	var promptsSeen []string
+	var sessionsSeen []string
+	var mu sync.Mutex
+	doneCh := make(chan struct{})
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    3,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			call := atomic.AddInt32(&runnerCalls, 1)
+			mu.Lock()
+			promptsSeen = append(promptsSeen, prompt)
+			sessionsSeen = append(sessionsSeen, sessionID)
+			mu.Unlock()
+
+			if call == 1 {
+				// Empty stdout on exit 0 with no transcript response -> transient error
+				return "", "", 0, nil
+			}
+
+			// Attempt 2 should receive continuation prompt and testSessID
+			return fmt.Sprintf(`{"conversation_id":%q,"status":"SUCCESS","response":"Recovered on attempt 2!"}`, sessionID), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			close(doneCh)
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{
+		ID:         "msg-empty-2",
+		ThreadID:   "thread-empty-retry-2",
+		GuildID:    "guild-2",
+		AuthorID:   "user-2",
+		AuthorName: "User",
+		Content:    "Finish it",
+		Status:     db.StatusPending,
+		CreatedAt:  time.Now().UTC(),
+		UpdatedAt:  time.Now().UTC(),
+	}
+	if err := db.InsertMessage(database, msg); err != nil {
+		t.Fatalf("Failed to insert message: %v", err)
+	}
+
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Timeout waiting for message processing")
+	}
+
+	calls := atomic.LoadInt32(&runnerCalls)
+	if calls != 2 {
+		t.Errorf("Expected exactly 2 runner calls, got: %d", calls)
+	}
+
+	mu.Lock()
+	if len(sessionsSeen) >= 2 {
+		if sessionsSeen[0] != testSessID {
+			t.Errorf("Attempt 1 expected session %q, got %q", testSessID, sessionsSeen[0])
+		}
+		if sessionsSeen[1] != testSessID {
+			t.Errorf("Attempt 2 expected preserved session %q, got %q", testSessID, sessionsSeen[1])
+		}
+	}
+	if len(promptsSeen) >= 2 {
+		if !strings.Contains(promptsSeen[1], "timed out or was interrupted") {
+			t.Errorf("Attempt 2 prompt missing continuation instruction: %q", promptsSeen[1])
+		}
+	}
+	mu.Unlock()
+}
+
+func TestProcessBurst_GeneralFailure_PreservesSessionOnDisk(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	testSessID := "sess-general-fail-777"
+	sessDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", testSessID)
+	_ = os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs"), 0755)
+
+	if err := os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte("existing transcript data\n"), 0600); err != nil {
+		t.Fatalf("failed to write mock transcript: %v", err)
+	}
+
+	_ = db.SaveSessionID(database, "thread-general-fail-3", testSessID)
+
+	var runnerCalls int32
+	var promptsSeen []string
+	var sessionsSeen []string
+	var mu sync.Mutex
+	doneCh := make(chan struct{})
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    3,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			call := atomic.AddInt32(&runnerCalls, 1)
+			mu.Lock()
+			promptsSeen = append(promptsSeen, prompt)
+			sessionsSeen = append(sessionsSeen, sessionID)
+			mu.Unlock()
+
+			if call == 1 {
+				// Non-transient exit 1 with generic error
+				return "", "fatal execution error: out of memory", 1, fmt.Errorf("exit status 1")
+			}
+
+			// Attempt 2: verify session was preserved on disk and passed in with continuation prompt
+			return fmt.Sprintf(`{"conversation_id":%q,"status":"SUCCESS","response":"Recovered from exit 1!"}`, sessionID), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			close(doneCh)
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{
+		ID:         "msg-fail-3",
+		ThreadID:   "thread-general-fail-3",
+		GuildID:    "guild-3",
+		AuthorID:   "user-3",
+		AuthorName: "User",
+		Content:    "Finish it",
+		Status:     db.StatusPending,
+		CreatedAt:  time.Now().UTC(),
+		UpdatedAt:  time.Now().UTC(),
+	}
+	if err := db.InsertMessage(database, msg); err != nil {
+		t.Fatalf("Failed to insert message: %v", err)
+	}
+
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Timeout waiting for message processing")
+	}
+
+	calls := atomic.LoadInt32(&runnerCalls)
+	if calls != 2 {
+		t.Errorf("Expected exactly 2 runner calls, got: %d", calls)
+	}
+
+	mu.Lock()
+	if len(sessionsSeen) >= 2 {
+		if sessionsSeen[0] != testSessID {
+			t.Errorf("Attempt 1 expected session %q, got %q", testSessID, sessionsSeen[0])
+		}
+		if sessionsSeen[1] != testSessID {
+			t.Errorf("Attempt 2 expected preserved session %q, got %q", testSessID, sessionsSeen[1])
+		}
+	}
+	if len(promptsSeen) >= 2 {
+		if !strings.Contains(promptsSeen[1], "timed out or was interrupted") {
+			t.Errorf("Attempt 2 prompt missing continuation instruction: %q", promptsSeen[1])
+		}
+	}
+	mu.Unlock()
+}
+
+
 
 
 
