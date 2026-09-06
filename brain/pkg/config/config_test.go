@@ -720,6 +720,38 @@ func TestLoadMCPConfig_MergeCustomWithDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadMCPConfig_StreamableHttpAndLegacySSENormalization(t *testing.T) {
+	t.Setenv("GITHUB_PAT", "ghp_test123456789")
+
+	// Set custom mcp_servers with legacy /sse URL in runtime config
+	runtimeConfigMu.Lock()
+	currentRuntimeConfig = Config{
+		Model: "Gemini 3.6 Flash (Low)",
+		McpServers: map[string]json.RawMessage{
+			"docker": json.RawMessage(`{"serverUrl":"http://docker-mcp:4002/sse"}`),
+			"github": json.RawMessage(`{"serverUrl":"http://github-mcp:4003/sse"}`),
+		},
+	}
+	runtimeConfigMu.Unlock()
+
+	raw := LoadMCPConfig()
+	var res struct {
+		McpServers map[string]struct {
+			ServerURL string `json:"serverUrl"`
+		} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(raw, &res); err != nil {
+		t.Fatalf("Failed to unmarshal LoadMCPConfig output: %v", err)
+	}
+
+	if res.McpServers["docker"].ServerURL != "http://docker-mcp:4002/mcp" {
+		t.Errorf("Expected docker serverUrl to be normalized to http://docker-mcp:4002/mcp, got %q", res.McpServers["docker"].ServerURL)
+	}
+	if res.McpServers["github"].ServerURL != "http://github-mcp:4003/mcp" {
+		t.Errorf("Expected github serverUrl to be normalized to http://github-mcp:4003/mcp, got %q", res.McpServers["github"].ServerURL)
+	}
+}
+
 func TestChannelPolicy_Parsing(t *testing.T) {
 	tmpDir := t.TempDir()
 	yamlPath := filepath.Join(tmpDir, "config.yaml")

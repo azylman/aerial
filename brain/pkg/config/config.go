@@ -818,12 +818,12 @@ func LoadMCPConfig() json.RawMessage {
 			"serverUrl": "http://discord-mcp:4001/mcp",
 		},
 		"docker": map[string]interface{}{
-			"serverUrl": "http://docker-mcp:4002/sse",
+			"serverUrl": "http://docker-mcp:4002/mcp",
 		},
 	}
 	if pat := os.Getenv("GITHUB_PAT"); pat != "" {
 		mergedServers["github"] = map[string]interface{}{
-			"serverUrl": "http://github-mcp:4003/sse",
+			"serverUrl": "http://github-mcp:4003/mcp",
 		}
 	}
 
@@ -886,6 +886,18 @@ func LoadMCPConfig() json.RawMessage {
 				mergedServers[k] = parsedVal
 			} else {
 				mergedServers[k] = v
+			}
+		}
+	}
+
+	// 4. Normalize legacy SSE endpoints to Streamable HTTP
+	for _, svc := range []string{"docker", "github"} {
+		if rawSvc, ok := mergedServers[svc].(map[string]interface{}); ok {
+			if url, ok := rawSvc["serverUrl"].(string); ok {
+				if strings.HasSuffix(url, "/sse") {
+					rawSvc["serverUrl"] = strings.TrimSuffix(url, "/sse") + "/mcp"
+					log.Printf("[LoadMCPConfig] Transparently normalized %s serverUrl from /sse to /mcp", svc)
+				}
 			}
 		}
 	}

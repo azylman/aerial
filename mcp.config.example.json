@@ -7,10 +7,10 @@
       "serverUrl": "http://discord-mcp:4001/mcp"
     },
     "docker": {
-      "serverUrl": "http://docker-mcp:4002/sse"
+      "serverUrl": "http://docker-mcp:4002/mcp"
     },
     "github": {
-      "serverUrl": "http://github-mcp:4003/sse"
+      "serverUrl": "http://github-mcp:4003/mcp"
     }
   }
 }
