@@ -42,11 +42,6 @@ admin_users:
 #   - classifier (or ambient): Direct mentions, replies, keywords, AND ambient relevance scoring (default for mode: channel).
 #   - all (or always): Respond to every message (default for mode: threads inside a thread).
 #
-# Available Typing Indicator Options:
-#   - always: Send typing indicator on every evaluated turn (default for threads).
-#   - on_mention: Only send typing indicator when the bot is mentioned/replied to (default for channel).
-#   - never: Never send typing indicator.
-#
 # Ambient Wake & Classification (for wake_mode: classifier):
 #   - ambient_wake_threshold: Confidence score threshold (0.0 to 1.0) for ambient messages to wake Aerial (default: 0.80).
 #   - ambient_wake_prompt: Custom criteria/prompt directive for the ambient relevance classifier in this channel.
@@ -69,7 +64,6 @@ channels:
   # The 'default' block is REQUIRED and acts as the fallback for all channels.
   default:
     mode: threads
-    typing_indicator: always
     ignore_bots: true
     ambient_wake_threshold: 0.80
 
@@ -77,7 +71,6 @@ channels:
   general:
     mode: channel
     wake_mode: classifier
-    typing_indicator: on_mention
     ignore_bots: true
     ambient_wake_threshold: 0.80
     ambient_wake_prompt: "Determine whether the target message is relevant to Aerial and warrants Aerial waking up and responding, based on the recent channel context."
@@ -87,7 +80,6 @@ channels:
   lounge:
     mode: channel
     wake_mode: mention
-    typing_indicator: on_mention
     ignore_bots: false
     max_session_turns: 50
 
@@ -95,7 +87,6 @@ channels:
   dev-alerts:
     mode: channel
     wake_mode: classifier
-    typing_indicator: on_mention
     ignore_bots: false # Allow alerts from bot integrations
     ambient_wake_threshold: 0.70
     ambient_wake_prompt: "Only wake up and respond if the user is asking about Kubernetes deployments, CI/CD pipeline failures, or production outages."
