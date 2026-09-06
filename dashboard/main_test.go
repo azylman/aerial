@@ -874,6 +874,7 @@ func TestScheduleRunsHandler_Success(t *testing.T) {
 		if q.Get("limit") != "10" || q.Get("offset") != "5" || q.Get("schedule_id") != "cron-1" || q.Get("status") != "success" {
 			t.Errorf("unexpected upstream query params: %s", r.URL.RawQuery)
 		}
+		started := time.Now().UTC().Add(-1 * time.Hour)
 		resp := ScheduleRunsAPIResponse{
 			Status: "ok",
 			Total:  42,
@@ -881,13 +882,14 @@ func TestScheduleRunsHandler_Success(t *testing.T) {
 			Offset: 5,
 			Runs: []ScheduleRun{
 				{
-					ID:           101,
+					ID:           "cron-brief-101",
 					ScheduleID:   "cron-1",
 					ScheduleType: "cron",
 					Prompt:       "Daily summary",
 					Title:        "Morning Brief #101",
 					Status:       "success",
-					TriggeredAt:  time.Now().UTC().Add(-1 * time.Hour),
+					StartedAt:    started,
+					DurationMs:   1250,
 				},
 			},
 		}
@@ -914,7 +916,7 @@ func TestScheduleRunsHandler_Success(t *testing.T) {
 	if data.Status != "ok" || data.Total != 42 || data.Limit != 10 || data.Offset != 5 {
 		t.Errorf("unexpected metadata in response: %+v", data)
 	}
-	if len(data.Runs) != 1 || data.Runs[0].ID != 101 || data.Runs[0].Status != "success" {
+	if len(data.Runs) != 1 || data.Runs[0].ID != "cron-brief-101" || data.Runs[0].Status != "success" || data.Runs[0].DurationMs != 1250 {
 		t.Errorf("unexpected runs in response: %+v", data.Runs)
 	}
 }
@@ -1424,13 +1426,13 @@ func TestDeploymentStatus_CommitTimeJSONSerialization(t *testing.T) {
 func TestLoadQuickLaunchLinks(t *testing.T) {
 	// 1. Missing or empty path returns default core links
 	defaults := DefaultQuickLaunchLinks()
-	if len(defaults) != 4 {
-		t.Fatalf("expected 4 default quick launch links, got %d", len(defaults))
+	if len(defaults) != 3 {
+		t.Fatalf("expected 3 default quick launch links, got %d", len(defaults))
 	}
 
 	linksEmpty := loadQuickLaunchLinks("/non/existent/path/config.yaml")
-	if len(linksEmpty) != 4 {
-		t.Errorf("expected 4 links for non-existent file, got %d", len(linksEmpty))
+	if len(linksEmpty) != 3 {
+		t.Errorf("expected 3 links for non-existent file, got %d", len(linksEmpty))
 	}
 	for _, l := range linksEmpty {
 		if !l.IsCore {
@@ -1458,10 +1460,10 @@ dashboard:
 	}
 
 	links1 := loadQuickLaunchLinks(cfgFile1)
-	if len(links1) != 5 {
-		t.Fatalf("expected 5 links (4 core + 1 custom), got %d", len(links1))
+	if len(links1) != 4 {
+		t.Fatalf("expected 4 links (3 core + 1 custom), got %d", len(links1))
 	}
-	customLink := links1[4]
+	customLink := links1[3]
 	if customLink.Name != "HOME" || customLink.URL != "https://home.zylman.com" || customLink.Icon != "🏠" {
 		t.Errorf("unexpected custom link: %+v", customLink)
 	}
@@ -1482,11 +1484,11 @@ quick_links:
 	}
 
 	links2 := loadQuickLaunchLinks(cfgFile2)
-	if len(links2) != 5 {
-		t.Fatalf("expected 5 links (4 core + 1 custom), got %d", len(links2))
+	if len(links2) != 4 {
+		t.Fatalf("expected 4 links (3 core + 1 custom), got %d", len(links2))
 	}
-	if links2[4].Name != "INTERNAL" || links2[4].Target != "_self" {
-		t.Errorf("unexpected root custom link: %+v", links2[4])
+	if links2[3].Name != "INTERNAL" || links2[3].Target != "_self" {
+		t.Errorf("unexpected root custom link: %+v", links2[3])
 	}
 
 	// 4. Malformed YAML
@@ -1495,8 +1497,8 @@ quick_links:
 		t.Fatal(err)
 	}
 	links3 := loadQuickLaunchLinks(cfgFile3)
-	if len(links3) != 4 {
-		t.Errorf("expected 4 links on malformed YAML, got %d", len(links3))
+	if len(links3) != 3 {
+		t.Errorf("expected 3 links on malformed YAML, got %d", len(links3))
 	}
 }
 
@@ -1604,8 +1606,8 @@ dashboard:
 	}
 
 	// Verify QuickLaunchLinks
-	if len(resp.QuickLaunchLinks) != 5 {
-		t.Fatalf("expected 5 quick launch links, got %d", len(resp.QuickLaunchLinks))
+	if len(resp.QuickLaunchLinks) != 4 {
+		t.Fatalf("expected 4 quick launch links, got %d", len(resp.QuickLaunchLinks))
 	}
 	hasHome := false
 	for _, l := range resp.QuickLaunchLinks {
