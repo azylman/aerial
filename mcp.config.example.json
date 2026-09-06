@@ -11,6 +11,9 @@
     },
     "github": {
       "serverUrl": "http://github-mcp:4003/mcp"
+    },
+    "victoriametrics": {
+      "serverUrl": "http://victoriametrics-mcp:4004/mcp"
     }
   }
 }

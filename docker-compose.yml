@@ -90,6 +90,8 @@ services:
         condition: service_started
       discord-mcp:
         condition: service_started
+      victoriametrics-mcp:
+        condition: service_started
 
   # ----------------------------------------------------------------------------
   # 1b. GitSync Sidecar: Aerial GitSync
@@ -610,6 +612,38 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+
+  # ----------------------------------------------------------------------------
+  # 18. Outbound MCP: VictoriaMetrics MCP Server
+  #     Exposes VictoriaMetrics TSDB metrics querying, rule checks, and telemetry
+  #     inspection tools to Aerial agent prompts over Streamable HTTP.
+  # ----------------------------------------------------------------------------
+  victoriametrics-mcp:
+    image: ghcr.io/victoriametrics/mcp-victoriametrics:latest
+    container_name: aerial-victoriametrics-mcp
+    restart: unless-stopped
+    labels:
+      autoheal: "true"
+      com.centurylinklabs.watchtower.enable: "true"
+    environment:
+      - MCP_SERVER_MODE=http
+      - MCP_LISTEN_ADDR=:4004
+      - VM_INSTANCE_ENTRYPOINT=http://victoriametrics:8428
+      - VM_INSTANCE_TYPE=single
+      - MCP_DISABLED_TOOLS=documentation,export,metric_relabel_debug
+    ports:
+      - "${VICTORIAMETRICS_MCP_HOST_PORT:-127.0.0.1:4004}:4004"
+    networks:
+      - aerial-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:4004/health/liveness || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    depends_on:
+      victoriametrics:
+        condition: service_started
 
 networks:
   aerial-net:

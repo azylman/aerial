@@ -710,6 +710,9 @@ func TestLoadMCPConfig_MergeCustomWithDefaults(t *testing.T) {
 	if _, ok := res.McpServers["docker"]; !ok {
 		t.Errorf("Expected built-in 'docker' server in merged config")
 	}
+	if _, ok := res.McpServers["victoriametrics"]; !ok {
+		t.Errorf("Expected built-in 'victoriametrics' server in merged config")
+	}
 
 	// Must contain custom servers
 	if _, ok := res.McpServers["brave-search"]; !ok {
@@ -728,8 +731,9 @@ func TestLoadMCPConfig_StreamableHttpAndLegacySSENormalization(t *testing.T) {
 	currentRuntimeConfig = Config{
 		Model: "Gemini 3.6 Flash (Low)",
 		McpServers: map[string]json.RawMessage{
-			"docker": json.RawMessage(`{"serverUrl":"http://docker-mcp:4002/sse"}`),
-			"github": json.RawMessage(`{"serverUrl":"http://github-mcp:4003/sse"}`),
+			"docker":          json.RawMessage(`{"serverUrl":"http://docker-mcp:4002/sse"}`),
+			"github":          json.RawMessage(`{"serverUrl":"http://github-mcp:4003/sse"}`),
+			"victoriametrics": json.RawMessage(`{"serverUrl":"http://victoriametrics-mcp:4004/sse"}`),
 		},
 	}
 	runtimeConfigMu.Unlock()
@@ -749,6 +753,9 @@ func TestLoadMCPConfig_StreamableHttpAndLegacySSENormalization(t *testing.T) {
 	}
 	if res.McpServers["github"].ServerURL != "http://github-mcp:4003/mcp" {
 		t.Errorf("Expected github serverUrl to be normalized to http://github-mcp:4003/mcp, got %q", res.McpServers["github"].ServerURL)
+	}
+	if res.McpServers["victoriametrics"].ServerURL != "http://victoriametrics-mcp:4004/mcp" {
+		t.Errorf("Expected victoriametrics serverUrl to be normalized to http://victoriametrics-mcp:4004/mcp, got %q", res.McpServers["victoriametrics"].ServerURL)
 	}
 }
 
