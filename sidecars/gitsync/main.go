@@ -235,6 +235,45 @@ func (d *SyncDaemon) ValidateCompose(ctx context.Context, composeDir string) err
 	return nil
 }
 
+// parseComposeServices parses newline-delimited compose service names, trims whitespace,
+// deduplicates entries, and filters out the gitsync sidecar service (case-insensitive).
+func parseComposeServices(output string) []string {
+	lines := strings.Split(output, "\n")
+	seen := make(map[string]struct{}, len(lines))
+	targets := make([]string, 0, len(lines))
+
+	for _, line := range lines {
+		svc := strings.TrimSpace(line)
+		svc = strings.TrimRight(svc, "\r")
+		if svc == "" || strings.EqualFold(svc, "gitsync") {
+			continue
+		}
+		if _, exists := seen[svc]; !exists {
+			seen[svc] = struct{}{}
+			targets = append(targets, svc)
+		}
+	}
+	return targets
+}
+
+// GetReconcileTargets queries docker compose config --services to discover all defined services,
+// filtering out the gitsync sidecar service.
+func (d *SyncDaemon) GetReconcileTargets(ctx context.Context, composeDir string) ([]string, error) {
+	args := append([]string{"compose"}, d.getComposeArgs(composeDir, "config", "--services")...)
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd.Dir = composeDir
+	var stdoutBuf, stderrBuf bytes.Buffer
+	cmd.Stdout = &stdoutBuf
+	cmd.Stderr = &stderrBuf
+
+	if err := cmd.Run(); err != nil {
+		sanitized := SanitizeLog(strings.TrimSpace(stderrBuf.String()))
+		return nil, fmt.Errorf("failed to discover compose services: %s (%w)", sanitized, err)
+	}
+
+	return parseComposeServices(stdoutBuf.String()), nil
+}
+
 // ReconcileCompose executes docker compose up -d with timeout, metrics observation, and output sanitization.
 func (d *SyncDaemon) ReconcileCompose(parentCtx context.Context) (err error) {
 	d.composeMu.Lock()
@@ -264,13 +303,26 @@ func (d *SyncDaemon) ReconcileCompose(parentCtx context.Context) (err error) {
 		return valErr
 	}
 
-	// 2. Bounded compose execution
+	// 2. Discover target services excluding gitsync
+	targets, targetErr := d.GetReconcileTargets(valCtx, composeDir)
+	if targetErr != nil {
+		log.Printf("[GitSync:GitOps] ERROR: Service discovery failed: %v. Aborting compose reconciliation.", targetErr)
+		return targetErr
+	}
+
+	if len(targets) == 0 {
+		log.Printf("[GitSync:GitOps] Notice: No external services to reconcile in %s (gitsync excluded)", composeDir)
+		return nil
+	}
+
+	// 3. Bounded compose execution
 	ctx, cancel := context.WithTimeout(parentCtx, 120*time.Second)
 	defer cancel()
 
-	log.Printf("[GitSync:GitOps] Reconciling Docker Compose state in %s...", composeDir)
+	log.Printf("[GitSync:GitOps] Reconciling Docker Compose state for %d services (%v) in %s...", len(targets), targets, composeDir)
 
-	args := append([]string{"compose"}, d.getComposeArgs(composeDir, "up", "-d", "--no-recreate", "gitsync")...)
+	upArgs := append([]string{"up", "-d", "--no-build"}, targets...)
+	args := append([]string{"compose"}, d.getComposeArgs(composeDir, upArgs...)...)
 	cmd := exec.CommandContext(ctx, "docker", args...)
 	cmd.Dir = composeDir
 	cmd.Cancel = func() error {

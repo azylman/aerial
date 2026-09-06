@@ -343,3 +343,56 @@ func TestGetComposeArgs_Deduplication(t *testing.T) {
 	}
 }
 
+func TestParseComposeServices(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected []string
+	}{
+		{
+			name:     "standard multi-service list",
+			input:    "brain\ngitsync\ndashboard\nunpoller\n",
+			expected: []string{"brain", "dashboard", "unpoller"},
+		},
+		{
+			name:     "whitespace and carriage returns",
+			input:    "  brain  \r\n\r\n  gitsync\r\n  dashboard \r\n",
+			expected: []string{"brain", "dashboard"},
+		},
+		{
+			name:     "case-insensitive gitsync filter",
+			input:    "GitSync\nGITSYNC\ngitsync\nbrain\n",
+			expected: []string{"brain"},
+		},
+		{
+			name:     "only gitsync present",
+			input:    "gitsync\n",
+			expected: []string{},
+		},
+		{
+			name:     "empty input",
+			input:    "",
+			expected: []string{},
+		},
+		{
+			name:     "duplicate service entries preserved uniquely",
+			input:    "brain\nunpoller\nbrain\nunpoller\n",
+			expected: []string{"brain", "unpoller"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			actual := parseComposeServices(tt.input)
+			if len(actual) != len(tt.expected) {
+				t.Fatalf("expected %d targets (%v), got %d (%v)", len(tt.expected), tt.expected, len(actual), actual)
+			}
+			for i := range tt.expected {
+				if actual[i] != tt.expected[i] {
+					t.Errorf("actual[%d] = %q, want %q", i, actual[i], tt.expected[i])
+				}
+			}
+		})
+	}
+}
+
