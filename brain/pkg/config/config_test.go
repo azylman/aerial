@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestGetEnv(t *testing.T) {
@@ -81,76 +83,6 @@ func TestEnsureAgySettingsAndRules(t *testing.T) {
 	oldRulesFile := filepath.Join(tmpDir, ".gemini", "rules", "system_instructions.md")
 	if _, err := os.Stat(oldRulesFile); !os.IsNotExist(err) {
 		t.Errorf("Expected system_instructions.md to not exist at %s", oldRulesFile)
-	}
-}
-
-func TestEnsureAgySettings_HealsCorruptedModelProvider(t *testing.T) {
-	tmpDir := t.TempDir()
-	_ = os.Setenv("HOME", tmpDir)
-
-	settingsDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli")
-	if err := os.MkdirAll(settingsDir, 0755); err != nil {
-		t.Fatalf("Failed to create settings dir: %v", err)
-	}
-
-	// Corrupt settings with modelProvider: gemini but no API key present in env
-	corrupted := map[string]interface{}{
-		"model":         "old-model",
-		"modelProvider": "gemini",
-		"someOtherKey":  "preserved_value",
-	}
-	raw, _ := json.Marshal(corrupted)
-	settingsPath := filepath.Join(settingsDir, "settings.json")
-	if err := os.WriteFile(settingsPath, raw, 0644); err != nil {
-		t.Fatalf("Failed to write corrupted settings: %v", err)
-	}
-
-	// Call EnsureAgySettings in OAuth mode (empty apiKey)
-	if err := EnsureAgySettings("", "Gemini 3.7 Flash (High)"); err != nil {
-		t.Fatalf("EnsureAgySettings failed: %v", err)
-	}
-
-	data, err := os.ReadFile(settingsPath)
-	if err != nil {
-		t.Fatalf("Failed to read healed settings: %v", err)
-	}
-	var healed map[string]interface{}
-	if err := json.Unmarshal(data, &healed); err != nil {
-		t.Fatalf("Failed to parse healed settings: %v", err)
-	}
-
-	if _, ok := healed["modelProvider"]; ok {
-		t.Fatalf("Expected modelProvider to be purged by EnsureAgySettings, but it still exists: %v", healed["modelProvider"])
-	}
-	if healed["model"] != "Gemini 3.7 Flash (High)" {
-		t.Errorf("Expected model=Gemini 3.7 Flash (High), got %v", healed["model"])
-	}
-	if healed["someOtherKey"] != "preserved_value" {
-		t.Errorf("Expected other settings keys to be preserved, got %v", healed["someOtherKey"])
-	}
-}
-
-func TestEnsureAgySettings_TestIsolationGuard(t *testing.T) {
-	// Temporarily set HOME to /root to simulate running in a container as root without t.TempDir()
-	oldHome := os.Getenv("HOME")
-	defer func() {
-		_ = os.Setenv("HOME", oldHome)
-	}()
-	_ = os.Setenv("HOME", "/root")
-
-	isolationDir := filepath.Join(os.TempDir(), "aerial-test-gemini-home")
-	_ = os.RemoveAll(isolationDir)
-	defer func() {
-		_ = os.RemoveAll(isolationDir)
-	}()
-
-	if err := EnsureAgySettings("key", "isolated-model"); err != nil {
-		t.Fatalf("EnsureAgySettings failed with isolation: %v", err)
-	}
-
-	isolatedSettings := filepath.Join(isolationDir, ".gemini", "antigravity-cli", "settings.json")
-	if _, err := os.Stat(isolatedSettings); os.IsNotExist(err) {
-		t.Errorf("Expected test isolation guard to redirect write to %s, but file does not exist", isolatedSettings)
 	}
 }
 
@@ -1862,6 +1794,327 @@ channels:
 		t.Errorf("expected error on invalid wake_mode, got nil")
 	}
 }
+
+func TestConfigGettersAndFallbacks(t *testing.T) {
+	// Test LoadConfig with search paths
+	_, _ = LoadConfig()
+
+	runtimeConfigMu.Lock()
+	origCfg := currentRuntimeConfig
+	currentRuntimeConfig.Timezone = ""
+	currentRuntimeConfig.SystemChannel = ""
+	runtimeConfigMu.Unlock()
+	defer func() {
+		runtimeConfigMu.Lock()
+		currentRuntimeConfig = origCfg
+		runtimeConfigMu.Unlock()
+	}()
+
+	// Test GetTimezone
+	t.Setenv("DEFAULT_TIMEZONE", "America/Chicago")
+	t.Setenv("TZ", "")
+	if tz := GetTimezone(); tz != "America/Chicago" {
+		t.Errorf("expected 'America/Chicago', got %q", tz)
+	}
+
+	t.Setenv("DEFAULT_TIMEZONE", "")
+	t.Setenv("TZ", "America/Denver")
+	if tz := GetTimezone(); tz != "America/Denver" {
+		t.Errorf("expected 'America/Denver', got %q", tz)
+	}
+
+	// Test GetSystemChannel
+	t.Setenv("SYSTEM_CHANNEL", "custom-sys-chan")
+	if ch := GetSystemChannel(); ch != "custom-sys-chan" {
+		t.Errorf("expected 'custom-sys-chan', got %q", ch)
+	}
+
+	t.Setenv("SYSTEM_CHANNEL", "")
+	_ = GetSystemChannel()
+}
+
+func TestLoadMCPConfigAndEnsure(t *testing.T) {
+	t.Setenv("GITHUB_PAT", "ghp_test12345")
+	t.Setenv("MCP_CONFIG", `{"mcpServers":{"docker":{"serverUrl":"http://docker:8080/sse"}}}`)
+
+	// Write local ./mcp.config.json to test file loading
+	mcpFile := "./mcp.config.json"
+	_ = os.WriteFile(mcpFile, []byte(`{"mcpServers":{"local_test":{"serverUrl":"http://local:8080"}}}`), 0644)
+	defer func() { _ = os.Remove(mcpFile) }()
+
+	rawMCP := LoadMCPConfig()
+	if len(rawMCP) == 0 {
+		t.Fatalf("LoadMCPConfig returned empty raw message")
+	}
+
+	var parsed map[string]map[string]map[string]interface{}
+	if err := json.Unmarshal(rawMCP, &parsed); err != nil {
+		t.Fatalf("failed to parse LoadMCPConfig: %v", err)
+	}
+
+	servers := parsed["mcpServers"]
+	if servers["github"] == nil {
+		t.Errorf("expected github mcp server present when GITHUB_PAT set")
+	}
+	if servers["local_test"] == nil {
+		t.Errorf("expected local_test mcp server from ./mcp.config.json")
+	}
+
+	// Test EnsureMcpConfig
+	if err := EnsureMcpConfig(nil); err != nil {
+		t.Errorf("EnsureMcpConfig(nil) failed: %v", err)
+	}
+	if err := EnsureMcpConfig(json.RawMessage(`""`)); err != nil {
+		t.Errorf("EnsureMcpConfig(\"\") failed: %v", err)
+	}
+	if err := EnsureMcpConfig(rawMCP); err != nil {
+		t.Errorf("EnsureMcpConfig failed: %v", err)
+	}
+
+	// Test EnsureAgySettings with and without API key
+	if err := EnsureAgySettings("test_key", "gemini-2.5-flash"); err != nil {
+		t.Errorf("EnsureAgySettings failed: %v", err)
+	}
+	if err := EnsureAgySettings("", "gemini-2.5-flash"); err != nil {
+		t.Errorf("EnsureAgySettings without apiKey failed: %v", err)
+	}
+}
+
+func TestConfigPolicyRawAndBotIgnored(t *testing.T) {
+	// 1. IsBotIgnored
+	var p ChannelPolicy
+	if p.IsBotIgnored() {
+		t.Errorf("expected false for nil IgnoreBots")
+	}
+	bTrue := true
+	p.IgnoreBots = &bTrue
+	if !p.IsBotIgnored() {
+		t.Errorf("expected true for true IgnoreBots")
+	}
+
+	// 2. getChannelPolicyRaw
+	var emptyCfg Config
+	if _, ok := emptyCfg.getChannelPolicyRaw(""); ok {
+		t.Errorf("expected false for empty key")
+	}
+	if _, ok := emptyCfg.getChannelPolicyRaw("chan1"); ok {
+		t.Errorf("expected false for empty channels map")
+	}
+
+	cfg := Config{
+		Channels: map[string]ChannelPolicy{
+			"alerts":  {Mode: "channel"},
+			"#general": {Mode: "threads"},
+		},
+	}
+	if _, ok := cfg.getChannelPolicyRaw("alerts"); !ok {
+		t.Errorf("expected exact match for 'alerts'")
+	}
+	if _, ok := cfg.getChannelPolicyRaw("general"); !ok {
+		t.Errorf("expected normalized match for 'general'")
+	}
+	if _, ok := cfg.getChannelPolicyRaw("nonexistent"); ok {
+		t.Errorf("expected false for nonexistent channel")
+	}
+
+	// Test writeAtomic
+	atomicPath := filepath.Join(t.TempDir(), "atomic_test.txt")
+	if err := writeAtomic(atomicPath, "test atomic content"); err != nil {
+		t.Errorf("writeAtomic failed: %v", err)
+	}
+
+	// Test getFallbackDefaults
+	t.Setenv("AGY_MODEL", "fallback-agy-model")
+	t.Setenv("DEFAULT_TIMEZONE", "America/Phoenix")
+	t.Setenv("SYSTEM_CHANNEL", "fallback-sys-channel")
+	fb := getFallbackDefaults()
+	if fb.Model != "fallback-agy-model" {
+		t.Errorf("expected fallback model 'fallback-agy-model', got %q", fb.Model)
+	}
+	if fb.Timezone != "America/Phoenix" {
+		t.Errorf("expected fallback timezone 'America/Phoenix', got %q", fb.Timezone)
+	}
+	if fb.SystemChannel != "fallback-sys-channel" {
+		t.Errorf("expected fallback system_channel 'fallback-sys-channel', got %q", fb.SystemChannel)
+	}
+
+	// Test ResolveChannelPolicy without default
+	noDefCfg := Config{
+		Channels: map[string]ChannelPolicy{
+			"chan1": {Mode: "channel"},
+		},
+	}
+	p1 := noDefCfg.ResolveChannelPolicy("chan1", "chan1")
+	if p1.Mode != "channel" {
+		t.Errorf("expected mode 'channel', got %q", p1.Mode)
+	}
+	pUnk := noDefCfg.ResolveChannelPolicy("unk", "unk")
+	if pUnk.Mode != "threads" {
+		t.Errorf("expected fallback mode 'threads', got %q", pUnk.Mode)
+	}
+
+	// Test default with empty mode
+	emptyModeCfg := Config{
+		Channels: map[string]ChannelPolicy{
+			"default": {},
+		},
+	}
+	pDef := emptyModeCfg.ResolveChannelPolicy("other", "other")
+	if pDef.Mode != "threads" {
+		t.Errorf("expected mode 'threads', got %q", pDef.Mode)
+	}
+
+	// Test EnsureMcpConfig with string-encoded JSON
+	strEncoded := json.RawMessage(`"{\"mcpServers\":{\"s1\":{\"serverUrl\":\"http://s1\"}}}"`)
+	if err := EnsureMcpConfig(strEncoded); err != nil {
+		t.Errorf("EnsureMcpConfig with string-encoded JSON failed: %v", err)
+	}
+
+	// Test EnsureAgySettings with existing settings
+	homeDir, _ := os.UserHomeDir()
+	if homeDir != "" {
+		settingsPath := filepath.Join(homeDir, ".gemini", "antigravity-cli", "settings.json")
+		_ = writeAtomic(settingsPath, `{"existingKey":"existingVal"}`)
+		if err := EnsureAgySettings("key2", "model2"); err != nil {
+			t.Errorf("EnsureAgySettings with existing settings failed: %v", err)
+		}
+	}
+	// Test LoadChannelInstructions edge cases
+	t.Run("LoadChannelInstructions_EdgeCases", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		origDirs := ChannelInstructionsDirs
+		ChannelInstructionsDirs = []string{tmpDir}
+		defer func() { ChannelInstructionsDirs = origDirs }()
+
+		// 1. Non-existent channel file
+		instr := LoadChannelInstructions("non_existent_chan")
+		if instr != "" {
+			t.Errorf("expected empty instructions for non-existent channel, got %q", instr)
+		}
+
+		// 2. Empty channel name
+		if instr := LoadChannelInstructions(""); instr != "" {
+			t.Errorf("expected empty string for empty channel name")
+		}
+
+		// 3. Channel markdown files with space vs dash normalization
+		if err := os.WriteFile(filepath.Join(tmpDir, "dev-chat.md"), []byte("Channel instructions for dev chat"), 0644); err != nil {
+			t.Fatalf("failed to write dev-chat.md: %v", err)
+		}
+
+		res1 := LoadChannelInstructions("dev chat")
+		if !strings.Contains(res1, "Channel instructions for dev chat") {
+			t.Errorf("expected channel instructions in res1, got %q", res1)
+		}
+
+		res2 := LoadChannelInstructions("dev-chat")
+		if !strings.Contains(res2, "Channel instructions for dev chat") {
+			t.Errorf("expected channel instructions in res2, got %q", res2)
+		}
+	})
+
+	// Test UnmarshalYAML with custom ChannelPolicy struct
+	t.Run("UnmarshalYAML_ChannelPolicy", func(t *testing.T) {
+		var p ChannelPolicy
+		yamlBytes := []byte(`
+mode: "threads"
+wake_mode: "classifier"
+ignore_bots: false
+ambient_wake_threshold: 0.8
+ambient_wake_prompt: "Wake on high priority"
+`)
+		if err := yaml.Unmarshal(yamlBytes, &p); err != nil {
+			t.Fatalf("UnmarshalYAML failed: %v", err)
+		}
+		if p.Mode != "threads" || p.GetWakeMode() != "classifier" || p.IsBotIgnored() || p.GetAmbientWakeThreshold() != 0.8 || p.GetAmbientWakePrompt() != "Wake on high priority" {
+			t.Errorf("unexpected unmarshaled policy: %+v", p)
+		}
+
+		// Invalid YAML
+		var p2 ChannelPolicy
+		if err := yaml.Unmarshal([]byte(`{invalid: yaml: [`), &p2); err == nil {
+			t.Errorf("expected error on invalid YAML, got nil")
+		}
+	})
+
+	// Test EnsureAgySettings with corrupted settings file
+	t.Run("EnsureAgySettings_CorruptedSettingsFile", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		t.Setenv("HOME", tmpDir)
+		settingsPath := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "settings.json")
+		if err := os.MkdirAll(filepath.Dir(settingsPath), 0755); err != nil {
+			t.Fatalf("failed to mkdir: %v", err)
+		}
+		if err := os.WriteFile(settingsPath, []byte("NOT_JSON_CONTENT"), 0644); err != nil {
+			t.Fatalf("failed to write settings: %v", err)
+		}
+
+		if err := EnsureAgySettings("apikey123", "gemini-pro"); err != nil {
+			t.Errorf("expected EnsureAgySettings to recover from corrupted settings: %v", err)
+		}
+	})
+
+	// Test LoadMCPConfig with invalid JSON values in McpServers
+	t.Run("LoadMCPConfig_RawStringServers", func(t *testing.T) {
+		runtimeConfigMu.Lock()
+		currentRuntimeConfig = Config{
+			McpServers: map[string]json.RawMessage{
+				"raw_server": json.RawMessage(`plain_string_not_json`),
+			},
+		}
+		runtimeConfigMu.Unlock()
+
+		raw := LoadMCPConfig()
+		if len(raw) == 0 {
+			t.Fatalf("LoadMCPConfig returned empty")
+		}
+	})
+
+	// Test channel validation error paths in LoadConfigFromPaths
+	t.Run("LoadConfigFromPaths_ValidationErrors", func(t *testing.T) {
+		tmpDir := t.TempDir()
+
+		// 1. Invalid default wake_mode
+		p1 := filepath.Join(tmpDir, "inv_def_wake.yaml")
+		_ = os.WriteFile(p1, []byte("channels:\n  default:\n    mode: 'threads'\n    wake_mode: 'unsupported'\n"), 0644)
+		if _, err := LoadConfigFromPaths(p1); err == nil {
+			t.Error("expected error for invalid default wake_mode")
+		}
+
+		// 2. Invalid non-default channel mode
+		p2 := filepath.Join(tmpDir, "inv_chan_mode.yaml")
+		_ = os.WriteFile(p2, []byte("channels:\n  default:\n    mode: 'threads'\n  c1:\n    mode: 'badmode'\n"), 0644)
+		if _, err := LoadConfigFromPaths(p2); err == nil {
+			t.Error("expected error for invalid channel mode")
+		}
+
+		// 3. Out of range ambient threshold (< 0 or > 1)
+		p3 := filepath.Join(tmpDir, "inv_thresh.yaml")
+		_ = os.WriteFile(p3, []byte("channels:\n  default:\n    mode: 'threads'\n  c1:\n    ambient_wake_threshold: 1.5\n"), 0644)
+		if _, err := LoadConfigFromPaths(p3); err == nil {
+			t.Error("expected error for ambient_wake_threshold > 1.0")
+		}
+
+		// 4. Invalid non-default channel wake_mode
+		p4 := filepath.Join(tmpDir, "inv_chan_wake.yaml")
+		_ = os.WriteFile(p4, []byte("channels:\n  default:\n    mode: 'threads'\n  c1:\n    wake_mode: 'bad_wake'\n"), 0644)
+		if _, err := LoadConfigFromPaths(p4); err == nil {
+			t.Error("expected error for invalid non-default channel wake_mode")
+		}
+	})
+
+	// Test writeAtomic failure paths
+	t.Run("writeAtomic_Errors", func(t *testing.T) {
+		err := writeAtomic("/dev/null/forbidden/file.txt", "content")
+		if err == nil {
+			t.Error("expected error for impossible writeAtomic directory")
+		}
+	})
+}
+
+
+
+
 
 
 

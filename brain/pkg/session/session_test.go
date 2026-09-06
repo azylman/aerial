@@ -632,3 +632,156 @@ func TestSessionExistsOnDisk(t *testing.T) {
 		t.Errorf("expected SessionExistsOnDisk(%q) with 0-byte .pb to be false", pbZeroID)
 	}
 }
+
+func TestSessionPackage_TargetDirsAndBaseDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	// 1. Create brain roots with session directories
+	cliBrainRoot := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain")
+	agyBrainRoot := filepath.Join(tmpDir, ".gemini", "antigravity", "brain")
+	_ = os.MkdirAll(cliBrainRoot, 0755)
+	_ = os.MkdirAll(agyBrainRoot, 0755)
+
+	sess1 := filepath.Join(cliBrainRoot, "sess-1")
+	sess2 := filepath.Join(agyBrainRoot, "sess-2")
+	_ = os.MkdirAll(sess1, 0755)
+	_ = os.MkdirAll(sess2, 0755)
+
+	// Test getTargetDirs with empty convID (searches brain roots)
+	dirs := getTargetDirs("")
+	if len(dirs) < 2 {
+		t.Errorf("expected at least 2 target dirs for empty convID, got %v", dirs)
+	}
+
+	// Test resolveBaseDir returns valid non-empty directory
+	baseDir := resolveBaseDir("sess-2")
+	if baseDir == "" {
+		t.Errorf("expected non-empty baseDir for sess-2")
+	}
+
+	// Test resolveBaseDir when brainDataDir does not exist
+	origBrainDataDir := brainDataDir
+	brainDataDir = filepath.Join(tmpDir, "non_existent_data_brain")
+	defer func() { brainDataDir = origBrainDataDir }()
+
+	baseDirSess2 := resolveBaseDir("sess-2")
+	if baseDirSess2 != agyBrainRoot {
+		t.Errorf("expected baseDir %s, got %s", agyBrainRoot, baseDirSess2)
+	}
+
+	baseDirNew := resolveBaseDir("new-session-xyz")
+	if baseDirNew != cliBrainRoot {
+		t.Errorf("expected baseDir %s, got %s", cliBrainRoot, baseDirNew)
+	}
+}
+
+func TestHasSuccessfulToolCall_ToolExecuted(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	convID := "tool-test-123"
+	logsDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", convID, ".system_generated", "logs")
+	_ = os.MkdirAll(logsDir, 0755)
+
+	transcript := `{"step_index":0,"type":"USER_INPUT","content":"Run tool"}
+{"step_index":1,"type":"MCP_TOOL","status":"DONE","content":"Tool result"}
+{"step_index":2,"type":"PLANNER_RESPONSE","status":"DONE","content":"Tool finished"}
+`
+	_ = os.WriteFile(filepath.Join(logsDir, "transcript.jsonl"), []byte(transcript), 0644)
+
+	if !HasSuccessfulToolCall(convID) {
+		t.Errorf("expected HasSuccessfulToolCall = true when MCP_TOOL status DONE is present")
+	}
+}
+
+func TestGetLastStepIndex_EdgeCases(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// 1. Non-existent file
+	idx, err := getLastStepIndex(filepath.Join(tmpDir, "non_existent.jsonl"))
+	if err != nil || idx != -1 {
+		t.Errorf("expected -1, nil for non-existent file, got %d, %v", idx, err)
+	}
+
+	// 2. Empty file
+	emptyFile := filepath.Join(tmpDir, "empty.jsonl")
+	_ = os.WriteFile(emptyFile, []byte(""), 0644)
+	idx, err = getLastStepIndex(emptyFile)
+	if err != nil || idx != -1 {
+		t.Errorf("expected -1, nil for empty file, got %d, %v", idx, err)
+	}
+
+	// 3. File with invalid JSON lines
+	badFile := filepath.Join(tmpDir, "bad.jsonl")
+	_ = os.WriteFile(badFile, []byte("invalid json line\n"), 0644)
+	idx, err = getLastStepIndex(badFile)
+	if err != nil || idx != -1 {
+		t.Errorf("expected -1, nil for invalid json file, got %d, %v", idx, err)
+	}
+}
+
+func TestDumpSessionDiagnosticLogs_LongLogFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	convID := "diag-long-123"
+	logsDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", convID, ".system_generated", "logs")
+	_ = os.MkdirAll(logsDir, 0755)
+
+	var sb strings.Builder
+	for i := 0; i < 75; i++ {
+		sb.WriteString(fmt.Sprintf("log line %d\n", i))
+	}
+	_ = os.WriteFile(filepath.Join(logsDir, "output.log"), []byte(sb.String()), 0644)
+
+	diag := DumpSessionDiagnosticLogs(convID)
+	if !strings.Contains(diag, "[...showing last 50 lines...]") {
+		t.Errorf("expected truncation notice in diagnostic output, got: %s", diag)
+	}
+}
+
+func TestFindLatestSessionDir_WithRegularFiles(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	brainDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain")
+	_ = os.MkdirAll(brainDir, 0755)
+
+	// Create a regular file in brain directory
+	_ = os.WriteFile(filepath.Join(brainDir, "notes.txt"), []byte("not a session"), 0644)
+
+	// Create a session dir
+	sessDir := filepath.Join(brainDir, "sess-real")
+	_ = os.MkdirAll(sessDir, 0755)
+
+	latest := FindLatestSessionDir(time.Now().Add(-1 * time.Hour))
+	if latest != "sess-real" {
+		t.Errorf("expected latest session 'sess-real', got %q", latest)
+	}
+}
+
+func TestAppendTranscriptStep_Errors(t *testing.T) {
+	err := appendTranscriptStep("/dev/null/impossible/transcript.jsonl", []byte("data"))
+	if err == nil {
+		t.Error("expected error for impossible transcript path")
+	}
+}
+
+func TestAppendAmbientTurn_ZeroTimestamp(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	sessionID := uuid.New().String()
+	sessDir, err := EnsureSessionDir(sessionID)
+	if err != nil {
+		t.Fatalf("EnsureSessionDir failed: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(sessDir) })
+
+	// Call with zero time
+	err = AppendAmbientTurn(sessionID, "general", "Alice", "Zero time msg", time.Time{})
+	if err != nil {
+		t.Fatalf("AppendAmbientTurn with zero time failed: %v", err)
+	}
+}

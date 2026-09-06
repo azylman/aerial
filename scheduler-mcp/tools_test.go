@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -562,4 +563,127 @@ func TestPostgresSchedules(t *testing.T) {
 		t.Fatalf("DeleteSchedule oneshot failed: deleted=%v, err=%v", deleted, err)
 	}
 }
+
+func TestRunApp_Lifecycle(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	tempDB := filepath.Join(t.TempDir(), "runapp.db")
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- RunApp(ctx, "59483", tempDB)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Probe health
+	resp, err := http.Get("http://127.0.0.1:59483/health")
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Errorf("health check failed: %v, status: %v", err, resp)
+	}
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+
+	// Trigger shutdown
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Errorf("unexpected error from RunApp shutdown: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for RunApp shutdown")
+	}
+}
+
+func TestToolHandlers_ArgumentValidationErrors(t *testing.T) {
+	db, err := InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer db.Close()
+	h := NewToolHandler(db)
+
+	// 1. HandleScheduleRecurring errors
+	if _, err := h.HandleScheduleRecurring([]byte("{bad json")); err == nil {
+		t.Error("expected error for malformed json")
+	}
+	if _, err := h.HandleScheduleRecurring([]byte(`{"cron_expression":"* * * * *","prompt":"p"}`)); err == nil {
+		t.Error("expected error for missing channel_id")
+	}
+	if _, err := h.HandleScheduleRecurring([]byte(`{"channel_id":"c","prompt":"p"}`)); err == nil {
+		t.Error("expected error for missing cron_expression")
+	}
+	if _, err := h.HandleScheduleRecurring([]byte(`{"channel_id":"c","cron_expression":"* * * * *"}`)); err == nil {
+		t.Error("expected error for missing prompt")
+	}
+	if _, err := h.HandleScheduleRecurring([]byte(`{"channel_id":"c","cron_expression":"invalid cron","prompt":"p"}`)); err == nil {
+		t.Error("expected error for invalid cron expr")
+	}
+
+	// 2. HandleScheduleOnce errors
+	if _, err := h.HandleScheduleOnce([]byte("{bad json")); err == nil {
+		t.Error("expected error for malformed json")
+	}
+	if _, err := h.HandleScheduleOnce([]byte(`{"run_at":"15m","prompt":"p"}`)); err == nil {
+		t.Error("expected error for missing target_id")
+	}
+	if _, err := h.HandleScheduleOnce([]byte(`{"target_id":"t","prompt":"p"}`)); err == nil {
+		t.Error("expected error for missing run_at")
+	}
+	if _, err := h.HandleScheduleOnce([]byte(`{"target_id":"t","run_at":"15m"}`)); err == nil {
+		t.Error("expected error for missing prompt")
+	}
+	if _, err := h.HandleScheduleOnce([]byte(`{"target_id":"t","run_at":"unparseable-date","prompt":"p"}`)); err == nil {
+		t.Error("expected error for unparseable run_at")
+	}
+
+	// 3. HandleCancelSchedule errors
+	if _, err := h.HandleCancelSchedule([]byte("{bad json")); err == nil {
+		t.Error("expected error for malformed json")
+	}
+	if _, err := h.HandleCancelSchedule([]byte(`{"schedule_id":""}`)); err == nil {
+		t.Error("expected error for empty schedule_id")
+	}
+	if _, err := h.HandleCancelSchedule([]byte(`{"schedule_id":"non-existent"}`)); err == nil {
+		t.Error("expected error for non-existent schedule")
+	}
+
+	// 4. Closed DB errors for all handlers
+	closedDB, _ := sql.Open("sqlite", ":memory:")
+	_ = closedDB.Close()
+	hClosed := NewToolHandler(closedDB)
+
+	if _, err := hClosed.HandleScheduleRecurring([]byte(`{"channel_id":"c","cron_expression":"* * * * *","prompt":"p"}`)); err == nil {
+		t.Error("expected error with closed db in HandleScheduleRecurring")
+	}
+	if _, err := hClosed.HandleScheduleOnce([]byte(`{"target_id":"t","run_at":"15m","prompt":"p"}`)); err == nil {
+		t.Error("expected error with closed db in HandleScheduleOnce")
+	}
+	if _, err := hClosed.HandleListSchedules([]byte(`{"target_id":"t"}`)); err == nil {
+		t.Error("expected error with closed db in HandleListSchedules")
+	}
+	if _, err := hClosed.HandleCancelSchedule([]byte(`{"schedule_id":"s1"}`)); err == nil {
+		t.Error("expected error with closed db in HandleCancelSchedule")
+	}
+
+	// 5. RunApp startup failure with invalid DSN and invalid port
+	origMax := postgresMaxAttempts
+	origBase := postgresRetryBase
+	postgresMaxAttempts = 1
+	postgresRetryBase = 1 * time.Millisecond
+	defer func() {
+		postgresMaxAttempts = origMax
+		postgresRetryBase = origBase
+	}()
+
+	if err := RunApp(context.Background(), "9999", "postgres://invalid:pass@127.0.0.1:59996/db?sslmode=disable"); err == nil {
+		t.Error("expected error running app with invalid db")
+	}
+
+	if err := RunApp(context.Background(), "-1", ":memory:"); err == nil {
+		t.Error("expected error running app with invalid port")
+	}
+}
+
 

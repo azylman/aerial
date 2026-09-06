@@ -2,6 +2,8 @@ package runner
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -340,3 +342,117 @@ func TestRunAgyWithEcho(t *testing.T) {
 	}
 }
 
+func TestRunAgy_OptionsAndFailures(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. Run with full options (model, sessionID, apiKey, timeout)
+	stdout, _, exitCode, err := RunAgy(ctx, "echo", "test prompt", "conv-123", "api-key-xyz", "gemini-pro", 5)
+	if err != nil || exitCode != 0 {
+		t.Errorf("RunAgy with options failed: %v, exitCode: %d", err, exitCode)
+	}
+	if !strings.Contains(stdout, "test prompt") {
+		t.Errorf("expected stdout to contain prompt")
+	}
+
+	// 2. Run with default agyBin ("") and non-existent binary to test error handling
+	_, _, exitCode, err = RunAgy(ctx, "/path/to/definitely/non_existent_binary", "prompt", "", "", "", 0)
+	if err == nil || exitCode != -1 {
+		t.Errorf("expected error and exitCode -1 for non-existent binary, got err=%v, code=%d", err, exitCode)
+	}
+}
+
+func TestExtractSessionID_EdgeCases(t *testing.T) {
+	if id := ExtractSessionID("", time.Now()); id != "" {
+		t.Errorf("expected empty string for empty stderr, got %q", id)
+	}
+	if id := ExtractSessionID("random unformatted stderr", time.Now()); id != "" {
+		t.Errorf("expected empty string for unformatted stderr, got %q", id)
+	}
+}
+
+func TestClassifyError_AdditionalBranches(t *testing.T) {
+	// 1. Exit code 0, invalid JSON, stderr has context window exceeded
+	isFail, isTrans, isCorrupt, detail := ClassifyError(0, "invalid-json", "context window exceeded: 1000 tokens")
+	if !isFail || !isCorrupt || isTrans || detail != "context window exceeded" {
+		t.Errorf("unexpected classification for context window exceeded: %v, %v, %v, %s", isFail, isTrans, isCorrupt, detail)
+	}
+
+	// 2. Exit code 0, invalid JSON, stderr has session corrupt
+	isFail, isTrans, isCorrupt, _ = ClassifyError(0, "invalid-json", "session corrupt: parse failure")
+	if !isFail || !isCorrupt || isTrans {
+		t.Errorf("unexpected classification for session corrupt: %v, %v, %v", isFail, isTrans, isCorrupt)
+	}
+
+	// 3. Exit code 0, invalid JSON, stderr has 503
+	isFail, isTrans, isCorrupt, _ = ClassifyError(0, "invalid-json", "error 503: unavailable")
+	if !isFail || isCorrupt || !isTrans {
+		t.Errorf("unexpected classification for 503: %v, %v, %v", isFail, isTrans, isCorrupt)
+	}
+
+	// 4. Long error message line (> 200 characters)
+	longLine := strings.Repeat("A", 250)
+	_, _, _, detailLong := ClassifyError(1, "", longLine)
+	if len(detailLong) > 200 || !strings.HasSuffix(detailLong, "...") {
+		t.Errorf("expected long line to be truncated to 200 chars with '...', got len=%d: %s", len(detailLong), detailLong)
+	}
+
+	// 5. Non-zero exit code with empty stderr but non-empty stdout
+	isFail, _, _, detailStdout := ClassifyError(1, "error reported in stdout", "")
+	if !isFail || detailStdout != "error reported in stdout" {
+		t.Errorf("expected detail from stdout, got %q", detailStdout)
+	}
+
+	// 6. Non-zero exit code with empty stderr and empty stdout
+	_, _, _, detailEmpty := ClassifyError(42, "", "")
+	if detailEmpty != "execution failed with exit code 42" {
+		t.Errorf("expected fallback error detail, got %q", detailEmpty)
+	}
+
+	// 7. Non-zero exit code with conversation not found
+	isFail, _, isCorrupt, _ = ClassifyError(1, "", "conversation not found")
+	if !isFail || !isCorrupt {
+		t.Errorf("expected isCorrupt=true for conversation not found")
+	}
+
+	// 8. Exit 0 with non-success status and empty error
+	isFail, _, _, detailStatus := ClassifyError(0, `{"status":"FAILED"}`, "")
+	if !isFail || detailStatus != "runner status: FAILED" {
+		t.Errorf("expected runner status detail, got %q", detailStatus)
+	}
+
+	// 9. Exit 0 with success status but non-empty error field
+	isFail, _, _, detailRespErr := ClassifyError(0, `{"status":"SUCCESS","error":"subtask timed out"}`, "")
+	if !isFail || detailRespErr != "subtask timed out" {
+		t.Errorf("expected error detail 'subtask timed out', got %q", detailRespErr)
+	}
+
+	// 10. Exit 0 with invalid JSON and fatal error in stderr
+	isFail, _, _, detailFatal := ClassifyError(0, "not-json", "panic: nil pointer dereference")
+	if !isFail || !strings.Contains(detailFatal, "panic") {
+		t.Errorf("expected fatal error classification, got %q", detailFatal)
+	}
+
+	// 11. Stderr with only debug/info lines falls through in extractErrorDetail
+	_, _, _, detailOnlyLogs := ClassifyError(1, "", "DEBUG loading models\nINFO connecting\nStarting conversation update stream for xyz\n\n")
+	if detailOnlyLogs != "execution failed with exit code 1" {
+		t.Errorf("expected fallback error detail for log-only stderr, got %q", detailOnlyLogs)
+	}
+}
+
+func TestRunAgy_EmptyAgyBinFallback(t *testing.T) {
+	tmpDir := t.TempDir()
+	mockAgy := filepath.Join(tmpDir, "agy")
+	_ = os.WriteFile(mockAgy, []byte("#!/bin/sh\necho '{\"status\":\"SUCCESS\"}'\n"), 0755)
+	t.Setenv("PATH", tmpDir+":"+os.Getenv("PATH"))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	// agyBin is "" so it defaults to "agy" from PATH
+	stdout, _, exitCode, err := RunAgy(ctx, "", "hello", "", "", "", 1)
+	if err != nil || exitCode != 0 {
+		t.Errorf("RunAgy with empty agyBin failed: %v, exitCode: %d", err, exitCode)
+	}
+	if !strings.Contains(stdout, "SUCCESS") {
+		t.Errorf("unexpected stdout: %q", stdout)
+	}
+}

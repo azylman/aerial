@@ -54,6 +54,11 @@ func isPostgres(database *sql.DB) bool {
 	return strings.Contains(driverType, "stdlib") || strings.Contains(driverType, "pgx")
 }
 
+var (
+	postgresMaxAttempts = 10
+	postgresRetryBase   = 500 * time.Millisecond
+)
+
 // InitDB establishes the database connection pool, applies schema migrations, and registers metrics.
 func InitDB(dsn string) (*sql.DB, error) {
 	if dsn == "" {
@@ -67,7 +72,7 @@ func InitDB(dsn string) (*sql.DB, error) {
 		var err error
 
 		// 1. Connection retry loop with exponential backoff for containerized startup
-		for attempt := 1; attempt <= 10; attempt++ {
+		for attempt := 1; attempt <= postgresMaxAttempts; attempt++ {
 			database, err = sql.Open("pgx", dsn)
 			if err == nil {
 				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -79,8 +84,8 @@ func InitDB(dsn string) (*sql.DB, error) {
 				err = pingErr
 				_ = database.Close()
 			}
-			log.Printf("[DB] Waiting for PostgreSQL (attempt %d/10): %v", attempt, err)
-			time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
+			log.Printf("[DB] Waiting for PostgreSQL (attempt %d/%d): %v", attempt, postgresMaxAttempts, err)
+			time.Sleep(time.Duration(attempt) * postgresRetryBase)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("could not connect to PostgreSQL after retries: %w", err)

@@ -317,11 +317,14 @@ func isFunnelBotTargeted(s *discordgo.Session, m *discordgo.MessageCreate) bool 
 	return false
 }
 
-func connectDiscordFunnel(database *sql.DB, pool *queue.WorkerPool) *discordgo.Session {
-	token := config.GetEnv("DISCORD_TOKEN", config.GetEnv("DISCORD_BOT_TOKEN", ""))
+func connectDiscordFunnel(ctx context.Context, database *sql.DB, pool *queue.WorkerPool, token string) *discordgo.Session {
 	if token == "" {
 		log.Println("Discord funnel disabled: DISCORD_BOT_TOKEN/DISCORD_TOKEN not configured")
 		return nil
+	}
+
+	if ctx == nil {
+		ctx = context.Background()
 	}
 
 	dg, err := discordgo.New("Bot " + token)
@@ -348,7 +351,7 @@ func connectDiscordFunnel(database *sql.DB, pool *queue.WorkerPool) *discordgo.S
 				}
 			}
 		}
-		go RunStartupCatchUpSweep(context.Background(), database, pool, s)
+		go RunStartupCatchUpSweep(ctx, database, pool, s)
 	})
 
 	dg.AddHandler(func(s *discordgo.Session, g *discordgo.GuildCreate) {
@@ -475,9 +478,13 @@ func connectDiscordFunnel(database *sql.DB, pool *queue.WorkerPool) *discordgo.S
 			backoff := 2 * time.Second
 			maxBackoff := 60 * time.Second
 			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(backoff):
+				}
 				if err := dg.Open(); err != nil {
 					log.Printf("Discord funnel retry failed: %v. Retrying in %v...", err, backoff)
-					time.Sleep(backoff)
 					backoff = backoff * 2
 					if backoff > maxBackoff {
 						backoff = maxBackoff
@@ -495,9 +502,14 @@ func connectDiscordFunnel(database *sql.DB, pool *queue.WorkerPool) *discordgo.S
 	go func() {
 		ticker := time.NewTicker(15 * time.Second)
 		defer ticker.Stop()
-		for range ticker.C {
-			if dg != nil {
-				metrics.RecordGatewayLatency(dg.HeartbeatLatency())
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if dg != nil {
+					metrics.RecordGatewayLatency(dg.HeartbeatLatency())
+				}
 			}
 		}
 	}()

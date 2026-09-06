@@ -92,6 +92,11 @@ func rebindQuery(query string, isPg bool) string {
 	return b.String()
 }
 
+var (
+	postgresMaxAttempts = 10
+	postgresRetryBase   = 500 * time.Millisecond
+)
+
 func InitDB(dsn string) (*sql.DB, error) {
 	isPg := strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://")
 
@@ -99,8 +104,8 @@ func InitDB(dsn string) (*sql.DB, error) {
 		var database *sql.DB
 		var err error
 
-		maxAttempts := 10
-		backoff := 500 * time.Millisecond
+		maxAttempts := postgresMaxAttempts
+		backoff := postgresRetryBase
 		for attempt := 1; attempt <= maxAttempts; attempt++ {
 			database, err = sql.Open("pgx", dsn)
 			if err == nil {

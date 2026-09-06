@@ -91,6 +91,7 @@ type SyncDaemon struct {
 	lastReconcile time.Time
 	lastSyncTimes map[string]time.Time
 	statusMu      sync.RWMutex
+	triggerFn     func() ([]RepoSyncResult, error)
 }
 
 // resolveGitDir checks if repoPath contains a .git directory or a .git file (e.g., worktree/submodule).
@@ -350,6 +351,11 @@ func (d *SyncDaemon) ReconcileCompose(parentCtx context.Context) (err error) {
 	return nil
 }
 
+var (
+	reconcilerDebounceDuration = 5 * time.Second
+	reconcilerMinCooldown      = 15 * time.Second
+)
+
 // StartReconcilerLoop runs the background debounced worker goroutine.
 func (d *SyncDaemon) StartReconcilerLoop(ctx context.Context) {
 	if d.reconcileCh == nil {
@@ -358,8 +364,6 @@ func (d *SyncDaemon) StartReconcilerLoop(ctx context.Context) {
 
 	go func() {
 		var debounceTimer *time.Timer
-		const debounceDuration = 5 * time.Second
-		const minCooldown = 15 * time.Second
 
 		for {
 			select {
@@ -369,9 +373,9 @@ func (d *SyncDaemon) StartReconcilerLoop(ctx context.Context) {
 				if debounceTimer != nil {
 					debounceTimer.Stop()
 				}
-				debounceTimer = time.AfterFunc(debounceDuration, func() {
-					if elapsed := time.Since(d.lastReconcile); elapsed < minCooldown {
-						time.Sleep(minCooldown - elapsed)
+				debounceTimer = time.AfterFunc(reconcilerDebounceDuration, func() {
+					if elapsed := time.Since(d.lastReconcile); elapsed < reconcilerMinCooldown {
+						time.Sleep(reconcilerMinCooldown - elapsed)
 					}
 					_ = d.ReconcileCompose(context.Background())
 				})
@@ -555,6 +559,10 @@ func (d *SyncDaemon) SyncRepo(ctx context.Context, repoPath string) (res RepoSyn
 
 // TriggerSync runs a synchronous singleflight sync across all managed repositories.
 func (d *SyncDaemon) TriggerSync() ([]RepoSyncResult, error) {
+	if d.triggerFn != nil {
+		return d.triggerFn()
+	}
+
 	val, err, _ := d.sfg.Do("sync", func() (interface{}, error) {
 		d.mu.Lock()
 		if d.ticker != nil {
@@ -730,71 +738,35 @@ func (d *SyncDaemon) GetStatus(ctx context.Context) GitSyncStatusResponse {
 	return resp
 }
 
-func main() {
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
+// DaemonConfig holds configuration options for the GitSync daemon.
+type DaemonConfig struct {
+	Port          string
+	Repos         []string
+	RepoURLs      map[string]string
+	Interval      time.Duration
+	PAT           string
+	ComposeDir    string
+	ConfigDir     string
+}
 
-	rawRepos := os.Getenv("SYNC_REPOS")
-	if rawRepos == "" {
-		rawRepos = "/share/aerial-config,/share/aerial"
+// NewDaemon initializes a new SyncDaemon from config.
+func NewDaemon(cfg DaemonConfig) *SyncDaemon {
+	if cfg.Interval <= 0 {
+		cfg.Interval = 60 * time.Second
 	}
-
-	var repos []string
-	for _, r := range strings.Split(rawRepos, ",") {
-		r = strings.TrimSpace(r)
-		if r != "" {
-			repos = append(repos, r)
-		}
-	}
-
-	intervalStr := os.Getenv("SYNC_INTERVAL")
-	interval := 60 * time.Second
-	if intervalStr != "" {
-		if d, err := time.ParseDuration(intervalStr); err == nil && d > 0 {
-			interval = d
-		}
-	}
-
-	pat := os.Getenv("GITHUB_PAT")
-	configRepoURL := os.Getenv("AERIAL_CONFIG_REPO_URL")
-	if configRepoURL == "" {
-		configRepoURL = "https://github.com/azylman/aerial-config.git"
-	}
-
-	composeDir := os.Getenv("AERIAL_PROJECT_DIR")
-	if composeDir == "" {
-		composeDir = "/share/aerial"
-	}
-
-	configDir := os.Getenv("AERIAL_CONFIG_DIR")
-	if configDir == "" {
-		configDir = "/share/aerial-config"
-	}
-
-	repoUrls := map[string]string{
-		configDir:  configRepoURL,
-		composeDir: "https://github.com/azylman/aerial.git",
-	}
-
-	daemon := &SyncDaemon{
-		repos:       repos,
-		repoUrls:    repoUrls,
-		interval:    interval,
-		pat:         pat,
-		composeDir:  composeDir,
-		configDir:   configDir,
+	return &SyncDaemon{
+		repos:       cfg.Repos,
+		repoUrls:    cfg.RepoURLs,
+		interval:    cfg.Interval,
+		pat:         cfg.PAT,
+		composeDir:  cfg.ComposeDir,
+		configDir:   cfg.ConfigDir,
 		reconcileCh: make(chan struct{}, 1),
 	}
+}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	daemon.StartPeriodicLoop(ctx)
-	daemon.StartReconcilerLoop(ctx)
-	log.Printf("[GitSync] Sidecar GitOps daemon started on :%s (interval: %v, repos: %v, composeDir: %s)", port, interval, repos, composeDir)
-
+// SetupMux configures HTTP handlers for metrics, health, status, and sync.
+func SetupMux(daemon *SyncDaemon) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.Handle("/metrics", metrics.Handler())
@@ -842,30 +814,114 @@ func main() {
 		})
 	})
 
+	return mux
+}
+
+// RunDaemon starts the background sync daemon and HTTP server.
+func RunDaemon(ctx context.Context, cfg DaemonConfig) error {
+	daemon := NewDaemon(cfg)
+
+	daemon.StartPeriodicLoop(ctx)
+	daemon.StartReconcilerLoop(ctx)
+	log.Printf("[GitSync] Sidecar GitOps daemon started on :%s (interval: %v, repos: %v, composeDir: %s)", cfg.Port, cfg.Interval, cfg.Repos, cfg.ComposeDir)
+
+	mux := SetupMux(daemon)
+
 	server := &http.Server{
-		Addr:         ":" + port,
+		Addr:         ":" + cfg.Port,
 		Handler:      mux,
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 60 * time.Second,
 	}
 
-	stopChan := make(chan os.Signal, 1)
-	signal.Notify(stopChan, os.Interrupt, syscall.SIGTERM)
-
+	serverErr := make(chan error, 1)
 	go func() {
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("[GitSync] HTTP server fatal error: %v", err)
+			serverErr <- err
 		}
 	}()
 
-	<-stopChan
-	log.Println("[GitSync] Shutting down GitSync sidecar gracefully...")
-
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer shutdownCancel()
-
-	if err := server.Shutdown(shutdownCtx); err != nil {
-		log.Printf("[GitSync] HTTP server shutdown error: %v", err)
+	select {
+	case <-ctx.Done():
+		log.Println("[GitSync] Shutting down GitSync sidecar gracefully...")
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			log.Printf("[GitSync] HTTP server shutdown error: %v", err)
+		}
+		log.Println("[GitSync] GitSync sidecar stopped cleanly")
+		return nil
+	case err := <-serverErr:
+		return fmt.Errorf("HTTP server fatal error: %w", err)
 	}
-	log.Println("[GitSync] GitSync sidecar stopped cleanly")
+}
+
+// NewConfigFromEnv extracts DaemonConfig from environment variables with sensible defaults.
+func NewConfigFromEnv() DaemonConfig {
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	rawRepos := os.Getenv("SYNC_REPOS")
+	if rawRepos == "" {
+		rawRepos = "/share/aerial-config,/share/aerial"
+	}
+
+	var repos []string
+	for _, r := range strings.Split(rawRepos, ",") {
+		r = strings.TrimSpace(r)
+		if r != "" {
+			repos = append(repos, r)
+		}
+	}
+
+	intervalStr := os.Getenv("SYNC_INTERVAL")
+	interval := 60 * time.Second
+	if intervalStr != "" {
+		if d, err := time.ParseDuration(intervalStr); err == nil && d > 0 {
+			interval = d
+		}
+	}
+
+	pat := os.Getenv("GITHUB_PAT")
+	configRepoURL := os.Getenv("AERIAL_CONFIG_REPO_URL")
+	if configRepoURL == "" {
+		configRepoURL = "https://github.com/azylman/aerial-config.git"
+	}
+
+	composeDir := os.Getenv("AERIAL_PROJECT_DIR")
+	if composeDir == "" {
+		composeDir = "/share/aerial"
+	}
+
+	configDir := os.Getenv("AERIAL_CONFIG_DIR")
+	if configDir == "" {
+		configDir = "/share/aerial-config"
+	}
+
+	repoUrls := map[string]string{
+		configDir:  configRepoURL,
+		composeDir: "https://github.com/azylman/aerial.git",
+	}
+
+	return DaemonConfig{
+		Port:       port,
+		Repos:      repos,
+		RepoURLs:   repoUrls,
+		Interval:   interval,
+		PAT:        pat,
+		ComposeDir: composeDir,
+		ConfigDir:  configDir,
+	}
+}
+
+func main() {
+	cfg := NewConfigFromEnv()
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	if err := RunDaemon(ctx, cfg); err != nil {
+		log.Fatalf("[GitSync] Fatal error: %v", err)
+	}
 }

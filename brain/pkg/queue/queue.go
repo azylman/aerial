@@ -34,9 +34,10 @@ type ChannelSnapshot struct {
 }
 
 var (
-	channelCacheMu   sync.RWMutex
-	channelCache     = make(map[string]ChannelSnapshot)
-	restSingleFlight singleflight.Group
+	channelCacheMu          sync.RWMutex
+	channelCache            = make(map[string]ChannelSnapshot)
+	restSingleFlight        singleflight.Group
+	threadWorkerIdleTimeout = 30 * time.Second
 )
 
 const (
@@ -418,7 +419,7 @@ func (p *WorkerPool) runThreadWorker(threadID string, ch chan db.Message) {
 				}
 			}
 			p.processBurst(burst)
-		case <-time.After(30 * time.Second):
+		case <-time.After(threadWorkerIdleTimeout):
 			p.mu.Lock()
 			if len(ch) == 0 {
 				delete(p.threadChs, threadID)

@@ -373,12 +373,12 @@ func UpdateScheduleRunStatus(database *sql.DB, params UpdateRunParams) error {
 		args = append(args, params.DurationMs)
 		idx++
 	}
-	if params.Status == "completed" {
-		sets = append(sets, "error = ''")
-	} else if params.Error != "" {
+	if params.Error != "" {
 		sets = append(sets, fmt.Sprintf("error = $%d", idx))
 		args = append(args, params.Error)
 		idx++
+	} else if params.Status == "completed" {
+		sets = append(sets, "error = ''")
 	}
 
 	if len(sets) == 0 {
