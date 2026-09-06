@@ -73,7 +73,7 @@ Aerial operates on a strict **Two-Repository Separation of Concerns**:
 ### 2. User Configuration Repository (e.g. `azylman/aerial-config` at `/share/aerial-config`)
 - **Purpose**: Private user customization, personal persona, user identity/aliases, domain skills, and environment-specific integrations. Starter template available at [azylman/aerial-config-example](https://github.com/azylman/aerial-config-example).
 - **Contents**:
-  - **`config.yaml`**: Non-secret user options (`model`, `timeout_minutes`, `timezone`, `system_channel`, `git_sync`, `mcp_servers`, `channels`).
+  - **`config.yaml`**: Non-secret user options (`model`, `timezone`, `system_channel`, `git_sync`, `mcp_servers`, `channels`).
   - **`AGENTS.md`**: User persona overrides, personal preferences, communication style, and user identity/alias definitions.
   - **`channels/<channel-name>.md`**: Dedicated instructions and operating constraints for specific Discord channels (auto-discovered; inherited by threads).
   - **`custom-skills/`**: Private operational runbooks and domain-specific workflows (e.g., smart home).

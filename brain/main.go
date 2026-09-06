@@ -911,13 +911,12 @@ func main() {
 	)
 
 	pool := queue.NewWorkerPool(queue.WorkerPoolConfig{
-		DB:             database,
-		AgyBin:         agyBin,
-		APIKey:         apiKey,
-		Model:          cfg.Model,
-		SystemPrompt:   systemPrompt,
-		TimeoutMinutes: cfg.TimeoutMinutes,
-		Classifier:     cls,
+		DB:           database,
+		AgyBin:       agyBin,
+		APIKey:       apiKey,
+		Model:        cfg.Model,
+		SystemPrompt: systemPrompt,
+		Classifier:   cls,
 	})
 	pool.Start()
 	defer pool.Stop()
@@ -947,7 +946,6 @@ func main() {
 		}
 
 		latestModel := latestCfg.Model
-		latestTimeout := latestCfg.TimeoutMinutes
 		latestMcpConfig := config.LoadMCPConfig()
 
 		if apiKey != "" {
@@ -960,7 +958,7 @@ func main() {
 				log.Printf("[%s] Warning: EnsureMcpConfig error: %v", source, err)
 			}
 		}
-		pool.UpdateRuntimeConfig(latestModel, latestTimeout)
+		pool.UpdateRuntimeConfig(latestModel)
 		if err := config.EnsureSystemRules(systemPrompt); err != nil {
 			log.Printf("[%s] Warning: EnsureSystemRules error: %v", source, err)
 		}
@@ -1045,7 +1043,7 @@ func main() {
 	signal.Notify(stopChan, os.Interrupt, syscall.SIGTERM)
 
 	go func() {
-		log.Printf("Aerial Brain listening on port %s (model=%s, timeout=%dm)", portStr, cfg.Model, cfg.TimeoutMinutes)
+		log.Printf("Aerial Brain listening on port %s (model=%s, timeout=%dm)", portStr, cfg.Model, queue.DefaultTimeoutMinutes)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Server failed: %v", err)
 		}

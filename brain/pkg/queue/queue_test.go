@@ -712,7 +712,6 @@ func TestWorkerPoolUpdateRuntimeConfig(t *testing.T) {
 	defer func() { _ = database.Close() }()
 
 	var receivedModel string
-	var receivedTimeout int
 	var mu sync.Mutex
 	doneCh := make(chan struct{})
 
@@ -724,7 +723,6 @@ func TestWorkerPoolUpdateRuntimeConfig(t *testing.T) {
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
 			mu.Lock()
 			receivedModel = model
-			receivedTimeout = timeoutMinutes
 			mu.Unlock()
 			return mockJSONResponse("", "OK"), "", 0, nil
 		},
@@ -742,17 +740,17 @@ func TestWorkerPoolUpdateRuntimeConfig(t *testing.T) {
 	defer pool.Stop()
 
 	// Initial check
-	m, tm := pool.GetRuntimeConfig()
-	if m != "initial-model-v1" || tm != 10 {
-		t.Errorf("Expected initial-model-v1 and 10, got model=%s timeout=%d", m, tm)
+	m := pool.GetRuntimeConfig()
+	if m != "initial-model-v1" {
+		t.Errorf("Expected initial-model-v1, got model=%s", m)
 	}
 
 	// Update runtime config
-	pool.UpdateRuntimeConfig("updated-model-v2", 35)
+	pool.UpdateRuntimeConfig("updated-model-v2")
 
-	m2, tm2 := pool.GetRuntimeConfig()
-	if m2 != "updated-model-v2" || tm2 != 35 {
-		t.Errorf("Expected updated-model-v2 and 35, got model=%s timeout=%d", m2, tm2)
+	m2 := pool.GetRuntimeConfig()
+	if m2 != "updated-model-v2" {
+		t.Errorf("Expected updated-model-v2, got model=%s", m2)
 	}
 
 	msg := db.Message{
@@ -773,8 +771,8 @@ func TestWorkerPoolUpdateRuntimeConfig(t *testing.T) {
 	}
 
 	mu.Lock()
-	if receivedModel != "updated-model-v2" || receivedTimeout != 35 {
-		t.Errorf("Runner received unexpected runtime config: model=%q timeout=%d", receivedModel, receivedTimeout)
+	if receivedModel != "updated-model-v2" {
+		t.Errorf("Runner received unexpected runtime config: model=%q", receivedModel)
 	}
 	mu.Unlock()
 }
@@ -1630,6 +1628,11 @@ func TestQueueTurnCountSessionRotation(t *testing.T) {
 	initialSessionID := "sess-channel-init-123"
 	_ = db.SaveSessionID(database, channelID, initialSessionID)
 
+	// Seed turn_count to DefaultMaxSessionTurns - 2 (48 turns)
+	for i := 0; i < DefaultMaxSessionTurns-2; i++ {
+		_, _ = db.IncrementSessionTurnCount(database, channelID)
+	}
+
 	_, _ = session.EnsureSessionDir(initialSessionID)
 	cliPbDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "conversations")
 	_ = os.MkdirAll(cliPbDir, 0755)
@@ -1645,8 +1648,7 @@ func TestQueueTurnCountSessionRotation(t *testing.T) {
 		MaxAttempts:    1,
 		ResolveChannelPolicy: func(cID, cName string) config.ChannelPolicy {
 			return config.ChannelPolicy{
-				Mode:            "channel",
-				MaxSessionTurns: 3,
+				Mode: "channel",
 			}
 		},
 		MemoryRetrieverFunc: func(ctx context.Context, database *sql.DB, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
@@ -1680,40 +1682,27 @@ func TestQueueTurnCountSessionRotation(t *testing.T) {
 	pool.Start()
 	defer pool.Stop()
 
-	// Send turn 1
+	// Send turn 49 (DefaultMaxSessionTurns - 1)
 	completedCh = make(chan struct{}, 1)
-	msg1 := db.Message{ID: "m-rot-1", ThreadID: channelID, Content: "Aerial Turn 1", CreatedAt: time.Now().UTC()}
+	msg1 := db.Message{ID: "m-rot-1", ThreadID: channelID, Content: "Aerial Turn 49", CreatedAt: time.Now().UTC()}
 	_ = db.InsertMessage(database, msg1)
 	pool.Enqueue(msg1)
 	<-completedCh
 
 	c1, _ := db.GetSessionTurnCount(database, channelID)
 	s1, _ := db.GetSessionID(database, channelID)
-	if c1 != 1 || s1 != initialSessionID {
-		t.Fatalf("Expected turn_count=1 and initial session ID after turn 1, got count=%d, sess=%s", c1, s1)
+	if c1 != DefaultMaxSessionTurns-1 || s1 != initialSessionID {
+		t.Fatalf("Expected turn_count=%d and initial session ID after turn 49, got count=%d, sess=%s", DefaultMaxSessionTurns-1, c1, s1)
 	}
 
-	// Send turn 2
+	// Send turn 50 (hits DefaultMaxSessionTurns limit)
 	completedCh = make(chan struct{}, 1)
-	msg2 := db.Message{ID: "m-rot-2", ThreadID: channelID, Content: "Aerial Turn 2", CreatedAt: time.Now().UTC()}
+	msg2 := db.Message{ID: "m-rot-2", ThreadID: channelID, Content: "Aerial Turn 50", CreatedAt: time.Now().UTC()}
 	_ = db.InsertMessage(database, msg2)
 	pool.Enqueue(msg2)
 	<-completedCh
 
-	c2, _ := db.GetSessionTurnCount(database, channelID)
-	s2, _ := db.GetSessionID(database, channelID)
-	if c2 != 2 || s2 != initialSessionID {
-		t.Fatalf("Expected turn_count=2 and initial session ID after turn 2, got count=%d, sess=%s", c2, s2)
-	}
-
-	// Send turn 3 (reaches limit of 3 turns)
-	completedCh = make(chan struct{}, 1)
-	msg3 := db.Message{ID: "m-rot-3", ThreadID: channelID, Content: "Aerial Turn 3", CreatedAt: time.Now().UTC()}
-	_ = db.InsertMessage(database, msg3)
-	pool.Enqueue(msg3)
-	<-completedCh
-
-	// Verify post-3-turns state:
+	// Verify post-50-turns state:
 	// Session ID should be rotated to cold state ""
 	// turn_count should be reset to 0
 	finalSessionID, err := db.GetSessionID(database, channelID)
@@ -2749,12 +2738,13 @@ func TestProcessBurst_SessionRotationBeforeLeadingAmbient(t *testing.T) {
 	_ = os.MkdirAll(cliPbDir, 0755)
 	_ = os.WriteFile(filepath.Join(cliPbDir, initialSessionID+".pb"), []byte("mock-pb"), 0644)
 
-	// Set turn_count to 2, with MaxSessionTurns = 3.
+	// Set turn_count to DefaultMaxSessionTurns - 1 (49 turns).
 	// The incoming burst has [Ambient1, Wake2].
-	// Wake2 will increment turn_count to 3, triggering rotation.
-	// Ambient1 MUST be written to the NEW session directory, not the old one!
-	_, _ = db.IncrementSessionTurnCount(database, channelID) // turn 1
-	_, _ = db.IncrementSessionTurnCount(database, channelID) // turn 2
+	// Since wakeIdx = 1 and currentTurns + 1 = 50 >= DefaultMaxSessionTurns,
+	// pre-burst rotation resets session to cold state so Ambient1 is written to the NEW session directory.
+	for i := 0; i < DefaultMaxSessionTurns-1; i++ {
+		_, _ = db.IncrementSessionTurnCount(database, channelID)
+	}
 
 	var mu sync.Mutex
 	runnerCalls := 0
@@ -2787,7 +2777,6 @@ func TestProcessBurst_SessionRotationBeforeLeadingAmbient(t *testing.T) {
 		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
 			return config.ChannelPolicy{
 				Mode:                 "channel",
-				MaxSessionTurns:      3,
 				AmbientWakeThreshold: ptrFloat(0.80),
 			}
 		},
@@ -4010,8 +3999,7 @@ func TestProcessBurst_SessionRotation_ResetsToColdState(t *testing.T) {
 		},
 		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
 			return config.ChannelPolicy{
-				Mode:            "channel",
-				MaxSessionTurns: 2,
+				Mode: "channel",
 			}
 		},
 	})
@@ -4042,12 +4030,17 @@ func TestProcessBurst_SessionRotation_ResetsToColdState(t *testing.T) {
 		t.Errorf("Expected session ID 'sess-rot-1' after Turn 1, got %q", s1)
 	}
 
-	// 2. Process Turn 2 -> turnCount hits 2, rotates session_id to ""
+	// Seed turn_count to DefaultMaxSessionTurns - 1 (49) so next turn hits 50 and triggers rotation
+	for i := 1; i < DefaultMaxSessionTurns-1; i++ {
+		_, _ = db.IncrementSessionTurnCount(database, channelID)
+	}
+
+	// 2. Process Turn 50 -> turnCount hits DefaultMaxSessionTurns (50), rotates session_id to ""
 	msg2 := db.Message{
 		ID:         "msg-turn-2",
 		ThreadID:   channelID,
 		AuthorName: "Alice",
-		Content:    "Aerial Turn 2",
+		Content:    "Aerial Turn 50",
 		Status:     db.StatusPending,
 		CreatedAt:  now.Add(2 * time.Second),
 	}

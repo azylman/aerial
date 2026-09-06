@@ -52,7 +52,6 @@ services:
       - DATABASE_URL=${DATABASE_URL:-postgres://${POSTGRES_USER:-aerial}:${POSTGRES_PASSWORD:-aerial_secure_pass}@postgres:5432/${POSTGRES_DB:-aerial}?sslmode=disable}
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - AGY_MODEL=${AGY_MODEL:-Gemini 3.6 Flash (Low)}
-      - TIMEOUT_MINUTES=${TIMEOUT_MINUTES:-15}
       - GITHUB_PAT=${GITHUB_PAT}
       - HA_TOKEN=${HA_TOKEN}
       - AERIAL_CONFIG_REPO_URL=${AERIAL_CONFIG_REPO_URL}
