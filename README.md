@@ -99,7 +99,6 @@ User configuration and persona rules live in your private configuration reposito
      # Default fallback (Required)
      default:
        mode: "threads"           # "threads" | "channel" | "ignore"
-       typing_indicator: "always" # "always" | "on_mention" | "never"
        ignore_bots: true
        ambient_wake_threshold: 0.80
 
@@ -107,7 +106,6 @@ User configuration and persona rules live in your private configuration reposito
      general:
        mode: "channel"
        wake_mode: "classifier"   # "classifier" | "mention" | "all"
-       typing_indicator: "on_mention"
        ignore_bots: true
        ambient_wake_threshold: 0.80
        ambient_wake_prompt: "Determine whether the target message is relevant to Aerial and warrants Aerial waking up and responding, based on the recent channel context."
@@ -117,7 +115,6 @@ User configuration and persona rules live in your private configuration reposito
      lounge:
        mode: "channel"
        wake_mode: "mention"
-       typing_indicator: "on_mention"
        ignore_bots: false
        max_session_turns: 50
 
@@ -125,7 +122,6 @@ User configuration and persona rules live in your private configuration reposito
      dev-alerts:
        mode: "channel"
        wake_mode: "classifier"
-       typing_indicator: "on_mention"
        ignore_bots: false # Allow bot alerts
        ambient_wake_threshold: 0.70
        ambient_wake_prompt: "Only wake up and respond if the user is asking about Kubernetes deployments, CI/CD pipeline failures, or production outages."
@@ -155,10 +151,6 @@ User configuration and persona rules live in your private configuration reposito
      - `mention` (or `mentions`, `direct`): Aerial responds strictly to explicit user pings (`@Aerial`) and direct replies. Keyword triggers and LLM classification are bypassed with zero token cost. Crucially, ambient channel chatter is silently appended into `transcript.jsonl` so Aerial retains complete conversational lookback when subsequently pinged.
      - `classifier` (or `ambient`): Tier 1 wakes on direct mentions, replies, or keywords (`aerial`, `gundam`); Tier 2 ambient messages are scored (0.0 to 1.0) by `Gemini 3.8 Flash (Low)` against `ambient_wake_prompt` using recent channel context.
      - `all` (or `always`): Responds to every incoming message (default inside active threads).
-   - **Typing Indicator Dynamics (`typing_indicator`)**:
-     - `always`: Sends typing indicator on every evaluated turn (default for `threads`).
-     - `on_mention`: Sends typing indicator only when the bot is directly mentioned or replied to (default for `channel`). Prevents channel chatter distraction during ambient evaluation.
-     - `never`: Completely suppresses typing indicators.
    - **Empty Response Suppression**: Agent turns with empty or whitespace-only stdout silently skip Discord message delivery without error, eliminating fragile `[NO_REPLY]` prompt sentinels.
    - **Server Whitelisting (Default-Deny)**: Set `channels.default.mode: "ignore"` to ignore the entire server by default, responding only in explicitly declared channels.
    - **Hot-Reloading & LKGC**: Changes to `config.yaml` are detected instantly via `fsnotify` and reconfigured in-memory without restarting the daemon. If invalid YAML is saved, Aerial retains the **Last Known Good Configuration (LKGC)** in memory and posts a diagnostic alert to `#aerial-dev`.

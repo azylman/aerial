@@ -586,37 +586,6 @@ func CoalesceBurstPrompt(burst []db.Message) string {
 	return strings.TrimSpace(sb.String())
 }
 
-func isMentionOrReply(burst []db.Message, botUserID string, wakeMode string) bool {
-	for _, m := range burst {
-		if isTier1Wake(m, botUserID, wakeMode) {
-			return true
-		}
-	}
-	return false
-}
-
-func resolveTypingStarter(policy config.ChannelPolicy, burst []db.Message, skipDiscord bool, typingFunc func(s *discordgo.Session, channelID string) func(), getSession func() *discordgo.Session, threadID string) func() {
-	if skipDiscord || typingFunc == nil {
-		return func() {}
-	}
-	switch policy.TypingIndicator {
-	case "never":
-		return func() {}
-	case "on_mention":
-		botUserID := ""
-		if sess := getSession(); sess != nil && sess.State != nil && sess.State.User != nil {
-			botUserID = sess.State.User.ID
-		}
-		if isMentionOrReply(burst, botUserID, policy.GetWakeMode()) {
-			return typingFunc(getSession(), threadID)
-		}
-		return func() {}
-	case "always":
-		fallthrough
-	default:
-		return typingFunc(getSession(), threadID)
-	}
-}
 
 func (p *WorkerPool) processBurst(burst []db.Message) {
 	if len(burst) == 0 {
@@ -1084,7 +1053,11 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		defer handleTrailing()
 	}
 
-	stopTyping = resolveTypingStarter(policy, burst, skipDiscord, p.cfg.TypingFunc, p.getDiscordSession, threadID)
+	if !skipDiscord && p.cfg.TypingFunc != nil {
+		if stop := p.cfg.TypingFunc(p.getDiscordSession(), threadID); stop != nil {
+			stopTyping = stop
+		}
+	}
 
 	// Format coalesced prompt
 	basePrompt := CoalesceBurstPrompt(burst)

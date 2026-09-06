@@ -1647,7 +1647,6 @@ func TestQueueTurnCountSessionRotation(t *testing.T) {
 			return config.ChannelPolicy{
 				Mode:            "channel",
 				MaxSessionTurns: 3,
-				TypingIndicator: "always",
 			}
 		},
 		MemoryRetrieverFunc: func(ctx context.Context, database *sql.DB, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
@@ -1734,7 +1733,7 @@ func TestQueueTurnCountSessionRotation(t *testing.T) {
 	}
 }
 
-func TestQueueTypingIndicatorPolicies(t *testing.T) {
+func TestQueueUniversalActiveTurnTyping(t *testing.T) {
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -1744,12 +1743,22 @@ func TestQueueTypingIndicatorPolicies(t *testing.T) {
 	var typingCalls int
 	var mu sync.Mutex
 	var currentPolicy config.ChannelPolicy
+	var classifierConfidence float64 = 0.9
 
+	cls := classifier.NewClassifier(classifier.WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
+		mu.Lock()
+		conf := classifierConfidence
+		mu.Unlock()
+		return fmt.Sprintf(`{"confidence": %.2f, "reason": "test classification"}`, conf), nil
+	}))
+
+	threshold := 0.8
 	pool := NewWorkerPool(WorkerPoolConfig{
 		DB:             database,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    1,
+		Classifier:     cls,
 		ResolveChannelPolicy: func(cID, cName string) config.ChannelPolicy {
 			mu.Lock()
 			defer mu.Unlock()
@@ -1774,79 +1783,119 @@ func TestQueueTypingIndicatorPolicies(t *testing.T) {
 	pool.Start()
 	defer pool.Stop()
 
-	// 1. Policy: TypingIndicator = "never"
+	// 1. Thread mode active turn -> typing indicator invoked
 	mu.Lock()
-	currentPolicy = config.ChannelPolicy{Mode: "channel", TypingIndicator: "never"}
+	currentPolicy = config.ChannelPolicy{Mode: "threads"}
 	typingCalls = 0
 	mu.Unlock()
 
 	doneCh1 := make(chan struct{})
 	pool.cfg.OnMessageCompleted = func(msg db.Message, finalStatus string) { close(doneCh1) }
-	msg1 := db.Message{ID: "m-type-1", ThreadID: "th-never", Content: "Hello @Aerial", CreatedAt: time.Now().UTC()}
+	msg1 := db.Message{ID: "m-type-1", ThreadID: "th-active-1", Content: "Hello thread", CreatedAt: time.Now().UTC()}
 	_ = db.InsertMessage(database, msg1)
 	pool.Enqueue(msg1)
 	<-doneCh1
 
 	mu.Lock()
-	if typingCalls != 0 {
-		t.Errorf("Expected 0 typing calls for policy 'never', got %d", typingCalls)
+	if typingCalls != 1 {
+		t.Errorf("Expected 1 typing call for threads mode active turn, got %d", typingCalls)
 	}
 	mu.Unlock()
 
-	// 2. Policy: TypingIndicator = "on_mention", without mention
+	// 2. Channel mode direct mention wake -> typing indicator invoked
 	mu.Lock()
-	currentPolicy = config.ChannelPolicy{Mode: "channel", TypingIndicator: "on_mention"}
+	currentPolicy = config.ChannelPolicy{Mode: "channel", WakeMode: "mention"}
 	typingCalls = 0
 	mu.Unlock()
 
 	doneCh2 := make(chan struct{})
 	pool.cfg.OnMessageCompleted = func(msg db.Message, finalStatus string) { close(doneCh2) }
-	msg2 := db.Message{ID: "m-type-2", ThreadID: "th-mention-no", Content: "Just talking to friends", CreatedAt: time.Now().UTC()}
+	msg2 := db.Message{ID: "m-type-2", ThreadID: "th-mention-yes", Content: "<@Aerial> help me", CreatedAt: time.Now().UTC()}
 	_ = db.InsertMessage(database, msg2)
 	pool.Enqueue(msg2)
 	<-doneCh2
 
 	mu.Lock()
-	if typingCalls != 0 {
-		t.Errorf("Expected 0 typing calls for policy 'on_mention' without mention, got %d", typingCalls)
+	if typingCalls != 1 {
+		t.Errorf("Expected 1 typing call for channel mode direct mention, got %d", typingCalls)
 	}
 	mu.Unlock()
 
-	// 3. Policy: TypingIndicator = "on_mention", with mention
+	// 3. Channel mode ambient classifier wake -> typing indicator invoked
 	mu.Lock()
-	currentPolicy = config.ChannelPolicy{Mode: "channel", TypingIndicator: "on_mention"}
+	currentPolicy = config.ChannelPolicy{Mode: "channel", WakeMode: "classifier", AmbientWakeThreshold: &threshold}
+	classifierConfidence = 0.95
 	typingCalls = 0
 	mu.Unlock()
 
 	doneCh3 := make(chan struct{})
 	pool.cfg.OnMessageCompleted = func(msg db.Message, finalStatus string) { close(doneCh3) }
-	msg3 := db.Message{ID: "m-type-3", ThreadID: "th-mention-yes", Content: "Hey @Aerial help me", CreatedAt: time.Now().UTC()}
+	msg3 := db.Message{ID: "m-type-3", ThreadID: "th-ambient-wake", Content: "Let's change all of these to 8am", CreatedAt: time.Now().UTC()}
 	_ = db.InsertMessage(database, msg3)
 	pool.Enqueue(msg3)
 	<-doneCh3
 
 	mu.Lock()
 	if typingCalls != 1 {
-		t.Errorf("Expected 1 typing call for policy 'on_mention' with mention, got %d", typingCalls)
+		t.Errorf("Expected 1 typing call for channel mode ambient classifier wake, got %d", typingCalls)
 	}
 	mu.Unlock()
 
-	// 4. Policy: TypingIndicator = "always"
+	// 4. Channel mode pure ambient non-wake chatter -> typing indicator NOT invoked
 	mu.Lock()
-	currentPolicy = config.ChannelPolicy{Mode: "threads", TypingIndicator: "always"}
+	currentPolicy = config.ChannelPolicy{Mode: "channel", WakeMode: "classifier", AmbientWakeThreshold: &threshold}
+	classifierConfidence = 0.1
 	typingCalls = 0
 	mu.Unlock()
 
 	doneCh4 := make(chan struct{})
 	pool.cfg.OnMessageCompleted = func(msg db.Message, finalStatus string) { close(doneCh4) }
-	msg4 := db.Message{ID: "m-type-4", ThreadID: "th-always", Content: "Any prompt", CreatedAt: time.Now().UTC()}
+	msg4 := db.Message{ID: "m-type-4", ThreadID: "th-ambient-drop", Content: "Just random human chat between people", CreatedAt: time.Now().UTC()}
 	_ = db.InsertMessage(database, msg4)
 	pool.Enqueue(msg4)
 	<-doneCh4
 
 	mu.Lock()
-	if typingCalls != 1 {
-		t.Errorf("Expected 1 typing call for policy 'always', got %d", typingCalls)
+	if typingCalls != 0 {
+		t.Errorf("Expected 0 typing calls for channel mode non-wake ambient chatter, got %d", typingCalls)
+	}
+	mu.Unlock()
+
+	// 5. Ignored channel policy -> typing indicator NOT invoked
+	mu.Lock()
+	currentPolicy = config.ChannelPolicy{Mode: "ignore"}
+	typingCalls = 0
+	mu.Unlock()
+
+	doneCh5 := make(chan struct{})
+	pool.cfg.OnMessageCompleted = func(msg db.Message, finalStatus string) { close(doneCh5) }
+	msg5 := db.Message{ID: "m-type-5", ThreadID: "th-ignored", Content: "Ignored message @Aerial", CreatedAt: time.Now().UTC()}
+	_ = db.InsertMessage(database, msg5)
+	pool.Enqueue(msg5)
+	<-doneCh5
+
+	mu.Lock()
+	if typingCalls != 0 {
+		t.Errorf("Expected 0 typing calls for ignored channel policy, got %d", typingCalls)
+	}
+	mu.Unlock()
+
+	// 6. HTTP client request (skipDiscord: true) -> typing indicator NOT invoked
+	mu.Lock()
+	currentPolicy = config.ChannelPolicy{Mode: "threads"}
+	typingCalls = 0
+	mu.Unlock()
+
+	doneCh6 := make(chan struct{})
+	pool.cfg.OnMessageCompleted = func(msg db.Message, finalStatus string) { close(doneCh6) }
+	msg6 := db.Message{ID: "m-type-6", ThreadID: "th-http", AuthorID: "http-client", Content: "CLI request", CreatedAt: time.Now().UTC()}
+	_ = db.InsertMessage(database, msg6)
+	pool.Enqueue(msg6)
+	<-doneCh6
+
+	mu.Lock()
+	if typingCalls != 0 {
+		t.Errorf("Expected 0 typing calls for HTTP client request, got %d", typingCalls)
 	}
 	mu.Unlock()
 }

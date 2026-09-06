@@ -781,22 +781,22 @@ channels:
 	}
 
 	def := cfg.Channels["default"]
-	if def.Mode != "threads" || def.TypingIndicator != "always" || !def.IsBotIgnored() || def.AllowSystemOps || def.MaxSessionTurns != 0 {
+	if def.Mode != "threads" || !def.IsBotIgnored() || def.AllowSystemOps || def.MaxSessionTurns != 0 {
 		t.Errorf("Unexpected default policy: %+v", def)
 	}
 
 	dev := cfg.Channels["aerial-dev"]
-	if dev.Mode != "threads" || dev.TypingIndicator != "always" || !dev.AllowSystemOps {
+	if dev.Mode != "threads" || !dev.AllowSystemOps {
 		t.Errorf("Unexpected aerial-dev policy: %+v", dev)
 	}
 
 	gen := cfg.Channels["general"]
-	if gen.Mode != "channel" || gen.TypingIndicator != "on_mention" || gen.MaxSessionTurns != 50 {
+	if gen.Mode != "channel" || gen.MaxSessionTurns != 50 {
 		t.Errorf("Unexpected general policy: %+v", gen)
 	}
 
 	sn := cfg.Channels["123456789012345678"]
-	if sn.Mode != "channel" || sn.TypingIndicator != "never" || sn.IsBotIgnored() || !sn.AllowSystemOps || sn.MaxSessionTurns != 20 {
+	if sn.Mode != "channel" || sn.IsBotIgnored() || !sn.AllowSystemOps || sn.MaxSessionTurns != 20 {
 		t.Errorf("Unexpected snowflake channel policy: %+v", sn)
 	}
 }
@@ -871,11 +871,11 @@ channels:
 	if err != nil {
 		t.Fatalf("LoadConfigFromPaths failed: %v", err)
 	}
-	if cfg.Channels["default"].TypingIndicator != "always" {
-		t.Errorf("Expected default typing_indicator='always' for threads mode, got %q", cfg.Channels["default"].TypingIndicator)
+	if cfg.Channels["default"].Mode != "threads" {
+		t.Errorf("Expected default mode='threads', got %q", cfg.Channels["default"].Mode)
 	}
 
-	// 2. Test default in channel mode gets typing_indicator: "on_mention" and max_session_turns: 50
+	// 2. Test default in channel mode gets max_session_turns: 50
 	yamlPath2 := filepath.Join(tmpDir, "config_channel.yaml")
 	yamlChannel := `
 model: "gemini-2.5-flash"
@@ -890,8 +890,8 @@ channels:
 	if err != nil {
 		t.Fatalf("LoadConfigFromPaths failed: %v", err)
 	}
-	if cfg.Channels["default"].TypingIndicator != "on_mention" {
-		t.Errorf("Expected default typing_indicator='on_mention' for channel mode, got %q", cfg.Channels["default"].TypingIndicator)
+	if cfg.Channels["default"].Mode != "channel" {
+		t.Errorf("Expected default mode='channel', got %q", cfg.Channels["default"].Mode)
 	}
 	if cfg.Channels["default"].MaxSessionTurns != 50 {
 		t.Errorf("Expected default max_session_turns=50 for channel mode, got %d", cfg.Channels["default"].MaxSessionTurns)
@@ -904,7 +904,6 @@ func TestResolveChannelPolicy(t *testing.T) {
 		Channels: map[string]ChannelPolicy{
 			"default": {
 				Mode:            "threads",
-				TypingIndicator: "always",
 				IgnoreBots:      &trueVal,
 				AllowSystemOps:  false,
 				MaxSessionTurns: 0,
@@ -923,7 +922,6 @@ func TestResolveChannelPolicy(t *testing.T) {
 			},
 			"1543668253363150928": {
 				Mode:            "channel",
-				TypingIndicator: "never",
 				AllowSystemOps:  true,
 				MaxSessionTurns: 100,
 			},
@@ -932,19 +930,19 @@ func TestResolveChannelPolicy(t *testing.T) {
 
 	// 1. Match by Snowflake ID
 	p1 := cfg.ResolveChannelPolicy("1543668253363150928", "aerial-dev")
-	if p1.Mode != "channel" || p1.TypingIndicator != "never" || !p1.AllowSystemOps || p1.MaxSessionTurns != 100 || !p1.IsBotIgnored() {
+	if p1.Mode != "channel" || !p1.AllowSystemOps || p1.MaxSessionTurns != 100 || !p1.IsBotIgnored() {
 		t.Errorf("Unexpected policy for snowflake ID match: %+v", p1)
 	}
 
 	// 2. Match by Channel Name with leading '#' and uppercase
 	p2 := cfg.ResolveChannelPolicy("999999", "#General")
-	if p2.Mode != "channel" || p2.TypingIndicator != "on_mention" || p2.MaxSessionTurns != 50 || !p2.IsBotIgnored() || p2.AllowSystemOps {
+	if p2.Mode != "channel" || p2.MaxSessionTurns != 50 || !p2.IsBotIgnored() || p2.AllowSystemOps {
 		t.Errorf("Unexpected policy for #General match: %+v", p2)
 	}
 
 	// 3. Match by Channel Name without '#'
 	p3 := cfg.ResolveChannelPolicy("999999", "aerial-dev")
-	if p3.Mode != "threads" || p3.TypingIndicator != "always" || !p3.AllowSystemOps || !p3.IsBotIgnored() {
+	if p3.Mode != "threads" || !p3.AllowSystemOps || !p3.IsBotIgnored() {
 		t.Errorf("Unexpected policy for aerial-dev match with default inheritance: %+v", p3)
 	}
 
@@ -960,7 +958,7 @@ func TestResolveChannelPolicy(t *testing.T) {
 
 	// 5. Fallback to default when neither ID nor name match
 	p4 := cfg.ResolveChannelPolicy("999999", "unknown-channel")
-	if p4.Mode != "threads" || p4.TypingIndicator != "always" || p4.AllowSystemOps || !p4.IsBotIgnored() {
+	if p4.Mode != "threads" || p4.AllowSystemOps || !p4.IsBotIgnored() {
 		t.Errorf("Unexpected policy for fallback: %+v", p4)
 	}
 }

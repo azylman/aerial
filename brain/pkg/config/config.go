@@ -79,7 +79,6 @@ type GitSyncConfig struct {
 type ChannelPolicy struct {
 	Mode                 string   `yaml:"mode" json:"mode"`
 	WakeMode             string   `yaml:"wake_mode,omitempty" json:"wake_mode,omitempty"`
-	TypingIndicator      string   `yaml:"typing_indicator" json:"typing_indicator"`
 	IgnoreBots           *bool    `yaml:"ignore_bots,omitempty" json:"ignore_bots,omitempty"`
 	AllowSystemOps       bool     `yaml:"allow_system_ops" json:"allow_system_ops"`
 	MaxSessionTurns      int      `yaml:"max_session_turns" json:"max_session_turns"`
@@ -207,7 +206,6 @@ func DefaultConfig() Config {
 		Channels: map[string]ChannelPolicy{
 			"default": {
 				Mode:            "threads",
-				TypingIndicator: "always",
 				IgnoreBots:      &defaultIgnoreBots,
 				AllowSystemOps:  false,
 				MaxSessionTurns: 0,
@@ -375,13 +373,6 @@ func LoadConfigFromPaths(paths ...string) (Config, error) {
 	}
 
 	// Normalize channels.default
-	if defPolicy.TypingIndicator == "" {
-		if defPolicy.Mode == "channel" {
-			defPolicy.TypingIndicator = "on_mention"
-		} else if defPolicy.Mode == "threads" {
-			defPolicy.TypingIndicator = "always"
-		}
-	}
 	if defPolicy.Mode == "channel" && defPolicy.MaxSessionTurns <= 0 {
 		defPolicy.MaxSessionTurns = 50
 	}
@@ -415,13 +406,6 @@ func LoadConfigFromPaths(paths ...string) (Config, error) {
 				return GetRuntimeConfig(), fmt.Errorf("channel %q wake_mode must be 'mention', 'classifier', or 'all', got %q", k, policy.WakeMode)
 			}
 			policy.WakeMode = policy.GetWakeMode()
-		}
-		if policy.TypingIndicator == "" {
-			if policy.Mode == "channel" {
-				policy.TypingIndicator = "on_mention"
-			} else if policy.Mode == "threads" {
-				policy.TypingIndicator = "always"
-			}
 		}
 		if policy.Mode == "channel" && policy.MaxSessionTurns <= 0 {
 			policy.MaxSessionTurns = 50
@@ -498,7 +482,6 @@ func (c Config) ResolveChannelPolicy(channelID, channelName string) ChannelPolic
 		defaultIgnoreBots := true
 		def = ChannelPolicy{
 			Mode:            "threads",
-			TypingIndicator: "always",
 			IgnoreBots:      &defaultIgnoreBots,
 			AllowSystemOps:  false,
 			MaxSessionTurns: 0,
@@ -506,13 +489,6 @@ func (c Config) ResolveChannelPolicy(channelID, channelName string) ChannelPolic
 	} else {
 		if def.Mode == "" {
 			def.Mode = "threads"
-		}
-		if def.TypingIndicator == "" {
-			if def.Mode == "channel" {
-				def.TypingIndicator = "on_mention"
-			} else if def.Mode == "threads" {
-				def.TypingIndicator = "always"
-			}
 		}
 		if def.Mode == "channel" && def.MaxSessionTurns <= 0 {
 			def.MaxSessionTurns = 50
@@ -546,21 +522,6 @@ func (c Config) ResolveChannelPolicy(channelID, channelName string) ChannelPolic
 	}
 	if res.IsIgnored() {
 		return res
-	}
-	if res.TypingIndicator == "" {
-		if res.Mode == "channel" {
-			if def.Mode == "channel" && def.TypingIndicator != "" {
-				res.TypingIndicator = def.TypingIndicator
-			} else {
-				res.TypingIndicator = "on_mention"
-			}
-		} else {
-			if def.TypingIndicator != "" {
-				res.TypingIndicator = def.TypingIndicator
-			} else {
-				res.TypingIndicator = "always"
-			}
-		}
 	}
 	if res.WakeMode == "" && def.WakeMode != "" {
 		res.WakeMode = def.WakeMode
