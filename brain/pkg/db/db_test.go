@@ -3,64 +3,45 @@ package db
 import (
 	"context"
 	"database/sql"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/azylman/aerial/brain/pkg/config"
 )
 
-func isProductionDSN(dsn string) bool {
-	lower := strings.ToLower(dsn)
-	if strings.Contains(lower, "aerial_test") || strings.Contains(lower, "test_") || strings.Contains(lower, "_test") {
-		return false
+func TestNew_ConfigPointerInjection(t *testing.T) {
+	// 1. Nil config rejected
+	if _, err := New(nil); err == nil {
+		t.Errorf("expected error when cfg is nil, got nil")
 	}
-	return strings.Contains(lower, "@postgres:5432/aerial") ||
-		strings.Contains(lower, "@127.0.0.1:5432/aerial") ||
-		strings.Contains(lower, "@localhost:5432/aerial") ||
-		strings.Contains(lower, ":5432/aerial") ||
-		strings.Contains(lower, "/aerial")
+
+	// 2. Empty connection string rejected
+	cfgEmpty := config.NewFromData(&config.ConfigData{})
+	if _, err := New(cfgEmpty); err == nil {
+		t.Errorf("expected error for empty connection string, got nil")
+	}
+
+	// 3. Unsupported scheme rejected
+	cfgInvalid := config.NewFromData(&config.ConfigData{DatabaseURL: "mysql://user:pass@localhost/db"})
+	if _, err := New(cfgInvalid); err == nil {
+		t.Errorf("expected error for unsupported scheme, got nil")
+	}
+
+	// 4. Valid SQLite temp db succeeds (supports both file paths and sqlite:// prefix)
+	tmpFile := filepath.Join(t.TempDir(), "test.db")
+	cfgValid := config.NewFromData(&config.ConfigData{DatabaseURL: "sqlite://" + tmpFile})
+	database, err := New(cfgValid)
+	if err != nil {
+		t.Fatalf("expected valid sqlite initialization, got: %v", err)
+	}
+	defer database.Close()
 }
 
-
 func setupTestDB(t *testing.T) *sql.DB {
-	dsn := os.Getenv("TEST_DATABASE_URL")
-	if dsn == "" {
-		dsn = "postgres://postgres:aerial_test@127.0.0.1:54329/aerial_test?sslmode=disable"
-	}
-
-	// Defensive invariant: Refuse to run test setup or truncate tables if DSN targets production
-	if isProductionDSN(dsn) {
-		t.Fatalf("CRITICAL SAFETY CHECK: setupTestDB detected production database in DSN %q; refusing to truncate", dsn)
-		return nil
-	}
-
-	// Quick connectivity probe (200ms) to avoid multi-minute retry delays in offline test runners
-	quickDB, openErr := sql.Open("pgx", dsn)
-	if openErr == nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-		pingErr := quickDB.PingContext(ctx)
-		cancel()
-		_ = quickDB.Close()
-		if pingErr == nil {
-			database, err := InitDB(dsn)
-			if err == nil {
-				_, err = database.Exec(`
-					TRUNCATE TABLE messages, sessions, one_shot_schedules, cron_schedules, schedule_runs, facts RESTART IDENTITY CASCADE;
-					SELECT setval(pg_get_serial_sequence('facts', 'id'), 1, false);
-					SELECT setval(pg_get_serial_sequence('messages', 'row_id'), 1, false);
-				`)
-				if err == nil {
-					return database
-				}
-				_ = database.Close()
-			}
-		}
-	}
-
-	// Hermetic SQLite temporary database fallback
 	sqlitePath := filepath.Join(t.TempDir(), "aerial_test.db")
-	database, err := InitDB(sqlitePath)
+	database, err := New(config.NewFromData(&config.ConfigData{DatabaseURL: sqlitePath}))
 	if err != nil {
 		t.Fatalf("Failed to initialize hermetic SQLite test database at %s: %v", sqlitePath, err)
 		return nil
@@ -657,14 +638,6 @@ func TestNativeVectorSearchHNSW(t *testing.T) {
 	}
 }
 
-func TestDBPath(t *testing.T) {
-	t.Setenv("DATABASE_PATH", "/data/custom.db")
-	p := GetDBPath()
-	if p == "" {
-		t.Errorf("expected non-empty DB path")
-	}
-}
-
 func TestRecentThreadMessagesAndActiveIDs(t *testing.T) {
 	database := setupTestDB(t)
 	defer func() { _ = database.Close() }()
@@ -902,44 +875,6 @@ func TestFactEmbeddingAndThreadLookup(t *testing.T) {
 	}
 	if len(facts) != 1 {
 		t.Fatalf("expected 1 fact for thread, got %d", len(facts))
-	}
-}
-
-func TestGetDBPath_Precedence(t *testing.T) {
-	// 1. TEST_DATABASE_URL highest precedence
-	t.Setenv("TEST_DATABASE_URL", "postgres://test:test@127.0.0.1:5432/test_db")
-	t.Setenv("DATABASE_URL", "postgres://prod:prod@prod:5432/prod_db")
-	if p := GetDBPath(); p != "postgres://test:test@127.0.0.1:5432/test_db" {
-		t.Errorf("expected TEST_DATABASE_URL precedence, got %q", p)
-	}
-
-	// 2. DATABASE_URL fallback
-	t.Setenv("TEST_DATABASE_URL", "")
-	if p := GetDBPath(); p != "postgres://prod:prod@prod:5432/prod_db" {
-		t.Errorf("expected DATABASE_URL fallback, got %q", p)
-	}
-
-	// 3. Custom POSTGRES environment variables
-	t.Setenv("DATABASE_URL", "")
-	t.Setenv("POSTGRES_USER", "custom_user")
-	t.Setenv("POSTGRES_PASSWORD", "custom_pass")
-	t.Setenv("POSTGRES_HOST", "custom_host")
-	t.Setenv("POSTGRES_PORT", "5433")
-	t.Setenv("POSTGRES_DB", "custom_db")
-	expected := "postgres://custom_user:custom_pass@custom_host:5433/custom_db?sslmode=disable"
-	if p := GetDBPath(); p != expected {
-		t.Errorf("expected %q, got %q", expected, p)
-	}
-
-	// 4. Default fallbacks
-	t.Setenv("POSTGRES_USER", "")
-	t.Setenv("POSTGRES_PASSWORD", "")
-	t.Setenv("POSTGRES_HOST", "")
-	t.Setenv("POSTGRES_PORT", "")
-	t.Setenv("POSTGRES_DB", "")
-	defaultExpected := "postgres://aerial:aerial_secure_pass@postgres:5432/aerial?sslmode=disable"
-	if p := GetDBPath(); p != defaultExpected {
-		t.Errorf("expected %q, got %q", defaultExpected, p)
 	}
 }
 

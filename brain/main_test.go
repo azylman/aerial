@@ -1410,18 +1410,17 @@ func TestRunBrainApp_ErrorBranches(t *testing.T) {
 		t.Errorf("Expected error from invalid DBPath, got nil")
 	}
 
-	// 2. Empty DBPath fallback to db.GetDBPath()
-	t.Setenv("DB_PATH", filepath.Join(tmpDir, "fallback.db"))
+	// 2. Empty DBPath returns error
 	bCfgFallback := BrainConfig{
 		Port:   "0",
 		DBPath: "",
 	}
 	ctx2, cancel2 := context.WithCancel(context.Background())
-	go func() {
-		time.Sleep(100 * time.Millisecond)
-		cancel2()
-	}()
-	_ = RunBrainApp(ctx2, bCfgFallback)
+	defer cancel2()
+	errEmpty := RunBrainApp(ctx2, bCfgFallback)
+	if errEmpty == nil {
+		t.Errorf("Expected error for empty DBPath, got nil")
+	}
 }
 
 func TestHandleSchedules_ConcurrentDoubleCheck(t *testing.T) {

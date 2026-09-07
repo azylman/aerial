@@ -835,8 +835,11 @@ type BrainConfig struct {
 
 func NewBrainConfigFromEnv(cfg *config.Config) BrainConfig {
 	model := ""
+	dbPath := ""
 	if cfg != nil {
-		model = cfg.Current().Model
+		cur := cfg.Current()
+		model = cur.Model
+		dbPath = cur.DatabaseURL
 	}
 	return BrainConfig{
 		Port:         config.GetEnv("PORT", "8080"),
@@ -844,7 +847,7 @@ func NewBrainConfigFromEnv(cfg *config.Config) BrainConfig {
 		APIKey:       config.GetEnv("GEMINI_API_KEY", config.GetEnv("ANTIGRAVITY_API_KEY", "")),
 		SystemPrompt: config.GetEnv("SYSTEM_PROMPT", ""),
 		Model:        model,
-		DBPath:       db.GetDBPath(),
+		DBPath:       dbPath,
 		DiscordToken: config.GetEnv("DISCORD_TOKEN", config.GetEnv("DISCORD_BOT_TOKEN", "")),
 	}
 }
@@ -931,7 +934,7 @@ func RunBrainApp(ctx context.Context, bCfg BrainConfig) error {
 
 	dbPath := bCfg.DBPath
 	if dbPath == "" {
-		dbPath = db.GetDBPath()
+		return fmt.Errorf("database path or URL is required")
 	}
 	database, err := db.InitDB(dbPath)
 	if err != nil {
