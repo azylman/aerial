@@ -21,10 +21,11 @@ import (
 )
 
 var (
-	reStrictUUID     = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
-	reUUIDInText     = regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`)
-	reUpdateStream   = regexp.MustCompile(`Starting conversation update stream for ([^\s\r\n]+)`)
-	reGeneralSession = regexp.MustCompile(`(?i)(?:conversation|session)(?:_id)?[:\s=]+([a-zA-Z0-9\-]+)`)
+	reStrictUUID        = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+	reUUIDInText        = regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`)
+	reUpdateStream      = regexp.MustCompile(`Starting conversation update stream for ([^\s\r\n]+)`)
+	reGeneralSession    = regexp.MustCompile(`(?i)(?:conversation|session)(?:_id)?[:\s=]+([a-zA-Z0-9\-]+)`)
+	reNDJSONInitSession = regexp.MustCompile(`"event"\s*:\s*"init"[^}]*"conversation_id"\s*:\s*"([^"]+)"`)
 )
 
 // IsValidUUID validates that a string strictly matches RFC 4122 UUID format.
@@ -110,6 +111,22 @@ func (w *ActivityWriter) SessionID() string {
 	return *ptr
 }
 
+// SetSessionID atomically latches the session UUID if not already set.
+func (w *ActivityWriter) SetSessionID(id string) {
+	if !IsValidUUID(id) {
+		return
+	}
+	for {
+		current := w.sessionID.Load()
+		if current != nil && *current != "" {
+			return
+		}
+		if w.sessionID.CompareAndSwap(current, &id) {
+			return
+		}
+	}
+}
+
 // AgyResponse models the top-level structured output of agy --output-format json.
 type AgyResponse struct {
 	ConversationID  string   `json:"conversation_id"`
@@ -131,16 +148,75 @@ type AgyUsage struct {
 }
 
 // ParseAgyOutput unmarshals raw stdout into an AgyResponse struct.
+// It supports both legacy single-line JSON and stream-json NDJSON streams.
 func ParseAgyOutput(stdout string) (*AgyResponse, error) {
 	trimmed := strings.TrimSpace(stdout)
 	if trimmed == "" {
 		return nil, fmt.Errorf("empty output")
 	}
-	var resp AgyResponse
-	if err := json.Unmarshal([]byte(trimmed), &resp); err != nil {
-		return nil, fmt.Errorf("failed to parse agy json output: %w", err)
+
+	// Fast path: attempt direct unmarshaling as legacy single-line JSON.
+	var legacyResp AgyResponse
+	if err := json.Unmarshal([]byte(trimmed), &legacyResp); err == nil && (legacyResp.Status != "" || legacyResp.Response != "" || legacyResp.ConversationID != "") {
+		return &legacyResp, nil
 	}
-	return &resp, nil
+
+	// Stream-json NDJSON path: process line by line.
+	// Uses strings.Split to avoid bufio.Scanner's default 64KB token limit on large tool responses.
+	var initConvID string
+	var resultResp *AgyResponse
+
+	lines := strings.Split(trimmed, "\n")
+	for _, rawLine := range lines {
+		line := strings.TrimSpace(rawLine)
+		if line == "" {
+			continue
+		}
+
+		if !strings.Contains(line, `"event"`) {
+			continue
+		}
+
+		var ev struct {
+			Event          string          `json:"event"`
+			ConversationID string          `json:"conversation_id,omitempty"`
+			Result         json.RawMessage `json:"result,omitempty"`
+		}
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			continue
+		}
+
+		switch ev.Event {
+		case "init":
+			if ev.ConversationID != "" {
+				initConvID = ev.ConversationID
+			}
+		case "result":
+			var res AgyResponse
+			if len(ev.Result) > 0 {
+				if err := json.Unmarshal(ev.Result, &res); err == nil {
+					resultResp = &res
+				}
+			} else {
+				if err := json.Unmarshal([]byte(line), &res); err == nil {
+					resultResp = &res
+				}
+			}
+		}
+	}
+
+	if resultResp == nil {
+		if err := json.Unmarshal([]byte(trimmed), &legacyResp); err == nil {
+			return &legacyResp, nil
+		}
+		return nil, fmt.Errorf("failed to parse agy output: stream-json missing result event")
+	}
+
+	if resultResp.ConversationID == "" && initConvID != "" {
+		resultResp.ConversationID = initConvID
+	}
+
+	return resultResp, nil
 }
 
 // IsSilentSentinel checks whether stdout is empty or consists solely of whitespace.
@@ -161,19 +237,119 @@ type WatchdogOptions struct {
 	MaxDuration       time.Duration
 	PollInterval      time.Duration
 	TranscriptDirs    []string
+	OutputFormat      string
 }
 
-// activityTap wraps an io.Writer and bumps the ActivityWriter timestamp on every write.
+// activityTap wraps an io.Writer, bumps the ActivityWriter timestamp on every write,
+// parses stream-json events across chunk boundaries, and filters high-volume intermediate events.
 type activityTap struct {
-	w         io.Writer
-	actWriter *ActivityWriter
+	mu           sync.Mutex
+	w            io.Writer
+	actWriter    *ActivityWriter
+	filterStream bool
+	remainder    []byte
+}
+
+func newActivityTap(w io.Writer, actWriter *ActivityWriter, filterStream bool) *activityTap {
+	return &activityTap{
+		w:            w,
+		actWriter:    actWriter,
+		filterStream: filterStream,
+	}
 }
 
 func (t *activityTap) Write(p []byte) (int, error) {
-	if len(p) > 0 {
+	if len(p) == 0 {
+		return 0, nil
+	}
+
+	if t.actWriter != nil {
 		t.actWriter.lastActivity.Store(time.Now().UnixNano())
 	}
-	return t.w.Write(p)
+
+	if !t.filterStream {
+		if t.w != nil {
+			return t.w.Write(p)
+		}
+		return len(p), nil
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	combined := append(t.remainder, p...)
+	start := 0
+
+	for i := 0; i < len(combined); i++ {
+		if combined[i] == '\n' {
+			line := combined[start : i+1]
+			t.processLine(line)
+			start = i + 1
+		}
+	}
+
+	if start < len(combined) {
+		t.remainder = make([]byte, len(combined)-start)
+		copy(t.remainder, combined[start:])
+	} else {
+		t.remainder = nil
+	}
+
+	// MUST strictly return (len(p), nil) to satisfy io.Writer contract and prevent
+	// os/exec's internal io.Copy from aborting the child process with io.ErrShortWrite.
+	return len(p), nil
+}
+
+func (t *activityTap) processLine(line []byte) {
+	trimmed := bytes.TrimSpace(line)
+	if len(trimmed) == 0 {
+		return
+	}
+
+	// Sniff session ID from {"event":"init","conversation_id":"..."}
+	if bytes.Contains(trimmed, []byte(`"event"`)) && bytes.Contains(trimmed, []byte(`"init"`)) {
+		if t.actWriter != nil {
+			if match := reNDJSONInitSession.FindSubmatch(trimmed); len(match) > 1 {
+				sessID := strings.TrimSpace(string(match[1]))
+				if IsValidUUID(sessID) {
+					t.actWriter.SetSessionID(sessID)
+				}
+			}
+		}
+		if t.w != nil {
+			_, _ = t.w.Write(line)
+		}
+		return
+	}
+
+	// Preserve final result event in the output buffer
+	if bytes.Contains(trimmed, []byte(`"event"`)) && bytes.Contains(trimmed, []byte(`"result"`)) {
+		if t.w != nil {
+			_, _ = t.w.Write(line)
+		}
+		return
+	}
+
+	// Filter out high-volume step_update events from the output buffer to prevent OOM
+	if bytes.Contains(trimmed, []byte(`"event"`)) && bytes.Contains(trimmed, []byte(`"step_update"`)) {
+		return
+	}
+
+	// Pass through any other output (e.g. non-event output, legacy json)
+	if t.w != nil {
+		_, _ = t.w.Write(line)
+	}
+}
+
+// Flush writes any remaining trailing fragment when the stream closes.
+func (t *activityTap) Flush() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if len(t.remainder) > 0 {
+		t.processLine(t.remainder)
+		t.remainder = nil
+	}
 }
 
 // DefaultWatchdogOptions returns sensible defaults for watchdog liveness tracking.
@@ -214,7 +390,12 @@ func RunAgyWithWatchdog(parentCtx context.Context, agyBin, prompt, sessionID, ap
 		agyBin = "agy"
 	}
 
-	args := []string{"--dangerously-skip-permissions", "--output-format", "json"}
+	outputFmt := opts.OutputFormat
+	if outputFmt == "" {
+		outputFmt = "stream-json"
+	}
+
+	args := []string{"--dangerously-skip-permissions", "--output-format", outputFmt}
 	if model != "" {
 		args = append(args, "--model", model)
 	}
@@ -258,7 +439,8 @@ func RunAgyWithWatchdog(parentCtx context.Context, agyBin, prompt, sessionID, ap
 
 	var outBuf bytes.Buffer
 	actWriter := NewActivityWriter(sessionID)
-	cmd.Stdout = &activityTap{w: &outBuf, actWriter: actWriter}
+	tap := newActivityTap(&outBuf, actWriter, outputFmt == "stream-json")
+	cmd.Stdout = tap
 	cmd.Stderr = actWriter
 
 	configureSysProcAttr(cmd)
@@ -374,6 +556,7 @@ func RunAgyWithWatchdog(parentCtx context.Context, agyBin, prompt, sessionID, ap
 	}()
 
 	runErr := cmd.Wait()
+	tap.Flush()
 	stopWatchdog()
 	watchdogWg.Wait()
 	stdout = outBuf.String()
@@ -421,24 +604,31 @@ func RunAgy(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string
 	return RunAgyWithWatchdog(ctx, agyBin, prompt, sessionID, apiKey, model, DefaultWatchdogOptions(timeoutMinutes))
 }
 
-// ExtractSessionID searches stderr for an active session/conversation UUID.
-func ExtractSessionID(stderr string, _ time.Time) string {
-	if stderr != "" {
-		if match := reUpdateStream.FindStringSubmatch(stderr); len(match) > 1 {
+// ExtractSessionID searches output (stdout or stderr) for an active session/conversation UUID.
+func ExtractSessionID(output string, _ time.Time) string {
+	if output != "" {
+		if match := reNDJSONInitSession.FindStringSubmatch(output); len(match) > 1 {
 			candidate := strings.TrimSpace(match[1])
 			if IsValidUUID(candidate) {
 				return candidate
 			}
 		}
 
-		if match := reGeneralSession.FindStringSubmatch(stderr); len(match) > 1 {
+		if match := reUpdateStream.FindStringSubmatch(output); len(match) > 1 {
 			candidate := strings.TrimSpace(match[1])
 			if IsValidUUID(candidate) {
 				return candidate
 			}
 		}
 
-		if match := reUUIDInText.FindString(stderr); match != "" {
+		if match := reGeneralSession.FindStringSubmatch(output); len(match) > 1 {
+			candidate := strings.TrimSpace(match[1])
+			if IsValidUUID(candidate) {
+				return candidate
+			}
+		}
+
+		if match := reUUIDInText.FindString(output); match != "" {
 			return match
 		}
 	}

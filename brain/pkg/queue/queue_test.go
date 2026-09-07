@@ -5196,6 +5196,117 @@ func TestProcessBurst_ColdStartWatchdogRecoveryAndContinuation(t *testing.T) {
 	}
 }
 
+func TestProcessBurst_ColdStartStreamJsonInitLatchingOnFailure(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	var runnerCalls int32
+	var promptsSeen []string
+	var sessionsSeen []string
+	var mu sync.Mutex
+	doneCh := make(chan struct{})
+
+	var deliveredText string
+	var deliveredChannel string
+
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	coldSessID := "99999999-bbbb-4ccc-dddd-555566667777"
+	sessDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", coldSessID)
+	_ = os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs"), 0755)
+	if err := os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte("mock transcript data\n"), 0600); err != nil {
+		t.Fatalf("failed to write mock transcript: %v", err)
+	}
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    3,
+		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+			return nil, nil
+		},
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			call := atomic.AddInt32(&runnerCalls, 1)
+			mu.Lock()
+			promptsSeen = append(promptsSeen, prompt)
+			sessionsSeen = append(sessionsSeen, sessionID)
+			mu.Unlock()
+
+			if call == 1 {
+				// Cold start: sessionID must be empty
+				if sessionID != "" {
+					t.Errorf("Attempt 1: expected empty sessionID on cold start, got %q", sessionID)
+				}
+				// Attempt 1 emits stream-json init event on stdout, but exits with error
+				stdout := fmt.Sprintf("{\"event\":\"init\",\"conversation_id\":%q}\n{\"event\":\"step_update\"}\n", coldSessID)
+				stderr := "[watchdog] inactivity timeout exceeded (5m without output)\n"
+				return stdout, stderr, -1, fmt.Errorf("exit status 255")
+			}
+
+			// Attempt 2 attaches to latched coldSessID
+			return fmt.Sprintf(`{"conversation_id":%q,"status":"SUCCESS","response":"Stream-json cold start recovered!"}`, sessionID), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			mu.Lock()
+			deliveredChannel = channelID
+			deliveredText = text
+			mu.Unlock()
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			close(doneCh)
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{
+		ID:        "msg-cold-stream-1",
+		ThreadID:  "thread-cold-stream-1",
+		Content:   "Please write the code for stream-json",
+		Status:    db.StatusPending,
+		CreatedAt: time.Now().UTC(),
+	}
+	_ = db.InsertMessage(database, msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Timeout waiting for cold start recovery")
+	}
+
+	mu.Lock()
+	if runnerCalls != 2 {
+		t.Fatalf("Expected 2 runner calls (failure then success), got %d", runnerCalls)
+	}
+	if len(sessionsSeen) >= 2 {
+		if sessionsSeen[0] != "" {
+			t.Errorf("Attempt 1 sessionID should be empty, got %q", sessionsSeen[0])
+		}
+		if sessionsSeen[1] != coldSessID {
+			t.Errorf("Attempt 2 sessionID should be latched %q, got %q", coldSessID, sessionsSeen[1])
+		}
+	}
+	if deliveredChannel != "thread-cold-stream-1" || !strings.Contains(deliveredText, "Stream-json cold start recovered!") {
+		t.Errorf("Unexpected delivery: channel=%q, text=%q", deliveredChannel, deliveredText)
+	}
+	mu.Unlock()
+
+	savedSess, err := db.GetSessionID(database, "thread-cold-stream-1")
+	if err != nil || savedSess != coldSessID {
+		t.Errorf("Expected latched session %q in DB, got: %q (err: %v)", coldSessID, savedSess, err)
+	}
+}
+
 func TestProcessBurst_ColdStartTransientRecoveryAndContinuation(t *testing.T) {
 	database, err := db.InitDB(":memory:")
 	if err != nil {
@@ -6143,7 +6254,7 @@ func TestThreadSession_RotationAt50Turns(t *testing.T) {
 	defer func() { _ = database.Close() }()
 
 	_ = db.SaveSessionID(database, "thread-rotate-test", "old-session-id")
-	for i := 0; i < 49; i++ {
+	for i := 0; i < DefaultMaxSessionTurns; i++ {
 		_, _ = db.IncrementSessionTurnCount(database, "thread-rotate-test")
 	}
 
@@ -6181,7 +6292,7 @@ func TestThreadSession_RotationAt50Turns(t *testing.T) {
 	pool.Start()
 	defer pool.Stop()
 
-	msg := db.Message{ID: "msg-rotate", ThreadID: "thread-rotate-test", Content: "Turn 50"}
+	msg := db.Message{ID: "msg-rotate", ThreadID: "thread-rotate-test", Content: fmt.Sprintf("Turn %d", DefaultMaxSessionTurns+1)}
 	_ = db.InsertMessage(database, msg)
 	pool.Enqueue(msg)
 
@@ -6193,7 +6304,7 @@ func TestThreadSession_RotationAt50Turns(t *testing.T) {
 
 	mu.Lock()
 	if gotSessionID != "" {
-		t.Errorf("Expected cold start (empty session ID) at turn 50 for thread mode, got: %q", gotSessionID)
+		t.Errorf("Expected cold start (empty session ID) after %d turns for thread mode, got: %q", DefaultMaxSessionTurns, gotSessionID)
 	}
 	mu.Unlock()
 }

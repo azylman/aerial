@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -48,6 +49,52 @@ func TestParseAgyOutput(t *testing.T) {
 			stdout:      "plain text without json formatting",
 			wantErr:     true,
 		},
+		{
+			name: "Valid stream-json Success Stream",
+			stdout: `{"event":"init","conversation_id":"22222222-3333-4444-5555-666666666666"}
+{"event":"step_update","type":"tool_call","name":"view_file"}
+{"event":"result","result":{"conversation_id":"22222222-3333-4444-5555-666666666666","status":"SUCCESS","response":"Stream finished!","duration_seconds":3.14,"num_turns":2,"usage":{"total_tokens":88}}}`,
+			wantErr:    false,
+			wantConvID: "22222222-3333-4444-5555-666666666666",
+			wantStatus: "SUCCESS",
+			wantResp:   "Stream finished!",
+			wantTokens: 88,
+		},
+		{
+			name: "Stream-json with Init Propagation to Result",
+			stdout: `{"event":"init","conversation_id":"33333333-4444-5555-6666-777777777777"}
+{"event":"step_update","type":"thinking"}
+{"event":"result","result":{"status":"SUCCESS","response":"Propagated UUID!","duration_seconds":1.0,"num_turns":1}}`,
+			wantErr:    false,
+			wantConvID: "33333333-4444-5555-6666-777777777777",
+			wantStatus: "SUCCESS",
+			wantResp:   "Propagated UUID!",
+		},
+		{
+			name: "Stream-json Error Stream",
+			stdout: `{"event":"init","conversation_id":"44444444-5555-6666-7777-888888888888"}
+{"event":"result","result":{"status":"ERROR","error":"model timeout"}}`,
+			wantErr:    false,
+			wantConvID: "44444444-5555-6666-7777-888888888888",
+			wantStatus: "ERROR",
+			wantResp:   "",
+		},
+		{
+			name: "Truncated Stream-json Missing Result Event",
+			stdout: `{"event":"init","conversation_id":"55555555-6666-7777-8888-999999999999"}
+{"event":"step_update","type":"run_command"}`,
+			wantErr: true,
+		},
+		{
+			name: "Large Line (>100KB) Stream-json Without Scanner Panic",
+			stdout: `{"event":"init","conversation_id":"66666666-7777-8888-9999-000000000000"}
+{"event":"step_update","huge_payload":"` + strings.Repeat("a", 120*1024) + `"}
+{"event":"result","result":{"status":"SUCCESS","response":"Handled large line","duration_seconds":2.0,"num_turns":1}}`,
+			wantErr:    false,
+			wantConvID: "66666666-7777-8888-9999-000000000000",
+			wantStatus: "SUCCESS",
+			wantResp:   "Handled large line",
+		},
 	}
 
 	for _, tt := range tests {
@@ -71,6 +118,59 @@ func TestParseAgyOutput(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestActivityTap_ChunkSplittingAndFiltering(t *testing.T) {
+	var outBuf bytes.Buffer
+	actWriter := NewActivityWriter("")
+	tap := newActivityTap(&outBuf, actWriter, true)
+
+	// Chunk 1 ends midway through the init event
+	chunk1 := []byte("{\"event\":\"init\",\"conversa")
+	n1, err1 := tap.Write(chunk1)
+	if err1 != nil || n1 != len(chunk1) {
+		t.Fatalf("Write(chunk1) = (%d, %v), want (%d, nil)", n1, err1, len(chunk1))
+	}
+	if actWriter.SessionID() != "" {
+		t.Errorf("Expected empty sessionID before complete line, got %q", actWriter.SessionID())
+	}
+
+	// Chunk 2 completes the init event and has a step_update
+	targetUUID := "12345678-abcd-ef01-2345-6789abcdef01"
+	chunk2 := []byte(fmt.Sprintf("tion_id\":%q}\n{\"event\":\"step_update\",\"data\":\"lots of bloat\"}\n", targetUUID))
+	n2, err2 := tap.Write(chunk2)
+	if err2 != nil || n2 != len(chunk2) {
+		t.Fatalf("Write(chunk2) = (%d, %v), want (%d, nil)", n2, err2, len(chunk2))
+	}
+
+	if actWriter.SessionID() != targetUUID {
+		t.Errorf("Expected latched sessionID = %q, got %q", targetUUID, actWriter.SessionID())
+	}
+
+	// Chunk 3: result event
+	chunk3 := []byte("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"done\"}}\n")
+	_, _ = tap.Write(chunk3)
+	tap.Flush()
+
+	out := outBuf.String()
+	if !strings.Contains(out, targetUUID) {
+		t.Errorf("Expected outBuf to contain init event with %s, got: %s", targetUUID, out)
+	}
+	if !strings.Contains(out, "SUCCESS") {
+		t.Errorf("Expected outBuf to contain result event, got: %s", out)
+	}
+	if strings.Contains(out, "lots of bloat") {
+		t.Errorf("Expected outBuf to filter out step_update events, but found 'lots of bloat' in: %s", out)
+	}
+}
+
+func TestExtractSessionID_NDJSONInit(t *testing.T) {
+	targetUUID := "88888888-9999-aaaa-bbbb-cccccccccccc"
+	ndjsonOutput := fmt.Sprintf("{\"event\":\"init\",\"conversation_id\":%q}\n{\"event\":\"step_update\"}\n", targetUUID)
+	extracted := ExtractSessionID(ndjsonOutput, time.Now())
+	if extracted != targetUUID {
+		t.Errorf("ExtractSessionID(ndjsonOutput) = %q, want %q", extracted, targetUUID)
 	}
 }
 
