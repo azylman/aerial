@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -66,12 +67,14 @@ func TestInitDB_PostgresAirgap(t *testing.T) {
 }
 
 func setupTestDB(t *testing.T) *sql.DB {
-	sqlitePath := filepath.Join(t.TempDir(), "aerial_test.db")
-	database, err := New(config.NewFromData(&config.ConfigData{DatabaseURL: sqlitePath}))
+	t.Helper()
+	dsn := fmt.Sprintf("file:%s_%d?mode=memory&cache=shared&_busy_timeout=5000", t.Name(), time.Now().UnixNano())
+	database, err := New(config.NewFromData(&config.ConfigData{DatabaseURL: dsn}))
 	if err != nil {
-		t.Fatalf("Failed to initialize hermetic SQLite test database at %s: %v", sqlitePath, err)
+		t.Fatalf("Failed to initialize hermetic SQLite in-memory test database: %v", err)
 		return nil
 	}
+	database.SetMaxOpenConns(1)
 	return database
 }
 

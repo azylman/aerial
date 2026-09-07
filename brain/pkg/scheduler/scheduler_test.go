@@ -107,6 +107,8 @@ func TestGetDefaultTimezone(t *testing.T) {
 	yamlPath := filepath.Join(tmpDir, "config.yaml")
 
 	// 0. Test with runtime config timezone set
+	t.Setenv("DEFAULT_TIMEZONE", "")
+	t.Setenv("TZ", "")
 	_ = os.WriteFile(yamlPath, []byte("timezone: 'Europe/Paris'\nchannels:\n  default:\n    mode: 'threads'\n"), 0644)
 	_, _ = config.LoadConfigFromPaths(yamlPath)
 
