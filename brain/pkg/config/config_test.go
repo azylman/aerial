@@ -2186,6 +2186,448 @@ ambient_wake_prompt: "Wake on high priority"
 	})
 }
 
+func TestConfig_UnmarshalYAML_InvalidTypes(t *testing.T) {
+	var cfg Config
+	err := yaml.Unmarshal([]byte("model: [1, 2, 3]"), &cfg)
+	if err == nil {
+		t.Error("Expected error unmarshaling invalid YAML into Config")
+	}
+}
+
+func TestGetFallbackDefaults_OptionsAndEnv(t *testing.T) {
+	t.Setenv("AGY_MODEL", "Custom-Env-Model")
+	t.Setenv("DEFAULT_TIMEZONE", "")
+	t.Setenv("TZ", "Asia/Tokyo")
+	t.Setenv("SYSTEM_CHANNEL", "custom-sys-channel")
+
+	fb := getFallbackDefaults()
+	if fb.Model != "Custom-Env-Model" {
+		t.Errorf("Expected Model=Custom-Env-Model, got %s", fb.Model)
+	}
+	if fb.Timezone != "Asia/Tokyo" {
+		t.Errorf("Expected Timezone=Asia/Tokyo, got %s", fb.Timezone)
+	}
+	if fb.SystemChannel != "custom-sys-channel" {
+		t.Errorf("Expected SystemChannel=custom-sys-channel, got %s", fb.SystemChannel)
+	}
+}
+
+func TestGetTimezone_And_GetSystemChannel_Fallbacks(t *testing.T) {
+	runtimeConfigMu.Lock()
+	oldCfg := currentRuntimeConfig
+	currentRuntimeConfig = Config{}
+	runtimeConfigMu.Unlock()
+	defer func() {
+		runtimeConfigMu.Lock()
+		currentRuntimeConfig = oldCfg
+		runtimeConfigMu.Unlock()
+	}()
+
+	// 1. DEFAULT_TIMEZONE fallback
+	t.Setenv("DEFAULT_TIMEZONE", "UTC")
+	t.Setenv("TZ", "")
+	if tz := GetTimezone(); tz != "UTC" {
+		t.Errorf("Expected UTC, got %s", tz)
+	}
+
+	// 2. TZ fallback
+	t.Setenv("DEFAULT_TIMEZONE", "")
+	t.Setenv("TZ", "America/New_York")
+	if tz := GetTimezone(); tz != "America/New_York" {
+		t.Errorf("Expected America/New_York, got %s", tz)
+	}
+
+	// 3. Absolute default
+	t.Setenv("TZ", "")
+	if tz := GetTimezone(); tz != "America/Los_Angeles" {
+		t.Errorf("Expected America/Los_Angeles, got %s", tz)
+	}
+
+	// 4. SYSTEM_CHANNEL env fallback
+	t.Setenv("SYSTEM_CHANNEL", "env-channel-1")
+	if ch := GetSystemChannel(); ch != "env-channel-1" {
+		t.Errorf("Expected env-channel-1, got %s", ch)
+	}
+
+	// 5. System channel default
+	t.Setenv("SYSTEM_CHANNEL", "")
+	if ch := GetSystemChannel(); ch != "aerial-dev" {
+		t.Errorf("Expected aerial-dev, got %s", ch)
+	}
+}
+
+func TestLoadConfigFromPaths_HashedDefaultChannel(t *testing.T) {
+	tmpDir := t.TempDir()
+	p := filepath.Join(tmpDir, "hashed_default.yaml")
+	_ = os.WriteFile(p, []byte(`
+channels:
+  "#default":
+    mode: "channel"
+`), 0644)
+
+	cfg, err := LoadConfigFromPaths(p)
+	if err != nil {
+		t.Fatalf("LoadConfigFromPaths failed with #default: %v", err)
+	}
+	if defPol, ok := cfg.Channels["default"]; !ok || defPol.Mode != "channel" {
+		t.Errorf("Expected default policy with mode=channel, got %+v", defPol)
+	}
+}
+
+func TestIsAdmin_EmptyAndBlank(t *testing.T) {
+	// Empty admin list
+	cfgEmpty := Config{AdminUsers: nil}
+	if cfgEmpty.IsAdmin("user1") {
+		t.Errorf("Expected false for empty admin list")
+	}
+
+	// Blank input
+	cfg := Config{AdminUsers: []string{"alice", "bob"}}
+	if cfg.IsAdmin("", "  ", "@") {
+		t.Errorf("Expected false for blank identifiers")
+	}
+}
+
+func TestLoadChannelInstructions_TornReadAndHyphenation(t *testing.T) {
+	tmpDir := t.TempDir()
+	instructionsDir := filepath.Join(tmpDir, "channels")
+	_ = os.MkdirAll(instructionsDir, 0755)
+
+	oldDirs := ChannelInstructionsDirs
+	ChannelInstructionsDirs = []string{instructionsDir}
+	defer func() { ChannelInstructionsDirs = oldDirs }()
+
+	// 1. Initial valid instructions for "dev-chat"
+	filePath := filepath.Join(instructionsDir, "dev-chat.md")
+	_ = os.WriteFile(filePath, []byte("Instructions for dev-chat"), 0644)
+
+	res := LoadChannelInstructions("dev chat")
+	if res != "Instructions for dev-chat" {
+		t.Errorf("Expected 'Instructions for dev-chat', got %q", res)
+	}
+
+	// 2. Torn read (file becomes 0 bytes) -> returns cached instructions!
+	_ = os.WriteFile(filePath, []byte(""), 0644)
+	resCached := LoadChannelInstructions("dev chat")
+	if resCached != "Instructions for dev-chat" {
+		t.Errorf("Expected cached instructions 'Instructions for dev-chat', got %q", resCached)
+	}
+
+	// 3. Traversal guard attempt
+	resTraversal := LoadChannelInstructions("../../../etc/passwd")
+	if resTraversal != "" {
+		t.Errorf("Expected empty string for path traversal attempt, got %q", resTraversal)
+	}
+}
+
+func TestIsTestEnvironment_And_GetGeminiHomeDir(t *testing.T) {
+	if !isTestEnvironment() {
+		t.Errorf("Expected isTestEnvironment()=true during tests")
+	}
+
+	// Test getGeminiHomeDir with HOME set to custom dir
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	home := getGeminiHomeDir()
+	if home != tmpDir {
+		t.Errorf("Expected home=%s, got %s", tmpDir, home)
+	}
+
+	// Test getGeminiHomeDir with HOME empty
+	t.Setenv("HOME", "")
+	homeFallback := getGeminiHomeDir()
+	if homeFallback == "" {
+		t.Errorf("Expected non-empty home fallback")
+	}
+}
+
+func TestEnsureAgySettings_CorruptedJSONAndWriteError(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	settingsDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli")
+	_ = os.MkdirAll(settingsDir, 0755)
+	settingsFile := filepath.Join(settingsDir, "settings.json")
+	_ = os.WriteFile(settingsFile, []byte("invalid-json{"), 0644)
+
+	err := EnsureAgySettings("api-key-123", "model-abc")
+	if err != nil {
+		t.Fatalf("Expected EnsureAgySettings to succeed by overwriting corrupt file, got: %v", err)
+	}
+
+	// Write error with uncreatable home
+	t.Setenv("HOME", "/proc/uncreatable")
+	errUncreatable := EnsureAgySettings("api-key-123", "model-abc")
+	if errUncreatable == nil {
+		t.Errorf("Expected error for uncreatable HOME")
+	}
+}
+
+func TestEnsureSystemRules_TornReadAndFallback(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	oldAgentPaths := AgentInstructionsSearchPaths
+	defer func() { AgentInstructionsSearchPaths = oldAgentPaths }()
+
+	// 1. Initial valid persona file
+	personaFile := filepath.Join(tmpDir, "AGENTS.md")
+	_ = os.WriteFile(personaFile, []byte("Persona prompt content"), 0644)
+	AgentInstructionsSearchPaths = []string{personaFile}
+
+	err := EnsureSystemRules("custom environment prompt")
+	if err != nil {
+		t.Fatalf("EnsureSystemRules failed: %v", err)
+	}
+
+	// 2. Torn read (empty file) -> triggers LKGC persona!
+	_ = os.WriteFile(personaFile, []byte(""), 0644)
+	errTorn := EnsureSystemRules("")
+	if errTorn != nil {
+		t.Fatalf("EnsureSystemRules with torn read failed: %v", errTorn)
+	}
+
+	// 3. Fallback to LastKnownGoodRules when no persona and no prompt
+	AgentInstructionsSearchPaths = []string{filepath.Join(tmpDir, "nonexistent.md")}
+	errLKGC := EnsureSystemRules("")
+	if errLKGC != nil {
+		t.Fatalf("EnsureSystemRules with LKGC fallback failed: %v", errLKGC)
+	}
+
+	// 4. Uncreatable home error
+	t.Setenv("HOME", "/proc/uncreatable")
+	errErr := EnsureSystemRules("test")
+	if errErr == nil {
+		t.Errorf("Expected error for uncreatable directory")
+	}
+}
+
+func TestLoadMCPConfig_EnvOverridesAndSSENormalization(t *testing.T) {
+	// 1. GITHUB_PAT and MCP_CONFIG env vars
+	t.Setenv("GITHUB_PAT", "mock-pat-123")
+	t.Setenv("MCP_CONFIG", `{"mcpServers":{"custom-env":{"serverUrl":"http://env-mcp:8080/mcp"}}}`)
+
+	raw := LoadMCPConfig()
+	var parsed map[string]map[string]interface{}
+	_ = json.Unmarshal(raw, &parsed)
+	servers := parsed["mcpServers"]
+	if servers["github"] == nil {
+		t.Errorf("Expected github MCP server with GITHUB_PAT set")
+	}
+	if servers["custom-env"] == nil {
+		t.Errorf("Expected custom-env MCP server from MCP_CONFIG env")
+	}
+
+	// 2. SSE normalization
+	t.Setenv("MCP_CONFIG", `{"mcpServers":{"docker":{"serverUrl":"http://docker-mcp:4002/sse"}}}`)
+	rawNorm := LoadMCPConfig()
+	var parsedNorm map[string]map[string]interface{}
+	_ = json.Unmarshal(rawNorm, &parsedNorm)
+	dockerSvc := parsedNorm["mcpServers"]["docker"].(map[string]interface{})
+	if dockerSvc["serverUrl"] != "http://docker-mcp:4002/mcp" {
+		t.Errorf("Expected normalized /mcp URL, got %v", dockerSvc["serverUrl"])
+	}
+
+	// 3. Runtime config overlay
+	runtimeConfigMu.Lock()
+	oldCfg := currentRuntimeConfig
+	currentRuntimeConfig = Config{
+		Model: "gemini-2.5-flash",
+		McpServers: map[string]json.RawMessage{
+			"overlay-svc": json.RawMessage(`{"serverUrl":"http://overlay:9000/mcp"}`),
+			"raw-str-svc": json.RawMessage(`"valid-json-string"`),
+		},
+	}
+	runtimeConfigMu.Unlock()
+	defer func() {
+		runtimeConfigMu.Lock()
+		currentRuntimeConfig = oldCfg
+		runtimeConfigMu.Unlock()
+	}()
+
+	rawOverlay := LoadMCPConfig()
+	var parsedOverlay map[string]interface{}
+	_ = json.Unmarshal(rawOverlay, &parsedOverlay)
+	serversOverlay, _ := parsedOverlay["mcpServers"].(map[string]interface{})
+	if serversOverlay["overlay-svc"] == nil {
+		t.Errorf("Expected overlay-svc in MCP config, got: %+v", serversOverlay)
+	}
+}
+
+func TestLoadMCPConfig_MarshalError(t *testing.T) {
+	runtimeConfigMu.Lock()
+	oldCfg := currentRuntimeConfig
+	currentRuntimeConfig = Config{
+		Model: "gemini-2.5-flash",
+		McpServers: map[string]json.RawMessage{
+			"bad-json-svc": json.RawMessage(`unclosed{`),
+		},
+	}
+	runtimeConfigMu.Unlock()
+	defer func() {
+		runtimeConfigMu.Lock()
+		currentRuntimeConfig = oldCfg
+		runtimeConfigMu.Unlock()
+	}()
+
+	raw := LoadMCPConfig()
+	if string(raw) != `{"mcpServers":{}}` {
+		t.Errorf("Expected fallback empty mcpServers on marshal error, got %s", string(raw))
+	}
+}
+
+func TestEnsureMcpConfig_EdgeCases(t *testing.T) {
+	// 1. Empty raw config
+	if err := EnsureMcpConfig(json.RawMessage("")); err != nil {
+		t.Errorf("Expected nil error for empty rawConfig")
+	}
+	if err := EnsureMcpConfig(json.RawMessage(`""`)); err != nil {
+		t.Errorf("Expected nil error for empty string rawConfig")
+	}
+	if err := EnsureMcpConfig(json.RawMessage("null")); err != nil {
+		t.Errorf("Expected nil error for null rawConfig")
+	}
+
+	// 2. JSON string encoded config
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	strJSON := json.RawMessage(`"{\"mcpServers\":{\"server1\":{\"serverUrl\":\"http://s1\"}}}"`)
+	if err := EnsureMcpConfig(strJSON); err != nil {
+		t.Fatalf("EnsureMcpConfig failed with string JSON: %v", err)
+	}
+
+	// 3. Unwriteable directory
+	t.Setenv("HOME", "/proc/uncreatable")
+	if err := EnsureMcpConfig(json.RawMessage(`{"mcpServers":{}}`)); err == nil {
+		t.Errorf("Expected error for uncreatable directory")
+	}
+}
+
+func TestResolveChannelPolicy_WakeModeInheritance(t *testing.T) {
+	cfg := Config{
+		Channels: map[string]ChannelPolicy{
+			"default": {
+				Mode:     "threads",
+				WakeMode: "mention",
+			},
+			"aerial-general": {
+				Mode: "threads",
+			},
+		},
+	}
+	pol := cfg.ResolveChannelPolicy("12345", "aerial-general")
+	if pol.WakeMode != "mention" {
+		t.Errorf("Expected inherited WakeMode=mention, got %s", pol.WakeMode)
+	}
+}
+
+func TestGetFallbackDefaults_And_LoadMCPConfig_DataOptions(t *testing.T) {
+	if _, err := os.Stat("/data"); err == nil {
+		origOptions, readErr := os.ReadFile("/data/options.json")
+		defer func() {
+			if readErr == nil {
+				_ = os.WriteFile("/data/options.json", origOptions, 0644)
+			} else {
+				_ = os.Remove("/data/options.json")
+			}
+		}()
+
+		// 1. Model override in /data/options.json
+		_ = os.WriteFile("/data/options.json", []byte(`{"model":"gemini-custom-data","mcp_config":"{\"mcpServers\":{\"data-mcp\":{\"serverUrl\":\"http://data-mcp:8080\"}}}"}`), 0644)
+		t.Setenv("AGY_MODEL", "")
+		fb := getFallbackDefaults()
+		if fb.Model != "gemini-custom-data" {
+			t.Errorf("Expected Model=gemini-custom-data from /data/options.json, got %s", fb.Model)
+		}
+
+		// 2. LoadMCPConfig reading string mcp_config from /data/options.json
+		t.Setenv("MCP_CONFIG", "")
+		raw := LoadMCPConfig()
+		var parsed map[string]interface{}
+		_ = json.Unmarshal(raw, &parsed)
+		servers, _ := parsed["mcpServers"].(map[string]interface{})
+		if servers["data-mcp"] == nil {
+			t.Errorf("Expected data-mcp in LoadMCPConfig from /data/options.json string")
+		}
+
+		// 3. LoadMCPConfig reading object mcp_config from /data/options.json
+		_ = os.WriteFile("/data/options.json", []byte(`{"mcp_config":{"mcpServers":{"raw-data-mcp":{"serverUrl":"http://raw-data"}}}}`), 0644)
+		rawRaw := LoadMCPConfig()
+		_ = json.Unmarshal(rawRaw, &parsed)
+		serversRaw, _ := parsed["mcpServers"].(map[string]interface{})
+		if serversRaw["raw-data-mcp"] == nil {
+			t.Errorf("Expected raw-data-mcp in LoadMCPConfig from /data/options.json object")
+		}
+	}
+}
+
+func TestEnsureSystemRules_TornRead_EmptyPersonaSource(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	oldAgentPaths := AgentInstructionsSearchPaths
+	defer func() { AgentInstructionsSearchPaths = oldAgentPaths }()
+
+	// Empty file triggers tornRead = true
+	emptyFile := filepath.Join(tmpDir, "AGENTS.md")
+	_ = os.WriteFile(emptyFile, []byte(""), 0644)
+	AgentInstructionsSearchPaths = []string{emptyFile}
+
+	lkgcMutex.Lock()
+	lastKnownGoodPersona = "LKGC Persona Content"
+	lastKnownGoodPersonaSource = ""
+	lkgcMutex.Unlock()
+
+	err := EnsureSystemRules("")
+	if err != nil {
+		t.Fatalf("EnsureSystemRules failed: %v", err)
+	}
+
+	// When no persona and no rules, returns nil
+	lkgcMutex.Lock()
+	lastKnownGoodPersona = ""
+	lastKnownGoodPersonaSource = ""
+	lastKnownGoodRules = ""
+	lkgcMutex.Unlock()
+	AgentInstructionsSearchPaths = []string{filepath.Join(tmpDir, "missing.md")}
+
+	errEmpty := EnsureSystemRules("")
+	if errEmpty != nil {
+		t.Errorf("Expected nil when no persona and no rules exist, got %v", errEmpty)
+	}
+}
+
+func TestLoadChannelInstructions_PathAndFileEdgeCases(t *testing.T) {
+	tmpDir := t.TempDir()
+	instructionsDir := filepath.Join(tmpDir, "channels")
+	_ = os.MkdirAll(instructionsDir, 0755)
+
+	oldDirs := ChannelInstructionsDirs
+	ChannelInstructionsDirs = []string{instructionsDir}
+	defer func() { ChannelInstructionsDirs = oldDirs }()
+
+	// 1. Directory with name matching channel (not regular file)
+	subDir := filepath.Join(instructionsDir, "dir-channel.md")
+	_ = os.MkdirAll(subDir, 0755)
+	if res := LoadChannelInstructions("dir-channel"); res != "" {
+		t.Errorf("Expected empty string when target is a directory, got %q", res)
+	}
+
+	// 2. Space in name matching space-separated file
+	spaceFile := filepath.Join(instructionsDir, "spaced channel.md")
+	_ = os.WriteFile(spaceFile, []byte("Spaced content"), 0644)
+	if res := LoadChannelInstructions("spaced-channel"); res != "Spaced content" {
+		t.Errorf("Expected 'Spaced content', got %q", res)
+	}
+
+	// 3. Path traversal outside root
+	if res := LoadChannelInstructions("../../outside"); res != "" {
+		t.Errorf("Expected empty string for path traversal outside dir, got %q", res)
+	}
+}
+
+
+
 
 
 
