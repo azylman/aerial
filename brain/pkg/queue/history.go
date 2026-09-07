@@ -26,6 +26,8 @@ var (
 	reChannelHistoryTag      = regexp.MustCompile(`(?i)<\s*/?\s*channel_history\s*>`)
 	reUserRequestTag         = regexp.MustCompile(`(?i)<\s*/?\s*user_request\s*>`)
 	reChannelInstructionsTag = regexp.MustCompile(`(?i)<\s*/?\s*channel_instructions\s*>`)
+	reRawThreadTranscriptTag = regexp.MustCompile(`(?i)<\s*/?\s*raw_thread_transcript\s*>`)
+	reThreadSummaryTag       = regexp.MustCompile(`(?i)<\s*/?\s*thread_summary\s*>`)
 )
 
 // HistoryMessage represents a normalized message retrieved for channel context.
@@ -46,6 +48,8 @@ func SanitizeHistoryContent(s string) string {
 	s = reChannelHistoryTag.ReplaceAllString(s, "<\\/CHANNEL_HISTORY>")
 	s = reUserRequestTag.ReplaceAllString(s, "<\\/USER_REQUEST>")
 	s = reChannelInstructionsTag.ReplaceAllString(s, "<\\/CHANNEL_INSTRUCTIONS>")
+	s = reRawThreadTranscriptTag.ReplaceAllString(s, "<\\/RAW_THREAD_TRANSCRIPT>")
+	s = reThreadSummaryTag.ReplaceAllString(s, "<\\/THREAD_SUMMARY>")
 	return s
 }
 

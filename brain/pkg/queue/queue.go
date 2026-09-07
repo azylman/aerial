@@ -1317,27 +1317,35 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 				basePrompt = summary + "\n\n" + basePrompt
 				log.Printf("[WorkerPool] Injected <THREAD_SUMMARY> into Turn 1 prompt for thread %s", threadID)
 
+				var lookbackMsgs []HistoryMessage
+				var err error
+				lookbackCtx, lookbackCancel := context.WithTimeout(p.ctx, 2500*time.Millisecond)
 				if p.cfg.HistoryFetcher != nil {
-					lookbackCtx, lookbackCancel := context.WithTimeout(p.ctx, 2500*time.Millisecond)
-					lookbackMsgs, err := p.cfg.HistoryFetcher(lookbackCtx, threadID, burst[0].ID, 10)
-					lookbackCancel()
-					if err == nil {
-						if formattedHist := FormatChannelHistory(lookbackMsgs); formattedHist != "" {
-							basePrompt = formattedHist + "\n\n" + basePrompt
-						}
+					lookbackMsgs, err = p.cfg.HistoryFetcher(lookbackCtx, threadID, burst[0].ID, 10)
+				} else {
+					lookbackMsgs, err = FetchRecentThreadHistory(lookbackCtx, p.getDiscordSession(), p.cfg.DB, threadID, 10)
+				}
+				lookbackCancel()
+				if err == nil {
+					if formattedHist := FormatChannelHistory(lookbackMsgs); formattedHist != "" {
+						basePrompt = formattedHist + "\n\n" + basePrompt
 					}
 				}
 			} else {
+				var lookbackMsgs []HistoryMessage
+				var err error
+				fetchCtx, fetchCancel := context.WithTimeout(p.ctx, 2500*time.Millisecond)
 				if p.cfg.HistoryFetcher != nil {
-					fetchCtx, fetchCancel := context.WithTimeout(p.ctx, 2500*time.Millisecond)
-					lookbackMsgs, err := p.cfg.HistoryFetcher(fetchCtx, threadID, burst[0].ID, 10)
-					fetchCancel()
-					if err != nil {
-						log.Printf("[WorkerPool] Warning: History fetch failed for thread %s: %v", threadID, err)
-					} else if formattedHist := FormatChannelHistory(lookbackMsgs); formattedHist != "" {
-						basePrompt = formattedHist + "\n\n" + basePrompt
-						log.Printf("[WorkerPool] Injected channel history into Turn 1 prompt for thread %s", threadID)
-					}
+					lookbackMsgs, err = p.cfg.HistoryFetcher(fetchCtx, threadID, burst[0].ID, 10)
+				} else {
+					lookbackMsgs, err = FetchRecentThreadHistory(fetchCtx, p.getDiscordSession(), p.cfg.DB, threadID, 10)
+				}
+				fetchCancel()
+				if err != nil {
+					log.Printf("[WorkerPool] Warning: History fetch failed for thread %s: %v", threadID, err)
+				} else if formattedHist := FormatChannelHistory(lookbackMsgs); formattedHist != "" {
+					basePrompt = formattedHist + "\n\n" + basePrompt
+					log.Printf("[WorkerPool] Injected channel history into Turn 1 prompt for thread %s", threadID)
 				}
 			}
 		} else {
