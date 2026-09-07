@@ -5050,7 +5050,7 @@ func TestProcessBurst_ColdStartWatchdogRecoveryAndContinuation(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
 
-	coldSessID := "dynamic-cold-uuid-707"
+	coldSessID := "70707070-aaaa-4bbb-cccc-111122223333"
 	sessDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", coldSessID)
 	_ = os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs"), 0755)
 	if err := os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte("mock transcript data\n"), 0600); err != nil {
@@ -5064,6 +5064,9 @@ func TestProcessBurst_ColdStartWatchdogRecoveryAndContinuation(t *testing.T) {
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
+		MemoryRetrieverFunc: func(ctx context.Context, database *sql.DB, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+			return nil, nil
+		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
 			call := atomic.AddInt32(&runnerCalls, 1)
 			mu.Lock()
@@ -5175,7 +5178,7 @@ func TestProcessBurst_ColdStartTransientRecoveryAndContinuation(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
 
-	transientSessID := "dynamic-transient-uuid-808"
+	transientSessID := "80808080-bbbb-4ccc-dddd-444455556666"
 	sessDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", transientSessID)
 	_ = os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs"), 0755)
 	if err := os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte("mock transcript data\n"), 0600); err != nil {
@@ -5187,6 +5190,9 @@ func TestProcessBurst_ColdStartTransientRecoveryAndContinuation(t *testing.T) {
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
+		MemoryRetrieverFunc: func(ctx context.Context, database *sql.DB, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+			return nil, nil
+		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
 			call := atomic.AddInt32(&runnerCalls, 1)
 			mu.Lock()
@@ -5251,8 +5257,11 @@ func TestProcessBurst_ColdStartTransientRecoveryAndContinuation(t *testing.T) {
 		}
 	}
 	if len(promptsSeen) >= 2 {
-		if !strings.Contains(promptsSeen[1], "timed out or was interrupted") {
-			t.Errorf("Attempt 2 prompt missing continuation instruction: %q", promptsSeen[1])
+		if strings.Contains(promptsSeen[1], "timed out or was interrupted") {
+			t.Errorf("Attempt 2 prompt should not contain timeout continuation instruction: %q", promptsSeen[1])
+		}
+		if !strings.Contains(promptsSeen[1], "Run transient task cold") {
+			t.Errorf("Attempt 2 prompt missing original prompt: %q", promptsSeen[1])
 		}
 	}
 	mu.Unlock()
@@ -5387,6 +5396,9 @@ func TestProcessBurst_EmptyStdout_TransientRetryAndContinuation(t *testing.T) {
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
+		MemoryRetrieverFunc: func(ctx context.Context, database *sql.DB, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+			return nil, nil
+		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
 			call := atomic.AddInt32(&runnerCalls, 1)
 			mu.Lock()
@@ -5399,7 +5411,7 @@ func TestProcessBurst_EmptyStdout_TransientRetryAndContinuation(t *testing.T) {
 				return "", "", 0, nil
 			}
 
-			// Attempt 2 should receive continuation prompt and testSessID
+			// Attempt 2 should receive original prompt and testSessID
 			return fmt.Sprintf(`{"conversation_id":%q,"status":"SUCCESS","response":"Recovered on attempt 2!"}`, sessionID), "", 0, nil
 		},
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
@@ -5453,8 +5465,11 @@ func TestProcessBurst_EmptyStdout_TransientRetryAndContinuation(t *testing.T) {
 		}
 	}
 	if len(promptsSeen) >= 2 {
-		if !strings.Contains(promptsSeen[1], "timed out or was interrupted") {
-			t.Errorf("Attempt 2 prompt missing continuation instruction: %q", promptsSeen[1])
+		if strings.Contains(promptsSeen[1], "timed out or was interrupted") {
+			t.Errorf("Attempt 2 prompt should not contain timeout continuation instruction: %q", promptsSeen[1])
+		}
+		if !strings.Contains(promptsSeen[1], "Finish it") {
+			t.Errorf("Attempt 2 prompt missing original prompt: %q", promptsSeen[1])
 		}
 	}
 	mu.Unlock()
@@ -5491,6 +5506,9 @@ func TestProcessBurst_GeneralFailure_PreservesSessionOnDisk(t *testing.T) {
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
+		MemoryRetrieverFunc: func(ctx context.Context, database *sql.DB, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+			return nil, nil
+		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
 			call := atomic.AddInt32(&runnerCalls, 1)
 			mu.Lock()
@@ -5503,7 +5521,7 @@ func TestProcessBurst_GeneralFailure_PreservesSessionOnDisk(t *testing.T) {
 				return "", "fatal execution error: out of memory", 1, fmt.Errorf("exit status 1")
 			}
 
-			// Attempt 2: verify session was preserved on disk and passed in with continuation prompt
+			// Attempt 2: verify session was preserved on disk and passed in with original prompt
 			return fmt.Sprintf(`{"conversation_id":%q,"status":"SUCCESS","response":"Recovered from exit 1!"}`, sessionID), "", 0, nil
 		},
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
@@ -5557,12 +5575,176 @@ func TestProcessBurst_GeneralFailure_PreservesSessionOnDisk(t *testing.T) {
 		}
 	}
 	if len(promptsSeen) >= 2 {
-		if !strings.Contains(promptsSeen[1], "timed out or was interrupted") {
-			t.Errorf("Attempt 2 prompt missing continuation instruction: %q", promptsSeen[1])
+		if strings.Contains(promptsSeen[1], "timed out or was interrupted") {
+			t.Errorf("Attempt 2 prompt should not contain timeout continuation instruction: %q", promptsSeen[1])
+		}
+		if !strings.Contains(promptsSeen[1], "Finish it") {
+			t.Errorf("Attempt 2 prompt missing original prompt: %q", promptsSeen[1])
 		}
 	}
 	mu.Unlock()
 }
+
+func TestWorkerPool_FullBuffer_NoEvictionZombieRace(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	const totalMsgs = 150
+	var processedCount atomic.Int32
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		IdleTimeout:    20 * time.Millisecond,
+		MaxAttempts:    1,
+		MemoryRetrieverFunc: func(ctx context.Context, database *sql.DB, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+			return nil, nil
+		},
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			time.Sleep(2 * time.Millisecond)
+			return mockJSONResponse(sessionID, "OK"), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			processedCount.Add(1)
+		},
+	})
+	pool.Start()
+
+	// Concurrently enqueue 150 messages to the same thread (channel buffer is 100)
+	var wg sync.WaitGroup
+	for i := 0; i < totalMsgs; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			m := db.Message{
+				ID:         fmt.Sprintf("msg-race-%d", idx),
+				ThreadID:   "thread-evict-race",
+				GuildID:    "guild-race",
+				AuthorID:   "user-race",
+				AuthorName: "User",
+				Content:    fmt.Sprintf("msg content %d", idx),
+				Status:     db.StatusPending,
+				CreatedAt:  time.Now().UTC(),
+				UpdatedAt:  time.Now().UTC(),
+			}
+			_ = db.InsertMessage(database, m)
+			pool.Enqueue(m)
+		}(i)
+	}
+	wg.Wait()
+
+	// Wait for all messages to complete
+	deadline := time.Now().Add(10 * time.Second)
+	for processedCount.Load() < totalMsgs && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	if got := processedCount.Load(); got != totalMsgs {
+		t.Fatalf("Expected %d messages processed, got %d", totalMsgs, got)
+	}
+
+	pool.StopWithTimeout(2 * time.Second)
+}
+
+func TestProcessBurst_TransientError_RetainsOriginalPrompt(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	testSessID := "sess-transient-503"
+	_, err = session.EnsureSessionDir(testSessID)
+	if err != nil {
+		t.Fatalf("EnsureSessionDir failed: %v", err)
+	}
+
+	var mu sync.Mutex
+	var promptsSeen []string
+	var runnerCalls atomic.Int32
+	doneCh := make(chan struct{})
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    5 * time.Millisecond,
+		MaxAttempts:    2,
+		MemoryRetrieverFunc: func(ctx context.Context, database *sql.DB, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+			return nil, nil
+		},
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			call := runnerCalls.Add(1)
+			mu.Lock()
+			promptsSeen = append(promptsSeen, prompt)
+			mu.Unlock()
+
+			if call == 1 {
+				// Simulate transient 503 error
+				return "", "Error 503: Service Unavailable. High demand.", 1, fmt.Errorf("exit code 1")
+			}
+			return mockJSONResponse(sessionID, "Recovered cleanly"), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			close(doneCh)
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{
+		ID:         "msg-503-1",
+		ThreadID:   "thread-503",
+		GuildID:    "guild-503",
+		AuthorID:   "user-503",
+		AuthorName: "User",
+		Content:    "Original prompt text that must not be wiped",
+		Status:     db.StatusPending,
+		CreatedAt:  time.Now().UTC(),
+		UpdatedAt:  time.Now().UTC(),
+	}
+	_ = db.InsertMessage(database, msg)
+	_ = db.SaveSessionID(database, msg.ThreadID, testSessID)
+
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Timeout waiting for message processing")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(promptsSeen) != 2 {
+		t.Fatalf("Expected 2 attempts, got %d", len(promptsSeen))
+	}
+	// Attempt 2 must RETAIN the original prompt, not overwrite with continuation text
+	if strings.Contains(promptsSeen[1], "timed out or was interrupted") {
+		t.Errorf("Attempt 2 prompt should NOT have been overwritten with timeout continuation: %q", promptsSeen[1])
+	}
+	if !strings.Contains(promptsSeen[1], "Original prompt text that must not be wiped") {
+		t.Errorf("Attempt 2 prompt missing original prompt content: %q", promptsSeen[1])
+	}
+}
+
 
 
 

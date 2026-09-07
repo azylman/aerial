@@ -79,6 +79,7 @@ func getDiscordChannel(s *discordgo.Session, channelID string) *discordgo.Channe
 		return &discordgo.Channel{
 			ID:       snap.ID,
 			Name:     snap.Name,
+			GuildID:  snap.GuildID,
 			ParentID: snap.ParentID,
 			Type:     chType,
 		}
@@ -101,6 +102,9 @@ func resolveGuildID(s *discordgo.Session, m *discordgo.Message) string {
 	}
 	if m.GuildID != "" {
 		return m.GuildID
+	}
+	if snap, ok := queue.GetCachedChannel(m.ChannelID); ok && snap.GuildID != "" {
+		return snap.GuildID
 	}
 	if ch := getDiscordChannel(s, m.ChannelID); ch != nil && ch.GuildID != "" {
 		return ch.GuildID
@@ -444,10 +448,13 @@ func connectDiscordFunnel(ctx context.Context, database *sql.DB, pool *queue.Wor
 				authorName = m.Author.Username
 			}
 
+			resolvedGuildID := resolveGuildID(s, m.Message)
+			m.GuildID = resolvedGuildID
+
 			msg := db.Message{
 				ID:         m.ID,
 				ThreadID:   targetThreadID,
-				GuildID:    m.GuildID,
+				GuildID:    resolvedGuildID,
 				AuthorID:   authorID,
 				AuthorName: authorName,
 				Content:    prompt,

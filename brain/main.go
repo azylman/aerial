@@ -954,15 +954,17 @@ func RunBrainApp(ctx context.Context, bCfg BrainConfig) error {
 		Classifier:   cls,
 	})
 	pool.Start()
-	defer pool.Stop()
 
 	// Connect Discord Gateway session before startup crash recovery
 	dgSession := connectDiscordFunnel(ctx, database, pool, bCfg.DiscordToken)
-	if dgSession != nil {
-		defer func() {
+	defer func() {
+		log.Printf("Draining worker pool (10s timeout)...")
+		pool.StopWithTimeout(10 * time.Second)
+		if dgSession != nil {
+			log.Printf("Closing Discord gateway session...")
 			_ = dgSession.Close()
-		}()
-	}
+		}
+	}()
 
 	reloadConfig := CreateReloadConfigFunc(pool, bCfg.APIKey, bCfg.SystemPrompt, dgSession)
 

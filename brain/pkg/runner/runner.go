@@ -635,10 +635,6 @@ func ClassifyError(exitCode int, stdout, stderr string) (isFailure bool, isTrans
 			return isFailure, isTransient, isSessionCorruption, resp.Error
 		}
 
-		if strings.TrimSpace(resp.Response) == "" {
-			return true, true, false, "runner returned empty response text with status SUCCESS"
-		}
-
 		if trimmedStderr != "" {
 			if containsFatalStderrError(trimmedStderr) {
 				return true, false, false, extractErrorDetail(trimmedStderr, exitCode)
