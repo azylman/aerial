@@ -13,6 +13,9 @@ import (
 
 
 
+// SourceAmbient represents ambient chat messages appended to session transcripts.
+const SourceAmbient = "AMBIENT"
+
 func FindLatestSessionDir(after time.Time) string {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
@@ -178,10 +181,13 @@ func ExtractResponseAndError(convID string) (string, string) {
 					continue
 				}
 				var step struct {
-					Type string `json:"type"`
+					Source  string `json:"source"`
+					Type    string `json:"type"`
+					Content string `json:"content"`
 				}
 				if err := json.Unmarshal([]byte(line), &step); err == nil {
-					if step.Type == "USER_INPUT" {
+					isAmbient := step.Source == SourceAmbient || (step.Type == "USER_INPUT" && strings.HasPrefix(step.Content, "[Chat #"))
+					if step.Type == "USER_INPUT" && !isAmbient {
 						lastUserInputIdx = i
 					}
 				}
@@ -248,10 +254,13 @@ func HasSuccessfulToolCall(convID string) bool {
 					continue
 				}
 				var step struct {
-					Type string `json:"type"`
+					Source  string `json:"source"`
+					Type    string `json:"type"`
+					Content string `json:"content"`
 				}
 				if err := json.Unmarshal([]byte(line), &step); err == nil {
-					if step.Type == "USER_INPUT" {
+					isAmbient := step.Source == SourceAmbient || (step.Type == "USER_INPUT" && strings.HasPrefix(step.Content, "[Chat #"))
+					if step.Type == "USER_INPUT" && !isAmbient {
 						lastUserInputIdx = i
 					}
 				}
@@ -406,7 +415,7 @@ func AppendAmbientTurn(sessionID, channelName, authorName, text string, timestam
 
 	step := TranscriptStep{
 		StepIndex: nextIndex,
-		Source:    "USER_EXPLICIT",
+		Source:    SourceAmbient,
 		Type:      "USER_INPUT",
 		Status:    "DONE",
 		CreatedAt: timeStr,

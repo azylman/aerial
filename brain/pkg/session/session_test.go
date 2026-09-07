@@ -169,8 +169,8 @@ func TestAppendAmbientTurn_EmptyFiles(t *testing.T) {
 	if step.StepIndex != 0 {
 		t.Errorf("expected step_index 0, got %d", step.StepIndex)
 	}
-	if step.Source != "USER_EXPLICIT" {
-		t.Errorf("expected source USER_EXPLICIT, got %s", step.Source)
+	if step.Source != SourceAmbient {
+		t.Errorf("expected source %s, got %s", SourceAmbient, step.Source)
 	}
 	if step.Type != "USER_INPUT" {
 		t.Errorf("expected type USER_INPUT, got %s", step.Type)
@@ -785,3 +785,56 @@ func TestAppendAmbientTurn_ZeroTimestamp(t *testing.T) {
 		t.Fatalf("AppendAmbientTurn with zero time failed: %v", err)
 	}
 }
+
+func TestExtractResponseAndError_LegacyAndModernAmbientTurns(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	convID := "test-conv-ambient-filter"
+	logsDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", convID, ".system_generated", "logs")
+	if err := os.MkdirAll(logsDir, 0755); err != nil {
+		t.Fatalf("Failed to create temp logs dir: %v", err)
+	}
+
+	// 1. Test Modern ambient turn with Source == SourceAmbient
+	modernTranscript := `{"step_index":0,"type":"USER_INPUT","source":"USER_EXPLICIT","content":"Turn 1 user request"}
+{"step_index":1,"type":"PLANNER_RESPONSE","status":"DONE","content":"Modern Turn 1 Response"}
+{"step_index":2,"type":"USER_INPUT","source":"AMBIENT","content":"[Chat #general] @Bob (2026-09-06T12:00:00Z): modern ambient msg"}
+`
+	tPath := filepath.Join(logsDir, "transcript.jsonl")
+	if err := os.WriteFile(tPath, []byte(modernTranscript), 0644); err != nil {
+		t.Fatalf("Failed to write transcript.jsonl: %v", err)
+	}
+
+	resp, errStr := ExtractResponseAndError(convID)
+	if resp != "Modern Turn 1 Response" {
+		t.Errorf("Expected response 'Modern Turn 1 Response', got: %q (err: %s)", resp, errStr)
+	}
+
+	// 2. Test Legacy ambient turn with Source == USER_EXPLICIT but content starting with "[Chat #"
+	legacyTranscript := `{"step_index":0,"type":"USER_INPUT","source":"USER_EXPLICIT","content":"Turn 1 user request"}
+{"step_index":1,"type":"PLANNER_RESPONSE","status":"DONE","content":"Legacy Turn 1 Response"}
+{"step_index":2,"type":"USER_INPUT","source":"USER_EXPLICIT","content":"[Chat #lounge] @Charlie (2026-09-06T12:00:00Z): legacy ambient msg"}
+`
+	if err := os.WriteFile(tPath, []byte(legacyTranscript), 0644); err != nil {
+		t.Fatalf("Failed to write transcript.jsonl: %v", err)
+	}
+
+	resp, errStr = ExtractResponseAndError(convID)
+	if resp != "Legacy Turn 1 Response" {
+		t.Errorf("Expected response 'Legacy Turn 1 Response', got: %q (err: %s)", resp, errStr)
+	}
+
+	// 3. Test genuine new user turn (non-ambient) - must correctly scope and return empty response
+	newTurnTranscript := legacyTranscript + `{"step_index":3,"type":"USER_INPUT","source":"USER_EXPLICIT","content":"Turn 2 genuine request"}
+`
+	if err := os.WriteFile(tPath, []byte(newTurnTranscript), 0644); err != nil {
+		t.Fatalf("Failed to write transcript.jsonl: %v", err)
+	}
+
+	resp, errStr = ExtractResponseAndError(convID)
+	if resp != "" {
+		t.Errorf("Expected empty response for incomplete Turn 2, got: %q", resp)
+	}
+}
+
