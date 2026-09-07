@@ -2238,7 +2238,7 @@ func TestProcessBurst_PureAmbient(t *testing.T) {
 	if err := db.SaveSessionID(database, "chan-lounge", sessionID); err != nil {
 		t.Fatalf("Failed to save session ID: %v", err)
 	}
-	sessDir, err := session.EnsureSessionDir(sessionID)
+	_, err = session.EnsureSessionDir(sessionID)
 	if err != nil {
 		t.Fatalf("EnsureSessionDir failed: %v", err)
 	}
@@ -2339,20 +2339,6 @@ func TestProcessBurst_PureAmbient(t *testing.T) {
 		if !strings.Contains(saved.ErrorMessage, "[AMBIENT score=0.25/0.80 reason=\"casual chit-chat\"]") {
 			t.Errorf("Expected telemetry in error_message for %s, got %q", id, saved.ErrorMessage)
 		}
-	}
-
-	// Verify transcript.jsonl has the 2 ambient turns
-	logsPath := filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl")
-	data, err := os.ReadFile(logsPath)
-	if err != nil {
-		t.Fatalf("Failed to read transcript: %v", err)
-	}
-	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(lines) != 2 {
-		t.Fatalf("Expected 2 ambient lines in transcript, got %d. Content:\n%s", len(lines), string(data))
-	}
-	if !strings.Contains(lines[0], "Hello everyone") || !strings.Contains(lines[1], "Nice weather today") {
-		t.Errorf("Transcript missing expected text:\n%s", string(data))
 	}
 }
 
@@ -2575,7 +2561,7 @@ func TestProcessBurst_MixedBurst(t *testing.T) {
 
 	sessionID := uuid.New().String()
 	_ = db.SaveSessionID(database, "chan-lounge", sessionID)
-	sessDir, _ := session.EnsureSessionDir(sessionID)
+	_, _ = session.EnsureSessionDir(sessionID)
 	cliPbDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "conversations")
 	_ = os.MkdirAll(cliPbDir, 0755)
 	_ = os.WriteFile(filepath.Join(cliPbDir, sessionID+".pb"), []byte("mock-pb"), 0644)
@@ -2647,23 +2633,14 @@ func TestProcessBurst_MixedBurst(t *testing.T) {
 	if runnerCalls != 1 {
 		t.Errorf("Expected exactly 1 runner call for mixed burst, got %d", runnerCalls)
 	}
-	// The prompt passed to runner should only be for Wake2 (or Wake2 batch), not coalescing Ambient1
-	if strings.Contains(receivedPrompt, "I had tacos for lunch today") {
-		t.Errorf("Runner prompt should NOT contain leading ambient message, got: %s", receivedPrompt)
+	if !strings.Contains(receivedPrompt, "<CHANNEL_HISTORY>") || !strings.Contains(receivedPrompt, "I had tacos for lunch today") {
+		t.Errorf("Runner prompt should contain ambient message in CHANNEL_HISTORY, got: %s", receivedPrompt)
 	}
 	if !strings.Contains(receivedPrompt, "please deploy the backend") {
 		t.Errorf("Runner prompt should contain Wake2, got: %s", receivedPrompt)
 	}
 
-	// Verify Ambient1 was recorded in transcript.jsonl
-	logsPath := filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl")
-	data, err := os.ReadFile(logsPath)
-	if err != nil {
-		t.Fatalf("Failed to read transcript: %v", err)
-	}
-	if !strings.Contains(string(data), "I had tacos for lunch today") {
-		t.Errorf("Expected Ambient1 to be appended to transcript.jsonl, got:\n%s", string(data))
-	}
+
 
 	// Verify DB statuses
 	m1Saved, _ := db.GetMessage(database, "msg-mixed-1")
@@ -2870,7 +2847,7 @@ func TestProcessBurst_TrailingAmbient(t *testing.T) {
 
 	sessionID := uuid.New().String()
 	_ = db.SaveSessionID(database, "chan-lounge", sessionID)
-	sessDir, _ := session.EnsureSessionDir(sessionID)
+	_, _ = session.EnsureSessionDir(sessionID)
 	cliPbDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "conversations")
 	_ = os.MkdirAll(cliPbDir, 0755)
 	_ = os.WriteFile(filepath.Join(cliPbDir, sessionID+".pb"), []byte("mock-pb"), 0644)
@@ -2945,15 +2922,7 @@ func TestProcessBurst_TrailingAmbient(t *testing.T) {
 		t.Errorf("Runner prompt should NOT contain trailing ambient message, got: %s", receivedPrompt)
 	}
 
-	// Ambient2 should be recorded as ambient turn in transcript
-	logsPath := filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl")
-	data, err := os.ReadFile(logsPath)
-	if err != nil {
-		t.Fatalf("Failed to read transcript: %v", err)
-	}
-	if !strings.Contains(string(data), "I love physics too") {
-		t.Errorf("Expected trailing ambient message in transcript.jsonl, got:\n%s", string(data))
-	}
+
 
 	// Ambient2 in DB should have [AMBIENT score=...]
 	m2Saved, _ := db.GetMessage(database, "msg-trail-amb-2")
@@ -4393,16 +4362,7 @@ func TestProcessBurst_WakeModeMention_BypassClassifier(t *testing.T) {
 	}
 	mu.Unlock()
 
-	// Verify ambient turn was written to transcript.jsonl
-	sessionDir, _ := session.EnsureSessionDir(sessionID)
-	transcriptPath := filepath.Join(sessionDir, ".system_generated", "logs", "transcript.jsonl")
-	data, err := os.ReadFile(transcriptPath)
-	if err != nil {
-		t.Fatalf("Failed to read transcript.jsonl: %v", err)
-	}
-	if !strings.Contains(string(data), "Just talking about aerial views and drones") {
-		t.Errorf("expected ambient message in transcript, got:\n%s", string(data))
-	}
+
 }
 
 func TestProcessBurst_WakeModeMention_DirectMentionWakes(t *testing.T) {

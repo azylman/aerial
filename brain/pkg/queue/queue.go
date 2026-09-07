@@ -890,6 +890,34 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 	currentSessionID, _ := db.GetSessionID(p.cfg.DB, threadID)
 	var turnCount int
 
+	var turnHistory []HistoryMessage
+	var turnHistoryFetched bool
+	wakeIdx := -1
+	getTurnHistory := func(limit int) []HistoryMessage {
+		if turnHistoryFetched {
+			if len(turnHistory) > limit {
+				return turnHistory[:limit]
+			}
+			return turnHistory
+		}
+		fetchCtx, fetchCancel := context.WithTimeout(p.ctx, 3*time.Second)
+		defer fetchCancel()
+		var err error
+		if p.cfg.HistoryFetcher != nil {
+			turnHistory, err = p.cfg.HistoryFetcher(fetchCtx, threadID, burst[0].ID, limit)
+		} else {
+			turnHistory, err = FetchRecentThreadHistory(fetchCtx, p.getDiscordSession(), p.cfg.DB, threadID, limit)
+		}
+		if err != nil {
+			log.Printf("[WorkerPool] Warning: History fetch failed for thread %s: %v", threadID, err)
+		}
+		turnHistoryFetched = true
+		if len(turnHistory) > limit {
+			return turnHistory[:limit]
+		}
+		return turnHistory
+	}
+
 	if strings.ToLower(policy.Mode) == "channel" {
 		botUserID := ""
 		if sess := p.getDiscordSession(); sess != nil && sess.State != nil && sess.State.User != nil {
@@ -907,7 +935,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		wakeInfos := make([]wakeInfo, len(burst))
 		var trailingMsgs []db.Message
 		var trailingInfos []wakeInfo
-		wakeIdx := -1
+		wakeIdx = -1
 
 		// Safeguard 1: Tier-1 Pre-Scan (Zero-Latency Priority)
 		for i, m := range burst {
@@ -1077,12 +1105,6 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 			for i, m := range burst {
 				info := wakeInfos[i]
 				metrics.DiscordMessagesProcessedTotal.WithLabelValues("true", "ambient").Inc()
-				if hasDiskSession {
-					rawBody := extractMessageBody(m.Content)
-					if err := session.AppendAmbientTurn(currentSessionID, channelName, m.AuthorName, rawBody, m.CreatedAt); err != nil {
-						log.Printf("[WorkerPool] Failed to append ambient turn for %s: %v", m.ID, err)
-					}
-				}
 				telemetry := fmt.Sprintf("[AMBIENT score=%.2f/%.2f reason=%q]", info.score, info.threshold, info.reason)
 				_ = db.UpdateMessageStatus(p.cfg.DB, m.ID, db.StatusCompleted, telemetry)
 				if m.ScheduleRunID != "" {
@@ -1126,12 +1148,6 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 				m := burst[i]
 				info := wakeInfos[i]
 				metrics.DiscordMessagesProcessedTotal.WithLabelValues("true", "ambient").Inc()
-				if currentSessionID != "" && session.SessionExistsOnDisk(currentSessionID) {
-					rawBody := extractMessageBody(m.Content)
-					if err := session.AppendAmbientTurn(currentSessionID, channelName, m.AuthorName, rawBody, m.CreatedAt); err != nil {
-						log.Printf("[WorkerPool] Failed to append ambient turn for %s: %v", m.ID, err)
-					}
-				}
 				telemetry := fmt.Sprintf("[AMBIENT score=%.2f/%.2f reason=%q]", info.score, info.threshold, info.reason)
 				_ = db.UpdateMessageStatus(p.cfg.DB, m.ID, db.StatusCompleted, telemetry)
 				if m.ScheduleRunID != "" {
@@ -1195,13 +1211,6 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 				}
 				if !info.isWake {
 					metrics.DiscordMessagesProcessedTotal.WithLabelValues("true", "ambient").Inc()
-					if currentSessionID != "" && session.SessionExistsOnDisk(currentSessionID) {
-						rawBody := extractMessageBody(m.Content)
-						cName := channelName
-						if err := session.AppendAmbientTurn(currentSessionID, cName, m.AuthorName, rawBody, m.CreatedAt); err != nil {
-							log.Printf("[WorkerPool] Failed to append ambient turn for trailing message %s: %v", m.ID, err)
-						}
-					}
 					telemetry := fmt.Sprintf("[AMBIENT score=%.2f/%.2f reason=%q]", info.score, info.threshold, info.reason)
 					_ = db.UpdateMessageStatus(p.cfg.DB, m.ID, db.StatusCompleted, telemetry)
 					if m.ScheduleRunID != "" {
@@ -1252,118 +1261,74 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 	snap, _ := resolveChannelSnapshot(p.getDiscordSession(), threadID)
 	isThreadColdStart := snap.IsThread && snap.ParentID != "" && snap.ParentID != snap.ID && currentSessionID == ""
 
-	if currentSessionID == "" {
-		if isThreadColdStart {
-			var summary string
-			cachedSum, lastMsgID, _ := db.GetThreadSummary(p.cfg.DB, threadID)
+	isColdStart := currentSessionID == ""
+	hasHistoryNeed := isColdStart || wakeIdx > 0 || len(burst) > 1
 
-			fetchCtx, fetchCancel := context.WithTimeout(p.ctx, 3*time.Second)
-			var histMsgs []HistoryMessage
-			var fetchErr error
-			if p.cfg.HistoryFetcher != nil {
-				histMsgs, fetchErr = p.cfg.HistoryFetcher(fetchCtx, threadID, burst[0].ID, 100)
+	if isThreadColdStart {
+		var summary string
+		cachedSum, lastMsgID, _ := db.GetThreadSummary(p.cfg.DB, threadID)
+
+		histMsgs := getTurnHistory(100)
+
+		if len(histMsgs) > 0 {
+			var latestMsgID string
+			var maxTime time.Time
+			for _, m := range histMsgs {
+				if m.CreatedAt.After(maxTime) || latestMsgID == "" {
+					maxTime = m.CreatedAt
+					latestMsgID = m.ID
+				}
+			}
+
+			if cachedSum != "" && lastMsgID != "" && lastMsgID == latestMsgID {
+				summary = cachedSum
+				log.Printf("[WorkerPool] Using cached thread summary for thread %s (watermark msg: %s)", threadID, lastMsgID)
 			} else {
-				histMsgs, fetchErr = FetchRecentThreadHistory(fetchCtx, p.getDiscordSession(), p.cfg.DB, threadID, 100)
-			}
-			fetchCancel()
-
-			if fetchErr != nil {
-				log.Printf("[WorkerPool] Warning: Thread history fetch failed for thread %s: %v", threadID, fetchErr)
-			} else if len(histMsgs) > 0 {
-				var latestMsgID string
-				var maxTime time.Time
-				for _, m := range histMsgs {
-					if m.CreatedAt.After(maxTime) || latestMsgID == "" {
-						maxTime = m.CreatedAt
-						latestMsgID = m.ID
-					}
+				llmFn := p.cfg.LLMFunc
+				if llmFn == nil && p.cfg.Classifier != nil && p.cfg.Classifier.LLMFunc != nil {
+					llmFn = p.cfg.Classifier.LLMFunc
+				}
+				if llmFn == nil {
+					llmFn = classifier.NewAgyLLMFunc(p.cfg.AgyBin, p.cfg.APIKey, p.cfg.RunnerFunc)
 				}
 
-				if cachedSum != "" && lastMsgID != "" && lastMsgID == latestMsgID {
-					summary = cachedSum
-					log.Printf("[WorkerPool] Using cached thread summary for thread %s (watermark msg: %s)", threadID, lastMsgID)
-				} else {
-					llmFn := p.cfg.LLMFunc
-					if llmFn == nil && p.cfg.Classifier != nil && p.cfg.Classifier.LLMFunc != nil {
-						llmFn = p.cfg.Classifier.LLMFunc
-					}
-					if llmFn == nil {
-						llmFn = classifier.NewAgyLLMFunc(p.cfg.AgyBin, p.cfg.APIKey, p.cfg.RunnerFunc)
-					}
+				flashModel := ""
+				if p.cfg.Classifier != nil && p.cfg.Classifier.Model != "" {
+					flashModel = p.cfg.Classifier.Model
+				}
+				if flashModel == "" && p.appCfg != nil && p.appCfg.Current() != nil {
+					flashModel = p.appCfg.Current().ClassifierModel
+				}
+				if flashModel == "" {
+					flashModel = p.cfg.Model
+				}
 
-					flashModel := ""
-					if p.cfg.Classifier != nil && p.cfg.Classifier.Model != "" {
-						flashModel = p.cfg.Classifier.Model
-					}
-					if flashModel == "" && p.appCfg != nil && p.appCfg.Current() != nil {
-						flashModel = p.appCfg.Current().ClassifierModel
-					}
-					if flashModel == "" {
-						flashModel = p.cfg.Model
-					}
+				sumCtx, sumCancel := context.WithTimeout(p.ctx, 3*time.Second)
+				newSum, sumErr := SummarizeThreadHistory(sumCtx, llmFn, flashModel, threadID, histMsgs)
+				sumCancel()
 
-					sumCtx, sumCancel := context.WithTimeout(p.ctx, 3*time.Second)
-					newSum, sumErr := SummarizeThreadHistory(sumCtx, llmFn, flashModel, threadID, histMsgs)
-					sumCancel()
-
-					if sumErr != nil {
-						log.Printf("[WorkerPool] Warning: Thread history summarization failed for thread %s: %v. Falling back to raw lookback.", threadID, sumErr)
-					} else if newSum != "" {
-						summary = newSum
-						if err := db.SaveThreadSummary(p.cfg.DB, threadID, summary, latestMsgID); err != nil {
-							log.Printf("[WorkerPool] Warning: Failed to save thread summary to DB for thread %s: %v", threadID, err)
-						}
+				if sumErr != nil {
+					log.Printf("[WorkerPool] Warning: Thread history summarization failed for thread %s: %v. Falling back to raw lookback.", threadID, sumErr)
+				} else if newSum != "" {
+					summary = newSum
+					if err := db.SaveThreadSummary(p.cfg.DB, threadID, summary, latestMsgID); err != nil {
+						log.Printf("[WorkerPool] Warning: Failed to save thread summary to DB for thread %s: %v", threadID, err)
 					}
 				}
 			}
+		}
 
-			if summary != "" {
-				basePrompt = summary + "\n\n" + basePrompt
-				log.Printf("[WorkerPool] Injected <THREAD_SUMMARY> into Turn 1 prompt for thread %s", threadID)
+		if summary != "" {
+			basePrompt = summary + "\n\n" + basePrompt
+			log.Printf("[WorkerPool] Injected <THREAD_SUMMARY> into Turn 1 prompt for thread %s", threadID)
+		}
+	}
 
-				var lookbackMsgs []HistoryMessage
-				var err error
-				lookbackCtx, lookbackCancel := context.WithTimeout(p.ctx, 2500*time.Millisecond)
-				if p.cfg.HistoryFetcher != nil {
-					lookbackMsgs, err = p.cfg.HistoryFetcher(lookbackCtx, threadID, burst[0].ID, 10)
-				} else {
-					lookbackMsgs, err = FetchRecentThreadHistory(lookbackCtx, p.getDiscordSession(), p.cfg.DB, threadID, 10)
-				}
-				lookbackCancel()
-				if err == nil {
-					if formattedHist := FormatChannelHistory(lookbackMsgs); formattedHist != "" {
-						basePrompt = formattedHist + "\n\n" + basePrompt
-					}
-				}
-			} else {
-				var lookbackMsgs []HistoryMessage
-				var err error
-				fetchCtx, fetchCancel := context.WithTimeout(p.ctx, 2500*time.Millisecond)
-				if p.cfg.HistoryFetcher != nil {
-					lookbackMsgs, err = p.cfg.HistoryFetcher(fetchCtx, threadID, burst[0].ID, 10)
-				} else {
-					lookbackMsgs, err = FetchRecentThreadHistory(fetchCtx, p.getDiscordSession(), p.cfg.DB, threadID, 10)
-				}
-				fetchCancel()
-				if err != nil {
-					log.Printf("[WorkerPool] Warning: History fetch failed for thread %s: %v", threadID, err)
-				} else if formattedHist := FormatChannelHistory(lookbackMsgs); formattedHist != "" {
-					basePrompt = formattedHist + "\n\n" + basePrompt
-					log.Printf("[WorkerPool] Injected channel history into Turn 1 prompt for thread %s", threadID)
-				}
-			}
-		} else {
-			if p.cfg.HistoryFetcher != nil {
-				fetchCtx, fetchCancel := context.WithTimeout(p.ctx, 2500*time.Millisecond)
-				histMsgs, err := p.cfg.HistoryFetcher(fetchCtx, threadID, burst[0].ID, 10)
-				fetchCancel()
-				if err != nil {
-					log.Printf("[WorkerPool] Warning: History fetch failed for thread %s: %v", threadID, err)
-				} else if formattedHist := FormatChannelHistory(histMsgs); formattedHist != "" {
-					basePrompt = formattedHist + "\n\n" + basePrompt
-					log.Printf("[WorkerPool] Injected channel history into Turn 1 prompt for thread %s", threadID)
-				}
-			}
+	if hasHistoryNeed {
+		lookbackMsgs := getTurnHistory(10)
+		if formattedHist := FormatChannelHistory(lookbackMsgs); formattedHist != "" {
+			basePrompt = formattedHist + "\n\n" + basePrompt
+			log.Printf("[WorkerPool] Injected channel history into prompt for thread %s", threadID)
 		}
 	}
 	queryText := memory.ExtractQueryText(basePrompt)
