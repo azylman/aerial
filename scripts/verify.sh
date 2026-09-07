@@ -116,7 +116,7 @@ run_go_test() {
                 LC_ALL="${LC_ALL:-en_US.UTF-8}" \
                 GIT_TERMINAL_PROMPT=0 \
                 CGO_ENABLED="${CGO_ENABLED:-1}" \
-                go test -v -p 1 ./...)
+                go test -v ./...)
         elif has_cmd docker; then
             docker run --rm -v "$(pwd)/$svc:/app" -w /app \
                 -e CGO_ENABLED=1 \
@@ -127,7 +127,7 @@ run_go_test() {
                 CGO_ENABLED=1 \
                 LANG="en_US.UTF-8" \
                 LC_ALL="en_US.UTF-8" \
-                go test -v -p 1 ./...
+                go test -v ./...
         else
             echo "🚨 [Aerial Verify] Error: Neither go nor docker found in PATH." >&2
             exit 1
