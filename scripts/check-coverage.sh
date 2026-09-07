@@ -148,8 +148,33 @@ for svc in $ALL_GO_SERVICES; do
         safe_pkg=$(echo "$pkg" | tr '/.' '__')
         prof_file="${PROF_DIR}/${safe_pkg}.out"
 
-        # Execute go test with isolated coverprofile
-        (cd "$svc" && env -u DATABASE_URL go test -coverprofile="$prof_file" "$pkg" >/dev/null 2>&1) || true
+        # Execute go test with isolated coverprofile under clean environment
+        if ! (cd "$svc" && env -i \
+            ${PATH:+PATH="$PATH"} \
+            ${HOME:+HOME="$HOME"} \
+            ${GOROOT:+GOROOT="$GOROOT"} \
+            ${GOPATH:+GOPATH="$GOPATH"} \
+            ${GOCACHE:+GOCACHE="$GOCACHE"} \
+            ${TMPDIR:+TMPDIR="$TMPDIR"} \
+            ${SystemRoot:+SystemRoot="$SystemRoot"} \
+            ${SYSTEMROOT:+SYSTEMROOT="$SYSTEMROOT"} \
+            ${USERPROFILE:+USERPROFILE="$USERPROFILE"} \
+            ${HOMEDRIVE:+HOMEDRIVE="$HOMEDRIVE"} \
+            ${HOMEPATH:+HOMEPATH="$HOMEPATH"} \
+            ${TMP:+TMP="$TMP"} \
+            ${TEMP:+TEMP="$TEMP"} \
+            ${LOCALAPPDATA:+LOCALAPPDATA="$LOCALAPPDATA"} \
+            ${APPDATA:+APPDATA="$APPDATA"} \
+            ${COMSPEC:+COMSPEC="$COMSPEC"} \
+            ${PATHEXT:+PATHEXT="$PATHEXT"} \
+            MSYS_NO_PATHCONV=1 \
+            LANG="${LANG:-en_US.UTF-8}" \
+            LC_ALL="${LC_ALL:-en_US.UTF-8}" \
+            GIT_TERMINAL_PROMPT=0 \
+            CGO_ENABLED="${CGO_ENABLED:-1}" \
+            go test -coverprofile="$prof_file" "$pkg"); then
+            record_violation "Package $pkg tests failed during coverage collection"
+        fi
 
         pkg_tot=0
         pkg_cov=0

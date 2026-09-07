@@ -78,11 +78,43 @@ run_golangci_lint() {
 run_go_test() {
     svc="$1"
     if [ -d "$svc" ]; then
-        echo "   [go test] Testing $svc..."
+        echo "   [go test] Testing $svc (clean-room)..."
         if has_cmd go; then
-            (cd "$svc" && env -u DATABASE_URL go test -v -p 1 ./...)
+            (cd "$svc" && env -i \
+                ${PATH:+PATH="$PATH"} \
+                ${HOME:+HOME="$HOME"} \
+                ${GOROOT:+GOROOT="$GOROOT"} \
+                ${GOPATH:+GOPATH="$GOPATH"} \
+                ${GOCACHE:+GOCACHE="$GOCACHE"} \
+                ${TMPDIR:+TMPDIR="$TMPDIR"} \
+                ${SystemRoot:+SystemRoot="$SystemRoot"} \
+                ${SYSTEMROOT:+SYSTEMROOT="$SYSTEMROOT"} \
+                ${USERPROFILE:+USERPROFILE="$USERPROFILE"} \
+                ${HOMEDRIVE:+HOMEDRIVE="$HOMEDRIVE"} \
+                ${HOMEPATH:+HOMEPATH="$HOMEPATH"} \
+                ${TMP:+TMP="$TMP"} \
+                ${TEMP:+TEMP="$TEMP"} \
+                ${LOCALAPPDATA:+LOCALAPPDATA="$LOCALAPPDATA"} \
+                ${APPDATA:+APPDATA="$APPDATA"} \
+                ${COMSPEC:+COMSPEC="$COMSPEC"} \
+                ${PATHEXT:+PATHEXT="$PATHEXT"} \
+                MSYS_NO_PATHCONV=1 \
+                LANG="${LANG:-en_US.UTF-8}" \
+                LC_ALL="${LC_ALL:-en_US.UTF-8}" \
+                GIT_TERMINAL_PROMPT=0 \
+                CGO_ENABLED="${CGO_ENABLED:-1}" \
+                go test -v -p 1 ./...)
         elif has_cmd docker; then
-            docker run --rm -v "$(pwd)/$svc:/app" -w /app -e DATABASE_URL="" golang:1.24 go test -v -p 1 ./...
+            docker run --rm -v "$(pwd)/$svc:/app" -w /app \
+                -e CGO_ENABLED=1 \
+                golang:1.24 env -i \
+                PATH="/go/bin:/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+                HOME="/root" \
+                GOPATH="/go" \
+                CGO_ENABLED=1 \
+                LANG="en_US.UTF-8" \
+                LC_ALL="en_US.UTF-8" \
+                go test -v -p 1 ./...
         else
             echo "🚨 [Aerial Verify] Error: Neither go nor docker found in PATH." >&2
             exit 1

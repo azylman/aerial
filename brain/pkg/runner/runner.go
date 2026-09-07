@@ -242,7 +242,7 @@ func RunAgyWithWatchdog(parentCtx context.Context, agyBin, prompt, sessionID, ap
 		cmd.Dir = "."
 	}
 	cmd.Stdin = strings.NewReader("")
-	env := append(os.Environ(),
+	env := append(cmd.Environ(),
 		"GIT_TERMINAL_PROMPT=0",
 		"AGY_LOG_LEVEL=debug",
 		"ANTIGRAVITY_LOG_LEVEL=debug",

@@ -121,7 +121,7 @@ func EnsureRepo(ctx context.Context, repoPath, repoUrl, pat string) error {
 		args = append(args, "clone", cleanRepoUrl, repoPath)
 
 		cmdClone := exec.CommandContext(ctx, "git", args...)
-		cmdClone.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+		cmdClone.Env = append(cmdClone.Environ(), "GIT_TERMINAL_PROMPT=0")
 		outClone, err := cmdClone.CombinedOutput()
 		if err != nil {
 			sanitizedOut := SanitizeLog(strings.TrimSpace(string(outClone)))
@@ -158,13 +158,13 @@ func EnsureRepo(ctx context.Context, repoPath, repoUrl, pat string) error {
 	fetchArgs := append([]string{"-C", repoPath}, authArgs...)
 	fetchArgs = append(fetchArgs, "fetch", "origin", "main")
 	cmdFetch := exec.CommandContext(ctx, "git", fetchArgs...)
-	cmdFetch.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	cmdFetch.Env = append(cmdFetch.Environ(), "GIT_TERMINAL_PROMPT=0")
 	if outFetch, err := cmdFetch.CombinedOutput(); err != nil {
 		// Fallback: try fetching origin without branch specification
 		fetchArgsFallback := append([]string{"-C", repoPath}, authArgs...)
 		fetchArgsFallback = append(fetchArgsFallback, "fetch", "origin")
 		cmdFetchFB := exec.CommandContext(ctx, "git", fetchArgsFallback...)
-		cmdFetchFB.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+		cmdFetchFB.Env = append(cmdFetchFB.Environ(), "GIT_TERMINAL_PROMPT=0")
 		if outFB, errFB := cmdFetchFB.CombinedOutput(); errFB != nil {
 			return fmt.Errorf("git fetch failed for %s: %s", repoPath, SanitizeLog(strings.TrimSpace(string(outFB)+" "+string(outFetch))))
 		}
@@ -252,7 +252,7 @@ func SyncRepo(ctx context.Context, repoPath string, cfg *config.Config) (bool, e
 	pullArgs = append(pullArgs, "pull", "--ff-only")
 
 	cmdPull := exec.CommandContext(opCtx, "git", pullArgs...)
-	cmdPull.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	cmdPull.Env = append(cmdPull.Environ(), "GIT_TERMINAL_PROMPT=0")
 	outPull, err := cmdPull.CombinedOutput()
 	if err != nil {
 		sanitizedOut := SanitizeLog(strings.TrimSpace(string(outPull)))

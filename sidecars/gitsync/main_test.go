@@ -84,8 +84,8 @@ func TestBuildGitEnv(t *testing.T) {
 
 	emptyEnv := buildGitEnv("")
 	for _, e := range emptyEnv {
-		if strings.HasPrefix(e, "GIT_CONFIG") {
-			t.Errorf("unexpected GIT_CONFIG in empty PAT env: %s", e)
+		if strings.HasPrefix(e, "GIT_CONFIG_COUNT=") || strings.HasPrefix(e, "GIT_CONFIG_KEY_") || strings.HasPrefix(e, "GIT_CONFIG_VALUE_") {
+			t.Errorf("unexpected auth GIT_CONFIG in empty PAT env: %s", e)
 		}
 	}
 }

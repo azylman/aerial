@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -397,22 +396,6 @@ func (s *Scheduler) ExtractFactsLLM(ctx context.Context, prompt string) (string,
 
 // ExtractFactsLLM extracts facts using the primary LLM via runner.RunAgy (compatibility wrapper).
 func ExtractFactsLLM(ctx context.Context, prompt string) (string, error) {
-	agyBin := os.Getenv("AGY_BIN")
-	apiKey := os.Getenv("GEMINI_API_KEY")
-	model := os.Getenv("AGY_MODEL")
-	if agyBin != "" || apiKey != "" || model != "" {
-		data := config.DefaultConfigData()
-		if agyBin != "" {
-			data.AgyBin = agyBin
-		}
-		if apiKey != "" {
-			data.APIKey = apiKey
-		}
-		if model != "" {
-			data.Model = model
-		}
-		return New(config.NewFromData(data), nil, nil, nil).ExtractFactsLLM(ctx, prompt)
-	}
 	return New(nil, nil, nil, nil).ExtractFactsLLM(ctx, prompt)
 }
 
