@@ -201,6 +201,7 @@ type WorkerPoolConfig struct {
 	ResolveChannelPolicy func(channelID, channelName string) config.ChannelPolicy
 	HistoryFetcher       HistoryFetcherFunc
 	SystemAlertFunc      func(s *discordgo.Session, channelNameOrID, title, alertBody string) error
+	LLMFunc              LLMFunc
 }
 
 type threadWorkerState struct {
@@ -220,6 +221,7 @@ type WorkerPool struct {
 	cancel           context.CancelFunc
 	stopped          bool
 	quotaLockedUntil atomic.Int64
+	scopeLocks       sync.Map
 }
 
 // New creates a new WorkerPool with pure *config.Config dependency injection.
@@ -592,6 +594,7 @@ func (p *WorkerPool) runThreadWorker(threadID string, state *threadWorkerState) 
 			p.mu.Lock()
 			if len(state.ch) == 0 && state.activeEnqueuers == 0 {
 				delete(p.threadChs, threadID)
+				p.scopeLocks.Delete(threadID)
 				p.mu.Unlock()
 				return
 			}
@@ -745,6 +748,11 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 
 	threadID := burst[0].ThreadID
 	log.Printf("[WorkerPool] Processing burst of %d message(s) for thread %s", len(burst), threadID)
+
+	lockVal, _ := p.scopeLocks.LoadOrStore(threadID, &sync.Mutex{})
+	scopeLock := lockVal.(*sync.Mutex)
+	scopeLock.Lock()
+	defer scopeLock.Unlock()
 
 	triggerType := "discord"
 	if burst[0].ScheduleRunID != "" {
@@ -1094,13 +1102,11 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 
 		// wakeIdx >= 0
 		// Check session rotation timing before Phase 1:
-		if strings.ToLower(policy.Mode) == "channel" {
-			currentTurns, _ := db.GetSessionTurnCount(p.cfg.DB, threadID)
-			if currentTurns >= DefaultMaxSessionTurns || (wakeIdx > 0 && currentTurns+1 >= DefaultMaxSessionTurns) {
-				log.Printf("[Queue] Channel session reached turn limit (%d/%d). Resetting to cold state for fresh session initialization.", currentTurns, DefaultMaxSessionTurns)
-				_ = db.RotateSessionID(p.cfg.DB, threadID, "")
-				currentSessionID = ""
-			}
+		currentTurns, _ := db.GetSessionTurnCount(p.cfg.DB, threadID)
+		if currentTurns >= DefaultMaxSessionTurns || (wakeIdx > 0 && currentTurns+1 >= DefaultMaxSessionTurns) {
+			log.Printf("[Queue] Scope session reached turn limit (%d/%d). Resetting to cold state for fresh session initialization.", currentTurns, DefaultMaxSessionTurns)
+			_ = db.RotateSessionID(p.cfg.DB, threadID, "")
+			currentSessionID = ""
 		}
 
 		if currentSessionID == "" {
@@ -1226,29 +1232,155 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		}
 	}
 
-	// Format coalesced prompt
+	if strings.ToLower(policy.Mode) != "channel" {
+		var incErr error
+		turnCount, incErr = db.IncrementSessionTurnCount(p.cfg.DB, threadID)
+		if incErr != nil {
+			log.Printf("[Queue] Error incrementing turn count for thread %s: %v", threadID, incErr)
+		}
+	}
+
+	// Pre-execution turn limit rotation check (applies to both channel and thread modes)
+	currentTurns, _ := db.GetSessionTurnCount(p.cfg.DB, threadID)
+	if currentTurns >= DefaultMaxSessionTurns {
+		log.Printf("[Queue] Scope session reached turn limit (%d/%d). Resetting to cold state for fresh session initialization.", currentTurns, DefaultMaxSessionTurns)
+		_ = db.RotateSessionID(p.cfg.DB, threadID, "")
+		currentSessionID = ""
+	}
+
 	basePrompt := CoalesceBurstPrompt(burst)
-	if strings.ToLower(policy.Mode) == "channel" && currentSessionID == "" {
-		if p.cfg.HistoryFetcher != nil {
-			fetchCtx, fetchCancel := context.WithTimeout(p.ctx, 2500*time.Millisecond)
-			histMsgs, err := p.cfg.HistoryFetcher(fetchCtx, threadID, burst[0].ID, 10)
+	snap, _ := resolveChannelSnapshot(p.getDiscordSession(), threadID)
+	isThreadColdStart := snap.IsThread && snap.ParentID != "" && snap.ParentID != snap.ID && currentSessionID == ""
+
+	if currentSessionID == "" {
+		if isThreadColdStart {
+			var summary string
+			cachedSum, lastMsgID, _ := db.GetThreadSummary(p.cfg.DB, threadID)
+
+			fetchCtx, fetchCancel := context.WithTimeout(p.ctx, 3*time.Second)
+			var histMsgs []HistoryMessage
+			var fetchErr error
+			if p.cfg.HistoryFetcher != nil {
+				histMsgs, fetchErr = p.cfg.HistoryFetcher(fetchCtx, threadID, burst[0].ID, 100)
+			} else {
+				histMsgs, fetchErr = FetchRecentThreadHistory(fetchCtx, p.getDiscordSession(), p.cfg.DB, threadID, 100)
+			}
 			fetchCancel()
-			if err != nil {
-				log.Printf("[WorkerPool] Warning: History fetch failed for thread %s: %v", threadID, err)
-			} else if formattedHist := FormatChannelHistory(histMsgs); formattedHist != "" {
-				basePrompt = formattedHist + "\n\n" + basePrompt
-				log.Printf("[WorkerPool] Injected channel history into Turn 1 prompt for thread %s", threadID)
+
+			if fetchErr != nil {
+				log.Printf("[WorkerPool] Warning: Thread history fetch failed for thread %s: %v", threadID, fetchErr)
+			} else if len(histMsgs) > 0 {
+				var latestMsgID string
+				var maxTime time.Time
+				for _, m := range histMsgs {
+					if m.CreatedAt.After(maxTime) || latestMsgID == "" {
+						maxTime = m.CreatedAt
+						latestMsgID = m.ID
+					}
+				}
+
+				if cachedSum != "" && lastMsgID != "" && lastMsgID == latestMsgID {
+					summary = cachedSum
+					log.Printf("[WorkerPool] Using cached thread summary for thread %s (watermark msg: %s)", threadID, lastMsgID)
+				} else {
+					llmFn := p.cfg.LLMFunc
+					if llmFn == nil && p.cfg.Classifier != nil && p.cfg.Classifier.LLMFunc != nil {
+						llmFn = p.cfg.Classifier.LLMFunc
+					}
+					if llmFn == nil {
+						llmFn = classifier.NewAgyLLMFunc(p.cfg.AgyBin, p.cfg.APIKey, p.cfg.RunnerFunc)
+					}
+
+					flashModel := ""
+					if p.cfg.Classifier != nil && p.cfg.Classifier.Model != "" {
+						flashModel = p.cfg.Classifier.Model
+					}
+					if flashModel == "" && p.appCfg != nil && p.appCfg.Current() != nil {
+						flashModel = p.appCfg.Current().ClassifierModel
+					}
+					if flashModel == "" {
+						flashModel = p.cfg.Model
+					}
+
+					sumCtx, sumCancel := context.WithTimeout(p.ctx, 3*time.Second)
+					newSum, sumErr := SummarizeThreadHistory(sumCtx, llmFn, flashModel, threadID, histMsgs)
+					sumCancel()
+
+					if sumErr != nil {
+						log.Printf("[WorkerPool] Warning: Thread history summarization failed for thread %s: %v. Falling back to raw lookback.", threadID, sumErr)
+					} else if newSum != "" {
+						summary = newSum
+						if err := db.SaveThreadSummary(p.cfg.DB, threadID, summary, latestMsgID); err != nil {
+							log.Printf("[WorkerPool] Warning: Failed to save thread summary to DB for thread %s: %v", threadID, err)
+						}
+					}
+				}
+			}
+
+			if summary != "" {
+				basePrompt = summary + "\n\n" + basePrompt
+				log.Printf("[WorkerPool] Injected <THREAD_SUMMARY> into Turn 1 prompt for thread %s", threadID)
+
+				var lookbackMsgs []HistoryMessage
+				var err error
+				lookbackCtx, lookbackCancel := context.WithTimeout(p.ctx, 2500*time.Millisecond)
+				if p.cfg.HistoryFetcher != nil {
+					lookbackMsgs, err = p.cfg.HistoryFetcher(lookbackCtx, threadID, burst[0].ID, 10)
+				} else {
+					lookbackMsgs, err = FetchRecentThreadHistory(lookbackCtx, p.getDiscordSession(), p.cfg.DB, threadID, 10)
+				}
+				lookbackCancel()
+				if err == nil {
+					if formattedHist := FormatChannelHistory(lookbackMsgs); formattedHist != "" {
+						basePrompt = formattedHist + "\n\n" + basePrompt
+					}
+				}
+			} else {
+				var lookbackMsgs []HistoryMessage
+				var err error
+				fetchCtx, fetchCancel := context.WithTimeout(p.ctx, 2500*time.Millisecond)
+				if p.cfg.HistoryFetcher != nil {
+					lookbackMsgs, err = p.cfg.HistoryFetcher(fetchCtx, threadID, burst[0].ID, 10)
+				} else {
+					lookbackMsgs, err = FetchRecentThreadHistory(fetchCtx, p.getDiscordSession(), p.cfg.DB, threadID, 10)
+				}
+				fetchCancel()
+				if err != nil {
+					log.Printf("[WorkerPool] Warning: History fetch failed for thread %s: %v", threadID, err)
+				} else if formattedHist := FormatChannelHistory(lookbackMsgs); formattedHist != "" {
+					basePrompt = formattedHist + "\n\n" + basePrompt
+					log.Printf("[WorkerPool] Injected channel history into Turn 1 prompt for thread %s", threadID)
+				}
+			}
+		} else {
+			if p.cfg.HistoryFetcher != nil {
+				fetchCtx, fetchCancel := context.WithTimeout(p.ctx, 2500*time.Millisecond)
+				histMsgs, err := p.cfg.HistoryFetcher(fetchCtx, threadID, burst[0].ID, 10)
+				fetchCancel()
+				if err != nil {
+					log.Printf("[WorkerPool] Warning: History fetch failed for thread %s: %v", threadID, err)
+				} else if formattedHist := FormatChannelHistory(histMsgs); formattedHist != "" {
+					basePrompt = formattedHist + "\n\n" + basePrompt
+					log.Printf("[WorkerPool] Injected channel history into Turn 1 prompt for thread %s", threadID)
+				}
 			}
 		}
 	}
 	queryText := memory.ExtractQueryText(basePrompt)
 	if p.cfg.MemoryRetrieverFunc != nil && p.cfg.DB != nil && strings.TrimSpace(queryText) != "" {
+		maxFacts := 10
+		if isThreadColdStart {
+			maxFacts = 5
+		}
 		retrievalCtx, retrievalCancel := context.WithTimeout(p.ctx, 2500*time.Millisecond)
-		facts, err := p.cfg.MemoryRetrieverFunc(retrievalCtx, p.cfg.DB, p.cfg.MemoryClient, queryText, 10)
+		facts, err := p.cfg.MemoryRetrieverFunc(retrievalCtx, p.cfg.DB, p.cfg.MemoryClient, queryText, maxFacts)
 		retrievalCancel()
 		if err != nil {
 			log.Printf("[WorkerPool] Warning: Semantic memory retrieval failed for thread %s: %v. Proceeding without injected facts.", threadID, err)
 		} else if len(facts) > 0 {
+			if isThreadColdStart && len(facts) > 5 {
+				facts = facts[:5]
+			}
 			memoryBlock := memory.FormatMemoryContext(facts)
 			if memoryBlock != "" {
 				basePrompt = memoryBlock + "\n\n" + basePrompt
@@ -1358,6 +1490,16 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		if err != nil && errDetail == "" {
 			errDetail = err.Error()
 		}
+		
+		if isFailure && isTransient && currentSessionID == "" {
+			lowerErr := strings.ToLower(errDetail + " " + stderr + " " + stdout)
+			if strings.Contains(lowerErr, "429") || strings.Contains(lowerErr, "too many requests") || strings.Contains(lowerErr, "quota exceeded") {
+				isTransient = false
+				errDetail = "cold start 429 token limit exceeded (hard failure)"
+				log.Printf("[Queue] Overriding 429 to non-transient hard failure on cold start for thread %s", threadID)
+			}
+		}
+
 		lastErrDetail = errDetail
 		lastStderr = stderr
 
@@ -1540,13 +1682,24 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 			if parseErr != nil {
 				log.Printf("[Queue] Failed to parse runner output despite exit 0: %v", parseErr)
 				lastErrDetail = parseErr.Error()
+				isFailure = true
 			} else {
-				if resp.ConversationID != "" && resp.ConversationID != currentSessionID {
-					log.Printf("[Queue] Active session synchronized for thread %s: %s -> %s", threadID, currentSessionID, resp.ConversationID)
-					currentSessionID = resp.ConversationID
-					_ = db.SaveSessionID(p.cfg.DB, threadID, currentSessionID)
+				extSess := resp.ConversationID
+				if extSess == "" {
+					extSess = runner.ExtractSessionID(stderr, execStart)
 				}
-				stopTyping()
+				if currentSessionID == "" && (extSess == "" || !runner.IsValidUUID(extSess)) {
+					isFailure = true
+					isTransient = false
+					lastErrDetail = "failed to latch active session UUID on cold start"
+					log.Printf("[Queue] Defensive Failure: %s for thread %s", lastErrDetail, threadID)
+				} else {
+					if extSess != "" && extSess != currentSessionID {
+						log.Printf("[Queue] Active session synchronized for thread %s: %s -> %s", threadID, currentSessionID, extSess)
+						currentSessionID = extSess
+						_ = db.SaveSessionID(p.cfg.DB, threadID, currentSessionID)
+					}
+					stopTyping()
 
 				responseText := resp.Response
 				baseDir := "/root/.gemini/antigravity-cli/brain"
@@ -1572,8 +1725,8 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 					}
 				}
 
-				if strings.ToLower(policy.Mode) == "channel" && turnCount >= DefaultMaxSessionTurns {
-					log.Printf("[Queue] Channel session reached turn limit (%d/%d). Resetting to cold state for fresh session initialization.", turnCount, DefaultMaxSessionTurns)
+				if turnCount >= DefaultMaxSessionTurns {
+					log.Printf("[Queue] Scope session reached turn limit (%d/%d). Resetting to cold state for fresh session initialization.", turnCount, DefaultMaxSessionTurns)
 					_ = db.RotateSessionID(p.cfg.DB, threadID, "")
 					currentSessionID = ""
 				}
@@ -1599,6 +1752,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 
 				return
 			}
+		}
 		}
 
 		// If execution failed because the pool context was cancelled (SIGTERM/shutdown),

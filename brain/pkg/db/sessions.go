@@ -249,3 +249,45 @@ func GetInterruptedTurns(database DBTX) ([]ConversationTurnState, error) {
 	}
 	return results, nil
 }
+
+// SaveThreadSummary persists a thread summary and its last summarized message ID watermark in the sessions table.
+func SaveThreadSummary(database *sql.DB, threadID, summary, lastSummarizedMsgID string) error {
+	if database == nil || threadID == "" {
+		return nil
+	}
+	now := time.Now().UTC()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	query := `
+	INSERT INTO sessions (thread_id, summary, last_summarized_message_id, created_at, updated_at)
+	VALUES ($1, $2, $3, $4, $4)
+	ON CONFLICT(thread_id) DO UPDATE SET
+		summary = EXCLUDED.summary,
+		last_summarized_message_id = EXCLUDED.last_summarized_message_id,
+		updated_at = EXCLUDED.updated_at
+	`
+	_, err := database.ExecContext(ctx, query, threadID, summary, lastSummarizedMsgID, now)
+	return err
+}
+
+// GetThreadSummary retrieves the cached thread summary and last_summarized_message_id watermark for a thread.
+func GetThreadSummary(database *sql.DB, threadID string) (summary string, lastSummarizedMsgID string, err error) {
+	if database == nil || threadID == "" {
+		return "", "", nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var sum, lastMsgID sql.NullString
+	query := `SELECT summary, last_summarized_message_id FROM sessions WHERE thread_id = $1`
+	err = database.QueryRowContext(ctx, query, threadID).Scan(&sum, &lastMsgID)
+	if err == sql.ErrNoRows {
+		return "", "", nil
+	}
+	if err != nil {
+		return "", "", err
+	}
+	return sum.String, lastMsgID.String, nil
+}
+
