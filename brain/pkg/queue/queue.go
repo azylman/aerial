@@ -756,7 +756,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 	// 1. Claim messages from PENDING to PROCESSING
 	var claimedBurst []db.Message
 	for _, m := range burst {
-		claimed, claimErr := db.ClaimPendingMessage(p.cfg.DB, m.ID)
+		claimed, claimErr := p.cfg.Store.ClaimPendingMessage(p.ctx, m.ID)
 		if claimErr != nil {
 			log.Printf("[WorkerPool] Failed to claim message %s: %v", m.ID, claimErr)
 			continue
