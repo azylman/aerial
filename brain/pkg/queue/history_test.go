@@ -418,3 +418,164 @@ func TestDefaultHistoryFetcher_DiscordAPIErrorFallback(t *testing.T) {
 		t.Errorf("unexpected fallback message content: %+v", history[0])
 	}
 }
+
+func TestSummarizeThreadHistory_XMLValidation(t *testing.T) {
+	msgs := []HistoryMessage{
+		{
+			ID:         "msg-1",
+			AuthorName: "User1",
+			Role:       "User",
+			Content:    "Hello thread",
+			CreatedAt:  time.Now().UTC(),
+		},
+	}
+
+	tests := []struct {
+		name        string
+		mockOutput  string
+		expectError bool
+	}{
+		{
+			name:        "Valid XML",
+			mockOutput:  "<THREAD_SUMMARY>This is a valid summary.</THREAD_SUMMARY>",
+			expectError: false,
+		},
+		{
+			name:        "Missing closing tag",
+			mockOutput:  "<THREAD_SUMMARY>Missing closing tag",
+			expectError: true,
+		},
+		{
+			name:        "Missing opening tag",
+			mockOutput:  "Missing opening tag</THREAD_SUMMARY>",
+			expectError: true,
+		},
+		{
+			name:        "No tags",
+			mockOutput:  "Just some text without tags.",
+			expectError: true,
+		},
+		{
+			name:        "Malformed order",
+			mockOutput:  "</THREAD_SUMMARY><THREAD_SUMMARY>",
+			expectError: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mockLLM := func(ctx context.Context, model, prompt string) (string, error) {
+				return tc.mockOutput, nil
+			}
+			summary, err := SummarizeThreadHistory(context.Background(), mockLLM, "test-model", "thread-xml", msgs)
+			if tc.expectError {
+				if err == nil {
+					t.Fatalf("expected error for mock output %q, got none", tc.mockOutput)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if summary != tc.mockOutput {
+					t.Errorf("expected %q, got %q", tc.mockOutput, summary)
+				}
+			}
+		})
+	}
+}
+
+func TestSummarizeThreadHistory_TimeoutFallback(t *testing.T) {
+	msgs := []HistoryMessage{
+		{
+			ID:         "msg-1",
+			AuthorName: "User1",
+			Role:       "User",
+			Content:    "Hello thread",
+			CreatedAt:  time.Now().UTC(),
+		},
+	}
+
+	mockLLM := func(ctx context.Context, model, prompt string) (string, error) {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			return "", errors.New("expected deadline in context")
+		}
+		// Deadline should be ~3 seconds from now
+		if time.Until(deadline) > 3*time.Second || time.Until(deadline) < 2*time.Second {
+			return "", errors.New("deadline not set to 3 seconds")
+		}
+		return "", context.DeadlineExceeded
+	}
+
+	_, err := SummarizeThreadHistory(context.Background(), mockLLM, "test-model", "thread-timeout", msgs)
+	if !errors.Is(err, context.DeadlineExceeded) && err != context.DeadlineExceeded {
+		t.Fatalf("expected DeadlineExceeded error, got %v", err)
+	}
+}
+
+func TestSummarizeThreadHistory_Singleflight(t *testing.T) {
+	msgs := []HistoryMessage{
+		{
+			ID:         "msg-1",
+			AuthorName: "User1",
+			Role:       "User",
+			Content:    "Hello thread",
+			CreatedAt:  time.Now().UTC(),
+		},
+	}
+
+	var calls int
+	mockLLM := func(ctx context.Context, model, prompt string) (string, error) {
+		calls++
+		time.Sleep(100 * time.Millisecond)
+		return "<THREAD_SUMMARY>deduplicated summary</THREAD_SUMMARY>", nil
+	}
+
+	done := make(chan string, 3)
+	for i := 0; i < 3; i++ {
+		go func() {
+			summary, _ := SummarizeThreadHistory(context.Background(), mockLLM, "test-model", "thread-sf", msgs)
+			done <- summary
+		}()
+	}
+
+	for i := 0; i < 3; i++ {
+		res := <-done
+		if res != "<THREAD_SUMMARY>deduplicated summary</THREAD_SUMMARY>" {
+			t.Errorf("unexpected summary: %q", res)
+		}
+	}
+
+	if calls != 1 {
+		t.Errorf("expected 1 call to LLM, got %d", calls)
+	}
+}
+
+func TestFetchRecentThreadHistory_DBFirst(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	now := time.Now().UTC()
+	err = db.InsertMessage(database, db.Message{
+		ID:         "msg-db-thread-1",
+		ThreadID:   "111111111111111111",
+		AuthorID:   "user-1",
+		AuthorName: "Alice",
+		Content:    "DB Thread Message",
+		CreatedAt:  now,
+	})
+	if err != nil {
+		t.Fatalf("InsertMessage failed: %v", err)
+	}
+
+	history, err := FetchRecentThreadHistory(context.Background(), nil, database, "111111111111111111", 10)
+	if err != nil {
+		t.Fatalf("FetchRecentThreadHistory failed: %v", err)
+	}
+	if len(history) != 1 || history[0].Content != "DB Thread Message" {
+		t.Errorf("expected 1 message from DB, got %+v", history)
+	}
+}

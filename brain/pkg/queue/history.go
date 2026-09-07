@@ -13,6 +13,7 @@ import (
 	"github.com/azylman/aerial/brain/pkg/db"
 	"github.com/azylman/aerial/brain/pkg/metrics"
 	"github.com/bwmarrin/discordgo"
+	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -230,4 +231,132 @@ func fetchHistoryFromDB(database *sql.DB, channelID string, limit int) ([]Histor
 
 	metrics.RecordChannelHistoryFetch("database", "success", time.Since(start), len(results))
 	return results, nil
+}
+
+// FetchRecentThreadHistory retrieves up to 100 recent messages for a thread.
+// It queries the local SQLite `messages` table first, falling back to the Discord API.
+func FetchRecentThreadHistory(ctx context.Context, dg *discordgo.Session, database *sql.DB, threadID string, limit int) ([]HistoryMessage, error) {
+	start := time.Now()
+	
+	if limit <= 0 {
+		limit = 100
+	} else if limit > 100 {
+		limit = 100
+	}
+
+	// 1. Local DB First
+	msgs, err := fetchHistoryFromDB(database, threadID, limit)
+	if err == nil && len(msgs) > 0 {
+		return msgs, nil
+	}
+
+	// 2. Fallback to Discord API
+	if dg == nil || threadID == "" || !IsNumericSnowflake(threadID) {
+		return nil, fmt.Errorf("no database messages and discord fallback unavailable")
+	}
+
+	fetchCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+
+	discordMsgs, err := dg.ChannelMessages(threadID, limit, "", "", "", discordgo.WithContext(fetchCtx))
+	if err != nil {
+		metrics.RecordChannelHistoryFetch("discord_api_thread", "error", time.Since(start), 0)
+		return nil, err
+	}
+	
+	botUserID := ""
+	botUsername := "aerial"
+	if dg.State != nil && dg.State.User != nil {
+		botUserID = dg.State.User.ID
+		botUsername = dg.State.User.Username
+	}
+
+	results := make([]HistoryMessage, 0, len(discordMsgs))
+	for _, dm := range discordMsgs {
+		if dm == nil {
+			continue
+		}
+		role := "User"
+		authorName := "User"
+		if dm.Author != nil {
+			authorName = dm.Author.Username
+			if (botUserID != "" && dm.Author.ID == botUserID) || strings.EqualFold(dm.Author.Username, botUsername) || strings.EqualFold(dm.Author.Username, "aerial") {
+				role = "Assistant"
+			} else if dm.Author.Bot {
+				role = "Bot"
+			}
+		} else if dm.WebhookID != "" {
+			role = "Bot"
+			authorName = "Webhook"
+		}
+
+		createdAt := dm.Timestamp
+		if createdAt.IsZero() {
+			if ts, err := discordgo.SnowflakeTimestamp(dm.ID); err == nil {
+				createdAt = ts
+			} else {
+				createdAt = time.Now().UTC()
+			}
+		}
+
+		results = append(results, HistoryMessage{
+			ID:         dm.ID,
+			AuthorName: authorName,
+			Role:       role,
+			Content:    dm.Content,
+			CreatedAt:  createdAt,
+		})
+	}
+	
+	metrics.RecordChannelHistoryFetch("discord_api_thread", "success", time.Since(start), len(results))
+	return results, nil
+}
+
+// LLMFunc is a function that generates text from a model.
+type LLMFunc func(ctx context.Context, model, prompt string) (string, error)
+
+var threadSummaryGroup singleflight.Group
+
+// SummarizeThreadHistory uses the Flash model to summarize the provided thread history.
+// It is wrapped in a singleflight.Group keyed by threadID, and uses a 3.0s context timeout.
+func SummarizeThreadHistory(ctx context.Context, llm LLMFunc, model, threadID string, msgs []HistoryMessage) (string, error) {
+	if len(msgs) == 0 {
+		return "", fmt.Errorf("empty history")
+	}
+
+	v, err, _ := threadSummaryGroup.Do(threadID, func() (interface{}, error) {
+		timeoutCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		defer cancel()
+
+		transcript := FormatChannelHistory(msgs)
+		if transcript == "" {
+			return "", fmt.Errorf("no valid history to summarize")
+		}
+
+		prompt := fmt.Sprintf("Synthesize the following Discord thread transcript into a concise memory block. Focus specifically on:\n1. Technical & Architecture Decisions: Key invariants, design choices, and code changes agreed upon.\n2. Open Questions & Future Action Items: Pending decisions, TODOs, and topics likely to be referenced in future turns.\n3. User Directives & Constraints: Explicit instructions and preferences given by the user.\n\nYou must output exactly a <THREAD_SUMMARY> block containing your summary. Do not include extra text outside the tags.\n\n<raw_thread_transcript>\n%s\n</raw_thread_transcript>", transcript)
+
+		result, err := llm(timeoutCtx, model, prompt)
+		if err != nil {
+			return "", err
+		}
+
+		if !strings.Contains(result, "<THREAD_SUMMARY>") || !strings.Contains(result, "</THREAD_SUMMARY>") {
+			return "", fmt.Errorf("missing <THREAD_SUMMARY> structural tags in output")
+		}
+		
+		startIdx := strings.Index(result, "<THREAD_SUMMARY>")
+		endIdx := strings.Index(result, "</THREAD_SUMMARY>")
+		if startIdx > endIdx {
+			return "", fmt.Errorf("malformed <THREAD_SUMMARY> tags")
+		}
+		
+		summary := result[startIdx : endIdx+len("</THREAD_SUMMARY>")]
+		return summary, nil
+	})
+
+	if err != nil {
+		return "", err
+	}
+
+	return v.(string), nil
 }
