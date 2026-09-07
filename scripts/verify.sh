@@ -62,7 +62,11 @@ run_go_vet() {
         if has_cmd go; then
             (cd "$svc" && go vet ./...)
         elif has_cmd docker; then
-            docker run --rm -v "$(pwd)/$svc:/app" -w /app golang:1.24 go vet ./...
+            docker run --rm \
+                -v aerial-go-cache:/root/.cache/go-build \
+                -v aerial-go-pkg:/go/pkg/mod \
+                -v "$(pwd)/$svc:/app" -w /app \
+                golang:1.24 go vet ./...
         fi
     fi
 }
@@ -118,12 +122,16 @@ run_go_test() {
                 CGO_ENABLED="${CGO_ENABLED:-1}" \
                 go test -v ./...)
         elif has_cmd docker; then
-            docker run --rm -v "$(pwd)/$svc:/app" -w /app \
+            docker run --rm \
+                -v aerial-go-cache:/root/.cache/go-build \
+                -v aerial-go-pkg:/go/pkg/mod \
+                -v "$(pwd)/$svc:/app" -w /app \
                 -e CGO_ENABLED=1 \
                 golang:1.24 env -i \
                 PATH="/go/bin:/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
                 HOME="/root" \
                 GOPATH="/go" \
+                GOCACHE="/root/.cache/go-build" \
                 CGO_ENABLED=1 \
                 LANG="en_US.UTF-8" \
                 LC_ALL="en_US.UTF-8" \
@@ -187,6 +195,7 @@ if [ "$MODE" = "staged" ]; then
     for svc in $GO_SERVICES; do
         if echo "$STAGED_FILES" | grep -q "^$svc/"; then
             run_go_vet "$svc"
+            run_go_test "$svc"
         fi
     done
 
