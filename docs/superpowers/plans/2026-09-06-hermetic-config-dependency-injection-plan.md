@@ -4,7 +4,7 @@
 
 **Goal:** Establish hermetic configuration parsing and pure `*config.Config` pointer constructor dependency injection across the Aerial monorepo, permanently eliminating ambient environment leakage, fragile `env -u` denylists, backdoor getters, and toxic postgres fallback traps.
 
-**Architecture:** Consolidate all environment variable and config-file parsing into `brain/pkg/config`. Every package other than `config` (`pkg/db`, `pkg/memory`, `pkg/queue`, `pkg/runner`, `pkg/scheduler`, `pkg/sanitizer`, `pkg/gitsync`, `pkg/session`, `pkg/skills`, `pkg/watcher`) must receive a pointer to `*config.Config` in its constructor, and that pointer is their **sole mechanism** for accessing configuration and their **only interaction** with `pkg/config`. No subpackage may ever call `os.Getenv`, `config.GetEnv`, `LoadDefaultConfig`, or package-level getters. Hot reload is handled atomically inside `config.Config` via internal read-write locking (`Update()` / `Reload()`), so all components holding `*config.Config` observe live updates safely and immediately without manual cross-package setters. Tests instantiate `&config.Config{ DatabaseURL: ":memory:", ... }` directly with zero environment variable manipulation.
+**Architecture:** Consolidate all environment variable and config-file parsing into `brain/pkg/config`. `config.Config` wraps an `atomic.Pointer[ConfigData]`, where `ConfigData` is a dumb data struct with **zero methods and zero field accessors**. Every package other than `config` (`pkg/db`, `pkg/memory`, `pkg/queue`, `pkg/runner`, `pkg/scheduler`, `pkg/sanitizer`, `pkg/gitsync`, `pkg/session`, `pkg/skills`, `pkg/watcher`) receives `*config.Config` in its constructor. Subpackages call `c := cfg.Current()` to obtain an immutable snapshot and read pure fields directly (`c.Model`, `c.Timezone`, `c.DatabaseURL`). No subpackage may ever call `os.Getenv`, `config.GetEnv`, `LoadDefaultConfig`, or package-level getters. Hot reload performs a lock-free atomic pointer swap `activeCfg.Update(freshData)`, so all components holding `*config.Config` observe live updates safely and immediately without manual cross-package setters. Tests instantiate `config.NewTestConfig(&config.ConfigData{ DatabaseURL: ":memory:", ... })` directly with zero environment variable manipulation.
 
 **Tech Stack:** Go 1.24, modernc.org/sqlite, jackc/pgx/v5, gopkg.in/yaml.v3, POSIX sh test harness.
 
@@ -13,12 +13,12 @@
 ## Global Constraints
 
 - Universal constructor injection: Every package other than `config` must receive `cfg *config.Config` in its constructor.
-- Single access path: Reading from `cfg *config.Config` is the ONLY interaction subpackages have with `config`.
+- Zero field accessors: `ConfigData` has zero methods and zero getters. Subpackages call `cfg.Current()` and read raw fields.
 - Zero `os.Getenv` or `os.LookupEnv` in `brain/pkg/db`, `brain/pkg/memory`, `brain/pkg/gitsync`, `brain/pkg/sanitizer`, `brain/pkg/queue`, `brain/pkg/runner`, `brain/pkg/scheduler`, `brain/pkg/session`, or `brain/pkg/watcher`.
 - `config.GetEnv` is deleted and unexported (`getEnv` private to `brain/pkg/config`).
-- `config.Config` manages thread-safe atomic hot-reloads via `mu sync.RWMutex`, `Update(newCfg)`, and `Reload(activeCfg)`.
+- `config.Config` manages thread-safe atomic hot-reloads via `atomic.Pointer[ConfigData]`, `Update(fresh)`, and `Reload(activeCfg)`.
 - `TEST_DATABASE_URL` is completely excised from all code, tests, scripts, and workflows.
-- `DefaultConfig()` and `buildPostgresDSNFromEnv()` must never default to hostname `postgres:5432` when `POSTGRES_HOST` is unset.
+- `DefaultConfigData()` and `buildPostgresDSNFromEnv()` must never default to hostname `postgres:5432` when `POSTGRES_HOST` is unset.
 - Unit tests must never call `os.Getenv` or `t.Setenv` for infrastructure/credentials. (Only `config_test.go` and `dashboard/main_test.go` retain scoped `t.Setenv` to test config file/env fallback parsing).
 - Constructors strictly validate required parameters: `db.InitDB(cfg)` returns error if `cfg == nil` or connection string is empty. Unrecognized URL schemes return errors instead of silently falling through to SQLite.
 - All Go test suites must compile and pass under clean-room execution at every commit.
@@ -26,7 +26,7 @@
 
 ---
 
-### Task 1: Refactor `brain/pkg/config` for Universal `*Config` Injection & Atomic Hot Reload
+### Task 1: Refactor `brain/pkg/config` for `cfg.Current()` Atomic Snapshot & Zero Accessors
 
 **Files:**
 - Modify: `brain/pkg/config/config.go`
@@ -34,14 +34,14 @@
 
 **Interfaces:**
 - Consumes: Environment variables (`DATABASE_URL`, `POSTGRES_*`, `PORT`, `AGY_BIN`, `GEMINI_API_KEY`, `ANTIGRAVITY_API_KEY`, `SYSTEM_PROMPT`, `DISCORD_TOKEN`, `DISCORD_BOT_TOKEN`, `GITHUB_PAT`, `OLLAMA_URL`, `EMBEDDING_MODEL`, `OLLAMA_EMBEDDING_MODEL`, `EMBEDDING_QUERY_PREFIX`, `CLASSIFIER_MODEL`, `AMBIENT_CLASSIFIER_MODEL`).
-- Produces: `*config.Config` with embedded `sync.RWMutex`, thread-safe accessors (`GetModel()`, `GetTimezone()`, `GetSystemChannel()`, `GetDatabaseURL()`, `GetPort()`, `GetAgyBin()`, `GetAPIKey()`, `GetSystemPrompt()`, `GetDiscordToken()`, `GetGitHubPAT()`, `GetClassifierModel()`, `GetOllama()`, `GetGitSync()`, `GetMcpServers()`, `ResolveChannelPolicy()`, `IsAdmin()`), `Update(newCfg *Config)`, `Reload(activeCfg *Config)`. Unexports `getEnv` and deletes `config.GetEnv`.
+- Produces: `ConfigData` (pure dumb struct, 0 methods), `Config` wrapping `atomic.Pointer[ConfigData]`, `cfg.Current() *ConfigData`, `cfg.Update(fresh *ConfigData)`, `config.NewTestConfig(data *ConfigData) *Config`, `Reload(activeCfg *Config) error`. Unexports `getEnv` and deletes `config.GetEnv`.
 
 - [ ] **Step 1: Write the failing test**
 
 Add concurrency and atomic update tests to `brain/pkg/config/config_test.go`:
 ```go
-func TestConfig_AtomicUpdateAndAccessors(t *testing.T) {
-	cfg := &Config{
+func TestConfig_AtomicSnapshotAndRawFields(t *testing.T) {
+	data := &ConfigData{
 		Model:         "initial-model",
 		Timezone:      "America/Los_Angeles",
 		SystemChannel: "initial-alerts",
@@ -59,45 +59,48 @@ func TestConfig_AtomicUpdateAndAccessors(t *testing.T) {
 			QueryPrefix: "search_query: ",
 		},
 	}
+	cfg := NewTestConfig(data)
 
-	if cfg.GetModel() != "initial-model" {
-		t.Errorf("expected GetModel 'initial-model', got %q", cfg.GetModel())
+	c := cfg.Current()
+	if c.Model != "initial-model" {
+		t.Errorf("expected Model 'initial-model', got %q", c.Model)
 	}
-	if cfg.GetTimezone() != "America/Los_Angeles" {
-		t.Errorf("expected GetTimezone 'America/Los_Angeles', got %q", cfg.GetTimezone())
+	if c.Timezone != "America/Los_Angeles" {
+		t.Errorf("expected Timezone 'America/Los_Angeles', got %q", c.Timezone)
 	}
-	if cfg.GetDatabaseURL() != ":memory:" {
-		t.Errorf("expected GetDatabaseURL ':memory:', got %q", cfg.GetDatabaseURL())
+	if c.DatabaseURL != ":memory:" {
+		t.Errorf("expected DatabaseURL ':memory:', got %q", c.DatabaseURL)
 	}
 
-	// Test concurrent atomic update
+	// Test concurrent atomic pointer swap
 	var wg sync.WaitGroup
 	for i := 0; i < 50; i++ {
 		wg.Add(1)
-		go func(idx int) {
+		go func() {
 			defer wg.Done()
-			_ = cfg.GetModel()
-			_ = cfg.GetTimezone()
-			_ = cfg.GetSystemChannel()
-			_ = cfg.GetDatabaseURL()
-			_ = cfg.GetOllama()
-		}(i)
+			cur := cfg.Current()
+			_ = cur.Model
+			_ = cur.Timezone
+			_ = cur.SystemChannel
+			_ = cur.DatabaseURL
+		}()
 	}
 
-	updateCfg := &Config{
+	updateData := &ConfigData{
 		Model:         "updated-model",
 		Timezone:      "America/Chicago",
 		SystemChannel: "updated-alerts",
 		DatabaseURL:   "sqlite://test.db",
 	}
-	cfg.Update(updateCfg)
+	cfg.Update(updateData)
 	wg.Wait()
 
-	if cfg.GetModel() != "updated-model" {
-		t.Errorf("expected updated model, got %q", cfg.GetModel())
+	finalCur := cfg.Current()
+	if finalCur.Model != "updated-model" {
+		t.Errorf("expected updated model, got %q", finalCur.Model)
 	}
-	if cfg.GetTimezone() != "America/Chicago" {
-		t.Errorf("expected updated timezone, got %q", cfg.GetTimezone())
+	if finalCur.Timezone != "America/Chicago" {
+		t.Errorf("expected updated timezone, got %q", finalCur.Timezone)
 	}
 }
 
@@ -113,19 +116,65 @@ func TestConfig_PostgresHostUnset_ReturnsEmptyDSN(t *testing.T) {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `go test -v -run "TestConfig_AtomicUpdateAndAccessors|TestConfig_PostgresHostUnset_ReturnsEmptyDSN" ./brain/pkg/config`
-Expected: FAIL due to missing fields/accessors.
+Run: `go test -v -run "TestConfig_AtomicSnapshotAndRawFields|TestConfig_PostgresHostUnset_ReturnsEmptyDSN" ./brain/pkg/config`
+Expected: FAIL due to undefined `ConfigData`.
 
-- [ ] **Step 3: Implement atomic accessors, `Update()`, `Reload()`, and safe defaults**
+- [ ] **Step 3: Implement `ConfigData`, `Config`, `Current()`, `Update()`, and safe defaults**
 
 In `brain/pkg/config/config.go`:
-1. Embed `mu sync.RWMutex` in `Config` struct.
-2. Add infrastructure fields: `DatabaseURL`, `Port`, `AgyBin`, `APIKey`, `SystemPrompt`, `DiscordToken`, `GitHubPAT`, `Ollama OllamaConfig`, `ClassifierModel`.
-3. Add accessors: `GetModel()`, `GetTimezone()`, `GetSystemChannel()`, `GetDatabaseURL()`, `GetPort()`, `GetAgyBin()`, `GetAPIKey()`, `GetSystemPrompt()`, `GetDiscordToken()`, `GetGitHubPAT()`, `GetClassifierModel()`, `GetOllama()`, `GetGitSync()`, `GetMcpServers()`.
-4. Implement `cfg.Update(newCfg *Config)` and `Reload(activeCfg *Config) error`.
-5. Update `buildPostgresDSNFromEnv()`: if `POSTGRES_HOST` is unset and `DATABASE_URL` is unset, return `""` (never `postgres:5432`).
-6. Unexport `getEnv(key, defaultVal string) string`. Delete `config.GetEnv`.
-7. In `LoadConfigFromPaths`: return `(*Config, error)`.
+1. Define `ConfigData` as dumb data struct without methods:
+```go
+type ConfigData struct {
+	Model           string                     `yaml:"model" json:"model"`
+	Timezone        string                     `yaml:"timezone" json:"timezone"`
+	SystemChannel   string                     `yaml:"system_channel" json:"system_channel"`
+	AdminUsers      []string                   `yaml:"admin_users" json:"admin_users"`
+	Channels        map[string]ChannelPolicy   `yaml:"channels" json:"channels"`
+	GitSync         GitSyncConfig              `yaml:"git_sync" json:"git_sync"`
+	McpServers      map[string]json.RawMessage `yaml:"mcp_servers,omitempty" json:"mcp_servers,omitempty"`
+	DatabaseURL     string                     `yaml:"database_url" json:"database_url"`
+	Port            string                     `yaml:"port" json:"port"`
+	AgyBin          string                     `yaml:"agy_bin" json:"agy_bin"`
+	APIKey          string                     `yaml:"api_key" json:"api_key"`
+	SystemPrompt    string                     `yaml:"system_prompt" json:"system_prompt"`
+	DiscordToken    string                     `yaml:"discord_token" json:"discord_token"`
+	GitHubPAT       string                     `yaml:"github_pat" json:"github_pat"`
+	Ollama          OllamaConfig               `yaml:"ollama" json:"ollama"`
+	ClassifierModel string                     `yaml:"classifier_model" json:"classifier_model"`
+}
+
+type Config struct {
+	current atomic.Pointer[ConfigData]
+}
+
+func NewTestConfig(data *ConfigData) *Config {
+	c := &Config{}
+	c.current.Store(data)
+	return c
+}
+
+func (c *Config) Current() *ConfigData {
+	return c.current.Load()
+}
+
+func (c *Config) Update(fresh *ConfigData) {
+	c.current.Store(fresh)
+}
+```
+2. Implement `Reload(activeCfg *Config) error`:
+```go
+func Reload(activeCfg *Config) error {
+	freshCfg, err := LoadConfig()
+	if err != nil {
+		return err
+	}
+	activeCfg.Update(freshCfg.Current())
+	return nil
+}
+```
+3. Update `buildPostgresDSNFromEnv()`: if `POSTGRES_HOST` is unset and `DATABASE_URL` is unset, return `""` (never `postgres:5432`).
+4. Unexport `getEnv(key, defaultVal string) string`. Delete `config.GetEnv`.
+5. Update `LoadConfig()` to return `(*Config, error)`.
 
 - [ ] **Step 4: Run tests and race detector to verify it passes**
 
@@ -136,7 +185,7 @@ Expected: PASS with 0 race warnings.
 
 ```bash
 git add brain/pkg/config/
-git commit -m "feat(config): implement thread-safe *Config, atomic hot-reload, and safe postgres defaults"
+git commit -m "feat(config): implement atomic snapshot Config with zero-accessor ConfigData"
 ```
 
 ---
@@ -149,7 +198,7 @@ git commit -m "feat(config): implement thread-safe *Config, atomic hot-reload, a
 - Modify: `brain/pkg/db/schedules_test.go`
 
 **Interfaces:**
-- Consumes: `cfg *config.Config`.
+- Consumes: `cfg *config.Config`. Reads `c := cfg.Current(); c.DatabaseURL`.
 - Produces: `InitDB(cfg *config.Config) (*sql.DB, error)`. Deletes `GetDBPath()`.
 
 - [ ] **Step 1: Write the failing test**
@@ -163,20 +212,20 @@ func TestInitDB_ConfigPointerInjection(t *testing.T) {
 	}
 
 	// 2. Empty connection string rejected
-	cfgEmpty := &config.Config{}
+	cfgEmpty := config.NewTestConfig(&config.ConfigData{})
 	if _, err := InitDB(cfgEmpty); err == nil {
 		t.Errorf("expected error for empty connection string, got nil")
 	}
 
 	// 3. Unsupported scheme rejected
-	cfgInvalid := &config.Config{DatabaseURL: "mysql://user:pass@localhost/db"}
+	cfgInvalid := config.NewTestConfig(&config.ConfigData{DatabaseURL: "mysql://user:pass@localhost/db"})
 	if _, err := InitDB(cfgInvalid); err == nil {
 		t.Errorf("expected error for unsupported scheme, got nil")
 	}
 
 	// 4. Valid SQLite temp db succeeds
 	tmpFile := filepath.Join(t.TempDir(), "test.db")
-	cfgValid := &config.Config{DatabaseURL: tmpFile}
+	cfgValid := config.NewTestConfig(&config.ConfigData{DatabaseURL: tmpFile})
 	database, err := InitDB(cfgValid)
 	if err != nil {
 		t.Fatalf("expected valid sqlite initialization, got: %v", err)
@@ -199,7 +248,11 @@ func InitDB(cfg *config.Config) (*sql.DB, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("db: config cannot be nil")
 	}
-	trimmed := strings.TrimSpace(cfg.GetDatabaseURL())
+	cur := cfg.Current()
+	if cur == nil {
+		return nil, fmt.Errorf("db: config snapshot is nil")
+	}
+	trimmed := strings.TrimSpace(cur.DatabaseURL)
 	if trimmed == "" {
 		return nil, fmt.Errorf("db: connection string cannot be empty")
 	}
@@ -227,7 +280,7 @@ func InitDB(cfg *config.Config) (*sql.DB, error) {
 ```
 2. Delete `GetDBPath()` function completely.
 3. In `db_test.go` and `schedules_test.go`:
-   - Replace all `InitDB(path)` calls with `InitDB(&config.Config{DatabaseURL: path})`.
+   - Replace all `InitDB(path)` calls with `InitDB(config.NewTestConfig(&config.ConfigData{DatabaseURL: path}))`.
    - Remove `os.Getenv("TEST_DATABASE_URL")`.
    - Delete `TestGetDBPath_Precedence` and `TestDBPath`.
 
@@ -252,7 +305,7 @@ git commit -m "refactor(db): require *config.Config in InitDB and delete GetDBPa
 - Modify: `brain/pkg/memory/memory_test.go`
 
 **Interfaces:**
-- Consumes: `cfg *config.Config`.
+- Consumes: `cfg *config.Config`. Reads `c := client.cfg.Current(); c.Ollama`.
 - Produces: `NewClient(cfg *config.Config) *Client`. Client holds `cfg *config.Config`.
 
 - [ ] **Step 1: Write the failing test**
@@ -260,13 +313,13 @@ git commit -m "refactor(db): require *config.Config in InitDB and delete GetDBPa
 In `brain/pkg/memory/memory_test.go`:
 ```go
 func TestNewClient_ConfigPointerInjection(t *testing.T) {
-	cfg := &config.Config{
+	cfg := config.NewTestConfig(&config.ConfigData{
 		Ollama: config.OllamaConfig{
 			BaseURL:     "http://localhost:11434",
 			Model:       "nomic-embed-text",
 			QueryPrefix: "search_query: ",
 		},
-	}
+	})
 	client := NewClient(cfg)
 	if client == nil {
 		t.Fatalf("expected non-nil client")
@@ -299,13 +352,13 @@ func NewClient(cfg *config.Config) *Client {
 	}
 }
 ```
-2. In embedding functions, read settings from `c.cfg.GetOllama()`:
-   - `baseURL := c.cfg.GetOllama().BaseURL`
-   - `model := c.cfg.GetOllama().Model`
-   - `prefix := c.cfg.GetOllama().QueryPrefix`
+2. In embedding functions, read settings from `c.cfg.Current().Ollama`:
+   - `baseURL := c.cfg.Current().Ollama.BaseURL`
+   - `model := c.cfg.Current().Ollama.Model`
+   - `prefix := c.cfg.Current().Ollama.QueryPrefix`
 3. Delete all calls to `os.Getenv` in `ollama.go` (lines 30, 64, 69, 71).
 4. In `memory_test.go`:
-   - Update tests to construct `&config.Config{ Ollama: config.OllamaConfig{ BaseURL: s.URL, ... } }`.
+   - Update tests to construct `config.NewTestConfig(&config.ConfigData{ Ollama: ... })`.
    - Remove `os.Getenv("TEST_DATABASE_URL")`.
 
 - [ ] **Step 4: Run tests to verify it passes**
@@ -329,7 +382,7 @@ git commit -m "refactor(memory): require *config.Config in NewClient and remove 
 - Modify: `brain/pkg/sanitizer/sanitizer_test.go`
 
 **Interfaces:**
-- Consumes: `cfg *config.Config`.
+- Consumes: `cfg *config.Config`. Reads `c := cfg.Current(); c.APIKey, c.DiscordToken, c.GitHubPAT`.
 - Produces: `RegisterConfigTokens(cfg *config.Config)` and `ResetSensitiveTokens()`. Removes automatic `os.Environ()` scan.
 
 - [ ] **Step 1: Write the failing test**
@@ -338,11 +391,11 @@ In `brain/pkg/sanitizer/sanitizer_test.go`:
 ```go
 func TestSanitizer_RegisterConfigTokens(t *testing.T) {
 	ResetSensitiveTokens()
-	cfg := &config.Config{
+	cfg := config.NewTestConfig(&config.ConfigData{
 		APIKey:       "gemini_secret_api_key_12345",
 		DiscordToken: "discord_token_secret_abcdef",
 		GitHubPAT:    "ghp_testpersonalaccesstoken123456",
-	}
+	})
 	RegisterConfigTokens(cfg)
 
 	input := "Error calling Gemini with key gemini_secret_api_key_12345 and token discord_token_secret_abcdef"
@@ -367,16 +420,17 @@ In `brain/pkg/sanitizer/sanitizer.go`:
 1. Implement `RegisterConfigTokens(cfg *config.Config)`:
 ```go
 func RegisterConfigTokens(cfg *config.Config) {
-	if cfg == nil {
+	if cfg == nil || cfg.Current() == nil {
 		return
 	}
+	cur := cfg.Current()
 	envMu.Lock()
 	defer envMu.Unlock()
 
 	tokens := []string{
-		cfg.GetAPIKey(),
-		cfg.GetDiscordToken(),
-		cfg.GetGitHubPAT(),
+		cur.APIKey,
+		cur.DiscordToken,
+		cur.GitHubPAT,
 	}
 	for _, tok := range tokens {
 		trimmed := strings.TrimSpace(tok)
@@ -418,7 +472,7 @@ git commit -m "refactor(sanitizer): add RegisterConfigTokens(*config.Config) and
 - Modify: `brain/pkg/gitsync/gitsync_test.go`
 
 **Interfaces:**
-- Consumes: `cfg *config.Config`.
+- Consumes: `cfg *config.Config`. Reads `c := cfg.Current(); c.GitHubPAT`.
 - Produces: `SyncRepo(ctx context.Context, repoPath string, cfg *config.Config) (bool, error)`.
 
 - [ ] **Step 1: Write the failing test**
@@ -426,10 +480,9 @@ git commit -m "refactor(sanitizer): add RegisterConfigTokens(*config.Config) and
 In `brain/pkg/gitsync/gitsync_test.go`:
 ```go
 func TestSyncRepo_ConfigPointerInjection(t *testing.T) {
-	cfg := &config.Config{
+	cfg := config.NewTestConfig(&config.ConfigData{
 		GitHubPAT: "ghp_mock_token_for_test",
-	}
-	// Verify signature compiles with *config.Config
+	})
 	ctx := context.Background()
 	_, _ = SyncRepo(ctx, t.TempDir(), cfg)
 }
@@ -447,15 +500,15 @@ In `brain/pkg/gitsync/gitsync.go`:
 ```go
 func SyncRepo(ctx context.Context, repoPath string, cfg *config.Config) (bool, error) {
 	var pat string
-	if cfg != nil {
-		pat = cfg.GetGitHubPAT()
+	if cfg != nil && cfg.Current() != nil {
+		pat = cfg.Current().GitHubPAT
 	}
 	// use pat in git credentials
 	...
 }
 ```
 2. Delete `os.Getenv("GITHUB_PAT")`.
-3. Update tests in `gitsync_test.go` to pass `&config.Config{ GitHubPAT: ... }`.
+3. Update tests in `gitsync_test.go` to pass `config.NewTestConfig(&config.ConfigData{ GitHubPAT: ... })`.
 
 - [ ] **Step 4: Run tests to verify it passes**
 
@@ -479,35 +532,35 @@ git commit -m "refactor(gitsync): require *config.Config in SyncRepo and remove 
 
 **Interfaces:**
 - Consumes: `cfg *config.Config`.
-- Produces: `WorkerPoolConfig{ Config: cfg, DB: db, ... }`. `WorkerPool` reads model, prompts, system channel, and channel policy from `p.cfg`.
+- Produces: `WorkerPoolConfig{ Config: cfg, DB: db, ... }`. `WorkerPool` reads `c := p.cfg.Current(); c.Model`, etc.
 
 - [ ] **Step 1: Write the failing test**
 
 In `brain/pkg/queue/queue_test.go`:
 ```go
 func TestWorkerPool_DynamicConfigObservation(t *testing.T) {
-	cfg := &config.Config{
+	cfg := config.NewTestConfig(&config.ConfigData{
 		Model:         "initial-model",
 		SystemChannel: "initial-alerts",
 		Channels: map[string]config.ChannelPolicy{
 			"default": {Mode: "threads"},
 		},
-	}
+	})
 	pool := NewWorkerPool(WorkerPoolConfig{
 		Config: cfg,
 	})
-	if pool.cfg.GetModel() != "initial-model" {
-		t.Errorf("expected initial model, got %q", pool.cfg.GetModel())
+	if pool.cfg.Current().Model != "initial-model" {
+		t.Errorf("expected initial model, got %q", pool.cfg.Current().Model)
 	}
 
 	// Mutate config atomically
-	cfg.Update(&config.Config{
+	cfg.Update(&config.ConfigData{
 		Model: "hot-reloaded-model",
 	})
 
 	// WorkerPool immediately observes updated model without manual setter
-	if pool.cfg.GetModel() != "hot-reloaded-model" {
-		t.Errorf("expected hot-reloaded model, got %q", pool.cfg.GetModel())
+	if pool.cfg.Current().Model != "hot-reloaded-model" {
+		t.Errorf("expected hot-reloaded model, got %q", pool.cfg.Current().Model)
 	}
 }
 ```
@@ -523,15 +576,16 @@ In `brain/pkg/queue/queue.go`:
 1. Add `Config *config.Config` to `WorkerPoolConfig`.
 2. In `NewWorkerPool`: store `p.cfg = cfg.Config`.
 3. In `processBurst`:
-   - Replace direct model access with `p.cfg.GetModel()`.
-   - Replace direct AgyBin access with `p.cfg.GetAgyBin()`.
-   - Replace direct APIKey access with `p.cfg.GetAPIKey()`.
-   - Replace direct SystemPrompt access with `p.cfg.GetSystemPrompt()`.
-   - Replace policy resolution with `p.cfg.ResolveChannelPolicy(...)`.
-   - Replace system alert channel with `p.cfg.GetSystemChannel()`.
+   - `cur := p.cfg.Current()`
+   - Replace direct model access with `cur.Model`.
+   - Replace direct AgyBin access with `cur.AgyBin`.
+   - Replace direct APIKey access with `cur.APIKey`.
+   - Replace direct SystemPrompt access with `cur.SystemPrompt`.
+   - Replace policy resolution with `cur.Channels[channelID]`.
+   - Replace system alert channel with `cur.SystemChannel`.
 4. In `queue_test.go`:
-   - Update tests to construct `WorkerPoolConfig{ Config: &config.Config{ ... }, DB: db, ... }`.
-   - Replace `config.GetSystemChannel()` assertions with `cfg.GetSystemChannel()`.
+   - Update tests to construct `WorkerPoolConfig{ Config: config.NewTestConfig(&config.ConfigData{ ... }), DB: db, ... }`.
+   - Replace `config.GetSystemChannel()` assertions with `cfg.Current().SystemChannel`.
 
 - [ ] **Step 4: Run tests to verify it passes**
 
@@ -542,7 +596,7 @@ Expected: PASS.
 
 ```bash
 git add brain/pkg/queue/
-git commit -m "refactor(queue): inject *config.Config into WorkerPool and read config dynamically"
+git commit -m "refactor(queue): inject *config.Config into WorkerPool and read config via cfg.Current()"
 ```
 
 ---
@@ -555,17 +609,17 @@ git commit -m "refactor(queue): inject *config.Config into WorkerPool and read c
 
 **Interfaces:**
 - Consumes: `cfg *config.Config`.
-- Produces: `scheduler.Start(ctx, database, pool, dgSession, memClient, cfg *config.Config) func()`. Eliminates all calls to `config.GetEnv`, `config.GetTimezone()`, and `config.GetRuntimeConfig()`.
+- Produces: `scheduler.Start(ctx, database, pool, dgSession, memClient, cfg *config.Config) func()`. Reads `c := s.cfg.Current()`. Eliminates all calls to `config.GetEnv`, `config.GetTimezone()`, and `config.GetRuntimeConfig()`.
 
 - [ ] **Step 1: Write the failing test**
 
 In `brain/pkg/scheduler/scheduler_test.go`:
 ```go
 func TestScheduler_ConfigPointerInjection(t *testing.T) {
-	cfg := &config.Config{
+	cfg := config.NewTestConfig(&config.ConfigData{
 		Timezone: "America/Chicago",
 		Model:    "scheduler-model",
-	}
+	})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -587,17 +641,18 @@ In `brain/pkg/scheduler/scheduler.go`:
 func Start(ctx context.Context, database *sql.DB, pool *queue.WorkerPool, dgSession *discordgo.Session, memClient *memory.Client, cfg *config.Config) func()
 ```
 2. In `scheduler.go`:
-   - Line 73: `return s.cfg.GetTimezone()`
-   - Line 160: `policy := s.cfg.ResolveChannelPolicy(c.TargetID, channelName)`
+   - Line 73: `return s.cfg.Current().Timezone`
+   - Line 160: `policy := s.cfg.Current().Channels[c.TargetID]`
    - Lines 312-317:
      ```go
-     apiKey := s.cfg.GetAPIKey()
-     model := s.cfg.GetModel()
-     agyBin := s.cfg.GetAgyBin()
+     cur := s.cfg.Current()
+     apiKey := cur.APIKey
+     model := cur.Model
+     agyBin := cur.AgyBin
      ```
    - Delete all calls to `config.GetEnv`, `config.GetTimezone()`, `config.GetRuntimeConfig()`.
 3. In `scheduler_test.go`:
-   - Replace file-based `config.LoadConfigFromPaths(yamlPath)` test mutations with pure `&config.Config{ Timezone: ... }` struct literals passed to `Start()`.
+   - Replace file-based `config.LoadConfigFromPaths(yamlPath)` test mutations with pure `config.NewTestConfig(&config.ConfigData{ Timezone: ... })` struct literals passed to `Start()`.
 
 - [ ] **Step 4: Run tests to verify it passes**
 
@@ -608,7 +663,7 @@ Expected: PASS.
 
 ```bash
 git add brain/pkg/scheduler/
-git commit -m "refactor(scheduler): require *config.Config in Start and eliminate ambient getters"
+git commit -m "refactor(scheduler): require *config.Config in Start and read via cfg.Current()"
 ```
 
 ---
@@ -707,7 +762,7 @@ git commit -m "refactor(scheduler-mcp): pure *Config pointer constructor injecti
 In `brain/main_test.go`: verify `RunBrainApp` starts and stops cleanly with a pure test `*config.Config`:
 ```go
 func TestRunBrainApp_PureConfig(t *testing.T) {
-	cfg := &config.Config{
+	cfg := config.NewTestConfig(&config.ConfigData{
 		DatabaseURL:  filepath.Join(t.TempDir(), "brain_test.db"),
 		Port:         "0",
 		Model:        "test-model",
@@ -716,7 +771,7 @@ func TestRunBrainApp_PureConfig(t *testing.T) {
 		Channels: map[string]config.ChannelPolicy{
 			"default": {Mode: "threads"},
 		},
-	}
+	})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // Immediate cancellation to test lifecycle shutdown
 
@@ -736,7 +791,7 @@ Expected: FAIL due to signature mismatch.
 
 1. In `funnel.go`:
    - Refactor `connectDiscordFunnel(ctx context.Context, database *sql.DB, pool *queue.WorkerPool, cfg *config.Config) *discordgo.Session`.
-   - Read `cfg.ResolveChannelPolicy(...)`, `cfg.IsAdmin(...)`, `cfg.GetDiscordToken()`.
+   - Read `c := cfg.Current()`, use `c.Channels`, `c.DiscordToken`.
    - Remove `config.GetRuntimeConfig()`.
 2. In `main.go`:
    - `RunBrainApp(ctx context.Context, cfg *config.Config) error`.
@@ -749,13 +804,14 @@ Expected: FAIL due to signature mismatch.
          if err := config.Reload(cfg); err != nil {
              log.Printf("[%s] Warning: config reload error: %v (retaining LKGC)", source, err)
              if dgSession != nil {
-                 _ = delivery.SendSystemAlert(dgSession, cfg.GetSystemChannel(), "Invalid Configuration File", err.Error())
+                 _ = delivery.SendSystemAlert(dgSession, cfg.Current().SystemChannel, "Invalid Configuration File", err.Error())
              }
          }
          sanitizer.RegisterConfigTokens(cfg)
-         _ = config.EnsureAgySettings(cfg.GetAPIKey(), cfg.GetModel())
-         _ = config.EnsureMcpConfig(cfg.GetGitHubPAT(), cfg.GetMcpServers())
-         _ = config.EnsureSystemRules(cfg.GetSystemPrompt())
+         cur := cfg.Current()
+         _ = config.EnsureAgySettings(cur.APIKey, cur.Model)
+         _ = config.EnsureMcpConfig(cur.GitHubPAT, cur.McpServers)
+         _ = config.EnsureSystemRules(cur.SystemPrompt)
          _ = skills.EnsureSkills()
      }
      ```

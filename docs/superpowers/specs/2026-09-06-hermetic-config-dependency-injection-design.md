@@ -1,7 +1,7 @@
 # Design Specification: Hermetic Configuration & Pure Pointer Dependency Injection
 
 **Date**: 2026-09-06  
-**Status**: Revised (Aligned with Pure `*config.Config` Pointer Constructor Injection & Atomic Hot Reload)  
+**Status**: Revised (Aligned with `cfg.Current()` Atomic Snapshot & Zero-Accessor Invariant)  
 **Target Repositories**: `azylman/aerial`  
 **Scope**: `brain/pkg/config`, `brain/pkg/db`, `brain/pkg/memory`, `brain/pkg/gitsync`, `brain/pkg/sanitizer`, `brain/pkg/scheduler`, `brain/pkg/queue`, `brain/main.go`, `scheduler-mcp`, `scripts/verify.sh`, `scripts/check-coverage.sh`.
 
@@ -20,18 +20,18 @@ During automated PR submission (`aerial-pr.sh submit`), a false-alarm "poison pi
 ### 1.2 The Architectural Flaw: Ambient Environment Coupling & Backdoors
 The root failure was not a missing flag in a test script; it was architectural:
 - **Ambient Environment Leakage**: Sub-packages (`pkg/db`, `pkg/memory`, `pkg/gitsync`, `pkg/sanitizer`, `scheduler-mcp`, `pkg/scheduler`) directly called `os.Getenv` or `config.GetEnv` to resolve defaults instead of receiving explicit dependencies from their callers.
-- **Backdoor Getters**: `config.GetEnv(...)` was imported by sub-packages (e.g. `brain/pkg/scheduler/scheduler.go:312`), bypassing configuration structures.
+- **Backdoor Getters**: `config.GetEnv(...)` was imported by sub-packages (e.g. `brain/pkg/scheduler/scheduler.go:312`), and `config.GetTimezone()` secretly fell back to `os.Getenv("DEFAULT_TIMEZONE")`.
 - **Fragile Denylists**: Attempting to unset individual environment variables (`env -u DATABASE_URL`) fails whenever new infrastructure variables are introduced.
 - **Test Harness Contamination**: Tests probed `TEST_DATABASE_URL` and ambient fallback paths instead of operating hermetically with pure in-memory or temporary resources.
 - **Toxic Defaults**: When `POSTGRES_HOST` was unset, code automatically generated connection strings pointing to `postgres:5432`, creating startup hangs (~27.5s) on non-Docker local environments.
 
-### 1.3 The Invariant Solution: Pure `*config.Config` Pointer Constructor Injection & Atomic Hot Reload
+### 1.3 The Invariant Solution: `cfg.Current()` Atomic Snapshot & Zero-Accessor Pattern
 We enforce five non-negotiable architectural invariants across the monorepo:
 1. **Universal Pointer Constructor Injection**: Every package other than `config` (`pkg/db`, `pkg/memory`, `pkg/queue`, `pkg/runner`, `pkg/scheduler`, `pkg/sanitizer`, `pkg/gitsync`, `pkg/session`, `pkg/skills`, `pkg/watcher`) must receive a pointer to a config struct (`*config.Config`) in its constructor.
-2. **Single Access Path**: Reading from the injected `*config.Config` is the **sole mechanism** by which sub-packages access configuration, and their **only interaction** with the `config` package. Sub-packages never call package-level config functions (`config.GetTimezone()`, `config.GetSystemChannel()`, `config.GetRuntimeConfig()`, `config.DefaultConfig()`, `config.LoadConfig()`).
+2. **Atomic Snapshot with Zero Field Accessors**: `config.Config` wraps an `atomic.Pointer[ConfigData]`. Sub-packages call `c := cfg.Current()` to obtain an immutable snapshot pointer. `ConfigData` is a pure, dumb data struct with **zero methods and zero field accessors**. Sub-packages access raw fields directly (`c.Model`, `c.Timezone`, `c.DatabaseURL`). Because `ConfigData` has zero methods, it is **physically impossible** for an accessor to serve as a backdoor to `os.Getenv`.
 3. **Zero Ambient Getters & Zero Backdoors**: `config.GetEnv` is deleted and unexported (`getEnv` private to `pkg/config`). No sub-package ever calls `os.Getenv` or `config.GetEnv`.
-4. **Atomic Updates for Hot Reload**: `config.Config` embeds a `sync.RWMutex` and manages thread-safe, atomic updates. When configuration reloads (`config.Reload(activeCfg)`), the `config` package atomically mutates the active `*config.Config` in-place under write lock. All holding packages immediately and safely observe the changes on subsequent reads via thread-safe accessors (`cfg.GetModel()`, `cfg.GetTimezone()`, `cfg.ResolveChannelPolicy()`) with zero manual cross-package setters.
-5. **Hermetic Testing Without Environment Variables**: Unit tests instantiate `&config.Config{ DatabaseURL: filepath.Join(t.TempDir(), "test.db"), ... }` or `&config.Config{ DatabaseURL: ":memory:" }` and pass `cfg` directly into constructors. Tests never touch `os.Getenv` or `t.Setenv`. `TEST_DATABASE_URL` is excised from the entire repository.
+4. **Hardware Atomic Hot Reload**: When configuration reloads (`config.Reload(activeCfg)`), the `config` package parses the new configuration and performs a lock-free atomic pointer swap `activeCfg.Update(freshData)`. All holding packages immediately and safely observe the new snapshot on subsequent `cfg.Current()` calls without torn reads, data races, or manual cross-package setters.
+5. **Hermetic Testing Without Environment Variables**: Unit tests instantiate `cfg := config.NewTestConfig(&config.ConfigData{ DatabaseURL: ":memory:", Timezone: "UTC" })` and pass `cfg` directly into constructors. Tests never touch `os.Getenv` or `t.Setenv`. `TEST_DATABASE_URL` is excised from the entire repository.
 
 ---
 
@@ -40,11 +40,12 @@ We enforce five non-negotiable architectural invariants across the monorepo:
 | Invariant | Description | Enforcement Mechanism |
 |---|---|---|
 | **I1: Single Parsing Authority** | Only `brain/pkg/config` reads `os.Getenv` for `brain`. Subpackages cannot call `config.GetEnv` (unexported/deleted). `main.go` calls `config.LoadConfig()` to instantiate the root `*config.Config`. | Static analysis check (`git grep "os.Getenv" brain/pkg/ \| grep -v "brain/pkg/config"` returns 0, and `git grep "config.GetEnv" brain/` returns 0). |
-| **I2: Pure `*config.Config` Constructor DI** | Sub-package constructors take `cfg *config.Config`. Their only interaction with `config` is reading through this pointer. | Constructors require `cfg *config.Config`. `db.InitDB(cfg)` returns error if `cfg.GetDatabaseURL()` is empty. |
-| **I3: Atomic Hot Reload via `*config.Config`** | `config.Config` protects its fields with `sync.RWMutex`. `cfg.Update(newCfg)` updates state atomically. `config.Reload(activeCfg)` reloads files and updates the active pointer in-place. | Race detector validation (`go test -race ./brain/pkg/...`). Zero manual `pool.UpdateRuntimeConfig` calls needed. |
-| **I4: Zero Test Env Usage for Infrastructure** | Tests never read `os.Getenv` or mutate env via `t.Setenv` for credentials or infrastructure. | No `TEST_DATABASE_URL`. Tests instantiate `&config.Config{ DatabaseURL: ":memory:" }` or temporary files directly. |
-| **I5: Clean-Room Test Harness** | `verify.sh` and `check-coverage.sh` run tests using OS-aware clean-room allowlists. | Ambient credentials cannot leak into test processes even if host environment contains `POSTGRES_HOST=postgres`. |
-| **I6: Complete Excision of `TEST_DATABASE_URL`** | `TEST_DATABASE_URL` is completely removed from all source code, tests, scripts, and workflows. | `git grep "TEST_DATABASE_URL"` returns 0 across the entire repository. |
+| **I2: Zero Field Accessors** | `ConfigData` has zero methods. Subpackages read pure fields directly from `cfg.Current()`. No field-level getters exist. | Code structure: `ConfigData` contains only public data fields. No getters (`GetModel`, `GetTimezone`) exist to act as backdoors. |
+| **I3: Pure `*config.Config` Constructor DI** | Sub-package constructors take `cfg *config.Config`. Their only interaction with `config` is reading through this pointer. | Constructors require `cfg *config.Config`. `db.InitDB(cfg)` returns error if `cfg.Current().DatabaseURL` is empty. |
+| **I4: Atomic Hot Reload via `cfg.Current()`** | `config.Config` wraps `atomic.Pointer[ConfigData]`. `cfg.Update(fresh)` executes an atomic pointer swap (1 CPU instruction). | Race detector validation (`go test -race ./brain/pkg/...`). Zero lock contention, zero torn reads. |
+| **I5: Zero Test Env Usage for Infrastructure** | Tests never read `os.Getenv` or mutate env via `t.Setenv` for credentials or infrastructure. | No `TEST_DATABASE_URL`. Tests instantiate `config.NewTestConfig(&config.ConfigData{ DatabaseURL: ":memory:" })` directly. |
+| **I6: Clean-Room Test Harness** | `verify.sh` and `check-coverage.sh` run tests using OS-aware clean-room allowlists. | Ambient credentials cannot leak into test processes even if host environment contains `POSTGRES_HOST=postgres`. |
+| **I7: Complete Excision of `TEST_DATABASE_URL`** | `TEST_DATABASE_URL` is completely removed from all source code, tests, scripts, and workflows. | `git grep "TEST_DATABASE_URL"` returns 0 across the entire repository. |
 
 ---
 
@@ -53,18 +54,19 @@ We enforce five non-negotiable architectural invariants across the monorepo:
 ### 3.1 `brain/pkg/config`: Single Source of Truth & Atomic Hot Reload
 `brain/pkg/config` is the sole parser of environment variables and configuration files for `brain`.
 
-#### 3.1.1 Thread-Safe `Config` Struct
+#### 3.1.1 Dumb Data Struct `ConfigData` & Atomic Holder `Config`
 ```go
 package config
 
 import (
 	"encoding/json"
-	"sync"
+	"sync/atomic"
 )
 
-type Config struct {
-	mu sync.RWMutex
-
+// ConfigData is a 100% pure, dumb data struct.
+// ZERO methods. ZERO field accessors. ZERO dynamic logic.
+// It is physically impossible for this struct to call os.Getenv.
+type ConfigData struct {
 	// Runtime / Policy Settings (from config.yaml / options.json)
 	Model         string                     `yaml:"model" json:"model"`
 	Timezone      string                     `yaml:"timezone" json:"timezone"`
@@ -91,155 +93,27 @@ type OllamaConfig struct {
 	Model       string `yaml:"model" json:"model"`
 	QueryPrefix string `yaml:"query_prefix" json:"query_prefix"`
 }
-```
 
-#### 3.1.2 Atomic Thread-Safe Accessors
-Subpackages hold `cfg *config.Config` and access fields through thread-safe accessors:
-```go
-func (c *Config) GetModel() string {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.Model
+// Config wraps an atomic pointer to the active ConfigData snapshot.
+type Config struct {
+	current atomic.Pointer[ConfigData]
 }
 
-func (c *Config) GetTimezone() string {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	if c.Timezone != "" {
-		return c.Timezone
-	}
-	return "America/Los_Angeles"
+// NewTestConfig instantiates a Config pointer directly with test data.
+func NewTestConfig(data *ConfigData) *Config {
+	c := &Config{}
+	c.current.Store(data)
+	return c
 }
 
-func (c *Config) GetSystemChannel() string {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	if c.SystemChannel != "" {
-		return c.SystemChannel
-	}
-	return "aerial-dev"
+// Current returns the active, immutable snapshot. Subpackages read raw fields directly.
+func (c *Config) Current() *ConfigData {
+	return c.current.Load()
 }
 
-func (c *Config) GetDatabaseURL() string {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.DatabaseURL
-}
-
-func (c *Config) GetPort() string {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	if c.Port != "" {
-		return c.Port
-	}
-	return "8080"
-}
-
-func (c *Config) GetAgyBin() string {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	if c.AgyBin != "" {
-		return c.AgyBin
-	}
-	return "agy"
-}
-
-func (c *Config) GetAPIKey() string {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.APIKey
-}
-
-func (c *Config) GetSystemPrompt() string {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.SystemPrompt
-}
-
-func (c *Config) GetDiscordToken() string {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.DiscordToken
-}
-
-func (c *Config) GetGitHubPAT() string {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.GitHubPAT
-}
-
-func (c *Config) GetClassifierModel() string {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	if c.ClassifierModel != "" {
-		return c.ClassifierModel
-	}
-	return "Gemini 3.8 Flash (Low)"
-}
-
-func (c *Config) GetOllama() OllamaConfig {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.Ollama
-}
-
-func (c *Config) GetGitSync() GitSyncConfig {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.GitSync
-}
-
-func (c *Config) GetMcpServers() map[string]json.RawMessage {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.McpServers
-}
-
-func (c *Config) ResolveChannelPolicy(channelID, channelName string) ChannelPolicy {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	// Channel policy resolution matching existing logic
-	...
-}
-
-func (c *Config) IsAdmin(userID, username, globalName string) bool {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	// Admin user resolution matching existing logic
-	...
-}
-```
-
-#### 3.1.3 Atomic Hot Reload & LKGC Preservation
-```go
-// Update atomically replaces configuration fields under write lock.
-func (c *Config) Update(newCfg *Config) {
-	if c == nil || newCfg == nil {
-		return
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	newCfg.mu.RLock()
-	defer newCfg.mu.RUnlock()
-
-	c.Model = newCfg.Model
-	c.Timezone = newCfg.Timezone
-	c.SystemChannel = newCfg.SystemChannel
-	c.AdminUsers = newCfg.AdminUsers
-	c.Channels = newCfg.Channels
-	c.GitSync = newCfg.GitSync
-	c.McpServers = newCfg.McpServers
-
-	if newCfg.DatabaseURL != "" { c.DatabaseURL = newCfg.DatabaseURL }
-	if newCfg.Port != "" { c.Port = newCfg.Port }
-	if newCfg.AgyBin != "" { c.AgyBin = newCfg.AgyBin }
-	if newCfg.APIKey != "" { c.APIKey = newCfg.APIKey }
-	if newCfg.SystemPrompt != "" { c.SystemPrompt = newCfg.SystemPrompt }
-	if newCfg.DiscordToken != "" { c.DiscordToken = newCfg.DiscordToken }
-	if newCfg.GitHubPAT != "" { c.GitHubPAT = newCfg.GitHubPAT }
-	if newCfg.ClassifierModel != "" { c.ClassifierModel = newCfg.ClassifierModel }
-	if newCfg.Ollama.BaseURL != "" { c.Ollama = newCfg.Ollama }
+// Update atomically replaces the active configuration snapshot in 1 CPU instruction.
+func (c *Config) Update(fresh *ConfigData) {
+	c.current.Store(fresh)
 }
 
 // Reload parses configuration from search paths and atomically updates the active Config in-place.
@@ -249,12 +123,12 @@ func Reload(activeCfg *Config) error {
 	if err != nil {
 		return err
 	}
-	activeCfg.Update(freshCfg)
+	activeCfg.Update(freshCfg.Current())
 	return nil
 }
 ```
 
-#### 3.1.4 Environment Parsing & Postgres Default Trap Removal
+#### 3.1.2 Environment Parsing & Postgres Default Trap Removal
 - `buildPostgresDSNFromEnv()`:
   - If `DATABASE_URL` is set, return it.
   - If `POSTGRES_HOST` is set, synthesize connection string via `net.JoinHostPort(dbHost, dbPort)`.
@@ -271,13 +145,14 @@ func Reload(activeCfg *Config) error {
   ```
 - **Validation**:
   - If `cfg == nil`, return `fmt.Errorf("db: config cannot be nil")`.
-  - `dsn := strings.TrimSpace(cfg.GetDatabaseURL())`
+  - `c := cfg.Current()`
+  - `dsn := strings.TrimSpace(c.DatabaseURL)`
   - If `dsn == ""`, return `fmt.Errorf("db: connection string cannot be empty")`.
   - Rejects unrecognized URL schemes (e.g. `mysql://`).
   - Sets `database.SetMaxOpenConns(1)` for in-memory SQLite (`:memory:` or `mode=memory`).
   - Acquires `SELECT pg_advisory_lock(849201948201)` during PostgreSQL migrations.
 - **Delete `GetDBPath()`**: Removed completely.
-- **Hermetic Testing**: Tests in `db_test.go` instantiate `&config.Config{ DatabaseURL: filepath.Join(t.TempDir(), "test.db") }` or `&config.Config{ DatabaseURL: ":memory:" }`. Zero `os.Getenv` or `TEST_DATABASE_URL`.
+- **Hermetic Testing**: Tests in `db_test.go` instantiate `config.NewTestConfig(&config.ConfigData{ DatabaseURL: filepath.Join(t.TempDir(), "test.db") })` or `&config.ConfigData{ DatabaseURL: ":memory:" }`. Zero `os.Getenv` or `TEST_DATABASE_URL`.
 
 ---
 
@@ -291,9 +166,9 @@ func Reload(activeCfg *Config) error {
 
   func NewClient(cfg *config.Config) *Client
   ```
-- **Execution**: When generating embeddings or querying Ollama, reads `ollamaCfg := c.cfg.GetOllama()` to get `BaseURL`, `Model`, `QueryPrefix`.
+- **Execution**: When generating embeddings or querying Ollama, reads `c := client.cfg.Current()`, uses `c.Ollama.BaseURL`, `c.Ollama.Model`, `c.Ollama.QueryPrefix`.
 - **Zero `os.Getenv`**: Lines 30, 64, 69, 71 in `ollama.go` removed entirely.
-- **Hermetic Testing**: Tests in `memory_test.go` pass `&config.Config{ Ollama: config.OllamaConfig{ BaseURL: server.URL, ... } }`.
+- **Hermetic Testing**: Tests in `memory_test.go` pass `config.NewTestConfig(&config.ConfigData{ Ollama: config.OllamaConfig{ BaseURL: server.URL, ... } })`.
 
 ---
 
@@ -302,8 +177,7 @@ func Reload(activeCfg *Config) error {
   ```go
   func RegisterConfigTokens(cfg *config.Config)
   ```
-- Reads `cfg.GetAPIKey()`, `cfg.GetDiscordToken()`, `cfg.GetGitHubPAT()`.
-- Appends non-empty values to `envSecretsCache`.
+- Reads `c := cfg.Current()`, appends `c.APIKey`, `c.DiscordToken`, `c.GitHubPAT` to `envSecretsCache`.
 - Provides `ResetSensitiveTokens()` for unit test isolation.
 - Removes automatic scan of `os.Environ()` and `os.Getenv`.
 
@@ -314,7 +188,7 @@ func Reload(activeCfg *Config) error {
   ```go
   func SyncRepo(ctx context.Context, repoPath string, cfg *config.Config) (bool, error)
   ```
-- Reads `cfg.GetGitHubPAT()`.
+- Reads `c := cfg.Current(); pat := c.GitHubPAT`.
 - Deletes `os.Getenv("GITHUB_PAT")`.
 
 ---
@@ -332,8 +206,8 @@ func Reload(activeCfg *Config) error {
   }
   ```
 - `WorkerPool` stores `p.cfg *config.Config`.
-- When running turns: reads `p.cfg.GetModel()`, `p.cfg.GetAgyBin()`, `p.cfg.GetAPIKey()`, `p.cfg.GetSystemPrompt()`.
-- When resolving policies: reads `p.cfg.ResolveChannelPolicy(...)` and `p.cfg.GetSystemChannel()`.
+- When running turns: reads `c := p.cfg.Current()`, uses `c.Model`, `c.AgyBin`, `c.APIKey`, `c.SystemPrompt`.
+- When resolving policies: reads `c.Channels` and `c.SystemChannel`.
 - **Hot Reload Elimination**: Because `p.cfg` is updated atomically in-place by `config.Reload`, `WorkerPool` immediately observes updated model/prompts without needing `pool.UpdateRuntimeConfig(...)`.
 
 ---
@@ -345,7 +219,7 @@ func Reload(activeCfg *Config) error {
   ```
 - Stores `cfg *config.Config`.
 - In `runSchedulerLoop` and `ExtractFactsLLM`:
-  Reads `cfg.GetTimezone()`, `cfg.GetModel()`, `cfg.GetAPIKey()`, `cfg.GetAgyBin()`, `cfg.ResolveChannelPolicy(...)`.
+  Reads `c := s.cfg.Current()`, uses `c.Timezone`, `c.Model`, `c.APIKey`, `c.AgyBin`.
 - **Zero Ambient Calls**: Completely removes calls to `config.GetEnv`, `config.GetTimezone()`, and `config.GetRuntimeConfig()`.
 
 ---
@@ -364,6 +238,8 @@ func Reload(activeCfg *Config) error {
 - `main.go` acts solely as the composition root:
   ```go
   func RunBrainApp(ctx context.Context, cfg *config.Config) error {
+      c := cfg.Current()
+
       // 1. Initialize DB
       database, err := db.InitDB(cfg)
       if err != nil { return err }
@@ -377,8 +253,8 @@ func Reload(activeCfg *Config) error {
 
       // 4. Initialize Classifier
       cls := classifier.NewClassifier(
-          classifier.WithModel(cfg.GetClassifierModel()),
-          classifier.WithLLMFunc(classifier.NewAgyLLMFunc(cfg.GetAgyBin(), cfg.GetAPIKey(), runner.RunAgy)),
+          classifier.WithModel(c.ClassifierModel),
+          classifier.WithLLMFunc(classifier.NewAgyLLMFunc(c.AgyBin, c.APIKey, runner.RunAgy)),
       )
 
       // 5. Initialize WorkerPool with Config pointer
@@ -397,13 +273,14 @@ func Reload(activeCfg *Config) error {
           if err := config.Reload(cfg); err != nil {
               log.Printf("[%s] Warning: config reload error: %v (retaining LKGC)", source, err)
               if dgSession != nil {
-                  _ = delivery.SendSystemAlert(dgSession, cfg.GetSystemChannel(), "Invalid Configuration File", err.Error())
+                  _ = delivery.SendSystemAlert(dgSession, cfg.Current().SystemChannel, "Invalid Configuration File", err.Error())
               }
           }
           sanitizer.RegisterConfigTokens(cfg)
-          _ = config.EnsureAgySettings(cfg.GetAPIKey(), cfg.GetModel())
-          _ = config.EnsureMcpConfig(cfg.GetGitHubPAT(), cfg.GetMcpServers())
-          _ = config.EnsureSystemRules(cfg.GetSystemPrompt())
+          cur := cfg.Current()
+          _ = config.EnsureAgySettings(cur.APIKey, cur.Model)
+          _ = config.EnsureMcpConfig(cur.GitHubPAT, cur.McpServers)
+          _ = config.EnsureSystemRules(cur.SystemPrompt)
           _ = skills.EnsureSkills()
       }
 
