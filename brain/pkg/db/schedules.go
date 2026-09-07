@@ -63,7 +63,7 @@ type ScheduleSummaryMetrics struct {
 	SuccessRate24h float64    `json:"success_rate_24h"`
 }
 
-func CreateOneShotSchedule(database *sql.DB, s OneShotSchedule) error {
+func CreateOneShotSchedule(database DBTX, s OneShotSchedule) error {
 	if database == nil {
 		return nil
 	}
@@ -78,7 +78,7 @@ func CreateOneShotSchedule(database *sql.DB, s OneShotSchedule) error {
 	return err
 }
 
-func GetDueOneShotSchedules(database *sql.DB) ([]OneShotSchedule, error) {
+func GetDueOneShotSchedules(database DBTX) ([]OneShotSchedule, error) {
 	if database == nil {
 		return nil, nil
 	}
@@ -103,7 +103,7 @@ func GetDueOneShotSchedules(database *sql.DB) ([]OneShotSchedule, error) {
 	return results, nil
 }
 
-func DeleteOneShotSchedule(database *sql.DB, id string) error {
+func DeleteOneShotSchedule(database DBTX, id string) error {
 	if database == nil || id == "" {
 		return nil
 	}
@@ -114,7 +114,7 @@ func DeleteOneShotSchedule(database *sql.DB, id string) error {
 	return err
 }
 
-func InsertMessageAndConsumeOneShot(database *sql.DB, scheduleID string, msg Message) error {
+func InsertMessageAndConsumeOneShot(database DBTX, scheduleID string, msg Message) error {
 	if database == nil {
 		return fmt.Errorf("database is nil")
 	}
@@ -135,24 +135,33 @@ func InsertMessageAndConsumeOneShot(database *sql.DB, scheduleID string, msg Mes
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	tx, err := database.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
-	if err != nil {
-		return err
+	exec := database
+	type beginner interface {
+		BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error)
 	}
-	defer func() { _ = tx.Rollback() }()
+	var tx *sql.Tx
+	if b, ok := database.(beginner); ok {
+		var err error
+		tx, err = b.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		exec = tx
+	}
 
 	insertQuery := `
 	INSERT INTO messages (id, thread_id, guild_id, author_id, author_name, content, summary, status, retry_count, error_message, response_text, schedule_run_id, created_at, updated_at)
 	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 	ON CONFLICT (id) DO NOTHING;
 	`
-	if _, err := tx.ExecContext(ctx, insertQuery, msg.ID, msg.ThreadID, msg.GuildID, msg.AuthorID, msg.AuthorName, msg.Content, msg.Summary, msg.Status, msg.RetryCount, msg.ErrorMessage, msg.ResponseText, msg.ScheduleRunID, msg.CreatedAt, msg.UpdatedAt); err != nil {
+	if _, err := exec.ExecContext(ctx, insertQuery, msg.ID, msg.ThreadID, msg.GuildID, msg.AuthorID, msg.AuthorName, msg.Content, msg.Summary, msg.Status, msg.RetryCount, msg.ErrorMessage, msg.ResponseText, msg.ScheduleRunID, msg.CreatedAt, msg.UpdatedAt); err != nil {
 		return err
 	}
 
 	var deletedID string
 	deleteQuery := `DELETE FROM one_shot_schedules WHERE id = $1 RETURNING id;`
-	err = tx.QueryRowContext(ctx, deleteQuery, scheduleID).Scan(&deletedID)
+	err := exec.QueryRowContext(ctx, deleteQuery, scheduleID).Scan(&deletedID)
 	if err == sql.ErrNoRows {
 		return fmt.Errorf("one-shot schedule %s not found or already consumed", scheduleID)
 	}
@@ -160,10 +169,13 @@ func InsertMessageAndConsumeOneShot(database *sql.DB, scheduleID string, msg Mes
 		return err
 	}
 
-	return tx.Commit()
+	if tx != nil {
+		return tx.Commit()
+	}
+	return nil
 }
 
-func GetAllOneShotSchedules(database *sql.DB, threadID string) ([]OneShotSchedule, error) {
+func GetAllOneShotSchedules(database DBTX, threadID string) ([]OneShotSchedule, error) {
 	if database == nil {
 		return nil, nil
 	}
@@ -196,7 +208,7 @@ func GetAllOneShotSchedules(database *sql.DB, threadID string) ([]OneShotSchedul
 	return results, nil
 }
 
-func CreateCronSchedule(database *sql.DB, c CronSchedule) error {
+func CreateCronSchedule(database DBTX, c CronSchedule) error {
 	if database == nil {
 		return nil
 	}
@@ -214,7 +226,7 @@ func CreateCronSchedule(database *sql.DB, c CronSchedule) error {
 	return err
 }
 
-func GetDueCronSchedules(database *sql.DB) ([]CronSchedule, error) {
+func GetDueCronSchedules(database DBTX) ([]CronSchedule, error) {
 	if database == nil {
 		return nil, nil
 	}
@@ -239,7 +251,7 @@ func GetDueCronSchedules(database *sql.DB) ([]CronSchedule, error) {
 	return results, nil
 }
 
-func GetAllCronSchedules(database *sql.DB, targetID string) ([]CronSchedule, error) {
+func GetAllCronSchedules(database DBTX, targetID string) ([]CronSchedule, error) {
 	if database == nil {
 		return nil, nil
 	}
@@ -272,7 +284,7 @@ func GetAllCronSchedules(database *sql.DB, targetID string) ([]CronSchedule, err
 	return results, nil
 }
 
-func DeleteCronSchedule(database *sql.DB, id string) error {
+func DeleteCronSchedule(database DBTX, id string) error {
 	if database == nil || id == "" {
 		return nil
 	}
@@ -283,7 +295,7 @@ func DeleteCronSchedule(database *sql.DB, id string) error {
 	return err
 }
 
-func UpdateCronNextRun(database *sql.DB, id string, nextRunAt time.Time) error {
+func UpdateCronNextRun(database DBTX, id string, nextRunAt time.Time) error {
 	if database == nil || id == "" {
 		return nil
 	}
@@ -294,7 +306,7 @@ func UpdateCronNextRun(database *sql.DB, id string, nextRunAt time.Time) error {
 	return err
 }
 
-func CreateScheduleRun(database *sql.DB, run ScheduleRun) error {
+func CreateScheduleRun(database DBTX, run ScheduleRun) error {
 	if database == nil {
 		return fmt.Errorf("database is nil")
 	}
@@ -338,7 +350,7 @@ func CreateScheduleRun(database *sql.DB, run ScheduleRun) error {
 	return err
 }
 
-func UpdateScheduleRunStatus(database *sql.DB, params UpdateRunParams) error {
+func UpdateScheduleRunStatus(database DBTX, params UpdateRunParams) error {
 	if database == nil {
 		return fmt.Errorf("database is nil")
 	}
@@ -392,7 +404,7 @@ func UpdateScheduleRunStatus(database *sql.DB, params UpdateRunParams) error {
 	return err
 }
 
-func GetScheduleRunsPaginated(database *sql.DB, limit, offset int, scheduleID, status string) ([]ScheduleRun, int, error) {
+func GetScheduleRunsPaginated(database DBTX, limit, offset int, scheduleID, status string) ([]ScheduleRun, int, error) {
 	if database == nil {
 		return nil, 0, fmt.Errorf("database is nil")
 	}
@@ -463,7 +475,7 @@ func GetScheduleRunsPaginated(database *sql.DB, limit, offset int, scheduleID, s
 	return runs, total, nil
 }
 
-func GetScheduleSummaryMetrics(database *sql.DB) (ScheduleSummaryMetrics, error) {
+func GetScheduleSummaryMetrics(database DBTX) (ScheduleSummaryMetrics, error) {
 	if database == nil {
 		return ScheduleSummaryMetrics{}, fmt.Errorf("database is nil")
 	}
@@ -531,7 +543,7 @@ func GetScheduleSummaryMetrics(database *sql.DB) (ScheduleSummaryMetrics, error)
 	return metrics, nil
 }
 
-func ReconcileOrphanedScheduleRuns(database *sql.DB) (int64, error) {
+func ReconcileOrphanedScheduleRuns(database DBTX) (int64, error) {
 	if database == nil {
 		return 0, fmt.Errorf("database is nil")
 	}
@@ -553,7 +565,7 @@ func ReconcileOrphanedScheduleRuns(database *sql.DB) (int64, error) {
 	return res.RowsAffected()
 }
 
-func PruneScheduleRuns(database *sql.DB, maxCount int, maxAge time.Duration) (int64, error) {
+func PruneScheduleRuns(database DBTX, maxCount int, maxAge time.Duration) (int64, error) {
 	if database == nil {
 		return 0, fmt.Errorf("database is nil")
 	}

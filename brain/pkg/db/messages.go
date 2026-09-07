@@ -36,7 +36,7 @@ type Message struct {
 }
 
 // InsertMessage inserts a new message into the queue if not already present.
-func InsertMessage(database *sql.DB, msg Message) (err error) {
+func InsertMessage(database DBTX, msg Message) (err error) {
 	start := time.Now()
 	defer func() {
 		status := "success"
@@ -78,7 +78,7 @@ func InsertMessage(database *sql.DB, msg Message) (err error) {
 }
 
 // UpdateMessageStatus updates the execution status and error message of a message.
-func UpdateMessageStatus(database *sql.DB, id string, status string, errorMsg string) error {
+func UpdateMessageStatus(database DBTX, id string, status string, errorMsg string) error {
 	if database == nil {
 		return fmt.Errorf("database is nil")
 	}
@@ -99,7 +99,7 @@ func UpdateMessageStatus(database *sql.DB, id string, status string, errorMsg st
 }
 
 // UpdateMessageCompleted marks a message as completed with its response text.
-func UpdateMessageCompleted(database *sql.DB, id string, responseText string) error {
+func UpdateMessageCompleted(database DBTX, id string, responseText string) error {
 	if database == nil {
 		return fmt.Errorf("database is nil")
 	}
@@ -120,7 +120,7 @@ func UpdateMessageCompleted(database *sql.DB, id string, responseText string) er
 }
 
 // IncrementMessageRetry increments the retry count and records the failure reason.
-func IncrementMessageRetry(database *sql.DB, id string, errorMsg string) error {
+func IncrementMessageRetry(database DBTX, id string, errorMsg string) error {
 	if database == nil {
 		return fmt.Errorf("database is nil")
 	}
@@ -141,7 +141,7 @@ func IncrementMessageRetry(database *sql.DB, id string, errorMsg string) error {
 }
 
 // GetPendingOrProcessingMessages returns active messages awaiting processing or recovery.
-func GetPendingOrProcessingMessages(database *sql.DB) (msgs []Message, err error) {
+func GetPendingOrProcessingMessages(database DBTX) (msgs []Message, err error) {
 	start := time.Now()
 	defer func() {
 		status := "success"
@@ -193,7 +193,7 @@ func GetPendingOrProcessingMessages(database *sql.DB) (msgs []Message, err error
 }
 
 // GetMessage retrieves a message by its ID.
-func GetMessage(database *sql.DB, id string) (*Message, error) {
+func GetMessage(database DBTX, id string) (*Message, error) {
 	if database == nil {
 		return nil, fmt.Errorf("database is nil")
 	}
@@ -233,7 +233,7 @@ func GetMessage(database *sql.DB, id string) (*Message, error) {
 }
 
 // MessageExists checks if a message with the given ID exists.
-func MessageExists(database *sql.DB, id string) (bool, error) {
+func MessageExists(database DBTX, id string) (bool, error) {
 	if database == nil {
 		return false, fmt.Errorf("database is nil")
 	}
@@ -256,7 +256,7 @@ func MessageExists(database *sql.DB, id string) (bool, error) {
 
 // ClaimPendingMessage atomically transitions a message from PENDING to PROCESSING using CAS.
 // It returns true if and only if the message was successfully claimed from PENDING state (strictly-once).
-func ClaimPendingMessage(database *sql.DB, id string) (claimed bool, err error) {
+func ClaimPendingMessage(database DBTX, id string) (claimed bool, err error) {
 	start := time.Now()
 	defer func() {
 		status := "success"
@@ -290,7 +290,7 @@ func ClaimPendingMessage(database *sql.DB, id string) (claimed bool, err error) 
 }
 
 // GetActiveRecentThreadIDs returns distinct thread IDs that have had recent activity.
-func GetActiveRecentThreadIDs(database *sql.DB, since time.Duration) ([]string, error) {
+func GetActiveRecentThreadIDs(database DBTX, since time.Duration) ([]string, error) {
 	if database == nil {
 		return nil, fmt.Errorf("database is nil")
 	}
@@ -332,7 +332,7 @@ func GetActiveRecentThreadIDs(database *sql.DB, since time.Duration) ([]string, 
 }
 
 // GetRecentThreadMessages returns the most recent messages in a thread in chronological order.
-func GetRecentThreadMessages(database *sql.DB, threadID string, limit int) (msgs []Message, err error) {
+func GetRecentThreadMessages(database DBTX, threadID string, limit int) (msgs []Message, err error) {
 	start := time.Now()
 	defer func() {
 		status := "success"
@@ -397,7 +397,7 @@ func GetRecentThreadMessages(database *sql.DB, threadID string, limit int) (msgs
 }
 
 // GetMaxMessageRowID returns the maximum row_id for COMPLETED messages in the specified thread.
-func GetMaxMessageRowID(database *sql.DB, threadID string) (int64, error) {
+func GetMaxMessageRowID(database DBTX, threadID string) (int64, error) {
 	if database == nil || threadID == "" {
 		return 0, nil
 	}
