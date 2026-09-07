@@ -7,6 +7,7 @@ import (
 	"image/png"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -5742,6 +5743,294 @@ func TestProcessBurst_TransientError_RetainsOriginalPrompt(t *testing.T) {
 	}
 	if !strings.Contains(promptsSeen[1], "Original prompt text that must not be wiped") {
 		t.Errorf("Attempt 2 prompt missing original prompt content: %q", promptsSeen[1])
+	}
+}
+
+func TestIsTier1Wake_SchedulerMessage(t *testing.T) {
+	// 1. AuthorID == "scheduler"
+	msgSched := db.Message{
+		ID:        "m-sched-1",
+		AuthorID:  "scheduler",
+		Content:   "check system health",
+		CreatedAt: time.Now().UTC(),
+	}
+	if !isTier1Wake(msgSched, "bot-123", "mention") {
+		t.Errorf("Expected isTier1Wake to return true for AuthorID == scheduler in mention mode")
+	}
+
+	// 2. ScheduleRunID != ""
+	msgRun := db.Message{
+		ID:            "m-run-1",
+		AuthorID:      "user-456",
+		ScheduleRunID: "run-uuid-999",
+		Content:       "run cron report",
+		CreatedAt:     time.Now().UTC(),
+	}
+	if !isTier1Wake(msgRun, "bot-123", "mention") {
+		t.Errorf("Expected isTier1Wake to return true for non-empty ScheduleRunID in mention mode")
+	}
+}
+
+func TestProcessBurst_QuotaPause_SchedulesOneShotAndNotifies(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to init DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	var runnerCalls int
+	var deliveredTexts []string
+	var mu sync.Mutex
+	doneCh := make(chan struct{})
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    3,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			mu.Lock()
+			runnerCalls++
+			mu.Unlock()
+			return "", "Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 16m58s.", 1, errors.New("exit 1")
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			mu.Lock()
+			deliveredTexts = append(deliveredTexts, text)
+			mu.Unlock()
+			return nil
+		},
+		OnMessageCompleted: func(m db.Message, status string) {
+			close(doneCh)
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	threadID := "chan-quota-1"
+	msg := db.Message{
+		ID:        "msg-quota-1",
+		ThreadID:  threadID,
+		Content:   "<@bot> can you analyze our code coverage?",
+		Status:    db.StatusPending,
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+	_ = db.InsertMessage(database, msg)
+
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Timeout waiting for message to complete")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	// 1. Must fail-fast: exactly 1 runner call, zero retries
+	if runnerCalls != 1 {
+		t.Fatalf("Expected exactly 1 runner call (fail-fast), got %d", runnerCalls)
+	}
+
+	// 2. Must deliver transparent notification with countdown and epoch timestamp
+	if len(deliveredTexts) != 1 {
+		t.Fatalf("Expected 1 delivered notice, got %d", len(deliveredTexts))
+	}
+	notice := deliveredTexts[0]
+	if !strings.Contains(notice, "16m 58s") {
+		t.Errorf("Expected '16m 58s' in notice, got: %s", notice)
+	}
+	if !strings.Contains(notice, "<t:") || !strings.Contains(notice, ":R>") {
+		t.Errorf("Expected relative Discord timestamp in notice, got: %s", notice)
+	}
+	if !strings.Contains(notice, "automatically scheduled a retry") {
+		t.Errorf("Expected auto-retry confirmation in notice, got: %s", notice)
+	}
+
+	// 3. One-shot schedule must be inserted into database for this thread with future run_at
+	var schedPrompt string
+	var runAt time.Time
+	err = database.QueryRow(`SELECT prompt, run_at FROM one_shot_schedules WHERE thread_id = $1`, threadID).Scan(&schedPrompt, &runAt)
+	if err != nil {
+		t.Fatalf("Error querying one_shot_schedules: %v", err)
+	}
+	if !strings.Contains(schedPrompt, "[QUOTA_RETRY]") || !strings.Contains(schedPrompt, "code coverage") {
+		t.Errorf("Expected retry prompt with [QUOTA_RETRY] and coverage query, got: %q", schedPrompt)
+	}
+	if time.Until(runAt) < 16*time.Minute {
+		t.Errorf("Expected runAt to be at least 16m in the future, got %v (runAt: %s)", time.Until(runAt), runAt)
+	}
+
+	// 4. Triggering message marked FAILED with [QUOTA_PAUSED]
+	dbMsg, _ := db.GetMessage(database, msg.ID)
+	if dbMsg.Status != db.StatusFailed {
+		t.Errorf("Expected message status FAILED, got %s", dbMsg.Status)
+	}
+	if !strings.Contains(dbMsg.ErrorMessage, "[QUOTA_PAUSED") {
+		t.Errorf("Expected [QUOTA_PAUSED] in error message, got: %s", dbMsg.ErrorMessage)
+	}
+}
+
+func TestProcessBurst_QuotaPause_CircuitBreakerDoesNotReschedule(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to init DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	var runnerCalls int
+	var deliveredTexts []string
+	var mu sync.Mutex
+	doneCh := make(chan struct{})
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    3,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			mu.Lock()
+			runnerCalls++
+			mu.Unlock()
+			return "", "Individual quota reached. Resets in 10m.", 1, errors.New("exit 1")
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			mu.Lock()
+			deliveredTexts = append(deliveredTexts, text)
+			mu.Unlock()
+			return nil
+		},
+		OnMessageCompleted: func(m db.Message, status string) {
+			close(doneCh)
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	threadID := "chan-circuit-1"
+	// Message was already generated by an automated retry
+	msg := db.Message{
+		ID:            "msg-circuit-1",
+		ThreadID:      threadID,
+		ScheduleRunID: "run-sched-previous-1",
+		Content:       "[QUOTA_RETRY] Previous failed question",
+		Status:        db.StatusPending,
+		CreatedAt:     time.Now().UTC(),
+		UpdatedAt:     time.Now().UTC(),
+	}
+	_ = db.InsertMessage(database, msg)
+
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Timeout waiting for message completion")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	// Circuit breaker: must NOT insert another one-shot schedule!
+	var schedCount int
+	_ = database.QueryRow(`SELECT COUNT(*) FROM one_shot_schedules WHERE thread_id = $1`, threadID).Scan(&schedCount)
+	if schedCount != 0 {
+		t.Fatalf("Expected 0 one-shot schedules created on circuit breaker, got %d", schedCount)
+	}
+
+	// Must notify user with circuit breaker warning
+	if len(deliveredTexts) != 1 {
+		t.Fatalf("Expected 1 delivered text, got %d", len(deliveredTexts))
+	}
+	if !strings.Contains(deliveredTexts[0], "paused automated retries") {
+		t.Errorf("Expected circuit breaker notice in delivery, got: %s", deliveredTexts[0])
+	}
+}
+
+func TestProcessBurst_TrailingBurstSuppression_OnQuotaPause(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to init DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	var runnerCalls int
+	var mu sync.Mutex
+	completedMsgs := make(map[string]string)
+	var completedCount int
+	doneCh := make(chan struct{})
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    3,
+		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
+			return config.ChannelPolicy{Mode: "channel"}
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			mu.Lock()
+			runnerCalls++
+			mu.Unlock()
+			return "", "Individual quota reached. Resets in 16m58s.", 1, errors.New("exit 1")
+		},
+		OnMessageCompleted: func(m db.Message, status string) {
+			mu.Lock()
+			completedMsgs[m.ID] = status
+			completedCount++
+			if completedCount == 2 {
+				close(doneCh)
+			}
+			mu.Unlock()
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	threadID := "chan-burst-suppress-1"
+	t0 := time.Now().UTC()
+	msg1 := db.Message{
+		ID:        "msg-burst-1",
+		ThreadID:  threadID,
+		Content:   "Aerial Question 1",
+		Status:    db.StatusPending,
+		CreatedAt: t0,
+		UpdatedAt: t0,
+	}
+	msg2 := db.Message{
+		ID:        "msg-burst-2",
+		ThreadID:  threadID,
+		Content:   "Aerial Question 2",
+		Status:    db.StatusPending,
+		CreatedAt: t0.Add(100 * time.Millisecond),
+		UpdatedAt: t0.Add(100 * time.Millisecond),
+	}
+	_ = db.InsertMessage(database, msg1)
+	_ = db.InsertMessage(database, msg2)
+
+	// Simulate burst arrival
+	pool.processBurst([]db.Message{msg1, msg2})
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	// Only message 1 should have invoked runner; message 2 must be suppressed
+	if runnerCalls != 1 {
+		t.Fatalf("Expected runner called only once, got %d", runnerCalls)
+	}
+
+	// Message 2 should be marked failed with trailing suppression reason
+	m2, _ := db.GetMessage(database, msg2.ID)
+	if m2.Status != db.StatusFailed {
+		t.Errorf("Expected msg2 status FAILED, got %s", m2.Status)
+	}
+	if !strings.Contains(m2.ErrorMessage, "Trailing message suppressed") {
+		t.Errorf("Expected trailing suppression error on msg2, got: %s", m2.ErrorMessage)
 	}
 }
 

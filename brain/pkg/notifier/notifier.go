@@ -15,9 +15,56 @@ func ModelUnavailableMessage() string {
 	return "Apologies, the AI model is currently unavailable or being rate limited. Please try again in a few moments."
 }
 
+// FormatDurationHuman renders durations in a friendly, conversational format.
+func FormatDurationHuman(d time.Duration) string {
+	if d <= 0 {
+		return "a few moments"
+	}
+	d = d.Round(time.Second)
+	h := int(d.Hours())
+	m := int(d.Minutes()) % 60
+	s := int(d.Seconds()) % 60
+
+	if h > 0 {
+		if m > 0 {
+			return fmt.Sprintf("%dh %dm", h, m)
+		}
+		return fmt.Sprintf("%dh", h)
+	}
+	if m > 0 {
+		if s > 0 {
+			return fmt.Sprintf("%dm %ds", m, s)
+		}
+		return fmt.Sprintf("%dm", m)
+	}
+	return fmt.Sprintf("%ds", s)
+}
+
+// FormatQuotaPauseMessage crafts Aerial's signature friendly heads-up message with live Discord relative timestamp.
+func FormatQuotaPauseMessage(resetDur time.Duration, runAt time.Time, scheduled bool, isCircuitBreak bool) string {
+	durHuman := FormatDurationHuman(resetDur)
+	var countdown string
+	if !runAt.IsZero() {
+		countdown = fmt.Sprintf(" (<t:%d:R>)", runAt.Unix())
+	}
+
+	if isCircuitBreak {
+		return "I've hit Google's personal subscription quota limit again after a scheduled auto-retry! ✨\n\nTo prevent getting locked in a retry loop, I've paused automated retries on this turn. You can add `GEMINI_API_KEY` into your environment to unlock unlimited pay-as-you-go access, or ping me again once limits have refreshed! 🌸"
+	}
+
+	if scheduled {
+		return fmt.Sprintf("I've hit Google's personal subscription quota limit. My brain bucket resets in **%s**%s! ✨\n\nI've automatically scheduled a retry for when the quota refreshes, so I'll answer you right then! (Or if you don't want to wait, add `GEMINI_API_KEY` into `.env` to unlock unlimited pay-as-you-go access immediately.) 🌸", durHuman, countdown)
+	}
+
+	return fmt.Sprintf("I've hit Google's personal subscription quota limit. My brain bucket resets in **%s**%s! ✨\n\nPlease ping me again once my brain bucket refreshes, or add `GEMINI_API_KEY` into `.env` to unlock unlimited access! 🌸", durHuman, countdown)
+}
+
 // StaticFallback returns a persona-compliant default notification based on the error context.
 func StaticFallback(contextDescription string) string {
 	lower := strings.ToLower(contextDescription)
+	if strings.Contains(lower, "quota") || strings.Contains(lower, "individual quota") || strings.Contains(lower, "resource_exhausted") {
+		return "I've hit Google's personal subscription quota limit! ✨ My brain bucket is currently cooling down. Please try again in a little bit, or add `GEMINI_API_KEY` into `.env` to bypass subscription limits! 🌸"
+	}
 	if strings.Contains(lower, "503") || strings.Contains(lower, "unavailable") || strings.Contains(lower, "high demand") || strings.Contains(lower, "rate limit") {
 		return ModelUnavailableMessage()
 	}
