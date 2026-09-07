@@ -9,7 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
+	"github.com/azylman/aerial/brain/pkg/runner"
 )
 
 func TestClassifier_Defaults(t *testing.T) {
@@ -739,6 +741,26 @@ func TestClassifier_ClassifyBurst(t *testing.T) {
 	}
 	if !strings.Contains(capturedPrompt, "brb grabbing coffee") {
 		t.Errorf("expected prompt to contain Bob's message")
+	}
+}
+
+func TestClassifier_ConfigInjection(t *testing.T) {
+	appCfg := config.NewFromData(&config.ConfigData{
+		ClassifierModel: "custom-flash-model",
+	})
+	var receivedModel string
+	var runnerFn runner.RunnerFunc = func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+		receivedModel = model
+		return `{"status":"SUCCESS","response":"{\"confidence\":0.95,\"reason\":\"urgent\"}"}`, "", 0, nil
+	}
+	c := New(appCfg, runnerFn)
+
+	res := c.Classify(context.Background(), db.Message{Content: "Help!"}, nil, "")
+	if res.Confidence != 0.95 {
+		t.Fatalf("expected confidence 0.95, got %f", res.Confidence)
+	}
+	if receivedModel != "custom-flash-model" {
+		t.Errorf("expected model 'custom-flash-model', got %q", receivedModel)
 	}
 }
 

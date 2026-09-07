@@ -413,6 +413,9 @@ func RunAgyWithWatchdog(parentCtx context.Context, agyBin, prompt, sessionID, ap
 	return stdout, stderr, exitCode, err
 }
 
+// RunnerFunc defines the signature for invoking the underlying agent runner (e.g. RunAgy).
+type RunnerFunc func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error)
+
 // RunAgy executes the agy binary with the given parameters, capturing stdout and stderr.
 func RunAgy(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
 	return RunAgyWithWatchdog(ctx, agyBin, prompt, sessionID, apiKey, model, DefaultWatchdogOptions(timeoutMinutes))

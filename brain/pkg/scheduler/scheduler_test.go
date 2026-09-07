@@ -1350,5 +1350,35 @@ func TestRunFactExtraction(t *testing.T) {
 	RunFactExtraction(context.Background(), closedDB, client, llmFunc)
 }
 
+func TestScheduler_ConfigInjection(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer database.Close()
+
+	appCfg := config.NewFromData(&config.ConfigData{
+		Timezone: "America/New_York",
+		Model:    "custom-scheduler-model",
+	})
+	enqueuer := newMockEnqueuer()
+	threadCreator := newMockThreadCreator()
+
+	s := New(appCfg, database, enqueuer, threadCreator)
+	if s == nil {
+		t.Fatalf("expected non-nil scheduler")
+	}
+	if s.cfg != appCfg {
+		t.Errorf("expected s.cfg to match injected appCfg")
+	}
+	if s.cfg.Current().Timezone != "America/New_York" {
+		t.Errorf("expected timezone America/New_York, got %q", s.cfg.Current().Timezone)
+	}
+
+	if err := s.ProcessDueSchedules(context.Background()); err != nil {
+		t.Errorf("unexpected error in ProcessDueSchedules: %v", err)
+	}
+}
+
 
 

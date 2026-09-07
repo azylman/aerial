@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -49,6 +50,29 @@ func (d *DiscordThreadCreator) CreatePublicThread(channelID, name string) (strin
 // MessageEnqueuer abstracts enqueueing messages to the worker pool.
 type MessageEnqueuer interface {
 	Enqueue(msg db.Message)
+}
+
+// Scheduler evaluates cron and one-shot schedules and manages recurring routine executions.
+type Scheduler struct {
+	cfg           *config.Config
+	db            *sql.DB
+	enqueuer      MessageEnqueuer
+	threadCreator ThreadCreator
+}
+
+// New constructs a Scheduler with pure *config.Config pointer dependency injection.
+func New(cfg *config.Config, db *sql.DB, enqueuer MessageEnqueuer, threadCreator ThreadCreator) *Scheduler {
+	return &Scheduler{
+		cfg:           cfg,
+		db:            db,
+		enqueuer:      enqueuer,
+		threadCreator: threadCreator,
+	}
+}
+
+// NewScheduler is a compatibility wrapper for New.
+func NewScheduler(cfg *config.Config, db *sql.DB, enqueuer MessageEnqueuer, threadCreator ThreadCreator) *Scheduler {
+	return New(cfg, db, enqueuer, threadCreator)
 }
 
 // FormatThreadTitle formats the thread title for a recurring cron trigger, clamped to at most 100 runes.
@@ -99,7 +123,16 @@ func CalculateNextRun(cronExpr, timezone string, from time.Time) (time.Time, err
 }
 
 // ProcessDueSchedules evaluates and processes due cron and one-shot schedules.
+func (s *Scheduler) ProcessDueSchedules(ctx context.Context) error {
+	return processDueSchedules(ctx, s.cfg, s.db, s.enqueuer, s.threadCreator)
+}
+
+// ProcessDueSchedules evaluates and processes due cron and one-shot schedules (compatibility wrapper).
 func ProcessDueSchedules(ctx context.Context, database *sql.DB, enqueuer MessageEnqueuer, threadCreator ThreadCreator) error {
+	return New(nil, database, enqueuer, threadCreator).ProcessDueSchedules(ctx)
+}
+
+func processDueSchedules(ctx context.Context, cfg *config.Config, database *sql.DB, enqueuer MessageEnqueuer, threadCreator ThreadCreator) error {
 	if database == nil {
 		return nil
 	}
@@ -119,11 +152,24 @@ func ProcessDueSchedules(ctx context.Context, database *sql.DB, enqueuer Message
 		default:
 		}
 
+		defaultTz := ""
+		if cfg != nil {
+			if cur := cfg.Current(); cur != nil {
+				defaultTz = cur.Timezone
+			}
+		} else {
+			defaultTz = GetDefaultTimezone()
+		}
+		tz := c.Timezone
+		if strings.TrimSpace(tz) == "" {
+			tz = defaultTz
+		}
+
 		// 24h staleness guard: if cron trigger is overdue by >24h, advance next_run_at without firing.
 		if now.Sub(c.NextRunAt) > 24*time.Hour {
 			log.Printf("[Scheduler] Warning: Cron %s (%q) is stale (>24h overdue: due %s, now %s). Advancing next_run_at without firing.",
 				c.ID, c.CronExpr, c.NextRunAt.Format(time.RFC3339), now.Format(time.RFC3339))
-			nextRun, err := CalculateNextRun(c.CronExpr, c.Timezone, now)
+			nextRun, err := CalculateNextRun(c.CronExpr, tz, now)
 			if err != nil {
 				log.Printf("[Scheduler] Failed to calculate next run for cron %s (%q): %v. Fallback 24h.", c.ID, c.CronExpr, err)
 				nextRun = now.Add(24 * time.Hour)
@@ -135,7 +181,7 @@ func ProcessDueSchedules(ctx context.Context, database *sql.DB, enqueuer Message
 		}
 
 		// Calculate and update next run time
-		nextRun, err := CalculateNextRun(c.CronExpr, c.Timezone, now)
+		nextRun, err := CalculateNextRun(c.CronExpr, tz, now)
 		if err != nil {
 			log.Printf("[Scheduler] Failed to calculate next run for cron %s (%q): %v. Fallback 24h.", c.ID, c.CronExpr, err)
 			nextRun = now.Add(24 * time.Hour)
@@ -157,7 +203,14 @@ func ProcessDueSchedules(ctx context.Context, database *sql.DB, enqueuer Message
 			}
 		}
 
-		policy := config.GetRuntimeConfig().ResolveChannelPolicy(c.TargetID, channelName)
+		var policy config.ChannelPolicy
+		if cfg != nil {
+			if cur := cfg.Current(); cur != nil {
+				policy = cur.ResolveChannelPolicy(c.TargetID, channelName)
+			}
+		} else {
+			policy = config.GetRuntimeConfig().ResolveChannelPolicy(c.TargetID, channelName)
+		}
 
 		// Create fresh public Discord thread only if:
 		// 1. Target is not already a thread, AND
@@ -288,14 +341,12 @@ func ProcessDueSchedules(ctx context.Context, database *sql.DB, enqueuer Message
 }
 
 // Start launches the background scheduler monitor daemon with a 30-second ticker.
-// It returns a stop function that cleanly cancels the monitor and waits for Run to exit.
-func Start(ctx context.Context, database *sql.DB, pool *queue.WorkerPool, dg *discordgo.Session) (stop func()) {
-	threadCreator := NewDiscordThreadCreator(dg)
+func (s *Scheduler) Start(ctx context.Context) (stop func()) {
 	subCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		Run(subCtx, database, pool, threadCreator, 30*time.Second)
+		s.Run(subCtx, 30*time.Second)
 	}()
 	var once sync.Once
 	return func() {
@@ -306,15 +357,33 @@ func Start(ctx context.Context, database *sql.DB, pool *queue.WorkerPool, dg *di
 	}
 }
 
-// Run executes the monitoring loop with ticker interval and context cancellation.
+// Start launches the background scheduler monitor daemon with a 30-second ticker (compatibility wrapper).
+func Start(ctx context.Context, database *sql.DB, pool *queue.WorkerPool, dg *discordgo.Session) (stop func()) {
+	threadCreator := NewDiscordThreadCreator(dg)
+	return New(nil, database, pool, threadCreator).Start(ctx)
+}
+
 // ExtractFactsLLM extracts facts using the primary LLM via runner.RunAgy.
-func ExtractFactsLLM(ctx context.Context, prompt string) (string, error) {
-	apiKey := config.GetEnv("GEMINI_API_KEY", config.GetEnv("ANTIGRAVITY_API_KEY", ""))
-	model := config.GetRuntimeConfig().Model
-	if model == "" {
-		model = config.GetEnv("AGY_MODEL", "gemini-2.5-flash")
+func (s *Scheduler) ExtractFactsLLM(ctx context.Context, prompt string) (string, error) {
+	apiKey := ""
+	model := ""
+	agyBin := ""
+	if s.cfg != nil {
+		if cur := s.cfg.Current(); cur != nil {
+			apiKey = cur.APIKey
+			model = cur.Model
+			agyBin = cur.AgyBin
+		}
 	}
-	agyBin := config.GetEnv("AGY_BIN", "agy")
+	if model == "" {
+		model = config.GetRuntimeConfig().Model
+	}
+	if model == "" {
+		model = "Gemini 3.6 Flash (Low)"
+	}
+	if agyBin == "" {
+		agyBin = "agy"
+	}
 	stdout, _, exitCode, err := runner.RunAgy(ctx, agyBin, prompt, "", apiKey, model, 5)
 	if exitCode != 0 || err != nil {
 		return "", fmt.Errorf("agy fact extraction exitCode=%d err=%v", exitCode, err)
@@ -324,6 +393,27 @@ func ExtractFactsLLM(ctx context.Context, prompt string) (string, error) {
 		return "", fmt.Errorf("failed to parse agy json output in scheduler: %w (raw: %q)", parseErr, stdout)
 	}
 	return resp.Response, nil
+}
+
+// ExtractFactsLLM extracts facts using the primary LLM via runner.RunAgy (compatibility wrapper).
+func ExtractFactsLLM(ctx context.Context, prompt string) (string, error) {
+	agyBin := os.Getenv("AGY_BIN")
+	apiKey := os.Getenv("GEMINI_API_KEY")
+	model := os.Getenv("AGY_MODEL")
+	if agyBin != "" || apiKey != "" || model != "" {
+		data := config.DefaultConfigData()
+		if agyBin != "" {
+			data.AgyBin = agyBin
+		}
+		if apiKey != "" {
+			data.APIKey = apiKey
+		}
+		if model != "" {
+			data.Model = model
+		}
+		return New(config.NewFromData(data), nil, nil, nil).ExtractFactsLLM(ctx, prompt)
+	}
+	return New(nil, nil, nil, nil).ExtractFactsLLM(ctx, prompt)
 }
 
 // RunPruneRetention executes schedule run retention cleanup.
@@ -354,20 +444,23 @@ func RunFactExtraction(ctx context.Context, database *sql.DB, client *memory.Cli
 }
 
 // Run executes the monitoring loop with ticker interval and context cancellation.
-func Run(ctx context.Context, database *sql.DB, enqueuer MessageEnqueuer, threadCreator ThreadCreator, interval time.Duration) {
+func (s *Scheduler) Run(ctx context.Context, interval time.Duration) {
 	log.Printf("[Scheduler] Background scheduler monitor started (interval=%v)", interval)
 	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
-	ollamaClient := memory.NewClient("")
-	llmFunc := ExtractFactsLLM
+	var ollamaClient *memory.Client
+	if s.cfg != nil {
+		ollamaClient = memory.New(s.cfg)
+	} else {
+		ollamaClient = memory.NewClient("")
+	}
+	llmFunc := s.ExtractFactsLLM
 
 	// Initial evaluation on start
-	if err := ProcessDueSchedules(ctx, database, enqueuer, threadCreator); err != nil {
+	if err := s.ProcessDueSchedules(ctx); err != nil {
 		log.Printf("[Scheduler] Error in initial schedule check: %v", err)
 	}
-	go RunPruneRetention(database)
-	go RunFactExtraction(ctx, database, ollamaClient, llmFunc)
+	go RunPruneRetention(s.db)
+	go RunFactExtraction(ctx, s.db, ollamaClient, llmFunc)
 
 	var tickCount int
 	for {
@@ -377,19 +470,24 @@ func Run(ctx context.Context, database *sql.DB, enqueuer MessageEnqueuer, thread
 			return
 		case <-ticker.C:
 			tickCount++
-			if err := ProcessDueSchedules(ctx, database, enqueuer, threadCreator); err != nil {
+			if err := s.ProcessDueSchedules(ctx); err != nil {
 				log.Printf("[Scheduler] Error in schedule tick evaluation: %v", err)
 			}
 
 			// Run fact extraction hourly (every 120 ticks at 30s interval = 1 hour)
 			if tickCount%120 == 0 {
-				go RunFactExtraction(ctx, database, ollamaClient, llmFunc)
+				go RunFactExtraction(ctx, s.db, ollamaClient, llmFunc)
 			}
 
 			// Run retention pruning daily (every 2880 ticks at 30s interval = 24 hours)
 			if tickCount%2880 == 0 {
-				go RunPruneRetention(database)
+				go RunPruneRetention(s.db)
 			}
 		}
 	}
+}
+
+// Run executes the monitoring loop with ticker interval and context cancellation (compatibility wrapper).
+func Run(ctx context.Context, database *sql.DB, enqueuer MessageEnqueuer, threadCreator ThreadCreator, interval time.Duration) {
+	New(nil, database, enqueuer, threadCreator).Run(ctx, interval)
 }

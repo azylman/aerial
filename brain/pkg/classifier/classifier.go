@@ -13,6 +13,7 @@ import (
 	"unicode"
 
 	"github.com/google/uuid"
+	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
 	"github.com/azylman/aerial/brain/pkg/metrics"
 	"github.com/azylman/aerial/brain/pkg/runner"
@@ -31,6 +32,7 @@ type ClassificationResult struct {
 
 // Classifier evaluates whether an ambient channel message requires assistant response.
 type Classifier struct {
+	cfg              *config.Config
 	LLMFunc          func(ctx context.Context, model, prompt string) (string, error)
 	Model            string
 	Timeout          time.Duration
@@ -97,19 +99,42 @@ func WithClock(clock func() time.Time) Option {
 	}
 }
 
-// NewClassifier constructs a Classifier with defaults.
-func NewClassifier(opts ...Option) *Classifier {
+// New constructs a Classifier with pure *config.Config dependency injection and an optional runnerFunc.
+func New(cfg *config.Config, runnerFn runner.RunnerFunc, opts ...Option) *Classifier {
+	if cfg == nil {
+		cfg = config.NewFromData(config.DefaultConfigData())
+	}
 	c := &Classifier{
+		cfg:              cfg,
 		Model:            "Gemini 3.8 Flash (Low)",
 		Timeout:          12 * time.Second,
 		FailureThreshold: 3,
 		CooldownDuration: 60 * time.Second,
 		Clock:            time.Now,
 	}
+	if runnerFn != nil {
+		c.LLMFunc = func(ctx context.Context, model, prompt string) (string, error) {
+			cur := c.cfg.Current()
+			agyBin := "agy"
+			apiKey := ""
+			if cur != nil {
+				if cur.AgyBin != "" {
+					agyBin = cur.AgyBin
+				}
+				apiKey = cur.APIKey
+			}
+			return NewAgyLLMFunc(agyBin, apiKey, runnerFn)(ctx, model, prompt)
+		}
+	}
 	for _, opt := range opts {
 		opt(c)
 	}
 	return c
+}
+
+// NewClassifier constructs a Classifier with defaults (compatibility wrapper for New).
+func NewClassifier(opts ...Option) *Classifier {
+	return New(nil, nil, opts...)
 }
 
 func (c *Classifier) recordFailure() {
@@ -367,6 +392,11 @@ func (c *Classifier) classifyWithPrompt(ctx context.Context, prompt string) Clas
 	}
 
 	model := c.Model
+	if c.cfg != nil {
+		if cur := c.cfg.Current(); cur != nil && cur.ClassifierModel != "" {
+			model = cur.ClassifierModel
+		}
+	}
 	if model == "" {
 		model = "Gemini 3.8 Flash (Low)"
 	}
