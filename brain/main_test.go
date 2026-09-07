@@ -1567,6 +1567,26 @@ func TestHandleTranscripts_DBErrorBranch(t *testing.T) {
 	}
 }
 
+func TestRunBrainApp_PureConfig(t *testing.T) {
+	cfg := config.NewFromData(&config.ConfigData{
+		DatabaseURL:  filepath.Join(t.TempDir(), "brain_test.db"),
+		Port:         "0",
+		Model:        "test-model",
+		Timezone:     "UTC",
+		SystemPrompt: "test prompt",
+		Channels: map[string]config.ChannelPolicy{
+			"default": {Mode: "threads"},
+		},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Immediate cancellation to test lifecycle shutdown
+
+	err := RunBrainApp(ctx, cfg)
+	if err != nil && err != http.ErrServerClosed {
+		t.Errorf("expected clean shutdown, got %v", err)
+	}
+}
+
 
 
 

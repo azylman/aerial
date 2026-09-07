@@ -28,9 +28,14 @@ func setupTestConfig(t *testing.T, yamlContent string) {
 	if err := os.WriteFile(yamlPath, []byte(yamlContent), 0644); err != nil {
 		t.Fatalf("Failed to write test config.yaml: %v", err)
 	}
-	if _, err := config.LoadConfigFromPaths(yamlPath); err != nil {
+	cfg, err := config.LoadConfigFromPaths(yamlPath)
+	if err != nil {
 		t.Fatalf("Failed to load test config from %s: %v", yamlPath, err)
 	}
+	SetFunnelConfig(cfg)
+	t.Cleanup(func() {
+		SetFunnelConfig(nil)
+	})
 }
 
 func TestFunnelHelpers(t *testing.T) {

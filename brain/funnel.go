@@ -19,6 +19,22 @@ import (
 	"github.com/bwmarrin/discordgo"
 )
 
+var funnelCfg atomic.Pointer[config.Config]
+
+// SetFunnelConfig sets the active *config.Config for the Discord funnel.
+func SetFunnelConfig(cfg *config.Config) {
+	if cfg != nil {
+		funnelCfg.Store(cfg)
+	}
+}
+
+func currentFunnelConfig() *config.Config {
+	if c := funnelCfg.Load(); c != nil {
+		return c
+	}
+	return config.ActiveConfig()
+}
+
 const discordErrCodeThreadAlreadyCreated = 160004
 
 func isThreadAlreadyExistsError(err error) bool {
@@ -135,7 +151,7 @@ func getOrCreateThreadID(s *discordgo.Session, m *discordgo.Message) (string, bo
 		return m.ChannelID, true
 	}
 
-	policy := config.GetRuntimeConfig().ResolveChannelPolicy(m.ChannelID, channelName)
+	policy := config.ResolveChannelPolicy(currentFunnelConfig().Current().Channels, m.ChannelID, channelName)
 	if policy.Mode == "channel" {
 		return m.ChannelID, false
 	}
@@ -213,7 +229,7 @@ func buildDiscordPrompt(m *discordgo.Message, targetThreadID string, policy conf
 
 	isAdmin := false
 	if m.Author != nil {
-		isAdmin = config.GetRuntimeConfig().IsAdmin(m.Author.ID, m.Author.Username, m.Author.GlobalName)
+		isAdmin = config.IsAdmin(currentFunnelConfig().Current().AdminUsers, m.Author.ID, m.Author.Username, m.Author.GlobalName)
 		sb.WriteString(fmt.Sprintf("- author_id: %s\n", m.Author.ID))
 		sb.WriteString(fmt.Sprintf("- author_username: %s\n", m.Author.Username))
 		sb.WriteString(fmt.Sprintf("- author_global_name: %s\n", m.Author.GlobalName))
@@ -264,7 +280,7 @@ func buildDiscordPrompt(m *discordgo.Message, targetThreadID string, policy conf
 // inherit ignore/whitelisting rules from their parent channel.
 func resolveEffectiveChannelPolicy(s *discordgo.Session, channelID string) (config.ChannelPolicy, bool) {
 	effID, effName, isThread := queue.ResolveEffectiveChannel(s, channelID)
-	return config.GetRuntimeConfig().ResolveChannelPolicy(effID, effName), isThread
+	return config.ResolveChannelPolicy(currentFunnelConfig().Current().Channels, effID, effName), isThread
 }
 
 // isFunnelBotTargeted returns true if the message should trigger the funnel worker pool.
@@ -328,7 +344,9 @@ func connectDiscordFunnel(ctx context.Context, database *sql.DB, pool *queue.Wor
 	}
 
 	if ctx == nil {
-		ctx = context.Background()
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(context.Background())
+		cancel()
 	}
 
 	dg, err := discordgo.New("Bot " + token)
@@ -514,7 +532,7 @@ func connectDiscordFunnel(ctx context.Context, database *sql.DB, pool *queue.Wor
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if dg != nil {
+				if dg != nil && dg.DataReady {
 					metrics.RecordGatewayLatency(dg.HeartbeatLatency())
 				}
 			}

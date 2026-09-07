@@ -170,6 +170,7 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 		GitSync         GitSyncConfig              `yaml:"git_sync"`
 		McpServers      map[string]interface{}     `yaml:"mcp_servers"`
 		DatabaseURL     string                     `yaml:"database_url"`
+		DBPath          string                     `yaml:"db_path"`
 		Port            string                     `yaml:"port"`
 		AgyBin          string                     `yaml:"agy_bin"`
 		APIKey          string                     `yaml:"api_key"`
@@ -192,6 +193,9 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 	c.Channels = raw.Channels
 	c.GitSync = raw.GitSync
 	c.DatabaseURL = raw.DatabaseURL
+	if c.DatabaseURL == "" {
+		c.DatabaseURL = raw.DBPath
+	}
 	c.Port = raw.Port
 	c.AgyBin = raw.AgyBin
 	c.APIKey = raw.APIKey
@@ -342,6 +346,9 @@ func buildPostgresDSNFromEnv() string {
 	if envDSN := strings.TrimSpace(os.Getenv("DATABASE_URL")); envDSN != "" {
 		return envDSN
 	}
+	if envDBPath := strings.TrimSpace(os.Getenv("DB_PATH")); envDBPath != "" {
+		return envDBPath
+	}
 	dbHost := strings.TrimSpace(os.Getenv("POSTGRES_HOST"))
 	if dbHost == "" {
 		return ""
@@ -444,6 +451,11 @@ func getFallbackDefaults() ConfigData {
 	return *data
 }
 
+// ActiveConfig returns the global active *Config instance.
+func ActiveConfig() *Config {
+	return activeGlobalConfig
+}
+
 func GetRuntimeConfig() ConfigData {
 	return *activeGlobalConfig.Current()
 }
@@ -509,6 +521,10 @@ func LoadConfigFromPaths(paths ...string) (*Config, error) {
 	if loadedPath == "" {
 		if lastErr != nil {
 			log.Printf("[Config] Retaining Last Known Good Configuration (LKGC) due to load error: %v", lastErr)
+			fallback := activeGlobalConfig.Current()
+			cloned := cloneConfigData(fallback)
+			applyEnvironmentOverrides(cloned)
+			activeGlobalConfig.update(cloned)
 			return activeGlobalConfig, lastErr
 		}
 		// No files found and no parse errors: apply defaults + env overrides
