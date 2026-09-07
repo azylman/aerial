@@ -101,6 +101,8 @@ func TestFormatThreadTitle(t *testing.T) {
 }
 
 func TestGetDefaultTimezone(t *testing.T) {
+	t.Setenv("DEFAULT_TIMEZONE", "")
+	t.Setenv("TZ", "")
 	tmpDir := t.TempDir()
 	yamlPath := filepath.Join(tmpDir, "config.yaml")
 
