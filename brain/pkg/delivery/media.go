@@ -26,6 +26,12 @@ var AllowedAttachmentRoots = []string{
 	"/dev/shm",
 }
 
+func init() {
+	if tmp := os.TempDir(); tmp != "" {
+		AllowedAttachmentRoots = append(AllowedAttachmentRoots, tmp)
+	}
+}
+
 // Attachment represents a validated, memory-safe in-memory file payload for Discord delivery.
 type Attachment struct {
 	Filename    string

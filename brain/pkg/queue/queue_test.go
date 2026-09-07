@@ -1646,6 +1646,7 @@ func TestQueueCustomStalenessTTL(t *testing.T) {
 func TestQueueTurnCountSessionRotation(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
 
 	database, err := db.InitDB(":memory:")
 	if err != nil {
@@ -2227,6 +2228,7 @@ func ptrFloat(f float64) *float64 {
 func TestProcessBurst_PureAmbient(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
 
 	database, err := db.InitDB(":memory:")
 	if err != nil {
@@ -2345,6 +2347,7 @@ func TestProcessBurst_PureAmbient(t *testing.T) {
 func TestProcessBurst_Tier1Wake(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
 
 	database, err := db.InitDB(":memory:")
 	if err != nil {
@@ -2450,6 +2453,7 @@ func TestProcessBurst_Tier1Wake(t *testing.T) {
 func TestProcessBurst_Tier2Wake(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
 
 	database, err := db.InitDB(":memory:")
 	if err != nil {
@@ -2552,6 +2556,7 @@ func TestProcessBurst_Tier2Wake(t *testing.T) {
 func TestProcessBurst_MixedBurst(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
 
 	database, err := db.InitDB(":memory:")
 	if err != nil {
@@ -2729,6 +2734,7 @@ Please formulate your response and output it clearly.
 func TestProcessBurst_SessionRotationBeforeLeadingAmbient(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
 
 	database, err := db.InitDB(":memory:")
 	if err != nil {
@@ -2838,6 +2844,7 @@ func TestProcessBurst_SessionRotationBeforeLeadingAmbient(t *testing.T) {
 func TestProcessBurst_TrailingAmbient(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
 
 	database, err := db.InitDB(":memory:")
 	if err != nil {
@@ -3611,6 +3618,7 @@ func TestProcessBurst_CoalescedAmbientBurst(t *testing.T) {
 func TestProcessBurst_GhostSessionRecovery(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
 
 	database, err := db.InitDB(":memory:")
 	if err != nil {
@@ -3680,6 +3688,7 @@ func TestProcessBurst_GhostSessionRecovery(t *testing.T) {
 func TestProcessBurst_MultiTurnContinuity_AfterRecovery(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
 
 	database, err := db.InitDB(":memory:")
 	if err != nil {
@@ -3760,6 +3769,7 @@ func TestProcessBurst_MultiTurnContinuity_AfterRecovery(t *testing.T) {
 func TestProcessBurst_ColdChannel_NoStubDirectory(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
 
 	database, err := db.InitDB(":memory:")
 	if err != nil {
@@ -3833,6 +3843,7 @@ func TestProcessBurst_ColdChannel_NoStubDirectory(t *testing.T) {
 func TestProcessBurst_Turn1ContextInjection(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
 
 	database, err := db.InitDB(":memory:")
 	if err != nil {
@@ -3946,6 +3957,7 @@ func TestProcessBurst_Turn1ContextInjection(t *testing.T) {
 func TestProcessBurst_SessionRotation_ResetsToColdState(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
 
 	database, err := db.InitDB(":memory:")
 	if err != nil {
@@ -4093,6 +4105,7 @@ func TestProcessBurst_SessionRotation_ResetsToColdState(t *testing.T) {
 func TestProcessBurst_Turn1Crash_DoesNotPersistGhostUUID(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
 
 	database, err := db.InitDB(":memory:")
 	if err != nil {
@@ -4285,6 +4298,7 @@ func TestIsTier1Wake_WakeModeMention(t *testing.T) {
 func TestProcessBurst_WakeModeMention_BypassClassifier(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
 
 	database, err := db.InitDB(":memory:")
 	if err != nil {
@@ -4368,6 +4382,7 @@ func TestProcessBurst_WakeModeMention_BypassClassifier(t *testing.T) {
 func TestProcessBurst_WakeModeMention_DirectMentionWakes(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
 
 	database, err := db.InitDB(":memory:")
 	if err != nil {
@@ -4921,6 +4936,7 @@ func TestQueue_WatchdogInactivityRetryAndRecovery(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
 
 	mockSessID := "recovery-uuid-505"
 	sessDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", mockSessID)
@@ -5043,6 +5059,7 @@ func TestProcessBurst_ColdStartWatchdogRecoveryAndContinuation(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
 
 	coldSessID := "70707070-aaaa-4bbb-cccc-111122223333"
 	sessDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", coldSessID)
@@ -5174,6 +5191,7 @@ func TestProcessBurst_ColdStartStreamJsonInitLatchingOnFailure(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
 
 	coldSessID := "99999999-bbbb-4ccc-dddd-555566667777"
 	sessDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", coldSessID)
@@ -5282,6 +5300,7 @@ func TestProcessBurst_ColdStartTransientRecoveryAndContinuation(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
 
 	transientSessID := "80808080-bbbb-4ccc-dddd-444455556666"
 	sessDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", transientSessID)
@@ -5702,6 +5721,7 @@ func TestProcessBurst_EmptyStdout_TransientRetryAndContinuation(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
 
 	testSessID := "sess-empty-retry-888"
 	sessDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", testSessID)
@@ -5815,6 +5835,7 @@ func TestProcessBurst_GeneralFailure_PreservesSessionOnDisk(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
 
 	testSessID := "sess-general-fail-777"
 	sessDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", testSessID)
@@ -5995,6 +6016,7 @@ func TestProcessBurst_TransientError_RetainsOriginalPrompt(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
 
 	testSessID := "sess-transient-503"
 	_, err = session.EnsureSessionDir(testSessID)
@@ -6850,3 +6872,280 @@ func TestProcessBurst_ColdStart429_RetriesTransiently(t *testing.T) {
 	}
 }
 
+func TestProcessBurst_NonTransient_FailsFastOnAttempt1(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
+
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	existingSess := uuid.New().String()
+	_ = db.SaveSessionID(database, "thread-fast-fail", existingSess)
+
+	var mu sync.Mutex
+	attempts := 0
+	var deliveredText string
+	doneCh := make(chan struct{}, 1)
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    3,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			mu.Lock()
+			attempts++
+			mu.Unlock()
+			return "", "Error: invalid api key provided", 1, fmt.Errorf("exit status 1")
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			mu.Lock()
+			deliveredText = text
+			mu.Unlock()
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			doneCh <- struct{}{}
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{ID: "msg-auth-fail", ThreadID: "thread-fast-fail", Content: "Run with bad auth"}
+	_ = db.InsertMessage(database, msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Timeout waiting for message to fail fast")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if attempts != 1 {
+		t.Errorf("Expected exactly 1 attempt for non-transient error, got %d", attempts)
+	}
+
+	dbMsg, _ := db.GetMessage(database, "msg-auth-fail")
+	if dbMsg.Status != db.StatusFailed {
+		t.Errorf("Expected message status to be FAILED, got %s", dbMsg.Status)
+	}
+
+	savedSess, _ := db.GetSessionID(database, "thread-fast-fail")
+	if savedSess != "" {
+		t.Errorf("Expected latched session in DB to be cleared on non-transient fail-fast, got %q", savedSess)
+	}
+
+	if strings.Contains(deliveredText, "temporarily unavailable") {
+		t.Errorf("Expected non-transient failure NOT to gaslight user with temporary model unavailability, got: %s", deliveredText)
+	}
+	if deliveredText == "" {
+		t.Errorf("Expected delivery notification to be sent to user")
+	}
+}
+
+func TestProcessBurst_Exit0_NonTransientJSON_FailsFastOnAttempt1(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
+
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	var mu sync.Mutex
+	attempts := 0
+	doneCh := make(chan struct{}, 1)
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    3,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			mu.Lock()
+			attempts++
+			mu.Unlock()
+			return `{"status":"ERROR","error":"unknown flag: --unsupported-flag"}`, "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			doneCh <- struct{}{}
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{ID: "msg-flag-fail", ThreadID: "thread-flag-fail", Content: "Run with bad flag"}
+	_ = db.InsertMessage(database, msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Timeout waiting for message to fail fast")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if attempts != 1 {
+		t.Errorf("Expected exactly 1 attempt for exit 0 non-transient error, got %d", attempts)
+	}
+
+	dbMsg, _ := db.GetMessage(database, "msg-flag-fail")
+	if dbMsg.Status != db.StatusFailed {
+		t.Errorf("Expected message status to be FAILED, got %s", dbMsg.Status)
+	}
+}
+
+func TestProcessBurst_UnknownError_RetriesTransientByDefault(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
+
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	var mu sync.Mutex
+	attempts := 0
+	doneCh := make(chan struct{}, 1)
+
+	validUUID := uuid.New().String()
+	pbPath := filepath.Join(tmpDir, ".gemini", "antigravity", "conversations", validUUID+".pb")
+	_ = os.MkdirAll(filepath.Dir(pbPath), 0755)
+	_ = os.WriteFile(pbPath, []byte("protobuf-data"), 0644)
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    3,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			mu.Lock()
+			attempts++
+			curr := attempts
+			mu.Unlock()
+
+			if curr < 3 {
+				// Unclassified internal error defaults to transient
+				return "", "some mysterious unexpected exit from child process", 1, fmt.Errorf("exit status 1")
+			}
+			return fmt.Sprintf(`{"conversation_id":%q,"status":"SUCCESS","response":"Success on attempt 3!"}`, validUUID), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			doneCh <- struct{}{}
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{ID: "msg-unknown-retry", ThreadID: "thread-unknown-retry", Content: "Run unknown error"}
+	_ = db.InsertMessage(database, msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Timeout waiting for message to complete")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if attempts != 3 {
+		t.Errorf("Expected 3 attempts (transient-by-default retry), got %d", attempts)
+	}
+
+	dbMsg, _ := db.GetMessage(database, "msg-unknown-retry")
+	if dbMsg.Status != db.StatusCompleted {
+		t.Errorf("Expected message status to be COMPLETED, got %s", dbMsg.Status)
+	}
+}
+
+func TestProcessBurst_ColdStartContextWindow_FailsFast(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
+
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	var mu sync.Mutex
+	attempts := 0
+	doneCh := make(chan struct{}, 1)
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    3,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			mu.Lock()
+			attempts++
+			mu.Unlock()
+			return `{"status":"ERROR","error":"maximum context length exceeded"}`, "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			doneCh <- struct{}{}
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{ID: "msg-ctx-cold", ThreadID: "thread-ctx-cold", Content: "Massive prompt"}
+	_ = db.InsertMessage(database, msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Timeout waiting for cold start context window fail-fast")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if attempts != 1 {
+		t.Errorf("Expected exactly 1 attempt on cold start context window exceeded, got %d", attempts)
+	}
+
+	dbMsg, _ := db.GetMessage(database, "msg-ctx-cold")
+	if dbMsg.Status != db.StatusFailed {
+		t.Errorf("Expected message status to be FAILED, got %s", dbMsg.Status)
+	}
+}
