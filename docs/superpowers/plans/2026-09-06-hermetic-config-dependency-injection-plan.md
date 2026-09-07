@@ -14,6 +14,7 @@
 
 - Universal constructor injection: Every package other than `config` must receive `cfg *config.Config` in its constructor.
 - Zero field accessors: `ConfigData` has zero methods and zero getters. Subpackages call `cfg.Current()` and read raw fields.
+- Zero stale field caching: Sub-packages store `*config.Config` only. They must NEVER copy or cache scalar fields (`Model`, `Timezone`, `Channels`, `SystemPrompt`, etc.) into long-lived struct fields during construction. All dynamic configuration must be read JIT via `cfg.Current()` at execution time.
 - Zero `os.Getenv` or `os.LookupEnv` in `brain/pkg/db`, `brain/pkg/memory`, `brain/pkg/gitsync`, `brain/pkg/sanitizer`, `brain/pkg/queue`, `brain/pkg/runner`, `brain/pkg/scheduler`, `brain/pkg/session`, or `brain/pkg/watcher`.
 - `config.GetEnv` is deleted and unexported (`getEnv` private to `brain/pkg/config`).
 - `config.Config` manages thread-safe atomic hot-reloads via `atomic.Pointer[ConfigData]`, `Update(fresh)`, and `Reload(activeCfg)`.
