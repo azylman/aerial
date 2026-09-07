@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/sanitizer"
 	"sync"
 	"time"
@@ -198,7 +199,7 @@ func EnsureRepo(ctx context.Context, repoPath, repoUrl, pat string) error {
 // SyncRepo checks if the specified repository has git tracking, skips if index.lock is active,
 // locks SyncMutex, and performs a fast-forward git pull with optional token authentication.
 // Returns (hasChanges bool, err error).
-func SyncRepo(ctx context.Context, repoPath string) (bool, error) {
+func SyncRepo(ctx context.Context, repoPath string, cfg *config.Config) (bool, error) {
 	if repoPath == "" {
 		return false, nil
 	}
@@ -238,8 +239,14 @@ func SyncRepo(ctx context.Context, repoPath string) (bool, error) {
 	}
 	headBefore := strings.TrimSpace(string(outBefore))
 
-	// 6. Pull with --ff-only, auth args if GITHUB_PAT is set, and GIT_TERMINAL_PROMPT=0
-	pat := os.Getenv("GITHUB_PAT")
+	// 6. Pull with --ff-only, auth args if GITHUB_PAT is set in cfg, and GIT_TERMINAL_PROMPT=0
+	var pat string
+	if cfg != nil {
+		cur := cfg.Current()
+		if cur != nil {
+			pat = cur.GitHubPAT
+		}
+	}
 	authArgs := buildAuthArgs(pat)
 	pullArgs := append([]string{"-C", repoPath}, authArgs...)
 	pullArgs = append(pullArgs, "pull", "--ff-only")
@@ -277,7 +284,7 @@ func SyncRepo(ctx context.Context, repoPath string) (bool, error) {
 // If interval <= 0, it defaults to 60 seconds.
 // For each repository in repos, calls SyncRepo; if changes are detected, onUpdate(repo) is invoked.
 // Returns a stop function that cancels the background worker cleanly.
-func StartPeriodicSync(ctx context.Context, interval time.Duration, repos []string, onUpdate func(repo string)) func() {
+func StartPeriodicSync(ctx context.Context, interval time.Duration, repos []string, cfg *config.Config, onUpdate func(repo string)) func() {
 	if interval <= 0 {
 		interval = 60 * time.Second
 	}
@@ -294,7 +301,7 @@ func StartPeriodicSync(ctx context.Context, interval time.Duration, repos []stri
 				return
 			case <-ticker.C:
 				for _, repo := range repos {
-					hasChanges, err := SyncRepo(syncCtx, repo)
+					hasChanges, err := SyncRepo(syncCtx, repo, cfg)
 					if err == nil && hasChanges && onUpdate != nil {
 						onUpdate(repo)
 					}
