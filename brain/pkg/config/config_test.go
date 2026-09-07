@@ -539,23 +539,24 @@ mcp_servers:
 		t.Fatalf("LoadConfigFromPaths failed: %v", err)
 	}
 
-	if cfg.Model != "gemini-1.5-pro" {
-		t.Errorf("Expected model 'gemini-1.5-pro', got %q", cfg.Model)
+	c := cfg.Current()
+	if c.Model != "gemini-1.5-pro" {
+		t.Errorf("Expected model 'gemini-1.5-pro', got %q", c.Model)
 	}
-	if cfg.Timezone != "America/New_York" {
-		t.Errorf("Expected timezone 'America/New_York', got %q", cfg.Timezone)
+	if c.Timezone != "America/New_York" {
+		t.Errorf("Expected timezone 'America/New_York', got %q", c.Timezone)
 	}
-	if cfg.SystemChannel != "my-alerts" {
-		t.Errorf("Expected system channel 'my-alerts', got %q", cfg.SystemChannel)
+	if c.SystemChannel != "my-alerts" {
+		t.Errorf("Expected system channel 'my-alerts', got %q", c.SystemChannel)
 	}
-	if !cfg.GitSync.Enabled || cfg.GitSync.Interval != "30s" || cfg.GitSync.ConfigRepoUrl != "https://github.com/example/repo.git" {
-		t.Errorf("Unexpected GitSyncConfig: %+v", cfg.GitSync)
+	if !c.GitSync.Enabled || c.GitSync.Interval != "30s" || c.GitSync.ConfigRepoUrl != "https://github.com/example/repo.git" {
+		t.Errorf("Unexpected GitSyncConfig: %+v", c.GitSync)
 	}
-	if len(cfg.GitSync.Repositories) != 2 || cfg.GitSync.Repositories[0] != "/custom/path1" {
-		t.Errorf("Unexpected GitSync Repositories: %v", cfg.GitSync.Repositories)
+	if len(c.GitSync.Repositories) != 2 || c.GitSync.Repositories[0] != "/custom/path1" {
+		t.Errorf("Unexpected GitSync Repositories: %v", c.GitSync.Repositories)
 	}
-	if len(cfg.McpServers) != 1 || cfg.McpServers["weather"] == nil {
-		t.Errorf("Unexpected McpServers: %v", cfg.McpServers)
+	if len(c.McpServers) != 1 || c.McpServers["weather"] == nil {
+		t.Errorf("Unexpected McpServers: %v", c.McpServers)
 	}
 
 	// Verify getters
@@ -591,8 +592,8 @@ channels:
 	if err != nil {
 		t.Fatalf("Initial LoadConfigFromPaths failed: %v", err)
 	}
-	if cfg.Model != "gemini-2.5-flash" {
-		t.Fatalf("Unexpected initial config: %+v", cfg)
+	if cfg.Current().Model != "gemini-2.5-flash" {
+		t.Fatalf("Unexpected initial config: %+v", cfg.Current())
 	}
 
 	// 2. Corrupt YAML with invalid syntax
@@ -609,9 +610,9 @@ model: [broken yaml invalid syntax: ::: {
 	}
 
 	// Verify LKGC is retained
-	if cfgAfter.Model != "gemini-2.5-flash" {
+	if cfgAfter.Current().Model != "gemini-2.5-flash" {
 		t.Errorf("Expected retained LKGC model 'gemini-2.5-flash', got model=%q",
-			cfgAfter.Model)
+			cfgAfter.Current().Model)
 	}
 	rtCfg := GetRuntimeConfig()
 	if rtCfg.Model != "gemini-2.5-flash" || rtCfg.SystemChannel != "dev-channel-1" {
@@ -645,22 +646,20 @@ git_sync:
 		t.Fatalf("LoadConfigFromPaths failed: %v", err)
 	}
 
-	if cfg.Model != "interpolated-gemini-model" {
-		t.Errorf("Expected interpolated model 'interpolated-gemini-model', got %q", cfg.Model)
+	if cfg.Current().Model != "interpolated-gemini-model" {
+		t.Errorf("Expected interpolated model 'interpolated-gemini-model', got %q", cfg.Current().Model)
 	}
-	if cfg.SystemChannel != "interpolated-channel" {
-		t.Errorf("Expected interpolated system_channel 'interpolated-channel', got %q", cfg.SystemChannel)
+	if cfg.Current().SystemChannel != "interpolated-channel" {
+		t.Errorf("Expected interpolated system_channel 'interpolated-channel', got %q", cfg.Current().SystemChannel)
 	}
-	if cfg.GitSync.ConfigRepoUrl != "https://github.com/interpolated/repo.git" {
-		t.Errorf("Expected interpolated repo url, got %q", cfg.GitSync.ConfigRepoUrl)
+	if cfg.Current().GitSync.ConfigRepoUrl != "https://github.com/interpolated/repo.git" {
+		t.Errorf("Expected interpolated repo url, got %q", cfg.Current().GitSync.ConfigRepoUrl)
 	}
 }
 
 func TestLoadConfigMissingFileFallbacks(t *testing.T) {
 	// Reset runtime config to clean defaults
-	runtimeConfigMu.Lock()
-	currentRuntimeConfig = Config{}
-	runtimeConfigMu.Unlock()
+	activeGlobalConfig.update(DefaultConfigData())
 
 	t.Setenv("AGY_MODEL", "env-model-fallback")
 	t.Setenv("DEFAULT_TIMEZONE", "Europe/London")
@@ -671,28 +670,26 @@ func TestLoadConfigMissingFileFallbacks(t *testing.T) {
 		t.Fatalf("LoadConfigFromPaths failed for missing file: %v", err)
 	}
 
-	if cfg.Model != "env-model-fallback" {
-		t.Errorf("Expected fallback to env model 'env-model-fallback', got %q", cfg.Model)
+	if cfg.Current().Model != "env-model-fallback" {
+		t.Errorf("Expected fallback to env model 'env-model-fallback', got %q", cfg.Current().Model)
 	}
-	if cfg.Timezone != "Europe/London" {
-		t.Errorf("Expected fallback timezone 'Europe/London', got %q", cfg.Timezone)
+	if cfg.Current().Timezone != "Europe/London" {
+		t.Errorf("Expected fallback timezone 'Europe/London', got %q", cfg.Current().Timezone)
 	}
-	if cfg.SystemChannel != "env-system-chan" {
-		t.Errorf("Expected fallback channel 'env-system-chan', got %q", cfg.SystemChannel)
+	if cfg.Current().SystemChannel != "env-system-chan" {
+		t.Errorf("Expected fallback channel 'env-system-chan', got %q", cfg.Current().SystemChannel)
 	}
 }
 
 func TestLoadMCPConfig_MergeCustomWithDefaults(t *testing.T) {
 	// Set custom mcp_servers in runtime config
-	runtimeConfigMu.Lock()
-	currentRuntimeConfig = Config{
+	activeGlobalConfig.update(&ConfigData{
 		Model: "Gemini 3.6 Flash (Low)",
 		McpServers: map[string]json.RawMessage{
 			"brave-search": json.RawMessage(`{"serverUrl":"http://brave-mcp:4005/mcp"}`),
 			"custom-api":   json.RawMessage(`{"serverUrl":"https://mcp.example.com/mcp","headers":{"Authorization":"Bearer secret123"}}`),
 		},
-	}
-	runtimeConfigMu.Unlock()
+	})
 
 	raw := LoadMCPConfig()
 	var res struct {
@@ -729,16 +726,14 @@ func TestLoadMCPConfig_StreamableHttpAndLegacySSENormalization(t *testing.T) {
 	t.Setenv("GITHUB_PAT", "ghp_test123456789")
 
 	// Set custom mcp_servers with legacy /sse URL in runtime config
-	runtimeConfigMu.Lock()
-	currentRuntimeConfig = Config{
+	activeGlobalConfig.update(&ConfigData{
 		Model: "Gemini 3.6 Flash (Low)",
 		McpServers: map[string]json.RawMessage{
 			"docker":          json.RawMessage(`{"serverUrl":"http://docker-mcp:4002/sse"}`),
 			"github":          json.RawMessage(`{"serverUrl":"http://github-mcp:4003/sse"}`),
 			"victoriametrics": json.RawMessage(`{"serverUrl":"http://victoriametrics-mcp:4004/sse"}`),
 		},
-	}
-	runtimeConfigMu.Unlock()
+	})
 
 	raw := LoadMCPConfig()
 	var res struct {
@@ -798,30 +793,31 @@ channels:
 		t.Fatalf("LoadConfigFromPaths failed: %v", err)
 	}
 
-	if len(cfg.AdminUsers) != 2 || cfg.AdminUsers[0] != "169260920550195200" || cfg.AdminUsers[1] != "999888777666" {
-		t.Errorf("Unexpected AdminUsers: %v", cfg.AdminUsers)
+	c := cfg.Current()
+	if len(c.AdminUsers) != 2 || c.AdminUsers[0] != "169260920550195200" || c.AdminUsers[1] != "999888777666" {
+		t.Errorf("Unexpected AdminUsers: %v", c.AdminUsers)
 	}
 
-	if len(cfg.Channels) != 4 {
-		t.Fatalf("Expected 4 channel policies, got %d", len(cfg.Channels))
+	if len(c.Channels) != 4 {
+		t.Fatalf("Expected 4 channel policies, got %d", len(c.Channels))
 	}
 
-	def := cfg.Channels["default"]
+	def := c.Channels["default"]
 	if def.Mode != "threads" || !def.IsBotIgnored() {
 		t.Errorf("Unexpected default policy: %+v", def)
 	}
 
-	dev := cfg.Channels["aerial-dev"]
+	dev := c.Channels["aerial-dev"]
 	if dev.Mode != "threads" || !dev.IsBotIgnored() {
 		t.Errorf("Unexpected aerial-dev policy: %+v", dev)
 	}
 
-	gen := cfg.Channels["general"]
+	gen := c.Channels["general"]
 	if gen.Mode != "channel" || gen.GetWakeMode() != "classifier" || !gen.IsBotIgnored() || gen.GetAmbientWakeThreshold() != thresh || gen.GetAmbientWakePrompt() != "Channel relevance directive" {
 		t.Errorf("Unexpected general policy: %+v", gen)
 	}
 
-	sn := cfg.Channels["123456789012345678"]
+	sn := c.Channels["123456789012345678"]
 	if sn.Mode != "channel" || sn.GetWakeMode() != "mention" || sn.IsBotIgnored() {
 		t.Errorf("Unexpected snowflake channel policy: %+v", sn)
 	}
@@ -897,8 +893,8 @@ channels:
 	if err != nil {
 		t.Fatalf("LoadConfigFromPaths failed: %v", err)
 	}
-	if cfg.Channels["default"].Mode != "threads" {
-		t.Errorf("Expected default mode='threads', got %q", cfg.Channels["default"].Mode)
+	if cfg.Current().Channels["default"].Mode != "threads" {
+		t.Errorf("Expected default mode='threads', got %q", cfg.Current().Channels["default"].Mode)
 	}
 
 	// 2. Test default in channel mode gets mode: "channel"
@@ -916,8 +912,8 @@ channels:
 	if err != nil {
 		t.Fatalf("LoadConfigFromPaths failed: %v", err)
 	}
-	if cfg.Channels["default"].Mode != "channel" {
-		t.Errorf("Expected default mode='channel', got %q", cfg.Channels["default"].Mode)
+	if cfg.Current().Channels["default"].Mode != "channel" {
+		t.Errorf("Expected default mode='channel', got %q", cfg.Current().Channels["default"].Mode)
 	}
 }
 
@@ -925,7 +921,7 @@ func TestResolveChannelPolicy(t *testing.T) {
 	trueVal := true
 	falseVal := false
 	thresh := 0.75
-	cfg := Config{
+	cfg := NewFromData(&ConfigData{
 		Channels: map[string]ChannelPolicy{
 			"default": {
 				Mode:       "threads",
@@ -950,7 +946,7 @@ func TestResolveChannelPolicy(t *testing.T) {
 				IgnoreBots: &falseVal,
 			},
 		},
-	}
+	})
 
 	// 1. Match by Snowflake ID
 	p1 := cfg.ResolveChannelPolicy("1543668253363150928", "aerial-dev")
@@ -1022,14 +1018,14 @@ memory:
 		t.Fatalf("Expected legacy YAML to unmarshal cleanly with zero errors, got: %v", err)
 	}
 
-	if cfg.Model != "gemini-3.7-flash" {
-		t.Errorf("Expected model 'gemini-3.7-flash', got %q", cfg.Model)
+	if cfg.Current().Model != "gemini-3.7-flash" {
+		t.Errorf("Expected model 'gemini-3.7-flash', got %q", cfg.Current().Model)
 	}
-	if cfg.Timezone != "America/Los_Angeles" {
-		t.Errorf("Expected timezone 'America/Los_Angeles', got %q", cfg.Timezone)
+	if cfg.Current().Timezone != "America/Los_Angeles" {
+		t.Errorf("Expected timezone 'America/Los_Angeles', got %q", cfg.Current().Timezone)
 	}
-	if cfg.SystemChannel != "aerial-dev" {
-		t.Errorf("Expected system_channel 'aerial-dev', got %q", cfg.SystemChannel)
+	if cfg.Current().SystemChannel != "aerial-dev" {
+		t.Errorf("Expected system_channel 'aerial-dev', got %q", cfg.Current().SystemChannel)
 	}
 
 	genPolicy := cfg.ResolveChannelPolicy("99999", "general")
@@ -1039,9 +1035,9 @@ memory:
 }
 
 func TestIsAdmin(t *testing.T) {
-	cfg := Config{
+	cfg := NewFromData(&ConfigData{
 		AdminUsers: []string{"123456789012345678", "testadmin", "@AliceAdmin"},
-	}
+	})
 
 	// 1. Exact snowflake ID
 	if !cfg.IsAdmin("123456789012345678") {
@@ -1183,7 +1179,7 @@ channels:
 	}
 
 	// Default channel should be ignored
-	defPolicy := cfg.Channels["default"]
+	defPolicy := cfg.Current().Channels["default"]
 	if !defPolicy.IsIgnored() || defPolicy.Mode != "ignore" {
 		t.Errorf("Expected default policy mode=ignore, got %+v", defPolicy)
 	}
@@ -1755,14 +1751,14 @@ channels:
 		t.Fatalf("LoadConfigFromPaths failed: %v", err)
 	}
 
-	if cfg.Channels["default"].WakeMode != "mention" {
-		t.Errorf("expected default.wake_mode to be 'mention', got %q", cfg.Channels["default"].WakeMode)
+	if cfg.Current().Channels["default"].WakeMode != "mention" {
+		t.Errorf("expected default.wake_mode to be 'mention', got %q", cfg.Current().Channels["default"].WakeMode)
 	}
-	if cfg.Channels["lounge"].WakeMode != "mention" {
-		t.Errorf("expected lounge.wake_mode to be 'mention', got %q", cfg.Channels["lounge"].WakeMode)
+	if cfg.Current().Channels["lounge"].WakeMode != "mention" {
+		t.Errorf("expected lounge.wake_mode to be 'mention', got %q", cfg.Current().Channels["lounge"].WakeMode)
 	}
-	if cfg.Channels["alerts"].WakeMode != "classifier" {
-		t.Errorf("expected alerts.wake_mode to be 'classifier', got %q", cfg.Channels["alerts"].WakeMode)
+	if cfg.Current().Channels["alerts"].WakeMode != "classifier" {
+		t.Errorf("expected alerts.wake_mode to be 'classifier', got %q", cfg.Current().Channels["alerts"].WakeMode)
 	}
 
 	// 4. Test ResolveChannelPolicy inheritance of WakeMode
@@ -1799,15 +1795,13 @@ func TestConfigGettersAndFallbacks(t *testing.T) {
 	// Test LoadConfig with search paths
 	_, _ = LoadConfig()
 
-	runtimeConfigMu.Lock()
-	origCfg := currentRuntimeConfig
-	currentRuntimeConfig.Timezone = ""
-	currentRuntimeConfig.SystemChannel = ""
-	runtimeConfigMu.Unlock()
+	origCfg := activeGlobalConfig.Current()
+	activeGlobalConfig.update(&ConfigData{
+		Timezone:      "",
+		SystemChannel: "",
+	})
 	defer func() {
-		runtimeConfigMu.Lock()
-		currentRuntimeConfig = origCfg
-		runtimeConfigMu.Unlock()
+		activeGlobalConfig.update(origCfg)
 	}()
 
 	// Test GetTimezone
@@ -1895,7 +1889,7 @@ func TestConfigPolicyRawAndBotIgnored(t *testing.T) {
 	}
 
 	// 2. getChannelPolicyRaw
-	var emptyCfg Config
+	emptyCfg := NewFromData(&ConfigData{})
 	if _, ok := emptyCfg.getChannelPolicyRaw(""); ok {
 		t.Errorf("expected false for empty key")
 	}
@@ -1903,12 +1897,12 @@ func TestConfigPolicyRawAndBotIgnored(t *testing.T) {
 		t.Errorf("expected false for empty channels map")
 	}
 
-	cfg := Config{
+	cfg := NewFromData(&ConfigData{
 		Channels: map[string]ChannelPolicy{
 			"alerts":  {Mode: "channel"},
 			"#general": {Mode: "threads"},
 		},
-	}
+	})
 	if _, ok := cfg.getChannelPolicyRaw("alerts"); !ok {
 		t.Errorf("expected exact match for 'alerts'")
 	}
@@ -1941,11 +1935,11 @@ func TestConfigPolicyRawAndBotIgnored(t *testing.T) {
 	}
 
 	// Test ResolveChannelPolicy without default
-	noDefCfg := Config{
+	noDefCfg := NewFromData(&ConfigData{
 		Channels: map[string]ChannelPolicy{
 			"chan1": {Mode: "channel"},
 		},
-	}
+	})
 	p1 := noDefCfg.ResolveChannelPolicy("chan1", "chan1")
 	if p1.Mode != "channel" {
 		t.Errorf("expected mode 'channel', got %q", p1.Mode)
@@ -1956,11 +1950,11 @@ func TestConfigPolicyRawAndBotIgnored(t *testing.T) {
 	}
 
 	// Test default with empty mode
-	emptyModeCfg := Config{
+	emptyModeCfg := NewFromData(&ConfigData{
 		Channels: map[string]ChannelPolicy{
 			"default": {},
 		},
-	}
+	})
 	pDef := emptyModeCfg.ResolveChannelPolicy("other", "other")
 	if pDef.Mode != "threads" {
 		t.Errorf("expected mode 'threads', got %q", pDef.Mode)
@@ -2130,13 +2124,11 @@ ambient_wake_prompt: "Wake on high priority"
 
 	// Test LoadMCPConfig with invalid JSON values in McpServers
 	t.Run("LoadMCPConfig_RawStringServers", func(t *testing.T) {
-		runtimeConfigMu.Lock()
-		currentRuntimeConfig = Config{
+		activeGlobalConfig.update(&ConfigData{
 			McpServers: map[string]json.RawMessage{
 				"raw_server": json.RawMessage(`plain_string_not_json`),
 			},
-		}
-		runtimeConfigMu.Unlock()
+		})
 
 		raw := LoadMCPConfig()
 		if len(raw) == 0 {
@@ -2187,7 +2179,7 @@ ambient_wake_prompt: "Wake on high priority"
 }
 
 func TestConfig_UnmarshalYAML_InvalidTypes(t *testing.T) {
-	var cfg Config
+	var cfg ConfigData
 	err := yaml.Unmarshal([]byte("model: [1, 2, 3]"), &cfg)
 	if err == nil {
 		t.Error("Expected error unmarshaling invalid YAML into Config")
@@ -2213,14 +2205,10 @@ func TestGetFallbackDefaults_OptionsAndEnv(t *testing.T) {
 }
 
 func TestGetTimezone_And_GetSystemChannel_Fallbacks(t *testing.T) {
-	runtimeConfigMu.Lock()
-	oldCfg := currentRuntimeConfig
-	currentRuntimeConfig = Config{}
-	runtimeConfigMu.Unlock()
+	oldCfg := activeGlobalConfig.Current()
+	activeGlobalConfig.update(&ConfigData{})
 	defer func() {
-		runtimeConfigMu.Lock()
-		currentRuntimeConfig = oldCfg
-		runtimeConfigMu.Unlock()
+		activeGlobalConfig.update(oldCfg)
 	}()
 
 	// 1. DEFAULT_TIMEZONE fallback
@@ -2269,20 +2257,20 @@ channels:
 	if err != nil {
 		t.Fatalf("LoadConfigFromPaths failed with #default: %v", err)
 	}
-	if defPol, ok := cfg.Channels["default"]; !ok || defPol.Mode != "channel" {
+	if defPol, ok := cfg.Current().Channels["default"]; !ok || defPol.Mode != "channel" {
 		t.Errorf("Expected default policy with mode=channel, got %+v", defPol)
 	}
 }
 
 func TestIsAdmin_EmptyAndBlank(t *testing.T) {
 	// Empty admin list
-	cfgEmpty := Config{AdminUsers: nil}
+	cfgEmpty := NewFromData(&ConfigData{AdminUsers: nil})
 	if cfgEmpty.IsAdmin("user1") {
 		t.Errorf("Expected false for empty admin list")
 	}
 
 	// Blank input
-	cfg := Config{AdminUsers: []string{"alice", "bob"}}
+	cfg := NewFromData(&ConfigData{AdminUsers: []string{"alice", "bob"}})
 	if cfg.IsAdmin("", "  ", "@") {
 		t.Errorf("Expected false for blank identifiers")
 	}
@@ -2429,20 +2417,16 @@ func TestLoadMCPConfig_EnvOverridesAndSSENormalization(t *testing.T) {
 	}
 
 	// 3. Runtime config overlay
-	runtimeConfigMu.Lock()
-	oldCfg := currentRuntimeConfig
-	currentRuntimeConfig = Config{
+	oldCfg := activeGlobalConfig.Current()
+	activeGlobalConfig.update(&ConfigData{
 		Model: "gemini-2.5-flash",
 		McpServers: map[string]json.RawMessage{
 			"overlay-svc": json.RawMessage(`{"serverUrl":"http://overlay:9000/mcp"}`),
 			"raw-str-svc": json.RawMessage(`"valid-json-string"`),
 		},
-	}
-	runtimeConfigMu.Unlock()
+	})
 	defer func() {
-		runtimeConfigMu.Lock()
-		currentRuntimeConfig = oldCfg
-		runtimeConfigMu.Unlock()
+		activeGlobalConfig.update(oldCfg)
 	}()
 
 	rawOverlay := LoadMCPConfig()
@@ -2455,19 +2439,15 @@ func TestLoadMCPConfig_EnvOverridesAndSSENormalization(t *testing.T) {
 }
 
 func TestLoadMCPConfig_MarshalError(t *testing.T) {
-	runtimeConfigMu.Lock()
-	oldCfg := currentRuntimeConfig
-	currentRuntimeConfig = Config{
+	oldCfg := activeGlobalConfig.Current()
+	activeGlobalConfig.update(&ConfigData{
 		Model: "gemini-2.5-flash",
 		McpServers: map[string]json.RawMessage{
 			"bad-json-svc": json.RawMessage(`unclosed{`),
 		},
-	}
-	runtimeConfigMu.Unlock()
+	})
 	defer func() {
-		runtimeConfigMu.Lock()
-		currentRuntimeConfig = oldCfg
-		runtimeConfigMu.Unlock()
+		activeGlobalConfig.update(oldCfg)
 	}()
 
 	raw := LoadMCPConfig()
@@ -2504,7 +2484,7 @@ func TestEnsureMcpConfig_EdgeCases(t *testing.T) {
 }
 
 func TestResolveChannelPolicy_WakeModeInheritance(t *testing.T) {
-	cfg := Config{
+	cfg := NewFromData(&ConfigData{
 		Channels: map[string]ChannelPolicy{
 			"default": {
 				Mode:     "threads",
@@ -2514,7 +2494,7 @@ func TestResolveChannelPolicy_WakeModeInheritance(t *testing.T) {
 				Mode: "threads",
 			},
 		},
-	}
+	})
 	pol := cfg.ResolveChannelPolicy("12345", "aerial-general")
 	if pol.WakeMode != "mention" {
 		t.Errorf("Expected inherited WakeMode=mention, got %s", pol.WakeMode)
@@ -2626,17 +2606,153 @@ func TestLoadChannelInstructions_PathAndFileEdgeCases(t *testing.T) {
 	}
 }
 
+func TestConfig_NilSafetyAndDeepCloning(t *testing.T) {
+	// 1. Nil receiver safety
+	var nilCfg *Config
+	if nilCfg.Current() == nil {
+		t.Fatalf("expected DefaultConfigData on nil receiver, got nil")
+	}
 
+	// 2. Uninitialized pointer safety
+	emptyCfg := &Config{}
+	if emptyCfg.Current() == nil {
+		t.Fatalf("expected DefaultConfigData on uninitialized Config, got nil")
+	}
 
+	// 3. Deep cloning on NewFromData & update prevents external map mutation race
+	origChannels := map[string]ChannelPolicy{
+		"default": {Mode: "threads"},
+	}
+	cfg := NewFromData(&ConfigData{
+		Model:    "test-model",
+		Channels: origChannels,
+	})
 
+	// Mutate caller map
+	origChannels["default"] = ChannelPolicy{Mode: "main"}
+	if cfg.Current().Channels["default"].Mode != "threads" {
+		t.Errorf("expected deep-cloned channels, got %q", cfg.Current().Channels["default"].Mode)
+	}
 
+	// Mutate via private update
+	cfg.update(&ConfigData{
+		Model: "updated-model",
+	})
+	if cfg.Current().Model != "updated-model" {
+		t.Errorf("expected updated-model, got %q", cfg.Current().Model)
+	}
+}
 
+func TestConfig_PointerAliasing_ChannelPolicy(t *testing.T) {
+	ignoreBots := true
+	threshold := 0.75
+	orig := &ConfigData{
+		Channels: map[string]ChannelPolicy{
+			"default": {
+				Mode:                 "channel",
+				IgnoreBots:           &ignoreBots,
+				AmbientWakeThreshold: &threshold,
+			},
+		},
+	}
 
+	cfg := NewFromData(orig)
 
+	// Mutate original pointer targets
+	ignoreBots = false
+	threshold = 0.20
 
+	cur := cfg.Current()
+	if cur.Channels["default"].IgnoreBots == nil || !*cur.Channels["default"].IgnoreBots {
+		t.Errorf("expected IgnoreBots to retain original value true, got %v", *cur.Channels["default"].IgnoreBots)
+	}
+	if cur.Channels["default"].AmbientWakeThreshold == nil || *cur.Channels["default"].AmbientWakeThreshold != 0.75 {
+		t.Errorf("expected AmbientWakeThreshold to retain 0.75, got %v", *cur.Channels["default"].AmbientWakeThreshold)
+	}
+}
 
+func TestConfig_PostgresHostUnset_ReturnsEmptyDSN(t *testing.T) {
+	t.Setenv("DATABASE_URL", "")
+	t.Setenv("POSTGRES_HOST", "")
+	dsn := buildPostgresDSNFromEnv()
+	if dsn != "" {
+		t.Errorf("expected empty DSN when POSTGRES_HOST is unset, got %q", dsn)
+	}
+}
 
+func TestConfig_ExhaustiveDeepClone_OCP(t *testing.T) {
+	orig := &ConfigData{
+		Model:      "test-model",
+		AdminUsers: []string{"admin1", "admin2"},
+		Channels:   map[string]ChannelPolicy{"default": {Mode: "threads"}},
+		McpServers: map[string]json.RawMessage{"srv": json.RawMessage(`{"url":"http://localhost"}`)},
+		GitSync:    GitSyncConfig{Repositories: []string{"/repo1", "/repo2"}},
+	}
 
+	cloned := cloneConfigData(orig)
 
+	// Slice pointer independence
+	if len(orig.AdminUsers) > 0 && &orig.AdminUsers[0] == &cloned.AdminUsers[0] {
+		t.Fatalf("OCP violation: AdminUsers slice backing array was not cloned")
+	}
+	if len(orig.GitSync.Repositories) > 0 && &orig.GitSync.Repositories[0] == &cloned.GitSync.Repositories[0] {
+		t.Fatalf("OCP violation: GitSync.Repositories backing array was not cloned")
+	}
 
+	// Map independence
+	orig.Channels["mutated"] = ChannelPolicy{Mode: "channel"}
+	if _, exists := cloned.Channels["mutated"]; exists {
+		t.Fatalf("OCP violation: Channels map was shallow-copied")
+	}
+
+	orig.McpServers["mutated"] = json.RawMessage(`{}`)
+	if _, exists := cloned.McpServers["mutated"]; exists {
+		t.Fatalf("OCP violation: McpServers map was shallow-copied")
+	}
+}
+
+func TestConfig_ConcurrentUpdateRace(t *testing.T) {
+	cfg := NewFromData(&ConfigData{
+		Model: "initial-model",
+		Channels: map[string]ChannelPolicy{
+			"default": {Mode: "threads"},
+		},
+	})
+
+	var wg sync.WaitGroup
+	// 20 reader goroutines
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				cur := cfg.Current()
+				if cur == nil {
+					t.Errorf("nil snapshot observed")
+					return
+				}
+				_ = cur.Model
+				_ = cur.Channels["default"].Mode
+			}
+		}()
+	}
+
+	// 5 writer goroutines
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				cfg.update(&ConfigData{
+					Model: fmt.Sprintf("model-%d-%d", idx, j),
+					Channels: map[string]ChannelPolicy{
+						"default": {Mode: "channel"},
+					},
+				})
+			}
+		}(i)
+	}
+
+	wg.Wait()
+}
 

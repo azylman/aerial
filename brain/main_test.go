@@ -792,7 +792,7 @@ func TestSetupBrainMux_And_Endpoints(t *testing.T) {
 }
 
 func TestInitializeBrainEnvironment_And_Config(t *testing.T) {
-	cfg := config.Config{Model: "gemini-2.5-flash"}
+	cfg := config.NewFromData(&config.ConfigData{Model: "gemini-2.5-flash"})
 	bCfg := NewBrainConfigFromEnv(cfg)
 	if bCfg.Model != "gemini-2.5-flash" {
 		t.Errorf("Unexpected model in BrainConfig: %s", bCfg.Model)

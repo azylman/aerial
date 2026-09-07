@@ -833,13 +833,17 @@ type BrainConfig struct {
 	DiscordToken string
 }
 
-func NewBrainConfigFromEnv(cfg config.Config) BrainConfig {
+func NewBrainConfigFromEnv(cfg *config.Config) BrainConfig {
+	model := ""
+	if cfg != nil {
+		model = cfg.Current().Model
+	}
 	return BrainConfig{
 		Port:         config.GetEnv("PORT", "8080"),
 		AgyBin:       config.GetEnv("AGY_BIN", "agy"),
 		APIKey:       config.GetEnv("GEMINI_API_KEY", config.GetEnv("ANTIGRAVITY_API_KEY", "")),
 		SystemPrompt: config.GetEnv("SYSTEM_PROMPT", ""),
-		Model:        cfg.Model,
+		Model:        model,
 		DBPath:       db.GetDBPath(),
 		DiscordToken: config.GetEnv("DISCORD_TOKEN", config.GetEnv("DISCORD_BOT_TOKEN", "")),
 	}
@@ -899,7 +903,7 @@ func CreateReloadConfigFunc(pool *queue.WorkerPool, apiKey, systemPrompt string,
 			metrics.ConfigReloadsTotal.WithLabelValues(source, "success").Inc()
 		}
 
-		latestModel := latestCfg.Model
+		latestModel := latestCfg.Current().Model
 		latestMcpConfig := config.LoadMCPConfig()
 
 		if err := config.EnsureAgySettings(apiKey, latestModel); err != nil {
