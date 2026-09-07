@@ -55,23 +55,41 @@ type MessageEnqueuer interface {
 type Scheduler struct {
 	cfg           *config.Config
 	db            *sql.DB
+	store         db.Store
 	enqueuer      MessageEnqueuer
 	threadCreator ThreadCreator
 }
 
-// New constructs a Scheduler with pure *config.Config pointer dependency injection.
-func New(cfg *config.Config, db *sql.DB, enqueuer MessageEnqueuer, threadCreator ThreadCreator) *Scheduler {
+// New constructs a Scheduler supporting both legacy *sql.DB and db.Store interface parameters.
+func New(cfg *config.Config, dbOrStore any, enqueuer MessageEnqueuer, threadCreator ThreadCreator) *Scheduler {
+	var database *sql.DB
+	var store db.Store
+	switch v := dbOrStore.(type) {
+	case db.Store:
+		store = v
+	case *sql.DB:
+		database = v
+		if v != nil {
+			store = db.NewSQLStore(v)
+		}
+	}
 	return &Scheduler{
 		cfg:           cfg,
-		db:            db,
+		db:            database,
+		store:         store,
 		enqueuer:      enqueuer,
 		threadCreator: threadCreator,
 	}
 }
 
+// NewWithStore constructs a Scheduler with a db.Store interface.
+func NewWithStore(cfg *config.Config, store db.Store, enqueuer MessageEnqueuer, threadCreator ThreadCreator) *Scheduler {
+	return New(cfg, store, enqueuer, threadCreator)
+}
+
 // NewScheduler is a compatibility wrapper for New.
-func NewScheduler(cfg *config.Config, db *sql.DB, enqueuer MessageEnqueuer, threadCreator ThreadCreator) *Scheduler {
-	return New(cfg, db, enqueuer, threadCreator)
+func NewScheduler(cfg *config.Config, dbOrStore any, enqueuer MessageEnqueuer, threadCreator ThreadCreator) *Scheduler {
+	return New(cfg, dbOrStore, enqueuer, threadCreator)
 }
 
 // FormatThreadTitle formats the thread title for a recurring cron trigger, clamped to at most 100 runes.
