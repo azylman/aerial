@@ -7,10 +7,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
+	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/metrics"
 )
 
@@ -21,24 +21,65 @@ const (
 )
 
 type Client struct {
-	BaseURL    string
-	HTTPClient *http.Client
+	cfg        *config.Config
+	httpClient *http.Client
 }
 
-func NewClient(baseURL string) *Client {
-	if baseURL == "" {
-		baseURL = os.Getenv("OLLAMA_URL")
-		if baseURL == "" {
-			baseURL = DefaultOllamaURL
-		}
+// New creates a new memory Client with pure *config.Config dependency injection.
+func New(cfg *config.Config) *Client {
+	if cfg == nil {
+		cfg = config.NewFromData(&config.ConfigData{})
 	}
-	baseURL = strings.TrimSuffix(baseURL, "/")
 	return &Client{
-		BaseURL: baseURL,
-		HTTPClient: &http.Client{
+		cfg: cfg,
+		httpClient: &http.Client{
 			Timeout: 3 * time.Second,
 		},
 	}
+}
+
+// NewClient is a compatibility constructor.
+func NewClient(baseURLOrCfg any) *Client {
+	switch v := baseURLOrCfg.(type) {
+	case *config.Config:
+		return New(v)
+	case string:
+		return New(config.NewFromData(&config.ConfigData{
+			Ollama: config.OllamaConfig{
+				BaseURL: v,
+			},
+		}))
+	default:
+		return New(nil)
+	}
+}
+
+func (c *Client) getOllamaConfig() config.OllamaConfig {
+	if c == nil || c.cfg == nil {
+		return config.OllamaConfig{
+			BaseURL: DefaultOllamaURL,
+			Model:   DefaultEmbeddingModel,
+		}
+	}
+	cur := c.cfg.Current()
+	if cur == nil {
+		return config.OllamaConfig{
+			BaseURL: DefaultOllamaURL,
+			Model:   DefaultEmbeddingModel,
+		}
+	}
+	cfg := cur.Ollama
+	if cfg.BaseURL == "" {
+		cfg.BaseURL = DefaultOllamaURL
+	}
+	if cfg.Model == "" {
+		cfg.Model = DefaultEmbeddingModel
+	}
+	return cfg
+}
+
+func (c *Client) BaseURL() string {
+	return strings.TrimSuffix(c.getOllamaConfig().BaseURL, "/")
 }
 
 type EmbeddingRequest struct {
@@ -52,24 +93,23 @@ type EmbeddingResponse struct {
 }
 
 // GenerateEmbedding generates an embedding for a text string.
-// If isQuery is true and EMBEDDING_QUERY_PREFIX is configured, prepends the query instruction prefix.
+// If isQuery is true and Ollama.QueryPrefix is configured, prepends the query instruction prefix.
 // Enforces a 1.0s timeout per attempt with up to maxRetries attempts (default 1 retry = 2 total attempts).
 func (c *Client) GenerateEmbedding(ctx context.Context, text string, isQuery bool, maxRetries int) (result []float32, retErr error) {
 	if text == "" {
 		return nil, fmt.Errorf("text cannot be empty")
 	}
 
+	ollamaCfg := c.getOllamaConfig()
+
 	prompt := text
 	if isQuery {
-		if prefix := os.Getenv("EMBEDDING_QUERY_PREFIX"); prefix != "" {
+		if prefix := ollamaCfg.QueryPrefix; prefix != "" {
 			prompt = prefix + text
 		}
 	}
 
-	model := os.Getenv("EMBEDDING_MODEL")
-	if model == "" {
-		model = os.Getenv("OLLAMA_EMBEDDING_MODEL")
-	}
+	model := ollamaCfg.Model
 	if model == "" {
 		model = DefaultEmbeddingModel
 	}
@@ -125,14 +165,19 @@ func (c *Client) GenerateEmbedding(ctx context.Context, text string, isQuery boo
 }
 
 func (c *Client) doRequest(ctx context.Context, body []byte) ([]float32, error) {
-	url := c.BaseURL + "/api/embeddings"
+	url := c.BaseURL() + "/api/embeddings"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.HTTPClient.Do(req)
+	httpClient := c.httpClient
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 3 * time.Second}
+	}
+
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}

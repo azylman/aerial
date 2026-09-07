@@ -13,8 +13,26 @@ import (
 	"testing"
 	"time"
 
+	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
 )
+
+func TestNew_ConfigPointerInjection(t *testing.T) {
+	cfg := config.NewFromData(&config.ConfigData{
+		Ollama: config.OllamaConfig{
+			BaseURL:     "http://localhost:11434",
+			Model:       "nomic-embed-text",
+			QueryPrefix: "search_query: ",
+		},
+	})
+	client := New(cfg)
+	if client == nil {
+		t.Fatalf("expected non-nil client")
+	}
+	if client.cfg != cfg {
+		t.Errorf("expected client to store injected *config.Config")
+	}
+}
 
 func TestFloat32ByteConversions(t *testing.T) {
 	input := []float32{0.123, -0.456, 0.789, 1.0, -1.0}
@@ -112,7 +130,12 @@ func TestMockOllamaClient(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL)
+	cfg := config.NewFromData(&config.ConfigData{
+		Ollama: config.OllamaConfig{
+			BaseURL: server.URL,
+		},
+	})
+	client := New(cfg)
 
 	// Test query embedding without prefix configured (default for all-minilm)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -129,10 +152,16 @@ func TestMockOllamaClient(t *testing.T) {
 		t.Errorf("expected clean prompt 'test query', got: %s", receivedPrompt)
 	}
 
-	// Test query embedding with EMBEDDING_QUERY_PREFIX configured
-	t.Setenv("EMBEDDING_QUERY_PREFIX", "Represent this query: ")
+	// Test query embedding with QueryPrefix configured in Config
+	cfgPrefixed := config.NewFromData(&config.ConfigData{
+		Ollama: config.OllamaConfig{
+			BaseURL:     server.URL,
+			QueryPrefix: "Represent this query: ",
+		},
+	})
+	clientPrefixed := New(cfgPrefixed)
 
-	embPrefixed, err := client.GenerateEmbedding(ctx, "test query 2", true, 1)
+	embPrefixed, err := clientPrefixed.GenerateEmbedding(ctx, "test query 2", true, 1)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -171,56 +200,12 @@ func TestParseFactsJSON(t *testing.T) {
 	}
 }
 
-func isProductionDSN(dsn string) bool {
-	lower := strings.ToLower(dsn)
-	if strings.Contains(lower, "aerial_test") || strings.Contains(lower, "test_") || strings.Contains(lower, "_test") {
-		return false
-	}
-	return strings.Contains(lower, "@postgres:5432/aerial") ||
-		strings.Contains(lower, "@127.0.0.1:5432/aerial") ||
-		strings.Contains(lower, "@localhost:5432/aerial") ||
-		strings.Contains(lower, ":5432/aerial") ||
-		strings.Contains(lower, "/aerial")
-}
-
 func setupTestDB(t *testing.T) *sql.DB {
-	dsn := os.Getenv("TEST_DATABASE_URL")
-	if dsn == "" {
-		dsn = "postgres://postgres:aerial_test@127.0.0.1:54329/aerial_test?sslmode=disable"
-	}
-
-	// Defensive invariant: Refuse to run test setup or truncate tables if DSN targets production
-	if isProductionDSN(dsn) {
-		t.Fatalf("CRITICAL SAFETY CHECK: setupTestDB detected production database in DSN %q; refusing to truncate", dsn)
-		return nil
-	}
-
-	// Quick connectivity probe (200ms) to avoid multi-minute retry delays in offline test runners
-	quickDB, openErr := sql.Open("pgx", dsn)
-	if openErr == nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-		pingErr := quickDB.PingContext(ctx)
-		cancel()
-		_ = quickDB.Close()
-		if pingErr == nil {
-			database, err := db.InitDB(dsn)
-			if err == nil {
-				_, err = database.Exec(`
-					TRUNCATE TABLE messages, sessions, one_shot_schedules, cron_schedules, schedule_runs, facts RESTART IDENTITY CASCADE;
-					SELECT setval(pg_get_serial_sequence('facts', 'id'), 1, false);
-					SELECT setval(pg_get_serial_sequence('messages', 'row_id'), 1, false);
-				`)
-				if err == nil {
-					return database
-				}
-				_ = database.Close()
-			}
-		}
-	}
-
-	// Hermetic SQLite fallback
 	sqlitePath := filepath.Join(t.TempDir(), "aerial_test_mem.db")
-	database, err := db.InitDB(sqlitePath)
+	cfg := config.NewFromData(&config.ConfigData{
+		DatabaseURL: sqlitePath,
+	})
+	database, err := db.New(cfg)
 	if err != nil {
 		t.Fatalf("Failed to initialize hermetic SQLite test DB: %v", err)
 		return nil
@@ -501,25 +486,46 @@ func TestExtractActiveConversationFacts(t *testing.T) {
 	}
 }
 
-func TestMemory_ClientCreationAndEnv(t *testing.T) {
-	// 1. Explicit baseURL
-	c1 := NewClient("http://custom:11434/")
-	if c1.BaseURL != "http://custom:11434" {
-		t.Errorf("expected trimmed baseURL, got %q", c1.BaseURL)
+func TestMemory_ClientCreationAndConfig(t *testing.T) {
+	// 1. Explicit baseURL in Config
+	cfg1 := config.NewFromData(&config.ConfigData{
+		Ollama: config.OllamaConfig{
+			BaseURL: "http://custom:11434/",
+		},
+	})
+	c1 := New(cfg1)
+	if c1.BaseURL() != "http://custom:11434" {
+		t.Errorf("expected trimmed baseURL, got %q", c1.BaseURL())
 	}
 
-	// 2. OLLAMA_URL env
-	t.Setenv("OLLAMA_URL", "http://env-ollama:11434/")
-	c2 := NewClient("")
-	if c2.BaseURL != "http://env-ollama:11434" {
-		t.Errorf("expected env baseURL, got %q", c2.BaseURL)
+	// 2. Custom BaseURL in Config
+	cfg2 := config.NewFromData(&config.ConfigData{
+		Ollama: config.OllamaConfig{
+			BaseURL: "http://env-ollama:11434/",
+		},
+	})
+	c2 := New(cfg2)
+	if c2.BaseURL() != "http://env-ollama:11434" {
+		t.Errorf("expected configured baseURL, got %q", c2.BaseURL())
 	}
 
 	// 3. Fallback default
-	t.Setenv("OLLAMA_URL", "")
-	c3 := NewClient("")
-	if c3.BaseURL != DefaultOllamaURL {
-		t.Errorf("expected DefaultOllamaURL %q, got %q", DefaultOllamaURL, c3.BaseURL)
+	cfg3 := config.NewFromData(&config.ConfigData{})
+	c3 := New(cfg3)
+	if c3.BaseURL() != DefaultOllamaURL {
+		t.Errorf("expected DefaultOllamaURL %q, got %q", DefaultOllamaURL, c3.BaseURL())
+	}
+
+	// 4. Nil config fallback
+	cNil := New(nil)
+	if cNil.BaseURL() != DefaultOllamaURL {
+		t.Errorf("expected DefaultOllamaURL %q for nil cfg, got %q", DefaultOllamaURL, cNil.BaseURL())
+	}
+
+	// 5. Compatibility NewClient with string
+	cCompat := NewClient("http://custom:11434/")
+	if cCompat.BaseURL() != "http://custom:11434" {
+		t.Errorf("expected trimmed baseURL from NewClient, got %q", cCompat.BaseURL())
 	}
 }
 
@@ -601,9 +607,6 @@ func TestMemory_GenerateEmbedding_ErrorsAndRetries(t *testing.T) {
 		t.Error("expected JSON unmarshal error")
 	}
 
-	// 8. Custom EMBEDDING_MODEL vs OLLAMA_EMBEDDING_MODEL
-	t.Setenv("EMBEDDING_MODEL", "custom-bge-model")
-	t.Setenv("OLLAMA_EMBEDDING_MODEL", "other-model")
 	var receivedModel string
 	serverModel := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req EmbeddingRequest
@@ -616,7 +619,14 @@ func TestMemory_GenerateEmbedding_ErrorsAndRetries(t *testing.T) {
 	}))
 	defer serverModel.Close()
 
-	cModel := NewClient(serverModel.URL)
+	// 8. Custom model via Config
+	cfgModel := config.NewFromData(&config.ConfigData{
+		Ollama: config.OllamaConfig{
+			BaseURL: serverModel.URL,
+			Model:   "custom-bge-model",
+		},
+	})
+	cModel := New(cfgModel)
 	_, _ = cModel.GenerateEmbedding(context.Background(), "hello", false, 0)
 	if receivedModel != "custom-bge-model" {
 		t.Errorf("expected custom-bge-model, got %q", receivedModel)
