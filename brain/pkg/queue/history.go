@@ -341,7 +341,7 @@ func SummarizeThreadHistory(ctx context.Context, llm LLMFunc, model, threadID st
 			return "", fmt.Errorf("no valid history to summarize")
 		}
 
-		prompt := fmt.Sprintf("Synthesize the following Discord thread transcript into a concise memory block. Focus specifically on:\n1. Technical & Architecture Decisions: Key invariants, design choices, and code changes agreed upon.\n2. Open Questions & Future Action Items: Pending decisions, TODOs, and topics likely to be referenced in future turns.\n3. User Directives & Constraints: Explicit instructions and preferences given by the user.\n\nYou must output exactly a <THREAD_SUMMARY> block containing your summary. Do not include extra text outside the tags.\n\n<raw_thread_transcript>\n%s\n</raw_thread_transcript>", transcript)
+		prompt := fmt.Sprintf("Synthesize the following Discord thread transcript into a concise memory block. Focus specifically on:\n1. Milestones & Deliverables: Key progress, completed tasks, and verified outcomes.\n2. User Directives & Constraints: Explicit instructions, preferences, and technical boundaries set by the user.\n3. Engineering Deltas & State Changes: Code modifications, refactors, architecture decisions, and config updates.\n4. Future Context & Action Items: Unresolved tasks, open questions, and context likely to be discussed in future turns.\n\nYou must output exactly a <THREAD_SUMMARY> block containing your summary. Do not include extra text outside the tags.\n\n<raw_thread_transcript>\n%s\n</raw_thread_transcript>", transcript)
 
 		result, err := llm(timeoutCtx, model, prompt)
 		if err != nil {

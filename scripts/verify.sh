@@ -96,6 +96,14 @@ run_go_test() {
     svc="$1"
     if [ -d "$svc" ]; then
         echo "   [go test] Testing $svc (clean-room)..."
+        cgo_val="${CGO_ENABLED:-}"
+        if [ -z "$cgo_val" ]; then
+            if has_cmd gcc || has_cmd clang; then
+                cgo_val=1
+            else
+                cgo_val=0
+            fi
+        fi
         if has_cmd go; then
             (cd "$svc" && env -i \
                 ${PATH:+PATH="$PATH"} \
@@ -119,7 +127,7 @@ run_go_test() {
                 LANG="${LANG:-en_US.UTF-8}" \
                 LC_ALL="${LC_ALL:-en_US.UTF-8}" \
                 GIT_TERMINAL_PROMPT=0 \
-                CGO_ENABLED="${CGO_ENABLED:-1}" \
+                CGO_ENABLED="$cgo_val" \
                 go test -v ./...)
         elif has_cmd docker; then
             docker run --rm \

@@ -148,6 +148,15 @@ for svc in $ALL_GO_SERVICES; do
         safe_pkg=$(echo "$pkg" | tr '/.' '__')
         prof_file="${PROF_DIR}/${safe_pkg}.out"
 
+        cgo_val="${CGO_ENABLED:-}"
+        if [ -z "$cgo_val" ]; then
+            if command -v gcc >/dev/null 2>&1 || command -v clang >/dev/null 2>&1; then
+                cgo_val=1
+            else
+                cgo_val=0
+            fi
+        fi
+
         # Execute go test with isolated coverprofile under clean environment
         if ! (cd "$svc" && env -i \
             ${PATH:+PATH="$PATH"} \
@@ -171,7 +180,7 @@ for svc in $ALL_GO_SERVICES; do
             LANG="${LANG:-en_US.UTF-8}" \
             LC_ALL="${LC_ALL:-en_US.UTF-8}" \
             GIT_TERMINAL_PROMPT=0 \
-            CGO_ENABLED="${CGO_ENABLED:-1}" \
+            CGO_ENABLED="$cgo_val" \
             go test -coverprofile="$prof_file" "$pkg"); then
             record_violation "Package $pkg tests failed during coverage collection"
         fi
