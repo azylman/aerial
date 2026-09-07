@@ -54,6 +54,10 @@ func BytesToFloat32(buf []byte) []float32 {
 }
 
 func InsertFact(database DBTX, category, factText string, importance float64, threadID string, embedding []float32) (id int64, err error) {
+	return InsertFactWithContext(context.Background(), database, false, category, factText, importance, threadID, embedding)
+}
+
+func InsertFactWithContext(ctx context.Context, database DBTX, isPg bool, category, factText string, importance float64, threadID string, embedding []float32) (id int64, err error) {
 	start := time.Now()
 	defer func() {
 		status := "success"
@@ -78,19 +82,22 @@ func InsertFact(database DBTX, category, factText string, importance float64, th
 
 	var vecVal interface{}
 	if len(embedding) == ExpectedEmbeddingDim {
-		if isPostgres(database) {
+		if isPg || isPostgres(database) {
 			vecVal = pgvector.NewVector(embedding)
 		} else {
 			vecVal = Float32ToBytes(embedding)
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	query := `INSERT INTO facts (category, fact_text, importance, thread_id, embedding, created_at) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`
 	var insertedID int64
-	err = database.QueryRowContext(ctx, query, category, factText, importance, threadID, vecVal, now).Scan(&insertedID)
+	err = database.QueryRowContext(queryCtx, query, category, factText, importance, threadID, vecVal, now).Scan(&insertedID)
 	if err != nil {
 		return 0, err
 	}

@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"testing"
 )
@@ -53,5 +54,20 @@ func TestWithTxRollback(t *testing.T) {
 	}
 	if len(facts.Facts) != 0 {
 		t.Fatalf("Expected 0 facts after rollback, got %d", len(facts.Facts))
+	}
+}
+
+func TestNewTxStoreTypedNil(t *testing.T) {
+	var tx *sql.Tx = nil
+	store := NewTxStore(tx, false)
+	if store != nil {
+		t.Fatalf("Expected NewTxStore to return nil for typed nil *sql.Tx, got %v", store)
+	}
+
+	var nilStore *SQLStore = nil
+	ctx := context.Background()
+	_, err := nilStore.InsertFact(ctx, "cat", "text", 1.0, "th", nil)
+	if err == nil {
+		t.Fatalf("Expected error when calling InsertFact on nil *SQLStore, got nil")
 	}
 }
