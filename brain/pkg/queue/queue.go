@@ -44,7 +44,7 @@ var (
 )
 
 const (
-	DefaultMaxSessionTurns = 25
+	DefaultMaxSessionTurns = 10
 	DefaultTimeoutMinutes  = 60
 	ContinuationPromptTemplate = "Your previous execution timed out or was interrupted while working. Please inspect where you left off in the conversation transcript and continue the task to completion.\n\nOriginal user request:\n%s"
 )
