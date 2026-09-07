@@ -51,14 +51,19 @@ Requirements:
 TRANSCRIPT:
 `
 
-// BackfillMissingEmbeddings iterates through any facts with NULL or empty embedding BLOBs
-// and generates vector embeddings via Ollama.
-func BackfillMissingEmbeddings(ctx context.Context, database *sql.DB, client *Client) (int, error) {
-	if database == nil || client == nil {
+func BackfillMissingEmbeddings(ctx context.Context, database any, client *Client) (int, error) {
+	var dbtx db.DBTX
+	switch v := database.(type) {
+	case db.DBTX:
+		dbtx = v
+	case interface{ DB() db.DBTX }:
+		dbtx = v.DB()
+	}
+	if dbtx == nil || client == nil {
 		return 0, fmt.Errorf("nil database or ollama client")
 	}
 
-	rows, err := database.QueryContext(ctx, "SELECT id, fact_text FROM facts WHERE embedding IS NULL")
+	rows, err := dbtx.QueryContext(ctx, "SELECT id, fact_text FROM facts WHERE embedding IS NULL")
 	if err != nil {
 		return 0, fmt.Errorf("failed to query facts missing embeddings: %w", err)
 	}
@@ -103,15 +108,11 @@ func BackfillMissingEmbeddings(ctx context.Context, database *sql.DB, client *Cl
 			continue
 		}
 
-		if err := db.UpdateFactEmbedding(database, item.id, emb); err != nil {
+		if err := db.UpdateFactEmbedding(dbtx, item.id, emb); err != nil {
 			log.Printf("[Memory] Error updating embedding for fact ID %d: %v", item.id, err)
 		} else {
 			backfilled++
 		}
-	}
-
-	if backfilled > 0 {
-		log.Printf("[Memory] Successfully backfilled %d vector embedding(s)", backfilled)
 	}
 	return backfilled, nil
 }
@@ -119,8 +120,17 @@ func BackfillMissingEmbeddings(ctx context.Context, database *sql.DB, client *Cl
 // ExtractActiveConversationFacts queries conversations modified in the last activeHours,
 // extracts facts via the primary LLM, generates vector embeddings via Ollama, and stores them in persistent DB.
 // Single-flight protected via extractionMutex.
-func ExtractActiveConversationFacts(ctx context.Context, database *sql.DB, client *Client, llmFunc LLMClientFunc, activeHours int) error {
-	if database == nil || client == nil || llmFunc == nil {
+func ExtractActiveConversationFacts(ctx context.Context, database any, client *Client, llmFunc LLMClientFunc, activeHours int) error {
+	var factStore db.FactStore
+	switch v := database.(type) {
+	case db.FactStore:
+		factStore = v
+	case *sql.DB:
+		if v != nil {
+			factStore = db.NewSQLStore(v)
+		}
+	}
+	if factStore == nil || client == nil || llmFunc == nil {
 		return fmt.Errorf("nil database, ollama client, or llmFunc")
 	}
 
@@ -130,7 +140,7 @@ func ExtractActiveConversationFacts(ctx context.Context, database *sql.DB, clien
 	}
 	defer extractionMutex.Unlock()
 
-	threadIDs, err := db.GetActiveConversationsForExtraction(database, activeHours)
+	threadIDs, err := factStore.GetActiveConversationsForExtraction(ctx, activeHours)
 	if err != nil {
 		return fmt.Errorf("failed to get active conversations: %w", err)
 	}
@@ -157,7 +167,21 @@ func ExtractActiveConversationFacts(ctx context.Context, database *sql.DB, clien
 	return nil
 }
 
-func processThreadFacts(ctx context.Context, database *sql.DB, client *Client, llmFunc LLMClientFunc, threadID string) (err error) {
+func processThreadFacts(ctx context.Context, database any, client *Client, llmFunc LLMClientFunc, threadID string) (err error) {
+	var factStore db.FactStore
+	var rawDB *sql.DB
+	switch v := database.(type) {
+	case db.FactStore:
+		factStore = v
+	case *sql.DB:
+		rawDB = v
+		if v != nil {
+			factStore = db.NewSQLStore(v)
+		}
+	}
+	if factStore == nil {
+		return fmt.Errorf("database is nil")
+	}
 	start := time.Now()
 	var factCount int
 	defer func() {
@@ -170,7 +194,12 @@ func processThreadFacts(ctx context.Context, database *sql.DB, client *Client, l
 		metrics.RecordFactExtraction(status, time.Since(start))
 	}()
 
-	maxRowID, err := db.GetMaxMessageRowID(database, threadID)
+	var maxRowID int64
+	if ms, ok := factStore.(db.MessageStore); ok {
+		maxRowID, err = ms.GetMaxMessageRowID(ctx, threadID)
+	} else if rawDB != nil {
+		maxRowID, err = db.GetMaxMessageRowID(rawDB, threadID)
+	}
 	if err != nil {
 		return fmt.Errorf("failed to get max message rowid for thread %s: %w", threadID, err)
 	}
@@ -181,7 +210,7 @@ func processThreadFacts(ctx context.Context, database *sql.DB, client *Client, l
 	}
 	if strings.TrimSpace(transcript) == "" {
 		log.Printf("[Memory] Empty transcript for thread %s, marking watermark.", threadID)
-		_ = db.UpdateConversationFactWatermark(database, threadID, maxRowID)
+		_ = factStore.UpdateConversationFactWatermark(ctx, threadID, maxRowID)
 		return nil
 	}
 
@@ -199,7 +228,12 @@ func processThreadFacts(ctx context.Context, database *sql.DB, client *Client, l
 	factCount = len(factsPayload.Facts)
 
 	// Fetch existing facts for deduplication
-	existingFacts, _ := db.GetFactsByThreadWithEmbeddings(database, threadID)
+	var existingFacts []db.FactWithEmbedding
+	if factStore != nil {
+		existingFacts, _ = factStore.GetFactsByThreadWithEmbeddings(ctx, threadID)
+	} else if rawDB != nil {
+		existingFacts, _ = db.GetFactsByThreadWithEmbeddings(rawDB, threadID)
+	}
 
 	for _, item := range factsPayload.Facts {
 		if strings.TrimSpace(item.FactText) == "" {
@@ -231,7 +265,7 @@ func processThreadFacts(ctx context.Context, database *sql.DB, client *Client, l
 		}
 
 		if !isDuplicate {
-			id, err := db.InsertFact(database, item.Category, item.FactText, item.Importance, threadID, emb)
+			id, err := factStore.InsertFact(ctx, item.Category, item.FactText, item.Importance, threadID, emb)
 			if err != nil {
 				metrics.MemoryOperationsTotal.WithLabelValues("extract", "error").Inc()
 				log.Printf("[Memory] Error inserting fact into DB: %v", err)
@@ -253,10 +287,12 @@ func processThreadFacts(ctx context.Context, database *sql.DB, client *Client, l
 		}
 	}
 
-	return db.UpdateConversationFactWatermark(database, threadID, maxRowID)
+	_ = factStore.UpdateConversationFactWatermark(ctx, threadID, maxRowID)
+	_ = factStore.UpdateConversationFactExtractedAt(ctx, threadID)
+	return nil
 }
 
-func loadThreadTranscript(database *sql.DB, threadID string) (string, error) {
+func loadThreadTranscript(database any, threadID string) (string, error) {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		homeDir = "/root"
@@ -270,8 +306,19 @@ func loadThreadTranscript(database *sql.DB, threadID string) (string, error) {
 
 	idCandidates := []string{threadID}
 	if database != nil {
-		if sessID, err := db.GetSessionID(database, threadID); err == nil && sessID != "" {
-			idCandidates = append([]string{sessID}, idCandidates...)
+		var sessStore db.SessionStore
+		switch v := database.(type) {
+		case db.SessionStore:
+			sessStore = v
+		case *sql.DB:
+			if v != nil {
+				sessStore = db.NewSQLStore(v)
+			}
+		}
+		if sessStore != nil {
+			if sessID, err := sessStore.GetSessionID(context.Background(), threadID); err == nil && sessID != "" {
+				idCandidates = append([]string{sessID}, idCandidates...)
+			}
 		}
 	}
 

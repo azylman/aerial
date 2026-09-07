@@ -106,6 +106,13 @@ func (s *SQLStore) GetFactsPaginated(ctx context.Context, filter FactsFilter) (*
 	return GetFactsPaginatedWithContext(ctx, s.db, s.isPostgres, filter)
 }
 
+func (s *SQLStore) GetFactsByThreadWithEmbeddings(ctx context.Context, threadID string) ([]FactWithEmbedding, error) {
+	if s == nil || isDBTXNil(s.db) {
+		return nil, fmt.Errorf("database is nil")
+	}
+	return GetFactsByThreadWithEmbeddings(s.db, threadID)
+}
+
 func (s *SQLStore) GetActiveConversationsForExtraction(ctx context.Context, activeHours int) ([]string, error) {
 	if s == nil || isDBTXNil(s.db) {
 		return nil, fmt.Errorf("database is nil")
