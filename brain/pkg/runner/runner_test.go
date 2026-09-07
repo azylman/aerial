@@ -430,6 +430,26 @@ func TestClassifyError(t *testing.T) {
 			wantCorrupt:          false,
 			errDetailMustContain: "modelProvider is set to \"gemini\"",
 		},
+		{
+			name:                 "Stream Was Interrupted In Result JSON Error (Exit 0)",
+			exitCode:             0,
+			stdout:               `{"event":"result","status":"error","error":"The stream was interrupted. Please continue the task you were working on."}`,
+			stderr:               "",
+			wantFailure:          true,
+			wantTransient:        false,
+			wantCorrupt:          true,
+			errDetailMustContain: "stream was interrupted",
+		},
+		{
+			name:                 "Stream Was Interrupted In Stderr (Non-Zero Exit)",
+			exitCode:             1,
+			stdout:               "",
+			stderr:               "Error: The stream was interrupted. Please continue the task you were working on.",
+			wantFailure:          true,
+			wantTransient:        false,
+			wantCorrupt:          true,
+			errDetailMustContain: "stream was interrupted",
+		},
 	}
 
 	for _, tt := range tests {

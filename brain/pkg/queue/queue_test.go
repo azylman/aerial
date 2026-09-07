@@ -5386,6 +5386,7 @@ func TestProcessBurst_EmptyStdout_TranscriptRecovery(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
 
 	testSessID := "sess-transcript-recovery-999"
 	sessDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", testSessID)
@@ -5409,6 +5410,9 @@ func TestProcessBurst_EmptyStdout_TranscriptRecovery(t *testing.T) {
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
+		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+			return nil, nil
+		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
 			// agy exits 0 with empty stdout (buffering or background task yield), but response is on disk
 			return "", "", 0, nil
@@ -5459,6 +5463,228 @@ func TestProcessBurst_EmptyStdout_TranscriptRecovery(t *testing.T) {
 	mu.Unlock()
 
 	dbMsg, err := db.GetMessage(database, "msg-empty-1")
+	if err != nil || dbMsg == nil {
+		t.Fatalf("Failed to retrieve message: %v", err)
+	}
+	if dbMsg.Status != db.StatusCompleted {
+		t.Errorf("Expected message status COMPLETED, got: %s", dbMsg.Status)
+	}
+}
+
+func TestProcessBurst_StreamInterrupted_TranscriptRecovery(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
+
+	testSessID := "11111111-2222-4333-8444-555555555555"
+	sessDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", testSessID)
+	_ = os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs"), 0755)
+
+	transcriptContent := `{"step_index":1,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-09-07T21:24:20Z","content":"Have the gang review"}
+{"step_index":2,"source":"MODEL","type":"ERROR_MESSAGE","status":"DONE","created_at":"2026-09-07T21:25:06Z","content":"Error: The stream was interrupted. Please continue the task you were working on."}
+{"step_index":3,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-09-07T21:26:39Z","content":"Here is the complete gang review with high consensus!"}
+`
+	if err := os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte(transcriptContent), 0600); err != nil {
+		t.Fatalf("failed to write mock transcript: %v", err)
+	}
+
+	_ = db.SaveSessionID(database, "thread-interrupted-1", testSessID)
+
+	var runnerCalls int32
+	var deliveredText string
+	var mu sync.Mutex
+	doneCh := make(chan struct{})
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    3,
+		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+			return nil, nil
+		},
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			atomic.AddInt32(&runnerCalls, 1)
+			// agy exits 0, but stream-json emits error status with "stream was interrupted"
+			out := fmt.Sprintf("{\"event\":\"init\",\"conversation_id\":%q}\n{\"event\":\"result\",\"status\":\"error\",\"error\":\"The stream was interrupted. Please continue the task you were working on.\"}", sessionID)
+			return out, "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			mu.Lock()
+			deliveredText = text
+			mu.Unlock()
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			close(doneCh)
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{
+		ID:         "msg-interrupted-1",
+		ThreadID:   "thread-interrupted-1",
+		GuildID:    "guild-1",
+		AuthorID:   "user-1",
+		AuthorName: "User",
+		Content:    "Have the gang review",
+		Status:     db.StatusPending,
+		CreatedAt:  time.Now().UTC(),
+		UpdatedAt:  time.Now().UTC(),
+	}
+	if err := db.InsertMessage(database, msg); err != nil {
+		t.Fatalf("Failed to insert message: %v", err)
+	}
+
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Timeout waiting for message processing")
+	}
+
+	calls := atomic.LoadInt32(&runnerCalls)
+	if calls != 1 {
+		t.Errorf("Expected exactly 1 runner call (recovered immediately), got: %d", calls)
+	}
+
+	mu.Lock()
+	if !strings.Contains(deliveredText, "Here is the complete gang review with high consensus!") {
+		t.Errorf("Expected recovered transcript response to be delivered, got: %q", deliveredText)
+	}
+	mu.Unlock()
+
+	dbMsg, err := db.GetMessage(database, "msg-interrupted-1")
+	if err != nil || dbMsg == nil {
+		t.Fatalf("Failed to retrieve message: %v", err)
+	}
+	if dbMsg.Status != db.StatusCompleted {
+		t.Errorf("Expected message status COMPLETED, got: %s", dbMsg.Status)
+	}
+}
+
+func TestProcessBurst_StreamInterrupted_NoResponse_RotatesSessionCorrupt(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
+
+	testSessID := "22222222-3333-4444-8555-666666666666"
+	sessDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", testSessID)
+	_ = os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs"), 0755)
+
+	// No PLANNER_RESPONSE after USER_INPUT, only error step
+	transcriptContent := `{"step_index":1,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-09-07T21:24:20Z","content":"Have the gang review"}
+{"step_index":2,"source":"MODEL","type":"ERROR_MESSAGE","status":"DONE","created_at":"2026-09-07T21:25:06Z","content":"Error: The stream was interrupted. Please continue the task you were working on."}
+`
+	if err := os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte(transcriptContent), 0600); err != nil {
+		t.Fatalf("failed to write mock transcript: %v", err)
+	}
+
+	_ = db.SaveSessionID(database, "thread-interrupted-corrupt-2", testSessID)
+
+	var runnerCalls int32
+	var sessionsSeen []string
+	var deliveredTexts []string
+	var mu sync.Mutex
+	doneCh := make(chan struct{})
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    3,
+		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+			return nil, nil
+		},
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			call := atomic.AddInt32(&runnerCalls, 1)
+			mu.Lock()
+			sessionsSeen = append(sessionsSeen, sessionID)
+			mu.Unlock()
+
+			if call == 1 {
+				// Attempt 1 fails with stream interruption and no response in transcript
+				out := fmt.Sprintf("{\"event\":\"init\",\"conversation_id\":%q}\n{\"event\":\"result\",\"status\":\"error\",\"error\":\"The stream was interrupted. Please continue the task you were working on.\"}", sessionID)
+				return out, "", 0, nil
+			}
+
+			// Attempt 2 should run with rotated/empty session ID and succeed
+			return `{"conversation_id":"33333333-4444-4555-8666-777777777777","status":"SUCCESS","response":"Recovered on clean session!"}`, "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			mu.Lock()
+			deliveredTexts = append(deliveredTexts, text)
+			mu.Unlock()
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			close(doneCh)
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{
+		ID:         "msg-interrupted-corrupt-2",
+		ThreadID:   "thread-interrupted-corrupt-2",
+		GuildID:    "guild-1",
+		AuthorID:   "user-1",
+		AuthorName: "User",
+		Content:    "Have the gang review",
+		Status:     db.StatusPending,
+		CreatedAt:  time.Now().UTC(),
+		UpdatedAt:  time.Now().UTC(),
+	}
+	if err := db.InsertMessage(database, msg); err != nil {
+		t.Fatalf("Failed to insert message: %v", err)
+	}
+
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Timeout waiting for message processing")
+	}
+
+	calls := atomic.LoadInt32(&runnerCalls)
+	if calls != 2 {
+		t.Errorf("Expected exactly 2 runner calls, got: %d", calls)
+	}
+
+	mu.Lock()
+	if len(sessionsSeen) >= 2 {
+		if sessionsSeen[0] != testSessID {
+			t.Errorf("Attempt 1 expected session %q, got %q", testSessID, sessionsSeen[0])
+		}
+		// Attempt 2 MUST be called with empty session ID (rotated due to session corruption)
+		if sessionsSeen[1] != "" {
+			t.Errorf("Attempt 2 expected empty session (rotated due to corruption), got %q", sessionsSeen[1])
+		}
+	}
+	mu.Unlock()
+
+	dbMsg, err := db.GetMessage(database, "msg-interrupted-corrupt-2")
 	if err != nil || dbMsg == nil {
 		t.Fatalf("Failed to retrieve message: %v", err)
 	}

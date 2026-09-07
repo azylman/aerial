@@ -722,6 +722,8 @@ func ClassifyError(exitCode int, stdout, stderr string) (isFailure bool, isTrans
 		"failed to load conversation",
 		"corrupted transcript",
 		"failed to parse session",
+		"stream was interrupted",
+		"the stream was interrupted",
 	}
 
 	contextWindowKeywords := []string{
