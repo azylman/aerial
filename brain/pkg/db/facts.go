@@ -252,6 +252,10 @@ func GetFactsByThreadWithEmbeddings(database DBTX, threadID string) ([]FactWithE
 
 // SearchSimilarFacts executes an HNSW index-accelerated candidate fetch followed by importance-weighted scoring.
 func SearchSimilarFacts(database DBTX, embedding []float32, limit int, minScore float64, threadID string) ([]Fact, error) {
+	return SearchSimilarFactsWithContext(context.Background(), database, false, embedding, limit, minScore, threadID)
+}
+
+func SearchSimilarFactsWithContext(ctx context.Context, database DBTX, isPg bool, embedding []float32, limit int, minScore float64, threadID string) ([]Fact, error) {
 	if database == nil || len(embedding) != ExpectedEmbeddingDim {
 		return nil, nil
 	}
@@ -262,7 +266,7 @@ func SearchSimilarFacts(database DBTX, embedding []float32, limit int, minScore 
 		minScore = 0.20
 	}
 
-	if !isPostgres(database) {
+	if !isPg && !isPostgres(database) {
 		// SQLite in-memory fallback for unit tests: rank in memory
 		allFacts, err := GetAllFactsWithEmbeddings(database)
 		if err != nil {
@@ -443,7 +447,12 @@ func EscapeSQLLike(s string) string {
 	return s
 }
 
+// GetFactsPaginated retrieves facts based on the provided filter.
 func GetFactsPaginated(database DBTX, filter FactsFilter) (*FactsResult, error) {
+	return GetFactsPaginatedWithContext(context.Background(), database, false, filter)
+}
+
+func GetFactsPaginatedWithContext(ctx context.Context, database DBTX, isPg bool, filter FactsFilter) (*FactsResult, error) {
 	if database == nil {
 		return nil, fmt.Errorf("database is nil")
 	}
@@ -474,12 +483,15 @@ func GetFactsPaginated(database DBTX, filter FactsFilter) (*FactsResult, error) 
 		whereSQL = " WHERE " + strings.Join(whereClauses, " AND ")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	countQuery := "SELECT COUNT(*) FROM facts" + whereSQL
 	var total int
-	if err := database.QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
+	if err := database.QueryRowContext(queryCtx, countQuery, args...).Scan(&total); err != nil {
 		return nil, fmt.Errorf("failed to count facts: %w", err)
 	}
 
@@ -489,7 +501,7 @@ func GetFactsPaginated(database DBTX, filter FactsFilter) (*FactsResult, error) 
 		paginationSQL = fmt.Sprintf("LIMIT $%d OFFSET $%d", argIdx, argIdx+1)
 		queryArgs = append(queryArgs, filter.Limit, filter.Offset)
 	} else if filter.Offset > 0 {
-		if isPostgres(database) {
+		if isPg || isPostgres(database) {
 			paginationSQL = fmt.Sprintf("OFFSET $%d", argIdx)
 		} else {
 			paginationSQL = fmt.Sprintf("LIMIT -1 OFFSET $%d", argIdx)

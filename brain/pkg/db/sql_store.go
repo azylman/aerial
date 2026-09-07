@@ -96,14 +96,14 @@ func (s *SQLStore) SearchSimilarFacts(ctx context.Context, embedding []float32, 
 	if s == nil || isDBTXNil(s.db) {
 		return nil, fmt.Errorf("database is nil")
 	}
-	return SearchSimilarFacts(s.db, embedding, limit, minScore, threadID)
+	return SearchSimilarFactsWithContext(ctx, s.db, s.isPostgres, embedding, limit, minScore, threadID)
 }
 
 func (s *SQLStore) GetFactsPaginated(ctx context.Context, filter FactsFilter) (*FactsResult, error) {
 	if s == nil || isDBTXNil(s.db) {
 		return nil, fmt.Errorf("database is nil")
 	}
-	return GetFactsPaginated(s.db, filter)
+	return GetFactsPaginatedWithContext(ctx, s.db, s.isPostgres, filter)
 }
 
 func (s *SQLStore) GetActiveConversationsForExtraction(ctx context.Context, activeHours int) ([]string, error) {
