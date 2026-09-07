@@ -2,9 +2,17 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"time"
 )
+
+// DBTX abstracts common SQL execution methods shared by *sql.DB and *sql.Tx.
+type DBTX interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
 
 var (
 	ErrScheduleAlreadyConsumed = errors.New("schedule already consumed")

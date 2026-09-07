@@ -53,7 +53,7 @@ func BytesToFloat32(buf []byte) []float32 {
 	return slice
 }
 
-func InsertFact(database *sql.DB, category, factText string, importance float64, threadID string, embedding []float32) (id int64, err error) {
+func InsertFact(database DBTX, category, factText string, importance float64, threadID string, embedding []float32) (id int64, err error) {
 	start := time.Now()
 	defer func() {
 		status := "success"
@@ -154,7 +154,7 @@ func cosineSimilarity(a, b []float32) float64 {
 	return dot / (math.Sqrt(normA) * math.Sqrt(normB))
 }
 
-func UpdateFactEmbedding(database *sql.DB, id int64, embedding []float32) error {
+func UpdateFactEmbedding(database DBTX, id int64, embedding []float32) error {
 	if database == nil {
 		return fmt.Errorf("database is nil")
 	}
@@ -169,7 +169,7 @@ func UpdateFactEmbedding(database *sql.DB, id int64, embedding []float32) error 
 	return err
 }
 
-func GetAllFactsWithEmbeddings(database *sql.DB) ([]FactWithEmbedding, error) {
+func GetAllFactsWithEmbeddings(database DBTX) ([]FactWithEmbedding, error) {
 	if database == nil {
 		return nil, nil
 	}
@@ -202,7 +202,7 @@ func GetAllFactsWithEmbeddings(database *sql.DB) ([]FactWithEmbedding, error) {
 	return results, nil
 }
 
-func GetFactsByThreadWithEmbeddings(database *sql.DB, threadID string) ([]FactWithEmbedding, error) {
+func GetFactsByThreadWithEmbeddings(database DBTX, threadID string) ([]FactWithEmbedding, error) {
 	if database == nil {
 		return nil, nil
 	}
@@ -244,7 +244,7 @@ func GetFactsByThreadWithEmbeddings(database *sql.DB, threadID string) ([]FactWi
 }
 
 // SearchSimilarFacts executes an HNSW index-accelerated candidate fetch followed by importance-weighted scoring.
-func SearchSimilarFacts(database *sql.DB, embedding []float32, limit int, minScore float64, threadID string) ([]Fact, error) {
+func SearchSimilarFacts(database DBTX, embedding []float32, limit int, minScore float64, threadID string) ([]Fact, error) {
 	if database == nil || len(embedding) != ExpectedEmbeddingDim {
 		return nil, nil
 	}
@@ -345,7 +345,7 @@ func SearchSimilarFacts(database *sql.DB, embedding []float32, limit int, minSco
 	return facts, nil
 }
 
-func GetActiveConversationsForExtraction(database *sql.DB, activeHours int) ([]string, error) {
+func GetActiveConversationsForExtraction(database DBTX, activeHours int) ([]string, error) {
 	if database == nil {
 		return nil, nil
 	}
@@ -386,7 +386,7 @@ func GetActiveConversationsForExtraction(database *sql.DB, activeHours int) ([]s
 	return tids, nil
 }
 
-func UpdateConversationFactWatermark(database *sql.DB, threadID string, maxRowID int64) error {
+func UpdateConversationFactWatermark(database DBTX, threadID string, maxRowID int64) error {
 	if database == nil || threadID == "" {
 		return nil
 	}
@@ -410,7 +410,7 @@ func UpdateConversationFactWatermark(database *sql.DB, threadID string, maxRowID
 	return err
 }
 
-func UpdateConversationFactExtractedAt(database *sql.DB, threadID string) error {
+func UpdateConversationFactExtractedAt(database DBTX, threadID string) error {
 	maxRowID, _ := GetMaxMessageRowID(database, threadID)
 	return UpdateConversationFactWatermark(database, threadID, maxRowID)
 }
@@ -436,7 +436,7 @@ func EscapeSQLLike(s string) string {
 	return s
 }
 
-func GetFactsPaginated(database *sql.DB, filter FactsFilter) (*FactsResult, error) {
+func GetFactsPaginated(database DBTX, filter FactsFilter) (*FactsResult, error) {
 	if database == nil {
 		return nil, fmt.Errorf("database is nil")
 	}

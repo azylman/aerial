@@ -107,7 +107,7 @@ func InferTriggerType(authorID, scheduleRunID string) string {
 }
 
 // GetActiveTasks returns up to 50 active tasks for telemetry HUD visualization.
-func GetActiveTasks(database *sql.DB) ([]ActiveTask, error) {
+func GetActiveTasks(database DBTX) ([]ActiveTask, error) {
 	if database == nil {
 		return nil, fmt.Errorf("database is nil")
 	}

@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"fmt"
 	"log"
 	"os"
@@ -17,12 +18,18 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-func isPostgres(database *sql.DB) bool {
+func isPostgres(database DBTX) bool {
 	if database == nil {
 		return false
 	}
-	driverType := fmt.Sprintf("%T", database.Driver())
-	return strings.Contains(driverType, "stdlib") || strings.Contains(driverType, "pgx")
+	type driverGetter interface {
+		Driver() driver.Driver
+	}
+	if dg, ok := database.(driverGetter); ok && dg.Driver() != nil {
+		driverType := fmt.Sprintf("%T", dg.Driver())
+		return strings.Contains(driverType, "stdlib") || strings.Contains(driverType, "pgx")
+	}
+	return false
 }
 
 var (

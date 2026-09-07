@@ -7,9 +7,9 @@ import (
 	"time"
 )
 
-// SQLStore wraps a concrete *sql.DB instance and implements the Store interface.
+// SQLStore wraps a DBTX instance (either *sql.DB connection pool or *sql.Tx) and implements the Store interface.
 type SQLStore struct {
-	db *sql.DB
+	db DBTX
 }
 
 // NewSQLStore creates a new Store instance wrapping the provided *sql.DB connection.
@@ -20,18 +20,40 @@ func NewSQLStore(database *sql.DB) Store {
 	return &SQLStore{db: database}
 }
 
+// NewTxStore creates a Store instance bound to an active transaction.
+func NewTxStore(tx DBTX) Store {
+	if tx == nil {
+		return nil
+	}
+	return &SQLStore{db: tx}
+}
+
 func (s *SQLStore) Close() error {
-	if s.db != nil {
-		return s.db.Close()
+	if s == nil || s.db == nil {
+		return nil
+	}
+	if closer, ok := s.db.(interface{ Close() error }); ok {
+		return closer.Close()
 	}
 	return nil
 }
 
 func (s *SQLStore) WithTx(ctx context.Context, fn func(txStore Store) error) error {
-	if s.db == nil {
+	if s == nil || s.db == nil {
 		return fmt.Errorf("database is nil")
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+
+	type beginner interface {
+		BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error)
+	}
+
+	b, ok := s.db.(beginner)
+	if !ok {
+		// Already inside a transaction or DBTX does not support BeginTx; execute fn within current context.
+		return fn(s)
+	}
+
+	tx, err := b.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin tx: %w", err)
 	}
@@ -39,7 +61,8 @@ func (s *SQLStore) WithTx(ctx context.Context, fn func(txStore Store) error) err
 		_ = tx.Rollback()
 	}()
 
-	if err := fn(s); err != nil {
+	txStore := NewTxStore(tx)
+	if err := fn(txStore); err != nil {
 		return err
 	}
 	return tx.Commit()
