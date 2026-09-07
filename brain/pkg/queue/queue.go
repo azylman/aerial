@@ -219,6 +219,7 @@ type WorkerPool struct {
 	cancel           context.CancelFunc
 	stopped          bool
 	quotaLockedUntil atomic.Int64
+	scopeLocks       sync.Map
 }
 
 // New creates a new WorkerPool with pure *config.Config dependency injection.
@@ -588,6 +589,7 @@ func (p *WorkerPool) runThreadWorker(threadID string, state *threadWorkerState) 
 			p.mu.Lock()
 			if len(state.ch) == 0 && state.activeEnqueuers == 0 {
 				delete(p.threadChs, threadID)
+				p.scopeLocks.Delete(threadID)
 				p.mu.Unlock()
 				return
 			}
@@ -741,6 +743,11 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 
 	threadID := burst[0].ThreadID
 	log.Printf("[WorkerPool] Processing burst of %d message(s) for thread %s", len(burst), threadID)
+
+	lockVal, _ := p.scopeLocks.LoadOrStore(threadID, &sync.Mutex{})
+	scopeLock := lockVal.(*sync.Mutex)
+	scopeLock.Lock()
+	defer scopeLock.Unlock()
 
 	triggerType := "discord"
 	if burst[0].ScheduleRunID != "" {
@@ -1090,13 +1097,11 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 
 		// wakeIdx >= 0
 		// Check session rotation timing before Phase 1:
-		if strings.ToLower(policy.Mode) == "channel" {
-			currentTurns, _ := db.GetSessionTurnCount(p.cfg.DB, threadID)
-			if currentTurns >= DefaultMaxSessionTurns || (wakeIdx > 0 && currentTurns+1 >= DefaultMaxSessionTurns) {
-				log.Printf("[Queue] Channel session reached turn limit (%d/%d). Resetting to cold state for fresh session initialization.", currentTurns, DefaultMaxSessionTurns)
-				_ = db.RotateSessionID(p.cfg.DB, threadID, "")
-				currentSessionID = ""
-			}
+		currentTurns, _ := db.GetSessionTurnCount(p.cfg.DB, threadID)
+		if currentTurns >= DefaultMaxSessionTurns || (wakeIdx > 0 && currentTurns+1 >= DefaultMaxSessionTurns) {
+			log.Printf("[Queue] Scope session reached turn limit (%d/%d). Resetting to cold state for fresh session initialization.", currentTurns, DefaultMaxSessionTurns)
+			_ = db.RotateSessionID(p.cfg.DB, threadID, "")
+			currentSessionID = ""
 		}
 
 		if currentSessionID == "" {
@@ -1222,9 +1227,24 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		}
 	}
 
-	// Format coalesced prompt
+	if strings.ToLower(policy.Mode) != "channel" {
+		var incErr error
+		turnCount, incErr = db.IncrementSessionTurnCount(p.cfg.DB, threadID)
+		if incErr != nil {
+			log.Printf("[Queue] Error incrementing turn count for thread %s: %v", threadID, incErr)
+		}
+	}
+
+	// Pre-execution turn limit rotation check (applies to both channel and thread modes)
+	currentTurns, _ := db.GetSessionTurnCount(p.cfg.DB, threadID)
+	if currentTurns >= DefaultMaxSessionTurns {
+		log.Printf("[Queue] Scope session reached turn limit (%d/%d). Resetting to cold state for fresh session initialization.", currentTurns, DefaultMaxSessionTurns)
+		_ = db.RotateSessionID(p.cfg.DB, threadID, "")
+		currentSessionID = ""
+	}
+
 	basePrompt := CoalesceBurstPrompt(burst)
-	if strings.ToLower(policy.Mode) == "channel" && currentSessionID == "" {
+	if currentSessionID == "" {
 		if p.cfg.HistoryFetcher != nil {
 			fetchCtx, fetchCancel := context.WithTimeout(p.ctx, 2500*time.Millisecond)
 			histMsgs, err := p.cfg.HistoryFetcher(fetchCtx, threadID, burst[0].ID, 10)
@@ -1354,6 +1374,16 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		if err != nil && errDetail == "" {
 			errDetail = err.Error()
 		}
+		
+		if isFailure && isTransient && currentSessionID == "" {
+			lowerErr := strings.ToLower(errDetail + " " + stderr + " " + stdout)
+			if strings.Contains(lowerErr, "429") || strings.Contains(lowerErr, "too many requests") || strings.Contains(lowerErr, "quota exceeded") {
+				isTransient = false
+				errDetail = "cold start 429 token limit exceeded (hard failure)"
+				log.Printf("[Queue] Overriding 429 to non-transient hard failure on cold start for thread %s", threadID)
+			}
+		}
+
 		lastErrDetail = errDetail
 		lastStderr = stderr
 
@@ -1536,13 +1566,24 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 			if parseErr != nil {
 				log.Printf("[Queue] Failed to parse runner output despite exit 0: %v", parseErr)
 				lastErrDetail = parseErr.Error()
+				isFailure = true
 			} else {
-				if resp.ConversationID != "" && resp.ConversationID != currentSessionID {
-					log.Printf("[Queue] Active session synchronized for thread %s: %s -> %s", threadID, currentSessionID, resp.ConversationID)
-					currentSessionID = resp.ConversationID
-					_ = db.SaveSessionID(p.cfg.DB, threadID, currentSessionID)
+				extSess := resp.ConversationID
+				if extSess == "" {
+					extSess = runner.ExtractSessionID(stderr, execStart)
 				}
-				stopTyping()
+				if currentSessionID == "" && (extSess == "" || !runner.IsValidUUID(extSess)) {
+					isFailure = true
+					isTransient = false
+					lastErrDetail = "failed to latch active session UUID on cold start"
+					log.Printf("[Queue] Defensive Failure: %s for thread %s", lastErrDetail, threadID)
+				} else {
+					if extSess != "" && extSess != currentSessionID {
+						log.Printf("[Queue] Active session synchronized for thread %s: %s -> %s", threadID, currentSessionID, extSess)
+						currentSessionID = extSess
+						_ = db.SaveSessionID(p.cfg.DB, threadID, currentSessionID)
+					}
+					stopTyping()
 
 				responseText := resp.Response
 				baseDir := "/root/.gemini/antigravity-cli/brain"
@@ -1568,8 +1609,8 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 					}
 				}
 
-				if strings.ToLower(policy.Mode) == "channel" && turnCount >= DefaultMaxSessionTurns {
-					log.Printf("[Queue] Channel session reached turn limit (%d/%d). Resetting to cold state for fresh session initialization.", turnCount, DefaultMaxSessionTurns)
+				if turnCount >= DefaultMaxSessionTurns {
+					log.Printf("[Queue] Scope session reached turn limit (%d/%d). Resetting to cold state for fresh session initialization.", turnCount, DefaultMaxSessionTurns)
 					_ = db.RotateSessionID(p.cfg.DB, threadID, "")
 					currentSessionID = ""
 				}
@@ -1595,6 +1636,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 
 				return
 			}
+		}
 		}
 
 		// If execution failed because the pool context was cancelled (SIGTERM/shutdown),

@@ -16,7 +16,7 @@ import (
 
 func TestFindLatestSessionDirAndExtract(t *testing.T) {
 	tmpDir := t.TempDir()
-	_ = os.Setenv("HOME", tmpDir)
+	t.Setenv("HOME", tmpDir)
 
 	convID := "test-conv-123"
 	logsDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", convID, ".system_generated", "logs")

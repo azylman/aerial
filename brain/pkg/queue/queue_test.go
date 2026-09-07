@@ -52,7 +52,7 @@ func TestWorkerPool_ConfigInjection(t *testing.T) {
 
 func mockJSONResponse(convID, responseText string) string {
 	if convID == "" {
-		convID = "sess-" + uuid.New().String()
+		convID = uuid.New().String()
 	}
 	payload, _ := json.Marshal(map[string]interface{}{
 		"conversation_id":  convID,
@@ -6059,3 +6059,207 @@ func TestProcessBurst_TrailingBurstSuppression_OnQuotaPause(t *testing.T) {
 
 
 
+
+func TestQueueWorker_PerScopeSerialization(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	var mu sync.Mutex
+	var activeWorkers int
+	var maxActiveWorkers int
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    1,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			mu.Lock()
+			activeWorkers++
+			if activeWorkers > maxActiveWorkers {
+				maxActiveWorkers = activeWorkers
+			}
+			mu.Unlock()
+			
+			time.Sleep(50 * time.Millisecond) // Simulate work
+
+			mu.Lock()
+			activeWorkers--
+			mu.Unlock()
+			
+			return mockJSONResponse("", "OK"), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+			return func() {}
+		},
+	})
+	
+	// Create multiple messages for the same thread but bypass Enqueue routing to test processBurst serialization directly.
+	msg1 := db.Message{ID: "msg-scope-1", ThreadID: "thread-scope-test", Content: "Msg 1"}
+	msg2 := db.Message{ID: "msg-scope-2", ThreadID: "thread-scope-test", Content: "Msg 2"}
+	msg3 := db.Message{ID: "msg-scope-3", ThreadID: "thread-scope-test", Content: "Msg 3"}
+	_ = db.InsertMessage(database, msg1)
+	_ = db.InsertMessage(database, msg2)
+	_ = db.InsertMessage(database, msg3)
+
+	var wg sync.WaitGroup
+	wg.Add(3)
+
+	go func() { defer wg.Done(); pool.processBurst([]db.Message{msg1}) }()
+	go func() { defer wg.Done(); pool.processBurst([]db.Message{msg2}) }()
+	go func() { defer wg.Done(); pool.processBurst([]db.Message{msg3}) }()
+
+	wg.Wait()
+
+	if maxActiveWorkers > 1 {
+		t.Errorf("Expected per-scope worker serialization, but found %d concurrent workers for same scope", maxActiveWorkers)
+	}
+}
+
+func TestThreadSession_RotationAt50Turns(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	_ = db.SaveSessionID(database, "thread-rotate-test", "old-session-id")
+	for i := 0; i < 49; i++ {
+		_, _ = db.IncrementSessionTurnCount(database, "thread-rotate-test")
+	}
+
+	var mu sync.Mutex
+	var gotSessionID string
+	doneCh := make(chan struct{})
+
+	appCfg := config.NewFromData(&config.ConfigData{
+		Channels: map[string]config.ChannelPolicy{
+			"default": {Mode: "thread"}, // Thread mode
+		},
+	})
+
+	pool := New(appCfg, WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    1,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			mu.Lock()
+			gotSessionID = sessionID
+			mu.Unlock()
+			return mockJSONResponse(uuid.New().String(), "OK"), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			close(doneCh)
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{ID: "msg-rotate", ThreadID: "thread-rotate-test", Content: "Turn 50"}
+	_ = db.InsertMessage(database, msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Timeout waiting for message")
+	}
+
+	mu.Lock()
+	if gotSessionID != "" {
+		t.Errorf("Expected cold start (empty session ID) at turn 50 for thread mode, got: %q", gotSessionID)
+	}
+	mu.Unlock()
+}
+
+func TestRunner_DefensiveLatchingAndCold429(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	var mu sync.Mutex
+	var receivedIDs []string
+	doneCh := make(chan struct{}, 2)
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    3,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			mu.Lock()
+			receivedIDs = append(receivedIDs, prompt)
+			mu.Unlock()
+
+			if strings.Contains(prompt, "Test429") {
+				return "", "HTTP 429 Too Many Requests: context length exceeded", 1, fmt.Errorf("429")
+			}
+			if strings.Contains(prompt, "TestEmptyLatch") {
+				return "{}", "", 0, nil // Invalid JSON with no conversation ID
+			}
+			return "", "", 0, fmt.Errorf("unknown")
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			doneCh <- struct{}{}
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	// 1. Test Cold 429 (should not retry)
+	msg1 := db.Message{ID: "msg-429", ThreadID: "thread-429", Content: "Test429"}
+	_ = db.InsertMessage(database, msg1)
+	pool.Enqueue(msg1)
+
+	select {
+	case <-doneCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Timeout waiting for 429")
+	}
+
+	mu.Lock()
+	dbMsg1, _ := db.GetMessage(database, "msg-429")
+	if dbMsg1.Status != db.StatusFailed {
+		t.Errorf("Expected 429 to fail fast, got status: %s", dbMsg1.Status)
+	}
+	mu.Unlock()
+
+	// 2. Test Empty Latch (should not retry)
+	msg2 := db.Message{ID: "msg-latch", ThreadID: "thread-latch", Content: "TestEmptyLatch"}
+	_ = db.InsertMessage(database, msg2)
+	pool.Enqueue(msg2)
+
+	select {
+	case <-doneCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Timeout waiting for empty latch")
+	}
+
+	mu.Lock()
+	dbMsg2, _ := db.GetMessage(database, "msg-latch")
+	if dbMsg2.Status != db.StatusFailed {
+		t.Errorf("Expected empty latch to fail fast, got status: %s", dbMsg2.Status)
+	}
+	mu.Unlock()
+}
