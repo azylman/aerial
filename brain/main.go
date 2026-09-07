@@ -823,49 +823,6 @@ func SetupBrainMux(database *sql.DB, pool *queue.WorkerPool, reloadFn func(strin
 	return mux
 }
 
-type BrainConfig struct {
-	Port         string
-	AgyBin       string
-	APIKey       string
-	SystemPrompt string
-	Model        string
-	DBPath       string
-	DiscordToken string
-}
-
-func NewBrainConfigFromEnv(cfg *config.Config) BrainConfig {
-	model := ""
-	dbPath := ""
-	port := "8080"
-	agyBin := "agy"
-	apiKey := ""
-	systemPrompt := ""
-	discordToken := ""
-	if cfg != nil {
-		cur := cfg.Current()
-		model = cur.Model
-		dbPath = cur.DatabaseURL
-		if cur.Port != "" {
-			port = cur.Port
-		}
-		if cur.AgyBin != "" {
-			agyBin = cur.AgyBin
-		}
-		apiKey = cur.APIKey
-		systemPrompt = cur.SystemPrompt
-		discordToken = cur.DiscordToken
-	}
-	return BrainConfig{
-		Port:         port,
-		AgyBin:       agyBin,
-		APIKey:       apiKey,
-		SystemPrompt: systemPrompt,
-		Model:        model,
-		DBPath:       dbPath,
-		DiscordToken: discordToken,
-	}
-}
-
 func InitializeBrainEnvironment(apiKey, model, systemPrompt string) {
 	if err := config.EnsureAgySettings(apiKey, model); err != nil {
 		log.Printf("Warning: EnsureAgySettings error: %v", err)
@@ -903,24 +860,39 @@ func InitializeBrainEnvironment(apiKey, model, systemPrompt string) {
 	}
 }
 
-func CreateReloadConfigFunc(cfgOrPool any, args ...any) func(source string) {
-	var cfg *config.Config
-	var dgSession *discordgo.Session
+type ReloadOption func(*reloadConfigOptions)
 
-	switch v := cfgOrPool.(type) {
-	case *config.Config:
-		cfg = v
-		if len(args) > 1 {
-			if sess, ok := args[1].(*discordgo.Session); ok {
-				dgSession = sess
-			}
-		}
-	case *queue.WorkerPool:
-		cfg = config.NewFromData(config.DefaultConfigData())
-		if len(args) > 2 {
-			if sess, ok := args[2].(*discordgo.Session); ok {
-				dgSession = sess
-			}
+type reloadConfigOptions struct {
+	dgSession           *discordgo.Session
+	reloadSupplier      func(active *config.Config) error
+	skipEnvironmentSync bool
+}
+
+func WithDiscordSession(s *discordgo.Session) ReloadOption {
+	return func(o *reloadConfigOptions) {
+		o.dgSession = s
+	}
+}
+
+func WithReloadSupplier(fn func(active *config.Config) error) ReloadOption {
+	return func(o *reloadConfigOptions) {
+		o.reloadSupplier = fn
+	}
+}
+
+func WithSkipEnvironmentSync() ReloadOption {
+	return func(o *reloadConfigOptions) {
+		o.skipEnvironmentSync = true
+	}
+}
+
+func CreateReloadConfigFunc(cfg *config.Config, opts ...ReloadOption) func(source string) {
+	options := &reloadConfigOptions{
+		reloadSupplier: config.Reload,
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(options)
 		}
 	}
 
@@ -930,12 +902,12 @@ func CreateReloadConfigFunc(cfgOrPool any, args ...any) func(source string) {
 		defer reloadMu.Unlock()
 		log.Printf("[%s] Changes detected. Reloading configuration, system rules, and skills...", source)
 		if cfg != nil {
-			if err := config.Reload(cfg); err != nil {
+			if err := options.reloadSupplier(cfg); err != nil {
 				metrics.ConfigReloadsTotal.WithLabelValues(source, "failure").Inc()
 				log.Printf("[%s] Warning: Failed to reload config: %v", source, err)
-				if dgSession != nil {
+				if options.dgSession != nil {
 					alertMsg := fmt.Sprintf("Failed to reload config:\n```\n%v\n```\nAerial has retained the Last Known Good Configuration (LKGC).", err)
-					_ = delivery.SendSystemAlert(dgSession, cfg.Current().SystemChannel, "Invalid Configuration File", alertMsg)
+					_ = delivery.SendSystemAlert(options.dgSession, cfg.Current().SystemChannel, "Invalid Configuration File", alertMsg)
 				}
 				return
 			}
@@ -943,46 +915,33 @@ func CreateReloadConfigFunc(cfgOrPool any, args ...any) func(source string) {
 			sanitizer.RegisterConfigTokens(cfg)
 			fresh := cfg.Current()
 
-			if err := config.EnsureAgySettings(fresh.APIKey, fresh.Model); err != nil {
-				log.Printf("[%s] Warning: EnsureAgySettings error: %v", source, err)
-			}
-			mcpConfig := config.LoadMCPConfig()
-			if len(mcpConfig) > 0 {
-				if err := config.EnsureMcpConfig(mcpConfig); err != nil {
-					log.Printf("[%s] Warning: EnsureMcpConfig error: %v", source, err)
+			if !options.skipEnvironmentSync {
+				if err := config.EnsureAgySettings(fresh.APIKey, fresh.Model); err != nil {
+					log.Printf("[%s] Warning: EnsureAgySettings error: %v", source, err)
 				}
-			}
-			if err := config.EnsureSystemRules(fresh.SystemPrompt); err != nil {
-				log.Printf("[%s] Warning: EnsureSystemRules error: %v", source, err)
-			}
-			if err := skills.EnsureSkills(); err != nil {
-				log.Printf("[%s] Warning: EnsureSkills error: %v", source, err)
+				mcpConfig := config.LoadMCPConfig()
+				if len(mcpConfig) > 0 {
+					if err := config.EnsureMcpConfig(mcpConfig); err != nil {
+						log.Printf("[%s] Warning: EnsureMcpConfig error: %v", source, err)
+					}
+				}
+				if err := config.EnsureSystemRules(fresh.SystemPrompt); err != nil {
+					log.Printf("[%s] Warning: EnsureSystemRules error: %v", source, err)
+				}
+				if err := skills.EnsureSkills(); err != nil {
+					log.Printf("[%s] Warning: EnsureSkills error: %v", source, err)
+				}
 			}
 		}
 	}
 }
 
-func RunBrainApp(ctx context.Context, cfgOrBrainCfg any) error {
-	var cfg *config.Config
-	switch v := cfgOrBrainCfg.(type) {
-	case *config.Config:
-		cfg = v
-	case BrainConfig:
-		cfg = config.NewFromData(&config.ConfigData{
-			Port:         v.Port,
-			AgyBin:       v.AgyBin,
-			APIKey:       v.APIKey,
-			SystemPrompt: v.SystemPrompt,
-			Model:        v.Model,
-			DatabaseURL:  v.DBPath,
-			DiscordToken: v.DiscordToken,
-		})
-	default:
-		var err error
-		cfg, err = config.New()
-		if err != nil {
-			return fmt.Errorf("failed to initialize config: %w", err)
-		}
+func RunBrainApp(ctx context.Context, cfg *config.Config) error {
+	if cfg == nil {
+		return fmt.Errorf("brain: config cannot be nil")
+	}
+	if ctx.Err() != nil {
+		return nil
 	}
 
 	cur := cfg.Current()
@@ -1023,7 +982,7 @@ func RunBrainApp(ctx context.Context, cfgOrBrainCfg any) error {
 		}
 	}()
 
-	reloadConfig := CreateReloadConfigFunc(cfg, pool, dgSession)
+	reloadConfig := CreateReloadConfigFunc(cfg, WithDiscordSession(dgSession))
 
 	// Start background file watcher for atomic hot-reloading of prompts and skills
 	fileWatcher, err := watcher.NewWatcher(
@@ -1049,7 +1008,10 @@ func RunBrainApp(ctx context.Context, cfgOrBrainCfg any) error {
 
 		watcherCtx, watcherCancel := context.WithCancel(ctx)
 		defer watcherCancel()
+		var watcherWg sync.WaitGroup
+		watcherWg.Add(1)
 		go func() {
+			defer watcherWg.Done()
 			for _, dir := range watchDirs {
 				if _, err := os.Stat(dir); err == nil {
 					if addErr := fileWatcher.AddRecursive(dir); addErr != nil {
@@ -1059,7 +1021,11 @@ func RunBrainApp(ctx context.Context, cfgOrBrainCfg any) error {
 			}
 			fileWatcher.Start(watcherCtx)
 		}()
-		defer func() { _ = fileWatcher.Close() }()
+		defer func() {
+			watcherCancel()
+			_ = fileWatcher.Close()
+			watcherWg.Wait()
+		}()
 	}
 
 	// Resume interrupted turns after Discord is attached

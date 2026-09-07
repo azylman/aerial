@@ -39,6 +39,32 @@ func TestNew_ConfigPointerInjection(t *testing.T) {
 	defer database.Close()
 }
 
+func TestInitDB_PostgresAirgap(t *testing.T) {
+	// 1. Prohibited by default in test environment
+	cfgPg := config.NewFromData(&config.ConfigData{DatabaseURL: "postgres://aerial:aerial@localhost:5432/aerial"})
+	_, err := New(cfgPg)
+	if err == nil {
+		t.Fatalf("expected error connecting to PostgreSQL in test environment, got nil")
+	}
+	if !strings.Contains(err.Error(), "prohibited in test environments") {
+		t.Errorf("expected prohibited error message, got: %v", err)
+	}
+
+	// 2. Allowed when AERIAL_ALLOW_TEST_POSTGRES=1 is set (passes airgap, reaches pgx.ParseConfig immediately)
+	t.Setenv("AERIAL_ALLOW_TEST_POSTGRES", "1")
+	cfgBadSyntax := config.NewFromData(&config.ConfigData{DatabaseURL: "postgres://invalid user@localhost:5432/aerial"})
+	_, errBadSyntax := New(cfgBadSyntax)
+	if errBadSyntax == nil {
+		t.Fatalf("expected parse error, got nil")
+	}
+	if strings.Contains(errBadSyntax.Error(), "prohibited in test environments") {
+		t.Errorf("expected airgap to be bypassed, but got airgap error: %v", errBadSyntax)
+	}
+	if !strings.Contains(errBadSyntax.Error(), "invalid postgres connection string") {
+		t.Errorf("expected invalid postgres connection string error, got: %v", errBadSyntax)
+	}
+}
+
 func setupTestDB(t *testing.T) *sql.DB {
 	sqlitePath := filepath.Join(t.TempDir(), "aerial_test.db")
 	database, err := New(config.NewFromData(&config.ConfigData{DatabaseURL: sqlitePath}))

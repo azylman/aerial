@@ -306,11 +306,34 @@ func (c *Config) Current() *ConfigData {
 	return cur
 }
 
+// Update atomically swaps the underlying ConfigData snapshot.
+func (c *Config) Update(fresh *ConfigData) {
+	c.update(fresh)
+}
+
 func (c *Config) update(fresh *ConfigData) {
 	if c == nil || fresh == nil {
 		return
 	}
 	c.current.Store(cloneConfigData(fresh))
+}
+
+// NewTestConfig returns a hermetic in-memory *Config initialized with DefaultConfigData(),
+// with DatabaseURL set to ":memory:", Port set to "0", sensitive tokens cleared,
+// and any caller-provided mutators applied.
+func NewTestConfig(mutators ...func(*ConfigData)) *Config {
+	data := DefaultConfigData()
+	data.DatabaseURL = ":memory:"
+	data.Port = "0"
+	data.DiscordToken = ""
+	data.APIKey = ""
+	data.GitHubPAT = ""
+	for _, fn := range mutators {
+		if fn != nil {
+			fn(data)
+		}
+	}
+	return NewFromData(data)
 }
 
 func NewFromData(data *ConfigData) *Config {

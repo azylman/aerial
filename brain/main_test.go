@@ -792,49 +792,45 @@ func TestSetupBrainMux_And_Endpoints(t *testing.T) {
 }
 
 func TestInitializeBrainEnvironment_And_Config(t *testing.T) {
-	cfg := config.NewFromData(&config.ConfigData{Model: "gemini-2.5-flash"})
-	bCfg := NewBrainConfigFromEnv(cfg)
-	if bCfg.Model != "gemini-2.5-flash" {
-		t.Errorf("Unexpected model in BrainConfig: %s", bCfg.Model)
+	cfg := config.NewTestConfig(func(d *config.ConfigData) {
+		d.Model = "gemini-2.5-flash"
+	})
+	if cfg.Current().Model != "gemini-2.5-flash" {
+		t.Errorf("Unexpected model in config: %s", cfg.Current().Model)
 	}
 
 	InitializeBrainEnvironment("", "gemini-2.5-flash", "test prompt")
 	InitializeBrainEnvironment("test-api-key", "gemini-2.5-flash", "test prompt")
 
-	pool := queue.NewWorkerPool(queue.WorkerPoolConfig{})
-	reloadFn := CreateReloadConfigFunc(pool, "test-key", "test prompt", nil)
+	reloadFn := CreateReloadConfigFunc(cfg, WithSkipEnvironmentSync())
 	reloadFn("UnitTest")
 }
 
 func TestRunBrainApp_Lifecycle(t *testing.T) {
-	t.Setenv("AGY_BIN", "/bin/true")
-	t.Setenv("PORT", "0")
-
 	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
 	dbPath := filepath.Join(tmpDir, "test_brain.db")
 
-	bCfg := BrainConfig{
-		Port:         "0",
-		AgyBin:       "/bin/true",
-		Model:        "gemini-2.5-flash",
-		APIKey:       "",
-		SystemPrompt: "test",
-		DBPath:       dbPath,
-		DiscordToken: "",
-	}
+	cfg := config.NewTestConfig(func(d *config.ConfigData) {
+		d.Port = "0"
+		d.AgyBin = "/bin/true"
+		d.Model = "gemini-2.5-flash"
+		d.DatabaseURL = dbPath
+		d.SystemPrompt = "test"
+	})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	time.AfterFunc(100*time.Millisecond, cancel)
 
-	err := RunBrainApp(ctx, bCfg)
+	err := RunBrainApp(ctx, cfg)
 	if err != nil && err != http.ErrServerClosed {
 		t.Errorf("Unexpected error running Brain app: %v", err)
 	}
 
 	// Test invalid DB path fails cleanly
-	badCfg := BrainConfig{
-		DBPath: "/nonexistent/invalid/dir/db.sqlite",
-	}
+	badCfg := config.NewTestConfig(func(d *config.ConfigData) {
+		d.DatabaseURL = "/nonexistent/invalid/dir/db.sqlite"
+	})
 	badCtx, badCancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer badCancel()
 	_ = RunBrainApp(badCtx, badCfg)
@@ -1075,40 +1071,38 @@ func TestInitializeBrainEnvironment_DataSymlink(t *testing.T) {
 }
 
 func TestCreateReloadConfigFunc_InvalidYAMLAndAlert(t *testing.T) {
-	tmpDir := t.TempDir()
-	yamlPath := filepath.Join(tmpDir, "config.yaml")
-	_ = os.WriteFile(yamlPath, []byte("invalid-yaml: [unclosed"), 0644)
-
+	cfg := config.NewTestConfig()
 	s, _ := discordgo.New("Bot mock-token")
-	pool := queue.NewWorkerPool(queue.WorkerPoolConfig{})
 
-	reloadFn := CreateReloadConfigFunc(pool, "test-api-key", "test-prompt", s)
+	reloadFn := CreateReloadConfigFunc(cfg,
+		WithDiscordSession(s),
+		WithReloadSupplier(func(active *config.Config) error {
+			return errors.New("simulated invalid YAML error")
+		}),
+		WithSkipEnvironmentSync(),
+	)
 	reloadFn("TestReload")
 }
 
 func TestRunBrainApp_ServerReadinessAndShutdown(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
-	t.Setenv("AGY_BIN", "/bin/true")
-	t.Setenv("PORT", "0")
-
 	dbPath := filepath.Join(tmpDir, "app_test.db")
-	bCfg := BrainConfig{
-		Port:         "0",
-		AgyBin:       "/bin/true",
-		Model:        "gemini-2.5-flash",
-		APIKey:       "",
-		SystemPrompt: "test",
-		DBPath:       dbPath,
-		DiscordToken: "",
-	}
+
+	cfg := config.NewTestConfig(func(d *config.ConfigData) {
+		d.Port = "0"
+		d.AgyBin = "/bin/true"
+		d.Model = "gemini-2.5-flash"
+		d.DatabaseURL = dbPath
+		d.SystemPrompt = "test"
+	})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	errChan := make(chan error, 1)
 	go func() {
-		errChan <- RunBrainApp(ctx, bCfg)
+		errChan <- RunBrainApp(ctx, cfg)
 	}()
 
 	time.Sleep(150 * time.Millisecond)
@@ -1237,57 +1231,53 @@ func TestHandleTasks_DetailedCoverage(t *testing.T) {
 }
 
 func TestCreateReloadConfigFunc_SuccessCoverage(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-
-	oldPaths := config.ConfigSearchPaths
-	defer func() { config.ConfigSearchPaths = oldPaths }()
-
-	// 1. Invalid YAML config path
-	invalidYaml := filepath.Join(tmpDir, "bad_config.yaml")
-	_ = os.WriteFile(invalidYaml, []byte("invalid_yaml: [unclosed"), 0644)
-	config.ConfigSearchPaths = []string{invalidYaml}
-
+	cfg := config.NewTestConfig()
 	s, _ := discordgo.New("Bot mock-token")
-	pool := queue.NewWorkerPool(queue.WorkerPoolConfig{})
-	reloadFn := CreateReloadConfigFunc(pool, "test-api-key", "test-prompt", s)
-	reloadFn("TestReloadFailure")
 
-	// 2. Valid YAML config path
-	validYaml := filepath.Join(tmpDir, "good_config.yaml")
-	_ = os.WriteFile(validYaml, []byte(`
-model: "gemini-2.5-flash"
-channels:
-  default:
-    mode: "channel"
-`), 0644)
-	config.ConfigSearchPaths = []string{validYaml}
-	reloadFn("TestReloadSuccess")
+	// 1. Failure supplier
+	reloadFail := CreateReloadConfigFunc(cfg,
+		WithDiscordSession(s),
+		WithReloadSupplier(func(active *config.Config) error {
+			return errors.New("simulated reload failure")
+		}),
+		WithSkipEnvironmentSync(),
+	)
+	reloadFail("TestReloadFailure")
+
+	// 2. Success supplier
+	reloadSuccess := CreateReloadConfigFunc(cfg,
+		WithDiscordSession(s),
+		WithReloadSupplier(func(active *config.Config) error {
+			active.Update(&config.ConfigData{Model: "gemini-2.5-flash"})
+			return nil
+		}),
+		WithSkipEnvironmentSync(),
+	)
+	reloadSuccess("TestReloadSuccess")
 }
 
 func TestRunBrainApp_DetailedOptions(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
-	t.Setenv("PORT", "0")
 
 	// 1. With DiscordToken set
 	dbPath := filepath.Join(tmpDir, "app_discord.db")
-	bCfg := BrainConfig{
-		Port:         "0",
-		AgyBin:       "/bin/true",
-		Model:        "gemini-2.5-flash",
-		APIKey:       "test-key",
-		SystemPrompt: "test",
-		DBPath:       dbPath,
-		DiscordToken: "mock-token",
-	}
+	cfg := config.NewTestConfig(func(d *config.ConfigData) {
+		d.Port = "0"
+		d.AgyBin = "/bin/true"
+		d.Model = "gemini-2.5-flash"
+		d.APIKey = "test-key"
+		d.SystemPrompt = "test"
+		d.DatabaseURL = dbPath
+		d.DiscordToken = "mock-token"
+	})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	errChan := make(chan error, 1)
 	go func() {
-		errChan <- RunBrainApp(ctx, bCfg)
+		errChan <- RunBrainApp(ctx, cfg)
 	}()
 
 	time.Sleep(100 * time.Millisecond)
@@ -1303,47 +1293,16 @@ func TestRunBrainApp_DetailedOptions(t *testing.T) {
 	}
 
 	// 2. Port listen error
-	badPortCfg := BrainConfig{
-		Port:         "-1",
-		AgyBin:       "/bin/true",
-		Model:        "gemini-2.5-flash",
-		APIKey:       "",
-		SystemPrompt: "test",
-		DBPath:       filepath.Join(tmpDir, "app_bad_port.db"),
-	}
+	badPortCfg := config.NewTestConfig(func(d *config.ConfigData) {
+		d.Port = "-1"
+		d.AgyBin = "/bin/true"
+		d.Model = "gemini-2.5-flash"
+		d.SystemPrompt = "test"
+		d.DatabaseURL = filepath.Join(tmpDir, "app_bad_port.db")
+	})
 	ctxBad, cancelBad := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancelBad()
 	_ = RunBrainApp(ctxBad, badPortCfg)
-}
-
-func TestMainFunc(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-	t.Setenv("PORT", "0")
-	dbFile := filepath.Join(tmpDir, "main_test.db")
-	t.Setenv("DB_PATH", dbFile)
-
-	validYaml := filepath.Join(tmpDir, "main_config.yaml")
-	_ = os.WriteFile(validYaml, []byte(`
-model: "gemini-2.5-flash"
-channels:
-  default:
-    mode: "channel"
-`), 0644)
-
-	oldPaths := config.ConfigSearchPaths
-	config.ConfigSearchPaths = []string{validYaml}
-	defer func() { config.ConfigSearchPaths = oldPaths }()
-
-	go func() {
-		time.Sleep(100 * time.Millisecond)
-		p, err := os.FindProcess(os.Getpid())
-		if err == nil {
-			_ = p.Signal(os.Interrupt)
-		}
-	}()
-
-	main()
 }
 
 func TestInitializeBrainEnvironment_Complete(t *testing.T) {
@@ -1373,24 +1332,23 @@ func TestCreateReloadConfigFunc_Complete(t *testing.T) {
 	_ = os.MkdirAll(filepath.Dir(mcpFile), 0755)
 	_ = os.WriteFile(mcpFile, []byte(`{"mcp-server":{"command":"echo"}}`), 0644)
 
-	validYaml := filepath.Join(tmpDir, "config.yaml")
-	_ = os.WriteFile(validYaml, []byte(`
-model: "gemini-2.5-flash"
-channels:
-  default:
-    mode: "channel"
-`), 0644)
+	cfg := config.NewTestConfig(func(d *config.ConfigData) {
+		d.Model = "gemini-2.5-flash"
+		d.APIKey = "test-api-key"
+		d.SystemPrompt = "test system prompt"
+	})
 
-	oldPaths := config.ConfigSearchPaths
-	config.ConfigSearchPaths = []string{validYaml}
-	defer func() { config.ConfigSearchPaths = oldPaths }()
-
-	pool := queue.NewWorkerPool(queue.WorkerPoolConfig{})
-	reloadFn := CreateReloadConfigFunc(pool, "test-api-key", "test system prompt", nil)
+	reloadFn := CreateReloadConfigFunc(cfg,
+		WithReloadSupplier(func(active *config.Config) error {
+			return nil
+		}),
+	)
 	reloadFn("TestSource")
 
 	// Trigger error branches with invalid home
-	t.Setenv("HOME", "/proc/read_only_home")
+	blockerHome := filepath.Join(tmpDir, "blocked_home")
+	_ = os.WriteFile(blockerHome, []byte("file"), 0644)
+	t.Setenv("HOME", filepath.Join(blockerHome, "sub"))
 	reloadFn("TestErrorSource")
 }
 
@@ -1398,28 +1356,33 @@ func TestRunBrainApp_ErrorBranches(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
 
-	// 1. Invalid DBPath (fails db.InitDB)
-	bCfgInvalidDB := BrainConfig{
-		Port:   "0",
-		DBPath: "/proc/nonexistent/dir/db.sqlite",
+	// 1. Nil config returns error
+	ctx0, cancel0 := context.WithCancel(context.Background())
+	defer cancel0()
+	if err := RunBrainApp(ctx0, nil); err == nil {
+		t.Errorf("Expected error for nil config, got nil")
 	}
+
+	// 2. Unsupported database scheme returns error
+	cfgInvalidDB := config.NewTestConfig(func(d *config.ConfigData) {
+		d.DatabaseURL = "mysql://user:pass@localhost/db"
+	})
 	ctx1, cancel1 := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel1()
-	err := RunBrainApp(ctx1, bCfgInvalidDB)
+	err := RunBrainApp(ctx1, cfgInvalidDB)
 	if err == nil {
 		t.Errorf("Expected error from invalid DBPath, got nil")
 	}
 
-	// 2. Empty DBPath returns error
-	bCfgFallback := BrainConfig{
-		Port:   "0",
-		DBPath: "",
-	}
+	// 4. Empty DatabaseURL returns error
+	cfgEmptyDB := config.NewTestConfig(func(d *config.ConfigData) {
+		d.DatabaseURL = ""
+	})
 	ctx2, cancel2 := context.WithCancel(context.Background())
 	defer cancel2()
-	errEmpty := RunBrainApp(ctx2, bCfgFallback)
+	errEmpty := RunBrainApp(ctx2, cfgEmptyDB)
 	if errEmpty == nil {
-		t.Errorf("Expected error for empty DBPath, got nil")
+		t.Errorf("Expected error for empty DatabaseURL, got nil")
 	}
 }
 
@@ -1505,31 +1468,6 @@ func TestFormatCronDescription_AdditionalPatterns(t *testing.T) {
 			t.Errorf("FormatCronDescription(%q) = %q, want %q", tc.expr, got, tc.want)
 		}
 	}
-}
-
-func TestMainFunc_ConfigError(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-	t.Setenv("PORT", "0")
-	dbFile := filepath.Join(tmpDir, "main_test_err.db")
-	t.Setenv("DB_PATH", dbFile)
-
-	invalidYaml := filepath.Join(tmpDir, "bad_config.yaml")
-	_ = os.WriteFile(invalidYaml, []byte("bad: [unclosed"), 0644)
-
-	oldPaths := config.ConfigSearchPaths
-	config.ConfigSearchPaths = []string{invalidYaml}
-	defer func() { config.ConfigSearchPaths = oldPaths }()
-
-	go func() {
-		time.Sleep(100 * time.Millisecond)
-		p, err := os.FindProcess(os.Getpid())
-		if err == nil {
-			_ = p.Signal(os.Interrupt)
-		}
-	}()
-
-	main()
 }
 
 func TestMetricsMiddleware_Implicit200(t *testing.T) {
