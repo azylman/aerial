@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestModelUnavailableMessage(t *testing.T) {
@@ -103,5 +104,67 @@ EOF
 	res503 := GenerateDynamicNotification(mockBin, "valid_key", "Error 503: unavailable")
 	if !strings.Contains(res503, "bestie") {
 		t.Errorf("Expected dynamic notification for 503 outage, got: %q", res503)
+	}
+}
+
+func TestFormatDurationHuman(t *testing.T) {
+	tests := []struct {
+		d    time.Duration
+		want string
+	}{
+		{d: 0, want: "a few moments"},
+		{d: -5 * time.Second, want: "a few moments"},
+		{d: 45 * time.Second, want: "45s"},
+		{d: 15 * time.Minute, want: "15m"},
+		{d: 16*time.Minute + 58*time.Second, want: "16m 58s"},
+		{d: 1 * time.Hour, want: "1h"},
+		{d: 1*time.Hour + 15*time.Minute, want: "1h 15m"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.want, func(t *testing.T) {
+			got := FormatDurationHuman(tt.d)
+			if got != tt.want {
+				t.Errorf("FormatDurationHuman(%v) = %q, want %q", tt.d, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFormatQuotaPauseMessage(t *testing.T) {
+	runAt := time.Unix(1725678900, 0)
+	dur := 16*time.Minute + 58*time.Second
+
+	// Scheduled = true
+	msgScheduled := FormatQuotaPauseMessage(dur, runAt, true, false)
+	if !strings.Contains(msgScheduled, "**16m 58s**") {
+		t.Errorf("Expected **16m 58s** in scheduled message, got: %s", msgScheduled)
+	}
+	if !strings.Contains(msgScheduled, "<t:1725678900:R>") {
+		t.Errorf("Expected live Discord countdown <t:1725678900:R>, got: %s", msgScheduled)
+	}
+	if !strings.Contains(msgScheduled, "automatically scheduled a retry") {
+		t.Errorf("Expected scheduled confirmation, got: %s", msgScheduled)
+	}
+	if !strings.Contains(msgScheduled, "GEMINI_API_KEY") {
+		t.Errorf("Expected GEMINI_API_KEY advice, got: %s", msgScheduled)
+	}
+
+	// Scheduled = false (DB failure)
+	msgNotScheduled := FormatQuotaPauseMessage(dur, runAt, false, false)
+	if strings.Contains(msgNotScheduled, "automatically scheduled a retry") {
+		t.Errorf("Did not expect scheduled confirmation when scheduled=false, got: %s", msgNotScheduled)
+	}
+	if !strings.Contains(msgNotScheduled, "ping me again") {
+		t.Errorf("Expected re-ask prompt, got: %s", msgNotScheduled)
+	}
+
+	// Circuit breaker = true
+	msgCircuit := FormatQuotaPauseMessage(dur, runAt, false, true)
+	if !strings.Contains(msgCircuit, "again after a scheduled auto-retry") {
+		t.Errorf("Expected circuit breaker notice, got: %s", msgCircuit)
+	}
+	if !strings.Contains(msgCircuit, "paused automated retries") {
+		t.Errorf("Expected paused automated retries notice, got: %s", msgCircuit)
 	}
 }

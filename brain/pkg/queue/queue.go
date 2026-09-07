@@ -5,10 +5,12 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
-	"regexp"
+	"math/rand"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/azylman/aerial/brain/pkg/classifier"
@@ -22,6 +24,7 @@ import (
 	"github.com/azylman/aerial/brain/pkg/sanitizer"
 	"github.com/azylman/aerial/brain/pkg/session"
 	"github.com/bwmarrin/discordgo"
+	"github.com/google/uuid"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -206,13 +209,14 @@ type threadWorkerState struct {
 }
 
 type WorkerPool struct {
-	cfg       WorkerPoolConfig
-	mu        sync.Mutex
-	threadChs map[string]*threadWorkerState
-	wg        sync.WaitGroup
-	ctx       context.Context
-	cancel    context.CancelFunc
-	stopped   bool
+	cfg              WorkerPoolConfig
+	mu               sync.Mutex
+	threadChs        map[string]*threadWorkerState
+	wg               sync.WaitGroup
+	ctx              context.Context
+	cancel           context.CancelFunc
+	stopped          bool
+	quotaLockedUntil atomic.Int64
 }
 
 func NewWorkerPool(cfg WorkerPoolConfig) *WorkerPool {
@@ -578,7 +582,7 @@ func extractMessageBody(content string) string {
 }
 
 func isTier1Wake(m db.Message, botUserID string, wakeMode string) bool {
-	if m.AuthorID == "http-client" {
+	if m.AuthorID == "http-client" || m.AuthorID == "scheduler" || m.ScheduleRunID != "" {
 		return true
 	}
 
@@ -676,6 +680,8 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 	if p.ctx.Err() != nil {
 		return
 	}
+
+	var isQuotaPaused bool
 
 	metrics.ActiveWorkers.Inc()
 	defer metrics.ActiveWorkers.Dec()
@@ -1102,6 +1108,28 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 			handledTrailing = true
 			for i, m := range trailingMsgs {
 				info := trailingInfos[i]
+				if isQuotaPaused {
+					if info.isWake {
+						metrics.DiscordMessagesProcessedTotal.WithLabelValues("false", "wake").Inc()
+					} else {
+						metrics.DiscordMessagesProcessedTotal.WithLabelValues("true", "ambient").Inc()
+					}
+					telemetry := "[QUOTA_PAUSED] Trailing message suppressed due to active quota lockout"
+					_ = db.UpdateMessageStatus(p.cfg.DB, m.ID, db.StatusFailed, telemetry)
+					if m.ScheduleRunID != "" {
+						_ = db.UpdateScheduleRunStatus(p.cfg.DB, db.UpdateRunParams{
+							RunID:       m.ScheduleRunID,
+							MessageID:   m.ID,
+							Status:      "failed",
+							CompletedAt: time.Now().UTC(),
+							Error:       telemetry,
+						})
+					}
+					if p.cfg.OnMessageCompleted != nil {
+						p.cfg.OnMessageCompleted(m, db.StatusFailed)
+					}
+					continue
+				}
 				if !info.isWake {
 					metrics.DiscordMessagesProcessedTotal.WithLabelValues("true", "ambient").Inc()
 					if currentSessionID != "" && session.SessionExistsOnDisk(currentSessionID) {
@@ -1193,6 +1221,43 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		currentAPIKey := p.cfg.APIKey
 		p.mu.Unlock()
 
+		// Global Quota Lockout Pre-check: if a quota pause is active across the pool and running in OAuth mode, fail-fast immediately
+		if currentAPIKey == "" {
+			if lockedUntilUnix := p.quotaLockedUntil.Load(); lockedUntilUnix > 0 {
+				lockedUntil := time.Unix(lockedUntilUnix, 0)
+				if time.Now().Before(lockedUntil) {
+					isQuotaPaused = true
+					remaining := time.Until(lockedUntil)
+					log.Printf("[WorkerPool] Global quota pause active for thread %s (%v remaining). Aborting turn.", threadID, remaining)
+					stopTyping()
+					reason := fmt.Sprintf("[QUOTA_PAUSED reset_in=%v scheduled=false] global quota pause active", remaining)
+					metrics.RecordRunnerError("quota_paused", currentModel)
+					metrics.RecordTurnCompleted("quota_paused", triggerType, currentModel, time.Since(execStart))
+					if !skipDiscord && p.cfg.DeliveryFunc != nil {
+						pauseMsg := notifier.FormatQuotaPauseMessage(remaining, lockedUntil, false, false)
+						_ = p.cfg.DeliveryFunc(p.getDiscordSession(), threadID, pauseMsg)
+					}
+					for _, m := range burst {
+						_ = db.UpdateMessageStatus(p.cfg.DB, m.ID, db.StatusFailed, reason)
+						if m.ScheduleRunID != "" {
+							_ = db.UpdateScheduleRunStatus(p.cfg.DB, db.UpdateRunParams{
+								RunID:       m.ScheduleRunID,
+								MessageID:   m.ID,
+								Status:      "failed",
+								CompletedAt: time.Now().UTC(),
+								DurationMs:  time.Since(execStart).Milliseconds(),
+								Error:       reason,
+							})
+						}
+						if p.cfg.OnMessageCompleted != nil {
+							p.cfg.OnMessageCompleted(m, db.StatusFailed)
+						}
+					}
+					return
+				}
+			}
+		}
+
 		promptToSend := turnPrompt
 		if attempt > 1 {
 			if (runner.IsInactivityTimeout(lastErrDetail, lastStderr) || strings.Contains(lastErrDetail, "max duration exceeded")) && currentSessionID != "" && session.SessionExistsOnDisk(currentSessionID) {
@@ -1246,6 +1311,81 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		}
 
 		if isFailure {
+			// Quota Lockout Fail-Fast & Auto-Retry Check
+			if runner.IsQuotaPause(errDetail, stderr) {
+				isQuotaPaused = true
+				stopTyping()
+				log.Printf("[WorkerPool] Quota pause detected for thread %s on attempt %d/%d: %s", threadID, attempt, maxAttempts, errDetail)
+
+				// Cold-start dynamic session latching if available
+				if currentSessionID == "" && !isSessionCorruption {
+					if extSess := runner.ExtractSessionID(stderr, execStart); extSess != "" && session.SessionExistsOnDisk(extSess) {
+						currentSessionID = extSess
+						_ = db.SaveSessionID(p.cfg.DB, threadID, currentSessionID)
+					}
+				}
+
+				// Circuit breaker: check if this turn was already a quota auto-retry
+				isAlreadyRetry := burst[0].ScheduleRunID != "" || strings.HasPrefix(burst[0].Content, "[QUOTA_RETRY]") || strings.HasPrefix(basePrompt, "[QUOTA_RETRY]")
+
+				resetDur, _ := runner.ExtractQuotaResetDuration(errDetail, stderr)
+				jitterSec := 5 + rand.Intn(16) // 5s to 20s jitter
+				runAt := time.Now().UTC().Add(resetDur).Add(30 * time.Second).Add(time.Duration(jitterSec) * time.Second)
+
+				p.quotaLockedUntil.Store(runAt.Unix())
+
+				var scheduled bool
+				if !isAlreadyRetry {
+					retryPrompt := fmt.Sprintf("[QUOTA_RETRY] %s", basePrompt)
+					oneShotID := uuid.New().String()
+					oneShot := db.OneShotSchedule{
+						ID:        oneShotID,
+						ThreadID:  threadID,
+						Prompt:    retryPrompt,
+						RunAt:     runAt,
+						CreatedAt: time.Now().UTC(),
+					}
+					if err := db.CreateOneShotSchedule(p.cfg.DB, oneShot); err != nil {
+						log.Printf("[WorkerPool] Failed to create one-shot retry schedule for thread %s: %v", threadID, err)
+					} else {
+						scheduled = true
+						log.Printf("[WorkerPool] Scheduled one-shot retry %s for thread %s at %s (+%v)", oneShotID, threadID, runAt.Format(time.RFC3339), resetDur)
+					}
+				} else {
+					log.Printf("[WorkerPool] Circuit breaker: turn for thread %s was already an auto-retry. Skipping further scheduling.", threadID)
+				}
+
+				metrics.RecordRunnerError("quota_paused", currentModel)
+				metrics.RecordTurnCompleted("quota_paused", triggerType, currentModel, time.Since(execStart))
+
+				if !skipDiscord && p.cfg.DeliveryFunc != nil {
+					pauseMsg := notifier.FormatQuotaPauseMessage(resetDur, runAt, scheduled, isAlreadyRetry)
+					if err := p.cfg.DeliveryFunc(p.getDiscordSession(), threadID, pauseMsg); err != nil {
+						log.Printf("[WorkerPool] Failed to deliver quota pause notice for thread %s: %v", threadID, err)
+					}
+				}
+
+				reason := fmt.Sprintf("[QUOTA_PAUSED reset_in=%v scheduled=%t] %s", resetDur, scheduled, sanitizeErrorText(errDetail))
+				for _, m := range burst {
+					_ = db.UpdateMessageStatus(p.cfg.DB, m.ID, db.StatusFailed, reason)
+					if m.ScheduleRunID != "" {
+						_ = db.UpdateScheduleRunStatus(p.cfg.DB, db.UpdateRunParams{
+							RunID:       m.ScheduleRunID,
+							MessageID:   m.ID,
+							Status:      "failed",
+							CompletedAt: time.Now().UTC(),
+							DurationMs:  time.Since(execStart).Milliseconds(),
+							Error:       reason,
+						})
+					}
+					if p.cfg.OnMessageCompleted != nil {
+						p.cfg.OnMessageCompleted(m, db.StatusFailed)
+					}
+				}
+
+				return
+			}
+
 			isWatchdog := runner.IsInactivityTimeout(errDetail, stderr) || strings.Contains(errDetail, "[watchdog]") || strings.Contains(errDetail, "inactivity timeout exceeded") || strings.Contains(errDetail, "max duration exceeded")
 
 			errCat := "process_error"

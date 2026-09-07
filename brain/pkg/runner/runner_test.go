@@ -870,3 +870,121 @@ func TestActivityWriter_ChunkBoundaryUUID(t *testing.T) {
 	}
 }
 
+func TestIsQuotaPause(t *testing.T) {
+	tests := []struct {
+		name      string
+		errDetail string
+		stderr    string
+		want      bool
+	}{
+		{
+			name:      "Google subscription quota reached",
+			errDetail: "Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 16m58s.",
+			stderr:    "",
+			want:      true,
+		},
+		{
+			name:      "Subscription quota in stderr",
+			errDetail: "execution failed with exit code 1",
+			stderr:    "[ERROR] Individual quota reached. Resets in 5m.",
+			want:      true,
+		},
+		{
+			name:      "Resource has been exhausted with reset timer",
+			errDetail: "Resource has been exhausted (e.g. check quota). Resets in 45s.",
+			stderr:    "",
+			want:      true,
+		},
+		{
+			name:      "Resource exhausted with quota in stderr",
+			errDetail: "429 Too Many Requests",
+			stderr:    "RESOURCE_EXHAUSTED: check quota limits. Resets in 30s.",
+			want:      true,
+		},
+		{
+			name:      "Generic 503 unavailable (transient, not quota pause)",
+			errDetail: "503 Service Unavailable",
+			stderr:    "The service is experiencing high demand",
+			want:      false,
+		},
+		{
+			name:      "Process syntax error",
+			errDetail: "syntax error near token",
+			stderr:    "",
+			want:      false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := IsQuotaPause(tt.errDetail, tt.stderr)
+			if got != tt.want {
+				t.Errorf("IsQuotaPause(%q, %q) = %v, want %v", tt.errDetail, tt.stderr, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExtractQuotaResetDuration(t *testing.T) {
+	tests := []struct {
+		name         string
+		errDetail    string
+		stderr       string
+		wantDur      time.Duration
+		wantExact    bool
+	}{
+		{
+			name:      "Standard Google minutes and seconds",
+			errDetail: "Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 16m58s.",
+			stderr:    "",
+			wantDur:   16*time.Minute + 58*time.Second,
+			wantExact: true,
+		},
+		{
+			name:      "Minutes and seconds with space",
+			errDetail: "Resets in 16m 58s.",
+			stderr:    "",
+			wantDur:   16*time.Minute + 58*time.Second,
+			wantExact: true,
+		},
+		{
+			name:      "Spelled out unit minutes",
+			errDetail: "Resets in 15 minutes.",
+			stderr:    "",
+			wantDur:   15 * time.Minute,
+			wantExact: true,
+		},
+		{
+			name:      "Short seconds",
+			errDetail: "Resource has been exhausted. Resets in 45s.",
+			stderr:    "",
+			wantDur:   45 * time.Second,
+			wantExact: true,
+		},
+		{
+			name:      "Hours and minutes",
+			errDetail: "Resets in 1h 15m.",
+			stderr:    "",
+			wantDur:   1*time.Hour + 15*time.Minute,
+			wantExact: true,
+		},
+		{
+			name:      "No reset time specified - fallback 20m",
+			errDetail: "Individual quota reached. Please upgrade your subscription.",
+			stderr:    "",
+			wantDur:   20 * time.Minute,
+			wantExact: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotDur, gotExact := ExtractQuotaResetDuration(tt.errDetail, tt.stderr)
+			if gotDur != tt.wantDur || gotExact != tt.wantExact {
+				t.Errorf("ExtractQuotaResetDuration(%q, %q) = (%v, %v), want (%v, %v)",
+					tt.errDetail, tt.stderr, gotDur, gotExact, tt.wantDur, tt.wantExact)
+			}
+		})
+	}
+}
+

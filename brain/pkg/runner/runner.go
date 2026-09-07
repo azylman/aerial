@@ -718,3 +718,70 @@ func extractErrorDetail(stderr string, exitCode int) string {
 
 	return fmt.Sprintf("execution failed with exit code %d", exitCode)
 }
+
+var (
+	reQuotaResetIn = regexp.MustCompile(`(?i)resets in\s+([0-9a-zA-Z\s]+?)(?:\.|\n|\r|$)`)
+	reWhitespace   = regexp.MustCompile(`\s+`)
+)
+
+// IsQuotaPause detects Google subscription and resource exhaustion quota lockouts.
+func IsQuotaPause(errDetail, stderr string) bool {
+	combined := strings.ToLower(errDetail + "\n" + stderr)
+
+	// Direct subscription quota markers
+	if strings.Contains(combined, "individual quota reached") ||
+		strings.Contains(combined, "please upgrade your subscription") ||
+		strings.Contains(combined, "brain bucket resets in") {
+		return true
+	}
+
+	// Quota / resource exhausted markers paired with a reset countdown or quota keywords
+	hasQuotaWord := strings.Contains(combined, "quota") ||
+		strings.Contains(combined, "resource_exhausted") ||
+		strings.Contains(combined, "resource has been exhausted")
+	hasResetTimer := strings.Contains(combined, "resets in")
+	hasUpgradePrompt := strings.Contains(combined, "upgrade your subscription")
+
+	if hasQuotaWord && (hasResetTimer || hasUpgradePrompt) {
+		return true
+	}
+
+	return false
+}
+
+// ExtractQuotaResetDuration parses compound reset countdowns (e.g. "16m58s", "16m 58s", "1h 15m", "45s", "15 minutes").
+// Normalizes unit words and strips internal whitespace. Clamps between 10s and 24h.
+// Falls back to (20 * time.Minute, false) if missing or unparseable.
+func ExtractQuotaResetDuration(errDetail, stderr string) (time.Duration, bool) {
+	combined := errDetail + "\n" + stderr
+	match := reQuotaResetIn.FindStringSubmatch(combined)
+	if len(match) > 1 {
+		raw := strings.TrimSpace(match[1])
+		raw = strings.ToLower(raw)
+		// Normalize unit words to standard Go duration units
+		raw = strings.ReplaceAll(raw, "minutes", "m")
+		raw = strings.ReplaceAll(raw, "minute", "m")
+		raw = strings.ReplaceAll(raw, "mins", "m")
+		raw = strings.ReplaceAll(raw, "min", "m")
+		raw = strings.ReplaceAll(raw, "hours", "h")
+		raw = strings.ReplaceAll(raw, "hour", "h")
+		raw = strings.ReplaceAll(raw, "hrs", "h")
+		raw = strings.ReplaceAll(raw, "hr", "h")
+		raw = strings.ReplaceAll(raw, "seconds", "s")
+		raw = strings.ReplaceAll(raw, "second", "s")
+		raw = strings.ReplaceAll(raw, "secs", "s")
+		raw = strings.ReplaceAll(raw, "sec", "s")
+		raw = reWhitespace.ReplaceAllString(raw, "")
+
+		if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+			// Safety clamping: min 10s, max 24h
+			if d < 10*time.Second {
+				d = 30 * time.Second
+			} else if d > 24*time.Hour {
+				d = 24 * time.Hour
+			}
+			return d, true
+		}
+	}
+	return 20 * time.Minute, false
+}
