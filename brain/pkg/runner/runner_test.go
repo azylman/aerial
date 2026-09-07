@@ -117,13 +117,14 @@ func TestClassifyError(t *testing.T) {
 			wantCorrupt:   false,
 		},
 		{
-			name:          "Clean Success With Empty Response In JSON Envelope",
-			exitCode:      0,
-			stdout:        `{"conversation_id":"abc","status":"SUCCESS","response":""}`,
-			stderr:        "",
-			wantFailure:   false,
-			wantTransient: false,
-			wantCorrupt:   false,
+			name:                 "Empty Response With Status SUCCESS On Exit 0",
+			exitCode:             0,
+			stdout:               `{"conversation_id":"abc","status":"SUCCESS","response":""}`,
+			stderr:               "",
+			wantFailure:          true,
+			wantTransient:        true,
+			wantCorrupt:          false,
+			errDetailMustContain: "empty response text",
 		},
 		{
 			name:          "Clean Success: Conversational response discussing maximum context length and 503 errors",
@@ -391,14 +392,14 @@ func TestActivityWriter_ThreadSafetyAndSessionDiscovery(t *testing.T) {
 	startNano := w.LastActivity().UnixNano()
 
 	// Write session start log chunk
-	chunk := []byte("INFO: Starting conversation update stream for 12345-abcd-6789\n")
+	chunk := []byte("INFO: Starting conversation update stream for 12345678-abcd-ef01-2345-6789abcdef01\n")
 	n, err := w.Write(chunk)
 	if err != nil || n != len(chunk) {
 		t.Fatalf("Write failed: n=%d, err=%v", n, err)
 	}
 
-	if w.SessionID() != "12345-abcd-6789" {
-		t.Errorf("expected session ID 12345-abcd-6789, got %q", w.SessionID())
+	if w.SessionID() != "12345678-abcd-ef01-2345-6789abcdef01" {
+		t.Errorf("expected session ID 12345678-abcd-ef01-2345-6789abcdef01, got %q", w.SessionID())
 	}
 	if w.LastActivity().UnixNano() < startNano {
 		t.Errorf("expected lastActivity to advance")
@@ -414,20 +415,20 @@ func TestActivityWriter_ThreadSafetyAndSessionDiscovery(t *testing.T) {
 	}
 
 	// Test initialized session ID retains value
-	wPre := NewActivityWriter("pre-existing-uuid")
-	if wPre.SessionID() != "pre-existing-uuid" {
-		t.Errorf("expected pre-existing-uuid, got %q", wPre.SessionID())
+	wPre := NewActivityWriter("11111111-2222-3333-4444-555555555555")
+	if wPre.SessionID() != "11111111-2222-3333-4444-555555555555" {
+		t.Errorf("expected 11111111-2222-3333-4444-555555555555, got %q", wPre.SessionID())
 	}
-	_, _ = wPre.Write([]byte("INFO: Starting conversation update stream for different-uuid\n"))
-	if wPre.SessionID() != "pre-existing-uuid" {
+	_, _ = wPre.Write([]byte("INFO: Starting conversation update stream for 99999999-8888-7777-6666-555555555555\n"))
+	if wPre.SessionID() != "11111111-2222-3333-4444-555555555555" {
 		t.Errorf("expected pre-existing session ID to not be overwritten, got %q", wPre.SessionID())
 	}
 
 	// Test general session regex discovery
 	wGen := NewActivityWriter("")
-	_, _ = wGen.Write([]byte("Initialized conversation_id: general-session-uuid-999\n"))
-	if wGen.SessionID() != "general-session-uuid-999" {
-		t.Errorf("expected general-session-uuid-999, got %q", wGen.SessionID())
+	_, _ = wGen.Write([]byte("Initialized conversation_id: 99999999-8888-7777-6666-555555555555\n"))
+	if wGen.SessionID() != "99999999-8888-7777-6666-555555555555" {
+		t.Errorf("expected 99999999-8888-7777-6666-555555555555, got %q", wGen.SessionID())
 	}
 
 	// Concurrent writes and reads
@@ -802,3 +803,71 @@ func TestIsInactivityTimeout(t *testing.T) {
 		})
 	}
 }
+
+func TestClassifyError_Exit0_ResponseDiscussingContextLimit_NotCorrupt(t *testing.T) {
+	stdout := `{"conversation_id":"11111111-2222-3333-4444-555555555555","status":"SUCCESS","response":"The maximum context length in tokens is 1 million. When context window exceeded occurs, the system rotates sessions."}`
+	isFailure, isTransient, isCorrupt, errDetail := ClassifyError(0, stdout, "")
+	if isFailure || isTransient || isCorrupt {
+		t.Fatalf("Expected clean success, got failure=%v, transient=%v, corrupt=%v, errDetail=%q", isFailure, isTransient, isCorrupt, errDetail)
+	}
+}
+
+func TestExtractSessionID_StrictUUID_IgnoresCommonWords(t *testing.T) {
+	tests := []struct {
+		name     string
+		stderr   string
+		wantUUID string
+	}{
+		{
+			name:     "Session started words",
+			stderr:   "Session started\nStarting session now",
+			wantUUID: "",
+		},
+		{
+			name:     "Conversation initialization-failed words",
+			stderr:   "Conversation initialization-failed: could not load",
+			wantUUID: "",
+		},
+		{
+			name:     "Valid RFC4122 UUID in update stream",
+			stderr:   "Starting conversation update stream for 12345678-abcd-ef01-2345-6789abcdef01",
+			wantUUID: "12345678-abcd-ef01-2345-6789abcdef01",
+		},
+		{
+			name:     "Valid RFC4122 UUID in session line",
+			stderr:   "conversation_id: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+			wantUUID: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+		},
+		{
+			name:     "Invalid partial or hex length",
+			stderr:   "conversation: 1234-5678",
+			wantUUID: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ExtractSessionID(tt.stderr, time.Now())
+			if got != tt.wantUUID {
+				t.Errorf("ExtractSessionID(%q) = %q, want %q", tt.stderr, got, tt.wantUUID)
+			}
+		})
+	}
+}
+
+func TestActivityWriter_ChunkBoundaryUUID(t *testing.T) {
+	w := NewActivityWriter("")
+	chunk1 := []byte("Some logs... Starting conversation update stream for 12345678-abcd-")
+	chunk2 := []byte("ef01-2345-6789abcdef01 and more logs...")
+
+	_, _ = w.Write(chunk1)
+	if sess := w.SessionID(); sess != "" {
+		t.Errorf("Expected empty session after chunk1, got %q", sess)
+	}
+
+	_, _ = w.Write(chunk2)
+	wantUUID := "12345678-abcd-ef01-2345-6789abcdef01"
+	if sess := w.SessionID(); sess != wantUUID {
+		t.Errorf("Expected extracted session %q after chunk2, got %q", wantUUID, sess)
+	}
+}
+
