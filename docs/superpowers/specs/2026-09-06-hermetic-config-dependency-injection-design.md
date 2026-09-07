@@ -1,9 +1,9 @@
 # Design Specification: Hermetic Configuration & Pure Constructor Dependency Injection
 
 **Date**: 2026-09-06  
-**Status**: Draft  
+**Status**: Revised (Post-Audit Hardened)  
 **Target Repositories**: `azylman/aerial`  
-**Scope**: `brain/pkg/config`, `brain/pkg/db`, `brain/pkg/memory`, `brain/pkg/gitsync`, `brain/pkg/sanitizer`, `brain/main.go`, `scheduler-mcp`, `scripts/verify.sh`, `scripts/check-coverage.sh`.
+**Scope**: `brain/pkg/config`, `brain/pkg/db`, `brain/pkg/memory`, `brain/pkg/gitsync`, `brain/pkg/sanitizer`, `brain/pkg/scheduler`, `brain/pkg/queue`, `brain/main.go`, `scheduler-mcp`, `scripts/verify.sh`, `scripts/check-coverage.sh`, `scripts/migrate_sqlite_to_postgres.go`, `.github/workflows/docker-publish.yml`.
 
 ---
 
@@ -19,17 +19,18 @@ During automated PR submission (`aerial-pr.sh submit`), a false-alarm "poison pi
 
 ### 1.2 The Architectural Flaw: Ambient Environment Coupling
 The root failure was not a missing flag in a test script; it was architectural:
-- **Ambient Environment Leakage**: Sub-packages (`pkg/db`, `pkg/memory`, `pkg/gitsync`, `pkg/sanitizer`, `scheduler-mcp`) directly called `os.Getenv` to resolve defaults instead of receiving explicit dependencies from their callers.
+- **Ambient Environment Leakage**: Sub-packages (`pkg/db`, `pkg/memory`, `pkg/gitsync`, `pkg/sanitizer`, `scheduler-mcp`, `pkg/scheduler`) directly called `os.Getenv` or `config.GetEnv` to resolve defaults instead of receiving explicit dependencies from their callers.
 - **Fragile Denylists**: Attempting to unset individual environment variables (`env -u DATABASE_URL`) fails whenever new infrastructure variables are introduced.
 - **Test Harness Contamination**: Tests probed `TEST_DATABASE_URL` and ambient fallback paths instead of operating hermetically with pure in-memory or temporary resources.
+- **Toxic Defaults**: When `POSTGRES_HOST` was unset, code automatically generated connection strings pointing to `postgres:5432`, creating startup hangs (~27.5s) on non-Docker local environments.
 
 ### 1.3 The Solution: Pure Constructor Dependency Injection & Clean-Room Testing
 We enforce five architectural invariants across the monorepo:
-1. **Zero `os.Getenv` in Sub-packages**: No package in `brain/pkg/*` (except `brain/pkg/config`) and no MCP tool module may read the process environment.
+1. **Zero `os.Getenv` in Sub-packages**: No package in `brain/pkg/*` (except `brain/pkg/config`) and no MCP tool module may read the process environment. `config.GetEnv` is unexported (`getEnv`) to prevent backdoors.
 2. **Single Parsing Authority**: `brain/pkg/config` is the sole parser of environment variables and configuration files for `brain`.
-3. **Pure Constructor Dependency Injection**: Every package constructor requires its configuration and dependencies explicitly (e.g. `InitDB(dsn string)`, `NewOllamaClient(cfg OllamaConfig)`). If a required parameter is empty, constructors return an immediate error rather than falling back to ambient state.
-4. **Zero Environment Variables in Tests**: Tests never read `os.Getenv` or call `t.Setenv`. `TEST_DATABASE_URL` is deleted entirely. Tests pass explicit test values, `filepath.Join(t.TempDir(), "test.db")`, or `":memory:"`.
-5. **Harness-Level Clean Room**: Test harnesses (`scripts/verify.sh` and `scripts/check-coverage.sh`) execute `go test` under an `env -i` allowlist containing only essential toolchain variables (`PATH`, `HOME`, `GOROOT`, `GOPATH`, `GOCACHE`, `TMPDIR`, `CGO_ENABLED`).
+3. **Pure Constructor Dependency Injection**: Every package constructor requires its configuration and dependencies explicitly (e.g. `InitDB(dsn string)`, `NewClient(cfg memory.ClientConfig)`). If a required parameter is empty, constructors return an immediate error rather than falling back to ambient state.
+4. **Zero Infrastructure Environment Variables in Tests**: Tests never read `os.Getenv` or call `t.Setenv` for database, auth, or infrastructure credentials. `TEST_DATABASE_URL` is deleted entirely. Tests pass explicit test values, `filepath.Join(t.TempDir(), "test.db")`, or `":memory:"`. (Only `brain/pkg/config/config_test.go` and `dashboard/main_test.go` retain scoped `t.Setenv` to test config file/env fallback parsing).
+5. **Cross-Platform Clean-Room Harness**: Test harnesses (`scripts/verify.sh` and `scripts/check-coverage.sh`) execute `go test` under an OS-aware clean-room allowlist supporting Linux, macOS, and Windows/MSYS2 toolchains without leaking credentials.
 
 ---
 
@@ -37,11 +38,11 @@ We enforce five architectural invariants across the monorepo:
 
 | Invariant | Description | Enforcement Mechanism |
 |---|---|---|
-| **I1: Single Parsing Authority** | Only `brain/pkg/config` reads `os.Getenv` for `brain`. `main.go` calls `config.LoadConfig()` and passes typed fields. | Static analysis check (`git grep "os.Getenv" brain/pkg/ \| grep -v "brain/pkg/config"` returns 0). |
-| **I2: Pure Constructor DI** | Sub-package constructors require all credentials, connection strings, and endpoints as explicit parameters or typed config structs. | No fallback to `os.Getenv`. `db.InitDB("")` returns an explicit error. |
-| **I3: Zero Test Env Usage** | Tests never read `os.Getenv` or mutate env via `t.Setenv`. | No `TEST_DATABASE_URL`. Tests instantiate dependencies with pure test fixtures. |
-| **I4: Clean-Room Harness** | `verify.sh` and `check-coverage.sh` run tests using `env -i` allowlists. | No ambient credentials can leak into the test process even if set on the host. |
-| **I5: Complete Excision of `TEST_DATABASE_URL`** | `TEST_DATABASE_URL` is completely removed from all source code, tests, and scripts. | `git grep "TEST_DATABASE_URL"` returns 0 across the entire repository. |
+| **I1: Single Parsing Authority** | Only `brain/pkg/config` reads `os.Getenv` for `brain`. Subpackages cannot call `config.GetEnv`. `main.go` calls `config.LoadConfig()` and passes typed fields. | Static analysis check (`git grep "os.Getenv" brain/pkg/ \| grep -v "brain/pkg/config"` returns 0, and `git grep "config.GetEnv" brain/pkg/` returns 0). |
+| **I2: Pure Constructor DI** | Sub-package constructors require all credentials, connection strings, and endpoints as explicit parameters or typed config structs. | No fallback to `os.Getenv`. `db.InitDB("")` returns an explicit error. Unrecognized URL schemes return errors instead of falling through to SQLite. |
+| **I3: Zero Test Env Usage for Infrastructure** | Tests never read `os.Getenv` or mutate env via `t.Setenv` for credentials or infrastructure. | No `TEST_DATABASE_URL`. Tests instantiate dependencies with pure test fixtures. |
+| **I4: Clean-Room Harness** | `verify.sh` and `check-coverage.sh` run tests using OS-aware clean-room wrappers. Failures in coverage generation are recorded as blocking violations. | No ambient credentials can leak into the test process. |
+| **I5: Complete Excision of `TEST_DATABASE_URL`** | `TEST_DATABASE_URL` is completely removed from all source code, tests, scripts, and workflows. | `git grep "TEST_DATABASE_URL"` returns 0 across the entire repository. |
 
 ---
 
@@ -79,8 +80,11 @@ We enforce five architectural invariants across the monorepo:
       QueryPrefix string `yaml:"query_prefix" json:"query_prefix"`
   }
   ```
-- **Environment Resolution**:
-  - `DatabaseURL`: Parsed from `DATABASE_URL`. If unset, synthesized from `POSTGRES_USER` (default `"aerial"`), `POSTGRES_PASSWORD` (default `"aerial_secure_pass"`), `POSTGRES_HOST` (default `"postgres"`), `POSTGRES_PORT` (default `"5432"`), `POSTGRES_DB` (default `"aerial"`), `POSTGRES_SSLMODE` (default `"disable"`). No `TEST_DATABASE_URL`.
+- **Environment Resolution & Safe Defaulting**:
+  - `DatabaseURL`: Parsed from `DATABASE_URL`. If unset, checked for `POSTGRES_HOST`.
+    - If `POSTGRES_HOST` is set, synthesize URL using `net/url` and `net.JoinHostPort`:
+      `postgres://user:pass@host:port/dbname?sslmode=...`
+    - If `POSTGRES_HOST` is unset, default to local SQLite: `filepath.Join(dataDir, "aerial.db")` (or empty string in pure DefaultConfig so tests/callers configure explicitly). **Never default to non-existent hostname `postgres:5432`**.
   - `Port`: `PORT` (default `"8080"`).
   - `AgyBin`: `AGY_BIN` (default `"agy"`).
   - `APIKey`: `GEMINI_API_KEY` or `ANTIGRAVITY_API_KEY`.
@@ -88,130 +92,136 @@ We enforce five architectural invariants across the monorepo:
   - `DiscordToken`: `DISCORD_TOKEN` or `DISCORD_BOT_TOKEN`.
   - `GitHubPAT`: `GITHUB_PAT`.
   - `Ollama`: `OLLAMA_URL` (default `"http://localhost:11434"`), `EMBEDDING_MODEL` or `OLLAMA_EMBEDDING_MODEL` (default `"nomic-embed-text"`), `EMBEDDING_QUERY_PREFIX` (default `"search_query: "`).
-  - `ClassifierModel`: `CLASSIFIER_MODEL` (default `"gemini-2.5-flash"`).
+  - `ClassifierModel`: `CLASSIFIER_MODEL` or `AMBIENT_CLASSIFIER_MODEL` (default `"Gemini 3.8 Flash (Low)"`).
+- **LoadConfigFromPaths Fallback Merging**:
+  When unmarshaling `config.yaml`, any empty infrastructure fields in `parsed` MUST inherit from `fallback` so omitted fields in `config.yaml` do not cause zero-value startup crashes.
+- **Unexport `GetEnv`**:
+  Make `getEnv(key, defaultVal string) string` internal to `brain/pkg/config`.
 - **Function Refactoring**:
   - `GetTimezone()` and `GetSystemChannel()`: operate solely on `GetRuntimeConfig()`, removing direct `os.Getenv` fallbacks.
-  - `EnsureAgySettings(apiKey string, homeDir string)`: accepts explicit API key and home directory.
-  - `EnsureMcpConfig(pat string, homeDir string)`: accepts explicit GitHub PAT and home directory.
-  - `config_test.go`: All tests pass synthetic YAML or construct structs directly; zero reliance on host environment.
+  - `EnsureAgySettings`: accepts explicit API key and home directory.
+  - `EnsureMcpConfig`: accepts explicit GitHub PAT and home directory.
+  - `LoadMCPConfig(pat string)`: accepts `pat` explicitly from `Config.GitHubPAT`, removing `os.Getenv("GITHUB_PAT")`.
 
-### 3.2 `brain/pkg/db`: Strict Constructor Requirement
+### 3.2 `brain/pkg/db`: Strict Constructor Requirement & Driver Invariants
 - **Delete `GetDBPath()`**: Removed entirely from `brain/pkg/db`.
 - **Hardened `InitDB(dsn string)`**:
   ```go
   func InitDB(dsn string) (*sql.DB, error) {
-      if strings.TrimSpace(dsn) == "" {
+      trimmed := strings.TrimSpace(dsn)
+      if trimmed == "" {
           return nil, fmt.Errorf("db: connection string cannot be empty")
       }
-      // ... connection pool setup & schema migrations ...
+
+      isPg := strings.HasPrefix(trimmed, "postgres://") || strings.HasPrefix(trimmed, "postgresql://")
+      if !isPg {
+          if strings.Contains(trimmed, "://") && !strings.HasPrefix(trimmed, "file://") {
+              return nil, fmt.Errorf("db: unsupported database scheme in %q", trimmed)
+          }
+      }
+
+      if isPg {
+          // Pre-flight validation with pgx before entering retry loop
+          if _, err := stdlib.ParseConfig(trimmed); err != nil {
+              return nil, fmt.Errorf("db: invalid postgres connection string: %w", err)
+          }
+          // ... retry loop & pool setup ...
+      } else {
+          // SQLite: SetMaxOpenConns(1) for in-memory databases
+          if trimmed == ":memory:" || strings.Contains(trimmed, "mode=memory") {
+              database.SetMaxOpenConns(1)
+          }
+      }
+      return database, nil
   }
   ```
 - **Hermetic Testing in `db_test.go`**:
-  - Delete `TestGetDBPath_Precedence`.
+  - Delete `TestGetDBPath_Precedence` and `TestDBPath`.
   - In `setupTestDB()`: remove `os.Getenv("TEST_DATABASE_URL")` and fallback to live Postgres. Tests strictly create a temporary SQLite database via `filepath.Join(t.TempDir(), "test.db")` or `":memory:"`.
 
 ### 3.3 `brain/pkg/memory`: Pure Client Constructor
-- **`OllamaClient` Configuration**:
+- **Decoupled Configuration**:
   ```go
-  type OllamaClient struct {
-      client *http.Client
-      cfg    config.OllamaConfig
+  type ClientConfig struct {
+      BaseURL     string
+      Model       string
+      QueryPrefix string
   }
 
-  func NewOllamaClient(cfg config.OllamaConfig) *OllamaClient {
-      if cfg.BaseURL == "" {
-          cfg.BaseURL = "http://localhost:11434"
-      }
-      if cfg.Model == "" {
-          cfg.Model = "nomic-embed-text"
-      }
-      if cfg.QueryPrefix == "" {
-          cfg.QueryPrefix = "search_query: "
-      }
-      return &OllamaClient{
-          client: &http.Client{Timeout: 30 * time.Second},
-          cfg:    cfg,
-      }
+  type Client struct {
+      BaseURL     string
+      Model       string
+      QueryPrefix string
+      HTTPClient  *http.Client
   }
+
+  func NewClient(cfg ClientConfig) *Client
   ```
-- **Delete `os.Getenv` in `ollama.go`**: Lines 30, 64, 69, 71 removed.
+- **Delete all `os.Getenv` in `ollama.go`**: Lines 30, 64, 69, 71 removed.
 - **Hermetic Testing in `memory_test.go`**:
-  - In `memory_test.go`: remove `os.Getenv("TEST_DATABASE_URL")`. Tests construct `NewOllamaClient(config.OllamaConfig{BaseURL: server.URL, ...})` directly.
+  - Remove `os.Getenv("TEST_DATABASE_URL")`. Tests construct `NewClient(memory.ClientConfig{BaseURL: server.URL, ...})` directly.
 
 ### 3.4 `brain/pkg/gitsync`: Explicit Token Injection
 - **`SyncRepo` Signature**:
   ```go
-  func SyncRepo(ctx context.Context, repoDir string, pat string) error
+  func SyncRepo(ctx context.Context, repoPath string, pat string) (bool, error)
   ```
-- **Delete `os.Getenv("GITHUB_PAT")`**: Token is passed from the caller (`main.go` using `cfg.GitHubPAT`).
+- **Delete `os.Getenv("GITHUB_PAT")`**: Token is passed from the caller.
 
 ### 3.5 `brain/pkg/sanitizer`: Explicit Sensitive Token Registration
 - **Token Registration**:
-  - Delete iteration over ambient environment variables in `InitSanitizer()`.
-  - Provide explicit registration:
-    ```go
-    func RegisterSensitiveTokens(tokens ...string)
-    ```
-  - `main.go` invokes `sanitizer.RegisterSensitiveTokens(cfg.APIKey, cfg.DiscordToken, cfg.GitHubPAT)`.
+  - Provide `RegisterSensitiveTokens(tokens ...string)` and `ResetSensitiveTokens()` (for test teardown).
+  - Use real struct identifiers: `envMu.Lock()`, `envSecretsCache`, `sort.Slice`.
+  - In `main.go`, invoke `sanitizer.RegisterSensitiveTokens(cfg.APIKey, cfg.DiscordToken, cfg.GitHubPAT)` on startup AND during configuration hot-reload in `CreateReloadConfigFunc`.
 
-### 3.6 `scheduler-mcp`: Service-Level Isolation
+### 3.6 `brain/pkg/scheduler`: Pure Fact Extraction
+- **Refactor `ExtractFactsLLM`**:
+  Eliminate `config.GetEnv`. Refactor `ExtractFactsLLM` to accept explicit parameters or provide `NewFactExtractionLLM(agyBin, apiKey, model string, runnerFn runner.RunnerFunc) memory.LLMClientFunc`.
+- Update `scheduler.Start` to receive `memClient *memory.Client` and fact extraction runner closure.
+
+### 3.7 `scheduler-mcp`: Service-Level Isolation
 - **Delete `GetDBPath()`**: Removed from `scheduler-mcp/db.go`.
-- **Hardened `InitDB(dsn string)`**: Strictly requires non-empty `dsn`.
+- **Hardened `InitDB(dsn string)`**: Strictly requires non-empty `dsn`. Sets `SetMaxOpenConns(1)` for SQLite `:memory:`. Uses `SELECT pg_advisory_lock(849201948201)` during PostgreSQL schema migrations.
 - **Explicit Config in `main.go`**:
   - `main.go` reads `PORT`, `DATABASE_URL` / `POSTGRES_*`, `DEFAULT_TIMEZONE` / `TZ`.
-  - Passes explicit `dsn` to `db.InitDB(dsn)` and explicit `timezone` to tools server.
+  - Injects `timezone` into `ToolHandler` struct (`NewToolHandler(database, timezone)`) rather than a package global variable.
 - **Hermetic Testing**:
-  - Remove all `TEST_DATABASE_URL` checks and `GetDBPath` tests from `scheduler-mcp/server_test.go` and `scheduler-mcp/tools_test.go`. All tests use SQLite temp files or `":memory:"`.
+  - Delete `TestPostgresSchedules` from `tools_test.go`. Remove all `TEST_DATABASE_URL` checks and `GetDBPath` tests. All tests use SQLite temp files or `":memory:"`.
 
-### 3.7 `brain/main.go`: Pure Composition Root
+### 3.8 `brain/main.go`: Pure Composition Root
 - `main.go` acts solely as the composition root:
   1. `cfg, err := config.LoadConfig()`
   2. `database, err := db.InitDB(cfg.DatabaseURL)`
   3. `sanitizer.RegisterSensitiveTokens(cfg.APIKey, cfg.DiscordToken, cfg.GitHubPAT)`
-  4. `ollamaClient := memory.NewOllamaClient(cfg.Ollama)`
-  5. `config.EnsureAgySettings(cfg.APIKey, homeDir)`
-  6. `config.EnsureMcpConfig(cfg.GitHubPAT, homeDir)`
-- Zero calls to `os.Getenv` in `main.go` or sub-packages.
+  4. `memClient := memory.NewClient(memory.ClientConfig{BaseURL: cfg.Ollama.BaseURL, Model: cfg.Ollama.Model, QueryPrefix: cfg.Ollama.QueryPrefix})`
+  5. `bCfg := NewBrainConfig(cfg)`
+  6. Pass `memClient` to `queue.NewWorkerPool` and `scheduler.Start`.
+  7. In `CreateReloadConfigFunc`: re-register sensitive tokens into sanitizer and reload agy/mcp settings dynamically.
+- Zero calls to `os.Getenv` or `config.GetEnv` in `main.go` or sub-packages.
 
-### 3.8 `scripts/verify.sh` & `scripts/check-coverage.sh`: Clean-Room Test Execution
-- Replace all instances of `env -u DATABASE_URL` with a clean-room execution wrapper:
-  ```sh
-  run_clean_test() {
-      env -i \
-          PATH="$PATH" \
-          HOME="$HOME" \
-          GOROOT="${GOROOT:-}" \
-          GOPATH="${GOPATH:-}" \
-          GOCACHE="${GOCACHE:-}" \
-          TMPDIR="${TMPDIR:-/tmp}" \
-          CGO_ENABLED="${CGO_ENABLED:-1}" \
-          go test "$@"
-  }
-  ```
-- No ambient environment variables (passwords, tokens, hostnames, ports) can reach `go test`.
+### 3.9 `scripts/verify.sh` & `scripts/check-coverage.sh`: Cross-Platform Clean Room
+- Implement `run_clean_test`:
+  - Toolchain: `PATH`, `HOME`, `GOROOT`, `GOPATH`, `GOCACHE`.
+  - Windows runtime: `SystemRoot`, `SYSTEMROOT`, `USERPROFILE`, `TMP`, `TEMP`, `LOCALAPPDATA`, `APPDATA`, `COMSPEC`, `PATHEXT`.
+  - Unix: `TMPDIR`, `LANG`, `LC_ALL`.
+  - Git isolation: `GIT_CONFIG_NOSYSTEM=1`, `GIT_TERMINAL_PROMPT=0`.
+  - CGO default: `CGO_ENABLED=${CGO_ENABLED:-0}`.
+- In `scripts/check-coverage.sh`: ensure clean-room test execution failures record an immediate blocking violation rather than silently reporting `status="N/A"`.
 
 ---
 
-## 4. Spec Self-Review Checklist
-
-1. **Placeholder scan**: Zero "TBD", "TODO", or vague requirements. All struct fields and constructor signatures are fully specified.
-2. **Internal consistency**: Architectural principles match component refactorings. Every package is completely purged of `os.Getenv`.
-3. **Scope check**: Well-bounded to environment parsing consolidation, pure constructor injection, test cleanup, and harness isolation across `brain` and `scheduler-mcp`.
-4. **Ambiguity check**: Clear error returned (`"db: connection string cannot be empty"`) if an empty DSN is provided. Clear `env -i` allowlist specified for test scripts.
-
----
-
-## 5. Verification Plan
+## 4. Verification Plan
 
 1. **Static Analysis & Invariant Verification**:
    - `git grep "os.Getenv" brain/pkg/ | grep -v "brain/pkg/config"` must return 0.
+   - `git grep "config.GetEnv" brain/pkg/` must return 0.
    - `git grep "TEST_DATABASE_URL"` must return 0 across the entire repository.
    - `git grep "GetDBPath"` must return 0 across the entire repository.
 2. **Automated Unit & Package Tests**:
    - `brain/pkg/config` tests pass with >= 90% coverage.
    - `brain/pkg/db` tests pass with pure SQLite fixtures.
-   - `brain/pkg/memory`, `brain/pkg/queue`, `brain/pkg/runner`, and `brain/pkg/sanitizer` tests pass with pure constructor injection.
+   - `brain/pkg/memory`, `brain/pkg/queue`, `brain/pkg/runner`, `brain/pkg/scheduler`, and `brain/pkg/sanitizer` tests pass with pure constructor injection.
    - `scheduler-mcp` tests pass with pure SQLite fixtures.
 3. **Monorepo Clean-Room Test Execution**:
-   - Run `sh scripts/verify.sh --full` under dirty ambient environment (e.g. `POSTGRES_HOST=postgres POSTGRES_PASSWORD=badpass GITHUB_PAT=fake`). Verification must pass 100%.
-   - Run `sh scripts/check-coverage.sh --check` to ensure monorepo coverage remains >= 90%.
+   - Run `sh scripts/verify.sh --full` under dirty ambient environment (`POSTGRES_HOST=postgres POSTGRES_PASSWORD=badpass GITHUB_PAT=fake`). Verification must pass 100%.
+   - Run `sh scripts/check-coverage.sh --check` to ensure all coverage thresholds pass.
