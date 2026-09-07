@@ -1304,7 +1304,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 					flashModel = p.cfg.Model
 				}
 
-				sumCtx, sumCancel := context.WithTimeout(p.ctx, 3*time.Second)
+				sumCtx, sumCancel := context.WithTimeout(p.ctx, DefaultThreadSummaryTimeout)
 				newSum, sumErr := SummarizeThreadHistory(sumCtx, llmFn, flashModel, threadID, histMsgs)
 				sumCancel()
 

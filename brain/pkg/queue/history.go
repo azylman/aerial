@@ -321,15 +321,19 @@ type LLMFunc func(ctx context.Context, model, prompt string) (string, error)
 
 var threadSummaryGroup singleflight.Group
 
+// DefaultThreadSummaryTimeout is the maximum duration allocated for the Flash model
+// to synthesize thread history into a <THREAD_SUMMARY> block.
+const DefaultThreadSummaryTimeout = 15 * time.Second
+
 // SummarizeThreadHistory uses the Flash model to summarize the provided thread history.
-// It is wrapped in a singleflight.Group keyed by threadID, and uses a 3.0s context timeout.
+// It is wrapped in a singleflight.Group keyed by threadID, and uses DefaultThreadSummaryTimeout.
 func SummarizeThreadHistory(ctx context.Context, llm LLMFunc, model, threadID string, msgs []HistoryMessage) (string, error) {
 	if len(msgs) == 0 {
 		return "", fmt.Errorf("empty history")
 	}
 
 	v, err, _ := threadSummaryGroup.Do(threadID, func() (interface{}, error) {
-		timeoutCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		timeoutCtx, cancel := context.WithTimeout(ctx, DefaultThreadSummaryTimeout)
 		defer cancel()
 
 		transcript := FormatChannelHistory(msgs)

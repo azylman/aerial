@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -510,9 +511,9 @@ func TestSummarizeThreadHistory_TimeoutFallback(t *testing.T) {
 		if !ok {
 			return "", errors.New("expected deadline in context")
 		}
-		// Deadline should be ~3 seconds from now
-		if time.Until(deadline) > 3*time.Second || time.Until(deadline) < 2*time.Second {
-			return "", errors.New("deadline not set to 3 seconds")
+		// Deadline should be ~15 seconds (DefaultThreadSummaryTimeout) from now
+		if time.Until(deadline) > DefaultThreadSummaryTimeout || time.Until(deadline) < DefaultThreadSummaryTimeout-3*time.Second {
+			return "", fmt.Errorf("deadline not set to %v (remaining: %v)", DefaultThreadSummaryTimeout, time.Until(deadline))
 		}
 		return "", context.DeadlineExceeded
 	}
