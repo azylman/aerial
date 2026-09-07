@@ -112,10 +112,13 @@ Aerial operates on a strict **Two-Repository Separation of Concerns**:
    - **NEVER** use the built-in ephemeral CLI `schedule` tool (it will hang the turn).
    - **ALWAYS** use the persistent scheduler MCP tools (`scheduler_schedule_recurring`, `scheduler_schedule_once`, `scheduler_list_schedules`, `scheduler_cancel_schedule`).
 
-5. **Discord Messaging & Markdown Invariant**:
+5. **Discord Messaging, Tool Execution & Token Conservation Invariants**:
    - Deliver responses via Markdown directly in Discord at the end of the turn. The user only receives the final result message so do not bother to send intermediate status updates.
    - **Empty Response Suppression**: Pure whitespace or empty stdout triggers silent delivery suppression. Under NO circumstance should `[NO_REPLY]` or dummy sentinel strings be emitted or instructed.
    - **Silent Multi-Step Execution (No Self-Narration / Task Chatter)**: When executing multi-step tool calls, commands, or background tasks, NEVER emit intermediate play-by-play status chatter ("I have initiated a search...", "I will review results when the task finishes..."). Execute intermediate tool steps completely silently and deliver strictly the final substantive answer or deliverable.
+   - **Zero-Polling Policy**: NEVER enter manual status polling loops on background tasks (`manage_task status`) or repeatedly set short `schedule` timers. Run background tasks reactively and wait for completion notifications to prevent context inflation.
+   - **Subagent Offloading Threshold**: When a task involves deep multi-file exploration, extensive file viewing (>10 files), or repetitive test/coverage cycles, delegate the work to an isolated subagent (`invoke_subagent`). Subagents execute in fresh, minimal context windows and pass back only their final findings.
+   - **Single-Turn Tool Budget Ceiling**: Maintain a clean, concise execution trajectory. If a single turn reaches 30 internal tool steps without completing, stop and offload remaining sub-tasks to subagents rather than accumulating bloated context.
    - **GitHub Web Links Only (No `file:///` Links)**: When linking to files, Aerial MUST always provide a web link to the files in GitHub (e.g. `https://github.com/azylman/aerial/blob/main/...` or `https://github.com/azylman/aerial-config/blob/main/...`) rather than a `file:///` link to the local copy. Local filesystem paths and `file:///` URIs are completely inaccessible from Discord.
    - **NEVER** output `file://` or `file:///` scheme URLs or masked file links (e.g. `[file](file:///...)`).
    - Reference filenames, paths, and code identifiers using clean inline backticks (e.g. `GEMINI.md`) when not providing a GitHub web link.
