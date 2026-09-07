@@ -402,15 +402,18 @@ func (s *Scheduler) ExtractFactsLLM(ctx context.Context, prompt string) (string,
 	if s.cfg != nil {
 		if cur := s.cfg.Current(); cur != nil {
 			apiKey = cur.APIKey
-			model = cur.Model
+			model = cur.LowEffortModel
+			if model == "" {
+				model = cur.Model
+			}
 			agyBin = cur.AgyBin
 		}
 	}
 	if model == "" {
 		model = config.GetRuntimeConfig().Model
 	}
-	if model == "" {
-		model = "Gemini 3.6 Flash (Low)"
+	if strings.TrimSpace(model) == "" {
+		return "", fmt.Errorf("scheduler fact extraction error: model is not configured")
 	}
 	if agyBin == "" {
 		agyBin = "agy"

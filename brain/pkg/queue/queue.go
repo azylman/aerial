@@ -1298,7 +1298,12 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 					flashModel = p.cfg.Classifier.Model
 				}
 				if flashModel == "" && p.appCfg != nil && p.appCfg.Current() != nil {
-					flashModel = p.appCfg.Current().ClassifierModel
+					cur := p.appCfg.Current()
+					if cur.LowEffortModel != "" {
+						flashModel = cur.LowEffortModel
+					} else {
+						flashModel = cur.ClassifierModel
+					}
 				}
 				if flashModel == "" {
 					flashModel = p.cfg.Model
