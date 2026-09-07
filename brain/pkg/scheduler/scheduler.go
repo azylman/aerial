@@ -55,23 +55,52 @@ type MessageEnqueuer interface {
 type Scheduler struct {
 	cfg           *config.Config
 	db            *sql.DB
+	store         db.Store
 	enqueuer      MessageEnqueuer
 	threadCreator ThreadCreator
 }
 
-// New constructs a Scheduler with pure *config.Config pointer dependency injection.
-func New(cfg *config.Config, db *sql.DB, enqueuer MessageEnqueuer, threadCreator ThreadCreator) *Scheduler {
+// New constructs a Scheduler supporting both legacy *sql.DB and db.Store interface parameters.
+func New(cfg *config.Config, dbOrStore any, enqueuer MessageEnqueuer, threadCreator ThreadCreator) *Scheduler {
+	var database *sql.DB
+	var store db.Store
+	switch v := dbOrStore.(type) {
+	case db.Store:
+		store = v
+	case *sql.DB:
+		database = v
+		if v != nil {
+			store = db.NewSQLStore(v)
+		}
+	}
 	return &Scheduler{
 		cfg:           cfg,
-		db:            db,
+		db:            database,
+		store:         store,
 		enqueuer:      enqueuer,
 		threadCreator: threadCreator,
 	}
 }
 
+func (s *Scheduler) getStore() db.Store {
+	if s == nil {
+		return nil
+	}
+	if s.store != nil {
+		return s.store
+	}
+	if s.db != nil {
+		return db.NewSQLStore(s.db)
+	}
+	return nil
+}
+func NewWithStore(cfg *config.Config, store db.Store, enqueuer MessageEnqueuer, threadCreator ThreadCreator) *Scheduler {
+	return New(cfg, store, enqueuer, threadCreator)
+}
+
 // NewScheduler is a compatibility wrapper for New.
-func NewScheduler(cfg *config.Config, db *sql.DB, enqueuer MessageEnqueuer, threadCreator ThreadCreator) *Scheduler {
-	return New(cfg, db, enqueuer, threadCreator)
+func NewScheduler(cfg *config.Config, dbOrStore any, enqueuer MessageEnqueuer, threadCreator ThreadCreator) *Scheduler {
+	return New(cfg, dbOrStore, enqueuer, threadCreator)
 }
 
 // FormatThreadTitle formats the thread title for a recurring cron trigger, clamped to at most 100 runes.
@@ -123,7 +152,10 @@ func CalculateNextRun(cronExpr, timezone string, from time.Time) (time.Time, err
 
 // ProcessDueSchedules evaluates and processes due cron and one-shot schedules.
 func (s *Scheduler) ProcessDueSchedules(ctx context.Context) error {
-	return processDueSchedules(ctx, s.cfg, s.db, s.enqueuer, s.threadCreator)
+	if s == nil || s.store == nil {
+		return nil
+	}
+	return processDueSchedulesStore(ctx, s.cfg, s.store, s.enqueuer, s.threadCreator)
 }
 
 // ProcessDueSchedules evaluates and processes due cron and one-shot schedules (compatibility wrapper).
@@ -131,15 +163,15 @@ func ProcessDueSchedules(ctx context.Context, database *sql.DB, enqueuer Message
 	return New(nil, database, enqueuer, threadCreator).ProcessDueSchedules(ctx)
 }
 
-func processDueSchedules(ctx context.Context, cfg *config.Config, database *sql.DB, enqueuer MessageEnqueuer, threadCreator ThreadCreator) error {
-	if database == nil {
+func processDueSchedulesStore(ctx context.Context, cfg *config.Config, store db.Store, enqueuer MessageEnqueuer, threadCreator ThreadCreator) error {
+	if store == nil {
 		return nil
 	}
 
 	now := time.Now().UTC()
 
 	// 1. Process Due Cron Schedules
-	dueCrons, err := db.GetDueCronSchedules(database)
+	dueCrons, err := store.GetDueCronSchedules(ctx)
 	if err != nil {
 		return fmt.Errorf("error querying due cron schedules: %w", err)
 	}
@@ -173,7 +205,7 @@ func processDueSchedules(ctx context.Context, cfg *config.Config, database *sql.
 				log.Printf("[Scheduler] Failed to calculate next run for cron %s (%q): %v. Fallback 24h.", c.ID, c.CronExpr, err)
 				nextRun = now.Add(24 * time.Hour)
 			}
-			if err := db.UpdateCronNextRun(database, c.ID, nextRun); err != nil {
+			if err := store.UpdateCronNextRun(ctx, c.ID, nextRun); err != nil {
 				log.Printf("[Scheduler] Failed to update next_run_at for cron %s: %v", c.ID, err)
 			}
 			continue
@@ -185,7 +217,7 @@ func processDueSchedules(ctx context.Context, cfg *config.Config, database *sql.
 			log.Printf("[Scheduler] Failed to calculate next run for cron %s (%q): %v. Fallback 24h.", c.ID, c.CronExpr, err)
 			nextRun = now.Add(24 * time.Hour)
 		}
-		if err := db.UpdateCronNextRun(database, c.ID, nextRun); err != nil {
+		if err := store.UpdateCronNextRun(ctx, c.ID, nextRun); err != nil {
 			log.Printf("[Scheduler] Failed to update next_run_at for cron %s: %v", c.ID, err)
 		}
 
@@ -241,7 +273,7 @@ func processDueSchedules(ctx context.Context, cfg *config.Config, database *sql.
 			Status:       "enqueued",
 			StartedAt:    now,
 		}
-		if err := db.CreateScheduleRun(database, run); err != nil {
+		if err := store.CreateScheduleRun(ctx, run); err != nil {
 			log.Printf("[Scheduler] Error creating schedule run %s for cron %s: %v", runID, c.ID, err)
 		}
 
@@ -264,7 +296,7 @@ func processDueSchedules(ctx context.Context, cfg *config.Config, database *sql.
 			UpdatedAt:     now,
 		}
 
-		if err := db.InsertMessage(database, msg); err != nil {
+		if err := store.InsertMessage(ctx, msg); err != nil {
 			log.Printf("[Scheduler] Error inserting recurring message %s for cron %s: %v", msgID, c.ID, err)
 		}
 
@@ -277,7 +309,7 @@ func processDueSchedules(ctx context.Context, cfg *config.Config, database *sql.
 	}
 
 	// 2. Process Due One-Shot Schedules (Atomic)
-	dueOneShots, err := db.GetDueOneShotSchedules(database)
+	dueOneShots, err := store.GetDueOneShotSchedules(ctx)
 	if err != nil {
 		return fmt.Errorf("error querying due one-shot schedules: %w", err)
 	}
@@ -306,7 +338,7 @@ func processDueSchedules(ctx context.Context, cfg *config.Config, database *sql.
 			UpdatedAt:     now,
 		}
 
-		if err := db.InsertMessageAndConsumeOneShot(database, s.ID, msg); err != nil {
+		if err := store.InsertMessageAndConsumeOneShot(ctx, s.ID, msg); err != nil {
 			log.Printf("[Scheduler] Error atomically processing one-shot schedule %s (message %s): %v", s.ID, msgID, err)
 			continue
 		}
@@ -323,7 +355,7 @@ func processDueSchedules(ctx context.Context, cfg *config.Config, database *sql.
 			Status:       "enqueued",
 			StartedAt:    now,
 		}
-		if err := db.CreateScheduleRun(database, run); err != nil {
+		if err := store.CreateScheduleRun(ctx, run); err != nil {
 			log.Printf("[Scheduler] Error creating schedule run %s for one-shot %s: %v", runID, s.ID, err)
 		}
 
@@ -400,11 +432,22 @@ func ExtractFactsLLM(ctx context.Context, prompt string) (string, error) {
 }
 
 // RunPruneRetention executes schedule run retention cleanup.
-func RunPruneRetention(database *sql.DB) {
-	if database == nil {
+func RunPruneRetention(dbOrStore any) {
+	var store db.Store
+	switch v := dbOrStore.(type) {
+	case db.Store:
+		store = v
+	case *sql.DB:
+		if v != nil {
+			store = db.NewSQLStore(v)
+		}
+	}
+	if store == nil {
 		return
 	}
-	if pruned, err := db.PruneScheduleRuns(database, 1000, 30*24*time.Hour); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if pruned, err := store.PruneScheduleRuns(ctx, 1000, 30*24*time.Hour); err != nil {
 		log.Printf("[Scheduler] Retention pruning error: %v", err)
 	} else if pruned > 0 {
 		log.Printf("[Scheduler] Retention pruning removed %d old schedule runs", pruned)
@@ -412,16 +455,16 @@ func RunPruneRetention(database *sql.DB) {
 }
 
 // RunFactExtraction triggers embedding backfill and active conversation fact extraction.
-func RunFactExtraction(ctx context.Context, database *sql.DB, client *memory.Client, llmFunc memory.LLMClientFunc) {
-	if database == nil || client == nil || llmFunc == nil {
+func RunFactExtraction(ctx context.Context, dbOrStore any, client *memory.Client, llmFunc memory.LLMClientFunc) {
+	if dbOrStore == nil || client == nil || llmFunc == nil {
 		return
 	}
-	if backfilled, err := memory.BackfillMissingEmbeddings(ctx, database, client); err != nil {
+	if backfilled, err := memory.BackfillMissingEmbeddings(ctx, dbOrStore, client); err != nil {
 		log.Printf("[Scheduler] Embedding backfill error: %v", err)
 	} else if backfilled > 0 {
 		log.Printf("[Scheduler] Embedding backfill completed for %d facts", backfilled)
 	}
-	if err := memory.ExtractActiveConversationFacts(ctx, database, client, llmFunc, 12); err != nil {
+	if err := memory.ExtractActiveConversationFacts(ctx, dbOrStore, client, llmFunc, 12); err != nil {
 		log.Printf("[Scheduler] Fact extraction error: %v", err)
 	}
 }
@@ -442,8 +485,8 @@ func (s *Scheduler) Run(ctx context.Context, interval time.Duration) {
 	if err := s.ProcessDueSchedules(ctx); err != nil {
 		log.Printf("[Scheduler] Error in initial schedule check: %v", err)
 	}
-	go RunPruneRetention(s.db)
-	go RunFactExtraction(ctx, s.db, ollamaClient, llmFunc)
+	go RunPruneRetention(s.getStore())
+	go RunFactExtraction(ctx, s.getStore(), ollamaClient, llmFunc)
 
 	var tickCount int
 	for {
@@ -459,12 +502,12 @@ func (s *Scheduler) Run(ctx context.Context, interval time.Duration) {
 
 			// Run fact extraction hourly (every 120 ticks at 30s interval = 1 hour)
 			if tickCount%120 == 0 {
-				go RunFactExtraction(ctx, s.db, ollamaClient, llmFunc)
+				go RunFactExtraction(ctx, s.getStore(), ollamaClient, llmFunc)
 			}
 
 			// Run retention pruning daily (every 2880 ticks at 30s interval = 24 hours)
 			if tickCount%2880 == 0 {
-				go RunPruneRetention(s.db)
+				go RunPruneRetention(s.getStore())
 			}
 		}
 	}

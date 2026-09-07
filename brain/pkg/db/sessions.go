@@ -17,7 +17,7 @@ type ConversationTurnState struct {
 }
 
 // GetSessionID retrieves the active session ID for a thread.
-func GetSessionID(database *sql.DB, threadID string) (string, error) {
+func GetSessionID(database DBTX, threadID string) (string, error) {
 	if database == nil || threadID == "" {
 		return "", nil
 	}
@@ -33,7 +33,7 @@ func GetSessionID(database *sql.DB, threadID string) (string, error) {
 }
 
 // SaveSessionID associates an internal session ID with a thread ID.
-func SaveSessionID(database *sql.DB, threadID, sessionID string) error {
+func SaveSessionID(database DBTX, threadID, sessionID string) error {
 	if database == nil || threadID == "" || sessionID == "" {
 		return nil
 	}
@@ -53,7 +53,7 @@ func SaveSessionID(database *sql.DB, threadID, sessionID string) error {
 }
 
 // DeleteSessionID removes the session association for a thread.
-func DeleteSessionID(database *sql.DB, threadID string) error {
+func DeleteSessionID(database DBTX, threadID string) error {
 	if database == nil || threadID == "" {
 		return nil
 	}
@@ -65,7 +65,7 @@ func DeleteSessionID(database *sql.DB, threadID string) error {
 }
 
 // IncrementSessionTurnCount atomically increments and returns the turn count for a session key.
-func IncrementSessionTurnCount(database *sql.DB, sessionKey string) (int, error) {
+func IncrementSessionTurnCount(database DBTX, sessionKey string) (int, error) {
 	if database == nil {
 		return 0, fmt.Errorf("database is nil")
 	}
@@ -93,7 +93,7 @@ func IncrementSessionTurnCount(database *sql.DB, sessionKey string) (int, error)
 }
 
 // RotateSessionID updates the internal session ID and resets turn count to zero.
-func RotateSessionID(database *sql.DB, sessionKey, newSessionID string) error {
+func RotateSessionID(database DBTX, sessionKey, newSessionID string) error {
 	if database == nil {
 		return fmt.Errorf("database is nil")
 	}
@@ -117,7 +117,7 @@ func RotateSessionID(database *sql.DB, sessionKey, newSessionID string) error {
 }
 
 // GetSessionTurnCount returns the current turn count for a session.
-func GetSessionTurnCount(database *sql.DB, sessionKey string) (int, error) {
+func GetSessionTurnCount(database DBTX, sessionKey string) (int, error) {
 	if database == nil || sessionKey == "" {
 		return 0, nil
 	}
@@ -133,12 +133,12 @@ func GetSessionTurnCount(database *sql.DB, sessionKey string) (int, error) {
 }
 
 // GetInternalConversationID is a legacy helper returning the internal session ID for an external ID.
-func GetInternalConversationID(database *sql.DB, externalID string) (string, error) {
+func GetInternalConversationID(database DBTX, externalID string) (string, error) {
 	return GetSessionID(database, externalID)
 }
 
 // GetExternalConversationID retrieves the external thread ID given an internal session ID.
-func GetExternalConversationID(database *sql.DB, internalID string) (string, error) {
+func GetExternalConversationID(database DBTX, internalID string) (string, error) {
 	if database == nil || internalID == "" {
 		return "", nil
 	}
@@ -154,12 +154,12 @@ func GetExternalConversationID(database *sql.DB, internalID string) (string, err
 }
 
 // SaveConversationMapping associates an external conversation ID with an internal session ID.
-func SaveConversationMapping(database *sql.DB, externalID, internalID string) error {
+func SaveConversationMapping(database DBTX, externalID, internalID string) error {
 	return SaveSessionID(database, externalID, internalID)
 }
 
 // RegisterTurn records a new conversation turn into the database queue.
-func RegisterTurn(database *sql.DB, externalID, messageID, prompt string) error {
+func RegisterTurn(database DBTX, externalID, messageID, prompt string) error {
 	if database == nil || externalID == "" {
 		return nil
 	}
@@ -175,7 +175,7 @@ func RegisterTurn(database *sql.DB, externalID, messageID, prompt string) error 
 }
 
 // SetTurnProcessing updates the turn processing status.
-func SetTurnProcessing(database *sql.DB, externalID string, isProcessing bool, lastMessageID string) error {
+func SetTurnProcessing(database DBTX, externalID string, isProcessing bool, lastMessageID string) error {
 	if database == nil || externalID == "" {
 		return nil
 	}
@@ -190,7 +190,7 @@ func SetTurnProcessing(database *sql.DB, externalID string, isProcessing bool, l
 }
 
 // GetTurnState retrieves the current active state for a conversation turn.
-func GetTurnState(database *sql.DB, externalID string) (*ConversationTurnState, error) {
+func GetTurnState(database DBTX, externalID string) (*ConversationTurnState, error) {
 	if database == nil || externalID == "" {
 		return nil, nil
 	}
@@ -227,7 +227,7 @@ func GetTurnState(database *sql.DB, externalID string) (*ConversationTurnState, 
 }
 
 // GetInterruptedTurns retrieves turns that were interrupted mid-processing across server restarts.
-func GetInterruptedTurns(database *sql.DB) ([]ConversationTurnState, error) {
+func GetInterruptedTurns(database DBTX) ([]ConversationTurnState, error) {
 	if database == nil {
 		return nil, nil
 	}

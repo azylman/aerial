@@ -172,10 +172,11 @@ func sanitizeErrorText(errStr string) string {
 	return sanitizer.SanitizeLog(errStr)
 }
 
-type MemoryRetrieverFunc func(ctx context.Context, database *sql.DB, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error)
+type MemoryRetrieverFunc func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error)
 
 type WorkerPoolConfig struct {
 	DB             *sql.DB
+	Store          db.Store
 	DiscordSession *discordgo.Session
 	AgyBin         string
 	APIKey         string
@@ -223,6 +224,9 @@ type WorkerPool struct {
 
 // New creates a new WorkerPool with pure *config.Config dependency injection.
 func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
+	if cfg.Store == nil && cfg.DB != nil {
+		cfg.Store = db.NewSQLStore(cfg.DB)
+	}
 	if appCfg == nil {
 		def := config.DefaultConfigData()
 		if cfg.Model != "" {
@@ -752,7 +756,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 	// 1. Claim messages from PENDING to PROCESSING
 	var claimedBurst []db.Message
 	for _, m := range burst {
-		claimed, claimErr := db.ClaimPendingMessage(p.cfg.DB, m.ID)
+		claimed, claimErr := p.cfg.Store.ClaimPendingMessage(p.ctx, m.ID)
 		if claimErr != nil {
 			log.Printf("[WorkerPool] Failed to claim message %s: %v", m.ID, claimErr)
 			continue

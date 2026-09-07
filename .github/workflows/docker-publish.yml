@@ -116,7 +116,7 @@ jobs:
         if: needs.changes.outputs.brain == 'true'
         run: |
           cd brain
-          go test -v -p 1 ./...
+          go test -v ./...
 
       - name: Test Scheduler MCP
         if: needs.changes.outputs.scheduler-mcp == 'true'

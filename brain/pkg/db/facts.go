@@ -53,7 +53,11 @@ func BytesToFloat32(buf []byte) []float32 {
 	return slice
 }
 
-func InsertFact(database *sql.DB, category, factText string, importance float64, threadID string, embedding []float32) (id int64, err error) {
+func InsertFact(database DBTX, category, factText string, importance float64, threadID string, embedding []float32) (id int64, err error) {
+	return InsertFactWithContext(context.Background(), database, false, category, factText, importance, threadID, embedding)
+}
+
+func InsertFactWithContext(ctx context.Context, database DBTX, isPg bool, category, factText string, importance float64, threadID string, embedding []float32) (id int64, err error) {
 	start := time.Now()
 	defer func() {
 		status := "success"
@@ -78,19 +82,22 @@ func InsertFact(database *sql.DB, category, factText string, importance float64,
 
 	var vecVal interface{}
 	if len(embedding) == ExpectedEmbeddingDim {
-		if isPostgres(database) {
+		if isPg || isPostgres(database) {
 			vecVal = pgvector.NewVector(embedding)
 		} else {
 			vecVal = Float32ToBytes(embedding)
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	query := `INSERT INTO facts (category, fact_text, importance, thread_id, embedding, created_at) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`
 	var insertedID int64
-	err = database.QueryRowContext(ctx, query, category, factText, importance, threadID, vecVal, now).Scan(&insertedID)
+	err = database.QueryRowContext(queryCtx, query, category, factText, importance, threadID, vecVal, now).Scan(&insertedID)
 	if err != nil {
 		return 0, err
 	}
@@ -154,7 +161,7 @@ func cosineSimilarity(a, b []float32) float64 {
 	return dot / (math.Sqrt(normA) * math.Sqrt(normB))
 }
 
-func UpdateFactEmbedding(database *sql.DB, id int64, embedding []float32) error {
+func UpdateFactEmbedding(database DBTX, id int64, embedding []float32) error {
 	if database == nil {
 		return fmt.Errorf("database is nil")
 	}
@@ -169,7 +176,7 @@ func UpdateFactEmbedding(database *sql.DB, id int64, embedding []float32) error 
 	return err
 }
 
-func GetAllFactsWithEmbeddings(database *sql.DB) ([]FactWithEmbedding, error) {
+func GetAllFactsWithEmbeddings(database DBTX) ([]FactWithEmbedding, error) {
 	if database == nil {
 		return nil, nil
 	}
@@ -202,7 +209,7 @@ func GetAllFactsWithEmbeddings(database *sql.DB) ([]FactWithEmbedding, error) {
 	return results, nil
 }
 
-func GetFactsByThreadWithEmbeddings(database *sql.DB, threadID string) ([]FactWithEmbedding, error) {
+func GetFactsByThreadWithEmbeddings(database DBTX, threadID string) ([]FactWithEmbedding, error) {
 	if database == nil {
 		return nil, nil
 	}
@@ -244,7 +251,11 @@ func GetFactsByThreadWithEmbeddings(database *sql.DB, threadID string) ([]FactWi
 }
 
 // SearchSimilarFacts executes an HNSW index-accelerated candidate fetch followed by importance-weighted scoring.
-func SearchSimilarFacts(database *sql.DB, embedding []float32, limit int, minScore float64, threadID string) ([]Fact, error) {
+func SearchSimilarFacts(database DBTX, embedding []float32, limit int, minScore float64, threadID string) ([]Fact, error) {
+	return SearchSimilarFactsWithContext(context.Background(), database, false, embedding, limit, minScore, threadID)
+}
+
+func SearchSimilarFactsWithContext(ctx context.Context, database DBTX, isPg bool, embedding []float32, limit int, minScore float64, threadID string) ([]Fact, error) {
 	if database == nil || len(embedding) != ExpectedEmbeddingDim {
 		return nil, nil
 	}
@@ -255,7 +266,7 @@ func SearchSimilarFacts(database *sql.DB, embedding []float32, limit int, minSco
 		minScore = 0.20
 	}
 
-	if !isPostgres(database) {
+	if !isPg && !isPostgres(database) {
 		// SQLite in-memory fallback for unit tests: rank in memory
 		allFacts, err := GetAllFactsWithEmbeddings(database)
 		if err != nil {
@@ -345,7 +356,7 @@ func SearchSimilarFacts(database *sql.DB, embedding []float32, limit int, minSco
 	return facts, nil
 }
 
-func GetActiveConversationsForExtraction(database *sql.DB, activeHours int) ([]string, error) {
+func GetActiveConversationsForExtraction(database DBTX, activeHours int) ([]string, error) {
 	if database == nil {
 		return nil, nil
 	}
@@ -386,7 +397,7 @@ func GetActiveConversationsForExtraction(database *sql.DB, activeHours int) ([]s
 	return tids, nil
 }
 
-func UpdateConversationFactWatermark(database *sql.DB, threadID string, maxRowID int64) error {
+func UpdateConversationFactWatermark(database DBTX, threadID string, maxRowID int64) error {
 	if database == nil || threadID == "" {
 		return nil
 	}
@@ -410,7 +421,7 @@ func UpdateConversationFactWatermark(database *sql.DB, threadID string, maxRowID
 	return err
 }
 
-func UpdateConversationFactExtractedAt(database *sql.DB, threadID string) error {
+func UpdateConversationFactExtractedAt(database DBTX, threadID string) error {
 	maxRowID, _ := GetMaxMessageRowID(database, threadID)
 	return UpdateConversationFactWatermark(database, threadID, maxRowID)
 }
@@ -436,7 +447,12 @@ func EscapeSQLLike(s string) string {
 	return s
 }
 
-func GetFactsPaginated(database *sql.DB, filter FactsFilter) (*FactsResult, error) {
+// GetFactsPaginated retrieves facts based on the provided filter.
+func GetFactsPaginated(database DBTX, filter FactsFilter) (*FactsResult, error) {
+	return GetFactsPaginatedWithContext(context.Background(), database, false, filter)
+}
+
+func GetFactsPaginatedWithContext(ctx context.Context, database DBTX, isPg bool, filter FactsFilter) (*FactsResult, error) {
 	if database == nil {
 		return nil, fmt.Errorf("database is nil")
 	}
@@ -467,12 +483,15 @@ func GetFactsPaginated(database *sql.DB, filter FactsFilter) (*FactsResult, erro
 		whereSQL = " WHERE " + strings.Join(whereClauses, " AND ")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	countQuery := "SELECT COUNT(*) FROM facts" + whereSQL
 	var total int
-	if err := database.QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
+	if err := database.QueryRowContext(queryCtx, countQuery, args...).Scan(&total); err != nil {
 		return nil, fmt.Errorf("failed to count facts: %w", err)
 	}
 
@@ -482,7 +501,7 @@ func GetFactsPaginated(database *sql.DB, filter FactsFilter) (*FactsResult, erro
 		paginationSQL = fmt.Sprintf("LIMIT $%d OFFSET $%d", argIdx, argIdx+1)
 		queryArgs = append(queryArgs, filter.Limit, filter.Offset)
 	} else if filter.Offset > 0 {
-		if isPostgres(database) {
+		if isPg || isPostgres(database) {
 			paginationSQL = fmt.Sprintf("OFFSET $%d", argIdx)
 		} else {
 			paginationSQL = fmt.Sprintf("LIMIT -1 OFFSET $%d", argIdx)
