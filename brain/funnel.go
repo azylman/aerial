@@ -23,9 +23,7 @@ var funnelCfg atomic.Pointer[config.Config]
 
 // SetFunnelConfig sets the active *config.Config for the Discord funnel.
 func SetFunnelConfig(cfg *config.Config) {
-	if cfg != nil {
-		funnelCfg.Store(cfg)
-	}
+	funnelCfg.Store(cfg)
 }
 
 func currentFunnelConfig() *config.Config {

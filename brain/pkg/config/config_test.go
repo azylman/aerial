@@ -122,7 +122,9 @@ func TestEnsureConfigErrorCases(t *testing.T) {
 	}
 
 	// Test unwritable directory
-	_ = os.Setenv("HOME", "/proc/unwritable_dir")
+	blockerHome := filepath.Join(t.TempDir(), "blocker_home")
+	_ = os.WriteFile(blockerHome, []byte("file"), 0644)
+	_ = os.Setenv("HOME", filepath.Join(blockerHome, "sub"))
 	if err := EnsureAgySettings("key", "model"); err == nil {
 		t.Error("Expected error when writing settings to uncreated directory, got nil")
 	}
@@ -2171,7 +2173,9 @@ ambient_wake_prompt: "Wake on high priority"
 
 	// Test writeAtomic failure paths
 	t.Run("writeAtomic_Errors", func(t *testing.T) {
-		err := writeAtomic("/dev/null/forbidden/file.txt", "content")
+		blocker := filepath.Join(t.TempDir(), "blocker_file")
+		_ = os.WriteFile(blocker, []byte("file"), 0644)
+		err := writeAtomic(filepath.Join(blocker, "forbidden", "file.txt"), "content")
 		if err == nil {
 			t.Error("expected error for impossible writeAtomic directory")
 		}
@@ -2344,7 +2348,9 @@ func TestEnsureAgySettings_CorruptedJSONAndWriteError(t *testing.T) {
 	}
 
 	// Write error with uncreatable home
-	t.Setenv("HOME", "/proc/uncreatable")
+	blockerHome := filepath.Join(tmpDir, "blocked_home")
+	_ = os.WriteFile(blockerHome, []byte("file"), 0644)
+	t.Setenv("HOME", filepath.Join(blockerHome, "sub"))
 	errUncreatable := EnsureAgySettings("api-key-123", "model-abc")
 	if errUncreatable == nil {
 		t.Errorf("Expected error for uncreatable HOME")
@@ -2383,7 +2389,9 @@ func TestEnsureSystemRules_TornReadAndFallback(t *testing.T) {
 	}
 
 	// 4. Uncreatable home error
-	t.Setenv("HOME", "/proc/uncreatable")
+	blockerRules := filepath.Join(tmpDir, "blocked_rules_home")
+	_ = os.WriteFile(blockerRules, []byte("file"), 0644)
+	t.Setenv("HOME", filepath.Join(blockerRules, "sub"))
 	errErr := EnsureSystemRules("test")
 	if errErr == nil {
 		t.Errorf("Expected error for uncreatable directory")
@@ -2477,7 +2485,9 @@ func TestEnsureMcpConfig_EdgeCases(t *testing.T) {
 	}
 
 	// 3. Unwriteable directory
-	t.Setenv("HOME", "/proc/uncreatable")
+	blockerMcp := filepath.Join(tmpDir, "blocked_mcp_home")
+	_ = os.WriteFile(blockerMcp, []byte("file"), 0644)
+	t.Setenv("HOME", filepath.Join(blockerMcp, "sub"))
 	if err := EnsureMcpConfig(json.RawMessage(`{"mcpServers":{}}`)); err == nil {
 		t.Errorf("Expected error for uncreatable directory")
 	}
@@ -2756,3 +2766,33 @@ func TestConfig_ConcurrentUpdateRace(t *testing.T) {
 	wg.Wait()
 }
 
+func TestNewTestConfig_And_Update(t *testing.T) {
+	cfg := NewTestConfig(func(d *ConfigData) {
+		d.Model = "custom-test-model"
+	})
+
+	cur := cfg.Current()
+	if cur.DatabaseURL != ":memory:" {
+		t.Errorf("expected :memory:, got %q", cur.DatabaseURL)
+	}
+	if cur.Port != "0" {
+		t.Errorf("expected 0, got %q", cur.Port)
+	}
+	if cur.DiscordToken != "" || cur.APIKey != "" || cur.GitHubPAT != "" {
+		t.Errorf("expected cleared tokens, got non-empty")
+	}
+	if cur.Model != "custom-test-model" {
+		t.Errorf("expected custom-test-model, got %q", cur.Model)
+	}
+	if cur.Channels == nil || cur.Channels["default"].Mode != "threads" {
+		t.Errorf("expected default channels preserved")
+	}
+
+	// Test public Update method
+	cfg.Update(&ConfigData{
+		Model: "updated-model",
+	})
+	if cfg.Current().Model != "updated-model" {
+		t.Errorf("expected updated-model, got %q", cfg.Current().Model)
+	}
+}

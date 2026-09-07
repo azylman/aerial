@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -17,6 +18,14 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "modernc.org/sqlite"
 )
+
+func isTestRunner() bool {
+	if flag.Lookup("test.v") != nil {
+		return true
+	}
+	base := filepath.Base(os.Args[0])
+	return strings.HasSuffix(base, ".test") || strings.HasSuffix(base, ".test.exe") || strings.Contains(base, "test")
+}
 
 func isPostgres(database DBTX) bool {
 	if database == nil {
@@ -78,6 +87,10 @@ func initDB(dsn string) (*sql.DB, error) {
 	}
 
 	if isPg {
+		if isTestRunner() && os.Getenv("AERIAL_ALLOW_TEST_POSTGRES") != "1" {
+			return nil, fmt.Errorf("db: PostgreSQL connections are prohibited in test environments without AERIAL_ALLOW_TEST_POSTGRES=1; use in-memory SQLite instead")
+		}
+
 		if _, err := pgx.ParseConfig(trimmed); err != nil {
 			return nil, fmt.Errorf("db: invalid postgres connection string: %w", err)
 		}

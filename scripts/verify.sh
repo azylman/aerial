@@ -39,6 +39,19 @@ check_utf8_bom() {
     fi
 }
 
+# Check that tests never execute main() directly
+check_no_main_in_tests() {
+    if has_cmd git; then
+        MAIN_CALLS=$(git grep -E '\bmain\(\)' 'brain/*_test.go' 2>/dev/null || true)
+        if [ -n "$MAIN_CALLS" ]; then
+            echo "🚨 [Aerial Verify] Error: Direct execution of main() detected in test files:" >&2
+            echo "$MAIN_CALLS" | sed 's/^/   • /' >&2
+            echo "Tests must use RunBrainApp(ctx, cfg) with explicit test configs instead." >&2
+            exit 1
+        fi
+    fi
+}
+
 # Go services in the monorepo
 GO_SERVICES="brain scheduler-mcp discord-mcp dashboard sidecars/gitsync"
 
@@ -162,6 +175,7 @@ run_json_syntax() {
 if [ "$MODE" = "staged" ]; then
     # Fast path: check only services that have staged changes
     check_utf8_bom
+    check_no_main_in_tests
 
     STAGED_FILES=$(git diff --cached --name-only 2>/dev/null || true)
     if [ -z "$STAGED_FILES" ]; then
@@ -203,6 +217,7 @@ fi
 # Full verification: Run entire CI-equivalent verification suite
 echo "=== 0. Encoding & BOM Hygiene ==="
 check_utf8_bom
+check_no_main_in_tests
 
 echo "=== 1. Static Analysis & Linting ==="
 for svc in $GO_SERVICES; do
