@@ -54,17 +54,25 @@ func ExtractAndSanitizeMedia(text string, baseDir string) (string, []*Attachment
 	var attachments []*Attachment
 	lines := strings.Split(text, "\n")
 	var processedLines []string
-	inCodeBlock := false
+	var activeFence string
+	var activeFenceLen int
 
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "```") {
-			inCodeBlock = !inCodeBlock
+		fenceMarker, fenceLen, isSingleLineSpan := parseCodeFence(trimmed)
+		if fenceMarker != "" && !isSingleLineSpan {
+			if activeFence == "" {
+				activeFence = fenceMarker
+				activeFenceLen = fenceLen
+			} else if activeFence == fenceMarker && fenceLen >= activeFenceLen {
+				activeFence = ""
+				activeFenceLen = 0
+			}
 			processedLines = append(processedLines, line)
 			continue
 		}
 
-		if inCodeBlock {
+		if activeFence != "" || isSingleLineSpan {
 			processedLines = append(processedLines, line)
 			continue
 		}
@@ -156,22 +164,75 @@ func SanitizeIntermediateStatus(s string) string {
 		}
 	}
 
-	// 2. Deduplicate consecutive identical lines
+	// 2. Deduplicate consecutive identical lines outside code blocks.
+	// Track code fences accurately to prevent inverting on single-line spans, blockquotes, or tildes.
 	lines := strings.Split(working, "\n")
 	var deduped []string
 	var prevLine string
+	var activeFence string
+	var activeFenceLen int
+
 	for _, l := range lines {
 		trimmedLine := strings.TrimSpace(l)
-		if trimmedLine != "" && trimmedLine == prevLine {
+		fenceMarker, fenceLen, isSingleLineSpan := parseCodeFence(trimmedLine)
+		if fenceMarker != "" && !isSingleLineSpan {
+			if activeFence == "" {
+				activeFence = fenceMarker
+				activeFenceLen = fenceLen
+			} else if activeFence == fenceMarker && fenceLen >= activeFenceLen {
+				activeFence = ""
+				activeFenceLen = 0
+			}
+		}
+
+		inCodeBlock := activeFence != ""
+		if !inCodeBlock && trimmedLine != "" && trimmedLine == prevLine {
 			continue
 		}
 		deduped = append(deduped, l)
-		if trimmedLine != "" {
+		if !inCodeBlock && trimmedLine != "" {
 			prevLine = trimmedLine
+		} else if inCodeBlock {
+			prevLine = ""
 		}
 	}
 
 	return strings.TrimSpace(strings.Join(deduped, "\n"))
+}
+
+// parseCodeFence detects markdown code fence delimiters (``` or ~~~), measuring marker length
+// and detecting single-line code spans. Leading blockquote markers ('> ') are stripped.
+func parseCodeFence(line string) (marker string, length int, isSingleLineSpan bool) {
+	trimmed := strings.TrimSpace(line)
+	for strings.HasPrefix(trimmed, ">") {
+		trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, ">"))
+	}
+
+	if strings.HasPrefix(trimmed, "```") {
+		marker = "```"
+	} else if strings.HasPrefix(trimmed, "~~~") {
+		marker = "~~~"
+	} else {
+		return "", 0, false
+	}
+
+	char := rune(marker[0])
+	count := 0
+	for _, r := range trimmed {
+		if r == char {
+			count++
+		} else {
+			break
+		}
+	}
+
+	// Check if this line is a single-line code block: e.g. ```bash echo 1``` or ~~~python code~~~
+	rest := trimmed[count:]
+	if strings.Contains(rest, strings.Repeat(string(char), count)) {
+		return marker, count, true
+	}
+
+	return marker, count, false
 }
 
 func cleanDuplicateBlankLines(s string) string {

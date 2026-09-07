@@ -20,6 +20,18 @@ import (
 	"github.com/azylman/aerial/brain/pkg/metrics"
 )
 
+var (
+	reStrictUUID     = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+	reUUIDInText     = regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`)
+	reUpdateStream   = regexp.MustCompile(`Starting conversation update stream for ([^\s\r\n]+)`)
+	reGeneralSession = regexp.MustCompile(`(?i)(?:conversation|session)(?:_id)?[:\s=]+([a-zA-Z0-9\-]+)`)
+)
+
+// IsValidUUID validates that a string strictly matches RFC 4122 UUID format.
+func IsValidUUID(s string) bool {
+	return reStrictUUID.MatchString(s)
+}
+
 // ActivityWriter is a thread-safe buffer that tracks write activity timestamps
 // and sniffs conversation UUIDs from stderr streams.
 type ActivityWriter struct {
@@ -48,17 +60,31 @@ func (w *ActivityWriter) Write(p []byte) (int, error) {
 	w.lastActivity.Store(time.Now().UnixNano())
 
 	w.mu.Lock()
+	defer w.mu.Unlock()
 	n, err := w.buf.Write(p)
 	if w.sessionID.Load() == nil {
-		if match := reUpdateStream.FindSubmatch(p); len(match) > 1 {
+		bufBytes := w.buf.Bytes()
+		window := bufBytes
+		if len(window) > 512 {
+			window = window[len(window)-512:]
+		}
+		if match := reUpdateStream.FindSubmatch(window); len(match) > 1 {
 			sess := strings.TrimSpace(string(match[1]))
-			w.sessionID.Store(&sess)
-		} else if match := reGeneralSession.FindSubmatch(p); len(match) > 1 {
+			if IsValidUUID(sess) {
+				w.sessionID.Store(&sess)
+			}
+		} else if match := reGeneralSession.FindSubmatch(window); len(match) > 1 {
 			sess := strings.TrimSpace(string(match[1]))
-			w.sessionID.Store(&sess)
+			if IsValidUUID(sess) {
+				w.sessionID.Store(&sess)
+			}
+		} else if match := reUUIDInText.Find(window); len(match) > 0 {
+			sess := strings.TrimSpace(string(match))
+			if IsValidUUID(sess) {
+				w.sessionID.Store(&sess)
+			}
 		}
 	}
-	w.mu.Unlock()
 
 	return n, err
 }
@@ -252,9 +278,15 @@ func RunAgyWithWatchdog(parentCtx context.Context, agyBin, prompt, sessionID, ap
 			close(done)
 		})
 	}
-	defer stopWatchdog()
+	var watchdogWg sync.WaitGroup
+	defer func() {
+		stopWatchdog()
+		watchdogWg.Wait()
+	}()
 
+	watchdogWg.Add(1)
 	go func() {
+		defer watchdogWg.Done()
 		ticker := time.NewTicker(opts.PollInterval)
 		defer ticker.Stop()
 
@@ -343,6 +375,7 @@ func RunAgyWithWatchdog(parentCtx context.Context, agyBin, prompt, sessionID, ap
 
 	runErr := cmd.Wait()
 	stopWatchdog()
+	watchdogWg.Wait()
 	stdout = outBuf.String()
 	stderr = actWriter.String()
 
@@ -385,20 +418,25 @@ func RunAgy(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string
 	return RunAgyWithWatchdog(ctx, agyBin, prompt, sessionID, apiKey, model, DefaultWatchdogOptions(timeoutMinutes))
 }
 
-var (
-	reUpdateStream   = regexp.MustCompile(`Starting conversation update stream for ([^\s\r\n]+)`)
-	reGeneralSession = regexp.MustCompile(`(?i)(?:conversation|session)(?:_id)?[:\s=]+([a-zA-Z0-9\-]+)`)
-)
-
 // ExtractSessionID searches stderr for an active session/conversation UUID.
 func ExtractSessionID(stderr string, _ time.Time) string {
 	if stderr != "" {
 		if match := reUpdateStream.FindStringSubmatch(stderr); len(match) > 1 {
-			return strings.TrimSpace(match[1])
+			candidate := strings.TrimSpace(match[1])
+			if IsValidUUID(candidate) {
+				return candidate
+			}
 		}
 
 		if match := reGeneralSession.FindStringSubmatch(stderr); len(match) > 1 {
-			return strings.TrimSpace(match[1])
+			candidate := strings.TrimSpace(match[1])
+			if IsValidUUID(candidate) {
+				return candidate
+			}
+		}
+
+		if match := reUUIDInText.FindString(stderr); match != "" {
+			return match
 		}
 	}
 
@@ -563,7 +601,7 @@ func ClassifyError(exitCode int, stdout, stderr string) (isFailure bool, isTrans
 		// Parsed JSON successfully
 		if resp.Status != "" && strings.ToUpper(resp.Status) != "SUCCESS" {
 			isFailure = true
-			errTarget := resp.Error + " " + resp.Response + " " + trimmedStderr
+			errTarget := resp.Error + " " + trimmedStderr
 			errTargetLower := strings.ToLower(errTarget)
 			if checkCorruption(errTargetLower) {
 				isSessionCorruption = true
@@ -603,6 +641,9 @@ func ClassifyError(exitCode int, stdout, stderr string) (isFailure bool, isTrans
 			}
 		}
 
+		// CRITICAL ADVERSARIAL GUARD: If resp.Status == "SUCCESS" (or empty) and resp.Error == ""
+		// with non-empty resp.Response, return clean success. Under no circumstances inspect
+		// resp.Response for corruption keywords.
 		return false, false, false, ""
 	}
 

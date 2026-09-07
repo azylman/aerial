@@ -29,6 +29,7 @@ import (
 type ChannelSnapshot struct {
 	ID       string
 	Name     string
+	GuildID  string
 	ParentID string
 	IsThread bool
 }
@@ -42,6 +43,7 @@ var (
 const (
 	DefaultMaxSessionTurns = 25
 	DefaultTimeoutMinutes  = 60
+	ContinuationPromptTemplate = "Your previous execution timed out or was interrupted while working. Please inspect where you left off in the conversation transcript and continue the task to completion.\n\nOriginal user request:\n%s"
 )
 
 // CacheDiscordChannel stores an immutable snapshot of a discordgo.Channel.
@@ -50,13 +52,20 @@ func CacheDiscordChannel(ch *discordgo.Channel) {
 		return
 	}
 	channelCacheMu.Lock()
+	defer channelCacheMu.Unlock()
+	guildID := ch.GuildID
+	if guildID == "" && ch.ParentID != "" {
+		if parentSnap, ok := channelCache[ch.ParentID]; ok {
+			guildID = parentSnap.GuildID
+		}
+	}
 	channelCache[ch.ID] = ChannelSnapshot{
 		ID:       ch.ID,
 		Name:     ch.Name,
+		GuildID:  guildID,
 		ParentID: ch.ParentID,
 		IsThread: ch.IsThread(),
 	}
-	channelCacheMu.Unlock()
 }
 
 // InvalidateChannelCache removes a channel from the internal cache.
@@ -175,6 +184,7 @@ type WorkerPoolConfig struct {
 	MemoryClient   *memory.Client
 	Classifier     *classifier.Classifier
 	StalenessTTL   time.Duration
+	IdleTimeout    time.Duration
 
 	// Optional hooks for testing/custom overrides
 	RunnerFunc           func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error)
@@ -189,10 +199,16 @@ type WorkerPoolConfig struct {
 	SystemAlertFunc      func(s *discordgo.Session, channelNameOrID, title, alertBody string) error
 }
 
+type threadWorkerState struct {
+	ch              chan db.Message
+	activeEnqueuers int
+	inFlight        bool
+}
+
 type WorkerPool struct {
 	cfg       WorkerPoolConfig
 	mu        sync.Mutex
-	threadChs map[string]chan db.Message
+	threadChs map[string]*threadWorkerState
 	wg        sync.WaitGroup
 	ctx       context.Context
 	cancel    context.CancelFunc
@@ -261,7 +277,7 @@ func NewWorkerPool(cfg WorkerPoolConfig) *WorkerPool {
 
 	p := &WorkerPool{
 		cfg:       cfg,
-		threadChs: make(map[string]chan db.Message),
+		threadChs: make(map[string]*threadWorkerState),
 		ctx:       ctx,
 		cancel:    cancel,
 	}
@@ -355,17 +371,60 @@ func (p *WorkerPool) Start() {
 	log.Printf("[WorkerPool] Started queue worker pool with max %d attempts per turn", p.cfg.MaxAttempts)
 }
 
-func (p *WorkerPool) Stop() {
+// StopWithTimeout initiates a bounded graceful drain of the worker pool, allowing inflight turns
+// to complete and deliver to Discord before cancelling context.
+func (p *WorkerPool) StopWithTimeout(drainTimeout time.Duration) {
 	p.mu.Lock()
 	if p.stopped {
 		p.mu.Unlock()
 		return
 	}
 	p.stopped = true
-	p.cancel()
 	p.mu.Unlock()
 
-	p.wg.Wait()
+	if drainTimeout <= 0 {
+		drainTimeout = 10 * time.Second
+	}
+
+	// Stage 1: Wait up to drainTimeout for pending messages and in-flight bursts to finish
+	deadline := time.Now().Add(drainTimeout)
+	for time.Now().Before(deadline) {
+		p.mu.Lock()
+		busy := false
+		for _, state := range p.threadChs {
+			if len(state.ch) > 0 || state.activeEnqueuers > 0 || state.inFlight {
+				busy = true
+				break
+			}
+		}
+		p.mu.Unlock()
+
+		if !busy {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// Stage 2: Queues drained and turns completed (or timeout reached).
+	// Cancel context to wake up all idle worker goroutines.
+	p.cancel()
+
+	done := make(chan struct{})
+	go func() {
+		p.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		log.Printf("[WorkerPool] Graceful drain completed cleanly")
+	case <-time.After(2 * time.Second):
+		log.Printf("[WorkerPool] Warning: worker exit wait timed out")
+	}
+}
+
+func (p *WorkerPool) Stop() {
+	p.StopWithTimeout(10 * time.Second)
 	log.Printf("[WorkerPool] Queue worker pool stopped cleanly")
 }
 
@@ -377,13 +436,26 @@ func (p *WorkerPool) Enqueue(msg db.Message) {
 		return
 	}
 
-	ch, exists := p.threadChs[msg.ThreadID]
+	state, exists := p.threadChs[msg.ThreadID]
 	if !exists {
-		ch = make(chan db.Message, 100)
-		p.threadChs[msg.ThreadID] = ch
+		state = &threadWorkerState{ch: make(chan db.Message, 100)}
+		p.threadChs[msg.ThreadID] = state
 		p.wg.Add(1)
-		go p.runThreadWorker(msg.ThreadID, ch)
+		go p.runThreadWorker(msg.ThreadID, state)
 	}
+
+	// Fast path: non-blocking send under lock
+	select {
+	case state.ch <- msg:
+		metrics.QueueDepth.Inc()
+		p.mu.Unlock()
+		return
+	default:
+	}
+
+	// Buffer full: track active enqueuer to block worker eviction while waiting outside lock
+	state.activeEnqueuers++
+	ch := state.ch
 	p.mu.Unlock()
 
 	select {
@@ -392,70 +464,78 @@ func (p *WorkerPool) Enqueue(msg db.Message) {
 	case <-p.ctx.Done():
 		log.Printf("[WorkerPool] Context cancelled while enqueuing message %s", msg.ID)
 	}
+
+	p.mu.Lock()
+	state.activeEnqueuers--
+	p.mu.Unlock()
 }
 
-func (p *WorkerPool) runThreadWorker(threadID string, ch chan db.Message) {
+func (p *WorkerPool) runThreadWorker(threadID string, state *threadWorkerState) {
 	defer p.wg.Done()
+
+	idleTimeout := p.cfg.IdleTimeout
+	if idleTimeout <= 0 {
+		idleTimeout = 30 * time.Second
+	}
+	idleTimer := time.NewTimer(idleTimeout)
+	defer idleTimer.Stop()
 
 	for {
 		select {
 		case <-p.ctx.Done():
 			return
-		case msg, ok := <-ch:
+		case msg, ok := <-state.ch:
 			if !ok {
 				return
 			}
+			if !idleTimer.Stop() {
+				select {
+				case <-idleTimer.C:
+				default:
+				}
+			}
+			idleTimer.Reset(idleTimeout)
+
 			metrics.QueueDepth.Dec()
 			burst := []db.Message{msg}
 		DrainLoop:
 			for len(burst) < 5 {
 				select {
-				case extra := <-ch:
+				case extra := <-state.ch:
 					metrics.QueueDepth.Dec()
 					burst = append(burst, extra)
 				default:
 					break DrainLoop
 				}
 			}
-			p.processBurst(burst)
-		case <-time.After(30 * time.Second):
+
 			p.mu.Lock()
-			if len(ch) == 0 {
+			state.inFlight = true
+			p.mu.Unlock()
+
+			p.processBurst(burst)
+
+			p.mu.Lock()
+			state.inFlight = false
+			p.mu.Unlock()
+
+			if !idleTimer.Stop() {
+				select {
+				case <-idleTimer.C:
+				default:
+				}
+			}
+			idleTimer.Reset(idleTimeout)
+
+		case <-idleTimer.C:
+			p.mu.Lock()
+			if len(state.ch) == 0 && state.activeEnqueuers == 0 {
 				delete(p.threadChs, threadID)
 				p.mu.Unlock()
-
-				// Final non-blocking drain check in case a message was pushed right during unlock
-				select {
-				case msg, ok := <-ch:
-					if !ok {
-						return
-					}
-					metrics.QueueDepth.Dec()
-					burst := []db.Message{msg}
-				DrainLoop2:
-					for len(burst) < 5 {
-						select {
-						case extra := <-ch:
-							metrics.QueueDepth.Dec()
-							burst = append(burst, extra)
-						default:
-							break DrainLoop2
-						}
-					}
-					p.processBurst(burst)
-					p.mu.Lock()
-					if _, exists := p.threadChs[threadID]; !exists {
-						p.threadChs[threadID] = ch
-						p.mu.Unlock()
-						continue
-					}
-					p.mu.Unlock()
-				default:
-					return
-				}
-			} else {
-				p.mu.Unlock()
+				return
 			}
+			p.mu.Unlock()
+			idleTimer.Reset(idleTimeout)
 		}
 	}
 }
@@ -1100,6 +1180,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 
 	maxAttempts := p.cfg.MaxAttempts
 	lastErrDetail := ""
+	lastStderr := ""
 	currentModel := p.cfg.Model
 
 	initialRetryCount := burst[0].RetryCount
@@ -1113,8 +1194,10 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		p.mu.Unlock()
 
 		promptToSend := turnPrompt
-		if attempt > 1 && currentSessionID != "" && session.SessionExistsOnDisk(currentSessionID) {
-			promptToSend = "Your previous execution timed out or was interrupted while working. Please inspect where you left off in the conversation transcript and continue the task to completion."
+		if attempt > 1 {
+			if (runner.IsInactivityTimeout(lastErrDetail, lastStderr) || strings.Contains(lastErrDetail, "max duration exceeded")) && currentSessionID != "" && session.SessionExistsOnDisk(currentSessionID) {
+				promptToSend = fmt.Sprintf(ContinuationPromptTemplate, turnPrompt)
+			}
 		}
 
 		// Pad Go context by +1 minute relative to runner watchdog ceiling so the runner watchdog always fires cleanly
@@ -1136,6 +1219,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 			errDetail = err.Error()
 		}
 		lastErrDetail = errDetail
+		lastStderr = stderr
 
 		if isFailure {
 			// Cold-Start Dynamic Session Latching:

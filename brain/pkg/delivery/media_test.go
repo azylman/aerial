@@ -213,3 +213,38 @@ func TestSanitizeIntermediateStatus(t *testing.T) {
 	}
 }
 
+func TestSanitizeIntermediateStatus_ComplexCodeFences(t *testing.T) {
+	// 1. Repeated braces and identical lines inside code fences MUST be preserved!
+	codeBlockInput := "Here is some code:\n```go\nfunc test() {\n\tif true {\n\t}\n\tif false {\n\t}\n}\n```\nOutside line\nOutside line\nFinal line"
+	wantCodeBlock := "Here is some code:\n```go\nfunc test() {\n\tif true {\n\t}\n\tif false {\n\t}\n}\n```\nOutside line\nFinal line"
+	gotCodeBlock := SanitizeIntermediateStatus(codeBlockInput)
+	if gotCodeBlock != wantCodeBlock {
+		t.Errorf("Expected code block with duplicate braces preserved, got:\n%s\nwant:\n%s", gotCodeBlock, wantCodeBlock)
+	}
+
+	// 2. Single-line code span must not invert state
+	singleLineSpan := "Intro\n```bash echo \"hello\"```\nDuplicate outside\nDuplicate outside\nDone"
+	wantSingleLine := "Intro\n```bash echo \"hello\"```\nDuplicate outside\nDone"
+	gotSingleLine := SanitizeIntermediateStatus(singleLineSpan)
+	if gotSingleLine != wantSingleLine {
+		t.Errorf("Expected single-line span to not prevent deduplication outside, got:\n%s\nwant:\n%s", gotSingleLine, wantSingleLine)
+	}
+
+	// 3. 4-backticks fence and tildes
+	tildeBlock := "Tilde test:\n~~~python\ndef foo():\n    return 1\n    return 1\n~~~\nDuplicate outside\nDuplicate outside"
+	wantTilde := "Tilde test:\n~~~python\ndef foo():\n    return 1\n    return 1\n~~~\nDuplicate outside"
+	gotTilde := SanitizeIntermediateStatus(tildeBlock)
+	if gotTilde != wantTilde {
+		t.Errorf("Expected tilde block content preserved, got:\n%s\nwant:\n%s", gotTilde, wantTilde)
+	}
+
+	// 4. Blockquoted code fence
+	blockquoteBlock := "> ```json\n> {\n> }\n> }\n> ```\nOut\nOut"
+	wantBlockquote := "> ```json\n> {\n> }\n> }\n> ```\nOut"
+	gotBlockquote := SanitizeIntermediateStatus(blockquoteBlock)
+	if gotBlockquote != wantBlockquote {
+		t.Errorf("Expected blockquoted fence handled, got:\n%s\nwant:\n%s", gotBlockquote, wantBlockquote)
+	}
+}
+
+
