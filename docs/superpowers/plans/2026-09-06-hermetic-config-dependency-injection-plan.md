@@ -170,34 +170,34 @@ git commit -m "feat(config): implement nil-safe atomic snapshot Config with deep
 
 **Interfaces:**
 - Consumes: `cfg *config.Config`. Reads `c := cfg.Current(); c.DatabaseURL`.
-- Produces: `InitDB(cfg *config.Config) (*sql.DB, error)`. Deletes `GetDBPath()`.
+- Produces: `New(cfg *config.Config) (*sql.DB, error)`, private `initDB(dsn string) (*sql.DB, error)`, and compatibility wrapper `InitDB(cfg *config.Config)`. Deletes `GetDBPath()`.
 
 - [ ] **Step 1: Write the failing test**
 
 In `brain/pkg/db/db_test.go`:
 ```go
-func TestInitDB_ConfigPointerInjection(t *testing.T) {
+func TestNew_ConfigPointerInjection(t *testing.T) {
 	// 1. Nil config rejected
-	if _, err := InitDB(nil); err == nil {
+	if _, err := New(nil); err == nil {
 		t.Errorf("expected error when cfg is nil, got nil")
 	}
 
 	// 2. Empty connection string rejected
 	cfgEmpty := config.New(&config.ConfigData{})
-	if _, err := InitDB(cfgEmpty); err == nil {
+	if _, err := New(cfgEmpty); err == nil {
 		t.Errorf("expected error for empty connection string, got nil")
 	}
 
 	// 3. Unsupported scheme rejected
 	cfgInvalid := config.New(&config.ConfigData{DatabaseURL: "mysql://user:pass@localhost/db"})
-	if _, err := InitDB(cfgInvalid); err == nil {
+	if _, err := New(cfgInvalid); err == nil {
 		t.Errorf("expected error for unsupported scheme, got nil")
 	}
 
 	// 4. Valid SQLite temp db succeeds (supports both file paths and sqlite:// prefix)
 	tmpFile := filepath.Join(t.TempDir(), "test.db")
 	cfgValid := config.New(&config.ConfigData{DatabaseURL: "sqlite://" + tmpFile})
-	database, err := InitDB(cfgValid)
+	database, err := New(cfgValid)
 	if err != nil {
 		t.Fatalf("expected valid sqlite initialization, got: %v", err)
 	}
@@ -207,15 +207,15 @@ func TestInitDB_ConfigPointerInjection(t *testing.T) {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `go test -v -run "TestInitDB_ConfigPointerInjection" ./brain/pkg/db`
-Expected: FAIL due to signature mismatch.
+Run: `go test -v -run "TestNew_ConfigPointerInjection" ./brain/pkg/db`
+Expected: FAIL (`New` undefined).
 
-- [ ] **Step 3: Implement `InitDB(cfg *config.Config)` & excise `GetDBPath()`**
+- [ ] **Step 3: Implement `New(cfg *config.Config)`, private `initDB(dsn string)`, and excise `GetDBPath()`**
 
 In `brain/pkg/db/db.go`:
-1. Change signature to:
+1. Implement `New` and private `initDB`:
 ```go
-func InitDB(cfg *config.Config) (*sql.DB, error) {
+func New(cfg *config.Config) (*sql.DB, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("db: config cannot be nil")
 	}
@@ -223,7 +223,15 @@ func InitDB(cfg *config.Config) (*sql.DB, error) {
 	if cur == nil {
 		return nil, fmt.Errorf("db: config snapshot is nil")
 	}
-	trimmed := strings.TrimSpace(cur.DatabaseURL)
+	return initDB(cur.DatabaseURL)
+}
+
+func InitDB(cfg *config.Config) (*sql.DB, error) {
+	return New(cfg)
+}
+
+func initDB(dsn string) (*sql.DB, error) {
+	trimmed := strings.TrimSpace(dsn)
 	if trimmed == "" {
 		return nil, fmt.Errorf("db: connection string cannot be empty")
 	}

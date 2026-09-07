@@ -121,6 +121,19 @@ func DefaultConfigData() *ConfigData {
 	return cloneConfigData(defaultConfigSnapshot)
 }
 
+func cloneChannelPolicy(p ChannelPolicy) ChannelPolicy {
+	cp := p
+	if p.IgnoreBots != nil {
+		b := *p.IgnoreBots
+		cp.IgnoreBots = &b
+	}
+	if p.AmbientWakeThreshold != nil {
+		f := *p.AmbientWakeThreshold
+		cp.AmbientWakeThreshold = &f
+	}
+	return cp
+}
+
 func cloneConfigData(src *ConfigData) *ConfigData {
 	if src == nil {
 		return nil
@@ -134,7 +147,7 @@ func cloneConfigData(src *ConfigData) *ConfigData {
 	if src.Channels != nil {
 		dst.Channels = make(map[string]ChannelPolicy, len(src.Channels))
 		for k, v := range src.Channels {
-			dst.Channels[k] = v // ChannelPolicy is a value struct
+			dst.Channels[k] = cloneChannelPolicy(v) // Deep copy pointers
 		}
 	}
 	if src.GitSync.Repositories != nil {
@@ -207,20 +220,27 @@ func IsAdmin(adminUsers []string, identifiers ...string) bool {
 }
 ```
 
-#### 2.1.3 Safe Environment Resolution (No Postgres 5432 Trap)
+#### 2.1.3 Safe Environment Resolution & Resilient Cold-Start
 - `buildPostgresDSNFromEnv()`:
   - If `DATABASE_URL` is set, return it.
   - If `POSTGRES_HOST` is set, synthesize connection string via `net.JoinHostPort(dbHost, dbPort)`.
   - If `POSTGRES_HOST` is unset, **return empty string `""`**. Never default to `postgres:5432`.
+- `LoadConfigFromPaths()`: continues searching candidate paths (including on-disk `/data/.config.yaml.lkgc`) if earlier files encounter YAML syntax or validation errors.
 - `LoadConfig()`: returns `(*Config, error)`.
 - `getEnv`: made private unexported function. `config.GetEnv` is deleted.
 
 ---
 
-### 2.2 `brain/pkg/db`: Strict Constructor Requirement & Driver Invariants
-- **Constructor Signature**:
+### 2.2 `brain/pkg/db`: Universal `New` Constructor, Private `initDB`, Driver Invariants
+- **Public Constructor Signature**:
   ```go
-  func InitDB(cfg *config.Config) (*sql.DB, error)
+  func New(cfg *config.Config) (*sql.DB, error)
+  ```
+- **Private Helper**:
+  ```go
+  func initDB(dsn string) (*sql.DB, error) {
+      return New(config.New(&config.ConfigData{DatabaseURL: dsn}))
+  }
   ```
 - **Validation**:
   - If `cfg == nil`, return `fmt.Errorf("db: config cannot be nil")`.
@@ -232,11 +252,11 @@ func IsAdmin(adminUsers []string, identifiers ...string) bool {
   - SQLite: if `trimmed == ":memory:" || strings.Contains(trimmed, "mode=memory")`, enforce `database.SetMaxOpenConns(1)`.
   - PostgreSQL: acquires `SELECT pg_advisory_lock(849201948201)` via dedicated `*sql.Conn` during migrations.
 - **Delete `GetDBPath()`**: Removed completely.
-- **Hermetic Testing**: All unit tests use `config.NewTestConfig(&config.ConfigData{ DatabaseURL: filepath.Join(t.TempDir(), "test.db") })` or `:memory:`. Zero `os.Getenv` or `TEST_DATABASE_URL`.
+- **Hermetic Testing**: All unit tests use `config.New(&config.ConfigData{ DatabaseURL: filepath.Join(t.TempDir(), "test.db") })` or `:memory:`. Zero `os.Getenv` or `TEST_DATABASE_URL`.
 
 ---
 
-### 2.3 `brain/pkg/memory`: Pure Constructor Injection
+### 2.3 `brain/pkg/memory`: Pure Constructor Injection (`memory.New`)
 - **Constructor Signature**:
   ```go
   type Client struct {
@@ -244,14 +264,14 @@ func IsAdmin(adminUsers []string, identifiers ...string) bool {
       httpClient *http.Client
   }
 
-  func NewClient(cfg *config.Config) *Client
+  func New(cfg *config.Config) *Client
   ```
 - **Execution**: Inside `EmbedQuery` and `EmbedDocuments`, reads `cur := c.cfg.Current(); cur.Ollama.BaseURL, cur.Ollama.Model, cur.Ollama.QueryPrefix` JIT.
 - **Zero `os.Getenv`**: Lines 30, 64, 69, 71 in `ollama.go` removed entirely.
 
 ---
 
-### 2.4 `brain/pkg/classifier`: Pure Constructor Injection
+### 2.4 `brain/pkg/classifier`: Pure Constructor Injection (`classifier.New`)
 - **Constructor Signature**:
   ```go
   type Classifier struct {
@@ -259,24 +279,27 @@ func IsAdmin(adminUsers []string, identifiers ...string) bool {
       runnerFn runner.RunnerFunc
   }
 
-  func NewClassifier(cfg *config.Config, runnerFn runner.RunnerFunc) *Classifier
+  func New(cfg *config.Config, runnerFn runner.RunnerFunc) *Classifier
   ```
 - In `Classify(ctx, text)`: evaluates `cur := c.cfg.Current()` JIT to obtain `cur.ClassifierModel`, `cur.AgyBin`, `cur.APIKey`. Adheres strictly to Invariant I5.
 
 ---
 
-### 2.5 `brain/pkg/sanitizer`: Deduplicating Token Registration
+### 2.5 `brain/pkg/sanitizer`: Copy-On-Write Token Registration
 - **Constructor / Registration**:
   ```go
   func RegisterConfigTokens(cfg *config.Config)
   ```
-- In `RegisterConfigTokens`: reads `cur := cfg.Current()`. Uses a temporary map to deduplicate against `envSecretsCache` before appending `cur.APIKey`, `cur.DiscordToken`, `cur.GitHubPAT`. Parses `cur.DatabaseURL` to extract and register database passwords.
-- Uses copy-on-write slice replacement under `envMu.Lock()` to prevent race conditions during iteration.
+- In `RegisterConfigTokens`: reads `cur := cfg.Current()`. Uses a thread-safe Copy-On-Write slice via `atomic.Pointer[[]string]` to eliminate reader data races. Deduplicates against existing secrets before appending `cur.APIKey`, `cur.DiscordToken`, `cur.GitHubPAT`, and database passwords. Capped at 256 secrets.
 - Removes automatic scan of `os.Environ()` and `os.Getenv`.
 
 ---
 
-### 2.6 `brain/pkg/queue`: Constructor Separation & Retry Re-evaluation
+### 2.6 `brain/pkg/queue`: Constructor Separation (`queue.New`) & Retry Re-evaluation
+- **Constructor Signature**:
+  ```go
+  func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool
+  ```
 - **WorkerPool Struct Definition**:
   ```go
   type WorkerPool struct {
@@ -286,15 +309,15 @@ func IsAdmin(adminUsers []string, identifiers ...string) bool {
       ...
   }
   ```
-  `WorkerPoolConfig` retains internal infrastructure dependencies (`DB`, `Classifier`, `DeliveryFunc`, `RunnerFunc`, `Metrics`), but **removes** `Model`, `AgyBin`, `APIKey`, and `SystemPrompt`.
+  `WorkerPoolConfig` retains internal infrastructure dependencies (`DB`, `Classifier`, `DeliveryFunc`, `RunnerFunc`, `Metrics`, `ResolveChannelPolicy`), but **removes** `Model`, `AgyBin`, `APIKey`, and `SystemPrompt`.
 - In `processBurst`: evaluates `cur := p.appCfg.Current()` at burst entry AND re-evaluates `cur = p.appCfg.Current()` at the top of each retry attempt in the loop.
-- Resolves policy via `config.ResolveChannelPolicy(cur.Channels, effectiveID, effectiveName)`.
+- Resolves policy via `config.ResolveChannelPolicy(cur.Channels, effectiveID, effectiveName)`. If `p.cfg.ResolveChannelPolicy != nil`, uses it as an optional test override hook.
 - Deletes `WorkerPool.UpdateRuntimeConfig(...)`.
 
 ---
 
-### 2.7 `brain/pkg/scheduler`: Explicit Service Struct
-- **Scheduler Struct Definition**:
+### 2.7 `brain/pkg/scheduler`: Explicit Service Struct (`scheduler.New`)
+- **Scheduler Struct & Constructor**:
   ```go
   type Scheduler struct {
       cfg           *config.Config
@@ -304,6 +327,8 @@ func IsAdmin(adminUsers []string, identifiers ...string) bool {
       threadCreator ThreadCreator
       memClient     *memory.Client
   }
+
+  func New(cfg *config.Config, db *sql.DB, pool *queue.WorkerPool, dgSession *discordgo.Session) *Scheduler
 
   func NewScheduler(cfg *config.Config, db *sql.DB, pool *queue.WorkerPool, dgSession *discordgo.Session, memClient *memory.Client) *Scheduler
   ```
