@@ -1470,27 +1470,39 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		lastStderr = stderr
 
 		if isFailure {
-			// Cold-Start Dynamic Session Latching:
-			// If this was a cold start (currentSessionID was empty), extract the active conversation UUID
-			// discovered in output during execution so retries can resume on the existing transcript.
-			if currentSessionID == "" && !isSessionCorruption {
+			targetSess := currentSessionID
+			if targetSess == "" {
 				combinedOutput := stdout + "\n" + stderr
 				if extSess := runner.ExtractSessionID(combinedOutput, execStart); extSess != "" && session.SessionExistsOnDisk(extSess) {
-					log.Printf("[Queue] Latched active session from output on failure (attempt %d/%d) for thread %s: %s", attempt, maxAttempts, threadID, extSess)
-					currentSessionID = extSess
-					_ = db.SaveSessionID(p.cfg.DB, threadID, currentSessionID)
+					targetSess = extSess
 				}
 			}
 
-			// Transcript Recovery on Empty Stdout:
-			// If agy completed with exit code 0 but produced empty stdout (e.g. buffering or background yield),
+			// Transcript Recovery on Exit Code 0:
+			// If agy completed with exit code 0 but was flagged as a failure (e.g. empty stdout from buffering,
+			// or stream-json reporting an error status despite the model successfully generating a response),
 			// check if the session transcript on disk contains a valid PLANNER_RESPONSE turn.
-			if exitCode == 0 && strings.TrimSpace(stdout) == "" && currentSessionID != "" && session.SessionExistsOnDisk(currentSessionID) {
-				if respText, _ := session.ExtractResponseAndError(currentSessionID); respText != "" {
-					log.Printf("[Queue] Recovered response directly from session %s transcript after empty stdout on exit 0", currentSessionID)
+			if exitCode == 0 && targetSess != "" && session.SessionExistsOnDisk(targetSess) {
+				if respText, _ := session.ExtractResponseAndError(targetSess); respText != "" && !strings.HasPrefix(respText, "[Tool Call Requested]:") {
+					log.Printf("[Queue] Recovered response directly from session %s transcript after runner failure on exit 0", targetSess)
 					isFailure = false
+					isSessionCorruption = false
+					isTransient = false
+					if currentSessionID == "" {
+						currentSessionID = targetSess
+						_ = db.SaveSessionID(p.cfg.DB, threadID, currentSessionID)
+					}
 					stdout = fmt.Sprintf(`{"conversation_id":%q,"status":"SUCCESS","response":%q}`, currentSessionID, respText)
 				}
+			}
+
+			// Cold-Start Dynamic Session Latching:
+			// If this was a cold start and remains an unrecovered failure, only latch the active session
+			// if the failure was NOT session corruption (so retries won't inherit corrupted state).
+			if isFailure && currentSessionID == "" && !isSessionCorruption && targetSess != "" {
+				log.Printf("[Queue] Latched active session from output on failure (attempt %d/%d) for thread %s: %s", attempt, maxAttempts, threadID, targetSess)
+				currentSessionID = targetSess
+				_ = db.SaveSessionID(p.cfg.DB, threadID, currentSessionID)
 			}
 		}
 
