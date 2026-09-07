@@ -201,15 +201,17 @@ func TestParseFactsJSON(t *testing.T) {
 }
 
 func setupTestDB(t *testing.T) *sql.DB {
-	sqlitePath := filepath.Join(t.TempDir(), "aerial_test_mem.db")
+	t.Helper()
+	dsn := fmt.Sprintf("file:%s_%d?mode=memory&cache=shared&_busy_timeout=5000", t.Name(), time.Now().UnixNano())
 	cfg := config.NewFromData(&config.ConfigData{
-		DatabaseURL: sqlitePath,
+		DatabaseURL: dsn,
 	})
 	database, err := db.New(cfg)
 	if err != nil {
 		t.Fatalf("Failed to initialize hermetic SQLite test DB: %v", err)
 		return nil
 	}
+	database.SetMaxOpenConns(1)
 	return database
 }
 
