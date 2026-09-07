@@ -150,17 +150,7 @@ func cloneConfigData(src *ConfigData) *ConfigData {
 	return &dst
 }
 
-// NewTestConfig instantiates a Config pointer directly with test data.
-func NewTestConfig(data *ConfigData) *Config {
-	c := &Config{}
-	if data == nil {
-		data = DefaultConfigData()
-	}
-	c.current.Store(cloneConfigData(data))
-	return c
-}
-
-// Current returns the active immutable snapshot. Guaranteed NEVER to return nil.
+// Current returns the active, immutable ConfigData snapshot. Guaranteed non-nil.
 func (c *Config) Current() *ConfigData {
 	if c == nil {
 		return DefaultConfigData()
@@ -172,13 +162,25 @@ func (c *Config) Current() *ConfigData {
 	return cur
 }
 
-// Update atomically replaces the active configuration snapshot.
-func (c *Config) Update(fresh *ConfigData) {
+// update atomically replaces the current configuration snapshot.
+// Unexported to enforce strict read-only access for sub-packages.
+// Only called internally by Reload().
+func (c *Config) update(fresh *ConfigData) {
 	if fresh == nil {
-		log.Printf("[Config] Warning: attempted Update with nil ConfigData; retaining active config")
 		return
 	}
 	c.current.Store(cloneConfigData(fresh))
+}
+
+// New constructs a *Config wrapping the given ConfigData.
+// Used for hermetic unit testing and production initialization.
+func New(data *ConfigData) *Config {
+	if data == nil {
+		data = DefaultConfigData()
+	}
+	cfg := &Config{}
+	cfg.current.Store(cloneConfigData(data))
+	return cfg
 }
 
 // Reload parses configuration from search paths and atomically updates the active Config in-place.

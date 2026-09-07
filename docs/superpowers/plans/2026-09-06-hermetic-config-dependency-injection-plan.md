@@ -4,7 +4,18 @@
 
 **Goal:** Establish hermetic configuration parsing and pure `*config.Config` pointer constructor dependency injection across the Aerial monorepo, permanently eliminating ambient environment leakage, fragile `env -u` denylists, backdoor getters, and toxic postgres fallback traps.
 
-**Architecture:** Consolidate all environment variable and config-file parsing into `brain/pkg/config`. `config.Config` wraps an `atomic.Pointer[ConfigData]`, where `ConfigData` is a dumb data struct with **zero methods and zero field accessors**. Every package other than `config` (`pkg/db`, `pkg/memory`, `pkg/queue`, `pkg/classifier`, `pkg/scheduler`, `pkg/sanitizer`, `pkg/gitsync`, `pkg/skills`, `scheduler-mcp`) receives `*config.Config` in its constructor. Subpackages call `c := cfg.Current()` to obtain an immutable, nil-safe snapshot and read pure fields directly (`c.Model`, `c.Timezone`, `c.DatabaseURL`). Reference fields (`Channels`, `AdminUsers`, `McpServers`) are defensively deep-cloned on ingestion. No subpackage may ever call `os.Getenv`, `config.GetEnv`, `LoadDefaultConfig`, or package-level getters. Hot reload performs a lock-free atomic pointer swap `activeCfg.Update(freshData)`, so all components holding `*config.Config` observe live updates safely and immediately without manual cross-package setters. Tests instantiate `config.NewTestConfig(&config.ConfigData{ DatabaseURL: ":memory:", ... })` directly with zero environment variable manipulation.
+**Architecture:** Consolidate all environment variable and config-file parsing into `brain/pkg/config`. `config.Config` wraps an `atomic.Pointer[ConfigData]`, where `ConfigData` is a dumb data struct with **zero methods and zero field accessors**. Every package other than `config` (`pkg/db`, `pkg/memory`, `pkg/queue`, `pkg/classifier`, `pkg/scheduler`, `pkg/sanitizer`, `pkg/gitsync`, `pkg/skills`, `scheduler-mcp`) receives `*config.Config` in its constructor. Subpackages call `c := cfg.Current()` to obtain an immutable, nil-safe snapshot and read pure fields directly (`c.Model`, `c.Timezone`, `c.DatabaseURL`). Reference fields (`Channels`, `AdminUsers`, `McpServers`) are defensively deep-cloned on ingestion. No subpackage may ever call `os.Getenv`, `config.GetEnv`, `LoadDefaultConfig`, or package-level getters. Hot reload performs a lock-free atomic pointer swap `activeCfg.update(freshData)` internally via `config.Reload(activeCfg)`, so all components holding `*config.Config` observe live updates safely and immediately without manual cross-package setters. `cfg.update` is private to `package config`, ensuring subpackages cannot mutate config. Tests instantiate `config.New(&config.ConfigData{ DatabaseURL: ":memory:", ... })` directly with zero environment variable manipulation.
+
+- Pure constructor dependency injection across all packages.
+- Zero `os.Getenv` / `config.GetEnv` calls in subpackages.
+- Zero field accessors / getters on `ConfigData`.
+- Dynamic JIT evaluation (`cfg.Current()`) on every turn / retry.
+- Reference immutability: internal `cfg.update` and `config.New` deep-clone `Channels`, `AdminUsers`, `McpServers`, and `Repositories`.
+- Clean-room test execution (`env -i`) passing in-memory configurations.
+- Stateless helper functions for policy resolution (`ResolveChannelPolicy`, `IsAdmin`).
+- Mathematical nil-safety: `cfg.Current()` never returns `nil`.
+- Strict encapsulation: `cfg.update` is private to `package config`.
+- `config.Config` manages thread-safe atomic hot-reloads via `atomic.Pointer[ConfigData]`, private `update(fresh)`, and `Reload(activeCfg)`.
 
 **Tech Stack:** Go 1.24, modernc.org/sqlite, jackc/pgx/v5, gopkg.in/yaml.v3, POSIX sh test harness.
 
@@ -38,7 +49,7 @@
 
 **Interfaces:**
 - Consumes: Environment variables (`DATABASE_URL`, `POSTGRES_*`, `PORT`, `AGY_BIN`, `GEMINI_API_KEY`, `ANTIGRAVITY_API_KEY`, `SYSTEM_PROMPT`, `DISCORD_TOKEN`, `DISCORD_BOT_TOKEN`, `GITHUB_PAT`, `OLLAMA_URL`, `EMBEDDING_MODEL`, `OLLAMA_EMBEDDING_MODEL`, `EMBEDDING_QUERY_PREFIX`, `CLASSIFIER_MODEL`, `AMBIENT_CLASSIFIER_MODEL`).
-- Produces: `ConfigData` (pure dumb struct, 0 methods), `Config` wrapping `atomic.Pointer[ConfigData]`, `cfg.Current() *ConfigData` (nil-safe), `cfg.Update(fresh *ConfigData)` (deep-cloned), `config.NewTestConfig(data *ConfigData) *Config`, `DefaultConfigData() *ConfigData`, `ResolveChannelPolicy(channels, id, name) ChannelPolicy`, `IsAdmin(adminUsers, ids...) bool`, `Reload(activeCfg *Config) error`. Unexports `getEnv` and deletes `config.GetEnv`.
+- Produces: `ConfigData` (pure dumb struct, 0 methods), `Config` wrapping `atomic.Pointer[ConfigData]`, `cfg.Current() *ConfigData` (nil-safe), unexported `cfg.update(fresh *ConfigData)` (deep-cloned), `config.New(data *ConfigData) *Config`, `DefaultConfigData() *ConfigData`, `ResolveChannelPolicy(channels, id, name) ChannelPolicy`, `IsAdmin(adminUsers, ids...) bool`, `Reload(activeCfg *Config) error`. Unexports `getEnv` and deletes `config.GetEnv`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -57,21 +68,27 @@ func TestConfig_NilSafetyAndDeepCloning(t *testing.T) {
 		t.Fatalf("expected DefaultConfigData on uninitialized Config, got nil")
 	}
 
-	// 3. Deep cloning on NewTestConfig & Update prevents external map mutation race
+	// 3. Deep cloning on New & update prevents external map mutation race
 	origChannels := map[string]ChannelPolicy{
 		"default": {Mode: "threads"},
 	}
-	cfg := NewTestConfig(&ConfigData{
+	cfg := New(&ConfigData{
 		Model:    "test-model",
 		Channels: origChannels,
 	})
 
 	// Mutate caller map
-	origChannels["default"] = ChannelPolicy{Mode: "ignore"}
-
-	// Snapshot must retain original value
+	origChannels["default"] = ChannelPolicy{Mode: "main"}
 	if cfg.Current().Channels["default"].Mode != "threads" {
-		t.Errorf("expected deep-cloned snapshot to resist external map mutation, got %q", cfg.Current().Channels["default"].Mode)
+		t.Errorf("expected deep-cloned channels, got %q", cfg.Current().Channels["default"].Mode)
+	}
+
+	// Mutate via private update
+	cfg.update(&ConfigData{
+		Model: "updated-model",
+	})
+	if cfg.Current().Model != "updated-model" {
+		t.Errorf("expected updated-model, got %q", cfg.Current().Model)
 	}
 }
 
@@ -120,7 +137,7 @@ type Config struct {
 
 func DefaultConfigData() *ConfigData { ... }
 func cloneConfigData(src *ConfigData) *ConfigData { ... }
-func NewTestConfig(data *ConfigData) *Config { ... }
+func New(data *ConfigData) *Config { ... }
 func (c *Config) Current() *ConfigData { ... }
 func (c *Config) Update(fresh *ConfigData) { ... }
 ```
@@ -166,20 +183,20 @@ func TestInitDB_ConfigPointerInjection(t *testing.T) {
 	}
 
 	// 2. Empty connection string rejected
-	cfgEmpty := config.NewTestConfig(&config.ConfigData{})
+	cfgEmpty := config.New(&config.ConfigData{})
 	if _, err := InitDB(cfgEmpty); err == nil {
 		t.Errorf("expected error for empty connection string, got nil")
 	}
 
 	// 3. Unsupported scheme rejected
-	cfgInvalid := config.NewTestConfig(&config.ConfigData{DatabaseURL: "mysql://user:pass@localhost/db"})
+	cfgInvalid := config.New(&config.ConfigData{DatabaseURL: "mysql://user:pass@localhost/db"})
 	if _, err := InitDB(cfgInvalid); err == nil {
 		t.Errorf("expected error for unsupported scheme, got nil")
 	}
 
 	// 4. Valid SQLite temp db succeeds (supports both file paths and sqlite:// prefix)
 	tmpFile := filepath.Join(t.TempDir(), "test.db")
-	cfgValid := config.NewTestConfig(&config.ConfigData{DatabaseURL: "sqlite://" + tmpFile})
+	cfgValid := config.New(&config.ConfigData{DatabaseURL: "sqlite://" + tmpFile})
 	database, err := InitDB(cfgValid)
 	if err != nil {
 		t.Fatalf("expected valid sqlite initialization, got: %v", err)
@@ -237,11 +254,11 @@ func InitDB(cfg *config.Config) (*sql.DB, error) {
 ```
 2. Delete `GetDBPath()` function completely.
 3. In `brain/pkg/db/db_test.go`:
-   - Replace `setupTestDB` Postgres probing with pure `config.NewTestConfig(&config.ConfigData{DatabaseURL: filepath.Join(t.TempDir(), "test.db")})`.
+   - Replace `setupTestDB` Postgres probing with pure `config.New(&config.ConfigData{DatabaseURL: filepath.Join(t.TempDir(), "test.db")})`.
    - Remove `os.Getenv("TEST_DATABASE_URL")`.
    - Delete `TestGetDBPath_Precedence` and `TestDBPath`.
 4. In `brain/pkg/skills/schedule_test.go`:
-   - Update `db.InitDB(":memory:")` calls on lines 13 and 73 to pass `config.NewTestConfig(&config.ConfigData{DatabaseURL: ":memory:"})`.
+   - Update `db.InitDB(":memory:")` calls on lines 13 and 73 to pass `config.New(&config.ConfigData{DatabaseURL: ":memory:"})`.
 
 - [ ] **Step 4: Run tests to verify it passes**
 
@@ -272,7 +289,7 @@ git commit -m "refactor(db): require *config.Config in InitDB and delete GetDBPa
 In `brain/pkg/memory/memory_test.go`:
 ```go
 func TestNewClient_ConfigPointerInjection(t *testing.T) {
-	cfg := config.NewTestConfig(&config.ConfigData{
+	cfg := config.New(&config.ConfigData{
 		Ollama: config.OllamaConfig{
 			BaseURL:     "http://localhost:11434",
 			Model:       "nomic-embed-text",
@@ -314,7 +331,7 @@ func NewClient(cfg *config.Config) *Client {
 2. In `EmbedQuery` and `EmbedDocuments`, read settings from `c.cfg.Current().Ollama` JIT.
 3. Delete all calls to `os.Getenv` in `ollama.go` (lines 30, 64, 69, 71).
 4. In `memory_test.go`:
-   - Replace `setupTestDB` Postgres probing with pure `config.NewTestConfig(&config.ConfigData{DatabaseURL: filepath.Join(t.TempDir(), "memory_test.db")})`.
+   - Replace `setupTestDB` Postgres probing with pure `config.New(&config.ConfigData{DatabaseURL: filepath.Join(t.TempDir(), "memory_test.db")})`.
    - Remove `os.Getenv("TEST_DATABASE_URL")`.
 
 - [ ] **Step 4: Run tests to verify it passes**
@@ -347,7 +364,7 @@ In `brain/pkg/sanitizer/sanitizer_test.go`:
 ```go
 func TestSanitizer_RegisterConfigTokens(t *testing.T) {
 	ResetSensitiveTokens()
-	cfg := config.NewTestConfig(&config.ConfigData{
+	cfg := config.New(&config.ConfigData{
 		APIKey:       "gemini_secret_api_key_12345",
 		DiscordToken: "discord_token_secret_abcdef",
 		GitHubPAT:    "ghp_testpersonalaccesstoken123456",
@@ -451,7 +468,7 @@ git commit -m "refactor(sanitizer): deduplicate RegisterConfigTokens and remove 
 In `brain/pkg/gitsync/gitsync_test.go`:
 ```go
 func TestSyncRepo_ConfigPointerInjection(t *testing.T) {
-	cfg := config.NewTestConfig(&config.ConfigData{
+	cfg := config.New(&config.ConfigData{
 		GitHubPAT: "ghp_mock_token_for_test",
 	})
 	ctx := context.Background()
@@ -478,7 +495,7 @@ func SyncRepo(ctx context.Context, repoPath string, cfg *config.Config) (bool, e
 }
 ```
 2. Delete `os.Getenv("GITHUB_PAT")`.
-3. Update tests in `gitsync_test.go` to pass `config.NewTestConfig(&config.ConfigData{ GitHubPAT: ... })`.
+3. Update tests in `gitsync_test.go` to pass `config.New(&config.ConfigData{ GitHubPAT: ... })`.
 
 - [ ] **Step 4: Run tests to verify it passes**
 
@@ -508,8 +525,8 @@ git commit -m "refactor(gitsync): require *config.Config in SyncRepo and remove 
 
 In `brain/pkg/queue/queue_test.go`:
 ```go
-func TestWorkerPool_DynamicConfigObservation(t *testing.T) {
-	appCfg := config.NewTestConfig(&config.ConfigData{
+func TestWorkerPool_ConfigInjection(t *testing.T) {
+	appCfg := config.New(&config.ConfigData{
 		Model:         "initial-model",
 		SystemChannel: "initial-alerts",
 		Channels: map[string]config.ChannelPolicy{
@@ -519,16 +536,6 @@ func TestWorkerPool_DynamicConfigObservation(t *testing.T) {
 	pool := NewWorkerPool(appCfg, WorkerPoolConfig{})
 	if pool.appCfg.Current().Model != "initial-model" {
 		t.Errorf("expected initial model, got %q", pool.appCfg.Current().Model)
-	}
-
-	// Mutate config atomically
-	appCfg.Update(&config.ConfigData{
-		Model: "hot-reloaded-model",
-	})
-
-	// WorkerPool immediately observes updated model without manual setter
-	if pool.appCfg.Current().Model != "hot-reloaded-model" {
-		t.Errorf("expected hot-reloaded model, got %q", pool.appCfg.Current().Model)
 	}
 }
 ```
@@ -599,7 +606,7 @@ git commit -m "refactor(queue): inject *config.Config into WorkerPool and read c
 In `brain/pkg/classifier/classifier_test.go`:
 ```go
 func TestClassifier_ConfigPointerInjection(t *testing.T) {
-	cfg := config.NewTestConfig(&config.ConfigData{
+	cfg := config.New(&config.ConfigData{
 		ClassifierModel: "test-classifier-model",
 	})
 	cls := NewClassifier(cfg, nil)
@@ -612,7 +619,7 @@ func TestClassifier_ConfigPointerInjection(t *testing.T) {
 In `brain/pkg/scheduler/scheduler_test.go`:
 ```go
 func TestScheduler_ConfigPointerInjection(t *testing.T) {
-	cfg := config.NewTestConfig(&config.ConfigData{
+	cfg := config.New(&config.ConfigData{
 		Timezone: "America/Chicago",
 		Model:    "scheduler-model",
 	})
@@ -759,7 +766,7 @@ git commit -m "refactor(scheduler-mcp): pure *Config pointer constructor injecti
 In `brain/main_test.go`: verify `RunBrainApp` starts and stops cleanly with a pure test `*config.Config`:
 ```go
 func TestRunBrainApp_PureConfig(t *testing.T) {
-	cfg := config.NewTestConfig(&config.ConfigData{
+	cfg := config.New(&config.ConfigData{
 		DatabaseURL:  filepath.Join(t.TempDir(), "brain_test.db"),
 		Port:         "0",
 		Model:        "test-model",
