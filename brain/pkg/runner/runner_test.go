@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -987,4 +988,299 @@ func TestExtractQuotaResetDuration(t *testing.T) {
 		})
 	}
 }
+
+func TestActivityWriter_RawUUIDWithoutPrefix(t *testing.T) {
+	w := NewActivityWriter("")
+	// Invalid UUID in text
+	_, _ = w.Write([]byte("some random text with 12345678-abcd-ef01-2345-6789abcdef0z invalid uuid"))
+	if w.SessionID() != "" {
+		t.Errorf("expected empty session ID for invalid uuid, got %q", w.SessionID())
+	}
+
+	// Valid UUID in text without stream or session keyword
+	_, _ = w.Write([]byte("some random text with 11111111-2222-3333-4444-555555555555 embedded inside"))
+	if w.SessionID() != "11111111-2222-3333-4444-555555555555" {
+		t.Errorf("expected extracted raw UUID 11111111-2222-3333-4444-555555555555, got %q", w.SessionID())
+	}
+}
+
+func TestRunAgyWithWatchdog_OptionDefaultsAndEdgeCases(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. Test invalid / non-existent binary path triggers cmd.Start() error
+	_, _, exitCode, err := RunAgyWithWatchdog(ctx, "/nonexistent/path/to/agy-bin", "prompt", "", "", "", WatchdogOptions{})
+	if exitCode != -1 || err == nil {
+		t.Errorf("expected exitCode -1 and error for nonexistent binary, got %d, %v", exitCode, err)
+	}
+
+	// 2. Test MaxDuration formatting with seconds (< 1 minute)
+	mockAgy := filepath.Join(t.TempDir(), "mock-agy-sec")
+	script := "#!/bin/sh\necho '{\"status\":\"SUCCESS\",\"response\":\"ok\"}'\n"
+	if err := os.WriteFile(mockAgy, []byte(script), 0755); err != nil {
+		t.Fatalf("failed to write mock script: %v", err)
+	}
+
+	stdout, stderr, exitCode, err := RunAgyWithWatchdog(ctx, mockAgy, "test prompt", "sess-123", "secret-key", "gemini-pro", WatchdogOptions{
+		InactivityTimeout: 2 * time.Second,
+		MaxDuration:       30 * time.Second,
+		PollInterval:      10 * time.Millisecond,
+		TranscriptDirs: []string{
+			filepath.Join(t.TempDir(), "%s"),
+			filepath.Join(t.TempDir(), "{session}"),
+			filepath.Join(t.TempDir(), "plain"),
+		},
+	})
+	if err != nil || exitCode != 0 {
+		t.Fatalf("RunAgyWithWatchdog failed: %v, exitCode=%d, stderr=%s", err, exitCode, stderr)
+	}
+	if !strings.Contains(stdout, "SUCCESS") {
+		t.Errorf("expected SUCCESS in stdout, got %q", stdout)
+	}
+
+	// 3. Test modelProvider is set to \"gemini\" in stderr with non-zero exit code and apiKey == \"\"
+	mockAgyModelErr := filepath.Join(t.TempDir(), "mock-agy-model-err")
+	scriptErr := "#!/bin/sh\necho 'modelprovider is set to \"gemini\"' >&2\nexit 1\n"
+	if err := os.WriteFile(mockAgyModelErr, []byte(scriptErr), 0755); err != nil {
+		t.Fatalf("failed to write mock script: %v", err)
+	}
+
+	_, stderrErr, exitCodeErr, _ := RunAgyWithWatchdog(ctx, mockAgyModelErr, "prompt", "", "", "gemini-flash", WatchdogOptions{
+		InactivityTimeout: 1 * time.Second,
+		MaxDuration:       2 * time.Second,
+		PollInterval:      10 * time.Millisecond,
+	})
+	if exitCodeErr != 1 {
+		t.Errorf("expected exitCode 1, got %d", exitCodeErr)
+	}
+	if !strings.Contains(stderrErr, "modelprovider") {
+		t.Errorf("expected stderr to contain modelprovider error, got %q", stderrErr)
+	}
+
+	// 4. Test RunAgy wrapper function
+	stdoutWrap, stderrWrap, exitCodeWrap, errWrap := RunAgy(ctx, mockAgy, "wrap prompt", "", "", "", 1)
+	if errWrap != nil || exitCodeWrap != 0 {
+		t.Errorf("RunAgy wrapper failed: %v, code=%d, stderr=%s", errWrap, exitCodeWrap, stderrWrap)
+	}
+	if !strings.Contains(stdoutWrap, "SUCCESS") {
+		t.Errorf("expected SUCCESS from RunAgy, got %q", stdoutWrap)
+	}
+}
+
+func TestExtractSessionID_AdditionalBranches(t *testing.T) {
+	// Empty stderr
+	if id := ExtractSessionID("", time.Now()); id != "" {
+		t.Errorf("expected empty string for empty stderr, got %q", id)
+	}
+
+	// Invalid candidate in reUpdateStream
+	stderrInvalidStream := "Starting conversation update stream for not-a-uuid\n"
+	if id := ExtractSessionID(stderrInvalidStream, time.Now()); id != "" {
+		t.Errorf("expected empty string for invalid update stream uuid, got %q", id)
+	}
+
+	// Invalid candidate in reGeneralSession
+	stderrInvalidGen := "conversation_id: not-a-valid-uuid\n"
+	if id := ExtractSessionID(stderrInvalidGen, time.Now()); id != "" {
+		t.Errorf("expected empty string for invalid general session uuid, got %q", id)
+	}
+
+	// Raw UUID in text (fallback reUUIDInText)
+	stderrRaw := "Some unstructured error log mentioning 12345678-abcd-ef01-2345-6789abcdef01 in the trace"
+	if id := ExtractSessionID(stderrRaw, time.Now()); id != "12345678-abcd-ef01-2345-6789abcdef01" {
+		t.Errorf("expected raw UUID extracted, got %q", id)
+	}
+}
+
+func TestIsInactivityTimeout_AdditionalWatchdogBranches(t *testing.T) {
+	if !IsInactivityTimeout("[watchdog]", "inactivity detected") {
+		t.Errorf("expected true when [watchdog] in errDetail and inactivity in stderr")
+	}
+	if !isWatchdogInactivity("[WATCHDOG] inactivity happened") {
+		t.Errorf("expected true for [watchdog] inactivity")
+	}
+	if !isWatchdogMaxDuration("[WATCHDOG] max duration reached") {
+		t.Errorf("expected true for [watchdog] max duration")
+	}
+	if isWatchdogInactivity("all good") {
+		t.Errorf("expected false for regular text")
+	}
+	if isWatchdogMaxDuration("all good") {
+		t.Errorf("expected false for regular text")
+	}
+}
+
+func TestExtractWatchdogDetail_EdgeCases(t *testing.T) {
+	// Line > 200 chars truncation
+	longLine := "[watchdog] " + strings.Repeat("x", 250)
+	detail := extractWatchdogDetail(longLine, "fallback")
+	if len(detail) != 200 || !strings.HasSuffix(detail, "...") {
+		t.Errorf("expected 200-char truncated detail with ..., got len %d: %q", len(detail), detail)
+	}
+
+	// Fallback keyword when no lines match [watchdog] or keyword
+	fallback := extractWatchdogDetail("regular log line 1\nregular log line 2", "my-fallback-keyword")
+	if fallback != "my-fallback-keyword" {
+		t.Errorf("expected fallback keyword, got %q", fallback)
+	}
+}
+
+func TestClassifyError_AdditionalScenarios(t *testing.T) {
+	// 1. exitCode 0 with empty stdout and empty stderr -> process produced empty stdout
+	isFail, isTrans, isCorrupt, errDetail := ClassifyError(0, "", "")
+	if !isFail || !isTrans || isCorrupt || errDetail != "process produced empty stdout" {
+		t.Errorf("unexpected empty stdout/stderr result: fail=%v trans=%v corrupt=%v detail=%q", isFail, isTrans, isCorrupt, errDetail)
+	}
+
+	// 2. exitCode 0 with empty stdout and fatal stderr -> isTransient=false
+	isFail, isTrans, isCorrupt, errDetail = ClassifyError(0, "", "fatal error: runtime panic")
+	if !isFail || isTrans || isCorrupt {
+		t.Errorf("unexpected fatal stderr result: fail=%v trans=%v corrupt=%v detail=%q", isFail, isTrans, isCorrupt, errDetail)
+	}
+
+	// 3. exitCode 0 with unparseable stdout and context window keyword
+	isFail, isTrans, isCorrupt, errDetail = ClassifyError(0, "not json maximum context length exceeded", "")
+	if !isFail || isTrans || !isCorrupt || errDetail != "context window exceeded" {
+		t.Errorf("unexpected context window parse error: fail=%v trans=%v corrupt=%v detail=%q", isFail, isTrans, isCorrupt, errDetail)
+	}
+
+	// 4. exitCode 0 with unparseable stdout and corruption keyword
+	isFail, isTrans, isCorrupt, _ = ClassifyError(0, "not json corrupted session state", "failed to load conversation")
+	if !isFail || isTrans || !isCorrupt {
+		t.Errorf("unexpected corruption parse error: fail=%v trans=%v corrupt=%v", isFail, isTrans, isCorrupt)
+	}
+
+	// 5. exitCode 0 with unparseable stdout and transient keyword
+	isFail, isTrans, isCorrupt, _ = ClassifyError(0, "not json 503 service unavailable", "high demand")
+	if !isFail || !isTrans || isCorrupt {
+		t.Errorf("unexpected transient parse error: fail=%v trans=%v corrupt=%v", isFail, isTrans, isCorrupt)
+	}
+
+	// 6. exitCode 0 with unparseable stdout and fatal stderr
+	isFail, isTrans, isCorrupt, _ = ClassifyError(0, "not json output", "panic: nil pointer dereference")
+	if !isFail || isTrans || isCorrupt {
+		t.Errorf("unexpected fatal parse error: fail=%v trans=%v corrupt=%v", isFail, isTrans, isCorrupt)
+	}
+
+	// 7. exitCode 0 with unparseable stdout and no matching keyword
+	isFail, isTrans, isCorrupt, errDetail = ClassifyError(0, "not json output", "regular stderr")
+	if !isFail || isTrans || isCorrupt || !strings.Contains(errDetail, "invalid json response") {
+		t.Errorf("unexpected generic invalid json result: fail=%v trans=%v corrupt=%v detail=%q", isFail, isTrans, isCorrupt, errDetail)
+	}
+
+	// 8. exitCode 0 with resp.Status != "SUCCESS" and resp.Error == ""
+	stdoutStatusErr := `{"status":"FAILED"}`
+	isFail, _, _, errDetail = ClassifyError(0, stdoutStatusErr, "")
+	if !isFail || errDetail != "runner status: FAILED" {
+		t.Errorf("unexpected status failure: fail=%v detail=%q", isFail, errDetail)
+	}
+
+	// 9. exitCode 0 with resp.Status == "SUCCESS" and resp.Error != ""
+	stdoutRespErr := `{"status":"SUCCESS","error":"quota exceeded"}`
+	isFail, isTrans, _, errDetail = ClassifyError(0, stdoutRespErr, "")
+	if !isFail || !isTrans || errDetail != "quota exceeded" {
+		t.Errorf("unexpected resp.Error failure: fail=%v trans=%v detail=%q", isFail, isTrans, errDetail)
+	}
+
+	// 10. exitCode 0 with resp.Status == "SUCCESS" and fatal stderr
+	stdoutSuccess := `{"status":"SUCCESS","response":"all good"}`
+	isFail, isTrans, isCorrupt, errDetail = ClassifyError(0, stdoutSuccess, "fatal: unrecoverable crash")
+	if !isFail || isTrans || isCorrupt || !strings.Contains(errDetail, "fatal") {
+		t.Errorf("unexpected fatal stderr with success json: fail=%v trans=%v corrupt=%v detail=%q", isFail, isTrans, isCorrupt, errDetail)
+	}
+
+	// 11. exitCode != 0 with conversation not found (corruption)
+	isFail, _, isCorrupt, _ = ClassifyError(1, "", "conversation not found in registry")
+	if !isFail || !isCorrupt {
+		t.Errorf("expected session corruption for conversation not found, got corrupt=%v", isCorrupt)
+	}
+
+	// 12. exitCode != 0 with empty stderr and short stdout (<300 chars)
+	isFail, _, _, errDetail = ClassifyError(2, "short failure message", "")
+	if !isFail || errDetail != "short failure message" {
+		t.Errorf("expected short stdout as errDetail, got %q", errDetail)
+	}
+
+	// 13. exitCode != 0 with empty stderr and JSON error in stdout
+	isFail, _, _, errDetail = ClassifyError(2, `{"error":"inner json error"}`, "")
+	if !isFail || errDetail != "inner json error" {
+		t.Errorf("expected inner json error as errDetail, got %q", errDetail)
+	}
+
+	// 14. exitCode != 0 with empty stderr and long stdout (>300 chars)
+	longStdout := strings.Repeat("a", 400)
+	isFail, _, _, errDetail = ClassifyError(2, longStdout, "")
+	if !isFail || errDetail != "execution failed with exit code 2" {
+		t.Errorf("expected fallback exit code message, got %q", errDetail)
+	}
+}
+
+func TestExtractErrorDetail_FilterNoiseAndTruncation(t *testing.T) {
+	// Filter noise lines: Starting conversation update stream, DEBUG, INFO, blanks
+	stderrWithNoise := `
+Starting conversation update stream for session-123
+DEBUG: initializing subsystem
+INFO: connecting to gateway
+
+Actual error occurred here
+`
+	detail := extractErrorDetail(stderrWithNoise, 1)
+	if detail != "Actual error occurred here" {
+		t.Errorf("expected 'Actual error occurred here', got %q", detail)
+	}
+
+	// Long error line truncation (>200 chars)
+	longError := strings.Repeat("e", 250)
+	detailLong := extractErrorDetail(longError, 1)
+	if len(detailLong) != 200 || !strings.HasSuffix(detailLong, "...") {
+		t.Errorf("expected 200-char truncated detail, got len %d: %q", len(detailLong), detailLong)
+	}
+
+	// Only noise lines in stderr -> fallback
+	onlyNoise := "DEBUG: step 1\nINFO: step 2\nStarting conversation update stream for test\n"
+	detailNoise := extractErrorDetail(onlyNoise, 42)
+	if detailNoise != "execution failed with exit code 42" {
+		t.Errorf("expected fallback for only-noise stderr, got %q", detailNoise)
+	}
+}
+
+func TestExtractQuotaResetDuration_ClampingAndEdgeCases(t *testing.T) {
+	// Clamped < 10s -> 30s
+	durShort, exactShort := ExtractQuotaResetDuration("Resets in 5s.", "")
+	if !exactShort || durShort != 30*time.Second {
+		t.Errorf("expected 30s clamping for 5s, got %v, %v", durShort, exactShort)
+	}
+
+	// Clamped > 24h -> 24h
+	durLong, exactLong := ExtractQuotaResetDuration("Resets in 48h.", "")
+	if !exactLong || durLong != 24*time.Hour {
+		t.Errorf("expected 24h clamping for 48h, got %v, %v", durLong, exactLong)
+	}
+
+	// Unparseable duration -> 20m fallback
+	durBad, exactBad := ExtractQuotaResetDuration("Resets in abcdefg.", "")
+	if exactBad || durBad != 20*time.Minute {
+		t.Errorf("expected (20m, false) fallback for bad duration, got %v, %v", durBad, exactBad)
+	}
+}
+
+func TestConfigureSysProcAttr_CancelNilProcess(t *testing.T) {
+	cmd := exec.Command("true")
+	configureSysProcAttr(cmd)
+
+	if cmd.SysProcAttr == nil || !cmd.SysProcAttr.Setpgid {
+		t.Errorf("expected SysProcAttr.Setpgid=true")
+	}
+	if cmd.WaitDelay != 3*time.Second {
+		t.Errorf("expected WaitDelay=3s, got %v", cmd.WaitDelay)
+	}
+	if cmd.Cancel == nil {
+		t.Fatalf("expected non-nil cmd.Cancel")
+	}
+
+	// Calling Cancel before process starts (cmd.Process == nil) should return nil safely
+	if err := cmd.Cancel(); err != nil {
+		t.Errorf("expected nil error when canceling nil process, got %v", err)
+	}
+}
+
 
