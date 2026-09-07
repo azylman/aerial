@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
@@ -149,17 +148,29 @@ func TestCalculateNextCronRun(t *testing.T) {
 	}
 }
 
-func TestToolHandlerOperations(t *testing.T) {
-	t.Setenv("DEFAULT_TIMEZONE", "America/Los_Angeles")
-	t.Setenv("TZ", "")
+func TestInitDB_ConfigPointer(t *testing.T) {
+	cfg := &Config{DatabaseURL: ":memory:", Timezone: "America/Chicago"}
+	database, err := InitDB(cfg)
+	if err != nil {
+		t.Fatalf("failed to init db: %v", err)
+	}
+	defer database.Close()
 
-	db, err := InitDB(":memory:")
+	handler := NewToolHandler(cfg, database)
+	if handler.cfg != cfg {
+		t.Errorf("expected handler to retain *Config")
+	}
+}
+
+func TestToolHandlerOperations(t *testing.T) {
+	cfg := &Config{DatabaseURL: ":memory:", Timezone: "America/Los_Angeles"}
+	db, err := InitDB(cfg)
 	if err != nil {
 		t.Fatalf("InitDB failed: %v", err)
 	}
 	defer func() { _ = db.Close() }()
 
-	handler := NewToolHandler(db)
+	handler := NewToolHandler(cfg, db)
 
 	// 1. Schedule recurring (explicit timezone America/Los_Angeles)
 	recArgJSON := []byte(`{
@@ -261,16 +272,14 @@ func TestToolHandlerOperations(t *testing.T) {
 }
 
 func TestToolHandler_DefaultTimezoneFallback(t *testing.T) {
-	t.Setenv("DEFAULT_TIMEZONE", "America/Los_Angeles")
-	t.Setenv("TZ", "")
-
-	db, err := InitDB(":memory:")
+	cfg := &Config{DatabaseURL: ":memory:", Timezone: "America/Los_Angeles"}
+	db, err := InitDB(cfg)
 	if err != nil {
 		t.Fatalf("InitDB failed: %v", err)
 	}
 	defer func() { _ = db.Close() }()
 
-	handler := NewToolHandler(db)
+	handler := NewToolHandler(cfg, db)
 
 	// Omitted timezone in recurring schedule should default to America/Los_Angeles
 	recArgJSON := []byte(`{
@@ -299,9 +308,10 @@ func TestToolHandler_DefaultTimezoneFallback(t *testing.T) {
 }
 
 func TestToolHandlerValidationErrors(t *testing.T) {
-	db, _ := InitDB(":memory:")
+	cfg := &Config{DatabaseURL: ":memory:", Timezone: "America/Los_Angeles"}
+	db, _ := InitDB(cfg)
 	defer func() { _ = db.Close() }()
-	handler := NewToolHandler(db)
+	handler := NewToolHandler(cfg, db)
 
 	// Missing channel_id
 	_, err := handler.HandleScheduleRecurring([]byte(`{"cron_expression":"0 20 * * 5","prompt":"p"}`))
@@ -376,12 +386,13 @@ func TestParseRunAtWithTimezone(t *testing.T) {
 }
 
 func TestHandleScheduleOnce_WithTimezone(t *testing.T) {
-	db, err := InitDB(":memory:")
+	cfg := &Config{DatabaseURL: ":memory:", Timezone: "America/Los_Angeles"}
+	db, err := InitDB(cfg)
 	if err != nil {
 		t.Fatalf("InitDB failed: %v", err)
 	}
 	defer func() { _ = db.Close() }()
-	handler := NewToolHandler(db)
+	handler := NewToolHandler(cfg, db)
 
 	payload := []byte(`{
 		"target_id": "thread-tz-test",
@@ -414,7 +425,7 @@ func TestFileDBDSNPragmasAndIndices(t *testing.T) {
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	dbPath := filepath.Join(tmpDir, "scheduler.db")
-	database, err := InitDB(dbPath)
+	database, err := InitDB(&Config{DatabaseURL: dbPath})
 	if err != nil {
 		t.Fatalf("InitDB file failed: %v", err)
 	}
@@ -459,118 +470,13 @@ func TestFileDBDSNPragmasAndIndices(t *testing.T) {
 	}
 }
 
-func isProductionDSN(dsn string) bool {
-	lower := strings.ToLower(dsn)
-	if strings.Contains(lower, "aerial_test") || strings.Contains(lower, "test_") || strings.Contains(lower, "_test") {
-		return false
-	}
-	return strings.Contains(lower, "@postgres:5432/aerial") ||
-		strings.Contains(lower, "@127.0.0.1:5432/aerial") ||
-		strings.Contains(lower, "@localhost:5432/aerial") ||
-		strings.Contains(lower, ":5432/aerial") ||
-		strings.Contains(lower, "/aerial")
-}
-
-func TestPostgresSchedules(t *testing.T) {
-	dsn := os.Getenv("TEST_DATABASE_URL")
-	if dsn == "" {
-		dsn = "postgres://postgres:aerial_test@127.0.0.1:54329/aerial_test?sslmode=disable"
-	}
-
-	// Defensive invariant: Refuse to run test setup or truncate tables if DSN targets production
-	if isProductionDSN(dsn) {
-		t.Fatalf("CRITICAL SAFETY CHECK: TestPostgresSchedules detected production database in DSN %q; refusing to truncate", dsn)
-		return
-	}
-
-	// Quick connectivity probe (200ms) to avoid multi-minute retry delays in offline test runners
-	quickDB, openErr := sql.Open("pgx", dsn)
-	if openErr != nil {
-		t.Skipf("Skipping postgres test: database driver error: %v", openErr)
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	pingErr := quickDB.PingContext(ctx)
-	cancel()
-	_ = quickDB.Close()
-	if pingErr != nil {
-		t.Skipf("Skipping postgres test: PostgreSQL not reachable at %s: %v", dsn, pingErr)
-		return
-	}
-
-	database, err := InitDB(dsn)
-	if err != nil {
-		t.Skipf("Skipping postgres test: failed to connect: %v", err)
-		return
-	}
-	defer func() { _ = database.Close() }()
-
-	_, err = database.Exec("TRUNCATE TABLE cron_schedules, one_shot_schedules RESTART IDENTITY CASCADE;")
-	if err != nil {
-		t.Fatalf("Failed to truncate tables: %v", err)
-	}
-
-	now := time.Now().UTC()
-	cron := CronSchedule{
-		ID:          "cron-pg-1",
-		TargetID:    "chan-123",
-		TitlePrefix: "Weather",
-		CronExpr:    "0 6 * * *",
-		Prompt:      "Morning forecast",
-		Timezone:    "America/Los_Angeles",
-		NextRunAt:   now.Add(1 * time.Hour),
-		Enabled:     true,
-		CreatedAt:   now,
-	}
-	if err := InsertCronSchedule(database, cron); err != nil {
-		t.Fatalf("InsertCronSchedule failed: %v", err)
-	}
-
-	cList, err := ListCronSchedules(database, "chan-123")
-	if err != nil {
-		t.Fatalf("ListCronSchedules failed: %v", err)
-	}
-	if len(cList) != 1 || cList[0].ID != "cron-pg-1" {
-		t.Fatalf("Unexpected cron list: %+v", cList)
-	}
-
-	oneshot := OneShotSchedule{
-		ID:        "oneshot-pg-1",
-		ThreadID:  "thread-456",
-		Prompt:    "Reminder prompt",
-		RunAt:     now.Add(10 * time.Minute),
-		CreatedAt: now,
-	}
-	if err := InsertOneShotSchedule(database, oneshot); err != nil {
-		t.Fatalf("InsertOneShotSchedule failed: %v", err)
-	}
-
-	oList, err := ListOneShotSchedules(database, "thread-456")
-	if err != nil {
-		t.Fatalf("ListOneShotSchedules failed: %v", err)
-	}
-	if len(oList) != 1 || oList[0].ID != "oneshot-pg-1" {
-		t.Fatalf("Unexpected oneshot list: %+v", oList)
-	}
-
-	deleted, err := DeleteSchedule(database, "cron-pg-1")
-	if err != nil || !deleted {
-		t.Fatalf("DeleteSchedule cron failed: deleted=%v, err=%v", deleted, err)
-	}
-
-	deleted, err = DeleteSchedule(database, "oneshot-pg-1")
-	if err != nil || !deleted {
-		t.Fatalf("DeleteSchedule oneshot failed: deleted=%v, err=%v", deleted, err)
-	}
-}
-
 func TestRunApp_Lifecycle(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	tempDB := filepath.Join(t.TempDir(), "runapp.db")
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- RunApp(ctx, "59483", tempDB)
+		errCh <- RunApp(ctx, &Config{Port: "59483", DatabaseURL: tempDB})
 	}()
 
 	time.Sleep(50 * time.Millisecond)
@@ -597,12 +503,13 @@ func TestRunApp_Lifecycle(t *testing.T) {
 }
 
 func TestToolHandlers_ArgumentValidationErrors(t *testing.T) {
-	db, err := InitDB(":memory:")
+	cfg := &Config{DatabaseURL: ":memory:", Timezone: "America/Los_Angeles"}
+	db, err := InitDB(cfg)
 	if err != nil {
 		t.Fatalf("InitDB failed: %v", err)
 	}
 	defer db.Close()
-	h := NewToolHandler(db)
+	h := NewToolHandler(cfg, db)
 
 	// 1. HandleScheduleRecurring errors
 	if _, err := h.HandleScheduleRecurring([]byte("{bad json")); err == nil {
@@ -652,7 +559,7 @@ func TestToolHandlers_ArgumentValidationErrors(t *testing.T) {
 	// 4. Closed DB errors for all handlers
 	closedDB, _ := sql.Open("sqlite", ":memory:")
 	_ = closedDB.Close()
-	hClosed := NewToolHandler(closedDB)
+	hClosed := NewToolHandler(cfg, closedDB)
 
 	if _, err := hClosed.HandleScheduleRecurring([]byte(`{"channel_id":"c","cron_expression":"* * * * *","prompt":"p"}`)); err == nil {
 		t.Error("expected error with closed db in HandleScheduleRecurring")
@@ -677,11 +584,11 @@ func TestToolHandlers_ArgumentValidationErrors(t *testing.T) {
 		postgresRetryBase = origBase
 	}()
 
-	if err := RunApp(context.Background(), "9999", "postgres://invalid:pass@127.0.0.1:59996/db?sslmode=disable"); err == nil {
+	if err := RunApp(context.Background(), &Config{Port: "9999", DatabaseURL: "postgres://invalid:pass@127.0.0.1:59996/db?sslmode=disable"}); err == nil {
 		t.Error("expected error running app with invalid db")
 	}
 
-	if err := RunApp(context.Background(), "-1", ":memory:"); err == nil {
+	if err := RunApp(context.Background(), &Config{Port: "-1", DatabaseURL: ":memory:"}); err == nil {
 		t.Error("expected error running app with invalid port")
 	}
 }

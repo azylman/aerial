@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -11,15 +12,20 @@ import (
 )
 
 // RunApp bootstraps the scheduler MCP HTTP server with graceful shutdown.
-func RunApp(ctx context.Context, port, dbPath string) error {
+func RunApp(ctx context.Context, cfg *Config) error {
+	if cfg == nil {
+		var err error
+		cfg, err = LoadConfig()
+		if err != nil {
+			return fmt.Errorf("config error: %w", err)
+		}
+	}
+	port := cfg.Port
 	if port == "" {
 		port = "8080"
 	}
-	if dbPath == "" {
-		dbPath = GetDBPath()
-	}
 
-	database, err := InitDB(dbPath)
+	database, err := InitDB(cfg)
 	if err != nil {
 		return err
 	}
@@ -27,7 +33,7 @@ func RunApp(ctx context.Context, port, dbPath string) error {
 		_ = database.Close()
 	}()
 
-	toolHandler := NewToolHandler(database)
+	toolHandler := NewToolHandler(cfg, database)
 	server := NewServer(toolHandler)
 
 	httpServer := &http.Server{
@@ -37,7 +43,7 @@ func RunApp(ctx context.Context, port, dbPath string) error {
 
 	errChan := make(chan error, 1)
 	go func() {
-		log.Printf("Scheduler MCP Server listening on port %s (db: %s)", port, dbPath)
+		log.Printf("Scheduler MCP Server listening on port %s (db: %s)", port, cfg.DatabaseURL)
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			errChan <- err
 		}
@@ -63,13 +69,15 @@ func RunApp(ctx context.Context, port, dbPath string) error {
 }
 
 func main() {
-	port := os.Getenv("PORT")
-	dbPath := GetDBPath()
+	cfg, err := LoadConfig()
+	if err != nil {
+		log.Fatalf("Configuration error: %v", err)
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	if err := RunApp(ctx, port, dbPath); err != nil && err != http.ErrServerClosed {
+	if err := RunApp(ctx, cfg); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("Server failure: %v", err)
 	}
 }
