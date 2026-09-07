@@ -55,7 +55,7 @@ func (s *SQLStore) Close() error {
 }
 
 func (s *SQLStore) WithTx(ctx context.Context, fn func(txStore Store) error) error {
-	if s == nil || s.db == nil {
+	if s == nil || isDBTXNil(s.db) {
 		return fmt.Errorf("database is nil")
 	}
 
