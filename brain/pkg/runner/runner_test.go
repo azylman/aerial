@@ -296,7 +296,7 @@ func TestClassifyError(t *testing.T) {
 			stdout:               "not a valid json output",
 			stderr:               "",
 			wantFailure:          true,
-			wantTransient:        false,
+			wantTransient:        true,
 			wantCorrupt:          false,
 			errDetailMustContain: "invalid json response",
 		},
@@ -356,7 +356,7 @@ func TestClassifyError(t *testing.T) {
 			stdout:               "",
 			stderr:               "sqlite error: database is locked",
 			wantFailure:          true,
-			wantTransient:        false,
+			wantTransient:        true,
 			wantCorrupt:          false,
 			errDetailMustContain: "database is locked",
 		},
@@ -406,7 +406,7 @@ func TestClassifyError(t *testing.T) {
 			stdout:               `{"conversation_id":"abc","status":"ERROR","error":"server name github failed to load: calling \"initialize\": sending \"initialize\": failed to connect (session ID: ): session not found"}`,
 			stderr:               "",
 			wantFailure:          true,
-			wantTransient:        false,
+			wantTransient:        true,
 			wantCorrupt:          false,
 			errDetailMustContain: "session not found",
 		},
@@ -416,7 +416,7 @@ func TestClassifyError(t *testing.T) {
 			stdout:               "",
 			stderr:               "server name docker failed to load: calling \"initialize\": sending \"initialize\": failed to connect (session ID: ): session not found",
 			wantFailure:          true,
-			wantTransient:        false,
+			wantTransient:        true,
 			wantCorrupt:          false,
 			errDetailMustContain: "session not found",
 		},
@@ -449,6 +449,55 @@ func TestClassifyError(t *testing.T) {
 			wantTransient:        false,
 			wantCorrupt:          true,
 			errDetailMustContain: "stream was interrupted",
+		},
+		{
+			name:                 "Unknown Exit 1 Error Defaults To Transient",
+			exitCode:             1,
+			stdout:               "",
+			stderr:               "unexpected internal socket glitch occurred in daemon",
+			wantFailure:          true,
+			wantTransient:        true,
+			wantCorrupt:          false,
+			errDetailMustContain: "socket glitch",
+		},
+		{
+			name:                 "Known Non-Transient Invalid API Key (Exit 1)",
+			exitCode:             1,
+			stdout:               "",
+			stderr:               "Error: invalid api key provided",
+			wantFailure:          true,
+			wantTransient:        false,
+			wantCorrupt:          false,
+			errDetailMustContain: "invalid api key",
+		},
+		{
+			name:                 "Known Non-Transient Unknown Flag In Result JSON (Exit 0)",
+			exitCode:             0,
+			stdout:               `{"event":"result","status":"error","error":"unknown flag: --bogus"}`,
+			stderr:               "",
+			wantFailure:          true,
+			wantTransient:        false,
+			wantCorrupt:          false,
+			errDetailMustContain: "unknown flag",
+		},
+		{
+			name:                 "Known Non-Transient Executable Not Found (Exit 1)",
+			exitCode:             1,
+			stdout:               "",
+			stderr:               `exec: "agy": executable file not found in $PATH`,
+			wantFailure:          true,
+			wantTransient:        false,
+			wantCorrupt:          false,
+			errDetailMustContain: "executable file not found",
+		},
+		{
+			name:          "Clean Success With Tool Permission Denied In Response Body",
+			exitCode:      0,
+			stdout:        `{"status":"SUCCESS","response":"The script failed earlier with permission denied, but I fixed chmod."}`,
+			stderr:        "",
+			wantFailure:   false,
+			wantTransient: false,
+			wantCorrupt:   false,
 		},
 	}
 
@@ -1280,9 +1329,9 @@ func TestClassifyError_AdditionalScenarios(t *testing.T) {
 		t.Errorf("unexpected fatal parse error: fail=%v trans=%v corrupt=%v", isFail, isTrans, isCorrupt)
 	}
 
-	// 7. exitCode 0 with unparseable stdout and no matching keyword
+	// 7. exitCode 0 with unparseable stdout and no matching keyword defaults to transient
 	isFail, isTrans, isCorrupt, errDetail = ClassifyError(0, "not json output", "regular stderr")
-	if !isFail || isTrans || isCorrupt || !strings.Contains(errDetail, "invalid json response") {
+	if !isFail || !isTrans || isCorrupt || !strings.Contains(errDetail, "invalid json response") {
 		t.Errorf("unexpected generic invalid json result: fail=%v trans=%v corrupt=%v detail=%q", isFail, isTrans, isCorrupt, errDetail)
 	}
 
