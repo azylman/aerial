@@ -35,6 +35,8 @@ CREATE TABLE IF NOT EXISTS sessions (
 	turn_count INTEGER NOT NULL DEFAULT 0,
 	last_extracted_rowid BIGINT NOT NULL DEFAULT 0,
 	fact_extracted_at TIMESTAMPTZ,
+	summary TEXT NOT NULL DEFAULT '',
+	last_summarized_message_id TEXT NOT NULL DEFAULT '',
 	created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
 	updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -131,6 +133,8 @@ CREATE TABLE IF NOT EXISTS sessions (
 	turn_count INTEGER NOT NULL DEFAULT 0,
 	last_extracted_rowid INTEGER NOT NULL DEFAULT 0,
 	fact_extracted_at DATETIME,
+	summary TEXT NOT NULL DEFAULT '',
+	last_summarized_message_id TEXT NOT NULL DEFAULT '',
 	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 	updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -214,6 +218,9 @@ func initSchemaPostgres(ctx context.Context, database *sql.DB) error {
 		return fmt.Errorf("failed to run postgres migrations: %w", err)
 	}
 
+	_, _ = conn.ExecContext(ctx, "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS summary TEXT NOT NULL DEFAULT ''")
+	_, _ = conn.ExecContext(ctx, "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS last_summarized_message_id TEXT NOT NULL DEFAULT ''")
+
 	// Idempotent sequence resynchronization in case of manual data restoration
 	_, _ = conn.ExecContext(ctx, `
 		SELECT setval(pg_get_serial_sequence('facts', 'id'), COALESCE((SELECT MAX(id) FROM facts), 1), (SELECT COUNT(*) > 0 FROM facts));
@@ -235,5 +242,8 @@ func initSchemaSQLite(database *sql.DB) error {
 	if _, err := database.Exec(sqliteSchema); err != nil {
 		return fmt.Errorf("failed to run sqlite migrations: %w", err)
 	}
+
+	_, _ = database.Exec("ALTER TABLE sessions ADD COLUMN summary TEXT NOT NULL DEFAULT ''")
+	_, _ = database.Exec("ALTER TABLE sessions ADD COLUMN last_summarized_message_id TEXT NOT NULL DEFAULT ''")
 	return nil
 }

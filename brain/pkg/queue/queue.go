@@ -200,6 +200,7 @@ type WorkerPoolConfig struct {
 	ResolveChannelPolicy func(channelID, channelName string) config.ChannelPolicy
 	HistoryFetcher       HistoryFetcherFunc
 	SystemAlertFunc      func(s *discordgo.Session, channelNameOrID, title, alertBody string) error
+	LLMFunc              LLMFunc
 }
 
 type threadWorkerState struct {
@@ -1244,27 +1245,130 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 	}
 
 	basePrompt := CoalesceBurstPrompt(burst)
+	snap, _ := resolveChannelSnapshot(p.getDiscordSession(), threadID)
+	isThreadColdStart := snap.IsThread && snap.ParentID != "" && snap.ParentID != snap.ID && currentSessionID == ""
+
 	if currentSessionID == "" {
-		if p.cfg.HistoryFetcher != nil {
-			fetchCtx, fetchCancel := context.WithTimeout(p.ctx, 2500*time.Millisecond)
-			histMsgs, err := p.cfg.HistoryFetcher(fetchCtx, threadID, burst[0].ID, 10)
+		if isThreadColdStart {
+			var summary string
+			cachedSum, lastMsgID, _ := db.GetThreadSummary(p.cfg.DB, threadID)
+
+			fetchCtx, fetchCancel := context.WithTimeout(p.ctx, 3*time.Second)
+			var histMsgs []HistoryMessage
+			var fetchErr error
+			if p.cfg.HistoryFetcher != nil {
+				histMsgs, fetchErr = p.cfg.HistoryFetcher(fetchCtx, threadID, burst[0].ID, 100)
+			} else {
+				histMsgs, fetchErr = FetchRecentThreadHistory(fetchCtx, p.getDiscordSession(), p.cfg.DB, threadID, 100)
+			}
 			fetchCancel()
-			if err != nil {
-				log.Printf("[WorkerPool] Warning: History fetch failed for thread %s: %v", threadID, err)
-			} else if formattedHist := FormatChannelHistory(histMsgs); formattedHist != "" {
-				basePrompt = formattedHist + "\n\n" + basePrompt
-				log.Printf("[WorkerPool] Injected channel history into Turn 1 prompt for thread %s", threadID)
+
+			if fetchErr != nil {
+				log.Printf("[WorkerPool] Warning: Thread history fetch failed for thread %s: %v", threadID, fetchErr)
+			} else if len(histMsgs) > 0 {
+				var latestMsgID string
+				var maxTime time.Time
+				for _, m := range histMsgs {
+					if m.CreatedAt.After(maxTime) || latestMsgID == "" {
+						maxTime = m.CreatedAt
+						latestMsgID = m.ID
+					}
+				}
+
+				if cachedSum != "" && lastMsgID != "" && lastMsgID == latestMsgID {
+					summary = cachedSum
+					log.Printf("[WorkerPool] Using cached thread summary for thread %s (watermark msg: %s)", threadID, lastMsgID)
+				} else {
+					llmFn := p.cfg.LLMFunc
+					if llmFn == nil && p.cfg.Classifier != nil && p.cfg.Classifier.LLMFunc != nil {
+						llmFn = p.cfg.Classifier.LLMFunc
+					}
+					if llmFn == nil {
+						llmFn = classifier.NewAgyLLMFunc(p.cfg.AgyBin, p.cfg.APIKey, p.cfg.RunnerFunc)
+					}
+
+					flashModel := ""
+					if p.cfg.Classifier != nil && p.cfg.Classifier.Model != "" {
+						flashModel = p.cfg.Classifier.Model
+					}
+					if flashModel == "" && p.appCfg != nil && p.appCfg.Current() != nil {
+						flashModel = p.appCfg.Current().ClassifierModel
+					}
+					if flashModel == "" {
+						flashModel = p.cfg.Model
+					}
+
+					sumCtx, sumCancel := context.WithTimeout(p.ctx, 3*time.Second)
+					newSum, sumErr := SummarizeThreadHistory(sumCtx, llmFn, flashModel, threadID, histMsgs)
+					sumCancel()
+
+					if sumErr != nil {
+						log.Printf("[WorkerPool] Warning: Thread history summarization failed for thread %s: %v. Falling back to raw lookback.", threadID, sumErr)
+					} else if newSum != "" {
+						summary = newSum
+						if err := db.SaveThreadSummary(p.cfg.DB, threadID, summary, latestMsgID); err != nil {
+							log.Printf("[WorkerPool] Warning: Failed to save thread summary to DB for thread %s: %v", threadID, err)
+						}
+					}
+				}
+			}
+
+			if summary != "" {
+				basePrompt = summary + "\n\n" + basePrompt
+				log.Printf("[WorkerPool] Injected <THREAD_SUMMARY> into Turn 1 prompt for thread %s", threadID)
+
+				if p.cfg.HistoryFetcher != nil {
+					lookbackCtx, lookbackCancel := context.WithTimeout(p.ctx, 2500*time.Millisecond)
+					lookbackMsgs, err := p.cfg.HistoryFetcher(lookbackCtx, threadID, burst[0].ID, 10)
+					lookbackCancel()
+					if err == nil {
+						if formattedHist := FormatChannelHistory(lookbackMsgs); formattedHist != "" {
+							basePrompt = formattedHist + "\n\n" + basePrompt
+						}
+					}
+				}
+			} else {
+				if p.cfg.HistoryFetcher != nil {
+					fetchCtx, fetchCancel := context.WithTimeout(p.ctx, 2500*time.Millisecond)
+					lookbackMsgs, err := p.cfg.HistoryFetcher(fetchCtx, threadID, burst[0].ID, 10)
+					fetchCancel()
+					if err != nil {
+						log.Printf("[WorkerPool] Warning: History fetch failed for thread %s: %v", threadID, err)
+					} else if formattedHist := FormatChannelHistory(lookbackMsgs); formattedHist != "" {
+						basePrompt = formattedHist + "\n\n" + basePrompt
+						log.Printf("[WorkerPool] Injected channel history into Turn 1 prompt for thread %s", threadID)
+					}
+				}
+			}
+		} else {
+			if p.cfg.HistoryFetcher != nil {
+				fetchCtx, fetchCancel := context.WithTimeout(p.ctx, 2500*time.Millisecond)
+				histMsgs, err := p.cfg.HistoryFetcher(fetchCtx, threadID, burst[0].ID, 10)
+				fetchCancel()
+				if err != nil {
+					log.Printf("[WorkerPool] Warning: History fetch failed for thread %s: %v", threadID, err)
+				} else if formattedHist := FormatChannelHistory(histMsgs); formattedHist != "" {
+					basePrompt = formattedHist + "\n\n" + basePrompt
+					log.Printf("[WorkerPool] Injected channel history into Turn 1 prompt for thread %s", threadID)
+				}
 			}
 		}
 	}
 	queryText := memory.ExtractQueryText(basePrompt)
 	if p.cfg.MemoryRetrieverFunc != nil && p.cfg.DB != nil && strings.TrimSpace(queryText) != "" {
+		maxFacts := 10
+		if isThreadColdStart {
+			maxFacts = 5
+		}
 		retrievalCtx, retrievalCancel := context.WithTimeout(p.ctx, 2500*time.Millisecond)
-		facts, err := p.cfg.MemoryRetrieverFunc(retrievalCtx, p.cfg.DB, p.cfg.MemoryClient, queryText, 10)
+		facts, err := p.cfg.MemoryRetrieverFunc(retrievalCtx, p.cfg.DB, p.cfg.MemoryClient, queryText, maxFacts)
 		retrievalCancel()
 		if err != nil {
 			log.Printf("[WorkerPool] Warning: Semantic memory retrieval failed for thread %s: %v. Proceeding without injected facts.", threadID, err)
 		} else if len(facts) > 0 {
+			if isThreadColdStart && len(facts) > 5 {
+				facts = facts[:5]
+			}
 			memoryBlock := memory.FormatMemoryContext(facts)
 			if memoryBlock != "" {
 				basePrompt = memoryBlock + "\n\n" + basePrompt
