@@ -1457,14 +1457,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 			errDetail = err.Error()
 		}
 		
-		if isFailure && isTransient && currentSessionID == "" {
-			lowerErr := strings.ToLower(errDetail + " " + stderr + " " + stdout)
-			if strings.Contains(lowerErr, "429") || strings.Contains(lowerErr, "too many requests") || strings.Contains(lowerErr, "quota exceeded") {
-				isTransient = false
-				errDetail = "cold start 429 token limit exceeded (hard failure)"
-				log.Printf("[Queue] Overriding 429 to non-transient hard failure on cold start for thread %s", threadID)
-			}
-		}
+
 
 		lastErrDetail = errDetail
 		lastStderr = stderr

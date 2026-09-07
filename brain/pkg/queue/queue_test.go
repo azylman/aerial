@@ -6776,3 +6776,77 @@ func TestThreadColdStartSummarization_Integration(t *testing.T) {
 		}
 	})
 }
+
+func TestProcessBurst_ColdStart429_RetriesTransiently(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
+
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	var mu sync.Mutex
+	attempts := 0
+	doneCh := make(chan struct{}, 1)
+
+	validUUID := uuid.New().String()
+	pbPath := filepath.Join(tmpDir, ".gemini", "antigravity", "conversations", validUUID+".pb")
+	_ = os.MkdirAll(filepath.Dir(pbPath), 0755)
+	_ = os.WriteFile(pbPath, []byte("protobuf-data"), 0644)
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    3,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			mu.Lock()
+			attempts++
+			curr := attempts
+			mu.Unlock()
+
+			if curr < 3 {
+				// Cold start 429 returns transient error on attempts 1 and 2
+				return "", "HTTP 429: Resource has been exhausted (e.g. check quota)", 1, fmt.Errorf("exit status 1")
+			}
+			// Attempt 3 succeeds with valid JSON and conversation ID
+			return fmt.Sprintf(`{"conversation_id":%q,"response":"Success after 429 backoff"}`, validUUID), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			doneCh <- struct{}{}
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{ID: "msg-cold-429", ThreadID: "thread-cold-429", Content: "Hello 429"}
+	_ = db.InsertMessage(database, msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Timeout waiting for message to complete")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if attempts != 3 {
+		t.Errorf("Expected exactly 3 attempts (2 retries on 429 then success), got %d attempts", attempts)
+	}
+
+	dbMsg, _ := db.GetMessage(database, "msg-cold-429")
+	if dbMsg.Status != db.StatusCompleted {
+		t.Errorf("Expected message status to be COMPLETED, got %s", dbMsg.Status)
+	}
+}
+
