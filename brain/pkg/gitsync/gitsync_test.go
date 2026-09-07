@@ -9,12 +9,22 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/azylman/aerial/brain/pkg/config"
 )
+
+func TestSyncRepo_ConfigPointerInjection(t *testing.T) {
+	cfg := config.NewFromData(&config.ConfigData{
+		GitHubPAT: "ghp_mock_token_for_test",
+	})
+	ctx := context.Background()
+	_, _ = SyncRepo(ctx, t.TempDir(), cfg)
+}
 
 func runGitCmd(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(cmd.Environ(),
 		"GIT_AUTHOR_NAME=Test User",
 		"GIT_AUTHOR_EMAIL=test@example.com",
 		"GIT_COMMITTER_NAME=Test User",
@@ -65,7 +75,7 @@ func setupGitRepos(t *testing.T) (originDir, repoADir, repoBDir string) {
 
 func TestSyncRepo_NonGit(t *testing.T) {
 	nonExistent := filepath.Join(t.TempDir(), "does_not_exist")
-	hasChanges, err := SyncRepo(context.Background(), nonExistent)
+	hasChanges, err := SyncRepo(context.Background(), nonExistent, nil)
 	if err != nil {
 		t.Errorf("Expected nil error for non-existent repo, got: %v", err)
 	}
@@ -74,7 +84,7 @@ func TestSyncRepo_NonGit(t *testing.T) {
 	}
 
 	emptyDir := t.TempDir()
-	hasChanges, err = SyncRepo(context.Background(), emptyDir)
+	hasChanges, err = SyncRepo(context.Background(), emptyDir, nil)
 	if err != nil {
 		t.Errorf("Expected nil error for non-git dir, got: %v", err)
 	}
@@ -82,7 +92,7 @@ func TestSyncRepo_NonGit(t *testing.T) {
 		t.Errorf("Expected hasChanges=false for non-git dir")
 	}
 
-	hasChanges, err = SyncRepo(context.Background(), "")
+	hasChanges, err = SyncRepo(context.Background(), "", nil)
 	if err != nil || hasChanges {
 		t.Errorf("Expected false, nil for empty path")
 	}
@@ -97,7 +107,7 @@ func TestSyncRepo_IndexLock(t *testing.T) {
 		t.Fatalf("failed to write index.lock: %v", err)
 	}
 
-	hasChanges, err := SyncRepo(context.Background(), repoB)
+	hasChanges, err := SyncRepo(context.Background(), repoB, nil)
 	if err != nil {
 		t.Errorf("Expected nil error when index.lock exists, got: %v", err)
 	}
@@ -107,7 +117,7 @@ func TestSyncRepo_IndexLock(t *testing.T) {
 
 	// Remove index.lock and verify normal sync succeeds
 	_ = os.Remove(lockPath)
-	hasChanges, err = SyncRepo(context.Background(), repoB)
+	hasChanges, err = SyncRepo(context.Background(), repoB, nil)
 	if err != nil {
 		t.Errorf("Expected nil error after removing index.lock, got: %v", err)
 	}
@@ -120,7 +130,7 @@ func TestSyncRepo_FastForward(t *testing.T) {
 	_, repoA, repoB := setupGitRepos(t)
 
 	// 1. Initial state: repoB is already at HEAD
-	hasChanges, err := SyncRepo(context.Background(), repoB)
+	hasChanges, err := SyncRepo(context.Background(), repoB, nil)
 	if err != nil {
 		t.Fatalf("SyncRepo failed: %v", err)
 	}
@@ -138,7 +148,7 @@ func TestSyncRepo_FastForward(t *testing.T) {
 	runGitCmd(t, repoA, "push", "origin", "HEAD")
 
 	// 3. SyncRepo on repoB should fast-forward and return hasChanges=true
-	hasChanges, err = SyncRepo(context.Background(), repoB)
+	hasChanges, err = SyncRepo(context.Background(), repoB, nil)
 	if err != nil {
 		t.Fatalf("SyncRepo failed after remote push: %v", err)
 	}
@@ -153,7 +163,7 @@ func TestSyncRepo_FastForward(t *testing.T) {
 	}
 
 	// 4. Subsequent sync without changes should return hasChanges=false
-	hasChanges, err = SyncRepo(context.Background(), repoB)
+	hasChanges, err = SyncRepo(context.Background(), repoB, nil)
 	if err != nil {
 		t.Fatalf("Subsequent SyncRepo failed: %v", err)
 	}
@@ -183,7 +193,7 @@ func TestSyncRepo_NonFastForwardConflict(t *testing.T) {
 	runGitCmd(t, repoB, "commit", "-m", "changed on B")
 
 	// SyncRepo on repoB should fail --ff-only and return error gracefully without panic
-	hasChanges, err := SyncRepo(context.Background(), repoB)
+	hasChanges, err := SyncRepo(context.Background(), repoB, nil)
 	if err == nil {
 		t.Errorf("Expected error on non-fast-forward conflict, got nil")
 	}
@@ -200,6 +210,7 @@ func TestStartPeriodicSync_LoopAndCancel(t *testing.T) {
 		context.Background(),
 		50*time.Millisecond,
 		[]string{repoB},
+		nil,
 		func(repo string) {
 			updateCh <- repo
 		},
@@ -247,7 +258,7 @@ func TestStartPeriodicSync_LoopAndCancel(t *testing.T) {
 
 func TestStartPeriodicSync_ContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	stop := StartPeriodicSync(ctx, 10*time.Millisecond, []string{"/nonexistent"}, nil)
+	stop := StartPeriodicSync(ctx, 10*time.Millisecond, []string{"/nonexistent"}, nil, nil)
 
 	cancel()
 	time.Sleep(30 * time.Millisecond)
@@ -288,7 +299,7 @@ func TestSyncRepo_Worktree_IndexLock(t *testing.T) {
 	}
 
 	// SyncRepo on worktree should skip due to index.lock
-	hasChanges, err := SyncRepo(context.Background(), wtDir)
+	hasChanges, err := SyncRepo(context.Background(), wtDir, nil)
 	if err != nil {
 		t.Errorf("Expected nil error when worktree index.lock exists, got: %v", err)
 	}
@@ -298,7 +309,7 @@ func TestSyncRepo_Worktree_IndexLock(t *testing.T) {
 
 	// Remove index.lock and verify normal sync
 	_ = os.Remove(lockPath)
-	hasChanges, err = SyncRepo(context.Background(), wtDir)
+	hasChanges, err = SyncRepo(context.Background(), wtDir, nil)
 	if err != nil {
 		t.Errorf("Expected nil error after removing worktree index.lock, got: %v", err)
 	}
@@ -312,7 +323,7 @@ func TestSyncRepo_SafeDirectory_Idempotent(t *testing.T) {
 
 	// Run SyncRepo multiple times
 	for i := 0; i < 3; i++ {
-		_, err := SyncRepo(context.Background(), repoA)
+		_, err := SyncRepo(context.Background(), repoA, nil)
 		if err != nil {
 			t.Fatalf("SyncRepo iteration %d failed: %v", i, err)
 		}
@@ -497,7 +508,7 @@ func TestEnsureRepo_AdoptionNonEmptyDir(t *testing.T) {
 	}
 
 	// Test that subsequent SyncRepo succeeds
-	hasChanges, err := SyncRepo(context.Background(), adoptDir)
+	hasChanges, err := SyncRepo(context.Background(), adoptDir, nil)
 	if err != nil {
 		t.Errorf("SyncRepo failed on adopted directory: %v", err)
 	}
@@ -538,8 +549,9 @@ func TestEnsureRepo_ZeroPlaintextTokenInvariant_WithEmbeddedURL(t *testing.T) {
 func TestSyncRepo_AuthenticatedPull(t *testing.T) {
 	_, repoA, repoB := setupGitRepos(t)
 
-	// Set GITHUB_PAT env var
-	t.Setenv("GITHUB_PAT", "ghp_mockSyncPat123")
+	cfg := config.NewFromData(&config.ConfigData{
+		GitHubPAT: "ghp_mockSyncPat123",
+	})
 
 	// Commit on repoA and push
 	f := filepath.Join(repoA, "auth_sync.txt")
@@ -551,7 +563,7 @@ func TestSyncRepo_AuthenticatedPull(t *testing.T) {
 	runGitCmd(t, repoA, "push", "origin", "HEAD")
 
 	// SyncRepo on repoB should pull with auth args
-	hasChanges, err := SyncRepo(context.Background(), repoB)
+	hasChanges, err := SyncRepo(context.Background(), repoB, cfg)
 	if err != nil {
 		t.Fatalf("SyncRepo with GITHUB_PAT failed: %v", err)
 	}
@@ -667,7 +679,7 @@ func TestEnsureRepo_ErrorsAndAdoptionRemoteSet(t *testing.T) {
 func TestStartPeriodicSync_ZeroInterval(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	stop := StartPeriodicSync(ctx, 0, []string{"/tmp/test"}, nil)
+	stop := StartPeriodicSync(ctx, 0, []string{"/tmp/test"}, nil, nil)
 	stop()
 }
 
@@ -675,7 +687,7 @@ func TestSyncRepo_CorruptedGitDir(t *testing.T) {
 	tmpDir := t.TempDir()
 	// Create a fake .git directory without HEAD
 	_ = os.MkdirAll(filepath.Join(tmpDir, ".git"), 0755)
-	hasChanges, err := SyncRepo(context.Background(), tmpDir)
+	hasChanges, err := SyncRepo(context.Background(), tmpDir, nil)
 	if err == nil {
 		t.Error("expected error for corrupted git repo, got nil")
 	}

@@ -6,11 +6,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
 )
 
 func TestScheduleTools(t *testing.T) {
-	database, err := db.InitDB(":memory:")
+	database, err := db.New(config.NewFromData(&config.ConfigData{DatabaseURL: ":memory:"}))
 	if err != nil {
 		t.Fatalf("Failed to initialize database: %v", err)
 	}
@@ -70,7 +71,7 @@ func TestScheduleTools(t *testing.T) {
 	}
 
 	// Test closed DB error handling
-	closedDB, err := db.InitDB(filepath.Join(t.TempDir(), "closed.db"))
+	closedDB, err := db.New(config.NewFromData(&config.ConfigData{DatabaseURL: filepath.Join(t.TempDir(), "closed.db")}))
 	if err == nil {
 		_ = closedDB.Close()
 		closedTools := NewScheduleTools(closedDB)

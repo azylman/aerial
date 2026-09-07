@@ -12,11 +12,12 @@ import (
 )
 
 func setupTestServer(t *testing.T) (*Server, *httptest.Server) {
-	db, err := InitDB(":memory:")
+	cfg := &Config{DatabaseURL: ":memory:", Timezone: "America/Los_Angeles", Port: "8080"}
+	db, err := InitDB(cfg)
 	if err != nil {
 		t.Fatalf("InitDB failed: %v", err)
 	}
-	handler := NewToolHandler(db)
+	handler := NewToolHandler(cfg, db)
 	server := NewServer(handler)
 	ts := httptest.NewServer(server.Routes())
 	return server, ts
@@ -291,29 +292,43 @@ func TestMCP_AllHttpAndRPC_EdgeCases(t *testing.T) {
 }
 
 func TestMCP_DB_AllBranches(t *testing.T) {
-	// 1. GetDBPath env combinations
-	t.Setenv("TEST_DATABASE_URL", "postgres://test_url")
-	if GetDBPath() != "postgres://test_url" {
-		t.Errorf("expected TEST_DATABASE_URL to be returned")
-	}
-	t.Setenv("TEST_DATABASE_URL", "")
+	// 1. LoadConfig env combinations
+	t.Setenv("PORT", "9090")
+	t.Setenv("DEFAULT_TIMEZONE", "America/New_York")
 	t.Setenv("DATABASE_URL", "postgres://db_url")
-	if GetDBPath() != "postgres://db_url" {
-		t.Errorf("expected DATABASE_URL to be returned")
+	cfg1, err := LoadConfig()
+	if err != nil || cfg1.DatabaseURL != "postgres://db_url" || cfg1.Port != "9090" || cfg1.Timezone != "America/New_York" {
+		t.Errorf("expected DATABASE_URL to be loaded, got %+v, err=%v", cfg1, err)
 	}
+
 	t.Setenv("DATABASE_URL", "")
 	t.Setenv("DB_PATH", "/tmp/local.db")
-	if GetDBPath() != "/tmp/local.db" {
-		t.Errorf("expected DB_PATH to be returned")
+	cfg2, err := LoadConfig()
+	if err != nil || cfg2.DatabaseURL != "/tmp/local.db" {
+		t.Errorf("expected DB_PATH to be loaded, got %+v, err=%v", cfg2, err)
 	}
+
 	t.Setenv("DB_PATH", "")
 	t.Setenv("POSTGRES_USER", "u")
 	t.Setenv("POSTGRES_PASSWORD", "p")
 	t.Setenv("POSTGRES_HOST", "h")
 	t.Setenv("POSTGRES_PORT", "1234")
 	t.Setenv("POSTGRES_DB", "d")
-	if GetDBPath() != "postgres://u:p@h:1234/d?sslmode=disable" {
-		t.Errorf("expected generated postgres URL, got %s", GetDBPath())
+	cfg3, err := LoadConfig()
+	if err != nil || cfg3.DatabaseURL != "postgres://u:p@h:1234/d?sslmode=disable" {
+		t.Errorf("expected generated postgres URL, got %+v, err=%v", cfg3, err)
+	}
+
+	// Unset all -> LoadConfig must fail (no toxic postgres:5432 default!)
+	t.Setenv("DATABASE_URL", "")
+	t.Setenv("DB_PATH", "")
+	t.Setenv("POSTGRES_USER", "")
+	t.Setenv("POSTGRES_PASSWORD", "")
+	t.Setenv("POSTGRES_HOST", "")
+	t.Setenv("POSTGRES_PORT", "")
+	t.Setenv("POSTGRES_DB", "")
+	if _, err := LoadConfig(); err == nil {
+		t.Error("expected error from LoadConfig when all DB env vars are unset")
 	}
 
 	// 2. isPostgres
@@ -348,8 +363,19 @@ func TestMCP_DB_AllBranches(t *testing.T) {
 		t.Error("expected error deleting schedule with nil db")
 	}
 
-	// 5. DB with valid targetID filters
-	db, err := InitDB(":memory:")
+	// 5. Config validation for InitDB and NewDB
+	if _, err := InitDB(nil); err == nil {
+		t.Error("expected error for InitDB(nil)")
+	}
+	if _, err := InitDB(&Config{DatabaseURL: ""}); err == nil {
+		t.Error("expected error for empty DatabaseURL")
+	}
+	if _, err := InitDB(&Config{DatabaseURL: "mysql://user:pass@host/db"}); err == nil {
+		t.Error("expected error for unsupported scheme mysql://")
+	}
+
+	// 6. DB with valid targetID filters
+	db, err := InitDB(&Config{DatabaseURL: ":memory:"})
 	if err != nil {
 		t.Fatalf("InitDB failed: %v", err)
 	}
@@ -367,7 +393,7 @@ func TestMCP_DB_AllBranches(t *testing.T) {
 		t.Errorf("expected 1 one-shot schedule for t1, got %v, err: %v", oList, err)
 	}
 
-	// 6. Postgres connection failure
+	// 7. Postgres connection failure
 	origMax := postgresMaxAttempts
 	origBase := postgresRetryBase
 	postgresMaxAttempts = 2
@@ -377,25 +403,12 @@ func TestMCP_DB_AllBranches(t *testing.T) {
 		postgresRetryBase = origBase
 	}()
 
-	_, errPg := InitDB("postgres://invalid_user:invalid_pass@127.0.0.1:59997/db?sslmode=disable")
+	_, errPg := InitDB(&Config{DatabaseURL: "postgres://invalid_user:invalid_pass@127.0.0.1:59997/db?sslmode=disable"})
 	if errPg == nil {
 		t.Error("expected error connecting to invalid postgres")
 	}
 
-	// 8. GetDBPath with all env vars unset
-	t.Setenv("TEST_DATABASE_URL", "")
-	t.Setenv("DATABASE_URL", "")
-	t.Setenv("DB_PATH", "")
-	t.Setenv("POSTGRES_USER", "")
-	t.Setenv("POSTGRES_PASSWORD", "")
-	t.Setenv("POSTGRES_HOST", "")
-	t.Setenv("POSTGRES_PORT", "")
-	t.Setenv("POSTGRES_DB", "")
-	if GetDBPath() != "postgres://aerial:aerial_secure_pass@postgres:5432/aerial?sslmode=disable" {
-		t.Errorf("expected default postgres DSN, got %s", GetDBPath())
-	}
-
-	// 9. DeleteSchedule existing vs non-existing
+	// 8. DeleteSchedule existing vs non-existing
 	delFalse, err := DeleteSchedule(db, "non-existent-id")
 	if err != nil || delFalse {
 		t.Errorf("expected false, nil for non-existent schedule, got %v, %v", delFalse, err)
@@ -405,14 +418,14 @@ func TestMCP_DB_AllBranches(t *testing.T) {
 		t.Errorf("expected true, nil for existing schedule, got %v, %v", delTrue, err)
 	}
 
-	// 10. RunApp default port and dbPath
+	// 9. RunApp with explicit config
 	ctxShort, cancelShort := context.WithCancel(context.Background())
 	cancelShort()
-	_ = RunApp(ctxShort, "", ":memory:")
+	_ = RunApp(ctxShort, &Config{DatabaseURL: ":memory:"})
 
-	// 11. SQLite DSN with existing query parameters
+	// 10. SQLite DSN with existing query parameters
 	tempFile := filepath.Join(t.TempDir(), "test_params.db")
-	dbParams, errParams := InitDB(tempFile + "?_pragma=foreign_keys(1)")
+	dbParams, errParams := InitDB(&Config{DatabaseURL: tempFile + "?_pragma=foreign_keys(1)"})
 	if errParams != nil {
 		t.Fatalf("failed to init sqlite with query params: %v", errParams)
 	}

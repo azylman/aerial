@@ -30,6 +30,26 @@ import (
 	"github.com/google/uuid"
 )
 
+func TestWorkerPool_ConfigInjection(t *testing.T) {
+	appCfg := config.NewFromData(&config.ConfigData{
+		Model:         "initial-model",
+		SystemChannel: "initial-alerts",
+		Channels: map[string]config.ChannelPolicy{
+			"default": {Mode: "threads"},
+		},
+	})
+	pool := New(appCfg, WorkerPoolConfig{})
+	if pool == nil {
+		t.Fatalf("expected non-nil pool")
+	}
+	if pool.appCfg != appCfg {
+		t.Errorf("expected pool.appCfg to match injected pointer")
+	}
+	if pool.appCfg.Current().Model != "initial-model" {
+		t.Errorf("expected initial model, got %q", pool.appCfg.Current().Model)
+	}
+}
+
 func mockJSONResponse(convID, responseText string) string {
 	if convID == "" {
 		convID = "sess-" + uuid.New().String()

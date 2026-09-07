@@ -4,11 +4,14 @@ package sanitizer
 
 import (
 	"fmt"
-	"os"
+	"net/url"
 	"regexp"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
+
+	"github.com/azylman/aerial/brain/pkg/config"
 )
 
 var (
@@ -40,45 +43,91 @@ var (
 )
 
 var (
-	envSecretsCache []string
-	envOnce         sync.Once
-	envMu           sync.RWMutex
-
-	// Known explicit sensitive environment variable keys
-	explicitSensitiveEnvKeys = []string{
-		"GEMINI_API_KEY",
-		"ANTIGRAVITY_API_KEY",
-		"DISCORD_BOT_TOKEN",
-		"DISCORD_TOKEN",
-		"GITHUB_PAT",
-		"GITHUB_PERSONAL_ACCESS_TOKEN",
-		"HA_TOKEN",
-		"OPENAI_API_KEY",
-		"ANTHROPIC_API_KEY",
-		"DATABASE_URL",
-		"POSTGRES_PASSWORD",
-		"GRAFANA_ADMIN_PASSWORD",
-	}
-
-	// Common non-secret words to prevent false-positive over-redaction in dynamic scanning
-	ignoredDynamicEnvValues = map[string]bool{
-		"production":  true,
-		"development": true,
-		"staging":     true,
-		"default":     true,
-		"enabled":     true,
-		"disabled":    true,
-		"true":        true,
-		"false":       true,
-		"latest":      true,
-		"bearer":      true,
-		"oauth2":      true,
-		"postgres":    true,
-		"aerial":      true,
-		"localhost":   true,
-		"127.0.0.1":   true,
-	}
+	sensitiveTokensMu  sync.Mutex
+	sensitiveTokensPtr atomic.Pointer[[]string]
 )
+
+func init() {
+	empty := make([]string, 0)
+	sensitiveTokensPtr.Store(&empty)
+}
+
+func getSensitiveTokens() []string {
+	p := sensitiveTokensPtr.Load()
+	if p == nil {
+		return nil
+	}
+	return *p
+}
+
+// RegisterSensitiveTokens safely registers secret strings into the global redaction pool.
+// Uses a copy-on-write atomic swap so reads remain completely lock-free.
+func RegisterSensitiveTokens(tokens ...string) {
+	sensitiveTokensMu.Lock()
+	defer sensitiveTokensMu.Unlock()
+
+	current := getSensitiveTokens()
+	seen := make(map[string]bool, len(current)+len(tokens))
+	for _, tok := range current {
+		seen[tok] = true
+	}
+
+	updated := make([]string, len(current), len(current)+len(tokens))
+	copy(updated, current)
+
+	for _, tok := range tokens {
+		trimmed := strings.TrimSpace(tok)
+		if len(trimmed) >= 4 && !seen[trimmed] {
+			seen[trimmed] = true
+			updated = append(updated, trimmed)
+		}
+	}
+
+	sort.Slice(updated, func(i, j int) bool {
+		return len(updated[i]) > len(updated[j])
+	})
+
+	sensitiveTokensPtr.Store(&updated)
+}
+
+// RegisterConfigTokens extracts secrets from the injected *config.Config and registers them.
+func RegisterConfigTokens(cfg *config.Config) {
+	if cfg == nil {
+		return
+	}
+	cur := cfg.Current()
+	if cur == nil {
+		return
+	}
+
+	var tokens []string
+	if cur.APIKey != "" {
+		tokens = append(tokens, cur.APIKey)
+	}
+	if cur.DiscordToken != "" {
+		tokens = append(tokens, cur.DiscordToken)
+	}
+	if cur.GitHubPAT != "" {
+		tokens = append(tokens, cur.GitHubPAT)
+	}
+	if cur.DatabaseURL != "" {
+		if u, err := url.Parse(cur.DatabaseURL); err == nil && u.User != nil {
+			if pass, ok := u.User.Password(); ok && pass != "" {
+				tokens = append(tokens, pass)
+			}
+		}
+	}
+
+	RegisterSensitiveTokens(tokens...)
+}
+
+// ResetSensitiveTokens clears all registered sensitive tokens (primarily for test isolation).
+func ResetSensitiveTokens() {
+	sensitiveTokensMu.Lock()
+	defer sensitiveTokensMu.Unlock()
+	empty := make([]string, 0)
+	sensitiveTokensPtr.Store(&empty)
+}
 
 // isSensitiveEnvKey strictly verifies whether an environment variable key represents a secret,
 // preventing accidental collisions with system variables like PATH, COMPAT, PATTERN, etc.
@@ -119,70 +168,6 @@ func isSensitiveEnvKey(key string) bool {
 	return false
 }
 
-// buildEnvSecrets extracts and sorts sensitive values from the current environment.
-func buildEnvSecrets() []string {
-	seen := make(map[string]bool)
-	var secrets []string
-
-	// 1. Collect explicit known sensitive keys
-	for _, k := range explicitSensitiveEnvKeys {
-		val := strings.TrimSpace(os.Getenv(k))
-		if len(val) >= 4 && !seen[val] {
-			// Don't redact boolean true/false or generic mode names even if explicitly set
-			lower := strings.ToLower(val)
-			if lower != "true" && lower != "false" && lower != "enabled" && lower != "disabled" {
-				seen[val] = true
-				secrets = append(secrets, val)
-			}
-		}
-	}
-
-	// 2. Scan dynamic environment variables with strict key delimiter and length checks
-	for _, env := range os.Environ() {
-		parts := strings.SplitN(env, "=", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		key := parts[0]
-		val := strings.TrimSpace(parts[1])
-
-		if len(val) < 8 || ignoredDynamicEnvValues[strings.ToLower(val)] || seen[val] {
-			continue
-		}
-
-		if isSensitiveEnvKey(key) {
-			seen[val] = true
-			secrets = append(secrets, val)
-		}
-	}
-
-	// Sort secrets in descending order of length to replace longer tokens before shorter substrings
-	sort.Slice(secrets, func(i, j int) bool {
-		return len(secrets[i]) > len(secrets[j])
-	})
-
-	return secrets
-}
-
-// getCachedEnvSecrets returns the thread-safe cached slice of active environment secrets.
-func getCachedEnvSecrets() []string {
-	envOnce.Do(func() {
-		envSecretsCache = buildEnvSecrets()
-	})
-
-	envMu.RLock()
-	defer envMu.RUnlock()
-	return envSecretsCache
-}
-
-// RefreshEnvironmentSecrets recomputes the cached list of environment secrets.
-// Useful when environment variables are dynamically updated during runtime or tests.
-func RefreshEnvironmentSecrets() {
-	envMu.Lock()
-	defer envMu.Unlock()
-	envSecretsCache = buildEnvSecrets()
-}
-
 // sanitizeInternal executes the unified sanitization pipeline with a designated replacement placeholder.
 func sanitizeInternal(input string, placeholder string) string {
 	if input == "" {
@@ -191,9 +176,9 @@ func sanitizeInternal(input string, placeholder string) string {
 
 	out := input
 
-	// 1. Redact cached environment secrets
-	envSecrets := getCachedEnvSecrets()
-	for _, secret := range envSecrets {
+	// 1. Redact registered sensitive tokens
+	sensitiveTokens := getSensitiveTokens()
+	for _, secret := range sensitiveTokens {
 		if strings.Contains(out, secret) {
 			out = strings.ReplaceAll(out, secret, placeholder)
 		}

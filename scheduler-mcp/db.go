@@ -34,37 +34,19 @@ type OneShotSchedule struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-func GetDBPath() string {
-	if testURL := os.Getenv("TEST_DATABASE_URL"); testURL != "" {
-		return testURL
+const migrationLockID = 849201948201
+
+// NewDB initializes the database connection using the provided configuration.
+func NewDB(cfg *Config) (*sql.DB, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("db: config cannot be nil")
 	}
-	if envURL := os.Getenv("DATABASE_URL"); envURL != "" {
-		return envURL
-	}
-	if envPath := os.Getenv("DB_PATH"); envPath != "" {
-		return envPath
-	}
-	dbUser := os.Getenv("POSTGRES_USER")
-	if dbUser == "" {
-		dbUser = "aerial"
-	}
-	dbPass := os.Getenv("POSTGRES_PASSWORD")
-	if dbPass == "" {
-		dbPass = "aerial_secure_pass"
-	}
-	dbHost := os.Getenv("POSTGRES_HOST")
-	if dbHost == "" {
-		dbHost = "postgres"
-	}
-	dbPort := os.Getenv("POSTGRES_PORT")
-	if dbPort == "" {
-		dbPort = "5432"
-	}
-	dbName := os.Getenv("POSTGRES_DB")
-	if dbName == "" {
-		dbName = "aerial"
-	}
-	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", dbUser, dbPass, dbHost, dbPort, dbName)
+	return initDB(cfg.DatabaseURL)
+}
+
+// InitDB is a compatibility wrapper for NewDB.
+func InitDB(cfg *Config) (*sql.DB, error) {
+	return NewDB(cfg)
 }
 
 func isPostgres(database *sql.DB) bool {
@@ -97,8 +79,18 @@ var (
 	postgresRetryBase   = 500 * time.Millisecond
 )
 
-func InitDB(dsn string) (*sql.DB, error) {
-	isPg := strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://")
+func initDB(dsn string) (*sql.DB, error) {
+	trimmed := strings.TrimSpace(dsn)
+	if trimmed == "" {
+		return nil, fmt.Errorf("db: connection string cannot be empty")
+	}
+
+	trimmed = strings.TrimPrefix(trimmed, "sqlite://")
+
+	isPg := strings.HasPrefix(trimmed, "postgres://") || strings.HasPrefix(trimmed, "postgresql://")
+	if !isPg && strings.Contains(trimmed, "://") && !strings.HasPrefix(trimmed, "file://") {
+		return nil, fmt.Errorf("db: unsupported database scheme in %q", trimmed)
+	}
 
 	if isPg {
 		var database *sql.DB
@@ -107,7 +99,7 @@ func InitDB(dsn string) (*sql.DB, error) {
 		maxAttempts := postgresMaxAttempts
 		backoff := postgresRetryBase
 		for attempt := 1; attempt <= maxAttempts; attempt++ {
-			database, err = sql.Open("pgx", dsn)
+			database, err = sql.Open("pgx", trimmed)
 			if err == nil {
 				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 				err = database.PingContext(ctx)
@@ -121,7 +113,7 @@ func InitDB(dsn string) (*sql.DB, error) {
 			time.Sleep(backoff)
 			backoff = time.Duration(float64(backoff) * 1.5)
 			if backoff > 5*time.Second {
-				backoff = 5*time.Second
+				backoff = 5 * time.Second
 			}
 		}
 		if err != nil {
@@ -133,6 +125,24 @@ func InitDB(dsn string) (*sql.DB, error) {
 		database.SetConnMaxLifetime(30 * time.Minute)
 		database.SetConnMaxIdleTime(5 * time.Minute)
 
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		conn, err := database.Conn(ctx)
+		if err != nil {
+			_ = database.Close()
+			return nil, fmt.Errorf("failed to acquire connection for migrations: %w", err)
+		}
+		defer func() { _ = conn.Close() }()
+
+		if _, err := conn.ExecContext(ctx, "SELECT pg_advisory_lock($1);", migrationLockID); err != nil {
+			_ = database.Close()
+			return nil, fmt.Errorf("failed to acquire migration advisory lock: %w", err)
+		}
+		defer func() {
+			_, _ = conn.ExecContext(context.Background(), "SELECT pg_advisory_unlock($1);", migrationLockID)
+		}()
+
 		schema := `
 		CREATE TABLE IF NOT EXISTS cron_schedules (
 			id TEXT PRIMARY KEY,
@@ -140,10 +150,10 @@ func InitDB(dsn string) (*sql.DB, error) {
 			title_prefix TEXT NOT NULL DEFAULT '',
 			cron_expr TEXT NOT NULL,
 			prompt TEXT NOT NULL,
-			timezone TEXT NOT NULL DEFAULT 'UTC',
+			timezone TEXT NOT NULL DEFAULT 'America/Los_Angeles',
 			next_run_at TIMESTAMPTZ NOT NULL,
 			enabled BOOLEAN NOT NULL DEFAULT TRUE,
-			created_at TIMESTAMPTZ NOT NULL
+			created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 		);
 		CREATE INDEX IF NOT EXISTS idx_cron_schedules_next_run_at ON cron_schedules(enabled, next_run_at);
 
@@ -152,29 +162,29 @@ func InitDB(dsn string) (*sql.DB, error) {
 			thread_id TEXT NOT NULL,
 			prompt TEXT NOT NULL,
 			run_at TIMESTAMPTZ NOT NULL,
-			created_at TIMESTAMPTZ NOT NULL
+			created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 		);
 		CREATE INDEX IF NOT EXISTS idx_one_shot_schedules_run_at ON one_shot_schedules(run_at);
 		`
-		if _, err := database.Exec(schema); err != nil {
+		if _, err := conn.ExecContext(ctx, schema); err != nil {
 			_ = database.Close()
 			return nil, fmt.Errorf("failed to execute postgres schema: %w", err)
 		}
 
-		log.Printf("[Scheduler DB] PostgreSQL initialized successfully at %s", dsn)
+		log.Printf("[Scheduler DB] PostgreSQL initialized successfully at %s", trimmed)
 		return database, nil
 	}
 
 	// SQLite fallback
-	if dsn != ":memory:" {
-		if err := os.MkdirAll(filepath.Dir(dsn), 0755); err != nil {
+	if trimmed != ":memory:" {
+		if err := os.MkdirAll(filepath.Dir(trimmed), 0755); err != nil {
 			return nil, fmt.Errorf("failed to create db directory: %w", err)
 		}
 	}
 
-	sqliteDSN := dsn
-	if dsn != ":memory:" && !strings.Contains(dsn, "_pragma") {
-		if strings.Contains(dsn, "?") {
+	sqliteDSN := trimmed
+	if trimmed != ":memory:" && !strings.Contains(trimmed, "_pragma") {
+		if strings.Contains(trimmed, "?") {
 			sqliteDSN += "&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"
 		} else {
 			sqliteDSN += "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"
@@ -184,6 +194,10 @@ func InitDB(dsn string) (*sql.DB, error) {
 	database, err := sql.Open("sqlite", sqliteDSN)
 	if err != nil {
 		return nil, err
+	}
+
+	if trimmed == ":memory:" || strings.Contains(trimmed, "mode=memory") {
+		database.SetMaxOpenConns(1)
 	}
 
 	pragmas := `
@@ -202,10 +216,10 @@ func InitDB(dsn string) (*sql.DB, error) {
 		title_prefix TEXT NOT NULL DEFAULT '',
 		cron_expr TEXT NOT NULL,
 		prompt TEXT NOT NULL,
-		timezone TEXT NOT NULL DEFAULT 'UTC',
+		timezone TEXT NOT NULL DEFAULT 'America/Los_Angeles',
 		next_run_at TIMESTAMP NOT NULL,
 		enabled BOOLEAN NOT NULL DEFAULT TRUE,
-		created_at TIMESTAMP NOT NULL
+		created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 	);
 	CREATE INDEX IF NOT EXISTS idx_cron_schedules_next_run_at ON cron_schedules(enabled, next_run_at);
 
@@ -214,7 +228,7 @@ func InitDB(dsn string) (*sql.DB, error) {
 		thread_id TEXT NOT NULL,
 		prompt TEXT NOT NULL,
 		run_at TIMESTAMP NOT NULL,
-		created_at TIMESTAMP NOT NULL
+		created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 	);
 	CREATE INDEX IF NOT EXISTS idx_one_shot_schedules_run_at ON one_shot_schedules(run_at);
 	`
@@ -225,9 +239,9 @@ func InitDB(dsn string) (*sql.DB, error) {
 
 	// Safe column migrations on existing tables
 	_, _ = database.Exec(`ALTER TABLE cron_schedules ADD COLUMN title_prefix TEXT NOT NULL DEFAULT '';`)
-	_, _ = database.Exec(`ALTER TABLE cron_schedules ADD COLUMN timezone TEXT NOT NULL DEFAULT 'UTC';`)
+	_, _ = database.Exec(`ALTER TABLE cron_schedules ADD COLUMN timezone TEXT NOT NULL DEFAULT 'America/Los_Angeles';`)
 
-	log.Printf("[Scheduler DB] SQLite database initialized at %s", dsn)
+	log.Printf("[Scheduler DB] SQLite database initialized at %s", trimmed)
 	return database, nil
 }
 
@@ -239,7 +253,7 @@ func InsertCronSchedule(database *sql.DB, c CronSchedule) error {
 		c.CreatedAt = time.Now().UTC()
 	}
 	if c.Timezone == "" {
-		c.Timezone = GetDefaultTimezone()
+		c.Timezone = "America/Los_Angeles"
 	}
 	query := `
 	INSERT INTO cron_schedules (id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at)

@@ -1221,40 +1221,41 @@ func TestProcessDueSchedules_DueCronWithInvalidCronExpr(t *testing.T) {
 
 func TestExtractFactsLLM_SuccessAndModelOverride(t *testing.T) {
 	tmpDir := t.TempDir()
-	yamlPath := filepath.Join(tmpDir, "config.yaml")
-	cfgContent := `
-model: "gemini-1.5-pro-custom"
-`
-	_ = os.WriteFile(yamlPath, []byte(cfgContent), 0644)
-	_, _ = config.LoadConfigFromPaths(yamlPath)
-
 	mockAgy := filepath.Join(tmpDir, "mock_agy.sh")
 	_ = os.WriteFile(mockAgy, []byte("#!/bin/sh\necho '{\"status\":\"SUCCESS\",\"response\":\"extracted facts json\"}'\n"), 0755)
-	t.Setenv("AGY_BIN", mockAgy)
-	t.Setenv("GEMINI_API_KEY", "mock_key")
 
-	res, err := ExtractFactsLLM(context.Background(), "test prompt")
+	cfg := config.NewFromData(&config.ConfigData{
+		AgyBin: mockAgy,
+		APIKey: "mock_key",
+		Model:  "gemini-1.5-pro-custom",
+	})
+	sched := New(cfg, nil, nil, nil)
+
+	res, err := sched.ExtractFactsLLM(context.Background(), "test prompt")
 	if err != nil {
 		t.Fatalf("ExtractFactsLLM failed: %v", err)
 	}
 	if res != "extracted facts json" {
 		t.Errorf("expected 'extracted facts json', got %q", res)
 	}
+
+	// Also verify package compatibility wrapper
+	_, _ = ExtractFactsLLM(context.Background(), "test prompt")
 }
 
 func TestExtractFactsLLM_DefaultModel(t *testing.T) {
 	tmpDir := t.TempDir()
-	yamlPath := filepath.Join(tmpDir, "config.yaml")
-	_ = os.WriteFile(yamlPath, []byte("channels:\n  default:\n    mode: 'threads'\n"), 0644)
-	_, _ = config.LoadConfigFromPaths(yamlPath)
-
 	mockAgy := filepath.Join(tmpDir, "mock_agy.sh")
 	_ = os.WriteFile(mockAgy, []byte("#!/bin/sh\necho '{\"status\":\"SUCCESS\",\"response\":\"default model result\"}'\n"), 0755)
-	t.Setenv("AGY_BIN", mockAgy)
-	t.Setenv("AGY_MODEL", "gemini-2.5-flash")
-	t.Setenv("GEMINI_API_KEY", "mock_key")
 
-	res, err := ExtractFactsLLM(context.Background(), "test prompt")
+	cfg := config.NewFromData(&config.ConfigData{
+		AgyBin: mockAgy,
+		APIKey: "mock_key",
+		Model:  "gemini-2.5-flash",
+	})
+	sched := New(cfg, nil, nil, nil)
+
+	res, err := sched.ExtractFactsLLM(context.Background(), "test prompt")
 	if err != nil {
 		t.Fatalf("ExtractFactsLLM failed: %v", err)
 	}
@@ -1268,9 +1269,10 @@ func TestExtractFactsLLM_Errors(t *testing.T) {
 	// 1. Script fails with exit code 1
 	mockFailAgy := filepath.Join(tmpDir, "mock_fail_agy.sh")
 	_ = os.WriteFile(mockFailAgy, []byte("#!/bin/sh\necho 'fatal error' >&2\nexit 1\n"), 0755)
-	t.Setenv("AGY_BIN", mockFailAgy)
 
-	_, err := ExtractFactsLLM(context.Background(), "prompt")
+	cfgFail := config.NewFromData(&config.ConfigData{AgyBin: mockFailAgy})
+	schedFail := New(cfgFail, nil, nil, nil)
+	_, err := schedFail.ExtractFactsLLM(context.Background(), "prompt")
 	if err == nil {
 		t.Error("expected error on nonzero exit code")
 	}
@@ -1278,9 +1280,10 @@ func TestExtractFactsLLM_Errors(t *testing.T) {
 	// 2. Script returns invalid JSON
 	mockBadJsonAgy := filepath.Join(tmpDir, "mock_bad_json.sh")
 	_ = os.WriteFile(mockBadJsonAgy, []byte("#!/bin/sh\necho 'not-json'\n"), 0755)
-	t.Setenv("AGY_BIN", mockBadJsonAgy)
 
-	_, err = ExtractFactsLLM(context.Background(), "prompt")
+	cfgBad := config.NewFromData(&config.ConfigData{AgyBin: mockBadJsonAgy})
+	schedBad := New(cfgBad, nil, nil, nil)
+	_, err = schedBad.ExtractFactsLLM(context.Background(), "prompt")
 	if err == nil {
 		t.Error("expected error on invalid JSON output")
 	}
@@ -1348,6 +1351,36 @@ func TestRunFactExtraction(t *testing.T) {
 	}
 	_ = closedDB.Close()
 	RunFactExtraction(context.Background(), closedDB, client, llmFunc)
+}
+
+func TestScheduler_ConfigInjection(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer database.Close()
+
+	appCfg := config.NewFromData(&config.ConfigData{
+		Timezone: "America/New_York",
+		Model:    "custom-scheduler-model",
+	})
+	enqueuer := newMockEnqueuer()
+	threadCreator := newMockThreadCreator()
+
+	s := New(appCfg, database, enqueuer, threadCreator)
+	if s == nil {
+		t.Fatalf("expected non-nil scheduler")
+	}
+	if s.cfg != appCfg {
+		t.Errorf("expected s.cfg to match injected appCfg")
+	}
+	if s.cfg.Current().Timezone != "America/New_York" {
+		t.Errorf("expected timezone America/New_York, got %q", s.cfg.Current().Timezone)
+	}
+
+	if err := s.ProcessDueSchedules(context.Background()); err != nil {
+		t.Errorf("unexpected error in ProcessDueSchedules: %v", err)
+	}
 }
 
 

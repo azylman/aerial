@@ -833,15 +833,36 @@ type BrainConfig struct {
 	DiscordToken string
 }
 
-func NewBrainConfigFromEnv(cfg config.Config) BrainConfig {
+func NewBrainConfigFromEnv(cfg *config.Config) BrainConfig {
+	model := ""
+	dbPath := ""
+	port := "8080"
+	agyBin := "agy"
+	apiKey := ""
+	systemPrompt := ""
+	discordToken := ""
+	if cfg != nil {
+		cur := cfg.Current()
+		model = cur.Model
+		dbPath = cur.DatabaseURL
+		if cur.Port != "" {
+			port = cur.Port
+		}
+		if cur.AgyBin != "" {
+			agyBin = cur.AgyBin
+		}
+		apiKey = cur.APIKey
+		systemPrompt = cur.SystemPrompt
+		discordToken = cur.DiscordToken
+	}
 	return BrainConfig{
-		Port:         config.GetEnv("PORT", "8080"),
-		AgyBin:       config.GetEnv("AGY_BIN", "agy"),
-		APIKey:       config.GetEnv("GEMINI_API_KEY", config.GetEnv("ANTIGRAVITY_API_KEY", "")),
-		SystemPrompt: config.GetEnv("SYSTEM_PROMPT", ""),
-		Model:        cfg.Model,
-		DBPath:       db.GetDBPath(),
-		DiscordToken: config.GetEnv("DISCORD_TOKEN", config.GetEnv("DISCORD_BOT_TOKEN", "")),
+		Port:         port,
+		AgyBin:       agyBin,
+		APIKey:       apiKey,
+		SystemPrompt: systemPrompt,
+		Model:        model,
+		DBPath:       dbPath,
+		DiscordToken: discordToken,
 	}
 }
 
@@ -882,54 +903,96 @@ func InitializeBrainEnvironment(apiKey, model, systemPrompt string) {
 	}
 }
 
-func CreateReloadConfigFunc(pool *queue.WorkerPool, apiKey, systemPrompt string, dgSession *discordgo.Session) func(source string) {
+func CreateReloadConfigFunc(cfgOrPool any, args ...any) func(source string) {
+	var cfg *config.Config
+	var dgSession *discordgo.Session
+
+	switch v := cfgOrPool.(type) {
+	case *config.Config:
+		cfg = v
+		if len(args) > 1 {
+			if sess, ok := args[1].(*discordgo.Session); ok {
+				dgSession = sess
+			}
+		}
+	case *queue.WorkerPool:
+		cfg = config.NewFromData(config.DefaultConfigData())
+		if len(args) > 2 {
+			if sess, ok := args[2].(*discordgo.Session); ok {
+				dgSession = sess
+			}
+		}
+	}
+
+	var reloadMu sync.Mutex
 	return func(source string) {
+		reloadMu.Lock()
+		defer reloadMu.Unlock()
 		log.Printf("[%s] Changes detected. Reloading configuration, system rules, and skills...", source)
-		latestCfg, parseErr := config.LoadConfig()
-		if parseErr != nil {
-			metrics.ConfigReloadsTotal.WithLabelValues(source, "failure").Inc()
-			log.Printf("[%s] Warning: Failed to parse config.yaml: %v", source, parseErr)
-			if dgSession != nil {
-				alertMsg := fmt.Sprintf("Failed to parse config.yaml:\n```\n%v\n```\nAerial has retained the Last Known Good Configuration (LKGC).", parseErr)
-				if alertErr := delivery.SendSystemAlert(dgSession, config.GetSystemChannel(), "Invalid Configuration File", alertMsg); alertErr != nil {
-					log.Printf("[%s] Warning: failed to send Discord alert: %v", source, alertErr)
+		if cfg != nil {
+			if err := config.Reload(cfg); err != nil {
+				metrics.ConfigReloadsTotal.WithLabelValues(source, "failure").Inc()
+				log.Printf("[%s] Warning: Failed to reload config: %v", source, err)
+				if dgSession != nil {
+					alertMsg := fmt.Sprintf("Failed to reload config:\n```\n%v\n```\nAerial has retained the Last Known Good Configuration (LKGC).", err)
+					_ = delivery.SendSystemAlert(dgSession, cfg.Current().SystemChannel, "Invalid Configuration File", alertMsg)
+				}
+				return
+			}
+			metrics.ConfigReloadsTotal.WithLabelValues(source, "success").Inc()
+			sanitizer.RegisterConfigTokens(cfg)
+			fresh := cfg.Current()
+
+			if err := config.EnsureAgySettings(fresh.APIKey, fresh.Model); err != nil {
+				log.Printf("[%s] Warning: EnsureAgySettings error: %v", source, err)
+			}
+			mcpConfig := config.LoadMCPConfig()
+			if len(mcpConfig) > 0 {
+				if err := config.EnsureMcpConfig(mcpConfig); err != nil {
+					log.Printf("[%s] Warning: EnsureMcpConfig error: %v", source, err)
 				}
 			}
-		} else {
-			metrics.ConfigReloadsTotal.WithLabelValues(source, "success").Inc()
-		}
-
-		latestModel := latestCfg.Model
-		latestMcpConfig := config.LoadMCPConfig()
-
-		if err := config.EnsureAgySettings(apiKey, latestModel); err != nil {
-			log.Printf("[%s] Warning: EnsureAgySettings error: %v", source, err)
-		}
-		if len(latestMcpConfig) > 0 {
-			if err := config.EnsureMcpConfig(latestMcpConfig); err != nil {
-				log.Printf("[%s] Warning: EnsureMcpConfig error: %v", source, err)
+			if err := config.EnsureSystemRules(fresh.SystemPrompt); err != nil {
+				log.Printf("[%s] Warning: EnsureSystemRules error: %v", source, err)
 			}
-		}
-		if pool != nil {
-			pool.UpdateRuntimeConfig(latestModel)
-		}
-		if err := config.EnsureSystemRules(systemPrompt); err != nil {
-			log.Printf("[%s] Warning: EnsureSystemRules error: %v", source, err)
-		}
-		if err := skills.EnsureSkills(); err != nil {
-			log.Printf("[%s] Warning: EnsureSkills error: %v", source, err)
+			if err := skills.EnsureSkills(); err != nil {
+				log.Printf("[%s] Warning: EnsureSkills error: %v", source, err)
+			}
 		}
 	}
 }
 
-func RunBrainApp(ctx context.Context, bCfg BrainConfig) error {
-	InitializeBrainEnvironment(bCfg.APIKey, bCfg.Model, bCfg.SystemPrompt)
-
-	dbPath := bCfg.DBPath
-	if dbPath == "" {
-		dbPath = db.GetDBPath()
+func RunBrainApp(ctx context.Context, cfgOrBrainCfg any) error {
+	var cfg *config.Config
+	switch v := cfgOrBrainCfg.(type) {
+	case *config.Config:
+		cfg = v
+	case BrainConfig:
+		cfg = config.NewFromData(&config.ConfigData{
+			Port:         v.Port,
+			AgyBin:       v.AgyBin,
+			APIKey:       v.APIKey,
+			SystemPrompt: v.SystemPrompt,
+			Model:        v.Model,
+			DatabaseURL:  v.DBPath,
+			DiscordToken: v.DiscordToken,
+		})
+	default:
+		var err error
+		cfg, err = config.New()
+		if err != nil {
+			return fmt.Errorf("failed to initialize config: %w", err)
+		}
 	}
-	database, err := db.InitDB(dbPath)
+
+	cur := cfg.Current()
+	InitializeBrainEnvironment(cur.APIKey, cur.Model, cur.SystemPrompt)
+
+	if cur.DatabaseURL == "" {
+		return fmt.Errorf("database URL or path is required")
+	}
+
+	database, err := db.New(cfg)
 	if err != nil {
 		return fmt.Errorf("failed to initialize database: %w", err)
 	}
@@ -939,24 +1002,18 @@ func RunBrainApp(ctx context.Context, bCfg BrainConfig) error {
 		}
 	}()
 
-	clsModel := config.GetEnv("AMBIENT_CLASSIFIER_MODEL", "Gemini 3.8 Flash (Low)")
-	cls := classifier.NewClassifier(
-		classifier.WithModel(clsModel),
-		classifier.WithLLMFunc(classifier.NewAgyLLMFunc(bCfg.AgyBin, bCfg.APIKey, runner.RunAgy)),
-	)
+	sanitizer.RegisterConfigTokens(cfg)
 
-	pool := queue.NewWorkerPool(queue.WorkerPoolConfig{
-		DB:           database,
-		AgyBin:       bCfg.AgyBin,
-		APIKey:       bCfg.APIKey,
-		Model:        bCfg.Model,
-		SystemPrompt: bCfg.SystemPrompt,
-		Classifier:   cls,
+	cls := classifier.New(cfg, runner.RunAgy)
+
+	pool := queue.New(cfg, queue.WorkerPoolConfig{
+		DB:         database,
+		Classifier: cls,
 	})
 	pool.Start()
 
-	// Connect Discord Gateway session before startup crash recovery
-	dgSession := connectDiscordFunnel(ctx, database, pool, bCfg.DiscordToken)
+	SetFunnelConfig(cfg)
+	dgSession := connectDiscordFunnel(ctx, database, pool, cur.DiscordToken)
 	defer func() {
 		log.Printf("Draining worker pool (10s timeout)...")
 		pool.StopWithTimeout(10 * time.Second)
@@ -966,7 +1023,7 @@ func RunBrainApp(ctx context.Context, bCfg BrainConfig) error {
 		}
 	}()
 
-	reloadConfig := CreateReloadConfigFunc(pool, bCfg.APIKey, bCfg.SystemPrompt, dgSession)
+	reloadConfig := CreateReloadConfigFunc(cfg, pool, dgSession)
 
 	// Start background file watcher for atomic hot-reloading of prompts and skills
 	fileWatcher, err := watcher.NewWatcher(
@@ -1009,19 +1066,25 @@ func RunBrainApp(ctx context.Context, bCfg BrainConfig) error {
 	queue.RecoverInterrupted(database, pool)
 
 	// Start background scheduler monitor for due cron and one-shot routines
-	stopScheduler := scheduler.Start(ctx, database, pool, dgSession)
+	sched := scheduler.New(cfg, database, pool, scheduler.NewDiscordThreadCreator(dgSession))
+	stopScheduler := sched.Start(ctx)
 	defer stopScheduler()
 
 	mux := SetupBrainMux(database, pool, reloadConfig)
 
+	port := cur.Port
+	if port == "" {
+		port = "8080"
+	}
+
 	srv := &http.Server{
-		Addr:    ":" + bCfg.Port,
+		Addr:    ":" + port,
 		Handler: metricsMiddleware(mux),
 	}
 
 	errChan := make(chan error, 1)
 	go func() {
-		log.Printf("Aerial Brain listening on port %s (model=%s, timeout=%dm)", bCfg.Port, bCfg.Model, queue.DefaultTimeoutMinutes)
+		log.Printf("Aerial Brain listening on port %s (model=%s, timeout=%dm)", port, cur.Model, queue.DefaultTimeoutMinutes)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			errChan <- err
 		}
@@ -1043,12 +1106,10 @@ func RunBrainApp(ctx context.Context, bCfg BrainConfig) error {
 }
 
 func main() {
-	cfg, err := config.LoadConfig()
+	cfg, err := config.New()
 	if err != nil {
 		log.Printf("Warning: initial LoadConfig error: %v", err)
 	}
-
-	bCfg := NewBrainConfigFromEnv(cfg)
 
 	stopChan := make(chan os.Signal, 1)
 	signal.Notify(stopChan, os.Interrupt, syscall.SIGTERM)
@@ -1061,7 +1122,7 @@ func main() {
 		cancel()
 	}()
 
-	if err := RunBrainApp(ctx, bCfg); err != nil && err != http.ErrServerClosed {
+	if err := RunBrainApp(ctx, cfg); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("Server failed: %v", err)
 	}
 }

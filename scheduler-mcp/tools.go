@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -14,18 +13,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/robfig/cron/v3"
 )
-
-// GetDefaultTimezone returns the configured default timezone for the server.
-// Reads DEFAULT_TIMEZONE -> TZ -> fallback "America/Los_Angeles".
-func GetDefaultTimezone() string {
-	if tz := strings.TrimSpace(os.Getenv("DEFAULT_TIMEZONE")); tz != "" {
-		return tz
-	}
-	if tz := strings.TrimSpace(os.Getenv("TZ")); tz != "" {
-		return tz
-	}
-	return "America/Los_Angeles"
-}
 
 var cronParser = cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
 
@@ -129,11 +116,19 @@ func CalculateNextCronRun(cronExpr, timezone string, from time.Time) (time.Time,
 }
 
 type ToolHandler struct {
-	db *sql.DB
+	cfg *Config
+	db  *sql.DB
 }
 
-func NewToolHandler(database *sql.DB) *ToolHandler {
-	return &ToolHandler{db: database}
+func NewToolHandler(cfg *Config, database *sql.DB) *ToolHandler {
+	return &ToolHandler{cfg: cfg, db: database}
+}
+
+func (h *ToolHandler) defaultTimezone() string {
+	if h.cfg != nil && h.cfg.Timezone != "" {
+		return h.cfg.Timezone
+	}
+	return "America/Los_Angeles"
 }
 
 type ScheduleRecurringArgs struct {
@@ -156,7 +151,7 @@ func (h *ToolHandler) HandleScheduleRecurring(rawArgs json.RawMessage) (interfac
 	args.TitlePrefix = strings.TrimSpace(args.TitlePrefix)
 	args.Timezone = strings.TrimSpace(args.Timezone)
 	if args.Timezone == "" {
-		args.Timezone = GetDefaultTimezone()
+		args.Timezone = h.defaultTimezone()
 	}
 
 	if args.ChannelID == "" {
@@ -220,7 +215,7 @@ func (h *ToolHandler) HandleScheduleOnce(rawArgs json.RawMessage) (interface{}, 
 	args.Prompt = strings.TrimSpace(args.Prompt)
 	args.Timezone = strings.TrimSpace(args.Timezone)
 	if args.Timezone == "" {
-		args.Timezone = GetDefaultTimezone()
+		args.Timezone = h.defaultTimezone()
 	}
 
 	if args.TargetID == "" {

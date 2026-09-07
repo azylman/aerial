@@ -792,7 +792,7 @@ func TestSetupBrainMux_And_Endpoints(t *testing.T) {
 }
 
 func TestInitializeBrainEnvironment_And_Config(t *testing.T) {
-	cfg := config.Config{Model: "gemini-2.5-flash"}
+	cfg := config.NewFromData(&config.ConfigData{Model: "gemini-2.5-flash"})
 	bCfg := NewBrainConfigFromEnv(cfg)
 	if bCfg.Model != "gemini-2.5-flash" {
 		t.Errorf("Unexpected model in BrainConfig: %s", bCfg.Model)
@@ -1410,18 +1410,17 @@ func TestRunBrainApp_ErrorBranches(t *testing.T) {
 		t.Errorf("Expected error from invalid DBPath, got nil")
 	}
 
-	// 2. Empty DBPath fallback to db.GetDBPath()
-	t.Setenv("DB_PATH", filepath.Join(tmpDir, "fallback.db"))
+	// 2. Empty DBPath returns error
 	bCfgFallback := BrainConfig{
 		Port:   "0",
 		DBPath: "",
 	}
 	ctx2, cancel2 := context.WithCancel(context.Background())
-	go func() {
-		time.Sleep(100 * time.Millisecond)
-		cancel2()
-	}()
-	_ = RunBrainApp(ctx2, bCfgFallback)
+	defer cancel2()
+	errEmpty := RunBrainApp(ctx2, bCfgFallback)
+	if errEmpty == nil {
+		t.Errorf("Expected error for empty DBPath, got nil")
+	}
 }
 
 func TestHandleSchedules_ConcurrentDoubleCheck(t *testing.T) {
@@ -1565,6 +1564,26 @@ func TestHandleTranscripts_DBErrorBranch(t *testing.T) {
 	handler(w, req)
 	if w.Code != http.StatusOK {
 		t.Errorf("Expected 200 OK, got %d", w.Code)
+	}
+}
+
+func TestRunBrainApp_PureConfig(t *testing.T) {
+	cfg := config.NewFromData(&config.ConfigData{
+		DatabaseURL:  filepath.Join(t.TempDir(), "brain_test.db"),
+		Port:         "0",
+		Model:        "test-model",
+		Timezone:     "UTC",
+		SystemPrompt: "test prompt",
+		Channels: map[string]config.ChannelPolicy{
+			"default": {Mode: "threads"},
+		},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Immediate cancellation to test lifecycle shutdown
+
+	err := RunBrainApp(ctx, cfg)
+	if err != nil && err != http.ErrServerClosed {
+		t.Errorf("expected clean shutdown, got %v", err)
 	}
 }
 

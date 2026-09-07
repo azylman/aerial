@@ -10,41 +10,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/metrics"
+	"github.com/jackc/pgx/v5"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "modernc.org/sqlite"
 )
-
-// GetDBPath returns the active database connection string from environment variables.
-func GetDBPath() string {
-	if testURL := os.Getenv("TEST_DATABASE_URL"); testURL != "" {
-		return testURL
-	}
-	if envDSN := os.Getenv("DATABASE_URL"); envDSN != "" {
-		return envDSN
-	}
-	dbUser := os.Getenv("POSTGRES_USER")
-	if dbUser == "" {
-		dbUser = "aerial"
-	}
-	dbPass := os.Getenv("POSTGRES_PASSWORD")
-	if dbPass == "" {
-		dbPass = "aerial_secure_pass"
-	}
-	dbHost := os.Getenv("POSTGRES_HOST")
-	if dbHost == "" {
-		dbHost = "postgres"
-	}
-	dbPort := os.Getenv("POSTGRES_PORT")
-	if dbPort == "" {
-		dbPort = "5432"
-	}
-	dbName := os.Getenv("POSTGRES_DB")
-	if dbName == "" {
-		dbName = "aerial"
-	}
-	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", dbUser, dbPass, dbHost, dbPort, dbName)
-}
 
 func isPostgres(database *sql.DB) bool {
 	if database == nil {
@@ -59,21 +30,57 @@ var (
 	postgresRetryBase   = 500 * time.Millisecond
 )
 
-// InitDB establishes the database connection pool, applies schema migrations, and registers metrics.
-func InitDB(dsn string) (*sql.DB, error) {
-	if dsn == "" {
-		dsn = GetDBPath()
+// New establishes a database connection pool using the DatabaseURL from cfg.
+func New(cfg *config.Config) (*sql.DB, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("db: config cannot be nil")
+	}
+	cur := cfg.Current()
+	if cur == nil {
+		return nil, fmt.Errorf("db: config snapshot is nil")
+	}
+	return initDB(cur.DatabaseURL)
+}
+
+// InitDB is a compatibility wrapper for New and existing tests during migration.
+func InitDB(dsnOrCfg any) (*sql.DB, error) {
+	switch v := dsnOrCfg.(type) {
+	case *config.Config:
+		return New(v)
+	case string:
+		return initDB(v)
+	default:
+		return nil, fmt.Errorf("db: unsupported InitDB argument type: %T", dsnOrCfg)
+	}
+}
+
+func initDB(dsn string) (*sql.DB, error) {
+	trimmed := strings.TrimSpace(dsn)
+	if trimmed == "" {
+		return nil, fmt.Errorf("db: connection string cannot be empty")
 	}
 
-	isPg := strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://")
+	// Normalize sqlite:// prefix to plain path
+	trimmed = strings.TrimPrefix(trimmed, "sqlite://")
+
+	isPg := strings.HasPrefix(trimmed, "postgres://") || strings.HasPrefix(trimmed, "postgresql://")
+	if !isPg {
+		if strings.Contains(trimmed, "://") && !strings.HasPrefix(trimmed, "file://") {
+			return nil, fmt.Errorf("db: unsupported database scheme in %q", trimmed)
+		}
+	}
 
 	if isPg {
+		if _, err := pgx.ParseConfig(trimmed); err != nil {
+			return nil, fmt.Errorf("db: invalid postgres connection string: %w", err)
+		}
+
 		var database *sql.DB
 		var err error
 
 		// 1. Connection retry loop with exponential backoff for containerized startup
 		for attempt := 1; attempt <= postgresMaxAttempts; attempt++ {
-			database, err = sql.Open("pgx", dsn)
+			database, err = sql.Open("pgx", trimmed)
 			if err == nil {
 				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 				pingErr := database.PingContext(ctx)
@@ -106,21 +113,21 @@ func InitDB(dsn string) (*sql.DB, error) {
 			return nil, err
 		}
 
-		log.Printf("[DB] PostgreSQL initialized successfully with pgvector at %s", dsn)
+		log.Printf("[DB] PostgreSQL initialized successfully with pgvector at %s", trimmed)
 		metrics.RegisterDBStats(database)
 		return database, nil
 	}
 
 	// SQLite fallback for in-memory unit tests and local runs
-	if dsn != ":memory:" {
-		if err := os.MkdirAll(filepath.Dir(dsn), 0755); err != nil {
+	if trimmed != ":memory:" {
+		if err := os.MkdirAll(filepath.Dir(trimmed), 0755); err != nil {
 			return nil, fmt.Errorf("failed to create db directory: %w", err)
 		}
 	}
 
-	sqliteDSN := dsn
-	if dsn != ":memory:" && !strings.Contains(dsn, "_pragma") {
-		if strings.Contains(dsn, "?") {
+	sqliteDSN := trimmed
+	if trimmed != ":memory:" && !strings.Contains(trimmed, "_pragma") {
+		if strings.Contains(trimmed, "?") {
 			sqliteDSN += "&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"
 		} else {
 			sqliteDSN += "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"
@@ -132,7 +139,7 @@ func InitDB(dsn string) (*sql.DB, error) {
 		return nil, err
 	}
 
-	if dsn == ":memory:" || strings.Contains(dsn, "mode=memory") {
+	if trimmed == ":memory:" || strings.Contains(trimmed, "mode=memory") {
 		database.SetMaxOpenConns(1)
 	}
 
@@ -141,7 +148,7 @@ func InitDB(dsn string) (*sql.DB, error) {
 		return nil, err
 	}
 
-	log.Printf("[DB] SQLite initialized successfully at %s", dsn)
+	log.Printf("[DB] SQLite initialized successfully at %s", trimmed)
 	metrics.RegisterDBStats(database)
 	return database, nil
 }

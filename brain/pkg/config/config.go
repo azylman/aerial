@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"gopkg.in/yaml.v3"
 )
@@ -134,25 +135,50 @@ func (p ChannelPolicy) IsBotIgnored() bool {
 	return false
 }
 
-type Config struct {
-	Model         string                     `yaml:"model" json:"model"`
-	Timezone      string                     `yaml:"timezone" json:"timezone"`
-	SystemChannel string                     `yaml:"system_channel" json:"system_channel"`
-	AdminUsers    []string                   `yaml:"admin_users" json:"admin_users"`
-	Channels      map[string]ChannelPolicy   `yaml:"channels" json:"channels"`
-	GitSync       GitSyncConfig              `yaml:"git_sync" json:"git_sync"`
-	McpServers    map[string]json.RawMessage `yaml:"mcp_servers,omitempty" json:"mcp_servers,omitempty"`
+type OllamaConfig struct {
+	BaseURL     string `yaml:"base_url" json:"base_url"`
+	Model       string `yaml:"model" json:"model"`
+	QueryPrefix string `yaml:"query_prefix" json:"query_prefix"`
 }
 
-func (c *Config) UnmarshalYAML(value *yaml.Node) error {
+type ConfigData struct {
+	Model           string                     `yaml:"model" json:"model"`
+	Timezone        string                     `yaml:"timezone" json:"timezone"`
+	SystemChannel   string                     `yaml:"system_channel" json:"system_channel"`
+	AdminUsers      []string                   `yaml:"admin_users" json:"admin_users"`
+	Channels        map[string]ChannelPolicy   `yaml:"channels" json:"channels"`
+	GitSync         GitSyncConfig              `yaml:"git_sync" json:"git_sync"`
+	McpServers      map[string]json.RawMessage `yaml:"mcp_servers,omitempty" json:"mcp_servers,omitempty"`
+	DatabaseURL     string                     `yaml:"database_url" json:"database_url"`
+	Port            string                     `yaml:"port" json:"port"`
+	AgyBin          string                     `yaml:"agy_bin" json:"agy_bin"`
+	APIKey          string                     `yaml:"api_key" json:"api_key"`
+	SystemPrompt    string                     `yaml:"system_prompt" json:"system_prompt"`
+	DiscordToken    string                     `yaml:"discord_token" json:"discord_token"`
+	GitHubPAT       string                     `yaml:"github_pat" json:"github_pat"`
+	Ollama          OllamaConfig               `yaml:"ollama" json:"ollama"`
+	ClassifierModel string                     `yaml:"classifier_model" json:"classifier_model"`
+}
+
+func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 	type rawConfigHelper struct {
-		Model         string                   `yaml:"model"`
-		Timezone      string                   `yaml:"timezone"`
-		SystemChannel string                   `yaml:"system_channel"`
-		AdminUsers    []string                 `yaml:"admin_users"`
-		Channels      map[string]ChannelPolicy `yaml:"channels"`
-		GitSync       GitSyncConfig            `yaml:"git_sync"`
-		McpServers    map[string]interface{}   `yaml:"mcp_servers"`
+		Model           string                     `yaml:"model"`
+		Timezone        string                     `yaml:"timezone"`
+		SystemChannel   string                     `yaml:"system_channel"`
+		AdminUsers      []string                   `yaml:"admin_users"`
+		Channels        map[string]ChannelPolicy   `yaml:"channels"`
+		GitSync         GitSyncConfig              `yaml:"git_sync"`
+		McpServers      map[string]interface{}     `yaml:"mcp_servers"`
+		DatabaseURL     string                     `yaml:"database_url"`
+		DBPath          string                     `yaml:"db_path"`
+		Port            string                     `yaml:"port"`
+		AgyBin          string                     `yaml:"agy_bin"`
+		APIKey          string                     `yaml:"api_key"`
+		SystemPrompt    string                     `yaml:"system_prompt"`
+		DiscordToken    string                     `yaml:"discord_token"`
+		GitHubPAT       string                     `yaml:"github_pat"`
+		Ollama          OllamaConfig               `yaml:"ollama"`
+		ClassifierModel string                     `yaml:"classifier_model"`
 	}
 
 	var raw rawConfigHelper
@@ -166,6 +192,18 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	c.AdminUsers = raw.AdminUsers
 	c.Channels = raw.Channels
 	c.GitSync = raw.GitSync
+	c.DatabaseURL = raw.DatabaseURL
+	if c.DatabaseURL == "" {
+		c.DatabaseURL = raw.DBPath
+	}
+	c.Port = raw.Port
+	c.AgyBin = raw.AgyBin
+	c.APIKey = raw.APIKey
+	c.SystemPrompt = raw.SystemPrompt
+	c.DiscordToken = raw.DiscordToken
+	c.GitHubPAT = raw.GitHubPAT
+	c.Ollama = raw.Ollama
+	c.ClassifierModel = raw.ClassifierModel
 
 	if raw.McpServers != nil {
 		c.McpServers = make(map[string]json.RawMessage)
@@ -180,18 +218,55 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
-type Options struct {
-	Port         int             `json:"port"`
-	AgyBin       string          `json:"agy_bin"`
-	ApiKey       string          `json:"api_key"`
-	Model        string          `json:"model"`
-	SystemPrompt string          `json:"system_prompt"`
-	McpConfig    json.RawMessage `json:"mcp_config"`
+type Config struct {
+	current atomic.Pointer[ConfigData]
 }
 
-func DefaultConfig() Config {
+func cloneChannelPolicy(p ChannelPolicy) ChannelPolicy {
+	cp := p
+	if p.IgnoreBots != nil {
+		b := *p.IgnoreBots
+		cp.IgnoreBots = &b
+	}
+	if p.AmbientWakeThreshold != nil {
+		f := *p.AmbientWakeThreshold
+		cp.AmbientWakeThreshold = &f
+	}
+	return cp
+}
+
+func cloneConfigData(src *ConfigData) *ConfigData {
+	if src == nil {
+		return nil
+	}
+	dst := *src
+
+	if src.AdminUsers != nil {
+		dst.AdminUsers = make([]string, len(src.AdminUsers))
+		copy(dst.AdminUsers, src.AdminUsers)
+	}
+	if src.Channels != nil {
+		dst.Channels = make(map[string]ChannelPolicy, len(src.Channels))
+		for k, v := range src.Channels {
+			dst.Channels[k] = cloneChannelPolicy(v)
+		}
+	}
+	if src.GitSync.Repositories != nil {
+		dst.GitSync.Repositories = make([]string, len(src.GitSync.Repositories))
+		copy(dst.GitSync.Repositories, src.GitSync.Repositories)
+	}
+	if src.McpServers != nil {
+		dst.McpServers = make(map[string]json.RawMessage, len(src.McpServers))
+		for k, v := range src.McpServers {
+			dst.McpServers[k] = append(json.RawMessage(nil), v...)
+		}
+	}
+	return &dst
+}
+
+func DefaultConfigData() *ConfigData {
 	defaultIgnoreBots := true
-	return Config{
+	return &ConfigData{
 		Model:         "Gemini 3.6 Flash (Low)",
 		Timezone:      "America/Los_Angeles",
 		SystemChannel: "aerial-dev",
@@ -208,50 +283,185 @@ func DefaultConfig() Config {
 			ConfigRepoUrl: "https://github.com/azylman/aerial-config.git",
 			Repositories:  []string{"/share/aerial-config", "/share/aerial"},
 		},
-		McpServers: make(map[string]json.RawMessage),
+		McpServers:      make(map[string]json.RawMessage),
+		Port:            "8080",
+		AgyBin:          "agy",
+		ClassifierModel: "Gemini 3.8 Flash (Low)",
+		Ollama: OllamaConfig{
+			BaseURL:     "http://ollama:11434",
+			Model:       "all-minilm",
+			QueryPrefix: "Represent this sentence for searching relevant passages: ",
+		},
 	}
 }
 
-func getFallbackDefaults() Config {
-	cfg := DefaultConfig()
+func (c *Config) Current() *ConfigData {
+	if c == nil {
+		return DefaultConfigData()
+	}
+	cur := c.current.Load()
+	if cur == nil {
+		return DefaultConfigData()
+	}
+	return cur
+}
+
+func (c *Config) update(fresh *ConfigData) {
+	if c == nil || fresh == nil {
+		return
+	}
+	c.current.Store(cloneConfigData(fresh))
+}
+
+func NewFromData(data *ConfigData) *Config {
+	if data == nil {
+		data = DefaultConfigData()
+	}
+	cfg := &Config{}
+	cfg.current.Store(cloneConfigData(data))
+	return cfg
+}
+
+func New() (*Config, error) {
+	return LoadConfigFromPaths(ConfigSearchPaths...)
+}
+
+func LoadConfig() (*Config, error) {
+	return New()
+}
+
+func Reload(activeCfg *Config) error {
+	if activeCfg == nil {
+		return fmt.Errorf("config: activeCfg cannot be nil")
+	}
+	fresh, err := New()
+	if err != nil {
+		return err
+	}
+	activeCfg.update(fresh.Current())
+	return nil
+}
+
+func buildPostgresDSNFromEnv() string {
+	if envDSN := strings.TrimSpace(os.Getenv("DATABASE_URL")); envDSN != "" {
+		return envDSN
+	}
+	if envDBPath := strings.TrimSpace(os.Getenv("DB_PATH")); envDBPath != "" {
+		return envDBPath
+	}
+	dbHost := strings.TrimSpace(os.Getenv("POSTGRES_HOST"))
+	if dbHost == "" {
+		return ""
+	}
+	dbPort := strings.TrimSpace(os.Getenv("POSTGRES_PORT"))
+	if dbPort == "" {
+		dbPort = "5432"
+	}
+	dbUser := strings.TrimSpace(os.Getenv("POSTGRES_USER"))
+	if dbUser == "" {
+		dbUser = "aerial"
+	}
+	dbPass := os.Getenv("POSTGRES_PASSWORD")
+	if dbPass == "" {
+		dbPass = "aerial_secure_pass"
+	}
+	dbName := strings.TrimSpace(os.Getenv("POSTGRES_DB"))
+	if dbName == "" {
+		dbName = "aerial"
+	}
+	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", dbUser, dbPass, dbHost, dbPort, dbName)
+}
+
+func applyEnvironmentOverrides(data *ConfigData) {
+	if data == nil {
+		return
+	}
+	if p := getEnv("PORT", ""); p != "" {
+		data.Port = p
+	}
+	if b := getEnv("AGY_BIN", ""); b != "" {
+		data.AgyBin = b
+	}
+	if k := getEnv("GEMINI_API_KEY", getEnv("ANTIGRAVITY_API_KEY", "")); k != "" {
+		data.APIKey = k
+	}
+	if sp := getEnv("SYSTEM_PROMPT", ""); sp != "" {
+		data.SystemPrompt = sp
+	}
+	if dt := getEnv("DISCORD_TOKEN", getEnv("DISCORD_BOT_TOKEN", "")); dt != "" {
+		data.DiscordToken = dt
+	}
+	if pat := getEnv("GITHUB_PAT", ""); pat != "" {
+		data.GitHubPAT = pat
+	}
+	if dsn := buildPostgresDSNFromEnv(); dsn != "" {
+		data.DatabaseURL = dsn
+	}
+	if m := getEnv("AGY_MODEL", ""); m != "" {
+		data.Model = m
+	}
+	if tz := getEnv("DEFAULT_TIMEZONE", getEnv("TZ", "")); tz != "" {
+		data.Timezone = tz
+	}
+	if sc := getEnv("SYSTEM_CHANNEL", ""); sc != "" {
+		data.SystemChannel = sc
+	}
+	if cm := getEnv("AMBIENT_CLASSIFIER_MODEL", getEnv("CLASSIFIER_MODEL", "")); cm != "" {
+		data.ClassifierModel = cm
+	}
+	if ou := getEnv("OLLAMA_URL", ""); ou != "" {
+		data.Ollama.BaseURL = ou
+	}
+	if om := getEnv("EMBEDDING_MODEL", getEnv("OLLAMA_EMBEDDING_MODEL", "")); om != "" {
+		data.Ollama.Model = om
+	}
+	if qp := getEnv("EMBEDDING_QUERY_PREFIX", ""); qp != "" {
+		data.Ollama.QueryPrefix = qp
+	}
+}
+
+var activeGlobalConfig = NewFromData(DefaultConfigData())
+
+func getFallbackDefaults() ConfigData {
+	data := DefaultConfigData()
 
 	// 1. Check /data/options.json
-	if data, err := os.ReadFile("/data/options.json"); err == nil {
+	if fData, err := os.ReadFile("/data/options.json"); err == nil {
 		var opts Options
-		if err := json.Unmarshal(data, &opts); err == nil {
+		if err := json.Unmarshal(fData, &opts); err == nil {
 			if strings.TrimSpace(opts.Model) != "" {
-				cfg.Model = opts.Model
+				data.Model = opts.Model
 			}
 		}
 	}
 
 	// 2. Check environment variables
 	if m := strings.TrimSpace(os.Getenv("AGY_MODEL")); m != "" {
-		cfg.Model = m
+		data.Model = m
 	}
 	if tz := strings.TrimSpace(os.Getenv("DEFAULT_TIMEZONE")); tz != "" {
-		cfg.Timezone = tz
+		data.Timezone = tz
 	} else if tz := strings.TrimSpace(os.Getenv("TZ")); tz != "" {
-		cfg.Timezone = tz
+		data.Timezone = tz
 	}
 	if ch := strings.TrimSpace(os.Getenv("SYSTEM_CHANNEL")); ch != "" {
-		cfg.SystemChannel = ch
+		data.SystemChannel = ch
 	}
 
-	return cfg
+	return *data
 }
 
-func GetRuntimeConfig() Config {
-	runtimeConfigMu.RLock()
-	defer runtimeConfigMu.RUnlock()
-	if currentRuntimeConfig.Model == "" {
-		return getFallbackDefaults()
-	}
-	return currentRuntimeConfig
+// ActiveConfig returns the global active *Config instance.
+func ActiveConfig() *Config {
+	return activeGlobalConfig
+}
+
+func GetRuntimeConfig() ConfigData {
+	return *activeGlobalConfig.Current()
 }
 
 func GetTimezone() string {
-	cfg := GetRuntimeConfig()
+	cfg := activeGlobalConfig.Current()
 	if strings.TrimSpace(cfg.Timezone) != "" {
 		return cfg.Timezone
 	}
@@ -265,54 +475,75 @@ func GetTimezone() string {
 }
 
 func GetSystemChannel() string {
-	cfg := GetRuntimeConfig()
+	cfg := activeGlobalConfig.Current()
 	if strings.TrimSpace(cfg.SystemChannel) != "" {
 		return cfg.SystemChannel
 	}
-	if ch := strings.TrimSpace(os.Getenv("SYSTEM_CHANNEL")); ch != "" {
-		return ch
+	if sc := strings.TrimSpace(os.Getenv("SYSTEM_CHANNEL")); sc != "" {
+		return sc
 	}
 	return "aerial-dev"
 }
 
-func LoadConfig() (Config, error) {
-	return LoadConfigFromPaths(ConfigSearchPaths...)
+func LoadConfigFromPaths(paths ...string) (*Config, error) {
+	data := DefaultConfigData()
+	var loadedPath string
+	var lastErr error
+
+	for _, p := range paths {
+		rawData, err := os.ReadFile(p)
+		if err != nil || len(bytes.TrimSpace(rawData)) == 0 {
+			continue
+		}
+
+		expanded := os.ExpandEnv(string(rawData))
+		var parsed ConfigData
+		if err := yaml.Unmarshal([]byte(expanded), &parsed); err != nil {
+			log.Printf("[Config] Warning: Failed to parse %s: %v. Checking fallback search paths...", p, err)
+			lastErr = fmt.Errorf("failed to parse %s: %w", p, err)
+			continue
+		}
+
+		if err := validateChannels(&parsed, p); err != nil {
+			log.Printf("[Config] Warning: Validation error for %s: %v. Checking fallback search paths...", p, err)
+			lastErr = err
+			continue
+		}
+
+		loadedPath = p
+		data = &parsed
+		if target := "/data/.config.yaml.lkgc"; p != target {
+			_ = writeAtomic(target, string(rawData))
+		}
+		break
+	}
+
+	if loadedPath == "" {
+		if lastErr != nil {
+			log.Printf("[Config] Retaining Last Known Good Configuration (LKGC) due to load error: %v", lastErr)
+			fallback := activeGlobalConfig.Current()
+			cloned := cloneConfigData(fallback)
+			applyEnvironmentOverrides(cloned)
+			activeGlobalConfig.update(cloned)
+			return activeGlobalConfig, lastErr
+		}
+		// No files found and no parse errors: apply defaults + env overrides
+		applyEnvironmentOverrides(data)
+		activeGlobalConfig.update(data)
+		return activeGlobalConfig, nil
+	}
+
+	applyEnvironmentOverrides(data)
+	activeGlobalConfig.update(data)
+	log.Printf("[Config] Successfully loaded configuration from %s (model=%s, timezone=%s, channel=%s)",
+		loadedPath, data.Model, data.Timezone, data.SystemChannel)
+	return activeGlobalConfig, nil
 }
 
-func LoadConfigFromPaths(paths ...string) (Config, error) {
-	fallback := getFallbackDefaults()
-
-	runtimeConfigMu.Lock()
-	if currentRuntimeConfig.Model == "" {
-		currentRuntimeConfig = fallback
-	}
-	runtimeConfigMu.Unlock()
-
-	var targetPath string
-	var rawData []byte
-	for _, p := range paths {
-		if data, err := os.ReadFile(p); err == nil && len(bytes.TrimSpace(data)) > 0 {
-			targetPath = p
-			rawData = data
-			break
-		}
-	}
-
-	if targetPath == "" {
-		return GetRuntimeConfig(), nil
-	}
-
-	expanded := os.ExpandEnv(string(rawData))
-	var parsed Config
-	if err := yaml.Unmarshal([]byte(expanded), &parsed); err != nil {
-		log.Printf("[Config] Warning: Failed to parse %s: %v. Retaining Last Known Good Configuration (LKGC).", targetPath, err)
-		return GetRuntimeConfig(), fmt.Errorf("failed to parse %s: %w", targetPath, err)
-	}
-
-	// Validate channels.default existence
+func validateChannels(parsed *ConfigData, targetPath string) error {
 	if parsed.Channels == nil {
-		log.Printf("[Config] Validation error: channels.default is required in %s. Retaining Last Known Good Configuration (LKGC).", targetPath)
-		return GetRuntimeConfig(), fmt.Errorf("channels.default is required")
+		log.Printf("[Config] Validation error: channels.default is required in %s.", targetPath)
+		return fmt.Errorf("channels.default is required")
 	}
 
 	defPolicy, hasDefault := parsed.Channels["default"]
@@ -327,20 +558,20 @@ func LoadConfigFromPaths(paths ...string) (Config, error) {
 	}
 
 	if !hasDefault {
-		log.Printf("[Config] Validation error: channels.default is required in %s. Retaining Last Known Good Configuration (LKGC).", targetPath)
-		return GetRuntimeConfig(), fmt.Errorf("channels.default is required")
+		log.Printf("[Config] Validation error: channels.default is required in %s.", targetPath)
+		return fmt.Errorf("channels.default is required")
 	}
 
 	defMode := strings.ToLower(strings.TrimSpace(defPolicy.Mode))
 	if defMode != "threads" && defMode != "channel" && defMode != "ignore" && defMode != "disabled" {
-		log.Printf("[Config] Validation error: channels.default mode must be 'threads', 'channel', 'ignore', or 'disabled', got %q in %s. Retaining Last Known Good Configuration (LKGC).", defPolicy.Mode, targetPath)
-		return GetRuntimeConfig(), fmt.Errorf("channels.default mode must be 'threads', 'channel', 'ignore', or 'disabled', got %q", defPolicy.Mode)
+		log.Printf("[Config] Validation error: channels.default mode must be 'threads', 'channel', 'ignore', or 'disabled', got %q in %s.", defPolicy.Mode, targetPath)
+		return fmt.Errorf("channels.default mode must be 'threads', 'channel', 'ignore', or 'disabled', got %q", defPolicy.Mode)
 	}
 
 	if defPolicy.AmbientWakeThreshold != nil {
 		if *defPolicy.AmbientWakeThreshold < 0.0 || *defPolicy.AmbientWakeThreshold > 1.0 {
-			log.Printf("[Config] Validation error: channels.default ambient_wake_threshold must be between 0.0 and 1.0, got %f in %s. Retaining Last Known Good Configuration (LKGC).", *defPolicy.AmbientWakeThreshold, targetPath)
-			return GetRuntimeConfig(), fmt.Errorf("channels.default ambient_wake_threshold must be between 0.0 and 1.0, got %f", *defPolicy.AmbientWakeThreshold)
+			log.Printf("[Config] Validation error: channels.default ambient_wake_threshold must be between 0.0 and 1.0, got %f in %s.", *defPolicy.AmbientWakeThreshold, targetPath)
+			return fmt.Errorf("channels.default ambient_wake_threshold must be between 0.0 and 1.0, got %f", *defPolicy.AmbientWakeThreshold)
 		}
 	}
 
@@ -349,15 +580,14 @@ func LoadConfigFromPaths(paths ...string) (Config, error) {
 		if wLower != "mention" && wLower != "mentions" && wLower != "direct" &&
 			wLower != "classifier" && wLower != "ambient" &&
 			wLower != "all" && wLower != "always" {
-			log.Printf("[Config] Validation error: channels.default wake_mode must be 'mention', 'classifier', or 'all', got %q in %s. Retaining Last Known Good Configuration (LKGC).", defPolicy.WakeMode, targetPath)
-			return GetRuntimeConfig(), fmt.Errorf("channels.default wake_mode must be 'mention', 'classifier', or 'all', got %q", defPolicy.WakeMode)
+			log.Printf("[Config] Validation error: channels.default wake_mode must be 'mention', 'classifier', or 'all', got %q in %s.", defPolicy.WakeMode, targetPath)
+			return fmt.Errorf("channels.default wake_mode must be 'mention', 'classifier', or 'all', got %q", defPolicy.WakeMode)
 		}
 		defPolicy.WakeMode = defPolicy.GetWakeMode()
 	}
 
 	parsed.Channels["default"] = defPolicy
 
-	// Normalize and validate other channels
 	for k, policy := range parsed.Channels {
 		if k == "default" {
 			continue
@@ -365,15 +595,15 @@ func LoadConfigFromPaths(paths ...string) (Config, error) {
 		if policy.Mode != "" {
 			modeLower := strings.ToLower(strings.TrimSpace(policy.Mode))
 			if modeLower != "threads" && modeLower != "channel" && modeLower != "ignore" && modeLower != "disabled" {
-				log.Printf("[Config] Validation error: channel %q mode must be 'threads', 'channel', 'ignore', or 'disabled', got %q in %s. Retaining Last Known Good Configuration (LKGC).", k, policy.Mode, targetPath)
-				return GetRuntimeConfig(), fmt.Errorf("channel %q mode must be 'threads', 'channel', 'ignore', or 'disabled', got %q", k, policy.Mode)
+				log.Printf("[Config] Validation error: channel %q mode must be 'threads', 'channel', 'ignore', or 'disabled', got %q in %s.", k, policy.Mode, targetPath)
+				return fmt.Errorf("channel %q mode must be 'threads', 'channel', 'ignore', or 'disabled', got %q", k, policy.Mode)
 			}
 			policy.Mode = modeLower
 		}
 		if policy.AmbientWakeThreshold != nil {
 			if *policy.AmbientWakeThreshold < 0.0 || *policy.AmbientWakeThreshold > 1.0 {
-				log.Printf("[Config] Validation error: channel %q ambient_wake_threshold must be between 0.0 and 1.0, got %f in %s. Retaining Last Known Good Configuration (LKGC).", k, *policy.AmbientWakeThreshold, targetPath)
-				return GetRuntimeConfig(), fmt.Errorf("channel %q ambient_wake_threshold must be between 0.0 and 1.0, got %f", k, *policy.AmbientWakeThreshold)
+				log.Printf("[Config] Validation error: channel %q ambient_wake_threshold must be between 0.0 and 1.0, got %f in %s.", k, *policy.AmbientWakeThreshold, targetPath)
+				return fmt.Errorf("channel %q ambient_wake_threshold must be between 0.0 and 1.0, got %f", k, *policy.AmbientWakeThreshold)
 			}
 		}
 		if policy.WakeMode != "" {
@@ -381,54 +611,27 @@ func LoadConfigFromPaths(paths ...string) (Config, error) {
 			if wLower != "mention" && wLower != "mentions" && wLower != "direct" &&
 				wLower != "classifier" && wLower != "ambient" &&
 				wLower != "all" && wLower != "always" {
-				log.Printf("[Config] Validation error: channel %q wake_mode must be 'mention', 'classifier', or 'all', got %q in %s. Retaining Last Known Good Configuration (LKGC).", k, policy.WakeMode, targetPath)
-				return GetRuntimeConfig(), fmt.Errorf("channel %q wake_mode must be 'mention', 'classifier', or 'all', got %q", k, policy.WakeMode)
+				log.Printf("[Config] Validation error: channel %q wake_mode must be 'mention', 'classifier', or 'all', got %q in %s.", k, policy.WakeMode, targetPath)
+				return fmt.Errorf("channel %q wake_mode must be 'mention', 'classifier', or 'all', got %q", k, policy.WakeMode)
 			}
 			policy.WakeMode = policy.GetWakeMode()
 		}
 		parsed.Channels[k] = policy
 	}
-
-	if strings.TrimSpace(parsed.Model) == "" {
-		parsed.Model = fallback.Model
-	}
-	if strings.TrimSpace(parsed.Timezone) == "" {
-		parsed.Timezone = fallback.Timezone
-	}
-	if strings.TrimSpace(parsed.SystemChannel) == "" {
-		parsed.SystemChannel = fallback.SystemChannel
-	}
-	if strings.TrimSpace(parsed.GitSync.Interval) == "" {
-		parsed.GitSync.Interval = fallback.GitSync.Interval
-	}
-	if strings.TrimSpace(parsed.GitSync.ConfigRepoUrl) == "" {
-		parsed.GitSync.ConfigRepoUrl = fallback.GitSync.ConfigRepoUrl
-	}
-	if len(parsed.GitSync.Repositories) == 0 {
-		parsed.GitSync.Repositories = fallback.GitSync.Repositories
-	}
-	if parsed.AdminUsers == nil {
-		parsed.AdminUsers = []string{}
-	}
-
-	runtimeConfigMu.Lock()
-	currentRuntimeConfig = parsed
-	runtimeConfigMu.Unlock()
-
-	// Persist durable on-disk LKGC to survive cold starts and container recycles
-	if targetPath != "/data/.config.yaml.lkgc" {
-		_ = writeAtomic("/data/.config.yaml.lkgc", string(rawData))
-	}
-
-	log.Printf("[Config] Successfully loaded configuration from %s (model=%s, timezone=%s, channel=%s)",
-		targetPath, parsed.Model, parsed.Timezone, parsed.SystemChannel)
-
-	return parsed, nil
+	return nil
 }
 
-// IsAdmin checks if any of the given identifiers (userID, username, globalName) match cfg.AdminUsers.
-func (c Config) IsAdmin(identifiers ...string) bool {
-	if len(c.AdminUsers) == 0 {
+type Options struct {
+	Port         int             `json:"port"`
+	AgyBin       string          `json:"agy_bin"`
+	ApiKey       string          `json:"api_key"`
+	Model        string          `json:"model"`
+	SystemPrompt string          `json:"system_prompt"`
+	McpConfig    json.RawMessage `json:"mcp_config"`
+}
+
+func IsAdmin(adminUsers []string, identifiers ...string) bool {
+	if len(adminUsers) == 0 {
 		return false
 	}
 	for _, id := range identifiers {
@@ -436,7 +639,7 @@ func (c Config) IsAdmin(identifiers ...string) bool {
 		if trimmedID == "" {
 			continue
 		}
-		for _, admin := range c.AdminUsers {
+		for _, admin := range adminUsers {
 			trimmedAdmin := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(admin)), "@")
 			if trimmedAdmin == trimmedID {
 				return true
@@ -446,11 +649,8 @@ func (c Config) IsAdmin(identifiers ...string) bool {
 	return false
 }
 
-// ResolveChannelPolicy resolves the effective ChannelPolicy for a given channel ID or name.
-// Lookup hierarchy: Channel Snowflake ID -> Channel Name (case-insensitive, '#' stripped) -> channels["default"].
-// Any unspecified field inherits from channels["default"].
-func (c Config) ResolveChannelPolicy(channelID, channelName string) ChannelPolicy {
-	def, hasDef := c.getChannelPolicyRaw("default")
+func ResolveChannelPolicy(channels map[string]ChannelPolicy, channelID, channelName string) ChannelPolicy {
+	def, hasDef := getChannelPolicyRaw(channels, "default")
 	if !hasDef {
 		defaultIgnoreBots := true
 		def = ChannelPolicy{
@@ -466,24 +666,20 @@ func (c Config) ResolveChannelPolicy(channelID, channelName string) ChannelPolic
 	var matched ChannelPolicy
 	var found bool
 
-	// 1. Match by Snowflake ID
 	if normID := strings.TrimSpace(channelID); normID != "" {
-		matched, found = c.getChannelPolicyRaw(normID)
+		matched, found = getChannelPolicyRaw(channels, normID)
 	}
 
-	// 2. Match by Channel Name (in-memory map key normalization)
 	if !found {
 		if normName := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(channelName)), "#"); normName != "" {
-			matched, found = c.getChannelPolicyRaw(normName)
+			matched, found = getChannelPolicyRaw(channels, normName)
 		}
 	}
 
-	// 3. Fallback to default
 	if !found {
 		return def
 	}
 
-	// Apply inheritance from def to matched
 	res := matched
 	if res.Mode == "" {
 		res.Mode = def.Mode
@@ -508,20 +704,54 @@ func (c Config) ResolveChannelPolicy(channelID, channelName string) ChannelPolic
 	return res
 }
 
-func (c Config) getChannelPolicyRaw(key string) (ChannelPolicy, bool) {
-	if len(c.Channels) == 0 || key == "" {
+func getChannelPolicyRaw(channels map[string]ChannelPolicy, key string) (ChannelPolicy, bool) {
+	if len(channels) == 0 || key == "" {
 		return ChannelPolicy{}, false
 	}
-	if p, ok := c.Channels[key]; ok {
+	if p, ok := channels[key]; ok {
 		return p, true
 	}
 	normKey := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(key)), "#")
-	for k, v := range c.Channels {
+	for k, v := range channels {
 		if strings.TrimPrefix(strings.ToLower(strings.TrimSpace(k)), "#") == normKey {
 			return v, true
 		}
 	}
 	return ChannelPolicy{}, false
+}
+
+func (c *Config) ResolveChannelPolicy(channelID, channelName string) ChannelPolicy {
+	return ResolveChannelPolicy(c.Current().Channels, channelID, channelName)
+}
+
+func (c *Config) IsAdmin(identifiers ...string) bool {
+	return IsAdmin(c.Current().AdminUsers, identifiers...)
+}
+
+func (c *Config) getChannelPolicyRaw(key string) (ChannelPolicy, bool) {
+	return getChannelPolicyRaw(c.Current().Channels, key)
+}
+
+// Deprecated: Shim for backward compatibility during migration.
+func (c ConfigData) ResolveChannelPolicy(channelID, channelName string) ChannelPolicy {
+	return ResolveChannelPolicy(c.Channels, channelID, channelName)
+}
+
+// Deprecated: Shim for backward compatibility during migration.
+func (c ConfigData) IsAdmin(identifiers ...string) bool {
+	return IsAdmin(c.AdminUsers, identifiers...)
+}
+
+func getEnv(key, defaultVal string) string {
+	if val := os.Getenv(key); val != "" {
+		return val
+	}
+	return defaultVal
+}
+
+// Deprecated: GetEnv is deprecated. Subpackages should read from cfg.Current().
+func GetEnv(key, defaultVal string) string {
+	return getEnv(key, defaultVal)
 }
 
 // NormalizeChannelName standardizes channel names for config key and file lookups.
@@ -596,13 +826,6 @@ func LoadChannelInstructions(channelName string) string {
 		}
 	}
 	return ""
-}
-
-func GetEnv(key, defaultVal string) string {
-	if val := os.Getenv(key); val != "" {
-		return val
-	}
-	return defaultVal
 }
 
 func isTestEnvironment() bool {

@@ -1,10 +1,31 @@
 package sanitizer
 
 import (
-	"os"
 	"strings"
 	"testing"
+
+	"github.com/azylman/aerial/brain/pkg/config"
 )
+
+func TestSanitizer_RegisterConfigTokens(t *testing.T) {
+	ResetSensitiveTokens()
+	cfg := config.NewFromData(&config.ConfigData{
+		APIKey:       "gemini_secret_api_key_12345",
+		DiscordToken: "discord_token_secret_abcdef",
+		GitHubPAT:    "ghp_testpersonalaccesstoken123456",
+		DatabaseURL:  "postgres://aerial:supersecretpass@localhost:5432/aerial",
+	})
+	RegisterConfigTokens(cfg)
+
+	input := "Error calling Gemini with key gemini_secret_api_key_12345 and db pass supersecretpass"
+	sanitized := SanitizeString(input)
+	if strings.Contains(sanitized, "gemini_secret_api_key_12345") {
+		t.Errorf("APIKey was not sanitized: %s", sanitized)
+	}
+	if strings.Contains(sanitized, "supersecretpass") {
+		t.Errorf("Database password was not sanitized: %s", sanitized)
+	}
+}
 
 func TestSanitizeString_Tokens(t *testing.T) {
 	tests := []struct {
@@ -144,28 +165,20 @@ func TestSanitizeString_Tokens(t *testing.T) {
 	}
 }
 
-func TestSanitizeString_EnvironmentSecrets(t *testing.T) {
-	// Set custom secret environment variables
-	os.Setenv("GEMINI_API_KEY", "custom_gemini_secret_key_999")
-	os.Setenv("CUSTOM_SERVICE_TOKEN", "super_secret_dynamic_token_xyz")
-	os.Setenv("MODE", "production") // Should NOT be redacted (in denylist)
-	RefreshEnvironmentSecrets()
+func TestSanitizeString_RegisteredTokens(t *testing.T) {
+	ResetSensitiveTokens()
+	defer ResetSensitiveTokens()
 
-	defer func() {
-		os.Unsetenv("GEMINI_API_KEY")
-		os.Unsetenv("CUSTOM_SERVICE_TOKEN")
-		os.Unsetenv("MODE")
-		RefreshEnvironmentSecrets()
-	}()
+	RegisterSensitiveTokens("custom_gemini_secret_key_999", "super_secret_dynamic_token_xyz")
 
 	input := "Request failed with key custom_gemini_secret_key_999 and token super_secret_dynamic_token_xyz in production mode"
 	got := SanitizeString(input)
 
 	if strings.Contains(got, "custom_gemini_secret_key_999") {
-		t.Errorf("expected GEMINI_API_KEY to be redacted, got: %s", got)
+		t.Errorf("expected custom_gemini_secret_key_999 to be redacted, got: %s", got)
 	}
 	if strings.Contains(got, "super_secret_dynamic_token_xyz") {
-		t.Errorf("expected CUSTOM_SERVICE_TOKEN to be redacted, got: %s", got)
+		t.Errorf("expected super_secret_dynamic_token_xyz to be redacted, got: %s", got)
 	}
 	if !strings.Contains(got, "production") {
 		t.Errorf("expected production word to NOT be redacted, got: %s", got)
