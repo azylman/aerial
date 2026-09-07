@@ -157,7 +157,8 @@ type ConfigData struct {
 	DiscordToken    string                     `yaml:"discord_token" json:"discord_token"`
 	GitHubPAT       string                     `yaml:"github_pat" json:"github_pat"`
 	Ollama          OllamaConfig               `yaml:"ollama" json:"ollama"`
-	ClassifierModel string                     `yaml:"classifier_model" json:"classifier_model"`
+	LowEffortModel  string                     `yaml:"low_effort_model" json:"low_effort_model"`
+	ClassifierModel string                     `yaml:"classifier_model,omitempty" json:"classifier_model,omitempty"` // Deprecated alias
 }
 
 func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
@@ -178,6 +179,7 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 		DiscordToken    string                     `yaml:"discord_token"`
 		GitHubPAT       string                     `yaml:"github_pat"`
 		Ollama          OllamaConfig               `yaml:"ollama"`
+		LowEffortModel  string                     `yaml:"low_effort_model"`
 		ClassifierModel string                     `yaml:"classifier_model"`
 	}
 
@@ -203,6 +205,11 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 	c.DiscordToken = raw.DiscordToken
 	c.GitHubPAT = raw.GitHubPAT
 	c.Ollama = raw.Ollama
+	c.LowEffortModel = strings.TrimSpace(raw.LowEffortModel)
+	if c.LowEffortModel == "" && strings.TrimSpace(raw.ClassifierModel) != "" {
+		c.LowEffortModel = strings.TrimSpace(raw.ClassifierModel)
+		log.Printf("[Config] Warning: 'classifier_model' key in config is deprecated; please rename to 'low_effort_model'")
+	}
 	c.ClassifierModel = raw.ClassifierModel
 
 	if raw.McpServers != nil {
@@ -286,6 +293,7 @@ func DefaultConfigData() *ConfigData {
 		McpServers:      make(map[string]json.RawMessage),
 		Port:            "8080",
 		AgyBin:          "agy",
+		LowEffortModel:  "Gemini 3.8 Flash (Low)",
 		ClassifierModel: "Gemini 3.8 Flash (Low)",
 		Ollama: OllamaConfig{
 			BaseURL:     "http://ollama:11434",
@@ -429,8 +437,9 @@ func applyEnvironmentOverrides(data *ConfigData) {
 	if sc := getEnv("SYSTEM_CHANNEL", ""); sc != "" {
 		data.SystemChannel = sc
 	}
-	if cm := getEnv("AMBIENT_CLASSIFIER_MODEL", getEnv("CLASSIFIER_MODEL", "")); cm != "" {
-		data.ClassifierModel = cm
+	if lem := getEnv("LOW_EFFORT_MODEL", getEnv("AMBIENT_CLASSIFIER_MODEL", getEnv("CLASSIFIER_MODEL", ""))); lem != "" {
+		data.LowEffortModel = lem
+		data.ClassifierModel = lem
 	}
 	if ou := getEnv("OLLAMA_URL", ""); ou != "" {
 		data.Ollama.BaseURL = ou
@@ -564,6 +573,14 @@ func LoadConfigFromPaths(paths ...string) (*Config, error) {
 }
 
 func validateChannels(parsed *ConfigData, targetPath string) error {
+	if strings.TrimSpace(parsed.Model) == "" {
+		parsed.Model = DefaultConfigData().Model
+	}
+	if strings.TrimSpace(parsed.LowEffortModel) == "" {
+		parsed.LowEffortModel = DefaultConfigData().LowEffortModel
+		parsed.ClassifierModel = DefaultConfigData().LowEffortModel
+	}
+
 	if parsed.Channels == nil {
 		log.Printf("[Config] Validation error: channels.default is required in %s.", targetPath)
 		return fmt.Errorf("channels.default is required")

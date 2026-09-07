@@ -393,12 +393,19 @@ func (c *Classifier) classifyWithPrompt(ctx context.Context, prompt string) Clas
 
 	model := c.Model
 	if c.cfg != nil {
-		if cur := c.cfg.Current(); cur != nil && cur.ClassifierModel != "" {
-			model = cur.ClassifierModel
+		if cur := c.cfg.Current(); cur != nil {
+			if strings.TrimSpace(cur.LowEffortModel) != "" {
+				model = cur.LowEffortModel
+			} else if strings.TrimSpace(cur.ClassifierModel) != "" {
+				model = cur.ClassifierModel
+			}
 		}
 	}
-	if model == "" {
-		model = "Gemini 3.8 Flash (Low)"
+	if strings.TrimSpace(model) == "" {
+		return ClassificationResult{
+			Confidence: 0.0,
+			Reason:     "classifier error: low_effort_model is not configured",
+		}
 	}
 
 	c.mu.Lock()
