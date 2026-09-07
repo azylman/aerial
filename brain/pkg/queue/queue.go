@@ -44,7 +44,7 @@ var (
 )
 
 const (
-	DefaultMaxSessionTurns = 10
+	DefaultMaxSessionTurns = 15
 	DefaultTimeoutMinutes  = 60
 	ContinuationPromptTemplate = "Your previous execution timed out or was interrupted while working. Please inspect where you left off in the conversation transcript and continue the task to completion.\n\nOriginal user request:\n%s"
 )
@@ -1241,20 +1241,21 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		}
 	}
 
+	// Pre-execution turn limit rotation check (applies to both channel and thread modes)
+	// Run BEFORE IncrementSessionTurnCount to prevent premature rotation and double-rotation.
+	currentTurns, _ := db.GetSessionTurnCount(p.cfg.DB, threadID)
+	if currentTurns >= DefaultMaxSessionTurns {
+		log.Printf("[Queue] Scope session reached turn limit (%d/%d). Resetting to cold state for fresh session initialization.", currentTurns, DefaultMaxSessionTurns)
+		_ = db.RotateSessionID(p.cfg.DB, threadID, "")
+		currentSessionID = ""
+	}
+
 	if strings.ToLower(policy.Mode) != "channel" {
 		var incErr error
 		turnCount, incErr = db.IncrementSessionTurnCount(p.cfg.DB, threadID)
 		if incErr != nil {
 			log.Printf("[Queue] Error incrementing turn count for thread %s: %v", threadID, incErr)
 		}
-	}
-
-	// Pre-execution turn limit rotation check (applies to both channel and thread modes)
-	currentTurns, _ := db.GetSessionTurnCount(p.cfg.DB, threadID)
-	if currentTurns >= DefaultMaxSessionTurns {
-		log.Printf("[Queue] Scope session reached turn limit (%d/%d). Resetting to cold state for fresh session initialization.", currentTurns, DefaultMaxSessionTurns)
-		_ = db.RotateSessionID(p.cfg.DB, threadID, "")
-		currentSessionID = ""
 	}
 
 	basePrompt := CoalesceBurstPrompt(burst)
@@ -1471,10 +1472,11 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		if isFailure {
 			// Cold-Start Dynamic Session Latching:
 			// If this was a cold start (currentSessionID was empty), extract the active conversation UUID
-			// discovered in stderr during execution so retries can resume on the existing transcript.
+			// discovered in output during execution so retries can resume on the existing transcript.
 			if currentSessionID == "" && !isSessionCorruption {
-				if extSess := runner.ExtractSessionID(stderr, execStart); extSess != "" && session.SessionExistsOnDisk(extSess) {
-					log.Printf("[Queue] Latched active session from stderr on failure (attempt %d/%d) for thread %s: %s", attempt, maxAttempts, threadID, extSess)
+				combinedOutput := stdout + "\n" + stderr
+				if extSess := runner.ExtractSessionID(combinedOutput, execStart); extSess != "" && session.SessionExistsOnDisk(extSess) {
+					log.Printf("[Queue] Latched active session from output on failure (attempt %d/%d) for thread %s: %s", attempt, maxAttempts, threadID, extSess)
 					currentSessionID = extSess
 					_ = db.SaveSessionID(p.cfg.DB, threadID, currentSessionID)
 				}
@@ -1501,7 +1503,8 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 
 				// Cold-start dynamic session latching if available
 				if currentSessionID == "" && !isSessionCorruption {
-					if extSess := runner.ExtractSessionID(stderr, execStart); extSess != "" && session.SessionExistsOnDisk(extSess) {
+					combinedOutput := stdout + "\n" + stderr
+					if extSess := runner.ExtractSessionID(combinedOutput, execStart); extSess != "" && session.SessionExistsOnDisk(extSess) {
 						currentSessionID = extSess
 						_ = db.SaveSessionID(p.cfg.DB, threadID, currentSessionID)
 					}
@@ -1651,7 +1654,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 			} else {
 				extSess := resp.ConversationID
 				if extSess == "" {
-					extSess = runner.ExtractSessionID(stderr, execStart)
+					extSess = runner.ExtractSessionID(stdout+"\n"+stderr, execStart)
 				}
 				if currentSessionID == "" && (extSess == "" || !runner.IsValidUUID(extSess)) {
 					isFailure = true
