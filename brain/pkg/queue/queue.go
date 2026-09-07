@@ -209,6 +209,8 @@ type threadWorkerState struct {
 }
 
 type WorkerPool struct {
+	appCfg           *config.Config
+	overrideModel    string
 	cfg              WorkerPoolConfig
 	mu               sync.Mutex
 	threadChs        map[string]*threadWorkerState
@@ -219,7 +221,18 @@ type WorkerPool struct {
 	quotaLockedUntil atomic.Int64
 }
 
-func NewWorkerPool(cfg WorkerPoolConfig) *WorkerPool {
+// New creates a new WorkerPool with pure *config.Config dependency injection.
+func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
+	if appCfg == nil {
+		def := config.DefaultConfigData()
+		if cfg.Model != "" {
+			def.Model = cfg.Model
+		}
+		if cfg.SystemPrompt != "" {
+			def.SystemPrompt = cfg.SystemPrompt
+		}
+		appCfg = config.NewFromData(def)
+	}
 	if cfg.TimeoutMinutes <= 0 {
 		cfg.TimeoutMinutes = DefaultTimeoutMinutes
 	}
@@ -254,7 +267,7 @@ func NewWorkerPool(cfg WorkerPoolConfig) *WorkerPool {
 		cfg.TypingFunc = delivery.StartTyping
 	}
 	if cfg.MemoryClient == nil {
-		cfg.MemoryClient = memory.NewClient("")
+		cfg.MemoryClient = memory.New(appCfg)
 	}
 	if cfg.MemoryRetrieverFunc == nil {
 		cfg.MemoryRetrieverFunc = memory.RetrieveRelevantFacts
@@ -264,12 +277,29 @@ func NewWorkerPool(cfg WorkerPoolConfig) *WorkerPool {
 		if runnerFn == nil {
 			runnerFn = runner.RunAgy
 		}
+		apiKey := cfg.APIKey
+		agyBin := cfg.AgyBin
+		if appCfg != nil {
+			if cur := appCfg.Current(); cur != nil {
+				if cur.APIKey != "" {
+					apiKey = cur.APIKey
+				}
+				if cur.AgyBin != "" {
+					agyBin = cur.AgyBin
+				}
+			}
+		}
 		cfg.Classifier = classifier.NewClassifier(
-			classifier.WithLLMFunc(classifier.NewAgyLLMFunc(cfg.AgyBin, cfg.APIKey, runnerFn)),
+			classifier.WithLLMFunc(classifier.NewAgyLLMFunc(agyBin, apiKey, runnerFn)),
 		)
 	}
 	if cfg.ResolveChannelPolicy == nil {
 		cfg.ResolveChannelPolicy = func(channelID, channelName string) config.ChannelPolicy {
+			if appCfg != nil {
+				if cur := appCfg.Current(); cur != nil {
+					return cur.ResolveChannelPolicy(channelID, channelName)
+				}
+			}
 			return config.GetRuntimeConfig().ResolveChannelPolicy(channelID, channelName)
 		}
 	}
@@ -280,6 +310,7 @@ func NewWorkerPool(cfg WorkerPoolConfig) *WorkerPool {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	p := &WorkerPool{
+		appCfg:    appCfg,
 		cfg:       cfg,
 		threadChs: make(map[string]*threadWorkerState),
 		ctx:       ctx,
@@ -318,7 +349,15 @@ func NewWorkerPool(cfg WorkerPoolConfig) *WorkerPool {
 				if sess == nil {
 					return
 				}
-				sysChan := config.GetSystemChannel()
+				sysChan := ""
+				if p.appCfg != nil {
+					if cur := p.appCfg.Current(); cur != nil {
+						sysChan = cur.SystemChannel
+					}
+				}
+				if sysChan == "" {
+					sysChan = config.GetSystemChannel()
+				}
 
 				// Defensively sanitize snippet: rune-slice to 600 runes, escape code fences, and neutralize mentions
 				snippet := raw
@@ -343,6 +382,11 @@ func NewWorkerPool(cfg WorkerPoolConfig) *WorkerPool {
 	return p
 }
 
+// NewWorkerPool is a compatibility wrapper for New.
+func NewWorkerPool(cfg WorkerPoolConfig) *WorkerPool {
+	return New(nil, cfg)
+}
+
 func (p *WorkerPool) SetDiscordSession(s *discordgo.Session) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -359,14 +403,23 @@ func (p *WorkerPool) UpdateRuntimeConfig(model string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if strings.TrimSpace(model) != "" {
+		p.overrideModel = model
 		p.cfg.Model = model
 	}
-	log.Printf("[WorkerPool] Runtime config updated: model=%s", p.cfg.Model)
+	log.Printf("[WorkerPool] Runtime config updated: model=%s", model)
 }
 
 func (p *WorkerPool) GetRuntimeConfig() string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.overrideModel != "" {
+		return p.overrideModel
+	}
+	if p.appCfg != nil {
+		if cur := p.appCfg.Current(); cur != nil && cur.Model != "" {
+			return cur.Model
+		}
+	}
 	return p.cfg.Model
 }
 
@@ -801,7 +854,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		if r := recover(); r != nil {
 			log.Printf("[WorkerPool] Panic in processBurst for thread %s: %v", threadID, r)
 			stopTyping()
-			metrics.RecordTurnCompleted("panic", triggerType, p.cfg.Model, time.Since(execStart))
+			metrics.RecordTurnCompleted("panic", triggerType, p.GetRuntimeConfig(), time.Since(execStart))
 			errMsg := sanitizeErrorText(fmt.Sprintf("panic: %v", r))
 			for _, m := range burst {
 				_ = db.UpdateMessageStatus(p.cfg.DB, m.ID, db.StatusFailed, errMsg)
@@ -1209,7 +1262,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 	maxAttempts := p.cfg.MaxAttempts
 	lastErrDetail := ""
 	lastStderr := ""
-	currentModel := p.cfg.Model
+	currentModel := p.GetRuntimeConfig()
 
 	initialRetryCount := burst[0].RetryCount
 
@@ -1219,7 +1272,25 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		currentTimeout := p.cfg.TimeoutMinutes
 		currentAgyBin := p.cfg.AgyBin
 		currentAPIKey := p.cfg.APIKey
+		overrideModel := p.overrideModel
 		p.mu.Unlock()
+
+		if p.appCfg != nil {
+			if cur := p.appCfg.Current(); cur != nil {
+				if cur.Model != "" {
+					currentModel = cur.Model
+				}
+				if cur.APIKey != "" {
+					currentAPIKey = cur.APIKey
+				}
+				if cur.AgyBin != "" {
+					currentAgyBin = cur.AgyBin
+				}
+			}
+		}
+		if overrideModel != "" {
+			currentModel = overrideModel
+		}
 
 		// Global Quota Lockout Pre-check: if a quota pause is active across the pool and running in OAuth mode, fail-fast immediately
 		if currentAPIKey == "" {
@@ -1543,7 +1614,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 			for _, m := range burst {
 				_ = db.IncrementMessageRetry(p.cfg.DB, m.ID, errDetail)
 			}
-			notif := notifier.GenerateSessionResetMessage(p.cfg.AgyBin, p.cfg.APIKey)
+			notif := notifier.GenerateSessionResetMessage(currentAgyBin, currentAPIKey)
 			if !skipDiscord {
 				if err := p.cfg.DeliveryFunc(p.getDiscordSession(), threadID, notif); err != nil {
 					log.Printf("[WorkerPool] Failed to deliver session reset notice for thread %s: %v", threadID, err)
@@ -1713,7 +1784,19 @@ func RecoverInterrupted(database *sql.DB, pool *WorkerPool) {
 			if len([]rune(snippet)) > 60 {
 				snippet = string([]rune(snippet)[:57]) + "..."
 			}
-			notif := notifier.GeneratePoisonPillMessage(pool.cfg.AgyBin, pool.cfg.APIKey, snippet)
+			agyBin := pool.cfg.AgyBin
+			apiKey := pool.cfg.APIKey
+			if pool.appCfg != nil {
+				if cur := pool.appCfg.Current(); cur != nil {
+					if cur.AgyBin != "" {
+						agyBin = cur.AgyBin
+					}
+					if cur.APIKey != "" {
+						apiKey = cur.APIKey
+					}
+				}
+			}
+			notif := notifier.GeneratePoisonPillMessage(agyBin, apiKey, snippet)
 			if m.AuthorID != "http-client" {
 				if err := pool.cfg.DeliveryFunc(pool.getDiscordSession(), m.ThreadID, notif); err != nil {
 					log.Printf("[Startup Recovery] Failed to deliver poison pill notice for message %s: %v", m.ID, err)
