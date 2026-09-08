@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/azylman/aerial/brain/pkg/classifier"
 	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
 	"github.com/azylman/aerial/brain/pkg/metrics"
@@ -20,6 +21,8 @@ import (
 )
 
 var funnelCfg atomic.Pointer[config.Config]
+var funnelPool atomic.Pointer[queue.WorkerPool]
+var titleSummarizeSem = make(chan struct{}, 2)
 
 // SetFunnelConfig sets the active *config.Config for the Discord funnel.
 func SetFunnelConfig(cfg *config.Config) {
@@ -31,6 +34,18 @@ func currentFunnelConfig() *config.Config {
 		return c
 	}
 	return config.ActiveConfig()
+}
+
+// SetFunnelPool sets the active *queue.WorkerPool for the Discord funnel.
+func SetFunnelPool(pool *queue.WorkerPool) {
+	funnelPool.Store(pool)
+}
+
+func currentFunnelClassifier() *classifier.Classifier {
+	if pool := funnelPool.Load(); pool != nil {
+		return pool.Classifier()
+	}
+	return nil
 }
 
 const discordErrCodeThreadAlreadyCreated = 160004
@@ -126,7 +141,7 @@ func resolveGuildID(s *discordgo.Session, m *discordgo.Message) string {
 	return ""
 }
 
-func getOrCreateThreadID(s *discordgo.Session, m *discordgo.Message) (string, bool) {
+func getOrCreateThreadID(s *discordgo.Session, m *discordgo.Message, allowSummarize ...bool) (string, bool) {
 	if m == nil {
 		return "", false
 	}
@@ -165,7 +180,35 @@ func getOrCreateThreadID(s *discordgo.Session, m *discordgo.Message) (string, bo
 		}
 	}
 
-	title := deriveThreadTitle(m.Content)
+	shouldSummarize := true
+	if len(allowSummarize) > 0 {
+		shouldSummarize = allowSummarize[0]
+	}
+
+	title := ""
+	if shouldSummarize {
+		cls := currentFunnelClassifier()
+		if cls != nil {
+			select {
+			case titleSummarizeSem <- struct{}{}:
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				var sumErr error
+				title, sumErr = cls.SummarizeThreadTitle(ctx, m.Content)
+				cancel()
+				<-titleSummarizeSem
+				if sumErr != nil {
+					log.Printf("Thread title summarization skipped/failed for message %s: %v", m.ID, sumErr)
+					title = ""
+				}
+			default:
+				log.Printf("Thread title summarization semaphore full, falling back to deriveThreadTitle for message %s", m.ID)
+			}
+		}
+	}
+	if title == "" {
+		title = deriveThreadTitle(m.Content)
+	}
+
 	if s != nil && s.Token != "" {
 		thread, err := s.MessageThreadStart(m.ChannelID, m.ID, title, 1440)
 		if err != nil {
@@ -354,6 +397,7 @@ func connectDiscordFunnel(ctx context.Context, database *sql.DB, pool *queue.Wor
 	}
 	if pool != nil {
 		pool.SetDiscordSession(dg)
+		SetFunnelPool(pool)
 	}
 
 	dg.AddHandler(func(s *discordgo.Session, r *discordgo.Ready) {
@@ -738,7 +782,7 @@ func RunStartupCatchUpSweep(ctx context.Context, database *sql.DB, pool *queue.W
 				continue
 			}
 
-			targetThreadID, isThread := getOrCreateThreadID(s, m)
+			targetThreadID, isThread := getOrCreateThreadID(s, m, false)
 			sweepPolicy, _ := resolveEffectiveChannelPolicy(s, m.ChannelID)
 			prompt := buildDiscordPrompt(m, targetThreadID, sweepPolicy)
 

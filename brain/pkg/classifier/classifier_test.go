@@ -764,3 +764,60 @@ func TestClassifier_ConfigInjection(t *testing.T) {
 	}
 }
 
+func TestCleanThreadTitle(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{
+			input: `"Debugging Docker Build Cache"`,
+			want:  "Debugging Docker Build Cache",
+		},
+		{
+			input: "Title: Fix Go Test Race Condition.\nExtra text",
+			want:  "Fix Go Test Race Condition",
+		},
+		{
+			input: "<@123456789> What is the API limit?",
+			want:  "What is the API limit",
+		},
+		{
+			input: "  Summary:   `Refactoring Database Connection Pool`   ",
+			want:  "Refactoring Database Connection Pool",
+		},
+		{
+			input: "This is a super long title that exceeds the eighty character limit for Discord thread titles and should be truncated cleanly with ellipsis at the end",
+			want:  "This is a super long title that exceeds the eighty character limit for Discor...",
+		},
+	}
+
+	for _, tt := range tests {
+		got := CleanThreadTitle(tt.input)
+		if got != tt.want {
+			t.Errorf("CleanThreadTitle(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestSummarizeThreadTitle(t *testing.T) {
+	var capturedPrompt string
+	c := NewClassifier(
+		WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
+			capturedPrompt = prompt
+			return "Fixing Go Test Failure", nil
+		}),
+	)
+
+	title, err := c.SummarizeThreadTitle(context.Background(), "<@123456> Why is the build failing?")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if title != "Fixing Go Test Failure" {
+		t.Errorf("expected 'Fixing Go Test Failure', got %q", title)
+	}
+	if !strings.Contains(capturedPrompt, "Why is the build failing?") {
+		t.Errorf("expected prompt to contain cleaned question, got %q", capturedPrompt)
+	}
+}
+
+

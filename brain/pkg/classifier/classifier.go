@@ -482,3 +482,79 @@ func (c *Classifier) ClassifyBurst(ctx context.Context, targetBurst []db.Message
 	prompt := BuildBurstPrompt(targetBurst, recentContext, customInstruction)
 	return c.classifyWithPrompt(ctx, prompt)
 }
+
+var (
+	reThreadTitlePreamble = regexp.MustCompile(`(?i)^(thread title|title|summary|topic|discussion):\s*`)
+	reDiscordMentions     = regexp.MustCompile(`<@[!&]?[0-9]+>|<#[0-9]+>|@everyone|@here`)
+)
+
+// CleanThreadTitle cleans and formats raw LLM text into a safe Discord thread title.
+func CleanThreadTitle(raw string) string {
+	cleaned := strings.TrimSpace(raw)
+	// Flatten multi-line outputs to first non-empty line
+	if lines := strings.Split(cleaned, "\n"); len(lines) > 0 {
+		for _, line := range lines {
+			if trimmed := strings.TrimSpace(line); trimmed != "" {
+				cleaned = trimmed
+				break
+			}
+		}
+	}
+
+	cleaned = reDiscordMentions.ReplaceAllString(cleaned, "")
+	cleaned = reThreadTitlePreamble.ReplaceAllString(cleaned, "")
+	cleaned = strings.Trim(cleaned, " \t\r\n\"'`*“”‘’")
+	cleaned = strings.TrimRight(cleaned, ".,!?:;-")
+	cleaned = strings.TrimSpace(cleaned)
+
+	runes := []rune(cleaned)
+	if len(runes) > 80 {
+		return string(runes[:77]) + "..."
+	}
+	return string(runes)
+}
+
+// SummarizeThreadTitle generates a concise <= 6-word title for a Discord thread using Flash Low.
+func (c *Classifier) SummarizeThreadTitle(ctx context.Context, question string) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if c.IsCircuitOpen() {
+		return "", fmt.Errorf("circuit breaker open")
+	}
+	if c.LLMFunc == nil {
+		return "", fmt.Errorf("no LLMFunc configured")
+	}
+
+	cleanedQuestion := strings.TrimSpace(reDiscordMentions.ReplaceAllString(question, ""))
+	if cleanedQuestion == "" {
+		return "", fmt.Errorf("empty question")
+	}
+
+	model := c.Model
+	if c.cfg != nil {
+		if cur := c.cfg.Current(); cur != nil && cur.ClassifierModel != "" {
+			model = cur.ClassifierModel
+		}
+	}
+	if model == "" {
+		model = "Gemini 3.8 Flash (Low)"
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	prompt := fmt.Sprintf("You are a Discord thread title generator.\nBased on the user's starting question, summarize the upcoming discussion in 6 words or less.\n\nRequirements:\n- 6 words or fewer.\n- Respond ONLY with the raw title text.\n- Do NOT include quotation marks, markdown formatting, preambles (e.g. 'Title:'), or trailing punctuation.\n\n<starting_question>\n%s\n</starting_question>", SanitizeContent(cleanedQuestion))
+
+	raw, err := c.LLMFunc(callCtx, model, prompt)
+	if err != nil {
+		return "", fmt.Errorf("thread title LLM call failed: %w", err)
+	}
+
+	title := CleanThreadTitle(raw)
+	if title == "" {
+		return "", fmt.Errorf("empty title after post-processing")
+	}
+	return title, nil
+}
+

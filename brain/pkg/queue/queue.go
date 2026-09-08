@@ -224,6 +224,14 @@ type WorkerPool struct {
 	scopeLocks       sync.Map
 }
 
+// Classifier returns the configured *classifier.Classifier instance.
+func (p *WorkerPool) Classifier() *classifier.Classifier {
+	if p == nil {
+		return nil
+	}
+	return p.cfg.Classifier
+}
+
 // New creates a new WorkerPool with pure *config.Config dependency injection.
 func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 	if cfg.Store == nil && cfg.DB != nil {
