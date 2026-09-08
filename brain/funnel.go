@@ -71,15 +71,24 @@ func isThreadAlreadyExistsError(err error) bool {
 	return strings.Contains(errStr, "160004") || strings.Contains(errStr, "already been created")
 }
 
+var mentionAndEmojiRegex = regexp.MustCompile(`(?i)<(@!?|@&|#|a?:[a-z0-9_]+:)[0-9]+>`)
+
 func deriveThreadTitle(content string) string {
-	re := regexp.MustCompile(`<@!?[0-9]+>`)
-	cleaned := re.ReplaceAllString(content, "")
+	cleaned := mentionAndEmojiRegex.ReplaceAllString(content, "")
 	cleaned = strings.TrimSpace(cleaned)
-	lines := strings.Split(cleaned, "\n")
-	firstLine := strings.TrimSpace(lines[0])
-	if firstLine == "" && len(lines) > 1 {
-		firstLine = strings.TrimSpace(lines[1])
+
+	var firstLine string
+	for _, line := range strings.Split(cleaned, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" {
+			firstLine = trimmed
+			break
+		}
 	}
+
+	firstLine = strings.TrimLeft(firstLine, "#> \t")
+	firstLine = strings.TrimSpace(firstLine)
+
 	if firstLine == "" {
 		firstLine = "Aerial Discussion"
 	}
