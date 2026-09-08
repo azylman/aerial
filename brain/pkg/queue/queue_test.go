@@ -78,17 +78,17 @@ func TestQueueSuccessLifecycleAndSessionSaving(t *testing.T) {
 
 	doneCh := make(chan struct{})
 
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	t.Setenv("USERPROFILE", tmpHome)
+
 	pool := NewWorkerPool(WorkerPoolConfig{
 		DB:             database,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
-			homeDir, _ := os.UserHomeDir()
-			if homeDir == "" {
-				homeDir = "/root"
-			}
-			sessDir := filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain", "f1111111-2222-3333-4444-555555555555")
+			sessDir := filepath.Join(tmpHome, ".gemini", "antigravity-cli", "brain", "f1111111-2222-3333-4444-555555555555")
 			_ = os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs"), 0755)
 			_ = os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte(`{"step_index":0}`+"\n"), 0644)
 			now := time.Now()
@@ -341,6 +341,10 @@ func TestQueueSessionCorruptionRecovery(t *testing.T) {
 	var mu sync.Mutex
 	doneCh := make(chan struct{})
 
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	t.Setenv("USERPROFILE", tmpHome)
+
 	pool := NewWorkerPool(WorkerPoolConfig{
 		DB:             database,
 		TimeoutMinutes: 1,
@@ -354,11 +358,7 @@ func TestQueueSessionCorruptionRecovery(t *testing.T) {
 			if sessionID == "a1111111-2222-3333-4444-555555555555" {
 				return "", "Error: failed to load conversation: session corrupted", 1, fmt.Errorf("corrupt")
 			}
-			homeDir, _ := os.UserHomeDir()
-			if homeDir == "" {
-				homeDir = "/root"
-			}
-			sessDir := filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain", "d8b5e679-7425-40de-944b-e07fc1f90ae7")
+			sessDir := filepath.Join(tmpHome, ".gemini", "antigravity-cli", "brain", "d8b5e679-7425-40de-944b-e07fc1f90ae7")
 			_ = os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs"), 0755)
 			_ = os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte(`{"step_index":0}`+"\n"), 0644)
 			now := time.Now()

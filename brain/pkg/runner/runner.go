@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"path"
 	"regexp"
 	"strings"
 	"sync"
@@ -388,6 +390,12 @@ func RunAgyWithWatchdog(parentCtx context.Context, agyBin, prompt, sessionID, ap
 
 	if agyBin == "" {
 		agyBin = "agy"
+	}
+
+	cleanBin := strings.ReplaceAll(agyBin, "\\", "/")
+	baseBin := strings.TrimSuffix(strings.ToLower(path.Base(cleanBin)), ".exe")
+	if baseBin == "agy" && isTestEnvironment() && os.Getenv("AERIAL_ALLOW_REAL_AGY") == "" {
+		return "", "", 1, fmt.Errorf("runner: real agy execution is blocked during testing (mock RunnerFunc or set AERIAL_ALLOW_REAL_AGY=1)")
 	}
 
 	outputFmt := opts.OutputFormat
@@ -955,4 +963,9 @@ func ExtractQuotaResetDuration(errDetail, stderr string) (time.Duration, bool) {
 		}
 	}
 	return 20 * time.Minute, false
+}
+
+// isTestEnvironment reports whether the binary is running under go test.
+func isTestEnvironment() bool {
+	return flag.Lookup("test.v") != nil
 }
