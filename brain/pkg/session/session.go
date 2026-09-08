@@ -16,16 +16,123 @@ import (
 // SourceAmbient represents ambient chat messages appended to session transcripts.
 const SourceAmbient = "AMBIENT"
 
-func FindLatestSessionDir(after time.Time) string {
+var (
+	defaultRootsMu sync.RWMutex
+	customRoots    []string
+)
+
+// SessionRoots returns a defensive copy of configured session roots.
+func SessionRoots() []string {
+	defaultRootsMu.RLock()
+	defer defaultRootsMu.RUnlock()
+	if len(customRoots) > 0 {
+		return append([]string(nil), customRoots...)
+	}
 	homeDir, err := os.UserHomeDir()
-	if err != nil {
+	if err != nil || homeDir == "" {
 		homeDir = "/root"
 	}
-	roots := []string{
+	return []string{
 		"/data/brain",
 		filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain"),
 		filepath.Join(homeDir, ".gemini", "antigravity", "brain"),
 	}
+}
+
+// SetSessionRoots sets custom session roots and returns a restore closure.
+func SetSessionRoots(roots ...string) func() {
+	defaultRootsMu.Lock()
+	orig := customRoots
+	customRoots = append([]string(nil), roots...)
+	defaultRootsMu.Unlock()
+	return func() {
+		defaultRootsMu.Lock()
+		customRoots = orig
+		defaultRootsMu.Unlock()
+	}
+}
+
+// GetSessionLastActivity returns the latest modification timestamp across all log files
+// (transcripts and background task logs) for a session ID.
+// Optional customRoots allow passing runner opts.TranscriptDirs or test directories directly.
+func GetSessionLastActivity(sessionID string, customRoots ...string) (time.Time, error) {
+	trimmed := strings.TrimSpace(sessionID)
+	// Security: Prevent path traversal
+	if trimmed == "" || strings.ContainsAny(trimmed, `/\:`) || strings.Contains(trimmed, "..") {
+		return time.Time{}, nil
+	}
+
+	roots := customRoots
+	if len(roots) == 0 {
+		roots = SessionRoots()
+	}
+
+	var latestTime time.Time
+	updateLatest := func(t time.Time) {
+		if t.After(latestTime) {
+			latestTime = t
+		}
+	}
+
+	for _, root := range roots {
+		if strings.TrimSpace(root) == "" {
+			continue
+		}
+		expandedRoot := root
+		if strings.Contains(expandedRoot, "%s") {
+			expandedRoot = fmt.Sprintf(expandedRoot, trimmed)
+		} else if strings.Contains(expandedRoot, "{session}") {
+			expandedRoot = strings.ReplaceAll(expandedRoot, "{session}", trimmed)
+		}
+
+		sessDir := filepath.Join(expandedRoot, trimmed)
+		if fi, err := os.Stat(sessDir); err != nil || !fi.IsDir() {
+			// Also check if expandedRoot is directly the session directory or points to .system_generated/logs
+			if fiRoot, errRoot := os.Stat(expandedRoot); errRoot == nil && fiRoot.IsDir() {
+				cleanExpanded := filepath.Clean(expandedRoot)
+				if filepath.Base(cleanExpanded) == trimmed {
+					sessDir = cleanExpanded
+				} else if strings.HasSuffix(cleanExpanded, filepath.Clean(filepath.Join(trimmed, ".system_generated", "logs"))) ||
+					strings.HasSuffix(cleanExpanded, filepath.Clean(filepath.Join(".system_generated", "logs"))) {
+					sessDir = filepath.Dir(filepath.Dir(cleanExpanded))
+				} else {
+					continue
+				}
+			} else {
+				continue
+			}
+		}
+
+		// 1. Transcripts in .system_generated/logs/
+		logsDir := filepath.Join(sessDir, ".system_generated", "logs")
+		for _, name := range []string{"transcript.jsonl", "transcript_full.jsonl"} {
+			if fi, err := os.Stat(filepath.Join(logsDir, name)); err == nil && !fi.IsDir() {
+				updateLatest(fi.ModTime())
+			}
+		}
+
+		// 2. Background task logs in .system_generated/tasks/*.log
+		tasksDir := filepath.Join(sessDir, ".system_generated", "tasks")
+		entries, err := os.ReadDir(tasksDir)
+		if err == nil {
+			for _, entry := range entries {
+				if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".log") {
+					continue
+				}
+				info, err := entry.Info()
+				if err != nil {
+					continue
+				}
+				updateLatest(info.ModTime())
+			}
+		}
+	}
+
+	return latestTime, nil
+}
+
+func FindLatestSessionDir(after time.Time) string {
+	roots := SessionRoots()
 	var newestID string
 	var newestTime time.Time
 	for _, root := range roots {
@@ -119,23 +226,14 @@ func DumpSessionDiagnosticLogs(convID string) string {
 }
 
 func getTargetDirs(convID string) []string {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		homeDir = "/root"
-	}
+	brainRoots := SessionRoots()
 
 	if convID != "" {
-		return []string{
-			filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain", convID),
-			filepath.Join(homeDir, ".gemini", "antigravity", "brain", convID),
-			filepath.Join("/data", "brain", convID),
+		var res []string
+		for _, root := range brainRoots {
+			res = append(res, filepath.Join(root, convID))
 		}
-	}
-
-	brainRoots := []string{
-		filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain"),
-		filepath.Join(homeDir, ".gemini", "antigravity", "brain"),
-		filepath.Join("/data", "brain"),
+		return res
 	}
 
 	var targetDirs []string
