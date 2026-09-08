@@ -51,7 +51,7 @@ services:
       - PORT=8080
       - DATABASE_URL=${DATABASE_URL:-postgres://${POSTGRES_USER:-aerial}:${POSTGRES_PASSWORD:-aerial_secure_pass}@postgres:5432/${POSTGRES_DB:-aerial}?sslmode=disable}
       - GEMINI_API_KEY=${GEMINI_API_KEY}
-      - AGY_MODEL=${AGY_MODEL:-Claude Sonnet 4.6 (Thinking)}
+      - AGY_MODEL=${AGY_MODEL:-Claude Opus 4.6 (Thinking)}
       - GITHUB_PAT=${GITHUB_PAT}
       - HA_TOKEN=${HA_TOKEN}
       - AERIAL_CONFIG_REPO_URL=${AERIAL_CONFIG_REPO_URL}
