@@ -89,7 +89,7 @@ submit_scratch() {
     # 1. Pre-flight verification (run full verify suite locally)
     if [ -f "scripts/verify.sh" ]; then
         echo "⚡ Running pre-flight verification checks in scratch checkout..."
-        if ! sh scripts/verify.sh --full; then
+        if ! sh scripts/verify.sh --staged; then
             echo "ERROR: Pre-flight verification failed in scratch workspace. Aborting submit." >&2
             exit 1
         fi

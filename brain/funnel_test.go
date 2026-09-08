@@ -1335,6 +1335,30 @@ func TestDeriveThreadTitle_ExtendedEdgeCases(t *testing.T) {
 	if !strings.HasSuffix(gotLong, "...") {
 		t.Errorf("Expected truncated title to end in '...', got %q", gotLong)
 	}
+
+	// Role, Channel & Custom Emoji scrubbing
+	if got := deriveThreadTitle("<@&99999> Fix docker build"); got != "Fix docker build" {
+		t.Errorf("Expected 'Fix docker build', got %q", got)
+	}
+	if got := deriveThreadTitle("<#88888> Check status"); got != "Check status" {
+		t.Errorf("Expected 'Check status', got %q", got)
+	}
+	if got := deriveThreadTitle("<:pepe:1234567> Unexpected panic"); got != "Unexpected panic" {
+		t.Errorf("Expected 'Unexpected panic', got %q", got)
+	}
+
+	// Leading markdown header & quote trimming
+	if got := deriveThreadTitle("### Critical outage on production"); got != "Critical outage on production" {
+		t.Errorf("Expected 'Critical outage on production', got %q", got)
+	}
+	if got := deriveThreadTitle("> Quoted prompt"); got != "Quoted prompt" {
+		t.Errorf("Expected 'Quoted prompt', got %q", got)
+	}
+
+	// Multi-line blank spacing beyond 2 lines
+	if got := deriveThreadTitle("\n\n\n   \n   Third line actual content"); got != "Third line actual content" {
+		t.Errorf("Expected 'Third line actual content', got %q", got)
+	}
 }
 
 func TestResolveGuildID_ExtendedEdgeCases(t *testing.T) {
