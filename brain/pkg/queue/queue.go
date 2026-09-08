@@ -1461,13 +1461,14 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		if err != nil && errDetail == "" {
 			errDetail = err.Error()
 		}
-		
-		if isFailure && isTransient && currentSessionID == "" {
+
+		if isFailure && isSessionCorruption && currentSessionID == "" {
 			lowerErr := strings.ToLower(errDetail + " " + stderr + " " + stdout)
-			if strings.Contains(lowerErr, "429") || strings.Contains(lowerErr, "too many requests") || strings.Contains(lowerErr, "quota exceeded") {
+			if strings.Contains(lowerErr, "context window") || strings.Contains(lowerErr, "context length") || strings.Contains(lowerErr, "maximum context length") || strings.Contains(lowerErr, "token limit exceeded") || strings.Contains(lowerErr, "prompt is too long") || strings.Contains(lowerErr, "request too large") {
+				isSessionCorruption = false
 				isTransient = false
-				errDetail = "cold start 429 token limit exceeded (hard failure)"
-				log.Printf("[Queue] Overriding 429 to non-transient hard failure on cold start for thread %s", threadID)
+				errDetail = "prompt length exceeds maximum model context window (hard failure)"
+				log.Printf("[Queue] Cold start context window exceeded for thread %s; converting to non-transient fail-fast", threadID)
 			}
 		}
 
@@ -1590,7 +1591,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 
 			isWatchdog := runner.IsInactivityTimeout(errDetail, stderr) || strings.Contains(errDetail, "[watchdog]") || strings.Contains(errDetail, "inactivity timeout exceeded") || strings.Contains(errDetail, "max duration exceeded")
 
-			errCat := "process_error"
+			errCat := "non_transient"
 			if isWatchdog {
 				errCat = "watchdog_timeout"
 			} else if isTransient {
@@ -1819,34 +1820,48 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 			continue
 		}
 
-		// Non-transient general failure
-		for _, m := range burst {
-			_ = db.IncrementMessageRetry(p.cfg.DB, m.ID, errDetail)
-		}
-		if currentSessionID != "" && !session.SessionExistsOnDisk(currentSessionID) {
+		// Non-transient hard failure: fail fast immediately on Attempt 1 without retries
+		stopTyping()
+
+		if currentSessionID != "" {
+			_ = db.RotateSessionID(p.cfg.DB, threadID, "")
 			currentSessionID = ""
 		}
-		if attempt < maxAttempts {
-			backoff := time.Duration(attempt) * p.cfg.BackoffBase
-			select {
-			case <-time.After(backoff):
-			case <-p.ctx.Done():
-				metrics.RecordTurnCompleted("cancelled", triggerType, currentModel, time.Since(execStart))
-				for _, m := range burst {
-					if m.ScheduleRunID != "" {
-						_ = db.UpdateScheduleRunStatus(p.cfg.DB, db.UpdateRunParams{
-							RunID:       m.ScheduleRunID,
-							MessageID:   m.ID,
-							Status:      "failed",
-							CompletedAt: time.Now().UTC(),
-							DurationMs:  time.Since(execStart).Milliseconds(),
-							Error:       "context cancelled during execution",
-						})
-					}
-				}
-				return
+
+		sanitizedErr := sanitizeErrorText(errDetail)
+		metrics.RecordTurnCompleted("failed", triggerType, currentModel, time.Since(execStart))
+
+		var notif string
+		if isRateLimitError(errDetail) {
+			notif = notifier.ModelUnavailableMessage()
+		} else {
+			notif = notifier.StaticFallback(fmt.Sprintf("execution failed with non-transient error: %s", errDetail))
+		}
+		if !skipDiscord {
+			if err := p.cfg.DeliveryFunc(p.getDiscordSession(), threadID, notif); err != nil {
+				log.Printf("[WorkerPool] Failed to deliver non-transient failure notice for thread %s: %v", threadID, err)
 			}
 		}
+
+		for _, m := range burst {
+			_ = db.IncrementMessageRetry(p.cfg.DB, m.ID, errDetail)
+			_ = db.UpdateMessageStatus(p.cfg.DB, m.ID, db.StatusFailed, sanitizedErr)
+			if m.ScheduleRunID != "" {
+				_ = db.UpdateScheduleRunStatus(p.cfg.DB, db.UpdateRunParams{
+					RunID:       m.ScheduleRunID,
+					MessageID:   m.ID,
+					Status:      "failed",
+					CompletedAt: time.Now().UTC(),
+					DurationMs:  time.Since(execStart).Milliseconds(),
+					Error:       sanitizedErr,
+				})
+			}
+			if p.cfg.OnMessageCompleted != nil {
+				p.cfg.OnMessageCompleted(m, db.StatusFailed)
+			}
+		}
+		log.Printf("[WorkerPool] %d message(s) in thread %s marked FAILED due to non-transient error (attempt %d/%d): %s", len(burst), threadID, attempt, maxAttempts, errDetail)
+		return
 	}
 
 	// Total exhaustion after all attempts
@@ -1858,7 +1873,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		return
 	}
 	var notif string
-	if lastErrDetail != "" && (runnerIsTransient(lastErrDetail)) {
+	if lastErrDetail != "" && isRateLimitError(lastErrDetail) {
 		notif = notifier.ModelUnavailableMessage()
 	} else {
 		notif = notifier.StaticFallback(fmt.Sprintf("execution failed after exhausting %d attempts: %s", maxAttempts, lastErrDetail))
@@ -1889,9 +1904,22 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 	log.Printf("[WorkerPool] %d message(s) in thread %s marked FAILED after exhausting all %d attempts", len(burst), threadID, maxAttempts)
 }
 
-func runnerIsTransient(errDetail string) bool {
-	_, isTransient, _, _ := runner.ClassifyError(1, "", errDetail)
-	return isTransient
+var rateLimitKeywords = []string{
+	"503",
+	"high demand",
+	"rate limit",
+	"resource_exhausted",
+	"429",
+}
+
+func isRateLimitError(errDetail string) bool {
+	lower := strings.ToLower(errDetail)
+	for _, kw := range rateLimitKeywords {
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	return false
 }
 
 // RecoverInterrupted resumes all PENDING and PROCESSING messages from the database on startup in chronological order.

@@ -674,11 +674,41 @@ func extractWatchdogDetail(source string, fallbackKeyword string) string {
 	return fallbackKeyword
 }
 
+var nonTransientKeywords = []string{
+	"invalid api key",
+	"invalid_api_key",
+	"authentication failed",
+	"unauthorized",
+	"permission_denied",
+	"permissiondenied",
+	"unknown flag",
+	"flag provided but not defined",
+	"unknown command",
+	"executable file not found",
+	"command not found",
+	"is not recognized as an internal or external command",
+	"model not found",
+	"panic:",
+}
+
+func isNonTransientError(s string) bool {
+	lower := strings.ToLower(s)
+	for _, kw := range nonTransientKeywords {
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	// Anchored process execution errors
+	if strings.Contains(lower, "fork/exec") && (strings.Contains(lower, "no such file or directory") || strings.Contains(lower, "permission denied")) {
+		return true
+	}
+	return false
+}
+
 // ClassifyError categorizes execution results into failure, transient, and session corruption states.
 func ClassifyError(exitCode int, stdout, stderr string) (isFailure bool, isTransient bool, isSessionCorruption bool, errDetail string) {
 	trimmedStdout := strings.TrimSpace(stdout)
 	trimmedStderr := strings.TrimSpace(stderr)
-	combined := strings.ToLower(trimmedStderr + "\n" + trimmedStdout)
 
 	// 1. Intercept watchdog timeout diagnoses FIRST on non-zero exit codes (watchdog kills with SIGKILL / exit code -1)
 	// Watchdog diagnostic markers are strictly emitted to stderr by the runner harness and must NEVER inspect stdout.
@@ -689,29 +719,6 @@ func ClassifyError(exitCode int, stdout, stderr string) (isFailure bool, isTrans
 		if isWatchdogMaxDuration(trimmedStderr) {
 			return true, false, false, extractWatchdogDetail(trimmedStderr, "max duration exceeded")
 		}
-	}
-
-	transientKeywords := []string{
-		"error 503",
-		"503 service unavailable",
-		"status: unavailable",
-		"high demand",
-		"rate limit",
-		"resource_exhausted",
-		"429",
-		"deadline_exceeded",
-		"context deadline exceeded",
-		"timeout",
-		"connection reset by peer",
-		"temporary failure in name resolution",
-		"quota exceeded",
-		"exceeded your current quota",
-		"insufficient_quota",
-		"too many requests",
-		"process produced empty stdout",
-		"empty stdout",
-		"modelprovider is set to \"gemini\"",
-		"modelprovider",
 	}
 
 	corruptionKeywords := []string{
@@ -766,46 +773,46 @@ func ClassifyError(exitCode int, stdout, stderr string) (isFailure bool, isTrans
 			if errDetail == fmt.Sprintf("execution failed with exit code %d", exitCode) || trimmedStderr == "" {
 				errDetail = "process produced empty stdout"
 			}
-			if containsFatalStderrError(trimmedStderr) {
+			if containsFatalStderrError(trimmedStderr) || isNonTransientError(trimmedStderr) {
 				return true, false, false, errDetail
 			}
-			return true, true, false, errDetail
+			return true, true, false, errDetail // Transient by default
 		}
 
 		resp, parseErr := ParseAgyOutput(stdout)
 		if parseErr != nil {
+			errTarget := trimmedStderr
+			if len(trimmedStdout) < 300 {
+				errTarget += " " + trimmedStdout
+			}
+			errTargetLower := strings.ToLower(errTarget)
 			for _, kw := range contextWindowKeywords {
-				if strings.Contains(combined, kw) {
+				if strings.Contains(errTargetLower, kw) {
 					return true, false, true, "context window exceeded"
 				}
 			}
-			if checkCorruption(combined) {
+			if checkCorruption(errTargetLower) {
 				return true, false, true, extractErrorDetail(trimmedStderr, exitCode)
 			}
-			for _, kw := range transientKeywords {
-				if strings.Contains(combined, kw) {
-					return true, true, false, extractErrorDetail(trimmedStderr, exitCode)
-				}
-			}
-			if containsFatalStderrError(trimmedStderr) {
+			if containsFatalStderrError(trimmedStderr) || isNonTransientError(errTargetLower) {
 				return true, false, false, extractErrorDetail(trimmedStderr, exitCode)
 			}
-			return true, false, false, fmt.Sprintf("invalid json response from runner: %v", parseErr)
+			// Unparseable JSON on exit 0 defaults to transient (e.g. truncated proxy stream or partial write)
+			return true, true, false, fmt.Sprintf("invalid json response from runner: %v", parseErr)
 		}
 
-		// Parsed JSON successfully
+		// Parsed JSON successfully: Status error
 		if resp.Status != "" && strings.ToUpper(resp.Status) != "SUCCESS" {
 			isFailure = true
-			errTarget := resp.Error + " " + trimmedStderr
+			errTarget := resp.Status + " " + resp.Error + " " + trimmedStderr
 			errTargetLower := strings.ToLower(errTarget)
 			if checkCorruption(errTargetLower) {
 				isSessionCorruption = true
 			}
-			for _, kw := range transientKeywords {
-				if strings.Contains(errTargetLower, kw) {
-					isTransient = true
-					break
-				}
+			if isNonTransientError(errTargetLower) {
+				isTransient = false
+			} else {
+				isTransient = !isSessionCorruption // Transient by default
 			}
 			errDetail = resp.Error
 			if errDetail == "" {
@@ -814,6 +821,7 @@ func ClassifyError(exitCode int, stdout, stderr string) (isFailure bool, isTrans
 			return isFailure, isTransient, isSessionCorruption, errDetail
 		}
 
+		// Parsed JSON successfully: Error field populated
 		if resp.Error != "" {
 			isFailure = true
 			errTarget := resp.Error + " " + trimmedStderr
@@ -821,11 +829,10 @@ func ClassifyError(exitCode int, stdout, stderr string) (isFailure bool, isTrans
 			if checkCorruption(errTargetLower) {
 				isSessionCorruption = true
 			}
-			for _, kw := range transientKeywords {
-				if strings.Contains(errTargetLower, kw) {
-					isTransient = true
-					break
-				}
+			if isNonTransientError(errTargetLower) {
+				isTransient = false
+			} else {
+				isTransient = !isSessionCorruption // Transient by default
 			}
 			return isFailure, isTransient, isSessionCorruption, resp.Error
 		}
@@ -838,21 +845,31 @@ func ClassifyError(exitCode int, stdout, stderr string) (isFailure bool, isTrans
 
 		// CRITICAL ADVERSARIAL GUARD: If resp.Status == "SUCCESS" (or empty) and resp.Error == ""
 		// with non-empty resp.Response, return clean success. Under no circumstances inspect
-		// resp.Response for corruption keywords.
+		// resp.Response for corruption or non-transient keywords.
 		return false, false, false, ""
 	}
 
 	// Non-zero exit code
 	isFailure = true
 
-	if checkCorruption(combined) || (!isMCPSessionError(combined) && strings.Contains(combined, "conversation not found")) {
+	// Build error target from stderr and any structured error from stdout
+	errorTarget := trimmedStderr
+	if resp, err := ParseAgyOutput(stdout); err == nil && resp.Error != "" {
+		errorTarget = resp.Status + " " + resp.Error + " " + trimmedStderr
+	} else if errorTarget == "" && len(trimmedStdout) < 300 {
+		errorTarget = trimmedStdout
+	}
+	errorTargetLower := strings.ToLower(errorTarget)
+
+	if checkCorruption(errorTargetLower) || (!isMCPSessionError(errorTargetLower) && strings.Contains(errorTargetLower, "conversation not found")) {
 		isSessionCorruption = true
 	}
 
-	for _, kw := range transientKeywords {
-		if strings.Contains(combined, kw) {
-			isTransient = true
-			break
+	if !isSessionCorruption {
+		if isNonTransientError(errorTargetLower) {
+			isTransient = false
+		} else {
+			isTransient = true // Transient by default
 		}
 	}
 
