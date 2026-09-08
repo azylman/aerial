@@ -10,7 +10,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
+	"path"
 	"regexp"
 	"strings"
 	"sync"
@@ -392,8 +392,9 @@ func RunAgyWithWatchdog(parentCtx context.Context, agyBin, prompt, sessionID, ap
 		agyBin = "agy"
 	}
 
-	baseBin := strings.ToLower(filepath.Base(agyBin))
-	if (baseBin == "agy" || baseBin == "agy.exe") && isTestEnvironment() && os.Getenv("AERIAL_ALLOW_REAL_AGY") == "" {
+	cleanBin := strings.ReplaceAll(agyBin, "\\", "/")
+	baseBin := strings.TrimSuffix(strings.ToLower(path.Base(cleanBin)), ".exe")
+	if baseBin == "agy" && isTestEnvironment() && os.Getenv("AERIAL_ALLOW_REAL_AGY") == "" {
 		return "", "", 1, fmt.Errorf("runner: real agy execution is blocked during testing (mock RunnerFunc or set AERIAL_ALLOW_REAL_AGY=1)")
 	}
 

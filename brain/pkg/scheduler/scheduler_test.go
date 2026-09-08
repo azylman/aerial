@@ -1241,10 +1241,14 @@ func TestExtractFactsLLM_SuccessAndModelOverride(t *testing.T) {
 	var mockAgy string
 	if runtime.GOOS == "windows" {
 		mockAgy = filepath.Join(tmpDir, "mock_agy.bat")
-		_ = os.WriteFile(mockAgy, []byte("@echo off\r\necho {\"status\":\"SUCCESS\",\"response\":\"extracted facts json\"}\r\n"), 0755)
+		if err := os.WriteFile(mockAgy, []byte("@echo off\r\necho {\"status\":\"SUCCESS\",\"response\":\"extracted facts json\"}\r\n"), 0755); err != nil {
+			t.Fatalf("failed to write mock script: %v", err)
+		}
 	} else {
 		mockAgy = filepath.Join(tmpDir, "mock_agy.sh")
-		_ = os.WriteFile(mockAgy, []byte("#!/bin/sh\necho '{\"status\":\"SUCCESS\",\"response\":\"extracted facts json\"}'\n"), 0755)
+		if err := os.WriteFile(mockAgy, []byte("#!/bin/sh\necho '{\"status\":\"SUCCESS\",\"response\":\"extracted facts json\"}'\n"), 0755); err != nil {
+			t.Fatalf("failed to write mock script: %v", err)
+		}
 	}
 
 	cfg := config.NewFromData(&config.ConfigData{
@@ -1271,10 +1275,14 @@ func TestExtractFactsLLM_DefaultModel(t *testing.T) {
 	var mockAgy string
 	if runtime.GOOS == "windows" {
 		mockAgy = filepath.Join(tmpDir, "mock_agy.bat")
-		_ = os.WriteFile(mockAgy, []byte("@echo off\r\necho {\"status\":\"SUCCESS\",\"response\":\"default model result\"}\r\n"), 0755)
+		if err := os.WriteFile(mockAgy, []byte("@echo off\r\necho {\"status\":\"SUCCESS\",\"response\":\"default model result\"}\r\n"), 0755); err != nil {
+			t.Fatalf("failed to write mock script: %v", err)
+		}
 	} else {
 		mockAgy = filepath.Join(tmpDir, "mock_agy.sh")
-		_ = os.WriteFile(mockAgy, []byte("#!/bin/sh\necho '{\"status\":\"SUCCESS\",\"response\":\"default model result\"}'\n"), 0755)
+		if err := os.WriteFile(mockAgy, []byte("#!/bin/sh\necho '{\"status\":\"SUCCESS\",\"response\":\"default model result\"}'\n"), 0755); err != nil {
+			t.Fatalf("failed to write mock script: %v", err)
+		}
 	}
 
 	cfg := config.NewFromData(&config.ConfigData{
@@ -1299,14 +1307,22 @@ func TestExtractFactsLLM_Errors(t *testing.T) {
 	var mockFailAgy, mockBadJsonAgy string
 	if runtime.GOOS == "windows" {
 		mockFailAgy = filepath.Join(tmpDir, "mock_fail_agy.bat")
-		_ = os.WriteFile(mockFailAgy, []byte("@echo fatal error >&2\r\nexit /b 1\r\n"), 0755)
+		if err := os.WriteFile(mockFailAgy, []byte("@echo fatal error >&2\r\nexit /b 1\r\n"), 0755); err != nil {
+			t.Fatalf("failed to write mock script: %v", err)
+		}
 		mockBadJsonAgy = filepath.Join(tmpDir, "mock_bad_json.bat")
-		_ = os.WriteFile(mockBadJsonAgy, []byte("@echo off\r\necho not-json\r\n"), 0755)
+		if err := os.WriteFile(mockBadJsonAgy, []byte("@echo off\r\necho not-json\r\n"), 0755); err != nil {
+			t.Fatalf("failed to write mock script: %v", err)
+		}
 	} else {
 		mockFailAgy = filepath.Join(tmpDir, "mock_fail_agy.sh")
-		_ = os.WriteFile(mockFailAgy, []byte("#!/bin/sh\necho 'fatal error' >&2\nexit 1\n"), 0755)
+		if err := os.WriteFile(mockFailAgy, []byte("#!/bin/sh\necho 'fatal error' >&2\nexit 1\n"), 0755); err != nil {
+			t.Fatalf("failed to write mock script: %v", err)
+		}
 		mockBadJsonAgy = filepath.Join(tmpDir, "mock_bad_json.sh")
-		_ = os.WriteFile(mockBadJsonAgy, []byte("#!/bin/sh\necho 'not-json'\n"), 0755)
+		if err := os.WriteFile(mockBadJsonAgy, []byte("#!/bin/sh\necho 'not-json'\n"), 0755); err != nil {
+			t.Fatalf("failed to write mock script: %v", err)
+		}
 	}
 
 	cfgFail := config.NewFromData(&config.ConfigData{AgyBin: mockFailAgy})

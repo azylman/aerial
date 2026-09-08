@@ -1607,15 +1607,20 @@ func TestRunAgyWithWatchdog_BlockedDuringTesting(t *testing.T) {
 		t.Errorf("expected blocked error for 'agy', got code=%d, err=%v", exitCodeAgy, errAgy)
 	}
 
-	// 3. Full path ending in "agy" or "agy.exe" must also be blocked
-	_, _, exitCodePath, errPath := RunAgyWithWatchdog(ctx, filepath.Join("some", "path", "agy"), "test prompt", "", "", "", WatchdogOptions{})
+	// 3. Full path ending in "agy" or "agy.exe" (with / or \) must also be blocked
+	_, _, exitCodePath, errPath := RunAgyWithWatchdog(ctx, "some/path/agy", "test prompt", "", "", "", WatchdogOptions{})
 	if errPath == nil || !strings.Contains(errPath.Error(), "real agy execution is blocked during testing") {
-		t.Errorf("expected blocked error for path ending in 'agy', got code=%d, err=%v", exitCodePath, errPath)
+		t.Errorf("expected blocked error for forward slash path, got code=%d, err=%v", exitCodePath, errPath)
+	}
+	_, _, exitCodePathBs, errPathBs := RunAgyWithWatchdog(ctx, "some\\path\\agy.exe", "test prompt", "", "", "", WatchdogOptions{})
+	if errPathBs == nil || !strings.Contains(errPathBs.Error(), "real agy execution is blocked during testing") {
+		t.Errorf("expected blocked error for backslash path, got code=%d, err=%v", exitCodePathBs, errPathBs)
 	}
 
-	// 4. Override via AERIAL_ALLOW_REAL_AGY=1 bypasses the block
+	// 4. Override via AERIAL_ALLOW_REAL_AGY=1 bypasses the block for "agy"
 	t.Setenv("AERIAL_ALLOW_REAL_AGY", "1")
-	_, _, _, errOverride := RunAgyWithWatchdog(ctx, filepath.Join(t.TempDir(), "nonexistent-agy-bin"), "test prompt", "", "", "", WatchdogOptions{})
+	fakeAgy := filepath.Join(t.TempDir(), "agy")
+	_, _, _, errOverride := RunAgyWithWatchdog(ctx, fakeAgy, "test prompt", "", "", "", WatchdogOptions{})
 	if errOverride != nil && strings.Contains(errOverride.Error(), "real agy execution is blocked during testing") {
 		t.Errorf("guardrail should not trigger when AERIAL_ALLOW_REAL_AGY=1 is set: %v", errOverride)
 	}
