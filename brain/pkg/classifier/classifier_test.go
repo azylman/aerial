@@ -764,3 +764,77 @@ func TestClassifier_ConfigInjection(t *testing.T) {
 	}
 }
 
+func TestCleanThreadTitle(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "clean simple title",
+			input:    `"Fixing Database Latency"`,
+			expected: "Fixing Database Latency",
+		},
+		{
+			name:     "strip mentions and backticks",
+			input:    "`` <@123456789> `<#987654321>` @everyone Discussion on Go concurrency. ``",
+			expected: "Discussion on Go concurrency",
+		},
+		{
+			name:     "multiline select first non-empty",
+			input:    "\n\n  \n  Optimizing Redis Cache Keys \n Second line",
+			expected: "Optimizing Redis Cache Keys",
+		},
+		{
+			name:     "rune truncation at 80",
+			input:    "This is a extremely long thread title designed to test rune truncation functionality when titles exceed maximum length limits",
+			expected: "This is a extremely long thread title designed to test rune truncation functi...",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := CleanThreadTitle(tt.input)
+			if got != tt.expected {
+				t.Errorf("CleanThreadTitle(%q) = %q; want %q", tt.input, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestSummarizeThreadTitle(t *testing.T) {
+	t.Run("nil classifier error", func(t *testing.T) {
+		var c *Classifier
+		_, err := c.SummarizeThreadTitle(context.Background(), "How to fix redis latency?")
+		if err == nil {
+			t.Fatal("expected error for nil classifier")
+		}
+	})
+
+	t.Run("successful summarization", func(t *testing.T) {
+		var capturedModel, capturedPrompt string
+		c := NewClassifier(
+			WithModel("gemini-2.5-flash"),
+			WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
+				capturedModel = model
+				capturedPrompt = prompt
+				return `"Database Latency Investigation."`, nil
+			}),
+		)
+
+		title, err := c.SummarizeThreadTitle(context.Background(), "Why is the database queries taking so long?")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if title != "Database Latency Investigation" {
+			t.Errorf("expected clean title 'Database Latency Investigation', got %q", title)
+		}
+		if capturedModel != "gemini-2.5-flash" {
+			t.Errorf("expected model 'gemini-2.5-flash', got %q", capturedModel)
+		}
+		if !strings.Contains(capturedPrompt, "Why is the database queries taking so long?") {
+			t.Errorf("expected prompt to contain question, got %q", capturedPrompt)
+		}
+	})
+}
+

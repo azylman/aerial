@@ -400,6 +400,12 @@ func (p *WorkerPool) SetDiscordSession(s *discordgo.Session) {
 	p.cfg.DiscordSession = s
 }
 
+func (p *WorkerPool) Classifier() *classifier.Classifier {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.cfg.Classifier
+}
+
 func (p *WorkerPool) getDiscordSession() *discordgo.Session {
 	p.mu.Lock()
 	defer p.mu.Unlock()
