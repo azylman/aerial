@@ -3,6 +3,7 @@ package classifier
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,11 +13,12 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/google/uuid"
 	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
 	"github.com/azylman/aerial/brain/pkg/metrics"
 	"github.com/azylman/aerial/brain/pkg/runner"
+	"github.com/azylman/aerial/brain/pkg/sanitizer"
+	"github.com/google/uuid"
 )
 
 var (
@@ -481,4 +483,69 @@ func (c *Classifier) ClassifyBurst(ctx context.Context, targetBurst []db.Message
 	}
 	prompt := BuildBurstPrompt(targetBurst, recentContext, customInstruction)
 	return c.classifyWithPrompt(ctx, prompt)
+}
+
+// CleanThreadTitle cleans and formats raw LLM output for use as a Discord thread title.
+func CleanThreadTitle(raw string) string {
+	cleaned := sanitizer.SanitizeString(raw)
+	reMention := regexp.MustCompile(`<@[!&]?[0-9]+>|<#[0-9]+>|@everyone|@here`)
+	cleaned = reMention.ReplaceAllString(cleaned, "")
+	cleaned = strings.ReplaceAll(cleaned, "`", "")
+	cleaned = strings.TrimSpace(cleaned)
+	cleaned = strings.Trim(cleaned, `"'`)
+	cleaned = strings.TrimSuffix(cleaned, ".")
+	cleaned = strings.TrimSpace(cleaned)
+
+	lines := strings.Split(cleaned, "\n")
+	for _, l := range lines {
+		trimmed := strings.TrimSpace(l)
+		if trimmed != "" {
+			cleaned = trimmed
+			break
+		}
+	}
+
+	runes := []rune(cleaned)
+	if len(runes) > 80 {
+		return string(runes[:77]) + "..."
+	}
+	return string(runes)
+}
+
+// SummarizeThreadTitle uses the low-effort Flash model to generate a concise thread title summary (≤6 words).
+func (c *Classifier) SummarizeThreadTitle(ctx context.Context, question string) (string, error) {
+	if c == nil || c.LLMFunc == nil {
+		return "", errors.New("classifier or LLMFunc not initialized")
+	}
+
+	sanitizedQuestion := SanitizeContent(question)
+	if strings.TrimSpace(sanitizedQuestion) == "" {
+		return "", errors.New("empty starting question")
+	}
+
+	prompt := fmt.Sprintf(
+		"Based on the starting question below, summarize the upcoming discussion in 6 words or less for a Discord thread title.\n"+
+			"Output strictly the title text with no surrounding quotes, markdown, or commentary.\n\n"+
+			"<starting_question>\n%s\n</starting_question>",
+		sanitizedQuestion,
+	)
+
+	model := c.Model
+	if model == "" && c.cfg != nil {
+		model = c.cfg.Current().LowEffortModel
+	}
+	if model == "" {
+		model = config.DefaultConfigData().LowEffortModel
+	}
+
+	resp, err := c.LLMFunc(ctx, model, prompt)
+	if err != nil {
+		return "", fmt.Errorf("LLM thread title call failed: %w", err)
+	}
+
+	cleaned := CleanThreadTitle(resp)
+	if cleaned == "" {
+		return "", errors.New("LLM returned empty thread title after cleaning")
+	}
+	return cleaned, nil
 }
