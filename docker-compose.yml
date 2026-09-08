@@ -80,8 +80,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      gitsync:
-        condition: service_healthy
       scheduler-mcp:
         condition: service_healthy
       docker-mcp:

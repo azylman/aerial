@@ -4,12 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -504,6 +507,98 @@ func TestResolveGitDir(t *testing.T) {
 	}
 }
 
+const mockDockerSrc = `package main
+
+import (
+	"fmt"
+	"os"
+	"strings"
+)
+
+func main() {
+	args := strings.Join(os.Args[1:], " ")
+	if os.Getenv("MOCK_DOCKER_FAIL") == "1" {
+		fmt.Fprintln(os.Stderr, "mock compose error with token ghp_1234567890abcdef1234567890abcdef12")
+		os.Exit(1)
+	}
+	if strings.Contains(args, "config --quiet") {
+		if os.Getenv("MOCK_VAL_FAIL") == "1" {
+			fmt.Fprintln(os.Stderr, "syntax err")
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	if strings.Contains(args, "config --services") {
+		if os.Getenv("MOCK_SERV_FAIL") == "1" || os.Getenv("MOCK_SERVICES_FAIL") == "1" {
+			fmt.Fprintln(os.Stderr, "services discovery err ghp_1234567890abcdef1234567890abcdef12")
+			os.Exit(1)
+		}
+		if os.Getenv("MOCK_ZERO_TARGETS") == "1" {
+			fmt.Println("gitsync")
+		} else {
+			fmt.Println("brain")
+			fmt.Println("gitsync")
+			fmt.Println("GITSYNC")
+			fmt.Println("dashboard")
+		}
+		os.Exit(0)
+	}
+	if strings.Contains(args, "up -d") {
+		if os.Getenv("MOCK_UP_FAIL") == "1" {
+			fmt.Fprintln(os.Stderr, "compose up failure with token ghp_1234567890abcdef")
+			os.Exit(1)
+		}
+		fmt.Println("services started cleanly")
+		os.Exit(0)
+	}
+	os.Exit(0)
+}
+`
+
+var (
+	mockDockerBinOnce sync.Once
+	mockDockerBinPath string
+	mockDockerBinErr  error
+)
+
+func getMockDockerBin(t *testing.T) string {
+	t.Helper()
+	mockDockerBinOnce.Do(func() {
+		dir, err := os.MkdirTemp("", "mock-docker-*")
+		if err != nil {
+			mockDockerBinErr = err
+			return
+		}
+		ext := ""
+		if runtime.GOOS == "windows" {
+			ext = ".exe"
+		}
+		target := filepath.Join(dir, "docker"+ext)
+		srcFile := filepath.Join(dir, "main.go")
+		if err := os.WriteFile(srcFile, []byte(mockDockerSrc), 0644); err != nil {
+			mockDockerBinErr = err
+			return
+		}
+		cmd := exec.Command("go", "build", "-o", target, srcFile)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			mockDockerBinErr = fmt.Errorf("failed to build mock docker: %s (%w)", string(out), err)
+			return
+		}
+		mockDockerBinPath = target
+	})
+	if mockDockerBinErr != nil {
+		t.Fatalf("getMockDockerBin error: %v", mockDockerBinErr)
+	}
+	return mockDockerBinPath
+}
+
+func setupMockDocker(t *testing.T) {
+	t.Helper()
+	binPath := getMockDockerBin(t)
+	binDir := filepath.Dir(binPath)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
 func TestValidateCompose(t *testing.T) {
 	tempDir := t.TempDir()
 	daemon := &SyncDaemon{}
@@ -521,21 +616,7 @@ func TestValidateCompose(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Mock docker binary
-	binDir := t.TempDir()
-	mockDocker := filepath.Join(binDir, "docker")
-	script := `#!/bin/sh
-if [ "$MOCK_DOCKER_FAIL" = "1" ]; then
-	echo "mock compose error with token ghp_1234567890abcdef1234567890abcdef12" >&2
-	exit 1
-fi
-exit 0
-`
-	if err := os.WriteFile(mockDocker, []byte(script), 0755); err != nil {
-		t.Fatal(err)
-	}
-	oldPath := os.Getenv("PATH")
-	t.Setenv("PATH", binDir+":"+oldPath)
+	setupMockDocker(t)
 
 	// Successful validation
 	if err := daemon.ValidateCompose(ctx, tempDir); err != nil {
@@ -547,8 +628,7 @@ exit 0
 	err = daemon.ValidateCompose(ctx, tempDir)
 	if err == nil {
 		t.Errorf("expected error when mock docker fails, got nil")
-	}
-	if strings.Contains(err.Error(), "ghp_1234567890abcdef1234567890abcdef12") {
+	} else if strings.Contains(err.Error(), "ghp_1234567890abcdef1234567890abcdef12") {
 		t.Errorf("expected sanitized error, got raw secret: %v", err)
 	}
 }
@@ -560,21 +640,7 @@ func TestGetReconcileTargets(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	binDir := t.TempDir()
-	mockDocker := filepath.Join(binDir, "docker")
-	script := `#!/bin/sh
-if [ "$MOCK_SERVICES_FAIL" = "1" ]; then
-	echo "discovery failure ghp_1234567890abcdef1234567890abcdef12" >&2
-	exit 1
-fi
-printf "brain\ngitsync\nGITSYNC\ndashboard\n"
-exit 0
-`
-	if err := os.WriteFile(mockDocker, []byte(script), 0755); err != nil {
-		t.Fatal(err)
-	}
-	oldPath := os.Getenv("PATH")
-	t.Setenv("PATH", binDir+":"+oldPath)
+	setupMockDocker(t)
 
 	// Success
 	targets, err := daemon.GetReconcileTargets(ctx, tempDir)
@@ -590,8 +656,7 @@ exit 0
 	_, err = daemon.GetReconcileTargets(ctx, tempDir)
 	if err == nil {
 		t.Errorf("expected error when services discovery fails, got nil")
-	}
-	if strings.Contains(err.Error(), "ghp_1234567890abcdef1234567890abcdef12") {
+	} else if strings.Contains(err.Error(), "ghp_1234567890abcdef1234567890abcdef12") {
 		t.Errorf("expected sanitized discovery error: %v", err)
 	}
 }
@@ -614,47 +679,7 @@ func TestReconcileCompose(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	binDir := t.TempDir()
-	mockDocker := filepath.Join(binDir, "docker")
-	script := `#!/bin/sh
-if [ "$1" = "compose" ]; then
-	case "$*" in
-		*"config --quiet"*)
-			if [ "$MOCK_VAL_FAIL" = "1" ]; then
-				echo "syntax err" >&2
-				exit 1
-			fi
-			exit 0
-			;;
-		*"config --services"*)
-			if [ "$MOCK_SERV_FAIL" = "1" ]; then
-				echo "services discovery err" >&2
-				exit 1
-			fi
-			if [ "$MOCK_ZERO_TARGETS" = "1" ]; then
-				echo "gitsync"
-			else
-				echo "brain"
-				echo "dashboard"
-			fi
-			exit 0
-			;;
-		*"up -d"*)
-			if [ "$MOCK_UP_FAIL" = "1" ]; then
-				echo "compose up failure with token ghp_1234567890abcdef" >&2
-				exit 1
-			fi
-			echo "services started cleanly"
-			exit 0
-			;;
-	esac
-fi
-exit 0
-`
-	if err := os.WriteFile(mockDocker, []byte(script), 0755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+	setupMockDocker(t)
 
 	// 2. Validation error
 	t.Setenv("MOCK_VAL_FAIL", "1")
@@ -1130,5 +1155,39 @@ func TestDaemonLifecycleAndHTTP(t *testing.T) {
 	}
 }
 
+// TestComposeGraph_NoGitsyncDependents parses docker-compose.yml to assert that zero services
+// declare a dependency on gitsync. This guarantees indegree(gitsync) == 0 so that external
+// compose commands targeting any other service (or gitops reconcile commands) will never recreate gitsync.
+func TestComposeGraph_NoGitsyncDependents(t *testing.T) {
+	composePath := filepath.Join("..", "..", "docker-compose.yml")
+	data, err := os.ReadFile(composePath)
+	if err != nil {
+		t.Fatalf("failed to read %s: %v", composePath, err)
+	}
 
+	lines := strings.Split(string(data), "\n")
+	inDependsOn := false
+	currentService := ""
 
+	for lineNum, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(line, "  ") && !strings.HasPrefix(line, "    ") && strings.HasSuffix(trimmed, ":") {
+			currentService = strings.TrimSuffix(trimmed, ":")
+			inDependsOn = false
+		}
+		if strings.HasPrefix(line, "    depends_on:") {
+			inDependsOn = true
+			continue
+		}
+		if inDependsOn {
+			if len(line) > 0 && line[0] != ' ' {
+				inDependsOn = false
+				currentService = ""
+			} else if strings.HasPrefix(line, "    ") && !strings.HasPrefix(line, "      ") && !strings.HasPrefix(line, "    depends_on:") && strings.HasSuffix(trimmed, ":") {
+				inDependsOn = false
+			} else if strings.Contains(line, "gitsync:") || trimmed == "- gitsync" {
+				t.Fatalf("line %d: service %q declares dependency on gitsync (%s); gitsync must have in-degree 0 in Compose DAG", lineNum+1, currentService, trimmed)
+			}
+		}
+	}
+}

@@ -105,7 +105,7 @@ func init() {
 func NormalizeRepoName(rawPath string) string {
 	cleaned := filepath.Clean(rawPath)
 	base := filepath.Base(cleaned)
-	if base == "." || base == "/" || base == "" {
+	if base == "." || base == "/" || base == "\\" || base == string(filepath.Separator) || base == "" {
 		return "unknown"
 	}
 	return base

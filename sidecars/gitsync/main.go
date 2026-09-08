@@ -593,6 +593,7 @@ func (d *SyncDaemon) TriggerSync() ([]RepoSyncResult, error) {
 			status = "error"
 		} else if anyChanged {
 			status = "synced"
+			go notifyBrainReload()
 		}
 		metrics.RecordSyncRequest("periodic", status)
 
@@ -603,6 +604,27 @@ func (d *SyncDaemon) TriggerSync() ([]RepoSyncResult, error) {
 		return nil, err
 	}
 	return val.([]RepoSyncResult), nil
+}
+
+// notifyBrainReload sends a best-effort POST request to Brain's internal reload endpoint.
+func notifyBrainReload() {
+	brainURL := os.Getenv("BRAIN_INTERNAL_URL")
+	if brainURL == "" {
+		brainURL = "http://brain:8080/internal/reload"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, brainURL, nil)
+	if err != nil {
+		return
+	}
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Do(req)
+	if err == nil {
+		_ = resp.Body.Close()
+		log.Printf("[GitSync] Successfully dispatched internal reload trigger to Brain (%s)", brainURL)
+	}
 }
 
 // StartPeriodicLoop runs the background ticker loop.
@@ -824,6 +846,12 @@ func RunDaemon(ctx context.Context, cfg DaemonConfig) error {
 	daemon.StartPeriodicLoop(ctx)
 	daemon.StartReconcilerLoop(ctx)
 	log.Printf("[GitSync] Sidecar GitOps daemon started on :%s (interval: %v, repos: %v, composeDir: %s)", cfg.Port, cfg.Interval, cfg.Repos, cfg.ComposeDir)
+
+	go func() {
+		if _, err := daemon.TriggerSync(); err != nil {
+			log.Printf("[GitSync] Initial startup sync completed with notice: %v", err)
+		}
+	}()
 
 	mux := SetupMux(daemon)
 
