@@ -32,10 +32,11 @@ Aerial runs as a multi-container Docker stack supervised by Watchtower and Autoh
   - Fast-forward pulls with safe reset recovery to `FETCH_HEAD`, keeping running code cleanly decoupled from the execution engine.
 
 - **Outbound Model Context Protocol (MCP) Microservices (`aerial-net`)**:
-  - `scheduler-mcp`: PostgreSQL-backed recurring cron and one-shot reminder management server over HTTP MCP.
-  - `discord-mcp`: Outbound Discord API operations (history, thread creation, channel management).
-  - `docker-mcp`: Native in-image Docker MCP stdio server with translation proxy over host `/var/run/docker.sock`.
-  - `github-mcp`: Native in-image GitHub MCP stdio server with translation proxy and PAT authentication.
+  - `scheduler-mcp`: PostgreSQL-backed recurring cron and one-shot reminder management server over HTTP MCP (`http://scheduler-mcp:8080/mcp`).
+  - `discord-mcp`: Outbound Discord API operations (history, thread creation, channel management) (`http://discord-mcp:4001/mcp`).
+  - `docker-mcp`: Native Streamable HTTP MCP server for host Docker daemon operations (`http://docker-mcp:4002/mcp`).
+  - `github-mcp`: Native Streamable HTTP MCP server for GitHub operations (`http://github-mcp:4003/mcp`).
+  - `victoriametrics-mcp`: Streamable HTTP MCP server for VictoriaMetrics TSDB metric querying and alert rule inspection (`http://victoriametrics-mcp:4004/mcp`).
 
 - **Web, Gateway & Documentation Services**:
   - `aerial-proxy`: Edge reverse proxy routing external web traffic to Dashboard (`/` 302 redirect and `/dashboard/`), Documentation (`/docs/`), Agentsview (`/conversations/`), and Grafana (`/grafana/`).
@@ -127,14 +128,20 @@ Aerial operates on a strict **Two-Repository Separation of Concerns**:
 
 6. **Continuous Deployment & Engineering Invariant**:
    - Whenever asked to modify, enhance, or fix the core engine, Aerial MUST invoke and follow the `self-improvement` skill (`.agents/skills/self-improvement/SKILL.md`).
-   - Pre-commit verification is mandatory via `./scripts/verify.sh` (or `scripts/verify.ps1`).
+   - **Local Pre-Flight Verification**: Local pre-commit and pre-flight verification MUST use `./scripts/verify.sh --staged` (or `scripts/verify.ps1 -Staged`), executing targeted tests against changed microservices for fast feedback.
+   - **CI-Offloaded Full Monorepo Sweep**: Full monorepo verification (`./scripts/verify.sh --full`) is offloaded 100% to GitHub Actions CI on PR push and merge to `main`.
    - **Zero-Bypass Invariant**: Under NO circumstance use `git commit --no-verify`, `git commit -n`, or `git push --no-verify`.
 
-7. **Multi-Agent Review Panel ("The Girl Gang")**:
+7. **Hermetic Testing & Pure Constructor Dependency Injection**:
+   - **In-Memory SQLite Test Fixtures**: All storage and database contract tests MUST use airgapped, in-memory SQLite handles (`:memory:` with single-connection pool guards) or `t.TempDir()` isolated files. Unit tests MUST NEVER write to shared host database paths or execute `main()` test functions that mutate production state.
+   - **Pure Constructor Injection**: Packages MUST require explicitly passed dependencies (e.g. `*config.Config`, domain interfaces) in `New` constructors instead of accessing ambient environment variables (`os.Getenv`) or ambient globals.
+   - **Atomic Snapshot Configuration (Invariant I5)**: Subpackage workers read dynamic options JIT via `cfg.Current()` snapshots. Subpackages MUST NEVER cache scalar snapshot fields (e.g. `cfg.Current().Model`) in long-lived struct fields during initialization.
+
+8. **Multi-Agent Review Panel ("The Girl Gang")**:
    - The subagent review panel is called **the girl gang** (or **the gang**).
    - During self-improvement workflows, the 4-expert review panel audits plans and task implementations to guard against race conditions, regressions, and invariant violations.
 
-8. **Multi-User Security & Admin Privilege Enforcement**:
+9. **Multi-User Security & Admin Privilege Enforcement**:
    - Messages from Discord include `- is_admin: true` or `- is_admin: false` (resolved against `admin_users` in `config.yaml`).
    - Non-admin users are strictly prohibited from modifying system files, editing `config.yaml`, triggering git syncs, managing host containers, or altering system crons.
 
