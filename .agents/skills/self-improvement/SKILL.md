@@ -119,24 +119,21 @@ Present a structured synthesis of the expert panel's audit to the human user:
 ### Stage 5: Pre-Flight Verification Gate (The New Path)
 *MANDATORY: Never commit or push unverified code.*
 
-1. **Execute Pre-Flight Verification Runner**:
-   Always execute the monorepo verification runner before committing:
+1. **Execute Local Pre-Flight Verification Runner (`--staged`)**:
+   Always execute targeted local verification before committing:
    - **Linux / Container**:
      ```bash
-     ./scripts/verify.sh
+     ./scripts/verify.sh --staged
      ```
    - **Windows Host**:
      ```powershell
-     powershell -ExecutionPolicy Bypass -File scripts/verify.ps1
+     powershell -ExecutionPolicy Bypass -File scripts/verify.ps1 -Staged
      ```
-   - **Container Fallback**: If local Go or Node tools are not installed in `PATH`, the runner automatically delegates to deterministic Docker containers (`golangci/golangci-lint:v1.59.1`, `golang:1.22`, `node:20`).
+   - **Local Iteration Target**: `--staged` inspects changed files and validates only touched microservices (`brain`, `scheduler-mcp`, `discord-mcp`, `dashboard`), providing sub-second feedback without running monorepo-wide test suites locally.
 
-2. **Full CI Parity Verification**:
-   The runner validates all microservices (`brain`, `scheduler-mcp`, `discord-mcp`, `dashboard`):
-   - **Static Analysis & Linting**: `golangci-lint run ./...`
-   - **Unit Test Suites**: `go test -v ./...`
-   - **Frontend & Documentation Syntax**: `node --check dashboard/static/app.js` and `docs-service/...`
-   - **Frontend Unit Tests**: `node --test dashboard/app.test.js`
+2. **Full Monorepo CI Offloading**:
+   - Full monorepo verification (`./scripts/verify.sh --full`) is offloaded 100% to GitHub Actions CI on PR push and merge to `main`.
+   - Never run `--full` locally as mandatory pre-commit or pre-push gates.
 
 3. **ZERO-BYPASS INVARIANT**:
    - **Under NO CIRCUMSTANCE is an agent permitted to use `git commit --no-verify`, `git commit -n`, or `git push --no-verify`.**
@@ -144,7 +141,7 @@ Present a structured synthesis of the expert panel's audit to the human user:
    - If a hook or test fails:
      1. Read the hook failure log from stderr.
      2. Fix the reported code violations, linter errors, or failing unit tests in the source files.
-     3. Re-run `./scripts/verify.sh` until exit code is 0.
+     3. Re-run `./scripts/verify.sh --staged` until exit code is 0.
      4. Retry the commit.
 
 ---

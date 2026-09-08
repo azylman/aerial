@@ -33,12 +33,12 @@ Aerial uses a decoupled **Two-Repository Architecture**:
                │                       │                      │
 ┌───────────────────────────┐ ┌───────────────────────┐ ┌─────────────────────┐
 │       aerial-gitsync      │ │       docker-mcp      │ │     github-mcp      │
-│  (Port 8080: Sidecar :rw) │ │  (Port 4002: In-Image)│ │(Port 4003: In-Image)│
-│  • Declarative GitOps     │ └───────────────────────┘ └─────────────────────┘
-│    Compose Reconciler     │          │                      │
-│  • Singleflight Git Sync  │  Host Docker Socket       GitHub API (PAT)
-│  • Prometheus (:8080)     │      (/var/run/docker.sock)
-└───────────────────────────┘          │                      │
+│  (Port 8080: Sidecar :rw) │ │ (Port 4002: Streamable│ │ (Port 4003: Streamable│
+│  • Declarative GitOps     │ │   HTTP MCP Transport) │ │   HTTP MCP Transport) │
+│    Compose Reconciler     │ └───────────────────────┘ └─────────────────────┘
+│  • Singleflight Git Sync  │          │                      │
+│  • Prometheus (:8080)     │  Host Docker Socket       GitHub API (PAT)
+└───────────────────────────┘      (/var/run/docker.sock)     │
                │                       │                      │
 ┌───────────────────────────┐ ┌───────────────────────┐ ┌─────────────────────┐
 │       scheduler-mcp       │ │     aerial-ollama     │ │     discord-mcp     │
@@ -46,10 +46,11 @@ Aerial uses a decoupled **Two-Repository Architecture**:
 └───────────────────────────┘ └───────────────────────┘ └─────────────────────┘
                │                       │                      │
 ┌───────────────────────────┐ ┌───────────────────────┐ ┌─────────────────────┐
-│      aerial-postgres      │ │   aerial-watchtower   │ │    aerial-proxy     │
-│   (Port 5432: pgvector)   │ │ (GHCR CD Supervisor)  │ │ (Port 8089: Edge)   │
-└───────────────────────────┘ └───────────────────────┘ └──────────┬──────────┘
-               │                       │                           │
+│    victoriametrics-mcp    │ │   aerial-watchtower   │ │    aerial-proxy     │
+│ (Port 4004: Streamable    │ │ (GHCR CD Supervisor)  │ │ (Port 8089: Edge)   │
+│   HTTP Metrics Inspection)│ └───────────────────────┘ └──────────┬──────────┘
+└───────────────────────────┘                                     │
+               │                                                  │
 ┌──────────────────────────────────────────────────────────┐       ├─ / -> 302 Redirect to /dashboard/
 │           Full Observability & Telemetry Stack           │       ├─ /dashboard/ -> Dashboard HUD
 │  • cAdvisor (Container Metrics :8080)                    │       ├─ /docs/ -> Docsify Living Docs
