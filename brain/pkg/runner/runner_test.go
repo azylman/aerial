@@ -1586,5 +1586,40 @@ func TestExtractQuotaResetDuration_ClampingAndEdgeCases(t *testing.T) {
 	}
 }
 
+func TestRunAgyWithWatchdog_BlockedDuringTesting(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. Default empty binary name resolves to "agy" and must be blocked in tests
+	_, _, exitCode, err := RunAgyWithWatchdog(ctx, "", "test prompt", "", "", "", WatchdogOptions{})
+	if err == nil {
+		t.Fatal("expected error blocking real agy execution during testing, got nil")
+	}
+	if exitCode != 1 {
+		t.Errorf("expected exit code 1, got %d", exitCode)
+	}
+	if !strings.Contains(err.Error(), "real agy execution is blocked during testing") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+
+	// 2. Explicit "agy" binary name must also be blocked
+	_, _, exitCodeAgy, errAgy := RunAgyWithWatchdog(ctx, "agy", "test prompt", "", "", "", WatchdogOptions{})
+	if errAgy == nil || !strings.Contains(errAgy.Error(), "real agy execution is blocked during testing") {
+		t.Errorf("expected blocked error for 'agy', got code=%d, err=%v", exitCodeAgy, errAgy)
+	}
+
+	// 3. Full path ending in "agy" or "agy.exe" must also be blocked
+	_, _, exitCodePath, errPath := RunAgyWithWatchdog(ctx, filepath.Join("some", "path", "agy"), "test prompt", "", "", "", WatchdogOptions{})
+	if errPath == nil || !strings.Contains(errPath.Error(), "real agy execution is blocked during testing") {
+		t.Errorf("expected blocked error for path ending in 'agy', got code=%d, err=%v", exitCodePath, errPath)
+	}
+
+	// 4. Override via AERIAL_ALLOW_REAL_AGY=1 bypasses the block
+	t.Setenv("AERIAL_ALLOW_REAL_AGY", "1")
+	_, _, _, errOverride := RunAgyWithWatchdog(ctx, filepath.Join(t.TempDir(), "nonexistent-agy-bin"), "test prompt", "", "", "", WatchdogOptions{})
+	if errOverride != nil && strings.Contains(errOverride.Error(), "real agy execution is blocked during testing") {
+		t.Errorf("guardrail should not trigger when AERIAL_ALLOW_REAL_AGY=1 is set: %v", errOverride)
+	}
+}
+
 
 

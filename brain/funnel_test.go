@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
@@ -20,6 +21,25 @@ import (
 	"github.com/azylman/aerial/brain/pkg/queue"
 	"github.com/bwmarrin/discordgo"
 )
+
+// newTestWorkerPool instantiates a fully isolated WorkerPool with mocked runner, notifier, and delivery hooks.
+func newTestWorkerPool(database *sql.DB) *queue.WorkerPool {
+	return queue.NewWorkerPool(queue.WorkerPoolConfig{
+		DB: database,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			return `{"event":"result","result":{"status":"SUCCESS","response":"mock test response"}}`, "", 0, nil
+		},
+		NotifierFunc: func(agyBin, apiKey, contextDescription string) string {
+			return "mock notification"
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) func() {
+			return func() {}
+		},
+	})
+}
 
 func setupTestConfig(t *testing.T, yamlContent string) {
 	t.Helper()
@@ -640,9 +660,7 @@ func TestFunnelStartupRecovery(t *testing.T) {
 	}
 	defer func() { _ = database.Close() }()
 
-	pool := queue.NewWorkerPool(queue.WorkerPoolConfig{
-		DB: database,
-	})
+	pool := newTestWorkerPool(database)
 	pool.Start()
 	defer pool.Stop()
 
@@ -684,7 +702,7 @@ func TestRunStartupCatchUpSweep_NilAndEmptySafeguards(t *testing.T) {
 	}
 	defer func() { _ = database.Close() }()
 
-	pool := queue.NewWorkerPool(queue.WorkerPoolConfig{DB: database})
+	pool := newTestWorkerPool(database)
 
 	// 1. Nil session / DB / pool should be safe no-op
 	RunStartupCatchUpSweep(context.Background(), nil, nil, nil)
@@ -730,7 +748,7 @@ channels:
 	}
 	defer func() { _ = database.Close() }()
 
-	pool := queue.NewWorkerPool(queue.WorkerPoolConfig{DB: database})
+	pool := newTestWorkerPool(database)
 	defer pool.Stop()
 
 	nowStr := time.Now().UTC().Format(time.RFC3339)
@@ -1161,7 +1179,7 @@ channels:
 	}
 	defer database.Close()
 
-	pool := queue.NewWorkerPool(queue.WorkerPoolConfig{DB: database})
+	pool := newTestWorkerPool(database)
 	pool.Start()
 	defer pool.Stop()
 
@@ -1516,7 +1534,7 @@ channels:
 	}
 	defer database.Close()
 
-	pool := queue.NewWorkerPool(queue.WorkerPoolConfig{DB: database})
+	pool := newTestWorkerPool(database)
 	pool.Start()
 	defer pool.Stop()
 
@@ -1796,7 +1814,7 @@ channels:
 	closedDB, _ := db.InitDB(":memory:")
 	_ = closedDB.Close()
 
-	pool := queue.NewWorkerPool(queue.WorkerPoolConfig{DB: closedDB})
+	pool := newTestWorkerPool(closedDB)
 	s := connectDiscordFunnel(ctx, closedDB, pool, "mock-token-closed-db")
 	if s == nil {
 		t.Fatalf("Expected non-nil session")
@@ -1947,7 +1965,7 @@ func TestRunStartupCatchUpSweep_ExtendedBranches(t *testing.T) {
 	}
 	defer database.Close()
 
-	pool := queue.NewWorkerPool(queue.WorkerPoolConfig{DB: database})
+	pool := newTestWorkerPool(database)
 	pool.Start()
 	defer pool.Stop()
 
@@ -2171,7 +2189,7 @@ func TestRunStartupCatchUpSweep_AllDetailedBranches(t *testing.T) {
 	}
 	defer database.Close()
 
-	pool := queue.NewWorkerPool(queue.WorkerPoolConfig{DB: database})
+	pool := newTestWorkerPool(database)
 	pool.Start()
 	defer pool.Stop()
 

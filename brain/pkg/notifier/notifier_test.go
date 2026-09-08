@@ -3,6 +3,7 @@ package notifier
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -79,14 +80,23 @@ func TestGenerateDynamicNotificationWithMock(t *testing.T) {
 
 func TestGenerateDynamicNotification_SuccessfulAgyRun(t *testing.T) {
 	tmpDir := t.TempDir()
-	mockBin := filepath.Join(tmpDir, "mock_agy.sh")
-	scriptContent := `#!/bin/sh
+	var mockBin string
+	if runtime.GOOS == "windows" {
+		mockBin = filepath.Join(tmpDir, "mock_agy.bat")
+		scriptContent := "@echo off\r\necho {\"response\": \"Hey bestie! ✨ Everything is running smoothly now! 🌸\"}\r\n"
+		if err := os.WriteFile(mockBin, []byte(scriptContent), 0755); err != nil {
+			t.Fatalf("failed to write mock script: %v", err)
+		}
+	} else {
+		mockBin = filepath.Join(tmpDir, "mock_agy.sh")
+		scriptContent := `#!/bin/sh
 cat << 'EOF'
 {"response": "Hey bestie! ✨ Everything is running smoothly now! 🌸"}
 EOF
 `
-	if err := os.WriteFile(mockBin, []byte(scriptContent), 0755); err != nil {
-		t.Fatalf("failed to write mock script: %v", err)
+		if err := os.WriteFile(mockBin, []byte(scriptContent), 0755); err != nil {
+			t.Fatalf("failed to write mock script: %v", err)
+		}
 	}
 
 	res := GenerateDynamicNotification(mockBin, "valid_key", "session reset due to context corruption")

@@ -17,7 +17,6 @@ import (
 	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
 	"github.com/azylman/aerial/brain/pkg/metrics"
-	"github.com/azylman/aerial/brain/pkg/queue"
 	"github.com/bwmarrin/discordgo"
 )
 
@@ -28,9 +27,7 @@ func TestHandlePromptValidation(t *testing.T) {
 	}
 	defer func() { _ = database.Close() }()
 
-	pool := queue.NewWorkerPool(queue.WorkerPoolConfig{
-		DB: database,
-	})
+	pool := newTestWorkerPool(database)
 	pool.Start()
 	defer pool.Stop()
 
@@ -849,7 +846,7 @@ func TestHandlePrompt_ErrorBranches(t *testing.T) {
 	}
 	defer database.Close()
 
-	pool := queue.NewWorkerPool(queue.WorkerPoolConfig{DB: database})
+	pool := newTestWorkerPool(database)
 	// pool is not started so it won't trigger real background worker executions
 
 	handler := handlePrompt(database, pool)
