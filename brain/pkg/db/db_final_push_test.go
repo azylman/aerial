@@ -85,7 +85,7 @@ func TestInitDBDSNVariants(t *testing.T) {
 	db1.Close()
 
 	// file: without query param ?
-	db2, err2 := initDB("file:mem_test_2")
+	db2, err2 := initDB("file:mem_test_2?mode=memory")
 	if err2 != nil {
 		t.Fatalf("initDB without query param failed: %v", err2)
 	}
