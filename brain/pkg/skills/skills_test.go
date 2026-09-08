@@ -3,12 +3,14 @@ package skills
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
 func TestEnsureSkills(t *testing.T) {
 	tmpDir := t.TempDir()
-	_ = os.Setenv("HOME", tmpDir)
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
 
 	// Create dummy skills in mock plugin and .agents dirs
 	mockSkillDir := filepath.Join(tmpDir, ".gemini", "config", "plugins", "superpowers", "skills", "test-skill")
@@ -30,13 +32,17 @@ func TestEnsureSkills(t *testing.T) {
 	// Verify symlink was created
 	linkPath := filepath.Join(tmpDir, ".gemini", "config", "skills", "test-skill")
 	if _, err := os.Lstat(linkPath); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("skipping symlink assertion on Windows without privilege: %v", err)
+		}
 		t.Errorf("Expected symlink at %s, got error: %v", linkPath, err)
 	}
 }
 
 func TestEnsureSkills_OrphanedSymlinkSweeper(t *testing.T) {
 	tmpDir := t.TempDir()
-	_ = os.Setenv("HOME", tmpDir)
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
 
 	targetSkillsDir := filepath.Join(tmpDir, ".gemini", "config", "skills")
 	if err := os.MkdirAll(targetSkillsDir, 0755); err != nil {
@@ -47,6 +53,9 @@ func TestEnsureSkills_OrphanedSymlinkSweeper(t *testing.T) {
 	brokenLink := filepath.Join(targetSkillsDir, "broken-skill")
 	nonExistentTarget := filepath.Join(tmpDir, "non-existent-skill-dir")
 	if err := os.Symlink(nonExistentTarget, brokenLink); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("skipping broken symlink test on Windows without privilege: %v", err)
+		}
 		t.Fatalf("Failed to create broken symlink: %v", err)
 	}
 
@@ -129,6 +138,7 @@ func TestEnsureSkills_PriorityOrder(t *testing.T) {
 func TestEnsureSkills_CloneAttempt(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
 
 	// Do NOT create .git so clone path is triggered
 	_ = EnsureSkills()
@@ -145,7 +155,12 @@ func TestSweepOrphanedSymlinks_ValidSymlink(t *testing.T) {
 	realFile := filepath.Join(targetDir, "real.txt")
 	_ = os.WriteFile(realFile, []byte("real content"), 0644)
 	validLink := filepath.Join(linkDir, "valid_link")
-	_ = os.Symlink(realFile, validLink)
+	if err := os.Symlink(realFile, validLink); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("skipping symlink test on Windows without privilege: %v", err)
+		}
+		t.Fatalf("Failed to create symlink: %v", err)
+	}
 
 	// Also add a non-symlink regular file in linkDir
 	_ = os.WriteFile(filepath.Join(linkDir, "regular.txt"), []byte("reg"), 0644)

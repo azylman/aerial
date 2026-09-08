@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -517,7 +518,37 @@ func GetSystemChannel() string {
 	return "aerial-dev"
 }
 
+func isContainerColdBoot(paths ...string) bool {
+	for _, p := range paths {
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() && fi.Size() > 0 {
+			return false
+		}
+	}
+	if fi, err := os.Stat("/share/aerial-config"); err == nil && fi.IsDir() {
+		return true
+	}
+	return false
+}
+
+func waitForColdBootConfig(paths []string, timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		for _, p := range paths {
+			if fi, err := os.Stat(p); err == nil && !fi.IsDir() && fi.Size() > 0 {
+				log.Printf("[Config] Cold-boot configuration detected at %s", p)
+				return
+			}
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	log.Printf("[Config] Cold-boot wait timed out after %v, proceeding with search", timeout)
+}
+
 func LoadConfigFromPaths(paths ...string) (*Config, error) {
+	if isContainerColdBoot(paths...) {
+		waitForColdBootConfig(paths, 5*time.Second)
+	}
+
 	data := DefaultConfigData()
 	var loadedPath string
 	var lastErr error
