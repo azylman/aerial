@@ -92,7 +92,7 @@ func TestInitDBDSNVariants(t *testing.T) {
 	db2.Close()
 
 	// file: with existing _pragma
-	db3, err3 := initDB("file:mem_test_3?_pragma=busy_timeout(5000)")
+	db3, err3 := initDB("file:mem_test_3?mode=memory&_pragma=busy_timeout(5000)")
 	if err3 != nil {
 		t.Fatalf("initDB with existing _pragma failed: %v", err3)
 	}
