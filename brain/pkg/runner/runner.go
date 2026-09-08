@@ -9,7 +9,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -18,6 +17,7 @@ import (
 
 	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/metrics"
+	"github.com/azylman/aerial/brain/pkg/session"
 )
 
 var (
@@ -472,15 +472,11 @@ func RunAgyWithWatchdog(parentCtx context.Context, agyBin, prompt, sessionID, ap
 		ticker := time.NewTicker(opts.PollInterval)
 		defer ticker.Stop()
 
-		type fileState struct {
-			modTime time.Time
-			size    int64
-		}
-		lastFileStates := make(map[string]fileState)
-
-		homeDir, _ := os.UserHomeDir()
-		if homeDir == "" {
-			homeDir = "/root"
+		lastSeenDiskActivity := start
+		if sessionID != "" {
+			if initAct, _ := session.GetSessionLastActivity(sessionID, opts.TranscriptDirs...); initAct.After(start) {
+				lastSeenDiskActivity = initAct
+			}
 		}
 
 		for {
@@ -492,47 +488,10 @@ func RunAgyWithWatchdog(parentCtx context.Context, agyBin, prompt, sessionID, ap
 			case <-ticker.C:
 				activeSess := actWriter.SessionID()
 				if activeSess != "" {
-					var candidateDirs []string
-					if len(opts.TranscriptDirs) > 0 {
-						for _, d := range opts.TranscriptDirs {
-							if strings.Contains(d, "%s") {
-								candidateDirs = append(candidateDirs, fmt.Sprintf(d, activeSess))
-							} else if strings.Contains(d, "{session}") {
-								candidateDirs = append(candidateDirs, strings.ReplaceAll(d, "{session}", activeSess))
-							} else {
-								candidateDirs = append(candidateDirs, filepath.Join(d, activeSess, ".system_generated", "logs"))
-							}
-						}
-					} else {
-						candidateDirs = []string{
-							filepath.Join("/data", "brain", activeSess, ".system_generated", "logs"),
-							filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain", activeSess, ".system_generated", "logs"),
-							filepath.Join(homeDir, ".gemini", "antigravity", "brain", activeSess, ".system_generated", "logs"),
-						}
-					}
-					for _, dir := range candidateDirs {
-						for _, filename := range []string{"transcript.jsonl", "transcript_full.jsonl"} {
-							filePath := filepath.Join(dir, filename)
-							info, statErr := os.Stat(filePath)
-							if statErr == nil {
-								prevState, exists := lastFileStates[filePath]
-								if !exists {
-									lastFileStates[filePath] = fileState{
-										modTime: info.ModTime(),
-										size:    info.Size(),
-									}
-									if info.ModTime().After(start) || info.Size() > 0 {
-										actWriter.lastActivity.Store(time.Now().UnixNano())
-									}
-								} else if info.ModTime().After(prevState.modTime) || info.Size() != prevState.size {
-									lastFileStates[filePath] = fileState{
-										modTime: info.ModTime(),
-										size:    info.Size(),
-									}
-									actWriter.lastActivity.Store(time.Now().UnixNano())
-								}
-							}
-						}
+					latestActivity, _ := session.GetSessionLastActivity(activeSess, opts.TranscriptDirs...)
+					if latestActivity.After(lastSeenDiskActivity) {
+						lastSeenDiskActivity = latestActivity
+						actWriter.lastActivity.Store(time.Now().UnixNano())
 					}
 				}
 

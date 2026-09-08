@@ -3,6 +3,7 @@ package queue
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"math/rand"
@@ -45,8 +46,9 @@ var (
 )
 
 const (
-	DefaultMaxSessionTurns = 15
-	DefaultTimeoutMinutes  = 60
+	DefaultMaxSessionTurns     = 15
+	DefaultTimeoutMinutes      = 60
+	MaxMessageAbsoluteAge      = 2 * time.Hour
 	ContinuationPromptTemplate = "Your previous execution timed out or was interrupted while working. Please inspect where you left off in the conversation transcript and continue the task to completion.\n\nOriginal user request:\n%s"
 )
 
@@ -813,6 +815,129 @@ func CoalesceBurstPrompt(burst []db.Message) string {
 	return strings.TrimSpace(sb.String())
 }
 
+func parseDBTime(val any) (time.Time, bool) {
+	if val == nil {
+		return time.Time{}, false
+	}
+	switch v := val.(type) {
+	case time.Time:
+		return v, true
+	case *time.Time:
+		if v != nil {
+			return *v, true
+		}
+		return time.Time{}, false
+	case string:
+		trimmed := strings.TrimSpace(v)
+		if trimmed == "" {
+			return time.Time{}, false
+		}
+		for _, layout := range []string{
+			time.RFC3339Nano,
+			time.RFC3339,
+			"2006-01-02 15:04:05.999999999 -0700 MST",
+			"2006-01-02 15:04:05 -0700 MST",
+			"2006-01-02 15:04:05.999999999-07:00",
+			"2006-01-02 15:04:05.999999999",
+			"2006-01-02 15:04:05.999999999Z07:00",
+			"2006-01-02 15:04:05-07:00",
+			"2006-01-02 15:04:05",
+			"2006-01-02T15:04:05",
+		} {
+			if t, err := time.Parse(layout, trimmed); err == nil {
+				return t, true
+			}
+		}
+	case []byte:
+		return parseDBTime(string(v))
+	}
+	return time.Time{}, false
+}
+
+// GetSessionLastActivity queries the database and on-disk session logs to determine the most
+// recent activity for a thread's session.
+//
+// It inspects:
+// 1. The `sessions` table (internal_session_id, turn_count, updated_at).
+// 2. The `messages` table for genuine completed turns (filtering out [EXPIRED_STALE], [AMBIENT, [IGNORED).
+// 3. On-disk logs and task outputs via session.GetSessionLastActivity(internal_session_id).
+//
+// A thread is considered cold/new (isColdThread: true) only if completedCount == 0, turnCount == 0,
+// and diskActivity.IsZero(). Rotated sessions with turn_count == 0 or empty internal_session_id
+// but with prior completed messages are recognized as existing sessions.
+// If database queries fail (excluding sql.ErrNoRows), the error is returned to allow fail-open semantics.
+func GetSessionLastActivity(database db.DBTX, threadID string) (time.Time, bool, error) {
+	if database == nil || strings.TrimSpace(threadID) == "" {
+		return time.Time{}, true, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var (
+		internalSessionID sql.NullString
+		turnCount         sql.NullInt64
+		rawSessUpdatedAt  any
+	)
+
+	err := database.QueryRowContext(
+		ctx,
+		`SELECT internal_session_id, turn_count, updated_at FROM sessions WHERE thread_id = $1`,
+		threadID,
+	).Scan(&internalSessionID, &turnCount, &rawSessUpdatedAt)
+
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, false, fmt.Errorf("querying session for thread %s: %w", threadID, err)
+	}
+
+	var (
+		completedCount int64
+		rawMsgUpdated  any
+	)
+
+	msgErr := database.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*), MAX(updated_at) FROM messages 
+		 WHERE thread_id = $1 
+		   AND status = 'COMPLETED' 
+		   AND response_text NOT LIKE '[EXPIRED_STALE]%' 
+		   AND response_text NOT LIKE '[AMBIENT%' 
+		   AND response_text NOT LIKE '[IGNORED%'`,
+		threadID,
+	).Scan(&completedCount, &rawMsgUpdated)
+
+	if msgErr != nil && !errors.Is(msgErr, sql.ErrNoRows) {
+		return time.Time{}, false, fmt.Errorf("querying completed messages for thread %s: %w", threadID, msgErr)
+	}
+
+	var diskActivity time.Time
+	if internalSessionID.Valid && strings.TrimSpace(internalSessionID.String) != "" {
+		diskActivity, _ = session.GetSessionLastActivity(internalSessionID.String)
+	}
+
+	turns := int64(0)
+	if turnCount.Valid {
+		turns = turnCount.Int64
+	}
+
+	// A thread is cold only if it has zero completed messages, zero turns, and no disk activity.
+	if completedCount == 0 && turns == 0 && diskActivity.IsZero() {
+		return time.Time{}, true, nil
+	}
+
+	var latestActivity time.Time
+	if t, ok := parseDBTime(rawSessUpdatedAt); ok && t.After(latestActivity) {
+		latestActivity = t
+	}
+	if t, ok := parseDBTime(rawMsgUpdated); ok && t.After(latestActivity) {
+		latestActivity = t
+	}
+	if diskActivity.After(latestActivity) {
+		latestActivity = diskActivity
+	}
+
+	return latestActivity, false, nil
+}
 
 func (p *WorkerPool) processBurst(burst []db.Message) {
 	if len(burst) == 0 {
@@ -866,9 +991,24 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 	if stalenessTTL <= 0 {
 		stalenessTTL = 30 * time.Minute
 	}
-	latestMsg := burst[len(burst)-1]
-	if !latestMsg.CreatedAt.IsZero() && time.Since(latestMsg.CreatedAt) > stalenessTTL {
-		log.Printf("[WorkerPool] Dropping stale message(s) in thread %s (age > %v). Marked [EXPIRED_STALE].", threadID, stalenessTTL)
+
+	latestMsg := burst[0]
+	for _, m := range burst[1:] {
+		if m.CreatedAt.After(latestMsg.CreatedAt) {
+			latestMsg = m
+		}
+	}
+
+	hasRecovered := false
+	for _, m := range burst {
+		if m.RetryCount > 0 {
+			hasRecovered = true
+			break
+		}
+	}
+
+	dropBurstAsStale := func(reason string) {
+		log.Printf("[WorkerPool] Dropping stale message(s) in thread %s (%s). Marked [EXPIRED_STALE].", threadID, reason)
 		metrics.RecordTurnCompleted("stale", triggerType, "none", time.Since(latestMsg.CreatedAt))
 		for _, m := range burst {
 			_ = db.UpdateMessageCompleted(p.cfg.DB, m.ID, "[EXPIRED_STALE]")
@@ -886,7 +1026,34 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 				p.cfg.OnMessageCompleted(m, db.StatusCompleted)
 			}
 		}
-		return
+	}
+
+	if !latestMsg.CreatedAt.IsZero() && !hasRecovered {
+		msgAge := time.Since(latestMsg.CreatedAt)
+		if msgAge > MaxMessageAbsoluteAge {
+			dropBurstAsStale(fmt.Sprintf("exceeded hard absolute age cap %v: msg age %v", MaxMessageAbsoluteAge, msgAge))
+			return
+		}
+
+		if msgAge > stalenessTTL {
+			lastActivity, isColdThread, err := GetSessionLastActivity(p.cfg.DB, threadID)
+			if err != nil {
+				// Fail-open: Retain message if DB error occurs during staleness lookup
+				log.Printf("[WorkerPool] Warning: failed to query session last activity for thread %s: %v. Retaining message(s) (fail-open).", threadID, err)
+			} else if isColdThread {
+				// New session: message send time governs staleness
+				dropBurstAsStale(fmt.Sprintf("new thread and message age %v > TTL %v", msgAge, stalenessTTL))
+				return
+			} else {
+				// Existing session: session last activity governs staleness
+				if time.Since(lastActivity) > stalenessTTL {
+					dropBurstAsStale(fmt.Sprintf("existing session inactive for %v > TTL %v", time.Since(lastActivity), stalenessTTL))
+					return
+				}
+				log.Printf("[WorkerPool] Retaining message in thread %s (msg age %v > TTL %v) because session had recent activity %v ago <= TTL.",
+					threadID, msgAge, stalenessTTL, time.Since(lastActivity))
+			}
+		}
 	}
 
 	execStart := time.Now().UTC()

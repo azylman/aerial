@@ -14,9 +14,16 @@ import (
 	"github.com/google/uuid"
 )
 
-func TestFindLatestSessionDirAndExtract(t *testing.T) {
+func setupTestHome(t *testing.T) string {
+	t.Helper()
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
+	return tmpDir
+}
+
+func TestFindLatestSessionDirAndExtract(t *testing.T) {
+	tmpDir := setupTestHome(t)
 
 	convID := "test-conv-123"
 	logsDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", convID, ".system_generated", "logs")
@@ -52,8 +59,7 @@ func TestFindLatestSessionDirAndExtract(t *testing.T) {
 }
 
 func TestMultiTurnTurnScoping(t *testing.T) {
-	tmpDir := t.TempDir()
-	_ = os.Setenv("HOME", tmpDir)
+	tmpDir := setupTestHome(t)
 
 	convID := "test-multi-turn-456"
 	logsDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", convID, ".system_generated", "logs")
@@ -538,8 +544,7 @@ func TestAppendAmbientTurn_Concurrent(t *testing.T) {
 }
 
 func TestSessionExistsOnDisk(t *testing.T) {
-	tmpDir := t.TempDir()
-	_ = os.Setenv("HOME", tmpDir)
+	tmpDir := setupTestHome(t)
 
 	// 1. Empty or whitespace session ID -> returns false
 	emptyCases := []string{"", "   ", "\t", "\n", " \t \n "}
@@ -634,8 +639,7 @@ func TestSessionExistsOnDisk(t *testing.T) {
 }
 
 func TestSessionPackage_TargetDirsAndBaseDir(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+	tmpDir := setupTestHome(t)
 
 	// 1. Create brain roots with session directories
 	cliBrainRoot := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain")
@@ -677,8 +681,7 @@ func TestSessionPackage_TargetDirsAndBaseDir(t *testing.T) {
 }
 
 func TestHasSuccessfulToolCall_ToolExecuted(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+	tmpDir := setupTestHome(t)
 
 	convID := "tool-test-123"
 	logsDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", convID, ".system_generated", "logs")
@@ -722,8 +725,7 @@ func TestGetLastStepIndex_EdgeCases(t *testing.T) {
 }
 
 func TestDumpSessionDiagnosticLogs_LongLogFile(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+	tmpDir := setupTestHome(t)
 
 	convID := "diag-long-123"
 	logsDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", convID, ".system_generated", "logs")
@@ -742,8 +744,7 @@ func TestDumpSessionDiagnosticLogs_LongLogFile(t *testing.T) {
 }
 
 func TestFindLatestSessionDir_WithRegularFiles(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+	tmpDir := setupTestHome(t)
 
 	brainDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain")
 	_ = os.MkdirAll(brainDir, 0755)
@@ -769,8 +770,7 @@ func TestAppendTranscriptStep_Errors(t *testing.T) {
 }
 
 func TestAppendAmbientTurn_ZeroTimestamp(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+	_ = setupTestHome(t)
 
 	sessionID := uuid.New().String()
 	sessDir, err := EnsureSessionDir(sessionID)
@@ -787,8 +787,7 @@ func TestAppendAmbientTurn_ZeroTimestamp(t *testing.T) {
 }
 
 func TestExtractResponseAndError_LegacyAndModernAmbientTurns(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+	tmpDir := setupTestHome(t)
 
 	convID := "test-conv-ambient-filter"
 	logsDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", convID, ".system_generated", "logs")
@@ -837,4 +836,144 @@ func TestExtractResponseAndError_LegacyAndModernAmbientTurns(t *testing.T) {
 		t.Errorf("Expected empty response for incomplete Turn 2, got: %q", resp)
 	}
 }
+
+func TestGetSessionLastActivity(t *testing.T) {
+	tmpDir := setupTestHome(t)
+
+	// 1. Empty or whitespace session ID -> zero time, nil error
+	for _, emptyID := range []string{"", "   ", "\t", "\n"} {
+		tAct, err := GetSessionLastActivity(emptyID)
+		if err != nil || !tAct.IsZero() {
+			t.Errorf("expected zero time, nil err for %q, got %v, %v", emptyID, tAct, err)
+		}
+	}
+
+	// 2. Path traversal attempts -> zero time, nil error
+	for _, traversalID := range []string{"../../etc/passwd", "foo/bar", `foo\bar`, "../foo", "foo/../bar"} {
+		tAct, err := GetSessionLastActivity(traversalID)
+		if err != nil || !tAct.IsZero() {
+			t.Errorf("expected zero time, nil err for traversal %q, got %v, %v", traversalID, tAct, err)
+		}
+	}
+
+	// 3. Non-existent session -> zero time, nil error
+	tAct, err := GetSessionLastActivity("non-existent-session-xyz")
+	if err != nil || !tAct.IsZero() {
+		t.Errorf("expected zero time, nil err for non-existent session, got %v, %v", tAct, err)
+	}
+
+	// 4. Session with only transcripts
+	sessionID := "test-session-activity-1"
+	sessRoot := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", sessionID)
+	logsDir := filepath.Join(sessRoot, ".system_generated", "logs")
+	if err := os.MkdirAll(logsDir, 0755); err != nil {
+		t.Fatalf("failed to create logsDir: %v", err)
+	}
+
+	t1 := time.Now().Add(-10 * time.Minute).Truncate(time.Second)
+	tPath := filepath.Join(logsDir, "transcript.jsonl")
+	if err := os.WriteFile(tPath, []byte(`{"step": 1}`), 0644); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+	_ = os.Chtimes(tPath, t1, t1)
+
+	actTime, err := GetSessionLastActivity(sessionID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !actTime.Equal(t1) {
+		t.Errorf("expected activity time %v, got %v", t1, actTime)
+	}
+
+	// 5. Session with task logs
+	tasksDir := filepath.Join(sessRoot, ".system_generated", "tasks")
+	if err := os.MkdirAll(tasksDir, 0755); err != nil {
+		t.Fatalf("failed to create tasksDir: %v", err)
+	}
+
+	t2 := time.Now().Add(-3 * time.Minute).Truncate(time.Second)
+	taskLog1 := filepath.Join(tasksDir, "task-1.log")
+	if err := os.WriteFile(taskLog1, []byte("build started\n"), 0644); err != nil {
+		t.Fatalf("failed to write taskLog1: %v", err)
+	}
+	_ = os.Chtimes(taskLog1, t2, t2)
+
+	// Non-log files and subdirectories in tasks/ should be ignored
+	_ = os.WriteFile(filepath.Join(tasksDir, "notes.txt"), []byte("ignored"), 0644)
+	_ = os.MkdirAll(filepath.Join(tasksDir, "subfolder.log"), 0755)
+
+	actTime, err = GetSessionLastActivity(sessionID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !actTime.Equal(t2) {
+		t.Errorf("expected activity time to advance to task-1 %v, got %v", t2, actTime)
+	}
+
+	// 6. Update task log with newer timestamp
+	t3 := time.Now().Add(-30 * time.Second).Truncate(time.Second)
+	taskLog2 := filepath.Join(tasksDir, "task-2.log")
+	if err := os.WriteFile(taskLog2, []byte("tests running\n"), 0644); err != nil {
+		t.Fatalf("failed to write taskLog2: %v", err)
+	}
+	_ = os.Chtimes(taskLog2, t3, t3)
+
+	actTime, err = GetSessionLastActivity(sessionID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !actTime.Equal(t3) {
+		t.Errorf("expected activity time to advance to task-2 %v, got %v", t3, actTime)
+	}
+
+	// 7. Custom roots passed variadically
+	customRoot := t.TempDir()
+	customSessID := "custom-sess-root-123"
+	customLogs := filepath.Join(customRoot, customSessID, ".system_generated", "logs")
+	_ = os.MkdirAll(customLogs, 0755)
+	tCustom := time.Now().Add(-5 * time.Second).Truncate(time.Second)
+	cPath := filepath.Join(customLogs, "transcript.jsonl")
+	_ = os.WriteFile(cPath, []byte("custom root"), 0644)
+	_ = os.Chtimes(cPath, tCustom, tCustom)
+
+	// Normal lookup won't find custom root
+	normTime, _ := GetSessionLastActivity(customSessID)
+	if !normTime.IsZero() {
+		t.Errorf("expected zero time in standard roots for custom sess, got %v", normTime)
+	}
+
+	// Variadic custom roots find it directly
+	customAct, err := GetSessionLastActivity(customSessID, customRoot)
+	if err != nil {
+		t.Fatalf("unexpected error with custom root: %v", err)
+	}
+	if !customAct.Equal(tCustom) {
+		t.Errorf("expected %v with custom root, got %v", tCustom, customAct)
+	}
+}
+
+func TestSessionRoots_SetSessionRoots(t *testing.T) {
+	origRoots := SessionRoots()
+	if len(origRoots) < 3 {
+		t.Errorf("expected at least 3 default roots, got %v", origRoots)
+	}
+
+	tempRoot1 := t.TempDir()
+	tempRoot2 := t.TempDir()
+
+	restore := SetSessionRoots(tempRoot1, tempRoot2)
+	defer restore()
+
+	custom := SessionRoots()
+	if len(custom) != 2 || custom[0] != tempRoot1 || custom[1] != tempRoot2 {
+		t.Errorf("expected custom roots [%s %s], got %v", tempRoot1, tempRoot2, custom)
+	}
+
+	restore()
+	restored := SessionRoots()
+	if len(restored) != len(origRoots) {
+		t.Errorf("expected restored roots len %d, got %d", len(origRoots), len(restored))
+	}
+}
+
 

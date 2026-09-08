@@ -7198,3 +7198,611 @@ func TestProcessBurst_ColdStartContextWindow_FailsFast(t *testing.T) {
 		t.Errorf("Expected message status to be FAILED, got %s", dbMsg.Status)
 	}
 }
+
+func TestGetSessionLastActivity_ChecksBothDBAndDiskLogs(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
+
+	threadID := "thread-act-1"
+	sessionID := "sess-act-uuid-1"
+
+	// 1. Initially empty thread -> cold thread, zero time
+	act, isCold, err := GetSessionLastActivity(database, threadID)
+	if err != nil || !isCold || !act.IsZero() {
+		t.Fatalf("expected cold thread with zero time, got act=%v, isCold=%v, err=%v", act, isCold, err)
+	}
+
+	// 2. Insert session with updated_at = 20m ago
+	tSess := time.Now().UTC().Add(-20 * time.Minute).Truncate(time.Second)
+	_, err = database.Exec(`
+		INSERT INTO sessions (thread_id, internal_session_id, turn_count, updated_at)
+		VALUES ($1, $2, $3, $4)
+	`, threadID, sessionID, 1, tSess)
+	if err != nil {
+		t.Fatalf("failed to insert session: %v", err)
+	}
+
+	act, isCold, err = GetSessionLastActivity(database, threadID)
+	if err != nil || isCold {
+		t.Fatalf("expected non-cold thread, got act=%v, isCold=%v, err=%v", act, isCold, err)
+	}
+	if !act.Equal(tSess) {
+		t.Errorf("expected session updated_at %v, got %v", tSess, act)
+	}
+
+	// 3. Insert completed message with updated_at = 10m ago (newer than session updated_at)
+	tMsg := time.Now().UTC().Add(-10 * time.Minute).Truncate(time.Second)
+	_, err = database.Exec(`
+		INSERT INTO messages (id, thread_id, status, response_text, created_at, updated_at)
+		VALUES ('msg-1', $1, 'COMPLETED', 'some answer', $2, $2)
+	`, threadID, tMsg)
+	if err != nil {
+		t.Fatalf("failed to insert message: %v", err)
+	}
+
+	act, isCold, err = GetSessionLastActivity(database, threadID)
+	if err != nil || isCold {
+		t.Fatalf("expected non-cold thread, got act=%v, isCold=%v, err=%v", act, isCold, err)
+	}
+	if !act.Equal(tMsg) {
+		t.Errorf("expected msg updated_at %v, got %v", tMsg, act)
+	}
+
+	// 4. Create on-disk task log with timestamp = 2m ago (newer than DB)
+	tasksDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", sessionID, ".system_generated", "tasks")
+	if err := os.MkdirAll(tasksDir, 0755); err != nil {
+		t.Fatalf("failed to create tasksDir: %v", err)
+	}
+	tDisk := time.Now().UTC().Add(-2 * time.Minute).Truncate(time.Second)
+	taskLog := filepath.Join(tasksDir, "task-1.log")
+	if err := os.WriteFile(taskLog, []byte("build output\n"), 0644); err != nil {
+		t.Fatalf("failed to write taskLog: %v", err)
+	}
+	_ = os.Chtimes(taskLog, tDisk, tDisk)
+
+	act, isCold, err = GetSessionLastActivity(database, threadID)
+	if err != nil || isCold {
+		t.Fatalf("expected non-cold thread, got act=%v, isCold=%v, err=%v", act, isCold, err)
+	}
+	if !act.Equal(tDisk) {
+		t.Errorf("expected disk activity %v to win, got %v", tDisk, act)
+	}
+}
+
+func TestGetSessionLastActivity_RotatedSessionNotNew(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	threadID := "thread-rotated-1"
+
+	// Session has reached 15 turns and rotated: internal_session_id is "", turn_count is 0
+	_, err = database.Exec(`
+		INSERT INTO sessions (thread_id, internal_session_id, turn_count, updated_at)
+		VALUES ($1, '', 0, $2)
+	`, threadID, time.Now().UTC().Add(-15*time.Minute))
+	if err != nil {
+		t.Fatalf("failed to insert session: %v", err)
+	}
+
+	// But messages table has prior completed turn from 4 minutes ago
+	tCompleted := time.Now().UTC().Add(-4 * time.Minute).Truncate(time.Second)
+	_, err = database.Exec(`
+		INSERT INTO messages (id, thread_id, status, response_text, created_at, updated_at)
+		VALUES ('msg-prev', $1, 'COMPLETED', 'previous answer', $2, $2)
+	`, threadID, tCompleted)
+	if err != nil {
+		t.Fatalf("failed to insert message: %v", err)
+	}
+
+	act, isCold, err := GetSessionLastActivity(database, threadID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if isCold {
+		t.Errorf("expected isCold=false for rotated session with completed turns, got true")
+	}
+	if !act.Equal(tCompleted) {
+		t.Errorf("expected lastActivity %v, got %v", tCompleted, act)
+	}
+}
+
+func TestGetSessionLastActivity_IgnoresExpiredStaleSentinel(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	threadID := "thread-stale-sentinel"
+
+	// Message completed with [EXPIRED_STALE]
+	_, err = database.Exec(`
+		INSERT INTO messages (id, thread_id, status, response_text, created_at, updated_at)
+		VALUES ('msg-stale-drop', $1, 'COMPLETED', '[EXPIRED_STALE]', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+	`, threadID)
+	if err != nil {
+		t.Fatalf("failed to insert message: %v", err)
+	}
+
+	// Also insert ambient evaluated message
+	_, err = database.Exec(`
+		INSERT INTO messages (id, thread_id, status, response_text, created_at, updated_at)
+		VALUES ('msg-ambient', $1, 'COMPLETED', '[AMBIENT: IGNORED]', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+	`, threadID)
+	if err != nil {
+		t.Fatalf("failed to insert message: %v", err)
+	}
+
+	// No real completed messages -> should be cold thread
+	act, isCold, err := GetSessionLastActivity(database, threadID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !isCold {
+		t.Errorf("expected isCold=true when only stale/ambient messages exist, got false")
+	}
+	if !act.IsZero() {
+		t.Errorf("expected zero activity time, got %v", act)
+	}
+}
+
+func TestProcessBurst_Staleness_ExistingSessionRecentDiskActivity_Retained(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
+
+	threadID := "thread-burst-disk-active"
+	sessionID := "sess-burst-disk-active"
+
+	// Session registered in DB
+	_ = db.SaveSessionID(database, threadID, sessionID)
+
+	// Task log active 5m ago
+	tasksDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", sessionID, ".system_generated", "tasks")
+	_ = os.MkdirAll(tasksDir, 0755)
+	tDisk := time.Now().UTC().Add(-5 * time.Minute)
+	taskLog := filepath.Join(tasksDir, "task-1.log")
+	_ = os.WriteFile(taskLog, []byte("running build"), 0644)
+	_ = os.Chtimes(taskLog, tDisk, tDisk)
+
+	var runnerCalls int
+	var mu sync.Mutex
+	doneCh := make(chan struct{})
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    1,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			mu.Lock()
+			runnerCalls++
+			mu.Unlock()
+			return mockJSONResponse(sessionID, "retained and executed"), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
+		TypingFunc:   func(s *discordgo.Session, channelID string) func() { return func() {} },
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			close(doneCh)
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	// Message created 35 minutes ago (> 30m default staleness TTL)
+	msg := db.Message{
+		ID:        "msg-old-retained",
+		ThreadID:  threadID,
+		AuthorID:  "user-1",
+		Content:   "Please continue the task",
+		Status:    db.StatusPending,
+		CreatedAt: time.Now().UTC().Add(-35 * time.Minute),
+	}
+	_ = db.InsertMessage(database, msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Timeout waiting for message processing")
+	}
+
+	mu.Lock()
+	calls := runnerCalls
+	mu.Unlock()
+
+	if calls != 1 {
+		t.Errorf("Expected 1 runner call for message in active session, got %d", calls)
+	}
+
+	dbMsg, _ := db.GetMessage(database, "msg-old-retained")
+	if dbMsg.Status != db.StatusCompleted || dbMsg.ResponseText == "[EXPIRED_STALE]" {
+		t.Errorf("Expected message to be completed normally, got status=%s, response=%s", dbMsg.Status, dbMsg.ResponseText)
+	}
+}
+
+func TestProcessBurst_Staleness_ExistingSessionRecentDBActivity_Retained(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	threadID := "thread-burst-db-active"
+
+	// Previous message completed 5 minutes ago
+	tPrev := time.Now().UTC().Add(-5 * time.Minute)
+	_, _ = database.Exec(`
+		INSERT INTO messages (id, thread_id, status, response_text, created_at, updated_at)
+		VALUES ('msg-prev-active', $1, 'COMPLETED', 'Finished earlier turn', $2, $2)
+	`, threadID, tPrev)
+
+	var runnerCalls int
+	var mu sync.Mutex
+	doneCh := make(chan struct{})
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    1,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			mu.Lock()
+			runnerCalls++
+			mu.Unlock()
+			return mockJSONResponse("sess-new", "done"), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
+		TypingFunc:   func(s *discordgo.Session, channelID string) func() { return func() {} },
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			close(doneCh)
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	// Message created 35 minutes ago (> 30m TTL)
+	msg := db.Message{
+		ID:        "msg-db-active-retained",
+		ThreadID:  threadID,
+		AuthorID:  "user-1",
+		Content:   "Next step please",
+		Status:    db.StatusPending,
+		CreatedAt: time.Now().UTC().Add(-35 * time.Minute),
+	}
+	_ = db.InsertMessage(database, msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Timeout waiting for message processing")
+	}
+
+	mu.Lock()
+	calls := runnerCalls
+	mu.Unlock()
+
+	if calls != 1 {
+		t.Errorf("Expected 1 runner call for message with recent DB activity, got %d", calls)
+	}
+}
+
+func TestProcessBurst_Staleness_ExistingSessionInactive_Dropped(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	threadID := "thread-burst-inactive"
+	sessionID := "sess-burst-inactive"
+
+	// Session registered, but updated_at is 45m ago
+	tInactive := time.Now().UTC().Add(-45 * time.Minute)
+	_, _ = database.Exec(`
+		INSERT INTO sessions (thread_id, internal_session_id, turn_count, updated_at)
+		VALUES ($1, $2, 1, $3)
+	`, threadID, sessionID, tInactive)
+
+	// Previous turn completed 45m ago
+	_, _ = database.Exec(`
+		INSERT INTO messages (id, thread_id, status, response_text, created_at, updated_at)
+		VALUES ('msg-old-completed', $1, 'COMPLETED', 'old answer', $2, $2)
+	`, threadID, tInactive)
+
+	var runnerCalls int
+	var mu sync.Mutex
+	doneCh := make(chan struct{})
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    1,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			mu.Lock()
+			runnerCalls++
+			mu.Unlock()
+			return mockJSONResponse(sessionID, "should not execute"), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
+		TypingFunc:   func(s *discordgo.Session, channelID string) func() { return func() {} },
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			close(doneCh)
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	// Message created 35m ago (> 30m TTL) and session inactive for 45m (> 30m TTL)
+	msg := db.Message{
+		ID:        "msg-inactive-dropped",
+		ThreadID:  threadID,
+		AuthorID:  "user-1",
+		Content:   "old prompt",
+		Status:    db.StatusPending,
+		CreatedAt: time.Now().UTC().Add(-35 * time.Minute),
+	}
+	_ = db.InsertMessage(database, msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Timeout waiting for stale message drop")
+	}
+
+	mu.Lock()
+	calls := runnerCalls
+	mu.Unlock()
+
+	if calls != 0 {
+		t.Errorf("Expected 0 runner calls for inactive session, got %d", calls)
+	}
+
+	dbMsg, _ := db.GetMessage(database, "msg-inactive-dropped")
+	if dbMsg.ResponseText != "[EXPIRED_STALE]" {
+		t.Errorf("Expected [EXPIRED_STALE], got %s", dbMsg.ResponseText)
+	}
+}
+
+func TestProcessBurst_Staleness_NewSession_Dropped(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	threadID := "thread-new-drop"
+	var runnerCalls int
+	var mu sync.Mutex
+	doneCh := make(chan struct{})
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    1,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			mu.Lock()
+			runnerCalls++
+			mu.Unlock()
+			return mockJSONResponse("sess-new", "should not run"), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
+		TypingFunc:   func(s *discordgo.Session, channelID string) func() { return func() {} },
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			close(doneCh)
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	// New thread, message 31m old
+	msg := db.Message{
+		ID:        "msg-new-stale",
+		ThreadID:  threadID,
+		AuthorID:  "user-1",
+		Content:   "brand new thread message",
+		Status:    db.StatusPending,
+		CreatedAt: time.Now().UTC().Add(-31 * time.Minute),
+	}
+	_ = db.InsertMessage(database, msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Timeout waiting for new thread stale drop")
+	}
+
+	mu.Lock()
+	calls := runnerCalls
+	mu.Unlock()
+
+	if calls != 0 {
+		t.Errorf("Expected 0 runner calls, got %d", calls)
+	}
+
+	dbMsg, _ := db.GetMessage(database, "msg-new-stale")
+	if dbMsg.ResponseText != "[EXPIRED_STALE]" {
+		t.Errorf("Expected [EXPIRED_STALE], got %s", dbMsg.ResponseText)
+	}
+}
+
+func TestGetSessionLastActivity_FailOpenOnDBError(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	_ = database.Close()
+
+	// When DB is closed, GetSessionLastActivity returns error
+	act, isCold, err := GetSessionLastActivity(database, "thread-closed")
+	if err == nil {
+		t.Fatalf("expected error from closed DB, got nil")
+	}
+	if isCold {
+		t.Errorf("expected isCold=false on DB error, got true")
+	}
+	if !act.IsZero() {
+		t.Errorf("expected zero activity time on DB error, got %v", act)
+	}
+}
+
+func TestProcessBurst_Staleness_HardCeiling_Dropped(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	threadID := "thread-hard-ceiling"
+
+	// Session is actively running right now (updated 1 minute ago)
+	_, _ = database.Exec(`
+		INSERT INTO sessions (thread_id, internal_session_id, turn_count, updated_at)
+		VALUES ($1, 'sess-ceiling', 1, CURRENT_TIMESTAMP)
+	`, threadID)
+	_, _ = database.Exec(`
+		INSERT INTO messages (id, thread_id, status, response_text, created_at, updated_at)
+		VALUES ('msg-recent', $1, 'COMPLETED', 'recent turn', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+	`, threadID)
+
+	var runnerCalls int
+	var mu sync.Mutex
+	doneCh := make(chan struct{})
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    1,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			mu.Lock()
+			runnerCalls++
+			mu.Unlock()
+			return mockJSONResponse("sess-ceiling", "should not run"), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
+		TypingFunc:   func(s *discordgo.Session, channelID string) func() { return func() {} },
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			close(doneCh)
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	// Message is 2 hours 10 minutes old (> MaxMessageAbsoluteAge)
+	msg := db.Message{
+		ID:        "msg-poison-pill",
+		ThreadID:  threadID,
+		AuthorID:  "user-1",
+		Content:   "very old command that survived in queue",
+		Status:    db.StatusPending,
+		CreatedAt: time.Now().UTC().Add(-130 * time.Minute),
+	}
+	_ = db.InsertMessage(database, msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Timeout waiting for hard ceiling drop")
+	}
+
+	mu.Lock()
+	calls := runnerCalls
+	mu.Unlock()
+
+	if calls != 0 {
+		t.Errorf("Expected 0 runner calls for message older than MaxMessageAbsoluteAge, got %d", calls)
+	}
+
+	dbMsg, _ := db.GetMessage(database, "msg-poison-pill")
+	if dbMsg.ResponseText != "[EXPIRED_STALE]" {
+		t.Errorf("Expected [EXPIRED_STALE], got %s", dbMsg.ResponseText)
+	}
+}
+
+func TestProcessBurst_Staleness_RecoveredMessage_Retained(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	threadID := "thread-recovered-msg"
+	var runnerCalls int
+	var mu sync.Mutex
+	doneCh := make(chan struct{})
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    3,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			mu.Lock()
+			runnerCalls++
+			mu.Unlock()
+			return mockJSONResponse("sess-rec", "recovered execution done"), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
+		TypingFunc:   func(s *discordgo.Session, channelID string) func() { return func() {} },
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			close(doneCh)
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	// Recovered message during restart has RetryCount > 0, age is 45m (> 30m)
+	msg := db.Message{
+		ID:         "msg-recovered-1",
+		ThreadID:   threadID,
+		AuthorID:   "user-1",
+		Content:    "interrupted turn resumed",
+		Status:     db.StatusPending,
+		RetryCount: 1,
+		CreatedAt:  time.Now().UTC().Add(-45 * time.Minute),
+	}
+	_ = db.InsertMessage(database, msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Timeout waiting for recovered message processing")
+	}
+
+	mu.Lock()
+	calls := runnerCalls
+	mu.Unlock()
+
+	if calls != 1 {
+		t.Errorf("Expected 1 runner call for recovered message with RetryCount > 0, got %d", calls)
+	}
+
+	dbMsg, _ := db.GetMessage(database, "msg-recovered-1")
+	if dbMsg.ResponseText == "[EXPIRED_STALE]" {
+		t.Errorf("Recovered message should NOT be marked [EXPIRED_STALE]")
+	}
+}

@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -534,7 +536,47 @@ func TestExtractSessionID(t *testing.T) {
 	}
 }
 
+func createMockAgyScript(t *testing.T, dir, script string) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		shPath, err := exec.LookPath("sh")
+		if err != nil {
+			for _, cand := range []string{
+				`C:\Users\alexz\AppData\Local\Programs\MinGit\usr\bin\sh.exe`,
+				`C:\Program Files\Git\bin\sh.exe`,
+				`C:\Program Files\Git\usr\bin\sh.exe`,
+			} {
+				if _, statErr := os.Stat(cand); statErr == nil {
+					shPath = cand
+					break
+				}
+			}
+		}
+		if shPath == "" {
+			t.Skip("skipping shell script test on Windows: sh not found")
+		}
+		shFile := filepath.Join(dir, "mock-agy.sh")
+		if err := os.WriteFile(shFile, []byte(script), 0755); err != nil {
+			t.Fatalf("failed to write script: %v", err)
+		}
+		batFile := filepath.Join(dir, "mock-agy.bat")
+		batContent := fmt.Sprintf("@echo off\r\n\"%s\" \"%s\" %%*\r\n", shPath, filepath.ToSlash(shFile))
+		if err := os.WriteFile(batFile, []byte(batContent), 0755); err != nil {
+			t.Fatalf("failed to write bat: %v", err)
+		}
+		return batFile
+	}
+	scriptPath := filepath.Join(dir, "mock-agy")
+	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {
+		t.Fatalf("failed to write mock script: %v", err)
+	}
+	return scriptPath
+}
+
 func TestRunAgyWithEcho(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("echo is a shell built-in on Windows")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -634,11 +676,7 @@ func TestRunAgyWithWatchdog_InactivityTimeout(t *testing.T) {
 		PollInterval:      10 * time.Millisecond,
 	}
 
-	mockAgy := filepath.Join(t.TempDir(), "mock-agy")
-	script := "#!/bin/sh\nsleep 1\n"
-	if err := os.WriteFile(mockAgy, []byte(script), 0755); err != nil {
-		t.Fatalf("failed to write mock script: %v", err)
-	}
+	mockAgy := createMockAgyScript(t, t.TempDir(), "#!/bin/sh\nsleep 1\n")
 
 	stdout, stderr, exitCode, err := RunAgyWithWatchdog(
 		ctx,
@@ -664,18 +702,24 @@ func TestRunAgyWithWatchdog_InactivityTimeout(t *testing.T) {
 
 func TestRunAgyWithWatchdog_ActiveStderrHeartbeat(t *testing.T) {
 	ctx := context.Background()
-	opts := WatchdogOptions{
-		InactivityTimeout: 100 * time.Millisecond,
-		MaxDuration:       2 * time.Second,
-		PollInterval:      15 * time.Millisecond,
+	inactTimeout := 100 * time.Millisecond
+	pollInterval := 15 * time.Millisecond
+	sleepSec := "0.03"
+	if runtime.GOOS == "windows" {
+		inactTimeout = 1200 * time.Millisecond
+		pollInterval = 30 * time.Millisecond
+		sleepSec = "0.3"
 	}
 
-	mockAgy := filepath.Join(t.TempDir(), "mock-agy")
-	// 5 pulses 30ms apart = ~150ms total execution time, beating the 100ms inactivity timeout
-	script := "#!/bin/sh\nfor i in 1 2 3 4 5; do\n  echo \"pulse $i\" >&2\n  sleep 0.03\ndone\necho '{\"status\":\"SUCCESS\",\"response\":\"done\"}'\n"
-	if err := os.WriteFile(mockAgy, []byte(script), 0755); err != nil {
-		t.Fatalf("failed to write mock script: %v", err)
+	opts := WatchdogOptions{
+		InactivityTimeout: inactTimeout,
+		MaxDuration:       5 * time.Second,
+		PollInterval:      pollInterval,
 	}
+
+	// 5 pulses beating the inactivity timeout
+	script := fmt.Sprintf("#!/bin/sh\nfor i in 1 2 3 4 5; do\n  echo \"pulse $i\" >&2\n  sleep %s\ndone\necho '{\"status\":\"SUCCESS\",\"response\":\"done\"}'\n", sleepSec)
+	mockAgy := createMockAgyScript(t, t.TempDir(), script)
 
 	stdout, stderr, exitCode, err := RunAgyWithWatchdog(
 		ctx,
@@ -688,7 +732,7 @@ func TestRunAgyWithWatchdog_ActiveStderrHeartbeat(t *testing.T) {
 	)
 
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("unexpected error: %v (stderr: %q, stdout: %q)", err, stderr, stdout)
 	}
 	if exitCode != 0 {
 		t.Errorf("expected exit code 0, got %d (stderr: %s)", exitCode, stderr)
@@ -703,18 +747,24 @@ func TestRunAgyWithWatchdog_ActiveStderrHeartbeat(t *testing.T) {
 
 func TestRunAgyWithWatchdog_ActiveStdoutHeartbeat(t *testing.T) {
 	ctx := context.Background()
-	opts := WatchdogOptions{
-		InactivityTimeout: 100 * time.Millisecond,
-		MaxDuration:       2 * time.Second,
-		PollInterval:      15 * time.Millisecond,
+	inactTimeout := 100 * time.Millisecond
+	pollInterval := 15 * time.Millisecond
+	sleepSec := "0.03"
+	if runtime.GOOS == "windows" {
+		inactTimeout = 1200 * time.Millisecond
+		pollInterval = 30 * time.Millisecond
+		sleepSec = "0.3"
 	}
 
-	mockAgy := filepath.Join(t.TempDir(), "mock-agy")
-	// 5 stdout pulses 30ms apart = ~150ms total execution time, beating the 100ms inactivity timeout
-	script := "#!/bin/sh\nfor i in 1 2 3 4 5; do\n  echo \"stdout pulse $i\"\n  sleep 0.03\ndone\necho '{\"status\":\"SUCCESS\",\"response\":\"done\"}'\n"
-	if err := os.WriteFile(mockAgy, []byte(script), 0755); err != nil {
-		t.Fatalf("failed to write mock script: %v", err)
+	opts := WatchdogOptions{
+		InactivityTimeout: inactTimeout,
+		MaxDuration:       5 * time.Second,
+		PollInterval:      pollInterval,
 	}
+
+	// 5 stdout pulses beating the inactivity timeout
+	script := fmt.Sprintf("#!/bin/sh\nfor i in 1 2 3 4 5; do\n  echo \"stdout pulse $i\"\n  sleep %s\ndone\necho '{\"status\":\"SUCCESS\",\"response\":\"done\"}'\n", sleepSec)
+	mockAgy := createMockAgyScript(t, t.TempDir(), script)
 
 	stdout, stderr, exitCode, err := RunAgyWithWatchdog(
 		ctx,
@@ -750,18 +800,24 @@ func TestRunAgyWithWatchdog_CustomTranscriptDirs(t *testing.T) {
 	}
 	transcriptFile := filepath.Join(customLogDir, "transcript.jsonl")
 
+	inactTimeout := 100 * time.Millisecond
+	pollInterval := 15 * time.Millisecond
+	sleepSec := "0.03"
+	if runtime.GOOS == "windows" {
+		inactTimeout = 1200 * time.Millisecond
+		pollInterval = 30 * time.Millisecond
+		sleepSec = "0.3"
+	}
+
 	opts := WatchdogOptions{
-		InactivityTimeout: 100 * time.Millisecond,
-		MaxDuration:       2 * time.Second,
-		PollInterval:      15 * time.Millisecond,
+		InactivityTimeout: inactTimeout,
+		MaxDuration:       5 * time.Second,
+		PollInterval:      pollInterval,
 		TranscriptDirs:    []string{filepath.Join(tempDir, "custom-logs")},
 	}
 
-	mockAgy := filepath.Join(t.TempDir(), "mock-agy")
-	script := fmt.Sprintf("#!/bin/sh\nfor i in 1 2 3 4 5; do\n  echo \"{\\\"step\\\": $i}\" >> %s\n  sleep 0.03\ndone\necho '{\"status\":\"SUCCESS\",\"response\":\"done\"}'\n", transcriptFile)
-	if err := os.WriteFile(mockAgy, []byte(script), 0755); err != nil {
-		t.Fatalf("failed to write mock script: %v", err)
-	}
+	script := fmt.Sprintf("#!/bin/sh\nfor i in 1 2 3 4 5; do\n  echo \"{\\\"step\\\": $i}\" >> \"%s\"\n  sleep %s\ndone\necho '{\"status\":\"SUCCESS\",\"response\":\"done\"}'\n", filepath.ToSlash(transcriptFile), sleepSec)
+	mockAgy := createMockAgyScript(t, t.TempDir(), script)
 
 	stdout, stderr, exitCode, err := RunAgyWithWatchdog(
 		ctx,
@@ -790,30 +846,35 @@ func TestRunAgyWithWatchdog_CustomTranscriptDirs(t *testing.T) {
 func TestRunAgyWithWatchdog_TranscriptHeartbeat(t *testing.T) {
 	ctx := context.Background()
 	testSessionID := "test-transcript-session-12345"
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		homeDir = "/root"
-	}
-	logDir := filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain", testSessionID, ".system_generated", "logs")
+	tempDir := t.TempDir()
+	t.Setenv("HOME", tempDir)
+	t.Setenv("USERPROFILE", tempDir)
+
+	logDir := filepath.Join(tempDir, ".gemini", "antigravity-cli", "brain", testSessionID, ".system_generated", "logs")
 	if err := os.MkdirAll(logDir, 0755); err != nil {
 		t.Fatalf("failed to create mock log dir: %v", err)
 	}
-	defer os.RemoveAll(filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain", testSessionID))
 
 	transcriptFile := filepath.Join(logDir, "transcript.jsonl")
 
-	opts := WatchdogOptions{
-		InactivityTimeout: 100 * time.Millisecond,
-		MaxDuration:       2 * time.Second,
-		PollInterval:      15 * time.Millisecond,
+	inactTimeout := 100 * time.Millisecond
+	pollInterval := 15 * time.Millisecond
+	sleepSec := "0.03"
+	if runtime.GOOS == "windows" {
+		inactTimeout = 1200 * time.Millisecond
+		pollInterval = 30 * time.Millisecond
+		sleepSec = "0.3"
 	}
 
-	mockAgy := filepath.Join(t.TempDir(), "mock-agy")
-	// Writes to transcript.jsonl every 30ms for 5 pulses (~150ms > 100ms inactivity timeout)
-	script := fmt.Sprintf("#!/bin/sh\nfor i in 1 2 3 4 5; do\n  echo \"{\\\"step\\\": $i}\" >> %s\n  sleep 0.03\ndone\necho '{\"status\":\"SUCCESS\",\"response\":\"done\"}'\n", transcriptFile)
-	if err := os.WriteFile(mockAgy, []byte(script), 0755); err != nil {
-		t.Fatalf("failed to write mock script: %v", err)
+	opts := WatchdogOptions{
+		InactivityTimeout: inactTimeout,
+		MaxDuration:       5 * time.Second,
+		PollInterval:      pollInterval,
 	}
+
+	// Writes to transcript.jsonl beating the inactivity timeout
+	script := fmt.Sprintf("#!/bin/sh\nfor i in 1 2 3 4 5; do\n  echo \"{\\\"step\\\": $i}\" >> \"%s\"\n  sleep %s\ndone\necho '{\"status\":\"SUCCESS\",\"response\":\"done\"}'\n", filepath.ToSlash(transcriptFile), sleepSec)
+	mockAgy := createMockAgyScript(t, t.TempDir(), script)
 
 	stdout, stderr, exitCode, err := RunAgyWithWatchdog(
 		ctx,
@@ -839,6 +900,110 @@ func TestRunAgyWithWatchdog_TranscriptHeartbeat(t *testing.T) {
 	}
 }
 
+func TestRunAgyWithWatchdog_BackgroundTaskLogHeartbeat(t *testing.T) {
+	ctx := context.Background()
+	testSessionID := "test-task-session-12345"
+	tempDir := t.TempDir()
+	t.Setenv("HOME", tempDir)
+	t.Setenv("USERPROFILE", tempDir)
+
+	tasksDir := filepath.Join(tempDir, ".gemini", "antigravity-cli", "brain", testSessionID, ".system_generated", "tasks")
+	if err := os.MkdirAll(tasksDir, 0755); err != nil {
+		t.Fatalf("failed to create mock tasks dir: %v", err)
+	}
+
+	taskLog := filepath.Join(tasksDir, "task-1.log")
+
+	inactTimeout := 100 * time.Millisecond
+	pollInterval := 15 * time.Millisecond
+	sleepSec := "0.03"
+	if runtime.GOOS == "windows" {
+		inactTimeout = 1200 * time.Millisecond
+		pollInterval = 30 * time.Millisecond
+		sleepSec = "0.3"
+	}
+
+	opts := WatchdogOptions{
+		InactivityTimeout: inactTimeout,
+		MaxDuration:       5 * time.Second,
+		PollInterval:      pollInterval,
+	}
+
+	// Writes to task-1.log beating the inactivity timeout.
+	// Stdout and stderr are silent during pulses, proving background task activity sustains watchdog.
+	script := fmt.Sprintf("#!/bin/sh\nfor i in 1 2 3 4 5; do\n  echo \"compiling $i\" >> \"%s\"\n  sleep %s\ndone\necho '{\"status\":\"SUCCESS\",\"response\":\"done\"}'\n", filepath.ToSlash(taskLog), sleepSec)
+	mockAgy := createMockAgyScript(t, t.TempDir(), script)
+
+	stdout, stderr, exitCode, err := RunAgyWithWatchdog(
+		ctx,
+		mockAgy,
+		"prompt",
+		testSessionID,
+		"",
+		"",
+		opts,
+	)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if exitCode != 0 {
+		t.Errorf("expected exit code 0, got %d (stderr: %s)", exitCode, stderr)
+	}
+	if strings.Contains(stderr, "[watchdog]") {
+		t.Errorf("unexpected watchdog intervention in stderr: %s", stderr)
+	}
+	if !strings.Contains(stdout, `"SUCCESS"`) {
+		t.Errorf("expected stdout to contain SUCCESS, got %q", stdout)
+	}
+}
+
+func TestRunAgyWithWatchdog_BackgroundTaskLogStall_Timeout(t *testing.T) {
+	ctx := context.Background()
+	testSessionID := "test-task-stall-6789"
+	tempDir := t.TempDir()
+	t.Setenv("HOME", tempDir)
+	t.Setenv("USERPROFILE", tempDir)
+
+	tasksDir := filepath.Join(tempDir, ".gemini", "antigravity-cli", "brain", testSessionID, ".system_generated", "tasks")
+	if err := os.MkdirAll(tasksDir, 0755); err != nil {
+		t.Fatalf("failed to create mock tasks dir: %v", err)
+	}
+
+	taskLog := filepath.Join(tasksDir, "task-1.log")
+
+	opts := WatchdogOptions{
+		InactivityTimeout: 60 * time.Millisecond,
+		MaxDuration:       2 * time.Second,
+		PollInterval:      10 * time.Millisecond,
+	}
+
+	// Writes to task-1.log once, then stalls for 500ms (> 60ms inactivity timeout)
+	script := fmt.Sprintf("#!/bin/sh\necho \"started build\" >> \"%s\"\nsleep 0.5\necho '{\"status\":\"SUCCESS\",\"response\":\"done\"}'\n", filepath.ToSlash(taskLog))
+	mockAgy := createMockAgyScript(t, t.TempDir(), script)
+
+	stdout, stderr, exitCode, err := RunAgyWithWatchdog(
+		ctx,
+		mockAgy,
+		"prompt",
+		testSessionID,
+		"",
+		"",
+		opts,
+	)
+
+	if exitCode == 0 {
+		t.Errorf("expected non-zero exit code on task stall timeout, got 0")
+	}
+	if !errors.Is(err, ErrInactivityTimeout) {
+		t.Errorf("expected ErrInactivityTimeout, got: %v", err)
+	}
+	if !strings.Contains(stderr, "[watchdog]") || !strings.Contains(stderr, "inactivity timeout exceeded") {
+		t.Errorf("expected [watchdog] inactivity timeout diagnosis in stderr, got: %s", stderr)
+	}
+	_ = stdout
+}
+
 func TestRunAgyWithWatchdog_MaxDuration(t *testing.T) {
 	ctx := context.Background()
 	opts := WatchdogOptions{
@@ -847,11 +1012,7 @@ func TestRunAgyWithWatchdog_MaxDuration(t *testing.T) {
 		PollInterval:      10 * time.Millisecond,
 	}
 
-	mockAgy := filepath.Join(t.TempDir(), "mock-agy")
-	script := "#!/bin/sh\nsleep 1\n"
-	if err := os.WriteFile(mockAgy, []byte(script), 0755); err != nil {
-		t.Fatalf("failed to write mock script: %v", err)
-	}
+	mockAgy := createMockAgyScript(t, t.TempDir(), "#!/bin/sh\nsleep 1\n")
 
 	stdout, stderr, exitCode, err := RunAgyWithWatchdog(
 		ctx,
@@ -1182,11 +1343,8 @@ func TestRunAgyWithWatchdog_OptionDefaultsAndEdgeCases(t *testing.T) {
 	}
 
 	// 2. Test MaxDuration formatting with seconds (< 1 minute)
-	mockAgy := filepath.Join(t.TempDir(), "mock-agy-sec")
 	script := "#!/bin/sh\necho '{\"status\":\"SUCCESS\",\"response\":\"ok\"}'\n"
-	if err := os.WriteFile(mockAgy, []byte(script), 0755); err != nil {
-		t.Fatalf("failed to write mock script: %v", err)
-	}
+	mockAgy := createMockAgyScript(t, t.TempDir(), script)
 
 	stdout, stderr, exitCode, err := RunAgyWithWatchdog(ctx, mockAgy, "test prompt", "sess-123", "secret-key", "gemini-pro", WatchdogOptions{
 		InactivityTimeout: 2 * time.Second,
@@ -1206,11 +1364,8 @@ func TestRunAgyWithWatchdog_OptionDefaultsAndEdgeCases(t *testing.T) {
 	}
 
 	// 3. Test modelProvider is set to \"gemini\" in stderr with non-zero exit code and apiKey == \"\"
-	mockAgyModelErr := filepath.Join(t.TempDir(), "mock-agy-model-err")
 	scriptErr := "#!/bin/sh\necho 'modelprovider is set to \"gemini\"' >&2\nexit 1\n"
-	if err := os.WriteFile(mockAgyModelErr, []byte(scriptErr), 0755); err != nil {
-		t.Fatalf("failed to write mock script: %v", err)
-	}
+	mockAgyModelErr := createMockAgyScript(t, t.TempDir(), scriptErr)
 
 	_, stderrErr, exitCodeErr, _ := RunAgyWithWatchdog(ctx, mockAgyModelErr, "prompt", "", "", "gemini-flash", WatchdogOptions{
 		InactivityTimeout: 1 * time.Second,
