@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func createTestPNG(t *testing.T, dir, filename string) string {
@@ -244,6 +245,44 @@ func TestSanitizeIntermediateStatus_ComplexCodeFences(t *testing.T) {
 	gotBlockquote := SanitizeIntermediateStatus(blockquoteBlock)
 	if gotBlockquote != wantBlockquote {
 		t.Errorf("Expected blockquoted fence handled, got:\n%s\nwant:\n%s", gotBlockquote, wantBlockquote)
+	}
+}
+
+func TestAutoAttachNewMedia(t *testing.T) {
+	tempDir := t.TempDir()
+	scratchDir := filepath.Join(tempDir, "scratch")
+	if err := os.MkdirAll(scratchDir, 0755); err != nil {
+		t.Fatalf("failed to create scratch dir: %v", err)
+	}
+
+	sinceTime := time.Now()
+	time.Sleep(10 * time.Millisecond)
+
+	// Create test images in baseDir and scratchDir
+	img1 := createTestPNG(t, tempDir, "gen_1.png")
+	img2 := createTestPNG(t, scratchDir, "gen_2.png")
+	_ = img2
+
+	// Pre-existing attachment from text
+	preExistingAtt, err := ResolveAndValidateLocalImage(img1, tempDir)
+	if err != nil {
+		t.Fatalf("failed to resolve pre-existing image: %v", err)
+	}
+	existing := []*Attachment{preExistingAtt}
+
+	// Run AutoAttachNewMedia
+	result := AutoAttachNewMedia(tempDir, sinceTime, existing)
+
+	// Expect img2 to be auto-attached, while img1 is deduplicated
+	if len(result) != 2 {
+		t.Fatalf("Expected 2 attachments (1 existing + 1 auto-attached), got %d", len(result))
+	}
+
+	if result[0].Filename != "gen_1.png" {
+		t.Errorf("Expected attachment 0 filename gen_1.png, got %s", result[0].Filename)
+	}
+	if result[1].Filename != "gen_2.png" {
+		t.Errorf("Expected attachment 1 filename gen_2.png, got %s", result[1].Filename)
 	}
 }
 

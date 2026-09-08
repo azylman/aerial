@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 )
@@ -127,6 +128,94 @@ func ExtractAndSanitizeMedia(text string, baseDir string) (string, []*Attachment
 	cleanedText = cleanDuplicateBlankLines(cleanedText)
 
 	return cleanedText, attachments
+}
+
+var validImageExts = map[string]bool{
+	".png":  true,
+	".jpg":  true,
+	".jpeg": true,
+	".gif":  true,
+	".webp": true,
+}
+
+// AutoAttachNewMedia scans top-level baseDir and baseDir/scratch for newly created/modified
+// image files since turnStartTime (with a 2-second safety buffer for OS timestamp truncation)
+// and appends resolved attachments up to MaxAttachmentsPerMessage.
+func AutoAttachNewMedia(baseDir string, sinceTime time.Time, existing []*Attachment) []*Attachment {
+	if baseDir == "" || sinceTime.IsZero() || len(existing) >= MaxAttachmentsPerMessage {
+		return existing
+	}
+
+	existingCanonical := make(map[string]bool)
+	for _, att := range existing {
+		if att != nil && att.Filename != "" {
+			existingCanonical[att.Filename] = true
+		}
+	}
+
+	cutoff := sinceTime.Add(-2 * time.Second)
+	dirsToScan := []string{
+		baseDir,
+		filepath.Join(baseDir, "scratch"),
+	}
+
+	result := append([]*Attachment(nil), existing...)
+
+	for _, dir := range dirsToScan {
+		if len(result) >= MaxAttachmentsPerMessage {
+			break
+		}
+
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+
+		for _, entry := range entries {
+			if len(result) >= MaxAttachmentsPerMessage {
+				break
+			}
+
+			if !entry.Type().IsRegular() || strings.HasPrefix(entry.Name(), ".") {
+				continue
+			}
+
+			ext := strings.ToLower(filepath.Ext(entry.Name()))
+			if !validImageExts[ext] {
+				continue
+			}
+
+			fullPath := filepath.Join(dir, entry.Name())
+			info, err := entry.Info()
+			if err != nil || info.Size() <= 0 || info.Size() > MaxAttachmentSizeBytes {
+				continue
+			}
+
+			if info.ModTime().Before(cutoff) {
+				continue
+			}
+
+			canonicalPath, err := filepath.EvalSymlinks(fullPath)
+			if err != nil {
+				canonicalPath = fullPath
+			}
+			baseName := filepath.Base(canonicalPath)
+			if existingCanonical[baseName] || existingCanonical[entry.Name()] {
+				continue
+			}
+
+			att, err := ResolveAndValidateLocalImage(fullPath, baseDir)
+			if err != nil {
+				continue
+			}
+
+			result = append(result, att)
+			existingCanonical[att.Filename] = true
+			existingCanonical[baseName] = true
+		}
+	}
+
+	return result
 }
 
 var intermediateStatusPhrases = []string{
@@ -312,6 +401,21 @@ func ResolveAndValidateLocalImage(rawPath string, baseDir string) (*Attachment, 
 		return nil, fmt.Errorf("failed to read file header: %w", err)
 	}
 	mimeType := http.DetectContentType(header[:n])
+	if !strings.HasPrefix(mimeType, "image/") {
+		if mimeType == "application/octet-stream" {
+			ext := strings.ToLower(filepath.Ext(canonicalPath))
+			switch ext {
+			case ".png":
+				mimeType = "image/png"
+			case ".jpg", ".jpeg":
+				mimeType = "image/jpeg"
+			case ".gif":
+				mimeType = "image/gif"
+			case ".webp":
+				mimeType = "image/webp"
+			}
+		}
+	}
 	if !strings.HasPrefix(mimeType, "image/") {
 		return nil, fmt.Errorf("unsupported MIME type %q: only image/* allowed", mimeType)
 	}

@@ -1952,6 +1952,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 					baseDir = filepath.Join(baseDir, currentSessionID)
 				}
 				cleanText, attachments := delivery.ExtractAndSanitizeMedia(responseText, baseDir)
+				attachments = delivery.AutoAttachNewMedia(baseDir, execStart, attachments)
 
 				isSilent := runner.IsSilentSentinel(cleanText) && len(attachments) == 0
 				if isSilent {
