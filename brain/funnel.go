@@ -217,7 +217,7 @@ func getOrCreateThreadID(s *discordgo.Session, m *discordgo.Message) (string, bo
 	return m.ChannelID, false
 }
 
-func buildDiscordPrompt(m *discordgo.Message, targetThreadID string, policy config.ChannelPolicy) string {
+func buildDiscordPrompt(s *discordgo.Session, m *discordgo.Message, targetThreadID string, policy config.ChannelPolicy) string {
 	var sb strings.Builder
 	sb.WriteString("<USER_REQUEST>\nHere's a message someone sent you from Discord:\n\n")
 	sb.WriteString(fmt.Sprintf("- id: %s\n", m.ID))
@@ -253,6 +253,15 @@ func buildDiscordPrompt(m *discordgo.Message, targetThreadID string, policy conf
 		if u != nil {
 			mentions = append(mentions, u.Username)
 		}
+	}
+	for _, roleID := range m.MentionRoles {
+		roleName := roleID
+		if s != nil && s.State != nil && m.GuildID != "" {
+			if r, err := s.State.Role(m.GuildID, roleID); err == nil && r != nil && r.Name != "" {
+				roleName = r.Name
+			}
+		}
+		mentions = append(mentions, roleName)
 	}
 	sb.WriteString(fmt.Sprintf("- mentions: %v\n", mentions))
 
@@ -455,7 +464,12 @@ func connectDiscordFunnel(ctx context.Context, database *sql.DB, pool *queue.Wor
 
 			targetThreadID, isThread := getOrCreateThreadID(s, m.Message)
 			policy, _ := resolveEffectiveChannelPolicy(s, m.ChannelID)
-			prompt := buildDiscordPrompt(m.Message, targetThreadID, policy)
+			resolvedGuildID := resolveGuildID(s, m.Message)
+			m.GuildID = resolvedGuildID
+			if m.Message != nil {
+				m.Message.GuildID = resolvedGuildID
+			}
+			prompt := buildDiscordPrompt(s, m.Message, targetThreadID, policy)
 
 			authorID := ""
 			authorName := "Discord User"
@@ -463,9 +477,6 @@ func connectDiscordFunnel(ctx context.Context, database *sql.DB, pool *queue.Wor
 				authorID = m.Author.ID
 				authorName = m.Author.Username
 			}
-
-			resolvedGuildID := resolveGuildID(s, m.Message)
-			m.GuildID = resolvedGuildID
 
 			msg := db.Message{
 				ID:         m.ID,
@@ -740,11 +751,12 @@ func RunStartupCatchUpSweep(ctx context.Context, database *sql.DB, pool *queue.W
 
 			targetThreadID, isThread := getOrCreateThreadID(s, m)
 			sweepPolicy, _ := resolveEffectiveChannelPolicy(s, m.ChannelID)
-			prompt := buildDiscordPrompt(m, targetThreadID, sweepPolicy)
+			resolvedGuildID := resolveGuildID(s, m)
+			m.GuildID = resolvedGuildID
+			prompt := buildDiscordPrompt(s, m, targetThreadID, sweepPolicy)
 
 			authorID := m.Author.ID
 			authorName := m.Author.Username
-			resolvedGuildID := resolveGuildID(s, m)
 
 			msg := db.Message{
 				ID:         m.ID,

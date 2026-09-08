@@ -77,7 +77,7 @@ channels:
 		t.Errorf("Expected DM targetThreadID 'chan-dm' and false, got: %s, %t", targetThreadID, isThread)
 	}
 
-	prompt := buildDiscordPrompt(dmMsg, "thread-12345", config.ChannelPolicy{Mode: "threads"})
+	prompt := buildDiscordPrompt(s, dmMsg, "thread-12345", config.ChannelPolicy{Mode: "threads"})
 	if prompt == "" {
 		t.Errorf("Expected non-empty prompt for message")
 	}
@@ -496,7 +496,7 @@ channels:
 		},
 	}
 
-	promptAdmin := buildDiscordPrompt(adminMsg, "thread-admin-1", config.ChannelPolicy{Mode: "threads"})
+	promptAdmin := buildDiscordPrompt(nil, adminMsg, "thread-admin-1", config.ChannelPolicy{Mode: "threads"})
 	if !strings.Contains(promptAdmin, "- is_admin: true") {
 		t.Errorf("Expected prompt to contain '- is_admin: true', got:\n%s", promptAdmin)
 	}
@@ -530,7 +530,7 @@ channels:
 		},
 	}
 
-	promptNonAdmin := buildDiscordPrompt(nonAdminMsg, "chan-channel-mode", config.ChannelPolicy{Mode: "channel"})
+	promptNonAdmin := buildDiscordPrompt(nil, nonAdminMsg, "chan-channel-mode", config.ChannelPolicy{Mode: "channel"})
 	if !strings.Contains(promptNonAdmin, "- is_admin: false") {
 		t.Errorf("Expected prompt to contain '- is_admin: false', got:\n%s", promptNonAdmin)
 	}
@@ -1403,7 +1403,7 @@ channels:
 		},
 	}
 
-	promptThread := buildDiscordPrompt(msg, "thread-100", config.ChannelPolicy{Mode: "threads"})
+	promptThread := buildDiscordPrompt(nil, msg, "thread-100", config.ChannelPolicy{Mode: "threads"})
 	if !strings.Contains(promptThread, "is_admin: true") {
 		t.Errorf("Expected is_admin: true in prompt")
 	}
@@ -1420,7 +1420,7 @@ channels:
 		t.Errorf("Expected thread delivery instructions in prompt")
 	}
 
-	promptChannel := buildDiscordPrompt(msg, "chan-fmt-1", config.ChannelPolicy{Mode: "channel"})
+	promptChannel := buildDiscordPrompt(nil, msg, "chan-fmt-1", config.ChannelPolicy{Mode: "channel"})
 	if !strings.Contains(promptChannel, "delivered directly to the Discord channel") {
 		t.Errorf("Expected channel delivery instructions in prompt")
 	}
@@ -1430,9 +1430,41 @@ channels:
 		ChannelID: "chan-1",
 		Timestamp: time.Now().UTC(),
 	}
-	promptNilAuth := buildDiscordPrompt(msgNilAuthor, "chan-1", config.ChannelPolicy{Mode: "channel"})
+	promptNilAuth := buildDiscordPrompt(nil, msgNilAuthor, "chan-1", config.ChannelPolicy{Mode: "channel"})
 	if !strings.Contains(promptNilAuth, "is_admin: false") {
 		t.Errorf("Expected is_admin: false for nil author")
+	}
+}
+
+func TestBuildDiscordPrompt_RoleMentionsResolved(t *testing.T) {
+	s := &discordgo.Session{
+		State: discordgo.NewState(),
+	}
+	guild := &discordgo.Guild{
+		ID: "guild-role-test",
+		Roles: []*discordgo.Role{
+			{ID: "role-aerial-1", Name: "Aerial"},
+			{ID: "role-mods-2", Name: "Moderators"},
+		},
+	}
+	_ = s.State.GuildAdd(guild)
+
+	msg := &discordgo.Message{
+		ID:           "msg-roles-1",
+		ChannelID:    "chan-roles",
+		GuildID:      "guild-role-test",
+		Content:      "Hey <@&role-aerial-1> can you help?",
+		MentionRoles: []string{"role-aerial-1", "role-mods-2", "role-unknown-3"},
+		Timestamp:    time.Now().UTC(),
+		Author: &discordgo.User{
+			ID:       "user-1",
+			Username: "alex",
+		},
+	}
+
+	prompt := buildDiscordPrompt(s, msg, "chan-roles", config.ChannelPolicy{Mode: "channel"})
+	if !strings.Contains(prompt, "- mentions: [Aerial Moderators role-unknown-3]") {
+		t.Errorf("Expected resolved role names in mentions list, got prompt:\n%s", prompt)
 	}
 }
 

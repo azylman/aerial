@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -641,24 +642,93 @@ func extractMessageBody(content string) string {
 	return trimmed
 }
 
-func isTier1Wake(m db.Message, botUserID string, wakeMode string) bool {
+// ResolveBotRoleIDs returns all role IDs associated with the bot in the given guild.
+// This includes roles held by the bot member and any managed integration roles matching the bot name.
+func ResolveBotRoleIDs(sess *discordgo.Session, guildID string, botUserID string) []string {
+	if sess == nil || sess.State == nil {
+		return nil
+	}
+
+	roleSet := make(map[string]bool)
+
+	// If guildID is specified, inspect that guild; otherwise inspect all cached guilds
+	var guilds []*discordgo.Guild
+	if guildID != "" {
+		if g, err := sess.State.Guild(guildID); err == nil && g != nil {
+			guilds = append(guilds, g)
+		}
+	} else {
+		guilds = sess.State.Guilds
+	}
+
+	botUsername := ""
+	if sess.State.User != nil {
+		botUsername = sess.State.User.Username
+	}
+
+	for _, g := range guilds {
+		if g == nil {
+			continue
+		}
+		// 1. Roles assigned to the bot member
+		if botUserID != "" {
+			if member, err := sess.State.Member(g.ID, botUserID); err == nil && member != nil {
+				for _, rID := range member.Roles {
+					if rID != "" {
+						roleSet[rID] = true
+					}
+				}
+			}
+		}
+		// 2. Roles in guild matching bot name or username
+		for _, r := range g.Roles {
+			if r == nil {
+				continue
+			}
+			if strings.EqualFold(r.Name, "aerial") || strings.EqualFold(r.Name, "gundam") || (botUsername != "" && strings.EqualFold(r.Name, botUsername)) {
+				roleSet[r.ID] = true
+			}
+		}
+	}
+
+	var res []string
+	for rID := range roleSet {
+		res = append(res, rID)
+	}
+	sort.Strings(res)
+	return res
+}
+
+func isTier1Wake(m db.Message, botUserID string, botRoleIDs []string, wakeMode string) bool {
 	if m.AuthorID == "http-client" || m.AuthorID == "scheduler" || m.ScheduleRunID != "" {
 		return true
 	}
 
-	// Direct mentions: <@botUserID>, <@!botUserID>
+	// Direct user mentions: <@botUserID>, <@!botUserID>
 	if botUserID != "" {
 		if strings.Contains(m.Content, "<@"+botUserID+">") || strings.Contains(m.Content, "<@!"+botUserID+">") {
 			return true
 		}
 	}
 
-	// Mentions list in Discord prompt envelope containing bot name or botUserID
+	// Direct role mentions: <@&botRoleID> for any role associated with the bot
+	for _, rID := range botRoleIDs {
+		if rID != "" && strings.Contains(m.Content, "<@&"+rID+">") {
+			return true
+		}
+	}
+
+	// Mentions list in Discord prompt envelope containing bot name, botUserID, or botRoleIDs
 	if idx := strings.Index(m.Content, "- mentions: ["); idx != -1 {
 		if endIdx := strings.Index(m.Content[idx:], "]"); endIdx != -1 {
 			inside := strings.ToLower(m.Content[idx+len("- mentions: [") : idx+endIdx])
 			if strings.Contains(inside, "aerial") || (botUserID != "" && strings.Contains(inside, strings.ToLower(botUserID))) {
 				return true
+			}
+			for _, rID := range botRoleIDs {
+				if rID != "" && strings.Contains(inside, strings.ToLower(rID)) {
+					return true
+				}
 			}
 		}
 	}
@@ -685,6 +755,11 @@ func isTier1Wake(m db.Message, botUserID string, wakeMode string) bool {
 	body := extractMessageBody(m.Content)
 	if botUserID != "" && (strings.Contains(body, "<@"+botUserID+">") || strings.Contains(body, "<@!"+botUserID+">")) {
 		return true
+	}
+	for _, rID := range botRoleIDs {
+		if rID != "" && strings.Contains(body, "<@&"+rID+">") {
+			return true
+		}
 	}
 	bodyLower := strings.ToLower(body)
 	if strings.Contains(bodyLower, "<@aerial") || strings.Contains(bodyLower, "<@!aerial") {
@@ -920,8 +995,13 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 
 	if strings.ToLower(policy.Mode) == "channel" {
 		botUserID := ""
-		if sess := p.getDiscordSession(); sess != nil && sess.State != nil && sess.State.User != nil {
-			botUserID = sess.State.User.ID
+		var botRoleIDs []string
+		if sess := p.getDiscordSession(); sess != nil && sess.State != nil {
+			if sess.State.User != nil {
+				botUserID = sess.State.User.ID
+			}
+			guildID := burst[0].GuildID
+			botRoleIDs = ResolveBotRoleIDs(sess, guildID, botUserID)
 		}
 
 		wakeMode := policy.GetWakeMode()
@@ -939,7 +1019,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 
 		// Safeguard 1: Tier-1 Pre-Scan (Zero-Latency Priority)
 		for i, m := range burst {
-			if isTier1Wake(m, botUserID, wakeMode) {
+			if isTier1Wake(m, botUserID, botRoleIDs, wakeMode) {
 				wakeInfos[i] = wakeInfo{
 					isWake:    true,
 					score:     1.0,
@@ -969,7 +1049,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 			threshold := policy.GetAmbientWakeThreshold()
 			for i := wakeIdx + 1; i < len(burst); i++ {
 				m := burst[i]
-				if isTier1Wake(m, botUserID, wakeMode) {
+				if isTier1Wake(m, botUserID, botRoleIDs, wakeMode) {
 					wakeInfos[i] = wakeInfo{
 						isWake:    true,
 						score:     1.0,
