@@ -121,6 +121,7 @@ submit_scratch() {
     export GIT_CONFIG_VALUE_1="HTTP/1.1"
 
     # 4. Push branch to remote
+    echo "📤 [aerial-pr] Pushing feature branch ${branch} to origin..."
     git push -u origin "$branch" >/dev/null 2>&1 || {
         echo "ERROR: Failed to push branch ${branch} to GitHub." >&2
         exit 1
@@ -164,6 +165,7 @@ EOF
     pr_num=$(echo "$pr_resp" | jq -r '.number')
     local pr_url
     pr_url=$(echo "$pr_resp" | jq -r '.html_url')
+    echo "📝 [aerial-pr] Created Pull Request #${pr_num}: ${pr_url}"
 
     # 6. Poll CI workflow runs (timeout: 900s for full monorepo build/test matrix)
     local max_wait=900
@@ -196,6 +198,8 @@ EOF
                 local failure_count
                 failure_count=$(echo "$check_resp" | jq '[.workflow_runs[]? | select(.conclusion != null and .conclusion != "success" and .conclusion != "neutral" and .conclusion != "skipped")] | length')
 
+                echo "⏳ [aerial-pr] Waiting for GitHub Actions CI on PR #${pr_num} (${elapsed}s/${max_wait}s) - ${pending_count} pending, ${failure_count} failed checks..."
+
                 if [ "$failure_count" -gt 0 ]; then
                     echo "ERROR: GitHub Actions workflow runs failed on PR #${pr_num}." >&2
                     # Post comment to issues endpoint (general PR comments)
@@ -223,12 +227,15 @@ EOF
                     break
                 fi
             else
+                echo "⏳ [aerial-pr] Waiting for GitHub Actions CI to register runs on PR #${pr_num} (${elapsed}s/${max_wait}s)..."
                 # If after 45 seconds no checks have ever registered, assume repo has no CI checks triggered
                 if [ $has_registered_checks -eq 0 ] && [ $elapsed -ge 45 ]; then
                     all_green=1
                     break
                 fi
             fi
+        else
+            echo "⏳ [aerial-pr] Polling GitHub Actions CI on PR #${pr_num} (${elapsed}s/${max_wait}s) - HTTP ${check_code}..."
         fi
 
         sleep $poll_interval
@@ -250,7 +257,10 @@ EOF
         exit 1
     fi
 
+    echo "✅ [aerial-pr] All GitHub Actions CI checks passed for PR #${pr_num} in ${elapsed}s."
+
     # 7. Squash Merge Pull Request
+    echo "🔀 [aerial-pr] Squash-merging PR #${pr_num} into ${DEFAULT_BRANCH}..."
     local merge_payload='{"merge_method":"squash"}'
     local merge_raw
     merge_raw=$(curl -s -w "\n%{http_code}" -X PUT \
@@ -282,6 +292,8 @@ EOF
     if [ -z "$merged_sha" ]; then
         merged_sha="$commit_sha"
     fi
+
+    echo "🎉 [aerial-pr] Successfully merged PR #${pr_num} (commit ${merged_sha})."
 
     # 8. Delete remote ephemeral feature branch
     curl -s -X DELETE \
