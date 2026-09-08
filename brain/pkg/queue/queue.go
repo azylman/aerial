@@ -48,6 +48,7 @@ var (
 const (
 	DefaultMaxSessionTurns     = 15
 	DefaultTimeoutMinutes      = 60
+	DefaultMaxRestarts         = 3
 	MaxMessageAbsoluteAge      = 2 * time.Hour
 	ContinuationPromptTemplate = "Your previous execution timed out or was interrupted while working. Please inspect where you left off in the conversation transcript and continue the task to completion.\n\nOriginal user request:\n%s"
 )
@@ -1001,7 +1002,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 
 	hasRecovered := false
 	for _, m := range burst {
-		if m.RetryCount > 0 {
+		if m.RetryCount > 0 || m.RestartCount > 0 {
 			hasRecovered = true
 			break
 		}
@@ -1028,14 +1029,14 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		}
 	}
 
-	if !latestMsg.CreatedAt.IsZero() && !hasRecovered {
+	if !latestMsg.CreatedAt.IsZero() {
 		msgAge := time.Since(latestMsg.CreatedAt)
 		if msgAge > MaxMessageAbsoluteAge {
 			dropBurstAsStale(fmt.Sprintf("exceeded hard absolute age cap %v: msg age %v", MaxMessageAbsoluteAge, msgAge))
 			return
 		}
 
-		if msgAge > stalenessTTL {
+		if !hasRecovered && msgAge > stalenessTTL {
 			lastActivity, isColdThread, err := GetSessionLastActivity(p.cfg.DB, threadID)
 			if err != nil {
 				// Fail-open: Retain message if DB error occurs during staleness lookup
@@ -1624,7 +1625,12 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 	lastStderr := ""
 	currentModel := p.GetRuntimeConfig()
 
-	initialRetryCount := burst[0].RetryCount
+	initialRetryCount := 0
+	for _, m := range burst {
+		if m.RetryCount > initialRetryCount {
+			initialRetryCount = m.RetryCount
+		}
+	}
 
 	for attempt := initialRetryCount + 1; attempt <= maxAttempts; attempt++ {
 		p.mu.Lock()
@@ -2176,8 +2182,8 @@ func isRateLimitError(errDetail string) bool {
 }
 
 // RecoverInterrupted resumes all PENDING and PROCESSING messages from the database on startup in chronological order.
-// If a message in PROCESSING has retry_count >= 3 (poison pill), it is not re-enqueued;
-// instead, a poison pill notification is sent and the message is marked FAILED.
+// If a message in PROCESSING has restart_count >= DefaultMaxRestarts or retry_count >= maxAttempts (poison pill),
+// it is not re-enqueued; instead, a poison pill notification is sent and the message is marked FAILED.
 func RecoverInterrupted(database *sql.DB, pool *WorkerPool) {
 	if database == nil || pool == nil {
 		return
@@ -2200,10 +2206,19 @@ func RecoverInterrupted(database *sql.DB, pool *WorkerPool) {
 		return
 	}
 
+	maxAttempts := pool.cfg.MaxAttempts
+	if maxAttempts <= 0 {
+		maxAttempts = 3
+	}
+
 	log.Printf("[Startup Recovery] Resuming %d interrupted message(s) in chronological FIFO order...", len(messages))
 	for _, m := range messages {
-		if m.Status == db.StatusProcessing && m.RetryCount >= 3 {
-			log.Printf("[Startup Recovery] Poison pill detected for message %s (retry_count=%d). Dropping message.", m.ID, m.RetryCount)
+		if m.Status == db.StatusProcessing && (m.RestartCount >= DefaultMaxRestarts || m.RetryCount >= maxAttempts) {
+			reason := "poison pill: exceeded restart limit during crash recovery"
+			if m.RestartCount < DefaultMaxRestarts {
+				reason = "poison pill: exceeded retry limit during crash recovery"
+			}
+			log.Printf("[Startup Recovery] Poison pill detected for message %s (restart_count=%d, retry_count=%d): %s. Dropping message.", m.ID, m.RestartCount, m.RetryCount, reason)
 			snippet := m.Content
 			if len([]rune(snippet)) > 60 {
 				snippet = string([]rune(snippet)[:57]) + "..."
@@ -2226,20 +2241,19 @@ func RecoverInterrupted(database *sql.DB, pool *WorkerPool) {
 					log.Printf("[Startup Recovery] Failed to deliver poison pill notice for message %s: %v", m.ID, err)
 				}
 			}
-			_ = db.UpdateMessageStatus(database, m.ID, db.StatusFailed, "poison pill: exceeded retry limit during crash recovery")
+			_ = db.UpdateMessageStatus(database, m.ID, db.StatusFailed, reason)
 			continue
 		}
 
 		if m.Status == db.StatusProcessing {
-			_ = db.IncrementMessageRetry(database, m.ID, "interrupted during restart")
-			_ = db.UpdateMessageStatus(database, m.ID, db.StatusPending, "interrupted during restart")
+			_ = db.ResetMessageToPendingWithRestart(database, m.ID, "interrupted during restart")
 			m.Status = db.StatusPending
-			m.RetryCount++
+			m.RestartCount++
 		}
 
 		metrics.InterruptedTurnsRecovered.Inc()
-		log.Printf("[Startup Recovery] Enqueuing message %s (thread: %s, status: %s, retry_count: %d)",
-			m.ID, m.ThreadID, m.Status, m.RetryCount)
+		log.Printf("[Startup Recovery] Enqueuing message %s (thread: %s, status: %s, restart_count: %d, retry_count: %d)",
+			m.ID, m.ThreadID, m.Status, m.RestartCount, m.RetryCount)
 		pool.Enqueue(m)
 	}
 }

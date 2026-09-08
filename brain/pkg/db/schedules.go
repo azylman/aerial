@@ -151,11 +151,11 @@ func InsertMessageAndConsumeOneShot(database DBTX, scheduleID string, msg Messag
 	}
 
 	insertQuery := `
-	INSERT INTO messages (id, thread_id, guild_id, author_id, author_name, content, summary, status, retry_count, error_message, response_text, schedule_run_id, created_at, updated_at)
-	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+	INSERT INTO messages (id, thread_id, guild_id, author_id, author_name, content, summary, status, retry_count, restart_count, error_message, response_text, schedule_run_id, created_at, updated_at)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 	ON CONFLICT (id) DO NOTHING;
 	`
-	if _, err := exec.ExecContext(ctx, insertQuery, msg.ID, msg.ThreadID, msg.GuildID, msg.AuthorID, msg.AuthorName, msg.Content, msg.Summary, msg.Status, msg.RetryCount, msg.ErrorMessage, msg.ResponseText, msg.ScheduleRunID, msg.CreatedAt, msg.UpdatedAt); err != nil {
+	if _, err := exec.ExecContext(ctx, insertQuery, msg.ID, msg.ThreadID, msg.GuildID, msg.AuthorID, msg.AuthorName, msg.Content, msg.Summary, msg.Status, msg.RetryCount, msg.RestartCount, msg.ErrorMessage, msg.ResponseText, msg.ScheduleRunID, msg.CreatedAt, msg.UpdatedAt); err != nil {
 		return err
 	}
 

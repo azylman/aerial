@@ -971,6 +971,9 @@ func RunBrainApp(ctx context.Context, cfg *config.Config) error {
 	})
 	pool.Start()
 
+	// Resume interrupted turns before connecting Discord gateway to eliminate startup races
+	queue.RecoverInterrupted(database, pool)
+
 	SetFunnelConfig(cfg)
 	dgSession := connectDiscordFunnel(ctx, database, pool, cur.DiscordToken)
 	defer func() {
@@ -1027,9 +1030,6 @@ func RunBrainApp(ctx context.Context, cfg *config.Config) error {
 			watcherWg.Wait()
 		}()
 	}
-
-	// Resume interrupted turns after Discord is attached
-	queue.RecoverInterrupted(database, pool)
 
 	// Start background scheduler monitor for due cron and one-shot routines
 	sched := scheduler.New(cfg, database, pool, scheduler.NewDiscordThreadCreator(dgSession))

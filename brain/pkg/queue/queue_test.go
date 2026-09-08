@@ -4586,6 +4586,9 @@ func TestWorkerPoolShutdown_PreservesProcessingMessageWithoutApology(t *testing.
 		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
 			return func() {}
 		},
+		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+			return nil, nil
+		},
 	})
 	pool.Start()
 
@@ -4656,6 +4659,9 @@ func TestWorkerPoolShutdown_PreservesProcessingMessageWithoutApology(t *testing.
 		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
 			return func() {}
 		},
+		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+			return nil, nil
+		},
 		OnMessageCompleted: func(m db.Message, finalStatus string) {
 			close(newDoneCh)
 		},
@@ -4680,15 +4686,18 @@ func TestWorkerPoolShutdown_PreservesProcessingMessageWithoutApology(t *testing.
 
 	// Verify final DB status
 	var finalStatus string
-	var finalRetryCount int
-	if err := database.QueryRow("SELECT status, retry_count FROM messages WHERE id = $1", msg.ID).Scan(&finalStatus, &finalRetryCount); err != nil {
+	var finalRetryCount, finalRestartCount int
+	if err := database.QueryRow("SELECT status, retry_count, restart_count FROM messages WHERE id = $1", msg.ID).Scan(&finalStatus, &finalRetryCount, &finalRestartCount); err != nil {
 		t.Fatalf("Final DB query failed: %v", err)
 	}
 	if finalStatus != db.StatusCompleted {
 		t.Errorf("Expected final message status %q, got %q", db.StatusCompleted, finalStatus)
 	}
-	if finalRetryCount != 1 {
-		t.Errorf("Expected final retry_count 1 (incremented during startup recovery), got %d", finalRetryCount)
+	if finalRestartCount != 1 {
+		t.Errorf("Expected final restart_count 1 (incremented during startup recovery), got %d", finalRestartCount)
+	}
+	if finalRetryCount != 0 {
+		t.Errorf("Expected final retry_count 0 (execution retries separate from restart), got %d", finalRetryCount)
 	}
 }
 
@@ -7804,5 +7813,333 @@ func TestProcessBurst_Staleness_RecoveredMessage_Retained(t *testing.T) {
 	dbMsg, _ := db.GetMessage(database, "msg-recovered-1")
 	if dbMsg.ResponseText == "[EXPIRED_STALE]" {
 		t.Errorf("Recovered message should NOT be marked [EXPIRED_STALE]")
+	}
+}
+
+func TestRecoverInterrupted_PreservesExecutionRetryBudget(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	threadID := "thread-retry-budget"
+	msg := db.Message{
+		ID:           "msg-restarted-budget",
+		ThreadID:     threadID,
+		AuthorID:     "user-1",
+		Content:      "turn interrupted by container restart",
+		Status:       db.StatusProcessing,
+		RestartCount: 2,
+		RetryCount:   0,
+		CreatedAt:    time.Now().UTC().Add(-10 * time.Minute),
+		UpdatedAt:    time.Now().UTC().Add(-10 * time.Minute),
+	}
+	if err := db.InsertMessage(database, msg); err != nil {
+		t.Fatalf("InsertMessage failed: %v", err)
+	}
+
+	var runnerCalls int
+	var mu sync.Mutex
+	doneCh := make(chan struct{})
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    3,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			mu.Lock()
+			runnerCalls++
+			mu.Unlock()
+			// Simulate runner failure (exit code 1) on every attempt
+			return "", "transient connection error", 1, errors.New("exit status 1")
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
+		TypingFunc:   func(s *discordgo.Session, channelID string) func() { return func() {} },
+		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+			return nil, nil
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			close(doneCh)
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	// RecoverInterrupted should reset status to PENDING and increment restart_count to 3, leaving retry_count at 0
+	RecoverInterrupted(database, pool)
+
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Timeout waiting for message processing")
+	}
+
+	mu.Lock()
+	calls := runnerCalls
+	mu.Unlock()
+
+	// Crucial invariant: The turn must get all 3 execution attempts despite having restarted twice!
+	if calls != 3 {
+		t.Errorf("Expected 3 runner execution attempts (full retry budget), got %d", calls)
+	}
+
+	dbMsg, err := db.GetMessage(database, "msg-restarted-budget")
+	if err != nil || dbMsg == nil {
+		t.Fatalf("Failed to fetch message: %v", err)
+	}
+	if dbMsg.Status != db.StatusFailed {
+		t.Errorf("Expected final status %s, got %s", db.StatusFailed, dbMsg.Status)
+	}
+	if dbMsg.RestartCount != 3 {
+		t.Errorf("Expected final restart_count 3, got %d", dbMsg.RestartCount)
+	}
+	if dbMsg.RetryCount != 3 {
+		t.Errorf("Expected final retry_count 3 (after 3 failed execution attempts), got %d", dbMsg.RetryCount)
+	}
+}
+
+func TestRecoverInterrupted_RestartPoisonPill_Boundaries(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	// msgPoison has StatusProcessing and RestartCount >= DefaultMaxRestarts (3)
+	msgPoison := db.Message{
+		ID:           "msg-poison-restart",
+		ThreadID:     "thread-poison-restart",
+		AuthorID:     "user-1",
+		Content:      "crash-looping container trigger",
+		Status:       db.StatusProcessing,
+		RestartCount: DefaultMaxRestarts,
+		RetryCount:   0,
+		CreatedAt:    time.Now().UTC().Add(-15 * time.Minute),
+	}
+
+	// msgValid has StatusProcessing and RestartCount < DefaultMaxRestarts (2)
+	msgValid := db.Message{
+		ID:           "msg-valid-restart",
+		ThreadID:     "thread-valid-restart",
+		AuthorID:     "user-2",
+		Content:      "valid restart message",
+		Status:       db.StatusProcessing,
+		RestartCount: DefaultMaxRestarts - 1,
+		RetryCount:   0,
+		CreatedAt:    time.Now().UTC().Add(-10 * time.Minute),
+	}
+
+	_ = db.InsertMessage(database, msgPoison)
+	_ = db.InsertMessage(database, msgValid)
+
+	var mu sync.Mutex
+	var deliveredNotifs []string
+	var completedIDs []string
+	var wg sync.WaitGroup
+	wg.Add(1) // Only msgValid should be completed by worker pool
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    3,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			return mockJSONResponse("d1111111-2222-3333-4444-555555555555", "Processed OK"), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			mu.Lock()
+			deliveredNotifs = append(deliveredNotifs, text)
+			mu.Unlock()
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) func() { return func() {} },
+		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+			return nil, nil
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			mu.Lock()
+			completedIDs = append(completedIDs, msg.ID)
+			mu.Unlock()
+			wg.Done()
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+	pool.SetDiscordSession(&discordgo.Session{})
+
+	RecoverInterrupted(database, pool)
+
+	wg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	// Verify only msgValid was processed
+	if len(completedIDs) != 1 || completedIDs[0] != "msg-valid-restart" {
+		t.Errorf("Expected only msg-valid-restart to complete, got: %v", completedIDs)
+	}
+
+	// Verify msgPoison was dropped and marked FAILED with restart limit error
+	poisonDB, err := db.GetMessage(database, "msg-poison-restart")
+	if err != nil || poisonDB == nil {
+		t.Fatalf("Failed to query poison message: %v", err)
+	}
+	if poisonDB.Status != db.StatusFailed {
+		t.Errorf("Expected poison pill status FAILED, got: %s", poisonDB.Status)
+	}
+	if !strings.Contains(poisonDB.ErrorMessage, "exceeded restart limit") {
+		t.Errorf("Expected error to mention exceeded restart limit, got: %s", poisonDB.ErrorMessage)
+	}
+
+	// Verify msgValid was successfully completed and restart_count incremented
+	validDB, err := db.GetMessage(database, "msg-valid-restart")
+	if err != nil || validDB == nil {
+		t.Fatalf("Failed to query valid message: %v", err)
+	}
+	if validDB.Status != db.StatusCompleted {
+		t.Errorf("Expected valid message status COMPLETED, got: %s", validDB.Status)
+	}
+	if validDB.RestartCount != DefaultMaxRestarts {
+		t.Errorf("Expected valid message restart_count %d, got %d", DefaultMaxRestarts, validDB.RestartCount)
+	}
+}
+
+func TestProcessBurst_Staleness_RestartedMessage_Retained(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	threadID := "thread-restarted-staleness"
+	var runnerCalls int
+	var mu sync.Mutex
+	doneCh := make(chan struct{})
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    3,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			mu.Lock()
+			runnerCalls++
+			mu.Unlock()
+			return mockJSONResponse("d2222222-2222-3333-4444-555555555555", "execution done"), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
+		TypingFunc:   func(s *discordgo.Session, channelID string) func() { return func() {} },
+		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+			return nil, nil
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			close(doneCh)
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	// Restarted message has RestartCount > 0, RetryCount == 0, age is 45m (> 30m)
+	msg := db.Message{
+		ID:           "msg-restarted-retained",
+		ThreadID:     threadID,
+		AuthorID:     "user-1",
+		Content:      "turn interrupted by restart resumed",
+		Status:       db.StatusPending,
+		RestartCount: 1,
+		RetryCount:   0,
+		CreatedAt:    time.Now().UTC().Add(-45 * time.Minute),
+	}
+	_ = db.InsertMessage(database, msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Timeout waiting for restarted message processing")
+	}
+
+	mu.Lock()
+	calls := runnerCalls
+	mu.Unlock()
+
+	if calls != 1 {
+		t.Errorf("Expected 1 runner call for restarted message with RestartCount > 0, got %d", calls)
+	}
+
+	dbMsg, _ := db.GetMessage(database, "msg-restarted-retained")
+	if dbMsg.ResponseText == "[EXPIRED_STALE]" {
+		t.Errorf("Restarted message should NOT be marked [EXPIRED_STALE]")
+	}
+}
+
+func TestProcessBurst_Staleness_RestartedMessage_HardCeiling_Dropped(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	threadID := "thread-restarted-hard-ceiling"
+	var runnerCalls int
+	var mu sync.Mutex
+	doneCh := make(chan struct{})
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    3,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			mu.Lock()
+			runnerCalls++
+			mu.Unlock()
+			return mockJSONResponse("sess-restart-drop", "unexpected"), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
+		TypingFunc:   func(s *discordgo.Session, channelID string) func() { return func() {} },
+		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+			return nil, nil
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			close(doneCh)
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	// Restarted message has RestartCount > 0, but age is 130m (> 2h MaxMessageAbsoluteAge)
+	msg := db.Message{
+		ID:           "msg-restarted-hard-ceiling",
+		ThreadID:     threadID,
+		AuthorID:     "user-1",
+		Content:      "stuck across multiple restarts for over 2 hours",
+		Status:       db.StatusPending,
+		RestartCount: 2,
+		RetryCount:   0,
+		CreatedAt:    time.Now().UTC().Add(-130 * time.Minute),
+	}
+	_ = db.InsertMessage(database, msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Timeout waiting for message drop")
+	}
+
+	mu.Lock()
+	calls := runnerCalls
+	mu.Unlock()
+
+	if calls != 0 {
+		t.Errorf("Expected 0 runner calls for message exceeding MaxMessageAbsoluteAge (hard ceiling), got %d", calls)
+	}
+
+	dbMsg, _ := db.GetMessage(database, "msg-restarted-hard-ceiling")
+	if dbMsg.ResponseText != "[EXPIRED_STALE]" {
+		t.Errorf("Expected [EXPIRED_STALE], got %s", dbMsg.ResponseText)
 	}
 }
