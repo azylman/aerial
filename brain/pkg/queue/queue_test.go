@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -2726,7 +2727,7 @@ Please formulate your response and output it clearly.
 		CreatedAt: time.Now().UTC(),
 	}
 
-	if isTier1Wake(msg, "bot-aerial-id", "classifier") {
+	if isTier1Wake(msg, "bot-aerial-id", nil, "classifier") {
 		t.Errorf("Expected isTier1Wake to be FALSE when replying to @bob whose content contains 'aerial photo'")
 	}
 }
@@ -4255,7 +4256,7 @@ func TestIsTier1Wake_WakeModeMention(t *testing.T) {
 
 	// 1. Direct mention <@bot-12345>
 	msgMention := db.Message{Content: "Hey <@" + botID + "> how are you?"}
-	if !isTier1Wake(msgMention, botID, "mention") {
+	if !isTier1Wake(msgMention, botID, nil, "mention") {
 		t.Errorf("expected isTier1Wake to be TRUE for direct mention in mention mode")
 	}
 
@@ -4266,7 +4267,7 @@ func TestIsTier1Wake_WakeModeMention(t *testing.T) {
     content: "previous response"
 - content: What was that?
 </USER_REQUEST>`}
-	if !isTier1Wake(msgReply, botID, "mention") {
+	if !isTier1Wake(msgReply, botID, nil, "mention") {
 		t.Errorf("expected isTier1Wake to be TRUE for reply to Aerial in mention mode")
 	}
 
@@ -4275,23 +4276,32 @@ func TestIsTier1Wake_WakeModeMention(t *testing.T) {
 - mentions: [Aerial]
 - content: Hello there!
 </USER_REQUEST>`}
-	if !isTier1Wake(msgEnvelopeMention, botID, "mention") {
+	if !isTier1Wake(msgEnvelopeMention, botID, nil, "mention") {
 		t.Errorf("expected isTier1Wake to be TRUE for mentions envelope in mention mode")
 	}
 
 	// 4. Plaintext name drop "aerial is great"
 	msgBareKeyword := db.Message{Content: "I think aerial is a great anime"}
-	if isTier1Wake(msgBareKeyword, botID, "mention") {
+	if isTier1Wake(msgBareKeyword, botID, nil, "mention") {
 		t.Errorf("expected isTier1Wake to be FALSE for bare keyword in mention mode")
 	}
-	if !isTier1Wake(msgBareKeyword, botID, "classifier") {
+	if !isTier1Wake(msgBareKeyword, botID, nil, "classifier") {
 		t.Errorf("expected isTier1Wake to be TRUE for bare keyword in classifier mode")
 	}
 
 	// 5. Plaintext keyword "gundam"
 	msgGundam := db.Message{Content: "I love gundam models"}
-	if isTier1Wake(msgGundam, botID, "mention") {
+	if isTier1Wake(msgGundam, botID, nil, "mention") {
 		t.Errorf("expected isTier1Wake to be FALSE for 'gundam' in mention mode")
+	}
+
+	// 6. Direct role mention <@&role-123> with botRoleIDs matching
+	msgRoleMention := db.Message{Content: "Hey <@&role-aerial-managed> check this out"}
+	if !isTier1Wake(msgRoleMention, botID, []string{"role-aerial-managed"}, "mention") {
+		t.Errorf("expected isTier1Wake to be TRUE for bot role mention in mention mode")
+	}
+	if isTier1Wake(msgRoleMention, botID, []string{"role-unrelated"}, "mention") {
+		t.Errorf("expected isTier1Wake to be FALSE for unrelated role mention in mention mode")
 	}
 }
 
@@ -6106,7 +6116,7 @@ func TestIsTier1Wake_SchedulerMessage(t *testing.T) {
 		Content:   "check system health",
 		CreatedAt: time.Now().UTC(),
 	}
-	if !isTier1Wake(msgSched, "bot-123", "mention") {
+	if !isTier1Wake(msgSched, "bot-123", nil, "mention") {
 		t.Errorf("Expected isTier1Wake to return true for AuthorID == scheduler in mention mode")
 	}
 
@@ -6118,8 +6128,47 @@ func TestIsTier1Wake_SchedulerMessage(t *testing.T) {
 		Content:       "run cron report",
 		CreatedAt:     time.Now().UTC(),
 	}
-	if !isTier1Wake(msgRun, "bot-123", "mention") {
+	if !isTier1Wake(msgRun, "bot-123", nil, "mention") {
 		t.Errorf("Expected isTier1Wake to return true for non-empty ScheduleRunID in mention mode")
+	}
+}
+
+func TestResolveBotRoleIDs(t *testing.T) {
+	// Nil session/state safety
+	if roles := ResolveBotRoleIDs(nil, "guild-1", "bot-1"); roles != nil {
+		t.Errorf("Expected nil for nil session, got %v", roles)
+	}
+
+	s := &discordgo.Session{
+		State: discordgo.NewState(),
+	}
+	s.State.User = &discordgo.User{
+		ID:       "bot-1",
+		Username: "Aerial",
+	}
+
+	guild := &discordgo.Guild{
+		ID: "guild-1",
+		Roles: []*discordgo.Role{
+			{ID: "role-aerial-managed", Name: "Aerial", Managed: true},
+			{ID: "role-gundam-alt", Name: "Gundam"},
+			{ID: "role-unrelated", Name: "Member"},
+		},
+		Members: []*discordgo.Member{
+			{
+				User:  &discordgo.User{ID: "bot-1"},
+				Roles: []string{"role-assigned-1"},
+			},
+		},
+	}
+	_ = s.State.GuildAdd(guild)
+
+	roles := ResolveBotRoleIDs(s, "guild-1", "bot-1")
+	expected := []string{"role-aerial-managed", "role-assigned-1", "role-gundam-alt"}
+	sort.Strings(roles)
+	sort.Strings(expected)
+	if strings.Join(roles, ",") != strings.Join(expected, ",") {
+		t.Errorf("Expected roles %v, got %v", expected, roles)
 	}
 }
 
