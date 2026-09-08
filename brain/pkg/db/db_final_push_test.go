@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/azylman/aerial/brain/pkg/config"
 )
 
 func TestInitDBErrorBranchesAndSQLitePathCreation(t *testing.T) {
@@ -315,3 +317,298 @@ func TestGetActiveTasksNilDB(t *testing.T) {
 		t.Errorf("expected error on nil DB, got nil")
 	}
 }
+
+func TestSQLStoreMethodsCoverage(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	store := NewSQLStore(database)
+	ctx := context.Background()
+
+	// 1. FactStore methods
+	_, err := store.InsertFact(ctx, "cat", "fact text", 1.0, "th1", nil)
+	if err != nil {
+		t.Fatalf("SQLStore.InsertFact failed: %v", err)
+	}
+
+	_, err = store.SearchSimilarFacts(ctx, []float32{1.0}, 10, 0.1, "th1")
+	if err != nil {
+		t.Fatalf("SQLStore.SearchSimilarFacts failed: %v", err)
+	}
+
+	_, err = store.GetFactsPaginated(ctx, FactsFilter{Limit: 10})
+	if err != nil {
+		t.Fatalf("SQLStore.GetFactsPaginated failed: %v", err)
+	}
+
+	_, err = store.GetFactsByThreadWithEmbeddings(ctx, "th1")
+	if err != nil {
+		t.Fatalf("SQLStore.GetFactsByThreadWithEmbeddings failed: %v", err)
+	}
+
+	_, err = store.GetActiveConversationsForExtraction(ctx, 24)
+	if err != nil {
+		t.Fatalf("SQLStore.GetActiveConversationsForExtraction failed: %v", err)
+	}
+
+	if err := store.UpdateConversationFactWatermark(ctx, "th1", 10); err != nil {
+		t.Fatalf("SQLStore.UpdateConversationFactWatermark failed: %v", err)
+	}
+
+	if err := store.UpdateConversationFactExtractedAt(ctx, "th1"); err != nil {
+		t.Fatalf("SQLStore.UpdateConversationFactExtractedAt failed: %v", err)
+	}
+
+	// 2. ScheduleStore methods
+	if err := store.CreateOneShotSchedule(ctx, OneShotSchedule{ID: "os-store-1", ThreadID: "th1", Prompt: "p", RunAt: time.Now().Add(time.Hour)}); err != nil {
+		t.Fatalf("SQLStore.CreateOneShotSchedule failed: %v", err)
+	}
+
+	dueOS, err := store.GetDueOneShotSchedules(ctx)
+	if err != nil {
+		t.Fatalf("SQLStore.GetDueOneShotSchedules failed: %v", err)
+	}
+	_ = dueOS
+
+	allOS, err := store.GetAllOneShotSchedules(ctx, "th1")
+	if err != nil || len(allOS) == 0 {
+		t.Fatalf("SQLStore.GetAllOneShotSchedules failed: %v", err)
+	}
+
+	if err := store.InsertMessageAndConsumeOneShot(ctx, "os-store-1", Message{ID: "m-os-1", ThreadID: "th1", Status: StatusPending}); err != nil {
+		t.Fatalf("SQLStore.InsertMessageAndConsumeOneShot failed: %v", err)
+	}
+
+	if err := store.DeleteOneShotSchedule(ctx, "os-store-1"); err != nil {
+		t.Fatalf("SQLStore.DeleteOneShotSchedule failed: %v", err)
+	}
+
+	if err := store.CreateCronSchedule(ctx, CronSchedule{ID: "cs-store-1", TargetID: "th1", CronExpr: "*/5 * * * *", Prompt: "p", Enabled: true, NextRunAt: time.Now().Add(time.Hour)}); err != nil {
+		t.Fatalf("SQLStore.CreateCronSchedule failed: %v", err)
+	}
+
+	dueCron, err := store.GetDueCronSchedules(ctx)
+	if err != nil {
+		t.Fatalf("SQLStore.GetDueCronSchedules failed: %v", err)
+	}
+	_ = dueCron
+
+	allCron, err := store.GetAllCronSchedules(ctx, "th1")
+	if err != nil || len(allCron) == 0 {
+		t.Fatalf("SQLStore.GetAllCronSchedules failed: %v", err)
+	}
+
+	if err := store.UpdateCronNextRun(ctx, "cs-store-1", time.Now().Add(2*time.Hour)); err != nil {
+		t.Fatalf("SQLStore.UpdateCronNextRun failed: %v", err)
+	}
+
+	if err := store.DeleteCronSchedule(ctx, "cs-store-1"); err != nil {
+		t.Fatalf("SQLStore.DeleteCronSchedule failed: %v", err)
+	}
+
+	if err := store.CreateScheduleRun(ctx, ScheduleRun{ID: "run-store-1", ScheduleType: "cron", ScheduleID: "cs1", TargetID: "th1", Status: "running", StartedAt: time.Now()}); err != nil {
+		t.Fatalf("SQLStore.CreateScheduleRun failed: %v", err)
+	}
+
+	if err := store.UpdateScheduleRunStatus(ctx, UpdateRunParams{RunID: "run-store-1", Status: "success", Error: "no error", CompletedAt: time.Now(), DurationMs: 100}); err != nil {
+		t.Fatalf("SQLStore.UpdateScheduleRunStatus failed: %v", err)
+	}
+
+	_, _, err = store.GetScheduleRunsPaginated(ctx, 10, 0, "cs1", "success")
+	if err != nil {
+		t.Fatalf("SQLStore.GetScheduleRunsPaginated failed: %v", err)
+	}
+
+	_, err = store.GetScheduleSummaryMetrics(ctx)
+	if err != nil {
+		t.Fatalf("SQLStore.GetScheduleSummaryMetrics failed: %v", err)
+	}
+
+	if _, err := store.ReconcileOrphanedScheduleRuns(ctx); err != nil {
+		t.Fatalf("SQLStore.ReconcileOrphanedScheduleRuns failed: %v", err)
+	}
+
+	if _, err := store.PruneScheduleRuns(ctx, 100, 24*time.Hour); err != nil {
+		t.Fatalf("SQLStore.PruneScheduleRuns failed: %v", err)
+	}
+
+	// 3. MessageStore methods
+	if err := store.InsertMessage(ctx, Message{ID: "m-store-1", ThreadID: "th1", Status: StatusPending}); err != nil {
+		t.Fatalf("SQLStore.InsertMessage failed: %v", err)
+	}
+
+	if err := store.UpdateMessageStatus(ctx, "m-store-1", StatusProcessing, "worker-1"); err != nil {
+		t.Fatalf("SQLStore.UpdateMessageStatus failed: %v", err)
+	}
+
+	if err := store.UpdateMessageCompleted(ctx, "m-store-1", "response text"); err != nil {
+		t.Fatalf("SQLStore.UpdateMessageCompleted failed: %v", err)
+	}
+
+	if err := store.IncrementMessageRetry(ctx, "m-store-1", "err msg"); err != nil {
+		t.Fatalf("SQLStore.IncrementMessageRetry failed: %v", err)
+	}
+
+	if err := store.IncrementMessageRestart(ctx, "m-store-1", "err msg"); err != nil {
+		t.Fatalf("SQLStore.IncrementMessageRestart failed: %v", err)
+	}
+
+	if err := store.ResetMessageToPendingWithRestart(ctx, "m-store-1", "reason"); err != nil {
+		t.Fatalf("SQLStore.ResetMessageToPendingWithRestart failed: %v", err)
+	}
+
+	msg, err := store.GetMessage(ctx, "m-store-1")
+	if err != nil || msg == nil {
+		t.Fatalf("SQLStore.GetMessage failed: %v", err)
+	}
+
+	exists, err := store.MessageExists(ctx, "m-store-1")
+	if err != nil || !exists {
+		t.Fatalf("SQLStore.MessageExists failed: %v, %v", exists, err)
+	}
+
+	if err := store.InsertMessage(ctx, Message{ID: "m-store-claim", ThreadID: "th1", Status: StatusPending}); err != nil {
+		t.Fatalf("SQLStore.InsertMessage for claim failed: %v", err)
+	}
+
+	claimed, err := store.ClaimPendingMessage(ctx, "m-store-claim")
+	if err != nil || !claimed {
+		t.Fatalf("SQLStore.ClaimPendingMessage failed: %v, claimed=%v", err, claimed)
+	}
+
+	_, err = store.GetPendingOrProcessingMessages(ctx, 10)
+	if err != nil {
+		t.Fatalf("SQLStore.GetPendingOrProcessingMessages failed: %v", err)
+	}
+
+	_, err = store.GetActiveRecentThreadIDs(ctx, 10)
+	if err != nil {
+		t.Fatalf("SQLStore.GetActiveRecentThreadIDs failed: %v", err)
+	}
+
+	_, err = store.GetRecentThreadMessages(ctx, "th1", 10)
+	if err != nil {
+		t.Fatalf("SQLStore.GetRecentThreadMessages failed: %v", err)
+	}
+
+	_, err = store.GetMaxMessageRowID(ctx, "th1")
+	if err != nil {
+		t.Fatalf("SQLStore.GetMaxMessageRowID failed: %v", err)
+	}
+
+	// 4. SessionStore methods
+	if _, err := store.GetSessionID(ctx, "th1"); err != nil {
+		t.Fatalf("SQLStore.GetSessionID failed: %v", err)
+	}
+
+	if err := store.SaveSessionID(ctx, "th1", "sess-1"); err != nil {
+		t.Fatalf("SQLStore.SaveSessionID failed: %v", err)
+	}
+
+	if _, err := store.IncrementSessionTurnCount(ctx, "th1"); err != nil {
+		t.Fatalf("SQLStore.IncrementSessionTurnCount failed: %v", err)
+	}
+
+	if _, err := store.GetSessionTurnCount(ctx, "th1"); err != nil {
+		t.Fatalf("SQLStore.GetSessionTurnCount failed: %v", err)
+	}
+
+	if err := store.RotateSessionID(ctx, "th1", "sess-2"); err != nil {
+		t.Fatalf("SQLStore.RotateSessionID failed: %v", err)
+	}
+
+	if err := store.DeleteSessionID(ctx, "th1"); err != nil {
+		t.Fatalf("SQLStore.DeleteSessionID failed: %v", err)
+	}
+
+	// 5. Close store
+	if err := store.Close(); err != nil {
+		t.Fatalf("SQLStore.Close failed: %v", err)
+	}
+
+	// Nil store calls return expected nil db errors
+	var nilStore *SQLStore = nil
+	if err := nilStore.Close(); err != nil {
+		t.Errorf("expected nil error on nilStore.Close(), got %v", err)
+	}
+	if _, err := nilStore.GetSessionID(ctx, "th1"); err == nil {
+		t.Errorf("expected error calling GetSessionID on nil store, got nil")
+	}
+}
+
+func TestThreadSummaryDirectFunctions(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	// 1. Nil / empty checks
+	if err := SaveThreadSummary(nil, "th1", "sum", "m1"); err != nil {
+		t.Errorf("expected nil for nil DB in SaveThreadSummary")
+	}
+	if err := SaveThreadSummary(database, "", "sum", "m1"); err != nil {
+		t.Errorf("expected nil for empty threadID in SaveThreadSummary")
+	}
+
+	sum1, msg1, err1 := GetThreadSummary(nil, "th1")
+	if err1 != nil || sum1 != "" || msg1 != "" {
+		t.Errorf("expected empty strings, nil err for nil DB in GetThreadSummary, got %q, %q, %v", sum1, msg1, err1)
+	}
+	sum2, msg2, err2 := GetThreadSummary(database, "")
+	if err2 != nil || sum2 != "" || msg2 != "" {
+		t.Errorf("expected empty strings, nil err for empty threadID in GetThreadSummary, got %q, %q, %v", sum2, msg2, err2)
+	}
+
+	// 2. Non-existent thread ID returns empty strings and nil error
+	sum3, msg3, err3 := GetThreadSummary(database, "non-existent")
+	if err3 != nil || sum3 != "" || msg3 != "" {
+		t.Errorf("expected empty, nil for non-existent thread in GetThreadSummary, got %q, %q, %v", sum3, msg3, err3)
+	}
+
+	// 3. Save and retrieve thread summary
+	if err := SaveThreadSummary(database, "th-sum-1", "First summary", "m-sum-1"); err != nil {
+		t.Fatalf("SaveThreadSummary failed: %v", err)
+	}
+
+	sum4, msg4, err4 := GetThreadSummary(database, "th-sum-1")
+	if err4 != nil || sum4 != "First summary" || msg4 != "m-sum-1" {
+		t.Fatalf("GetThreadSummary failed: sum=%q msg=%q err=%v", sum4, msg4, err4)
+	}
+
+	// 4. Update existing thread summary (upsert ON CONFLICT)
+	if err := SaveThreadSummary(database, "th-sum-1", "Updated summary", "m-sum-2"); err != nil {
+		t.Fatalf("SaveThreadSummary upsert failed: %v", err)
+	}
+
+	sum5, msg5, err5 := GetThreadSummary(database, "th-sum-1")
+	if err5 != nil || sum5 != "Updated summary" || msg5 != "m-sum-2" {
+		t.Fatalf("GetThreadSummary upsert check failed: sum=%q msg=%q err=%v", sum5, msg5, err5)
+	}
+}
+
+func TestSearchSimilarFactsWithContextPgBranch(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	ctx := context.Background()
+	embValid := make([]float32, ExpectedEmbeddingDim)
+	embValid[0] = 1.0
+
+	// Trigger isPg = true branch of SearchSimilarFactsWithContext on non-pg DB to force error path
+	res, err := SearchSimilarFactsWithContext(ctx, database, true, embValid, 10, 0.2, "th1")
+	if err == nil && res != nil {
+		t.Errorf("expected error or nil response when searching pg branch on sqlite db, got %v, %v", res, err)
+	}
+}
+
+func TestInitDBAndNewEdgeCases(t *testing.T) {
+	// 1. InitDB with invalid type (e.g. int)
+	if _, err := InitDB(12345); err == nil {
+		t.Errorf("expected error for int type in InitDB, got nil")
+	}
+
+	// 2. New with nil config snapshot
+	cfgEmptySnap := &config.Config{}
+	if _, err := New(cfgEmptySnap); err == nil {
+		t.Errorf("expected error for nil config snapshot in New, got nil")
+	}
+}
+
