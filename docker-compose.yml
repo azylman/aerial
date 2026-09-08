@@ -398,6 +398,8 @@ services:
     build: ./proxy
     container_name: aerial-proxy
     restart: unless-stopped
+    stop_signal: SIGTERM
+    stop_grace_period: 15s
     labels:
       autoheal: "true"
       com.centurylinklabs.watchtower.enable: "true"
