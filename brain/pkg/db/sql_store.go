@@ -276,6 +276,20 @@ func (s *SQLStore) IncrementMessageRetry(ctx context.Context, id, errorMsg strin
 	return IncrementMessageRetry(s.db, id, errorMsg)
 }
 
+func (s *SQLStore) IncrementMessageRestart(ctx context.Context, id, errorMsg string) error {
+	if s == nil || isDBTXNil(s.db) {
+		return fmt.Errorf("database is nil")
+	}
+	return IncrementMessageRestart(s.db, id, errorMsg)
+}
+
+func (s *SQLStore) ResetMessageToPendingWithRestart(ctx context.Context, id, reason string) error {
+	if s == nil || isDBTXNil(s.db) {
+		return fmt.Errorf("database is nil")
+	}
+	return ResetMessageToPendingWithRestart(s.db, id, reason)
+}
+
 func (s *SQLStore) GetPendingOrProcessingMessages(ctx context.Context, limit int) ([]Message, error) {
 	if s == nil || isDBTXNil(s.db) {
 		return nil, fmt.Errorf("database is nil")

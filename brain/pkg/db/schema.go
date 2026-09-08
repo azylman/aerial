@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 )
 
 const migrationLockID = 849201948201
@@ -22,6 +23,7 @@ CREATE TABLE IF NOT EXISTS messages (
 	summary TEXT NOT NULL DEFAULT '',
 	status TEXT NOT NULL DEFAULT 'PENDING',
 	retry_count INTEGER NOT NULL DEFAULT 0,
+	restart_count INTEGER NOT NULL DEFAULT 0,
 	error_message TEXT,
 	response_text TEXT,
 	schedule_run_id TEXT NOT NULL DEFAULT '',
@@ -116,6 +118,7 @@ CREATE TABLE IF NOT EXISTS messages (
 	summary TEXT NOT NULL DEFAULT '',
 	status TEXT NOT NULL DEFAULT 'PENDING',
 	retry_count INTEGER NOT NULL DEFAULT 0,
+	restart_count INTEGER NOT NULL DEFAULT 0,
 	error_message TEXT,
 	response_text TEXT,
 	schedule_run_id TEXT NOT NULL DEFAULT '',
@@ -218,6 +221,10 @@ func initSchemaPostgres(ctx context.Context, database *sql.DB) error {
 		return fmt.Errorf("failed to run postgres migrations: %w", err)
 	}
 
+	if _, err := conn.ExecContext(ctx, "ALTER TABLE messages ADD COLUMN IF NOT EXISTS restart_count INTEGER NOT NULL DEFAULT 0;"); err != nil {
+		return fmt.Errorf("failed to add restart_count column to messages: %w", err)
+	}
+
 	_, _ = conn.ExecContext(ctx, "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS summary TEXT NOT NULL DEFAULT ''")
 	_, _ = conn.ExecContext(ctx, "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS last_summarized_message_id TEXT NOT NULL DEFAULT ''")
 
@@ -241,6 +248,12 @@ func initSchemaSQLite(database *sql.DB) error {
 
 	if _, err := database.Exec(sqliteSchema); err != nil {
 		return fmt.Errorf("failed to run sqlite migrations: %w", err)
+	}
+
+	if _, err := database.Exec("ALTER TABLE messages ADD COLUMN restart_count INTEGER NOT NULL DEFAULT 0;"); err != nil {
+		if !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("failed to add restart_count column to messages: %w", err)
+		}
 	}
 
 	_, _ = database.Exec("ALTER TABLE sessions ADD COLUMN summary TEXT NOT NULL DEFAULT ''")

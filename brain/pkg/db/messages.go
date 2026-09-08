@@ -28,6 +28,7 @@ type Message struct {
 	Summary       string    `json:"summary"`
 	Status        string    `json:"status"`
 	RetryCount    int       `json:"retry_count"`
+	RestartCount  int       `json:"restart_count"`
 	ErrorMessage  string    `json:"error_message,omitempty"`
 	ResponseText  string    `json:"response_text,omitempty"`
 	ScheduleRunID string    `json:"schedule_run_id,omitempty"`
@@ -69,11 +70,11 @@ func InsertMessage(database DBTX, msg Message) (err error) {
 	defer cancel()
 
 	query := `
-	INSERT INTO messages (id, thread_id, guild_id, author_id, author_name, content, summary, status, retry_count, error_message, response_text, schedule_run_id, created_at, updated_at)
-	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+	INSERT INTO messages (id, thread_id, guild_id, author_id, author_name, content, summary, status, retry_count, restart_count, error_message, response_text, schedule_run_id, created_at, updated_at)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 	ON CONFLICT (id) DO NOTHING;
 	`
-	_, err = database.ExecContext(ctx, query, msg.ID, msg.ThreadID, msg.GuildID, msg.AuthorID, msg.AuthorName, msg.Content, msg.Summary, msg.Status, msg.RetryCount, msg.ErrorMessage, msg.ResponseText, msg.ScheduleRunID, msg.CreatedAt, msg.UpdatedAt)
+	_, err = database.ExecContext(ctx, query, msg.ID, msg.ThreadID, msg.GuildID, msg.AuthorID, msg.AuthorName, msg.Content, msg.Summary, msg.Status, msg.RetryCount, msg.RestartCount, msg.ErrorMessage, msg.ResponseText, msg.ScheduleRunID, msg.CreatedAt, msg.UpdatedAt)
 	return err
 }
 
@@ -140,6 +141,48 @@ func IncrementMessageRetry(database DBTX, id string, errorMsg string) error {
 	return err
 }
 
+// IncrementMessageRestart atomically increments the restart count and records the restart reason.
+func IncrementMessageRestart(database DBTX, id string, errorMsg string) error {
+	if database == nil {
+		return fmt.Errorf("database is nil")
+	}
+	if id == "" {
+		return fmt.Errorf("message id cannot be empty")
+	}
+	now := time.Now().UTC()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	query := `
+	UPDATE messages
+	SET restart_count = restart_count + 1, error_message = $1, updated_at = $2
+	WHERE id = $3
+	`
+	_, err := database.ExecContext(ctx, query, errorMsg, now, id)
+	return err
+}
+
+// ResetMessageToPendingWithRestart atomically increments restart_count, sets status to PENDING, and updates error_message.
+func ResetMessageToPendingWithRestart(database DBTX, id string, reason string) error {
+	if database == nil {
+		return fmt.Errorf("database is nil")
+	}
+	if id == "" {
+		return fmt.Errorf("message id cannot be empty")
+	}
+	now := time.Now().UTC()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	query := `
+	UPDATE messages
+	SET restart_count = restart_count + 1, status = 'PENDING', error_message = $1, updated_at = $2
+	WHERE id = $3 AND status = 'PROCESSING'
+	`
+	_, err := database.ExecContext(ctx, query, reason, now, id)
+	return err
+}
+
 // GetPendingOrProcessingMessages returns active messages awaiting processing or recovery.
 func GetPendingOrProcessingMessages(database DBTX) (msgs []Message, err error) {
 	start := time.Now()
@@ -157,7 +200,7 @@ func GetPendingOrProcessingMessages(database DBTX) (msgs []Message, err error) {
 	defer cancel()
 
 	query := `
-	SELECT id, COALESCE(row_id, 0), thread_id, guild_id, author_id, author_name, content, COALESCE(summary, ''), status, retry_count, COALESCE(error_message, ''), COALESCE(response_text, ''), COALESCE(schedule_run_id, ''), created_at, updated_at
+	SELECT id, COALESCE(row_id, 0), thread_id, guild_id, author_id, author_name, content, COALESCE(summary, ''), status, retry_count, COALESCE(restart_count, 0), COALESCE(error_message, ''), COALESCE(response_text, ''), COALESCE(schedule_run_id, ''), created_at, updated_at
 	FROM messages
 	WHERE status IN ('PENDING', 'PROCESSING')
 	ORDER BY created_at ASC
@@ -172,7 +215,7 @@ func GetPendingOrProcessingMessages(database DBTX) (msgs []Message, err error) {
 	for rows.Next() {
 		var m Message
 		var errMsg, respText, schedID sql.NullString
-		if err := rows.Scan(&m.ID, &m.RowID, &m.ThreadID, &m.GuildID, &m.AuthorID, &m.AuthorName, &m.Content, &m.Summary, &m.Status, &m.RetryCount, &errMsg, &respText, &schedID, &m.CreatedAt, &m.UpdatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.RowID, &m.ThreadID, &m.GuildID, &m.AuthorID, &m.AuthorName, &m.Content, &m.Summary, &m.Status, &m.RetryCount, &m.RestartCount, &errMsg, &respText, &schedID, &m.CreatedAt, &m.UpdatedAt); err != nil {
 			return nil, err
 		}
 		if errMsg.Valid {
@@ -204,13 +247,13 @@ func GetMessage(database DBTX, id string) (*Message, error) {
 	defer cancel()
 
 	query := `
-	SELECT id, COALESCE(row_id, 0), thread_id, guild_id, author_id, author_name, content, COALESCE(summary, ''), status, retry_count, COALESCE(error_message, ''), COALESCE(response_text, ''), COALESCE(schedule_run_id, ''), created_at, updated_at
+	SELECT id, COALESCE(row_id, 0), thread_id, guild_id, author_id, author_name, content, COALESCE(summary, ''), status, retry_count, COALESCE(restart_count, 0), COALESCE(error_message, ''), COALESCE(response_text, ''), COALESCE(schedule_run_id, ''), created_at, updated_at
 	FROM messages
 	WHERE id = $1
 	`
 	var m Message
 	var errMsg, respText, schedID sql.NullString
-	err := database.QueryRowContext(ctx, query, id).Scan(&m.ID, &m.RowID, &m.ThreadID, &m.GuildID, &m.AuthorID, &m.AuthorName, &m.Content, &m.Summary, &m.Status, &m.RetryCount, &errMsg, &respText, &schedID, &m.CreatedAt, &m.UpdatedAt)
+	err := database.QueryRowContext(ctx, query, id).Scan(&m.ID, &m.RowID, &m.ThreadID, &m.GuildID, &m.AuthorID, &m.AuthorName, &m.Content, &m.Summary, &m.Status, &m.RetryCount, &m.RestartCount, &errMsg, &respText, &schedID, &m.CreatedAt, &m.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -352,10 +395,10 @@ func GetRecentThreadMessages(database DBTX, threadID string, limit int) (msgs []
 
 	query := `
 	SELECT id, COALESCE(row_id, 0), thread_id, guild_id, author_id, author_name, content, summary, status,
-	       retry_count, error_message, response_text, schedule_run_id, created_at, updated_at
+	       retry_count, COALESCE(restart_count, 0), error_message, response_text, schedule_run_id, created_at, updated_at
 	FROM (
 		SELECT id, COALESCE(row_id, 0) AS row_id, thread_id, guild_id, author_id, author_name, content, summary, status,
-		       retry_count, error_message, response_text, schedule_run_id, created_at, updated_at
+		       retry_count, COALESCE(restart_count, 0) AS restart_count, error_message, response_text, schedule_run_id, created_at, updated_at
 		FROM messages
 		WHERE thread_id = $1
 		ORDER BY created_at DESC
@@ -375,7 +418,7 @@ func GetRecentThreadMessages(database DBTX, threadID string, limit int) (msgs []
 		var errMsg, respText, schedID sql.NullString
 		if err := rows.Scan(
 			&m.ID, &m.RowID, &m.ThreadID, &m.GuildID, &m.AuthorID, &m.AuthorName, &m.Content, &m.Summary,
-			&m.Status, &m.RetryCount, &errMsg, &respText, &schedID, &m.CreatedAt, &m.UpdatedAt,
+			&m.Status, &m.RetryCount, &m.RestartCount, &errMsg, &respText, &schedID, &m.CreatedAt, &m.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan recent message: %w", err)
 		}

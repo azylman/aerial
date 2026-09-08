@@ -59,6 +59,8 @@ type MessageStore interface {
 	UpdateMessageStatus(ctx context.Context, id, status, errorMsg string) error
 	UpdateMessageCompleted(ctx context.Context, id, responseText string) error
 	IncrementMessageRetry(ctx context.Context, id, errorMsg string) error
+	IncrementMessageRestart(ctx context.Context, id, errorMsg string) error
+	ResetMessageToPendingWithRestart(ctx context.Context, id, reason string) error
 	GetPendingOrProcessingMessages(ctx context.Context, limit int) ([]Message, error)
 	GetMessage(ctx context.Context, id string) (*Message, error)
 	MessageExists(ctx context.Context, id string) (bool, error)

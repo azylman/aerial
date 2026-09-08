@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -83,7 +84,7 @@ func TestDBInitializationAndMigrations(t *testing.T) {
 	defer func() { _ = database.Close() }()
 
 	// Verify messages table exists with response_text
-	_, err := database.Exec("SELECT id, row_id, thread_id, guild_id, author_id, author_name, content, status, retry_count, error_message, response_text, created_at, updated_at FROM messages LIMIT 0")
+	_, err := database.Exec("SELECT id, row_id, thread_id, guild_id, author_id, author_name, content, status, retry_count, restart_count, error_message, response_text, created_at, updated_at FROM messages LIMIT 0")
 	if err != nil {
 		t.Fatalf("Messages table schema error: %v", err)
 	}
@@ -229,8 +230,25 @@ func TestMessageCRUD(t *testing.T) {
 		t.Fatalf("Failed to increment retry: %v", err)
 	}
 	fetched, _ = GetMessage(database, "msg-1")
-	if fetched.RetryCount != 1 || fetched.ErrorMessage != "503 Unavailable" {
-		t.Errorf("Expected retry_count=1 and error message set, got count=%d, err=%s", fetched.RetryCount, fetched.ErrorMessage)
+	if fetched.RetryCount != 1 || fetched.RestartCount != 0 || fetched.ErrorMessage != "503 Unavailable" {
+		t.Errorf("Expected retry_count=1, restart_count=0, error message set, got retry=%d, restart=%d, err=%s", fetched.RetryCount, fetched.RestartCount, fetched.ErrorMessage)
+	}
+
+	if err := IncrementMessageRestart(database, "msg-1", "crash recovery"); err != nil {
+		t.Fatalf("Failed to increment restart: %v", err)
+	}
+	fetched, _ = GetMessage(database, "msg-1")
+	if fetched.RestartCount != 1 || fetched.RetryCount != 1 || fetched.ErrorMessage != "crash recovery" {
+		t.Errorf("Expected restart_count=1, retry_count=1, got restart=%d, retry=%d, err=%s", fetched.RestartCount, fetched.RetryCount, fetched.ErrorMessage)
+	}
+
+	// Test ResetMessageToPendingWithRestart on msg-2 (which is StatusProcessing)
+	if err := ResetMessageToPendingWithRestart(database, "msg-2", "interrupted during restart"); err != nil {
+		t.Fatalf("Failed to reset message with restart: %v", err)
+	}
+	fetched2, _ := GetMessage(database, "msg-2")
+	if fetched2.Status != StatusPending || fetched2.RestartCount != 1 || fetched2.RetryCount != 0 || fetched2.ErrorMessage != "interrupted during restart" {
+		t.Errorf("Expected msg-2 status=PENDING, restart_count=1, retry_count=0, got status=%s, restart=%d, retry=%d, err=%s", fetched2.Status, fetched2.RestartCount, fetched2.RetryCount, fetched2.ErrorMessage)
 	}
 
 	if err := UpdateMessageStatus(database, "msg-1", StatusCompleted, ""); err != nil {
@@ -1094,6 +1112,8 @@ func TestDB_NilDatabaseHandling_All(t *testing.T) {
 	_ = UpdateMessageStatus(nil, "m1", StatusCompleted, "")
 	_ = UpdateMessageCompleted(nil, "m1", "resp")
 	_ = IncrementMessageRetry(nil, "m1", "err")
+	_ = IncrementMessageRestart(nil, "m1", "err")
+	_ = ResetMessageToPendingWithRestart(nil, "m1", "err")
 	_, _ = GetPendingOrProcessingMessages(nil)
 	_, _ = GetMessage(nil, "m1")
 	_, _ = MessageExists(nil, "m1")
@@ -1163,6 +1183,8 @@ func TestDB_ClosedDatabaseHandling_All(t *testing.T) {
 	_ = UpdateMessageStatus(closedDB, "m1", StatusCompleted, "")
 	_ = UpdateMessageCompleted(closedDB, "m1", "resp")
 	_ = IncrementMessageRetry(closedDB, "m1", "err")
+	_ = IncrementMessageRestart(closedDB, "m1", "err")
+	_ = ResetMessageToPendingWithRestart(closedDB, "m1", "err")
 	_, _ = GetPendingOrProcessingMessages(closedDB)
 	_, _ = GetMessage(closedDB, "m1")
 	_, _ = MessageExists(closedDB, "m1")
@@ -1218,7 +1240,11 @@ func TestDB_ClosedDatabaseHandling_All(t *testing.T) {
 }
 
 func TestDB_InitDB_InvalidPath(t *testing.T) {
-	_, err := InitDB("/proc/sys/fs/nonexistent_dir_12345/database.db")
+	tmpFile := filepath.Join(t.TempDir(), "not_a_dir")
+	if err := os.WriteFile(tmpFile, []byte("x"), 0644); err != nil {
+		t.Fatalf("failed to create dummy file: %v", err)
+	}
+	_, err := InitDB(filepath.Join(tmpFile, "database.db"))
 	if err == nil {
 		t.Error("expected error for invalid DB path")
 	}
