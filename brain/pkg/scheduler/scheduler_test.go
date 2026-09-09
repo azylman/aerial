@@ -582,6 +582,57 @@ func TestProcessDueCronSchedules_CreatesScheduleRun(t *testing.T) {
 	}
 }
 
+func TestProcessDueCronSchedules_EffortPropagation(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to init DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	now := time.Now().UTC()
+	cronSched := db.CronSchedule{
+		ID:          "cron-effort-test",
+		TargetID:    "chan-effort-test",
+		TitlePrefix: "Low Effort Cron",
+		CronExpr:    "0 9 * * *",
+		Prompt:      "Post low effort update",
+		Timezone:    "UTC",
+		NextRunAt:   now.Add(-10 * time.Second),
+		Enabled:     true,
+		CreatedAt:   now.Add(-1 * time.Hour),
+		Effort:      "low",
+	}
+	if err := db.CreateCronSchedule(database, cronSched); err != nil {
+		t.Fatalf("Failed to create cron schedule: %v", err)
+	}
+
+	threadCreator := newMockThreadCreator()
+	enqueuer := newMockEnqueuer()
+
+	if err := ProcessDueSchedules(context.Background(), database, enqueuer, threadCreator); err != nil {
+		t.Fatalf("ProcessDueSchedules error: %v", err)
+	}
+
+	msgs := enqueuer.getMessages()
+	if len(msgs) != 1 {
+		t.Fatalf("Expected 1 message enqueued, got %d", len(msgs))
+	}
+	if msgs[0].Effort != "low" {
+		t.Errorf("Expected message effort 'low', got %q", msgs[0].Effort)
+	}
+
+	runs, total, err := db.GetScheduleRunsPaginated(database, 10, 0, cronSched.ID, "")
+	if err != nil {
+		t.Fatalf("GetScheduleRunsPaginated error: %v", err)
+	}
+	if total != 1 || len(runs) != 1 {
+		t.Fatalf("Expected 1 schedule run created, got total=%d, len=%d", total, len(runs))
+	}
+	if runs[0].Effort != "low" {
+		t.Errorf("Expected schedule run effort 'low', got %q", runs[0].Effort)
+	}
+}
+
 func TestProcessDueOneShotSchedules_CreatesScheduleRun(t *testing.T) {
 	database, err := db.InitDB(":memory:")
 	if err != nil {
@@ -1338,6 +1389,46 @@ func TestExtractFactsLLM_Errors(t *testing.T) {
 	_, err = schedBad.ExtractFactsLLM(context.Background(), "prompt")
 	if err == nil {
 		t.Error("expected error on invalid JSON output")
+	}
+}
+
+func TestExtractFactsLLM_PrefersLowEffortModel(t *testing.T) {
+	tmpDir := t.TempDir()
+	var mockAgy string
+	logFile := filepath.Join(tmpDir, "args.log")
+	if runtime.GOOS == "windows" {
+		mockAgy = filepath.Join(tmpDir, "mock_agy.bat")
+		content := fmt.Sprintf("@echo off\r\necho %%* > \"%s\"\r\necho {\"status\":\"SUCCESS\",\"response\":\"ok\"}\r\n", logFile)
+		if err := os.WriteFile(mockAgy, []byte(content), 0755); err != nil {
+			t.Fatalf("failed to write mock script: %v", err)
+		}
+	} else {
+		mockAgy = filepath.Join(tmpDir, "mock_agy.sh")
+		content := fmt.Sprintf("#!/bin/sh\necho \"$@\" > '%s'\necho '{\"status\":\"SUCCESS\",\"response\":\"ok\"}'\n", logFile)
+		if err := os.WriteFile(mockAgy, []byte(content), 0755); err != nil {
+			t.Fatalf("failed to write mock script: %v", err)
+		}
+	}
+
+	cfg := config.NewFromData(&config.ConfigData{
+		AgyBin:         mockAgy,
+		APIKey:         "mock_key",
+		Model:          "high-effort-model",
+		LowEffortModel: "low-effort-model",
+	})
+	sched := New(cfg, nil, nil, nil)
+
+	_, err := sched.ExtractFactsLLM(context.Background(), "test prompt")
+	if err != nil {
+		t.Fatalf("ExtractFactsLLM failed: %v", err)
+	}
+
+	loggedArgs, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("failed to read logged args: %v", err)
+	}
+	if !strings.Contains(string(loggedArgs), "low-effort-model") {
+		t.Errorf("expected agy args to contain 'low-effort-model', got %q", string(loggedArgs))
 	}
 }
 

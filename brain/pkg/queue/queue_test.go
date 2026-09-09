@@ -8143,3 +8143,135 @@ func TestProcessBurst_Staleness_RestartedMessage_HardCeiling_Dropped(t *testing.
 		t.Errorf("Expected [EXPIRED_STALE], got %s", dbMsg.ResponseText)
 	}
 }
+
+func TestWorkerPool_EffortRouting(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to init DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	var executedModels []string
+	var mu sync.Mutex
+
+	appCfg := config.NewFromData(&config.ConfigData{
+		Model:          "claude-opus-4-6-thinking",
+		LowEffortModel: "claude-sonnet-4-6-thinking",
+		Channels: map[string]config.ChannelPolicy{
+			"default": {Mode: "threads"},
+		},
+	})
+
+	doneCh := make(chan struct{}, 2)
+
+	pool := New(appCfg, WorkerPoolConfig{
+		DB: database,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			mu.Lock()
+			executedModels = append(executedModels, model)
+			mu.Unlock()
+			return mockJSONResponse(sessionID, "Done!"), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
+		TypingFunc:   func(s *discordgo.Session, channelID string) func() { return func() {} },
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			doneCh <- struct{}{}
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	// 1. High effort / default message
+	runID1 := "run-high-1"
+	_ = db.CreateScheduleRun(database, db.ScheduleRun{
+		ID:           runID1,
+		ScheduleID:   "cron-high",
+		ScheduleType: "cron",
+		MessageID:    "msg-high-1",
+		TargetID:     "thread-high",
+		ThreadID:     "thread-high",
+		Title:        "High Routine",
+		Prompt:       "Run high routine",
+		Status:       "enqueued",
+		StartedAt:    time.Now().UTC(),
+		Effort:       "high",
+	})
+	msgHigh := db.Message{
+		ID:            "msg-high-1",
+		ThreadID:      "thread-high",
+		AuthorID:      "scheduler",
+		AuthorName:    "Scheduler",
+		Content:       "Run high routine",
+		Status:        db.StatusPending,
+		ScheduleRunID: runID1,
+		Effort:        "high",
+		CreatedAt:     time.Now().UTC(),
+	}
+	_ = db.InsertMessage(database, msgHigh)
+	pool.Enqueue(msgHigh)
+
+	select {
+	case <-doneCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Timeout waiting for high effort message completion")
+	}
+
+	// 2. Low effort message
+	runID2 := "run-low-1"
+	_ = db.CreateScheduleRun(database, db.ScheduleRun{
+		ID:           runID2,
+		ScheduleID:   "cron-low",
+		ScheduleType: "cron",
+		MessageID:    "msg-low-1",
+		TargetID:     "thread-low",
+		ThreadID:     "thread-low",
+		Title:        "Low Routine",
+		Prompt:       "Run low routine",
+		Status:       "enqueued",
+		StartedAt:    time.Now().UTC(),
+		Effort:       "low",
+	})
+	msgLow := db.Message{
+		ID:            "msg-low-1",
+		ThreadID:      "thread-low",
+		AuthorID:      "scheduler",
+		AuthorName:    "Scheduler",
+		Content:       "Run low routine",
+		Status:        db.StatusPending,
+		ScheduleRunID: runID2,
+		Effort:        "low",
+		CreatedAt:     time.Now().UTC(),
+	}
+	_ = db.InsertMessage(database, msgLow)
+	pool.Enqueue(msgLow)
+
+	select {
+	case <-doneCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Timeout waiting for low effort message completion")
+	}
+
+	mu.Lock()
+	models := append([]string{}, executedModels...)
+	mu.Unlock()
+
+	if len(models) != 2 {
+		t.Fatalf("Expected 2 runner invocations, got %d (%v)", len(models), models)
+	}
+	if models[0] != "claude-opus-4-6-thinking" {
+		t.Errorf("Expected first run with high effort model 'claude-opus-4-6-thinking', got %q", models[0])
+	}
+	if models[1] != "claude-sonnet-4-6-thinking" {
+		t.Errorf("Expected second run with low effort model 'claude-sonnet-4-6-thinking', got %q", models[1])
+	}
+
+	// Verify schedule run records recorded the executed model
+	runsHigh, _, _ := db.GetScheduleRunsPaginated(database, 10, 0, "cron-high", "")
+	if len(runsHigh) != 1 || runsHigh[0].Model != "claude-opus-4-6-thinking" {
+		t.Errorf("Expected schedule run high model to be 'claude-opus-4-6-thinking', got %+v", runsHigh)
+	}
+	runsLow, _, _ := db.GetScheduleRunsPaginated(database, 10, 0, "cron-low", "")
+	if len(runsLow) != 1 || runsLow[0].Model != "claude-sonnet-4-6-thinking" {
+		t.Errorf("Expected schedule run low model to be 'claude-sonnet-4-6-thinking', got %+v", runsLow)
+	}
+}

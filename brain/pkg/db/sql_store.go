@@ -205,6 +205,13 @@ func (s *SQLStore) UpdateCronNextRun(ctx context.Context, id string, nextRunAt t
 	return UpdateCronNextRun(s.db, id, nextRunAt)
 }
 
+func (s *SQLStore) UpdateCronScheduleEffort(ctx context.Context, id, effort string) error {
+	if s == nil || isDBTXNil(s.db) {
+		return fmt.Errorf("database is nil")
+	}
+	return UpdateCronScheduleEffort(s.db, id, effort)
+}
+
 func (s *SQLStore) CreateScheduleRun(ctx context.Context, run ScheduleRun) error {
 	if s == nil || isDBTXNil(s.db) {
 		return fmt.Errorf("database is nil")

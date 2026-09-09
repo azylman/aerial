@@ -189,6 +189,8 @@ func (s *Server) processRequest(req JSONRPCRequest) *JSONRPCResponse {
 		switch toolName {
 		case "schedule_recurring":
 			result, callErr = s.handler.HandleScheduleRecurring(params.Arguments)
+		case "update_cron_schedule":
+			result, callErr = s.handler.HandleUpdateCronSchedule(params.Arguments)
 		case "schedule_once":
 			result, callErr = s.handler.HandleScheduleOnce(params.Arguments)
 		case "list_schedules":
@@ -273,8 +275,48 @@ func (s *Server) getToolsList() []map[string]interface{} {
 						"type":        "string",
 						"description": "Timezone for evaluation (e.g. 'America/Los_Angeles', 'America/New_York', or 'UTC'). Defaults to configured server timezone ('America/Los_Angeles').",
 					},
+					"effort": map[string]interface{}{
+						"type":        "string",
+						"enum":        []string{"high", "low"},
+						"description": "Effort tier for the routine: 'high' (uses primary high-effort model) or 'low' (uses lightweight low-effort model). Defaults to 'high'.",
+					},
 				},
 				"required": []string{"channel_id", "cron_expression", "prompt"},
+			},
+		},
+		{
+			"name":        "update_cron_schedule",
+			"description": "Update an existing recurring cron schedule's effort tier, cron expression, prompt, title prefix, or timezone.",
+			"inputSchema": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"schedule_id": map[string]interface{}{
+						"type":        "string",
+						"description": "The ID of the recurring cron schedule to update.",
+					},
+					"effort": map[string]interface{}{
+						"type":        "string",
+						"enum":        []string{"high", "low"},
+						"description": "Effort tier for the routine: 'high' (uses primary high-effort model) or 'low' (uses lightweight low-effort model).",
+					},
+					"cron_expression": map[string]interface{}{
+						"type":        "string",
+						"description": "New 5-field cron expression or macro.",
+					},
+					"prompt": map[string]interface{}{
+						"type":        "string",
+						"description": "New prompt instructions to execute on every occurrence.",
+					},
+					"title_prefix": map[string]interface{}{
+						"type":        "string",
+						"description": "New title prefix for spawned threads.",
+					},
+					"timezone": map[string]interface{}{
+						"type":        "string",
+						"description": "New timezone for evaluation.",
+					},
+				},
+				"required": []string{"schedule_id"},
 			},
 		},
 		{

@@ -24,6 +24,7 @@ type CronSchedule struct {
 	NextRunAt   time.Time `json:"next_run_at"`
 	Enabled     bool      `json:"enabled"`
 	CreatedAt   time.Time `json:"created_at"`
+	Effort      string    `json:"effort,omitempty"`
 }
 
 type OneShotSchedule struct {
@@ -153,6 +154,7 @@ func initDB(dsn string) (*sql.DB, error) {
 			timezone TEXT NOT NULL DEFAULT 'America/Los_Angeles',
 			next_run_at TIMESTAMPTZ NOT NULL,
 			enabled BOOLEAN NOT NULL DEFAULT TRUE,
+			effort TEXT NOT NULL DEFAULT 'high',
 			created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 		);
 		CREATE INDEX IF NOT EXISTS idx_cron_schedules_next_run_at ON cron_schedules(enabled, next_run_at);
@@ -170,6 +172,8 @@ func initDB(dsn string) (*sql.DB, error) {
 			_ = database.Close()
 			return nil, fmt.Errorf("failed to execute postgres schema: %w", err)
 		}
+
+		_, _ = conn.ExecContext(ctx, "ALTER TABLE cron_schedules ADD COLUMN IF NOT EXISTS effort TEXT NOT NULL DEFAULT 'high';")
 
 		log.Printf("[Scheduler DB] PostgreSQL initialized successfully at %s", trimmed)
 		return database, nil
@@ -219,6 +223,7 @@ func initDB(dsn string) (*sql.DB, error) {
 		timezone TEXT NOT NULL DEFAULT 'America/Los_Angeles',
 		next_run_at TIMESTAMP NOT NULL,
 		enabled BOOLEAN NOT NULL DEFAULT TRUE,
+		effort TEXT NOT NULL DEFAULT 'high',
 		created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 	);
 	CREATE INDEX IF NOT EXISTS idx_cron_schedules_next_run_at ON cron_schedules(enabled, next_run_at);
@@ -240,6 +245,7 @@ func initDB(dsn string) (*sql.DB, error) {
 	// Safe column migrations on existing tables
 	_, _ = database.Exec(`ALTER TABLE cron_schedules ADD COLUMN title_prefix TEXT NOT NULL DEFAULT '';`)
 	_, _ = database.Exec(`ALTER TABLE cron_schedules ADD COLUMN timezone TEXT NOT NULL DEFAULT 'America/Los_Angeles';`)
+	_, _ = database.Exec(`ALTER TABLE cron_schedules ADD COLUMN effort TEXT NOT NULL DEFAULT 'high';`)
 
 	log.Printf("[Scheduler DB] SQLite database initialized at %s", trimmed)
 	return database, nil
@@ -255,12 +261,17 @@ func InsertCronSchedule(database *sql.DB, c CronSchedule) error {
 	if c.Timezone == "" {
 		c.Timezone = "America/Los_Angeles"
 	}
+	if strings.ToLower(strings.TrimSpace(c.Effort)) != "low" {
+		c.Effort = "high"
+	} else {
+		c.Effort = "low"
+	}
 	query := `
-	INSERT INTO cron_schedules (id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	INSERT INTO cron_schedules (id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, effort)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 	query = rebindQuery(query, isPostgres(database))
-	_, err := database.Exec(query, c.ID, c.TargetID, c.TitlePrefix, c.CronExpr, c.Prompt, c.Timezone, c.NextRunAt, c.Enabled, c.CreatedAt)
+	_, err := database.Exec(query, c.ID, c.TargetID, c.TitlePrefix, c.CronExpr, c.Prompt, c.Timezone, c.NextRunAt, c.Enabled, c.CreatedAt, c.Effort)
 	return err
 }
 
@@ -285,7 +296,7 @@ func ListCronSchedules(database *sql.DB, targetID string) ([]CronSchedule, error
 		return nil, fmt.Errorf("database is nil")
 	}
 	query := `
-	SELECT id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at
+	SELECT id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, COALESCE(effort, 'high')
 	FROM cron_schedules
 	WHERE enabled = TRUE
 	`
@@ -308,12 +319,72 @@ func ListCronSchedules(database *sql.DB, targetID string) ([]CronSchedule, error
 	var results []CronSchedule
 	for rows.Next() {
 		var c CronSchedule
-		if err := rows.Scan(&c.ID, &c.TargetID, &c.TitlePrefix, &c.CronExpr, &c.Prompt, &c.Timezone, &c.NextRunAt, &c.Enabled, &c.CreatedAt); err != nil {
+		if err := rows.Scan(&c.ID, &c.TargetID, &c.TitlePrefix, &c.CronExpr, &c.Prompt, &c.Timezone, &c.NextRunAt, &c.Enabled, &c.CreatedAt, &c.Effort); err != nil {
 			return nil, err
 		}
 		results = append(results, c)
 	}
 	return results, nil
+}
+
+func UpdateCronSchedule(database *sql.DB, id string, effort *string, cronExpr *string, prompt *string, titlePrefix *string, timezone *string, nextRunAt *time.Time) error {
+	if database == nil {
+		return fmt.Errorf("database is nil")
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return fmt.Errorf("schedule_id cannot be empty")
+	}
+
+	var sets []string
+	var args []interface{}
+
+	if effort != nil {
+		eff := strings.ToLower(strings.TrimSpace(*effort))
+		if eff != "low" {
+			eff = "high"
+		}
+		sets = append(sets, "effort = ?")
+		args = append(args, eff)
+	}
+	if cronExpr != nil && strings.TrimSpace(*cronExpr) != "" {
+		sets = append(sets, "cron_expr = ?")
+		args = append(args, strings.TrimSpace(*cronExpr))
+	}
+	if prompt != nil && strings.TrimSpace(*prompt) != "" {
+		sets = append(sets, "prompt = ?")
+		args = append(args, strings.TrimSpace(*prompt))
+	}
+	if titlePrefix != nil {
+		sets = append(sets, "title_prefix = ?")
+		args = append(args, strings.TrimSpace(*titlePrefix))
+	}
+	if timezone != nil && strings.TrimSpace(*timezone) != "" {
+		sets = append(sets, "timezone = ?")
+		args = append(args, strings.TrimSpace(*timezone))
+	}
+	if nextRunAt != nil && !nextRunAt.IsZero() {
+		sets = append(sets, "next_run_at = ?")
+		args = append(args, *nextRunAt)
+	}
+
+	if len(sets) == 0 {
+		return nil
+	}
+
+	query := fmt.Sprintf("UPDATE cron_schedules SET %s WHERE id = ?", strings.Join(sets, ", "))
+	args = append(args, id)
+	query = rebindQuery(query, isPostgres(database))
+
+	res, err := database.Exec(query, args...)
+	if err != nil {
+		return err
+	}
+	rowsAffected, _ := res.RowsAffected()
+	if rowsAffected == 0 {
+		return fmt.Errorf("cron schedule %q not found", id)
+	}
+	return nil
 }
 
 func ListOneShotSchedules(database *sql.DB, targetID string) ([]OneShotSchedule, error) {

@@ -27,6 +27,7 @@ type CronSchedule struct {
 	NextRunAt   time.Time `json:"next_run_at"`
 	Enabled     bool      `json:"enabled"`
 	CreatedAt   time.Time `json:"created_at"`
+	Effort      string    `json:"effort,omitempty"`
 }
 
 type ScheduleRun struct {
@@ -43,6 +44,8 @@ type ScheduleRun struct {
 	CompletedAt  *time.Time `json:"completed_at,omitempty"`
 	DurationMs   int64      `json:"duration_ms"`
 	Error        string     `json:"error,omitempty"`
+	Effort       string     `json:"effort,omitempty"`
+	Model        string     `json:"model,omitempty"`
 }
 
 type UpdateRunParams struct {
@@ -52,6 +55,7 @@ type UpdateRunParams struct {
 	CompletedAt time.Time `json:"completed_at"`
 	DurationMs  int64     `json:"duration_ms"`
 	Error       string    `json:"error"`
+	Model       string    `json:"model,omitempty"`
 }
 
 type ScheduleSummaryMetrics struct {
@@ -151,11 +155,11 @@ func InsertMessageAndConsumeOneShot(database DBTX, scheduleID string, msg Messag
 	}
 
 	insertQuery := `
-	INSERT INTO messages (id, thread_id, guild_id, author_id, author_name, content, summary, status, retry_count, restart_count, error_message, response_text, schedule_run_id, created_at, updated_at)
-	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+	INSERT INTO messages (id, thread_id, guild_id, author_id, author_name, content, summary, status, retry_count, restart_count, effort, error_message, response_text, schedule_run_id, created_at, updated_at)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 	ON CONFLICT (id) DO NOTHING;
 	`
-	if _, err := exec.ExecContext(ctx, insertQuery, msg.ID, msg.ThreadID, msg.GuildID, msg.AuthorID, msg.AuthorName, msg.Content, msg.Summary, msg.Status, msg.RetryCount, msg.RestartCount, msg.ErrorMessage, msg.ResponseText, msg.ScheduleRunID, msg.CreatedAt, msg.UpdatedAt); err != nil {
+	if _, err := exec.ExecContext(ctx, insertQuery, msg.ID, msg.ThreadID, msg.GuildID, msg.AuthorID, msg.AuthorName, msg.Content, msg.Summary, msg.Status, msg.RetryCount, msg.RestartCount, msg.Effort, msg.ErrorMessage, msg.ResponseText, msg.ScheduleRunID, msg.CreatedAt, msg.UpdatedAt); err != nil {
 		return err
 	}
 
@@ -218,11 +222,16 @@ func CreateCronSchedule(database DBTX, c CronSchedule) error {
 	if c.Timezone == "" {
 		c.Timezone = "America/Los_Angeles"
 	}
+	if strings.ToLower(strings.TrimSpace(c.Effort)) != "low" {
+		c.Effort = "high"
+	} else {
+		c.Effort = "low"
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	query := `INSERT INTO cron_schedules (id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`
-	_, err := database.ExecContext(ctx, query, c.ID, c.TargetID, c.TitlePrefix, c.CronExpr, c.Prompt, c.Timezone, c.NextRunAt, c.Enabled, c.CreatedAt)
+	query := `INSERT INTO cron_schedules (id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, effort) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`
+	_, err := database.ExecContext(ctx, query, c.ID, c.TargetID, c.TitlePrefix, c.CronExpr, c.Prompt, c.Timezone, c.NextRunAt, c.Enabled, c.CreatedAt, c.Effort)
 	return err
 }
 
@@ -233,7 +242,7 @@ func GetDueCronSchedules(database DBTX) ([]CronSchedule, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	query := `SELECT id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at FROM cron_schedules WHERE enabled = TRUE AND next_run_at <= $1`
+	query := `SELECT id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, COALESCE(effort, 'high') FROM cron_schedules WHERE enabled = TRUE AND next_run_at <= $1`
 	rows, err := database.QueryContext(ctx, query, time.Now().UTC())
 	if err != nil {
 		return nil, err
@@ -243,7 +252,7 @@ func GetDueCronSchedules(database DBTX) ([]CronSchedule, error) {
 	var results []CronSchedule
 	for rows.Next() {
 		var c CronSchedule
-		if err := rows.Scan(&c.ID, &c.TargetID, &c.TitlePrefix, &c.CronExpr, &c.Prompt, &c.Timezone, &c.NextRunAt, &c.Enabled, &c.CreatedAt); err != nil {
+		if err := rows.Scan(&c.ID, &c.TargetID, &c.TitlePrefix, &c.CronExpr, &c.Prompt, &c.Timezone, &c.NextRunAt, &c.Enabled, &c.CreatedAt, &c.Effort); err != nil {
 			return nil, err
 		}
 		results = append(results, c)
@@ -258,7 +267,7 @@ func GetAllCronSchedules(database DBTX, targetID string) ([]CronSchedule, error)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	query := `SELECT id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at FROM cron_schedules WHERE enabled = TRUE`
+	query := `SELECT id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, COALESCE(effort, 'high') FROM cron_schedules WHERE enabled = TRUE`
 	var rows *sql.Rows
 	var err error
 	if targetID != "" {
@@ -276,12 +285,28 @@ func GetAllCronSchedules(database DBTX, targetID string) ([]CronSchedule, error)
 	var results []CronSchedule
 	for rows.Next() {
 		var c CronSchedule
-		if err := rows.Scan(&c.ID, &c.TargetID, &c.TitlePrefix, &c.CronExpr, &c.Prompt, &c.Timezone, &c.NextRunAt, &c.Enabled, &c.CreatedAt); err != nil {
+		if err := rows.Scan(&c.ID, &c.TargetID, &c.TitlePrefix, &c.CronExpr, &c.Prompt, &c.Timezone, &c.NextRunAt, &c.Enabled, &c.CreatedAt, &c.Effort); err != nil {
 			return nil, err
 		}
 		results = append(results, c)
 	}
 	return results, nil
+}
+
+func UpdateCronScheduleEffort(database DBTX, id, effort string) error {
+	if database == nil || id == "" {
+		return nil
+	}
+	if strings.ToLower(strings.TrimSpace(effort)) != "low" {
+		effort = "high"
+	} else {
+		effort = "low"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err := database.ExecContext(ctx, `UPDATE cron_schedules SET effort = $1 WHERE id = $2`, effort, id)
+	return err
 }
 
 func DeleteCronSchedule(database DBTX, id string) error {
@@ -324,13 +349,18 @@ func CreateScheduleRun(database DBTX, run ScheduleRun) error {
 	if run.CompletedAt != nil && !run.CompletedAt.IsZero() {
 		completedAtVal = *run.CompletedAt
 	}
+	if strings.ToLower(strings.TrimSpace(run.Effort)) != "low" {
+		run.Effort = "high"
+	} else {
+		run.Effort = "low"
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	query := `
-	INSERT INTO schedule_runs (id, schedule_id, schedule_type, message_id, target_id, thread_id, title, prompt, status, started_at, completed_at, duration_ms, error)
-	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+	INSERT INTO schedule_runs (id, schedule_id, schedule_type, message_id, target_id, thread_id, title, prompt, status, started_at, completed_at, duration_ms, error, effort, model)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 	`
 	_, err := database.ExecContext(ctx, query,
 		run.ID,
@@ -346,6 +376,8 @@ func CreateScheduleRun(database DBTX, run ScheduleRun) error {
 		completedAtVal,
 		run.DurationMs,
 		run.Error,
+		run.Effort,
+		run.Model,
 	)
 	return err
 }
@@ -383,6 +415,11 @@ func UpdateScheduleRunStatus(database DBTX, params UpdateRunParams) error {
 	if params.DurationMs != 0 {
 		sets = append(sets, fmt.Sprintf("duration_ms = $%d", idx))
 		args = append(args, params.DurationMs)
+		idx++
+	}
+	if params.Model != "" {
+		sets = append(sets, fmt.Sprintf("model = $%d", idx))
+		args = append(args, params.Model)
 		idx++
 	}
 	if params.Error != "" {
@@ -445,7 +482,7 @@ func GetScheduleRunsPaginated(database DBTX, limit, offset int, scheduleID, stat
 	}
 
 	selectQuery := fmt.Sprintf(`
-		SELECT id, schedule_id, schedule_type, message_id, target_id, thread_id, title, prompt, status, started_at, completed_at, duration_ms, error
+		SELECT id, schedule_id, schedule_type, message_id, target_id, thread_id, title, prompt, status, started_at, completed_at, duration_ms, error, COALESCE(effort, 'high'), COALESCE(model, '')
 		FROM schedule_runs
 		%s
 		ORDER BY started_at DESC, id DESC
@@ -463,7 +500,7 @@ func GetScheduleRunsPaginated(database DBTX, limit, offset int, scheduleID, stat
 	for rows.Next() {
 		var r ScheduleRun
 		var completedAt sql.NullTime
-		if err := rows.Scan(&r.ID, &r.ScheduleID, &r.ScheduleType, &r.MessageID, &r.TargetID, &r.ThreadID, &r.Title, &r.Prompt, &r.Status, &r.StartedAt, &completedAt, &r.DurationMs, &r.Error); err != nil {
+		if err := rows.Scan(&r.ID, &r.ScheduleID, &r.ScheduleType, &r.MessageID, &r.TargetID, &r.ThreadID, &r.Title, &r.Prompt, &r.Status, &r.StartedAt, &completedAt, &r.DurationMs, &r.Error, &r.Effort, &r.Model); err != nil {
 			return nil, 0, fmt.Errorf("failed to scan schedule run: %w", err)
 		}
 		if completedAt.Valid {

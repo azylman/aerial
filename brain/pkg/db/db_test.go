@@ -1860,6 +1860,158 @@ func TestDB_SessionsAndSchedules_MoreBranches(t *testing.T) {
 	_ = resNeg
 }
 
+func TestCronScheduleAndMessageEffortRouting(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	ctx := context.Background()
+	store := NewSQLStore(database)
+
+	// 1. Create CronSchedule with effort: "low"
+	cron1 := CronSchedule{
+		ID:          "cron-low-1",
+		TargetID:    "target-chan-1",
+		TitlePrefix: "Weather",
+		CronExpr:    "0 6 * * *",
+		Prompt:      "Morning forecast",
+		NextRunAt:   time.Now().UTC().Add(-1 * time.Minute),
+		Enabled:     true,
+		Effort:      "low",
+	}
+	if err := store.CreateCronSchedule(ctx, cron1); err != nil {
+		t.Fatalf("CreateCronSchedule low failed: %v", err)
+	}
+
+	// 2. Create CronSchedule with empty effort (should default to "high")
+	cron2 := CronSchedule{
+		ID:          "cron-high-1",
+		TargetID:    "target-chan-1",
+		TitlePrefix: "News",
+		CronExpr:    "0 8 * * *",
+		Prompt:      "Morning news",
+		NextRunAt:   time.Now().UTC().Add(-1 * time.Minute),
+		Enabled:     true,
+		Effort:      "",
+	}
+	if err := store.CreateCronSchedule(ctx, cron2); err != nil {
+		t.Fatalf("CreateCronSchedule high failed: %v", err)
+	}
+
+	// 3. Query due crons and verify effort fields
+	dueCrons, err := store.GetDueCronSchedules(ctx)
+	if err != nil {
+		t.Fatalf("GetDueCronSchedules failed: %v", err)
+	}
+	if len(dueCrons) != 2 {
+		t.Fatalf("expected 2 due crons, got %d", len(dueCrons))
+	}
+	var foundLow, foundHigh bool
+	for _, c := range dueCrons {
+		if c.ID == "cron-low-1" && c.Effort == "low" {
+			foundLow = true
+		}
+		if c.ID == "cron-high-1" && c.Effort == "high" {
+			foundHigh = true
+		}
+	}
+	if !foundLow || !foundHigh {
+		t.Errorf("expected foundLow=true and foundHigh=true, got foundLow=%v foundHigh=%v", foundLow, foundHigh)
+	}
+
+	// 4. Test UpdateCronScheduleEffort
+	if err := store.UpdateCronScheduleEffort(ctx, "cron-high-1", "low"); err != nil {
+		t.Fatalf("UpdateCronScheduleEffort failed: %v", err)
+	}
+	allCrons, err := store.GetAllCronSchedules(ctx, "target-chan-1")
+	if err != nil {
+		t.Fatalf("GetAllCronSchedules failed: %v", err)
+	}
+	for _, c := range allCrons {
+		if c.ID == "cron-high-1" && c.Effort != "low" {
+			t.Errorf("expected cron-high-1 effort updated to 'low', got %q", c.Effort)
+		}
+	}
+
+	// 5. Test ScheduleRun with Effort and Model
+	runID := "run-test-1"
+	run := ScheduleRun{
+		ID:           runID,
+		ScheduleID:   "cron-low-1",
+		ScheduleType: "cron",
+		MessageID:    "msg-test-1",
+		TargetID:     "target-chan-1",
+		ThreadID:     "thread-chan-1",
+		Title:        "Weather Run",
+		Prompt:       "Morning forecast",
+		Status:       "enqueued",
+		StartedAt:    time.Now().UTC(),
+		Effort:       "low",
+		Model:        "Claude Sonnet 4.6 (Thinking)",
+	}
+	if err := store.CreateScheduleRun(ctx, run); err != nil {
+		t.Fatalf("CreateScheduleRun failed: %v", err)
+	}
+	runs, total, err := store.GetScheduleRunsPaginated(ctx, 10, 0, "cron-low-1", "")
+	if err != nil {
+		t.Fatalf("GetScheduleRunsPaginated failed: %v", err)
+	}
+	if total != 1 || len(runs) != 1 {
+		t.Fatalf("expected 1 run, got %d (total %d)", len(runs), total)
+	}
+	if runs[0].Effort != "low" || runs[0].Model != "Claude Sonnet 4.6 (Thinking)" {
+		t.Errorf("expected effort='low' and model='Claude Sonnet 4.6 (Thinking)', got effort=%q model=%q", runs[0].Effort, runs[0].Model)
+	}
+
+	// 6. Test UpdateScheduleRunStatus with Model
+	now := time.Now().UTC()
+	if err := store.UpdateScheduleRunStatus(ctx, UpdateRunParams{
+		RunID:       runID,
+		Status:      "completed",
+		CompletedAt: now,
+		DurationMs:  1234,
+		Model:       "Gemini 3.8 Flash (Low)",
+	}); err != nil {
+		t.Fatalf("UpdateScheduleRunStatus failed: %v", err)
+	}
+	runsAfter, _, err := store.GetScheduleRunsPaginated(ctx, 10, 0, "cron-low-1", "completed")
+	if err != nil || len(runsAfter) == 0 {
+		t.Fatalf("failed fetching completed runs: %v", err)
+	}
+	if runsAfter[0].Model != "Gemini 3.8 Flash (Low)" {
+		t.Errorf("expected updated model='Gemini 3.8 Flash (Low)', got %q", runsAfter[0].Model)
+	}
+
+	// 7. Test Message with Effort
+	msg := Message{
+		ID:         "msg-test-effort-1",
+		ThreadID:   "thread-chan-1",
+		Content:    "Run weather",
+		Status:     StatusPending,
+		Effort:     "low",
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	if err := store.InsertMessage(ctx, msg); err != nil {
+		t.Fatalf("InsertMessage failed: %v", err)
+	}
+	fetchedMsg, err := store.GetMessage(ctx, "msg-test-effort-1")
+	if err != nil {
+		t.Fatalf("GetMessage failed: %v", err)
+	}
+	if fetchedMsg == nil || fetchedMsg.Effort != "low" {
+		t.Errorf("expected message effort='low', got %v", fetchedMsg)
+	}
+
+	// 8. Test GetRecentThreadMessages with Effort
+	recent, err := store.GetRecentThreadMessages(ctx, "thread-chan-1", 10)
+	if err != nil {
+		t.Fatalf("GetRecentThreadMessages failed: %v", err)
+	}
+	if len(recent) != 1 || recent[0].Effort != "low" {
+		t.Errorf("expected 1 recent message with effort='low', got %v", recent)
+	}
+}
+
 
 
 
