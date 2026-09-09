@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS messages (
 	status TEXT NOT NULL DEFAULT 'PENDING',
 	retry_count INTEGER NOT NULL DEFAULT 0,
 	restart_count INTEGER NOT NULL DEFAULT 0,
+	effort TEXT NOT NULL DEFAULT '',
 	error_message TEXT,
 	response_text TEXT,
 	schedule_run_id TEXT NOT NULL DEFAULT '',
@@ -60,6 +61,7 @@ CREATE TABLE IF NOT EXISTS cron_schedules (
 	timezone TEXT NOT NULL DEFAULT 'America/Los_Angeles',
 	next_run_at TIMESTAMPTZ NOT NULL,
 	enabled BOOLEAN NOT NULL DEFAULT TRUE,
+	effort TEXT NOT NULL DEFAULT 'high',
 	created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -76,6 +78,8 @@ CREATE TABLE IF NOT EXISTS schedule_runs (
 	started_at TIMESTAMPTZ NOT NULL,
 	completed_at TIMESTAMPTZ,
 	duration_ms BIGINT DEFAULT 0,
+	effort TEXT NOT NULL DEFAULT 'high',
+	model TEXT NOT NULL DEFAULT '',
 	error TEXT NOT NULL DEFAULT ''
 );
 
@@ -119,6 +123,7 @@ CREATE TABLE IF NOT EXISTS messages (
 	status TEXT NOT NULL DEFAULT 'PENDING',
 	retry_count INTEGER NOT NULL DEFAULT 0,
 	restart_count INTEGER NOT NULL DEFAULT 0,
+	effort TEXT NOT NULL DEFAULT '',
 	error_message TEXT,
 	response_text TEXT,
 	schedule_run_id TEXT NOT NULL DEFAULT '',
@@ -159,6 +164,7 @@ CREATE TABLE IF NOT EXISTS cron_schedules (
 	timezone TEXT NOT NULL DEFAULT 'America/Los_Angeles',
 	next_run_at DATETIME NOT NULL,
 	enabled BOOLEAN NOT NULL DEFAULT 1,
+	effort TEXT NOT NULL DEFAULT 'high',
 	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -175,6 +181,8 @@ CREATE TABLE IF NOT EXISTS schedule_runs (
 	started_at DATETIME NOT NULL,
 	completed_at DATETIME,
 	duration_ms INTEGER DEFAULT 0,
+	effort TEXT NOT NULL DEFAULT 'high',
+	model TEXT NOT NULL DEFAULT '',
 	error TEXT NOT NULL DEFAULT ''
 );
 
@@ -225,6 +233,11 @@ func initSchemaPostgres(ctx context.Context, database *sql.DB) error {
 		return fmt.Errorf("failed to add restart_count column to messages: %w", err)
 	}
 
+	_, _ = conn.ExecContext(ctx, "ALTER TABLE messages ADD COLUMN IF NOT EXISTS effort TEXT NOT NULL DEFAULT ''")
+	_, _ = conn.ExecContext(ctx, "ALTER TABLE cron_schedules ADD COLUMN IF NOT EXISTS effort TEXT NOT NULL DEFAULT 'high'")
+	_, _ = conn.ExecContext(ctx, "ALTER TABLE schedule_runs ADD COLUMN IF NOT EXISTS effort TEXT NOT NULL DEFAULT 'high'")
+	_, _ = conn.ExecContext(ctx, "ALTER TABLE schedule_runs ADD COLUMN IF NOT EXISTS model TEXT NOT NULL DEFAULT ''")
+
 	_, _ = conn.ExecContext(ctx, "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS summary TEXT NOT NULL DEFAULT ''")
 	_, _ = conn.ExecContext(ctx, "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS last_summarized_message_id TEXT NOT NULL DEFAULT ''")
 
@@ -255,6 +268,11 @@ func initSchemaSQLite(database *sql.DB) error {
 			return fmt.Errorf("failed to add restart_count column to messages: %w", err)
 		}
 	}
+
+	_, _ = database.Exec("ALTER TABLE messages ADD COLUMN effort TEXT NOT NULL DEFAULT ''")
+	_, _ = database.Exec("ALTER TABLE cron_schedules ADD COLUMN effort TEXT NOT NULL DEFAULT 'high'")
+	_, _ = database.Exec("ALTER TABLE schedule_runs ADD COLUMN effort TEXT NOT NULL DEFAULT 'high'")
+	_, _ = database.Exec("ALTER TABLE schedule_runs ADD COLUMN model TEXT NOT NULL DEFAULT ''")
 
 	_, _ = database.Exec("ALTER TABLE sessions ADD COLUMN summary TEXT NOT NULL DEFAULT ''")
 	_, _ = database.Exec("ALTER TABLE sessions ADD COLUMN last_summarized_message_id TEXT NOT NULL DEFAULT ''")

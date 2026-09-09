@@ -44,6 +44,7 @@ type ScheduleStore interface {
 	GetAllCronSchedules(ctx context.Context, targetID string) ([]CronSchedule, error)
 	DeleteCronSchedule(ctx context.Context, id string) error
 	UpdateCronNextRun(ctx context.Context, id string, nextRunAt time.Time) error
+	UpdateCronScheduleEffort(ctx context.Context, id, effort string) error
 
 	CreateScheduleRun(ctx context.Context, run ScheduleRun) error
 	UpdateScheduleRunStatus(ctx context.Context, params UpdateRunParams) error

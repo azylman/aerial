@@ -137,6 +137,7 @@ type ScheduleRecurringArgs struct {
 	Prompt         string `json:"prompt"`
 	TitlePrefix    string `json:"title_prefix,omitempty"`
 	Timezone       string `json:"timezone,omitempty"`
+	Effort         string `json:"effort,omitempty"`
 }
 
 func (h *ToolHandler) HandleScheduleRecurring(rawArgs json.RawMessage) (interface{}, error) {
@@ -152,6 +153,10 @@ func (h *ToolHandler) HandleScheduleRecurring(rawArgs json.RawMessage) (interfac
 	args.Timezone = strings.TrimSpace(args.Timezone)
 	if args.Timezone == "" {
 		args.Timezone = h.defaultTimezone()
+	}
+	args.Effort = strings.ToLower(strings.TrimSpace(args.Effort))
+	if args.Effort != "low" {
+		args.Effort = "high"
 	}
 
 	if args.ChannelID == "" {
@@ -181,6 +186,7 @@ func (h *ToolHandler) HandleScheduleRecurring(rawArgs json.RawMessage) (interfac
 		NextRunAt:   nextRun,
 		Enabled:     true,
 		CreatedAt:   now,
+		Effort:      args.Effort,
 	}
 
 	if err := InsertCronSchedule(h.db, sched); err != nil {
@@ -193,6 +199,7 @@ func (h *ToolHandler) HandleScheduleRecurring(rawArgs json.RawMessage) (interfac
 		"cron_expression": args.CronExpression,
 		"next_run_at":     nextRun.Format(time.RFC3339),
 		"channel_id":      args.ChannelID,
+		"effort":          args.Effort,
 		"message":         "Recurring schedule created successfully.",
 	}, nil
 }
@@ -316,4 +323,59 @@ func (h *ToolHandler) HandleCancelSchedule(rawArgs json.RawMessage) (interface{}
 		"schedule_id": args.ScheduleID,
 		"message":     "Schedule cancelled successfully.",
 	}, nil
+}
+
+type UpdateCronScheduleArgs struct {
+	ScheduleID     string  `json:"schedule_id"`
+	Effort         *string `json:"effort,omitempty"`
+	CronExpression *string `json:"cron_expression,omitempty"`
+	Prompt         *string `json:"prompt,omitempty"`
+	TitlePrefix    *string `json:"title_prefix,omitempty"`
+	Timezone       *string `json:"timezone,omitempty"`
+}
+
+func (h *ToolHandler) HandleUpdateCronSchedule(rawArgs json.RawMessage) (interface{}, error) {
+	var args UpdateCronScheduleArgs
+	if err := json.Unmarshal(rawArgs, &args); err != nil {
+		return nil, fmt.Errorf("invalid arguments: %w", err)
+	}
+
+	args.ScheduleID = strings.TrimSpace(args.ScheduleID)
+	if args.ScheduleID == "" {
+		return nil, fmt.Errorf("'schedule_id' is required")
+	}
+
+	var nextRun *time.Time
+	if args.CronExpression != nil && strings.TrimSpace(*args.CronExpression) != "" {
+		tz := h.defaultTimezone()
+		if args.Timezone != nil && strings.TrimSpace(*args.Timezone) != "" {
+			tz = strings.TrimSpace(*args.Timezone)
+		}
+		computed, err := CalculateNextCronRun(*args.CronExpression, tz, time.Now().UTC())
+		if err != nil {
+			return nil, err
+		}
+		nextRun = &computed
+	}
+
+	if err := UpdateCronSchedule(h.db, args.ScheduleID, args.Effort, args.CronExpression, args.Prompt, args.TitlePrefix, args.Timezone, nextRun); err != nil {
+		return nil, fmt.Errorf("failed to update recurring schedule: %w", err)
+	}
+
+	resp := map[string]interface{}{
+		"status":      "success",
+		"schedule_id": args.ScheduleID,
+		"message":     "Recurring schedule updated successfully.",
+	}
+	if args.Effort != nil {
+		eff := strings.ToLower(strings.TrimSpace(*args.Effort))
+		if eff != "low" {
+			eff = "high"
+		}
+		resp["effort"] = eff
+	}
+	if nextRun != nil {
+		resp["next_run_at"] = nextRun.Format(time.RFC3339)
+	}
+	return resp, nil
 }

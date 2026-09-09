@@ -272,6 +272,7 @@ func processDueSchedulesStore(ctx context.Context, cfg *config.Config, store db.
 			Prompt:       c.Prompt,
 			Status:       "enqueued",
 			StartedAt:    now,
+			Effort:       c.Effort,
 		}
 		if err := store.CreateScheduleRun(ctx, run); err != nil {
 			log.Printf("[Scheduler] Error creating schedule run %s for cron %s: %v", runID, c.ID, err)
@@ -294,6 +295,7 @@ func processDueSchedulesStore(ctx context.Context, cfg *config.Config, store db.
 			ScheduleRunID: runID,
 			CreatedAt:     now,
 			UpdatedAt:     now,
+			Effort:        c.Effort,
 		}
 
 		if err := store.InsertMessage(ctx, msg); err != nil {
@@ -410,7 +412,11 @@ func (s *Scheduler) ExtractFactsLLM(ctx context.Context, prompt string) (string,
 		}
 	}
 	if model == "" {
-		model = config.GetRuntimeConfig().Model
+		rc := config.GetRuntimeConfig()
+		model = rc.LowEffortModel
+		if model == "" {
+			model = rc.Model
+		}
 	}
 	if strings.TrimSpace(model) == "" {
 		return "", fmt.Errorf("scheduler fact extraction error: model is not configured")

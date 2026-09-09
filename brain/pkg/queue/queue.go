@@ -185,6 +185,7 @@ type WorkerPoolConfig struct {
 	AgyBin         string
 	APIKey         string
 	Model          string
+	LowEffortModel string
 	SystemPrompt   string
 	TimeoutMinutes int
 	BackoffBase    time.Duration
@@ -237,6 +238,9 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 		def := config.DefaultConfigData()
 		if cfg.Model != "" {
 			def.Model = cfg.Model
+		}
+		if cfg.LowEffortModel != "" {
+			def.LowEffortModel = cfg.LowEffortModel
 		}
 		if cfg.SystemPrompt != "" {
 			def.SystemPrompt = cfg.SystemPrompt
@@ -1635,6 +1639,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 	for attempt := initialRetryCount + 1; attempt <= maxAttempts; attempt++ {
 		p.mu.Lock()
 		currentModel = p.cfg.Model
+		lowEffortModel := p.cfg.LowEffortModel
 		currentTimeout := p.cfg.TimeoutMinutes
 		currentAgyBin := p.cfg.AgyBin
 		currentAPIKey := p.cfg.APIKey
@@ -1646,6 +1651,9 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 				if cur.Model != "" {
 					currentModel = cur.Model
 				}
+				if cur.LowEffortModel != "" {
+					lowEffortModel = cur.LowEffortModel
+				}
 				if cur.APIKey != "" {
 					currentAPIKey = cur.APIKey
 				}
@@ -1654,6 +1662,23 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 				}
 			}
 		}
+
+		if lowEffortModel == "" {
+			lowEffortModel = config.GetRuntimeConfig().LowEffortModel
+		}
+
+		// Check if any message in the burst requested low effort routing
+		isLowEffort := false
+		for _, m := range burst {
+			if strings.EqualFold(strings.TrimSpace(m.Effort), "low") {
+				isLowEffort = true
+				break
+			}
+		}
+		if isLowEffort && strings.TrimSpace(lowEffortModel) != "" {
+			currentModel = lowEffortModel
+		}
+
 		if overrideModel != "" {
 			currentModel = overrideModel
 		}
@@ -1684,6 +1709,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 								CompletedAt: time.Now().UTC(),
 								DurationMs:  time.Since(execStart).Milliseconds(),
 								Error:       reason,
+								Model:       currentModel,
 							})
 						}
 						if p.cfg.OnMessageCompleted != nil {
@@ -1838,6 +1864,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 							CompletedAt: time.Now().UTC(),
 							DurationMs:  time.Since(execStart).Milliseconds(),
 							Error:       reason,
+							Model:       currentModel,
 						})
 					}
 					if p.cfg.OnMessageCompleted != nil {
@@ -1880,6 +1907,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 									CompletedAt: time.Now().UTC(),
 									DurationMs:  time.Since(execStart).Milliseconds(),
 									Error:       "context cancelled during execution",
+									Model:       currentModel,
 								})
 							}
 						}
@@ -1911,6 +1939,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 							CompletedAt: time.Now().UTC(),
 							DurationMs:  time.Since(execStart).Milliseconds(),
 							Error:       sanitizedErr,
+							Model:       currentModel,
 						})
 					}
 					if p.cfg.OnMessageCompleted != nil {
@@ -1988,6 +2017,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 							Status:      "completed",
 							CompletedAt: time.Now().UTC(),
 							DurationMs:  time.Since(execStart).Milliseconds(),
+							Model:       currentModel,
 						})
 					}
 					if p.cfg.OnMessageCompleted != nil {
@@ -2042,6 +2072,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 								CompletedAt: time.Now().UTC(),
 								DurationMs:  time.Since(execStart).Milliseconds(),
 								Error:       "context cancelled during execution",
+								Model:       currentModel,
 							})
 						}
 					}
@@ -2071,6 +2102,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 								CompletedAt: time.Now().UTC(),
 								DurationMs:  time.Since(execStart).Milliseconds(),
 								Error:       "context cancelled during execution",
+								Model:       currentModel,
 							})
 						}
 					}
@@ -2114,6 +2146,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 					CompletedAt: time.Now().UTC(),
 					DurationMs:  time.Since(execStart).Milliseconds(),
 					Error:       sanitizedErr,
+					Model:       currentModel,
 				})
 			}
 			if p.cfg.OnMessageCompleted != nil {
@@ -2155,6 +2188,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 				CompletedAt: time.Now().UTC(),
 				DurationMs:  time.Since(execStart).Milliseconds(),
 				Error:       sanitizedErr,
+				Model:       currentModel,
 			})
 		}
 		if p.cfg.OnMessageCompleted != nil {

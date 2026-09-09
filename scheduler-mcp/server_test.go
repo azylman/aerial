@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -96,8 +97,8 @@ func TestMCPToolsList(t *testing.T) {
 
 	resMap := jsonResp.Result.(map[string]interface{})
 	tools := resMap["tools"].([]interface{})
-	if len(tools) != 4 {
-		t.Fatalf("Expected 4 tools, got %d", len(tools))
+	if len(tools) != 5 {
+		t.Fatalf("Expected 5 tools, got %d", len(tools))
 	}
 }
 
@@ -106,7 +107,7 @@ func TestMCPToolsCallLifecycle(t *testing.T) {
 	defer ts.Close()
 
 	// 1. Call schedule_recurring via namespaced tool name
-	recReq := `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"scheduler_schedule_recurring","arguments":{"channel_id":"123","cron_expression":"0 20 * * 5","prompt":"weekly plan"}}}`
+	recReq := `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"scheduler_schedule_recurring","arguments":{"channel_id":"123","cron_expression":"0 20 * * 5","prompt":"weekly plan","effort":"high"}}}`
 	resp, err := http.Post(ts.URL+"/mcp", "application/json", bytes.NewBufferString(recReq))
 	if err != nil {
 		t.Fatalf("Call schedule_recurring failed: %v", err)
@@ -124,6 +125,45 @@ func TestMCPToolsCallLifecycle(t *testing.T) {
 	content := resMap["content"].([]interface{})
 	if len(content) == 0 {
 		t.Fatalf("Expected content in response")
+	}
+
+	// Extract schedule_id
+	firstContent := content[0].(map[string]interface{})
+	var recData map[string]interface{}
+	if err := json.Unmarshal([]byte(firstContent["text"].(string)), &recData); err != nil {
+		t.Fatalf("Failed to unmarshal schedule_recurring response: %v", err)
+	}
+	schedID, ok := recData["schedule_id"].(string)
+	if !ok || schedID == "" {
+		t.Fatalf("Expected schedule_id in response: %+v", recData)
+	}
+	if recData["effort"] != "high" {
+		t.Errorf("Expected effort 'high', got %v", recData["effort"])
+	}
+
+	// 1b. Call update_cron_schedule to switch effort to low
+	updateReq := fmt.Sprintf(`{"jsonrpc":"2.0","id":31,"method":"tools/call","params":{"name":"update_cron_schedule","arguments":{"schedule_id":"%s","effort":"low"}}}`, schedID)
+	respUp, err := http.Post(ts.URL+"/mcp", "application/json", bytes.NewBufferString(updateReq))
+	if err != nil {
+		t.Fatalf("Call update_cron_schedule failed: %v", err)
+	}
+	defer respUp.Body.Close()
+
+	var updateResp JSONRPCResponse
+	if err := json.NewDecoder(respUp.Body).Decode(&updateResp); err != nil {
+		t.Fatalf("Failed to decode update response: %v", err)
+	}
+	if updateResp.Error != nil {
+		t.Fatalf("Unexpected RPC error on update: %+v", updateResp.Error)
+	}
+	upResMap := updateResp.Result.(map[string]interface{})
+	upContent := upResMap["content"].([]interface{})
+	var upData map[string]interface{}
+	if err := json.Unmarshal([]byte(upContent[0].(map[string]interface{})["text"].(string)), &upData); err != nil {
+		t.Fatalf("Failed to unmarshal update_cron_schedule response: %v", err)
+	}
+	if upData["effort"] != "low" {
+		t.Errorf("Expected effort 'low' after update, got %v", upData["effort"])
 	}
 
 	// 2. Call schedule_once via direct tool name
@@ -361,6 +401,12 @@ func TestMCP_DB_AllBranches(t *testing.T) {
 	}
 	if _, err := DeleteSchedule(nil, "s1"); err == nil {
 		t.Error("expected error deleting schedule with nil db")
+	}
+	if err := UpdateCronSchedule(nil, "s1", nil, nil, nil, nil, nil, nil); err == nil {
+		t.Error("expected error updating cron with nil db")
+	}
+	if err := UpdateCronSchedule(nil, "", nil, nil, nil, nil, nil, nil); err == nil {
+		t.Error("expected error updating cron with empty id")
 	}
 
 	// 5. Config validation for InitDB and NewDB
