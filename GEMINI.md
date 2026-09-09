@@ -136,6 +136,7 @@ Aerial operates on a strict **Two-Repository Separation of Concerns**:
    - **In-Memory SQLite Test Fixtures**: All storage and database contract tests MUST use airgapped, in-memory SQLite handles (`:memory:` with single-connection pool guards) or `t.TempDir()` isolated files. Unit tests MUST NEVER write to shared host database paths or execute `main()` test functions that mutate production state.
    - **Pure Constructor Injection**: Packages MUST require explicitly passed dependencies (e.g. `*config.Config`, domain interfaces) in `New` constructors instead of accessing ambient environment variables (`os.Getenv`) or ambient globals.
    - **Atomic Snapshot Configuration (Invariant I5)**: Subpackage workers read dynamic options JIT via `cfg.Current()` snapshots. Subpackages MUST NEVER cache scalar snapshot fields (e.g. `cfg.Current().Model`) in long-lived struct fields during initialization.
+   - **Runner Execution Guardrail**: `RunAgyWithWatchdog` detects `go test` via `flag.Lookup("test.v")` and blocks real `agy` binary invocations by default, returning a hard error. Tests requiring real runner execution MUST set `AERIAL_ALLOW_REAL_AGY=1`. All other tests MUST mock `RunnerFunc` or use dummy callbacks.
 
 8. **Multi-Agent Review Panel ("The Girl Gang")**:
    - The subagent review panel is called **the girl gang** (or **the gang**).
