@@ -4,13 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -507,98 +505,6 @@ func TestResolveGitDir(t *testing.T) {
 	}
 }
 
-const mockDockerSrc = `package main
-
-import (
-	"fmt"
-	"os"
-	"strings"
-)
-
-func main() {
-	args := strings.Join(os.Args[1:], " ")
-	if os.Getenv("MOCK_DOCKER_FAIL") == "1" {
-		fmt.Fprintln(os.Stderr, "mock compose error with token ghp_1234567890abcdef1234567890abcdef12")
-		os.Exit(1)
-	}
-	if strings.Contains(args, "config --quiet") {
-		if os.Getenv("MOCK_VAL_FAIL") == "1" {
-			fmt.Fprintln(os.Stderr, "syntax err")
-			os.Exit(1)
-		}
-		os.Exit(0)
-	}
-	if strings.Contains(args, "config --services") {
-		if os.Getenv("MOCK_SERV_FAIL") == "1" || os.Getenv("MOCK_SERVICES_FAIL") == "1" {
-			fmt.Fprintln(os.Stderr, "services discovery err ghp_1234567890abcdef1234567890abcdef12")
-			os.Exit(1)
-		}
-		if os.Getenv("MOCK_ZERO_TARGETS") == "1" {
-			fmt.Println("gitsync")
-		} else {
-			fmt.Println("brain")
-			fmt.Println("gitsync")
-			fmt.Println("GITSYNC")
-			fmt.Println("dashboard")
-		}
-		os.Exit(0)
-	}
-	if strings.Contains(args, "up -d") {
-		if os.Getenv("MOCK_UP_FAIL") == "1" {
-			fmt.Fprintln(os.Stderr, "compose up failure with token ghp_1234567890abcdef")
-			os.Exit(1)
-		}
-		fmt.Println("services started cleanly")
-		os.Exit(0)
-	}
-	os.Exit(0)
-}
-`
-
-var (
-	mockDockerBinOnce sync.Once
-	mockDockerBinPath string
-	mockDockerBinErr  error
-)
-
-func getMockDockerBin(t *testing.T) string {
-	t.Helper()
-	mockDockerBinOnce.Do(func() {
-		dir, err := os.MkdirTemp("", "mock-docker-*")
-		if err != nil {
-			mockDockerBinErr = err
-			return
-		}
-		ext := ""
-		if runtime.GOOS == "windows" {
-			ext = ".exe"
-		}
-		target := filepath.Join(dir, "docker"+ext)
-		srcFile := filepath.Join(dir, "main.go")
-		if err := os.WriteFile(srcFile, []byte(mockDockerSrc), 0644); err != nil {
-			mockDockerBinErr = err
-			return
-		}
-		cmd := exec.Command("go", "build", "-o", target, srcFile)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			mockDockerBinErr = fmt.Errorf("failed to build mock docker: %s (%w)", string(out), err)
-			return
-		}
-		mockDockerBinPath = target
-	})
-	if mockDockerBinErr != nil {
-		t.Fatalf("getMockDockerBin error: %v", mockDockerBinErr)
-	}
-	return mockDockerBinPath
-}
-
-func setupMockDocker(t *testing.T) {
-	t.Helper()
-	binPath := getMockDockerBin(t)
-	binDir := filepath.Dir(binPath)
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-}
-
 func TestValidateCompose(t *testing.T) {
 	tempDir := t.TempDir()
 	daemon := &SyncDaemon{}
@@ -616,15 +522,18 @@ func TestValidateCompose(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	setupMockDocker(t)
-
-	// Successful validation
+	// Successful validation with mock executor
+	daemon.composeExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+		return []byte("valid"), nil, nil
+	}
 	if err := daemon.ValidateCompose(ctx, tempDir); err != nil {
 		t.Errorf("expected nil error on valid compose, got %v", err)
 	}
 
-	// Failed validation
-	t.Setenv("MOCK_DOCKER_FAIL", "1")
+	// Failed validation with secret token in stderr
+	daemon.composeExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+		return nil, []byte("mock compose error with token ghp_1234567890abcdef1234567890abcdef12"), errors.New("exit status 1")
+	}
 	err = daemon.ValidateCompose(ctx, tempDir)
 	if err == nil {
 		t.Errorf("expected error when mock docker fails, got nil")
@@ -640,9 +549,11 @@ func TestGetReconcileTargets(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	setupMockDocker(t)
-
 	// Success
+	daemon.composeExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+		output := "brain\ngitsync\nGITSYNC\ndashboard\n"
+		return []byte(output), nil, nil
+	}
 	targets, err := daemon.GetReconcileTargets(ctx, tempDir)
 	if err != nil {
 		t.Fatalf("GetReconcileTargets failed: %v", err)
@@ -651,8 +562,10 @@ func TestGetReconcileTargets(t *testing.T) {
 		t.Errorf("unexpected targets: %v", targets)
 	}
 
-	// Error
-	t.Setenv("MOCK_SERVICES_FAIL", "1")
+	// Error with secret token in stderr
+	daemon.composeExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+		return nil, []byte("services discovery err ghp_1234567890abcdef1234567890abcdef12"), errors.New("exit status 1")
+	}
 	_, err = daemon.GetReconcileTargets(ctx, tempDir)
 	if err == nil {
 		t.Errorf("expected error when services discovery fails, got nil")
@@ -679,31 +592,62 @@ func TestReconcileCompose(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	setupMockDocker(t)
-
 	// 2. Validation error
-	t.Setenv("MOCK_VAL_FAIL", "1")
+	daemon.composeExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+		argsStr := strings.Join(args, " ")
+		if strings.Contains(argsStr, "config") && strings.Contains(argsStr, "--quiet") {
+			return nil, []byte("syntax err"), errors.New("exit status 1")
+		}
+		return nil, nil, nil
+	}
 	if err := daemon.ReconcileCompose(ctx); err == nil {
 		t.Errorf("expected validation error, got nil")
 	}
-	t.Setenv("MOCK_VAL_FAIL", "0")
 
 	// 3. Service discovery error
-	t.Setenv("MOCK_SERV_FAIL", "1")
+	daemon.composeExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+		argsStr := strings.Join(args, " ")
+		if strings.Contains(argsStr, "config") && strings.Contains(argsStr, "--quiet") {
+			return nil, nil, nil
+		}
+		if strings.Contains(argsStr, "config") && strings.Contains(argsStr, "--services") {
+			return nil, []byte("services discovery err ghp_1234567890abcdef1234567890abcdef12"), errors.New("exit status 1")
+		}
+		return nil, nil, nil
+	}
 	if err := daemon.ReconcileCompose(ctx); err == nil {
 		t.Errorf("expected discovery error, got nil")
 	}
-	t.Setenv("MOCK_SERV_FAIL", "0")
 
 	// 4. Zero targets
-	t.Setenv("MOCK_ZERO_TARGETS", "1")
+	daemon.composeExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+		argsStr := strings.Join(args, " ")
+		if strings.Contains(argsStr, "config") && strings.Contains(argsStr, "--quiet") {
+			return nil, nil, nil
+		}
+		if strings.Contains(argsStr, "config") && strings.Contains(argsStr, "--services") {
+			return []byte("gitsync\n"), nil, nil
+		}
+		return nil, nil, nil
+	}
 	if err := daemon.ReconcileCompose(ctx); err != nil {
 		t.Errorf("expected nil on zero targets, got %v", err)
 	}
-	t.Setenv("MOCK_ZERO_TARGETS", "0")
 
 	// 5. Compose up failure
-	t.Setenv("MOCK_UP_FAIL", "1")
+	daemon.composeExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+		argsStr := strings.Join(args, " ")
+		if strings.Contains(argsStr, "config") && strings.Contains(argsStr, "--quiet") {
+			return nil, nil, nil
+		}
+		if strings.Contains(argsStr, "config") && strings.Contains(argsStr, "--services") {
+			return []byte("brain\ndashboard\n"), nil, nil
+		}
+		if strings.Contains(argsStr, "up -d") {
+			return nil, []byte("compose up failure with token ghp_1234567890abcdef"), errors.New("exit status 1")
+		}
+		return nil, nil, nil
+	}
 	err := daemon.ReconcileCompose(ctx)
 	if err == nil {
 		t.Errorf("expected up failure, got nil")
@@ -711,9 +655,21 @@ func TestReconcileCompose(t *testing.T) {
 	if strings.Contains(err.Error(), "ghp_1234567890abcdef") {
 		t.Errorf("expected sanitized compose up error: %v", err)
 	}
-	t.Setenv("MOCK_UP_FAIL", "0")
 
 	// 6. Compose up success
+	daemon.composeExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+		argsStr := strings.Join(args, " ")
+		if strings.Contains(argsStr, "config") && strings.Contains(argsStr, "--quiet") {
+			return nil, nil, nil
+		}
+		if strings.Contains(argsStr, "config") && strings.Contains(argsStr, "--services") {
+			return []byte("brain\ndashboard\n"), nil, nil
+		}
+		if strings.Contains(argsStr, "up -d") {
+			return []byte("services started cleanly\n"), nil, nil
+		}
+		return nil, nil, nil
+	}
 	if err := daemon.ReconcileCompose(ctx); err != nil {
 		t.Errorf("expected successful compose reconcile, got %v", err)
 	}
@@ -999,16 +955,28 @@ func TestGetRepoCommitAndStatusEdgeCases(t *testing.T) {
 	}
 }
 
-func TestNewConfigFromEnv_Custom(t *testing.T) {
-	t.Setenv("PORT", "9090")
-	t.Setenv("SYNC_REPOS", "/path/a, /path/b")
-	t.Setenv("SYNC_INTERVAL", "30s")
-	t.Setenv("GITHUB_PAT", "my_secret_pat")
-	t.Setenv("AERIAL_CONFIG_REPO_URL", "https://github.com/custom/config.git")
-	t.Setenv("AERIAL_PROJECT_DIR", "/custom/aerial")
-	t.Setenv("AERIAL_CONFIG_DIR", "/custom/config")
+func TestNewConfigFromLookup_Custom(t *testing.T) {
+	envMap := map[string]string{
+		"PORT":                   "9090",
+		"SYNC_REPOS":             "/path/a, /path/b",
+		"SYNC_INTERVAL":          "30s",
+		"GITHUB_PAT":             "my_secret_pat",
+		"AERIAL_CONFIG_REPO_URL": "https://github.com/custom/config.git",
+		"AERIAL_PROJECT_DIR":     "/custom/aerial",
+		"AERIAL_CONFIG_DIR":      "/custom/config",
+		"DISCORD_BOT_TOKEN":      "bot_token",
+		"DISCORD_CHANNEL":        "custom-channel",
+		"DISCORD_WEBHOOK_URL":    "https://discord.com/api/webhooks/123/abc",
+		"BRAIN_INTERNAL_URL":     "http://brain:9999/reload",
+		"POSTGRES_PASSWORD":      "pg_pass",
+		"HA_TOKEN":               "ha_tok",
+		"GEMINI_API_KEY":         "gem_key",
+	}
+	lookup := func(k string) string {
+		return envMap[k]
+	}
 
-	cfg := NewConfigFromEnv()
+	cfg := NewConfigFromLookup(lookup)
 	if cfg.Port != "9090" {
 		t.Errorf("expected port 9090, got %q", cfg.Port)
 	}
@@ -1027,19 +995,26 @@ func TestNewConfigFromEnv_Custom(t *testing.T) {
 	if cfg.ConfigDir != "/custom/config" {
 		t.Errorf("expected configDir '/custom/config', got %q", cfg.ConfigDir)
 	}
+	if cfg.DiscordToken != "bot_token" {
+		t.Errorf("expected discordToken 'bot_token', got %q", cfg.DiscordToken)
+	}
+	if cfg.DiscordChannel != "custom-channel" {
+		t.Errorf("expected discordChannel 'custom-channel', got %q", cfg.DiscordChannel)
+	}
+	if cfg.DiscordWebhookURL != "https://discord.com/api/webhooks/123/abc" {
+		t.Errorf("expected discordWebhookURL 'https://discord.com/api/webhooks/123/abc', got %q", cfg.DiscordWebhookURL)
+	}
+	if cfg.BrainInternalURL != "http://brain:9999/reload" {
+		t.Errorf("expected brainInternalURL 'http://brain:9999/reload', got %q", cfg.BrainInternalURL)
+	}
+	if len(cfg.ExtraSecrets) != 4 {
+		t.Errorf("expected 4 extraSecrets, got %d (%v)", len(cfg.ExtraSecrets), cfg.ExtraSecrets)
+	}
 }
 
-func TestNewConfigFromEnv_Defaults(t *testing.T) {
-	// Clear relevant env vars
-	t.Setenv("PORT", "")
-	t.Setenv("SYNC_REPOS", "")
-	t.Setenv("SYNC_INTERVAL", "")
-	t.Setenv("GITHUB_PAT", "")
-	t.Setenv("AERIAL_CONFIG_REPO_URL", "")
-	t.Setenv("AERIAL_PROJECT_DIR", "")
-	t.Setenv("AERIAL_CONFIG_DIR", "")
-
-	cfg := NewConfigFromEnv()
+func TestNewConfigFromLookup_Defaults(t *testing.T) {
+	// Empty lookup returns defaults
+	cfg := NewConfigFromLookup(func(string) string { return "" })
 	if cfg.Port != "8080" {
 		t.Errorf("expected default port 8080, got %q", cfg.Port)
 	}
@@ -1051,6 +1026,25 @@ func TestNewConfigFromEnv_Defaults(t *testing.T) {
 	}
 	if cfg.ConfigDir != "/share/aerial-config" {
 		t.Errorf("expected default configDir /share/aerial-config, got %q", cfg.ConfigDir)
+	}
+	if cfg.BrainInternalURL != "http://brain:8080/internal/reload" {
+		t.Errorf("expected default brainInternalURL 'http://brain:8080/internal/reload', got %q", cfg.BrainInternalURL)
+	}
+	if len(cfg.ExtraSecrets) != 0 {
+		t.Errorf("expected 0 extraSecrets with empty lookup, got %v", cfg.ExtraSecrets)
+	}
+
+	// Nil lookup safely behaves the same as empty lookup
+	cfgNil := NewConfigFromLookup(nil)
+	if cfgNil.Port != "8080" {
+		t.Errorf("expected default port 8080 with nil lookup, got %q", cfgNil.Port)
+	}
+}
+
+func TestNewConfigFromEnv_Smoke(t *testing.T) {
+	cfg := NewConfigFromEnv()
+	if cfg.Port == "" {
+		t.Errorf("expected non-empty port from NewConfigFromEnv, got %q", cfg.Port)
 	}
 }
 
@@ -1220,12 +1214,24 @@ func TestAutomatedRollback_OnValidationFailure(t *testing.T) {
 		t.Fatalf("failed to get commit 2: %v", err)
 	}
 
-	setupMockDocker(t)
-	t.Setenv("MOCK_VAL_FAIL", "1")
+	valMockExecutor := func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+		argsStr := strings.Join(args, " ")
+		if strings.Contains(argsStr, "config") && strings.Contains(argsStr, "--quiet") {
+			return nil, []byte("syntax err"), errors.New("exit status 1")
+		}
+		if strings.Contains(argsStr, "config") && strings.Contains(argsStr, "--services") {
+			return []byte("brain\n"), nil, nil
+		}
+		if strings.Contains(argsStr, "up -d") {
+			return []byte("restored\n"), nil, nil
+		}
+		return nil, nil, nil
+	}
 
 	daemon := NewDaemon(DaemonConfig{
-		ComposeDir: tempDir,
-		Repos:      []string{tempDir},
+		ComposeDir:      tempDir,
+		Repos:           []string{tempDir},
+		ComposeExecutor: valMockExecutor,
 	})
 	daemon.recordPendingChange(ComposeChangeEvent{
 		RepoPath:     tempDir,
@@ -1301,12 +1307,27 @@ func TestAutomatedRollback_OnComposeUpFailure(t *testing.T) {
 		t.Fatalf("failed to get commit 2: %v", err)
 	}
 
-	setupMockDocker(t)
-	t.Setenv("MOCK_UP_FAIL", "1")
+	upMockExecutor := func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+		argsStr := strings.Join(args, " ")
+		if strings.Contains(argsStr, "config") && strings.Contains(argsStr, "--quiet") {
+			return []byte("valid\n"), nil, nil
+		}
+		if strings.Contains(argsStr, "config") && strings.Contains(argsStr, "--services") {
+			return []byte("brain\n"), nil, nil
+		}
+		if strings.Contains(argsStr, "up -d") {
+			if strings.Contains(argsStr, "--remove-orphans") {
+				return []byte("restored\n"), nil, nil
+			}
+			return nil, []byte("compose up failure with token ghp_1234567890abcdef"), errors.New("exit status 1")
+		}
+		return nil, nil, nil
+	}
 
 	daemon := NewDaemon(DaemonConfig{
-		ComposeDir: tempDir,
-		Repos:      []string{tempDir},
+		ComposeDir:      tempDir,
+		Repos:           []string{tempDir},
+		ComposeExecutor: upMockExecutor,
 	})
 	daemon.recordPendingChange(ComposeChangeEvent{
 		RepoPath:     tempDir,
@@ -1565,7 +1586,10 @@ func TestDiscordAlert_FormattingAndTruncation(t *testing.T) {
 func TestResolveAlertChannel_DynamicFromConfig(t *testing.T) {
 	tempDir := t.TempDir()
 
-	// 1. Explicit daemon config field overrides everything
+	// 1. Explicit daemon config field overrides everything, including config.yaml
+	configContent := "system_channel: \"ops-alerts\"\ntimezone: \"America/Los_Angeles\"\n"
+	_ = os.WriteFile(filepath.Join(tempDir, "config.yaml"), []byte(configContent), 0644)
+
 	d1 := NewDaemon(DaemonConfig{
 		DiscordChannel: "override-channel",
 		ConfigDir:      tempDir,
@@ -1574,44 +1598,103 @@ func TestResolveAlertChannel_DynamicFromConfig(t *testing.T) {
 		t.Errorf("expected 'override-channel', got %q", ch)
 	}
 
-	// 2. DISCORD_CHANNEL env var
-	t.Setenv("DISCORD_CHANNEL", "env-channel")
+	// 2. Dynamic read from config.yaml in ConfigDir when DiscordChannel is empty
 	d2 := NewDaemon(DaemonConfig{
 		ConfigDir: tempDir,
 	})
-	if ch := d2.ResolveAlertChannel(); ch != "env-channel" {
-		t.Errorf("expected 'env-channel', got %q", ch)
-	}
-	t.Setenv("DISCORD_CHANNEL", "")
-
-	// 3. Dynamic read from config.yaml in ConfigDir
-	configContent := "system_channel: \"ops-alerts\"\ntimezone: \"America/Los_Angeles\"\n"
-	_ = os.WriteFile(filepath.Join(tempDir, "config.yaml"), []byte(configContent), 0644)
-	d3 := NewDaemon(DaemonConfig{
-		ConfigDir: tempDir,
-	})
-	if ch := d3.ResolveAlertChannel(); ch != "ops-alerts" {
+	if ch := d2.ResolveAlertChannel(); ch != "ops-alerts" {
 		t.Errorf("expected 'ops-alerts' from config.yaml, got %q", ch)
 	}
 
-	// 4. Invalid YAML falls back to "aerial-dev"
+	// 3. Invalid YAML falls back to "aerial-dev"
 	tempDirBad := t.TempDir()
 	_ = os.WriteFile(filepath.Join(tempDirBad, "config.yaml"), []byte("invalid: [yaml\n"), 0644)
-	d4 := NewDaemon(DaemonConfig{
+	d3 := NewDaemon(DaemonConfig{
 		ConfigDir: tempDirBad,
 	})
-	if ch := d4.ResolveAlertChannel(); ch != "aerial-dev" {
+	if ch := d3.ResolveAlertChannel(); ch != "aerial-dev" {
 		t.Errorf("expected fallback 'aerial-dev' on invalid yaml, got %q", ch)
 	}
 
-	// 5. Missing config.yaml falls back to "aerial-dev"
+	// 4. Missing config.yaml falls back to "aerial-dev"
 	tempDirEmpty := t.TempDir()
-	d5 := NewDaemon(DaemonConfig{
+	d4 := NewDaemon(DaemonConfig{
 		ConfigDir: tempDirEmpty,
 	})
-	if ch := d5.ResolveAlertChannel(); ch != "aerial-dev" {
+	if ch := d4.ResolveAlertChannel(); ch != "aerial-dev" {
 		t.Errorf("expected fallback 'aerial-dev' on missing config.yaml, got %q", ch)
 	}
+}
+
+func TestSanitizeAll(t *testing.T) {
+	d := &SyncDaemon{
+		pat:               "ghp_myPersonalAccessToken12345",
+		discordToken:      "my_discord_secret_token",
+		discordWebhookURL: "https://discord.com/api/webhooks/999/super_secret_webhook",
+		extraSecrets: []string{
+			"pg_super_secret_password",
+			"ha_long_lived_access_token_12345",
+			"AIzaSyTestApiKeyForGemini1234567890",
+			"abc", // length < 4, should NOT be added or sanitized as literal secret
+		},
+	}
+
+	raw := "Connect to postgres://user:pg_super_secret_password@db:5432 with ghp_myPersonalAccessToken12345 and token my_discord_secret_token or webhook https://discord.com/api/webhooks/999/super_secret_webhook. Also ha_long_lived_access_token_12345 and key AIzaSyTestApiKeyForGemini1234567890 and normal word abc."
+
+	sanitized := d.SanitizeAll(raw)
+
+	if strings.Contains(sanitized, "pg_super_secret_password") {
+		t.Errorf("expected postgres password to be redacted, got: %s", sanitized)
+	}
+	if strings.Contains(sanitized, "ghp_myPersonalAccessToken12345") {
+		t.Errorf("expected PAT to be redacted, got: %s", sanitized)
+	}
+	if strings.Contains(sanitized, "my_discord_secret_token") {
+		t.Errorf("expected discord token to be redacted, got: %s", sanitized)
+	}
+	if strings.Contains(sanitized, "super_secret_webhook") {
+		t.Errorf("expected webhook URL to be redacted, got: %s", sanitized)
+	}
+	if strings.Contains(sanitized, "ha_long_lived_access_token_12345") {
+		t.Errorf("expected HA token to be redacted, got: %s", sanitized)
+	}
+	if strings.Contains(sanitized, "AIzaSyTestApiKeyForGemini1234567890") {
+		t.Errorf("expected Gemini API key to be redacted, got: %s", sanitized)
+	}
+	// "abc" must NOT be redacted because len < 4
+	if !strings.Contains(sanitized, "abc") {
+		t.Errorf("expected short string 'abc' to be preserved, got: %s", sanitized)
+	}
+}
+
+func TestNotifyBrainReload(t *testing.T) {
+	var received bool
+	var receivedMethod string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received = true
+		receivedMethod = r.Method
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	d := &SyncDaemon{
+		brainInternalURL: srv.URL,
+	}
+
+	d.notifyBrainReload()
+
+	if !received {
+		t.Errorf("expected reload notification to reach mock Brain server")
+	}
+	if receivedMethod != http.MethodPost {
+		t.Errorf("expected POST method, got %s", receivedMethod)
+	}
+
+	// Empty brainInternalURL is safe no-op
+	dEmpty := &SyncDaemon{
+		brainInternalURL: "",
+	}
+	dEmpty.notifyBrainReload()
 }
 
 func TestRepoLock_ThreadSafety(t *testing.T) {
