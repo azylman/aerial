@@ -1697,7 +1697,8 @@ func TestQueueTurnCountSessionRotation(t *testing.T) {
 		_, _ = db.IncrementSessionTurnCount(database, channelID)
 	}
 
-	_, _ = session.EnsureSessionDir(initialSessionID)
+	sessMgr := session.New(tmpDir, "")
+	_, _ = sessMgr.EnsureSessionDir(initialSessionID)
 	cliPbDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "conversations")
 	_ = os.MkdirAll(cliPbDir, 0755)
 	_ = os.WriteFile(filepath.Join(cliPbDir, initialSessionID+".pb"), []byte("mock-pb"), 0644)
@@ -1707,6 +1708,7 @@ func TestQueueTurnCountSessionRotation(t *testing.T) {
 
 	pool := NewWorkerPool(WorkerPoolConfig{
 		DB:             database,
+		SessionManager: sessMgr,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    1,
@@ -2274,7 +2276,8 @@ func TestProcessBurst_PureAmbient(t *testing.T) {
 	if err := db.SaveSessionID(database, "chan-lounge", sessionID); err != nil {
 		t.Fatalf("Failed to save session ID: %v", err)
 	}
-	_, err = session.EnsureSessionDir(sessionID)
+	sessMgr := session.New(tmpDir, "")
+	_, err = sessMgr.EnsureSessionDir(sessionID)
 	if err != nil {
 		t.Fatalf("EnsureSessionDir failed: %v", err)
 	}
@@ -2293,6 +2296,7 @@ func TestProcessBurst_PureAmbient(t *testing.T) {
 
 	pool := NewWorkerPool(WorkerPoolConfig{
 		DB:             database,
+		SessionManager: sessMgr,
 		TimeoutMinutes: 1,
 		Classifier:     cls,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
@@ -2390,8 +2394,8 @@ func TestProcessBurst_Tier1Wake(t *testing.T) {
 	defer func() { _ = database.Close() }()
 
 	sessionID := uuid.New().String()
-	_ = db.SaveSessionID(database, "chan-lounge", sessionID)
-	_, _ = session.EnsureSessionDir(sessionID)
+	sessMgr := session.New(tmpDir, "")
+	_, _ = sessMgr.EnsureSessionDir(sessionID)
 
 	var mu sync.Mutex
 	runnerCalls := 0
@@ -2406,6 +2410,7 @@ func TestProcessBurst_Tier1Wake(t *testing.T) {
 
 	pool := NewWorkerPool(WorkerPoolConfig{
 		DB:             database,
+		SessionManager: sessMgr,
 		DiscordSession: s,
 		TimeoutMinutes: 1,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
@@ -2497,7 +2502,8 @@ func TestProcessBurst_Tier2Wake(t *testing.T) {
 
 	sessionID := uuid.New().String()
 	_ = db.SaveSessionID(database, "chan-lounge", sessionID)
-	_, _ = session.EnsureSessionDir(sessionID)
+	sessMgr := session.New(tmpDir, "")
+	_, _ = sessMgr.EnsureSessionDir(sessionID)
 
 	var mu sync.Mutex
 	runnerCalls := 0
@@ -2511,6 +2517,7 @@ func TestProcessBurst_Tier2Wake(t *testing.T) {
 
 	pool := NewWorkerPool(WorkerPoolConfig{
 		DB:             database,
+		SessionManager: sessMgr,
 		TimeoutMinutes: 1,
 		Classifier:     cls,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
@@ -2600,7 +2607,8 @@ func TestProcessBurst_MixedBurst(t *testing.T) {
 
 	sessionID := uuid.New().String()
 	_ = db.SaveSessionID(database, "chan-lounge", sessionID)
-	_, _ = session.EnsureSessionDir(sessionID)
+	sessMgr := session.New(tmpDir, "")
+	_, _ = sessMgr.EnsureSessionDir(sessionID)
 	cliPbDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "conversations")
 	_ = os.MkdirAll(cliPbDir, 0755)
 	_ = os.WriteFile(filepath.Join(cliPbDir, sessionID+".pb"), []byte("mock-pb"), 0644)
@@ -2616,6 +2624,7 @@ func TestProcessBurst_MixedBurst(t *testing.T) {
 
 	pool := NewWorkerPool(WorkerPoolConfig{
 		DB:             database,
+		SessionManager: sessMgr,
 		TimeoutMinutes: 1,
 		Classifier:     cls,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
@@ -2779,7 +2788,8 @@ func TestProcessBurst_SessionRotationBeforeLeadingAmbient(t *testing.T) {
 	channelID := "chan-rot-ambient"
 	initialSessionID := uuid.New().String()
 	_ = db.SaveSessionID(database, channelID, initialSessionID)
-	_, _ = session.EnsureSessionDir(initialSessionID)
+	sessMgr := session.New(tmpDir, "")
+	_, _ = sessMgr.EnsureSessionDir(initialSessionID)
 	cliPbDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "conversations")
 	_ = os.MkdirAll(cliPbDir, 0755)
 	_ = os.WriteFile(filepath.Join(cliPbDir, initialSessionID+".pb"), []byte("mock-pb"), 0644)
@@ -2802,6 +2812,7 @@ func TestProcessBurst_SessionRotationBeforeLeadingAmbient(t *testing.T) {
 
 	pool := NewWorkerPool(WorkerPoolConfig{
 		DB:             database,
+		SessionManager: sessMgr,
 		TimeoutMinutes: 1,
 		Classifier:     cls,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
@@ -2862,7 +2873,7 @@ func TestProcessBurst_SessionRotationBeforeLeadingAmbient(t *testing.T) {
 	}
 
 	// Verify that Ambient1 was NOT written to the old session directory, but marked COMPLETED in DB!
-	oldSessDir, _ := session.EnsureSessionDir(initialSessionID)
+	oldSessDir, _ := sessMgr.EnsureSessionDir(initialSessionID)
 	oldTranscriptPath := filepath.Join(oldSessDir, ".system_generated", "logs", "transcript.jsonl")
 	dataOld, _ := os.ReadFile(oldTranscriptPath)
 	if strings.Contains(string(dataOld), "Random ambient chatter before question") {
@@ -2888,7 +2899,8 @@ func TestProcessBurst_TrailingAmbient(t *testing.T) {
 
 	sessionID := uuid.New().String()
 	_ = db.SaveSessionID(database, "chan-lounge", sessionID)
-	_, _ = session.EnsureSessionDir(sessionID)
+	sessMgr := session.New(tmpDir, "")
+	_, _ = sessMgr.EnsureSessionDir(sessionID)
 	cliPbDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "conversations")
 	_ = os.MkdirAll(cliPbDir, 0755)
 	_ = os.WriteFile(filepath.Join(cliPbDir, sessionID+".pb"), []byte("mock-pb"), 0644)
@@ -2903,6 +2915,7 @@ func TestProcessBurst_TrailingAmbient(t *testing.T) {
 
 	pool := NewWorkerPool(WorkerPoolConfig{
 		DB:             database,
+		SessionManager: sessMgr,
 		TimeoutMinutes: 1,
 		Classifier:     cls,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
@@ -4352,7 +4365,8 @@ func TestProcessBurst_WakeModeMention_BypassClassifier(t *testing.T) {
 	sessionID := uuid.New().String()
 	channelID := "chan-lounge-mention"
 	_ = db.SaveSessionID(database, channelID, sessionID)
-	_, _ = session.EnsureSessionDir(sessionID)
+	sessMgr := session.New(tmpDir, "")
+	_, _ = sessMgr.EnsureSessionDir(sessionID)
 	cliPbDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "conversations")
 	_ = os.MkdirAll(cliPbDir, 0755)
 	_ = os.WriteFile(filepath.Join(cliPbDir, sessionID+".pb"), []byte("mock-pb"), 0644)
@@ -4363,7 +4377,8 @@ func TestProcessBurst_WakeModeMention_BypassClassifier(t *testing.T) {
 	var mu sync.Mutex
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB: database,
+		DB:             database,
+		SessionManager: sessMgr,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
 			mu.Lock()
 			runnerCalls++
@@ -4436,7 +4451,8 @@ func TestProcessBurst_WakeModeMention_DirectMentionWakes(t *testing.T) {
 	sessionID := uuid.New().String()
 	channelID := "chan-lounge-wake"
 	_ = db.SaveSessionID(database, channelID, sessionID)
-	_, _ = session.EnsureSessionDir(sessionID)
+	sessMgr := session.New(tmpDir, "")
+	_, _ = sessMgr.EnsureSessionDir(sessionID)
 	cliPbDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "conversations")
 	_ = os.MkdirAll(cliPbDir, 0755)
 	_ = os.WriteFile(filepath.Join(cliPbDir, sessionID+".pb"), []byte("mock-pb"), 0644)
@@ -4446,7 +4462,8 @@ func TestProcessBurst_WakeModeMention_DirectMentionWakes(t *testing.T) {
 	var mu sync.Mutex
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB: database,
+		DB:             database,
+		SessionManager: sessMgr,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
 			mu.Lock()
 			runnerCalls++
@@ -6072,8 +6089,9 @@ func TestProcessBurst_TransientError_RetainsOriginalPrompt(t *testing.T) {
 	t.Setenv("HOME", tmpDir)
 	t.Setenv("USERPROFILE", tmpDir)
 
+	sessMgr := session.New(tmpDir, "")
 	testSessID := "sess-transient-503"
-	_, err = session.EnsureSessionDir(testSessID)
+	_, err = sessMgr.EnsureSessionDir(testSessID)
 	if err != nil {
 		t.Fatalf("EnsureSessionDir failed: %v", err)
 	}
@@ -6085,6 +6103,7 @@ func TestProcessBurst_TransientError_RetainsOriginalPrompt(t *testing.T) {
 
 	pool := NewWorkerPool(WorkerPoolConfig{
 		DB:             database,
+		SessionManager: sessMgr,
 		TimeoutMinutes: 1,
 		BackoffBase:    5 * time.Millisecond,
 		MaxAttempts:    2,
@@ -7251,14 +7270,13 @@ func TestGetSessionLastActivity_ChecksBothDBAndDiskLogs(t *testing.T) {
 	defer func() { _ = database.Close() }()
 
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-	t.Setenv("USERPROFILE", tmpDir)
+	sessMgr := session.New(tmpDir, "")
 
 	threadID := "thread-act-1"
 	sessionID := "sess-act-uuid-1"
 
 	// 1. Initially empty thread -> cold thread, zero time
-	act, isCold, err := GetSessionLastActivity(database, threadID)
+	act, isCold, err := GetSessionLastActivity(database, threadID, sessMgr)
 	if err != nil || !isCold || !act.IsZero() {
 		t.Fatalf("expected cold thread with zero time, got act=%v, isCold=%v, err=%v", act, isCold, err)
 	}
@@ -7273,7 +7291,7 @@ func TestGetSessionLastActivity_ChecksBothDBAndDiskLogs(t *testing.T) {
 		t.Fatalf("failed to insert session: %v", err)
 	}
 
-	act, isCold, err = GetSessionLastActivity(database, threadID)
+	act, isCold, err = GetSessionLastActivity(database, threadID, sessMgr)
 	if err != nil || isCold {
 		t.Fatalf("expected non-cold thread, got act=%v, isCold=%v, err=%v", act, isCold, err)
 	}
@@ -7291,7 +7309,7 @@ func TestGetSessionLastActivity_ChecksBothDBAndDiskLogs(t *testing.T) {
 		t.Fatalf("failed to insert message: %v", err)
 	}
 
-	act, isCold, err = GetSessionLastActivity(database, threadID)
+	act, isCold, err = GetSessionLastActivity(database, threadID, sessMgr)
 	if err != nil || isCold {
 		t.Fatalf("expected non-cold thread, got act=%v, isCold=%v, err=%v", act, isCold, err)
 	}
@@ -7311,7 +7329,7 @@ func TestGetSessionLastActivity_ChecksBothDBAndDiskLogs(t *testing.T) {
 	}
 	_ = os.Chtimes(taskLog, tDisk, tDisk)
 
-	act, isCold, err = GetSessionLastActivity(database, threadID)
+	act, isCold, err = GetSessionLastActivity(database, threadID, sessMgr)
 	if err != nil || isCold {
 		t.Fatalf("expected non-cold thread, got act=%v, isCold=%v, err=%v", act, isCold, err)
 	}

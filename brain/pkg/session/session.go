@@ -16,55 +16,59 @@ import (
 // SourceAmbient represents ambient chat messages appended to session transcripts.
 const SourceAmbient = "AMBIENT"
 
-var (
-	defaultRootsMu sync.RWMutex
-	customRoots    []string
-)
+// Manager manages session directories, transcripts, and activity tracking
+// with explicitly injected homeDir and dataDir paths.
+type Manager struct {
+	homeDir  string
+	dataDir  string
+	roots    []string
+	appendMu sync.Mutex
+}
 
-// SessionRoots returns a defensive copy of configured session roots.
-func SessionRoots() []string {
-	defaultRootsMu.RLock()
-	defer defaultRootsMu.RUnlock()
-	if len(customRoots) > 0 {
-		return append([]string(nil), customRoots...)
+// New creates a new session Manager with explicitly injected homeDir and dataDir.
+// No ambient environment fallbacks (os.UserHomeDir, os.Getenv("HOME"), /root, /data) are used.
+func New(homeDir, dataDir string) *Manager {
+	cleanHome := strings.TrimSpace(homeDir)
+	cleanData := strings.TrimSpace(dataDir)
+
+	var roots []string
+	if cleanData != "" {
+		roots = append(roots, filepath.Join(cleanData, "brain"))
 	}
-	homeDir, err := os.UserHomeDir()
-	if err != nil || homeDir == "" {
-		homeDir = "/root"
+	if cleanHome != "" {
+		roots = append(roots,
+			filepath.Join(cleanHome, ".gemini", "antigravity-cli", "brain"),
+			filepath.Join(cleanHome, ".gemini", "antigravity", "brain"),
+		)
 	}
-	return []string{
-		"/data/brain",
-		filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain"),
-		filepath.Join(homeDir, ".gemini", "antigravity", "brain"),
+
+	return &Manager{
+		homeDir: cleanHome,
+		dataDir: cleanData,
+		roots:   roots,
 	}
 }
 
-// SetSessionRoots sets custom session roots and returns a restore closure.
-func SetSessionRoots(roots ...string) func() {
-	defaultRootsMu.Lock()
-	orig := customRoots
-	customRoots = append([]string(nil), roots...)
-	defaultRootsMu.Unlock()
-	return func() {
-		defaultRootsMu.Lock()
-		customRoots = orig
-		defaultRootsMu.Unlock()
+// Roots returns a defensive copy of configured session roots.
+func (m *Manager) Roots() []string {
+	if m == nil || len(m.roots) == 0 {
+		return nil
 	}
+	return append([]string(nil), m.roots...)
 }
 
-// GetSessionLastActivity returns the latest modification timestamp across all log files
-// (transcripts and background task logs) for a session ID.
-// Optional customRoots allow passing runner opts.TranscriptDirs or test directories directly.
-func GetSessionLastActivity(sessionID string, customRoots ...string) (time.Time, error) {
+// LastActivityFromRoots returns the latest modification timestamp across all log files
+// (transcripts and background task logs) for a session ID within the provided search roots.
+// Zero ambient environment defaults are used.
+func LastActivityFromRoots(sessionID string, roots []string) (time.Time, error) {
 	trimmed := strings.TrimSpace(sessionID)
 	// Security: Prevent path traversal
 	if trimmed == "" || strings.ContainsAny(trimmed, `/\:`) || strings.Contains(trimmed, "..") {
 		return time.Time{}, nil
 	}
 
-	roots := customRoots
 	if len(roots) == 0 {
-		roots = SessionRoots()
+		return time.Time{}, nil
 	}
 
 	var latestTime time.Time
@@ -131,11 +135,26 @@ func GetSessionLastActivity(sessionID string, customRoots ...string) (time.Time,
 	return latestTime, nil
 }
 
-func FindLatestSessionDir(after time.Time) string {
-	roots := SessionRoots()
+// GetSessionLastActivity returns the latest modification timestamp across all log files
+// for a session ID. If customRoots are provided, they override the manager's configured roots.
+func (m *Manager) GetSessionLastActivity(sessionID string, customRoots ...string) (time.Time, error) {
+	if len(customRoots) > 0 {
+		return LastActivityFromRoots(sessionID, customRoots)
+	}
+	if m == nil {
+		return time.Time{}, nil
+	}
+	return LastActivityFromRoots(sessionID, m.roots)
+}
+
+// FindLatestSessionDir scans the manager's configured roots for the newest session directory modified after the given time.
+func (m *Manager) FindLatestSessionDir(after time.Time) string {
+	if m == nil {
+		return ""
+	}
 	var newestID string
 	var newestTime time.Time
-	for _, root := range roots {
+	for _, root := range m.roots {
 		entries, err := os.ReadDir(root)
 		if err != nil {
 			continue
@@ -157,21 +176,35 @@ func FindLatestSessionDir(after time.Time) string {
 	return newestID
 }
 
-func DumpSessionDiagnosticLogs(convID string) string {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		homeDir = "/root"
+// DumpSessionDiagnosticLogs returns formatted diagnostic output from session log files.
+func (m *Manager) DumpSessionDiagnosticLogs(convID string) string {
+	if m == nil {
+		return ""
 	}
-
-	searchDirs := []string{
-		filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain", convID, ".system_generated", "logs"),
-		filepath.Join(homeDir, ".gemini", "antigravity", "brain", convID, ".system_generated", "logs"),
-		filepath.Join("/data", "brain", convID, ".system_generated", "logs"),
-		filepath.Join(homeDir, ".gemini", "antigravity-cli", "log"),
-		filepath.Join(homeDir, ".gemini", "antigravity-cli", "crashes"),
-		filepath.Join(homeDir, ".gemini", "antigravity-cli", "logs"),
-		filepath.Join(homeDir, ".gemini", "antigravity", "logs"),
-		filepath.Join("/data", "brain", convID),
+	var searchDirs []string
+	if m.homeDir != "" {
+		searchDirs = append(searchDirs,
+			filepath.Join(m.homeDir, ".gemini", "antigravity-cli", "brain", convID, ".system_generated", "logs"),
+			filepath.Join(m.homeDir, ".gemini", "antigravity", "brain", convID, ".system_generated", "logs"),
+		)
+	}
+	if m.dataDir != "" {
+		searchDirs = append(searchDirs,
+			filepath.Join(m.dataDir, "brain", convID, ".system_generated", "logs"),
+		)
+	}
+	if m.homeDir != "" {
+		searchDirs = append(searchDirs,
+			filepath.Join(m.homeDir, ".gemini", "antigravity-cli", "log"),
+			filepath.Join(m.homeDir, ".gemini", "antigravity-cli", "crashes"),
+			filepath.Join(m.homeDir, ".gemini", "antigravity-cli", "logs"),
+			filepath.Join(m.homeDir, ".gemini", "antigravity", "logs"),
+		)
+	}
+	if m.dataDir != "" {
+		searchDirs = append(searchDirs,
+			filepath.Join(m.dataDir, "brain", convID),
+		)
 	}
 
 	var sb strings.Builder
@@ -225,19 +258,21 @@ func DumpSessionDiagnosticLogs(convID string) string {
 	return sb.String()
 }
 
-func getTargetDirs(convID string) []string {
-	brainRoots := SessionRoots()
+func (m *Manager) getTargetDirs(convID string) []string {
+	if m == nil || len(m.roots) == 0 {
+		return nil
+	}
 
 	if convID != "" {
 		var res []string
-		for _, root := range brainRoots {
+		for _, root := range m.roots {
 			res = append(res, filepath.Join(root, convID))
 		}
 		return res
 	}
 
 	var targetDirs []string
-	for _, root := range brainRoots {
+	for _, root := range m.roots {
 		if entries, err := os.ReadDir(root); err == nil {
 			var latestDir string
 			var latestTime time.Time
@@ -257,8 +292,12 @@ func getTargetDirs(convID string) []string {
 	return targetDirs
 }
 
-func ExtractResponseAndError(convID string) (string, string) {
-	targetDirs := getTargetDirs(convID)
+// ExtractResponseAndError parses transcript files to extract the last response and error for a conversation.
+func (m *Manager) ExtractResponseAndError(convID string) (string, string) {
+	if m == nil {
+		return "", ""
+	}
+	targetDirs := m.getTargetDirs(convID)
 
 	var lastResponse string
 	var lastError string
@@ -333,8 +372,12 @@ func ExtractResponseAndError(convID string) (string, string) {
 	return lastResponse, lastError
 }
 
-func HasSuccessfulToolCall(convID string) bool {
-	targetDirs := getTargetDirs(convID)
+// HasSuccessfulToolCall returns whether the conversation contains any successful tool calls.
+func (m *Manager) HasSuccessfulToolCall(convID string) bool {
+	if m == nil {
+		return false
+	}
+	targetDirs := m.getTargetDirs(convID)
 
 	for _, dir := range targetDirs {
 		for _, name := range []string{"transcript_full.jsonl", "transcript.jsonl"} {
@@ -389,49 +432,43 @@ func HasSuccessfulToolCall(convID string) bool {
 	return false
 }
 
-var brainDataDir = "/data/brain"
-
 // resolveBaseDir locates the appropriate brain base directory for sessions.
-func resolveBaseDir(sessionID string) string {
-	if fi, err := os.Stat(brainDataDir); err == nil && fi.IsDir() {
-		return brainDataDir
-	}
-
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		homeDir = "/root"
+func (m *Manager) resolveBaseDir(sessionID string) string {
+	if m == nil || len(m.roots) == 0 {
+		return ""
 	}
 
 	// Check if session directory already exists under any known target dir
-	for _, targetDir := range getTargetDirs(sessionID) {
+	for _, targetDir := range m.getTargetDirs(sessionID) {
 		if fi, err := os.Stat(targetDir); err == nil && fi.IsDir() {
 			return filepath.Dir(targetDir)
 		}
 	}
 
-	// Check existing parent root dirs from getTargetDirs
-	brainRoots := []string{
-		filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain"),
-		filepath.Join(homeDir, ".gemini", "antigravity", "brain"),
-		brainDataDir,
-	}
-	for _, root := range brainRoots {
+	// Check existing parent root dirs from m.roots
+	for _, root := range m.roots {
 		if fi, err := os.Stat(root); err == nil && fi.IsDir() {
 			return root
 		}
 	}
 
-	// Fallback to primary root under homeDir
-	return filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain")
+	// Fallback to first configured root
+	return m.roots[0]
 }
 
 // EnsureSessionDir bootstraps the session directory and transcript files if they do not exist.
-func EnsureSessionDir(sessionID string) (string, error) {
+func (m *Manager) EnsureSessionDir(sessionID string) (string, error) {
+	if m == nil {
+		return "", fmt.Errorf("session manager is nil")
+	}
 	if strings.TrimSpace(sessionID) == "" {
 		return "", fmt.Errorf("sessionID cannot be empty")
 	}
 
-	baseDir := resolveBaseDir(sessionID)
+	baseDir := m.resolveBaseDir(sessionID)
+	if baseDir == "" {
+		return "", fmt.Errorf("no session roots configured")
+	}
 	sessionDir := filepath.Join(baseDir, sessionID)
 	logsDir := filepath.Join(sessionDir, ".system_generated", "logs")
 
@@ -461,19 +498,17 @@ type TranscriptStep struct {
 	Content   string `json:"content"`
 }
 
-var appendTurnMu sync.Mutex
-
 // AppendAmbientTurn quietly appends an unaddressed ambient chat message to the session's transcripts.
-func AppendAmbientTurn(sessionID, channelName, authorName, text string, timestamp time.Time) error {
-	if strings.TrimSpace(sessionID) == "" {
+func (m *Manager) AppendAmbientTurn(sessionID, channelName, authorName, text string, timestamp time.Time) error {
+	if m == nil || strings.TrimSpace(sessionID) == "" {
 		return nil
 	}
 
-	appendTurnMu.Lock()
-	defer appendTurnMu.Unlock()
+	m.appendMu.Lock()
+	defer m.appendMu.Unlock()
 
 	var logsDir string
-	for _, dir := range getTargetDirs(sessionID) {
+	for _, dir := range m.getTargetDirs(sessionID) {
 		c1 := filepath.Join(dir, ".system_generated", "logs")
 		if _, err := os.Stat(filepath.Join(c1, "transcript.jsonl")); err == nil {
 			logsDir = c1
@@ -637,28 +672,29 @@ func getLastStepIndex(filePath string) (int, error) {
 
 // SessionExistsOnDisk checks if the session has a valid agy conversation
 // protobuf or non-empty transcript on disk.
-func SessionExistsOnDisk(sessionID string) bool {
+func (m *Manager) SessionExistsOnDisk(sessionID string) bool {
+	if m == nil {
+		return false
+	}
 	trimmed := strings.TrimSpace(sessionID)
 	if trimmed == "" || strings.ContainsAny(trimmed, `/\:`) || strings.Contains(trimmed, "..") {
 		return false
 	}
-	homeDir, err := os.UserHomeDir()
-	if err != nil || homeDir == "" {
-		homeDir = "/root"
-	}
 
-	// 1. Check agy conversation protobufs
-	cliConvPb := filepath.Join(homeDir, ".gemini", "antigravity-cli", "conversations", trimmed+".pb")
-	if fi, err := os.Stat(cliConvPb); err == nil && !fi.IsDir() && fi.Size() > 0 {
-		return true
-	}
-	agyConvPb := filepath.Join(homeDir, ".gemini", "antigravity", "conversations", trimmed+".pb")
-	if fi, err := os.Stat(agyConvPb); err == nil && !fi.IsDir() && fi.Size() > 0 {
-		return true
+	// 1. Check agy conversation protobufs under homeDir (if configured)
+	if m.homeDir != "" {
+		cliConvPb := filepath.Join(m.homeDir, ".gemini", "antigravity-cli", "conversations", trimmed+".pb")
+		if fi, err := os.Stat(cliConvPb); err == nil && !fi.IsDir() && fi.Size() > 0 {
+			return true
+		}
+		agyConvPb := filepath.Join(m.homeDir, ".gemini", "antigravity", "conversations", trimmed+".pb")
+		if fi, err := os.Stat(agyConvPb); err == nil && !fi.IsDir() && fi.Size() > 0 {
+			return true
+		}
 	}
 
 	// 2. Check transcript.jsonl non-empty status
-	for _, dir := range getTargetDirs(trimmed) {
+	for _, dir := range m.getTargetDirs(trimmed) {
 		tPath := filepath.Join(dir, ".system_generated", "logs", "transcript.jsonl")
 		if fi, err := os.Stat(tPath); err == nil && !fi.IsDir() && fi.Size() > 0 {
 			return true
