@@ -58,6 +58,29 @@ func TestWorkerPool_ConfigInjection(t *testing.T) {
 	}
 }
 
+func TestWorkerPool_DrainTimeoutConfig(t *testing.T) {
+	// Default when unset or <= 0
+	poolDef := NewWorkerPool(WorkerPoolConfig{
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			return "", "", 0, nil
+		},
+	})
+	if poolDef.cfg.DrainTimeout != 10*time.Second {
+		t.Errorf("expected default DrainTimeout 10s, got %v", poolDef.cfg.DrainTimeout)
+	}
+
+	// Explicit custom DrainTimeout
+	poolCustom := NewWorkerPool(WorkerPoolConfig{
+		DrainTimeout: 250 * time.Millisecond,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			return "", "", 0, nil
+		},
+	})
+	if poolCustom.cfg.DrainTimeout != 250*time.Millisecond {
+		t.Errorf("expected custom DrainTimeout 250ms, got %v", poolCustom.cfg.DrainTimeout)
+	}
+}
+
 func mockJSONResponse(convID, responseText string) string {
 	if convID == "" {
 		convID = uuid.New().String()
@@ -4577,6 +4600,7 @@ func TestWorkerPoolShutdown_PreservesProcessingMessageWithoutApology(t *testing.
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
+		DrainTimeout:   50 * time.Millisecond,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
 			close(runnerStarted)
 			// Wait until shutdown cancels ctx or runnerBlock is closed
@@ -4805,6 +4829,7 @@ func TestWorkerPoolShutdown_AmbientClassifierCancellationPreserved(t *testing.T)
 	pool := NewWorkerPool(WorkerPoolConfig{
 		DB:             database,
 		TimeoutMinutes: 1,
+		DrainTimeout:   50 * time.Millisecond,
 		Classifier:     cls,
 		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
 			return config.ChannelPolicy{
