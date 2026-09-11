@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/base64"
@@ -120,6 +121,44 @@ type GitSyncStatusResponse struct {
 	Repos         map[string]RepoStatus `json:"repos"`
 }
 
+// DockerExecutor executes docker CLI commands.
+type DockerExecutor func(ctx context.Context, args ...string) (stdout []byte, stderr []byte, err error)
+
+func defaultDockerExecutor(ctx context.Context, args ...string) ([]byte, []byte, error) {
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd.Cancel = func() error {
+		if cmd.Process != nil {
+			return cmd.Process.Signal(syscall.SIGTERM)
+		}
+		return nil
+	}
+	cmd.WaitDelay = 10 * time.Second
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	return stdout.Bytes(), stderr.Bytes(), err
+}
+
+// scrubComposeEnv filters out container-internal path overrides (AERIAL_CONFIG_DIR, AERIAL_PROJECT_DIR)
+// so docker compose does not inherit container filesystem paths for host volume mounts.
+func scrubComposeEnv(environ []string) []string {
+	out := make([]string, 0, len(environ))
+	for _, env := range environ {
+		eq := strings.IndexByte(env, '=')
+		if eq == -1 {
+			continue
+		}
+		key := env[:eq]
+		if strings.EqualFold(key, "AERIAL_CONFIG_DIR") || strings.EqualFold(key, "AERIAL_PROJECT_DIR") {
+			continue
+		}
+		out = append(out, env)
+	}
+	return out
+}
+
 // ComposeExecutor executes docker compose commands.
 type ComposeExecutor func(ctx context.Context, dir string, args ...string) (stdout []byte, stderr []byte, err error)
 
@@ -127,6 +166,7 @@ func defaultComposeExecutor(ctx context.Context, dir string, args ...string) ([]
 	cmdArgs := append([]string{"compose"}, args...)
 	cmd := exec.CommandContext(ctx, "docker", cmdArgs...)
 	cmd.Dir = dir
+	cmd.Env = scrubComposeEnv(os.Environ())
 	cmd.Cancel = func() error {
 		if cmd.Process != nil {
 			return cmd.Process.Signal(syscall.SIGTERM)
@@ -163,6 +203,7 @@ type SyncDaemon struct {
 	brainInternalURL string
 	extraSecrets     []string
 	composeExecutor  ComposeExecutor
+	dockerExecutor   DockerExecutor
 
 	// Concurrency & Quarantine
 	repoLocksMu        sync.Mutex
@@ -188,6 +229,13 @@ func (d *SyncDaemon) getComposeExecutor() ComposeExecutor {
 		return d.composeExecutor
 	}
 	return defaultComposeExecutor
+}
+
+func (d *SyncDaemon) getDockerExecutor() DockerExecutor {
+	if d != nil && d.dockerExecutor != nil {
+		return d.dockerExecutor
+	}
+	return defaultDockerExecutor
 }
 
 // resolveGitDir checks if repoPath contains a .git directory or a .git file (e.g., worktree/submodule).
@@ -309,6 +357,93 @@ func (d *SyncDaemon) getComposeArgs(composeDir string, subCmd ...string) []strin
 	}
 
 	return append(args, subCmd...)
+}
+
+// CleanConflictContainers queries Docker for stopped or exited conflict containers left behind
+// by aborted Docker Compose recreation attempts (which rename containers to <short_id>_<service>)
+// and purges them to prevent name collision errors on subsequent compose runs.
+func (d *SyncDaemon) CleanConflictContainers(ctx context.Context) error {
+	args := []string{"ps", "-a", "--filter", "label=com.docker.compose.project=aerial", "--format", "{{.ID}}\t{{.Names}}\t{{.Status}}"}
+	stdout, stderr, err := d.getDockerExecutor()(ctx, args...)
+	if err != nil {
+		log.Printf("[GitSync:ConflictClean] Warning: failed to list containers: %s (%v)", SanitizeLog(strings.TrimSpace(string(stderr))), err)
+		return fmt.Errorf("failed to list containers: %s (%w)", SanitizeLog(strings.TrimSpace(string(stderr))), err)
+	}
+
+	scanner := bufio.NewScanner(bytes.NewReader(stdout))
+	selfHostname := os.Getenv("HOSTNAME")
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		parts := strings.Split(line, "\t")
+		if len(parts) < 3 {
+			continue
+		}
+		id := strings.TrimSpace(parts[0])
+		names := strings.TrimSpace(parts[1])
+		status := strings.TrimSpace(parts[2])
+
+		if id == "" {
+			continue
+		}
+
+		shortID := id
+		if len(shortID) > 12 {
+			shortID = shortID[:12]
+		}
+
+		// Self-preservation: do not touch self or gitsync
+		if selfHostname != "" && (strings.EqualFold(id, selfHostname) || strings.EqualFold(shortID, selfHostname)) {
+			continue
+		}
+		if strings.Contains(names, "aerial-gitsync") {
+			continue
+		}
+
+		// State gate: only remove containers in created, exited, or dead states.
+		// Active containers (e.g. Up..., Restarting...) during rolling restarts are never killed.
+		statusLower := strings.ToLower(status)
+		isNonRunning := strings.HasPrefix(statusLower, "created") ||
+			strings.HasPrefix(statusLower, "exited") ||
+			strings.HasPrefix(statusLower, "dead")
+		if !isNonRunning {
+			continue
+		}
+
+		// Cryptographic prefix check:
+		// Docker Compose renames old containers before recreating them to: <short_id>_<service_name>.
+		// Verify that one of the container's names starts with its own short ID followed by '_'.
+		nameList := strings.Split(names, ",")
+		isConflict := false
+		expectedPrefix := shortID + "_"
+		for _, name := range nameList {
+			cleanName := strings.TrimSpace(name)
+			cleanName = strings.TrimPrefix(cleanName, "/")
+			if strings.HasPrefix(cleanName, expectedPrefix) {
+				isConflict = true
+				break
+			}
+		}
+		if !isConflict {
+			continue
+		}
+
+		// Remove conflict container
+		_, rmErrBytes, rmErr := d.getDockerExecutor()(ctx, "rm", "-f", shortID)
+		if rmErr != nil {
+			rmErrStr := string(rmErrBytes)
+			if strings.Contains(rmErrStr, "No such container") {
+				log.Printf("[GitSync:ConflictClean] Container %s already removed", shortID)
+			} else {
+				log.Printf("[GitSync:ConflictClean] Warning: failed to remove conflict container %s (%s): %s (%v)", shortID, names, SanitizeLog(strings.TrimSpace(rmErrStr)), rmErr)
+			}
+		} else {
+			log.Printf("[GitSync:ConflictClean] Purged orphaned conflict container %s (%s, status: %s)", shortID, names, status)
+		}
+	}
+	return nil
 }
 
 // ValidateCompose executes docker compose config --quiet to verify valid syntax and schema before apply.
@@ -714,6 +849,8 @@ func (d *SyncDaemon) executeRollback(ctx context.Context, pending []ComposeChang
 	valCtx, valCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer valCancel()
 
+	_ = d.CleanConflictContainers(valCtx)
+
 	restoredTargets, errTargets := d.GetReconcileTargets(valCtx, composeDir)
 	if errTargets != nil {
 		log.Printf("[GitSync:GitOps] Critical: Failed to discover targets after rollback in %s: %v", composeDir, errTargets)
@@ -753,9 +890,11 @@ func (d *SyncDaemon) ReconcileCompose(parentCtx context.Context) (err error) {
 
 	pending := d.drainPendingChanges()
 
-	// 1. Pre-flight validation gate
+	// 1. Conflict container cleanup & pre-flight validation gate
 	valCtx, valCancel := context.WithTimeout(parentCtx, 30*time.Second)
 	defer valCancel()
+
+	_ = d.CleanConflictContainers(valCtx)
 
 	if valErr := d.ValidateCompose(valCtx, composeDir); valErr != nil {
 		log.Printf("[GitSync:GitOps] ERROR: Pre-flight validation failed: %v. Initiating automated rollback.", valErr)
@@ -782,7 +921,7 @@ func (d *SyncDaemon) ReconcileCompose(parentCtx context.Context) (err error) {
 
 	log.Printf("[GitSync:GitOps] Reconciling Docker Compose state for %d services (%v) in %s...", len(targets), targets, composeDir)
 
-	upArgs := append([]string{"up", "-d", "--no-build"}, targets...)
+	upArgs := append([]string{"up", "-d", "--remove-orphans", "--no-build"}, targets...)
 	stdout, stderr, cmdErr := d.getComposeExecutor()(ctx, composeDir, d.getComposeArgs(composeDir, upArgs...)...)
 	combined := string(append(stdout, stderr...))
 	sanitized := SanitizeLog(strings.TrimSpace(combined))
@@ -1282,6 +1421,7 @@ type DaemonConfig struct {
 	BrainInternalURL  string
 	ExtraSecrets      []string
 	ComposeExecutor   ComposeExecutor
+	DockerExecutor    DockerExecutor
 }
 
 // NewDaemon initializes a new SyncDaemon from config.
@@ -1311,6 +1451,7 @@ func NewDaemon(cfg DaemonConfig) *SyncDaemon {
 		brainInternalURL:   cfg.BrainInternalURL,
 		extraSecrets:       cfg.ExtraSecrets,
 		composeExecutor:    cfg.ComposeExecutor,
+		dockerExecutor:     cfg.DockerExecutor,
 		reconcileCh:        make(chan struct{}, 1),
 		repoLocks:          make(map[string]*sync.Mutex),
 		quarantinedCommits: make(map[QuarantineKey]QuarantineRecord),
@@ -1454,12 +1595,18 @@ func NewConfigFromLookup(lookup func(string) string) DaemonConfig {
 		configRepoURL = "https://github.com/azylman/aerial-config.git"
 	}
 
-	composeDir := lookup("AERIAL_PROJECT_DIR")
+	composeDir := lookup("AERIAL_INTERNAL_PROJECT_DIR")
+	if composeDir == "" {
+		composeDir = lookup("AERIAL_PROJECT_DIR")
+	}
 	if composeDir == "" {
 		composeDir = "/share/aerial"
 	}
 
-	configDir := lookup("AERIAL_CONFIG_DIR")
+	configDir := lookup("AERIAL_INTERNAL_CONFIG_DIR")
+	if configDir == "" {
+		configDir = lookup("AERIAL_CONFIG_DIR")
+	}
 	if configDir == "" {
 		configDir = "/share/aerial-config"
 	}
