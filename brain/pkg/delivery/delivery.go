@@ -1,6 +1,7 @@
 package delivery
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -352,3 +353,94 @@ func SendSystemAlert(s *discordgo.Session, channelNameOrID, title, alertBody str
 	formatted := fmt.Sprintf("⚠️ **Aerial System Alert: %s**\n\n%s", strings.TrimSpace(title), strings.TrimSpace(alertBody))
 	return SendMessage(s, resolvedID, formatted)
 }
+
+// EditMessage edits an existing message in the specified channel or thread.
+func EditMessage(s *discordgo.Session, channelID, messageID, text string) error {
+	if s == nil {
+		return fmt.Errorf("discord session is nil")
+	}
+	if channelID == "" {
+		return fmt.Errorf("channelID cannot be empty")
+	}
+	if messageID == "" {
+		return fmt.Errorf("messageID cannot be empty")
+	}
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return fmt.Errorf("text cannot be empty")
+	}
+	if len([]rune(trimmed)) > MaxDiscordMessageLength {
+		trimmed = string([]rune(trimmed)[:MaxDiscordMessageLength])
+	}
+
+	_, err := s.ChannelMessageEdit(channelID, messageID, trimmed)
+	return err
+}
+
+// DeleteMessage deletes an existing message in the specified channel or thread.
+func DeleteMessage(s *discordgo.Session, channelID, messageID string) error {
+	if s == nil {
+		return fmt.Errorf("discord session is nil")
+	}
+	if channelID == "" {
+		return fmt.Errorf("channelID cannot be empty")
+	}
+	if messageID == "" {
+		return fmt.Errorf("messageID cannot be empty")
+	}
+
+	return s.ChannelMessageDelete(channelID, messageID)
+}
+
+// IsMessageNotFoundError checks if the Discord error represents a 404 Unknown Message (code 10008).
+func IsMessageNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var restErr *discordgo.RESTError
+	if errors.As(err, &restErr) {
+		if restErr.Response != nil && restErr.Response.StatusCode == 404 {
+			return true
+		}
+		if restErr.Message != nil && restErr.Message.Code == 10008 {
+			return true
+		}
+	}
+	errStr := strings.ToLower(err.Error())
+	return strings.Contains(errStr, "10008") || strings.Contains(errStr, "unknown message") || strings.Contains(errStr, "404 not found")
+}
+
+// IsThreadArchivedOrLockedError checks if the Discord error indicates the thread is archived (50083) or locked (50084).
+func IsThreadArchivedOrLockedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var restErr *discordgo.RESTError
+	if errors.As(err, &restErr) {
+		if restErr.Message != nil && (restErr.Message.Code == 50083 || restErr.Message.Code == 50084) {
+			return true
+		}
+	}
+	errStr := strings.ToLower(err.Error())
+	return strings.Contains(errStr, "50083") || strings.Contains(errStr, "50084") || strings.Contains(errStr, "thread is archived") || strings.Contains(errStr, "thread is locked")
+}
+
+// IsPermissionError checks if the Discord error represents a 403 Forbidden or missing permissions (50001, 50013).
+func IsPermissionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var restErr *discordgo.RESTError
+	if errors.As(err, &restErr) {
+		if restErr.Response != nil && restErr.Response.StatusCode == 403 {
+			return true
+		}
+		if restErr.Message != nil && (restErr.Message.Code == 50001 || restErr.Message.Code == 50013) {
+			return true
+		}
+	}
+	errStr := strings.ToLower(err.Error())
+	return strings.Contains(errStr, "50001") || strings.Contains(errStr, "50013") || strings.Contains(errStr, "missing access") || strings.Contains(errStr, "missing permissions") || strings.Contains(errStr, "403 forbidden")
+}
+
+

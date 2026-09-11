@@ -197,6 +197,7 @@ type WorkerPoolConfig struct {
 
 	// Optional hooks for testing/custom overrides
 	RunnerFunc           func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error)
+	RunnerWithOptionsFunc func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (stdout, stderr string, exitCode int, err error)
 	NotifierFunc         func(agyBin, apiKey, contextDescription string) string
 	DeliveryFunc                func(s *discordgo.Session, channelID, text string) error
 	DeliveryWithAttachmentsFunc func(s *discordgo.Session, channelID, text string, attachments []*delivery.Attachment) error
@@ -259,9 +260,27 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 	if cfg.StalenessTTL <= 0 {
 		cfg.StalenessTTL = 30 * time.Minute
 	}
-	if cfg.RunnerFunc == nil {
+	if cfg.RunnerWithOptionsFunc == nil && cfg.RunnerFunc != nil {
+		cfg.RunnerWithOptionsFunc = func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+			timeoutMins := int(opts.MaxDuration / time.Minute)
+			if timeoutMins <= 0 {
+				timeoutMins = int(opts.InactivityTimeout / time.Minute)
+			}
+			if timeoutMins <= 0 {
+				timeoutMins = cfg.TimeoutMinutes
+			}
+			return cfg.RunnerFunc(ctx, agyBin, prompt, sessionID, apiKey, model, timeoutMins)
+		}
+	} else if cfg.RunnerFunc == nil && cfg.RunnerWithOptionsFunc != nil {
+		cfg.RunnerFunc = func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			return cfg.RunnerWithOptionsFunc(ctx, agyBin, prompt, sessionID, apiKey, model, runner.DefaultWatchdogOptions(timeoutMinutes))
+		}
+	} else if cfg.RunnerWithOptionsFunc == nil && cfg.RunnerFunc == nil {
 		cfg.RunnerFunc = func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			return "", "", 1, fmt.Errorf("queue: RunnerFunc not configured on WorkerPool")
+		}
+		cfg.RunnerWithOptionsFunc = func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+			return "", "", 1, fmt.Errorf("queue: RunnerWithOptionsFunc not configured on WorkerPool")
 		}
 	}
 	if cfg.NotifierFunc == nil {
@@ -1077,7 +1096,6 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 	// Resolve Channel Policy (inheriting parent channel policy if in a thread)
 	var policy config.ChannelPolicy
 	effectiveID, effectiveName, isThread := ResolveEffectiveChannel(p.getDiscordSession(), threadID)
-	_ = isThread
 	if p.cfg.ResolveChannelPolicy != nil {
 		policy = p.cfg.ResolveChannelPolicy(effectiveID, effectiveName)
 	} else {
@@ -1113,14 +1131,19 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 	}
 
 	stopTyping := func() {}
+	statusUpdater := NewStatusUpdater(p.getDiscordSession(), threadID, isThread && !skipDiscord)
 	defer func() {
 		stopTyping()
+		statusUpdater.Stop()
+		statusUpdater.DeleteStatusMessage()
 	}()
 
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("[WorkerPool] Panic in processBurst for thread %s: %v", threadID, r)
 			stopTyping()
+			statusUpdater.Stop()
+			statusUpdater.DeleteStatusMessage()
 			metrics.RecordTurnCompleted("panic", triggerType, p.GetRuntimeConfig(), time.Since(execStart))
 			errMsg := sanitizeErrorText(fmt.Sprintf("panic: %v", r))
 			for _, m := range burst {
@@ -1733,15 +1756,36 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		// Pad Go context by +1 minute relative to runner watchdog ceiling so the runner watchdog always fires cleanly
 		runCtx, runCancel := context.WithTimeout(p.ctx, time.Duration(currentTimeout+1)*time.Minute)
 
-		stdout, stderr, exitCode, err := p.cfg.RunnerFunc(
-			runCtx,
-			currentAgyBin,
-			promptToSend,
-			currentSessionID,
-			currentAPIKey,
-			currentModel,
-			currentTimeout,
-		)
+		var stdout, stderr string
+		var exitCode int
+		var err error
+
+		if p.cfg.RunnerWithOptionsFunc != nil {
+			watchdogOpts := runner.DefaultWatchdogOptions(currentTimeout)
+			if statusUpdater != nil {
+				statusUpdater.MarkTurnStarted()
+				watchdogOpts.StepUpdateHandler = statusUpdater.HandleStep
+			}
+			stdout, stderr, exitCode, err = p.cfg.RunnerWithOptionsFunc(
+				runCtx,
+				currentAgyBin,
+				promptToSend,
+				currentSessionID,
+				currentAPIKey,
+				currentModel,
+				watchdogOpts,
+			)
+		} else if p.cfg.RunnerFunc != nil {
+			stdout, stderr, exitCode, err = p.cfg.RunnerFunc(
+				runCtx,
+				currentAgyBin,
+				promptToSend,
+				currentSessionID,
+				currentAPIKey,
+				currentModel,
+				currentTimeout,
+			)
+		}
 		runCancel()
 
 		isFailure, isTransient, isSessionCorruption, errDetail := runner.ClassifyError(exitCode, stdout, stderr)
@@ -1848,6 +1892,10 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 				metrics.RecordRunnerError("quota_paused", currentModel)
 				metrics.RecordTurnCompleted("quota_paused", triggerType, currentModel, time.Since(execStart))
 
+				stopTyping()
+				statusUpdater.Stop()
+				statusUpdater.DeleteStatusMessage()
+
 				if !skipDiscord && p.cfg.DeliveryFunc != nil {
 					pauseMsg := notifier.FormatQuotaPauseMessage(resetDur, runAt, scheduled, isAlreadyRetry)
 					if err := p.cfg.DeliveryFunc(p.getDiscordSession(), threadID, pauseMsg); err != nil {
@@ -1894,6 +1942,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 					_ = db.IncrementMessageRetry(p.cfg.DB, m.ID, errDetail)
 				}
 				if attempt < maxAttempts {
+					statusUpdater.Reset()
 					backoff := time.Duration(attempt) * p.cfg.BackoffBase
 					log.Printf("[WorkerPool] Retrying watchdog timeout in %v (attempt %d/%d, preserving session %s)", backoff, attempt, maxAttempts, currentSessionID)
 					select {
@@ -1976,6 +2025,8 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 						_ = db.SaveSessionID(p.cfg.DB, threadID, currentSessionID)
 					}
 					stopTyping()
+					statusUpdater.Stop()
+					statusUpdater.DeleteStatusMessage()
 
 				responseText := resp.Response
 				baseDir := "/root/.gemini/antigravity-cli/brain"
@@ -2051,6 +2102,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 			for _, m := range burst {
 				_ = db.IncrementMessageRetry(p.cfg.DB, m.ID, errDetail)
 			}
+			statusUpdater.Reset()
 			notif := p.cfg.NotifierFunc(currentAgyBin, currentAPIKey, "session reset due to context corruption")
 			if !skipDiscord {
 				if err := p.cfg.DeliveryFunc(p.getDiscordSession(), threadID, notif); err != nil {
@@ -2090,6 +2142,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 				_ = db.IncrementMessageRetry(p.cfg.DB, m.ID, errDetail)
 			}
 			if attempt < maxAttempts {
+				statusUpdater.Reset()
 				backoff := time.Duration(attempt) * p.cfg.BackoffBase
 				log.Printf("[WorkerPool] Retrying transient error in %v (preserving session %s)", backoff, currentSessionID)
 				select {
@@ -2132,6 +2185,9 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		} else {
 			notif = notifier.StaticFallback(fmt.Sprintf("execution failed with non-transient error: %s", errDetail))
 		}
+		stopTyping()
+		statusUpdater.Stop()
+		statusUpdater.DeleteStatusMessage()
 		if !skipDiscord {
 			if err := p.cfg.DeliveryFunc(p.getDiscordSession(), threadID, notif); err != nil {
 				log.Printf("[WorkerPool] Failed to deliver non-transient failure notice for thread %s: %v", threadID, err)

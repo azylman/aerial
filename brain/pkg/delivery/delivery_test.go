@@ -1,6 +1,7 @@
 package delivery
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -343,3 +344,108 @@ func TestSplitMessage_ZeroLimitAndCodeBlockOverflow(t *testing.T) {
 		t.Errorf("expected multiple chunks for giant line inside code block, got %d", len(resCode))
 	}
 }
+
+func TestEditMessage_And_DeleteMessage(t *testing.T) {
+	// 1. Validation errors with nil session or empty IDs
+	if err := EditMessage(nil, "ch1", "msg1", "hello"); err == nil {
+		t.Error("expected error for nil session in EditMessage")
+	}
+	if err := EditMessage(&discordgo.Session{}, "", "msg1", "hello"); err == nil {
+		t.Error("expected error for empty channelID in EditMessage")
+	}
+	if err := EditMessage(&discordgo.Session{}, "ch1", "", "hello"); err == nil {
+		t.Error("expected error for empty messageID in EditMessage")
+	}
+	if err := EditMessage(&discordgo.Session{}, "ch1", "msg1", "   "); err == nil {
+		t.Error("expected error for empty text in EditMessage")
+	}
+
+	if err := DeleteMessage(nil, "ch1", "msg1"); err == nil {
+		t.Error("expected error for nil session in DeleteMessage")
+	}
+	if err := DeleteMessage(&discordgo.Session{}, "", "msg1"); err == nil {
+		t.Error("expected error for empty channelID in DeleteMessage")
+	}
+	if err := DeleteMessage(&discordgo.Session{}, "ch1", ""); err == nil {
+		t.Error("expected error for empty messageID in DeleteMessage")
+	}
+
+	// 2. Successful mock calls
+	var lastMethod, lastPath string
+	sess := newMockDiscordSession(func(req *http.Request) (*http.Response, error) {
+		lastMethod = req.Method
+		lastPath = req.URL.Path
+		if req.Method == http.MethodPatch {
+			return mockJSONResponse(http.StatusOK, `{"id":"msg1","channel_id":"ch1","content":"updated"}`)
+		}
+		if req.Method == http.MethodDelete {
+			return mockJSONResponse(http.StatusNoContent, "")
+		}
+		return mockJSONResponse(http.StatusBadRequest, `{"message":"bad request"}`)
+	})
+
+	if err := EditMessage(sess, "ch1", "msg1", "updated text"); err != nil {
+		t.Fatalf("EditMessage failed: %v", err)
+	}
+	if lastMethod != http.MethodPatch || !strings.Contains(lastPath, "/channels/ch1/messages/msg1") {
+		t.Errorf("unexpected edit request: %s %s", lastMethod, lastPath)
+	}
+
+	if err := DeleteMessage(sess, "ch1", "msg1"); err != nil {
+		t.Fatalf("DeleteMessage failed: %v", err)
+	}
+	if lastMethod != http.MethodDelete || !strings.Contains(lastPath, "/channels/ch1/messages/msg1") {
+		t.Errorf("unexpected delete request: %s %s", lastMethod, lastPath)
+	}
+}
+
+func TestErrorClassifiers(t *testing.T) {
+	// Nil checks
+	if IsMessageNotFoundError(nil) {
+		t.Error("expected false for nil error")
+	}
+	if IsThreadArchivedOrLockedError(nil) {
+		t.Error("expected false for nil error")
+	}
+
+	// 404 / 10008 errors
+	errNotFound := errors.New("HTTP 404 Not Found, 10008 Unknown Message")
+	if !IsMessageNotFoundError(errNotFound) {
+		t.Error("expected true for 10008 Unknown Message")
+	}
+
+	// 50083 / 50084 errors
+	errArchived := errors.New("HTTP 400 Bad Request, 50083 Thread is archived")
+	if !IsThreadArchivedOrLockedError(errArchived) {
+		t.Error("expected true for 50083 Thread is archived")
+	}
+
+	errLocked := errors.New("HTTP 403 Forbidden, 50084 Thread is locked")
+	if !IsThreadArchivedOrLockedError(errLocked) {
+		t.Error("expected true for 50084 Thread is locked")
+	}
+
+	// Permission errors (403, 50001, 50013)
+	err403 := errors.New("HTTP 403 Forbidden")
+	if !IsPermissionError(err403) {
+		t.Error("expected true for HTTP 403 Forbidden")
+	}
+	err50001 := errors.New("HTTP 403 Forbidden, 50001 Missing Access")
+	if !IsPermissionError(err50001) {
+		t.Error("expected true for 50001 Missing Access")
+	}
+	err50013 := errors.New("HTTP 403 Forbidden, 50013 Missing Permissions")
+	if !IsPermissionError(err50013) {
+		t.Error("expected true for 50013 Missing Permissions")
+	}
+
+	// Unrelated errors
+	unrelated := errors.New("connection reset by peer")
+	if IsMessageNotFoundError(unrelated) || IsThreadArchivedOrLockedError(unrelated) || IsPermissionError(unrelated) {
+		t.Error("unrelated error should not match classifiers")
+	}
+	if IsPermissionError(nil) {
+		t.Error("expected false for nil error")
+	}
+}
+
