@@ -23,6 +23,9 @@ func TestSyncRepo_ConfigPointerInjection(t *testing.T) {
 
 func runGitCmd(t *testing.T, dir string, args ...string) string {
 	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git binary not found in PATH; skipping git integration test")
+	}
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
 	cmd.Env = append(cmd.Environ(),
 		"GIT_AUTHOR_NAME=Test User",

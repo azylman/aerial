@@ -41,6 +41,11 @@ ENV PATH="/usr/local/go/bin:/root/go/bin:${PATH}"
 # Install official Antigravity CLI binary
 RUN curl -fsSL https://antigravity.google/cli/install.sh | bash -s -- -d /usr/local/bin
 
+# Clone superpowers into /opt/superpowers (outside /root/.gemini so volume mounts don't mask it)
+ARG SUPERPOWERS_CACHEBUST=1
+RUN git clone --depth 1 https://github.com/obra/superpowers.git /opt/superpowers && \
+    rm -rf /opt/superpowers/.git
+
 WORKDIR /app
 
 COPY --from=builder /aerial-brain /usr/local/bin/aerial-brain

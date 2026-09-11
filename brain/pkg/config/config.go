@@ -3,7 +3,6 @@ package config
 import (
 	"bytes"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -19,13 +18,6 @@ import (
 )
 
 var (
-	lkgcMutex                   sync.RWMutex
-	lastKnownGoodRules          string
-	lastKnownGoodPersona        string
-	lastKnownGoodPersonaSource  string
-
-	systemRulesMu sync.Mutex
-
 	runtimeConfigMu      sync.RWMutex
 	currentRuntimeConfig Config
 
@@ -41,27 +33,6 @@ var ConfigSearchPaths = []string{
 	"/app/config.yaml",
 	"/share/aerial/config.yaml",
 	"/data/.config.yaml.lkgc",
-}
-
-// Deprecated: SystemGuidelinesSearchPaths is no longer used by EnsureSystemRules
-// because Antigravity CLI discovers GEMINI.md natively in cmd.Dir.
-var SystemGuidelinesSearchPaths = []string{
-	"/share/aerial-config/SYSTEM.local.md",
-	"/share/aerial-config/SYSTEM.md",
-	"/share/aerial/SYSTEM.md",
-	"/app/SYSTEM.md",
-	"./SYSTEM.md",
-}
-
-var AgentInstructionsSearchPaths = []string{
-	"/share/aerial-config/AGENTS.local.md",
-	"/share/aerial-config/AGENTS.md",
-	"/share/aerial/AGENTS.md",
-	"/app/AGENTS.md",
-	"/data/AGENTS.md",
-	"/data/.AGENTS.md.lkgc",
-	"./AGENTS.local.md",
-	"./AGENTS.md",
 }
 
 var ChannelInstructionsDirs = []string{
@@ -160,10 +131,14 @@ type ConfigData struct {
 	Ollama          OllamaConfig               `yaml:"ollama" json:"ollama"`
 	LowEffortModel  string                     `yaml:"low_effort_model" json:"low_effort_model"`
 	ClassifierModel string                     `yaml:"classifier_model,omitempty" json:"classifier_model,omitempty"` // Deprecated alias
+	GeminiHomeDir   string                     `yaml:"gemini_home_dir,omitempty" json:"gemini_home_dir,omitempty"`
+	DataDir         string                     `yaml:"data_dir,omitempty" json:"data_dir,omitempty"`
 }
 
 func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 	type rawConfigHelper struct {
+		GeminiHomeDir   string                     `yaml:"gemini_home_dir"`
+		DataDir         string                     `yaml:"data_dir"`
 		Model           string                     `yaml:"model"`
 		Timezone        string                     `yaml:"timezone"`
 		SystemChannel   string                     `yaml:"system_channel"`
@@ -212,6 +187,8 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 		log.Printf("[Config] Warning: 'classifier_model' key in config is deprecated; please rename to 'low_effort_model'")
 	}
 	c.ClassifierModel = raw.ClassifierModel
+	c.GeminiHomeDir = raw.GeminiHomeDir
+	c.DataDir = raw.DataDir
 
 	if raw.McpServers != nil {
 		c.McpServers = make(map[string]json.RawMessage)
@@ -272,6 +249,18 @@ func cloneConfigData(src *ConfigData) *ConfigData {
 	return &dst
 }
 
+func getGeminiHomeDirDefault() string {
+	homeDir := os.Getenv("HOME")
+	if homeDir == "" {
+		var err error
+		homeDir, err = os.UserHomeDir()
+		if err != nil || homeDir == "" {
+			homeDir = "/root"
+		}
+	}
+	return homeDir
+}
+
 func DefaultConfigData() *ConfigData {
 	defaultIgnoreBots := true
 	return &ConfigData{
@@ -296,6 +285,8 @@ func DefaultConfigData() *ConfigData {
 		AgyBin:          "agy",
 		LowEffortModel:  "Gemini 3.8 Flash (Low)",
 		ClassifierModel: "Gemini 3.8 Flash (Low)",
+		DataDir:         "/data",
+		GeminiHomeDir:   getGeminiHomeDirDefault(),
 		Ollama: OllamaConfig{
 			BaseURL:     "http://ollama:11434",
 			Model:       "all-minilm",
@@ -313,6 +304,24 @@ func (c *Config) Current() *ConfigData {
 		return DefaultConfigData()
 	}
 	return cur
+}
+
+// GeminiHomeDir returns the resolved base directory for .gemini files.
+func (c *Config) GeminiHomeDir() string {
+	cur := c.Current()
+	if cur.GeminiHomeDir != "" {
+		return cur.GeminiHomeDir
+	}
+	return getGeminiHomeDirDefault()
+}
+
+// DataDir returns the resolved base directory for persistent data.
+func (c *Config) DataDir() string {
+	cur := c.Current()
+	if cur.DataDir != "" {
+		return cur.DataDir
+	}
+	return "/data"
 }
 
 // Update atomically swaps the underlying ConfigData snapshot.
@@ -451,6 +460,12 @@ func applyEnvironmentOverrides(data *ConfigData) {
 	if qp := getEnv("EMBEDDING_QUERY_PREFIX", ""); qp != "" {
 		data.Ollama.QueryPrefix = qp
 	}
+	if gh := getEnv("GEMINI_HOME", ""); gh != "" {
+		data.GeminiHomeDir = gh
+	}
+	if dd := getEnv("DATA_DIR", ""); dd != "" {
+		data.DataDir = dd
+	}
 }
 
 var activeGlobalConfig = NewFromData(DefaultConfigData())
@@ -575,8 +590,12 @@ func LoadConfigFromPaths(paths ...string) (*Config, error) {
 
 		loadedPath = p
 		data = &parsed
-		if target := "/data/.config.yaml.lkgc"; p != target {
-			_ = writeAtomic(target, string(rawData))
+		target := filepath.Join(data.DataDir, ".config.yaml.lkgc")
+		if data.DataDir == "" {
+			target = "/data/.config.yaml.lkgc"
+		}
+		if p != target {
+			_ = writeAtomicFile(target, string(rawData))
 		}
 		break
 	}
@@ -899,65 +918,7 @@ func LoadChannelInstructions(channelName string) string {
 	return ""
 }
 
-func isTestEnvironment() bool {
-	if flag.Lookup("test.v") != nil {
-		return true
-	}
-	base := filepath.Base(os.Args[0])
-	return strings.HasSuffix(base, ".test") || strings.HasSuffix(base, ".test.exe") || strings.Contains(base, "test")
-}
-
-func getGeminiHomeDir() string {
-	homeDir := os.Getenv("HOME")
-	if homeDir == "" {
-		var err error
-		homeDir, err = os.UserHomeDir()
-		if err != nil || homeDir == "" {
-			homeDir = "/root"
-		}
-	}
-	// Test isolation guard: if running within a test binary and homeDir is unset or points to /root,
-	// isolate to a temporary directory so un-sandboxed tests never clobber production settings.
-	if isTestEnvironment() && (homeDir == "/root" || homeDir == "") {
-		homeDir = filepath.Join(os.TempDir(), "aerial-test-gemini-home")
-	}
-	return homeDir
-}
-
-func EnsureAgySettings(apiKey, model string) error {
-	homeDir := getGeminiHomeDir()
-	configDir := filepath.Join(homeDir, ".gemini", "antigravity-cli")
-	if err := os.MkdirAll(configDir, 0755); err != nil {
-		return fmt.Errorf("failed to create config directory: %w", err)
-	}
-
-	settingsPath := filepath.Join(configDir, "settings.json")
-	settings := map[string]interface{}{}
-	if data, err := os.ReadFile(settingsPath); err == nil {
-		if err := json.Unmarshal(data, &settings); err != nil {
-			log.Printf("Warning: failed to unmarshal existing settings from %s: %v", settingsPath, err)
-		}
-	}
-	if model != "" {
-		settings["model"] = model
-	}
-	if apiKey != "" {
-		settings["modelProvider"] = "gemini"
-	} else {
-		delete(settings, "modelProvider")
-	}
-
-	out, err := json.MarshalIndent(settings, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal settings: %w", err)
-	}
-	if err := writeAtomic(settingsPath, string(out)); err != nil {
-		return fmt.Errorf("failed to write settings: %w", err)
-	}
-	return nil
-}
-
-func writeAtomic(targetPath, content string) error {
+func writeAtomicFile(targetPath, content string) error {
 	dir := filepath.Dir(targetPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
@@ -981,300 +942,9 @@ func writeAtomic(targetPath, content string) error {
 	}
 
 	if err := os.Rename(tmpName, targetPath); err != nil {
-		return err
+		_ = os.Remove(targetPath)
+		return os.Rename(tmpName, targetPath)
 	}
-	return nil
-}
-
-func EnsureSystemRules(customPrompt string) error {
-	systemRulesMu.Lock()
-	defer systemRulesMu.Unlock()
-
-	var sb strings.Builder
-	sb.WriteString("---\ndescription: User persona, tone, and identity overrides\ntrigger: always_on\n---\n\n")
-
-	foundPersona := false
-	tornRead := false
-	var personaContent string
-	var personaSource string
-
-	// User persona overrides (AGENTS.md) in priority order
-	for _, p := range AgentInstructionsSearchPaths {
-		data, err := os.ReadFile(p)
-		if err != nil {
-			continue
-		}
-		if len(bytes.TrimSpace(data)) > 0 {
-			personaContent = string(data)
-			personaSource = filepath.Base(p)
-			foundPersona = true
-			log.Printf("Loaded agent instructions from %s", p)
-			break
-		}
-		// File exists but is 0-bytes or whitespace-only (torn read during git sync)
-		log.Printf("[Config] Active agent instructions file %s is empty (possible GitSync torn read), engaging Last Known Good Persona (LKGC)", p)
-		tornRead = true
-		break
-	}
-
-	if tornRead {
-		lkgcMutex.RLock()
-		personaContent = lastKnownGoodPersona
-		personaSource = lastKnownGoodPersonaSource
-		lkgcMutex.RUnlock()
-		if personaSource == "" {
-			personaSource = "AGENTS.md"
-		}
-		if personaContent != "" {
-			foundPersona = true
-		}
-	} else if foundPersona {
-		lkgcMutex.Lock()
-		lastKnownGoodPersona = personaContent
-		lastKnownGoodPersonaSource = personaSource
-		lkgcMutex.Unlock()
-
-		if personaSource != ".AGENTS.md.lkgc" {
-			_ = writeAtomic("/data/.AGENTS.md.lkgc", personaContent)
-		}
-	}
-
-	foundInstructions := false
-	if foundPersona && personaContent != "" {
-		sb.WriteString(fmt.Sprintf("# User Persona Overrides (%s)\n\n%s\n\n", personaSource, personaContent))
-		foundInstructions = true
-	}
-
-	// Environment Prompt Override
-	if strings.TrimSpace(customPrompt) != "" {
-		sb.WriteString(fmt.Sprintf("# Environment Prompt Override\n\n%s\n\n", strings.TrimSpace(customPrompt)))
-		foundInstructions = true
-	}
-
-	var content string
-	if foundInstructions {
-		content = sb.String()
-		lkgcMutex.Lock()
-		lastKnownGoodRules = content
-		lkgcMutex.Unlock()
-	} else {
-		lkgcMutex.RLock()
-		content = lastKnownGoodRules
-		lkgcMutex.RUnlock()
-		if content == "" {
-			return nil
-		}
-		log.Printf("Using Last Known Good Configuration (LKGC) for system rules")
-	}
-
-	homeDir := getGeminiHomeDir()
-
-	primaryRulesDir := filepath.Join(homeDir, ".gemini", "rules")
-	if err := os.MkdirAll(primaryRulesDir, 0755); err != nil {
-		return fmt.Errorf("failed to create primary rules directory: %w", err)
-	}
-
-	configRulesDir := filepath.Join(homeDir, ".gemini", "config", "rules")
-	if err := os.MkdirAll(configRulesDir, 0755); err != nil {
-		return fmt.Errorf("failed to create config rules directory: %w", err)
-	}
-
-	// Clean up any legacy, conflicting, or repository-level generated rule files
-	staleRuleFiles := []string{
-		filepath.Join(primaryRulesDir, "system_instructions.md"),
-		filepath.Join(primaryRulesDir, "SYSTEM_INSTRUCTIONS.md"),
-		filepath.Join(primaryRulesDir, "system.md"),
-		filepath.Join(primaryRulesDir, "SYSTEM.md"),
-		filepath.Join(primaryRulesDir, "gemini.md"),
-		filepath.Join(primaryRulesDir, "GEMINI.md"),
-		filepath.Join(primaryRulesDir, "agents.md"),
-		filepath.Join(primaryRulesDir, "custom_instructions.md"),
-
-		filepath.Join(configRulesDir, "system_instructions.md"),
-		filepath.Join(configRulesDir, "SYSTEM_INSTRUCTIONS.md"),
-		filepath.Join(configRulesDir, "system.md"),
-		filepath.Join(configRulesDir, "SYSTEM.md"),
-		filepath.Join(configRulesDir, "gemini.md"),
-		filepath.Join(configRulesDir, "GEMINI.md"),
-		filepath.Join(configRulesDir, "agents.md"),
-		filepath.Join(configRulesDir, "custom_instructions.md"),
-
-		"/app/.agents/rules/system_instructions.md",
-		"/app/.agents/rules/custom_instructions.md",
-		"/app/.agents/rules/agents.md",
-		"/app/.agents/rules/system.md",
-		"/app/.agents/rules/gemini.md",
-	}
-	for _, stale := range staleRuleFiles {
-		_ = os.Remove(stale)
-	}
-
-	primaryRuleFile := filepath.Join(primaryRulesDir, "user_persona.md")
-	if err := writeAtomic(primaryRuleFile, content); err != nil {
-		return fmt.Errorf("failed to write primary system rules: %w", err)
-	}
-	log.Printf("Configured always_on user persona in %s", primaryRuleFile)
-
-	// Also sync to ~/.gemini/config/rules for compatibility
-	configRuleFile := filepath.Join(configRulesDir, "user_persona.md")
-	_ = writeAtomic(configRuleFile, content)
-
-	return nil
-}
-
-func LoadMCPConfig() json.RawMessage {
-	// 1. Start with built-in default MCP microservices
-	mergedServers := map[string]interface{}{
-		"scheduler": map[string]interface{}{
-			"serverUrl": "http://scheduler-mcp:8080/mcp",
-		},
-		"discord": map[string]interface{}{
-			"serverUrl": "http://discord-mcp:4001/mcp",
-		},
-		"docker": map[string]interface{}{
-			"serverUrl": "http://docker-mcp:4002/mcp",
-		},
-		"victoriametrics": map[string]interface{}{
-			"serverUrl": "http://victoriametrics-mcp:4004/mcp",
-		},
-	}
-	if pat := os.Getenv("GITHUB_PAT"); pat != "" {
-		mergedServers["github"] = map[string]interface{}{
-			"serverUrl": "http://github-mcp:4003/mcp",
-		}
-	}
-
-	// 2. Check for file-based overrides (e.g. /share/aerial-config/mcp.config.json)
-	configPaths := []string{
-		"/share/aerial-config/mcp.config.json",
-		"/share/aerial-config/mcp.json",
-		"/config/mcp.config.json",
-		"/config/mcp.json",
-		"/data/mcp.config.json",
-		"./mcp.config.json",
-	}
-
-	var rawBytes []byte
-	for _, p := range configPaths {
-		if data, err := os.ReadFile(p); err == nil && len(bytes.TrimSpace(data)) > 0 {
-			log.Printf("Loaded MCP configuration from %s", p)
-			rawBytes = data
-			break
-		}
-	}
-
-	if len(rawBytes) == 0 {
-		if envVal := os.Getenv("MCP_CONFIG"); envVal != "" {
-			rawBytes = []byte(envVal)
-		}
-	}
-
-	if len(rawBytes) == 0 {
-		if data, err := os.ReadFile("/data/options.json"); err == nil {
-			var opts Options
-			if err := json.Unmarshal(data, &opts); err == nil && len(opts.McpConfig) > 0 {
-				var strVal string
-				if err := json.Unmarshal(opts.McpConfig, &strVal); err == nil && strVal != "" {
-					rawBytes = []byte(strVal)
-				} else {
-					rawBytes = opts.McpConfig
-				}
-			}
-		}
-	}
-
-	if len(rawBytes) > 0 {
-		var parsed map[string]interface{}
-		if err := json.Unmarshal(rawBytes, &parsed); err == nil {
-			if servers, ok := parsed["mcpServers"].(map[string]interface{}); ok {
-				for k, v := range servers {
-					mergedServers[k] = v
-				}
-			}
-		}
-	}
-
-	// 3. Overlay custom MCP servers from config.yaml
-	cfg := GetRuntimeConfig()
-	if len(cfg.McpServers) > 0 {
-		for k, v := range cfg.McpServers {
-			var parsedVal interface{}
-			if err := json.Unmarshal(v, &parsedVal); err == nil {
-				mergedServers[k] = parsedVal
-			} else {
-				mergedServers[k] = v
-			}
-		}
-	}
-
-	// 4. Normalize legacy SSE endpoints to Streamable HTTP
-	for _, svc := range []string{"docker", "github", "victoriametrics"} {
-		if rawSvc, ok := mergedServers[svc].(map[string]interface{}); ok {
-			if url, ok := rawSvc["serverUrl"].(string); ok {
-				if strings.HasSuffix(url, "/sse") {
-					rawSvc["serverUrl"] = strings.TrimSuffix(url, "/sse") + "/mcp"
-					log.Printf("[LoadMCPConfig] Transparently normalized %s serverUrl from /sse to /mcp", svc)
-				}
-			}
-		}
-	}
-
-	finalConfig := map[string]interface{}{
-		"mcpServers": mergedServers,
-	}
-
-	outBytes, err := json.Marshal(finalConfig)
-	if err != nil {
-		log.Printf("Error marshaling merged MCP config: %v", err)
-		return json.RawMessage(`{"mcpServers":{}}`)
-	}
-
-	expanded := os.ExpandEnv(string(outBytes))
-	return json.RawMessage(expanded)
-}
-
-func EnsureMcpConfig(rawConfig json.RawMessage) error {
-	if len(rawConfig) == 0 {
-		return nil
-	}
-	trimmed := strings.TrimSpace(string(rawConfig))
-	if trimmed == "" || trimmed == `""` || trimmed == "null" {
-		return nil
-	}
-
-	homeDir := getGeminiHomeDir()
-	configDir := filepath.Join(homeDir, ".gemini", "config")
-	if err := os.MkdirAll(configDir, 0755); err != nil {
-		return fmt.Errorf("failed to create config directory: %w", err)
-	}
-	targetPath := filepath.Join(configDir, "mcp_config.json")
-
-	var configContent []byte
-	var strVal string
-	if err := json.Unmarshal(rawConfig, &strVal); err == nil && strVal != "" {
-		configContent = []byte(strVal)
-	} else {
-		configContent = rawConfig
-	}
-
-	var js map[string]interface{}
-	var serverList []string
-	if err := json.Unmarshal(configContent, &js); err == nil {
-		if servers, ok := js["mcpServers"].(map[string]interface{}); ok {
-			for name := range servers {
-				serverList = append(serverList, name)
-			}
-		}
-		if formatted, err := json.MarshalIndent(js, "", "  "); err == nil {
-			configContent = formatted
-		}
-	}
-
-	if err := writeAtomic(targetPath, string(configContent)); err != nil {
-		log.Printf("Failed to write %s: %v", targetPath, err)
-		return fmt.Errorf("failed to write mcp config: %w", err)
-	}
-	log.Printf("Configured %d MCP server(s) in %s: %v", len(serverList), targetPath, serverList)
 	return nil
 }
 

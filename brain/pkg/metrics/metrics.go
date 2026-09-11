@@ -36,6 +36,15 @@ var (
 		[]string{"status", "trigger_type", "model"},
 	)
 
+	// LLM Token Consumption Metrics
+	TokensTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "aerial_brain_tokens_total",
+			Help: "Total number of LLM tokens consumed by Aerial Brain turns.",
+		},
+		[]string{"type", "model"},
+	)
+
 	ActiveWorkers = prometheus.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "aerial_brain_active_workers",
@@ -353,6 +362,7 @@ func init() {
 	Registry.MustRegister(
 		TurnsTotal,
 		TurnDurationSeconds,
+		TokensTotal,
 		ActiveWorkers,
 		QueueDepth,
 		InterruptedTurnsRecovered,
@@ -424,6 +434,31 @@ func RecordTurnCompleted(status, triggerType, model string, duration time.Durati
 	}
 	TurnsTotal.WithLabelValues(status, triggerType, model).Inc()
 	TurnDurationSeconds.WithLabelValues(status, triggerType, model).Observe(duration.Seconds())
+}
+
+// RecordTokens records LLM token usage categorized by token type and model.
+func RecordTokens(model string, input, output, thinking, cacheRead, total int) {
+	if model == "" {
+		model = "default"
+	}
+	if total <= 0 && (input > 0 || output > 0 || thinking > 0 || cacheRead > 0) {
+		total = input + output + thinking + cacheRead
+	}
+	if input > 0 {
+		TokensTotal.WithLabelValues("input", model).Add(float64(input))
+	}
+	if output > 0 {
+		TokensTotal.WithLabelValues("output", model).Add(float64(output))
+	}
+	if thinking > 0 {
+		TokensTotal.WithLabelValues("thinking", model).Add(float64(thinking))
+	}
+	if cacheRead > 0 {
+		TokensTotal.WithLabelValues("cache_read", model).Add(float64(cacheRead))
+	}
+	if total > 0 {
+		TokensTotal.WithLabelValues("total", model).Add(float64(total))
+	}
 }
 
 // RecordRunnerExecution records runner subprocess duration and status.

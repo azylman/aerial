@@ -25,7 +25,7 @@ import (
 	"github.com/azylman/aerial/brain/pkg/queue"
 	"github.com/azylman/aerial/brain/pkg/runner"
 	"github.com/azylman/aerial/brain/pkg/scheduler"
-	"github.com/azylman/aerial/brain/pkg/skills"
+	"github.com/azylman/aerial/brain/pkg/env"
 	"github.com/azylman/aerial/brain/pkg/sanitizer"
 	"github.com/azylman/aerial/brain/pkg/watcher"
 	"github.com/bwmarrin/discordgo"
@@ -823,41 +823,33 @@ func SetupBrainMux(database *sql.DB, pool *queue.WorkerPool, reloadFn func(strin
 	return mux
 }
 
-func InitializeBrainEnvironment(apiKey, model, systemPrompt string) {
-	if err := config.EnsureAgySettings(apiKey, model); err != nil {
-		log.Printf("Warning: EnsureAgySettings error: %v", err)
+func InitializeBrainEnvironment(ctx context.Context, cfg *config.Config) error {
+	if cfg == nil {
+		return nil
 	}
-	if err := config.EnsureSystemRules(systemPrompt); err != nil {
-		log.Printf("Warning: EnsureSystemRules error: %v", err)
-	}
-	mcpConfig := config.LoadMCPConfig()
-	if len(mcpConfig) > 0 {
-		if err := config.EnsureMcpConfig(mcpConfig); err != nil {
-			log.Printf("Warning: EnsureMcpConfig error: %v", err)
-		}
-	}
-	if err := skills.EnsureSkills(); err != nil {
-		log.Printf("Warning: EnsureSkills error: %v", err)
+	provisioner := env.NewFromConfig(cfg)
+	if err := provisioner.Sync(ctx, cfg); err != nil {
+		log.Printf("Warning: env sync error: %v", err)
 	}
 
-	if _, err := os.Stat("/data"); err == nil {
-		if err := os.MkdirAll("/data/brain", 0755); err != nil {
-			log.Printf("Warning: MkdirAll /data/brain error: %v", err)
+	dataDir := cfg.DataDir()
+	if _, err := os.Stat(dataDir); err == nil {
+		brainDir := filepath.Join(dataDir, "brain")
+		if err := os.MkdirAll(brainDir, 0755); err != nil {
+			log.Printf("Warning: MkdirAll %s error: %v", brainDir, err)
 		}
-		homeDir, err := os.UserHomeDir()
-		if err != nil || homeDir == "" {
-			homeDir = "/root"
-		}
+		homeDir := cfg.GeminiHomeDir()
 		cliBrainDir := filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain")
 		if err := os.MkdirAll(filepath.Dir(cliBrainDir), 0755); err != nil {
 			log.Printf("Warning: MkdirAll cliBrainDir parent error: %v", err)
 		}
 		if _, err := os.Lstat(cliBrainDir); err != nil {
-			if err := os.Symlink("/data/brain", cliBrainDir); err != nil {
-				log.Printf("Warning: Symlink /data/brain error: %v", err)
+			if err := os.Symlink(brainDir, cliBrainDir); err != nil {
+				log.Printf("Warning: Symlink %s error: %v", brainDir, err)
 			}
 		}
 	}
+	return nil
 }
 
 type ReloadOption func(*reloadConfigOptions)
@@ -866,6 +858,7 @@ type reloadConfigOptions struct {
 	dgSession           *discordgo.Session
 	reloadSupplier      func(active *config.Config) error
 	skipEnvironmentSync bool
+	provisioner         *env.Provisioner
 }
 
 func WithDiscordSession(s *discordgo.Session) ReloadOption {
@@ -886,6 +879,12 @@ func WithSkipEnvironmentSync() ReloadOption {
 	}
 }
 
+func WithProvisioner(p *env.Provisioner) ReloadOption {
+	return func(o *reloadConfigOptions) {
+		o.provisioner = p
+	}
+}
+
 func CreateReloadConfigFunc(cfg *config.Config, opts ...ReloadOption) func(source string) {
 	options := &reloadConfigOptions{
 		reloadSupplier: config.Reload,
@@ -894,6 +893,9 @@ func CreateReloadConfigFunc(cfg *config.Config, opts ...ReloadOption) func(sourc
 		if opt != nil {
 			opt(options)
 		}
+	}
+	if options.provisioner == nil && cfg != nil {
+		options.provisioner = env.NewFromConfig(cfg)
 	}
 
 	var reloadMu sync.Mutex
@@ -913,23 +915,10 @@ func CreateReloadConfigFunc(cfg *config.Config, opts ...ReloadOption) func(sourc
 			}
 			metrics.ConfigReloadsTotal.WithLabelValues(source, "success").Inc()
 			sanitizer.RegisterConfigTokens(cfg)
-			fresh := cfg.Current()
 
-			if !options.skipEnvironmentSync {
-				if err := config.EnsureAgySettings(fresh.APIKey, fresh.Model); err != nil {
-					log.Printf("[%s] Warning: EnsureAgySettings error: %v", source, err)
-				}
-				mcpConfig := config.LoadMCPConfig()
-				if len(mcpConfig) > 0 {
-					if err := config.EnsureMcpConfig(mcpConfig); err != nil {
-						log.Printf("[%s] Warning: EnsureMcpConfig error: %v", source, err)
-					}
-				}
-				if err := config.EnsureSystemRules(fresh.SystemPrompt); err != nil {
-					log.Printf("[%s] Warning: EnsureSystemRules error: %v", source, err)
-				}
-				if err := skills.EnsureSkills(); err != nil {
-					log.Printf("[%s] Warning: EnsureSkills error: %v", source, err)
+			if !options.skipEnvironmentSync && options.provisioner != nil {
+				if err := options.provisioner.Sync(context.Background(), cfg); err != nil {
+					log.Printf("[%s] Warning: env sync error: %v", source, err)
 				}
 			}
 		}
@@ -945,7 +934,8 @@ func RunBrainApp(ctx context.Context, cfg *config.Config) error {
 	}
 
 	cur := cfg.Current()
-	InitializeBrainEnvironment(cur.APIKey, cur.Model, cur.SystemPrompt)
+	provisioner := env.NewFromConfig(cfg)
+	_ = InitializeBrainEnvironment(ctx, cfg)
 
 	if cur.DatabaseURL == "" {
 		return fmt.Errorf("database URL or path is required")
@@ -985,7 +975,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config) error {
 		}
 	}()
 
-	reloadConfig := CreateReloadConfigFunc(cfg, WithDiscordSession(dgSession))
+	reloadConfig := CreateReloadConfigFunc(cfg, WithDiscordSession(dgSession), WithProvisioner(provisioner))
 
 	// Start background file watcher for atomic hot-reloading of prompts and skills
 	fileWatcher, err := watcher.NewWatcher(
@@ -996,10 +986,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config) error {
 	if err != nil {
 		log.Printf("Warning: failed to create file watcher: %v", err)
 	} else {
-		homeDir, err := os.UserHomeDir()
-		if err != nil || homeDir == "" {
-			homeDir = "/root"
-		}
+		homeDir := cfg.GeminiHomeDir()
 
 		watchDirs := []string{
 			"/share/aerial-config",

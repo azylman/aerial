@@ -287,15 +287,14 @@ func TestProcessThreadFactsDeduplicationAndWatermark(t *testing.T) {
 	// Pre-insert an existing identical/similar fact with same vector
 	_, _ = db.InsertFact(database, "user_pref", "User likes matcha", 1.0, "thread-test-1", makeDimVector(1.0, 0.0))
 
-	// Create a dummy transcript file for thread-test-1
-	homeDir, _ := os.UserHomeDir()
-	if homeDir == "" {
-		homeDir = "/root"
-	}
-	logDir := filepath.Join(homeDir, ".gemini", "antigravity", "brain", "thread-test-1", ".system_generated", "logs")
+	// Create a dummy transcript file for thread-test-1 in a hermetic temp directory
+	tmpDir := t.TempDir()
+	restoreRoots := SetCustomTranscriptRoots([]string{tmpDir})
+	defer restoreRoots()
+
+	logDir := filepath.Join(tmpDir, "thread-test-1", ".system_generated", "logs")
 	_ = os.MkdirAll(logDir, 0755)
 	_ = os.WriteFile(filepath.Join(logDir, "transcript.jsonl"), []byte("{\"step\":1,\"content\":\"User likes matcha\"}\n"), 0644)
-	defer func() { _ = os.RemoveAll(filepath.Join(homeDir, ".gemini", "antigravity", "brain", "thread-test-1")) }()
 
 	ctx := context.Background()
 	err := processThreadFacts(ctx, database, client, llmFunc, "thread-test-1")
@@ -471,15 +470,14 @@ func TestExtractActiveConversationFacts(t *testing.T) {
 		ID: "m-extract-1", ThreadID: "thread-active-1", Status: db.StatusCompleted, CreatedAt: now, UpdatedAt: now,
 	})
 
-	// Create dummy transcript
-	homeDir, _ := os.UserHomeDir()
-	if homeDir == "" {
-		homeDir = "/root"
-	}
-	logDir := filepath.Join(homeDir, ".gemini", "antigravity", "brain", "thread-active-1", ".system_generated", "logs")
+	// Create dummy transcript in hermetic temp directory
+	tmpDir := t.TempDir()
+	restoreRoots := SetCustomTranscriptRoots([]string{tmpDir})
+	defer restoreRoots()
+
+	logDir := filepath.Join(tmpDir, "thread-active-1", ".system_generated", "logs")
 	_ = os.MkdirAll(logDir, 0755)
 	_ = os.WriteFile(filepath.Join(logDir, "transcript.jsonl"), []byte("{\"step\":1,\"content\":\"I love vim keybindings\"}\n"), 0644)
-	defer func() { _ = os.RemoveAll(filepath.Join(homeDir, ".gemini", "antigravity", "brain", "thread-active-1")) }()
 
 	ctx := context.Background()
 	err := ExtractActiveConversationFacts(ctx, database, client, llmFunc, 12)
@@ -737,14 +735,13 @@ func TestMemory_ProcessThreadFacts_EdgeCases(t *testing.T) {
 	}
 
 	// 2. Empty transcript file
-	homeDir, _ := os.UserHomeDir()
-	if homeDir == "" {
-		homeDir = "/root"
-	}
-	logDir := filepath.Join(homeDir, ".gemini", "antigravity", "brain", "th-pf-empty", ".system_generated", "logs")
+	tmpDir := t.TempDir()
+	restoreRoots := SetCustomTranscriptRoots([]string{tmpDir})
+	defer restoreRoots()
+
+	logDir := filepath.Join(tmpDir, "th-pf-empty", ".system_generated", "logs")
 	_ = os.MkdirAll(logDir, 0755)
 	_ = os.WriteFile(filepath.Join(logDir, "transcript.jsonl"), []byte("   \n"), 0644)
-	defer func() { _ = os.RemoveAll(filepath.Join(homeDir, ".gemini", "antigravity", "brain", "th-pf-empty")) }()
 
 	_ = db.InsertMessage(database, db.Message{
 		ID: "m-pf-empty", ThreadID: "th-pf-empty", Status: db.StatusCompleted, CreatedAt: now, UpdatedAt: now,
@@ -755,10 +752,9 @@ func TestMemory_ProcessThreadFacts_EdgeCases(t *testing.T) {
 	}
 
 	// 3. Transcript exists, but LLM call fails
-	logDir2 := filepath.Join(homeDir, ".gemini", "antigravity", "brain", "th-pf-llm-fail", ".system_generated", "logs")
+	logDir2 := filepath.Join(tmpDir, "th-pf-llm-fail", ".system_generated", "logs")
 	_ = os.MkdirAll(logDir2, 0755)
 	_ = os.WriteFile(filepath.Join(logDir2, "transcript.jsonl"), []byte("{\"step\":1,\"content\":\"hello\"}\n"), 0644)
-	defer func() { _ = os.RemoveAll(filepath.Join(homeDir, ".gemini", "antigravity", "brain", "th-pf-llm-fail")) }()
 
 	_ = db.InsertMessage(database, db.Message{
 		ID: "m-pf-fail", ThreadID: "th-pf-llm-fail", Status: db.StatusCompleted, CreatedAt: now, UpdatedAt: now,
@@ -794,21 +790,19 @@ func TestMemory_LoadThreadTranscript_LongFileAndSessionLookup(t *testing.T) {
 	}
 	defer database.Close()
 
-	homeDir, _ := os.UserHomeDir()
-	if homeDir == "" {
-		homeDir = "/root"
-	}
+	tmpDir := t.TempDir()
+	restoreRoots := SetCustomTranscriptRoots([]string{tmpDir})
+	defer restoreRoots()
 
 	sessID := "sess-custom-guid-12345"
 	threadID := "thread-mapped-999"
 	_ = db.SaveSessionID(database, threadID, sessID)
 
 	// Create long transcript > 20000 bytes in sessID directory under transcript_full.jsonl
-	logDir := filepath.Join(homeDir, ".gemini", "antigravity", "brain", sessID, ".system_generated", "logs")
+	logDir := filepath.Join(tmpDir, sessID, ".system_generated", "logs")
 	_ = os.MkdirAll(logDir, 0755)
 	longContent := strings.Repeat("{\"step\":1,\"content\":\"long conversation message snippet\"}\n", 500)
 	_ = os.WriteFile(filepath.Join(logDir, "transcript_full.jsonl"), []byte(longContent), 0644)
-	defer func() { _ = os.RemoveAll(filepath.Join(homeDir, ".gemini", "antigravity", "brain", sessID)) }()
 
 	text, err := loadThreadTranscript(database, threadID)
 	if err != nil {
