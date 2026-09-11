@@ -105,13 +105,30 @@ func handlePrompt(database *sql.DB, pool *queue.WorkerPool) http.HandlerFunc {
 	}
 }
 
-func handleTranscripts(database *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			homeDir = "/root"
-		}
+// DefaultTranscriptRoots returns the search roots for conversation transcripts
+// based on the provided configuration. In production, this includes the persistent
+// data brain directory as well as CLI and Antigravity brain directories under GeminiHomeDir.
+func DefaultTranscriptRoots(cfg *config.Config) []string {
+	if cfg == nil {
+		return []string{"/data/brain"}
+	}
+	var roots []string
+	dataDir := strings.TrimSpace(cfg.DataDir())
+	if dataDir == "" {
+		dataDir = "/data"
+	}
+	roots = append(roots, filepath.Join(dataDir, "brain"))
+	if homeDir := strings.TrimSpace(cfg.GeminiHomeDir()); homeDir != "" {
+		roots = append(roots,
+			filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain"),
+			filepath.Join(homeDir, ".gemini", "antigravity", "brain"),
+		)
+	}
+	return roots
+}
 
+func handleTranscripts(database *sql.DB, searchPaths ...string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		type TranscriptEntry struct {
 			Path       string `json:"path"`
 			ModTime    string `json:"mod_time"`
@@ -122,16 +139,15 @@ func handleTranscripts(database *sql.DB) http.HandlerFunc {
 			RawJSONL   string `json:"raw_jsonl,omitempty"`
 		}
 
-		var results []TranscriptEntry
-		roots := []string{
-			"/data/brain",
-			filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain"),
-			filepath.Join(homeDir, ".gemini", "antigravity", "brain"),
-		}
-
+		results := make([]TranscriptEntry, 0)
+		seen := make(map[string]bool)
 		includeRaw := r.URL.Query().Get("include_raw") == "true"
 
-		for _, root := range roots {
+		for _, root := range searchPaths {
+			root = strings.TrimSpace(root)
+			if root == "" {
+				continue
+			}
 			entries, err := os.ReadDir(root)
 			if err != nil {
 				continue
@@ -143,9 +159,14 @@ func handleTranscripts(database *sql.DB) http.HandlerFunc {
 				}
 
 				internalID := entry.Name()
+				if seen[internalID] {
+					continue
+				}
 				tPath := filepath.Join(root, internalID, ".system_generated", "logs", "transcript_full.jsonl")
-				if _, err := os.Stat(tPath); err != nil {
+				tStat, err := os.Stat(tPath)
+				if err != nil {
 					tPath = filepath.Join(root, internalID, ".system_generated", "logs", "transcript.jsonl")
+					tStat, _ = os.Stat(tPath)
 				}
 
 				data, err := os.ReadFile(tPath)
@@ -153,9 +174,11 @@ func handleTranscripts(database *sql.DB) http.HandlerFunc {
 					continue
 				}
 
-				info, err := entry.Info()
-				if err != nil {
-					continue
+				modTime := ""
+				if tStat != nil {
+					modTime = tStat.ModTime().Format(time.RFC3339)
+				} else if info, err := entry.Info(); err == nil {
+					modTime = info.ModTime().Format(time.RFC3339)
 				}
 				lines := strings.Split(string(data), "\n")
 				totalSteps := 0
@@ -193,7 +216,7 @@ func handleTranscripts(database *sql.DB) http.HandlerFunc {
 
 				item := TranscriptEntry{
 					Path:       tPath,
-					ModTime:    info.ModTime().Format(time.RFC3339),
+					ModTime:    modTime,
 					TotalSteps: totalSteps,
 					LastStatus: lastStatus,
 					LastError:  lastError,
@@ -202,6 +225,7 @@ func handleTranscripts(database *sql.DB) http.HandlerFunc {
 				if includeRaw {
 					item.RawJSONL = string(data)
 				}
+				seen[internalID] = true
 				results = append(results, item)
 			}
 		}
@@ -794,11 +818,11 @@ func metricsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func SetupBrainMux(database *sql.DB, pool *queue.WorkerPool, reloadFn func(string)) *http.ServeMux {
+func SetupBrainMux(database *sql.DB, pool *queue.WorkerPool, reloadFn func(string), searchPaths ...string) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", metrics.Handler())
 	mux.HandleFunc("/prompt", handlePrompt(database, pool))
-	mux.HandleFunc("/transcripts", handleTranscripts(database))
+	mux.HandleFunc("/transcripts", handleTranscripts(database, searchPaths...))
 	mux.HandleFunc("/tasks", handleTasks(database))
 	mux.HandleFunc("/facts", handleFacts(database))
 	mux.HandleFunc("/schedules", handleSchedules(database))
@@ -934,6 +958,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config) error {
 	}
 
 	cur := cfg.Current()
+	homeDir := cfg.GeminiHomeDir()
 	provisioner := env.NewFromConfig(cfg)
 	_ = InitializeBrainEnvironment(ctx, cfg)
 
@@ -988,8 +1013,6 @@ func RunBrainApp(ctx context.Context, cfg *config.Config) error {
 	if err != nil {
 		log.Printf("Warning: failed to create file watcher: %v", err)
 	} else {
-		homeDir := cfg.GeminiHomeDir()
-
 		watchDirs := []string{
 			"/share/aerial-config",
 			"/share/aerial",
@@ -1025,7 +1048,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config) error {
 	stopScheduler := sched.Start(ctx)
 	defer stopScheduler()
 
-	mux := SetupBrainMux(database, pool, reloadConfig)
+	mux := SetupBrainMux(database, pool, reloadConfig, DefaultTranscriptRoots(cfg)...)
 
 	port := cur.Port
 	if port == "" {

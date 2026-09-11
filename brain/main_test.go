@@ -92,7 +92,8 @@ func TestHandleTranscripts(t *testing.T) {
 	}
 	defer func() { _ = database.Close() }()
 
-	handler := handleTranscripts(database)
+	tmpHome := t.TempDir()
+	handler := handleTranscripts(database, tmpHome)
 
 	req := httptest.NewRequest(http.MethodGet, "/transcripts", nil)
 	w := httptest.NewRecorder()
@@ -100,6 +101,9 @@ func TestHandleTranscripts(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Errorf("Expected status 200 OK, got %d", w.Code)
+	}
+	if strings.TrimSpace(w.Body.String()) != "[]" {
+		t.Errorf("Expected empty JSON array '[]', got %q", w.Body.String())
 	}
 }
 
@@ -762,7 +766,8 @@ func TestSetupBrainMux_And_Endpoints(t *testing.T) {
 		reloaded = true
 	}
 
-	mux := SetupBrainMux(database, nil, reloadFn)
+	tmpHome := t.TempDir()
+	mux := SetupBrainMux(database, nil, reloadFn, tmpHome)
 
 	// Test /health
 	reqHealth := httptest.NewRequest(http.MethodGet, "/health", nil)
@@ -770,6 +775,14 @@ func TestSetupBrainMux_And_Endpoints(t *testing.T) {
 	mux.ServeHTTP(wHealth, reqHealth)
 	if wHealth.Code != http.StatusOK {
 		t.Errorf("Expected 200 from /health, got %d", wHealth.Code)
+	}
+
+	// Test /transcripts with injected homeDir
+	reqTranscripts := httptest.NewRequest(http.MethodGet, "/transcripts", nil)
+	wTranscripts := httptest.NewRecorder()
+	mux.ServeHTTP(wTranscripts, reqTranscripts)
+	if wTranscripts.Code != http.StatusOK {
+		t.Errorf("Expected 200 from /transcripts, got %d", wTranscripts.Code)
 	}
 
 	// Test /internal/reload (GET -> 405, POST -> 200)
@@ -809,7 +822,6 @@ func TestInitializeBrainEnvironment_And_Config(t *testing.T) {
 
 func TestRunBrainApp_Lifecycle(t *testing.T) {
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
 	dbPath := filepath.Join(tmpDir, "test_brain.db")
 
 	cfg := config.NewTestConfig(func(d *config.ConfigData) {
@@ -818,6 +830,8 @@ func TestRunBrainApp_Lifecycle(t *testing.T) {
 		d.Model = "gemini-2.5-flash"
 		d.DatabaseURL = dbPath
 		d.SystemPrompt = "test"
+		d.GeminiHomeDir = tmpDir
+		d.DataDir = filepath.Join(tmpDir, "data")
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -831,6 +845,8 @@ func TestRunBrainApp_Lifecycle(t *testing.T) {
 	// Test invalid DB path fails cleanly
 	badCfg := config.NewTestConfig(func(d *config.ConfigData) {
 		d.DatabaseURL = "/nonexistent/invalid/dir/db.sqlite"
+		d.GeminiHomeDir = tmpDir
+		d.DataDir = filepath.Join(tmpDir, "data")
 	})
 	badCtx, badCancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer badCancel()
@@ -902,7 +918,6 @@ func TestHandlePrompt_ErrorBranches(t *testing.T) {
 
 func TestHandleTranscripts_ErrorAndRawBranches(t *testing.T) {
 	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
 
 	database, err := db.InitDB(":memory:")
 	if err != nil {
@@ -914,7 +929,8 @@ func TestHandleTranscripts_ErrorAndRawBranches(t *testing.T) {
 	_ = db.SaveConversationMapping(database, "thread-discord-100", "conv-alpha-100")
 
 	// Create transcript folders
-	convDir := filepath.Join(tmpHome, ".gemini", "antigravity-cli", "brain", "conv-alpha-100", ".system_generated", "logs")
+	brainDir := filepath.Join(tmpHome, "brain")
+	convDir := filepath.Join(brainDir, "conv-alpha-100", ".system_generated", "logs")
 	if err := os.MkdirAll(convDir, 0755); err != nil {
 		t.Fatalf("MkdirAll failed: %v", err)
 	}
@@ -928,7 +944,7 @@ not a valid json line
 		t.Fatalf("WriteFile failed: %v", err)
 	}
 
-	handler := handleTranscripts(database)
+	handler := handleTranscripts(database, brainDir)
 
 	// GET transcripts with include_raw=true
 	reqGet := httptest.NewRequest(http.MethodGet, "/transcripts?include_raw=true", nil)
@@ -1091,7 +1107,6 @@ func TestCreateReloadConfigFunc_InvalidYAMLAndAlert(t *testing.T) {
 
 func TestRunBrainApp_ServerReadinessAndShutdown(t *testing.T) {
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
 	dbPath := filepath.Join(tmpDir, "app_test.db")
 
 	cfg := config.NewTestConfig(func(d *config.ConfigData) {
@@ -1100,6 +1115,8 @@ func TestRunBrainApp_ServerReadinessAndShutdown(t *testing.T) {
 		d.Model = "gemini-2.5-flash"
 		d.DatabaseURL = dbPath
 		d.SystemPrompt = "test"
+		d.GeminiHomeDir = tmpDir
+		d.DataDir = filepath.Join(tmpDir, "data")
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1263,7 +1280,6 @@ func TestCreateReloadConfigFunc_SuccessCoverage(t *testing.T) {
 
 func TestRunBrainApp_DetailedOptions(t *testing.T) {
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
 
 	// 1. With DiscordToken set
 	dbPath := filepath.Join(tmpDir, "app_discord.db")
@@ -1275,6 +1291,8 @@ func TestRunBrainApp_DetailedOptions(t *testing.T) {
 		d.SystemPrompt = "test"
 		d.DatabaseURL = dbPath
 		d.DiscordToken = "mock-token"
+		d.GeminiHomeDir = tmpDir
+		d.DataDir = filepath.Join(tmpDir, "data")
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1304,6 +1322,8 @@ func TestRunBrainApp_DetailedOptions(t *testing.T) {
 		d.Model = "gemini-2.5-flash"
 		d.SystemPrompt = "test"
 		d.DatabaseURL = filepath.Join(tmpDir, "app_bad_port.db")
+		d.GeminiHomeDir = tmpDir
+		d.DataDir = filepath.Join(tmpDir, "data")
 	})
 	ctxBad, cancelBad := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancelBad()
@@ -1370,7 +1390,6 @@ func TestCreateReloadConfigFunc_Complete(t *testing.T) {
 
 func TestRunBrainApp_ErrorBranches(t *testing.T) {
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
 
 	// 1. Nil config returns error
 	ctx0, cancel0 := context.WithCancel(context.Background())
@@ -1382,6 +1401,8 @@ func TestRunBrainApp_ErrorBranches(t *testing.T) {
 	// 2. Unsupported database scheme returns error
 	cfgInvalidDB := config.NewTestConfig(func(d *config.ConfigData) {
 		d.DatabaseURL = "mysql://user:pass@localhost/db"
+		d.GeminiHomeDir = tmpDir
+		d.DataDir = filepath.Join(tmpDir, "data")
 	})
 	ctx1, cancel1 := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel1()
@@ -1393,6 +1414,8 @@ func TestRunBrainApp_ErrorBranches(t *testing.T) {
 	// 4. Empty DatabaseURL returns error
 	cfgEmptyDB := config.NewTestConfig(func(d *config.ConfigData) {
 		d.DatabaseURL = ""
+		d.GeminiHomeDir = tmpDir
+		d.DataDir = filepath.Join(tmpDir, "data")
 	})
 	ctx2, cancel2 := context.WithCancel(context.Background())
 	defer cancel2()
@@ -1454,13 +1477,12 @@ func TestHandleTranscripts_NonDirectoryAndBadHome(t *testing.T) {
 	defer database.Close()
 
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
 
-	brainDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain")
+	brainDir := filepath.Join(tmpDir, "brain")
 	_ = os.MkdirAll(brainDir, 0755)
 	_ = os.WriteFile(filepath.Join(brainDir, "regular_file.txt"), []byte("not a dir"), 0644)
 
-	handler := handleTranscripts(database)
+	handler := handleTranscripts(database, brainDir, "", "   ", "/nonexistent/dir")
 	req := httptest.NewRequest(http.MethodGet, "/transcripts", nil)
 	w := httptest.NewRecorder()
 	handler(w, req)
@@ -1502,17 +1524,17 @@ func TestMetricsMiddleware_Implicit200(t *testing.T) {
 
 func TestHandleTranscripts_DBErrorBranch(t *testing.T) {
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
 
 	convID := "test-conv-err-1"
-	tDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", convID, ".system_generated", "logs")
+	brainDir := filepath.Join(tmpDir, "brain")
+	tDir := filepath.Join(brainDir, convID, ".system_generated", "logs")
 	_ = os.MkdirAll(tDir, 0755)
 	_ = os.WriteFile(filepath.Join(tDir, "transcript.jsonl"), []byte(`{"status":"DONE"}`+"\n"), 0644)
 
 	closedDB, _ := db.InitDB(":memory:")
 	_ = closedDB.Close()
 
-	handler := handleTranscripts(closedDB)
+	handler := handleTranscripts(closedDB, brainDir)
 	req := httptest.NewRequest(http.MethodGet, "/transcripts", nil)
 	w := httptest.NewRecorder()
 	handler(w, req)
@@ -1538,6 +1560,97 @@ func TestRunBrainApp_PureConfig(t *testing.T) {
 	err := RunBrainApp(ctx, cfg)
 	if err != nil && err != http.ErrServerClosed {
 		t.Errorf("expected clean shutdown, got %v", err)
+	}
+}
+
+func TestDefaultTranscriptRoots(t *testing.T) {
+	// 1. Nil config
+	nilRoots := DefaultTranscriptRoots(nil)
+	if len(nilRoots) != 1 || nilRoots[0] != "/data/brain" {
+		t.Errorf("DefaultTranscriptRoots(nil) = %v, want [/data/brain]", nilRoots)
+	}
+
+	// 2. Custom config with specific DataDir and GeminiHomeDir
+	tmpDir := t.TempDir()
+	dataDir := filepath.Join(tmpDir, "custom_data")
+	homeDir := filepath.Join(tmpDir, "custom_home")
+
+	cfg := config.NewTestConfig(func(d *config.ConfigData) {
+		d.DataDir = dataDir
+		d.GeminiHomeDir = homeDir
+	})
+
+	roots := DefaultTranscriptRoots(cfg)
+	expected := []string{
+		filepath.Join(dataDir, "brain"),
+		filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain"),
+		filepath.Join(homeDir, ".gemini", "antigravity", "brain"),
+	}
+
+	if len(roots) != len(expected) {
+		t.Fatalf("DefaultTranscriptRoots returned %d roots, want %d", len(roots), len(expected))
+	}
+	for i, want := range expected {
+		if roots[i] != want {
+			t.Errorf("roots[%d] = %q, want %q", i, roots[i], want)
+		}
+	}
+
+	// 3. Config with empty/whitespace DataDir defaults to filepath.Join("/data", "brain")
+	emptyDataCfg := config.NewTestConfig(func(d *config.ConfigData) {
+		d.DataDir = "   "
+		d.GeminiHomeDir = homeDir
+	})
+	emptyRoots := DefaultTranscriptRoots(emptyDataCfg)
+	expectedEmpty := []string{
+		filepath.Join("/data", "brain"),
+		filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain"),
+		filepath.Join(homeDir, ".gemini", "antigravity", "brain"),
+	}
+	if len(emptyRoots) != len(expectedEmpty) || emptyRoots[0] != expectedEmpty[0] {
+		t.Errorf("DefaultTranscriptRoots with whitespace DataDir = %v, want %v", emptyRoots, expectedEmpty)
+	}
+}
+
+func TestHandleTranscripts_Deduplication(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer database.Close()
+
+	tmpDir := t.TempDir()
+	root1 := filepath.Join(tmpDir, "root1")
+	root2 := filepath.Join(tmpDir, "root2")
+
+	convID := "shared-conv-1"
+	dir1 := filepath.Join(root1, convID, ".system_generated", "logs")
+	dir2 := filepath.Join(root2, convID, ".system_generated", "logs")
+	_ = os.MkdirAll(dir1, 0755)
+	_ = os.MkdirAll(dir2, 0755)
+	_ = os.WriteFile(filepath.Join(dir1, "transcript.jsonl"), []byte(`{"step_index":1,"status":"DONE"}`+"\n"), 0644)
+	_ = os.WriteFile(filepath.Join(dir2, "transcript.jsonl"), []byte(`{"step_index":1,"status":"DONE"}`+"\n"), 0644)
+
+	handler := handleTranscripts(database, root1, root2)
+	req := httptest.NewRequest(http.MethodGet, "/transcripts", nil)
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected 200 OK, got %d", w.Code)
+	}
+
+	var results []map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &results); err != nil {
+		t.Fatalf("Failed to parse json: %v", err)
+	}
+	if len(results) != 1 {
+		t.Errorf("Expected exactly 1 deduplicated result, got %d", len(results))
+	} else {
+		expectedPath := filepath.Join(dir1, "transcript.jsonl")
+		if gotPath, ok := results[0]["path"].(string); !ok || gotPath != expectedPath {
+			t.Errorf("Expected first root to win with path %q, got %q", expectedPath, gotPath)
+		}
 	}
 }
 
