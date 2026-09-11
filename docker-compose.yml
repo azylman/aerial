@@ -106,7 +106,7 @@ services:
     restart: unless-stopped
     labels:
       autoheal: "true"
-      com.centurylinklabs.watchtower.enable: "true"
+      com.centurylinklabs.watchtower.enable: "false"
     environment:
       - PORT=8080
       - GITHUB_PAT=${GITHUB_PAT}
@@ -141,13 +141,15 @@ services:
     restart: unless-stopped
     labels:
       autoheal: "true"
+      com.centurylinklabs.watchtower.enable: "false"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - WATCHTOWER_POLL_INTERVAL=60
       - WATCHTOWER_CLEANUP=true
       - WATCHTOWER_INCLUDE_SELF=false
-      - WATCHTOWER_ROLLING_RESTART=false
+      - WATCHTOWER_ROLLING_RESTART=true
+      - WATCHTOWER_TIMEOUT=75s
       - WATCHTOWER_LABEL_ENABLE=true
       - DOCKER_API_VERSION=1.45
     networks:
