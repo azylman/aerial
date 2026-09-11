@@ -675,9 +675,8 @@ func TestActivityWriter_ThreadSafetyAndSessionDiscovery(t *testing.T) {
 func TestRunAgyWithWatchdog_InactivityTimeout(t *testing.T) {
 	ctx := context.Background()
 	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
-	t.Setenv("USERPROFILE", tmpHome)
 	opts := WatchdogOptions{
+		HomeDir:           tmpHome,
 		InactivityTimeout: 50 * time.Millisecond,
 		MaxDuration:       2 * time.Second,
 		PollInterval:      10 * time.Millisecond,
@@ -710,8 +709,6 @@ func TestRunAgyWithWatchdog_InactivityTimeout(t *testing.T) {
 func TestRunAgyWithWatchdog_ActiveStderrHeartbeat(t *testing.T) {
 	ctx := context.Background()
 	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
-	t.Setenv("USERPROFILE", tmpHome)
 	inactTimeout := 100 * time.Millisecond
 	pollInterval := 15 * time.Millisecond
 	sleepSec := "0.03"
@@ -722,6 +719,7 @@ func TestRunAgyWithWatchdog_ActiveStderrHeartbeat(t *testing.T) {
 	}
 
 	opts := WatchdogOptions{
+		HomeDir:           tmpHome,
 		InactivityTimeout: inactTimeout,
 		MaxDuration:       5 * time.Second,
 		PollInterval:      pollInterval,
@@ -758,8 +756,6 @@ func TestRunAgyWithWatchdog_ActiveStderrHeartbeat(t *testing.T) {
 func TestRunAgyWithWatchdog_ActiveStdoutHeartbeat(t *testing.T) {
 	ctx := context.Background()
 	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
-	t.Setenv("USERPROFILE", tmpHome)
 	inactTimeout := 100 * time.Millisecond
 	pollInterval := 15 * time.Millisecond
 	sleepSec := "0.03"
@@ -770,6 +766,7 @@ func TestRunAgyWithWatchdog_ActiveStdoutHeartbeat(t *testing.T) {
 	}
 
 	opts := WatchdogOptions{
+		HomeDir:           tmpHome,
 		InactivityTimeout: inactTimeout,
 		MaxDuration:       5 * time.Second,
 		PollInterval:      pollInterval,
@@ -806,8 +803,6 @@ func TestRunAgyWithWatchdog_ActiveStdoutHeartbeat(t *testing.T) {
 func TestRunAgyWithWatchdog_CustomTranscriptDirs(t *testing.T) {
 	ctx := context.Background()
 	tempDir := t.TempDir()
-	t.Setenv("HOME", tempDir)
-	t.Setenv("USERPROFILE", tempDir)
 	testSessionID := "custom-sess-9988"
 	customLogDir := filepath.Join(tempDir, "custom-logs", testSessionID, ".system_generated", "logs")
 	if err := os.MkdirAll(customLogDir, 0755); err != nil {
@@ -825,6 +820,7 @@ func TestRunAgyWithWatchdog_CustomTranscriptDirs(t *testing.T) {
 	}
 
 	opts := WatchdogOptions{
+		HomeDir:           tempDir,
 		InactivityTimeout: inactTimeout,
 		MaxDuration:       5 * time.Second,
 		PollInterval:      pollInterval,
@@ -1019,9 +1015,8 @@ func TestRunAgyWithWatchdog_BackgroundTaskLogStall_Timeout(t *testing.T) {
 func TestRunAgyWithWatchdog_MaxDuration(t *testing.T) {
 	ctx := context.Background()
 	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
-	t.Setenv("USERPROFILE", tmpHome)
 	opts := WatchdogOptions{
+		HomeDir:           tmpHome,
 		InactivityTimeout: 500 * time.Millisecond,
 		MaxDuration:       50 * time.Millisecond,
 		PollInterval:      10 * time.Millisecond,
@@ -1351,8 +1346,6 @@ func TestActivityWriter_RawUUIDWithoutPrefix(t *testing.T) {
 func TestRunAgyWithWatchdog_OptionDefaultsAndEdgeCases(t *testing.T) {
 	ctx := context.Background()
 	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
-	t.Setenv("USERPROFILE", tmpHome)
 
 	// 1. Test invalid / non-existent binary path triggers cmd.Start() error
 	_, _, exitCode, err := RunAgyWithWatchdog(ctx, "/nonexistent/path/to/agy-bin", "prompt", "", "", "", WatchdogOptions{})
@@ -1365,6 +1358,7 @@ func TestRunAgyWithWatchdog_OptionDefaultsAndEdgeCases(t *testing.T) {
 	mockAgy := createMockAgyScript(t, t.TempDir(), script)
 
 	stdout, stderr, exitCode, err := RunAgyWithWatchdog(ctx, mockAgy, "test prompt", "sess-123", "secret-key", "gemini-pro", WatchdogOptions{
+		HomeDir:           tmpHome,
 		InactivityTimeout: 2 * time.Second,
 		MaxDuration:       30 * time.Second,
 		PollInterval:      10 * time.Millisecond,
@@ -1386,6 +1380,7 @@ func TestRunAgyWithWatchdog_OptionDefaultsAndEdgeCases(t *testing.T) {
 	mockAgyModelErr := createMockAgyScript(t, t.TempDir(), scriptErr)
 
 	_, stderrErr, exitCodeErr, _ := RunAgyWithWatchdog(ctx, mockAgyModelErr, "prompt", "", "", "gemini-flash", WatchdogOptions{
+		HomeDir:           tmpHome,
 		InactivityTimeout: 1 * time.Second,
 		MaxDuration:       2 * time.Second,
 		PollInterval:      10 * time.Millisecond,

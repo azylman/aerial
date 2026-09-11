@@ -343,14 +343,14 @@ func IsHeuristicSkip(content string) bool {
 // NewAgyLLMFunc constructs an LLMFunc that executes agy in stateless single-turn mode.
 // It runs under the user's subscription profile and purges any created ephemeral conversation folder
 // upon completion to prevent disk bloat.
-func NewAgyLLMFunc(agyBin, apiKey string, runnerFn func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error)) func(ctx context.Context, model, prompt string) (string, error) {
+func NewAgyLLMFunc(agyBin, apiKey string, runnerFn func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error), searchRoots ...string) func(ctx context.Context, model, prompt string) (string, error) {
 	return func(ctx context.Context, model, prompt string) (string, error) {
 		if runnerFn == nil {
 			return "", fmt.Errorf("no runner function configured")
 		}
 
 		ephemeralID := "ambient-eval-" + uuid.New().String()
-		defer CleanupEphemeralSession(ephemeralID)
+		defer CleanupEphemeralSession(ephemeralID, searchRoots...)
 
 		stdout, stderr, exitCode, err := runnerFn(ctx, agyBin, prompt, ephemeralID, apiKey, model, 1)
 		if err != nil || exitCode != 0 {
@@ -365,21 +365,27 @@ func NewAgyLLMFunc(agyBin, apiKey string, runnerFn func(ctx context.Context, agy
 }
 
 // CleanupEphemeralSession purges throwaway classifier session directories from disk.
-func CleanupEphemeralSession(convID string) {
-	if convID == "" {
+// If searchRoots are provided, it deletes convID subdirectories within those roots.
+// Zero ambient environment defaults (os.UserHomeDir, os.Getenv("HOME")) are used.
+func CleanupEphemeralSession(convID string, searchRoots ...string) {
+	cleanConvID := strings.TrimSpace(convID)
+	if cleanConvID == "" || strings.ContainsAny(cleanConvID, `/\:`) || strings.Contains(cleanConvID, "..") {
 		return
 	}
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		homeDir = "/root"
-	}
-	dirs := []string{
-		filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain", convID),
-		filepath.Join(homeDir, ".gemini", "antigravity", "brain", convID),
-		filepath.Join("/data", "brain", convID),
-	}
-	for _, d := range dirs {
-		_ = os.RemoveAll(d)
+	for _, root := range searchRoots {
+		cleanRoot := strings.TrimSpace(root)
+		if cleanRoot == "" {
+			continue
+		}
+		dirs := []string{
+			filepath.Join(cleanRoot, cleanConvID),
+			filepath.Join(cleanRoot, ".gemini", "antigravity-cli", "brain", cleanConvID),
+			filepath.Join(cleanRoot, ".gemini", "antigravity", "brain", cleanConvID),
+			filepath.Join(cleanRoot, "brain", cleanConvID),
+		}
+		for _, d := range dirs {
+			_ = os.RemoveAll(d)
+		}
 	}
 }
 

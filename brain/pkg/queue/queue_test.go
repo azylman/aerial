@@ -109,10 +109,9 @@ func TestQueueSuccessLifecycleAndSessionSaving(t *testing.T) {
 	doneCh := make(chan struct{})
 
 	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
-	t.Setenv("USERPROFILE", tmpHome)
 
 	pool := NewWorkerPool(WorkerPoolConfig{
+		SessionManager: session.New(tmpHome, ""),
 		DB:             database,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
@@ -372,10 +371,9 @@ func TestQueueSessionCorruptionRecovery(t *testing.T) {
 	doneCh := make(chan struct{})
 
 	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
-	t.Setenv("USERPROFILE", tmpHome)
 
 	pool := NewWorkerPool(WorkerPoolConfig{
+		SessionManager: session.New(tmpHome, ""),
 		DB:             database,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
@@ -1679,8 +1677,6 @@ func TestQueueCustomStalenessTTL(t *testing.T) {
 
 func TestQueueTurnCountSessionRotation(t *testing.T) {
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-	t.Setenv("USERPROFILE", tmpDir)
 
 	database, err := db.InitDB(":memory:")
 	if err != nil {
@@ -2263,8 +2259,6 @@ func ptrFloat(f float64) *float64 {
 
 func TestProcessBurst_PureAmbient(t *testing.T) {
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-	t.Setenv("USERPROFILE", tmpDir)
 
 	database, err := db.InitDB(":memory:")
 	if err != nil {
@@ -2384,8 +2378,6 @@ func TestProcessBurst_PureAmbient(t *testing.T) {
 
 func TestProcessBurst_Tier1Wake(t *testing.T) {
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-	t.Setenv("USERPROFILE", tmpDir)
 
 	database, err := db.InitDB(":memory:")
 	if err != nil {
@@ -2491,8 +2483,6 @@ func TestProcessBurst_Tier1Wake(t *testing.T) {
 
 func TestProcessBurst_Tier2Wake(t *testing.T) {
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-	t.Setenv("USERPROFILE", tmpDir)
 
 	database, err := db.InitDB(":memory:")
 	if err != nil {
@@ -2596,8 +2586,6 @@ func TestProcessBurst_Tier2Wake(t *testing.T) {
 
 func TestProcessBurst_MixedBurst(t *testing.T) {
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-	t.Setenv("USERPROFILE", tmpDir)
 
 	database, err := db.InitDB(":memory:")
 	if err != nil {
@@ -2776,8 +2764,6 @@ Please formulate your response and output it clearly.
 
 func TestProcessBurst_SessionRotationBeforeLeadingAmbient(t *testing.T) {
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-	t.Setenv("USERPROFILE", tmpDir)
 
 	database, err := db.InitDB(":memory:")
 	if err != nil {
@@ -2888,8 +2874,6 @@ func TestProcessBurst_SessionRotationBeforeLeadingAmbient(t *testing.T) {
 
 func TestProcessBurst_TrailingAmbient(t *testing.T) {
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-	t.Setenv("USERPROFILE", tmpDir)
 
 	database, err := db.InitDB(":memory:")
 	if err != nil {
@@ -3664,8 +3648,6 @@ func TestProcessBurst_CoalescedAmbientBurst(t *testing.T) {
 
 func TestProcessBurst_GhostSessionRecovery(t *testing.T) {
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-	t.Setenv("USERPROFILE", tmpDir)
 
 	database, err := db.InitDB(":memory:")
 	if err != nil {
@@ -3684,6 +3666,7 @@ func TestProcessBurst_GhostSessionRecovery(t *testing.T) {
 	var mu sync.Mutex
 	runnerCalls := 0
 	pool := NewWorkerPool(WorkerPoolConfig{
+		SessionManager: session.New(tmpDir, ""),
 		DB: database,
 		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
 			return nil, nil
@@ -3734,8 +3717,6 @@ func TestProcessBurst_GhostSessionRecovery(t *testing.T) {
 
 func TestProcessBurst_MultiTurnContinuity_AfterRecovery(t *testing.T) {
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-	t.Setenv("USERPROFILE", tmpDir)
 
 	database, err := db.InitDB(":memory:")
 	if err != nil {
@@ -3754,6 +3735,7 @@ func TestProcessBurst_MultiTurnContinuity_AfterRecovery(t *testing.T) {
 	var receivedSessionIDs []string
 
 	pool := NewWorkerPool(WorkerPoolConfig{
+		SessionManager: session.New(tmpDir, ""),
 		DB: database,
 		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
 			return nil, nil
@@ -3815,8 +3797,6 @@ func TestProcessBurst_MultiTurnContinuity_AfterRecovery(t *testing.T) {
 
 func TestProcessBurst_ColdChannel_NoStubDirectory(t *testing.T) {
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-	t.Setenv("USERPROFILE", tmpDir)
 
 	database, err := db.InitDB(":memory:")
 	if err != nil {
@@ -3832,6 +3812,7 @@ func TestProcessBurst_ColdChannel_NoStubDirectory(t *testing.T) {
 
 	var runnerCalls int
 	pool := NewWorkerPool(WorkerPoolConfig{
+		SessionManager: session.New(tmpDir, ""),
 		DB:         database,
 		Classifier: cls,
 		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
@@ -3889,8 +3870,6 @@ func TestProcessBurst_ColdChannel_NoStubDirectory(t *testing.T) {
 
 func TestProcessBurst_Turn1ContextInjection(t *testing.T) {
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-	t.Setenv("USERPROFILE", tmpDir)
 
 	database, err := db.InitDB(":memory:")
 	if err != nil {
@@ -3910,6 +3889,7 @@ func TestProcessBurst_Turn1ContextInjection(t *testing.T) {
 	var receivedSessionIDs []string
 
 	pool := NewWorkerPool(WorkerPoolConfig{
+		SessionManager: session.New(tmpDir, ""),
 		DB: database,
 		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
 			return nil, nil
@@ -4003,8 +3983,6 @@ func TestProcessBurst_Turn1ContextInjection(t *testing.T) {
 
 func TestProcessBurst_SessionRotation_ResetsToColdState(t *testing.T) {
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-	t.Setenv("USERPROFILE", tmpDir)
 
 	database, err := db.InitDB(":memory:")
 	if err != nil {
@@ -4027,6 +4005,7 @@ func TestProcessBurst_SessionRotation_ResetsToColdState(t *testing.T) {
 	historyFetchCalls := 0
 
 	pool := NewWorkerPool(WorkerPoolConfig{
+		SessionManager: session.New(tmpDir, ""),
 		DB: database,
 		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
 			return nil, nil
@@ -4151,8 +4130,6 @@ func TestProcessBurst_SessionRotation_ResetsToColdState(t *testing.T) {
 
 func TestProcessBurst_Turn1Crash_DoesNotPersistGhostUUID(t *testing.T) {
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-	t.Setenv("USERPROFILE", tmpDir)
 
 	database, err := db.InitDB(":memory:")
 	if err != nil {
@@ -4164,6 +4141,7 @@ func TestProcessBurst_Turn1Crash_DoesNotPersistGhostUUID(t *testing.T) {
 
 	var runnerCalls int
 	pool := NewWorkerPool(WorkerPoolConfig{
+		SessionManager: session.New(tmpDir, ""),
 		DB:          database,
 		MaxAttempts: 1,
 		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
@@ -4353,8 +4331,6 @@ func TestIsTier1Wake_WakeModeMention(t *testing.T) {
 
 func TestProcessBurst_WakeModeMention_BypassClassifier(t *testing.T) {
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-	t.Setenv("USERPROFILE", tmpDir)
 
 	database, err := db.InitDB(":memory:")
 	if err != nil {
@@ -4439,8 +4415,6 @@ func TestProcessBurst_WakeModeMention_BypassClassifier(t *testing.T) {
 
 func TestProcessBurst_WakeModeMention_DirectMentionWakes(t *testing.T) {
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-	t.Setenv("USERPROFILE", tmpDir)
 
 	database, err := db.InitDB(":memory:")
 	if err != nil {
@@ -5006,8 +4980,6 @@ func TestQueue_WatchdogInactivityRetryAndRecovery(t *testing.T) {
 	var deliveredChannel string
 
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-	t.Setenv("USERPROFILE", tmpDir)
 
 	mockSessID := "recovery-uuid-505"
 	sessDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", mockSessID)
@@ -5018,6 +4990,7 @@ func TestQueue_WatchdogInactivityRetryAndRecovery(t *testing.T) {
 	_ = db.SaveSessionID(database, "thread-recovery-505", mockSessID)
 
 	pool := NewWorkerPool(WorkerPoolConfig{
+		SessionManager: session.New(tmpDir, ""),
 		DB:             database,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
@@ -5129,8 +5102,6 @@ func TestProcessBurst_ColdStartWatchdogRecoveryAndContinuation(t *testing.T) {
 	var deliveredChannel string
 
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-	t.Setenv("USERPROFILE", tmpDir)
 
 	coldSessID := "70707070-aaaa-4bbb-cccc-111122223333"
 	sessDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", coldSessID)
@@ -5142,6 +5113,7 @@ func TestProcessBurst_ColdStartWatchdogRecoveryAndContinuation(t *testing.T) {
 	// NOTE: We do NOT seed db.SaveSessionID here; this is a cold start turn!
 
 	pool := NewWorkerPool(WorkerPoolConfig{
+		SessionManager: session.New(tmpDir, ""),
 		DB:             database,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
@@ -5261,8 +5233,6 @@ func TestProcessBurst_ColdStartStreamJsonInitLatchingOnFailure(t *testing.T) {
 	var deliveredChannel string
 
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-	t.Setenv("USERPROFILE", tmpDir)
 
 	coldSessID := "99999999-bbbb-4ccc-dddd-555566667777"
 	sessDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", coldSessID)
@@ -5272,6 +5242,7 @@ func TestProcessBurst_ColdStartStreamJsonInitLatchingOnFailure(t *testing.T) {
 	}
 
 	pool := NewWorkerPool(WorkerPoolConfig{
+		SessionManager: session.New(tmpDir, ""),
 		DB:             database,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
@@ -5370,8 +5341,6 @@ func TestProcessBurst_ColdStartTransientRecoveryAndContinuation(t *testing.T) {
 	doneCh := make(chan struct{})
 
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-	t.Setenv("USERPROFILE", tmpDir)
 
 	transientSessID := "80808080-bbbb-4ccc-dddd-444455556666"
 	sessDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", transientSessID)
@@ -5381,6 +5350,7 @@ func TestProcessBurst_ColdStartTransientRecoveryAndContinuation(t *testing.T) {
 	}
 
 	pool := NewWorkerPool(WorkerPoolConfig{
+		SessionManager: session.New(tmpDir, ""),
 		DB:             database,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
@@ -5475,8 +5445,6 @@ func TestProcessBurst_EmptyStdout_TranscriptRecovery(t *testing.T) {
 	defer func() { _ = database.Close() }()
 
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-	t.Setenv("USERPROFILE", tmpDir)
 
 	testSessID := "sess-transcript-recovery-999"
 	sessDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", testSessID)
@@ -5496,6 +5464,7 @@ func TestProcessBurst_EmptyStdout_TranscriptRecovery(t *testing.T) {
 	doneCh := make(chan struct{})
 
 	pool := NewWorkerPool(WorkerPoolConfig{
+		SessionManager: session.New(tmpDir, ""),
 		DB:             database,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
@@ -5569,8 +5538,6 @@ func TestProcessBurst_StreamInterrupted_TranscriptRecovery(t *testing.T) {
 	defer func() { _ = database.Close() }()
 
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-	t.Setenv("USERPROFILE", tmpDir)
 
 	testSessID := "11111111-2222-4333-8444-555555555555"
 	sessDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", testSessID)
@@ -5592,6 +5559,7 @@ func TestProcessBurst_StreamInterrupted_TranscriptRecovery(t *testing.T) {
 	doneCh := make(chan struct{})
 
 	pool := NewWorkerPool(WorkerPoolConfig{
+		SessionManager: session.New(tmpDir, ""),
 		DB:             database,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
@@ -5672,8 +5640,6 @@ func TestProcessBurst_StreamInterrupted_NoResponse_RotatesSessionCorrupt(t *test
 	defer func() { _ = database.Close() }()
 
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-	t.Setenv("USERPROFILE", tmpDir)
 
 	testSessID := "22222222-3333-4444-8555-666666666666"
 	sessDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", testSessID)
@@ -5696,6 +5662,7 @@ func TestProcessBurst_StreamInterrupted_NoResponse_RotatesSessionCorrupt(t *test
 	doneCh := make(chan struct{})
 
 	pool := NewWorkerPool(WorkerPoolConfig{
+		SessionManager: session.New(tmpDir, ""),
 		DB:             database,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
@@ -5791,8 +5758,6 @@ func TestProcessBurst_EmptyStdout_TransientRetryAndContinuation(t *testing.T) {
 	defer func() { _ = database.Close() }()
 
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-	t.Setenv("USERPROFILE", tmpDir)
 
 	testSessID := "sess-empty-retry-888"
 	sessDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", testSessID)
@@ -5814,6 +5779,7 @@ func TestProcessBurst_EmptyStdout_TransientRetryAndContinuation(t *testing.T) {
 	doneCh := make(chan struct{})
 
 	pool := NewWorkerPool(WorkerPoolConfig{
+		SessionManager: session.New(tmpDir, ""),
 		DB:             database,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
@@ -5905,8 +5871,6 @@ func TestProcessBurst_GeneralFailure_PreservesSessionOnDisk(t *testing.T) {
 	defer func() { _ = database.Close() }()
 
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-	t.Setenv("USERPROFILE", tmpDir)
 
 	testSessID := "sess-general-fail-777"
 	sessDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", testSessID)
@@ -5925,6 +5889,7 @@ func TestProcessBurst_GeneralFailure_PreservesSessionOnDisk(t *testing.T) {
 	doneCh := make(chan struct{})
 
 	pool := NewWorkerPool(WorkerPoolConfig{
+		SessionManager: session.New(tmpDir, ""),
 		DB:             database,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
@@ -6086,8 +6051,6 @@ func TestProcessBurst_TransientError_RetainsOriginalPrompt(t *testing.T) {
 	defer func() { _ = database.Close() }()
 
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-	t.Setenv("USERPROFILE", tmpDir)
 
 	sessMgr := session.New(tmpDir, "")
 	testSessID := "sess-transient-503"
@@ -6589,6 +6552,7 @@ func TestThreadSession_RotationAt50Turns(t *testing.T) {
 	})
 
 	pool := New(appCfg, WorkerPoolConfig{
+		SessionManager: session.New(t.TempDir(), ""),
 		DB:             database,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
@@ -6913,8 +6877,6 @@ func TestThreadColdStartSummarization_Integration(t *testing.T) {
 
 func TestProcessBurst_ColdStart429_RetriesTransiently(t *testing.T) {
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-	t.Setenv("USERPROFILE", tmpDir)
 
 	database, err := db.InitDB(":memory:")
 	if err != nil {
@@ -6932,6 +6894,7 @@ func TestProcessBurst_ColdStart429_RetriesTransiently(t *testing.T) {
 	_ = os.WriteFile(pbPath, []byte("protobuf-data"), 0644)
 
 	pool := NewWorkerPool(WorkerPoolConfig{
+		SessionManager: session.New(tmpDir, ""),
 		DB:             database,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
@@ -6986,8 +6949,6 @@ func TestProcessBurst_ColdStart429_RetriesTransiently(t *testing.T) {
 
 func TestProcessBurst_NonTransient_FailsFastOnAttempt1(t *testing.T) {
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-	t.Setenv("USERPROFILE", tmpDir)
 
 	database, err := db.InitDB(":memory:")
 	if err != nil {
@@ -7004,6 +6965,7 @@ func TestProcessBurst_NonTransient_FailsFastOnAttempt1(t *testing.T) {
 	doneCh := make(chan struct{}, 1)
 
 	pool := NewWorkerPool(WorkerPoolConfig{
+		SessionManager: session.New(tmpDir, ""),
 		DB:             database,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
@@ -7067,8 +7029,6 @@ func TestProcessBurst_NonTransient_FailsFastOnAttempt1(t *testing.T) {
 
 func TestProcessBurst_Exit0_NonTransientJSON_FailsFastOnAttempt1(t *testing.T) {
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-	t.Setenv("USERPROFILE", tmpDir)
 
 	database, err := db.InitDB(":memory:")
 	if err != nil {
@@ -7081,6 +7041,7 @@ func TestProcessBurst_Exit0_NonTransientJSON_FailsFastOnAttempt1(t *testing.T) {
 	doneCh := make(chan struct{}, 1)
 
 	pool := NewWorkerPool(WorkerPoolConfig{
+		SessionManager: session.New(tmpDir, ""),
 		DB:             database,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
@@ -7129,8 +7090,6 @@ func TestProcessBurst_Exit0_NonTransientJSON_FailsFastOnAttempt1(t *testing.T) {
 
 func TestProcessBurst_UnknownError_RetriesTransientByDefault(t *testing.T) {
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-	t.Setenv("USERPROFILE", tmpDir)
 
 	database, err := db.InitDB(":memory:")
 	if err != nil {
@@ -7148,6 +7107,7 @@ func TestProcessBurst_UnknownError_RetriesTransientByDefault(t *testing.T) {
 	_ = os.WriteFile(pbPath, []byte("protobuf-data"), 0644)
 
 	pool := NewWorkerPool(WorkerPoolConfig{
+		SessionManager: session.New(tmpDir, ""),
 		DB:             database,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
@@ -7202,8 +7162,6 @@ func TestProcessBurst_UnknownError_RetriesTransientByDefault(t *testing.T) {
 
 func TestProcessBurst_ColdStartContextWindow_FailsFast(t *testing.T) {
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-	t.Setenv("USERPROFILE", tmpDir)
 
 	database, err := db.InitDB(":memory:")
 	if err != nil {
@@ -7216,6 +7174,7 @@ func TestProcessBurst_ColdStartContextWindow_FailsFast(t *testing.T) {
 	doneCh := make(chan struct{}, 1)
 
 	pool := NewWorkerPool(WorkerPoolConfig{
+		SessionManager: session.New(tmpDir, ""),
 		DB:             database,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
@@ -7426,8 +7385,6 @@ func TestProcessBurst_Staleness_ExistingSessionRecentDiskActivity_Retained(t *te
 	defer func() { _ = database.Close() }()
 
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-	t.Setenv("USERPROFILE", tmpDir)
 
 	threadID := "thread-burst-disk-active"
 	sessionID := "sess-burst-disk-active"
@@ -7448,6 +7405,7 @@ func TestProcessBurst_Staleness_ExistingSessionRecentDiskActivity_Retained(t *te
 	doneCh := make(chan struct{})
 
 	pool := NewWorkerPool(WorkerPoolConfig{
+		SessionManager: session.New(tmpDir, ""),
 		DB:             database,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
@@ -8218,6 +8176,7 @@ func TestWorkerPool_EffortRouting(t *testing.T) {
 	doneCh := make(chan struct{}, 2)
 
 	pool := New(appCfg, WorkerPoolConfig{
+		SessionManager: session.New(t.TempDir(), ""),
 		DB: database,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			mu.Lock()

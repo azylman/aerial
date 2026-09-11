@@ -1790,6 +1790,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 			watchdogOpts := runner.DefaultWatchdogOptions(currentTimeout)
 			if p.sessionMgr != nil {
 				watchdogOpts.TranscriptDirs = p.sessionMgr.Roots()
+				watchdogOpts.HomeDir = p.sessionMgr.HomeDir()
 			}
 			if statusUpdater != nil {
 				statusUpdater.MarkTurnStarted()

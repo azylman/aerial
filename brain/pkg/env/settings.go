@@ -6,10 +6,14 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // SyncSettings writes ~/.gemini/antigravity-cli/settings.json matching the authentication mode.
 func (p *Provisioner) SyncSettings(apiKey, model string) error {
+	if p == nil || p.homeDir == "" {
+		return nil
+	}
 	configDir := filepath.Join(p.homeDir, ".gemini", "antigravity-cli")
 	if err := os.MkdirAll(configDir, 0755); err != nil {
 		return fmt.Errorf("failed to create config directory: %w", err)
@@ -50,12 +54,16 @@ func (p *Provisioner) SyncSettings(apiKey, model string) error {
 	return p.writeAtomic(settingsPath, string(updatedData))
 }
 
-// EnsureAgySettings is a convenience helper for callers without an explicit Provisioner instance (e.g. runner.go).
+// EnsureAgySettings is a deprecated no-op helper for callers without an explicit home directory.
 func EnsureAgySettings(apiKey, model string) error {
-	return New("", "").SyncSettings(apiKey, model)
+	return EnsureAgySettingsForHome("", apiKey, model)
 }
 
 // EnsureAgySettingsForHome configures settings.json under a specific home directory.
 func EnsureAgySettingsForHome(homeDir, apiKey, model string) error {
-	return New(homeDir, "").SyncSettings(apiKey, model)
+	cleanHome := strings.TrimSpace(homeDir)
+	if cleanHome == "" {
+		return nil
+	}
+	return New(cleanHome, "").SyncSettings(apiKey, model)
 }
