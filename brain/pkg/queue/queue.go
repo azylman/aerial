@@ -194,6 +194,7 @@ type WorkerPoolConfig struct {
 	Classifier     *classifier.Classifier
 	StalenessTTL   time.Duration
 	IdleTimeout    time.Duration
+	DrainTimeout   time.Duration
 
 	// Optional hooks for testing/custom overrides
 	RunnerFunc           func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error)
@@ -259,6 +260,9 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 	}
 	if cfg.StalenessTTL <= 0 {
 		cfg.StalenessTTL = 30 * time.Minute
+	}
+	if cfg.DrainTimeout <= 0 {
+		cfg.DrainTimeout = 10 * time.Second
 	}
 	if cfg.RunnerWithOptionsFunc == nil && cfg.RunnerFunc != nil {
 		cfg.RunnerWithOptionsFunc = func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
@@ -481,7 +485,10 @@ func (p *WorkerPool) StopWithTimeout(drainTimeout time.Duration) {
 	p.mu.Unlock()
 
 	if drainTimeout <= 0 {
-		drainTimeout = 10 * time.Second
+		drainTimeout = p.cfg.DrainTimeout
+		if drainTimeout <= 0 {
+			drainTimeout = 10 * time.Second
+		}
 	}
 
 	// Stage 1: Wait up to drainTimeout for pending messages and in-flight bursts to finish
@@ -522,7 +529,7 @@ func (p *WorkerPool) StopWithTimeout(drainTimeout time.Duration) {
 }
 
 func (p *WorkerPool) Stop() {
-	p.StopWithTimeout(10 * time.Second)
+	p.StopWithTimeout(p.cfg.DrainTimeout)
 	log.Printf("[WorkerPool] Queue worker pool stopped cleanly")
 }
 
