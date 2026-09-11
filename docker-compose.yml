@@ -111,6 +111,7 @@ services:
       - PORT=8080
       - GITHUB_PAT=${GITHUB_PAT}
       - AERIAL_CONFIG_REPO_URL=${AERIAL_CONFIG_REPO_URL}
+      - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN}
       - SYNC_INTERVAL=60s
       - SYNC_REPOS=/share/aerial-config,/share/aerial
       - AERIAL_PROJECT_DIR=/share/aerial

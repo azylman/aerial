@@ -1191,3 +1191,465 @@ func TestComposeGraph_NoGitsyncDependents(t *testing.T) {
 		}
 	}
 }
+
+func TestAutomatedRollback_OnValidationFailure(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// Initialize git repo with 2 commits
+	_ = exec.Command("git", "init", "-b", "main", tempDir).Run()
+	_ = exec.Command("git", "-C", tempDir, "config", "user.name", "Test").Run()
+	_ = exec.Command("git", "-C", tempDir, "config", "user.email", "test@example.com").Run()
+
+	composePath := filepath.Join(tempDir, "docker-compose.yml")
+	_ = os.WriteFile(composePath, []byte("services:\n  brain:\n    image: aerial-brain:v1\n"), 0644)
+	_ = exec.Command("git", "-C", tempDir, "add", "-A").Run()
+	_ = exec.Command("git", "-C", tempDir, "commit", "-m", "Valid compose v1").Run()
+
+	ctx := context.Background()
+	head1, _, err := getRepoCommit(ctx, tempDir, "HEAD", "")
+	if err != nil {
+		t.Fatalf("failed to get commit 1: %v", err)
+	}
+
+	_ = os.WriteFile(composePath, []byte("services:\n  brain:\n    image: aerial-brain:v2\n    bad: [invalid\n"), 0644)
+	_ = exec.Command("git", "-C", tempDir, "add", "-A").Run()
+	_ = exec.Command("git", "-C", tempDir, "commit", "-m", "Invalid compose v2").Run()
+
+	head2, _, err := getRepoCommit(ctx, tempDir, "HEAD", "")
+	if err != nil {
+		t.Fatalf("failed to get commit 2: %v", err)
+	}
+
+	setupMockDocker(t)
+	t.Setenv("MOCK_VAL_FAIL", "1")
+
+	daemon := NewDaemon(DaemonConfig{
+		ComposeDir: tempDir,
+		Repos:      []string{tempDir},
+	})
+	daemon.recordPendingChange(ComposeChangeEvent{
+		RepoPath:     tempDir,
+		PreviousHead: head1,
+		CurrentHead:  head2,
+		Timestamp:    time.Now(),
+	})
+
+	err = daemon.ReconcileCompose(ctx)
+	if err == nil {
+		t.Fatalf("expected ReconcileCompose to fail on validation error, got nil")
+	}
+
+	// Verify working tree was rolled back to head1
+	currentHead, _, err := getRepoCommit(ctx, tempDir, "HEAD", "")
+	if err != nil {
+		t.Fatalf("failed to get commit after rollback: %v", err)
+	}
+	if currentHead != head1 {
+		t.Errorf("expected rolled back HEAD to be %s, got %s", head1, currentHead)
+	}
+
+	// Verify head2 is quarantined
+	rec, quarantined := daemon.isQuarantined(tempDir, head2)
+	if !quarantined {
+		t.Fatalf("expected commit %s to be quarantined", head2)
+	}
+	if rec.FailureStage != "pre-flight validation" {
+		t.Errorf("expected failure stage 'pre-flight validation', got %s", rec.FailureStage)
+	}
+	if rec.PreviousHead != head1 {
+		t.Errorf("expected quarantine record previousHead %s, got %s", head1, rec.PreviousHead)
+	}
+
+	// Verify status reports quarantined
+	status := daemon.GetStatus(ctx)
+	if status.Status != "quarantined" {
+		t.Errorf("expected overall status 'quarantined', got %s", status.Status)
+	}
+	repoSt, ok := status.Repos[tempDir]
+	if !ok || !repoSt.Quarantined {
+		t.Errorf("expected repo %s to be reported as quarantined: %+v", tempDir, repoSt)
+	}
+	if repoSt.QuarantinedCommit != head2 {
+		t.Errorf("expected quarantined commit %s, got %s", head2, repoSt.QuarantinedCommit)
+	}
+}
+
+func TestAutomatedRollback_OnComposeUpFailure(t *testing.T) {
+	tempDir := t.TempDir()
+
+	_ = exec.Command("git", "init", "-b", "main", tempDir).Run()
+	_ = exec.Command("git", "-C", tempDir, "config", "user.name", "Test").Run()
+	_ = exec.Command("git", "-C", tempDir, "config", "user.email", "test@example.com").Run()
+
+	composePath := filepath.Join(tempDir, "docker-compose.yml")
+	_ = os.WriteFile(composePath, []byte("services:\n  brain:\n    image: aerial-brain:v1\n"), 0644)
+	_ = exec.Command("git", "-C", tempDir, "add", "-A").Run()
+	_ = exec.Command("git", "-C", tempDir, "commit", "-m", "Valid compose v1").Run()
+
+	ctx := context.Background()
+	head1, _, err := getRepoCommit(ctx, tempDir, "HEAD", "")
+	if err != nil {
+		t.Fatalf("failed to get commit 1: %v", err)
+	}
+
+	_ = os.WriteFile(composePath, []byte("services:\n  brain:\n    image: aerial-brain:v2\n"), 0644)
+	_ = exec.Command("git", "-C", tempDir, "add", "-A").Run()
+	_ = exec.Command("git", "-C", tempDir, "commit", "-m", "Failing compose v2").Run()
+
+	head2, _, err := getRepoCommit(ctx, tempDir, "HEAD", "")
+	if err != nil {
+		t.Fatalf("failed to get commit 2: %v", err)
+	}
+
+	setupMockDocker(t)
+	t.Setenv("MOCK_UP_FAIL", "1")
+
+	daemon := NewDaemon(DaemonConfig{
+		ComposeDir: tempDir,
+		Repos:      []string{tempDir},
+	})
+	daemon.recordPendingChange(ComposeChangeEvent{
+		RepoPath:     tempDir,
+		PreviousHead: head1,
+		CurrentHead:  head2,
+		Timestamp:    time.Now(),
+	})
+
+	err = daemon.ReconcileCompose(ctx)
+	if err == nil {
+		t.Fatalf("expected ReconcileCompose to fail on compose up, got nil")
+	}
+
+	// Verify working tree rolled back to head1
+	currentHead, _, err := getRepoCommit(ctx, tempDir, "HEAD", "")
+	if err != nil {
+		t.Fatalf("failed to get commit after rollback: %v", err)
+	}
+	if currentHead != head1 {
+		t.Errorf("expected rolled back HEAD to be %s, got %s", head1, currentHead)
+	}
+
+	// Verify head2 is quarantined with failure stage compose apply
+	rec, quarantined := daemon.isQuarantined(tempDir, head2)
+	if !quarantined {
+		t.Fatalf("expected commit %s to be quarantined", head2)
+	}
+	if rec.FailureStage != "compose apply" {
+		t.Errorf("expected failure stage 'compose apply', got %s", rec.FailureStage)
+	}
+}
+
+func TestQuarantine_PreventsPullLoop(t *testing.T) {
+	tempBase := t.TempDir()
+	bareRemote := filepath.Join(tempBase, "remote.git")
+	seedRepo := filepath.Join(tempBase, "seed")
+	localClone := filepath.Join(tempBase, "local")
+
+	// 1. Bare remote
+	if out, err := exec.Command("git", "init", "--bare", "-b", "main", bareRemote).CombinedOutput(); err != nil {
+		t.Fatalf("failed to init bare remote: %s (%v)", out, err)
+	}
+
+	// 2. Seed repo
+	_ = exec.Command("git", "init", "-b", "main", seedRepo).Run()
+	_ = exec.Command("git", "-C", seedRepo, "config", "user.name", "Seed").Run()
+	_ = exec.Command("git", "-C", seedRepo, "config", "user.email", "seed@example.com").Run()
+	_ = os.WriteFile(filepath.Join(seedRepo, "file.txt"), []byte("v1\n"), 0644)
+	_ = exec.Command("git", "-C", seedRepo, "add", "-A").Run()
+	_ = exec.Command("git", "-C", seedRepo, "commit", "-m", "commit 1").Run()
+	_ = exec.Command("git", "-C", seedRepo, "remote", "add", "origin", bareRemote).Run()
+	_ = exec.Command("git", "-C", seedRepo, "push", "-u", "origin", "main").Run()
+
+	// 3. Setup local clone
+	daemon := NewDaemon(DaemonConfig{
+		Repos:    []string{localClone},
+		RepoURLs: map[string]string{localClone: bareRemote},
+	})
+	ctx := context.Background()
+	if err := daemon.EnsureRepo(ctx, localClone, bareRemote); err != nil {
+		t.Fatalf("EnsureRepo failed: %v", err)
+	}
+
+	head1, _, err := getRepoCommit(ctx, localClone, "HEAD", "")
+	if err != nil {
+		t.Fatalf("failed to get head1: %v", err)
+	}
+
+	// 4. Commit 2 to seed and push to bare remote
+	_ = os.WriteFile(filepath.Join(seedRepo, "file.txt"), []byte("v2 bad commit\n"), 0644)
+	_ = exec.Command("git", "-C", seedRepo, "add", "-A").Run()
+	_ = exec.Command("git", "-C", seedRepo, "commit", "-m", "commit 2 bad").Run()
+	_ = exec.Command("git", "-C", seedRepo, "push", "origin", "main").Run()
+
+	head2, _, err := getRepoCommit(ctx, seedRepo, "HEAD", "")
+	if err != nil {
+		t.Fatalf("failed to get head2: %v", err)
+	}
+
+	// 5. Quarantine commit 2 in daemon
+	daemon.quarantineCommit(localClone, head2, head1, "pre-flight validation", "broken syntax")
+
+	// 6. Attempt sync: should skip pull and return error mentioning quarantine
+	res := daemon.SyncRepo(ctx, localClone)
+	if !strings.Contains(res.Error, "quarantined") {
+		t.Errorf("expected sync to be blocked by quarantine, got error: %q", res.Error)
+	}
+
+	// Verify local clone is STILL at head1
+	currentHead, _, _ := getRepoCommit(ctx, localClone, "HEAD", "")
+	if currentHead != head1 {
+		t.Errorf("expected local clone to remain at %s, but advanced to %s", head1, currentHead)
+	}
+
+	// 7. Seed advances to commit 3 (clean fix)
+	_ = os.WriteFile(filepath.Join(seedRepo, "file.txt"), []byte("v3 good fix\n"), 0644)
+	_ = exec.Command("git", "-C", seedRepo, "add", "-A").Run()
+	_ = exec.Command("git", "-C", seedRepo, "commit", "-m", "commit 3 good").Run()
+	_ = exec.Command("git", "-C", seedRepo, "push", "origin", "main").Run()
+
+	head3, _, _ := getRepoCommit(ctx, seedRepo, "HEAD", "")
+
+	// 8. Attempt sync: should succeed, advance to head3, and clear quarantine for head2
+	res2 := daemon.SyncRepo(ctx, localClone)
+	if res2.Error != "" {
+		t.Fatalf("expected successful sync after upstream fix, got: %s", res2.Error)
+	}
+	if !res2.Changed {
+		t.Errorf("expected changed=true after syncing head3")
+	}
+	currentHead2, _, _ := getRepoCommit(ctx, localClone, "HEAD", "")
+	if currentHead2 != head3 {
+		t.Errorf("expected local clone to advance to %s, got %s", head3, currentHead2)
+	}
+
+	// Verify quarantine for head2 was cleared
+	if _, isQ := daemon.isQuarantined(localClone, head2); isQ {
+		t.Errorf("expected quarantine for head2 to be cleared after clean advance to head3")
+	}
+}
+
+type urlRewritingTransport struct {
+	targetBase string
+}
+
+func (t *urlRewritingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	// Rewrite https://discord.com to targetBase
+	if strings.HasPrefix(req.URL.String(), "https://discord.com") {
+		rewritten := strings.Replace(req.URL.String(), "https://discord.com", t.targetBase, 1)
+		newReq, err := http.NewRequestWithContext(req.Context(), req.Method, rewritten, req.Body)
+		if err != nil {
+			return nil, err
+		}
+		newReq.Header = req.Header
+		return http.DefaultTransport.RoundTrip(newReq)
+	}
+	return http.DefaultTransport.RoundTrip(req)
+}
+
+func TestDiscordAlert_FormattingAndTruncation(t *testing.T) {
+	var receivedPayloads []map[string]interface{}
+	var mu sync.Mutex
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		if strings.Contains(r.URL.Path, "webhook") {
+			var payload map[string]interface{}
+			_ = json.NewDecoder(r.Body).Decode(&payload)
+			receivedPayloads = append(receivedPayloads, payload)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		if strings.HasSuffix(r.URL.Path, "/guilds") {
+			_ = json.NewEncoder(w).Encode([]map[string]string{
+				{"id": "guild_123"},
+			})
+			return
+		}
+
+		if strings.HasSuffix(r.URL.Path, "/channels") && r.Method == http.MethodGet {
+			_ = json.NewEncoder(w).Encode([]map[string]interface{}{
+				{"id": "chan_456", "name": "aerial-dev", "type": 0},
+			})
+			return
+		}
+
+		if strings.Contains(r.URL.Path, "/channels/chan_456/messages") || strings.Contains(r.URL.Path, "/channels/snowflake_789/messages") {
+			var payload map[string]interface{}
+			_ = json.NewDecoder(r.Body).Decode(&payload)
+			receivedPayloads = append(receivedPayloads, payload)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	customClient := &http.Client{
+		Transport: &urlRewritingTransport{targetBase: srv.URL},
+		Timeout:   5 * time.Second,
+	}
+
+	daemon := NewDaemon(DaemonConfig{
+		DiscordWebhookURL: srv.URL + "/webhook",
+	})
+	daemon.alertHTTPClient = customClient
+
+	// 1. Send alert via webhook with large error (>1200 chars) and sensitive secrets
+	longError := "sensitive token ghp_1234567890abcdef1234567890abcdef12 and secret\n" + strings.Repeat("error detail line with some context\n", 40)
+	ctx := context.Background()
+
+	daemon.SendDiscordAlert(ctx, "Test Rollback", "/share/aerial", "badsha123", "goodsha456", "compose apply", longError)
+
+	mu.Lock()
+	if len(receivedPayloads) != 1 {
+		t.Fatalf("expected 1 webhook payload, got %d", len(receivedPayloads))
+	}
+	content := receivedPayloads[0]["content"].(string)
+	mu.Unlock()
+
+	if !strings.Contains(content, "🚨 **GitSync GitOps Rollback Alert: Test Rollback**") {
+		t.Errorf("expected alert header in payload, got: %s", content)
+	}
+	if !strings.Contains(content, "[... truncated for length]") {
+		t.Errorf("expected error truncation marker in payload")
+	}
+	if strings.Contains(content, "ghp_1234567890abcdef1234567890abcdef12") {
+		t.Errorf("expected token to be scrubbed, but found in payload")
+	}
+	if !strings.Contains(content, "[REDACTED_TOKEN]") {
+		t.Errorf("expected [REDACTED_TOKEN] in payload")
+	}
+
+	// 2. Deduplication: Send identical alert within 15 minutes
+	daemon.SendDiscordAlert(ctx, "Test Rollback", "/share/aerial", "badsha123", "goodsha456", "compose apply", longError)
+	mu.Lock()
+	if len(receivedPayloads) != 1 {
+		t.Errorf("expected alert to be deduplicated (count=1), got count=%d", len(receivedPayloads))
+	}
+	mu.Unlock()
+
+	// 3. Test Bot token and channel name resolution
+	daemonBot := NewDaemon(DaemonConfig{
+		DiscordToken:   "my-bot-token",
+		DiscordChannel: "aerial-dev",
+	})
+	daemonBot.alertHTTPClient = customClient
+
+	daemonBot.SendDiscordAlert(ctx, "Bot API Alert", "/share/aerial", "badsha789", "goodsha000", "pre-flight validation", "syntax error")
+	mu.Lock()
+	if len(receivedPayloads) != 2 {
+		t.Fatalf("expected 2 total payloads after bot alert, got %d", len(receivedPayloads))
+	}
+	botContent := receivedPayloads[1]["content"].(string)
+	mu.Unlock()
+
+	if !strings.Contains(botContent, "badsha789") {
+		t.Errorf("expected faulty commit in bot alert, got: %s", botContent)
+	}
+
+	// 4. Test direct snowflake channel ID
+	daemonSnowflake := NewDaemon(DaemonConfig{
+		DiscordToken:   "my-bot-token",
+		DiscordChannel: "123456789012345678",
+	})
+	daemonSnowflake.alertHTTPClient = customClient
+	if !isSnowflake(daemonSnowflake.discordChannel) {
+		t.Errorf("expected 123456789012345678 to be recognized as snowflake")
+	}
+}
+
+func TestResolveAlertChannel_DynamicFromConfig(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// 1. Explicit daemon config field overrides everything
+	d1 := NewDaemon(DaemonConfig{
+		DiscordChannel: "override-channel",
+		ConfigDir:      tempDir,
+	})
+	if ch := d1.ResolveAlertChannel(); ch != "override-channel" {
+		t.Errorf("expected 'override-channel', got %q", ch)
+	}
+
+	// 2. DISCORD_CHANNEL env var
+	t.Setenv("DISCORD_CHANNEL", "env-channel")
+	d2 := NewDaemon(DaemonConfig{
+		ConfigDir: tempDir,
+	})
+	if ch := d2.ResolveAlertChannel(); ch != "env-channel" {
+		t.Errorf("expected 'env-channel', got %q", ch)
+	}
+	t.Setenv("DISCORD_CHANNEL", "")
+
+	// 3. Dynamic read from config.yaml in ConfigDir
+	configContent := "system_channel: \"ops-alerts\"\ntimezone: \"America/Los_Angeles\"\n"
+	_ = os.WriteFile(filepath.Join(tempDir, "config.yaml"), []byte(configContent), 0644)
+	d3 := NewDaemon(DaemonConfig{
+		ConfigDir: tempDir,
+	})
+	if ch := d3.ResolveAlertChannel(); ch != "ops-alerts" {
+		t.Errorf("expected 'ops-alerts' from config.yaml, got %q", ch)
+	}
+
+	// 4. Invalid YAML falls back to "aerial-dev"
+	tempDirBad := t.TempDir()
+	_ = os.WriteFile(filepath.Join(tempDirBad, "config.yaml"), []byte("invalid: [yaml\n"), 0644)
+	d4 := NewDaemon(DaemonConfig{
+		ConfigDir: tempDirBad,
+	})
+	if ch := d4.ResolveAlertChannel(); ch != "aerial-dev" {
+		t.Errorf("expected fallback 'aerial-dev' on invalid yaml, got %q", ch)
+	}
+
+	// 5. Missing config.yaml falls back to "aerial-dev"
+	tempDirEmpty := t.TempDir()
+	d5 := NewDaemon(DaemonConfig{
+		ConfigDir: tempDirEmpty,
+	})
+	if ch := d5.ResolveAlertChannel(); ch != "aerial-dev" {
+		t.Errorf("expected fallback 'aerial-dev' on missing config.yaml, got %q", ch)
+	}
+}
+
+func TestRepoLock_ThreadSafety(t *testing.T) {
+	daemon := NewDaemon(DaemonConfig{})
+
+	pathA := filepath.Clean("/share/aerial")
+	pathB := filepath.Clean("/share/aerial-config")
+
+	lockA1 := daemon.getRepoLock(pathA)
+	lockA2 := daemon.getRepoLock(pathA)
+	lockB := daemon.getRepoLock(pathB)
+
+	if lockA1 != lockA2 {
+		t.Errorf("expected identical mutex pointer for same repo path, got %p vs %p", lockA1, lockA2)
+	}
+	if lockA1 == lockB {
+		t.Errorf("expected distinct mutex pointers for different repo paths")
+	}
+
+	// Concurrent lock test
+	var wg sync.WaitGroup
+	iterations := 50
+	counter := 0
+
+	for i := 0; i < iterations; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			l := daemon.getRepoLock(pathA)
+			l.Lock()
+			counter++
+			l.Unlock()
+		}()
+	}
+	wg.Wait()
+
+	if counter != iterations {
+		t.Errorf("expected counter %d, got %d", iterations, counter)
+	}
+}
+
