@@ -260,10 +260,15 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 		cfg.StalenessTTL = 30 * time.Minute
 	}
 	if cfg.RunnerFunc == nil {
-		cfg.RunnerFunc = runner.RunAgy
+		cfg.RunnerFunc = func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			return "", "", 1, fmt.Errorf("queue: RunnerFunc not configured on WorkerPool")
+		}
 	}
 	if cfg.NotifierFunc == nil {
-		cfg.NotifierFunc = notifier.GenerateDynamicNotification
+		runnerFn := cfg.RunnerFunc
+		cfg.NotifierFunc = func(agyBin, apiKey, contextDescription string) string {
+			return notifier.GenerateDynamicNotification(agyBin, apiKey, contextDescription, runnerFn)
+		}
 	}
 	if cfg.DeliveryWithAttachmentsFunc == nil {
 		if cfg.DeliveryFunc != nil {
@@ -288,9 +293,6 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 	}
 	if cfg.Classifier == nil {
 		runnerFn := cfg.RunnerFunc
-		if runnerFn == nil {
-			runnerFn = runner.RunAgy
-		}
 		apiKey := cfg.APIKey
 		agyBin := cfg.AgyBin
 		if appCfg != nil {
@@ -2049,7 +2051,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 			for _, m := range burst {
 				_ = db.IncrementMessageRetry(p.cfg.DB, m.ID, errDetail)
 			}
-			notif := notifier.GenerateSessionResetMessage(currentAgyBin, currentAPIKey)
+			notif := p.cfg.NotifierFunc(currentAgyBin, currentAPIKey, "session reset due to context corruption")
 			if !skipDiscord {
 				if err := p.cfg.DeliveryFunc(p.getDiscordSession(), threadID, notif); err != nil {
 					log.Printf("[WorkerPool] Failed to deliver session reset notice for thread %s: %v", threadID, err)
@@ -2271,7 +2273,11 @@ func RecoverInterrupted(database *sql.DB, pool *WorkerPool) {
 					}
 				}
 			}
-			notif := notifier.GeneratePoisonPillMessage(agyBin, apiKey, snippet)
+			desc := "a message caused repeated crashes and had to be dropped"
+			if strings.TrimSpace(snippet) != "" {
+				desc = fmt.Sprintf("a message caused repeated crashes and had to be dropped (message snippet: %q)", snippet)
+			}
+			notif := pool.cfg.NotifierFunc(agyBin, apiKey, desc)
 			if m.AuthorID != "http-client" {
 				if err := pool.cfg.DeliveryFunc(pool.getDiscordSession(), m.ThreadID, notif); err != nil {
 					log.Printf("[Startup Recovery] Failed to deliver poison pill notice for message %s: %v", m.ID, err)

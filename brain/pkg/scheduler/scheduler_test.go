@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -1288,26 +1287,16 @@ func TestProcessDueSchedules_DueCronWithInvalidCronExpr(t *testing.T) {
 }
 
 func TestExtractFactsLLM_SuccessAndModelOverride(t *testing.T) {
-	tmpDir := t.TempDir()
-	var mockAgy string
-	if runtime.GOOS == "windows" {
-		mockAgy = filepath.Join(tmpDir, "mock_agy.bat")
-		if err := os.WriteFile(mockAgy, []byte("@echo off\r\necho {\"status\":\"SUCCESS\",\"response\":\"extracted facts json\"}\r\n"), 0755); err != nil {
-			t.Fatalf("failed to write mock script: %v", err)
-		}
-	} else {
-		mockAgy = filepath.Join(tmpDir, "mock_agy.sh")
-		if err := os.WriteFile(mockAgy, []byte("#!/bin/sh\necho '{\"status\":\"SUCCESS\",\"response\":\"extracted facts json\"}'\n"), 0755); err != nil {
-			t.Fatalf("failed to write mock script: %v", err)
-		}
-	}
-
 	cfg := config.NewFromData(&config.ConfigData{
-		AgyBin: mockAgy,
 		APIKey: "mock_key",
 		Model:  "gemini-1.5-pro-custom",
 	})
-	sched := New(cfg, nil, nil, nil)
+	sched := New(cfg, nil, nil, nil, WithRunnerFunc(func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+		if model != "gemini-1.5-pro-custom" {
+			return "", "", 1, fmt.Errorf("expected model gemini-1.5-pro-custom, got %s", model)
+		}
+		return `{"status":"SUCCESS","response":"extracted facts json"}`, "", 0, nil
+	}))
 
 	res, err := sched.ExtractFactsLLM(context.Background(), "test prompt")
 	if err != nil {
@@ -1317,31 +1306,23 @@ func TestExtractFactsLLM_SuccessAndModelOverride(t *testing.T) {
 		t.Errorf("expected 'extracted facts json', got %q", res)
 	}
 
-	// Also verify package compatibility wrapper
-	_, _ = ExtractFactsLLM(context.Background(), "test prompt")
+	// Verify package compatibility wrapper returns error when unconfigured
+	if _, err := ExtractFactsLLM(context.Background(), "test prompt"); err == nil {
+		t.Errorf("expected error from unconfigured package ExtractFactsLLM")
+	}
 }
 
 func TestExtractFactsLLM_DefaultModel(t *testing.T) {
-	tmpDir := t.TempDir()
-	var mockAgy string
-	if runtime.GOOS == "windows" {
-		mockAgy = filepath.Join(tmpDir, "mock_agy.bat")
-		if err := os.WriteFile(mockAgy, []byte("@echo off\r\necho {\"status\":\"SUCCESS\",\"response\":\"default model result\"}\r\n"), 0755); err != nil {
-			t.Fatalf("failed to write mock script: %v", err)
-		}
-	} else {
-		mockAgy = filepath.Join(tmpDir, "mock_agy.sh")
-		if err := os.WriteFile(mockAgy, []byte("#!/bin/sh\necho '{\"status\":\"SUCCESS\",\"response\":\"default model result\"}'\n"), 0755); err != nil {
-			t.Fatalf("failed to write mock script: %v", err)
-		}
-	}
-
 	cfg := config.NewFromData(&config.ConfigData{
-		AgyBin: mockAgy,
 		APIKey: "mock_key",
 		Model:  "gemini-2.5-flash",
 	})
-	sched := New(cfg, nil, nil, nil)
+	sched := New(cfg, nil, nil, nil, WithRunnerFunc(func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+		if model != "gemini-2.5-flash" {
+			return "", "", 1, fmt.Errorf("expected model gemini-2.5-flash, got %s", model)
+		}
+		return `{"status":"SUCCESS","response":"default model result"}`, "", 0, nil
+	}))
 
 	res, err := sched.ExtractFactsLLM(context.Background(), "test prompt")
 	if err != nil {
@@ -1353,39 +1334,21 @@ func TestExtractFactsLLM_DefaultModel(t *testing.T) {
 }
 
 func TestExtractFactsLLM_Errors(t *testing.T) {
-	tmpDir := t.TempDir()
-	// 1. Script fails with exit code 1
-	var mockFailAgy, mockBadJsonAgy string
-	if runtime.GOOS == "windows" {
-		mockFailAgy = filepath.Join(tmpDir, "mock_fail_agy.bat")
-		if err := os.WriteFile(mockFailAgy, []byte("@echo fatal error >&2\r\nexit /b 1\r\n"), 0755); err != nil {
-			t.Fatalf("failed to write mock script: %v", err)
-		}
-		mockBadJsonAgy = filepath.Join(tmpDir, "mock_bad_json.bat")
-		if err := os.WriteFile(mockBadJsonAgy, []byte("@echo off\r\necho not-json\r\n"), 0755); err != nil {
-			t.Fatalf("failed to write mock script: %v", err)
-		}
-	} else {
-		mockFailAgy = filepath.Join(tmpDir, "mock_fail_agy.sh")
-		if err := os.WriteFile(mockFailAgy, []byte("#!/bin/sh\necho 'fatal error' >&2\nexit 1\n"), 0755); err != nil {
-			t.Fatalf("failed to write mock script: %v", err)
-		}
-		mockBadJsonAgy = filepath.Join(tmpDir, "mock_bad_json.sh")
-		if err := os.WriteFile(mockBadJsonAgy, []byte("#!/bin/sh\necho 'not-json'\n"), 0755); err != nil {
-			t.Fatalf("failed to write mock script: %v", err)
-		}
-	}
-
-	cfgFail := config.NewFromData(&config.ConfigData{AgyBin: mockFailAgy})
-	schedFail := New(cfgFail, nil, nil, nil)
+	// 1. Runner fails with nonzero exit code
+	cfgFail := config.NewFromData(&config.ConfigData{Model: "test-model"})
+	schedFail := New(cfgFail, nil, nil, nil, WithRunnerFunc(func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+		return "", "fatal error", 1, fmt.Errorf("exit 1")
+	}))
 	_, err := schedFail.ExtractFactsLLM(context.Background(), "prompt")
 	if err == nil {
 		t.Error("expected error on nonzero exit code")
 	}
 
-	// 2. Script returns invalid JSON
-	cfgBad := config.NewFromData(&config.ConfigData{AgyBin: mockBadJsonAgy})
-	schedBad := New(cfgBad, nil, nil, nil)
+	// 2. Runner returns invalid JSON
+	cfgBad := config.NewFromData(&config.ConfigData{Model: "test-model"})
+	schedBad := New(cfgBad, nil, nil, nil, WithRunnerFunc(func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+		return "not-json", "", 0, nil
+	}))
 	_, err = schedBad.ExtractFactsLLM(context.Background(), "prompt")
 	if err == nil {
 		t.Error("expected error on invalid JSON output")
@@ -1393,42 +1356,23 @@ func TestExtractFactsLLM_Errors(t *testing.T) {
 }
 
 func TestExtractFactsLLM_PrefersLowEffortModel(t *testing.T) {
-	tmpDir := t.TempDir()
-	var mockAgy string
-	logFile := filepath.Join(tmpDir, "args.log")
-	if runtime.GOOS == "windows" {
-		mockAgy = filepath.Join(tmpDir, "mock_agy.bat")
-		content := fmt.Sprintf("@echo off\r\necho %%* > \"%s\"\r\necho {\"status\":\"SUCCESS\",\"response\":\"ok\"}\r\n", logFile)
-		if err := os.WriteFile(mockAgy, []byte(content), 0755); err != nil {
-			t.Fatalf("failed to write mock script: %v", err)
-		}
-	} else {
-		mockAgy = filepath.Join(tmpDir, "mock_agy.sh")
-		content := fmt.Sprintf("#!/bin/sh\necho \"$@\" > '%s'\necho '{\"status\":\"SUCCESS\",\"response\":\"ok\"}'\n", logFile)
-		if err := os.WriteFile(mockAgy, []byte(content), 0755); err != nil {
-			t.Fatalf("failed to write mock script: %v", err)
-		}
-	}
-
 	cfg := config.NewFromData(&config.ConfigData{
-		AgyBin:         mockAgy,
 		APIKey:         "mock_key",
 		Model:          "high-effort-model",
 		LowEffortModel: "low-effort-model",
 	})
-	sched := New(cfg, nil, nil, nil)
+	var capturedModel string
+	sched := New(cfg, nil, nil, nil, WithRunnerFunc(func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+		capturedModel = model
+		return `{"status":"SUCCESS","response":"ok"}`, "", 0, nil
+	}))
 
 	_, err := sched.ExtractFactsLLM(context.Background(), "test prompt")
 	if err != nil {
 		t.Fatalf("ExtractFactsLLM failed: %v", err)
 	}
-
-	loggedArgs, err := os.ReadFile(logFile)
-	if err != nil {
-		t.Fatalf("failed to read logged args: %v", err)
-	}
-	if !strings.Contains(string(loggedArgs), "low-effort-model") {
-		t.Errorf("expected agy args to contain 'low-effort-model', got %q", string(loggedArgs))
+	if capturedModel != "low-effort-model" {
+		t.Errorf("expected low-effort-model, got %q", capturedModel)
 	}
 }
 

@@ -41,29 +41,34 @@ func TestNew_ConfigPointerInjection(t *testing.T) {
 	defer database.Close()
 }
 
-func TestInitDB_PostgresAirgap(t *testing.T) {
-	// 1. Prohibited by default in test environment
-	cfgPg := config.NewFromData(&config.ConfigData{DatabaseURL: "postgres://aerial:aerial@localhost:5432/aerial"})
-	_, err := New(cfgPg)
-	if err == nil {
-		t.Fatalf("expected error connecting to PostgreSQL in test environment, got nil")
-	}
-	if !strings.Contains(err.Error(), "prohibited in test environments") {
-		t.Errorf("expected prohibited error message, got: %v", err)
-	}
-
-	// 2. Allowed when AERIAL_ALLOW_TEST_POSTGRES=1 is set (passes airgap, reaches pgx.ParseConfig immediately)
-	t.Setenv("AERIAL_ALLOW_TEST_POSTGRES", "1")
+func TestInitDB_PostgresValidation(t *testing.T) {
+	// 1. Rejects invalid PostgreSQL connection string syntax via pgx.ParseConfig
 	cfgBadSyntax := config.NewFromData(&config.ConfigData{DatabaseURL: "postgres://invalid user@localhost:5432/aerial"})
 	_, errBadSyntax := New(cfgBadSyntax)
 	if errBadSyntax == nil {
 		t.Fatalf("expected parse error, got nil")
 	}
-	if strings.Contains(errBadSyntax.Error(), "prohibited in test environments") {
-		t.Errorf("expected airgap to be bypassed, but got airgap error: %v", errBadSyntax)
-	}
 	if !strings.Contains(errBadSyntax.Error(), "invalid postgres connection string") {
 		t.Errorf("expected invalid postgres connection string error, got: %v", errBadSyntax)
+	}
+
+	// 2. Unreachable PostgreSQL host fails connection retry loop
+	origAttempts := postgresMaxAttempts
+	origBase := postgresRetryBase
+	postgresMaxAttempts = 1
+	postgresRetryBase = 1 * time.Millisecond
+	defer func() {
+		postgresMaxAttempts = origAttempts
+		postgresRetryBase = origBase
+	}()
+
+	cfgUnreachable := config.NewFromData(&config.ConfigData{DatabaseURL: "postgres://user:pass@127.0.0.1:54399/nonexistent?sslmode=disable&connect_timeout=1"})
+	_, errUnreachable := New(cfgUnreachable)
+	if errUnreachable == nil {
+		t.Fatalf("expected error connecting to unreachable PostgreSQL host, got nil")
+	}
+	if !strings.Contains(errUnreachable.Error(), "could not connect to PostgreSQL after retries") {
+		t.Errorf("expected connection failure error, got: %v", errUnreachable)
 	}
 }
 

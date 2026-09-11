@@ -12,13 +12,7 @@ import (
 )
 
 func TestInitDBErrorBranchesAndSQLitePathCreation(t *testing.T) {
-	// 1. Postgres prohibited in test environment by default
-	if _, err := initDB("postgres://user:pass@localhost:5432/db"); err == nil {
-		t.Errorf("expected error when AERIAL_ALLOW_TEST_POSTGRES is not set, got nil")
-	}
-
-	// 2. Invalid postgres connection string when allowed
-	t.Setenv("AERIAL_ALLOW_TEST_POSTGRES", "1")
+	// 1. Invalid postgres connection string
 	if _, err := initDB("postgres://invalid user@localhost:5432/db"); err == nil {
 		t.Errorf("expected pgx parse error for invalid postgres string, got nil")
 	}

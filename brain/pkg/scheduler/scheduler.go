@@ -58,10 +58,21 @@ type Scheduler struct {
 	store         db.Store
 	enqueuer      MessageEnqueuer
 	threadCreator ThreadCreator
+	runnerFn      runner.RunnerFunc
+}
+
+// Option configures Scheduler options.
+type Option func(*Scheduler)
+
+// WithRunnerFunc sets the runner.RunnerFunc used by Scheduler for LLM fact extraction.
+func WithRunnerFunc(fn runner.RunnerFunc) Option {
+	return func(s *Scheduler) {
+		s.runnerFn = fn
+	}
 }
 
 // New constructs a Scheduler supporting both legacy *sql.DB and db.Store interface parameters.
-func New(cfg *config.Config, dbOrStore any, enqueuer MessageEnqueuer, threadCreator ThreadCreator) *Scheduler {
+func New(cfg *config.Config, dbOrStore any, enqueuer MessageEnqueuer, threadCreator ThreadCreator, opts ...Option) *Scheduler {
 	var database *sql.DB
 	var store db.Store
 	switch v := dbOrStore.(type) {
@@ -73,13 +84,19 @@ func New(cfg *config.Config, dbOrStore any, enqueuer MessageEnqueuer, threadCrea
 			store = db.NewSQLStore(v)
 		}
 	}
-	return &Scheduler{
+	s := &Scheduler{
 		cfg:           cfg,
 		db:            database,
 		store:         store,
 		enqueuer:      enqueuer,
 		threadCreator: threadCreator,
 	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(s)
+		}
+	}
+	return s
 }
 
 func (s *Scheduler) getStore() db.Store {
@@ -94,13 +111,13 @@ func (s *Scheduler) getStore() db.Store {
 	}
 	return nil
 }
-func NewWithStore(cfg *config.Config, store db.Store, enqueuer MessageEnqueuer, threadCreator ThreadCreator) *Scheduler {
-	return New(cfg, store, enqueuer, threadCreator)
+func NewWithStore(cfg *config.Config, store db.Store, enqueuer MessageEnqueuer, threadCreator ThreadCreator, opts ...Option) *Scheduler {
+	return New(cfg, store, enqueuer, threadCreator, opts...)
 }
 
 // NewScheduler is a compatibility wrapper for New.
-func NewScheduler(cfg *config.Config, dbOrStore any, enqueuer MessageEnqueuer, threadCreator ThreadCreator) *Scheduler {
-	return New(cfg, dbOrStore, enqueuer, threadCreator)
+func NewScheduler(cfg *config.Config, dbOrStore any, enqueuer MessageEnqueuer, threadCreator ThreadCreator, opts ...Option) *Scheduler {
+	return New(cfg, dbOrStore, enqueuer, threadCreator, opts...)
 }
 
 // FormatThreadTitle formats the thread title for a recurring cron trigger, clamped to at most 100 runes.
@@ -396,8 +413,11 @@ func Start(ctx context.Context, database *sql.DB, pool *queue.WorkerPool, dg *di
 	return New(nil, database, pool, threadCreator).Start(ctx)
 }
 
-// ExtractFactsLLM extracts facts using the primary LLM via runner.RunAgy.
+// ExtractFactsLLM extracts facts using the primary LLM via the configured runner function.
 func (s *Scheduler) ExtractFactsLLM(ctx context.Context, prompt string) (string, error) {
+	if s == nil || s.runnerFn == nil {
+		return "", fmt.Errorf("scheduler: RunnerFunc not configured for fact extraction")
+	}
 	apiKey := ""
 	model := ""
 	agyBin := ""
@@ -424,7 +444,7 @@ func (s *Scheduler) ExtractFactsLLM(ctx context.Context, prompt string) (string,
 	if agyBin == "" {
 		agyBin = "agy"
 	}
-	stdout, _, exitCode, err := runner.RunAgy(ctx, agyBin, prompt, "", apiKey, model, 5)
+	stdout, _, exitCode, err := s.runnerFn(ctx, agyBin, prompt, "", apiKey, model, 5)
 	if exitCode != 0 || err != nil {
 		return "", fmt.Errorf("agy fact extraction exitCode=%d err=%v", exitCode, err)
 	}
@@ -435,7 +455,8 @@ func (s *Scheduler) ExtractFactsLLM(ctx context.Context, prompt string) (string,
 	return resp.Response, nil
 }
 
-// ExtractFactsLLM extracts facts using the primary LLM via runner.RunAgy (compatibility wrapper).
+// ExtractFactsLLM extracts facts using the primary LLM (compatibility wrapper).
+// Returns an error if no scheduler with a configured RunnerFunc is available.
 func ExtractFactsLLM(ctx context.Context, prompt string) (string, error) {
 	return New(nil, nil, nil, nil).ExtractFactsLLM(ctx, prompt)
 }

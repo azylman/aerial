@@ -958,6 +958,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config) error {
 	pool := queue.New(cfg, queue.WorkerPoolConfig{
 		DB:         database,
 		Classifier: cls,
+		RunnerFunc: runner.RunAgy,
 	})
 	pool.Start()
 
@@ -1019,7 +1020,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config) error {
 	}
 
 	// Start background scheduler monitor for due cron and one-shot routines
-	sched := scheduler.New(cfg, database, pool, scheduler.NewDiscordThreadCreator(dgSession))
+	sched := scheduler.New(cfg, database, pool, scheduler.NewDiscordThreadCreator(dgSession), scheduler.WithRunnerFunc(runner.RunAgy))
 	stopScheduler := sched.Start(ctx)
 	defer stopScheduler()
 

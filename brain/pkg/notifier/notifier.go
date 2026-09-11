@@ -81,22 +81,22 @@ func StaticFallback(contextDescription string) string {
 }
 
 // GenerateSessionResetMessage uses a lightweight agy call to synthesize a persona-aligned reset notice, with static fallback.
-func GenerateSessionResetMessage(agyBin, apiKey string) string {
-	return GenerateDynamicNotification(agyBin, apiKey, "session reset due to context corruption")
+func GenerateSessionResetMessage(agyBin, apiKey string, runnerFns ...runner.RunnerFunc) string {
+	return GenerateDynamicNotification(agyBin, apiKey, "session reset due to context corruption", runnerFns...)
 }
 
 // GeneratePoisonPillMessage uses a lightweight agy call to synthesize a notice explaining the message caused repeated crashes and had to be dropped, with static fallback.
-func GeneratePoisonPillMessage(agyBin, apiKey, promptSnippet string) string {
+func GeneratePoisonPillMessage(agyBin, apiKey, promptSnippet string, runnerFns ...runner.RunnerFunc) string {
 	desc := "a message caused repeated crashes and had to be dropped"
 	if strings.TrimSpace(promptSnippet) != "" {
 		desc = fmt.Sprintf("a message caused repeated crashes and had to be dropped (message snippet: %q)", promptSnippet)
 	}
-	return GenerateDynamicNotification(agyBin, apiKey, desc)
+	return GenerateDynamicNotification(agyBin, apiKey, desc, runnerFns...)
 }
 
 // GenerateDynamicNotification attempts to generate a persona-compliant message using a lightweight agy call,
-// falling back to static predefined persona messages on error or timeout.
-func GenerateDynamicNotification(agyBin, apiKey, contextDescription string) string {
+// falling back to static predefined persona messages on error, timeout, or if no runner function is provided.
+func GenerateDynamicNotification(agyBin, apiKey, contextDescription string, runnerFns ...runner.RunnerFunc) string {
 	start := time.Now()
 	trigger := "error"
 	lowerDesc := strings.ToLower(contextDescription)
@@ -114,7 +114,11 @@ func GenerateDynamicNotification(agyBin, apiKey, contextDescription string) stri
 	}()
 
 	fallback := StaticFallback(contextDescription)
-	if agyBin == "" || apiKey == "" {
+	var runnerFn runner.RunnerFunc
+	if len(runnerFns) > 0 {
+		runnerFn = runnerFns[0]
+	}
+	if runnerFn == nil || agyBin == "" || apiKey == "" {
 		return fallback
 	}
 
@@ -123,7 +127,7 @@ func GenerateDynamicNotification(agyBin, apiKey, contextDescription string) stri
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	stdout, stderr, exitCode, err := runner.RunAgy(ctx, agyBin, prompt, "", apiKey, "", 1)
+	stdout, stderr, exitCode, err := runnerFn(ctx, agyBin, prompt, "", apiKey, "", 1)
 	if err != nil || exitCode != 0 {
 		return fallback
 	}
