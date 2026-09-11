@@ -153,6 +153,32 @@ jobs:
         with:
           node-version: 20
 
+      - name: Verify Repository Hygiene & Invariants
+        run: |
+          # 1. UTF-8 BOM Hygiene
+          BOM_HEX=$(printf '\357\273\277')
+          BOM_FILES=$(git grep -I -l "^$BOM_HEX" 2>/dev/null || true)
+          if [ -n "$BOM_FILES" ]; then
+            echo "::error::Invalid UTF-8 BOM detected in tracked files:"
+            echo "$BOM_FILES" | sed 's/^/   • /'
+            exit 1
+          fi
+
+          # 2. Direct execution of main() in test files
+          MAIN_CALLS=$(git grep -E '\bmain\(\)' 'brain/*_test.go' 2>/dev/null || true)
+          if [ -n "$MAIN_CALLS" ]; then
+            echo "::error::Direct execution of main() detected in test files:"
+            echo "$MAIN_CALLS" | sed 's/^/   • /'
+            exit 1
+          fi
+
+          # 3. Grafana Dashboard JSON Syntax
+          for jf in grafana/dashboards/*.json; do
+            if [ -f "$jf" ]; then
+              node -e "JSON.parse(require('fs').readFileSync('$jf', 'utf8'))"
+            fi
+          done
+
       - name: Lint Brain
         if: needs.changes.outputs.brain == 'true'
         run: |
