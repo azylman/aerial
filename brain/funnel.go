@@ -326,9 +326,9 @@ func buildDiscordPrompt(s *discordgo.Session, m *discordgo.Message, targetThread
 	sb.WriteString(fmt.Sprintf("- attachments: %v\n\n", attachments))
 
 	if policy.Mode == "channel" {
-		sb.WriteString("Please formulate your response and output it clearly. It will be delivered directly to the Discord channel.\n")
+		sb.WriteString("Execute all requested tools, subagents, tests, and code modifications to fulfill the request. Only formulate and output your final response once all immediate work is complete. It will be delivered directly to the Discord channel.\n")
 	} else {
-		sb.WriteString("Please formulate your response and output it clearly. It will be delivered directly to the Discord thread.\n")
+		sb.WriteString("Execute all requested tools, subagents, tests, and code modifications to fulfill the request. Only formulate and output your final response once all immediate work is complete. It will be delivered directly to the Discord thread.\n")
 	}
 	sb.WriteString("</USER_REQUEST>")
 	return sb.String()
