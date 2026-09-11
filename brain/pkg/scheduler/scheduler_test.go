@@ -2,13 +2,16 @@ package scheduler
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1545,6 +1548,555 @@ func TestScheduler_WithSessionRoots(t *testing.T) {
 		t.Errorf("expected clean sessionRoots [/custom/root1 /custom/root2], got %v", s.sessionRoots)
 	}
 }
+
+type mockStoreWrapper struct {
+	db.Store
+	getDueCronSchedulesFn                func(ctx context.Context) ([]db.CronSchedule, error)
+	updateCronNextRunFn                  func(ctx context.Context, id string, nextRunAt time.Time) error
+	createScheduleRunFn                  func(ctx context.Context, run db.ScheduleRun) error
+	insertMessageFn                      func(ctx context.Context, msg db.Message) error
+	getDueOneShotSchedulesFn             func(ctx context.Context) ([]db.OneShotSchedule, error)
+	insertMessageAndConsumeOneShotFn     func(ctx context.Context, scheduleID string, msg db.Message) error
+	getActiveConversationsForExtractionFn func(ctx context.Context, activeHours int) ([]string, error)
+}
+
+func (m *mockStoreWrapper) GetDueCronSchedules(ctx context.Context) ([]db.CronSchedule, error) {
+	if m.getDueCronSchedulesFn != nil {
+		return m.getDueCronSchedulesFn(ctx)
+	}
+	if m.Store != nil {
+		return m.Store.GetDueCronSchedules(ctx)
+	}
+	return nil, nil
+}
+
+func (m *mockStoreWrapper) UpdateCronNextRun(ctx context.Context, id string, nextRunAt time.Time) error {
+	if m.updateCronNextRunFn != nil {
+		return m.updateCronNextRunFn(ctx, id, nextRunAt)
+	}
+	if m.Store != nil {
+		return m.Store.UpdateCronNextRun(ctx, id, nextRunAt)
+	}
+	return nil
+}
+
+func (m *mockStoreWrapper) CreateScheduleRun(ctx context.Context, run db.ScheduleRun) error {
+	if m.createScheduleRunFn != nil {
+		return m.createScheduleRunFn(ctx, run)
+	}
+	if m.Store != nil {
+		return m.Store.CreateScheduleRun(ctx, run)
+	}
+	return nil
+}
+
+func (m *mockStoreWrapper) InsertMessage(ctx context.Context, msg db.Message) error {
+	if m.insertMessageFn != nil {
+		return m.insertMessageFn(ctx, msg)
+	}
+	if m.Store != nil {
+		return m.Store.InsertMessage(ctx, msg)
+	}
+	return nil
+}
+
+func (m *mockStoreWrapper) GetDueOneShotSchedules(ctx context.Context) ([]db.OneShotSchedule, error) {
+	if m.getDueOneShotSchedulesFn != nil {
+		return m.getDueOneShotSchedulesFn(ctx)
+	}
+	if m.Store != nil {
+		return m.Store.GetDueOneShotSchedules(ctx)
+	}
+	return nil, nil
+}
+
+func (m *mockStoreWrapper) InsertMessageAndConsumeOneShot(ctx context.Context, scheduleID string, msg db.Message) error {
+	if m.insertMessageAndConsumeOneShotFn != nil {
+		return m.insertMessageAndConsumeOneShotFn(ctx, scheduleID, msg)
+	}
+	if m.Store != nil {
+		return m.Store.InsertMessageAndConsumeOneShot(ctx, scheduleID, msg)
+	}
+	return nil
+}
+
+func (m *mockStoreWrapper) GetActiveConversationsForExtraction(ctx context.Context, activeHours int) ([]string, error) {
+	if m.getActiveConversationsForExtractionFn != nil {
+		return m.getActiveConversationsForExtractionFn(ctx, activeHours)
+	}
+	if m.Store != nil {
+		return m.Store.GetActiveConversationsForExtraction(ctx, activeHours)
+	}
+	return nil, nil
+}
+
+func TestGetStore_AllBranches(t *testing.T) {
+	// 1. nil scheduler
+	var nilSched *Scheduler
+	if st := nilSched.getStore(); st != nil {
+		t.Errorf("expected nil store for nil scheduler, got %v", st)
+	}
+
+	// 2. s.store is set
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer database.Close()
+	sqlStore := db.NewSQLStore(database)
+	sStore := &Scheduler{store: sqlStore}
+	if st := sStore.getStore(); st != sqlStore {
+		t.Errorf("expected s.store, got %v", st)
+	}
+
+	// 3. s.db is set and s.store is nil
+	sDB := &Scheduler{db: database}
+	if st := sDB.getStore(); st == nil {
+		t.Errorf("expected non-nil store from s.db")
+	}
+
+	// 4. both s.store and s.db are nil
+	sBothNil := &Scheduler{}
+	if st := sBothNil.getStore(); st != nil {
+		t.Errorf("expected nil store when both s.store and s.db are nil, got %v", st)
+	}
+}
+
+func TestNew_StoreAndWrappers(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer database.Close()
+	sqlStore := db.NewSQLStore(database)
+
+	cfg := newTestConfig()
+	enqueuer := newMockEnqueuer()
+	threadCreator := newMockThreadCreator()
+
+	// 1. New with db.Store
+	s1, err := New(cfg, sqlStore, enqueuer, threadCreator)
+	if err != nil {
+		t.Fatalf("New with db.Store failed: %v", err)
+	}
+	if s1.store != sqlStore || s1.db != nil {
+		t.Errorf("expected s1.store to be sqlStore and s1.db to be nil")
+	}
+
+	// 2. NewWithStore
+	s2, err := NewWithStore(cfg, sqlStore, enqueuer, threadCreator)
+	if err != nil {
+		t.Fatalf("NewWithStore failed: %v", err)
+	}
+	if s2.store != sqlStore {
+		t.Errorf("expected s2.store to be sqlStore")
+	}
+
+	// 3. NewScheduler wrapper
+	s3, err := NewScheduler(cfg, sqlStore, enqueuer, threadCreator)
+	if err != nil {
+		t.Fatalf("NewScheduler failed: %v", err)
+	}
+	if s3.store != sqlStore {
+		t.Errorf("expected s3.store to be sqlStore")
+	}
+
+	// 4. NewScheduler with nil config returns error
+	if _, err := NewScheduler(nil, sqlStore, enqueuer, threadCreator); err == nil {
+		t.Errorf("expected error when config is nil in NewScheduler")
+	}
+}
+
+func TestProcessDueSchedules_StoreErrorsAndEdgeCases(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer database.Close()
+	sqlStore := db.NewSQLStore(database)
+
+	cfg := newTestConfig()
+	enqueuer := newMockEnqueuer()
+	threadCreator := newMockThreadCreator()
+
+	// 1. ProcessDueSchedules on nil scheduler
+	var nilSched *Scheduler
+	if err := nilSched.ProcessDueSchedules(context.Background()); err != nil {
+		t.Errorf("expected nil error on nil scheduler, got %v", err)
+	}
+
+	// 2. ProcessDueSchedules on scheduler with nil store
+	sNoStore := &Scheduler{cfg: cfg}
+	if err := sNoStore.ProcessDueSchedules(context.Background()); err != nil {
+		t.Errorf("expected nil error on scheduler with nil store, got %v", err)
+	}
+
+	// 3. ProcessDueSchedules with nil cfg
+	sNoCfg := &Scheduler{store: sqlStore}
+	if err := sNoCfg.ProcessDueSchedules(context.Background()); err == nil {
+		t.Errorf("expected error on scheduler with nil cfg")
+	}
+
+	// 4. processDueSchedulesStore edge cases: nil store, nil cfg
+	if err := processDueSchedulesStore(context.Background(), cfg, nil, enqueuer, threadCreator); err != nil {
+		t.Errorf("expected nil on nil store, got %v", err)
+	}
+	if err := processDueSchedulesStore(context.Background(), nil, sqlStore, enqueuer, threadCreator); err == nil {
+		t.Errorf("expected error on nil cfg in processDueSchedulesStore")
+	}
+
+	// 5. Store error on GetDueCronSchedules
+	mockStore := &mockStoreWrapper{
+		Store: sqlStore,
+		getDueCronSchedulesFn: func(ctx context.Context) ([]db.CronSchedule, error) {
+			return nil, fmt.Errorf("cron query failed")
+		},
+	}
+	sErrCron, _ := New(cfg, mockStore, enqueuer, threadCreator)
+	if err := sErrCron.ProcessDueSchedules(context.Background()); err == nil || !strings.Contains(err.Error(), "cron query failed") {
+		t.Errorf("expected cron query error, got %v", err)
+	}
+
+	// 6. Stale cron with empty timezone (tests tz == \"\" branch) and UpdateCronNextRun error
+	now := time.Now().UTC()
+	staleCron := db.CronSchedule{
+		ID:          "stale-cron-1",
+		CronExpr:    "0 9 * * *",
+		Timezone:    "", // Empty timezone
+		TargetID:    "chan-test",
+		TitlePrefix: "Stale",
+		Prompt:      "Stale prompt",
+		NextRunAt:   now.Add(-48 * time.Hour), // >24h overdue
+		Enabled:     true,
+	}
+	mockStoreStale := &mockStoreWrapper{
+		Store: sqlStore,
+		getDueCronSchedulesFn: func(ctx context.Context) ([]db.CronSchedule, error) {
+			return []db.CronSchedule{staleCron}, nil
+		},
+		updateCronNextRunFn: func(ctx context.Context, id string, nextRunAt time.Time) error {
+			return fmt.Errorf("failed to update next run for stale")
+		},
+		getDueOneShotSchedulesFn: func(ctx context.Context) ([]db.OneShotSchedule, error) {
+			return nil, nil
+		},
+	}
+	sStale, _ := New(cfg, mockStoreStale, enqueuer, threadCreator)
+	if err := sStale.ProcessDueSchedules(context.Background()); err != nil {
+		t.Errorf("unexpected error on stale cron processing: %v", err)
+	}
+
+	// 7. Due cron with UpdateCronNextRun error, CreateScheduleRun error, and InsertMessage error
+	dueCron := db.CronSchedule{
+		ID:          "due-cron-1",
+		CronExpr:    "0 9 * * *",
+		Timezone:    "UTC",
+		TargetID:    "chan-test",
+		TitlePrefix: "DuePrefix",
+		Prompt:      "Due prompt",
+		NextRunAt:   now.Add(-5 * time.Minute),
+		Enabled:     true,
+	}
+	mockStoreErrors := &mockStoreWrapper{
+		Store: sqlStore,
+		getDueCronSchedulesFn: func(ctx context.Context) ([]db.CronSchedule, error) {
+			return []db.CronSchedule{dueCron}, nil
+		},
+		updateCronNextRunFn: func(ctx context.Context, id string, nextRunAt time.Time) error {
+			return fmt.Errorf("update cron next run failed")
+		},
+		createScheduleRunFn: func(ctx context.Context, run db.ScheduleRun) error {
+			return fmt.Errorf("create schedule run failed")
+		},
+		insertMessageFn: func(ctx context.Context, msg db.Message) error {
+			return fmt.Errorf("insert message failed")
+		},
+		getDueOneShotSchedulesFn: func(ctx context.Context) ([]db.OneShotSchedule, error) {
+			return nil, nil
+		},
+	}
+	sDueErrors, _ := New(cfg, mockStoreErrors, enqueuer, threadCreator)
+	if err := sDueErrors.ProcessDueSchedules(context.Background()); err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+
+	// 8. Store error on GetDueOneShotSchedules
+	mockStoreOneShotErr := &mockStoreWrapper{
+		Store: sqlStore,
+		getDueCronSchedulesFn: func(ctx context.Context) ([]db.CronSchedule, error) {
+			return nil, nil
+		},
+		getDueOneShotSchedulesFn: func(ctx context.Context) ([]db.OneShotSchedule, error) {
+			return nil, fmt.Errorf("oneshot query error")
+		},
+	}
+	sOneShotErr, _ := New(cfg, mockStoreOneShotErr, enqueuer, threadCreator)
+	if err := sOneShotErr.ProcessDueSchedules(context.Background()); err == nil || !strings.Contains(err.Error(), "oneshot query error") {
+		t.Errorf("expected oneshot query error, got %v", err)
+	}
+
+	// 9. Due one-shot: InsertMessageAndConsumeOneShot error
+	oneShot1 := db.OneShotSchedule{
+		ID:        "oneshot-err-1",
+		ThreadID:  "th-1",
+		Prompt:    "Prompt 1",
+		RunAt:     now.Add(-1 * time.Minute),
+	}
+	mockStoreOneShotConsumeErr := &mockStoreWrapper{
+		Store: sqlStore,
+		getDueCronSchedulesFn: func(ctx context.Context) ([]db.CronSchedule, error) {
+			return nil, nil
+		},
+		getDueOneShotSchedulesFn: func(ctx context.Context) ([]db.OneShotSchedule, error) {
+			return []db.OneShotSchedule{oneShot1}, nil
+		},
+		insertMessageAndConsumeOneShotFn: func(ctx context.Context, scheduleID string, msg db.Message) error {
+			return fmt.Errorf("failed to consume oneshot")
+		},
+	}
+	sConsumeErr, _ := New(cfg, mockStoreOneShotConsumeErr, enqueuer, threadCreator)
+	if err := sConsumeErr.ProcessDueSchedules(context.Background()); err != nil {
+		t.Errorf("unexpected error on consume error: %v", err)
+	}
+
+	// 10. Due one-shot: CreateScheduleRun error
+	mockStoreOneShotRunErr := &mockStoreWrapper{
+		Store: sqlStore,
+		getDueCronSchedulesFn: func(ctx context.Context) ([]db.CronSchedule, error) {
+			return nil, nil
+		},
+		getDueOneShotSchedulesFn: func(ctx context.Context) ([]db.OneShotSchedule, error) {
+			return []db.OneShotSchedule{oneShot1}, nil
+		},
+		insertMessageAndConsumeOneShotFn: func(ctx context.Context, scheduleID string, msg db.Message) error {
+			return nil
+		},
+		createScheduleRunFn: func(ctx context.Context, run db.ScheduleRun) error {
+			return fmt.Errorf("failed to create run record")
+		},
+	}
+	sRunErr, _ := New(cfg, mockStoreOneShotRunErr, enqueuer, threadCreator)
+	if err := sRunErr.ProcessDueSchedules(context.Background()); err != nil {
+		t.Errorf("unexpected error on run record error: %v", err)
+	}
+
+	// 11. Context cancellation during one-shot loop
+	cancellingCtx, cancel := context.WithCancel(context.Background())
+	cancel() // canceled before processing loop
+	mockStoreOneShotCancel := &mockStoreWrapper{
+		Store: sqlStore,
+		getDueCronSchedulesFn: func(ctx context.Context) ([]db.CronSchedule, error) {
+			return nil, nil
+		},
+		getDueOneShotSchedulesFn: func(ctx context.Context) ([]db.OneShotSchedule, error) {
+			return []db.OneShotSchedule{oneShot1}, nil
+		},
+	}
+	sCancel, _ := New(cfg, mockStoreOneShotCancel, enqueuer, threadCreator)
+	if err := sCancel.ProcessDueSchedules(cancellingCtx); err != context.Canceled {
+		t.Errorf("expected context.Canceled, got %v", err)
+	}
+}
+
+func TestStart_AllBranchesAndWrappers(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer database.Close()
+
+	cfg := newTestConfig()
+	enqueuer := newMockEnqueuer()
+	threadCreator := newMockThreadCreator()
+
+	sched, err := New(cfg, database, enqueuer, threadCreator)
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	// 1. Scheduler.Start and multiple stop calls
+	stop := sched.Start(context.Background())
+	stop()
+	stop() // once.Do branch
+
+	// 2. Package Start wrapper with nil config (returns no-op stop func)
+	stopNil := Start(context.Background(), nil, database, nil, nil)
+	if stopNil == nil {
+		t.Fatalf("expected non-nil stop func on Start with nil config")
+	}
+	stopNil()
+
+	// 3. Package Start wrapper with valid config
+	stopValid := Start(context.Background(), cfg, database, nil, nil)
+	if stopValid == nil {
+		t.Fatalf("expected non-nil stop func on Start with valid config")
+	}
+	stopValid()
+}
+
+func TestExtractFactsLLM_AdditionalBranches(t *testing.T) {
+	// 1. nil scheduler
+	var nilSched *Scheduler
+	if _, err := nilSched.ExtractFactsLLM(context.Background(), "prompt"); err == nil {
+		t.Errorf("expected error on nil scheduler")
+	}
+
+	// 2. scheduler with nil runnerFn
+	schedNoRunner := &Scheduler{}
+	if _, err := schedNoRunner.ExtractFactsLLM(context.Background(), "prompt"); err == nil {
+		t.Errorf("expected error on nil runnerFn")
+	}
+
+	// 3. scheduler with non-nil runnerFn but nil cfg or nil cfg.Current()
+	schedRunnerNoCfg := &Scheduler{
+		runnerFn: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			return "", "", 0, nil
+		},
+	}
+	if _, err := schedRunnerNoCfg.ExtractFactsLLM(context.Background(), "prompt"); err == nil {
+		t.Errorf("expected error on nil cfg")
+	}
+
+	schedRunnerNilCur := &Scheduler{
+		cfg: &config.Config{},
+		runnerFn: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			return "", "", 0, nil
+		},
+	}
+	if _, err := schedRunnerNilCur.ExtractFactsLLM(context.Background(), "prompt"); err == nil {
+		t.Errorf("expected error on nil cfg.Current()")
+	}
+
+	// 4. Model missing / empty string / whitespace
+	cfgEmptyModel := config.NewFromData(&config.ConfigData{Model: "   "})
+	schedEmptyModel, _ := New(cfgEmptyModel, nil, nil, nil, WithRunnerFunc(func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+		return "", "", 0, nil
+	}))
+	if _, err := schedEmptyModel.ExtractFactsLLM(context.Background(), "prompt"); err == nil || !strings.Contains(err.Error(), "model is not configured") {
+		t.Errorf("expected 'model is not configured' error, got %v", err)
+	}
+
+	// 5. Package wrapper ExtractFactsLLM
+	if _, err := ExtractFactsLLM(context.Background(), "prompt"); err == nil {
+		t.Errorf("expected error from package wrapper ExtractFactsLLM")
+	}
+}
+
+func TestRunFactExtraction_BackfilledAndMockErrors(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer database.Close()
+
+	// 1. Test backfill with server returning embedding of expected dimension 384
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		emb384 := make([]float32, 384)
+		emb384[0] = 0.5
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"embedding": emb384,
+		})
+	}))
+	defer ts.Close()
+
+	// Insert fact without embedding
+	_, err = database.ExecContext(context.Background(), `INSERT INTO facts (category, fact_text, importance, thread_id) VALUES ('user_pref', 'Test fact for backfill', 0.8, 'th-backfill')`)
+	if err != nil {
+		t.Fatalf("failed to insert fact for backfill: %v", err)
+	}
+
+	client := memory.NewClient(ts.URL)
+	llmFunc := func(ctx context.Context, prompt string) (string, error) {
+		return "[]", nil
+	}
+
+	// Runs backfill, hits backfilled > 0
+	RunFactExtraction(context.Background(), database, client, llmFunc)
+
+	// 2. Test fact extraction error via mock store returning error on active conversations
+	mockStore := &mockStoreWrapper{
+		Store: db.NewSQLStore(database),
+		getActiveConversationsForExtractionFn: func(ctx context.Context, activeHours int) ([]string, error) {
+			return nil, fmt.Errorf("active conv retrieval failed")
+		},
+	}
+	RunFactExtraction(context.Background(), mockStore, client, llmFunc)
+}
+
+func TestSchedulerRun_BranchesAndTickErrors(t *testing.T) {
+	// 1. Nil scheduler
+	var nilSched *Scheduler
+	nilSched.Run(context.Background(), time.Second)
+
+	// 2. Scheduler with nil config
+	schedNilCfg := &Scheduler{}
+	schedNilCfg.Run(context.Background(), time.Second)
+
+	// 3. Package Run wrapper with nil config
+	Run(context.Background(), nil, nil, nil, nil, time.Second)
+
+	// 4. Initial schedule check error in Run
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer database.Close()
+
+	mockStoreInitErr := &mockStoreWrapper{
+		Store: db.NewSQLStore(database),
+		getDueCronSchedulesFn: func(ctx context.Context) ([]db.CronSchedule, error) {
+			return nil, fmt.Errorf("init check error")
+		},
+	}
+	schedInitErr, _ := New(newTestConfig(), mockStoreInitErr, nil, nil)
+	ctxCancel, cancel := context.WithCancel(context.Background())
+	cancel() // canceled immediately
+	schedInitErr.Run(ctxCancel, 10*time.Millisecond)
+
+	// 5. Tick schedule evaluation error in Run
+	tickCount := 0
+	mockStoreTickErr := &mockStoreWrapper{
+		Store: db.NewSQLStore(database),
+		getDueCronSchedulesFn: func(ctx context.Context) ([]db.CronSchedule, error) {
+			tickCount++
+			if tickCount > 1 {
+				return nil, fmt.Errorf("tick check error")
+			}
+			return nil, nil
+		},
+		getDueOneShotSchedulesFn: func(ctx context.Context) ([]db.OneShotSchedule, error) {
+			return nil, nil
+		},
+	}
+	schedTickErr, _ := New(newTestConfig(), mockStoreTickErr, nil, nil)
+	ctxTick, cancelTick := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancelTick()
+	}()
+	schedTickErr.Run(ctxTick, 5*time.Millisecond)
+
+	// 6. Fast ticker to hit tickCount % 2880 == 0
+	var ticks atomic.Int64
+	ctxFast, cancelFast := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelFast()
+	mockStoreFast := &mockStoreWrapper{
+		Store: db.NewSQLStore(database),
+		getDueCronSchedulesFn: func(ctx context.Context) ([]db.CronSchedule, error) {
+			if ticks.Add(1) > 2890 {
+				cancelFast()
+			}
+			return nil, nil
+		},
+		getDueOneShotSchedulesFn: func(ctx context.Context) ([]db.OneShotSchedule, error) {
+			return nil, nil
+		},
+	}
+	schedFast, _ := New(newTestConfig(), mockStoreFast, nil, nil)
+	schedFast.Run(ctxFast, 10*time.Microsecond)
+}
+
 
 
 
