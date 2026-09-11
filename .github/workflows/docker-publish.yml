@@ -25,6 +25,7 @@ jobs:
       proxy: ${{ steps.filter.outputs.proxy }}
       ollama: ${{ steps.filter.outputs.ollama }}
       gitsync: ${{ steps.filter.outputs.gitsync }}
+      updater: ${{ steps.filter.outputs.updater }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -71,6 +72,10 @@ jobs:
               - '.github/workflows/**'
             gitsync:
               - 'sidecars/gitsync/**'
+              - 'docker-compose.yml'
+              - '.github/workflows/**'
+            updater:
+              - 'docker/updater/**'
               - 'docker-compose.yml'
               - '.github/workflows/**'
 
@@ -267,6 +272,10 @@ jobs:
             context: .
             file: ./sidecars/gitsync/Dockerfile
             image_name: aerial-gitsync
+          - service: updater
+            context: ./docker/updater
+            file: ./docker/updater/Dockerfile
+            image_name: aerial-updater
 
     steps:
       - name: Checkout Repository
