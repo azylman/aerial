@@ -272,7 +272,8 @@ func TestProcessThreadFactsDeduplicationAndWatermark(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL)
+	tmpDir := t.TempDir()
+	client := NewClient(server.URL, tmpDir)
 
 	// Mock LLM function returning the same fact
 	llmFunc := func(ctx context.Context, prompt string) (string, error) {
@@ -288,10 +289,6 @@ func TestProcessThreadFactsDeduplicationAndWatermark(t *testing.T) {
 	_, _ = db.InsertFact(database, "user_pref", "User likes matcha", 1.0, "thread-test-1", makeDimVector(1.0, 0.0))
 
 	// Create a dummy transcript file for thread-test-1 in a hermetic temp directory
-	tmpDir := t.TempDir()
-	restoreRoots := SetCustomTranscriptRoots([]string{tmpDir})
-	defer restoreRoots()
-
 	logDir := filepath.Join(tmpDir, "thread-test-1", ".system_generated", "logs")
 	_ = os.MkdirAll(logDir, 0755)
 	_ = os.WriteFile(filepath.Join(logDir, "transcript.jsonl"), []byte("{\"step\":1,\"content\":\"User likes matcha\"}\n"), 0644)
@@ -459,7 +456,8 @@ func TestExtractActiveConversationFacts(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL)
+	tmpDir := t.TempDir()
+	client := NewClient(server.URL, tmpDir)
 
 	llmFunc := func(ctx context.Context, prompt string) (string, error) {
 		return `{"facts":[{"category":"user_preference","fact_text":"User prefers vim keybindings","importance_score":0.9}]}`, nil
@@ -471,10 +469,6 @@ func TestExtractActiveConversationFacts(t *testing.T) {
 	})
 
 	// Create dummy transcript in hermetic temp directory
-	tmpDir := t.TempDir()
-	restoreRoots := SetCustomTranscriptRoots([]string{tmpDir})
-	defer restoreRoots()
-
 	logDir := filepath.Join(tmpDir, "thread-active-1", ".system_generated", "logs")
 	_ = os.MkdirAll(logDir, 0755)
 	_ = os.WriteFile(filepath.Join(logDir, "transcript.jsonl"), []byte("{\"step\":1,\"content\":\"I love vim keybindings\"}\n"), 0644)
@@ -523,9 +517,21 @@ func TestMemory_ClientCreationAndConfig(t *testing.T) {
 	}
 
 	// 5. Compatibility NewClient with string
-	cCompat := NewClient("http://custom:11434/")
+	cCompat := NewClient("http://custom:11434/", "  /path/one  ", "", "/path/two")
 	if cCompat.BaseURL() != "http://custom:11434" {
 		t.Errorf("expected trimmed baseURL from NewClient, got %q", cCompat.BaseURL())
+	}
+	roots := cCompat.Roots()
+	if len(roots) != 2 || roots[0] != "/path/one" || roots[1] != "/path/two" {
+		t.Errorf("expected clean roots [/path/one /path/two], got %v", roots)
+	}
+	// Verify defensive copy
+	roots[0] = "/modified"
+	if cCompat.Roots()[0] != "/path/one" {
+		t.Errorf("expected roots to be defensive copy, modified internal state")
+	}
+	if cNil.Roots() != nil {
+		t.Errorf("expected nil roots for cNil, got %v", cNil.Roots())
 	}
 }
 
@@ -722,22 +728,22 @@ func TestMemory_ProcessThreadFacts_EdgeCases(t *testing.T) {
 	}
 	defer database.Close()
 
-	client := NewClient("http://127.0.0.1:11434")
+	emptyTmp := t.TempDir()
+	clientNoFiles := NewClient("http://127.0.0.1:11434", emptyTmp)
 	now := time.Now().UTC()
 	_ = db.InsertMessage(database, db.Message{
 		ID: "m-pf-1", ThreadID: "th-pf-1", Status: db.StatusCompleted, CreatedAt: now, UpdatedAt: now,
 	})
 
 	// 1. Transcript file missing
-	err = processThreadFacts(context.Background(), database, client, func(ctx context.Context, prompt string) (string, error) { return "", nil }, "th-pf-1")
+	err = processThreadFacts(context.Background(), database, clientNoFiles, func(ctx context.Context, prompt string) (string, error) { return "", nil }, "th-pf-1")
 	if err == nil || !strings.Contains(err.Error(), "transcript unavailable") {
 		t.Errorf("expected transcript unavailable error, got %v", err)
 	}
 
 	// 2. Empty transcript file
 	tmpDir := t.TempDir()
-	restoreRoots := SetCustomTranscriptRoots([]string{tmpDir})
-	defer restoreRoots()
+	client := NewClient("http://127.0.0.1:11434", tmpDir)
 
 	logDir := filepath.Join(tmpDir, "th-pf-empty", ".system_generated", "logs")
 	_ = os.MkdirAll(logDir, 0755)
@@ -791,8 +797,7 @@ func TestMemory_LoadThreadTranscript_LongFileAndSessionLookup(t *testing.T) {
 	defer database.Close()
 
 	tmpDir := t.TempDir()
-	restoreRoots := SetCustomTranscriptRoots([]string{tmpDir})
-	defer restoreRoots()
+	client := NewClient("", tmpDir)
 
 	sessID := "sess-custom-guid-12345"
 	threadID := "thread-mapped-999"
@@ -804,7 +809,7 @@ func TestMemory_LoadThreadTranscript_LongFileAndSessionLookup(t *testing.T) {
 	longContent := strings.Repeat("{\"step\":1,\"content\":\"long conversation message snippet\"}\n", 500)
 	_ = os.WriteFile(filepath.Join(logDir, "transcript_full.jsonl"), []byte(longContent), 0644)
 
-	text, err := loadThreadTranscript(database, threadID)
+	text, err := loadThreadTranscript(database, client, threadID)
 	if err != nil {
 		t.Fatalf("loadThreadTranscript failed: %v", err)
 	}
@@ -812,6 +817,24 @@ func TestMemory_LoadThreadTranscript_LongFileAndSessionLookup(t *testing.T) {
 		t.Errorf("expected truncated transcript <= 20000 bytes, got %d", len(text))
 	}
 }
+
+func TestMemory_LoadThreadTranscript_NoRootsSafeFallback(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer database.Close()
+
+	client := NewClient("")
+	text, err := loadThreadTranscript(database, client, "any-thread")
+	if err != nil {
+		t.Fatalf("expected nil error on empty roots fallback, got: %v", err)
+	}
+	if text != "" {
+		t.Errorf("expected empty string transcript on empty roots fallback, got: %q", text)
+	}
+}
+
 
 func TestMemory_Search_EdgeCases(t *testing.T) {
 	// 1. sanitizeQueryText long text > 1000

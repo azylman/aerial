@@ -23,35 +23,51 @@ const (
 type Client struct {
 	cfg        *config.Config
 	httpClient *http.Client
+	roots      []string
 }
 
-// New creates a new memory Client with pure *config.Config dependency injection.
-func New(cfg *config.Config) *Client {
+// New creates a new memory Client with pure *config.Config and optional transcript search roots.
+func New(cfg *config.Config, roots ...string) *Client {
 	if cfg == nil {
 		cfg = config.NewFromData(&config.ConfigData{})
+	}
+	var cleanRoots []string
+	for _, r := range roots {
+		if tr := strings.TrimSpace(r); tr != "" {
+			cleanRoots = append(cleanRoots, tr)
+		}
 	}
 	return &Client{
 		cfg: cfg,
 		httpClient: &http.Client{
 			Timeout: 3 * time.Second,
 		},
+		roots: cleanRoots,
 	}
 }
 
 // NewClient is a compatibility constructor.
-func NewClient(baseURLOrCfg any) *Client {
+func NewClient(baseURLOrCfg any, roots ...string) *Client {
 	switch v := baseURLOrCfg.(type) {
 	case *config.Config:
-		return New(v)
+		return New(v, roots...)
 	case string:
 		return New(config.NewFromData(&config.ConfigData{
 			Ollama: config.OllamaConfig{
 				BaseURL: v,
 			},
-		}))
+		}), roots...)
 	default:
-		return New(nil)
+		return New(nil, roots...)
 	}
+}
+
+// Roots returns a defensive copy of configured transcript search roots.
+func (c *Client) Roots() []string {
+	if c == nil || len(c.roots) == 0 {
+		return nil
+	}
+	return append([]string(nil), c.roots...)
 }
 
 func (c *Client) getOllamaConfig() config.OllamaConfig {

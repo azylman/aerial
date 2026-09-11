@@ -940,6 +940,20 @@ func CreateReloadConfigFunc(cfg *config.Config, opts ...ReloadOption) func(sourc
 				return
 			}
 			metrics.ConfigReloadsTotal.WithLabelValues(source, "success").Inc()
+			if cur := cfg.Current(); cur != nil {
+				changed := false
+				if cur.GeminiHomeDir == "" {
+					cur.GeminiHomeDir = DefaultGeminiHomeDir()
+					changed = true
+				}
+				if cur.DataDir == "" {
+					cur.DataDir = DefaultDataDir()
+					changed = true
+				}
+				if changed {
+					cfg.Update(cur)
+				}
+			}
 			sanitizer.RegisterConfigTokens(cfg)
 
 			if !options.skipEnvironmentSync && options.provisioner != nil {
@@ -960,6 +974,14 @@ func RunBrainApp(ctx context.Context, cfg *config.Config) error {
 	}
 
 	cur := cfg.Current()
+	if cur.GeminiHomeDir == "" {
+		cur.GeminiHomeDir = DefaultGeminiHomeDir()
+	}
+	if cur.DataDir == "" {
+		cur.DataDir = DefaultDataDir()
+	}
+	cfg.Update(cur)
+
 	homeDir := cfg.GeminiHomeDir()
 	provisioner := env.NewFromConfig(cfg)
 	_ = InitializeBrainEnvironment(ctx, cfg)
@@ -1049,7 +1071,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config) error {
 	}
 
 	// Start background scheduler monitor for due cron and one-shot routines
-	sched := scheduler.New(cfg, database, pool, scheduler.NewDiscordThreadCreator(dgSession), scheduler.WithRunnerFunc(runner.RunAgy))
+	sched := scheduler.New(cfg, database, pool, scheduler.NewDiscordThreadCreator(dgSession), scheduler.WithRunnerFunc(runner.RunAgy), scheduler.WithSessionRoots(sessionMgr.Roots()...))
 	stopScheduler := sched.Start(ctx)
 	defer stopScheduler()
 
@@ -1088,11 +1110,36 @@ func RunBrainApp(ctx context.Context, cfg *config.Config) error {
 	}
 }
 
+// DefaultGeminiHomeDir returns the production default base directory for .gemini files.
+func DefaultGeminiHomeDir() string {
+	if h := os.Getenv("HOME"); strings.TrimSpace(h) != "" {
+		return strings.TrimSpace(h)
+	}
+	if h, err := os.UserHomeDir(); err == nil && strings.TrimSpace(h) != "" {
+		return strings.TrimSpace(h)
+	}
+	return "/root"
+}
+
+// DefaultDataDir returns the production default base directory for persistent data.
+func DefaultDataDir() string {
+	return "/data"
+}
+
 func main() {
 	cfg, err := config.New()
 	if err != nil {
 		log.Printf("Warning: initial LoadConfig error: %v", err)
 	}
+
+	cur := cfg.Current()
+	if cur.GeminiHomeDir == "" {
+		cur.GeminiHomeDir = DefaultGeminiHomeDir()
+	}
+	if cur.DataDir == "" {
+		cur.DataDir = DefaultDataDir()
+	}
+	cfg.Update(cur)
 
 	stopChan := make(chan os.Signal, 1)
 	signal.Notify(stopChan, os.Interrupt, syscall.SIGTERM)

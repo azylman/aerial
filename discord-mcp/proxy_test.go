@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -308,11 +309,18 @@ func TestProxy_EdgeCasesAndErrors(t *testing.T) {
 		t.Error("expected error starting proxy server with invalid url")
 	}
 
-	// 8. RunProxyApp with mock node process and cancellation
+	// 8. RunProxyApp with mock process and cancellation
+	mockBin := "sh"
+	mockArg := "-c"
+	if runtime.GOOS == "windows" {
+		mockBin = "cmd.exe"
+		mockArg = "/c"
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- RunProxyApp(ctx, "59989", "59988", "sh", "-c")
+		errCh <- RunProxyApp(ctx, "59989", "59988", mockBin, mockArg)
 	}()
 
 	time.Sleep(50 * time.Millisecond)
@@ -330,7 +338,7 @@ func TestProxy_EdgeCasesAndErrors(t *testing.T) {
 	if err := RunProxyApp(context.Background(), "59987", "59986", "/non/existent/bin", ""); err == nil {
 		t.Error("expected error running proxy app with non-existent binary")
 	}
-	if err := RunProxyApp(context.Background(), "-1", "59985", "sh", "-c"); err == nil {
+	if err := RunProxyApp(context.Background(), "-1", "59985", mockBin, mockArg); err == nil {
 		t.Error("expected error running proxy app with invalid port")
 	}
 

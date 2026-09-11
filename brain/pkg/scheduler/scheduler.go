@@ -51,7 +51,6 @@ type MessageEnqueuer interface {
 	Enqueue(msg db.Message)
 }
 
-// Scheduler evaluates cron and one-shot schedules and manages recurring routine executions.
 type Scheduler struct {
 	cfg           *config.Config
 	db            *sql.DB
@@ -59,6 +58,7 @@ type Scheduler struct {
 	enqueuer      MessageEnqueuer
 	threadCreator ThreadCreator
 	runnerFn      runner.RunnerFunc
+	sessionRoots  []string
 }
 
 // Option configures Scheduler options.
@@ -68,6 +68,19 @@ type Option func(*Scheduler)
 func WithRunnerFunc(fn runner.RunnerFunc) Option {
 	return func(s *Scheduler) {
 		s.runnerFn = fn
+	}
+}
+
+// WithSessionRoots sets the transcript search roots used by memory fact extraction.
+func WithSessionRoots(roots ...string) Option {
+	return func(s *Scheduler) {
+		var clean []string
+		for _, r := range roots {
+			if tr := strings.TrimSpace(r); tr != "" {
+				clean = append(clean, tr)
+			}
+		}
+		s.sessionRoots = clean
 	}
 }
 
@@ -505,9 +518,9 @@ func (s *Scheduler) Run(ctx context.Context, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	var ollamaClient *memory.Client
 	if s.cfg != nil {
-		ollamaClient = memory.New(s.cfg)
+		ollamaClient = memory.New(s.cfg, s.sessionRoots...)
 	} else {
-		ollamaClient = memory.NewClient("")
+		ollamaClient = memory.NewClient("", s.sessionRoots...)
 	}
 	llmFunc := s.ExtractFactsLLM
 

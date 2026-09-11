@@ -249,18 +249,6 @@ func cloneConfigData(src *ConfigData) *ConfigData {
 	return &dst
 }
 
-func getGeminiHomeDirDefault() string {
-	homeDir := os.Getenv("HOME")
-	if homeDir == "" {
-		var err error
-		homeDir, err = os.UserHomeDir()
-		if err != nil || homeDir == "" {
-			homeDir = "/root"
-		}
-	}
-	return homeDir
-}
-
 func DefaultConfigData() *ConfigData {
 	defaultIgnoreBots := true
 	return &ConfigData{
@@ -285,8 +273,8 @@ func DefaultConfigData() *ConfigData {
 		AgyBin:          "agy",
 		LowEffortModel:  "Gemini 3.8 Flash (Low)",
 		ClassifierModel: "Gemini 3.8 Flash (Low)",
-		DataDir:         "/data",
-		GeminiHomeDir:   getGeminiHomeDirDefault(),
+		DataDir:         "",
+		GeminiHomeDir:   "",
 		Ollama: OllamaConfig{
 			BaseURL:     "http://ollama:11434",
 			Model:       "all-minilm",
@@ -306,22 +294,14 @@ func (c *Config) Current() *ConfigData {
 	return cur
 }
 
-// GeminiHomeDir returns the resolved base directory for .gemini files.
+// GeminiHomeDir returns the configured base directory for .gemini files.
 func (c *Config) GeminiHomeDir() string {
-	cur := c.Current()
-	if cur.GeminiHomeDir != "" {
-		return cur.GeminiHomeDir
-	}
-	return getGeminiHomeDirDefault()
+	return c.Current().GeminiHomeDir
 }
 
-// DataDir returns the resolved base directory for persistent data.
+// DataDir returns the configured base directory for persistent data.
 func (c *Config) DataDir() string {
-	cur := c.Current()
-	if cur.DataDir != "" {
-		return cur.DataDir
-	}
-	return "/data"
+	return c.Current().DataDir
 }
 
 // Update atomically swaps the underlying ConfigData snapshot.
@@ -338,6 +318,7 @@ func (c *Config) update(fresh *ConfigData) {
 
 // NewTestConfig returns a hermetic in-memory *Config initialized with DefaultConfigData(),
 // with DatabaseURL set to ":memory:", Port set to "0", sensitive tokens cleared,
+// hermetic temporary directories set for GeminiHomeDir and DataDir,
 // and any caller-provided mutators applied.
 func NewTestConfig(mutators ...func(*ConfigData)) *Config {
 	data := DefaultConfigData()
@@ -346,6 +327,8 @@ func NewTestConfig(mutators ...func(*ConfigData)) *Config {
 	data.DiscordToken = ""
 	data.APIKey = ""
 	data.GitHubPAT = ""
+	data.GeminiHomeDir = filepath.Join(os.TempDir(), "aerial-test-gemini")
+	data.DataDir = filepath.Join(os.TempDir(), "aerial-test-data")
 	for _, fn := range mutators {
 		if fn != nil {
 			fn(data)
