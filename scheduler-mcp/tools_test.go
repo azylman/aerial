@@ -515,16 +515,24 @@ func TestRunApp_Lifecycle(t *testing.T) {
 		errCh <- RunApp(ctx, &Config{Port: "59483", DatabaseURL: tempDB})
 	}()
 
-	time.Sleep(50 * time.Millisecond)
-
-	// Probe health
-	resp, err := http.Get("http://127.0.0.1:59483/health")
-	if err != nil || resp.StatusCode != http.StatusOK {
-		t.Errorf("health check failed: %v, status: %v", err, resp)
+	// Poll health endpoint until server is ready or timeout
+	var resp *http.Response
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		var err error
+		resp, err = http.Get("http://127.0.0.1:59483/health")
+		if err == nil && resp.StatusCode == http.StatusOK {
+			break
+		}
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
-	if resp != nil {
-		_ = resp.Body.Close()
+	if resp == nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("health check failed, status: %v", resp)
 	}
+	_ = resp.Body.Close()
 
 	// Trigger shutdown
 	cancel()
