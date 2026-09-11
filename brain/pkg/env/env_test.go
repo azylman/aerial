@@ -384,3 +384,60 @@ func TestProvisioner_ZeroAmbientDefaultsAndNoOps(t *testing.T) {
 		t.Errorf("Expected empty paths from nil config, got home=%q data=%q", pNilCfg.HomeDir(), pNilCfg.DataDir())
 	}
 }
+
+func TestLoadMCPConfig_ConfigDataPropagation(t *testing.T) {
+	tmpHome := t.TempDir()
+	tmpData := t.TempDir()
+	p := New(tmpHome, tmpData)
+
+	cfg := config.NewTestConfig(func(d *config.ConfigData) {
+		d.GitHubPAT = "ghp_mock_token_123"
+		d.MCPConfig = `{"mcpServers":{"custom":{"serverUrl":"http://custom:5000/mcp"}}}`
+	})
+
+	raw := p.LoadMCPConfig(cfg)
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("failed to unmarshal LoadMCPConfig output: %v", err)
+	}
+
+	servers, ok := parsed["mcpServers"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("mcpServers mapping missing from output: %s", string(raw))
+	}
+
+	// 1. Built-in defaults must be present
+	for _, name := range []string{"scheduler", "discord", "docker", "victoriametrics"} {
+		if _, exists := servers[name]; !exists {
+			t.Errorf("expected built-in server %q to be present", name)
+		}
+	}
+
+	// 2. GitHub server enabled via cfg.Current().GitHubPAT
+	if _, exists := servers["github"]; !exists {
+		t.Errorf("expected github server to be enabled when GitHubPAT is set in config")
+	}
+
+	// 3. Custom server enabled via cfg.Current().MCPConfig
+	if customSrv, exists := servers["custom"]; !exists {
+		t.Errorf("expected custom server to be enabled from cfg.MCPConfig")
+	} else if customMap, ok := customSrv.(map[string]interface{}); !ok || customMap["serverUrl"] != "http://custom:5000/mcp" {
+		t.Errorf("expected custom serverUrl 'http://custom:5000/mcp', got %+v", customSrv)
+	}
+
+	// 4. Test without GitHubPAT and without MCPConfig
+	cfgEmpty := config.NewTestConfig(func(d *config.ConfigData) {
+		d.GitHubPAT = ""
+		d.MCPConfig = ""
+	})
+	rawEmpty := p.LoadMCPConfig(cfgEmpty)
+	var parsedEmpty map[string]interface{}
+	_ = json.Unmarshal(rawEmpty, &parsedEmpty)
+	serversEmpty := parsedEmpty["mcpServers"].(map[string]interface{})
+	if _, exists := serversEmpty["github"]; exists {
+		t.Errorf("expected github server to be absent when GitHubPAT is empty")
+	}
+	if _, exists := serversEmpty["custom"]; exists {
+		t.Errorf("expected custom server to be absent when MCPConfig is empty")
+	}
+}

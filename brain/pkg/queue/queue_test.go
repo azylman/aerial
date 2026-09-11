@@ -4270,8 +4270,8 @@ func TestQueue_ClassifierParseErrorTriggersSystemAlert(t *testing.T) {
 	if !strings.Contains(alertBody, "Parse Error") || !strings.Contains(alertBody, "Raw Output") {
 		t.Errorf("expected alert body to contain parse error and raw output, got %q", alertBody)
 	}
-	if alertChannel != config.GetSystemChannel() {
-		t.Errorf("expected alert channel %q, got %q", config.GetSystemChannel(), alertChannel)
+	if alertChannel != config.DefaultConfigData().SystemChannel {
+		t.Errorf("expected alert channel %q, got %q", config.DefaultConfigData().SystemChannel, alertChannel)
 	}
 }
 

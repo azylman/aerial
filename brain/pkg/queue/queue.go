@@ -408,7 +408,7 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 					}
 				}
 				if sysChan == "" {
-					sysChan = config.GetSystemChannel()
+					sysChan = config.DefaultConfigData().SystemChannel
 				}
 
 				// Defensively sanitize snippet: rune-slice to 600 runes, escape code fences, and neutralize mentions

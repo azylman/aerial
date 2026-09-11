@@ -133,6 +133,7 @@ type ConfigData struct {
 	ClassifierModel string                     `yaml:"classifier_model,omitempty" json:"classifier_model,omitempty"` // Deprecated alias
 	GeminiHomeDir   string                     `yaml:"gemini_home_dir,omitempty" json:"gemini_home_dir,omitempty"`
 	DataDir         string                     `yaml:"data_dir,omitempty" json:"data_dir,omitempty"`
+	MCPConfig       string                     `yaml:"mcp_config,omitempty" json:"mcp_config,omitempty"`
 }
 
 func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
@@ -157,6 +158,7 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 		Ollama          OllamaConfig               `yaml:"ollama"`
 		LowEffortModel  string                     `yaml:"low_effort_model"`
 		ClassifierModel string                     `yaml:"classifier_model"`
+		MCPConfig       interface{}                `yaml:"mcp_config"`
 	}
 
 	var raw rawConfigHelper
@@ -189,6 +191,19 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 	c.ClassifierModel = raw.ClassifierModel
 	c.GeminiHomeDir = raw.GeminiHomeDir
 	c.DataDir = raw.DataDir
+
+	if raw.MCPConfig != nil {
+		switch v := raw.MCPConfig.(type) {
+		case string:
+			c.MCPConfig = v
+		default:
+			b, err := json.Marshal(v)
+			if err != nil {
+				return fmt.Errorf("failed to marshal mcp_config to JSON: %w", err)
+			}
+			c.MCPConfig = string(b)
+		}
+	}
 
 	if raw.McpServers != nil {
 		c.McpServers = make(map[string]json.RawMessage)
@@ -366,88 +381,101 @@ func Reload(activeCfg *Config) error {
 	return nil
 }
 
-func buildPostgresDSNFromEnv() string {
-	if envDSN := strings.TrimSpace(os.Getenv("DATABASE_URL")); envDSN != "" {
+func buildPostgresDSN(lookup func(string) string) string {
+	if lookup == nil {
+		lookup = func(string) string { return "" }
+	}
+	if envDSN := strings.TrimSpace(lookup("DATABASE_URL")); envDSN != "" {
 		return envDSN
 	}
-	if envDBPath := strings.TrimSpace(os.Getenv("DB_PATH")); envDBPath != "" {
+	if envDBPath := strings.TrimSpace(lookup("DB_PATH")); envDBPath != "" {
 		return envDBPath
 	}
-	dbHost := strings.TrimSpace(os.Getenv("POSTGRES_HOST"))
+	dbHost := strings.TrimSpace(lookup("POSTGRES_HOST"))
 	if dbHost == "" {
 		return ""
 	}
-	dbPort := strings.TrimSpace(os.Getenv("POSTGRES_PORT"))
+	dbPort := strings.TrimSpace(lookup("POSTGRES_PORT"))
 	if dbPort == "" {
 		dbPort = "5432"
 	}
-	dbUser := strings.TrimSpace(os.Getenv("POSTGRES_USER"))
+	dbUser := strings.TrimSpace(lookup("POSTGRES_USER"))
 	if dbUser == "" {
 		dbUser = "aerial"
 	}
-	dbPass := os.Getenv("POSTGRES_PASSWORD")
+	dbPass := lookup("POSTGRES_PASSWORD")
 	if dbPass == "" {
 		dbPass = "aerial_secure_pass"
 	}
-	dbName := strings.TrimSpace(os.Getenv("POSTGRES_DB"))
+	dbName := strings.TrimSpace(lookup("POSTGRES_DB"))
 	if dbName == "" {
 		dbName = "aerial"
 	}
 	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", dbUser, dbPass, dbHost, dbPort, dbName)
 }
 
-func applyEnvironmentOverrides(data *ConfigData) {
+func buildPostgresDSNFromEnv() string {
+	return buildPostgresDSN(os.Getenv)
+}
+
+func applyEnvironmentOverrides(data *ConfigData, lookup func(string) string) {
 	if data == nil {
 		return
 	}
-	if p := getEnv("PORT", ""); p != "" {
+	if lookup == nil {
+		lookup = func(string) string { return "" }
+	}
+	if p := getEnvFromLookup(lookup, "PORT", ""); p != "" {
 		data.Port = p
 	}
-	if b := getEnv("AGY_BIN", ""); b != "" {
+	if b := getEnvFromLookup(lookup, "AGY_BIN", ""); b != "" {
 		data.AgyBin = b
 	}
-	if k := getEnv("GEMINI_API_KEY", getEnv("ANTIGRAVITY_API_KEY", "")); k != "" {
+	if k := getEnvFromLookup(lookup, "GEMINI_API_KEY", getEnvFromLookup(lookup, "ANTIGRAVITY_API_KEY", "")); k != "" {
 		data.APIKey = k
 	}
-	if sp := getEnv("SYSTEM_PROMPT", ""); sp != "" {
+	if sp := getEnvFromLookup(lookup, "SYSTEM_PROMPT", ""); sp != "" {
 		data.SystemPrompt = sp
 	}
-	if dt := getEnv("DISCORD_TOKEN", getEnv("DISCORD_BOT_TOKEN", "")); dt != "" {
+	if dt := getEnvFromLookup(lookup, "DISCORD_TOKEN", getEnvFromLookup(lookup, "DISCORD_BOT_TOKEN", "")); dt != "" {
 		data.DiscordToken = dt
 	}
-	if pat := getEnv("GITHUB_PAT", ""); pat != "" {
+	if pat := getEnvFromLookup(lookup, "GITHUB_PAT", ""); pat != "" {
 		data.GitHubPAT = pat
 	}
-	if dsn := buildPostgresDSNFromEnv(); dsn != "" {
+	if dsn := buildPostgresDSN(lookup); dsn != "" {
 		data.DatabaseURL = dsn
 	}
-	if m := getEnv("AGY_MODEL", ""); m != "" {
+	if m := getEnvFromLookup(lookup, "AGY_MODEL", ""); m != "" {
 		data.Model = m
 	}
-	if tz := getEnv("DEFAULT_TIMEZONE", getEnv("TZ", "")); tz != "" {
+	if tz := getEnvFromLookup(lookup, "DEFAULT_TIMEZONE", getEnvFromLookup(lookup, "TZ", "")); tz != "" {
 		data.Timezone = tz
 	}
-	if sc := getEnv("SYSTEM_CHANNEL", ""); sc != "" {
+	if sc := getEnvFromLookup(lookup, "SYSTEM_CHANNEL", ""); sc != "" {
 		data.SystemChannel = sc
 	}
-	if lem := getEnv("LOW_EFFORT_MODEL", getEnv("AMBIENT_CLASSIFIER_MODEL", getEnv("CLASSIFIER_MODEL", ""))); lem != "" {
+	if lem := getEnvFromLookup(lookup, "LOW_EFFORT_MODEL", getEnvFromLookup(lookup, "AMBIENT_CLASSIFIER_MODEL", getEnvFromLookup(lookup, "CLASSIFIER_MODEL", ""))); lem != "" {
 		data.LowEffortModel = lem
 		data.ClassifierModel = lem
 	}
-	if ou := getEnv("OLLAMA_URL", ""); ou != "" {
+	if ou := getEnvFromLookup(lookup, "OLLAMA_URL", ""); ou != "" {
 		data.Ollama.BaseURL = ou
 	}
-	if om := getEnv("EMBEDDING_MODEL", getEnv("OLLAMA_EMBEDDING_MODEL", "")); om != "" {
+	if om := getEnvFromLookup(lookup, "EMBEDDING_MODEL", getEnvFromLookup(lookup, "OLLAMA_EMBEDDING_MODEL", "")); om != "" {
 		data.Ollama.Model = om
 	}
-	if qp := getEnv("EMBEDDING_QUERY_PREFIX", ""); qp != "" {
+	if qp := getEnvFromLookup(lookup, "EMBEDDING_QUERY_PREFIX", ""); qp != "" {
 		data.Ollama.QueryPrefix = qp
 	}
-	if gh := getEnv("GEMINI_HOME", ""); gh != "" {
+	if gh := getEnvFromLookup(lookup, "GEMINI_HOME", ""); gh != "" {
 		data.GeminiHomeDir = gh
 	}
-	if dd := getEnv("DATA_DIR", ""); dd != "" {
+	if dd := getEnvFromLookup(lookup, "DATA_DIR", ""); dd != "" {
 		data.DataDir = dd
+	}
+	if mcp := getEnvFromLookup(lookup, "MCP_CONFIG", ""); mcp != "" {
+		data.MCPConfig = mcp
 	}
 }
 
@@ -466,17 +494,18 @@ func getFallbackDefaults() ConfigData {
 		}
 	}
 
-	// 2. Check environment variables
-	if m := strings.TrimSpace(os.Getenv("AGY_MODEL")); m != "" {
-		data.Model = m
-	}
-	if tz := strings.TrimSpace(os.Getenv("DEFAULT_TIMEZONE")); tz != "" {
-		data.Timezone = tz
-	} else if tz := strings.TrimSpace(os.Getenv("TZ")); tz != "" {
-		data.Timezone = tz
-	}
-	if ch := strings.TrimSpace(os.Getenv("SYSTEM_CHANNEL")); ch != "" {
-		data.SystemChannel = ch
+	// 2. Read from active config snapshot (zero ambient reads)
+	cfg := activeGlobalConfig.Current()
+	if cfg != nil {
+		if strings.TrimSpace(cfg.Model) != "" {
+			data.Model = cfg.Model
+		}
+		if strings.TrimSpace(cfg.Timezone) != "" {
+			data.Timezone = cfg.Timezone
+		}
+		if strings.TrimSpace(cfg.SystemChannel) != "" {
+			data.SystemChannel = cfg.SystemChannel
+		}
 	}
 
 	return *data
@@ -493,25 +522,16 @@ func GetRuntimeConfig() ConfigData {
 
 func GetTimezone() string {
 	cfg := activeGlobalConfig.Current()
-	if strings.TrimSpace(cfg.Timezone) != "" {
+	if cfg != nil && strings.TrimSpace(cfg.Timezone) != "" {
 		return cfg.Timezone
-	}
-	if tz := strings.TrimSpace(os.Getenv("DEFAULT_TIMEZONE")); tz != "" {
-		return tz
-	}
-	if tz := strings.TrimSpace(os.Getenv("TZ")); tz != "" {
-		return tz
 	}
 	return "America/Los_Angeles"
 }
 
 func GetSystemChannel() string {
 	cfg := activeGlobalConfig.Current()
-	if strings.TrimSpace(cfg.SystemChannel) != "" {
+	if cfg != nil && strings.TrimSpace(cfg.SystemChannel) != "" {
 		return cfg.SystemChannel
-	}
-	if sc := strings.TrimSpace(os.Getenv("SYSTEM_CHANNEL")); sc != "" {
-		return sc
 	}
 	return "aerial-dev"
 }
@@ -542,11 +562,13 @@ func waitForColdBootConfig(paths []string, timeout time.Duration) {
 	log.Printf("[Config] Cold-boot wait timed out after %v, proceeding with search", timeout)
 }
 
-func LoadConfigFromPaths(paths ...string) (*Config, error) {
-	if isContainerColdBoot(paths...) {
-		waitForColdBootConfig(paths, 5*time.Second)
+// LoadConfigFromLookup loads configuration searching the given paths and applying
+// environment variable interpolation and overrides using the provided lookup function.
+// It returns a newly allocated, isolated *Config instance without mutating the global active config.
+func LoadConfigFromLookup(lookup func(string) string, paths ...string) (*Config, error) {
+	if lookup == nil {
+		lookup = func(string) string { return "" }
 	}
-
 	data := DefaultConfigData()
 	var loadedPath string
 	var lastErr error
@@ -557,7 +579,7 @@ func LoadConfigFromPaths(paths ...string) (*Config, error) {
 			continue
 		}
 
-		expanded := os.ExpandEnv(string(rawData))
+		expanded := os.Expand(string(rawData), lookup)
 		var parsed ConfigData
 		if err := yaml.Unmarshal([]byte(expanded), &parsed); err != nil {
 			log.Printf("[Config] Warning: Failed to parse %s: %v. Checking fallback search paths...", p, err)
@@ -588,21 +610,35 @@ func LoadConfigFromPaths(paths ...string) (*Config, error) {
 			log.Printf("[Config] Retaining Last Known Good Configuration (LKGC) due to load error: %v", lastErr)
 			fallback := activeGlobalConfig.Current()
 			cloned := cloneConfigData(fallback)
-			applyEnvironmentOverrides(cloned)
-			activeGlobalConfig.update(cloned)
-			return activeGlobalConfig, lastErr
+			applyEnvironmentOverrides(cloned, lookup)
+			return NewFromData(cloned), lastErr
 		}
 		// No files found and no parse errors: apply defaults + env overrides
-		applyEnvironmentOverrides(data)
-		activeGlobalConfig.update(data)
-		return activeGlobalConfig, nil
+		applyEnvironmentOverrides(data, lookup)
+		return NewFromData(data), nil
 	}
 
-	applyEnvironmentOverrides(data)
-	activeGlobalConfig.update(data)
+	applyEnvironmentOverrides(data, lookup)
 	log.Printf("[Config] Successfully loaded configuration from %s (model=%s, timezone=%s, channel=%s)",
 		loadedPath, data.Model, data.Timezone, data.SystemChannel)
-	return activeGlobalConfig, nil
+	return NewFromData(data), nil
+}
+
+// NewFromLookup constructs a Config instance by searching standard paths using the provided lookup.
+func NewFromLookup(lookup func(string) string) (*Config, error) {
+	return LoadConfigFromLookup(lookup, ConfigSearchPaths...)
+}
+
+func LoadConfigFromPaths(paths ...string) (*Config, error) {
+	if isContainerColdBoot(paths...) {
+		waitForColdBootConfig(paths, 5*time.Second)
+	}
+
+	fresh, err := LoadConfigFromLookup(os.Getenv, paths...)
+	if fresh != nil {
+		activeGlobalConfig.update(fresh.Current())
+	}
+	return activeGlobalConfig, err
 }
 
 func validateChannels(parsed *ConfigData, targetPath string) error {
@@ -815,16 +851,28 @@ func (c ConfigData) IsAdmin(identifiers ...string) bool {
 	return IsAdmin(c.AdminUsers, identifiers...)
 }
 
-func getEnv(key, defaultVal string) string {
-	if val := os.Getenv(key); val != "" {
+func getEnvFromLookup(lookup func(string) string, key, defaultVal string) string {
+	if lookup == nil {
+		return defaultVal
+	}
+	if val := lookup(key); val != "" {
 		return val
 	}
 	return defaultVal
 }
 
+// GetEnvFromLookup returns the value of the environment variable resolved via lookup or defaultVal.
+func GetEnvFromLookup(lookup func(string) string, key, defaultVal string) string {
+	return getEnvFromLookup(lookup, key, defaultVal)
+}
+
+func getEnv(key, defaultVal string) string {
+	return getEnvFromLookup(os.Getenv, key, defaultVal)
+}
+
 // Deprecated: GetEnv is deprecated. Subpackages should read from cfg.Current().
 func GetEnv(key, defaultVal string) string {
-	return getEnv(key, defaultVal)
+	return getEnvFromLookup(os.Getenv, key, defaultVal)
 }
 
 // NormalizeChannelName standardizes channel names for config key and file lookups.

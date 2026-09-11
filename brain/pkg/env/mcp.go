@@ -33,8 +33,6 @@ func (p *Provisioner) LoadMCPConfig(cfg *config.Config) json.RawMessage {
 	var gitHubPAT string
 	if cfg != nil && cfg.Current().GitHubPAT != "" {
 		gitHubPAT = cfg.Current().GitHubPAT
-	} else if pat := os.Getenv("GITHUB_PAT"); pat != "" {
-		gitHubPAT = pat
 	}
 	if gitHubPAT != "" {
 		mergedServers["github"] = map[string]interface{}{
@@ -63,10 +61,8 @@ func (p *Provisioner) LoadMCPConfig(cfg *config.Config) json.RawMessage {
 		}
 	}
 
-	if len(rawBytes) == 0 {
-		if envVal := os.Getenv("MCP_CONFIG"); envVal != "" {
-			rawBytes = []byte(envVal)
-		}
+	if len(rawBytes) == 0 && cfg != nil && cfg.Current().MCPConfig != "" {
+		rawBytes = []byte(cfg.Current().MCPConfig)
 	}
 
 	if len(rawBytes) == 0 && p != nil && p.dataDir != "" {
@@ -134,8 +130,7 @@ func (p *Provisioner) LoadMCPConfig(cfg *config.Config) json.RawMessage {
 		return json.RawMessage(`{"mcpServers":{}}`)
 	}
 
-	expanded := os.ExpandEnv(string(outBytes))
-	return json.RawMessage(expanded)
+	return json.RawMessage(outBytes)
 }
 
 // SyncMCP loads and synchronizes mcp_config.json into ~/.gemini/config/mcp_config.json.
