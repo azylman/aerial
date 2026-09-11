@@ -188,6 +188,8 @@ services:
       - DATABASE_URL=${DATABASE_URL:-postgres://${POSTGRES_USER:-aerial}:${POSTGRES_PASSWORD:-aerial_secure_pass}@postgres:5432/${POSTGRES_DB:-aerial}?sslmode=disable}
       - DEFAULT_TIMEZONE=${DEFAULT_TIMEZONE:-America/Los_Angeles}
       - TZ=${DEFAULT_TIMEZONE:-America/Los_Angeles}
+    ports:
+      - "${SCHEDULER_MCP_HOST_PORT:-4005}:8080"
     networks:
       - aerial-net
     healthcheck:
