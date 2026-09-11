@@ -105,22 +105,28 @@ func handlePrompt(database *sql.DB, pool *queue.WorkerPool) http.HandlerFunc {
 	}
 }
 
-func handleTranscripts(database *sql.DB, homeDir ...string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		var resolvedHome string
-		if len(homeDir) > 0 && homeDir[0] != "" {
-			resolvedHome = homeDir[0]
-		} else {
-			resolvedHome = os.Getenv("HOME")
-			if resolvedHome == "" {
-				var err error
-				resolvedHome, err = os.UserHomeDir()
-				if err != nil || resolvedHome == "" {
-					resolvedHome = "/root"
-				}
-			}
-		}
+// DefaultTranscriptRoots returns the search roots for conversation transcripts
+// based on the provided configuration. In production, this includes the persistent
+// data brain directory as well as CLI and Antigravity brain directories under GeminiHomeDir.
+func DefaultTranscriptRoots(cfg *config.Config) []string {
+	if cfg == nil {
+		return []string{"/data/brain"}
+	}
+	var roots []string
+	if dataDir := strings.TrimSpace(cfg.DataDir()); dataDir != "" {
+		roots = append(roots, filepath.Join(dataDir, "brain"))
+	}
+	if homeDir := strings.TrimSpace(cfg.GeminiHomeDir()); homeDir != "" {
+		roots = append(roots,
+			filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain"),
+			filepath.Join(homeDir, ".gemini", "antigravity", "brain"),
+		)
+	}
+	return roots
+}
 
+func handleTranscripts(database *sql.DB, searchPaths ...string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		type TranscriptEntry struct {
 			Path       string `json:"path"`
 			ModTime    string `json:"mod_time"`
@@ -132,23 +138,14 @@ func handleTranscripts(database *sql.DB, homeDir ...string) http.HandlerFunc {
 		}
 
 		var results []TranscriptEntry
-		var roots []string
-		if len(homeDir) > 0 && homeDir[0] != "" {
-			roots = []string{
-				filepath.Join(resolvedHome, ".gemini", "antigravity-cli", "brain"),
-				filepath.Join(resolvedHome, ".gemini", "antigravity", "brain"),
-			}
-		} else {
-			roots = []string{
-				"/data/brain",
-				filepath.Join(resolvedHome, ".gemini", "antigravity-cli", "brain"),
-				filepath.Join(resolvedHome, ".gemini", "antigravity", "brain"),
-			}
-		}
-
+		seen := make(map[string]bool)
 		includeRaw := r.URL.Query().Get("include_raw") == "true"
 
-		for _, root := range roots {
+		for _, root := range searchPaths {
+			root = strings.TrimSpace(root)
+			if root == "" {
+				continue
+			}
 			entries, err := os.ReadDir(root)
 			if err != nil {
 				continue
@@ -160,6 +157,9 @@ func handleTranscripts(database *sql.DB, homeDir ...string) http.HandlerFunc {
 				}
 
 				internalID := entry.Name()
+				if seen[internalID] {
+					continue
+				}
 				tPath := filepath.Join(root, internalID, ".system_generated", "logs", "transcript_full.jsonl")
 				if _, err := os.Stat(tPath); err != nil {
 					tPath = filepath.Join(root, internalID, ".system_generated", "logs", "transcript.jsonl")
@@ -219,6 +219,7 @@ func handleTranscripts(database *sql.DB, homeDir ...string) http.HandlerFunc {
 				if includeRaw {
 					item.RawJSONL = string(data)
 				}
+				seen[internalID] = true
 				results = append(results, item)
 			}
 		}
@@ -811,15 +812,11 @@ func metricsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func SetupBrainMux(database *sql.DB, pool *queue.WorkerPool, reloadFn func(string), homeDir ...string) *http.ServeMux {
-	var hDir string
-	if len(homeDir) > 0 {
-		hDir = homeDir[0]
-	}
+func SetupBrainMux(database *sql.DB, pool *queue.WorkerPool, reloadFn func(string), searchPaths ...string) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", metrics.Handler())
 	mux.HandleFunc("/prompt", handlePrompt(database, pool))
-	mux.HandleFunc("/transcripts", handleTranscripts(database, hDir))
+	mux.HandleFunc("/transcripts", handleTranscripts(database, searchPaths...))
 	mux.HandleFunc("/tasks", handleTasks(database))
 	mux.HandleFunc("/facts", handleFacts(database))
 	mux.HandleFunc("/schedules", handleSchedules(database))
@@ -1044,7 +1041,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config) error {
 	stopScheduler := sched.Start(ctx)
 	defer stopScheduler()
 
-	mux := SetupBrainMux(database, pool, reloadConfig, homeDir)
+	mux := SetupBrainMux(database, pool, reloadConfig, DefaultTranscriptRoots(cfg)...)
 
 	port := cur.Port
 	if port == "" {
