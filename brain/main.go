@@ -1071,7 +1071,10 @@ func RunBrainApp(ctx context.Context, cfg *config.Config) error {
 	}
 
 	// Start background scheduler monitor for due cron and one-shot routines
-	sched := scheduler.New(cfg, database, pool, scheduler.NewDiscordThreadCreator(dgSession), scheduler.WithRunnerFunc(runner.RunAgy), scheduler.WithSessionRoots(sessionMgr.Roots()...))
+	sched, err := scheduler.New(cfg, database, pool, scheduler.NewDiscordThreadCreator(dgSession), scheduler.WithRunnerFunc(runner.RunAgy), scheduler.WithSessionRoots(sessionMgr.Roots()...))
+	if err != nil {
+		return fmt.Errorf("failed to initialize scheduler: %w", err)
+	}
 	stopScheduler := sched.Start(ctx)
 	defer stopScheduler()
 

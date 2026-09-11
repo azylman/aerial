@@ -85,7 +85,10 @@ func WithSessionRoots(roots ...string) Option {
 }
 
 // New constructs a Scheduler supporting both legacy *sql.DB and db.Store interface parameters.
-func New(cfg *config.Config, dbOrStore any, enqueuer MessageEnqueuer, threadCreator ThreadCreator, opts ...Option) *Scheduler {
+func New(cfg *config.Config, dbOrStore any, enqueuer MessageEnqueuer, threadCreator ThreadCreator, opts ...Option) (*Scheduler, error) {
+	if cfg == nil || cfg.Current() == nil {
+		return nil, fmt.Errorf("scheduler: config cannot be nil")
+	}
 	var database *sql.DB
 	var store db.Store
 	switch v := dbOrStore.(type) {
@@ -109,7 +112,7 @@ func New(cfg *config.Config, dbOrStore any, enqueuer MessageEnqueuer, threadCrea
 			opt(s)
 		}
 	}
-	return s
+	return s, nil
 }
 
 func (s *Scheduler) getStore() db.Store {
@@ -124,12 +127,12 @@ func (s *Scheduler) getStore() db.Store {
 	}
 	return nil
 }
-func NewWithStore(cfg *config.Config, store db.Store, enqueuer MessageEnqueuer, threadCreator ThreadCreator, opts ...Option) *Scheduler {
+func NewWithStore(cfg *config.Config, store db.Store, enqueuer MessageEnqueuer, threadCreator ThreadCreator, opts ...Option) (*Scheduler, error) {
 	return New(cfg, store, enqueuer, threadCreator, opts...)
 }
 
 // NewScheduler is a compatibility wrapper for New.
-func NewScheduler(cfg *config.Config, dbOrStore any, enqueuer MessageEnqueuer, threadCreator ThreadCreator, opts ...Option) *Scheduler {
+func NewScheduler(cfg *config.Config, dbOrStore any, enqueuer MessageEnqueuer, threadCreator ThreadCreator, opts ...Option) (*Scheduler, error) {
 	return New(cfg, dbOrStore, enqueuer, threadCreator, opts...)
 }
 
@@ -150,11 +153,6 @@ func FormatThreadTitle(titlePrefix string, t time.Time) string {
 	return string(runes)
 }
 
-// GetDefaultTimezone returns the default timezone configured for the scheduler.
-func GetDefaultTimezone() string {
-	return config.GetTimezone()
-}
-
 // CalculateNextRun parses a standard 5-field cron or descriptor and computes the next run time in UTC.
 func CalculateNextRun(cronExpr, timezone string, from time.Time) (time.Time, error) {
 	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
@@ -165,7 +163,7 @@ func CalculateNextRun(cronExpr, timezone string, from time.Time) (time.Time, err
 
 	tzTrimmed := strings.TrimSpace(timezone)
 	if tzTrimmed == "" {
-		tzTrimmed = GetDefaultTimezone()
+		return time.Time{}, fmt.Errorf("timezone cannot be empty")
 	}
 
 	loc := time.UTC
@@ -185,17 +183,27 @@ func (s *Scheduler) ProcessDueSchedules(ctx context.Context) error {
 	if s == nil || s.store == nil {
 		return nil
 	}
+	if s.cfg == nil || s.cfg.Current() == nil {
+		return fmt.Errorf("scheduler: config cannot be nil")
+	}
 	return processDueSchedulesStore(ctx, s.cfg, s.store, s.enqueuer, s.threadCreator)
 }
 
 // ProcessDueSchedules evaluates and processes due cron and one-shot schedules (compatibility wrapper).
-func ProcessDueSchedules(ctx context.Context, database *sql.DB, enqueuer MessageEnqueuer, threadCreator ThreadCreator) error {
-	return New(nil, database, enqueuer, threadCreator).ProcessDueSchedules(ctx)
+func ProcessDueSchedules(ctx context.Context, cfg *config.Config, database *sql.DB, enqueuer MessageEnqueuer, threadCreator ThreadCreator) error {
+	s, err := New(cfg, database, enqueuer, threadCreator)
+	if err != nil {
+		return err
+	}
+	return s.ProcessDueSchedules(ctx)
 }
 
 func processDueSchedulesStore(ctx context.Context, cfg *config.Config, store db.Store, enqueuer MessageEnqueuer, threadCreator ThreadCreator) error {
 	if store == nil {
 		return nil
+	}
+	if cfg == nil || cfg.Current() == nil {
+		return fmt.Errorf("scheduler: config cannot be nil")
 	}
 
 	now := time.Now().UTC()
@@ -213,17 +221,9 @@ func processDueSchedulesStore(ctx context.Context, cfg *config.Config, store db.
 		default:
 		}
 
-		defaultTz := ""
-		if cfg != nil {
-			if cur := cfg.Current(); cur != nil {
-				defaultTz = cur.Timezone
-			}
-		} else {
-			defaultTz = GetDefaultTimezone()
-		}
-		tz := c.Timezone
-		if strings.TrimSpace(tz) == "" {
-			tz = defaultTz
+		tz := strings.TrimSpace(c.Timezone)
+		if tz == "" {
+			tz = cfg.Current().Timezone
 		}
 
 		// 24h staleness guard: if cron trigger is overdue by >24h, advance next_run_at without firing.
@@ -264,14 +264,7 @@ func processDueSchedulesStore(ctx context.Context, cfg *config.Config, store db.
 			}
 		}
 
-		var policy config.ChannelPolicy
-		if cfg != nil {
-			if cur := cfg.Current(); cur != nil {
-				policy = cur.ResolveChannelPolicy(c.TargetID, channelName)
-			}
-		} else {
-			policy = config.GetRuntimeConfig().ResolveChannelPolicy(c.TargetID, channelName)
-		}
+		policy := cfg.Current().ResolveChannelPolicy(c.TargetID, channelName)
 
 		// Create fresh public Discord thread only if:
 		// 1. Target is not already a thread, AND
@@ -421,9 +414,14 @@ func (s *Scheduler) Start(ctx context.Context) (stop func()) {
 }
 
 // Start launches the background scheduler monitor daemon with a 30-second ticker (compatibility wrapper).
-func Start(ctx context.Context, database *sql.DB, pool *queue.WorkerPool, dg *discordgo.Session) (stop func()) {
+func Start(ctx context.Context, cfg *config.Config, database *sql.DB, pool *queue.WorkerPool, dg *discordgo.Session) (stop func()) {
 	threadCreator := NewDiscordThreadCreator(dg)
-	return New(nil, database, pool, threadCreator).Start(ctx)
+	s, err := New(cfg, database, pool, threadCreator)
+	if err != nil {
+		log.Printf("[Scheduler] Error: %v", err)
+		return func() {}
+	}
+	return s.Start(ctx)
 }
 
 // ExtractFactsLLM extracts facts using the primary LLM via the configured runner function.
@@ -431,26 +429,16 @@ func (s *Scheduler) ExtractFactsLLM(ctx context.Context, prompt string) (string,
 	if s == nil || s.runnerFn == nil {
 		return "", fmt.Errorf("scheduler: RunnerFunc not configured for fact extraction")
 	}
-	apiKey := ""
-	model := ""
-	agyBin := ""
-	if s.cfg != nil {
-		if cur := s.cfg.Current(); cur != nil {
-			apiKey = cur.APIKey
-			model = cur.LowEffortModel
-			if model == "" {
-				model = cur.Model
-			}
-			agyBin = cur.AgyBin
-		}
+	if s.cfg == nil || s.cfg.Current() == nil {
+		return "", fmt.Errorf("scheduler: config cannot be nil")
 	}
+	cur := s.cfg.Current()
+	apiKey := cur.APIKey
+	model := cur.LowEffortModel
 	if model == "" {
-		rc := config.GetRuntimeConfig()
-		model = rc.LowEffortModel
-		if model == "" {
-			model = rc.Model
-		}
+		model = cur.Model
 	}
+	agyBin := cur.AgyBin
 	if strings.TrimSpace(model) == "" {
 		return "", fmt.Errorf("scheduler fact extraction error: model is not configured")
 	}
@@ -471,7 +459,7 @@ func (s *Scheduler) ExtractFactsLLM(ctx context.Context, prompt string) (string,
 // ExtractFactsLLM extracts facts using the primary LLM (compatibility wrapper).
 // Returns an error if no scheduler with a configured RunnerFunc is available.
 func ExtractFactsLLM(ctx context.Context, prompt string) (string, error) {
-	return New(nil, nil, nil, nil).ExtractFactsLLM(ctx, prompt)
+	return "", fmt.Errorf("scheduler: config cannot be nil")
 }
 
 // RunPruneRetention executes schedule run retention cleanup.
@@ -514,14 +502,13 @@ func RunFactExtraction(ctx context.Context, dbOrStore any, client *memory.Client
 
 // Run executes the monitoring loop with ticker interval and context cancellation.
 func (s *Scheduler) Run(ctx context.Context, interval time.Duration) {
+	if s == nil || s.cfg == nil || s.cfg.Current() == nil {
+		log.Printf("[Scheduler] Error: cannot run scheduler with nil config")
+		return
+	}
 	log.Printf("[Scheduler] Background scheduler monitor started (interval=%v)", interval)
 	ticker := time.NewTicker(interval)
-	var ollamaClient *memory.Client
-	if s.cfg != nil {
-		ollamaClient = memory.New(s.cfg, s.sessionRoots...)
-	} else {
-		ollamaClient = memory.NewClient("", s.sessionRoots...)
-	}
+	ollamaClient := memory.New(s.cfg, s.sessionRoots...)
 	llmFunc := s.ExtractFactsLLM
 
 	// Initial evaluation on start
@@ -557,6 +544,11 @@ func (s *Scheduler) Run(ctx context.Context, interval time.Duration) {
 }
 
 // Run executes the monitoring loop with ticker interval and context cancellation (compatibility wrapper).
-func Run(ctx context.Context, database *sql.DB, enqueuer MessageEnqueuer, threadCreator ThreadCreator, interval time.Duration) {
-	New(nil, database, enqueuer, threadCreator).Run(ctx, interval)
+func Run(ctx context.Context, cfg *config.Config, database *sql.DB, enqueuer MessageEnqueuer, threadCreator ThreadCreator, interval time.Duration) {
+	s, err := New(cfg, database, enqueuer, threadCreator)
+	if err != nil {
+		log.Printf("[Scheduler] Error: %v", err)
+		return
+	}
+	s.Run(ctx, interval)
 }
