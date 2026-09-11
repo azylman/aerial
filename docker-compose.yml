@@ -635,7 +635,7 @@ services:
       - VM_INSTANCE_TYPE=single
       - MCP_DISABLED_TOOLS=documentation,export,metric_relabel_debug
     ports:
-      - "${VICTORIAMETRICS_MCP_HOST_PORT:-127.0.0.1:4004}:4004"
+      - "${VICTORIAMETRICS_MCP_HOST_PORT:-127.0.0.1:4044}:4004"
     networks:
       - aerial-net
     healthcheck:
