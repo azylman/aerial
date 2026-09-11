@@ -41,7 +41,7 @@ func TestStatusHandler(t *testing.T) {
 	req := httptest.NewRequest("GET", "/api/status", nil)
 	rr := httptest.NewRecorder()
 
-	handler := statusHandler("")
+	handler := statusHandler("", "", "", "")
 	handler.ServeHTTP(rr, req)
 
 	if status := rr.Code; status != http.StatusOK {
@@ -95,7 +95,7 @@ func TestStatusHandlerActiveTasks(t *testing.T) {
 	}))
 	defer brainMock.Close()
 
-	handler := statusHandler(brainMock.URL)
+	handler := statusHandler(brainMock.URL, "", "", "")
 	req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
@@ -121,7 +121,7 @@ func TestStatusHandlerActiveTasks(t *testing.T) {
 	}
 
 	// 2. Graceful degradation on brain error / offline
-	degradedHandler := statusHandler("http://127.0.0.1:54321")
+	degradedHandler := statusHandler("http://127.0.0.1:54321", "", "", "")
 	reqDegraded := httptest.NewRequest(http.MethodGet, "/api/status", nil)
 	rrDegraded := httptest.NewRecorder()
 	degradedHandler.ServeHTTP(rrDegraded, reqDegraded)
@@ -1579,7 +1579,6 @@ dashboard:
 	if err := os.WriteFile(cfgFile, []byte(cfgContent), 0644); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("AERIAL_CONFIG_PATH", cfgFile)
 
 	gitsyncMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -1591,7 +1590,7 @@ dashboard:
 	}))
 	defer gitsyncMock.Close()
 
-	handler := statusHandler("", gitsyncMock.URL)
+	handler := statusHandler("", gitsyncMock.URL, cfgFile, "testsha")
 	req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
@@ -1764,20 +1763,17 @@ func TestGetContainerCommit_AllLabels(t *testing.T) {
 }
 
 func TestGetGitCommitVariations(t *testing.T) {
-	// 1. Env commit short
-	t.Setenv("GIT_COMMIT", "abcdef")
-	if c := getGitCommit(); c != "abcdef" {
+	// 1. Normalize short commit
+	if c := normalizeGitCommit("abcdef"); c != "abcdef" {
 		t.Errorf("expected 'abcdef', got %q", c)
 	}
 
-	// 2. Env commit long
-	t.Setenv("GIT_COMMIT", "abcdef0123456789")
-	if c := getGitCommit(); c != "abcdef0" {
+	// 2. Normalize long commit
+	if c := normalizeGitCommit("abcdef0123456789"); c != "abcdef0" {
 		t.Errorf("expected 'abcdef0', got %q", c)
 	}
 
 	// 3. From ref file
-	t.Setenv("GIT_COMMIT", "")
 	tempDir := t.TempDir()
 	headFile := filepath.Join(tempDir, "HEAD")
 	mainRefFile := filepath.Join(tempDir, "refs", "heads", "main")
@@ -1802,25 +1798,97 @@ func TestGetGitCommitVariations(t *testing.T) {
 	}
 }
 
-func TestNewDashboardConfigFromEnv_Defaults(t *testing.T) {
-	t.Setenv("PORT", "")
-	t.Setenv("BRAIN_URL", "")
-	t.Setenv("GITHUB_REPO", "")
-	t.Setenv("GITHUB_PAT", "")
-	t.Setenv("GITHUB_PERSONAL_ACCESS_TOKEN", "fallback_token_123")
+func TestNewDashboardConfigFromLookup_Custom(t *testing.T) {
+	envMap := map[string]string{
+		"PORT":                         "9090",
+		"BRAIN_URL":                    "http://brain-custom:9090",
+		"GITHUB_REPO":                  "custom/repo",
+		"GITHUB_PAT":                   "custom_pat",
+		"GITHUB_PERSONAL_ACCESS_TOKEN": "fallback_token",
+		"GITSYNC_URL":                  "http://gitsync-custom:9090",
+		"AERIAL_CONFIG_PATH":           "/custom/config.yaml",
+		"GIT_COMMIT":                   "0123456789",
+	}
+	lookup := func(k string) string { return envMap[k] }
 
+	cfg := NewDashboardConfigFromLookup(lookup)
+	if cfg.Port != "9090" {
+		t.Errorf("expected port 9090, got %q", cfg.Port)
+	}
+	if cfg.BrainURL != "http://brain-custom:9090" {
+		t.Errorf("expected brain URL http://brain-custom:9090, got %q", cfg.BrainURL)
+	}
+	if cfg.GHRepo != "custom/repo" {
+		t.Errorf("expected repo custom/repo, got %q", cfg.GHRepo)
+	}
+	if cfg.GHToken != "custom_pat" {
+		t.Errorf("expected pat custom_pat, got %q", cfg.GHToken)
+	}
+	if cfg.GitSyncURL != "http://gitsync-custom:9090" {
+		t.Errorf("expected gitsync URL http://gitsync-custom:9090, got %q", cfg.GitSyncURL)
+	}
+	if cfg.ConfigPath != "/custom/config.yaml" {
+		t.Errorf("expected config path /custom/config.yaml, got %q", cfg.ConfigPath)
+	}
+	if cfg.GitCommit != "0123456" {
+		t.Errorf("expected git commit 0123456, got %q", cfg.GitCommit)
+	}
+}
+
+func TestNewDashboardConfigFromLookup_Defaults(t *testing.T) {
+	// 1. Nil lookup
+	cfgNil := NewDashboardConfigFromLookup(nil)
+	if cfgNil.Port != "8080" {
+		t.Errorf("expected default port 8080, got %q", cfgNil.Port)
+	}
+	if cfgNil.BrainURL != "http://brain:8080" {
+		t.Errorf("expected default brain URL http://brain:8080, got %q", cfgNil.BrainURL)
+	}
+	if cfgNil.GHRepo != "azylman/aerial" {
+		t.Errorf("expected default repo azylman/aerial, got %q", cfgNil.GHRepo)
+	}
+	if cfgNil.GHToken != "" {
+		t.Errorf("expected empty default token, got %q", cfgNil.GHToken)
+	}
+	if cfgNil.GitSyncURL != "http://gitsync:8080" {
+		t.Errorf("expected default gitsync URL http://gitsync:8080, got %q", cfgNil.GitSyncURL)
+	}
+	if cfgNil.ConfigPath != "/share/aerial-config/config.yaml" {
+		t.Errorf("expected default config path /share/aerial-config/config.yaml, got %q", cfgNil.ConfigPath)
+	}
+	if cfgNil.GitCommit != "latest" {
+		t.Errorf("expected default commit latest, got %q", cfgNil.GitCommit)
+	}
+
+	// 2. Fallback token lookup
+	envMap := map[string]string{
+		"GITHUB_PERSONAL_ACCESS_TOKEN": "fallback_token_123",
+	}
+	cfgFallback := NewDashboardConfigFromLookup(func(k string) string { return envMap[k] })
+	if cfgFallback.GHToken != "fallback_token_123" {
+		t.Errorf("expected fallback token, got %q", cfgFallback.GHToken)
+	}
+}
+
+func TestNewDashboardConfigFromEnv_Smoke(t *testing.T) {
 	cfg := NewDashboardConfigFromEnv()
-	if cfg.Port != "8080" {
-		t.Errorf("expected default port 8080, got %q", cfg.Port)
+	if cfg.Port == "" {
+		t.Errorf("expected non-empty Port from NewDashboardConfigFromEnv")
 	}
-	if cfg.BrainURL != "http://brain:8080" {
-		t.Errorf("expected default brain URL, got %q", cfg.BrainURL)
+	if cfg.BrainURL == "" {
+		t.Errorf("expected non-empty BrainURL from NewDashboardConfigFromEnv")
 	}
-	if cfg.GHRepo != "azylman/aerial" {
-		t.Errorf("expected default repo, got %q", cfg.GHRepo)
+	if cfg.GHRepo == "" {
+		t.Errorf("expected non-empty GHRepo from NewDashboardConfigFromEnv")
 	}
-	if cfg.GHToken != "fallback_token_123" {
-		t.Errorf("expected fallback token, got %q", cfg.GHToken)
+	if cfg.GitSyncURL == "" {
+		t.Errorf("expected non-empty GitSyncURL from NewDashboardConfigFromEnv")
+	}
+	if cfg.ConfigPath == "" {
+		t.Errorf("expected non-empty ConfigPath from NewDashboardConfigFromEnv")
+	}
+	if cfg.GitCommit == "" {
+		t.Errorf("expected non-empty GitCommit from NewDashboardConfigFromEnv")
 	}
 }
 
@@ -2024,16 +2092,6 @@ func TestFactsSchedulesRuns_ErrorBranches(t *testing.T) {
 }
 
 func TestDashboardServerLifecycle(t *testing.T) {
-	t.Setenv("PORT", "8080")
-	t.Setenv("BRAIN_URL", "http://brain:8080")
-	t.Setenv("GITHUB_REPO", "azylman/aerial")
-	t.Setenv("GITHUB_PAT", "my_pat")
-
-	cfg := NewDashboardConfigFromEnv()
-	if cfg.Port != "8080" || cfg.BrainURL != "http://brain:8080" || cfg.GHRepo != "azylman/aerial" {
-		t.Errorf("unexpected parsed config: %+v", cfg)
-	}
-
 	// RunDashboardServer with ephemeral port and cancellation
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -2155,3 +2213,76 @@ func TestFactsSchedulesRuns_SuccessParams(t *testing.T) {
 		t.Errorf("expected 503 on offline brain runs, got %d", rrOfflineRuns.Code)
 	}
 }
+
+func TestSetupDashboardMux_StatusWiring(t *testing.T) {
+	tempDir := t.TempDir()
+	cfgFile := filepath.Join(tempDir, "config.yaml")
+	cfgContent := `
+dashboard:
+  quick_launch_links:
+    - name: "TESTLINK"
+      url: "https://test.zylman.com"
+`
+	if err := os.WriteFile(cfgFile, []byte(cfgContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	gitsyncMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(GitSyncStatusResponse{
+			Status:        "synced",
+			MaxLagSeconds: 0,
+			LastSyncTime:  time.Now().UTC(),
+		})
+	}))
+	defer gitsyncMock.Close()
+
+	brainMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/queue/active" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"tasks": []}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer brainMock.Close()
+
+	cfg := DashboardConfig{
+		Port:       "8080",
+		BrainURL:   brainMock.URL,
+		GitSyncURL: gitsyncMock.URL,
+		ConfigPath: cfgFile,
+		GitCommit:  "wirecommit",
+	}
+
+	handler := SetupDashboardMux(cfg, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from /api/status, got %d", rr.Code)
+	}
+
+	var resp ClusterResponse
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode status response: %v", err)
+	}
+
+	if resp.GitSync.Status != "synced" {
+		t.Errorf("expected GitSync.Status 'synced', got %q", resp.GitSync.Status)
+	}
+
+	foundLink := false
+	for _, l := range resp.QuickLaunchLinks {
+		if l.Name == "TESTLINK" && l.URL == "https://test.zylman.com" {
+			foundLink = true
+			break
+		}
+	}
+	if !foundLink {
+		t.Errorf("expected QuickLaunchLinks to contain TESTLINK, got %+v", resp.QuickLaunchLinks)
+	}
+}
+
