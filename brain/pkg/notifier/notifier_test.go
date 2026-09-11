@@ -1,9 +1,7 @@
 package notifier
 
 import (
-	"os"
-	"path/filepath"
-	"runtime"
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -79,39 +77,23 @@ func TestGenerateDynamicNotificationWithMock(t *testing.T) {
 }
 
 func TestGenerateDynamicNotification_SuccessfulAgyRun(t *testing.T) {
-	tmpDir := t.TempDir()
-	var mockBin string
-	if runtime.GOOS == "windows" {
-		mockBin = filepath.Join(tmpDir, "mock_agy.bat")
-		scriptContent := "@echo off\r\necho {\"response\": \"Hey bestie! ✨ Everything is running smoothly now! 🌸\"}\r\n"
-		if err := os.WriteFile(mockBin, []byte(scriptContent), 0755); err != nil {
-			t.Fatalf("failed to write mock script: %v", err)
-		}
-	} else {
-		mockBin = filepath.Join(tmpDir, "mock_agy.sh")
-		scriptContent := `#!/bin/sh
-cat << 'EOF'
-{"response": "Hey bestie! ✨ Everything is running smoothly now! 🌸"}
-EOF
-`
-		if err := os.WriteFile(mockBin, []byte(scriptContent), 0755); err != nil {
-			t.Fatalf("failed to write mock script: %v", err)
-		}
+	mockRunner := func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+		return `{"response": "Hey bestie! ✨ Everything is running smoothly now! 🌸"}`, "", 0, nil
 	}
 
-	res := GenerateDynamicNotification(mockBin, "valid_key", "session reset due to context corruption")
+	res := GenerateDynamicNotification("agy", "valid_key", "session reset due to context corruption", mockRunner)
 	if !strings.Contains(res, "bestie") {
 		t.Errorf("Expected dynamic notification from mock agy, got: %q", res)
 	}
 
 	// Test with poison pill context description
-	resPoison := GenerateDynamicNotification(mockBin, "valid_key", "a message caused repeated crashes and had to be dropped")
+	resPoison := GenerateDynamicNotification("agy", "valid_key", "a message caused repeated crashes and had to be dropped", mockRunner)
 	if !strings.Contains(resPoison, "bestie") {
 		t.Errorf("Expected dynamic notification for poison pill, got: %q", resPoison)
 	}
 
 	// Test with 503 outage context description
-	res503 := GenerateDynamicNotification(mockBin, "valid_key", "Error 503: unavailable")
+	res503 := GenerateDynamicNotification("agy", "valid_key", "Error 503: unavailable", mockRunner)
 	if !strings.Contains(res503, "bestie") {
 		t.Errorf("Expected dynamic notification for 503 outage, got: %q", res503)
 	}

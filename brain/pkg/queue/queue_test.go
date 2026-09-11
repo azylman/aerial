@@ -41,7 +41,11 @@ func TestWorkerPool_ConfigInjection(t *testing.T) {
 			"default": {Mode: "threads"},
 		},
 	})
-	pool := New(appCfg, WorkerPoolConfig{})
+	pool := New(appCfg, WorkerPoolConfig{
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			return "", "", 0, nil
+		},
+	})
 	if pool == nil {
 		t.Fatalf("expected non-nil pool")
 	}
@@ -1123,6 +1127,9 @@ func TestRecoverInterrupted_ReconcilesOrphanedScheduleRuns(t *testing.T) {
 
 	pool := NewWorkerPool(WorkerPoolConfig{
 		DB: database,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			return "", "", 0, nil
+		},
 	})
 	pool.Start()
 	defer pool.Stop()

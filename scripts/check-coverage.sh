@@ -61,7 +61,13 @@ if [ -n "$CUSTOM_PROFILE_DIR" ]; then
     PROF_DIR="$CUSTOM_PROFILE_DIR"
     mkdir -p "$PROF_DIR"
 else
-    PROF_DIR=$(mktemp -d /tmp/aerial-coverage.XXXXXX)
+    WIN_ROOT="$(pwd -W 2>/dev/null || true)"
+    if [ -n "$WIN_ROOT" ]; then
+        PROF_DIR="${WIN_ROOT}/.aerial-coverage-$$.tmp"
+        mkdir -p "$PROF_DIR"
+    else
+        PROF_DIR=$(mktemp -d /tmp/aerial-coverage.XXXXXX)
+    fi
     TEMP_CREATED=1
 fi
 
