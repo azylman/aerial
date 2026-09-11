@@ -862,8 +862,6 @@ func TestRunAgyWithWatchdog_TranscriptHeartbeat(t *testing.T) {
 	ctx := context.Background()
 	testSessionID := "test-transcript-session-12345"
 	tempDir := t.TempDir()
-	t.Setenv("HOME", tempDir)
-	t.Setenv("USERPROFILE", tempDir)
 
 	logDir := filepath.Join(tempDir, ".gemini", "antigravity-cli", "brain", testSessionID, ".system_generated", "logs")
 	if err := os.MkdirAll(logDir, 0755); err != nil {
@@ -885,6 +883,7 @@ func TestRunAgyWithWatchdog_TranscriptHeartbeat(t *testing.T) {
 		InactivityTimeout: inactTimeout,
 		MaxDuration:       5 * time.Second,
 		PollInterval:      pollInterval,
+		TranscriptDirs:    []string{filepath.Join(tempDir, ".gemini", "antigravity-cli", "brain")},
 	}
 
 	// Writes to transcript.jsonl beating the inactivity timeout
@@ -919,8 +918,6 @@ func TestRunAgyWithWatchdog_BackgroundTaskLogHeartbeat(t *testing.T) {
 	ctx := context.Background()
 	testSessionID := "test-task-session-12345"
 	tempDir := t.TempDir()
-	t.Setenv("HOME", tempDir)
-	t.Setenv("USERPROFILE", tempDir)
 
 	tasksDir := filepath.Join(tempDir, ".gemini", "antigravity-cli", "brain", testSessionID, ".system_generated", "tasks")
 	if err := os.MkdirAll(tasksDir, 0755); err != nil {
@@ -942,6 +939,7 @@ func TestRunAgyWithWatchdog_BackgroundTaskLogHeartbeat(t *testing.T) {
 		InactivityTimeout: inactTimeout,
 		MaxDuration:       5 * time.Second,
 		PollInterval:      pollInterval,
+		TranscriptDirs:    []string{filepath.Join(tempDir, ".gemini", "antigravity-cli", "brain")},
 	}
 
 	// Writes to task-1.log beating the inactivity timeout.
@@ -977,8 +975,6 @@ func TestRunAgyWithWatchdog_BackgroundTaskLogStall_Timeout(t *testing.T) {
 	ctx := context.Background()
 	testSessionID := "test-task-stall-6789"
 	tempDir := t.TempDir()
-	t.Setenv("HOME", tempDir)
-	t.Setenv("USERPROFILE", tempDir)
 
 	tasksDir := filepath.Join(tempDir, ".gemini", "antigravity-cli", "brain", testSessionID, ".system_generated", "tasks")
 	if err := os.MkdirAll(tasksDir, 0755); err != nil {
@@ -991,6 +987,7 @@ func TestRunAgyWithWatchdog_BackgroundTaskLogStall_Timeout(t *testing.T) {
 		InactivityTimeout: 60 * time.Millisecond,
 		MaxDuration:       2 * time.Second,
 		PollInterval:      10 * time.Millisecond,
+		TranscriptDirs:    []string{filepath.Join(tempDir, ".gemini", "antigravity-cli", "brain")},
 	}
 
 	// Writes to task-1.log once, then stalls for 500ms (> 60ms inactivity timeout)
