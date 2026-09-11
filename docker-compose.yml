@@ -133,7 +133,10 @@ services:
   #    Automatically monitors GHCR container images and performs rolling restarts.
   # ----------------------------------------------------------------------------
   watchtower:
-    image: ghcr.io/azylman/aerial-updater:latest
+    image: aerial-updater:latest
+    build:
+      dockerfile_inline: |
+        FROM ghcr.io/nicholas-fedor/watchtower:latest
     container_name: aerial-watchtower
     restart: unless-stopped
     labels:

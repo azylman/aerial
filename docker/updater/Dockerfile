@@ -1,1 +1,0 @@
-FROM ghcr.io/nicholas-fedor/watchtower:latest
