@@ -28,6 +28,7 @@ import (
 	"github.com/azylman/aerial/brain/pkg/memory"
 	"github.com/azylman/aerial/brain/pkg/metrics"
 	"github.com/azylman/aerial/brain/pkg/notifier"
+	"github.com/azylman/aerial/brain/pkg/runner"
 	"github.com/azylman/aerial/brain/pkg/session"
 	"github.com/bwmarrin/discordgo"
 	"github.com/google/uuid"
@@ -8340,6 +8341,68 @@ func TestProcessBurst_RecordsTokensTelemetry(t *testing.T) {
 	}
 	if !strings.Contains(body, `aerial_brain_tokens_total{model="test-token-model",type="cache_read"} 10`) {
 		t.Errorf("expected cache_read tokens 10 for test-token-model, got metrics body: %s", body)
+	}
+}
+
+func TestThreadStatusQueueIntegration(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	threadID := "thread-status-test-123"
+
+	var finalDelivered atomic.Int32
+
+	sess, _ := discordgo.New("Bot mock_token")
+	sess.State = discordgo.NewState()
+	_ = sess.State.ChannelAdd(&discordgo.Channel{
+		ID:       threadID,
+		Name:     "status-thread",
+		Type:     discordgo.ChannelTypeGuildPublicThread,
+		ParentID: "parent-chan-1",
+	})
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    1,
+		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+			return nil, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			finalDelivered.Add(1)
+			return nil
+		},
+		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (stdout, stderr string, exitCode int, err error) {
+			if opts.StepUpdateHandler != nil {
+				opts.StepUpdateHandler(&runner.StepUpdateEvent{
+					StepType: "tool",
+					ToolName: "view_file",
+					State:    "ACTIVE",
+				})
+			}
+			return `{"conversation_id":"11111111-2222-3333-4444-555555555555","status":"SUCCESS","response":"Hello from thread!"}`, "", 0, nil
+		},
+	})
+	pool.SetDiscordSession(sess)
+
+	msg := db.Message{
+		ID:        "msg-thread-1",
+		ThreadID:  threadID,
+		AuthorID:  "user-1",
+		Content:   "check my file",
+		CreatedAt: time.Now().UTC(),
+	}
+	_ = db.InsertMessage(database, msg)
+
+	pool.processBurst([]db.Message{msg})
+
+	// Final response was delivered
+	if finalDelivered.Load() != 1 {
+		t.Errorf("Expected 1 final message delivered, got %d", finalDelivered.Load())
 	}
 }
 
