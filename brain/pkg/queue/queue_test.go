@@ -8431,3 +8431,87 @@ func TestThreadStatusQueueIntegration(t *testing.T) {
 	}
 }
 
+func TestWorkerPool_HermeticByDefaultWithoutRetriever(t *testing.T) {
+	pool := NewWorkerPool(WorkerPoolConfig{})
+	if pool.cfg.MemoryRetrieverFunc != nil {
+		t.Errorf("Expected MemoryRetrieverFunc to be nil by default for hermetic test isolation, got non-nil func")
+	}
+
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize test DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	var runnerCalled bool
+	poolWithDB := NewWorkerPool(WorkerPoolConfig{
+		DB: database,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			runnerCalled = true
+			return mockJSONResponse("sess-test-1", "Test Response"), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
+		TypingFunc:   func(s *discordgo.Session, channelID string) func() { return func() {} },
+	})
+
+	msg := db.Message{
+		ID:        "msg-hermetic-1",
+		ThreadID:  "thread-hermetic-1",
+		AuthorID:  "user-1",
+		Content:   "Hermetic test without retriever",
+		CreatedAt: time.Now().UTC(),
+	}
+	_ = db.InsertMessage(database, msg)
+
+	poolWithDB.processBurst([]db.Message{msg})
+	if !runnerCalled {
+		t.Errorf("Expected runner to be called cleanly without error")
+	}
+}
+
+func TestWorkerPool_ExplicitMemoryRetrieverWiring(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize test DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	var retrieverCalled bool
+	mockRetriever := func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+		retrieverCalled = true
+		return []db.Fact{
+			{Category: "test_cat", FactText: "Explicit retriever fact", Importance: 1.0},
+		}, nil
+	}
+
+	var capturedPrompt string
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:                  database,
+		MemoryRetrieverFunc: mockRetriever,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			capturedPrompt = prompt
+			return mockJSONResponse("sess-test-2", "Response with facts"), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
+		TypingFunc:   func(s *discordgo.Session, channelID string) func() { return func() {} },
+	})
+
+	msg := db.Message{
+		ID:        "msg-explicit-1",
+		ThreadID:  "thread-explicit-1",
+		AuthorID:  "user-1",
+		Content:   "Question requiring facts",
+		CreatedAt: time.Now().UTC(),
+	}
+	_ = db.InsertMessage(database, msg)
+
+	pool.processBurst([]db.Message{msg})
+	if !retrieverCalled {
+		t.Errorf("Expected injected MemoryRetrieverFunc to be called")
+	}
+	if !strings.Contains(capturedPrompt, "Explicit retriever fact") {
+		t.Errorf("Expected prompt to contain injected fact, got: %s", capturedPrompt)
+	}
+}
+
+

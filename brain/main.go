@@ -21,6 +21,7 @@ import (
 	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
 	"github.com/azylman/aerial/brain/pkg/delivery"
+	"github.com/azylman/aerial/brain/pkg/memory"
 	"github.com/azylman/aerial/brain/pkg/metrics"
 	"github.com/azylman/aerial/brain/pkg/queue"
 	"github.com/azylman/aerial/brain/pkg/runner"
@@ -985,6 +986,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config) error {
 		Classifier:            cls,
 		RunnerFunc:            runner.RunAgy,
 		RunnerWithOptionsFunc: runner.RunAgyWithOptions,
+		MemoryRetrieverFunc:   memory.RetrieveRelevantFacts,
 	})
 	pool.Start()
 
