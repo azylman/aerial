@@ -231,6 +231,44 @@ var (
 	ErrMaxDuration       = errors.New("watchdog: max duration exceeded")
 )
 
+// StepUpdateEvent models intermediate execution updates emitted during stream-json mode.
+type StepUpdateEvent struct {
+	Event          string `json:"event,omitempty"`
+	Type           string `json:"type,omitempty"`
+	StepType       string `json:"step_type,omitempty"`
+	Name           string `json:"name,omitempty"`
+	ToolName       string `json:"tool_name,omitempty"`
+	State          string `json:"state,omitempty"` // "ACTIVE", "DONE", "ERROR"
+	Status         string `json:"status,omitempty"`
+	ConversationID string `json:"conversation_id,omitempty"`
+	StepIndex      int    `json:"step_index,omitempty"`
+}
+
+// ResolvedType returns the normalized event type across both AGY NDJSON variants.
+func (e *StepUpdateEvent) ResolvedType() string {
+	if e == nil {
+		return ""
+	}
+	if e.StepType != "" {
+		return strings.ToLower(strings.TrimSpace(e.StepType))
+	}
+	return strings.ToLower(strings.TrimSpace(e.Type))
+}
+
+// ResolvedToolName returns the normalized tool name across both AGY NDJSON variants.
+func (e *StepUpdateEvent) ResolvedToolName() string {
+	if e == nil {
+		return ""
+	}
+	if e.ToolName != "" {
+		return strings.TrimSpace(e.ToolName)
+	}
+	return strings.TrimSpace(e.Name)
+}
+
+// StepUpdateHandler is an explicit callback for intermediate stream-json updates.
+type StepUpdateHandler func(ev *StepUpdateEvent)
+
 // WatchdogOptions configures execution timeouts and activity polling behavior.
 type WatchdogOptions struct {
 	InactivityTimeout time.Duration
@@ -238,6 +276,7 @@ type WatchdogOptions struct {
 	PollInterval      time.Duration
 	TranscriptDirs    []string
 	OutputFormat      string
+	StepUpdateHandler StepUpdateHandler
 }
 
 // activityTap wraps an io.Writer, bumps the ActivityWriter timestamp on every write,
@@ -247,14 +286,16 @@ type activityTap struct {
 	w            io.Writer
 	actWriter    *ActivityWriter
 	filterStream bool
+	stepHandler  StepUpdateHandler
 	remainder    []byte
 }
 
-func newActivityTap(w io.Writer, actWriter *ActivityWriter, filterStream bool) *activityTap {
+func newActivityTap(w io.Writer, actWriter *ActivityWriter, filterStream bool, stepHandler StepUpdateHandler) *activityTap {
 	return &activityTap{
 		w:            w,
 		actWriter:    actWriter,
 		filterStream: filterStream,
+		stepHandler:  stepHandler,
 	}
 }
 
@@ -332,6 +373,32 @@ func (t *activityTap) processLine(line []byte) {
 
 	// Filter out high-volume step_update events from the output buffer to prevent OOM
 	if bytes.Contains(trimmed, []byte(`"event"`)) && bytes.Contains(trimmed, []byte(`"step_update"`)) {
+		if t.stepHandler != nil && len(trimmed) <= 32*1024 {
+			var raw struct {
+				Event      string          `json:"event"`
+				StepUpdate json.RawMessage `json:"step_update,omitempty"`
+				Type       string          `json:"type,omitempty"`
+				Name       string          `json:"name,omitempty"`
+				State      string          `json:"state,omitempty"`
+				ToolName   string          `json:"tool_name,omitempty"`
+				StepType   string          `json:"step_type,omitempty"`
+			}
+			if err := json.Unmarshal(trimmed, &raw); err == nil {
+				var ev StepUpdateEvent
+				if len(raw.StepUpdate) > 0 {
+					_ = json.Unmarshal(raw.StepUpdate, &ev)
+				} else {
+					ev.Type = raw.Type
+					ev.Name = raw.Name
+					ev.State = raw.State
+					ev.ToolName = raw.ToolName
+					ev.StepType = raw.StepType
+				}
+				if ev.ResolvedType() != "" || ev.ResolvedToolName() != "" {
+					t.stepHandler(&ev)
+				}
+			}
+		}
 		return
 	}
 
@@ -439,7 +506,7 @@ func RunAgyWithWatchdog(parentCtx context.Context, agyBin, prompt, sessionID, ap
 
 	var outBuf bytes.Buffer
 	actWriter := NewActivityWriter(sessionID)
-	tap := newActivityTap(&outBuf, actWriter, outputFmt == "stream-json")
+	tap := newActivityTap(&outBuf, actWriter, outputFmt == "stream-json", opts.StepUpdateHandler)
 	cmd.Stdout = tap
 	cmd.Stderr = actWriter
 
@@ -561,6 +628,11 @@ type RunnerFunc func(ctx context.Context, agyBin, prompt, sessionID, apiKey, mod
 // RunAgy executes the agy binary with the given parameters, capturing stdout and stderr.
 func RunAgy(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
 	return RunAgyWithWatchdog(ctx, agyBin, prompt, sessionID, apiKey, model, DefaultWatchdogOptions(timeoutMinutes))
+}
+
+// RunAgyWithOptions executes the agy binary with explicitly provided WatchdogOptions.
+func RunAgyWithOptions(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts WatchdogOptions) (stdout, stderr string, exitCode int, err error) {
+	return RunAgyWithWatchdog(ctx, agyBin, prompt, sessionID, apiKey, model, opts)
 }
 
 // ExtractSessionID searches output (stdout or stderr) for an active session/conversation UUID.
