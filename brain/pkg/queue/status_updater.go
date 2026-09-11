@@ -18,7 +18,9 @@ const (
 )
 
 // FormatToolStatus dynamically formats an active tool status badge without hardcoded dictionaries.
-func FormatToolStatus(toolName string, elapsed time.Duration) string {
+// For command execution tools (e.g. run_command), it avoids repetitive phrasing and displays
+// strictly the executable name without arguments or sensitive parameters.
+func FormatToolStatus(toolName, commandName string, elapsed time.Duration) string {
 	clean := strings.TrimSpace(toolName)
 	clean = strings.TrimPrefix(clean, "mcp_")
 	clean = strings.TrimPrefix(clean, "call_mcp_tool_")
@@ -29,7 +31,21 @@ func FormatToolStatus(toolName string, elapsed time.Duration) string {
 	if sec < 0.1 {
 		sec = 0.1
 	}
-	text := fmt.Sprintf("⚡ Running `%s`... (%.1fs)", clean, sec)
+
+	var text string
+	if clean == "run_command" || clean == "execute_command" || clean == "bash" || clean == "sh" || commandName != "" {
+		cmd := strings.TrimSpace(commandName)
+		if cmd == "" {
+			cmd = "command"
+		}
+		if len([]rune(cmd)) > 24 {
+			cmd = string([]rune(cmd)[:24])
+		}
+		text = fmt.Sprintf("⚡ Executing `%s`... (%.1fs)", cmd, sec)
+	} else {
+		text = fmt.Sprintf("⚡ Running `%s`... (%.1fs)", clean, sec)
+	}
+
 	if len([]rune(text)) > MaxStatusTextLength {
 		text = string([]rune(text)[:MaxStatusTextLength])
 	}
@@ -43,6 +59,7 @@ type StatusUpdater struct {
 	threadID        string
 	statusMessageID string
 	activeTool      string
+	activeCommand   string
 	phase           string // "thinking", "tool", "responding"
 	toolStart       time.Time
 	turnStart       time.Time
@@ -162,22 +179,26 @@ func (u *StatusUpdater) HandleStep(ev *runner.StepUpdateEvent) {
 	switch {
 	case typ == "thinking":
 		u.phase = "thinking"
+		u.activeCommand = ""
 		u.dirty = true
 	case typ == "tool_call" || typ == "tool":
 		toolName := ev.ResolvedToolName()
 		if ev.State == "DONE" || ev.State == "ERROR" {
-			if u.activeTool == toolName {
+			if u.activeTool == toolName || toolName == "" {
 				u.activeTool = ""
+				u.activeCommand = ""
 				u.phase = "thinking"
 				u.dirty = true
 			}
 		} else {
 			u.activeTool = toolName
+			u.activeCommand = ev.ResolvedCommandName()
 			u.toolStart = time.Now()
 			u.phase = "tool"
 			u.dirty = true
 		}
 	case typ == "agent_response" || typ == "text_delta":
+		u.activeCommand = ""
 		if u.phase != "responding" {
 			u.phase = "responding"
 			u.dirty = true
@@ -225,7 +246,7 @@ func (u *StatusUpdater) currentStatusText() string {
 	case "tool":
 		if u.activeTool != "" {
 			elapsed := time.Since(u.toolStart)
-			return FormatToolStatus(u.activeTool, elapsed)
+			return FormatToolStatus(u.activeTool, u.activeCommand, elapsed)
 		}
 		fallthrough
 	case "responding":
@@ -343,6 +364,7 @@ func (u *StatusUpdater) Reset() {
 	msgID := u.statusMessageID
 	u.statusMessageID = ""
 	u.activeTool = ""
+	u.activeCommand = ""
 	u.phase = ""
 	u.dirty = false
 	u.lastDelivered = ""
@@ -365,6 +387,8 @@ func (u *StatusUpdater) DeleteStatusMessage() {
 	u.mu.Lock()
 	msgID := u.statusMessageID
 	u.statusMessageID = ""
+	u.activeTool = ""
+	u.activeCommand = ""
 	u.disabled = true
 	u.mu.Unlock()
 
