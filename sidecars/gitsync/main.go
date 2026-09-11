@@ -21,6 +21,7 @@ import (
 
 	"github.com/azylman/aerial/sidecars/gitsync/pkg/metrics"
 	"golang.org/x/sync/singleflight"
+	"gopkg.in/yaml.v3"
 )
 
 var sanitizePatterns = []*regexp.Regexp{
@@ -44,6 +45,51 @@ func SanitizeLog(input string) string {
 	return out
 }
 
+// SanitizeAll scrubs pattern-matched tokens as well as known literal secret values.
+func (d *SyncDaemon) SanitizeAll(input string) string {
+	out := SanitizeLog(input)
+	secrets := []string{
+		d.pat,
+		d.discordToken,
+		d.discordWebhookURL,
+		os.Getenv("POSTGRES_PASSWORD"),
+		os.Getenv("HA_TOKEN"),
+		os.Getenv("GEMINI_API_KEY"),
+		os.Getenv("GITHUB_PAT"),
+	}
+	for _, s := range secrets {
+		s = strings.TrimSpace(s)
+		if len(s) >= 4 {
+			out = strings.ReplaceAll(out, s, "[REDACTED_SECRET]")
+		}
+	}
+	return out
+}
+
+// QuarantineKey uniquely identifies a repository and a commit SHA.
+type QuarantineKey struct {
+	RepoPath  string
+	CommitSHA string
+}
+
+// QuarantineRecord holds diagnostic metadata for a quarantined commit.
+type QuarantineRecord struct {
+	RepoPath      string    `json:"repo_path"`
+	CommitSHA     string    `json:"commit_sha"`
+	PreviousHead  string    `json:"previous_head"`
+	Reason        string    `json:"reason"`
+	FailureStage  string    `json:"failure_stage"` // "validation" or "compose_up"
+	QuarantinedAt time.Time `json:"quarantined_at"`
+}
+
+// ComposeChangeEvent captures a detected configuration change before reconciliation.
+type ComposeChangeEvent struct {
+	RepoPath     string    `json:"repo_path"`
+	PreviousHead string    `json:"previous_head"`
+	CurrentHead  string    `json:"current_head"`
+	Timestamp    time.Time `json:"timestamp"`
+}
+
 // RepoSyncResult holds telemetry for a single repository sync operation.
 type RepoSyncResult struct {
 	Repo           string `json:"repo"`
@@ -56,20 +102,23 @@ type RepoSyncResult struct {
 
 // RepoStatus holds git commit and timestamp metadata for an individual repository.
 type RepoStatus struct {
-	Repo             string     `json:"repo"`
-	DiskCommit       string     `json:"disk_commit"`
-	DiskCommitTime   *time.Time `json:"disk_commit_time,omitempty"`
-	RemoteCommit     string     `json:"remote_commit"`
-	RemoteCommitTime *time.Time `json:"remote_commit_time,omitempty"`
-	TimeLagSeconds   int64      `json:"time_lag_seconds"`
-	SyncStatus       string     `json:"sync_status"` // "synced", "lagging", "error"
-	LastSyncTime     time.Time  `json:"last_sync_time"`
-	Error            string     `json:"error,omitempty"`
+	Repo              string     `json:"repo"`
+	DiskCommit        string     `json:"disk_commit"`
+	DiskCommitTime    *time.Time `json:"disk_commit_time,omitempty"`
+	RemoteCommit      string     `json:"remote_commit"`
+	RemoteCommitTime  *time.Time `json:"remote_commit_time,omitempty"`
+	TimeLagSeconds    int64      `json:"time_lag_seconds"`
+	SyncStatus        string     `json:"sync_status"` // "synced", "lagging", "quarantined", "error"
+	Quarantined       bool       `json:"quarantined,omitempty"`
+	QuarantinedCommit string     `json:"quarantined_commit,omitempty"`
+	QuarantineReason  string     `json:"quarantine_reason,omitempty"`
+	LastSyncTime      time.Time  `json:"last_sync_time"`
+	Error             string     `json:"error,omitempty"`
 }
 
 // GitSyncStatusResponse is the aggregated telemetry payload returned by GET /status.
 type GitSyncStatusResponse struct {
-	Status        string                `json:"status"` // "synced", "lagging", "error"
+	Status        string                `json:"status"` // "synced", "lagging", "quarantined", "error"
 	MaxLagSeconds int64                 `json:"max_lag_seconds"`
 	LastSyncTime  time.Time             `json:"last_sync_time"`
 	Repos         map[string]RepoStatus `json:"repos"`
@@ -92,6 +141,24 @@ type SyncDaemon struct {
 	lastSyncTimes map[string]time.Time
 	statusMu      sync.RWMutex
 	triggerFn     func() ([]RepoSyncResult, error)
+
+	// Concurrency & Quarantine
+	repoLocksMu        sync.Mutex
+	repoLocks          map[string]*sync.Mutex
+	pendingChangesMu   sync.Mutex
+	pendingChanges     []ComposeChangeEvent
+	quarantineMu       sync.RWMutex
+	quarantinedCommits map[QuarantineKey]QuarantineRecord
+
+	// Discord Alerting
+	discordToken      string
+	discordChannel    string
+	discordWebhookURL string
+	discordChannelMu  sync.RWMutex
+	cachedChannelID   string
+	alertDedupeMu     sync.Mutex
+	lastAlertTimes    map[string]time.Time
+	alertHTTPClient   *http.Client
 }
 
 // resolveGitDir checks if repoPath contains a .git directory or a .git file (e.g., worktree/submodule).
@@ -275,6 +342,397 @@ func (d *SyncDaemon) GetReconcileTargets(ctx context.Context, composeDir string)
 	return parseComposeServices(stdoutBuf.String()), nil
 }
 
+var snowflakeRegex = regexp.MustCompile(`^\d{17,20}$`)
+
+func isSnowflake(str string) bool {
+	return snowflakeRegex.MatchString(strings.TrimSpace(str))
+}
+
+func (d *SyncDaemon) getRepoLock(repoPath string) *sync.Mutex {
+	cleaned := filepath.Clean(repoPath)
+	d.repoLocksMu.Lock()
+	defer d.repoLocksMu.Unlock()
+	if d.repoLocks == nil {
+		d.repoLocks = make(map[string]*sync.Mutex)
+	}
+	l, exists := d.repoLocks[cleaned]
+	if !exists {
+		l = &sync.Mutex{}
+		d.repoLocks[cleaned] = l
+	}
+	return l
+}
+
+func (d *SyncDaemon) isQuarantined(repoPath, commitSHA string) (QuarantineRecord, bool) {
+	d.quarantineMu.RLock()
+	defer d.quarantineMu.RUnlock()
+	if d.quarantinedCommits == nil {
+		return QuarantineRecord{}, false
+	}
+	key := QuarantineKey{
+		RepoPath:  filepath.Clean(repoPath),
+		CommitSHA: strings.TrimSpace(commitSHA),
+	}
+	rec, ok := d.quarantinedCommits[key]
+	return rec, ok
+}
+
+func (d *SyncDaemon) getQuarantineForRepo(repoPath string) (QuarantineRecord, bool) {
+	d.quarantineMu.RLock()
+	defer d.quarantineMu.RUnlock()
+	if d.quarantinedCommits == nil {
+		return QuarantineRecord{}, false
+	}
+	cleaned := filepath.Clean(repoPath)
+	for k, rec := range d.quarantinedCommits {
+		if k.RepoPath == cleaned {
+			return rec, true
+		}
+	}
+	return QuarantineRecord{}, false
+}
+
+func (d *SyncDaemon) quarantineCommit(repoPath, commitSHA, prevHead, stage, reason string) {
+	d.quarantineMu.Lock()
+	defer d.quarantineMu.Unlock()
+	if d.quarantinedCommits == nil {
+		d.quarantinedCommits = make(map[QuarantineKey]QuarantineRecord)
+	}
+	key := QuarantineKey{
+		RepoPath:  filepath.Clean(repoPath),
+		CommitSHA: strings.TrimSpace(commitSHA),
+	}
+	d.quarantinedCommits[key] = QuarantineRecord{
+		RepoPath:      filepath.Clean(repoPath),
+		CommitSHA:     strings.TrimSpace(commitSHA),
+		PreviousHead:  strings.TrimSpace(prevHead),
+		Reason:        SanitizeLog(strings.TrimSpace(reason)),
+		FailureStage:  stage,
+		QuarantinedAt: time.Now(),
+	}
+}
+
+func (d *SyncDaemon) clearQuarantineForRepo(repoPath, currentSha string) {
+	d.quarantineMu.Lock()
+	defer d.quarantineMu.Unlock()
+	cleaned := filepath.Clean(repoPath)
+	for k := range d.quarantinedCommits {
+		if k.RepoPath == cleaned && k.CommitSHA != currentSha {
+			delete(d.quarantinedCommits, k)
+		}
+	}
+}
+
+func (d *SyncDaemon) recordPendingChange(change ComposeChangeEvent) {
+	d.pendingChangesMu.Lock()
+	defer d.pendingChangesMu.Unlock()
+	change.RepoPath = filepath.Clean(change.RepoPath)
+	d.pendingChanges = append(d.pendingChanges, change)
+}
+
+func (d *SyncDaemon) drainPendingChanges() []ComposeChangeEvent {
+	d.pendingChangesMu.Lock()
+	defer d.pendingChangesMu.Unlock()
+	changes := d.pendingChanges
+	d.pendingChanges = nil
+	return changes
+}
+
+type rawSystemConfig struct {
+	SystemChannel string `yaml:"system_channel"`
+}
+
+// ResolveAlertChannel dynamically resolves the Discord alert channel name or snowflake ID.
+// Precedence:
+// 1. Explicit DISCORD_CHANNEL environment variable (if non-empty)
+// 2. system_channel from config.yaml in configDir (/share/aerial-config/config.yaml)
+// 3. Fallback to "aerial-dev"
+func (d *SyncDaemon) ResolveAlertChannel() string {
+	if ch := strings.TrimSpace(d.discordChannel); ch != "" {
+		return ch
+	}
+	if ch := strings.TrimSpace(os.Getenv("DISCORD_CHANNEL")); ch != "" {
+		return ch
+	}
+	configDir := d.configDir
+	if configDir == "" {
+		configDir = os.Getenv("AERIAL_CONFIG_DIR")
+		if configDir == "" {
+			configDir = "/share/aerial-config"
+		}
+	}
+	configPath := filepath.Join(configDir, "config.yaml")
+	if data, err := os.ReadFile(configPath); err == nil {
+		var raw rawSystemConfig
+		if err := yaml.Unmarshal(data, &raw); err == nil && strings.TrimSpace(raw.SystemChannel) != "" {
+			return strings.TrimSpace(raw.SystemChannel)
+		}
+	}
+	return "aerial-dev"
+}
+
+// SendDiscordAlert dispatches an alert message to Discord with deduplication and bounded timeout.
+func (d *SyncDaemon) SendDiscordAlert(ctx context.Context, title, repoPath, faultyCommit, rolledBackTo, stage, errorMsg string) {
+	dedupeKey := fmt.Sprintf("%s:%s:%s", repoPath, faultyCommit, stage)
+	d.alertDedupeMu.Lock()
+	if d.lastAlertTimes == nil {
+		d.lastAlertTimes = make(map[string]time.Time)
+	}
+	lastSent, exists := d.lastAlertTimes[dedupeKey]
+	if exists && time.Since(lastSent) < 15*time.Minute {
+		d.alertDedupeMu.Unlock()
+		log.Printf("[GitSync:Discord] Suppressing duplicate alert for %s (sent %v ago)", dedupeKey, time.Since(lastSent).Truncate(time.Second))
+		return
+	}
+	d.lastAlertTimes[dedupeKey] = time.Now()
+	d.alertDedupeMu.Unlock()
+
+	sanitizedErr := d.SanitizeAll(strings.TrimSpace(errorMsg))
+	if len(sanitizedErr) > 1200 {
+		sanitizedErr = sanitizedErr[:1200] + "\n[... truncated for length]"
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("🚨 **GitSync GitOps Rollback Alert: %s**\n\n", strings.TrimSpace(title)))
+	if repoPath != "" {
+		sb.WriteString(fmt.Sprintf("**Repository:** `%s`\n", filepath.Clean(repoPath)))
+	}
+	if stage != "" {
+		sb.WriteString(fmt.Sprintf("**Stage:** `%s`\n", stage))
+	}
+	if faultyCommit != "" {
+		sb.WriteString(fmt.Sprintf("**Faulty Commit:** `%s`\n", faultyCommit))
+	}
+	if rolledBackTo != "" {
+		sb.WriteString(fmt.Sprintf("**Rolled Back To:** `%s`\n", rolledBackTo))
+	}
+	if sanitizedErr != "" {
+		sb.WriteString(fmt.Sprintf("\n**Error:**\n```\n%s\n```\n", sanitizedErr))
+	}
+	sb.WriteString("*Faulty commit quarantined to prevent sync loops. Newer commits to origin/main will sync normally.*")
+
+	content := sb.String()
+
+	client := d.alertHTTPClient
+	if client == nil {
+		client = &http.Client{Timeout: 10 * time.Second}
+	}
+
+	alertCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	if webhookURL := strings.TrimSpace(d.discordWebhookURL); webhookURL != "" {
+		d.sendWebhook(alertCtx, client, webhookURL, content)
+		return
+	}
+
+	token := strings.TrimSpace(d.discordToken)
+	if token == "" {
+		token = strings.TrimSpace(os.Getenv("DISCORD_BOT_TOKEN"))
+		if token == "" {
+			token = strings.TrimSpace(os.Getenv("DISCORD_TOKEN"))
+		}
+	}
+	if token == "" {
+		log.Printf("[GitSync:Discord] Notice: No DISCORD_BOT_TOKEN or DISCORD_WEBHOOK_URL configured, skipping alert")
+		return
+	}
+
+	targetChannel := d.ResolveAlertChannel()
+	channelID, err := d.resolveChannelID(alertCtx, client, token, targetChannel)
+	if err != nil {
+		log.Printf("[GitSync:Discord] Warning: Failed to resolve channel %q: %s", targetChannel, d.SanitizeAll(err.Error()))
+		return
+	}
+
+	d.postChannelMessage(alertCtx, client, token, channelID, content)
+}
+
+func (d *SyncDaemon) sendWebhook(ctx context.Context, client *http.Client, webhookURL, content string) {
+	payloadBytes, _ := json.Marshal(map[string]string{"content": content})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, webhookURL, bytes.NewReader(payloadBytes))
+	if err != nil {
+		log.Printf("[GitSync:Discord] Error creating webhook request: %s", d.SanitizeAll(err.Error()))
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("[GitSync:Discord] Webhook dispatch failed: %s", d.SanitizeAll(err.Error()))
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		log.Printf("[GitSync:Discord] Webhook returned HTTP %d", resp.StatusCode)
+	} else {
+		log.Printf("[GitSync:Discord] Successfully dispatched alert via webhook")
+	}
+}
+
+func (d *SyncDaemon) resolveChannelID(ctx context.Context, client *http.Client, token, targetChannel string) (string, error) {
+	targetChannel = strings.TrimSpace(targetChannel)
+	if isSnowflake(targetChannel) {
+		return targetChannel, nil
+	}
+
+	d.discordChannelMu.RLock()
+	cached := d.cachedChannelID
+	d.discordChannelMu.RUnlock()
+	if cached != "" {
+		return cached, nil
+	}
+
+	cleanName := strings.TrimPrefix(targetChannel, "#")
+	authHeader := "Bot " + strings.TrimPrefix(token, "Bot ")
+
+	reqGuilds, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://discord.com/api/v10/users/@me/guilds", nil)
+	if err != nil {
+		return "", err
+	}
+	reqGuilds.Header.Set("Authorization", authHeader)
+	respGuilds, err := client.Do(reqGuilds)
+	if err != nil {
+		return "", err
+	}
+	defer respGuilds.Body.Close()
+
+	if respGuilds.StatusCode >= 400 {
+		return "", fmt.Errorf("failed to fetch guilds: HTTP %d", respGuilds.StatusCode)
+	}
+
+	var guilds []struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(respGuilds.Body).Decode(&guilds); err != nil {
+		return "", err
+	}
+
+	for _, g := range guilds {
+		url := fmt.Sprintf("https://discord.com/api/v10/guilds/%s/channels", g.ID)
+		reqChans, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			continue
+		}
+		reqChans.Header.Set("Authorization", authHeader)
+		respChans, err := client.Do(reqChans)
+		if err != nil {
+			continue
+		}
+		var channels []struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+			Type int    `json:"type"`
+		}
+		_ = json.NewDecoder(respChans.Body).Decode(&channels)
+		respChans.Body.Close()
+
+		for _, ch := range channels {
+			if strings.EqualFold(ch.Name, cleanName) {
+				d.discordChannelMu.Lock()
+				d.cachedChannelID = ch.ID
+				d.discordChannelMu.Unlock()
+				return ch.ID, nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("channel %q not found in connected guilds", targetChannel)
+}
+
+func (d *SyncDaemon) postChannelMessage(ctx context.Context, client *http.Client, token, channelID, content string) {
+	url := fmt.Sprintf("https://discord.com/api/v10/channels/%s/messages", channelID)
+	payloadBytes, _ := json.Marshal(map[string]string{"content": content})
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payloadBytes))
+	if err != nil {
+		log.Printf("[GitSync:Discord] Error creating message request: %s", d.SanitizeAll(err.Error()))
+		return
+	}
+	req.Header.Set("Authorization", "Bot "+strings.TrimPrefix(token, "Bot "))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("[GitSync:Discord] Channel message dispatch failed: %s", d.SanitizeAll(err.Error()))
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		d.discordChannelMu.Lock()
+		d.cachedChannelID = ""
+		d.discordChannelMu.Unlock()
+		log.Printf("[GitSync:Discord] Channel %s returned 404, invalidated channel cache", channelID)
+	} else if resp.StatusCode >= 400 {
+		log.Printf("[GitSync:Discord] Failed to post message to channel %s: HTTP %d", channelID, resp.StatusCode)
+	} else {
+		log.Printf("[GitSync:Discord] Successfully dispatched alert to channel %s", channelID)
+	}
+}
+
+// executeRollback safely resets each affected repository to PreviousHead, quarantines the faulty commit,
+// and restores container topology using the restored PreviousHead configuration with --remove-orphans.
+func (d *SyncDaemon) executeRollback(ctx context.Context, pending []ComposeChangeEvent, stage string, causeErr error) {
+	if len(pending) == 0 {
+		log.Printf("[GitSync:GitOps] Warning: Rollback requested with no pending changes tracked; skipping git reset")
+		return
+	}
+
+	cleanEnv := append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+
+	for _, ch := range pending {
+		if ch.PreviousHead == "" || ch.RepoPath == "" {
+			continue
+		}
+		repoLock := d.getRepoLock(ch.RepoPath)
+		repoLock.Lock()
+
+		cmdReset := exec.CommandContext(ctx, "git", "-C", ch.RepoPath, "reset", "--hard", ch.PreviousHead)
+		cmdReset.Env = cleanEnv
+		outReset, errReset := cmdReset.CombinedOutput()
+		if errReset != nil {
+			log.Printf("[GitSync:GitOps] Critical: Failed to reset %s to %s: %s (%v)", ch.RepoPath, ch.PreviousHead, SanitizeLog(string(outReset)), errReset)
+		} else {
+			log.Printf("[GitSync:GitOps] Successfully rolled back %s to %s", ch.RepoPath, ch.PreviousHead)
+		}
+
+		d.quarantineCommit(ch.RepoPath, ch.CurrentHead, ch.PreviousHead, stage, causeErr.Error())
+		repoLock.Unlock()
+
+		d.SendDiscordAlert(context.Background(), "Docker Compose Failure (Rolled Back)", ch.RepoPath, ch.CurrentHead, ch.PreviousHead, stage, causeErr.Error())
+	}
+
+	composeDir := d.composeDir
+	if composeDir == "" {
+		composeDir = "/share/aerial"
+	}
+
+	valCtx, valCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer valCancel()
+
+	restoredTargets, errTargets := d.GetReconcileTargets(valCtx, composeDir)
+	if errTargets != nil {
+		log.Printf("[GitSync:GitOps] Critical: Failed to discover targets after rollback in %s: %v", composeDir, errTargets)
+		return
+	}
+	if len(restoredTargets) == 0 {
+		return
+	}
+
+	upArgs := append([]string{"up", "-d", "--remove-orphans", "--no-build"}, restoredTargets...)
+	args := append([]string{"compose"}, d.getComposeArgs(composeDir, upArgs...)...)
+	cmdUp := exec.CommandContext(ctx, "docker", args...)
+	cmdUp.Dir = composeDir
+	outUp, errUp := cmdUp.CombinedOutput()
+	if errUp != nil {
+		log.Printf("[GitSync:GitOps] CRITICAL: Re-applying restored configuration failed: %s (%v)", SanitizeLog(string(outUp)), errUp)
+		d.SendDiscordAlert(context.Background(), "CRITICAL: Rollback Re-Apply Failed", composeDir, "", "", "rollback re-apply", fmt.Sprintf("Failed to restore containers to previous configuration: %s (%v)", SanitizeLog(string(outUp)), errUp))
+	} else {
+		log.Printf("[GitSync:GitOps] Restored previous container topology successfully (%s)", SanitizeLog(string(outUp)))
+	}
+}
+
 // ReconcileCompose executes docker compose up -d with timeout, metrics observation, and output sanitization.
 func (d *SyncDaemon) ReconcileCompose(parentCtx context.Context) (err error) {
 	d.composeMu.Lock()
@@ -295,19 +753,23 @@ func (d *SyncDaemon) ReconcileCompose(parentCtx context.Context) (err error) {
 		return nil
 	}
 
+	pending := d.drainPendingChanges()
+
 	// 1. Pre-flight validation gate
 	valCtx, valCancel := context.WithTimeout(parentCtx, 30*time.Second)
 	defer valCancel()
 
 	if valErr := d.ValidateCompose(valCtx, composeDir); valErr != nil {
-		log.Printf("[GitSync:GitOps] ERROR: Pre-flight validation failed: %v. Aborting compose reconciliation.", valErr)
+		log.Printf("[GitSync:GitOps] ERROR: Pre-flight validation failed: %v. Initiating automated rollback.", valErr)
+		d.executeRollback(parentCtx, pending, "pre-flight validation", valErr)
 		return valErr
 	}
 
 	// 2. Discover target services excluding gitsync
 	targets, targetErr := d.GetReconcileTargets(valCtx, composeDir)
 	if targetErr != nil {
-		log.Printf("[GitSync:GitOps] ERROR: Service discovery failed: %v. Aborting compose reconciliation.", targetErr)
+		log.Printf("[GitSync:GitOps] ERROR: Service discovery failed: %v. Initiating automated rollback.", targetErr)
+		d.executeRollback(parentCtx, pending, "service discovery", targetErr)
 		return targetErr
 	}
 
@@ -339,7 +801,8 @@ func (d *SyncDaemon) ReconcileCompose(parentCtx context.Context) (err error) {
 	sanitized := SanitizeLog(strings.TrimSpace(string(out)))
 
 	if cmdErr != nil {
-		log.Printf("[GitSync:GitOps] ERROR: docker compose up failed: %s (%v)", sanitized, cmdErr)
+		log.Printf("[GitSync:GitOps] ERROR: docker compose up failed: %s (%v). Initiating automated rollback.", sanitized, cmdErr)
+		d.executeRollback(parentCtx, pending, "compose apply", fmt.Errorf("%s (%w)", sanitized, cmdErr))
 		return fmt.Errorf("compose up failed: %s (%w)", sanitized, cmdErr)
 	}
 
@@ -440,6 +903,10 @@ func (d *SyncDaemon) SyncRepo(ctx context.Context, repoPath string) (res RepoSyn
 		return res
 	}
 
+	repoLock := d.getRepoLock(repoPath)
+	repoLock.Lock()
+	defer repoLock.Unlock()
+
 	start := time.Now()
 	defer func() {
 		status := "success"
@@ -498,18 +965,43 @@ func (d *SyncDaemon) SyncRepo(ctx context.Context, repoPath string) (res RepoSyn
 	res.PreviousHead = strings.TrimSpace(string(outBefore))
 	res.CurrentHead = res.PreviousHead
 
-	cmdPull := exec.CommandContext(opCtx, "git", "-C", repoPath, "pull", "--ff-only")
-	cmdPull.Env = gitEnv
-	outPull, errPull := cmdPull.CombinedOutput()
+	// 1. Fetch remote commit metadata without modifying working tree
+	cmdFetch := exec.CommandContext(opCtx, "git", "-C", repoPath, "fetch", "origin", "main")
+	cmdFetch.Env = gitEnv
+	outFetch, errFetch := cmdFetch.CombinedOutput()
+	if errFetch != nil {
+		sanitizedOut := SanitizeLog(strings.TrimSpace(string(outFetch)))
+		sanitizedErr := SanitizeLog(errFetch.Error())
+		log.Printf("[GitSync] Notice: git fetch origin main failed for %s (%s, %s). Attempting git pull fallback...", repoPath, sanitizedErr, sanitizedOut)
 
-	if errPull != nil {
-		sanitizedOut := SanitizeLog(strings.TrimSpace(string(outPull)))
-		sanitizedErr := SanitizeLog(errPull.Error())
-		log.Printf("[GitSync] Notice: git pull --ff-only failed for %s (%s, %s). Attempting safe reset recovery...", repoPath, sanitizedErr, sanitizedOut)
+		cmdPull := exec.CommandContext(opCtx, "git", "-C", repoPath, "pull", "--ff-only")
+		cmdPull.Env = gitEnv
+		outPull, errPull := cmdPull.CombinedOutput()
+		if errPull != nil {
+			res.Error = fmt.Sprintf("fetch failed: %s; pull failed: %s", sanitizedOut, SanitizeLog(strings.TrimSpace(string(outPull))))
+			return res
+		}
+	} else {
+		// 2. Inspect fetched commit SHA for active quarantine
+		cmdFetchHead := exec.CommandContext(opCtx, "git", "-C", repoPath, "rev-parse", "FETCH_HEAD")
+		cmdFetchHead.Env = gitEnv
+		if outFetchHead, errFetchHead := cmdFetchHead.Output(); errFetchHead == nil {
+			fetchedSha := strings.TrimSpace(string(outFetchHead))
+			if rec, quarantined := d.isQuarantined(repoPath, fetchedSha); quarantined {
+				log.Printf("[GitSync] Notice: remote commit %s for %s is quarantined (reason: %s). Skipping pull to prevent failure loop.", fetchedSha, repoPath, rec.Reason)
+				res.Error = fmt.Sprintf("commit %s is quarantined: %s", fetchedSha, rec.Reason)
+				return res
+			}
+		}
 
-		cmdFetch := exec.CommandContext(opCtx, "git", "-C", repoPath, "fetch", "origin", "main")
-		cmdFetch.Env = gitEnv
-		if outFetch, errFetch := cmdFetch.CombinedOutput(); errFetch == nil {
+		// 3. Fast-forward merge verified clean upstream commit
+		cmdMerge := exec.CommandContext(opCtx, "git", "-C", repoPath, "merge", "--ff-only", "FETCH_HEAD")
+		cmdMerge.Env = gitEnv
+		if outMerge, errMerge := cmdMerge.CombinedOutput(); errMerge != nil {
+			sanitizedOut := SanitizeLog(strings.TrimSpace(string(outMerge)))
+			sanitizedErr := SanitizeLog(errMerge.Error())
+			log.Printf("[GitSync] Notice: git merge --ff-only failed for %s (%s, %s). Attempting safe reset recovery...", repoPath, sanitizedErr, sanitizedOut)
+
 			cmdReset := exec.CommandContext(opCtx, "git", "-C", repoPath, "reset", "--hard", "FETCH_HEAD")
 			cmdReset.Env = gitEnv
 			if outReset, errReset := cmdReset.CombinedOutput(); errReset != nil {
@@ -522,9 +1014,6 @@ func (d *SyncDaemon) SyncRepo(ctx context.Context, repoPath string) (res RepoSyn
 			_ = cmdClean.Run()
 
 			log.Printf("[GitSync] Successfully recovered %s via reset to FETCH_HEAD", repoPath)
-		} else {
-			res.Error = fmt.Sprintf("pull failed: %s; fetch failed: %s", sanitizedOut, SanitizeLog(strings.TrimSpace(string(outFetch))))
-			return res
 		}
 	}
 
@@ -540,11 +1029,18 @@ func (d *SyncDaemon) SyncRepo(ctx context.Context, repoPath string) (res RepoSyn
 
 	if res.PreviousHead != res.CurrentHead {
 		res.Changed = true
+		d.clearQuarantineForRepo(repoPath, res.CurrentHead)
 		log.Printf("[GitSync] Repository %s updated: %s -> %s", repoPath, res.PreviousHead, res.CurrentHead)
 
 		if composeChanged, _ := d.HasComposeChanges(opCtx, repoPath, res.PreviousHead, res.CurrentHead); composeChanged {
 			res.ComposeChanged = true
 			log.Printf("[GitSync:GitOps] Infrastructure/compose changes detected in %s (%s -> %s). Triggering debounced reconciliation.", repoPath, res.PreviousHead, res.CurrentHead)
+			d.recordPendingChange(ComposeChangeEvent{
+				RepoPath:     repoPath,
+				PreviousHead: res.PreviousHead,
+				CurrentHead:  res.CurrentHead,
+				Timestamp:    time.Now(),
+			})
 			if d.reconcileCh != nil {
 				select {
 				case d.reconcileCh <- struct{}{}:
@@ -687,6 +1183,7 @@ func (d *SyncDaemon) GetStatus(ctx context.Context) GitSyncStatusResponse {
 	var latestSync time.Time
 	hasError := false
 	hasLag := false
+	hasQuarantine := false
 
 	for _, repo := range d.repos {
 		st := RepoStatus{
@@ -740,6 +1237,27 @@ func (d *SyncDaemon) GetStatus(ctx context.Context) GitSyncStatusResponse {
 			}
 		}
 
+		// Check quarantine state
+		if rec, quarantined := d.isQuarantined(repo, remoteSha); quarantined {
+			st.SyncStatus = "quarantined"
+			st.Quarantined = true
+			st.QuarantinedCommit = rec.CommitSHA
+			st.QuarantineReason = rec.Reason
+			hasQuarantine = true
+		} else if rec, quarantined := d.isQuarantined(repo, diskSha); quarantined {
+			st.SyncStatus = "quarantined"
+			st.Quarantined = true
+			st.QuarantinedCommit = rec.CommitSHA
+			st.QuarantineReason = rec.Reason
+			hasQuarantine = true
+		} else if rec, quarantined := d.getQuarantineForRepo(repo); quarantined {
+			st.SyncStatus = "quarantined"
+			st.Quarantined = true
+			st.QuarantinedCommit = rec.CommitSHA
+			st.QuarantineReason = rec.Reason
+			hasQuarantine = true
+		}
+
 		resp.Repos[repo] = st
 	}
 
@@ -751,6 +1269,8 @@ func (d *SyncDaemon) GetStatus(ctx context.Context) GitSyncStatusResponse {
 
 	if hasError {
 		resp.Status = "error"
+	} else if hasQuarantine {
+		resp.Status = "quarantined"
 	} else if hasLag {
 		resp.Status = "lagging"
 	} else {
@@ -762,13 +1282,16 @@ func (d *SyncDaemon) GetStatus(ctx context.Context) GitSyncStatusResponse {
 
 // DaemonConfig holds configuration options for the GitSync daemon.
 type DaemonConfig struct {
-	Port          string
-	Repos         []string
-	RepoURLs      map[string]string
-	Interval      time.Duration
-	PAT           string
-	ComposeDir    string
-	ConfigDir     string
+	Port              string
+	Repos             []string
+	RepoURLs          map[string]string
+	Interval          time.Duration
+	PAT               string
+	ComposeDir        string
+	ConfigDir         string
+	DiscordToken      string
+	DiscordChannel    string
+	DiscordWebhookURL string
 }
 
 // NewDaemon initializes a new SyncDaemon from config.
@@ -777,13 +1300,19 @@ func NewDaemon(cfg DaemonConfig) *SyncDaemon {
 		cfg.Interval = 60 * time.Second
 	}
 	return &SyncDaemon{
-		repos:       cfg.Repos,
-		repoUrls:    cfg.RepoURLs,
-		interval:    cfg.Interval,
-		pat:         cfg.PAT,
-		composeDir:  cfg.ComposeDir,
-		configDir:   cfg.ConfigDir,
-		reconcileCh: make(chan struct{}, 1),
+		repos:              cfg.Repos,
+		repoUrls:           cfg.RepoURLs,
+		interval:           cfg.Interval,
+		pat:                cfg.PAT,
+		composeDir:         cfg.ComposeDir,
+		configDir:          cfg.ConfigDir,
+		discordToken:       cfg.DiscordToken,
+		discordChannel:     cfg.DiscordChannel,
+		discordWebhookURL:  cfg.DiscordWebhookURL,
+		reconcileCh:        make(chan struct{}, 1),
+		repoLocks:          make(map[string]*sync.Mutex),
+		quarantinedCommits: make(map[QuarantineKey]QuarantineRecord),
+		lastAlertTimes:     make(map[string]time.Time),
 	}
 }
 
@@ -933,14 +1462,24 @@ func NewConfigFromEnv() DaemonConfig {
 		composeDir: "https://github.com/azylman/aerial.git",
 	}
 
+	discordToken := os.Getenv("DISCORD_BOT_TOKEN")
+	if discordToken == "" {
+		discordToken = os.Getenv("DISCORD_TOKEN")
+	}
+	discordChannel := os.Getenv("DISCORD_CHANNEL")
+	discordWebhookURL := os.Getenv("DISCORD_WEBHOOK_URL")
+
 	return DaemonConfig{
-		Port:       port,
-		Repos:      repos,
-		RepoURLs:   repoUrls,
-		Interval:   interval,
-		PAT:        pat,
-		ComposeDir: composeDir,
-		ConfigDir:  configDir,
+		Port:              port,
+		Repos:             repos,
+		RepoURLs:          repoUrls,
+		Interval:          interval,
+		PAT:               pat,
+		ComposeDir:        composeDir,
+		ConfigDir:         configDir,
+		DiscordToken:      discordToken,
+		DiscordChannel:    discordChannel,
+		DiscordWebhookURL: discordWebhookURL,
 	}
 }
 
