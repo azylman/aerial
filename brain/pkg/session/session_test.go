@@ -14,16 +14,15 @@ import (
 	"github.com/google/uuid"
 )
 
-func setupTestHome(t *testing.T) string {
+func setupTestManager(t *testing.T) (*Manager, string) {
 	t.Helper()
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-	t.Setenv("USERPROFILE", tmpDir)
-	return tmpDir
+	mgr := New(tmpDir, "")
+	return mgr, tmpDir
 }
 
 func TestFindLatestSessionDirAndExtract(t *testing.T) {
-	tmpDir := setupTestHome(t)
+	mgr, tmpDir := setupTestManager(t)
 
 	convID := "test-conv-123"
 	logsDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", convID, ".system_generated", "logs")
@@ -39,12 +38,12 @@ func TestFindLatestSessionDirAndExtract(t *testing.T) {
 		t.Fatalf("Failed to write transcript.jsonl: %v", err)
 	}
 
-	latest := FindLatestSessionDir(time.Now().Add(-1 * time.Hour))
+	latest := mgr.FindLatestSessionDir(time.Now().Add(-1 * time.Hour))
 	if latest != convID {
 		t.Errorf("Expected latest session dir %s, got: %s", convID, latest)
 	}
 
-	resp, errStr := ExtractResponseAndError(convID)
+	resp, errStr := mgr.ExtractResponseAndError(convID)
 	if resp != "Hello world!" {
 		t.Errorf("Expected response 'Hello world!', got: '%s'", resp)
 	}
@@ -52,14 +51,14 @@ func TestFindLatestSessionDirAndExtract(t *testing.T) {
 		t.Errorf("Expected error '\"something went wrong\"', got: '%s'", errStr)
 	}
 
-	diag := DumpSessionDiagnosticLogs(convID)
+	diag := mgr.DumpSessionDiagnosticLogs(convID)
 	if diag == "" {
 		t.Error("Expected non-empty diagnostic logs")
 	}
 }
 
 func TestMultiTurnTurnScoping(t *testing.T) {
-	tmpDir := setupTestHome(t)
+	mgr, tmpDir := setupTestManager(t)
 
 	convID := "test-multi-turn-456"
 	logsDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", convID, ".system_generated", "logs")
@@ -79,7 +78,7 @@ func TestMultiTurnTurnScoping(t *testing.T) {
 		t.Fatalf("Failed to write transcript.jsonl: %v", err)
 	}
 
-	resp, errStr := ExtractResponseAndError(convID)
+	resp, errStr := mgr.ExtractResponseAndError(convID)
 	if resp != "" {
 		t.Errorf("Expected empty response for Turn 2, but got Turn 1 response '%s'", resp)
 	}
@@ -87,44 +86,68 @@ func TestMultiTurnTurnScoping(t *testing.T) {
 		t.Errorf("Expected empty error, got '%s'", errStr)
 	}
 
-	hasTool := HasSuccessfulToolCall(convID)
+	hasTool := mgr.HasSuccessfulToolCall(convID)
 	if hasTool {
 		t.Error("Expected HasSuccessfulToolCall = false for failed Turn 2")
 	}
 }
 
 func TestSessionErrorCases(t *testing.T) {
-	// Test non-existent conversation ID
-	resp, errStr := ExtractResponseAndError("nonexistent-conv-id-999")
+	// Test non-existent conversation ID on empty manager
+	mEmpty := New("", "")
+	resp, errStr := mEmpty.ExtractResponseAndError("nonexistent-conv-id-999")
 	if resp != "" || errStr != "" {
 		t.Errorf("Expected empty response/error for nonexistent conv, got resp='%s', err='%s'", resp, errStr)
 	}
 
-	// Test invalid HOME directory or inaccessible path
-	_ = os.Setenv("HOME", "/proc/unwritable_dir")
-	latest := FindLatestSessionDir(time.Now())
+	// Test invalid HOME directory or inaccessible path with injected path
+	mInvalid := New("/proc/unwritable_dir", "")
+	latest := mInvalid.FindLatestSessionDir(time.Now())
 	if latest != "" {
 		t.Errorf("Expected empty session dir for invalid path, got: %s", latest)
 	}
 
-	diag := DumpSessionDiagnosticLogs("nonexistent-conv-id-999")
+	diag := mInvalid.DumpSessionDiagnosticLogs("nonexistent-conv-id-999")
 	if diag != "" {
 		t.Errorf("Expected empty diag log for nonexistent conv, got: %s", diag)
+	}
+
+	// Test nil manager safety
+	var nilMgr *Manager
+	if nilLatest := nilMgr.FindLatestSessionDir(time.Now()); nilLatest != "" {
+		t.Errorf("Expected empty string from nilMgr.FindLatestSessionDir, got: %s", nilLatest)
+	}
+	if nilDiag := nilMgr.DumpSessionDiagnosticLogs("conv-123"); nilDiag != "" {
+		t.Errorf("Expected empty string from nilMgr.DumpSessionDiagnosticLogs, got: %s", nilDiag)
+	}
+	if nilResp, nilErr := nilMgr.ExtractResponseAndError("conv-123"); nilResp != "" || nilErr != "" {
+		t.Errorf("Expected empty response/err from nilMgr.ExtractResponseAndError, got resp=%q, err=%q", nilResp, nilErr)
+	}
+	if nilHasTool := nilMgr.HasSuccessfulToolCall("conv-123"); nilHasTool {
+		t.Errorf("Expected false from nilMgr.HasSuccessfulToolCall")
+	}
+	if nilExists := nilMgr.SessionExistsOnDisk("conv-123"); nilExists {
+		t.Errorf("Expected false from nilMgr.SessionExistsOnDisk")
+	}
+	if _, nilEnsureErr := nilMgr.EnsureSessionDir("conv-123"); nilEnsureErr == nil {
+		t.Errorf("Expected error from nilMgr.EnsureSessionDir, got nil")
+	}
+	if nilAppendErr := nilMgr.AppendAmbientTurn("conv-123", "chan", "auth", "text", time.Now()); nilAppendErr != nil {
+		t.Errorf("Expected nil error from nilMgr.AppendAmbientTurn, got %v", nilAppendErr)
 	}
 }
 
 func TestAppendAmbientTurn_NoopWhenMissing(t *testing.T) {
-	tmpDir := t.TempDir()
-	_ = os.Setenv("HOME", tmpDir)
+	mgr, tmpDir := setupTestManager(t)
 
 	// Case 1: Empty session ID
-	err := AppendAmbientTurn("", "lounge", "Alice", "Hello", time.Now())
+	err := mgr.AppendAmbientTurn("", "lounge", "Alice", "Hello", time.Now())
 	if err != nil {
 		t.Fatalf("expected nil for empty sessionID, got %v", err)
 	}
 
 	// Case 2: Non-existent session ID
-	err = AppendAmbientTurn("non-existent-session-id", "lounge", "Alice", "Hello", time.Now())
+	err = mgr.AppendAmbientTurn("non-existent-session-id", "lounge", "Alice", "Hello", time.Now())
 	if err != nil {
 		t.Fatalf("expected nil for non-existent sessionID, got %v", err)
 	}
@@ -140,18 +163,17 @@ func TestAppendAmbientTurn_NoopWhenMissing(t *testing.T) {
 }
 
 func TestAppendAmbientTurn_EmptyFiles(t *testing.T) {
-	tmpDir := t.TempDir()
-	_ = os.Setenv("HOME", tmpDir)
+	mgr, _ := setupTestManager(t)
 
 	sessionID := uuid.New().String()
-	sessDir, err := EnsureSessionDir(sessionID)
+	sessDir, err := mgr.EnsureSessionDir(sessionID)
 	if err != nil {
 		t.Fatalf("EnsureSessionDir failed: %v", err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(sessDir) })
 
 	fixedTime := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
-	err = AppendAmbientTurn(sessionID, "#lounge", "Alice", "Hello ambient world", fixedTime)
+	err = mgr.AppendAmbientTurn(sessionID, "#lounge", "Alice", "Hello ambient world", fixedTime)
 	if err != nil {
 		t.Fatalf("AppendAmbientTurn failed: %v", err)
 	}
@@ -194,11 +216,10 @@ func TestAppendAmbientTurn_EmptyFiles(t *testing.T) {
 }
 
 func TestAppendAmbientTurn_Monotonic(t *testing.T) {
-	tmpDir := t.TempDir()
-	_ = os.Setenv("HOME", tmpDir)
+	mgr, _ := setupTestManager(t)
 
 	sessionID := uuid.New().String()
-	sessDir, err := EnsureSessionDir(sessionID)
+	sessDir, err := mgr.EnsureSessionDir(sessionID)
 	if err != nil {
 		t.Fatalf("EnsureSessionDir failed: %v", err)
 	}
@@ -217,10 +238,10 @@ func TestAppendAmbientTurn_Monotonic(t *testing.T) {
 	t1 := time.Date(2026, 9, 2, 10, 5, 0, 0, time.UTC)
 	t2 := time.Date(2026, 9, 2, 10, 6, 0, 0, time.UTC)
 
-	if err := AppendAmbientTurn(sessionID, "dev", "Bob", "Turn 2 text", t1); err != nil {
+	if err := mgr.AppendAmbientTurn(sessionID, "dev", "Bob", "Turn 2 text", t1); err != nil {
 		t.Fatalf("failed to append turn 2: %v", err)
 	}
-	if err := AppendAmbientTurn(sessionID, "dev", "Charlie", "Turn 3 text", t2); err != nil {
+	if err := mgr.AppendAmbientTurn(sessionID, "dev", "Charlie", "Turn 3 text", t2); err != nil {
 		t.Fatalf("failed to append turn 3: %v", err)
 	}
 
@@ -247,11 +268,10 @@ func TestAppendAmbientTurn_Monotonic(t *testing.T) {
 }
 
 func TestAppendAmbientTurn_DualSync(t *testing.T) {
-	tmpDir := t.TempDir()
-	_ = os.Setenv("HOME", tmpDir)
+	mgr, _ := setupTestManager(t)
 
 	sessionID := uuid.New().String()
-	sessDir, err := EnsureSessionDir(sessionID)
+	sessDir, err := mgr.EnsureSessionDir(sessionID)
 	if err != nil {
 		t.Fatalf("EnsureSessionDir failed: %v", err)
 	}
@@ -270,7 +290,7 @@ func TestAppendAmbientTurn_DualSync(t *testing.T) {
 	}
 
 	for _, turn := range turns {
-		if err := AppendAmbientTurn(sessionID, turn.channel, turn.author, turn.text, turn.t); err != nil {
+		if err := mgr.AppendAmbientTurn(sessionID, turn.channel, turn.author, turn.text, turn.t); err != nil {
 			t.Fatalf("AppendAmbientTurn failed: %v", err)
 		}
 	}
@@ -302,11 +322,10 @@ func TestAppendAmbientTurn_DualSync(t *testing.T) {
 }
 
 func TestAppendAmbientTurn_MissingTrailingNewline(t *testing.T) {
-	tmpDir := t.TempDir()
-	_ = os.Setenv("HOME", tmpDir)
+	mgr, _ := setupTestManager(t)
 
 	sessionID := uuid.New().String()
-	sessDir, err := EnsureSessionDir(sessionID)
+	sessDir, err := mgr.EnsureSessionDir(sessionID)
 	if err != nil {
 		t.Fatalf("EnsureSessionDir failed: %v", err)
 	}
@@ -322,7 +341,7 @@ func TestAppendAmbientTurn_MissingTrailingNewline(t *testing.T) {
 	}
 
 	now := time.Date(2026, 9, 2, 12, 1, 0, 0, time.UTC)
-	if err := AppendAmbientTurn(sessionID, "lounge", "Bob", "Second line", now); err != nil {
+	if err := mgr.AppendAmbientTurn(sessionID, "lounge", "Bob", "Second line", now); err != nil {
 		t.Fatalf("AppendAmbientTurn failed: %v", err)
 	}
 
@@ -353,17 +372,23 @@ func TestAppendAmbientTurn_MissingTrailingNewline(t *testing.T) {
 }
 
 func TestEnsureSessionDir(t *testing.T) {
-	tmpDir := t.TempDir()
-	_ = os.Setenv("HOME", tmpDir)
+	mgr, _ := setupTestManager(t)
 
 	// Error case: empty sessionID
-	_, err := EnsureSessionDir("")
+	_, err := mgr.EnsureSessionDir("")
 	if err == nil {
 		t.Error("expected error for empty sessionID, got nil")
 	}
 
+	// Error case: empty roots on manager
+	mNoRoots := New("", "")
+	_, err = mNoRoots.EnsureSessionDir("sess-1")
+	if err == nil {
+		t.Error("expected error for EnsureSessionDir with no roots configured, got nil")
+	}
+
 	sessionID := uuid.New().String()
-	sessDir, err := EnsureSessionDir(sessionID)
+	sessDir, err := mgr.EnsureSessionDir(sessionID)
 	if err != nil {
 		t.Fatalf("EnsureSessionDir failed: %v", err)
 	}
@@ -397,7 +422,7 @@ func TestEnsureSessionDir(t *testing.T) {
 	testData := []byte(`{"step_index":0}`)
 	_ = os.WriteFile(filepath.Join(logsDir, "transcript.jsonl"), testData, 0644)
 
-	sessDir2, err := EnsureSessionDir(sessionID)
+	sessDir2, err := mgr.EnsureSessionDir(sessionID)
 	if err != nil {
 		t.Fatalf("second EnsureSessionDir call failed: %v", err)
 	}
@@ -412,11 +437,10 @@ func TestEnsureSessionDir(t *testing.T) {
 }
 
 func TestAppendAmbientTurn_SanitizationAndNormalization(t *testing.T) {
-	tmpDir := t.TempDir()
-	_ = os.Setenv("HOME", tmpDir)
+	mgr, _ := setupTestManager(t)
 
 	sessionID := uuid.New().String()
-	sessDir, err := EnsureSessionDir(sessionID)
+	sessDir, err := mgr.EnsureSessionDir(sessionID)
 	if err != nil {
 		t.Fatalf("EnsureSessionDir failed: %v", err)
 	}
@@ -427,7 +451,7 @@ func TestAppendAmbientTurn_SanitizationAndNormalization(t *testing.T) {
 	localTime := time.Date(2026, 9, 2, 10, 30, 0, 0, loc)
 
 	// Channel with extra spaces and #, author with @ and spaces
-	err = AppendAmbientTurn(sessionID, "  ###special-room  ", "  @BobTheBuilder  ", "Sanitized content", localTime)
+	err = mgr.AppendAmbientTurn(sessionID, "  ###special-room  ", "  @BobTheBuilder  ", "Sanitized content", localTime)
 	if err != nil {
 		t.Fatalf("AppendAmbientTurn failed: %v", err)
 	}
@@ -456,11 +480,10 @@ func TestAppendAmbientTurn_SanitizationAndNormalization(t *testing.T) {
 }
 
 func TestAppendAmbientTurn_LargeLineSeek(t *testing.T) {
-	tmpDir := t.TempDir()
-	_ = os.Setenv("HOME", tmpDir)
+	mgr, _ := setupTestManager(t)
 
 	sessionID := uuid.New().String()
-	sessDir, err := EnsureSessionDir(sessionID)
+	sessDir, err := mgr.EnsureSessionDir(sessionID)
 	if err != nil {
 		t.Fatalf("EnsureSessionDir failed: %v", err)
 	}
@@ -479,7 +502,7 @@ func TestAppendAmbientTurn_LargeLineSeek(t *testing.T) {
 	}
 
 	// Now append an ambient turn: it should scan past the 80KB line and find step_index: 42, making next index 43!
-	err = AppendAmbientTurn(sessionID, "general", "Alice", "After large step", time.Now())
+	err = mgr.AppendAmbientTurn(sessionID, "general", "Alice", "After large step", time.Now())
 	if err != nil {
 		t.Fatalf("AppendAmbientTurn failed: %v", err)
 	}
@@ -494,11 +517,10 @@ func TestAppendAmbientTurn_LargeLineSeek(t *testing.T) {
 }
 
 func TestAppendAmbientTurn_Concurrent(t *testing.T) {
-	tmpDir := t.TempDir()
-	_ = os.Setenv("HOME", tmpDir)
+	mgr, _ := setupTestManager(t)
 
 	sessionID := uuid.New().String()
-	sessDir, err := EnsureSessionDir(sessionID)
+	sessDir, err := mgr.EnsureSessionDir(sessionID)
 	if err != nil {
 		t.Fatalf("EnsureSessionDir failed: %v", err)
 	}
@@ -510,7 +532,7 @@ func TestAppendAmbientTurn_Concurrent(t *testing.T) {
 	for i := 0; i < n; i++ {
 		go func(idx int) {
 			defer wg.Done()
-			_ = AppendAmbientTurn(sessionID, "lounge", fmt.Sprintf("User%d", idx), fmt.Sprintf("Msg %d", idx), time.Now())
+			_ = mgr.AppendAmbientTurn(sessionID, "lounge", fmt.Sprintf("User%d", idx), fmt.Sprintf("Msg %d", idx), time.Now())
 		}(i)
 	}
 	wg.Wait()
@@ -544,12 +566,12 @@ func TestAppendAmbientTurn_Concurrent(t *testing.T) {
 }
 
 func TestSessionExistsOnDisk(t *testing.T) {
-	tmpDir := setupTestHome(t)
+	mgr, tmpDir := setupTestManager(t)
 
 	// 1. Empty or whitespace session ID -> returns false
 	emptyCases := []string{"", "   ", "\t", "\n", " \t \n "}
 	for _, id := range emptyCases {
-		if SessionExistsOnDisk(id) {
+		if mgr.SessionExistsOnDisk(id) {
 			t.Errorf("expected SessionExistsOnDisk(%q) to be false", id)
 		}
 	}
@@ -558,21 +580,21 @@ func TestSessionExistsOnDisk(t *testing.T) {
 	traversalCases := []string{
 		"../../etc/passwd",
 		"foo/bar",
-		`foo\bar`,
+		`foo\\bar`,
 		"../foo",
 		"foo/../bar",
-		`..\foo`,
+		`..\\foo`,
 		"/etc/passwd",
-		`C:\Windows`,
+		`C:\\Windows`,
 	}
 	for _, id := range traversalCases {
-		if SessionExistsOnDisk(id) {
+		if mgr.SessionExistsOnDisk(id) {
 			t.Errorf("expected SessionExistsOnDisk(%q) to be false", id)
 		}
 	}
 
 	// 3. Non-existent session ID -> returns false
-	if SessionExistsOnDisk("non-existent-session-id-999") {
+	if mgr.SessionExistsOnDisk("non-existent-session-id-999") {
 		t.Errorf("expected SessionExistsOnDisk for non-existent session to be false")
 	}
 
@@ -585,7 +607,7 @@ func TestSessionExistsOnDisk(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(zeroDir, "transcript.jsonl"), []byte{}, 0644); err != nil {
 		t.Fatalf("failed to write 0-byte transcript: %v", err)
 	}
-	if SessionExistsOnDisk(zeroByteID) {
+	if mgr.SessionExistsOnDisk(zeroByteID) {
 		t.Errorf("expected SessionExistsOnDisk(%q) with 0-byte transcript to be false", zeroByteID)
 	}
 
@@ -598,7 +620,7 @@ func TestSessionExistsOnDisk(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(validDir, "transcript.jsonl"), []byte(`{"step_index":0}`+"\n"), 0644); err != nil {
 		t.Fatalf("failed to write valid transcript: %v", err)
 	}
-	if !SessionExistsOnDisk(validTranscriptID) {
+	if !mgr.SessionExistsOnDisk(validTranscriptID) {
 		t.Errorf("expected SessionExistsOnDisk(%q) with valid transcript to be true", validTranscriptID)
 	}
 
@@ -611,7 +633,7 @@ func TestSessionExistsOnDisk(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(cliPbDir, pbCliID+".pb"), []byte("mock-protobuf-cli"), 0644); err != nil {
 		t.Fatalf("failed to write cli .pb: %v", err)
 	}
-	if !SessionExistsOnDisk(pbCliID) {
+	if !mgr.SessionExistsOnDisk(pbCliID) {
 		t.Errorf("expected SessionExistsOnDisk(%q) with cli .pb to be true", pbCliID)
 	}
 
@@ -624,7 +646,7 @@ func TestSessionExistsOnDisk(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(agyPbDir, pbAgyID+".pb"), []byte("mock-protobuf-agy"), 0644); err != nil {
 		t.Fatalf("failed to write agy .pb: %v", err)
 	}
-	if !SessionExistsOnDisk(pbAgyID) {
+	if !mgr.SessionExistsOnDisk(pbAgyID) {
 		t.Errorf("expected SessionExistsOnDisk(%q) with agy .pb to be true", pbAgyID)
 	}
 
@@ -633,13 +655,13 @@ func TestSessionExistsOnDisk(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(cliPbDir, pbZeroID+".pb"), []byte{}, 0644); err != nil {
 		t.Fatalf("failed to write zero-byte cli .pb: %v", err)
 	}
-	if SessionExistsOnDisk(pbZeroID) {
+	if mgr.SessionExistsOnDisk(pbZeroID) {
 		t.Errorf("expected SessionExistsOnDisk(%q) with 0-byte .pb to be false", pbZeroID)
 	}
 }
 
 func TestSessionPackage_TargetDirsAndBaseDir(t *testing.T) {
-	tmpDir := setupTestHome(t)
+	mgr, tmpDir := setupTestManager(t)
 
 	// 1. Create brain roots with session directories
 	cliBrainRoot := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain")
@@ -653,35 +675,30 @@ func TestSessionPackage_TargetDirsAndBaseDir(t *testing.T) {
 	_ = os.MkdirAll(sess2, 0755)
 
 	// Test getTargetDirs with empty convID (searches brain roots)
-	dirs := getTargetDirs("")
+	dirs := mgr.getTargetDirs("")
 	if len(dirs) < 2 {
 		t.Errorf("expected at least 2 target dirs for empty convID, got %v", dirs)
 	}
 
 	// Test resolveBaseDir returns valid non-empty directory
-	baseDir := resolveBaseDir("sess-2")
+	baseDir := mgr.resolveBaseDir("sess-2")
 	if baseDir == "" {
 		t.Errorf("expected non-empty baseDir for sess-2")
 	}
 
-	// Test resolveBaseDir when brainDataDir does not exist
-	origBrainDataDir := brainDataDir
-	brainDataDir = filepath.Join(tmpDir, "non_existent_data_brain")
-	defer func() { brainDataDir = origBrainDataDir }()
-
-	baseDirSess2 := resolveBaseDir("sess-2")
+	baseDirSess2 := mgr.resolveBaseDir("sess-2")
 	if baseDirSess2 != agyBrainRoot {
 		t.Errorf("expected baseDir %s, got %s", agyBrainRoot, baseDirSess2)
 	}
 
-	baseDirNew := resolveBaseDir("new-session-xyz")
+	baseDirNew := mgr.resolveBaseDir("new-session-xyz")
 	if baseDirNew != cliBrainRoot {
 		t.Errorf("expected baseDir %s, got %s", cliBrainRoot, baseDirNew)
 	}
 }
 
 func TestHasSuccessfulToolCall_ToolExecuted(t *testing.T) {
-	tmpDir := setupTestHome(t)
+	mgr, tmpDir := setupTestManager(t)
 
 	convID := "tool-test-123"
 	logsDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", convID, ".system_generated", "logs")
@@ -693,7 +710,7 @@ func TestHasSuccessfulToolCall_ToolExecuted(t *testing.T) {
 `
 	_ = os.WriteFile(filepath.Join(logsDir, "transcript.jsonl"), []byte(transcript), 0644)
 
-	if !HasSuccessfulToolCall(convID) {
+	if !mgr.HasSuccessfulToolCall(convID) {
 		t.Errorf("expected HasSuccessfulToolCall = true when MCP_TOOL status DONE is present")
 	}
 }
@@ -725,7 +742,7 @@ func TestGetLastStepIndex_EdgeCases(t *testing.T) {
 }
 
 func TestDumpSessionDiagnosticLogs_LongLogFile(t *testing.T) {
-	tmpDir := setupTestHome(t)
+	mgr, tmpDir := setupTestManager(t)
 
 	convID := "diag-long-123"
 	logsDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", convID, ".system_generated", "logs")
@@ -737,14 +754,14 @@ func TestDumpSessionDiagnosticLogs_LongLogFile(t *testing.T) {
 	}
 	_ = os.WriteFile(filepath.Join(logsDir, "output.log"), []byte(sb.String()), 0644)
 
-	diag := DumpSessionDiagnosticLogs(convID)
+	diag := mgr.DumpSessionDiagnosticLogs(convID)
 	if !strings.Contains(diag, "[...showing last 50 lines...]") {
 		t.Errorf("expected truncation notice in diagnostic output, got: %s", diag)
 	}
 }
 
 func TestFindLatestSessionDir_WithRegularFiles(t *testing.T) {
-	tmpDir := setupTestHome(t)
+	mgr, tmpDir := setupTestManager(t)
 
 	brainDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain")
 	_ = os.MkdirAll(brainDir, 0755)
@@ -756,7 +773,7 @@ func TestFindLatestSessionDir_WithRegularFiles(t *testing.T) {
 	sessDir := filepath.Join(brainDir, "sess-real")
 	_ = os.MkdirAll(sessDir, 0755)
 
-	latest := FindLatestSessionDir(time.Now().Add(-1 * time.Hour))
+	latest := mgr.FindLatestSessionDir(time.Now().Add(-1 * time.Hour))
 	if latest != "sess-real" {
 		t.Errorf("expected latest session 'sess-real', got %q", latest)
 	}
@@ -770,24 +787,24 @@ func TestAppendTranscriptStep_Errors(t *testing.T) {
 }
 
 func TestAppendAmbientTurn_ZeroTimestamp(t *testing.T) {
-	_ = setupTestHome(t)
+	mgr, _ := setupTestManager(t)
 
 	sessionID := uuid.New().String()
-	sessDir, err := EnsureSessionDir(sessionID)
+	sessDir, err := mgr.EnsureSessionDir(sessionID)
 	if err != nil {
 		t.Fatalf("EnsureSessionDir failed: %v", err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(sessDir) })
 
 	// Call with zero time
-	err = AppendAmbientTurn(sessionID, "general", "Alice", "Zero time msg", time.Time{})
+	err = mgr.AppendAmbientTurn(sessionID, "general", "Alice", "Zero time msg", time.Time{})
 	if err != nil {
 		t.Fatalf("AppendAmbientTurn with zero time failed: %v", err)
 	}
 }
 
 func TestExtractResponseAndError_LegacyAndModernAmbientTurns(t *testing.T) {
-	tmpDir := setupTestHome(t)
+	mgr, tmpDir := setupTestManager(t)
 
 	convID := "test-conv-ambient-filter"
 	logsDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", convID, ".system_generated", "logs")
@@ -805,7 +822,7 @@ func TestExtractResponseAndError_LegacyAndModernAmbientTurns(t *testing.T) {
 		t.Fatalf("Failed to write transcript.jsonl: %v", err)
 	}
 
-	resp, errStr := ExtractResponseAndError(convID)
+	resp, errStr := mgr.ExtractResponseAndError(convID)
 	if resp != "Modern Turn 1 Response" {
 		t.Errorf("Expected response 'Modern Turn 1 Response', got: %q (err: %s)", resp, errStr)
 	}
@@ -819,7 +836,7 @@ func TestExtractResponseAndError_LegacyAndModernAmbientTurns(t *testing.T) {
 		t.Fatalf("Failed to write transcript.jsonl: %v", err)
 	}
 
-	resp, errStr = ExtractResponseAndError(convID)
+	resp, errStr = mgr.ExtractResponseAndError(convID)
 	if resp != "Legacy Turn 1 Response" {
 		t.Errorf("Expected response 'Legacy Turn 1 Response', got: %q (err: %s)", resp, errStr)
 	}
@@ -831,33 +848,33 @@ func TestExtractResponseAndError_LegacyAndModernAmbientTurns(t *testing.T) {
 		t.Fatalf("Failed to write transcript.jsonl: %v", err)
 	}
 
-	resp, errStr = ExtractResponseAndError(convID)
+	resp, errStr = mgr.ExtractResponseAndError(convID)
 	if resp != "" {
 		t.Errorf("Expected empty response for incomplete Turn 2, got: %q", resp)
 	}
 }
 
 func TestGetSessionLastActivity(t *testing.T) {
-	tmpDir := setupTestHome(t)
+	mgr, tmpDir := setupTestManager(t)
 
 	// 1. Empty or whitespace session ID -> zero time, nil error
-	for _, emptyID := range []string{"", "   ", "\t", "\n"} {
-		tAct, err := GetSessionLastActivity(emptyID)
+	for _, emptyID := range []string{"", "   ", "	", "\n"} {
+		tAct, err := mgr.GetSessionLastActivity(emptyID)
 		if err != nil || !tAct.IsZero() {
 			t.Errorf("expected zero time, nil err for %q, got %v, %v", emptyID, tAct, err)
 		}
 	}
 
 	// 2. Path traversal attempts -> zero time, nil error
-	for _, traversalID := range []string{"../../etc/passwd", "foo/bar", `foo\bar`, "../foo", "foo/../bar"} {
-		tAct, err := GetSessionLastActivity(traversalID)
+	for _, traversalID := range []string{"../../etc/passwd", "foo/bar", `foo\\bar`, "../foo", "foo/../bar"} {
+		tAct, err := mgr.GetSessionLastActivity(traversalID)
 		if err != nil || !tAct.IsZero() {
 			t.Errorf("expected zero time, nil err for traversal %q, got %v, %v", traversalID, tAct, err)
 		}
 	}
 
 	// 3. Non-existent session -> zero time, nil error
-	tAct, err := GetSessionLastActivity("non-existent-session-xyz")
+	tAct, err := mgr.GetSessionLastActivity("non-existent-session-xyz")
 	if err != nil || !tAct.IsZero() {
 		t.Errorf("expected zero time, nil err for non-existent session, got %v, %v", tAct, err)
 	}
@@ -877,7 +894,7 @@ func TestGetSessionLastActivity(t *testing.T) {
 	}
 	_ = os.Chtimes(tPath, t1, t1)
 
-	actTime, err := GetSessionLastActivity(sessionID)
+	actTime, err := mgr.GetSessionLastActivity(sessionID)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -902,7 +919,7 @@ func TestGetSessionLastActivity(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(tasksDir, "notes.txt"), []byte("ignored"), 0644)
 	_ = os.MkdirAll(filepath.Join(tasksDir, "subfolder.log"), 0755)
 
-	actTime, err = GetSessionLastActivity(sessionID)
+	actTime, err = mgr.GetSessionLastActivity(sessionID)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -918,7 +935,7 @@ func TestGetSessionLastActivity(t *testing.T) {
 	}
 	_ = os.Chtimes(taskLog2, t3, t3)
 
-	actTime, err = GetSessionLastActivity(sessionID)
+	actTime, err = mgr.GetSessionLastActivity(sessionID)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -937,43 +954,59 @@ func TestGetSessionLastActivity(t *testing.T) {
 	_ = os.Chtimes(cPath, tCustom, tCustom)
 
 	// Normal lookup won't find custom root
-	normTime, _ := GetSessionLastActivity(customSessID)
+	normTime, _ := mgr.GetSessionLastActivity(customSessID)
 	if !normTime.IsZero() {
 		t.Errorf("expected zero time in standard roots for custom sess, got %v", normTime)
 	}
 
 	// Variadic custom roots find it directly
-	customAct, err := GetSessionLastActivity(customSessID, customRoot)
+	customAct, err := mgr.GetSessionLastActivity(customSessID, customRoot)
 	if err != nil {
 		t.Fatalf("unexpected error with custom root: %v", err)
 	}
 	if !customAct.Equal(tCustom) {
 		t.Errorf("expected %v with custom root, got %v", tCustom, customAct)
 	}
-}
 
-func TestSessionRoots_SetSessionRoots(t *testing.T) {
-	origRoots := SessionRoots()
-	if len(origRoots) < 3 {
-		t.Errorf("expected at least 3 default roots, got %v", origRoots)
+	// Direct call to pure LastActivityFromRoots
+	pureAct, err := LastActivityFromRoots(customSessID, []string{customRoot})
+	if err != nil {
+		t.Fatalf("unexpected error from LastActivityFromRoots: %v", err)
 	}
-
-	tempRoot1 := t.TempDir()
-	tempRoot2 := t.TempDir()
-
-	restore := SetSessionRoots(tempRoot1, tempRoot2)
-	defer restore()
-
-	custom := SessionRoots()
-	if len(custom) != 2 || custom[0] != tempRoot1 || custom[1] != tempRoot2 {
-		t.Errorf("expected custom roots [%s %s], got %v", tempRoot1, tempRoot2, custom)
-	}
-
-	restore()
-	restored := SessionRoots()
-	if len(restored) != len(origRoots) {
-		t.Errorf("expected restored roots len %d, got %d", len(origRoots), len(restored))
+	if !pureAct.Equal(tCustom) {
+		t.Errorf("expected %v from LastActivityFromRoots, got %v", tCustom, pureAct)
 	}
 }
 
+func TestManager_Roots(t *testing.T) {
+	// 1. Manager with empty home/data has nil/empty roots
+	mEmpty := New("", "")
+	if len(mEmpty.Roots()) != 0 {
+		t.Errorf("expected 0 roots for empty manager, got %v", mEmpty.Roots())
+	}
 
+	// 2. Manager with explicit paths
+	tmpHome := t.TempDir()
+	tmpData := t.TempDir()
+	m := New(tmpHome, tmpData)
+	roots := m.Roots()
+	if len(roots) != 3 {
+		t.Fatalf("expected 3 roots, got %d (%v)", len(roots), roots)
+	}
+	expectedDataRoot := filepath.Join(tmpData, "brain")
+	if roots[0] != expectedDataRoot {
+		t.Errorf("expected roots[0] == %s, got %s", expectedDataRoot, roots[0])
+	}
+
+	// 3. Defensive copy: modifying returned slice must not affect m.roots
+	roots[0] = "/mutated"
+	if m.Roots()[0] == "/mutated" {
+		t.Errorf("Roots() returned a mutable reference to internal slice")
+	}
+
+	// 4. Nil receiver safety
+	var nilMgr *Manager
+	if nilRoots := nilMgr.Roots(); nilRoots != nil {
+		t.Errorf("expected nil roots for nil manager, got %v", nilRoots)
+	}
+}

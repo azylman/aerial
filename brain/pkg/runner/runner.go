@@ -751,7 +751,7 @@ func RunAgyWithWatchdog(parentCtx context.Context, agyBin, prompt, sessionID, ap
 
 		lastSeenDiskActivity := start
 		if sessionID != "" {
-			if initAct, _ := session.GetSessionLastActivity(sessionID, opts.TranscriptDirs...); initAct.After(start) {
+			if initAct, _ := session.LastActivityFromRoots(sessionID, opts.TranscriptDirs); initAct.After(start) {
 				lastSeenDiskActivity = initAct
 			}
 		}
@@ -765,7 +765,7 @@ func RunAgyWithWatchdog(parentCtx context.Context, agyBin, prompt, sessionID, ap
 			case <-ticker.C:
 				activeSess := actWriter.SessionID()
 				if activeSess != "" {
-					latestActivity, _ := session.GetSessionLastActivity(activeSess, opts.TranscriptDirs...)
+					latestActivity, _ := session.LastActivityFromRoots(activeSess, opts.TranscriptDirs)
 					if latestActivity.After(lastSeenDiskActivity) {
 						lastSeenDiskActivity = latestActivity
 						actWriter.lastActivity.Store(time.Now().UnixNano())

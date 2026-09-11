@@ -28,6 +28,7 @@ import (
 	"github.com/azylman/aerial/brain/pkg/scheduler"
 	"github.com/azylman/aerial/brain/pkg/env"
 	"github.com/azylman/aerial/brain/pkg/sanitizer"
+	"github.com/azylman/aerial/brain/pkg/session"
 	"github.com/azylman/aerial/brain/pkg/watcher"
 	"github.com/bwmarrin/discordgo"
 	"github.com/google/uuid"
@@ -980,6 +981,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config) error {
 	sanitizer.RegisterConfigTokens(cfg)
 
 	cls := classifier.New(cfg, runner.RunAgy)
+	sessionMgr := session.New(cfg.GeminiHomeDir(), cfg.DataDir())
 
 	pool := queue.New(cfg, queue.WorkerPoolConfig{
 		DB:                    database,
@@ -987,6 +989,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config) error {
 		RunnerFunc:            runner.RunAgy,
 		RunnerWithOptionsFunc: runner.RunAgyWithOptions,
 		MemoryRetrieverFunc:   memory.RetrieveRelevantFacts,
+		SessionManager:        sessionMgr,
 	})
 	pool.Start()
 
@@ -1050,7 +1053,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config) error {
 	stopScheduler := sched.Start(ctx)
 	defer stopScheduler()
 
-	mux := SetupBrainMux(database, pool, reloadConfig, DefaultTranscriptRoots(cfg)...)
+	mux := SetupBrainMux(database, pool, reloadConfig, sessionMgr.Roots()...)
 
 	port := cur.Port
 	if port == "" {

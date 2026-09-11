@@ -195,6 +195,7 @@ type WorkerPoolConfig struct {
 	StalenessTTL   time.Duration
 	IdleTimeout    time.Duration
 	DrainTimeout   time.Duration
+	SessionManager *session.Manager
 
 	// Optional hooks for testing/custom overrides
 	RunnerFunc           func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error)
@@ -221,6 +222,7 @@ type WorkerPool struct {
 	appCfg           *config.Config
 	overrideModel    string
 	cfg              WorkerPoolConfig
+	sessionMgr       *session.Manager
 	mu               sync.Mutex
 	threadChs        map[string]*threadWorkerState
 	wg               sync.WaitGroup
@@ -346,14 +348,25 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 		cfg.SystemAlertFunc = delivery.SendSystemAlert
 	}
 
+	sessMgr := cfg.SessionManager
+	if sessMgr == nil {
+		if appCfg != nil {
+			sessMgr = session.New(appCfg.GeminiHomeDir(), appCfg.DataDir())
+		} else {
+			sessMgr = session.New("", "")
+		}
+	}
+	cfg.SessionManager = sessMgr
+
 	ctx, cancel := context.WithCancel(context.Background())
 
 	p := &WorkerPool{
-		appCfg:    appCfg,
-		cfg:       cfg,
-		threadChs: make(map[string]*threadWorkerState),
-		ctx:       ctx,
-		cancel:    cancel,
+		appCfg:     appCfg,
+		cfg:        cfg,
+		sessionMgr: sessMgr,
+		threadChs:  make(map[string]*threadWorkerState),
+		ctx:        ctx,
+		cancel:     cancel,
 	}
 
 	if p.cfg.HistoryFetcher == nil {
@@ -466,6 +479,10 @@ func (p *WorkerPool) GetRuntimeConfig() string {
 		}
 	}
 	return p.cfg.Model
+}
+
+func (p *WorkerPool) SessionManager() *session.Manager {
+	return p.sessionMgr
 }
 
 func (p *WorkerPool) Start() {
@@ -899,7 +916,7 @@ func parseDBTime(val any) (time.Time, bool) {
 // and diskActivity.IsZero(). Rotated sessions with turn_count == 0 or empty internal_session_id
 // but with prior completed messages are recognized as existing sessions.
 // If database queries fail (excluding sql.ErrNoRows), the error is returned to allow fail-open semantics.
-func GetSessionLastActivity(database db.DBTX, threadID string) (time.Time, bool, error) {
+func GetSessionLastActivity(database db.DBTX, threadID string, mgr ...*session.Manager) (time.Time, bool, error) {
 	if database == nil || strings.TrimSpace(threadID) == "" {
 		return time.Time{}, true, nil
 	}
@@ -945,7 +962,9 @@ func GetSessionLastActivity(database db.DBTX, threadID string) (time.Time, bool,
 
 	var diskActivity time.Time
 	if internalSessionID.Valid && strings.TrimSpace(internalSessionID.String) != "" {
-		diskActivity, _ = session.GetSessionLastActivity(internalSessionID.String)
+		if len(mgr) > 0 && mgr[0] != nil {
+			diskActivity, _ = mgr[0].GetSessionLastActivity(internalSessionID.String)
+		}
 	}
 
 	turns := int64(0)
@@ -1069,7 +1088,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		}
 
 		if !hasRecovered && msgAge > stalenessTTL {
-			lastActivity, isColdThread, err := GetSessionLastActivity(p.cfg.DB, threadID)
+			lastActivity, isColdThread, err := GetSessionLastActivity(p.cfg.DB, threadID, p.sessionMgr)
 			if err != nil {
 				// Fail-open: Retain message if DB error occurs during staleness lookup
 				log.Printf("[WorkerPool] Warning: failed to query session last activity for thread %s: %v. Retaining message(s) (fail-open).", threadID, err)
@@ -1385,9 +1404,9 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 			}
 
 			// ALL messages in burst are ambient
-			hasDiskSession := currentSessionID != "" && session.SessionExistsOnDisk(currentSessionID)
-			if hasDiskSession {
-				_, _ = session.EnsureSessionDir(currentSessionID)
+			hasDiskSession := currentSessionID != "" && p.sessionMgr != nil && p.sessionMgr.SessionExistsOnDisk(currentSessionID)
+			if hasDiskSession && p.sessionMgr != nil {
+				_, _ = p.sessionMgr.EnsureSessionDir(currentSessionID)
 			}
 
 			metrics.RecordTurnCompleted("ambient", triggerType, "classifier", time.Since(execStart))
@@ -1424,12 +1443,12 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		if currentSessionID == "" {
 			currentSessionID, _ = db.GetSessionID(p.cfg.DB, threadID)
 		}
-		if currentSessionID != "" && !session.SessionExistsOnDisk(currentSessionID) {
+		if currentSessionID != "" && p.sessionMgr != nil && !p.sessionMgr.SessionExistsOnDisk(currentSessionID) {
 			log.Printf("[Queue] Session %s for thread %s not found on disk. Clearing for fresh Turn 1.", currentSessionID, threadID)
 			currentSessionID = ""
 		}
-		if currentSessionID != "" {
-			_, _ = session.EnsureSessionDir(currentSessionID)
+		if currentSessionID != "" && p.sessionMgr != nil {
+			_, _ = p.sessionMgr.EnsureSessionDir(currentSessionID)
 		}
 
 		// Phase 1 (Leading ambient messages)
@@ -1755,7 +1774,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 
 		promptToSend := turnPrompt
 		if attempt > 1 {
-			if (runner.IsInactivityTimeout(lastErrDetail, lastStderr) || strings.Contains(lastErrDetail, "max duration exceeded")) && currentSessionID != "" && session.SessionExistsOnDisk(currentSessionID) {
+			if (runner.IsInactivityTimeout(lastErrDetail, lastStderr) || strings.Contains(lastErrDetail, "max duration exceeded")) && currentSessionID != "" && p.sessionMgr != nil && p.sessionMgr.SessionExistsOnDisk(currentSessionID) {
 				promptToSend = fmt.Sprintf(ContinuationPromptTemplate, turnPrompt)
 			}
 		}
@@ -1769,6 +1788,9 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 
 		if p.cfg.RunnerWithOptionsFunc != nil {
 			watchdogOpts := runner.DefaultWatchdogOptions(currentTimeout)
+			if p.sessionMgr != nil {
+				watchdogOpts.TranscriptDirs = p.sessionMgr.Roots()
+			}
 			if statusUpdater != nil {
 				statusUpdater.MarkTurnStarted()
 				watchdogOpts.StepUpdateHandler = statusUpdater.HandleStep
@@ -1817,7 +1839,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 			targetSess := currentSessionID
 			if targetSess == "" {
 				combinedOutput := stdout + "\n" + stderr
-				if extSess := runner.ExtractSessionID(combinedOutput, execStart); extSess != "" && session.SessionExistsOnDisk(extSess) {
+				if extSess := runner.ExtractSessionID(combinedOutput, execStart); extSess != "" && p.sessionMgr != nil && p.sessionMgr.SessionExistsOnDisk(extSess) {
 					targetSess = extSess
 				}
 			}
@@ -1826,8 +1848,8 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 			// If agy completed with exit code 0 but was flagged as a failure (e.g. empty stdout from buffering,
 			// or stream-json reporting an error status despite the model successfully generating a response),
 			// check if the session transcript on disk contains a valid PLANNER_RESPONSE turn.
-			if exitCode == 0 && targetSess != "" && session.SessionExistsOnDisk(targetSess) {
-				if respText, _ := session.ExtractResponseAndError(targetSess); respText != "" && !strings.HasPrefix(respText, "[Tool Call Requested]:") {
+			if exitCode == 0 && targetSess != "" && p.sessionMgr != nil && p.sessionMgr.SessionExistsOnDisk(targetSess) {
+				if respText, _ := p.sessionMgr.ExtractResponseAndError(targetSess); respText != "" && !strings.HasPrefix(respText, "[Tool Call Requested]:") {
 					log.Printf("[Queue] Recovered response directly from session %s transcript after runner failure on exit 0", targetSess)
 					isFailure = false
 					isSessionCorruption = false
@@ -1860,7 +1882,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 				// Cold-start dynamic session latching if available
 				if currentSessionID == "" && !isSessionCorruption {
 					combinedOutput := stdout + "\n" + stderr
-					if extSess := runner.ExtractSessionID(combinedOutput, execStart); extSess != "" && session.SessionExistsOnDisk(extSess) {
+					if extSess := runner.ExtractSessionID(combinedOutput, execStart); extSess != "" && p.sessionMgr != nil && p.sessionMgr.SessionExistsOnDisk(extSess) {
 						currentSessionID = extSess
 						_ = db.SaveSessionID(p.cfg.DB, threadID, currentSessionID)
 					}
