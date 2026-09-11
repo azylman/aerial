@@ -68,6 +68,8 @@ init_scratch() {
     echo "{\"status\":\"initialized\",\"scratch_dir\":\"${scratch_dir}\",\"branch\":\"${branch_name}\"}"
 }
 
+SCRATCH_DIR_CLEANUP=""
+
 submit_scratch() {
     local scratch_dir="${1:-}"
     local commit_msg="${2:-}"
@@ -81,8 +83,9 @@ submit_scratch() {
         commit_msg="feat(core): automated update by Aerial"
     fi
 
+    SCRATCH_DIR_CLEANUP="$scratch_dir"
     # Ensure cleanup of scratch directory on exit
-    trap 'rm -rf "${scratch_dir}"' EXIT INT TERM
+    trap 'if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then rm -rf "${SCRATCH_DIR_CLEANUP}"; fi' EXIT INT TERM
 
     cd "$scratch_dir"
 
