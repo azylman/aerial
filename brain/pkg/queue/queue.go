@@ -311,9 +311,9 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 	if cfg.MemoryClient == nil {
 		cfg.MemoryClient = memory.New(appCfg)
 	}
-	if cfg.MemoryRetrieverFunc == nil {
-		cfg.MemoryRetrieverFunc = memory.RetrieveRelevantFacts
-	}
+	// Note: MemoryRetrieverFunc is deliberately NOT defaulted to memory.RetrieveRelevantFacts here.
+	// Production callers (e.g. brain/main.go) explicitly inject memory.RetrieveRelevantFacts, ensuring
+	// unit tests remain strictly hermetic and never attempt live network calls to Ollama.
 	if cfg.Classifier == nil {
 		runnerFn := cfg.RunnerFunc
 		apiKey := cfg.APIKey
