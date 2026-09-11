@@ -8,6 +8,9 @@ import (
 
 // SyncSkills symlinks custom and built-in skills into ~/.gemini/skills directories.
 func (p *Provisioner) SyncSkills() error {
+	if p == nil || p.homeDir == "" {
+		return nil
+	}
 	targetSkillDirs := []string{
 		filepath.Join(p.homeDir, ".gemini", "config", "skills"),
 		filepath.Join(p.homeDir, ".gemini", "skills"),

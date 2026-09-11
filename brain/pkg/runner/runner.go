@@ -479,6 +479,7 @@ type StepUpdateHandler func(ev *StepUpdateEvent)
 
 // WatchdogOptions configures execution timeouts and activity polling behavior.
 type WatchdogOptions struct {
+	HomeDir           string
 	InactivityTimeout time.Duration
 	MaxDuration       time.Duration
 	PollInterval      time.Duration
@@ -705,6 +706,12 @@ func RunAgyWithWatchdog(parentCtx context.Context, agyBin, prompt, sessionID, ap
 		"AGY_LOG_LEVEL=debug",
 		"ANTIGRAVITY_LOG_LEVEL=debug",
 	)
+	if strings.TrimSpace(opts.HomeDir) != "" {
+		cmdEnv = append(cmdEnv,
+			"HOME="+strings.TrimSpace(opts.HomeDir),
+			"USERPROFILE="+strings.TrimSpace(opts.HomeDir),
+		)
+	}
 	if apiKey != "" {
 		cmdEnv = append(cmdEnv,
 			"GEMINI_API_KEY="+apiKey,
@@ -723,7 +730,9 @@ func RunAgyWithWatchdog(parentCtx context.Context, agyBin, prompt, sessionID, ap
 	configureSysProcAttr(cmd)
 
 	// Pre-flight: ensure settings.json matches authentication mode prior to executing agy
-	_ = env.EnsureAgySettings(apiKey, model)
+	if strings.TrimSpace(opts.HomeDir) != "" {
+		_ = env.EnsureAgySettingsForHome(strings.TrimSpace(opts.HomeDir), apiKey, model)
+	}
 
 	if startErr := cmd.Start(); startErr != nil {
 		return "", actWriter.String(), -1, startErr
@@ -822,8 +831,8 @@ func RunAgyWithWatchdog(parentCtx context.Context, agyBin, prompt, sessionID, ap
 			exitCode = -1
 		}
 		err = runErr
-		if strings.Contains(strings.ToLower(stderr), "modelprovider is set to \"gemini\"") && apiKey == "" {
-			_ = env.EnsureAgySettings("", model)
+		if strings.Contains(strings.ToLower(stderr), "modelprovider is set to \"gemini\"") && apiKey == "" && strings.TrimSpace(opts.HomeDir) != "" {
+			_ = env.EnsureAgySettingsForHome(strings.TrimSpace(opts.HomeDir), "", model)
 		}
 	} else {
 		exitCode = 0

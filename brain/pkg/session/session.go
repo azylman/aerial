@@ -57,6 +57,22 @@ func (m *Manager) Roots() []string {
 	return append([]string(nil), m.roots...)
 }
 
+// HomeDir returns the explicitly configured home directory for this Manager.
+func (m *Manager) HomeDir() string {
+	if m == nil {
+		return ""
+	}
+	return m.homeDir
+}
+
+// DataDir returns the explicitly configured data directory for this Manager.
+func (m *Manager) DataDir() string {
+	if m == nil {
+		return ""
+	}
+	return m.dataDir
+}
+
 // LastActivityFromRoots returns the latest modification timestamp across all log files
 // (transcripts and background task logs) for a session ID within the provided search roots.
 // Zero ambient environment defaults are used.

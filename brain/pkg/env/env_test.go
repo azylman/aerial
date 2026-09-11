@@ -304,3 +304,82 @@ func TestSyncMCP_EdgeCases(t *testing.T) {
 		t.Errorf("Expected 'from-str' in mcp_config.json, got: %s", string(data))
 	}
 }
+
+func TestProvisioner_ZeroAmbientDefaultsAndNoOps(t *testing.T) {
+	// 1. Verify New strictly sets given values without ambient fallbacks
+	pEmpty := New("", "")
+	if pEmpty.HomeDir() != "" {
+		t.Errorf("Expected empty HomeDir, got %q", pEmpty.HomeDir())
+	}
+	if pEmpty.DataDir() != "" {
+		t.Errorf("Expected empty DataDir, got %q", pEmpty.DataDir())
+	}
+
+	// 2. Verify all operations return nil when homeDir == ""
+	if err := pEmpty.Sync(context.Background(), nil); err != nil {
+		t.Errorf("Expected nil error from Sync on empty homeDir, got: %v", err)
+	}
+	if err := pEmpty.SyncSettings("key", "model"); err != nil {
+		t.Errorf("Expected nil error from SyncSettings on empty homeDir, got: %v", err)
+	}
+	if err := pEmpty.SyncRules("prompt"); err != nil {
+		t.Errorf("Expected nil error from SyncRules on empty homeDir, got: %v", err)
+	}
+	if err := pEmpty.SyncMCP(context.Background(), nil); err != nil {
+		t.Errorf("Expected nil error from SyncMCP on empty homeDir, got: %v", err)
+	}
+	if err := pEmpty.EnsureMcpConfig(json.RawMessage(`{"mcpServers":{}}`)); err != nil {
+		t.Errorf("Expected nil error from EnsureMcpConfig on empty homeDir, got: %v", err)
+	}
+	if err := pEmpty.SyncSkills(); err != nil {
+		t.Errorf("Expected nil error from SyncSkills on empty homeDir, got: %v", err)
+	}
+
+	// 3. Verify nil receiver safety
+	var pNil *Provisioner
+	if err := pNil.Sync(context.Background(), nil); err != nil {
+		t.Errorf("Expected nil error from Sync on nil Provisioner, got: %v", err)
+	}
+	if err := pNil.SyncSettings("key", "model"); err != nil {
+		t.Errorf("Expected nil error from SyncSettings on nil Provisioner, got: %v", err)
+	}
+	if err := pNil.SyncRules("prompt"); err != nil {
+		t.Errorf("Expected nil error from SyncRules on nil Provisioner, got: %v", err)
+	}
+	if err := pNil.SyncMCP(context.Background(), nil); err != nil {
+		t.Errorf("Expected nil error from SyncMCP on nil Provisioner, got: %v", err)
+	}
+	if err := pNil.EnsureMcpConfig(json.RawMessage(`{"mcpServers":{}}`)); err != nil {
+		t.Errorf("Expected nil error from EnsureMcpConfig on nil Provisioner, got: %v", err)
+	}
+	if err := pNil.SyncSkills(); err != nil {
+		t.Errorf("Expected nil error from SyncSkills on nil Provisioner, got: %v", err)
+	}
+
+	// 4. EnsureAgySettings and EnsureAgySettingsForHome with empty homeDir
+	if err := EnsureAgySettings("key", "model"); err != nil {
+		t.Errorf("Expected nil error from EnsureAgySettings, got: %v", err)
+	}
+	if err := EnsureAgySettingsForHome("", "key", "model"); err != nil {
+		t.Errorf("Expected nil error from EnsureAgySettingsForHome(\"\"), got: %v", err)
+	}
+
+	// 5. NewFromConfig resolves via getters
+	tmpHome := t.TempDir()
+	cfg := config.NewTestConfig(func(d *config.ConfigData) {
+		d.GeminiHomeDir = tmpHome
+	})
+	pFromCfg := NewFromConfig(cfg)
+	if pFromCfg.HomeDir() != tmpHome {
+		t.Errorf("Expected HomeDir %q from config, got %q", tmpHome, pFromCfg.HomeDir())
+	}
+	if pFromCfg.DataDir() != "/data" {
+		t.Errorf("Expected resolved DataDir '/data' from config, got %q", pFromCfg.DataDir())
+	}
+
+	// Nil config in NewFromConfig
+	pNilCfg := NewFromConfig(nil)
+	if pNilCfg.HomeDir() != "" || pNilCfg.DataDir() != "" {
+		t.Errorf("Expected empty paths from nil config, got home=%q data=%q", pNilCfg.HomeDir(), pNilCfg.DataDir())
+	}
+}

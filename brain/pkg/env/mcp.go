@@ -30,7 +30,13 @@ func (p *Provisioner) LoadMCPConfig(cfg *config.Config) json.RawMessage {
 			"serverUrl": "http://victoriametrics-mcp:4004/mcp",
 		},
 	}
-	if pat := os.Getenv("GITHUB_PAT"); pat != "" {
+	var gitHubPAT string
+	if cfg != nil && cfg.Current().GitHubPAT != "" {
+		gitHubPAT = cfg.Current().GitHubPAT
+	} else if pat := os.Getenv("GITHUB_PAT"); pat != "" {
+		gitHubPAT = pat
+	}
+	if gitHubPAT != "" {
 		mergedServers["github"] = map[string]interface{}{
 			"serverUrl": "http://github-mcp:4003/mcp",
 		}
@@ -42,9 +48,11 @@ func (p *Provisioner) LoadMCPConfig(cfg *config.Config) json.RawMessage {
 		"/share/aerial-config/mcp.json",
 		"/config/mcp.config.json",
 		"/config/mcp.json",
-		filepath.Join(p.dataDir, "mcp.config.json"),
-		"./mcp.config.json",
 	}
+	if p != nil && p.dataDir != "" {
+		configPaths = append(configPaths, filepath.Join(p.dataDir, "mcp.config.json"))
+	}
+	configPaths = append(configPaths, "./mcp.config.json")
 
 	var rawBytes []byte
 	for _, cp := range configPaths {
@@ -61,7 +69,7 @@ func (p *Provisioner) LoadMCPConfig(cfg *config.Config) json.RawMessage {
 		}
 	}
 
-	if len(rawBytes) == 0 {
+	if len(rawBytes) == 0 && p != nil && p.dataDir != "" {
 		optionsPath := filepath.Join(p.dataDir, "options.json")
 		if data, err := os.ReadFile(optionsPath); err == nil {
 			var opts struct {
@@ -132,12 +140,18 @@ func (p *Provisioner) LoadMCPConfig(cfg *config.Config) json.RawMessage {
 
 // SyncMCP loads and synchronizes mcp_config.json into ~/.gemini/config/mcp_config.json.
 func (p *Provisioner) SyncMCP(ctx context.Context, cfg *config.Config) error {
+	if p == nil || p.homeDir == "" {
+		return nil
+	}
 	rawConfig := p.LoadMCPConfig(cfg)
 	return p.EnsureMcpConfig(rawConfig)
 }
 
 // EnsureMcpConfig writes raw JSON configuration into ~/.gemini/config/mcp_config.json.
 func (p *Provisioner) EnsureMcpConfig(rawConfig json.RawMessage) error {
+	if p == nil || p.homeDir == "" {
+		return nil
+	}
 	if len(rawConfig) == 0 {
 		return nil
 	}

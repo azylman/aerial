@@ -28,6 +28,9 @@ var (
 
 // SyncRules compiles the user persona, AGENTS.md, and custom system prompt into ~/.gemini rules.
 func (p *Provisioner) SyncRules(customPrompt string) error {
+	if p == nil || p.homeDir == "" {
+		return nil
+	}
 	systemRulesMu.Lock()
 	defer systemRulesMu.Unlock()
 
@@ -75,7 +78,7 @@ func (p *Provisioner) SyncRules(customPrompt string) error {
 	} else if foundPersona {
 		p.lkgcPersona = personaContent
 		p.lkgcPersonaSource = personaSource
-		if personaSource != ".AGENTS.md.lkgc" {
+		if personaSource != ".AGENTS.md.lkgc" && p.dataDir != "" {
 			_ = p.writeAtomic(filepath.Join(p.dataDir, ".AGENTS.md.lkgc"), personaContent)
 		}
 	}

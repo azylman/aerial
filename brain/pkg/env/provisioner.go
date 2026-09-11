@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/azylman/aerial/brain/pkg/config"
@@ -27,22 +28,9 @@ type Provisioner struct {
 
 // New creates a Provisioner targeting the given homeDir and dataDir.
 func New(homeDir, dataDir string) *Provisioner {
-	if homeDir == "" {
-		homeDir = os.Getenv("HOME")
-		if homeDir == "" {
-			var err error
-			homeDir, err = os.UserHomeDir()
-			if err != nil || homeDir == "" {
-				homeDir = "/root"
-			}
-		}
-	}
-	if dataDir == "" {
-		dataDir = "/data"
-	}
 	return &Provisioner{
-		homeDir:                homeDir,
-		dataDir:                dataDir,
+		homeDir:                strings.TrimSpace(homeDir),
+		dataDir:                strings.TrimSpace(dataDir),
 		customSkillsDir:        "/share/aerial-config/custom-skills",
 		superpowersDir:         "/opt/superpowers/skills",
 		agentsSkillsDir:        "/app/.agents/skills",
@@ -52,8 +40,10 @@ func New(homeDir, dataDir string) *Provisioner {
 
 // NewFromConfig creates a Provisioner using the directories configured in cfg.
 func NewFromConfig(cfg *config.Config) *Provisioner {
-	cur := cfg.Current()
-	return New(cur.GeminiHomeDir, cur.DataDir)
+	if cfg == nil {
+		return New("", "")
+	}
+	return New(cfg.GeminiHomeDir(), cfg.DataDir())
 }
 
 // SetCustomSkillsDir sets the search path for custom user skills.
@@ -88,6 +78,9 @@ func (p *Provisioner) DataDir() string {
 
 // Sync provisions all runtime requirements into ~/.gemini based on current configuration.
 func (p *Provisioner) Sync(ctx context.Context, cfg *config.Config) error {
+	if p == nil || p.homeDir == "" {
+		return nil
+	}
 	var cur *config.ConfigData
 	if cfg != nil {
 		cur = cfg.Current()
