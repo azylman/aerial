@@ -262,7 +262,14 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 	}
 	if cfg.RunnerWithOptionsFunc == nil && cfg.RunnerFunc != nil {
 		cfg.RunnerWithOptionsFunc = func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
-			return cfg.RunnerFunc(ctx, agyBin, prompt, sessionID, apiKey, model, opts.TimeoutMinutes)
+			timeoutMins := int(opts.InactivityTimeout / time.Minute)
+			if timeoutMins <= 0 {
+				timeoutMins = int(opts.MaxDuration / time.Minute)
+			}
+			if timeoutMins <= 0 {
+				timeoutMins = cfg.TimeoutMinutes
+			}
+			return cfg.RunnerFunc(ctx, agyBin, prompt, sessionID, apiKey, model, timeoutMins)
 		}
 	} else if cfg.RunnerFunc == nil && cfg.RunnerWithOptionsFunc != nil {
 		cfg.RunnerFunc = func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
