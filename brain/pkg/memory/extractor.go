@@ -19,8 +19,24 @@ import (
 type LLMClientFunc func(ctx context.Context, prompt string) (string, error)
 
 var (
-	extractionMutex sync.Mutex
+	extractionMutex       sync.Mutex
+	transcriptRootsMu     sync.RWMutex
+	customTranscriptRoots []string
 )
+
+// SetCustomTranscriptRoots sets custom roots to search for transcripts (for testing or custom mount paths).
+// Returns a cleanup function that restores the previous roots.
+func SetCustomTranscriptRoots(roots []string) func() {
+	transcriptRootsMu.Lock()
+	orig := customTranscriptRoots
+	customTranscriptRoots = roots
+	transcriptRootsMu.Unlock()
+	return func() {
+		transcriptRootsMu.Lock()
+		customTranscriptRoots = orig
+		transcriptRootsMu.Unlock()
+	}
+}
 
 type ExtractedFactItem struct {
 	Category   string  `json:"category"`
@@ -293,15 +309,25 @@ func processThreadFacts(ctx context.Context, database any, client *Client, llmFu
 }
 
 func loadThreadTranscript(database any, threadID string) (string, error) {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		homeDir = "/root"
+	transcriptRootsMu.RLock()
+	var roots []string
+	if len(customTranscriptRoots) > 0 {
+		roots = make([]string, len(customTranscriptRoots))
+		copy(roots, customTranscriptRoots)
 	}
+	transcriptRootsMu.RUnlock()
 
-	roots := []string{
-		"/data/brain",
-		filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain"),
-		filepath.Join(homeDir, ".gemini", "antigravity", "brain"),
+	if len(roots) == 0 {
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			homeDir = "/root"
+		}
+
+		roots = []string{
+			"/data/brain",
+			filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain"),
+			filepath.Join(homeDir, ".gemini", "antigravity", "brain"),
+		}
 	}
 
 	idCandidates := []string{threadID}

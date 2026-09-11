@@ -2008,6 +2008,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 
 				// Mark all messages in the burst as completed with unpacked clean text
 				metrics.RecordTurnCompleted("success", triggerType, currentModel, time.Since(execStart))
+				metrics.RecordTokens(currentModel, resp.Usage.InputTokens, resp.Usage.OutputTokens, resp.Usage.ThinkingTokens, resp.Usage.CacheReadTokens, resp.Usage.TotalTokens)
 				for _, m := range burst {
 					_ = db.UpdateMessageCompleted(p.cfg.DB, m.ID, cleanText)
 					if m.ScheduleRunID != "" {

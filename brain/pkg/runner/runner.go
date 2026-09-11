@@ -17,7 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/azylman/aerial/brain/pkg/config"
+	"github.com/azylman/aerial/brain/pkg/env"
 	"github.com/azylman/aerial/brain/pkg/metrics"
 	"github.com/azylman/aerial/brain/pkg/session"
 )
@@ -431,19 +431,19 @@ func RunAgyWithWatchdog(parentCtx context.Context, agyBin, prompt, sessionID, ap
 		cmd.Dir = "."
 	}
 	cmd.Stdin = strings.NewReader("")
-	env := append(cmd.Environ(),
+	cmdEnv := append(cmd.Environ(),
 		"GIT_TERMINAL_PROMPT=0",
 		"AGY_LOG_LEVEL=debug",
 		"ANTIGRAVITY_LOG_LEVEL=debug",
 	)
 	if apiKey != "" {
-		env = append(env,
+		cmdEnv = append(cmdEnv,
 			"GEMINI_API_KEY="+apiKey,
 			"ANTIGRAVITY_API_KEY="+apiKey,
 			"GOOGLE_GENAI_API_KEY="+apiKey,
 		)
 	}
-	cmd.Env = env
+	cmd.Env = cmdEnv
 
 	var outBuf bytes.Buffer
 	actWriter := NewActivityWriter(sessionID)
@@ -454,7 +454,7 @@ func RunAgyWithWatchdog(parentCtx context.Context, agyBin, prompt, sessionID, ap
 	configureSysProcAttr(cmd)
 
 	// Pre-flight: ensure settings.json matches authentication mode prior to executing agy
-	_ = config.EnsureAgySettings(apiKey, model)
+	_ = env.EnsureAgySettings(apiKey, model)
 
 	if startErr := cmd.Start(); startErr != nil {
 		return "", actWriter.String(), -1, startErr
@@ -554,7 +554,7 @@ func RunAgyWithWatchdog(parentCtx context.Context, agyBin, prompt, sessionID, ap
 		}
 		err = runErr
 		if strings.Contains(strings.ToLower(stderr), "modelprovider is set to \"gemini\"") && apiKey == "" {
-			_ = config.EnsureAgySettings("", model)
+			_ = env.EnsureAgySettings("", model)
 		}
 	} else {
 		exitCode = 0

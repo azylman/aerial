@@ -789,15 +789,19 @@ func TestSetupBrainMux_And_Endpoints(t *testing.T) {
 }
 
 func TestInitializeBrainEnvironment_And_Config(t *testing.T) {
+	tmpHome := t.TempDir()
+	tmpData := t.TempDir()
 	cfg := config.NewTestConfig(func(d *config.ConfigData) {
 		d.Model = "gemini-2.5-flash"
+		d.GeminiHomeDir = tmpHome
+		d.DataDir = tmpData
 	})
 	if cfg.Current().Model != "gemini-2.5-flash" {
 		t.Errorf("Unexpected model in config: %s", cfg.Current().Model)
 	}
 
-	InitializeBrainEnvironment("", "gemini-2.5-flash", "test prompt")
-	InitializeBrainEnvironment("test-api-key", "gemini-2.5-flash", "test prompt")
+	ctx := context.Background()
+	_ = InitializeBrainEnvironment(ctx, cfg)
 
 	reloadFn := CreateReloadConfigFunc(cfg, WithSkipEnvironmentSync())
 	reloadFn("UnitTest")
@@ -1062,9 +1066,13 @@ func TestHandleTasks_GranularErrors(t *testing.T) {
 
 func TestInitializeBrainEnvironment_DataSymlink(t *testing.T) {
 	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	tmpData := t.TempDir()
+	cfg := config.NewTestConfig(func(d *config.ConfigData) {
+		d.GeminiHomeDir = tmpHome
+		d.DataDir = tmpData
+	})
 
-	InitializeBrainEnvironment("", "gemini-2.5-flash", "test-prompt")
+	_ = InitializeBrainEnvironment(context.Background(), cfg)
 }
 
 func TestCreateReloadConfigFunc_InvalidYAMLAndAlert(t *testing.T) {
@@ -1305,31 +1313,39 @@ func TestRunBrainApp_DetailedOptions(t *testing.T) {
 func TestInitializeBrainEnvironment_Complete(t *testing.T) {
 	// 1. Success with temporary HOME directory
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+	tmpData := t.TempDir()
 
-	mcpFile := filepath.Join(tmpDir, ".gemini", "antigravity", "mcp_config.json")
-	_ = os.MkdirAll(filepath.Dir(mcpFile), 0755)
-	_ = os.WriteFile(mcpFile, []byte(`{"test-server":{"command":"echo"}}`), 0644)
+	cfg := config.NewTestConfig(func(d *config.ConfigData) {
+		d.GeminiHomeDir = tmpDir
+		d.DataDir = tmpData
+		d.APIKey = "test-api-key"
+		d.Model = "gemini-2.5-flash"
+		d.SystemPrompt = "test prompt"
+	})
 
-	InitializeBrainEnvironment("test-api-key", "gemini-2.5-flash", "test prompt")
+	_ = InitializeBrainEnvironment(context.Background(), cfg)
 
 	// 2. Call again when directory already exists
-	InitializeBrainEnvironment("test-api-key", "gemini-2.5-flash", "test prompt")
+	_ = InitializeBrainEnvironment(context.Background(), cfg)
 
 	// 3. Error branches with uncreatable path
-	t.Setenv("HOME", "/proc/nonexistent")
-	InitializeBrainEnvironment("test-api-key", "gemini-2.5-flash", "test prompt")
+	badCfg := config.NewTestConfig(func(d *config.ConfigData) {
+		d.GeminiHomeDir = filepath.Join(tmpDir, "nonexistent", "sub", "dir", "invalid")
+		d.DataDir = tmpData
+		d.APIKey = "test-api-key"
+		d.Model = "gemini-2.5-flash"
+		d.SystemPrompt = "test prompt"
+	})
+	_ = InitializeBrainEnvironment(context.Background(), badCfg)
 }
 
 func TestCreateReloadConfigFunc_Complete(t *testing.T) {
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-
-	mcpFile := filepath.Join(tmpDir, ".gemini", "antigravity", "mcp_config.json")
-	_ = os.MkdirAll(filepath.Dir(mcpFile), 0755)
-	_ = os.WriteFile(mcpFile, []byte(`{"mcp-server":{"command":"echo"}}`), 0644)
+	tmpData := t.TempDir()
 
 	cfg := config.NewTestConfig(func(d *config.ConfigData) {
+		d.GeminiHomeDir = tmpDir
+		d.DataDir = tmpData
 		d.Model = "gemini-2.5-flash"
 		d.APIKey = "test-api-key"
 		d.SystemPrompt = "test system prompt"
@@ -1345,7 +1361,10 @@ func TestCreateReloadConfigFunc_Complete(t *testing.T) {
 	// Trigger error branches with invalid home
 	blockerHome := filepath.Join(tmpDir, "blocked_home")
 	_ = os.WriteFile(blockerHome, []byte("file"), 0644)
-	t.Setenv("HOME", filepath.Join(blockerHome, "sub"))
+	cfg.Update(&config.ConfigData{
+		GeminiHomeDir: filepath.Join(blockerHome, "sub"),
+		DataDir:       tmpData,
+	})
 	reloadFn("TestErrorSource")
 }
 

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sort"
@@ -25,6 +26,7 @@ import (
 	"github.com/azylman/aerial/brain/pkg/db"
 	"github.com/azylman/aerial/brain/pkg/delivery"
 	"github.com/azylman/aerial/brain/pkg/memory"
+	"github.com/azylman/aerial/brain/pkg/metrics"
 	"github.com/azylman/aerial/brain/pkg/notifier"
 	"github.com/azylman/aerial/brain/pkg/session"
 	"github.com/bwmarrin/discordgo"
@@ -8275,3 +8277,62 @@ func TestWorkerPool_EffortRouting(t *testing.T) {
 		t.Errorf("Expected schedule run low model to be 'claude-sonnet-4-6-thinking', got %+v", runsLow)
 	}
 }
+
+func TestProcessBurst_RecordsTokensTelemetry(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	customModel := "test-token-model"
+	mockOutput := `{"conversation_id":"c1111111-1111-2222-3333-444444444444","status":"SUCCESS","response":"Done!","usage":{"input_tokens":150,"output_tokens":75,"thinking_tokens":30,"cache_read_tokens":10,"total_tokens":265}}`
+
+	pool := New(nil, WorkerPoolConfig{
+		DB:    database,
+		Model: customModel,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			return mockOutput, "", 0, nil
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	threadID := "chan-token-test-1"
+	t0 := time.Now().UTC()
+	msg := db.Message{
+		ID:        "msg-token-1",
+		ThreadID:  threadID,
+		Content:   "Aerial Question Token Test",
+		Status:    db.StatusPending,
+		CreatedAt: t0,
+		UpdatedAt: t0,
+	}
+	_ = db.InsertMessage(database, msg)
+
+	pool.processBurst([]db.Message{msg})
+
+	// Query metrics registry
+	handler := metrics.Handler()
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, `aerial_brain_tokens_total{model="test-token-model",type="total"} 265`) {
+		t.Errorf("expected total tokens 265 for test-token-model, got metrics body: %s", body)
+	}
+	if !strings.Contains(body, `aerial_brain_tokens_total{model="test-token-model",type="input"} 150`) {
+		t.Errorf("expected input tokens 150 for test-token-model, got metrics body: %s", body)
+	}
+	if !strings.Contains(body, `aerial_brain_tokens_total{model="test-token-model",type="output"} 75`) {
+		t.Errorf("expected output tokens 75 for test-token-model, got metrics body: %s", body)
+	}
+	if !strings.Contains(body, `aerial_brain_tokens_total{model="test-token-model",type="thinking"} 30`) {
+		t.Errorf("expected thinking tokens 30 for test-token-model, got metrics body: %s", body)
+	}
+	if !strings.Contains(body, `aerial_brain_tokens_total{model="test-token-model",type="cache_read"} 10`) {
+		t.Errorf("expected cache_read tokens 10 for test-token-model, got metrics body: %s", body)
+	}
+}
+

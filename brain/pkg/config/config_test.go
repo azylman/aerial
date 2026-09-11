@@ -25,454 +25,13 @@ func TestGetEnv(t *testing.T) {
 	}
 }
 
-func TestEnsureAgySettingsAndRules(t *testing.T) {
-	tmpDir := t.TempDir()
-	_ = os.Setenv("HOME", tmpDir)
-
-	// Test with API key
-	if err := EnsureAgySettings("test_key", "test_model"); err != nil {
-		t.Fatalf("EnsureAgySettings failed: %v", err)
-	}
-
-	settingsFile := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "settings.json")
-	data, err := os.ReadFile(settingsFile)
-	if err != nil {
-		t.Fatalf("Expected settings.json to exist at %s: %v", settingsFile, err)
-	}
-	var parsedSettings map[string]interface{}
-	if err := json.Unmarshal(data, &parsedSettings); err != nil {
-		t.Fatalf("Failed to parse settings: %v", err)
-	}
-	if parsedSettings["modelProvider"] != "gemini" {
-		t.Errorf("Expected modelProvider=gemini with apiKey, got %v", parsedSettings["modelProvider"])
-	}
-
-	// Test without API key (OAuth mode)
-	if err := EnsureAgySettings("", "test_model_oauth"); err != nil {
-		t.Fatalf("EnsureAgySettings failed without apiKey: %v", err)
-	}
-	data, err = os.ReadFile(settingsFile)
-	if err != nil {
-		t.Fatalf("Failed to read settings: %v", err)
-	}
-	parsedSettings = nil
-	if err := json.Unmarshal(data, &parsedSettings); err != nil {
-		t.Fatalf("Failed to parse settings: %v", err)
-	}
-	if _, ok := parsedSettings["modelProvider"]; ok {
-		t.Errorf("Expected modelProvider to be deleted when apiKey is empty, but found: %v", parsedSettings["modelProvider"])
-	}
-	if parsedSettings["model"] != "test_model_oauth" {
-		t.Errorf("Expected model=test_model_oauth, got %v", parsedSettings["model"])
-	}
-
-	if err := EnsureSystemRules("test custom prompt"); err != nil {
-		t.Fatalf("EnsureSystemRules failed: %v", err)
-	}
-
-	personaFile := filepath.Join(tmpDir, ".gemini", "rules", "user_persona.md")
-	personaData, err := os.ReadFile(personaFile)
-	if err != nil {
-		t.Fatalf("Expected user_persona.md to exist at %s: %v", personaFile, err)
-	}
-	expectedFrontmatter := "---\ndescription: User persona, tone, and identity overrides\ntrigger: always_on\n---"
-	if !strings.Contains(string(personaData), expectedFrontmatter) {
-		t.Errorf("Expected frontmatter %q in %s, got:\n%s", expectedFrontmatter, personaFile, string(personaData))
-	}
-
-	oldRulesFile := filepath.Join(tmpDir, ".gemini", "rules", "system_instructions.md")
-	if _, err := os.Stat(oldRulesFile); !os.IsNotExist(err) {
-		t.Errorf("Expected system_instructions.md to not exist at %s", oldRulesFile)
-	}
-}
-
-func TestEnsureMcpConfigAndLoad(t *testing.T) {
-	tmpDir := t.TempDir()
-	_ = os.Setenv("HOME", tmpDir)
-
-	rawJSON := json.RawMessage(`{"mcpServers": {"test": {"serverUrl": "http://localhost:1234"}}}`)
-	if err := EnsureMcpConfig(rawJSON); err != nil {
-		t.Fatalf("EnsureMcpConfig failed: %v", err)
-	}
-
-	cfgFile := filepath.Join(tmpDir, ".gemini", "config", "mcp_config.json")
-	if _, err := os.Stat(cfgFile); err != nil {
-		t.Errorf("Expected mcp_config.json to exist at %s", cfgFile)
-	}
-
-	mcpCfg := LoadMCPConfig()
-	if len(mcpCfg) == 0 {
-		t.Error("Expected non-empty MCP config")
-	}
-}
-
-func TestEnsureConfigErrorCases(t *testing.T) {
-	// Test empty or nil configs return nil without error
-	if err := EnsureAgySettings("", ""); err != nil {
-		t.Errorf("Expected nil error for empty apiKey, got %v", err)
-	}
-	if err := EnsureSystemRules(""); err != nil {
-		t.Errorf("Expected nil error for empty customPrompt, got %v", err)
-	}
-	if err := EnsureMcpConfig(nil); err != nil {
-		t.Errorf("Expected nil error for nil mcpConfig, got %v", err)
-	}
-	if err := EnsureMcpConfig(json.RawMessage(`""`)); err != nil {
-		t.Errorf("Expected nil error for empty raw string, got %v", err)
-	}
-
-	// Test unwritable directory
-	blockerHome := filepath.Join(t.TempDir(), "blocker_home")
-	_ = os.WriteFile(blockerHome, []byte("file"), 0644)
-	_ = os.Setenv("HOME", filepath.Join(blockerHome, "sub"))
-	if err := EnsureAgySettings("key", "model"); err == nil {
-		t.Error("Expected error when writing settings to uncreated directory, got nil")
-	}
-	if err := EnsureSystemRules("prompt"); err == nil {
-		t.Error("Expected error when writing rules to uncreated directory, got nil")
-	}
-	if err := EnsureMcpConfig(json.RawMessage(`{"test":1}`)); err == nil {
-		t.Error("Expected error when writing mcp config to uncreated directory, got nil")
-	}
-}
-
-func TestEnsureSystemRules_LKGCAndOrdering(t *testing.T) {
-	tmpDir := t.TempDir()
-	_ = os.Setenv("HOME", tmpDir)
-
-	oldSys := SystemGuidelinesSearchPaths
-	oldAgent := AgentInstructionsSearchPaths
-	SystemGuidelinesSearchPaths = []string{filepath.Join(tmpDir, "non_existent_system.md")}
-	AgentInstructionsSearchPaths = []string{filepath.Join(tmpDir, "non_existent_agents.md")}
-	defer func() {
-		SystemGuidelinesSearchPaths = oldSys
-		AgentInstructionsSearchPaths = oldAgent
-	}()
-
-	// Test writing initial instructions
-	if err := EnsureSystemRules("initial instructions prompt"); err != nil {
-		t.Fatalf("EnsureSystemRules failed: %v", err)
-	}
-
-	personaFile := filepath.Join(tmpDir, ".gemini", "rules", "user_persona.md")
-	data, err := os.ReadFile(personaFile)
-	if err != nil {
-		t.Fatalf("Failed to read generated persona: %v", err)
-	}
-	expectedFrontmatter := "---\ndescription: User persona, tone, and identity overrides\ntrigger: always_on\n---"
-	if !strings.Contains(string(data), expectedFrontmatter) {
-		t.Errorf("Expected frontmatter %q, got:\n%s", expectedFrontmatter, string(data))
-	}
-	if !strings.Contains(string(data), "initial instructions prompt") {
-		t.Errorf("Expected persona to contain 'initial instructions prompt', got: %s", string(data))
-	}
-
-	oldRulesFile := filepath.Join(tmpDir, ".gemini", "rules", "system_instructions.md")
-	if _, err := os.Stat(oldRulesFile); !os.IsNotExist(err) {
-		t.Errorf("Expected system_instructions.md to not exist at %s", oldRulesFile)
-	}
-
-	// Test LKGC fallback when calling with empty prompt and no files
-	if err := EnsureSystemRules(""); err != nil {
-		t.Fatalf("EnsureSystemRules with LKGC failed: %v", err)
-	}
-
-	dataAfter, err := os.ReadFile(personaFile)
-	if err != nil {
-		t.Fatalf("Failed to read persona after LKGC fallback: %v", err)
-	}
-	if !strings.Contains(string(dataAfter), "initial instructions prompt") {
-		t.Errorf("Expected persona to retain LKGC 'initial instructions prompt', got: %s", string(dataAfter))
-	}
-	if _, err := os.Stat(oldRulesFile); !os.IsNotExist(err) {
-		t.Errorf("Expected system_instructions.md to still not exist at %s after LKGC fallback", oldRulesFile)
-	}
-}
-
-func TestEnsureSystemRules_PersonaCompilation(t *testing.T) {
-	tmpDir := t.TempDir()
-	_ = os.Setenv("HOME", tmpDir)
-
-	agentsFile := filepath.Join(tmpDir, "AGENTS.md")
-	geminiFile := filepath.Join(tmpDir, "GEMINI.md")
-
-	agentsContent := "You are Aerial, a helpful personal AI assistant."
-	geminiContent := "CRITICAL SYSTEM INVARIANT: DO NOT CONCATENATE ME DIRECTLY"
-
-	if err := os.WriteFile(agentsFile, []byte(agentsContent), 0644); err != nil {
-		t.Fatalf("Failed to write test AGENTS.md: %v", err)
-	}
-	if err := os.WriteFile(geminiFile, []byte(geminiContent), 0644); err != nil {
-		t.Fatalf("Failed to write test GEMINI.md: %v", err)
-	}
-
-	oldAgents := AgentInstructionsSearchPaths
-	oldSys := SystemGuidelinesSearchPaths
-	AgentInstructionsSearchPaths = []string{agentsFile}
-	SystemGuidelinesSearchPaths = []string{geminiFile}
-	defer func() {
-		AgentInstructionsSearchPaths = oldAgents
-		SystemGuidelinesSearchPaths = oldSys
-	}()
-
-	if err := EnsureSystemRules("custom runtime prompt"); err != nil {
-		t.Fatalf("EnsureSystemRules failed: %v", err)
-	}
-
-	personaFile := filepath.Join(tmpDir, ".gemini", "rules", "user_persona.md")
-	data, err := os.ReadFile(personaFile)
-	if err != nil {
-		t.Fatalf("Expected user_persona.md to exist: %v", err)
-	}
-
-	content := string(data)
-
-	expectedFrontmatter := "---\ndescription: User persona, tone, and identity overrides\ntrigger: always_on\n---"
-	if !strings.Contains(content, expectedFrontmatter) {
-		t.Errorf("Expected frontmatter %q, got:\n%s", expectedFrontmatter, content)
-	}
-
-	if !strings.Contains(content, "# User Persona Overrides (AGENTS.md)") {
-		t.Errorf("Expected '# User Persona Overrides (AGENTS.md)', got:\n%s", content)
-	}
-	if !strings.Contains(content, agentsContent) {
-		t.Errorf("Expected AGENTS.md content %q in persona, got:\n%s", agentsContent, content)
-	}
-	if !strings.Contains(content, "# Environment Prompt Override") {
-		t.Errorf("Expected '# Environment Prompt Override', got:\n%s", content)
-	}
-	if !strings.Contains(content, "custom runtime prompt") {
-		t.Errorf("Expected 'custom runtime prompt' in persona, got:\n%s", content)
-	}
-
-	// Must NOT concatenate GEMINI.md
-	if strings.Contains(content, geminiContent) {
-		t.Errorf("Expected user_persona.md NOT to contain GEMINI.md content, but found: %s", content)
-	}
-	if strings.Contains(content, "Base System Guidelines") {
-		t.Errorf("Expected user_persona.md NOT to contain 'Base System Guidelines', but found: %s", content)
-	}
-
-	// system_instructions.md must not exist
-	staleFile := filepath.Join(tmpDir, ".gemini", "rules", "system_instructions.md")
-	if _, err := os.Stat(staleFile); !os.IsNotExist(err) {
-		t.Errorf("Expected system_instructions.md to not exist")
-	}
-
-	// Check compatibility copy in ~/.gemini/config/rules/user_persona.md
-	configPersonaFile := filepath.Join(tmpDir, ".gemini", "config", "rules", "user_persona.md")
-	configData, err := os.ReadFile(configPersonaFile)
-	if err != nil {
-		t.Fatalf("Expected config copy user_persona.md to exist: %v", err)
-	}
-	if string(configData) != content {
-		t.Errorf("Expected config copy to match primary rule content")
-	}
-}
-
-func TestEnsureSystemRules_LKGCProtectionOnTornRead(t *testing.T) {
-	tmpDir := t.TempDir()
-	_ = os.Setenv("HOME", tmpDir)
-
-	primaryAgents := filepath.Join(tmpDir, "primary_AGENTS.md")
-	secondaryAgents := filepath.Join(tmpDir, "secondary_AGENTS.md")
-
-	initialValidPersona := "Persona v1: You are a sharp and succinct engineer."
-	fallbackPersona := "GENERIC FALLBACK THAT SHOULD NEVER BE REACHED"
-
-	if err := os.WriteFile(primaryAgents, []byte(initialValidPersona), 0644); err != nil {
-		t.Fatalf("Failed to write primary AGENTS.md: %v", err)
-	}
-	if err := os.WriteFile(secondaryAgents, []byte(fallbackPersona), 0644); err != nil {
-		t.Fatalf("Failed to write secondary AGENTS.md: %v", err)
-	}
-
-	oldAgents := AgentInstructionsSearchPaths
-	AgentInstructionsSearchPaths = []string{primaryAgents, secondaryAgents}
-	defer func() {
-		AgentInstructionsSearchPaths = oldAgents
-	}()
-
-	// 1. Initial valid load
-	if err := EnsureSystemRules(""); err != nil {
-		t.Fatalf("Initial EnsureSystemRules failed: %v", err)
-	}
-
-	personaFile := filepath.Join(tmpDir, ".gemini", "rules", "user_persona.md")
-	data, err := os.ReadFile(personaFile)
-	if err != nil {
-		t.Fatalf("Failed to read user_persona.md: %v", err)
-	}
-	if !strings.Contains(string(data), initialValidPersona) {
-		t.Fatalf("Expected %q in user_persona.md", initialValidPersona)
-	}
-	if lastKnownGoodPersona != initialValidPersona {
-		t.Fatalf("Expected lastKnownGoodPersona to be %q, got %q", initialValidPersona, lastKnownGoodPersona)
-	}
-
-	// 2. Simulate 0-byte torn read of AGENTS.md (without customPrompt)
-	if err := os.WriteFile(primaryAgents, []byte(""), 0644); err != nil {
-		t.Fatalf("Failed to simulate 0-byte file: %v", err)
-	}
-
-	if err := EnsureSystemRules(""); err != nil {
-		t.Fatalf("EnsureSystemRules on 0-byte read failed: %v", err)
-	}
-
-	data, err = os.ReadFile(personaFile)
-	if err != nil {
-		t.Fatalf("Failed to read user_persona.md after 0-byte read: %v", err)
-	}
-	if !strings.Contains(string(data), initialValidPersona) {
-		t.Errorf("Expected user_persona.md to retain LKGC persona after 0-byte read, got:\n%s", string(data))
-	}
-	if strings.Contains(string(data), fallbackPersona) {
-		t.Errorf("Torn read must NOT fall through to secondary fallback search paths")
-	}
-	if lastKnownGoodPersona != initialValidPersona {
-		t.Errorf("Expected lastKnownGoodPersona to remain %q, got %q", initialValidPersona, lastKnownGoodPersona)
-	}
-
-	// 3. Simulate whitespace-only torn read of AGENTS.md (WITH customPrompt)
-	if err := os.WriteFile(primaryAgents, []byte("   \n\t  \n  "), 0644); err != nil {
-		t.Fatalf("Failed to simulate whitespace-only file: %v", err)
-	}
-
-	if err := EnsureSystemRules("special custom prompt"); err != nil {
-		t.Fatalf("EnsureSystemRules on whitespace read with customPrompt failed: %v", err)
-	}
-
-	data, err = os.ReadFile(personaFile)
-	if err != nil {
-		t.Fatalf("Failed to read user_persona.md after whitespace read: %v", err)
-	}
-	if !strings.Contains(string(data), initialValidPersona) {
-		t.Errorf("Expected user_persona.md to retain LKGC persona after whitespace read, got:\n%s", string(data))
-	}
-	if !strings.Contains(string(data), "special custom prompt") {
-		t.Errorf("Expected user_persona.md to contain 'special custom prompt', got:\n%s", string(data))
-	}
-	if strings.Contains(string(data), fallbackPersona) {
-		t.Errorf("Whitespace torn read must NOT fall through to secondary fallback search paths")
-	}
-	if lastKnownGoodPersona != initialValidPersona {
-		t.Errorf("Expected lastKnownGoodPersona to remain %q, got %q", initialValidPersona, lastKnownGoodPersona)
-	}
-}
-
-func TestEnsureSystemRules_StaleRuleCleanup(t *testing.T) {
-	tmpDir := t.TempDir()
-	_ = os.Setenv("HOME", tmpDir)
-
-	primaryRulesDir := filepath.Join(tmpDir, ".gemini", "rules")
-	configRulesDir := filepath.Join(tmpDir, ".gemini", "config", "rules")
-
-	if err := os.MkdirAll(primaryRulesDir, 0755); err != nil {
-		t.Fatalf("Failed to create primaryRulesDir: %v", err)
-	}
-	if err := os.MkdirAll(configRulesDir, 0755); err != nil {
-		t.Fatalf("Failed to create configRulesDir: %v", err)
-	}
-
-	staleFiles := []string{
-		filepath.Join(primaryRulesDir, "system_instructions.md"),
-		filepath.Join(primaryRulesDir, "SYSTEM_INSTRUCTIONS.md"),
-		filepath.Join(primaryRulesDir, "system.md"),
-		filepath.Join(primaryRulesDir, "SYSTEM.md"),
-		filepath.Join(primaryRulesDir, "gemini.md"),
-		filepath.Join(primaryRulesDir, "GEMINI.md"),
-		filepath.Join(primaryRulesDir, "agents.md"),
-		filepath.Join(primaryRulesDir, "custom_instructions.md"),
-
-		filepath.Join(configRulesDir, "system_instructions.md"),
-		filepath.Join(configRulesDir, "SYSTEM_INSTRUCTIONS.md"),
-		filepath.Join(configRulesDir, "system.md"),
-		filepath.Join(configRulesDir, "SYSTEM.md"),
-		filepath.Join(configRulesDir, "gemini.md"),
-		filepath.Join(configRulesDir, "GEMINI.md"),
-		filepath.Join(configRulesDir, "agents.md"),
-		filepath.Join(configRulesDir, "custom_instructions.md"),
-	}
-
-	for _, sf := range staleFiles {
-		if err := os.WriteFile(sf, []byte("stale legacy rule content"), 0644); err != nil {
-			t.Fatalf("Failed to write stale file %s: %v", sf, err)
-		}
-	}
-
-	if err := EnsureSystemRules("valid active prompt"); err != nil {
-		t.Fatalf("EnsureSystemRules failed: %v", err)
-	}
-
-	for _, sf := range staleFiles {
-		if _, err := os.Stat(sf); !os.IsNotExist(err) {
-			t.Errorf("Expected stale rule file %s to be removed, but it still exists", sf)
-		}
-	}
-
-	primaryPersona := filepath.Join(primaryRulesDir, "user_persona.md")
-	if _, err := os.Stat(primaryPersona); err != nil {
-		t.Errorf("Expected primary user_persona.md to exist: %v", err)
-	}
-	configPersona := filepath.Join(configRulesDir, "user_persona.md")
-	if _, err := os.Stat(configPersona); err != nil {
-		t.Errorf("Expected config user_persona.md to exist: %v", err)
-	}
-}
-
-func TestEnsureSystemRules_ConcurrentReload(t *testing.T) {
-	tmpDir := t.TempDir()
-	_ = os.Setenv("HOME", tmpDir)
-
-	agentsFile := filepath.Join(tmpDir, "AGENTS.md")
-	if err := os.WriteFile(agentsFile, []byte("Concurrent reload persona"), 0644); err != nil {
-		t.Fatalf("Failed to write AGENTS.md: %v", err)
-	}
-
-	oldAgents := AgentInstructionsSearchPaths
-	AgentInstructionsSearchPaths = []string{agentsFile}
-	defer func() {
-		AgentInstructionsSearchPaths = oldAgents
-	}()
-
-	var wg sync.WaitGroup
-	errCh := make(chan error, 10)
-
-	for i := 0; i < 10; i++ {
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
-			prompt := fmt.Sprintf("concurrent prompt iteration %d", idx)
-			if err := EnsureSystemRules(prompt); err != nil {
-				errCh <- fmt.Errorf("goroutine %d failed: %w", idx, err)
-			}
-		}(i)
-	}
-
-	wg.Wait()
-	close(errCh)
-
-	for err := range errCh {
-		t.Errorf("Concurrent reload error: %v", err)
-	}
-
-	personaFile := filepath.Join(tmpDir, ".gemini", "rules", "user_persona.md")
-	data, err := os.ReadFile(personaFile)
-	if err != nil {
-		t.Fatalf("Expected user_persona.md to exist after concurrent reload: %v", err)
-	}
-	if !strings.Contains(string(data), "Concurrent reload persona") {
-		t.Errorf("Expected persona content in user_persona.md")
-	}
-}
-
-func TestWriteAtomic(t *testing.T) {
+func TestWriteAtomicFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	targetFile := filepath.Join(tmpDir, "sub", "config.json")
 
 	content1 := `{"version": 1}`
-	if err := writeAtomic(targetFile, content1); err != nil {
-		t.Fatalf("writeAtomic failed: %v", err)
+	if err := writeAtomicFile(targetFile, content1); err != nil {
+		t.Fatalf("writeAtomicFile failed: %v", err)
 	}
 
 	data, err := os.ReadFile(targetFile)
@@ -485,8 +44,8 @@ func TestWriteAtomic(t *testing.T) {
 
 	// Test overwriting
 	content2 := `{"version": 2}`
-	if err := writeAtomic(targetFile, content2); err != nil {
-		t.Fatalf("writeAtomic overwrite failed: %v", err)
+	if err := writeAtomicFile(targetFile, content2); err != nil {
+		t.Fatalf("writeAtomicFile overwrite failed: %v", err)
 	}
 
 	data2, err := os.ReadFile(targetFile)
@@ -680,81 +239,6 @@ func TestLoadConfigMissingFileFallbacks(t *testing.T) {
 	}
 	if cfg.Current().SystemChannel != "env-system-chan" {
 		t.Errorf("Expected fallback channel 'env-system-chan', got %q", cfg.Current().SystemChannel)
-	}
-}
-
-func TestLoadMCPConfig_MergeCustomWithDefaults(t *testing.T) {
-	// Set custom mcp_servers in runtime config
-	activeGlobalConfig.update(&ConfigData{
-		Model: "Gemini 3.6 Flash (Low)",
-		McpServers: map[string]json.RawMessage{
-			"brave-search": json.RawMessage(`{"serverUrl":"http://brave-mcp:4005/mcp"}`),
-			"custom-api":   json.RawMessage(`{"serverUrl":"https://mcp.example.com/mcp","headers":{"Authorization":"Bearer secret123"}}`),
-		},
-	})
-
-	raw := LoadMCPConfig()
-	var res struct {
-		McpServers map[string]interface{} `json:"mcpServers"`
-	}
-	if err := json.Unmarshal(raw, &res); err != nil {
-		t.Fatalf("Failed to unmarshal LoadMCPConfig output: %v", err)
-	}
-
-	// Must contain default servers
-	if _, ok := res.McpServers["discord"]; !ok {
-		t.Errorf("Expected built-in 'discord' server in merged config")
-	}
-	if _, ok := res.McpServers["scheduler"]; !ok {
-		t.Errorf("Expected built-in 'scheduler' server in merged config")
-	}
-	if _, ok := res.McpServers["docker"]; !ok {
-		t.Errorf("Expected built-in 'docker' server in merged config")
-	}
-	if _, ok := res.McpServers["victoriametrics"]; !ok {
-		t.Errorf("Expected built-in 'victoriametrics' server in merged config")
-	}
-
-	// Must contain custom servers
-	if _, ok := res.McpServers["brave-search"]; !ok {
-		t.Errorf("Expected custom 'brave-search' server in merged config")
-	}
-	if _, ok := res.McpServers["custom-api"]; !ok {
-		t.Errorf("Expected custom 'custom-api' server in merged config")
-	}
-}
-
-func TestLoadMCPConfig_StreamableHttpAndLegacySSENormalization(t *testing.T) {
-	t.Setenv("GITHUB_PAT", "ghp_test123456789")
-
-	// Set custom mcp_servers with legacy /sse URL in runtime config
-	activeGlobalConfig.update(&ConfigData{
-		Model: "Gemini 3.6 Flash (Low)",
-		McpServers: map[string]json.RawMessage{
-			"docker":          json.RawMessage(`{"serverUrl":"http://docker-mcp:4002/sse"}`),
-			"github":          json.RawMessage(`{"serverUrl":"http://github-mcp:4003/sse"}`),
-			"victoriametrics": json.RawMessage(`{"serverUrl":"http://victoriametrics-mcp:4004/sse"}`),
-		},
-	})
-
-	raw := LoadMCPConfig()
-	var res struct {
-		McpServers map[string]struct {
-			ServerURL string `json:"serverUrl"`
-		} `json:"mcpServers"`
-	}
-	if err := json.Unmarshal(raw, &res); err != nil {
-		t.Fatalf("Failed to unmarshal LoadMCPConfig output: %v", err)
-	}
-
-	if res.McpServers["docker"].ServerURL != "http://docker-mcp:4002/mcp" {
-		t.Errorf("Expected docker serverUrl to be normalized to http://docker-mcp:4002/mcp, got %q", res.McpServers["docker"].ServerURL)
-	}
-	if res.McpServers["github"].ServerURL != "http://github-mcp:4003/mcp" {
-		t.Errorf("Expected github serverUrl to be normalized to http://github-mcp:4003/mcp, got %q", res.McpServers["github"].ServerURL)
-	}
-	if res.McpServers["victoriametrics"].ServerURL != "http://victoriametrics-mcp:4004/mcp" {
-		t.Errorf("Expected victoriametrics serverUrl to be normalized to http://victoriametrics-mcp:4004/mcp, got %q", res.McpServers["victoriametrics"].ServerURL)
 	}
 }
 
@@ -1829,55 +1313,6 @@ func TestConfigGettersAndFallbacks(t *testing.T) {
 	_ = GetSystemChannel()
 }
 
-func TestLoadMCPConfigAndEnsure(t *testing.T) {
-	t.Setenv("GITHUB_PAT", "ghp_test12345")
-	t.Setenv("MCP_CONFIG", `{"mcpServers":{"docker":{"serverUrl":"http://docker:8080/sse"}}}`)
-
-	// Write local ./mcp.config.json to test file loading
-	mcpFile := "./mcp.config.json"
-	_ = os.WriteFile(mcpFile, []byte(`{"mcpServers":{"local_test":{"serverUrl":"http://local:8080"}}}`), 0644)
-	defer func() { _ = os.Remove(mcpFile) }()
-
-	rawMCP := LoadMCPConfig()
-	if len(rawMCP) == 0 {
-		t.Fatalf("LoadMCPConfig returned empty raw message")
-	}
-
-	var parsed map[string]map[string]map[string]interface{}
-	if err := json.Unmarshal(rawMCP, &parsed); err != nil {
-		t.Fatalf("failed to parse LoadMCPConfig: %v", err)
-	}
-
-	servers := parsed["mcpServers"]
-	if servers["github"] == nil {
-		t.Errorf("expected github mcp server present when GITHUB_PAT set")
-	}
-	if servers["local_test"] == nil {
-		t.Errorf("expected local_test mcp server from ./mcp.config.json")
-	}
-
-	// Test EnsureMcpConfig
-	if err := EnsureMcpConfig(nil); err != nil {
-		t.Errorf("EnsureMcpConfig(nil) failed: %v", err)
-	}
-	if err := EnsureMcpConfig(json.RawMessage(`""`)); err != nil {
-		t.Errorf("EnsureMcpConfig(\"\") failed: %v", err)
-	}
-	if err := EnsureMcpConfig(rawMCP); err != nil {
-		t.Errorf("EnsureMcpConfig failed: %v", err)
-	}
-
-	// Test EnsureAgySettings with and without API key
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
-	if err := EnsureAgySettings("test_key", "gemini-2.5-flash"); err != nil {
-		t.Errorf("EnsureAgySettings failed: %v", err)
-	}
-	if err := EnsureAgySettings("", "gemini-2.5-flash"); err != nil {
-		t.Errorf("EnsureAgySettings without apiKey failed: %v", err)
-	}
-}
-
 func TestConfigPolicyRawAndBotIgnored(t *testing.T) {
 	// 1. IsBotIgnored
 	var p ChannelPolicy
@@ -1917,7 +1352,7 @@ func TestConfigPolicyRawAndBotIgnored(t *testing.T) {
 
 	// Test writeAtomic
 	atomicPath := filepath.Join(t.TempDir(), "atomic_test.txt")
-	if err := writeAtomic(atomicPath, "test atomic content"); err != nil {
+	if err := writeAtomicFile(atomicPath, "test atomic content"); err != nil {
 		t.Errorf("writeAtomic failed: %v", err)
 	}
 
@@ -1962,93 +1397,6 @@ func TestConfigPolicyRawAndBotIgnored(t *testing.T) {
 		t.Errorf("expected mode 'threads', got %q", pDef.Mode)
 	}
 
-	// Test EnsureMcpConfig with string-encoded JSON
-	strEncoded := json.RawMessage(`"{\"mcpServers\":{\"s1\":{\"serverUrl\":\"http://s1\"}}}"`)
-	if err := EnsureMcpConfig(strEncoded); err != nil {
-		t.Errorf("EnsureMcpConfig with string-encoded JSON failed: %v", err)
-	}
-
-	// Test EnsureAgySettings with existing settings
-	t.Run("EnsureAgySettings_WithExistingSettings", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		t.Setenv("HOME", tmpDir)
-		settingsPath := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "settings.json")
-		_ = writeAtomic(settingsPath, `{"existingKey":"existingVal"}`)
-		if err := EnsureAgySettings("key2", "model2"); err != nil {
-			t.Errorf("EnsureAgySettings with existing settings failed: %v", err)
-		}
-	})
-
-	// Test EnsureAgySettings heals corrupted modelProvider
-	t.Run("EnsureAgySettings_HealsCorruptedModelProvider", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		t.Setenv("HOME", tmpDir)
-
-		settingsDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli")
-		if err := os.MkdirAll(settingsDir, 0755); err != nil {
-			t.Fatalf("Failed to create settings dir: %v", err)
-		}
-
-		// Corrupt settings with modelProvider: gemini but no API key present in env
-		corrupted := map[string]interface{}{
-			"model":         "old-model",
-			"modelProvider": "gemini",
-			"someOtherKey":  "preserved_value",
-		}
-		raw, _ := json.Marshal(corrupted)
-		settingsPath := filepath.Join(settingsDir, "settings.json")
-		if err := os.WriteFile(settingsPath, raw, 0644); err != nil {
-			t.Fatalf("Failed to write corrupted settings: %v", err)
-		}
-
-		// Call EnsureAgySettings in OAuth mode (empty apiKey)
-		if err := EnsureAgySettings("", "Gemini 3.7 Flash (High)"); err != nil {
-			t.Fatalf("EnsureAgySettings failed: %v", err)
-		}
-
-		data, err := os.ReadFile(settingsPath)
-		if err != nil {
-			t.Fatalf("Failed to read healed settings: %v", err)
-		}
-		var healed map[string]interface{}
-		if err := json.Unmarshal(data, &healed); err != nil {
-			t.Fatalf("Failed to parse healed settings: %v", err)
-		}
-
-		if _, ok := healed["modelProvider"]; ok {
-			t.Fatalf("Expected modelProvider to be purged by EnsureAgySettings, but it still exists: %v", healed["modelProvider"])
-		}
-		if healed["model"] != "Gemini 3.7 Flash (High)" {
-			t.Errorf("Expected model=Gemini 3.7 Flash (High), got %v", healed["model"])
-		}
-		if healed["someOtherKey"] != "preserved_value" {
-			t.Errorf("Expected other settings keys to be preserved, got %v", healed["someOtherKey"])
-		}
-	})
-
-	// Test EnsureAgySettings test isolation guard
-	t.Run("EnsureAgySettings_TestIsolationGuard", func(t *testing.T) {
-		oldHome := os.Getenv("HOME")
-		defer func() {
-			_ = os.Setenv("HOME", oldHome)
-		}()
-		_ = os.Setenv("HOME", "/root")
-
-		isolationDir := filepath.Join(os.TempDir(), "aerial-test-gemini-home")
-		_ = os.RemoveAll(isolationDir)
-		defer func() {
-			_ = os.RemoveAll(isolationDir)
-		}()
-
-		if err := EnsureAgySettings("key", "isolated-model"); err != nil {
-			t.Fatalf("EnsureAgySettings failed with isolation: %v", err)
-		}
-
-		isolatedSettings := filepath.Join(isolationDir, ".gemini", "antigravity-cli", "settings.json")
-		if _, err := os.Stat(isolatedSettings); os.IsNotExist(err) {
-			t.Errorf("Expected test isolation guard to redirect write to %s, but file does not exist", isolatedSettings)
-		}
-	})
 	// Test LoadChannelInstructions edge cases
 	t.Run("LoadChannelInstructions_EdgeCases", func(t *testing.T) {
 		tmpDir := t.TempDir()
@@ -2107,37 +1455,6 @@ ambient_wake_prompt: "Wake on high priority"
 		}
 	})
 
-	// Test EnsureAgySettings with corrupted settings file
-	t.Run("EnsureAgySettings_CorruptedSettingsFile", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		t.Setenv("HOME", tmpDir)
-		settingsPath := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "settings.json")
-		if err := os.MkdirAll(filepath.Dir(settingsPath), 0755); err != nil {
-			t.Fatalf("failed to mkdir: %v", err)
-		}
-		if err := os.WriteFile(settingsPath, []byte("NOT_JSON_CONTENT"), 0644); err != nil {
-			t.Fatalf("failed to write settings: %v", err)
-		}
-
-		if err := EnsureAgySettings("apikey123", "gemini-pro"); err != nil {
-			t.Errorf("expected EnsureAgySettings to recover from corrupted settings: %v", err)
-		}
-	})
-
-	// Test LoadMCPConfig with invalid JSON values in McpServers
-	t.Run("LoadMCPConfig_RawStringServers", func(t *testing.T) {
-		activeGlobalConfig.update(&ConfigData{
-			McpServers: map[string]json.RawMessage{
-				"raw_server": json.RawMessage(`plain_string_not_json`),
-			},
-		})
-
-		raw := LoadMCPConfig()
-		if len(raw) == 0 {
-			t.Fatalf("LoadMCPConfig returned empty")
-		}
-	})
-
 	// Test channel validation error paths in LoadConfigFromPaths
 	t.Run("LoadConfigFromPaths_ValidationErrors", func(t *testing.T) {
 		tmpDir := t.TempDir()
@@ -2175,7 +1492,7 @@ ambient_wake_prompt: "Wake on high priority"
 	t.Run("writeAtomic_Errors", func(t *testing.T) {
 		blocker := filepath.Join(t.TempDir(), "blocker_file")
 		_ = os.WriteFile(blocker, []byte("file"), 0644)
-		err := writeAtomic(filepath.Join(blocker, "forbidden", "file.txt"), "content")
+		err := writeAtomicFile(filepath.Join(blocker, "forbidden", "file.txt"), "content")
 		if err == nil {
 			t.Error("expected error for impossible writeAtomic directory")
 		}
@@ -2312,184 +1629,18 @@ func TestLoadChannelInstructions_TornReadAndHyphenation(t *testing.T) {
 	}
 }
 
-func TestIsTestEnvironment_And_GetGeminiHomeDir(t *testing.T) {
-	if !isTestEnvironment() {
-		t.Errorf("Expected isTestEnvironment()=true during tests")
-	}
-
-	// Test getGeminiHomeDir with HOME set to custom dir
+func TestGetGeminiHomeDirDefault(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
-	home := getGeminiHomeDir()
+	home := getGeminiHomeDirDefault()
 	if home != tmpDir {
 		t.Errorf("Expected home=%s, got %s", tmpDir, home)
 	}
 
-	// Test getGeminiHomeDir with HOME empty
 	t.Setenv("HOME", "")
-	homeFallback := getGeminiHomeDir()
+	homeFallback := getGeminiHomeDirDefault()
 	if homeFallback == "" {
 		t.Errorf("Expected non-empty home fallback")
-	}
-}
-
-func TestEnsureAgySettings_CorruptedJSONAndWriteError(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-
-	settingsDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli")
-	_ = os.MkdirAll(settingsDir, 0755)
-	settingsFile := filepath.Join(settingsDir, "settings.json")
-	_ = os.WriteFile(settingsFile, []byte("invalid-json{"), 0644)
-
-	err := EnsureAgySettings("api-key-123", "model-abc")
-	if err != nil {
-		t.Fatalf("Expected EnsureAgySettings to succeed by overwriting corrupt file, got: %v", err)
-	}
-
-	// Write error with uncreatable home
-	blockerHome := filepath.Join(tmpDir, "blocked_home")
-	_ = os.WriteFile(blockerHome, []byte("file"), 0644)
-	t.Setenv("HOME", filepath.Join(blockerHome, "sub"))
-	errUncreatable := EnsureAgySettings("api-key-123", "model-abc")
-	if errUncreatable == nil {
-		t.Errorf("Expected error for uncreatable HOME")
-	}
-}
-
-func TestEnsureSystemRules_TornReadAndFallback(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-
-	oldAgentPaths := AgentInstructionsSearchPaths
-	defer func() { AgentInstructionsSearchPaths = oldAgentPaths }()
-
-	// 1. Initial valid persona file
-	personaFile := filepath.Join(tmpDir, "AGENTS.md")
-	_ = os.WriteFile(personaFile, []byte("Persona prompt content"), 0644)
-	AgentInstructionsSearchPaths = []string{personaFile}
-
-	err := EnsureSystemRules("custom environment prompt")
-	if err != nil {
-		t.Fatalf("EnsureSystemRules failed: %v", err)
-	}
-
-	// 2. Torn read (empty file) -> triggers LKGC persona!
-	_ = os.WriteFile(personaFile, []byte(""), 0644)
-	errTorn := EnsureSystemRules("")
-	if errTorn != nil {
-		t.Fatalf("EnsureSystemRules with torn read failed: %v", errTorn)
-	}
-
-	// 3. Fallback to LastKnownGoodRules when no persona and no prompt
-	AgentInstructionsSearchPaths = []string{filepath.Join(tmpDir, "nonexistent.md")}
-	errLKGC := EnsureSystemRules("")
-	if errLKGC != nil {
-		t.Fatalf("EnsureSystemRules with LKGC fallback failed: %v", errLKGC)
-	}
-
-	// 4. Uncreatable home error
-	blockerRules := filepath.Join(tmpDir, "blocked_rules_home")
-	_ = os.WriteFile(blockerRules, []byte("file"), 0644)
-	t.Setenv("HOME", filepath.Join(blockerRules, "sub"))
-	errErr := EnsureSystemRules("test")
-	if errErr == nil {
-		t.Errorf("Expected error for uncreatable directory")
-	}
-}
-
-func TestLoadMCPConfig_EnvOverridesAndSSENormalization(t *testing.T) {
-	// 1. GITHUB_PAT and MCP_CONFIG env vars
-	t.Setenv("GITHUB_PAT", "mock-pat-123")
-	t.Setenv("MCP_CONFIG", `{"mcpServers":{"custom-env":{"serverUrl":"http://env-mcp:8080/mcp"}}}`)
-
-	raw := LoadMCPConfig()
-	var parsed map[string]map[string]interface{}
-	_ = json.Unmarshal(raw, &parsed)
-	servers := parsed["mcpServers"]
-	if servers["github"] == nil {
-		t.Errorf("Expected github MCP server with GITHUB_PAT set")
-	}
-	if servers["custom-env"] == nil {
-		t.Errorf("Expected custom-env MCP server from MCP_CONFIG env")
-	}
-
-	// 2. SSE normalization
-	t.Setenv("MCP_CONFIG", `{"mcpServers":{"docker":{"serverUrl":"http://docker-mcp:4002/sse"}}}`)
-	rawNorm := LoadMCPConfig()
-	var parsedNorm map[string]map[string]interface{}
-	_ = json.Unmarshal(rawNorm, &parsedNorm)
-	dockerSvc := parsedNorm["mcpServers"]["docker"].(map[string]interface{})
-	if dockerSvc["serverUrl"] != "http://docker-mcp:4002/mcp" {
-		t.Errorf("Expected normalized /mcp URL, got %v", dockerSvc["serverUrl"])
-	}
-
-	// 3. Runtime config overlay
-	oldCfg := activeGlobalConfig.Current()
-	activeGlobalConfig.update(&ConfigData{
-		Model: "gemini-2.5-flash",
-		McpServers: map[string]json.RawMessage{
-			"overlay-svc": json.RawMessage(`{"serverUrl":"http://overlay:9000/mcp"}`),
-			"raw-str-svc": json.RawMessage(`"valid-json-string"`),
-		},
-	})
-	defer func() {
-		activeGlobalConfig.update(oldCfg)
-	}()
-
-	rawOverlay := LoadMCPConfig()
-	var parsedOverlay map[string]interface{}
-	_ = json.Unmarshal(rawOverlay, &parsedOverlay)
-	serversOverlay, _ := parsedOverlay["mcpServers"].(map[string]interface{})
-	if serversOverlay["overlay-svc"] == nil {
-		t.Errorf("Expected overlay-svc in MCP config, got: %+v", serversOverlay)
-	}
-}
-
-func TestLoadMCPConfig_MarshalError(t *testing.T) {
-	oldCfg := activeGlobalConfig.Current()
-	activeGlobalConfig.update(&ConfigData{
-		Model: "gemini-2.5-flash",
-		McpServers: map[string]json.RawMessage{
-			"bad-json-svc": json.RawMessage(`unclosed{`),
-		},
-	})
-	defer func() {
-		activeGlobalConfig.update(oldCfg)
-	}()
-
-	raw := LoadMCPConfig()
-	if string(raw) != `{"mcpServers":{}}` {
-		t.Errorf("Expected fallback empty mcpServers on marshal error, got %s", string(raw))
-	}
-}
-
-func TestEnsureMcpConfig_EdgeCases(t *testing.T) {
-	// 1. Empty raw config
-	if err := EnsureMcpConfig(json.RawMessage("")); err != nil {
-		t.Errorf("Expected nil error for empty rawConfig")
-	}
-	if err := EnsureMcpConfig(json.RawMessage(`""`)); err != nil {
-		t.Errorf("Expected nil error for empty string rawConfig")
-	}
-	if err := EnsureMcpConfig(json.RawMessage("null")); err != nil {
-		t.Errorf("Expected nil error for null rawConfig")
-	}
-
-	// 2. JSON string encoded config
-	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-	strJSON := json.RawMessage(`"{\"mcpServers\":{\"server1\":{\"serverUrl\":\"http://s1\"}}}"`)
-	if err := EnsureMcpConfig(strJSON); err != nil {
-		t.Fatalf("EnsureMcpConfig failed with string JSON: %v", err)
-	}
-
-	// 3. Unwriteable directory
-	blockerMcp := filepath.Join(tmpDir, "blocked_mcp_home")
-	_ = os.WriteFile(blockerMcp, []byte("file"), 0644)
-	t.Setenv("HOME", filepath.Join(blockerMcp, "sub"))
-	if err := EnsureMcpConfig(json.RawMessage(`{"mcpServers":{}}`)); err == nil {
-		t.Errorf("Expected error for uncreatable directory")
 	}
 }
 
@@ -2511,7 +1662,7 @@ func TestResolveChannelPolicy_WakeModeInheritance(t *testing.T) {
 	}
 }
 
-func TestGetFallbackDefaults_And_LoadMCPConfig_DataOptions(t *testing.T) {
+func TestGetFallbackDefaults_DataOptions(t *testing.T) {
 	if _, err := os.Stat("/data"); err == nil {
 		origOptions, readErr := os.ReadFile("/data/options.json")
 		defer func() {
@@ -2523,67 +1674,12 @@ func TestGetFallbackDefaults_And_LoadMCPConfig_DataOptions(t *testing.T) {
 		}()
 
 		// 1. Model override in /data/options.json
-		_ = os.WriteFile("/data/options.json", []byte(`{"model":"gemini-custom-data","mcp_config":"{\"mcpServers\":{\"data-mcp\":{\"serverUrl\":\"http://data-mcp:8080\"}}}"}`), 0644)
+		_ = os.WriteFile("/data/options.json", []byte(`{"model":"gemini-custom-data"}`), 0644)
 		t.Setenv("AGY_MODEL", "")
 		fb := getFallbackDefaults()
 		if fb.Model != "gemini-custom-data" {
 			t.Errorf("Expected Model=gemini-custom-data from /data/options.json, got %s", fb.Model)
 		}
-
-		// 2. LoadMCPConfig reading string mcp_config from /data/options.json
-		t.Setenv("MCP_CONFIG", "")
-		raw := LoadMCPConfig()
-		var parsed map[string]interface{}
-		_ = json.Unmarshal(raw, &parsed)
-		servers, _ := parsed["mcpServers"].(map[string]interface{})
-		if servers["data-mcp"] == nil {
-			t.Errorf("Expected data-mcp in LoadMCPConfig from /data/options.json string")
-		}
-
-		// 3. LoadMCPConfig reading object mcp_config from /data/options.json
-		_ = os.WriteFile("/data/options.json", []byte(`{"mcp_config":{"mcpServers":{"raw-data-mcp":{"serverUrl":"http://raw-data"}}}}`), 0644)
-		rawRaw := LoadMCPConfig()
-		_ = json.Unmarshal(rawRaw, &parsed)
-		serversRaw, _ := parsed["mcpServers"].(map[string]interface{})
-		if serversRaw["raw-data-mcp"] == nil {
-			t.Errorf("Expected raw-data-mcp in LoadMCPConfig from /data/options.json object")
-		}
-	}
-}
-
-func TestEnsureSystemRules_TornRead_EmptyPersonaSource(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-
-	oldAgentPaths := AgentInstructionsSearchPaths
-	defer func() { AgentInstructionsSearchPaths = oldAgentPaths }()
-
-	// Empty file triggers tornRead = true
-	emptyFile := filepath.Join(tmpDir, "AGENTS.md")
-	_ = os.WriteFile(emptyFile, []byte(""), 0644)
-	AgentInstructionsSearchPaths = []string{emptyFile}
-
-	lkgcMutex.Lock()
-	lastKnownGoodPersona = "LKGC Persona Content"
-	lastKnownGoodPersonaSource = ""
-	lkgcMutex.Unlock()
-
-	err := EnsureSystemRules("")
-	if err != nil {
-		t.Fatalf("EnsureSystemRules failed: %v", err)
-	}
-
-	// When no persona and no rules, returns nil
-	lkgcMutex.Lock()
-	lastKnownGoodPersona = ""
-	lastKnownGoodPersonaSource = ""
-	lastKnownGoodRules = ""
-	lkgcMutex.Unlock()
-	AgentInstructionsSearchPaths = []string{filepath.Join(tmpDir, "missing.md")}
-
-	errEmpty := EnsureSystemRules("")
-	if errEmpty != nil {
-		t.Errorf("Expected nil when no persona and no rules exist, got %v", errEmpty)
 	}
 }
 
