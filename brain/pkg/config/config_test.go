@@ -1629,18 +1629,30 @@ func TestLoadChannelInstructions_TornReadAndHyphenation(t *testing.T) {
 	}
 }
 
-func TestGetGeminiHomeDirDefault(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-	home := getGeminiHomeDirDefault()
-	if home != tmpDir {
-		t.Errorf("Expected home=%s, got %s", tmpDir, home)
+func TestNewTestConfig_HermeticDefaults(t *testing.T) {
+	cfg := NewTestConfig()
+	if cfg.Current().DatabaseURL != ":memory:" {
+		t.Errorf("expected :memory: database URL, got %q", cfg.Current().DatabaseURL)
+	}
+	expectedGemini := filepath.Join(os.TempDir(), "aerial-test-gemini")
+	if cfg.GeminiHomeDir() != expectedGemini {
+		t.Errorf("expected hermetic temp GeminiHomeDir %q, got %q", expectedGemini, cfg.GeminiHomeDir())
+	}
+	expectedData := filepath.Join(os.TempDir(), "aerial-test-data")
+	if cfg.DataDir() != expectedData {
+		t.Errorf("expected hermetic temp DataDir %q, got %q", expectedData, cfg.DataDir())
 	}
 
-	t.Setenv("HOME", "")
-	homeFallback := getGeminiHomeDirDefault()
-	if homeFallback == "" {
-		t.Errorf("Expected non-empty home fallback")
+	// Mutators can override hermetic defaults if specifically required
+	custom := NewTestConfig(func(d *ConfigData) {
+		d.GeminiHomeDir = "/custom/gemini"
+		d.DataDir = "/custom/data"
+	})
+	if custom.GeminiHomeDir() != "/custom/gemini" {
+		t.Errorf("expected overridden GeminiHomeDir, got %q", custom.GeminiHomeDir())
+	}
+	if custom.DataDir() != "/custom/data" {
+		t.Errorf("expected overridden DataDir, got %q", custom.DataDir())
 	}
 }
 

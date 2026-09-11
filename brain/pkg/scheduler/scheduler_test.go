@@ -1470,5 +1470,21 @@ func TestScheduler_ConfigInjection(t *testing.T) {
 	}
 }
 
+func TestScheduler_WithSessionRoots(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer database.Close()
+
+	enqueuer := newMockEnqueuer()
+	threadCreator := newMockThreadCreator()
+
+	s := New(nil, database, enqueuer, threadCreator, WithSessionRoots(" /custom/root1 ", "", " /custom/root2 "))
+	if len(s.sessionRoots) != 2 || s.sessionRoots[0] != "/custom/root1" || s.sessionRoots[1] != "/custom/root2" {
+		t.Errorf("expected clean sessionRoots [/custom/root1 /custom/root2], got %v", s.sessionRoots)
+	}
+}
+
 
 

@@ -368,13 +368,14 @@ func TestProvisioner_ZeroAmbientDefaultsAndNoOps(t *testing.T) {
 	tmpHome := t.TempDir()
 	cfg := config.NewTestConfig(func(d *config.ConfigData) {
 		d.GeminiHomeDir = tmpHome
+		d.DataDir = "/custom/data"
 	})
 	pFromCfg := NewFromConfig(cfg)
 	if pFromCfg.HomeDir() != tmpHome {
 		t.Errorf("Expected HomeDir %q from config, got %q", tmpHome, pFromCfg.HomeDir())
 	}
-	if pFromCfg.DataDir() != "/data" {
-		t.Errorf("Expected resolved DataDir '/data' from config, got %q", pFromCfg.DataDir())
+	if pFromCfg.DataDir() != "/custom/data" {
+		t.Errorf("Expected resolved DataDir '/custom/data' from config, got %q", pFromCfg.DataDir())
 	}
 
 	// Nil config in NewFromConfig

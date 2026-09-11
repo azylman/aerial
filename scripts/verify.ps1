@@ -14,13 +14,21 @@ $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $goServices = @("brain", "scheduler-mcp", "discord-mcp", "dashboard", "sidecars/gitsync")
 
 $gitCmd = if (Get-Command "git" -ErrorAction SilentlyContinue) { "git" }
-          elseif (Test-Path "$env:LOCALAPPDATA\Programs\MinGit\cmd\git.exe") { "$env:LOCALAPPDATA\Programs\MinGit\cmd\git.exe" }
-          elseif (Test-Path "C:\Program Files\Git\cmd\git.exe") { "C:\Program Files\Git\cmd\git.exe" }
+          elseif (Test-Path "$env:LOCALAPPDATA\Programs\MinGit\cmd\git.exe") { 
+              $env:PATH = "$env:LOCALAPPDATA\Programs\MinGit\cmd;" + $env:PATH
+              "$env:LOCALAPPDATA\Programs\MinGit\cmd\git.exe" 
+          }
+          elseif (Test-Path "C:\Program Files\Git\cmd\git.exe") { 
+              $env:PATH = "C:\Program Files\Git\cmd;" + $env:PATH
+              "C:\Program Files\Git\cmd\git.exe" 
+          }
           else { "git" }
 
 $hasGo = [bool](Get-Command "go" -ErrorAction SilentlyContinue)
 $hasLint = [bool](Get-Command "golangci-lint" -ErrorAction SilentlyContinue)
-$hasDocker = [bool](Get-Command "docker" -ErrorAction SilentlyContinue)
+$hasDocker = if (Get-Command "docker" -ErrorAction SilentlyContinue) {
+    try { & docker version *>$null; $LASTEXITCODE -eq 0 } catch { $false }
+} else { $false }
 $hasNode = [bool](Get-Command "node" -ErrorAction SilentlyContinue)
 
 function Run-GoVet($svc) {

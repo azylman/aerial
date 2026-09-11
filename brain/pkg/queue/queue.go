@@ -310,8 +310,18 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 	if cfg.TypingFunc == nil {
 		cfg.TypingFunc = delivery.StartTyping
 	}
+	sessMgr := cfg.SessionManager
+	if sessMgr == nil {
+		if appCfg != nil {
+			sessMgr = session.New(appCfg.GeminiHomeDir(), appCfg.DataDir())
+		} else {
+			sessMgr = session.New("", "")
+		}
+	}
+	cfg.SessionManager = sessMgr
+
 	if cfg.MemoryClient == nil {
-		cfg.MemoryClient = memory.New(appCfg)
+		cfg.MemoryClient = memory.New(appCfg, sessMgr.Roots()...)
 	}
 	// Note: MemoryRetrieverFunc is deliberately NOT defaulted to memory.RetrieveRelevantFacts here.
 	// Production callers (e.g. brain/main.go) explicitly inject memory.RetrieveRelevantFacts, ensuring
@@ -347,16 +357,6 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 	if cfg.SystemAlertFunc == nil {
 		cfg.SystemAlertFunc = delivery.SendSystemAlert
 	}
-
-	sessMgr := cfg.SessionManager
-	if sessMgr == nil {
-		if appCfg != nil {
-			sessMgr = session.New(appCfg.GeminiHomeDir(), appCfg.DataDir())
-		} else {
-			sessMgr = session.New("", "")
-		}
-	}
-	cfg.SessionManager = sessMgr
 
 	ctx, cancel := context.WithCancel(context.Background())
 
