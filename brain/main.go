@@ -105,11 +105,20 @@ func handlePrompt(database *sql.DB, pool *queue.WorkerPool) http.HandlerFunc {
 	}
 }
 
-func handleTranscripts(database *sql.DB) http.HandlerFunc {
+func handleTranscripts(database *sql.DB, homeDir ...string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			homeDir = "/root"
+		var resolvedHome string
+		if len(homeDir) > 0 && homeDir[0] != "" {
+			resolvedHome = homeDir[0]
+		} else {
+			resolvedHome = os.Getenv("HOME")
+			if resolvedHome == "" {
+				var err error
+				resolvedHome, err = os.UserHomeDir()
+				if err != nil || resolvedHome == "" {
+					resolvedHome = "/root"
+				}
+			}
 		}
 
 		type TranscriptEntry struct {
@@ -123,10 +132,18 @@ func handleTranscripts(database *sql.DB) http.HandlerFunc {
 		}
 
 		var results []TranscriptEntry
-		roots := []string{
-			"/data/brain",
-			filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain"),
-			filepath.Join(homeDir, ".gemini", "antigravity", "brain"),
+		var roots []string
+		if len(homeDir) > 0 && homeDir[0] != "" {
+			roots = []string{
+				filepath.Join(resolvedHome, ".gemini", "antigravity-cli", "brain"),
+				filepath.Join(resolvedHome, ".gemini", "antigravity", "brain"),
+			}
+		} else {
+			roots = []string{
+				"/data/brain",
+				filepath.Join(resolvedHome, ".gemini", "antigravity-cli", "brain"),
+				filepath.Join(resolvedHome, ".gemini", "antigravity", "brain"),
+			}
 		}
 
 		includeRaw := r.URL.Query().Get("include_raw") == "true"
@@ -794,11 +811,15 @@ func metricsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func SetupBrainMux(database *sql.DB, pool *queue.WorkerPool, reloadFn func(string)) *http.ServeMux {
+func SetupBrainMux(database *sql.DB, pool *queue.WorkerPool, reloadFn func(string), homeDir ...string) *http.ServeMux {
+	var hDir string
+	if len(homeDir) > 0 {
+		hDir = homeDir[0]
+	}
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", metrics.Handler())
 	mux.HandleFunc("/prompt", handlePrompt(database, pool))
-	mux.HandleFunc("/transcripts", handleTranscripts(database))
+	mux.HandleFunc("/transcripts", handleTranscripts(database, hDir))
 	mux.HandleFunc("/tasks", handleTasks(database))
 	mux.HandleFunc("/facts", handleFacts(database))
 	mux.HandleFunc("/schedules", handleSchedules(database))
@@ -934,6 +955,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config) error {
 	}
 
 	cur := cfg.Current()
+	homeDir := cfg.GeminiHomeDir()
 	provisioner := env.NewFromConfig(cfg)
 	_ = InitializeBrainEnvironment(ctx, cfg)
 
@@ -987,8 +1009,6 @@ func RunBrainApp(ctx context.Context, cfg *config.Config) error {
 	if err != nil {
 		log.Printf("Warning: failed to create file watcher: %v", err)
 	} else {
-		homeDir := cfg.GeminiHomeDir()
-
 		watchDirs := []string{
 			"/share/aerial-config",
 			"/share/aerial",
@@ -1024,7 +1044,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config) error {
 	stopScheduler := sched.Start(ctx)
 	defer stopScheduler()
 
-	mux := SetupBrainMux(database, pool, reloadConfig)
+	mux := SetupBrainMux(database, pool, reloadConfig, homeDir)
 
 	port := cur.Port
 	if port == "" {
