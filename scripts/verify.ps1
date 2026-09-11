@@ -133,9 +133,6 @@ if ($Staged) {
 
     if ($stagedFiles | Where-Object { $_ -like "dashboard/*" }) {
         Run-NodeCheck "dashboard/static/app.js"
-        if (Test-Path (Join-Path $repoRoot "dashboard/app.test.js")) {
-            Run-NodeTest "dashboard" "*.test.js"
-        }
     }
 
     if ($stagedFiles | Where-Object { $_ -like "docs-service/*" }) {

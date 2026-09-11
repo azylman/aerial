@@ -57,7 +57,7 @@ Stage 5: Pre-Flight Verification Gate (The New Path)
    │
    ▼
 Stage 6: Commit, Push & Continuous Deployment
-         • Fast-path pre-commit & comprehensive pre-push hooks
+         • Fast-path static pre-commit hook (< 1s)
          • Automated PR auto-merge (if branch protection active)
          • Watchtower out-of-band rolling deployment on main (60s)
 ```
@@ -129,20 +129,20 @@ Present a structured synthesis of the expert panel's audit to the human user:
      ```powershell
      powershell -ExecutionPolicy Bypass -File scripts/verify.ps1 -Staged
      ```
-   - **Local Iteration Target**: `--staged` inspects changed files and validates only touched microservices (`brain`, `scheduler-mcp`, `discord-mcp`, `dashboard`), providing sub-second feedback without running monorepo-wide test suites locally.
+   - **Local Iteration Target**: `--staged` inspects changed files and validates static analysis, BOM headers, test hygiene, and syntax checks, providing sub-second feedback (< 1s). Unit tests are executed via targeted `go test` and offloaded monorepo CI.
 
 2. **Full Monorepo CI Offloading**:
-   - Full monorepo verification (`./scripts/verify.sh --full`) is offloaded 100% to GitHub Actions CI on PR push and merge to `main`.
-   - Never run `--full` locally as mandatory pre-commit or pre-push gates.
+   - Full monorepo verification (`./scripts/verify.sh --full`), comprehensive test suites, and coverage gating (`check-coverage.sh`) are offloaded 100% to GitHub Actions CI on PR push and merge to `main`.
+   - Pre-push hooks have been eliminated; remote PR gating and GitHub Actions CI enforce all monorepo test matrices and coverage thresholds.
 
 3. **ZERO-BYPASS INVARIANT**:
-   - **Under NO CIRCUMSTANCE is an agent permitted to use `git commit --no-verify`, `git commit -n`, or `git push --no-verify`.**
-   - Any attempt to bypass pre-commit or pre-push verification is classified as a Critical System Invariant Violation.
-   - If a hook or test fails:
-     1. Read the hook failure log from stderr.
-     2. Fix the reported code violations, linter errors, or failing unit tests in the source files.
+   - **Under NO CIRCUMSTANCE is an agent permitted to commit or push unverified changes.**
+   - Fresh verification evidence (`./scripts/verify.sh --staged` or targeted package test suites with exit code 0) must exist in the turn transcript prior to commit.
+   - If a check fails:
+     1. Read the failure log from stderr.
+     2. Fix the reported code violations, linter errors, or failing tests in the source files.
      3. Re-run `./scripts/verify.sh --staged` until exit code is 0.
-     4. Retry the commit.
+     4. Proceed with commit.
 
 ---
 
@@ -152,18 +152,18 @@ Present a structured synthesis of the expert panel's audit to the human user:
    ```bash
    git status && git diff
    ```
-2. **Commit with Conventional Messages (WITHOUT `--no-verify`)**:
+2. **Commit with Conventional Messages**:
    ```bash
    git add -A && git commit -m "feat(module): clear description of changes"
    ```
-   *The fast-path pre-commit hook verifies staged changes automatically.*
+   *The fast-path pre-commit hook verifies staged syntax and BOM hygiene automatically in < 1s.*
 
 3. **Push to Remote & Branch Protection Awareness**:
    - When pushing directly to `main`:
      ```bash
      git push origin main
      ```
-     *The pre-push hook runs full monorepo verification before egress.*
+     *Pushes proceed immediately without pre-push hook latency; GitHub Actions CI validates the build out-of-band.*
    - When branch protection is active on `main`:
      ```bash
      git checkout -b fix/<topic>

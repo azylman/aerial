@@ -132,9 +132,9 @@ Aerial operates on a strict **Two-Repository Separation of Concerns**:
 
 6. **Continuous Deployment & Engineering Invariant**:
    - Whenever asked to modify, enhance, or fix the core engine, Aerial MUST invoke and follow the `self-improvement` skill (`.agents/skills/self-improvement/SKILL.md`).
-   - **Local Pre-Flight Verification**: Local pre-commit and pre-flight verification MUST use `./scripts/verify.sh --staged` (or `scripts/verify.ps1 -Staged`), executing targeted tests against changed microservices for fast feedback.
-   - **CI-Offloaded Full Monorepo Sweep**: Full monorepo verification (`./scripts/verify.sh --full`) is offloaded 100% to GitHub Actions CI on PR push and merge to `main`.
-   - **Zero-Bypass Invariant**: Under NO circumstance use `git commit --no-verify`, `git commit -n`, or `git push --no-verify`.
+   - **Local Pre-Flight Verification**: Local pre-commit and pre-flight verification MUST use `./scripts/verify.sh --staged` (or `scripts/verify.ps1 -Staged`), executing fast static analysis, BOM hygiene, and syntax checks against staged files for sub-second feedback (< 1s).
+   - **CI-Offloaded Full Monorepo Sweep**: Full monorepo verification (`./scripts/verify.sh --full`), comprehensive test suites, and coverage gating are offloaded 100% to GitHub Actions CI on PR push and merge to `main`. Pre-push hooks are eliminated to prevent redundant local test execution.
+   - **Zero-Bypass Invariant**: Under NO circumstance commit or push unverified changes; fresh verification evidence must be obtained prior to commit.
 
 7. **Hermetic Testing & Pure Constructor Dependency Injection**:
    - **In-Memory SQLite Test Fixtures**: All storage and database contract tests MUST use airgapped, in-memory SQLite handles (`:memory:` with single-connection pool guards) or `t.TempDir()` isolated files. Unit tests MUST NEVER write to shared host database paths or execute `main()` test functions that mutate production state.

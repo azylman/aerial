@@ -86,7 +86,16 @@ submit_scratch() {
 
     cd "$scratch_dir"
 
-    # 1. Pre-flight verification (run full verify suite locally)
+    # 1. Check for modifications
+    if git diff --quiet && git diff --staged --quiet; then
+        echo "{\"status\":\"no_changes\",\"message\":\"No modifications detected in scratch directory.\"}"
+        exit 0
+    fi
+
+    # 2. Stage all modifications
+    git add -A
+
+    # 3. Pre-flight verification (run fast staged verify suite on staged changes)
     if [ -f "scripts/verify.sh" ]; then
         echo "⚡ Running pre-flight verification checks in scratch checkout..."
         if ! sh scripts/verify.sh --staged; then
@@ -95,14 +104,7 @@ submit_scratch() {
         fi
     fi
 
-    # 2. Check for modifications
-    if git diff --quiet && git diff --staged --quiet; then
-        echo "{\"status\":\"no_changes\",\"message\":\"No modifications detected in scratch directory.\"}"
-        exit 0
-    fi
-
-    # 3. Commit
-    git add -A
+    # 4. Commit
     git commit -m "$commit_msg" >/dev/null
 
     local branch

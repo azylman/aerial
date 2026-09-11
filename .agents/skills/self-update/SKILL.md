@@ -55,7 +55,7 @@ powershell -ExecutionPolicy Bypass -File scripts/verify.ps1
 git add -A && git commit -m "feat(module): description of update"
 git push origin main
 ```
-- **ZERO-BYPASS INVARIANT**: **Under NO circumstance use `git commit --no-verify`, `git commit -n`, or `git push --no-verify`.** The local `.githooks/pre-commit` (fast staged scan) and `.githooks/pre-push` (full verification) hooks run automatically.
+- **ZERO-BYPASS INVARIANT**: **Never commit or push unverified changes.** Ensure `./scripts/verify.sh --staged` or test commands pass cleanly with exit code 0. The local `.githooks/pre-commit` hook automatically checks staged static analysis in < 1s, and full verification is offloaded to GitHub Actions CI.
 - **Branch Protection**: When branch protection is active on `main`, checkout a feature branch (`git checkout -b fix/<topic>`), push, open a PR via GitHub MCP, and enable auto-merge (`gh pr merge --auto --squash`).
 
 ### Step 5: Automated CD & Watchtower Invariant

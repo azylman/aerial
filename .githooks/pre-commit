@@ -4,7 +4,7 @@ set -eu
 # Prevent MSYS2 from mangling Docker volume path colons on Windows
 export MSYS_NO_PATHCONV=1
 
-# Fast-path pre-commit verification (< 3s, only checks staged changes)
+# Fast-path pre-commit static verification (< 1s, BOM hygiene and syntax checks)
 if [ -f "./scripts/verify.sh" ]; then
     ./scripts/verify.sh --staged
 elif [ -f "scripts/verify.sh" ]; then

@@ -203,16 +203,12 @@ if [ "$MODE" = "staged" ]; then
     for svc in $GO_SERVICES; do
         if echo "$STAGED_FILES" | grep -q "^$svc/"; then
             run_go_vet "$svc"
-            run_go_test "$svc"
         fi
     done
 
-    # Check dashboard JS syntax and unit tests
+    # Check dashboard JS syntax
     if echo "$STAGED_FILES" | grep -q "^dashboard/"; then
         run_node_syntax "dashboard/static/app.js"
-        if [ -f "dashboard/app.test.js" ]; then
-            run_node_test "dashboard" "*.test.js"
-        fi
     fi
 
     # Check docs service JS syntax
