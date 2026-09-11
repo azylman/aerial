@@ -113,9 +113,11 @@ func DefaultTranscriptRoots(cfg *config.Config) []string {
 		return []string{"/data/brain"}
 	}
 	var roots []string
-	if dataDir := strings.TrimSpace(cfg.DataDir()); dataDir != "" {
-		roots = append(roots, filepath.Join(dataDir, "brain"))
+	dataDir := strings.TrimSpace(cfg.DataDir())
+	if dataDir == "" {
+		dataDir = "/data"
 	}
+	roots = append(roots, filepath.Join(dataDir, "brain"))
 	if homeDir := strings.TrimSpace(cfg.GeminiHomeDir()); homeDir != "" {
 		roots = append(roots,
 			filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain"),
@@ -137,7 +139,7 @@ func handleTranscripts(database *sql.DB, searchPaths ...string) http.HandlerFunc
 			RawJSONL   string `json:"raw_jsonl,omitempty"`
 		}
 
-		var results []TranscriptEntry
+		results := make([]TranscriptEntry, 0)
 		seen := make(map[string]bool)
 		includeRaw := r.URL.Query().Get("include_raw") == "true"
 
@@ -161,8 +163,10 @@ func handleTranscripts(database *sql.DB, searchPaths ...string) http.HandlerFunc
 					continue
 				}
 				tPath := filepath.Join(root, internalID, ".system_generated", "logs", "transcript_full.jsonl")
-				if _, err := os.Stat(tPath); err != nil {
+				tStat, err := os.Stat(tPath)
+				if err != nil {
 					tPath = filepath.Join(root, internalID, ".system_generated", "logs", "transcript.jsonl")
+					tStat, _ = os.Stat(tPath)
 				}
 
 				data, err := os.ReadFile(tPath)
@@ -170,9 +174,11 @@ func handleTranscripts(database *sql.DB, searchPaths ...string) http.HandlerFunc
 					continue
 				}
 
-				info, err := entry.Info()
-				if err != nil {
-					continue
+				modTime := ""
+				if tStat != nil {
+					modTime = tStat.ModTime().Format(time.RFC3339)
+				} else if info, err := entry.Info(); err == nil {
+					modTime = info.ModTime().Format(time.RFC3339)
 				}
 				lines := strings.Split(string(data), "\n")
 				totalSteps := 0
@@ -210,7 +216,7 @@ func handleTranscripts(database *sql.DB, searchPaths ...string) http.HandlerFunc
 
 				item := TranscriptEntry{
 					Path:       tPath,
-					ModTime:    info.ModTime().Format(time.RFC3339),
+					ModTime:    modTime,
 					TotalSteps: totalSteps,
 					LastStatus: lastStatus,
 					LastError:  lastError,

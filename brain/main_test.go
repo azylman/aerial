@@ -102,6 +102,9 @@ func TestHandleTranscripts(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Errorf("Expected status 200 OK, got %d", w.Code)
 	}
+	if strings.TrimSpace(w.Body.String()) != "[]" {
+		t.Errorf("Expected empty JSON array '[]', got %q", w.Body.String())
+	}
 }
 
 func TestFormatCronDescription(t *testing.T) {
@@ -1592,6 +1595,21 @@ func TestDefaultTranscriptRoots(t *testing.T) {
 			t.Errorf("roots[%d] = %q, want %q", i, roots[i], want)
 		}
 	}
+
+	// 3. Config with empty/whitespace DataDir defaults to filepath.Join("/data", "brain")
+	emptyDataCfg := config.NewTestConfig(func(d *config.ConfigData) {
+		d.DataDir = "   "
+		d.GeminiHomeDir = homeDir
+	})
+	emptyRoots := DefaultTranscriptRoots(emptyDataCfg)
+	expectedEmpty := []string{
+		filepath.Join("/data", "brain"),
+		filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain"),
+		filepath.Join(homeDir, ".gemini", "antigravity", "brain"),
+	}
+	if len(emptyRoots) != len(expectedEmpty) || emptyRoots[0] != expectedEmpty[0] {
+		t.Errorf("DefaultTranscriptRoots with whitespace DataDir = %v, want %v", emptyRoots, expectedEmpty)
+	}
 }
 
 func TestHandleTranscripts_Deduplication(t *testing.T) {
@@ -1628,6 +1646,11 @@ func TestHandleTranscripts_Deduplication(t *testing.T) {
 	}
 	if len(results) != 1 {
 		t.Errorf("Expected exactly 1 deduplicated result, got %d", len(results))
+	} else {
+		expectedPath := filepath.Join(dir1, "transcript.jsonl")
+		if gotPath, ok := results[0]["path"].(string); !ok || gotPath != expectedPath {
+			t.Errorf("Expected first root to win with path %q, got %q", expectedPath, gotPath)
+		}
 	}
 }
 
