@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -14,15 +15,11 @@ import (
 // RunApp bootstraps the scheduler MCP HTTP server with graceful shutdown.
 func RunApp(ctx context.Context, cfg *Config) error {
 	if cfg == nil {
-		var err error
-		cfg, err = LoadConfig()
-		if err != nil {
-			return fmt.Errorf("config error: %w", err)
-		}
+		return fmt.Errorf("app: config cannot be nil")
 	}
-	port := cfg.Port
+	port := strings.TrimSpace(cfg.Port)
 	if port == "" {
-		port = "8080"
+		return fmt.Errorf("app: port cannot be empty")
 	}
 
 	database, err := InitDB(cfg)

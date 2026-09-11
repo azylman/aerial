@@ -11,31 +11,60 @@ import (
 	"time"
 )
 
-func TestGetDefaultTimezone(t *testing.T) {
+func TestLoadConfig_TimezoneResolution(t *testing.T) {
 	// 1. Fallback when both DEFAULT_TIMEZONE and TZ are unset
-	t.Setenv("DEFAULT_TIMEZONE", "")
-	t.Setenv("TZ", "")
-	if tz := GetDefaultTimezone(); tz != "America/Los_Angeles" {
-		t.Errorf("Expected fallback 'America/Los_Angeles', got %q", tz)
+	cfg1, err := LoadConfigFromLookup(func(k string) string {
+		if k == "DATABASE_URL" {
+			return ":memory:"
+		}
+		return ""
+	})
+	if err != nil {
+		t.Fatalf("LoadConfigFromLookup failed: %v", err)
+	}
+	if cfg1.Timezone != DefaultTimezone {
+		t.Errorf("Expected fallback %q, got %q", DefaultTimezone, cfg1.Timezone)
 	}
 
 	// 2. TZ environment variable fallback
-	t.Setenv("TZ", "America/Chicago")
-	if tz := GetDefaultTimezone(); tz != "America/Chicago" {
-		t.Errorf("Expected TZ 'America/Chicago', got %q", tz)
+	cfg2, err := LoadConfigFromLookup(func(k string) string {
+		if k == "DATABASE_URL" {
+			return ":memory:"
+		}
+		if k == "TZ" {
+			return "America/Chicago"
+		}
+		return ""
+	})
+	if err != nil {
+		t.Fatalf("LoadConfigFromLookup failed: %v", err)
+	}
+	if cfg2.Timezone != "America/Chicago" {
+		t.Errorf("Expected TZ 'America/Chicago', got %q", cfg2.Timezone)
 	}
 
 	// 3. DEFAULT_TIMEZONE environment variable takes highest precedence
-	t.Setenv("DEFAULT_TIMEZONE", "America/New_York")
-	if tz := GetDefaultTimezone(); tz != "America/New_York" {
-		t.Errorf("Expected DEFAULT_TIMEZONE 'America/New_York', got %q", tz)
+	cfg3, err := LoadConfigFromLookup(func(k string) string {
+		if k == "DATABASE_URL" {
+			return ":memory:"
+		}
+		if k == "DEFAULT_TIMEZONE" {
+			return "America/New_York"
+		}
+		if k == "TZ" {
+			return "America/Chicago"
+		}
+		return ""
+	})
+	if err != nil {
+		t.Fatalf("LoadConfigFromLookup failed: %v", err)
+	}
+	if cfg3.Timezone != "America/New_York" {
+		t.Errorf("Expected DEFAULT_TIMEZONE 'America/New_York', got %q", cfg3.Timezone)
 	}
 }
 
 func TestParseRunAt(t *testing.T) {
-	t.Setenv("DEFAULT_TIMEZONE", "America/Los_Angeles")
-	t.Setenv("TZ", "")
-
 	baseTime := time.Date(2026, time.August, 28, 12, 0, 0, 0, time.UTC)
 
 	tests := []struct {
@@ -72,14 +101,24 @@ func TestParseRunAt(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		got, err := ParseRunAt(tc.input, baseTime)
+		got, err := ParseRunAtWithTimezone(tc.input, "America/Los_Angeles", baseTime)
 		if (err != nil) != tc.hasError {
-			t.Errorf("ParseRunAt(%q) error = %v, expected error = %t", tc.input, err, tc.hasError)
+			t.Errorf("ParseRunAtWithTimezone(%q) error = %v, expected error = %t", tc.input, err, tc.hasError)
 			continue
 		}
 		if !tc.hasError && !got.Equal(tc.expected) {
-			t.Errorf("ParseRunAt(%q) = %v, expected %v", tc.input, got, tc.expected)
+			t.Errorf("ParseRunAtWithTimezone(%q) = %v, expected %v", tc.input, got, tc.expected)
 		}
+	}
+
+	// Empty timezone error
+	if _, err := ParseRunAtWithTimezone("15m", "", baseTime); err == nil {
+		t.Error("expected error for empty timezone")
+	}
+
+	// Invalid timezone error
+	if _, err := ParseRunAtWithTimezone("15m", "Invalid/Timezone", baseTime); err == nil {
+		t.Error("expected error for invalid timezone")
 	}
 }
 
@@ -118,32 +157,29 @@ func TestCalculateNextCronRun(t *testing.T) {
 		t.Errorf("Expected next LA run %s, got %s", expectedLA, nextLA)
 	}
 
-	// Empty timezone defaults to GetDefaultTimezone() ("America/Los_Angeles")
-	t.Setenv("DEFAULT_TIMEZONE", "America/Los_Angeles")
-	t.Setenv("TZ", "")
-	nextDefault, err := CalculateNextCronRun("0 9 * * *", "", baseTime)
-	if err != nil {
-		t.Fatalf("CalculateNextCronRun with empty timezone failed: %v", err)
-	}
-	if !nextDefault.Equal(expectedLA) {
-		t.Errorf("Expected default next run %s, got %s", expectedLA, nextDefault)
-	}
-
-	// Configurable DEFAULT_TIMEZONE override: America/New_York (EDT = UTC-4)
+	// Timezone test with America/New_York (EDT = UTC-4 in August)
 	// 9 AM EDT from 12:00 UTC (8:00 AM EDT) -> Aug 28 9:00 EDT (13:00 UTC)
-	t.Setenv("DEFAULT_TIMEZONE", "America/New_York")
-	nextNYDefault, err := CalculateNextCronRun("0 9 * * *", "", baseTime)
+	nextNY, err := CalculateNextCronRun("0 9 * * *", "America/New_York", baseTime)
 	if err != nil {
-		t.Fatalf("CalculateNextCronRun with DEFAULT_TIMEZONE override failed: %v", err)
+		t.Fatalf("CalculateNextCronRun America/New_York failed: %v", err)
 	}
 	expectedNY := time.Date(2026, time.August, 28, 13, 0, 0, 0, time.UTC)
-	if !nextNYDefault.Equal(expectedNY) {
-		t.Errorf("Expected next NY run %s, got %s", expectedNY, nextNYDefault)
+	if !nextNY.Equal(expectedNY) {
+		t.Errorf("Expected next NY run %s, got %s", expectedNY, nextNY)
+	}
+
+	// Empty timezone must return an error
+	if _, err := CalculateNextCronRun("0 9 * * *", "", baseTime); err == nil {
+		t.Error("Expected error on empty timezone")
+	}
+
+	// Invalid timezone must return an error
+	if _, err := CalculateNextCronRun("0 9 * * *", "Invalid/Timezone", baseTime); err == nil {
+		t.Error("Expected error on invalid timezone")
 	}
 
 	// Invalid cron
-	_, err = CalculateNextCronRun("not a cron expr", "UTC", baseTime)
-	if err == nil {
+	if _, err := CalculateNextCronRun("not a cron expr", "UTC", baseTime); err == nil {
 		t.Error("Expected error on invalid cron expression")
 	}
 }
@@ -586,6 +622,14 @@ func TestToolHandlers_ArgumentValidationErrors(t *testing.T) {
 
 	if err := RunApp(context.Background(), &Config{Port: "9999", DatabaseURL: "postgres://invalid:pass@127.0.0.1:59996/db?sslmode=disable"}); err == nil {
 		t.Error("expected error running app with invalid db")
+	}
+
+	if err := RunApp(context.Background(), nil); err == nil {
+		t.Error("expected error running app with nil config")
+	}
+
+	if err := RunApp(context.Background(), &Config{Port: "", DatabaseURL: ":memory:"}); err == nil {
+		t.Error("expected error running app with empty port")
 	}
 
 	if err := RunApp(context.Background(), &Config{Port: "-1", DatabaseURL: ":memory:"}); err == nil {
