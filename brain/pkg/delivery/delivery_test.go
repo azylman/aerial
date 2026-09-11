@@ -449,3 +449,104 @@ func TestErrorClassifiers(t *testing.T) {
 	}
 }
 
+func TestErrorClassifiers_RESTError(t *testing.T) {
+	// 404
+	err404 := &discordgo.RESTError{Response: &http.Response{StatusCode: 404}}
+	if !IsMessageNotFoundError(err404) {
+		t.Error("expected true for RESTError 404")
+	}
+	// 10008
+	err10008 := &discordgo.RESTError{Message: &discordgo.APIErrorMessage{Code: 10008}}
+	if !IsMessageNotFoundError(err10008) {
+		t.Error("expected true for RESTError 10008")
+	}
+	// 50083
+	err50083 := &discordgo.RESTError{Message: &discordgo.APIErrorMessage{Code: 50083}}
+	if !IsThreadArchivedOrLockedError(err50083) {
+		t.Error("expected true for RESTError 50083")
+	}
+	// 50084
+	err50084 := &discordgo.RESTError{Message: &discordgo.APIErrorMessage{Code: 50084}}
+	if !IsThreadArchivedOrLockedError(err50084) {
+		t.Error("expected true for RESTError 50084")
+	}
+	// 403
+	err403 := &discordgo.RESTError{Response: &http.Response{StatusCode: 403}}
+	if !IsPermissionError(err403) {
+		t.Error("expected true for RESTError 403")
+	}
+	// 50001
+	err50001 := &discordgo.RESTError{Message: &discordgo.APIErrorMessage{Code: 50001}}
+	if !IsPermissionError(err50001) {
+		t.Error("expected true for RESTError 50001")
+	}
+	// 50013
+	err50013 := &discordgo.RESTError{Message: &discordgo.APIErrorMessage{Code: 50013}}
+	if !IsPermissionError(err50013) {
+		t.Error("expected true for RESTError 50013")
+	}
+}
+
+func TestSplitMessage_LongCodeBlockLines(t *testing.T) {
+	longLine := "```go\n" + strings.Repeat("x", 2500) + "\n```"
+	chunks := SplitMessage(longLine, 2000)
+	if len(chunks) < 2 {
+		t.Errorf("expected at least 2 chunks, got %d", len(chunks))
+	}
+	codeBlockClosed := "```python\nprint(1)\n```\n" + strings.Repeat("A", 1990)
+	chunks2 := SplitMessage(codeBlockClosed, 2000)
+	_ = chunks2
+}
+
+func TestIsSnowflake_EdgeCases(t *testing.T) {
+	if isSnowflake("") {
+		t.Error("expected false for empty snowflake")
+	}
+	if isSnowflake("12345abc6789") {
+		t.Error("expected false for alphanumeric snowflake")
+	}
+	if !isSnowflake("123456789012345678") {
+		t.Error("expected true for valid numeric snowflake")
+	}
+}
+
+func TestDelivery_AdditionalCoverage(t *testing.T) {
+	// 1. SendMessageWithAttachments empty channelID
+	sess := newMockDiscordSession(func(req *http.Request) (*http.Response, error) {
+		return mockJSONResponse(http.StatusOK, `{"id":"1"}`)
+	})
+	if err := SendMessageWithAttachments(sess, "", "hello", nil); err == nil {
+		t.Error("expected error for empty channelID")
+	}
+
+	// 2. SendMessageWithAttachments attachments send failure on empty text
+	sessErr := newMockDiscordSession(func(req *http.Request) (*http.Response, error) {
+		return mockJSONResponse(http.StatusBadRequest, `{"message":"failed"}`)
+	})
+	att := &Attachment{Filename: "a.png", Data: []byte("abc")}
+	if err := SendMessageWithAttachments(sessErr, "123", "", []*Attachment{att}); err == nil {
+		t.Error("expected error when attachment send fails")
+	}
+
+	// 3. EditMessage text truncation (> 2000 runes)
+	longText := strings.Repeat("A", 2500)
+	var editedBody string
+	sessEdit := newMockDiscordSession(func(req *http.Request) (*http.Response, error) {
+		body, _ := io.ReadAll(req.Body)
+		editedBody = string(body)
+		return mockJSONResponse(http.StatusOK, `{"id":"1"}`)
+	})
+	if err := EditMessage(sessEdit, "chan1", "msg1", longText); err != nil {
+		t.Fatalf("EditMessage failed: %v", err)
+	}
+	_ = editedBody
+
+	// 4. SplitMessage fence carried over to next chunk and small limit
+	exactClosing := "```go\n" + strings.Repeat("x", 1990) + "\n```"
+	cExact := SplitMessage(exactClosing, 2000)
+	_ = cExact
+
+	smallLimit := SplitMessage("```go\n"+strings.Repeat("a", 100)+"\n```", 50)
+	_ = smallLimit
+}
+

@@ -867,3 +867,108 @@ func TestCleanupEphemeralSession(t *testing.T) {
 	}
 }
 
+func TestSummarizeThreadTitle_EdgeCases(t *testing.T) {
+	ctx := context.Background()
+
+	c := &Classifier{
+		Model: "test-model",
+	}
+	if _, err := c.SummarizeThreadTitle(ctx, "hello"); err == nil {
+		t.Error("expected error with nil LLMFunc")
+	}
+
+	// 2. Empty question
+	c.LLMFunc = func(ctx context.Context, model, prompt string) (string, error) {
+		return "Valid Title", nil
+	}
+	if _, err := c.SummarizeThreadTitle(ctx, "   "); err == nil {
+		t.Error("expected error with empty question")
+	}
+
+	// 3. LLM failure
+	c.LLMFunc = func(ctx context.Context, model, prompt string) (string, error) {
+		return "", errors.New("upstream timeout")
+	}
+	if _, err := c.SummarizeThreadTitle(ctx, "Question"); err == nil {
+		t.Error("expected error when LLMFunc fails")
+	}
+
+	// 4. LLM returns empty/cleaned to empty
+	c.LLMFunc = func(ctx context.Context, model, prompt string) (string, error) {
+		return "   \n\t  ", nil
+	}
+	if _, err := c.SummarizeThreadTitle(ctx, "Question"); err == nil {
+		t.Error("expected error when LLMFunc returns empty string")
+	}
+
+	// 5. Model fallbacks (empty model, nil cfg, default config model)
+	c.Model = ""
+	c.LLMFunc = func(ctx context.Context, model, prompt string) (string, error) {
+		if model != config.DefaultConfigData().LowEffortModel {
+			t.Errorf("expected default low effort model, got %q", model)
+		}
+		return "Default Model Title", nil
+	}
+	if _, err := c.SummarizeThreadTitle(ctx, "Question"); err != nil {
+		t.Errorf("unexpected error with default model fallback: %v", err)
+	}
+
+	// 7. Fallback using c.cfg
+	appCfg := config.NewFromData(&config.ConfigData{
+		LowEffortModel: "cfg-low-effort-model",
+	})
+	c.cfg = appCfg
+	c.LLMFunc = func(ctx context.Context, model, prompt string) (string, error) {
+		if model != "cfg-low-effort-model" {
+			t.Errorf("expected cfg low effort model, got %q", model)
+		}
+		return "Cfg Model Title", nil
+	}
+	if _, err := c.SummarizeThreadTitle(ctx, "Question"); err != nil {
+		t.Errorf("unexpected error with c.cfg model: %v", err)
+	}
+}
+
+func TestClassifier_RecordFailure_CircuitTrip(t *testing.T) {
+	// 1. With explicit threshold and cooldown
+	c := NewClassifier(
+		WithFailureThreshold(2),
+		WithCooldownDuration(1*time.Minute),
+	)
+	c.recordFailure()
+	if c.circuitOpen {
+		t.Error("expected circuit to be closed after 1 failure with threshold 2")
+	}
+
+	c.recordFailure()
+	if !c.circuitOpen {
+		t.Error("expected circuit to be open after 2 failures with threshold 2")
+	}
+
+	// 2. With default threshold (3), default cooldown (60s), and custom Clock
+	fixedTime := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	c2 := &Classifier{
+		Clock: func() time.Time { return fixedTime },
+	}
+	c2.recordFailure()
+	c2.recordFailure()
+	if c2.circuitOpen {
+		t.Error("expected circuit closed after 2 failures with default threshold 3")
+	}
+	c2.recordFailure()
+	if !c2.circuitOpen {
+		t.Error("expected circuit open after 3 failures with default threshold 3")
+	}
+	if !c2.circuitOpenUntil.Equal(fixedTime.Add(60 * time.Second)) {
+		t.Errorf("expected circuitOpenUntil %v, got %v", fixedTime.Add(60*time.Second), c2.circuitOpenUntil)
+	}
+}
+
+func TestClassifyBurst_Empty(t *testing.T) {
+	c := &Classifier{}
+	res := c.ClassifyBurst(context.Background(), nil, nil, "")
+	if res.Confidence != 0.0 || res.Reason != "empty target burst" {
+		t.Errorf("expected 0.0 confidence on empty burst, got %+v", res)
+	}
+}
+

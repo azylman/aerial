@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -77,6 +78,9 @@ func TestWriteAtomicFile(t *testing.T) {
 }
 
 func TestLoadConfigValidYAML(t *testing.T) {
+	t.Setenv("AGY_MODEL", "")
+	t.Setenv("DEFAULT_TIMEZONE", "")
+	t.Setenv("TZ", "")
 	tmpDir := t.TempDir()
 	yamlPath := filepath.Join(tmpDir, "config.yaml")
 
@@ -142,6 +146,9 @@ mcp_servers:
 }
 
 func TestLoadConfigCorruptedYAML_LKGCFallback(t *testing.T) {
+	t.Setenv("AGY_MODEL", "")
+	t.Setenv("DEFAULT_TIMEZONE", "")
+	t.Setenv("TZ", "")
 	tmpDir := t.TempDir()
 	yamlPath := filepath.Join(tmpDir, "config.yaml")
 
@@ -493,6 +500,9 @@ func TestResolveChannelPolicy(t *testing.T) {
 }
 
 func TestLoadConfigLegacyYAML_BackwardsCompatibility(t *testing.T) {
+	t.Setenv("AGY_MODEL", "")
+	t.Setenv("DEFAULT_TIMEZONE", "")
+	t.Setenv("TZ", "")
 	tmpDir := t.TempDir()
 	yamlPath := filepath.Join(tmpDir, "config_legacy.yaml")
 
@@ -2309,4 +2319,120 @@ func TestBuildPostgresDSN_Lookup(t *testing.T) {
 	if dsn := buildPostgresDSN(nil); dsn != "" {
 		t.Errorf("expected empty DSN for nil lookup, got %q", dsn)
 	}
+}
+
+func TestConfig_PackageLevelAndUncoveredHelpers(t *testing.T) {
+	// 1. ActiveConfig()
+	ac := ActiveConfig()
+	if ac == nil {
+		t.Errorf("expected non-nil ActiveConfig")
+	}
+
+	// 2. Deprecated ConfigData methods
+	cd := ConfigData{
+		AdminUsers: []string{"admin1", "admin2"},
+		Channels: map[string]ChannelPolicy{
+			"chan1": {Mode: "threads"},
+		},
+	}
+	if !cd.IsAdmin("admin1") {
+		t.Errorf("expected cd.IsAdmin('admin1') to be true")
+	}
+	p := cd.ResolveChannelPolicy("chan1", "chan1")
+	if p.Mode != "threads" {
+		t.Errorf("expected threads mode, got %s", p.Mode)
+	}
+
+	// 3. getEnv and GetEnv
+	if val := getEnv("SOME_DEFINITELY_UNSET_KEY_ABC123", "default_val"); val != "default_val" {
+		t.Errorf("expected default_val, got %s", val)
+	}
+	if val := GetEnv("SOME_DEFINITELY_UNSET_KEY_ABC123", "default_val"); val != "default_val" {
+		t.Errorf("expected default_val, got %s", val)
+	}
+
+	// 4. buildPostgresDSN defaults with POSTGRES_HOST
+	lookupHostOnly := func(k string) string {
+		if k == "POSTGRES_HOST" {
+			return "localhost"
+		}
+		return ""
+	}
+	expectedDefault := "postgres://aerial:aerial_secure_pass@localhost:5432/aerial?sslmode=disable"
+	if dsn := buildPostgresDSN(lookupHostOnly); dsn != expectedDefault {
+		t.Errorf("expected default postgres DSN %q, got %q", expectedDefault, dsn)
+	}
+	_ = buildPostgresDSNFromEnv()
+
+	// 5. Reload nil check
+	if err := Reload(nil); err == nil {
+		t.Errorf("expected error for Reload(nil)")
+	}
+
+	// 6. writeAtomicFile tests
+	tmpDir := t.TempDir()
+	targetPath := filepath.Join(tmpDir, "atomic.txt")
+	if err := writeAtomicFile(targetPath, "initial"); err != nil {
+		t.Fatalf("writeAtomicFile failed: %v", err)
+	}
+	// Overwrite existing
+	if err := writeAtomicFile(targetPath, "updated"); err != nil {
+		t.Fatalf("writeAtomicFile overwrite failed: %v", err)
+	}
+	data, _ := os.ReadFile(targetPath)
+	if string(data) != "updated" {
+		t.Errorf("expected 'updated', got %q", string(data))
+	}
+	// Invalid path
+	fileAsDir := filepath.Join(tmpDir, "file_as_dir")
+	_ = os.WriteFile(fileAsDir, []byte("x"), 0644)
+	if err := writeAtomicFile(filepath.Join(fileAsDir, "cannot_create", "f.txt"), "c"); err == nil {
+		t.Errorf("expected error for invalid dir in writeAtomicFile")
+	}
+
+	// 7. isContainerColdBoot
+	_ = isContainerColdBoot(filepath.Join(tmpDir, "nonexistent"))
+
+	// 8. NewFromLookup
+	mockLookup := func(string) string { return "" }
+	cfg, err := NewFromLookup(mockLookup)
+	if cfg == nil && err == nil {
+		t.Errorf("unexpected nil cfg and nil err")
+	}
+
+	// 9. New() and LoadConfig()
+	t.Setenv("AGY_MODEL", "")
+	t.Setenv("DEFAULT_TIMEZONE", "")
+	t.Setenv("TZ", "")
+	cfgNew, _ := New()
+	_ = cfgNew
+	cfgLoad, _ := LoadConfig()
+	_ = cfgLoad
+
+	// 10. waitForColdBootConfig
+	validBootFile := filepath.Join(tmpDir, "boot.yaml")
+	_ = os.WriteFile(validBootFile, []byte("model: test\n"), 0644)
+	waitForColdBootConfig([]string{validBootFile}, 500*time.Millisecond)
+	waitForColdBootConfig([]string{filepath.Join(tmpDir, "does_not_exist")}, 10*time.Millisecond)
+
+	// 11. cloneConfigData nil and update nil
+	if res := cloneConfigData(nil); res != nil {
+		t.Errorf("expected nil from cloneConfigData(nil)")
+	}
+	cfgDummy := NewTestConfig()
+	cfgDummy.update(nil)
+
+	// 12. NewFromData nil
+	cfgFromNil := NewFromData(nil)
+	if cfgFromNil == nil || cfgFromNil.Current() == nil {
+		t.Errorf("expected non-nil default from NewFromData(nil)")
+	}
+
+	// 13. applyEnvironmentOverrides nil checks
+	applyEnvironmentOverrides(nil, mockLookup)
+	dummyData := DefaultConfigData()
+	applyEnvironmentOverrides(dummyData, nil)
+
+	// 14. Reload with valid active config
+	_ = Reload(ActiveConfig())
 }

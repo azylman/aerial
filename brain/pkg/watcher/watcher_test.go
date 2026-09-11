@@ -335,5 +335,161 @@ func TestWatcher_NonExistentDir(t *testing.T) {
 	if err == nil {
 		t.Errorf("expected error when adding non-existent directory")
 	}
+
+	// Test adding a regular file (should return nil early)
+	tmpFile := filepath.Join(t.TempDir(), "file.txt")
+	_ = os.WriteFile(tmpFile, []byte("hello"), 0644)
+	if err := w.AddRecursive(tmpFile); err != nil {
+		t.Errorf("expected AddRecursive on regular file to return nil, got %v", err)
+	}
+}
+
+func TestWatcher_StartContextCancel(t *testing.T) {
+	w, err := NewWatcher(WithFallbackInterval(0))
+	if err != nil {
+		t.Fatalf("failed to create watcher: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		w.Start(ctx)
+		close(done)
+	}()
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Start did not exit on context cancellation")
+	}
+}
+
+func TestShouldIgnore_AdditionalPatterns(t *testing.T) {
+	cases := []struct {
+		path   string
+		ignore bool
+	}{
+		{"/a/b/user_persona.md", true},
+		{"/a/b/file.swp", true},
+		{"/a/b/file.swx", true},
+		{"/a/b/.#lockfile", true},
+		{"/a/b/#autosave#", true},
+		{"/a/b/file~", true},
+		{"/a/b/normal_file.yaml", false},
+	}
+	for _, tc := range cases {
+		if res := ShouldIgnore(tc.path); res != tc.ignore {
+			t.Errorf("ShouldIgnore(%q) = %v; want %v", tc.path, res, tc.ignore)
+		}
+	}
+}
+
+func TestWatcher_StartClose(t *testing.T) {
+	w, err := NewWatcher(WithFallbackInterval(0))
+	if err != nil {
+		t.Fatalf("failed to create watcher: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		w.Start(context.Background())
+		close(done)
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	_ = w.Close()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Start did not exit on Close")
+	}
+}
+
+func TestWatcher_AddRecursive_SkipDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	gitDir := filepath.Join(tmpDir, ".git")
+	_ = os.Mkdir(gitDir, 0755)
+	_ = os.WriteFile(filepath.Join(gitDir, "HEAD"), []byte("ref: refs/heads/main"), 0644)
+
+	w, err := NewWatcher(WithFallbackInterval(0))
+	if err != nil {
+		t.Fatalf("failed to create watcher: %v", err)
+	}
+	defer func() { _ = w.Close() }()
+
+	if err := w.AddRecursive(tmpDir); err != nil {
+		t.Fatalf("AddRecursive failed: %v", err)
+	}
+
+	w.mu.Lock()
+	watchedGit := w.watchedDirs[gitDir]
+	w.mu.Unlock()
+	if watchedGit {
+		t.Errorf("expected .git directory to be skipped by AddRecursive")
+	}
+
+	// Test WithCallback with nil callback
+	w2, err := NewWatcher(WithCallback(nil))
+	if err != nil {
+		t.Fatalf("NewWatcher failed: %v", err)
+	}
+	_ = w2.Close()
+
+	if !ShouldIgnore("cache.tmp") {
+		t.Errorf("expected cache.tmp to be ignored")
+	}
+}
+
+func TestWatcher_NestedDirectoryRemoval(t *testing.T) {
+	tmpDir := t.TempDir()
+	parent := filepath.Join(tmpDir, "parent")
+	child := filepath.Join(parent, "child")
+	_ = os.MkdirAll(child, 0755)
+
+	w, err := NewWatcher(WithFallbackInterval(0))
+	if err != nil {
+		t.Fatalf("NewWatcher failed: %v", err)
+	}
+	defer func() { _ = w.Close() }()
+
+	if err := w.AddRecursive(parent); err != nil {
+		t.Fatalf("AddRecursive failed: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go w.Start(ctx)
+
+	// Verify both are watched
+	w.mu.Lock()
+	pWatched := w.watchedDirs[parent]
+	cWatched := w.watchedDirs[child]
+	w.mu.Unlock()
+	if !pWatched || !cWatched {
+		t.Fatalf("expected parent and child to be watched")
+	}
+
+	// Manually inject a subpath entry in watchedDirs to guarantee line 226 coverage
+	w.mu.Lock()
+	w.watchedDirs[filepath.Join(parent, "virtual_sub")] = true
+	w.mu.Unlock()
+
+	// Write an ignored file to trigger the ShouldIgnore branch in Start
+	ignoredFile := filepath.Join(parent, "test.tmp")
+	_ = os.WriteFile(ignoredFile, []byte("ignored"), 0644)
+	time.Sleep(100 * time.Millisecond)
+
+	// Remove parent
+	_ = os.RemoveAll(parent)
+	time.Sleep(150 * time.Millisecond)
+
+	w.mu.Lock()
+	cStillWatched := w.watchedDirs[child]
+	vStillWatched := w.watchedDirs[filepath.Join(parent, "virtual_sub")]
+	w.mu.Unlock()
+	if cStillWatched || vStillWatched {
+		t.Errorf("expected subdirs to be removed from watchedDirs when parent removed")
+	}
 }
 

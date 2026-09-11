@@ -1787,6 +1787,198 @@ func TestStepUpdateEvent_ResolvedCommandName(t *testing.T) {
 	if evWithSnakeCmd.ResolvedCommandName() != "docker" {
 		t.Errorf("expected 'docker', got %q", evWithSnakeCmd.ResolvedCommandName())
 	}
+
+	evWithCommand := &StepUpdateEvent{
+		ToolName: "run_command",
+		ToolInfo: &StepToolInfo{
+			Name: "run_command",
+			Parameters: StepToolParameters{
+				Command: "kubectl get pods",
+			},
+		},
+	}
+	if evWithCommand.ResolvedCommandName() != "kubectl" {
+		t.Errorf("expected 'kubectl', got %q", evWithCommand.ResolvedCommandName())
+	}
+
+	evWithCmd := &StepUpdateEvent{
+		ToolName: "run_command",
+		ToolInfo: &StepToolInfo{
+			Name: "run_command",
+			Parameters: StepToolParameters{
+				Cmd: "python -m http.server",
+			},
+		},
+	}
+	if evWithCmd.ResolvedCommandName() != "python" {
+		t.Errorf("expected 'python', got %q", evWithCmd.ResolvedCommandName())
+	}
+
+	evWithEmptyCmd := &StepUpdateEvent{
+		ToolName: "run_command",
+		ToolInfo: &StepToolInfo{
+			Name: "run_command",
+		},
+	}
+	if evWithEmptyCmd.ResolvedCommandName() != "" {
+		t.Errorf("expected '', got %q", evWithEmptyCmd.ResolvedCommandName())
+	}
 }
+
+func TestRunAgyWithOptions(t *testing.T) {
+	ctx := context.Background()
+	opts := WatchdogOptions{
+		InactivityTimeout: 10 * time.Second,
+		MaxDuration:       30 * time.Second,
+		PollInterval:      1 * time.Second,
+	}
+	stdout, stderr, exitCode, err := RunAgyWithOptions(ctx, "echo", "hello world", "", "", "", opts)
+	if err != nil {
+		t.Fatalf("RunAgyWithOptions failed: %v, code=%d, stderr=%s", err, exitCode, stderr)
+	}
+	if exitCode != 0 {
+		t.Errorf("expected exit code 0, got %d", exitCode)
+	}
+	if !strings.Contains(stdout, "hello world") {
+		t.Errorf("expected stdout to contain 'hello world', got %q", stdout)
+	}
+}
+
+func TestTokenizeCommandLine_EdgeCases(t *testing.T) {
+	tests := []struct {
+		input string
+		want  []string
+		ok    bool
+	}{
+		// Trailing backslash
+		{"foo\\", nil, false},
+		// Double quote escapes: \$, \`, \", \\, and non-escapes like \n and \x
+		{"\"a\\$b\\`c\\\"d\\\\e\\nf\\xg\"", []string{"a$b`c\"d\\e\\nf\\xg"}, true},
+		// Outside quotes escapes: space, quote, backslash, and path separator preservation
+		{"a\\ b\\tc\\\"d\\'e\\\\f\\xg", []string{"a b\\tc\"d'e\\f\\xg"}, true},
+		// Unclosed single quote
+		{"'unclosed", nil, false},
+		// Unclosed double quote
+		{`"unclosed`, nil, false},
+		// Empty string
+		{"", nil, true},
+		// Whitespace only
+		{"   \t\r\n  ", nil, true},
+	}
+
+	for _, tt := range tests {
+		got, ok := tokenizeCommandLine(tt.input)
+		if ok != tt.ok {
+			t.Errorf("tokenizeCommandLine(%q) ok = %v, want %v", tt.input, ok, tt.ok)
+		}
+		if ok && tt.ok {
+			if len(got) != len(tt.want) {
+				t.Errorf("tokenizeCommandLine(%q) len = %d, want %d (%v vs %v)", tt.input, len(got), len(tt.want), got, tt.want)
+			} else {
+				for i := range got {
+					if got[i] != tt.want[i] {
+						t.Errorf("tokenizeCommandLine(%q)[%d] = %q, want %q", tt.input, i, got[i], tt.want[i])
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestIsPOSIXIdentifier(t *testing.T) {
+	valid := []string{"foo", "Foo", "_bar", "_", "FOO_BAR_123", "a1"}
+	for _, s := range valid {
+		if !isPOSIXIdentifier(s) {
+			t.Errorf("isPOSIXIdentifier(%q) = false, want true", s)
+		}
+	}
+
+	invalid := []string{"", "1foo", "foo-bar", "foo bar", "foo@bar", "foo.bar", "foo/bar"}
+	for _, s := range invalid {
+		if isPOSIXIdentifier(s) {
+			t.Errorf("isPOSIXIdentifier(%q) = true, want false", s)
+		}
+	}
+}
+
+func TestActivityTap_FlushWithPendingContent(t *testing.T) {
+	var outBuf bytes.Buffer
+	actWriter := NewActivityWriter("")
+	var handledEvents []*StepUpdateEvent
+	handler := func(ev *StepUpdateEvent) {
+		handledEvents = append(handledEvents, ev)
+	}
+	tap := newActivityTap(&outBuf, actWriter, true, handler)
+
+	// Write content without a trailing newline
+	pending := []byte(`{"event":"step_update","type":"tool_call","name":"read_file"}`)
+	n, err := tap.Write(pending)
+	if err != nil || n != len(pending) {
+		t.Fatalf("Write failed: n=%d, err=%v", n, err)
+	}
+	if len(handledEvents) != 0 {
+		t.Fatalf("expected 0 events before flush, got %d", len(handledEvents))
+	}
+
+	// Flush should process the remaining line
+	tap.Flush()
+	if len(handledEvents) != 1 {
+		t.Fatalf("expected 1 event after flush, got %d", len(handledEvents))
+	}
+	if handledEvents[0].ResolvedToolName() != "read_file" {
+		t.Errorf("expected tool name 'read_file', got %q", handledEvents[0].ResolvedToolName())
+	}
+}
+
+func TestActivityWriter_SetSessionID_AlreadySet(t *testing.T) {
+	w := NewActivityWriter("")
+	uuid1 := "11111111-2222-3333-4444-555555555555"
+	uuid2 := "99999999-8888-7777-6666-555555555555"
+	invalidUUID := "not-a-uuid"
+
+	w.SetSessionID(invalidUUID)
+	if w.SessionID() != "" {
+		t.Errorf("SessionID should be empty after invalid UUID, got %q", w.SessionID())
+	}
+
+	w.SetSessionID(uuid1)
+	if w.SessionID() != uuid1 {
+		t.Fatalf("SessionID should be %q, got %q", uuid1, w.SessionID())
+	}
+
+	w.SetSessionID(uuid2)
+	if w.SessionID() != uuid1 {
+		t.Errorf("SessionID should remain %q, got %q", uuid1, w.SessionID())
+	}
+}
+
+func TestParseAgyOutput_RootResultAndFallback(t *testing.T) {
+	// Root result format: event is "result", but fields are top-level
+	rootResult := `{"event":"result","status":"SUCCESS","response":"all good"}`
+	resp, err := ParseAgyOutput(rootResult)
+	if err != nil {
+		t.Fatalf("ParseAgyOutput root result failed: %v", err)
+	}
+	if resp.Status != "SUCCESS" || resp.Response != "all good" {
+		t.Errorf("unexpected response: %+v", resp)
+	}
+
+	// Fallback unmarshal where resultResp is nil but JSON parses
+	emptyObj := `{"custom":"field"}`
+	fallbackResp, err := ParseAgyOutput(emptyObj)
+	if err != nil {
+		t.Fatalf("ParseAgyOutput fallback failed: %v", err)
+	}
+	if fallbackResp == nil {
+		t.Errorf("expected non-nil fallbackResp")
+	}
+}
+
+func TestIsNonTransientError_ForkExecPermissionDenied(t *testing.T) {
+	if !isNonTransientError("fork/exec /bin/sh: permission denied") {
+		t.Errorf("expected true for fork/exec permission denied")
+	}
+}
+
 
 

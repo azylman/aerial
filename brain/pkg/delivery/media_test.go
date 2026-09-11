@@ -286,4 +286,128 @@ func TestAutoAttachNewMedia(t *testing.T) {
 	}
 }
 
+func TestResolveAndValidateLocalImage_MIMETypesAndEdges(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Empty file
+	emptyFile := filepath.Join(tmpDir, "empty.png")
+	_ = os.WriteFile(emptyFile, []byte(""), 0644)
+	if _, err := ResolveAndValidateLocalImage(emptyFile, tmpDir); err == nil {
+		t.Error("expected error for empty file")
+	}
+
+	// Non-regular file (directory)
+	subDir := filepath.Join(tmpDir, "dir.png")
+	_ = os.MkdirAll(subDir, 0755)
+	if _, err := ResolveAndValidateLocalImage(subDir, tmpDir); err == nil {
+		t.Error("expected error for directory")
+	}
+
+	// Octet stream extensions (.png, .jpg, .gif, .webp)
+	for _, ext := range []string{".png", ".jpg", ".jpeg", ".gif", ".webp"} {
+		f := filepath.Join(tmpDir, "sample"+ext)
+		_ = os.WriteFile(f, []byte{0x00, 0x01, 0x02, 0x03, 0x04}, 0644)
+		att, err := ResolveAndValidateLocalImage(f, tmpDir)
+		if err != nil {
+			t.Errorf("unexpected error for %s: %v", ext, err)
+		}
+		if att == nil || !strings.HasPrefix(att.ContentType, "image/") {
+			t.Errorf("expected image/ contentType for %s, got %+v", ext, att)
+		}
+	}
+
+	// Octet stream unsupported extension (.bin)
+	unsupportedFile := filepath.Join(tmpDir, "sample.bin")
+	_ = os.WriteFile(unsupportedFile, []byte{0x00, 0x01, 0x02, 0x03, 0x04}, 0644)
+	if _, err := ResolveAndValidateLocalImage(unsupportedFile, tmpDir); err == nil {
+		t.Error("expected error for unsupported bin MIME type")
+	}
+
+	// Oversized file > MaxAttachmentSizeBytes
+	bigFile := filepath.Join(tmpDir, "big.png")
+	bf, _ := os.Create(bigFile)
+	_ = bf.Truncate(9 * 1024 * 1024)
+	_ = bf.Close()
+	if _, err := ResolveAndValidateLocalImage(bigFile, tmpDir); err == nil {
+		t.Error("expected error for file exceeding max attachment size")
+	}
+
+	// Relative path without baseDir
+	_, _ = ResolveAndValidateLocalImage("relative/path.png", "")
+}
+
+func TestAutoAttachNewMedia_EdgeCases(t *testing.T) {
+	// 1. Empty args
+	if res := AutoAttachNewMedia("", time.Time{}, nil); res != nil {
+		t.Errorf("expected nil for empty baseDir")
+	}
+
+	// 2. Already at limit
+	var maxAtts []*Attachment
+	for i := 0; i < MaxAttachmentsPerMessage; i++ {
+		maxAtts = append(maxAtts, &Attachment{Filename: fmt.Sprintf("file%d.png", i)})
+	}
+	res := AutoAttachNewMedia("/tmp", time.Now(), maxAtts)
+	if len(res) != MaxAttachmentsPerMessage {
+		t.Errorf("expected existing attachments returned when at limit")
+	}
+
+	// 3. Scan directory with hidden file and non-image file
+	tmpDir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(tmpDir, ".hidden.png"), []byte("data"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "notes.txt"), []byte("data"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "zero.png"), []byte(""), 0644)
+	res2 := AutoAttachNewMedia(tmpDir, time.Now().Add(-1*time.Minute), nil)
+	if len(res2) != 0 {
+		t.Errorf("expected 0 attachments for hidden, txt, and empty files, got %d", len(res2))
+	}
+}
+
+func TestMedia_SanitizeIntermediateStatus_Empty(t *testing.T) {
+	if res := SanitizeIntermediateStatus("   "); res != "" {
+		t.Errorf("expected empty string for whitespace input, got %q", res)
+	}
+}
+
+func TestAutoAttachNewMedia_BreakLimitsAndErrors(t *testing.T) {
+	tmpDir := t.TempDir()
+	now := time.Now()
+
+	// 1. Create 12 valid images to trigger MaxAttachmentsPerMessage break
+	for i := 0; i < 12; i++ {
+		createTestPNG(t, tmpDir, fmt.Sprintf("pic_%02d.png", i))
+	}
+
+	// 2. Old image with ModTime before cutoff
+	oldFile := filepath.Join(tmpDir, "old.png")
+	_ = os.WriteFile(oldFile, []byte("pngdata"), 0644)
+	oldTime := now.Add(-10 * time.Minute)
+	_ = os.Chtimes(oldFile, oldTime, oldTime)
+
+	// 3. Corrupt image that fails ResolveAndValidateLocalImage
+	badImg := filepath.Join(tmpDir, "bad.png")
+	_ = os.WriteFile(badImg, []byte("not really a png"), 0644)
+
+	res := AutoAttachNewMedia(tmpDir, now.Add(-5*time.Second), nil)
+	if len(res) != MaxAttachmentsPerMessage {
+		t.Errorf("expected %d attachments, got %d", MaxAttachmentsPerMessage, len(res))
+	}
+}
+
+func TestExtractAndSanitizeMedia_EdgePaths(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// 1. Dot path: ![Alt](.)
+	out, _ := ExtractAndSanitizeMedia("Here is: ![My Dot](.)", tmpDir)
+	if !strings.Contains(out, "*(Image attachment unavailable: My Dot - image)*") {
+		t.Errorf("expected fallback with 'image' basename, got %s", out)
+	}
+
+	// 2. Missing image without alt text: ![](/does/not/exist.png)
+	out2, _ := ExtractAndSanitizeMedia("Here is: ![](/does/not/exist.png)", tmpDir)
+	if !strings.Contains(out2, "*(Image attachment unavailable: exist.png)*") {
+		t.Errorf("expected fallback without alt text, got %s", out2)
+	}
+}
+
 

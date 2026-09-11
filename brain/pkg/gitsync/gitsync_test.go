@@ -699,5 +699,146 @@ func TestSyncRepo_CorruptedGitDir(t *testing.T) {
 	}
 }
 
+func TestResolveGitDir_GitDirFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	realGitDir := filepath.Join(tmpDir, "real_git_dir")
+	_ = os.MkdirAll(realGitDir, 0755)
+
+	// .git as a file with gitdir: relative and absolute paths
+	gitFilePath := filepath.Join(tmpDir, ".git")
+	_ = os.WriteFile(gitFilePath, []byte("gitdir: "+realGitDir), 0644)
+
+	res, err := resolveGitDir(tmpDir)
+	if err != nil || res != realGitDir {
+		t.Errorf("expected %q, got %q (err: %v)", realGitDir, res, err)
+	}
+
+	// Relative path
+	_ = os.WriteFile(gitFilePath, []byte("gitdir: real_git_dir"), 0644)
+	resRel, err := resolveGitDir(tmpDir)
+	if err != nil || resRel != realGitDir {
+		t.Errorf("expected %q, got %q (err: %v)", realGitDir, resRel, err)
+	}
+}
+
+func TestEnsureRepo_AlreadyValid(t *testing.T) {
+	originDir, repoADir, _ := setupGitRepos(t)
+	// EnsureRepo on repoADir which is already a valid git repository
+	err := EnsureRepo(context.Background(), repoADir, originDir, "")
+	if err != nil {
+		t.Errorf("expected nil error when repo is already valid, got %v", err)
+	}
+}
+
+func TestEnsureRepo_EmptyArgs(t *testing.T) {
+	if err := EnsureRepo(context.Background(), "", "https://example.com/repo.git", ""); err != nil {
+		t.Errorf("expected nil error for empty repoPath, got %v", err)
+	}
+	if err := EnsureRepo(context.Background(), "/tmp/test", "", ""); err != nil {
+		t.Errorf("expected nil error for empty repoUrl, got %v", err)
+	}
+}
+
+func TestEnsureRepo_MkdirAllError(t *testing.T) {
+	tmpDir := t.TempDir()
+	fileAsParent := filepath.Join(tmpDir, "file_blocking_mkdir")
+	if err := os.WriteFile(fileAsParent, []byte("blocking"), 0644); err != nil {
+		t.Fatalf("failed to write blocking file: %v", err)
+	}
+	invalidRepoPath := filepath.Join(fileAsParent, "cannot_create_dir", "repo")
+	err := EnsureRepo(context.Background(), invalidRepoPath, "https://example.com/repo.git", "")
+	if err == nil {
+		t.Errorf("expected error when parent directory cannot be created, got nil")
+	}
+}
+
+func TestEnsureRepo_AdoptFetchError(t *testing.T) {
+	tmpDir := t.TempDir()
+	adoptDir := filepath.Join(tmpDir, "adopt_fetch_err")
+	_ = os.MkdirAll(adoptDir, 0755)
+	_ = os.WriteFile(filepath.Join(adoptDir, "somefile.txt"), []byte("data"), 0644)
+	err := EnsureRepo(context.Background(), adoptDir, "https://127.0.0.1:9999/nonexistent.git", "")
+	if err == nil {
+		t.Error("expected error for adopt with failed fetch, got nil")
+	}
+}
+
+func TestEnsureRepo_AdoptWithExistingOrigin(t *testing.T) {
+	originDir, _, _ := setupGitRepos(t)
+	tmpDir := t.TempDir()
+
+	// Configure a template directory with origin already defined
+	tmplDir := filepath.Join(tmpDir, "git_template")
+	_ = os.MkdirAll(tmplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tmplDir, "config"), []byte("[remote \"origin\"]\n\turl = https://example.com/old.git\n"), 0644)
+	t.Setenv("GIT_TEMPLATE_DIR", tmplDir)
+
+	adoptDir := filepath.Join(tmpDir, "adopt_existing_origin")
+	_ = os.MkdirAll(adoptDir, 0755)
+	_ = os.WriteFile(filepath.Join(adoptDir, "initial.txt"), []byte("data"), 0644)
+
+	err := EnsureRepo(context.Background(), adoptDir, originDir, "")
+	if err != nil {
+		t.Fatalf("EnsureRepo failed: %v", err)
+	}
+}
+
+func TestEnsureRepo_AdoptWithCustomBranch(t *testing.T) {
+	tmpDir := t.TempDir()
+	originDir := filepath.Join(tmpDir, "origin_custom.git")
+	_ = os.MkdirAll(originDir, 0755)
+	runGitCmd(t, originDir, "init", "--bare")
+
+	// Create a temp repo to push custom branch to origin
+	seederDir := filepath.Join(tmpDir, "seeder")
+	runGitCmd(t, tmpDir, "clone", originDir, "seeder")
+	runGitCmd(t, seederDir, "config", "user.name", "Test User")
+	runGitCmd(t, seederDir, "config", "user.email", "test@example.com")
+	runGitCmd(t, seederDir, "checkout", "-b", "custom_branch")
+	_ = os.WriteFile(filepath.Join(seederDir, "seed.txt"), []byte("seed"), 0644)
+	runGitCmd(t, seederDir, "add", "seed.txt")
+	runGitCmd(t, seederDir, "commit", "-m", "seed commit")
+	runGitCmd(t, seederDir, "push", "origin", "custom_branch")
+
+	adoptDir := filepath.Join(tmpDir, "adopt_custom")
+	_ = os.MkdirAll(adoptDir, 0755)
+	_ = os.WriteFile(filepath.Join(adoptDir, "local.txt"), []byte("local"), 0644)
+
+	err := EnsureRepo(context.Background(), adoptDir, originDir, "")
+	if err != nil {
+		t.Fatalf("EnsureRepo failed for custom branch: %v", err)
+	}
+}
+
+func TestSyncRepo_PostPullRevParseFailure(t *testing.T) {
+	_, repoA, repoB := setupGitRepos(t)
+
+	// Add post-merge hook to repoB that removes .git/HEAD
+	hooksDir := filepath.Join(repoB, ".git", "hooks")
+	_ = os.MkdirAll(hooksDir, 0755)
+	postMergeHook := filepath.Join(hooksDir, "post-merge")
+	hookContent := "#!/bin/sh\nrm -f .git/HEAD\n"
+	if err := os.WriteFile(postMergeHook, []byte(hookContent), 0755); err != nil {
+		t.Fatalf("failed to write hook: %v", err)
+	}
+
+	// Commit on repoA and push
+	f := filepath.Join(repoA, "trigger.txt")
+	_ = os.WriteFile(f, []byte("trigger"), 0644)
+	runGitCmd(t, repoA, "add", "trigger.txt")
+	runGitCmd(t, repoA, "commit", "-m", "trigger commit")
+	runGitCmd(t, repoA, "push", "origin", "HEAD")
+
+	// SyncRepo should pull, trigger the hook which deletes HEAD, and then fail on rev-parse HEAD after pull
+	hasChanges, err := SyncRepo(context.Background(), repoB, nil)
+	if err == nil {
+		t.Errorf("expected error when rev-parse HEAD fails after pull, got nil")
+	}
+	if hasChanges {
+		t.Errorf("expected hasChanges=false on error")
+	}
+}
+
+
 
 

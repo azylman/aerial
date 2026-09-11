@@ -160,3 +160,34 @@ func TestFormatQuotaPauseMessage(t *testing.T) {
 		t.Errorf("Expected paused automated retries notice, got: %s", msgCircuit)
 	}
 }
+
+func TestGenerateDynamicNotification_FailureCases(t *testing.T) {
+	// 1. Runner returns failure output classified by ClassifyError
+	mockFailRunner := func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+		return "Error: model is overloaded with error 503", "Service Unavailable", 1, nil
+	}
+	res := GenerateDynamicNotification("agy", "test-key", "some context", mockFailRunner)
+	if !strings.Contains(res, "darling") && !strings.Contains(res, "Apologies") {
+		t.Errorf("Expected static fallback on failure classification, got %q", res)
+	}
+
+	// 2. Runner returns empty response in parsed output
+	mockEmptyRunner := func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+		return `{"response": "   "}`, "", 0, nil
+	}
+	resEmpty := GenerateDynamicNotification("agy", "test-key", "some context", mockEmptyRunner)
+	if !strings.Contains(resEmpty, "darling") && !strings.Contains(resEmpty, "Apologies") {
+		t.Errorf("Expected static fallback on empty response, got %q", resEmpty)
+	}
+
+	// 3. Fallback descriptions triggers
+	resPoison := GeneratePoisonPillMessage("agy", "test-key", "crash prompt", mockFailRunner)
+	if !strings.Contains(resPoison, "crashes and had to be skipped") {
+		t.Errorf("Expected poison pill fallback, got %q", resPoison)
+	}
+
+	resSession := GenerateSessionResetMessage("agy", "test-key", mockFailRunner)
+	if !strings.Contains(resSession, "previous session context") {
+		t.Errorf("Expected session reset fallback, got %q", resSession)
+	}
+}

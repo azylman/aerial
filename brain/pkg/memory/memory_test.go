@@ -894,6 +894,291 @@ func TestMemory_Search_EdgeCases(t *testing.T) {
 	}
 }
 
+func TestMemory_NewClient_Variants(t *testing.T) {
+	// 1. Config pointer
+	cfg := config.NewFromData(&config.ConfigData{
+		Ollama: config.OllamaConfig{BaseURL: "http://localhost:11434"},
+	})
+	c1 := NewClient(cfg, "/tmp/root1")
+	if len(c1.Roots()) != 1 || c1.Roots()[0] != "/tmp/root1" {
+		t.Errorf("unexpected roots: %v", c1.Roots())
+	}
+	// 2. Fallback / default (nil / unknown type)
+	c2 := NewClient(12345)
+	if c2 == nil || c2.BaseURL() != DefaultOllamaURL {
+		t.Errorf("unexpected client from unknown type: %v", c2)
+	}
+	// 3. Roots on nil receiver
+	var nilClient *Client
+	if nilClient.Roots() != nil {
+		t.Errorf("expected nil roots on nil client")
+	}
+	// 4. getOllamaConfig on nil receiver and nil config
+	cfgNil := nilClient.getOllamaConfig()
+	if cfgNil.BaseURL != DefaultOllamaURL {
+		t.Errorf("expected default ollama url, got %s", cfgNil.BaseURL)
+	}
+	cEmpty := &Client{}
+	cfgEmpty := cEmpty.getOllamaConfig()
+	if cfgEmpty.BaseURL != DefaultOllamaURL {
+		t.Errorf("expected default ollama url, got %s", cfgEmpty.BaseURL)
+	}
+}
+
+func TestMemory_Client_DoRequestErrors(t *testing.T) {
+	// 1. HTTP 500 status code
+	ts500 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("internal error"))
+	}))
+	defer ts500.Close()
+	c500 := NewClient(ts500.URL)
+	_, err := c500.GenerateEmbedding(context.Background(), "test", false, 0)
+	if err == nil || !strings.Contains(err.Error(), "ollama HTTP 500") {
+		t.Errorf("expected HTTP 500 error, got %v", err)
+	}
+
+	// 2. HTTP 200 with invalid JSON
+	tsBadJSON := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("not valid json"))
+	}))
+	defer tsBadJSON.Close()
+	cBadJSON := NewClient(tsBadJSON.URL)
+	_, err = cBadJSON.GenerateEmbedding(context.Background(), "test", false, 0)
+	if err == nil {
+		t.Errorf("expected json unmarshal error, got nil")
+	}
+
+	// 3. HTTP 200 with error field
+	tsErrResp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"error":"model not found"}`))
+	}))
+	defer tsErrResp.Close()
+	cErrResp := NewClient(tsErrResp.URL)
+	_, err = cErrResp.GenerateEmbedding(context.Background(), "test", false, 0)
+	if err == nil || !strings.Contains(err.Error(), "model not found") {
+		t.Errorf("expected model not found error, got %v", err)
+	}
+
+	// 4. HTTP 200 with empty embedding
+	tsEmptyEmb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"embedding":[]}`))
+	}))
+	defer tsEmptyEmb.Close()
+	cEmptyEmb := NewClient(tsEmptyEmb.URL)
+	_, err = cEmptyEmb.GenerateEmbedding(context.Background(), "test", false, 0)
+	if err == nil || !strings.Contains(err.Error(), "empty embedding returned") {
+		t.Errorf("expected empty embedding error, got %v", err)
+	}
+}
+
+type errFactStore struct {
+	db.FactStore
+}
+
+func (e *errFactStore) SearchSimilarFacts(ctx context.Context, queryVector []float32, maxFacts int, minScore float64, category string) ([]db.Fact, error) {
+	return nil, fmt.Errorf("search failed")
+}
+
+type errInsertFactStore struct {
+	db.FactStore
+}
+
+func (e *errInsertFactStore) GetMaxMessageRowID(ctx context.Context, threadID string) (int64, error) {
+	return 1, nil
+}
+func (e *errInsertFactStore) UpdateConversationFactWatermark(ctx context.Context, threadID string, maxRowID int64) error {
+	return nil
+}
+func (e *errInsertFactStore) GetFactsByThreadWithEmbeddings(ctx context.Context, threadID string) ([]db.FactWithEmbedding, error) {
+	return nil, nil
+}
+func (e *errInsertFactStore) InsertFact(ctx context.Context, category, factText string, importance float64, threadID string, embedding []float32) (int64, error) {
+	return 0, fmt.Errorf("simulated insert error")
+}
+
+func TestMemory_RetrieveRelevantFacts_TypesAndErrors(t *testing.T) {
+	// 1. Long query > 1000 runes
+	tsSuccess := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"embedding":[0.1, 0.2]}`))
+	}))
+	defer tsSuccess.Close()
+	c := NewClient(tsSuccess.URL)
+
+	memDB, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer memDB.Close()
+
+	longQuery := strings.Repeat("hello world ", 100) // > 1000 chars
+	facts, err := RetrieveRelevantFacts(context.Background(), memDB, c, longQuery, 5)
+	if err != nil {
+		t.Errorf("expected nil error for long query, got %v", err)
+	}
+	_ = facts
+
+	// 2. Nil *sql.DB
+	var nilDB *sql.DB
+	facts, err = RetrieveRelevantFacts(context.Background(), nilDB, c, "hello", 5)
+	if facts != nil || err != nil {
+		t.Errorf("expected nil, nil for nil *sql.DB, got %v, %v", facts, err)
+	}
+
+	// 3. Unsupported database type
+	facts, err = RetrieveRelevantFacts(context.Background(), "not a database", c, "hello", 5)
+	if err == nil || !strings.Contains(err.Error(), "unsupported database type") {
+		t.Errorf("expected unsupported database type error, got %v", err)
+	}
+
+	// 4. FactStore interface directly
+	store := db.NewSQLStore(memDB)
+	facts, err = RetrieveRelevantFacts(context.Background(), store, c, "query", 5)
+	if err != nil {
+		t.Errorf("expected nil error for FactStore interface, got %v", err)
+	}
+
+	// 5. FactStore search error
+	errStore := &errFactStore{}
+	_, err = RetrieveRelevantFacts(context.Background(), errStore, c, "query", 5)
+	if err == nil {
+		t.Errorf("expected error from closed database in RetrieveRelevantFacts, got nil")
+	}
+}
+
+func TestMemory_Extractor_EdgeCases(t *testing.T) {
+	// 1. BackfillMissingEmbeddings nil store or client
+	n, err := BackfillMissingEmbeddings(context.Background(), nil, nil)
+	if n != 0 || err == nil {
+		t.Errorf("expected 0, err for nil store or client, got %d, %v", n, err)
+	}
+
+	// 2. ExtractActiveConversationFacts nil database / client / llmFunc
+	err = ExtractActiveConversationFacts(context.Background(), nil, nil, nil, 24)
+	if err == nil {
+		t.Errorf("expected error for nil args in ExtractActiveConversationFacts")
+	}
+
+	// 3. processThreadFacts nil database
+	err = processThreadFacts(context.Background(), nil, nil, nil, "")
+	if err == nil {
+		t.Errorf("expected error for nil database in processThreadFacts, got nil")
+	}
+
+	// 4. processThreadFacts empty factsJSON
+	memDB, _ := db.InitDB(":memory:")
+	defer memDB.Close()
+	c := NewClient("http://127.0.0.1:11434")
+	err = processThreadFacts(context.Background(), memDB, c, func(ctx context.Context, prompt string) (string, error) {
+		return "", nil
+	}, "th-123")
+	if err != nil {
+		t.Errorf("expected nil error for empty factsJSON, got %v", err)
+	}
+}
+
+type mockDBHolder struct {
+	dbtx db.DBTX
+}
+
+func (m *mockDBHolder) DB() db.DBTX {
+	return m.dbtx
+}
+
+func TestMemory_AdditionalCoverage(t *testing.T) {
+	// 1. search.go RankFacts len(scored) > topN
+	qVec := []float32{1.0, 0.0}
+	facts := []db.FactWithEmbedding{
+		{Fact: db.Fact{ID: 1, Category: "c", FactText: "t1", Importance: 1.0}, Embedding: []float32{1.0, 0.0}},
+		{Fact: db.Fact{ID: 2, Category: "c", FactText: "t2", Importance: 1.0}, Embedding: []float32{0.9, 0.1}},
+	}
+	res := RankFacts(qVec, facts, 0.1, 1)
+	if len(res) != 1 {
+		t.Errorf("expected 1 fact after topN truncation, got %d", len(res))
+	}
+
+	// 2. ollama.go GenerateEmbedding with empty prompt
+	c := NewClient("http://127.0.0.1:11434")
+	emb, err := c.GenerateEmbedding(context.Background(), "", false, 0)
+	if emb != nil || err == nil || !strings.Contains(err.Error(), "text cannot be empty") {
+		t.Errorf("expected 'text cannot be empty' error, got emb: %v, err: %v", emb, err)
+	}
+
+	// 3. ollama.go getOllamaConfig with cfg.Current() == nil
+	emptyCfg := config.NewFromData(nil)
+	cEmptyCfg := New(emptyCfg)
+	cfgRes := cEmptyCfg.getOllamaConfig()
+	if cfgRes.BaseURL != DefaultOllamaURL {
+		t.Errorf("expected default ollama URL for uninitialized config, got %s", cfgRes.BaseURL)
+	}
+
+	// 4. extractor.go BackfillMissingEmbeddings with DB() holder
+	memDB, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer memDB.Close()
+
+	holder := &mockDBHolder{dbtx: memDB}
+	n, err := BackfillMissingEmbeddings(context.Background(), holder, c)
+	if err != nil || n != 0 {
+		t.Errorf("expected 0, nil from holder, got %d, %v", n, err)
+	}
+
+	// 5. extractor.go BackfillMissingEmbeddings with cancelled context during iteration
+	memDB2, _ := db.InitDB(":memory:")
+	defer memDB2.Close()
+	_, _ = memDB2.Exec("INSERT INTO facts (category, fact_text, importance) VALUES ('test', 'fact 1', 1.0), ('test', 'fact 2', 1.0)")
+	cancelCtx, cancel := context.WithCancel(context.Background())
+	tsCancel := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cancel()
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"embedding":[0.1, 0.2]}`))
+	}))
+	defer tsCancel.Close()
+	cCancel := NewClient(tsCancel.URL)
+	_, err = BackfillMissingEmbeddings(cancelCtx, memDB2, cCancel)
+	if err == nil {
+		t.Errorf("expected context cancellation error, got nil")
+	}
+
+	// 6. extractor.go BackfillMissingEmbeddings UpdateFactEmbedding error
+	memDB3, _ := db.InitDB(":memory:")
+	_, _ = memDB3.Exec("INSERT INTO facts (category, fact_text, importance) VALUES ('test', 'fact 1', 1.0)")
+	tsUpdateErr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		memDB3.Close()
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"embedding":[0.1, 0.2]}`))
+	}))
+	defer tsUpdateErr.Close()
+	cUpdateErr := NewClient(tsUpdateErr.URL)
+	_, _ = BackfillMissingEmbeddings(context.Background(), memDB3, cUpdateErr)
+
+	// 7. extractor.go ExtractActiveConversationFacts with db.FactStore directly
+	store := db.NewSQLStore(memDB)
+	err = ExtractActiveConversationFacts(context.Background(), store, c, func(ctx context.Context, p string) (string, error) { return "", nil }, 24)
+	if err != nil {
+		t.Errorf("expected nil error for ExtractActiveConversationFacts with FactStore, got %v", err)
+	}
+
+	// 8. extractor.go loadThreadTranscript with db.SessionStore directly
+	sessStore := db.NewSQLStore(memDB)
+	tmpDir := t.TempDir()
+	cWithRoot := NewClient("", tmpDir)
+	_, _ = loadThreadTranscript(sessStore, cWithRoot, "th-sess-test")
+
+	// 9. extractor.go processThreadFacts with InsertFact error
+	insErrStore := &errInsertFactStore{}
+	_ = processThreadFacts(context.Background(), insErrStore, c, func(ctx context.Context, p string) (string, error) {
+		return `{"facts":[{"category":"user_pref","fact_text":"Fact to fail","importance_score":1.0}]}`, nil
+	}, "th-ins-err")
+}
+
+
 
 
 
