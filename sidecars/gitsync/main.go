@@ -48,15 +48,11 @@ func SanitizeLog(input string) string {
 // SanitizeAll scrubs pattern-matched tokens as well as known literal secret values.
 func (d *SyncDaemon) SanitizeAll(input string) string {
 	out := SanitizeLog(input)
-	secrets := []string{
+	secrets := append([]string{
 		d.pat,
 		d.discordToken,
 		d.discordWebhookURL,
-		os.Getenv("POSTGRES_PASSWORD"),
-		os.Getenv("HA_TOKEN"),
-		os.Getenv("GEMINI_API_KEY"),
-		os.Getenv("GITHUB_PAT"),
-	}
+	}, d.extraSecrets...)
 	for _, s := range secrets {
 		s = strings.TrimSpace(s)
 		if len(s) >= 4 {
@@ -124,6 +120,28 @@ type GitSyncStatusResponse struct {
 	Repos         map[string]RepoStatus `json:"repos"`
 }
 
+// ComposeExecutor executes docker compose commands.
+type ComposeExecutor func(ctx context.Context, dir string, args ...string) (stdout []byte, stderr []byte, err error)
+
+func defaultComposeExecutor(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+	cmdArgs := append([]string{"compose"}, args...)
+	cmd := exec.CommandContext(ctx, "docker", cmdArgs...)
+	cmd.Dir = dir
+	cmd.Cancel = func() error {
+		if cmd.Process != nil {
+			return cmd.Process.Signal(syscall.SIGTERM)
+		}
+		return nil
+	}
+	cmd.WaitDelay = 10 * time.Second
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	return stdout.Bytes(), stderr.Bytes(), err
+}
+
 // SyncDaemon coordinates periodic and on-demand repository synchronizations.
 type SyncDaemon struct {
 	sfg           singleflight.Group
@@ -142,6 +160,10 @@ type SyncDaemon struct {
 	statusMu      sync.RWMutex
 	triggerFn     func() ([]RepoSyncResult, error)
 
+	brainInternalURL string
+	extraSecrets     []string
+	composeExecutor  ComposeExecutor
+
 	// Concurrency & Quarantine
 	repoLocksMu        sync.Mutex
 	repoLocks          map[string]*sync.Mutex
@@ -159,6 +181,13 @@ type SyncDaemon struct {
 	alertDedupeMu     sync.Mutex
 	lastAlertTimes    map[string]time.Time
 	alertHTTPClient   *http.Client
+}
+
+func (d *SyncDaemon) getComposeExecutor() ComposeExecutor {
+	if d != nil && d.composeExecutor != nil {
+		return d.composeExecutor
+	}
+	return defaultComposeExecutor
 }
 
 // resolveGitDir checks if repoPath contains a .git directory or a .git file (e.g., worktree/submodule).
@@ -254,18 +283,17 @@ func (d *SyncDaemon) getComposeArgs(composeDir string, subCmd ...string) []strin
 	}
 
 	configDir := d.configDir
-	if configDir == "" {
-		configDir = os.Getenv("AERIAL_CONFIG_DIR")
-		if configDir == "" {
-			configDir = "/share/aerial-config"
-		}
-	}
 
-	overrideCandidates := []string{
+	var overrideCandidates []string
+	overrideCandidates = append(overrideCandidates,
 		filepath.Join(composeDir, "docker-compose.override.yml"),
 		filepath.Join(composeDir, "docker-compose.override.yaml"),
-		filepath.Join(configDir, "docker-compose.override.yml"),
-		filepath.Join(configDir, "docker-compose.override.yaml"),
+	)
+	if configDir != "" {
+		overrideCandidates = append(overrideCandidates,
+			filepath.Join(configDir, "docker-compose.override.yml"),
+			filepath.Join(configDir, "docker-compose.override.yaml"),
+		)
 	}
 
 	seen := make(map[string]bool)
@@ -290,14 +318,10 @@ func (d *SyncDaemon) ValidateCompose(ctx context.Context, composeDir string) err
 		return fmt.Errorf("compose file not found: %w", err)
 	}
 
-	args := append([]string{"compose"}, d.getComposeArgs(composeDir, "config", "--quiet")...)
-	cmd := exec.CommandContext(ctx, "docker", args...)
-	cmd.Dir = composeDir
-	var errBuf bytes.Buffer
-	cmd.Stderr = &errBuf
-
-	if err := cmd.Run(); err != nil {
-		sanitized := SanitizeLog(strings.TrimSpace(errBuf.String()))
+	args := d.getComposeArgs(composeDir, "config", "--quiet")
+	_, stderr, err := d.getComposeExecutor()(ctx, composeDir, args...)
+	if err != nil {
+		sanitized := SanitizeLog(strings.TrimSpace(string(stderr)))
 		return fmt.Errorf("compose validation failed: %s (%w)", sanitized, err)
 	}
 	return nil
@@ -327,19 +351,14 @@ func parseComposeServices(output string) []string {
 // GetReconcileTargets queries docker compose config --services to discover all defined services,
 // filtering out the gitsync sidecar service.
 func (d *SyncDaemon) GetReconcileTargets(ctx context.Context, composeDir string) ([]string, error) {
-	args := append([]string{"compose"}, d.getComposeArgs(composeDir, "config", "--services")...)
-	cmd := exec.CommandContext(ctx, "docker", args...)
-	cmd.Dir = composeDir
-	var stdoutBuf, stderrBuf bytes.Buffer
-	cmd.Stdout = &stdoutBuf
-	cmd.Stderr = &stderrBuf
-
-	if err := cmd.Run(); err != nil {
-		sanitized := SanitizeLog(strings.TrimSpace(stderrBuf.String()))
+	args := d.getComposeArgs(composeDir, "config", "--services")
+	stdout, stderr, err := d.getComposeExecutor()(ctx, composeDir, args...)
+	if err != nil {
+		sanitized := SanitizeLog(strings.TrimSpace(string(stderr)))
 		return nil, fmt.Errorf("failed to discover compose services: %s (%w)", sanitized, err)
 	}
 
-	return parseComposeServices(stdoutBuf.String()), nil
+	return parseComposeServices(string(stdout)), nil
 }
 
 var snowflakeRegex = regexp.MustCompile(`^\d{17,20}$`)
@@ -444,28 +463,21 @@ type rawSystemConfig struct {
 
 // ResolveAlertChannel dynamically resolves the Discord alert channel name or snowflake ID.
 // Precedence:
-// 1. Explicit DISCORD_CHANNEL environment variable (if non-empty)
+// 1. Explicit DiscordChannel configured on daemon (if non-empty)
 // 2. system_channel from config.yaml in configDir (/share/aerial-config/config.yaml)
 // 3. Fallback to "aerial-dev"
 func (d *SyncDaemon) ResolveAlertChannel() string {
 	if ch := strings.TrimSpace(d.discordChannel); ch != "" {
 		return ch
 	}
-	if ch := strings.TrimSpace(os.Getenv("DISCORD_CHANNEL")); ch != "" {
-		return ch
-	}
 	configDir := d.configDir
-	if configDir == "" {
-		configDir = os.Getenv("AERIAL_CONFIG_DIR")
-		if configDir == "" {
-			configDir = "/share/aerial-config"
-		}
-	}
-	configPath := filepath.Join(configDir, "config.yaml")
-	if data, err := os.ReadFile(configPath); err == nil {
-		var raw rawSystemConfig
-		if err := yaml.Unmarshal(data, &raw); err == nil && strings.TrimSpace(raw.SystemChannel) != "" {
-			return strings.TrimSpace(raw.SystemChannel)
+	if configDir != "" {
+		configPath := filepath.Join(configDir, "config.yaml")
+		if data, err := os.ReadFile(configPath); err == nil {
+			var raw rawSystemConfig
+			if err := yaml.Unmarshal(data, &raw); err == nil && strings.TrimSpace(raw.SystemChannel) != "" {
+				return strings.TrimSpace(raw.SystemChannel)
+			}
 		}
 	}
 	return "aerial-dev"
@@ -527,12 +539,6 @@ func (d *SyncDaemon) SendDiscordAlert(ctx context.Context, title, repoPath, faul
 	}
 
 	token := strings.TrimSpace(d.discordToken)
-	if token == "" {
-		token = strings.TrimSpace(os.Getenv("DISCORD_BOT_TOKEN"))
-		if token == "" {
-			token = strings.TrimSpace(os.Getenv("DISCORD_TOKEN"))
-		}
-	}
 	if token == "" {
 		log.Printf("[GitSync:Discord] Notice: No DISCORD_BOT_TOKEN or DISCORD_WEBHOOK_URL configured, skipping alert")
 		return
@@ -704,9 +710,6 @@ func (d *SyncDaemon) executeRollback(ctx context.Context, pending []ComposeChang
 	}
 
 	composeDir := d.composeDir
-	if composeDir == "" {
-		composeDir = "/share/aerial"
-	}
 
 	valCtx, valCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer valCancel()
@@ -721,15 +724,13 @@ func (d *SyncDaemon) executeRollback(ctx context.Context, pending []ComposeChang
 	}
 
 	upArgs := append([]string{"up", "-d", "--remove-orphans", "--no-build"}, restoredTargets...)
-	args := append([]string{"compose"}, d.getComposeArgs(composeDir, upArgs...)...)
-	cmdUp := exec.CommandContext(ctx, "docker", args...)
-	cmdUp.Dir = composeDir
-	outUp, errUp := cmdUp.CombinedOutput()
+	stdoutUp, stderrUp, errUp := d.getComposeExecutor()(ctx, composeDir, d.getComposeArgs(composeDir, upArgs...)...)
+	combinedUp := string(append(stdoutUp, stderrUp...))
 	if errUp != nil {
-		log.Printf("[GitSync:GitOps] CRITICAL: Re-applying restored configuration failed: %s (%v)", SanitizeLog(string(outUp)), errUp)
-		d.SendDiscordAlert(context.Background(), "CRITICAL: Rollback Re-Apply Failed", composeDir, "", "", "rollback re-apply", fmt.Sprintf("Failed to restore containers to previous configuration: %s (%v)", SanitizeLog(string(outUp)), errUp))
+		log.Printf("[GitSync:GitOps] CRITICAL: Re-applying restored configuration failed: %s (%v)", SanitizeLog(combinedUp), errUp)
+		d.SendDiscordAlert(context.Background(), "CRITICAL: Rollback Re-Apply Failed", composeDir, "", "", "rollback re-apply", fmt.Sprintf("Failed to restore containers to previous configuration: %s (%v)", SanitizeLog(combinedUp), errUp))
 	} else {
-		log.Printf("[GitSync:GitOps] Restored previous container topology successfully (%s)", SanitizeLog(string(outUp)))
+		log.Printf("[GitSync:GitOps] Restored previous container topology successfully (%s)", SanitizeLog(combinedUp))
 	}
 }
 
@@ -744,9 +745,6 @@ func (d *SyncDaemon) ReconcileCompose(parentCtx context.Context) (err error) {
 	}()
 
 	composeDir := d.composeDir
-	if composeDir == "" {
-		composeDir = "/share/aerial"
-	}
 
 	if _, statErr := os.Stat(filepath.Join(composeDir, "docker-compose.yml")); statErr != nil {
 		log.Printf("[GitSync:GitOps] Notice: No docker-compose.yml found in %s, skipping reconciliation", composeDir)
@@ -785,20 +783,9 @@ func (d *SyncDaemon) ReconcileCompose(parentCtx context.Context) (err error) {
 	log.Printf("[GitSync:GitOps] Reconciling Docker Compose state for %d services (%v) in %s...", len(targets), targets, composeDir)
 
 	upArgs := append([]string{"up", "-d", "--no-build"}, targets...)
-	args := append([]string{"compose"}, d.getComposeArgs(composeDir, upArgs...)...)
-	cmd := exec.CommandContext(ctx, "docker", args...)
-	cmd.Dir = composeDir
-	cmd.Cancel = func() error {
-		log.Printf("[GitSync:GitOps] Compose apply timeout reached, sending SIGTERM...")
-		if cmd.Process != nil {
-			return cmd.Process.Signal(syscall.SIGTERM)
-		}
-		return nil
-	}
-	cmd.WaitDelay = 10 * time.Second
-
-	out, cmdErr := cmd.CombinedOutput()
-	sanitized := SanitizeLog(strings.TrimSpace(string(out)))
+	stdout, stderr, cmdErr := d.getComposeExecutor()(ctx, composeDir, d.getComposeArgs(composeDir, upArgs...)...)
+	combined := string(append(stdout, stderr...))
+	sanitized := SanitizeLog(strings.TrimSpace(combined))
 
 	if cmdErr != nil {
 		log.Printf("[GitSync:GitOps] ERROR: docker compose up failed: %s (%v). Initiating automated rollback.", sanitized, cmdErr)
@@ -1089,7 +1076,7 @@ func (d *SyncDaemon) TriggerSync() ([]RepoSyncResult, error) {
 			status = "error"
 		} else if anyChanged {
 			status = "synced"
-			go notifyBrainReload()
+			go d.notifyBrainReload()
 		}
 		metrics.RecordSyncRequest("periodic", status)
 
@@ -1103,10 +1090,10 @@ func (d *SyncDaemon) TriggerSync() ([]RepoSyncResult, error) {
 }
 
 // notifyBrainReload sends a best-effort POST request to Brain's internal reload endpoint.
-func notifyBrainReload() {
-	brainURL := os.Getenv("BRAIN_INTERNAL_URL")
+func (d *SyncDaemon) notifyBrainReload() {
+	brainURL := d.brainInternalURL
 	if brainURL == "" {
-		brainURL = "http://brain:8080/internal/reload"
+		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -1292,12 +1279,24 @@ type DaemonConfig struct {
 	DiscordToken      string
 	DiscordChannel    string
 	DiscordWebhookURL string
+	BrainInternalURL  string
+	ExtraSecrets      []string
+	ComposeExecutor   ComposeExecutor
 }
 
 // NewDaemon initializes a new SyncDaemon from config.
 func NewDaemon(cfg DaemonConfig) *SyncDaemon {
 	if cfg.Interval <= 0 {
 		cfg.Interval = 60 * time.Second
+	}
+	if cfg.ComposeDir == "" {
+		cfg.ComposeDir = "/share/aerial"
+	}
+	if cfg.ConfigDir == "" {
+		cfg.ConfigDir = "/share/aerial-config"
+	}
+	if cfg.BrainInternalURL == "" {
+		cfg.BrainInternalURL = "http://brain:8080/internal/reload"
 	}
 	return &SyncDaemon{
 		repos:              cfg.Repos,
@@ -1309,6 +1308,9 @@ func NewDaemon(cfg DaemonConfig) *SyncDaemon {
 		discordToken:       cfg.DiscordToken,
 		discordChannel:     cfg.DiscordChannel,
 		discordWebhookURL:  cfg.DiscordWebhookURL,
+		brainInternalURL:   cfg.BrainInternalURL,
+		extraSecrets:       cfg.ExtraSecrets,
+		composeExecutor:    cfg.ComposeExecutor,
 		reconcileCh:        make(chan struct{}, 1),
 		repoLocks:          make(map[string]*sync.Mutex),
 		quarantinedCommits: make(map[QuarantineKey]QuarantineRecord),
@@ -1413,14 +1415,19 @@ func RunDaemon(ctx context.Context, cfg DaemonConfig) error {
 	}
 }
 
-// NewConfigFromEnv extracts DaemonConfig from environment variables with sensible defaults.
-func NewConfigFromEnv() DaemonConfig {
-	port := os.Getenv("PORT")
+// NewConfigFromLookup extracts DaemonConfig using a provided lookup function.
+// If lookup is nil, it safely defaults to returning empty strings without ambient env access.
+func NewConfigFromLookup(lookup func(string) string) DaemonConfig {
+	if lookup == nil {
+		lookup = func(string) string { return "" }
+	}
+
+	port := lookup("PORT")
 	if port == "" {
 		port = "8080"
 	}
 
-	rawRepos := os.Getenv("SYNC_REPOS")
+	rawRepos := lookup("SYNC_REPOS")
 	if rawRepos == "" {
 		rawRepos = "/share/aerial-config,/share/aerial"
 	}
@@ -1433,7 +1440,7 @@ func NewConfigFromEnv() DaemonConfig {
 		}
 	}
 
-	intervalStr := os.Getenv("SYNC_INTERVAL")
+	intervalStr := lookup("SYNC_INTERVAL")
 	interval := 60 * time.Second
 	if intervalStr != "" {
 		if d, err := time.ParseDuration(intervalStr); err == nil && d > 0 {
@@ -1441,18 +1448,18 @@ func NewConfigFromEnv() DaemonConfig {
 		}
 	}
 
-	pat := os.Getenv("GITHUB_PAT")
-	configRepoURL := os.Getenv("AERIAL_CONFIG_REPO_URL")
+	pat := lookup("GITHUB_PAT")
+	configRepoURL := lookup("AERIAL_CONFIG_REPO_URL")
 	if configRepoURL == "" {
 		configRepoURL = "https://github.com/azylman/aerial-config.git"
 	}
 
-	composeDir := os.Getenv("AERIAL_PROJECT_DIR")
+	composeDir := lookup("AERIAL_PROJECT_DIR")
 	if composeDir == "" {
 		composeDir = "/share/aerial"
 	}
 
-	configDir := os.Getenv("AERIAL_CONFIG_DIR")
+	configDir := lookup("AERIAL_CONFIG_DIR")
 	if configDir == "" {
 		configDir = "/share/aerial-config"
 	}
@@ -1462,12 +1469,33 @@ func NewConfigFromEnv() DaemonConfig {
 		composeDir: "https://github.com/azylman/aerial.git",
 	}
 
-	discordToken := os.Getenv("DISCORD_BOT_TOKEN")
+	discordToken := lookup("DISCORD_BOT_TOKEN")
 	if discordToken == "" {
-		discordToken = os.Getenv("DISCORD_TOKEN")
+		discordToken = lookup("DISCORD_TOKEN")
 	}
-	discordChannel := os.Getenv("DISCORD_CHANNEL")
-	discordWebhookURL := os.Getenv("DISCORD_WEBHOOK_URL")
+	discordChannel := lookup("DISCORD_CHANNEL")
+	discordWebhookURL := lookup("DISCORD_WEBHOOK_URL")
+
+	brainInternalURL := lookup("BRAIN_INTERNAL_URL")
+	if brainInternalURL == "" {
+		brainInternalURL = "http://brain:8080/internal/reload"
+	}
+
+	extraSecretCandidates := []string{
+		lookup("POSTGRES_PASSWORD"),
+		lookup("HA_TOKEN"),
+		lookup("GEMINI_API_KEY"),
+		lookup("GITHUB_PAT"),
+	}
+	var extraSecrets []string
+	seenSecrets := make(map[string]bool)
+	for _, s := range extraSecretCandidates {
+		s = strings.TrimSpace(s)
+		if len(s) >= 4 && !seenSecrets[s] {
+			seenSecrets[s] = true
+			extraSecrets = append(extraSecrets, s)
+		}
+	}
 
 	return DaemonConfig{
 		Port:              port,
@@ -1480,7 +1508,14 @@ func NewConfigFromEnv() DaemonConfig {
 		DiscordToken:      discordToken,
 		DiscordChannel:    discordChannel,
 		DiscordWebhookURL: discordWebhookURL,
+		BrainInternalURL:  brainInternalURL,
+		ExtraSecrets:      extraSecrets,
 	}
+}
+
+// NewConfigFromEnv extracts DaemonConfig from environment variables with sensible defaults.
+func NewConfigFromEnv() DaemonConfig {
+	return NewConfigFromLookup(os.Getenv)
 }
 
 func main() {
