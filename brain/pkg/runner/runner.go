@@ -219,11 +219,18 @@ func ParseAgyOutput(stdout string) (*AgyResponse, error) {
 	return resultResp, nil
 }
 
-// IsSilentSentinel checks whether stdout is empty or consists solely of whitespace.
-// Returns true if empty string or whitespace.
+var silentWaitRegex = regexp.MustCompile(`(?i)^wait for (background task|subagent|remaining subagent|the final subagent).*\.?$`)
+
+// IsSilentSentinel checks whether stdout is empty, consists solely of whitespace,
+// or matches internal CLI task-wait notices that should not be delivered to users.
+// Returns true if empty string, whitespace, or internal wait chatter.
 // Returns false for visible conversational responses.
 func IsSilentSentinel(stdout string) bool {
-	return strings.TrimSpace(stdout) == ""
+	trimmed := strings.TrimSpace(stdout)
+	if trimmed == "" {
+		return true
+	}
+	return silentWaitRegex.MatchString(trimmed)
 }
 
 var (

@@ -184,6 +184,10 @@ func TestIsSilentSentinel(t *testing.T) {
 	}{
 		{name: "Empty string", stdout: "", expected: true},
 		{name: "Whitespace only", stdout: "   \n\t\r  ", expected: true},
+		{name: "Background task wait notice", stdout: "Wait for background task task-645 to complete.", expected: true},
+		{name: "Subagent panel wait notice", stdout: "Wait for subagent review panel to complete audits.", expected: true},
+		{name: "Remaining subagents wait notice", stdout: "Wait for remaining subagents to complete their audits.", expected: true},
+		{name: "Final subagent wait notice", stdout: "Wait for the final subagent to complete the audit.", expected: true},
 		{name: "Visible conversational text", stdout: "Hello world!", expected: false},
 		{name: "Visible conversational text", stdout: "Here is your requested answer.", expected: false},
 	}
