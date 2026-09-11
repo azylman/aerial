@@ -16,10 +16,10 @@ func TestFormatToolStatus(t *testing.T) {
 		elapsed  time.Duration
 		expected string
 	}{
-		{"view_file", 1200 * time.Millisecond, "⚡ Running view_file... (1.2s)"},
-		{"mcp_docker_list_containers", 2500 * time.Millisecond, "⚡ Running docker_list_containers... (2.5s)"},
-		{"call_mcp_tool_github_create_pr", 3100 * time.Millisecond, "⚡ Running github_create_pr... (3.1s)"},
-		{"", 500 * time.Millisecond, "⚡ Running tool... (0.5s)"},
+		{"view_file", 1200 * time.Millisecond, "⚡ Running `view_file`... (1.2s)"},
+		{"mcp_docker_list_containers", 2500 * time.Millisecond, "⚡ Running `docker_list_containers`... (2.5s)"},
+		{"call_mcp_tool_github_create_pr", 3100 * time.Millisecond, "⚡ Running `github_create_pr`... (3.1s)"},
+		{"", 500 * time.Millisecond, "⚡ Running `tool`... (0.5s)"},
 	}
 
 	for _, tt := range tests {
@@ -132,6 +132,9 @@ func TestStatusUpdater_ActiveToolBypassesDebounceAndFlushes(t *testing.T) {
 	updater.Stop()
 	updater.DeleteStatusMessage()
 
+	// Wait for async deletion goroutine
+	time.Sleep(30 * time.Millisecond)
+
 	if deletes.Load() != 1 {
 		t.Errorf("expected 1 delete at turn cleanup, got %d", deletes.Load())
 	}
@@ -173,3 +176,148 @@ func TestStatusUpdater_CircuitBreakerOn404(t *testing.T) {
 		t.Errorf("expected circuit breaker to halt edits after 404, got %d edits", edits.Load())
 	}
 }
+
+func TestStatusUpdater_CircuitBreakerOn403(t *testing.T) {
+	var sends atomic.Int32
+
+	updater := NewStatusUpdater(nil, "thread-403", true,
+		WithStatusInterval(10*time.Millisecond),
+		WithStatusDebounce(0),
+		WithStatusMockFuncs(
+			func(channelID, text string) (string, error) {
+				sends.Add(1)
+				return "", errors.New("HTTP 403 Forbidden, 50013 Missing Permissions")
+			},
+			func(channelID, messageID, text string) error {
+				return nil
+			},
+			func(channelID, messageID string) error {
+				return nil
+			},
+		),
+	)
+
+	updater.HandleStep(&runner.StepUpdateEvent{StepType: "tool", ToolName: "test_tool", State: "ACTIVE"})
+	time.Sleep(20 * time.Millisecond)
+
+	// Subsequent ticks should not attempt sendFunc again
+	time.Sleep(30 * time.Millisecond)
+	updater.Stop()
+
+	if sends.Load() != 1 {
+		t.Errorf("expected circuit breaker to stop sends after 403, got %d sends", sends.Load())
+	}
+}
+
+func TestStatusUpdater_ZombieLeakPrevention(t *testing.T) {
+	var sends atomic.Int32
+	var deletes atomic.Int32
+	sendStarted := make(chan struct{})
+	sendRelease := make(chan struct{})
+
+	updater := NewStatusUpdater(nil, "thread-zombie", true,
+		WithStatusInterval(5*time.Millisecond),
+		WithStatusDebounce(0),
+		WithStatusMockFuncs(
+			func(channelID, text string) (string, error) {
+				sends.Add(1)
+				close(sendStarted)
+				<-sendRelease
+				return "msg-slow-send", nil
+			},
+			func(channelID, messageID, text string) error {
+				return nil
+			},
+			func(channelID, messageID string) error {
+				if messageID == "msg-slow-send" {
+					deletes.Add(1)
+				}
+				return nil
+			},
+		),
+	)
+
+	updater.HandleStep(&runner.StepUpdateEvent{StepType: "tool", ToolName: "slow_tool", State: "ACTIVE"})
+	<-sendStarted // Wait until sendFunc is actively in flight
+
+	// Turn finishes or errors out concurrently while sendFunc is executing
+	updater.DeleteStatusMessage()
+
+	// Unblock sendFunc
+	close(sendRelease)
+	time.Sleep(20 * time.Millisecond)
+	updater.Stop()
+
+	// The message created by sendFunc must have been deleted to avoid zombie leak
+	if deletes.Load() != 1 {
+		t.Errorf("expected zombie message to be cleaned up immediately, got %d deletes", deletes.Load())
+	}
+}
+
+func TestStatusUpdater_LiveTimerRefreshDuringLongTool(t *testing.T) {
+	var edits atomic.Int32
+
+	updater := NewStatusUpdater(nil, "thread-timer", true,
+		WithStatusInterval(10*time.Millisecond),
+		WithStatusDebounce(0),
+		WithStatusMockFuncs(
+			func(channelID, text string) (string, error) {
+				return "msg-timer", nil
+			},
+			func(channelID, messageID, text string) error {
+				edits.Add(1)
+				return nil
+			},
+			func(channelID, messageID string) error {
+				return nil
+			},
+		),
+	)
+
+	// Tool starts - only 1 event is emitted
+	updater.HandleStep(&runner.StepUpdateEvent{StepType: "tool", ToolName: "long_tool", State: "ACTIVE"})
+
+	// Wait across multiple ticks without sending new events (enough for 0.1s interval to advance)
+	time.Sleep(350 * time.Millisecond)
+	updater.Stop()
+
+	// Live timer should have updated multiple times as elapsed seconds increased
+	if edits.Load() < 2 {
+		t.Errorf("expected timer to refresh across ticks during long tool, got %d edits", edits.Load())
+	}
+}
+
+func TestStatusUpdater_ResetOnRetry(t *testing.T) {
+	var deletes atomic.Int32
+
+	updater := NewStatusUpdater(nil, "thread-reset", true,
+		WithStatusInterval(10*time.Millisecond),
+		WithStatusDebounce(0),
+		WithStatusMockFuncs(
+			func(channelID, text string) (string, error) {
+				return "msg-retry-1", nil
+			},
+			func(channelID, messageID, text string) error {
+				return nil
+			},
+			func(channelID, messageID string) error {
+				deletes.Add(1)
+				return nil
+			},
+		),
+	)
+
+	updater.HandleStep(&runner.StepUpdateEvent{StepType: "tool", ToolName: "flaky_tool", State: "ACTIVE"})
+	time.Sleep(20 * time.Millisecond)
+
+	// Attempt fails; Reset() is called before retry backoff
+	updater.Reset()
+	time.Sleep(20 * time.Millisecond)
+
+	if deletes.Load() != 1 {
+		t.Errorf("expected status message from failed attempt to be deleted on Reset, got %d deletes", deletes.Load())
+	}
+
+	updater.Stop()
+}
+

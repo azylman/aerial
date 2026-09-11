@@ -425,10 +425,27 @@ func TestErrorClassifiers(t *testing.T) {
 		t.Error("expected true for 50084 Thread is locked")
 	}
 
+	// Permission errors (403, 50001, 50013)
+	err403 := errors.New("HTTP 403 Forbidden")
+	if !IsPermissionError(err403) {
+		t.Error("expected true for HTTP 403 Forbidden")
+	}
+	err50001 := errors.New("HTTP 403 Forbidden, 50001 Missing Access")
+	if !IsPermissionError(err50001) {
+		t.Error("expected true for 50001 Missing Access")
+	}
+	err50013 := errors.New("HTTP 403 Forbidden, 50013 Missing Permissions")
+	if !IsPermissionError(err50013) {
+		t.Error("expected true for 50013 Missing Permissions")
+	}
+
 	// Unrelated errors
 	unrelated := errors.New("connection reset by peer")
-	if IsMessageNotFoundError(unrelated) || IsThreadArchivedOrLockedError(unrelated) {
+	if IsMessageNotFoundError(unrelated) || IsThreadArchivedOrLockedError(unrelated) || IsPermissionError(unrelated) {
 		t.Error("unrelated error should not match classifiers")
+	}
+	if IsPermissionError(nil) {
+		t.Error("expected false for nil error")
 	}
 }
 

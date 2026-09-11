@@ -29,7 +29,7 @@ func FormatToolStatus(toolName string, elapsed time.Duration) string {
 	if sec < 0.1 {
 		sec = 0.1
 	}
-	text := fmt.Sprintf("⚡ Running %s... (%.1fs)", clean, sec)
+	text := fmt.Sprintf("⚡ Running `%s`... (%.1fs)", clean, sec)
 	if len([]rune(text)) > MaxStatusTextLength {
 		text = string([]rune(text)[:MaxStatusTextLength])
 	}
@@ -51,11 +51,12 @@ type StatusUpdater struct {
 	enabled         bool
 	tickerInterval  time.Duration
 	debounceDelay   time.Duration
+	lastDelivered   string
 
-	ticker   *time.Ticker
-	done     chan struct{}
-	stopOnce sync.Once
-	wg       sync.WaitGroup
+	done      chan struct{}
+	startOnce sync.Once
+	stopOnce  sync.Once
+	wg        sync.WaitGroup
 
 	// Dependency injection hooks for hermetic unit testing
 	sendFunc   func(channelID, text string) (string, error)
@@ -167,6 +168,7 @@ func (u *StatusUpdater) HandleStep(ev *runner.StepUpdateEvent) {
 		if ev.State == "DONE" || ev.State == "ERROR" {
 			if u.activeTool == toolName {
 				u.activeTool = ""
+				u.phase = "thinking"
 				u.dirty = true
 			}
 		} else {
@@ -183,26 +185,38 @@ func (u *StatusUpdater) HandleStep(ev *runner.StepUpdateEvent) {
 	}
 }
 
-// Start launches the background ticker goroutine.
+// MarkTurnStarted sets the turn start timestamp to when the runner actually begins execution.
+func (u *StatusUpdater) MarkTurnStarted() {
+	if u == nil {
+		return
+	}
+	u.mu.Lock()
+	u.turnStart = time.Now()
+	u.mu.Unlock()
+}
+
+// Start launches the background ticker goroutine with idempotency protection.
 func (u *StatusUpdater) Start() {
 	if !u.enabled {
 		return
 	}
-	u.wg.Add(1)
-	go func() {
-		defer u.wg.Done()
-		ticker := time.NewTicker(u.tickerInterval)
-		defer ticker.Stop()
+	u.startOnce.Do(func() {
+		u.wg.Add(1)
+		go func() {
+			defer u.wg.Done()
+			ticker := time.NewTicker(u.tickerInterval)
+			defer ticker.Stop()
 
-		for {
-			select {
-			case <-u.done:
-				return
-			case <-ticker.C:
-				u.flush()
+			for {
+				select {
+				case <-u.done:
+					return
+				case <-ticker.C:
+					u.flush()
+				}
 			}
-		}
-	}()
+		}()
+	})
 }
 
 // currentStatusText formats the current status string under mutex lock.
@@ -237,7 +251,13 @@ func (u *StatusUpdater) currentStatusText() string {
 
 func (u *StatusUpdater) flush() {
 	u.mu.Lock()
-	if !u.dirty || u.disabled {
+	if u.disabled {
+		u.mu.Unlock()
+		return
+	}
+
+	hasActivePhase := u.activeTool != "" || u.phase == "thinking" || u.phase == "responding"
+	if !u.dirty && (u.statusMessageID == "" || !hasActivePhase) {
 		u.mu.Unlock()
 		return
 	}
@@ -250,6 +270,12 @@ func (u *StatusUpdater) flush() {
 	}
 
 	text := u.currentStatusText()
+	if u.statusMessageID != "" && text == u.lastDelivered {
+		u.dirty = false
+		u.mu.Unlock()
+		return
+	}
+
 	msgID := u.statusMessageID
 	u.dirty = false
 	u.mu.Unlock()
@@ -258,14 +284,22 @@ func (u *StatusUpdater) flush() {
 		newID, err := u.sendFunc(u.threadID, text)
 		if err != nil {
 			u.mu.Lock()
-			if delivery.IsThreadArchivedOrLockedError(err) {
+			if delivery.IsThreadArchivedOrLockedError(err) || delivery.IsPermissionError(err) {
 				u.disabled = true
 			}
 			u.mu.Unlock()
 			return
 		}
 		u.mu.Lock()
+		if u.disabled {
+			// Turn completed, cancelled, or deleted while sendFunc was in flight.
+			// Delete immediately to prevent permanent zombie message leak.
+			u.mu.Unlock()
+			_ = u.deleteFunc(u.threadID, newID)
+			return
+		}
 		u.statusMessageID = newID
+		u.lastDelivered = text
 		u.mu.Unlock()
 	} else {
 		err := u.editFunc(u.threadID, msgID, text)
@@ -274,9 +308,16 @@ func (u *StatusUpdater) flush() {
 			if delivery.IsMessageNotFoundError(err) {
 				u.statusMessageID = ""
 				u.disabled = true
-			} else if delivery.IsThreadArchivedOrLockedError(err) {
+			} else if delivery.IsThreadArchivedOrLockedError(err) || delivery.IsPermissionError(err) {
 				u.disabled = true
+			} else {
+				// Transient error: re-mark dirty so next tick can self-heal
+				u.dirty = true
 			}
+			u.mu.Unlock()
+		} else {
+			u.mu.Lock()
+			u.lastDelivered = text
 			u.mu.Unlock()
 		}
 	}
@@ -293,7 +334,30 @@ func (u *StatusUpdater) Stop() {
 	u.wg.Wait()
 }
 
+// Reset resets updater state for retry attempts and deletes any active message.
+func (u *StatusUpdater) Reset() {
+	if u == nil {
+		return
+	}
+	u.mu.Lock()
+	msgID := u.statusMessageID
+	u.statusMessageID = ""
+	u.activeTool = ""
+	u.phase = ""
+	u.dirty = false
+	u.lastDelivered = ""
+	u.turnStart = time.Now()
+	u.mu.Unlock()
+
+	if msgID != "" {
+		go func(threadID, messageID string) {
+			_ = u.deleteFunc(threadID, messageID)
+		}(u.threadID, msgID)
+	}
+}
+
 // DeleteStatusMessage cleans up the status message from Discord with zero tombstone.
+// Deletion is executed non-blockingly so the worker thread is never stalled on Discord REST latency.
 func (u *StatusUpdater) DeleteStatusMessage() {
 	if u == nil {
 		return
@@ -305,6 +369,8 @@ func (u *StatusUpdater) DeleteStatusMessage() {
 	u.mu.Unlock()
 
 	if msgID != "" {
-		_ = u.deleteFunc(u.threadID, msgID)
+		go func(threadID, messageID string) {
+			_ = u.deleteFunc(threadID, messageID)
+		}(u.threadID, msgID)
 	}
 }

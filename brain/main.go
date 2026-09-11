@@ -956,9 +956,10 @@ func RunBrainApp(ctx context.Context, cfg *config.Config) error {
 	cls := classifier.New(cfg, runner.RunAgy)
 
 	pool := queue.New(cfg, queue.WorkerPoolConfig{
-		DB:         database,
-		Classifier: cls,
-		RunnerFunc: runner.RunAgy,
+		DB:                    database,
+		Classifier:            cls,
+		RunnerFunc:            runner.RunAgy,
+		RunnerWithOptionsFunc: runner.RunAgyWithOptions,
 	})
 	pool.Start()
 
