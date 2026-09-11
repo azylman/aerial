@@ -12,20 +12,28 @@ import (
 
 func TestFormatToolStatus(t *testing.T) {
 	tests := []struct {
-		input    string
-		elapsed  time.Duration
-		expected string
+		toolName    string
+		commandName string
+		elapsed     time.Duration
+		expected    string
 	}{
-		{"view_file", 1200 * time.Millisecond, "⚡ Running `view_file`... (1.2s)"},
-		{"mcp_docker_list_containers", 2500 * time.Millisecond, "⚡ Running `docker_list_containers`... (2.5s)"},
-		{"call_mcp_tool_github_create_pr", 3100 * time.Millisecond, "⚡ Running `github_create_pr`... (3.1s)"},
-		{"", 500 * time.Millisecond, "⚡ Running `tool`... (0.5s)"},
+		{"view_file", "", 1200 * time.Millisecond, "⚡ Running `view_file`... (1.2s)"},
+		{"mcp_docker_list_containers", "", 2500 * time.Millisecond, "⚡ Running `docker_list_containers`... (2.5s)"},
+		{"call_mcp_tool_github_create_pr", "", 3100 * time.Millisecond, "⚡ Running `github_create_pr`... (3.1s)"},
+		{"", "", 500 * time.Millisecond, "⚡ Running `tool`... (0.5s)"},
+		// run_command with command name
+		{"run_command", "git", 1200 * time.Millisecond, "⚡ Executing `git`... (1.2s)"},
+		{"run_command", "docker-compose", 2500 * time.Millisecond, "⚡ Executing `docker-compose`... (2.5s)"},
+		{"run_command", "verify.sh", 800 * time.Millisecond, "⚡ Executing `verify.sh`... (0.8s)"},
+		// run_command with empty command fallback
+		{"run_command", "", 500 * time.Millisecond, "⚡ Executing `command`... (0.5s)"},
+		{"mcp_run_command", "go", 1500 * time.Millisecond, "⚡ Executing `go`... (1.5s)"},
 	}
 
 	for _, tt := range tests {
-		got := FormatToolStatus(tt.input, tt.elapsed)
+		got := FormatToolStatus(tt.toolName, tt.commandName, tt.elapsed)
 		if got != tt.expected {
-			t.Errorf("FormatToolStatus(%q, %v) = %q, want %q", tt.input, tt.elapsed, got, tt.expected)
+			t.Errorf("FormatToolStatus(%q, %q, %v) = %q, want %q", tt.toolName, tt.commandName, tt.elapsed, got, tt.expected)
 		}
 	}
 }
@@ -320,4 +328,62 @@ func TestStatusUpdater_ResetOnRetry(t *testing.T) {
 
 	updater.Stop()
 }
+
+func TestStatusUpdater_RunCommandDisplaysCommandName(t *testing.T) {
+	var sends atomic.Int32
+	var lastText atomic.Pointer[string]
+
+	updater := NewStatusUpdater(nil, "thread-cmd", true,
+		WithStatusInterval(10*time.Millisecond),
+		WithStatusDebounce(0),
+		WithStatusMockFuncs(
+			func(channelID, text string) (string, error) {
+				sends.Add(1)
+				lastText.Store(&text)
+				return "msg-cmd", nil
+			},
+			func(channelID, messageID, text string) error {
+				lastText.Store(&text)
+				return nil
+			},
+			func(channelID, messageID string) error {
+				return nil
+			},
+		),
+	)
+
+	updater.HandleStep(&runner.StepUpdateEvent{
+		StepType: "tool",
+		ToolName: "run_command",
+		State:    "ACTIVE",
+		ToolInfo: &runner.StepToolInfo{
+			Name: "run_command",
+			Parameters: runner.StepToolParameters{
+				CommandLine: "git status",
+			},
+		},
+	})
+
+	time.Sleep(25 * time.Millisecond)
+
+	if sends.Load() != 1 {
+		t.Fatalf("expected 1 send, got %d", sends.Load())
+	}
+	last := lastText.Load()
+	if last == nil || !strings.Contains(*last, "Executing `git`") {
+		t.Errorf("expected text to contain 'Executing `git`', got %v", last)
+	}
+
+	// Tool completes
+	updater.HandleStep(&runner.StepUpdateEvent{
+		StepType: "tool",
+		ToolName: "run_command",
+		State:    "DONE",
+	})
+	time.Sleep(20 * time.Millisecond)
+
+	updater.Stop()
+	updater.DeleteStatusMessage()
+}
+
 

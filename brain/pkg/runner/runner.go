@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path"
 	"regexp"
 	"strings"
 	"sync"
@@ -238,17 +239,34 @@ var (
 	ErrMaxDuration       = errors.New("watchdog: max duration exceeded")
 )
 
+var safeCmdRegex = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
+
+// StepToolInfo captures lightweight tool metadata without unbounded payload allocations.
+type StepToolInfo struct {
+	Name       string             `json:"name,omitempty"`
+	Parameters StepToolParameters `json:"parameters,omitempty"`
+}
+
+// StepToolParameters captures common execution parameters needed for status display.
+type StepToolParameters struct {
+	CommandLine      string `json:"CommandLine,omitempty"`
+	CommandLineSnake string `json:"command_line,omitempty"`
+	Command          string `json:"command,omitempty"`
+	Cmd              string `json:"cmd,omitempty"`
+}
+
 // StepUpdateEvent models intermediate execution updates emitted during stream-json mode.
 type StepUpdateEvent struct {
-	Event          string `json:"event,omitempty"`
-	Type           string `json:"type,omitempty"`
-	StepType       string `json:"step_type,omitempty"`
-	Name           string `json:"name,omitempty"`
-	ToolName       string `json:"tool_name,omitempty"`
-	State          string `json:"state,omitempty"` // "ACTIVE", "DONE", "ERROR"
-	Status         string `json:"status,omitempty"`
-	ConversationID string `json:"conversation_id,omitempty"`
-	StepIndex      int    `json:"step_index,omitempty"`
+	Event          string        `json:"event,omitempty"`
+	Type           string        `json:"type,omitempty"`
+	StepType       string        `json:"step_type,omitempty"`
+	Name           string        `json:"name,omitempty"`
+	ToolName       string        `json:"tool_name,omitempty"`
+	State          string        `json:"state,omitempty"` // "ACTIVE", "DONE", "ERROR"
+	Status         string        `json:"status,omitempty"`
+	ConversationID string        `json:"conversation_id,omitempty"`
+	StepIndex      int           `json:"step_index,omitempty"`
+	ToolInfo       *StepToolInfo `json:"tool_info,omitempty"`
 }
 
 // ResolvedType returns the normalized event type across both AGY NDJSON variants.
@@ -271,6 +289,189 @@ func (e *StepUpdateEvent) ResolvedToolName() string {
 		return strings.TrimSpace(e.ToolName)
 	}
 	return strings.TrimSpace(e.Name)
+}
+
+// ResolvedCommandName returns the extracted base command name if available.
+func (e *StepUpdateEvent) ResolvedCommandName() string {
+	if e == nil || e.ToolInfo == nil {
+		return ""
+	}
+	cmdLine := e.ToolInfo.Parameters.CommandLine
+	if cmdLine == "" {
+		cmdLine = e.ToolInfo.Parameters.CommandLineSnake
+	}
+	if cmdLine == "" {
+		cmdLine = e.ToolInfo.Parameters.Command
+	}
+	if cmdLine == "" {
+		cmdLine = e.ToolInfo.Parameters.Cmd
+	}
+	if cmdLine == "" {
+		return ""
+	}
+	return ExtractCommandName(cmdLine)
+}
+
+// ExtractCommandName extracts strictly the executable base name from a command line string.
+// It fails closed and returns "" if anything looks ambiguous, malformed, or sensitive.
+func ExtractCommandName(cmdLine string) string {
+	trimmed := strings.TrimSpace(cmdLine)
+	if trimmed == "" {
+		return ""
+	}
+
+	tokens, ok := tokenizeCommandLine(trimmed)
+	if !ok || len(tokens) == 0 {
+		return ""
+	}
+
+	i := 0
+	for i < len(tokens) {
+		token := tokens[i]
+
+		// Hard stop on shell control operators - never traverse command chains
+		if token == "&&" || token == "||" || token == ";" || token == "|" || token == "&" {
+			return ""
+		}
+
+		// Skip leading environment variable assignments: KEY=val
+		if eq := strings.IndexByte(token, '='); eq > 0 {
+			key := token[:eq]
+			if isPOSIXIdentifier(key) {
+				i++
+				continue
+			}
+		}
+
+		// Skip known shell wrapper utilities
+		if token == "sudo" || token == "nohup" || token == "time" || token == "exec" {
+			i++
+			continue
+		}
+
+		// Handle env wrapper invocations: skip env and simple flags like -i
+		if token == "env" {
+			i++
+			for i < len(tokens) && strings.HasPrefix(tokens[i], "-") {
+				if tokens[i] == "-i" || tokens[i] == "--ignore-environment" {
+					i++
+				} else {
+					return "env" // Complex flag with args; stop at env
+				}
+			}
+			continue
+		}
+
+		break
+	}
+
+	if i >= len(tokens) {
+		return ""
+	}
+
+	candidate := tokens[i]
+
+	// Robust OS-agnostic path stripping: normalize backslashes before path.Base
+	candidate = strings.ReplaceAll(candidate, "\\", "/")
+	candidate = path.Base(candidate)
+
+	// Reject dot paths, empty names, or lengths > 24
+	if candidate == "." || candidate == ".." || len(candidate) == 0 || len(candidate) > 24 {
+		return ""
+	}
+
+	// Strict ASCII validation gate (Fail closed, no mutation)
+	if !safeCmdRegex.MatchString(candidate) {
+		return ""
+	}
+
+	return candidate
+}
+
+func tokenizeCommandLine(s string) ([]string, bool) {
+	var tokens []string
+	var cur strings.Builder
+	inSingle := false
+	inDouble := false
+
+	runes := []rune(s)
+	n := len(runes)
+	for i := 0; i < n; i++ {
+		r := runes[i]
+
+		if r == '\\' && !inSingle {
+			if i+1 < n {
+				next := runes[i+1]
+				// Inside double quotes, backslash only escapes $, `, ", \, and newline
+				if inDouble {
+					if next == '$' || next == '`' || next == '"' || next == '\\' || next == '\n' {
+						cur.WriteRune(next)
+						i++
+						continue
+					}
+					cur.WriteRune(r)
+					continue
+				}
+				// Outside quotes, backslash escapes whitespace, quotes, and backslash
+				if next == ' ' || next == '\t' || next == '\n' || next == '\r' || next == '"' || next == '\'' || next == '\\' {
+					cur.WriteRune(next)
+					i++
+					continue
+				}
+				// Retain literal backslash for path separators (e.g. C:\Users or .\scripts)
+				cur.WriteRune(r)
+				continue
+			}
+			// Trailing backslash at EOF is invalid
+			return nil, false
+		}
+
+		if r == '\'' && !inDouble {
+			inSingle = !inSingle
+			continue
+		}
+
+		if r == '"' && !inSingle {
+			inDouble = !inDouble
+			continue
+		}
+
+		if !inSingle && !inDouble && (r == ' ' || r == '\t' || r == '\n' || r == '\r') {
+			if cur.Len() > 0 {
+				tokens = append(tokens, cur.String())
+				cur.Reset()
+			}
+			continue
+		}
+
+		cur.WriteRune(r)
+	}
+
+	if inSingle || inDouble {
+		return nil, false
+	}
+
+	if cur.Len() > 0 {
+		tokens = append(tokens, cur.String())
+	}
+
+	return tokens, true
+}
+
+func isPOSIXIdentifier(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for i, r := range s {
+		if r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+			continue
+		}
+		if i > 0 && (r >= '0' && r <= '9') {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // StepUpdateHandler is an explicit callback for intermediate stream-json updates.
@@ -389,6 +590,7 @@ func (t *activityTap) processLine(line []byte) {
 				State      string          `json:"state,omitempty"`
 				ToolName   string          `json:"tool_name,omitempty"`
 				StepType   string          `json:"step_type,omitempty"`
+				ToolInfo   *StepToolInfo   `json:"tool_info,omitempty"`
 			}
 			if err := json.Unmarshal(trimmed, &raw); err == nil {
 				var ev StepUpdateEvent
@@ -400,6 +602,7 @@ func (t *activityTap) processLine(line []byte) {
 					ev.State = raw.State
 					ev.ToolName = raw.ToolName
 					ev.StepType = raw.StepType
+					ev.ToolInfo = raw.ToolInfo
 				}
 				if ev.ResolvedType() != "" || ev.ResolvedToolName() != "" {
 					t.stepHandler(&ev)

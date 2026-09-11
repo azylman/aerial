@@ -1706,3 +1706,95 @@ func TestActivityTap_StepUpdateHandler(t *testing.T) {
 	}
 }
 
+func TestExtractCommandName(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		// Standard CLI commands
+		{"git status", "git"},
+		{"go test -v ./...", "go"},
+		{"docker run -d alpine", "docker"},
+		{"npm install", "npm"},
+		{"python3 main.py", "python3"},
+
+		// Paths (Unix and Windows)
+		{"/usr/local/bin/git push", "git"},
+		{"./scripts/verify.sh --staged", "verify.sh"},
+		{`C:\Users\Alex\tools\kubectl.exe get pods`, "kubectl.exe"},
+		{`C:\\tools\\app.exe`, "app.exe"},
+
+		// Leading environment variables
+		{"FOO=bar git diff", "git"},
+		{`TOKEN="secret with spaces" ./deploy.sh`, "deploy.sh"},
+		{"KEY1=val1 KEY2=val2 cargo build", "cargo"},
+		{"_PRIVATE_KEY=xyz pytest", "pytest"},
+
+		// Wrapper utilities
+		{"sudo systemctl restart foo", "systemctl"},
+		{"time go test ./...", "go"},
+		{"nohup ./service.sh &", "service.sh"},
+		{"env -i CI=true cargo build", "cargo"},
+		{"env --ignore-environment python3 app.py", "python3"},
+
+		// Fail closed / Security / Edge cases
+		{"", ""},
+		{"   ", ""},
+		{"FOO=bar", ""},
+		{"&& rm -rf /", ""},
+		{"$(which git)", ""},
+		{"`which git`", ""},
+		{"< input.txt", ""},
+		{"(cd foo && make)", ""},
+		{"ghp_123456789012345678901234567890123456", ""}, // Exceeds 24 chars
+		{`curl -H "Auth...`, ""},                           // Unclosed quote
+		{"cat << 'EOF' > test.txt", "cat"},
+	}
+
+	for _, tt := range tests {
+		got := ExtractCommandName(tt.input)
+		if got != tt.expected {
+			t.Errorf("ExtractCommandName(%q) = %q, want %q", tt.input, got, tt.expected)
+		}
+	}
+}
+
+func TestStepUpdateEvent_ResolvedCommandName(t *testing.T) {
+	var nilEv *StepUpdateEvent
+	if nilEv.ResolvedCommandName() != "" {
+		t.Errorf("expected empty string for nil event")
+	}
+
+	evWithoutToolInfo := &StepUpdateEvent{ToolName: "run_command"}
+	if evWithoutToolInfo.ResolvedCommandName() != "" {
+		t.Errorf("expected empty string when ToolInfo is nil")
+	}
+
+	evWithCmdLine := &StepUpdateEvent{
+		ToolName: "run_command",
+		ToolInfo: &StepToolInfo{
+			Name: "run_command",
+			Parameters: StepToolParameters{
+				CommandLine: "git commit -m 'test'",
+			},
+		},
+	}
+	if evWithCmdLine.ResolvedCommandName() != "git" {
+		t.Errorf("expected 'git', got %q", evWithCmdLine.ResolvedCommandName())
+	}
+
+	evWithSnakeCmd := &StepUpdateEvent{
+		ToolName: "run_command",
+		ToolInfo: &StepToolInfo{
+			Name: "run_command",
+			Parameters: StepToolParameters{
+				CommandLineSnake: "docker ps -a",
+			},
+		},
+	}
+	if evWithSnakeCmd.ResolvedCommandName() != "docker" {
+		t.Errorf("expected 'docker', got %q", evWithSnakeCmd.ResolvedCommandName())
+	}
+}
+
+
