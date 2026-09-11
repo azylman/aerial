@@ -14,9 +14,54 @@ import (
 	"time"
 )
 
+// Config defines configuration settings for discord-mcp proxy and upstream server.
+type Config struct {
+	Port         string
+	UpstreamPort string
+	NodeBin      string
+	AppPath      string
+}
+
+// DefaultConfig returns production default values for discord-mcp.
+func DefaultConfig() *Config {
+	return &Config{
+		Port:         "4001",
+		UpstreamPort: "4005",
+		NodeBin:      "node",
+		AppPath:      "build/app.js",
+	}
+}
+
+// NewConfigFromLookup populates Config using lookup with fallback to DefaultConfig.
+// Nil lookup is safely guarded.
+func NewConfigFromLookup(lookup func(string) string) *Config {
+	if lookup == nil {
+		return DefaultConfig()
+	}
+	cfg := DefaultConfig()
+	if p := strings.TrimSpace(lookup("PORT")); p != "" {
+		cfg.Port = p
+	}
+	if up := strings.TrimSpace(lookup("UPSTREAM_PORT")); up != "" {
+		cfg.UpstreamPort = up
+	}
+	if nb := strings.TrimSpace(lookup("NODE_BIN")); nb != "" {
+		cfg.NodeBin = nb
+	}
+	if ap := strings.TrimSpace(lookup("APP_PATH")); ap != "" {
+		cfg.AppPath = ap
+	}
+	return cfg
+}
+
 // PollUpstream checks if upstream TCP port is accepting connections.
-func PollUpstream(upstreamPort string, maxAttempts int, delay time.Duration) bool {
+func PollUpstream(ctx context.Context, upstreamPort string, maxAttempts int, delay time.Duration) bool {
 	for i := 0; i < maxAttempts; i++ {
+		select {
+		case <-ctx.Done():
+			return false
+		default:
+		}
 		time.Sleep(delay)
 		conn, err := net.DialTimeout("tcp", "127.0.0.1:"+upstreamPort, 200*time.Millisecond)
 		if err == nil {
@@ -52,18 +97,26 @@ func StartProxyServer(port, upstreamBase string) (*http.Server, error) {
 }
 
 // RunProxyApp starts the upstream node process and proxy server with graceful shutdown.
-func RunProxyApp(ctx context.Context, port, upstreamPort, nodeBin, appPath string) error {
-	if port == "" {
-		port = "4001"
+func RunProxyApp(ctx context.Context, cfg *Config) error {
+	if cfg == nil {
+		return fmt.Errorf("discord-mcp: config cannot be nil")
 	}
-	if upstreamPort == "" {
-		upstreamPort = "4005"
+
+	cfg.Port = strings.TrimSpace(cfg.Port)
+	if cfg.Port == "" {
+		return fmt.Errorf("discord-mcp: port cannot be empty")
 	}
-	if nodeBin == "" {
-		nodeBin = "node"
+	cfg.UpstreamPort = strings.TrimSpace(cfg.UpstreamPort)
+	if cfg.UpstreamPort == "" {
+		return fmt.Errorf("discord-mcp: upstreamPort cannot be empty")
 	}
-	if appPath == "" {
-		appPath = "build/app.js"
+	cfg.NodeBin = strings.TrimSpace(cfg.NodeBin)
+	if cfg.NodeBin == "" {
+		return fmt.Errorf("discord-mcp: nodeBin cannot be empty")
+	}
+	cfg.AppPath = strings.TrimSpace(cfg.AppPath)
+	if cfg.AppPath == "" {
+		return fmt.Errorf("discord-mcp: appPath cannot be empty")
 	}
 
 	nodeEnv := make([]string, 0, len(os.Environ()))
@@ -72,9 +125,9 @@ func RunProxyApp(ctx context.Context, port, upstreamPort, nodeBin, appPath strin
 			nodeEnv = append(nodeEnv, e)
 		}
 	}
-	nodeEnv = append(nodeEnv, "PORT="+upstreamPort)
+	nodeEnv = append(nodeEnv, "PORT="+cfg.UpstreamPort)
 
-	cmd := exec.CommandContext(ctx, nodeBin, appPath, "--transport", "http", "--port", upstreamPort)
+	cmd := exec.CommandContext(ctx, cfg.NodeBin, cfg.AppPath, "--transport", "http", "--port", cfg.UpstreamPort)
 	cmd.Env = nodeEnv
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -83,27 +136,32 @@ func RunProxyApp(ctx context.Context, port, upstreamPort, nodeBin, appPath strin
 		return fmt.Errorf("failed to start upstream Node MCP server: %w", err)
 	}
 
-	upstreamBase := fmt.Sprintf("http://127.0.0.1:%s", upstreamPort)
-	PollUpstream(upstreamPort, 20, 50*time.Millisecond)
+	upstreamBase := fmt.Sprintf("http://127.0.0.1:%s", cfg.UpstreamPort)
+	PollUpstream(ctx, cfg.UpstreamPort, 20, 50*time.Millisecond)
 
-	srv, err := StartProxyServer(port, upstreamBase)
+	srv, err := StartProxyServer(cfg.Port, upstreamBase)
 	if err != nil {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
 		return err
 	}
 
 	errChan := make(chan error, 1)
 	go func() {
-		log.Printf("[Discord-MCP] Listening on port %s (proxying to %s with filtered tools)...", port, upstreamBase)
+		log.Printf("[Discord-MCP] Listening on port %s (proxying to %s with filtered tools)...", cfg.Port, upstreamBase)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			errChan <- err
 		}
 		close(errChan)
 	}()
 
+	var runErr error
 	select {
 	case <-ctx.Done():
 	case err := <-errChan:
-		return err
+		runErr = err
 	}
 
 	log.Println("[Discord-MCP] Shutting down gracefully...")
@@ -113,24 +171,20 @@ func RunProxyApp(ctx context.Context, port, upstreamPort, nodeBin, appPath strin
 	_ = srv.Shutdown(shutdownCtx)
 
 	if cmd.Process != nil {
-		_ = cmd.Process.Signal(syscall.SIGTERM)
-		time.Sleep(50 * time.Millisecond)
 		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
 	}
 	log.Println("[Discord-MCP] Server stopped.")
-	return nil
+	return runErr
 }
 
 func main() {
-	port := os.Getenv("PORT")
-	upstreamPort := os.Getenv("UPSTREAM_PORT")
-	nodeBin := os.Getenv("NODE_BIN")
-	appPath := os.Getenv("APP_PATH")
+	cfg := NewConfigFromLookup(os.Getenv)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	if err := RunProxyApp(ctx, port, upstreamPort, nodeBin, appPath); err != nil && err != http.ErrServerClosed {
+	if err := RunProxyApp(ctx, cfg); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("[Discord-MCP] Error: %v", err)
 	}
 }
