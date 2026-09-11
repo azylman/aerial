@@ -369,13 +369,16 @@ var defaultGitCommitPaths = []string{
 	"/share/aerial/.git/HEAD",
 }
 
-func getGitCommit(customPaths ...string) string {
-	if envCommit := os.Getenv("GIT_COMMIT"); envCommit != "" {
-		if len(envCommit) > 7 {
-			return envCommit[:7]
-		}
-		return envCommit
+// normalizeGitCommit sanitizes and truncates a git commit string to short 7-character form.
+func normalizeGitCommit(commit string) string {
+	commit = strings.TrimSpace(commit)
+	if len(commit) > 7 {
+		return commit[:7]
 	}
+	return commit
+}
+
+func getGitCommit(customPaths ...string) string {
 
 	paths := defaultGitCommitPaths
 	if len(customPaths) > 0 {
@@ -1317,12 +1320,11 @@ type rawUserConfig struct {
 func loadQuickLaunchLinks(configPath string) []QuickLaunchLink {
 	links := DefaultQuickLaunchLinks()
 
+	configPath = strings.TrimSpace(configPath)
 	if configPath == "" {
-		configPath = os.Getenv("AERIAL_CONFIG_PATH")
+		return links
 	}
-	if configPath == "" {
-		configPath = "/share/aerial-config/config.yaml"
-	}
+	configPath = filepath.Clean(configPath)
 
 	data, err := os.ReadFile(configPath)
 	if err != nil {
@@ -1393,7 +1395,7 @@ func fetchGitSyncStatus(ctx context.Context, gitsyncURL string) GitSyncStatusRes
 	return status
 }
 
-func statusHandler(brainURL string, gitsyncURL ...string) http.HandlerFunc {
+func statusHandler(brainURL, gitsyncURL, configPath, gitCommit string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
@@ -1405,7 +1407,10 @@ func statusHandler(brainURL string, gitsyncURL ...string) http.HandlerFunc {
 
 		now := time.Now().UTC()
 		services, rawContainers, err := fetchDockerClusterState(ctx)
-		currentCommit := getGitCommit()
+		currentCommit := gitCommit
+		if currentCommit == "" {
+			currentCommit = "latest"
+		}
 
 		var ghRuns []GitHubRun
 		var ghJobs map[int64][]GitHubJob
@@ -1427,18 +1432,8 @@ func statusHandler(brainURL string, gitsyncURL ...string) http.HandlerFunc {
 			activeTasks = []ActiveTaskStatus{}
 		}
 
-		gURL := ""
-		if len(gitsyncURL) > 0 {
-			gURL = gitsyncURL[0]
-		} else {
-			gURL = os.Getenv("GITSYNC_URL")
-			if gURL == "" {
-				gURL = "http://gitsync:8080"
-			}
-		}
-
-		gitSync := fetchGitSyncStatus(ctx, gURL)
-		quickLinks := loadQuickLaunchLinks("")
+		gitSync := fetchGitSyncStatus(ctx, gitsyncURL)
+		quickLinks := loadQuickLaunchLinks(configPath)
 
 		if err != nil || len(services) == 0 {
 			uptimeSec := int64(time.Since(startTime).Seconds())
@@ -2011,52 +2006,85 @@ type DashboardConfig struct {
 	GHRepo     string
 	GHToken    string
 	GitCommit  string
+	GitSyncURL string
+	ConfigPath string
 	APIBaseURL string
 }
 
-// NewDashboardConfigFromEnv parses DashboardConfig from environment variables.
-func NewDashboardConfigFromEnv() DashboardConfig {
-	brainURL := os.Getenv("BRAIN_URL")
+// NewDashboardConfigFromLookup parses DashboardConfig using a key lookup function.
+func NewDashboardConfigFromLookup(lookup func(string) string) DashboardConfig {
+	if lookup == nil {
+		lookup = func(string) string { return "" }
+	}
+
+	brainURL := strings.TrimSpace(lookup("BRAIN_URL"))
 	if brainURL == "" {
 		brainURL = "http://brain:8080"
 	}
 
-	ghRepo := os.Getenv("GITHUB_REPO")
+	ghRepo := strings.TrimSpace(lookup("GITHUB_REPO"))
 	if ghRepo == "" {
 		ghRepo = "azylman/aerial"
 	}
-	ghToken := os.Getenv("GITHUB_PAT")
+
+	ghToken := strings.TrimSpace(lookup("GITHUB_PAT"))
 	if ghToken == "" {
-		ghToken = os.Getenv("GITHUB_PERSONAL_ACCESS_TOKEN")
+		ghToken = strings.TrimSpace(lookup("GITHUB_PERSONAL_ACCESS_TOKEN"))
 	}
 
-	port := os.Getenv("PORT")
+	port := strings.TrimSpace(lookup("PORT"))
 	if port == "" {
 		port = "8080"
 	}
 
+	gitSyncURL := strings.TrimSpace(lookup("GITSYNC_URL"))
+	if gitSyncURL == "" {
+		gitSyncURL = "http://gitsync:8080"
+	}
+
+	configPath := strings.TrimSpace(lookup("AERIAL_CONFIG_PATH"))
+	if configPath == "" {
+		configPath = "/share/aerial-config/config.yaml"
+	}
+
+	gitCommit := normalizeGitCommit(lookup("GIT_COMMIT"))
+	if gitCommit == "" {
+		gitCommit = "latest"
+	}
+
 	return DashboardConfig{
-		Port:      port,
-		BrainURL:  brainURL,
-		GHRepo:    ghRepo,
-		GHToken:   ghToken,
-		GitCommit: getGitCommit(),
+		Port:       port,
+		BrainURL:   brainURL,
+		GHRepo:     ghRepo,
+		GHToken:    ghToken,
+		GitSyncURL: gitSyncURL,
+		ConfigPath: configPath,
+		GitCommit:  gitCommit,
 	}
 }
 
+// NewDashboardConfigFromEnv parses DashboardConfig from environment variables.
+func NewDashboardConfigFromEnv() DashboardConfig {
+	cfg := NewDashboardConfigFromLookup(os.Getenv)
+	if cfg.GitCommit == "latest" || cfg.GitCommit == "" {
+		cfg.GitCommit = getGitCommit()
+	}
+	return cfg
+}
+
 // SetupDashboardMux configures the HTTP router and route handlers.
-func SetupDashboardMux(brainURL string, assetReg *AssetRegistry) http.Handler {
+func SetupDashboardMux(cfg DashboardConfig, assetReg *AssetRegistry) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/dashboard/health", healthHandler)
-	mux.HandleFunc("/api/status", statusHandler(brainURL))
-	mux.HandleFunc("/dashboard/api/status", statusHandler(brainURL))
-	mux.HandleFunc("/api/facts", factsHandler(brainURL))
-	mux.HandleFunc("/dashboard/api/facts", factsHandler(brainURL))
-	mux.HandleFunc("/api/schedules", schedulesHandler(brainURL))
-	mux.HandleFunc("/dashboard/api/schedules", schedulesHandler(brainURL))
-	mux.HandleFunc("/api/schedules/runs", scheduleRunsHandler(brainURL))
-	mux.HandleFunc("/dashboard/api/schedules/runs", scheduleRunsHandler(brainURL))
+	mux.HandleFunc("/api/status", statusHandler(cfg.BrainURL, cfg.GitSyncURL, cfg.ConfigPath, cfg.GitCommit))
+	mux.HandleFunc("/dashboard/api/status", statusHandler(cfg.BrainURL, cfg.GitSyncURL, cfg.ConfigPath, cfg.GitCommit))
+	mux.HandleFunc("/api/facts", factsHandler(cfg.BrainURL))
+	mux.HandleFunc("/dashboard/api/facts", factsHandler(cfg.BrainURL))
+	mux.HandleFunc("/api/schedules", schedulesHandler(cfg.BrainURL))
+	mux.HandleFunc("/dashboard/api/schedules", schedulesHandler(cfg.BrainURL))
+	mux.HandleFunc("/api/schedules/runs", scheduleRunsHandler(cfg.BrainURL))
+	mux.HandleFunc("/dashboard/api/schedules/runs", scheduleRunsHandler(cfg.BrainURL))
 
 	if assetReg != nil {
 		mux.HandleFunc("/", assetReg.ServeHTTP)
@@ -2075,7 +2103,7 @@ func RunDashboardServer(ctx context.Context, cfg DashboardConfig) error {
 
 	gitCommit := cfg.GitCommit
 	if gitCommit == "" {
-		gitCommit = getGitCommit()
+		gitCommit = "latest"
 	}
 	assetReg, err := NewAssetRegistry(staticFS, gitCommit)
 	if err != nil {
@@ -2090,7 +2118,7 @@ func RunDashboardServer(ctx context.Context, cfg DashboardConfig) error {
 		globalGHPoller.Start(ctx)
 	}
 
-	handler := SetupDashboardMux(cfg.BrainURL, assetReg)
+	handler := SetupDashboardMux(cfg, assetReg)
 
 	log.Printf("aerial-dashboard server starting on :%s (upstream brain=%s)", cfg.Port, cfg.BrainURL)
 	srv := &http.Server{
