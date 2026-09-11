@@ -581,6 +581,9 @@ func TestReconcileCompose(t *testing.T) {
 	// 1. Missing compose file -> skip
 	daemon := &SyncDaemon{
 		composeDir: tempDir,
+		dockerExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			return nil, nil, nil
+		},
 	}
 	if err := daemon.ReconcileCompose(ctx); err != nil {
 		t.Errorf("expected nil when compose missing, got %v", err)
@@ -680,6 +683,9 @@ func TestReconcileCompose(t *testing.T) {
 	// Default composeDir check
 	daemonDefault := &SyncDaemon{
 		composeDir: "",
+		dockerExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			return nil, nil, nil
+		},
 	}
 	_ = daemonDefault.ReconcileCompose(ctx)
 }
@@ -1232,6 +1238,9 @@ func TestAutomatedRollback_OnValidationFailure(t *testing.T) {
 		ComposeDir:      tempDir,
 		Repos:           []string{tempDir},
 		ComposeExecutor: valMockExecutor,
+		DockerExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			return nil, nil, nil
+		},
 	})
 	daemon.recordPendingChange(ComposeChangeEvent{
 		RepoPath:     tempDir,
@@ -1307,6 +1316,7 @@ func TestAutomatedRollback_OnComposeUpFailure(t *testing.T) {
 		t.Fatalf("failed to get commit 2: %v", err)
 	}
 
+	var upCalls int
 	upMockExecutor := func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
 		argsStr := strings.Join(args, " ")
 		if strings.Contains(argsStr, "config") && strings.Contains(argsStr, "--quiet") {
@@ -1316,7 +1326,8 @@ func TestAutomatedRollback_OnComposeUpFailure(t *testing.T) {
 			return []byte("brain\n"), nil, nil
 		}
 		if strings.Contains(argsStr, "up -d") {
-			if strings.Contains(argsStr, "--remove-orphans") {
+			upCalls++
+			if upCalls > 1 {
 				return []byte("restored\n"), nil, nil
 			}
 			return nil, []byte("compose up failure with token ghp_1234567890abcdef"), errors.New("exit status 1")
@@ -1328,6 +1339,9 @@ func TestAutomatedRollback_OnComposeUpFailure(t *testing.T) {
 		ComposeDir:      tempDir,
 		Repos:           []string{tempDir},
 		ComposeExecutor: upMockExecutor,
+		DockerExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			return nil, nil, nil
+		},
 	})
 	daemon.recordPendingChange(ComposeChangeEvent{
 		RepoPath:     tempDir,
@@ -1735,4 +1749,148 @@ func TestRepoLock_ThreadSafety(t *testing.T) {
 		t.Errorf("expected counter %d, got %d", iterations, counter)
 	}
 }
+
+func TestScrubComposeEnv(t *testing.T) {
+	input := []string{
+		"PATH=/usr/bin:/bin",
+		"AERIAL_CONFIG_DIR=/share/aerial-config",
+		"aerial_project_dir=/share/aerial",
+		"AERIAL_HOST_CONFIG_DIR=/mnt/data/supervisor/share/aerial-config",
+		"AERIAL_HOST_PROJECT_DIR=/mnt/data/supervisor/share/aerial",
+		"DISCORD_BOT_TOKEN=secret_token",
+		"INVALID_ENTRY_NO_EQUALS",
+		"AERIAL_PROJECT_DIR=/share/aerial",
+	}
+
+	scrubbed := scrubComposeEnv(input)
+
+	// Verify excluded
+	for _, env := range scrubbed {
+		if strings.HasPrefix(strings.ToLower(env), "aerial_config_dir=") {
+			t.Errorf("expected AERIAL_CONFIG_DIR to be scrubbed, found: %s", env)
+		}
+		if strings.HasPrefix(strings.ToLower(env), "aerial_project_dir=") {
+			t.Errorf("expected AERIAL_PROJECT_DIR to be scrubbed, found: %s", env)
+		}
+	}
+
+	// Verify retained
+	expectedRetained := []string{
+		"PATH=/usr/bin:/bin",
+		"AERIAL_HOST_CONFIG_DIR=/mnt/data/supervisor/share/aerial-config",
+		"AERIAL_HOST_PROJECT_DIR=/mnt/data/supervisor/share/aerial",
+		"DISCORD_BOT_TOKEN=secret_token",
+	}
+
+	foundMap := make(map[string]bool)
+	for _, env := range scrubbed {
+		foundMap[env] = true
+	}
+
+	for _, exp := range expectedRetained {
+		if !foundMap[exp] {
+			t.Errorf("expected %s to be retained, but was missing", exp)
+		}
+	}
+}
+
+func TestCleanConflictContainers(t *testing.T) {
+	mockOutput := strings.Join([]string{
+		"a1b2c3d4e5f6\taerial-brain\tUp 2 hours (healthy)",
+		"b2c3d4e5f6a1\taerial-proxy\tExited (0) 5 minutes ago",
+		"c3d4e5f6a1b2\tc3d4e5f6a1b2_aerial-brain\tCreated",
+		"d4e5f6a1b2c3\t/d4e5f6a1b2c3_aerial-proxy\tExited (0)",
+		"e5f6a1b2c3d4\tcustom_aerial-docs\tExited (0)",
+		"f6a1b2c3d4e5\tf6a1b2c3d4e5_aerial-gitsync\tExited (1)",
+		"112233445566\t112233445566_aerial-dashboard\tUp 10 minutes",
+	}, "\n")
+
+	var rmCalls []string
+	var mu sync.Mutex
+
+	mockDocker := func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		if len(args) > 0 && args[0] == "ps" {
+			return []byte(mockOutput), nil, nil
+		}
+		if len(args) >= 3 && args[0] == "rm" && args[1] == "-f" {
+			rmCalls = append(rmCalls, args[2])
+			return []byte("removed\n"), nil, nil
+		}
+		return nil, nil, nil
+	}
+
+	daemon := &SyncDaemon{
+		dockerExecutor: mockDocker,
+	}
+
+	ctx := context.Background()
+	if err := daemon.CleanConflictContainers(ctx); err != nil {
+		t.Fatalf("CleanConflictContainers returned error: %v", err)
+	}
+
+	// Verify only c3d4e5f6a1b2 and d4e5f6a1b2c3 were removed:
+	// - a1b2c3d4e5f6 is running (Up 2 hours) -> skipped
+	// - b2c3d4e5f6a1 has name aerial-proxy without shortID prefix -> skipped
+	// - c3d4e5f6a1b2 has matching prefix c3d4e5f6a1b2_ and is Created -> PURGED
+	// - d4e5f6a1b2c3 has matching prefix /d4e5f6a1b2c3_ and is Exited -> PURGED
+	// - e5f6a1b2c3d4 has custom_ prefix (doesn't match e5f6a1b2c3d4_) -> skipped
+	// - f6a1b2c3d4e5 is aerial-gitsync -> self-preservation skipped
+	// - 112233445566 is Up 10 minutes (running) -> state-gate skipped
+	expectedRemoved := []string{"c3d4e5f6a1b2", "d4e5f6a1b2c3"}
+
+	mu.Lock()
+	actualCalls := append([]string(nil), rmCalls...)
+	mu.Unlock()
+
+	if len(actualCalls) != len(expectedRemoved) {
+		t.Fatalf("expected %d rm calls, got %d: %v", len(expectedRemoved), len(actualCalls), actualCalls)
+	}
+	for i, exp := range expectedRemoved {
+		if actualCalls[i] != exp {
+			t.Errorf("rm call %d: expected %s, got %s", i, exp, actualCalls[i])
+		}
+	}
+}
+
+func TestCleanConflictContainers_ErrorHandling(t *testing.T) {
+	// 1. Docker ps failure returns error
+	failingDocker := func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+		if len(args) > 0 && args[0] == "ps" {
+			return nil, []byte("daemon unavailable"), errors.New("exit status 1")
+		}
+		return nil, nil, nil
+	}
+
+	daemon := &SyncDaemon{
+		dockerExecutor: failingDocker,
+	}
+
+	err := daemon.CleanConflictContainers(context.Background())
+	if err == nil {
+		t.Errorf("expected error when docker ps fails, got nil")
+	}
+
+	// 2. Docker rm failure with "No such container" handled as idempotent success
+	idempotentDocker := func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+		if len(args) > 0 && args[0] == "ps" {
+			return []byte("c3d4e5f6a1b2\tc3d4e5f6a1b2_aerial-brain\tExited (0)"), nil, nil
+		}
+		if len(args) > 0 && args[0] == "rm" {
+			return nil, []byte("Error: No such container: c3d4e5f6a1b2"), errors.New("exit status 1")
+		}
+		return nil, nil, nil
+	}
+
+	daemonIdempotent := &SyncDaemon{
+		dockerExecutor: idempotentDocker,
+	}
+
+	if err := daemonIdempotent.CleanConflictContainers(context.Background()); err != nil {
+		t.Errorf("expected nil error on idempotent rm failure, got: %v", err)
+	}
+}
+
 

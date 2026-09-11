@@ -65,8 +65,8 @@ services:
       - aerial-brain-data:/data
       - aerial-brain-gemini:/root/.gemini
       - /var/run/docker.sock:/var/run/docker.sock
-      - ${AERIAL_CONFIG_DIR:-/mnt/data/supervisor/share/aerial-config}:/share/aerial-config:ro
-      - ${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}:/share/aerial:ro
+      - ${AERIAL_HOST_CONFIG_DIR:-${AERIAL_CONFIG_DIR:-/mnt/data/supervisor/share/aerial-config}}:/share/aerial-config:ro
+      - ${AERIAL_HOST_PROJECT_DIR:-${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}}:/share/aerial:ro
     ports:
       - "${AERIAL_BRAIN_HOST_PORT:-8088}:8080"
     networks:
@@ -114,11 +114,9 @@ services:
       - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN}
       - SYNC_INTERVAL=60s
       - SYNC_REPOS=/share/aerial-config,/share/aerial
-      - AERIAL_PROJECT_DIR=/share/aerial
-      - AERIAL_CONFIG_DIR=/share/aerial-config
     volumes:
-      - ${AERIAL_CONFIG_DIR:-/mnt/data/supervisor/share/aerial-config}:/share/aerial-config:rw
-      - ${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}:/share/aerial:rw
+      - ${AERIAL_HOST_CONFIG_DIR:-${AERIAL_CONFIG_DIR:-/mnt/data/supervisor/share/aerial-config}}:/share/aerial-config:rw
+      - ${AERIAL_HOST_PROJECT_DIR:-${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}}:/share/aerial:rw
       - /var/run/docker.sock:/var/run/docker.sock
     networks:
       - aerial-net
@@ -363,7 +361,7 @@ services:
       - GITHUB_REPO=${GITHUB_REPO:-azylman/aerial}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - ${AERIAL_CONFIG_DIR:-/mnt/data/supervisor/share/aerial-config}:/share/aerial-config:ro
+      - ${AERIAL_HOST_CONFIG_DIR:-${AERIAL_CONFIG_DIR:-/mnt/data/supervisor/share/aerial-config}}:/share/aerial-config:ro
     networks:
       - aerial-net
     healthcheck:
@@ -386,8 +384,8 @@ services:
       autoheal: "true"
       com.centurylinklabs.watchtower.enable: "true"
     volumes:
-      - ${AERIAL_CONFIG_DIR:-/mnt/data/supervisor/share/aerial-config}:/share/aerial-config:ro
-      - ${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}/docs-service/app:/usr/share/nginx/html:ro
+      - ${AERIAL_HOST_CONFIG_DIR:-${AERIAL_CONFIG_DIR:-/mnt/data/supervisor/share/aerial-config}}:/share/aerial-config:ro
+      - ${AERIAL_HOST_PROJECT_DIR:-${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}}/docs-service/app:/usr/share/nginx/html:ro
     networks:
       - aerial-net
     healthcheck:
@@ -412,8 +410,8 @@ services:
       autoheal: "true"
       com.centurylinklabs.watchtower.enable: "true"
     volumes:
-      - ${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}/proxy/grafana-cyberpunk.css:/etc/nginx/grafana-cyberpunk.css:ro
-      - ${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}/proxy/agentsview-cyberpunk.css:/etc/nginx/agentsview-cyberpunk.css:ro
+      - ${AERIAL_HOST_PROJECT_DIR:-${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}}/proxy/grafana-cyberpunk.css:/etc/nginx/grafana-cyberpunk.css:ro
+      - ${AERIAL_HOST_PROJECT_DIR:-${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}}/proxy/agentsview-cyberpunk.css:/etc/nginx/agentsview-cyberpunk.css:ro
     ports:
       - "${AGENTSVIEW_HOST_PORT:-8089}:80"
     networks:
@@ -523,8 +521,8 @@ services:
       - HA_METRICS_TOKEN=${HA_METRICS_TOKEN:-}
     volumes:
       - aerial-victoriametrics-data:/victoria-metrics-data
-      - ${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}:/share/aerial:ro
-      - ${AERIAL_CONFIG_DIR:-/mnt/data/supervisor/share/aerial-config}:/share/aerial-config:ro
+      - ${AERIAL_HOST_PROJECT_DIR:-${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}}:/share/aerial:ro
+      - ${AERIAL_HOST_CONFIG_DIR:-${AERIAL_CONFIG_DIR:-/mnt/data/supervisor/share/aerial-config}}:/share/aerial-config:ro
     networks:
       - aerial-net
     healthcheck:
@@ -576,8 +574,8 @@ services:
       - GF_AUTH_DISABLE_SIGNOUT_MENU=true
       - GF_PANELS_DISABLE_SANITIZE_HTML=true
     volumes:
-      - ${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}:/share/aerial:ro
-      - ${AERIAL_CONFIG_DIR:-/mnt/data/supervisor/share/aerial-config}:/share/aerial-config:ro
+      - ${AERIAL_HOST_PROJECT_DIR:-${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}}:/share/aerial:ro
+      - ${AERIAL_HOST_CONFIG_DIR:-${AERIAL_CONFIG_DIR:-/mnt/data/supervisor/share/aerial-config}}:/share/aerial-config:ro
     networks:
       - aerial-net
     healthcheck:
