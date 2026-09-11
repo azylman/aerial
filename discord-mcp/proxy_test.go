@@ -280,7 +280,7 @@ func TestProxy_EdgeCasesAndErrors(t *testing.T) {
 	}
 
 	// 6. PollUpstream
-	if PollUpstream("59994", 2, 5*time.Millisecond) {
+	if PollUpstream(context.Background(), "59994", 2, 5*time.Millisecond) {
 		t.Error("expected false for closed port in PollUpstream")
 	}
 
@@ -288,9 +288,16 @@ func TestProxy_EdgeCasesAndErrors(t *testing.T) {
 	l, err := net.Listen("tcp", "127.0.0.1:59991")
 	if err == nil {
 		defer l.Close()
-		if !PollUpstream("59991", 5, 10*time.Millisecond) {
+		if !PollUpstream(context.Background(), "59991", 5, 10*time.Millisecond) {
 			t.Error("expected true for open port in PollUpstream")
 		}
+	}
+
+	// PollUpstream canceled context
+	canceledCtx, cancelPoll := context.WithCancel(context.Background())
+	cancelPoll()
+	if PollUpstream(canceledCtx, "59991", 5, 10*time.Millisecond) {
+		t.Error("expected false when context is canceled in PollUpstream")
 	}
 
 	// 7. StartProxyServer with valid and invalid URL + probe /health
@@ -320,7 +327,12 @@ func TestProxy_EdgeCasesAndErrors(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- RunProxyApp(ctx, "59989", "59988", mockBin, mockArg)
+		errCh <- RunProxyApp(ctx, &Config{
+			Port:         "59989",
+			UpstreamPort: "59988",
+			NodeBin:      mockBin,
+			AppPath:      mockArg,
+		})
 	}()
 
 	time.Sleep(50 * time.Millisecond)
@@ -335,10 +347,20 @@ func TestProxy_EdgeCasesAndErrors(t *testing.T) {
 	}
 
 	// 9. RunProxyApp startup error (invalid binary and invalid port)
-	if err := RunProxyApp(context.Background(), "59987", "59986", "/non/existent/bin", ""); err == nil {
-		t.Error("expected error running proxy app with non-existent binary")
+	if err := RunProxyApp(context.Background(), &Config{
+		Port:         "59987",
+		UpstreamPort: "59986",
+		NodeBin:      "/non/existent/bin",
+		AppPath:      mockArg,
+	}); err == nil || !strings.Contains(err.Error(), "failed to start upstream Node MCP server") {
+		t.Errorf("expected 'failed to start upstream Node MCP server', got %v", err)
 	}
-	if err := RunProxyApp(context.Background(), "-1", "59985", mockBin, mockArg); err == nil {
+	if err := RunProxyApp(context.Background(), &Config{
+		Port:         "-1",
+		UpstreamPort: "59985",
+		NodeBin:      mockBin,
+		AppPath:      mockArg,
+	}); err == nil {
 		t.Error("expected error running proxy app with invalid port")
 	}
 
@@ -363,10 +385,10 @@ func TestProxy_EdgeCasesAndErrors(t *testing.T) {
 		t.Errorf("expected 200 for forwarded raw response, got %d", badListResp.StatusCode)
 	}
 
-	// 11. RunProxyApp with empty string defaults
-	ctxImm, cancelImm := context.WithCancel(context.Background())
-	cancelImm()
-	_ = RunProxyApp(ctxImm, "", "", "sh", "-c")
+	// 11. RunProxyApp nil config error
+	if err := RunProxyApp(context.Background(), nil); err == nil || !strings.Contains(err.Error(), "discord-mcp: config cannot be nil") {
+		t.Errorf("expected nil config error, got %v", err)
+	}
 
 	// 12. ServeHTTP with body read error
 	errReq, _ := http.NewRequest(http.MethodPost, "/mcp", &errReader{})
@@ -374,6 +396,249 @@ func TestProxy_EdgeCasesAndErrors(t *testing.T) {
 	handler.ServeHTTP(errRec, errReq)
 	if errRec.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 Bad Request for body read error, got %d", errRec.Code)
+	}
+}
+
+func TestRunProxyApp_ValidationErrors(t *testing.T) {
+	testCases := []struct {
+		name        string
+		cfg         *Config
+		expectedErr string
+	}{
+		{
+			name:        "nil config",
+			cfg:         nil,
+			expectedErr: "discord-mcp: config cannot be nil",
+		},
+		{
+			name:        "empty struct",
+			cfg:         &Config{},
+			expectedErr: "discord-mcp: port cannot be empty",
+		},
+		{
+			name: "empty port",
+			cfg: &Config{
+				Port:         "",
+				UpstreamPort: "4005",
+				NodeBin:      "node",
+				AppPath:      "build/app.js",
+			},
+			expectedErr: "discord-mcp: port cannot be empty",
+		},
+		{
+			name: "whitespace port",
+			cfg: &Config{
+				Port:         "   ",
+				UpstreamPort: "4005",
+				NodeBin:      "node",
+				AppPath:      "build/app.js",
+			},
+			expectedErr: "discord-mcp: port cannot be empty",
+		},
+		{
+			name: "empty upstream port",
+			cfg: &Config{
+				Port:         "4001",
+				UpstreamPort: "",
+				NodeBin:      "node",
+				AppPath:      "build/app.js",
+			},
+			expectedErr: "discord-mcp: upstreamPort cannot be empty",
+		},
+		{
+			name: "whitespace upstream port",
+			cfg: &Config{
+				Port:         "4001",
+				UpstreamPort: "   ",
+				NodeBin:      "node",
+				AppPath:      "build/app.js",
+			},
+			expectedErr: "discord-mcp: upstreamPort cannot be empty",
+		},
+		{
+			name: "empty node bin",
+			cfg: &Config{
+				Port:         "4001",
+				UpstreamPort: "4005",
+				NodeBin:      "",
+				AppPath:      "build/app.js",
+			},
+			expectedErr: "discord-mcp: nodeBin cannot be empty",
+		},
+		{
+			name: "whitespace node bin",
+			cfg: &Config{
+				Port:         "4001",
+				UpstreamPort: "4005",
+				NodeBin:      "   ",
+				AppPath:      "build/app.js",
+			},
+			expectedErr: "discord-mcp: nodeBin cannot be empty",
+		},
+		{
+			name: "empty app path",
+			cfg: &Config{
+				Port:         "4001",
+				UpstreamPort: "4005",
+				NodeBin:      "node",
+				AppPath:      "",
+			},
+			expectedErr: "discord-mcp: appPath cannot be empty",
+		},
+		{
+			name: "whitespace app path",
+			cfg: &Config{
+				Port:         "4001",
+				UpstreamPort: "4005",
+				NodeBin:      "node",
+				AppPath:      "   ",
+			},
+			expectedErr: "discord-mcp: appPath cannot be empty",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := RunProxyApp(context.Background(), tc.cfg)
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tc.expectedErr)
+			}
+			if !strings.Contains(err.Error(), tc.expectedErr) {
+				t.Errorf("expected error containing %q, got %q", tc.expectedErr, err.Error())
+			}
+		})
+	}
+}
+
+func TestNewConfigFromLookup_TableDriven(t *testing.T) {
+	testCases := []struct {
+		name     string
+		lookup   func(string) string
+		expected *Config
+	}{
+		{
+			name:     "nil lookup uses defaults",
+			lookup:   nil,
+			expected: DefaultConfig(),
+		},
+		{
+			name: "empty lookup uses defaults",
+			lookup: func(k string) string {
+				return ""
+			},
+			expected: DefaultConfig(),
+		},
+		{
+			name: "whitespace-only lookup values use defaults",
+			lookup: func(k string) string {
+				return "   "
+			},
+			expected: DefaultConfig(),
+		},
+		{
+			name: "override port only with trimming",
+			lookup: func(k string) string {
+				if k == "PORT" {
+					return "  5001  "
+				}
+				return ""
+			},
+			expected: &Config{
+				Port:         "5001",
+				UpstreamPort: "4005",
+				NodeBin:      "node",
+				AppPath:      "build/app.js",
+			},
+		},
+		{
+			name: "override upstream port only",
+			lookup: func(k string) string {
+				if k == "UPSTREAM_PORT" {
+					return "5005"
+				}
+				return ""
+			},
+			expected: &Config{
+				Port:         "4001",
+				UpstreamPort: "5005",
+				NodeBin:      "node",
+				AppPath:      "build/app.js",
+			},
+		},
+		{
+			name: "override node bin only",
+			lookup: func(k string) string {
+				if k == "NODE_BIN" {
+					return "/usr/local/bin/node"
+				}
+				return ""
+			},
+			expected: &Config{
+				Port:         "4001",
+				UpstreamPort: "4005",
+				NodeBin:      "/usr/local/bin/node",
+				AppPath:      "build/app.js",
+			},
+		},
+		{
+			name: "override app path only",
+			lookup: func(k string) string {
+				if k == "APP_PATH" {
+					return "dist/server.js"
+				}
+				return ""
+			},
+			expected: &Config{
+				Port:         "4001",
+				UpstreamPort: "4005",
+				NodeBin:      "node",
+				AppPath:      "dist/server.js",
+			},
+		},
+		{
+			name: "override all fields with trimming",
+			lookup: func(k string) string {
+				switch k {
+				case "PORT":
+					return " 9001 "
+				case "UPSTREAM_PORT":
+					return " 9005 "
+				case "NODE_BIN":
+					return " /opt/node/bin/node "
+				case "APP_PATH":
+					return " /opt/app/index.js "
+				default:
+					return ""
+				}
+			},
+			expected: &Config{
+				Port:         "9001",
+				UpstreamPort: "9005",
+				NodeBin:      "/opt/node/bin/node",
+				AppPath:      "/opt/app/index.js",
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := NewConfigFromLookup(tc.lookup)
+			if cfg == nil {
+				t.Fatal("expected non-nil config")
+			}
+			if cfg.Port != tc.expected.Port {
+				t.Errorf("expected Port %q, got %q", tc.expected.Port, cfg.Port)
+			}
+			if cfg.UpstreamPort != tc.expected.UpstreamPort {
+				t.Errorf("expected UpstreamPort %q, got %q", tc.expected.UpstreamPort, cfg.UpstreamPort)
+			}
+			if cfg.NodeBin != tc.expected.NodeBin {
+				t.Errorf("expected NodeBin %q, got %q", tc.expected.NodeBin, cfg.NodeBin)
+			}
+			if cfg.AppPath != tc.expected.AppPath {
+				t.Errorf("expected AppPath %q, got %q", tc.expected.AppPath, cfg.AppPath)
+			}
+		})
 	}
 }
 
