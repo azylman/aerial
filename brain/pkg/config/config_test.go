@@ -13,15 +13,23 @@ import (
 )
 
 func TestGetEnv(t *testing.T) {
-	if val := GetEnv("NON_EXISTENT_VAR_12345", "default_val"); val != "default_val" {
+	mockLookup := func(k string) string {
+		if k == "TEST_VAR_12345" {
+			return "actual_val"
+		}
+		return ""
+	}
+	if val := GetEnvFromLookup(mockLookup, "NON_EXISTENT_VAR_12345", "default_val"); val != "default_val" {
 		t.Errorf("Expected default_val, got %s", val)
 	}
-
-	_ = os.Setenv("TEST_VAR_12345", "actual_val")
-	defer func() { _ = os.Unsetenv("TEST_VAR_12345") }()
-
-	if val := GetEnv("TEST_VAR_12345", "default_val"); val != "actual_val" {
+	if val := GetEnvFromLookup(mockLookup, "TEST_VAR_12345", "default_val"); val != "actual_val" {
 		t.Errorf("Expected actual_val, got %s", val)
+	}
+	if val := GetEnvFromLookup(nil, "TEST_VAR_12345", "default_val"); val != "default_val" {
+		t.Errorf("Expected default_val with nil lookup, got %s", val)
+	}
+	if val := GetEnv("NON_EXISTENT_VAR_12345", "default_val"); val != "default_val" {
+		t.Errorf("Expected default_val from GetEnv fallback, got %s", val)
 	}
 }
 
@@ -185,9 +193,18 @@ func TestLoadConfigEnvInterpolation(t *testing.T) {
 	tmpDir := t.TempDir()
 	yamlPath := filepath.Join(tmpDir, "config.yaml")
 
-	t.Setenv("TEST_EXPAND_MODEL", "interpolated-gemini-model")
-	t.Setenv("TEST_EXPAND_CHAN", "interpolated-channel")
-	t.Setenv("TEST_EXPAND_REPO", "https://github.com/interpolated/repo.git")
+	mockLookup := func(key string) string {
+		switch key {
+		case "TEST_EXPAND_MODEL":
+			return "interpolated-gemini-model"
+		case "TEST_EXPAND_CHAN":
+			return "interpolated-channel"
+		case "TEST_EXPAND_REPO":
+			return "https://github.com/interpolated/repo.git"
+		default:
+			return ""
+		}
+	}
 
 	yamlContent := `
 model: "${TEST_EXPAND_MODEL}"
@@ -202,9 +219,9 @@ git_sync:
 		t.Fatalf("Failed to write yaml: %v", err)
 	}
 
-	cfg, err := LoadConfigFromPaths(yamlPath)
+	cfg, err := LoadConfigFromLookup(mockLookup, yamlPath)
 	if err != nil {
-		t.Fatalf("LoadConfigFromPaths failed: %v", err)
+		t.Fatalf("LoadConfigFromLookup failed: %v", err)
 	}
 
 	if cfg.Current().Model != "interpolated-gemini-model" {
@@ -219,16 +236,22 @@ git_sync:
 }
 
 func TestLoadConfigMissingFileFallbacks(t *testing.T) {
-	// Reset runtime config to clean defaults
-	activeGlobalConfig.update(DefaultConfigData())
+	mockLookup := func(key string) string {
+		switch key {
+		case "AGY_MODEL":
+			return "env-model-fallback"
+		case "DEFAULT_TIMEZONE":
+			return "Europe/London"
+		case "SYSTEM_CHANNEL":
+			return "env-system-chan"
+		default:
+			return ""
+		}
+	}
 
-	t.Setenv("AGY_MODEL", "env-model-fallback")
-	t.Setenv("DEFAULT_TIMEZONE", "Europe/London")
-	t.Setenv("SYSTEM_CHANNEL", "env-system-chan")
-
-	cfg, err := LoadConfigFromPaths("/non/existent/file/for/sure/config.yaml")
+	cfg, err := LoadConfigFromLookup(mockLookup, "/non/existent/file/for/sure/config.yaml")
 	if err != nil {
-		t.Fatalf("LoadConfigFromPaths failed for missing file: %v", err)
+		t.Fatalf("LoadConfigFromLookup failed for missing file: %v", err)
 	}
 
 	if cfg.Current().Model != "env-model-fallback" {
@@ -1278,39 +1301,45 @@ channels:
 }
 
 func TestConfigGettersAndFallbacks(t *testing.T) {
-	// Test LoadConfig with search paths
-	_, _ = LoadConfig()
-
 	origCfg := activeGlobalConfig.Current()
-	activeGlobalConfig.update(&ConfigData{
-		Timezone:      "",
-		SystemChannel: "",
-	})
 	defer func() {
 		activeGlobalConfig.update(origCfg)
 	}()
 
-	// Test GetTimezone
-	t.Setenv("DEFAULT_TIMEZONE", "America/Chicago")
-	t.Setenv("TZ", "")
+	// 1. Injected Chicago timezone
+	activeGlobalConfig.update(&ConfigData{
+		Timezone:      "America/Chicago",
+		SystemChannel: "custom-sys-chan",
+	})
 	if tz := GetTimezone(); tz != "America/Chicago" {
 		t.Errorf("expected 'America/Chicago', got %q", tz)
 	}
 
-	t.Setenv("DEFAULT_TIMEZONE", "")
-	t.Setenv("TZ", "America/Denver")
+	// 2. Injected Denver timezone
+	activeGlobalConfig.update(&ConfigData{
+		Timezone:      "America/Denver",
+		SystemChannel: "custom-sys-chan",
+	})
 	if tz := GetTimezone(); tz != "America/Denver" {
 		t.Errorf("expected 'America/Denver', got %q", tz)
 	}
 
-	// Test GetSystemChannel
-	t.Setenv("SYSTEM_CHANNEL", "custom-sys-chan")
+	// 3. Injected custom system channel
 	if ch := GetSystemChannel(); ch != "custom-sys-chan" {
 		t.Errorf("expected 'custom-sys-chan', got %q", ch)
 	}
 
-	t.Setenv("SYSTEM_CHANNEL", "")
-	_ = GetSystemChannel()
+	// 4. Injected empty fallback
+	activeGlobalConfig.update(&ConfigData{
+		Timezone:      "",
+		SystemChannel: "",
+	})
+	if tz := GetTimezone(); tz != "America/Los_Angeles" {
+		t.Errorf("expected default 'America/Los_Angeles', got %q", tz)
+	}
+	if ch := GetSystemChannel(); ch != "aerial-dev" {
+		t.Errorf("expected default 'aerial-dev', got %q", ch)
+	}
 }
 
 func TestConfigPolicyRawAndBotIgnored(t *testing.T) {
@@ -1357,9 +1386,15 @@ func TestConfigPolicyRawAndBotIgnored(t *testing.T) {
 	}
 
 	// Test getFallbackDefaults
-	t.Setenv("AGY_MODEL", "fallback-agy-model")
-	t.Setenv("DEFAULT_TIMEZONE", "America/Phoenix")
-	t.Setenv("SYSTEM_CHANNEL", "fallback-sys-channel")
+	origGlobal := activeGlobalConfig.Current()
+	defer func() {
+		activeGlobalConfig.update(origGlobal)
+	}()
+	activeGlobalConfig.update(&ConfigData{
+		Model:         "fallback-agy-model",
+		Timezone:      "America/Phoenix",
+		SystemChannel: "fallback-sys-channel",
+	})
 	fb := getFallbackDefaults()
 	if fb.Model != "fallback-agy-model" {
 		t.Errorf("expected fallback model 'fallback-agy-model', got %q", fb.Model)
@@ -1508,10 +1543,16 @@ func TestConfig_UnmarshalYAML_InvalidTypes(t *testing.T) {
 }
 
 func TestGetFallbackDefaults_OptionsAndEnv(t *testing.T) {
-	t.Setenv("AGY_MODEL", "Custom-Env-Model")
-	t.Setenv("DEFAULT_TIMEZONE", "")
-	t.Setenv("TZ", "Asia/Tokyo")
-	t.Setenv("SYSTEM_CHANNEL", "custom-sys-channel")
+	origGlobal := activeGlobalConfig.Current()
+	defer func() {
+		activeGlobalConfig.update(origGlobal)
+	}()
+
+	activeGlobalConfig.update(&ConfigData{
+		Model:         "Custom-Env-Model",
+		Timezone:      "Asia/Tokyo",
+		SystemChannel: "custom-sys-channel",
+	})
 
 	fb := getFallbackDefaults()
 	if fb.Model != "Custom-Env-Model" {
@@ -1527,39 +1568,36 @@ func TestGetFallbackDefaults_OptionsAndEnv(t *testing.T) {
 
 func TestGetTimezone_And_GetSystemChannel_Fallbacks(t *testing.T) {
 	oldCfg := activeGlobalConfig.Current()
-	activeGlobalConfig.update(&ConfigData{})
 	defer func() {
 		activeGlobalConfig.update(oldCfg)
 	}()
 
-	// 1. DEFAULT_TIMEZONE fallback
-	t.Setenv("DEFAULT_TIMEZONE", "UTC")
-	t.Setenv("TZ", "")
+	// 1. Configured UTC
+	activeGlobalConfig.update(&ConfigData{Timezone: "UTC"})
 	if tz := GetTimezone(); tz != "UTC" {
 		t.Errorf("Expected UTC, got %s", tz)
 	}
 
-	// 2. TZ fallback
-	t.Setenv("DEFAULT_TIMEZONE", "")
-	t.Setenv("TZ", "America/New_York")
+	// 2. Configured America/New_York
+	activeGlobalConfig.update(&ConfigData{Timezone: "America/New_York"})
 	if tz := GetTimezone(); tz != "America/New_York" {
 		t.Errorf("Expected America/New_York, got %s", tz)
 	}
 
 	// 3. Absolute default
-	t.Setenv("TZ", "")
+	activeGlobalConfig.update(&ConfigData{Timezone: ""})
 	if tz := GetTimezone(); tz != "America/Los_Angeles" {
 		t.Errorf("Expected America/Los_Angeles, got %s", tz)
 	}
 
-	// 4. SYSTEM_CHANNEL env fallback
-	t.Setenv("SYSTEM_CHANNEL", "env-channel-1")
+	// 4. Configured channel
+	activeGlobalConfig.update(&ConfigData{SystemChannel: "env-channel-1"})
 	if ch := GetSystemChannel(); ch != "env-channel-1" {
 		t.Errorf("Expected env-channel-1, got %s", ch)
 	}
 
 	// 5. System channel default
-	t.Setenv("SYSTEM_CHANNEL", "")
+	activeGlobalConfig.update(&ConfigData{SystemChannel: ""})
 	if ch := GetSystemChannel(); ch != "aerial-dev" {
 		t.Errorf("Expected aerial-dev, got %s", ch)
 	}
@@ -1685,9 +1723,14 @@ func TestGetFallbackDefaults_DataOptions(t *testing.T) {
 			}
 		}()
 
+		origGlobal := activeGlobalConfig.Current()
+		defer func() {
+			activeGlobalConfig.update(origGlobal)
+		}()
+		activeGlobalConfig.update(&ConfigData{})
+
 		// 1. Model override in /data/options.json
 		_ = os.WriteFile("/data/options.json", []byte(`{"model":"gemini-custom-data"}`), 0644)
-		t.Setenv("AGY_MODEL", "")
 		fb := getFallbackDefaults()
 		if fb.Model != "gemini-custom-data" {
 			t.Errorf("Expected Model=gemini-custom-data from /data/options.json, got %s", fb.Model)
@@ -1790,9 +1833,8 @@ func TestConfig_PointerAliasing_ChannelPolicy(t *testing.T) {
 }
 
 func TestConfig_PostgresHostUnset_ReturnsEmptyDSN(t *testing.T) {
-	t.Setenv("DATABASE_URL", "")
-	t.Setenv("POSTGRES_HOST", "")
-	dsn := buildPostgresDSNFromEnv()
+	emptyLookup := func(string) string { return "" }
+	dsn := buildPostgresDSN(emptyLookup)
 	if dsn != "" {
 		t.Errorf("expected empty DSN when POSTGRES_HOST is unset, got %q", dsn)
 	}
@@ -1902,5 +1944,369 @@ func TestNewTestConfig_And_Update(t *testing.T) {
 	})
 	if cfg.Current().Model != "updated-model" {
 		t.Errorf("expected updated-model, got %q", cfg.Current().Model)
+	}
+}
+
+func TestApplyEnvironmentOverrides_TableDriven(t *testing.T) {
+	tests := []struct {
+		name     string
+		envMap   map[string]string
+		assertFn func(t *testing.T, data *ConfigData)
+	}{
+		{
+			name:   "PORT override",
+			envMap: map[string]string{"PORT": "9090"},
+			assertFn: func(t *testing.T, d *ConfigData) {
+				if d.Port != "9090" {
+					t.Errorf("expected Port=9090, got %q", d.Port)
+				}
+			},
+		},
+		{
+			name:   "AGY_BIN override",
+			envMap: map[string]string{"AGY_BIN": "/custom/bin/agy"},
+			assertFn: func(t *testing.T, d *ConfigData) {
+				if d.AgyBin != "/custom/bin/agy" {
+					t.Errorf("expected AgyBin=/custom/bin/agy, got %q", d.AgyBin)
+				}
+			},
+		},
+		{
+			name:   "GEMINI_API_KEY override",
+			envMap: map[string]string{"GEMINI_API_KEY": "test-key-1"},
+			assertFn: func(t *testing.T, d *ConfigData) {
+				if d.APIKey != "test-key-1" {
+					t.Errorf("expected APIKey=test-key-1, got %q", d.APIKey)
+				}
+			},
+		},
+		{
+			name:   "ANTIGRAVITY_API_KEY fallback override",
+			envMap: map[string]string{"ANTIGRAVITY_API_KEY": "test-key-2"},
+			assertFn: func(t *testing.T, d *ConfigData) {
+				if d.APIKey != "test-key-2" {
+					t.Errorf("expected APIKey=test-key-2, got %q", d.APIKey)
+				}
+			},
+		},
+		{
+			name:   "SYSTEM_PROMPT override",
+			envMap: map[string]string{"SYSTEM_PROMPT": "you are an agent"},
+			assertFn: func(t *testing.T, d *ConfigData) {
+				if d.SystemPrompt != "you are an agent" {
+					t.Errorf("expected custom system prompt, got %q", d.SystemPrompt)
+				}
+			},
+		},
+		{
+			name:   "DISCORD_TOKEN override",
+			envMap: map[string]string{"DISCORD_TOKEN": "dt-1"},
+			assertFn: func(t *testing.T, d *ConfigData) {
+				if d.DiscordToken != "dt-1" {
+					t.Errorf("expected DiscordToken=dt-1, got %q", d.DiscordToken)
+				}
+			},
+		},
+		{
+			name:   "DISCORD_BOT_TOKEN fallback override",
+			envMap: map[string]string{"DISCORD_BOT_TOKEN": "dbt-2"},
+			assertFn: func(t *testing.T, d *ConfigData) {
+				if d.DiscordToken != "dbt-2" {
+					t.Errorf("expected DiscordToken=dbt-2, got %q", d.DiscordToken)
+				}
+			},
+		},
+		{
+			name:   "GITHUB_PAT override",
+			envMap: map[string]string{"GITHUB_PAT": "ghp_mock_123"},
+			assertFn: func(t *testing.T, d *ConfigData) {
+				if d.GitHubPAT != "ghp_mock_123" {
+					t.Errorf("expected GitHubPAT=ghp_mock_123, got %q", d.GitHubPAT)
+				}
+			},
+		},
+		{
+			name:   "DATABASE_URL direct override",
+			envMap: map[string]string{"DATABASE_URL": "postgres://db.prod:5432/mydb"},
+			assertFn: func(t *testing.T, d *ConfigData) {
+				if d.DatabaseURL != "postgres://db.prod:5432/mydb" {
+					t.Errorf("expected DatabaseURL override, got %q", d.DatabaseURL)
+				}
+			},
+		},
+		{
+			name:   "AGY_MODEL override",
+			envMap: map[string]string{"AGY_MODEL": "gemini-exp"},
+			assertFn: func(t *testing.T, d *ConfigData) {
+				if d.Model != "gemini-exp" {
+					t.Errorf("expected Model=gemini-exp, got %q", d.Model)
+				}
+			},
+		},
+		{
+			name:   "DEFAULT_TIMEZONE override",
+			envMap: map[string]string{"DEFAULT_TIMEZONE": "Asia/Tokyo"},
+			assertFn: func(t *testing.T, d *ConfigData) {
+				if d.Timezone != "Asia/Tokyo" {
+					t.Errorf("expected Timezone=Asia/Tokyo, got %q", d.Timezone)
+				}
+			},
+		},
+		{
+			name:   "TZ fallback override",
+			envMap: map[string]string{"TZ": "Europe/Paris"},
+			assertFn: func(t *testing.T, d *ConfigData) {
+				if d.Timezone != "Europe/Paris" {
+					t.Errorf("expected Timezone=Europe/Paris, got %q", d.Timezone)
+				}
+			},
+		},
+		{
+			name:   "SYSTEM_CHANNEL override",
+			envMap: map[string]string{"SYSTEM_CHANNEL": "ops-channel"},
+			assertFn: func(t *testing.T, d *ConfigData) {
+				if d.SystemChannel != "ops-channel" {
+					t.Errorf("expected SystemChannel=ops-channel, got %q", d.SystemChannel)
+				}
+			},
+		},
+		{
+			name:   "LOW_EFFORT_MODEL override",
+			envMap: map[string]string{"LOW_EFFORT_MODEL": "gemini-mini"},
+			assertFn: func(t *testing.T, d *ConfigData) {
+				if d.LowEffortModel != "gemini-mini" || d.ClassifierModel != "gemini-mini" {
+					t.Errorf("expected LowEffortModel=gemini-mini, got %q", d.LowEffortModel)
+				}
+			},
+		},
+		{
+			name:   "AMBIENT_CLASSIFIER_MODEL fallback override",
+			envMap: map[string]string{"AMBIENT_CLASSIFIER_MODEL": "gemini-ambient"},
+			assertFn: func(t *testing.T, d *ConfigData) {
+				if d.LowEffortModel != "gemini-ambient" || d.ClassifierModel != "gemini-ambient" {
+					t.Errorf("expected LowEffortModel=gemini-ambient, got %q", d.LowEffortModel)
+				}
+			},
+		},
+		{
+			name:   "CLASSIFIER_MODEL fallback override",
+			envMap: map[string]string{"CLASSIFIER_MODEL": "gemini-legacy-classifier"},
+			assertFn: func(t *testing.T, d *ConfigData) {
+				if d.LowEffortModel != "gemini-legacy-classifier" || d.ClassifierModel != "gemini-legacy-classifier" {
+					t.Errorf("expected LowEffortModel=gemini-legacy-classifier, got %q", d.LowEffortModel)
+				}
+			},
+		},
+		{
+			name:   "OLLAMA_URL override",
+			envMap: map[string]string{"OLLAMA_URL": "http://ollama-host:11434"},
+			assertFn: func(t *testing.T, d *ConfigData) {
+				if d.Ollama.BaseURL != "http://ollama-host:11434" {
+					t.Errorf("expected Ollama BaseURL override, got %q", d.Ollama.BaseURL)
+				}
+			},
+		},
+		{
+			name:   "EMBEDDING_MODEL override",
+			envMap: map[string]string{"EMBEDDING_MODEL": "text-embed-3"},
+			assertFn: func(t *testing.T, d *ConfigData) {
+				if d.Ollama.Model != "text-embed-3" {
+					t.Errorf("expected Ollama Model override, got %q", d.Ollama.Model)
+				}
+			},
+		},
+		{
+			name:   "OLLAMA_EMBEDDING_MODEL fallback override",
+			envMap: map[string]string{"OLLAMA_EMBEDDING_MODEL": "ollama-embed"},
+			assertFn: func(t *testing.T, d *ConfigData) {
+				if d.Ollama.Model != "ollama-embed" {
+					t.Errorf("expected Ollama Model override, got %q", d.Ollama.Model)
+				}
+			},
+		},
+		{
+			name:   "EMBEDDING_QUERY_PREFIX override",
+			envMap: map[string]string{"EMBEDDING_QUERY_PREFIX": "query: "},
+			assertFn: func(t *testing.T, d *ConfigData) {
+				if d.Ollama.QueryPrefix != "query: " {
+					t.Errorf("expected Ollama QueryPrefix override, got %q", d.Ollama.QueryPrefix)
+				}
+			},
+		},
+		{
+			name:   "GEMINI_HOME override",
+			envMap: map[string]string{"GEMINI_HOME": "/custom/gemini/home"},
+			assertFn: func(t *testing.T, d *ConfigData) {
+				if d.GeminiHomeDir != "/custom/gemini/home" {
+					t.Errorf("expected GeminiHomeDir override, got %q", d.GeminiHomeDir)
+				}
+			},
+		},
+		{
+			name:   "DATA_DIR override",
+			envMap: map[string]string{"DATA_DIR": "/custom/aerial/data"},
+			assertFn: func(t *testing.T, d *ConfigData) {
+				if d.DataDir != "/custom/aerial/data" {
+					t.Errorf("expected DataDir override, got %q", d.DataDir)
+				}
+			},
+		},
+		{
+			name:   "MCP_CONFIG override",
+			envMap: map[string]string{"MCP_CONFIG": `{"mcpServers":{"custom":{"serverUrl":"http://custom:8080"}}}`},
+			assertFn: func(t *testing.T, d *ConfigData) {
+				if d.MCPConfig != `{"mcpServers":{"custom":{"serverUrl":"http://custom:8080"}}}` {
+					t.Errorf("expected MCPConfig override, got %q", d.MCPConfig)
+				}
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			data := DefaultConfigData()
+			lookup := func(k string) string {
+				return tc.envMap[k]
+			}
+			applyEnvironmentOverrides(data, lookup)
+			tc.assertFn(t, data)
+		})
+	}
+}
+
+func TestLoadConfigFromLookup_Isolation(t *testing.T) {
+	origCurrent := activeGlobalConfig.Current()
+	tmpDir := t.TempDir()
+	yamlPath := filepath.Join(tmpDir, "isolated.yaml")
+	content := `
+model: "isolated-model-123"
+system_channel: "isolated-channel-456"
+channels:
+  default:
+    mode: "threads"
+`
+	if err := os.WriteFile(yamlPath, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write test yaml: %v", err)
+	}
+
+	lookup := func(k string) string {
+		if k == "SYSTEM_PROMPT" {
+			return "prompt from lookup"
+		}
+		return ""
+	}
+
+	cfg, err := LoadConfigFromLookup(lookup, yamlPath)
+	if err != nil {
+		t.Fatalf("LoadConfigFromLookup failed: %v", err)
+	}
+
+	if cfg.Current().Model != "isolated-model-123" {
+		t.Errorf("expected isolated model, got %q", cfg.Current().Model)
+	}
+	if cfg.Current().SystemPrompt != "prompt from lookup" {
+		t.Errorf("expected prompt from lookup, got %q", cfg.Current().SystemPrompt)
+	}
+
+	// Verify activeGlobalConfig was NOT mutated
+	afterCurrent := activeGlobalConfig.Current()
+	if afterCurrent.Model != origCurrent.Model || afterCurrent.SystemChannel != origCurrent.SystemChannel {
+		t.Errorf("activeGlobalConfig was unexpectedly mutated: before=%+v, after=%+v", origCurrent, afterCurrent)
+	}
+}
+
+func TestLoadConfigFromLookup_PolymorphicMCPConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// 1. mcp_config as string
+	p1 := filepath.Join(tmpDir, "cfg_str.yaml")
+	c1 := `
+channels:
+  default:
+    mode: "threads"
+mcp_config: '{"mcpServers":{"s1":{"serverUrl":"http://s1:1000"}}}'
+`
+	if err := os.WriteFile(p1, []byte(c1), 0644); err != nil {
+		t.Fatalf("failed to write yaml: %v", err)
+	}
+	cfg1, err := LoadConfigFromLookup(nil, p1)
+	if err != nil {
+		t.Fatalf("LoadConfigFromLookup string mcp_config failed: %v", err)
+	}
+	if !strings.Contains(cfg1.Current().MCPConfig, "http://s1:1000") {
+		t.Errorf("expected string mcp_config to contain s1 url, got %q", cfg1.Current().MCPConfig)
+	}
+
+	// 2. mcp_config as mapping
+	p2 := filepath.Join(tmpDir, "cfg_map.yaml")
+	c2 := `
+channels:
+  default:
+    mode: "threads"
+mcp_config:
+  mcpServers:
+    s2:
+      serverUrl: "http://s2:2000"
+`
+	if err := os.WriteFile(p2, []byte(c2), 0644); err != nil {
+		t.Fatalf("failed to write yaml: %v", err)
+	}
+	cfg2, err := LoadConfigFromLookup(nil, p2)
+	if err != nil {
+		t.Fatalf("LoadConfigFromLookup map mcp_config failed: %v", err)
+	}
+	if !strings.Contains(cfg2.Current().MCPConfig, "http://s2:2000") {
+		t.Errorf("expected map mcp_config serialized to JSON containing s2 url, got %q", cfg2.Current().MCPConfig)
+	}
+}
+
+func TestBuildPostgresDSN_Lookup(t *testing.T) {
+	// 1. Direct DATABASE_URL
+	lookup1 := func(k string) string {
+		if k == "DATABASE_URL" {
+			return "postgres://user:pass@host1:5432/db1"
+		}
+		return ""
+	}
+	if dsn := buildPostgresDSN(lookup1); dsn != "postgres://user:pass@host1:5432/db1" {
+		t.Errorf("expected direct DATABASE_URL, got %q", dsn)
+	}
+
+	// 2. Direct DB_PATH
+	lookup2 := func(k string) string {
+		if k == "DB_PATH" {
+			return "/var/data/app.db"
+		}
+		return ""
+	}
+	if dsn := buildPostgresDSN(lookup2); dsn != "/var/data/app.db" {
+		t.Errorf("expected direct DB_PATH, got %q", dsn)
+	}
+
+	// 3. Components
+	lookup3 := func(k string) string {
+		switch k {
+		case "POSTGRES_HOST":
+			return "pg.internal"
+		case "POSTGRES_PORT":
+			return "5433"
+		case "POSTGRES_USER":
+			return "myuser"
+		case "POSTGRES_PASSWORD":
+			return "secret123"
+		case "POSTGRES_DB":
+			return "aerial_db"
+		default:
+			return ""
+		}
+	}
+	expected := "postgres://myuser:secret123@pg.internal:5433/aerial_db?sslmode=disable"
+	if dsn := buildPostgresDSN(lookup3); dsn != expected {
+		t.Errorf("expected constructed DSN %q, got %q", expected, dsn)
+	}
+
+	// 4. Nil lookup safe
+	if dsn := buildPostgresDSN(nil); dsn != "" {
+		t.Errorf("expected empty DSN for nil lookup, got %q", dsn)
 	}
 }
