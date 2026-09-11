@@ -12,8 +12,16 @@ import (
 	"time"
 )
 
+func NewTestConfig() *Config {
+	return &Config{
+		DatabaseURL: ":memory:",
+		Timezone:    DefaultTimezone,
+		Port:        "8080",
+	}
+}
+
 func setupTestServer(t *testing.T) (*Server, *httptest.Server) {
-	cfg := &Config{DatabaseURL: ":memory:", Timezone: "America/Los_Angeles", Port: "8080"}
+	cfg := NewTestConfig()
 	db, err := InitDB(cfg)
 	if err != nil {
 		t.Fatalf("InitDB failed: %v", err)
@@ -332,44 +340,50 @@ func TestMCP_AllHttpAndRPC_EdgeCases(t *testing.T) {
 }
 
 func TestMCP_DB_AllBranches(t *testing.T) {
-	// 1. LoadConfig env combinations
-	t.Setenv("PORT", "9090")
-	t.Setenv("DEFAULT_TIMEZONE", "America/New_York")
-	t.Setenv("DATABASE_URL", "postgres://db_url")
-	cfg1, err := LoadConfig()
+	// 1. LoadConfigFromLookup combinations
+	env1 := map[string]string{
+		"PORT":             "9090",
+		"DEFAULT_TIMEZONE": "America/New_York",
+		"DATABASE_URL":     "postgres://db_url",
+	}
+	cfg1, err := LoadConfigFromLookup(func(k string) string { return env1[k] })
 	if err != nil || cfg1.DatabaseURL != "postgres://db_url" || cfg1.Port != "9090" || cfg1.Timezone != "America/New_York" {
 		t.Errorf("expected DATABASE_URL to be loaded, got %+v, err=%v", cfg1, err)
 	}
 
-	t.Setenv("DATABASE_URL", "")
-	t.Setenv("DB_PATH", "/tmp/local.db")
-	cfg2, err := LoadConfig()
-	if err != nil || cfg2.DatabaseURL != "/tmp/local.db" {
+	env2 := map[string]string{
+		"DB_PATH": "/tmp/local.db",
+	}
+	cfg2, err := LoadConfigFromLookup(func(k string) string { return env2[k] })
+	if err != nil || cfg2.DatabaseURL != "/tmp/local.db" || cfg2.Port != "8080" || cfg2.Timezone != DefaultTimezone {
 		t.Errorf("expected DB_PATH to be loaded, got %+v, err=%v", cfg2, err)
 	}
 
-	t.Setenv("DB_PATH", "")
-	t.Setenv("POSTGRES_USER", "u")
-	t.Setenv("POSTGRES_PASSWORD", "p")
-	t.Setenv("POSTGRES_HOST", "h")
-	t.Setenv("POSTGRES_PORT", "1234")
-	t.Setenv("POSTGRES_DB", "d")
-	cfg3, err := LoadConfig()
+	env3 := map[string]string{
+		"POSTGRES_USER":     "u",
+		"POSTGRES_PASSWORD": "p",
+		"POSTGRES_HOST":     "h",
+		"POSTGRES_PORT":     "1234",
+		"POSTGRES_DB":       "d",
+	}
+	cfg3, err := LoadConfigFromLookup(func(k string) string { return env3[k] })
 	if err != nil || cfg3.DatabaseURL != "postgres://u:p@h:1234/d?sslmode=disable" {
 		t.Errorf("expected generated postgres URL, got %+v, err=%v", cfg3, err)
 	}
 
-	// Unset all -> LoadConfig must fail (no toxic postgres:5432 default!)
-	t.Setenv("DATABASE_URL", "")
-	t.Setenv("DB_PATH", "")
-	t.Setenv("POSTGRES_USER", "")
-	t.Setenv("POSTGRES_PASSWORD", "")
-	t.Setenv("POSTGRES_HOST", "")
-	t.Setenv("POSTGRES_PORT", "")
-	t.Setenv("POSTGRES_DB", "")
-	if _, err := LoadConfig(); err == nil {
-		t.Error("expected error from LoadConfig when all DB env vars are unset")
+	// Unset all -> LoadConfigFromLookup must fail (no toxic postgres:5432 default!)
+	emptyLookup := func(string) string { return "" }
+	if _, err := LoadConfigFromLookup(emptyLookup); err == nil {
+		t.Error("expected error from LoadConfigFromLookup when all DB env vars are unset")
 	}
+
+	// Nil lookup must fail explicitly
+	if _, err := LoadConfigFromLookup(nil); err == nil {
+		t.Error("expected error from LoadConfigFromLookup when lookup is nil")
+	}
+
+	// Smoke test production LoadConfig()
+	_, _ = LoadConfig()
 
 	// 2. isPostgres
 	if isPostgres(nil) {

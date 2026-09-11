@@ -23,6 +23,15 @@ func ParseRunAtWithTimezone(input string, timezone string, now time.Time) (time.
 		return time.Time{}, fmt.Errorf("run_at cannot be empty")
 	}
 
+	tzTrimmed := strings.TrimSpace(timezone)
+	if tzTrimmed == "" {
+		return time.Time{}, fmt.Errorf("timezone cannot be empty")
+	}
+	loc, err := time.LoadLocation(tzTrimmed)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid timezone %q: %w", tzTrimmed, err)
+	}
+
 	lower := strings.ToLower(raw)
 
 	// 1. Check relative human durations with regex
@@ -66,14 +75,6 @@ func ParseRunAtWithTimezone(input string, timezone string, now time.Time) (time.
 	}
 
 	// 4. Try standard absolute layouts in specified timezone
-	loc := time.UTC
-	tzTrimmed := strings.TrimSpace(timezone)
-	if tzTrimmed != "" {
-		if l, err := time.LoadLocation(tzTrimmed); err == nil {
-			loc = l
-		}
-	}
-
 	localLayouts := []string{
 		"2006-01-02T15:04:05",
 		"2006-01-02 15:04:05",
@@ -90,24 +91,19 @@ func ParseRunAtWithTimezone(input string, timezone string, now time.Time) (time.
 	return time.Time{}, fmt.Errorf("unrecognized run_at format %q: expected ISO timestamp (e.g. 2026-08-28T21:00:00Z) or relative duration (e.g. 30m, 2h, 1d)", raw)
 }
 
-// ParseRunAt parses relative durations or ISO timestamps using default timezone.
-func ParseRunAt(input string, now time.Time) (time.Time, error) {
-	return ParseRunAtWithTimezone(input, GetDefaultTimezone(), now)
-}
-
 func CalculateNextCronRun(cronExpr, timezone string, from time.Time) (time.Time, error) {
 	sched, err := cronParser.Parse(cronExpr)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("invalid cron expression %q: %w", cronExpr, err)
 	}
 
-	loc := time.UTC
 	tzTrimmed := strings.TrimSpace(timezone)
 	if tzTrimmed == "" {
-		tzTrimmed = GetDefaultTimezone()
+		return time.Time{}, fmt.Errorf("timezone cannot be empty")
 	}
-	if l, err := time.LoadLocation(tzTrimmed); err == nil {
-		loc = l
+	loc, err := time.LoadLocation(tzTrimmed)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid timezone %q: %w", tzTrimmed, err)
 	}
 
 	fromInLoc := from.In(loc)
@@ -116,19 +112,20 @@ func CalculateNextCronRun(cronExpr, timezone string, from time.Time) (time.Time,
 }
 
 type ToolHandler struct {
-	cfg *Config
-	db  *sql.DB
+	cfg      *Config
+	db       *sql.DB
+	timezone string
 }
 
 func NewToolHandler(cfg *Config, database *sql.DB) *ToolHandler {
-	return &ToolHandler{cfg: cfg, db: database}
-}
-
-func (h *ToolHandler) defaultTimezone() string {
-	if h.cfg != nil && h.cfg.Timezone != "" {
-		return h.cfg.Timezone
+	if cfg == nil {
+		panic("tool handler: config cannot be nil")
 	}
-	return "America/Los_Angeles"
+	return &ToolHandler{
+		cfg:      cfg,
+		db:       database,
+		timezone: cfg.Timezone,
+	}
 }
 
 type ScheduleRecurringArgs struct {
@@ -152,7 +149,7 @@ func (h *ToolHandler) HandleScheduleRecurring(rawArgs json.RawMessage) (interfac
 	args.TitlePrefix = strings.TrimSpace(args.TitlePrefix)
 	args.Timezone = strings.TrimSpace(args.Timezone)
 	if args.Timezone == "" {
-		args.Timezone = h.defaultTimezone()
+		args.Timezone = h.timezone
 	}
 	args.Effort = strings.ToLower(strings.TrimSpace(args.Effort))
 	if args.Effort != "low" {
@@ -222,7 +219,7 @@ func (h *ToolHandler) HandleScheduleOnce(rawArgs json.RawMessage) (interface{}, 
 	args.Prompt = strings.TrimSpace(args.Prompt)
 	args.Timezone = strings.TrimSpace(args.Timezone)
 	if args.Timezone == "" {
-		args.Timezone = h.defaultTimezone()
+		args.Timezone = h.timezone
 	}
 
 	if args.TargetID == "" {
@@ -347,7 +344,7 @@ func (h *ToolHandler) HandleUpdateCronSchedule(rawArgs json.RawMessage) (interfa
 
 	var nextRun *time.Time
 	if args.CronExpression != nil && strings.TrimSpace(*args.CronExpression) != "" {
-		tz := h.defaultTimezone()
+		tz := h.timezone
 		if args.Timezone != nil && strings.TrimSpace(*args.Timezone) != "" {
 			tz = strings.TrimSpace(*args.Timezone)
 		}

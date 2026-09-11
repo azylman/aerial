@@ -6,6 +6,13 @@ import (
 	"strings"
 )
 
+const (
+	// DefaultTimezone is the fallback timezone when unspecified.
+	DefaultTimezone = "America/Los_Angeles"
+	// DefaultPort is the fallback HTTP server port when unspecified.
+	DefaultPort = "8080"
+)
+
 // Config represents the runtime configuration for the scheduler MCP server.
 type Config struct {
 	DatabaseURL string
@@ -13,25 +20,13 @@ type Config struct {
 	Port        string
 }
 
-// GetDefaultTimezone returns the configured default timezone for the server.
-// Reads DEFAULT_TIMEZONE -> TZ -> fallback "America/Los_Angeles".
-func GetDefaultTimezone() string {
-	if tz := strings.TrimSpace(os.Getenv("DEFAULT_TIMEZONE")); tz != "" {
-		return tz
-	}
-	if tz := strings.TrimSpace(os.Getenv("TZ")); tz != "" {
-		return tz
-	}
-	return "America/Los_Angeles"
-}
-
 // NewConfig creates a Config instance with explicit values.
 func NewConfig(databaseURL, timezone, port string) *Config {
 	if timezone == "" {
-		timezone = "America/Los_Angeles"
+		timezone = DefaultTimezone
 	}
 	if port == "" {
-		port = "8080"
+		port = DefaultPort
 	}
 	return &Config{
 		DatabaseURL: databaseURL,
@@ -40,36 +35,46 @@ func NewConfig(databaseURL, timezone, port string) *Config {
 	}
 }
 
-// LoadConfig reads configuration from environment variables.
-// Returns an error if no valid database URL or host is specified.
-func LoadConfig() (*Config, error) {
-	port := strings.TrimSpace(os.Getenv("PORT"))
+// LoadConfigFromLookup reads configuration using the provided environment lookup function.
+// Returns an error if lookup is nil or if no valid database connection string can be constructed.
+func LoadConfigFromLookup(lookup func(string) string) (*Config, error) {
+	if lookup == nil {
+		return nil, fmt.Errorf("config: lookup function cannot be nil")
+	}
+
+	port := strings.TrimSpace(lookup("PORT"))
 	if port == "" {
-		port = "8080"
+		port = DefaultPort
 	}
 
-	tz := GetDefaultTimezone()
+	tz := strings.TrimSpace(lookup("DEFAULT_TIMEZONE"))
+	if tz == "" {
+		tz = strings.TrimSpace(lookup("TZ"))
+	}
+	if tz == "" {
+		tz = DefaultTimezone
+	}
 
-	dbURL := strings.TrimSpace(os.Getenv("DATABASE_URL"))
+	dbURL := strings.TrimSpace(lookup("DATABASE_URL"))
 	if dbURL == "" {
-		dbURL = strings.TrimSpace(os.Getenv("DB_PATH"))
+		dbURL = strings.TrimSpace(lookup("DB_PATH"))
 	}
 	if dbURL == "" {
-		dbHost := strings.TrimSpace(os.Getenv("POSTGRES_HOST"))
+		dbHost := strings.TrimSpace(lookup("POSTGRES_HOST"))
 		if dbHost != "" {
-			dbUser := strings.TrimSpace(os.Getenv("POSTGRES_USER"))
+			dbUser := strings.TrimSpace(lookup("POSTGRES_USER"))
 			if dbUser == "" {
 				dbUser = "aerial"
 			}
-			dbPass := strings.TrimSpace(os.Getenv("POSTGRES_PASSWORD"))
+			dbPass := strings.TrimSpace(lookup("POSTGRES_PASSWORD"))
 			if dbPass == "" {
 				dbPass = "aerial_secure_pass"
 			}
-			dbPort := strings.TrimSpace(os.Getenv("POSTGRES_PORT"))
+			dbPort := strings.TrimSpace(lookup("POSTGRES_PORT"))
 			if dbPort == "" {
 				dbPort = "5432"
 			}
-			dbName := strings.TrimSpace(os.Getenv("POSTGRES_DB"))
+			dbName := strings.TrimSpace(lookup("POSTGRES_DB"))
 			if dbName == "" {
 				dbName = "aerial"
 			}
@@ -86,4 +91,9 @@ func LoadConfig() (*Config, error) {
 		Timezone:    tz,
 		Port:        port,
 	}, nil
+}
+
+// LoadConfig reads configuration from ambient environment variables.
+func LoadConfig() (*Config, error) {
+	return LoadConfigFromLookup(os.Getenv)
 }
