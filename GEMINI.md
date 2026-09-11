@@ -124,6 +124,10 @@ Aerial operates on a strict **Two-Repository Separation of Concerns**:
    - **NEVER** output `file://` or `file:///` scheme URLs or masked file links (e.g. `[file](file:///...)`).
    - Reference filenames, paths, and code identifiers using clean inline backticks (e.g. `GEMINI.md`) when not providing a GitHub web link.
    - Masked links (`[label](url)`) are ONLY permitted for valid `https://` or `http://` web URLs.
+   - **Action-Output Synchronicity Invariant (No False Starts / Future-Tense Promises)**:
+     - NEVER end a turn stating in prose that you are "starting", "running", or "kicking off" a task right now (e.g. *"Kicking off Task 1 right now!"*). In a turn-based system, final text is delivered to Discord only after your execution process has completely stopped.
+     - If work remains to be done, **do not speak**—execute the tool calls, write code, run tests, or spawn subagents silently.
+     - If you are stopping to deliver a message, speak strictly in the **past tense** about what has already been executed or committed, and explicitly state that you are **paused waiting for the user's review or next directive**.
    - **No Markdown Tables**: NEVER format responses using Markdown tables as Discord does not support table rendering.
 
 6. **Continuous Deployment & Engineering Invariant**:
