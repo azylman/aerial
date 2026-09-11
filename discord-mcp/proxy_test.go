@@ -648,5 +648,112 @@ func (e *errReader) Read(p []byte) (n int, err error) {
 	return 0, fmt.Errorf("simulated read error")
 }
 
+func TestServeHTTP_ToolsListFilterError(t *testing.T) {
+	// Upstream returns 200 OK with malformed JSON for tools/list
+	mockUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{not valid json`))
+	}))
+	defer mockUpstream.Close()
+
+	handler, err := NewProxyHandler(mockUpstream.URL, BlockedToolNames)
+	if err != nil {
+		t.Fatalf("NewProxyHandler failed: %v", err)
+	}
+
+	reqBody := `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(reqBody))
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200 OK even when filter fails, got %d", rec.Code)
+	}
+	if rec.Body.String() != `{not valid json` {
+		t.Errorf("expected original body when filter fails, got %q", rec.Body.String())
+	}
+}
+
+func TestStartProxyServer_InvalidUpstream(t *testing.T) {
+	_, err := StartProxyServer("8080", "://invalid-scheme\x7f")
+	if err == nil {
+		t.Error("expected error for invalid upstream URL")
+	}
+}
+
+func TestFilterToolsResponse_InvalidJSON(t *testing.T) {
+	raw := []byte(`{invalid-json`)
+	filtered, err := FilterToolsResponse(raw, BlockedToolNames)
+	if err == nil {
+		t.Error("expected error for invalid JSON in FilterToolsResponse")
+	}
+	if string(filtered) != string(raw) {
+		t.Errorf("expected original bytes returned on error, got %s", string(filtered))
+	}
+}
+
+func TestServeHTTP_InvalidMethod(t *testing.T) {
+	handler, err := NewProxyHandler("http://127.0.0.1:4005", BlockedToolNames)
+	if err != nil {
+		t.Fatalf("NewProxyHandler failed: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/mcp", nil)
+	req.Method = "INVALID METHOD WITH SPACES"
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code < 500 {
+		t.Errorf("expected 5xx error on invalid method, got %d", rec.Code)
+	}
+}
+
+func TestRunProxyApp_StartProxyServerFailure(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	cfg := &Config{
+		Port:         "8080",
+		UpstreamPort: ":\x7f-invalid-port",
+		NodeBin:      "sleep",
+		AppPath:      "0.1",
+	}
+
+	err := RunProxyApp(ctx, cfg)
+	if err == nil {
+		t.Error("expected error when StartProxyServer fails due to invalid upstream URL")
+	}
+}
+
+func TestServeHTTP_UpstreamBodyReadError(t *testing.T) {
+	mockUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "500")
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		if hj, ok := w.(http.Hijacker); ok {
+			conn, _, _ := hj.Hijack()
+			_ = conn.Close()
+		}
+	}))
+	defer mockUpstream.Close()
+
+	handler, err := NewProxyHandler(mockUpstream.URL, BlockedToolNames)
+	if err != nil {
+		t.Fatalf("NewProxyHandler failed: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Errorf("expected 502 on read error, got %d", rec.Code)
+	}
+}
+
 
 

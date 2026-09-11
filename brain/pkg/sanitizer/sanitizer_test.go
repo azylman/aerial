@@ -272,6 +272,37 @@ func TestSanitizeEnvVars(t *testing.T) {
 	}
 }
 
+func TestRegisterConfigTokens_EdgeCases(t *testing.T) {
+	// Nil config
+	RegisterConfigTokens(nil)
+
+	// Config with nil data
+	emptyCfg := &config.Config{}
+	RegisterConfigTokens(emptyCfg)
+}
+
+func TestIsSensitiveEnvKey_Direct(t *testing.T) {
+	cases := []struct {
+		key      string
+		expected bool
+	}{
+		{"", false},
+		{"   ", false},
+		{"AUTH", true},
+		{"CREDENTIALS", true},
+		{"AUTH_HEADER", true},
+		{"MY_AUTH_TOKEN", true},
+		{"PAT_VALUE", true},
+		{"DB_PAT_TOKEN", true},
+		{"NORMAL_VAR", false},
+	}
+	for _, tc := range cases {
+		if res := isSensitiveEnvKey(tc.key); res != tc.expected {
+			t.Errorf("isSensitiveEnvKey(%q) = %v; want %v", tc.key, res, tc.expected)
+		}
+	}
+}
+
 func BenchmarkSanitizeString_Clean(b *testing.B) {
 	text := "This is a clean prompt message from the user requesting a political and AI technology news summary."
 	b.ResetTimer()

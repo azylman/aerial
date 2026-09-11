@@ -1010,3 +1010,227 @@ func TestManager_Roots(t *testing.T) {
 		t.Errorf("expected nil roots for nil manager, got %v", nilRoots)
 	}
 }
+
+func TestManager_HomeDir_DataDir(t *testing.T) {
+	tmpHome := t.TempDir()
+	tmpData := t.TempDir()
+	m := New(tmpHome, tmpData)
+	if m.HomeDir() != tmpHome {
+		t.Errorf("expected %s, got %s", tmpHome, m.HomeDir())
+	}
+	if m.DataDir() != tmpData {
+		t.Errorf("expected %s, got %s", tmpData, m.DataDir())
+	}
+
+	var nilMgr *Manager
+	if nilMgr.HomeDir() != "" {
+		t.Errorf("expected empty string for nil HomeDir")
+	}
+	if nilMgr.DataDir() != "" {
+		t.Errorf("expected empty string for nil DataDir")
+	}
+	if act, err := nilMgr.GetSessionLastActivity("sess"); err != nil || !act.IsZero() {
+		t.Errorf("expected zero time for nil manager, got %v, %v", act, err)
+	}
+}
+
+func TestManager_DumpSessionDiagnosticLogs_DataDirCoverage(t *testing.T) {
+	tmpHome := t.TempDir()
+	tmpData := t.TempDir()
+	m := New(tmpHome, tmpData)
+
+	convID := "test-diag-conv"
+	dataLogDir := filepath.Join(tmpData, "brain", convID, ".system_generated", "logs")
+	_ = os.MkdirAll(dataLogDir, 0755)
+
+	// Add sub-directory inside dataLogDir so entry.IsDir() executes continue
+	_ = os.MkdirAll(filepath.Join(dataLogDir, "subdir"), 0755)
+
+	// Add an empty file
+	_ = os.WriteFile(filepath.Join(dataLogDir, "empty.log"), []byte(""), 0644)
+
+	// Add a file with content
+	_ = os.WriteFile(filepath.Join(dataLogDir, "file1.log"), []byte("log line 1\nlog line 2\n"), 0644)
+
+	diag := m.DumpSessionDiagnosticLogs(convID)
+	if !strings.Contains(diag, "log line 1") {
+		t.Errorf("expected diag logs to contain log line 1, got %q", diag)
+	}
+}
+
+func TestAppendAmbientTurn_EdgeCases(t *testing.T) {
+	tmpHome := t.TempDir()
+	tmpData := t.TempDir()
+	m := New(tmpHome, tmpData)
+
+	sessID := "sess-edge-ambient"
+	// Create session directory under tmpData/brain/sessID/.system_generated/logs
+	logsDir := filepath.Join(tmpData, "brain", sessID, ".system_generated", "logs")
+	_ = os.MkdirAll(logsDir, 0755)
+
+	// Write transcript without trailing newline
+	transcriptPath := filepath.Join(logsDir, "transcript.jsonl")
+	_ = os.WriteFile(transcriptPath, []byte(`{"step_index":0,"content":"hello"}`), 0644)
+
+	// Append turn with zero timestamp
+	err := m.AppendAmbientTurn(sessID, "general", "alice", "hey there", time.Time{})
+	if err != nil {
+		t.Fatalf("AppendAmbientTurn failed: %v", err)
+	}
+
+	data, err := os.ReadFile(transcriptPath)
+	if err != nil {
+		t.Fatalf("failed to read transcript: %v", err)
+	}
+	if !strings.Contains(string(data), "[Chat #general] @alice") {
+		t.Errorf("expected ambient turn content, got %s", string(data))
+	}
+}
+
+func TestGetLastStepIndex_Errors(t *testing.T) {
+	tmpDir := t.TempDir()
+	emptyFile := filepath.Join(tmpDir, "empty.jsonl")
+	_ = os.WriteFile(emptyFile, []byte(""), 0644)
+	idx, err := getLastStepIndex(emptyFile)
+	if idx != -1 || err != nil {
+		t.Errorf("expected -1, nil for empty file, got %d, %v", idx, err)
+	}
+
+	nonExistent := filepath.Join(tmpDir, "does_not_exist.jsonl")
+	idx, err = getLastStepIndex(nonExistent)
+	if idx != -1 || err != nil {
+		t.Errorf("expected -1, nil for non-existent file, got %d, %v", idx, err)
+	}
+
+	trailingNewlines := filepath.Join(tmpDir, "trailing.jsonl")
+	_ = os.WriteFile(trailingNewlines, []byte("{\"step_index\":5}\n\n\n"), 0644)
+	idx, err = getLastStepIndex(trailingNewlines)
+	if idx != 5 || err != nil {
+		t.Errorf("expected 5, nil for trailing newlines, got %d, %v", idx, err)
+	}
+}
+
+func TestEnsureSessionDir_Coverage(t *testing.T) {
+	tmpHome := t.TempDir()
+	tmpData := t.TempDir()
+	m := New(tmpHome, tmpData)
+
+	dir, err := m.EnsureSessionDir("sess-ensure-1")
+	if err != nil {
+		t.Fatalf("EnsureSessionDir failed: %v", err)
+	}
+	if !strings.Contains(dir, "sess-ensure-1") {
+		t.Errorf("expected session dir to contain sess-ensure-1, got %s", dir)
+	}
+
+	// 1. Nil manager
+	var nilM *Manager
+	if _, err := nilM.EnsureSessionDir("sess"); err == nil {
+		t.Error("expected error for nil manager")
+	}
+
+	// 2. Empty sessionID
+	if _, err := m.EnsureSessionDir(""); err == nil {
+		t.Error("expected error for empty sessionID")
+	}
+
+	// 3. Manager without roots
+	mEmpty := New("", "")
+	if _, err := mEmpty.EnsureSessionDir("sess"); err == nil {
+		t.Error("expected error for manager without roots")
+	}
+
+	// 4. MkdirAll error: blocking file
+	blockingFile := filepath.Join(tmpData, "brain", "sess-blocking")
+	_ = os.WriteFile(blockingFile, []byte("blocking"), 0644)
+	if _, err := m.EnsureSessionDir("sess-blocking"); err == nil {
+		t.Error("expected error when file blocks session directory creation")
+	}
+}
+
+func TestAppendAmbientTurn_NilAndEmpty(t *testing.T) {
+	tmpHome := t.TempDir()
+	tmpData := t.TempDir()
+	m := New(tmpHome, tmpData)
+
+	var nilM *Manager
+	if err := nilM.AppendAmbientTurn("s", "c", "a", "t", time.Time{}); err != nil {
+		t.Errorf("expected nil error for nil manager, got %v", err)
+	}
+	if err := m.AppendAmbientTurn("", "c", "a", "t", time.Time{}); err != nil {
+		t.Errorf("expected nil error for empty sessionID, got %v", err)
+	}
+	if err := m.AppendAmbientTurn("s", "c", "a", "", time.Time{}); err != nil {
+		t.Errorf("expected nil error for empty text, got %v", err)
+	}
+	// Session where logsDir does not exist
+	if err := m.AppendAmbientTurn("non-existent-session-xyz", "c", "a", "t", time.Time{}); err != nil {
+		t.Errorf("expected nil error for non-existent session, got %v", err)
+	}
+}
+
+func TestLastActivityFromRoots_PatternExpansions(t *testing.T) {
+	// Empty sessionID or roots
+	if act, err := LastActivityFromRoots("", []string{"/tmp"}); err != nil || !act.IsZero() {
+		t.Errorf("expected zero time for empty sessionID, got %v, %v", act, err)
+	}
+	if act, err := LastActivityFromRoots("sess", nil); err != nil || !act.IsZero() {
+		t.Errorf("expected zero time for nil roots, got %v, %v", act, err)
+	}
+
+	tmpDir := t.TempDir()
+	sessID := "pattern-sess-123"
+	sessDir := filepath.Join(tmpDir, sessID)
+	_ = os.MkdirAll(sessDir, 0755)
+
+	// Roots with %s and {session} and .system_generated/logs suffix
+	logsSuffixDir := filepath.Join(sessDir, ".system_generated", "logs")
+	_ = os.MkdirAll(logsSuffixDir, 0755)
+
+	roots := []string{
+		"", // empty root to hit strings.TrimSpace(root) == "" continue
+		filepath.Join(tmpDir, "%s"),
+		filepath.Join(tmpDir, "{session}"),
+		sessDir,       // cleanExpanded == trimmed
+		logsSuffixDir, // strings.HasSuffix .system_generated/logs
+	}
+	act, err := LastActivityFromRoots(sessID, roots)
+	if err != nil {
+		t.Fatalf("LastActivityFromRoots failed: %v", err)
+	}
+	_ = act
+}
+
+func TestEnsureSessionDir_OpenFileError(t *testing.T) {
+	tmpHome := t.TempDir()
+	tmpData := t.TempDir()
+	m := New(tmpHome, tmpData)
+
+	sessID := "sess-open-err"
+	logsDir := filepath.Join(tmpData, "brain", sessID, ".system_generated", "logs")
+	_ = os.MkdirAll(logsDir, 0755)
+	// Create transcript.jsonl as a directory so os.OpenFile fails
+	_ = os.MkdirAll(filepath.Join(logsDir, "transcript.jsonl"), 0755)
+
+	if _, err := m.EnsureSessionDir(sessID); err == nil {
+		t.Error("expected error when transcript.jsonl is a directory")
+	}
+}
+
+func TestAppendAmbientTurn_C2LogsDir(t *testing.T) {
+	tmpData := t.TempDir()
+
+	sessID := "sess-c2-test"
+	// c2 is dir/sessionID/.system_generated/logs
+	// If we configure root as tmpData (not tmpData/brain):
+	mRoot := New("", "")
+	mRoot.roots = []string{tmpData} // dir = tmpData, so c1 is tmpData/.system_generated/logs (missing), c2 is tmpData/sessID/.system_generated/logs (exists)
+	c2LogsDir := filepath.Join(tmpData, sessID, ".system_generated", "logs")
+	_ = os.MkdirAll(c2LogsDir, 0755)
+	_ = os.WriteFile(filepath.Join(c2LogsDir, "transcript.jsonl"), []byte("{\"step_index\":1}\n"), 0644)
+
+	err := mRoot.AppendAmbientTurn(sessID, "chat", "bob", "c2 message", time.Now())
+	if err != nil {
+		t.Fatalf("AppendAmbientTurn failed for c2 dir: %v", err)
+	}
+}
