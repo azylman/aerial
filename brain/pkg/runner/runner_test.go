@@ -97,6 +97,27 @@ func TestParseAgyOutput(t *testing.T) {
 			wantStatus: "SUCCESS",
 			wantResp:   "Handled large line",
 		},
+		{
+			name: "Stream-json Result Flat",
+			stdout: `{"event":"init","conversation_id":"77777777-7777-7777-7777-777777777777"}
+{"event":"result","status":"SUCCESS","response":"flat response"}`,
+			wantErr:    false,
+			wantConvID: "77777777-7777-7777-7777-777777777777",
+			wantStatus: "SUCCESS",
+			wantResp:   "flat response",
+		},
+		{
+			name: "Multiline Legacy JSON fallback",
+			stdout: `{
+"conversation_id":"88888888-8888-8888-8888-888888888888",
+"status":"SUCCESS",
+"response":"multiline legacy"
+}`,
+			wantErr:    false,
+			wantConvID: "88888888-8888-8888-8888-888888888888",
+			wantStatus: "SUCCESS",
+			wantResp:   "multiline legacy",
+		},
 	}
 
 	for _, tt := range tests {

@@ -719,4 +719,28 @@ func (m *Manager) SessionExistsOnDisk(sessionID string) bool {
 	return false
 }
 
+// CleanupEphemeralSession purges throwaway session directories from disk.
+// If searchRoots are provided, it deletes convID subdirectories within those roots.
+func CleanupEphemeralSession(convID string, searchRoots ...string) {
+	cleanConvID := strings.TrimSpace(convID)
+	if cleanConvID == "" || strings.ContainsAny(cleanConvID, `/\:`) || strings.Contains(cleanConvID, "..") {
+		return
+	}
+	for _, root := range searchRoots {
+		cleanRoot := strings.TrimSpace(root)
+		if cleanRoot == "" {
+			continue
+		}
+		dirs := []string{
+			filepath.Join(cleanRoot, cleanConvID),
+			filepath.Join(cleanRoot, ".gemini", "antigravity-cli", "brain", cleanConvID),
+			filepath.Join(cleanRoot, ".gemini", "antigravity", "brain", cleanConvID),
+			filepath.Join(cleanRoot, "brain", cleanConvID),
+		}
+		for _, d := range dirs {
+			_ = os.RemoveAll(d)
+		}
+	}
+}
+
 

@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -18,6 +16,7 @@ import (
 	"github.com/azylman/aerial/brain/pkg/metrics"
 	"github.com/azylman/aerial/brain/pkg/runner"
 	"github.com/azylman/aerial/brain/pkg/sanitizer"
+	"github.com/azylman/aerial/brain/pkg/session"
 	"github.com/google/uuid"
 )
 
@@ -368,25 +367,7 @@ func NewAgyLLMFunc(agyBin, apiKey string, runnerFn func(ctx context.Context, agy
 // If searchRoots are provided, it deletes convID subdirectories within those roots.
 // Zero ambient environment defaults (os.UserHomeDir, os.Getenv("HOME")) are used.
 func CleanupEphemeralSession(convID string, searchRoots ...string) {
-	cleanConvID := strings.TrimSpace(convID)
-	if cleanConvID == "" || strings.ContainsAny(cleanConvID, `/\:`) || strings.Contains(cleanConvID, "..") {
-		return
-	}
-	for _, root := range searchRoots {
-		cleanRoot := strings.TrimSpace(root)
-		if cleanRoot == "" {
-			continue
-		}
-		dirs := []string{
-			filepath.Join(cleanRoot, cleanConvID),
-			filepath.Join(cleanRoot, ".gemini", "antigravity-cli", "brain", cleanConvID),
-			filepath.Join(cleanRoot, ".gemini", "antigravity", "brain", cleanConvID),
-			filepath.Join(cleanRoot, "brain", cleanConvID),
-		}
-		for _, d := range dirs {
-			_ = os.RemoveAll(d)
-		}
-	}
+	session.CleanupEphemeralSession(convID, searchRoots...)
 }
 
 func (c *Classifier) classifyWithPrompt(ctx context.Context, prompt string) ClassificationResult {
