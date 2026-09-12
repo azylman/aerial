@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE TABLE IF NOT EXISTS sessions (
 	thread_id TEXT PRIMARY KEY,
 	internal_session_id TEXT NOT NULL DEFAULT '',
+	previous_session_id TEXT NOT NULL DEFAULT '',
 	turn_count INTEGER NOT NULL DEFAULT 0,
 	last_extracted_rowid BIGINT NOT NULL DEFAULT 0,
 	fact_extracted_at TIMESTAMPTZ,
@@ -138,6 +139,7 @@ END;
 CREATE TABLE IF NOT EXISTS sessions (
 	thread_id TEXT PRIMARY KEY,
 	internal_session_id TEXT NOT NULL DEFAULT '',
+	previous_session_id TEXT NOT NULL DEFAULT '',
 	turn_count INTEGER NOT NULL DEFAULT 0,
 	last_extracted_rowid INTEGER NOT NULL DEFAULT 0,
 	fact_extracted_at DATETIME,
@@ -240,6 +242,9 @@ func initSchemaPostgres(ctx context.Context, database *sql.DB) error {
 
 	_, _ = conn.ExecContext(ctx, "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS summary TEXT NOT NULL DEFAULT ''")
 	_, _ = conn.ExecContext(ctx, "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS last_summarized_message_id TEXT NOT NULL DEFAULT ''")
+	if _, err := conn.ExecContext(ctx, "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS previous_session_id TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("failed to add previous_session_id column to sessions: %w", err)
+	}
 
 	// Idempotent sequence resynchronization in case of manual data restoration
 	_, _ = conn.ExecContext(ctx, `
@@ -276,5 +281,10 @@ func initSchemaSQLite(database *sql.DB) error {
 
 	_, _ = database.Exec("ALTER TABLE sessions ADD COLUMN summary TEXT NOT NULL DEFAULT ''")
 	_, _ = database.Exec("ALTER TABLE sessions ADD COLUMN last_summarized_message_id TEXT NOT NULL DEFAULT ''")
+	if _, err := database.Exec("ALTER TABLE sessions ADD COLUMN previous_session_id TEXT NOT NULL DEFAULT ''"); err != nil {
+		if !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("failed to add previous_session_id column to sessions: %w", err)
+		}
+	}
 	return nil
 }

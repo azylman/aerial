@@ -17,8 +17,9 @@ import (
 var (
 	reDiscordContent = regexp.MustCompile(`(?s)(?:^|\n)- content:\s*(.+?)(?:\n- timestamp:|\n- mentions:|\n- attachments:|\n</USER_REQUEST>|\z)`)
 	reUserRequest    = regexp.MustCompile(`(?s)<USER_REQUEST>(.*?)</USER_REQUEST>`)
-	reDiscordMention = regexp.MustCompile(`<@!?[0-9]+>|<@&[0-9]+>|<#[0-9]+>`)
-	reWhitespace     = regexp.MustCompile(`\s+`)
+	reDiscordMention          = regexp.MustCompile(`<@!?[0-9]+>|<@&[0-9]+>|<#[0-9]+>`)
+	reWhitespace              = regexp.MustCompile(`\s+`)
+	rePreviousSessionEnvelope = regexp.MustCompile(`(?s)<PREVIOUS_SESSION>.*?</PREVIOUS_SESSION>`)
 )
 
 func sanitizeQueryText(text string) string {
@@ -55,6 +56,8 @@ func ExtractQueryText(content string) string {
 	}
 
 	// 3. Raw text fallback
+	clean = rePreviousSessionEnvelope.ReplaceAllString(clean, "")
+	clean = strings.TrimSpace(clean)
 	return sanitizeQueryText(clean)
 }
 

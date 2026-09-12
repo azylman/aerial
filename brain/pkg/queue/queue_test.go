@@ -4413,9 +4413,177 @@ func TestProcessBurst_SessionRotation_ResetsToColdState(t *testing.T) {
 	if !strings.Contains(capturedPrompts[2], "Historical message before bootstrap") {
 		t.Errorf("Expected Turn 3 prompt to contain fetched history message, got:\n%s", capturedPrompts[2])
 	}
+	if !strings.Contains(capturedPrompts[2], "<PREVIOUS_SESSION>") {
+		t.Errorf("Expected Turn 3 prompt to contain <PREVIOUS_SESSION>, got:\n%s", capturedPrompts[2])
+	}
+	if !strings.Contains(capturedPrompts[2], "Previous session ID: c9b5e679-7425-40de-944b-e07fc1f90ae7") {
+		t.Errorf("Expected Turn 3 prompt to contain previous session ID, got:\n%s", capturedPrompts[2])
+	}
+	if strings.Contains(capturedPrompts[0], "<PREVIOUS_SESSION>") {
+		t.Errorf("Expected Turn 1 (fresh channel) to NOT contain <PREVIOUS_SESSION>, got:\n%s", capturedPrompts[0])
+	}
 	if historyFetchCalls < 2 {
 		t.Errorf("Expected HistoryFetcher to be called at least twice (Turn 1 and Turn 3), got %d", historyFetchCalls)
 	}
+}
+
+func TestProcessBurst_SessionRotation_SeedsPreviousSessionID(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	sess1 := "11111111-1111-1111-1111-111111111111"
+	sess2 := "22222222-2222-2222-2222-222222222222"
+	channelID := "chan-rotation-seed-test"
+
+	// Create transcript on disk for sess2 so Turn 4 (Turn 2 of Session 2) is recognized as an active warm session
+	sess2Logs := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", sess2, ".system_generated", "logs")
+	_ = os.MkdirAll(sess2Logs, 0755)
+	_ = os.WriteFile(filepath.Join(sess2Logs, "transcript.jsonl"), []byte(`{"step_index":0}`+"\n"), 0644)
+
+	var mu sync.Mutex
+	var capturedPrompts []string
+	var callCount int
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		SessionManager: session.New(tmpDir, ""),
+		DB:             database,
+		MaxAttempts:    1,
+		HistoryFetcher: func(ctx context.Context, channelID string, beforeID string, limit int) ([]HistoryMessage, error) {
+			return nil, nil
+		},
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			mu.Lock()
+			capturedPrompts = append(capturedPrompts, prompt)
+			callCount++
+			currentCall := callCount
+			mu.Unlock()
+
+			activeSess := sess1
+			if currentCall >= 3 {
+				activeSess = sess2
+			}
+			return mockJSONResponse(activeSess, "Hello from turn"), "", 0, nil
+		},
+		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
+			return config.ChannelPolicy{
+				Mode: "channel",
+			}
+		},
+	})
+
+	now := time.Now().UTC()
+
+	// 1. Turn 1 (Fresh channel genesis) -> should NOT have <PREVIOUS_SESSION>
+	msg1 := db.Message{
+		ID:         "msg-seed-1",
+		ThreadID:   channelID,
+		AuthorName: "Alice",
+		Content:    "Aerial Turn 1",
+		Status:     db.StatusPending,
+		CreatedAt:  now,
+	}
+	_ = db.InsertMessage(database, msg1)
+	pool.processBurst([]db.Message{msg1})
+
+	mu.Lock()
+	if len(capturedPrompts) != 1 {
+		t.Fatalf("Expected 1 captured prompt, got %d", len(capturedPrompts))
+	}
+	if strings.Contains(capturedPrompts[0], "<PREVIOUS_SESSION>") {
+		t.Errorf("Turn 1 on fresh channel should NOT contain <PREVIOUS_SESSION>, got:\n%s", capturedPrompts[0])
+	}
+	mu.Unlock()
+
+	// Seed turn_count to DefaultMaxSessionTurns - 1 (9)
+	for i := 1; i < DefaultMaxSessionTurns-1; i++ {
+		_, _ = db.IncrementSessionTurnCount(database, channelID)
+	}
+
+	// 2. Turn 10 of Session 1 -> reaches turn limit, rotates session
+	msg2 := db.Message{
+		ID:         "msg-seed-2",
+		ThreadID:   channelID,
+		AuthorName: "Alice",
+		Content:    fmt.Sprintf("Aerial Turn %d", DefaultMaxSessionTurns),
+		Status:     db.StatusPending,
+		CreatedAt:  now.Add(2 * time.Second),
+	}
+	_ = db.InsertMessage(database, msg2)
+	pool.processBurst([]db.Message{msg2})
+
+	mu.Lock()
+	if len(capturedPrompts) != 2 {
+		t.Fatalf("Expected 2 captured prompts, got %d", len(capturedPrompts))
+	}
+	if strings.Contains(capturedPrompts[1], "<PREVIOUS_SESSION>") {
+		t.Errorf("Turn 10 in existing session should NOT contain <PREVIOUS_SESSION>, got:\n%s", capturedPrompts[1])
+	}
+	mu.Unlock()
+
+	// Verify DB state after rotation
+	currentSess, err := db.GetSessionID(database, channelID)
+	if err != nil || currentSess != "" {
+		t.Fatalf("Expected empty current session ID after rotation, got %q (err: %v)", currentSess, err)
+	}
+	prevSess, err := db.GetPreviousSessionID(database, channelID)
+	if err != nil || prevSess != sess1 {
+		t.Fatalf("Expected previous session ID %q after rotation, got %q (err: %v)", sess1, prevSess, err)
+	}
+
+	// 3. Turn 3 (Turn 1 of Session 2) -> cold start, MUST have <PREVIOUS_SESSION> with sess1
+	msg3 := db.Message{
+		ID:         "msg-seed-3",
+		ThreadID:   channelID,
+		AuthorName: "Alice",
+		Content:    "Aerial Turn 1 of Session 2",
+		Status:     db.StatusPending,
+		CreatedAt:  now.Add(4 * time.Second),
+	}
+	_ = db.InsertMessage(database, msg3)
+	pool.processBurst([]db.Message{msg3})
+
+	mu.Lock()
+	if len(capturedPrompts) != 3 {
+		t.Fatalf("Expected 3 captured prompts, got %d", len(capturedPrompts))
+	}
+	turn3Prompt := capturedPrompts[2]
+	if !strings.Contains(turn3Prompt, "<PREVIOUS_SESSION>") {
+		t.Fatalf("Expected Turn 3 to contain <PREVIOUS_SESSION>, got:\n%s", turn3Prompt)
+	}
+	if !strings.Contains(turn3Prompt, "Previous session ID: "+sess1) {
+		t.Errorf("Expected Turn 3 prompt to contain Previous session ID %s, got:\n%s", sess1, turn3Prompt)
+	}
+	if !strings.Contains(turn3Prompt, "/root/.gemini/antigravity-cli/brain/"+sess1+"/.system_generated/logs/transcript.jsonl") {
+		t.Errorf("Expected Turn 3 prompt to contain transcript path for %s, got:\n%s", sess1, turn3Prompt)
+	}
+	mu.Unlock()
+
+	// 4. Turn 4 (Turn 2 of Session 2) -> warm turn, MUST NOT have <PREVIOUS_SESSION>
+	msg4 := db.Message{
+		ID:         "msg-seed-4",
+		ThreadID:   channelID,
+		AuthorName: "Alice",
+		Content:    "Aerial Turn 2 of Session 2",
+		Status:     db.StatusPending,
+		CreatedAt:  now.Add(6 * time.Second),
+	}
+	_ = db.InsertMessage(database, msg4)
+	pool.processBurst([]db.Message{msg4})
+
+	mu.Lock()
+	if len(capturedPrompts) != 4 {
+		t.Fatalf("Expected 4 captured prompts, got %d", len(capturedPrompts))
+	}
+	turn4Prompt := capturedPrompts[3]
+	if strings.Contains(turn4Prompt, "<PREVIOUS_SESSION>") {
+		t.Errorf("Turn 4 (Turn 2 of Session 2) should NOT contain <PREVIOUS_SESSION>, got:\n%s", turn4Prompt)
+	}
+	mu.Unlock()
 }
 
 func TestProcessBurst_Turn1Crash_DoesNotPersistGhostUUID(t *testing.T) {

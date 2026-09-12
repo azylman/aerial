@@ -511,6 +511,14 @@ func TestSQLStoreMethodsCoverage(t *testing.T) {
 		t.Fatalf("SQLStore.RotateSessionID failed: %v", err)
 	}
 
+	prevID, err := store.GetPreviousSessionID(ctx, "th1")
+	if err != nil {
+		t.Fatalf("SQLStore.GetPreviousSessionID failed: %v", err)
+	}
+	if prevID != "sess-1" {
+		t.Fatalf("Expected previous session ID 'sess-1', got %q", prevID)
+	}
+
 	if err := store.DeleteSessionID(ctx, "th1"); err != nil {
 		t.Fatalf("SQLStore.DeleteSessionID failed: %v", err)
 	}

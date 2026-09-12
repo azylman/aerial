@@ -422,3 +422,10 @@ func (s *SQLStore) GetSessionInfo(ctx context.Context, threadID string) (*Sessio
 	}
 	return GetSessionInfo(s.db, threadID)
 }
+
+func (s *SQLStore) GetPreviousSessionID(ctx context.Context, threadID string) (string, error) {
+	if s == nil || isDBTXNil(s.db) {
+		return "", fmt.Errorf("database is nil")
+	}
+	return GetPreviousSessionID(s.db, threadID)
+}

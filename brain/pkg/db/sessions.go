@@ -33,6 +33,22 @@ func GetSessionID(database DBTX, threadID string) (string, error) {
 	return sessionID, err
 }
 
+// GetPreviousSessionID retrieves the previous session ID for a thread.
+func GetPreviousSessionID(database DBTX, threadID string) (string, error) {
+	if database == nil || threadID == "" {
+		return "", nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var prevSessionID string
+	err := database.QueryRowContext(ctx, "SELECT COALESCE(previous_session_id, '') FROM sessions WHERE thread_id = $1", threadID).Scan(&prevSessionID)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return prevSessionID, err
+}
+
 // ParseDBTime attempts to parse a database time value from various types and layouts.
 func ParseDBTime(val any) (time.Time, bool) {
 	if val == nil {
@@ -77,6 +93,7 @@ func ParseDBTime(val any) (time.Time, bool) {
 type SessionInfo struct {
 	ThreadID          string
 	InternalSessionID string
+	PreviousSessionID string
 	TurnCount         int
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
@@ -96,13 +113,14 @@ func GetSessionInfo(database DBTX, threadID string) (*SessionInfo, error) {
 		rawUpdatedAt any
 	)
 	query := `
-	SELECT thread_id, internal_session_id, turn_count, created_at, updated_at
+	SELECT thread_id, internal_session_id, COALESCE(previous_session_id, ''), turn_count, created_at, updated_at
 	FROM sessions
 	WHERE thread_id = $1
 	`
 	err := database.QueryRowContext(ctx, query, threadID).Scan(
 		&info.ThreadID,
 		&info.InternalSessionID,
+		&info.PreviousSessionID,
 		&info.TurnCount,
 		&rawCreatedAt,
 		&rawUpdatedAt,
@@ -186,7 +204,7 @@ func IncrementSessionTurnCount(database DBTX, sessionKey string) (int, error) {
 	return turnCount, nil
 }
 
-// RotateSessionID updates the internal session ID and resets turn count to zero.
+// RotateSessionID updates the internal session ID, stores the previous session ID, and resets turn count to zero.
 func RotateSessionID(database DBTX, sessionKey, newSessionID string) error {
 	if database == nil {
 		return fmt.Errorf("database is nil")
@@ -199,9 +217,14 @@ func RotateSessionID(database DBTX, sessionKey, newSessionID string) error {
 	defer cancel()
 
 	query := `
-	INSERT INTO sessions (thread_id, internal_session_id, turn_count, created_at, updated_at)
-	VALUES ($1, $2, 0, $3, $4)
+	INSERT INTO sessions (thread_id, internal_session_id, previous_session_id, turn_count, created_at, updated_at)
+	VALUES ($1, $2, '', 0, $3, $4)
 	ON CONFLICT(thread_id) DO UPDATE SET
+		previous_session_id = CASE
+			WHEN sessions.internal_session_id != '' AND sessions.internal_session_id != EXCLUDED.internal_session_id
+				THEN sessions.internal_session_id
+			ELSE sessions.previous_session_id
+		END,
 		internal_session_id = EXCLUDED.internal_session_id,
 		turn_count = 0,
 		created_at = EXCLUDED.created_at,

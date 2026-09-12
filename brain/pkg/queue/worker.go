@@ -38,6 +38,7 @@ type turnExecution struct {
 	triggerType      string
 	execStart        time.Time
 	currentSessionID string
+	previousSessionID string
 	turnCount        int
 	policy           config.ChannelPolicy
 	effectiveID      string
@@ -626,6 +627,9 @@ func (te *turnExecution) evaluateAmbientWake() (shouldExit bool) {
 			} else {
 				log.Printf("[Queue] Scope session reached turn limit (%d/%d). Resetting to cold state for fresh session initialization.", currentTurns, DefaultMaxSessionTurns)
 			}
+			if te.currentSessionID != "" {
+				te.previousSessionID = te.currentSessionID
+			}
 			_ = db.RotateSessionID(te.pool.cfg.DB, te.threadID, "")
 			te.currentSessionID = ""
 		}
@@ -690,6 +694,9 @@ func (te *turnExecution) evaluateAmbientWake() (shouldExit bool) {
 			log.Printf("[Queue] Scope session reached idle limit (%v >= %v). Resetting to cold state for fresh session initialization.", time.Since(lastActivity).Round(time.Minute), DefaultMaxSessionIdleTime)
 		} else {
 			log.Printf("[Queue] Scope session reached turn limit (%d/%d). Resetting to cold state for fresh session initialization.", currentTurns, DefaultMaxSessionTurns)
+		}
+		if te.currentSessionID != "" {
+			te.previousSessionID = te.currentSessionID
 		}
 		_ = db.RotateSessionID(te.pool.cfg.DB, te.threadID, "")
 		te.currentSessionID = ""
@@ -867,6 +874,18 @@ func (te *turnExecution) buildTurnPrompt() {
 			log.Printf("[WorkerPool] Injected channel history into prompt for thread %s", te.threadID)
 		}
 	}
+
+	if isColdStart {
+		prevID := te.previousSessionID
+		if prevID == "" && te.pool.cfg.DB != nil {
+			prevID, _ = db.GetPreviousSessionID(te.pool.cfg.DB, te.threadID)
+		}
+		if prevBlock := FormatPreviousSession(prevID); prevBlock != "" {
+			basePrompt = prevBlock + "\n\n" + basePrompt
+			log.Printf("[WorkerPool] Injected previous session identifier (%s) into prompt for thread %s", prevID, te.threadID)
+		}
+	}
+
 	queryText := memory.ExtractQueryText(basePrompt)
 	if te.pool.cfg.MemoryRetrieverFunc != nil && te.pool.cfg.DB != nil && strings.TrimSpace(queryText) != "" {
 		maxFacts := 10
