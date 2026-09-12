@@ -3,7 +3,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"io/fs"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -2285,4 +2289,555 @@ dashboard:
 		t.Errorf("expected QuickLaunchLinks to contain TESTLINK, got %+v", resp.QuickLaunchLinks)
 	}
 }
+
+func TestRunDashboardServer_Extended(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen failed: %v", err)
+	}
+	port := fmt.Sprintf("%d", l.Addr().(*net.TCPAddr).Port)
+	_ = l.Close()
+
+	ghMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(GitHubRunsResponse{})
+	}))
+	defer ghMock.Close()
+
+	cfg := DashboardConfig{
+		Port:       port,
+		GHRepo:     "azylman/aerial",
+		GHToken:    "dummy",
+		APIBaseURL: ghMock.URL,
+		GitCommit:  "testsha",
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- RunDashboardServer(ctx, cfg)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Errorf("RunDashboardServer unexpected error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Errorf("RunDashboardServer shutdown timed out")
+	}
+
+	// Test invalid port failure
+	errFatal := RunDashboardServer(context.Background(), DashboardConfig{Port: "-1"})
+	if errFatal == nil {
+		t.Errorf("expected fatal error on invalid port -1")
+	}
+}
+
+func TestGitHubPoller_AdaptiveAndStop(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ghMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		resp := GitHubRunsResponse{
+			WorkflowRuns: []GitHubRun{
+				{
+					ID:        100,
+					Status:    "in_progress",
+					UpdatedAt: time.Now().UTC(),
+					HeadCommit: &struct {
+						Message   string    `json:"message"`
+						Timestamp time.Time `json:"timestamp"`
+					}{
+						Message: strings.Repeat("Very long commit message that exceeds seventy-two runes in length so it gets truncated", 2),
+					},
+				},
+			},
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer ghMock.Close()
+
+	p := NewGitHubPoller("azylman/aerial", "token")
+	p.apiBaseURL = ghMock.URL
+	p.pollInterval = 5 * time.Millisecond
+
+	// Seed stale cached jobs to verify pruning
+	p.cachedJobs[999] = []GitHubJob{{ID: 1}}
+	p.jobsETagMap[999] = "stale-etag"
+
+	p.Start(ctx)
+	time.Sleep(30 * time.Millisecond)
+	close(p.stopCh)
+
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if _, exists := p.cachedJobs[999]; exists {
+		t.Errorf("expected stale cachedJobs to be pruned")
+	}
+	if _, exists := p.jobsETagMap[999]; exists {
+		t.Errorf("expected stale jobsETagMap to be pruned")
+	}
+}
+
+func TestFetchDockerClusterState_Extended(t *testing.T) {
+	origClient := dockerSocketClient
+	defer func() { dockerSocketClient = origClient }()
+
+	// 1. Success with various container states
+	dockerSocketClient = &http.Client{
+		Transport: &roundTripperFunc{
+			fn: func(req *http.Request) (*http.Response, error) {
+				containers := []DockerContainerJSON{
+					{
+						Names:   []string{"/aerial-brain"},
+						State:   "running",
+						Status:  "Up 2 hours (healthy)",
+						Created: time.Now().UTC().Add(-2 * time.Hour).Unix(),
+						Labels: map[string]string{
+							"com.docker.compose.project": "aerial",
+							"com.docker.compose.service": "brain",
+						},
+					},
+					{
+						Names:   []string{"/aerial-scheduler"},
+						State:   "running",
+						Status:  "Up 10 minutes (unhealthy)",
+						Created: time.Now().UTC().Add(-10 * time.Minute).Unix(),
+					},
+					{
+						Names:   []string{"/aerial-proxy"},
+						State:   "running",
+						Status:  "Up 5 minutes (health: starting)",
+						Created: time.Now().UTC().Add(time.Hour).Unix(), // future time -> uptime 0
+					},
+					{
+						Names:   []string{"/aerial-db"},
+						State:   "exited",
+						Status:  "Exited (1)",
+						Created: time.Now().UTC().Add(-time.Hour).Unix(),
+					},
+				}
+				data, _ := json.Marshal(containers)
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(string(data))),
+					Header:     make(http.Header),
+				}, nil
+			},
+		},
+	}
+
+	services, _, err := fetchDockerClusterState(context.Background())
+	if err != nil {
+		t.Fatalf("fetchDockerClusterState failed: %v", err)
+	}
+	if len(services) != 4 {
+		t.Errorf("expected 4 services, got %d", len(services))
+	}
+
+	// 2. HTTP 500 error
+	dockerSocketClient = &http.Client{
+		Transport: &roundTripperFunc{
+			fn: func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusInternalServerError,
+					Body:       io.NopCloser(strings.NewReader("server err")),
+					Header:     make(http.Header),
+				}, nil
+			},
+		},
+	}
+	_, _, err500 := fetchDockerClusterState(context.Background())
+	if err500 == nil {
+		t.Errorf("expected error on HTTP 500")
+	}
+
+	// 3. Bad JSON
+	dockerSocketClient = &http.Client{
+		Transport: &roundTripperFunc{
+			fn: func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader("{invalid json")),
+					Header:     make(http.Header),
+				}, nil
+			},
+		},
+	}
+	_, _, errJSON := fetchDockerClusterState(context.Background())
+	if errJSON == nil {
+		t.Errorf("expected error on bad JSON")
+	}
+
+	// 4. Client error
+	dockerSocketClient = &http.Client{
+		Transport: &roundTripperFunc{
+			fn: func(req *http.Request) (*http.Response, error) {
+				return nil, errors.New("socket closed")
+			},
+		},
+	}
+	_, _, errNet := fetchDockerClusterState(context.Background())
+	if errNet == nil {
+		t.Errorf("expected error on client failure")
+	}
+}
+
+func TestFetchActiveTasksFromBrain_Extended(t *testing.T) {
+	origClient := brainHTTPClient
+	defer func() { brainHTTPClient = origClient }()
+
+	// 1. Empty brainURL
+	tasks, err := fetchActiveTasksFromBrain(context.Background(), "")
+	if err != nil || len(tasks) != 0 {
+		t.Errorf("expected empty tasks for empty brainURL")
+	}
+
+	// 2. HTTP 500 error
+	brainHTTPClient = &http.Client{
+		Transport: &roundTripperFunc{
+			fn: func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusInternalServerError,
+					Body:       io.NopCloser(strings.NewReader("error")),
+					Header:     make(http.Header),
+				}, nil
+			},
+		},
+	}
+	_, err500 := fetchActiveTasksFromBrain(context.Background(), "http://brain")
+	if err500 == nil {
+		t.Errorf("expected error on HTTP 500")
+	}
+
+	// 3. Bad JSON
+	brainHTTPClient = &http.Client{
+		Transport: &roundTripperFunc{
+			fn: func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader("bad json")),
+					Header:     make(http.Header),
+				}, nil
+			},
+		},
+	}
+	_, errJSON := fetchActiveTasksFromBrain(context.Background(), "http://brain")
+	if errJSON == nil {
+		t.Errorf("expected error on bad JSON")
+	}
+
+	// 4. Pending task and empty summary fallback
+	brainHTTPClient = &http.Client{
+		Transport: &roundTripperFunc{
+			fn: func(req *http.Request) (*http.Response, error) {
+				resp := `{"status":"ok","total":1,"tasks":[{"id":"t1","status":"PENDING","prompt":"do something","summary":"","created_at":"2026-08-30T12:00:00Z"}]}`
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(resp)),
+					Header:     make(http.Header),
+				}, nil
+			},
+		},
+	}
+	tasks, err = fetchActiveTasksFromBrain(context.Background(), "http://brain")
+	if err != nil || len(tasks) != 1 || tasks[0].Summary != "do something" {
+		t.Errorf("expected task summary to fallback to prompt, got %+v", tasks)
+	}
+}
+
+func TestStatusHandler_DegradedAndMethodNotAllowed(t *testing.T) {
+	handler := statusHandler("", "", "", "")
+
+	// 1. Method Not Allowed
+	reqPost := httptest.NewRequest(http.MethodPost, "/api/status", nil)
+	rrPost := httptest.NewRecorder()
+	handler.ServeHTTP(rrPost, reqPost)
+	if rrPost.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405 on POST /api/status, got %d", rrPost.Code)
+	}
+
+	// 2. Degraded cluster status when container is unhealthy
+	origClient := dockerSocketClient
+	defer func() { dockerSocketClient = origClient }()
+
+	dockerSocketClient = &http.Client{
+		Transport: &roundTripperFunc{
+			fn: func(req *http.Request) (*http.Response, error) {
+				containers := []DockerContainerJSON{
+					{
+						Names:   []string{"/aerial-brain"},
+						State:   "running",
+						Status:  "Up 10m (unhealthy)",
+						Created: time.Now().UTC().Unix(),
+					},
+				}
+				data, _ := json.Marshal(containers)
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(string(data))),
+					Header:     make(http.Header),
+				}, nil
+			},
+		},
+	}
+
+	reqGet := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	rrGet := httptest.NewRecorder()
+	handler.ServeHTTP(rrGet, reqGet)
+	if rrGet.Code != http.StatusOK {
+		t.Fatalf("expected 200 on GET /api/status, got %d", rrGet.Code)
+	}
+
+	var resp ClusterResponse
+	_ = json.NewDecoder(rrGet.Body).Decode(&resp)
+	if resp.ClusterStatus != "degraded" {
+		t.Errorf("expected clusterStatus 'degraded', got %q", resp.ClusterStatus)
+	}
+}
+
+func TestFactsHandler_Extended(t *testing.T) {
+	// 1. Method not allowed
+	h := factsHandler("http://brain:8080")
+	reqPost := httptest.NewRequest(http.MethodPost, "/api/facts", nil)
+	rrPost := httptest.NewRecorder()
+	h.ServeHTTP(rrPost, reqPost)
+	if rrPost.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405 from POST /api/facts, got %d", rrPost.Code)
+	}
+
+	// 2. Invalid upstream URL (control char)
+	hBadURL := factsHandler("http://brain:\x7f8080")
+	reqGet := httptest.NewRequest(http.MethodGet, "/api/facts", nil)
+	rrBadURL := httptest.NewRecorder()
+	hBadURL.ServeHTTP(rrBadURL, reqGet)
+	if rrBadURL.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 from invalid upstream URL, got %d", rrBadURL.Code)
+	}
+
+	// 3. Search query truncated > 64 runes
+	reqSearch := httptest.NewRequest(http.MethodGet, "/api/facts?q="+strings.Repeat("a", 100)+"&limit=10&offset=5&category=user", nil)
+	rrSearch := httptest.NewRecorder()
+	h.ServeHTTP(rrSearch, reqSearch)
+}
+
+func TestSchedulesHandlers_Extended(t *testing.T) {
+	// 1. schedulesHandler: Method not allowed & invalid URL
+	hSched := schedulesHandler("http://brain:8080")
+	reqPost := httptest.NewRequest(http.MethodPost, "/api/schedules", nil)
+	rrPost := httptest.NewRecorder()
+	hSched.ServeHTTP(rrPost, reqPost)
+	if rrPost.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405 from POST /api/schedules, got %d", rrPost.Code)
+	}
+
+	hSchedBad := schedulesHandler("http://brain:\x7f8080")
+	rrBad := httptest.NewRecorder()
+	hSchedBad.ServeHTTP(rrBad, httptest.NewRequest(http.MethodGet, "/api/schedules", nil))
+	if rrBad.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 from invalid schedules URL")
+	}
+
+	// 2. scheduleRunsHandler: Method not allowed & invalid URL
+	hRuns := scheduleRunsHandler("http://brain:8080")
+	rrRunsPost := httptest.NewRecorder()
+	hRuns.ServeHTTP(rrRunsPost, reqPost)
+	if rrRunsPost.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405 from POST /api/schedules/runs, got %d", rrRunsPost.Code)
+	}
+
+	hRunsBad := scheduleRunsHandler("http://brain:\x7f8080")
+	rrRunsBad := httptest.NewRecorder()
+	hRunsBad.ServeHTTP(rrRunsBad, httptest.NewRequest(http.MethodGet, "/api/schedules/runs", nil))
+	if rrRunsBad.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 from invalid schedule runs URL")
+	}
+}
+
+func TestNewAssetRegistry_FallbackVersions(t *testing.T) {
+	emptyDir := t.TempDir()
+	reg, err := NewAssetRegistry(os.DirFS(emptyDir), "dev")
+	if err != nil {
+		t.Fatalf("NewAssetRegistry failed on empty dir: %v", err)
+	}
+	if reg == nil {
+		t.Errorf("expected non-nil asset registry")
+	}
+}
+
+type roundTripperFunc struct {
+	fn func(req *http.Request) (*http.Response, error)
+}
+
+func (r *roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return r.fn(req)
+}
+
+func TestSanitizeEnvVars_NoEquals(t *testing.T) {
+	input := []string{"VALID=1", "INVALID_NO_EQUALS", "ANOTHER=2"}
+	got := SanitizeEnvVars(input)
+	for _, env := range got {
+		if strings.HasPrefix(env, "INVALID_NO_EQUALS") {
+			t.Errorf("expected INVALID_NO_EQUALS to be skipped")
+		}
+	}
+	if len(got) != 2 {
+		t.Errorf("expected 2 sanitized vars, got %d", len(got))
+	}
+}
+
+func TestExtractServiceNameFromJobName_NoMatch(t *testing.T) {
+	if got := extractServiceNameFromJobName("completely-unrelated-job"); got != "" {
+		t.Errorf("expected empty string, got %q", got)
+	}
+}
+
+func TestParseMatrixJobChips_EdgeCases(t *testing.T) {
+	jobs := []GitHubJob{
+		{
+			Name:       "build / brain",
+			Status:     "completed",
+			Conclusion: "failure",
+		},
+		{
+			Name:       "build / brain",
+			Status:     "completed",
+			Conclusion: "success",
+		},
+		{
+			Name:       "build / dashboard",
+			Status:     "completed",
+			Conclusion: "skipped",
+		},
+	}
+	chips := parseMatrixJobChips(jobs)
+	if len(chips) != 2 {
+		t.Fatalf("expected 2 chips, got %d", len(chips))
+	}
+	if chips[0].Status != "failed" {
+		t.Errorf("expected failure conclusion to result in 'failed', got %s", chips[0].Status)
+	}
+	if chips[1].Status != "pending" {
+		t.Errorf("expected skipped conclusion to result in 'pending', got %s", chips[1].Status)
+	}
+}
+
+func TestIsCoreAerialContainer_Filters(t *testing.T) {
+	cAgentsview := DockerContainerJSON{
+		Image: "ghcr.io/azylman/agentsview:latest",
+	}
+	if isCoreAerialContainer(cAgentsview) {
+		t.Errorf("expected agentsview to NOT be recognized as core aerial container")
+	}
+
+	cForeign := DockerContainerJSON{
+		Image: "other/image",
+		Labels: map[string]string{
+			"org.opencontainers.image.source": "https://github.com/external/project",
+		},
+	}
+	if isCoreAerialContainer(cForeign) {
+		t.Errorf("expected foreign container to not be core aerial container")
+	}
+}
+
+func TestBuildContainerChips_EdgeCases(t *testing.T) {
+	now := time.Now().UTC()
+	containers := []DockerContainerJSON{
+		{
+			ID:      "c1",
+			Names:   []string{"/aerial-brain"},
+			State:   "running",
+			Created: now.Add(1 * time.Hour).Unix(),
+			Labels:  map[string]string{"com.docker.compose.service": "brain"},
+		},
+		{
+			ID:      "c2",
+			Names:   []string{"/aerial-brain"},
+			State:   "running",
+			Created: now.Unix(),
+			Labels:  map[string]string{"com.docker.compose.service": "brain"},
+		},
+	}
+	chips := buildContainerChips(containers)
+	if len(chips) != 1 {
+		t.Fatalf("expected 1 deduplicated chip, got %d", len(chips))
+	}
+	if chips[0].Duration != "0s" {
+		t.Errorf("expected Duration '0s' for future created time, got %s", chips[0].Duration)
+	}
+}
+
+func TestMergeClusterDeployments_EmptyAndFuture(t *testing.T) {
+	if deps := mergeClusterDeployments(nil, nil, nil, "commit123"); len(deps) != 0 {
+		t.Errorf("expected empty deployments for no aerial containers, got %d", len(deps))
+	}
+
+	now := time.Now().UTC()
+	futureContainers := []DockerContainerJSON{
+		{
+			ID:      "c1",
+			Names:   []string{"/aerial-brain"},
+			State:   "running",
+			Created: now.Add(2 * time.Hour).Unix(),
+			Labels:  map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"},
+		},
+	}
+	runs := []GitHubRun{
+		{
+			ID:         123,
+			Status:     "completed",
+			Conclusion: "success",
+			HeadSHA:    "sha1234567890",
+			CreatedAt:  now.Add(-10 * time.Minute),
+			HeadCommit: nil,
+		},
+	}
+	deps := mergeClusterDeployments(futureContainers, runs, nil, "")
+	if len(deps) == 0 {
+		t.Fatalf("expected at least 1 deployment")
+	}
+}
+
+func TestGetMimeType_Extended(t *testing.T) {
+	if got := getMimeType("test.woff2"); got != "font/woff2" {
+		t.Errorf("expected font/woff2, got %s", got)
+	}
+	if got := getMimeType("test.svg"); got != "image/svg+xml" {
+		t.Errorf("expected image/svg+xml, got %s", got)
+	}
+}
+
+func TestGitHubPoller_CoverageBoost(t *testing.T) {
+	p := NewGitHubPoller("azylman/aerial", "")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_ = p.pollOnce(ctx)
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("If-None-Match") == "test-etag" {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Header().Set("ETag", "test-etag")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(GitHubJobsResponse{Jobs: []GitHubJob{}})
+	}))
+	defer ts.Close()
+
+	p2 := NewGitHubPoller("azylman/aerial", "token")
+	p2.apiBaseURL = ts.URL
+	p2.jobsETagMap[100] = "test-etag"
+	p2.fetchJobsForRun(context.Background(), 100)
+
+	p2.fetchJobsForRun(ctx, 100)
+}
+
 
