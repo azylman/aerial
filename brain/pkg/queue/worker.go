@@ -32,26 +32,34 @@ type wakeInfo struct {
 }
 
 type turnExecution struct {
-	pool             *WorkerPool
-	burst            []db.Message
-	threadID         string
-	triggerType      string
-	execStart        time.Time
-	currentSessionID string
-	turnCount        int
-	policy           config.ChannelPolicy
-	effectiveID      string
-	effectiveName    string
-	isThread         bool
-	skipDiscord      bool
-	wakeIdx          int
-	wakeInfos        []wakeInfo
-	trailingMsgs     []db.Message
-	trailingInfos    []wakeInfo
-	turnPrompt       string
-	isQuotaPaused    bool
-	statusUpdater    *StatusUpdater
-	stopTyping       func()
+	pool                *WorkerPool
+	burst               []db.Message
+	threadID            string
+	triggerType         string
+	execStart           time.Time
+	currentSessionID    string
+	turnCount           int
+	policy              config.ChannelPolicy
+	effectiveID         string
+	effectiveName       string
+	isThread            bool
+	skipDiscord         bool
+	wakeIdx             int
+	wakeInfos           []wakeInfo
+	trailingMsgs        []db.Message
+	trailingInfos       []wakeInfo
+	turnPrompt          string
+	isQuotaPaused       bool
+	statusUpdater       *StatusUpdater
+	stopTyping          func()
+	injectedHookContext string
+	hookMetadata        map[string]any
+	turnAttempted       bool
+	turnStatus          string
+	turnResponseText    string
+	turnError           string
+	turnDurationMs      int64
+	turnTokenUsage      runner.TokenUsage
 }
 
 func parseDBTime(val any) (time.Time, bool) {
@@ -212,6 +220,28 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		stopTyping:  func() {},
 	}
 
+	// Synchronous post_turn hook:
+	// Go defers execute LIFO. By placing post_turn right after scopeLock.Lock() / defer scopeLock.Unlock(),
+	// it executes AFTER handleTrailing and panic recovery, but BEFORE scopeLock.Unlock().
+	defer func() {
+		if te.turnAttempted && te.policy.Hooks.PostTurn != nil {
+			postReq := buildPostTurnRequest(te)
+			ctx, cancel := context.WithTimeout(context.Background(), te.policy.Hooks.PostTurn.GetTimeout())
+			defer cancel()
+			var dispatcher WebhookDispatcher
+			if te.pool != nil {
+				dispatcher = te.pool.WebhookDispatcher()
+			}
+			if dispatcher == nil {
+				dispatcher = NewDefaultWebhookDispatcher()
+			}
+			_, err := dispatcher.CallPostTurnHook(ctx, te.policy.Hooks.PostTurn, postReq)
+			if err != nil {
+				log.Printf("[WorkerPool] Warning: post_turn hook failed for thread %s: %v", te.threadID, err)
+			}
+		}
+	}()
+
 	defer func() {
 		if te.stopTyping != nil {
 			te.stopTyping()
@@ -234,6 +264,9 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 			}
 			metrics.RecordTurnCompleted("panic", te.triggerType, te.pool.GetRuntimeConfig(), time.Since(te.execStart))
 			errMsg := sanitizeErrorText(fmt.Sprintf("panic: %v", r))
+			te.turnStatus = "failed"
+			te.turnError = errMsg
+			te.turnDurationMs = time.Since(te.execStart).Milliseconds()
 			for _, m := range te.burst {
 				_ = db.UpdateMessageStatus(te.pool.cfg.DB, m.ID, db.StatusFailed, errMsg)
 				if m.ScheduleRunID != "" {
@@ -264,6 +297,49 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 	if te.evaluateAmbientWake() {
 		return
 	}
+
+	if te.policy.Hooks.PreTurn != nil {
+		preReq := buildPreTurnRequest(te)
+		var dispatcher WebhookDispatcher
+		var poolCtx context.Context
+		if te.pool != nil {
+			dispatcher = te.pool.WebhookDispatcher()
+			poolCtx = te.pool.ctx
+		}
+		if dispatcher == nil {
+			dispatcher = NewDefaultWebhookDispatcher()
+		}
+		if poolCtx == nil {
+			poolCtx = context.Background()
+		}
+
+		preResp, err := dispatcher.CallPreTurnHook(poolCtx, te.policy.Hooks.PreTurn, preReq)
+		if err != nil {
+			action := te.policy.Hooks.PreTurn.GetOnTimeout("drop")
+			if action == "drop" {
+				te.abortBurst("pre_turn_timeout_drop")
+				return
+			} else if action == "retry" {
+				te.rescheduleBurst(5)
+				return
+			}
+		} else if preResp != nil {
+			if !preResp.Allow {
+				if preResp.Action == "retry" {
+					te.rescheduleBurst(preResp.RetryAfterSeconds)
+					return
+				}
+				te.abortBurst("pre_turn_rejected: " + preResp.Reason)
+				return
+			}
+			if strings.TrimSpace(preResp.InjectedContext) != "" {
+				te.injectedHookContext = fmt.Sprintf("<COORDINATION_CONTEXT>\n%s\n</COORDINATION_CONTEXT>", strings.TrimSpace(preResp.InjectedContext))
+			}
+			te.hookMetadata = preResp.Metadata
+		}
+	}
+
+	te.turnAttempted = true
 	te.buildTurnPrompt()
 	te.executeWithRetries()
 }
@@ -431,153 +507,218 @@ func (te *turnExecution) evaluateAmbientWake() (shouldExit bool) {
 		te.wakeInfos = make([]wakeInfo, len(te.burst))
 		te.wakeIdx = -1
 
-		// Safeguard 1: Tier-1 Pre-Scan (Zero-Latency Priority)
-		for i, m := range te.burst {
-			if isTier1Wake(m, botUserID, botRoleIDs, wakeMode) {
-				te.wakeInfos[i] = wakeInfo{
-					isWake:    true,
-					score:     1.0,
-					threshold: te.policy.GetAmbientWakeThreshold(),
-					reason:    "direct_address",
-				}
-				if te.wakeIdx == -1 {
-					te.wakeIdx = i
-				}
+		if te.policy.Hooks.OnWake != nil {
+			channelID := te.effectiveID
+			if channelID == "" {
+				channelID = te.threadID
 			}
-		}
+			var firstMsg db.Message
+			if len(te.burst) > 0 {
+				firstMsg = te.burst[0]
+			}
+			req := &WakeRequest{
+				ChannelID: channelID,
+				ThreadID:  te.threadID,
+				Message:   firstMsg,
+				Timestamp: time.Now().UTC(),
+			}
 
-		if te.wakeIdx != -1 {
-			// Direct Tier-1 wake found!
-			// Any leading ambient messages [0..wakeIdx-1] are marked ambient with zero classifier delay.
-			for i := 0; i < te.wakeIdx; i++ {
-				te.wakeInfos[i] = wakeInfo{
-					isWake:    false,
-					score:     0.0,
-					threshold: te.policy.GetAmbientWakeThreshold(),
-					reason:    "burst_prescan_leading",
-				}
+			var dispatcher WebhookDispatcher
+			var poolCtx context.Context
+			if te.pool != nil {
+				dispatcher = te.pool.WebhookDispatcher()
+				poolCtx = te.pool.ctx
 			}
-			// Trailing messages after wakeIdx:
-			// If Tier-1, mark isWake: true so handleTrailing re-enqueues it for the next turn.
-			// Otherwise mark ambient (or classify if threshold > 0 and wakeMode == "classifier").
-			threshold := te.policy.GetAmbientWakeThreshold()
-			for i := te.wakeIdx + 1; i < len(te.burst); i++ {
-				m := te.burst[i]
-				if isTier1Wake(m, botUserID, botRoleIDs, wakeMode) {
+			if dispatcher == nil {
+				dispatcher = NewDefaultWebhookDispatcher()
+			}
+			if poolCtx == nil {
+				poolCtx = context.Background()
+			}
+
+			wakeResp, err := dispatcher.CallWakeHook(poolCtx, te.policy.Hooks.OnWake, req)
+			override := te.policy.Hooks.OnWake.GetOnTimeout("classify")
+			if err == nil && wakeResp != nil && strings.TrimSpace(wakeResp.Override) != "" {
+				override = strings.ToLower(strings.TrimSpace(wakeResp.Override))
+			}
+
+			switch override {
+			case "wake":
+				te.wakeIdx = 0
+				for i := range te.burst {
 					te.wakeInfos[i] = wakeInfo{
-						isWake:    true,
+						isWake:    i == 0,
 						score:     1.0,
-						threshold: threshold,
-						reason:    "direct_address",
-					}
-				} else if wakeMode == "mention" || threshold <= 0.0 || classifier.IsHeuristicSkip(extractMessageBody(m.Content)) {
-					te.wakeInfos[i] = wakeInfo{
-						isWake:    false,
-						score:     0.0,
-						threshold: threshold,
-						reason:    "heuristic_skip",
-					}
-				} else {
-					var recentContext []db.Message
-					if te.pool.cfg.DB != nil {
-						recentContext, _ = db.GetRecentThreadMessages(te.pool.cfg.DB, te.threadID, 10)
-					}
-					var res classifier.ClassificationResult
-					if te.pool.cfg.Classifier != nil {
-						res = te.pool.cfg.Classifier.Classify(te.pool.ctx, m, recentContext, te.policy.GetAmbientWakePrompt())
-					} else {
-						res = classifier.ClassificationResult{Confidence: 0.0, Reason: "no classifier configured"}
-					}
-					te.wakeInfos[i] = wakeInfo{
-						isWake:    res.Confidence >= threshold,
-						score:     res.Confidence,
-						threshold: threshold,
-						reason:    res.Reason,
+						threshold: te.policy.GetAmbientWakeThreshold(),
+						reason:    "hook_wake_override",
 					}
 				}
-			}
-		} else if wakeMode == "mention" {
-			// Mention-only mode: all non-mention messages are ambient without running classifier
-			for i := range te.burst {
-				te.wakeInfos[i] = wakeInfo{
-					isWake:    false,
-					score:     0.0,
-					threshold: 0.0,
-					reason:    "mention_mode_ambient",
-				}
-			}
-		} else if wakeMode == "all" {
-			for i := range te.burst {
-				te.wakeInfos[i] = wakeInfo{
-					isWake:    i == 0,
-					score:     1.0,
-					threshold: 0.0,
-					reason:    "all_wake",
-				}
-			}
-			te.wakeIdx = 0
-		} else {
-			// Safeguard 2: Coalesced Burst Ambient Evaluation (classifier mode)
-			threshold := te.policy.GetAmbientWakeThreshold()
-			if threshold <= 0.0 {
+			case "drop":
+				te.wakeIdx = -1
 				for i := range te.burst {
 					te.wakeInfos[i] = wakeInfo{
 						isWake:    false,
 						score:     0.0,
-						threshold: threshold,
-						reason:    "classifier disabled",
+						threshold: te.policy.GetAmbientWakeThreshold(),
+						reason:    "hook_drop_override",
 					}
 				}
-			} else {
-				// Fast pre-filter: if all messages in burst are banter/emojis/commands, skip without LLM
-				allSkip := true
-				for _, m := range te.burst {
-					if !classifier.IsHeuristicSkip(extractMessageBody(m.Content)) {
-						allSkip = false
-						break
+				te.markAmbientBurst()
+				return true
+			case "classify":
+				// Fall through to normal Tier-1 / Tier-2 classifier
+			}
+		}
+
+		if te.wakeIdx == -1 {
+			// Safeguard 1: Tier-1 Pre-Scan (Zero-Latency Priority)
+			for i, m := range te.burst {
+				if isTier1Wake(m, botUserID, botRoleIDs, wakeMode) {
+					te.wakeInfos[i] = wakeInfo{
+						isWake:    true,
+						score:     1.0,
+						threshold: te.policy.GetAmbientWakeThreshold(),
+						reason:    "direct_address",
+					}
+					if te.wakeIdx == -1 {
+						te.wakeIdx = i
 					}
 				}
-				if allSkip {
-					for i := range te.burst {
+			}
+
+			if te.wakeIdx != -1 {
+				// Direct Tier-1 wake found!
+				// Any leading ambient messages [0..wakeIdx-1] are marked ambient with zero classifier delay.
+				for i := 0; i < te.wakeIdx; i++ {
+					te.wakeInfos[i] = wakeInfo{
+						isWake:    false,
+						score:     0.0,
+						threshold: te.policy.GetAmbientWakeThreshold(),
+						reason:    "burst_prescan_leading",
+					}
+				}
+				// Trailing messages after wakeIdx:
+				// If Tier-1, mark isWake: true so handleTrailing re-enqueues it for the next turn.
+				// Otherwise mark ambient (or classify if threshold > 0 and wakeMode == "classifier").
+				threshold := te.policy.GetAmbientWakeThreshold()
+				for i := te.wakeIdx + 1; i < len(te.burst); i++ {
+					m := te.burst[i]
+					if isTier1Wake(m, botUserID, botRoleIDs, wakeMode) {
+						te.wakeInfos[i] = wakeInfo{
+							isWake:    true,
+							score:     1.0,
+							threshold: threshold,
+							reason:    "direct_address",
+						}
+					} else if wakeMode == "mention" || threshold <= 0.0 || classifier.IsHeuristicSkip(extractMessageBody(m.Content)) {
 						te.wakeInfos[i] = wakeInfo{
 							isWake:    false,
 							score:     0.0,
 							threshold: threshold,
 							reason:    "heuristic_skip",
 						}
-					}
-				} else {
-					var recentContext []db.Message
-					if te.pool.cfg.DB != nil {
-						recentContext, _ = db.GetRecentThreadMessages(te.pool.cfg.DB, te.threadID, 10)
-					}
-					var res classifier.ClassificationResult
-					if te.pool.cfg.Classifier != nil {
-						res = te.pool.cfg.Classifier.ClassifyBurst(te.pool.ctx, te.burst, recentContext, te.policy.GetAmbientWakePrompt())
 					} else {
-						res = classifier.ClassificationResult{Confidence: 0.0, Reason: "no classifier configured"}
-					}
-					isWake := res.Confidence >= threshold
-					log.Printf("[AmbientClassifier] Channel %s | BurstSize %d | Score: %.2f (Threshold: %.2f) | Wake: %t | Reason: %s",
-						te.threadID, len(te.burst), res.Confidence, threshold, isWake, res.Reason)
-
-					for i := range te.burst {
+						var recentContext []db.Message
+						if te.pool.cfg.DB != nil {
+							recentContext, _ = db.GetRecentThreadMessages(te.pool.cfg.DB, te.threadID, 10)
+						}
+						var res classifier.ClassificationResult
+						if te.pool.cfg.Classifier != nil {
+							res = te.pool.cfg.Classifier.Classify(te.pool.ctx, m, recentContext, te.policy.GetAmbientWakePrompt())
+						} else {
+							res = classifier.ClassificationResult{Confidence: 0.0, Reason: "no classifier configured"}
+						}
 						te.wakeInfos[i] = wakeInfo{
-							isWake:    i == 0 && isWake,
+							isWake:    res.Confidence >= threshold,
 							score:     res.Confidence,
 							threshold: threshold,
 							reason:    res.Reason,
 						}
 					}
-					if isWake {
-						te.wakeIdx = 0
+				}
+			} else if wakeMode == "mention" {
+				// Mention-only mode: all non-mention messages are ambient without running classifier
+				for i := range te.burst {
+					te.wakeInfos[i] = wakeInfo{
+						isWake:    false,
+						score:     0.0,
+						threshold: 0.0,
+						reason:    "mention_mode_ambient",
+					}
+				}
+			} else if wakeMode == "all" {
+				for i := range te.burst {
+					te.wakeInfos[i] = wakeInfo{
+						isWake:    i == 0,
+						score:     1.0,
+						threshold: 0.0,
+						reason:    "all_wake",
+					}
+				}
+				te.wakeIdx = 0
+			} else {
+				// Safeguard 2: Coalesced Burst Ambient Evaluation (classifier mode)
+				threshold := te.policy.GetAmbientWakeThreshold()
+				if threshold <= 0.0 {
+					for i := range te.burst {
+						te.wakeInfos[i] = wakeInfo{
+							isWake:    false,
+							score:     0.0,
+							threshold: threshold,
+							reason:    "classifier disabled",
+						}
+					}
+				} else {
+					// Fast pre-filter: if all messages in burst are banter/emojis/commands, skip without LLM
+					allSkip := true
+					for _, m := range te.burst {
+						if !classifier.IsHeuristicSkip(extractMessageBody(m.Content)) {
+							allSkip = false
+							break
+						}
+					}
+					if allSkip {
+						for i := range te.burst {
+							te.wakeInfos[i] = wakeInfo{
+								isWake:    false,
+								score:     0.0,
+								threshold: threshold,
+								reason:    "heuristic_skip",
+							}
+						}
+					} else {
+						var recentContext []db.Message
+						if te.pool.cfg.DB != nil {
+							recentContext, _ = db.GetRecentThreadMessages(te.pool.cfg.DB, te.threadID, 10)
+						}
+						var res classifier.ClassificationResult
+						if te.pool.cfg.Classifier != nil {
+							res = te.pool.cfg.Classifier.ClassifyBurst(te.pool.ctx, te.burst, recentContext, te.policy.GetAmbientWakePrompt())
+						} else {
+							res = classifier.ClassificationResult{Confidence: 0.0, Reason: "no classifier configured"}
+						}
+						isWake := res.Confidence >= threshold
+						log.Printf("[AmbientClassifier] Channel %s | BurstSize %d | Score: %.2f (Threshold: %.2f) | Wake: %t | Reason: %s",
+							te.threadID, len(te.burst), res.Confidence, threshold, isWake, res.Reason)
+
+						for i := range te.burst {
+							te.wakeInfos[i] = wakeInfo{
+								isWake:    i == 0 && isWake,
+								score:     res.Confidence,
+								threshold: threshold,
+								reason:    res.Reason,
+							}
+						}
+						if isWake {
+							te.wakeIdx = 0
+						}
 					}
 				}
 			}
 		}
 
 		if te.wakeIdx == -1 {
-			if te.pool.ctx.Err() != nil {
+			if te.pool != nil && te.pool.ctx != nil && te.pool.ctx.Err() != nil {
 				log.Printf("[WorkerPool] Context cancelled during ambient classification for thread %s. Resetting to PENDING for clean deployment recovery.", te.threadID)
 				metrics.RecordTurnCompleted("cancelled", te.triggerType, "classifier", time.Since(te.execStart))
 				for _, m := range te.burst {
@@ -587,30 +728,7 @@ func (te *turnExecution) evaluateAmbientWake() (shouldExit bool) {
 			}
 
 			// ALL messages in burst are ambient
-			hasDiskSession := te.currentSessionID != "" && te.pool.sessionMgr != nil && te.pool.sessionMgr.SessionExistsOnDisk(te.currentSessionID)
-			if hasDiskSession && te.pool.sessionMgr != nil {
-				_, _ = te.pool.sessionMgr.EnsureSessionDir(te.currentSessionID)
-			}
-
-			metrics.RecordTurnCompleted("ambient", te.triggerType, "classifier", time.Since(te.execStart))
-
-			for i, m := range te.burst {
-				info := te.wakeInfos[i]
-				metrics.DiscordMessagesProcessedTotal.WithLabelValues("true", "ambient").Inc()
-				telemetry := fmt.Sprintf("[AMBIENT score=%.2f/%.2f reason=%q]", info.score, info.threshold, info.reason)
-				_ = db.UpdateMessageStatus(te.pool.cfg.DB, m.ID, db.StatusCompleted, telemetry)
-				if m.ScheduleRunID != "" {
-					_ = db.UpdateScheduleRunStatus(te.pool.cfg.DB, db.UpdateRunParams{
-						RunID:       m.ScheduleRunID,
-						MessageID:   m.ID,
-						Status:      "completed",
-						CompletedAt: time.Now().UTC(),
-					})
-				}
-				if te.pool.cfg.OnMessageCompleted != nil {
-					te.pool.cfg.OnMessageCompleted(m, db.StatusCompleted)
-				}
-			}
+			te.markAmbientBurst()
 			return true
 		}
 
@@ -702,6 +820,181 @@ func (te *turnExecution) evaluateAmbientWake() (shouldExit bool) {
 	}
 
 	return false
+}
+
+func (te *turnExecution) markAmbientBurst() {
+	if te.pool == nil {
+		return
+	}
+	hasDiskSession := te.currentSessionID != "" && te.pool.sessionMgr != nil && te.pool.sessionMgr.SessionExistsOnDisk(te.currentSessionID)
+	if hasDiskSession && te.pool.sessionMgr != nil {
+		_, _ = te.pool.sessionMgr.EnsureSessionDir(te.currentSessionID)
+	}
+
+	metrics.RecordTurnCompleted("ambient", te.triggerType, "classifier", time.Since(te.execStart))
+
+	for i, m := range te.burst {
+		var info wakeInfo
+		if i < len(te.wakeInfos) {
+			info = te.wakeInfos[i]
+		}
+		metrics.DiscordMessagesProcessedTotal.WithLabelValues("true", "ambient").Inc()
+		telemetry := fmt.Sprintf("[AMBIENT score=%.2f/%.2f reason=%q]", info.score, info.threshold, info.reason)
+		_ = db.UpdateMessageStatus(te.pool.cfg.DB, m.ID, db.StatusCompleted, telemetry)
+		if m.ScheduleRunID != "" {
+			_ = db.UpdateScheduleRunStatus(te.pool.cfg.DB, db.UpdateRunParams{
+				RunID:       m.ScheduleRunID,
+				MessageID:   m.ID,
+				Status:      "completed",
+				CompletedAt: time.Now().UTC(),
+			})
+		}
+		if te.pool.cfg.OnMessageCompleted != nil {
+			te.pool.cfg.OnMessageCompleted(m, db.StatusCompleted)
+		}
+	}
+}
+
+func buildPreTurnRequest(te *turnExecution) *PreTurnRequest {
+	if te == nil {
+		return &PreTurnRequest{Timestamp: time.Now().UTC()}
+	}
+	channelID := te.effectiveID
+	if channelID == "" {
+		channelID = te.threadID
+	}
+	msgs := make([]*db.Message, len(te.burst))
+	maxRetry := 0
+	for i := range te.burst {
+		msgs[i] = &te.burst[i]
+		if te.burst[i].RetryCount > maxRetry {
+			maxRetry = te.burst[i].RetryCount
+		}
+	}
+	prompt := te.turnPrompt
+	if prompt == "" {
+		prompt = CoalesceBurstPrompt(te.burst)
+	}
+	return &PreTurnRequest{
+		ChannelID:  channelID,
+		ThreadID:   te.threadID,
+		BurstCount: len(te.burst),
+		Messages:   msgs,
+		Prompt:     prompt,
+		RetryCount: maxRetry,
+		Timestamp:  time.Now().UTC(),
+	}
+}
+
+func buildPostTurnRequest(te *turnExecution) *PostTurnRequest {
+	if te == nil {
+		return &PostTurnRequest{Timestamp: time.Now().UTC()}
+	}
+	channelID := te.effectiveID
+	if channelID == "" {
+		channelID = te.threadID
+	}
+	durMs := te.turnDurationMs
+	if durMs <= 0 && !te.execStart.IsZero() {
+		durMs = time.Since(te.execStart).Milliseconds()
+	}
+	status := te.turnStatus
+	if status == "" {
+		status = "failed"
+	}
+	return &PostTurnRequest{
+		ChannelID:    channelID,
+		ThreadID:     te.threadID,
+		Status:       status,
+		ResponseText: te.turnResponseText,
+		Error:        te.turnError,
+		DurationMs:   durMs,
+		TokenUsage:   te.turnTokenUsage,
+		Metadata:     te.hookMetadata,
+		Timestamp:    time.Now().UTC(),
+	}
+}
+
+func (te *turnExecution) abortBurst(reason string) {
+	if te.stopTyping != nil {
+		te.stopTyping()
+	}
+	if te.statusUpdater != nil {
+		te.statusUpdater.Stop()
+		te.statusUpdater.DeleteStatusMessage()
+	}
+	if te.pool != nil {
+		metrics.RecordTurnCompleted("aborted", te.triggerType, "pre_turn", time.Since(te.execStart))
+	}
+	telemetry := fmt.Sprintf("[SKIPPED %s]", reason)
+	for _, m := range te.burst {
+		if te.pool != nil && te.pool.cfg.DB != nil {
+			_ = db.UpdateMessageStatus(te.pool.cfg.DB, m.ID, db.StatusCompleted, telemetry)
+			if m.ScheduleRunID != "" {
+				_ = db.UpdateScheduleRunStatus(te.pool.cfg.DB, db.UpdateRunParams{
+					RunID:       m.ScheduleRunID,
+					MessageID:   m.ID,
+					Status:      "completed",
+					CompletedAt: time.Now().UTC(),
+					Error:       telemetry,
+				})
+			}
+			if te.pool.cfg.OnMessageCompleted != nil {
+				te.pool.cfg.OnMessageCompleted(m, db.StatusCompleted)
+			}
+		}
+	}
+}
+
+func (te *turnExecution) rescheduleBurst(delaySeconds int) {
+	if delaySeconds <= 0 {
+		delaySeconds = 5
+	}
+	if te.stopTyping != nil {
+		te.stopTyping()
+	}
+	if te.statusUpdater != nil {
+		te.statusUpdater.Stop()
+		te.statusUpdater.DeleteStatusMessage()
+	}
+	maxAttempts := 3
+	if te.pool != nil && te.pool.cfg.MaxAttempts > 0 {
+		maxAttempts = te.pool.cfg.MaxAttempts
+	}
+	for _, m := range te.burst {
+		if m.RetryCount+1 >= maxAttempts {
+			log.Printf("[WorkerPool] Message %s in thread %s exceeded max retry attempts (%d). Marking FAILED.", m.ID, te.threadID, maxAttempts)
+			if te.pool != nil && te.pool.cfg.DB != nil {
+				_ = db.UpdateMessageStatus(te.pool.cfg.DB, m.ID, db.StatusFailed, "[EXHAUSTED_PRE_TURN_RETRIES]")
+				if m.ScheduleRunID != "" {
+					_ = db.UpdateScheduleRunStatus(te.pool.cfg.DB, db.UpdateRunParams{
+						RunID:       m.ScheduleRunID,
+						MessageID:   m.ID,
+						Status:      "failed",
+						CompletedAt: time.Now().UTC(),
+						DurationMs:  time.Since(te.execStart).Milliseconds(),
+						Error:       "[EXHAUSTED_PRE_TURN_RETRIES]",
+					})
+				}
+				if te.pool.cfg.OnMessageCompleted != nil {
+					te.pool.cfg.OnMessageCompleted(m, db.StatusFailed)
+				}
+			}
+			continue
+		}
+		if te.pool != nil && te.pool.cfg.DB != nil {
+			_ = db.IncrementMessageRetry(te.pool.cfg.DB, m.ID, "pre_turn_deferred")
+			_ = db.UpdateMessageStatus(te.pool.cfg.DB, m.ID, db.StatusPending, "pre_turn_deferred")
+		}
+		m.RetryCount++
+		m.Status = db.StatusPending
+		mCopy := m
+		if te.pool != nil {
+			time.AfterFunc(time.Duration(delaySeconds)*time.Second, func() {
+				te.pool.Enqueue(mCopy)
+			})
+		}
+	}
 }
 
 func (te *turnExecution) handleTrailing() {
@@ -895,6 +1188,18 @@ func (te *turnExecution) buildTurnPrompt() {
 		turnPrompt = fmt.Sprintf("<CHANNEL_INSTRUCTIONS>\nChannel-specific guidelines for this conversation:\n\n%s\n</CHANNEL_INSTRUCTIONS>\n\n%s", instructions, basePrompt)
 		log.Printf("[WorkerPool] Injected channel instructions for #%s into prompt", te.effectiveName)
 	}
+	if te.injectedHookContext != "" {
+		hookCtx := te.injectedHookContext
+		if !strings.HasPrefix(hookCtx, "<COORDINATION_CONTEXT>") {
+			hookCtx = fmt.Sprintf("<COORDINATION_CONTEXT>\n%s\n</COORDINATION_CONTEXT>", strings.TrimSpace(hookCtx))
+		}
+		if turnPrompt != "" {
+			turnPrompt = fmt.Sprintf("%s\n\n%s", hookCtx, turnPrompt)
+		} else {
+			turnPrompt = hookCtx
+		}
+		log.Printf("[WorkerPool] Injected coordination context into prompt for thread %s", te.threadID)
+	}
 	te.turnPrompt = turnPrompt
 }
 
@@ -990,6 +1295,9 @@ func (te *turnExecution) executeWithRetries() {
 					reason := fmt.Sprintf("[QUOTA_PAUSED reset_in=%v scheduled=false] global quota pause active", remaining)
 					metrics.RecordRunnerError("quota_paused", currentModel)
 					metrics.RecordTurnCompleted("quota_paused", te.triggerType, currentModel, time.Since(te.execStart))
+					te.turnStatus = "failed"
+					te.turnError = reason
+					te.turnDurationMs = time.Since(te.execStart).Milliseconds()
 					if !te.skipDiscord && te.pool.cfg.DeliveryFunc != nil {
 						pauseMsg := notifier.FormatQuotaPauseMessage(remaining, lockedUntil, false, false)
 						_ = te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), te.threadID, pauseMsg)
@@ -1180,6 +1488,9 @@ func (te *turnExecution) executeWithRetries() {
 				}
 
 				reason := fmt.Sprintf("[QUOTA_PAUSED reset_in=%v scheduled=%t] %s", resetDur, scheduled, sanitizeErrorText(errDetail))
+				te.turnStatus = "failed"
+				te.turnError = reason
+				te.turnDurationMs = time.Since(te.execStart).Milliseconds()
 				for _, m := range te.burst {
 					_ = db.UpdateMessageStatus(te.pool.cfg.DB, m.ID, db.StatusFailed, reason)
 					if m.ScheduleRunID != "" {
@@ -1227,6 +1538,9 @@ func (te *turnExecution) executeWithRetries() {
 					case <-time.After(backoff):
 					case <-te.pool.ctx.Done():
 						metrics.RecordTurnCompleted("cancelled", te.triggerType, currentModel, time.Since(te.execStart))
+						te.turnStatus = "failed"
+						te.turnError = "context cancelled during execution"
+						te.turnDurationMs = time.Since(te.execStart).Milliseconds()
 						for _, m := range te.burst {
 							_ = db.UpdateMessageStatus(te.pool.cfg.DB, m.ID, db.StatusPending, "interrupted by graceful deployment")
 							if m.ScheduleRunID != "" {
@@ -1256,6 +1570,9 @@ func (te *turnExecution) executeWithRetries() {
 				if te.pool.ctx.Err() != nil {
 					log.Printf("[WorkerPool] Pool shutting down on watchdog timeout for thread %s. Resetting to PENDING.", te.threadID)
 					metrics.RecordTurnCompleted("cancelled", te.triggerType, currentModel, time.Since(te.execStart))
+					te.turnStatus = "timeout"
+					te.turnError = "context cancelled during execution"
+					te.turnDurationMs = time.Since(te.execStart).Milliseconds()
 					for _, m := range te.burst {
 						_ = db.UpdateMessageStatus(te.pool.cfg.DB, m.ID, db.StatusPending, "interrupted by graceful deployment")
 					}
@@ -1282,6 +1599,9 @@ func (te *turnExecution) executeWithRetries() {
 				}
 
 				sanitizedErr := sanitizeErrorText(errDetail)
+				te.turnStatus = "timeout"
+				te.turnError = sanitizedErr
+				te.turnDurationMs = time.Since(te.execStart).Milliseconds()
 				for _, m := range te.burst {
 					_ = db.UpdateMessageStatus(te.pool.cfg.DB, m.ID, db.StatusFailed, sanitizedErr)
 					if m.ScheduleRunID != "" {
@@ -1366,6 +1686,10 @@ func (te *turnExecution) executeWithRetries() {
 					// Mark all messages in the burst as completed with unpacked clean text
 					metrics.RecordTurnCompleted("success", te.triggerType, currentModel, time.Since(te.execStart))
 					metrics.RecordTokens(currentModel, resp.Usage.InputTokens, resp.Usage.OutputTokens, resp.Usage.ThinkingTokens, resp.Usage.CacheReadTokens, resp.Usage.TotalTokens)
+					te.turnStatus = "success"
+					te.turnResponseText = resp.Response
+					te.turnTokenUsage = resp.Usage
+					te.turnDurationMs = time.Since(te.execStart).Milliseconds()
 					for _, m := range te.burst {
 						_ = db.UpdateMessageCompleted(te.pool.cfg.DB, m.ID, cleanText)
 						if m.ScheduleRunID != "" {
@@ -1396,6 +1720,9 @@ func (te *turnExecution) executeWithRetries() {
 			log.Printf("[WorkerPool] Turn execution cancelled due to pool shutdown (thread: %s, attempt: %d/%d). Resetting to PENDING for clean deployment recovery.", te.threadID, attempt, maxAttempts)
 			te.stopTyping()
 			metrics.RecordTurnCompleted("cancelled", te.triggerType, currentModel, time.Since(te.execStart))
+			te.turnStatus = "failed"
+			te.turnError = "interrupted by graceful deployment"
+			te.turnDurationMs = time.Since(te.execStart).Milliseconds()
 			for _, m := range te.burst {
 				_ = db.UpdateMessageStatus(te.pool.cfg.DB, m.ID, db.StatusPending, "interrupted by graceful deployment")
 			}
@@ -1432,6 +1759,9 @@ func (te *turnExecution) executeWithRetries() {
 				case <-time.After(backoff):
 				case <-te.pool.ctx.Done():
 					metrics.RecordTurnCompleted("cancelled", te.triggerType, currentModel, time.Since(te.execStart))
+					te.turnStatus = "failed"
+					te.turnError = "context cancelled during execution"
+					te.turnDurationMs = time.Since(te.execStart).Milliseconds()
 					for _, m := range te.burst {
 						_ = db.UpdateMessageStatus(te.pool.cfg.DB, m.ID, db.StatusPending, "interrupted by graceful deployment")
 						if m.ScheduleRunID != "" {
@@ -1466,6 +1796,9 @@ func (te *turnExecution) executeWithRetries() {
 				case <-time.After(backoff):
 				case <-te.pool.ctx.Done():
 					metrics.RecordTurnCompleted("cancelled", te.triggerType, currentModel, time.Since(te.execStart))
+					te.turnStatus = "failed"
+					te.turnError = "context cancelled during execution"
+					te.turnDurationMs = time.Since(te.execStart).Milliseconds()
 					for _, m := range te.burst {
 						_ = db.UpdateMessageStatus(te.pool.cfg.DB, m.ID, db.StatusPending, "interrupted by graceful deployment")
 						if m.ScheduleRunID != "" {
@@ -1495,6 +1828,9 @@ func (te *turnExecution) executeWithRetries() {
 
 		if te.pool.ctx.Err() != nil {
 			log.Printf("[WorkerPool] Pool shutting down during non-transient error for thread %s. Resetting to PENDING.", te.threadID)
+			te.turnStatus = "failed"
+			te.turnError = "interrupted by graceful deployment"
+			te.turnDurationMs = time.Since(te.execStart).Milliseconds()
 			for _, m := range te.burst {
 				_ = db.UpdateMessageStatus(te.pool.cfg.DB, m.ID, db.StatusPending, "interrupted by graceful deployment")
 			}
@@ -1507,6 +1843,9 @@ func (te *turnExecution) executeWithRetries() {
 		}
 
 		sanitizedErr := sanitizeErrorText(errDetail)
+		te.turnStatus = "failed"
+		te.turnError = sanitizedErr
+		te.turnDurationMs = time.Since(te.execStart).Milliseconds()
 		metrics.RecordTurnCompleted("failed", te.triggerType, currentModel, time.Since(te.execStart))
 
 		var notif string
@@ -1557,6 +1896,9 @@ func (te *turnExecution) executeWithRetries() {
 	if te.pool.ctx.Err() != nil {
 		log.Printf("[WorkerPool] Pool shutting down during turn for thread %s. Suppressing exhaustion alert and resetting to PENDING for deployment recovery.", te.threadID)
 		metrics.RecordTurnCompleted("cancelled", te.triggerType, currentModel, time.Since(te.execStart))
+		te.turnStatus = "failed"
+		te.turnError = "context cancelled during execution"
+		te.turnDurationMs = time.Since(te.execStart).Milliseconds()
 		for _, m := range te.burst {
 			_ = db.UpdateMessageStatus(te.pool.cfg.DB, m.ID, db.StatusPending, "interrupted by graceful deployment")
 			if m.ScheduleRunID != "" {
@@ -1589,6 +1931,9 @@ func (te *turnExecution) executeWithRetries() {
 		}
 	}
 	sanitizedErr := sanitizeErrorText(lastErrDetail)
+	te.turnStatus = "failed"
+	te.turnError = sanitizedErr
+	te.turnDurationMs = time.Since(te.execStart).Milliseconds()
 	metrics.RecordTurnCompleted("failed", te.triggerType, currentModel, time.Since(te.execStart))
 	for _, m := range te.burst {
 		_ = db.UpdateMessageStatus(te.pool.cfg.DB, m.ID, db.StatusFailed, sanitizedErr)

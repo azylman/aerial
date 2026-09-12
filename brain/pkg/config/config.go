@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -49,12 +50,25 @@ type GitSyncConfig struct {
 	Repositories  []string `yaml:"repositories" json:"repositories"`
 }
 
+type WebhookEndpoint struct {
+	URL             string `yaml:"url" json:"url"`
+	TimeoutMs       int    `yaml:"timeout_ms,omitempty" json:"timeout_ms,omitempty"`
+	OnTimeoutAction string `yaml:"on_timeout,omitempty" json:"on_timeout,omitempty"` // "proceed", "drop", "retry", "classify", "wake"
+}
+
+type ChannelHooksConfig struct {
+	OnWake   *WebhookEndpoint `yaml:"on_wake,omitempty" json:"on_wake,omitempty"`
+	PreTurn  *WebhookEndpoint `yaml:"pre_turn,omitempty" json:"pre_turn,omitempty"`
+	PostTurn *WebhookEndpoint `yaml:"post_turn,omitempty" json:"post_turn,omitempty"`
+}
+
 type ChannelPolicy struct {
-	Mode                 string   `yaml:"mode" json:"mode"`
-	WakeMode             string   `yaml:"wake_mode,omitempty" json:"wake_mode,omitempty"`
-	IgnoreBots           *bool    `yaml:"ignore_bots,omitempty" json:"ignore_bots,omitempty"`
-	AmbientWakeThreshold *float64 `yaml:"ambient_wake_threshold,omitempty" json:"ambient_wake_threshold,omitempty"`
-	AmbientWakePrompt    string   `yaml:"ambient_wake_prompt,omitempty" json:"ambient_wake_prompt,omitempty"`
+	Mode                 string             `yaml:"mode" json:"mode"`
+	WakeMode             string             `yaml:"wake_mode,omitempty" json:"wake_mode,omitempty"`
+	IgnoreBots           *bool              `yaml:"ignore_bots,omitempty" json:"ignore_bots,omitempty"`
+	AmbientWakeThreshold *float64           `yaml:"ambient_wake_threshold,omitempty" json:"ambient_wake_threshold,omitempty"`
+	AmbientWakePrompt    string             `yaml:"ambient_wake_prompt,omitempty" json:"ambient_wake_prompt,omitempty"`
+	Hooks                ChannelHooksConfig `yaml:"hooks,omitempty" json:"hooks,omitempty"`
 }
 
 // IsIgnored reports whether the channel policy specifies an ignored/disabled channel.
@@ -105,6 +119,27 @@ func (p ChannelPolicy) IsBotIgnored() bool {
 		return *p.IgnoreBots
 	}
 	return false
+}
+
+// GetHooks returns the channel lifecycle webhook configuration.
+func (p ChannelPolicy) GetHooks() ChannelHooksConfig {
+	return p.Hooks
+}
+
+// GetTimeout returns the configured timeout duration, defaulting to 3000ms if unspecified or non-positive.
+func (e *WebhookEndpoint) GetTimeout() time.Duration {
+	if e == nil || e.TimeoutMs <= 0 {
+		return 3000 * time.Millisecond
+	}
+	return time.Duration(e.TimeoutMs) * time.Millisecond
+}
+
+// GetOnTimeout returns the normalized lowercase on_timeout action, or defaultAction if unspecified.
+func (e *WebhookEndpoint) GetOnTimeout(defaultAction string) string {
+	if e == nil || strings.TrimSpace(e.OnTimeoutAction) == "" {
+		return defaultAction
+	}
+	return strings.ToLower(strings.TrimSpace(e.OnTimeoutAction))
 }
 
 type OllamaConfig struct {
@@ -231,6 +266,18 @@ func cloneChannelPolicy(p ChannelPolicy) ChannelPolicy {
 	if p.AmbientWakeThreshold != nil {
 		f := *p.AmbientWakeThreshold
 		cp.AmbientWakeThreshold = &f
+	}
+	if p.Hooks.OnWake != nil {
+		w := *p.Hooks.OnWake
+		cp.Hooks.OnWake = &w
+	}
+	if p.Hooks.PreTurn != nil {
+		w := *p.Hooks.PreTurn
+		cp.Hooks.PreTurn = &w
+	}
+	if p.Hooks.PostTurn != nil {
+		w := *p.Hooks.PostTurn
+		cp.Hooks.PostTurn = &w
 	}
 	return cp
 }
@@ -695,6 +742,10 @@ func validateChannels(parsed *ConfigData, targetPath string) error {
 		defPolicy.WakeMode = defPolicy.GetWakeMode()
 	}
 
+	if err := validateHooks("default", defPolicy.Hooks, targetPath); err != nil {
+		return err
+	}
+
 	parsed.Channels["default"] = defPolicy
 
 	for k, policy := range parsed.Channels {
@@ -725,7 +776,50 @@ func validateChannels(parsed *ConfigData, targetPath string) error {
 			}
 			policy.WakeMode = policy.GetWakeMode()
 		}
+		if err := validateHooks(k, policy.Hooks, targetPath); err != nil {
+			return err
+		}
 		parsed.Channels[k] = policy
+	}
+	return nil
+}
+
+func validateWebhookEndpoint(channelName, hookName string, ep *WebhookEndpoint, targetPath string) error {
+	if ep == nil {
+		return nil
+	}
+	rawURL := strings.TrimSpace(ep.URL)
+	if rawURL == "" {
+		log.Printf("[Config] Validation error: channel %q %s webhook url is required in %s.", channelName, hookName, targetPath)
+		return fmt.Errorf("channel %q %s webhook url is required", channelName, hookName)
+	}
+	parsedURL, err := url.ParseRequestURI(rawURL)
+	if err != nil || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") || parsedURL.Host == "" {
+		log.Printf("[Config] Validation error: channel %q %s webhook url must be a valid http or https URL, got %q in %s.", channelName, hookName, ep.URL, targetPath)
+		return fmt.Errorf("channel %q %s webhook url must be a valid http or https URL, got %q", channelName, hookName, ep.URL)
+	}
+	if ep.TimeoutMs < 0 {
+		log.Printf("[Config] Validation error: channel %q %s webhook timeout_ms cannot be negative, got %d in %s.", channelName, hookName, ep.TimeoutMs, targetPath)
+		return fmt.Errorf("channel %q %s webhook timeout_ms cannot be negative, got %d", channelName, hookName, ep.TimeoutMs)
+	}
+	return nil
+}
+
+func validateHooks(channelName string, hooks ChannelHooksConfig, targetPath string) error {
+	if hooks.OnWake != nil {
+		if err := validateWebhookEndpoint(channelName, "on_wake", hooks.OnWake, targetPath); err != nil {
+			return err
+		}
+	}
+	if hooks.PreTurn != nil {
+		if err := validateWebhookEndpoint(channelName, "pre_turn", hooks.PreTurn, targetPath); err != nil {
+			return err
+		}
+	}
+	if hooks.PostTurn != nil {
+		if err := validateWebhookEndpoint(channelName, "post_turn", hooks.PostTurn, targetPath); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -809,6 +903,27 @@ func ResolveChannelPolicy(channels map[string]ChannelPolicy, channelID, channelN
 	}
 	if res.AmbientWakePrompt == "" && def.AmbientWakePrompt != "" {
 		res.AmbientWakePrompt = def.AmbientWakePrompt
+	}
+	if res.Hooks.OnWake != nil {
+		w := *res.Hooks.OnWake
+		res.Hooks.OnWake = &w
+	} else if def.Hooks.OnWake != nil {
+		w := *def.Hooks.OnWake
+		res.Hooks.OnWake = &w
+	}
+	if res.Hooks.PreTurn != nil {
+		w := *res.Hooks.PreTurn
+		res.Hooks.PreTurn = &w
+	} else if def.Hooks.PreTurn != nil {
+		w := *def.Hooks.PreTurn
+		res.Hooks.PreTurn = &w
+	}
+	if res.Hooks.PostTurn != nil {
+		w := *res.Hooks.PostTurn
+		res.Hooks.PostTurn = &w
+	} else if def.Hooks.PostTurn != nil {
+		w := *def.Hooks.PostTurn
+		res.Hooks.PostTurn = &w
 	}
 	return res
 }
