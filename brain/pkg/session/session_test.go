@@ -1259,3 +1259,10 @@ func TestCleanupEphemeralSession(t *testing.T) {
 	}
 }
 
+func TestDefaultMaxSessionTurnsConstant(t *testing.T) {
+	if DefaultMaxSessionTurns != 10 {
+		t.Errorf("expected DefaultMaxSessionTurns to be 10, got %d", DefaultMaxSessionTurns)
+	}
+}
+
+

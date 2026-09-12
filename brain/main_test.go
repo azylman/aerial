@@ -1877,6 +1877,7 @@ func TestRunBrainApp_FullLifecycle(t *testing.T) {
 	cur.GeminiHomeDir = tmpDir
 	cur.DiscordToken = "mock-discord-token"
 	cur.Port = "0"
+	cur.AgyBin = "/bin/true"
 	cfg.Update(cur)
 
 	ctx, cancel := context.WithCancel(context.Background())

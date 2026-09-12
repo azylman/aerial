@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/brain/pkg/config"
+	"github.com/azylman/aerial/brain/pkg/session"
 )
 
 func newMockSpawner(script string) func(ctx context.Context, opts WorkerOptions) (*WorkerInstance, error) {
@@ -351,5 +352,76 @@ func TestUtilityDaemon_NilActiveWorkerAccessors(t *testing.T) {
 		t.Errorf("expected 0 turns used, got %d", daemon.ActiveTurnsUsed())
 	}
 }
+
+func TestUtilityDaemon_DefaultTurnBudgetConstant(t *testing.T) {
+	if DefaultTurnBudget != session.DefaultMaxSessionTurns {
+		t.Errorf("expected DefaultTurnBudget (%d) to match session.DefaultMaxSessionTurns (%d)", DefaultTurnBudget, session.DefaultMaxSessionTurns)
+	}
+	if DefaultTurnBudget != 10 {
+		t.Errorf("expected DefaultTurnBudget to be 10, got %d", DefaultTurnBudget)
+	}
+
+	d := NewUtilityDaemon(nil,
+		WithSpawner(func(ctx context.Context, opts WorkerOptions) (*WorkerInstance, error) {
+			return &WorkerInstance{}, nil
+		}),
+	)
+	defer d.Close()
+	if d.turnBudget != 10 {
+		t.Errorf("expected default turnBudget to be 10, got %d", d.turnBudget)
+	}
+}
+
+func TestUtilityDaemon_StandbyPendingAndDeadStandbyReplacement(t *testing.T) {
+	script := createMockStreamJsonHelper(t)
+	daemon := NewUtilityDaemon(nil,
+		WithSpawner(newMockSpawner(script)),
+	)
+	defer daemon.Close()
+
+	// Wait for initial standby to warm
+	time.Sleep(50 * time.Millisecond)
+
+	daemon.mu.Lock()
+	// Test standbyPending guard
+	daemon.standbyPending = true
+	daemon.ensureStandbyLocked()
+	daemon.standbyPending = false
+
+	// Test promoteStandbyLocked when standby is dead
+	if daemon.standbyWorker != nil {
+		daemon.standbyWorker.isDead.Store(true)
+	}
+	daemon.promoteStandbyLocked()
+	daemon.mu.Unlock()
+
+	// Wait for standby to prewarm replacing old dead standby
+	time.Sleep(50 * time.Millisecond)
+
+	// Test closed daemon guards
+	daemon.Close()
+	daemon.mu.Lock()
+	daemon.promoteStandbyLocked()
+	daemon.ensureStandbyLocked()
+	daemon.mu.Unlock()
+}
+
+func TestUtilityDaemon_ExecuteClosedMidAttempt(t *testing.T) {
+	script := createMockStreamJsonHelper(t)
+	daemon := NewUtilityDaemon(nil,
+		WithSpawner(newMockSpawner(script)),
+	)
+
+	// Close daemon mid-attempt
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		daemon.Close()
+	}()
+
+	_, _ = daemon.Execute(context.Background(), "SLEEP")
+}
+
+
+
 
 

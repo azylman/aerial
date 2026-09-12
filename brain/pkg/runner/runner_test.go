@@ -2001,5 +2001,18 @@ func TestIsNonTransientError_ForkExecPermissionDenied(t *testing.T) {
 	}
 }
 
+func TestActivityTap_Branches(t *testing.T) {
+	tap := newActivityTap(nil, nil, false, nil)
+	n, err := tap.Write(nil)
+	if n != 0 || err != nil {
+		t.Errorf("expected (0, nil) on empty write, got (%d, %v)", n, err)
+	}
+	n, err = tap.Write([]byte("hello"))
+	if n != 5 || err != nil {
+		t.Errorf("expected (5, nil) on tap with nil writer, got (%d, %v)", n, err)
+	}
+}
+
+
 
 

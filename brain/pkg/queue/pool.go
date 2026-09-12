@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	DefaultMaxSessionTurns     = 10
+	DefaultMaxSessionTurns     = session.DefaultMaxSessionTurns
 	DefaultMaxSessionIdleTime  = 24 * time.Hour
 	DefaultTimeoutMinutes      = 60
 	DefaultMaxRestarts         = 3
