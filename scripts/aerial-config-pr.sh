@@ -294,22 +294,21 @@ EOF
 }
 
 submit_scratch() {
-    local async_mode=0
     local target_id=""
     local check_delay=""
     local no_schedule=0
     local scratch_dir=""
     local commit_msg=""
 
-    if [ "${AERIAL_PR_ASYNC:-0}" = "1" ]; then
-        async_mode=1
-    fi
-
     while [ $# -gt 0 ]; do
         case "$1" in
             --async|-a)
-                async_mode=1
+                # Accepted as no-op for backwards compatibility; async is now the only mode
                 shift
+                ;;
+            --sync)
+                echo "ERROR: Synchronous submit mode has been eliminated. Submissions are strictly asynchronous." >&2
+                exit 1
                 ;;
             --target-id|--target|-t)
                 if [ $# -lt 2 ]; then
@@ -477,35 +476,31 @@ EOF
     pr_num=$(echo "$pr_resp" | jq -r '.number')
     local pr_url
     pr_url=$(echo "$pr_resp" | jq -r '.html_url')
+    echo "📝 [aerial-config-pr] Created Pull Request #${pr_num}: ${pr_url}"
 
-    if [ "$async_mode" -eq 1 ]; then
-        # Disarm cleanup trap and remove scratch workspace immediately since changes are pushed
-        if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
-            rm -rf "${SCRATCH_DIR_CLEANUP}"
-            SCRATCH_DIR_CLEANUP=""
-        fi
-
-        local script_path
-        script_path="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
-        local log_file="/tmp/aerial-config-pr-monitor-${pr_num}.log"
-
-        nohup bash "$script_path" monitor "$pr_num" "$branch" "$commit_sha" < /dev/null > "$log_file" 2>&1 &
-        local monitor_pid=$!
-
-        echo "⚡ [aerial-config-pr] Asynchronous submission active. CI monitoring delegated to background PID ${monitor_pid} (log: ${log_file})."
-
-        local sched_id=""
-        local effective_delay="${check_delay:-${AERIAL_PR_CHECK_DELAY:-$DEFAULT_PR_CHECK_DELAY}}"
-        if [ "$no_schedule" -eq 0 ]; then
-            sched_id=$(schedule_pr_followup "$pr_num" "$pr_url" "$target_id" "$effective_delay" "$commit_msg" | tail -n 1)
-        fi
-
-        echo "{\"status\":\"submitted\",\"pr_url\":\"${pr_url}\",\"pr_number\":${pr_num},\"branch\":\"${branch}\",\"commit_sha\":\"${commit_sha}\",\"async\":true,\"monitor_pid\":${monitor_pid},\"scheduled_check\":\"${effective_delay}\",\"schedule_id\":\"${sched_id}\"}"
-        return 0
+    # Asynchronous Submission: Disarm cleanup trap and remove scratch workspace immediately
+    if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
+        rm -rf "${SCRATCH_DIR_CLEANUP}"
+        SCRATCH_DIR_CLEANUP=""
     fi
 
-    # Synchronous mode: monitor and merge inline
-    monitor_and_merge_pr "$pr_num" "$branch" "$commit_sha"
+    local script_path
+    script_path="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+    local log_file="/tmp/aerial-config-pr-monitor-${pr_num}.log"
+
+    nohup bash "$script_path" monitor "$pr_num" "$branch" "$commit_sha" < /dev/null > "$log_file" 2>&1 &
+    local monitor_pid=$!
+
+    echo "⚡ [aerial-config-pr] Asynchronous submission active. CI monitoring delegated to background PID ${monitor_pid} (log: ${log_file})."
+
+    local sched_id=""
+    local effective_delay="${check_delay:-${AERIAL_PR_CHECK_DELAY:-$DEFAULT_PR_CHECK_DELAY}}"
+    if [ "$no_schedule" -eq 0 ]; then
+        sched_id=$(schedule_pr_followup "$pr_num" "$pr_url" "$target_id" "$effective_delay" "$commit_msg" | tail -n 1)
+    fi
+
+    echo "{\"status\":\"submitted\",\"pr_url\":\"${pr_url}\",\"pr_number\":${pr_num},\"branch\":\"${branch}\",\"commit_sha\":\"${commit_sha}\",\"async\":true,\"monitor_pid\":${monitor_pid},\"scheduled_check\":\"${effective_delay}\",\"schedule_id\":\"${sched_id}\"}"
+    return 0
 }
 
 case "$cmd" in
@@ -519,7 +514,7 @@ case "$cmd" in
         monitor_and_merge_pr "$@"
         ;;
     *)
-        echo "Usage: $0 {init|submit [--async] [-t <target_id>] [-d <delay>] [--no-schedule] <scratch_dir> [commit_msg]|monitor <pr_num> <branch> <commit_sha>}" >&2
+        echo "Usage: $0 {init|submit [-t <target_id>] [-d <delay>] [--no-schedule] <scratch_dir> [commit_msg]|monitor <pr_num> <branch> <commit_sha>}" >&2
         exit 1
         ;;
 esac
