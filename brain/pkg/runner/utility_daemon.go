@@ -10,7 +10,11 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/brain/pkg/config"
+	"github.com/azylman/aerial/brain/pkg/session"
 )
+
+// DefaultTurnBudget defines the default number of turns executed before rotating a persistent utility worker.
+const DefaultTurnBudget = session.DefaultMaxSessionTurns
 
 type DaemonOption func(*UtilityDaemon)
 
@@ -60,25 +64,33 @@ type UtilityDaemon struct {
 	roots         []string
 	closed        atomic.Bool
 
+	ctx            context.Context
+	cancel         context.CancelFunc
+	wg             sync.WaitGroup
+	standbyPending bool
+
 	reloadMu    sync.Mutex
 	reloadTimer *time.Timer
 }
 
 // NewUtilityDaemon constructs and pre-warms a persistent utility worker daemon.
 func NewUtilityDaemon(cfg *config.Config, opts ...DaemonOption) *UtilityDaemon {
+	daemonCtx, daemonCancel := context.WithCancel(context.Background())
 	d := &UtilityDaemon{
 		cfg:         cfg,
-		turnBudget:  15,
+		turnBudget:  DefaultTurnBudget,
 		turnTimeout: 15 * time.Second,
 		maxRSSBytes: 500 * 1024 * 1024,
 		spawner:     NewWorkerInstance,
+		ctx:         daemonCtx,
+		cancel:      daemonCancel,
 	}
 
 	for _, opt := range opts {
 		opt(d)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(d.ctx, 20*time.Second)
 	defer cancel()
 
 	// Initialize active worker
@@ -139,15 +151,29 @@ func (d *UtilityDaemon) ensureStandbyLocked() {
 	if d.standbyWorker != nil && !d.standbyWorker.IsDead() {
 		return
 	}
+	if d.standbyPending {
+		return
+	}
+	d.standbyPending = true
 
+	d.wg.Add(1)
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer d.wg.Done()
+		defer func() {
+			d.mu.Lock()
+			d.standbyPending = false
+			d.mu.Unlock()
+		}()
+
+		ctx, cancel := context.WithTimeout(d.ctx, 30*time.Second)
 		defer cancel()
 
 		opts := d.workerOpts()
 		standby, err := d.spawner(ctx, opts)
 		if err != nil {
-			log.Printf("[UtilityDaemon] Standby pre-warming failed: %v", err)
+			if !d.closed.Load() {
+				log.Printf("[UtilityDaemon] Standby pre-warming failed: %v", err)
+			}
 			return
 		}
 
@@ -157,34 +183,64 @@ func (d *UtilityDaemon) ensureStandbyLocked() {
 			standby.Close()
 			return
 		}
-		if d.standbyWorker != nil {
+		if d.standbyWorker != nil && !d.standbyWorker.IsDead() {
 			standby.Close()
 			return
 		}
+		oldStandby := d.standbyWorker
 		d.standbyWorker = standby
+		if oldStandby != nil {
+			d.wg.Add(1)
+			go func(w *WorkerInstance) {
+				defer d.wg.Done()
+				w.Close()
+			}(oldStandby)
+		}
 	}()
 }
 
 func (d *UtilityDaemon) promoteStandbyLocked() {
+	if d.closed.Load() {
+		return
+	}
+
 	oldWorker := d.activeWorker
 
 	if d.standbyWorker != nil && !d.standbyWorker.IsDead() {
 		d.activeWorker = d.standbyWorker
 		d.standbyWorker = nil
 	} else {
-		// Standby not ready; spawn synchronously
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		if d.standbyWorker != nil {
+			deadStandby := d.standbyWorker
+			d.standbyWorker = nil
+			d.wg.Add(1)
+			go func(w *WorkerInstance) {
+				defer d.wg.Done()
+				w.Close()
+			}(deadStandby)
+		}
+
+		// Standby not ready; spawn synchronously bound to daemon lifecycle context
+		ctx, cancel := context.WithTimeout(d.ctx, 20*time.Second)
 		defer cancel()
 		fresh, err := d.spawner(ctx, d.workerOpts())
 		if err != nil {
 			log.Printf("[UtilityDaemon] Failed to spawn synchronous replacement worker: %v", err)
 		} else {
-			d.activeWorker = fresh
+			if d.closed.Load() {
+				fresh.Close()
+			} else {
+				d.activeWorker = fresh
+			}
 		}
 	}
 
 	if oldWorker != nil {
-		go oldWorker.Close()
+		d.wg.Add(1)
+		go func(w *WorkerInstance) {
+			defer d.wg.Done()
+			w.Close()
+		}(oldWorker)
 	}
 
 	d.ensureStandbyLocked()
@@ -217,7 +273,15 @@ func (d *UtilityDaemon) Execute(ctx context.Context, prompt string) (string, err
 	}
 
 	for attempt := 0; attempt < 2; attempt++ {
+		if d.closed.Load() {
+			return "", ErrWorkerDead
+		}
+
 		d.mu.Lock()
+		if d.closed.Load() {
+			d.mu.Unlock()
+			return "", ErrWorkerDead
+		}
 		if d.activeWorker == nil || d.activeWorker.IsDead() {
 			d.promoteStandbyLocked()
 		}
@@ -237,8 +301,16 @@ func (d *UtilityDaemon) Execute(ctx context.Context, prompt string) (string, err
 		cancel()
 
 		if err != nil {
+			if d.closed.Load() {
+				return "", ErrWorkerDead
+			}
+
 			// If worker crashed or pipe broke, promote standby and retry once
 			d.mu.Lock()
+			if d.closed.Load() {
+				d.mu.Unlock()
+				return "", ErrWorkerDead
+			}
 			if d.activeWorker == worker {
 				d.promoteStandbyLocked()
 			}
@@ -253,7 +325,7 @@ func (d *UtilityDaemon) Execute(ctx context.Context, prompt string) (string, err
 
 		// Turn succeeded; check RSS ceiling and turn budget for pre-warmed rotation
 		d.mu.Lock()
-		if d.activeWorker == worker {
+		if !d.closed.Load() && d.activeWorker == worker {
 			if d.maxRSSBytes > 0 && worker.RSSBytes() > d.maxRSSBytes {
 				log.Printf("[UtilityDaemon] Worker RSS (%d bytes) exceeded ceiling (%d bytes); rotating worker", worker.RSSBytes(), d.maxRSSBytes)
 				d.promoteStandbyLocked()
@@ -335,15 +407,29 @@ func (d *UtilityDaemon) Close() {
 		return
 	}
 
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	if d.cancel != nil {
+		d.cancel()
+	}
 
-	if d.activeWorker != nil {
-		d.activeWorker.Close()
-		d.activeWorker = nil
+	d.reloadMu.Lock()
+	if d.reloadTimer != nil {
+		d.reloadTimer.Stop()
 	}
-	if d.standbyWorker != nil {
-		d.standbyWorker.Close()
-		d.standbyWorker = nil
+	d.reloadMu.Unlock()
+
+	d.mu.Lock()
+	active := d.activeWorker
+	d.activeWorker = nil
+	standby := d.standbyWorker
+	d.standbyWorker = nil
+	d.mu.Unlock()
+
+	if active != nil {
+		active.Close()
 	}
+	if standby != nil {
+		standby.Close()
+	}
+
+	d.wg.Wait()
 }

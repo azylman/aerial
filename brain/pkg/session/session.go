@@ -13,6 +13,9 @@ import (
 
 
 
+// DefaultMaxSessionTurns defines the engine-wide maximum turn limit before an agy session is rotated.
+const DefaultMaxSessionTurns = 10
+
 // SourceAmbient represents ambient chat messages appended to session transcripts.
 const SourceAmbient = "AMBIENT"
 

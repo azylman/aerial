@@ -295,3 +295,49 @@ func TestWorkerInstance_SpawnWithAPIKeyAndHandshakeCancel(t *testing.T) {
 	}
 }
 
+func TestWorkerInstance_ExecuteWriteError(t *testing.T) {
+	script := createMockStreamJsonHelper(t)
+	w, err := NewWorkerInstance(context.Background(), WorkerOptions{
+		AgyBin: script,
+	})
+	if err != nil {
+		t.Fatalf("spawn failed: %v", err)
+	}
+	defer w.Close()
+
+	_ = w.stdin.Close()
+
+	_, err = w.Execute(context.Background(), "test write error")
+	if err == nil {
+		t.Fatal("expected write error on closed stdin")
+	}
+}
+
+func TestWorkerInstance_ParseErrorOnResult(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "bad_result.sh")
+	script := `#!/bin/sh
+echo '{"event":"init","conversation_id":"bad-1"}'
+while read line; do
+  echo '{"event":"result", "result": invalid json}'
+done
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {
+		t.Fatalf("failed to write script: %v", err)
+	}
+
+	w, err := NewWorkerInstance(context.Background(), WorkerOptions{
+		AgyBin: scriptPath,
+	})
+	if err != nil {
+		t.Fatalf("spawn failed: %v", err)
+	}
+	defer w.Close()
+
+	_, err = w.Execute(context.Background(), "test bad json")
+	if err == nil {
+		t.Fatal("expected parse error, got nil")
+	}
+}
+
+
