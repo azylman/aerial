@@ -70,6 +70,7 @@ type WorkerPoolConfig struct {
 	HistoryFetcher              HistoryFetcherFunc
 	SystemAlertFunc             func(s *discordgo.Session, channelNameOrID, title, alertBody string) error
 	LLMFunc                     LLMFunc
+	WebhookDispatcher           WebhookDispatcher
 }
 
 type threadWorkerState struct {
@@ -79,18 +80,19 @@ type threadWorkerState struct {
 }
 
 type WorkerPool struct {
-	appCfg           *config.Config
-	overrideModel    string
-	cfg              WorkerPoolConfig
-	sessionMgr       *session.Manager
-	mu               sync.Mutex
-	threadChs        map[string]*threadWorkerState
-	wg               sync.WaitGroup
-	ctx              context.Context
-	cancel           context.CancelFunc
-	stopped          bool
-	quotaLockedUntil atomic.Int64
-	scopeLocks       sync.Map
+	appCfg            *config.Config
+	overrideModel     string
+	cfg               WorkerPoolConfig
+	sessionMgr        *session.Manager
+	mu                sync.Mutex
+	threadChs         map[string]*threadWorkerState
+	wg                sync.WaitGroup
+	ctx               context.Context
+	cancel            context.CancelFunc
+	stopped           bool
+	quotaLockedUntil  atomic.Int64
+	scopeLocks        sync.Map
+	webhookDispatcher WebhookDispatcher
 }
 
 // New creates a new WorkerPool with pure *config.Config dependency injection.
@@ -227,16 +229,20 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 	if cfg.SystemAlertFunc == nil {
 		cfg.SystemAlertFunc = delivery.SendSystemAlert
 	}
+	if cfg.WebhookDispatcher == nil {
+		cfg.WebhookDispatcher = NewDefaultWebhookDispatcher()
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 
 	p := &WorkerPool{
-		appCfg:     appCfg,
-		cfg:        cfg,
-		sessionMgr: sessMgr,
-		threadChs:  make(map[string]*threadWorkerState),
-		ctx:        ctx,
-		cancel:     cancel,
+		appCfg:            appCfg,
+		cfg:               cfg,
+		sessionMgr:        sessMgr,
+		threadChs:         make(map[string]*threadWorkerState),
+		ctx:               ctx,
+		cancel:            cancel,
+		webhookDispatcher: cfg.WebhookDispatcher,
 	}
 
 	if p.cfg.HistoryFetcher == nil {
@@ -330,6 +336,30 @@ func (p *WorkerPool) getDiscordSession() *discordgo.Session {
 // DiscordSession returns the currently assigned discordgo session.
 func (p *WorkerPool) DiscordSession() *discordgo.Session {
 	return p.getDiscordSession()
+}
+
+// WebhookDispatcher returns the assigned webhook dispatcher.
+func (p *WorkerPool) WebhookDispatcher() WebhookDispatcher {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.webhookDispatcher
+}
+
+// SetWebhookDispatcher updates the webhook dispatcher on the pool.
+func (p *WorkerPool) SetWebhookDispatcher(d WebhookDispatcher) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if d == nil {
+		d = NewDefaultWebhookDispatcher()
+	}
+	p.webhookDispatcher = d
+	p.cfg.WebhookDispatcher = d
 }
 
 func (p *WorkerPool) UpdateRuntimeConfig(model string) {

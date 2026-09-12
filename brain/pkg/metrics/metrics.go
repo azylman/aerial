@@ -344,6 +344,24 @@ var (
 		[]string{"source", "status"},
 	)
 
+	// Lifecycle Webhook Telemetry
+	WebhooksDispatchedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "aerial_brain_webhooks_dispatched_total",
+			Help: "Total lifecycle webhook requests dispatched by Aerial Brain.",
+		},
+		[]string{"hook", "status"},
+	)
+
+	WebhookDurationSeconds = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "aerial_brain_webhook_duration_seconds",
+			Help:    "Execution duration of lifecycle webhook HTTP requests in seconds.",
+			Buckets: []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0},
+		},
+		[]string{"hook"},
+	)
+
 	BuildInfo = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "aerial_brain_build_info",
@@ -399,6 +417,8 @@ func init() {
 		FallbackNotificationsTotal,
 		FallbackNotificationDurationSeconds,
 		ConfigReloadsTotal,
+		WebhooksDispatchedTotal,
+		WebhookDurationSeconds,
 		BuildInfo,
 	)
 
@@ -612,3 +632,16 @@ func RecordFallbackNotification(trigger, outcome string, duration time.Duration)
 	FallbackNotificationsTotal.WithLabelValues(trigger, outcome).Inc()
 	FallbackNotificationDurationSeconds.Observe(duration.Seconds())
 }
+
+// RecordWebhookDispatch records a lifecycle webhook dispatch outcome and duration.
+func RecordWebhookDispatch(hook, status string, duration time.Duration) {
+	if hook == "" {
+		hook = "unknown"
+	}
+	if status == "" {
+		status = "unknown"
+	}
+	WebhooksDispatchedTotal.WithLabelValues(hook, status).Inc()
+	WebhookDurationSeconds.WithLabelValues(hook).Observe(duration.Seconds())
+}
+

@@ -2436,3 +2436,362 @@ func TestConfig_PackageLevelAndUncoveredHelpers(t *testing.T) {
 	// 14. Reload with valid active config
 	_ = Reload(ActiveConfig())
 }
+
+func TestChannelHooksConfig(t *testing.T) {
+	t.Run("YAML_And_JSON_RoundTrip", func(t *testing.T) {
+		yamlData := `
+mode: "threads"
+hooks:
+  on_wake:
+    url: "https://agent-sidecar:8080/on-wake"
+    timeout_ms: 2500
+    on_timeout: "wake"
+  pre_turn:
+    url: "http://127.0.0.1:9090/pre-turn"
+    timeout_ms: 1500
+    on_timeout: "retry"
+  post_turn:
+    url: "http://127.0.0.1:9090/post-turn"
+    timeout_ms: 4000
+    on_timeout: "proceed"
+`
+		var policy ChannelPolicy
+		if err := yaml.Unmarshal([]byte(yamlData), &policy); err != nil {
+			t.Fatalf("Failed to unmarshal YAML into ChannelPolicy: %v", err)
+		}
+
+		if policy.Hooks.OnWake == nil || policy.Hooks.OnWake.URL != "https://agent-sidecar:8080/on-wake" {
+			t.Errorf("Unexpected OnWake: %+v", policy.Hooks.OnWake)
+		}
+		if policy.Hooks.OnWake.TimeoutMs != 2500 || policy.Hooks.OnWake.OnTimeoutAction != "wake" {
+			t.Errorf("Unexpected OnWake fields: %+v", policy.Hooks.OnWake)
+		}
+		if policy.Hooks.PreTurn == nil || policy.Hooks.PreTurn.URL != "http://127.0.0.1:9090/pre-turn" {
+			t.Errorf("Unexpected PreTurn: %+v", policy.Hooks.PreTurn)
+		}
+		if policy.Hooks.PreTurn.TimeoutMs != 1500 || policy.Hooks.PreTurn.OnTimeoutAction != "retry" {
+			t.Errorf("Unexpected PreTurn fields: %+v", policy.Hooks.PreTurn)
+		}
+		if policy.Hooks.PostTurn == nil || policy.Hooks.PostTurn.URL != "http://127.0.0.1:9090/post-turn" {
+			t.Errorf("Unexpected PostTurn: %+v", policy.Hooks.PostTurn)
+		}
+		if policy.Hooks.PostTurn.TimeoutMs != 4000 || policy.Hooks.PostTurn.OnTimeoutAction != "proceed" {
+			t.Errorf("Unexpected PostTurn fields: %+v", policy.Hooks.PostTurn)
+		}
+
+		// Re-marshal to YAML and verify round-trip
+		marshaledYAML, err := yaml.Marshal(policy)
+		if err != nil {
+			t.Fatalf("Failed to marshal ChannelPolicy to YAML: %v", err)
+		}
+		var policyFromYAML ChannelPolicy
+		if err := yaml.Unmarshal(marshaledYAML, &policyFromYAML); err != nil {
+			t.Fatalf("Failed to unmarshal round-tripped YAML: %v", err)
+		}
+		if policyFromYAML.Hooks.OnWake == nil || policyFromYAML.Hooks.OnWake.URL != policy.Hooks.OnWake.URL {
+			t.Errorf("YAML round-trip mismatch: %+v", policyFromYAML.Hooks)
+		}
+
+		// Re-marshal to JSON and verify round-trip
+		marshaledJSON, err := json.Marshal(policy)
+		if err != nil {
+			t.Fatalf("Failed to marshal ChannelPolicy to JSON: %v", err)
+		}
+		var policyFromJSON ChannelPolicy
+		if err := json.Unmarshal(marshaledJSON, &policyFromJSON); err != nil {
+			t.Fatalf("Failed to unmarshal round-tripped JSON: %v", err)
+		}
+		if policyFromJSON.Hooks.PreTurn == nil || policyFromJSON.Hooks.PreTurn.URL != policy.Hooks.PreTurn.URL {
+			t.Errorf("JSON round-trip mismatch: %+v", policyFromJSON.Hooks)
+		}
+	})
+
+	t.Run("GetHooks_Helper", func(t *testing.T) {
+		p := ChannelPolicy{
+			Mode: "channel",
+			Hooks: ChannelHooksConfig{
+				OnWake: &WebhookEndpoint{URL: "http://localhost:8080/on-wake"},
+			},
+		}
+		hooks := p.GetHooks()
+		if hooks.OnWake == nil || hooks.OnWake.URL != "http://localhost:8080/on-wake" {
+			t.Errorf("Expected GetHooks to return policy hooks, got %+v", hooks)
+		}
+	})
+
+	t.Run("GetTimeout_Defaults_And_Custom", func(t *testing.T) {
+		var nilEp *WebhookEndpoint
+		if d := nilEp.GetTimeout(); d != 3000*time.Millisecond {
+			t.Errorf("Expected 3000ms for nil endpoint, got %v", d)
+		}
+
+		epZero := &WebhookEndpoint{TimeoutMs: 0}
+		if d := epZero.GetTimeout(); d != 3000*time.Millisecond {
+			t.Errorf("Expected 3000ms for TimeoutMs=0, got %v", d)
+		}
+
+		epNeg := &WebhookEndpoint{TimeoutMs: -500}
+		if d := epNeg.GetTimeout(); d != 3000*time.Millisecond {
+			t.Errorf("Expected 3000ms for negative TimeoutMs, got %v", d)
+		}
+
+		epCustom := &WebhookEndpoint{TimeoutMs: 5000}
+		if d := epCustom.GetTimeout(); d != 5000*time.Millisecond {
+			t.Errorf("Expected 5000ms for TimeoutMs=5000, got %v", d)
+		}
+	})
+
+	t.Run("GetOnTimeout_Defaults_And_Normalization", func(t *testing.T) {
+		var nilEp *WebhookEndpoint
+		if a := nilEp.GetOnTimeout("default_act"); a != "default_act" {
+			t.Errorf("Expected default_act for nil endpoint, got %q", a)
+		}
+
+		epEmpty := &WebhookEndpoint{OnTimeoutAction: ""}
+		if a := epEmpty.GetOnTimeout("fallback"); a != "fallback" {
+			t.Errorf("Expected fallback for empty action, got %q", a)
+		}
+
+		epWhitespace := &WebhookEndpoint{OnTimeoutAction: "   \t  "}
+		if a := epWhitespace.GetOnTimeout("fallback"); a != "fallback" {
+			t.Errorf("Expected fallback for whitespace action, got %q", a)
+		}
+
+		epTrimLower := &WebhookEndpoint{OnTimeoutAction: "  RETRY  "}
+		if a := epTrimLower.GetOnTimeout("drop"); a != "retry" {
+			t.Errorf("Expected normalized 'retry', got %q", a)
+		}
+
+		epWake := &WebhookEndpoint{OnTimeoutAction: "WaKe"}
+		if a := epWake.GetOnTimeout("drop"); a != "wake" {
+			t.Errorf("Expected normalized 'wake', got %q", a)
+		}
+	})
+
+	t.Run("ResolveChannelPolicy_And_Cloning", func(t *testing.T) {
+		channels := map[string]ChannelPolicy{
+			"default": {
+				Mode: "threads",
+				Hooks: ChannelHooksConfig{
+					OnWake: &WebhookEndpoint{
+						URL:             "http://default-sidecar/wake",
+						TimeoutMs:       2000,
+						OnTimeoutAction: "classify",
+					},
+					PreTurn: &WebhookEndpoint{
+						URL:             "http://default-sidecar/pre",
+						TimeoutMs:       3000,
+						OnTimeoutAction: "drop",
+					},
+				},
+			},
+			"custom-channel": {
+				Mode: "channel",
+				Hooks: ChannelHooksConfig{
+					PreTurn: &WebhookEndpoint{
+						URL:             "http://custom-sidecar/pre",
+						TimeoutMs:       1000,
+						OnTimeoutAction: "retry",
+					},
+					PostTurn: &WebhookEndpoint{
+						URL:             "http://custom-sidecar/post",
+						TimeoutMs:       4000,
+						OnTimeoutAction: "proceed",
+					},
+				},
+			},
+		}
+
+		// 1. Resolve custom channel: should inherit OnWake from default, keep its own PreTurn and PostTurn
+		resolvedCustom := ResolveChannelPolicy(channels, "", "custom-channel")
+		if resolvedCustom.Hooks.OnWake == nil || resolvedCustom.Hooks.OnWake.URL != "http://default-sidecar/wake" {
+			t.Errorf("Expected inherited OnWake from default, got %+v", resolvedCustom.Hooks.OnWake)
+		}
+		if resolvedCustom.Hooks.PreTurn == nil || resolvedCustom.Hooks.PreTurn.URL != "http://custom-sidecar/pre" {
+			t.Errorf("Expected custom PreTurn, got %+v", resolvedCustom.Hooks.PreTurn)
+		}
+		if resolvedCustom.Hooks.PostTurn == nil || resolvedCustom.Hooks.PostTurn.URL != "http://custom-sidecar/post" {
+			t.Errorf("Expected custom PostTurn, got %+v", resolvedCustom.Hooks.PostTurn)
+		}
+
+		// Verify deep copy isolation: mutating resolvedCustom does not mutate source
+		resolvedCustom.Hooks.OnWake.URL = "http://mutated-wake"
+		if channels["default"].Hooks.OnWake.URL == "http://mutated-wake" {
+			t.Errorf("Pointer aliasing detected: default OnWake was mutated")
+		}
+
+		// 2. Resolve default channel directly
+		resolvedDef := ResolveChannelPolicy(channels, "", "default")
+		if resolvedDef.Hooks.OnWake == nil || resolvedDef.Hooks.OnWake.URL != "http://default-sidecar/wake" {
+			t.Errorf("Expected default OnWake, got %+v", resolvedDef.Hooks.OnWake)
+		}
+
+		// 3. cloneChannelPolicy deep copy verification
+		origPolicy := ChannelPolicy{
+			Mode: "channel",
+			Hooks: ChannelHooksConfig{
+				OnWake:   &WebhookEndpoint{URL: "http://orig/wake", TimeoutMs: 100},
+				PreTurn:  &WebhookEndpoint{URL: "http://orig/pre", TimeoutMs: 200},
+				PostTurn: &WebhookEndpoint{URL: "http://orig/post", TimeoutMs: 300},
+			},
+		}
+		clonedPolicy := cloneChannelPolicy(origPolicy)
+		clonedPolicy.Hooks.OnWake.URL = "http://cloned/wake"
+		clonedPolicy.Hooks.PreTurn.TimeoutMs = 999
+		clonedPolicy.Hooks.PostTurn.OnTimeoutAction = "mutated"
+
+		if origPolicy.Hooks.OnWake.URL != "http://orig/wake" {
+			t.Errorf("cloneChannelPolicy failed to deep clone OnWake")
+		}
+		if origPolicy.Hooks.PreTurn.TimeoutMs != 200 {
+			t.Errorf("cloneChannelPolicy failed to deep clone PreTurn")
+		}
+		if origPolicy.Hooks.PostTurn.OnTimeoutAction != "" {
+			t.Errorf("cloneChannelPolicy failed to deep clone PostTurn")
+		}
+	})
+
+	t.Run("Validation_Errors", func(t *testing.T) {
+		tests := []struct {
+			name        string
+			yamlContent string
+			wantErr     string
+		}{
+			{
+				name: "valid_full_hooks",
+				yamlContent: `
+model: "test-model"
+channels:
+  default:
+    mode: "threads"
+    hooks:
+      on_wake:
+        url: "http://127.0.0.1:8080/on-wake"
+        timeout_ms: 1000
+      pre_turn:
+        url: "https://example.com/api/pre"
+        timeout_ms: 2000
+      post_turn:
+        url: "http://localhost:9000/post"
+`,
+				wantErr: "",
+			},
+			{
+				name: "default_channel_empty_url",
+				yamlContent: `
+channels:
+  default:
+    mode: "threads"
+    hooks:
+      on_wake:
+        url: "   "
+`,
+				wantErr: "channel \"default\" on_wake webhook url is required",
+			},
+			{
+				name: "default_channel_invalid_url_scheme",
+				yamlContent: `
+channels:
+  default:
+    mode: "threads"
+    hooks:
+      pre_turn:
+        url: "ftp://example.com/hook"
+`,
+				wantErr: "channel \"default\" pre_turn webhook url must be a valid http or https URL",
+			},
+			{
+				name: "default_channel_malformed_url",
+				yamlContent: `
+channels:
+  default:
+    mode: "threads"
+    hooks:
+      post_turn:
+        url: "://invalid-url"
+`,
+				wantErr: "channel \"default\" post_turn webhook url must be a valid http or https URL",
+			},
+			{
+				name: "default_channel_negative_timeout",
+				yamlContent: `
+channels:
+  default:
+    mode: "threads"
+    hooks:
+      on_wake:
+        url: "http://localhost:8080/wake"
+        timeout_ms: -1
+`,
+				wantErr: "channel \"default\" on_wake webhook timeout_ms cannot be negative",
+			},
+			{
+				name: "custom_channel_empty_url",
+				yamlContent: `
+channels:
+  default:
+    mode: "threads"
+  custom:
+    mode: "channel"
+    hooks:
+      pre_turn:
+        url: ""
+`,
+				wantErr: "channel \"custom\" pre_turn webhook url is required",
+			},
+			{
+				name: "custom_channel_invalid_url_host",
+				yamlContent: `
+channels:
+  default:
+    mode: "threads"
+  custom:
+    mode: "channel"
+    hooks:
+      post_turn:
+        url: "http://"
+`,
+				wantErr: "channel \"custom\" post_turn webhook url must be a valid http or https URL",
+			},
+			{
+				name: "custom_channel_negative_timeout",
+				yamlContent: `
+channels:
+  default:
+    mode: "threads"
+  custom:
+    mode: "channel"
+    hooks:
+      on_wake:
+        url: "https://example.com/wake"
+        timeout_ms: -100
+`,
+				wantErr: "channel \"custom\" on_wake webhook timeout_ms cannot be negative",
+			},
+		}
+
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				tmpDir := t.TempDir()
+				cfgPath := filepath.Join(tmpDir, "config.yaml")
+				if err := os.WriteFile(cfgPath, []byte(tc.yamlContent), 0644); err != nil {
+					t.Fatalf("Failed to write temp config: %v", err)
+				}
+
+				_, err := LoadConfigFromLookup(func(string) string { return "" }, cfgPath)
+				if tc.wantErr == "" {
+					if err != nil {
+						t.Fatalf("Expected valid config load, got error: %v", err)
+					}
+				} else {
+					if err == nil {
+						t.Fatalf("Expected error containing %q, got nil", tc.wantErr)
+					}
+					if !strings.Contains(err.Error(), tc.wantErr) {
+						t.Errorf("Expected error to contain %q, got %q", tc.wantErr, err.Error())
+					}
+				}
+			})
+		}
+	})
+}
