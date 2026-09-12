@@ -16,6 +16,7 @@ import (
 
 	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
+	"github.com/azylman/aerial/brain/pkg/env"
 	"github.com/azylman/aerial/brain/pkg/metrics"
 	"github.com/bwmarrin/discordgo"
 )
@@ -1653,6 +1654,204 @@ func TestHandleTranscripts_Deduplication(t *testing.T) {
 		}
 	}
 }
+
+func TestDefaultGeminiHomeDir_Extended(t *testing.T) {
+	// 1. With HOME set
+	t.Setenv("HOME", "/custom/home")
+	if got := DefaultGeminiHomeDir(); got != "/custom/home" {
+		t.Errorf("expected /custom/home, got %s", got)
+	}
+
+	// 2. With HOME empty
+	t.Setenv("HOME", "")
+	gotEmpty := DefaultGeminiHomeDir()
+	if gotEmpty == "" {
+		t.Errorf("expected non-empty default gemini home dir")
+	}
+}
+
+func TestMetricsMiddleware_EmptyMethod(t *testing.T) {
+	handler := metricsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("", "/metrics", nil)
+	req.Method = ""
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Errorf("expected 200 OK, got %d", rr.Code)
+	}
+}
+
+func TestInitializeBrainEnvironment_Errors(t *testing.T) {
+	// 1. nil config
+	if err := InitializeBrainEnvironment(context.Background(), nil); err != nil {
+		t.Errorf("expected nil error for nil config, got %v", err)
+	}
+
+	// 2. DataDir exists but MkdirAll for brainDir fails because a regular file is in the way
+	tmpDir := t.TempDir()
+	conflictFile := filepath.Join(tmpDir, "brain")
+	_ = os.WriteFile(conflictFile, []byte("file-not-dir"), 0644)
+
+	cfg, _ := config.LoadConfigFromPaths()
+	cur := cfg.Current()
+	cur.DataDir = tmpDir
+	cur.GeminiHomeDir = tmpDir
+	cfg.Update(cur)
+
+	_ = InitializeBrainEnvironment(context.Background(), cfg)
+
+	// 3. Parent of cliBrainDir is a file
+	tmpDir2 := t.TempDir()
+	cliParentConflict := filepath.Join(tmpDir2, ".gemini", "antigravity-cli")
+	_ = os.MkdirAll(filepath.Dir(cliParentConflict), 0755)
+	_ = os.WriteFile(cliParentConflict, []byte("file-not-dir"), 0644)
+
+	cur2 := cfg.Current()
+	cur2.DataDir = tmpDir2
+	cur2.GeminiHomeDir = tmpDir2
+	cfg.Update(cur2)
+	_ = InitializeBrainEnvironment(context.Background(), cfg)
+}
+
+func TestRunBrainApp_EarlyReturns(t *testing.T) {
+	// 1. nil config
+	if err := RunBrainApp(context.Background(), nil); err == nil {
+		t.Errorf("expected error for nil config")
+	}
+
+	// 2. Cancelled context
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	cfg, _ := config.LoadConfigFromPaths()
+	if err := RunBrainApp(ctx, cfg); err != nil {
+		t.Errorf("expected nil for cancelled context, got %v", err)
+	}
+
+	// 3. Missing DatabaseURL with empty GeminiHomeDir and DataDir
+	ctxLive := context.Background()
+	cfg2, _ := config.LoadConfigFromPaths()
+	cur2 := cfg2.Current()
+	cur2.GeminiHomeDir = ""
+	cur2.DataDir = ""
+	cur2.DatabaseURL = ""
+	cfg2.Update(cur2)
+	errMissingDB := RunBrainApp(ctxLive, cfg2)
+	if errMissingDB == nil || !strings.Contains(errMissingDB.Error(), "database URL or path is required") {
+		t.Errorf("expected database URL error, got %v", errMissingDB)
+	}
+
+	// 4. Invalid DatabaseURL
+	cur2.DatabaseURL = "invalid-protocol://host:port/dbname"
+	cfg2.Update(cur2)
+	errBadDB := RunBrainApp(ctxLive, cfg2)
+	if errBadDB == nil || !strings.Contains(errBadDB.Error(), "failed to initialize database") {
+		t.Errorf("expected db init error, got %v", errBadDB)
+	}
+}
+
+func TestCreateReloadConfigFunc_ProvisionerError(t *testing.T) {
+	cfg, _ := config.LoadConfigFromPaths()
+	cur := cfg.Current()
+	cur.GeminiHomeDir = "/dev/null/nonexistent"
+	cfg.Update(cur)
+
+	prov := env.NewFromConfig(cfg)
+	reloadFn := CreateReloadConfigFunc(cfg, WithProvisioner(prov))
+	reloadFn("test-provisioner-error")
+}
+
+func TestHandleSessions_UnreadableTranscript(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer database.Close()
+
+	tmpDir := t.TempDir()
+	convDir := filepath.Join(tmpDir, "conv-no-transcript", ".system_generated", "logs")
+	_ = os.MkdirAll(convDir, 0755)
+
+	handler := handleTranscripts(database, tmpDir)
+	req := httptest.NewRequest(http.MethodGet, "/transcripts", nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Errorf("expected 200 OK, got %d", rr.Code)
+	}
+}
+
+func TestHandleSchedules_CacheDoubleCheck(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer database.Close()
+
+	handler := handleSchedules(database)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 30; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			req := httptest.NewRequest(http.MethodGet, "/schedules", nil)
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+		}()
+	}
+	wg.Wait()
+}
+
+func TestHandleTasks_CacheDoubleCheck(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer database.Close()
+
+	handler := handleTasks(database)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 30; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			req := httptest.NewRequest(http.MethodGet, "/tasks", nil)
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+		}()
+	}
+	wg.Wait()
+}
+
+func TestRunBrainApp_FullLifecycle(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "brain.db")
+	cfg, err := config.LoadConfigFromPaths()
+	if err != nil {
+		t.Fatalf("LoadConfigFromPaths failed: %v", err)
+	}
+	cur := cfg.Current()
+	cur.DatabaseURL = dbPath
+	cur.DataDir = tmpDir
+	cur.GeminiHomeDir = tmpDir
+	cur.DiscordToken = ""
+	cur.Port = "0"
+	cfg.Update(cur)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(300*time.Millisecond, cancel)
+
+	err = RunBrainApp(ctx, cfg)
+	if err != nil {
+		t.Fatalf("RunBrainApp failed: %v", err)
+	}
+}
+
+
 
 
 
