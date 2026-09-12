@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -98,24 +99,23 @@ func TestHasComposeChanges(t *testing.T) {
 	tempDir := t.TempDir()
 
 	// Initialize git repo
-	cmdInit := exec.Command("git", "init", "-b", "main", tempDir)
+	cmdInit := execGit("init", "-b", "main", tempDir)
 	if out, err := cmdInit.CombinedOutput(); err != nil {
 		t.Fatalf("git init failed: %s (%v)", out, err)
 	}
 
-	_ = exec.Command("git", "-C", tempDir, "config", "user.name", "Test").Run()
-	_ = exec.Command("git", "-C", tempDir, "config", "user.email", "test@example.com").Run()
+	_ = execGit("-C", tempDir, "config", "user.name", "Test").Run()
+	_ = execGit("-C", tempDir, "config", "user.email", "test@example.com").Run()
 
 	// Initial commit with non-compose file
 	readmePath := filepath.Join(tempDir, "README.md")
 	if err := os.WriteFile(readmePath, []byte("# Test"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	_ = exec.Command("git", "-C", tempDir, "add", "-A").Run()
-	_ = exec.Command("git", "-C", tempDir, "commit", "-m", "initial").Run()
+	_ = execGit("-C", tempDir, "add", "-A").Run()
+	_ = execGit("-C", tempDir, "commit", "-m", "initial").Run()
 
-	c1Out, _ := exec.Command("git", "-C", tempDir, "rev-parse", "HEAD").Output()
-	c1 := string(c1Out)
+	c1 := runGitOutput(t, tempDir, "rev-parse", "HEAD")
 
 	daemon := &SyncDaemon{}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -129,10 +129,9 @@ func TestHasComposeChanges(t *testing.T) {
 
 	// 2. Commit modifying markdown -> no compose changes
 	_ = os.WriteFile(readmePath, []byte("# Updated README"), 0644)
-	_ = exec.Command("git", "-C", tempDir, "add", "-A").Run()
-	_ = exec.Command("git", "-C", tempDir, "commit", "-m", "update readme").Run()
-	c2Out, _ := exec.Command("git", "-C", tempDir, "rev-parse", "HEAD").Output()
-	c2 := string(c2Out)
+	_ = execGit("-C", tempDir, "add", "-A").Run()
+	_ = execGit("-C", tempDir, "commit", "-m", "update readme").Run()
+	c2 := runGitOutput(t, tempDir, "rev-parse", "HEAD")
 
 	changed, err = daemon.HasComposeChanges(ctx, tempDir, c1, c2)
 	if err != nil || changed {
@@ -144,10 +143,9 @@ func TestHasComposeChanges(t *testing.T) {
 	if err := os.WriteFile(composePath, []byte("services: {}"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	_ = exec.Command("git", "-C", tempDir, "add", "-A").Run()
-	_ = exec.Command("git", "-C", tempDir, "commit", "-m", "add compose").Run()
-	c3Out, _ := exec.Command("git", "-C", tempDir, "rev-parse", "HEAD").Output()
-	c3 := string(c3Out)
+	_ = execGit("-C", tempDir, "add", "-A").Run()
+	_ = execGit("-C", tempDir, "commit", "-m", "add compose").Run()
+	c3 := runGitOutput(t, tempDir, "rev-parse", "HEAD")
 
 	changed, err = daemon.HasComposeChanges(ctx, tempDir, c2, c3)
 	if err != nil || !changed {
@@ -159,10 +157,9 @@ func TestHasComposeChanges(t *testing.T) {
 	if err := os.WriteFile(envPath, []byte("FOO=BAR"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	_ = exec.Command("git", "-C", tempDir, "add", "-A").Run()
-	_ = exec.Command("git", "-C", tempDir, "commit", "-m", "add env").Run()
-	c4Out, _ := exec.Command("git", "-C", tempDir, "rev-parse", "HEAD").Output()
-	c4 := string(c4Out)
+	_ = execGit("-C", tempDir, "add", "-A").Run()
+	_ = execGit("-C", tempDir, "commit", "-m", "add env").Run()
+	c4 := runGitOutput(t, tempDir, "rev-parse", "HEAD")
 
 	changed, err = daemon.HasComposeChanges(ctx, tempDir, c3, c4)
 	if err != nil || !changed {
@@ -188,20 +185,20 @@ func TestGetStatus(t *testing.T) {
 	tempDir := t.TempDir()
 
 	// Initialize git repo
-	cmdInit := exec.Command("git", "init", "-b", "main", tempDir)
+	cmdInit := execGit("init", "-b", "main", tempDir)
 	if out, err := cmdInit.CombinedOutput(); err != nil {
 		t.Fatalf("git init failed: %s (%v)", out, err)
 	}
 
-	_ = exec.Command("git", "-C", tempDir, "config", "user.name", "Test").Run()
-	_ = exec.Command("git", "-C", tempDir, "config", "user.email", "test@example.com").Run()
+	_ = execGit("-C", tempDir, "config", "user.name", "Test").Run()
+	_ = execGit("-C", tempDir, "config", "user.email", "test@example.com").Run()
 
 	readmePath := filepath.Join(tempDir, "README.md")
 	if err := os.WriteFile(readmePath, []byte("# Initial"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	_ = exec.Command("git", "-C", tempDir, "add", "-A").Run()
-	_ = exec.Command("git", "-C", tempDir, "commit", "-m", "initial commit").Run()
+	_ = execGit("-C", tempDir, "add", "-A").Run()
+	_ = execGit("-C", tempDir, "commit", "-m", "initial commit").Run()
 
 	daemon := &SyncDaemon{
 		repos: []string{tempDir},
@@ -419,15 +416,15 @@ func TestGetRepoCommitAndStatus(t *testing.T) {
 	tempDir := t.TempDir()
 
 	// Initialize git repo and make a commit
-	cmdInit := exec.Command("git", "init", "-b", "main", tempDir)
+	cmdInit := execGit("init", "-b", "main", tempDir)
 	_ = cmdInit.Run()
-	_ = exec.Command("git", "-C", tempDir, "config", "user.name", "Test").Run()
-	_ = exec.Command("git", "-C", tempDir, "config", "user.email", "test@example.com").Run()
+	_ = execGit("-C", tempDir, "config", "user.name", "Test").Run()
+	_ = execGit("-C", tempDir, "config", "user.email", "test@example.com").Run()
 
 	testFile := filepath.Join(tempDir, "README.md")
 	_ = os.WriteFile(testFile, []byte("# Test Repo\n"), 0644)
-	_ = exec.Command("git", "-C", tempDir, "add", "-A").Run()
-	_ = exec.Command("git", "-C", tempDir, "commit", "-m", "Initial commit").Run()
+	_ = execGit("-C", tempDir, "add", "-A").Run()
+	_ = execGit("-C", tempDir, "commit", "-m", "Initial commit").Run()
 
 	ctx := context.Background()
 	sha, ts, err := getRepoCommit(ctx, tempDir, "HEAD", "")
@@ -722,21 +719,21 @@ func TestEnsureRepoAndSync(t *testing.T) {
 	localClone := filepath.Join(tempBase, "local")
 
 	// 1. Initialize bare remote repository
-	cmdBare := exec.Command("git", "init", "--bare", "-b", "main", bareRemote)
+	cmdBare := execGit("init", "--bare", "-b", "main", bareRemote)
 	if out, err := cmdBare.CombinedOutput(); err != nil {
 		t.Fatalf("failed to init bare remote: %s (%v)", out, err)
 	}
 
 	// 2. Initialize temporary seed repo and push to bare remote
 	seedRepo := filepath.Join(tempBase, "seed")
-	_ = exec.Command("git", "init", "-b", "main", seedRepo).Run()
-	_ = exec.Command("git", "-C", seedRepo, "config", "user.name", "Seed").Run()
-	_ = exec.Command("git", "-C", seedRepo, "config", "user.email", "seed@example.com").Run()
+	_ = execGit("init", "-b", "main", seedRepo).Run()
+	_ = execGit("-C", seedRepo, "config", "user.name", "Seed").Run()
+	_ = execGit("-C", seedRepo, "config", "user.email", "seed@example.com").Run()
 	_ = os.WriteFile(filepath.Join(seedRepo, "file.txt"), []byte("hello v1\n"), 0644)
-	_ = exec.Command("git", "-C", seedRepo, "add", "-A").Run()
-	_ = exec.Command("git", "-C", seedRepo, "commit", "-m", "initial").Run()
-	_ = exec.Command("git", "-C", seedRepo, "remote", "add", "origin", bareRemote).Run()
-	_ = exec.Command("git", "-C", seedRepo, "push", "-u", "origin", "main").Run()
+	_ = execGit("-C", seedRepo, "add", "-A").Run()
+	_ = execGit("-C", seedRepo, "commit", "-m", "initial").Run()
+	_ = execGit("-C", seedRepo, "remote", "add", "origin", bareRemote).Run()
+	_ = execGit("-C", seedRepo, "push", "-u", "origin", "main").Run()
 
 	// 3. EnsureRepo test on empty directory (clones from bareRemote)
 	daemon := &SyncDaemon{
@@ -777,9 +774,9 @@ func TestEnsureRepoAndSync(t *testing.T) {
 
 	// 5. Commit change to seedRepo and push to bareRemote
 	_ = os.WriteFile(filepath.Join(seedRepo, "docker-compose.yml"), []byte("services: { app: {} }\n"), 0644)
-	_ = exec.Command("git", "-C", seedRepo, "add", "-A").Run()
-	_ = exec.Command("git", "-C", seedRepo, "commit", "-m", "update compose").Run()
-	_ = exec.Command("git", "-C", seedRepo, "push", "origin", "main").Run()
+	_ = execGit("-C", seedRepo, "add", "-A").Run()
+	_ = execGit("-C", seedRepo, "commit", "-m", "update compose").Run()
+	_ = execGit("-C", seedRepo, "push", "origin", "main").Run()
 
 	// 6. SyncRepo test when changes exist
 	res2 := daemon.SyncRepo(ctx, localClone)
@@ -807,13 +804,13 @@ func TestEnsureRepoAndSync(t *testing.T) {
 
 	// 8. Test pull divergence recovery (simulate non-fast-forward conflict)
 	_ = os.WriteFile(filepath.Join(localClone, "local_diverge.txt"), []byte("diverged"), 0644)
-	_ = exec.Command("git", "-C", localClone, "add", "-A").Run()
-	_ = exec.Command("git", "-C", localClone, "commit", "-m", "divergent local commit").Run()
+	_ = execGit("-C", localClone, "add", "-A").Run()
+	_ = execGit("-C", localClone, "commit", "-m", "divergent local commit").Run()
 
 	_ = os.WriteFile(filepath.Join(seedRepo, "remote_commit.txt"), []byte("remote update"), 0644)
-	_ = exec.Command("git", "-C", seedRepo, "add", "-A").Run()
-	_ = exec.Command("git", "-C", seedRepo, "commit", "-m", "remote commit").Run()
-	_ = exec.Command("git", "-C", seedRepo, "push", "origin", "main").Run()
+	_ = execGit("-C", seedRepo, "add", "-A").Run()
+	_ = execGit("-C", seedRepo, "commit", "-m", "remote commit").Run()
+	_ = execGit("-C", seedRepo, "push", "origin", "main").Run()
 
 	resRecover := daemon.SyncRepo(ctx, localClone)
 	if resRecover.Error != "" {
@@ -856,13 +853,13 @@ func TestSyncRepoErrorBranches(t *testing.T) {
 
 	// 2. Repo where pull fails and fetch also fails
 	brokenOriginRepo := filepath.Join(tempBase, "brokenorigin")
-	_ = exec.Command("git", "init", "-b", "main", brokenOriginRepo).Run()
-	_ = exec.Command("git", "-C", brokenOriginRepo, "config", "user.name", "Tester").Run()
-	_ = exec.Command("git", "-C", brokenOriginRepo, "config", "user.email", "tester@example.com").Run()
+	_ = execGit("init", "-b", "main", brokenOriginRepo).Run()
+	_ = execGit("-C", brokenOriginRepo, "config", "user.name", "Tester").Run()
+	_ = execGit("-C", brokenOriginRepo, "config", "user.email", "tester@example.com").Run()
 	_ = os.WriteFile(filepath.Join(brokenOriginRepo, "test.txt"), []byte("data"), 0644)
-	_ = exec.Command("git", "-C", brokenOriginRepo, "add", "-A").Run()
-	_ = exec.Command("git", "-C", brokenOriginRepo, "commit", "-m", "init").Run()
-	_ = exec.Command("git", "-C", brokenOriginRepo, "remote", "add", "origin", "file:///nonexistent/path/git").Run()
+	_ = execGit("-C", brokenOriginRepo, "add", "-A").Run()
+	_ = execGit("-C", brokenOriginRepo, "commit", "-m", "init").Run()
+	_ = execGit("-C", brokenOriginRepo, "remote", "add", "origin", "file:///nonexistent/path/git").Run()
 
 	resBroken := daemon.SyncRepo(ctx, brokenOriginRepo)
 	if !strings.Contains(resBroken.Error, "fetch failed") {
@@ -918,12 +915,12 @@ func TestGetRepoCommitAndStatusEdgeCases(t *testing.T) {
 	}
 
 	// 2. Initialize repo with commit
-	_ = exec.Command("git", "init", "-b", "main", tempDir).Run()
-	_ = exec.Command("git", "-C", tempDir, "config", "user.name", "Tester").Run()
-	_ = exec.Command("git", "-C", tempDir, "config", "user.email", "tester@example.com").Run()
+	_ = execGit("init", "-b", "main", tempDir).Run()
+	_ = execGit("-C", tempDir, "config", "user.name", "Tester").Run()
+	_ = execGit("-C", tempDir, "config", "user.email", "tester@example.com").Run()
 	_ = os.WriteFile(filepath.Join(tempDir, "file.txt"), []byte("data"), 0644)
-	_ = exec.Command("git", "-C", tempDir, "add", "-A").Run()
-	_ = exec.Command("git", "-C", tempDir, "commit", "-m", "msg").Run()
+	_ = execGit("-C", tempDir, "add", "-A").Run()
+	_ = execGit("-C", tempDir, "commit", "-m", "msg").Run()
 
 	// Valid commit with PAT
 	sha, ts, err := getRepoCommit(ctx, tempDir, "HEAD", "my_pat")
@@ -1193,14 +1190,14 @@ func TestAutomatedRollback_OnValidationFailure(t *testing.T) {
 	tempDir := t.TempDir()
 
 	// Initialize git repo with 2 commits
-	_ = exec.Command("git", "init", "-b", "main", tempDir).Run()
-	_ = exec.Command("git", "-C", tempDir, "config", "user.name", "Test").Run()
-	_ = exec.Command("git", "-C", tempDir, "config", "user.email", "test@example.com").Run()
+	_ = execGit("init", "-b", "main", tempDir).Run()
+	_ = execGit("-C", tempDir, "config", "user.name", "Test").Run()
+	_ = execGit("-C", tempDir, "config", "user.email", "test@example.com").Run()
 
 	composePath := filepath.Join(tempDir, "docker-compose.yml")
 	_ = os.WriteFile(composePath, []byte("services:\n  brain:\n    image: aerial-brain:v1\n"), 0644)
-	_ = exec.Command("git", "-C", tempDir, "add", "-A").Run()
-	_ = exec.Command("git", "-C", tempDir, "commit", "-m", "Valid compose v1").Run()
+	_ = execGit("-C", tempDir, "add", "-A").Run()
+	_ = execGit("-C", tempDir, "commit", "-m", "Valid compose v1").Run()
 
 	ctx := context.Background()
 	head1, _, err := getRepoCommit(ctx, tempDir, "HEAD", "")
@@ -1209,8 +1206,8 @@ func TestAutomatedRollback_OnValidationFailure(t *testing.T) {
 	}
 
 	_ = os.WriteFile(composePath, []byte("services:\n  brain:\n    image: aerial-brain:v2\n    bad: [invalid\n"), 0644)
-	_ = exec.Command("git", "-C", tempDir, "add", "-A").Run()
-	_ = exec.Command("git", "-C", tempDir, "commit", "-m", "Invalid compose v2").Run()
+	_ = execGit("-C", tempDir, "add", "-A").Run()
+	_ = execGit("-C", tempDir, "commit", "-m", "Invalid compose v2").Run()
 
 	head2, _, err := getRepoCommit(ctx, tempDir, "HEAD", "")
 	if err != nil {
@@ -1286,14 +1283,14 @@ func TestAutomatedRollback_OnValidationFailure(t *testing.T) {
 func TestAutomatedRollback_OnComposeUpFailure(t *testing.T) {
 	tempDir := t.TempDir()
 
-	_ = exec.Command("git", "init", "-b", "main", tempDir).Run()
-	_ = exec.Command("git", "-C", tempDir, "config", "user.name", "Test").Run()
-	_ = exec.Command("git", "-C", tempDir, "config", "user.email", "test@example.com").Run()
+	_ = execGit("init", "-b", "main", tempDir).Run()
+	_ = execGit("-C", tempDir, "config", "user.name", "Test").Run()
+	_ = execGit("-C", tempDir, "config", "user.email", "test@example.com").Run()
 
 	composePath := filepath.Join(tempDir, "docker-compose.yml")
 	_ = os.WriteFile(composePath, []byte("services:\n  brain:\n    image: aerial-brain:v1\n"), 0644)
-	_ = exec.Command("git", "-C", tempDir, "add", "-A").Run()
-	_ = exec.Command("git", "-C", tempDir, "commit", "-m", "Valid compose v1").Run()
+	_ = execGit("-C", tempDir, "add", "-A").Run()
+	_ = execGit("-C", tempDir, "commit", "-m", "Valid compose v1").Run()
 
 	ctx := context.Background()
 	head1, _, err := getRepoCommit(ctx, tempDir, "HEAD", "")
@@ -1302,8 +1299,8 @@ func TestAutomatedRollback_OnComposeUpFailure(t *testing.T) {
 	}
 
 	_ = os.WriteFile(composePath, []byte("services:\n  brain:\n    image: aerial-brain:v2\n"), 0644)
-	_ = exec.Command("git", "-C", tempDir, "add", "-A").Run()
-	_ = exec.Command("git", "-C", tempDir, "commit", "-m", "Failing compose v2").Run()
+	_ = execGit("-C", tempDir, "add", "-A").Run()
+	_ = execGit("-C", tempDir, "commit", "-m", "Failing compose v2").Run()
 
 	head2, _, err := getRepoCommit(ctx, tempDir, "HEAD", "")
 	if err != nil {
@@ -1372,19 +1369,19 @@ func TestQuarantine_PreventsPullLoop(t *testing.T) {
 	localClone := filepath.Join(tempBase, "local")
 
 	// 1. Bare remote
-	if out, err := exec.Command("git", "init", "--bare", "-b", "main", bareRemote).CombinedOutput(); err != nil {
+	if out, err := execGit("init", "--bare", "-b", "main", bareRemote).CombinedOutput(); err != nil {
 		t.Fatalf("failed to init bare remote: %s (%v)", out, err)
 	}
 
 	// 2. Seed repo
-	_ = exec.Command("git", "init", "-b", "main", seedRepo).Run()
-	_ = exec.Command("git", "-C", seedRepo, "config", "user.name", "Seed").Run()
-	_ = exec.Command("git", "-C", seedRepo, "config", "user.email", "seed@example.com").Run()
+	_ = execGit("init", "-b", "main", seedRepo).Run()
+	_ = execGit("-C", seedRepo, "config", "user.name", "Seed").Run()
+	_ = execGit("-C", seedRepo, "config", "user.email", "seed@example.com").Run()
 	_ = os.WriteFile(filepath.Join(seedRepo, "file.txt"), []byte("v1\n"), 0644)
-	_ = exec.Command("git", "-C", seedRepo, "add", "-A").Run()
-	_ = exec.Command("git", "-C", seedRepo, "commit", "-m", "commit 1").Run()
-	_ = exec.Command("git", "-C", seedRepo, "remote", "add", "origin", bareRemote).Run()
-	_ = exec.Command("git", "-C", seedRepo, "push", "-u", "origin", "main").Run()
+	_ = execGit("-C", seedRepo, "add", "-A").Run()
+	_ = execGit("-C", seedRepo, "commit", "-m", "commit 1").Run()
+	_ = execGit("-C", seedRepo, "remote", "add", "origin", bareRemote).Run()
+	_ = execGit("-C", seedRepo, "push", "-u", "origin", "main").Run()
 
 	// 3. Setup local clone
 	daemon := NewDaemon(DaemonConfig{
@@ -1403,9 +1400,9 @@ func TestQuarantine_PreventsPullLoop(t *testing.T) {
 
 	// 4. Commit 2 to seed and push to bare remote
 	_ = os.WriteFile(filepath.Join(seedRepo, "file.txt"), []byte("v2 bad commit\n"), 0644)
-	_ = exec.Command("git", "-C", seedRepo, "add", "-A").Run()
-	_ = exec.Command("git", "-C", seedRepo, "commit", "-m", "commit 2 bad").Run()
-	_ = exec.Command("git", "-C", seedRepo, "push", "origin", "main").Run()
+	_ = execGit("-C", seedRepo, "add", "-A").Run()
+	_ = execGit("-C", seedRepo, "commit", "-m", "commit 2 bad").Run()
+	_ = execGit("-C", seedRepo, "push", "origin", "main").Run()
 
 	head2, _, err := getRepoCommit(ctx, seedRepo, "HEAD", "")
 	if err != nil {
@@ -1429,9 +1426,9 @@ func TestQuarantine_PreventsPullLoop(t *testing.T) {
 
 	// 7. Seed advances to commit 3 (clean fix)
 	_ = os.WriteFile(filepath.Join(seedRepo, "file.txt"), []byte("v3 good fix\n"), 0644)
-	_ = exec.Command("git", "-C", seedRepo, "add", "-A").Run()
-	_ = exec.Command("git", "-C", seedRepo, "commit", "-m", "commit 3 good").Run()
-	_ = exec.Command("git", "-C", seedRepo, "push", "origin", "main").Run()
+	_ = execGit("-C", seedRepo, "add", "-A").Run()
+	_ = execGit("-C", seedRepo, "commit", "-m", "commit 3 good").Run()
+	_ = execGit("-C", seedRepo, "push", "origin", "main").Run()
 
 	head3, _, _ := getRepoCommit(ctx, seedRepo, "HEAD", "")
 
@@ -1748,10 +1745,28 @@ func TestDefaultComposeExecutor(t *testing.T) {
 		t.Fatalf("failed to create bin dir: %v", err)
 	}
 
-	fakeDocker := filepath.Join(binDir, "docker")
-	scriptContent := "#!/bin/sh\ncase \"$*\" in\n  *\"version\"*) echo \"Docker Compose mock v2.0\"; exit 0;;\n  *\"sleep\"*) trap 'exit 0' TERM INT; while :; do sleep 0.05; done;;\n  *) echo \"unknown cmd\" >&2; exit 1;;\nesac\n"
-	if err := os.WriteFile(fakeDocker, []byte(scriptContent), 0755); err != nil {
-		t.Fatalf("failed to write fake docker: %v", err)
+	if runtime.GOOS == "windows" {
+		fakeDocker := filepath.Join(binDir, "docker.cmd")
+		scriptContent := "@echo off\r\n" +
+			"set \"arg=%*\"\r\n" +
+			"echo %arg% | findstr /i \"version\" >nul && (\r\n" +
+			"  echo Docker Compose mock v2.0\r\n" +
+			"  exit /b 0\r\n" +
+			")\r\n" +
+			"echo %arg% | findstr /i \"sleep\" >nul && goto do_sleep\r\n" +
+			"echo unknown cmd >&2\r\n" +
+			"exit /b 1\r\n" +
+			":do_sleep\r\n" +
+			"goto do_sleep\r\n"
+		if err := os.WriteFile(fakeDocker, []byte(scriptContent), 0755); err != nil {
+			t.Fatalf("failed to write fake docker: %v", err)
+		}
+	} else {
+		fakeDocker := filepath.Join(binDir, "docker")
+		scriptContent := "#!/bin/sh\ncase \"$*\" in\n  *\"version\"*) echo \"Docker Compose mock v2.0\"; exit 0;;\n  *\"sleep\"*) trap 'exit 0' TERM INT; while :; do sleep 0.05; done;;\n  *) echo \"unknown cmd\" >&2; exit 1;;\nesac\n"
+		if err := os.WriteFile(fakeDocker, []byte(scriptContent), 0755); err != nil {
+			t.Fatalf("failed to write fake docker: %v", err)
+		}
 	}
 
 	origPath := os.Getenv("PATH")
@@ -2078,8 +2093,7 @@ func TestGetStatus_Extended(t *testing.T) {
 	}
 
 	// 2. Quarantine match on disk commit SHA
-	cmdOut, _ := exec.Command("git", "-C", tempDir, "rev-parse", "HEAD").Output()
-	diskSha := strings.TrimSpace(string(cmdOut))
+	diskSha := runGitOutput(t, tempDir, "rev-parse", "HEAD")
 	d.clearQuarantineForRepo(tempDir, "")
 	d.quarantineCommit(tempDir, diskSha, "prev123", "validation", "disk quarantined")
 	st2 := d.GetStatus(context.Background())
@@ -2107,7 +2121,7 @@ func TestGetStatus_LaggingAndRemoteQuarantine(t *testing.T) {
 
 	// Make origin have commit 2 with a future timestamp
 	_ = os.WriteFile(filepath.Join(originDir, "file.txt"), []byte("v2"), 0644)
-	cmdCommit2 := exec.Command("git", "-C", originDir, "commit", "-am", "commit 2")
+	cmdCommit2 := execGit("-C", originDir, "commit", "-am", "commit 2")
 	cmdCommit2.Env = append(os.Environ(), "GIT_COMMITTER_DATE=2035-01-01T12:00:00Z", "GIT_AUTHOR_DATE=2035-01-01T12:00:00Z")
 	if out, err := cmdCommit2.CombinedOutput(); err != nil {
 		t.Fatalf("commit 2 failed: %s (%v)", out, err)
@@ -2116,8 +2130,7 @@ func TestGetStatus_LaggingAndRemoteQuarantine(t *testing.T) {
 	// Fetch origin in local so origin/main is updated with commit 2 while HEAD remains at commit 1
 	runGit(t, localDir, "fetch", "origin", "main")
 
-	cmdOut, _ := exec.Command("git", "-C", originDir, "rev-parse", "HEAD").Output()
-	remoteSha := strings.TrimSpace(string(cmdOut))
+	remoteSha := runGitOutput(t, originDir, "rev-parse", "HEAD")
 
 	d := NewDaemon(DaemonConfig{
 		Repos: []string{localDir},
@@ -2388,13 +2401,28 @@ func ioNopCloser(r io.Reader) io.ReadCloser {
 	return io.NopCloser(r)
 }
 
+func execGit(args ...string) *exec.Cmd {
+	gitBin := ResolveGitBin(os.Getenv)
+	return exec.Command(gitBin, args...)
+}
+
 func runGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
-	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd := execGit(append([]string{"-C", dir}, args...)...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %v failed in %s: %s (%v)", args, dir, out, err)
 	}
+}
+
+func runGitOutput(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := execGit(append([]string{"-C", dir}, args...)...)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git %v failed in %s: %s (%v)", args, dir, out, err)
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func TestCleanConflictContainers_AllBranches(t *testing.T) {
@@ -2488,5 +2516,31 @@ func TestNotifyBrainReload_Success(t *testing.T) {
 	dEmpty.notifyBrainReload()
 }
 
+func TestDefaultGitExecutor_Coverage(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, _, _ = defaultGitExecutor(ctx, "", "status")
+}
 
+func TestGetGitExecutor_Branches(t *testing.T) {
+	var nilDaemon *SyncDaemon
+	if nilDaemon.getGitExecutor() == nil {
+		t.Errorf("expected non-nil default git executor for nil daemon")
+	}
 
+	d := &SyncDaemon{}
+	if d.getGitExecutor() == nil {
+		t.Errorf("expected non-nil executor when gitExecutor is nil")
+	}
+
+	customCalled := false
+	d.gitExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+		customCalled = true
+		return []byte("custom-git"), nil, nil
+	}
+	execFn := d.getGitExecutor()
+	_, _, _ = execFn(context.Background(), "")
+	if !customCalled {
+		t.Errorf("expected custom git executor to be called")
+	}
+}
