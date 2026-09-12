@@ -75,6 +75,7 @@ type MessageStore interface {
 // SessionStore handles thread turn counts and session rotations.
 type SessionStore interface {
 	GetSessionID(ctx context.Context, threadID string) (string, error)
+	GetPreviousSessionID(ctx context.Context, threadID string) (string, error)
 	SaveSessionID(ctx context.Context, threadID, sessionID string) error
 	DeleteSessionID(ctx context.Context, threadID string) error
 	IncrementSessionTurnCount(ctx context.Context, sessionKey string) (int, error)

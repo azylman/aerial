@@ -28,6 +28,8 @@ var (
 	reChannelInstructionsTag = regexp.MustCompile(`(?i)<\s*/?\s*channel_instructions\s*>`)
 	reRawThreadTranscriptTag = regexp.MustCompile(`(?i)<\s*/?\s*raw_thread_transcript\s*>`)
 	reThreadSummaryTag       = regexp.MustCompile(`(?i)<\s*/?\s*thread_summary\s*>`)
+	rePreviousSessionTag     = regexp.MustCompile(`(?i)<\s*/?\s*previous_session\s*>`)
+	reValidSessionID         = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,128}$`)
 )
 
 // HistoryMessage represents a normalized message retrieved for channel context.
@@ -50,6 +52,7 @@ func SanitizeHistoryContent(s string) string {
 	s = reChannelInstructionsTag.ReplaceAllString(s, "<\\/CHANNEL_INSTRUCTIONS>")
 	s = reRawThreadTranscriptTag.ReplaceAllString(s, "<\\/RAW_THREAD_TRANSCRIPT>")
 	s = reThreadSummaryTag.ReplaceAllString(s, "<\\/THREAD_SUMMARY>")
+	s = rePreviousSessionTag.ReplaceAllString(s, "<\\/PREVIOUS_SESSION>")
 	return s
 }
 
@@ -367,4 +370,24 @@ func SummarizeThreadHistory(ctx context.Context, llm LLMFunc, model, threadID st
 	}
 
 	return v.(string), nil
+}
+
+// FormatPreviousSession formats the previous session ID into a secure <PREVIOUS_SESSION> block.
+// Returns an empty string if sessionID is empty, whitespace-only, or contains invalid characters.
+func FormatPreviousSession(sessionID string) string {
+	cleanID := strings.TrimSpace(sessionID)
+	if cleanID == "" {
+		return ""
+	}
+	if !reValidSessionID.MatchString(cleanID) {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString("<PREVIOUS_SESSION>\n")
+	sb.WriteString(fmt.Sprintf("Previous session ID: %s\n", cleanID))
+	sb.WriteString(fmt.Sprintf("Prior conversation transcript on disk: /root/.gemini/antigravity-cli/brain/%s/.system_generated/logs/transcript.jsonl\n", cleanID))
+	sb.WriteString("Note: This thread was recently rotated to preserve token budget. If past technical context, prior decisions, or code changes are required, use grep_search or view_file to inspect the prior transcript. Do not load the full file unless necessary.\n")
+	sb.WriteString("</PREVIOUS_SESSION>")
+	return sb.String()
 }

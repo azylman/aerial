@@ -435,6 +435,9 @@ func TestSessionsValidationAndEdgeCases(t *testing.T) {
 	if _, _, err := GetThreadSummary(closedDB, "t1"); err == nil {
 		t.Errorf("expected error on GetThreadSummary with closed DB")
 	}
+	if _, err := GetPreviousSessionID(closedDB, "t1"); err == nil {
+		t.Errorf("expected error on GetPreviousSessionID with closed DB")
+	}
 }
 
 func TestFactsAndTasksEdgeCases(t *testing.T) {

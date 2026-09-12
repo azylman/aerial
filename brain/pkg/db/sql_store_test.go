@@ -217,4 +217,7 @@ func TestSQLStoreNilDatabaseBranchCoverage(t *testing.T) {
 	if err := s.RotateSessionID(ctx, "k", "n"); err == nil {
 		t.Errorf("expected error on RotateSessionID nil store")
 	}
+	if _, err := s.GetPreviousSessionID(ctx, "k"); err == nil {
+		t.Errorf("expected error on GetPreviousSessionID nil store")
+	}
 }

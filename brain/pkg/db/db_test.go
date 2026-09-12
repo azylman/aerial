@@ -401,11 +401,28 @@ func TestSessionLifecycle_TimestampsAndInfo(t *testing.T) {
 	if info4.InternalSessionID != "" || info4.TurnCount != 0 {
 		t.Errorf("Expected cold session state, got: %+v", info4)
 	}
+	if info4.PreviousSessionID != "sess-1" {
+		t.Errorf("Expected info4.PreviousSessionID 'sess-1', got %q", info4.PreviousSessionID)
+	}
+	prevAfterRot, err := GetPreviousSessionID(database, key)
+	if err != nil || prevAfterRot != "sess-1" {
+		t.Errorf("Expected GetPreviousSessionID 'sess-1', got %q (err: %v)", prevAfterRot, err)
+	}
+
+	// Redundant rotation does not wipe previous session ID
+	if err := RotateSessionID(database, key, ""); err != nil {
+		t.Fatalf("Redundant RotateSessionID failed: %v", err)
+	}
+	prevAfterRedundant, err := GetPreviousSessionID(database, key)
+	if err != nil || prevAfterRedundant != "sess-1" {
+		t.Errorf("Expected GetPreviousSessionID 'sess-1' after redundant rotation, got %q (err: %v)", prevAfterRedundant, err)
+	}
+
 	if !info4.CreatedAt.After(firstCreatedAt) {
 		t.Errorf("RotateSessionID did not advance created_at: first=%v, rotated=%v", firstCreatedAt, info4.CreatedAt)
 	}
 
-	// 5. Saving a new session ID after cold rotation
+	// 5. Saving a new session ID after cold rotation preserves previous_session_id
 	time.Sleep(10 * time.Millisecond)
 	if err := SaveSessionID(database, key, "sess-fresh-2"); err != nil {
 		t.Fatalf("SaveSessionID fresh failed: %v", err)
@@ -417,8 +434,28 @@ func TestSessionLifecycle_TimestampsAndInfo(t *testing.T) {
 	if info5.InternalSessionID != "sess-fresh-2" {
 		t.Errorf("Expected sess-fresh-2, got %s", info5.InternalSessionID)
 	}
+	if info5.PreviousSessionID != "sess-1" {
+		t.Errorf("Expected info5.PreviousSessionID 'sess-1', got %q", info5.PreviousSessionID)
+	}
 	if !info5.CreatedAt.After(firstCreatedAt) {
 		t.Errorf("Fresh session created_at is not newer than initial: initial=%v, fresh=%v", firstCreatedAt, info5.CreatedAt)
+	}
+
+	// 6. Rotating again advances previous_session_id to sess-fresh-2
+	if err := RotateSessionID(database, key, "sess-fresh-3"); err != nil {
+		t.Fatalf("RotateSessionID to sess-fresh-3 failed: %v", err)
+	}
+	prevAfterRot2, err := GetPreviousSessionID(database, key)
+	if err != nil || prevAfterRot2 != "sess-fresh-2" {
+		t.Errorf("Expected GetPreviousSessionID 'sess-fresh-2' after 2nd rotation, got %q (err: %v)", prevAfterRot2, err)
+	}
+
+	// Edge case validation: nil DB and empty thread
+	if p, err := GetPreviousSessionID(nil, "key"); p != "" || err != nil {
+		t.Errorf("Expected empty string and nil error for nil DB, got %q, %v", p, err)
+	}
+	if p, err := GetPreviousSessionID(database, ""); p != "" || err != nil {
+		t.Errorf("Expected empty string and nil error for empty key, got %q, %v", p, err)
 	}
 }
 
