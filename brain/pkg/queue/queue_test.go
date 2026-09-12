@@ -4650,15 +4650,15 @@ func TestWorkerPoolShutdown_PreservesProcessingMessageWithoutApology(t *testing.
 	}
 	mu.Unlock()
 
-	// Verify database state: message should remain in PROCESSING (not FAILED), and retry_count should NOT have incremented
+	// Verify database state: message should be reset to PENDING (not FAILED or PROCESSING), and retry_count should NOT have incremented
 	var status string
 	var retryCount int
 	if err := database.QueryRow("SELECT status, retry_count FROM messages WHERE id = $1", msg.ID).Scan(&status, &retryCount); err != nil {
 		t.Fatalf("Query failed: %v", err)
 	}
 
-	if status != db.StatusProcessing {
-		t.Errorf("Expected message status %q in DB on shutdown, got %q", db.StatusProcessing, status)
+	if status != db.StatusPending {
+		t.Errorf("Expected message status %q in DB on shutdown, got %q", db.StatusPending, status)
 	}
 	if retryCount != 0 {
 		t.Errorf("Expected retry_count 0 on shutdown exit, got %d", retryCount)
@@ -4718,8 +4718,8 @@ func TestWorkerPoolShutdown_PreservesProcessingMessageWithoutApology(t *testing.
 	if finalStatus != db.StatusCompleted {
 		t.Errorf("Expected final message status %q, got %q", db.StatusCompleted, finalStatus)
 	}
-	if finalRestartCount != 1 {
-		t.Errorf("Expected final restart_count 1 (incremented during startup recovery), got %d", finalRestartCount)
+	if finalRestartCount != 0 {
+		t.Errorf("Expected final restart_count 0 (clean deployment recovery), got %d", finalRestartCount)
 	}
 	if finalRetryCount != 0 {
 		t.Errorf("Expected final retry_count 0 (execution retries separate from restart), got %d", finalRetryCount)
@@ -4873,8 +4873,8 @@ func TestWorkerPoolShutdown_AmbientClassifierCancellationPreserved(t *testing.T)
 	if status == db.StatusCompleted {
 		t.Errorf("Message was mistakenly marked COMPLETED [AMBIENT] during shutdown cancellation")
 	}
-	if status != db.StatusProcessing {
-		t.Errorf("Expected message status %q in DB on shutdown, got %q", db.StatusProcessing, status)
+	if status != db.StatusPending {
+		t.Errorf("Expected message status %q in DB on shutdown, got %q", db.StatusPending, status)
 	}
 }
 
@@ -8490,5 +8490,283 @@ func TestWorkerPool_ExplicitMemoryRetrieverWiring(t *testing.T) {
 		t.Errorf("Expected prompt to contain injected fact, got: %s", capturedPrompt)
 	}
 }
+
+func TestProcessBurst_GracefulShutdown_ResetsToPendingWithoutRestartPenalty(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	msg := db.Message{
+		ID:           "msg-graceful-shutdown",
+		ThreadID:     "thread-graceful",
+		Content:      "task interrupted by deployment",
+		Status:       db.StatusPending,
+		RestartCount: 0,
+		RetryCount:   0,
+		CreatedAt:    time.Now().UTC(),
+	}
+	_ = db.InsertMessage(database, msg)
+
+	// Simulate cancelled pool context (SIGTERM)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Pre-cancel context
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB: database,
+	})
+	pool.ctx = ctx
+
+	// Process burst under cancelled context
+	pool.processBurst([]db.Message{msg})
+
+	updated, err := db.GetMessage(database, "msg-graceful-shutdown")
+	if err != nil || updated == nil {
+		t.Fatalf("Failed to fetch message: %v", err)
+	}
+	if updated.Status != db.StatusPending {
+		t.Errorf("Expected status %s, got %s", db.StatusPending, updated.Status)
+	}
+	if updated.RestartCount != 0 {
+		t.Errorf("Expected restart_count 0, got %d", updated.RestartCount)
+	}
+}
+
+func TestRecoverInterrupted_LongRunningTask_DeploymentVelocityProtection(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	// Message that ran for 5 minutes before being killed by deployment
+	msg := db.Message{
+		ID:           "msg-long-running",
+		ThreadID:     "thread-long",
+		AuthorID:     "user-1",
+		Content:      "long task",
+		Status:       db.StatusProcessing,
+		RestartCount: DefaultMaxRestarts, // normally 3, would trigger poison pill if instant crash
+		RetryCount:   0,
+		CreatedAt:    time.Now().UTC().Add(-10 * time.Minute),
+		UpdatedAt:    time.Now().UTC().Add(-5 * time.Minute), // Last active 5m ago (> 30s)
+	}
+	_ = db.InsertMessage(database, msg)
+	_, _ = database.Exec("UPDATE messages SET updated_at = $1 WHERE id = $2", time.Now().UTC().Add(-5*time.Minute), msg.ID)
+
+	var mu sync.Mutex
+	var completedIDs []string
+	doneCh := make(chan struct{})
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB: database,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			return mockJSONResponse("e1111111-2222-3333-4444-555555555555", "Recovered successfully"), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
+		TypingFunc:   func(s *discordgo.Session, channelID string) func() { return func() {} },
+		OnMessageCompleted: func(m db.Message, finalStatus string) {
+			mu.Lock()
+			completedIDs = append(completedIDs, m.ID)
+			mu.Unlock()
+			close(doneCh)
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	RecoverInterrupted(database, pool)
+
+	select {
+	case <-doneCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Timeout waiting for long-running task to be recovered and completed")
+	}
+
+	updated, _ := db.GetMessage(database, "msg-long-running")
+	if updated.Status != db.StatusCompleted {
+		t.Errorf("Expected long running task to be completed, got %s", updated.Status)
+	}
+	if updated.RestartCount != 4 {
+		t.Errorf("Expected restart_count 4 after recovery, got %d", updated.RestartCount)
+	}
+}
+
+func TestRecoverInterrupted_PoisonPill_HardCeiling(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	// Message that has restarted 5 times (hard cap) even though UpdatedAt was > 30s ago
+	msg := db.Message{
+		ID:           "msg-hard-ceiling",
+		ThreadID:     "thread-ceiling",
+		AuthorID:     "user-1",
+		Content:      "hard ceiling test",
+		Status:       db.StatusProcessing,
+		RestartCount: 5,
+		RetryCount:   0,
+		CreatedAt:    time.Now().UTC().Add(-20 * time.Minute),
+	}
+	_ = db.InsertMessage(database, msg)
+	_, _ = database.Exec("UPDATE messages SET updated_at = $1 WHERE id = $2", time.Now().UTC().Add(-5*time.Minute), msg.ID)
+
+	var deliveredNotifs []string
+	var mu sync.Mutex
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB: database,
+		NotifierFunc: func(agyBin, apiKey, contextDescription string) string {
+			return "Poison pill dropped"
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			mu.Lock()
+			deliveredNotifs = append(deliveredNotifs, text)
+			mu.Unlock()
+			return nil
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	RecoverInterrupted(database, pool)
+
+	updated, _ := db.GetMessage(database, "msg-hard-ceiling")
+	if updated.Status != db.StatusFailed {
+		t.Errorf("Expected hard ceiling message to be marked FAILED, got %s", updated.Status)
+	}
+	if !strings.Contains(updated.ErrorMessage, "poison pill") {
+		t.Errorf("Expected poison pill error message, got %s", updated.ErrorMessage)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(deliveredNotifs) == 0 {
+		t.Errorf("Expected poison pill notification delivered to Discord")
+	}
+}
+
+func TestRecoverInterrupted_DiscordSessionDeliversPoisonNotice(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	msg := db.Message{
+		ID:           "msg-delivery-check",
+		ThreadID:     "thread-delivery-check",
+		AuthorID:     "user-1",
+		Content:      "poison message",
+		Status:       db.StatusProcessing,
+		RestartCount: DefaultMaxRestarts,
+		RetryCount:   0,
+		CreatedAt:    time.Now().UTC(),
+		UpdatedAt:    time.Now().UTC(), // instant crash (< 30s)
+	}
+	_ = db.InsertMessage(database, msg)
+
+	var capturedSession *discordgo.Session
+	var deliveredThreadID string
+	var deliveredText string
+	var mu sync.Mutex
+
+	mockSession := &discordgo.Session{
+		State: discordgo.NewState(),
+	}
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB: database,
+		NotifierFunc: func(agyBin, apiKey, contextDescription string) string {
+			return "Poison pill notice"
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			mu.Lock()
+			capturedSession = s
+			deliveredThreadID = channelID
+			deliveredText = text
+			mu.Unlock()
+			return nil
+		},
+	})
+	pool.SetDiscordSession(mockSession)
+	pool.Start()
+	defer pool.Stop()
+
+	RecoverInterrupted(database, pool)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if capturedSession != mockSession {
+		t.Errorf("Expected DeliveryFunc to receive mockSession %p, got %p", mockSession, capturedSession)
+	}
+	if deliveredThreadID != "thread-delivery-check" {
+		t.Errorf("Expected thread-delivery-check, got %s", deliveredThreadID)
+	}
+	if deliveredText != "Poison pill notice" {
+		t.Errorf("Expected poison notice, got %s", deliveredText)
+	}
+}
+
+func TestRecoverInterrupted_CoverageEdgeCases(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	msg := db.Message{
+		ID:           "msg-edge-case-cov",
+		ThreadID:     "thread-cov",
+		AuthorID:     "user-1",
+		Content:      "short",
+		Status:       db.StatusProcessing,
+		RestartCount: DefaultMaxRestarts,
+		RetryCount:   0,
+		CreatedAt:    time.Now().UTC(),
+		UpdatedAt:    time.Now().UTC(),
+	}
+	_ = db.InsertMessage(database, msg)
+
+	mockSess := &discordgo.Session{State: discordgo.NewState()}
+	appCfg := config.NewFromData(&config.ConfigData{
+		Model:  "test-model",
+		AgyBin: "agy-custom",
+		APIKey: "custom-api-key",
+	})
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:          database,
+		MaxAttempts: 0, // covers maxAttempts <= 0 fallback
+		NotifierFunc: func(agyBin, apiKey, contextDescription string) string {
+			if apiKey != "custom-api-key" || agyBin != "agy-custom" {
+				t.Errorf("expected apiKey custom-api-key and agyBin agy-custom, got %s / %s", apiKey, agyBin)
+			}
+			return "Poison notice"
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			// Return error to cover failed delivery branch
+			return errors.New("discord delivery failed")
+		},
+	})
+	pool.appCfg = appCfg
+	pool.SetDiscordSession(mockSess)
+
+	// Exercise DiscordSession() getter
+	if pool.DiscordSession() != mockSess {
+		t.Errorf("expected DiscordSession() to return mockSession")
+	}
+
+	RecoverInterrupted(database, pool)
+
+	updated, _ := db.GetMessage(database, "msg-edge-case-cov")
+	if updated.Status != db.StatusFailed {
+		t.Errorf("expected status FAILED, got %s", updated.Status)
+	}
+}
+
+
 
 

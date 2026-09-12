@@ -2297,6 +2297,29 @@ channels:
 	RunStartupCatchUpSweep(context.Background(), closedDB, pool, sFull)
 }
 
+func TestStartupSequence_DiscordSessionAvailableDuringRecovery(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	pool := queue.NewWorkerPool(queue.WorkerPoolConfig{DB: database})
+	if pool.DiscordSession() != nil {
+		t.Fatal("expected pool discord session to be nil prior to SetDiscordSession")
+	}
+
+	mockSession := &discordgo.Session{
+		State: discordgo.NewState(),
+	}
+	pool.SetDiscordSession(mockSession)
+
+	if pool.DiscordSession() != mockSession {
+		t.Fatalf("expected pool discord session to match set session, got %v", pool.DiscordSession())
+	}
+}
+
+
 
 
 
