@@ -54,7 +54,7 @@ Aerial uses a decoupled **Two-Repository Architecture**:
 ┌──────────────────────────────────────────────────────────┐       ├─ / -> 302 Redirect to /dashboard/
 │           Full Observability & Telemetry Stack           │       ├─ /dashboard/ -> Dashboard HUD
 │  • cAdvisor (Container Metrics :8080)                    │       ├─ /docs/ -> Docsify Living Docs
-│  • Node Exporter (Host System Metrics :9100)             │       ├─ /conversations/ -> Agentsview
+│  • Node Exporter (Host System Metrics :9100)             │       ├─ /agentsview/ -> Agentsview
 │  • PostgreSQL Exporter (Database Pool & Stats :9187)     │       └─ /grafana/ -> Grafana Telemetry
 │  • VictoriaMetrics TSDB (:8428 with modular scrape.d/)   │
 │  • Grafana Cyberpunk Dashboards (:3000 / Postgres store) │
@@ -307,7 +307,7 @@ Aerial uses an automated GitOps deployment and configuration pipeline:
 | **`aerial-agentsview`** | `8080` (via proxy) | Web UI for visualizing agent transcripts, session history, and execution timelines. |
 | **`aerial-dashboard`** | `8080` (via proxy) | Status microservice serving Cyberpunk status HUD. |
 | **`aerial-docs`** | `80` (via proxy) | Documentation engine rendering Markdown and Mermaid diagrams from config repo via Docsify. |
-| **`aerial-proxy`** | `8089` (Host `8089`) | Edge reverse proxy routing traffic for `/` (302 to HUD), `/dashboard/`, `/docs/`, `/conversations/`, and `/grafana/`. |
+| **`aerial-proxy`** | `8089` (Host `8089`) | Edge reverse proxy routing traffic for `/` (302 to HUD), `/dashboard/`, `/docs/`, `/agentsview/`, and `/grafana/`. |
 | **`aerial-cadvisor`** | `8080` (Internal) | cAdvisor container metrics collector gathering per-container CPU, memory, network, and disk telemetry. |
 | **`aerial-node-exporter`**| `9100` (Internal) | Node Exporter host telemetry gathering host CPU loads, memory, storage, thermals, and network metrics. |
 | **`aerial-postgres-exporter`**| `9187` (Internal) | PostgreSQL database metrics exporter gathering connection pools, locks, query stats, and buffer metrics. |
@@ -383,7 +383,7 @@ docker compose logs -f brain
 | :--- | :--- |
 | Status Dashboard (HUD) | `http://localhost:8089/dashboard/` (or `http://localhost:8089/`) |
 | Documentation (Docsify) | `http://localhost:8089/docs/` |
-| Agent Transcripts (Agentsview) | `http://localhost:8089/conversations/` |
+| Agent Transcripts (Agentsview) | `http://localhost:8089/agentsview/` |
 | System Telemetry (Grafana) | `http://localhost:8089/grafana/` |
 | Brain Prometheus Metrics | `http://localhost:8088/metrics` |
 | Brain Healthcheck | `http://localhost:8088/health` |

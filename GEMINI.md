@@ -39,7 +39,7 @@ Aerial runs as a multi-container Docker stack supervised by Watchtower and Autoh
   - `victoriametrics-mcp`: Streamable HTTP MCP server for VictoriaMetrics TSDB metric querying and alert rule inspection (`http://victoriametrics-mcp:4004/mcp`).
 
 - **Web, Gateway & Documentation Services**:
-  - `aerial-proxy`: Edge reverse proxy routing external web traffic to Dashboard (`/` 302 redirect and `/dashboard/`), Documentation (`/docs/`), Agentsview (`/conversations/`), and Grafana (`/grafana/`).
+  - `aerial-proxy`: Edge reverse proxy routing external web traffic to Dashboard (`/` 302 redirect and `/dashboard/`), Documentation (`/docs/`), Agentsview (`/agentsview/`), and Grafana (`/grafana/`).
   - `aerial-dashboard`: Web status HUD rendering live queue state, recent turns, and health.
   - `aerial-docs`: Documentation service serving architectural specifications and runbooks via Docsify and Mermaid.
   - `agentsview`: Web observability dashboard rendering Antigravity session transcripts and tool traces.

@@ -1302,7 +1302,7 @@ func fetchActiveTasksFromBrain(ctx context.Context, brainURL string) ([]ActiveTa
 // DefaultQuickLaunchLinks returns the core default gateway launch targets.
 func DefaultQuickLaunchLinks() []QuickLaunchLink {
 	return []QuickLaunchLink{
-		{Name: "💬 LLM SESSIONS", URL: "/conversations/", Target: "_blank", IsCore: true},
+		{Name: "💬 LLM SESSIONS", URL: "/agentsview/", Target: "_blank", IsCore: true},
 		{Name: "📚 DOCS", URL: "/docs/", Target: "_blank", IsCore: true},
 		{Name: "📊 OBSERVABILITY", URL: "/grafana/", Target: "_blank", IsCore: true},
 	}
