@@ -430,7 +430,7 @@ submit_scratch() {
         commit_msg="chore(config): update configuration via Aerial self-improvement"
     fi
 
-    # Resolve Tier 2: Convention-based description file in scratch workspace
+    # Resolve PR description from convention file in scratch workspace if not explicitly passed
     if [ -z "$pr_body" ]; then
         if [ -s "${scratch_dir}/PR_DESCRIPTION.md" ]; then
             pr_body=$(cat "${scratch_dir}/PR_DESCRIPTION.md")
@@ -450,22 +450,12 @@ submit_scratch() {
         clean_title="chore(config): update configuration via Aerial self-improvement"
     fi
 
-    # Resolve Tier 3: Multi-line commit splitting
-    if [ -z "$pr_body" ]; then
-        local first_line_num
-        first_line_num=$(printf "%s\n" "$commit_msg" | awk 'NF {print NR; exit}')
-        if [ -n "$first_line_num" ]; then
-            local remainder
-            remainder=$(printf "%s\n" "$commit_msg" | sed "1,${first_line_num}d" | sed -e '/^[[:space:]]*$/d')
-            if [ -n "$remainder" ]; then
-                pr_body="$remainder"
-            fi
-        fi
-    fi
-
-    # Resolve Tier 4: Fallback default placeholder
-    if [ -z "$pr_body" ]; then
-        pr_body="Automated configuration update by Aerial from scratch workspace."
+    # Mandatory PR Description Invariant: PR description must not be empty
+    local trimmed_body
+    trimmed_body=$(printf "%s" "$pr_body" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+    if [ -z "$trimmed_body" ]; then
+        echo "ERROR: Pull Request description is mandatory. Provide a description via PR_DESCRIPTION.md in the workspace, or via --body-file / -b." >&2
+        exit 1
     fi
 
     # Defensively clamp body length to 60,000 characters (GitHub API limit is 65,536)
@@ -598,6 +588,7 @@ if data is not None:
     script_path="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
     local log_file="/tmp/aerial-config-pr-monitor-${pr_num}.log"
 
+    cd /tmp
     nohup bash "$script_path" monitor "$pr_num" "$branch" "$commit_sha" < /dev/null > "$log_file" 2>&1 &
     local monitor_pid=$!
 
