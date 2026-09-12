@@ -120,14 +120,14 @@ function getTriggerBadge(triggerType) {
 
 function formatAgentsviewSessionUrl(sessionId) {
     if (!sessionId || typeof sessionId !== 'string') {
-        return '/conversations/';
+        return '/agentsview/';
     }
     const cleanId = sessionId.trim().replace(/^\/+|\/+$/g, '');
     if (!cleanId) {
-        return '/conversations/';
+        return '/agentsview/';
     }
     const fullId = cleanId.includes(':') ? cleanId : `antigravity-cli:${cleanId}`;
-    return `/conversations/sessions/${encodeURIComponent(fullId)}`;
+    return `/agentsview/sessions/${encodeURIComponent(fullId)}`;
 }
 
 function parseValidTimestampMs(dateStr) {
@@ -291,7 +291,7 @@ function renderActiveTasks(tasks) {
             const inspectUrl = formatAgentsviewSessionUrl(task.session_id);
             const inspectHTML = hasValidSession 
                 ? `<a href="${escapeHtml(inspectUrl)}" target="_blank" rel="noopener noreferrer" class="task-inspect-btn active">💬 INSPECT IN AGENTSVIEW ↗</a>`
-                : `<a href="/conversations/" target="_blank" rel="noopener noreferrer" class="task-inspect-btn active" title="Session allocating - Click to open Agentsview">💬 OPEN AGENTSVIEW ↗</a>`;
+                : `<a href="/agentsview/" target="_blank" rel="noopener noreferrer" class="task-inspect-btn active" title="Session allocating - Click to open Agentsview">💬 OPEN AGENTSVIEW ↗</a>`;
 
             const sessionInfo = hasValidSession ? `SESSION: <code style="color: var(--permet-purple);">${escapeHtml(task.session_id)}</code>` : '';
 
@@ -958,7 +958,7 @@ function renderFactCards() {
         let threadMarkup = '';
         if (f.thread_id && /^\d+$/.test(f.thread_id.trim())) {
             const safeThread = escapeHtml(f.thread_id.trim());
-            threadMarkup = ` • <a href="/conversations/?thread=${safeThread}" class="fact-thread-link" target="_blank" rel="noopener">#${safeThread.slice(0, 8)} ↗</a>`;
+            threadMarkup = ` • <a href="/agentsview/?thread=${safeThread}" class="fact-thread-link" target="_blank" rel="noopener">#${safeThread.slice(0, 8)} ↗</a>`;
         }
 
         return `
@@ -1512,7 +1512,7 @@ function renderScheduleCards() {
         let threadMarkup = `<code>${escapeHtml(threadId)}</code>`;
         if (/^\d+$/.test(threadId.trim())) {
             const safeThread = escapeHtml(threadId.trim());
-            threadMarkup = `<a href="/conversations/?thread=${safeThread}" class="schedule-thread-link" target="_blank" rel="noopener">#${safeThread.slice(0, 8)} ↗</a>`;
+            threadMarkup = `<a href="/agentsview/?thread=${safeThread}" class="schedule-thread-link" target="_blank" rel="noopener">#${safeThread.slice(0, 8)} ↗</a>`;
         }
 
         cardsHTML += `
@@ -1628,7 +1628,7 @@ function renderScheduleRuns() {
         let threadMarkup = '';
         if (run.thread_id && /^\d+$/.test(run.thread_id.trim())) {
             const safeThread = escapeHtml(run.thread_id.trim());
-            threadMarkup = ` • <a href="/conversations/?thread=${safeThread}" class="run-thread-link" target="_blank" rel="noopener">THREAD #${safeThread.slice(0, 8)} ↗</a>`;
+            threadMarkup = ` • <a href="/agentsview/?thread=${safeThread}" class="run-thread-link" target="_blank" rel="noopener">THREAD #${safeThread.slice(0, 8)} ↗</a>`;
         }
 
         let errorBox = '';

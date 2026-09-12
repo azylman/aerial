@@ -89,7 +89,7 @@ Database Pool Metrics"]
     Proxy -->|/ -> 302 Redirect| Dashboard
     Proxy -->|/dashboard/| Dashboard
     Proxy -->|/docs/| Docs
-    Proxy -->|/conversations/| Agentsview
+    Proxy -->|/agentsview/| Agentsview
     Proxy -->|/grafana/| Grafana
 
     %% Core interactions
