@@ -1688,7 +1688,7 @@ func TestQueueTurnCountSessionRotation(t *testing.T) {
 	initialSessionID := "sess-channel-init-123"
 	_ = db.SaveSessionID(database, channelID, initialSessionID)
 
-	// Seed turn_count to DefaultMaxSessionTurns - 2 (48 turns)
+	// Seed turn_count to DefaultMaxSessionTurns - 2 (8 turns)
 	for i := 0; i < DefaultMaxSessionTurns-2; i++ {
 		_, _ = db.IncrementSessionTurnCount(database, channelID)
 	}
@@ -1718,7 +1718,7 @@ func TestQueueTurnCountSessionRotation(t *testing.T) {
 		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
 			if sessionID == "" {
-				sessionID = "sess-turn-" + uuid.New().String()
+				sessionID = uuid.New().String()
 			}
 			stderr = fmt.Sprintf("Starting conversation update stream for %s\n", sessionID)
 			return mockJSONResponse(sessionID, "OK response"), stderr, 0, nil
@@ -1744,9 +1744,9 @@ func TestQueueTurnCountSessionRotation(t *testing.T) {
 	pool.Start()
 	defer pool.Stop()
 
-	// Send turn 49 (DefaultMaxSessionTurns - 1)
+	// Send turn DefaultMaxSessionTurns - 1 (turn 9)
 	completedCh = make(chan struct{}, 1)
-	msg1 := db.Message{ID: "m-rot-1", ThreadID: channelID, Content: "Aerial Turn 49", CreatedAt: time.Now().UTC()}
+	msg1 := db.Message{ID: "m-rot-1", ThreadID: channelID, Content: fmt.Sprintf("Aerial Turn %d", DefaultMaxSessionTurns-1), CreatedAt: time.Now().UTC()}
 	_ = db.InsertMessage(database, msg1)
 	pool.Enqueue(msg1)
 	<-completedCh
@@ -1754,17 +1754,17 @@ func TestQueueTurnCountSessionRotation(t *testing.T) {
 	c1, _ := db.GetSessionTurnCount(database, channelID)
 	s1, _ := db.GetSessionID(database, channelID)
 	if c1 != DefaultMaxSessionTurns-1 || s1 != initialSessionID {
-		t.Fatalf("Expected turn_count=%d and initial session ID after turn 49, got count=%d, sess=%s", DefaultMaxSessionTurns-1, c1, s1)
+		t.Fatalf("Expected turn_count=%d and initial session ID after turn %d, got count=%d, sess=%s", DefaultMaxSessionTurns-1, DefaultMaxSessionTurns-1, c1, s1)
 	}
 
-	// Send turn 50 (hits DefaultMaxSessionTurns limit)
+	// Send turn DefaultMaxSessionTurns (hits DefaultMaxSessionTurns limit)
 	completedCh = make(chan struct{}, 1)
-	msg2 := db.Message{ID: "m-rot-2", ThreadID: channelID, Content: "Aerial Turn 50", CreatedAt: time.Now().UTC()}
+	msg2 := db.Message{ID: "m-rot-2", ThreadID: channelID, Content: fmt.Sprintf("Aerial Turn %d", DefaultMaxSessionTurns), CreatedAt: time.Now().UTC()}
 	_ = db.InsertMessage(database, msg2)
 	pool.Enqueue(msg2)
 	<-completedCh
 
-	// Verify post-50-turns state:
+	// Verify post-rotation state:
 	// Session ID should be rotated to cold state ""
 	// turn_count should be reset to 0
 	finalSessionID, err := db.GetSessionID(database, channelID)
@@ -1781,6 +1781,28 @@ func TestQueueTurnCountSessionRotation(t *testing.T) {
 	}
 	if finalTurnCount != 0 {
 		t.Errorf("Expected turn_count=0 after rotation, got %d", finalTurnCount)
+	}
+
+	// Send turn DefaultMaxSessionTurns + 1 (Turn 11, starts cold)
+	completedCh = make(chan struct{}, 1)
+	msg3 := db.Message{ID: "m-rot-3", ThreadID: channelID, Content: fmt.Sprintf("Aerial Turn %d", DefaultMaxSessionTurns+1), CreatedAt: time.Now().UTC()}
+	_ = db.InsertMessage(database, msg3)
+	pool.Enqueue(msg3)
+	<-completedCh
+
+	turn11Count, err := db.GetSessionTurnCount(database, channelID)
+	if err != nil {
+		t.Fatalf("Failed to query turn count after turn 11: %v", err)
+	}
+	if turn11Count != 1 {
+		t.Errorf("Expected turn_count=1 after cold restart on turn 11, got %d", turn11Count)
+	}
+	turn11SessionID, err := db.GetSessionID(database, channelID)
+	if err != nil {
+		t.Fatalf("Failed to query session ID after turn 11: %v", err)
+	}
+	if turn11SessionID == "" || turn11SessionID == initialSessionID {
+		t.Errorf("Expected fresh new session ID after turn 11, got %q", turn11SessionID)
 	}
 }
 
@@ -3048,9 +3070,9 @@ func TestProcessBurst_SessionRotationBeforeLeadingAmbient(t *testing.T) {
 	_ = os.MkdirAll(cliPbDir, 0755)
 	_ = os.WriteFile(filepath.Join(cliPbDir, initialSessionID+".pb"), []byte("mock-pb"), 0644)
 
-	// Set turn_count to DefaultMaxSessionTurns - 1 (49 turns).
+	// Set turn_count to DefaultMaxSessionTurns - 1 (9 turns).
 	// The incoming burst has [Ambient1, Wake2].
-	// Since wakeIdx = 1 and currentTurns + 1 = 50 >= DefaultMaxSessionTurns,
+	// Since wakeIdx = 1 and currentTurns + 1 = 10 >= DefaultMaxSessionTurns,
 	// pre-burst rotation resets session to cold state so Ambient1 is written to the NEW session directory.
 	for i := 0; i < DefaultMaxSessionTurns-1; i++ {
 		_, _ = db.IncrementSessionTurnCount(database, channelID)
@@ -4339,17 +4361,17 @@ func TestProcessBurst_SessionRotation_ResetsToColdState(t *testing.T) {
 		t.Errorf("Expected session ID 'c9b5e679-7425-40de-944b-e07fc1f90ae7' after Turn 1, got %q", s1)
 	}
 
-	// Seed turn_count to DefaultMaxSessionTurns - 1 (49) so next turn hits 50 and triggers rotation
+	// Seed turn_count to DefaultMaxSessionTurns - 1 (9) so next turn hits 10 and triggers rotation
 	for i := 1; i < DefaultMaxSessionTurns-1; i++ {
 		_, _ = db.IncrementSessionTurnCount(database, channelID)
 	}
 
-	// 2. Process Turn 50 -> turnCount hits DefaultMaxSessionTurns (50), rotates session_id to ""
+	// 2. Process Turn 10 -> turnCount hits DefaultMaxSessionTurns (10), rotates session_id to ""
 	msg2 := db.Message{
 		ID:         "msg-turn-2",
 		ThreadID:   channelID,
 		AuthorName: "Alice",
-		Content:    "Aerial Turn 50",
+		Content:    fmt.Sprintf("Aerial Turn %d", DefaultMaxSessionTurns),
 		Status:     db.StatusPending,
 		CreatedAt:  now.Add(2 * time.Second),
 	}
@@ -6797,7 +6819,7 @@ func TestQueueWorker_PerScopeSerialization(t *testing.T) {
 	}
 }
 
-func TestThreadSession_RotationAt50Turns(t *testing.T) {
+func TestThreadSession_RotationAtTurnLimit(t *testing.T) {
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -7574,7 +7596,7 @@ func TestGetSessionLastActivity_RotatedSessionNotNew(t *testing.T) {
 
 	threadID := "thread-rotated-1"
 
-	// Session has reached 15 turns and rotated: internal_session_id is "", turn_count is 0
+	// Session has reached turn limit and rotated: internal_session_id is "", turn_count is 0
 	_, err = database.Exec(`
 		INSERT INTO sessions (thread_id, internal_session_id, turn_count, updated_at)
 		VALUES ($1, '', 0, $2)
