@@ -138,7 +138,7 @@ func NewWorkerInstance(ctx context.Context, opts WorkerOptions) (*WorkerInstance
 	}
 
 	// Perform handshake with timeout
-	handshakeTimeout := 15 * time.Second
+	handshakeTimeout := 30 * time.Second
 	if opts.Timeout > 0 {
 		handshakeTimeout = opts.Timeout
 	}
@@ -270,7 +270,18 @@ func (w *WorkerInstance) Execute(ctx context.Context, prompt string) (*AgyRespon
 			outputBuffer.WriteString(line)
 
 			trimmed := strings.TrimSpace(line)
-			if strings.Contains(trimmed, `"event"`) && strings.Contains(trimmed, `"result"`) {
+			var ev struct {
+				Event string `json:"event"`
+			}
+			isResult := false
+			if err := json.Unmarshal([]byte(trimmed), &ev); err == nil {
+				isResult = (ev.Event == "result")
+			} else {
+				normalized := strings.ReplaceAll(trimmed, " ", "")
+				isResult = strings.HasPrefix(normalized, `{"event":"result"`)
+			}
+
+			if isResult {
 				resp, parseErr := ParseAgyOutput(outputBuffer.String())
 				if parseErr != nil {
 					resCh <- turnResult{err: fmt.Errorf("failed to parse worker result output: %w (raw: %q)", parseErr, trimmed)}
@@ -317,6 +328,19 @@ func (w *WorkerInstance) Close() {
 	if w.closed.Swap(true) {
 		return
 	}
+
+	// Allow any in-flight Execute turn a brief grace period to complete cleanly
+	drainCh := make(chan struct{})
+	go func() {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		close(drainCh)
+	}()
+	select {
+	case <-drainCh:
+	case <-time.After(3 * time.Second):
+	}
+
 	w.isDead.Store(true)
 	if w.cancel != nil {
 		w.cancel()
