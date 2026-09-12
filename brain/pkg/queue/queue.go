@@ -46,7 +46,7 @@ var (
 )
 
 const (
-	DefaultMaxSessionTurns     = 15
+	DefaultMaxSessionTurns     = 10
 	DefaultMaxSessionIdleTime  = 24 * time.Hour
 	DefaultTimeoutMinutes      = 60
 	DefaultMaxRestarts         = 3
@@ -1482,12 +1482,6 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		burst = []db.Message{burst[wakeIdx]}
 		metrics.DiscordMessagesProcessedTotal.WithLabelValues("false", "wake").Inc()
 
-		var incErr error
-		turnCount, incErr = db.IncrementSessionTurnCount(p.cfg.DB, threadID)
-		if incErr != nil {
-			log.Printf("[Queue] Error incrementing turn count for thread %s: %v", threadID, incErr)
-		}
-
 		var handledTrailing bool
 		handleTrailing := func() {
 			if handledTrailing {
@@ -1566,12 +1560,10 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		currentSessionID = ""
 	}
 
-	if strings.ToLower(policy.Mode) != "channel" {
-		var incErr error
-		turnCount, incErr = db.IncrementSessionTurnCount(p.cfg.DB, threadID)
-		if incErr != nil {
-			log.Printf("[Queue] Error incrementing turn count for thread %s: %v", threadID, incErr)
-		}
+	var incErr error
+	turnCount, incErr = db.IncrementSessionTurnCount(p.cfg.DB, threadID)
+	if incErr != nil {
+		log.Printf("[Queue] Error incrementing turn count for thread %s: %v", threadID, incErr)
 	}
 
 	basePrompt := CoalesceBurstPrompt(burst)
