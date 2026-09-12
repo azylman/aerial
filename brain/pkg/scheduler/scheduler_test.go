@@ -1083,13 +1083,12 @@ func TestSchedulerRun_TickLoop(t *testing.T) {
 	enqueuer := newMockEnqueuer()
 	threadCreator := newMockThreadCreator()
 
-	// Run with 100 microseconds interval for 350ms so it ticks > 3000 times (exercising 120 and 2880 tick branches)
 	go func() {
-		time.Sleep(350 * time.Millisecond)
+		time.Sleep(5 * time.Millisecond)
 		cancel()
 	}()
 
-	Run(ctx, newTestConfig(), database, enqueuer, threadCreator, 100*time.Microsecond)
+	Run(ctx, newTestConfig(), database, enqueuer, threadCreator, 1*time.Millisecond)
 }
 
 func TestProcessDueSchedules_ClosedDBAndErrors(t *testing.T) {
@@ -1176,7 +1175,7 @@ func TestSchedulerRun_WithActiveConversationsAndFactExtraction(t *testing.T) {
 	threadCreator := newMockThreadCreator()
 
 	go func() {
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 		cancel()
 	}()
 
@@ -1193,7 +1192,7 @@ func TestSchedulerRun_WithActiveConversationsAndFactExtraction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
 	}
-	sched.Run(ctx, 10*time.Millisecond)
+	sched.Run(ctx, 2*time.Millisecond)
 }
 
 func TestSchedulerStart_Stop(t *testing.T) {
@@ -2056,11 +2055,13 @@ func TestSchedulerRun_BranchesAndTickErrors(t *testing.T) {
 
 	// 5. Tick schedule evaluation error in Run
 	tickCount := 0
+	ctxTick, cancelTick := context.WithCancel(context.Background())
 	mockStoreTickErr := &mockStoreWrapper{
 		Store: db.NewSQLStore(database),
 		getDueCronSchedulesFn: func(ctx context.Context) ([]db.CronSchedule, error) {
 			tickCount++
 			if tickCount > 1 {
+				cancelTick()
 				return nil, fmt.Errorf("tick check error")
 			}
 			return nil, nil
@@ -2070,23 +2071,14 @@ func TestSchedulerRun_BranchesAndTickErrors(t *testing.T) {
 		},
 	}
 	schedTickErr, _ := New(newTestConfig(), mockStoreTickErr, nil, nil)
-	ctxTick, cancelTick := context.WithCancel(context.Background())
-	go func() {
-		time.Sleep(20 * time.Millisecond)
-		cancelTick()
-	}()
-	schedTickErr.Run(ctxTick, 5*time.Millisecond)
+	schedTickErr.Run(ctxTick, 1*time.Millisecond)
 
-	// 6. Fast ticker to hit tickCount % 2880 == 0
-	var ticks atomic.Int64
-	ctxFast, cancelFast := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancelFast()
+	// 6. Direct handleTick testing for modulo branches (120 and 2880) and nil scheduler
+	nilSched.handleTick(context.Background(), 120, nil, nil)
+
 	mockStoreFast := &mockStoreWrapper{
 		Store: db.NewSQLStore(database),
 		getDueCronSchedulesFn: func(ctx context.Context) ([]db.CronSchedule, error) {
-			if ticks.Add(1) > 2890 {
-				cancelFast()
-			}
 			return nil, nil
 		},
 		getDueOneShotSchedulesFn: func(ctx context.Context) ([]db.OneShotSchedule, error) {
@@ -2094,7 +2086,19 @@ func TestSchedulerRun_BranchesAndTickErrors(t *testing.T) {
 		},
 	}
 	schedFast, _ := New(newTestConfig(), mockStoreFast, nil, nil)
-	schedFast.Run(ctxFast, 10*time.Microsecond)
+	schedFast.handleTick(context.Background(), 120, nil, nil)
+	schedFast.handleTick(context.Background(), 2880, nil, nil)
+
+	// Verify short ticker run loop terminates cleanly on cancellation
+	var ticks atomic.Int64
+	ctxFast, cancelFast := context.WithCancel(context.Background())
+	mockStoreFast.getDueCronSchedulesFn = func(ctx context.Context) ([]db.CronSchedule, error) {
+		if ticks.Add(1) >= 2 {
+			cancelFast()
+		}
+		return nil, nil
+	}
+	schedFast.Run(ctxFast, 1*time.Millisecond)
 }
 
 

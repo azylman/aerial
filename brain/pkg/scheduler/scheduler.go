@@ -18,7 +18,6 @@ import (
 	"github.com/azylman/aerial/brain/pkg/runner"
 	"github.com/bwmarrin/discordgo"
 	"github.com/google/uuid"
-	"github.com/robfig/cron/v3"
 )
 
 // ThreadCreator defines an interface for creating Discord threads.
@@ -136,48 +135,6 @@ func NewScheduler(cfg *config.Config, dbOrStore any, enqueuer MessageEnqueuer, t
 	return New(cfg, dbOrStore, enqueuer, threadCreator, opts...)
 }
 
-// FormatThreadTitle formats the thread title for a recurring cron trigger, clamped to at most 100 runes.
-func FormatThreadTitle(titlePrefix string, t time.Time) string {
-	dateStr := t.Format("Jan 02, 2006")
-	trimmed := strings.TrimSpace(titlePrefix)
-	var title string
-	if trimmed == "" {
-		title = fmt.Sprintf("Scheduled Routine – %s", dateStr)
-	} else {
-		title = fmt.Sprintf("%s – %s", trimmed, dateStr)
-	}
-	runes := []rune(title)
-	if len(runes) > 100 {
-		runes = append(runes[:97], []rune("...")...)
-	}
-	return string(runes)
-}
-
-// CalculateNextRun parses a standard 5-field cron or descriptor and computes the next run time in UTC.
-func CalculateNextRun(cronExpr, timezone string, from time.Time) (time.Time, error) {
-	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
-	sched, err := parser.Parse(cronExpr)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("invalid cron expression %q: %w", cronExpr, err)
-	}
-
-	tzTrimmed := strings.TrimSpace(timezone)
-	if tzTrimmed == "" {
-		return time.Time{}, fmt.Errorf("timezone cannot be empty")
-	}
-
-	loc := time.UTC
-	if l, err := time.LoadLocation(tzTrimmed); err == nil {
-		loc = l
-	} else {
-		log.Printf("[Scheduler] Warning: unknown timezone %q, falling back to UTC", tzTrimmed)
-	}
-
-	fromInLoc := from.In(loc)
-	next := sched.Next(fromInLoc)
-	return next.UTC(), nil
-}
-
 // ProcessDueSchedules evaluates and processes due cron and one-shot schedules.
 func (s *Scheduler) ProcessDueSchedules(ctx context.Context) error {
 	if s == nil || s.store == nil {
@@ -226,35 +183,6 @@ func processDueSchedulesStore(ctx context.Context, cfg *config.Config, store db.
 			tz = cfg.Current().Timezone
 		}
 
-		// 24h staleness guard: if cron trigger is overdue by >24h, advance next_run_at without firing.
-		if now.Sub(c.NextRunAt) > 24*time.Hour {
-			log.Printf("[Scheduler] Warning: Cron %s (%q) is stale (>24h overdue: due %s, now %s). Advancing next_run_at without firing.",
-				c.ID, c.CronExpr, c.NextRunAt.Format(time.RFC3339), now.Format(time.RFC3339))
-			nextRun, err := CalculateNextRun(c.CronExpr, tz, now)
-			if err != nil {
-				log.Printf("[Scheduler] Failed to calculate next run for cron %s (%q): %v. Fallback 24h.", c.ID, c.CronExpr, err)
-				nextRun = now.Add(24 * time.Hour)
-			}
-			if err := store.UpdateCronNextRun(ctx, c.ID, nextRun); err != nil {
-				log.Printf("[Scheduler] Failed to update next_run_at for cron %s: %v", c.ID, err)
-			}
-			continue
-		}
-
-		// Calculate and update next run time
-		nextRun, err := CalculateNextRun(c.CronExpr, tz, now)
-		if err != nil {
-			log.Printf("[Scheduler] Failed to calculate next run for cron %s (%q): %v. Fallback 24h.", c.ID, c.CronExpr, err)
-			nextRun = now.Add(24 * time.Hour)
-		}
-		if err := store.UpdateCronNextRun(ctx, c.ID, nextRun); err != nil {
-			log.Printf("[Scheduler] Failed to update next_run_at for cron %s: %v", c.ID, err)
-		}
-
-		// Resolve channel policy and metadata for the target channel
-		title := FormatThreadTitle(c.TitlePrefix, now)
-		targetThreadID := c.TargetID
-
 		var channelName string
 		var isAlreadyThread bool
 		if snap, ok := queue.GetCachedChannel(c.TargetID); ok {
@@ -265,62 +193,45 @@ func processDueSchedulesStore(ctx context.Context, cfg *config.Config, store db.
 		}
 
 		policy := cfg.Current().ResolveChannelPolicy(c.TargetID, channelName)
+		action := PlanDueCronTurn(c, now, isAlreadyThread, policy.Mode, threadCreator != nil, tz)
 
-		// Create fresh public Discord thread only if:
-		// 1. Target is not already a thread, AND
-		// 2. Channel policy mode is NOT "channel" (i.e. it is "threads" or default), AND
-		// 3. Thread creator is provided.
-		if !isAlreadyThread && policy.Mode != "channel" && threadCreator != nil {
-			thID, err := threadCreator.CreatePublicThread(c.TargetID, title)
+		if action.NextRunError != nil {
+			log.Printf("[Scheduler] Failed to calculate next run for cron %s (%q): %v. Fallback 24h.", c.ID, c.CronExpr, action.NextRunError)
+		}
+
+		if action.IsStale {
+			log.Printf("[Scheduler] Warning: Cron %s (%q) is stale (>24h overdue: due %s, now %s). Advancing next_run_at without firing.",
+				c.ID, c.CronExpr, c.NextRunAt.Format(time.RFC3339), now.Format(time.RFC3339))
+			if err := store.UpdateCronNextRun(ctx, c.ID, action.NextRunAt); err != nil {
+				log.Printf("[Scheduler] Failed to update next_run_at for cron %s: %v", c.ID, err)
+			}
+			continue
+		}
+
+		if err := store.UpdateCronNextRun(ctx, c.ID, action.NextRunAt); err != nil {
+			log.Printf("[Scheduler] Failed to update next_run_at for cron %s: %v", c.ID, err)
+		}
+
+		targetThreadID := c.TargetID
+		if action.ShouldCreateThread {
+			thID, err := threadCreator.CreatePublicThread(c.TargetID, action.Title)
 			if err != nil {
-				log.Printf("[Scheduler] Failed to create Discord thread %q in channel %s: %v. Fallback to channel ID.", title, c.TargetID, err)
+				log.Printf("[Scheduler] Failed to create Discord thread %q in channel %s: %v. Fallback to channel ID.", action.Title, c.TargetID, err)
 			} else if thID != "" {
 				targetThreadID = thID
-				log.Printf("[Scheduler] Created Discord thread %q (ID: %s) for recurring cron %s", title, targetThreadID, c.ID)
+				log.Printf("[Scheduler] Created Discord thread %q (ID: %s) for recurring cron %s", action.Title, targetThreadID, c.ID)
 			}
 		}
 
-		// Create run record and message
 		runID := uuid.New().String()
 		msgID := uuid.New().String()
 
-		run := db.ScheduleRun{
-			ID:           runID,
-			ScheduleID:   c.ID,
-			ScheduleType: "cron",
-			MessageID:    msgID,
-			TargetID:     c.TargetID,
-			ThreadID:     targetThreadID,
-			Title:        title,
-			Prompt:       c.Prompt,
-			Status:       "enqueued",
-			StartedAt:    now,
-			Effort:       c.Effort,
-		}
+		run := BuildCronScheduleRun(runID, msgID, targetThreadID, c, action.Title, now)
 		if err := store.CreateScheduleRun(ctx, run); err != nil {
 			log.Printf("[Scheduler] Error creating schedule run %s for cron %s: %v", runID, c.ID, err)
 		}
 
-		// Create and persist PENDING message
-		cronSummary := db.CleanTaskSummary(c.Prompt)
-		if c.TitlePrefix != "" {
-			cronSummary = fmt.Sprintf("[%s] %s", c.TitlePrefix, cronSummary)
-		}
-		msg := db.Message{
-			ID:            msgID,
-			ThreadID:      targetThreadID,
-			GuildID:       "scheduled",
-			AuthorID:      "scheduler",
-			AuthorName:    "Scheduler",
-			Content:       c.Prompt,
-			Summary:       cronSummary,
-			Status:        db.StatusPending,
-			ScheduleRunID: runID,
-			CreatedAt:     now,
-			UpdatedAt:     now,
-			Effort:        c.Effort,
-		}
-
+		msg := BuildCronMessage(msgID, runID, targetThreadID, c, action.Summary, now)
 		if err := store.InsertMessage(ctx, msg); err != nil {
 			log.Printf("[Scheduler] Error inserting recurring message %s for cron %s: %v", msgID, c.ID, err)
 		}
@@ -330,7 +241,7 @@ func processDueSchedulesStore(ctx context.Context, cfg *config.Config, store db.
 		}
 		metrics.SchedulerExecutionsTotal.WithLabelValues("cron", "enqueued").Inc()
 		log.Printf("[Scheduler] Enqueued recurring turn for cron %s (message ID: %s, target thread: %s, next_run: %s)",
-			c.ID, msgID, targetThreadID, nextRun.Format(time.RFC3339))
+			c.ID, msgID, targetThreadID, action.NextRunAt.Format(time.RFC3339))
 	}
 
 	// 2. Process Due One-Shot Schedules (Atomic)
@@ -348,38 +259,15 @@ func processDueSchedulesStore(ctx context.Context, cfg *config.Config, store db.
 
 		runID := uuid.New().String()
 		msgID := uuid.New().String()
-		oneShotSummary := fmt.Sprintf("[Reminder] %s", db.CleanTaskSummary(s.Prompt))
-		msg := db.Message{
-			ID:            msgID,
-			ThreadID:      s.ThreadID,
-			GuildID:       "scheduled",
-			AuthorID:      "scheduler",
-			AuthorName:    "Scheduler",
-			Content:       s.Prompt,
-			Summary:       oneShotSummary,
-			Status:        db.StatusPending,
-			ScheduleRunID: runID,
-			CreatedAt:     now,
-			UpdatedAt:     now,
-		}
+		oneShotSummary := BuildOneShotMessageSummary(s.Prompt)
+		msg := BuildOneShotMessage(msgID, runID, s, oneShotSummary, now)
 
 		if err := store.InsertMessageAndConsumeOneShot(ctx, s.ID, msg); err != nil {
 			log.Printf("[Scheduler] Error atomically processing one-shot schedule %s (message %s): %v", s.ID, msgID, err)
 			continue
 		}
 
-		run := db.ScheduleRun{
-			ID:           runID,
-			ScheduleID:   s.ID,
-			ScheduleType: "one_shot",
-			MessageID:    msgID,
-			TargetID:     s.ThreadID,
-			ThreadID:     s.ThreadID,
-			Title:        "One-shot Reminder",
-			Prompt:       s.Prompt,
-			Status:       "enqueued",
-			StartedAt:    now,
-		}
+		run := BuildOneShotScheduleRun(runID, msgID, s, now)
 		if err := store.CreateScheduleRun(ctx, run); err != nil {
 			log.Printf("[Scheduler] Error creating schedule run %s for one-shot %s: %v", runID, s.ID, err)
 		}
@@ -500,6 +388,26 @@ func RunFactExtraction(ctx context.Context, dbOrStore any, client *memory.Client
 	}
 }
 
+// handleTick executes periodic evaluations for a single ticker event.
+func (s *Scheduler) handleTick(ctx context.Context, tickCount int, ollamaClient *memory.Client, llmFunc memory.LLMClientFunc) {
+	if s == nil {
+		return
+	}
+	if err := s.ProcessDueSchedules(ctx); err != nil {
+		log.Printf("[Scheduler] Error in schedule tick evaluation: %v", err)
+	}
+
+	// Run fact extraction hourly (every 120 ticks at 30s interval = 1 hour)
+	if ShouldRunFactExtraction(tickCount) {
+		go RunFactExtraction(ctx, s.getStore(), ollamaClient, llmFunc)
+	}
+
+	// Run retention pruning daily (every 2880 ticks at 30s interval = 24 hours)
+	if ShouldRunPruneRetention(tickCount) {
+		go RunPruneRetention(s.getStore())
+	}
+}
+
 // Run executes the monitoring loop with ticker interval and context cancellation.
 func (s *Scheduler) Run(ctx context.Context, interval time.Duration) {
 	if s == nil || s.cfg == nil || s.cfg.Current() == nil {
@@ -508,6 +416,7 @@ func (s *Scheduler) Run(ctx context.Context, interval time.Duration) {
 	}
 	log.Printf("[Scheduler] Background scheduler monitor started (interval=%v)", interval)
 	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
 	ollamaClient := memory.New(s.cfg, s.sessionRoots...)
 	llmFunc := s.ExtractFactsLLM
 
@@ -526,19 +435,7 @@ func (s *Scheduler) Run(ctx context.Context, interval time.Duration) {
 			return
 		case <-ticker.C:
 			tickCount++
-			if err := s.ProcessDueSchedules(ctx); err != nil {
-				log.Printf("[Scheduler] Error in schedule tick evaluation: %v", err)
-			}
-
-			// Run fact extraction hourly (every 120 ticks at 30s interval = 1 hour)
-			if tickCount%120 == 0 {
-				go RunFactExtraction(ctx, s.getStore(), ollamaClient, llmFunc)
-			}
-
-			// Run retention pruning daily (every 2880 ticks at 30s interval = 24 hours)
-			if tickCount%2880 == 0 {
-				go RunPruneRetention(s.getStore())
-			}
+			s.handleTick(ctx, tickCount, ollamaClient, llmFunc)
 		}
 	}
 }
