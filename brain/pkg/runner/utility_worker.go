@@ -14,7 +14,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/azylman/aerial/brain/pkg/session"
@@ -317,9 +316,7 @@ func (w *WorkerInstance) markDeadAndKill() {
 	}
 	if w.cmd != nil && w.cmd.Process != nil {
 		// Kill process group
-		pid := w.cmd.Process.Pid
-		_ = syscall.Kill(-pid, syscall.SIGKILL)
-		_ = w.cmd.Process.Kill()
+		killProcessGroup(w.cmd)
 	}
 }
 
@@ -360,9 +357,7 @@ func (w *WorkerInstance) Close() {
 		select {
 		case <-done:
 		case <-time.After(3 * time.Second):
-			pid := w.cmd.Process.Pid
-			_ = syscall.Kill(-pid, syscall.SIGKILL)
-			_ = w.cmd.Process.Kill()
+			killProcessGroup(w.cmd)
 		}
 	}
 

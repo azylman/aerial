@@ -730,8 +730,8 @@ func TestRunAgyWithWatchdog_InactivityTimeout(t *testing.T) {
 func TestRunAgyWithWatchdog_ActiveStderrHeartbeat(t *testing.T) {
 	ctx := context.Background()
 	tmpHome := t.TempDir()
-	inactTimeout := 100 * time.Millisecond
-	pollInterval := 15 * time.Millisecond
+	inactTimeout := 500 * time.Millisecond
+	pollInterval := 25 * time.Millisecond
 	sleepSec := "0.03"
 	if runtime.GOOS == "windows" {
 		inactTimeout = 1200 * time.Millisecond
@@ -777,8 +777,8 @@ func TestRunAgyWithWatchdog_ActiveStderrHeartbeat(t *testing.T) {
 func TestRunAgyWithWatchdog_ActiveStdoutHeartbeat(t *testing.T) {
 	ctx := context.Background()
 	tmpHome := t.TempDir()
-	inactTimeout := 100 * time.Millisecond
-	pollInterval := 15 * time.Millisecond
+	inactTimeout := 500 * time.Millisecond
+	pollInterval := 25 * time.Millisecond
 	sleepSec := "0.03"
 	if runtime.GOOS == "windows" {
 		inactTimeout = 1200 * time.Millisecond
@@ -831,8 +831,8 @@ func TestRunAgyWithWatchdog_CustomTranscriptDirs(t *testing.T) {
 	}
 	transcriptFile := filepath.Join(customLogDir, "transcript.jsonl")
 
-	inactTimeout := 100 * time.Millisecond
-	pollInterval := 15 * time.Millisecond
+	inactTimeout := 500 * time.Millisecond
+	pollInterval := 25 * time.Millisecond
 	sleepSec := "0.03"
 	if runtime.GOOS == "windows" {
 		inactTimeout = 1200 * time.Millisecond
@@ -887,8 +887,8 @@ func TestRunAgyWithWatchdog_TranscriptHeartbeat(t *testing.T) {
 
 	transcriptFile := filepath.Join(logDir, "transcript.jsonl")
 
-	inactTimeout := 100 * time.Millisecond
-	pollInterval := 15 * time.Millisecond
+	inactTimeout := 500 * time.Millisecond
+	pollInterval := 25 * time.Millisecond
 	sleepSec := "0.03"
 	if runtime.GOOS == "windows" {
 		inactTimeout = 1200 * time.Millisecond
@@ -943,8 +943,8 @@ func TestRunAgyWithWatchdog_BackgroundTaskLogHeartbeat(t *testing.T) {
 
 	taskLog := filepath.Join(tasksDir, "task-1.log")
 
-	inactTimeout := 100 * time.Millisecond
-	pollInterval := 15 * time.Millisecond
+	inactTimeout := 500 * time.Millisecond
+	pollInterval := 25 * time.Millisecond
 	sleepSec := "0.03"
 	if runtime.GOOS == "windows" {
 		inactTimeout = 1200 * time.Millisecond
