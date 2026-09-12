@@ -269,7 +269,7 @@ func getOrCreateThreadID(s *discordgo.Session, m *discordgo.Message, allowSummar
 	return m.ChannelID, false
 }
 
-func buildDiscordPrompt(s *discordgo.Session, m *discordgo.Message, targetThreadID string, policy config.ChannelPolicy) string {
+func buildDiscordPrompt(s *discordgo.Session, m *discordgo.Message, targetThreadID string, _ config.ChannelPolicy) string {
 	var sb strings.Builder
 	sb.WriteString("<USER_REQUEST>\nHere's a message someone sent you from Discord:\n\n")
 	sb.WriteString(fmt.Sprintf("- id: %s\n", m.ID))
@@ -325,11 +325,7 @@ func buildDiscordPrompt(s *discordgo.Session, m *discordgo.Message, targetThread
 	}
 	sb.WriteString(fmt.Sprintf("- attachments: %v\n\n", attachments))
 
-	if policy.Mode == "channel" {
-		sb.WriteString("Execute all requested tools, subagents, tests, and code modifications to fulfill the request. Only formulate and output your final response once all immediate work is complete. It will be delivered directly to the Discord channel.\n")
-	} else {
-		sb.WriteString("Execute all requested tools, subagents, tests, and code modifications to fulfill the request. Only formulate and output your final response once all immediate work is complete. It will be delivered directly to the Discord thread.\n")
-	}
+	sb.WriteString("Fulfill the user's request. If the user asks for a plan, design, proposal, or investigation, draft the plan, run review gates, and present it for review without modifying source code or opening PRs. If the user asks to implement, build, or fix something, execute all necessary tools, subagents, tests, and code modifications. Only formulate and output your final response once all immediate work is complete. It will be delivered directly to Discord.\n")
 	sb.WriteString("</USER_REQUEST>")
 	return sb.String()
 }
