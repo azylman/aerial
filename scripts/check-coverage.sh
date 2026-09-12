@@ -100,10 +100,10 @@ GLOBAL_GO_THRESHOLD=95.0
 FRONTEND_LINE_THRESHOLD=90.0
 
 # Critical backend package thresholds (Key -> Floor)
-# All backend Go packages enforce a strict minimum 90.0% statement coverage floor.
+# All backend Go packages enforce a strict minimum 95.0% statement coverage floor.
 get_pkg_threshold() {
     case "$1" in
-        *) echo "90.0" ;;
+        *) echo "95.0" ;;
     esac
 }
 

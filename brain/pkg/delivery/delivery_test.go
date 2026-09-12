@@ -4,6 +4,8 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -548,5 +550,43 @@ func TestDelivery_AdditionalCoverage(t *testing.T) {
 
 	smallLimit := SplitMessage("```go\n"+strings.Repeat("a", 100)+"\n```", 50)
 	_ = smallLimit
+}
+
+func TestDelivery_ExtendedBranches(t *testing.T) {
+	// 1. SplitMessage: Long line inside code block exceeding chunk limit
+	longCodeLine := "```python\n" + strings.Repeat("x", 2500) + "\n```"
+	chunks := SplitMessage(longCodeLine, 500)
+	if len(chunks) < 2 {
+		t.Errorf("expected multiple chunks for long code line, got %d", len(chunks))
+	}
+
+	// 2. ResolveAndValidateLocalImage: non-image MIME type
+	tmpDir := t.TempDir()
+	origRoots := AllowedAttachmentRoots
+	AllowedAttachmentRoots = []string{tmpDir}
+	defer func() { AllowedAttachmentRoots = origRoots }()
+
+	txtFile := filepath.Join(tmpDir, "sample.txt")
+	if err := os.WriteFile(txtFile, []byte("plain text hello world"), 0644); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+	_, err := ResolveAndValidateLocalImage(txtFile, "")
+	if err == nil {
+		t.Errorf("expected error for non-image file")
+	}
+
+	// 3. ResolveAndValidateLocalImage: application/octet-stream sniffing fallback for .png
+	binPng := filepath.Join(tmpDir, "fallback.png")
+	// Non-standard binary header that detects as application/octet-stream
+	if err := os.WriteFile(binPng, []byte("\x00\x01\x02\x03\x04\x05\x06\x07"), 0644); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+	att, err := ResolveAndValidateLocalImage(binPng, "")
+	if err != nil {
+		t.Fatalf("expected successful fallback sniffing, got err: %v", err)
+	}
+	if att.ContentType != "image/png" {
+		t.Errorf("expected image/png content type, got %s", att.ContentType)
+	}
 }
 
