@@ -415,3 +415,10 @@ func (s *SQLStore) RotateSessionID(ctx context.Context, sessionKey, newSessionID
 	}
 	return RotateSessionID(s.db, sessionKey, newSessionID)
 }
+
+func (s *SQLStore) GetSessionInfo(ctx context.Context, threadID string) (*SessionInfo, error) {
+	if s == nil || isDBTXNil(s.db) {
+		return nil, fmt.Errorf("database is nil")
+	}
+	return GetSessionInfo(s.db, threadID)
+}

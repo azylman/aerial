@@ -47,6 +47,7 @@ var (
 
 const (
 	DefaultMaxSessionTurns     = 15
+	DefaultMaxSessionIdleTime  = 24 * time.Hour
 	DefaultTimeoutMinutes      = 60
 	DefaultMaxRestarts         = 3
 	MaxMessageAbsoluteAge      = 2 * time.Hour
@@ -1461,8 +1462,15 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		// wakeIdx >= 0
 		// Check session rotation timing before Phase 1:
 		currentTurns, _ := db.GetSessionTurnCount(p.cfg.DB, threadID)
-		if currentTurns >= DefaultMaxSessionTurns || (wakeIdx > 0 && currentTurns+1 >= DefaultMaxSessionTurns) {
-			log.Printf("[Queue] Scope session reached turn limit (%d/%d). Resetting to cold state for fresh session initialization.", currentTurns, DefaultMaxSessionTurns)
+		lastActivity, isCold, _ := GetSessionLastActivity(p.cfg.DB, threadID, p.sessionMgr)
+		isTurnLimit := currentTurns >= DefaultMaxSessionTurns || (wakeIdx > 0 && currentTurns+1 >= DefaultMaxSessionTurns)
+		isIdleLimit := currentSessionID != "" && !isCold && !lastActivity.IsZero() && time.Since(lastActivity) >= DefaultMaxSessionIdleTime
+		if isTurnLimit || isIdleLimit {
+			if isIdleLimit {
+				log.Printf("[Queue] Scope session reached idle limit (%v >= %v). Resetting to cold state for fresh session initialization.", time.Since(lastActivity).Round(time.Minute), DefaultMaxSessionIdleTime)
+			} else {
+				log.Printf("[Queue] Scope session reached turn limit (%d/%d). Resetting to cold state for fresh session initialization.", currentTurns, DefaultMaxSessionTurns)
+			}
 			_ = db.RotateSessionID(p.cfg.DB, threadID, "")
 			currentSessionID = ""
 		}
@@ -1577,11 +1585,18 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		}
 	}
 
-	// Pre-execution turn limit rotation check (applies to both channel and thread modes)
+	// Pre-execution turn limit and idle rotation check (applies to both channel and thread modes)
 	// Run BEFORE IncrementSessionTurnCount to prevent premature rotation and double-rotation.
 	currentTurns, _ := db.GetSessionTurnCount(p.cfg.DB, threadID)
-	if currentTurns >= DefaultMaxSessionTurns {
-		log.Printf("[Queue] Scope session reached turn limit (%d/%d). Resetting to cold state for fresh session initialization.", currentTurns, DefaultMaxSessionTurns)
+	lastActivity, isCold, _ := GetSessionLastActivity(p.cfg.DB, threadID, p.sessionMgr)
+	isTurnLimit := currentTurns >= DefaultMaxSessionTurns
+	isIdleLimit := currentSessionID != "" && !isCold && !lastActivity.IsZero() && time.Since(lastActivity) >= DefaultMaxSessionIdleTime
+	if isTurnLimit || isIdleLimit {
+		if isIdleLimit {
+			log.Printf("[Queue] Scope session reached idle limit (%v >= %v). Resetting to cold state for fresh session initialization.", time.Since(lastActivity).Round(time.Minute), DefaultMaxSessionIdleTime)
+		} else {
+			log.Printf("[Queue] Scope session reached turn limit (%d/%d). Resetting to cold state for fresh session initialization.", currentTurns, DefaultMaxSessionTurns)
+		}
 		_ = db.RotateSessionID(p.cfg.DB, threadID, "")
 		currentSessionID = ""
 	}

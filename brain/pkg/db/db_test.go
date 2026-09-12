@@ -330,6 +330,98 @@ func TestIncrementSessionTurnCountAndRotation(t *testing.T) {
 	}
 }
 
+func TestSessionLifecycle_TimestampsAndInfo(t *testing.T) {
+	database := setupTestDB(t)
+	defer func() { _ = database.Close() }()
+
+	key := "session-lifecycle-test"
+
+	// 1. Initial save creates session with created_at == updated_at
+	if err := SaveSessionID(database, key, "sess-1"); err != nil {
+		t.Fatalf("SaveSessionID 1 failed: %v", err)
+	}
+
+	info1, err := GetSessionInfo(database, key)
+	if err != nil {
+		t.Fatalf("GetSessionInfo 1 failed: %v", err)
+	}
+	if info1 == nil {
+		t.Fatalf("Expected non-nil SessionInfo")
+	}
+	if info1.ThreadID != key || info1.InternalSessionID != "sess-1" || info1.TurnCount != 0 {
+		t.Errorf("Unexpected session info: %+v", info1)
+	}
+	if info1.CreatedAt.IsZero() || info1.UpdatedAt.IsZero() {
+		t.Errorf("Expected non-zero timestamps: created=%v, updated=%v", info1.CreatedAt, info1.UpdatedAt)
+	}
+	firstCreatedAt := info1.CreatedAt
+
+	// 2. Mid-session turn increment updates updated_at but leaves created_at untouched
+	time.Sleep(10 * time.Millisecond)
+	if _, err := IncrementSessionTurnCount(database, key); err != nil {
+		t.Fatalf("IncrementSessionTurnCount failed: %v", err)
+	}
+
+	info2, err := GetSessionInfo(database, key)
+	if err != nil {
+		t.Fatalf("GetSessionInfo 2 failed: %v", err)
+	}
+	if info2.TurnCount != 1 {
+		t.Errorf("Expected turn_count=1, got %d", info2.TurnCount)
+	}
+	if !info2.CreatedAt.Equal(firstCreatedAt) {
+		t.Errorf("created_at was mutated on turn increment: before=%v, after=%v", firstCreatedAt, info2.CreatedAt)
+	}
+	if !info2.UpdatedAt.After(info1.UpdatedAt) {
+		t.Errorf("updated_at did not advance on turn increment: before=%v, after=%v", info1.UpdatedAt, info2.UpdatedAt)
+	}
+
+	// 3. Re-saving identical session ID does NOT change created_at
+	time.Sleep(10 * time.Millisecond)
+	if err := SaveSessionID(database, key, "sess-1"); err != nil {
+		t.Fatalf("SaveSessionID idempotent failed: %v", err)
+	}
+	info3, err := GetSessionInfo(database, key)
+	if err != nil {
+		t.Fatalf("GetSessionInfo 3 failed: %v", err)
+	}
+	if !info3.CreatedAt.Equal(firstCreatedAt) {
+		t.Errorf("created_at mutated on idempotent SaveSessionID: before=%v, after=%v", firstCreatedAt, info3.CreatedAt)
+	}
+
+	// 4. RotateSessionID updates created_at to now and resets turn_count to 0
+	time.Sleep(10 * time.Millisecond)
+	if err := RotateSessionID(database, key, ""); err != nil {
+		t.Fatalf("RotateSessionID failed: %v", err)
+	}
+	info4, err := GetSessionInfo(database, key)
+	if err != nil {
+		t.Fatalf("GetSessionInfo 4 failed: %v", err)
+	}
+	if info4.InternalSessionID != "" || info4.TurnCount != 0 {
+		t.Errorf("Expected cold session state, got: %+v", info4)
+	}
+	if !info4.CreatedAt.After(firstCreatedAt) {
+		t.Errorf("RotateSessionID did not advance created_at: first=%v, rotated=%v", firstCreatedAt, info4.CreatedAt)
+	}
+
+	// 5. Saving a new session ID after cold rotation
+	time.Sleep(10 * time.Millisecond)
+	if err := SaveSessionID(database, key, "sess-fresh-2"); err != nil {
+		t.Fatalf("SaveSessionID fresh failed: %v", err)
+	}
+	info5, err := GetSessionInfo(database, key)
+	if err != nil {
+		t.Fatalf("GetSessionInfo 5 failed: %v", err)
+	}
+	if info5.InternalSessionID != "sess-fresh-2" {
+		t.Errorf("Expected sess-fresh-2, got %s", info5.InternalSessionID)
+	}
+	if !info5.CreatedAt.After(firstCreatedAt) {
+		t.Errorf("Fresh session created_at is not newer than initial: initial=%v, fresh=%v", firstCreatedAt, info5.CreatedAt)
+	}
+}
+
 func TestSchedulesCompatibility(t *testing.T) {
 	database := setupTestDB(t)
 	defer func() { _ = database.Close() }()
