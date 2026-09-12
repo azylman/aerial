@@ -16,6 +16,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/azylman/aerial/brain/pkg/classifier"
 	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
 	"github.com/azylman/aerial/brain/pkg/queue"
@@ -2226,9 +2227,30 @@ channels:
 	sFull.State = discordgo.NewState()
 	sFull.State.User = &discordgo.User{ID: "bot-user-id"}
 	_ = sFull.State.GuildAdd(&discordgo.Guild{ID: "g-full"})
+	_ = sFull.State.RoleAdd("g-full", &discordgo.Role{
+		ID:          "g-full",
+		Permissions: 0,
+	})
 	_ = sFull.State.ChannelAdd(&discordgo.Channel{ID: "ignored-ch", GuildID: "g-full", Type: discordgo.ChannelTypeGuildText})
 	_ = sFull.State.ChannelAdd(&discordgo.Channel{ID: "no-perm-ch", GuildID: "g-full", Type: discordgo.ChannelTypeGuildText})
-	_ = sFull.State.ChannelAdd(&discordgo.Channel{ID: "valid-ch", GuildID: "g-full", Type: discordgo.ChannelTypeGuildText})
+	_ = sFull.State.ChannelAdd(&discordgo.Channel{
+		ID:      "valid-ch",
+		GuildID: "g-full",
+		Type:    discordgo.ChannelTypeGuildText,
+		PermissionOverwrites: []*discordgo.PermissionOverwrite{
+			{
+				ID:    "bot-user-id",
+				Type:  discordgo.PermissionOverwriteTypeMember,
+				Allow: discordgo.PermissionViewChannel | discordgo.PermissionReadMessageHistory,
+			},
+		},
+	})
+	_ = sFull.State.ChannelAdd(&discordgo.Channel{
+		ID:       "msg-targeted-valid",
+		GuildID:  "g-full",
+		ParentID: "valid-ch",
+		Type:     discordgo.ChannelTypeGuildPublicThread,
+	})
 
 	_ = sFull.State.MemberAdd(&discordgo.Member{
 		GuildID: "g-full",
@@ -2242,6 +2264,18 @@ channels:
 
 	sFull.Client = &http.Client{
 		Transport: mockCatchUpRoundTripper(func(req *http.Request) (*http.Response, error) {
+			if strings.Contains(req.URL.Path, "/guilds/g-full/channels") {
+				respBody, _ := json.Marshal([]*discordgo.Channel{
+					{ID: "ignored-ch", GuildID: "g-full", Type: discordgo.ChannelTypeGuildText},
+					{ID: "no-perm-ch", GuildID: "g-full", Type: discordgo.ChannelTypeGuildText},
+					{ID: "valid-ch", GuildID: "g-full", Type: discordgo.ChannelTypeGuildText},
+				})
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(bytes.NewReader(respBody)),
+				}, nil
+			}
 			if strings.Contains(req.URL.Path, "/channels/valid-ch/messages") {
 				respBody, _ := json.Marshal([]*discordgo.Message{
 					{
@@ -2271,6 +2305,7 @@ channels:
 						GuildID:   "g-full",
 						Author:    &discordgo.User{ID: "other-user", Username: "User"},
 						Content:   "aerial help me",
+						Mentions:  []*discordgo.User{{ID: "bot-user-id"}},
 						Timestamp: time.Now().UTC(),
 					},
 				})
@@ -2288,7 +2323,28 @@ channels:
 		}),
 	}
 
-	RunStartupCatchUpSweep(context.Background(), database, pool, sFull)
+	// Nil context
+	RunStartupCatchUpSweep(nil, database, pool, sFull)
+
+	// Cancelled context
+	resetFunnelGlobals(t)
+	ctxCancel, cancel := context.WithCancel(context.Background())
+	cancel()
+	RunStartupCatchUpSweep(ctxCancel, database, pool, sFull)
+
+	// Panic recovery
+	resetFunnelGlobals(t)
+	sPanic := &discordgo.Session{
+		State: discordgo.NewState(),
+		Token: "mock-token",
+		Client: &http.Client{
+			Transport: mockCatchUpRoundTripper(func(req *http.Request) (*http.Response, error) {
+				panic("deliberate panic for recovery test")
+			}),
+		},
+	}
+	_ = sPanic.State.GuildAdd(&discordgo.Guild{ID: "g-panic"})
+	RunStartupCatchUpSweep(context.Background(), database, pool, sPanic)
 
 	// 5. DB insert error during sweep
 	resetFunnelGlobals(t)
@@ -2296,6 +2352,71 @@ channels:
 	_ = closedDB.Close()
 	RunStartupCatchUpSweep(context.Background(), closedDB, pool, sFull)
 }
+
+func TestCreateThread_EdgeCases(t *testing.T) {
+	setupTestConfig(t, `
+model: "gemini-2.5-flash"
+channels:
+  default:
+    mode: "threads"
+`)
+	s := &discordgo.Session{
+		State: discordgo.NewState(),
+	}
+	_ = s.State.GuildAdd(&discordgo.Guild{ID: "guild-edge"})
+	_ = s.State.ChannelAdd(&discordgo.Channel{
+		ID:      "chan-edge-1",
+		GuildID: "guild-edge",
+		Name:    "general",
+		Type:    discordgo.ChannelTypeGuildText,
+	})
+
+	msg := &discordgo.Message{
+		ID:        "msg-edge-1",
+		ChannelID: "chan-edge-1",
+		GuildID:   "guild-edge",
+		Content:   "test content",
+	}
+
+	// 1. allowSummarize = false
+	thID, _ := getOrCreateThreadID(s, msg, false)
+	if thID == "" {
+		t.Errorf("expected non-empty thread id with allowSummarize=false")
+	}
+
+	// 2. Set classifier that returns an error to test sumErr != nil branch
+	clsErr := classifier.New(currentFunnelConfig(), func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+		return "", "", 1, errors.New("summarizer forced failure")
+	})
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer database.Close()
+	pool := queue.New(currentFunnelConfig(), queue.WorkerPoolConfig{
+		Classifier: clsErr,
+		DB:         database,
+	})
+	SetFunnelPool(pool)
+	defer SetFunnelPool(nil)
+
+	thIDFail, _ := getOrCreateThreadID(s, msg, true)
+	if thIDFail == "" {
+		t.Errorf("expected non-empty thread id on summarizer failure")
+	}
+
+	// 3. titleSummarizeSem saturated: occupy the semaphore and call getOrCreateThreadID
+	select {
+	case titleSummarizeSem <- struct{}{}:
+		defer func() { <-titleSummarizeSem }()
+	default:
+	}
+	thID2, _ := getOrCreateThreadID(s, msg, true)
+	if thID2 == "" {
+		t.Errorf("expected non-empty thread id when semaphore saturated")
+	}
+}
+
 
 
 
