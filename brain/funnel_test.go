@@ -524,8 +524,8 @@ channels:
 	if strings.Contains(promptAdmin, "[NO_REPLY]") {
 		t.Errorf("Expected threads mode prompt NOT to contain '[NO_REPLY]', got:\n%s", promptAdmin)
 	}
-	if !strings.Contains(promptAdmin, "Discord thread") {
-		t.Errorf("Expected threads mode prompt to mention 'Discord thread', got:\n%s", promptAdmin)
+	if !strings.Contains(promptAdmin, "delivered directly to Discord") {
+		t.Errorf("Expected threads mode prompt to mention 'delivered directly to Discord', got:\n%s", promptAdmin)
 	}
 
 	// 2. Non-admin message in channel mode with reply context
@@ -561,8 +561,8 @@ channels:
 	if strings.Contains(promptNonAdmin, "[NO_REPLY]") {
 		t.Errorf("Expected channel mode prompt NOT to contain [NO_REPLY] guidance, got:\n%s", promptNonAdmin)
 	}
-	if !strings.Contains(promptNonAdmin, "Discord channel") {
-		t.Errorf("Expected channel mode prompt to mention 'Discord channel', got:\n%s", promptNonAdmin)
+	if !strings.Contains(promptNonAdmin, "delivered directly to Discord") {
+		t.Errorf("Expected channel mode prompt to mention 'delivered directly to Discord', got:\n%s", promptNonAdmin)
 	}
 }
 
@@ -1457,13 +1457,13 @@ channels:
 	if !strings.Contains(promptThread, "https://example.com/log.txt") {
 		t.Errorf("Expected attachment URL in prompt")
 	}
-	if !strings.Contains(promptThread, "delivered directly to the Discord thread") {
-		t.Errorf("Expected thread delivery instructions in prompt")
+	if !strings.Contains(promptThread, "delivered directly to Discord") {
+		t.Errorf("Expected delivery instructions in thread prompt")
 	}
 
 	promptChannel := buildDiscordPrompt(nil, msg, "chan-fmt-1", config.ChannelPolicy{Mode: "channel"})
-	if !strings.Contains(promptChannel, "delivered directly to the Discord channel") {
-		t.Errorf("Expected channel delivery instructions in prompt")
+	if !strings.Contains(promptChannel, "delivered directly to Discord") {
+		t.Errorf("Expected delivery instructions in channel prompt")
 	}
 
 	msgNilAuthor := &discordgo.Message{
