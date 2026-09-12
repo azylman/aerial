@@ -1708,6 +1708,16 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 	currentModel := p.GetRuntimeConfig()
 	currentAgyBin := p.cfg.AgyBin
 	currentAPIKey := p.cfg.APIKey
+	if p.appCfg != nil {
+		if cur := p.appCfg.Current(); cur != nil {
+			if cur.AgyBin != "" {
+				currentAgyBin = cur.AgyBin
+			}
+			if cur.APIKey != "" {
+				currentAPIKey = cur.APIKey
+			}
+		}
+	}
 
 	initialRetryCount := 0
 	for _, m := range burst {
@@ -2035,16 +2045,18 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 				stopTyping()
 				statusUpdater.Stop()
 				statusUpdater.DeleteStatusMessage()
-				_ = db.RotateSessionID(p.cfg.DB, threadID, "")
-				metrics.RecordTurnCompleted("watchdog_timeout", triggerType, currentModel, time.Since(execStart))
 
 				if p.ctx.Err() != nil {
 					log.Printf("[WorkerPool] Pool shutting down on watchdog timeout for thread %s. Resetting to PENDING.", threadID)
+					metrics.RecordTurnCompleted("cancelled", triggerType, currentModel, time.Since(execStart))
 					for _, m := range burst {
 						_ = db.UpdateMessageStatus(p.cfg.DB, m.ID, db.StatusPending, "interrupted by graceful deployment")
 					}
 					return
 				}
+
+				_ = db.RotateSessionID(p.cfg.DB, threadID, "")
+				metrics.RecordTurnCompleted("watchdog_timeout", triggerType, currentModel, time.Since(execStart))
 
 				if !skipDiscord {
 					sanitizedSnippet := sanitizeErrorText(errDetail)
@@ -2189,7 +2201,12 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 				_ = db.IncrementMessageRetry(p.cfg.DB, m.ID, errDetail)
 			}
 			statusUpdater.Reset()
-			notif := p.cfg.NotifierFunc(currentAgyBin, currentAPIKey, "session reset due to context corruption")
+			var notif string
+			if isRateLimitError(errDetail, stderr) {
+				notif = notifier.ModelUnavailableMessage()
+			} else {
+				notif = p.cfg.NotifierFunc(currentAgyBin, currentAPIKey, "session reset due to context corruption")
+			}
 			if !skipDiscord {
 				if err := p.cfg.DeliveryFunc(p.getDiscordSession(), threadID, notif); err != nil {
 					log.Printf("[WorkerPool] Failed to deliver session reset notice for thread %s: %v", threadID, err)
@@ -2396,6 +2413,9 @@ func isRateLimitError(errDetail string, extraStrs ...string) bool {
 	for _, s := range extraStrs {
 		combined += " " + strings.ToLower(s)
 	}
+	if strings.Contains(combined, "disk quota") {
+		return false
+	}
 	for _, kw := range rateLimitKeywords {
 		if strings.Contains(combined, kw) {
 			return true
@@ -2444,11 +2464,14 @@ func RecoverInterrupted(database *sql.DB, pool *WorkerPool) {
 			if m.RetryCount >= maxAttempts {
 				reason = "poison pill: exceeded retry limit during crash recovery"
 			}
-			log.Printf("[Startup Recovery] Poison pill detected for message %s (restart_count=%d, retry_count=%d): %s. Dropping message.", m.ID, m.RestartCount, m.RetryCount, reason)
-			snippet := m.Content
-			if len([]rune(snippet)) > 60 {
-				snippet = string([]rune(snippet)[:57]) + "..."
+			cleanSnippet := sanitizeErrorText(m.Content)
+			cleanSnippet = strings.ReplaceAll(cleanSnippet, "\n", " ")
+			cleanSnippet = strings.ReplaceAll(cleanSnippet, "\r", "")
+			cleanSnippet = strings.TrimSpace(cleanSnippet)
+			if len([]rune(cleanSnippet)) > 60 {
+				cleanSnippet = string([]rune(cleanSnippet)[:57]) + "..."
 			}
+			snippet := cleanSnippet
 			agyBin := pool.cfg.AgyBin
 			apiKey := pool.cfg.APIKey
 			if pool.appCfg != nil {

@@ -8786,6 +8786,7 @@ func TestIsRateLimitError_ExtendedKeywords(t *testing.T) {
 		{errDetail: "Individual quota reached for user", want: true},
 		{errDetail: "Please upgrade your subscription to continue", want: true},
 		{errDetail: "generic error", extra: "upstream returned 429 Too Many Requests", want: true},
+		{errDetail: "write: disk quota exceeded", want: false},
 		{errDetail: "syntax error on line 42", want: false},
 		{errDetail: "", want: false},
 	}
@@ -9461,6 +9462,67 @@ func TestWorkerPool_Transient_CancelledDuringBackoff(t *testing.T) {
 	}
 	if dbMsg.Status != db.StatusPending {
 		t.Errorf("Expected status PENDING after pool cancel during transient backoff, got: %s", dbMsg.Status)
+	}
+}
+
+func TestWorkerPool_SessionCorruption_RateLimitBypassesNotifier(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	_ = db.RotateSessionID(database, "thread-sc-rl", "sess-existing-1")
+
+	notifierCalled := false
+	var deliveredNotif string
+	var mu sync.Mutex
+	doneCh := make(chan struct{}, 1)
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		MaxAttempts:    1,
+		TimeoutMinutes: 1,
+		BackoffBase:    5 * time.Millisecond,
+		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+			return "", "conversation not found: 429 rate limit exceeded", 1, errors.New("rate limited corruption")
+		},
+		NotifierFunc: func(agyBin, apiKey, contextDescription string) string {
+			mu.Lock()
+			notifierCalled = true
+			mu.Unlock()
+			return "SHOULD NOT BE CALLED"
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			mu.Lock()
+			deliveredNotif = text
+			mu.Unlock()
+			return nil
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			doneCh <- struct{}{}
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{ID: "msg-sc-rl", ThreadID: "thread-sc-rl", Content: "corrupt test"}
+	_ = db.InsertMessage(database, msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Timeout waiting for session corruption completion")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if notifierCalled {
+		t.Errorf("NotifierFunc should not be called when session corruption has rate limit")
+	}
+	if deliveredNotif != notifier.ModelUnavailableMessage() {
+		t.Errorf("Expected ModelUnavailableMessage, got: %q", deliveredNotif)
 	}
 }
 
