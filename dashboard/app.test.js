@@ -47,6 +47,8 @@ const sandbox = {
     console: { log: () => {}, warn: () => {}, error: () => {} }
 };
 
+const initialGetElementById = sandbox.document.getElementById;
+
 vm.createContext(sandbox);
 vm.runInContext(appJsCode, sandbox);
 
@@ -295,7 +297,7 @@ describe('Permet HUD Pure Logic Unit Tests', () => {
     describe('renderQuickLaunchDock(links)', () => {
         it('renders quick launch chips and sets target and rel attributes', () => {
             const mockDock = { style: {}, innerHTML: '' };
-            sandbox.document.getElementById = (id) => id === 'quick-launch-dock' ? mockDock : null;
+            sandbox.document.getElementById = () => mockDock;
 
             const links = [
                 { name: 'DOCS', url: '/docs/', icon: '📚', target: '_blank', is_core: true },
@@ -316,7 +318,7 @@ describe('Permet HUD Pure Logic Unit Tests', () => {
 
         it('hides dock when links list is empty', () => {
             const mockDock = { style: {}, innerHTML: '' };
-            sandbox.document.getElementById = (id) => id === 'quick-launch-dock' ? mockDock : null;
+            sandbox.document.getElementById = () => mockDock;
 
             renderQuickLaunchDock([]);
             assert.equal(mockDock.style.display, 'none');
@@ -326,7 +328,7 @@ describe('Permet HUD Pure Logic Unit Tests', () => {
     describe('renderGitSyncBadge(gitSync)', () => {
         it('renders in-sync pill when status is synced and lag is 0', () => {
             const mockBadge = { className: '', innerHTML: '' };
-            sandbox.document.getElementById = (id) => id === 'gitsync-badge' ? mockBadge : null;
+            sandbox.document.getElementById = () => mockBadge;
 
             renderGitSyncBadge({ status: 'synced', max_lag_seconds: 0 });
             assert.equal(mockBadge.className, 'gitsync-pill');
@@ -335,7 +337,7 @@ describe('Permet HUD Pure Logic Unit Tests', () => {
 
         it('renders lagging pill when lag > 0', () => {
             const mockBadge = { className: '', innerHTML: '' };
-            sandbox.document.getElementById = (id) => id === 'gitsync-badge' ? mockBadge : null;
+            sandbox.document.getElementById = () => mockBadge;
 
             renderGitSyncBadge({ status: 'lagging', max_lag_seconds: 45 });
             assert.equal(mockBadge.className, 'gitsync-pill lagging');
@@ -344,7 +346,7 @@ describe('Permet HUD Pure Logic Unit Tests', () => {
 
         it('renders error pill when status is error', () => {
             const mockBadge = { className: '', innerHTML: '' };
-            sandbox.document.getElementById = (id) => id === 'gitsync-badge' ? mockBadge : null;
+            sandbox.document.getElementById = () => mockBadge;
 
             renderGitSyncBadge({ status: 'error' });
             assert.equal(mockBadge.className, 'gitsync-pill error');
@@ -540,7 +542,7 @@ describe('Permet HUD Pure Logic Unit Tests', () => {
         });
 
         it('verifies eager metrics fetch on bootstrap in app.js', () => {
-            assert.ok(appJsCode.includes('fetchSchedules();\nfetchFacts();') || appJsCode.includes('fetchSchedules();\r\nfetchFacts();') || (appJsCode.includes('fetchSchedules()') && appJsCode.includes('fetchFacts()')), 'app.js should include eager metrics bootstrap');
+            assert.ok(appJsCode.includes('fetchSchedules()') && appJsCode.includes('fetchFacts()'), 'app.js should include eager metrics bootstrap');
         });
     });
 
@@ -686,6 +688,33 @@ describe('Permet HUD Pure Logic Unit Tests', () => {
                 // Total sum = 1.0 + 0.5 + 0.0 + 0.5 = 2.0. Avg = 2.0 / 4 = 0.50
                 assert.equal(elements['memory-avg-importance'].textContent, '0.50');
             });
+        });
+    });
+
+    describe('Sandbox Environment & DOM Fallbacks', () => {
+        it('exercises browser stub methods cleanly', async () => {
+            sandbox.window.addEventListener('load', () => {});
+            sandbox.window.removeEventListener('load', () => {});
+            const elem = sandbox.document.createElement('div');
+            elem.setAttribute('data-test', 'true');
+            elem.classList.add('active');
+            elem.classList.remove('active');
+            sandbox.document.addEventListener('click', () => {});
+            assert.deepEqual(sandbox.document.querySelectorAll(), []);
+            assert.equal(initialGetElementById('missing'), null);
+            sandbox.document.getElementById = (id) => ({ id });
+            assert.ok(sandbox.document.getElementById('missing'));
+            await sandbox.navigator.clipboard.writeText('hello');
+            assert.equal(sandbox.setInterval(() => {}, 1000), 1);
+            sandbox.clearInterval(1);
+            assert.equal(sandbox.setTimeout(() => {}, 1000), 1);
+            sandbox.clearTimeout(1);
+            const fetchRes = await sandbox.fetch('/api');
+            const data = await fetchRes.json();
+            assert.deepEqual(data, {});
+            sandbox.console.log('info');
+            sandbox.console.warn('warning');
+            sandbox.console.error('error');
         });
     });
 });
