@@ -1,10 +1,8 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -128,7 +126,10 @@ func defaultDockerExecutor(ctx context.Context, args ...string) ([]byte, []byte,
 	cmd := exec.CommandContext(ctx, "docker", args...)
 	cmd.Cancel = func() error {
 		if cmd.Process != nil {
-			return cmd.Process.Signal(syscall.SIGTERM)
+			if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+				return cmd.Process.Kill()
+			}
+			return nil
 		}
 		return nil
 	}
@@ -144,19 +145,7 @@ func defaultDockerExecutor(ctx context.Context, args ...string) ([]byte, []byte,
 // scrubComposeEnv filters out container-internal path overrides (AERIAL_CONFIG_DIR, AERIAL_PROJECT_DIR)
 // so docker compose does not inherit container filesystem paths for host volume mounts.
 func scrubComposeEnv(environ []string) []string {
-	out := make([]string, 0, len(environ))
-	for _, env := range environ {
-		eq := strings.IndexByte(env, '=')
-		if eq == -1 {
-			continue
-		}
-		key := env[:eq]
-		if strings.EqualFold(key, "AERIAL_CONFIG_DIR") || strings.EqualFold(key, "AERIAL_PROJECT_DIR") {
-			continue
-		}
-		out = append(out, env)
-	}
-	return out
+	return ScrubComposeEnv(environ)
 }
 
 // ComposeExecutor executes docker compose commands.
@@ -169,7 +158,10 @@ func defaultComposeExecutor(ctx context.Context, dir string, args ...string) ([]
 	cmd.Env = scrubComposeEnv(os.Environ())
 	cmd.Cancel = func() error {
 		if cmd.Process != nil {
-			return cmd.Process.Signal(syscall.SIGTERM)
+			if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+				return cmd.Process.Kill()
+			}
+			return nil
 		}
 		return nil
 	}
@@ -180,6 +172,38 @@ func defaultComposeExecutor(ctx context.Context, dir string, args ...string) ([]
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	return stdout.Bytes(), stderr.Bytes(), err
+}
+
+// GitExecutor executes git CLI commands.
+type GitExecutor func(ctx context.Context, dir string, args ...string) (stdout []byte, stderr []byte, err error)
+
+func runGitCommand(ctx context.Context, dir, pat string, args ...string) ([]byte, []byte, error) {
+	gitBin := ResolveGitBin(os.Getenv)
+	cmd := exec.CommandContext(ctx, gitBin, args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	cmd.Env = BuildGitEnv(pat, os.Environ())
+	cmd.Cancel = func() error {
+		if cmd.Process != nil {
+			if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+				return cmd.Process.Kill()
+			}
+			return nil
+		}
+		return nil
+	}
+	cmd.WaitDelay = 10 * time.Second
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	return stdout.Bytes(), stderr.Bytes(), err
+}
+
+func defaultGitExecutor(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+	return runGitCommand(ctx, dir, "", args...)
 }
 
 // SyncDaemon coordinates periodic and on-demand repository synchronizations.
@@ -204,6 +228,7 @@ type SyncDaemon struct {
 	extraSecrets     []string
 	composeExecutor  ComposeExecutor
 	dockerExecutor   DockerExecutor
+	gitExecutor      GitExecutor
 
 	// Concurrency & Quarantine
 	repoLocksMu        sync.Mutex
@@ -238,6 +263,19 @@ func (d *SyncDaemon) getDockerExecutor() DockerExecutor {
 	return defaultDockerExecutor
 }
 
+func (d *SyncDaemon) getGitExecutor() GitExecutor {
+	if d != nil && d.gitExecutor != nil {
+		return d.gitExecutor
+	}
+	pat := ""
+	if d != nil {
+		pat = d.pat
+	}
+	return func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+		return runGitCommand(ctx, dir, pat, args...)
+	}
+}
+
 // resolveGitDir checks if repoPath contains a .git directory or a .git file (e.g., worktree/submodule).
 func resolveGitDir(repoPath string) (string, error) {
 	gitPath := filepath.Join(repoPath, ".git")
@@ -267,58 +305,45 @@ func resolveGitDir(repoPath string) (string, error) {
 
 // buildGitEnv builds the environment variables for git execution with secret hygiene.
 func buildGitEnv(pat string) []string {
-	env := append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
-	pat = strings.TrimSpace(pat)
-	if pat == "" {
-		return env
-	}
-
-	encoded := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + pat))
-	cleanEncoded := strings.ReplaceAll(strings.ReplaceAll(encoded, "\r", ""), "\n", "")
-
-	return append(env,
-		"GIT_CONFIG_COUNT=2",
-		"GIT_CONFIG_KEY_0=http.extraHeader",
-		"GIT_CONFIG_VALUE_0="+fmt.Sprintf("AUTHORIZATION: basic %s", cleanEncoded),
-		"GIT_CONFIG_KEY_1=http.version",
-		"GIT_CONFIG_VALUE_1=HTTP/1.1",
-	)
+	return BuildGitEnv(pat, os.Environ())
 }
 
 // HasComposeChanges checks whether compose or environment configuration files changed between commits.
 func (d *SyncDaemon) HasComposeChanges(ctx context.Context, repoPath, prevHead, currHead string) (bool, error) {
+	if ctx.Err() != nil {
+		return false, ctx.Err()
+	}
 	if prevHead == "" || currHead == "" || prevHead == currHead {
 		return false, nil
 	}
-
-	composeTargets := []string{
-		"docker-compose.yml",
-		"docker-compose.override.yml",
-		"docker-compose.override.yaml",
-		"compose.yaml",
-		"compose.override.yaml",
-		".env",
-		".env.example",
+	if repoPath == "" {
+		return false, nil
 	}
 
-	args := append([]string{"-C", repoPath, "diff", "--name-only", prevHead, currHead, "--"}, composeTargets...)
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Env = buildGitEnv(d.pat)
-	out, err := cmd.Output()
+	composeTargets := composeFileTargets
+
+	args := append([]string{"diff", "--name-only", prevHead, currHead, "--"}, composeTargets...)
+	stdout, _, err := d.getGitExecutor()(ctx, repoPath, args...)
 	if err != nil {
+		if ctx.Err() != nil {
+			return false, ctx.Err()
+		}
 		// Fallback for shallow clone or disconnected histories
-		fallbackArgs := append([]string{"-C", repoPath, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD", "--"}, composeTargets...)
-		cmdFallback := exec.CommandContext(ctx, "git", fallbackArgs...)
-		cmdFallback.Env = buildGitEnv(d.pat)
-		outFallback, errFallback := cmdFallback.Output()
+		fallbackArgs := append([]string{"diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD", "--"}, composeTargets...)
+		stdoutFallback, _, errFallback := d.getGitExecutor()(ctx, repoPath, fallbackArgs...)
 		if errFallback != nil {
+			if ctx.Err() != nil {
+				return false, ctx.Err()
+			}
 			log.Printf("[GitSync] Warning: Failed to inspect diff in %s (%v); failing safe to trigger reconcile", repoPath, errFallback)
 			return true, nil
 		}
-		return len(strings.TrimSpace(string(outFallback))) > 0, nil
+		lines := strings.Split(strings.TrimSpace(string(stdoutFallback)), "\n")
+		return len(FilterComposeChanges(lines)) > 0, nil
 	}
 
-	return len(strings.TrimSpace(string(out))) > 0, nil
+	lines := strings.Split(strings.TrimSpace(string(stdout)), "\n")
+	return len(FilterComposeChanges(lines)) > 0, nil
 }
 
 // getComposeArgs constructs the compose CLI flags with base docker-compose.yml and any present overrides.
@@ -370,66 +395,12 @@ func (d *SyncDaemon) CleanConflictContainers(ctx context.Context) error {
 		return fmt.Errorf("failed to list containers: %s (%w)", SanitizeLog(strings.TrimSpace(string(stderr))), err)
 	}
 
-	scanner := bufio.NewScanner(bytes.NewReader(stdout))
-	selfHostname := os.Getenv("HOSTNAME")
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-		parts := strings.Split(line, "\t")
-		if len(parts) < 3 {
-			continue
-		}
-		id := strings.TrimSpace(parts[0])
-		names := strings.TrimSpace(parts[1])
-		status := strings.TrimSpace(parts[2])
-
-		if id == "" {
-			continue
-		}
-
-		shortID := id
+	conflicts := FilterConflictContainers(string(stdout), os.Getenv("HOSTNAME"))
+	for _, c := range conflicts {
+		shortID := c.ID
 		if len(shortID) > 12 {
 			shortID = shortID[:12]
 		}
-
-		// Self-preservation: do not touch self or gitsync
-		if selfHostname != "" && (strings.EqualFold(id, selfHostname) || strings.EqualFold(shortID, selfHostname)) {
-			continue
-		}
-		if strings.Contains(names, "aerial-gitsync") {
-			continue
-		}
-
-		// State gate: only remove containers in created, exited, or dead states.
-		// Active containers (e.g. Up..., Restarting...) during rolling restarts are never killed.
-		statusLower := strings.ToLower(status)
-		isNonRunning := strings.HasPrefix(statusLower, "created") ||
-			strings.HasPrefix(statusLower, "exited") ||
-			strings.HasPrefix(statusLower, "dead")
-		if !isNonRunning {
-			continue
-		}
-
-		// Cryptographic prefix check:
-		// Docker Compose renames old containers before recreating them to: <short_id>_<service_name>.
-		// Verify that one of the container's names starts with its own short ID followed by '_'.
-		nameList := strings.Split(names, ",")
-		isConflict := false
-		expectedPrefix := shortID + "_"
-		for _, name := range nameList {
-			cleanName := strings.TrimSpace(name)
-			cleanName = strings.TrimPrefix(cleanName, "/")
-			if strings.HasPrefix(cleanName, expectedPrefix) {
-				isConflict = true
-				break
-			}
-		}
-		if !isConflict {
-			continue
-		}
-
 		// Remove conflict container
 		_, rmErrBytes, rmErr := d.getDockerExecutor()(ctx, "rm", "-f", shortID)
 		if rmErr != nil {
@@ -437,10 +408,10 @@ func (d *SyncDaemon) CleanConflictContainers(ctx context.Context) error {
 			if strings.Contains(rmErrStr, "No such container") {
 				log.Printf("[GitSync:ConflictClean] Container %s already removed", shortID)
 			} else {
-				log.Printf("[GitSync:ConflictClean] Warning: failed to remove conflict container %s (%s): %s (%v)", shortID, names, SanitizeLog(strings.TrimSpace(rmErrStr)), rmErr)
+				log.Printf("[GitSync:ConflictClean] Warning: failed to remove conflict container %s (%s): %s (%v)", shortID, c.Names, SanitizeLog(strings.TrimSpace(rmErrStr)), rmErr)
 			}
 		} else {
-			log.Printf("[GitSync:ConflictClean] Purged orphaned conflict container %s (%s, status: %s)", shortID, names, status)
+			log.Printf("[GitSync:ConflictClean] Purged orphaned conflict container %s (%s, status: %s)", shortID, c.Names, c.Status)
 		}
 	}
 	return nil
@@ -465,22 +436,7 @@ func (d *SyncDaemon) ValidateCompose(ctx context.Context, composeDir string) err
 // parseComposeServices parses newline-delimited compose service names, trims whitespace,
 // deduplicates entries, and filters out the gitsync sidecar service (case-insensitive).
 func parseComposeServices(output string) []string {
-	lines := strings.Split(output, "\n")
-	seen := make(map[string]struct{}, len(lines))
-	targets := make([]string, 0, len(lines))
-
-	for _, line := range lines {
-		svc := strings.TrimSpace(line)
-		svc = strings.TrimRight(svc, "\r")
-		if svc == "" || strings.EqualFold(svc, "gitsync") {
-			continue
-		}
-		if _, exists := seen[svc]; !exists {
-			seen[svc] = struct{}{}
-			targets = append(targets, svc)
-		}
-	}
-	return targets
+	return ParseComposeServices(output)
 }
 
 // GetReconcileTargets queries docker compose config --services to discover all defined services,
@@ -635,30 +591,7 @@ func (d *SyncDaemon) SendDiscordAlert(ctx context.Context, title, repoPath, faul
 	d.alertDedupeMu.Unlock()
 
 	sanitizedErr := d.SanitizeAll(strings.TrimSpace(errorMsg))
-	if len(sanitizedErr) > 1200 {
-		sanitizedErr = sanitizedErr[:1200] + "\n[... truncated for length]"
-	}
-
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("🚨 **GitSync GitOps Rollback Alert: %s**\n\n", strings.TrimSpace(title)))
-	if repoPath != "" {
-		sb.WriteString(fmt.Sprintf("**Repository:** `%s`\n", filepath.Clean(repoPath)))
-	}
-	if stage != "" {
-		sb.WriteString(fmt.Sprintf("**Stage:** `%s`\n", stage))
-	}
-	if faultyCommit != "" {
-		sb.WriteString(fmt.Sprintf("**Faulty Commit:** `%s`\n", faultyCommit))
-	}
-	if rolledBackTo != "" {
-		sb.WriteString(fmt.Sprintf("**Rolled Back To:** `%s`\n", rolledBackTo))
-	}
-	if sanitizedErr != "" {
-		sb.WriteString(fmt.Sprintf("\n**Error:**\n```\n%s\n```\n", sanitizedErr))
-	}
-	sb.WriteString("*Faulty commit quarantined to prevent sync loops. Newer commits to origin/main will sync normally.*")
-
-	content := sb.String()
+	content := BuildDiscordAlertContent(title, repoPath, faultyCommit, rolledBackTo, stage, sanitizedErr)
 
 	client := d.alertHTTPClient
 	if client == nil {
@@ -820,8 +753,6 @@ func (d *SyncDaemon) executeRollback(ctx context.Context, pending []ComposeChang
 		return
 	}
 
-	cleanEnv := append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
-
 	for _, ch := range pending {
 		if ch.PreviousHead == "" || ch.RepoPath == "" {
 			continue
@@ -829,11 +760,10 @@ func (d *SyncDaemon) executeRollback(ctx context.Context, pending []ComposeChang
 		repoLock := d.getRepoLock(ch.RepoPath)
 		repoLock.Lock()
 
-		cmdReset := exec.CommandContext(ctx, "git", "-C", ch.RepoPath, "reset", "--hard", ch.PreviousHead)
-		cmdReset.Env = cleanEnv
-		outReset, errReset := cmdReset.CombinedOutput()
+		outReset, errResetBytes, errReset := d.getGitExecutor()(ctx, ch.RepoPath, "reset", "--hard", ch.PreviousHead)
 		if errReset != nil {
-			log.Printf("[GitSync:GitOps] Critical: Failed to reset %s to %s: %s (%v)", ch.RepoPath, ch.PreviousHead, SanitizeLog(string(outReset)), errReset)
+			combined := string(append(outReset, errResetBytes...))
+			log.Printf("[GitSync:GitOps] Critical: Failed to reset %s to %s: %s (%v)", ch.RepoPath, ch.PreviousHead, SanitizeLog(combined), errReset)
 		} else {
 			log.Printf("[GitSync:GitOps] Successfully rolled back %s to %s", ch.RepoPath, ch.PreviousHead)
 		}
@@ -991,33 +921,24 @@ func (d *SyncDaemon) EnsureRepo(ctx context.Context, repoPath, repoURL string) e
 		return err
 	}
 
-	gitEnv := buildGitEnv(d.pat)
-
 	if len(entries) == 0 {
-		cmd := exec.CommandContext(ctx, "git", "clone", "--depth", "1", "-b", "main", repoURL, repoPath)
-		cmd.Env = gitEnv
-		if out, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("git clone failed for %s: %s (%w)", repoPath, SanitizeLog(string(out)), err)
+		out, errBytes, err := d.getGitExecutor()(ctx, "", "clone", "--depth", "1", "-b", "main", repoURL, repoPath)
+		if err != nil {
+			combined := string(append(out, errBytes...))
+			return fmt.Errorf("git clone failed for %s: %s (%w)", repoPath, SanitizeLog(string(combined)), err)
 		}
 		return nil
 	}
 
-	cmdInit := exec.CommandContext(ctx, "git", "-C", repoPath, "init", "-b", "main")
-	_ = cmdInit.Run()
-
-	cmdRemote := exec.CommandContext(ctx, "git", "-C", repoPath, "remote", "add", "origin", repoURL)
-	_ = cmdRemote.Run()
-
-	cmdFetch := exec.CommandContext(ctx, "git", "-C", repoPath, "fetch", "--depth", "1", "origin", "main")
-	cmdFetch.Env = gitEnv
-	if out, err := cmdFetch.CombinedOutput(); err != nil {
-		return fmt.Errorf("git fetch failed during adoption for %s: %s (%w)", repoPath, SanitizeLog(string(out)), err)
+	_, _, _ = d.getGitExecutor()(ctx, repoPath, "init", "-b", "main")
+	_, _, _ = d.getGitExecutor()(ctx, repoPath, "remote", "add", "origin", repoURL)
+	out, errBytes, err := d.getGitExecutor()(ctx, repoPath, "fetch", "--depth", "1", "origin", "main")
+	if err != nil {
+		combined := string(append(out, errBytes...))
+		return fmt.Errorf("git fetch failed during adoption for %s: %s (%w)", repoPath, SanitizeLog(string(combined)), err)
 	}
 
-	cmdReset := exec.CommandContext(ctx, "git", "-C", repoPath, "reset", "--soft", "FETCH_HEAD")
-	cmdReset.Env = gitEnv
-	_ = cmdReset.Run()
-
+	_, _, _ = d.getGitExecutor()(ctx, repoPath, "reset", "--soft", "FETCH_HEAD")
 	return nil
 }
 
@@ -1074,14 +995,9 @@ func (d *SyncDaemon) SyncRepo(ctx context.Context, repoPath string) (res RepoSyn
 	opCtx, cancel := context.WithTimeout(ctx, 40*time.Second)
 	defer cancel()
 
-	gitEnv := buildGitEnv(d.pat)
+	_, _, _ = d.getGitExecutor()(opCtx, "", "config", "--global", "safe.directory", "*")
 
-	cmdSafe := exec.CommandContext(opCtx, "git", "config", "--global", "safe.directory", "*")
-	_ = cmdSafe.Run()
-
-	cmdBefore := exec.CommandContext(opCtx, "git", "-C", repoPath, "rev-parse", "HEAD")
-	cmdBefore.Env = gitEnv
-	outBefore, err := cmdBefore.Output()
+	outBefore, _, err := d.getGitExecutor()(opCtx, repoPath, "rev-parse", "HEAD")
 	if err != nil {
 		sanitizedErr := SanitizeLog(err.Error())
 		log.Printf("[GitSync] Warning: failed to rev-parse HEAD before pull for %s: %s", repoPath, sanitizedErr)
@@ -1092,26 +1008,22 @@ func (d *SyncDaemon) SyncRepo(ctx context.Context, repoPath string) (res RepoSyn
 	res.CurrentHead = res.PreviousHead
 
 	// 1. Fetch remote commit metadata without modifying working tree
-	cmdFetch := exec.CommandContext(opCtx, "git", "-C", repoPath, "fetch", "origin", "main")
-	cmdFetch.Env = gitEnv
-	outFetch, errFetch := cmdFetch.CombinedOutput()
+	outFetch, errFetchBytes, errFetch := d.getGitExecutor()(opCtx, repoPath, "fetch", "origin", "main")
 	if errFetch != nil {
-		sanitizedOut := SanitizeLog(strings.TrimSpace(string(outFetch)))
+		combinedFetch := string(append(outFetch, errFetchBytes...))
+		sanitizedOut := SanitizeLog(strings.TrimSpace(combinedFetch))
 		sanitizedErr := SanitizeLog(errFetch.Error())
 		log.Printf("[GitSync] Notice: git fetch origin main failed for %s (%s, %s). Attempting git pull fallback...", repoPath, sanitizedErr, sanitizedOut)
 
-		cmdPull := exec.CommandContext(opCtx, "git", "-C", repoPath, "pull", "--ff-only")
-		cmdPull.Env = gitEnv
-		outPull, errPull := cmdPull.CombinedOutput()
+		outPull, errPullBytes, errPull := d.getGitExecutor()(opCtx, repoPath, "pull", "--ff-only")
 		if errPull != nil {
-			res.Error = fmt.Sprintf("fetch failed: %s; pull failed: %s", sanitizedOut, SanitizeLog(strings.TrimSpace(string(outPull))))
+			combinedPull := string(append(outPull, errPullBytes...))
+			res.Error = fmt.Sprintf("fetch failed: %s; pull failed: %s", sanitizedOut, SanitizeLog(strings.TrimSpace(combinedPull)))
 			return res
 		}
 	} else {
 		// 2. Inspect fetched commit SHA for active quarantine
-		cmdFetchHead := exec.CommandContext(opCtx, "git", "-C", repoPath, "rev-parse", "FETCH_HEAD")
-		cmdFetchHead.Env = gitEnv
-		if outFetchHead, errFetchHead := cmdFetchHead.Output(); errFetchHead == nil {
+		if outFetchHead, _, errFetchHead := d.getGitExecutor()(opCtx, repoPath, "rev-parse", "FETCH_HEAD"); errFetchHead == nil {
 			fetchedSha := strings.TrimSpace(string(outFetchHead))
 			if rec, quarantined := d.isQuarantined(repoPath, fetchedSha); quarantined {
 				log.Printf("[GitSync] Notice: remote commit %s for %s is quarantined (reason: %s). Skipping pull to prevent failure loop.", fetchedSha, repoPath, rec.Reason)
@@ -1121,31 +1033,27 @@ func (d *SyncDaemon) SyncRepo(ctx context.Context, repoPath string) (res RepoSyn
 		}
 
 		// 3. Fast-forward merge verified clean upstream commit
-		cmdMerge := exec.CommandContext(opCtx, "git", "-C", repoPath, "merge", "--ff-only", "FETCH_HEAD")
-		cmdMerge.Env = gitEnv
-		if outMerge, errMerge := cmdMerge.CombinedOutput(); errMerge != nil {
-			sanitizedOut := SanitizeLog(strings.TrimSpace(string(outMerge)))
+		outMerge, errMergeBytes, errMerge := d.getGitExecutor()(opCtx, repoPath, "merge", "--ff-only", "FETCH_HEAD")
+		if errMerge != nil {
+			combinedMerge := string(append(outMerge, errMergeBytes...))
+			sanitizedOut := SanitizeLog(strings.TrimSpace(combinedMerge))
 			sanitizedErr := SanitizeLog(errMerge.Error())
 			log.Printf("[GitSync] Notice: git merge --ff-only failed for %s (%s, %s). Attempting safe reset recovery...", repoPath, sanitizedErr, sanitizedOut)
 
-			cmdReset := exec.CommandContext(opCtx, "git", "-C", repoPath, "reset", "--hard", "FETCH_HEAD")
-			cmdReset.Env = gitEnv
-			if outReset, errReset := cmdReset.CombinedOutput(); errReset != nil {
-				res.Error = fmt.Sprintf("reset failed: %s", SanitizeLog(string(outReset)))
+			outReset, errResetBytes, errReset := d.getGitExecutor()(opCtx, repoPath, "reset", "--hard", "FETCH_HEAD")
+			if errReset != nil {
+				combinedReset := string(append(outReset, errResetBytes...))
+				res.Error = fmt.Sprintf("reset failed: %s", SanitizeLog(combinedReset))
 				return res
 			}
 
-			cmdClean := exec.CommandContext(opCtx, "git", "-C", repoPath, "clean", "-fd")
-			cmdClean.Env = gitEnv
-			_ = cmdClean.Run()
+			_, _, _ = d.getGitExecutor()(opCtx, repoPath, "clean", "-fd")
 
 			log.Printf("[GitSync] Successfully recovered %s via reset to FETCH_HEAD", repoPath)
 		}
 	}
 
-	cmdAfter := exec.CommandContext(opCtx, "git", "-C", repoPath, "rev-parse", "HEAD")
-	cmdAfter.Env = gitEnv
-	outAfter, err := cmdAfter.Output()
+	outAfter, _, err := d.getGitExecutor()(opCtx, repoPath, "rev-parse", "HEAD")
 	if err != nil {
 		sanitizedErr := SanitizeLog(err.Error())
 		res.Error = sanitizedErr
@@ -1270,12 +1178,8 @@ func (d *SyncDaemon) StartPeriodicLoop(ctx context.Context) {
 }
 
 // getRepoCommit extracts the commit SHA and author timestamp for a given ref in a repository.
-func getRepoCommit(ctx context.Context, repoPath, ref, pat string) (string, *time.Time, error) {
-	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "log", "-1", "--format=%H%x00%aI", ref)
-	if pat != "" {
-		cmd.Env = buildGitEnv(pat)
-	}
-	out, err := cmd.Output()
+func (d *SyncDaemon) getRepoCommit(ctx context.Context, repoPath, ref string) (string, *time.Time, error) {
+	out, _, err := d.getGitExecutor()(ctx, repoPath, "log", "-1", "--format=%H%x00%aI", ref)
 	if err != nil {
 		return "", nil, err
 	}
@@ -1289,6 +1193,11 @@ func getRepoCommit(ctx context.Context, repoPath, ref, pat string) (string, *tim
 		return sha, nil, nil
 	}
 	return sha, &t, nil
+}
+
+func getRepoCommit(ctx context.Context, repoPath, ref, pat string) (string, *time.Time, error) {
+	d := &SyncDaemon{pat: pat}
+	return d.getRepoCommit(ctx, repoPath, ref)
 }
 
 // GetStatus computes real-time synchronization telemetry across all configured repositories.
@@ -1307,9 +1216,6 @@ func (d *SyncDaemon) GetStatus(ctx context.Context) GitSyncStatusResponse {
 
 	var maxLag int64
 	var latestSync time.Time
-	hasError := false
-	hasLag := false
-	hasQuarantine := false
 
 	for _, repo := range d.repos {
 		st := RepoStatus{
@@ -1325,11 +1231,10 @@ func (d *SyncDaemon) GetStatus(ctx context.Context) GitSyncStatusResponse {
 		}
 
 		// Check disk HEAD
-		diskSha, diskTime, err := getRepoCommit(ctx, repo, "HEAD", d.pat)
+		diskSha, diskTime, err := d.getRepoCommit(ctx, repo, "HEAD")
 		if err != nil {
 			st.SyncStatus = "error"
 			st.Error = fmt.Sprintf("failed to get disk HEAD: %v", SanitizeLog(err.Error()))
-			hasError = true
 			resp.Repos[repo] = st
 			continue
 		}
@@ -1337,9 +1242,9 @@ func (d *SyncDaemon) GetStatus(ctx context.Context) GitSyncStatusResponse {
 		st.DiskCommitTime = diskTime
 
 		// Check remote commit: try origin/main, fallback to FETCH_HEAD
-		remoteSha, remoteTime, err := getRepoCommit(ctx, repo, "origin/main", d.pat)
+		remoteSha, remoteTime, err := d.getRepoCommit(ctx, repo, "origin/main")
 		if err != nil || remoteSha == "" {
-			remoteSha, remoteTime, err = getRepoCommit(ctx, repo, "FETCH_HEAD", d.pat)
+			remoteSha, remoteTime, err = d.getRepoCommit(ctx, repo, "FETCH_HEAD")
 		}
 		if err != nil || remoteSha == "" {
 			remoteSha = diskSha
@@ -1359,7 +1264,6 @@ func (d *SyncDaemon) GetStatus(ctx context.Context) GitSyncStatusResponse {
 			}
 			if diskSha != remoteSha && lag > 0 {
 				st.SyncStatus = "lagging"
-				hasLag = true
 			}
 		}
 
@@ -1369,19 +1273,16 @@ func (d *SyncDaemon) GetStatus(ctx context.Context) GitSyncStatusResponse {
 			st.Quarantined = true
 			st.QuarantinedCommit = rec.CommitSHA
 			st.QuarantineReason = rec.Reason
-			hasQuarantine = true
 		} else if rec, quarantined := d.isQuarantined(repo, diskSha); quarantined {
 			st.SyncStatus = "quarantined"
 			st.Quarantined = true
 			st.QuarantinedCommit = rec.CommitSHA
 			st.QuarantineReason = rec.Reason
-			hasQuarantine = true
 		} else if rec, quarantined := d.getQuarantineForRepo(repo); quarantined {
 			st.SyncStatus = "quarantined"
 			st.Quarantined = true
 			st.QuarantinedCommit = rec.CommitSHA
 			st.QuarantineReason = rec.Reason
-			hasQuarantine = true
 		}
 
 		resp.Repos[repo] = st
@@ -1393,15 +1294,7 @@ func (d *SyncDaemon) GetStatus(ctx context.Context) GitSyncStatusResponse {
 		resp.LastSyncTime = time.Now()
 	}
 
-	if hasError {
-		resp.Status = "error"
-	} else if hasQuarantine {
-		resp.Status = "quarantined"
-	} else if hasLag {
-		resp.Status = "lagging"
-	} else {
-		resp.Status = "synced"
-	}
+	resp.Status = CalculateSyncStatus(resp.Repos)
 
 	return resp
 }
@@ -1422,6 +1315,7 @@ type DaemonConfig struct {
 	ExtraSecrets      []string
 	ComposeExecutor   ComposeExecutor
 	DockerExecutor    DockerExecutor
+	GitExecutor       GitExecutor
 }
 
 // NewDaemon initializes a new SyncDaemon from config.
@@ -1452,6 +1346,7 @@ func NewDaemon(cfg DaemonConfig) *SyncDaemon {
 		extraSecrets:       cfg.ExtraSecrets,
 		composeExecutor:    cfg.ComposeExecutor,
 		dockerExecutor:     cfg.DockerExecutor,
+		gitExecutor:        cfg.GitExecutor,
 		reconcileCh:        make(chan struct{}, 1),
 		repoLocks:          make(map[string]*sync.Mutex),
 		quarantinedCommits: make(map[QuarantineKey]QuarantineRecord),
