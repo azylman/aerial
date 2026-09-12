@@ -1,7 +1,7 @@
 package main
 
 import (
-	"path/filepath"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -437,9 +437,20 @@ func TestResolveGitBin_TableDriven(t *testing.T) {
 	mockFileExists := func(path string) bool {
 		return mockFiles[path]
 	}
+	noLookPath := func(string) (string, error) {
+		return "", errors.New("not on path")
+	}
 
-	// 1. MinGit via LOCALAPPDATA
-	minGitPath := filepath.Join("C:\\mock\\localappdata", "Programs", "MinGit", "cmd", "git.exe")
+	// 1. LookPath hit takes priority
+	resolvedHit := resolveGitBinInternal(func(string) string { return "" }, nil, func(string) (string, error) {
+		return "/usr/bin/custom-git", nil
+	}, "linux")
+	if resolvedHit != "/usr/bin/custom-git" {
+		t.Errorf("expected '/usr/bin/custom-git', got %q", resolvedHit)
+	}
+
+	// 2. MinGit via LOCALAPPDATA
+	minGitPath := "C:\\mock\\localappdata\\Programs\\MinGit\\cmd\\git.exe"
 	mockFiles[minGitPath] = true
 
 	lookup1 := func(key string) string {
@@ -452,14 +463,14 @@ func TestResolveGitBin_TableDriven(t *testing.T) {
 			return ""
 		}
 	}
-	resolved := ResolveGitBin(lookup1, mockFileExists)
+	resolved := resolveGitBinInternal(lookup1, []func(string) bool{mockFileExists}, noLookPath, "windows")
 	if resolved != minGitPath {
 		t.Errorf("expected %q, got %q", minGitPath, resolved)
 	}
 
-	// 2. Git via ProgramFiles
+	// 3. Git via ProgramFiles
 	delete(mockFiles, minGitPath)
-	progFilesGit := filepath.Join("C:\\mock\\ProgramFiles", "Git", "cmd", "git.exe")
+	progFilesGit := "C:\\mock\\ProgramFiles\\Git\\cmd\\git.exe"
 	mockFiles[progFilesGit] = true
 
 	lookup2 := func(key string) string {
@@ -472,14 +483,14 @@ func TestResolveGitBin_TableDriven(t *testing.T) {
 			return ""
 		}
 	}
-	resolved = ResolveGitBin(lookup2, mockFileExists)
+	resolved = resolveGitBinInternal(lookup2, []func(string) bool{mockFileExists}, noLookPath, "windows")
 	if resolved != progFilesGit {
 		t.Errorf("expected %q, got %q", progFilesGit, resolved)
 	}
 
-	// 3. MinGit via USERPROFILE
+	// 4. MinGit via USERPROFILE
 	delete(mockFiles, progFilesGit)
-	userProfileMinGit := filepath.Join("C:\\mock\\user", "AppData", "Local", "Programs", "MinGit", "cmd", "git.exe")
+	userProfileMinGit := "C:\\mock\\user\\AppData\\Local\\Programs\\MinGit\\cmd\\git.exe"
 	mockFiles[userProfileMinGit] = true
 
 	lookup3 := func(key string) string {
@@ -492,16 +503,26 @@ func TestResolveGitBin_TableDriven(t *testing.T) {
 			return ""
 		}
 	}
-	resolved = ResolveGitBin(lookup3, mockFileExists)
+	resolved = resolveGitBinInternal(lookup3, []func(string) bool{mockFileExists}, noLookPath, "windows")
 	if resolved != userProfileMinGit {
 		t.Errorf("expected %q, got %q", userProfileMinGit, resolved)
 	}
 
-	// 4. Fallback to "git" when none found
+	// 5. Fallback to "git" when none found
 	delete(mockFiles, userProfileMinGit)
 	lookupEmpty := func(key string) string { return "" }
-	resolved = ResolveGitBin(lookupEmpty, mockFileExists)
+	resolved = resolveGitBinInternal(lookupEmpty, []func(string) bool{mockFileExists}, noLookPath, "windows")
 	if resolved != "git" {
 		t.Errorf("expected 'git', got %q", resolved)
 	}
+
+	// 6. Linux without git on path fallback
+	resolvedLinux := resolveGitBinInternal(lookupEmpty, nil, noLookPath, "linux")
+	if resolvedLinux != "git" {
+		t.Errorf("expected 'git', got %q", resolvedLinux)
+	}
+
+	// 7. Test public ResolveGitBin
+	_ = ResolveGitBin(lookupEmpty)
+	_ = ResolveGitBin(lookup1, mockFileExists)
 }

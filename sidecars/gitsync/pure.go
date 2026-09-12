@@ -261,6 +261,15 @@ func BuildGitEnv(pat string, environ []string) []string {
 
 // ResolveGitBin locates the git executable across platforms with Windows MinGit support.
 func ResolveGitBin(lookup func(string) string, fileExists ...func(string) bool) string {
+	return resolveGitBinInternal(lookup, fileExists, exec.LookPath, runtime.GOOS)
+}
+
+func resolveGitBinInternal(
+	lookup func(string) string,
+	fileExists []func(string) bool,
+	lookPath func(string) (string, error),
+	goos string,
+) string {
 	exists := func(path string) bool {
 		if len(fileExists) > 0 && fileExists[0] != nil {
 			return fileExists[0](path)
@@ -269,14 +278,20 @@ func ResolveGitBin(lookup func(string) string, fileExists ...func(string) bool) 
 		return err == nil && !fi.IsDir()
 	}
 
-	if p, err := exec.LookPath("git"); err == nil && p != "" {
-		return p
+	if lookPath != nil {
+		if p, err := lookPath("git"); err == nil && p != "" {
+			return p
+		}
 	}
 
-	if runtime.GOOS == "windows" || lookup("OS") == "Windows_NT" {
+	if goos == "windows" || lookup("OS") == "Windows_NT" {
+		sep := string(filepath.Separator)
+		if goos == "windows" {
+			sep = "\\"
+		}
 		localAppData := lookup("LOCALAPPDATA")
 		if localAppData != "" {
-			minGit := filepath.Join(localAppData, "Programs", "MinGit", "cmd", "git.exe")
+			minGit := strings.Join([]string{localAppData, "Programs", "MinGit", "cmd", "git.exe"}, sep)
 			if exists(minGit) {
 				return minGit
 			}
@@ -284,7 +299,7 @@ func ResolveGitBin(lookup func(string) string, fileExists ...func(string) bool) 
 
 		progFiles := lookup("ProgramFiles")
 		if progFiles != "" {
-			gitExe := filepath.Join(progFiles, "Git", "cmd", "git.exe")
+			gitExe := strings.Join([]string{progFiles, "Git", "cmd", "git.exe"}, sep)
 			if exists(gitExe) {
 				return gitExe
 			}
@@ -292,7 +307,7 @@ func ResolveGitBin(lookup func(string) string, fileExists ...func(string) bool) 
 
 		userProfile := lookup("USERPROFILE")
 		if userProfile != "" {
-			minGitUser := filepath.Join(userProfile, "AppData", "Local", "Programs", "MinGit", "cmd", "git.exe")
+			minGitUser := strings.Join([]string{userProfile, "AppData", "Local", "Programs", "MinGit", "cmd", "git.exe"}, sep)
 			if exists(minGitUser) {
 				return minGitUser
 			}
