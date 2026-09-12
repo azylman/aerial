@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -32,6 +33,95 @@ func GetSessionID(database DBTX, threadID string) (string, error) {
 	return sessionID, err
 }
 
+// ParseDBTime attempts to parse a database time value from various types and layouts.
+func ParseDBTime(val any) (time.Time, bool) {
+	if val == nil {
+		return time.Time{}, false
+	}
+	switch v := val.(type) {
+	case time.Time:
+		return v, true
+	case *time.Time:
+		if v != nil {
+			return *v, true
+		}
+		return time.Time{}, false
+	case string:
+		trimmed := strings.TrimSpace(v)
+		if trimmed == "" {
+			return time.Time{}, false
+		}
+		for _, layout := range []string{
+			time.RFC3339Nano,
+			time.RFC3339,
+			"2006-01-02 15:04:05.999999999 -0700 MST",
+			"2006-01-02 15:04:05 -0700 MST",
+			"2006-01-02 15:04:05.999999999-07:00",
+			"2006-01-02 15:04:05.999999999",
+			"2006-01-02 15:04:05.999999999Z07:00",
+			"2006-01-02 15:04:05-07:00",
+			"2006-01-02 15:04:05",
+			"2006-01-02T15:04:05",
+		} {
+			if t, err := time.Parse(layout, trimmed); err == nil {
+				return t, true
+			}
+		}
+	case []byte:
+		return ParseDBTime(string(v))
+	}
+	return time.Time{}, false
+}
+
+// SessionInfo encapsulates active session state and lifecycle timestamps.
+type SessionInfo struct {
+	ThreadID          string
+	InternalSessionID string
+	TurnCount         int
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+}
+
+// GetSessionInfo retrieves the full session state for a thread in a single atomic query.
+func GetSessionInfo(database DBTX, threadID string) (*SessionInfo, error) {
+	if database == nil || threadID == "" {
+		return nil, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var (
+		info         SessionInfo
+		rawCreatedAt any
+		rawUpdatedAt any
+	)
+	query := `
+	SELECT thread_id, internal_session_id, turn_count, created_at, updated_at
+	FROM sessions
+	WHERE thread_id = $1
+	`
+	err := database.QueryRowContext(ctx, query, threadID).Scan(
+		&info.ThreadID,
+		&info.InternalSessionID,
+		&info.TurnCount,
+		&rawCreatedAt,
+		&rawUpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if t, ok := ParseDBTime(rawCreatedAt); ok {
+		info.CreatedAt = t
+	}
+	if t, ok := ParseDBTime(rawUpdatedAt); ok {
+		info.UpdatedAt = t
+	}
+	return &info, nil
+}
+
 // SaveSessionID associates an internal session ID with a thread ID.
 func SaveSessionID(database DBTX, threadID, sessionID string) error {
 	if database == nil || threadID == "" || sessionID == "" {
@@ -45,6 +135,10 @@ func SaveSessionID(database DBTX, threadID, sessionID string) error {
 	INSERT INTO sessions (thread_id, internal_session_id, created_at, updated_at)
 	VALUES ($1, $2, $3, $4)
 	ON CONFLICT(thread_id) DO UPDATE SET
+		created_at = CASE
+			WHEN sessions.internal_session_id != EXCLUDED.internal_session_id THEN EXCLUDED.created_at
+			ELSE sessions.created_at
+		END,
 		internal_session_id = EXCLUDED.internal_session_id,
 		updated_at = EXCLUDED.updated_at
 	`
@@ -110,6 +204,7 @@ func RotateSessionID(database DBTX, sessionKey, newSessionID string) error {
 	ON CONFLICT(thread_id) DO UPDATE SET
 		internal_session_id = EXCLUDED.internal_session_id,
 		turn_count = 0,
+		created_at = EXCLUDED.created_at,
 		updated_at = EXCLUDED.updated_at;
 	`
 	_, err := database.ExecContext(ctx, query, sessionKey, newSessionID, now, now)

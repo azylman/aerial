@@ -80,6 +80,7 @@ type SessionStore interface {
 	IncrementSessionTurnCount(ctx context.Context, sessionKey string) (int, error)
 	GetSessionTurnCount(ctx context.Context, sessionKey string) (int, error)
 	RotateSessionID(ctx context.Context, sessionKey, newSessionID string) error
+	GetSessionInfo(ctx context.Context, threadID string) (*SessionInfo, error)
 }
 
 // Store unifies all repository capabilities under a single interface.

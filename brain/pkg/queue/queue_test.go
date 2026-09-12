@@ -1784,6 +1784,274 @@ func TestQueueTurnCountSessionRotation(t *testing.T) {
 	}
 }
 
+func TestChannelSession_RotationOnIdleTimeout(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	channelID := "channel-idle-rot-test"
+	initialSessionID := "sess-channel-old-999"
+	_ = db.SaveSessionID(database, channelID, initialSessionID)
+	_, _ = db.IncrementSessionTurnCount(database, channelID)
+
+	// Set updated_at and created_at to 25 hours ago to simulate an idle session
+	idleTime := time.Now().UTC().Add(-25 * time.Hour)
+	_, err = database.Exec("UPDATE sessions SET created_at = $1, updated_at = $2 WHERE thread_id = $3", idleTime, idleTime, channelID)
+	if err != nil {
+		t.Fatalf("Failed to backdate session: %v", err)
+	}
+
+	sessMgr := session.New(tmpDir, "")
+	sessDir, _ := sessMgr.EnsureSessionDir(initialSessionID)
+	cliPbDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "conversations")
+	_ = os.MkdirAll(cliPbDir, 0755)
+	pbFile := filepath.Join(cliPbDir, initialSessionID+".pb")
+	_ = os.WriteFile(pbFile, []byte("mock-pb"), 0644)
+	_ = os.Chtimes(pbFile, idleTime, idleTime)
+	_ = os.Chtimes(cliPbDir, idleTime, idleTime)
+	_ = filepath.Walk(sessDir, func(path string, info os.FileInfo, err error) error {
+		if err == nil {
+			_ = os.Chtimes(path, idleTime, idleTime)
+		}
+		return nil
+	})
+
+	var mu sync.Mutex
+	var capturedSessionIDs []string
+	var completedCh chan struct{}
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		SessionManager: sessMgr,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    1,
+		ResolveChannelPolicy: func(cID, cName string) config.ChannelPolicy {
+			return config.ChannelPolicy{
+				Mode: "channel",
+			}
+		},
+		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+			return nil, nil
+		},
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			mu.Lock()
+			capturedSessionIDs = append(capturedSessionIDs, sessionID)
+			mu.Unlock()
+			if sessionID == "" {
+				sessionID = uuid.New().String()
+			}
+			_, _ = sessMgr.EnsureSessionDir(sessionID)
+			_ = os.WriteFile(filepath.Join(cliPbDir, sessionID+".pb"), []byte("mock-pb"), 0644)
+			stderr = fmt.Sprintf("Starting conversation update stream for %s\n", sessionID)
+			return mockJSONResponse(sessionID, "OK response"), stderr, 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) func() {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			mu.Lock()
+			ch := completedCh
+			mu.Unlock()
+			if ch != nil {
+				select {
+				case ch <- struct{}{}:
+				default:
+				}
+			}
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	// 1. Send Turn 1 after 25h of idle time
+	completedCh = make(chan struct{}, 1)
+	msg1 := db.Message{ID: "m-idle-1", ThreadID: channelID, Content: "Aerial wake up", CreatedAt: time.Now().UTC()}
+	_ = db.InsertMessage(database, msg1)
+	pool.Enqueue(msg1)
+	<-completedCh
+
+	mu.Lock()
+	if len(capturedSessionIDs) != 1 {
+		t.Fatalf("Expected 1 execution, got %d", len(capturedSessionIDs))
+	}
+	// The runner should have received sessionID == "" because the 25h idle session rotated pre-execution!
+	if capturedSessionIDs[0] != "" {
+		t.Errorf("Expected cold start (sessionID == \"\") due to 25h idle timeout, got: %q", capturedSessionIDs[0])
+	}
+	mu.Unlock()
+
+	// Turn count should now be 1
+	c1, _ := db.GetSessionTurnCount(database, channelID)
+	if c1 != 1 {
+		t.Errorf("Expected turn_count=1 after cold start, got %d", c1)
+	}
+
+	newSessID, _ := db.GetSessionID(database, channelID)
+	if newSessID == "" || newSessID == initialSessionID {
+		t.Errorf("Expected a fresh session ID, got: %s", newSessID)
+	}
+
+	// 2. Send Turn 2 immediately (5 seconds later). It should NOT rotate!
+	completedCh = make(chan struct{}, 1)
+	msg2 := db.Message{ID: "m-idle-2", ThreadID: channelID, Content: "Aerial follow up", CreatedAt: time.Now().UTC()}
+	_ = db.InsertMessage(database, msg2)
+	pool.Enqueue(msg2)
+	<-completedCh
+
+	mu.Lock()
+	if len(capturedSessionIDs) != 2 {
+		t.Fatalf("Expected 2 executions, got %d", len(capturedSessionIDs))
+	}
+	if capturedSessionIDs[1] != newSessID {
+		t.Errorf("Expected Turn 2 to retain new session ID %q, got: %q", newSessID, capturedSessionIDs[1])
+	}
+	mu.Unlock()
+
+	c2, _ := db.GetSessionTurnCount(database, channelID)
+	if c2 != 2 {
+		t.Errorf("Expected turn_count=2 after Turn 2, got %d", c2)
+	}
+}
+
+func TestThreadSession_RotationOnIdleTimeout(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	threadID := "thread-idle-rot-test"
+	initialSessionID := "sess-thread-old-888"
+	_ = db.SaveSessionID(database, threadID, initialSessionID)
+	_, _ = db.IncrementSessionTurnCount(database, threadID)
+
+	idleTime := time.Now().UTC().Add(-25 * time.Hour)
+	_, err = database.Exec("UPDATE sessions SET created_at = $1, updated_at = $2 WHERE thread_id = $3", idleTime, idleTime, threadID)
+	if err != nil {
+		t.Fatalf("Failed to backdate session: %v", err)
+	}
+
+	sessMgr := session.New(tmpDir, "")
+	sessDir, _ := sessMgr.EnsureSessionDir(initialSessionID)
+	cliPbDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "conversations")
+	_ = os.MkdirAll(cliPbDir, 0755)
+	pbFile := filepath.Join(cliPbDir, initialSessionID+".pb")
+	_ = os.WriteFile(pbFile, []byte("mock-pb"), 0644)
+	_ = os.Chtimes(pbFile, idleTime, idleTime)
+	_ = os.Chtimes(cliPbDir, idleTime, idleTime)
+	_ = filepath.Walk(sessDir, func(path string, info os.FileInfo, err error) error {
+		if err == nil {
+			_ = os.Chtimes(path, idleTime, idleTime)
+		}
+		return nil
+	})
+
+	var mu sync.Mutex
+	var capturedSessionIDs []string
+	var completedCh chan struct{}
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		SessionManager: sessMgr,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    1,
+		ResolveChannelPolicy: func(cID, cName string) config.ChannelPolicy {
+			return config.ChannelPolicy{
+				Mode: "thread",
+			}
+		},
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			mu.Lock()
+			capturedSessionIDs = append(capturedSessionIDs, sessionID)
+			mu.Unlock()
+			if sessionID == "" {
+				sessionID = uuid.New().String()
+			}
+			_, _ = sessMgr.EnsureSessionDir(sessionID)
+			_ = os.WriteFile(filepath.Join(cliPbDir, sessionID+".pb"), []byte("mock-pb"), 0644)
+			stderr = fmt.Sprintf("Starting conversation update stream for %s\n", sessionID)
+			return mockJSONResponse(sessionID, "OK response"), stderr, 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) func() {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			mu.Lock()
+			ch := completedCh
+			mu.Unlock()
+			if ch != nil {
+				select {
+				case ch <- struct{}{}:
+				default:
+				}
+			}
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	// 1. Send Turn 1 after 25h of idle time
+	completedCh = make(chan struct{}, 1)
+	msg1 := db.Message{ID: "m-th-idle-1", ThreadID: threadID, Content: "Hello thread", CreatedAt: time.Now().UTC()}
+	_ = db.InsertMessage(database, msg1)
+	pool.Enqueue(msg1)
+	<-completedCh
+
+	mu.Lock()
+	if len(capturedSessionIDs) != 1 {
+		t.Fatalf("Expected 1 execution, got %d", len(capturedSessionIDs))
+	}
+	if capturedSessionIDs[0] != "" {
+		t.Errorf("Expected cold start (sessionID == \"\") in thread mode due to 25h idle timeout, got: %q", capturedSessionIDs[0])
+	}
+	mu.Unlock()
+
+	c1, _ := db.GetSessionTurnCount(database, threadID)
+	if c1 != 1 {
+		t.Errorf("Expected turn_count=1 after cold start, got %d", c1)
+	}
+
+	newSessID, _ := db.GetSessionID(database, threadID)
+	if newSessID == "" || newSessID == initialSessionID {
+		t.Errorf("Expected a fresh session ID, got: %s", newSessID)
+	}
+
+	// 2. Send Turn 2 immediately. It should retain the new session ID.
+	completedCh = make(chan struct{}, 1)
+	msg2 := db.Message{ID: "m-th-idle-2", ThreadID: threadID, Content: "Hello thread again", CreatedAt: time.Now().UTC()}
+	_ = db.InsertMessage(database, msg2)
+	pool.Enqueue(msg2)
+	<-completedCh
+
+	mu.Lock()
+	if len(capturedSessionIDs) != 2 {
+		t.Fatalf("Expected 2 executions, got %d", len(capturedSessionIDs))
+	}
+	if capturedSessionIDs[1] != newSessID {
+		t.Errorf("Expected Turn 2 in thread mode to retain session ID %q, got: %q", newSessID, capturedSessionIDs[1])
+	}
+	mu.Unlock()
+
+	c2, _ := db.GetSessionTurnCount(database, threadID)
+	if c2 != 2 {
+		t.Errorf("Expected turn_count=2 after Turn 2, got %d", c2)
+	}
+}
+
 func TestQueueUniversalActiveTurnTyping(t *testing.T) {
 	database, err := db.InitDB(":memory:")
 	if err != nil {
