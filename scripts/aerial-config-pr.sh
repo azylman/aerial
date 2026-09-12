@@ -212,7 +212,7 @@ schedule_pr_followup() {
     local pr_url="${2:-}"
     local target_id="${3:-}"
     local delay="${4:-}"
-    local commit_msg="${5:-}"
+    local pr_title="${5:-}"
 
     if [ -z "$target_id" ]; then
         target_id="${AERIAL_TARGET_ID:-${DISCORD_THREAD_ID:-${DISCORD_CHANNEL_ID:-1542423172400291873}}}"
@@ -225,7 +225,7 @@ schedule_pr_followup() {
     local scheduler_url="${SCHEDULER_MCP_URL:-http://scheduler-mcp:8080/mcp}"
     local prompt
     prompt=$(cat <<EOF
-Check on the status of Pull Request #${pr_num} on ${REPO_OWNER}/${REPO_NAME} (${pr_url}) for commit: "${commit_msg}".
+Check on the status of Pull Request #${pr_num} on ${REPO_OWNER}/${REPO_NAME} (${pr_url}) for commit: "${pr_title}".
 1. If the PR is already merged, confirm the successful merge and deployment to the user.
 2. If all CI checks passed and the PR is still open (e.g. background monitor terminated), immediately complete the squash-merge, delete the remote branch, trigger gitsync, and confirm deployment.
 3. If CI failed or was blocked, report the exact failure details to the user.
@@ -299,6 +299,8 @@ submit_scratch() {
     local no_schedule=0
     local scratch_dir=""
     local commit_msg=""
+    local pr_body=""
+    local pr_body_file=""
 
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -338,8 +340,43 @@ submit_scratch() {
                 no_schedule=1
                 shift
                 ;;
+            --body|-b)
+                if [ $# -lt 2 ]; then
+                    echo "ERROR: $1 requires a body string argument." >&2
+                    exit 1
+                fi
+                pr_body="$2"
+                shift 2
+                ;;
+            --body=*|-b=*)
+                pr_body="${1#*=}"
+                shift 1
+                ;;
+            --body-file|-f|-F)
+                if [ $# -lt 2 ]; then
+                    echo "ERROR: $1 requires a file path argument." >&2
+                    exit 1
+                fi
+                pr_body_file="$2"
+                shift 2
+                ;;
+            --body-file=*|-f=*|-F=*)
+                pr_body_file="${1#*=}"
+                shift 1
+                ;;
             --)
                 shift
+                while [ $# -gt 0 ]; do
+                    if [ -z "$scratch_dir" ]; then
+                        scratch_dir="$1"
+                    elif [ -z "$commit_msg" ]; then
+                        commit_msg="$1"
+                    else
+                        echo "ERROR: Unexpected extra argument: $1" >&2
+                        exit 1
+                    fi
+                    shift
+                done
                 break
                 ;;
             -*)
@@ -360,13 +397,83 @@ submit_scratch() {
         esac
     done
 
+    # Validation: Mutual exclusivity of body sources
+    if [ -n "$pr_body" ] && [ -n "$pr_body_file" ]; then
+        echo "ERROR: Cannot specify both --body and --body-file." >&2
+        exit 1
+    fi
+
     if [ -z "$scratch_dir" ] || [ ! -d "$scratch_dir" ]; then
         echo "ERROR: Valid scratch directory path required for submit." >&2
         exit 1
     fi
 
+    # Resolve Tier 1 file if specified
+    if [ -n "$pr_body_file" ]; then
+        local resolved_body_file=""
+        if [ -f "$pr_body_file" ]; then
+            resolved_body_file="$pr_body_file"
+        elif [ -f "${scratch_dir}/${pr_body_file}" ]; then
+            resolved_body_file="${scratch_dir}/${pr_body_file}"
+        else
+            echo "ERROR: Specified body file does not exist: $pr_body_file" >&2
+            exit 1
+        fi
+        if [ ! -r "$resolved_body_file" ]; then
+            echo "ERROR: Specified body file is not readable: $resolved_body_file" >&2
+            exit 1
+        fi
+        pr_body=$(cat "$resolved_body_file")
+    fi
+
     if [ -z "$commit_msg" ]; then
         commit_msg="chore(config): update configuration via Aerial self-improvement"
+    fi
+
+    # Resolve Tier 2: Convention-based description file in scratch workspace
+    if [ -z "$pr_body" ]; then
+        if [ -s "${scratch_dir}/PR_DESCRIPTION.md" ]; then
+            pr_body=$(cat "${scratch_dir}/PR_DESCRIPTION.md")
+        elif [ -s "${scratch_dir}/.pr_description.md" ]; then
+            pr_body=$(cat "${scratch_dir}/.pr_description.md")
+        fi
+    fi
+
+    # CRITICAL WORKSPACE HYGIENE: Always remove convention files from scratch workspace before staging
+    # so they are NEVER staged by git add -A or permanently committed into git history on main!
+    rm -f "${scratch_dir}/PR_DESCRIPTION.md" "${scratch_dir}/.pr_description.md"
+
+    # Title Hygiene: Extract first non-empty line, strip \r, \n, and whitespace, clamp to 256 chars
+    local clean_title
+    clean_title=$(printf "%s\n" "$commit_msg" | awk 'NF {print; exit}' | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | cut -c 1-256)
+    if [ -z "$clean_title" ]; then
+        clean_title="chore(config): update configuration via Aerial self-improvement"
+    fi
+
+    # Resolve Tier 3: Multi-line commit splitting
+    if [ -z "$pr_body" ]; then
+        local first_line_num
+        first_line_num=$(printf "%s\n" "$commit_msg" | awk 'NF {print NR; exit}')
+        if [ -n "$first_line_num" ]; then
+            local remainder
+            remainder=$(printf "%s\n" "$commit_msg" | sed "1,${first_line_num}d" | sed -e '/^[[:space:]]*$/d')
+            if [ -n "$remainder" ]; then
+                pr_body="$remainder"
+            fi
+        fi
+    fi
+
+    # Resolve Tier 4: Fallback default placeholder
+    if [ -z "$pr_body" ]; then
+        pr_body="Automated configuration update by Aerial from scratch workspace."
+    fi
+
+    # Defensively clamp body length to 60,000 characters (GitHub API limit is 65,536)
+    local max_body_len=60000
+    if [ "${#pr_body}" -gt "$max_body_len" ]; then
+        pr_body="${pr_body:0:$max_body_len}
+
+> ⚠️ **[Aerial Notice]**: PR description was truncated because it exceeded 60,000 characters."
     fi
 
     SCRATCH_DIR_CLEANUP="$scratch_dir"
@@ -413,8 +520,9 @@ if data is not None:
         exit 0
     fi
 
-    # 3. Commit
+    # 3. Stage all modifications (defensively unstage any convention files if previously cached)
     git add -A
+    git rm --cached -f PR_DESCRIPTION.md .pr_description.md 2>/dev/null || true
     git commit -m "$commit_msg" >/dev/null
 
     local branch
@@ -438,17 +546,14 @@ if data is not None:
         exit 1
     }
 
-    # 5. Open Pull Request via GitHub REST API without silent -f
+    # 5. Open Pull Request via GitHub REST API without silent -f safely using jq
     local pr_payload
-    pr_payload=$(cat <<EOF
-{
-  "title": $(echo "$commit_msg" | jq -Rs .),
-  "head": "${branch}",
-  "base": "${DEFAULT_BRANCH}",
-  "body": "Automated configuration update by Aerial from scratch workspace."
-}
-EOF
-)
+    pr_payload=$(jq -n \
+        --arg title "$clean_title" \
+        --arg head "$branch" \
+        --arg base "$DEFAULT_BRANCH" \
+        --arg body "$pr_body" \
+        '{title: $title, head: $head, base: $base, body: $body}')
 
     local pr_raw
     pr_raw=$(curl -s -w "\n%{http_code}" -X POST \
@@ -469,6 +574,11 @@ EOF
             -H "Authorization: token ${GITHUB_PAT}" \
             -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/git/refs/heads/${branch}" >/dev/null 2>&1 || true
+        # Prevent trap from nuking the local workspace so code can be recovered
+        if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
+            echo "💾 [aerial-config-pr] Scratch workspace preserved at: ${SCRATCH_DIR_CLEANUP}" >&2
+            SCRATCH_DIR_CLEANUP=""
+        fi
         exit 1
     fi
 
@@ -496,7 +606,7 @@ EOF
     local sched_id=""
     local effective_delay="${check_delay:-${AERIAL_PR_CHECK_DELAY:-$DEFAULT_PR_CHECK_DELAY}}"
     if [ "$no_schedule" -eq 0 ]; then
-        sched_id=$(schedule_pr_followup "$pr_num" "$pr_url" "$target_id" "$effective_delay" "$commit_msg" | tail -n 1)
+        sched_id=$(schedule_pr_followup "$pr_num" "$pr_url" "$target_id" "$effective_delay" "$clean_title" | tail -n 1)
     fi
 
     echo "{\"status\":\"submitted\",\"pr_url\":\"${pr_url}\",\"pr_number\":${pr_num},\"branch\":\"${branch}\",\"commit_sha\":\"${commit_sha}\",\"async\":true,\"monitor_pid\":${monitor_pid},\"scheduled_check\":\"${effective_delay}\",\"schedule_id\":\"${sched_id}\"}"
@@ -514,7 +624,7 @@ case "$cmd" in
         monitor_and_merge_pr "$@"
         ;;
     *)
-        echo "Usage: $0 {init|submit [-t <target_id>] [-d <delay>] [--no-schedule] <scratch_dir> [commit_msg]|monitor <pr_num> <branch> <commit_sha>}" >&2
+        echo "Usage: $0 {init|submit [-t <target_id>] [-d <delay>] [--no-schedule] [-b <body>|--body <body>|-f <file>|--body-file <file>] <scratch_dir> [commit_msg]|monitor <pr_num> <branch> <commit_sha>}" >&2
         exit 1
         ;;
 esac
