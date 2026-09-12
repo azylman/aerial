@@ -229,6 +229,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		burst:       burst,
 		threadID:    threadID,
 		triggerType: triggerType,
+		execStart:   time.Now().UTC(),
 		wakeIdx:     -1,
 		stopTyping:  func() {},
 	}
