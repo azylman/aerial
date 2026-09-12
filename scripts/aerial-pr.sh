@@ -10,6 +10,7 @@ REPO_NAME="aerial"
 REPO_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}.git"
 DEFAULT_BRANCH="main"
 SIDE_SYNC_URL="${AERIAL_GITSYNC_URL:-http://aerial-gitsync:8080/sync}"
+DEFAULT_PR_CHECK_DELAY="13m"
 
 cmd="${1:-}"
 if [ -n "$cmd" ]; then
@@ -225,29 +226,159 @@ monitor_and_merge_pr() {
     echo "{\"status\":\"merged\",\"pr_url\":\"${pr_url}\",\"pr_number\":${pr_num},\"merged_sha\":\"${merged_sha}\",\"sync_status\":\"${sync_status}\"}"
 }
 
+schedule_pr_followup() {
+    local pr_num="${1:-}"
+    local pr_url="${2:-}"
+    local target_id="${3:-}"
+    local delay="${4:-}"
+    local commit_msg="${5:-}"
+
+    if [ -z "$target_id" ]; then
+        target_id="${AERIAL_TARGET_ID:-${DISCORD_THREAD_ID:-${DISCORD_CHANNEL_ID:-1542423172400291873}}}"
+    fi
+
+    if [ -z "$delay" ]; then
+        delay="${AERIAL_PR_CHECK_DELAY:-$DEFAULT_PR_CHECK_DELAY}"
+    fi
+
+    local scheduler_url="${SCHEDULER_MCP_URL:-http://scheduler-mcp:8080/mcp}"
+    local prompt
+    prompt=$(cat <<EOF
+Check on the status of Pull Request #${pr_num} on ${REPO_OWNER}/${REPO_NAME} (${pr_url}) for commit: "${commit_msg}".
+1. If the PR is already merged, confirm the successful merge and deployment to the user.
+2. If all CI checks passed and the PR is still open (e.g. background monitor terminated), immediately complete the squash-merge, delete the remote branch, trigger gitsync, and confirm deployment.
+3. If CI failed or was blocked, report the exact failure details to the user.
+4. If CI is still in progress, do not emit noisy chatter; quietly reschedule a 3m follow-up check via scheduler_schedule_once with target_id "${target_id}" and suppress response output.
+EOF
+)
+
+    # Build JSON-RPC payload safely via jq
+    local rpc_payload
+    rpc_payload=$(jq -n \
+        --arg tool "schedule_once" \
+        --arg target_id "$target_id" \
+        --arg run_at "$delay" \
+        --arg prompt "$prompt" \
+        '{
+            jsonrpc: "2.0",
+            id: 1,
+            method: "tools/call",
+            params: {
+                name: $tool,
+                arguments: {
+                    target_id: $target_id,
+                    run_at: $run_at,
+                    prompt: $prompt
+                }
+            }
+        }')
+
+    # Execute curl with bounded network timeout and error suppression
+    local mcp_resp=""
+    mcp_resp=$(curl -s --connect-timeout 2 -m 5 -X POST \
+        -H "Content-Type: application/json" \
+        -d "$rpc_payload" \
+        "$scheduler_url" 2>/dev/null) || {
+        echo "⚠️ [aerial-pr] Warning: Unable to contact scheduler-mcp (${scheduler_url}). Follow-up event not scheduled." >&2
+        return 0
+    }
+
+    # Verify response is valid JSON before parsing
+    if ! echo "$mcp_resp" | jq -e . >/dev/null 2>&1; then
+        echo "⚠️ [aerial-pr] Warning: Invalid non-JSON response from scheduler-mcp. Skipping schedule registration." >&2
+        return 0
+    fi
+
+    # Check for tool-level error in JSON-RPC result
+    local is_err
+    is_err=$(echo "$mcp_resp" | jq -r '.result.isError // false' 2>/dev/null || true)
+    if [ "$is_err" = "true" ]; then
+        local err_msg
+        err_msg=$(echo "$mcp_resp" | jq -r '.result.content[0].text // "Unknown error"' 2>/dev/null || true)
+        echo "⚠️ [aerial-pr] Warning: scheduler-mcp returned tool error: ${err_msg}" >&2
+        return 0
+    fi
+
+    # Unpack nested MCP text content
+    local sched_id
+    sched_id=$(echo "$mcp_resp" | jq -r '(.result.content[0].text | fromjson? | .schedule_id) // empty' 2>/dev/null || true)
+
+    if [ -n "$sched_id" ]; then
+        echo "⏰ [aerial-pr] Scheduled one-shot follow-up check in ${delay} (Schedule ID: ${sched_id}, Target: ${target_id})."
+        echo "$sched_id"
+    else
+        echo "⚠️ [aerial-pr] Warning: Scheduler MCP did not return a valid schedule ID." >&2
+    fi
+    return 0
+}
+
 submit_scratch() {
     local async_mode=0
+    local target_id=""
+    local check_delay=""
+    local no_schedule=0
     local scratch_dir=""
     local commit_msg=""
-
-    for arg in "$@"; do
-        case "$arg" in
-            --async|-a)
-                async_mode=1
-                ;;
-            *)
-                if [ -z "$scratch_dir" ]; then
-                    scratch_dir="$arg"
-                elif [ -z "$commit_msg" ]; then
-                    commit_msg="$arg"
-                fi
-                ;;
-        esac
-    done
 
     if [ "${AERIAL_PR_ASYNC:-0}" = "1" ]; then
         async_mode=1
     fi
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --async|-a)
+                async_mode=1
+                shift
+                ;;
+            --target-id|--target|-t)
+                if [ $# -lt 2 ]; then
+                    echo "ERROR: $1 requires a target ID argument." >&2
+                    exit 1
+                fi
+                target_id="$2"
+                shift 2
+                ;;
+            --target-id=*|--target=*)
+                target_id="${1#*=}"
+                shift 1
+                ;;
+            --delay|--run-at|-d)
+                if [ $# -lt 2 ]; then
+                    echo "ERROR: $1 requires a delay duration argument." >&2
+                    exit 1
+                fi
+                check_delay="$2"
+                shift 2
+                ;;
+            --delay=*|--run-at=*)
+                check_delay="${1#*=}"
+                shift 1
+                ;;
+            --no-schedule)
+                no_schedule=1
+                shift
+                ;;
+            --)
+                shift
+                break
+                ;;
+            -*)
+                echo "ERROR: Unknown option: $1" >&2
+                exit 1
+                ;;
+            *)
+                if [ -z "$scratch_dir" ]; then
+                    scratch_dir="$1"
+                elif [ -z "$commit_msg" ]; then
+                    commit_msg="$1"
+                else
+                    echo "ERROR: Unexpected extra argument: $1" >&2
+                    exit 1
+                fi
+                shift
+                ;;
+        esac
+    done
 
     if [ -z "$scratch_dir" ] || [ ! -d "$scratch_dir" ]; then
         echo "ERROR: Valid scratch directory path required for submit." >&2
@@ -358,11 +489,18 @@ EOF
         script_path="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
         local log_file="/tmp/aerial-pr-monitor-${pr_num}.log"
 
-        nohup bash "$script_path" monitor "$pr_num" "$branch" "$commit_sha" > "$log_file" 2>&1 &
+        nohup bash "$script_path" monitor "$pr_num" "$branch" "$commit_sha" < /dev/null > "$log_file" 2>&1 &
         local monitor_pid=$!
 
         echo "⚡ [aerial-pr] Asynchronous submission active. CI monitoring delegated to background PID ${monitor_pid} (log: ${log_file})."
-        echo "{\"status\":\"submitted\",\"pr_url\":\"${pr_url}\",\"pr_number\":${pr_num},\"branch\":\"${branch}\",\"commit_sha\":\"${commit_sha}\",\"async\":true,\"monitor_pid\":${monitor_pid}}"
+
+        local sched_id=""
+        local effective_delay="${check_delay:-${AERIAL_PR_CHECK_DELAY:-$DEFAULT_PR_CHECK_DELAY}}"
+        if [ "$no_schedule" -eq 0 ]; then
+            sched_id=$(schedule_pr_followup "$pr_num" "$pr_url" "$target_id" "$effective_delay" "$commit_msg" | tail -n 1)
+        fi
+
+        echo "{\"status\":\"submitted\",\"pr_url\":\"${pr_url}\",\"pr_number\":${pr_num},\"branch\":\"${branch}\",\"commit_sha\":\"${commit_sha}\",\"async\":true,\"monitor_pid\":${monitor_pid},\"scheduled_check\":\"${effective_delay}\",\"schedule_id\":\"${sched_id}\"}"
         return 0
     fi
 
@@ -381,7 +519,7 @@ case "$cmd" in
         monitor_and_merge_pr "$@"
         ;;
     *)
-        echo "Usage: $0 {init|submit [--async] <scratch_dir> [commit_msg]|monitor <pr_num> <branch> <commit_sha>}" >&2
+        echo "Usage: $0 {init|submit [--async] [-t <target_id>] [-d <delay>] [--no-schedule] <scratch_dir> [commit_msg]|monitor <pr_num> <branch> <commit_sha>}" >&2
         exit 1
         ;;
 esac
