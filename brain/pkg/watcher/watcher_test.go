@@ -102,7 +102,6 @@ func TestWatcherDebounceAndDynamicDir(t *testing.T) {
 	var callbackCount int32
 	w, err := NewWatcher(
 		WithDebounce(50*time.Millisecond),
-		WithFallbackInterval(0), // Disable fallback ticker for this test
 		WithCallback(func() {
 			atomic.AddInt32(&callbackCount, 1)
 		}),
@@ -121,44 +120,43 @@ func TestWatcherDebounceAndDynamicDir(t *testing.T) {
 
 	go w.Start(ctx)
 
-	// Rapidly write multiple files to verify debounce triggers fewer times than writes
-	for i := 0; i < 5; i++ {
-		testFile := filepath.Join(tmpDir, "test.md")
-		_ = os.WriteFile(testFile, []byte("hello"), 0644)
-		time.Sleep(5 * time.Millisecond)
+	// Sleep briefly to ensure watcher loop is active
+	time.Sleep(20 * time.Millisecond)
+
+	// Create a new subdirectory inside tmpDir
+	subDir := filepath.Join(tmpDir, "new_subdir")
+	if err := os.Mkdir(subDir, 0755); err != nil {
+		t.Fatalf("Failed to create subdirectory: %v", err)
 	}
 
-	// Wait for debounce period to settle
-	time.Sleep(150 * time.Millisecond)
+	// Wait for debounce and callback execution
+	time.Sleep(100 * time.Millisecond)
 
 	count := atomic.LoadInt32(&callbackCount)
 	if count == 0 {
-		t.Errorf("Expected reload callback to be executed, but got %d", count)
+		t.Errorf("Expected reload callback to trigger for new directory, got 0")
 	}
 
-	// Dynamically create a new subdirectory and write inside it
-	newSubDir := filepath.Join(tmpDir, "new_sub")
-	_ = os.Mkdir(newSubDir, 0755)
-	time.Sleep(50 * time.Millisecond)
+	// Create a file in the newly watched directory to verify it is dynamically watched
+	newFile := filepath.Join(subDir, "config.json")
+	if err := os.WriteFile(newFile, []byte(`{"key":"value"}`), 0644); err != nil {
+		t.Fatalf("Failed to create file in subdirectory: %v", err)
+	}
 
-	newSubFile := filepath.Join(newSubDir, "inner.md")
-	_ = os.WriteFile(newSubFile, []byte("inner content"), 0644)
-
-	time.Sleep(150 * time.Millisecond)
-
+	time.Sleep(100 * time.Millisecond)
 	newCount := atomic.LoadInt32(&callbackCount)
 	if newCount <= count {
 		t.Errorf("Expected reload callback to trigger for newly created subdirectory, got %d (prev: %d)", newCount, count)
 	}
 }
 
-func TestWatcherFallbackTicker(t *testing.T) {
-	var fallbackCount int32
+func TestWatcher_PureInotifyNoPhantomCallbacks(t *testing.T) {
+	tmpDir := t.TempDir()
+	var callbackCount int32
 	w, err := NewWatcher(
 		WithDebounce(10*time.Millisecond),
-		WithFallbackInterval(30*time.Millisecond),
 		WithCallback(func() {
-			atomic.AddInt32(&fallbackCount, 1)
+			atomic.AddInt32(&callbackCount, 1)
 		}),
 	)
 	if err != nil {
@@ -166,16 +164,20 @@ func TestWatcherFallbackTicker(t *testing.T) {
 	}
 	defer func() { _ = w.Close() }()
 
+	if err := w.AddRecursive(tmpDir); err != nil {
+		t.Fatalf("AddRecursive failed: %v", err)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	go w.Start(ctx)
 
-	// Wait for fallback ticker to fire at least once
+	// Wait without modifying files; pure inotify should never trigger phantom callbacks
 	time.Sleep(100 * time.Millisecond)
 
-	if atomic.LoadInt32(&fallbackCount) == 0 {
-		t.Errorf("Expected fallback ticker to execute callback, got 0")
+	if count := atomic.LoadInt32(&callbackCount); count != 0 {
+		t.Errorf("Expected 0 phantom callbacks without file events, got %d", count)
 	}
 }
 
@@ -188,7 +190,6 @@ func TestWatcher_RecreatedDirectory(t *testing.T) {
 	var callbackCount int32
 	w, err := NewWatcher(
 		WithDebounce(50*time.Millisecond),
-		WithFallbackInterval(0),
 		WithCallback(func() {
 			atomic.AddInt32(&callbackCount, 1)
 		}),
@@ -255,7 +256,6 @@ func TestWatcher_ConcurrentCallbacks(t *testing.T) {
 
 	w, err := NewWatcher(
 		WithDebounce(10*time.Millisecond),
-		WithFallbackInterval(0),
 		WithCallback(func() {
 			current := atomic.AddInt32(&running, 1)
 			defer atomic.AddInt32(&running, -1)
@@ -345,7 +345,7 @@ func TestWatcher_NonExistentDir(t *testing.T) {
 }
 
 func TestWatcher_StartContextCancel(t *testing.T) {
-	w, err := NewWatcher(WithFallbackInterval(0))
+	w, err := NewWatcher()
 	if err != nil {
 		t.Fatalf("failed to create watcher: %v", err)
 	}
@@ -386,7 +386,7 @@ func TestShouldIgnore_AdditionalPatterns(t *testing.T) {
 }
 
 func TestWatcher_StartClose(t *testing.T) {
-	w, err := NewWatcher(WithFallbackInterval(0))
+	w, err := NewWatcher()
 	if err != nil {
 		t.Fatalf("failed to create watcher: %v", err)
 	}
@@ -412,7 +412,7 @@ func TestWatcher_AddRecursive_SkipDir(t *testing.T) {
 	_ = os.Mkdir(gitDir, 0755)
 	_ = os.WriteFile(filepath.Join(gitDir, "HEAD"), []byte("ref: refs/heads/main"), 0644)
 
-	w, err := NewWatcher(WithFallbackInterval(0))
+	w, err := NewWatcher()
 	if err != nil {
 		t.Fatalf("failed to create watcher: %v", err)
 	}
@@ -447,7 +447,7 @@ func TestWatcher_NestedDirectoryRemoval(t *testing.T) {
 	child := filepath.Join(parent, "child")
 	_ = os.MkdirAll(child, 0755)
 
-	w, err := NewWatcher(WithFallbackInterval(0))
+	w, err := NewWatcher()
 	if err != nil {
 		t.Fatalf("NewWatcher failed: %v", err)
 	}

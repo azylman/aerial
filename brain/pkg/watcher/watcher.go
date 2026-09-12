@@ -18,7 +18,6 @@ type ReloadCallback func()
 type Watcher struct {
 	fsw         *fsnotify.Watcher
 	debounce    time.Duration
-	fallback    time.Duration
 	callbacks   []ReloadCallback
 	mu          sync.Mutex
 	cbMu        sync.Mutex
@@ -35,19 +34,13 @@ func WithDebounce(d time.Duration) Option {
 	}
 }
 
-func WithFallbackInterval(d time.Duration) Option {
-	return func(w *Watcher) {
-		w.fallback = d
-	}
-}
-
 func WithCallback(cb ReloadCallback) Option {
 	return func(w *Watcher) {
 		w.callbacks = append(w.callbacks, cb)
 	}
 }
 
-// NewWatcher initializes a new fsnotify file watcher with default 500ms debounce and 30s fallback ticker.
+// NewWatcher initializes a new fsnotify file watcher with default 500ms debounce.
 func NewWatcher(opts ...Option) (*Watcher, error) {
 	fsw, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -57,7 +50,6 @@ func NewWatcher(opts ...Option) (*Watcher, error) {
 	w := &Watcher{
 		fsw:         fsw,
 		debounce:    500 * time.Millisecond,
-		fallback:    30 * time.Second,
 		callbacks:   make([]ReloadCallback, 0),
 		watchedDirs: make(map[string]bool),
 	}
@@ -196,15 +188,6 @@ func (w *Watcher) executeCallbacks() {
 
 // Start runs the background event listening loop until ctx is cancelled or watcher is closed.
 func (w *Watcher) Start(ctx context.Context) {
-	var fallbackTicker *time.Ticker
-	var fallbackChan <-chan time.Time
-
-	if w.fallback > 0 {
-		fallbackTicker = time.NewTicker(w.fallback)
-		defer fallbackTicker.Stop()
-		fallbackChan = fallbackTicker.C
-	}
-
 	for {
 		select {
 		case <-ctx.Done():
@@ -250,10 +233,6 @@ func (w *Watcher) Start(ctx context.Context) {
 				return
 			}
 			log.Printf("[Watcher] fsnotify error: %v", err)
-
-		case <-fallbackChan:
-			// Fallback ticker to guarantee sync even on non-inotify mounts
-			w.executeCallbacks()
 		}
 	}
 }
