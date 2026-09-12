@@ -457,6 +457,12 @@ func (p *WorkerPool) getDiscordSession() *discordgo.Session {
 	return p.cfg.DiscordSession
 }
 
+// DiscordSession returns the currently assigned discordgo session.
+func (p *WorkerPool) DiscordSession() *discordgo.Session {
+	return p.getDiscordSession()
+}
+
+
 func (p *WorkerPool) UpdateRuntimeConfig(model string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -542,6 +548,13 @@ func (p *WorkerPool) StopWithTimeout(drainTimeout time.Duration) {
 		log.Printf("[WorkerPool] Graceful drain completed cleanly")
 	case <-time.After(2 * time.Second):
 		log.Printf("[WorkerPool] Warning: worker exit wait timed out")
+	}
+
+	// Stage 3: Atomic safety net: sweep any remaining PROCESSING messages to PENDING
+	if p.cfg.DB != nil {
+		sweepCtx, sweepCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_, _ = p.cfg.DB.ExecContext(sweepCtx, "UPDATE messages SET status = 'PENDING', error_message = 'deployment_drain' WHERE status = 'PROCESSING'")
+		sweepCancel()
 	}
 }
 
@@ -1398,8 +1411,11 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 
 		if wakeIdx == -1 {
 			if p.ctx.Err() != nil {
-				log.Printf("[WorkerPool] Context cancelled during ambient classification for thread %s. Preserving burst in PROCESSING for startup recovery.", threadID)
+				log.Printf("[WorkerPool] Context cancelled during ambient classification for thread %s. Resetting to PENDING for clean deployment recovery.", threadID)
 				metrics.RecordTurnCompleted("cancelled", triggerType, "classifier", time.Since(execStart))
+				for _, m := range burst {
+					_ = db.UpdateMessageStatus(p.cfg.DB, m.ID, db.StatusPending, "interrupted by graceful deployment")
+				}
 				return
 			}
 
@@ -2117,11 +2133,14 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 
 		// If execution failed because the pool context was cancelled (SIGTERM/shutdown),
 		// suppress Discord error notifications and do NOT mark FAILED or increment retries.
-		// Leave messages in PROCESSING for RecoverInterrupted on container restart.
+		// Reset messages to PENDING for clean deployment recovery on container restart.
 		if p.ctx.Err() != nil {
-			log.Printf("[WorkerPool] Turn execution cancelled due to pool shutdown (thread: %s, attempt: %d/%d). Preserving PROCESSING state for startup recovery.", threadID, attempt, maxAttempts)
+			log.Printf("[WorkerPool] Turn execution cancelled due to pool shutdown (thread: %s, attempt: %d/%d). Resetting to PENDING for clean deployment recovery.", threadID, attempt, maxAttempts)
 			stopTyping()
 			metrics.RecordTurnCompleted("cancelled", triggerType, currentModel, time.Since(execStart))
+			for _, m := range burst {
+				_ = db.UpdateMessageStatus(p.cfg.DB, m.ID, db.StatusPending, "interrupted by graceful deployment")
+			}
 			return
 		}
 
@@ -2149,6 +2168,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 				case <-p.ctx.Done():
 					metrics.RecordTurnCompleted("cancelled", triggerType, currentModel, time.Since(execStart))
 					for _, m := range burst {
+						_ = db.UpdateMessageStatus(p.cfg.DB, m.ID, db.StatusPending, "interrupted by graceful deployment")
 						if m.ScheduleRunID != "" {
 							_ = db.UpdateScheduleRunStatus(p.cfg.DB, db.UpdateRunParams{
 								RunID:       m.ScheduleRunID,
@@ -2180,6 +2200,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 				case <-p.ctx.Done():
 					metrics.RecordTurnCompleted("cancelled", triggerType, currentModel, time.Since(execStart))
 					for _, m := range burst {
+						_ = db.UpdateMessageStatus(p.cfg.DB, m.ID, db.StatusPending, "interrupted by graceful deployment")
 						if m.ScheduleRunID != "" {
 							_ = db.UpdateScheduleRunStatus(p.cfg.DB, db.UpdateRunParams{
 								RunID:       m.ScheduleRunID,
@@ -2250,8 +2271,11 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 	stopTyping()
 
 	if p.ctx.Err() != nil {
-		log.Printf("[WorkerPool] Pool shutting down during turn for thread %s. Suppressing exhaustion alert and preserving state.", threadID)
+		log.Printf("[WorkerPool] Pool shutting down during turn for thread %s. Suppressing exhaustion alert and resetting to PENDING for deployment recovery.", threadID)
 		metrics.RecordTurnCompleted("cancelled", triggerType, currentModel, time.Since(execStart))
+		for _, m := range burst {
+			_ = db.UpdateMessageStatus(p.cfg.DB, m.ID, db.StatusPending, "interrupted by graceful deployment")
+		}
 		return
 	}
 	var notif string
@@ -2337,9 +2361,12 @@ func RecoverInterrupted(database *sql.DB, pool *WorkerPool) {
 
 	log.Printf("[Startup Recovery] Resuming %d interrupted message(s) in chronological FIFO order...", len(messages))
 	for _, m := range messages {
-		if m.Status == db.StatusProcessing && (m.RestartCount >= DefaultMaxRestarts || m.RetryCount >= maxAttempts) {
+		const MaxHardRestarts = 5
+		isInstantCrashLoop := m.Status == db.StatusProcessing && time.Since(m.UpdatedAt) < 30*time.Second
+
+		if m.Status == db.StatusProcessing && (m.RestartCount >= MaxHardRestarts || (m.RestartCount >= DefaultMaxRestarts && isInstantCrashLoop) || m.RetryCount >= maxAttempts) {
 			reason := "poison pill: exceeded restart limit during crash recovery"
-			if m.RestartCount < DefaultMaxRestarts {
+			if m.RetryCount >= maxAttempts {
 				reason = "poison pill: exceeded retry limit during crash recovery"
 			}
 			log.Printf("[Startup Recovery] Poison pill detected for message %s (restart_count=%d, retry_count=%d): %s. Dropping message.", m.ID, m.RestartCount, m.RetryCount, reason)
@@ -2374,6 +2401,9 @@ func RecoverInterrupted(database *sql.DB, pool *WorkerPool) {
 		}
 
 		if m.Status == db.StatusProcessing {
+			if m.RestartCount >= DefaultMaxRestarts && !isInstantCrashLoop {
+				log.Printf("[Startup Recovery] Message %s was active for %v before restart (restart_count=%d < %d). Treating as long-running task interrupted by deployment rather than instant crash loop.", m.ID, time.Since(m.UpdatedAt), m.RestartCount, MaxHardRestarts)
+			}
 			_ = db.ResetMessageToPendingWithRestart(database, m.ID, "interrupted during restart")
 			m.Status = db.StatusPending
 			m.RestartCount++

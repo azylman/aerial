@@ -1015,11 +1015,15 @@ func RunBrainApp(ctx context.Context, cfg *config.Config) error {
 	})
 	pool.Start()
 
-	// Resume interrupted turns before connecting Discord gateway to eliminate startup races
-	queue.RecoverInterrupted(database, pool)
-
 	SetFunnelConfig(cfg)
 	dgSession := connectDiscordFunnel(ctx, database, pool, cur.DiscordToken)
+	if pool != nil && dgSession != nil {
+		pool.SetDiscordSession(dgSession)
+	}
+
+	// Resume interrupted turns after Discord gateway session is registered
+	// so poison pill and recovery notifications can reliably deliver to Discord.
+	queue.RecoverInterrupted(database, pool)
 	defer func() {
 		log.Printf("Draining worker pool (10s timeout)...")
 		pool.StopWithTimeout(10 * time.Second)
