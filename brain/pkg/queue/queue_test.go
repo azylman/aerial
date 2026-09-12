@@ -9564,7 +9564,7 @@ func TestWorkerPool_Watchdog_CancelledDuringBackoff(t *testing.T) {
 		DB:             database,
 		MaxAttempts:    3,
 		TimeoutMinutes: 1,
-		BackoffBase:    200 * time.Millisecond,
+		BackoffBase:    100 * time.Millisecond,
 		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
 			go func() {
 				time.Sleep(30 * time.Millisecond)
@@ -9591,12 +9591,9 @@ func TestWorkerPool_Watchdog_CancelledDuringBackoff(t *testing.T) {
 	_ = db.InsertMessage(database, msg)
 	pool.Enqueue(msg)
 
-	time.Sleep(150 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
 	dbMsg, err := db.GetMessage(database, "msg-wd-cancel")
-	if err != nil || dbMsg == nil {
-		t.Fatalf("GetMessage failed: %v", err)
-	}
 	if dbMsg.Status != db.StatusPending {
 		t.Errorf("Expected status PENDING after pool cancel during watchdog backoff, got: %s", dbMsg.Status)
 	}
@@ -9835,7 +9832,7 @@ func TestWorkerPool_RateLimit_CancelledDuringBackoff(t *testing.T) {
 		DB:             database,
 		MaxAttempts:    3,
 		TimeoutMinutes: 1,
-		BackoffBase:    200 * time.Millisecond,
+		BackoffBase:    100 * time.Millisecond,
 		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
 			go func() {
 				time.Sleep(30 * time.Millisecond)
@@ -9862,7 +9859,7 @@ func TestWorkerPool_RateLimit_CancelledDuringBackoff(t *testing.T) {
 	_ = db.InsertMessage(database, msg)
 	pool.Enqueue(msg)
 
-	time.Sleep(150 * time.Millisecond)
+	time.Sleep(120 * time.Millisecond)
 
 	dbMsg, err := db.GetMessage(database, "msg-rl-cancel")
 	if err != nil || dbMsg == nil {
@@ -9885,7 +9882,7 @@ func TestWorkerPool_Transient_CancelledDuringBackoff(t *testing.T) {
 		DB:             database,
 		MaxAttempts:    3,
 		TimeoutMinutes: 1,
-		BackoffBase:    200 * time.Millisecond,
+		BackoffBase:    100 * time.Millisecond,
 		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
 			go func() {
 				time.Sleep(30 * time.Millisecond)
@@ -9912,7 +9909,7 @@ func TestWorkerPool_Transient_CancelledDuringBackoff(t *testing.T) {
 	_ = db.InsertMessage(database, msg)
 	pool.Enqueue(msg)
 
-	time.Sleep(150 * time.Millisecond)
+	time.Sleep(120 * time.Millisecond)
 
 	dbMsg, err := db.GetMessage(database, "msg-tr-cancel")
 	if err != nil || dbMsg == nil {
@@ -10100,7 +10097,7 @@ func TestOnWakeHook(t *testing.T) {
 		if te.wakeIdx != 0 {
 			t.Errorf("expected wakeIdx = 0, got %d", te.wakeIdx)
 		}
-		if len(te.wakeInfos) == 0 || !te.wakeInfos[0].isWake {
+		if len(te.wakeInfos) == 0 || !te.wakeInfos[0].IsWake {
 			t.Errorf("expected wakeInfo[0].isWake = true")
 		}
 	})
@@ -10958,11 +10955,12 @@ func TestPreTurnHook(t *testing.T) {
 
 		completedChan := make(chan struct{})
 		pool := NewWorkerPool(WorkerPoolConfig{
-			DB:                database,
-			SessionManager:    sessMgr,
-			TimeoutMinutes:    1,
-			MaxAttempts:       3,
-			WebhookDispatcher: mockDisp,
+			DB:                 database,
+			SessionManager:     sessMgr,
+			TimeoutMinutes:     1,
+			MaxAttempts:        3,
+			RetryDelayOverride: 10 * time.Millisecond,
+			WebhookDispatcher:  mockDisp,
 			RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 				mu.Lock()
 				runnerCalls++

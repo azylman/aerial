@@ -24,12 +24,7 @@ import (
 	"github.com/google/uuid"
 )
 
-type wakeInfo struct {
-	isWake    bool
-	score     float64
-	threshold float64
-	reason    string
-}
+type wakeInfo = WakeInfo
 
 type turnExecution struct {
 	pool                *WorkerPool
@@ -407,32 +402,31 @@ func (te *turnExecution) claimAndFilterStale() bool {
 		}
 	}
 
-	if !latestMsg.CreatedAt.IsZero() {
-		msgAge := time.Since(latestMsg.CreatedAt)
-		if msgAge > MaxMessageAbsoluteAge {
-			dropBurstAsStale(fmt.Sprintf("exceeded hard absolute age cap %v: msg age %v", MaxMessageAbsoluteAge, msgAge))
-			return false
-		}
+	var lastActivity time.Time
+	var isColdThread bool
+	now := time.Now().UTC()
+	msgAge := time.Duration(0)
+	if !latestMsg.CreatedAt.IsZero() && now.After(latestMsg.CreatedAt) {
+		msgAge = now.Sub(latestMsg.CreatedAt)
+	}
 
-		if !hasRecovered && msgAge > stalenessTTL {
-			lastActivity, isColdThread, err := GetSessionLastActivity(te.pool.cfg.DB, te.threadID, te.pool.sessionMgr)
-			if err != nil {
-				// Fail-open: Retain message if DB error occurs during staleness lookup
-				log.Printf("[WorkerPool] Warning: failed to query session last activity for thread %s: %v. Retaining message(s) (fail-open).", te.threadID, err)
-			} else if isColdThread {
-				// New session: message send time governs staleness
-				dropBurstAsStale(fmt.Sprintf("new thread and message age %v > TTL %v", msgAge, stalenessTTL))
-				return false
-			} else {
-				// Existing session: session last activity governs staleness
-				if time.Since(lastActivity) > stalenessTTL {
-					dropBurstAsStale(fmt.Sprintf("existing session inactive for %v > TTL %v", time.Since(lastActivity), stalenessTTL))
-					return false
-				}
-				log.Printf("[WorkerPool] Retaining message in thread %s (msg age %v > TTL %v) because session had recent activity %v ago <= TTL.",
-					te.threadID, msgAge, stalenessTTL, time.Since(lastActivity))
-			}
+	if msgAge > stalenessTTL && !hasRecovered {
+		var err error
+		lastActivity, isColdThread, err = GetSessionLastActivity(te.pool.cfg.DB, te.threadID, te.pool.sessionMgr)
+		if err != nil {
+			// Fail-open: Retain message if DB error occurs during staleness lookup
+			log.Printf("[WorkerPool] Warning: failed to query session last activity for thread %s: %v. Retaining message(s) (fail-open).", te.threadID, err)
 		}
+	}
+
+	isStale, reason := EvaluateBurstStaleness(te.burst, stalenessTTL, isColdThread, lastActivity, now)
+	if isStale {
+		dropBurstAsStale(reason)
+		return false
+	}
+	if reason != "" && strings.Contains(reason, "recent activity") {
+		log.Printf("[WorkerPool] Retaining message in thread %s (msg age %v > TTL %v) because session had recent activity %v ago <= TTL.",
+			te.threadID, msgAge, stalenessTTL, now.Sub(lastActivity))
 	}
 
 	te.execStart = time.Now().UTC()
@@ -505,9 +499,7 @@ func (te *turnExecution) evaluateAmbientWake() (shouldExit bool) {
 
 		wakeMode := te.policy.GetWakeMode()
 
-		te.wakeInfos = make([]wakeInfo, len(te.burst))
-		te.wakeIdx = -1
-
+		var hookOverride string
 		if te.policy.Hooks.OnWake != nil {
 			channelID := te.effectiveID
 			if channelID == "" {
@@ -538,187 +530,44 @@ func (te *turnExecution) evaluateAmbientWake() (shouldExit bool) {
 			}
 
 			wakeResp, err := dispatcher.CallWakeHook(poolCtx, te.policy.Hooks.OnWake, req)
-			override := te.policy.Hooks.OnWake.GetOnTimeout("classify")
+			hookOverride = te.policy.Hooks.OnWake.GetOnTimeout("classify")
 			if err == nil && wakeResp != nil && strings.TrimSpace(wakeResp.Override) != "" {
-				override = strings.ToLower(strings.TrimSpace(wakeResp.Override))
-			}
-
-			switch override {
-			case "wake":
-				te.wakeIdx = 0
-				for i := range te.burst {
-					te.wakeInfos[i] = wakeInfo{
-						isWake:    i == 0,
-						score:     1.0,
-						threshold: te.policy.GetAmbientWakeThreshold(),
-						reason:    "hook_wake_override",
-					}
-				}
-			case "drop":
-				te.wakeIdx = -1
-				for i := range te.burst {
-					te.wakeInfos[i] = wakeInfo{
-						isWake:    false,
-						score:     0.0,
-						threshold: te.policy.GetAmbientWakeThreshold(),
-						reason:    "hook_drop_override",
-					}
-				}
-				te.markAmbientBurst()
-				return true
-			case "classify":
-				// Fall through to normal Tier-1 / Tier-2 classifier
+				hookOverride = strings.ToLower(strings.TrimSpace(wakeResp.Override))
 			}
 		}
 
-		if te.wakeIdx == -1 {
-			// Safeguard 1: Tier-1 Pre-Scan (Zero-Latency Priority)
-			for i, m := range te.burst {
-				if isTier1Wake(m, botUserID, botRoleIDs, wakeMode) {
-					te.wakeInfos[i] = wakeInfo{
-						isWake:    true,
-						score:     1.0,
-						threshold: te.policy.GetAmbientWakeThreshold(),
-						reason:    "direct_address",
-					}
-					if te.wakeIdx == -1 {
-						te.wakeIdx = i
-					}
-				}
+		classifierFn := func(msgs []db.Message) (float64, string) {
+			var recentContext []db.Message
+			if te.pool != nil && te.pool.cfg.DB != nil {
+				recentContext, _ = db.GetRecentThreadMessages(te.pool.cfg.DB, te.threadID, 10)
 			}
-
-			if te.wakeIdx != -1 {
-				// Direct Tier-1 wake found!
-				// Any leading ambient messages [0..wakeIdx-1] are marked ambient with zero classifier delay.
-				for i := 0; i < te.wakeIdx; i++ {
-					te.wakeInfos[i] = wakeInfo{
-						isWake:    false,
-						score:     0.0,
-						threshold: te.policy.GetAmbientWakeThreshold(),
-						reason:    "burst_prescan_leading",
-					}
-				}
-				// Trailing messages after wakeIdx:
-				// If Tier-1, mark isWake: true so handleTrailing re-enqueues it for the next turn.
-				// Otherwise mark ambient (or classify if threshold > 0 and wakeMode == "classifier").
-				threshold := te.policy.GetAmbientWakeThreshold()
-				for i := te.wakeIdx + 1; i < len(te.burst); i++ {
-					m := te.burst[i]
-					if isTier1Wake(m, botUserID, botRoleIDs, wakeMode) {
-						te.wakeInfos[i] = wakeInfo{
-							isWake:    true,
-							score:     1.0,
-							threshold: threshold,
-							reason:    "direct_address",
-						}
-					} else if wakeMode == "mention" || threshold <= 0.0 || classifier.IsHeuristicSkip(extractMessageBody(m.Content)) {
-						te.wakeInfos[i] = wakeInfo{
-							isWake:    false,
-							score:     0.0,
-							threshold: threshold,
-							reason:    "heuristic_skip",
-						}
-					} else {
-						var recentContext []db.Message
-						if te.pool.cfg.DB != nil {
-							recentContext, _ = db.GetRecentThreadMessages(te.pool.cfg.DB, te.threadID, 10)
-						}
-						var res classifier.ClassificationResult
-						if te.pool.cfg.Classifier != nil {
-							res = te.pool.cfg.Classifier.Classify(te.pool.ctx, m, recentContext, te.policy.GetAmbientWakePrompt())
-						} else {
-							res = classifier.ClassificationResult{Confidence: 0.0, Reason: "no classifier configured"}
-						}
-						te.wakeInfos[i] = wakeInfo{
-							isWake:    res.Confidence >= threshold,
-							score:     res.Confidence,
-							threshold: threshold,
-							reason:    res.Reason,
-						}
-					}
-				}
-			} else if wakeMode == "mention" {
-				// Mention-only mode: all non-mention messages are ambient without running classifier
-				for i := range te.burst {
-					te.wakeInfos[i] = wakeInfo{
-						isWake:    false,
-						score:     0.0,
-						threshold: 0.0,
-						reason:    "mention_mode_ambient",
-					}
-				}
-			} else if wakeMode == "all" {
-				for i := range te.burst {
-					te.wakeInfos[i] = wakeInfo{
-						isWake:    i == 0,
-						score:     1.0,
-						threshold: 0.0,
-						reason:    "all_wake",
-					}
-				}
-				te.wakeIdx = 0
-			} else {
-				// Safeguard 2: Coalesced Burst Ambient Evaluation (classifier mode)
-				threshold := te.policy.GetAmbientWakeThreshold()
-				if threshold <= 0.0 {
-					for i := range te.burst {
-						te.wakeInfos[i] = wakeInfo{
-							isWake:    false,
-							score:     0.0,
-							threshold: threshold,
-							reason:    "classifier disabled",
-						}
-					}
-				} else {
-					// Fast pre-filter: if all messages in burst are banter/emojis/commands, skip without LLM
-					allSkip := true
-					for _, m := range te.burst {
-						if !classifier.IsHeuristicSkip(extractMessageBody(m.Content)) {
-							allSkip = false
-							break
-						}
-					}
-					if allSkip {
-						for i := range te.burst {
-							te.wakeInfos[i] = wakeInfo{
-								isWake:    false,
-								score:     0.0,
-								threshold: threshold,
-								reason:    "heuristic_skip",
-							}
-						}
-					} else {
-						var recentContext []db.Message
-						if te.pool.cfg.DB != nil {
-							recentContext, _ = db.GetRecentThreadMessages(te.pool.cfg.DB, te.threadID, 10)
-						}
-						var res classifier.ClassificationResult
-						if te.pool.cfg.Classifier != nil {
-							res = te.pool.cfg.Classifier.ClassifyBurst(te.pool.ctx, te.burst, recentContext, te.policy.GetAmbientWakePrompt())
-						} else {
-							res = classifier.ClassificationResult{Confidence: 0.0, Reason: "no classifier configured"}
-						}
-						isWake := res.Confidence >= threshold
-						log.Printf("[AmbientClassifier] Channel %s | BurstSize %d | Score: %.2f (Threshold: %.2f) | Wake: %t | Reason: %s",
-							te.threadID, len(te.burst), res.Confidence, threshold, isWake, res.Reason)
-
-						for i := range te.burst {
-							te.wakeInfos[i] = wakeInfo{
-								isWake:    i == 0 && isWake,
-								score:     res.Confidence,
-								threshold: threshold,
-								reason:    res.Reason,
-							}
-						}
-						if isWake {
-							te.wakeIdx = 0
-						}
-					}
-				}
+			if te.pool == nil || te.pool.cfg.Classifier == nil {
+				return 0.0, "no classifier configured"
 			}
+			if len(msgs) == 1 {
+				res := te.pool.cfg.Classifier.Classify(te.pool.ctx, msgs[0], recentContext, te.policy.GetAmbientWakePrompt())
+				return res.Confidence, res.Reason
+			}
+			res := te.pool.cfg.Classifier.ClassifyBurst(te.pool.ctx, msgs, recentContext, te.policy.GetAmbientWakePrompt())
+			log.Printf("[AmbientClassifier] Channel %s | BurstSize %d | Score: %.2f (Threshold: %.2f) | Wake: %t | Reason: %s",
+				te.threadID, len(msgs), res.Confidence, te.policy.GetAmbientWakeThreshold(), res.Confidence >= te.policy.GetAmbientWakeThreshold(), res.Reason)
+			return res.Confidence, res.Reason
 		}
 
-		if te.wakeIdx == -1 {
+		plan := PlanBurstExecution(BurstPlanInput{
+			Burst:        te.burst,
+			WakeMode:     wakeMode,
+			Threshold:    te.policy.GetAmbientWakeThreshold(),
+			BotUserID:    botUserID,
+			BotRoleIDs:   botRoleIDs,
+			HookOverride: hookOverride,
+			ClassifierFn: classifierFn,
+		})
+
+		te.wakeIdx = plan.WakeIndex
+		te.wakeInfos = plan.WakeInfos
+
+		if plan.IsAllAmbient {
 			if te.pool != nil && te.pool.ctx != nil && te.pool.ctx.Err() != nil {
 				log.Printf("[WorkerPool] Context cancelled during ambient classification for thread %s. Resetting to PENDING for clean deployment recovery.", te.threadID)
 				metrics.RecordTurnCompleted("cancelled", te.triggerType, "classifier", time.Since(te.execStart))
@@ -737,7 +586,7 @@ func (te *turnExecution) evaluateAmbientWake() (shouldExit bool) {
 		// Check session rotation timing before Phase 1:
 		currentTurns, _ := db.GetSessionTurnCount(te.pool.cfg.DB, te.threadID)
 		lastActivity, isCold, _ := GetSessionLastActivity(te.pool.cfg.DB, te.threadID, te.pool.sessionMgr)
-		isTurnLimit := currentTurns >= DefaultMaxSessionTurns || (te.wakeIdx > 0 && currentTurns+1 >= DefaultMaxSessionTurns)
+		isTurnLimit := currentTurns >= DefaultMaxSessionTurns || (plan.WakeIndex > 0 && currentTurns+1 >= DefaultMaxSessionTurns)
 		isIdleLimit := te.currentSessionID != "" && !isCold && !lastActivity.IsZero() && time.Since(lastActivity) >= DefaultMaxSessionIdleTime
 		if isTurnLimit || isIdleLimit {
 			if isIdleLimit {
@@ -764,34 +613,28 @@ func (te *turnExecution) evaluateAmbientWake() (shouldExit bool) {
 		}
 
 		// Phase 1 (Leading ambient messages)
-		if te.wakeIdx > 0 {
-			for i := 0; i < te.wakeIdx; i++ {
-				m := te.burst[i]
-				info := te.wakeInfos[i]
-				metrics.DiscordMessagesProcessedTotal.WithLabelValues("true", "ambient").Inc()
-				telemetry := fmt.Sprintf("[AMBIENT score=%.2f/%.2f reason=%q]", info.score, info.threshold, info.reason)
-				_ = db.UpdateMessageStatus(te.pool.cfg.DB, m.ID, db.StatusCompleted, telemetry)
-				if m.ScheduleRunID != "" {
-					_ = db.UpdateScheduleRunStatus(te.pool.cfg.DB, db.UpdateRunParams{
-						RunID:       m.ScheduleRunID,
-						MessageID:   m.ID,
-						Status:      "completed",
-						CompletedAt: time.Now().UTC(),
-					})
-				}
-				if te.pool.cfg.OnMessageCompleted != nil {
-					te.pool.cfg.OnMessageCompleted(m, db.StatusCompleted)
-				}
+		for i, m := range plan.LeadingAmbient {
+			info := plan.WakeInfos[i]
+			metrics.DiscordMessagesProcessedTotal.WithLabelValues("true", "ambient").Inc()
+			telemetry := fmt.Sprintf("[AMBIENT score=%.2f/%.2f reason=%q]", info.Score, info.Threshold, info.Reason)
+			_ = db.UpdateMessageStatus(te.pool.cfg.DB, m.ID, db.StatusCompleted, telemetry)
+			if m.ScheduleRunID != "" {
+				_ = db.UpdateScheduleRunStatus(te.pool.cfg.DB, db.UpdateRunParams{
+					RunID:       m.ScheduleRunID,
+					MessageID:   m.ID,
+					Status:      "completed",
+					CompletedAt: time.Now().UTC(),
+				})
+			}
+			if te.pool.cfg.OnMessageCompleted != nil {
+				te.pool.cfg.OnMessageCompleted(m, db.StatusCompleted)
 			}
 		}
 
 		// Phase 2 (Active wake batch)
-		// Partition trailing messages after the wake message
-		if te.wakeIdx+1 < len(te.burst) {
-			te.trailingMsgs = te.burst[te.wakeIdx+1:]
-			te.trailingInfos = te.wakeInfos[te.wakeIdx+1:]
-		}
-		te.burst = []db.Message{te.burst[te.wakeIdx]}
+		te.trailingMsgs = plan.TrailingMessages
+		te.trailingInfos = plan.TrailingInfos
+		te.burst = []db.Message{plan.ActiveMessage}
 		metrics.DiscordMessagesProcessedTotal.WithLabelValues("false", "wake").Inc()
 	}
 
@@ -841,12 +684,12 @@ func (te *turnExecution) markAmbientBurst() {
 	metrics.RecordTurnCompleted("ambient", te.triggerType, "classifier", time.Since(te.execStart))
 
 	for i, m := range te.burst {
-		var info wakeInfo
+		var info WakeInfo
 		if i < len(te.wakeInfos) {
 			info = te.wakeInfos[i]
 		}
 		metrics.DiscordMessagesProcessedTotal.WithLabelValues("true", "ambient").Inc()
-		telemetry := fmt.Sprintf("[AMBIENT score=%.2f/%.2f reason=%q]", info.score, info.threshold, info.reason)
+		telemetry := fmt.Sprintf("[AMBIENT score=%.2f/%.2f reason=%q]", info.Score, info.Threshold, info.Reason)
 		_ = db.UpdateMessageStatus(te.pool.cfg.DB, m.ID, db.StatusCompleted, telemetry)
 		if m.ScheduleRunID != "" {
 			_ = db.UpdateScheduleRunStatus(te.pool.cfg.DB, db.UpdateRunParams{
@@ -997,7 +840,11 @@ func (te *turnExecution) rescheduleBurst(delaySeconds int) {
 		m.Status = db.StatusPending
 		mCopy := m
 		if te.pool != nil {
-			time.AfterFunc(time.Duration(delaySeconds)*time.Second, func() {
+			delay := time.Duration(delaySeconds) * time.Second
+			if te.pool.cfg.RetryDelayOverride > 0 {
+				delay = te.pool.cfg.RetryDelayOverride
+			}
+			time.AfterFunc(delay, func() {
 				te.pool.Enqueue(mCopy)
 			})
 		}
@@ -1015,7 +862,7 @@ func (te *turnExecution) handleTrailing() {
 	for i, m := range trailing {
 		info := trailingInfos[i]
 		if te.isQuotaPaused {
-			if info.isWake {
+			if info.IsWake {
 				metrics.DiscordMessagesProcessedTotal.WithLabelValues("false", "wake").Inc()
 			} else {
 				metrics.DiscordMessagesProcessedTotal.WithLabelValues("true", "ambient").Inc()
@@ -1036,9 +883,9 @@ func (te *turnExecution) handleTrailing() {
 			}
 			continue
 		}
-		if !info.isWake {
+		if !info.IsWake {
 			metrics.DiscordMessagesProcessedTotal.WithLabelValues("true", "ambient").Inc()
-			telemetry := fmt.Sprintf("[AMBIENT score=%.2f/%.2f reason=%q]", info.score, info.threshold, info.reason)
+			telemetry := fmt.Sprintf("[AMBIENT score=%.2f/%.2f reason=%q]", info.Score, info.Threshold, info.Reason)
 			_ = db.UpdateMessageStatus(te.pool.cfg.DB, m.ID, db.StatusCompleted, telemetry)
 			if m.ScheduleRunID != "" {
 				_ = db.UpdateScheduleRunStatus(te.pool.cfg.DB, db.UpdateRunParams{
@@ -1088,15 +935,14 @@ func (te *turnExecution) buildTurnPrompt() {
 		return turnHistory
 	}
 
-	basePrompt := CoalesceBurstPrompt(te.burst)
 	snap, _ := resolveChannelSnapshot(te.pool.getDiscordSession(), te.threadID)
 	isThreadColdStart := snap.IsThread && snap.ParentID != "" && snap.ParentID != snap.ID && te.currentSessionID == ""
 
 	isColdStart := te.currentSessionID == ""
 	hasHistoryNeed := isColdStart || te.wakeIdx > 0 || len(te.burst) > 1
 
+	var summary string
 	if isThreadColdStart {
-		var summary string
 		cachedSum, lastMsgID, _ := db.GetThreadSummary(te.pool.cfg.DB, te.threadID)
 
 		histMsgs := getTurnHistory(100)
@@ -1155,38 +1001,44 @@ func (te *turnExecution) buildTurnPrompt() {
 		}
 
 		if summary != "" {
-			basePrompt = summary + "\n\n" + basePrompt
 			log.Printf("[WorkerPool] Injected <THREAD_SUMMARY> into Turn 1 prompt for thread %s", te.threadID)
 		}
 	}
 
+	var lookbackMsgs []HistoryMessage
 	if hasHistoryNeed {
-		lookbackMsgs := getTurnHistory(10)
-		if formattedHist := FormatChannelHistory(lookbackMsgs); formattedHist != "" {
-			basePrompt = formattedHist + "\n\n" + basePrompt
+		lookbackMsgs = getTurnHistory(10)
+		if len(lookbackMsgs) > 0 {
 			log.Printf("[WorkerPool] Injected channel history into prompt for thread %s", te.threadID)
 		}
 	}
 
+	var prevID string
 	if isColdStart {
-		prevID := te.previousSessionID
+		prevID = te.previousSessionID
 		if prevID == "" && te.pool.cfg.DB != nil {
 			prevID, _ = db.GetPreviousSessionID(te.pool.cfg.DB, te.threadID)
 		}
-		if prevBlock := FormatPreviousSession(prevID); prevBlock != "" {
-			basePrompt = prevBlock + "\n\n" + basePrompt
+		if prevID != "" {
 			log.Printf("[WorkerPool] Injected previous session identifier (%s) into prompt for thread %s", prevID, te.threadID)
 		}
 	}
 
-	queryText := memory.ExtractQueryText(basePrompt)
+	baseCoalesced := CoalesceBurstPrompt(te.burst)
+	queryText := memory.ExtractQueryText(baseCoalesced)
+	if queryText == "" && summary != "" {
+		queryText = memory.ExtractQueryText(summary)
+	}
+
+	var facts []db.Fact
 	if te.pool.cfg.MemoryRetrieverFunc != nil && te.pool.cfg.DB != nil && strings.TrimSpace(queryText) != "" {
 		maxFacts := 10
 		if isThreadColdStart {
 			maxFacts = 5
 		}
 		retrievalCtx, retrievalCancel := context.WithTimeout(te.pool.ctx, 2500*time.Millisecond)
-		facts, err := te.pool.cfg.MemoryRetrieverFunc(retrievalCtx, te.pool.cfg.DB, te.pool.cfg.MemoryClient, queryText, maxFacts)
+		var err error
+		facts, err = te.pool.cfg.MemoryRetrieverFunc(retrievalCtx, te.pool.cfg.DB, te.pool.cfg.MemoryClient, queryText, maxFacts)
 		retrievalCancel()
 		if err != nil {
 			log.Printf("[WorkerPool] Warning: Semantic memory retrieval failed for thread %s: %v. Proceeding without injected facts.", te.threadID, err)
@@ -1194,32 +1046,28 @@ func (te *turnExecution) buildTurnPrompt() {
 			if isThreadColdStart && len(facts) > 5 {
 				facts = facts[:5]
 			}
-			memoryBlock := memory.FormatMemoryContext(facts)
-			if memoryBlock != "" {
-				basePrompt = memoryBlock + "\n\n" + basePrompt
-				log.Printf("[WorkerPool] Injected %d semantic memory fact(s) into prompt for thread %s", len(facts), te.threadID)
-			}
+			log.Printf("[WorkerPool] Injected %d semantic memory fact(s) into prompt for thread %s", len(facts), te.threadID)
 		}
 	}
 
-	turnPrompt := basePrompt
-	if instructions := config.LoadChannelInstructions(te.effectiveName); instructions != "" {
-		turnPrompt = fmt.Sprintf("<CHANNEL_INSTRUCTIONS>\nChannel-specific guidelines for this conversation:\n\n%s\n</CHANNEL_INSTRUCTIONS>\n\n%s", instructions, basePrompt)
+	instructions := config.LoadChannelInstructions(te.effectiveName)
+	if instructions != "" {
 		log.Printf("[WorkerPool] Injected channel instructions for #%s into prompt", te.effectiveName)
 	}
 	if te.injectedHookContext != "" {
-		hookCtx := te.injectedHookContext
-		if !strings.HasPrefix(hookCtx, "<COORDINATION_CONTEXT>") {
-			hookCtx = fmt.Sprintf("<COORDINATION_CONTEXT>\n%s\n</COORDINATION_CONTEXT>", strings.TrimSpace(hookCtx))
-		}
-		if turnPrompt != "" {
-			turnPrompt = fmt.Sprintf("%s\n\n%s", hookCtx, turnPrompt)
-		} else {
-			turnPrompt = hookCtx
-		}
 		log.Printf("[WorkerPool] Injected coordination context into prompt for thread %s", te.threadID)
 	}
-	te.turnPrompt = turnPrompt
+
+	te.turnPrompt = AssembleTurnPrompt(TurnPromptInput{
+		Burst:               te.burst,
+		ThreadSummary:       summary,
+		LookbackHistory:     lookbackMsgs,
+		PreviousSessionID:   prevID,
+		IsColdStart:         isColdStart,
+		SemanticMemoryFacts: facts,
+		ChannelInstructions: instructions,
+		InjectedHookContext: te.injectedHookContext,
+	})
 }
 
 func (te *turnExecution) executeWithRetries() {

@@ -324,7 +324,7 @@ func TestWebhookDispatcher_HTTPErrorAndTimeout(t *testing.T) {
 		var requestReceived atomic.Bool
 		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			requestReceived.Store(true)
-			time.Sleep(200 * time.Millisecond)
+			time.Sleep(50 * time.Millisecond)
 			w.WriteHeader(http.StatusOK)
 		}))
 		defer ts.Close()
@@ -332,7 +332,7 @@ func TestWebhookDispatcher_HTTPErrorAndTimeout(t *testing.T) {
 		dispatcher := NewDefaultWebhookDispatcher()
 		endpoint := &config.WebhookEndpoint{
 			URL:             ts.URL,
-			TimeoutMs:       50, // fast timeout
+			TimeoutMs:       10, // fast timeout
 			OnTimeoutAction: "classify",
 		}
 		resp, err := dispatcher.CallPreTurnHook(context.Background(), endpoint, &PreTurnRequest{ChannelID: "c1"})
@@ -443,7 +443,7 @@ func TestWebhookDispatcher_EdgeCases(t *testing.T) {
 	})
 
 	t.Run("invalid url format", func(t *testing.T) {
-		ep := &config.WebhookEndpoint{URL: "http://invalid-url-that-does-not-exist:9999"}
+		ep := &config.WebhookEndpoint{URL: "http://invalid-url-that-does-not-exist:9999", TimeoutMs: 100}
 		_, err := dispatcher.CallWakeHook(context.Background(), ep, &WakeRequest{ChannelID: "c1"})
 		if err == nil {
 			t.Errorf("expected network error on invalid host")
