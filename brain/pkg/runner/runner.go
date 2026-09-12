@@ -148,6 +148,10 @@ type AgyUsage struct {
 	TotalTokens     int `json:"total_tokens"`
 }
 
+// TokenUsage is an alias for AgyUsage representing LLM token telemetry.
+type TokenUsage = AgyUsage
+
+
 // ParseAgyOutput unmarshals raw stdout into an AgyResponse struct.
 // It supports both legacy single-line JSON and stream-json NDJSON streams.
 func ParseAgyOutput(stdout string) (*AgyResponse, error) {
