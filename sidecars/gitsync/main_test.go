@@ -2454,5 +2454,39 @@ func TestDefaultDockerExecutor_Coverage(t *testing.T) {
 	_, _, _ = defaultDockerExecutor(ctx, "version")
 }
 
+func TestScrubComposeEnv_Extended(t *testing.T) {
+	input := []string{
+		"INVALID_NO_EQUALS",
+		"AERIAL_CONFIG_DIR=/dir/config",
+		"AERIAL_PROJECT_DIR=/dir/project",
+		"GOOD_VAR=123",
+	}
+	out := scrubComposeEnv(input)
+	if len(out) != 1 || out[0] != "GOOD_VAR=123" {
+		t.Errorf("unexpected scrubbed output: %v", out)
+	}
+}
+
+func TestNotifyBrainReload_Success(t *testing.T) {
+	called := false
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	d := &SyncDaemon{
+		brainInternalURL: ts.URL,
+	}
+	d.notifyBrainReload()
+	if !called {
+		t.Errorf("expected brain reload endpoint to be called")
+	}
+
+	// Empty URL no-op
+	dEmpty := &SyncDaemon{}
+	dEmpty.notifyBrainReload()
+}
+
 
 
