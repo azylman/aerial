@@ -110,16 +110,28 @@ func TestGenerateDynamicNotification_SuccessfulAgyRun(t *testing.T) {
 		t.Errorf("Expected dynamic notification for non-transient error, got: %q", resNonTransient)
 	}
 
-	// Test with 503 outage context description
+	// Test with 503 outage context description: must bypass dynamic generation and return neutral fallback
 	res503 := GenerateDynamicNotification("agy", "valid_key", "Error 503: unavailable", mockRunner)
-	if !strings.Contains(res503, "bestie") {
-		t.Errorf("Expected dynamic notification for 503 outage, got: %q", res503)
+	if res503 != ModelUnavailableMessage() {
+		t.Errorf("Expected neutral ModelUnavailableMessage for 503 outage, got: %q", res503)
 	}
 
 	// Test OAuth environment: apiKey is empty, runner still succeeds
 	resOAuth := GenerateDynamicNotification("agy", "", "session reset due to context corruption", mockRunner)
 	if !strings.Contains(resOAuth, "bestie") {
 		t.Errorf("Expected dynamic notification in OAuth mode with empty apiKey, got: %q", resOAuth)
+	}
+
+	// Test mention neutralization: @everyone and @here are defanged
+	mentionRunner := func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+		return `{"response": "Attention @everyone and @here: server broke 💀"}`, "", 0, nil
+	}
+	resMention := GenerateDynamicNotification("agy", "valid_key", "session reset due to context corruption", mentionRunner)
+	if strings.Contains(resMention, "@everyone") || strings.Contains(resMention, "@here") {
+		t.Errorf("Expected @everyone and @here to be neutralized, got: %q", resMention)
+	}
+	if !strings.Contains(resMention, "@\u200beveryone") {
+		t.Errorf("Expected zero-width space in mention, got: %q", resMention)
 	}
 }
 
