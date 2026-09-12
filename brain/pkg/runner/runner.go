@@ -151,7 +151,6 @@ type AgyUsage struct {
 // TokenUsage is an alias for AgyUsage representing LLM token telemetry.
 type TokenUsage = AgyUsage
 
-
 // ParseAgyOutput unmarshals raw stdout into an AgyResponse struct.
 // It supports both legacy single-line JSON and stream-json NDJSON streams.
 func ParseAgyOutput(stdout string) (*AgyResponse, error) {
@@ -491,6 +490,7 @@ type WatchdogOptions struct {
 	OutputFormat      string
 	StepUpdateHandler StepUpdateHandler
 	TargetID          string
+	ExtraEnv          []string
 }
 
 // activityTap wraps an io.Writer, bumps the ActivityWriter timestamp on every write,
@@ -678,21 +678,13 @@ func RunAgyWithWatchdog(parentCtx context.Context, agyBin, prompt, sessionID, ap
 		outputFmt = "stream-json"
 	}
 
-	args := []string{"--dangerously-skip-permissions", "--output-format", outputFmt}
-	if model != "" {
-		args = append(args, "--model", model)
-	}
-	if opts.MaxDuration > 0 {
-		if opts.MaxDuration >= time.Minute {
-			args = append(args, "--print-timeout", fmt.Sprintf("%dm", int(opts.MaxDuration.Minutes())))
-		} else {
-			args = append(args, "--print-timeout", fmt.Sprintf("%ds", int(opts.MaxDuration.Seconds())))
-		}
-	}
-	if sessionID != "" {
-		args = append(args, "--conversation", sessionID)
-	}
-	args = append(args, "-p", prompt)
+	args := BuildAgyArgs(AgyArgsInput{
+		OutputFormat: outputFmt,
+		Model:        model,
+		MaxDuration:  opts.MaxDuration,
+		SessionID:    sessionID,
+		Prompt:       prompt,
+	})
 
 	runCtx, runCancel := context.WithCancel(parentCtx)
 	defer runCancel()
@@ -706,28 +698,13 @@ func RunAgyWithWatchdog(parentCtx context.Context, agyBin, prompt, sessionID, ap
 		cmd.Dir = "."
 	}
 	cmd.Stdin = strings.NewReader("")
-	cmdEnv := append(cmd.Environ(),
-		"GIT_TERMINAL_PROMPT=0",
-		"AGY_LOG_LEVEL=debug",
-		"ANTIGRAVITY_LOG_LEVEL=debug",
-	)
-	if strings.TrimSpace(opts.HomeDir) != "" {
-		cmdEnv = append(cmdEnv,
-			"HOME="+strings.TrimSpace(opts.HomeDir),
-			"USERPROFILE="+strings.TrimSpace(opts.HomeDir),
-		)
-	}
-	if apiKey != "" {
-		cmdEnv = append(cmdEnv,
-			"GEMINI_API_KEY="+apiKey,
-			"ANTIGRAVITY_API_KEY="+apiKey,
-			"GOOGLE_GENAI_API_KEY="+apiKey,
-		)
-	}
-	if strings.TrimSpace(opts.TargetID) != "" {
-		cmdEnv = append(cmdEnv, "AERIAL_TARGET_ID="+strings.TrimSpace(opts.TargetID))
-	}
-	cmd.Env = cmdEnv
+	cmd.Env = BuildAgyEnv(AgyEnvInput{
+		BaseEnv:  cmd.Environ(),
+		HomeDir:  opts.HomeDir,
+		APIKey:   apiKey,
+		TargetID: opts.TargetID,
+		ExtraEnv: opts.ExtraEnv,
+	})
 
 	var outBuf bytes.Buffer
 	actWriter := NewActivityWriter(sessionID)
@@ -780,27 +757,29 @@ func RunAgyWithWatchdog(parentCtx context.Context, agyBin, prompt, sessionID, ap
 			case <-runCtx.Done():
 				return
 			case <-ticker.C:
+				var latestActivity time.Time
 				activeSess := actWriter.SessionID()
 				if activeSess != "" {
-					latestActivity, _ := session.LastActivityFromRoots(activeSess, opts.TranscriptDirs)
-					if latestActivity.After(lastSeenDiskActivity) {
-						lastSeenDiskActivity = latestActivity
-						actWriter.lastActivity.Store(time.Now().UnixNano())
-					}
+					latestActivity, _ = session.LastActivityFromRoots(activeSess, opts.TranscriptDirs)
 				}
 
-				// Check inactivity timeout
-				if time.Since(actWriter.LastActivity()) > opts.InactivityTimeout {
-					reason := fmt.Sprintf("inactivity timeout exceeded (%v without output or transcript update)", opts.InactivityTimeout)
-					watchdogReason.Store(&reason)
-					runCancel()
-					return
+				decision := EvaluateWatchdogStatus(WatchdogStatusInput{
+					Now:                  time.Now(),
+					StartTime:            start,
+					LastActivityTime:     actWriter.LastActivity(),
+					LatestDiskActivity:   latestActivity,
+					LastSeenDiskActivity: lastSeenDiskActivity,
+					InactivityTimeout:    opts.InactivityTimeout,
+					MaxDuration:          opts.MaxDuration,
+				})
+
+				if decision.NewLastSeenDisk.After(lastSeenDiskActivity) {
+					lastSeenDiskActivity = decision.NewLastSeenDisk
+					actWriter.lastActivity.Store(decision.UpdatedActivityTime.UnixNano())
 				}
 
-				// Check max duration cap
-				if time.Since(start) > opts.MaxDuration {
-					reason := fmt.Sprintf("max duration exceeded (%v total duration cap)", opts.MaxDuration)
-					watchdogReason.Store(&reason)
+				if decision.Action != WatchdogActionNone {
+					watchdogReason.Store(&decision.Reason)
 					runCancel()
 					return
 				}

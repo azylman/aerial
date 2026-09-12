@@ -16,40 +16,40 @@ import (
 
 func TestParseAgyOutput(t *testing.T) {
 	tests := []struct {
-		name        string
-		stdout      string
-		wantErr     bool
-		wantConvID  string
-		wantStatus  string
-		wantResp    string
-		wantTokens  int
+		name       string
+		stdout     string
+		wantErr    bool
+		wantConvID string
+		wantStatus string
+		wantResp   string
+		wantTokens int
 	}{
 		{
-			name:        "Valid Success Response",
-			stdout:      `{"conversation_id":"11111111-2222-3333-4444-555555555555","status":"SUCCESS","response":"Hello world!","duration_seconds":1.25,"num_turns":1,"usage":{"total_tokens":42}}`,
-			wantErr:     false,
-			wantConvID:  "11111111-2222-3333-4444-555555555555",
-			wantStatus:  "SUCCESS",
-			wantResp:    "Hello world!",
-			wantTokens:  42,
+			name:       "Valid Success Response",
+			stdout:     `{"conversation_id":"11111111-2222-3333-4444-555555555555","status":"SUCCESS","response":"Hello world!","duration_seconds":1.25,"num_turns":1,"usage":{"total_tokens":42}}`,
+			wantErr:    false,
+			wantConvID: "11111111-2222-3333-4444-555555555555",
+			wantStatus: "SUCCESS",
+			wantResp:   "Hello world!",
+			wantTokens: 42,
 		},
 		{
-			name:        "Valid Error Response",
-			stdout:      `{"conversation_id":"11111111-2222-3333-4444-555555555555","status":"ERROR","error":"context window exceeded","duration_seconds":0.5}`,
-			wantErr:     false,
-			wantConvID:  "11111111-2222-3333-4444-555555555555",
-			wantStatus:  "ERROR",
-			wantResp:    "",
+			name:       "Valid Error Response",
+			stdout:     `{"conversation_id":"11111111-2222-3333-4444-555555555555","status":"ERROR","error":"context window exceeded","duration_seconds":0.5}`,
+			wantErr:    false,
+			wantConvID: "11111111-2222-3333-4444-555555555555",
+			wantStatus: "ERROR",
+			wantResp:   "",
 		},
 		{
-			name:        "Empty Stdout",
-			stdout:      "",
-			wantErr:     true,
+			name:    "Empty Stdout",
+			stdout:  "",
+			wantErr: true,
 		},
 		{
-			name:        "Invalid JSON",
-			stdout:      "plain text without json formatting",
-			wantErr:     true,
+			name:    "Invalid JSON",
+			stdout:  "plain text without json formatting",
+			wantErr: true,
 		},
 		{
 			name: "Valid stream-json Success Stream",
@@ -599,14 +599,14 @@ func createMockAgyScript(t *testing.T, dir, script string) string {
 }
 
 func TestRunAgyWithEcho(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("echo is a shell built-in on Windows")
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// In linux container, echo is available
-	stdout, stderr, exitCode, err := RunAgy(ctx, "echo", "Hello aerial", "", "", "", 1)
+	bin := getHelperProcessBin(t)
+	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
+	t.Setenv("MOCK_MODE", "echo")
+
+	stdout, stderr, exitCode, err := RunAgy(ctx, bin, "Hello aerial", "", "", "", 1)
 	if err != nil {
 		t.Fatalf("RunAgy failed: %v", err)
 	}
@@ -617,7 +617,6 @@ func TestRunAgyWithEcho(t *testing.T) {
 		t.Errorf("Expected stdout to contain 'Hello aerial', got: %q (stderr: %q)", stdout, stderr)
 	}
 }
-
 
 func TestActivityWriter_ThreadSafetyAndSessionDiscovery(t *testing.T) {
 	w := NewActivityWriter("")
@@ -1288,11 +1287,11 @@ func TestIsQuotaPause(t *testing.T) {
 
 func TestExtractQuotaResetDuration(t *testing.T) {
 	tests := []struct {
-		name         string
-		errDetail    string
-		stderr       string
-		wantDur      time.Duration
-		wantExact    bool
+		name      string
+		errDetail string
+		stderr    string
+		wantDur   time.Duration
+		wantExact bool
 	}{
 		{
 			name:      "Standard Google minutes and seconds",
@@ -1634,8 +1633,6 @@ func TestExtractQuotaResetDuration_ClampingAndEdgeCases(t *testing.T) {
 	}
 }
 
-
-
 func TestStepUpdateEvent_Resolved(t *testing.T) {
 	// Test nil safety
 	var nilEv *StepUpdateEvent
@@ -1774,7 +1771,7 @@ func TestExtractCommandName(t *testing.T) {
 		{"< input.txt", ""},
 		{"(cd foo && make)", ""},
 		{"ghp_123456789012345678901234567890123456", ""}, // Exceeds 24 chars
-		{`curl -H "Auth...`, ""},                           // Unclosed quote
+		{`curl -H "Auth...`, ""},                         // Unclosed quote
 		{"cat << 'EOF' > test.txt", "cat"},
 	}
 
@@ -1862,12 +1859,14 @@ func TestStepUpdateEvent_ResolvedCommandName(t *testing.T) {
 
 func TestRunAgyWithOptions(t *testing.T) {
 	ctx := context.Background()
+	bin := getHelperProcessBin(t)
 	opts := WatchdogOptions{
 		InactivityTimeout: 10 * time.Second,
 		MaxDuration:       30 * time.Second,
 		PollInterval:      1 * time.Second,
+		ExtraEnv:          []string{"GO_WANT_HELPER_PROCESS=1", "MOCK_MODE=echo"},
 	}
-	stdout, stderr, exitCode, err := RunAgyWithOptions(ctx, "echo", "hello world", "", "", "", opts)
+	stdout, stderr, exitCode, err := RunAgyWithOptions(ctx, bin, "hello world", "", "", "", opts)
 	if err != nil {
 		t.Fatalf("RunAgyWithOptions failed: %v, code=%d, stderr=%s", err, exitCode, stderr)
 	}
@@ -2026,7 +2025,3 @@ func TestActivityTap_Branches(t *testing.T) {
 		t.Errorf("expected (5, nil) on tap with nil writer, got (%d, %v)", n, err)
 	}
 }
-
-
-
-

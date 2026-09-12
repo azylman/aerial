@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,64 +11,9 @@ import (
 	"time"
 )
 
-func createMockStreamJsonHelper(t *testing.T) string {
-	t.Helper()
-	dir := t.TempDir()
-	scriptPath := filepath.Join(dir, "mock_agy.sh")
-
-	script := `#!/usr/bin/env python3
-import json, sys, time, uuid, os
-
-conv_id = os.environ.get("MOCK_CONV_ID", str(uuid.uuid4()))
-print(json.dumps({"event": "init", "conversation_id": conv_id}), flush=True)
-for line in sys.stdin:
-    line = line.strip()
-    if not line: continue
-    if "CRASH_ALWAYS" in line or "CRASH_NOW" in line:
-        sys.exit(1)
-    if "CRASH_ONCE" in line:
-        marker = "/tmp/mock_crash_once.marker"
-        if not os.path.exists(marker):
-            with open(marker, "w") as f: f.write("1")
-            sys.exit(1)
-    if "SLEEP" in line:
-        time.sleep(5)
-    try:
-        data = json.loads(line)
-        content = data.get("message", {}).get("content", "")
-    except Exception:
-        content = line
-    res = {
-        "event": "result",
-        "result": {
-            "status": "SUCCESS",
-            "response": "ECHO:" + content,
-            "conversation_id": conv_id
-        }
-    }
-    print(json.dumps(res), flush=True)
-`
-	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {
-		t.Fatalf("failed to write mock script: %v", err)
-	}
-	return scriptPath
-}
-
 func TestWorkerInstance_LifecycleAndExecution(t *testing.T) {
-	script := createMockStreamJsonHelper(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	opts := WorkerOptions{
-		AgyBin:  script,
-		Model:   "test-model",
-		HomeDir: t.TempDir(),
-	}
-
-	w, err := NewWorkerInstance(ctx, opts)
-	if err != nil {
-		t.Fatalf("failed to spawn worker instance: %v", err)
-	}
+	w, harness := NewMockStreamWorker(t, MockStreamWorkerConfig{})
+	defer harness.Close()
 	defer w.Close()
 
 	if w.ConversationID() == "" {
@@ -76,6 +22,9 @@ func TestWorkerInstance_LifecycleAndExecution(t *testing.T) {
 	if w.TurnsUsed() != 0 {
 		t.Errorf("expected 0 turns initially, got %d", w.TurnsUsed())
 	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
 	// Turn 1
 	resp, err := w.Execute(ctx, "hello world")
@@ -103,24 +52,15 @@ func TestWorkerInstance_LifecycleAndExecution(t *testing.T) {
 }
 
 func TestWorkerInstance_BrokenPipeDetection(t *testing.T) {
-	script := createMockStreamJsonHelper(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	opts := WorkerOptions{
-		AgyBin:  script,
-		Model:   "test-model",
-		HomeDir: t.TempDir(),
-	}
-
-	w, err := NewWorkerInstance(ctx, opts)
-	if err != nil {
-		t.Fatalf("failed to spawn worker instance: %v", err)
-	}
+	w, harness := NewMockStreamWorker(t, MockStreamWorkerConfig{})
+	defer harness.Close()
 	defer w.Close()
 
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
 	// Trigger crash
-	_, err = w.Execute(ctx, "CRASH_NOW")
+	_, err := w.Execute(ctx, "CRASH_NOW")
 	if err == nil {
 		t.Fatal("expected error on crash, got nil")
 	}
@@ -137,27 +77,16 @@ func TestWorkerInstance_BrokenPipeDetection(t *testing.T) {
 }
 
 func TestWorkerInstance_ContextCancellation(t *testing.T) {
-	script := createMockStreamJsonHelper(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	opts := WorkerOptions{
-		AgyBin:  script,
-		Model:   "test-model",
-		HomeDir: t.TempDir(),
-	}
-
-	w, err := NewWorkerInstance(ctx, opts)
-	if err != nil {
-		t.Fatalf("failed to spawn worker instance: %v", err)
-	}
+	w, harness := NewMockStreamWorker(t, MockStreamWorkerConfig{
+		SleepDelay: 5 * time.Second,
+	})
+	defer harness.Close()
 	defer w.Close()
 
-	// Execute with tight timeout on a slow command
-	callCtx, callCancel := context.WithTimeout(ctx, 100*time.Millisecond)
+	callCtx, callCancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer callCancel()
 
-	_, err = w.Execute(callCtx, "SLEEP_COMMAND")
+	_, err := w.Execute(callCtx, "SLEEP_COMMAND")
 	if err == nil {
 		t.Fatal("expected timeout error, got nil")
 	}
@@ -190,59 +119,68 @@ func TestWorkerInstance_RSSBytesEdgeCases(t *testing.T) {
 	if rss := w3.RSSBytes(); rss != 0 {
 		t.Errorf("expected 0 RSS for nonexistent pid, got %d", rss)
 	}
+
+	// 3. custom rssFunc
+	w4 := &WorkerInstance{
+		rssFunc: func() uint64 { return 12345 },
+	}
+	if rss := w4.RSSBytes(); rss != 12345 {
+		t.Errorf("expected 12345 RSS, got %d", rss)
+	}
 }
 
 func TestWorkerInstance_SpawnFailures(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	bin := getHelperProcessBin(t)
 
 	// 1. Invalid binary path
-	_, err := NewWorkerInstance(ctx, WorkerOptions{
-		AgyBin: "/nonexistent/path/to/binary",
+	ctx1, cancel1 := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel1()
+	_, err := NewWorkerInstance(ctx1, WorkerOptions{
+		AgyBin: filepath.Join(t.TempDir(), "nonexistent_binary"),
 	})
 	if err == nil {
 		t.Error("expected error for nonexistent binary")
 	}
 
-	// 2. Handshake timeout
-	hangingScript := filepath.Join(t.TempDir(), "hang.sh")
-	if err := os.WriteFile(hangingScript, []byte("#!/bin/sh\nsleep 10\n"), 0755); err != nil {
-		t.Fatalf("failed to write hang script: %v", err)
-	}
-	_, err = NewWorkerInstance(ctx, WorkerOptions{
-		AgyBin:  hangingScript,
-		Timeout: 20 * time.Millisecond,
+	// 2. Handshake timeout via NewWorkerInstance
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel2()
+	_, err = NewWorkerInstance(ctx2, WorkerOptions{
+		AgyBin:   bin,
+		Timeout:  20 * time.Millisecond,
+		ExtraEnv: []string{"GO_WANT_HELPER_PROCESS=1", "MOCK_MODE=hang"},
 	})
 	if err != ErrHandshakeTimeout {
 		t.Errorf("expected ErrHandshakeTimeout, got %v", err)
 	}
 
-	// 3. Stdout closed before init event
-	exitScript := filepath.Join(t.TempDir(), "exit.sh")
-	if err := os.WriteFile(exitScript, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
-		t.Fatalf("failed to write exit script: %v", err)
-	}
-	_, err = NewWorkerInstance(ctx, WorkerOptions{
-		AgyBin: exitScript,
+	// 3. Process exits before handshake via NewWorkerInstance
+	ctx3, cancel3 := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel3()
+	_, err = NewWorkerInstance(ctx3, WorkerOptions{
+		AgyBin:   bin,
+		ExtraEnv: []string{"GO_WANT_HELPER_PROCESS=1", "MOCK_MODE=exit"},
 	})
 	if err == nil || !strings.Contains(err.Error(), ErrInvalidHandshake.Error()) {
 		t.Errorf("expected ErrInvalidHandshake, got %v", err)
 	}
 }
 
+func TestStreamIO_NilSafety(t *testing.T) {
+	if err := WriteWorkerTurn(nil, "foo"); err == nil {
+		t.Error("expected error writing to nil writer")
+	}
+	if _, err := ReadWorkerTurn(nil); err == nil {
+		t.Error("expected error reading from nil reader")
+	}
+}
+
 func TestWorkerInstance_DiskPurgeOnClose(t *testing.T) {
 	tmpDir := t.TempDir()
-	script := createMockStreamJsonHelper(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	w, err := NewWorkerInstance(ctx, WorkerOptions{
-		AgyBin:       script,
-		SessionRoots: []string{tmpDir},
+	w, harness := NewMockStreamWorker(t, MockStreamWorkerConfig{
+		Roots: []string{tmpDir},
 	})
-	if err != nil {
-		t.Fatalf("spawn failed: %v", err)
-	}
+	defer harness.Close()
 
 	convID := w.ConversationID()
 	sessDir := filepath.Join(tmpDir, convID)
@@ -259,6 +197,9 @@ func TestWorkerInstance_DiskPurgeOnClose(t *testing.T) {
 }
 
 func TestWorkerInstance_RSSBytesLive(t *testing.T) {
+	if os.Getenv("GOOS") == "windows" || filepath.Separator == '\\' {
+		t.Skip("RSS /proc/statm inspection is only available on Linux")
+	}
 	w := &WorkerInstance{
 		cmd: &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}},
 	}
@@ -268,11 +209,12 @@ func TestWorkerInstance_RSSBytesLive(t *testing.T) {
 }
 
 func TestWorkerInstance_SpawnWithAPIKeyAndHandshakeCancel(t *testing.T) {
-	script := createMockStreamJsonHelper(t)
+	bin := getHelperProcessBin(t)
 	opts := WorkerOptions{
-		AgyBin:  script,
-		APIKey:  "test-api-key",
-		HomeDir: t.TempDir(),
+		AgyBin:   bin,
+		APIKey:   "test-api-key",
+		HomeDir:  t.TempDir(),
+		ExtraEnv: []string{"GO_WANT_HELPER_PROCESS=1", "MOCK_MODE=stream-json"},
 	}
 	w, err := NewWorkerInstance(context.Background(), opts)
 	if err != nil {
@@ -281,63 +223,43 @@ func TestWorkerInstance_SpawnWithAPIKeyAndHandshakeCancel(t *testing.T) {
 	w.Close()
 
 	// Handshake cancellation
-	hangingScript := filepath.Join(t.TempDir(), "hang2.sh")
-	if err := os.WriteFile(hangingScript, []byte("#!/bin/sh\nsleep 10\n"), 0755); err != nil {
-		t.Fatalf("failed to write hang script: %v", err)
-	}
+	userInR, userInW := io.Pipe()
+	userOutR, userOutW := io.Pipe()
+	defer userInR.Close()
+	defer userInW.Close()
+	defer userOutR.Close()
+	defer userOutW.Close()
+
 	canceledCtx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err = NewWorkerInstance(canceledCtx, WorkerOptions{
-		AgyBin: hangingScript,
-	})
+	_, err = NewWorkerInstanceFromStreams(canceledCtx, userInW, userOutR, cancel, nil, 2*time.Second, nil)
 	if err == nil {
 		t.Error("expected error for canceled context during handshake")
 	}
 }
 
 func TestWorkerInstance_ExecuteWriteError(t *testing.T) {
-	script := createMockStreamJsonHelper(t)
-	w, err := NewWorkerInstance(context.Background(), WorkerOptions{
-		AgyBin: script,
-	})
-	if err != nil {
-		t.Fatalf("spawn failed: %v", err)
-	}
+	w, harness := NewMockStreamWorker(t, MockStreamWorkerConfig{})
+	defer harness.Close()
 	defer w.Close()
 
 	_ = w.stdin.Close()
 
-	_, err = w.Execute(context.Background(), "test write error")
+	_, err := w.Execute(context.Background(), "test write error")
 	if err == nil {
 		t.Fatal("expected write error on closed stdin")
 	}
 }
 
 func TestWorkerInstance_ParseErrorOnResult(t *testing.T) {
-	dir := t.TempDir()
-	scriptPath := filepath.Join(dir, "bad_result.sh")
-	script := `#!/bin/sh
-echo '{"event":"init","conversation_id":"bad-1"}'
-while read line; do
-  echo '{"event":"result", "result": invalid json}'
-done
-`
-	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {
-		t.Fatalf("failed to write script: %v", err)
-	}
-
-	w, err := NewWorkerInstance(context.Background(), WorkerOptions{
-		AgyBin: scriptPath,
+	w, harness := NewMockStreamWorker(t, MockStreamWorkerConfig{
+		BadResult: true,
 	})
-	if err != nil {
-		t.Fatalf("spawn failed: %v", err)
-	}
+	defer harness.Close()
 	defer w.Close()
 
-	_, err = w.Execute(context.Background(), "test bad json")
+	_, err := w.Execute(context.Background(), "test bad json")
 	if err == nil {
 		t.Fatal("expected parse error, got nil")
 	}
 }
-
-

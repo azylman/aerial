@@ -326,10 +326,8 @@ func (d *UtilityDaemon) Execute(ctx context.Context, prompt string) (string, err
 		// Turn succeeded; check RSS ceiling and turn budget for pre-warmed rotation
 		d.mu.Lock()
 		if !d.closed.Load() && d.activeWorker == worker {
-			if d.maxRSSBytes > 0 && worker.RSSBytes() > d.maxRSSBytes {
-				log.Printf("[UtilityDaemon] Worker RSS (%d bytes) exceeded ceiling (%d bytes); rotating worker", worker.RSSBytes(), d.maxRSSBytes)
-				d.promoteStandbyLocked()
-			} else if worker.TurnsUsed() >= d.turnBudget {
+			if rotate, reason := ShouldRotateWorker(worker.TurnsUsed(), d.turnBudget, worker.RSSBytes(), d.maxRSSBytes, worker.IsDead()); rotate {
+				log.Printf("[UtilityDaemon] Rotating worker: %s", reason)
 				d.promoteStandbyLocked()
 			}
 		}
