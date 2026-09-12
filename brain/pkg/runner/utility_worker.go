@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -33,20 +32,23 @@ type WorkerOptions struct {
 	APIKey       string
 	SessionRoots []string
 	Timeout      time.Duration
+	ExtraEnv     []string
 }
 
 type WorkerInstance struct {
-	cmd       *exec.Cmd
-	stdin     io.WriteCloser
-	stdout    *bufio.Reader
-	stderrBuf bytes.Buffer
-	convID    string
-	turnsUsed atomic.Int32
-	isDead    atomic.Bool
-	closed    atomic.Bool
-	mu        sync.Mutex
-	roots     []string
-	cancel    context.CancelFunc
+	cmd          *exec.Cmd
+	stdin        io.WriteCloser
+	stdout       *bufio.Reader
+	stdoutCloser io.Closer
+	stderrBuf    bytes.Buffer
+	convID       string
+	turnsUsed    atomic.Int32
+	isDead       atomic.Bool
+	closed       atomic.Bool
+	mu           sync.Mutex
+	roots        []string
+	cancel       context.CancelFunc
+	rssFunc      func() uint64
 }
 
 type streamUserMessage struct {
@@ -58,6 +60,107 @@ type streamUserMessageBody struct {
 	Content string `json:"content"`
 }
 
+// NegotiateHandshake scans line-by-line from r until it encounters the initial {"event":"init","conversation_id":"..."}.
+// If timeout expires or ctx is cancelled, closer is closed to unblock any pending read in the background routine.
+func NegotiateHandshake(ctx context.Context, r *bufio.Reader, closer io.Closer, timeout time.Duration) (string, error) {
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+
+	type initResult struct {
+		convID string
+		err    error
+	}
+	initCh := make(chan initResult, 1)
+
+	go func() {
+		for {
+			line, readErr := r.ReadString('\n')
+			if readErr != nil {
+				initCh <- initResult{err: fmt.Errorf("stdout closed before init event: %w", readErr)}
+				return
+			}
+			if convID, ok := ParseInitEvent(line); ok {
+				initCh <- initResult{convID: convID}
+				return
+			}
+		}
+	}()
+
+	select {
+	case <-ctx.Done():
+		if closer != nil {
+			_ = closer.Close()
+		}
+		return "", ctx.Err()
+	case <-time.After(timeout):
+		if closer != nil {
+			_ = closer.Close()
+		}
+		return "", ErrHandshakeTimeout
+	case res := <-initCh:
+		if res.err != nil {
+			if closer != nil {
+				_ = closer.Close()
+			}
+			return "", fmt.Errorf("%w: %v", ErrInvalidHandshake, res.err)
+		}
+		return res.convID, nil
+	}
+}
+
+// ReadWorkerTurn scans lines from r until a stream-json result event is encountered, accumulating stdout and returning the parsed response.
+func ReadWorkerTurn(r *bufio.Reader) (*AgyResponse, error) {
+	if r == nil {
+		return nil, fmt.Errorf("worker reader is nil: %w", ErrWorkerDead)
+	}
+
+	var outputBuffer strings.Builder
+	for {
+		line, readErr := r.ReadString('\n')
+		if readErr != nil {
+			return nil, fmt.Errorf("worker stdout read failed: %w", readErr)
+		}
+		outputBuffer.WriteString(line)
+
+		if IsResultEvent(line) {
+			resp, parseErr := ParseAgyOutput(outputBuffer.String())
+			if parseErr != nil {
+				return nil, fmt.Errorf("failed to parse worker result output: %w (raw: %q)", parseErr, strings.TrimSpace(line))
+			}
+			return resp, nil
+		}
+	}
+}
+
+// NewWorkerInstanceFromStreams initializes a WorkerInstance on abstract I/O streams and performs initial handshake negotiation.
+func NewWorkerInstanceFromStreams(ctx context.Context, stdin io.WriteCloser, stdout io.ReadCloser, cancel context.CancelFunc, roots []string, timeout time.Duration, rssFunc func() uint64) (*WorkerInstance, error) {
+	bufReader := bufio.NewReader(stdout)
+	convID, err := NegotiateHandshake(ctx, bufReader, stdout, timeout)
+	if err != nil {
+		if cancel != nil {
+			cancel()
+		}
+		if stdin != nil {
+			_ = stdin.Close()
+		}
+		if stdout != nil {
+			_ = stdout.Close()
+		}
+		return nil, err
+	}
+
+	return &WorkerInstance{
+		stdin:        stdin,
+		stdout:       bufReader,
+		stdoutCloser: stdout,
+		convID:       convID,
+		roots:        roots,
+		cancel:       cancel,
+		rssFunc:      rssFunc,
+	}, nil
+}
+
 // NewWorkerInstance spawns an agy process in stream-json mode and waits for the init event handshake.
 func NewWorkerInstance(ctx context.Context, opts WorkerOptions) (*WorkerInstance, error) {
 	agyBin := strings.TrimSpace(opts.AgyBin)
@@ -65,14 +168,11 @@ func NewWorkerInstance(ctx context.Context, opts WorkerOptions) (*WorkerInstance
 		agyBin = "agy"
 	}
 
-	args := []string{
-		"--dangerously-skip-permissions",
-		"--input-format", "stream-json",
-		"--output-format", "stream-json",
-	}
-	if strings.TrimSpace(opts.Model) != "" {
-		args = append(args, "--model", strings.TrimSpace(opts.Model))
-	}
+	args := BuildAgyArgs(AgyArgsInput{
+		WorkerMode:   true,
+		OutputFormat: "stream-json",
+		Model:        opts.Model,
+	})
 
 	workerCtx, workerCancel := context.WithCancel(context.Background())
 	cmd := exec.CommandContext(workerCtx, agyBin, args...)
@@ -84,26 +184,12 @@ func NewWorkerInstance(ctx context.Context, opts WorkerOptions) (*WorkerInstance
 		cmd.Dir = "."
 	}
 
-	cmdEnv := append(cmd.Environ(),
-		"GIT_TERMINAL_PROMPT=0",
-		"AGY_LOG_LEVEL=debug",
-		"ANTIGRAVITY_LOG_LEVEL=debug",
-	)
-	if strings.TrimSpace(opts.HomeDir) != "" {
-		cmdEnv = append(cmdEnv,
-			"HOME="+strings.TrimSpace(opts.HomeDir),
-			"USERPROFILE="+strings.TrimSpace(opts.HomeDir),
-		)
-	}
-	if strings.TrimSpace(opts.APIKey) != "" {
-		apiKey := strings.TrimSpace(opts.APIKey)
-		cmdEnv = append(cmdEnv,
-			"GEMINI_API_KEY="+apiKey,
-			"ANTIGRAVITY_API_KEY="+apiKey,
-			"GOOGLE_GENAI_API_KEY="+apiKey,
-		)
-	}
-	cmd.Env = cmdEnv
+	cmd.Env = BuildAgyEnv(AgyEnvInput{
+		BaseEnv:  cmd.Environ(),
+		HomeDir:  opts.HomeDir,
+		APIKey:   opts.APIKey,
+		ExtraEnv: opts.ExtraEnv,
+	})
 
 	configureSysProcAttr(cmd)
 
@@ -120,15 +206,6 @@ func NewWorkerInstance(ctx context.Context, opts WorkerOptions) (*WorkerInstance
 		return nil, fmt.Errorf("failed to create stdout pipe: %w", err)
 	}
 
-	w := &WorkerInstance{
-		cmd:    cmd,
-		stdin:  stdinPipe,
-		stdout: bufio.NewReader(stdoutPipe),
-		roots:  opts.SessionRoots,
-		cancel: workerCancel,
-	}
-	cmd.Stderr = &w.stderrBuf
-
 	if err := cmd.Start(); err != nil {
 		workerCancel()
 		_ = stdinPipe.Close()
@@ -136,58 +213,16 @@ func NewWorkerInstance(ctx context.Context, opts WorkerOptions) (*WorkerInstance
 		return nil, fmt.Errorf("failed to start worker process: %w", err)
 	}
 
-	// Perform handshake with timeout
-	handshakeTimeout := 30 * time.Second
-	if opts.Timeout > 0 {
-		handshakeTimeout = opts.Timeout
+	w, err := NewWorkerInstanceFromStreams(ctx, stdinPipe, stdoutPipe, workerCancel, opts.SessionRoots, opts.Timeout, nil)
+	if err != nil {
+		killProcessGroup(cmd)
+		return nil, err
 	}
 
-	type initResult struct {
-		convID string
-		err    error
-	}
-	initCh := make(chan initResult, 1)
+	w.cmd = cmd
+	cmd.Stderr = &w.stderrBuf
 
-	go func() {
-		for {
-			line, readErr := w.stdout.ReadString('\n')
-			if readErr != nil {
-				initCh <- initResult{err: fmt.Errorf("stdout closed before init event: %w", readErr)}
-				return
-			}
-			line = strings.TrimSpace(line)
-			if line == "" {
-				continue
-			}
-
-			var ev struct {
-				Event          string `json:"event"`
-				ConversationID string `json:"conversation_id"`
-			}
-			if err := json.Unmarshal([]byte(line), &ev); err == nil {
-				if ev.Event == "init" && ev.ConversationID != "" {
-					initCh <- initResult{convID: ev.ConversationID}
-					return
-				}
-			}
-		}
-	}()
-
-	select {
-	case <-ctx.Done():
-		w.Close()
-		return nil, ctx.Err()
-	case <-time.After(handshakeTimeout):
-		w.Close()
-		return nil, ErrHandshakeTimeout
-	case res := <-initCh:
-		if res.err != nil {
-			w.Close()
-			return nil, fmt.Errorf("%w: %v", ErrInvalidHandshake, res.err)
-		}
-		w.convID = res.convID
-		return w, nil
-	}
+	return w, nil
 }
 
 // ConversationID returns the session conversation UUID emitted by the worker on boot.
@@ -202,6 +237,9 @@ func (w *WorkerInstance) TurnsUsed() int {
 
 // RSSBytes returns the resident set size (RSS) in bytes of the worker subprocess on Linux, or 0 if unavailable.
 func (w *WorkerInstance) RSSBytes() uint64 {
+	if w.rssFunc != nil {
+		return w.rssFunc()
+	}
 	if w.cmd == nil || w.cmd.Process == nil || w.cmd.Process.Pid <= 0 {
 		return 0
 	}
@@ -235,21 +273,9 @@ func (w *WorkerInstance) Execute(ctx context.Context, prompt string) (*AgyRespon
 		return nil, ErrWorkerDead
 	}
 
-	req := streamUserMessage{
-		Event: "user",
-		Message: streamUserMessageBody{
-			Content: prompt,
-		},
-	}
-	payload, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal prompt request: %w", err)
-	}
-	payload = append(payload, '\n')
-
-	if _, err := w.stdin.Write(payload); err != nil {
+	if err := WriteWorkerTurn(w.stdin, prompt); err != nil {
 		w.markDeadAndKill()
-		return nil, fmt.Errorf("failed to write prompt to worker stdin: %w", err)
+		return nil, err
 	}
 
 	type turnResult struct {
@@ -259,37 +285,8 @@ func (w *WorkerInstance) Execute(ctx context.Context, prompt string) (*AgyRespon
 	resCh := make(chan turnResult, 1)
 
 	go func() {
-		var outputBuffer strings.Builder
-		for {
-			line, readErr := w.stdout.ReadString('\n')
-			if readErr != nil {
-				resCh <- turnResult{err: fmt.Errorf("worker stdout read failed: %w", readErr)}
-				return
-			}
-			outputBuffer.WriteString(line)
-
-			trimmed := strings.TrimSpace(line)
-			var ev struct {
-				Event string `json:"event"`
-			}
-			isResult := false
-			if err := json.Unmarshal([]byte(trimmed), &ev); err == nil {
-				isResult = (ev.Event == "result")
-			} else {
-				normalized := strings.ReplaceAll(trimmed, " ", "")
-				isResult = strings.HasPrefix(normalized, `{"event":"result"`)
-			}
-
-			if isResult {
-				resp, parseErr := ParseAgyOutput(outputBuffer.String())
-				if parseErr != nil {
-					resCh <- turnResult{err: fmt.Errorf("failed to parse worker result output: %w (raw: %q)", parseErr, trimmed)}
-					return
-				}
-				resCh <- turnResult{resp: resp}
-				return
-			}
-		}
+		resp, err := ReadWorkerTurn(w.stdout)
+		resCh <- turnResult{resp: resp, err: err}
 	}()
 
 	select {
@@ -313,6 +310,9 @@ func (w *WorkerInstance) markDeadAndKill() {
 	}
 	if w.stdin != nil {
 		_ = w.stdin.Close()
+	}
+	if w.stdoutCloser != nil {
+		_ = w.stdoutCloser.Close()
 	}
 	if w.cmd != nil && w.cmd.Process != nil {
 		// Kill process group
@@ -345,6 +345,9 @@ func (w *WorkerInstance) Close() {
 
 	if w.stdin != nil {
 		_ = w.stdin.Close()
+	}
+	if w.stdoutCloser != nil {
+		_ = w.stdoutCloser.Close()
 	}
 
 	if w.cmd != nil && w.cmd.Process != nil {

@@ -12,20 +12,21 @@ import (
 	"github.com/azylman/aerial/brain/pkg/session"
 )
 
-func newMockSpawner(script string) func(ctx context.Context, opts WorkerOptions) (*WorkerInstance, error) {
+func newMockSpawner(t *testing.T) func(ctx context.Context, opts WorkerOptions) (*WorkerInstance, error) {
 	return func(ctx context.Context, opts WorkerOptions) (*WorkerInstance, error) {
-		opts.AgyBin = script
-		return NewWorkerInstance(ctx, opts)
+		w, _ := NewMockStreamWorker(t, MockStreamWorkerConfig{
+			Roots: opts.SessionRoots,
+		})
+		return w, nil
 	}
 }
 
 func TestUtilityDaemon_TurnBudgetRotation(t *testing.T) {
-	script := createMockStreamJsonHelper(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	daemon := NewUtilityDaemon(nil,
-		WithSpawner(newMockSpawner(script)),
+		WithSpawner(newMockSpawner(t)),
 		WithTurnBudget(2),
 	)
 	defer daemon.Close()
@@ -54,7 +55,7 @@ func TestUtilityDaemon_TurnBudgetRotation(t *testing.T) {
 	}
 
 	// Wait briefly for async swap
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
 
 	// Turn 3 should execute on the rotated worker
 	out3, err := daemon.Execute(ctx, "turn-3")
@@ -72,20 +73,32 @@ func TestUtilityDaemon_TurnBudgetRotation(t *testing.T) {
 }
 
 func TestUtilityDaemon_BrokenPipeAutoRetry(t *testing.T) {
-	script := createMockStreamJsonHelper(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	_ = os.Remove("/tmp/mock_crash_once.marker")
+	var firstSpawn atomic.Bool
+	spawner := func(ctx context.Context, opts WorkerOptions) (*WorkerInstance, error) {
+		if firstSpawn.CompareAndSwap(false, true) {
+			w, _ := NewMockStreamWorker(t, MockStreamWorkerConfig{
+				CrashOnce: true,
+				Roots:     opts.SessionRoots,
+			})
+			return w, nil
+		}
+		w, _ := NewMockStreamWorker(t, MockStreamWorkerConfig{
+			Roots: opts.SessionRoots,
+		})
+		return w, nil
+	}
 
 	daemon := NewUtilityDaemon(nil,
-		WithSpawner(newMockSpawner(script)),
+		WithSpawner(spawner),
 		WithTurnBudget(10),
 	)
 	defer daemon.Close()
 
 	// Ensure standby is ready before testing crash handoff
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
 
 	initialConvID := daemon.ActiveConvID()
 
@@ -106,12 +119,11 @@ func TestUtilityDaemon_BrokenPipeAutoRetry(t *testing.T) {
 }
 
 func TestUtilityDaemon_RunnerFuncPassthrough(t *testing.T) {
-	script := createMockStreamJsonHelper(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	daemon := NewUtilityDaemon(nil,
-		WithSpawner(newMockSpawner(script)),
+		WithSpawner(newMockSpawner(t)),
 	)
 	defer daemon.Close()
 
@@ -132,15 +144,14 @@ func TestUtilityDaemon_RunnerFuncPassthrough(t *testing.T) {
 }
 
 func TestUtilityDaemon_TriggerRestart(t *testing.T) {
-	script := createMockStreamJsonHelper(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	var spawnCount atomic.Int32
 	customSpawner := func(ctx context.Context, opts WorkerOptions) (*WorkerInstance, error) {
 		spawnCount.Add(1)
-		opts.AgyBin = script
-		return NewWorkerInstance(ctx, opts)
+		w, _ := NewMockStreamWorker(t, MockStreamWorkerConfig{Roots: opts.SessionRoots})
+		return w, nil
 	}
 
 	daemon := NewUtilityDaemon(nil,
@@ -163,13 +174,20 @@ func TestUtilityDaemon_TriggerRestart(t *testing.T) {
 }
 
 func TestUtilityDaemon_RSSRotation(t *testing.T) {
-	script := createMockStreamJsonHelper(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	rssSpawner := func(ctx context.Context, opts WorkerOptions) (*WorkerInstance, error) {
+		w, _ := NewMockStreamWorker(t, MockStreamWorkerConfig{
+			RSSBytes: 100,
+			Roots:    opts.SessionRoots,
+		})
+		return w, nil
+	}
+
 	// Set tiny RSS threshold (1 byte) so any running process exceeds it
 	daemon := NewUtilityDaemon(nil,
-		WithSpawner(newMockSpawner(script)),
+		WithSpawner(rssSpawner),
 		WithTurnBudget(100),
 		WithMaxRSSBytes(1),
 	)
@@ -183,7 +201,7 @@ func TestUtilityDaemon_RSSRotation(t *testing.T) {
 		t.Fatalf("execute failed: %v", err)
 	}
 
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
 
 	newConvID := daemon.ActiveConvID()
 	if initialConvID == newConvID {
@@ -192,9 +210,8 @@ func TestUtilityDaemon_RSSRotation(t *testing.T) {
 }
 
 func TestUtilityDaemon_OptionsAndAccessors(t *testing.T) {
-	script := createMockStreamJsonHelper(t)
 	daemon := NewUtilityDaemon(nil,
-		WithSpawner(newMockSpawner(script)),
+		WithSpawner(newMockSpawner(t)),
 		WithTurnBudget(5),
 		WithTurnTimeout(2*time.Second),
 		WithSessionRoots("/tmp/test-roots"),
@@ -255,9 +272,8 @@ func TestUtilityDaemon_WorkerOptsConfigFallback(t *testing.T) {
 }
 
 func TestUtilityDaemon_RunnerFuncSessionBypassAndError(t *testing.T) {
-	script := createMockStreamJsonHelper(t)
 	daemon := NewUtilityDaemon(nil,
-		WithSpawner(newMockSpawner(script)),
+		WithSpawner(newMockSpawner(t)),
 	)
 	defer daemon.Close()
 
@@ -279,9 +295,8 @@ func TestUtilityDaemon_RunnerFuncSessionBypassAndError(t *testing.T) {
 }
 
 func TestUtilityDaemon_DebouncedRestartAndEnsureStandby(t *testing.T) {
-	script := createMockStreamJsonHelper(t)
 	daemon := NewUtilityDaemon(nil,
-		WithSpawner(newMockSpawner(script)),
+		WithSpawner(newMockSpawner(t)),
 	)
 	defer daemon.Close()
 
@@ -327,12 +342,19 @@ func TestUtilityDaemon_ExecuteNoWorker(t *testing.T) {
 }
 
 func TestUtilityDaemon_ExecuteRetryExhaustion(t *testing.T) {
-	script := createMockStreamJsonHelper(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	crashSpawner := func(ctx context.Context, opts WorkerOptions) (*WorkerInstance, error) {
+		w, _ := NewMockStreamWorker(t, MockStreamWorkerConfig{
+			CrashNow: true,
+			Roots:    opts.SessionRoots,
+		})
+		return w, nil
+	}
+
 	daemon := NewUtilityDaemon(nil,
-		WithSpawner(newMockSpawner(script)),
+		WithSpawner(crashSpawner),
 	)
 	defer daemon.Close()
 
@@ -373,9 +395,8 @@ func TestUtilityDaemon_DefaultTurnBudgetConstant(t *testing.T) {
 }
 
 func TestUtilityDaemon_StandbyPendingAndDeadStandbyReplacement(t *testing.T) {
-	script := createMockStreamJsonHelper(t)
 	daemon := NewUtilityDaemon(nil,
-		WithSpawner(newMockSpawner(script)),
+		WithSpawner(newMockSpawner(t)),
 	)
 	defer daemon.Close()
 
@@ -407,9 +428,16 @@ func TestUtilityDaemon_StandbyPendingAndDeadStandbyReplacement(t *testing.T) {
 }
 
 func TestUtilityDaemon_ExecuteClosedMidAttempt(t *testing.T) {
-	script := createMockStreamJsonHelper(t)
+	sleepSpawner := func(ctx context.Context, opts WorkerOptions) (*WorkerInstance, error) {
+		w, _ := NewMockStreamWorker(t, MockStreamWorkerConfig{
+			SleepDelay: 500 * time.Millisecond,
+			Roots:      opts.SessionRoots,
+		})
+		return w, nil
+	}
+
 	daemon := NewUtilityDaemon(nil,
-		WithSpawner(newMockSpawner(script)),
+		WithSpawner(sleepSpawner),
 	)
 
 	// Close daemon mid-attempt
@@ -420,8 +448,3 @@ func TestUtilityDaemon_ExecuteClosedMidAttempt(t *testing.T) {
 
 	_, _ = daemon.Execute(context.Background(), "SLEEP")
 }
-
-
-
-
-
