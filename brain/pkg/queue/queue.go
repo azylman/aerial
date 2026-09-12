@@ -200,6 +200,7 @@ type WorkerPoolConfig struct {
 	// Optional hooks for testing/custom overrides
 	RunnerFunc           func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error)
 	RunnerWithOptionsFunc func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (stdout, stderr string, exitCode int, err error)
+	NotifierRunnerFunc   runner.RunnerFunc
 	NotifierFunc         func(agyBin, apiKey, contextDescription string) string
 	DeliveryFunc                func(s *discordgo.Session, channelID, text string) error
 	DeliveryWithAttachmentsFunc func(s *discordgo.Session, channelID, text string, attachments []*delivery.Attachment) error
@@ -238,6 +239,7 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 	if cfg.Store == nil && cfg.DB != nil {
 		cfg.Store = db.NewSQLStore(cfg.DB)
 	}
+	isExplicitAppCfg := (appCfg != nil)
 	if appCfg == nil {
 		def := config.DefaultConfigData()
 		if cfg.Model != "" {
@@ -290,9 +292,18 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 		}
 	}
 	if cfg.NotifierFunc == nil {
-		runnerFn := cfg.RunnerFunc
-		cfg.NotifierFunc = func(agyBin, apiKey, contextDescription string) string {
-			return notifier.GenerateDynamicNotification(agyBin, apiKey, contextDescription, runnerFn)
+		notifierRunner := cfg.NotifierRunnerFunc
+		if notifierRunner == nil && isExplicitAppCfg {
+			notifierRunner = cfg.RunnerFunc
+		}
+		if notifierRunner != nil {
+			cfg.NotifierFunc = func(agyBin, apiKey, contextDescription string) string {
+				return notifier.GenerateDynamicNotification(agyBin, apiKey, contextDescription, notifierRunner)
+			}
+		} else {
+			cfg.NotifierFunc = func(agyBin, apiKey, contextDescription string) string {
+				return notifier.StaticFallback(contextDescription)
+			}
 		}
 	}
 	if cfg.DeliveryWithAttachmentsFunc == nil {
@@ -1695,6 +1706,8 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 	lastErrDetail := ""
 	lastStderr := ""
 	currentModel := p.GetRuntimeConfig()
+	currentAgyBin := p.cfg.AgyBin
+	currentAPIKey := p.cfg.APIKey
 
 	initialRetryCount := 0
 	for _, m := range burst {
@@ -1708,8 +1721,12 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		currentModel = p.cfg.Model
 		lowEffortModel := p.cfg.LowEffortModel
 		currentTimeout := p.cfg.TimeoutMinutes
-		currentAgyBin := p.cfg.AgyBin
-		currentAPIKey := p.cfg.APIKey
+		if p.cfg.AgyBin != "" {
+			currentAgyBin = p.cfg.AgyBin
+		}
+		if p.cfg.APIKey != "" {
+			currentAPIKey = p.cfg.APIKey
+		}
 		overrideModel := p.overrideModel
 		p.mu.Unlock()
 
@@ -1996,6 +2013,7 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 					case <-p.ctx.Done():
 						metrics.RecordTurnCompleted("cancelled", triggerType, currentModel, time.Since(execStart))
 						for _, m := range burst {
+							_ = db.UpdateMessageStatus(p.cfg.DB, m.ID, db.StatusPending, "interrupted by graceful deployment")
 							if m.ScheduleRunID != "" {
 								_ = db.UpdateScheduleRunStatus(p.cfg.DB, db.UpdateRunParams{
 									RunID:       m.ScheduleRunID,
@@ -2015,11 +2033,30 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 
 				// Exhausted all attempts on watchdog timeout
 				stopTyping()
+				statusUpdater.Stop()
+				statusUpdater.DeleteStatusMessage()
 				_ = db.RotateSessionID(p.cfg.DB, threadID, "")
 				metrics.RecordTurnCompleted("watchdog_timeout", triggerType, currentModel, time.Since(execStart))
 
+				if p.ctx.Err() != nil {
+					log.Printf("[WorkerPool] Pool shutting down on watchdog timeout for thread %s. Resetting to PENDING.", threadID)
+					for _, m := range burst {
+						_ = db.UpdateMessageStatus(p.cfg.DB, m.ID, db.StatusPending, "interrupted by graceful deployment")
+					}
+					return
+				}
+
 				if !skipDiscord {
-					notif := notifier.StaticFallback("execution terminated by watchdog: " + errDetail)
+					sanitizedSnippet := sanitizeErrorText(errDetail)
+					if len([]rune(sanitizedSnippet)) > 300 {
+						sanitizedSnippet = string([]rune(sanitizedSnippet)[:300])
+					}
+					var notif string
+					if isRateLimitError(errDetail, stderr) {
+						notif = notifier.ModelUnavailableMessage()
+					} else {
+						notif = p.cfg.NotifierFunc(currentAgyBin, currentAPIKey, "execution timed out while processing the request: "+sanitizedSnippet)
+					}
 					if err := p.cfg.DeliveryFunc(p.getDiscordSession(), threadID, notif); err != nil {
 						log.Printf("[WorkerPool] Failed to deliver watchdog notice for thread %s: %v", threadID, err)
 					}
@@ -2221,6 +2258,16 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 
 		// Non-transient hard failure: fail fast immediately on Attempt 1 without retries
 		stopTyping()
+		statusUpdater.Stop()
+		statusUpdater.DeleteStatusMessage()
+
+		if p.ctx.Err() != nil {
+			log.Printf("[WorkerPool] Pool shutting down during non-transient error for thread %s. Resetting to PENDING.", threadID)
+			for _, m := range burst {
+				_ = db.UpdateMessageStatus(p.cfg.DB, m.ID, db.StatusPending, "interrupted by graceful deployment")
+			}
+			return
+		}
 
 		if currentSessionID != "" {
 			_ = db.RotateSessionID(p.cfg.DB, threadID, "")
@@ -2231,14 +2278,15 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		metrics.RecordTurnCompleted("failed", triggerType, currentModel, time.Since(execStart))
 
 		var notif string
-		if isRateLimitError(errDetail) {
+		if isRateLimitError(errDetail, stderr) {
 			notif = notifier.ModelUnavailableMessage()
 		} else {
-			notif = notifier.StaticFallback(fmt.Sprintf("execution failed with non-transient error: %s", errDetail))
+			snippet := sanitizedErr
+			if len([]rune(snippet)) > 300 {
+				snippet = string([]rune(snippet)[:300])
+			}
+			notif = p.cfg.NotifierFunc(currentAgyBin, currentAPIKey, fmt.Sprintf("execution failed with non-transient error: %s", snippet))
 		}
-		stopTyping()
-		statusUpdater.Stop()
-		statusUpdater.DeleteStatusMessage()
 		if !skipDiscord {
 			if err := p.cfg.DeliveryFunc(p.getDiscordSession(), threadID, notif); err != nil {
 				log.Printf("[WorkerPool] Failed to deliver non-transient failure notice for thread %s: %v", threadID, err)
@@ -2269,20 +2317,37 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 
 	// Total exhaustion after all attempts
 	stopTyping()
+	statusUpdater.Stop()
+	statusUpdater.DeleteStatusMessage()
 
 	if p.ctx.Err() != nil {
 		log.Printf("[WorkerPool] Pool shutting down during turn for thread %s. Suppressing exhaustion alert and resetting to PENDING for deployment recovery.", threadID)
 		metrics.RecordTurnCompleted("cancelled", triggerType, currentModel, time.Since(execStart))
 		for _, m := range burst {
 			_ = db.UpdateMessageStatus(p.cfg.DB, m.ID, db.StatusPending, "interrupted by graceful deployment")
+			if m.ScheduleRunID != "" {
+				_ = db.UpdateScheduleRunStatus(p.cfg.DB, db.UpdateRunParams{
+					RunID:       m.ScheduleRunID,
+					MessageID:   m.ID,
+					Status:      "failed",
+					CompletedAt: time.Now().UTC(),
+					DurationMs:  time.Since(execStart).Milliseconds(),
+					Error:       "context cancelled during execution",
+					Model:       currentModel,
+				})
+			}
 		}
 		return
 	}
 	var notif string
-	if lastErrDetail != "" && isRateLimitError(lastErrDetail) {
+	if lastErrDetail != "" && isRateLimitError(lastErrDetail, lastStderr) {
 		notif = notifier.ModelUnavailableMessage()
 	} else {
-		notif = notifier.StaticFallback(fmt.Sprintf("execution failed after exhausting %d attempts: %s", maxAttempts, lastErrDetail))
+		snippet := sanitizeErrorText(lastErrDetail)
+		if len([]rune(snippet)) > 300 {
+			snippet = string([]rune(snippet)[:300])
+		}
+		notif = p.cfg.NotifierFunc(currentAgyBin, currentAPIKey, fmt.Sprintf("execution failed after exhausting %d attempts: %s", maxAttempts, snippet))
 	}
 	if !skipDiscord {
 		if err := p.cfg.DeliveryFunc(p.getDiscordSession(), threadID, notif); err != nil {
@@ -2317,12 +2382,22 @@ var rateLimitKeywords = []string{
 	"rate limit",
 	"resource_exhausted",
 	"429",
+	"quota",
+	"too many requests",
+	"overloaded",
+	"service unavailable",
+	"resource has been exhausted",
+	"individual quota reached",
+	"please upgrade your subscription",
 }
 
-func isRateLimitError(errDetail string) bool {
-	lower := strings.ToLower(errDetail)
+func isRateLimitError(errDetail string, extraStrs ...string) bool {
+	combined := strings.ToLower(errDetail)
+	for _, s := range extraStrs {
+		combined += " " + strings.ToLower(s)
+	}
 	for _, kw := range rateLimitKeywords {
-		if strings.Contains(lower, kw) {
+		if strings.Contains(combined, kw) {
 			return true
 		}
 	}
