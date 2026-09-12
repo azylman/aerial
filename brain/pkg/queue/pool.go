@@ -53,8 +53,9 @@ type WorkerPoolConfig struct {
 	Classifier     *classifier.Classifier
 	StalenessTTL   time.Duration
 	IdleTimeout    time.Duration
-	DrainTimeout   time.Duration
-	SessionManager *session.Manager
+	DrainTimeout       time.Duration
+	RetryDelayOverride time.Duration
+	SessionManager     *session.Manager
 
 	// Optional hooks for testing/custom overrides
 	RunnerFunc                  func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error)

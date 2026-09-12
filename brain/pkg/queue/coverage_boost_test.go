@@ -1206,8 +1206,10 @@ func TestRecoverInterrupted_AllBranches(t *testing.T) {
 
 	// Pool setup
 	pool := New(nil, WorkerPoolConfig{
-		DB:          database,
-		MaxAttempts: 3,
+		DB:           database,
+		MaxAttempts:  3,
+		DrainTimeout: 50 * time.Millisecond,
+		IdleTimeout:  50 * time.Millisecond,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			return "", "", 0, nil
 		},
