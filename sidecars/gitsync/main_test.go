@@ -2730,3 +2730,155 @@ func TestGetGitExecutor_Branches(t *testing.T) {
 		t.Errorf("expected custom git executor to be called")
 	}
 }
+
+func TestGetDockerExecutor_Branches(t *testing.T) {
+	var nilDaemon *SyncDaemon
+	if nilDaemon.getDockerExecutor() == nil {
+		t.Errorf("expected non-nil default docker executor for nil daemon")
+	}
+
+	d := &SyncDaemon{}
+	if d.getDockerExecutor() == nil {
+		t.Errorf("expected non-nil executor when dockerExecutor is nil")
+	}
+}
+
+func TestExecuteRollback_ErrorBranches(t *testing.T) {
+	tempDir := t.TempDir()
+	composePath := filepath.Join(tempDir, "docker-compose.yml")
+	_ = os.WriteFile(composePath, []byte("services:\n  brain:\n    image: alpine\n"), 0644)
+
+	d := NewDaemon(DaemonConfig{
+		ComposeDir: tempDir,
+		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			if len(args) > 0 && args[0] == "reset" {
+				return nil, []byte("fatal: reset failed"), errors.New("reset failed")
+			}
+			return nil, nil, nil
+		},
+		ComposeExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			argsStr := strings.Join(args, " ")
+			if strings.Contains(argsStr, "config") && strings.Contains(argsStr, "--services") {
+				return []byte("brain\n"), nil, nil
+			}
+			if strings.Contains(argsStr, "up -d") {
+				return nil, []byte("fatal: compose up failed"), errors.New("compose up failed")
+			}
+			return nil, nil, nil
+		},
+		DockerExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			return nil, nil, nil
+		},
+	})
+
+	d.executeRollback(context.Background(), []ComposeChangeEvent{
+		{RepoPath: tempDir, PreviousHead: "head1", CurrentHead: "head2"},
+	}, "test_stage", errors.New("cause error"))
+}
+
+func TestSyncRepo_ResetFailureAndPostMergeRevParseError(t *testing.T) {
+	tempDir := t.TempDir()
+	localDir := filepath.Join(tempDir, "local")
+	_ = os.MkdirAll(filepath.Join(localDir, ".git"), 0755)
+
+	// 1. Reset failure in recovery branch
+	dResetFail := NewDaemon(DaemonConfig{
+		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			if len(args) > 0 {
+				switch args[0] {
+				case "config":
+					return nil, nil, nil
+				case "rev-parse":
+					return []byte("1111111111111111111111111111111111111111"), nil, nil
+				case "fetch":
+					return nil, nil, nil
+				case "merge":
+					return nil, []byte("fatal: conflict"), errors.New("merge conflict")
+				case "reset":
+					return nil, []byte("fatal: reset failed"), errors.New("reset failed")
+				}
+			}
+			return nil, nil, nil
+		},
+	})
+	res := dResetFail.SyncRepo(context.Background(), localDir)
+	if !strings.Contains(res.Error, "reset failed") {
+		t.Errorf("expected reset failed error, got %s", res.Error)
+	}
+
+	// 2. Post-merge rev-parse failure
+	revParseCount := 0
+	dRevParseFail := NewDaemon(DaemonConfig{
+		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			if len(args) > 0 {
+				switch args[0] {
+				case "config":
+					return nil, nil, nil
+				case "rev-parse":
+					revParseCount++
+					if revParseCount > 2 {
+						return nil, []byte("fatal: rev-parse failed"), errors.New("rev-parse error")
+					}
+					return []byte("1111111111111111111111111111111111111111"), nil, nil
+				case "fetch":
+					return nil, nil, nil
+				case "merge":
+					return []byte("Already up to date."), nil, nil
+				}
+			}
+			return nil, nil, nil
+		},
+	})
+	res2 := dRevParseFail.SyncRepo(context.Background(), localDir)
+	if res2.Error == "" {
+		t.Errorf("expected error when post-merge rev-parse fails")
+	}
+}
+
+func TestGetStatus_RemoteFallbackAndNegativeLag(t *testing.T) {
+	fakeRepo := "/mock/repo"
+	now := time.Now()
+	past := now.Add(-10 * time.Minute)
+
+	// Case 1: origin/main fails, fallback to FETCH_HEAD
+	d := NewDaemon(DaemonConfig{
+		Repos: []string{fakeRepo},
+		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			ref := args[len(args)-1]
+			if ref == "origin/main" {
+				return nil, nil, errors.New("no origin/main")
+			}
+			if ref == "FETCH_HEAD" {
+				return []byte("2222222222222222222222222222222222222222\x00" + past.Format(time.RFC3339)), nil, nil
+			}
+			return []byte("1111111111111111111111111111111111111111\x00" + now.Format(time.RFC3339)), nil, nil
+		},
+	})
+	st := d.GetStatus(context.Background())
+	if st.Repos[fakeRepo].RemoteCommit != "2222222222222222222222222222222222222222" {
+		t.Errorf("expected FETCH_HEAD fallback, got %s", st.Repos[fakeRepo].RemoteCommit)
+	}
+
+	// Case 2: both origin/main and FETCH_HEAD fail, fallback to diskSha
+	dFallbackDisk := NewDaemon(DaemonConfig{
+		Repos: []string{fakeRepo},
+		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			ref := args[len(args)-1]
+			if ref == "origin/main" || ref == "FETCH_HEAD" {
+				return nil, nil, errors.New("remote ref not found")
+			}
+			return []byte("1111111111111111111111111111111111111111\x00" + now.Format(time.RFC3339)), nil, nil
+		},
+	})
+	st2 := dFallbackDisk.GetStatus(context.Background())
+	if st2.Repos[fakeRepo].RemoteCommit != "1111111111111111111111111111111111111111" {
+		t.Errorf("expected diskSha fallback, got %s", st2.Repos[fakeRepo].RemoteCommit)
+	}
+}
+
+func TestRunGitCommand_CancelCoverage(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, _, _ = runGitCommand(ctx, "", "", "status")
+}
+
