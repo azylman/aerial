@@ -409,3 +409,23 @@ func TestWriteWorkerTurn(t *testing.T) {
 		}
 	})
 }
+
+func TestEvaluateWatchdogStatus_Defaults(t *testing.T) {
+	now := time.Now()
+	// Zero Now, InactivityTimeout <= 0, MaxDuration <= 0
+	d1 := EvaluateWatchdogStatus(WatchdogStatusInput{
+		StartTime:        now.Add(-2 * time.Hour),
+		LastActivityTime: now,
+	})
+	if d1.Action != WatchdogActionKillMaxDuration {
+		t.Errorf("expected max duration kill with default 60m cap, got %v", d1.Action)
+	}
+
+	d2 := EvaluateWatchdogStatus(WatchdogStatusInput{
+		StartTime:        now,
+		LastActivityTime: now.Add(-10 * time.Minute),
+	})
+	if d2.Action != WatchdogActionKillInactivity {
+		t.Errorf("expected inactivity kill with default 5m cap, got %v", d2.Action)
+	}
+}

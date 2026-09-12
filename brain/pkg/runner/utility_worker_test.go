@@ -130,6 +130,8 @@ func TestWorkerInstance_RSSBytesEdgeCases(t *testing.T) {
 }
 
 func TestWorkerInstance_SpawnFailures(t *testing.T) {
+	bin := getHelperProcessBin(t)
+
 	// 1. Invalid binary path
 	ctx1, cancel1 := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel1()
@@ -140,34 +142,36 @@ func TestWorkerInstance_SpawnFailures(t *testing.T) {
 		t.Error("expected error for nonexistent binary")
 	}
 
-	// 2. Handshake timeout
+	// 2. Handshake timeout via NewWorkerInstance
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel2()
-	userInR, userInW := io.Pipe()
-	userOutR, userOutW := io.Pipe()
-	defer userInR.Close()
-	defer userInW.Close()
-	defer userOutR.Close()
-	defer userOutW.Close()
-
-	_, err = NewWorkerInstanceFromStreams(ctx2, userInW, userOutR, cancel2, nil, 20*time.Millisecond, nil)
+	_, err = NewWorkerInstance(ctx2, WorkerOptions{
+		AgyBin:   bin,
+		Timeout:  20 * time.Millisecond,
+		ExtraEnv: []string{"GO_WANT_HELPER_PROCESS=1", "MOCK_MODE=hang"},
+	})
 	if err != ErrHandshakeTimeout {
 		t.Errorf("expected ErrHandshakeTimeout, got %v", err)
 	}
 
-	// 3. Stdout closed before init event
+	// 3. Process exits before handshake via NewWorkerInstance
 	ctx3, cancel3 := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel3()
-	userInR2, userInW2 := io.Pipe()
-	userOutR2, userOutW2 := io.Pipe()
-	defer userInR2.Close()
-	defer userInW2.Close()
-	userOutW2.Close()
-	defer userOutR2.Close()
-
-	_, err = NewWorkerInstanceFromStreams(ctx3, userInW2, userOutR2, cancel3, nil, 1*time.Second, nil)
+	_, err = NewWorkerInstance(ctx3, WorkerOptions{
+		AgyBin:   bin,
+		ExtraEnv: []string{"GO_WANT_HELPER_PROCESS=1", "MOCK_MODE=exit"},
+	})
 	if err == nil || !strings.Contains(err.Error(), ErrInvalidHandshake.Error()) {
 		t.Errorf("expected ErrInvalidHandshake, got %v", err)
+	}
+}
+
+func TestStreamIO_NilSafety(t *testing.T) {
+	if err := WriteWorkerTurn(nil, "foo"); err == nil {
+		t.Error("expected error writing to nil writer")
+	}
+	if _, err := ReadWorkerTurn(nil); err == nil {
+		t.Error("expected error reading from nil reader")
 	}
 }
 
