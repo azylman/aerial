@@ -1281,55 +1281,59 @@ func TestCreateReloadConfigFunc_SuccessCoverage(t *testing.T) {
 }
 
 func TestRunBrainApp_DetailedOptions(t *testing.T) {
-	tmpDir := t.TempDir()
+	t.Run("with discord token", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "app_discord.db")
+		cfg := config.NewTestConfig(func(d *config.ConfigData) {
+			d.Port = "0"
+			d.AgyBin = "/bin/true"
+			d.Model = "gemini-2.5-flash"
+			d.APIKey = "test-key"
+			d.SystemPrompt = "test"
+			d.DatabaseURL = dbPath
+			d.DiscordToken = "mock-token"
+			d.GeminiHomeDir = tmpDir
+			d.DataDir = filepath.Join(tmpDir, "data")
+		})
 
-	// 1. With DiscordToken set
-	dbPath := filepath.Join(tmpDir, "app_discord.db")
-	cfg := config.NewTestConfig(func(d *config.ConfigData) {
-		d.Port = "0"
-		d.AgyBin = "/bin/true"
-		d.Model = "gemini-2.5-flash"
-		d.APIKey = "test-key"
-		d.SystemPrompt = "test"
-		d.DatabaseURL = dbPath
-		d.DiscordToken = "mock-token"
-		d.GeminiHomeDir = tmpDir
-		d.DataDir = filepath.Join(tmpDir, "data")
-	})
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+		errChan := make(chan error, 1)
+		go func() {
+			errChan <- RunBrainApp(ctx, cfg)
+		}()
 
-	errChan := make(chan error, 1)
-	go func() {
-		errChan <- RunBrainApp(ctx, cfg)
-	}()
+		time.Sleep(100 * time.Millisecond)
+		cancel()
 
-	time.Sleep(100 * time.Millisecond)
-	cancel()
-
-	select {
-	case err := <-errChan:
-		if err != nil && err != http.ErrServerClosed {
-			t.Errorf("RunBrainApp returned unexpected error: %v", err)
+		select {
+		case err := <-errChan:
+			if err != nil && err != http.ErrServerClosed {
+				t.Errorf("RunBrainApp returned unexpected error: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Errorf("RunBrainApp did not shut down within 5 seconds")
 		}
-	case <-time.After(5 * time.Second):
-		t.Errorf("RunBrainApp did not shut down within 5 seconds")
-	}
-
-	// 2. Port listen error
-	badPortCfg := config.NewTestConfig(func(d *config.ConfigData) {
-		d.Port = "-1"
-		d.AgyBin = "/bin/true"
-		d.Model = "gemini-2.5-flash"
-		d.SystemPrompt = "test"
-		d.DatabaseURL = filepath.Join(tmpDir, "app_bad_port.db")
-		d.GeminiHomeDir = tmpDir
-		d.DataDir = filepath.Join(tmpDir, "data")
+		time.Sleep(50 * time.Millisecond)
 	})
-	ctxBad, cancelBad := context.WithTimeout(context.Background(), 1*time.Second)
-	defer cancelBad()
-	_ = RunBrainApp(ctxBad, badPortCfg)
+
+	t.Run("port listen error", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		badPortCfg := config.NewTestConfig(func(d *config.ConfigData) {
+			d.Port = "-1"
+			d.AgyBin = "/bin/true"
+			d.Model = "gemini-2.5-flash"
+			d.SystemPrompt = "test"
+			d.DatabaseURL = filepath.Join(tmpDir, "app_bad_port.db")
+			d.GeminiHomeDir = tmpDir
+			d.DataDir = filepath.Join(tmpDir, "data")
+		})
+		ctxBad, cancelBad := context.WithTimeout(context.Background(), 1*time.Second)
+		defer cancelBad()
+		_ = RunBrainApp(ctxBad, badPortCfg)
+		time.Sleep(50 * time.Millisecond)
+	})
 }
 
 func TestInitializeBrainEnvironment_Complete(t *testing.T) {

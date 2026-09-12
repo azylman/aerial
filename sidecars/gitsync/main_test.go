@@ -2477,9 +2477,55 @@ func TestCleanConflictContainers_AllBranches(t *testing.T) {
 }
 
 func TestDefaultDockerExecutor_Coverage(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	_, _, _ = defaultDockerExecutor(ctx, "version")
+	tempDir := t.TempDir()
+	binDir := filepath.Join(tempDir, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatalf("failed to create bin dir: %v", err)
+	}
+
+	if runtime.GOOS == "windows" {
+		fakeDocker := filepath.Join(binDir, "docker.cmd")
+		scriptContent := "@echo off\r\n" +
+			"set \"arg=%*\"\r\n" +
+			"echo %arg% | findstr /i \"version\" >nul && (\r\n" +
+			"  echo Docker mock v24.0\r\n" +
+			"  exit /b 0\r\n" +
+			")\r\n" +
+			"echo %arg% | findstr /i \"sleep\" >nul && goto do_sleep\r\n" +
+			"echo unknown cmd >&2\r\n" +
+			"exit /b 1\r\n" +
+			":do_sleep\r\n" +
+			"goto do_sleep\r\n"
+		if err := os.WriteFile(fakeDocker, []byte(scriptContent), 0755); err != nil {
+			t.Fatalf("failed to write fake docker: %v", err)
+		}
+	} else {
+		fakeDocker := filepath.Join(binDir, "docker")
+		scriptContent := "#!/bin/sh\ncase \"$*\" in\n  *\"version\"*) echo \"Docker mock v24.0\"; exit 0;;\n  *\"sleep\"*) trap 'exit 0' TERM INT; while :; do sleep 0.05; done;;\n  *) echo \"unknown cmd\" >&2; exit 1;;\nesac\n"
+		if err := os.WriteFile(fakeDocker, []byte(scriptContent), 0755); err != nil {
+			t.Fatalf("failed to write fake docker: %v", err)
+		}
+	}
+
+	origPath := os.Getenv("PATH")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+origPath)
+
+	// 1. Success execution
+	stdout, _, err := defaultDockerExecutor(context.Background(), "version")
+	if err != nil || !strings.Contains(string(stdout), "Docker mock v24.0") {
+		t.Errorf("expected mock output, got err=%v, stdout=%s", err, string(stdout))
+	}
+
+	// 2. Cancellation execution
+	cancelCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, _, _ = defaultDockerExecutor(cancelCtx, "sleep")
+
+	// 3. Error execution
+	_, stderr, err := defaultDockerExecutor(context.Background(), "unknown")
+	if err == nil || !strings.Contains(string(stderr), "unknown cmd") {
+		t.Errorf("expected error from unknown command, got err=%v, stderr=%s", err, string(stderr))
+	}
 }
 
 func TestScrubComposeEnv_Extended(t *testing.T) {
@@ -2517,9 +2563,233 @@ func TestNotifyBrainReload_Success(t *testing.T) {
 }
 
 func TestDefaultGitExecutor_Coverage(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	// 1. Success execution with version
+	stdout, _, _ := defaultGitExecutor(context.Background(), "", "version")
+	_ = stdout
+
+	// 2. Execution with directory
+	tempDir := t.TempDir()
+	_, _, _ = defaultGitExecutor(context.Background(), tempDir, "version")
+
+	// 3. Pre-canceled context
+	ctxCancelled, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, _, _ = defaultGitExecutor(ctx, "", "status")
+	_, _, _ = defaultGitExecutor(ctxCancelled, "", "version")
+
+	// 4. Invalid command
+	_, _, _ = defaultGitExecutor(context.Background(), "", "invalid-git-subcommand-nonexistent")
+}
+
+func TestHasComposeChanges_Coverage(t *testing.T) {
+	d := &SyncDaemon{}
+
+	// 1. Canceled context
+	ctxCancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	changed, err := d.HasComposeChanges(ctxCancelled, "/path", "v1", "v2")
+	if err == nil || changed {
+		t.Errorf("expected context error, got %v, %v", changed, err)
+	}
+
+	// 2. Empty or matching heads / empty repoPath
+	cases := []struct {
+		repo, prev, curr string
+	}{
+		{"/path", "", "v2"},
+		{"/path", "v1", ""},
+		{"/path", "v1", "v1"},
+		{"", "v1", "v2"},
+	}
+	for _, c := range cases {
+		got, err := d.HasComposeChanges(context.Background(), c.repo, c.prev, c.curr)
+		if err != nil || got {
+			t.Errorf("expected false, nil for %v, got %v, %v", c, got, err)
+		}
+	}
+
+	// 3. Diff returns compose change
+	d.gitExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+		return []byte("docker-compose.yml\nmain.go\n"), nil, nil
+	}
+	got, err := d.HasComposeChanges(context.Background(), "/path", "v1", "v2")
+	if err != nil || !got {
+		t.Errorf("expected true, nil, got %v, %v", got, err)
+	}
+
+	// 4. Diff returns no compose change
+	d.gitExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+		return []byte("README.md\nmain.go\n"), nil, nil
+	}
+	got, err = d.HasComposeChanges(context.Background(), "/path", "v1", "v2")
+	if err != nil || got {
+		t.Errorf("expected false, nil, got %v, %v", got, err)
+	}
+
+	// 5. Diff fails, fallback diff-tree succeeds with compose changes
+	callCount := 0
+	d.gitExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+		callCount++
+		if callCount == 1 {
+			return nil, []byte("fatal: ambiguous argument"), errors.New("diff failed")
+		}
+		return []byte(".env\n"), nil, nil
+	}
+	got, err = d.HasComposeChanges(context.Background(), "/path", "v1", "v2")
+	if err != nil || !got {
+		t.Errorf("expected fallback true, nil, got %v, %v", got, err)
+	}
+
+	// 6. Diff fails, fallback diff-tree fails (fail safe)
+	d.gitExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+		return nil, []byte("fatal: repo corrupt"), errors.New("diff failed")
+	}
+	got, err = d.HasComposeChanges(context.Background(), "/path", "v1", "v2")
+	if err != nil || !got {
+		t.Errorf("expected fail-safe true, nil, got %v, %v", got, err)
+	}
+
+	// 7. Diff fails with canceled context during diff
+	ctxFail, cancelFail := context.WithCancel(context.Background())
+	d.gitExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+		cancelFail()
+		return nil, nil, errors.New("aborted")
+	}
+	got, err = d.HasComposeChanges(ctxFail, "/path", "v1", "v2")
+	if err == nil || got {
+		t.Errorf("expected ctx error on diff abort, got %v, %v", got, err)
+	}
+
+	// 8. Diff fails, diff-tree fails with canceled context
+	ctxTreeFail, cancelTreeFail := context.WithCancel(context.Background())
+	treeCalls := 0
+	d.gitExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+		treeCalls++
+		if treeCalls == 1 {
+			return nil, nil, errors.New("diff error")
+		}
+		cancelTreeFail()
+		return nil, nil, errors.New("diff-tree error")
+	}
+	got, err = d.HasComposeChanges(ctxTreeFail, "/path", "v1", "v2")
+	if err == nil || got {
+		t.Errorf("expected ctx error on diff-tree abort, got %v, %v", got, err)
+	}
+}
+
+func TestGetRepoCommit_DetailedCoverage(t *testing.T) {
+	d := &SyncDaemon{}
+
+	// 1. Error from git executor
+	d.gitExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+		return nil, nil, errors.New("git error")
+	}
+	sha, tm, err := d.getRepoCommit(context.Background(), "/repo", "HEAD")
+	if err == nil || sha != "" || tm != nil {
+		t.Errorf("expected error, got %v, %v, %v", sha, tm, err)
+	}
+
+	// 2. Output without null delimiter
+	d.gitExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+		return []byte("abc1234"), nil, nil
+	}
+	sha, tm, err = d.getRepoCommit(context.Background(), "/repo", "HEAD")
+	if err != nil || sha != "abc1234" || tm != nil {
+		t.Errorf("expected sha only, got %v, %v, %v", sha, tm, err)
+	}
+
+	// 3. Output with invalid date
+	d.gitExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+		return []byte("abc1234\x00invalid-date"), nil, nil
+	}
+	sha, tm, err = d.getRepoCommit(context.Background(), "/repo", "HEAD")
+	if err != nil || sha != "abc1234" || tm != nil {
+		t.Errorf("expected sha with nil time on bad date, got %v, %v, %v", sha, tm, err)
+	}
+
+	// 4. Output with valid RFC3339 date
+	d.gitExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+		return []byte("abc1234\x002026-09-12T12:00:00Z"), nil, nil
+	}
+	sha, tm, err = d.getRepoCommit(context.Background(), "/repo", "HEAD")
+	if err != nil || sha != "abc1234" || tm == nil || tm.Year() != 2026 {
+		t.Errorf("expected valid sha and time, got %v, %v, %v", sha, tm, err)
+	}
+
+	// 5. Package-level getRepoCommit
+	sha, tm, _ = getRepoCommit(context.Background(), "/repo", "HEAD", "fake-pat")
+	if sha == "" && tm == nil {
+		// Executed cleanly
+	}
+}
+
+func TestCleanConflictContainers_DetailedCoverage(t *testing.T) {
+	d := &SyncDaemon{}
+
+	// 1. Docker ps error
+	d.dockerExecutor = func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+		return nil, []byte("permission denied"), errors.New("daemon error")
+	}
+	if err := d.CleanConflictContainers(context.Background()); err == nil {
+		t.Errorf("expected error on ps failure")
+	}
+
+	// 2. Rm returns "No such container", generic rm error, and rm success
+	rmStep := 0
+	d.dockerExecutor = func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+		if args[0] == "ps" {
+			// Provide 3 dead conflict containers (with >12 char IDs)
+			return []byte("1111222233334444\t111122223333_aerial-db\tExited (0)\n" +
+				"5555666677778888\t555566667777_aerial-brain\tDead\n" +
+				"9999000011112222\t999900001111_aerial-watchtower\tExited (1)\n"), nil, nil
+		}
+		if args[0] == "rm" {
+			rmStep++
+			switch rmStep {
+			case 1:
+				// "No such container" error
+				return nil, []byte("Error: No such container: 111122223333"), errors.New("exit 1")
+			case 2:
+				// Generic error
+				return nil, []byte("Error: container locked"), errors.New("exit 1")
+			case 3:
+				// Success
+				return []byte("999900001111"), nil, nil
+			}
+		}
+		return nil, nil, nil
+	}
+
+	if err := d.CleanConflictContainers(context.Background()); err != nil {
+		t.Errorf("expected clean completion, got %v", err)
+	}
+}
+
+func TestResolveChannelID_DetailedCoverage(t *testing.T) {
+	d := &SyncDaemon{}
+
+	// 1. Guilds HTTP 500 error
+	tsError := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer tsError.Close()
+
+	_, err := d.resolveChannelID(context.Background(), tsError.Client(), "token", "alerts")
+	if err == nil {
+		t.Errorf("expected error on HTTP 500")
+	}
+
+	// 2. Snowflake fast return
+	ch, err := d.resolveChannelID(context.Background(), http.DefaultClient, "token", "123456789012345678")
+	if err != nil || ch != "123456789012345678" {
+		t.Errorf("expected snowflake fast return, got %v, %v", ch, err)
+	}
+
+	// 3. Channel not found / cached return
+	d.cachedChannelID = "cached-999"
+	ch, err = d.resolveChannelID(context.Background(), http.DefaultClient, "token", "alerts")
+	if err != nil || ch != "cached-999" {
+		t.Errorf("expected cached channel ID, got %v, %v", ch, err)
+	}
 }
 
 func TestGetGitExecutor_Branches(t *testing.T) {
