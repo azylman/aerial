@@ -474,7 +474,7 @@ type ScheduleRunsResponse struct {
 }
 
 type schedulesCache struct {
-	mu        sync.RWMutex
+	mu        sync.Mutex
 	expiresAt time.Time
 	summary   db.ScheduleSummaryMetrics
 	crons     []CronScheduleWithDesc
@@ -494,29 +494,9 @@ func handleSchedules(database *sql.DB) http.HandlerFunc {
 
 		now := time.Now().UTC()
 
-		cache.mu.RLock()
-		if now.Before(cache.expiresAt) && cache.crons != nil {
-			resp := SchedulesResponse{
-				Status:     "ok",
-				SystemTime: now,
-				Summary:    cache.summary,
-				Crons:      cache.crons,
-				OneShots:   cache.oneShots,
-			}
-			cache.mu.RUnlock()
-
-			w.Header().Set("Content-Type", "application/json; charset=utf-8")
-			w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-			w.WriteHeader(http.StatusOK)
-			_ = json.NewEncoder(w).Encode(resp)
-			return
-		}
-		cache.mu.RUnlock()
-
 		cache.mu.Lock()
 		defer cache.mu.Unlock()
 
-		// Double-check under write lock
 		if now.Before(cache.expiresAt) && cache.crons != nil {
 			resp := SchedulesResponse{
 				Status:     "ok",
@@ -673,7 +653,7 @@ type TasksResponse struct {
 }
 
 type tasksCache struct {
-	mu        sync.RWMutex
+	mu        sync.Mutex
 	tasks     []db.ActiveTask
 	expiresAt time.Time
 }
@@ -691,26 +671,9 @@ func handleTasks(database *sql.DB) http.HandlerFunc {
 
 		now := time.Now().UTC()
 
-		cache.mu.RLock()
-		if now.Before(cache.expiresAt) && cache.tasks != nil {
-			cached := cache.tasks
-			cache.mu.RUnlock()
-			w.Header().Set("Content-Type", "application/json; charset=utf-8")
-			w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-			w.WriteHeader(http.StatusOK)
-			_ = json.NewEncoder(w).Encode(TasksResponse{
-				Status: "ok",
-				Total:  len(cached),
-				Tasks:  cached,
-			})
-			return
-		}
-		cache.mu.RUnlock()
-
 		cache.mu.Lock()
 		defer cache.mu.Unlock()
 
-		// Double-check under write lock
 		if now.Before(cache.expiresAt) && cache.tasks != nil {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 			w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")

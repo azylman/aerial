@@ -697,6 +697,8 @@ func TestIsMessageableChannel(t *testing.T) {
 }
 
 func TestRunStartupCatchUpSweep_NilAndEmptySafeguards(t *testing.T) {
+	resetFunnelGlobals(t)
+	defer resetFunnelGlobals(t)
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to init DB: %v", err)
@@ -715,12 +717,6 @@ func TestRunStartupCatchUpSweep_NilAndEmptySafeguards(t *testing.T) {
 	}
 	s.State.User = &discordgo.User{ID: "bot-123", Username: "Aerial"}
 
-	// Force lastSweepAt to zero for test
-	sweepMu.Lock()
-	lastSweepAt = time.Time{}
-	isSweeping.Store(false)
-	sweepMu.Unlock()
-
 	RunStartupCatchUpSweep(context.Background(), database, pool, s)
 }
 
@@ -731,6 +727,8 @@ func (m mockCatchUpRoundTripper) RoundTrip(req *http.Request) (*http.Response, e
 }
 
 func TestRunStartupCatchUpSweep_BotPolicy(t *testing.T) {
+	resetFunnelGlobals(t)
+	defer resetFunnelGlobals(t)
 	setupTestConfig(t, `
 channels:
   default:
@@ -2405,12 +2403,13 @@ channels:
 		t.Errorf("expected non-empty thread id on summarizer failure")
 	}
 
-	// 3. titleSummarizeSem saturated: occupy the semaphore and call getOrCreateThreadID
-	select {
-	case titleSummarizeSem <- struct{}{}:
-		defer func() { <-titleSummarizeSem }()
-	default:
-	}
+	// 3. titleSummarizeSem saturated: occupy both slots of the semaphore and call getOrCreateThreadID
+	titleSummarizeSem <- struct{}{}
+	titleSummarizeSem <- struct{}{}
+	defer func() {
+		<-titleSummarizeSem
+		<-titleSummarizeSem
+	}()
 	thID2, _ := getOrCreateThreadID(s, msg, true)
 	if thID2 == "" {
 		t.Errorf("expected non-empty thread id when semaphore saturated")

@@ -1424,6 +1424,13 @@ func TestRunBrainApp_ErrorBranches(t *testing.T) {
 	if errEmpty == nil {
 		t.Errorf("Expected error for empty DatabaseURL, got nil")
 	}
+
+	// 5. Pre-canceled context returns nil immediately
+	ctxCanceled, cancelEarly := context.WithCancel(context.Background())
+	cancelEarly()
+	if err := RunBrainApp(ctxCanceled, cfgInvalidDB); err != nil {
+		t.Errorf("Expected nil error for pre-canceled context, got %v", err)
+	}
 }
 
 func TestHandleSchedules_ConcurrentDoubleCheck(t *testing.T) {
@@ -1830,6 +1837,9 @@ func TestHandleTasks_CacheDoubleCheck(t *testing.T) {
 func TestRunBrainApp_FullLifecycle(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "brain.db")
+	_ = os.MkdirAll(filepath.Join(tmpDir, ".gemini", "skills"), 0755)
+	_ = os.MkdirAll(filepath.Join(tmpDir, ".gemini", "config", "skills"), 0755)
+
 	cfg, err := config.LoadConfigFromPaths()
 	if err != nil {
 		t.Fatalf("LoadConfigFromPaths failed: %v", err)
@@ -1838,12 +1848,12 @@ func TestRunBrainApp_FullLifecycle(t *testing.T) {
 	cur.DatabaseURL = dbPath
 	cur.DataDir = tmpDir
 	cur.GeminiHomeDir = tmpDir
-	cur.DiscordToken = ""
+	cur.DiscordToken = "mock-discord-token"
 	cur.Port = "0"
 	cfg.Update(cur)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	time.AfterFunc(300*time.Millisecond, cancel)
+	time.AfterFunc(1000*time.Millisecond, cancel)
 
 	err = RunBrainApp(ctx, cfg)
 	if err != nil {
