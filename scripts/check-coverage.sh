@@ -96,28 +96,14 @@ else
 fi
 
 # Target Minimum Thresholds
-GLOBAL_GO_THRESHOLD=70.0
+GLOBAL_GO_THRESHOLD=95.0
 FRONTEND_LINE_THRESHOLD=90.0
 
 # Critical backend package thresholds (Key -> Floor)
-# brain/pkg/classifier: 90%
-# brain/pkg/config:     80%
-# brain/pkg/db:         70%
-# brain/pkg/memory:     70%
-# brain/pkg/queue:      75%
-# brain/pkg/sanitizer:  90%
-# brain/pkg/watcher:    80%
-
+# All backend Go packages enforce a strict minimum 90.0% statement coverage floor.
 get_pkg_threshold() {
     case "$1" in
-        *brain/pkg/classifier*) echo "90.0" ;;
-        *brain/pkg/config*)     echo "80.0" ;;
-        *brain/pkg/db*)         echo "70.0" ;;
-        *brain/pkg/memory*)     echo "70.0" ;;
-        *brain/pkg/queue*)      echo "75.0" ;;
-        *brain/pkg/sanitizer*)  echo "90.0" ;;
-        *brain/pkg/watcher*)    echo "80.0" ;;
-        *)                      echo "0.0" ;;
+        *) echo "90.0" ;;
     esac
 }
 
