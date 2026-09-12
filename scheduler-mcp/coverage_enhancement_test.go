@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -195,13 +196,17 @@ func TestDB_ErrorBranchesAndEdgeCases(t *testing.T) {
 		t.Error("expected error on empty DSN")
 	}
 
-	// initDB directory creation error
-	if _, err := initDB("/dev/null/forbidden/db.sqlite"); err == nil {
-		t.Error("expected error creating dir in /dev/null")
+	// initDB directory creation error (hermetic across Windows and POSIX)
+	tmpDir := t.TempDir()
+	blockerFile := filepath.Join(tmpDir, "blocker.txt")
+	if err := os.WriteFile(blockerFile, []byte("data"), 0644); err != nil {
+		t.Fatalf("failed to write blocker file: %v", err)
+	}
+	if _, err := initDB(filepath.Join(blockerFile, "forbidden", "db.sqlite")); err == nil {
+		t.Error("expected error creating dir inside a regular file")
 	}
 
 	// initDB sqlite without ? and without _pragma
-	tmpDir := t.TempDir()
 	freshDB := filepath.Join(tmpDir, "fresh.db")
 	db1, err := initDB(freshDB)
 	if err != nil {
