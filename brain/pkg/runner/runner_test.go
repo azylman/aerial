@@ -1421,6 +1421,20 @@ func TestRunAgyWithWatchdog_OptionDefaultsAndEdgeCases(t *testing.T) {
 	if !strings.Contains(stdoutWrap, "SUCCESS") {
 		t.Errorf("expected SUCCESS from RunAgy, got %q", stdoutWrap)
 	}
+
+	// 5. Test TargetID sets AERIAL_TARGET_ID in process environment
+	scriptTarget := "#!/bin/sh\necho \"TARGET=$AERIAL_TARGET_ID\"\necho '{\"status\":\"SUCCESS\"}'\n"
+	mockAgyTarget := createMockAgyScript(t, t.TempDir(), scriptTarget)
+	stdoutTarget, _, exitCodeTarget, errTarget := RunAgyWithWatchdog(ctx, mockAgyTarget, "test prompt", "sess-123", "", "gemini-pro", WatchdogOptions{
+		HomeDir:  tmpHome,
+		TargetID: "123456789012345678",
+	})
+	if errTarget != nil || exitCodeTarget != 0 {
+		t.Fatalf("RunAgyWithWatchdog failed with TargetID: %v", errTarget)
+	}
+	if !strings.Contains(stdoutTarget, "TARGET=123456789012345678") {
+		t.Errorf("expected AERIAL_TARGET_ID in stdout, got %q", stdoutTarget)
+	}
 }
 
 func TestExtractSessionID_AdditionalBranches(t *testing.T) {

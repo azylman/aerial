@@ -1367,6 +1367,9 @@ func (te *turnExecution) executeWithRetries() {
 				te.statusUpdater.MarkTurnStarted()
 				watchdogOpts.StepUpdateHandler = te.statusUpdater.HandleStep
 			}
+			if strings.TrimSpace(te.threadID) != "" {
+				watchdogOpts.TargetID = strings.TrimSpace(te.threadID)
+			}
 			stdout, stderr, exitCode, err = te.pool.cfg.RunnerWithOptionsFunc(
 				runCtx,
 				currentAgyBin,

@@ -490,6 +490,7 @@ type WatchdogOptions struct {
 	TranscriptDirs    []string
 	OutputFormat      string
 	StepUpdateHandler StepUpdateHandler
+	TargetID          string
 }
 
 // activityTap wraps an io.Writer, bumps the ActivityWriter timestamp on every write,
@@ -722,6 +723,9 @@ func RunAgyWithWatchdog(parentCtx context.Context, agyBin, prompt, sessionID, ap
 			"ANTIGRAVITY_API_KEY="+apiKey,
 			"GOOGLE_GENAI_API_KEY="+apiKey,
 		)
+	}
+	if strings.TrimSpace(opts.TargetID) != "" {
+		cmdEnv = append(cmdEnv, "AERIAL_TARGET_ID="+strings.TrimSpace(opts.TargetID))
 	}
 	cmd.Env = cmdEnv
 
