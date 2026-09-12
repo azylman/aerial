@@ -97,9 +97,7 @@ fi
 
 # Target Minimum Thresholds
 GLOBAL_GO_THRESHOLD=95.0
-FRONTEND_LINE_THRESHOLD=95.0
-FRONTEND_BRANCH_THRESHOLD=95.0
-FRONTEND_FUNCS_THRESHOLD=95.0
+FRONTEND_THRESHOLD=95.0
 
 # Critical backend package thresholds (Key -> Floor)
 # All backend Go packages enforce a strict minimum 95.0% statement coverage floor.
@@ -256,21 +254,21 @@ if [ -f "dashboard/app.test.js" ] && { [ -z "$TARGET_SERVICE" ] || [ "$TARGET_SE
             FRONTEND_BRANCH_PCT=$(echo "$cov_line" | awk -F'|' '{gsub(/[ %]/, "", $3); print $3}')
             FRONTEND_FUNCS_PCT=$(echo "$cov_line" | awk -F'|' '{gsub(/[ %]/, "", $4); print $4}')
 
-            is_fe_line_violation=$(awk "BEGIN { print ($FRONTEND_LINE_PCT < $FRONTEND_LINE_THRESHOLD) ? 1 : 0 }")
-            is_fe_branch_violation=$(awk "BEGIN { print ($FRONTEND_BRANCH_PCT < $FRONTEND_BRANCH_THRESHOLD) ? 1 : 0 }")
-            is_fe_funcs_violation=$(awk "BEGIN { print ($FRONTEND_FUNCS_PCT < $FRONTEND_FUNCS_THRESHOLD) ? 1 : 0 }")
+            is_fe_line_violation=$(awk "BEGIN { print ($FRONTEND_LINE_PCT < $FRONTEND_THRESHOLD) ? 1 : 0 }")
+            is_fe_branch_violation=$(awk "BEGIN { print ($FRONTEND_BRANCH_PCT < $FRONTEND_THRESHOLD) ? 1 : 0 }")
+            is_fe_funcs_violation=$(awk "BEGIN { print ($FRONTEND_FUNCS_PCT < $FRONTEND_THRESHOLD) ? 1 : 0 }")
             if [ "$is_fe_line_violation" -eq 0 ] && [ "$is_fe_branch_violation" -eq 0 ] && [ "$is_fe_funcs_violation" -eq 0 ]; then
                 FRONTEND_STATUS="PASS"
             else
                 FRONTEND_STATUS="FAIL"
                 if [ "$is_fe_line_violation" -eq 1 ]; then
-                    record_violation "Permet HUD Frontend line coverage ($FRONTEND_LINE_PCT%) is below threshold (${FRONTEND_LINE_THRESHOLD}%)"
+                    record_violation "Permet HUD Frontend line coverage ($FRONTEND_LINE_PCT%) is below threshold (${FRONTEND_THRESHOLD}%)"
                 fi
                 if [ "$is_fe_branch_violation" -eq 1 ]; then
-                    record_violation "Permet HUD Frontend branch coverage ($FRONTEND_BRANCH_PCT%) is below threshold (${FRONTEND_BRANCH_THRESHOLD}%)"
+                    record_violation "Permet HUD Frontend branch coverage ($FRONTEND_BRANCH_PCT%) is below threshold (${FRONTEND_THRESHOLD}%)"
                 fi
                 if [ "$is_fe_funcs_violation" -eq 1 ]; then
-                    record_violation "Permet HUD Frontend funcs coverage ($FRONTEND_FUNCS_PCT%) is below threshold (${FRONTEND_FUNCS_THRESHOLD}%)"
+                    record_violation "Permet HUD Frontend funcs coverage ($FRONTEND_FUNCS_PCT%) is below threshold (${FRONTEND_THRESHOLD}%)"
                 fi
             fi
         fi
@@ -311,9 +309,9 @@ fi
 
 if [ "$FRONTEND_STATUS" != "SKIPPED" ]; then
     if [ "$FRONTEND_STATUS" = "PASS" ]; then
-        printf "%bPermet HUD Frontend Coverage: %s%% lines, %s%% branches, %s%% funcs [Floor: %s%% lines, %s%% branches, %s%% funcs] - PASS%b\n" "$GREEN" "$FRONTEND_LINE_PCT" "$FRONTEND_BRANCH_PCT" "$FRONTEND_FUNCS_PCT" "$FRONTEND_LINE_THRESHOLD" "$FRONTEND_BRANCH_THRESHOLD" "$FRONTEND_FUNCS_THRESHOLD" "$NC"
+        printf "%bPermet HUD Frontend Coverage: %s%% lines, %s%% branches, %s%% funcs [Floor: %s%%] - PASS%b\n" "$GREEN" "$FRONTEND_LINE_PCT" "$FRONTEND_BRANCH_PCT" "$FRONTEND_FUNCS_PCT" "$FRONTEND_THRESHOLD" "$NC"
     else
-        printf "%bPermet HUD Frontend Coverage: %s%% lines, %s%% branches, %s%% funcs [Floor: %s%% lines, %s%% branches, %s%% funcs] - FAIL%b\n" "$RED" "$FRONTEND_LINE_PCT" "$FRONTEND_BRANCH_PCT" "$FRONTEND_FUNCS_PCT" "$FRONTEND_LINE_THRESHOLD" "$FRONTEND_BRANCH_THRESHOLD" "$FRONTEND_FUNCS_THRESHOLD" "$NC"
+        printf "%bPermet HUD Frontend Coverage: %s%% lines, %s%% branches, %s%% funcs [Floor: %s%%] - FAIL%b\n" "$RED" "$FRONTEND_LINE_PCT" "$FRONTEND_BRANCH_PCT" "$FRONTEND_FUNCS_PCT" "$FRONTEND_THRESHOLD" "$NC"
     fi
 fi
 printf "\n"
@@ -328,7 +326,7 @@ generate_markdown_summary() {
 | Metric | Measured | Target Floor | Status |
 | :--- | :---: | :---: | :---: |
 | **Global Go Backend Statement Coverage** | **${GLOBAL_GO_PCT}%** (${COVERED_GO_STMTS}/${TOTAL_GO_STMTS} stmts) | \`>= ${GLOBAL_GO_THRESHOLD}%\` | $([ "$GLOBAL_GO_STATUS" = "PASS" ] && echo "✅ PASS" || echo "❌ FAIL") |
-| **Permet HUD Frontend Logic Coverage** | **${FRONTEND_LINE_PCT}%** lines (${FRONTEND_BRANCH_PCT}% branch, ${FRONTEND_FUNCS_PCT}% func) | \`>= ${FRONTEND_LINE_THRESHOLD}% lines, >= ${FRONTEND_BRANCH_THRESHOLD}% branches, >= ${FRONTEND_FUNCS_THRESHOLD}% funcs\` | $([ "$FRONTEND_STATUS" = "PASS" ] && echo "✅ PASS" || echo "❌ FAIL") |
+| **Permet HUD Frontend Logic Coverage** | **${FRONTEND_LINE_PCT}%** lines (${FRONTEND_BRANCH_PCT}% branch, ${FRONTEND_FUNCS_PCT}% func) | \`>= ${FRONTEND_THRESHOLD}%\` | $([ "$FRONTEND_STATUS" = "PASS" ] && echo "✅ PASS" || echo "❌ FAIL") |
 
 ### 📦 Package-Level Statement Coverage Breakdown
 
