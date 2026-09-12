@@ -8,3 +8,6 @@
 coverage.out
 *.out
 .superpowers/
+PR_DESCRIPTION.md
+.pr_description.md
+*.pr_description.*
