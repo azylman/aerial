@@ -47,6 +47,7 @@ var (
 
 const (
 	DefaultMaxSessionTurns     = 15
+	DefaultMaxSessionIdleTime  = 24 * time.Hour
 	DefaultTimeoutMinutes      = 60
 	DefaultMaxRestarts         = 3
 	MaxMessageAbsoluteAge      = 2 * time.Hour
@@ -890,42 +891,7 @@ func CoalesceBurstPrompt(burst []db.Message) string {
 }
 
 func parseDBTime(val any) (time.Time, bool) {
-	if val == nil {
-		return time.Time{}, false
-	}
-	switch v := val.(type) {
-	case time.Time:
-		return v, true
-	case *time.Time:
-		if v != nil {
-			return *v, true
-		}
-		return time.Time{}, false
-	case string:
-		trimmed := strings.TrimSpace(v)
-		if trimmed == "" {
-			return time.Time{}, false
-		}
-		for _, layout := range []string{
-			time.RFC3339Nano,
-			time.RFC3339,
-			"2006-01-02 15:04:05.999999999 -0700 MST",
-			"2006-01-02 15:04:05 -0700 MST",
-			"2006-01-02 15:04:05.999999999-07:00",
-			"2006-01-02 15:04:05.999999999",
-			"2006-01-02 15:04:05.999999999Z07:00",
-			"2006-01-02 15:04:05-07:00",
-			"2006-01-02 15:04:05",
-			"2006-01-02T15:04:05",
-		} {
-			if t, err := time.Parse(layout, trimmed); err == nil {
-				return t, true
-			}
-		}
-	case []byte:
-		return parseDBTime(string(v))
-	}
-	return time.Time{}, false
+	return db.ParseDBTime(val)
 }
 
 // GetSessionLastActivity queries the database and on-disk session logs to determine the most
@@ -1461,8 +1427,15 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		// wakeIdx >= 0
 		// Check session rotation timing before Phase 1:
 		currentTurns, _ := db.GetSessionTurnCount(p.cfg.DB, threadID)
-		if currentTurns >= DefaultMaxSessionTurns || (wakeIdx > 0 && currentTurns+1 >= DefaultMaxSessionTurns) {
-			log.Printf("[Queue] Scope session reached turn limit (%d/%d). Resetting to cold state for fresh session initialization.", currentTurns, DefaultMaxSessionTurns)
+		lastActivity, isCold, _ := GetSessionLastActivity(p.cfg.DB, threadID, p.sessionMgr)
+		isTurnLimit := currentTurns >= DefaultMaxSessionTurns || (wakeIdx > 0 && currentTurns+1 >= DefaultMaxSessionTurns)
+		isIdleLimit := currentSessionID != "" && !isCold && !lastActivity.IsZero() && time.Since(lastActivity) >= DefaultMaxSessionIdleTime
+		if isTurnLimit || isIdleLimit {
+			if isIdleLimit {
+				log.Printf("[Queue] Scope session reached idle limit (%v >= %v). Resetting to cold state for fresh session initialization.", time.Since(lastActivity).Round(time.Minute), DefaultMaxSessionIdleTime)
+			} else {
+				log.Printf("[Queue] Scope session reached turn limit (%d/%d). Resetting to cold state for fresh session initialization.", currentTurns, DefaultMaxSessionTurns)
+			}
 			_ = db.RotateSessionID(p.cfg.DB, threadID, "")
 			currentSessionID = ""
 		}
@@ -1577,11 +1550,18 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 		}
 	}
 
-	// Pre-execution turn limit rotation check (applies to both channel and thread modes)
+	// Pre-execution turn limit and idle rotation check (applies to both channel and thread modes)
 	// Run BEFORE IncrementSessionTurnCount to prevent premature rotation and double-rotation.
 	currentTurns, _ := db.GetSessionTurnCount(p.cfg.DB, threadID)
-	if currentTurns >= DefaultMaxSessionTurns {
-		log.Printf("[Queue] Scope session reached turn limit (%d/%d). Resetting to cold state for fresh session initialization.", currentTurns, DefaultMaxSessionTurns)
+	lastActivity, isCold, _ := GetSessionLastActivity(p.cfg.DB, threadID, p.sessionMgr)
+	isTurnLimit := currentTurns >= DefaultMaxSessionTurns
+	isIdleLimit := currentSessionID != "" && !isCold && !lastActivity.IsZero() && time.Since(lastActivity) >= DefaultMaxSessionIdleTime
+	if isTurnLimit || isIdleLimit {
+		if isIdleLimit {
+			log.Printf("[Queue] Scope session reached idle limit (%v >= %v). Resetting to cold state for fresh session initialization.", time.Since(lastActivity).Round(time.Minute), DefaultMaxSessionIdleTime)
+		} else {
+			log.Printf("[Queue] Scope session reached turn limit (%d/%d). Resetting to cold state for fresh session initialization.", currentTurns, DefaultMaxSessionTurns)
+		}
 		_ = db.RotateSessionID(p.cfg.DB, threadID, "")
 		currentSessionID = ""
 	}
