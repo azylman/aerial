@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -137,8 +138,9 @@ var composeFileTargets = []string{
 }
 
 // IsComposeFile returns true if the given path or filename corresponds to a compose or environment configuration file.
-func IsComposeFile(path string) bool {
-	base := filepath.Base(strings.TrimSpace(path))
+func IsComposeFile(p string) bool {
+	cleanPath := strings.ReplaceAll(strings.TrimSpace(p), "\\", "/")
+	base := path.Base(cleanPath)
 	for _, target := range composeFileTargets {
 		if strings.EqualFold(base, target) {
 			return true
