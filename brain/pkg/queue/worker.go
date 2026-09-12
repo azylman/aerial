@@ -55,42 +55,7 @@ type turnExecution struct {
 }
 
 func parseDBTime(val any) (time.Time, bool) {
-	if val == nil {
-		return time.Time{}, false
-	}
-	switch v := val.(type) {
-	case time.Time:
-		return v, true
-	case *time.Time:
-		if v != nil {
-			return *v, true
-		}
-		return time.Time{}, false
-	case string:
-		trimmed := strings.TrimSpace(v)
-		if trimmed == "" {
-			return time.Time{}, false
-		}
-		for _, layout := range []string{
-			time.RFC3339Nano,
-			time.RFC3339,
-			"2006-01-02 15:04:05.999999999 -0700 MST",
-			"2006-01-02 15:04:05 -0700 MST",
-			"2006-01-02 15:04:05.999999999-07:00",
-			"2006-01-02 15:04:05.999999999",
-			"2006-01-02 15:04:05.999999999Z07:00",
-			"2006-01-02 15:04:05-07:00",
-			"2006-01-02 15:04:05",
-			"2006-01-02T15:04:05",
-		} {
-			if t, err := time.Parse(layout, trimmed); err == nil {
-				return t, true
-			}
-		}
-	case []byte:
-		return parseDBTime(string(v))
-	}
-	return time.Time{}, false
+	return db.ParseDBTime(val)
 }
 
 // GetSessionLastActivity queries the database and on-disk session logs to determine the most
@@ -186,12 +151,25 @@ var rateLimitKeywords = []string{
 	"rate limit",
 	"resource_exhausted",
 	"429",
+	"quota",
+	"too many requests",
+	"overloaded",
+	"service unavailable",
+	"resource has been exhausted",
+	"individual quota reached",
+	"please upgrade your subscription",
 }
 
-func isRateLimitError(errDetail string) bool {
-	lower := strings.ToLower(errDetail)
+func isRateLimitError(errDetail string, extraStrs ...string) bool {
+	combined := strings.ToLower(errDetail)
+	for _, s := range extraStrs {
+		combined += " " + strings.ToLower(s)
+	}
+	if strings.Contains(combined, "disk quota") {
+		return false
+	}
 	for _, kw := range rateLimitKeywords {
-		if strings.Contains(lower, kw) {
+		if strings.Contains(combined, kw) {
 			return true
 		}
 	}
@@ -639,8 +617,15 @@ func (te *turnExecution) evaluateAmbientWake() (shouldExit bool) {
 		// wakeIdx >= 0
 		// Check session rotation timing before Phase 1:
 		currentTurns, _ := db.GetSessionTurnCount(te.pool.cfg.DB, te.threadID)
-		if currentTurns >= DefaultMaxSessionTurns || (te.wakeIdx > 0 && currentTurns+1 >= DefaultMaxSessionTurns) {
-			log.Printf("[Queue] Scope session reached turn limit (%d/%d). Resetting to cold state for fresh session initialization.", currentTurns, DefaultMaxSessionTurns)
+		lastActivity, isCold, _ := GetSessionLastActivity(te.pool.cfg.DB, te.threadID, te.pool.sessionMgr)
+		isTurnLimit := currentTurns >= DefaultMaxSessionTurns || (te.wakeIdx > 0 && currentTurns+1 >= DefaultMaxSessionTurns)
+		isIdleLimit := te.currentSessionID != "" && !isCold && !lastActivity.IsZero() && time.Since(lastActivity) >= DefaultMaxSessionIdleTime
+		if isTurnLimit || isIdleLimit {
+			if isIdleLimit {
+				log.Printf("[Queue] Scope session reached idle limit (%v >= %v). Resetting to cold state for fresh session initialization.", time.Since(lastActivity).Round(time.Minute), DefaultMaxSessionIdleTime)
+			} else {
+				log.Printf("[Queue] Scope session reached turn limit (%d/%d). Resetting to cold state for fresh session initialization.", currentTurns, DefaultMaxSessionTurns)
+			}
 			_ = db.RotateSessionID(te.pool.cfg.DB, te.threadID, "")
 			te.currentSessionID = ""
 		}
@@ -686,12 +671,6 @@ func (te *turnExecution) evaluateAmbientWake() (shouldExit bool) {
 		}
 		te.burst = []db.Message{te.burst[te.wakeIdx]}
 		metrics.DiscordMessagesProcessedTotal.WithLabelValues("false", "wake").Inc()
-
-		var incErr error
-		te.turnCount, incErr = db.IncrementSessionTurnCount(te.pool.cfg.DB, te.threadID)
-		if incErr != nil {
-			log.Printf("[Queue] Error incrementing turn count for thread %s: %v", te.threadID, incErr)
-		}
 	}
 
 	if !te.skipDiscord && te.pool.cfg.TypingFunc != nil {
@@ -700,21 +679,26 @@ func (te *turnExecution) evaluateAmbientWake() (shouldExit bool) {
 		}
 	}
 
-	// Pre-execution turn limit rotation check (applies to both channel and thread modes)
+	// Pre-execution turn limit and idle rotation check (applies to both channel and thread modes)
 	// Run BEFORE IncrementSessionTurnCount to prevent premature rotation and double-rotation.
 	currentTurns, _ := db.GetSessionTurnCount(te.pool.cfg.DB, te.threadID)
-	if currentTurns >= DefaultMaxSessionTurns {
-		log.Printf("[Queue] Scope session reached turn limit (%d/%d). Resetting to cold state for fresh session initialization.", currentTurns, DefaultMaxSessionTurns)
+	lastActivity, isCold, _ := GetSessionLastActivity(te.pool.cfg.DB, te.threadID, te.pool.sessionMgr)
+	isTurnLimit := currentTurns >= DefaultMaxSessionTurns
+	isIdleLimit := te.currentSessionID != "" && !isCold && !lastActivity.IsZero() && time.Since(lastActivity) >= DefaultMaxSessionIdleTime
+	if isTurnLimit || isIdleLimit {
+		if isIdleLimit {
+			log.Printf("[Queue] Scope session reached idle limit (%v >= %v). Resetting to cold state for fresh session initialization.", time.Since(lastActivity).Round(time.Minute), DefaultMaxSessionIdleTime)
+		} else {
+			log.Printf("[Queue] Scope session reached turn limit (%d/%d). Resetting to cold state for fresh session initialization.", currentTurns, DefaultMaxSessionTurns)
+		}
 		_ = db.RotateSessionID(te.pool.cfg.DB, te.threadID, "")
 		te.currentSessionID = ""
 	}
 
-	if strings.ToLower(te.policy.Mode) != "channel" {
-		var incErr error
-		te.turnCount, incErr = db.IncrementSessionTurnCount(te.pool.cfg.DB, te.threadID)
-		if incErr != nil {
-			log.Printf("[Queue] Error incrementing turn count for thread %s: %v", te.threadID, incErr)
-		}
+	var incErr error
+	te.turnCount, incErr = db.IncrementSessionTurnCount(te.pool.cfg.DB, te.threadID)
+	if incErr != nil {
+		log.Printf("[Queue] Error incrementing turn count for thread %s: %v", te.threadID, incErr)
 	}
 
 	return false
@@ -927,13 +911,33 @@ func (te *turnExecution) executeWithRetries() {
 		}
 	}
 
+	var currentAgyBin, currentAPIKey string
+	te.pool.mu.Lock()
+	currentAgyBin = te.pool.cfg.AgyBin
+	currentAPIKey = te.pool.cfg.APIKey
+	te.pool.mu.Unlock()
+	if te.pool.appCfg != nil {
+		if cur := te.pool.appCfg.Current(); cur != nil {
+			if cur.AgyBin != "" {
+				currentAgyBin = cur.AgyBin
+			}
+			if cur.APIKey != "" {
+				currentAPIKey = cur.APIKey
+			}
+		}
+	}
+
 	for attempt := initialRetryCount + 1; attempt <= maxAttempts; attempt++ {
 		te.pool.mu.Lock()
 		currentModel = te.pool.cfg.Model
 		lowEffortModel := te.pool.cfg.LowEffortModel
 		currentTimeout := te.pool.cfg.TimeoutMinutes
-		currentAgyBin := te.pool.cfg.AgyBin
-		currentAPIKey := te.pool.cfg.APIKey
+		if te.pool.cfg.AgyBin != "" {
+			currentAgyBin = te.pool.cfg.AgyBin
+		}
+		if te.pool.cfg.APIKey != "" {
+			currentAPIKey = te.pool.cfg.APIKey
+		}
 		overrideModel := te.pool.overrideModel
 		te.pool.mu.Unlock()
 
@@ -1224,6 +1228,7 @@ func (te *turnExecution) executeWithRetries() {
 					case <-te.pool.ctx.Done():
 						metrics.RecordTurnCompleted("cancelled", te.triggerType, currentModel, time.Since(te.execStart))
 						for _, m := range te.burst {
+							_ = db.UpdateMessageStatus(te.pool.cfg.DB, m.ID, db.StatusPending, "interrupted by graceful deployment")
 							if m.ScheduleRunID != "" {
 								_ = db.UpdateScheduleRunStatus(te.pool.cfg.DB, db.UpdateRunParams{
 									RunID:       m.ScheduleRunID,
@@ -1243,11 +1248,34 @@ func (te *turnExecution) executeWithRetries() {
 
 				// Exhausted all attempts on watchdog timeout
 				te.stopTyping()
+				if te.statusUpdater != nil {
+					te.statusUpdater.Stop()
+					te.statusUpdater.DeleteStatusMessage()
+				}
+
+				if te.pool.ctx.Err() != nil {
+					log.Printf("[WorkerPool] Pool shutting down on watchdog timeout for thread %s. Resetting to PENDING.", te.threadID)
+					metrics.RecordTurnCompleted("cancelled", te.triggerType, currentModel, time.Since(te.execStart))
+					for _, m := range te.burst {
+						_ = db.UpdateMessageStatus(te.pool.cfg.DB, m.ID, db.StatusPending, "interrupted by graceful deployment")
+					}
+					return
+				}
+
 				_ = db.RotateSessionID(te.pool.cfg.DB, te.threadID, "")
 				metrics.RecordTurnCompleted("watchdog_timeout", te.triggerType, currentModel, time.Since(te.execStart))
 
 				if !te.skipDiscord {
-					notif := notifier.StaticFallback("execution terminated by watchdog: " + errDetail)
+					sanitizedSnippet := sanitizeErrorText(errDetail)
+					if len([]rune(sanitizedSnippet)) > 300 {
+						sanitizedSnippet = string([]rune(sanitizedSnippet)[:300])
+					}
+					var notif string
+					if isRateLimitError(errDetail, stderr) {
+						notif = notifier.ModelUnavailableMessage()
+					} else {
+						notif = te.pool.cfg.NotifierFunc(currentAgyBin, currentAPIKey, "execution timed out while processing the request: "+sanitizedSnippet)
+					}
 					if err := te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), te.threadID, notif); err != nil {
 						log.Printf("[WorkerPool] Failed to deliver watchdog notice for thread %s: %v", te.threadID, err)
 					}
@@ -1384,7 +1412,12 @@ func (te *turnExecution) executeWithRetries() {
 			if te.statusUpdater != nil {
 				te.statusUpdater.Reset()
 			}
-			notif := te.pool.cfg.NotifierFunc(currentAgyBin, currentAPIKey, "session reset due to context corruption")
+			var notif string
+			if isRateLimitError(errDetail, stderr) {
+				notif = notifier.ModelUnavailableMessage()
+			} else {
+				notif = te.pool.cfg.NotifierFunc(currentAgyBin, currentAPIKey, "session reset due to context corruption")
+			}
 			if !te.skipDiscord {
 				if err := te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), te.threadID, notif); err != nil {
 					log.Printf("[WorkerPool] Failed to deliver session reset notice for thread %s: %v", te.threadID, err)
@@ -1455,6 +1488,18 @@ func (te *turnExecution) executeWithRetries() {
 
 		// Non-transient hard failure: fail fast immediately on Attempt 1 without retries
 		te.stopTyping()
+		if te.statusUpdater != nil {
+			te.statusUpdater.Stop()
+			te.statusUpdater.DeleteStatusMessage()
+		}
+
+		if te.pool.ctx.Err() != nil {
+			log.Printf("[WorkerPool] Pool shutting down during non-transient error for thread %s. Resetting to PENDING.", te.threadID)
+			for _, m := range te.burst {
+				_ = db.UpdateMessageStatus(te.pool.cfg.DB, m.ID, db.StatusPending, "interrupted by graceful deployment")
+			}
+			return
+		}
 
 		if te.currentSessionID != "" {
 			_ = db.RotateSessionID(te.pool.cfg.DB, te.threadID, "")
@@ -1465,15 +1510,14 @@ func (te *turnExecution) executeWithRetries() {
 		metrics.RecordTurnCompleted("failed", te.triggerType, currentModel, time.Since(te.execStart))
 
 		var notif string
-		if isRateLimitError(errDetail) {
+		if isRateLimitError(errDetail, stderr) {
 			notif = notifier.ModelUnavailableMessage()
 		} else {
-			notif = notifier.StaticFallback(fmt.Sprintf("execution failed with non-transient error: %s", errDetail))
-		}
-		te.stopTyping()
-		if te.statusUpdater != nil {
-			te.statusUpdater.Stop()
-			te.statusUpdater.DeleteStatusMessage()
+			snippet := sanitizedErr
+			if len([]rune(snippet)) > 300 {
+				snippet = string([]rune(snippet)[:300])
+			}
+			notif = te.pool.cfg.NotifierFunc(currentAgyBin, currentAPIKey, fmt.Sprintf("execution failed with non-transient error: %s", snippet))
 		}
 		if !te.skipDiscord {
 			if err := te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), te.threadID, notif); err != nil {
@@ -1505,20 +1549,39 @@ func (te *turnExecution) executeWithRetries() {
 
 	// Total exhaustion after all attempts
 	te.stopTyping()
+	if te.statusUpdater != nil {
+		te.statusUpdater.Stop()
+		te.statusUpdater.DeleteStatusMessage()
+	}
 
 	if te.pool.ctx.Err() != nil {
 		log.Printf("[WorkerPool] Pool shutting down during turn for thread %s. Suppressing exhaustion alert and resetting to PENDING for deployment recovery.", te.threadID)
 		metrics.RecordTurnCompleted("cancelled", te.triggerType, currentModel, time.Since(te.execStart))
 		for _, m := range te.burst {
 			_ = db.UpdateMessageStatus(te.pool.cfg.DB, m.ID, db.StatusPending, "interrupted by graceful deployment")
+			if m.ScheduleRunID != "" {
+				_ = db.UpdateScheduleRunStatus(te.pool.cfg.DB, db.UpdateRunParams{
+					RunID:       m.ScheduleRunID,
+					MessageID:   m.ID,
+					Status:      "failed",
+					CompletedAt: time.Now().UTC(),
+					DurationMs:  time.Since(te.execStart).Milliseconds(),
+					Error:       "context cancelled during execution",
+					Model:       currentModel,
+				})
+			}
 		}
 		return
 	}
 	var notif string
-	if lastErrDetail != "" && isRateLimitError(lastErrDetail) {
+	if lastErrDetail != "" && isRateLimitError(lastErrDetail, lastStderr) {
 		notif = notifier.ModelUnavailableMessage()
 	} else {
-		notif = notifier.StaticFallback(fmt.Sprintf("execution failed after exhausting %d attempts: %s", maxAttempts, lastErrDetail))
+		snippet := sanitizeErrorText(lastErrDetail)
+		if len([]rune(snippet)) > 300 {
+			snippet = string([]rune(snippet)[:300])
+		}
+		notif = te.pool.cfg.NotifierFunc(currentAgyBin, currentAPIKey, fmt.Sprintf("execution failed after exhausting %d attempts: %s", maxAttempts, snippet))
 	}
 	if !te.skipDiscord {
 		if err := te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), te.threadID, notif); err != nil {

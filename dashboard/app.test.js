@@ -89,24 +89,24 @@ describe('Permet HUD Pure Logic Unit Tests', () => {
     describe('formatAgentsviewSessionUrl(sessionId)', () => {
         it('formats a raw session UUID into an antigravity-cli path', () => {
             const uuid = '7a874a91-3afb-4eb0-bb62-8d96b9a3ae0b';
-            assert.equal(formatAgentsviewSessionUrl(uuid), `/conversations/sessions/antigravity-cli%3A${uuid}`);
+            assert.equal(formatAgentsviewSessionUrl(uuid), `/agentsview/sessions/antigravity-cli%3A${uuid}`);
         });
 
         it('preserves already prefixed session IDs while encoding special characters', () => {
             const sessionPath = 'antigravity-cli:7a874a91-3afb-4eb0-bb62-8d96b9a3ae0b';
-            assert.equal(formatAgentsviewSessionUrl(sessionPath), '/conversations/sessions/antigravity-cli%3A7a874a91-3afb-4eb0-bb62-8d96b9a3ae0b');
+            assert.equal(formatAgentsviewSessionUrl(sessionPath), '/agentsview/sessions/antigravity-cli%3A7a874a91-3afb-4eb0-bb62-8d96b9a3ae0b');
         });
 
         it('strips leading and trailing slashes safely', () => {
-            assert.equal(formatAgentsviewSessionUrl('/sessions/abc/'), '/conversations/sessions/antigravity-cli%3Asessions%2Fabc');
+            assert.equal(formatAgentsviewSessionUrl('/sessions/abc/'), '/agentsview/sessions/antigravity-cli%3Asessions%2Fabc');
         });
 
-        it('falls back to /conversations/ for null, undefined, or whitespace', () => {
-            assert.equal(formatAgentsviewSessionUrl(null), '/conversations/');
-            assert.equal(formatAgentsviewSessionUrl(undefined), '/conversations/');
-            assert.equal(formatAgentsviewSessionUrl(''), '/conversations/');
-            assert.equal(formatAgentsviewSessionUrl('   '), '/conversations/');
-            assert.equal(formatAgentsviewSessionUrl(12345), '/conversations/');
+        it('falls back to /agentsview/ for null, undefined, or whitespace', () => {
+            assert.equal(formatAgentsviewSessionUrl(null), '/agentsview/');
+            assert.equal(formatAgentsviewSessionUrl(undefined), '/agentsview/');
+            assert.equal(formatAgentsviewSessionUrl(''), '/agentsview/');
+            assert.equal(formatAgentsviewSessionUrl('   '), '/agentsview/');
+            assert.equal(formatAgentsviewSessionUrl(12345), '/agentsview/');
         });
     });
 

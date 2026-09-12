@@ -23,7 +23,8 @@ import (
 )
 
 const (
-	DefaultMaxSessionTurns     = 15
+	DefaultMaxSessionTurns     = 10
+	DefaultMaxSessionIdleTime  = 24 * time.Hour
 	DefaultTimeoutMinutes      = 60
 	DefaultMaxRestarts         = 3
 	MaxMessageAbsoluteAge      = 2 * time.Hour
@@ -58,6 +59,7 @@ type WorkerPoolConfig struct {
 	// Optional hooks for testing/custom overrides
 	RunnerFunc                  func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error)
 	RunnerWithOptionsFunc       func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (stdout, stderr string, exitCode int, err error)
+	NotifierRunnerFunc          runner.RunnerFunc
 	NotifierFunc                func(agyBin, apiKey, contextDescription string) string
 	DeliveryFunc                func(s *discordgo.Session, channelID, text string) error
 	DeliveryWithAttachmentsFunc func(s *discordgo.Session, channelID, text string, attachments []*delivery.Attachment) error
@@ -96,6 +98,7 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 	if cfg.Store == nil && cfg.DB != nil {
 		cfg.Store = db.NewSQLStore(cfg.DB)
 	}
+	isExplicitAppCfg := (appCfg != nil)
 	if appCfg == nil {
 		def := config.DefaultConfigData()
 		if cfg.Model != "" {
@@ -148,9 +151,18 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 		}
 	}
 	if cfg.NotifierFunc == nil {
-		runnerFn := cfg.RunnerFunc
-		cfg.NotifierFunc = func(agyBin, apiKey, contextDescription string) string {
-			return notifier.GenerateDynamicNotification(agyBin, apiKey, contextDescription, runnerFn)
+		notifierRunner := cfg.NotifierRunnerFunc
+		if notifierRunner == nil && isExplicitAppCfg {
+			notifierRunner = cfg.RunnerFunc
+		}
+		if notifierRunner != nil {
+			cfg.NotifierFunc = func(agyBin, apiKey, contextDescription string) string {
+				return notifier.GenerateDynamicNotification(agyBin, apiKey, contextDescription, notifierRunner)
+			}
+		} else {
+			cfg.NotifierFunc = func(agyBin, apiKey, contextDescription string) string {
+				return notifier.StaticFallback(contextDescription)
+			}
 		}
 	}
 	if cfg.DeliveryWithAttachmentsFunc == nil {

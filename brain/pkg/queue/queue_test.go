@@ -1688,7 +1688,7 @@ func TestQueueTurnCountSessionRotation(t *testing.T) {
 	initialSessionID := "sess-channel-init-123"
 	_ = db.SaveSessionID(database, channelID, initialSessionID)
 
-	// Seed turn_count to DefaultMaxSessionTurns - 2 (48 turns)
+	// Seed turn_count to DefaultMaxSessionTurns - 2 (8 turns)
 	for i := 0; i < DefaultMaxSessionTurns-2; i++ {
 		_, _ = db.IncrementSessionTurnCount(database, channelID)
 	}
@@ -1718,7 +1718,7 @@ func TestQueueTurnCountSessionRotation(t *testing.T) {
 		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
 			if sessionID == "" {
-				sessionID = "sess-turn-" + uuid.New().String()
+				sessionID = uuid.New().String()
 			}
 			stderr = fmt.Sprintf("Starting conversation update stream for %s\n", sessionID)
 			return mockJSONResponse(sessionID, "OK response"), stderr, 0, nil
@@ -1744,9 +1744,9 @@ func TestQueueTurnCountSessionRotation(t *testing.T) {
 	pool.Start()
 	defer pool.Stop()
 
-	// Send turn 49 (DefaultMaxSessionTurns - 1)
+	// Send turn DefaultMaxSessionTurns - 1 (turn 9)
 	completedCh = make(chan struct{}, 1)
-	msg1 := db.Message{ID: "m-rot-1", ThreadID: channelID, Content: "Aerial Turn 49", CreatedAt: time.Now().UTC()}
+	msg1 := db.Message{ID: "m-rot-1", ThreadID: channelID, Content: fmt.Sprintf("Aerial Turn %d", DefaultMaxSessionTurns-1), CreatedAt: time.Now().UTC()}
 	_ = db.InsertMessage(database, msg1)
 	pool.Enqueue(msg1)
 	<-completedCh
@@ -1754,17 +1754,17 @@ func TestQueueTurnCountSessionRotation(t *testing.T) {
 	c1, _ := db.GetSessionTurnCount(database, channelID)
 	s1, _ := db.GetSessionID(database, channelID)
 	if c1 != DefaultMaxSessionTurns-1 || s1 != initialSessionID {
-		t.Fatalf("Expected turn_count=%d and initial session ID after turn 49, got count=%d, sess=%s", DefaultMaxSessionTurns-1, c1, s1)
+		t.Fatalf("Expected turn_count=%d and initial session ID after turn %d, got count=%d, sess=%s", DefaultMaxSessionTurns-1, DefaultMaxSessionTurns-1, c1, s1)
 	}
 
-	// Send turn 50 (hits DefaultMaxSessionTurns limit)
+	// Send turn DefaultMaxSessionTurns (hits DefaultMaxSessionTurns limit)
 	completedCh = make(chan struct{}, 1)
-	msg2 := db.Message{ID: "m-rot-2", ThreadID: channelID, Content: "Aerial Turn 50", CreatedAt: time.Now().UTC()}
+	msg2 := db.Message{ID: "m-rot-2", ThreadID: channelID, Content: fmt.Sprintf("Aerial Turn %d", DefaultMaxSessionTurns), CreatedAt: time.Now().UTC()}
 	_ = db.InsertMessage(database, msg2)
 	pool.Enqueue(msg2)
 	<-completedCh
 
-	// Verify post-50-turns state:
+	// Verify post-rotation state:
 	// Session ID should be rotated to cold state ""
 	// turn_count should be reset to 0
 	finalSessionID, err := db.GetSessionID(database, channelID)
@@ -1781,6 +1781,296 @@ func TestQueueTurnCountSessionRotation(t *testing.T) {
 	}
 	if finalTurnCount != 0 {
 		t.Errorf("Expected turn_count=0 after rotation, got %d", finalTurnCount)
+	}
+
+	// Send turn DefaultMaxSessionTurns + 1 (Turn 11, starts cold)
+	completedCh = make(chan struct{}, 1)
+	msg3 := db.Message{ID: "m-rot-3", ThreadID: channelID, Content: fmt.Sprintf("Aerial Turn %d", DefaultMaxSessionTurns+1), CreatedAt: time.Now().UTC()}
+	_ = db.InsertMessage(database, msg3)
+	pool.Enqueue(msg3)
+	<-completedCh
+
+	turn11Count, err := db.GetSessionTurnCount(database, channelID)
+	if err != nil {
+		t.Fatalf("Failed to query turn count after turn 11: %v", err)
+	}
+	if turn11Count != 1 {
+		t.Errorf("Expected turn_count=1 after cold restart on turn 11, got %d", turn11Count)
+	}
+	turn11SessionID, err := db.GetSessionID(database, channelID)
+	if err != nil {
+		t.Fatalf("Failed to query session ID after turn 11: %v", err)
+	}
+	if turn11SessionID == "" || turn11SessionID == initialSessionID {
+		t.Errorf("Expected fresh new session ID after turn 11, got %q", turn11SessionID)
+	}
+}
+
+func TestChannelSession_RotationOnIdleTimeout(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	channelID := "channel-idle-rot-test"
+	initialSessionID := "sess-channel-old-999"
+	_ = db.SaveSessionID(database, channelID, initialSessionID)
+	_, _ = db.IncrementSessionTurnCount(database, channelID)
+
+	// Set updated_at and created_at to 25 hours ago to simulate an idle session
+	idleTime := time.Now().UTC().Add(-25 * time.Hour)
+	_, err = database.Exec("UPDATE sessions SET created_at = $1, updated_at = $2 WHERE thread_id = $3", idleTime, idleTime, channelID)
+	if err != nil {
+		t.Fatalf("Failed to backdate session: %v", err)
+	}
+
+	sessMgr := session.New(tmpDir, "")
+	sessDir, _ := sessMgr.EnsureSessionDir(initialSessionID)
+	cliPbDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "conversations")
+	_ = os.MkdirAll(cliPbDir, 0755)
+	pbFile := filepath.Join(cliPbDir, initialSessionID+".pb")
+	_ = os.WriteFile(pbFile, []byte("mock-pb"), 0644)
+	_ = os.Chtimes(pbFile, idleTime, idleTime)
+	_ = os.Chtimes(cliPbDir, idleTime, idleTime)
+	_ = filepath.Walk(sessDir, func(path string, info os.FileInfo, err error) error {
+		if err == nil {
+			_ = os.Chtimes(path, idleTime, idleTime)
+		}
+		return nil
+	})
+
+	var mu sync.Mutex
+	var capturedSessionIDs []string
+	var completedCh chan struct{}
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		SessionManager: sessMgr,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    1,
+		ResolveChannelPolicy: func(cID, cName string) config.ChannelPolicy {
+			return config.ChannelPolicy{
+				Mode: "channel",
+			}
+		},
+		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+			return nil, nil
+		},
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			mu.Lock()
+			capturedSessionIDs = append(capturedSessionIDs, sessionID)
+			mu.Unlock()
+			if sessionID == "" {
+				sessionID = uuid.New().String()
+			}
+			_, _ = sessMgr.EnsureSessionDir(sessionID)
+			_ = os.WriteFile(filepath.Join(cliPbDir, sessionID+".pb"), []byte("mock-pb"), 0644)
+			stderr = fmt.Sprintf("Starting conversation update stream for %s\n", sessionID)
+			return mockJSONResponse(sessionID, "OK response"), stderr, 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) func() {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			mu.Lock()
+			ch := completedCh
+			mu.Unlock()
+			if ch != nil {
+				select {
+				case ch <- struct{}{}:
+				default:
+				}
+			}
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	// 1. Send Turn 1 after 25h of idle time
+	completedCh = make(chan struct{}, 1)
+	msg1 := db.Message{ID: "m-idle-1", ThreadID: channelID, Content: "Aerial wake up", CreatedAt: time.Now().UTC()}
+	_ = db.InsertMessage(database, msg1)
+	pool.Enqueue(msg1)
+	<-completedCh
+
+	mu.Lock()
+	if len(capturedSessionIDs) != 1 {
+		t.Fatalf("Expected 1 execution, got %d", len(capturedSessionIDs))
+	}
+	// The runner should have received sessionID == "" because the 25h idle session rotated pre-execution!
+	if capturedSessionIDs[0] != "" {
+		t.Errorf("Expected cold start (sessionID == \"\") due to 25h idle timeout, got: %q", capturedSessionIDs[0])
+	}
+	mu.Unlock()
+
+	// Turn count should now be 1
+	c1, _ := db.GetSessionTurnCount(database, channelID)
+	if c1 != 1 {
+		t.Errorf("Expected turn_count=1 after cold start, got %d", c1)
+	}
+
+	newSessID, _ := db.GetSessionID(database, channelID)
+	if newSessID == "" || newSessID == initialSessionID {
+		t.Errorf("Expected a fresh session ID, got: %s", newSessID)
+	}
+
+	// 2. Send Turn 2 immediately (5 seconds later). It should NOT rotate!
+	completedCh = make(chan struct{}, 1)
+	msg2 := db.Message{ID: "m-idle-2", ThreadID: channelID, Content: "Aerial follow up", CreatedAt: time.Now().UTC()}
+	_ = db.InsertMessage(database, msg2)
+	pool.Enqueue(msg2)
+	<-completedCh
+
+	mu.Lock()
+	if len(capturedSessionIDs) != 2 {
+		t.Fatalf("Expected 2 executions, got %d", len(capturedSessionIDs))
+	}
+	if capturedSessionIDs[1] != newSessID {
+		t.Errorf("Expected Turn 2 to retain new session ID %q, got: %q", newSessID, capturedSessionIDs[1])
+	}
+	mu.Unlock()
+
+	c2, _ := db.GetSessionTurnCount(database, channelID)
+	if c2 != 2 {
+		t.Errorf("Expected turn_count=2 after Turn 2, got %d", c2)
+	}
+}
+
+func TestThreadSession_RotationOnIdleTimeout(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	threadID := "thread-idle-rot-test"
+	initialSessionID := "sess-thread-old-888"
+	_ = db.SaveSessionID(database, threadID, initialSessionID)
+	_, _ = db.IncrementSessionTurnCount(database, threadID)
+
+	idleTime := time.Now().UTC().Add(-25 * time.Hour)
+	_, err = database.Exec("UPDATE sessions SET created_at = $1, updated_at = $2 WHERE thread_id = $3", idleTime, idleTime, threadID)
+	if err != nil {
+		t.Fatalf("Failed to backdate session: %v", err)
+	}
+
+	sessMgr := session.New(tmpDir, "")
+	sessDir, _ := sessMgr.EnsureSessionDir(initialSessionID)
+	cliPbDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "conversations")
+	_ = os.MkdirAll(cliPbDir, 0755)
+	pbFile := filepath.Join(cliPbDir, initialSessionID+".pb")
+	_ = os.WriteFile(pbFile, []byte("mock-pb"), 0644)
+	_ = os.Chtimes(pbFile, idleTime, idleTime)
+	_ = os.Chtimes(cliPbDir, idleTime, idleTime)
+	_ = filepath.Walk(sessDir, func(path string, info os.FileInfo, err error) error {
+		if err == nil {
+			_ = os.Chtimes(path, idleTime, idleTime)
+		}
+		return nil
+	})
+
+	var mu sync.Mutex
+	var capturedSessionIDs []string
+	var completedCh chan struct{}
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		SessionManager: sessMgr,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    1,
+		ResolveChannelPolicy: func(cID, cName string) config.ChannelPolicy {
+			return config.ChannelPolicy{
+				Mode: "thread",
+			}
+		},
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			mu.Lock()
+			capturedSessionIDs = append(capturedSessionIDs, sessionID)
+			mu.Unlock()
+			if sessionID == "" {
+				sessionID = uuid.New().String()
+			}
+			_, _ = sessMgr.EnsureSessionDir(sessionID)
+			_ = os.WriteFile(filepath.Join(cliPbDir, sessionID+".pb"), []byte("mock-pb"), 0644)
+			stderr = fmt.Sprintf("Starting conversation update stream for %s\n", sessionID)
+			return mockJSONResponse(sessionID, "OK response"), stderr, 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) func() {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			mu.Lock()
+			ch := completedCh
+			mu.Unlock()
+			if ch != nil {
+				select {
+				case ch <- struct{}{}:
+				default:
+				}
+			}
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	// 1. Send Turn 1 after 25h of idle time
+	completedCh = make(chan struct{}, 1)
+	msg1 := db.Message{ID: "m-th-idle-1", ThreadID: threadID, Content: "Hello thread", CreatedAt: time.Now().UTC()}
+	_ = db.InsertMessage(database, msg1)
+	pool.Enqueue(msg1)
+	<-completedCh
+
+	mu.Lock()
+	if len(capturedSessionIDs) != 1 {
+		t.Fatalf("Expected 1 execution, got %d", len(capturedSessionIDs))
+	}
+	if capturedSessionIDs[0] != "" {
+		t.Errorf("Expected cold start (sessionID == \"\") in thread mode due to 25h idle timeout, got: %q", capturedSessionIDs[0])
+	}
+	mu.Unlock()
+
+	c1, _ := db.GetSessionTurnCount(database, threadID)
+	if c1 != 1 {
+		t.Errorf("Expected turn_count=1 after cold start, got %d", c1)
+	}
+
+	newSessID, _ := db.GetSessionID(database, threadID)
+	if newSessID == "" || newSessID == initialSessionID {
+		t.Errorf("Expected a fresh session ID, got: %s", newSessID)
+	}
+
+	// 2. Send Turn 2 immediately. It should retain the new session ID.
+	completedCh = make(chan struct{}, 1)
+	msg2 := db.Message{ID: "m-th-idle-2", ThreadID: threadID, Content: "Hello thread again", CreatedAt: time.Now().UTC()}
+	_ = db.InsertMessage(database, msg2)
+	pool.Enqueue(msg2)
+	<-completedCh
+
+	mu.Lock()
+	if len(capturedSessionIDs) != 2 {
+		t.Fatalf("Expected 2 executions, got %d", len(capturedSessionIDs))
+	}
+	if capturedSessionIDs[1] != newSessID {
+		t.Errorf("Expected Turn 2 in thread mode to retain session ID %q, got: %q", newSessID, capturedSessionIDs[1])
+	}
+	mu.Unlock()
+
+	c2, _ := db.GetSessionTurnCount(database, threadID)
+	if c2 != 2 {
+		t.Errorf("Expected turn_count=2 after Turn 2, got %d", c2)
 	}
 }
 
@@ -2780,9 +3070,9 @@ func TestProcessBurst_SessionRotationBeforeLeadingAmbient(t *testing.T) {
 	_ = os.MkdirAll(cliPbDir, 0755)
 	_ = os.WriteFile(filepath.Join(cliPbDir, initialSessionID+".pb"), []byte("mock-pb"), 0644)
 
-	// Set turn_count to DefaultMaxSessionTurns - 1 (49 turns).
+	// Set turn_count to DefaultMaxSessionTurns - 1 (9 turns).
 	// The incoming burst has [Ambient1, Wake2].
-	// Since wakeIdx = 1 and currentTurns + 1 = 50 >= DefaultMaxSessionTurns,
+	// Since wakeIdx = 1 and currentTurns + 1 = 10 >= DefaultMaxSessionTurns,
 	// pre-burst rotation resets session to cold state so Ambient1 is written to the NEW session directory.
 	for i := 0; i < DefaultMaxSessionTurns-1; i++ {
 		_, _ = db.IncrementSessionTurnCount(database, channelID)
@@ -4071,17 +4361,17 @@ func TestProcessBurst_SessionRotation_ResetsToColdState(t *testing.T) {
 		t.Errorf("Expected session ID 'c9b5e679-7425-40de-944b-e07fc1f90ae7' after Turn 1, got %q", s1)
 	}
 
-	// Seed turn_count to DefaultMaxSessionTurns - 1 (49) so next turn hits 50 and triggers rotation
+	// Seed turn_count to DefaultMaxSessionTurns - 1 (9) so next turn hits 10 and triggers rotation
 	for i := 1; i < DefaultMaxSessionTurns-1; i++ {
 		_, _ = db.IncrementSessionTurnCount(database, channelID)
 	}
 
-	// 2. Process Turn 50 -> turnCount hits DefaultMaxSessionTurns (50), rotates session_id to ""
+	// 2. Process Turn 10 -> turnCount hits DefaultMaxSessionTurns (10), rotates session_id to ""
 	msg2 := db.Message{
 		ID:         "msg-turn-2",
 		ThreadID:   channelID,
 		AuthorName: "Alice",
-		Content:    "Aerial Turn 50",
+		Content:    fmt.Sprintf("Aerial Turn %d", DefaultMaxSessionTurns),
 		Status:     db.StatusPending,
 		CreatedAt:  now.Add(2 * time.Second),
 	}
@@ -6529,7 +6819,7 @@ func TestQueueWorker_PerScopeSerialization(t *testing.T) {
 	}
 }
 
-func TestThreadSession_RotationAt50Turns(t *testing.T) {
+func TestThreadSession_RotationAtTurnLimit(t *testing.T) {
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -7306,7 +7596,7 @@ func TestGetSessionLastActivity_RotatedSessionNotNew(t *testing.T) {
 
 	threadID := "thread-rotated-1"
 
-	// Session has reached 15 turns and rotated: internal_session_id is "", turn_count is 0
+	// Session has reached turn limit and rotated: internal_session_id is "", turn_count is 0
 	_, err = database.Exec(`
 		INSERT INTO sessions (thread_id, internal_session_id, turn_count, updated_at)
 		VALUES ($1, '', 0, $2)
@@ -8766,6 +9056,766 @@ func TestRecoverInterrupted_CoverageEdgeCases(t *testing.T) {
 		t.Errorf("expected status FAILED, got %s", updated.Status)
 	}
 }
+
+func TestIsRateLimitError_ExtendedKeywords(t *testing.T) {
+	tests := []struct {
+		errDetail string
+		extra     string
+		want      bool
+	}{
+		{errDetail: "Error 503", want: true},
+		{errDetail: "rate limit exceeded", want: true},
+		{errDetail: "RESOURCE_EXHAUSTED", want: true},
+		{errDetail: "HTTP 429", want: true},
+		{errDetail: "high demand, please wait", want: true},
+		{errDetail: "Daily quota exceeded", want: true},
+		{errDetail: "Too Many Requests", want: true},
+		{errDetail: "model is overloaded", want: true},
+		{errDetail: "503 Service Unavailable", want: true},
+		{errDetail: "resource has been exhausted by caller", want: true},
+		{errDetail: "Individual quota reached for user", want: true},
+		{errDetail: "Please upgrade your subscription to continue", want: true},
+		{errDetail: "generic error", extra: "upstream returned 429 Too Many Requests", want: true},
+		{errDetail: "write: disk quota exceeded", want: false},
+		{errDetail: "syntax error on line 42", want: false},
+		{errDetail: "", want: false},
+	}
+
+	for _, tt := range tests {
+		got := isRateLimitError(tt.errDetail, tt.extra)
+		if got != tt.want {
+			t.Errorf("isRateLimitError(%q, %q) = %t, want %t", tt.errDetail, tt.extra, got, tt.want)
+		}
+	}
+}
+
+func TestWorkerPool_WatchdogExhaustion_InvokesNotifierFunc(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	var capturedDesc string
+	var deliveredNotif string
+	var mu sync.Mutex
+	doneCh := make(chan struct{}, 1)
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		MaxAttempts:    1,
+		TimeoutMinutes: 1,
+		BackoffBase:    5 * time.Millisecond,
+		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+			return "", "inactivity timeout exceeded [watchdog]", 1, errors.New("watchdog timeout")
+		},
+		NotifierFunc: func(agyBin, apiKey, contextDescription string) string {
+			mu.Lock()
+			capturedDesc = contextDescription
+			mu.Unlock()
+			return "DEADASS TIMED OUT 💀"
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			mu.Lock()
+			deliveredNotif = text
+			mu.Unlock()
+			return nil
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			doneCh <- struct{}{}
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{ID: "msg-wd-exhaust", ThreadID: "thread-wd-1", Content: "heavy command"}
+	_ = db.InsertMessage(database, msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Timeout waiting for watchdog exhaustion")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !strings.Contains(capturedDesc, "execution timed out") {
+		t.Errorf("Expected NotifierFunc to receive timeout description, got: %q", capturedDesc)
+	}
+	if deliveredNotif != "DEADASS TIMED OUT 💀" {
+		t.Errorf("Expected delivered notice from NotifierFunc, got: %q", deliveredNotif)
+	}
+}
+
+func TestWorkerPool_NonTransient_InvokesNotifierFunc(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	var capturedDesc string
+	var deliveredNotif string
+	var mu sync.Mutex
+	doneCh := make(chan struct{}, 1)
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		MaxAttempts:    3,
+		TimeoutMinutes: 1,
+		BackoffBase:    5 * time.Millisecond,
+		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+			return "", "Error: unknown flag: --bogus-flag", 1, errors.New("exit status 1")
+		},
+		NotifierFunc: func(agyBin, apiKey, contextDescription string) string {
+			mu.Lock()
+			capturedDesc = contextDescription
+			mu.Unlock()
+			return "UNACCEPTABLE GARBAGE DETECTED 🔥"
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			mu.Lock()
+			deliveredNotif = text
+			mu.Unlock()
+			return nil
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			doneCh <- struct{}{}
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{ID: "msg-nt-notif", ThreadID: "thread-nt-1", Content: "fatal command"}
+	_ = db.InsertMessage(database, msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Timeout waiting for non-transient failure")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !strings.Contains(capturedDesc, "non-transient error") {
+		t.Errorf("Expected NotifierFunc to receive non-transient description, got: %q", capturedDesc)
+	}
+	if deliveredNotif != "UNACCEPTABLE GARBAGE DETECTED 🔥" {
+		t.Errorf("Expected delivered notice from NotifierFunc, got: %q", deliveredNotif)
+	}
+}
+
+func TestWorkerPool_RetryExhaustion_InvokesNotifierFunc(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	var capturedDesc string
+	var deliveredNotif string
+	var mu sync.Mutex
+	doneCh := make(chan struct{}, 1)
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		MaxAttempts:    2,
+		TimeoutMinutes: 1,
+		BackoffBase:    5 * time.Millisecond,
+		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+			return "", "connection reset by peer", 1, errors.New("network drop")
+		},
+		NotifierFunc: func(agyBin, apiKey, contextDescription string) string {
+			mu.Lock()
+			capturedDesc = contextDescription
+			mu.Unlock()
+			return "ROASTED TO ASHES 🤘"
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			mu.Lock()
+			deliveredNotif = text
+			mu.Unlock()
+			return nil
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			doneCh <- struct{}{}
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{ID: "msg-exhaust-notif", ThreadID: "thread-exhaust-1", Content: "flake command"}
+	_ = db.InsertMessage(database, msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Timeout waiting for retry exhaustion")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !strings.Contains(capturedDesc, "exhausting 2 attempts") {
+		t.Errorf("Expected NotifierFunc to receive exhaustion description, got: %q", capturedDesc)
+	}
+	if deliveredNotif != "ROASTED TO ASHES 🤘" {
+		t.Errorf("Expected delivered notice from NotifierFunc, got: %q", deliveredNotif)
+	}
+}
+
+func TestWorkerPool_RateLimitBypassesNotifierFunc(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	notifierCalled := false
+	var deliveredNotif string
+	var mu sync.Mutex
+	doneCh := make(chan struct{}, 1)
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		MaxAttempts:    1,
+		TimeoutMinutes: 1,
+		BackoffBase:    5 * time.Millisecond,
+		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+			return "", "Error 429: Too Many Requests", 1, errors.New("rate limit")
+		},
+		NotifierFunc: func(agyBin, apiKey, contextDescription string) string {
+			mu.Lock()
+			notifierCalled = true
+			mu.Unlock()
+			return "SHOULD NOT BE CALLED"
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			mu.Lock()
+			deliveredNotif = text
+			mu.Unlock()
+			return nil
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			doneCh <- struct{}{}
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{ID: "msg-rl-bypass", ThreadID: "thread-rl-1", Content: "rate limited turn"}
+	_ = db.InsertMessage(database, msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Timeout waiting for rate limit failure")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if notifierCalled {
+		t.Errorf("NotifierFunc should NOT have been called on rate limit error")
+	}
+	if deliveredNotif != notifier.ModelUnavailableMessage() {
+		t.Errorf("Expected ModelUnavailableMessage on rate limit, got: %q", deliveredNotif)
+	}
+}
+
+func TestWorkerPool_Watchdog_RateLimitBypassesNotifier(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	notifierCalled := false
+	var deliveredNotif string
+	var mu sync.Mutex
+	doneCh := make(chan struct{}, 1)
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		MaxAttempts:    1,
+		TimeoutMinutes: 1,
+		BackoffBase:    5 * time.Millisecond,
+		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+			return "", "inactivity timeout exceeded: [watchdog] Resource has been exhausted (quota limit reached)", 124, context.DeadlineExceeded
+		},
+		NotifierFunc: func(agyBin, apiKey, contextDescription string) string {
+			mu.Lock()
+			notifierCalled = true
+			mu.Unlock()
+			return "SHOULD NOT BE CALLED"
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			mu.Lock()
+			deliveredNotif = text
+			mu.Unlock()
+			return nil
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			doneCh <- struct{}{}
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{ID: "msg-wd-rl-bypass", ThreadID: "thread-wd-rl", Content: "watchdog quota test"}
+	_ = db.InsertMessage(database, msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Timeout waiting for watchdog rate limit failure")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if notifierCalled {
+		t.Errorf("NotifierFunc should NOT have been called on rate limit error during watchdog")
+	}
+	if deliveredNotif != notifier.ModelUnavailableMessage() {
+		t.Errorf("Expected ModelUnavailableMessage on watchdog rate limit, got: %q", deliveredNotif)
+	}
+}
+
+func TestWorkerPool_Watchdog_CancelledDuringBackoff(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	var pool *WorkerPool
+	pool = NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		MaxAttempts:    3,
+		TimeoutMinutes: 1,
+		BackoffBase:    200 * time.Millisecond,
+		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+			go func() {
+				time.Sleep(30 * time.Millisecond)
+				pool.cancel()
+			}()
+			return "", "inactivity timeout exceeded: [watchdog] hung process", 124, context.DeadlineExceeded
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	runID := "run-wd-cancel"
+	_ = db.CreateScheduleRun(database, db.ScheduleRun{
+		ID:           runID,
+		ScheduleID:   "sched-1",
+		ScheduleType: "cron",
+		Status:       "running",
+		StartedAt:    time.Now().UTC(),
+	})
+	msg := db.Message{ID: "msg-wd-cancel", ThreadID: "thread-wd-cancel", Content: "wd cancel test", ScheduleRunID: runID}
+	_ = db.InsertMessage(database, msg)
+	pool.Enqueue(msg)
+
+	time.Sleep(150 * time.Millisecond)
+
+	dbMsg, err := db.GetMessage(database, "msg-wd-cancel")
+	if err != nil || dbMsg == nil {
+		t.Fatalf("GetMessage failed: %v", err)
+	}
+	if dbMsg.Status != db.StatusPending {
+		t.Errorf("Expected status PENDING after pool cancel during watchdog backoff, got: %s", dbMsg.Status)
+	}
+}
+
+func TestWorkerPool_Watchdog_CancelledPostWatchdog(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	var pool *WorkerPool
+	deliveredCalled := false
+	var mu sync.Mutex
+
+	pool = NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		MaxAttempts:    1,
+		TimeoutMinutes: 1,
+		BackoffBase:    5 * time.Millisecond,
+		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+			pool.cancel()
+			return "", "inactivity timeout exceeded: [watchdog] single attempt cancel", 124, context.DeadlineExceeded
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			mu.Lock()
+			deliveredCalled = true
+			mu.Unlock()
+			return nil
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{ID: "msg-wd-post-cancel", ThreadID: "thread-wd-post-cancel", Content: "wd post cancel"}
+	_ = db.InsertMessage(database, msg)
+	pool.Enqueue(msg)
+
+	time.Sleep(100 * time.Millisecond)
+
+	mu.Lock()
+	if deliveredCalled {
+		t.Errorf("DeliveryFunc should not be called when pool is cancelled")
+	}
+	mu.Unlock()
+
+	dbMsg, _ := db.GetMessage(database, "msg-wd-post-cancel")
+	if dbMsg != nil && dbMsg.Status != db.StatusPending {
+		t.Errorf("Expected status PENDING after cancellation, got: %s", dbMsg.Status)
+	}
+}
+
+func TestWorkerPool_NonTransient_CancelledDuringTurn(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	var pool *WorkerPool
+	deliveredCalled := false
+	var mu sync.Mutex
+
+	pool = NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		MaxAttempts:    1,
+		TimeoutMinutes: 1,
+		BackoffBase:    5 * time.Millisecond,
+		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+			pool.cancel()
+			return "", "Fatal: invalid prompt parameters", 2, errors.New("non transient err")
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			mu.Lock()
+			deliveredCalled = true
+			mu.Unlock()
+			return nil
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{ID: "msg-nt-cancel", ThreadID: "thread-nt-cancel", Content: "nt cancel"}
+	_ = db.InsertMessage(database, msg)
+	pool.Enqueue(msg)
+
+	time.Sleep(100 * time.Millisecond)
+
+	mu.Lock()
+	if deliveredCalled {
+		t.Errorf("DeliveryFunc should not be called when pool is cancelled during non-transient error")
+	}
+	mu.Unlock()
+
+	dbMsg, _ := db.GetMessage(database, "msg-nt-cancel")
+	if dbMsg != nil && dbMsg.Status != db.StatusPending {
+		t.Errorf("Expected status PENDING after cancellation, got: %s", dbMsg.Status)
+	}
+}
+
+func TestWorkerPool_NonTransient_LongSnippetAndDeliveryErr(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	var capturedDesc string
+	var mu sync.Mutex
+	doneCh := make(chan struct{}, 1)
+
+	longError := strings.Repeat("VeryBadError-", 50)
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		MaxAttempts:    1,
+		TimeoutMinutes: 1,
+		BackoffBase:    5 * time.Millisecond,
+		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+			return "", longError, 1, errors.New("fatal command syntax")
+		},
+		NotifierFunc: func(agyBin, apiKey, contextDescription string) string {
+			mu.Lock()
+			capturedDesc = contextDescription
+			mu.Unlock()
+			return "DEADASS BROKEN 💀"
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return errors.New("discord delivery network failed")
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			doneCh <- struct{}{}
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{ID: "msg-nt-long", ThreadID: "thread-nt-long", Content: "long err test"}
+	_ = db.InsertMessage(database, msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Timeout waiting for non-transient completion")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len([]rune(capturedDesc)) > 350 {
+		t.Errorf("Expected truncated description, got length %d: %q", len([]rune(capturedDesc)), capturedDesc)
+	}
+}
+
+func TestWorkerPool_RetryExhaustion_CancelledWithScheduleRunID(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	var pool *WorkerPool
+	pool = NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		MaxAttempts:    2,
+		TimeoutMinutes: 1,
+		BackoffBase:    5 * time.Millisecond,
+		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+			pool.cancel()
+			return "", "connection timed out", 1, errors.New("timeout")
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return errors.New("delivery error")
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	runID := "run-exh-cancel"
+	_ = db.CreateScheduleRun(database, db.ScheduleRun{
+		ID:           runID,
+		ScheduleID:   "sched-exh",
+		ScheduleType: "cron",
+		Status:       "running",
+		StartedAt:    time.Now().UTC(),
+	})
+	msg := db.Message{ID: "msg-exh-cancel", ThreadID: "thread-exh-cancel", Content: "exh cancel test", ScheduleRunID: runID}
+	_ = db.InsertMessage(database, msg)
+	pool.Enqueue(msg)
+
+	time.Sleep(100 * time.Millisecond)
+
+	dbMsg, _ := db.GetMessage(database, "msg-exh-cancel")
+	if dbMsg != nil && dbMsg.Status != db.StatusPending {
+		t.Errorf("Expected status PENDING after cancel, got: %s", dbMsg.Status)
+	}
+}
+
+func TestWorkerPool_New_NotifierRunnerFuncWrapped(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	runnerCalled := false
+	pool := New(nil, WorkerPoolConfig{
+		DB: database,
+		NotifierRunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			runnerCalled = true
+			return mockJSONResponse("", "DYNAMIC FALLBACK NOTICE"), "", 0, nil
+		},
+	})
+
+	if pool.cfg.NotifierFunc == nil {
+		t.Fatal("Expected NotifierFunc to be initialized")
+	}
+	res := pool.cfg.NotifierFunc("agy", "key", "test description")
+	if !runnerCalled {
+		t.Errorf("Expected NotifierRunnerFunc to be invoked")
+	}
+	if res != "DYNAMIC FALLBACK NOTICE" {
+		t.Errorf("Expected dynamic fallback notice, got: %q", res)
+	}
+}
+
+func TestWorkerPool_RateLimit_CancelledDuringBackoff(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	var pool *WorkerPool
+	pool = NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		MaxAttempts:    3,
+		TimeoutMinutes: 1,
+		BackoffBase:    200 * time.Millisecond,
+		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+			go func() {
+				time.Sleep(30 * time.Millisecond)
+				pool.cancel()
+			}()
+			return "", "Error 429: Resource has been exhausted (quota exceeded)", 1, errors.New("rate limited")
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	runID := "run-rl-cancel"
+	_ = db.CreateScheduleRun(database, db.ScheduleRun{
+		ID:           runID,
+		ScheduleID:   "sched-rl",
+		ScheduleType: "cron",
+		Status:       "running",
+		StartedAt:    time.Now().UTC(),
+	})
+	msg := db.Message{ID: "msg-rl-cancel", ThreadID: "thread-rl-cancel", Content: "rl cancel test", ScheduleRunID: runID}
+	_ = db.InsertMessage(database, msg)
+	pool.Enqueue(msg)
+
+	time.Sleep(150 * time.Millisecond)
+
+	dbMsg, err := db.GetMessage(database, "msg-rl-cancel")
+	if err != nil || dbMsg == nil {
+		t.Fatalf("GetMessage failed: %v", err)
+	}
+	if dbMsg.Status != db.StatusPending {
+		t.Errorf("Expected status PENDING after pool cancel during quota backoff, got: %s", dbMsg.Status)
+	}
+}
+
+func TestWorkerPool_Transient_CancelledDuringBackoff(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	var pool *WorkerPool
+	pool = NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		MaxAttempts:    3,
+		TimeoutMinutes: 1,
+		BackoffBase:    200 * time.Millisecond,
+		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+			go func() {
+				time.Sleep(30 * time.Millisecond)
+				pool.cancel()
+			}()
+			return "", "connection reset by peer", 1, errors.New("transient network drop")
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	runID := "run-tr-cancel"
+	_ = db.CreateScheduleRun(database, db.ScheduleRun{
+		ID:           runID,
+		ScheduleID:   "sched-tr",
+		ScheduleType: "cron",
+		Status:       "running",
+		StartedAt:    time.Now().UTC(),
+	})
+	msg := db.Message{ID: "msg-tr-cancel", ThreadID: "thread-tr-cancel", Content: "tr cancel test", ScheduleRunID: runID}
+	_ = db.InsertMessage(database, msg)
+	pool.Enqueue(msg)
+
+	time.Sleep(150 * time.Millisecond)
+
+	dbMsg, err := db.GetMessage(database, "msg-tr-cancel")
+	if err != nil || dbMsg == nil {
+		t.Fatalf("GetMessage failed: %v", err)
+	}
+	if dbMsg.Status != db.StatusPending {
+		t.Errorf("Expected status PENDING after pool cancel during transient backoff, got: %s", dbMsg.Status)
+	}
+}
+
+func TestWorkerPool_SessionCorruption_RateLimitBypassesNotifier(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	_ = db.RotateSessionID(database, "thread-sc-rl", "sess-existing-1")
+
+	notifierCalled := false
+	var deliveredNotif string
+	var mu sync.Mutex
+	doneCh := make(chan struct{}, 1)
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		DB:             database,
+		MaxAttempts:    1,
+		TimeoutMinutes: 1,
+		BackoffBase:    5 * time.Millisecond,
+		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+			return "", "conversation not found: 429 rate limit exceeded", 1, errors.New("rate limited corruption")
+		},
+		NotifierFunc: func(agyBin, apiKey, contextDescription string) string {
+			mu.Lock()
+			notifierCalled = true
+			mu.Unlock()
+			return "SHOULD NOT BE CALLED"
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			mu.Lock()
+			deliveredNotif = text
+			mu.Unlock()
+			return nil
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			doneCh <- struct{}{}
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{ID: "msg-sc-rl", ThreadID: "thread-sc-rl", Content: "corrupt test"}
+	_ = db.InsertMessage(database, msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Timeout waiting for session corruption completion")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if notifierCalled {
+		t.Errorf("NotifierFunc should not be called when session corruption has rate limit")
+	}
+	if deliveredNotif != notifier.ModelUnavailableMessage() {
+		t.Errorf("Expected ModelUnavailableMessage, got: %q", deliveredNotif)
+	}
+}
+
 
 
 

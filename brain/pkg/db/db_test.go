@@ -330,6 +330,215 @@ func TestIncrementSessionTurnCountAndRotation(t *testing.T) {
 	}
 }
 
+func TestSessionLifecycle_TimestampsAndInfo(t *testing.T) {
+	database := setupTestDB(t)
+	defer func() { _ = database.Close() }()
+
+	key := "session-lifecycle-test"
+
+	// 1. Initial save creates session with created_at == updated_at
+	if err := SaveSessionID(database, key, "sess-1"); err != nil {
+		t.Fatalf("SaveSessionID 1 failed: %v", err)
+	}
+
+	info1, err := GetSessionInfo(database, key)
+	if err != nil {
+		t.Fatalf("GetSessionInfo 1 failed: %v", err)
+	}
+	if info1 == nil {
+		t.Fatalf("Expected non-nil SessionInfo")
+	}
+	if info1.ThreadID != key || info1.InternalSessionID != "sess-1" || info1.TurnCount != 0 {
+		t.Errorf("Unexpected session info: %+v", info1)
+	}
+	if info1.CreatedAt.IsZero() || info1.UpdatedAt.IsZero() {
+		t.Errorf("Expected non-zero timestamps: created=%v, updated=%v", info1.CreatedAt, info1.UpdatedAt)
+	}
+	firstCreatedAt := info1.CreatedAt
+
+	// 2. Mid-session turn increment updates updated_at but leaves created_at untouched
+	time.Sleep(10 * time.Millisecond)
+	if _, err := IncrementSessionTurnCount(database, key); err != nil {
+		t.Fatalf("IncrementSessionTurnCount failed: %v", err)
+	}
+
+	info2, err := GetSessionInfo(database, key)
+	if err != nil {
+		t.Fatalf("GetSessionInfo 2 failed: %v", err)
+	}
+	if info2.TurnCount != 1 {
+		t.Errorf("Expected turn_count=1, got %d", info2.TurnCount)
+	}
+	if !info2.CreatedAt.Equal(firstCreatedAt) {
+		t.Errorf("created_at was mutated on turn increment: before=%v, after=%v", firstCreatedAt, info2.CreatedAt)
+	}
+	if !info2.UpdatedAt.After(info1.UpdatedAt) {
+		t.Errorf("updated_at did not advance on turn increment: before=%v, after=%v", info1.UpdatedAt, info2.UpdatedAt)
+	}
+
+	// 3. Re-saving identical session ID does NOT change created_at
+	time.Sleep(10 * time.Millisecond)
+	if err := SaveSessionID(database, key, "sess-1"); err != nil {
+		t.Fatalf("SaveSessionID idempotent failed: %v", err)
+	}
+	info3, err := GetSessionInfo(database, key)
+	if err != nil {
+		t.Fatalf("GetSessionInfo 3 failed: %v", err)
+	}
+	if !info3.CreatedAt.Equal(firstCreatedAt) {
+		t.Errorf("created_at mutated on idempotent SaveSessionID: before=%v, after=%v", firstCreatedAt, info3.CreatedAt)
+	}
+
+	// 4. RotateSessionID updates created_at to now and resets turn_count to 0
+	time.Sleep(10 * time.Millisecond)
+	if err := RotateSessionID(database, key, ""); err != nil {
+		t.Fatalf("RotateSessionID failed: %v", err)
+	}
+	info4, err := GetSessionInfo(database, key)
+	if err != nil {
+		t.Fatalf("GetSessionInfo 4 failed: %v", err)
+	}
+	if info4.InternalSessionID != "" || info4.TurnCount != 0 {
+		t.Errorf("Expected cold session state, got: %+v", info4)
+	}
+	if !info4.CreatedAt.After(firstCreatedAt) {
+		t.Errorf("RotateSessionID did not advance created_at: first=%v, rotated=%v", firstCreatedAt, info4.CreatedAt)
+	}
+
+	// 5. Saving a new session ID after cold rotation
+	time.Sleep(10 * time.Millisecond)
+	if err := SaveSessionID(database, key, "sess-fresh-2"); err != nil {
+		t.Fatalf("SaveSessionID fresh failed: %v", err)
+	}
+	info5, err := GetSessionInfo(database, key)
+	if err != nil {
+		t.Fatalf("GetSessionInfo 5 failed: %v", err)
+	}
+	if info5.InternalSessionID != "sess-fresh-2" {
+		t.Errorf("Expected sess-fresh-2, got %s", info5.InternalSessionID)
+	}
+	if !info5.CreatedAt.After(firstCreatedAt) {
+		t.Errorf("Fresh session created_at is not newer than initial: initial=%v, fresh=%v", firstCreatedAt, info5.CreatedAt)
+	}
+}
+
+func TestParseDBTime(t *testing.T) {
+	// 1. nil
+	if _, ok := ParseDBTime(nil); ok {
+		t.Error("expected false for nil")
+	}
+
+	// 2. time.Time
+	now := time.Now().UTC()
+	if got, ok := ParseDBTime(now); !ok || !got.Equal(now) {
+		t.Errorf("expected true and equal time, got %v, %v", got, ok)
+	}
+
+	// 3. *time.Time
+	var nilTimePtr *time.Time
+	if _, ok := ParseDBTime(nilTimePtr); ok {
+		t.Error("expected false for nil *time.Time")
+	}
+	if got, ok := ParseDBTime(&now); !ok || !got.Equal(now) {
+		t.Errorf("expected true for valid *time.Time, got %v, %v", got, ok)
+	}
+
+	// 4. string (empty and whitespace)
+	if _, ok := ParseDBTime(""); ok {
+		t.Error("expected false for empty string")
+	}
+	if _, ok := ParseDBTime("   "); ok {
+		t.Error("expected false for whitespace string")
+	}
+
+	// 5. string formats
+	layouts := []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02 15:04:05.999999999 -0700 MST",
+		"2006-01-02 15:04:05 -0700 MST",
+		"2006-01-02 15:04:05.999999999-07:00",
+		"2006-01-02 15:04:05.999999999",
+		"2006-01-02 15:04:05.999999999Z07:00",
+		"2006-01-02 15:04:05-07:00",
+		"2006-01-02 15:04:05",
+		"2006-01-02T15:04:05",
+	}
+	for _, l := range layouts {
+		str := now.Format(l)
+		if _, ok := ParseDBTime(str); !ok {
+			t.Errorf("failed to parse layout %q from string %q", l, str)
+		}
+	}
+
+	// 6. invalid string
+	if _, ok := ParseDBTime("not-a-timestamp"); ok {
+		t.Error("expected false for invalid timestamp string")
+	}
+
+	// 7. []byte
+	byteStr := []byte(now.Format(time.RFC3339))
+	if _, ok := ParseDBTime(byteStr); !ok {
+		t.Error("expected true for valid []byte timestamp")
+	}
+
+	// 8. unsupported type
+	if _, ok := ParseDBTime(12345); ok {
+		t.Error("expected false for integer")
+	}
+}
+
+func TestGetSessionInfo_EdgeCasesAndSQLStore(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. nil db
+	info, err := GetSessionInfo(nil, "key")
+	if info != nil || err != nil {
+		t.Errorf("expected nil, nil for nil db, got info=%v, err=%v", info, err)
+	}
+
+	// 2. empty threadID
+	database := setupTestDB(t)
+	defer func() { _ = database.Close() }()
+
+	info, err = GetSessionInfo(database, "")
+	if info != nil || err != nil {
+		t.Errorf("expected nil, nil for empty threadID, got info=%v, err=%v", info, err)
+	}
+
+	// 3. non-existent thread
+	info, err = GetSessionInfo(database, "non-existent-thread")
+	if info != nil || err != nil {
+		t.Errorf("expected nil, nil for missing thread, got info=%v, err=%v", info, err)
+	}
+
+	// 4. SQLStore nil checks
+	var nilStore *SQLStore
+	if _, err := nilStore.GetSessionInfo(ctx, "key"); err == nil {
+		t.Error("expected error for nil SQLStore")
+	}
+
+	emptyStore := &SQLStore{}
+	if _, err := emptyStore.GetSessionInfo(ctx, "key"); err == nil {
+		t.Error("expected error for empty SQLStore with nil DB")
+	}
+
+	// 5. Valid SQLStore
+	store := NewSQLStore(database)
+	_ = store.SaveSessionID(ctx, "key-store-test", "sess-test")
+	storeInfo, err := store.GetSessionInfo(ctx, "key-store-test")
+	if err != nil || storeInfo == nil || storeInfo.InternalSessionID != "sess-test" {
+		t.Errorf("unexpected store GetSessionInfo result: info=%+v, err=%v", storeInfo, err)
+	}
+
+	// 6. Query error (closed DB)
+	closedDB, _ := InitDB(":memory:")
+	_ = closedDB.Close()
+	if _, err := GetSessionInfo(closedDB, "any-key"); err == nil {
+		t.Error("expected error when querying closed DB")
+	}
+}
+
 func TestSchedulesCompatibility(t *testing.T) {
 	database := setupTestDB(t)
 	defer func() { _ = database.Close() }()

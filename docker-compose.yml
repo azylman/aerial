@@ -331,7 +331,7 @@ services:
       - AGENTSVIEW_DATA_DIR=/agentsview-data
     command:
       - "--host=0.0.0.0"
-      - "--base-path=/conversations"
+      - "--base-path=/agentsview"
       - "--public-origin=${AGENTSVIEW_PUBLIC_ORIGINS:-http://localhost:8089,http://127.0.0.1:8089}"
       - "--public-url=${AGENTSVIEW_PUBLIC_URL:-http://localhost:8089}"
     volumes:
@@ -397,7 +397,7 @@ services:
 
   # ----------------------------------------------------------------------------
   # 12. Edge Reverse Proxy Gateway: Aerial Proxy Gateway
-  #     Routes traffic for / (status dashboard), /docs (docsify), and /conversations (agentsview).
+  #     Routes traffic for / (status dashboard), /docs (docsify), and /agentsview (agentsview).
   # ----------------------------------------------------------------------------
   proxy:
     image: ghcr.io/azylman/aerial-proxy:latest

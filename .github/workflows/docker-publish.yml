@@ -35,44 +35,35 @@ jobs:
               - 'brain/**'
               - 'GEMINI.md'
               - '.agents/**'
-              - 'docker-compose.yml'
-              - '.github/workflows/**'
+              - 'scripts/**'
+              - '.github/workflows/docker-publish.yml'
             scheduler-mcp:
               - 'scheduler-mcp/**'
-              - 'docker-compose.yml'
-              - '.github/workflows/**'
+              - '.github/workflows/docker-publish.yml'
             discord-mcp:
               - 'discord-mcp/**'
-              - 'docker-compose.yml'
-              - '.github/workflows/**'
+              - '.github/workflows/docker-publish.yml'
             docker-mcp:
               - 'docker-mcp/**'
-              - 'docker-compose.yml'
-              - '.github/workflows/**'
+              - '.github/workflows/docker-publish.yml'
             github-mcp:
               - 'github-mcp/**'
-              - 'docker-compose.yml'
-              - '.github/workflows/**'
+              - '.github/workflows/docker-publish.yml'
             dashboard:
               - 'dashboard/**'
-              - 'docker-compose.yml'
-              - '.github/workflows/**'
+              - '.github/workflows/docker-publish.yml'
             docs:
               - 'docs-service/**'
-              - 'docker-compose.yml'
-              - '.github/workflows/**'
+              - '.github/workflows/docker-publish.yml'
             proxy:
               - 'proxy/**'
-              - 'docker-compose.yml'
-              - '.github/workflows/**'
+              - '.github/workflows/docker-publish.yml'
             ollama:
               - 'docker/ollama/**'
-              - 'docker-compose.yml'
-              - '.github/workflows/**'
+              - '.github/workflows/docker-publish.yml'
             gitsync:
               - 'sidecars/gitsync/**'
-              - 'docker-compose.yml'
-              - '.github/workflows/**'
+              - '.github/workflows/docker-publish.yml'
 
   test:
     name: Run Service Unit Tests
@@ -178,6 +169,9 @@ jobs:
               node -e "JSON.parse(require('fs').readFileSync('$jf', 'utf8'))"
             fi
           done
+
+          # 4. Docker Compose Validation
+          docker compose -f docker-compose.yml config --quiet
 
       - name: Lint Brain
         if: needs.changes.outputs.brain == 'true'

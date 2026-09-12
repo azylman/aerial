@@ -56,10 +56,14 @@ func RecoverInterrupted(database *sql.DB, pool *WorkerPool) {
 				reason = "poison pill: exceeded retry limit during crash recovery"
 			}
 			log.Printf("[Startup Recovery] Poison pill detected for message %s (restart_count=%d, retry_count=%d): %s. Dropping message.", m.ID, m.RestartCount, m.RetryCount, reason)
-			snippet := m.Content
-			if len([]rune(snippet)) > 60 {
-				snippet = string([]rune(snippet)[:57]) + "..."
+			cleanSnippet := sanitizeErrorText(m.Content)
+			cleanSnippet = strings.ReplaceAll(cleanSnippet, "\n", " ")
+			cleanSnippet = strings.ReplaceAll(cleanSnippet, "\r", "")
+			cleanSnippet = strings.TrimSpace(cleanSnippet)
+			if len([]rune(cleanSnippet)) > 60 {
+				cleanSnippet = string([]rune(cleanSnippet)[:57]) + "..."
 			}
+			snippet := cleanSnippet
 			agyBin := pool.cfg.AgyBin
 			apiKey := pool.cfg.APIKey
 			if pool.appCfg != nil {
