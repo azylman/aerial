@@ -1234,3 +1234,28 @@ func TestAppendAmbientTurn_C2LogsDir(t *testing.T) {
 		t.Fatalf("AppendAmbientTurn failed for c2 dir: %v", err)
 	}
 }
+
+func TestCleanupEphemeralSession(t *testing.T) {
+	// Empty convID is safe no-op
+	CleanupEphemeralSession("")
+	CleanupEphemeralSession("   ")
+
+	// Path traversal protection
+	CleanupEphemeralSession("../evil", t.TempDir())
+	CleanupEphemeralSession("foo/bar", t.TempDir())
+
+	// Cleans directory under search root
+	tmpDir := t.TempDir()
+	convID := "test-conv-12345"
+	targetDir := filepath.Join(tmpDir, convID)
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		t.Fatalf("failed to create target dir: %v", err)
+	}
+
+	CleanupEphemeralSession(convID, "", "   ", tmpDir)
+
+	if _, err := os.Stat(targetDir); !os.IsNotExist(err) {
+		t.Errorf("expected target dir to be removed, but it still exists")
+	}
+}
+

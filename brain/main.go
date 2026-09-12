@@ -848,6 +848,7 @@ type reloadConfigOptions struct {
 	reloadSupplier      func(active *config.Config) error
 	skipEnvironmentSync bool
 	provisioner         *env.Provisioner
+	utilityDaemon       *runner.UtilityDaemon
 }
 
 func WithDiscordSession(s *discordgo.Session) ReloadOption {
@@ -871,6 +872,12 @@ func WithSkipEnvironmentSync() ReloadOption {
 func WithProvisioner(p *env.Provisioner) ReloadOption {
 	return func(o *reloadConfigOptions) {
 		o.provisioner = p
+	}
+}
+
+func WithUtilityDaemon(d *runner.UtilityDaemon) ReloadOption {
+	return func(o *reloadConfigOptions) {
+		o.utilityDaemon = d
 	}
 }
 
@@ -924,6 +931,10 @@ func CreateReloadConfigFunc(cfg *config.Config, opts ...ReloadOption) func(sourc
 					log.Printf("[%s] Warning: env sync error: %v", source, err)
 				}
 			}
+
+			if options.utilityDaemon != nil {
+				options.utilityDaemon.TriggerRestart(source)
+			}
 		}
 	}
 }
@@ -965,8 +976,12 @@ func RunBrainApp(ctx context.Context, cfg *config.Config) error {
 
 	sanitizer.RegisterConfigTokens(cfg)
 
-	cls := classifier.New(cfg, runner.RunAgy)
 	sessionMgr := session.New(cfg.GeminiHomeDir(), cfg.DataDir())
+	utilityDaemon := runner.NewUtilityDaemon(cfg, runner.WithSessionRoots(sessionMgr.Roots()...))
+	defer utilityDaemon.Close()
+
+	utilityRunner := utilityDaemon.RunnerFunc()
+	cls := classifier.New(cfg, utilityRunner)
 
 	pool := queue.New(cfg, queue.WorkerPoolConfig{
 		DB:                    database,
@@ -996,7 +1011,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config) error {
 		}
 	}()
 
-	reloadConfig := CreateReloadConfigFunc(cfg, WithDiscordSession(dgSession), WithProvisioner(provisioner))
+	reloadConfig := CreateReloadConfigFunc(cfg, WithDiscordSession(dgSession), WithProvisioner(provisioner), WithUtilityDaemon(utilityDaemon))
 
 	// Start background file watcher for atomic hot-reloading of prompts and skills
 	fileWatcher, err := watcher.NewWatcher(
@@ -1038,7 +1053,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config) error {
 	}
 
 	// Start background scheduler monitor for due cron and one-shot routines
-	sched, err := scheduler.New(cfg, database, pool, scheduler.NewDiscordThreadCreator(dgSession), scheduler.WithRunnerFunc(runner.RunAgy), scheduler.WithSessionRoots(sessionMgr.Roots()...))
+	sched, err := scheduler.New(cfg, database, pool, scheduler.NewDiscordThreadCreator(dgSession), scheduler.WithRunnerFunc(utilityRunner), scheduler.WithSessionRoots(sessionMgr.Roots()...))
 	if err != nil {
 		return fmt.Errorf("failed to initialize scheduler: %w", err)
 	}
