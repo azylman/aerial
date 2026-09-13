@@ -3,10 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
-	"errors"
-	"fmt"
 	"log"
-	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -23,6 +20,10 @@ import (
 var funnelCfg atomic.Pointer[config.Config]
 var funnelPool atomic.Pointer[queue.WorkerPool]
 var titleSummarizeSem = make(chan struct{}, 2)
+var discordSessionOpener = func(dg *discordgo.Session) error {
+	return dg.Open()
+}
+var funnelRetryBackoff = 2 * time.Second
 
 // SetFunnelConfig sets the active *config.Config for the Discord funnel.
 func SetFunnelConfig(cfg *config.Config) {
@@ -48,55 +49,12 @@ func currentFunnelClassifier() *classifier.Classifier {
 	return nil
 }
 
-const discordErrCodeThreadAlreadyCreated = 160004
-
 func isThreadAlreadyExistsError(err error) bool {
-	if err == nil {
-		return false
-	}
-	var restErr *discordgo.RESTError
-	if errors.As(err, &restErr) && restErr != nil {
-		if restErr.Message != nil && restErr.Message.Code == discordErrCodeThreadAlreadyCreated {
-			return true
-		}
-		if len(restErr.ResponseBody) > 0 {
-			bodyStr := strings.ToLower(string(restErr.ResponseBody))
-			if strings.Contains(bodyStr, "160004") || strings.Contains(bodyStr, "already been created") {
-				return true
-			}
-		}
-		return false
-	}
-	errStr := strings.ToLower(err.Error())
-	return strings.Contains(errStr, "160004") || strings.Contains(errStr, "already been created")
+	return IsThreadAlreadyExistsError(err)
 }
 
-var mentionAndEmojiRegex = regexp.MustCompile(`(?i)<(@!?|@&|#|a?:[a-z0-9_]+:)[0-9]+>`)
-
 func deriveThreadTitle(content string) string {
-	cleaned := mentionAndEmojiRegex.ReplaceAllString(content, "")
-	cleaned = strings.TrimSpace(cleaned)
-
-	var firstLine string
-	for _, line := range strings.Split(cleaned, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if trimmed != "" {
-			firstLine = trimmed
-			break
-		}
-	}
-
-	firstLine = strings.TrimLeft(firstLine, "#> \t")
-	firstLine = strings.TrimSpace(firstLine)
-
-	if firstLine == "" {
-		firstLine = "Aerial Discussion"
-	}
-	runes := []rune(firstLine)
-	if len(runes) > 60 {
-		return string(runes[:57]) + "..."
-	}
-	return string(runes)
+	return DeriveThreadTitle(content)
 }
 
 func getDiscordChannel(s *discordgo.Session, channelID string) *discordgo.Channel {
@@ -138,16 +96,17 @@ func resolveGuildID(s *discordgo.Session, m *discordgo.Message) string {
 	if m == nil {
 		return ""
 	}
-	if m.GuildID != "" {
-		return m.GuildID
-	}
+	cachedGuildID := ""
 	if snap, ok := queue.GetCachedChannel(m.ChannelID); ok && snap.GuildID != "" {
-		return snap.GuildID
+		cachedGuildID = snap.GuildID
 	}
-	if ch := getDiscordChannel(s, m.ChannelID); ch != nil && ch.GuildID != "" {
-		return ch.GuildID
+	channelGuildID := ""
+	if m.GuildID == "" && cachedGuildID == "" {
+		if ch := getDiscordChannel(s, m.ChannelID); ch != nil && ch.GuildID != "" {
+			channelGuildID = ch.GuildID
+		}
 	}
-	return ""
+	return ResolveGuildID(m.GuildID, cachedGuildID, channelGuildID)
 }
 
 func getOrCreateThreadID(s *discordgo.Session, m *discordgo.Message, allowSummarize ...bool) (string, bool) {
@@ -269,65 +228,34 @@ func getOrCreateThreadID(s *discordgo.Session, m *discordgo.Message, allowSummar
 	return m.ChannelID, false
 }
 
-func buildDiscordPrompt(s *discordgo.Session, m *discordgo.Message, targetThreadID string, _ config.ChannelPolicy) string {
-	var sb strings.Builder
-	sb.WriteString("<USER_REQUEST>\nHere's a message someone sent you from Discord:\n\n")
-	sb.WriteString(fmt.Sprintf("- id: %s\n", m.ID))
-	sb.WriteString(fmt.Sprintf("- channel_id: %s\n", m.ChannelID))
-	sb.WriteString(fmt.Sprintf("- thread_id: %s\n", targetThreadID))
-	sb.WriteString(fmt.Sprintf("- guild_id: %s\n", m.GuildID))
-
-	isAdmin := false
-	if m.Author != nil {
-		isAdmin = config.IsAdmin(currentFunnelConfig().Current().AdminUsers, m.Author.ID, m.Author.Username, m.Author.GlobalName)
-		sb.WriteString(fmt.Sprintf("- author_id: %s\n", m.Author.ID))
-		sb.WriteString(fmt.Sprintf("- author_username: %s\n", m.Author.Username))
-		sb.WriteString(fmt.Sprintf("- author_global_name: %s\n", m.Author.GlobalName))
-		sb.WriteString(fmt.Sprintf("- author_bot: %t\n", m.Author.Bot))
-		sb.WriteString(fmt.Sprintf("- is_admin: %t\n", isAdmin))
-	} else {
-		sb.WriteString(fmt.Sprintf("- is_admin: %t\n", false))
+func buildDiscordPrompt(s *discordgo.Session, m *discordgo.Message, targetThreadID string, policy config.ChannelPolicy) string {
+	if m == nil {
+		return ""
 	}
-
-	if m.ReferencedMessage != nil && m.ReferencedMessage.Author != nil {
-		sb.WriteString("- replying_to:\n")
-		sb.WriteString(fmt.Sprintf("    author: \"@%s\"\n", m.ReferencedMessage.Author.Username))
-		sb.WriteString(fmt.Sprintf("    content: %q\n", m.ReferencedMessage.Content))
-	}
-
-	sanitizedContent := strings.ReplaceAll(m.Content, "</USER_REQUEST>", "<\\/USER_REQUEST>")
-	sanitizedContent = strings.ReplaceAll(sanitizedContent, "<USER_REQUEST>", "<\\USER_REQUEST>")
-	sb.WriteString(fmt.Sprintf("- content: %s\n", sanitizedContent))
-	sb.WriteString(fmt.Sprintf("- timestamp: %s\n", m.Timestamp.Format(time.RFC3339)))
-
-	var mentions []string
-	for _, u := range m.Mentions {
-		if u != nil {
-			mentions = append(mentions, u.Username)
-		}
-	}
-	for _, roleID := range m.MentionRoles {
-		roleName := roleID
-		if s != nil && s.State != nil && m.GuildID != "" {
+	roleNames := make(map[string]string)
+	if s != nil && s.State != nil && m.GuildID != "" {
+		for _, roleID := range m.MentionRoles {
 			if r, err := s.State.Role(m.GuildID, roleID); err == nil && r != nil && r.Name != "" {
-				roleName = r.Name
+				roleNames[roleID] = r.Name
 			}
 		}
-		mentions = append(mentions, roleName)
 	}
-	sb.WriteString(fmt.Sprintf("- mentions: %v\n", mentions))
-
-	var attachments []string
-	for _, a := range m.Attachments {
-		if a != nil {
-			attachments = append(attachments, a.URL)
-		}
+	var adminUsers []string
+	var tz string
+	if cfg := currentFunnelConfig(); cfg != nil {
+		cur := cfg.Current()
+		adminUsers = cur.AdminUsers
+		tz = cur.Timezone
 	}
-	sb.WriteString(fmt.Sprintf("- attachments: %v\n\n", attachments))
-
-	sb.WriteString("Fulfill the user's request. If the user asks for a plan, design, proposal, or investigation, draft the plan, run review gates, and present it for review without modifying source code or opening PRs. If the user asks to implement, build, or fix something, execute all necessary tools, subagents, tests, and code modifications. Only formulate and output your final response once all immediate work is complete. It will be delivered directly to Discord.\n")
-	sb.WriteString("</USER_REQUEST>")
-	return sb.String()
+	input := DiscordPromptInput{
+		Message:        m,
+		TargetThreadID: targetThreadID,
+		Policy:         policy,
+		AdminUsers:     adminUsers,
+		Timezone:       tz,
+		RoleNames:      roleNames,
+	}
+	return BuildDiscordPrompt(input)
 }
 
 // resolveEffectiveChannelPolicy resolves the ChannelPolicy for a channel or thread.
@@ -555,10 +483,10 @@ func connectDiscordFunnel(ctx context.Context, database *sql.DB, pool *queue.Wor
 	dg.Identify.Intents = discordgo.IntentsGuildMessages | discordgo.IntentsDirectMessages | discordgo.IntentMessageContent
 	dg.SyncEvents = false
 
-	if err := dg.Open(); err != nil {
+	if err := discordSessionOpener(dg); err != nil {
 		log.Printf("Warning: Discord funnel failed to open initial session: %v. Retrying in background...", err)
 		go func() {
-			backoff := 2 * time.Second
+			backoff := funnelRetryBackoff
 			maxBackoff := 60 * time.Second
 			for {
 				select {
@@ -566,7 +494,7 @@ func connectDiscordFunnel(ctx context.Context, database *sql.DB, pool *queue.Wor
 					return
 				case <-time.After(backoff):
 				}
-				if err := dg.Open(); err != nil {
+				if err := discordSessionOpener(dg); err != nil {
 					log.Printf("Discord funnel retry failed: %v. Retrying in %v...", err, backoff)
 					backoff = backoff * 2
 					if backoff > maxBackoff {
@@ -607,16 +535,7 @@ var (
 )
 
 func isMessageableChannel(chType discordgo.ChannelType) bool {
-	switch chType {
-	case discordgo.ChannelTypeGuildText,
-		discordgo.ChannelTypeGuildNews,
-		discordgo.ChannelTypeGuildNewsThread,
-		discordgo.ChannelTypeGuildPublicThread,
-		discordgo.ChannelTypeGuildPrivateThread:
-		return true
-	default:
-		return false
-	}
+	return IsMessageableChannel(chType)
 }
 
 // RunStartupCatchUpSweep safely sweeps active channels and threads for missed messages during downtime.
