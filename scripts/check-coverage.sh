@@ -123,6 +123,17 @@ PKG_DATA_FILE="${PROF_DIR}/pkg_summary.txt"
 TOTAL_GO_STMTS=0
 COVERED_GO_STMTS=0
 
+cgo_val="${CGO_ENABLED:-}"
+if [ -z "$cgo_val" ]; then
+    if command -v gcc >/dev/null 2>&1 || command -v clang >/dev/null 2>&1; then
+        cgo_val=1
+    else
+        cgo_val=0
+    fi
+fi
+
+PARALLEL_JOBS="${AERIAL_COVERAGE_JOBS:-${PARALLEL_JOBS:-6}}"
+
 for svc in $ALL_GO_SERVICES; do
     if [ ! -d "$svc" ]; then
         continue
@@ -134,44 +145,65 @@ for svc in $ALL_GO_SERVICES; do
         continue
     fi
 
+    # Phase 1: Run coverage collection for all packages in parallel batches
+    job_count=0
     for pkg in $pkgs; do
         safe_pkg=$(echo "$pkg" | tr '/.' '__')
         prof_file="${PROF_DIR}/${safe_pkg}.out"
+        log_file="${PROF_DIR}/${safe_pkg}.log"
+        status_file="${PROF_DIR}/${safe_pkg}.status"
 
-        cgo_val="${CGO_ENABLED:-}"
-        if [ -z "$cgo_val" ]; then
-            if command -v gcc >/dev/null 2>&1 || command -v clang >/dev/null 2>&1; then
-                cgo_val=1
+        (
+            if (cd "$svc" && env -i \
+                ${PATH:+PATH="$PATH"} \
+                ${HOME:+HOME="$HOME"} \
+                ${GOROOT:+GOROOT="$GOROOT"} \
+                ${GOPATH:+GOPATH="$GOPATH"} \
+                ${GOCACHE:+GOCACHE="$GOCACHE"} \
+                ${TMPDIR:+TMPDIR="$TMPDIR"} \
+                ${SystemRoot:+SystemRoot="$SystemRoot"} \
+                ${SYSTEMROOT:+SYSTEMROOT="$SYSTEMROOT"} \
+                ${USERPROFILE:+USERPROFILE="$USERPROFILE"} \
+                ${HOMEDRIVE:+HOMEDRIVE="$HOMEDRIVE"} \
+                ${HOMEPATH:+HOMEPATH="$HOMEPATH"} \
+                ${TMP:+TMP="$TMP"} \
+                ${TEMP:+TEMP="$TEMP"} \
+                ${LOCALAPPDATA:+LOCALAPPDATA="$LOCALAPPDATA"} \
+                ${APPDATA:+APPDATA="$APPDATA"} \
+                ${COMSPEC:+COMSPEC="$COMSPEC"} \
+                ${PATHEXT:+PATHEXT="$PATHEXT"} \
+                MSYS_NO_PATHCONV=1 \
+                LANG="${LANG:-en_US.UTF-8}" \
+                LC_ALL="${LC_ALL:-en_US.UTF-8}" \
+                GIT_TERMINAL_PROMPT=0 \
+                CGO_ENABLED="$cgo_val" \
+                go test -coverprofile="$prof_file" "$pkg" >"$log_file" 2>&1); then
+                echo "PASS" > "$status_file"
             else
-                cgo_val=0
+                echo "FAIL" > "$status_file"
             fi
+        ) &
+
+        job_count=$((job_count + 1))
+        if [ "$job_count" -ge "$PARALLEL_JOBS" ]; then
+            wait
+            job_count=0
+        fi
+    done
+    wait
+
+    # Phase 2: Process results, print logs in order, and record violations
+    for pkg in $pkgs; do
+        safe_pkg=$(echo "$pkg" | tr '/.' '__')
+        prof_file="${PROF_DIR}/${safe_pkg}.out"
+        log_file="${PROF_DIR}/${safe_pkg}.log"
+        status_file="${PROF_DIR}/${safe_pkg}.status"
+
+        if [ -f "$log_file" ]; then
+            cat "$log_file"
         fi
 
-        # Execute go test with isolated coverprofile under clean environment
-        if ! (cd "$svc" && env -i \
-            ${PATH:+PATH="$PATH"} \
-            ${HOME:+HOME="$HOME"} \
-            ${GOROOT:+GOROOT="$GOROOT"} \
-            ${GOPATH:+GOPATH="$GOPATH"} \
-            ${GOCACHE:+GOCACHE="$GOCACHE"} \
-            ${TMPDIR:+TMPDIR="$TMPDIR"} \
-            ${SystemRoot:+SystemRoot="$SystemRoot"} \
-            ${SYSTEMROOT:+SYSTEMROOT="$SYSTEMROOT"} \
-            ${USERPROFILE:+USERPROFILE="$USERPROFILE"} \
-            ${HOMEDRIVE:+HOMEDRIVE="$HOMEDRIVE"} \
-            ${HOMEPATH:+HOMEPATH="$HOMEPATH"} \
-            ${TMP:+TMP="$TMP"} \
-            ${TEMP:+TEMP="$TEMP"} \
-            ${LOCALAPPDATA:+LOCALAPPDATA="$LOCALAPPDATA"} \
-            ${APPDATA:+APPDATA="$APPDATA"} \
-            ${COMSPEC:+COMSPEC="$COMSPEC"} \
-            ${PATHEXT:+PATHEXT="$PATHEXT"} \
-            MSYS_NO_PATHCONV=1 \
-            LANG="${LANG:-en_US.UTF-8}" \
-            LC_ALL="${LC_ALL:-en_US.UTF-8}" \
-            GIT_TERMINAL_PROMPT=0 \
-            CGO_ENABLED="$cgo_val" \
-            go test -coverprofile="$prof_file" "$pkg"); then
+        if [ ! -f "$status_file" ] || [ "$(cat "$status_file" 2>/dev/null)" = "FAIL" ]; then
             record_violation "Package $pkg tests failed during coverage collection"
         fi
 
