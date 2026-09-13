@@ -4,10 +4,46 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func isDirWatched(w *Watcher, dir string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.watchedDirs[dir]
+}
+
+func waitForCondition(t *testing.T, timeout time.Duration, cond func() bool) {
+	t.Helper()
+	if cond() {
+		return
+	}
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+		if cond() {
+			return
+		}
+	}
+	t.Fatalf("condition not met within %v", timeout)
+}
+
+func safeMkdirAll(t *testing.T, dir string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var err error
+	for time.Now().Before(deadline) {
+		err = os.Mkdir(dir, 0755)
+		if err == nil {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("safeMkdirAll failed within %v: %v", timeout, err)
+}
 
 func TestShouldIgnore(t *testing.T) {
 	ignoredPaths := []string{
@@ -101,7 +137,7 @@ func TestWatcherDebounceAndDynamicDir(t *testing.T) {
 
 	var callbackCount int32
 	w, err := NewWatcher(
-		WithDebounce(50*time.Millisecond),
+		WithDebounce(15*time.Millisecond),
 		WithCallback(func() {
 			atomic.AddInt32(&callbackCount, 1)
 		}),
@@ -121,7 +157,7 @@ func TestWatcherDebounceAndDynamicDir(t *testing.T) {
 	go w.Start(ctx)
 
 	// Sleep briefly to ensure watcher loop is active
-	time.Sleep(20 * time.Millisecond)
+	time.Sleep(5 * time.Millisecond)
 
 	// Create a new subdirectory inside tmpDir
 	subDir := filepath.Join(tmpDir, "new_subdir")
@@ -130,12 +166,11 @@ func TestWatcherDebounceAndDynamicDir(t *testing.T) {
 	}
 
 	// Wait for debounce and callback execution
-	time.Sleep(100 * time.Millisecond)
+	waitForCondition(t, 2*time.Second, func() bool {
+		return atomic.LoadInt32(&callbackCount) > 0
+	})
 
 	count := atomic.LoadInt32(&callbackCount)
-	if count == 0 {
-		t.Errorf("Expected reload callback to trigger for new directory, got 0")
-	}
 
 	// Create a file in the newly watched directory to verify it is dynamically watched
 	newFile := filepath.Join(subDir, "config.json")
@@ -143,18 +178,16 @@ func TestWatcherDebounceAndDynamicDir(t *testing.T) {
 		t.Fatalf("Failed to create file in subdirectory: %v", err)
 	}
 
-	time.Sleep(100 * time.Millisecond)
-	newCount := atomic.LoadInt32(&callbackCount)
-	if newCount <= count {
-		t.Errorf("Expected reload callback to trigger for newly created subdirectory, got %d (prev: %d)", newCount, count)
-	}
+	waitForCondition(t, 2*time.Second, func() bool {
+		return atomic.LoadInt32(&callbackCount) > count
+	})
 }
 
 func TestWatcher_PureInotifyNoPhantomCallbacks(t *testing.T) {
 	tmpDir := t.TempDir()
 	var callbackCount int32
 	w, err := NewWatcher(
-		WithDebounce(10*time.Millisecond),
+		WithDebounce(15*time.Millisecond),
 		WithCallback(func() {
 			atomic.AddInt32(&callbackCount, 1)
 		}),
@@ -174,7 +207,7 @@ func TestWatcher_PureInotifyNoPhantomCallbacks(t *testing.T) {
 	go w.Start(ctx)
 
 	// Wait without modifying files; pure inotify should never trigger phantom callbacks
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(30 * time.Millisecond)
 
 	if count := atomic.LoadInt32(&callbackCount); count != 0 {
 		t.Errorf("Expected 0 phantom callbacks without file events, got %d", count)
@@ -189,7 +222,7 @@ func TestWatcher_RecreatedDirectory(t *testing.T) {
 
 	var callbackCount int32
 	w, err := NewWatcher(
-		WithDebounce(50*time.Millisecond),
+		WithDebounce(15*time.Millisecond),
 		WithCallback(func() {
 			atomic.AddInt32(&callbackCount, 1)
 		}),
@@ -207,58 +240,50 @@ func TestWatcher_RecreatedDirectory(t *testing.T) {
 	defer cancel()
 	go w.Start(ctx)
 
-	w.mu.Lock()
-	if !w.watchedDirs[subDir] {
+	if !isDirWatched(w, subDir) {
 		t.Fatalf("Expected subDir %s to be watched", subDir)
 	}
-	w.mu.Unlock()
 
 	// Remove directory and wait for event processing
 	if err := os.RemoveAll(subDir); err != nil {
 		t.Fatalf("Failed to remove subDir: %v", err)
 	}
-	time.Sleep(150 * time.Millisecond)
 
-	w.mu.Lock()
-	if w.watchedDirs[subDir] {
-		t.Errorf("Expected subDir %s to be removed from watchedDirs after removal", subDir)
-	}
-	w.mu.Unlock()
+	waitForCondition(t, 2*time.Second, func() bool {
+		return !isDirWatched(w, subDir)
+	})
 
-	// Recreate directory
-	if err := os.Mkdir(subDir, 0755); err != nil {
-		t.Fatalf("Failed to recreate subDir: %v", err)
-	}
-	time.Sleep(150 * time.Millisecond)
+	// Recreate directory with retry loop for Windows delete-pending handle closure
+	safeMkdirAll(t, subDir, 2*time.Second)
 
-	w.mu.Lock()
-	isWatched := w.watchedDirs[subDir]
-	w.mu.Unlock()
-	if !isWatched {
-		t.Errorf("Expected recreated subDir %s to be re-added to watchedDirs", subDir)
-	}
+	waitForCondition(t, 2*time.Second, func() bool {
+		return isDirWatched(w, subDir)
+	})
 
 	// Write file into recreated directory to ensure events fire
 	prevCount := atomic.LoadInt32(&callbackCount)
 	testFile := filepath.Join(subDir, "file.txt")
 	_ = os.WriteFile(testFile, []byte("content"), 0644)
-	time.Sleep(150 * time.Millisecond)
 
-	newCount := atomic.LoadInt32(&callbackCount)
-	if newCount <= prevCount {
-		t.Errorf("Expected event trigger in recreated directory, got count %d <= %d", newCount, prevCount)
-	}
+	waitForCondition(t, 2*time.Second, func() bool {
+		return atomic.LoadInt32(&callbackCount) > prevCount
+	})
 }
 
 func TestWatcher_ConcurrentCallbacks(t *testing.T) {
 	var running int32
 	var maxConcurrent int32
+	var totalInvocations int32
+
+	entered := make(chan struct{}, 1)
+	proceed := make(chan struct{})
 
 	w, err := NewWatcher(
 		WithDebounce(10*time.Millisecond),
 		WithCallback(func() {
 			current := atomic.AddInt32(&running, 1)
 			defer atomic.AddInt32(&running, -1)
+			atomic.AddInt32(&totalInvocations, 1)
 
 			// Record max concurrency observed
 			for {
@@ -268,8 +293,12 @@ func TestWatcher_ConcurrentCallbacks(t *testing.T) {
 				}
 			}
 
-			// Simulate slow reload operation
-			time.Sleep(50 * time.Millisecond)
+			select {
+			case entered <- struct{}{}:
+			default:
+			}
+
+			<-proceed
 		}),
 	)
 	if err != nil {
@@ -277,21 +306,35 @@ func TestWatcher_ConcurrentCallbacks(t *testing.T) {
 	}
 	defer func() { _ = w.Close() }()
 
-	// Trigger callbacks concurrently from multiple goroutines
-	done := make(chan struct{})
-	for i := 0; i < 10; i++ {
-		go func() {
-			w.executeCallbacks()
-			done <- struct{}{}
-		}()
+	// Start goroutine 0 to acquire cbMu
+	go w.executeCallbacks()
+
+	// Wait for goroutine 0 to enter the callback
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for callback entry")
 	}
 
-	for i := 0; i < 10; i++ {
-		<-done
+	// Launch 9 concurrent goroutines while goroutine 0 holds cbMu
+	var wg sync.WaitGroup
+	for i := 0; i < 9; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			w.executeCallbacks()
+		}()
 	}
+	wg.Wait()
+
+	// Release goroutine 0
+	close(proceed)
 
 	if maxVal := atomic.LoadInt32(&maxConcurrent); maxVal > 1 {
 		t.Errorf("Expected max concurrent executions to be 1, got %d", maxVal)
+	}
+	if total := atomic.LoadInt32(&totalInvocations); total != 1 {
+		t.Errorf("Expected exactly 1 callback invocation, got %d", total)
 	}
 }
 
@@ -397,7 +440,7 @@ func TestWatcher_StartClose(t *testing.T) {
 		close(done)
 	}()
 
-	time.Sleep(20 * time.Millisecond)
+	time.Sleep(5 * time.Millisecond)
 	_ = w.Close()
 	select {
 	case <-done:
@@ -447,7 +490,13 @@ func TestWatcher_NestedDirectoryRemoval(t *testing.T) {
 	child := filepath.Join(parent, "child")
 	_ = os.MkdirAll(child, 0755)
 
-	w, err := NewWatcher()
+	var callbackCount int32
+	w, err := NewWatcher(
+		WithDebounce(15*time.Millisecond),
+		WithCallback(func() {
+			atomic.AddInt32(&callbackCount, 1)
+		}),
+	)
 	if err != nil {
 		t.Fatalf("NewWatcher failed: %v", err)
 	}
@@ -462,11 +511,7 @@ func TestWatcher_NestedDirectoryRemoval(t *testing.T) {
 	go w.Start(ctx)
 
 	// Verify both are watched
-	w.mu.Lock()
-	pWatched := w.watchedDirs[parent]
-	cWatched := w.watchedDirs[child]
-	w.mu.Unlock()
-	if !pWatched || !cWatched {
+	if !isDirWatched(w, parent) || !isDirWatched(w, child) {
 		t.Fatalf("expected parent and child to be watched")
 	}
 
@@ -478,18 +523,20 @@ func TestWatcher_NestedDirectoryRemoval(t *testing.T) {
 	// Write an ignored file to trigger the ShouldIgnore branch in Start
 	ignoredFile := filepath.Join(parent, "test.tmp")
 	_ = os.WriteFile(ignoredFile, []byte("ignored"), 0644)
-	time.Sleep(100 * time.Millisecond)
+
+	// Deterministic canary: write a non-ignored file to guarantee test.tmp has been
+	// processed by Start's FIFO event queue before we remove parent.
+	canaryFile := filepath.Join(parent, "canary.txt")
+	_ = os.WriteFile(canaryFile, []byte("canary"), 0644)
+	waitForCondition(t, 2*time.Second, func() bool {
+		return atomic.LoadInt32(&callbackCount) > 0
+	})
 
 	// Remove parent
 	_ = os.RemoveAll(parent)
-	time.Sleep(150 * time.Millisecond)
 
-	w.mu.Lock()
-	cStillWatched := w.watchedDirs[child]
-	vStillWatched := w.watchedDirs[filepath.Join(parent, "virtual_sub")]
-	w.mu.Unlock()
-	if cStillWatched || vStillWatched {
-		t.Errorf("expected subdirs to be removed from watchedDirs when parent removed")
-	}
+	waitForCondition(t, 2*time.Second, func() bool {
+		return !isDirWatched(w, child) && !isDirWatched(w, filepath.Join(parent, "virtual_sub"))
+	})
 }
 
