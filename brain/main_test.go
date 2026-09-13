@@ -1783,6 +1783,8 @@ func TestInitializeBrainEnvironment_Errors(t *testing.T) {
 }
 
 func TestRunBrainApp_EarlyReturns(t *testing.T) {
+	tmpDir := t.TempDir()
+
 	// 1. nil config
 	if err := RunBrainApp(context.Background(), nil); err == nil {
 		t.Errorf("expected error for nil config")
@@ -1791,25 +1793,28 @@ func TestRunBrainApp_EarlyReturns(t *testing.T) {
 	// 2. Cancelled context
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	cfg, _ := config.LoadConfigFromPaths()
+	cfg := config.NewTestConfig(func(d *config.ConfigData) {
+		d.GeminiHomeDir = tmpDir
+		d.DataDir = filepath.Join(tmpDir, "data")
+	})
 	if err := RunBrainApp(ctx, cfg); err != nil {
 		t.Errorf("expected nil for cancelled context, got %v", err)
 	}
 
-	// 3. Missing DatabaseURL with empty GeminiHomeDir and DataDir
+	// 3. Missing DatabaseURL
 	ctxLive := context.Background()
-	cfg2, _ := config.LoadConfigFromPaths()
-	cur2 := cfg2.Current()
-	cur2.GeminiHomeDir = ""
-	cur2.DataDir = ""
-	cur2.DatabaseURL = ""
-	cfg2.Update(cur2)
+	cfg2 := config.NewTestConfig(func(d *config.ConfigData) {
+		d.GeminiHomeDir = tmpDir
+		d.DataDir = filepath.Join(tmpDir, "data")
+		d.DatabaseURL = ""
+	})
 	errMissingDB := RunBrainApp(ctxLive, cfg2)
 	if errMissingDB == nil || !strings.Contains(errMissingDB.Error(), "database URL or path is required") {
 		t.Errorf("expected database URL error, got %v", errMissingDB)
 	}
 
 	// 4. Invalid DatabaseURL
+	cur2 := cfg2.Current()
 	cur2.DatabaseURL = "invalid-protocol://host:port/dbname"
 	cfg2.Update(cur2)
 	errBadDB := RunBrainApp(ctxLive, cfg2)
