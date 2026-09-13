@@ -1065,6 +1065,41 @@ func TestDaemonLifecycleAndHTTP(t *testing.T) {
 	respSyncErr.Body.Close()
 	daemon.triggerFn = nil
 
+	// 5c. /reconcile endpoint method validation
+	respBadReconcile, _ := http.Get(srv.URL + "/reconcile")
+	if respBadReconcile.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405 on GET /reconcile, got %d", respBadReconcile.StatusCode)
+	}
+	respBadReconcile.Body.Close()
+
+	// 5d. POST /reconcile async success
+	respReconcile, err := http.Post(srv.URL+"/reconcile", "application/json", nil)
+	if err != nil || respReconcile.StatusCode != http.StatusAccepted {
+		t.Fatalf("POST /reconcile failed: %v, status=%d", err, respReconcile.StatusCode)
+	}
+	respReconcile.Body.Close()
+
+	// 5e. POST /reconcile?sync=true success
+	daemon.reconcileFn = func(ctx context.Context) error {
+		return nil
+	}
+	respReconcileSync, err := http.Post(srv.URL+"/reconcile?sync=true", "application/json", nil)
+	if err != nil || respReconcileSync.StatusCode != http.StatusOK {
+		t.Fatalf("POST /reconcile?sync=true failed: %v, status=%d", err, respReconcileSync.StatusCode)
+	}
+	respReconcileSync.Body.Close()
+
+	// 5f. POST /reconcile?sync=true error
+	daemon.reconcileFn = func(ctx context.Context) error {
+		return errors.New("mock reconcile compose failure")
+	}
+	respReconcileErr, err := http.Post(srv.URL+"/reconcile?sync=true", "application/json", nil)
+	if err != nil || respReconcileErr.StatusCode != http.StatusInternalServerError {
+		t.Errorf("expected 500 on POST /reconcile?sync=true error, got %v (status=%d)", err, respReconcileErr.StatusCode)
+	}
+	respReconcileErr.Body.Close()
+	daemon.reconcileFn = nil
+
 	// 6. Test RunDaemon graceful cancel
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -2127,6 +2162,105 @@ func TestSetupMux_Extended(t *testing.T) {
 	handlerErr.ServeHTTP(recSyncErr, reqSyncPost)
 	if recSyncErr.Code != http.StatusInternalServerError {
 		t.Errorf("expected 500 from failing /sync, got %d", recSyncErr.Code)
+	}
+
+	// 4. /reconcile method not allowed
+	reqRecGet := httptest.NewRequest(http.MethodGet, "/reconcile", nil)
+	recRecGet := httptest.NewRecorder()
+	handler.ServeHTTP(recRecGet, reqRecGet)
+	if recRecGet.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405 from GET /reconcile, got %d", recRecGet.Code)
+	}
+
+	// 5. /reconcile POST async success
+	reqRecPost := httptest.NewRequest(http.MethodPost, "/reconcile", nil)
+	recRecPost := httptest.NewRecorder()
+	handler.ServeHTTP(recRecPost, reqRecPost)
+	if recRecPost.Code != http.StatusAccepted {
+		t.Errorf("expected 202 from POST /reconcile, got %d", recRecPost.Code)
+	}
+
+	// 6. /reconcile POST sync success (query param)
+	dSync := NewDaemon(DaemonConfig{})
+	dSync.reconcileFn = func(ctx context.Context) error { return nil }
+	handlerSync := SetupMux(dSync)
+	reqRecSync := httptest.NewRequest(http.MethodPost, "/reconcile?sync=true", nil)
+	recRecSync := httptest.NewRecorder()
+	handlerSync.ServeHTTP(recRecSync, reqRecSync)
+	if recRecSync.Code != http.StatusOK {
+		t.Errorf("expected 200 from POST /reconcile?sync=true, got %d", recRecSync.Code)
+	}
+
+	// 7. /reconcile POST sync error (query param)
+	dSyncErr := NewDaemon(DaemonConfig{})
+	dSyncErr.reconcileFn = func(ctx context.Context) error { return errors.New("compose fail") }
+	handlerSyncErr := SetupMux(dSyncErr)
+	recRecSyncErr := httptest.NewRecorder()
+	handlerSyncErr.ServeHTTP(recRecSyncErr, reqRecSync)
+	if recRecSyncErr.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 from failing /reconcile?sync=true, got %d", recRecSyncErr.Code)
+	}
+
+	// 8. /reconcile POST sync with JSON body {"sync": true}
+	reqRecJSONSync := httptest.NewRequest(http.MethodPost, "/reconcile", strings.NewReader(`{"sync": true}`))
+	reqRecJSONSync.Header.Set("Content-Type", "application/json")
+	recRecJSONSync := httptest.NewRecorder()
+	handlerSync.ServeHTTP(recRecJSONSync, reqRecJSONSync)
+	if recRecJSONSync.Code != http.StatusOK {
+		t.Errorf("expected 200 from POST /reconcile JSON sync=true, got %d", recRecJSONSync.Code)
+	}
+
+	// 9. /reconcile POST async with JSON body {"sync": false}
+	reqRecJSONAsync := httptest.NewRequest(http.MethodPost, "/reconcile", strings.NewReader(`{"sync": false}`))
+	reqRecJSONAsync.Header.Set("Content-Type", "application/json")
+	recRecJSONAsync := httptest.NewRecorder()
+	handlerSync.ServeHTTP(recRecJSONAsync, reqRecJSONAsync)
+	if recRecJSONAsync.Code != http.StatusAccepted {
+		t.Errorf("expected 202 from POST /reconcile JSON sync=false, got %d", recRecJSONAsync.Code)
+	}
+}
+
+func TestTriggerReconcile_TableDriven(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. Sync execution calls ReconcileCompose
+	calledSync := false
+	d := &SyncDaemon{
+		reconcileFn: func(ctx context.Context) error {
+			calledSync = true
+			return nil
+		},
+	}
+	if err := d.TriggerReconcile(ctx, false); err != nil || !calledSync {
+		t.Fatalf("expected TriggerReconcile(false) to execute reconcileFn, err=%v", err)
+	}
+
+	// 2. Async execution queues into reconcileCh
+	dAsync := &SyncDaemon{
+		reconcileCh: make(chan struct{}, 1),
+	}
+	if err := dAsync.TriggerReconcile(ctx, true); err != nil {
+		t.Fatalf("expected TriggerReconcile(true) to succeed, err=%v", err)
+	}
+	select {
+	case <-dAsync.reconcileCh:
+	default:
+		t.Errorf("expected message in reconcileCh")
+	}
+
+	// 3. Async execution when channel is already full (default branch)
+	dAsync.reconcileCh <- struct{}{}
+	if err := dAsync.TriggerReconcile(ctx, true); err != nil {
+		t.Fatalf("expected TriggerReconcile(true) with full channel to succeed, err=%v", err)
+	}
+
+	// 4. Async execution when reconcileCh is nil (lazy initialization branch)
+	dNil := &SyncDaemon{}
+	if err := dNil.TriggerReconcile(ctx, true); err != nil {
+		t.Fatalf("expected TriggerReconcile(true) with nil channel to succeed, err=%v", err)
+	}
+	if dNil.reconcileCh == nil {
+		t.Errorf("expected reconcileCh to be initialized")
 	}
 }
 

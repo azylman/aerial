@@ -29,7 +29,7 @@ Aerial runs as a multi-container Docker stack supervised by Watchtower and Autoh
 - **Infrastructure, GitOps & Synchronization (`aerial-gitsync`)**:
   - Dedicated sidecar container holding read-write (`:rw`) volume mounts on `/share/aerial-config` and `/share/aerial`.
   - Performs singleflight periodic and webhook-triggered (`POST /sync`) Git synchronization with credential scrubbing and POSIX base64 tokens.
-  - Automated Declarative GitOps Docker Compose Reconciler: pre-flight validates and executes `docker compose up -d` upon git sync or webhook trigger, keeping container topologies declaratively aligned.
+  - Automated Declarative GitOps Docker Compose Reconciler: pre-flight validates and executes `docker compose up -d` upon git sync, webhook trigger (`POST /sync`), or dedicated on-demand API trigger (`POST /reconcile`), keeping container topologies declaratively aligned with automated orphan cleanup.
   - Exposes Prometheus metrics on internal port `8080/metrics`.
   - Fast-forward pulls with safe reset recovery to `FETCH_HEAD`, keeping running code cleanly decoupled from the execution engine.
 
