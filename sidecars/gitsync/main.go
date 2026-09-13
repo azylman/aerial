@@ -223,6 +223,7 @@ type SyncDaemon struct {
 	lastSyncTimes map[string]time.Time
 	statusMu      sync.RWMutex
 	triggerFn     func() ([]RepoSyncResult, error)
+	reconcileFn   func(ctx context.Context) error
 
 	brainInternalURL string
 	extraSecrets     []string
@@ -803,6 +804,10 @@ func (d *SyncDaemon) executeRollback(ctx context.Context, pending []ComposeChang
 
 // ReconcileCompose executes docker compose up -d with timeout, metrics observation, and output sanitization.
 func (d *SyncDaemon) ReconcileCompose(parentCtx context.Context) (err error) {
+	if d.reconcileFn != nil {
+		return d.reconcileFn(parentCtx)
+	}
+
 	d.composeMu.Lock()
 	defer d.composeMu.Unlock()
 
@@ -867,6 +872,27 @@ func (d *SyncDaemon) ReconcileCompose(parentCtx context.Context) (err error) {
 	}
 	log.Printf("[GitSync:GitOps] Docker Compose reconciliation successfully applied.")
 	d.lastReconcile = time.Now()
+	return nil
+}
+
+// TriggerReconcile requests Docker Compose reconciliation. If async is true, it queues
+// reconciliation onto the debounced worker channel. If async is false, it executes
+// ReconcileCompose synchronously.
+func (d *SyncDaemon) TriggerReconcile(ctx context.Context, async bool) error {
+	if !async {
+		return d.ReconcileCompose(ctx)
+	}
+	d.mu.Lock()
+	if d.reconcileCh == nil {
+		d.reconcileCh = make(chan struct{}, 1)
+	}
+	ch := d.reconcileCh
+	d.mu.Unlock()
+
+	select {
+	case ch <- struct{}{}:
+	default:
+	}
 	return nil
 }
 
@@ -1400,6 +1426,49 @@ func SetupMux(daemon *SyncDaemon) http.Handler {
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":  "synced",
 			"results": results,
+		})
+	})
+
+	mux.HandleFunc("/reconcile", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
+			return
+		}
+
+		isSync := r.URL.Query().Get("sync") == "true"
+		if !isSync && r.Header.Get("Content-Type") == "application/json" && r.Body != nil {
+			var bodyReq struct {
+				Sync *bool `json:"sync"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&bodyReq); err == nil && bodyReq.Sync != nil {
+				isSync = *bodyReq.Sync
+			}
+		}
+
+		if isSync {
+			if err := daemon.TriggerReconcile(r.Context(), false); err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+				return
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"status":  "reconciled",
+				"applied": true,
+			})
+			return
+		}
+
+		_ = daemon.TriggerReconcile(r.Context(), true)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":           "queued",
+			"message":          "Docker Compose reconciliation scheduled",
+			"debounce_seconds": int(reconcilerDebounceDuration.Seconds()),
 		})
 	})
 
