@@ -516,7 +516,7 @@ func TestMergeClusterDeployments_RollingSwap(t *testing.T) {
 			State:   "running",
 			Created: now.Add(-30 * time.Second).Unix(),
 			Labels:  map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain", "org.opencontainers.image.revision": "abc9999999"},
-			Health:  &struct {
+			Health: &struct {
 				Status string `json:"Status"`
 			}{Status: "starting"},
 		},
@@ -555,7 +555,7 @@ func TestMergeClusterDeployments_SyncedGrace(t *testing.T) {
 			State:   "running",
 			Created: now.Add(-3 * time.Minute).Unix(),
 			Labels:  map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"},
-			Health:  &struct {
+			Health: &struct {
 				Status string `json:"Status"`
 			}{Status: "healthy"},
 		},
@@ -565,7 +565,7 @@ func TestMergeClusterDeployments_SyncedGrace(t *testing.T) {
 			State:   "running",
 			Created: now.Add(-3 * time.Minute).Unix(),
 			Labels:  map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "dashboard"},
-			Health:  &struct {
+			Health: &struct {
 				Status string `json:"Status"`
 			}{Status: "healthy"},
 		},
@@ -599,7 +599,7 @@ func TestMergeClusterDeployments_DegradedState(t *testing.T) {
 			State:   "running",
 			Created: now.Add(-2 * time.Minute).Unix(),
 			Labels:  map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"},
-			Health:  &struct {
+			Health: &struct {
 				Status string `json:"Status"`
 			}{Status: "unhealthy"},
 		},
@@ -609,7 +609,7 @@ func TestMergeClusterDeployments_DegradedState(t *testing.T) {
 			State:   "running",
 			Created: now.Add(-2 * time.Minute).Unix(),
 			Labels:  map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "dashboard"},
-			Health:  &struct {
+			Health: &struct {
 				Status string `json:"Status"`
 			}{Status: "healthy"},
 		},
@@ -639,7 +639,7 @@ func TestMergeClusterDeployments_Idle(t *testing.T) {
 			State:   "running",
 			Created: now.Add(-2 * time.Hour).Unix(),
 			Labels:  map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"},
-			Health:  &struct {
+			Health: &struct {
 				Status string `json:"Status"`
 			}{Status: "healthy"},
 		},
@@ -733,10 +733,10 @@ func TestParseMatrixJobChips_LintAndTests(t *testing.T) {
 			CompletedAt: time.Now().Add(-5 * time.Second),
 		},
 		{
-			ID:          202,
-			Name:        "Lint Go Microservices",
-			Status:      "in_progress",
-			StartedAt:   time.Now().Add(-10 * time.Second),
+			ID:        202,
+			Name:      "Lint Go Microservices",
+			Status:    "in_progress",
+			StartedAt: time.Now().Add(-10 * time.Second),
 		},
 	}
 
@@ -751,7 +751,6 @@ func TestParseMatrixJobChips_LintAndTests(t *testing.T) {
 		t.Errorf("unexpected chip 1: %+v", chips[1])
 	}
 }
-
 
 func TestSchedulesHandler_Success(t *testing.T) {
 	mockBrain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1237,8 +1236,8 @@ func TestGetContainerCommit_IgnoreAuxiliarySidecars(t *testing.T) {
 			Names: []string{"/aerial-agentsview"},
 			Image: "ghcr.io/azylman/agentsview:latest",
 			Labels: map[string]string{
-				"com.docker.compose.project": "aerial",
-				"com.docker.compose.service": "agentsview",
+				"com.docker.compose.project":        "aerial",
+				"com.docker.compose.service":        "agentsview",
 				"org.opencontainers.image.revision": "080b49fb7a7c1d8f206549e8ee4eaf9cf50a5c20",
 			},
 		},
@@ -1247,8 +1246,8 @@ func TestGetContainerCommit_IgnoreAuxiliarySidecars(t *testing.T) {
 			Names: []string{"/aerial-watchtower"},
 			Image: "containrrr/watchtower:latest",
 			Labels: map[string]string{
-				"com.docker.compose.project": "aerial",
-				"com.docker.compose.service": "watchtower",
+				"com.docker.compose.project":        "aerial",
+				"com.docker.compose.service":        "watchtower",
 				"org.opencontainers.image.revision": "ace93994711edfe47036e2d2ee5f5d531df013ed",
 			},
 		},
@@ -1257,8 +1256,8 @@ func TestGetContainerCommit_IgnoreAuxiliarySidecars(t *testing.T) {
 			Names: []string{"/aerial-autoheal"},
 			Image: "willfarrell/autoheal:latest",
 			Labels: map[string]string{
-				"com.docker.compose.project": "aerial",
-				"com.docker.compose.service": "autoheal",
+				"com.docker.compose.project":        "aerial",
+				"com.docker.compose.service":        "autoheal",
 				"org.opencontainers.image.revision": "autohealsha1234",
 			},
 		},
@@ -1362,7 +1361,7 @@ func TestMergeClusterDeployments_CommitTimeAcrossAllStages(t *testing.T) {
 			State:   "running",
 			Created: now.Add(-30 * time.Second).Unix(),
 			Labels:  map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"},
-			Health:  &struct {
+			Health: &struct {
 				Status string `json:"Status"`
 			}{Status: "starting"},
 		},
@@ -2623,9 +2622,47 @@ func TestFactsHandler_Extended(t *testing.T) {
 	}
 
 	// 3. Search query truncated > 64 runes
+	origClient := brainHTTPClient
+	defer func() { brainHTTPClient = origClient }()
+
+	var capturedReq *http.Request
+	brainHTTPClient = &http.Client{
+		Transport: &roundTripperFunc{
+			fn: func(req *http.Request) (*http.Response, error) {
+				capturedReq = req
+				resp := `{"status":"ok","total":0,"limit":10,"offset":5,"facts":[]}`
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(resp)),
+					Header:     make(http.Header),
+				}, nil
+			},
+		},
+	}
+
 	reqSearch := httptest.NewRequest(http.MethodGet, "/api/facts?q="+strings.Repeat("a", 100)+"&limit=10&offset=5&category=user", nil)
 	rrSearch := httptest.NewRecorder()
 	h.ServeHTTP(rrSearch, reqSearch)
+
+	if rrSearch.Code != http.StatusOK {
+		t.Errorf("expected 200 OK from mocked factsHandler, got %d", rrSearch.Code)
+	}
+	if capturedReq == nil {
+		t.Fatal("expected capturedReq to not be nil")
+	}
+	gotQ := capturedReq.URL.Query().Get("q")
+	if gotQ != strings.Repeat("a", 64) {
+		t.Errorf("expected q truncated to 64 runes, got len %d: %q", len(gotQ), gotQ)
+	}
+	if capturedReq.URL.Query().Get("limit") != "10" {
+		t.Errorf("expected limit=10, got %q", capturedReq.URL.Query().Get("limit"))
+	}
+	if capturedReq.URL.Query().Get("offset") != "5" {
+		t.Errorf("expected offset=5, got %q", capturedReq.URL.Query().Get("offset"))
+	}
+	if capturedReq.URL.Query().Get("category") != "user" {
+		t.Errorf("expected category=user, got %q", capturedReq.URL.Query().Get("category"))
+	}
 }
 
 func TestSchedulesHandlers_Extended(t *testing.T) {
@@ -2839,5 +2876,3 @@ func TestGitHubPoller_CoverageBoost(t *testing.T) {
 
 	p2.fetchJobsForRun(ctx, 100)
 }
-
-

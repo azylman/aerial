@@ -12,10 +12,8 @@ import (
 	"io"
 	"io/fs"
 	"log"
-	"mime"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -33,43 +31,6 @@ import (
 var content embed.FS
 
 var startTime = time.Now().UTC()
-
-var sensitiveKeys = []string{
-	"GEMINI_API_KEY",
-	"DISCORD_TOKEN",
-	"DISCORD_BOT_TOKEN",
-	"GITHUB_PAT",
-	"GITHUB_PERSONAL_ACCESS_TOKEN",
-	"HA_TOKEN",
-	"SECRET",
-	"PASSWORD",
-	"TOKEN",
-	"KEY",
-}
-
-func SanitizeEnvVars(envVars []string) []string {
-	var cleaned []string
-	for _, env := range envVars {
-		parts := strings.SplitN(env, "=", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		key := strings.ToUpper(parts[0])
-		isSensitive := false
-		for _, sensitive := range sensitiveKeys {
-			if strings.Contains(key, sensitive) {
-				isSensitive = true
-				break
-			}
-		}
-		if isSensitive {
-			cleaned = append(cleaned, fmt.Sprintf("%s=[REDACTED]", parts[0]))
-		} else {
-			cleaned = append(cleaned, env)
-		}
-	}
-	return cleaned
-}
 
 type ServiceStatus struct {
 	Name          string    `json:"name"`
@@ -178,10 +139,10 @@ type ClusterResponse struct {
 }
 
 type GitHubRun struct {
-	ID         int64     `json:"id"`
-	Name       string    `json:"name"`
-	HeadSHA    string    `json:"head_sha"`
-	HeadBranch string    `json:"head_branch"`
+	ID         int64  `json:"id"`
+	Name       string `json:"name"`
+	HeadSHA    string `json:"head_sha"`
+	HeadBranch string `json:"head_branch"`
 	HeadCommit *struct {
 		Message   string    `json:"message"`
 		Timestamp time.Time `json:"timestamp"`
@@ -321,7 +282,6 @@ type ScheduleRunsAPIResponse struct {
 	Runs   []ScheduleRun `json:"runs"`
 	Error  string        `json:"error,omitempty"`
 }
-
 
 // Singleton tuned HTTP client for upstream brain communication
 var brainHTTPClient = &http.Client{
@@ -630,208 +590,6 @@ func (p *GitHubPoller) GetSnapshot() ([]GitHubRun, map[int64][]GitHubJob) {
 		jobs[k] = jobsCopy
 	}
 	return runs, jobs
-}
-
-func extractServiceNameFromJobName(jobName string) string {
-	lower := strings.ToLower(jobName)
-	services := []string{
-		"brain",
-		"dashboard",
-		"proxy",
-		"scheduler-mcp",
-		"discord-mcp",
-		"docker-mcp",
-		"github-mcp",
-		"ollama",
-		"agentsview",
-	}
-	for _, s := range services {
-		if strings.Contains(lower, s) {
-			return s
-		}
-	}
-	if strings.Contains(lower, "unit test") || strings.Contains(lower, "test") {
-		return "unit-tests"
-	}
-	if strings.Contains(lower, "lint") {
-		return "lint"
-	}
-	return ""
-}
-
-func parseMatrixJobChips(jobs []GitHubJob) []MatrixJobChip {
-	var chips []MatrixJobChip
-	seen := make(map[string]bool)
-
-	for _, j := range jobs {
-		svc := extractServiceNameFromJobName(j.Name)
-		if svc == "" || seen[svc] {
-			continue
-		}
-		seen[svc] = true
-
-		chipStatus := "pending"
-		if j.Status == "in_progress" {
-			chipStatus = "active"
-		} else if j.Status == "completed" {
-			if j.Conclusion == "success" {
-				chipStatus = "completed"
-			} else if j.Conclusion == "failure" {
-				chipStatus = "failed"
-			} else {
-				chipStatus = "pending"
-			}
-		}
-
-		var durStr string
-		if !j.StartedAt.IsZero() {
-			end := j.CompletedAt
-			if end.IsZero() {
-				end = time.Now().UTC()
-			}
-			sec := int(end.Sub(j.StartedAt).Seconds())
-			if sec > 0 {
-				durStr = fmt.Sprintf("%ds", sec)
-			}
-		}
-
-		chips = append(chips, MatrixJobChip{
-			Name:       svc,
-			Status:     chipStatus,
-			Conclusion: j.Conclusion,
-			Duration:   durStr,
-		})
-	}
-	return chips
-}
-
-var ignoredContainerServices = map[string]bool{
-	"agentsview": true,
-	"watchtower": true,
-	"autoheal":   true,
-	"ollama":     true,
-}
-
-func isCoreAerialContainer(c DockerContainerJSON) bool {
-	svcName := ""
-	if c.Labels != nil {
-		svcName = c.Labels["com.docker.compose.service"]
-	}
-	if svcName == "" && len(c.Names) > 0 {
-		name := strings.TrimPrefix(c.Names[0], "/")
-		svcName = strings.TrimPrefix(name, "aerial-")
-	}
-	svcName = strings.ToLower(svcName)
-	if ignoredContainerServices[svcName] {
-		return false
-	}
-
-	img := strings.ToLower(c.Image)
-	if strings.Contains(img, "watchtower") ||
-		strings.Contains(img, "autoheal") ||
-		strings.Contains(img, "ollama") ||
-		strings.Contains(img, "agentsview") {
-		return false
-	}
-
-	if c.Labels != nil {
-		if src, ok := c.Labels["org.opencontainers.image.source"]; ok && src != "" {
-			if !strings.Contains(strings.ToLower(src), "azylman/aerial") {
-				return false
-			}
-		}
-	}
-
-	return true
-}
-
-func getContainerCommit(containers []DockerContainerJSON) string {
-	for _, c := range containers {
-		if !isCoreAerialContainer(c) || c.Labels == nil {
-			continue
-		}
-		if rev, ok := c.Labels["org.opencontainers.image.revision"]; ok && rev != "" {
-			if len(rev) > 7 {
-				return rev[:7]
-			}
-			return rev
-		}
-		if rev, ok := c.Labels["aerial.commit_sha"]; ok && rev != "" {
-			if len(rev) > 7 {
-				return rev[:7]
-			}
-			return rev
-		}
-		if rev, ok := c.Labels["vcs-ref"]; ok && rev != "" {
-			if len(rev) > 7 {
-				return rev[:7]
-			}
-			return rev
-		}
-	}
-	return ""
-}
-
-func formatUptimeString(sec int) string {
-	if sec < 60 {
-		return fmt.Sprintf("%ds", sec)
-	}
-	if sec < 3600 {
-		return fmt.Sprintf("%dm", sec/60)
-	}
-	return fmt.Sprintf("%dh", sec/3600)
-}
-
-func buildContainerChips(rawContainers []DockerContainerJSON) []MatrixJobChip {
-	var chips []MatrixJobChip
-	now := time.Now().UTC()
-	seen := make(map[string]bool)
-
-	for _, c := range rawContainers {
-		isAerial := false
-		var svcName string
-
-		if proj, ok := c.Labels["com.docker.compose.project"]; ok && proj == "aerial" {
-			isAerial = true
-			svcName = c.Labels["com.docker.compose.service"]
-		} else if len(c.Names) > 0 {
-			name := strings.TrimPrefix(c.Names[0], "/")
-			if strings.HasPrefix(name, "aerial-") {
-				isAerial = true
-				svcName = strings.TrimPrefix(name, "aerial-")
-			}
-		}
-
-		if !isAerial || svcName == "" || seen[svcName] {
-			continue
-		}
-		seen[svcName] = true
-
-		status := "completed"
-		conclusion := "success"
-		if c.Health != nil && c.Health.Status == "starting" {
-			status = "active"
-			conclusion = ""
-		} else if c.State != "running" || (c.Health != nil && c.Health.Status == "unhealthy") {
-			status = "failed"
-			conclusion = "failure"
-		}
-
-		createdAt := time.Unix(c.Created, 0).UTC()
-		durSec := int(now.Sub(createdAt).Seconds())
-		if durSec < 0 {
-			durSec = 0
-		}
-		durStr := formatUptimeString(durSec)
-
-		chips = append(chips, MatrixJobChip{
-			Name:       svcName,
-			Status:     status,
-			Conclusion: conclusion,
-			Duration:   durStr,
-		})
-	}
-	return chips
 }
 
 func mergeClusterDeployments(
@@ -1452,13 +1210,7 @@ func statusHandler(brainURL, gitsyncURL, configPath, gitCommit string) http.Hand
 			}
 		}
 
-		clusterStatus := "healthy"
-		for _, s := range services {
-			if s.Status == "unhealthy" {
-				clusterStatus = "degraded"
-				break
-			}
-		}
+		clusterStatus := CalculateClusterStatus(services)
 
 		resp := ClusterResponse{
 			SystemTime:       now,
@@ -1483,47 +1235,16 @@ func factsHandler(brainBaseURL string) http.HandlerFunc {
 			return
 		}
 
-		inQuery := r.URL.Query()
-		targetURL, err := url.Parse(brainBaseURL + "/facts")
+		targetURL, limit, offset, err := BuildFactsUpstreamURL(brainBaseURL, r.URL.Query())
 		if err != nil {
 			http.Error(w, `{"error":"Invalid upstream URL configuration"}`, http.StatusInternalServerError)
 			return
 		}
 
-		outQuery := targetURL.Query()
-		limit := 0
-		if lStr := inQuery.Get("limit"); lStr != "" {
-			if n, err := strconv.Atoi(lStr); err == nil && n > 0 {
-				limit = n
-				outQuery.Set("limit", strconv.Itoa(limit))
-			}
-		}
-
-		offset := 0
-		if oStr := inQuery.Get("offset"); oStr != "" {
-			if n, err := strconv.Atoi(oStr); err == nil && n >= 0 {
-				offset = n
-				if offset > 0 {
-					outQuery.Set("offset", strconv.Itoa(offset))
-				}
-			}
-		}
-
-		if cat := strings.TrimSpace(inQuery.Get("category")); cat != "" {
-			outQuery.Set("category", cat)
-		}
-		if search := strings.TrimSpace(inQuery.Get("q")); search != "" {
-			if runes := []rune(search); len(runes) > 64 {
-				search = string(runes[:64])
-			}
-			outQuery.Set("q", search)
-		}
-		targetURL.RawQuery = outQuery.Encode()
-
 		ctx, cancel := context.WithTimeout(r.Context(), 4*time.Second)
 		defer cancel()
 
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL.String(), nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
 		if err != nil {
 			http.Error(w, `{"error":"Failed to create upstream request"}`, http.StatusInternalServerError)
 			return
@@ -1535,7 +1256,7 @@ func factsHandler(brainBaseURL string) http.HandlerFunc {
 
 		resp, err := brainHTTPClient.Do(req)
 		if err != nil {
-			log.Printf("[Dashboard] Upstream brain request failed (%s): %v", targetURL.String(), err)
+			log.Printf("[Dashboard] Upstream brain request failed (%s): %v", targetURL, err)
 			w.WriteHeader(http.StatusServiceUnavailable)
 			_ = json.NewEncoder(w).Encode(FactsAPIResponse{
 				Facts:  []FactItem{},
@@ -1597,7 +1318,7 @@ func schedulesHandler(brainBaseURL string) http.HandlerFunc {
 			return
 		}
 
-		targetURL, err := url.Parse(brainBaseURL + "/schedules")
+		targetURL, err := BuildSchedulesUpstreamURL(brainBaseURL)
 		if err != nil {
 			http.Error(w, `{"error":"Invalid upstream URL configuration"}`, http.StatusInternalServerError)
 			return
@@ -1606,7 +1327,7 @@ func schedulesHandler(brainBaseURL string) http.HandlerFunc {
 		ctx, cancel := context.WithTimeout(r.Context(), 4*time.Second)
 		defer cancel()
 
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL.String(), nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
 		if err != nil {
 			http.Error(w, `{"error":"Failed to create upstream request"}`, http.StatusInternalServerError)
 			return
@@ -1618,7 +1339,7 @@ func schedulesHandler(brainBaseURL string) http.HandlerFunc {
 
 		resp, err := brainHTTPClient.Do(req)
 		if err != nil {
-			log.Printf("[Dashboard] Upstream brain request failed (%s): %v", targetURL.String(), err)
+			log.Printf("[Dashboard] Upstream brain request failed (%s): %v", targetURL, err)
 			w.WriteHeader(http.StatusServiceUnavailable)
 			_ = json.NewEncoder(w).Encode(SchedulesAPIResponse{
 				Status: "degraded",
@@ -1698,42 +1419,16 @@ func scheduleRunsHandler(brainBaseURL string) http.HandlerFunc {
 			return
 		}
 
-		inQuery := r.URL.Query()
-		targetURL, err := url.Parse(brainBaseURL + "/schedules/runs")
+		targetURL, limit, offset, err := BuildScheduleRunsUpstreamURL(brainBaseURL, r.URL.Query())
 		if err != nil {
 			http.Error(w, `{"error":"Invalid upstream URL configuration"}`, http.StatusInternalServerError)
 			return
 		}
 
-		outQuery := targetURL.Query()
-		limit := 50
-		if lStr := inQuery.Get("limit"); lStr != "" {
-			if n, err := strconv.Atoi(lStr); err == nil && n > 0 && n <= 100 {
-				limit = n
-			}
-		}
-		outQuery.Set("limit", strconv.Itoa(limit))
-
-		offset := 0
-		if oStr := inQuery.Get("offset"); oStr != "" {
-			if n, err := strconv.Atoi(oStr); err == nil && n >= 0 {
-				offset = n
-			}
-		}
-		outQuery.Set("offset", strconv.Itoa(offset))
-
-		if schedID := strings.TrimSpace(inQuery.Get("schedule_id")); schedID != "" {
-			outQuery.Set("schedule_id", schedID)
-		}
-		if status := strings.TrimSpace(inQuery.Get("status")); status != "" {
-			outQuery.Set("status", status)
-		}
-		targetURL.RawQuery = outQuery.Encode()
-
 		ctx, cancel := context.WithTimeout(r.Context(), 4*time.Second)
 		defer cancel()
 
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL.String(), nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
 		if err != nil {
 			http.Error(w, `{"error":"Failed to create upstream request"}`, http.StatusInternalServerError)
 			return
@@ -1745,7 +1440,7 @@ func scheduleRunsHandler(brainBaseURL string) http.HandlerFunc {
 
 		resp, err := brainHTTPClient.Do(req)
 		if err != nil {
-			log.Printf("[Dashboard] Upstream brain request failed (%s): %v", targetURL.String(), err)
+			log.Printf("[Dashboard] Upstream brain request failed (%s): %v", targetURL, err)
 			w.WriteHeader(http.StatusServiceUnavailable)
 			_ = json.NewEncoder(w).Encode(ScheduleRunsAPIResponse{
 				Status: "degraded",
@@ -1826,50 +1521,6 @@ type StaticAsset struct {
 
 type AssetRegistry struct {
 	assets map[string]StaticAsset
-}
-
-var mimeFallbacks = map[string]string{
-	".html":  "text/html; charset=utf-8",
-	".css":   "text/css; charset=utf-8",
-	".js":    "application/javascript; charset=utf-8",
-	".json":  "application/json; charset=utf-8",
-	".svg":   "image/svg+xml",
-	".ico":   "image/x-icon",
-	".png":   "image/png",
-	".woff2": "font/woff2",
-	".woff":  "font/woff",
-}
-
-func getMimeType(filename string) string {
-	ext := strings.ToLower(filepath.Ext(filename))
-	if ct := mime.TypeByExtension(ext); ct != "" {
-		return ct
-	}
-	if ct, ok := mimeFallbacks[ext]; ok {
-		return ct
-	}
-	return "application/octet-stream"
-}
-
-// MatchesETag implements RFC 7232 §2.3.2 / RFC 9110 §13.1.2 weak comparison
-func MatchesETag(ifNoneMatch, targetETag, targetHash string) bool {
-	if ifNoneMatch == "" {
-		return false
-	}
-	if strings.TrimSpace(ifNoneMatch) == "*" {
-		return true
-	}
-	cleanTargetETag := strings.Trim(strings.TrimPrefix(targetETag, "W/"), "\"")
-	parts := strings.Split(ifNoneMatch, ",")
-	for _, part := range parts {
-		token := strings.TrimSpace(part)
-		token = strings.TrimPrefix(token, "W/")
-		token = strings.Trim(token, "\"")
-		if token == cleanTargetETag || token == targetHash {
-			return true
-		}
-	}
-	return false
 }
 
 func NewAssetRegistry(fsys fs.FS, versionToken string) (*AssetRegistry, error) {
