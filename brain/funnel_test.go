@@ -23,6 +23,21 @@ import (
 	"github.com/bwmarrin/discordgo"
 )
 
+func init() {
+	discordSessionOpener = func(dg *discordgo.Session) error {
+		return nil
+	}
+}
+
+func setDiscordSessionOpenerForTest(t *testing.T, fn func(*discordgo.Session) error) {
+	t.Helper()
+	old := discordSessionOpener
+	discordSessionOpener = fn
+	t.Cleanup(func() {
+		discordSessionOpener = old
+	})
+}
+
 // newTestWorkerPool instantiates a fully isolated WorkerPool with mocked runner, notifier, and delivery hooks.
 func newTestWorkerPool(database *sql.DB) *queue.WorkerPool {
 	return queue.NewWorkerPool(queue.WorkerPoolConfig{
@@ -994,6 +1009,61 @@ func TestConnectDiscordFunnel_Registration(t *testing.T) {
 	if _, ok := queue.GetCachedChannel(chanID); ok {
 		t.Fatalf("Expected channel to be removed from cache on invalidation")
 	}
+}
+
+func TestConnectDiscordFunnel_OpenerRetry(t *testing.T) {
+	oldBackoff := funnelRetryBackoff
+	funnelRetryBackoff = 2 * time.Millisecond
+	defer func() { funnelRetryBackoff = oldBackoff }()
+
+	attempts := 0
+	done := make(chan struct{})
+	setDiscordSessionOpenerForTest(t, func(dg *discordgo.Session) error {
+		attempts++
+		if attempts == 1 {
+			return errors.New("first open error")
+		}
+		if attempts == 2 {
+			return errors.New("second open error")
+		}
+		select {
+		case <-done:
+		default:
+			close(done)
+		}
+		return nil
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	s := connectDiscordFunnel(ctx, nil, nil, "mock-token-retry")
+	if s == nil {
+		t.Fatal("Expected non-nil session")
+	}
+	defer func() { _ = s.Close() }()
+
+	select {
+	case <-done:
+		// Succeeded after retry
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Timed out waiting for retry loop")
+	}
+}
+
+func TestConnectDiscordFunnel_OpenerContextCanceled(t *testing.T) {
+	setDiscordSessionOpenerForTest(t, func(dg *discordgo.Session) error {
+		return errors.New("mock open error")
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	s := connectDiscordFunnel(ctx, nil, nil, "mock-token-ctx-cancel")
+	if s == nil {
+		t.Fatal("Expected non-nil session")
+	}
+	_ = s.Close()
 }
 
 func TestIsThreadAlreadyExistsError(t *testing.T) {

@@ -836,13 +836,29 @@ func TestRunBrainApp_Lifecycle(t *testing.T) {
 		d.DataDir = filepath.Join(tmpDir, "data")
 	})
 
+	var readyOnce sync.Once
+	ready := make(chan struct{})
+	oldReady := onServerReady
+	onServerReady = func(addr string) {
+		readyOnce.Do(func() {
+			close(ready)
+		})
+	}
+	defer func() { onServerReady = oldReady }()
+
 	ctx, cancel := context.WithCancel(context.Background())
-	time.AfterFunc(100*time.Millisecond, cancel)
+	defer cancel()
+
+	go func() {
+		<-ready
+		cancel()
+	}()
 
 	err := RunBrainApp(ctx, cfg)
 	if err != nil && err != http.ErrServerClosed {
 		t.Errorf("Unexpected error running Brain app: %v", err)
 	}
+	onServerReady = oldReady
 
 	// Test invalid DB path fails cleanly
 	badCfg := config.NewTestConfig(func(d *config.ConfigData) {
@@ -850,7 +866,7 @@ func TestRunBrainApp_Lifecycle(t *testing.T) {
 		d.GeminiHomeDir = tmpDir
 		d.DataDir = filepath.Join(tmpDir, "data")
 	})
-	badCtx, badCancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	badCtx, badCancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer badCancel()
 	_ = RunBrainApp(badCtx, badCfg)
 }
@@ -1124,12 +1140,19 @@ func TestRunBrainApp_ServerReadinessAndShutdown(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	ready := make(chan struct{})
+	oldReady := onServerReady
+	onServerReady = func(addr string) {
+		close(ready)
+	}
+	defer func() { onServerReady = oldReady }()
+
 	errChan := make(chan error, 1)
 	go func() {
 		errChan <- RunBrainApp(ctx, cfg)
 	}()
 
-	time.Sleep(150 * time.Millisecond)
+	<-ready
 	cancel()
 
 	select {
@@ -1299,12 +1322,19 @@ func TestRunBrainApp_DetailedOptions(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
+		ready := make(chan struct{})
+		oldReady := onServerReady
+		onServerReady = func(addr string) {
+			close(ready)
+		}
+		defer func() { onServerReady = oldReady }()
+
 		errChan := make(chan error, 1)
 		go func() {
 			errChan <- RunBrainApp(ctx, cfg)
 		}()
 
-		time.Sleep(100 * time.Millisecond)
+		<-ready
 		cancel()
 
 		select {
@@ -1315,7 +1345,6 @@ func TestRunBrainApp_DetailedOptions(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Errorf("RunBrainApp did not shut down within 5 seconds")
 		}
-		time.Sleep(50 * time.Millisecond)
 	})
 
 	t.Run("port listen error", func(t *testing.T) {
@@ -1332,7 +1361,6 @@ func TestRunBrainApp_DetailedOptions(t *testing.T) {
 		ctxBad, cancelBad := context.WithTimeout(context.Background(), 1*time.Second)
 		defer cancelBad()
 		_ = RunBrainApp(ctxBad, badPortCfg)
-		time.Sleep(50 * time.Millisecond)
 	})
 }
 
@@ -1884,8 +1912,20 @@ func TestRunBrainApp_FullLifecycle(t *testing.T) {
 	cur.AgyBin = "/bin/true"
 	cfg.Update(cur)
 
+	ready := make(chan struct{})
+	oldReady := onServerReady
+	onServerReady = func(addr string) {
+		close(ready)
+	}
+	defer func() { onServerReady = oldReady }()
+
 	ctx, cancel := context.WithCancel(context.Background())
-	time.AfterFunc(1000*time.Millisecond, cancel)
+	defer cancel()
+
+	go func() {
+		<-ready
+		cancel()
+	}()
 
 	err = RunBrainApp(ctx, cfg)
 	if err != nil {

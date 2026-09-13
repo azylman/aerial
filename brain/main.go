@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -296,141 +297,7 @@ func SanitizeString(input string) string {
 }
 
 func ordinal(n int) string {
-	if n >= 11 && n <= 13 {
-		return fmt.Sprintf("%dth", n)
-	}
-	switch n % 10 {
-	case 1:
-		return fmt.Sprintf("%dst", n)
-	case 2:
-		return fmt.Sprintf("%dnd", n)
-	case 3:
-		return fmt.Sprintf("%drd", n)
-	default:
-		return fmt.Sprintf("%dth", n)
-	}
-}
-
-var cronMonthNames = map[int]string{
-	1: "Jan", 2: "Feb", 3: "Mar", 4: "Apr", 5: "May", 6: "Jun",
-	7: "Jul", 8: "Aug", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dec",
-}
-
-var cronDayNames = map[int]string{
-	0: "Sunday", 1: "Monday", 2: "Tuesday", 3: "Wednesday", 4: "Thursday", 5: "Friday", 6: "Saturday", 7: "Sunday",
-}
-
-var cronDayShortNames = map[int]string{
-	0: "Sun", 1: "Mon", 2: "Tue", 3: "Wed", 4: "Thu", 5: "Fri", 6: "Sat", 7: "Sun",
-}
-
-// FormatCronDescription converts a standard 5-field cron expression or descriptor into human-readable English.
-func FormatCronDescription(cronExpr string) string {
-	expr := strings.TrimSpace(cronExpr)
-	if expr == "" {
-		return ""
-	}
-
-	switch strings.ToLower(expr) {
-	case "@yearly", "@annually":
-		return "Every year on Jan 1st at 00:00"
-	case "@monthly":
-		return "1st of every month at 00:00"
-	case "@weekly":
-		return "Every week on Sunday at 00:00"
-	case "@daily", "@midnight":
-		return "Every day at 00:00"
-	case "@hourly":
-		return "Every hour"
-	}
-
-	fields := strings.Fields(expr)
-	if len(fields) != 5 {
-		return expr
-	}
-
-	minStr, hourStr, domStr, monStr, dowStr := fields[0], fields[1], fields[2], fields[3], fields[4]
-
-	// Case: Every minute (* * * * *)
-	if minStr == "*" && hourStr == "*" && domStr == "*" && monStr == "*" && dowStr == "*" {
-		return "Every minute"
-	}
-
-	// Case: Every X minutes (*/N * * * *)
-	if strings.HasPrefix(minStr, "*/") && hourStr == "*" && domStr == "*" && monStr == "*" && dowStr == "*" {
-		interval := strings.TrimPrefix(minStr, "*/")
-		return fmt.Sprintf("Every %s minutes", interval)
-	}
-
-	// Case: Every X hours (0 */N * * *)
-	if minStr == "0" && strings.HasPrefix(hourStr, "*/") && domStr == "*" && monStr == "*" && dowStr == "*" {
-		interval := strings.TrimPrefix(hourStr, "*/")
-		return fmt.Sprintf("Every %s hours", interval)
-	}
-
-	// Try to parse hour and minute as integers
-	m, minErr := strconv.Atoi(minStr)
-	h, hourErr := strconv.Atoi(hourStr)
-
-	if minErr == nil && hourErr == nil {
-		timeStr := fmt.Sprintf("%02d:%02d", h, m)
-
-		// 1. Every day at HH:MM (0 9 * * *)
-		if domStr == "*" && monStr == "*" && dowStr == "*" {
-			return fmt.Sprintf("Every day at %s", timeStr)
-		}
-
-		// 2. Specific day of week (0 9 * * 1-5, 0 9 * * 0, etc.)
-		if domStr == "*" && monStr == "*" && dowStr != "*" {
-			dowUpper := strings.ToUpper(dowStr)
-			if dowUpper == "1-5" || dowUpper == "MON-FRI" {
-				return fmt.Sprintf("Weekdays (Mon–Fri) at %s", timeStr)
-			}
-			if dowUpper == "0,6" || dowUpper == "6,0" || dowUpper == "SAT,SUN" || dowUpper == "SUN,SAT" {
-				return fmt.Sprintf("Weekends (Sat–Sun) at %s", timeStr)
-			}
-
-			// Single number day of week
-			if dowNum, err := strconv.Atoi(dowStr); err == nil && dowNum >= 0 && dowNum <= 7 {
-				return fmt.Sprintf("Every %s at %s", cronDayNames[dowNum], timeStr)
-			}
-
-			// Comma-separated list of days (e.g. 1,3,5 or Mon,Wed,Fri)
-			parts := strings.Split(dowStr, ",")
-			var names []string
-			for _, p := range parts {
-				pTrim := strings.TrimSpace(p)
-				if dNum, err := strconv.Atoi(pTrim); err == nil && dNum >= 0 && dNum <= 7 {
-					names = append(names, cronDayShortNames[dNum])
-				} else {
-					names = append(names, pTrim)
-				}
-			}
-			if len(names) > 0 {
-				return fmt.Sprintf("%s at %s", strings.Join(names, ", "), timeStr)
-			}
-		}
-
-		// 3. Specific day of month (0 12 1 * *)
-		if domStr != "*" && monStr == "*" && dowStr == "*" {
-			if domNum, err := strconv.Atoi(domStr); err == nil && domNum >= 1 && domNum <= 31 {
-				return fmt.Sprintf("%s of every month at %s", ordinal(domNum), timeStr)
-			}
-		}
-
-		// 4. Specific month and day (0 0 1 1 *)
-		if domStr != "*" && monStr != "*" && dowStr == "*" {
-			domNum, errDom := strconv.Atoi(domStr)
-			monNum, errMon := strconv.Atoi(monStr)
-			if errDom == nil && errMon == nil && monNum >= 1 && monNum <= 12 {
-				return fmt.Sprintf("Every year on %s %s at %s", cronMonthNames[monNum], ordinal(domNum), timeStr)
-			}
-		}
-
-		return fmt.Sprintf("At %s (cron: %s)", timeStr, expr)
-	}
-
-	return expr
+	return Ordinal(n)
 }
 
 // Telemetry & Schedules Data Structures
@@ -939,6 +806,8 @@ func CreateReloadConfigFunc(cfg *config.Config, opts ...ReloadOption) func(sourc
 	}
 }
 
+var onServerReady func(addr string)
+
 func RunBrainApp(ctx context.Context, cfg *config.Config) error {
 	if cfg == nil {
 		return fmt.Errorf("brain: config cannot be nil")
@@ -1067,15 +936,24 @@ func RunBrainApp(ctx context.Context, cfg *config.Config) error {
 		port = "8080"
 	}
 
+	ln, err := net.Listen("tcp", ":"+port)
+	if err != nil {
+		return err
+	}
+	defer ln.Close()
+
 	srv := &http.Server{
-		Addr:    ":" + port,
 		Handler: metricsMiddleware(mux),
+	}
+
+	if onServerReady != nil {
+		onServerReady(ln.Addr().String())
 	}
 
 	errChan := make(chan error, 1)
 	go func() {
-		log.Printf("Aerial Brain listening on port %s (model=%s, timeout=%dm)", port, cur.Model, queue.DefaultTimeoutMinutes)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Printf("Aerial Brain listening on %s (model=%s, timeout=%dm)", ln.Addr().String(), cur.Model, queue.DefaultTimeoutMinutes)
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			errChan <- err
 		}
 	}()
