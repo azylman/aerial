@@ -23,6 +23,7 @@ Aerial runs as a multi-container Docker stack supervised by Watchtower and Autoh
 
 - **Persistence Layer (`aerial-postgres`)**:
   - PostgreSQL 16 relational database with `pgvector` extension.
+  - Production Database: Aerial runs exclusively on containerized PostgreSQL 16 in production. SQLite is strictly prohibited in production.
   - Centralized store for Discord messages, session tracking, atomic CAS task queues, recurring and one-shot schedules, vector embeddings, and Grafana dashboard persistence.
 
 - **Infrastructure, GitOps & Synchronization (`aerial-gitsync`)**:
@@ -146,7 +147,8 @@ Aerial operates on a strict **Two-Repository Separation of Concerns**:
    - **Zero-Bypass Invariant**: Under NO circumstance commit or push unverified changes; fresh verification evidence must be obtained prior to commit.
 
 7. **Core Software Engineering & Hermetic Testing Invariants**:
-   - **In-Memory SQLite Test Fixtures**: All storage and database contract tests MUST use airgapped, in-memory SQLite handles (`:memory:` with single-connection pool guards) or `t.TempDir()` isolated files. Unit tests MUST NEVER write to shared host database paths, `/data`, `/share`, or execute `main()` test functions that mutate production state.
+   - **Production Database Invariant**: Aerial runs exclusively on PostgreSQL 16 with `pgvector` (`aerial-postgres`) for production persistence (messages, sessions, schedules, facts, embeddings, and Grafana). Embedded SQLite is strictly prohibited in production.
+   - **In-Memory SQLite Test Fixtures**: All storage and database contract tests MUST use airgapped, in-memory SQLite handles (`:memory:` with single-connection pool guards) or `t.TempDir()` isolated files strictly for fast, hermetic unit testing. Unit tests MUST NEVER write to shared host database paths, `/data`, `/share`, or execute `main()` test functions that mutate production state.
    - **Subprocess & Runner Airgapping**: Live agent runner execution (`runner.RunAgy`), real `agy` binaries, and live shell subprocesses must NEVER execute during test runs. Components (`WorkerPool`, `Classifier`, `Scheduler`, `Notifier`) accept an injected `RunnerFunc`. In production, `main.go` supplies `runner.RunAgy`. In tests, suites provide mock runner functions or safe defaults, backed by the `isTestEnvironment()` guardrail to block accidental real CLI execution.
    - **Pure Constructor Injection**: Packages MUST require explicitly passed dependencies (e.g. `*config.Config`, domain interfaces) in `New` constructors instead of accessing ambient environment variables (`os.Getenv`), package globals, or global singletons.
    - **Atomic Snapshot Configuration (Invariant I5)**: Subpackage workers read dynamic options JIT via `cfg.Current()` snapshots. Subpackages MUST NEVER cache scalar snapshot fields (e.g. `cfg.Current().Model`) in long-lived struct fields during initialization.

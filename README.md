@@ -318,7 +318,7 @@ Aerial uses an automated GitOps deployment and configuration pipeline:
 
 | Service | Port | Description |
 | :--- | :--- | :--- |
-| **`aerial-postgres`** | `5432` (Host `127.0.0.1:5432`) | PostgreSQL 16 relational database with `pgvector` extension for state, CAS task queues, vector memory, and Grafana storage. |
+| **`aerial-postgres`** | `5432` (Host `127.0.0.1:5432`) | Dedicated PostgreSQL 16 relational database with `pgvector` extension for production state, CAS task queues, vector memory, schedules, and Grafana storage. Production runs exclusively on PostgreSQL; SQLite is prohibited in production. |
 | **`aerial-brain`** | `8080` (Host `8088`) | Go execution daemon running `agy`, PostgreSQL memory, Discord funnel, Prometheus metrics (`:8080/metrics`), and file watcher. Mounted `:ro`. |
 | **`aerial-gitsync`** | `8080` (Internal) | Dedicated GitSync sidecar daemon managing automated repository synchronization, `/sync` webhooks, Prometheus metrics, and declarative GitOps compose reconciliation. Mounted `:rw`. |
 | **`aerial-scheduler-mcp`**| `8080` (Internal) | PostgreSQL-backed cron and one-shot reminder management server over HTTP MCP. |
