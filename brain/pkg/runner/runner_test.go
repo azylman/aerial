@@ -693,20 +693,21 @@ func TestActivityWriter_ThreadSafetyAndSessionDiscovery(t *testing.T) {
 }
 
 func TestRunAgyWithWatchdog_InactivityTimeout(t *testing.T) {
+	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
 	ctx := context.Background()
 	tmpHome := t.TempDir()
+	bin := getHelperProcessBin(t)
 	opts := WatchdogOptions{
 		HomeDir:           tmpHome,
-		InactivityTimeout: 50 * time.Millisecond,
+		InactivityTimeout: 30 * time.Millisecond,
 		MaxDuration:       2 * time.Second,
-		PollInterval:      10 * time.Millisecond,
+		PollInterval:      5 * time.Millisecond,
+		ExtraEnv:          []string{"MOCK_MODE=hang"},
 	}
-
-	mockAgy := createMockAgyScript(t, t.TempDir(), "#!/bin/sh\nsleep 1\n")
 
 	stdout, stderr, exitCode, err := RunAgyWithWatchdog(
 		ctx,
-		mockAgy,
+		bin,
 		"prompt",
 		"",
 		"",
@@ -727,31 +728,22 @@ func TestRunAgyWithWatchdog_InactivityTimeout(t *testing.T) {
 }
 
 func TestRunAgyWithWatchdog_ActiveStderrHeartbeat(t *testing.T) {
+	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
 	ctx := context.Background()
 	tmpHome := t.TempDir()
-	inactTimeout := 500 * time.Millisecond
-	pollInterval := 25 * time.Millisecond
-	sleepSec := "0.03"
-	if runtime.GOOS == "windows" {
-		inactTimeout = 1200 * time.Millisecond
-		pollInterval = 30 * time.Millisecond
-		sleepSec = "0.3"
-	}
+	bin := getHelperProcessBin(t)
 
 	opts := WatchdogOptions{
 		HomeDir:           tmpHome,
-		InactivityTimeout: inactTimeout,
+		InactivityTimeout: 200 * time.Millisecond,
 		MaxDuration:       5 * time.Second,
-		PollInterval:      pollInterval,
+		PollInterval:      10 * time.Millisecond,
+		ExtraEnv:          []string{"MOCK_MODE=pulse_stderr", "MOCK_PULSES=3"},
 	}
-
-	// 5 pulses beating the inactivity timeout
-	script := fmt.Sprintf("#!/bin/sh\nfor i in 1 2 3 4 5; do\n  echo \"pulse $i\" >&2\n  sleep %s\ndone\necho '{\"status\":\"SUCCESS\",\"response\":\"done\"}'\n", sleepSec)
-	mockAgy := createMockAgyScript(t, t.TempDir(), script)
 
 	stdout, stderr, exitCode, err := RunAgyWithWatchdog(
 		ctx,
-		mockAgy,
+		bin,
 		"prompt",
 		"",
 		"",
@@ -774,31 +766,22 @@ func TestRunAgyWithWatchdog_ActiveStderrHeartbeat(t *testing.T) {
 }
 
 func TestRunAgyWithWatchdog_ActiveStdoutHeartbeat(t *testing.T) {
+	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
 	ctx := context.Background()
 	tmpHome := t.TempDir()
-	inactTimeout := 500 * time.Millisecond
-	pollInterval := 25 * time.Millisecond
-	sleepSec := "0.03"
-	if runtime.GOOS == "windows" {
-		inactTimeout = 1200 * time.Millisecond
-		pollInterval = 30 * time.Millisecond
-		sleepSec = "0.3"
-	}
+	bin := getHelperProcessBin(t)
 
 	opts := WatchdogOptions{
 		HomeDir:           tmpHome,
-		InactivityTimeout: inactTimeout,
+		InactivityTimeout: 200 * time.Millisecond,
 		MaxDuration:       5 * time.Second,
-		PollInterval:      pollInterval,
+		PollInterval:      10 * time.Millisecond,
+		ExtraEnv:          []string{"MOCK_MODE=pulse_stdout", "MOCK_PULSES=3"},
 	}
-
-	// 5 stdout pulses beating the inactivity timeout
-	script := fmt.Sprintf("#!/bin/sh\nfor i in 1 2 3 4 5; do\n  echo \"stdout pulse $i\"\n  sleep %s\ndone\necho '{\"status\":\"SUCCESS\",\"response\":\"done\"}'\n", sleepSec)
-	mockAgy := createMockAgyScript(t, t.TempDir(), script)
 
 	stdout, stderr, exitCode, err := RunAgyWithWatchdog(
 		ctx,
-		mockAgy,
+		bin,
 		"prompt",
 		"",
 		"",
@@ -815,14 +798,16 @@ func TestRunAgyWithWatchdog_ActiveStdoutHeartbeat(t *testing.T) {
 	if strings.Contains(stderr, "[watchdog]") {
 		t.Errorf("unexpected watchdog intervention in stderr: %s", stderr)
 	}
-	if !strings.Contains(stdout, "stdout pulse 5") {
+	if !strings.Contains(stdout, "stdout pulse 3") {
 		t.Errorf("expected stdout to contain stdout pulses, got: %q", stdout)
 	}
 }
 
 func TestRunAgyWithWatchdog_CustomTranscriptDirs(t *testing.T) {
+	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
 	ctx := context.Background()
 	tempDir := t.TempDir()
+	bin := getHelperProcessBin(t)
 	testSessionID := "custom-sess-9988"
 	customLogDir := filepath.Join(tempDir, "custom-logs", testSessionID, ".system_generated", "logs")
 	if err := os.MkdirAll(customLogDir, 0755); err != nil {
@@ -830,29 +815,18 @@ func TestRunAgyWithWatchdog_CustomTranscriptDirs(t *testing.T) {
 	}
 	transcriptFile := filepath.Join(customLogDir, "transcript.jsonl")
 
-	inactTimeout := 500 * time.Millisecond
-	pollInterval := 25 * time.Millisecond
-	sleepSec := "0.03"
-	if runtime.GOOS == "windows" {
-		inactTimeout = 1200 * time.Millisecond
-		pollInterval = 30 * time.Millisecond
-		sleepSec = "0.3"
-	}
-
 	opts := WatchdogOptions{
 		HomeDir:           tempDir,
-		InactivityTimeout: inactTimeout,
+		InactivityTimeout: 200 * time.Millisecond,
 		MaxDuration:       5 * time.Second,
-		PollInterval:      pollInterval,
+		PollInterval:      10 * time.Millisecond,
 		TranscriptDirs:    []string{filepath.Join(tempDir, "custom-logs")},
+		ExtraEnv:          []string{"MOCK_MODE=pulse_file", "MOCK_LOG_FILE=" + transcriptFile, "MOCK_PULSES=3"},
 	}
-
-	script := fmt.Sprintf("#!/bin/sh\nfor i in 1 2 3 4 5; do\n  echo \"{\\\"step\\\": $i}\" >> \"%s\"\n  sleep %s\ndone\necho '{\"status\":\"SUCCESS\",\"response\":\"done\"}'\n", filepath.ToSlash(transcriptFile), sleepSec)
-	mockAgy := createMockAgyScript(t, t.TempDir(), script)
 
 	stdout, stderr, exitCode, err := RunAgyWithWatchdog(
 		ctx,
-		mockAgy,
+		bin,
 		"prompt",
 		testSessionID,
 		"",
@@ -875,9 +849,11 @@ func TestRunAgyWithWatchdog_CustomTranscriptDirs(t *testing.T) {
 }
 
 func TestRunAgyWithWatchdog_TranscriptHeartbeat(t *testing.T) {
+	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
 	ctx := context.Background()
 	testSessionID := "test-transcript-session-12345"
 	tempDir := t.TempDir()
+	bin := getHelperProcessBin(t)
 
 	logDir := filepath.Join(tempDir, ".gemini", "antigravity-cli", "brain", testSessionID, ".system_generated", "logs")
 	if err := os.MkdirAll(logDir, 0755); err != nil {
@@ -886,29 +862,17 @@ func TestRunAgyWithWatchdog_TranscriptHeartbeat(t *testing.T) {
 
 	transcriptFile := filepath.Join(logDir, "transcript.jsonl")
 
-	inactTimeout := 500 * time.Millisecond
-	pollInterval := 25 * time.Millisecond
-	sleepSec := "0.03"
-	if runtime.GOOS == "windows" {
-		inactTimeout = 1200 * time.Millisecond
-		pollInterval = 30 * time.Millisecond
-		sleepSec = "0.3"
-	}
-
 	opts := WatchdogOptions{
-		InactivityTimeout: inactTimeout,
+		InactivityTimeout: 200 * time.Millisecond,
 		MaxDuration:       5 * time.Second,
-		PollInterval:      pollInterval,
+		PollInterval:      10 * time.Millisecond,
 		TranscriptDirs:    []string{filepath.Join(tempDir, ".gemini", "antigravity-cli", "brain")},
+		ExtraEnv:          []string{"MOCK_MODE=pulse_file", "MOCK_LOG_FILE=" + transcriptFile, "MOCK_PULSES=3"},
 	}
-
-	// Writes to transcript.jsonl beating the inactivity timeout
-	script := fmt.Sprintf("#!/bin/sh\nfor i in 1 2 3 4 5; do\n  echo \"{\\\"step\\\": $i}\" >> \"%s\"\n  sleep %s\ndone\necho '{\"status\":\"SUCCESS\",\"response\":\"done\"}'\n", filepath.ToSlash(transcriptFile), sleepSec)
-	mockAgy := createMockAgyScript(t, t.TempDir(), script)
 
 	stdout, stderr, exitCode, err := RunAgyWithWatchdog(
 		ctx,
-		mockAgy,
+		bin,
 		"prompt",
 		testSessionID,
 		"",
@@ -931,9 +895,11 @@ func TestRunAgyWithWatchdog_TranscriptHeartbeat(t *testing.T) {
 }
 
 func TestRunAgyWithWatchdog_BackgroundTaskLogHeartbeat(t *testing.T) {
+	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
 	ctx := context.Background()
 	testSessionID := "test-task-session-12345"
 	tempDir := t.TempDir()
+	bin := getHelperProcessBin(t)
 
 	tasksDir := filepath.Join(tempDir, ".gemini", "antigravity-cli", "brain", testSessionID, ".system_generated", "tasks")
 	if err := os.MkdirAll(tasksDir, 0755); err != nil {
@@ -942,30 +908,17 @@ func TestRunAgyWithWatchdog_BackgroundTaskLogHeartbeat(t *testing.T) {
 
 	taskLog := filepath.Join(tasksDir, "task-1.log")
 
-	inactTimeout := 500 * time.Millisecond
-	pollInterval := 25 * time.Millisecond
-	sleepSec := "0.03"
-	if runtime.GOOS == "windows" {
-		inactTimeout = 1200 * time.Millisecond
-		pollInterval = 30 * time.Millisecond
-		sleepSec = "0.3"
-	}
-
 	opts := WatchdogOptions{
-		InactivityTimeout: inactTimeout,
+		InactivityTimeout: 200 * time.Millisecond,
 		MaxDuration:       5 * time.Second,
-		PollInterval:      pollInterval,
+		PollInterval:      10 * time.Millisecond,
 		TranscriptDirs:    []string{filepath.Join(tempDir, ".gemini", "antigravity-cli", "brain")},
+		ExtraEnv:          []string{"MOCK_MODE=pulse_file", "MOCK_LOG_FILE=" + taskLog, "MOCK_PULSES=3"},
 	}
-
-	// Writes to task-1.log beating the inactivity timeout.
-	// Stdout and stderr are silent during pulses, proving background task activity sustains watchdog.
-	script := fmt.Sprintf("#!/bin/sh\nfor i in 1 2 3 4 5; do\n  echo \"compiling $i\" >> \"%s\"\n  sleep %s\ndone\necho '{\"status\":\"SUCCESS\",\"response\":\"done\"}'\n", filepath.ToSlash(taskLog), sleepSec)
-	mockAgy := createMockAgyScript(t, t.TempDir(), script)
 
 	stdout, stderr, exitCode, err := RunAgyWithWatchdog(
 		ctx,
-		mockAgy,
+		bin,
 		"prompt",
 		testSessionID,
 		"",
@@ -988,9 +941,11 @@ func TestRunAgyWithWatchdog_BackgroundTaskLogHeartbeat(t *testing.T) {
 }
 
 func TestRunAgyWithWatchdog_BackgroundTaskLogStall_Timeout(t *testing.T) {
+	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
 	ctx := context.Background()
 	testSessionID := "test-task-stall-6789"
 	tempDir := t.TempDir()
+	bin := getHelperProcessBin(t)
 
 	tasksDir := filepath.Join(tempDir, ".gemini", "antigravity-cli", "brain", testSessionID, ".system_generated", "tasks")
 	if err := os.MkdirAll(tasksDir, 0755); err != nil {
@@ -1002,17 +957,14 @@ func TestRunAgyWithWatchdog_BackgroundTaskLogStall_Timeout(t *testing.T) {
 	opts := WatchdogOptions{
 		InactivityTimeout: 60 * time.Millisecond,
 		MaxDuration:       2 * time.Second,
-		PollInterval:      10 * time.Millisecond,
+		PollInterval:      5 * time.Millisecond,
 		TranscriptDirs:    []string{filepath.Join(tempDir, ".gemini", "antigravity-cli", "brain")},
+		ExtraEnv:          []string{"MOCK_MODE=stall_file", "MOCK_LOG_FILE=" + taskLog, "MOCK_STALL_MS=150"},
 	}
-
-	// Writes to task-1.log once, then stalls for 500ms (> 60ms inactivity timeout)
-	script := fmt.Sprintf("#!/bin/sh\necho \"started build\" >> \"%s\"\nsleep 0.5\necho '{\"status\":\"SUCCESS\",\"response\":\"done\"}'\n", filepath.ToSlash(taskLog))
-	mockAgy := createMockAgyScript(t, t.TempDir(), script)
 
 	stdout, stderr, exitCode, err := RunAgyWithWatchdog(
 		ctx,
-		mockAgy,
+		bin,
 		"prompt",
 		testSessionID,
 		"",
@@ -1033,20 +985,21 @@ func TestRunAgyWithWatchdog_BackgroundTaskLogStall_Timeout(t *testing.T) {
 }
 
 func TestRunAgyWithWatchdog_MaxDuration(t *testing.T) {
+	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
 	ctx := context.Background()
 	tmpHome := t.TempDir()
+	bin := getHelperProcessBin(t)
 	opts := WatchdogOptions{
 		HomeDir:           tmpHome,
 		InactivityTimeout: 500 * time.Millisecond,
-		MaxDuration:       50 * time.Millisecond,
-		PollInterval:      10 * time.Millisecond,
+		MaxDuration:       30 * time.Millisecond,
+		PollInterval:      5 * time.Millisecond,
+		ExtraEnv:          []string{"MOCK_MODE=hang"},
 	}
-
-	mockAgy := createMockAgyScript(t, t.TempDir(), "#!/bin/sh\nsleep 1\n")
 
 	stdout, stderr, exitCode, err := RunAgyWithWatchdog(
 		ctx,
-		mockAgy,
+		bin,
 		"prompt",
 		"",
 		"",
@@ -1364,8 +1317,10 @@ func TestActivityWriter_RawUUIDWithoutPrefix(t *testing.T) {
 }
 
 func TestRunAgyWithWatchdog_OptionDefaultsAndEdgeCases(t *testing.T) {
+	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
 	ctx := context.Background()
 	tmpHome := t.TempDir()
+	bin := getHelperProcessBin(t)
 
 	// 1. Test invalid / non-existent binary path triggers cmd.Start() error
 	_, _, exitCode, err := RunAgyWithWatchdog(ctx, "/nonexistent/path/to/agy-bin", "prompt", "", "", "", WatchdogOptions{})
@@ -1374,10 +1329,7 @@ func TestRunAgyWithWatchdog_OptionDefaultsAndEdgeCases(t *testing.T) {
 	}
 
 	// 2. Test MaxDuration formatting with seconds (< 1 minute)
-	script := "#!/bin/sh\necho '{\"status\":\"SUCCESS\",\"response\":\"ok\"}'\n"
-	mockAgy := createMockAgyScript(t, t.TempDir(), script)
-
-	stdout, stderr, exitCode, err := RunAgyWithWatchdog(ctx, mockAgy, "test prompt", "sess-123", "secret-key", "gemini-pro", WatchdogOptions{
+	stdout, stderr, exitCode, err := RunAgyWithWatchdog(ctx, bin, "test prompt", "sess-123", "secret-key", "gemini-pro", WatchdogOptions{
 		HomeDir:           tmpHome,
 		InactivityTimeout: 2 * time.Second,
 		MaxDuration:       30 * time.Second,
@@ -1396,14 +1348,12 @@ func TestRunAgyWithWatchdog_OptionDefaultsAndEdgeCases(t *testing.T) {
 	}
 
 	// 3. Test modelProvider is set to \"gemini\" in stderr with non-zero exit code and apiKey == \"\"
-	scriptErr := "#!/bin/sh\necho 'modelprovider is set to \"gemini\"' >&2\nexit 1\n"
-	mockAgyModelErr := createMockAgyScript(t, t.TempDir(), scriptErr)
-
-	_, stderrErr, exitCodeErr, _ := RunAgyWithWatchdog(ctx, mockAgyModelErr, "prompt", "", "", "gemini-flash", WatchdogOptions{
+	_, stderrErr, exitCodeErr, _ := RunAgyWithWatchdog(ctx, bin, "prompt", "", "", "gemini-flash", WatchdogOptions{
 		HomeDir:           tmpHome,
 		InactivityTimeout: 1 * time.Second,
 		MaxDuration:       2 * time.Second,
 		PollInterval:      10 * time.Millisecond,
+		ExtraEnv:          []string{"MOCK_MODE=model_err"},
 	})
 	if exitCodeErr != 1 {
 		t.Errorf("expected exitCode 1, got %d", exitCodeErr)
@@ -1413,7 +1363,7 @@ func TestRunAgyWithWatchdog_OptionDefaultsAndEdgeCases(t *testing.T) {
 	}
 
 	// 4. Test RunAgy wrapper function
-	stdoutWrap, stderrWrap, exitCodeWrap, errWrap := RunAgy(ctx, mockAgy, "wrap prompt", "", "", "", 1)
+	stdoutWrap, stderrWrap, exitCodeWrap, errWrap := RunAgy(ctx, bin, "wrap prompt", "", "", "", 1)
 	if errWrap != nil || exitCodeWrap != 0 {
 		t.Errorf("RunAgy wrapper failed: %v, code=%d, stderr=%s", errWrap, exitCodeWrap, stderrWrap)
 	}
@@ -1422,11 +1372,10 @@ func TestRunAgyWithWatchdog_OptionDefaultsAndEdgeCases(t *testing.T) {
 	}
 
 	// 5. Test TargetID sets AERIAL_TARGET_ID in process environment
-	scriptTarget := "#!/bin/sh\necho \"TARGET=$AERIAL_TARGET_ID\"\necho '{\"status\":\"SUCCESS\"}'\n"
-	mockAgyTarget := createMockAgyScript(t, t.TempDir(), scriptTarget)
-	stdoutTarget, _, exitCodeTarget, errTarget := RunAgyWithWatchdog(ctx, mockAgyTarget, "test prompt", "sess-123", "", "gemini-pro", WatchdogOptions{
+	stdoutTarget, _, exitCodeTarget, errTarget := RunAgyWithWatchdog(ctx, bin, "test prompt", "sess-123", "", "gemini-pro", WatchdogOptions{
 		HomeDir:  tmpHome,
 		TargetID: "123456789012345678",
+		ExtraEnv: []string{"MOCK_MODE=target"},
 	})
 	if errTarget != nil || exitCodeTarget != 0 {
 		t.Fatalf("RunAgyWithWatchdog failed with TargetID: %v", errTarget)

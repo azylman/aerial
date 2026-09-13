@@ -21,6 +21,33 @@ func newMockSpawner(t *testing.T) func(ctx context.Context, opts WorkerOptions) 
 	}
 }
 
+func waitForStandby(t *testing.T, d *UtilityDaemon) {
+	t.Helper()
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		d.mu.Lock()
+		ready := d.standbyWorker != nil && !d.standbyWorker.IsDead()
+		d.mu.Unlock()
+		if ready {
+			return
+		}
+		time.Sleep(1 * time.Millisecond)
+	}
+	t.Fatal("timed out waiting for standby worker to warm")
+}
+
+func waitForReload(t *testing.T, d *UtilityDaemon, initialConvID string) {
+	t.Helper()
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if d.ActiveConvID() != initialConvID {
+			return
+		}
+		time.Sleep(1 * time.Millisecond)
+	}
+	t.Fatal("timed out waiting for debounced reload to rotate active worker")
+}
+
 func TestUtilityDaemon_TurnBudgetRotation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -53,9 +80,6 @@ func TestUtilityDaemon_TurnBudgetRotation(t *testing.T) {
 	if !strings.Contains(out2, "turn-2") {
 		t.Errorf("unexpected turn 2 output: %s", out2)
 	}
-
-	// Wait briefly for async swap
-	time.Sleep(50 * time.Millisecond)
 
 	// Turn 3 should execute on the rotated worker
 	out3, err := daemon.Execute(ctx, "turn-3")
@@ -98,7 +122,7 @@ func TestUtilityDaemon_BrokenPipeAutoRetry(t *testing.T) {
 	defer daemon.Close()
 
 	// Ensure standby is ready before testing crash handoff
-	time.Sleep(50 * time.Millisecond)
+	waitForStandby(t, daemon)
 
 	initialConvID := daemon.ActiveConvID()
 
@@ -201,8 +225,6 @@ func TestUtilityDaemon_RSSRotation(t *testing.T) {
 		t.Fatalf("execute failed: %v", err)
 	}
 
-	time.Sleep(50 * time.Millisecond)
-
 	newConvID := daemon.ActiveConvID()
 	if initialConvID == newConvID {
 		t.Errorf("expected worker to rotate when RSS exceeded ceiling, still %s", newConvID)
@@ -300,6 +322,8 @@ func TestUtilityDaemon_DebouncedRestartAndEnsureStandby(t *testing.T) {
 	)
 	defer daemon.Close()
 
+	initialConvID := daemon.ActiveConvID()
+
 	// Trigger restart with short debounce (50ms)
 	daemon.TriggerRestartWithDebounce("test debounce", 50*time.Millisecond)
 	// Immediately trigger standard TriggerRestart (1000ms debounce) to test cancel/overwrite
@@ -307,7 +331,7 @@ func TestUtilityDaemon_DebouncedRestartAndEnsureStandby(t *testing.T) {
 
 	// Trigger again with 10ms to let timer fire
 	daemon.TriggerRestartWithDebounce("test fire", 10*time.Millisecond)
-	time.Sleep(50 * time.Millisecond)
+	waitForReload(t, daemon, initialConvID)
 
 	// Ensure standby already exists branch (line 139)
 	daemon.mu.Lock()
@@ -401,7 +425,7 @@ func TestUtilityDaemon_StandbyPendingAndDeadStandbyReplacement(t *testing.T) {
 	defer daemon.Close()
 
 	// Wait for initial standby to warm
-	time.Sleep(50 * time.Millisecond)
+	waitForStandby(t, daemon)
 
 	daemon.mu.Lock()
 	// Test standbyPending guard
@@ -417,7 +441,7 @@ func TestUtilityDaemon_StandbyPendingAndDeadStandbyReplacement(t *testing.T) {
 	daemon.mu.Unlock()
 
 	// Wait for standby to prewarm replacing old dead standby
-	time.Sleep(50 * time.Millisecond)
+	waitForStandby(t, daemon)
 
 	// Test closed daemon guards
 	daemon.Close()
@@ -428,10 +452,14 @@ func TestUtilityDaemon_StandbyPendingAndDeadStandbyReplacement(t *testing.T) {
 }
 
 func TestUtilityDaemon_ExecuteClosedMidAttempt(t *testing.T) {
+	turnStarted := make(chan struct{}, 1)
+	blockUntil := make(chan struct{})
+
 	sleepSpawner := func(ctx context.Context, opts WorkerOptions) (*WorkerInstance, error) {
 		w, _ := NewMockStreamWorker(t, MockStreamWorkerConfig{
-			SleepDelay: 500 * time.Millisecond,
-			Roots:      opts.SessionRoots,
+			Roots:       opts.SessionRoots,
+			TurnStarted: turnStarted,
+			BlockUntil:  blockUntil,
 		})
 		return w, nil
 	}
@@ -440,11 +468,15 @@ func TestUtilityDaemon_ExecuteClosedMidAttempt(t *testing.T) {
 		WithSpawner(sleepSpawner),
 	)
 
-	// Close daemon mid-attempt
+	// Close daemon mid-attempt: wait for turn to start, initiate close, spin-wait for daemon.closed, then unblock worker
 	go func() {
-		time.Sleep(10 * time.Millisecond)
-		daemon.Close()
+		<-turnStarted
+		go daemon.Close()
+		for !daemon.closed.Load() {
+			time.Sleep(100 * time.Microsecond)
+		}
+		close(blockUntil)
 	}()
 
-	_, _ = daemon.Execute(context.Background(), "SLEEP")
+	_, _ = daemon.Execute(context.Background(), "mid-attempt")
 }

@@ -83,7 +83,7 @@ func TestWorkerInstance_ContextCancellation(t *testing.T) {
 	defer harness.Close()
 	defer w.Close()
 
-	callCtx, callCancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	callCtx, callCancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer callCancel()
 
 	_, err := w.Execute(callCtx, "SLEEP_COMMAND")
