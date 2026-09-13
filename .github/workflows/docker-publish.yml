@@ -298,3 +298,50 @@ jobs:
             aerial.service=${{ matrix.service }}
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+  build-gate:
+    name: Container Builds Gate
+    needs: [changes, test, lint, build-and-push]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify Container Builds
+        run: |
+          CHANGES_RES="${{ needs.changes.result }}"
+          TEST_RES="${{ needs.test.result }}"
+          LINT_RES="${{ needs.lint.result }}"
+          BUILD_RES="${{ needs.build-and-push.result }}"
+          HAS_BUILDS="${{ needs.changes.outputs.has_builds }}"
+
+          echo "Changes status: $CHANGES_RES"
+          echo "Test status: $TEST_RES"
+          echo "Lint status: $LINT_RES"
+          echo "Has builds: $HAS_BUILDS"
+          echo "Builds status: $BUILD_RES"
+
+          if [ "$CHANGES_RES" != "success" ]; then
+            echo "::error::Changes detection failed"
+            exit 1
+          fi
+
+          if [ "$TEST_RES" != "success" ]; then
+            echo "::error::Unit tests failed"
+            exit 1
+          fi
+
+          if [ "$LINT_RES" != "success" ]; then
+            echo "::error::Linting failed"
+            exit 1
+          fi
+
+          if [ "$HAS_BUILDS" = "false" ]; then
+            echo "No container builds required for this change. Gate passed."
+            exit 0
+          fi
+
+          if [ "$BUILD_RES" != "success" ]; then
+            echo "::error::One or more container builds failed or were cancelled"
+            exit 1
+          fi
+
+          echo "All required container builds passed successfully."
