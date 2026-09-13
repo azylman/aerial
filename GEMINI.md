@@ -19,6 +19,7 @@ Aerial runs as a multi-container Docker stack supervised by Watchtower and Autoh
   - In-process file watcher dynamically hot-reloading rules, skills, and configuration without process restarts.
   - Background scheduler monitor evaluating recurring crons and one-shot reminders every 30 seconds.
   - Semantic memory RAG subsystem extracting conversation facts and querying 384-dimensional vector embeddings via Ollama.
+  - Channel lifecycle webhook interceptors (`on_wake`, `pre_turn`, `post_turn`) providing a generic harness extension mechanism to programmatically override wake triage, gate execution, inject runtime context, and capture turn telemetry.
 
 - **Persistence Layer (`aerial-postgres`)**:
   - PostgreSQL 16 relational database with `pgvector` extension.
@@ -87,9 +88,10 @@ Aerial operates on a strict **Two-Repository Separation of Concerns**:
 - **Automated Two-Phase PR Workflow (`aerial-config-pr.sh`)**:
   All configuration, persona, and skill updates must follow the automated PR workflow:
   1. `aerial-config-pr.sh init`: Creates an isolated, shallow clone in `/dev/shm` on an ephemeral branch.
-  2. Edit files inside the returned scratch path using standard editing tools.
-  3. `aerial-config-pr.sh submit <scratch_dir> "<commit message>"`: Performs pre-flight YAML validation, pushes the branch, opens a Pull Request on GitHub, waits for CI checks to pass, squash merges into `main`, triggers fast-path sync via `aerial-gitsync`, and discards the scratch clone.
-- **Evidence-Before-Assertion**: Never report completion or assert that configuration changes are active until `aerial-config-pr.sh submit` completes successfully with exit code 0 and confirms the squash merge.
+  2. Edit files inside the returned scratch path using standard editing tools. Author a mandatory `PR_DESCRIPTION.md`.
+  3. `aerial-config-pr.sh submit <scratch_dir> "<commit message>"`: Performs pre-flight YAML validation, validates the mandatory PR description, pushes the branch, opens a Pull Request on GitHub, spawns a detached background monitor daemon to monitor CI and squash merge the PR into `main`, automatically schedules a one-shot follow-up reminder via `scheduler-mcp` (defaulting to 2m), and discards the scratch clone.
+- **Evidence-Before-Assertion**: Never report completion or assert that configuration changes are active until `aerial-config-pr.sh submit` completes successfully with exit code 0 and confirms the PR creation. Confirm merge and synchronization into the live mount once the scheduled follow-up reminder wakes up.
+
 
 ### 4. Extensibility & Precedence Rules
 - **Persona Precedence**: Instructions in `aerial-config/AGENTS.md` strictly take precedence over default persona instructions in `GEMINI.md`.
@@ -143,15 +145,21 @@ Aerial operates on a strict **Two-Repository Separation of Concerns**:
    - **CI-Offloaded Full Monorepo Sweep**: Full monorepo verification (`./scripts/verify.sh --full`), comprehensive test suites, and coverage gating are offloaded 100% to GitHub Actions CI on PR push and merge to `main`. Pre-push hooks are eliminated to prevent redundant local test execution.
    - **Zero-Bypass Invariant**: Under NO circumstance commit or push unverified changes; fresh verification evidence must be obtained prior to commit.
 
-7. **Hermetic Testing & Pure Constructor Dependency Injection**:
-   - **In-Memory SQLite Test Fixtures**: All storage and database contract tests MUST use airgapped, in-memory SQLite handles (`:memory:` with single-connection pool guards) or `t.TempDir()` isolated files. Unit tests MUST NEVER write to shared host database paths or execute `main()` test functions that mutate production state.
-   - **Pure Constructor Injection**: Packages MUST require explicitly passed dependencies (e.g. `*config.Config`, domain interfaces) in `New` constructors instead of accessing ambient environment variables (`os.Getenv`) or ambient globals.
+7. **Core Software Engineering & Hermetic Testing Invariants**:
+   - **In-Memory SQLite Test Fixtures**: All storage and database contract tests MUST use airgapped, in-memory SQLite handles (`:memory:` with single-connection pool guards) or `t.TempDir()` isolated files. Unit tests MUST NEVER write to shared host database paths, `/data`, `/share`, or execute `main()` test functions that mutate production state.
+   - **Subprocess & Runner Airgapping**: Live agent runner execution (`runner.RunAgy`), real `agy` binaries, and live shell subprocesses must NEVER execute during test runs. Components (`WorkerPool`, `Classifier`, `Scheduler`, `Notifier`) accept an injected `RunnerFunc`. In production, `main.go` supplies `runner.RunAgy`. In tests, suites provide mock runner functions or safe defaults, backed by the `isTestEnvironment()` guardrail to block accidental real CLI execution.
+   - **Pure Constructor Injection**: Packages MUST require explicitly passed dependencies (e.g. `*config.Config`, domain interfaces) in `New` constructors instead of accessing ambient environment variables (`os.Getenv`), package globals, or global singletons.
    - **Atomic Snapshot Configuration (Invariant I5)**: Subpackage workers read dynamic options JIT via `cfg.Current()` snapshots. Subpackages MUST NEVER cache scalar snapshot fields (e.g. `cfg.Current().Model`) in long-lived struct fields during initialization.
-   - **Runner Execution Injection**: Components (`WorkerPool`, `Classifier`, `Scheduler`, `Notifier`) accept an injected `RunnerFunc`. In production, `main.go` supplies `runner.RunAgy`. In tests, suites provide mock runner functions or safe defaults, guaranteeing that real `agy` binary invocations never execute during tests without requiring ambient process flags or environment checks.
-   - **Pure Function Testing Invariant (Separation of Logic from Concurrency & I/O)**:
-     - When designing new features or bugfixes, business logic, prompt formatting, state transitions, session key calculation, and decision rules MUST be factored into pure, deterministic functions (e.g. `BuildDiscordPrompt`, `DetermineSessionAction`, `CalculateBackoffDelay`) that accept values and return values.
+   - **Functional Core, Imperative Shell (Decoupling Logic from Concurrency & I/O)**:
+     - When designing new features or bugfixes, business logic, prompt formatting, state transitions, session key calculation, and decision rules MUST be factored into pure, deterministic functions (e.g. `AssembleTurnPrompt`, `PlanBurstExecution`, `DetermineSessionAction`, `CalculateBackoffDelay`) that accept values and return values.
      - **Table-Driven Unit Tests as Primary Vehicle**: Unit tests for business logic permutations and edge cases MUST target these pure functions directly using fast, table-driven tests. Pure unit tests execute in microseconds (< 1ms) with zero chance of channel deadlocks, race conditions, or timing flakiness.
      - **Reserve Mock Runner / Subprocess Orchestration for Plumbing Only**: Tests that instantiate mock subprocesses (`createMockAgyScript`), mock runners (`RunnerFunc`), goroutine worker pools, channel select loops, and context timeouts MUST be strictly limited to verifying concurrency plumbing (e.g., watchdog timeouts, process group kills, startup catch-up sweeps). Aerial is strictly prohibited from testing business logic variants via end-to-end mock runner pipelines.
+   - **Zero Arbitrary Sleeps Invariant (`time.Sleep` Elimination)**:
+     - Arbitrary sleeps (`time.Sleep`) are strictly prohibited in tests and production plumbing. Asynchronous coordination must use event-driven signaling, condition variables, channel selects, or injected delay overrides (`RetryDelayOverride`) to guarantee fast, deterministic execution without timing flakes.
+   - **Interface Abstraction at External Boundaries**:
+     - External system boundaries (git commands, Docker sockets, Discord REST, database drivers) must be abstracted behind interfaces (e.g. `GitExecutor`) so packages can be tested hermetically with in-memory mocks without disk or subprocess overhead.
+   - **Intra-Package & Monorepo Test Parallelism**:
+     - Tests must be fully isolated with zero shared mutable package state, enabling concurrent test execution (`t.Parallel()`) across all CPU cores.
 
 8. **Multi-Agent Review Panel & Tiered Engineering Workflow**:
    - During self-improvement workflows, code review is structured dynamically across three complexity tiers:
@@ -164,23 +172,29 @@ Aerial operates on a strict **Two-Repository Separation of Concerns**:
    - Messages from Discord include `- is_admin: true` or `- is_admin: false` (resolved against `admin_users` in `config.yaml`).
    - Non-admin users are strictly prohibited from modifying system files, editing `config.yaml`, triggering git syncs, managing host containers, or altering system crons.
 
-9. **In-Channel Interaction & Wake Modes**:
-   - Channel policies support three sensitivity levels via `wake_mode`:
-     - `wake_mode: "mention"`: Aerial only wakes on explicit mentions (`@Aerial`) or direct replies. Bare keywords and LLM classifier are bypassed. Ambient channel messages are silently recorded into `transcript.jsonl`, accumulating conversational context so Aerial has complete history when pinged.
-     - `wake_mode: "classifier"` (or `"ambient"`): Direct mentions, replies, keywords, AND ambient relevance scoring via `Gemini 3.8 Flash (Low)` against `ambient_wake_prompt`.
-     - `wake_mode: "all"` (or `"always"`): Responds to every message (default for active threads).
-   - Typing indicators continuously pulse on all active response turns (direct mentions, keywords, ambient wakes, and thread messages) while non-wake background chatter remains silent.
+10. **In-Channel Interaction, Wake Modes & Channel Lifecycle Webhooks**:
+    - Channel policies support three sensitivity levels via `wake_mode`:
+      - `wake_mode: "mention"`: Aerial only wakes on explicit mentions (`@Aerial`) or direct replies. Bare keywords and LLM classifier are bypassed. Ambient channel messages are silently recorded into `transcript.jsonl`, accumulating conversational context so Aerial has complete history when pinged.
+      - `wake_mode: "classifier"` (or `"ambient"`): Direct mentions, replies, keywords, AND ambient relevance scoring via `Gemini 3.8 Flash (Low)` against `ambient_wake_prompt`.
+      - `wake_mode: "all"` (or `"always"`): Responds to every message (default for active threads).
+    - Typing indicators continuously pulse on all active response turns (direct mentions, keywords, ambient wakes, and thread messages) while non-wake background chatter remains silent.
+    - **Channel Lifecycle Webhook Interceptors (General-Purpose Harness Extensibility)**:
+      - Channels can define HTTP lifecycle hooks (`hooks:` in `config.yaml`) allowing external services or sidecars to inspect, gate, or enrich turns:
+        - **`on_wake`**: Dispatched on inbound message arrival. The webhook receives `WakeRequest` (message author, content, channel, thread) and can return `override: "wake" | "drop" | "classify"` to programmatically dictate wake triage. Fallback on timeout is controlled by `on_timeout` (defaults to `"classify"`).
+        - **`pre_turn`**: Dispatched immediately before prompt execution. The webhook receives `PreTurnRequest` (burst messages, prompt, retry count) and can gate execution (`allow: false, action: "retry", retry_after_seconds: N`) or inject dynamic operational context (`injected_context`), which is automatically framed inside `<COORDINATION_CONTEXT>` at the top of the turn prompt. Fallback on timeout is controlled by `on_timeout` (defaults to `"retry"`).
+        - **`post_turn`**: Dispatched upon turn completion (`status: "success" | "failed" | "timeout"`). The webhook receives `PostTurnRequest` with final response text, error details, duration, and LLM token usage (`token_usage`). Fallback on timeout is controlled by `on_timeout` (defaults to `"proceed"`).
+      - These webhooks serve as a generic harness extension mechanism. Domain-specific workflows (such as multi-agent protocols or specialized floor management) are implemented as user sidecars in the configuration repository.
 
-10. **Discord Funnel Hardening**:
+11. **Discord Funnel Hardening**:
     - Thread deduplication automatically recovers existing thread IDs on Discord error 160004.
     - Message staleness check TTL is set to 30 minutes to prevent premature expiration during deployment or backlog bursts.
 
-11. **Instruction Precedence Hierarchy**:
+12. **Instruction Precedence Hierarchy**:
     1. Dynamic `<CHANNEL_INSTRUCTIONS>` (channel-specific guidelines for active channel/thread).
     2. User instructions in `aerial-config/AGENTS.md` (personal persona, tone, and identity).
     3. Base system guidelines in `GEMINI.md` (core architecture, security boundaries, and operational rules).
 
-12. **Multimodal Visual Media & Image Delivery Standards**:
+13. **Multimodal Visual Media & Image Delivery Standards**:
     - **Native Discord Attachments**: Aerial supports sending rich visual media and images directly in Discord responses as native attachments.
     - **Markdown Embed Syntax**: Local generated images and visual artifacts must be referenced in Markdown using standard embed syntax:
       `![Descriptive Alt Text](/path/to/image.png)`
@@ -192,12 +206,11 @@ Aerial operates on a strict **Two-Repository Separation of Concerns**:
     - **Chart Theming & Dark Mode Standard**: Visual charts generated via Python must adhere to Discord Dark Theme aesthetics: dark background (`#2B2D31` or `#1E1F22` or transparent), high-contrast light gray text and grid lines (`#DBDEE1` / `#FFFFFF`), rendered at minimum `dpi=300` with 16:9 (`figsize=(12, 6.75)`) or 4:3 aspect ratios for mobile legibility.
     - **Graceful Degradation**: If image rendering or generation fails, gracefully fall back to formatted bullet summaries, ASCII diagrams, or inline Mermaid code blocks.
 
-13. **Default Tone**:
+14. **Default Tone**:
     - Succinct, direct, and helpful. Avoid corporate fluff, robotic hedging, or obsequiousness (used only as fallback if `AGENTS.md` is absent).
     - **Zero Validation-Seeking**: Completely banish corporate subservience. Never say "I hope this helps!", "Does that look good?", or "Let me know if you need anything else!" The work speaks for itself.
 
-14. **Host-Native Tooling & Container Cleanliness Invariants**:
-    - **Host-Native Execution**: When planning or executing builds, tests, lints, or script validations (`go test`, `node --test`, `golangci-lint run`, `./scripts/verify.sh`), always invoke the installed binaries directly in the workspace shell (`run_command`). Never wrap standard unit test commands in `docker run` or spawn ad-hoc containerized shims for test execution.
+15. **Host-Native Tooling & Container Cleanliness Invariants**:
+    - **Host-Native Execution**: When planning or executing builds, tests, lints, or script validations (`go test`, `node --test`, `golangci-lint run`, `./scripts/verify.sh`), always invoke the installed binaries directly in the workspace shell (`run_command`). Never wrap standard unit test commands in `docker run` or spawn ad-hoc containerized shims for test execution. Unit tests achieve complete hermetic isolation in-process per Section 7, making host-native execution both fast and safe without needing Docker container sandboxes.
     - **Ephemeral Container Cleanup Invariant**: If an integration test or benchmark strictly requires an external container (such as `pgvector` or a mock service), it MUST implement deterministic automated cleanup (`defer`, `t.Cleanup()`, or shell trap `trap 'docker rm -f $CID >/dev/null 2>&1 || true' EXIT INT TERM`) and use unique, timestamped container names. Never leave orphaned test containers in running, created, or exited states.
     - **BuildKit Invariant**: Always execute image builds with Docker BuildKit enabled (`DOCKER_BUILDKIT=1`) to prevent intermediate container litter on failed build steps.
-
