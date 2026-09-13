@@ -25,6 +25,8 @@ jobs:
       proxy: ${{ steps.filter.outputs.proxy }}
       ollama: ${{ steps.filter.outputs.ollama }}
       gitsync: ${{ steps.filter.outputs.gitsync }}
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      has_builds: ${{ steps.set-matrix.outputs.has_builds }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -64,6 +66,42 @@ jobs:
             gitsync:
               - 'sidecars/gitsync/**'
               - '.github/workflows/docker-publish.yml'
+
+      - name: Compute Dynamic Build Matrix
+        id: set-matrix
+        run: |
+          node -e '
+            const filter = {
+              brain: "${{ steps.filter.outputs.brain }}",
+              "scheduler-mcp": "${{ steps.filter.outputs.scheduler-mcp }}",
+              "discord-mcp": "${{ steps.filter.outputs.discord-mcp }}",
+              "docker-mcp": "${{ steps.filter.outputs.docker-mcp }}",
+              "github-mcp": "${{ steps.filter.outputs.github-mcp }}",
+              dashboard: "${{ steps.filter.outputs.dashboard }}",
+              docs: "${{ steps.filter.outputs.docs }}",
+              proxy: "${{ steps.filter.outputs.proxy }}",
+              ollama: "${{ steps.filter.outputs.ollama }}",
+              gitsync: "${{ steps.filter.outputs.gitsync }}"
+            };
+
+            const catalog = [
+              { service: "brain", context: ".", file: "./brain/Dockerfile", image_name: "aerial-brain" },
+              { service: "scheduler-mcp", context: "./scheduler-mcp", file: "./scheduler-mcp/Dockerfile", image_name: "aerial-scheduler-mcp" },
+              { service: "discord-mcp", context: "./discord-mcp", file: "./discord-mcp/Dockerfile", image_name: "aerial-discord-mcp" },
+              { service: "docker-mcp", context: "./docker-mcp", file: "./docker-mcp/Dockerfile", image_name: "aerial-docker-mcp" },
+              { service: "github-mcp", context: "./github-mcp", file: "./github-mcp/Dockerfile", image_name: "aerial-github-mcp" },
+              { service: "dashboard", context: "./dashboard", file: "./dashboard/Dockerfile", image_name: "aerial-dashboard" },
+              { service: "docs", context: "./docs-service", file: "./docs-service/Dockerfile", image_name: "aerial-docs" },
+              { service: "proxy", context: "./proxy", file: "./proxy/Dockerfile", image_name: "aerial-proxy" },
+              { service: "ollama", context: "./docker/ollama", file: "./docker/ollama/Dockerfile", image_name: "aerial-ollama" },
+              { service: "gitsync", context: ".", file: "./sidecars/gitsync/Dockerfile", image_name: "aerial-gitsync" }
+            ];
+
+            const active = catalog.filter(c => filter[c.service] === "true");
+            const fs = require("fs");
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `matrix=${JSON.stringify(active)}\n`);
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `has_builds=${active.length > 0}\n`);
+          '
 
   test:
     name: Run Service Unit Tests
@@ -214,72 +252,30 @@ jobs:
           node --check docs-service/app/assets/js/plugins/docsify-mermaid-cyberpunk.js
 
   build-and-push:
-    name: Build & Push Images to GHCR
+    name: Build & Push Images to GHCR (${{ matrix.service }})
     needs: [changes, test, lint]
+    if: needs.changes.outputs.has_builds == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - service: brain
-            context: .
-            file: ./brain/Dockerfile
-            image_name: aerial-brain
-          - service: scheduler-mcp
-            context: ./scheduler-mcp
-            file: ./scheduler-mcp/Dockerfile
-            image_name: aerial-scheduler-mcp
-          - service: discord-mcp
-            context: ./discord-mcp
-            file: ./discord-mcp/Dockerfile
-            image_name: aerial-discord-mcp
-          - service: docker-mcp
-            context: ./docker-mcp
-            file: ./docker-mcp/Dockerfile
-            image_name: aerial-docker-mcp
-          - service: github-mcp
-            context: ./github-mcp
-            file: ./github-mcp/Dockerfile
-            image_name: aerial-github-mcp
-          - service: dashboard
-            context: ./dashboard
-            file: ./dashboard/Dockerfile
-            image_name: aerial-dashboard
-          - service: docs
-            context: ./docs-service
-            file: ./docs-service/Dockerfile
-            image_name: aerial-docs
-          - service: proxy
-            context: ./proxy
-            file: ./proxy/Dockerfile
-            image_name: aerial-proxy
-          - service: ollama
-            context: ./docker/ollama
-            file: ./docker/ollama/Dockerfile
-            image_name: aerial-ollama
-          - service: gitsync
-            context: .
-            file: ./sidecars/gitsync/Dockerfile
-            image_name: aerial-gitsync
+        include: ${{ fromJSON(needs.changes.outputs.matrix) }}
 
     steps:
       - name: Checkout Repository
-        if: needs.changes.outputs[matrix.service] == 'true'
         uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
-        if: needs.changes.outputs[matrix.service] == 'true'
         uses: docker/setup-buildx-action@v3
 
       - name: Lowercase Repository Owner
-        if: needs.changes.outputs[matrix.service] == 'true'
         id: repo_owner
         run: echo "owner=${OWNER,,}" >> $GITHUB_OUTPUT
         env:
           OWNER: ${{ github.repository_owner }}
 
       - name: Log in to GitHub Container Registry
-        if: needs.changes.outputs[matrix.service] == 'true' && github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -287,7 +283,6 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and Push ${{ matrix.service }}
-        if: needs.changes.outputs[matrix.service] == 'true'
         uses: docker/build-push-action@v5
         with:
           context: ${{ matrix.context }}
