@@ -2,20 +2,19 @@ package gitsync
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"log"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"testing"
+	"time"
 
 	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/sanitizer"
-	"sync"
-	"time"
 )
 
 // SyncMutex is exported so runner or agent turns can coordinate with gitsync if needed.
@@ -26,27 +25,14 @@ func SanitizeLog(input string) string {
 	return sanitizer.SanitizeLog(input)
 }
 
-// buildAuthArgs returns git command-line arguments to inject HTTP basic auth headers
-// for GitHub personal access tokens without writing them to .git/config on disk.
+// buildAuthArgs forwards to BuildAuthArgs for backward compatibility.
 func buildAuthArgs(pat string) []string {
-	pat = strings.TrimSpace(pat)
-	if pat == "" {
-		return []string{}
-	}
-	encoded := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + pat))
-	return []string{"-c", fmt.Sprintf("http.extraHeader=AUTHORIZATION: basic %s", encoded)}
+	return BuildAuthArgs(pat)
 }
 
-// cleanURL removes embedded userinfo/credentials from a URL to maintain zero plaintext token on disk.
+// cleanURL forwards to CleanURL for backward compatibility.
 func cleanURL(rawURL string) string {
-	rawURL = strings.TrimSpace(rawURL)
-	if strings.HasPrefix(rawURL, "http://") || strings.HasPrefix(rawURL, "https://") || strings.HasPrefix(rawURL, "ssh://") || strings.HasPrefix(rawURL, "git://") {
-		if u, err := url.Parse(rawURL); err == nil {
-			u.User = nil
-			return u.String()
-		}
-	}
-	return rawURL
+	return CleanURL(rawURL)
 }
 
 // resolveGitDir checks if repoPath contains a .git directory or a .git file (e.g., in a git worktree or submodule).
@@ -66,17 +52,60 @@ func resolveGitDir(repoPath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	content := strings.TrimSpace(string(data))
-	const prefix = "gitdir:"
-	if strings.HasPrefix(content, prefix) {
-		target := strings.TrimSpace(content[len(prefix):])
-		if !filepath.IsAbs(target) {
-			target = filepath.Join(repoPath, target)
-		}
-		return filepath.Clean(target), nil
+	if target, ok := ParseGitDirContent(data, repoPath); ok {
+		return target, nil
 	}
 
 	return gitPath, nil
+}
+
+var defaultGitExecutor GitExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+	gitBin := ResolveGitBin(os.Getenv)
+	cmd := exec.CommandContext(ctx, gitBin, args...)
+	if dir != "" {
+		if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
+			cmd.Dir = dir
+		}
+	}
+	cmd.Env = BuildGitEnv(os.Environ())
+	cmd.WaitDelay = 5 * time.Second
+
+	var stdoutBuf, stderrBuf strings.Builder
+	cmd.Stdout = &stdoutBuf
+	cmd.Stderr = &stderrBuf
+
+	err := cmd.Run()
+	stdout := []byte(stdoutBuf.String())
+	stderr := []byte(stderrBuf.String())
+
+	if err != nil {
+		return stdout, stderr, errors.New(SanitizeLog(err.Error()))
+	}
+	return stdout, stderr, nil
+}
+
+var (
+	gitExecutorMu sync.RWMutex
+	gitExecutor   = defaultGitExecutor
+)
+
+func getGitExecutor() GitExecutor {
+	gitExecutorMu.RLock()
+	defer gitExecutorMu.RUnlock()
+	return gitExecutor
+}
+
+// SetGitExecutorForTest swaps gitExecutor for testing and restores default on cleanup.
+func SetGitExecutorForTest(t *testing.T, mock GitExecutor) {
+	gitExecutorMu.Lock()
+	orig := gitExecutor
+	gitExecutor = mock
+	gitExecutorMu.Unlock()
+	t.Cleanup(func() {
+		gitExecutorMu.Lock()
+		gitExecutor = orig
+		gitExecutorMu.Unlock()
+	})
 }
 
 // EnsureRepo ensures repoPath is a valid git repository tracked against repoUrl.
@@ -87,7 +116,7 @@ func EnsureRepo(ctx context.Context, repoPath, repoUrl, pat string) error {
 		return nil
 	}
 
-	cleanRepoUrl := cleanURL(repoUrl)
+	cleanRepoUrl := CleanURL(repoUrl)
 
 	// If already a valid git repository, nothing to do
 	if _, err := resolveGitDir(repoPath); err == nil {
@@ -102,14 +131,13 @@ func EnsureRepo(ctx context.Context, repoPath, repoUrl, pat string) error {
 		return nil
 	}
 
+	execGit := getGitExecutor()
+
 	// Configure safe.directory to prevent ownership conflicts
-	cmdSafe := exec.CommandContext(ctx, "git", "config", "--global", "safe.directory", "*")
-	_ = cmdSafe.Run()
+	_, _, _ = execGit(ctx, "", BuildSafeDirectoryArgs()...)
 
 	entries, readErr := os.ReadDir(repoPath)
 	isEmptyOrNotExist := readErr != nil || len(entries) == 0
-
-	authArgs := buildAuthArgs(pat)
 
 	if isEmptyOrNotExist {
 		// Ensure parent directory exists
@@ -117,82 +145,70 @@ func EnsureRepo(ctx context.Context, repoPath, repoUrl, pat string) error {
 			return errors.New(SanitizeLog(err.Error()))
 		}
 
-		args := append([]string{}, authArgs...)
-		args = append(args, "clone", cleanRepoUrl, repoPath)
-
-		cmdClone := exec.CommandContext(ctx, "git", args...)
-		cmdClone.Env = append(cmdClone.Environ(), "GIT_TERMINAL_PROMPT=0")
-		outClone, err := cmdClone.CombinedOutput()
+		cloneArgs := BuildCloneArgs(cleanRepoUrl, repoPath, pat)
+		outClone, errClone, err := execGit(ctx, "", cloneArgs...)
 		if err != nil {
-			sanitizedOut := SanitizeLog(strings.TrimSpace(string(outClone)))
-			if sanitizedOut == "" {
-				sanitizedOut = SanitizeLog(err.Error())
+			combined := SanitizeLog(strings.TrimSpace(string(outClone) + " " + string(errClone)))
+			if combined == "" {
+				combined = SanitizeLog(err.Error())
 			}
-			return fmt.Errorf("git clone failed for %s: %s", repoPath, sanitizedOut)
+			return fmt.Errorf("git clone failed for %s: %s", repoPath, combined)
 		}
 		return nil
 	}
 
 	// Non-Destructive Directory Adoption Protocol:
-	// 1. git -C <repoPath> init
-	cmdInit := exec.CommandContext(ctx, "git", "-C", repoPath, "init")
-	outInit, err := cmdInit.CombinedOutput()
+	// 1. git init
+	outInit, errInit, err := execGit(ctx, repoPath, "init")
 	if err != nil {
-		return fmt.Errorf("git init failed for %s: %s", repoPath, SanitizeLog(strings.TrimSpace(string(outInit))))
+		combined := SanitizeLog(strings.TrimSpace(string(outInit) + " " + string(errInit)))
+		return fmt.Errorf("git init failed for %s: %s", repoPath, combined)
 	}
 
 	// 2. git config --global safe.directory "*"
-	cmdSafeAdopt := exec.CommandContext(ctx, "git", "config", "--global", "safe.directory", "*")
-	_ = cmdSafeAdopt.Run()
+	_, _, _ = execGit(ctx, "", BuildSafeDirectoryArgs()...)
 
-	// 3. git -C <repoPath> remote add origin <cleanRepoUrl>
-	cmdRemote := exec.CommandContext(ctx, "git", "-C", repoPath, "remote", "add", "origin", cleanRepoUrl)
-	if outRemote, err := cmdRemote.CombinedOutput(); err != nil {
-		cmdSet := exec.CommandContext(ctx, "git", "-C", repoPath, "remote", "set-url", "origin", cleanRepoUrl)
-		if outSet, errSet := cmdSet.CombinedOutput(); errSet != nil {
-			return fmt.Errorf("git remote add/set-url failed for %s: %s", repoPath, SanitizeLog(strings.TrimSpace(string(outSet)+" "+string(outRemote))))
+	// 3. git remote add origin <cleanRepoUrl>
+	outRemote, errRemote, err := execGit(ctx, repoPath, "remote", "add", "origin", cleanRepoUrl)
+	if err != nil {
+		outSet, errSetOut, errSet := execGit(ctx, repoPath, "remote", "set-url", "origin", cleanRepoUrl)
+		if errSet != nil {
+			combined := SanitizeLog(strings.TrimSpace(string(outSet) + " " + string(errSetOut) + " " + string(outRemote) + " " + string(errRemote) + " " + errSet.Error()))
+			return fmt.Errorf("git remote add/set-url failed for %s: %s", repoPath, combined)
 		}
 	}
 
-	// 4. git -C <repoPath> <authArgs> fetch origin main
-	fetchArgs := append([]string{"-C", repoPath}, authArgs...)
-	fetchArgs = append(fetchArgs, "fetch", "origin", "main")
-	cmdFetch := exec.CommandContext(ctx, "git", fetchArgs...)
-	cmdFetch.Env = append(cmdFetch.Environ(), "GIT_TERMINAL_PROMPT=0")
-	if outFetch, err := cmdFetch.CombinedOutput(); err != nil {
-		// Fallback: try fetching origin without branch specification
-		fetchArgsFallback := append([]string{"-C", repoPath}, authArgs...)
-		fetchArgsFallback = append(fetchArgsFallback, "fetch", "origin")
-		cmdFetchFB := exec.CommandContext(ctx, "git", fetchArgsFallback...)
-		cmdFetchFB.Env = append(cmdFetchFB.Environ(), "GIT_TERMINAL_PROMPT=0")
-		if outFB, errFB := cmdFetchFB.CombinedOutput(); errFB != nil {
-			return fmt.Errorf("git fetch failed for %s: %s", repoPath, SanitizeLog(strings.TrimSpace(string(outFB)+" "+string(outFetch))))
+	// 4. git fetch origin main
+	outFetch, errFetch, err := execGit(ctx, repoPath, BuildFetchArgs(pat, "origin", "main")...)
+	if err != nil {
+		outFB, errFB, errFBEx := execGit(ctx, repoPath, BuildFetchArgs(pat, "origin", "")...)
+		if errFBEx != nil {
+			combined := SanitizeLog(strings.TrimSpace(string(outFB) + " " + string(errFB) + " " + string(outFetch) + " " + string(errFetch)))
+			return fmt.Errorf("git fetch failed for %s: %s", repoPath, combined)
 		}
 	}
 
 	// Detect target remote branch (main vs master)
 	targetBranch := "main"
-	if err := exec.CommandContext(ctx, "git", "-C", repoPath, "rev-parse", "--verify", "origin/main").Run(); err != nil {
-		if errMaster := exec.CommandContext(ctx, "git", "-C", repoPath, "rev-parse", "--verify", "origin/master").Run(); errMaster == nil {
+	if _, _, err := execGit(ctx, repoPath, BuildRevParseVerifyArgs("origin/main")...); err != nil {
+		if _, _, errMaster := execGit(ctx, repoPath, BuildRevParseVerifyArgs("origin/master")...); errMaster == nil {
 			targetBranch = "master"
 		}
 	}
 
-	// 5. git -C <repoPath> reset --soft origin/main (or origin/<targetBranch>)
-	cmdBranch := exec.CommandContext(ctx, "git", "-C", repoPath, "branch", "-M", targetBranch)
-	_ = cmdBranch.Run()
+	// 5. git branch -M targetBranch & reset --soft
+	_, _, _ = execGit(ctx, repoPath, BuildBranchRenameArgs(targetBranch)...)
 
-	cmdReset := exec.CommandContext(ctx, "git", "-C", repoPath, "reset", "--soft", "origin/"+targetBranch)
-	if outReset, err := cmdReset.CombinedOutput(); err != nil {
-		cmdResetFH := exec.CommandContext(ctx, "git", "-C", repoPath, "reset", "--soft", "FETCH_HEAD")
-		if outFH, errFH := cmdResetFH.CombinedOutput(); errFH != nil {
-			return fmt.Errorf("git reset --soft failed for %s: %s", repoPath, SanitizeLog(strings.TrimSpace(string(outFH)+" "+string(outReset))))
+	outReset, errReset, err := execGit(ctx, repoPath, BuildResetSoftArgs("origin/"+targetBranch)...)
+	if err != nil {
+		outFH, errFH, errFHEx := execGit(ctx, repoPath, BuildResetSoftArgs("FETCH_HEAD")...)
+		if errFHEx != nil {
+			combined := SanitizeLog(strings.TrimSpace(string(outFH) + " " + string(errFH) + " " + string(outReset) + " " + string(errReset)))
+			return fmt.Errorf("git reset --soft failed for %s: %s", repoPath, combined)
 		}
 	}
 
-	cmdTrack := exec.CommandContext(ctx, "git", "-C", repoPath, "branch", "-u", "origin/"+targetBranch, targetBranch)
-	_ = cmdTrack.Run()
-
+	_, _, _ = execGit(ctx, repoPath, BuildBranchTrackArgs("origin", targetBranch)...)
 	return nil
 }
 
@@ -204,42 +220,42 @@ func SyncRepo(ctx context.Context, repoPath string, cfg *config.Config) (bool, e
 		return false, nil
 	}
 
-	// 1. Check if repoPath exists and resolve the .git directory (handles directories, worktrees, and submodules)
+	// 1. Check if repoPath exists and resolve the .git directory
 	gitDir, err := resolveGitDir(repoPath)
 	if err != nil {
 		return false, nil
 	}
 
-	// 2. Check for index.lock -> if exists, skip cycle to avoid collisions
+	// 2. Acquire SyncMutex
+	SyncMutex.Lock()
+	defer SyncMutex.Unlock()
+
+	// 3. Check for index.lock inside mutex -> if exists, skip cycle
 	lockFile := filepath.Join(gitDir, "index.lock")
 	if _, err := os.Stat(lockFile); err == nil {
 		log.Printf("[GitSync] %s has index.lock present, skipping sync cycle", repoPath)
 		return false, nil
 	}
 
-	// 3. Acquire SyncMutex
-	SyncMutex.Lock()
-	defer SyncMutex.Unlock()
-
 	// Unified bounded timeout for all git subprocesses in this sync operation
 	opCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	// 4. Configure safe.directory to prevent dubious ownership issues across host/container UIDs
-	cmdSafe := exec.CommandContext(opCtx, "git", "config", "--global", "safe.directory", "*")
-	_ = cmdSafe.Run()
+	execGit := getGitExecutor()
+
+	// 4. Configure safe.directory
+	_, _, _ = execGit(opCtx, "", BuildSafeDirectoryArgs()...)
 
 	// 5. Rev-parse HEAD before pull
-	cmdBefore := exec.CommandContext(opCtx, "git", "-C", repoPath, "rev-parse", "HEAD")
-	outBefore, err := cmdBefore.Output()
+	outBefore, errBefore, err := execGit(opCtx, repoPath, "rev-parse", "HEAD")
 	if err != nil {
-		sanitizedErr := SanitizeLog(err.Error())
-		log.Printf("[GitSync] Warning: failed to rev-parse HEAD before pull for %s: %s", repoPath, sanitizedErr)
-		return false, errors.New(sanitizedErr)
+		combined := SanitizeLog(strings.TrimSpace(string(outBefore) + " " + string(errBefore) + " " + err.Error()))
+		log.Printf("[GitSync] Warning: failed to rev-parse HEAD before pull for %s: %s", repoPath, combined)
+		return false, errors.New(combined)
 	}
 	headBefore := strings.TrimSpace(string(outBefore))
 
-	// 6. Pull with --ff-only, auth args if GITHUB_PAT is set in cfg, and GIT_TERMINAL_PROMPT=0
+	// 6. Pull with --ff-only and auth args
 	var pat string
 	if cfg != nil {
 		cur := cfg.Current()
@@ -247,27 +263,22 @@ func SyncRepo(ctx context.Context, repoPath string, cfg *config.Config) (bool, e
 			pat = cur.GitHubPAT
 		}
 	}
-	authArgs := buildAuthArgs(pat)
-	pullArgs := append([]string{"-C", repoPath}, authArgs...)
-	pullArgs = append(pullArgs, "pull", "--ff-only")
+	pullArgs := BuildPullArgs(pat)
 
-	cmdPull := exec.CommandContext(opCtx, "git", pullArgs...)
-	cmdPull.Env = append(cmdPull.Environ(), "GIT_TERMINAL_PROMPT=0")
-	outPull, err := cmdPull.CombinedOutput()
+	outPull, errPull, err := execGit(opCtx, repoPath, pullArgs...)
 	if err != nil {
-		sanitizedOut := SanitizeLog(strings.TrimSpace(string(outPull)))
+		sanitizedOut := SanitizeLog(strings.TrimSpace(string(outPull) + " " + string(errPull)))
 		sanitizedErr := SanitizeLog(err.Error())
 		log.Printf("[GitSync] Warning: failed to pull %s: %s, output: %s", repoPath, sanitizedErr, sanitizedOut)
 		return false, fmt.Errorf("git pull failed: %s", sanitizedOut)
 	}
 
 	// 7. Rev-parse HEAD after pull
-	cmdAfter := exec.CommandContext(opCtx, "git", "-C", repoPath, "rev-parse", "HEAD")
-	outAfter, err := cmdAfter.Output()
+	outAfter, errAfter, err := execGit(opCtx, repoPath, "rev-parse", "HEAD")
 	if err != nil {
-		sanitizedErr := SanitizeLog(err.Error())
-		log.Printf("[GitSync] Warning: failed to rev-parse HEAD after pull for %s: %s", repoPath, sanitizedErr)
-		return false, errors.New(sanitizedErr)
+		combined := SanitizeLog(strings.TrimSpace(string(outAfter) + " " + string(errAfter) + " " + err.Error()))
+		log.Printf("[GitSync] Warning: failed to rev-parse HEAD after pull for %s: %s", repoPath, combined)
+		return false, errors.New(combined)
 	}
 	headAfter := strings.TrimSpace(string(outAfter))
 
@@ -313,8 +324,6 @@ func StartPeriodicSync(ctx context.Context, interval time.Duration, repos []stri
 	return cancel
 }
 
-
-
 // EnsureGitHooks checks if repoPath contains a .githooks directory, and if so, configures git core.hooksPath.
 func EnsureGitHooks(ctx context.Context, repoPath string) error {
 	if repoPath == "" {
@@ -322,11 +331,12 @@ func EnsureGitHooks(ctx context.Context, repoPath string) error {
 	}
 	hooksDir := filepath.Join(repoPath, ".githooks")
 	if fi, err := os.Stat(hooksDir); err == nil && fi.IsDir() {
-		cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "config", "core.hooksPath", ".githooks")
-		if out, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("failed to configure git core.hooksPath for %s: %w (output: %s)", repoPath, err, SanitizeLog(string(out)))
+		execGit := getGitExecutor()
+		out, errOut, err := execGit(ctx, repoPath, BuildHooksPathArgs(".githooks")...)
+		if err != nil {
+			combined := SanitizeLog(strings.TrimSpace(string(out) + " " + string(errOut)))
+			return fmt.Errorf("failed to configure git core.hooksPath for %s: %w (output: %s)", repoPath, err, combined)
 		}
 	}
 	return nil
 }
-
