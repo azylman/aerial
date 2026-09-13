@@ -821,16 +821,17 @@ func RunBrainApp(ctx context.Context, cfg *config.Config) error {
 	if cur.DatabaseURL == "" {
 		return fmt.Errorf("database URL or path is required")
 	}
-
 	if cur.GeminiHomeDir == "" {
-		cur.GeminiHomeDir = DefaultGeminiHomeDir()
+		return fmt.Errorf("gemini home directory is required")
 	}
 	if cur.DataDir == "" {
-		cur.DataDir = DefaultDataDir()
+		return fmt.Errorf("data directory is required")
 	}
-	cfg.Update(cur)
+	if cur.Port == "" {
+		return fmt.Errorf("port is required")
+	}
 
-	homeDir := cfg.GeminiHomeDir()
+	homeDir := cur.GeminiHomeDir
 	provisioner := env.NewFromConfig(cfg)
 	_ = InitializeBrainEnvironment(ctx, cfg)
 
@@ -933,10 +934,6 @@ func RunBrainApp(ctx context.Context, cfg *config.Config) error {
 	mux := SetupBrainMux(database, pool, reloadConfig, sessionMgr.Roots()...)
 
 	port := cur.Port
-	if port == "" {
-		port = "8080"
-	}
-
 	ln, err := net.Listen("tcp", ":"+port)
 	if err != nil {
 		return err
@@ -1008,6 +1005,9 @@ func main() {
 	}
 	if cur.DataDir == "" {
 		cur.DataDir = DefaultDataDir()
+	}
+	if cur.Port == "" {
+		cur.Port = "8080"
 	}
 	cfg.Update(cur)
 
