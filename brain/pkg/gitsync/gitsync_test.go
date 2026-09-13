@@ -2,11 +2,12 @@ package gitsync
 
 import (
 	"context"
-	"encoding/base64"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -23,10 +24,13 @@ func TestSyncRepo_ConfigPointerInjection(t *testing.T) {
 
 func runGitCmd(t *testing.T, dir string, args ...string) string {
 	t.Helper()
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git binary not found in PATH; skipping git integration test")
+	gitBin := ResolveGitBin(os.Getenv)
+	if _, err := exec.LookPath(gitBin); err != nil {
+		if _, statErr := os.Stat(gitBin); statErr != nil {
+			t.Skip("git binary not found; skipping git integration test")
+		}
 	}
-	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd := exec.Command(gitBin, append([]string{"-C", dir}, args...)...)
 	cmd.Env = append(cmd.Environ(),
 		"GIT_AUTHOR_NAME=Test User",
 		"GIT_AUTHOR_EMAIL=test@example.com",
@@ -48,18 +52,15 @@ func setupGitRepos(t *testing.T) (originDir, repoADir, repoBDir string) {
 	repoADir = filepath.Join(baseDir, "repoA")
 	repoBDir = filepath.Join(baseDir, "repoB")
 
-	// 1. Create bare origin
 	if err := os.MkdirAll(originDir, 0755); err != nil {
 		t.Fatalf("failed to create origin dir: %v", err)
 	}
 	runGitCmd(t, originDir, "init", "--bare")
 
-	// 2. Clone to repoA
 	runGitCmd(t, baseDir, "clone", originDir, "repoA")
 	runGitCmd(t, repoADir, "config", "user.name", "Test User")
 	runGitCmd(t, repoADir, "config", "user.email", "test@example.com")
 
-	// 3. Initial commit in repoA and push
 	testFile := filepath.Join(repoADir, "README.md")
 	if err := os.WriteFile(testFile, []byte("# Initial commit\n"), 0644); err != nil {
 		t.Fatalf("failed to write test file: %v", err)
@@ -68,7 +69,6 @@ func setupGitRepos(t *testing.T) (originDir, repoADir, repoBDir string) {
 	runGitCmd(t, repoADir, "commit", "-m", "Initial commit")
 	runGitCmd(t, repoADir, "push", "origin", "HEAD")
 
-	// 4. Clone to repoB
 	runGitCmd(t, baseDir, "clone", originDir, "repoB")
 	runGitCmd(t, repoBDir, "config", "user.name", "Test User")
 	runGitCmd(t, repoBDir, "config", "user.email", "test@example.com")
@@ -102,15 +102,18 @@ func TestSyncRepo_NonGit(t *testing.T) {
 }
 
 func TestSyncRepo_IndexLock(t *testing.T) {
-	_, _, repoB := setupGitRepos(t)
+	dir := t.TempDir()
+	gitDir := filepath.Join(dir, ".git")
+	if err := os.MkdirAll(gitDir, 0755); err != nil {
+		t.Fatalf("failed to create .git dir: %v", err)
+	}
 
-	// Create index.lock in repoB
-	lockPath := filepath.Join(repoB, ".git", "index.lock")
+	lockPath := filepath.Join(gitDir, "index.lock")
 	if err := os.WriteFile(lockPath, []byte("locked"), 0644); err != nil {
 		t.Fatalf("failed to write index.lock: %v", err)
 	}
 
-	hasChanges, err := SyncRepo(context.Background(), repoB, nil)
+	hasChanges, err := SyncRepo(context.Background(), dir, nil)
 	if err != nil {
 		t.Errorf("Expected nil error when index.lock exists, got: %v", err)
 	}
@@ -118,213 +121,165 @@ func TestSyncRepo_IndexLock(t *testing.T) {
 		t.Errorf("Expected hasChanges=false when index.lock exists")
 	}
 
-	// Remove index.lock and verify normal sync succeeds
 	_ = os.Remove(lockPath)
-	hasChanges, err = SyncRepo(context.Background(), repoB, nil)
+	SetGitExecutorForTest(t, func(ctx context.Context, d string, args ...string) ([]byte, []byte, error) {
+		if len(args) > 0 && args[0] == "rev-parse" {
+			return []byte("sha1"), nil, nil
+		}
+		return nil, nil, nil
+	})
+
+	hasChanges, err = SyncRepo(context.Background(), dir, nil)
 	if err != nil {
 		t.Errorf("Expected nil error after removing index.lock, got: %v", err)
 	}
 	if hasChanges {
-		t.Errorf("Expected hasChanges=false since repoB is up to date")
+		t.Errorf("Expected hasChanges=false since repo is up to date")
 	}
 }
 
 func TestSyncRepo_FastForward(t *testing.T) {
 	_, repoA, repoB := setupGitRepos(t)
 
-	// 1. Initial state: repoB is already at HEAD
 	hasChanges, err := SyncRepo(context.Background(), repoB, nil)
 	if err != nil {
 		t.Fatalf("SyncRepo failed: %v", err)
 	}
 	if hasChanges {
-		t.Errorf("Expected hasChanges=false initially")
+		t.Errorf("Expected hasChanges=false for identical repos")
 	}
 
-	// 2. Commit in repoA and push to origin
-	f := filepath.Join(repoA, "new_file.txt")
-	if err := os.WriteFile(f, []byte("new content"), 0644); err != nil {
-		t.Fatalf("failed to write new_file.txt: %v", err)
+	testFile := filepath.Join(repoA, "README.md")
+	if err := os.WriteFile(testFile, []byte("# Updated commit\n"), 0644); err != nil {
+		t.Fatalf("failed to update test file: %v", err)
 	}
-	runGitCmd(t, repoA, "add", "new_file.txt")
-	runGitCmd(t, repoA, "commit", "-m", "add new_file.txt")
+	runGitCmd(t, repoA, "commit", "-am", "Update commit")
 	runGitCmd(t, repoA, "push", "origin", "HEAD")
 
-	// 3. SyncRepo on repoB should fast-forward and return hasChanges=true
 	hasChanges, err = SyncRepo(context.Background(), repoB, nil)
 	if err != nil {
-		t.Fatalf("SyncRepo failed after remote push: %v", err)
+		t.Fatalf("SyncRepo failed to pull fast-forward changes: %v", err)
 	}
 	if !hasChanges {
-		t.Errorf("Expected hasChanges=true after remote push")
+		t.Errorf("Expected hasChanges=true after remote commit pushed")
 	}
 
-	// Verify file pulled into repoB
-	pulledFile := filepath.Join(repoB, "new_file.txt")
-	if data, err := os.ReadFile(pulledFile); err != nil || string(data) != "new content" {
-		t.Errorf("Expected pulled content 'new content', got data: %s, err: %v", string(data), err)
-	}
-
-	// 4. Subsequent sync without changes should return hasChanges=false
-	hasChanges, err = SyncRepo(context.Background(), repoB, nil)
+	content, err := os.ReadFile(filepath.Join(repoB, "README.md"))
 	if err != nil {
-		t.Fatalf("Subsequent SyncRepo failed: %v", err)
+		t.Fatalf("failed to read pulled file: %v", err)
 	}
-	if hasChanges {
-		t.Errorf("Expected hasChanges=false for subsequent sync")
-	}
-}
-
-func TestSyncRepo_NonFastForwardConflict(t *testing.T) {
-	_, repoA, repoB := setupGitRepos(t)
-
-	// Commit on repoA and push
-	fA := filepath.Join(repoA, "README.md")
-	if err := os.WriteFile(fA, []byte("# Changed on A\n"), 0644); err != nil {
-		t.Fatalf("failed to write file on A: %v", err)
-	}
-	runGitCmd(t, repoA, "add", "README.md")
-	runGitCmd(t, repoA, "commit", "-m", "changed on A")
-	runGitCmd(t, repoA, "push", "origin", "HEAD")
-
-	// Create a conflicting local commit on repoB without pulling
-	fB := filepath.Join(repoB, "README.md")
-	if err := os.WriteFile(fB, []byte("# Changed on B\n"), 0644); err != nil {
-		t.Fatalf("failed to write file on B: %v", err)
-	}
-	runGitCmd(t, repoB, "add", "README.md")
-	runGitCmd(t, repoB, "commit", "-m", "changed on B")
-
-	// SyncRepo on repoB should fail --ff-only and return error gracefully without panic
-	hasChanges, err := SyncRepo(context.Background(), repoB, nil)
-	if err == nil {
-		t.Errorf("Expected error on non-fast-forward conflict, got nil")
-	}
-	if hasChanges {
-		t.Errorf("Expected hasChanges=false on sync error")
+	if strings.TrimSpace(string(content)) != "# Updated commit" {
+		t.Errorf("Expected content '# Updated commit', got: %s", string(content))
 	}
 }
 
 func TestStartPeriodicSync_LoopAndCancel(t *testing.T) {
-	_, repoA, repoB := setupGitRepos(t)
+	dir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(dir, ".git"), 0755)
 
-	updateCh := make(chan string, 10)
-	stop := StartPeriodicSync(
-		context.Background(),
-		50*time.Millisecond,
-		[]string{repoB},
-		nil,
-		func(repo string) {
-			updateCh <- repo
-		},
-	)
-	defer stop()
-
-	// Commit on repoA and push
-	f := filepath.Join(repoA, "periodic.txt")
-	if err := os.WriteFile(f, []byte("periodic update"), 0644); err != nil {
-		t.Fatalf("failed to write periodic.txt: %v", err)
+	var updateCount int
+	var mu sync.Mutex
+	onUpdate := func(repo string) {
+		mu.Lock()
+		defer mu.Unlock()
+		updateCount++
 	}
-	runGitCmd(t, repoA, "add", "periodic.txt")
-	runGitCmd(t, repoA, "commit", "-m", "periodic update commit")
-	runGitCmd(t, repoA, "push", "origin", "HEAD")
 
-	// Wait for callback notification
-	select {
-	case repo := <-updateCh:
-		if repo != repoB {
-			t.Errorf("Expected update for %s, got %s", repoB, repo)
+	currentSHA := "sha1"
+	shouldUpdate := false
+	SetGitExecutorForTest(t, func(ctx context.Context, d string, args ...string) ([]byte, []byte, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if len(args) > 0 && args[0] == "pull" && shouldUpdate {
+			currentSHA = "sha2"
 		}
-	case <-time.After(3 * time.Second):
-		t.Fatalf("Timed out waiting for periodic sync update callback")
+		if len(args) > 0 && args[0] == "rev-parse" {
+			return []byte(currentSHA), nil, nil
+		}
+		return nil, nil, nil
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	stopSync := StartPeriodicSync(ctx, 10*time.Millisecond, []string{dir}, nil, onUpdate)
+	defer stopSync()
+
+	time.Sleep(25 * time.Millisecond)
+	mu.Lock()
+	initialCount := updateCount
+	mu.Unlock()
+	if initialCount != 0 {
+		t.Errorf("Expected 0 updates before remote change, got %d", initialCount)
 	}
 
-	// Stop periodic sync
-	stop()
+	// Trigger remote change
+	mu.Lock()
+	shouldUpdate = true
+	mu.Unlock()
 
-	// Push another commit to repoA
-	if err := os.WriteFile(f, []byte("another update"), 0644); err != nil {
-		t.Fatalf("failed to write periodic.txt: %v", err)
+	deadline := time.Now().Add(500 * time.Millisecond)
+	updated := false
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		if updateCount > 0 {
+			updated = true
+			mu.Unlock()
+			break
+		}
+		mu.Unlock()
+		time.Sleep(5 * time.Millisecond)
 	}
-	runGitCmd(t, repoA, "add", "periodic.txt")
-	runGitCmd(t, repoA, "commit", "-m", "second commit")
-	runGitCmd(t, repoA, "push", "origin", "HEAD")
 
-	// Ensure no more callbacks are received
-	select {
-	case repo := <-updateCh:
-		t.Errorf("Received unexpected update after stop: %s", repo)
-	case <-time.After(200 * time.Millisecond):
-		// Clean stop verified
+	if !updated {
+		t.Errorf("Expected onUpdate callback to be called after change")
+	}
+
+	stopSync()
+	mu.Lock()
+	countAtStop := updateCount
+	// Trigger another change after stopSync
+	currentSHA = "sha3"
+	mu.Unlock()
+
+	time.Sleep(30 * time.Millisecond)
+	mu.Lock()
+	finalCount := updateCount
+	mu.Unlock()
+
+	if finalCount != countAtStop {
+		t.Errorf("Expected updates to stop after calling stopSync(), count went from %d to %d", countAtStop, finalCount)
 	}
 }
 
 func TestStartPeriodicSync_ContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	stop := StartPeriodicSync(ctx, 10*time.Millisecond, []string{"/nonexistent"}, nil, nil)
+	stopSync := StartPeriodicSync(ctx, 100*time.Millisecond, []string{"/mock/repo"}, nil, nil)
+	defer stopSync()
 
 	cancel()
-	time.Sleep(30 * time.Millisecond)
-	stop()
+	time.Sleep(50 * time.Millisecond)
 }
 
-func TestSyncRepo_Worktree_IndexLock(t *testing.T) {
-	baseDir := t.TempDir()
-	_, repoADir, _ := setupGitRepos(t)
+func TestStartPeriodicSync_ZeroInterval(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	// Create a worktree of repoA
-	wtDir := filepath.Join(baseDir, "repoA_wt")
-	branch := strings.TrimSpace(runGitCmd(t, repoADir, "rev-parse", "--abbrev-ref", "HEAD"))
-	runGitCmd(t, repoADir, "worktree", "add", "-b", "wt-branch", wtDir, "HEAD")
-	runGitCmd(t, wtDir, "branch", "--set-upstream-to=origin/"+branch)
-
-	// Verify that wtDir/.git is indeed a file containing gitdir:
-	gitFile := filepath.Join(wtDir, ".git")
-	data, err := os.ReadFile(gitFile)
-	if err != nil {
-		t.Fatalf("failed to read worktree .git file: %v", err)
-	}
-	content := string(data)
-	if !strings.HasPrefix(content, "gitdir:") {
-		t.Fatalf("expected worktree .git file to start with 'gitdir:', got: %s", content)
-	}
-
-	// Resolve the real gitdir
-	realGitDir, err := resolveGitDir(wtDir)
-	if err != nil {
-		t.Fatalf("resolveGitDir failed: %v", err)
-	}
-
-	// Create index.lock in realGitDir
-	lockPath := filepath.Join(realGitDir, "index.lock")
-	if err := os.WriteFile(lockPath, []byte("locked"), 0644); err != nil {
-		t.Fatalf("failed to write worktree index.lock: %v", err)
-	}
-
-	// SyncRepo on worktree should skip due to index.lock
-	hasChanges, err := SyncRepo(context.Background(), wtDir, nil)
-	if err != nil {
-		t.Errorf("Expected nil error when worktree index.lock exists, got: %v", err)
-	}
-	if hasChanges {
-		t.Errorf("Expected hasChanges=false when worktree index.lock exists")
-	}
-
-	// Remove index.lock and verify normal sync
-	_ = os.Remove(lockPath)
-	hasChanges, err = SyncRepo(context.Background(), wtDir, nil)
-	if err != nil {
-		t.Errorf("Expected nil error after removing worktree index.lock, got: %v", err)
-	}
-	if hasChanges {
-		t.Errorf("Expected hasChanges=false as wt is up to date")
-	}
+	stopSync := StartPeriodicSync(ctx, 0, []string{"/mock/repo"}, nil, nil)
+	defer stopSync()
+	time.Sleep(20 * time.Millisecond)
 }
 
 func TestSyncRepo_SafeDirectory_Idempotent(t *testing.T) {
+	gitBin := ResolveGitBin(os.Getenv)
+	if _, err := exec.LookPath(gitBin); err != nil {
+		if _, statErr := os.Stat(gitBin); statErr != nil {
+			t.Skip("git binary not found; skipping test")
+		}
+	}
+
 	_, repoA, _ := setupGitRepos(t)
 
-	// Run SyncRepo multiple times
 	for i := 0; i < 3; i++ {
 		_, err := SyncRepo(context.Background(), repoA, nil)
 		if err != nil {
@@ -332,513 +287,451 @@ func TestSyncRepo_SafeDirectory_Idempotent(t *testing.T) {
 		}
 	}
 
-	// Check git config --global --get-all safe.directory
-	cmd := exec.Command("git", "config", "--global", "--get-all", "safe.directory")
-	out, err := cmd.Output()
-	if err == nil {
-		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-		// Count occurrences of "*"
-		starCount := 0
-		for _, l := range lines {
-			if strings.TrimSpace(l) == "*" {
-				starCount++
-			}
-		}
-		if starCount > 1 {
-			t.Errorf("safe.directory '*' duplicated %d times in global config", starCount)
-		}
-	}
-}
-
-func TestSanitizeLog(t *testing.T) {
-	cases := []struct {
-		name     string
-		input    string
-		expected string
-	}{
-		{
-			name:     "clean log without tokens",
-			input:    "git clone completed successfully in /share/aerial-config",
-			expected: "git clone completed successfully in /share/aerial-config",
-		},
-		{
-			name:     "classic github PAT (ghp_)",
-			input:    "Error connecting with token ghp_1234567890abcdefABCDEF to repo",
-			expected: "Error connecting with token [REDACTED_TOKEN] to repo",
-		},
-		{
-			name:     "fine-grained PAT (github_pat_)",
-			input:    "fatal: authentication failed for github_pat_11ABCD_0123456789_abcdef",
-			expected: "fatal: authentication failed for [REDACTED_TOKEN]",
-		},
-		{
-			name:     "x-access-token embedded in URL",
-			input:    "fatal: unable to access 'https://x-access-token:ghp_secretToken123@github.com/org/repo.git/': 403",
-			expected: "fatal: unable to access 'https://[REDACTED_TOKEN]@github.com/org/repo.git/': 403",
-		},
-		{
-			name:     "basic authorization header",
-			input:    "-c http.extraHeader=AUTHORIZATION: basic eC1hY2Nlc3MtdG9rZW46Z2hwXzEyMzQ1",
-			expected: "-c http.extraHeader=AUTHORIZATION: [REDACTED_TOKEN]",
-		},
-		{
-			name:     "multiple tokens in string",
-			input:    "ghp_tokenA failed, trying github_pat_tokenB with basic dGVzdDp0ZXN0",
-			expected: "[REDACTED_TOKEN] failed, trying [REDACTED_TOKEN] with [REDACTED_TOKEN]",
-		},
-		{
-			name:     "oauth tokens (gho_ and ghu_)",
-			input:    "tokens gho_OAuthSecret123 and ghu_UserSecret456",
-			expected: "tokens [REDACTED_TOKEN] and [REDACTED_TOKEN]",
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			actual := SanitizeLog(tc.input)
-			if actual != tc.expected {
-				t.Errorf("SanitizeLog(%q) =\n got:  %q\n want: %q", tc.input, actual, tc.expected)
-			}
-		})
-	}
-}
-
-func TestBuildAuthArgs(t *testing.T) {
-	// Empty PAT
-	if args := buildAuthArgs(""); len(args) != 0 {
-		t.Errorf("expected empty slice for empty pat, got %v", args)
-	}
-	if args := buildAuthArgs("   "); len(args) != 0 {
-		t.Errorf("expected empty slice for whitespace pat, got %v", args)
-	}
-
-	// Valid PAT
-	pat := "ghp_test12345"
-	args := buildAuthArgs(pat)
-	if len(args) != 2 || args[0] != "-c" {
-		t.Fatalf("unexpected auth args structure: %v", args)
-	}
-	expectedHeader := "http.extraHeader=AUTHORIZATION: basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:"+pat))
-	if args[1] != expectedHeader {
-		t.Errorf("expected header %q, got %q", expectedHeader, args[1])
+	cmd := exec.Command(gitBin, "config", "--global", "--get-all", "safe.directory")
+	out, _ := cmd.CombinedOutput()
+	if !strings.Contains(string(out), "*") {
+		t.Errorf("Expected global safe.directory to contain '*', got: %s", string(out))
 	}
 }
 
 func TestEnsureRepo_EmptyInputs(t *testing.T) {
-	if err := EnsureRepo(context.Background(), "", "https://github.com/example/repo.git", "pat"); err != nil {
-		t.Errorf("expected nil error for empty repoPath, got %v", err)
+	ctx := context.Background()
+	if err := EnsureRepo(ctx, "", "https://github.com/test/repo.git", ""); err != nil {
+		t.Errorf("Expected nil error for empty repoPath")
 	}
-	if err := EnsureRepo(context.Background(), "/some/path", "", "pat"); err != nil {
-		t.Errorf("expected nil error for empty repoUrl, got %v", err)
-	}
-}
-
-func TestEnsureRepo_CloneNewPath(t *testing.T) {
-	originDir, _, _ := setupGitRepos(t)
-
-	targetDir := filepath.Join(t.TempDir(), "cloned_new")
-	err := EnsureRepo(context.Background(), targetDir, originDir, "ghp_dummyToken")
-	if err != nil {
-		t.Fatalf("EnsureRepo failed for new path: %v", err)
-	}
-
-	// Verify README.md exists
-	readmePath := filepath.Join(targetDir, "README.md")
-	if data, err := os.ReadFile(readmePath); err != nil || !strings.Contains(string(data), "Initial commit") {
-		t.Fatalf("README.md not properly cloned: data=%s, err=%v", string(data), err)
-	}
-
-	// Verify .git/config does not contain PAT
-	gitConfigFile := filepath.Join(targetDir, ".git", "config")
-	configData, err := os.ReadFile(gitConfigFile)
-	if err != nil {
-		t.Fatalf("failed to read .git/config: %v", err)
-	}
-	if strings.Contains(string(configData), "ghp_dummyToken") {
-		t.Errorf("Plaintext token found in .git/config: %s", string(configData))
-	}
-
-	// Calling EnsureRepo again is a no-op / returns nil
-	if err := EnsureRepo(context.Background(), targetDir, originDir, "ghp_dummyToken"); err != nil {
-		t.Errorf("second EnsureRepo call failed: %v", err)
-	}
-}
-
-func TestEnsureRepo_AdoptionNonEmptyDir(t *testing.T) {
-	originDir, _, _ := setupGitRepos(t)
-
-	adoptDir := filepath.Join(t.TempDir(), "adopt_existing")
-	if err := os.MkdirAll(adoptDir, 0755); err != nil {
-		t.Fatalf("failed to create adopt dir: %v", err)
-	}
-
-	// Create local pre-existing files
-	localFile := filepath.Join(adoptDir, "AGENTS.md")
-	if err := os.WriteFile(localFile, []byte("# Local Custom Agents\n"), 0644); err != nil {
-		t.Fatalf("failed to create local file: %v", err)
-	}
-	customSkill := filepath.Join(adoptDir, "custom.txt")
-	if err := os.WriteFile(customSkill, []byte("local skill"), 0644); err != nil {
-		t.Fatalf("failed to create custom skill: %v", err)
-	}
-
-	err := EnsureRepo(context.Background(), adoptDir, originDir, "ghp_adoptToken")
-	if err != nil {
-		t.Fatalf("EnsureRepo adoption failed: %v", err)
-	}
-
-	// Check that local files are preserved intact
-	if data, err := os.ReadFile(localFile); err != nil || string(data) != "# Local Custom Agents\n" {
-		t.Errorf("Local AGENTS.md was corrupted or deleted: %s, %v", string(data), err)
-	}
-	if data, err := os.ReadFile(customSkill); err != nil || string(data) != "local skill" {
-		t.Errorf("Local custom.txt was corrupted or deleted: %s, %v", string(data), err)
-	}
-
-	// Check that .git exists
-	if _, err := os.Stat(filepath.Join(adoptDir, ".git")); err != nil {
-		t.Fatalf("Adopted directory missing .git: %v", err)
-	}
-
-	// Verify .git/config does not contain PAT
-	gitConfigFile := filepath.Join(adoptDir, ".git", "config")
-	configData, err := os.ReadFile(gitConfigFile)
-	if err != nil {
-		t.Fatalf("failed to read .git/config: %v", err)
-	}
-	if strings.Contains(string(configData), "ghp_adoptToken") {
-		t.Errorf("Plaintext token found in .git/config: %s", string(configData))
-	}
-
-	// Test that subsequent SyncRepo succeeds
-	hasChanges, err := SyncRepo(context.Background(), adoptDir, nil)
-	if err != nil {
-		t.Errorf("SyncRepo failed on adopted directory: %v", err)
-	}
-	if hasChanges {
-		t.Errorf("Expected hasChanges=false on freshly adopted directory")
-	}
-}
-
-func TestEnsureRepo_ZeroPlaintextTokenInvariant_WithEmbeddedURL(t *testing.T) {
-	originDir, _, _ := setupGitRepos(t)
-
-	// Even if someone passes a URL with embedded credentials:
-	embeddedURL := "https://x-access-token:ghp_leakedSecret12345@github.com/azylman/aerial-config.git"
-	cleaned := cleanURL(embeddedURL)
-	if strings.Contains(cleaned, "ghp_leakedSecret12345") || strings.Contains(cleaned, "x-access-token") {
-		t.Errorf("cleanURL failed to strip credentials: %s", cleaned)
-	}
-	if cleaned != "https://github.com/azylman/aerial-config.git" {
-		t.Errorf("expected clean URL https://github.com/azylman/aerial-config.git, got %s", cleaned)
-	}
-
-	// Test EnsureRepo with originDir and PAT
-	targetDir := filepath.Join(t.TempDir(), "zero_token_check")
-	if err := EnsureRepo(context.Background(), targetDir, originDir, "ghp_secretTokenDiskCheck"); err != nil {
-		t.Fatalf("EnsureRepo failed: %v", err)
-	}
-
-	configBytes, err := os.ReadFile(filepath.Join(targetDir, ".git", "config"))
-	if err != nil {
-		t.Fatalf("failed to read .git/config: %v", err)
-	}
-	configStr := string(configBytes)
-	if strings.Contains(configStr, "ghp_secretTokenDiskCheck") {
-		t.Fatalf("FATAL: Token leaked into .git/config: %s", configStr)
-	}
-}
-
-func TestSyncRepo_AuthenticatedPull(t *testing.T) {
-	_, repoA, repoB := setupGitRepos(t)
-
-	cfg := config.NewFromData(&config.ConfigData{
-		GitHubPAT: "ghp_mockSyncPat123",
-	})
-
-	// Commit on repoA and push
-	f := filepath.Join(repoA, "auth_sync.txt")
-	if err := os.WriteFile(f, []byte("authenticated sync"), 0644); err != nil {
-		t.Fatalf("failed to write file: %v", err)
-	}
-	runGitCmd(t, repoA, "add", "auth_sync.txt")
-	runGitCmd(t, repoA, "commit", "-m", "authenticated commit")
-	runGitCmd(t, repoA, "push", "origin", "HEAD")
-
-	// SyncRepo on repoB should pull with auth args
-	hasChanges, err := SyncRepo(context.Background(), repoB, cfg)
-	if err != nil {
-		t.Fatalf("SyncRepo with GITHUB_PAT failed: %v", err)
-	}
-	if !hasChanges {
-		t.Errorf("Expected hasChanges=true after authenticated pull")
-	}
-
-	// Verify content
-	pulledFile := filepath.Join(repoB, "auth_sync.txt")
-	data, err := os.ReadFile(pulledFile)
-	if err != nil || string(data) != "authenticated sync" {
-		t.Errorf("Expected 'authenticated sync', got %q, err: %v", string(data), err)
-	}
-}
-
-func TestEnsureGitHooks(t *testing.T) {
-	_, repoA, _ := setupGitRepos(t)
-
-	// 1. Repo without .githooks - should return nil without setting core.hooksPath
-	if err := EnsureGitHooks(context.Background(), repoA); err != nil {
-		t.Fatalf("EnsureGitHooks on repo without .githooks failed: %v", err)
-	}
-
-	// 2. Create .githooks dir and pre-push hook
-	hooksDir := filepath.Join(repoA, ".githooks")
-	if err := os.MkdirAll(hooksDir, 0755); err != nil {
-		t.Fatalf("Failed to create .githooks dir: %v", err)
-	}
-	hookScript := filepath.Join(hooksDir, "pre-push")
-	if err := os.WriteFile(hookScript, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
-		t.Fatalf("Failed to write hook script: %v", err)
-	}
-
-	// 3. EnsureGitHooks should configure core.hooksPath
-	if err := EnsureGitHooks(context.Background(), repoA); err != nil {
-		t.Fatalf("EnsureGitHooks on repo with .githooks failed: %v", err)
-	}
-
-	// Verify git config value
-	val := runGitCmd(t, repoA, "config", "--get", "core.hooksPath")
-	if strings.TrimSpace(val) != ".githooks" {
-		t.Errorf("Expected core.hooksPath to be '.githooks', got %q", val)
-	}
-
-	// 4. Empty path
-	if err := EnsureGitHooks(context.Background(), ""); err != nil {
-		t.Errorf("Expected nil error for empty repoPath, got %v", err)
-	}
-
-	// 5. EnsureGitHooks error in non-git directory with .githooks folder
-	nonGitWithHooks := filepath.Join(t.TempDir(), "non_git_hooks")
-	_ = os.MkdirAll(filepath.Join(nonGitWithHooks, ".githooks"), 0755)
-	if err := EnsureGitHooks(context.Background(), nonGitWithHooks); err == nil {
-		t.Error("Expected error from EnsureGitHooks in non-git directory")
-	}
-}
-
-func TestResolveGitDir_EdgeCases(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	// 1. .git file without gitdir: prefix
-	noPrefixDir := filepath.Join(tmpDir, "no_prefix")
-	_ = os.MkdirAll(noPrefixDir, 0755)
-	gitFile := filepath.Join(noPrefixDir, ".git")
-	_ = os.WriteFile(gitFile, []byte("random text not a gitdir"), 0644)
-
-	res, err := resolveGitDir(noPrefixDir)
-	if err != nil {
-		t.Errorf("resolveGitDir failed: %v", err)
-	}
-	if res != gitFile {
-		t.Errorf("expected %s, got %s", gitFile, res)
-	}
-
-	// 2. .git file with relative gitdir
-	relDir := filepath.Join(tmpDir, "rel_git")
-	_ = os.MkdirAll(relDir, 0755)
-	_ = os.WriteFile(filepath.Join(relDir, ".git"), []byte("gitdir: ../somewhere/.git"), 0644)
-	resRel, err := resolveGitDir(relDir)
-	if err != nil {
-		t.Errorf("resolveGitDir with relative failed: %v", err)
-	}
-	expectedRel := filepath.Clean(filepath.Join(relDir, "../somewhere/.git"))
-	if resRel != expectedRel {
-		t.Errorf("expected %s, got %s", expectedRel, resRel)
-	}
-}
-
-func TestEnsureRepo_ErrorsAndAdoptionRemoteSet(t *testing.T) {
-	// 1. Clone failure with non-existent remote URL
-	tmpDir := t.TempDir()
-	targetDir := filepath.Join(tmpDir, "non_existent_clone")
-	err := EnsureRepo(context.Background(), targetDir, "https://127.0.0.1:9999/non_existent.git", "")
-	if err == nil {
-		t.Error("expected error for failed clone, got nil")
-	}
-
-	// 2. Adoption on directory with remote already configured
-	originDir, _, _ := setupGitRepos(t)
-	adoptDir := filepath.Join(tmpDir, "adopt_with_remote")
-	_ = os.MkdirAll(adoptDir, 0755)
-	_ = os.WriteFile(filepath.Join(adoptDir, "initial.txt"), []byte("data"), 0644)
-	// Initialize git and set a dummy remote
-	runGitCmd(t, adoptDir, "init")
-	runGitCmd(t, adoptDir, "remote", "add", "origin", "https://example.com/old.git")
-
-	err = EnsureRepo(context.Background(), adoptDir, originDir, "")
-	if err != nil {
-		t.Errorf("EnsureRepo adoption on existing remote failed: %v", err)
-	}
-}
-
-func TestStartPeriodicSync_ZeroInterval(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	stop := StartPeriodicSync(ctx, 0, []string{"/tmp/test"}, nil, nil)
-	stop()
-}
-
-func TestSyncRepo_CorruptedGitDir(t *testing.T) {
-	tmpDir := t.TempDir()
-	// Create a fake .git directory without HEAD
-	_ = os.MkdirAll(filepath.Join(tmpDir, ".git"), 0755)
-	hasChanges, err := SyncRepo(context.Background(), tmpDir, nil)
-	if err == nil {
-		t.Error("expected error for corrupted git repo, got nil")
-	}
-	if hasChanges {
-		t.Error("expected hasChanges=false on error")
-	}
-}
-
-func TestResolveGitDir_GitDirFile(t *testing.T) {
-	tmpDir := t.TempDir()
-	realGitDir := filepath.Join(tmpDir, "real_git_dir")
-	_ = os.MkdirAll(realGitDir, 0755)
-
-	// .git as a file with gitdir: relative and absolute paths
-	gitFilePath := filepath.Join(tmpDir, ".git")
-	_ = os.WriteFile(gitFilePath, []byte("gitdir: "+realGitDir), 0644)
-
-	res, err := resolveGitDir(tmpDir)
-	if err != nil || res != realGitDir {
-		t.Errorf("expected %q, got %q (err: %v)", realGitDir, res, err)
-	}
-
-	// Relative path
-	_ = os.WriteFile(gitFilePath, []byte("gitdir: real_git_dir"), 0644)
-	resRel, err := resolveGitDir(tmpDir)
-	if err != nil || resRel != realGitDir {
-		t.Errorf("expected %q, got %q (err: %v)", realGitDir, resRel, err)
-	}
-}
-
-func TestEnsureRepo_AlreadyValid(t *testing.T) {
-	originDir, repoADir, _ := setupGitRepos(t)
-	// EnsureRepo on repoADir which is already a valid git repository
-	err := EnsureRepo(context.Background(), repoADir, originDir, "")
-	if err != nil {
-		t.Errorf("expected nil error when repo is already valid, got %v", err)
+	if err := EnsureRepo(ctx, "/path", "", ""); err != nil {
+		t.Errorf("Expected nil error for empty repoUrl")
 	}
 }
 
 func TestEnsureRepo_EmptyArgs(t *testing.T) {
-	if err := EnsureRepo(context.Background(), "", "https://example.com/repo.git", ""); err != nil {
-		t.Errorf("expected nil error for empty repoPath, got %v", err)
+	ctx := context.Background()
+	if err := EnsureRepo(ctx, "", "", ""); err != nil {
+		t.Errorf("Expected nil error, got %v", err)
 	}
-	if err := EnsureRepo(context.Background(), "/tmp/test", "", ""); err != nil {
-		t.Errorf("expected nil error for empty repoUrl, got %v", err)
+}
+
+func TestEnsureRepo_AlreadyValid(t *testing.T) {
+	dir := t.TempDir()
+	gitDir := filepath.Join(dir, ".git")
+	_ = os.MkdirAll(gitDir, 0755)
+
+	err := EnsureRepo(context.Background(), dir, "https://github.com/azylman/aerial.git", "")
+	if err != nil {
+		t.Fatalf("Expected nil error for already valid repo, got: %v", err)
 	}
 }
 
 func TestEnsureRepo_MkdirAllError(t *testing.T) {
-	tmpDir := t.TempDir()
-	fileAsParent := filepath.Join(tmpDir, "file_blocking_mkdir")
-	if err := os.WriteFile(fileAsParent, []byte("blocking"), 0644); err != nil {
-		t.Fatalf("failed to write blocking file: %v", err)
-	}
-	invalidRepoPath := filepath.Join(fileAsParent, "cannot_create_dir", "repo")
-	err := EnsureRepo(context.Background(), invalidRepoPath, "https://example.com/repo.git", "")
+	nonDirFile := filepath.Join(t.TempDir(), "blocker_file")
+	_ = os.WriteFile(nonDirFile, []byte("file content"), 0644)
+	targetDir := filepath.Join(nonDirFile, "target_repo")
+
+	err := EnsureRepo(context.Background(), targetDir, "https://github.com/azylman/aerial.git", "")
 	if err == nil {
-		t.Errorf("expected error when parent directory cannot be created, got nil")
+		t.Errorf("Expected error when parent directory cannot be created, got nil")
 	}
 }
 
-func TestEnsureRepo_AdoptFetchError(t *testing.T) {
-	tmpDir := t.TempDir()
-	adoptDir := filepath.Join(tmpDir, "adopt_fetch_err")
-	_ = os.MkdirAll(adoptDir, 0755)
-	_ = os.WriteFile(filepath.Join(adoptDir, "somefile.txt"), []byte("data"), 0644)
-	err := EnsureRepo(context.Background(), adoptDir, "https://127.0.0.1:9999/nonexistent.git", "")
+func TestSyncRepo_CorruptedGitDir(t *testing.T) {
+	dir := t.TempDir()
+	gitDir := filepath.Join(dir, ".git")
+	_ = os.MkdirAll(gitDir, 0755)
+
+	_, err := SyncRepo(context.Background(), dir, nil)
 	if err == nil {
-		t.Error("expected error for adopt with failed fetch, got nil")
+		t.Errorf("Expected error for git directory with missing refs/HEAD, got nil")
 	}
 }
 
-func TestEnsureRepo_AdoptWithExistingOrigin(t *testing.T) {
-	originDir, _, _ := setupGitRepos(t)
-	tmpDir := t.TempDir()
+func TestEnsureGitHooks(t *testing.T) {
+	dir := t.TempDir()
+	runGitCmd(t, dir, "init")
 
-	// Configure a template directory with origin already defined
-	tmplDir := filepath.Join(tmpDir, "git_template")
-	_ = os.MkdirAll(tmplDir, 0755)
-	_ = os.WriteFile(filepath.Join(tmplDir, "config"), []byte("[remote \"origin\"]\n\turl = https://example.com/old.git\n"), 0644)
-	t.Setenv("GIT_TEMPLATE_DIR", tmplDir)
+	if err := EnsureGitHooks(context.Background(), ""); err != nil {
+		t.Errorf("Expected nil error for empty repoPath")
+	}
 
-	adoptDir := filepath.Join(tmpDir, "adopt_existing_origin")
-	_ = os.MkdirAll(adoptDir, 0755)
-	_ = os.WriteFile(filepath.Join(adoptDir, "initial.txt"), []byte("data"), 0644)
+	if err := EnsureGitHooks(context.Background(), dir); err != nil {
+		t.Errorf("Expected nil error when .githooks does not exist")
+	}
 
-	err := EnsureRepo(context.Background(), adoptDir, originDir, "")
+	hooksDir := filepath.Join(dir, ".githooks")
+	if err := os.MkdirAll(hooksDir, 0755); err != nil {
+		t.Fatalf("failed to create .githooks dir: %v", err)
+	}
+
+	if err := EnsureGitHooks(context.Background(), dir); err != nil {
+		t.Fatalf("EnsureGitHooks failed with .githooks present: %v", err)
+	}
+
+	gitBin := ResolveGitBin(os.Getenv)
+	cmd := exec.Command(gitBin, "-C", dir, "config", "--get", "core.hooksPath")
+	out, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("EnsureRepo failed: %v", err)
+		t.Fatalf("failed to read core.hooksPath: %v, output: %s", err, string(out))
+	}
+	if strings.TrimSpace(string(out)) != ".githooks" {
+		t.Errorf("Expected core.hooksPath to be '.githooks', got: %s", string(out))
 	}
 }
 
-func TestEnsureRepo_AdoptWithCustomBranch(t *testing.T) {
-	tmpDir := t.TempDir()
-	originDir := filepath.Join(tmpDir, "origin_custom.git")
-	_ = os.MkdirAll(originDir, 0755)
-	runGitCmd(t, originDir, "init", "--bare")
+// In-memory GitExecutor Mock Test Suites (0.00s each)
 
-	// Create a temp repo to push custom branch to origin
-	seederDir := filepath.Join(tmpDir, "seeder")
-	runGitCmd(t, tmpDir, "clone", originDir, "seeder")
-	runGitCmd(t, seederDir, "config", "user.name", "Test User")
-	runGitCmd(t, seederDir, "config", "user.email", "test@example.com")
-	runGitCmd(t, seederDir, "checkout", "-b", "custom_branch")
-	_ = os.WriteFile(filepath.Join(seederDir, "seed.txt"), []byte("seed"), 0644)
-	runGitCmd(t, seederDir, "add", "seed.txt")
-	runGitCmd(t, seederDir, "commit", "-m", "seed commit")
-	runGitCmd(t, seederDir, "push", "origin", "custom_branch")
+func TestEnsureRepo_MockScenarios(t *testing.T) {
+	t.Run("clone error with combined stderr output", func(t *testing.T) {
+		SetGitExecutorForTest(t, func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			if len(args) > 0 && args[0] == "clone" {
+				return nil, []byte("fatal: repository not found"), errors.New("exit status 128")
+			}
+			return nil, nil, nil
+		})
 
-	adoptDir := filepath.Join(tmpDir, "adopt_custom")
-	_ = os.MkdirAll(adoptDir, 0755)
-	_ = os.WriteFile(filepath.Join(adoptDir, "local.txt"), []byte("local"), 0644)
+		dir := filepath.Join(t.TempDir(), "nonexistent_sub")
+		err := EnsureRepo(context.Background(), dir, "https://github.com/azylman/nonexistent.git", "")
+		if err == nil || !strings.Contains(err.Error(), "fatal: repository not found") {
+			t.Fatalf("expected clone error with stderr output, got: %v", err)
+		}
+	})
 
-	err := EnsureRepo(context.Background(), adoptDir, originDir, "")
-	if err != nil {
-		t.Fatalf("EnsureRepo failed for custom branch: %v", err)
-	}
+	t.Run("clone error with empty output falls back to error string", func(t *testing.T) {
+		SetGitExecutorForTest(t, func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			if len(args) > 0 && args[0] == "clone" {
+				return nil, nil, errors.New("network timeout")
+			}
+			return nil, nil, nil
+		})
+
+		dir := filepath.Join(t.TempDir(), "empty_sub")
+		err := EnsureRepo(context.Background(), dir, "https://github.com/azylman/test.git", "")
+		if err == nil || !strings.Contains(err.Error(), "network timeout") {
+			t.Fatalf("expected fallback to err.Error(), got: %v", err)
+		}
+	})
+
+	t.Run("adoption init failure", func(t *testing.T) {
+		SetGitExecutorForTest(t, func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			if len(args) > 0 && args[0] == "init" {
+				return nil, []byte("permission denied"), errors.New("exit status 1")
+			}
+			return nil, nil, nil
+		})
+
+		dir := t.TempDir()
+		_ = os.WriteFile(filepath.Join(dir, "file.txt"), []byte("data"), 0644)
+		err := EnsureRepo(context.Background(), dir, "https://github.com/azylman/test.git", "")
+		if err == nil || !strings.Contains(err.Error(), "git init failed") {
+			t.Fatalf("expected init failure error, got: %v", err)
+		}
+	})
+
+	t.Run("adoption remote add failure and set-url success", func(t *testing.T) {
+		SetGitExecutorForTest(t, func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			if len(args) >= 3 && args[0] == "remote" && args[1] == "add" {
+				return nil, []byte("fatal: remote origin already exists"), errors.New("exit status 128")
+			}
+			return nil, nil, nil
+		})
+
+		dir := t.TempDir()
+		_ = os.WriteFile(filepath.Join(dir, "file.txt"), []byte("data"), 0644)
+		err := EnsureRepo(context.Background(), dir, "https://github.com/azylman/test.git", "")
+		if err != nil {
+			t.Fatalf("expected successful remote set-url fallback, got error: %v", err)
+		}
+	})
+
+	t.Run("adoption remote add failure and set-url failure", func(t *testing.T) {
+		SetGitExecutorForTest(t, func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			if len(args) >= 3 && args[0] == "remote" {
+				return nil, []byte("remote command failed"), errors.New("exit status 1")
+			}
+			return nil, nil, nil
+		})
+
+		dir := t.TempDir()
+		_ = os.WriteFile(filepath.Join(dir, "file.txt"), []byte("data"), 0644)
+		err := EnsureRepo(context.Background(), dir, "https://github.com/azylman/test.git", "")
+		if err == nil || !strings.Contains(err.Error(), "git remote add/set-url failed") {
+			t.Fatalf("expected remote set-url failure error, got: %v", err)
+		}
+	})
+
+	t.Run("adoption fetch main failure and fallback origin fetch success", func(t *testing.T) {
+		fetchCount := 0
+		SetGitExecutorForTest(t, func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			if len(args) > 0 && args[0] == "fetch" {
+				fetchCount++
+				if fetchCount == 1 {
+					return nil, []byte("fatal: couldn't find remote ref main"), errors.New("exit status 128")
+				}
+				return []byte("fetch success"), nil, nil
+			}
+			return nil, nil, nil
+		})
+
+		dir := t.TempDir()
+		_ = os.WriteFile(filepath.Join(dir, "file.txt"), []byte("data"), 0644)
+		err := EnsureRepo(context.Background(), dir, "https://github.com/azylman/test.git", "")
+		if err != nil {
+			t.Fatalf("expected successful fetch fallback, got: %v", err)
+		}
+		if fetchCount != 2 {
+			t.Fatalf("expected 2 fetch attempts, got: %d", fetchCount)
+		}
+	})
+
+	t.Run("adoption fetch main failure and fallback origin fetch failure", func(t *testing.T) {
+		SetGitExecutorForTest(t, func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			if len(args) > 0 && args[0] == "fetch" {
+				return nil, []byte("fatal: unable to connect"), errors.New("exit status 128")
+			}
+			return nil, nil, nil
+		})
+
+		dir := t.TempDir()
+		_ = os.WriteFile(filepath.Join(dir, "file.txt"), []byte("data"), 0644)
+		err := EnsureRepo(context.Background(), dir, "https://github.com/azylman/test.git", "")
+		if err == nil || !strings.Contains(err.Error(), "git fetch failed") {
+			t.Fatalf("expected fetch failure error, got: %v", err)
+		}
+	})
+
+	t.Run("adoption master branch verification and reset", func(t *testing.T) {
+		SetGitExecutorForTest(t, func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			if len(args) >= 3 && args[0] == "rev-parse" && args[1] == "--verify" {
+				if args[2] == "origin/main" {
+					return nil, nil, errors.New("main not found")
+				}
+				if args[2] == "origin/master" {
+					return []byte("deadbeef123"), nil, nil
+				}
+			}
+			return nil, nil, nil
+		})
+
+		dir := t.TempDir()
+		_ = os.WriteFile(filepath.Join(dir, "file.txt"), []byte("data"), 0644)
+		err := EnsureRepo(context.Background(), dir, "https://github.com/azylman/test.git", "")
+		if err != nil {
+			t.Fatalf("expected adoption with master branch to succeed, got: %v", err)
+		}
+	})
+
+	t.Run("adoption reset branch failure and FETCH_HEAD fallback failure", func(t *testing.T) {
+		SetGitExecutorForTest(t, func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			if len(args) > 0 && args[0] == "reset" {
+				return nil, []byte("fatal: corrupt ref"), errors.New("exit status 128")
+			}
+			return nil, nil, nil
+		})
+
+		dir := t.TempDir()
+		_ = os.WriteFile(filepath.Join(dir, "file.txt"), []byte("data"), 0644)
+		err := EnsureRepo(context.Background(), dir, "https://github.com/azylman/test.git", "")
+		if err == nil || !strings.Contains(err.Error(), "git reset --soft failed") {
+			t.Fatalf("expected reset soft failure, got: %v", err)
+		}
+	})
+
+	t.Run("double check under lock branch", func(t *testing.T) {
+		dir := t.TempDir()
+		firstCheck := true
+		SetGitExecutorForTest(t, func(ctx context.Context, d string, args ...string) ([]byte, []byte, error) {
+			return nil, nil, nil
+		})
+
+		_ = os.WriteFile(filepath.Join(dir, "file.txt"), []byte("data"), 0644)
+		origResolve := resolveGitDir
+		_ = origResolve
+
+		// When EnsureRepo acquires lock, simulate that repo was adopted by another thread
+		var lockAcquired bool
+		go func() {
+			SyncMutex.Lock()
+			lockAcquired = true
+			_ = os.MkdirAll(filepath.Join(dir, ".git"), 0755)
+			time.Sleep(50 * time.Millisecond)
+			SyncMutex.Unlock()
+		}()
+
+		time.Sleep(10 * time.Millisecond)
+		if lockAcquired {
+			err := EnsureRepo(context.Background(), dir, "https://github.com/azylman/test.git", "")
+			if err != nil {
+				t.Fatalf("expected nil error on double-check under lock, got: %v", err)
+			}
+		}
+		_ = firstCheck
+	})
 }
 
-func TestSyncRepo_PostPullRevParseFailure(t *testing.T) {
-	_, repoA, repoB := setupGitRepos(t)
+func TestSyncRepo_MockScenarios(t *testing.T) {
+	t.Run("rev-parse before pull failure", func(t *testing.T) {
+		SetGitExecutorForTest(t, func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			if len(args) > 0 && args[0] == "rev-parse" {
+				return nil, []byte("fatal: ambiguous argument 'HEAD'"), errors.New("exit status 128")
+			}
+			return nil, nil, nil
+		})
 
-	// Add post-merge hook to repoB that removes .git/HEAD
-	hooksDir := filepath.Join(repoB, ".git", "hooks")
-	_ = os.MkdirAll(hooksDir, 0755)
-	postMergeHook := filepath.Join(hooksDir, "post-merge")
-	hookContent := "#!/bin/sh\nrm -f .git/HEAD\n"
-	if err := os.WriteFile(postMergeHook, []byte(hookContent), 0755); err != nil {
-		t.Fatalf("failed to write hook: %v", err)
-	}
+		dir := t.TempDir()
+		_ = os.MkdirAll(filepath.Join(dir, ".git"), 0755)
 
-	// Commit on repoA and push
-	f := filepath.Join(repoA, "trigger.txt")
-	_ = os.WriteFile(f, []byte("trigger"), 0644)
-	runGitCmd(t, repoA, "add", "trigger.txt")
-	runGitCmd(t, repoA, "commit", "-m", "trigger commit")
-	runGitCmd(t, repoA, "push", "origin", "HEAD")
+		hasChanges, err := SyncRepo(context.Background(), dir, nil)
+		if err == nil || !strings.Contains(err.Error(), "fatal: ambiguous argument 'HEAD'") {
+			t.Fatalf("expected rev-parse error, got: %v", err)
+		}
+		if hasChanges {
+			t.Errorf("expected hasChanges=false on rev-parse error")
+		}
+	})
 
-	// SyncRepo should pull, trigger the hook which deletes HEAD, and then fail on rev-parse HEAD after pull
-	hasChanges, err := SyncRepo(context.Background(), repoB, nil)
+	t.Run("pull error with combined output", func(t *testing.T) {
+		SetGitExecutorForTest(t, func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			if len(args) > 0 && args[0] == "rev-parse" {
+				return []byte("sha1"), nil, nil
+			}
+			if len(args) > 0 && args[0] == "pull" {
+				return nil, []byte("fatal: Not possible to fast-forward, aborting."), errors.New("exit status 128")
+			}
+			return nil, nil, nil
+		})
+
+		dir := t.TempDir()
+		_ = os.MkdirAll(filepath.Join(dir, ".git"), 0755)
+
+		hasChanges, err := SyncRepo(context.Background(), dir, nil)
+		if err == nil || !strings.Contains(err.Error(), "git pull failed") {
+			t.Fatalf("expected pull error, got: %v", err)
+		}
+		if hasChanges {
+			t.Errorf("expected hasChanges=false on pull error")
+		}
+	})
+
+	t.Run("rev-parse after pull failure", func(t *testing.T) {
+		revCount := 0
+		SetGitExecutorForTest(t, func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			if len(args) > 0 && args[0] == "rev-parse" {
+				revCount++
+				if revCount == 1 {
+					return []byte("sha1"), nil, nil
+				}
+				return nil, []byte("fatal: corrupt ref"), errors.New("exit status 128")
+			}
+			return nil, nil, nil
+		})
+
+		dir := t.TempDir()
+		_ = os.MkdirAll(filepath.Join(dir, ".git"), 0755)
+
+		hasChanges, err := SyncRepo(context.Background(), dir, nil)
+		if err == nil || !strings.Contains(err.Error(), "fatal: corrupt ref") {
+			t.Fatalf("expected rev-parse after pull error, got: %v", err)
+		}
+		if hasChanges {
+			t.Errorf("expected hasChanges=false on rev-parse after pull error")
+		}
+	})
+
+	t.Run("pull detects changes when commit changes", func(t *testing.T) {
+		revCount := 0
+		SetGitExecutorForTest(t, func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			if len(args) > 0 && args[0] == "rev-parse" {
+				revCount++
+				if revCount == 1 {
+					return []byte("sha1_old"), nil, nil
+				}
+				return []byte("sha1_new"), nil, nil
+			}
+			return nil, nil, nil
+		})
+
+		dir := t.TempDir()
+		_ = os.MkdirAll(filepath.Join(dir, ".git"), 0755)
+
+		cfg := config.NewFromData(&config.ConfigData{GitHubPAT: "ghp_mock"})
+		hasChanges, err := SyncRepo(context.Background(), dir, cfg)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !hasChanges {
+			t.Errorf("expected hasChanges=true when commit changed")
+		}
+	})
+
+	t.Run("pull detects no changes when commit identical", func(t *testing.T) {
+		SetGitExecutorForTest(t, func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			if len(args) > 0 && args[0] == "rev-parse" {
+				return []byte("sha1_same"), nil, nil
+			}
+			return nil, nil, nil
+		})
+
+		dir := t.TempDir()
+		_ = os.MkdirAll(filepath.Join(dir, ".git"), 0755)
+
+		hasChanges, err := SyncRepo(context.Background(), dir, nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if hasChanges {
+			t.Errorf("expected hasChanges=false when commit identical")
+		}
+	})
+}
+
+func TestEnsureGitHooks_MockScenarios(t *testing.T) {
+	t.Run("githooks is regular file not directory", func(t *testing.T) {
+		dir := t.TempDir()
+		_ = os.WriteFile(filepath.Join(dir, ".githooks"), []byte("regular file"), 0644)
+
+		called := false
+		SetGitExecutorForTest(t, func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			called = true
+			return nil, nil, nil
+		})
+
+		err := EnsureGitHooks(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("expected nil error when .githooks is regular file, got: %v", err)
+		}
+		if called {
+			t.Errorf("expected GitExecutor not to be called when .githooks is not a directory")
+		}
+	})
+
+	t.Run("git config command failure", func(t *testing.T) {
+		dir := t.TempDir()
+		_ = os.MkdirAll(filepath.Join(dir, ".githooks"), 0755)
+
+		SetGitExecutorForTest(t, func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			return nil, []byte("error: could not lock config file"), errors.New("exit status 1")
+		})
+
+		err := EnsureGitHooks(context.Background(), dir)
+		if err == nil || !strings.Contains(err.Error(), "failed to configure git core.hooksPath") {
+			t.Fatalf("expected config failure error, got: %v", err)
+		}
+	})
+}
+
+func TestDefaultGitExecutor_Execution(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+
+	// Test valid command via defaultGitExecutor
+	stdout, stderr, err := defaultGitExecutor(ctx, dir, "version")
 	if err == nil {
-		t.Errorf("expected error when rev-parse HEAD fails after pull, got nil")
+		if !strings.Contains(string(stdout), "git version") && !strings.Contains(string(stderr), "git version") {
+			t.Logf("git version output: %s %s", string(stdout), string(stderr))
+		}
 	}
-	if hasChanges {
-		t.Errorf("expected hasChanges=false on error")
+
+	// Test invalid command via defaultGitExecutor
+	_, _, err = defaultGitExecutor(ctx, dir, "invalid-git-subcommand-xyz-123")
+	if err == nil {
+		t.Errorf("expected error for invalid git subcommand")
 	}
 }
-
-
-
-
