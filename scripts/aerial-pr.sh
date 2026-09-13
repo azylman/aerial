@@ -3,14 +3,14 @@ set -euo pipefail
 
 # scripts/aerial-pr.sh - Monorepo PR Automation & Continuous Integration Verifier
 # Safely clones azylman/aerial into ephemeral scratch space, verifies changes with scripts/verify.sh,
-# creates Pull Requests, polls GitHub Actions CI, and squash-merges once green.
+# creates Pull Requests, schedules follow-up checks via scheduler-mcp, and provides single-shot merge verification.
 
 REPO_OWNER="azylman"
 REPO_NAME="aerial"
 REPO_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}.git"
 DEFAULT_BRANCH="main"
 SIDE_SYNC_URL="${AERIAL_GITSYNC_URL:-http://aerial-gitsync:8080/sync}"
-DEFAULT_PR_CHECK_DELAY="13m"
+DEFAULT_PR_CHECK_DELAY="5m"
 
 cmd="${1:-}"
 if [ -n "$cmd" ]; then
@@ -71,115 +71,138 @@ init_scratch() {
 
 SCRATCH_DIR_CLEANUP=""
 
-monitor_and_merge_pr() {
+merge_pr() {
     local pr_num="${1:-}"
     local branch="${2:-}"
     local commit_sha="${3:-}"
 
-    if [ -z "$pr_num" ] || [ -z "$branch" ] || [ -z "$commit_sha" ]; then
-        echo "ERROR: pr_num, branch, and commit_sha are required for monitor." >&2
+    if [ -z "$pr_num" ] || ! [[ "$pr_num" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: Valid numeric pr_num required for merge." >&2
         exit 1
     fi
 
     local pr_url="https://github.com/${REPO_OWNER}/${REPO_NAME}/pull/${pr_num}"
 
-    # 6. Poll CI workflow runs (timeout: 900s for full monorepo build/test matrix)
-    local max_wait=900
-    local elapsed=0
-    local poll_interval=10
-    local has_registered_checks=0
-    local all_green=0
+    # 1. Fetch Pull Request details to check state and resolve branch/sha
+    local pr_raw
+    pr_raw=$(curl -s --retry 3 --retry-delay 2 --retry-connrefused -w "\n%{http_code}" -X GET \
+        -H "Authorization: token ${GITHUB_PAT}" \
+        -H "Accept: application/vnd.github.v3+json" \
+        "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/pulls/${pr_num}")
 
-    while [ $elapsed -lt $max_wait ]; do
-        local check_raw
-        check_raw=$(curl -s -w "\n%{http_code}" -X GET \
-            -H "Authorization: token ${GITHUB_PAT}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/actions/runs?head_sha=${commit_sha}")
+    local pr_code
+    pr_code=$(echo "$pr_raw" | tail -n1)
+    local pr_resp
+    pr_resp=$(echo "$pr_raw" | sed '$d')
 
-        local check_code
-        check_code=$(echo "$check_raw" | tail -n1)
-        local check_resp
-        check_resp=$(echo "$check_raw" | sed '$d')
-
-        if [ "$check_code" -ge 200 ] && [ "$check_code" -lt 300 ]; then
-            local total_count
-            total_count=$(echo "$check_resp" | jq -r '.total_count // 0')
-
-            if [ "$total_count" -gt 0 ]; then
-                has_registered_checks=1
-
-                local pending_count
-                pending_count=$(echo "$check_resp" | jq '[.workflow_runs[]? | select(.status != "completed")] | length')
-                local failure_count
-                failure_count=$(echo "$check_resp" | jq '[.workflow_runs[]? | select(.conclusion != null and .conclusion != "success" and .conclusion != "neutral" and .conclusion != "skipped")] | length')
-
-                echo "⏳ [aerial-pr] Waiting for GitHub Actions CI on PR #${pr_num} (${elapsed}s/${max_wait}s) - ${pending_count} pending, ${failure_count} failed checks..."
-
-                if [ "$failure_count" -gt 0 ]; then
-                    echo "ERROR: GitHub Actions workflow runs failed on PR #${pr_num}." >&2
-                    # Post comment to issues endpoint (general PR comments)
-                    curl -s -X POST \
-                        -H "Authorization: token ${GITHUB_PAT}" \
-                        -H "Accept: application/vnd.github.v3+json" \
-                        "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/issues/${pr_num}/comments" \
-                        -d '{"body":"Automated validation failed in CI. Closing PR and discarding scratch workspace."}' >/dev/null 2>&1 || true
-                    # Close PR
-                    curl -s -X PATCH \
-                        -H "Authorization: token ${GITHUB_PAT}" \
-                        -H "Accept: application/vnd.github.v3+json" \
-                        "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/pulls/${pr_num}" \
-                        -d '{"state":"closed"}' >/dev/null 2>&1 || true
-                    # Delete remote branch
-                    curl -s -X DELETE \
-                        -H "Authorization: token ${GITHUB_PAT}" \
-                        -H "Accept: application/vnd.github.v3+json" \
-                        "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/git/refs/heads/${branch}" >/dev/null 2>&1 || true
-                    exit 1
-                fi
-
-                if [ "$pending_count" -eq 0 ]; then
-                    all_green=1
-                    break
-                fi
-            else
-                echo "⏳ [aerial-pr] Waiting for GitHub Actions CI to register runs on PR #${pr_num} (${elapsed}s/${max_wait}s)..."
-                # If after 45 seconds no checks have ever registered, assume repo has no CI checks triggered
-                if [ $has_registered_checks -eq 0 ] && [ $elapsed -ge 45 ]; then
-                    all_green=1
-                    break
-                fi
-            fi
-        else
-            echo "⏳ [aerial-pr] Polling GitHub Actions CI on PR #${pr_num} (${elapsed}s/${max_wait}s) - HTTP ${check_code}..."
-        fi
-
-        sleep $poll_interval
-        elapsed=$((elapsed + poll_interval))
-    done
-
-    # CRITICAL CHECK: Verify all_green was attained before merging
-    if [ "$all_green" -ne 1 ]; then
-        echo "ERROR: CI checks timed out or never completed successfully after ${max_wait}s. Aborting merge." >&2
-        curl -s -X PATCH \
-            -H "Authorization: token ${GITHUB_PAT}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/pulls/${pr_num}" \
-            -d '{"state":"closed"}' >/dev/null 2>&1 || true
-        curl -s -X DELETE \
-            -H "Authorization: token ${GITHUB_PAT}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/git/refs/heads/${branch}" >/dev/null 2>&1 || true
+    if [ "$pr_code" -lt 200 ] || [ "$pr_code" -ge 300 ]; then
+        echo "{\"status\":\"error\",\"error_code\":${pr_code},\"message\":\"Failed to query PR #${pr_num}\"}" >&2
         exit 1
     fi
 
-    echo "✅ [aerial-pr] All GitHub Actions CI checks passed for PR #${pr_num} in ${elapsed}s."
+    local is_merged
+    is_merged=$(echo "$pr_resp" | jq -r '.merged // false')
+    if [ "$is_merged" = "true" ]; then
+        local merged_sha
+        merged_sha=$(echo "$pr_resp" | jq -r '.merge_commit_sha // empty')
+        echo "{\"status\":\"already_merged\",\"pr_url\":\"${pr_url}\",\"pr_number\":${pr_num},\"merged_sha\":\"${merged_sha}\"}"
+        exit 0
+    fi
 
-    # 7. Squash Merge Pull Request
-    echo "🔀 [aerial-pr] Squash-merging PR #${pr_num} into ${DEFAULT_BRANCH}..."
+    local state
+    state=$(echo "$pr_resp" | jq -r '.state // empty')
+    if [ "$state" = "closed" ]; then
+        echo "{\"status\":\"closed\",\"pr_url\":\"${pr_url}\",\"pr_number\":${pr_num},\"message\":\"Pull Request is closed without being merged\"}"
+        exit 1
+    fi
+
+    if [ -z "$branch" ]; then
+        branch=$(echo "$pr_resp" | jq -r '.head.ref // empty')
+    fi
+    if [ -z "$commit_sha" ]; then
+        commit_sha=$(echo "$pr_resp" | jq -r '.head.sha // empty')
+    fi
+
+    if [ -z "$branch" ] || [ -z "$commit_sha" ]; then
+        echo "ERROR: Could not resolve branch or head commit SHA for PR #${pr_num}." >&2
+        exit 1
+    fi
+
+    # Check for merge conflicts
+    local mergeable
+    mergeable=$(echo "$pr_resp" | jq -r '.mergeable')
+    local mergeable_state
+    mergeable_state=$(echo "$pr_resp" | jq -r '.mergeable_state // empty')
+    if [ "$mergeable" = "false" ] || [ "$mergeable_state" = "dirty" ]; then
+        echo "{\"status\":\"conflict\",\"pr_url\":\"${pr_url}\",\"pr_number\":${pr_num},\"error\":\"Pull request has merge conflicts with base branch\"}"
+        exit 1
+    fi
+
+    # 2. Check GitHub Actions CI runs for head_sha
+    local check_raw
+    check_raw=$(curl -s --retry 3 --retry-delay 2 --retry-connrefused -w "\n%{http_code}" -X GET \
+        -H "Authorization: token ${GITHUB_PAT}" \
+        -H "Accept: application/vnd.github.v3+json" \
+        "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/actions/runs?head_sha=${commit_sha}")
+
+    local check_code
+    check_code=$(echo "$check_raw" | tail -n1)
+    local check_resp
+    check_resp=$(echo "$check_raw" | sed '$d')
+
+    if [ "$check_code" -lt 200 ] || [ "$check_code" -ge 300 ]; then
+        echo "{\"status\":\"error\",\"error_code\":${check_code},\"message\":\"Failed to query CI runs for commit ${commit_sha}\"}" >&2
+        exit 1
+    fi
+
+    local total_count
+    total_count=$(echo "$check_resp" | jq -r '.total_count // 0')
+
+    # Guard: CI Registration Grace Period
+    # If no runs registered yet, check PR age. If PR was created < 60s ago, consider it pending registration.
+    local created_at
+    created_at=$(echo "$pr_resp" | jq -r '.created_at // empty')
+    local pr_created_epoch=0
+    if [ -n "$created_at" ]; then
+        pr_created_epoch=$(date -d "$created_at" +%s 2>/dev/null || date -jf "%Y-%m-%dT%H:%M:%SZ" "$created_at" +%s 2>/dev/null || echo 0)
+    fi
+    local now_epoch
+    now_epoch=$(date +%s)
+    local pr_age=$((now_epoch - pr_created_epoch))
+
+    if [ "$total_count" -eq 0 ]; then
+        if [ $pr_age -lt 60 ]; then
+            echo "{\"status\":\"pending\",\"pr_url\":\"${pr_url}\",\"pr_number\":${pr_num},\"pending_count\":1,\"failure_count\":0,\"total_runs\":0,\"message\":\"CI checks pending registration (PR age ${pr_age}s)\"}"
+            exit 2
+        fi
+        echo "{\"status\":\"pending\",\"pr_url\":\"${pr_url}\",\"pr_number\":${pr_num},\"pending_count\":0,\"failure_count\":0,\"total_runs\":0,\"message\":\"No CI runs registered yet after ${pr_age}s\"}"
+        exit 2
+    fi
+
+    local pending_count
+    pending_count=$(echo "$check_resp" | jq '[.workflow_runs[]? | select(.status != "completed")] | length')
+    local failure_count
+    failure_count=$(echo "$check_resp" | jq '[.workflow_runs[]? | select(.conclusion != null and .conclusion != "success" and .conclusion != "neutral" and .conclusion != "skipped")] | length')
+
+    if [ "$failure_count" -gt 0 ]; then
+        local failed_runs
+        failed_runs=$(echo "$check_resp" | jq '[.workflow_runs[]? | select(.conclusion != null and .conclusion != "success" and .conclusion != "neutral" and .conclusion != "skipped") | {name: .name, conclusion: .conclusion, html_url: .html_url}]')
+        echo "{\"status\":\"failed\",\"pr_url\":\"${pr_url}\",\"pr_number\":${pr_num},\"failure_count\":${failure_count},\"failed_runs\":${failed_runs}}"
+        exit 1
+    fi
+
+    if [ "$pending_count" -gt 0 ]; then
+        echo "{\"status\":\"pending\",\"pr_url\":\"${pr_url}\",\"pr_number\":${pr_num},\"pending_count\":${pending_count},\"failure_count\":0,\"total_runs\":${total_count}}"
+        exit 2
+    fi
+
+    # All CI runs are green (pending_count == 0 && failure_count == 0)
+    echo "✅ [aerial-pr] All GitHub Actions CI checks passed for PR #${pr_num}." >&2
+    echo "🔀 [aerial-pr] Squash-merging PR #${pr_num} into ${DEFAULT_BRANCH}..." >&2
+
     local merge_payload='{"merge_method":"squash"}'
     local merge_raw
-    merge_raw=$(curl -s -w "\n%{http_code}" -X PUT \
+    merge_raw=$(curl -s --retry 3 --retry-delay 2 --retry-connrefused -w "\n%{http_code}" -X PUT \
         -H "Authorization: token ${GITHUB_PAT}" \
         -H "Accept: application/vnd.github.v3+json" \
         "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/pulls/${pr_num}/merge" \
@@ -191,39 +214,45 @@ monitor_and_merge_pr() {
     merge_resp=$(echo "$merge_raw" | sed '$d')
 
     if [ "$merge_code" -lt 200 ] || [ "$merge_code" -ge 300 ]; then
-        echo "ERROR: Failed to merge Pull Request #${pr_num} (HTTP ${merge_code}): ${merge_resp}" >&2
+        local recheck_merged
+        recheck_merged=$(curl -s -H "Authorization: token ${GITHUB_PAT}" "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/pulls/${pr_num}" | jq -r '.merged // false')
+        if [ "$recheck_merged" = "true" ]; then
+            echo "{\"status\":\"already_merged\",\"pr_url\":\"${pr_url}\",\"pr_number\":${pr_num}}"
+            exit 0
+        fi
+        echo "{\"status\":\"error\",\"error_code\":${merge_code},\"message\":\"Failed to merge PR #${pr_num}: ${merge_resp}\"}" >&2
         exit 1
     fi
 
     local merged
     merged=$(echo "$merge_resp" | jq -r '.merged // false')
     if [ "$merged" != "true" ]; then
-        echo "ERROR: Pull Request #${pr_num} merge rejected: ${merge_resp}" >&2
+        echo "{\"status\":\"error\",\"message\":\"Pull Request #${pr_num} merge rejected: ${merge_resp}\"}" >&2
         exit 1
     fi
 
-    # Extract actual new squash merge SHA on main
     local merged_sha
     merged_sha=$(echo "$merge_resp" | jq -r '.sha // empty')
     if [ -z "$merged_sha" ]; then
         merged_sha="$commit_sha"
     fi
 
-    echo "🎉 [aerial-pr] Successfully merged PR #${pr_num} (commit ${merged_sha})."
+    echo "🎉 [aerial-pr] Successfully merged PR #${pr_num} (commit ${merged_sha})." >&2
 
-    # 8. Delete remote ephemeral feature branch
+    # Delete remote ephemeral feature branch
     curl -s -X DELETE \
         -H "Authorization: token ${GITHUB_PAT}" \
         -H "Accept: application/vnd.github.v3+json" \
         "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/git/refs/heads/${branch}" >/dev/null 2>&1 || true
 
-    # 9. Trigger fast-path sync on aerial-gitsync sidecar
+    # Trigger fast-path sync on aerial-gitsync sidecar
     local sync_status="skipped"
     if curl -s -f -X POST "$SIDE_SYNC_URL" >/dev/null 2>&1; then
         sync_status="synced"
     fi
 
     echo "{\"status\":\"merged\",\"pr_url\":\"${pr_url}\",\"pr_number\":${pr_num},\"merged_sha\":\"${merged_sha}\",\"sync_status\":\"${sync_status}\"}"
+    exit 0
 }
 
 schedule_pr_followup() {
@@ -242,14 +271,17 @@ schedule_pr_followup() {
         delay="${AERIAL_PR_CHECK_DELAY:-$DEFAULT_PR_CHECK_DELAY}"
     fi
 
+    local script_name
+    script_name="$(basename "$0")"
     local scheduler_url="${SCHEDULER_MCP_URL:-http://scheduler-mcp:8080/mcp}"
     local prompt
     prompt=$(cat <<EOF
 Check on the status of Pull Request #${pr_num} on ${REPO_OWNER}/${REPO_NAME} (${pr_url}) for commit: "${pr_title}".
-1. If the PR is already merged, confirm the successful merge and deployment to the user.
-2. If all CI checks passed and the PR is still open (e.g. background monitor terminated), immediately complete the squash-merge, delete the remote branch, trigger gitsync, and confirm deployment.
-3. If CI failed or was blocked, report the exact failure details to the user.
-4. If CI is still in progress, do not emit noisy chatter; quietly reschedule a 3m follow-up check via scheduler_schedule_once with target_id "${target_id}" and suppress response output.
+1. Inspect CI status and PR state by running:
+   scripts/${script_name} merge ${pr_num}
+2. If status is "merged" or "already_merged", confirm the successful merge and deployment to the user.
+3. If status is "pending", quietly reschedule a 2m follow-up check via scheduler_schedule_once with target_id "${target_id}" and suppress response output (empty stdout).
+4. If status is "failed" or "conflict", report the failure details to the user.
 EOF
 )
 
@@ -584,15 +616,7 @@ submit_scratch() {
         SCRATCH_DIR_CLEANUP=""
     fi
 
-    local script_path
-    script_path="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
-    local log_file="/tmp/aerial-pr-monitor-${pr_num}.log"
-
-    cd /tmp
-    nohup bash "$script_path" monitor "$pr_num" "$branch" "$commit_sha" < /dev/null > "$log_file" 2>&1 &
-    local monitor_pid=$!
-
-    echo "⚡ [aerial-pr] Asynchronous submission active. CI monitoring delegated to background PID ${monitor_pid} (log: ${log_file})."
+    echo "⚡ [aerial-pr] Asynchronous submission active. Follow-up check scheduled via scheduler-mcp."
 
     local sched_id=""
     local effective_delay="${check_delay:-${AERIAL_PR_CHECK_DELAY:-$DEFAULT_PR_CHECK_DELAY}}"
@@ -600,7 +624,7 @@ submit_scratch() {
         sched_id=$(schedule_pr_followup "$pr_num" "$pr_url" "$target_id" "$effective_delay" "$clean_title" | tail -n 1)
     fi
 
-    echo "{\"status\":\"submitted\",\"pr_url\":\"${pr_url}\",\"pr_number\":${pr_num},\"branch\":\"${branch}\",\"commit_sha\":\"${commit_sha}\",\"async\":true,\"monitor_pid\":${monitor_pid},\"scheduled_check\":\"${effective_delay}\",\"schedule_id\":\"${sched_id}\"}"
+    echo "{\"status\":\"submitted\",\"pr_url\":\"${pr_url}\",\"pr_number\":${pr_num},\"branch\":\"${branch}\",\"commit_sha\":\"${commit_sha}\",\"async\":true,\"scheduled_check\":\"${effective_delay}\",\"schedule_id\":\"${sched_id}\"}"
     return 0
 }
 
@@ -611,11 +635,11 @@ case "$cmd" in
     submit)
         submit_scratch "$@"
         ;;
-    monitor)
-        monitor_and_merge_pr "$@"
+    merge|monitor)
+        merge_pr "$@"
         ;;
     *)
-        echo "Usage: $0 {init|submit [-t <target_id>] [-d <delay>] [--no-schedule] [-b <body>|--body <body>|-f <file>|--body-file <file>] <scratch_dir> [commit_msg]|monitor <pr_num> <branch> <commit_sha>}" >&2
+        echo "Usage: $0 {init|submit [-t <target_id>] [-d <delay>] [--no-schedule] [-b <body>|--body <body>|-f <file>|--body-file <file>] <scratch_dir> [commit_msg]|merge <pr_num> [branch] [commit_sha]}" >&2
         exit 1
         ;;
 esac

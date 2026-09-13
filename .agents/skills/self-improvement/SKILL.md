@@ -88,7 +88,7 @@ Stage 5: Pre-Flight Verification & Pre-PR Diff Audit
    ▼
 Stage 6: Commit, Push & Asynchronous PR Deployment
          • Fast-path static pre-commit hook (< 1s)
-         • scripts/aerial-pr.sh submit (instant PR creation, background CI monitor)
+         • scripts/aerial-pr.sh submit (instant PR creation, scheduled follow-up via scheduler-mcp)
          • Report PR link, diff summary, and verification evidence directly
 ```
 
