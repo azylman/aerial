@@ -23,7 +23,7 @@ WORKDIR /build
 COPY go.mod go.sum* ./
 RUN go mod download
 
-COPY main.go proxy.go ./
+COPY main.go proxy.go pure.go ./
 
 # Build statically linked Go proxy
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /discord-mcp .
