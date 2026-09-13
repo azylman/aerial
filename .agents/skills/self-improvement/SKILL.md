@@ -31,9 +31,17 @@ Before making any changes, Aerial MUST determine the target repository:
 
 Whenever undertaking feature development, architectural changes, bug fixes, or system modifications, Aerial follows a **Tiered Engineering Workflow** scaled dynamically by the complexity and blast radius of the change.
 
-### The Three Complexity Tiers
+### The Four Complexity Tiers
 
-- **Tier 1: Targeted Fixes, Bugfixes & Tests (< 50 LOC, Single Package)**:
+- **Tier 0: Micro-Changes & Config Tweaks (≤ 5 LOC, Single-Line Changes)**:
+  - **Scope**: Single-line changes, configuration updates (`config.yaml`, environment overrides), prompt string adjustments, documentation/typo fixes.
+  - **Negative Scope & Blacklist (Auto-Escalate to Tier 1+)**: Strictly forbidden for SQL/database schemas, security/auth primitives, concurrency/mutex logic, Docker topology, or core runner loops. Touching any blacklisted domain immediately escalates to Tier 1+.
+  - **Plan Review**: **None (Bypassed)**. Zero subagent review overhead.
+  - **Human Gate**: Autonomous execution (no mandatory stop).
+  - **Coding**: Direct continuous implementation.
+  - **Pre-PR Gate**: Automated syntax/schema checks (`./scripts/verify.sh --staged` or YAML validation). Zero subagent diff review. Hard blocking invariant (zero `--no-verify`). Mandatory PR description still enforced. If diff > 5 LOC or verification fails, auto-escalate to Tier 1.
+
+- **Tier 1: Targeted Fixes, Bugfixes & Tests (5–50 LOC, Single Package)**:
   - **Scope**: Bug fixes, parameter/config tweaks, isolated test additions, pure function adjustments.
   - **Plan Review**: Solo Adversarial Systems Critic / Devil's Advocate (~30s).
   - **Human Gate**: Autonomous execution (no mandatory stop).
@@ -59,17 +67,18 @@ Whenever undertaking feature development, architectural changes, bug fixes, or s
 ### Universal Workflow Stages
 
 ```
-Stage 1: Implementation Plan (Lightweight for Tier 1; Formal for Tier 2; Full RFC for Tier 3)
+Stage 1: Implementation Plan (Bypassed for Tier 0; Lightweight for Tier 1; Formal for Tier 2; Full RFC for Tier 3)
    │
    ▼
 Stage 2: Tiered Plan Review (The Review Gate)
+   │     • Tier 0: Bypassed (Zero subagents dispatched)
    │     • Tier 1: Solo Devil's Advocate Critic (~30s)
    │     • Tier 2 & 3: Full 4-Expert Review Panel (3 Domain Specialists + 1 Devil's Advocate, ~45s)
    │     • Remediate all plan objections immediately
    │
    ▼
 Stage 3: Human Review Checkpoint (Tier 3 ONLY)
-   │     • Tier 1 & Tier 2: Bypassed autonomously (flow directly into Stage 4)
+   │     • Tier 0, Tier 1 & Tier 2: Bypassed autonomously (flow directly into Stage 4)
    │     • Tier 3: MANDATORY STOP — wait for explicit human approval before touching code
    │
    ▼
@@ -80,6 +89,7 @@ Stage 4: Autonomous Continuous Implementation (TDD)
    ▼
 Stage 5: Pre-Flight Verification & Pre-PR Diff Audit
    │     • Execute local verification runner (./scripts/verify.sh --staged)
+   │     • Tier 0: Direct syntax & automated pre-flight checks (Zero subagent diff review)
    │     • Tier 1: Direct verification & targeted package tests
    │     • Tier 2: Consolidated Devil's Advocate audit of unified git diff (~30s)
    │     • Tier 3: Consolidated Full 4-Expert Panel audit of unified git diff (~45s)
@@ -102,13 +112,15 @@ Stage 6: Commit, Push & Asynchronous PR Deployment
    git pull --rebase origin main
    ```
 3. **Draft Implementation Plan**:
-   - Write technical plan in `implementation_plan.md` (lightweight task list for Tier 1, full specification for Tier 2/3).
-   - Define exact schemas, state machines, component interactions, and API signatures.
+   - Tier 0: Omitted (proceed directly to implementation).
+   - Tier 1: Lightweight task list in `implementation_plan.md`.
+   - Tier 2/3: Full specification in `implementation_plan.md` defining exact schemas, state machines, component interactions, and API signatures.
 
 ---
 
 ### Stage 2: Tiered Plan Review
 Before modifying source code, Aerial MUST audit the plan according to the task's complexity tier:
+- **Tier 0**: **Bypassed completely**. Zero subagent review overhead.
 - **Tier 1**: Concurrently dispatch **exactly one subagent**: the **Adversarial Systems Critic / Devil's Advocate** to attack edge cases, regression risks, error handling, and invariant compliance (~30s).
 - **Tier 2 & Tier 3**: Concurrently dispatch the **4-expert review panel** via `invoke_subagent` (~45s):
   1. **Three Domain Specialists**: Tailored to the task (e.g. Concurrency Engineer, Systems Architect, Platform Specialist).
@@ -121,7 +133,7 @@ Before modifying source code, Aerial MUST audit the plan according to the task's
 ---
 
 ### Stage 3: Human Review Checkpoint (Tier 3 ONLY)
-- **Tier 1 & Tier 2 Tasks**: **Bypassed autonomously**. If the user requested an implementation/fix, Aerial directly incorporates review feedback and transitions immediately to Stage 4 without asking for permission.
+- **Tier 0, Tier 1 & Tier 2 Tasks**: **Bypassed autonomously**. If the user requested an implementation/fix, Aerial directly incorporates review feedback and transitions immediately to Stage 4 without asking for permission.
 - **Tier 3 Tasks**: **MANDATORY STOP**. For database schema migrations, service topology changes, breaking API updates, or high-blast-radius changes, present the synthesized panel findings and **STOP execution to obtain explicit user approval before touching code**.
 
 ---
@@ -154,6 +166,7 @@ Before modifying source code, Aerial MUST audit the plan according to the task's
    - Run targeted package tests (`go test -v ./pkg/...`).
 
 2. **Pre-PR Diff Audit**:
+   - **Tier 0**: Direct syntax/schema verification (Zero subagent diff review).
    - **Tier 1**: Direct local verification.
    - **Tier 2**: Dispatch a single **Devil's Advocate Critic** subagent to audit the complete, unified `git diff` against the approved plan (~30s). Resolve any identified regressions before commit.
    - **Tier 3**: Dispatch the **full 4-expert panel** to audit the complete, unified `git diff` (~45s).
