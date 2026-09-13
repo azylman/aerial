@@ -5,6 +5,12 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      force_all:
+        description: 'Force rebuild and push all container images'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -38,34 +44,24 @@ jobs:
               - 'GEMINI.md'
               - '.agents/**'
               - 'scripts/**'
-              - '.github/workflows/docker-publish.yml'
             scheduler-mcp:
               - 'scheduler-mcp/**'
-              - '.github/workflows/docker-publish.yml'
             discord-mcp:
               - 'discord-mcp/**'
-              - '.github/workflows/docker-publish.yml'
             docker-mcp:
               - 'docker-mcp/**'
-              - '.github/workflows/docker-publish.yml'
             github-mcp:
               - 'github-mcp/**'
-              - '.github/workflows/docker-publish.yml'
             dashboard:
               - 'dashboard/**'
-              - '.github/workflows/docker-publish.yml'
             docs:
               - 'docs-service/**'
-              - '.github/workflows/docker-publish.yml'
             proxy:
               - 'proxy/**'
-              - '.github/workflows/docker-publish.yml'
             ollama:
               - 'docker/ollama/**'
-              - '.github/workflows/docker-publish.yml'
             gitsync:
               - 'sidecars/gitsync/**'
-              - '.github/workflows/docker-publish.yml'
 
       - name: Compute Dynamic Build Matrix
         id: set-matrix
@@ -97,7 +93,8 @@ jobs:
               { service: "gitsync", context: ".", file: "./sidecars/gitsync/Dockerfile", image_name: "aerial-gitsync" }
             ];
 
-            const active = catalog.filter(c => filter[c.service] === "true");
+            const forceAll = "${{ inputs.force_all }}" === "true";
+            const active = forceAll ? catalog : catalog.filter(c => filter[c.service] === "true");
             const fs = require("fs");
             fs.appendFileSync(process.env.GITHUB_OUTPUT, `matrix=${JSON.stringify(active)}\n`);
             fs.appendFileSync(process.env.GITHUB_OUTPUT, `has_builds=${active.length > 0}\n`);
