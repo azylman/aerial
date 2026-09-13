@@ -9,6 +9,7 @@ import (
 )
 
 func TestConfigureSysProcAttr_Windows(t *testing.T) {
+	t.Parallel()
 	cmd := exec.Command("cmd.exe")
 	configureSysProcAttr(cmd)
 	if cmd.WaitDelay != 3*time.Second {

@@ -15,6 +15,7 @@ import (
 )
 
 func TestParseAgyOutput(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name       string
 		stdout     string
@@ -145,6 +146,7 @@ func TestParseAgyOutput(t *testing.T) {
 }
 
 func TestActivityTap_ChunkSplittingAndFiltering(t *testing.T) {
+	t.Parallel()
 	var outBuf bytes.Buffer
 	actWriter := NewActivityWriter("")
 	tap := newActivityTap(&outBuf, actWriter, true, nil)
@@ -189,6 +191,7 @@ func TestActivityTap_ChunkSplittingAndFiltering(t *testing.T) {
 }
 
 func TestExtractSessionID_NDJSONInit(t *testing.T) {
+	t.Parallel()
 	targetUUID := "88888888-9999-aaaa-bbbb-cccccccccccc"
 	ndjsonOutput := fmt.Sprintf("{\"event\":\"init\",\"conversation_id\":%q}\n{\"event\":\"step_update\"}\n", targetUUID)
 	extracted := ExtractSessionID(ndjsonOutput, time.Now())
@@ -198,6 +201,7 @@ func TestExtractSessionID_NDJSONInit(t *testing.T) {
 }
 
 func TestIsSilentSentinel(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		stdout   string
@@ -224,6 +228,7 @@ func TestIsSilentSentinel(t *testing.T) {
 }
 
 func TestClassifyError(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name                 string
 		exitCode             int
@@ -548,6 +553,7 @@ func TestClassifyError(t *testing.T) {
 }
 
 func TestExtractSessionID(t *testing.T) {
+	t.Parallel()
 	stderr1 := "2026-08-28T10:00:00Z Starting conversation update stream for 12345678-abcd-1234-abcd-1234567890ab\nConnecting..."
 	id1 := ExtractSessionID(stderr1, time.Now())
 	if id1 != "12345678-abcd-1234-abcd-1234567890ab" {
@@ -599,16 +605,17 @@ func createMockAgyScript(t *testing.T, dir, script string) string {
 }
 
 func TestRunAgyWithEcho(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	bin := getHelperProcessBin(t)
-	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
-	t.Setenv("MOCK_MODE", "echo")
+	opts := DefaultWatchdogOptions(1)
+	opts.ExtraEnv = append(opts.ExtraEnv, "GO_WANT_HELPER_PROCESS=1", "MOCK_MODE=echo")
 
-	stdout, stderr, exitCode, err := RunAgy(ctx, bin, "Hello aerial", "", "", "", 1)
+	stdout, stderr, exitCode, err := RunAgyWithOptions(ctx, bin, "Hello aerial", "", "", "", opts)
 	if err != nil {
-		t.Fatalf("RunAgy failed: %v", err)
+		t.Fatalf("RunAgyWithOptions failed: %v", err)
 	}
 	if exitCode != 0 {
 		t.Errorf("Expected exitCode 0, got %d", exitCode)
@@ -619,6 +626,7 @@ func TestRunAgyWithEcho(t *testing.T) {
 }
 
 func TestActivityWriter_ThreadSafetyAndSessionDiscovery(t *testing.T) {
+	t.Parallel()
 	w := NewActivityWriter("")
 	if w.SessionID() != "" {
 		t.Errorf("expected empty initial session ID, got %q", w.SessionID())
@@ -693,16 +701,16 @@ func TestActivityWriter_ThreadSafetyAndSessionDiscovery(t *testing.T) {
 }
 
 func TestRunAgyWithWatchdog_InactivityTimeout(t *testing.T) {
-	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
+	t.Parallel()
 	ctx := context.Background()
 	tmpHome := t.TempDir()
 	bin := getHelperProcessBin(t)
 	opts := WatchdogOptions{
 		HomeDir:           tmpHome,
-		InactivityTimeout: 30 * time.Millisecond,
+		InactivityTimeout: 150 * time.Millisecond,
 		MaxDuration:       2 * time.Second,
-		PollInterval:      5 * time.Millisecond,
-		ExtraEnv:          []string{"MOCK_MODE=hang"},
+		PollInterval:      10 * time.Millisecond,
+		ExtraEnv:          []string{"GO_WANT_HELPER_PROCESS=1", "MOCK_MODE=hang"},
 	}
 
 	stdout, stderr, exitCode, err := RunAgyWithWatchdog(
@@ -728,7 +736,7 @@ func TestRunAgyWithWatchdog_InactivityTimeout(t *testing.T) {
 }
 
 func TestRunAgyWithWatchdog_ActiveStderrHeartbeat(t *testing.T) {
-	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
+	t.Parallel()
 	ctx := context.Background()
 	tmpHome := t.TempDir()
 	bin := getHelperProcessBin(t)
@@ -738,7 +746,7 @@ func TestRunAgyWithWatchdog_ActiveStderrHeartbeat(t *testing.T) {
 		InactivityTimeout: 200 * time.Millisecond,
 		MaxDuration:       5 * time.Second,
 		PollInterval:      10 * time.Millisecond,
-		ExtraEnv:          []string{"MOCK_MODE=pulse_stderr", "MOCK_PULSES=3"},
+		ExtraEnv:          []string{"GO_WANT_HELPER_PROCESS=1", "MOCK_MODE=pulse_stderr", "MOCK_PULSES=3"},
 	}
 
 	stdout, stderr, exitCode, err := RunAgyWithWatchdog(
@@ -766,7 +774,7 @@ func TestRunAgyWithWatchdog_ActiveStderrHeartbeat(t *testing.T) {
 }
 
 func TestRunAgyWithWatchdog_ActiveStdoutHeartbeat(t *testing.T) {
-	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
+	t.Parallel()
 	ctx := context.Background()
 	tmpHome := t.TempDir()
 	bin := getHelperProcessBin(t)
@@ -776,7 +784,7 @@ func TestRunAgyWithWatchdog_ActiveStdoutHeartbeat(t *testing.T) {
 		InactivityTimeout: 200 * time.Millisecond,
 		MaxDuration:       5 * time.Second,
 		PollInterval:      10 * time.Millisecond,
-		ExtraEnv:          []string{"MOCK_MODE=pulse_stdout", "MOCK_PULSES=3"},
+		ExtraEnv:          []string{"GO_WANT_HELPER_PROCESS=1", "MOCK_MODE=pulse_stdout", "MOCK_PULSES=3"},
 	}
 
 	stdout, stderr, exitCode, err := RunAgyWithWatchdog(
@@ -804,7 +812,7 @@ func TestRunAgyWithWatchdog_ActiveStdoutHeartbeat(t *testing.T) {
 }
 
 func TestRunAgyWithWatchdog_CustomTranscriptDirs(t *testing.T) {
-	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
+	t.Parallel()
 	ctx := context.Background()
 	tempDir := t.TempDir()
 	bin := getHelperProcessBin(t)
@@ -821,7 +829,7 @@ func TestRunAgyWithWatchdog_CustomTranscriptDirs(t *testing.T) {
 		MaxDuration:       5 * time.Second,
 		PollInterval:      10 * time.Millisecond,
 		TranscriptDirs:    []string{filepath.Join(tempDir, "custom-logs")},
-		ExtraEnv:          []string{"MOCK_MODE=pulse_file", "MOCK_LOG_FILE=" + transcriptFile, "MOCK_PULSES=3"},
+		ExtraEnv:          []string{"GO_WANT_HELPER_PROCESS=1", "MOCK_MODE=pulse_file", "MOCK_LOG_FILE=" + transcriptFile, "MOCK_PULSES=3"},
 	}
 
 	stdout, stderr, exitCode, err := RunAgyWithWatchdog(
@@ -849,7 +857,7 @@ func TestRunAgyWithWatchdog_CustomTranscriptDirs(t *testing.T) {
 }
 
 func TestRunAgyWithWatchdog_TranscriptHeartbeat(t *testing.T) {
-	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
+	t.Parallel()
 	ctx := context.Background()
 	testSessionID := "test-transcript-session-12345"
 	tempDir := t.TempDir()
@@ -867,7 +875,7 @@ func TestRunAgyWithWatchdog_TranscriptHeartbeat(t *testing.T) {
 		MaxDuration:       5 * time.Second,
 		PollInterval:      10 * time.Millisecond,
 		TranscriptDirs:    []string{filepath.Join(tempDir, ".gemini", "antigravity-cli", "brain")},
-		ExtraEnv:          []string{"MOCK_MODE=pulse_file", "MOCK_LOG_FILE=" + transcriptFile, "MOCK_PULSES=3"},
+		ExtraEnv:          []string{"GO_WANT_HELPER_PROCESS=1", "MOCK_MODE=pulse_file", "MOCK_LOG_FILE=" + transcriptFile, "MOCK_PULSES=3"},
 	}
 
 	stdout, stderr, exitCode, err := RunAgyWithWatchdog(
@@ -895,7 +903,7 @@ func TestRunAgyWithWatchdog_TranscriptHeartbeat(t *testing.T) {
 }
 
 func TestRunAgyWithWatchdog_BackgroundTaskLogHeartbeat(t *testing.T) {
-	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
+	t.Parallel()
 	ctx := context.Background()
 	testSessionID := "test-task-session-12345"
 	tempDir := t.TempDir()
@@ -913,7 +921,7 @@ func TestRunAgyWithWatchdog_BackgroundTaskLogHeartbeat(t *testing.T) {
 		MaxDuration:       5 * time.Second,
 		PollInterval:      10 * time.Millisecond,
 		TranscriptDirs:    []string{filepath.Join(tempDir, ".gemini", "antigravity-cli", "brain")},
-		ExtraEnv:          []string{"MOCK_MODE=pulse_file", "MOCK_LOG_FILE=" + taskLog, "MOCK_PULSES=3"},
+		ExtraEnv:          []string{"GO_WANT_HELPER_PROCESS=1", "MOCK_MODE=pulse_file", "MOCK_LOG_FILE=" + taskLog, "MOCK_PULSES=3"},
 	}
 
 	stdout, stderr, exitCode, err := RunAgyWithWatchdog(
@@ -941,7 +949,7 @@ func TestRunAgyWithWatchdog_BackgroundTaskLogHeartbeat(t *testing.T) {
 }
 
 func TestRunAgyWithWatchdog_BackgroundTaskLogStall_Timeout(t *testing.T) {
-	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
+	t.Parallel()
 	ctx := context.Background()
 	testSessionID := "test-task-stall-6789"
 	tempDir := t.TempDir()
@@ -955,11 +963,11 @@ func TestRunAgyWithWatchdog_BackgroundTaskLogStall_Timeout(t *testing.T) {
 	taskLog := filepath.Join(tasksDir, "task-1.log")
 
 	opts := WatchdogOptions{
-		InactivityTimeout: 60 * time.Millisecond,
+		InactivityTimeout: 150 * time.Millisecond,
 		MaxDuration:       2 * time.Second,
-		PollInterval:      5 * time.Millisecond,
+		PollInterval:      10 * time.Millisecond,
 		TranscriptDirs:    []string{filepath.Join(tempDir, ".gemini", "antigravity-cli", "brain")},
-		ExtraEnv:          []string{"MOCK_MODE=stall_file", "MOCK_LOG_FILE=" + taskLog, "MOCK_STALL_MS=150"},
+		ExtraEnv:          []string{"GO_WANT_HELPER_PROCESS=1", "MOCK_MODE=stall_file", "MOCK_LOG_FILE=" + taskLog, "MOCK_STALL_MS=300"},
 	}
 
 	stdout, stderr, exitCode, err := RunAgyWithWatchdog(
@@ -985,16 +993,16 @@ func TestRunAgyWithWatchdog_BackgroundTaskLogStall_Timeout(t *testing.T) {
 }
 
 func TestRunAgyWithWatchdog_MaxDuration(t *testing.T) {
-	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
+	t.Parallel()
 	ctx := context.Background()
 	tmpHome := t.TempDir()
 	bin := getHelperProcessBin(t)
 	opts := WatchdogOptions{
 		HomeDir:           tmpHome,
 		InactivityTimeout: 500 * time.Millisecond,
-		MaxDuration:       30 * time.Millisecond,
-		PollInterval:      5 * time.Millisecond,
-		ExtraEnv:          []string{"MOCK_MODE=hang"},
+		MaxDuration:       150 * time.Millisecond,
+		PollInterval:      10 * time.Millisecond,
+		ExtraEnv:          []string{"GO_WANT_HELPER_PROCESS=1", "MOCK_MODE=hang"},
 	}
 
 	stdout, stderr, exitCode, err := RunAgyWithWatchdog(
@@ -1020,6 +1028,7 @@ func TestRunAgyWithWatchdog_MaxDuration(t *testing.T) {
 }
 
 func TestClassifyError_WatchdogInactivityNotTransient(t *testing.T) {
+	t.Parallel()
 	stderr := "Starting conversation update stream for uuid-123\n[watchdog] inactivity timeout exceeded (5m without output or transcript update)"
 	isFailure, isTransient, isSessionCorruption, errDetail := ClassifyError(-1, "", stderr)
 
@@ -1038,6 +1047,7 @@ func TestClassifyError_WatchdogInactivityNotTransient(t *testing.T) {
 }
 
 func TestClassifyError_WatchdogMaxDurationNotTransient(t *testing.T) {
+	t.Parallel()
 	stderr := "Starting conversation update stream for uuid-123\n[watchdog] max duration exceeded (60m total duration cap)"
 	isFailure, isTransient, isSessionCorruption, errDetail := ClassifyError(-1, "", stderr)
 
@@ -1056,6 +1066,7 @@ func TestClassifyError_WatchdogMaxDurationNotTransient(t *testing.T) {
 }
 
 func TestIsInactivityTimeout(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		errDetail string
@@ -1117,6 +1128,7 @@ func TestIsInactivityTimeout(t *testing.T) {
 }
 
 func TestClassifyError_Exit0_ResponseDiscussingContextLimit_NotCorrupt(t *testing.T) {
+	t.Parallel()
 	stdout := `{"conversation_id":"11111111-2222-3333-4444-555555555555","status":"SUCCESS","response":"The maximum context length in tokens is 1 million. When context window exceeded occurs, the system rotates sessions."}`
 	isFailure, isTransient, isCorrupt, errDetail := ClassifyError(0, stdout, "")
 	if isFailure || isTransient || isCorrupt {
@@ -1125,6 +1137,7 @@ func TestClassifyError_Exit0_ResponseDiscussingContextLimit_NotCorrupt(t *testin
 }
 
 func TestExtractSessionID_StrictUUID_IgnoresCommonWords(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		stderr   string
@@ -1167,6 +1180,7 @@ func TestExtractSessionID_StrictUUID_IgnoresCommonWords(t *testing.T) {
 }
 
 func TestActivityWriter_ChunkBoundaryUUID(t *testing.T) {
+	t.Parallel()
 	w := NewActivityWriter("")
 	chunk1 := []byte("Some logs... Starting conversation update stream for 12345678-abcd-")
 	chunk2 := []byte("ef01-2345-6789abcdef01 and more logs...")
@@ -1184,6 +1198,7 @@ func TestActivityWriter_ChunkBoundaryUUID(t *testing.T) {
 }
 
 func TestIsQuotaPause(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		errDetail string
@@ -1239,6 +1254,7 @@ func TestIsQuotaPause(t *testing.T) {
 }
 
 func TestExtractQuotaResetDuration(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		errDetail string
@@ -1302,6 +1318,7 @@ func TestExtractQuotaResetDuration(t *testing.T) {
 }
 
 func TestActivityWriter_RawUUIDWithoutPrefix(t *testing.T) {
+	t.Parallel()
 	w := NewActivityWriter("")
 	// Invalid UUID in text
 	_, _ = w.Write([]byte("some random text with 12345678-abcd-ef01-2345-6789abcdef0z invalid uuid"))
@@ -1317,7 +1334,7 @@ func TestActivityWriter_RawUUIDWithoutPrefix(t *testing.T) {
 }
 
 func TestRunAgyWithWatchdog_OptionDefaultsAndEdgeCases(t *testing.T) {
-	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
+	t.Parallel()
 	ctx := context.Background()
 	tmpHome := t.TempDir()
 	bin := getHelperProcessBin(t)
@@ -1334,6 +1351,7 @@ func TestRunAgyWithWatchdog_OptionDefaultsAndEdgeCases(t *testing.T) {
 		InactivityTimeout: 2 * time.Second,
 		MaxDuration:       30 * time.Second,
 		PollInterval:      10 * time.Millisecond,
+		ExtraEnv:          []string{"GO_WANT_HELPER_PROCESS=1"},
 		TranscriptDirs: []string{
 			filepath.Join(t.TempDir(), "%s"),
 			filepath.Join(t.TempDir(), "{session}"),
@@ -1353,7 +1371,7 @@ func TestRunAgyWithWatchdog_OptionDefaultsAndEdgeCases(t *testing.T) {
 		InactivityTimeout: 1 * time.Second,
 		MaxDuration:       2 * time.Second,
 		PollInterval:      10 * time.Millisecond,
-		ExtraEnv:          []string{"MOCK_MODE=model_err"},
+		ExtraEnv:          []string{"GO_WANT_HELPER_PROCESS=1", "MOCK_MODE=model_err"},
 	})
 	if exitCodeErr != 1 {
 		t.Errorf("expected exitCode 1, got %d", exitCodeErr)
@@ -1375,7 +1393,7 @@ func TestRunAgyWithWatchdog_OptionDefaultsAndEdgeCases(t *testing.T) {
 	stdoutTarget, _, exitCodeTarget, errTarget := RunAgyWithWatchdog(ctx, bin, "test prompt", "sess-123", "", "gemini-pro", WatchdogOptions{
 		HomeDir:  tmpHome,
 		TargetID: "123456789012345678",
-		ExtraEnv: []string{"MOCK_MODE=target"},
+		ExtraEnv: []string{"GO_WANT_HELPER_PROCESS=1", "MOCK_MODE=target"},
 	})
 	if errTarget != nil || exitCodeTarget != 0 {
 		t.Fatalf("RunAgyWithWatchdog failed with TargetID: %v", errTarget)
@@ -1386,6 +1404,7 @@ func TestRunAgyWithWatchdog_OptionDefaultsAndEdgeCases(t *testing.T) {
 }
 
 func TestExtractSessionID_AdditionalBranches(t *testing.T) {
+	t.Parallel()
 	// Empty stderr
 	if id := ExtractSessionID("", time.Now()); id != "" {
 		t.Errorf("expected empty string for empty stderr, got %q", id)
@@ -1411,6 +1430,7 @@ func TestExtractSessionID_AdditionalBranches(t *testing.T) {
 }
 
 func TestIsInactivityTimeout_AdditionalWatchdogBranches(t *testing.T) {
+	t.Parallel()
 	if !IsInactivityTimeout("[watchdog]", "inactivity detected") {
 		t.Errorf("expected true when [watchdog] in errDetail and inactivity in stderr")
 	}
@@ -1429,6 +1449,7 @@ func TestIsInactivityTimeout_AdditionalWatchdogBranches(t *testing.T) {
 }
 
 func TestExtractWatchdogDetail_EdgeCases(t *testing.T) {
+	t.Parallel()
 	// Line > 200 chars truncation
 	longLine := "[watchdog] " + strings.Repeat("x", 250)
 	detail := extractWatchdogDetail(longLine, "fallback")
@@ -1444,6 +1465,7 @@ func TestExtractWatchdogDetail_EdgeCases(t *testing.T) {
 }
 
 func TestClassifyError_AdditionalScenarios(t *testing.T) {
+	t.Parallel()
 	// 1. exitCode 0 with empty stdout and empty stderr -> process produced empty stdout
 	isFail, isTrans, isCorrupt, errDetail := ClassifyError(0, "", "")
 	if !isFail || !isTrans || isCorrupt || errDetail != "process produced empty stdout" {
@@ -1534,6 +1556,7 @@ func TestClassifyError_AdditionalScenarios(t *testing.T) {
 }
 
 func TestExtractErrorDetail_FilterNoiseAndTruncation(t *testing.T) {
+	t.Parallel()
 	// Filter noise lines: Starting conversation update stream, DEBUG, INFO, blanks
 	stderrWithNoise := `
 Starting conversation update stream for session-123
@@ -1563,6 +1586,7 @@ Actual error occurred here
 }
 
 func TestExtractQuotaResetDuration_ClampingAndEdgeCases(t *testing.T) {
+	t.Parallel()
 	// Clamped < 10s -> 30s
 	durShort, exactShort := ExtractQuotaResetDuration("Resets in 5s.", "")
 	if !exactShort || durShort != 30*time.Second {
@@ -1583,6 +1607,7 @@ func TestExtractQuotaResetDuration_ClampingAndEdgeCases(t *testing.T) {
 }
 
 func TestStepUpdateEvent_Resolved(t *testing.T) {
+	t.Parallel()
 	// Test nil safety
 	var nilEv *StepUpdateEvent
 	if nilEv.ResolvedType() != "" || nilEv.ResolvedToolName() != "" {
@@ -1631,6 +1656,7 @@ func TestStepUpdateEvent_Resolved(t *testing.T) {
 }
 
 func TestActivityTap_StepUpdateHandler(t *testing.T) {
+	t.Parallel()
 	var events []*StepUpdateEvent
 	handler := func(ev *StepUpdateEvent) {
 		events = append(events, ev)
@@ -1680,6 +1706,7 @@ func TestActivityTap_StepUpdateHandler(t *testing.T) {
 }
 
 func TestExtractCommandName(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		input    string
 		expected string
@@ -1733,6 +1760,7 @@ func TestExtractCommandName(t *testing.T) {
 }
 
 func TestStepUpdateEvent_ResolvedCommandName(t *testing.T) {
+	t.Parallel()
 	var nilEv *StepUpdateEvent
 	if nilEv.ResolvedCommandName() != "" {
 		t.Errorf("expected empty string for nil event")
@@ -1807,6 +1835,7 @@ func TestStepUpdateEvent_ResolvedCommandName(t *testing.T) {
 }
 
 func TestRunAgyWithOptions(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	bin := getHelperProcessBin(t)
 	opts := WatchdogOptions{
@@ -1828,6 +1857,7 @@ func TestRunAgyWithOptions(t *testing.T) {
 }
 
 func TestTokenizeCommandLine_EdgeCases(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		input string
 		want  []string
@@ -1869,6 +1899,7 @@ func TestTokenizeCommandLine_EdgeCases(t *testing.T) {
 }
 
 func TestIsPOSIXIdentifier(t *testing.T) {
+	t.Parallel()
 	valid := []string{"foo", "Foo", "_bar", "_", "FOO_BAR_123", "a1"}
 	for _, s := range valid {
 		if !isPOSIXIdentifier(s) {
@@ -1885,6 +1916,7 @@ func TestIsPOSIXIdentifier(t *testing.T) {
 }
 
 func TestActivityTap_FlushWithPendingContent(t *testing.T) {
+	t.Parallel()
 	var outBuf bytes.Buffer
 	actWriter := NewActivityWriter("")
 	var handledEvents []*StepUpdateEvent
@@ -1914,6 +1946,7 @@ func TestActivityTap_FlushWithPendingContent(t *testing.T) {
 }
 
 func TestActivityWriter_SetSessionID_AlreadySet(t *testing.T) {
+	t.Parallel()
 	w := NewActivityWriter("")
 	uuid1 := "11111111-2222-3333-4444-555555555555"
 	uuid2 := "99999999-8888-7777-6666-555555555555"
@@ -1936,6 +1969,7 @@ func TestActivityWriter_SetSessionID_AlreadySet(t *testing.T) {
 }
 
 func TestParseAgyOutput_RootResultAndFallback(t *testing.T) {
+	t.Parallel()
 	// Root result format: event is "result", but fields are top-level
 	rootResult := `{"event":"result","status":"SUCCESS","response":"all good"}`
 	resp, err := ParseAgyOutput(rootResult)
@@ -1958,12 +1992,14 @@ func TestParseAgyOutput_RootResultAndFallback(t *testing.T) {
 }
 
 func TestIsNonTransientError_ForkExecPermissionDenied(t *testing.T) {
+	t.Parallel()
 	if !isNonTransientError("fork/exec /bin/sh: permission denied") {
 		t.Errorf("expected true for fork/exec permission denied")
 	}
 }
 
 func TestActivityTap_Branches(t *testing.T) {
+	t.Parallel()
 	tap := newActivityTap(nil, nil, false, nil)
 	n, err := tap.Write(nil)
 	if n != 0 || err != nil {

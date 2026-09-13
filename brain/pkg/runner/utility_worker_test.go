@@ -12,6 +12,7 @@ import (
 )
 
 func TestWorkerInstance_LifecycleAndExecution(t *testing.T) {
+	t.Parallel()
 	w, harness := NewMockStreamWorker(t, MockStreamWorkerConfig{})
 	defer harness.Close()
 	defer w.Close()
@@ -52,6 +53,7 @@ func TestWorkerInstance_LifecycleAndExecution(t *testing.T) {
 }
 
 func TestWorkerInstance_BrokenPipeDetection(t *testing.T) {
+	t.Parallel()
 	w, harness := NewMockStreamWorker(t, MockStreamWorkerConfig{})
 	defer harness.Close()
 	defer w.Close()
@@ -77,6 +79,7 @@ func TestWorkerInstance_BrokenPipeDetection(t *testing.T) {
 }
 
 func TestWorkerInstance_ContextCancellation(t *testing.T) {
+	t.Parallel()
 	w, harness := NewMockStreamWorker(t, MockStreamWorkerConfig{
 		SleepDelay: 5 * time.Second,
 	})
@@ -99,6 +102,7 @@ func TestWorkerInstance_ContextCancellation(t *testing.T) {
 }
 
 func TestWorkerInstance_RSSBytesEdgeCases(t *testing.T) {
+	t.Parallel()
 	// 1. nil cmd
 	w1 := &WorkerInstance{}
 	if rss := w1.RSSBytes(); rss != 0 {
@@ -130,6 +134,7 @@ func TestWorkerInstance_RSSBytesEdgeCases(t *testing.T) {
 }
 
 func TestWorkerInstance_SpawnFailures(t *testing.T) {
+	t.Parallel()
 	bin := getHelperProcessBin(t)
 
 	// 1. Invalid binary path
@@ -167,6 +172,7 @@ func TestWorkerInstance_SpawnFailures(t *testing.T) {
 }
 
 func TestStreamIO_NilSafety(t *testing.T) {
+	t.Parallel()
 	if err := WriteWorkerTurn(nil, "foo"); err == nil {
 		t.Error("expected error writing to nil writer")
 	}
@@ -176,6 +182,7 @@ func TestStreamIO_NilSafety(t *testing.T) {
 }
 
 func TestWorkerInstance_DiskPurgeOnClose(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	w, harness := NewMockStreamWorker(t, MockStreamWorkerConfig{
 		Roots: []string{tmpDir},
@@ -197,6 +204,7 @@ func TestWorkerInstance_DiskPurgeOnClose(t *testing.T) {
 }
 
 func TestWorkerInstance_RSSBytesLive(t *testing.T) {
+	t.Parallel()
 	if os.Getenv("GOOS") == "windows" || filepath.Separator == '\\' {
 		t.Skip("RSS /proc/statm inspection is only available on Linux")
 	}
@@ -209,6 +217,7 @@ func TestWorkerInstance_RSSBytesLive(t *testing.T) {
 }
 
 func TestWorkerInstance_SpawnWithAPIKeyAndHandshakeCancel(t *testing.T) {
+	t.Parallel()
 	bin := getHelperProcessBin(t)
 	opts := WorkerOptions{
 		AgyBin:   bin,
@@ -239,6 +248,7 @@ func TestWorkerInstance_SpawnWithAPIKeyAndHandshakeCancel(t *testing.T) {
 }
 
 func TestWorkerInstance_ExecuteWriteError(t *testing.T) {
+	t.Parallel()
 	w, harness := NewMockStreamWorker(t, MockStreamWorkerConfig{})
 	defer harness.Close()
 	defer w.Close()
@@ -252,6 +262,7 @@ func TestWorkerInstance_ExecuteWriteError(t *testing.T) {
 }
 
 func TestWorkerInstance_ParseErrorOnResult(t *testing.T) {
+	t.Parallel()
 	w, harness := NewMockStreamWorker(t, MockStreamWorkerConfig{
 		BadResult: true,
 	})

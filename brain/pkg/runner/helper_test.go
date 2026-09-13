@@ -17,9 +17,18 @@ import (
 )
 
 func init() {
-	if os.Getenv("GO_WANT_HELPER_PROCESS") == "1" {
+	if os.Getenv("GO_WANT_HELPER_PROCESS") == "1" || isTestHelperArgs() {
 		runHelperProcess()
 	}
+}
+
+func isTestHelperArgs() bool {
+	for _, arg := range os.Args[1:] {
+		if arg == "--dangerously-skip-permissions" {
+			return true
+		}
+	}
+	return false
 }
 
 // TestHelperProcess serves as an in-process mock executable for cross-platform subprocess tests.
