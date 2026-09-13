@@ -64,7 +64,7 @@ func TestStatusUpdater_DebounceAndFastTurn(t *testing.T) {
 
 	// Turn finishes fast (< 50ms) without running tools
 	updater.HandleStep(&runner.StepUpdateEvent{StepType: "thinking"})
-	time.Sleep(20 * time.Millisecond)
+	time.Sleep(15 * time.Millisecond) // Exercises live ticker select branch once
 	updater.Stop()
 	updater.DeleteStatusMessage()
 
@@ -82,9 +82,10 @@ func TestStatusUpdater_ActiveToolBypassesDebounceAndFlushes(t *testing.T) {
 	var edits atomic.Int32
 	var deletes atomic.Int32
 	var lastText atomic.Pointer[string]
+	deleteDone := make(chan struct{}, 1)
 
 	updater := NewStatusUpdater(nil, "thread-456", true,
-		WithStatusInterval(10*time.Millisecond),
+		WithStatusInterval(1*time.Hour),
 		WithStatusDebounce(100*time.Millisecond),
 		WithStatusMockFuncs(
 			func(channelID, text string) (string, error) {
@@ -99,6 +100,10 @@ func TestStatusUpdater_ActiveToolBypassesDebounceAndFlushes(t *testing.T) {
 			},
 			func(channelID, messageID string) error {
 				deletes.Add(1)
+				select {
+				case deleteDone <- struct{}{}:
+				default:
+				}
 				return nil
 			},
 		),
@@ -111,8 +116,8 @@ func TestStatusUpdater_ActiveToolBypassesDebounceAndFlushes(t *testing.T) {
 		State:    "ACTIVE",
 	})
 
-	// Wait for ticker to fire
-	time.Sleep(30 * time.Millisecond)
+	// Synchronously flush active tool
+	updater.flush()
 
 	if sends.Load() != 1 {
 		t.Fatalf("expected 1 send immediately on active tool, got %d", sends.Load())
@@ -131,7 +136,7 @@ func TestStatusUpdater_ActiveToolBypassesDebounceAndFlushes(t *testing.T) {
 		StepType: "agent_response",
 	})
 
-	time.Sleep(30 * time.Millisecond)
+	updater.flush()
 
 	if edits.Load() == 0 {
 		t.Errorf("expected at least 1 edit after phase change, got %d", edits.Load())
@@ -140,8 +145,11 @@ func TestStatusUpdater_ActiveToolBypassesDebounceAndFlushes(t *testing.T) {
 	updater.Stop()
 	updater.DeleteStatusMessage()
 
-	// Wait for async deletion goroutine
-	time.Sleep(30 * time.Millisecond)
+	select {
+	case <-deleteDone:
+	case <-time.After(1 * time.Second):
+		t.Fatal("timed out waiting for async deleteFunc")
+	}
 
 	if deletes.Load() != 1 {
 		t.Errorf("expected 1 delete at turn cleanup, got %d", deletes.Load())
@@ -152,7 +160,7 @@ func TestStatusUpdater_CircuitBreakerOn404(t *testing.T) {
 	var edits atomic.Int32
 
 	updater := NewStatusUpdater(nil, "thread-789", true,
-		WithStatusInterval(10*time.Millisecond),
+		WithStatusInterval(1*time.Hour),
 		WithStatusDebounce(0),
 		WithStatusMockFuncs(
 			func(channelID, text string) (string, error) {
@@ -169,12 +177,12 @@ func TestStatusUpdater_CircuitBreakerOn404(t *testing.T) {
 	)
 
 	updater.HandleStep(&runner.StepUpdateEvent{StepType: "tool", ToolName: "test_tool", State: "ACTIVE"})
-	time.Sleep(20 * time.Millisecond)
+	updater.flush()
 
 	// Step updates continue arriving
 	for i := 0; i < 5; i++ {
 		updater.HandleStep(&runner.StepUpdateEvent{StepType: "tool", ToolName: "test_tool", State: "ACTIVE"})
-		time.Sleep(15 * time.Millisecond)
+		updater.flush()
 	}
 
 	updater.Stop()
@@ -189,7 +197,7 @@ func TestStatusUpdater_CircuitBreakerOn403(t *testing.T) {
 	var sends atomic.Int32
 
 	updater := NewStatusUpdater(nil, "thread-403", true,
-		WithStatusInterval(10*time.Millisecond),
+		WithStatusInterval(1*time.Hour),
 		WithStatusDebounce(0),
 		WithStatusMockFuncs(
 			func(channelID, text string) (string, error) {
@@ -206,10 +214,10 @@ func TestStatusUpdater_CircuitBreakerOn403(t *testing.T) {
 	)
 
 	updater.HandleStep(&runner.StepUpdateEvent{StepType: "tool", ToolName: "test_tool", State: "ACTIVE"})
-	time.Sleep(20 * time.Millisecond)
+	updater.flush()
 
-	// Subsequent ticks should not attempt sendFunc again
-	time.Sleep(30 * time.Millisecond)
+	// Subsequent flush calls should not attempt sendFunc again
+	updater.flush()
 	updater.Stop()
 
 	if sends.Load() != 1 {
@@ -222,9 +230,10 @@ func TestStatusUpdater_ZombieLeakPrevention(t *testing.T) {
 	var deletes atomic.Int32
 	sendStarted := make(chan struct{})
 	sendRelease := make(chan struct{})
+	deleteDone := make(chan struct{}, 1)
 
 	updater := NewStatusUpdater(nil, "thread-zombie", true,
-		WithStatusInterval(5*time.Millisecond),
+		WithStatusInterval(1*time.Hour),
 		WithStatusDebounce(0),
 		WithStatusMockFuncs(
 			func(channelID, text string) (string, error) {
@@ -239,6 +248,10 @@ func TestStatusUpdater_ZombieLeakPrevention(t *testing.T) {
 			func(channelID, messageID string) error {
 				if messageID == "msg-slow-send" {
 					deletes.Add(1)
+					select {
+					case deleteDone <- struct{}{}:
+					default:
+					}
 				}
 				return nil
 			},
@@ -246,6 +259,8 @@ func TestStatusUpdater_ZombieLeakPrevention(t *testing.T) {
 	)
 
 	updater.HandleStep(&runner.StepUpdateEvent{StepType: "tool", ToolName: "slow_tool", State: "ACTIVE"})
+	go updater.flush()
+
 	<-sendStarted // Wait until sendFunc is actively in flight
 
 	// Turn finishes or errors out concurrently while sendFunc is executing
@@ -253,7 +268,13 @@ func TestStatusUpdater_ZombieLeakPrevention(t *testing.T) {
 
 	// Unblock sendFunc
 	close(sendRelease)
-	time.Sleep(20 * time.Millisecond)
+
+	select {
+	case <-deleteDone:
+	case <-time.After(1 * time.Second):
+		t.Fatal("timed out waiting for zombie deleteFunc")
+	}
+
 	updater.Stop()
 
 	// The message created by sendFunc must have been deleted to avoid zombie leak
@@ -266,7 +287,7 @@ func TestStatusUpdater_LiveTimerRefreshDuringLongTool(t *testing.T) {
 	var edits atomic.Int32
 
 	updater := NewStatusUpdater(nil, "thread-timer", true,
-		WithStatusInterval(10*time.Millisecond),
+		WithStatusInterval(1*time.Hour),
 		WithStatusDebounce(0),
 		WithStatusMockFuncs(
 			func(channelID, text string) (string, error) {
@@ -284,9 +305,19 @@ func TestStatusUpdater_LiveTimerRefreshDuringLongTool(t *testing.T) {
 
 	// Tool starts - only 1 event is emitted
 	updater.HandleStep(&runner.StepUpdateEvent{StepType: "tool", ToolName: "long_tool", State: "ACTIVE"})
+	updater.flush() // First flush sends "msg-timer"
 
-	// Wait across multiple ticks without sending new events (enough for 0.1s interval to advance)
-	time.Sleep(350 * time.Millisecond)
+	// Simulate passage of time by backdating toolStart under mutex
+	updater.mu.Lock()
+	updater.toolStart = time.Now().Add(-250 * time.Millisecond)
+	updater.mu.Unlock()
+	updater.flush() // Formatted string advances to (0.2s or 0.3s) -> edits=1
+
+	updater.mu.Lock()
+	updater.toolStart = time.Now().Add(-500 * time.Millisecond)
+	updater.mu.Unlock()
+	updater.flush() // Formatted string advances to (0.5s) -> edits=2
+
 	updater.Stop()
 
 	// Live timer should have updated multiple times as elapsed seconds increased
@@ -297,9 +328,10 @@ func TestStatusUpdater_LiveTimerRefreshDuringLongTool(t *testing.T) {
 
 func TestStatusUpdater_ResetOnRetry(t *testing.T) {
 	var deletes atomic.Int32
+	deleteDone := make(chan struct{}, 1)
 
 	updater := NewStatusUpdater(nil, "thread-reset", true,
-		WithStatusInterval(10*time.Millisecond),
+		WithStatusInterval(1*time.Hour),
 		WithStatusDebounce(0),
 		WithStatusMockFuncs(
 			func(channelID, text string) (string, error) {
@@ -310,17 +342,26 @@ func TestStatusUpdater_ResetOnRetry(t *testing.T) {
 			},
 			func(channelID, messageID string) error {
 				deletes.Add(1)
+				select {
+				case deleteDone <- struct{}{}:
+				default:
+				}
 				return nil
 			},
 		),
 	)
 
 	updater.HandleStep(&runner.StepUpdateEvent{StepType: "tool", ToolName: "flaky_tool", State: "ACTIVE"})
-	time.Sleep(20 * time.Millisecond)
+	updater.flush()
 
 	// Attempt fails; Reset() is called before retry backoff
 	updater.Reset()
-	time.Sleep(20 * time.Millisecond)
+
+	select {
+	case <-deleteDone:
+	case <-time.After(1 * time.Second):
+		t.Fatal("timed out waiting for reset deleteFunc")
+	}
 
 	if deletes.Load() != 1 {
 		t.Errorf("expected status message from failed attempt to be deleted on Reset, got %d deletes", deletes.Load())
@@ -334,7 +375,7 @@ func TestStatusUpdater_RunCommandDisplaysCommandName(t *testing.T) {
 	var lastText atomic.Pointer[string]
 
 	updater := NewStatusUpdater(nil, "thread-cmd", true,
-		WithStatusInterval(10*time.Millisecond),
+		WithStatusInterval(1*time.Hour),
 		WithStatusDebounce(0),
 		WithStatusMockFuncs(
 			func(channelID, text string) (string, error) {
@@ -364,7 +405,7 @@ func TestStatusUpdater_RunCommandDisplaysCommandName(t *testing.T) {
 		},
 	})
 
-	time.Sleep(25 * time.Millisecond)
+	updater.flush()
 
 	if sends.Load() != 1 {
 		t.Fatalf("expected 1 send, got %d", sends.Load())
@@ -380,7 +421,7 @@ func TestStatusUpdater_RunCommandDisplaysCommandName(t *testing.T) {
 		ToolName: "run_command",
 		State:    "DONE",
 	})
-	time.Sleep(20 * time.Millisecond)
+	updater.flush()
 
 	updater.Stop()
 	updater.DeleteStatusMessage()

@@ -1208,7 +1208,7 @@ func TestRecoverInterrupted_AllBranches(t *testing.T) {
 	pool := New(nil, WorkerPoolConfig{
 		DB:           database,
 		MaxAttempts:  3,
-		DrainTimeout: 50 * time.Millisecond,
+		DrainTimeout: 1 * time.Millisecond,
 		IdleTimeout:  50 * time.Millisecond,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			return "", "", 0, nil
@@ -1394,10 +1394,15 @@ func TestWorkerPool_NewPermutations(t *testing.T) {
 	})
 	dg, _ := discordgo.New("Bot test")
 	var alertSent atomic.Int32
+	alertReceived := make(chan struct{}, 1)
 	pool5 := New(appCfg, WorkerPoolConfig{
 		DiscordSession: dg,
 		SystemAlertFunc: func(s *discordgo.Session, channelNameOrID, title, alertBody string) error {
 			alertSent.Add(1)
+			select {
+			case alertReceived <- struct{}{}:
+			default:
+			}
 			return nil
 		},
 	})
@@ -1405,11 +1410,15 @@ func TestWorkerPool_NewPermutations(t *testing.T) {
 	if pool5.cfg.Classifier != nil && pool5.cfg.Classifier.OnParseError != nil {
 		longOutput := strings.Repeat("x", 700) + "\n```json\n@everyone @here\n```"
 		pool5.cfg.Classifier.OnParseError("gemini-flash", longOutput, errors.New("parse error 1"))
-		time.Sleep(50 * time.Millisecond)
+		select {
+		case <-alertReceived:
+		case <-time.After(1 * time.Second):
+			t.Fatal("timed out waiting for parse error alert")
+		}
 
 		// Second call within 15s debounced
 		pool5.cfg.Classifier.OnParseError("gemini-flash", "short", errors.New("parse error 2"))
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(5 * time.Millisecond)
 
 		if alertSent.Load() != 1 {
 			t.Errorf("expected exactly 1 alert sent due to debouncing, got %d", alertSent.Load())
@@ -1505,7 +1514,7 @@ func TestGetSessionLastActivity_ErrorAndEdgeCases(t *testing.T) {
 func TestWorkerPool_EnqueueSlowPathAndWorkerIdle(t *testing.T) {
 	pool := New(nil, WorkerPoolConfig{
 		IdleTimeout:  30 * time.Millisecond,
-		DrainTimeout: 50 * time.Millisecond,
+		DrainTimeout: 1 * time.Millisecond,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			return "", "", 0, nil
 		},
@@ -1624,6 +1633,9 @@ func TestQueue_TargetedCoveragePush(t *testing.T) {
 	// 1. StatusUpdater default sendFunc and text branches
 	t.Run("StatusUpdater defaults", func(t *testing.T) {
 		s, _ := discordgo.New("Bot fake")
+		s.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			return nil, errors.New("mock network error")
+		})
 		up := NewStatusUpdater(s, "thread-def", false)
 		if _, err := up.sendFunc("c", "t"); err == nil {
 			t.Errorf("expected error from default sendFunc with dummy session")
@@ -1661,11 +1673,17 @@ func TestQueue_TargetedCoveragePush(t *testing.T) {
 		if pool2.cfg.Classifier != nil && pool2.cfg.Classifier.OnParseError != nil {
 			dg, _ := discordgo.New("Bot fake")
 			pool2.SetDiscordSession(dg)
+			panicDone := make(chan struct{}, 1)
 			pool2.cfg.SystemAlertFunc = func(s *discordgo.Session, ch, title, text string) error {
+				close(panicDone)
 				panic("deliberate panic in alert handler")
 			}
 			pool2.cfg.Classifier.OnParseError("model-1", strings.Repeat("a", 700)+"``` @everyone", errors.New("syntax error"))
-			time.Sleep(30 * time.Millisecond)
+			select {
+			case <-panicDone:
+			case <-time.After(1 * time.Second):
+				t.Fatal("timed out waiting for panic in alert handler")
+			}
 		}
 	})
 

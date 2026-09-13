@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -535,10 +536,14 @@ func TestSummarizeThreadHistory_Singleflight(t *testing.T) {
 		},
 	}
 
-	var calls int
+	var calls atomic.Int32
+	started := make(chan struct{})
+	release := make(chan struct{})
+
 	mockLLM := func(ctx context.Context, model, prompt string) (string, error) {
-		calls++
-		time.Sleep(100 * time.Millisecond)
+		calls.Add(1)
+		close(started)
+		<-release
 		return "<THREAD_SUMMARY>deduplicated summary</THREAD_SUMMARY>", nil
 	}
 
@@ -550,15 +555,28 @@ func TestSummarizeThreadHistory_Singleflight(t *testing.T) {
 		}()
 	}
 
+	select {
+	case <-started:
+	case <-time.After(1 * time.Second):
+		t.Fatal("timed out waiting for mockLLM invocation")
+	}
+
+	time.Sleep(5 * time.Millisecond) // Allow sibling goroutines to enter singleflight
+	close(release)
+
 	for i := 0; i < 3; i++ {
-		res := <-done
-		if res != "<THREAD_SUMMARY>deduplicated summary</THREAD_SUMMARY>" {
-			t.Errorf("unexpected summary: %q", res)
+		select {
+		case res := <-done:
+			if res != "<THREAD_SUMMARY>deduplicated summary</THREAD_SUMMARY>" {
+				t.Errorf("unexpected summary: %q", res)
+			}
+		case <-time.After(1 * time.Second):
+			t.Fatal("timed out waiting for singleflight summary")
 		}
 	}
 
-	if calls != 1 {
-		t.Errorf("expected 1 call to LLM, got %d", calls)
+	if calls.Load() != 1 {
+		t.Errorf("expected 1 call to LLM, got %d", calls.Load())
 	}
 }
 

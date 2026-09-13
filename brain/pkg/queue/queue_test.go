@@ -199,6 +199,9 @@ func TestQueueMultiThreadConcurrencyAndSingleThreadFIFO(t *testing.T) {
 	var allDone sync.WaitGroup
 	allDone.Add(3)
 
+	a1Started := make(chan struct{})
+	b1Finished := make(chan struct{})
+
 	pool := NewWorkerPool(WorkerPoolConfig{
 		DB:             database,
 		TimeoutMinutes: 1,
@@ -217,9 +220,14 @@ func TestQueueMultiThreadConcurrencyAndSingleThreadFIFO(t *testing.T) {
 			mu.Unlock()
 
 			if strings.Contains(prompt, "A1") {
-				time.Sleep(100 * time.Millisecond)
+				close(a1Started)
+				select {
+				case <-b1Finished:
+				case <-time.After(2 * time.Second):
+					t.Error("timed out waiting for B1 to complete concurrently while A1 is active")
+				}
 			} else if strings.Contains(prompt, "B1") {
-				time.Sleep(20 * time.Millisecond)
+				defer close(b1Finished)
 			}
 
 			mu.Lock()
@@ -252,7 +260,13 @@ func TestQueueMultiThreadConcurrencyAndSingleThreadFIFO(t *testing.T) {
 
 	pool.Enqueue(msgA1)
 	pool.Enqueue(msgB1)
-	time.Sleep(50 * time.Millisecond)
+
+	select {
+	case <-a1Started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for A1 to start")
+	}
+
 	pool.Enqueue(msgA2)
 
 	allDone.Wait()
@@ -5049,7 +5063,7 @@ func TestWorkerPoolShutdown_PreservesProcessingMessageWithoutApology(t *testing.
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
-		DrainTimeout:   50 * time.Millisecond,
+		DrainTimeout:   5 * time.Millisecond,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
 			close(runnerStarted)
 			// Wait until shutdown cancels ctx or runnerBlock is closed
@@ -5205,7 +5219,7 @@ func TestWorkerPoolShutdown_RunnerSuccessPreserved(t *testing.T) {
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
 			close(runnerStarted)
 			// Small sleep, then return success even if ctx is cancelling
-			time.Sleep(50 * time.Millisecond)
+			time.Sleep(5 * time.Millisecond)
 			return mockJSONResponse("c4444444-2222-3333-4444-555555555555", "Finished just before pool stopped"), "", 0, nil
 		},
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
@@ -5278,7 +5292,7 @@ func TestWorkerPoolShutdown_AmbientClassifierCancellationPreserved(t *testing.T)
 	pool := NewWorkerPool(WorkerPoolConfig{
 		DB:             database,
 		TimeoutMinutes: 1,
-		DrainTimeout:   50 * time.Millisecond,
+		DrainTimeout:   5 * time.Millisecond,
 		Classifier:     cls,
 		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
 			return config.ChannelPolicy{
@@ -6440,6 +6454,7 @@ func TestWorkerPool_FullBuffer_NoEvictionZombieRace(t *testing.T) {
 
 	const totalMsgs = 150
 	var processedCount atomic.Int32
+	allCompleted := make(chan struct{})
 
 	pool := NewWorkerPool(WorkerPoolConfig{
 		DB:             database,
@@ -6450,7 +6465,6 @@ func TestWorkerPool_FullBuffer_NoEvictionZombieRace(t *testing.T) {
 			return nil, nil
 		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
-			time.Sleep(2 * time.Millisecond)
 			return mockJSONResponse(sessionID, "OK"), "", 0, nil
 		},
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
@@ -6460,7 +6474,9 @@ func TestWorkerPool_FullBuffer_NoEvictionZombieRace(t *testing.T) {
 			return func() {}
 		},
 		OnMessageCompleted: func(msg db.Message, finalStatus string) {
-			processedCount.Add(1)
+			if processedCount.Add(1) == totalMsgs {
+				close(allCompleted)
+			}
 		},
 	})
 	pool.Start()
@@ -6489,13 +6505,10 @@ func TestWorkerPool_FullBuffer_NoEvictionZombieRace(t *testing.T) {
 	wg.Wait()
 
 	// Wait for all messages to complete
-	deadline := time.Now().Add(10 * time.Second)
-	for processedCount.Load() < totalMsgs && time.Now().Before(deadline) {
-		time.Sleep(50 * time.Millisecond)
-	}
-
-	if got := processedCount.Load(); got != totalMsgs {
-		t.Fatalf("Expected %d messages processed, got %d", totalMsgs, got)
+	select {
+	case <-allCompleted:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("Expected %d messages processed, got %d", totalMsgs, processedCount.Load())
 	}
 
 	pool.StopWithTimeout(2 * time.Second)
@@ -6949,7 +6962,7 @@ func TestQueueWorker_PerScopeSerialization(t *testing.T) {
 			}
 			mu.Unlock()
 			
-			time.Sleep(50 * time.Millisecond) // Simulate work
+			time.Sleep(2 * time.Millisecond) // Simulate work
 
 			mu.Lock()
 			activeWorkers--
@@ -8816,6 +8829,14 @@ func TestThreadStatusQueueIntegration(t *testing.T) {
 	var finalDelivered atomic.Int32
 
 	sess, _ := discordgo.New("Bot mock_token")
+	sess.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		msgJSON := `{"id":"mock-status-msg-123","channel_id":"thread-status-test-123","content":"mock status"}`
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(msgJSON)),
+		}, nil
+	})
 	sess.State = discordgo.NewState()
 	_ = sess.State.ChannelAdd(&discordgo.Channel{
 		ID:       threadID,
@@ -9552,6 +9573,20 @@ func TestWorkerPool_Watchdog_RateLimitBypassesNotifier(t *testing.T) {
 	}
 }
 
+func waitPoolWorkersDone(t *testing.T, pool *WorkerPool, timeout time.Duration) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		pool.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		t.Fatal("timed out waiting for worker pool goroutines to exit")
+	}
+}
+
 func TestWorkerPool_Watchdog_CancelledDuringBackoff(t *testing.T) {
 	database, err := db.InitDB(":memory:")
 	if err != nil {
@@ -9564,10 +9599,10 @@ func TestWorkerPool_Watchdog_CancelledDuringBackoff(t *testing.T) {
 		DB:             database,
 		MaxAttempts:    3,
 		TimeoutMinutes: 1,
-		BackoffBase:    100 * time.Millisecond,
+		BackoffBase:    500 * time.Millisecond,
 		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
 			go func() {
-				time.Sleep(30 * time.Millisecond)
+				time.Sleep(10 * time.Millisecond)
 				pool.cancel()
 			}()
 			return "", "inactivity timeout exceeded: [watchdog] hung process", 124, context.DeadlineExceeded
@@ -9591,7 +9626,7 @@ func TestWorkerPool_Watchdog_CancelledDuringBackoff(t *testing.T) {
 	_ = db.InsertMessage(database, msg)
 	pool.Enqueue(msg)
 
-	time.Sleep(100 * time.Millisecond)
+	waitPoolWorkersDone(t, pool, 2*time.Second)
 
 	dbMsg, err := db.GetMessage(database, "msg-wd-cancel")
 	if dbMsg.Status != db.StatusPending {
@@ -9633,7 +9668,7 @@ func TestWorkerPool_Watchdog_CancelledPostWatchdog(t *testing.T) {
 	_ = db.InsertMessage(database, msg)
 	pool.Enqueue(msg)
 
-	time.Sleep(100 * time.Millisecond)
+	waitPoolWorkersDone(t, pool, 2*time.Second)
 
 	mu.Lock()
 	if deliveredCalled {
@@ -9681,7 +9716,7 @@ func TestWorkerPool_NonTransient_CancelledDuringTurn(t *testing.T) {
 	_ = db.InsertMessage(database, msg)
 	pool.Enqueue(msg)
 
-	time.Sleep(100 * time.Millisecond)
+	waitPoolWorkersDone(t, pool, 2*time.Second)
 
 	mu.Lock()
 	if deliveredCalled {
@@ -9784,7 +9819,7 @@ func TestWorkerPool_RetryExhaustion_CancelledWithScheduleRunID(t *testing.T) {
 	_ = db.InsertMessage(database, msg)
 	pool.Enqueue(msg)
 
-	time.Sleep(100 * time.Millisecond)
+	waitPoolWorkersDone(t, pool, 2*time.Second)
 
 	dbMsg, _ := db.GetMessage(database, "msg-exh-cancel")
 	if dbMsg != nil && dbMsg.Status != db.StatusPending {
@@ -9832,10 +9867,10 @@ func TestWorkerPool_RateLimit_CancelledDuringBackoff(t *testing.T) {
 		DB:             database,
 		MaxAttempts:    3,
 		TimeoutMinutes: 1,
-		BackoffBase:    100 * time.Millisecond,
+		BackoffBase:    500 * time.Millisecond,
 		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
 			go func() {
-				time.Sleep(30 * time.Millisecond)
+				time.Sleep(10 * time.Millisecond)
 				pool.cancel()
 			}()
 			return "", "Error 429: Resource has been exhausted (quota exceeded)", 1, errors.New("rate limited")
@@ -9859,7 +9894,7 @@ func TestWorkerPool_RateLimit_CancelledDuringBackoff(t *testing.T) {
 	_ = db.InsertMessage(database, msg)
 	pool.Enqueue(msg)
 
-	time.Sleep(120 * time.Millisecond)
+	waitPoolWorkersDone(t, pool, 2*time.Second)
 
 	dbMsg, err := db.GetMessage(database, "msg-rl-cancel")
 	if err != nil || dbMsg == nil {
@@ -9882,10 +9917,10 @@ func TestWorkerPool_Transient_CancelledDuringBackoff(t *testing.T) {
 		DB:             database,
 		MaxAttempts:    3,
 		TimeoutMinutes: 1,
-		BackoffBase:    100 * time.Millisecond,
+		BackoffBase:    500 * time.Millisecond,
 		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
 			go func() {
-				time.Sleep(30 * time.Millisecond)
+				time.Sleep(10 * time.Millisecond)
 				pool.cancel()
 			}()
 			return "", "connection reset by peer", 1, errors.New("transient network drop")
@@ -9909,7 +9944,7 @@ func TestWorkerPool_Transient_CancelledDuringBackoff(t *testing.T) {
 	_ = db.InsertMessage(database, msg)
 	pool.Enqueue(msg)
 
-	time.Sleep(120 * time.Millisecond)
+	waitPoolWorkersDone(t, pool, 2*time.Second)
 
 	dbMsg, err := db.GetMessage(database, "msg-tr-cancel")
 	if err != nil || dbMsg == nil {
@@ -11747,7 +11782,7 @@ func TestPostTurnHook(t *testing.T) {
 						// Turn 1
 						close(turn1PostStarted)
 						// Simulate post_turn teardown work while holding lock
-						time.Sleep(50 * time.Millisecond)
+						time.Sleep(5 * time.Millisecond)
 						mu.Lock()
 						turn1PostFinished = true
 						mu.Unlock()
