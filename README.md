@@ -85,16 +85,17 @@ User configuration and persona rules live in your private configuration reposito
 
 1. **`config.yaml`** (Agent Options, Channel Policies, & MCP Tools):
    ```yaml
-   model: "Gemini 3.7 Flash (High)"
+   model: "Gemini 3.8 Flash (High)"
+   low_effort_model: "Gemini 3.8 Flash (Low)"
    timezone: "America/Los_Angeles"
    system_channel: "aerial-dev"
 
    # Administrator Allowlist
-   # Numeric Discord Snowflake IDs authorized to perform system-level operations
+   # Numeric Discord Snowflake IDs or usernames authorized to perform system operations
    admin_users:
      - "123456789012345678"
 
-   # Channel Policies & Interaction Modes
+   # Channel Policies, Interaction Modes & Webhook Interceptors
    channels:
      # Default fallback (Required)
      default:
@@ -102,13 +103,27 @@ User configuration and persona rules live in your private configuration reposito
        ignore_bots: true
        ambient_wake_threshold: 0.80
 
-     # In-Channel Direct Interaction with Classifier (wake_mode: classifier)
+     # In-Channel Direct Interaction with Classifier and Lifecycle Webhooks
      general:
        mode: "channel"
        wake_mode: "classifier"   # "classifier" | "mention" | "all"
        ignore_bots: true
        ambient_wake_threshold: 0.80
-       ambient_wake_prompt: "Determine whether the target message is relevant to Aerial and warrants Aerial waking up and responding, based on the recent channel context."
+       ambient_wake_prompt: "Determine whether the target message is relevant to Aerial and warrants waking up."
+       # Optional Channel Lifecycle Webhook Interceptors
+       hooks:
+         on_wake:
+           url: "http://sidecar-service:8000/hooks/wake"
+           timeout_ms: 2000
+           on_timeout: "classify"
+         pre_turn:
+           url: "http://sidecar-service:8000/hooks/pre-turn"
+           timeout_ms: 5000
+           on_timeout: "retry"
+         post_turn:
+           url: "http://sidecar-service:8000/hooks/post-turn"
+           timeout_ms: 3000
+           on_timeout: "proceed"
 
      # Mention-Only Channel (listens ambiently, responds ONLY on explicit @mention or direct reply)
      lounge:
@@ -141,9 +156,14 @@ User configuration and persona rules live in your private configuration reposito
      - `channel`: Messages are evaluated directly in-channel without spawning threads.
      - `ignore` (or `disabled`): Channel is completely ignored (no messages evaluated, no startup sweeps).
    - **Wake Sensitivity Modes (`wake_mode`)**:
-     - `mention` (or `mentions`, `direct`): Aerial responds strictly to explicit user pings (`@Aerial`) and direct replies. Keyword triggers and LLM classification are bypassed with zero token cost. Crucially, ambient channel chatter is silently appended into `transcript.jsonl` so Aerial retains complete conversational lookback when subsequently pinged.
+     - `mention` (or `mentions`, `direct`): Aerial responds strictly to explicit user pings (`@Aerial`) and direct replies. Keyword triggers and LLM classification are bypassed with zero token cost. Ambient channel chatter is silently appended into `transcript.jsonl` so Aerial retains complete conversational lookback when subsequently pinged.
      - `classifier` (or `ambient`): Tier 1 wakes on direct mentions, replies, or keywords (`aerial`, `gundam`); Tier 2 ambient messages are scored (0.0 to 1.0) by `Gemini 3.8 Flash (Low)` against `ambient_wake_prompt` using recent channel context.
      - `all` (or `always`): Responds to every incoming message (default inside active threads).
+   - **Channel Lifecycle Webhook Interceptors (`hooks:`)**:
+     - Generic harness extension points allowing user services or sidecars to programmatically modify turn behavior:
+       - `on_wake`: Intercepts raw messages to override wake decisions (`wake`, `drop`, `classify`).
+       - `pre_turn`: Execution gating (`proceed`, `drop`, `retry`) and dynamic operational context injection (`injected_context` wrapped in `<COORDINATION_CONTEXT>`).
+       - `post_turn`: Captures turn outcome, error messages, duration, and LLM token usage.
    - **Empty Response Suppression**: Agent turns with empty or whitespace-only stdout silently skip Discord message delivery without error, eliminating fragile `[NO_REPLY]` prompt sentinels.
    - **Server Whitelisting (Default-Deny)**: Set `channels.default.mode: "ignore"` to ignore the entire server by default, responding only in explicitly declared channels.
    - **Hot-Reloading & LKGC**: Changes to `config.yaml` are detected instantly via `fsnotify` and reconfigured in-memory without restarting the daemon. If invalid YAML is saved, Aerial retains the **Last Known Good Configuration (LKGC)** in memory and posts a diagnostic alert to `#aerial-dev`.
@@ -202,6 +222,8 @@ By default, Aerial automatically mounts:
 - **`docker`** (`http://docker-mcp:4002/mcp` - Native in-image execution over host `/var/run/docker.sock`)
 - **`github`** (`http://github-mcp:4003/mcp` - Native in-image execution with PAT auth)
 - **`scheduler`** (`http://scheduler-mcp:8080/mcp` - PostgreSQL-backed cron & reminder manager)
+- **`victoriametrics`** (`http://victoriametrics-mcp:4004/mcp` - Streamable HTTP TSDB metric querying & alert rule inspection)
+
 
 #### Custom MCP Servers (`config.yaml`)
 Define additional MCP tools directly in your `config.yaml`:
@@ -287,8 +309,8 @@ Aerial uses an automated GitOps deployment and configuration pipeline:
 2. **Watchtower Supervisor**: Polls GHCR every 60 seconds out-of-band and performs zero-downtime rolling container updates across core services.
 3. **Dedicated GitSync Sidecar (`aerial-gitsync`)**: A dedicated background daemon holding read-write mounts on `/share/aerial-config` and `/share/aerial`, pulling updates via singleflight fast-forward syncs every 60s and exposing a `POST /sync` trigger.
 4. **Declarative GitOps Compose Reconciler**: Whenever repository updates are synchronized (periodically or via webhook), `aerial-gitsync` automatically pre-flight validates and executes `docker compose up -d` with strict timeouts and token sanitization, reconciling any topology changes declaratively without manual container intervention.
-5. **Physical Immutability & Two-Phase PR Workflow**: The `aerial-brain` execution container mounts repositories strictly **read-only (`:ro`)**. When making configuration, persona, or skill adjustments, Aerial uses `scripts/aerial-config-pr.sh` to clone into an ephemeral `/dev/shm` scratch directory, run pre-flight syntax checks, push a branch, open a GitHub PR, verify CI, squash merge into `main`, and trigger fast-path sync via `aerial-gitsync`.
-6. **Core Engine Self-Improvement**: For changes to the Go monorepo (`azylman/aerial`), Aerial uses `.agents/skills/self-improvement/SKILL.md` to run local tests and static analysis (`./scripts/verify.sh`), commit, push a branch, and open a PR with required CI status checks.
+5. **Physical Immutability & Asynchronous PR Workflow**: The `aerial-brain` execution container mounts repositories strictly **read-only (`:ro`)**. When making configuration, persona, or skill adjustments, Aerial uses `scripts/aerial-config-pr.sh` to clone into an ephemeral `/dev/shm` scratch directory, run pre-flight YAML syntax checks, validate mandatory `PR_DESCRIPTION.md`, push a branch, open a GitHub PR, and spawn a detached background monitor daemon that waits for green CI and squash-merges into `main`, while an automated one-shot reminder scheduled via `scheduler-mcp` confirms live synchronization.
+6. **Core Engine Self-Improvement**: For changes to the Go monorepo (`azylman/aerial`), Aerial uses `.agents/skills/self-improvement/SKILL.md` to run local tests and static analysis (`./scripts/verify.sh --staged`), commit, push a branch, and open an asynchronous PR via `scripts/aerial-pr.sh submit` with automated background CI monitoring and one-shot reminder verification.
 
 ---
 
@@ -303,6 +325,7 @@ Aerial uses an automated GitOps deployment and configuration pipeline:
 | **`aerial-discord-mcp`** | `4001` (Host `4001`) | Outbound MCP server providing Discord messaging, thread creation, and channel tools. |
 | **`aerial-docker-mcp`** | `4002` (Host `4002`) | Native in-image Docker MCP stdio server with `supergateway` translation proxy over `/var/run/docker.sock`. |
 | **`aerial-github-mcp`** | `4003` (Host `4003`) | Native in-image GitHub MCP stdio server with `supergateway` translation proxy and PAT authentication. |
+| **`aerial-victoriametrics-mcp`**| `4004` (Host `127.0.0.1:4044`) | VictoriaMetrics MCP server exposing metrics querying and alert inspection over Streamable HTTP. |
 | **`aerial-ollama`** | `11434` (Host `11434`) | Local LLM and embedding server for vector memory retrieval (`all-minilm:latest` / 384-dim). |
 | **`aerial-agentsview`** | `8080` (via proxy) | Web UI for visualizing agent transcripts, session history, and execution timelines. |
 | **`aerial-dashboard`** | `8080` (via proxy) | Status microservice serving Cyberpunk status HUD. |
@@ -315,6 +338,7 @@ Aerial uses an automated GitOps deployment and configuration pipeline:
 | **`aerial-grafana`** | `3000` (via proxy) | Grafana visual dashboards serving system HUD & container metrics with PostgreSQL persistent backend and pre-provisioned dashboards. |
 | **`aerial-watchtower`** | - | Out-of-band continuous deployment supervisor polling GHCR every 60 seconds. |
 | **`aerial-autoheal`** | - | Health supervisor probing container healthchecks every 15s and auto-restarting unhealthy containers. |
+
 
 ---
 
