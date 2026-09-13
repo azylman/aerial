@@ -55,6 +55,7 @@ func NewConfigFromLookup(lookup func(string) string) *Config {
 }
 
 // PollUpstream checks if upstream TCP port is accepting connections.
+// It checks attempt 0 immediately before sleeping and supports context preemption.
 func PollUpstream(ctx context.Context, upstreamPort string, maxAttempts int, delay time.Duration) bool {
 	for i := 0; i < maxAttempts; i++ {
 		select {
@@ -62,11 +63,17 @@ func PollUpstream(ctx context.Context, upstreamPort string, maxAttempts int, del
 			return false
 		default:
 		}
-		time.Sleep(delay)
 		conn, err := net.DialTimeout("tcp", "127.0.0.1:"+upstreamPort, 200*time.Millisecond)
 		if err == nil {
 			_ = conn.Close()
 			return true
+		}
+		if i < maxAttempts-1 {
+			select {
+			case <-ctx.Done():
+				return false
+			case <-time.After(delay):
+			}
 		}
 	}
 	return false
@@ -83,7 +90,7 @@ func StartProxyServer(port, upstreamBase string) (*http.Server, error) {
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"ok","wrapper":"aerial-discord-mcp","blocked_tools":["discord_send","send_message","discord_create_thread"]}`))
+		_, _ = w.Write(BuildHealthResponse("aerial-discord-mcp", DefaultBlockedToolList))
 	})
 	mux.Handle("/mcp", proxyHandler)
 	mux.Handle("/", proxyHandler)
@@ -96,38 +103,23 @@ func StartProxyServer(port, upstreamBase string) (*http.Server, error) {
 	return srv, nil
 }
 
+var (
+	pollUpstreamFn     = PollUpstream
+	execCommandContext = exec.CommandContext
+	runProxyApp        = RunProxyApp
+	exitFn             = log.Fatalf
+	onServerReady      func(addr string)
+)
+
 // RunProxyApp starts the upstream node process and proxy server with graceful shutdown.
 func RunProxyApp(ctx context.Context, cfg *Config) error {
-	if cfg == nil {
-		return fmt.Errorf("discord-mcp: config cannot be nil")
+	if err := ValidateConfig(cfg); err != nil {
+		return err
 	}
 
-	cfg.Port = strings.TrimSpace(cfg.Port)
-	if cfg.Port == "" {
-		return fmt.Errorf("discord-mcp: port cannot be empty")
-	}
-	cfg.UpstreamPort = strings.TrimSpace(cfg.UpstreamPort)
-	if cfg.UpstreamPort == "" {
-		return fmt.Errorf("discord-mcp: upstreamPort cannot be empty")
-	}
-	cfg.NodeBin = strings.TrimSpace(cfg.NodeBin)
-	if cfg.NodeBin == "" {
-		return fmt.Errorf("discord-mcp: nodeBin cannot be empty")
-	}
-	cfg.AppPath = strings.TrimSpace(cfg.AppPath)
-	if cfg.AppPath == "" {
-		return fmt.Errorf("discord-mcp: appPath cannot be empty")
-	}
+	nodeEnv := BuildNodeEnv(os.Environ(), cfg.UpstreamPort)
 
-	nodeEnv := make([]string, 0, len(os.Environ()))
-	for _, e := range os.Environ() {
-		if !strings.HasPrefix(e, "PORT=") {
-			nodeEnv = append(nodeEnv, e)
-		}
-	}
-	nodeEnv = append(nodeEnv, "PORT="+cfg.UpstreamPort)
-
-	cmd := exec.CommandContext(ctx, cfg.NodeBin, cfg.AppPath, "--transport", "http", "--port", cfg.UpstreamPort)
+	cmd := execCommandContext(ctx, cfg.NodeBin, cfg.AppPath, "--transport", "http", "--port", cfg.UpstreamPort)
 	cmd.Env = nodeEnv
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -136,8 +128,18 @@ func RunProxyApp(ctx context.Context, cfg *Config) error {
 		return fmt.Errorf("failed to start upstream Node MCP server: %w", err)
 	}
 
-	upstreamBase := fmt.Sprintf("http://127.0.0.1:%s", cfg.UpstreamPort)
-	PollUpstream(ctx, cfg.UpstreamPort, 20, 50*time.Millisecond)
+	upstreamBase := FormatUpstreamURL(cfg.UpstreamPort)
+	pollUpstreamFn(ctx, cfg.UpstreamPort, 20, 50*time.Millisecond)
+
+	ln, err := net.Listen("tcp", ":"+cfg.Port)
+	if err != nil {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+		return err
+	}
+	defer ln.Close()
 
 	srv, err := StartProxyServer(cfg.Port, upstreamBase)
 	if err != nil {
@@ -148,10 +150,14 @@ func RunProxyApp(ctx context.Context, cfg *Config) error {
 		return err
 	}
 
+	if onServerReady != nil {
+		onServerReady(ln.Addr().String())
+	}
+
 	errChan := make(chan error, 1)
 	go func() {
-		log.Printf("[Discord-MCP] Listening on port %s (proxying to %s with filtered tools)...", cfg.Port, upstreamBase)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Printf("[Discord-MCP] Listening on %s (proxying to %s with filtered tools)...", ln.Addr().String(), upstreamBase)
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			errChan <- err
 		}
 		close(errChan)
@@ -184,9 +190,7 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	if err := RunProxyApp(ctx, cfg); err != nil && err != http.ErrServerClosed {
-		log.Fatalf("[Discord-MCP] Error: %v", err)
+	if err := runProxyApp(ctx, cfg); err != nil && err != http.ErrServerClosed {
+		exitFn("[Discord-MCP] Error: %v", err)
 	}
 }
-
-

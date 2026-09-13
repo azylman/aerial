@@ -3,16 +3,29 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"runtime"
+	"os"
 	"strings"
 	"testing"
 	"time"
 )
+
+func init() {
+	flag.String("transport", "", "mock transport flag for TestHelperProcess")
+	flag.String("port", "", "mock port flag for TestHelperProcess")
+}
+
+func TestHelperProcess(t *testing.T) {
+	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
+		return
+	}
+	select {}
+}
 
 func TestFilterToolsResponse(t *testing.T) {
 	mockResponse := `{
@@ -317,25 +330,40 @@ func TestProxy_EdgeCasesAndErrors(t *testing.T) {
 	}
 
 	// 8. RunProxyApp with mock process and cancellation
-	mockBin := "sh"
-	mockArg := "-c"
-	if runtime.GOOS == "windows" {
-		mockBin = "cmd.exe"
-		mockArg = "/c"
+	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
+	oldPoller := pollUpstreamFn
+	pollUpstreamFn = func(ctx context.Context, port string, maxAttempts int, delay time.Duration) bool {
+		return true
 	}
+	defer func() { pollUpstreamFn = oldPoller }()
+
+	readyCh := make(chan struct{})
+	oldReady := onServerReady
+	onServerReady = func(addr string) {
+		select {
+		case <-readyCh:
+		default:
+			close(readyCh)
+		}
+	}
+	defer func() { onServerReady = oldReady }()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- RunProxyApp(ctx, &Config{
-			Port:         "59989",
+			Port:         "0",
 			UpstreamPort: "59988",
-			NodeBin:      mockBin,
-			AppPath:      mockArg,
+			NodeBin:      os.Args[0],
+			AppPath:      "-test.run=TestHelperProcess",
 		})
 	}()
 
-	time.Sleep(50 * time.Millisecond)
+	select {
+	case <-readyCh:
+	case <-time.After(1 * time.Second):
+		t.Fatal("timed out waiting for RunProxyApp to become ready")
+	}
 	cancel()
 	select {
 	case err := <-errCh:
@@ -351,15 +379,15 @@ func TestProxy_EdgeCasesAndErrors(t *testing.T) {
 		Port:         "59987",
 		UpstreamPort: "59986",
 		NodeBin:      "/non/existent/bin",
-		AppPath:      mockArg,
+		AppPath:      "-test.run=TestHelperProcess",
 	}); err == nil || !strings.Contains(err.Error(), "failed to start upstream Node MCP server") {
 		t.Errorf("expected 'failed to start upstream Node MCP server', got %v", err)
 	}
 	if err := RunProxyApp(context.Background(), &Config{
 		Port:         "-1",
 		UpstreamPort: "59985",
-		NodeBin:      mockBin,
-		AppPath:      mockArg,
+		NodeBin:      os.Args[0],
+		AppPath:      "-test.run=TestHelperProcess",
 	}); err == nil {
 		t.Error("expected error running proxy app with invalid port")
 	}
@@ -711,14 +739,21 @@ func TestServeHTTP_InvalidMethod(t *testing.T) {
 }
 
 func TestRunProxyApp_StartProxyServerFailure(t *testing.T) {
+	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
+	oldPoller := pollUpstreamFn
+	pollUpstreamFn = func(ctx context.Context, port string, maxAttempts int, delay time.Duration) bool {
+		return true
+	}
+	defer func() { pollUpstreamFn = oldPoller }()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
 	cfg := &Config{
-		Port:         "8080",
+		Port:         "0",
 		UpstreamPort: ":\x7f-invalid-port",
-		NodeBin:      "sleep",
-		AppPath:      "0.1",
+		NodeBin:      os.Args[0],
+		AppPath:      "-test.run=TestHelperProcess",
 	}
 
 	err := RunProxyApp(ctx, cfg)
@@ -752,6 +787,69 @@ func TestServeHTTP_UpstreamBodyReadError(t *testing.T) {
 
 	if rec.Code != http.StatusBadGateway {
 		t.Errorf("expected 502 on read error, got %d", rec.Code)
+	}
+}
+
+func TestMain_Execution(t *testing.T) {
+	oldRun := runProxyApp
+	oldExit := exitFn
+	defer func() {
+		runProxyApp = oldRun
+		exitFn = oldExit
+	}()
+
+	// 1. Success path
+	runCalled := false
+	runProxyApp = func(ctx context.Context, cfg *Config) error {
+		runCalled = true
+		return nil
+	}
+	main()
+	if !runCalled {
+		t.Error("expected runProxyApp to be called")
+	}
+
+	// 2. Server closed error (should not exit)
+	exitCalled := false
+	exitFn = func(format string, v ...interface{}) {
+		exitCalled = true
+	}
+	runProxyApp = func(ctx context.Context, cfg *Config) error {
+		return http.ErrServerClosed
+	}
+	main()
+	if exitCalled {
+		t.Error("expected exitFn not to be called for ErrServerClosed")
+	}
+
+	// 3. Error path (calls exitFn)
+	runProxyApp = func(ctx context.Context, cfg *Config) error {
+		return fmt.Errorf("simulated fatal startup error")
+	}
+	main()
+	if !exitCalled {
+		t.Error("expected exitFn to be called on fatal error")
+	}
+}
+
+func TestRunProxyApp_ListenFailure(t *testing.T) {
+	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
+	oldPoller := pollUpstreamFn
+	pollUpstreamFn = func(ctx context.Context, port string, maxAttempts int, delay time.Duration) bool {
+		return true
+	}
+	defer func() { pollUpstreamFn = oldPoller }()
+
+	cfg := &Config{
+		Port:         "-1",
+		UpstreamPort: "59985",
+		NodeBin:      os.Args[0],
+		AppPath:      "-test.run=TestHelperProcess",
+	}
+
+	err := RunProxyApp(context.Background(), cfg)
+	if err == nil {
+		t.Error("expected error from invalid port")
 	}
 }
 
