@@ -1611,12 +1611,15 @@ func TestHandleTranscripts_DBErrorBranch(t *testing.T) {
 }
 
 func TestRunBrainApp_PureConfig(t *testing.T) {
+	tmpDir := t.TempDir()
 	cfg := config.NewFromData(&config.ConfigData{
-		DatabaseURL:  filepath.Join(t.TempDir(), "brain_test.db"),
-		Port:         "0",
-		Model:        "test-model",
-		Timezone:     "UTC",
-		SystemPrompt: "test prompt",
+		DatabaseURL:   filepath.Join(tmpDir, "brain_test.db"),
+		GeminiHomeDir: tmpDir,
+		DataDir:       filepath.Join(tmpDir, "data"),
+		Port:          "0",
+		Model:         "test-model",
+		Timezone:      "UTC",
+		SystemPrompt:  "test prompt",
 		Channels: map[string]config.ChannelPolicy{
 			"default": {Mode: "threads"},
 		},
@@ -1813,9 +1816,46 @@ func TestRunBrainApp_EarlyReturns(t *testing.T) {
 		t.Errorf("expected database URL error, got %v", errMissingDB)
 	}
 
-	// 4. Invalid DatabaseURL
+	// 4. Missing GeminiHomeDir
+	cfgNoHome := config.NewTestConfig(func(d *config.ConfigData) {
+		d.GeminiHomeDir = ""
+		d.DataDir = filepath.Join(tmpDir, "data")
+		d.DatabaseURL = ":memory:"
+	})
+	errNoHome := RunBrainApp(ctxLive, cfgNoHome)
+	if errNoHome == nil || !strings.Contains(errNoHome.Error(), "gemini home directory is required") {
+		t.Errorf("expected gemini home directory error, got %v", errNoHome)
+	}
+
+	// 5. Missing DataDir
+	cfgNoData := config.NewTestConfig(func(d *config.ConfigData) {
+		d.GeminiHomeDir = tmpDir
+		d.DataDir = ""
+		d.DatabaseURL = ":memory:"
+	})
+	errNoData := RunBrainApp(ctxLive, cfgNoData)
+	if errNoData == nil || !strings.Contains(errNoData.Error(), "data directory is required") {
+		t.Errorf("expected data directory error, got %v", errNoData)
+	}
+
+	// 6. Missing Port
+	cfgNoPort := config.NewTestConfig(func(d *config.ConfigData) {
+		d.GeminiHomeDir = tmpDir
+		d.DataDir = filepath.Join(tmpDir, "data")
+		d.DatabaseURL = ":memory:"
+		d.Port = ""
+	})
+	errNoPort := RunBrainApp(ctxLive, cfgNoPort)
+	if errNoPort == nil || !strings.Contains(errNoPort.Error(), "port is required") {
+		t.Errorf("expected port error, got %v", errNoPort)
+	}
+
+	// 7. Invalid DatabaseURL
 	cur2 := cfg2.Current()
 	cur2.DatabaseURL = "invalid-protocol://host:port/dbname"
+	cur2.GeminiHomeDir = tmpDir
+	cur2.DataDir = filepath.Join(tmpDir, "data")
+	cur2.Port = "0"
 	cfg2.Update(cur2)
 	errBadDB := RunBrainApp(ctxLive, cfg2)
 	if errBadDB == nil || !strings.Contains(errBadDB.Error(), "failed to initialize database") {
