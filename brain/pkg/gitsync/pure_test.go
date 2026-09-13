@@ -190,6 +190,13 @@ func TestParseGitDirContent_TableDriven(t *testing.T) {
 			expectedPath: "",
 			expectedOK:   false,
 		},
+		{
+			name:         "absolute target path",
+			data:         []byte(fmt.Sprintf("gitdir: %s\n", baseDir)),
+			repoPath:     baseDir,
+			expectedPath: baseDir,
+			expectedOK:   true,
+		},
 	}
 
 	for _, tc := range tests {

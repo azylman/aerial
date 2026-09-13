@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -20,60 +19,6 @@ func TestSyncRepo_ConfigPointerInjection(t *testing.T) {
 	})
 	ctx := context.Background()
 	_, _ = SyncRepo(ctx, t.TempDir(), cfg)
-}
-
-func runGitCmd(t *testing.T, dir string, args ...string) string {
-	t.Helper()
-	gitBin := ResolveGitBin(os.Getenv)
-	if _, err := exec.LookPath(gitBin); err != nil {
-		if _, statErr := os.Stat(gitBin); statErr != nil {
-			t.Skip("git binary not found; skipping git integration test")
-		}
-	}
-	cmd := exec.Command(gitBin, append([]string{"-C", dir}, args...)...)
-	cmd.Env = append(cmd.Environ(),
-		"GIT_AUTHOR_NAME=Test User",
-		"GIT_AUTHOR_EMAIL=test@example.com",
-		"GIT_COMMITTER_NAME=Test User",
-		"GIT_COMMITTER_EMAIL=test@example.com",
-	)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %v failed in %s: %v, output: %s", args, dir, err, string(out))
-	}
-	return string(out)
-}
-
-func setupGitRepos(t *testing.T) (originDir, repoADir, repoBDir string) {
-	t.Helper()
-
-	baseDir := t.TempDir()
-	originDir = filepath.Join(baseDir, "origin.git")
-	repoADir = filepath.Join(baseDir, "repoA")
-	repoBDir = filepath.Join(baseDir, "repoB")
-
-	if err := os.MkdirAll(originDir, 0755); err != nil {
-		t.Fatalf("failed to create origin dir: %v", err)
-	}
-	runGitCmd(t, originDir, "init", "--bare")
-
-	runGitCmd(t, baseDir, "clone", originDir, "repoA")
-	runGitCmd(t, repoADir, "config", "user.name", "Test User")
-	runGitCmd(t, repoADir, "config", "user.email", "test@example.com")
-
-	testFile := filepath.Join(repoADir, "README.md")
-	if err := os.WriteFile(testFile, []byte("# Initial commit\n"), 0644); err != nil {
-		t.Fatalf("failed to write test file: %v", err)
-	}
-	runGitCmd(t, repoADir, "add", "README.md")
-	runGitCmd(t, repoADir, "commit", "-m", "Initial commit")
-	runGitCmd(t, repoADir, "push", "origin", "HEAD")
-
-	runGitCmd(t, baseDir, "clone", originDir, "repoB")
-	runGitCmd(t, repoBDir, "config", "user.name", "Test User")
-	runGitCmd(t, repoBDir, "config", "user.email", "test@example.com")
-
-	return originDir, repoADir, repoBDir
 }
 
 func TestSyncRepo_NonGit(t *testing.T) {
@@ -139,38 +84,138 @@ func TestSyncRepo_IndexLock(t *testing.T) {
 }
 
 func TestSyncRepo_FastForward(t *testing.T) {
-	_, repoA, repoB := setupGitRepos(t)
+	t.Run("up to date repo with no changes", func(t *testing.T) {
+		dir := t.TempDir()
+		_ = os.MkdirAll(filepath.Join(dir, ".git"), 0755)
 
-	hasChanges, err := SyncRepo(context.Background(), repoB, nil)
-	if err != nil {
-		t.Fatalf("SyncRepo failed: %v", err)
-	}
-	if hasChanges {
-		t.Errorf("Expected hasChanges=false for identical repos")
-	}
+		type gitCall struct {
+			dir  string
+			args []string
+		}
+		var calls []gitCall
+		var mu sync.Mutex
 
-	testFile := filepath.Join(repoA, "README.md")
-	if err := os.WriteFile(testFile, []byte("# Updated commit\n"), 0644); err != nil {
-		t.Fatalf("failed to update test file: %v", err)
-	}
-	runGitCmd(t, repoA, "commit", "-am", "Update commit")
-	runGitCmd(t, repoA, "push", "origin", "HEAD")
+		SetGitExecutorForTest(t, func(ctx context.Context, d string, args ...string) ([]byte, []byte, error) {
+			mu.Lock()
+			calls = append(calls, gitCall{dir: d, args: args})
+			mu.Unlock()
 
-	hasChanges, err = SyncRepo(context.Background(), repoB, nil)
-	if err != nil {
-		t.Fatalf("SyncRepo failed to pull fast-forward changes: %v", err)
-	}
-	if !hasChanges {
-		t.Errorf("Expected hasChanges=true after remote commit pushed")
-	}
+			if len(args) > 0 && args[0] == "rev-parse" {
+				return []byte("sha_identical\n"), nil, nil
+			}
+			return nil, nil, nil
+		})
 
-	content, err := os.ReadFile(filepath.Join(repoB, "README.md"))
-	if err != nil {
-		t.Fatalf("failed to read pulled file: %v", err)
-	}
-	if strings.TrimSpace(string(content)) != "# Updated commit" {
-		t.Errorf("Expected content '# Updated commit', got: %s", string(content))
-	}
+		cfg := config.NewFromData(&config.ConfigData{GitHubPAT: "ghp_secret_token_123"})
+		hasChanges, err := SyncRepo(context.Background(), dir, cfg)
+		if err != nil {
+			t.Fatalf("SyncRepo failed: %v", err)
+		}
+		if hasChanges {
+			t.Errorf("expected hasChanges=false for identical commit SHAs")
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+
+		// Verify exact 4-step sequence
+		if len(calls) != 4 {
+			t.Fatalf("expected exactly 4 git calls, got %d: %+v", len(calls), calls)
+		}
+
+		// Step 1: safe.directory (global scope, dir == "")
+		if calls[0].dir != "" {
+			t.Errorf("step 1 dir expected empty, got %q", calls[0].dir)
+		}
+		expectedSafeArgs := BuildSafeDirectoryArgs()
+		if strings.Join(calls[0].args, " ") != strings.Join(expectedSafeArgs, " ") {
+			t.Errorf("step 1 args mismatch: got %v, want %v", calls[0].args, expectedSafeArgs)
+		}
+
+		// Step 2: rev-parse HEAD before (dir == dir)
+		if calls[1].dir != dir {
+			t.Errorf("step 2 dir expected %q, got %q", dir, calls[1].dir)
+		}
+		if strings.Join(calls[1].args, " ") != "rev-parse HEAD" {
+			t.Errorf("step 2 args mismatch: got %v", calls[1].args)
+		}
+
+		// Step 3: pull with auth header (dir == dir)
+		if calls[2].dir != dir {
+			t.Errorf("step 3 dir expected %q, got %q", dir, calls[2].dir)
+		}
+		// Verify Zero Plaintext Token Invariant
+		argsStr := strings.Join(calls[2].args, " ")
+		if strings.Contains(argsStr, "ghp_secret_token_123") {
+			t.Fatalf("CRITICAL SECURITY VIOLATION: raw PAT leaked in git arguments: %s", argsStr)
+		}
+		if !strings.Contains(argsStr, "http.extraHeader=AUTHORIZATION: basic ") {
+			t.Errorf("step 3 expected basic auth header, got %s", argsStr)
+		}
+		if !strings.HasSuffix(argsStr, "pull --ff-only") {
+			t.Errorf("step 3 expected suffix 'pull --ff-only', got %s", argsStr)
+		}
+
+		// Step 4: rev-parse HEAD after (dir == dir)
+		if calls[3].dir != dir {
+			t.Errorf("step 4 dir expected %q, got %q", dir, calls[3].dir)
+		}
+		if strings.Join(calls[3].args, " ") != "rev-parse HEAD" {
+			t.Errorf("step 4 args mismatch: got %v", calls[3].args)
+		}
+	})
+
+	t.Run("fast-forward remote commit change detected", func(t *testing.T) {
+		dir := t.TempDir()
+		_ = os.MkdirAll(filepath.Join(dir, ".git"), 0755)
+
+		revCount := 0
+		SetGitExecutorForTest(t, func(ctx context.Context, d string, args ...string) ([]byte, []byte, error) {
+			if len(args) > 0 && args[0] == "rev-parse" {
+				revCount++
+				if revCount == 1 {
+					return []byte("  commit_sha_before\r\n"), nil, nil
+				}
+				return []byte("  commit_sha_after\n"), nil, nil
+			}
+			return nil, nil, nil
+		})
+
+		hasChanges, err := SyncRepo(context.Background(), dir, nil)
+		if err != nil {
+			t.Fatalf("SyncRepo failed: %v", err)
+		}
+		if !hasChanges {
+			t.Errorf("expected hasChanges=true when commit changes from before to after")
+		}
+	})
+
+	t.Run("pull error sanitizes token in error output", func(t *testing.T) {
+		dir := t.TempDir()
+		_ = os.MkdirAll(filepath.Join(dir, ".git"), 0755)
+
+		SetGitExecutorForTest(t, func(ctx context.Context, d string, args ...string) ([]byte, []byte, error) {
+			if len(args) > 0 && args[0] == "rev-parse" {
+				return []byte("sha1"), nil, nil
+			}
+			if len(args) > 0 && args[0] == "-c" {
+				return nil, []byte("fatal: authentication failed for token ghp_leaked_token_xyz"), errors.New("exit status 128")
+			}
+			return nil, nil, nil
+		})
+
+		cfg := config.NewFromData(&config.ConfigData{GitHubPAT: "ghp_leaked_token_xyz"})
+		_, err := SyncRepo(context.Background(), dir, cfg)
+		if err == nil {
+			t.Fatalf("expected error on pull failure, got nil")
+		}
+		if strings.Contains(err.Error(), "ghp_leaked_token_xyz") {
+			t.Fatalf("expected token to be redacted from error output, got: %v", err)
+		}
+		if !strings.Contains(err.Error(), "[REDACTED_TOKEN]") {
+			t.Fatalf("expected [REDACTED_TOKEN] in error output, got: %v", err)
+		}
+	})
 }
 
 func TestStartPeriodicSync_LoopAndCancel(t *testing.T) {
@@ -271,26 +316,42 @@ func TestStartPeriodicSync_ZeroInterval(t *testing.T) {
 }
 
 func TestSyncRepo_SafeDirectory_Idempotent(t *testing.T) {
-	gitBin := ResolveGitBin(os.Getenv)
-	if _, err := exec.LookPath(gitBin); err != nil {
-		if _, statErr := os.Stat(gitBin); statErr != nil {
-			t.Skip("git binary not found; skipping test")
-		}
-	}
+	dir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(dir, ".git"), 0755)
 
-	_, repoA, _ := setupGitRepos(t)
+	safeDirCallCount := 0
+	var mu sync.Mutex
+
+	SetGitExecutorForTest(t, func(ctx context.Context, d string, args ...string) ([]byte, []byte, error) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		expected := BuildSafeDirectoryArgs()
+		if len(args) == len(expected) && strings.Join(args, " ") == strings.Join(expected, " ") {
+			if d != "" {
+				t.Errorf("expected safe.directory to be executed with empty dir (global scope), got %q", d)
+			}
+			safeDirCallCount++
+		}
+		if len(args) > 0 && args[0] == "rev-parse" {
+			return []byte("sha1"), nil, nil
+		}
+		return nil, nil, nil
+	})
 
 	for i := 0; i < 3; i++ {
-		_, err := SyncRepo(context.Background(), repoA, nil)
+		_, err := SyncRepo(context.Background(), dir, nil)
 		if err != nil {
 			t.Fatalf("SyncRepo iteration %d failed: %v", i, err)
 		}
 	}
 
-	cmd := exec.Command(gitBin, "config", "--global", "--get-all", "safe.directory")
-	out, _ := cmd.CombinedOutput()
-	if !strings.Contains(string(out), "*") {
-		t.Errorf("Expected global safe.directory to contain '*', got: %s", string(out))
+	mu.Lock()
+	count := safeDirCallCount
+	mu.Unlock()
+
+	if count != 3 {
+		t.Errorf("Expected safe.directory to be called 3 times (once per iteration), got %d", count)
 	}
 }
 
@@ -323,6 +384,9 @@ func TestEnsureRepo_AlreadyValid(t *testing.T) {
 }
 
 func TestEnsureRepo_MkdirAllError(t *testing.T) {
+	SetGitExecutorForTest(t, func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+		return nil, nil, nil
+	})
 	nonDirFile := filepath.Join(t.TempDir(), "blocker_file")
 	_ = os.WriteFile(nonDirFile, []byte("file content"), 0644)
 	targetDir := filepath.Join(nonDirFile, "target_repo")
@@ -334,6 +398,12 @@ func TestEnsureRepo_MkdirAllError(t *testing.T) {
 }
 
 func TestSyncRepo_CorruptedGitDir(t *testing.T) {
+	SetGitExecutorForTest(t, func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+		if len(args) > 0 && args[0] == "rev-parse" {
+			return nil, []byte("fatal: not a git repository"), errors.New("exit status 128")
+		}
+		return nil, nil, nil
+	})
 	dir := t.TempDir()
 	gitDir := filepath.Join(dir, ".git")
 	_ = os.MkdirAll(gitDir, 0755)
@@ -345,17 +415,40 @@ func TestSyncRepo_CorruptedGitDir(t *testing.T) {
 }
 
 func TestEnsureGitHooks(t *testing.T) {
-	dir := t.TempDir()
-	runGitCmd(t, dir, "init")
+	var invokedArgs []string
+	var invokedDir string
+	var mu sync.Mutex
 
+	SetGitExecutorForTest(t, func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		invokedDir = dir
+		invokedArgs = args
+		return nil, nil, nil
+	})
+
+	// Case 1: empty repoPath -> early return nil, executor not called
 	if err := EnsureGitHooks(context.Background(), ""); err != nil {
 		t.Errorf("Expected nil error for empty repoPath")
 	}
+	mu.Lock()
+	if len(invokedArgs) != 0 {
+		t.Errorf("Expected no git commands for empty repoPath")
+	}
+	mu.Unlock()
 
+	// Case 2: directory without .githooks -> executor not called
+	dir := t.TempDir()
 	if err := EnsureGitHooks(context.Background(), dir); err != nil {
 		t.Errorf("Expected nil error when .githooks does not exist")
 	}
+	mu.Lock()
+	if len(invokedArgs) != 0 {
+		t.Errorf("Expected no git commands when .githooks does not exist")
+	}
+	mu.Unlock()
 
+	// Case 3: directory with .githooks directory -> executor called with BuildHooksPathArgs
 	hooksDir := filepath.Join(dir, ".githooks")
 	if err := os.MkdirAll(hooksDir, 0755); err != nil {
 		t.Fatalf("failed to create .githooks dir: %v", err)
@@ -365,14 +458,19 @@ func TestEnsureGitHooks(t *testing.T) {
 		t.Fatalf("EnsureGitHooks failed with .githooks present: %v", err)
 	}
 
-	gitBin := ResolveGitBin(os.Getenv)
-	cmd := exec.Command(gitBin, "-C", dir, "config", "--get", "core.hooksPath")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("failed to read core.hooksPath: %v, output: %s", err, string(out))
+	mu.Lock()
+	defer mu.Unlock()
+	if invokedDir != dir {
+		t.Errorf("Expected invokedDir to be %q, got %q", dir, invokedDir)
 	}
-	if strings.TrimSpace(string(out)) != ".githooks" {
-		t.Errorf("Expected core.hooksPath to be '.githooks', got: %s", string(out))
+	expectedArgs := BuildHooksPathArgs(".githooks")
+	if len(invokedArgs) != len(expectedArgs) {
+		t.Fatalf("Expected %v args, got %v", expectedArgs, invokedArgs)
+	}
+	for i := range expectedArgs {
+		if invokedArgs[i] != expectedArgs[i] {
+			t.Errorf("Expected arg %d to be %q, got %q", i, expectedArgs[i], invokedArgs[i])
+		}
 	}
 }
 
@@ -718,10 +816,11 @@ func TestEnsureGitHooks_MockScenarios(t *testing.T) {
 }
 
 func TestDefaultGitExecutor_Execution(t *testing.T) {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	dir := t.TempDir()
 
-	// Test valid command via defaultGitExecutor
+	// Test valid command via defaultGitExecutor with directory
 	stdout, stderr, err := defaultGitExecutor(ctx, dir, "version")
 	if err == nil {
 		if !strings.Contains(string(stdout), "git version") && !strings.Contains(string(stderr), "git version") {
@@ -729,9 +828,143 @@ func TestDefaultGitExecutor_Execution(t *testing.T) {
 		}
 	}
 
+	// Test valid command with empty directory (exercises dir == "" branch in defaultGitExecutor)
+	_, _, _ = defaultGitExecutor(ctx, "", "version")
+
 	// Test invalid command via defaultGitExecutor
 	_, _, err = defaultGitExecutor(ctx, dir, "invalid-git-subcommand-xyz-123")
 	if err == nil {
 		t.Errorf("expected error for invalid git subcommand")
 	}
 }
+
+func TestResolveGitDir_WorktreeAndErrors(t *testing.T) {
+	t.Run("worktree file with relative path", func(t *testing.T) {
+		dir := t.TempDir()
+		gitFile := filepath.Join(dir, ".git")
+		worktreeTarget := filepath.Join(dir, "target_gitdir")
+		_ = os.MkdirAll(worktreeTarget, 0755)
+
+		relTarget := "target_gitdir"
+		_ = os.WriteFile(gitFile, []byte("gitdir: "+relTarget+"\n"), 0644)
+
+		resolved, err := resolveGitDir(dir)
+		if err != nil {
+			t.Fatalf("resolveGitDir failed: %v", err)
+		}
+		expected := filepath.Clean(worktreeTarget)
+		if filepath.Clean(resolved) != expected {
+			t.Fatalf("resolveGitDir returned %q, want %q", resolved, expected)
+		}
+	})
+
+	t.Run("worktree file with invalid content falls back to gitPath", func(t *testing.T) {
+		dir := t.TempDir()
+		gitFile := filepath.Join(dir, ".git")
+		_ = os.WriteFile(gitFile, []byte("invalid content not starting with gitdir"), 0644)
+
+		resolved, err := resolveGitDir(dir)
+		if err != nil {
+			t.Fatalf("resolveGitDir failed: %v", err)
+		}
+		if filepath.Clean(resolved) != filepath.Clean(gitFile) {
+			t.Fatalf("resolveGitDir returned %q, want %q", resolved, gitFile)
+		}
+	})
+
+	t.Run("missing git dir returns stat error", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "nonexistent")
+		_, err := resolveGitDir(dir)
+		if err == nil {
+			t.Fatalf("expected error for nonexistent directory, got nil")
+		}
+	})
+}
+
+func TestEnsureRepo_AdditionalMockScenarios(t *testing.T) {
+	t.Run("successful clone into empty directory", func(t *testing.T) {
+		var cloneArgs []string
+		SetGitExecutorForTest(t, func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			for _, arg := range args {
+				if arg == "clone" {
+					cloneArgs = args
+					return []byte("Cloning into..."), nil, nil
+				}
+			}
+			return nil, nil, nil
+		})
+
+		dir := filepath.Join(t.TempDir(), "empty_repo")
+		err := EnsureRepo(context.Background(), dir, "https://github.com/azylman/aerial.git", "ghp_mock")
+		if err != nil {
+			t.Fatalf("expected nil error on successful clone, got: %v", err)
+		}
+		if len(cloneArgs) == 0 {
+			t.Fatalf("expected git clone to be called")
+		}
+	})
+
+	t.Run("soft reset fallback to FETCH_HEAD succeeds when origin/branch fails", func(t *testing.T) {
+		resetCount := 0
+		SetGitExecutorForTest(t, func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			if len(args) > 0 && args[0] == "reset" {
+				resetCount++
+				if resetCount == 1 {
+					return nil, []byte("fatal: ambiguous ref origin/main"), errors.New("exit status 128")
+				}
+				return []byte("reset FETCH_HEAD success"), nil, nil
+			}
+			return nil, nil, nil
+		})
+
+		dir := t.TempDir()
+		_ = os.WriteFile(filepath.Join(dir, "local_file.txt"), []byte("data"), 0644)
+
+		err := EnsureRepo(context.Background(), dir, "https://github.com/azylman/aerial.git", "")
+		if err != nil {
+			t.Fatalf("expected nil error on FETCH_HEAD fallback reset, got: %v", err)
+		}
+		if resetCount != 2 {
+			t.Fatalf("expected 2 reset attempts, got: %d", resetCount)
+		}
+	})
+}
+
+func TestBackwardCompatibilityShims(t *testing.T) {
+	authArgs := buildAuthArgs("test_token")
+	expectedAuth := BuildAuthArgs("test_token")
+	if strings.Join(authArgs, " ") != strings.Join(expectedAuth, " ") {
+		t.Errorf("buildAuthArgs mismatch: got %v, want %v", authArgs, expectedAuth)
+	}
+
+	rawURL := "  https://github.com/test.git  "
+	cleaned := cleanURL(rawURL)
+	expectedURL := CleanURL(rawURL)
+	if cleaned != expectedURL {
+		t.Errorf("cleanURL mismatch: got %q, want %q", cleaned, expectedURL)
+	}
+}
+
+func TestSyncRepo_EmptyErrorOutput(t *testing.T) {
+	SetGitExecutorForTest(t, func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+		if len(args) > 0 && args[0] == "rev-parse" {
+			return []byte("sha1"), nil, nil
+		}
+		if len(args) > 0 && args[0] == "pull" {
+			return []byte(""), []byte(""), errors.New("aborted")
+		}
+		return nil, nil, nil
+	})
+
+	dir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(dir, ".git"), 0755)
+
+	hasChanges, err := SyncRepo(context.Background(), dir, nil)
+	if err == nil {
+		t.Fatalf("expected error on empty output pull failure, got nil")
+	}
+	if hasChanges {
+		t.Errorf("expected hasChanges=false on error")
+	}
+}
+

@@ -1895,7 +1895,6 @@ func TestHandleTasks_CacheDoubleCheck(t *testing.T) {
 
 func TestRunBrainApp_FullLifecycle(t *testing.T) {
 	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "brain.db")
 	_ = os.MkdirAll(filepath.Join(tmpDir, ".gemini", "skills"), 0755)
 	_ = os.MkdirAll(filepath.Join(tmpDir, ".gemini", "config", "skills"), 0755)
 
@@ -1904,7 +1903,7 @@ func TestRunBrainApp_FullLifecycle(t *testing.T) {
 		t.Fatalf("LoadConfigFromPaths failed: %v", err)
 	}
 	cur := cfg.Current()
-	cur.DatabaseURL = dbPath
+	cur.DatabaseURL = ":memory:"
 	cur.DataDir = tmpDir
 	cur.GeminiHomeDir = tmpDir
 	cur.DiscordToken = "mock-discord-token"
