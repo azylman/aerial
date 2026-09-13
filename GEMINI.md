@@ -153,8 +153,7 @@ Aerial operates on a strict **Two-Repository Separation of Concerns**:
      - **Table-Driven Unit Tests as Primary Vehicle**: Unit tests for business logic permutations and edge cases MUST target these pure functions directly using fast, table-driven tests. Pure unit tests execute in microseconds (< 1ms) with zero chance of channel deadlocks, race conditions, or timing flakiness.
      - **Reserve Mock Runner / Subprocess Orchestration for Plumbing Only**: Tests that instantiate mock subprocesses (`createMockAgyScript`), mock runners (`RunnerFunc`), goroutine worker pools, channel select loops, and context timeouts MUST be strictly limited to verifying concurrency plumbing (e.g., watchdog timeouts, process group kills, startup catch-up sweeps). Aerial is strictly prohibited from testing business logic variants via end-to-end mock runner pipelines.
 
-8. **Multi-Agent Review Panel ("The Girl Gang") & Tiered Engineering Workflow**:
-   - The subagent review panel is called **the girl gang** (or **the gang**).
+8. **Multi-Agent Review Panel & Tiered Engineering Workflow**:
    - During self-improvement workflows, code review is structured dynamically across three complexity tiers:
      - **Tier 1 (< 50 LOC, targeted bugfixes & test additions)**: Solo Adversarial Systems Critic / Devil's Advocate audits the plan (~30s). Autonomous execution (no mandatory stop). Zero mid-task pauses during coding.
      - **Tier 2 (50–200 LOC, standard features & multi-package refactors)**: Full 4-expert review panel (3 Domain Specialists + 1 Devil's Advocate) audits the plan (~45s). Autonomous execution (no mandatory stop; directly incorporates plan feedback). Zero mid-task pauses during coding. Consolidated Devil's Advocate audits the unified `git diff` before opening the PR (~30s).
