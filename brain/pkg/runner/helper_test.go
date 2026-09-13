@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -139,6 +140,99 @@ func runHelperProcess() {
 		}
 		os.Exit(0)
 
+	case "target":
+		targetID := os.Getenv("AERIAL_TARGET_ID")
+		fmt.Printf("TARGET=%s\n{\"status\":\"SUCCESS\",\"response\":\"target ok\"}\n", targetID)
+		os.Exit(0)
+
+	case "pulse_stderr":
+		pulses := 5
+		if pStr := os.Getenv("MOCK_PULSES"); pStr != "" {
+			if p, err := strconv.Atoi(pStr); err == nil && p > 0 {
+				pulses = p
+			}
+		}
+		sleepMs := 15
+		if sStr := os.Getenv("MOCK_PULSE_SLEEP_MS"); sStr != "" {
+			if s, err := strconv.Atoi(sStr); err == nil && s > 0 {
+				sleepMs = s
+			}
+		}
+		for i := 1; i <= pulses; i++ {
+			fmt.Fprintf(os.Stderr, "pulse %d\n", i)
+			time.Sleep(time.Duration(sleepMs) * time.Millisecond)
+		}
+		fmt.Println(`{"status":"SUCCESS","response":"done"}`)
+		os.Exit(0)
+
+	case "pulse_stdout":
+		pulses := 5
+		if pStr := os.Getenv("MOCK_PULSES"); pStr != "" {
+			if p, err := strconv.Atoi(pStr); err == nil && p > 0 {
+				pulses = p
+			}
+		}
+		sleepMs := 15
+		if sStr := os.Getenv("MOCK_PULSE_SLEEP_MS"); sStr != "" {
+			if s, err := strconv.Atoi(sStr); err == nil && s > 0 {
+				sleepMs = s
+			}
+		}
+		for i := 1; i <= pulses; i++ {
+			fmt.Printf("stdout pulse %d\n", i)
+			time.Sleep(time.Duration(sleepMs) * time.Millisecond)
+		}
+		fmt.Println(`{"status":"SUCCESS","response":"done"}`)
+		os.Exit(0)
+
+	case "pulse_file":
+		logFile := os.Getenv("MOCK_LOG_FILE")
+		pulses := 5
+		if pStr := os.Getenv("MOCK_PULSES"); pStr != "" {
+			if p, err := strconv.Atoi(pStr); err == nil && p > 0 {
+				pulses = p
+			}
+		}
+		sleepMs := 15
+		if sStr := os.Getenv("MOCK_PULSE_SLEEP_MS"); sStr != "" {
+			if s, err := strconv.Atoi(sStr); err == nil && s > 0 {
+				sleepMs = s
+			}
+		}
+		for i := 1; i <= pulses; i++ {
+			if logFile != "" {
+				f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+				if err == nil {
+					_, _ = fmt.Fprintf(f, "{\"step\": %d}\n", i)
+					_ = f.Sync()
+					_ = f.Close()
+				}
+			}
+			time.Sleep(time.Duration(sleepMs) * time.Millisecond)
+		}
+		fmt.Println(`{"status":"SUCCESS","response":"done"}`)
+		os.Exit(0)
+
+	case "stall_file":
+		logFile := os.Getenv("MOCK_LOG_FILE")
+		stallMs := 150
+		if sStr := os.Getenv("MOCK_STALL_MS"); sStr != "" {
+			if s, err := strconv.Atoi(sStr); err == nil && s > 0 {
+				stallMs = s
+			}
+		}
+		if logFile != "" {
+			f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+			if err == nil {
+				_, _ = fmt.Fprintln(f, "started build")
+				_ = f.Sync()
+				_ = f.Close()
+			}
+		}
+		time.Sleep(time.Duration(stallMs) * time.Millisecond)
+		fmt.Println(`{"status":"SUCCESS","response":"done"}`)
+		os.Exit(0)
+
 	default:
 		fmt.Printf("{\"status\":\"SUCCESS\",\"response\":\"default helper ok\"}\n")
 		os.Exit(0)
@@ -167,8 +261,10 @@ type MockStreamWorkerConfig struct {
 	BadResult  bool
 	NoInit     bool
 	HangInit   bool
-	RSSBytes   uint64
-	Roots      []string
+	RSSBytes    uint64
+	Roots       []string
+	TurnStarted chan struct{}
+	BlockUntil  chan struct{}
 }
 
 // MockStreamWorkerHarness manages the background goroutine and pipes for in-memory stream testing.
@@ -245,6 +341,21 @@ func NewMockStreamWorker(t *testing.T, cfg MockStreamWorkerConfig) (*WorkerInsta
 			line := strings.TrimSpace(scanner.Text())
 			if line == "" {
 				continue
+			}
+
+			if cfg.TurnStarted != nil {
+				select {
+				case cfg.TurnStarted <- struct{}{}:
+				default:
+				}
+			}
+
+			if cfg.BlockUntil != nil {
+				select {
+				case <-cfg.BlockUntil:
+				case <-ctx.Done():
+					return
+				}
 			}
 
 			if cfg.CrashNow || strings.Contains(line, "CRASH_ALWAYS") || strings.Contains(line, "CRASH_NOW") {
