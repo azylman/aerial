@@ -258,6 +258,39 @@ func TestGetComposeArgs_Deduplication(t *testing.T) {
 	}
 }
 
+func TestGetComposeArgs_WithEnvFile(t *testing.T) {
+	composeDir := t.TempDir()
+	configDir := t.TempDir()
+
+	baseFile := filepath.Join(composeDir, "docker-compose.yml")
+	if err := os.WriteFile(baseFile, []byte("services: {}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	envFile := filepath.Join(composeDir, ".env")
+	if err := os.WriteFile(envFile, []byte("TEST_KEY=123"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	daemon := &SyncDaemon{
+		composeDir: composeDir,
+		configDir:  configDir,
+	}
+
+	args := daemon.getComposeArgs(composeDir, "config")
+
+	hasEnvFile := false
+	for i, a := range args {
+		if a == "--env-file" && i+1 < len(args) && args[i+1] == envFile {
+			hasEnvFile = true
+			break
+		}
+	}
+	if !hasEnvFile {
+		t.Fatalf("expected --env-file %s in args, got: %v", envFile, args)
+	}
+}
+
 func TestParseComposeServices(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -2585,9 +2618,10 @@ func TestScrubComposeEnv_Extended(t *testing.T) {
 		"AERIAL_CONFIG_DIR=/dir/config",
 		"AERIAL_PROJECT_DIR=/dir/project",
 		"GOOD_VAR=123",
+		"COMPOSE_PROJECT_NAME=aerial",
 	}
 	out := scrubComposeEnv(input)
-	if len(out) != 1 || out[0] != "GOOD_VAR=123" {
+	if len(out) != 1 || out[0] != "COMPOSE_PROJECT_NAME=aerial" {
 		t.Errorf("unexpected scrubbed output: %v", out)
 	}
 }

@@ -220,8 +220,52 @@ func CalculateSyncStatus(repos map[string]RepoStatus) string {
 	return "synced"
 }
 
-// ScrubComposeEnv filters out container-internal path overrides (AERIAL_CONFIG_DIR, AERIAL_PROJECT_DIR)
-// so docker compose does not inherit container filesystem paths for host volume mounts.
+var allowedExactKeys = map[string]struct{}{
+	"path":            {},
+	"home":            {},
+	"user":            {},
+	"tmpdir":          {},
+	"temp":            {},
+	"tmp":             {},
+	"hostname":        {},
+	"lang":            {},
+	"lc_all":          {},
+	"lc_ctype":        {},
+	"xdg_runtime_dir": {},
+	"ci":              {},
+	"http_proxy":      {},
+	"https_proxy":     {},
+	"no_proxy":        {},
+	"all_proxy":       {},
+	"ssl_cert_file":   {},
+	"ssl_cert_dir":    {},
+	"systemroot":      {},
+	"systemdrive":     {},
+	"comspec":         {},
+	"pathext":         {},
+}
+
+var allowedPrefixes = []string{
+	"docker_",
+	"compose_",
+}
+
+func isAllowedEnvKey(key string) bool {
+	lower := strings.ToLower(strings.TrimSpace(key))
+	if _, ok := allowedExactKeys[lower]; ok {
+		return true
+	}
+	for _, p := range allowedPrefixes {
+		if strings.HasPrefix(lower, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// ScrubComposeEnv filters environment variables for docker compose execution,
+// strictly allowlisting engine, system, proxy, and Docker CLI essentials
+// to prevent container process environment variables from shadowing host .env values.
 func ScrubComposeEnv(environ []string) []string {
 	out := make([]string, 0, len(environ))
 	for _, env := range environ {
@@ -230,10 +274,9 @@ func ScrubComposeEnv(environ []string) []string {
 			continue
 		}
 		key := env[:eq]
-		if strings.EqualFold(key, "AERIAL_CONFIG_DIR") || strings.EqualFold(key, "AERIAL_PROJECT_DIR") {
-			continue
+		if isAllowedEnvKey(key) {
+			out = append(out, env)
 		}
-		out = append(out, env)
 	}
 	return out
 }
