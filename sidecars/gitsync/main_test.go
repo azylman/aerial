@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -618,42 +617,63 @@ func TestStartPeriodicLoop(t *testing.T) {
 
 func TestEnsureRepoAndSync(t *testing.T) {
 	tempBase := t.TempDir()
-	bareRemote := filepath.Join(tempBase, "remote.git")
+	bareRemote := "https://example.com/repo.git"
 	localClone := filepath.Join(tempBase, "local")
 
-	// 1. Initialize bare remote repository
-	cmdBare := execGit("init", "--bare", "-b", "main", bareRemote)
-	if out, err := cmdBare.CombinedOutput(); err != nil {
-		t.Fatalf("failed to init bare remote: %s (%v)", out, err)
+	simulatedCurrentHead := "1111111111111111111111111111111111111111"
+	simulatedFetchHead := "1111111111111111111111111111111111111111"
+	cloneCalled := false
+
+	gitMock := func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+		if len(args) == 0 {
+			return nil, nil, nil
+		}
+		switch args[0] {
+		case "clone":
+			cloneCalled = true
+			targetPath := args[len(args)-1]
+			_ = os.MkdirAll(filepath.Join(targetPath, ".git"), 0755)
+			return nil, nil, nil
+		case "config":
+			return nil, nil, nil
+		case "rev-parse":
+			if len(args) > 1 && args[1] == "FETCH_HEAD" {
+				return []byte(simulatedFetchHead + "\n"), nil, nil
+			}
+			return []byte(simulatedCurrentHead + "\n"), nil, nil
+		case "fetch":
+			return nil, nil, nil
+		case "merge":
+			simulatedCurrentHead = simulatedFetchHead
+			return []byte("Updating " + simulatedCurrentHead + "\n"), nil, nil
+		case "diff":
+			return []byte("docker-compose.yml\n"), nil, nil
+		}
+		return nil, nil, nil
 	}
 
-	// 2. Initialize temporary seed repo and push to bare remote
-	seedRepo := filepath.Join(tempBase, "seed")
-	_ = execGit("init", "-b", "main", seedRepo).Run()
-	_ = execGit("-C", seedRepo, "config", "user.name", "Seed").Run()
-	_ = execGit("-C", seedRepo, "config", "user.email", "seed@example.com").Run()
-	_ = os.WriteFile(filepath.Join(seedRepo, "file.txt"), []byte("hello v1\n"), 0644)
-	_ = execGit("-C", seedRepo, "add", "-A").Run()
-	_ = execGit("-C", seedRepo, "commit", "-m", "initial").Run()
-	_ = execGit("-C", seedRepo, "remote", "add", "origin", bareRemote).Run()
-	_ = execGit("-C", seedRepo, "push", "-u", "origin", "main").Run()
-
-	// 3. EnsureRepo test on empty directory (clones from bareRemote)
 	daemon := &SyncDaemon{
 		repos:       []string{localClone},
 		repoUrls:    map[string]string{localClone: bareRemote},
 		reconcileCh: make(chan struct{}, 1),
+		gitExecutor: gitMock,
 	}
 	ctx := context.Background()
+
+	// 1. EnsureRepo test on empty directory (clones from bareRemote)
 	if err := daemon.EnsureRepo(ctx, localClone, bareRemote); err != nil {
 		t.Fatalf("EnsureRepo failed: %v", err)
 	}
+	if !cloneCalled {
+		t.Errorf("expected clone to be called on empty directory")
+	}
 
-	// Calling EnsureRepo again should be a no-op
+	// 2. Calling EnsureRepo again should be a no-op since .git now exists
 	if err := daemon.EnsureRepo(ctx, localClone, bareRemote); err != nil {
 		t.Fatalf("EnsureRepo second call failed: %v", err)
 	}
-	// Calling EnsureRepo with empty strings
+
+	// 3. Calling EnsureRepo with empty strings returns nil immediately
 	if err := daemon.EnsureRepo(ctx, "", ""); err != nil {
 		t.Errorf("EnsureRepo with empty strings failed: %v", err)
 	}
@@ -666,14 +686,15 @@ func TestEnsureRepoAndSync(t *testing.T) {
 	if res.Changed {
 		t.Errorf("expected changed=false when up to date")
 	}
+	if res.ComposeChanged {
+		t.Errorf("expected compose_changed=false when up to date")
+	}
+	if res.PreviousHead != res.CurrentHead {
+		t.Errorf("expected PreviousHead == CurrentHead, got %s != %s", res.PreviousHead, res.CurrentHead)
+	}
 
-	// 5. Commit change to seedRepo and push to bareRemote
-	_ = os.WriteFile(filepath.Join(seedRepo, "docker-compose.yml"), []byte("services: { app: {} }\n"), 0644)
-	_ = execGit("-C", seedRepo, "add", "-A").Run()
-	_ = execGit("-C", seedRepo, "commit", "-m", "update compose").Run()
-	_ = execGit("-C", seedRepo, "push", "origin", "main").Run()
-
-	// 6. SyncRepo test when changes exist
+	// 5. SyncRepo test when remote changes exist with compose update
+	simulatedFetchHead = "2222222222222222222222222222222222222222"
 	res2 := daemon.SyncRepo(ctx, localClone)
 	if res2.Error != "" {
 		t.Fatalf("SyncRepo failed on update: %s", res2.Error)
@@ -687,8 +708,11 @@ func TestEnsureRepoAndSync(t *testing.T) {
 	if res2.PreviousHead == res2.CurrentHead {
 		t.Errorf("expected PreviousHead != CurrentHead, got %s == %s", res2.PreviousHead, res2.CurrentHead)
 	}
+	if res2.PreviousHead != "1111111111111111111111111111111111111111" || res2.CurrentHead != "2222222222222222222222222222222222222222" {
+		t.Errorf("unexpected heads: prev=%s curr=%s", res2.PreviousHead, res2.CurrentHead)
+	}
 
-	// 7. Test index.lock guard
+	// 6. Test index.lock guard
 	lockFile := filepath.Join(localClone, ".git", "index.lock")
 	_ = os.WriteFile(lockFile, []byte(""), 0644)
 	resLock := daemon.SyncRepo(ctx, localClone)
@@ -697,7 +721,7 @@ func TestEnsureRepoAndSync(t *testing.T) {
 	}
 	_ = os.Remove(lockFile)
 
-	// 8. Test SyncRepo empty repo path & invalid repo
+	// 7. Test SyncRepo empty repo path & invalid repo
 	emptyRes := daemon.SyncRepo(ctx, "")
 	if emptyRes.Repo != "" {
 		t.Errorf("expected empty repo result")
@@ -1685,7 +1709,7 @@ func TestDefaultComposeExecutor(t *testing.T) {
 	}
 
 	// Test cancellation
-	cancelCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	cancelCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	_, _, errCancel := defaultComposeExecutor(cancelCtx, tempDir, "sleep")
 	if errCancel == nil {
@@ -2317,29 +2341,6 @@ func ioNopCloser(r io.Reader) io.ReadCloser {
 	return io.NopCloser(r)
 }
 
-func execGit(args ...string) *exec.Cmd {
-	gitBin := ResolveGitBin(os.Getenv)
-	return exec.Command(gitBin, args...)
-}
-
-func runGit(t *testing.T, dir string, args ...string) {
-	t.Helper()
-	cmd := execGit(append([]string{"-C", dir}, args...)...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %v failed in %s: %s (%v)", args, dir, out, err)
-	}
-}
-
-func runGitOutput(t *testing.T, dir string, args ...string) string {
-	t.Helper()
-	cmd := execGit(append([]string{"-C", dir}, args...)...)
-	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("git %v failed in %s: %s (%v)", args, dir, out, err)
-	}
-	return strings.TrimSpace(string(out))
-}
 
 func TestCleanConflictContainers_AllBranches(t *testing.T) {
 	ctx := context.Background()
@@ -2683,26 +2684,33 @@ func TestCleanConflictContainers_DetailedCoverage(t *testing.T) {
 func TestResolveChannelID_DetailedCoverage(t *testing.T) {
 	d := &SyncDaemon{}
 
-	// 1. Guilds HTTP 500 error
-	tsError := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer tsError.Close()
+	client500 := &http.Client{
+		Transport: &roundTripperFunc{
+			fn: func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusInternalServerError,
+					Body:       ioNopCloser(strings.NewReader("server error")),
+					Header:     make(http.Header),
+				}, nil
+			},
+		},
+	}
 
-	_, err := d.resolveChannelID(context.Background(), tsError.Client(), "token", "alerts")
+	// 1. Guilds HTTP 500 error
+	_, err := d.resolveChannelID(context.Background(), client500, "token", "alerts")
 	if err == nil {
 		t.Errorf("expected error on HTTP 500")
 	}
 
 	// 2. Snowflake fast return
-	ch, err := d.resolveChannelID(context.Background(), http.DefaultClient, "token", "123456789012345678")
+	ch, err := d.resolveChannelID(context.Background(), client500, "token", "123456789012345678")
 	if err != nil || ch != "123456789012345678" {
 		t.Errorf("expected snowflake fast return, got %v, %v", ch, err)
 	}
 
 	// 3. Channel not found / cached return
 	d.cachedChannelID = "cached-999"
-	ch, err = d.resolveChannelID(context.Background(), http.DefaultClient, "token", "alerts")
+	ch, err = d.resolveChannelID(context.Background(), client500, "token", "alerts")
 	if err != nil || ch != "cached-999" {
 		t.Errorf("expected cached channel ID, got %v, %v", ch, err)
 	}
