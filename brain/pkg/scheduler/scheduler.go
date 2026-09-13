@@ -58,6 +58,7 @@ type Scheduler struct {
 	threadCreator ThreadCreator
 	runnerFn      runner.RunnerFunc
 	sessionRoots  []string
+	wg            sync.WaitGroup
 }
 
 // Option configures Scheduler options.
@@ -352,6 +353,14 @@ func ExtractFactsLLM(ctx context.Context, prompt string) (string, error) {
 
 // RunPruneRetention executes schedule run retention cleanup.
 func RunPruneRetention(dbOrStore any) {
+	RunPruneRetentionWithContext(context.Background(), dbOrStore)
+}
+
+// RunPruneRetentionWithContext executes schedule run retention cleanup with the provided context.
+func RunPruneRetentionWithContext(ctx context.Context, dbOrStore any) {
+	if dbOrStore == nil {
+		return
+	}
 	var store db.Store
 	switch v := dbOrStore.(type) {
 	case db.Store:
@@ -364,10 +373,12 @@ func RunPruneRetention(dbOrStore any) {
 	if store == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	pruneCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	if pruned, err := store.PruneScheduleRuns(ctx, 1000, 30*24*time.Hour); err != nil {
-		log.Printf("[Scheduler] Retention pruning error: %v", err)
+	if pruned, err := store.PruneScheduleRuns(pruneCtx, 1000, 30*24*time.Hour); err != nil {
+		if ctx.Err() == nil {
+			log.Printf("[Scheduler] Retention pruning error: %v", err)
+		}
 	} else if pruned > 0 {
 		log.Printf("[Scheduler] Retention pruning removed %d old schedule runs", pruned)
 	}
@@ -378,14 +389,40 @@ func RunFactExtraction(ctx context.Context, dbOrStore any, client *memory.Client
 	if dbOrStore == nil || client == nil || llmFunc == nil {
 		return
 	}
+	if ctx.Err() != nil {
+		return
+	}
 	if backfilled, err := memory.BackfillMissingEmbeddings(ctx, dbOrStore, client); err != nil {
-		log.Printf("[Scheduler] Embedding backfill error: %v", err)
+		if ctx.Err() == nil {
+			log.Printf("[Scheduler] Embedding backfill error: %v", err)
+		}
 	} else if backfilled > 0 {
 		log.Printf("[Scheduler] Embedding backfill completed for %d facts", backfilled)
 	}
-	if err := memory.ExtractActiveConversationFacts(ctx, dbOrStore, client, llmFunc, 12); err != nil {
-		log.Printf("[Scheduler] Fact extraction error: %v", err)
+	if ctx.Err() != nil {
+		return
 	}
+	if err := memory.ExtractActiveConversationFacts(ctx, dbOrStore, client, llmFunc, 12); err != nil {
+		if ctx.Err() == nil {
+			log.Printf("[Scheduler] Fact extraction error: %v", err)
+		}
+	}
+}
+
+func (s *Scheduler) runPruneRetention(ctx context.Context) {
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		RunPruneRetentionWithContext(ctx, s.getStore())
+	}()
+}
+
+func (s *Scheduler) runFactExtraction(ctx context.Context, ollamaClient *memory.Client, llmFunc memory.LLMClientFunc) {
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		RunFactExtraction(ctx, s.getStore(), ollamaClient, llmFunc)
+	}()
 }
 
 // handleTick executes periodic evaluations for a single ticker event.
@@ -399,12 +436,12 @@ func (s *Scheduler) handleTick(ctx context.Context, tickCount int, ollamaClient 
 
 	// Run fact extraction hourly (every 120 ticks at 30s interval = 1 hour)
 	if ShouldRunFactExtraction(tickCount) {
-		go RunFactExtraction(ctx, s.getStore(), ollamaClient, llmFunc)
+		s.runFactExtraction(ctx, ollamaClient, llmFunc)
 	}
 
 	// Run retention pruning daily (every 2880 ticks at 30s interval = 24 hours)
 	if ShouldRunPruneRetention(tickCount) {
-		go RunPruneRetention(s.getStore())
+		s.runPruneRetention(ctx)
 	}
 }
 
@@ -424,13 +461,14 @@ func (s *Scheduler) Run(ctx context.Context, interval time.Duration) {
 	if err := s.ProcessDueSchedules(ctx); err != nil {
 		log.Printf("[Scheduler] Error in initial schedule check: %v", err)
 	}
-	go RunPruneRetention(s.getStore())
-	go RunFactExtraction(ctx, s.getStore(), ollamaClient, llmFunc)
+	s.runPruneRetention(ctx)
+	s.runFactExtraction(ctx, ollamaClient, llmFunc)
 
 	var tickCount int
 	for {
 		select {
 		case <-ctx.Done():
+			s.wg.Wait()
 			log.Println("[Scheduler] Background scheduler monitor stopped cleanly")
 			return
 		case <-ticker.C:
