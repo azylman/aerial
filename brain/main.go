@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"testing"
 	"time"
 
 	"github.com/azylman/aerial/brain/pkg/classifier"
@@ -817,6 +818,10 @@ func RunBrainApp(ctx context.Context, cfg *config.Config) error {
 	}
 
 	cur := cfg.Current()
+	if cur.DatabaseURL == "" {
+		return fmt.Errorf("database URL or path is required")
+	}
+
 	if cur.GeminiHomeDir == "" {
 		cur.GeminiHomeDir = DefaultGeminiHomeDir()
 	}
@@ -828,10 +833,6 @@ func RunBrainApp(ctx context.Context, cfg *config.Config) error {
 	homeDir := cfg.GeminiHomeDir()
 	provisioner := env.NewFromConfig(cfg)
 	_ = InitializeBrainEnvironment(ctx, cfg)
-
-	if cur.DatabaseURL == "" {
-		return fmt.Errorf("database URL or path is required")
-	}
 
 	database, err := db.New(cfg)
 	if err != nil {
@@ -978,6 +979,9 @@ func DefaultGeminiHomeDir() string {
 	if h := os.Getenv("HOME"); strings.TrimSpace(h) != "" {
 		return strings.TrimSpace(h)
 	}
+	if testing.Testing() {
+		return filepath.Join(os.TempDir(), "aerial-test-gemini")
+	}
 	if h, err := os.UserHomeDir(); err == nil && strings.TrimSpace(h) != "" {
 		return strings.TrimSpace(h)
 	}
@@ -986,6 +990,9 @@ func DefaultGeminiHomeDir() string {
 
 // DefaultDataDir returns the production default base directory for persistent data.
 func DefaultDataDir() string {
+	if testing.Testing() {
+		return filepath.Join(os.TempDir(), "aerial-test-data")
+	}
 	return "/data"
 }
 
