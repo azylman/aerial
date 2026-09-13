@@ -11,6 +11,7 @@ import (
 )
 
 func TestFormatToolStatus(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		toolName    string
 		commandName string
@@ -39,6 +40,7 @@ func TestFormatToolStatus(t *testing.T) {
 }
 
 func TestStatusUpdater_DebounceAndFastTurn(t *testing.T) {
+	t.Parallel()
 	var sends atomic.Int32
 	var edits atomic.Int32
 	var deletes atomic.Int32
@@ -78,6 +80,7 @@ func TestStatusUpdater_DebounceAndFastTurn(t *testing.T) {
 }
 
 func TestStatusUpdater_ActiveToolBypassesDebounceAndFlushes(t *testing.T) {
+	t.Parallel()
 	var sends atomic.Int32
 	var edits atomic.Int32
 	var deletes atomic.Int32
@@ -157,6 +160,7 @@ func TestStatusUpdater_ActiveToolBypassesDebounceAndFlushes(t *testing.T) {
 }
 
 func TestStatusUpdater_CircuitBreakerOn404(t *testing.T) {
+	t.Parallel()
 	var edits atomic.Int32
 
 	updater := NewStatusUpdater(nil, "thread-789", true,
@@ -194,6 +198,7 @@ func TestStatusUpdater_CircuitBreakerOn404(t *testing.T) {
 }
 
 func TestStatusUpdater_CircuitBreakerOn403(t *testing.T) {
+	t.Parallel()
 	var sends atomic.Int32
 
 	updater := NewStatusUpdater(nil, "thread-403", true,
@@ -226,6 +231,7 @@ func TestStatusUpdater_CircuitBreakerOn403(t *testing.T) {
 }
 
 func TestStatusUpdater_ZombieLeakPrevention(t *testing.T) {
+	t.Parallel()
 	var sends atomic.Int32
 	var deletes atomic.Int32
 	sendStarted := make(chan struct{})
@@ -284,6 +290,7 @@ func TestStatusUpdater_ZombieLeakPrevention(t *testing.T) {
 }
 
 func TestStatusUpdater_LiveTimerRefreshDuringLongTool(t *testing.T) {
+	t.Parallel()
 	var edits atomic.Int32
 
 	updater := NewStatusUpdater(nil, "thread-timer", true,
@@ -327,6 +334,7 @@ func TestStatusUpdater_LiveTimerRefreshDuringLongTool(t *testing.T) {
 }
 
 func TestStatusUpdater_ResetOnRetry(t *testing.T) {
+	t.Parallel()
 	var deletes atomic.Int32
 	deleteDone := make(chan struct{}, 1)
 
@@ -371,6 +379,7 @@ func TestStatusUpdater_ResetOnRetry(t *testing.T) {
 }
 
 func TestStatusUpdater_RunCommandDisplaysCommandName(t *testing.T) {
+	t.Parallel()
 	var sends atomic.Int32
 	var lastText atomic.Pointer[string]
 

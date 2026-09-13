@@ -9,6 +9,7 @@ import (
 )
 
 func TestBuildAgyArgs(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		input    AgyArgsInput
@@ -87,6 +88,7 @@ func TestBuildAgyArgs(t *testing.T) {
 }
 
 func TestBuildAgyEnv(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		input    AgyEnvInput
@@ -140,6 +142,7 @@ func TestBuildAgyEnv(t *testing.T) {
 }
 
 func TestEvaluateWatchdogStatus(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	startTime := now.Add(-10 * time.Minute)
 
@@ -213,6 +216,7 @@ func TestEvaluateWatchdogStatus(t *testing.T) {
 }
 
 func TestShouldRotateWorker(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		turnsUsed   int
@@ -280,6 +284,7 @@ func TestShouldRotateWorker(t *testing.T) {
 }
 
 func TestParseInitEvent(t *testing.T) {
+	t.Parallel()
 	validUUID := "11111111-2222-3333-4444-555555555555"
 
 	tests := []struct {
@@ -331,6 +336,7 @@ func TestParseInitEvent(t *testing.T) {
 }
 
 func TestIsResultEvent(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		line string
@@ -381,6 +387,7 @@ func (e *errWriter) Write(p []byte) (int, error) {
 }
 
 func TestWriteWorkerTurn(t *testing.T) {
+	t.Parallel()
 	t.Run("Nil Writer", func(t *testing.T) {
 		err := WriteWorkerTurn(nil, "hello")
 		if err == nil {
@@ -411,6 +418,7 @@ func TestWriteWorkerTurn(t *testing.T) {
 }
 
 func TestEvaluateWatchdogStatus_Defaults(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	// Zero Now, InactivityTimeout <= 0, MaxDuration <= 0
 	d1 := EvaluateWatchdogStatus(WatchdogStatusInput{

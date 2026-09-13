@@ -986,7 +986,7 @@ func (te *turnExecution) buildTurnPrompt() {
 				}
 
 				sumCtx, sumCancel := context.WithTimeout(te.pool.ctx, DefaultThreadSummaryTimeout)
-				newSum, sumErr := SummarizeThreadHistory(sumCtx, llmFn, flashModel, te.threadID, histMsgs)
+				newSum, sumErr := SummarizeThreadHistoryWithGroup(sumCtx, te.pool.SummaryGroup(), llmFn, flashModel, te.threadID, histMsgs)
 				sumCancel()
 
 				if sumErr != nil {

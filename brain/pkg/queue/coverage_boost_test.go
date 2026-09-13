@@ -19,6 +19,7 @@ import (
 	"github.com/azylman/aerial/brain/pkg/runner"
 	"github.com/azylman/aerial/brain/pkg/session"
 	"github.com/bwmarrin/discordgo"
+	"golang.org/x/sync/singleflight"
 )
 
 // ---------------------------------------------------------------------------
@@ -26,6 +27,7 @@ import (
 // ---------------------------------------------------------------------------
 
 func TestFetchRecentThreadHistory_EdgeCases(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("InitDB failed: %v", err)
@@ -211,6 +213,7 @@ func TestFetchRecentThreadHistory_EdgeCases(t *testing.T) {
 }
 
 func TestDefaultHistoryFetcher_AdditionalEdgeCases(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("InitDB failed: %v", err)
@@ -274,6 +277,7 @@ func TestDefaultHistoryFetcher_AdditionalEdgeCases(t *testing.T) {
 }
 
 func TestFetchHistoryFromDB_EdgeCases(t *testing.T) {
+	t.Parallel()
 	// 1. database == nil -> returns nil, nil
 	msgs, err := fetchHistoryFromDB(nil, "chan-1", 10)
 	if err != nil || msgs != nil {
@@ -341,6 +345,7 @@ func TestFetchHistoryFromDB_EdgeCases(t *testing.T) {
 }
 
 func TestFormatChannelHistory_AuthorAndRoleSanitization(t *testing.T) {
+	t.Parallel()
 	now := time.Now().UTC()
 
 	msgs := []HistoryMessage{
@@ -383,10 +388,12 @@ func TestFormatChannelHistory_AuthorAndRoleSanitization(t *testing.T) {
 }
 
 func TestSummarizeThreadHistory_AdditionalEdgeCases(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
+	sfg := new(singleflight.Group)
 
 	// 1. Empty msgs
-	_, err := SummarizeThreadHistory(ctx, nil, "model", "thread-1", nil)
+	_, err := SummarizeThreadHistoryWithGroup(ctx, sfg, nil, "model", "thread-1", nil)
 	if err == nil || !strings.Contains(err.Error(), "empty history") {
 		t.Errorf("expected 'empty history' error, got: %v", err)
 	}
@@ -399,7 +406,7 @@ func TestSummarizeThreadHistory_AdditionalEdgeCases(t *testing.T) {
 			CreatedAt: time.Now().UTC().Add(-10 * time.Hour),
 		},
 	}
-	_, err = SummarizeThreadHistory(ctx, nil, "model", "thread-1", expiredMsgs)
+	_, err = SummarizeThreadHistoryWithGroup(ctx, sfg, nil, "model", "thread-1", expiredMsgs)
 	if err == nil || !strings.Contains(err.Error(), "no valid history to summarize") {
 		t.Errorf("expected 'no valid history to summarize' error, got: %v", err)
 	}
@@ -407,7 +414,7 @@ func TestSummarizeThreadHistory_AdditionalEdgeCases(t *testing.T) {
 	// 3. LLM returns error
 	freshMsgs := []HistoryMessage{
 		{
-			ID:        "msg-fresh",
+			ID:         "msg-fresh",
 			Content:   "fresh message",
 			CreatedAt: time.Now().UTC().Add(-5 * time.Minute),
 		},
@@ -415,7 +422,7 @@ func TestSummarizeThreadHistory_AdditionalEdgeCases(t *testing.T) {
 	mockErrLLM := func(ctx context.Context, model, prompt string) (string, error) {
 		return "", errors.New("simulated LLM generation error")
 	}
-	_, err = SummarizeThreadHistory(ctx, mockErrLLM, "model", "thread-err-llm", freshMsgs)
+	_, err = SummarizeThreadHistoryWithGroup(ctx, sfg, mockErrLLM, "model", "thread-err-llm", freshMsgs)
 	if err == nil || !strings.Contains(err.Error(), "simulated LLM generation error") {
 		t.Errorf("expected simulated LLM error, got: %v", err)
 	}
@@ -424,7 +431,7 @@ func TestSummarizeThreadHistory_AdditionalEdgeCases(t *testing.T) {
 	mockSuccessLLM := func(ctx context.Context, model, prompt string) (string, error) {
 		return "Prefix banter\n<THREAD_SUMMARY>\nDeliverables: done.\n</THREAD_SUMMARY>\nTrailing banter", nil
 	}
-	res, err := SummarizeThreadHistory(ctx, mockSuccessLLM, "model", "thread-success-tags", freshMsgs)
+	res, err := SummarizeThreadHistoryWithGroup(ctx, sfg, mockSuccessLLM, "model", "thread-success-tags", freshMsgs)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -439,6 +446,7 @@ func TestSummarizeThreadHistory_AdditionalEdgeCases(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestFormatToolStatus_AdditionalBranches(t *testing.T) {
+	t.Parallel()
 	// Command > 24 runes truncated
 	longCmd := "really_long_command_name_that_exceeds_twenty_four_runes"
 	formatted := FormatToolStatus("run_command", longCmd, 1500*time.Millisecond)
@@ -472,6 +480,7 @@ func TestFormatToolStatus_AdditionalBranches(t *testing.T) {
 }
 
 func TestStatusUpdater_DefaultRESTImplementations(t *testing.T) {
+	t.Parallel()
 	// 1. Session is nil
 	uNil := NewStatusUpdater(nil, "thread-rest-nil", false)
 	_, err := uNil.sendFunc("thread-rest-nil", "hello")
@@ -533,6 +542,7 @@ func TestStatusUpdater_DefaultRESTImplementations(t *testing.T) {
 }
 
 func TestStatusUpdater_NilReceiverAndGuards(t *testing.T) {
+	t.Parallel()
 	var u *StatusUpdater
 	// These should not panic
 	u.MarkTurnStarted()
@@ -552,6 +562,7 @@ func TestStatusUpdater_NilReceiverAndGuards(t *testing.T) {
 }
 
 func TestStatusUpdater_HandleStep_Branches(t *testing.T) {
+	t.Parallel()
 	// Guard when disabled
 	uDisabled := NewStatusUpdater(nil, "thread-step-disabled", false)
 	uDisabled.HandleStep(&runner.StepUpdateEvent{StepType: "thinking"})
@@ -624,6 +635,7 @@ func TestStatusUpdater_HandleStep_Branches(t *testing.T) {
 }
 
 func TestStatusUpdater_CurrentStatusText_Branches(t *testing.T) {
+	t.Parallel()
 	u := NewStatusUpdater(nil, "thread-status-text", false)
 
 	// 1. Tool phase with empty activeTool falls through to responding
@@ -660,6 +672,7 @@ func TestStatusUpdater_CurrentStatusText_Branches(t *testing.T) {
 }
 
 func TestStatusUpdater_FlushEdgeCases(t *testing.T) {
+	t.Parallel()
 	// 1. Flush when disabled
 	u := NewStatusUpdater(nil, "thread-flush", false)
 	u.disabled = true
@@ -760,6 +773,7 @@ func TestStatusUpdater_FlushEdgeCases(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestChannelCaching_FullCoverage(t *testing.T) {
+	t.Parallel()
 	// 1. CacheDiscordChannel nil and empty
 	CacheDiscordChannel(nil)
 	CacheDiscordChannel(&discordgo.Channel{ID: ""})
@@ -809,6 +823,7 @@ func TestChannelCaching_FullCoverage(t *testing.T) {
 }
 
 func TestResolveChannelSnapshot_And_EffectiveChannel(t *testing.T) {
+	t.Parallel()
 	// 1. ResolveEffectiveChannel empty
 	effID, effName, isTh := ResolveEffectiveChannel(nil, "")
 	if effID != "" || effName != "" || isTh {
@@ -911,6 +926,7 @@ func TestResolveChannelSnapshot_And_EffectiveChannel(t *testing.T) {
 }
 
 func TestParseDBTime_AllLayoutsAndTypes(t *testing.T) {
+	t.Parallel()
 	// nil
 	if _, ok := parseDBTime(nil); ok {
 		t.Errorf("expected false for nil")
@@ -976,6 +992,7 @@ func TestParseDBTime_AllLayoutsAndTypes(t *testing.T) {
 }
 
 func TestCoalesceBurstPrompt_EdgeCases(t *testing.T) {
+	t.Parallel()
 	// Empty burst
 	if got := CoalesceBurstPrompt(nil); got != "" {
 		t.Errorf("expected empty string for nil burst, got %q", got)
@@ -1022,6 +1039,7 @@ func TestCoalesceBurstPrompt_EdgeCases(t *testing.T) {
 }
 
 func TestExtractMessageBody_AllVariants(t *testing.T) {
+	t.Parallel()
 	// 1. Plain text without <USER_REQUEST>
 	if got := extractMessageBody("  just plain text  "); got != "just plain text" {
 		t.Errorf("expected 'just plain text', got %q", got)
@@ -1058,6 +1076,7 @@ func TestExtractMessageBody_AllVariants(t *testing.T) {
 }
 
 func TestResolveBotRoleIDs_AllVariants(t *testing.T) {
+	t.Parallel()
 	// sess == nil
 	if roles := ResolveBotRoleIDs(nil, "guild-1", "bot-1"); roles != nil {
 		t.Errorf("expected nil for nil sess")
@@ -1106,6 +1125,7 @@ func TestResolveBotRoleIDs_AllVariants(t *testing.T) {
 }
 
 func TestIsTier1Wake_AllVariants(t *testing.T) {
+	t.Parallel()
 	// 1. System authors / schedule runs
 	if !isTier1Wake(db.Message{AuthorID: "http-client"}, "", nil, "") {
 		t.Errorf("expected http-client to wake")
@@ -1183,6 +1203,7 @@ func TestIsTier1Wake_AllVariants(t *testing.T) {
 }
 
 func TestRecoverInterrupted_AllBranches(t *testing.T) {
+	t.Parallel()
 	// 1. database == nil or pool == nil
 	RecoverInterrupted(nil, nil)
 
@@ -1295,6 +1316,7 @@ func TestRecoverInterrupted_AllBranches(t *testing.T) {
 }
 
 func TestWorkerPool_NewPermutations(t *testing.T) {
+	t.Parallel()
 	// 1. appCfg == nil with cfg.Model, LowEffortModel, SystemPrompt
 	pool1 := New(nil, WorkerPoolConfig{
 		Model:          "custom-model",
@@ -1439,6 +1461,7 @@ func TestWorkerPool_NewPermutations(t *testing.T) {
 }
 
 func TestWorkerPool_GettersAndStop(t *testing.T) {
+	t.Parallel()
 	pool := New(nil, WorkerPoolConfig{
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			return "", "", 0, nil
@@ -1463,6 +1486,7 @@ func TestWorkerPool_GettersAndStop(t *testing.T) {
 }
 
 func TestGetSessionLastActivity_ErrorAndEdgeCases(t *testing.T) {
+	t.Parallel()
 	// 1. database == nil or threadID empty
 	act, isCold, err := GetSessionLastActivity(nil, "thread-1")
 	if err != nil || !isCold || !act.IsZero() {
@@ -1512,6 +1536,7 @@ func TestGetSessionLastActivity_ErrorAndEdgeCases(t *testing.T) {
 }
 
 func TestWorkerPool_EnqueueSlowPathAndWorkerIdle(t *testing.T) {
+	t.Parallel()
 	pool := New(nil, WorkerPoolConfig{
 		IdleTimeout:  30 * time.Millisecond,
 		DrainTimeout: 1 * time.Millisecond,
@@ -1541,6 +1566,7 @@ func TestWorkerPool_EnqueueSlowPathAndWorkerIdle(t *testing.T) {
 }
 
 func TestProcessBurst_AdditionalEdgeCases(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("InitDB failed: %v", err)
@@ -1624,6 +1650,7 @@ func (m *mockClaimStore) ClaimPendingMessage(ctx context.Context, id string) (bo
 }
 
 func TestQueue_TargetedCoveragePush(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("InitDB failed: %v", err)
@@ -1897,6 +1924,7 @@ func TestQueue_TargetedCoveragePush(t *testing.T) {
 }
 
 func TestQueue_CoverageFinalSprint(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("InitDB failed: %v", err)

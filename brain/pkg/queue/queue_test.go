@@ -35,6 +35,7 @@ import (
 )
 
 func TestWorkerPool_ConfigInjection(t *testing.T) {
+	t.Parallel()
 	appCfg := config.NewFromData(&config.ConfigData{
 		Model:         "initial-model",
 		SystemChannel: "initial-alerts",
@@ -59,6 +60,7 @@ func TestWorkerPool_ConfigInjection(t *testing.T) {
 }
 
 func TestWorkerPool_DrainTimeoutConfig(t *testing.T) {
+	t.Parallel()
 	// Default when unset or <= 0
 	poolDef := NewWorkerPool(WorkerPoolConfig{
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
@@ -96,6 +98,7 @@ func mockJSONResponse(convID, responseText string) string {
 }
 
 func TestQueueSuccessLifecycleAndSessionSaving(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -188,6 +191,7 @@ func TestQueueSuccessLifecycleAndSessionSaving(t *testing.T) {
 }
 
 func TestQueueMultiThreadConcurrencyAndSingleThreadFIFO(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -300,6 +304,7 @@ func TestQueueMultiThreadConcurrencyAndSingleThreadFIFO(t *testing.T) {
 }
 
 func TestQueueTransientRetryPreservesSession(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -371,6 +376,7 @@ func TestQueueTransientRetryPreservesSession(t *testing.T) {
 }
 
 func TestQueueSessionCorruptionRecovery(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -456,6 +462,7 @@ func TestQueueSessionCorruptionRecovery(t *testing.T) {
 }
 
 func TestQueueTotalExhaustion(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -517,6 +524,7 @@ func TestQueueTotalExhaustion(t *testing.T) {
 }
 
 func TestRecoverInterrupted(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -581,6 +589,7 @@ func TestRecoverInterrupted(t *testing.T) {
 }
 
 func TestRecoverInterruptedPoisonPill(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -681,6 +690,7 @@ func TestRecoverInterruptedPoisonPill(t *testing.T) {
 }
 
 func TestQueueSkipDiscordLogic(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -777,6 +787,7 @@ func TestQueueSkipDiscordLogic(t *testing.T) {
 }
 
 func TestWorkerPoolUpdateRuntimeConfig(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -850,6 +861,7 @@ func TestWorkerPoolUpdateRuntimeConfig(t *testing.T) {
 }
 
 func TestQueueScheduleRunLifecycle_Success(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -943,6 +955,7 @@ func TestQueueScheduleRunLifecycle_Success(t *testing.T) {
 }
 
 func TestQueueScheduleRunLifecycle_Failure(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -1029,6 +1042,7 @@ func TestQueueScheduleRunLifecycle_Failure(t *testing.T) {
 }
 
 func TestQueueScheduleRunLifecycle_PanicRecovery(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -1119,6 +1133,7 @@ func TestQueueScheduleRunLifecycle_PanicRecovery(t *testing.T) {
 }
 
 func TestRecoverInterrupted_ReconcilesOrphanedScheduleRuns(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -1198,6 +1213,7 @@ func TestRecoverInterrupted_ReconcilesOrphanedScheduleRuns(t *testing.T) {
 }
 
 func TestWorkerPool_InjectsSemanticMemoryFacts(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -1270,6 +1286,7 @@ func TestWorkerPool_InjectsSemanticMemoryFacts(t *testing.T) {
 }
 
 func TestWorkerPool_SemanticMemoryGracefulFallbackOnError(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -1330,6 +1347,7 @@ func TestWorkerPool_SemanticMemoryGracefulFallbackOnError(t *testing.T) {
 }
 
 func TestQueueSilentSentinelSuppression(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -1404,6 +1422,7 @@ func TestQueueSilentSentinelSuppression(t *testing.T) {
 }
 
 func TestQueueBurstCoalescing(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -1461,9 +1480,7 @@ func TestQueueBurstCoalescing(t *testing.T) {
 	_ = db.InsertMessage(database, msg3)
 
 	// Enqueue all 3 in rapid succession to form a burst
-	pool.Enqueue(msg1)
-	pool.Enqueue(msg2)
-	pool.Enqueue(msg3)
+	pool.EnqueueBurst(msg1, msg2, msg3)
 
 	pool.Start()
 	defer pool.Stop()
@@ -1509,6 +1526,7 @@ func TestQueueBurstCoalescing(t *testing.T) {
 }
 
 func TestQueueStalenessDrop(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -1621,6 +1639,7 @@ func TestQueueStalenessDrop(t *testing.T) {
 }
 
 func TestQueueCustomStalenessTTL(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -1690,6 +1709,7 @@ func TestQueueCustomStalenessTTL(t *testing.T) {
 }
 
 func TestQueueTurnCountSessionRotation(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	database, err := db.InitDB(":memory:")
@@ -1821,6 +1841,7 @@ func TestQueueTurnCountSessionRotation(t *testing.T) {
 }
 
 func TestChannelSession_RotationOnIdleTimeout(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	database, err := db.InitDB(":memory:")
@@ -1958,6 +1979,7 @@ func TestChannelSession_RotationOnIdleTimeout(t *testing.T) {
 }
 
 func TestThreadSession_RotationOnIdleTimeout(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	database, err := db.InitDB(":memory:")
@@ -2089,6 +2111,7 @@ func TestThreadSession_RotationOnIdleTimeout(t *testing.T) {
 }
 
 func TestQueueUniversalActiveTurnTyping(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -2256,6 +2279,7 @@ func TestQueueUniversalActiveTurnTyping(t *testing.T) {
 }
 
 func TestQueueIgnoredChannelPolicy(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -2335,6 +2359,7 @@ func TestQueueIgnoredChannelPolicy(t *testing.T) {
 }
 
 func TestQueueIgnoredChannelPolicy_NilCallback(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -2390,6 +2415,7 @@ func TestQueueIgnoredChannelPolicy_NilCallback(t *testing.T) {
 }
 
 func TestQueueThreadInheritsParentChannelPolicy(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -2487,6 +2513,7 @@ func TestQueueThreadInheritsParentChannelPolicy(t *testing.T) {
 }
 
 func TestQueueHTTPClient_NotDroppedByDefaultDenyIgnore(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -2562,6 +2589,7 @@ func ptrFloat(f float64) *float64 {
 }
 
 func TestProcessBurst_PureAmbient(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	database, err := db.InitDB(":memory:")
@@ -2681,6 +2709,7 @@ func TestProcessBurst_PureAmbient(t *testing.T) {
 }
 
 func TestProcessBurst_Tier1Wake(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	database, err := db.InitDB(":memory:")
@@ -2786,6 +2815,7 @@ func TestProcessBurst_Tier1Wake(t *testing.T) {
 }
 
 func TestProcessBurst_Tier2Wake(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	database, err := db.InitDB(":memory:")
@@ -2889,6 +2919,7 @@ func TestProcessBurst_Tier2Wake(t *testing.T) {
 }
 
 func TestProcessBurst_MixedBurst(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	database, err := db.InitDB(":memory:")
@@ -2999,6 +3030,7 @@ func TestProcessBurst_MixedBurst(t *testing.T) {
 }
 
 func TestExtractMessageBody_Multiline(t *testing.T) {
+	t.Parallel()
 	prompt := `<USER_REQUEST>
 Here's a message someone sent you from Discord:
 
@@ -3029,6 +3061,7 @@ Please formulate your response and output it clearly.
 }
 
 func TestIsTier1Wake_ReplyingToNonAerialWithAerialContent(t *testing.T) {
+	t.Parallel()
 	// A message replying to @bob, where bob's quoted content mentions "aerial photo"
 	// and the user's content is "Nice shot!"
 	prompt := `<USER_REQUEST>
@@ -3067,6 +3100,7 @@ Please formulate your response and output it clearly.
 }
 
 func TestProcessBurst_SessionRotationBeforeLeadingAmbient(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	database, err := db.InitDB(":memory:")
@@ -3177,6 +3211,7 @@ func TestProcessBurst_SessionRotationBeforeLeadingAmbient(t *testing.T) {
 }
 
 func TestProcessBurst_TrailingAmbient(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	database, err := db.InitDB(":memory:")
@@ -3274,6 +3309,7 @@ func TestProcessBurst_TrailingAmbient(t *testing.T) {
 }
 
 func TestProcessBurst_CustomAmbientWakePrompt(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -3346,6 +3382,7 @@ func TestProcessBurst_CustomAmbientWakePrompt(t *testing.T) {
 }
 
 func TestResolveEffectiveChannel_NilSession(t *testing.T) {
+	t.Parallel()
 	// Empty channel ID
 	effID, effName, isThread := ResolveEffectiveChannel(nil, "")
 	if effID != "" || effName != "" || isThread {
@@ -3366,6 +3403,7 @@ func TestResolveEffectiveChannel_NilSession(t *testing.T) {
 }
 
 func TestResolveEffectiveChannel_SyntheticNonNumericID(t *testing.T) {
+	t.Parallel()
 	s := &discordgo.Session{
 		Token: "fake-token",
 		State: discordgo.NewState(),
@@ -3387,6 +3425,7 @@ func TestResolveEffectiveChannel_SyntheticNonNumericID(t *testing.T) {
 }
 
 func TestResolveEffectiveChannel_NormalChannel(t *testing.T) {
+	t.Parallel()
 	channelID := "100200300400500601"
 	channelName := "general-chat"
 
@@ -3405,6 +3444,7 @@ func TestResolveEffectiveChannel_NormalChannel(t *testing.T) {
 }
 
 func TestResolveEffectiveChannel_ThreadParent(t *testing.T) {
+	t.Parallel()
 	parentID := "100200300400500600"
 	parentName := "announcements"
 	threadID := "100200300400500602"
@@ -3439,6 +3479,7 @@ func TestResolveEffectiveChannel_ThreadParent(t *testing.T) {
 }
 
 func TestResolveEffectiveChannel_ThreadMissingParent(t *testing.T) {
+	t.Parallel()
 	parentID := "999888777666555444"
 	threadID := "100200300400500603"
 	threadName := "isolated-thread"
@@ -3465,6 +3506,7 @@ func TestResolveEffectiveChannel_ThreadMissingParent(t *testing.T) {
 }
 
 func TestResolveEffectiveChannel_InvalidateCache(t *testing.T) {
+	t.Parallel()
 	channelID := "100200300400500604"
 	ch := &discordgo.Channel{
 		ID:   channelID,
@@ -3486,6 +3528,7 @@ func TestResolveEffectiveChannel_InvalidateCache(t *testing.T) {
 }
 
 func TestResolveEffectiveChannel_StateFallback(t *testing.T) {
+	t.Parallel()
 	channelID := "100200300400500605"
 	InvalidateChannelCache(channelID)
 	defer InvalidateChannelCache(channelID)
@@ -3522,6 +3565,7 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 func TestResolveEffectiveChannel_SingleFlightREST(t *testing.T) {
+	t.Parallel()
 	channelID := "100200300400500606"
 	InvalidateChannelCache(channelID)
 	defer InvalidateChannelCache(channelID)
@@ -3819,6 +3863,7 @@ func TestProcessBurst_NoDuplicationOnRetry(t *testing.T) {
 }
 
 func TestProcessBurst_Tier1PreScan_SkipsClassifier(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to init db: %v", err)
@@ -3887,6 +3932,7 @@ func TestProcessBurst_Tier1PreScan_SkipsClassifier(t *testing.T) {
 }
 
 func TestProcessBurst_CoalescedAmbientBurst(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to init db: %v", err)
@@ -3951,6 +3997,7 @@ func TestProcessBurst_CoalescedAmbientBurst(t *testing.T) {
 }
 
 func TestProcessBurst_GhostSessionRecovery(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	database, err := db.InitDB(":memory:")
@@ -4020,6 +4067,7 @@ func TestProcessBurst_GhostSessionRecovery(t *testing.T) {
 }
 
 func TestProcessBurst_MultiTurnContinuity_AfterRecovery(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	database, err := db.InitDB(":memory:")
@@ -4100,6 +4148,7 @@ func TestProcessBurst_MultiTurnContinuity_AfterRecovery(t *testing.T) {
 }
 
 func TestProcessBurst_ColdChannel_NoStubDirectory(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	database, err := db.InitDB(":memory:")
@@ -4173,6 +4222,7 @@ func TestProcessBurst_ColdChannel_NoStubDirectory(t *testing.T) {
 }
 
 func TestProcessBurst_Turn1ContextInjection(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	database, err := db.InitDB(":memory:")
@@ -4286,6 +4336,7 @@ func TestProcessBurst_Turn1ContextInjection(t *testing.T) {
 }
 
 func TestProcessBurst_SessionRotation_ResetsToColdState(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	database, err := db.InitDB(":memory:")
@@ -4442,6 +4493,7 @@ func TestProcessBurst_SessionRotation_ResetsToColdState(t *testing.T) {
 }
 
 func TestProcessBurst_SessionRotation_SeedsPreviousSessionID(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	database, err := db.InitDB(":memory:")
@@ -4601,6 +4653,7 @@ func TestProcessBurst_SessionRotation_SeedsPreviousSessionID(t *testing.T) {
 }
 
 func TestProcessBurst_Turn1Crash_DoesNotPersistGhostUUID(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	database, err := db.InitDB(":memory:")
@@ -4661,6 +4714,7 @@ func TestProcessBurst_Turn1Crash_DoesNotPersistGhostUUID(t *testing.T) {
 }
 
 func TestQueue_ClassifierParseErrorTriggersSystemAlert(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -4748,6 +4802,7 @@ func TestQueue_ClassifierParseErrorTriggersSystemAlert(t *testing.T) {
 }
 
 func TestIsTier1Wake_WakeModeMention(t *testing.T) {
+	t.Parallel()
 	botID := "bot-12345"
 
 	// 1. Direct mention <@bot-12345>
@@ -4802,6 +4857,7 @@ func TestIsTier1Wake_WakeModeMention(t *testing.T) {
 }
 
 func TestProcessBurst_WakeModeMention_BypassClassifier(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	database, err := db.InitDB(":memory:")
@@ -4886,6 +4942,7 @@ func TestProcessBurst_WakeModeMention_BypassClassifier(t *testing.T) {
 }
 
 func TestProcessBurst_WakeModeMention_DirectMentionWakes(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	database, err := db.InitDB(":memory:")
@@ -4960,6 +5017,7 @@ func TestProcessBurst_WakeModeMention_DirectMentionWakes(t *testing.T) {
 
 
 func TestWorkerPool_ImageDeliveryAndSanitization(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("InitDB failed: %v", err)
@@ -5046,6 +5104,7 @@ func TestWorkerPool_ImageDeliveryAndSanitization(t *testing.T) {
 }
 
 func TestWorkerPoolShutdown_PreservesProcessingMessageWithoutApology(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -5199,6 +5258,7 @@ func TestWorkerPoolShutdown_PreservesProcessingMessageWithoutApology(t *testing.
 }
 
 func TestWorkerPoolShutdown_RunnerSuccessPreserved(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -5274,6 +5334,7 @@ func TestWorkerPoolShutdown_RunnerSuccessPreserved(t *testing.T) {
 }
 
 func TestWorkerPoolShutdown_AmbientClassifierCancellationPreserved(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -5351,6 +5412,7 @@ func TestWorkerPoolShutdown_AmbientClassifierCancellationPreserved(t *testing.T)
 }
 
 func TestQueue_WatchdogInactivityRetryAndExhaustion(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -5437,6 +5499,7 @@ func TestQueue_WatchdogInactivityRetryAndExhaustion(t *testing.T) {
 }
 
 func TestQueue_WatchdogInactivityRetryAndRecovery(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -5552,12 +5615,14 @@ func TestQueue_WatchdogInactivityRetryAndRecovery(t *testing.T) {
 }
 
 func TestDefaultTimeoutMinutes_Is60(t *testing.T) {
+	t.Parallel()
 	if DefaultTimeoutMinutes != 60 {
 		t.Errorf("Expected DefaultTimeoutMinutes to be 60, got %d", DefaultTimeoutMinutes)
 	}
 }
 
 func TestProcessBurst_ColdStartWatchdogRecoveryAndContinuation(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -5689,6 +5754,7 @@ func TestProcessBurst_ColdStartWatchdogRecoveryAndContinuation(t *testing.T) {
 }
 
 func TestProcessBurst_ColdStartStreamJsonInitLatchingOnFailure(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -5800,6 +5866,7 @@ func TestProcessBurst_ColdStartStreamJsonInitLatchingOnFailure(t *testing.T) {
 }
 
 func TestProcessBurst_ColdStartTransientRecoveryAndContinuation(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -5910,6 +5977,7 @@ func TestProcessBurst_ColdStartTransientRecoveryAndContinuation(t *testing.T) {
 }
 
 func TestProcessBurst_EmptyStdout_TranscriptRecovery(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -6003,6 +6071,7 @@ func TestProcessBurst_EmptyStdout_TranscriptRecovery(t *testing.T) {
 }
 
 func TestProcessBurst_StreamInterrupted_TranscriptRecovery(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -6105,6 +6174,7 @@ func TestProcessBurst_StreamInterrupted_TranscriptRecovery(t *testing.T) {
 }
 
 func TestProcessBurst_StreamInterrupted_NoResponse_RotatesSessionCorrupt(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -6223,6 +6293,7 @@ func TestProcessBurst_StreamInterrupted_NoResponse_RotatesSessionCorrupt(t *test
 }
 
 func TestProcessBurst_EmptyStdout_TransientRetryAndContinuation(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -6336,6 +6407,7 @@ func TestProcessBurst_EmptyStdout_TransientRetryAndContinuation(t *testing.T) {
 }
 
 func TestProcessBurst_GeneralFailure_PreservesSessionOnDisk(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -6446,6 +6518,7 @@ func TestProcessBurst_GeneralFailure_PreservesSessionOnDisk(t *testing.T) {
 }
 
 func TestWorkerPool_FullBuffer_NoEvictionZombieRace(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("InitDB failed: %v", err)
@@ -6515,6 +6588,7 @@ func TestWorkerPool_FullBuffer_NoEvictionZombieRace(t *testing.T) {
 }
 
 func TestProcessBurst_TransientError_RetainsOriginalPrompt(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("InitDB failed: %v", err)
@@ -6606,6 +6680,7 @@ func TestProcessBurst_TransientError_RetainsOriginalPrompt(t *testing.T) {
 }
 
 func TestIsTier1Wake_SchedulerMessage(t *testing.T) {
+	t.Parallel()
 	// 1. AuthorID == "scheduler"
 	msgSched := db.Message{
 		ID:        "m-sched-1",
@@ -6631,6 +6706,7 @@ func TestIsTier1Wake_SchedulerMessage(t *testing.T) {
 }
 
 func TestResolveBotRoleIDs(t *testing.T) {
+	t.Parallel()
 	// Nil session/state safety
 	if roles := ResolveBotRoleIDs(nil, "guild-1", "bot-1"); roles != nil {
 		t.Errorf("Expected nil for nil session, got %v", roles)
@@ -6670,6 +6746,7 @@ func TestResolveBotRoleIDs(t *testing.T) {
 }
 
 func TestProcessBurst_QuotaPause_SchedulesOneShotAndNotifies(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to init DB: %v", err)
@@ -6772,6 +6849,7 @@ func TestProcessBurst_QuotaPause_SchedulesOneShotAndNotifies(t *testing.T) {
 }
 
 func TestProcessBurst_QuotaPause_CircuitBreakerDoesNotReschedule(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to init DB: %v", err)
@@ -6848,6 +6926,7 @@ func TestProcessBurst_QuotaPause_CircuitBreakerDoesNotReschedule(t *testing.T) {
 }
 
 func TestProcessBurst_TrailingBurstSuppression_OnQuotaPause(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to init DB: %v", err)
@@ -6939,6 +7018,7 @@ func TestProcessBurst_TrailingBurstSuppression_OnQuotaPause(t *testing.T) {
 
 
 func TestQueueWorker_PerScopeSerialization(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -7001,6 +7081,7 @@ func TestQueueWorker_PerScopeSerialization(t *testing.T) {
 }
 
 func TestThreadSession_RotationAtTurnLimit(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -7065,6 +7146,7 @@ func TestThreadSession_RotationAtTurnLimit(t *testing.T) {
 }
 
 func TestRunner_DefensiveLatchingAndCold429(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -7144,6 +7226,7 @@ func TestRunner_DefensiveLatchingAndCold429(t *testing.T) {
 }
 
 func TestThreadColdStartSummarization_Integration(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -7347,6 +7430,7 @@ func TestThreadColdStartSummarization_Integration(t *testing.T) {
 }
 
 func TestProcessBurst_ColdStart429_RetriesTransiently(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	database, err := db.InitDB(":memory:")
@@ -7419,6 +7503,7 @@ func TestProcessBurst_ColdStart429_RetriesTransiently(t *testing.T) {
 }
 
 func TestProcessBurst_NonTransient_FailsFastOnAttempt1(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	database, err := db.InitDB(":memory:")
@@ -7499,6 +7584,7 @@ func TestProcessBurst_NonTransient_FailsFastOnAttempt1(t *testing.T) {
 }
 
 func TestProcessBurst_Exit0_NonTransientJSON_FailsFastOnAttempt1(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	database, err := db.InitDB(":memory:")
@@ -7560,6 +7646,7 @@ func TestProcessBurst_Exit0_NonTransientJSON_FailsFastOnAttempt1(t *testing.T) {
 }
 
 func TestProcessBurst_UnknownError_RetriesTransientByDefault(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	database, err := db.InitDB(":memory:")
@@ -7632,6 +7719,7 @@ func TestProcessBurst_UnknownError_RetriesTransientByDefault(t *testing.T) {
 }
 
 func TestProcessBurst_ColdStartContextWindow_FailsFast(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	database, err := db.InitDB(":memory:")
@@ -7693,6 +7781,7 @@ func TestProcessBurst_ColdStartContextWindow_FailsFast(t *testing.T) {
 }
 
 func TestGetSessionLastActivity_ChecksBothDBAndDiskLogs(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -7769,6 +7858,7 @@ func TestGetSessionLastActivity_ChecksBothDBAndDiskLogs(t *testing.T) {
 }
 
 func TestGetSessionLastActivity_RotatedSessionNotNew(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -7809,6 +7899,7 @@ func TestGetSessionLastActivity_RotatedSessionNotNew(t *testing.T) {
 }
 
 func TestGetSessionLastActivity_IgnoresExpiredStaleSentinel(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -7849,6 +7940,7 @@ func TestGetSessionLastActivity_IgnoresExpiredStaleSentinel(t *testing.T) {
 }
 
 func TestProcessBurst_Staleness_ExistingSessionRecentDiskActivity_Retained(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -7929,6 +8021,7 @@ func TestProcessBurst_Staleness_ExistingSessionRecentDiskActivity_Retained(t *te
 }
 
 func TestProcessBurst_Staleness_ExistingSessionRecentDBActivity_Retained(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -7996,6 +8089,7 @@ func TestProcessBurst_Staleness_ExistingSessionRecentDBActivity_Retained(t *test
 }
 
 func TestProcessBurst_Staleness_ExistingSessionInactive_Dropped(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -8075,6 +8169,7 @@ func TestProcessBurst_Staleness_ExistingSessionInactive_Dropped(t *testing.T) {
 }
 
 func TestProcessBurst_Staleness_NewSession_Dropped(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -8139,6 +8234,7 @@ func TestProcessBurst_Staleness_NewSession_Dropped(t *testing.T) {
 }
 
 func TestGetSessionLastActivity_FailOpenOnDBError(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -8159,6 +8255,7 @@ func TestGetSessionLastActivity_FailOpenOnDBError(t *testing.T) {
 }
 
 func TestProcessBurst_Staleness_HardCeiling_Dropped(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -8234,6 +8331,7 @@ func TestProcessBurst_Staleness_HardCeiling_Dropped(t *testing.T) {
 }
 
 func TestProcessBurst_Staleness_RecoveredMessage_Retained(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -8299,6 +8397,7 @@ func TestProcessBurst_Staleness_RecoveredMessage_Retained(t *testing.T) {
 }
 
 func TestRecoverInterrupted_PreservesExecutionRetryBudget(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -8383,6 +8482,7 @@ func TestRecoverInterrupted_PreservesExecutionRetryBudget(t *testing.T) {
 }
 
 func TestRecoverInterrupted_RestartPoisonPill_Boundaries(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -8489,6 +8589,7 @@ func TestRecoverInterrupted_RestartPoisonPill_Boundaries(t *testing.T) {
 }
 
 func TestProcessBurst_Staleness_RestartedMessage_Retained(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -8558,6 +8659,7 @@ func TestProcessBurst_Staleness_RestartedMessage_Retained(t *testing.T) {
 }
 
 func TestProcessBurst_Staleness_RestartedMessage_HardCeiling_Dropped(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -8627,6 +8729,7 @@ func TestProcessBurst_Staleness_RestartedMessage_HardCeiling_Dropped(t *testing.
 }
 
 func TestWorkerPool_EffortRouting(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to init DB: %v", err)
@@ -8818,6 +8921,7 @@ func TestProcessBurst_RecordsTokensTelemetry(t *testing.T) {
 }
 
 func TestThreadStatusQueueIntegration(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize DB: %v", err)
@@ -8888,6 +8992,7 @@ func TestThreadStatusQueueIntegration(t *testing.T) {
 }
 
 func TestWorkerPool_HermeticByDefaultWithoutRetriever(t *testing.T) {
+	t.Parallel()
 	pool := NewWorkerPool(WorkerPoolConfig{})
 	if pool.cfg.MemoryRetrieverFunc != nil {
 		t.Errorf("Expected MemoryRetrieverFunc to be nil by default for hermetic test isolation, got non-nil func")
@@ -8926,6 +9031,7 @@ func TestWorkerPool_HermeticByDefaultWithoutRetriever(t *testing.T) {
 }
 
 func TestWorkerPool_ExplicitMemoryRetrieverWiring(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to initialize test DB: %v", err)
@@ -8971,6 +9077,7 @@ func TestWorkerPool_ExplicitMemoryRetrieverWiring(t *testing.T) {
 }
 
 func TestProcessBurst_GracefulShutdown_ResetsToPendingWithoutRestartPenalty(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("InitDB failed: %v", err)
@@ -9013,6 +9120,7 @@ func TestProcessBurst_GracefulShutdown_ResetsToPendingWithoutRestartPenalty(t *t
 }
 
 func TestRecoverInterrupted_LongRunningTask_DeploymentVelocityProtection(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("InitDB failed: %v", err)
@@ -9073,6 +9181,7 @@ func TestRecoverInterrupted_LongRunningTask_DeploymentVelocityProtection(t *test
 }
 
 func TestRecoverInterrupted_PoisonPill_HardCeiling(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("InitDB failed: %v", err)
@@ -9128,6 +9237,7 @@ func TestRecoverInterrupted_PoisonPill_HardCeiling(t *testing.T) {
 }
 
 func TestRecoverInterrupted_DiscordSessionDeliversPoisonNotice(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("InitDB failed: %v", err)
@@ -9190,6 +9300,7 @@ func TestRecoverInterrupted_DiscordSessionDeliversPoisonNotice(t *testing.T) {
 }
 
 func TestRecoverInterrupted_CoverageEdgeCases(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("InitDB failed: %v", err)
@@ -9247,6 +9358,7 @@ func TestRecoverInterrupted_CoverageEdgeCases(t *testing.T) {
 }
 
 func TestIsRateLimitError_ExtendedKeywords(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		errDetail string
 		extra     string
@@ -9279,6 +9391,7 @@ func TestIsRateLimitError_ExtendedKeywords(t *testing.T) {
 }
 
 func TestWorkerPool_WatchdogExhaustion_InvokesNotifierFunc(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("InitDB failed: %v", err)
@@ -9338,6 +9451,7 @@ func TestWorkerPool_WatchdogExhaustion_InvokesNotifierFunc(t *testing.T) {
 }
 
 func TestWorkerPool_NonTransient_InvokesNotifierFunc(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("InitDB failed: %v", err)
@@ -9397,6 +9511,7 @@ func TestWorkerPool_NonTransient_InvokesNotifierFunc(t *testing.T) {
 }
 
 func TestWorkerPool_RetryExhaustion_InvokesNotifierFunc(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("InitDB failed: %v", err)
@@ -9456,6 +9571,7 @@ func TestWorkerPool_RetryExhaustion_InvokesNotifierFunc(t *testing.T) {
 }
 
 func TestWorkerPool_RateLimitBypassesNotifierFunc(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("InitDB failed: %v", err)
@@ -9515,6 +9631,7 @@ func TestWorkerPool_RateLimitBypassesNotifierFunc(t *testing.T) {
 }
 
 func TestWorkerPool_Watchdog_RateLimitBypassesNotifier(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("InitDB failed: %v", err)
@@ -9588,6 +9705,7 @@ func waitPoolWorkersDone(t *testing.T, pool *WorkerPool, timeout time.Duration) 
 }
 
 func TestWorkerPool_Watchdog_CancelledDuringBackoff(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("InitDB failed: %v", err)
@@ -9635,6 +9753,7 @@ func TestWorkerPool_Watchdog_CancelledDuringBackoff(t *testing.T) {
 }
 
 func TestWorkerPool_Watchdog_CancelledPostWatchdog(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("InitDB failed: %v", err)
@@ -9683,6 +9802,7 @@ func TestWorkerPool_Watchdog_CancelledPostWatchdog(t *testing.T) {
 }
 
 func TestWorkerPool_NonTransient_CancelledDuringTurn(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("InitDB failed: %v", err)
@@ -9731,6 +9851,7 @@ func TestWorkerPool_NonTransient_CancelledDuringTurn(t *testing.T) {
 }
 
 func TestWorkerPool_NonTransient_LongSnippetAndDeliveryErr(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("InitDB failed: %v", err)
@@ -9784,6 +9905,7 @@ func TestWorkerPool_NonTransient_LongSnippetAndDeliveryErr(t *testing.T) {
 }
 
 func TestWorkerPool_RetryExhaustion_CancelledWithScheduleRunID(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("InitDB failed: %v", err)
@@ -9828,6 +9950,7 @@ func TestWorkerPool_RetryExhaustion_CancelledWithScheduleRunID(t *testing.T) {
 }
 
 func TestWorkerPool_New_NotifierRunnerFuncWrapped(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("InitDB failed: %v", err)
@@ -9856,6 +9979,7 @@ func TestWorkerPool_New_NotifierRunnerFuncWrapped(t *testing.T) {
 }
 
 func TestWorkerPool_RateLimit_CancelledDuringBackoff(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("InitDB failed: %v", err)
@@ -9906,6 +10030,7 @@ func TestWorkerPool_RateLimit_CancelledDuringBackoff(t *testing.T) {
 }
 
 func TestWorkerPool_Transient_CancelledDuringBackoff(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("InitDB failed: %v", err)
@@ -9956,6 +10081,7 @@ func TestWorkerPool_Transient_CancelledDuringBackoff(t *testing.T) {
 }
 
 func TestWorkerPool_SessionCorruption_RateLimitBypassesNotifier(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("InitDB failed: %v", err)
@@ -10044,6 +10170,7 @@ func (m *mockWebhookDispatcher) CallPostTurnHook(ctx context.Context, endpoint *
 }
 
 func TestOnWakeHook(t *testing.T) {
+	t.Parallel()
 	t.Run("WakeOverride", func(t *testing.T) {
 		database, err := db.InitDB(":memory:")
 		if err != nil {
@@ -10749,6 +10876,7 @@ func TestOnWakeHook(t *testing.T) {
 }
 
 func TestPreTurnHook(t *testing.T) {
+	t.Parallel()
 	t.Run("Approved_WithInjectedContext", func(t *testing.T) {
 		database, err := db.InitDB(":memory:")
 		if err != nil {
@@ -11496,6 +11624,7 @@ func mockJSONResponseWithUsage(convID, responseText string, usage runner.TokenUs
 }
 
 func TestPostTurnHook(t *testing.T) {
+	t.Parallel()
 	t.Run("SuccessfulTurn", func(t *testing.T) {
 		database, err := db.InitDB(":memory:")
 		if err != nil {

@@ -9,6 +9,7 @@ import (
 )
 
 func TestPlanBurstExecution(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2026, 9, 12, 12, 0, 0, 0, time.UTC)
 	botID := "bot-aerial-123"
 	roleIDs := []string{"role-aerial-managed"}
@@ -299,6 +300,7 @@ func TestPlanBurstExecution(t *testing.T) {
 }
 
 func TestAssembleTurnPrompt(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2026, 9, 12, 14, 0, 0, 0, time.UTC)
 
 	tests := []struct {
@@ -436,6 +438,7 @@ func TestAssembleTurnPrompt(t *testing.T) {
 }
 
 func TestEvaluateBurstStaleness(t *testing.T) {
+	t.Parallel()
 	baseTime := time.Date(2026, 9, 12, 12, 0, 0, 0, time.UTC)
 	ttl := 30 * time.Minute
 
@@ -582,6 +585,7 @@ func TestEvaluateBurstStaleness(t *testing.T) {
 }
 
 func TestEvaluateMessageStaleness(t *testing.T) {
+	t.Parallel()
 	baseTime := time.Date(2026, 9, 12, 12, 0, 0, 0, time.UTC)
 	msg := db.Message{ID: "single-1", CreatedAt: baseTime}
 

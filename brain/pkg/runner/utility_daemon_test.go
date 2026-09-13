@@ -49,6 +49,7 @@ func waitForReload(t *testing.T, d *UtilityDaemon, initialConvID string) {
 }
 
 func TestUtilityDaemon_TurnBudgetRotation(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -97,6 +98,7 @@ func TestUtilityDaemon_TurnBudgetRotation(t *testing.T) {
 }
 
 func TestUtilityDaemon_BrokenPipeAutoRetry(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -143,6 +145,7 @@ func TestUtilityDaemon_BrokenPipeAutoRetry(t *testing.T) {
 }
 
 func TestUtilityDaemon_RunnerFuncPassthrough(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -168,6 +171,7 @@ func TestUtilityDaemon_RunnerFuncPassthrough(t *testing.T) {
 }
 
 func TestUtilityDaemon_TriggerRestart(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -198,6 +202,7 @@ func TestUtilityDaemon_TriggerRestart(t *testing.T) {
 }
 
 func TestUtilityDaemon_RSSRotation(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -232,6 +237,7 @@ func TestUtilityDaemon_RSSRotation(t *testing.T) {
 }
 
 func TestUtilityDaemon_OptionsAndAccessors(t *testing.T) {
+	t.Parallel()
 	daemon := NewUtilityDaemon(nil,
 		WithSpawner(newMockSpawner(t)),
 		WithTurnBudget(5),
@@ -260,6 +266,7 @@ func TestUtilityDaemon_OptionsAndAccessors(t *testing.T) {
 }
 
 func TestUtilityDaemon_WorkerOptsConfigFallback(t *testing.T) {
+	t.Parallel()
 	// 1. Nil config
 	d1 := &UtilityDaemon{roots: []string{"/tmp/r1"}}
 	opts1 := d1.workerOpts()
@@ -294,6 +301,7 @@ func TestUtilityDaemon_WorkerOptsConfigFallback(t *testing.T) {
 }
 
 func TestUtilityDaemon_RunnerFuncSessionBypassAndError(t *testing.T) {
+	t.Parallel()
 	daemon := NewUtilityDaemon(nil,
 		WithSpawner(newMockSpawner(t)),
 	)
@@ -317,6 +325,7 @@ func TestUtilityDaemon_RunnerFuncSessionBypassAndError(t *testing.T) {
 }
 
 func TestUtilityDaemon_DebouncedRestartAndEnsureStandby(t *testing.T) {
+	t.Parallel()
 	daemon := NewUtilityDaemon(nil,
 		WithSpawner(newMockSpawner(t)),
 	)
@@ -350,6 +359,7 @@ func TestUtilityDaemon_DebouncedRestartAndEnsureStandby(t *testing.T) {
 }
 
 func TestUtilityDaemon_ExecuteNoWorker(t *testing.T) {
+	t.Parallel()
 	failSpawner := func(ctx context.Context, opts WorkerOptions) (*WorkerInstance, error) {
 		return nil, os.ErrInvalid
 	}
@@ -366,6 +376,7 @@ func TestUtilityDaemon_ExecuteNoWorker(t *testing.T) {
 }
 
 func TestUtilityDaemon_ExecuteRetryExhaustion(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -390,6 +401,7 @@ func TestUtilityDaemon_ExecuteRetryExhaustion(t *testing.T) {
 }
 
 func TestUtilityDaemon_NilActiveWorkerAccessors(t *testing.T) {
+	t.Parallel()
 	daemon := &UtilityDaemon{}
 	if daemon.ActiveConvID() != "" {
 		t.Errorf("expected empty convID, got %s", daemon.ActiveConvID())
@@ -400,6 +412,7 @@ func TestUtilityDaemon_NilActiveWorkerAccessors(t *testing.T) {
 }
 
 func TestUtilityDaemon_DefaultTurnBudgetConstant(t *testing.T) {
+	t.Parallel()
 	if DefaultTurnBudget != session.DefaultMaxSessionTurns {
 		t.Errorf("expected DefaultTurnBudget (%d) to match session.DefaultMaxSessionTurns (%d)", DefaultTurnBudget, session.DefaultMaxSessionTurns)
 	}
@@ -419,6 +432,7 @@ func TestUtilityDaemon_DefaultTurnBudgetConstant(t *testing.T) {
 }
 
 func TestUtilityDaemon_StandbyPendingAndDeadStandbyReplacement(t *testing.T) {
+	t.Parallel()
 	daemon := NewUtilityDaemon(nil,
 		WithSpawner(newMockSpawner(t)),
 	)
@@ -452,6 +466,7 @@ func TestUtilityDaemon_StandbyPendingAndDeadStandbyReplacement(t *testing.T) {
 }
 
 func TestUtilityDaemon_ExecuteClosedMidAttempt(t *testing.T) {
+	t.Parallel()
 	turnStarted := make(chan struct{}, 1)
 	blockUntil := make(chan struct{})
 
