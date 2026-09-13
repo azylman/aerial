@@ -27,99 +27,121 @@ Before making any changes, Aerial MUST determine the target repository:
 
 ---
 
-## 2. The 6-Stage Multi-Agent Engineering Workflow
+## 2. The Tiered Engineering & Review Workflow
 
-Whenever undertaking feature development, architectural changes, bug fixes, or system modifications, Aerial must follow this strict workflow:
+Whenever undertaking feature development, architectural changes, bug fixes, or system modifications, Aerial follows a **Tiered Engineering Workflow** scaled dynamically by the complexity and blast radius of the change.
+
+### The Three Complexity Tiers
+
+- **Tier 1: Targeted Fixes, Bugfixes & Tests (< 50 LOC, Single Package)**:
+  - **Scope**: Bug fixes, parameter/config tweaks, isolated test additions, pure function adjustments.
+  - **Plan Review**: Solo Adversarial Systems Critic / Devil's Advocate (~30s).
+  - **Human Gate**: Autonomous execution (no mandatory stop).
+  - **Coding**: Continuous TDD implementation (zero mid-task subagent pauses).
+  - **Pre-PR Gate**: Fast local pre-flight verification (`./scripts/verify.sh --staged` + package tests).
+
+- **Tier 2: Standard Features & Multi-Package Enhancements (50–200 LOC, 1–3 Packages)**:
+  - **Scope**: New features, multi-package refactors, MCP API additions, runner/queue plumbing enhancements.
+  - **Plan Review**: Full 4-Expert Review Panel (3 Domain Specialists + 1 Devil's Advocate, ~45s).
+  - **Human Gate**: Autonomous execution (no mandatory stop; directly incorporates plan feedback).
+  - **Coding**: Continuous TDD implementation (zero mid-task subagent pauses).
+  - **Pre-PR Gate**: Solo Devil's Advocate audits the complete consolidated `git diff` (~30s).
+
+- **Tier 3: Core Architecture, Database Schemas & Breaking Changes (> 200 LOC, Cross-Service)**:
+  - **Scope**: SQLite/PostgreSQL schema migrations, Docker service topology changes, breaking API/protocol updates, core security boundaries.
+  - **Plan Review**: Full 4-Expert Review Panel (3 Domain Specialists + 1 Devil's Advocate, ~45s).
+  - **Human Gate**: **MANDATORY HUMAN REVIEW CHECKPOINT (STOP)**. Synthesize panel findings, trade-offs, and consensus, and pause execution until Alex explicitly approves.
+  - **Coding**: Continuous modular implementation once approved (zero mid-task subagent pauses).
+  - **Pre-PR Gate**: Full 4-Expert Review Panel audits the complete consolidated `git diff` before merge (~45s).
+
+---
+
+### Universal Workflow Stages
 
 ```
-Stage 1: Brainstorming & Formal Implementation Plan
+Stage 1: Implementation Plan (Lightweight for Tier 1; Formal for Tier 2; Full RFC for Tier 3)
    │
    ▼
-Stage 2: The 4-Expert Review Panel — Plan Audit
-   │     • 3 Domain Specialists tailored to the problem
-   │     • 1 Dedicated Adversarial Systems Critic / Devil's Advocate
+Stage 2: Tiered Plan Review (The Review Gate)
+   │     • Tier 1: Solo Devil's Advocate Critic (~30s)
+   │     • Tier 2 & 3: Full 4-Expert Review Panel (3 Domain Specialists + 1 Devil's Advocate, ~45s)
+   │     • Remediate all plan objections immediately
    │
    ▼
-Stage 3: Human Review Checkpoint (Mandatory Gate)
-   │     • Synthesize expert panel findings, trade-offs, and consensus
-   │     • STOP and obtain explicit user approval before touching code
+Stage 3: Human Review Checkpoint (Tier 3 ONLY)
+   │     • Tier 1 & Tier 2: Bypassed autonomously (flow directly into Stage 4)
+   │     • Tier 3: MANDATORY STOP — wait for explicit human approval before touching code
    │
    ▼
-Stage 4: Implementation with Per-Task Expert Review
-   │     • Break plan into discrete, modular tasks (TDD)
-   │     • For EACH task: consult the 4-expert panel to audit code & tests
-   │     • Verify invariants, race safety, and error paths before next task
+Stage 4: Autonomous Continuous Implementation (TDD)
+   │     • Implement tasks continuously in flow
+   │     • STRICT PROHIBITION: Zero mid-task pauses or per-task subagent audits
    │
    ▼
-Stage 5: Pre-Flight Verification Gate (The New Path)
-   │     • Execute monorepo verification runner (verify.sh / verify.ps1)
+Stage 5: Pre-Flight Verification & Pre-PR Diff Audit
+   │     • Execute local verification runner (./scripts/verify.sh --staged)
+   │     • Tier 1: Direct verification & targeted package tests
+   │     • Tier 2: Consolidated Devil's Advocate audit of unified git diff (~30s)
+   │     • Tier 3: Consolidated Full 4-Expert Panel audit of unified git diff (~45s)
    │     • ZERO-BYPASS INVARIANT: --no-verify strictly forbidden
    │
    ▼
-Stage 6: Commit, Push & Continuous Deployment
+Stage 6: Commit, Push & Asynchronous PR Deployment
          • Fast-path static pre-commit hook (< 1s)
-         • Automated PR auto-merge (if branch protection active)
-         • Watchtower out-of-band rolling deployment on main (60s)
+         • scripts/aerial-pr.sh submit (instant PR creation, background CI monitor)
+         • Report PR link, diff summary, and verification evidence directly
 ```
 
 ---
 
 ### Stage 1: Brainstorming & Architectural Specification
 1. **Explore Intent & Scope**:
-   - Activate the `brainstorming` skill.
    - Clarify scope, system constraints, persistence schemas, concurrency boundaries, and failure modes before writing code.
 2. **Sync Workspace**:
    ```bash
    git pull --rebase origin main
    ```
-3. **Draft Formal Implementation Plan**:
-   - Write a complete design document in `implementation_plan.md` (or `docs/specs/YYYY-MM-DD-<feature-name>.md`).
+3. **Draft Implementation Plan**:
+   - Write technical plan in `implementation_plan.md` (lightweight task list for Tier 1, full specification for Tier 2/3).
    - Define exact schemas, state machines, component interactions, and API signatures.
 
 ---
 
-### Stage 2: The 4-Expert Review Panel — Plan Audit
-Before modifying source code, Aerial MUST assemble and consult a dynamic review panel of **four independent expert subagents**:
-1. **Three Domain Specialists**: Dynamically chosen and tailored to the technical requirements of the task (e.g. CI/CD & DevOps Specialist, Distributed Systems & Concurrency Engineer, Discord Gateway & UX Specialist, Git Tooling Specialist, etc.).
-2. **One Dedicated Adversarial Systems Critic / Devil's Advocate**: Tasked specifically with aggressively challenging assumptions, probing edge cases, failure modes, race conditions, memory leaks, and personal data leakage.
+### Stage 2: Tiered Plan Review
+Before modifying source code, Aerial MUST audit the plan according to the task's complexity tier:
+- **Tier 1**: Concurrently dispatch **exactly one subagent**: the **Adversarial Systems Critic / Devil's Advocate** to attack edge cases, regression risks, error handling, and invariant compliance (~30s).
+- **Tier 2 & Tier 3**: Concurrently dispatch the **4-expert review panel** via `invoke_subagent` (~45s):
+  1. **Three Domain Specialists**: Tailored to the task (e.g. Concurrency Engineer, Systems Architect, Platform Specialist).
+  2. **One Dedicated Adversarial Systems Critic / Devil's Advocate**: Challenging assumptions, race conditions, memory leaks, and invariants.
 
 **Action**:
-- Concurrently dispatch all four subagents using `invoke_subagent`.
-- Collect and synthesize their structured audit reports and verdicts.
+- Collect and synthesize audit findings.
+- Remediate all valid architectural objections directly in `implementation_plan.md` before proceeding.
 
 ---
 
-### Stage 3: Human Review Checkpoint (Mandatory Gate)
-Present a structured synthesis of the expert panel's audit to the human user:
-1. **Consensus & Contentions**: Highlight where the domain specialists and Devil's Advocate agreed and where they clashed.
-2. **Key Decisions & Trade-Offs**: Outline architectural trade-offs, risk mitigations, and plan remediations.
-3. **MANDATORY STOP**: Wait for explicit human approval before writing or modifying any implementation code.
+### Stage 3: Human Review Checkpoint (Tier 3 ONLY)
+- **Tier 1 & Tier 2 Tasks**: **Bypassed autonomously**. If the user requested an implementation/fix, Aerial directly incorporates review feedback and transitions immediately to Stage 4 without asking for permission.
+- **Tier 3 Tasks**: **MANDATORY STOP**. For database schema migrations, service topology changes, breaking API updates, or high-blast-radius changes, present the synthesized panel findings and **STOP execution to obtain explicit user approval before touching code**.
 
 ---
 
-### Stage 4: Implementation with Per-Task Expert Review
+### Stage 4: Autonomous Continuous Implementation (TDD)
 1. **Modular Task Execution (TDD)**:
    - Break implementation into discrete, sequential components/tasks.
    - Implement following Test-Driven Development (write tests first, then implementation).
    - Verify task unit tests pass with race detection (`-race`).
-2. **Per-Task Expert Review Gate**:
-   - **For EACH task completed**, consult the 4-expert panel (or dispatch a dedicated Devil's Advocate subagent from the panel) to audit the task's code changes.
-   - **Core Software Engineering Principles Audit (Beyond Plan Conformity)**:
-     - **Code Re-use & DRY**: Actively identify duplicated logic, copy-pasted helpers, and inline ad-hoc patterns; require extracting reusable, testable utility functions or shared packages.
-     - **Package Boundaries & Separation of Concerns**: Enforce clean architectural boundaries between database persistence, API orchestration/proxying, and frontend presentation state; strictly forbid leaky abstractions or tight cross-package coupling.
-     - **Single Responsibility Principle (SRP) & High Cohesion**: Ensure modules, structs, handlers, and functions have a focused, single responsibility without monolithic god-objects.
-     - **Interface & Abstraction Hygiene**: Design small, consumer-driven interfaces (idiomatic Go / JS); avoid premature over-engineering or unnecessary abstraction layers.
-     - **Idiomatic Code & Maintainability**: Enforce language-specific idioms, clear domain naming, self-documenting code, and zero dead code.
-     - **Defensive Error Handling & Resource Lifecycles**: Comprehensive error wrapping, defensive nil guards, context cancellation propagation, and explicit cleanup of timers, intervals, and sockets.
-     - **Repository Invariants**: Strict adherence to zero personal data and zero plaintext secrets.
-   - **Remediation**: Resolve all identified P0/P1 bugs, architectural antipatterns, and audit objections before proceeding to subsequent tasks.
+2. **STRICT PROHIBITION: Zero Mid-Task Subagent Halts**:
+   - **Under NO circumstance should Aerial halt execution between individual tasks to spawn subagents.**
+   - Per-task subagent reviews are strictly eliminated. Implementation must proceed continuously from Task 1 to completion.
+   - Code review is deferred exclusively to Stage 5 on the consolidated diff.
 
 ---
 
-### Stage 5: Pre-Flight Verification Gate (The New Path)
+### Stage 5: Pre-Flight Verification & Pre-PR Diff Audit
 *MANDATORY: Never commit or push unverified code.*
 
-1. **Execute Local Pre-Flight Verification Runner (`--staged`)**:
+1. **Local Pre-Flight Verification Runner (`--staged`)**:
    Always execute targeted local verification before committing:
    - **Linux / Container**:
      ```bash
@@ -129,20 +151,16 @@ Present a structured synthesis of the expert panel's audit to the human user:
      ```powershell
      powershell -ExecutionPolicy Bypass -File scripts/verify.ps1 -Staged
      ```
-   - **Local Iteration Target**: `--staged` inspects changed files and validates static analysis, BOM headers, test hygiene, and syntax checks, providing sub-second feedback (< 1s). Unit tests are executed via targeted `go test` and offloaded monorepo CI.
+   - Run targeted package tests (`go test -v ./pkg/...`).
 
-2. **Full Monorepo CI Offloading**:
-   - Full monorepo verification (`./scripts/verify.sh --full`), comprehensive test suites, and coverage gating (`check-coverage.sh`) are offloaded 100% to GitHub Actions CI on PR push and merge to `main`.
-   - Pre-push hooks have been eliminated; remote PR gating and GitHub Actions CI enforce all monorepo test matrices and coverage thresholds.
+2. **Pre-PR Diff Audit**:
+   - **Tier 1**: Direct local verification.
+   - **Tier 2**: Dispatch a single **Devil's Advocate Critic** subagent to audit the complete, unified `git diff` against the approved plan (~30s). Resolve any identified regressions before commit.
+   - **Tier 3**: Dispatch the **full 4-expert panel** to audit the complete, unified `git diff` (~45s).
 
 3. **ZERO-BYPASS INVARIANT**:
-   - **Under NO CIRCUMSTANCE is an agent permitted to commit or push unverified changes.**
-   - Fresh verification evidence (`./scripts/verify.sh --staged` or targeted package test suites with exit code 0) must exist in the turn transcript prior to commit.
-   - If a check fails:
-     1. Read the failure log from stderr.
-     2. Fix the reported code violations, linter errors, or failing tests in the source files.
-     3. Re-run `./scripts/verify.sh --staged` until exit code is 0.
-     4. Proceed with commit.
+   - Fresh verification evidence must exist in the turn transcript prior to commit.
+   - If a check fails, fix the code/tests, re-run `./scripts/verify.sh --staged` until exit code is 0, and proceed.
 
 ---
 

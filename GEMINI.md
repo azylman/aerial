@@ -153,9 +153,13 @@ Aerial operates on a strict **Two-Repository Separation of Concerns**:
      - **Table-Driven Unit Tests as Primary Vehicle**: Unit tests for business logic permutations and edge cases MUST target these pure functions directly using fast, table-driven tests. Pure unit tests execute in microseconds (< 1ms) with zero chance of channel deadlocks, race conditions, or timing flakiness.
      - **Reserve Mock Runner / Subprocess Orchestration for Plumbing Only**: Tests that instantiate mock subprocesses (`createMockAgyScript`), mock runners (`RunnerFunc`), goroutine worker pools, channel select loops, and context timeouts MUST be strictly limited to verifying concurrency plumbing (e.g., watchdog timeouts, process group kills, startup catch-up sweeps). Aerial is strictly prohibited from testing business logic variants via end-to-end mock runner pipelines.
 
-8. **Multi-Agent Review Panel ("The Girl Gang")**:
+8. **Multi-Agent Review Panel ("The Girl Gang") & Tiered Engineering Workflow**:
    - The subagent review panel is called **the girl gang** (or **the gang**).
-   - During self-improvement workflows, the 4-expert review panel audits plans and task implementations to guard against race conditions, regressions, and invariant violations.
+   - During self-improvement workflows, code review is structured dynamically across three complexity tiers:
+     - **Tier 1 (< 50 LOC, targeted bugfixes & test additions)**: Solo Adversarial Systems Critic / Devil's Advocate audits the plan (~30s). Autonomous execution (no mandatory stop). Zero mid-task pauses during coding.
+     - **Tier 2 (50–200 LOC, standard features & multi-package refactors)**: Full 4-expert review panel (3 Domain Specialists + 1 Devil's Advocate) audits the plan (~45s). Autonomous execution (no mandatory stop; directly incorporates plan feedback). Zero mid-task pauses during coding. Consolidated Devil's Advocate audits the unified `git diff` before opening the PR (~30s).
+     - **Tier 3 (> 200 LOC, core architecture, database migrations, breaking changes)**: Full 4-expert review panel audits the plan. **MANDATORY HUMAN REVIEW CHECKPOINT (STOP)**: synthesize panel findings and wait for explicit user approval before touching code. Continuous implementation once approved (zero mid-task pauses). Full 4-expert review panel audits the unified `git diff` before merge (~45s).
+   - **Continuous Implementation Invariant**: Under NO circumstance should execution halt between individual tasks to spawn subagents. Per-task subagent pauses are strictly eliminated; code review is performed on the consolidated pre-PR diff.
 
 9. **Multi-User Security & Admin Privilege Enforcement**:
    - Messages from Discord include `- is_admin: true` or `- is_admin: false` (resolved against `admin_users` in `config.yaml`).
