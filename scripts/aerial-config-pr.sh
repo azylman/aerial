@@ -10,7 +10,7 @@ REPO_NAME="aerial-config"
 REPO_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}.git"
 DEFAULT_BRANCH="main"
 SIDE_SYNC_URL="${AERIAL_GITSYNC_URL:-http://aerial-gitsync:8080/sync}"
-DEFAULT_PR_CHECK_DELAY="2m"
+DEFAULT_PR_CHECK_DELAY="1m"
 
 cmd="${1:-}"
 if [ -n "$cmd" ]; then
@@ -272,7 +272,7 @@ Check on the status of Pull Request #${pr_num} on ${REPO_OWNER}/${REPO_NAME} (${
 1. Inspect CI status and PR state by running:
    scripts/${script_name} merge ${pr_num}
 2. If status is "merged" or "already_merged", confirm the successful merge and deployment to the user.
-3. If status is "pending", quietly reschedule a 2m follow-up check via scheduler_schedule_once with target_id "${target_id}" and suppress response output (empty stdout).
+3. If status is "pending", quietly reschedule a ${delay} follow-up check via scheduler_schedule_once with target_id "${target_id}" and suppress response output (empty stdout).
 4. If status is "failed" or "conflict", report the failure details to the user.
 EOF
 )
