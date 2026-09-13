@@ -24,6 +24,7 @@ type Client struct {
 	cfg        *config.Config
 	httpClient *http.Client
 	roots      []string
+	retryDelay time.Duration
 }
 
 // New creates a new memory Client with pure *config.Config and optional transcript search roots.
@@ -42,7 +43,32 @@ func New(cfg *config.Config, roots ...string) *Client {
 		httpClient: &http.Client{
 			Timeout: 3 * time.Second,
 		},
-		roots: cleanRoots,
+		roots:      cleanRoots,
+		retryDelay: 50 * time.Millisecond,
+	}
+}
+
+// SetHTTPClientForTest sets a custom *http.Client for testing and returns a restore function.
+func (c *Client) SetHTTPClientForTest(client *http.Client) func() {
+	if c == nil {
+		return func() {}
+	}
+	old := c.httpClient
+	c.httpClient = client
+	return func() {
+		c.httpClient = old
+	}
+}
+
+// SetRetryDelayForTest sets a custom retry delay for testing (e.g. -1 to disable sleep) and returns a restore function.
+func (c *Client) SetRetryDelayForTest(d time.Duration) func() {
+	if c == nil {
+		return func() {}
+	}
+	old := c.retryDelay
+	c.retryDelay = d
+	return func() {
+		c.retryDelay = old
 	}
 }
 
@@ -174,7 +200,15 @@ func (c *Client) GenerateEmbedding(ctx context.Context, text string, isQuery boo
 			retErr = ctx.Err()
 			return nil, retErr
 		}
-		time.Sleep(50 * time.Millisecond)
+		if attempt < totalAttempts-1 {
+			delay := c.retryDelay
+			if delay == 0 {
+				delay = 50 * time.Millisecond
+			}
+			if delay > 0 {
+				time.Sleep(delay)
+			}
+		}
 	}
 	retErr = fmt.Errorf("failed after %d attempts: %w", totalAttempts, lastErr)
 	return nil, retErr

@@ -596,15 +596,37 @@ func isContainerColdBoot(paths ...string) bool {
 }
 
 func waitForColdBootConfig(paths []string, timeout time.Duration) {
+	if len(paths) == 0 {
+		return
+	}
+	for _, p := range paths {
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() && fi.Size() > 0 {
+			log.Printf("[Config] Cold-boot configuration detected at %s", p)
+			return
+		}
+	}
+	if timeout <= 0 {
+		log.Printf("[Config] Cold-boot wait timed out after %v, proceeding with search", timeout)
+		return
+	}
+
 	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
+	for {
 		for _, p := range paths {
 			if fi, err := os.Stat(p); err == nil && !fi.IsDir() && fi.Size() > 0 {
 				log.Printf("[Config] Cold-boot configuration detected at %s", p)
 				return
 			}
 		}
-		time.Sleep(250 * time.Millisecond)
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+		sleepDur := 10 * time.Millisecond
+		if remaining < sleepDur {
+			sleepDur = remaining
+		}
+		time.Sleep(sleepDur)
 	}
 	log.Printf("[Config] Cold-boot wait timed out after %v, proceeding with search", timeout)
 }
