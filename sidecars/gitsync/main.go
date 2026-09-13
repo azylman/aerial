@@ -356,6 +356,11 @@ func (d *SyncDaemon) getComposeArgs(composeDir string, subCmd ...string) []strin
 		"-f", baseFile,
 	}
 
+	envFile := filepath.Join(composeDir, ".env")
+	if fi, err := os.Stat(envFile); err == nil && !fi.IsDir() {
+		args = append(args, "--env-file", envFile)
+	}
+
 	configDir := d.configDir
 
 	var overrideCandidates []string
