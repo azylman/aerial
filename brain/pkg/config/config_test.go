@@ -2413,7 +2413,9 @@ func TestConfig_PackageLevelAndUncoveredHelpers(t *testing.T) {
 	validBootFile := filepath.Join(tmpDir, "boot.yaml")
 	_ = os.WriteFile(validBootFile, []byte("model: test\n"), 0644)
 	waitForColdBootConfig([]string{validBootFile}, 500*time.Millisecond)
-	waitForColdBootConfig([]string{filepath.Join(tmpDir, "does_not_exist")}, 10*time.Millisecond)
+	waitForColdBootConfig([]string{filepath.Join(tmpDir, "does_not_exist")}, 1*time.Millisecond)
+	waitForColdBootConfig(nil, 1*time.Millisecond)
+	waitForColdBootConfig([]string{filepath.Join(tmpDir, "does_not_exist")}, 0)
 
 	// 11. cloneConfigData nil and update nil
 	if res := cloneConfigData(nil); res != nil {

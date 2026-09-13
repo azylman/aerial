@@ -4,9 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +17,33 @@ import (
 	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
 )
+
+type roundTripperFunc func(req *http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func mockJSONResponse(statusCode int, body string) *http.Response {
+	return &http.Response{
+		StatusCode: statusCode,
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Header:     make(http.Header),
+	}
+}
+
+func mockEmbeddingResponse(vec []float32) *http.Response {
+	b, _ := json.Marshal(EmbeddingResponse{Embedding: vec})
+	return mockJSONResponse(http.StatusOK, string(b))
+}
+
+func newMockClient(rt roundTripperFunc, roots ...string) *Client {
+	c := NewClient("http://mock-ollama:11434", roots...)
+	c.httpClient = &http.Client{Transport: rt}
+	c.retryDelay = -1
+	return c
+}
+
 
 func TestNew_ConfigPointerInjection(t *testing.T) {
 	cfg := config.NewFromData(&config.ConfigData{
@@ -118,24 +146,21 @@ func TestFormatMemoryContext(t *testing.T) {
 
 func TestMockOllamaClient(t *testing.T) {
 	var receivedPrompt string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req EmbeddingRequest
-		_ = json.NewDecoder(r.Body).Decode(&req)
-		receivedPrompt = req.Prompt
-
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(EmbeddingResponse{
-			Embedding: []float32{0.1, 0.2, 0.3},
-		})
-	}))
-	defer server.Close()
+	rt := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		var r EmbeddingRequest
+		_ = json.NewDecoder(req.Body).Decode(&r)
+		receivedPrompt = r.Prompt
+		return mockJSONResponse(http.StatusOK, `{"embedding":[0.1, 0.2, 0.3]}`), nil
+	})
 
 	cfg := config.NewFromData(&config.ConfigData{
 		Ollama: config.OllamaConfig{
-			BaseURL: server.URL,
+			BaseURL: "http://mock-ollama:11434",
 		},
 	})
 	client := New(cfg)
+	client.httpClient = &http.Client{Transport: rt}
+	client.retryDelay = -1
 
 	// Test query embedding without prefix configured (default for all-minilm)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -155,11 +180,13 @@ func TestMockOllamaClient(t *testing.T) {
 	// Test query embedding with QueryPrefix configured in Config
 	cfgPrefixed := config.NewFromData(&config.ConfigData{
 		Ollama: config.OllamaConfig{
-			BaseURL:     server.URL,
+			BaseURL:     "http://mock-ollama:11434",
 			QueryPrefix: "Represent this query: ",
 		},
 	})
 	clientPrefixed := New(cfgPrefixed)
+	clientPrefixed.httpClient = &http.Client{Transport: rt}
+	clientPrefixed.retryDelay = -1
 
 	embPrefixed, err := clientPrefixed.GenerateEmbedding(ctx, "test query 2", true, 1)
 	if err != nil {
@@ -264,16 +291,10 @@ func TestProcessThreadFactsDeduplicationAndWatermark(t *testing.T) {
 	}
 	defer func() { _ = database.Close() }()
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(EmbeddingResponse{
-			Embedding: makeDimVector(1.0, 0.0),
-		})
-	}))
-	defer server.Close()
-
 	tmpDir := t.TempDir()
-	client := NewClient(server.URL, tmpDir)
+	client := newMockClient(func(req *http.Request) (*http.Response, error) {
+		return mockEmbeddingResponse(makeDimVector(1.0, 0.0)), nil
+	}, tmpDir)
 
 	// Mock LLM function returning the same fact
 	llmFunc := func(ctx context.Context, prompt string) (string, error) {
@@ -369,15 +390,9 @@ func TestBackfillMissingEmbeddings(t *testing.T) {
 	}
 	defer func() { _ = database.Close() }()
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(EmbeddingResponse{
-			Embedding: makeDimVector(0.5, 0.5),
-		})
-	}))
-	defer server.Close()
-
-	client := NewClient(server.URL)
+	client := newMockClient(func(req *http.Request) (*http.Response, error) {
+		return mockEmbeddingResponse(makeDimVector(0.5, 0.5)), nil
+	})
 
 	// Insert facts: 1 with embedding, 2 without embedding
 	_, _ = db.InsertFact(database, "system_config", "Fact 1 with emb", 1.0, "thread-1", makeDimVector(0.1, 0.2))
@@ -414,15 +429,9 @@ func TestRetrieveRelevantFacts(t *testing.T) {
 	}
 	defer func() { _ = database.Close() }()
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(EmbeddingResponse{
-			Embedding: makeDimVector(1.0, 0.0),
-		})
-	}))
-	defer server.Close()
-
-	client := NewClient(server.URL)
+	client := newMockClient(func(req *http.Request) (*http.Response, error) {
+		return mockEmbeddingResponse(makeDimVector(1.0, 0.0)), nil
+	})
 
 	// Insert facts into DB
 	_, _ = db.InsertFact(database, "system_config", "Server port is 8080", 1.0, "thread-1", makeDimVector(0.9, 0.1))
@@ -448,16 +457,10 @@ func TestExtractActiveConversationFacts(t *testing.T) {
 	}
 	defer func() { _ = database.Close() }()
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(EmbeddingResponse{
-			Embedding: makeDimVector(1.0, 0.0),
-		})
-	}))
-	defer server.Close()
-
 	tmpDir := t.TempDir()
-	client := NewClient(server.URL, tmpDir)
+	client := newMockClient(func(req *http.Request) (*http.Response, error) {
+		return mockEmbeddingResponse(makeDimVector(1.0, 0.0)), nil
+	}, tmpDir)
 
 	llmFunc := func(ctx context.Context, prompt string) (string, error) {
 		return `{"facts":[{"category":"user_preference","fact_text":"User prefers vim keybindings","importance_score":0.9}]}`, nil
@@ -536,7 +539,9 @@ func TestMemory_ClientCreationAndConfig(t *testing.T) {
 }
 
 func TestMemory_GenerateEmbedding_ErrorsAndRetries(t *testing.T) {
-	client := NewClient("http://127.0.0.1:59999") // closed port
+	client := newMockClient(func(req *http.Request) (*http.Response, error) {
+		return nil, errors.New("connection refused")
+	})
 
 	// 1. Empty text
 	_, err := client.GenerateEmbedding(context.Background(), "", false, 1)
@@ -559,80 +564,59 @@ func TestMemory_GenerateEmbedding_ErrorsAndRetries(t *testing.T) {
 	}
 
 	// 4. Server error 500
-	server500 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-	}))
-	defer server500.Close()
-
-	c500 := NewClient(server500.URL)
+	c500 := newMockClient(func(req *http.Request) (*http.Response, error) {
+		return mockJSONResponse(http.StatusInternalServerError, "internal server error"), nil
+	})
 	_, err = c500.GenerateEmbedding(context.Background(), "hello", false, 0)
 	if err == nil {
 		t.Error("expected error on HTTP 500")
 	}
 
 	// 5. Server returns error in JSON
-	serverErrJson := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(EmbeddingResponse{
-			Error: "model not loaded",
-		})
-	}))
-	defer serverErrJson.Close()
-
-	cErrJson := NewClient(serverErrJson.URL)
+	cErrJson := newMockClient(func(req *http.Request) (*http.Response, error) {
+		return mockJSONResponse(http.StatusOK, `{"error":"model not loaded"}`), nil
+	})
 	_, err = cErrJson.GenerateEmbedding(context.Background(), "hello", false, 0)
 	if err == nil || !strings.Contains(err.Error(), "model not loaded") {
 		t.Errorf("expected 'model not loaded' error, got %v", err)
 	}
 
 	// 6. Server returns empty embedding array
-	serverEmptyEmb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(EmbeddingResponse{
-			Embedding: []float32{},
-		})
-	}))
-	defer serverEmptyEmb.Close()
-
-	cEmptyEmb := NewClient(serverEmptyEmb.URL)
+	cEmptyEmb := newMockClient(func(req *http.Request) (*http.Response, error) {
+		return mockJSONResponse(http.StatusOK, `{"embedding":[]}`), nil
+	})
 	_, err = cEmptyEmb.GenerateEmbedding(context.Background(), "hello", false, 0)
 	if err == nil || !strings.Contains(err.Error(), "empty embedding returned") {
 		t.Errorf("expected 'empty embedding returned' error, got %v", err)
 	}
 
 	// 7. Server returns non-JSON invalid payload
-	serverBadJson := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("not valid json"))
-	}))
-	defer serverBadJson.Close()
-
-	cBadJson := NewClient(serverBadJson.URL)
+	cBadJson := newMockClient(func(req *http.Request) (*http.Response, error) {
+		return mockJSONResponse(http.StatusOK, "not valid json"), nil
+	})
 	_, err = cBadJson.GenerateEmbedding(context.Background(), "hello", false, 0)
 	if err == nil {
 		t.Error("expected JSON unmarshal error")
 	}
 
 	var receivedModel string
-	serverModel := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req EmbeddingRequest
-		_ = json.NewDecoder(r.Body).Decode(&req)
-		receivedModel = req.Model
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(EmbeddingResponse{
-			Embedding: []float32{1.0, 2.0},
-		})
-	}))
-	defer serverModel.Close()
+	rtModel := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		var reqBody EmbeddingRequest
+		_ = json.NewDecoder(req.Body).Decode(&reqBody)
+		receivedModel = reqBody.Model
+		return mockJSONResponse(http.StatusOK, `{"embedding":[1.0, 2.0]}`), nil
+	})
 
 	// 8. Custom model via Config
 	cfgModel := config.NewFromData(&config.ConfigData{
 		Ollama: config.OllamaConfig{
-			BaseURL: serverModel.URL,
+			BaseURL: "http://mock-ollama:11434",
 			Model:   "custom-bge-model",
 		},
 	})
 	cModel := New(cfgModel)
+	cModel.httpClient = &http.Client{Transport: rtModel}
+	cModel.retryDelay = -1
 	_, _ = cModel.GenerateEmbedding(context.Background(), "hello", false, 0)
 	if receivedModel != "custom-bge-model" {
 		t.Errorf("expected custom-bge-model, got %q", receivedModel)
@@ -651,7 +635,9 @@ func TestMemory_BackfillMissingEmbeddings_EdgeCases(t *testing.T) {
 		t.Fatalf("InitDB failed: %v", err)
 	}
 	_ = closedDB.Close()
-	c := NewClient("http://127.0.0.1:11434")
+	c := newMockClient(func(req *http.Request) (*http.Response, error) {
+		return nil, errors.New("connection refused")
+	})
 	if _, err := BackfillMissingEmbeddings(context.Background(), closedDB, c); err == nil {
 		t.Error("expected error for closed DB")
 	}
@@ -729,7 +715,9 @@ func TestMemory_ProcessThreadFacts_EdgeCases(t *testing.T) {
 	defer database.Close()
 
 	emptyTmp := t.TempDir()
-	clientNoFiles := NewClient("http://127.0.0.1:11434", emptyTmp)
+	clientNoFiles := newMockClient(func(req *http.Request) (*http.Response, error) {
+		return nil, errors.New("connection refused")
+	}, emptyTmp)
 	now := time.Now().UTC()
 	_ = db.InsertMessage(database, db.Message{
 		ID: "m-pf-1", ThreadID: "th-pf-1", Status: db.StatusCompleted, CreatedAt: now, UpdatedAt: now,
@@ -743,7 +731,9 @@ func TestMemory_ProcessThreadFacts_EdgeCases(t *testing.T) {
 
 	// 2. Empty transcript file
 	tmpDir := t.TempDir()
-	client := NewClient("http://127.0.0.1:11434", tmpDir)
+	client := newMockClient(func(req *http.Request) (*http.Response, error) {
+		return nil, errors.New("connection refused")
+	}, tmpDir)
 
 	logDir := filepath.Join(tmpDir, "th-pf-empty", ".system_generated", "logs")
 	_ = os.MkdirAll(logDir, 0755)
@@ -876,7 +866,9 @@ func TestMemory_Search_EdgeCases(t *testing.T) {
 	// 5. RetrieveRelevantFacts with Ollama failure (graceful fallback)
 	memDB, _ := db.InitDB(":memory:")
 	defer memDB.Close()
-	cFail := NewClient("http://127.0.0.1:59999")
+	cFail := newMockClient(func(req *http.Request) (*http.Response, error) {
+		return nil, errors.New("connection refused")
+	})
 	resFail, errFail := RetrieveRelevantFacts(context.Background(), memDB, cFail, "What is my name?", 5)
 	if resFail != nil || errFail != nil {
 		t.Errorf("expected nil, nil on vector embedding failure, got %v, %v", resFail, errFail)
@@ -927,48 +919,36 @@ func TestMemory_NewClient_Variants(t *testing.T) {
 
 func TestMemory_Client_DoRequestErrors(t *testing.T) {
 	// 1. HTTP 500 status code
-	ts500 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte("internal error"))
-	}))
-	defer ts500.Close()
-	c500 := NewClient(ts500.URL)
+	c500 := newMockClient(func(req *http.Request) (*http.Response, error) {
+		return mockJSONResponse(http.StatusInternalServerError, "internal error"), nil
+	})
 	_, err := c500.GenerateEmbedding(context.Background(), "test", false, 0)
 	if err == nil || !strings.Contains(err.Error(), "ollama HTTP 500") {
 		t.Errorf("expected HTTP 500 error, got %v", err)
 	}
 
 	// 2. HTTP 200 with invalid JSON
-	tsBadJSON := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("not valid json"))
-	}))
-	defer tsBadJSON.Close()
-	cBadJSON := NewClient(tsBadJSON.URL)
+	cBadJSON := newMockClient(func(req *http.Request) (*http.Response, error) {
+		return mockJSONResponse(http.StatusOK, "not valid json"), nil
+	})
 	_, err = cBadJSON.GenerateEmbedding(context.Background(), "test", false, 0)
 	if err == nil {
 		t.Errorf("expected json unmarshal error, got nil")
 	}
 
 	// 3. HTTP 200 with error field
-	tsErrResp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"error":"model not found"}`))
-	}))
-	defer tsErrResp.Close()
-	cErrResp := NewClient(tsErrResp.URL)
+	cErrResp := newMockClient(func(req *http.Request) (*http.Response, error) {
+		return mockJSONResponse(http.StatusOK, `{"error":"model not found"}`), nil
+	})
 	_, err = cErrResp.GenerateEmbedding(context.Background(), "test", false, 0)
 	if err == nil || !strings.Contains(err.Error(), "model not found") {
 		t.Errorf("expected model not found error, got %v", err)
 	}
 
 	// 4. HTTP 200 with empty embedding
-	tsEmptyEmb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"embedding":[]}`))
-	}))
-	defer tsEmptyEmb.Close()
-	cEmptyEmb := NewClient(tsEmptyEmb.URL)
+	cEmptyEmb := newMockClient(func(req *http.Request) (*http.Response, error) {
+		return mockJSONResponse(http.StatusOK, `{"embedding":[]}`), nil
+	})
 	_, err = cEmptyEmb.GenerateEmbedding(context.Background(), "test", false, 0)
 	if err == nil || !strings.Contains(err.Error(), "empty embedding returned") {
 		t.Errorf("expected empty embedding error, got %v", err)
@@ -1002,12 +982,9 @@ func (e *errInsertFactStore) InsertFact(ctx context.Context, category, factText 
 
 func TestMemory_RetrieveRelevantFacts_TypesAndErrors(t *testing.T) {
 	// 1. Long query > 1000 runes
-	tsSuccess := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"embedding":[0.1, 0.2]}`))
-	}))
-	defer tsSuccess.Close()
-	c := NewClient(tsSuccess.URL)
+	c := newMockClient(func(req *http.Request) (*http.Response, error) {
+		return mockEmbeddingResponse([]float32{0.1, 0.2}), nil
+	})
 
 	memDB, err := db.InitDB(":memory:")
 	if err != nil {
@@ -1134,13 +1111,10 @@ func TestMemory_AdditionalCoverage(t *testing.T) {
 	defer memDB2.Close()
 	_, _ = memDB2.Exec("INSERT INTO facts (category, fact_text, importance) VALUES ('test', 'fact 1', 1.0), ('test', 'fact 2', 1.0)")
 	cancelCtx, cancel := context.WithCancel(context.Background())
-	tsCancel := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	cCancel := newMockClient(func(req *http.Request) (*http.Response, error) {
 		cancel()
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"embedding":[0.1, 0.2]}`))
-	}))
-	defer tsCancel.Close()
-	cCancel := NewClient(tsCancel.URL)
+		return mockEmbeddingResponse(make([]float32, 384)), nil
+	})
 	_, err = BackfillMissingEmbeddings(cancelCtx, memDB2, cCancel)
 	if err == nil {
 		t.Errorf("expected context cancellation error, got nil")
@@ -1149,13 +1123,10 @@ func TestMemory_AdditionalCoverage(t *testing.T) {
 	// 6. extractor.go BackfillMissingEmbeddings UpdateFactEmbedding error
 	memDB3, _ := db.InitDB(":memory:")
 	_, _ = memDB3.Exec("INSERT INTO facts (category, fact_text, importance) VALUES ('test', 'fact 1', 1.0)")
-	tsUpdateErr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		memDB3.Close()
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"embedding":[0.1, 0.2]}`))
-	}))
-	defer tsUpdateErr.Close()
-	cUpdateErr := NewClient(tsUpdateErr.URL)
+	cUpdateErr := newMockClient(func(req *http.Request) (*http.Response, error) {
+		_ = memDB3.Close()
+		return mockEmbeddingResponse(make([]float32, 384)), nil
+	})
 	_, _ = BackfillMissingEmbeddings(context.Background(), memDB3, cUpdateErr)
 
 	// 7. extractor.go ExtractActiveConversationFacts with db.FactStore directly
@@ -1176,6 +1147,64 @@ func TestMemory_AdditionalCoverage(t *testing.T) {
 	_ = processThreadFacts(context.Background(), insErrStore, c, func(ctx context.Context, p string) (string, error) {
 		return `{"facts":[{"category":"user_pref","fact_text":"Fact to fail","importance_score":1.0}]}`, nil
 	}, "th-ins-err")
+}
+
+func TestMemory_SettersAndNilClient(t *testing.T) {
+	c := NewClient("http://mock-ollama:11434")
+	origHTTP := c.httpClient
+	origDelay := c.retryDelay
+
+	dummyClient := &http.Client{}
+	restoreHTTP := c.SetHTTPClientForTest(dummyClient)
+	if c.httpClient != dummyClient {
+		t.Errorf("expected custom http client to be set")
+	}
+	restoreHTTP()
+	if c.httpClient != origHTTP {
+		t.Errorf("expected http client to be restored")
+	}
+
+	var nilClient *Client
+	nilRestoreHTTP := nilClient.SetHTTPClientForTest(dummyClient)
+	nilRestoreHTTP()
+
+	restoreDelay := c.SetRetryDelayForTest(10 * time.Millisecond)
+	if c.retryDelay != 10*time.Millisecond {
+		t.Errorf("expected retry delay to be 10ms")
+	}
+	restoreDelay()
+	if c.retryDelay != origDelay {
+		t.Errorf("expected retry delay to be restored")
+	}
+
+	nilRestoreDelay := nilClient.SetRetryDelayForTest(10 * time.Millisecond)
+	nilRestoreDelay()
+
+	// doRequest with nil httpClient fallback
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	cNilHTTP := NewClient("http://mock-ollama:11434")
+	cNilHTTP.httpClient = nil
+	_, err := cNilHTTP.doRequest(ctx, []byte(`{}`))
+	if err == nil {
+		t.Errorf("expected context cancelled error from default client")
+	}
+
+	// doRequest with invalid URL
+	cBadURL := NewClient("http://\x7f")
+	_, err = cBadURL.doRequest(context.Background(), []byte(`{}`))
+	if err == nil {
+		t.Errorf("expected error with invalid URL")
+	}
+
+	// doRequest with invalid response JSON
+	cBadJSON := newMockClient(func(req *http.Request) (*http.Response, error) {
+		return mockJSONResponse(http.StatusOK, `invalid-json`), nil
+	})
+	_, err = cBadJSON.doRequest(context.Background(), []byte(`{}`))
+	if err == nil {
+		t.Errorf("expected unmarshal error for invalid JSON")
+	}
 }
 
 
