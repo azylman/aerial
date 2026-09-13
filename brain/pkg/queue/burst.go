@@ -13,44 +13,50 @@ import (
 )
 
 func (p *WorkerPool) Enqueue(msg db.Message) {
+	p.EnqueueBurst(msg)
+}
+
+// EnqueueBurst atomically enqueues multiple messages for a thread into the queue.
+func (p *WorkerPool) EnqueueBurst(msgs ...db.Message) {
+	if len(msgs) == 0 {
+		return
+	}
 	p.mu.Lock()
 	if p.stopped {
 		p.mu.Unlock()
-		log.Printf("[WorkerPool] Warning: attempted to enqueue message %s to stopped pool", msg.ID)
+		log.Printf("[WorkerPool] Warning: attempted to enqueue %d message(s) to stopped pool", len(msgs))
 		return
 	}
 
-	state, exists := p.threadChs[msg.ThreadID]
-	if !exists {
-		state = &threadWorkerState{ch: make(chan db.Message, 100)}
-		p.threadChs[msg.ThreadID] = state
-		p.wg.Add(1)
-		go p.runThreadWorker(msg.ThreadID, state)
+	for _, msg := range msgs {
+		state, exists := p.threadChs[msg.ThreadID]
+		if !exists {
+			state = &threadWorkerState{ch: make(chan db.Message, 100)}
+			p.threadChs[msg.ThreadID] = state
+			p.wg.Add(1)
+			go p.runThreadWorker(msg.ThreadID, state)
+		}
+
+		select {
+		case state.ch <- msg:
+			metrics.QueueDepth.Inc()
+		default:
+			// Buffer full: track active enqueuer to block worker eviction while waiting outside lock
+			state.activeEnqueuers++
+			ch := state.ch
+			p.mu.Unlock()
+
+			select {
+			case ch <- msg:
+				metrics.QueueDepth.Inc()
+			case <-p.ctx.Done():
+				log.Printf("[WorkerPool] Context cancelled while enqueuing message %s", msg.ID)
+			}
+
+			p.mu.Lock()
+			state.activeEnqueuers--
+		}
 	}
-
-	// Fast path: non-blocking send under lock
-	select {
-	case state.ch <- msg:
-		metrics.QueueDepth.Inc()
-		p.mu.Unlock()
-		return
-	default:
-	}
-
-	// Buffer full: track active enqueuer to block worker eviction while waiting outside lock
-	state.activeEnqueuers++
-	ch := state.ch
-	p.mu.Unlock()
-
-	select {
-	case ch <- msg:
-		metrics.QueueDepth.Inc()
-	case <-p.ctx.Done():
-		log.Printf("[WorkerPool] Context cancelled while enqueuing message %s", msg.ID)
-	}
-
-	p.mu.Lock()
-	state.activeEnqueuers--
 	p.mu.Unlock()
 }
 

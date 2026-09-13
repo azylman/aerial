@@ -331,11 +331,20 @@ const DefaultThreadSummaryTimeout = 15 * time.Second
 // SummarizeThreadHistory uses the Flash model to summarize the provided thread history.
 // It is wrapped in a singleflight.Group keyed by threadID, and uses DefaultThreadSummaryTimeout.
 func SummarizeThreadHistory(ctx context.Context, llm LLMFunc, model, threadID string, msgs []HistoryMessage) (string, error) {
+	return SummarizeThreadHistoryWithGroup(ctx, &threadSummaryGroup, llm, model, threadID, msgs)
+}
+
+// SummarizeThreadHistoryWithGroup uses the provided singleflight.Group (or falls back to package-level group if nil)
+// to coordinate concurrent summarization requests for the same thread.
+func SummarizeThreadHistoryWithGroup(ctx context.Context, sfg *singleflight.Group, llm LLMFunc, model, threadID string, msgs []HistoryMessage) (string, error) {
 	if len(msgs) == 0 {
 		return "", fmt.Errorf("empty history")
 	}
+	if sfg == nil {
+		sfg = &threadSummaryGroup
+	}
 
-	v, err, _ := threadSummaryGroup.Do(threadID, func() (interface{}, error) {
+	v, err, _ := sfg.Do(threadID, func() (interface{}, error) {
 		timeoutCtx, cancel := context.WithTimeout(ctx, DefaultThreadSummaryTimeout)
 		defer cancel()
 

@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/sync/singleflight"
+
 	"github.com/azylman/aerial/brain/pkg/classifier"
 	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
@@ -94,6 +96,15 @@ type WorkerPool struct {
 	quotaLockedUntil  atomic.Int64
 	scopeLocks        sync.Map
 	webhookDispatcher WebhookDispatcher
+	summaryGroup      singleflight.Group
+}
+
+// SummaryGroup returns the singleflight.Group coordinating thread summarizations for this pool instance.
+func (p *WorkerPool) SummaryGroup() *singleflight.Group {
+	if p == nil {
+		return nil
+	}
+	return &p.summaryGroup
 }
 
 // New creates a new WorkerPool with pure *config.Config dependency injection.

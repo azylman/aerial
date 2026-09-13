@@ -15,9 +15,11 @@ import (
 
 	"github.com/azylman/aerial/brain/pkg/db"
 	"github.com/bwmarrin/discordgo"
+	"golang.org/x/sync/singleflight"
 )
 
 func TestSanitizeHistoryContent(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		input    string
@@ -86,6 +88,7 @@ func TestSanitizeHistoryContent(t *testing.T) {
 }
 
 func TestFormatChannelHistory_TemporalClamp(t *testing.T) {
+	t.Parallel()
 	now := time.Now().UTC()
 	msgs := []HistoryMessage{
 		{
@@ -138,6 +141,7 @@ func TestFormatChannelHistory_TemporalClamp(t *testing.T) {
 }
 
 func TestFormatChannelHistory_TruncationCap(t *testing.T) {
+	t.Parallel()
 	now := time.Now().UTC()
 	longContent := strings.Repeat("A", 2000)
 
@@ -163,6 +167,7 @@ func TestFormatChannelHistory_TruncationCap(t *testing.T) {
 }
 
 func TestFormatChannelHistory_OrderingAndFraming(t *testing.T) {
+	t.Parallel()
 	now := time.Now().UTC()
 	t1 := now.Add(-3 * time.Hour)
 	t2 := now.Add(-2 * time.Hour)
@@ -230,6 +235,7 @@ func TestFormatChannelHistory_OrderingAndFraming(t *testing.T) {
 }
 
 func TestFormatChannelHistory_EmptyOrAllClamped(t *testing.T) {
+	t.Parallel()
 	if got := FormatChannelHistory(nil); got != "" {
 		t.Errorf("expected empty string for nil messages, got %q", got)
 	}
@@ -250,6 +256,7 @@ func TestFormatChannelHistory_EmptyOrAllClamped(t *testing.T) {
 }
 
 func TestDefaultHistoryFetcher_NonSnowflakeFallback(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("InitDB failed: %v", err)
@@ -306,6 +313,7 @@ func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 func TestDefaultHistoryFetcher_DiscordAPISuccess(t *testing.T) {
+	t.Parallel()
 	now := time.Now().UTC()
 	t1 := now.Add(-15 * time.Minute)
 	t2 := now.Add(-10 * time.Minute)
@@ -389,6 +397,7 @@ func TestDefaultHistoryFetcher_DiscordAPISuccess(t *testing.T) {
 }
 
 func TestDefaultHistoryFetcher_DiscordAPIErrorFallback(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("InitDB failed: %v", err)
@@ -432,6 +441,7 @@ func TestDefaultHistoryFetcher_DiscordAPIErrorFallback(t *testing.T) {
 }
 
 func TestSummarizeThreadHistory_XMLValidation(t *testing.T) {
+	t.Parallel()
 	msgs := []HistoryMessage{
 		{
 			ID:         "msg-1",
@@ -479,7 +489,7 @@ func TestSummarizeThreadHistory_XMLValidation(t *testing.T) {
 			mockLLM := func(ctx context.Context, model, prompt string) (string, error) {
 				return tc.mockOutput, nil
 			}
-			summary, err := SummarizeThreadHistory(context.Background(), mockLLM, "test-model", "thread-xml", msgs)
+			summary, err := SummarizeThreadHistoryWithGroup(context.Background(), new(singleflight.Group), mockLLM, "test-model", "thread-xml", msgs)
 			if tc.expectError {
 				if err == nil {
 					t.Fatalf("expected error for mock output %q, got none", tc.mockOutput)
@@ -497,6 +507,7 @@ func TestSummarizeThreadHistory_XMLValidation(t *testing.T) {
 }
 
 func TestSummarizeThreadHistory_TimeoutFallback(t *testing.T) {
+	t.Parallel()
 	msgs := []HistoryMessage{
 		{
 			ID:         "msg-1",
@@ -519,13 +530,14 @@ func TestSummarizeThreadHistory_TimeoutFallback(t *testing.T) {
 		return "", context.DeadlineExceeded
 	}
 
-	_, err := SummarizeThreadHistory(context.Background(), mockLLM, "test-model", "thread-timeout", msgs)
+	_, err := SummarizeThreadHistoryWithGroup(context.Background(), new(singleflight.Group), mockLLM, "test-model", "thread-timeout", msgs)
 	if !errors.Is(err, context.DeadlineExceeded) && err != context.DeadlineExceeded {
 		t.Fatalf("expected DeadlineExceeded error, got %v", err)
 	}
 }
 
 func TestSummarizeThreadHistory_Singleflight(t *testing.T) {
+	t.Parallel()
 	msgs := []HistoryMessage{
 		{
 			ID:         "msg-1",
@@ -547,10 +559,11 @@ func TestSummarizeThreadHistory_Singleflight(t *testing.T) {
 		return "<THREAD_SUMMARY>deduplicated summary</THREAD_SUMMARY>", nil
 	}
 
+	sfg := new(singleflight.Group)
 	done := make(chan string, 3)
 	for i := 0; i < 3; i++ {
 		go func() {
-			summary, _ := SummarizeThreadHistory(context.Background(), mockLLM, "test-model", "thread-sf", msgs)
+			summary, _ := SummarizeThreadHistoryWithGroup(context.Background(), sfg, mockLLM, "test-model", "thread-sf", msgs)
 			done <- summary
 		}()
 	}
@@ -581,6 +594,7 @@ func TestSummarizeThreadHistory_Singleflight(t *testing.T) {
 }
 
 func TestFetchRecentThreadHistory_DBFirst(t *testing.T) {
+	t.Parallel()
 	database, err := db.InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("InitDB failed: %v", err)
@@ -610,6 +624,7 @@ func TestFetchRecentThreadHistory_DBFirst(t *testing.T) {
 }
 
 func TestFormatPreviousSession(t *testing.T) {
+	t.Parallel()
 	// 1. Empty and whitespace
 	if got := FormatPreviousSession(""); got != "" {
 		t.Errorf("expected empty string for empty input, got %q", got)
@@ -657,6 +672,7 @@ func TestFormatPreviousSession(t *testing.T) {
 }
 
 func TestSanitizeHistoryContent_PreviousSessionTag(t *testing.T) {
+	t.Parallel()
 	input := "Check out <PREVIOUS_SESSION> and </PREVIOUS_SESSION> and < previous_session >"
 	sanitized := SanitizeHistoryContent(input)
 	if strings.Contains(sanitized, "<PREVIOUS_SESSION>") || strings.Contains(sanitized, "</PREVIOUS_SESSION>") {

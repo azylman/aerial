@@ -19,6 +19,7 @@ import (
 )
 
 func TestWebhookDispatcher_WakeHook(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name             string
 		serverResponse   WakeResponse
@@ -118,6 +119,7 @@ func TestWebhookDispatcher_WakeHook(t *testing.T) {
 }
 
 func TestWebhookDispatcher_PreTurnHook(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name                  string
 		serverResponse        PreTurnResponse
@@ -237,6 +239,7 @@ func TestWebhookDispatcher_PreTurnHook(t *testing.T) {
 }
 
 func TestWebhookDispatcher_PostTurnHook(t *testing.T) {
+	t.Parallel()
 	var receivedHeaderEvent string
 	var receivedReq PostTurnRequest
 
@@ -295,6 +298,7 @@ func TestWebhookDispatcher_PostTurnHook(t *testing.T) {
 }
 
 func TestWebhookDispatcher_HTTPErrorAndTimeout(t *testing.T) {
+	t.Parallel()
 	t.Run("HTTP 500 error returns error", func(t *testing.T) {
 		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusInternalServerError)
@@ -374,6 +378,7 @@ func TestWebhookDispatcher_HTTPErrorAndTimeout(t *testing.T) {
 }
 
 func TestWebhookDispatcher_EdgeCases(t *testing.T) {
+	t.Parallel()
 	dispatcher := NewDefaultWebhookDispatcher()
 
 	t.Run("nil endpoint", func(t *testing.T) {
