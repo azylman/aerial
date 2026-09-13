@@ -241,7 +241,7 @@ func fetchHistoryFromDB(database *sql.DB, channelID string, limit int) ([]Histor
 }
 
 // FetchRecentThreadHistory retrieves up to 100 recent messages for a thread.
-// It queries the local SQLite `messages` table first, falling back to the Discord API.
+// It queries the local PostgreSQL `messages` table first, falling back to the Discord API.
 func FetchRecentThreadHistory(ctx context.Context, dg *discordgo.Session, database *sql.DB, threadID string, limit int) ([]HistoryMessage, error) {
 	start := time.Now()
 	
