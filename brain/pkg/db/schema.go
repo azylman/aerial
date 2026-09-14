@@ -9,6 +9,9 @@ import (
 
 const migrationLockID = 849201948201
 
+// WARNING: Any indexes on columns added via downstream ALTER TABLE migrations (e.g. idx_facts_last_reinforced_at)
+// must NOT be defined here in postgresSchema. Doing so breaks migrations on existing databases where the table exists
+// but the column has not yet been added. Define such indexes in initSchemaPostgres after the ALTER TABLE statements.
 const postgresSchema = `
 CREATE EXTENSION IF NOT EXISTS vector;
 
@@ -111,10 +114,11 @@ CREATE INDEX IF NOT EXISTS idx_facts_thread_id ON facts(thread_id);
 CREATE INDEX IF NOT EXISTS idx_facts_category ON facts(category);
 CREATE INDEX IF NOT EXISTS idx_facts_created_at ON facts(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_facts_importance_created_at ON facts(importance DESC, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_facts_last_reinforced_at ON facts(last_reinforced_at DESC);
 CREATE INDEX IF NOT EXISTS idx_facts_embedding_hnsw ON facts USING hnsw (embedding vector_cosine_ops);
 `
 
+// WARNING: Any indexes on columns added via downstream ALTER TABLE migrations (e.g. idx_facts_last_reinforced_at)
+// must NOT be defined here in sqliteSchema. Define such indexes in initSchemaSQLite after the ALTER TABLE statements.
 const sqliteSchema = `
 CREATE TABLE IF NOT EXISTS messages (
 	id TEXT PRIMARY KEY,
@@ -218,7 +222,6 @@ CREATE INDEX IF NOT EXISTS idx_facts_thread_id ON facts(thread_id);
 CREATE INDEX IF NOT EXISTS idx_facts_category ON facts(category);
 CREATE INDEX IF NOT EXISTS idx_facts_created_at ON facts(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_facts_importance_created_at ON facts(importance DESC, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_facts_last_reinforced_at ON facts(last_reinforced_at DESC);
 `
 
 func initSchemaPostgres(ctx context.Context, database *sql.DB) error {
@@ -301,12 +304,12 @@ func initSchemaSQLite(database *sql.DB) error {
 		}
 	}
 
-	if _, err := database.Exec("ALTER TABLE facts ADD COLUMN last_reinforced_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP;"); err != nil {
+	if _, err := database.Exec("ALTER TABLE facts ADD COLUMN last_reinforced_at DATETIME NOT NULL DEFAULT '';"); err != nil {
 		if !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 			return fmt.Errorf("failed to add last_reinforced_at column to facts: %w", err)
 		}
 	}
-	if _, err := database.Exec("ALTER TABLE facts ADD COLUMN last_decayed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP;"); err != nil {
+	if _, err := database.Exec("ALTER TABLE facts ADD COLUMN last_decayed_at DATETIME NOT NULL DEFAULT '';"); err != nil {
 		if !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 			return fmt.Errorf("failed to add last_decayed_at column to facts: %w", err)
 		}
@@ -317,6 +320,7 @@ func initSchemaSQLite(database *sql.DB) error {
 		}
 	}
 	_, _ = database.Exec("CREATE INDEX IF NOT EXISTS idx_facts_last_reinforced_at ON facts(last_reinforced_at DESC)")
-	_, _ = database.Exec("UPDATE facts SET last_reinforced_at = created_at WHERE reinforce_count = 1 AND last_reinforced_at > created_at")
+	_, _ = database.Exec("UPDATE facts SET last_reinforced_at = created_at WHERE last_reinforced_at = '' OR (reinforce_count = 1 AND last_reinforced_at > created_at)")
+	_, _ = database.Exec("UPDATE facts SET last_decayed_at = created_at WHERE last_decayed_at = ''")
 	return nil
 }

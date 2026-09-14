@@ -2263,6 +2263,93 @@ func TestCronScheduleAndMessageEffortRouting(t *testing.T) {
 	}
 }
 
+func TestInitSchema_LegacyFactsUpgrade(t *testing.T) {
+	// 1. Create a SQLite DB with legacy facts schema (lacking last_reinforced_at, last_decayed_at, reinforce_count)
+	tmpDB := filepath.Join(t.TempDir(), "legacy_facts.db")
+	database, err := sql.Open("sqlite", tmpDB)
+	if err != nil {
+		t.Fatalf("failed to open sqlite: %v", err)
+	}
+	defer database.Close()
+
+	legacyFactsDDL := `
+	CREATE TABLE facts (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		category TEXT NOT NULL DEFAULT 'general',
+		fact_text TEXT NOT NULL,
+		importance REAL NOT NULL DEFAULT 1.0,
+		thread_id TEXT NOT NULL DEFAULT '',
+		embedding BLOB,
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE INDEX idx_facts_thread_id ON facts(thread_id);
+	CREATE INDEX idx_facts_category ON facts(category);
+	CREATE INDEX idx_facts_created_at ON facts(created_at DESC);
+	CREATE INDEX idx_facts_importance_created_at ON facts(importance DESC, created_at DESC);
+	`
+	if _, err := database.Exec(legacyFactsDDL); err != nil {
+		t.Fatalf("failed to create legacy facts table: %v", err)
+	}
+
+	// Insert a legacy row
+	if _, err := database.Exec("INSERT INTO facts (category, fact_text, importance, thread_id) VALUES ('user_pref', 'Likes green tea', 0.8, 't1')"); err != nil {
+		t.Fatalf("failed to insert legacy fact: %v", err)
+	}
+
+	// 2. Run initSchemaSQLite on this existing legacy database
+	if err := initSchemaSQLite(database); err != nil {
+		t.Fatalf("initSchemaSQLite failed on legacy schema: %v", err)
+	}
+
+	// 3. Verify that the new columns and index were successfully added
+	var reinforceCount int
+	var lastReinforcedAt, lastDecayedAt string
+	err = database.QueryRow("SELECT reinforce_count, last_reinforced_at, last_decayed_at FROM facts WHERE id = 1").Scan(&reinforceCount, &lastReinforcedAt, &lastDecayedAt)
+	if err != nil {
+		t.Fatalf("failed to query migrated columns: %v", err)
+	}
+	if reinforceCount != 1 {
+		t.Errorf("expected reinforce_count=1, got %d", reinforceCount)
+	}
+	if lastReinforcedAt == "" || lastDecayedAt == "" {
+		t.Errorf("expected populated timestamps, got %q, %q", lastReinforcedAt, lastDecayedAt)
+	}
+
+	// 4. Verify index exists
+	var indexCount int
+	err = database.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_facts_last_reinforced_at'").Scan(&indexCount)
+	if err != nil || indexCount != 1 {
+		t.Errorf("expected idx_facts_last_reinforced_at to exist in sqlite_master, count=%d, err=%v", indexCount, err)
+	}
+}
+
+func TestSchemaContract_NoPrematureIndexes(t *testing.T) {
+	// Any index on columns added in downstream migrations (ALTER TABLE) must NOT be declared in postgresSchema or sqliteSchema constants
+	downstreamColumns := []string{"last_reinforced_at", "last_decayed_at", "reinforce_count", "restart_count", "previous_session_id"}
+
+	for _, col := range downstreamColumns {
+		pattern := " " + col + " "
+		patternDesc := " " + col + ")"
+		for _, line := range strings.Split(postgresSchema, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "CREATE INDEX") {
+				if strings.Contains(trimmed, pattern) || strings.Contains(trimmed, patternDesc) || strings.Contains(trimmed, "("+col) {
+					t.Errorf("postgresSchema contains premature index definition for downstream column %q: %s", col, trimmed)
+				}
+			}
+		}
+		for _, line := range strings.Split(sqliteSchema, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "CREATE INDEX") {
+				if strings.Contains(trimmed, pattern) || strings.Contains(trimmed, patternDesc) || strings.Contains(trimmed, "("+col) {
+					t.Errorf("sqliteSchema contains premature index definition for downstream column %q: %s", col, trimmed)
+				}
+			}
+		}
+	}
+}
+
+
 
 
 
