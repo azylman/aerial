@@ -9,9 +9,83 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="assets/css/dark.css">
-  <link rel="stylesheet" href="assets/css/cyberpunk-docs.css?v=11.0">
+  <link rel="stylesheet" href="assets/css/cyberpunk-docs.css?v=11.2">
 </head>
 <body>
+  <!-- Celestial Permet Orrery Background Matrix -->
+  <div class="aerial-orrery" aria-hidden="true">
+    <svg xmlns="http://www.w3.org/2000/svg" width="800" height="800" viewBox="0 0 800 800">
+      <defs>
+        <radialGradient id="coreGlow" cx="50%" cy="50%" r="50%">
+          <stop offset="0%" stop-color="#ffffff" stop-opacity="1"/>
+          <stop offset="30%" stop-color="#c084fc" stop-opacity="0.95"/>
+          <stop offset="70%" stop-color="#a855f7" stop-opacity="0.4"/>
+          <stop offset="100%" stop-color="#a855f7" stop-opacity="0"/>
+        </radialGradient>
+        <radialGradient id="planetGlowCyan" cx="50%" cy="50%" r="50%">
+          <stop offset="0%" stop-color="#ffffff" stop-opacity="1"/>
+          <stop offset="35%" stop-color="#00f0ff" stop-opacity="0.9"/>
+          <stop offset="100%" stop-color="#00f0ff" stop-opacity="0"/>
+        </radialGradient>
+        <radialGradient id="planetGlowMagenta" cx="50%" cy="50%" r="50%">
+          <stop offset="0%" stop-color="#ffffff" stop-opacity="1"/>
+          <stop offset="35%" stop-color="#ff2a85" stop-opacity="0.9"/>
+          <stop offset="100%" stop-color="#ff2a85" stop-opacity="0"/>
+        </radialGradient>
+      </defs>
+
+      <!-- Cardinal Axes & Ecliptic Crosshairs -->
+      <path d="M400 15 L400 360 M400 440 L400 785 M15 400 L360 400 M440 400 L785 400" stroke="rgba(168,85,247,0.45)" stroke-width="1.5" stroke-dasharray="4, 6"/>
+      <path d="M128 128 L370 370 M430 430 L672 672 M128 672 L370 430 M430 370 L672 128" stroke="rgba(0,240,255,0.3)" stroke-width="1.2" stroke-dasharray="3, 7"/>
+
+      <!-- Outer Celestial Astrolabe Ring -->
+      <circle cx="400" cy="400" r="385" fill="none" stroke="rgba(168,85,247,0.55)" stroke-width="2"/>
+      <circle cx="400" cy="400" r="370" fill="none" stroke="rgba(0,240,255,0.45)" stroke-width="1.2" stroke-dasharray="3, 6"/>
+
+      <!-- Track 4: Outer Deep Space Track (r=320) -->
+      <circle cx="400" cy="400" r="320" fill="none" stroke="rgba(168,85,247,0.45)" stroke-width="1.8" stroke-dasharray="8, 12"/>
+      <g class="orrery-track-4">
+        <circle cx="400" cy="80" r="18" fill="url(#planetGlowCyan)"/>
+        <circle cx="400" cy="80" r="7" fill="#00f0ff"/>
+        <circle cx="400" cy="80" r="3" fill="#ffffff"/>
+        <circle cx="400" cy="80" r="26" fill="none" stroke="rgba(0,240,255,0.7)" stroke-width="1" stroke-dasharray="3, 4"/>
+        <circle cx="422" cy="80" r="3.5" fill="#05ffa1"/>
+      </g>
+
+      <!-- Track 3: Mid-Outer Track (r=240) -->
+      <circle cx="400" cy="400" r="240" fill="none" stroke="rgba(255,42,133,0.45)" stroke-width="1.8" stroke-dasharray="5, 8"/>
+      <g class="orrery-track-3">
+        <circle cx="400" cy="160" r="16" fill="url(#planetGlowMagenta)"/>
+        <circle cx="400" cy="160" r="6.5" fill="#ff2a85"/>
+        <circle cx="400" cy="160" r="3" fill="#ffffff"/>
+        <ellipse cx="400" cy="160" rx="24" ry="9" fill="none" stroke="rgba(255,42,133,0.85)" stroke-width="1.2" transform="rotate(-20 400 160)"/>
+      </g>
+
+      <!-- Track 2: Mid-Inner Track (r=160) -->
+      <circle cx="400" cy="400" r="160" fill="none" stroke="rgba(0,240,255,0.5)" stroke-width="1.8"/>
+      <g class="orrery-track-2">
+        <circle cx="400" cy="240" r="12" fill="rgba(192,132,252,0.95)"/>
+        <circle cx="400" cy="240" r="5" fill="#ffffff"/>
+        <circle cx="400" cy="240" r="18" fill="none" stroke="rgba(192,132,252,0.75)" stroke-width="1"/>
+        <circle cx="415" cy="240" r="3" fill="#ffb703"/>
+      </g>
+
+      <!-- Track 1: Innermost Fast Track (r=90) -->
+      <circle cx="400" cy="400" r="90" fill="none" stroke="rgba(5,255,161,0.55)" stroke-width="1.5" stroke-dasharray="4, 5"/>
+      <g class="orrery-track-1">
+        <circle cx="400" cy="310" r="7" fill="#05ffa1"/>
+        <circle cx="400" cy="310" r="3" fill="#ffffff"/>
+      </g>
+
+      <!-- Central Permet Singularity / Sun -->
+      <g class="orrery-core">
+        <circle cx="400" cy="400" r="50" fill="url(#coreGlow)"/>
+        <circle cx="400" cy="400" r="20" fill="#c084fc"/>
+        <circle cx="400" cy="400" r="10" fill="#ffffff"/>
+      </g>
+    </svg>
+  </div>
+
   <div id="app">Initializing Aerial Docs Matrix...</div>
 
   <script>
