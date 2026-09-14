@@ -55,8 +55,9 @@ init_scratch() {
     export GIT_CONFIG_KEY_1="http.version"
     export GIT_CONFIG_VALUE_1="HTTP/1.1"
 
-    if ! git clone --depth 1 --single-branch -b "$DEFAULT_BRANCH" "$REPO_URL" "$scratch_dir" 2>&1; then
-        echo "ERROR: Failed to clone ${REPO_URL} into scratch directory." >&2
+    local clone_out=""
+    if ! clone_out=$(git clone --depth 1 --single-branch -b "$DEFAULT_BRANCH" "$REPO_URL" "$scratch_dir" 2>&1); then
+        echo "ERROR: Failed to clone ${REPO_URL} into scratch directory: ${clone_out}" >&2
         rm -rf "$scratch_dir"
         exit 1
     fi
@@ -337,7 +338,7 @@ EOF
     sched_id=$(echo "$mcp_resp" | jq -r '(.result.content[0].text | fromjson? | .schedule_id) // empty' 2>/dev/null || true)
 
     if [ -n "$sched_id" ]; then
-        echo "⏰ [aerial-pr] Scheduled one-shot follow-up check in ${delay} (Schedule ID: ${sched_id}, Target: ${target_id})."
+        echo "⏰ [aerial-pr] Scheduled one-shot follow-up check in ${delay} (Schedule ID: ${sched_id}, Target: ${target_id})." >&2
         echo "$sched_id"
     else
         echo "⚠️ [aerial-pr] Warning: Scheduler MCP did not return a valid schedule ID." >&2
@@ -536,8 +537,8 @@ submit_scratch() {
 
     # 3. Pre-flight verification (run fast staged verify suite on staged changes)
     if [ -f "scripts/verify.sh" ]; then
-        echo "⚡ Running pre-flight verification checks in scratch checkout..."
-        if ! sh scripts/verify.sh --staged; then
+        echo "⚡ Running pre-flight verification checks in scratch checkout..." >&2
+        if ! sh scripts/verify.sh --staged >&2; then
             echo "ERROR: Pre-flight verification failed in scratch workspace. Aborting submit." >&2
             exit 1
         fi
@@ -562,7 +563,7 @@ submit_scratch() {
     export GIT_CONFIG_VALUE_1="HTTP/1.1"
 
     # 4. Push branch to remote
-    echo "📤 [aerial-pr] Pushing feature branch ${branch} to origin..."
+    echo "📤 [aerial-pr] Pushing feature branch ${branch} to origin..." >&2
     git push -u origin "$branch" >/dev/null 2>&1 || {
         echo "ERROR: Failed to push branch ${branch} to GitHub." >&2
         exit 1
@@ -608,7 +609,6 @@ submit_scratch() {
     pr_num=$(echo "$pr_resp" | jq -r '.number')
     local pr_url
     pr_url=$(echo "$pr_resp" | jq -r '.html_url')
-    echo "📝 [aerial-pr] Created Pull Request #${pr_num}: ${pr_url}"
 
     # Asynchronous Submission: Disarm cleanup trap and remove scratch workspace immediately
     if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
@@ -616,15 +616,21 @@ submit_scratch() {
         SCRATCH_DIR_CLEANUP=""
     fi
 
-    echo "⚡ [aerial-pr] Asynchronous submission active. Follow-up check scheduled via scheduler-mcp."
-
     local sched_id=""
     local effective_delay="${check_delay:-${AERIAL_PR_CHECK_DELAY:-$DEFAULT_PR_CHECK_DELAY}}"
     if [ "$no_schedule" -eq 0 ]; then
         sched_id=$(schedule_pr_followup "$pr_num" "$pr_url" "$target_id" "$effective_delay" "$clean_title" | tail -n 1)
     fi
 
-    echo "{\"status\":\"submitted\",\"pr_url\":\"${pr_url}\",\"pr_number\":${pr_num},\"branch\":\"${branch}\",\"commit_sha\":\"${commit_sha}\",\"async\":true,\"scheduled_check\":\"${effective_delay}\",\"schedule_id\":\"${sched_id}\"}"
+    cat <<EOF >&2
+================================================================================
+📝 [aerial-pr] Created Pull Request #${pr_num}: ${pr_url}
+⚡ [aerial-pr] Asynchronous submission active. Follow-up check scheduled via scheduler-mcp (${effective_delay}).
+🛑 MANDATORY TURN ACTION: Do not poll CI in the foreground. End active execution turn now.
+================================================================================
+EOF
+
+    echo "{\"status\":\"submitted\",\"pr_url\":\"${pr_url}\",\"pr_number\":${pr_num},\"branch\":\"${branch}\",\"commit_sha\":\"${commit_sha}\",\"async\":true,\"scheduled_check\":\"${effective_delay}\",\"schedule_id\":\"${sched_id}\",\"turn_action\":\"end_turn\",\"message\":\"PR #${pr_num} submitted. Follow-up check scheduled. Do not poll CI in foreground; end active turn now.\"}"
     return 0
 }
 
