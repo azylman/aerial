@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -3057,4 +3058,166 @@ func TestRunGitCommand_CancelCoverage(t *testing.T) {
 	cancel()
 	_, _, _ = runGitCommand(ctx, "", "", "status")
 }
+
+func TestEnsureDockerAuth_TableDriven(t *testing.T) {
+	dummyPAT := "dummy-pat-for-test-only"
+
+	// 1. Nil daemon returns nil
+	var nilDaemon *SyncDaemon
+	if err := nilDaemon.EnsureDockerAuth(); err != nil {
+		t.Errorf("expected nil error for nil daemon, got %v", err)
+	}
+
+	// 2. Empty PAT daemon returns nil
+	emptyPATDaemon := &SyncDaemon{pat: ""}
+	if err := emptyPATDaemon.EnsureDockerAuth(); err != nil {
+		t.Errorf("expected nil error for empty PAT daemon, got %v", err)
+	}
+
+	// 3. EnsureDockerAuthPath unit branches
+	t.Run("empty pat is no-op", func(t *testing.T) {
+		err := EnsureDockerAuthPath("", "https://github.com/azylman/aerial-config.git", nil, nil, nil, nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("mkdir failure returns error", func(t *testing.T) {
+		errMkdir := errors.New("disk permission denied")
+		err := EnsureDockerAuthPath(
+			dummyPAT,
+			"https://github.com/azylman/aerial-config.git",
+			func(string) string { return "/mock/docker" },
+			nil,
+			nil,
+			func(string, os.FileMode) error { return errMkdir },
+		)
+		if err == nil || !strings.Contains(err.Error(), "disk permission denied") {
+			t.Fatalf("expected wrapped mkdir error, got %v", err)
+		}
+	})
+
+	t.Run("read error other than not-exist returns error", func(t *testing.T) {
+		errRead := errors.New("read fault")
+		err := EnsureDockerAuthPath(
+			dummyPAT,
+			"https://github.com/azylman/aerial-config.git",
+			func(string) string { return "/mock/docker" },
+			func(string) ([]byte, error) { return nil, errRead },
+			nil,
+			func(string, os.FileMode) error { return nil },
+		)
+		if err == nil || !strings.Contains(err.Error(), "read fault") {
+			t.Fatalf("expected wrapped read error, got %v", err)
+		}
+	})
+
+	t.Run("write failure returns error", func(t *testing.T) {
+		errWrite := errors.New("write fault")
+		err := EnsureDockerAuthPath(
+			dummyPAT,
+			"https://github.com/azylman/aerial-config.git",
+			func(string) string { return "/mock/docker" },
+			func(string) ([]byte, error) { return nil, os.ErrNotExist },
+			func(string, []byte, os.FileMode) error { return errWrite },
+			func(string, os.FileMode) error { return nil },
+		)
+		if err == nil || !strings.Contains(err.Error(), "write fault") {
+			t.Fatalf("expected wrapped write error, got %v", err)
+		}
+	})
+
+	t.Run("successful write creates valid docker config file with 0600 mode", func(t *testing.T) {
+		var writtenPath string
+		var writtenData []byte
+		var writtenMode os.FileMode
+
+		err := EnsureDockerAuthPath(
+			dummyPAT,
+			"https://github.com/custom-org/aerial-config.git",
+			func(k string) string {
+				if k == "DOCKER_CONFIG" {
+					return "/mock/docker"
+				}
+				return ""
+			},
+			func(string) ([]byte, error) { return nil, os.ErrNotExist },
+			func(path string, data []byte, mode os.FileMode) error {
+				writtenPath = path
+				writtenData = data
+				writtenMode = mode
+				return nil
+			},
+			func(string, os.FileMode) error { return nil },
+		)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if writtenPath != "/mock/docker/config.json" {
+			t.Errorf("expected /mock/docker/config.json, got %s", writtenPath)
+		}
+		if writtenMode != 0600 {
+			t.Errorf("expected 0600 mode, got %v", writtenMode)
+		}
+
+		var parsed struct {
+			Auths map[string]struct {
+				Auth string `json:"auth"`
+			} `json:"auths"`
+		}
+		if err := json.Unmarshal(writtenData, &parsed); err != nil {
+			t.Fatalf("failed to unmarshal written config: %v", err)
+		}
+		entry, ok := parsed.Auths["ghcr.io"]
+		if !ok {
+			t.Fatalf("expected ghcr.io entry in auths")
+		}
+		expectedAuth := base64.StdEncoding.EncodeToString([]byte("custom-org:" + dummyPAT))
+		if entry.Auth != expectedAuth {
+			t.Errorf("auth mismatch: got %q, want %q", entry.Auth, expectedAuth)
+		}
+	})
+
+	// 4. Integration test using temporary directory
+	t.Run("filesystem integration test via daemon EnsureDockerAuth", func(t *testing.T) {
+		tempDir := t.TempDir()
+		t.Setenv("DOCKER_CONFIG", tempDir)
+
+		d := &SyncDaemon{
+			pat: dummyPAT,
+			configDir: "/share/aerial-config",
+			repoUrls: map[string]string{
+				"/share/aerial-config": "https://github.com/azylman/aerial-config.git",
+			},
+		}
+
+		if err := d.EnsureDockerAuth(); err != nil {
+			t.Fatalf("daemon.EnsureDockerAuth failed: %v", err)
+		}
+
+		cfgFile := filepath.Join(tempDir, "config.json")
+		data, err := os.ReadFile(cfgFile)
+		if err != nil {
+			t.Fatalf("failed to read written docker config: %v", err)
+		}
+
+		var parsed map[string]any
+		if err := json.Unmarshal(data, &parsed); err != nil {
+			t.Fatalf("failed to unmarshal written config: %v", err)
+		}
+		auths, ok := parsed["auths"].(map[string]any)
+		if !ok {
+			t.Fatalf("expected auths map in config")
+		}
+		ghcrEntry, ok := auths["ghcr.io"].(map[string]any)
+		if !ok {
+			t.Fatalf("expected ghcr.io in auths")
+		}
+		expectedAuth := base64.StdEncoding.EncodeToString([]byte("azylman:" + dummyPAT))
+		if ghcrEntry["auth"] != expectedAuth {
+			t.Errorf("auth mismatch: got %v, want %s", ghcrEntry["auth"], expectedAuth)
+		}
+	})
+}
+
 

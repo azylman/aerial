@@ -2,7 +2,9 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -361,3 +363,101 @@ func resolveGitBinInternal(
 
 	return "git"
 }
+
+// GenerateDockerConfig formats or updates a Docker config.json file with authentication
+// credentials for a target registry (defaulting to ghcr.io). Preserves any existing
+// non-conflicting registries and top-level fields.
+func GenerateDockerConfig(existingContent []byte, registry, username, pat string) ([]byte, error) {
+	pat = strings.TrimSpace(pat)
+	if pat == "" {
+		return existingContent, nil
+	}
+
+	registry = strings.TrimSpace(registry)
+	if registry == "" {
+		registry = "ghcr.io"
+	}
+
+	username = strings.TrimSpace(username)
+	if username == "" {
+		username = "x-access-token"
+	}
+
+	var cfg map[string]any
+	if len(bytes.TrimSpace(existingContent)) > 0 {
+		if err := json.Unmarshal(existingContent, &cfg); err != nil {
+			// If existing file is corrupted or not valid JSON, re-initialize cleanly
+			cfg = make(map[string]any)
+		}
+	} else {
+		cfg = make(map[string]any)
+	}
+
+	auths, ok := cfg["auths"].(map[string]any)
+	if !ok {
+		auths = make(map[string]any)
+		cfg["auths"] = auths
+	}
+
+	encoded := base64.StdEncoding.EncodeToString([]byte(username + ":" + pat))
+	cleanEncoded := strings.ReplaceAll(strings.ReplaceAll(encoded, "\r", ""), "\n", "")
+
+	auths[registry] = map[string]any{
+		"auth": cleanEncoded,
+	}
+
+	marshaled, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal docker config: %w", err)
+	}
+	return append(marshaled, '\n'), nil
+}
+
+// ResolveRegistryUser determines the username for registry authentication.
+// Checks DOCKER_REGISTRY_USER, GITHUB_ACTOR, parses from repoURL, or defaults to "x-access-token".
+func ResolveRegistryUser(repoURL string, lookup func(string) string) string {
+	if lookup != nil {
+		if u := strings.TrimSpace(lookup("DOCKER_REGISTRY_USER")); u != "" {
+			return u
+		}
+		if a := strings.TrimSpace(lookup("GITHUB_ACTOR")); a != "" {
+			return a
+		}
+	}
+
+	repoURL = strings.TrimSpace(repoURL)
+	if repoURL != "" {
+		trimmed := strings.TrimSuffix(repoURL, ".git")
+		var pathPart string
+		if idx := strings.Index(trimmed, "://"); idx != -1 {
+			pathPart = trimmed[idx+3:]
+			if slashIdx := strings.Index(pathPart, "/"); slashIdx != -1 {
+				pathPart = pathPart[slashIdx+1:]
+			}
+		} else if idx := strings.Index(trimmed, ":"); idx != -1 {
+			pathPart = trimmed[idx+1:]
+		}
+
+		parts := strings.Split(strings.Trim(pathPart, "/"), "/")
+		if len(parts) >= 2 && parts[0] != "" {
+			return parts[0]
+		}
+	}
+
+	return "x-access-token"
+}
+
+// ResolveDockerConfigPath returns the absolute path to the Docker config.json file
+// based on DOCKER_CONFIG or HOME environment variables.
+func ResolveDockerConfigPath(lookup func(string) string) string {
+	if lookup != nil {
+		if cfg := strings.TrimSpace(lookup("DOCKER_CONFIG")); cfg != "" {
+			return filepath.Join(cfg, "config.json")
+		}
+		if home := strings.TrimSpace(lookup("HOME")); home != "" {
+			return filepath.Join(home, ".docker", "config.json")
+		}
+	}
+	return "/root/.docker/config.json"
+}
+

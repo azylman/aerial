@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -562,3 +564,267 @@ func TestResolveGitBin_TableDriven(t *testing.T) {
 	_ = ResolveGitBin(lookupEmpty)
 	_ = ResolveGitBin(lookup1, mockFileExists)
 }
+
+func TestGenerateDockerConfig_TableDriven(t *testing.T) {
+	dummyPAT := "test-pat-dummy-12345"
+
+	tests := []struct {
+		name         string
+		existingJSON string
+		registry     string
+		username     string
+		pat          string
+		validate     func(t *testing.T, out []byte, err error)
+	}{
+		{
+			name:         "empty pat returns existing content without error",
+			existingJSON: `{"credsStore":"desktop"}`,
+			registry:     "ghcr.io",
+			username:     "azylman",
+			pat:          "",
+			validate: func(t *testing.T, out []byte, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if string(out) != `{"credsStore":"desktop"}` {
+					t.Errorf("expected unchanged content, got: %s", string(out))
+				}
+			},
+		},
+		{
+			name:         "whitespace pat returns existing content without error",
+			existingJSON: `{"credsStore":"desktop"}`,
+			registry:     "ghcr.io",
+			username:     "azylman",
+			pat:          "   \t\n  ",
+			validate: func(t *testing.T, out []byte, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if string(out) != `{"credsStore":"desktop"}` {
+					t.Errorf("expected unchanged content, got: %s", string(out))
+				}
+			},
+		},
+		{
+			name:         "fresh generation with default registry and username",
+			existingJSON: "",
+			registry:     "",
+			username:     "",
+			pat:          dummyPAT,
+			validate: func(t *testing.T, out []byte, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				var parsed struct {
+					Auths map[string]struct {
+						Auth string `json:"auth"`
+					} `json:"auths"`
+				}
+				if err := json.Unmarshal(out, &parsed); err != nil {
+					t.Fatalf("failed to unmarshal generated json: %v", err)
+				}
+				authEntry, ok := parsed.Auths["ghcr.io"]
+				if !ok {
+					t.Fatalf("expected ghcr.io in auths map")
+				}
+				expectedAuth := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + dummyPAT))
+				if authEntry.Auth != expectedAuth {
+					t.Errorf("auth mismatch: got %q, want %q", authEntry.Auth, expectedAuth)
+				}
+			},
+		},
+		{
+			name:         "merges into existing config preserving other registries and top-level fields",
+			existingJSON: `{"credsStore":"pass","auths":{"docker.io":{"auth":"ZG9ja2VydXNlcjpkb2NrZXJwYXNz"}}}`,
+			registry:     "ghcr.io",
+			username:     "custom-user",
+			pat:          dummyPAT,
+			validate: func(t *testing.T, out []byte, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				var parsed map[string]any
+				if err := json.Unmarshal(out, &parsed); err != nil {
+					t.Fatalf("failed to unmarshal output: %v", err)
+				}
+				if parsed["credsStore"] != "pass" {
+					t.Errorf("expected credsStore preserved, got %v", parsed["credsStore"])
+				}
+				auths, ok := parsed["auths"].(map[string]any)
+				if !ok {
+					t.Fatalf("expected auths map")
+				}
+				if _, ok := auths["docker.io"]; !ok {
+					t.Errorf("expected docker.io preserved in auths")
+				}
+				ghcrEntry, ok := auths["ghcr.io"].(map[string]any)
+				if !ok {
+					t.Fatalf("expected ghcr.io entry")
+				}
+				expectedAuth := base64.StdEncoding.EncodeToString([]byte("custom-user:" + dummyPAT))
+				if ghcrEntry["auth"] != expectedAuth {
+					t.Errorf("ghcr auth mismatch: got %v, want %s", ghcrEntry["auth"], expectedAuth)
+				}
+			},
+		},
+		{
+			name:         "recovers from malformed existing JSON cleanly",
+			existingJSON: `{invalid-json-content`,
+			registry:     "ghcr.io",
+			username:     "azylman",
+			pat:          dummyPAT,
+			validate: func(t *testing.T, out []byte, err error) {
+				if err != nil {
+					t.Fatalf("unexpected error on malformed recovery: %v", err)
+				}
+				var parsed map[string]any
+				if err := json.Unmarshal(out, &parsed); err != nil {
+					t.Fatalf("failed to unmarshal output: %v", err)
+				}
+				auths, ok := parsed["auths"].(map[string]any)
+				if !ok {
+					t.Fatalf("expected auths map after recovery")
+				}
+				if _, ok := auths["ghcr.io"]; !ok {
+					t.Errorf("expected ghcr.io entry present after recovery")
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := GenerateDockerConfig([]byte(tt.existingJSON), tt.registry, tt.username, tt.pat)
+			tt.validate(t, out, err)
+		})
+	}
+}
+
+func TestResolveRegistryUser_TableDriven(t *testing.T) {
+	tests := []struct {
+		name     string
+		repoURL  string
+		lookup   func(string) string
+		expected string
+	}{
+		{
+			name:    "DOCKER_REGISTRY_USER takes highest priority",
+			repoURL: "https://github.com/azylman/aerial-config.git",
+			lookup: func(k string) string {
+				switch k {
+				case "DOCKER_REGISTRY_USER":
+					return "explicit-user"
+				case "GITHUB_ACTOR":
+					return "actor-user"
+				default:
+					return ""
+				}
+			},
+			expected: "explicit-user",
+		},
+		{
+			name:    "GITHUB_ACTOR takes priority over repo URL parsing",
+			repoURL: "https://github.com/azylman/aerial-config.git",
+			lookup: func(k string) string {
+				if k == "GITHUB_ACTOR" {
+					return "actor-user"
+				}
+				return ""
+			},
+			expected: "actor-user",
+		},
+		{
+			name:     "parses owner from https github URL",
+			repoURL:  "https://github.com/my-org/my-repo.git",
+			lookup:   func(string) string { return "" },
+			expected: "my-org",
+		},
+		{
+			name:     "parses owner from https URL without .git suffix",
+			repoURL:  "https://github.com/custom-owner/custom-repo",
+			lookup:   func(string) string { return "" },
+			expected: "custom-owner",
+		},
+		{
+			name:     "parses owner from git@ ssh URL",
+			repoURL:  "git@github.com:ssh-owner/ssh-repo.git",
+			lookup:   func(string) string { return "" },
+			expected: "ssh-owner",
+		},
+		{
+			name:     "nil lookup with unparseable URL defaults to x-access-token",
+			repoURL:  "invalid-url-without-slashes",
+			lookup:   nil,
+			expected: "x-access-token",
+		},
+		{
+			name:     "empty lookup and empty URL defaults to x-access-token",
+			repoURL:  "",
+			lookup:   func(string) string { return "" },
+			expected: "x-access-token",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ResolveRegistryUser(tt.repoURL, tt.lookup)
+			if got != tt.expected {
+				t.Errorf("ResolveRegistryUser() = %q, want %q", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestResolveDockerConfigPath_TableDriven(t *testing.T) {
+	tests := []struct {
+		name     string
+		lookup   func(string) string
+		expected string
+	}{
+		{
+			name: "DOCKER_CONFIG takes precedence",
+			lookup: func(k string) string {
+				switch k {
+				case "DOCKER_CONFIG":
+					return "/custom/docker/cfg"
+				case "HOME":
+					return "/home/user"
+				default:
+					return ""
+				}
+			},
+			expected: "/custom/docker/cfg/config.json",
+		},
+		{
+			name: "HOME is used when DOCKER_CONFIG is unset",
+			lookup: func(k string) string {
+				if k == "HOME" {
+					return "/home/user"
+				}
+				return ""
+			},
+			expected: "/home/user/.docker/config.json",
+		},
+		{
+			name:     "defaults to /root/.docker/config.json when lookup is nil",
+			lookup:   nil,
+			expected: "/root/.docker/config.json",
+		},
+		{
+			name:     "defaults to /root/.docker/config.json when env is empty",
+			lookup:   func(string) string { return "" },
+			expected: "/root/.docker/config.json",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ResolveDockerConfigPath(tt.lookup)
+			if got != tt.expected {
+				t.Errorf("ResolveDockerConfigPath() = %q, want %q", got, tt.expected)
+			}
+		})
+	}
+}
+
