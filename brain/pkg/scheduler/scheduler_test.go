@@ -2088,6 +2088,7 @@ func TestSchedulerRun_BranchesAndTickErrors(t *testing.T) {
 	schedFast, _ := New(newTestConfig(), mockStoreFast, nil, nil)
 	schedFast.handleTick(context.Background(), 120, nil, nil)
 	schedFast.handleTick(context.Background(), 2880, nil, nil)
+	schedFast.handleTick(context.Background(), 60, nil, nil)
 
 	// Verify short ticker run loop terminates cleanly on cancellation
 	var ticks atomic.Int64
@@ -2099,6 +2100,73 @@ func TestSchedulerRun_BranchesAndTickErrors(t *testing.T) {
 		return nil, nil
 	}
 	schedFast.Run(ctxFast, 1*time.Millisecond)
+}
+
+func TestShouldRunMemoryDecay(t *testing.T) {
+	cases := []struct {
+		tickCount int
+		expected  bool
+	}{
+		{0, false},
+		{59, false},
+		{60, true},
+		{61, false},
+		{120, false},
+		{2880, false},
+		{2880 + 60, true},
+		{2880 * 2, false},
+		{2880*2 + 60, true},
+	}
+	for _, tc := range cases {
+		if got := ShouldRunMemoryDecay(tc.tickCount); got != tc.expected {
+			t.Errorf("ShouldRunMemoryDecay(%d) = %v, expected %v", tc.tickCount, got, tc.expected)
+		}
+	}
+}
+
+func TestRunMemoryDecay(t *testing.T) {
+	// 1. Nil DB
+	RunMemoryDecay(nil)
+	RunMemoryDecayWithContext(context.Background(), nil)
+
+	// 2. Closed DB (error branch)
+	database, err := db.InitDB(filepath.Join(t.TempDir(), "decay_closed.db"))
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	_ = database.Close()
+	RunMemoryDecay(database)
+
+	// 3. Valid DB with decay and pruning
+	dbValid, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer dbValid.Close()
+
+	emb := make([]float32, db.ExpectedEmbeddingDim)
+	emb[0] = 1.0
+
+	// Insert fact and artificially age it
+	id, err := db.InsertFact(dbValid, "general", "Temporary notice", 0.50, "th-1", emb)
+	if err != nil {
+		t.Fatalf("InsertFact failed: %v", err)
+	}
+	twoDaysAgo := time.Now().UTC().Add(-48 * time.Hour).Format("2006-01-02 15:04:05")
+	_, err = dbValid.Exec("UPDATE facts SET last_reinforced_at = ?, last_decayed_at = ? WHERE id = ?", twoDaysAgo, twoDaysAgo, id)
+	if err != nil {
+		t.Fatalf("UPDATE failed: %v", err)
+	}
+
+	RunMemoryDecay(dbValid)
+
+	facts, err := db.GetFactsPaginated(dbValid, db.FactsFilter{Limit: 10})
+	if err != nil || len(facts.Facts) != 1 {
+		t.Fatalf("GetFactsPaginated failed: %v", err)
+	}
+	if facts.Facts[0].Importance >= 0.50 {
+		t.Errorf("Expected decayed importance < 0.50, got %f", facts.Facts[0].Importance)
+	}
 }
 
 
