@@ -834,6 +834,11 @@ func (d *SyncDaemon) ReconcileCompose(parentCtx context.Context) (err error) {
 	valCtx, valCancel := context.WithTimeout(parentCtx, 30*time.Second)
 	defer valCancel()
 
+	// Ensure Docker registry credentials are configured for private images before compose apply
+	if authErr := d.EnsureDockerAuth(); authErr != nil {
+		log.Printf("[GitSync:GitOps] Warning: Failed to refresh Docker auth before reconciliation: %v", d.SanitizeAll(authErr.Error()))
+	}
+
 	_ = d.CleanConflictContainers(valCtx)
 
 	if valErr := d.ValidateCompose(valCtx, composeDir); valErr != nil {
@@ -1385,6 +1390,79 @@ func NewDaemon(cfg DaemonConfig) *SyncDaemon {
 	}
 }
 
+// EnsureDockerAuth writes or updates the Docker config.json file with authentication credentials
+// for ghcr.io using the daemon's configured PAT, enabling Docker Compose to pull private sidecar images.
+func (d *SyncDaemon) EnsureDockerAuth() error {
+	if d == nil || strings.TrimSpace(d.pat) == "" {
+		return nil
+	}
+
+	repoURL := ""
+	if d.repoUrls != nil {
+		repoURL = d.repoUrls[d.configDir]
+		if repoURL == "" {
+			repoURL = d.repoUrls[d.composeDir]
+		}
+	}
+
+	return EnsureDockerAuthPath(d.pat, repoURL, os.Getenv, os.ReadFile, os.WriteFile, os.MkdirAll)
+}
+
+// EnsureDockerAuthPath is the parameterized implementation of EnsureDockerAuth, enabling
+// hermetic unit testing without filesystem or ambient environment side-effects.
+func EnsureDockerAuthPath(
+	pat string,
+	repoURL string,
+	lookup func(string) string,
+	readFile func(string) ([]byte, error),
+	writeFile func(string, []byte, os.FileMode) error,
+	mkdirAll func(string, os.FileMode) error,
+) error {
+	pat = strings.TrimSpace(pat)
+	if pat == "" {
+		return nil
+	}
+
+	if lookup == nil {
+		lookup = func(string) string { return "" }
+	}
+	if readFile == nil {
+		readFile = os.ReadFile
+	}
+	if writeFile == nil {
+		writeFile = os.WriteFile
+	}
+	if mkdirAll == nil {
+		mkdirAll = os.MkdirAll
+	}
+
+	configPath := ResolveDockerConfigPath(lookup)
+	configDir := filepath.Dir(configPath)
+
+	if err := mkdirAll(configDir, 0700); err != nil {
+		return fmt.Errorf("failed to create docker config directory %s: %w", configDir, err)
+	}
+
+	var existingContent []byte
+	if data, err := readFile(configPath); err == nil {
+		existingContent = data
+	} else if !errors.Is(err, os.ErrNotExist) && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to read existing docker config %s: %w", configPath, err)
+	}
+
+	username := ResolveRegistryUser(repoURL, lookup)
+	newContent, err := GenerateDockerConfig(existingContent, "ghcr.io", username, pat)
+	if err != nil {
+		return fmt.Errorf("failed to generate docker config: %w", err)
+	}
+
+	if err := writeFile(configPath, newContent, 0600); err != nil {
+		return fmt.Errorf("failed to write docker config to %s: %w", configPath, err)
+	}
+
+	return nil
+}
+
 // SetupMux configures HTTP handlers for metrics, health, status, and sync.
 func SetupMux(daemon *SyncDaemon) http.Handler {
 	mux := http.NewServeMux()
@@ -1483,6 +1561,12 @@ func SetupMux(daemon *SyncDaemon) http.Handler {
 // RunDaemon starts the background sync daemon and HTTP server.
 func RunDaemon(ctx context.Context, cfg DaemonConfig) error {
 	daemon := NewDaemon(cfg)
+
+	if err := daemon.EnsureDockerAuth(); err != nil {
+		log.Printf("[GitSync] Warning: Failed to configure Docker registry authentication: %v", SanitizeLog(err.Error()))
+	} else if strings.TrimSpace(cfg.PAT) != "" {
+		log.Printf("[GitSync] Docker registry authentication configured for ghcr.io")
+	}
 
 	daemon.StartPeriodicLoop(ctx)
 	daemon.StartReconcilerLoop(ctx)
