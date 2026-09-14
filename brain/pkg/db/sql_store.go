@@ -134,6 +134,27 @@ func (s *SQLStore) UpdateConversationFactExtractedAt(ctx context.Context, thread
 	return UpdateConversationFactExtractedAt(s.db, threadID)
 }
 
+func (s *SQLStore) FindDuplicateFact(ctx context.Context, embedding []float32, minSim float64) (*Fact, float64, error) {
+	if s == nil || isDBTXNil(s.db) {
+		return nil, 0, fmt.Errorf("database is nil")
+	}
+	return FindDuplicateFactWithContext(ctx, s.db, s.isPostgres, embedding, minSim)
+}
+
+func (s *SQLStore) ReinforceFact(ctx context.Context, id int64, newText string, newEmbedding []float32, boost float64) error {
+	if s == nil || isDBTXNil(s.db) {
+		return fmt.Errorf("database is nil")
+	}
+	return ReinforceFactWithContext(ctx, s.db, s.isPostgres, id, newText, newEmbedding, boost)
+}
+
+func (s *SQLStore) DecayAndPruneFacts(ctx context.Context, decayStep float64, pruneFloor float64, pruneAgeDays int) (int64, int64, error) {
+	if s == nil || isDBTXNil(s.db) {
+		return 0, 0, fmt.Errorf("database is nil")
+	}
+	return DecayAndPruneFactsWithContext(ctx, s.db, s.isPostgres, decayStep, pruneFloor, pruneAgeDays)
+}
+
 // ScheduleStore implementation
 func (s *SQLStore) CreateOneShotSchedule(ctx context.Context, sched OneShotSchedule) error {
 	if s == nil || isDBTXNil(s.db) {

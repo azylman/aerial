@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -19,12 +20,15 @@ const (
 )
 
 type Fact struct {
-	ID         int64     `json:"id"`
-	Category   string    `json:"category"`
-	FactText   string    `json:"fact_text"`
-	Importance float64   `json:"importance"`
-	ThreadID   string    `json:"thread_id"`
-	CreatedAt  time.Time `json:"created_at"`
+	ID               int64     `json:"id"`
+	Category         string    `json:"category"`
+	FactText         string    `json:"fact_text"`
+	Importance       float64   `json:"importance"`
+	ThreadID         string    `json:"thread_id"`
+	CreatedAt        time.Time `json:"created_at"`
+	LastReinforcedAt time.Time `json:"last_reinforced_at"`
+	LastDecayedAt    time.Time `json:"last_decayed_at"`
+	ReinforceCount   int       `json:"reinforce_count"`
 }
 
 type FactWithEmbedding struct {
@@ -95,7 +99,7 @@ func InsertFactWithContext(ctx context.Context, database DBTX, isPg bool, catego
 	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	query := `INSERT INTO facts (category, fact_text, importance, thread_id, embedding, created_at) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`
+	query := `INSERT INTO facts (category, fact_text, importance, thread_id, embedding, created_at, last_reinforced_at, last_decayed_at, reinforce_count) VALUES ($1, $2, $3, $4, $5, $6, $6, $6, 1) RETURNING id`
 	var insertedID int64
 	err = database.QueryRowContext(queryCtx, query, category, factText, importance, threadID, vecVal, now).Scan(&insertedID)
 	if err != nil {
@@ -145,6 +149,64 @@ func (nv *NullVector) Scan(src any) error {
 	return nil
 }
 
+type FactTime struct {
+	Time  time.Time
+	Valid bool
+}
+
+func (ft *FactTime) Scan(src any) error {
+	if src == nil {
+		ft.Time = time.Time{}
+		ft.Valid = false
+		return nil
+	}
+	switch v := src.(type) {
+	case time.Time:
+		ft.Time = v
+		ft.Valid = true
+		return nil
+	case string:
+		for _, layout := range []string{
+			"2006-01-02 15:04:05.999999999 -0700 MST",
+			"2006-01-02 15:04:05.999999999 -0700 -0700",
+			"2006-01-02 15:04:05 -0700 MST",
+			time.RFC3339Nano,
+			time.RFC3339,
+			time.DateTime,
+			"2006-01-02 15:04:05.999999999-07:00",
+			"2006-01-02 15:04:05-07:00",
+			"2006-01-02 15:04:05.999999999",
+			"2006-01-02 15:04:05",
+			"2006-01-02T15:04:05Z",
+			"2006-01-02T15:04:05",
+		} {
+			if t, err := time.Parse(layout, v); err == nil {
+				ft.Time = t
+				ft.Valid = true
+				return nil
+			}
+		}
+		// Also try trimming any trailing monotonic clock info (e.g. " m=+0.001234567")
+		if idx := strings.Index(v, " m="); idx != -1 {
+			trimmed := v[:idx]
+			for _, layout := range []string{
+				"2006-01-02 15:04:05.999999999 -0700 MST",
+				"2006-01-02 15:04:05 -0700 MST",
+			} {
+				if t, err := time.Parse(layout, trimmed); err == nil {
+					ft.Time = t
+					ft.Valid = true
+					return nil
+				}
+			}
+		}
+		return fmt.Errorf("cannot parse %q into FactTime", v)
+	case []byte:
+		return ft.Scan(string(v))
+	}
+	return fmt.Errorf("unsupported type %T for FactTime", src)
+}
+
 func cosineSimilarity(a, b []float32) float64 {
 	if len(a) != len(b) || len(a) == 0 {
 		return 0
@@ -183,7 +245,7 @@ func GetAllFactsWithEmbeddings(database DBTX) ([]FactWithEmbedding, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	query := `SELECT id, category, fact_text, importance, thread_id, embedding, created_at FROM facts ORDER BY created_at DESC`
+	query := `SELECT id, category, fact_text, importance, thread_id, embedding, created_at, COALESCE(last_reinforced_at, created_at), COALESCE(last_decayed_at, created_at), COALESCE(reinforce_count, 1) FROM facts ORDER BY created_at DESC`
 	rows, err := database.QueryContext(ctx, query)
 	if err != nil {
 		return nil, err
@@ -194,9 +256,13 @@ func GetAllFactsWithEmbeddings(database DBTX) ([]FactWithEmbedding, error) {
 	for rows.Next() {
 		var f Fact
 		var nv NullVector
-		if err := rows.Scan(&f.ID, &f.Category, &f.FactText, &f.Importance, &f.ThreadID, &nv, &f.CreatedAt); err != nil {
+		var createdAt, lastReinforced, lastDecayed FactTime
+		if err := rows.Scan(&f.ID, &f.Category, &f.FactText, &f.Importance, &f.ThreadID, &nv, &createdAt, &lastReinforced, &lastDecayed, &f.ReinforceCount); err != nil {
 			return nil, err
 		}
+		f.CreatedAt = createdAt.Time
+		f.LastReinforcedAt = lastReinforced.Time
+		f.LastDecayedAt = lastDecayed.Time
 		var emb []float32
 		if nv.Valid {
 			emb = nv.Vector
@@ -216,7 +282,7 @@ func GetFactsByThreadWithEmbeddings(database DBTX, threadID string) ([]FactWithE
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	query := `SELECT id, category, fact_text, importance, thread_id, embedding, created_at FROM facts`
+	query := `SELECT id, category, fact_text, importance, thread_id, embedding, created_at, COALESCE(last_reinforced_at, created_at), COALESCE(last_decayed_at, created_at), COALESCE(reinforce_count, 1) FROM facts`
 	var rows *sql.Rows
 	var err error
 	if threadID != "" {
@@ -235,9 +301,13 @@ func GetFactsByThreadWithEmbeddings(database DBTX, threadID string) ([]FactWithE
 	for rows.Next() {
 		var f Fact
 		var nv NullVector
-		if err := rows.Scan(&f.ID, &f.Category, &f.FactText, &f.Importance, &f.ThreadID, &nv, &f.CreatedAt); err != nil {
+		var createdAt, lastReinforced, lastDecayed FactTime
+		if err := rows.Scan(&f.ID, &f.Category, &f.FactText, &f.Importance, &f.ThreadID, &nv, &createdAt, &lastReinforced, &lastDecayed, &f.ReinforceCount); err != nil {
 			return nil, err
 		}
+		f.CreatedAt = createdAt.Time
+		f.LastReinforcedAt = lastReinforced.Time
+		f.LastDecayedAt = lastDecayed.Time
 		var emb []float32
 		if nv.Valid {
 			emb = nv.Vector
@@ -305,7 +375,10 @@ func SearchSimilarFactsWithContext(ctx context.Context, database DBTX, isPg bool
 		candidateLimit = 30
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	query := `
@@ -317,6 +390,9 @@ func SearchSimilarFactsWithContext(ctx context.Context, database DBTX, isPg bool
 			importance, 
 			thread_id, 
 			created_at,
+			COALESCE(last_reinforced_at, created_at) AS last_reinforced_at,
+			COALESCE(last_decayed_at, created_at) AS last_decayed_at,
+			COALESCE(reinforce_count, 1) AS reinforce_count,
 			(1.0 - (embedding <=> $1)) AS similarity
 		FROM facts
 		WHERE ($2 = '' OR thread_id = $2 OR thread_id = '')
@@ -330,7 +406,10 @@ func SearchSimilarFactsWithContext(ctx context.Context, database DBTX, isPg bool
 		fact_text, 
 		importance, 
 		thread_id, 
-		created_at
+		created_at,
+		last_reinforced_at,
+		last_decayed_at,
+		reinforce_count
 	FROM candidates
 	WHERE (similarity * importance) >= $4
 	ORDER BY (similarity * importance) DESC
@@ -347,9 +426,13 @@ func SearchSimilarFactsWithContext(ctx context.Context, database DBTX, isPg bool
 	var facts []Fact
 	for rows.Next() {
 		var f Fact
-		if err := rows.Scan(&f.ID, &f.Category, &f.FactText, &f.Importance, &f.ThreadID, &f.CreatedAt); err != nil {
+		var createdAt, lastReinforced, lastDecayed FactTime
+		if err := rows.Scan(&f.ID, &f.Category, &f.FactText, &f.Importance, &f.ThreadID, &createdAt, &lastReinforced, &lastDecayed, &f.ReinforceCount); err != nil {
 			return nil, fmt.Errorf("scan fact error: %w", err)
 		}
+		f.CreatedAt = createdAt.Time
+		f.LastReinforcedAt = lastReinforced.Time
+		f.LastDecayedAt = lastDecayed.Time
 		facts = append(facts, f)
 	}
 
@@ -510,7 +593,10 @@ func GetFactsPaginatedWithContext(ctx context.Context, database DBTX, isPg bool,
 	}
 
 	selectQuery := fmt.Sprintf(`
-		SELECT id, category, fact_text, COALESCE(importance, 1.0) AS importance, thread_id, created_at
+		SELECT id, category, fact_text, COALESCE(importance, 1.0) AS importance, thread_id, created_at,
+		       COALESCE(last_reinforced_at, created_at) AS last_reinforced_at,
+		       COALESCE(last_decayed_at, created_at) AS last_decayed_at,
+		       COALESCE(reinforce_count, 1) AS reinforce_count
 		FROM facts
 		%s
 		ORDER BY COALESCE(importance, 1.0) DESC, created_at DESC, id DESC
@@ -526,9 +612,13 @@ func GetFactsPaginatedWithContext(ctx context.Context, database DBTX, isPg bool,
 	facts := make([]Fact, 0)
 	for rows.Next() {
 		var f Fact
-		if err := rows.Scan(&f.ID, &f.Category, &f.FactText, &f.Importance, &f.ThreadID, &f.CreatedAt); err != nil {
+		var createdAt, lastReinforced, lastDecayed FactTime
+		if err := rows.Scan(&f.ID, &f.Category, &f.FactText, &f.Importance, &f.ThreadID, &createdAt, &lastReinforced, &lastDecayed, &f.ReinforceCount); err != nil {
 			return nil, fmt.Errorf("failed to scan fact: %w", err)
 		}
+		f.CreatedAt = createdAt.Time
+		f.LastReinforcedAt = lastReinforced.Time
+		f.LastDecayedAt = lastDecayed.Time
 		facts = append(facts, f)
 	}
 
@@ -538,4 +628,272 @@ func GetFactsPaginatedWithContext(ctx context.Context, database DBTX, isPg bool,
 		Limit:  filter.Limit,
 		Offset: filter.Offset,
 	}, nil
+}
+
+// FindDuplicateFact searches the facts table globally for an existing fact with cosine similarity >= minSim.
+func FindDuplicateFact(database DBTX, embedding []float32, minSim float64) (*Fact, float64, error) {
+	return FindDuplicateFactWithContext(context.Background(), database, false, embedding, minSim)
+}
+
+func FindDuplicateFactWithContext(ctx context.Context, database DBTX, isPg bool, embedding []float32, minSim float64) (*Fact, float64, error) {
+	if database == nil || len(embedding) != ExpectedEmbeddingDim {
+		return nil, 0, nil
+	}
+	if minSim <= 0 {
+		minSim = 0.88
+	}
+
+	if !isPg && !isPostgres(database) {
+		// SQLite in-memory fallback for unit tests
+		allFacts, err := GetAllFactsWithEmbeddings(database)
+		if err != nil {
+			return nil, 0, err
+		}
+		var bestFact *Fact
+		var bestSim float64
+		for _, fwe := range allFacts {
+			if len(fwe.Embedding) != ExpectedEmbeddingDim {
+				continue
+			}
+			sim := cosineSimilarity(embedding, fwe.Embedding)
+			if sim > bestSim {
+				bestSim = sim
+				f := fwe.Fact
+				bestFact = &f
+			}
+		}
+		if bestSim >= minSim && bestFact != nil {
+			return bestFact, bestSim, nil
+		}
+		return nil, bestSim, nil
+	}
+
+	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	query := `
+	SELECT id, category, fact_text, importance, thread_id, created_at,
+	       COALESCE(last_reinforced_at, created_at), COALESCE(last_decayed_at, created_at), COALESCE(reinforce_count, 1),
+	       (1.0 - (embedding <=> $1)) AS similarity
+	FROM facts
+	WHERE embedding IS NOT NULL
+	ORDER BY embedding <=> $1
+	LIMIT 1;
+	`
+	vec := pgvector.NewVector(embedding)
+	var f Fact
+	var sim float64
+	var createdAt, lastReinforced, lastDecayed FactTime
+	err := database.QueryRowContext(queryCtx, query, vec).Scan(
+		&f.ID, &f.Category, &f.FactText, &f.Importance, &f.ThreadID, &createdAt,
+		&lastReinforced, &lastDecayed, &f.ReinforceCount, &sim,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, 0, nil
+	}
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to find duplicate fact: %w", err)
+	}
+	f.CreatedAt = createdAt.Time
+	f.LastReinforcedAt = lastReinforced.Time
+	f.LastDecayedAt = lastDecayed.Time
+	if sim >= minSim {
+		return &f, sim, nil
+	}
+	return nil, sim, nil
+}
+
+// ReinforceFact updates an existing fact with an importance boost, touching last_reinforced_at and updating text/embedding if provided.
+func ReinforceFact(database DBTX, id int64, newText string, newEmbedding []float32, boost float64) error {
+	return ReinforceFactWithContext(context.Background(), database, false, id, newText, newEmbedding, boost)
+}
+
+func ReinforceFactWithContext(ctx context.Context, database DBTX, isPg bool, id int64, newText string, newEmbedding []float32, boost float64) error {
+	if database == nil {
+		return fmt.Errorf("database is nil")
+	}
+	if boost <= 0 {
+		boost = 0.15
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	now := time.Now().UTC()
+	var updateText bool
+	var vecVal any
+	if strings.TrimSpace(newText) != "" && len(newEmbedding) == ExpectedEmbeddingDim {
+		updateText = true
+		if isPg || isPostgres(database) {
+			vecVal = pgvector.NewVector(newEmbedding)
+		} else {
+			vecVal = Float32ToBytes(newEmbedding)
+		}
+	}
+
+	if isPg || isPostgres(database) {
+		var query string
+		var res sql.Result
+		var err error
+		if updateText {
+			query = `
+				UPDATE facts
+				SET importance = LEAST(1.0, GREATEST(0.70, ROUND((importance + $1)::numeric, 2))),
+				    fact_text = $2,
+				    embedding = $3,
+				    last_reinforced_at = $4,
+				    reinforce_count = reinforce_count + 1
+				WHERE id = $5
+			`
+			res, err = database.ExecContext(queryCtx, query, boost, newText, vecVal, now, id)
+		} else {
+			query = `
+				UPDATE facts
+				SET importance = LEAST(1.0, GREATEST(0.70, ROUND((importance + $1)::numeric, 2))),
+				    last_reinforced_at = $2,
+				    reinforce_count = reinforce_count + 1
+				WHERE id = $3
+			`
+			res, err = database.ExecContext(queryCtx, query, boost, now, id)
+		}
+		if err != nil {
+			return fmt.Errorf("failed to reinforce fact: %w", err)
+		}
+		rows, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if rows == 0 {
+			return ErrFactNotFound
+		}
+		return nil
+	}
+
+	// SQLite branch
+	var query string
+	var res sql.Result
+	var err error
+	if updateText {
+		query = `
+			UPDATE facts
+			SET importance = MIN(1.0, MAX(0.70, ROUND(importance + ?, 2))),
+			    fact_text = ?,
+			    embedding = ?,
+			    last_reinforced_at = ?,
+			    reinforce_count = reinforce_count + 1
+			WHERE id = ?
+		`
+		res, err = database.ExecContext(queryCtx, query, boost, newText, vecVal, now, id)
+	} else {
+		query = `
+			UPDATE facts
+			SET importance = MIN(1.0, MAX(0.70, ROUND(importance + ?, 2))),
+			    last_reinforced_at = ?,
+			    reinforce_count = reinforce_count + 1
+			WHERE id = ?
+		`
+		res, err = database.ExecContext(queryCtx, query, boost, now, id)
+	}
+	if err != nil {
+		return fmt.Errorf("failed to reinforce fact in sqlite: %w", err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return ErrFactNotFound
+	}
+	return nil
+}
+
+// DecayAndPruneFacts applies scheduled daily importance decay to unreinforced facts and prunes dead facts.
+func DecayAndPruneFacts(database DBTX, decayStep float64, pruneFloor float64, pruneAgeDays int) (int64, int64, error) {
+	return DecayAndPruneFactsWithContext(context.Background(), database, false, decayStep, pruneFloor, pruneAgeDays)
+}
+
+func DecayAndPruneFactsWithContext(ctx context.Context, database DBTX, isPg bool, decayStep float64, pruneFloor float64, pruneAgeDays int) (int64, int64, error) {
+	if database == nil {
+		return 0, 0, fmt.Errorf("database is nil")
+	}
+	if decayStep <= 0 {
+		decayStep = 0.02
+	}
+	if pruneFloor <= 0 {
+		pruneFloor = 0.10
+	}
+	if pruneAgeDays <= 0 {
+		pruneAgeDays = 30
+	}
+
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	now := time.Now().UTC()
+	decayCutoff := now.Add(-24 * time.Hour)
+	cutoffDate := now.AddDate(0, 0, -pruneAgeDays)
+
+	var decayedCount, prunedCount int64
+
+	if isPg || isPostgres(database) {
+		decayQuery := `
+			UPDATE facts
+			SET importance = GREATEST(0.0, ROUND((importance - $1)::numeric, 2)),
+			    last_decayed_at = $2
+			WHERE (last_decayed_at IS NULL OR last_decayed_at < $3)
+			  AND (last_reinforced_at IS NULL OR last_reinforced_at < $3)
+			  AND importance > 0.0
+		`
+		resDecay, err := database.ExecContext(queryCtx, decayQuery, decayStep, now, decayCutoff)
+		if err != nil {
+			return 0, 0, fmt.Errorf("failed to decay facts: %w", err)
+		}
+		decayedCount, _ = resDecay.RowsAffected()
+
+		pruneQuery := `
+			DELETE FROM facts
+			WHERE importance <= $1
+			  AND (last_reinforced_at IS NULL OR last_reinforced_at < $2)
+		`
+		resPrune, err := database.ExecContext(queryCtx, pruneQuery, pruneFloor, cutoffDate)
+		if err != nil {
+			return decayedCount, 0, fmt.Errorf("failed to prune facts: %w", err)
+		}
+		prunedCount, _ = resPrune.RowsAffected()
+
+		return decayedCount, prunedCount, nil
+	}
+
+	// SQLite branch
+	decayQuery := `
+		UPDATE facts
+		SET importance = MAX(0.0, ROUND(importance - ?, 2)),
+		    last_decayed_at = ?
+		WHERE (last_decayed_at IS NULL OR last_decayed_at < ?)
+		  AND (last_reinforced_at IS NULL OR last_reinforced_at < ?)
+		  AND importance > 0.0
+	`
+	resDecay, err := database.ExecContext(queryCtx, decayQuery, decayStep, now, decayCutoff, decayCutoff)
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to decay facts in sqlite: %w", err)
+	}
+	decayedCount, _ = resDecay.RowsAffected()
+
+	pruneQuery := `
+		DELETE FROM facts
+		WHERE importance <= ?
+		  AND (last_reinforced_at IS NULL OR last_reinforced_at < ?)
+	`
+	resPrune, err := database.ExecContext(queryCtx, pruneQuery, pruneFloor, cutoffDate)
+	if err != nil {
+		return decayedCount, 0, fmt.Errorf("failed to prune facts in sqlite: %w", err)
+	}
+	prunedCount, _ = resPrune.RowsAffected()
+
+	return decayedCount, prunedCount, nil
 }

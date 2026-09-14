@@ -91,7 +91,10 @@ CREATE TABLE IF NOT EXISTS facts (
 	importance REAL NOT NULL DEFAULT 1.0,
 	thread_id TEXT NOT NULL DEFAULT '',
 	embedding vector(384),
-	created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+	created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	last_reinforced_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	last_decayed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	reinforce_count INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_thread_status ON messages(thread_id, status);
@@ -108,6 +111,7 @@ CREATE INDEX IF NOT EXISTS idx_facts_thread_id ON facts(thread_id);
 CREATE INDEX IF NOT EXISTS idx_facts_category ON facts(category);
 CREATE INDEX IF NOT EXISTS idx_facts_created_at ON facts(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_facts_importance_created_at ON facts(importance DESC, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_facts_last_reinforced_at ON facts(last_reinforced_at DESC);
 CREATE INDEX IF NOT EXISTS idx_facts_embedding_hnsw ON facts USING hnsw (embedding vector_cosine_ops);
 `
 
@@ -195,7 +199,10 @@ CREATE TABLE IF NOT EXISTS facts (
 	importance REAL NOT NULL DEFAULT 1.0,
 	thread_id TEXT NOT NULL DEFAULT '',
 	embedding BLOB,
-	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	last_reinforced_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	last_decayed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	reinforce_count INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_thread_status ON messages(thread_id, status);
@@ -211,6 +218,7 @@ CREATE INDEX IF NOT EXISTS idx_facts_thread_id ON facts(thread_id);
 CREATE INDEX IF NOT EXISTS idx_facts_category ON facts(category);
 CREATE INDEX IF NOT EXISTS idx_facts_created_at ON facts(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_facts_importance_created_at ON facts(importance DESC, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_facts_last_reinforced_at ON facts(last_reinforced_at DESC);
 `
 
 func initSchemaPostgres(ctx context.Context, database *sql.DB) error {
@@ -245,6 +253,12 @@ func initSchemaPostgres(ctx context.Context, database *sql.DB) error {
 	if _, err := conn.ExecContext(ctx, "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS previous_session_id TEXT NOT NULL DEFAULT ''"); err != nil {
 		return fmt.Errorf("failed to add previous_session_id column to sessions: %w", err)
 	}
+
+	_, _ = conn.ExecContext(ctx, "ALTER TABLE facts ADD COLUMN IF NOT EXISTS last_reinforced_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP")
+	_, _ = conn.ExecContext(ctx, "ALTER TABLE facts ADD COLUMN IF NOT EXISTS last_decayed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP")
+	_, _ = conn.ExecContext(ctx, "ALTER TABLE facts ADD COLUMN IF NOT EXISTS reinforce_count INTEGER NOT NULL DEFAULT 1")
+	_, _ = conn.ExecContext(ctx, "CREATE INDEX IF NOT EXISTS idx_facts_last_reinforced_at ON facts(last_reinforced_at DESC)")
+	_, _ = conn.ExecContext(ctx, "UPDATE facts SET last_reinforced_at = created_at WHERE reinforce_count = 1 AND last_reinforced_at > created_at")
 
 	// Idempotent sequence resynchronization in case of manual data restoration
 	_, _ = conn.ExecContext(ctx, `
@@ -286,5 +300,23 @@ func initSchemaSQLite(database *sql.DB) error {
 			return fmt.Errorf("failed to add previous_session_id column to sessions: %w", err)
 		}
 	}
+
+	if _, err := database.Exec("ALTER TABLE facts ADD COLUMN last_reinforced_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP;"); err != nil {
+		if !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("failed to add last_reinforced_at column to facts: %w", err)
+		}
+	}
+	if _, err := database.Exec("ALTER TABLE facts ADD COLUMN last_decayed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP;"); err != nil {
+		if !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("failed to add last_decayed_at column to facts: %w", err)
+		}
+	}
+	if _, err := database.Exec("ALTER TABLE facts ADD COLUMN reinforce_count INTEGER NOT NULL DEFAULT 1;"); err != nil {
+		if !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("failed to add reinforce_count column to facts: %w", err)
+		}
+	}
+	_, _ = database.Exec("CREATE INDEX IF NOT EXISTS idx_facts_last_reinforced_at ON facts(last_reinforced_at DESC)")
+	_, _ = database.Exec("UPDATE facts SET last_reinforced_at = created_at WHERE reinforce_count = 1 AND last_reinforced_at > created_at")
 	return nil
 }

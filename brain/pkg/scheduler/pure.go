@@ -247,3 +247,8 @@ func ShouldRunFactExtraction(tickCount int) bool {
 func ShouldRunPruneRetention(tickCount int) bool {
 	return tickCount > 0 && tickCount%2880 == 0
 }
+
+// ShouldRunMemoryDecay returns true when tickCount represents a daily interval staggered by 60 ticks (30 minutes).
+func ShouldRunMemoryDecay(tickCount int) bool {
+	return tickCount > 0 && tickCount%2880 == 60
+}

@@ -167,12 +167,10 @@ func ExtractActiveConversationFacts(ctx context.Context, database any, client *C
 
 func processThreadFacts(ctx context.Context, database any, client *Client, llmFunc LLMClientFunc, threadID string) (err error) {
 	var factStore db.FactStore
-	var rawDB *sql.DB
 	switch v := database.(type) {
 	case db.FactStore:
 		factStore = v
 	case *sql.DB:
-		rawDB = v
 		if v != nil {
 			factStore = db.NewSQLStore(v)
 		}
@@ -195,8 +193,6 @@ func processThreadFacts(ctx context.Context, database any, client *Client, llmFu
 	var maxRowID int64
 	if ms, ok := factStore.(db.MessageStore); ok {
 		maxRowID, err = ms.GetMaxMessageRowID(ctx, threadID)
-	} else if rawDB != nil {
-		maxRowID, err = db.GetMaxMessageRowID(rawDB, threadID)
 	}
 	if err != nil {
 		return fmt.Errorf("failed to get max message rowid for thread %s: %w", threadID, err)
@@ -225,14 +221,6 @@ func processThreadFacts(ctx context.Context, database any, client *Client, llmFu
 
 	factCount = len(factsPayload.Facts)
 
-	// Fetch existing facts for deduplication
-	var existingFacts []db.FactWithEmbedding
-	if factStore != nil {
-		existingFacts, _ = factStore.GetFactsByThreadWithEmbeddings(ctx, threadID)
-	} else if rawDB != nil {
-		existingFacts, _ = db.GetFactsByThreadWithEmbeddings(rawDB, threadID)
-	}
-
 	for _, item := range factsPayload.Facts {
 		if strings.TrimSpace(item.FactText) == "" {
 			continue
@@ -245,24 +233,24 @@ func processThreadFacts(ctx context.Context, database any, client *Client, llmFu
 			continue
 		}
 
-		// Semantic deduplication: Check if a similar fact already exists
-		isDuplicate := false
-		if len(emb) > 0 && len(existingFacts) > 0 {
-			for _, ef := range existingFacts {
-				if len(ef.Embedding) == len(emb) {
-					sim := DotProduct(emb, ef.Embedding)
-					if (ef.Fact.Category == item.Category && sim >= 0.88) || sim >= 0.90 {
-						log.Printf("[Memory] Duplicate fact detected (%q ~ %q, sim=%.2f). Skipping duplicate row.",
-							item.FactText, ef.Fact.FactText, sim)
-						isDuplicate = true
-						metrics.MemoryOperationsTotal.WithLabelValues("extract", "duplicate").Inc()
-						break
-					}
-				}
+		// Global semantic deduplication: check across the whole database
+		var dupFact *db.Fact
+		var sim float64
+		if len(emb) == db.ExpectedEmbeddingDim {
+			dupFact, sim, err = factStore.FindDuplicateFact(ctx, emb, 0.88)
+			if err != nil {
+				log.Printf("[Memory] Warning: FindDuplicateFact check failed: %v", err)
 			}
 		}
 
-		if !isDuplicate {
+		if dupFact != nil {
+			log.Printf("[Memory] Duplicate fact detected (id=%d, sim=%.2f: %q ~ %q). Reinforcing fact.",
+				dupFact.ID, sim, item.FactText, dupFact.FactText)
+			metrics.MemoryOperationsTotal.WithLabelValues("extract", "reinforced").Inc()
+			if rErr := factStore.ReinforceFact(ctx, dupFact.ID, item.FactText, emb, 0.15); rErr != nil {
+				log.Printf("[Memory] Error reinforcing fact id=%d: %v", dupFact.ID, rErr)
+			}
+		} else {
 			id, err := factStore.InsertFact(ctx, item.Category, item.FactText, item.Importance, threadID, emb)
 			if err != nil {
 				metrics.MemoryOperationsTotal.WithLabelValues("extract", "error").Inc()
@@ -270,17 +258,6 @@ func processThreadFacts(ctx context.Context, database any, client *Client, llmFu
 			} else {
 				metrics.MemoryOperationsTotal.WithLabelValues("extract", "stored").Inc()
 				log.Printf("[Memory] Extracted and stored new fact [%s] (id=%d): %s", item.Category, id, item.FactText)
-				existingFacts = append(existingFacts, db.FactWithEmbedding{
-					Fact: db.Fact{
-						ID:         id,
-						Category:   item.Category,
-						FactText:   item.FactText,
-						Importance: item.Importance,
-						ThreadID:   threadID,
-						CreatedAt:  time.Now().UTC(),
-					},
-					Embedding: emb,
-				})
 			}
 		}
 	}

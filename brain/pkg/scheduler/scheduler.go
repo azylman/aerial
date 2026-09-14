@@ -409,11 +409,73 @@ func RunFactExtraction(ctx context.Context, dbOrStore any, client *memory.Client
 	}
 }
 
+var decayMutex sync.Mutex
+
+// RunMemoryDecay executes fact importance decay and stale fact pruning.
+func RunMemoryDecay(dbOrStore any) {
+	RunMemoryDecayWithContext(context.Background(), dbOrStore)
+}
+
+// RunMemoryDecayWithContext executes fact importance decay and pruning with the provided context.
+func RunMemoryDecayWithContext(ctx context.Context, dbOrStore any) {
+	if dbOrStore == nil {
+		return
+	}
+	if !decayMutex.TryLock() {
+		log.Printf("[Scheduler] Memory decay already in progress, skipping overlapping sweep.")
+		return
+	}
+	defer decayMutex.Unlock()
+
+	var factStore db.FactStore
+	switch v := dbOrStore.(type) {
+	case db.FactStore:
+		factStore = v
+	case *sql.DB:
+		if v != nil {
+			factStore = db.NewSQLStore(v)
+		}
+	}
+	if factStore == nil {
+		return
+	}
+
+	decayCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	decayed, pruned, err := factStore.DecayAndPruneFacts(decayCtx, 0.02, 0.10, 30)
+	if err != nil {
+		if ctx.Err() == nil {
+			log.Printf("[Scheduler] Memory decay error: %v", err)
+			metrics.MemoryOperationsTotal.WithLabelValues("decay", "error").Inc()
+		}
+		return
+	}
+
+	metrics.MemoryOperationsTotal.WithLabelValues("decay", "success").Inc()
+	if decayed > 0 {
+		log.Printf("[Scheduler] Memory decay updated %d fact(s)", decayed)
+		metrics.MemoryOperationsTotal.WithLabelValues("decay", "decayed").Add(float64(decayed))
+	}
+	if pruned > 0 {
+		log.Printf("[Scheduler] Memory decay pruned %d stale fact(s)", pruned)
+		metrics.MemoryOperationsTotal.WithLabelValues("decay", "pruned").Add(float64(pruned))
+	}
+}
+
 func (s *Scheduler) runPruneRetention(ctx context.Context) {
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
 		RunPruneRetentionWithContext(ctx, s.getStore())
+	}()
+}
+
+func (s *Scheduler) runMemoryDecay(ctx context.Context) {
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		RunMemoryDecayWithContext(ctx, s.getStore())
 	}()
 }
 
@@ -442,6 +504,11 @@ func (s *Scheduler) handleTick(ctx context.Context, tickCount int, ollamaClient 
 	// Run retention pruning daily (every 2880 ticks at 30s interval = 24 hours)
 	if ShouldRunPruneRetention(tickCount) {
 		s.runPruneRetention(ctx)
+	}
+
+	// Run memory decay daily (staggered at tick%2880 == 60)
+	if ShouldRunMemoryDecay(tickCount) {
+		s.runMemoryDecay(ctx)
 	}
 }
 

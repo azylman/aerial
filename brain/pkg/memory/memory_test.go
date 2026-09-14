@@ -339,6 +339,69 @@ func TestProcessThreadFactsDeduplicationAndWatermark(t *testing.T) {
 	}
 }
 
+func TestProcessThreadFactsGlobalDeduplicationAndReinforce(t *testing.T) {
+	database := setupTestDB(t)
+	if database == nil {
+		return
+	}
+	defer func() { _ = database.Close() }()
+
+	tmpDir := t.TempDir()
+	client := newMockClient(func(req *http.Request) (*http.Response, error) {
+		return mockEmbeddingResponse(makeDimVector(1.0, 0.0)), nil
+	}, tmpDir)
+
+	// Mock LLM function returning a rephrased fact from thread-beta
+	llmFunc := func(ctx context.Context, prompt string) (string, error) {
+		return `{"facts":[{"category":"user_preference","fact_text":"Alex prefers oat milk in matcha latte","importance_score":0.60}]}`, nil
+	}
+
+	now := time.Now().UTC()
+	_ = db.InsertMessage(database, db.Message{
+		ID: "m-beta-1", ThreadID: "thread-beta", Status: db.StatusCompleted, CreatedAt: now, UpdatedAt: now,
+	})
+
+	// Pre-insert fact in thread-alpha with lower importance (0.50)
+	origID, err := db.InsertFact(database, "user_preference", "Alex likes oat milk in matcha", 0.50, "thread-alpha", makeDimVector(1.0, 0.0))
+	if err != nil {
+		t.Fatalf("InsertFact failed: %v", err)
+	}
+
+	// Create a dummy transcript file for thread-beta
+	logDir := filepath.Join(tmpDir, "thread-beta", ".system_generated", "logs")
+	_ = os.MkdirAll(logDir, 0755)
+	_ = os.WriteFile(filepath.Join(logDir, "transcript.jsonl"), []byte("{\"step\":1,\"content\":\"Alex prefers oat milk in matcha latte\"}\n"), 0644)
+
+	ctx := context.Background()
+	err = processThreadFacts(ctx, database, client, llmFunc, "thread-beta")
+	if err != nil {
+		t.Fatalf("processThreadFacts failed: %v", err)
+	}
+
+	// Verify global deduplication: no new fact in thread-beta
+	allFacts, err := db.GetFactsPaginated(database, db.FactsFilter{Limit: 10})
+	if err != nil {
+		t.Fatalf("GetFactsPaginated failed: %v", err)
+	}
+	if len(allFacts.Facts) != 1 {
+		t.Fatalf("Expected exactly 1 fact globally due to cross-thread deduplication, got %d", len(allFacts.Facts))
+	}
+
+	reinforcedFact := allFacts.Facts[0]
+	if reinforcedFact.ID != origID {
+		t.Errorf("Expected reinforced fact ID %d, got %d", origID, reinforcedFact.ID)
+	}
+	if reinforcedFact.FactText != "Alex prefers oat milk in matcha latte" {
+		t.Errorf("Expected updated fact text, got %q", reinforcedFact.FactText)
+	}
+	if reinforcedFact.Importance < 0.70 {
+		t.Errorf("Expected importance boosted to at least 0.70, got %f", reinforcedFact.Importance)
+	}
+	if reinforcedFact.ReinforceCount != 2 {
+		t.Errorf("Expected reinforce_count = 2, got %d", reinforcedFact.ReinforceCount)
+	}
+}
+
 func TestExtractQueryText(t *testing.T) {
 	// Case 1: Discord prompt format with mention
 	discordPrompt := `<USER_REQUEST>
