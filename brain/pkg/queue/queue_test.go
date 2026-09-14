@@ -12092,6 +12092,235 @@ func TestPostTurnHook(t *testing.T) {
 	})
 }
 
+func mockMultiTurnJSONResponse(convID, responseText string, numTurns int) string {
+	if convID == "" {
+		convID = uuid.New().String()
+	}
+	payload, _ := json.Marshal(map[string]interface{}{
+		"conversation_id":  convID,
+		"status":           "SUCCESS",
+		"response":         responseText,
+		"duration_seconds": 1.0,
+		"num_turns":        numTurns,
+	})
+	return string(payload)
+}
+
+func TestWorkerPool_MultiTurn_ExtractFinalSubstantiveTurnAndPreserveMedia(t *testing.T) {
+	t.Parallel()
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer database.Close()
+
+	tempDir := t.TempDir()
+	convID := "c1111111-2222-3333-4444-555555555555"
+
+	// Create test PNG in tempDir
+	img := image.NewRGBA(image.Rect(0, 0, 10, 10))
+	var imgBuf bytes.Buffer
+	_ = png.Encode(&imgBuf, img)
+	testImgPath := filepath.Join(tempDir, "preview.png")
+	if err := os.WriteFile(testImgPath, imgBuf.Bytes(), 0600); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	// Create transcript in session dir
+	sessDir := filepath.Join(tempDir, ".gemini", "antigravity-cli", "brain", convID)
+	if err := os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs"), 0755); err != nil {
+		t.Fatalf("MkdirAll failed: %v", err)
+	}
+
+	transcriptContent := fmt.Sprintf(`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"Build the docker image"}
+{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","content":"Reverting the orrery...\nWaiting on Docker image builds for dashboard...\n![preview](%s)","tool_calls":[{"name":"build"}]}
+{"step_index":2,"source":"SYSTEM","type":"USER_INPUT","content":"build finished successfully"}
+{"step_index":3,"source":"MODEL","type":"PLANNER_RESPONSE","content":"Handled, boss—all containers are deployed cleanly!"}
+`, testImgPath)
+
+	if err := os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte(transcriptContent), 0644); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	var deliveredText string
+	var deliveredAttachments []*delivery.Attachment
+	var mu sync.Mutex
+	doneCh := make(chan struct{})
+
+	sessMgr := session.New(tempDir, "")
+	pool := NewWorkerPool(WorkerPoolConfig{
+		SessionManager: sessMgr,
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    1,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			rawAggregated := fmt.Sprintf("Reverting the orrery...\nWaiting on Docker image builds for dashboard...\n![preview](%s)\nHandled, boss—all containers are deployed cleanly!", testImgPath)
+			return mockMultiTurnJSONResponse(convID, rawAggregated, 2), "", 0, nil
+		},
+		DeliveryWithAttachmentsFunc: func(s *discordgo.Session, channelID, text string, attachments []*delivery.Attachment) error {
+			mu.Lock()
+			deliveredText = text
+			deliveredAttachments = attachments
+			mu.Unlock()
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) func() {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			close(doneCh)
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{
+		ID:         "msg-multiturn-1",
+		ThreadID:   "thread-multiturn-1",
+		GuildID:    "guild-1",
+		AuthorID:   "user-1",
+		AuthorName: "User",
+		Content:    "Deploy",
+		Status:     db.StatusPending,
+		CreatedAt:  time.Now().UTC(),
+		UpdatedAt:  time.Now().UTC(),
+	}
+	if err := db.InsertMessage(database, msg); err != nil {
+		t.Fatalf("InsertMessage failed: %v", err)
+	}
+
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Timeout waiting for message processing")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	expectedFinalText := "Handled, boss—all containers are deployed cleanly!"
+	if deliveredText != expectedFinalText {
+		t.Errorf("Delivered text mismatch:\ngot:  %q\nwant: %q", deliveredText, expectedFinalText)
+	}
+	if strings.Contains(deliveredText, "Reverting the orrery") || strings.Contains(deliveredText, "Waiting on Docker image builds") {
+		t.Errorf("Delivered text contains intermediate chatter: %q", deliveredText)
+	}
+
+	if len(deliveredAttachments) != 1 {
+		t.Fatalf("Expected 1 preserved attachment from earlier turn, got %d", len(deliveredAttachments))
+	}
+	if deliveredAttachments[0].Filename != "preview.png" {
+		t.Errorf("Expected attachment preview.png, got %q", deliveredAttachments[0].Filename)
+	}
+
+	dbMsg, err := db.GetMessage(database, "msg-multiturn-1")
+	if err != nil || dbMsg == nil {
+		t.Fatalf("GetMessage failed: %v", err)
+	}
+	if dbMsg.ResponseText != expectedFinalText {
+		t.Errorf("DB response text mismatch:\ngot:  %q\nwant: %q", dbMsg.ResponseText, expectedFinalText)
+	}
+}
+
+func TestWorkerPool_MultiTurn_SilentSentinel_DropsIntermediateChatter(t *testing.T) {
+	t.Parallel()
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer database.Close()
+
+	tempDir := t.TempDir()
+	convID := "c2222222-2222-3333-4444-555555555555"
+
+	sessDir := filepath.Join(tempDir, ".gemini", "antigravity-cli", "brain", convID)
+	if err := os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs"), 0755); err != nil {
+		t.Fatalf("MkdirAll failed: %v", err)
+	}
+
+	transcriptContent := `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"Check sync"}
+{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","content":"Checking status now...","tool_calls":[{"name":"status"}]}
+{"step_index":2,"source":"SYSTEM","type":"USER_INPUT","content":"All in sync"}
+{"step_index":3,"source":"MODEL","type":"PLANNER_RESPONSE","content":"Wait for background task task-645 to complete."}
+`
+	if err := os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte(transcriptContent), 0644); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	var deliveryCalled bool
+	var mu sync.Mutex
+	doneCh := make(chan struct{})
+
+	sessMgr := session.New(tempDir, "")
+	pool := NewWorkerPool(WorkerPoolConfig{
+		SessionManager: sessMgr,
+		DB:             database,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    1,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			rawAggregated := "Checking status now...\nWait for background task task-645 to complete."
+			return mockMultiTurnJSONResponse(convID, rawAggregated, 2), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			mu.Lock()
+			deliveryCalled = true
+			mu.Unlock()
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) func() {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			close(doneCh)
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{
+		ID:         "msg-silent-1",
+		ThreadID:   "thread-silent-1",
+		GuildID:    "guild-1",
+		AuthorID:   "user-1",
+		AuthorName: "User",
+		Content:    "Check sync",
+		Status:     db.StatusPending,
+		CreatedAt:  time.Now().UTC(),
+		UpdatedAt:  time.Now().UTC(),
+	}
+	if err := db.InsertMessage(database, msg); err != nil {
+		t.Fatalf("InsertMessage failed: %v", err)
+	}
+
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Timeout waiting for message processing")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if deliveryCalled {
+		t.Errorf("DeliveryFunc was called when final response was a silent sentinel")
+	}
+
+	dbMsg, err := db.GetMessage(database, "msg-silent-1")
+	if err != nil || dbMsg == nil {
+		t.Fatalf("GetMessage failed: %v", err)
+	}
+	if dbMsg.Status != db.StatusCompleted {
+		t.Errorf("Expected status COMPLETED, got: %s", dbMsg.Status)
+	}
+}
+
+
 
 
 

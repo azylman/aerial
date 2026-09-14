@@ -1,11 +1,13 @@
 package session
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -389,6 +391,156 @@ func (m *Manager) ExtractResponseAndError(convID string) (string, string) {
 		}
 	}
 	return lastResponse, lastError
+}
+
+var silentWaitRegex = regexp.MustCompile(`(?i)^wait for (background task|subagent|remaining subagent|the final subagent).*\.?$`)
+
+func isSilentSentinel(s string) bool {
+	trimmed := strings.TrimSpace(s)
+	if trimmed == "" {
+		return true
+	}
+	return silentWaitRegex.MatchString(trimmed)
+}
+
+// ExtractFinalSubstantiveResponse extracts strictly the terminal conversational PLANNER_RESPONSE
+// step for an active conversation turn, bypassing multi-turn tool progress chatter concatenated by agy.
+// It returns the substantive response text, whether the turn was explicitly silent, and any error.
+func (m *Manager) ExtractFinalSubstantiveResponse(ctx context.Context, convID string) (string, bool, error) {
+	if m == nil {
+		return "", false, nil
+	}
+	trimmedID := strings.TrimSpace(convID)
+	if trimmedID == "" || strings.ContainsAny(trimmedID, "/\\:") || strings.Contains(trimmedID, "..") {
+		return "", false, nil
+	}
+	if ctx != nil && ctx.Err() != nil {
+		return "", false, ctx.Err()
+	}
+
+	targetDirs := m.getTargetDirs(trimmedID)
+
+	for _, dir := range targetDirs {
+		for _, name := range []string{"transcript_full.jsonl", "transcript.jsonl"} {
+			if ctx != nil && ctx.Err() != nil {
+				return "", false, ctx.Err()
+			}
+			tPath := filepath.Join(dir, ".system_generated", "logs", name)
+			f, err := os.Open(tPath)
+			if err != nil {
+				continue
+			}
+
+			fi, err := f.Stat()
+			if err != nil || fi.Size() == 0 {
+				_ = f.Close()
+				continue
+			}
+
+			fileSize := fi.Size()
+			readSize := fileSize
+			var offset int64 = 0
+			const maxChunk = int64(1024 * 1024)
+			if fileSize > maxChunk {
+				readSize = maxChunk
+				offset = fileSize - maxChunk
+			}
+
+			buf := make([]byte, readSize)
+			_, err = f.ReadAt(buf, offset)
+			_ = f.Close()
+			if err != nil && err != io.EOF {
+				continue
+			}
+
+			lines := strings.Split(string(buf), "\n")
+			if offset > 0 && len(lines) > 1 {
+				lines = lines[1:]
+			}
+
+			lastUserInputIdx := -1
+			for i, rawLine := range lines {
+				line := strings.TrimSpace(rawLine)
+				if line == "" {
+					continue
+				}
+				var step struct {
+					Source  string `json:"source"`
+					Type    string `json:"type"`
+					Content string `json:"content"`
+				}
+				if err := json.Unmarshal([]byte(line), &step); err == nil {
+					isAmbient := step.Source == SourceAmbient || (step.Type == "USER_INPUT" && strings.HasPrefix(step.Content, "[Chat #"))
+					if step.Type == "USER_INPUT" && !isAmbient {
+						lastUserInputIdx = i
+					}
+				}
+			}
+
+			if lastUserInputIdx == -1 && offset > 0 {
+				fullData, readErr := os.ReadFile(tPath)
+				if readErr == nil {
+					lines = strings.Split(string(fullData), "\n")
+					for i, rawLine := range lines {
+						line := strings.TrimSpace(rawLine)
+						if line == "" {
+							continue
+						}
+						var step struct {
+							Source  string `json:"source"`
+							Type    string `json:"type"`
+							Content string `json:"content"`
+						}
+						if err := json.Unmarshal([]byte(line), &step); err == nil {
+							isAmbient := step.Source == SourceAmbient || (step.Type == "USER_INPUT" && strings.HasPrefix(step.Content, "[Chat #"))
+							if step.Type == "USER_INPUT" && !isAmbient {
+								lastUserInputIdx = i
+							}
+						}
+					}
+				}
+			}
+
+			startIdx := 0
+			if lastUserInputIdx >= 0 {
+				startIdx = lastUserInputIdx + 1
+			}
+
+			for i := len(lines) - 1; i >= startIdx; i-- {
+				line := strings.TrimSpace(lines[i])
+				if line == "" {
+					continue
+				}
+				var step struct {
+					Type      string          `json:"type"`
+					Status    string          `json:"status"`
+					Content   string          `json:"content"`
+					ToolCalls json.RawMessage `json:"tool_calls"`
+				}
+				if err := json.Unmarshal([]byte(line), &step); err != nil {
+					continue
+				}
+				if step.Type != "PLANNER_RESPONSE" {
+					continue
+				}
+
+				hasToolCalls := len(step.ToolCalls) > 2 && string(step.ToolCalls) != "[]" && string(step.ToolCalls) != "null"
+				trimmedContent := strings.TrimSpace(step.Content)
+
+				if hasToolCalls {
+					break
+				}
+
+				if isSilentSentinel(trimmedContent) {
+					return "", true, nil
+				}
+
+				return step.Content, false, nil
+			}
+		}
+	}
+
+	return "", false, nil
 }
 
 // HasSuccessfulToolCall returns whether the conversation contains any successful tool calls.

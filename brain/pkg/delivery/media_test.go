@@ -410,4 +410,69 @@ func TestExtractAndSanitizeMedia_EdgePaths(t *testing.T) {
 	}
 }
 
+func TestMergeAttachments(t *testing.T) {
+	att1 := &Attachment{Filename: "file1.png", ContentType: "image/png", Data: []byte("1")}
+	att2 := &Attachment{Filename: "file2.png", ContentType: "image/png", Data: []byte("2")}
+	att1Dup := &Attachment{Filename: "file1.png", ContentType: "image/png", Data: []byte("1-dup")}
+	att3 := &Attachment{Filename: "file3.png", ContentType: "image/png", Data: []byte("3")}
+
+	merged := MergeAttachments([]*Attachment{att1, att2}, []*Attachment{att1Dup, att3})
+	if len(merged) != 3 {
+		t.Fatalf("expected 3 merged attachments, got %d", len(merged))
+	}
+	if merged[0].Filename != "file1.png" || merged[1].Filename != "file2.png" || merged[2].Filename != "file3.png" {
+		t.Errorf("unexpected merged order/names: %v, %v, %v", merged[0].Filename, merged[1].Filename, merged[2].Filename)
+	}
+
+	// Verify primary attachment data is retained over secondary duplicate
+	if string(merged[0].Data) != "1" {
+		t.Errorf("expected primary data '1', got '%s'", string(merged[0].Data))
+	}
+
+	// Empty secondary returns primary
+	pOnly := MergeAttachments([]*Attachment{att1}, nil)
+	if len(pOnly) != 1 {
+		t.Errorf("expected 1 attachment, got %d", len(pOnly))
+	}
+
+	// Cap at MaxAttachmentsPerMessage
+	var many []*Attachment
+	for i := 0; i < 15; i++ {
+		many = append(many, &Attachment{Filename: fmt.Sprintf("many_%d.png", i), ContentType: "image/png", Data: []byte("x")})
+	}
+	capped := MergeAttachments(many, nil)
+	if len(capped) != MaxAttachmentsPerMessage {
+		t.Errorf("expected %d attachments, got %d", MaxAttachmentsPerMessage, len(capped))
+	}
+	cappedSecondary := MergeAttachments([]*Attachment{att1}, many)
+	if len(cappedSecondary) != MaxAttachmentsPerMessage {
+		t.Errorf("expected %d attachments, got %d", MaxAttachmentsPerMessage, len(cappedSecondary))
+	}
+}
+
+func TestSanitizeIntermediateStatus_HarnessChatter(t *testing.T) {
+	input := `Waiting for unit test suite completion on PR #225.
+Waiting on Docker image builds for dashboard on PR #225.
+Handled, boss—PR #225 is merged and synced! 🍵`
+	got := SanitizeIntermediateStatus(input)
+	want := "Handled, boss—PR #225 is merged and synced! 🍵"
+	if got != want {
+		t.Errorf("expected %q, got %q", want, got)
+	}
+
+	// Conversational sentences preserved
+	convInput := "Waiting on your decision between Option A and Option B.\nPlease let me know."
+	gotConv := SanitizeIntermediateStatus(convInput)
+	if gotConv != convInput {
+		t.Errorf("expected conversational text preserved, got %q", gotConv)
+	}
+
+	// Lines inside code block preserved
+	codeBlock := "Here is a script:\n```bash\nwaiting for unit test suite completion\n```\nDone."
+	gotCode := SanitizeIntermediateStatus(codeBlock)
+	if gotCode != codeBlock {
+		t.Errorf("expected code block line preserved, got %q", gotCode)
+	}
+}
+
 

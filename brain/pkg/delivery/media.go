@@ -49,6 +49,42 @@ func (a *Attachment) ToDiscordFile() *discordgo.File {
 	}
 }
 
+// MergeAttachments combines two attachment slices, deduplicating by Filename
+// and capping the total merged slice at MaxAttachmentsPerMessage.
+func MergeAttachments(primary, secondary []*Attachment) []*Attachment {
+	if len(secondary) == 0 {
+		if len(primary) > MaxAttachmentsPerMessage {
+			return primary[:MaxAttachmentsPerMessage]
+		}
+		return primary
+	}
+	seen := make(map[string]struct{}, len(primary)+len(secondary))
+	merged := make([]*Attachment, 0, len(primary)+len(secondary))
+	for _, att := range primary {
+		if len(merged) >= MaxAttachmentsPerMessage {
+			break
+		}
+		if att != nil && att.Filename != "" {
+			if _, ok := seen[att.Filename]; !ok {
+				seen[att.Filename] = struct{}{}
+				merged = append(merged, att)
+			}
+		}
+	}
+	for _, att := range secondary {
+		if len(merged) >= MaxAttachmentsPerMessage {
+			break
+		}
+		if att != nil && att.Filename != "" {
+			if _, ok := seen[att.Filename]; !ok {
+				seen[att.Filename] = struct{}{}
+				merged = append(merged, att)
+			}
+		}
+	}
+	return merged
+}
+
 var mdImageRegex = regexp.MustCompile(`!\[([^\]]*)\]\(([^)]+)\)`)
 
 // ExtractAndSanitizeMedia parses markdown image references, resolves and validates local files,
@@ -224,13 +260,18 @@ var intermediateStatusPhrases = []string{
 	"Everything is running smoothly! I'll keep working on this and check in shortly",
 }
 
+var intermediateStatusRegexes = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)^waiting (for|on) (unit test|docker image|ci checks|ci to complete|github actions|builds|validation|run).*\.?$`),
+	regexp.MustCompile(`(?i)^wait for (background task|subagent|remaining subagent|the final subagent).*\.?$`),
+}
+
 func isSubstantiveContent(s string) bool {
 	clean := strings.Trim(strings.TrimSpace(s), " \t\r\n.!?*-_~`")
 	return len(clean) > 0
 }
 
 // SanitizeIntermediateStatus strips repetitive intermediate task status preambles
-// when followed by substantive response content, and deduplicates consecutive identical lines.
+// and harness wait lines when followed by substantive response content, and deduplicates consecutive identical lines.
 func SanitizeIntermediateStatus(s string) string {
 	trimmed := strings.TrimSpace(s)
 	if trimmed == "" {
@@ -259,7 +300,7 @@ func SanitizeIntermediateStatus(s string) string {
 		}
 	}
 
-	// 2. Deduplicate consecutive identical lines outside code blocks.
+	// 2. Filter intermediate harness status chatter and deduplicate consecutive identical lines outside code blocks.
 	// Track code fences accurately to prevent inverting on single-line spans, blockquotes, or tildes.
 	lines := strings.Split(working, "\n")
 	var deduped []string
@@ -281,6 +322,19 @@ func SanitizeIntermediateStatus(s string) string {
 		}
 
 		inCodeBlock := activeFence != ""
+		if !inCodeBlock && trimmedLine != "" {
+			isHarnessChatter := false
+			for _, re := range intermediateStatusRegexes {
+				if re.MatchString(trimmedLine) {
+					isHarnessChatter = true
+					break
+				}
+			}
+			if isHarnessChatter {
+				continue
+			}
+		}
+
 		if !inCodeBlock && trimmedLine != "" && trimmedLine == prevLine {
 			continue
 		}
@@ -292,7 +346,11 @@ func SanitizeIntermediateStatus(s string) string {
 		}
 	}
 
-	return strings.TrimSpace(strings.Join(deduped, "\n"))
+	result := strings.TrimSpace(strings.Join(deduped, "\n"))
+	if result == "" && trimmed != "" {
+		return trimmed
+	}
+	return result
 }
 
 // parseCodeFence detects markdown code fence delimiters (``` or ~~~), measuring marker length
