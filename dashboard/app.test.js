@@ -323,6 +323,22 @@ describe('Permet HUD Pure Logic Unit Tests', () => {
             renderQuickLaunchDock([]);
             assert.equal(mockDock.style.display, 'none');
         });
+
+        it('renders single portal link cleanly without extra external chips', () => {
+            const mockDock = { style: {}, innerHTML: '' };
+            sandbox.document.getElementById = () => mockDock;
+
+            const links = [
+                { name: 'PORTAL', url: '/', icon: '🏠', target: '_self', is_core: true }
+            ];
+
+            renderQuickLaunchDock(links);
+            assert.equal(mockDock.style.display, 'flex');
+            assert.ok(mockDock.innerHTML.includes('href="/"'));
+            assert.ok(mockDock.innerHTML.includes('target="_self"'));
+            assert.ok(!mockDock.innerHTML.includes('rel="noopener noreferrer"'));
+            assert.ok(mockDock.innerHTML.includes('PORTAL'));
+        });
     });
 
     describe('renderGitSyncBadge(gitSync)', () => {

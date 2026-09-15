@@ -1061,9 +1061,6 @@ func fetchActiveTasksFromBrain(ctx context.Context, brainURL string) ([]ActiveTa
 func DefaultQuickLaunchLinks() []QuickLaunchLink {
 	return []QuickLaunchLink{
 		{Name: "🏠 PORTAL", URL: "/", Target: "_self", IsCore: true},
-		{Name: "💬 LLM SESSIONS", URL: "/agentsview/", Target: "_blank", IsCore: true},
-		{Name: "📚 DOCS", URL: "/docs/", Target: "_blank", IsCore: true},
-		{Name: "📊 OBSERVABILITY", URL: "/grafana/", Target: "_blank", IsCore: true},
 	}
 }
 
