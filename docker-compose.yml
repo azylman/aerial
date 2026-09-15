@@ -446,6 +446,9 @@ services:
         if [ -d /app/core-config ]; then
             cp -rf /app/core-config/. /config/
         fi
+        if [ -f /app/core-config/custom.css ]; then
+            ln -sf /app/core-config/custom.css /config/custom.css
+        fi
         USER_DIR="/share/aerial-config/homepage"
         if [ -d "$$USER_DIR" ]; then
             for cfg in services.yaml widgets.yaml bookmarks.yaml settings.yaml docker.yaml; do
@@ -454,8 +457,8 @@ services:
                 fi
             done
             if [ -f "$$USER_DIR/custom.css" ]; then
-                printf "\n\n/* --- User Overrides from aerial-config --- */\n" >> /config/custom.css
-                cat "$$USER_DIR/custom.css" >> /config/custom.css
+                rm -f /config/custom.css
+                cat /app/core-config/custom.css "$$USER_DIR/custom.css" > /config/custom.css
             fi
         fi
         if [ "$$(id -u)" = "0" ]; then
