@@ -111,11 +111,10 @@ body::after {
     50% { filter: drop-shadow(0 0 2px rgba(192, 132, 252, 0.25)); opacity: 0.85; }
 }
 
-/* --- BENTO SERVICE CARDS & GLASSMORPHISM --- */
-#services > div > div > div,
+/* --- BENTO SERVICE & BOOKMARK CARDS & GLASSMORPHISM --- */
 .service-card,
-[class*="rounded-lg"],
-[class*="rounded-xl"] {
+.bookmark-list a,
+.bookmark-list li > a {
     background: var(--bg-surface) !important;
     border: 1px solid var(--border-default) !important;
     box-shadow: var(--shadow-md) !important;
@@ -127,8 +126,9 @@ body::after {
     z-index: 1;
 }
 
-#services > div > div > div:hover,
-.service-card:hover {
+.service-card:hover,
+.bookmark-list a:hover,
+.bookmark-list li > a:hover {
     border-color: var(--permet-cyan) !important;
     box-shadow: var(--shadow-hover) !important;
     transform: translateY(-2px);
@@ -136,10 +136,28 @@ body::after {
 }
 
 /* --- FLAGSHIP CARD: AERIAL COMMAND HUD --- */
-div:has(a[href*="/dashboard/"]),
-a[href*="/dashboard/"] {
+.service-card:has(a[href*="/dashboard/"]),
+li[data-name="Aerial Command HUD"] .service-card {
     border-color: var(--permet-cyan) !important;
     box-shadow: 0 0 16px rgba(0, 240, 255, 0.30), inset 0 0 14px rgba(192, 132, 252, 0.15) !important;
+}
+
+.service-card:has(a[href*="/dashboard/"]):hover,
+li[data-name="Aerial Command HUD"] .service-card:hover {
+    border-color: var(--permet-cyan) !important;
+    box-shadow: 0 0 24px rgba(0, 240, 255, 0.50), inset 0 0 18px rgba(192, 132, 252, 0.25) !important;
+}
+
+/* --- LAYOUT CONTAINERS & OVERFLOW PROTECTION --- */
+#page_wrapper,
+#inner_wrapper,
+.container,
+#layout-groups,
+#services,
+#bookmarks {
+    border: none !important;
+    box-shadow: none !important;
+    background: transparent !important;
 }
 
 /* --- REACTOR STATUS PULSE --- */
@@ -159,10 +177,9 @@ a[href*="/dashboard/"] {
     }
 
     /* Fallback to high-opacity solid surface on mobile to protect GPU */
-    #services > div > div > div,
     .service-card,
-    [class*="rounded-lg"],
-    [class*="rounded-xl"] {
+    .bookmark-list a,
+    .bookmark-list li > a {
         background: rgba(48, 26, 82, 0.95) !important;
         backdrop-filter: none !important;
         -webkit-backdrop-filter: none !important;
