@@ -216,6 +216,15 @@ if [ "$MODE" = "staged" ]; then
         run_node_syntax "docs-service/app/assets/js/plugins/docsify-mermaid-cyberpunk.js"
     fi
 
+    # Check homepage JS syntax & unit tests
+    if echo "$STAGED_FILES" | grep -q "^homepage/"; then
+        run_node_syntax "homepage/lib/merge.js"
+        run_node_syntax "homepage/prepare-config.js"
+        if [ -d "homepage/test" ]; then
+            run_node_test "homepage" "test/*.test.js"
+        fi
+    fi
+
     # Check grafana dashboard JSON syntax
     if echo "$STAGED_FILES" | grep -q "^grafana/dashboards/"; then
         for jf in grafana/dashboards/*.json; do
@@ -240,6 +249,8 @@ done
 echo "=== 2. Frontend & Script Syntax Checks ==="
 run_node_syntax "dashboard/static/app.js"
 run_node_syntax "docs-service/app/assets/js/plugins/docsify-mermaid-cyberpunk.js"
+run_node_syntax "homepage/lib/merge.js"
+run_node_syntax "homepage/prepare-config.js"
 for jf in grafana/dashboards/*.json; do
     run_json_syntax "$jf"
 done
@@ -251,6 +262,10 @@ done
 
 if [ -f "dashboard/app.test.js" ]; then
     run_node_test "dashboard" "*.test.js"
+fi
+
+if [ -d "homepage/test" ]; then
+    run_node_test "homepage" "test/*.test.js"
 fi
 
 echo "=== 4. Test Coverage Gating ==="
