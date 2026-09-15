@@ -114,7 +114,9 @@ body::after {
 /* --- BENTO SERVICE & BOOKMARK CARDS & GLASSMORPHISM --- */
 .service-card,
 .bookmark-list a,
-.bookmark-list li > a {
+.bookmark-list li > a,
+.bookmark-group ul a,
+a:has(.bookmark-name) {
     background: var(--bg-surface) !important;
     border: 1px solid var(--border-default) !important;
     box-shadow: var(--shadow-md) !important;
@@ -128,7 +130,9 @@ body::after {
 
 .service-card:hover,
 .bookmark-list a:hover,
-.bookmark-list li > a:hover {
+.bookmark-list li > a:hover,
+.bookmark-group ul a:hover,
+a:has(.bookmark-name):hover {
     border-color: var(--permet-cyan) !important;
     box-shadow: var(--shadow-hover) !important;
     transform: translateY(-2px);
@@ -179,7 +183,9 @@ li[data-name="Aerial Command HUD"] .service-card:hover {
     /* Fallback to high-opacity solid surface on mobile to protect GPU */
     .service-card,
     .bookmark-list a,
-    .bookmark-list li > a {
+    .bookmark-list li > a,
+    .bookmark-group ul a,
+    a:has(.bookmark-name) {
         background: rgba(48, 26, 82, 0.95) !important;
         backdrop-filter: none !important;
         -webkit-backdrop-filter: none !important;
