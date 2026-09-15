@@ -833,9 +833,23 @@ func CreateReloadConfigFunc(cfg *config.Config, opts ...ReloadOption) func(sourc
 	}
 }
 
+// BrainAppOption configures optional runtime dependencies for RunBrainApp.
+type BrainAppOption func(*brainAppOptions)
+
+type brainAppOptions struct {
+	store db.Store
+}
+
+// WithStore allows injecting a custom Store implementation (e.g. db.FakeStore for tests).
+func WithStore(store db.Store) BrainAppOption {
+	return func(o *brainAppOptions) {
+		o.store = store
+	}
+}
+
 var onServerReady func(addr string)
 
-func RunBrainApp(ctx context.Context, cfg *config.Config) error {
+func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption) error {
 	if cfg == nil {
 		return fmt.Errorf("brain: config cannot be nil")
 	}
@@ -843,8 +857,15 @@ func RunBrainApp(ctx context.Context, cfg *config.Config) error {
 		return nil
 	}
 
+	var appOpts brainAppOptions
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&appOpts)
+		}
+	}
+
 	cur := cfg.Current()
-	if cur.DatabaseURL == "" {
+	if appOpts.store == nil && cur.DatabaseURL == "" {
 		return fmt.Errorf("database URL or path is required")
 	}
 	if cur.GeminiHomeDir == "" {
@@ -861,17 +882,21 @@ func RunBrainApp(ctx context.Context, cfg *config.Config) error {
 	provisioner := env.NewFromConfig(cfg)
 	_ = InitializeBrainEnvironment(ctx, cfg)
 
-	database, err := db.New(cfg)
-	if err != nil {
-		return fmt.Errorf("failed to initialize database: %w", err)
-	}
-	defer func() {
-		if err := database.Close(); err != nil {
-			log.Printf("Error closing database: %v", err)
+	var store db.Store
+	if appOpts.store != nil {
+		store = appOpts.store
+	} else {
+		database, err := db.New(cfg)
+		if err != nil {
+			return fmt.Errorf("failed to initialize database: %w", err)
 		}
-	}()
-
-	store := db.NewSQLStore(database)
+		defer func() {
+			if err := database.Close(); err != nil {
+				log.Printf("Error closing database: %v", err)
+			}
+		}()
+		store = db.NewSQLStore(database)
+	}
 
 	sanitizer.RegisterConfigTokens(cfg)
 

@@ -800,13 +800,11 @@ func TestInitializeBrainEnvironment_And_Config(t *testing.T) {
 
 func TestRunBrainApp_Lifecycle(t *testing.T) {
 	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "test_brain.db")
 
 	cfg := config.NewTestConfig(func(d *config.ConfigData) {
 		d.Port = "0"
 		d.AgyBin = "/bin/true"
 		d.Model = "gemini-2.5-flash"
-		d.DatabaseURL = dbPath
 		d.SystemPrompt = "test"
 		d.GeminiHomeDir = tmpDir
 		d.DataDir = filepath.Join(tmpDir, "data")
@@ -830,7 +828,8 @@ func TestRunBrainApp_Lifecycle(t *testing.T) {
 		cancel()
 	}()
 
-	err := RunBrainApp(ctx, cfg)
+	mockStore := db.NewFakeStore()
+	err := RunBrainApp(ctx, cfg, WithStore(mockStore))
 	if err != nil && err != http.ErrServerClosed {
 		t.Errorf("Unexpected error running Brain app: %v", err)
 	}
@@ -1081,13 +1080,11 @@ func TestCreateReloadConfigFunc_InvalidYAMLAndAlert(t *testing.T) {
 
 func TestRunBrainApp_ServerReadinessAndShutdown(t *testing.T) {
 	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "app_test.db")
 
 	cfg := config.NewTestConfig(func(d *config.ConfigData) {
 		d.Port = "0"
 		d.AgyBin = "/bin/true"
 		d.Model = "gemini-2.5-flash"
-		d.DatabaseURL = dbPath
 		d.SystemPrompt = "test"
 		d.GeminiHomeDir = tmpDir
 		d.DataDir = filepath.Join(tmpDir, "data")
@@ -1104,8 +1101,9 @@ func TestRunBrainApp_ServerReadinessAndShutdown(t *testing.T) {
 	defer func() { onServerReady = oldReady }()
 
 	errChan := make(chan error, 1)
+	mockStore := db.NewFakeStore()
 	go func() {
-		errChan <- RunBrainApp(ctx, cfg)
+		errChan <- RunBrainApp(ctx, cfg, WithStore(mockStore))
 	}()
 
 	<-ready
@@ -1252,14 +1250,12 @@ func TestCreateReloadConfigFunc_SuccessCoverage(t *testing.T) {
 func TestRunBrainApp_DetailedOptions(t *testing.T) {
 	t.Run("with discord token", func(t *testing.T) {
 		tmpDir := t.TempDir()
-		dbPath := filepath.Join(tmpDir, "app_discord.db")
 		cfg := config.NewTestConfig(func(d *config.ConfigData) {
 			d.Port = "0"
 			d.AgyBin = "/bin/true"
 			d.Model = "gemini-2.5-flash"
 			d.APIKey = "test-key"
 			d.SystemPrompt = "test"
-			d.DatabaseURL = dbPath
 			d.DiscordToken = "mock-token"
 			d.GeminiHomeDir = tmpDir
 			d.DataDir = filepath.Join(tmpDir, "data")
@@ -1276,8 +1272,9 @@ func TestRunBrainApp_DetailedOptions(t *testing.T) {
 		defer func() { onServerReady = oldReady }()
 
 		errChan := make(chan error, 1)
+		mockStore := db.NewFakeStore()
 		go func() {
-			errChan <- RunBrainApp(ctx, cfg)
+			errChan <- RunBrainApp(ctx, cfg, WithStore(mockStore))
 		}()
 
 		<-ready
@@ -1300,13 +1297,13 @@ func TestRunBrainApp_DetailedOptions(t *testing.T) {
 			d.AgyBin = "/bin/true"
 			d.Model = "gemini-2.5-flash"
 			d.SystemPrompt = "test"
-			d.DatabaseURL = filepath.Join(tmpDir, "app_bad_port.db")
 			d.GeminiHomeDir = tmpDir
 			d.DataDir = filepath.Join(tmpDir, "data")
 		})
 		ctxBad, cancelBad := context.WithTimeout(context.Background(), 1*time.Second)
 		defer cancelBad()
-		_ = RunBrainApp(ctxBad, badPortCfg)
+		mockStore := db.NewFakeStore()
+		_ = RunBrainApp(ctxBad, badPortCfg, WithStore(mockStore))
 	})
 }
 
@@ -1547,7 +1544,6 @@ func TestHandleTranscripts_DBErrorBranch(t *testing.T) {
 func TestRunBrainApp_PureConfig(t *testing.T) {
 	tmpDir := t.TempDir()
 	cfg := config.NewFromData(&config.ConfigData{
-		DatabaseURL:   filepath.Join(tmpDir, "brain_test.db"),
 		GeminiHomeDir: tmpDir,
 		DataDir:       filepath.Join(tmpDir, "data"),
 		Port:          "0",
@@ -1561,7 +1557,8 @@ func TestRunBrainApp_PureConfig(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // Immediate cancellation to test lifecycle shutdown
 
-	err := RunBrainApp(ctx, cfg)
+	mockStore := db.NewFakeStore()
+	err := RunBrainApp(ctx, cfg, WithStore(mockStore))
 	if err != nil && err != http.ErrServerClosed {
 		t.Errorf("expected clean shutdown, got %v", err)
 	}
@@ -1866,7 +1863,6 @@ func TestRunBrainApp_FullLifecycle(t *testing.T) {
 		t.Fatalf("LoadConfigFromPaths failed: %v", err)
 	}
 	cur := cfg.Current()
-	cur.DatabaseURL = ":memory:"
 	cur.DataDir = tmpDir
 	cur.GeminiHomeDir = tmpDir
 	cur.DiscordToken = "mock-discord-token"
@@ -1889,7 +1885,8 @@ func TestRunBrainApp_FullLifecycle(t *testing.T) {
 		cancel()
 	}()
 
-	err = RunBrainApp(ctx, cfg)
+	mockStore := db.NewFakeStore()
+	err = RunBrainApp(ctx, cfg, WithStore(mockStore))
 	if err != nil {
 		t.Fatalf("RunBrainApp failed: %v", err)
 	}
