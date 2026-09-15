@@ -1059,9 +1059,7 @@ func fetchActiveTasksFromBrain(ctx context.Context, brainURL string) ([]ActiveTa
 
 // DefaultQuickLaunchLinks returns the core default gateway launch targets.
 func DefaultQuickLaunchLinks() []QuickLaunchLink {
-	return []QuickLaunchLink{
-		{Name: "🏠 PORTAL", URL: "/", Target: "_self", IsCore: true},
-	}
+	return []QuickLaunchLink{}
 }
 
 type rawUserConfig struct {

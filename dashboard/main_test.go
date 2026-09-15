@@ -1508,23 +1508,15 @@ func TestDeploymentStatus_CommitTimeJSONSerialization(t *testing.T) {
 }
 
 func TestLoadQuickLaunchLinks(t *testing.T) {
-	// 1. Missing or empty path returns default core links
+	// 1. Missing or empty path returns default core links (now empty by default)
 	defaults := DefaultQuickLaunchLinks()
-	if len(defaults) != 1 {
-		t.Fatalf("expected 1 default quick launch link, got %d", len(defaults))
-	}
-	if defaults[0].Name != "🏠 PORTAL" || defaults[0].URL != "/" {
-		t.Errorf("expected first default link to be PORTAL, got %+v", defaults[0])
+	if len(defaults) != 0 {
+		t.Fatalf("expected 0 default quick launch links, got %d", len(defaults))
 	}
 
 	linksEmpty := loadQuickLaunchLinks("/non/existent/path/config.yaml")
-	if len(linksEmpty) != 1 {
-		t.Errorf("expected 1 link for non-existent file, got %d", len(linksEmpty))
-	}
-	for _, l := range linksEmpty {
-		if !l.IsCore {
-			t.Errorf("expected default link to have IsCore=true: %+v", l)
-		}
+	if len(linksEmpty) != 0 {
+		t.Errorf("expected 0 links for non-existent file, got %d", len(linksEmpty))
 	}
 
 	// 2. Custom links in dashboard.quick_launch_links
@@ -1547,10 +1539,10 @@ dashboard:
 	}
 
 	links1 := loadQuickLaunchLinks(cfgFile1)
-	if len(links1) != 2 {
-		t.Fatalf("expected 2 links (1 core + 1 custom), got %d", len(links1))
+	if len(links1) != 1 {
+		t.Fatalf("expected 1 custom link, got %d", len(links1))
 	}
-	customLink := links1[1]
+	customLink := links1[0]
 	if customLink.Name != "HOME" || customLink.URL != "https://home.zylman.com" || customLink.Icon != "🏠" {
 		t.Errorf("unexpected custom link: %+v", customLink)
 	}
@@ -1571,11 +1563,11 @@ quick_links:
 	}
 
 	links2 := loadQuickLaunchLinks(cfgFile2)
-	if len(links2) != 2 {
-		t.Fatalf("expected 2 links (1 core + 1 custom), got %d", len(links2))
+	if len(links2) != 1 {
+		t.Fatalf("expected 1 custom link, got %d", len(links2))
 	}
-	if links2[1].Name != "INTERNAL" || links2[1].Target != "_self" {
-		t.Errorf("unexpected root custom link: %+v", links2[1])
+	if links2[0].Name != "INTERNAL" || links2[0].Target != "_self" {
+		t.Errorf("unexpected root custom link: %+v", links2[0])
 	}
 
 	// 4. Malformed YAML
@@ -1584,8 +1576,8 @@ quick_links:
 		t.Fatal(err)
 	}
 	links3 := loadQuickLaunchLinks(cfgFile3)
-	if len(links3) != 1 {
-		t.Errorf("expected 1 link on malformed YAML, got %d", len(links3))
+	if len(links3) != 0 {
+		t.Errorf("expected 0 links on malformed YAML, got %d", len(links3))
 	}
 }
 
@@ -1692,8 +1684,8 @@ dashboard:
 	}
 
 	// Verify QuickLaunchLinks
-	if len(resp.QuickLaunchLinks) != 2 {
-		t.Fatalf("expected 2 quick launch links, got %d", len(resp.QuickLaunchLinks))
+	if len(resp.QuickLaunchLinks) != 1 {
+		t.Fatalf("expected 1 quick launch link, got %d", len(resp.QuickLaunchLinks))
 	}
 	hasHome := false
 	for _, l := range resp.QuickLaunchLinks {
