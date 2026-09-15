@@ -66,6 +66,36 @@ func TestStatusHandler(t *testing.T) {
 			t.Errorf("service %s has negative uptime: %d", svc.Name, svc.UptimeSeconds)
 		}
 	}
+
+	if resp.OngoingDeploy == "" {
+		t.Errorf("expected non-empty OngoingDeploy in status response")
+	}
+}
+
+func TestStatusHandlerOngoingDeploy(t *testing.T) {
+	tempDir := t.TempDir()
+	cfgFile := filepath.Join(tempDir, "config.yaml")
+	if err := os.WriteFile(cfgFile, []byte("dashboard: {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := statusHandler("", "", cfgFile, "testcommit")
+	req := httptest.NewRequest("GET", "/api/status", nil)
+	rr := httptest.NewRecorder()
+	handler(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", rr.Code)
+	}
+
+	var resp ClusterResponse
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if resp.OngoingDeploy != "idle" && resp.OngoingDeploy != "swapping" && resp.OngoingDeploy != "building" {
+		t.Errorf("unexpected OngoingDeploy: %q", resp.OngoingDeploy)
+	}
 }
 
 func TestStatusHandlerActiveTasks(t *testing.T) {

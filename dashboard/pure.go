@@ -454,3 +454,44 @@ func buildContainerChips(rawContainers []DockerContainerJSON) []MatrixJobChip {
 func getMimeType(filename string) string {
 	return GetMimeType(filename)
 }
+
+// CalculateDeployStatus evaluates active deployment stages with deterministic precedence:
+// swapping > building > awaiting_pull > queued > failed > degraded > idle.
+// Returns "idle" if no deployments exist or all deployments are completed/live.
+func CalculateDeployStatus(deployments []DeploymentStatus) string {
+	stageRank := map[string]int{
+		"swapping":      6,
+		"building":      5,
+		"awaiting_pull": 4,
+		"queued":        3,
+		"failed":        2,
+		"degraded":      1,
+	}
+
+	bestRank := 0
+	bestStage := "idle"
+
+	for _, d := range deployments {
+		if rank, ok := stageRank[d.Stage]; ok {
+			if rank > bestRank {
+				bestRank = rank
+				bestStage = d.Stage
+			}
+		}
+	}
+
+	return bestStage
+}
+
+// IsDeployOngoing returns true if any deployment is actively in-progress
+// ("queued", "building", "awaiting_pull", "swapping").
+// Returns false for terminal states ("failed", "degraded"), completed states ("live"), or empty slices.
+func IsDeployOngoing(deployments []DeploymentStatus) bool {
+	for _, d := range deployments {
+		switch d.Stage {
+		case "queued", "building", "awaiting_pull", "swapping":
+			return true
+		}
+	}
+	return false
+}

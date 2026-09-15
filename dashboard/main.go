@@ -136,6 +136,8 @@ type ClusterResponse struct {
 	Deployments      []DeploymentStatus    `json:"deployments"`
 	QuickLaunchLinks []QuickLaunchLink     `json:"quick_launch_links"`
 	GitSync          GitSyncStatusResponse `json:"git_sync"`
+	OngoingDeploy    string                `json:"ongoing_deploy"`
+	IsDeploying      bool                  `json:"is_deploying"`
 }
 
 type GitHubRun struct {
@@ -1209,6 +1211,8 @@ func statusHandler(brainURL, gitsyncURL, configPath, gitCommit string) http.Hand
 		}
 
 		clusterStatus := CalculateClusterStatus(services)
+		ongoingDeploy := CalculateDeployStatus(deployments)
+		isDeploying := IsDeployOngoing(deployments)
 
 		resp := ClusterResponse{
 			SystemTime:       now,
@@ -1219,6 +1223,8 @@ func statusHandler(brainURL, gitsyncURL, configPath, gitCommit string) http.Hand
 			Deployments:      deployments,
 			QuickLaunchLinks: quickLinks,
 			GitSync:          gitSync,
+			OngoingDeploy:    ongoingDeploy,
+			IsDeploying:      isDeploying,
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")

@@ -971,3 +971,117 @@ func TestSanitizeEnvVars_TableDriven(t *testing.T) {
 		}
 	}
 }
+
+func TestCalculateDeployStatus_TableDriven(t *testing.T) {
+	tests := []struct {
+		name        string
+		deployments []DeploymentStatus
+		wantStatus  string
+		wantOngoing bool
+	}{
+		{
+			name:        "empty deployments returns idle and false",
+			deployments: []DeploymentStatus{},
+			wantStatus:  "idle",
+			wantOngoing: false,
+		},
+		{
+			name: "live completed deployment returns idle and false",
+			deployments: []DeploymentStatus{
+				{Stage: "live", Progress: 100},
+			},
+			wantStatus:  "idle",
+			wantOngoing: false,
+		},
+		{
+			name: "queued deployment returns queued and true",
+			deployments: []DeploymentStatus{
+				{Stage: "queued", Progress: 15},
+			},
+			wantStatus:  "queued",
+			wantOngoing: true,
+		},
+		{
+			name: "building deployment returns building and true",
+			deployments: []DeploymentStatus{
+				{Stage: "building", Progress: 45},
+			},
+			wantStatus:  "building",
+			wantOngoing: true,
+		},
+		{
+			name: "awaiting_pull deployment returns awaiting_pull and true",
+			deployments: []DeploymentStatus{
+				{Stage: "awaiting_pull", Progress: 50},
+			},
+			wantStatus:  "awaiting_pull",
+			wantOngoing: true,
+		},
+		{
+			name: "swapping deployment returns swapping and true",
+			deployments: []DeploymentStatus{
+				{Stage: "swapping", Progress: 75},
+			},
+			wantStatus:  "swapping",
+			wantOngoing: true,
+		},
+		{
+			name: "failed deployment returns failed and false",
+			deployments: []DeploymentStatus{
+				{Stage: "failed", Progress: 0},
+			},
+			wantStatus:  "failed",
+			wantOngoing: false,
+		},
+		{
+			name: "degraded deployment returns degraded and false",
+			deployments: []DeploymentStatus{
+				{Stage: "degraded", Progress: 85},
+			},
+			wantStatus:  "degraded",
+			wantOngoing: false,
+		},
+		{
+			name: "precedence: swapping overrides building",
+			deployments: []DeploymentStatus{
+				{Stage: "building", Progress: 45},
+				{Stage: "swapping", Progress: 75},
+			},
+			wantStatus:  "swapping",
+			wantOngoing: true,
+		},
+		{
+			name: "precedence: building overrides queued and failed",
+			deployments: []DeploymentStatus{
+				{Stage: "queued", Progress: 15},
+				{Stage: "failed", Progress: 0},
+				{Stage: "building", Progress: 35},
+			},
+			wantStatus:  "building",
+			wantOngoing: true,
+		},
+		{
+			name: "precedence: failed overrides degraded",
+			deployments: []DeploymentStatus{
+				{Stage: "degraded", Progress: 85},
+				{Stage: "failed", Progress: 0},
+			},
+			wantStatus:  "failed",
+			wantOngoing: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotStatus := CalculateDeployStatus(tt.deployments)
+			if gotStatus != tt.wantStatus {
+				t.Errorf("CalculateDeployStatus() = %q, want %q", gotStatus, tt.wantStatus)
+			}
+			gotOngoing := IsDeployOngoing(tt.deployments)
+			if gotOngoing != tt.wantOngoing {
+				t.Errorf("IsDeployOngoing() = %v, want %v", gotOngoing, tt.wantOngoing)
+			}
+		})
+	}
+}
+

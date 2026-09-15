@@ -369,6 +369,8 @@ services:
       homepage.widget.mappings[0].label: "Active Tasks"
       homepage.widget.mappings[1].field: "cluster_status"
       homepage.widget.mappings[1].label: "Cluster Status"
+      homepage.widget.mappings[2].field: "ongoing_deploy"
+      homepage.widget.mappings[2].label: "Ongoing Deploy"
     environment:
       - PORT=8080
       - BRAIN_URL=http://brain:8080
