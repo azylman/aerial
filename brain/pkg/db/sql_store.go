@@ -155,6 +155,20 @@ func (s *SQLStore) DecayAndPruneFacts(ctx context.Context, decayStep float64, pr
 	return DecayAndPruneFactsWithContext(ctx, s.db, s.isPostgres, decayStep, pruneFloor, pruneAgeDays)
 }
 
+func (s *SQLStore) GetFactsMissingEmbeddings(ctx context.Context, limit int) ([]Fact, error) {
+	if s == nil || isDBTXNil(s.db) {
+		return nil, fmt.Errorf("database is nil")
+	}
+	return GetFactsMissingEmbeddingsWithContext(ctx, s.db, limit)
+}
+
+func (s *SQLStore) UpdateFactEmbedding(ctx context.Context, id int64, embedding []float32) error {
+	if s == nil || isDBTXNil(s.db) {
+		return fmt.Errorf("database is nil")
+	}
+	return UpdateFactEmbeddingWithContext(ctx, s.db, id, embedding)
+}
+
 // ScheduleStore implementation
 func (s *SQLStore) CreateOneShotSchedule(ctx context.Context, sched OneShotSchedule) error {
 	if s == nil || isDBTXNil(s.db) {
@@ -450,3 +464,25 @@ func (s *SQLStore) GetPreviousSessionID(ctx context.Context, threadID string) (s
 	}
 	return GetPreviousSessionID(s.db, threadID)
 }
+
+func (s *SQLStore) GetThreadSummary(ctx context.Context, threadID string) (string, string, error) {
+	if s == nil || isDBTXNil(s.db) {
+		return "", "", fmt.Errorf("database is nil")
+	}
+	return GetThreadSummaryWithContext(ctx, s.db, threadID)
+}
+
+func (s *SQLStore) SaveThreadSummary(ctx context.Context, threadID, summary, lastSummarizedMsgID string) error {
+	if s == nil || isDBTXNil(s.db) {
+		return fmt.Errorf("database is nil")
+	}
+	return SaveThreadSummaryWithContext(ctx, s.db, threadID, summary, lastSummarizedMsgID)
+}
+
+func (s *SQLStore) GetSessionActivityStats(ctx context.Context, threadID string) (*SessionActivityStats, error) {
+	if s == nil || isDBTXNil(s.db) {
+		return nil, fmt.Errorf("database is nil")
+	}
+	return GetSessionActivityStatsWithContext(ctx, s.db, threadID)
+}
+

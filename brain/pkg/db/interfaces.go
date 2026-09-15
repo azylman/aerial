@@ -20,6 +20,15 @@ var (
 	ErrFactNotFound            = errors.New("fact not found")
 )
 
+// SessionActivityStats summarizes database-level activity timestamps for session lifecycle decisions.
+type SessionActivityStats struct {
+	InternalSessionID string    `json:"internal_session_id"`
+	TurnCount         int       `json:"turn_count"`
+	SessionUpdatedAt  time.Time `json:"session_updated_at"`
+	CompletedTurns    int64     `json:"completed_turns"`
+	LastMessageAt     time.Time `json:"last_message_at"`
+}
+
 // FactStore handles persistence and semantic search for conversation facts.
 type FactStore interface {
 	InsertFact(ctx context.Context, category, factText string, importance float64, threadID string, embedding []float32) (int64, error)
@@ -32,6 +41,8 @@ type FactStore interface {
 	FindDuplicateFact(ctx context.Context, embedding []float32, minSim float64) (*Fact, float64, error)
 	ReinforceFact(ctx context.Context, id int64, newText string, newEmbedding []float32, boost float64) error
 	DecayAndPruneFacts(ctx context.Context, decayStep float64, pruneFloor float64, pruneAgeDays int) (decayed int64, pruned int64, err error)
+	GetFactsMissingEmbeddings(ctx context.Context, limit int) ([]Fact, error)
+	UpdateFactEmbedding(ctx context.Context, id int64, embedding []float32) error
 }
 
 // ScheduleStore handles cron and one-shot schedule execution and telemetry.
@@ -85,6 +96,9 @@ type SessionStore interface {
 	GetSessionTurnCount(ctx context.Context, sessionKey string) (int, error)
 	RotateSessionID(ctx context.Context, sessionKey, newSessionID string) error
 	GetSessionInfo(ctx context.Context, threadID string) (*SessionInfo, error)
+	GetThreadSummary(ctx context.Context, threadID string) (summary string, lastSummarizedMsgID string, err error)
+	SaveThreadSummary(ctx context.Context, threadID, summary, lastSummarizedMsgID string) error
+	GetSessionActivityStats(ctx context.Context, threadID string) (*SessionActivityStats, error)
 }
 
 // Store unifies all repository capabilities under a single interface.

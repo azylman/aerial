@@ -223,19 +223,52 @@ func cosineSimilarity(a, b []float32) float64 {
 	return dot / (math.Sqrt(normA) * math.Sqrt(normB))
 }
 
-func UpdateFactEmbedding(database DBTX, id int64, embedding []float32) error {
+func UpdateFactEmbeddingWithContext(ctx context.Context, database DBTX, id int64, embedding []float32) error {
 	if database == nil {
 		return fmt.Errorf("database is nil")
 	}
 	if len(embedding) != ExpectedEmbeddingDim {
 		return fmt.Errorf("invalid embedding dimension: expected %d, got %d", ExpectedEmbeddingDim, len(embedding))
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
 
 	vec := pgvector.NewVector(embedding)
 	_, err := database.ExecContext(ctx, "UPDATE facts SET embedding = $1 WHERE id = $2", vec, id)
 	return err
+}
+
+func UpdateFactEmbedding(database DBTX, id int64, embedding []float32) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return UpdateFactEmbeddingWithContext(ctx, database, id, embedding)
+}
+
+func GetFactsMissingEmbeddingsWithContext(ctx context.Context, database DBTX, limit int) ([]Fact, error) {
+	if database == nil {
+		return nil, nil
+	}
+	query := "SELECT id, category, fact_text, importance, thread_id, created_at, COALESCE(last_reinforced_at, created_at), COALESCE(last_decayed_at, created_at), COALESCE(reinforce_count, 1) FROM facts WHERE embedding IS NULL ORDER BY id ASC"
+	if limit > 0 {
+		query += fmt.Sprintf(" LIMIT %d", limit)
+	}
+	rows, err := database.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var results []Fact
+	for rows.Next() {
+		var f Fact
+		var createdAt, lastReinforced, lastDecayed FactTime
+		if err := rows.Scan(&f.ID, &f.Category, &f.FactText, &f.Importance, &f.ThreadID, &createdAt, &lastReinforced, &lastDecayed, &f.ReinforceCount); err != nil {
+			return nil, err
+		}
+		f.CreatedAt = createdAt.Time
+		f.LastReinforcedAt = lastReinforced.Time
+		f.LastDecayedAt = lastDecayed.Time
+		results = append(results, f)
+	}
+	return results, rows.Err()
 }
 
 func GetAllFactsWithEmbeddings(database DBTX) ([]FactWithEmbedding, error) {
