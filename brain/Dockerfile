@@ -1,13 +1,16 @@
+# syntax=docker/dockerfile:1
 # --- Build stage --------------------------------------------------------
 FROM golang:1.24-bookworm AS builder
 
 WORKDIR /build
 
 COPY brain/go.mod brain/go.sum* ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
 
 COPY brain/ ./
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /aerial-brain .
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /aerial-brain .
 
 # Install golangci-lint in builder stage for runtime export
 RUN curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b /usr/local/bin v1.59.1

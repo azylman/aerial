@@ -177,7 +177,7 @@ for svc in $ALL_GO_SERVICES; do
                 LC_ALL="${LC_ALL:-en_US.UTF-8}" \
                 GIT_TERMINAL_PROMPT=0 \
                 CGO_ENABLED="$cgo_val" \
-                go test -coverprofile="$prof_file" "$pkg" >"$log_file" 2>&1); then
+                go test -timeout 60s -coverprofile="$prof_file" "$pkg" >"$log_file" 2>&1); then
                 echo "PASS" > "$status_file"
             else
                 echo "FAIL" > "$status_file"
@@ -274,6 +274,7 @@ if [ -f "dashboard/app.test.js" ] && { [ -z "$TARGET_SERVICE" ] || [ "$TARGET_SE
         node_exit=0
         node_out=$( (cd dashboard && node --test --experimental-test-coverage *.test.js 2>&1) ) || node_exit=$?
         if [ "$node_exit" -ne 0 ]; then
+            echo "$node_out" >&2
             record_violation "Permet HUD frontend tests failed during coverage collection"
         fi
         
