@@ -84,7 +84,7 @@ func TestSQLStoreCloseAndWithTxBranches(t *testing.T) {
 
 	// 6. WithTx failure when BeginTx fails (e.g. closed DB)
 	tmpPath := filepath.Join(t.TempDir(), "closed.db")
-	db, err := initDB(tmpPath)
+	db, err := initTestSQLite(tmpPath)
 	if err != nil {
 		t.Fatalf("failed to init db: %v", err)
 	}
@@ -135,7 +135,7 @@ func TestSQLStoreUpdateCronEffortAndPendingMessages(t *testing.T) {
 
 	// 4. GetPendingOrProcessingMessages error branch
 	tmpPath := filepath.Join(t.TempDir(), "closed2.db")
-	closedDB, err := initDB(tmpPath)
+	closedDB, err := initTestSQLite(tmpPath)
 	if err != nil {
 		t.Fatalf("failed to init db: %v", err)
 	}
@@ -221,7 +221,7 @@ func TestMessagesValidationAndEdgeCases(t *testing.T) {
 
 	// 6. Closed DB error paths
 	tmpPath := filepath.Join(t.TempDir(), "closed3.db")
-	closedDB, err := initDB(tmpPath)
+	closedDB, err := initTestSQLite(tmpPath)
 	if err != nil {
 		t.Fatalf("failed to init db: %v", err)
 	}
@@ -374,7 +374,7 @@ func TestSchedulesValidationAndMetricsBranches(t *testing.T) {
 	_ = affected
 
 	tmpPath := filepath.Join(t.TempDir(), "closed4.db")
-	closedDB, err := initDB(tmpPath)
+	closedDB, err := initTestSQLite(tmpPath)
 	if err != nil {
 		t.Fatalf("failed to init db: %v", err)
 	}
@@ -426,7 +426,7 @@ func TestSessionsValidationAndEdgeCases(t *testing.T) {
 
 	// 3. GetThreadSummary closed DB error
 	tmpPath := filepath.Join(t.TempDir(), "closed5.db")
-	closedDB, err := initDB(tmpPath)
+	closedDB, err := initTestSQLite(tmpPath)
 	if err != nil {
 		t.Fatalf("failed to init db: %v", err)
 	}

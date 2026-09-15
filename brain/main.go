@@ -34,7 +34,6 @@ import (
 	"github.com/azylman/aerial/brain/pkg/watcher"
 	"github.com/bwmarrin/discordgo"
 	"github.com/google/uuid"
-	_ "modernc.org/sqlite"
 )
 
 type PromptRequest struct {

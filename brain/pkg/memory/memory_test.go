@@ -62,20 +62,6 @@ func TestNew_ConfigPointerInjection(t *testing.T) {
 	}
 }
 
-func TestFloat32ByteConversions(t *testing.T) {
-	input := []float32{0.123, -0.456, 0.789, 1.0, -1.0}
-	bytes := db.Float32ToBytes(input)
-	output := db.BytesToFloat32(bytes)
-
-	if len(output) != len(input) {
-		t.Fatalf("expected len %d, got %d", len(input), len(output))
-	}
-	for i := range input {
-		if input[i] != output[i] {
-			t.Errorf("at index %d: expected %f, got %f", i, input[i], output[i])
-		}
-	}
-}
 
 func TestDotProduct(t *testing.T) {
 	v1 := []float32{1.0, 0.0, 0.0}

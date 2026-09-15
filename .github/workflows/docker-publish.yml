@@ -104,6 +104,20 @@ jobs:
     name: Run Service Unit Tests
     needs: changes
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: aerial
+          POSTGRES_PASSWORD: aerial_secure_pass
+          POSTGRES_DB: aerial
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -124,6 +138,8 @@ jobs:
 
       - name: Test Brain
         if: needs.changes.outputs.brain == 'true'
+        env:
+          DATABASE_URL: postgres://aerial:aerial_secure_pass@localhost:5432/aerial?sslmode=disable
         run: |
           cd brain
           go test -v ./...
@@ -154,6 +170,8 @@ jobs:
           go test -v ./...
 
       - name: Verify Monorepo Test Coverage & Gating
+        env:
+          DATABASE_URL: postgres://aerial:aerial_secure_pass@localhost:5432/aerial?sslmode=disable
         run: |
           sh scripts/check-coverage.sh --check --summary
 

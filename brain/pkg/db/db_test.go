@@ -11,9 +11,14 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/brain/pkg/config"
+	"github.com/pgvector/pgvector-go"
 )
 
 func TestNew_ConfigPointerInjection(t *testing.T) {
+	oldHook := sqliteTestInitHook
+	sqliteTestInitHook = nil
+	defer func() { sqliteTestInitHook = oldHook }()
+
 	// 1. Nil config rejected
 	if _, err := New(nil); err == nil {
 		t.Errorf("expected error when cfg is nil, got nil")
@@ -31,17 +36,47 @@ func TestNew_ConfigPointerInjection(t *testing.T) {
 		t.Errorf("expected error for unsupported scheme, got nil")
 	}
 
-	// 4. Valid SQLite temp db succeeds (supports both file paths and sqlite:// prefix)
+	// 4. SQLite scheme rejected by New() in production (nil hook)
 	tmpFile := filepath.Join(t.TempDir(), "test.db")
-	cfgValid := config.NewFromData(&config.ConfigData{DatabaseURL: "sqlite://" + tmpFile})
-	database, err := New(cfgValid)
-	if err != nil {
-		t.Fatalf("expected valid sqlite initialization, got: %v", err)
+	cfgSQLite := config.NewFromData(&config.ConfigData{DatabaseURL: "sqlite://" + tmpFile})
+	if _, err := New(cfgSQLite); err == nil {
+		t.Errorf("expected error for sqlite scheme in New, got nil")
 	}
-	defer database.Close()
+
+	// 5. With hook restored, SQLite succeeds in test mode
+	sqliteTestInitHook = oldHook
+	if oldHook != nil {
+		dbHooked, err := New(cfgSQLite)
+		if err != nil {
+			t.Errorf("expected New to succeed with hooked sqlite, got: %v", err)
+		} else {
+			dbHooked.Close()
+		}
+	}
 }
 
 func TestInitDB_PostgresValidation(t *testing.T) {
+	oldHook := sqliteTestInitHook
+	sqliteTestInitHook = nil
+	defer func() { sqliteTestInitHook = oldHook }()
+
+	// 0. Rejects nil config, empty URL, and non-PostgreSQL schemes in New()
+	if _, err := New(nil); err == nil {
+		t.Errorf("expected error for nil config in New, got nil")
+	}
+	cfgEmptyURL := config.NewFromData(&config.ConfigData{DatabaseURL: ""})
+	if _, err := New(cfgEmptyURL); err == nil {
+		t.Errorf("expected error for empty DatabaseURL in New, got nil")
+	}
+	for _, invalidScheme := range []string{":memory:", "sqlite://aerial.db", "file:aerial.db?mode=memory", "/var/data/aerial.db"} {
+		cfgInvalidScheme := config.NewFromData(&config.ConfigData{DatabaseURL: invalidScheme})
+		if _, err := New(cfgInvalidScheme); err == nil {
+			t.Errorf("expected error for non-postgres scheme %q in New, got nil", invalidScheme)
+		} else if !strings.Contains(err.Error(), "only postgres:// or postgresql:// supported") {
+			t.Errorf("unexpected error for %q: %v", invalidScheme, err)
+		}
+	}
+
 	// 1. Rejects invalid PostgreSQL connection string syntax via pgx.ParseConfig
 	cfgBadSyntax := config.NewFromData(&config.ConfigData{DatabaseURL: "postgres://invalid user@localhost:5432/aerial"})
 	_, errBadSyntax := New(cfgBadSyntax)
@@ -75,7 +110,7 @@ func TestInitDB_PostgresValidation(t *testing.T) {
 func setupTestDB(t *testing.T) *sql.DB {
 	t.Helper()
 	dsn := fmt.Sprintf("file:%s_%d?mode=memory&cache=shared&_busy_timeout=5000", t.Name(), time.Now().UnixNano())
-	database, err := New(config.NewFromData(&config.ConfigData{DatabaseURL: dsn}))
+	database, err := initTestSQLite(dsn)
 	if err != nil {
 		t.Fatalf("Failed to initialize hermetic SQLite in-memory test database: %v", err)
 		return nil
@@ -1296,24 +1331,7 @@ func TestSQLiteExplicitSchemaAndMigrations(t *testing.T) {
 }
 
 func TestVectorHelpersEdgeCases(t *testing.T) {
-	// 1. Float32ToBytes and BytesToFloat32 empty
-	b := Float32ToBytes(nil)
-	if len(b) != 0 {
-		t.Errorf("expected empty bytes for nil slice")
-	}
-	f := BytesToFloat32(nil)
-	if len(f) != 0 {
-		t.Errorf("expected empty float slice for nil bytes")
-	}
-
-	// 2. BytesToFloat32 invalid length
-	invalidBytes := []byte{1, 2, 3}
-	fInv := BytesToFloat32(invalidBytes)
-	if len(fInv) != 0 {
-		t.Errorf("expected empty slice for misaligned byte slice")
-	}
-
-	// 3. cosineSimilarity zero vectors
+	// cosineSimilarity zero vectors
 	sim := cosineSimilarity(nil, nil)
 	if sim != 0.0 {
 		t.Errorf("expected 0.0 for nil vectors, got %f", sim)
@@ -1345,13 +1363,7 @@ func TestNullVector_Scan(t *testing.T) {
 		t.Errorf("expected valid vector from byte string, got err: %v, len: %d", err, len(nv.Vector))
 	}
 
-	// 4. raw float32 byte slice
-	rawBytes := Float32ToBytes([]float32{1.0, 2.0, 3.0, 4.0})
-	if err := nv.Scan(rawBytes); err != nil || !nv.Valid || len(nv.Vector) != 4 {
-		t.Errorf("expected valid vector from raw float bytes, got err: %v, len: %d", err, len(nv.Vector))
-	}
-
-	// 5. invalid int type
+	// 4. invalid int type
 	if err := nv.Scan(12345); err == nil {
 		t.Error("expected error for invalid int type in NullVector.Scan")
 	}
@@ -1818,8 +1830,8 @@ func TestDB_SearchSimilarFacts_SQLite_InvalidEmbeddingDimensions(t *testing.T) {
 		t.Fatalf("failed to insert fact: %v", err)
 	}
 
-	// Update embedding bytes to valid binary float32 slice of mismatched dimension (10 != ExpectedEmbeddingDim)
-	shortVec := Float32ToBytes(make([]float32, 10))
+	// Update embedding bytes to valid vector of mismatched dimension (10 != ExpectedEmbeddingDim)
+	shortVec := pgvector.NewVector(make([]float32, 10))
 	_, err = database.Exec("UPDATE facts SET embedding = $1 WHERE id = $2", shortVec, f1ID)
 	if err != nil {
 		t.Fatalf("failed to update embedding: %v", err)
@@ -1923,16 +1935,7 @@ func TestDB_NullVector_Scan_AllBranches(t *testing.T) {
 		t.Errorf("expected 2 items for byte pgvector, got %+v, err: %v", nv, err)
 	}
 
-	// 5. []byte binary float32
-	binFloats := Float32ToBytes([]float32{1.5, 2.5})
-	if err := nv.Scan(binFloats); err != nil || !nv.Valid || len(nv.Vector) != 2 {
-		t.Errorf("expected 2 items for binary float bytes, got %+v, err: %v", nv, err)
-	}
-
-	// 6. []byte odd length (not divisible by 4)
-	_ = nv.Scan([]byte{1, 2, 3})
-
-	// 7. Unsupported type
+	// 5. Unsupported type
 	if err := nv.Scan(12345); err == nil {
 		t.Error("expected error scanning int into NullVector")
 	}

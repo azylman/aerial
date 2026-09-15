@@ -9,7 +9,7 @@ import (
 func NewTestStore(t testing.TB) Store {
 	t.Helper()
 	sqlitePath := filepath.Join(t.TempDir(), "aerial_test.db")
-	db, err := initDB(sqlitePath)
+	db, err := initTestSQLite(sqlitePath)
 	if err != nil {
 		t.Fatalf("NewTestStore failed to initialize SQLite test database: %v", err)
 	}
