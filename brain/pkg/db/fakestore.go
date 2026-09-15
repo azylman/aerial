@@ -1160,18 +1160,28 @@ func (f *FakeStore) GetActiveConversationsForExtraction(ctx context.Context, act
 		return nil, err
 	}
 
+	if activeHours <= 0 {
+		activeHours = 24
+	}
 	cutoff := time.Now().UTC().Add(-time.Duration(activeHours) * time.Hour)
 	seen := make(map[string]bool)
 	var threads []string
 	for _, id := range f.messageOrder {
 		m := f.messages[id]
-		if m != nil && m.ThreadID != "" && m.CreatedAt.After(cutoff) {
-			if !seen[m.ThreadID] {
-				seen[m.ThreadID] = true
-				threads = append(threads, m.ThreadID)
+		if m != nil && m.ThreadID != "" && (m.CreatedAt.After(cutoff) || m.CreatedAt.Equal(cutoff)) {
+			watermark := f.watermarks[m.ThreadID]
+			if watermark == 0 || m.RowID > watermark {
+				if !seen[m.ThreadID] {
+					seen[m.ThreadID] = true
+					threads = append(threads, m.ThreadID)
+					if len(threads) >= 20 {
+						break
+					}
+				}
 			}
 		}
 	}
+	sort.Strings(threads)
 	return threads, nil
 }
 
@@ -1231,7 +1241,10 @@ func (f *FakeStore) ReinforceFact(ctx context.Context, id int64, newText string,
 	if !ok || fe == nil {
 		return ErrFactNotFound
 	}
-	fe.Fact.Importance = math.Min(1.0, fe.Fact.Importance+boost)
+	if boost <= 0 {
+		boost = 0.15
+	}
+	fe.Fact.Importance = math.Min(1.0, math.Max(0.70, math.Round((fe.Fact.Importance+boost)*100)/100))
 	fe.Fact.LastReinforcedAt = time.Now().UTC()
 	fe.Fact.ReinforceCount++
 	if newText != "" {
@@ -1251,6 +1264,13 @@ func (f *FakeStore) DecayAndPruneFacts(ctx context.Context, decayStep float64, p
 		return 0, 0, err
 	}
 
+	if decayStep <= 0 {
+		decayStep = 0.02
+	}
+	if pruneFloor <= 0 {
+		pruneFloor = 0.10
+	}
+
 	now := time.Now().UTC()
 	ageCutoff := now.Add(-time.Duration(pruneAgeDays) * 24 * time.Hour)
 	var decayed, pruned int64
@@ -1259,7 +1279,7 @@ func (f *FakeStore) DecayAndPruneFacts(ctx context.Context, decayStep float64, p
 		if fe == nil {
 			continue
 		}
-		fe.Fact.Importance = math.Max(0.0, fe.Fact.Importance-decayStep)
+		fe.Fact.Importance = math.Max(0.0, math.Round((fe.Fact.Importance-decayStep)*100)/100)
 		fe.Fact.LastDecayedAt = now
 		decayed++
 

@@ -148,8 +148,8 @@ func (s *Scheduler) ProcessDueSchedules(ctx context.Context) error {
 }
 
 // ProcessDueSchedules evaluates and processes due cron and one-shot schedules (compatibility wrapper).
-func ProcessDueSchedules(ctx context.Context, cfg *config.Config, database *sql.DB, enqueuer MessageEnqueuer, threadCreator ThreadCreator) error {
-	s, err := New(cfg, database, enqueuer, threadCreator)
+func ProcessDueSchedules(ctx context.Context, cfg *config.Config, dbOrStore any, enqueuer MessageEnqueuer, threadCreator ThreadCreator) error {
+	s, err := New(cfg, dbOrStore, enqueuer, threadCreator)
 	if err != nil {
 		return err
 	}
@@ -303,9 +303,9 @@ func (s *Scheduler) Start(ctx context.Context) (stop func()) {
 }
 
 // Start launches the background scheduler monitor daemon with a 30-second ticker (compatibility wrapper).
-func Start(ctx context.Context, cfg *config.Config, database *sql.DB, pool *queue.WorkerPool, dg *discordgo.Session) (stop func()) {
+func Start(ctx context.Context, cfg *config.Config, dbOrStore any, pool *queue.WorkerPool, dg *discordgo.Session) (stop func()) {
 	threadCreator := NewDiscordThreadCreator(dg)
-	s, err := New(cfg, database, pool, threadCreator)
+	s, err := New(cfg, dbOrStore, pool, threadCreator)
 	if err != nil {
 		log.Printf("[Scheduler] Error: %v", err)
 		return func() {}
@@ -546,8 +546,8 @@ func (s *Scheduler) Run(ctx context.Context, interval time.Duration) {
 }
 
 // Run executes the monitoring loop with ticker interval and context cancellation (compatibility wrapper).
-func Run(ctx context.Context, cfg *config.Config, database *sql.DB, enqueuer MessageEnqueuer, threadCreator ThreadCreator, interval time.Duration) {
-	s, err := New(cfg, database, enqueuer, threadCreator)
+func Run(ctx context.Context, cfg *config.Config, dbOrStore any, enqueuer MessageEnqueuer, threadCreator ThreadCreator, interval time.Duration) {
+	s, err := New(cfg, dbOrStore, enqueuer, threadCreator)
 	if err != nil {
 		log.Printf("[Scheduler] Error: %v", err)
 		return

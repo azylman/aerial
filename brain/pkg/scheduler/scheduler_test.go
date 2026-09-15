@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -107,24 +108,67 @@ func TestFormatThreadTitle(t *testing.T) {
 func newTestConfig() *config.Config {
 	return config.NewFromData(config.DefaultConfigData())
 }
+
+func setupTestStore(t *testing.T) *db.FakeStore {
+	t.Helper()
+	return db.NewFakeStore()
+}
+
+func createCronSchedule(s db.Store, c db.CronSchedule) error {
+	return s.CreateCronSchedule(context.Background(), c)
+}
+
+func getDueCronSchedules(s db.Store) ([]db.CronSchedule, error) {
+	return s.GetDueCronSchedules(context.Background())
+}
+
+func getAllCronSchedules(s db.Store, targetID string) ([]db.CronSchedule, error) {
+	return s.GetAllCronSchedules(context.Background(), targetID)
+}
+
+func createOneShotSchedule(s db.Store, o db.OneShotSchedule) error {
+	return s.CreateOneShotSchedule(context.Background(), o)
+}
+
+func getDueOneShotSchedules(s db.Store) ([]db.OneShotSchedule, error) {
+	return s.GetDueOneShotSchedules(context.Background())
+}
+
+func getAllOneShotSchedules(s db.Store, threadID string) ([]db.OneShotSchedule, error) {
+	return s.GetAllOneShotSchedules(context.Background(), threadID)
+}
+
+func getScheduleRunsPaginated(s db.Store, limit, offset int, schedID, status string) ([]db.ScheduleRun, int, error) {
+	return s.GetScheduleRunsPaginated(context.Background(), limit, offset, schedID, status)
+}
+
+func insertMessageAndConsumeOneShot(s db.Store, scheduleID string, msg db.Message) error {
+	return s.InsertMessageAndConsumeOneShot(context.Background(), scheduleID, msg)
+}
+
+func getMessage(s db.Store, id string) (*db.Message, error) {
+	return s.GetMessage(context.Background(), id)
+}
+
+func insertMessage(s db.Store, msg db.Message) error {
+	return s.InsertMessage(context.Background(), msg)
+}
+
 func TestNew_NilConfigReturnsError(t *testing.T) {
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer database.Close()
+	store := setupTestStore(t)
+	defer store.Close()
 
 	enqueuer := newMockEnqueuer()
 	threadCreator := newMockThreadCreator()
 
 	// 1. nil *config.Config returns error
-	if _, err := New(nil, database, enqueuer, threadCreator); err == nil {
+	if _, err := New(nil, store, enqueuer, threadCreator); err == nil {
 		t.Errorf("expected error when cfg is nil")
 	}
 
 	// 2. Valid config succeeds
 	validCfg := config.NewFromData(config.DefaultConfigData())
-	s, err := New(validCfg, database, enqueuer, threadCreator)
+	s, err := New(validCfg, store, enqueuer, threadCreator)
 	if err != nil {
 		t.Fatalf("unexpected error with valid config: %v", err)
 	}
@@ -134,11 +178,8 @@ func TestNew_NilConfigReturnsError(t *testing.T) {
 }
 
 func TestProcessDueCronSchedules_InheritsConfigTimezone(t *testing.T) {
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer database.Close()
+	store := setupTestStore(t)
+	defer store.Close()
 
 	enqueuer := newMockEnqueuer()
 	threadCreator := newMockThreadCreator()
@@ -150,7 +191,7 @@ func TestProcessDueCronSchedules_InheritsConfigTimezone(t *testing.T) {
 		},
 	})
 
-	sched, err := New(cfg, database, enqueuer, threadCreator)
+	sched, err := New(cfg, store, enqueuer, threadCreator)
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
 	}
@@ -168,7 +209,7 @@ func TestProcessDueCronSchedules_InheritsConfigTimezone(t *testing.T) {
 		Enabled:     true,
 		CreatedAt:   now.Add(-1 * time.Hour),
 	}
-	if err := db.CreateCronSchedule(database, cronSched); err != nil {
+	if err := createCronSchedule(store, cronSched); err != nil {
 		t.Fatalf("CreateCronSchedule failed: %v", err)
 	}
 
@@ -177,7 +218,7 @@ func TestProcessDueCronSchedules_InheritsConfigTimezone(t *testing.T) {
 	}
 
 	// Verify next_run_at was calculated using America/New_York
-	dueAfter, err := db.GetDueCronSchedules(database)
+	dueAfter, err := getDueCronSchedules(store)
 	if err != nil {
 		t.Fatalf("GetDueCronSchedules failed: %v", err)
 	}
@@ -256,11 +297,8 @@ func TestCalculateNextRun(t *testing.T) {
 }
 
 func TestProcessDueCronSchedules(t *testing.T) {
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to init DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
+	defer store.Close()
 
 	now := time.Now().UTC()
 
@@ -276,7 +314,7 @@ func TestProcessDueCronSchedules(t *testing.T) {
 		Enabled:     true,
 		CreatedAt:   now.Add(-1 * time.Hour),
 	}
-	if err := db.CreateCronSchedule(database, cronSched); err != nil {
+	if err := createCronSchedule(store, cronSched); err != nil {
 		t.Fatalf("Failed to create cron schedule: %v", err)
 	}
 
@@ -292,7 +330,7 @@ func TestProcessDueCronSchedules(t *testing.T) {
 		Enabled:     true,
 		CreatedAt:   now,
 	}
-	if err := db.CreateCronSchedule(database, futureCron); err != nil {
+	if err := createCronSchedule(store, futureCron); err != nil {
 		t.Fatalf("Failed to create future cron schedule: %v", err)
 	}
 
@@ -300,7 +338,7 @@ func TestProcessDueCronSchedules(t *testing.T) {
 	enqueuer := newMockEnqueuer()
 
 	// Process due schedules
-	if err := ProcessDueSchedules(context.Background(), newTestConfig(), database, enqueuer, threadCreator); err != nil {
+	if err := ProcessDueSchedules(context.Background(), newTestConfig(), store, enqueuer, threadCreator); err != nil {
 		t.Fatalf("ProcessDueSchedules error: %v", err)
 	}
 
@@ -323,7 +361,7 @@ func TestProcessDueCronSchedules(t *testing.T) {
 	}
 
 	// Verify message in DB
-	dbMsg, err := db.GetMessage(database, msgs[0].ID)
+	dbMsg, err := getMessage(store, msgs[0].ID)
 	if err != nil || dbMsg == nil {
 		t.Fatalf("Message not found in DB: %v", err)
 	}
@@ -332,7 +370,7 @@ func TestProcessDueCronSchedules(t *testing.T) {
 	}
 
 	// Verify next_run_at was advanced and cron-1 is no longer due
-	dueCrons, err := db.GetDueCronSchedules(database)
+	dueCrons, err := getDueCronSchedules(store)
 	if err != nil {
 		t.Fatalf("GetDueCronSchedules error: %v", err)
 	}
@@ -342,11 +380,8 @@ func TestProcessDueCronSchedules(t *testing.T) {
 }
 
 func TestProcessDueCronSchedules_24hStalenessGuard(t *testing.T) {
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to init DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
+	defer store.Close()
 
 	now := time.Now().UTC()
 
@@ -362,14 +397,14 @@ func TestProcessDueCronSchedules_24hStalenessGuard(t *testing.T) {
 		Enabled:     true,
 		CreatedAt:   now.Add(-48 * time.Hour),
 	}
-	if err := db.CreateCronSchedule(database, staleCron); err != nil {
+	if err := createCronSchedule(store, staleCron); err != nil {
 		t.Fatalf("Failed to create stale cron schedule: %v", err)
 	}
 
 	threadCreator := newMockThreadCreator()
 	enqueuer := newMockEnqueuer()
 
-	if err := ProcessDueSchedules(context.Background(), newTestConfig(), database, enqueuer, threadCreator); err != nil {
+	if err := ProcessDueSchedules(context.Background(), newTestConfig(), store, enqueuer, threadCreator); err != nil {
 		t.Fatalf("ProcessDueSchedules error: %v", err)
 	}
 
@@ -380,7 +415,7 @@ func TestProcessDueCronSchedules_24hStalenessGuard(t *testing.T) {
 	}
 
 	// Stale cron schedule's next_run_at MUST be advanced into future
-	dueCrons, err := db.GetDueCronSchedules(database)
+	dueCrons, err := getDueCronSchedules(store)
 	if err != nil {
 		t.Fatalf("GetDueCronSchedules error: %v", err)
 	}
@@ -388,7 +423,7 @@ func TestProcessDueCronSchedules_24hStalenessGuard(t *testing.T) {
 		t.Errorf("Expected 0 due cron schedules after advancing stale cron, got %d", len(dueCrons))
 	}
 
-	allCrons, _ := db.GetAllCronSchedules(database, "chan-stale")
+	allCrons, _ := getAllCronSchedules(store, "chan-stale")
 	if len(allCrons) != 1 {
 		t.Fatalf("Expected 1 cron in DB, got %d", len(allCrons))
 	}
@@ -398,11 +433,8 @@ func TestProcessDueCronSchedules_24hStalenessGuard(t *testing.T) {
 }
 
 func TestProcessDueOneShotSchedules(t *testing.T) {
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to init DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
+	defer store.Close()
 
 	now := time.Now().UTC()
 
@@ -414,7 +446,7 @@ func TestProcessDueOneShotSchedules(t *testing.T) {
 		RunAt:     now.Add(-2 * time.Minute),
 		CreatedAt: now.Add(-10 * time.Minute),
 	}
-	if err := db.CreateOneShotSchedule(database, oneShot); err != nil {
+	if err := createOneShotSchedule(store, oneShot); err != nil {
 		t.Fatalf("Failed to create one shot schedule: %v", err)
 	}
 
@@ -426,14 +458,14 @@ func TestProcessDueOneShotSchedules(t *testing.T) {
 		RunAt:     now.Add(30 * time.Minute),
 		CreatedAt: now,
 	}
-	if err := db.CreateOneShotSchedule(database, futureOneShot); err != nil {
+	if err := createOneShotSchedule(store, futureOneShot); err != nil {
 		t.Fatalf("Failed to create future one-shot schedule: %v", err)
 	}
 
 	threadCreator := newMockThreadCreator()
 	enqueuer := newMockEnqueuer()
 
-	if err := ProcessDueSchedules(context.Background(), newTestConfig(), database, enqueuer, threadCreator); err != nil {
+	if err := ProcessDueSchedules(context.Background(), newTestConfig(), store, enqueuer, threadCreator); err != nil {
 		t.Fatalf("ProcessDueSchedules error: %v", err)
 	}
 
@@ -453,25 +485,22 @@ func TestProcessDueOneShotSchedules(t *testing.T) {
 	}
 
 	// Verify one-shot schedule was atomically deleted
-	dueAfter, _ := db.GetDueOneShotSchedules(database)
+	dueAfter, _ := getDueOneShotSchedules(store)
 	if len(dueAfter) != 0 {
 		t.Errorf("Expected 0 due one-shot schedules after execution, got %d", len(dueAfter))
 	}
-	allAfter, _ := db.GetAllOneShotSchedules(database, "thread-existing-123")
+	allAfter, _ := getAllOneShotSchedules(store, "thread-existing-123")
 	if len(allAfter) != 1 || allAfter[0].ID != futureOneShot.ID {
 		t.Errorf("Expected only future schedule to remain, got %d schedules", len(allAfter))
 	}
 }
 
 func TestSchedulerStartAndStop(t *testing.T) {
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to init DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
+	defer store.Close()
 
 	pool := queue.NewWorkerPool(queue.WorkerPoolConfig{
-		DB: database,
+		Store: store,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			return `{"event":"result","result":{"status":"SUCCESS","response":"mock test response"}}`, "", 0, nil
 		},
@@ -486,7 +515,7 @@ func TestSchedulerStartAndStop(t *testing.T) {
 		},
 	})
 
-	stop := Start(context.Background(), newTestConfig(), database, pool, nil)
+	stop := Start(context.Background(), newTestConfig(), store, pool, nil)
 	time.Sleep(50 * time.Millisecond)
 
 	stoppedCh := make(chan struct{})
@@ -506,11 +535,8 @@ func TestSchedulerStartAndStop(t *testing.T) {
 }
 
 func TestSchedulerRunContextCancellation(t *testing.T) {
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to init DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
+	defer store.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	threadCreator := newMockThreadCreator()
@@ -518,7 +544,7 @@ func TestSchedulerRunContextCancellation(t *testing.T) {
 
 	doneCh := make(chan struct{})
 	go func() {
-		Run(ctx, newTestConfig(), database, enqueuer, threadCreator, 10*time.Millisecond)
+		Run(ctx, newTestConfig(), store, enqueuer, threadCreator, 10*time.Millisecond)
 		close(doneCh)
 	}()
 
@@ -534,11 +560,8 @@ func TestSchedulerRunContextCancellation(t *testing.T) {
 }
 
 func TestProcessDueCronSchedules_CreatesScheduleRun(t *testing.T) {
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to init DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
+	defer store.Close()
 
 	now := time.Now().UTC()
 	cronSched := db.CronSchedule{
@@ -552,14 +575,14 @@ func TestProcessDueCronSchedules_CreatesScheduleRun(t *testing.T) {
 		Enabled:     true,
 		CreatedAt:   now.Add(-1 * time.Hour),
 	}
-	if err := db.CreateCronSchedule(database, cronSched); err != nil {
+	if err := createCronSchedule(store, cronSched); err != nil {
 		t.Fatalf("Failed to create cron schedule: %v", err)
 	}
 
 	threadCreator := newMockThreadCreator()
 	enqueuer := newMockEnqueuer()
 
-	if err := ProcessDueSchedules(context.Background(), newTestConfig(), database, enqueuer, threadCreator); err != nil {
+	if err := ProcessDueSchedules(context.Background(), newTestConfig(), store, enqueuer, threadCreator); err != nil {
 		t.Fatalf("ProcessDueSchedules error: %v", err)
 	}
 
@@ -572,7 +595,7 @@ func TestProcessDueCronSchedules_CreatesScheduleRun(t *testing.T) {
 	}
 
 	// Verify schedule run entry exists in DB
-	runs, total, err := db.GetScheduleRunsPaginated(database, 10, 0, cronSched.ID, "")
+	runs, total, err := getScheduleRunsPaginated(store, 10, 0, cronSched.ID, "")
 	if err != nil {
 		t.Fatalf("GetScheduleRunsPaginated error: %v", err)
 	}
@@ -608,11 +631,8 @@ func TestProcessDueCronSchedules_CreatesScheduleRun(t *testing.T) {
 }
 
 func TestProcessDueCronSchedules_EffortPropagation(t *testing.T) {
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to init DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
+	defer store.Close()
 
 	now := time.Now().UTC()
 	cronSched := db.CronSchedule{
@@ -627,14 +647,14 @@ func TestProcessDueCronSchedules_EffortPropagation(t *testing.T) {
 		CreatedAt:   now.Add(-1 * time.Hour),
 		Effort:      "low",
 	}
-	if err := db.CreateCronSchedule(database, cronSched); err != nil {
+	if err := createCronSchedule(store, cronSched); err != nil {
 		t.Fatalf("Failed to create cron schedule: %v", err)
 	}
 
 	threadCreator := newMockThreadCreator()
 	enqueuer := newMockEnqueuer()
 
-	if err := ProcessDueSchedules(context.Background(), newTestConfig(), database, enqueuer, threadCreator); err != nil {
+	if err := ProcessDueSchedules(context.Background(), newTestConfig(), store, enqueuer, threadCreator); err != nil {
 		t.Fatalf("ProcessDueSchedules error: %v", err)
 	}
 
@@ -646,7 +666,7 @@ func TestProcessDueCronSchedules_EffortPropagation(t *testing.T) {
 		t.Errorf("Expected message effort 'low', got %q", msgs[0].Effort)
 	}
 
-	runs, total, err := db.GetScheduleRunsPaginated(database, 10, 0, cronSched.ID, "")
+	runs, total, err := getScheduleRunsPaginated(store, 10, 0, cronSched.ID, "")
 	if err != nil {
 		t.Fatalf("GetScheduleRunsPaginated error: %v", err)
 	}
@@ -659,11 +679,8 @@ func TestProcessDueCronSchedules_EffortPropagation(t *testing.T) {
 }
 
 func TestProcessDueOneShotSchedules_CreatesScheduleRun(t *testing.T) {
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to init DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
+	defer store.Close()
 
 	now := time.Now().UTC()
 	oneShot := db.OneShotSchedule{
@@ -673,14 +690,14 @@ func TestProcessDueOneShotSchedules_CreatesScheduleRun(t *testing.T) {
 		RunAt:     now.Add(-5 * time.Second),
 		CreatedAt: now.Add(-30 * time.Minute),
 	}
-	if err := db.CreateOneShotSchedule(database, oneShot); err != nil {
+	if err := createOneShotSchedule(store, oneShot); err != nil {
 		t.Fatalf("Failed to create one shot schedule: %v", err)
 	}
 
 	threadCreator := newMockThreadCreator()
 	enqueuer := newMockEnqueuer()
 
-	if err := ProcessDueSchedules(context.Background(), newTestConfig(), database, enqueuer, threadCreator); err != nil {
+	if err := ProcessDueSchedules(context.Background(), newTestConfig(), store, enqueuer, threadCreator); err != nil {
 		t.Fatalf("ProcessDueSchedules error: %v", err)
 	}
 
@@ -692,7 +709,7 @@ func TestProcessDueOneShotSchedules_CreatesScheduleRun(t *testing.T) {
 		t.Fatalf("Expected ScheduleRunID to be populated on enqueued message, got empty string")
 	}
 
-	runs, total, err := db.GetScheduleRunsPaginated(database, 10, 0, oneShot.ID, "")
+	runs, total, err := getScheduleRunsPaginated(store, 10, 0, oneShot.ID, "")
 	if err != nil {
 		t.Fatalf("GetScheduleRunsPaginated error: %v", err)
 	}
@@ -719,11 +736,8 @@ func TestProcessDueOneShotSchedules_CreatesScheduleRun(t *testing.T) {
 }
 
 func TestInsertMessageAndConsumeOneShot_RollbackOnCancelled(t *testing.T) {
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to init DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
+	defer store.Close()
 
 	msg := db.Message{
 		ID:        "msg-cancelled-1",
@@ -734,13 +748,13 @@ func TestInsertMessageAndConsumeOneShot_RollbackOnCancelled(t *testing.T) {
 	}
 
 	// Schedule does not exist in DB (e.g. was cancelled concurrently)
-	err = db.InsertMessageAndConsumeOneShot(database, "non-existent-sched-id", msg)
+	err := insertMessageAndConsumeOneShot(store, "non-existent-sched-id", msg)
 	if err == nil {
 		t.Fatal("Expected error when consuming non-existent one-shot schedule, got nil")
 	}
 
 	// Verify message was NOT inserted due to rollback
-	dbMsg, _ := db.GetMessage(database, "msg-cancelled-1")
+	dbMsg, _ := getMessage(store, "msg-cancelled-1")
 	if dbMsg != nil {
 		t.Errorf("Expected message to NOT exist in DB after transaction rollback, but found: %+v", dbMsg)
 	}
@@ -764,11 +778,8 @@ channels:
 		t.Fatalf("Failed to load test config: %v", err)
 	}
 
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to init DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
+	defer store.Close()
 
 	chanID := "1464358486849622120"
 	queue.CacheDiscordChannel(&discordgo.Channel{
@@ -789,14 +800,14 @@ channels:
 		Enabled:     true,
 		CreatedAt:   now.Add(-1 * time.Hour),
 	}
-	if err := db.CreateCronSchedule(database, cronSched); err != nil {
+	if err := createCronSchedule(store, cronSched); err != nil {
 		t.Fatalf("Failed to create cron schedule: %v", err)
 	}
 
 	threadCreator := newMockThreadCreator()
 	enqueuer := newMockEnqueuer()
 
-	if err := ProcessDueSchedules(context.Background(), appCfg, database, enqueuer, threadCreator); err != nil {
+	if err := ProcessDueSchedules(context.Background(), appCfg, store, enqueuer, threadCreator); err != nil {
 		t.Fatalf("ProcessDueSchedules error: %v", err)
 	}
 
@@ -815,7 +826,7 @@ channels:
 	}
 
 	// 3. Schedule run record ThreadID must match channel ID
-	runs, total, err := db.GetScheduleRunsPaginated(database, 10, 0, cronSched.ID, "")
+	runs, total, err := getScheduleRunsPaginated(store, 10, 0, cronSched.ID, "")
 	if err != nil {
 		t.Fatalf("GetScheduleRunsPaginated error: %v", err)
 	}
@@ -845,11 +856,8 @@ channels:
 		t.Fatalf("Failed to load test config: %v", err)
 	}
 
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to init DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
+	defer store.Close()
 
 	chanID := "chan-aerial-dev-123"
 	queue.CacheDiscordChannel(&discordgo.Channel{
@@ -870,14 +878,14 @@ channels:
 		Enabled:     true,
 		CreatedAt:   now.Add(-1 * time.Hour),
 	}
-	if err := db.CreateCronSchedule(database, cronSched); err != nil {
+	if err := createCronSchedule(store, cronSched); err != nil {
 		t.Fatalf("Failed to create cron schedule: %v", err)
 	}
 
 	threadCreator := newMockThreadCreator()
 	enqueuer := newMockEnqueuer()
 
-	if err := ProcessDueSchedules(context.Background(), appCfg, database, enqueuer, threadCreator); err != nil {
+	if err := ProcessDueSchedules(context.Background(), appCfg, store, enqueuer, threadCreator); err != nil {
 		t.Fatalf("ProcessDueSchedules error: %v", err)
 	}
 
@@ -897,7 +905,7 @@ channels:
 	}
 
 	// 3. Schedule run record ThreadID must match created thread ID
-	runs, total, err := db.GetScheduleRunsPaginated(database, 10, 0, cronSched.ID, "")
+	runs, total, err := getScheduleRunsPaginated(store, 10, 0, cronSched.ID, "")
 	if err != nil {
 		t.Fatalf("GetScheduleRunsPaginated error: %v", err)
 	}
@@ -924,11 +932,8 @@ channels:
 		t.Fatalf("Failed to load test config: %v", err)
 	}
 
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to init DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
+	defer store.Close()
 
 	threadTargetID := "thread-existing-target-999"
 	queue.CacheDiscordChannel(&discordgo.Channel{
@@ -950,14 +955,14 @@ channels:
 		Enabled:     true,
 		CreatedAt:   now.Add(-1 * time.Hour),
 	}
-	if err := db.CreateCronSchedule(database, cronSched); err != nil {
+	if err := createCronSchedule(store, cronSched); err != nil {
 		t.Fatalf("Failed to create cron schedule: %v", err)
 	}
 
 	threadCreator := newMockThreadCreator()
 	enqueuer := newMockEnqueuer()
 
-	if err := ProcessDueSchedules(context.Background(), newTestConfig(), database, enqueuer, threadCreator); err != nil {
+	if err := ProcessDueSchedules(context.Background(), newTestConfig(), store, enqueuer, threadCreator); err != nil {
 		t.Fatalf("ProcessDueSchedules error: %v", err)
 	}
 
@@ -1062,20 +1067,17 @@ func TestProcessDueSchedules_NilDBAndCancelledCtx(t *testing.T) {
 	}
 
 	// 3. Cancelled context
-	database, _ := db.InitDB(":memory:")
-	defer database.Close()
+	store := setupTestStore(t)
+	defer store.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel immediately
-	_ = ProcessDueSchedules(ctx, validCfg, database, nil, nil)
+	_ = ProcessDueSchedules(ctx, validCfg, store, nil, nil)
 }
 
 func TestSchedulerRun_TickLoop(t *testing.T) {
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer database.Close()
+	store := setupTestStore(t)
+	defer store.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1088,18 +1090,15 @@ func TestSchedulerRun_TickLoop(t *testing.T) {
 		cancel()
 	}()
 
-	Run(ctx, newTestConfig(), database, enqueuer, threadCreator, 1*time.Millisecond)
+	Run(ctx, newTestConfig(), store, enqueuer, threadCreator, 1*time.Millisecond)
 }
 
 func TestProcessDueSchedules_ClosedDBAndErrors(t *testing.T) {
-	database, err := db.InitDB(filepath.Join(t.TempDir(), "test_closed.db"))
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	_ = database.Close()
+	store := setupTestStore(t)
+	_ = store.Close()
 
 	// Closed DB returns query error
-	err = ProcessDueSchedules(context.Background(), newTestConfig(), database, nil, nil)
+	err := ProcessDueSchedules(context.Background(), newTestConfig(), store, nil, nil)
 	if err == nil {
 		t.Error("expected error for closed DB in ProcessDueSchedules")
 	}
@@ -1112,11 +1111,8 @@ func (e *errThreadCreator) CreatePublicThread(channelID, name string) (string, e
 }
 
 func TestProcessDueCronSchedules_EmptyTitlePrefixAndThreadCreationError(t *testing.T) {
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer database.Close()
+	store := setupTestStore(t)
+	defer store.Close()
 
 	now := time.Now().UTC()
 	cronSched := db.CronSchedule{
@@ -1130,13 +1126,13 @@ func TestProcessDueCronSchedules_EmptyTitlePrefixAndThreadCreationError(t *testi
 		Enabled:     true,
 		CreatedAt:   now.Add(-1 * time.Hour),
 	}
-	_ = db.CreateCronSchedule(database, cronSched)
+	_ = createCronSchedule(store, cronSched)
 
 	enqueuer := newMockEnqueuer()
 	errCreator := &errThreadCreator{}
 
 	// When thread creation fails, it falls back to target channel ID
-	if err := ProcessDueSchedules(context.Background(), newTestConfig(), database, enqueuer, errCreator); err != nil {
+	if err := ProcessDueSchedules(context.Background(), newTestConfig(), store, enqueuer, errCreator); err != nil {
 		t.Fatalf("ProcessDueSchedules error: %v", err)
 	}
 
@@ -1150,14 +1146,11 @@ func TestProcessDueCronSchedules_EmptyTitlePrefixAndThreadCreationError(t *testi
 }
 
 func TestSchedulerRun_WithActiveConversationsAndFactExtraction(t *testing.T) {
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer database.Close()
+	store := setupTestStore(t)
+	defer store.Close()
 
 	now := time.Now().UTC()
-	_ = db.InsertMessage(database, db.Message{
+	_ = insertMessage(store, db.Message{
 		ID:         "msg-active-1",
 		ThreadID:   "thread-active-facts",
 		AuthorID:   "user-100",
@@ -1188,7 +1181,7 @@ func TestSchedulerRun_WithActiveConversationsAndFactExtraction(t *testing.T) {
 		APIKey:   "mock_key",
 		Timezone: "America/Los_Angeles",
 	})
-	sched, err := New(cfg, database, enqueuer, threadCreator, WithRunnerFunc(mockRunner))
+	sched, err := New(cfg, store, enqueuer, threadCreator, WithRunnerFunc(mockRunner))
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
 	}
@@ -1196,16 +1189,13 @@ func TestSchedulerRun_WithActiveConversationsAndFactExtraction(t *testing.T) {
 }
 
 func TestSchedulerStart_Stop(t *testing.T) {
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer database.Close()
+	store := setupTestStore(t)
+	defer store.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	stop := Start(ctx, newTestConfig(), database, nil, nil)
+	stop := Start(ctx, newTestConfig(), store, nil, nil)
 	time.Sleep(20 * time.Millisecond)
 	stop()
 	// Calling stop second time should be safe
@@ -1213,16 +1203,13 @@ func TestSchedulerStart_Stop(t *testing.T) {
 }
 
 func TestProcessDueSchedules_ContextCancellationInLoops(t *testing.T) {
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer database.Close()
+	store := setupTestStore(t)
+	defer store.Close()
 
 	now := time.Now().UTC()
 	// Insert 2 due crons
 	for i := 1; i <= 2; i++ {
-		_ = db.CreateCronSchedule(database, db.CronSchedule{
+		_ = createCronSchedule(store, db.CronSchedule{
 			ID:          fmt.Sprintf("cron-cancel-%d", i),
 			TargetID:    "chan-test",
 			TitlePrefix: "Cancel Test",
@@ -1238,14 +1225,14 @@ func TestProcessDueSchedules_ContextCancellationInLoops(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // pre-cancel context
 
-	err = ProcessDueSchedules(ctx, newTestConfig(), database, nil, nil)
+	err := ProcessDueSchedules(ctx, newTestConfig(), store, nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "context canceled") {
 		t.Errorf("expected context canceled error, got %v", err)
 	}
 
 	// Insert 2 due one-shots
 	for i := 1; i <= 2; i++ {
-		_ = db.CreateOneShotSchedule(database, db.OneShotSchedule{
+		_ = createOneShotSchedule(store, db.OneShotSchedule{
 			ID:        fmt.Sprintf("oneshot-cancel-%d", i),
 			ThreadID:  "th-test",
 			Prompt:    "test",
@@ -1254,18 +1241,15 @@ func TestProcessDueSchedules_ContextCancellationInLoops(t *testing.T) {
 		})
 	}
 
-	err = ProcessDueSchedules(ctx, newTestConfig(), database, nil, nil)
+	err = ProcessDueSchedules(ctx, newTestConfig(), store, nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "context canceled") {
 		t.Errorf("expected context canceled error, got %v", err)
 	}
 }
 
 func TestProcessDueSchedules_StaleCronWithInvalidCronExpr(t *testing.T) {
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer database.Close()
+	store := setupTestStore(t)
+	defer store.Close()
 
 	now := time.Now().UTC()
 	// Overdue by > 24 hours with invalid cron expr
@@ -1280,10 +1264,10 @@ func TestProcessDueSchedules_StaleCronWithInvalidCronExpr(t *testing.T) {
 		Enabled:     true,
 		CreatedAt:   now.Add(-72 * time.Hour),
 	}
-	_ = db.CreateCronSchedule(database, cronSched)
+	_ = createCronSchedule(store, cronSched)
 
 	enqueuer := newMockEnqueuer()
-	if err := ProcessDueSchedules(context.Background(), newTestConfig(), database, enqueuer, nil); err != nil {
+	if err := ProcessDueSchedules(context.Background(), newTestConfig(), store, enqueuer, nil); err != nil {
 		t.Fatalf("ProcessDueSchedules error: %v", err)
 	}
 
@@ -1295,11 +1279,8 @@ func TestProcessDueSchedules_StaleCronWithInvalidCronExpr(t *testing.T) {
 }
 
 func TestProcessDueSchedules_DueCronWithInvalidCronExpr(t *testing.T) {
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer database.Close()
+	store := setupTestStore(t)
+	defer store.Close()
 
 	now := time.Now().UTC()
 	// Overdue by 5 minutes with invalid cron expr (not stale >24h, but invalid)
@@ -1314,10 +1295,10 @@ func TestProcessDueSchedules_DueCronWithInvalidCronExpr(t *testing.T) {
 		Enabled:     true,
 		CreatedAt:   now.Add(-1 * time.Hour),
 	}
-	_ = db.CreateCronSchedule(database, cronSched)
+	_ = createCronSchedule(store, cronSched)
 
 	enqueuer := newMockEnqueuer()
-	if err := ProcessDueSchedules(context.Background(), newTestConfig(), database, enqueuer, nil); err != nil {
+	if err := ProcessDueSchedules(context.Background(), newTestConfig(), store, enqueuer, nil); err != nil {
 		t.Fatalf("ProcessDueSchedules error: %v", err)
 	}
 
@@ -1437,22 +1418,16 @@ func TestRunPruneRetention(t *testing.T) {
 	RunPruneRetention(nil)
 
 	// 2. Closed DB (error branch)
-	database, err := db.InitDB(filepath.Join(t.TempDir(), "closed.db"))
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	_ = database.Close()
-	RunPruneRetention(database)
+	closedStore := setupTestStore(t)
+	_ = closedStore.Close()
+	RunPruneRetention(closedStore)
 
 	// 3. Valid DB with old runs pruned
-	dbValid, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer dbValid.Close()
+	store := setupTestStore(t)
+	defer store.Close()
 
 	oldTime := time.Now().UTC().Add(-60 * 24 * time.Hour)
-	_ = db.CreateScheduleRun(dbValid, db.ScheduleRun{
+	_ = store.CreateScheduleRun(context.Background(), db.ScheduleRun{
 		ID:           "old-run-1",
 		ScheduleID:   "sched-1",
 		ScheduleType: "cron",
@@ -1466,18 +1441,15 @@ func TestRunPruneRetention(t *testing.T) {
 		CompletedAt:  &oldTime,
 	})
 
-	RunPruneRetention(dbValid)
+	RunPruneRetention(store)
 }
 
 func TestRunFactExtraction(t *testing.T) {
 	// 1. Nil arguments
 	RunFactExtraction(nil, nil, nil, nil)
 
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer database.Close()
+	store := setupTestStore(t)
+	defer store.Close()
 
 	client := memory.NewClient("")
 	llmFunc := func(ctx context.Context, prompt string) (string, error) {
@@ -1485,23 +1457,17 @@ func TestRunFactExtraction(t *testing.T) {
 	}
 
 	// 2. Valid execution
-	RunFactExtraction(context.Background(), database, client, llmFunc)
+	RunFactExtraction(context.Background(), store, client, llmFunc)
 
 	// 3. Closed DB error
-	closedDB, err := db.InitDB(filepath.Join(t.TempDir(), "fact_closed.db"))
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	_ = closedDB.Close()
-	RunFactExtraction(context.Background(), closedDB, client, llmFunc)
+	closedStore := setupTestStore(t)
+	_ = closedStore.Close()
+	RunFactExtraction(context.Background(), closedStore, client, llmFunc)
 }
 
 func TestScheduler_ConfigInjection(t *testing.T) {
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer database.Close()
+	store := setupTestStore(t)
+	defer store.Close()
 
 	appCfg := config.NewFromData(&config.ConfigData{
 		Timezone: "America/New_York",
@@ -1510,7 +1476,7 @@ func TestScheduler_ConfigInjection(t *testing.T) {
 	enqueuer := newMockEnqueuer()
 	threadCreator := newMockThreadCreator()
 
-	s, err := New(appCfg, database, enqueuer, threadCreator)
+	s, err := New(appCfg, store, enqueuer, threadCreator)
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
 	}
@@ -1530,16 +1496,13 @@ func TestScheduler_ConfigInjection(t *testing.T) {
 }
 
 func TestScheduler_WithSessionRoots(t *testing.T) {
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer database.Close()
+	store := setupTestStore(t)
+	defer store.Close()
 
 	enqueuer := newMockEnqueuer()
 	threadCreator := newMockThreadCreator()
 
-	s, err := New(newTestConfig(), database, enqueuer, threadCreator, WithSessionRoots(" /custom/root1 ", "", " /custom/root2 "))
+	s, err := New(newTestConfig(), store, enqueuer, threadCreator, WithSessionRoots(" /custom/root1 ", "", " /custom/root2 "))
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
 	}
@@ -1637,19 +1600,17 @@ func TestGetStore_AllBranches(t *testing.T) {
 	}
 
 	// 2. s.store is set
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer database.Close()
-	sqlStore := db.NewSQLStore(database)
-	sStore := &Scheduler{store: sqlStore}
-	if st := sStore.getStore(); st != sqlStore {
+	store := setupTestStore(t)
+	defer store.Close()
+	sStore := &Scheduler{store: store}
+	if st := sStore.getStore(); st != store {
 		t.Errorf("expected s.store, got %v", st)
 	}
 
 	// 3. s.db is set and s.store is nil
-	sDB := &Scheduler{db: database}
+	dummyDB, _ := sql.Open("pgx", "postgres://mock:mock@127.0.0.1:5432/mock")
+	defer dummyDB.Close()
+	sDB := &Scheduler{db: dummyDB}
 	if st := sDB.getStore(); st == nil {
 		t.Errorf("expected non-nil store from s.db")
 	}
@@ -1662,57 +1623,49 @@ func TestGetStore_AllBranches(t *testing.T) {
 }
 
 func TestNew_StoreAndWrappers(t *testing.T) {
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer database.Close()
-	sqlStore := db.NewSQLStore(database)
+	store := setupTestStore(t)
+	defer store.Close()
 
 	cfg := newTestConfig()
 	enqueuer := newMockEnqueuer()
 	threadCreator := newMockThreadCreator()
 
 	// 1. New with db.Store
-	s1, err := New(cfg, sqlStore, enqueuer, threadCreator)
+	s1, err := New(cfg, store, enqueuer, threadCreator)
 	if err != nil {
 		t.Fatalf("New with db.Store failed: %v", err)
 	}
-	if s1.store != sqlStore || s1.db != nil {
-		t.Errorf("expected s1.store to be sqlStore and s1.db to be nil")
+	if s1.store != store || s1.db != nil {
+		t.Errorf("expected s1.store to be store and s1.db to be nil")
 	}
 
 	// 2. NewWithStore
-	s2, err := NewWithStore(cfg, sqlStore, enqueuer, threadCreator)
+	s2, err := NewWithStore(cfg, store, enqueuer, threadCreator)
 	if err != nil {
 		t.Fatalf("NewWithStore failed: %v", err)
 	}
-	if s2.store != sqlStore {
-		t.Errorf("expected s2.store to be sqlStore")
+	if s2.store != store {
+		t.Errorf("expected s2.store to be store")
 	}
 
 	// 3. NewScheduler wrapper
-	s3, err := NewScheduler(cfg, sqlStore, enqueuer, threadCreator)
+	s3, err := NewScheduler(cfg, store, enqueuer, threadCreator)
 	if err != nil {
 		t.Fatalf("NewScheduler failed: %v", err)
 	}
-	if s3.store != sqlStore {
-		t.Errorf("expected s3.store to be sqlStore")
+	if s3.store != store {
+		t.Errorf("expected s3.store to be store")
 	}
 
 	// 4. NewScheduler with nil config returns error
-	if _, err := NewScheduler(nil, sqlStore, enqueuer, threadCreator); err == nil {
+	if _, err := NewScheduler(nil, store, enqueuer, threadCreator); err == nil {
 		t.Errorf("expected error when config is nil in NewScheduler")
 	}
 }
 
 func TestProcessDueSchedules_StoreErrorsAndEdgeCases(t *testing.T) {
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer database.Close()
-	sqlStore := db.NewSQLStore(database)
+	store := setupTestStore(t)
+	defer store.Close()
 
 	cfg := newTestConfig()
 	enqueuer := newMockEnqueuer()
@@ -1731,7 +1684,7 @@ func TestProcessDueSchedules_StoreErrorsAndEdgeCases(t *testing.T) {
 	}
 
 	// 3. ProcessDueSchedules with nil cfg
-	sNoCfg := &Scheduler{store: sqlStore}
+	sNoCfg := &Scheduler{store: store}
 	if err := sNoCfg.ProcessDueSchedules(context.Background()); err == nil {
 		t.Errorf("expected error on scheduler with nil cfg")
 	}
@@ -1740,13 +1693,13 @@ func TestProcessDueSchedules_StoreErrorsAndEdgeCases(t *testing.T) {
 	if err := processDueSchedulesStore(context.Background(), cfg, nil, enqueuer, threadCreator); err != nil {
 		t.Errorf("expected nil on nil store, got %v", err)
 	}
-	if err := processDueSchedulesStore(context.Background(), nil, sqlStore, enqueuer, threadCreator); err == nil {
+	if err := processDueSchedulesStore(context.Background(), nil, store, enqueuer, threadCreator); err == nil {
 		t.Errorf("expected error on nil cfg in processDueSchedulesStore")
 	}
 
 	// 5. Store error on GetDueCronSchedules
 	mockStore := &mockStoreWrapper{
-		Store: sqlStore,
+		Store: store,
 		getDueCronSchedulesFn: func(ctx context.Context) ([]db.CronSchedule, error) {
 			return nil, fmt.Errorf("cron query failed")
 		},
@@ -1769,7 +1722,7 @@ func TestProcessDueSchedules_StoreErrorsAndEdgeCases(t *testing.T) {
 		Enabled:     true,
 	}
 	mockStoreStale := &mockStoreWrapper{
-		Store: sqlStore,
+		Store: store,
 		getDueCronSchedulesFn: func(ctx context.Context) ([]db.CronSchedule, error) {
 			return []db.CronSchedule{staleCron}, nil
 		},
@@ -1797,7 +1750,7 @@ func TestProcessDueSchedules_StoreErrorsAndEdgeCases(t *testing.T) {
 		Enabled:     true,
 	}
 	mockStoreErrors := &mockStoreWrapper{
-		Store: sqlStore,
+		Store: store,
 		getDueCronSchedulesFn: func(ctx context.Context) ([]db.CronSchedule, error) {
 			return []db.CronSchedule{dueCron}, nil
 		},
@@ -1821,7 +1774,7 @@ func TestProcessDueSchedules_StoreErrorsAndEdgeCases(t *testing.T) {
 
 	// 8. Store error on GetDueOneShotSchedules
 	mockStoreOneShotErr := &mockStoreWrapper{
-		Store: sqlStore,
+		Store: store,
 		getDueCronSchedulesFn: func(ctx context.Context) ([]db.CronSchedule, error) {
 			return nil, nil
 		},
@@ -1842,7 +1795,7 @@ func TestProcessDueSchedules_StoreErrorsAndEdgeCases(t *testing.T) {
 		RunAt:     now.Add(-1 * time.Minute),
 	}
 	mockStoreOneShotConsumeErr := &mockStoreWrapper{
-		Store: sqlStore,
+		Store: store,
 		getDueCronSchedulesFn: func(ctx context.Context) ([]db.CronSchedule, error) {
 			return nil, nil
 		},
@@ -1860,7 +1813,7 @@ func TestProcessDueSchedules_StoreErrorsAndEdgeCases(t *testing.T) {
 
 	// 10. Due one-shot: CreateScheduleRun error
 	mockStoreOneShotRunErr := &mockStoreWrapper{
-		Store: sqlStore,
+		Store: store,
 		getDueCronSchedulesFn: func(ctx context.Context) ([]db.CronSchedule, error) {
 			return nil, nil
 		},
@@ -1883,7 +1836,7 @@ func TestProcessDueSchedules_StoreErrorsAndEdgeCases(t *testing.T) {
 	cancellingCtx, cancel := context.WithCancel(context.Background())
 	cancel() // canceled before processing loop
 	mockStoreOneShotCancel := &mockStoreWrapper{
-		Store: sqlStore,
+		Store: store,
 		getDueCronSchedulesFn: func(ctx context.Context) ([]db.CronSchedule, error) {
 			return nil, nil
 		},
@@ -1898,17 +1851,14 @@ func TestProcessDueSchedules_StoreErrorsAndEdgeCases(t *testing.T) {
 }
 
 func TestStart_AllBranchesAndWrappers(t *testing.T) {
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer database.Close()
+	store := setupTestStore(t)
+	defer store.Close()
 
 	cfg := newTestConfig()
 	enqueuer := newMockEnqueuer()
 	threadCreator := newMockThreadCreator()
 
-	sched, err := New(cfg, database, enqueuer, threadCreator)
+	sched, err := New(cfg, store, enqueuer, threadCreator)
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
 	}
@@ -1919,14 +1869,14 @@ func TestStart_AllBranchesAndWrappers(t *testing.T) {
 	stop() // once.Do branch
 
 	// 2. Package Start wrapper with nil config (returns no-op stop func)
-	stopNil := Start(context.Background(), nil, database, nil, nil)
+	stopNil := Start(context.Background(), nil, store, nil, nil)
 	if stopNil == nil {
 		t.Fatalf("expected non-nil stop func on Start with nil config")
 	}
 	stopNil()
 
 	// 3. Package Start wrapper with valid config
-	stopValid := Start(context.Background(), cfg, database, nil, nil)
+	stopValid := Start(context.Background(), cfg, store, nil, nil)
 	if stopValid == nil {
 		t.Fatalf("expected non-nil stop func on Start with valid config")
 	}
@@ -1982,11 +1932,8 @@ func TestExtractFactsLLM_AdditionalBranches(t *testing.T) {
 }
 
 func TestRunFactExtraction_BackfilledAndMockErrors(t *testing.T) {
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer database.Close()
+	store := setupTestStore(t)
+	defer store.Close()
 
 	// 1. Test backfill with server returning embedding of expected dimension 384
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2000,7 +1947,7 @@ func TestRunFactExtraction_BackfilledAndMockErrors(t *testing.T) {
 	defer ts.Close()
 
 	// Insert fact without embedding
-	_, err = database.ExecContext(context.Background(), `INSERT INTO facts (category, fact_text, importance, thread_id) VALUES ('user_pref', 'Test fact for backfill', 0.8, 'th-backfill')`)
+	_, err := store.InsertFact(context.Background(), "user_pref", "Test fact for backfill", 0.8, "th-backfill", nil)
 	if err != nil {
 		t.Fatalf("failed to insert fact for backfill: %v", err)
 	}
@@ -2011,11 +1958,11 @@ func TestRunFactExtraction_BackfilledAndMockErrors(t *testing.T) {
 	}
 
 	// Runs backfill, hits backfilled > 0
-	RunFactExtraction(context.Background(), database, client, llmFunc)
+	RunFactExtraction(context.Background(), store, client, llmFunc)
 
 	// 2. Test fact extraction error via mock store returning error on active conversations
 	mockStore := &mockStoreWrapper{
-		Store: db.NewSQLStore(database),
+		Store: store,
 		getActiveConversationsForExtractionFn: func(ctx context.Context, activeHours int) ([]string, error) {
 			return nil, fmt.Errorf("active conv retrieval failed")
 		},
@@ -2036,14 +1983,11 @@ func TestSchedulerRun_BranchesAndTickErrors(t *testing.T) {
 	Run(context.Background(), nil, nil, nil, nil, time.Second)
 
 	// 4. Initial schedule check error in Run
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer database.Close()
+	store := setupTestStore(t)
+	defer store.Close()
 
 	mockStoreInitErr := &mockStoreWrapper{
-		Store: db.NewSQLStore(database),
+		Store: store,
 		getDueCronSchedulesFn: func(ctx context.Context) ([]db.CronSchedule, error) {
 			return nil, fmt.Errorf("init check error")
 		},
@@ -2057,7 +2001,7 @@ func TestSchedulerRun_BranchesAndTickErrors(t *testing.T) {
 	tickCount := 0
 	ctxTick, cancelTick := context.WithCancel(context.Background())
 	mockStoreTickErr := &mockStoreWrapper{
-		Store: db.NewSQLStore(database),
+		Store: store,
 		getDueCronSchedulesFn: func(ctx context.Context) ([]db.CronSchedule, error) {
 			tickCount++
 			if tickCount > 1 {
@@ -2077,7 +2021,7 @@ func TestSchedulerRun_BranchesAndTickErrors(t *testing.T) {
 	nilSched.handleTick(context.Background(), 120, nil, nil)
 
 	mockStoreFast := &mockStoreWrapper{
-		Store: db.NewSQLStore(database),
+		Store: store,
 		getDueCronSchedulesFn: func(ctx context.Context) ([]db.CronSchedule, error) {
 			return nil, nil
 		},
@@ -2130,37 +2074,26 @@ func TestRunMemoryDecay(t *testing.T) {
 	RunMemoryDecayWithContext(context.Background(), nil)
 
 	// 2. Closed DB (error branch)
-	database, err := db.InitDB(filepath.Join(t.TempDir(), "decay_closed.db"))
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	_ = database.Close()
-	RunMemoryDecay(database)
+	closedStore := setupTestStore(t)
+	_ = closedStore.Close()
+	RunMemoryDecay(closedStore)
 
 	// 3. Valid DB with decay and pruning
-	dbValid, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer dbValid.Close()
+	store := setupTestStore(t)
+	defer store.Close()
 
 	emb := make([]float32, db.ExpectedEmbeddingDim)
 	emb[0] = 1.0
 
 	// Insert fact and artificially age it
-	id, err := db.InsertFact(dbValid, "general", "Temporary notice", 0.50, "th-1", emb)
+	_, err := store.InsertFact(context.Background(), "general", "Temporary notice", 0.50, "th-1", emb)
 	if err != nil {
 		t.Fatalf("InsertFact failed: %v", err)
 	}
-	twoDaysAgo := time.Now().UTC().Add(-48 * time.Hour).Format("2006-01-02 15:04:05")
-	_, err = dbValid.Exec("UPDATE facts SET last_reinforced_at = ?, last_decayed_at = ? WHERE id = ?", twoDaysAgo, twoDaysAgo, id)
-	if err != nil {
-		t.Fatalf("UPDATE failed: %v", err)
-	}
 
-	RunMemoryDecay(dbValid)
+	RunMemoryDecay(store)
 
-	facts, err := db.GetFactsPaginated(dbValid, db.FactsFilter{Limit: 10})
+	facts, err := store.GetFactsPaginated(context.Background(), db.FactsFilter{Limit: 10})
 	if err != nil || len(facts.Facts) != 1 {
 		t.Fatalf("GetFactsPaginated failed: %v", err)
 	}

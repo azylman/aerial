@@ -630,12 +630,13 @@ func TestFakeStoreFactOperations(t *testing.T) {
 	}
 
 	// Watermarks & ExtractedAt
-	if err := s.UpdateConversationFactWatermark(ctx, "th-facts", 42); err != nil {
+	if err := s.UpdateConversationFactWatermark(ctx, "th-done", 42); err != nil {
 		t.Fatalf("UpdateConversationFactWatermark failed: %v", err)
 	}
-	if err := s.UpdateConversationFactExtractedAt(ctx, "th-facts"); err != nil {
+	if err := s.UpdateConversationFactExtractedAt(ctx, "th-done"); err != nil {
 		t.Fatalf("UpdateConversationFactExtractedAt failed: %v", err)
 	}
+	_ = s.InsertMessage(ctx, Message{ID: "m-extract-0", ThreadID: "th-done"})
 	_ = s.InsertMessage(ctx, Message{ID: "m-extract-1", ThreadID: "th-facts"})
 	_ = s.InsertMessage(ctx, Message{ID: "m-extract-2", ThreadID: "th-facts"})
 	_ = s.InsertMessage(ctx, Message{ID: "m-extract-3", ThreadID: "th-other"})
