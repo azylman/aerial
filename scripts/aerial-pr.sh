@@ -10,7 +10,7 @@ REPO_NAME="aerial"
 REPO_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}.git"
 DEFAULT_BRANCH="main"
 SIDE_SYNC_URL="${AERIAL_GITSYNC_URL:-http://aerial-gitsync:8080/sync}"
-DEFAULT_PR_CHECK_DELAY="5m"
+DEFAULT_PR_CHECK_DELAY="2m"
 
 cmd="${1:-}"
 if [ -n "$cmd" ]; then
