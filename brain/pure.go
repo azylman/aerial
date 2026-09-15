@@ -277,7 +277,7 @@ func BuildDiscordPrompt(input DiscordPromptInput) string {
 	}
 	sb.WriteString(fmt.Sprintf("- attachments: %v\n\n", attachments))
 
-	sb.WriteString("Fulfill the user's request. If the user asks for a plan, design, proposal, or investigation, draft the plan, run review gates, and present it for review without modifying source code or opening PRs. If the user asks to implement, build, or fix something, execute all necessary tools, subagents, tests, and code modifications. Only formulate and output your final response once all immediate work is complete. It will be delivered directly to Discord.\n")
+	sb.WriteString("Only formulate and output your final response once all immediate work is complete. It will be delivered directly to Discord.\n")
 	sb.WriteString("</USER_REQUEST>")
 	return sb.String()
 }
