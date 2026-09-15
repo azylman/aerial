@@ -279,7 +279,7 @@ func TestDefaultHistoryFetcher_AdditionalEdgeCases(t *testing.T) {
 func TestFetchHistoryFromDB_EdgeCases(t *testing.T) {
 	t.Parallel()
 	// 1. database == nil -> returns nil, nil
-	msgs, err := fetchHistoryFromDB(nil, "chan-1", 10)
+	msgs, err := fetchHistoryFromDB(nil, "chan-1", "", 10)
 	if err != nil || msgs != nil {
 		t.Errorf("expected nil, nil for nil database, got msgs=%v err=%v", msgs, err)
 	}
@@ -290,7 +290,7 @@ func TestFetchHistoryFromDB_EdgeCases(t *testing.T) {
 		t.Fatalf("InitDB failed: %v", err)
 	}
 	_ = closedDB.Close()
-	_, err = fetchHistoryFromDB(closedDB, "chan-1", 10)
+	_, err = fetchHistoryFromDB(closedDB, "chan-1", "", 10)
 	if err == nil {
 		t.Errorf("expected error querying closed database")
 	}
@@ -329,7 +329,7 @@ func TestFetchHistoryFromDB_EdgeCases(t *testing.T) {
 		})
 	}
 
-	fetched, err := fetchHistoryFromDB(database, "role-test-chan", 50)
+	fetched, err := fetchHistoryFromDB(database, "role-test-chan", "", 50)
 	if err != nil {
 		t.Fatalf("fetchHistoryFromDB failed: %v", err)
 	}
@@ -341,6 +341,46 @@ func TestFetchHistoryFromDB_EdgeCases(t *testing.T) {
 			t.Errorf("msg %d (authorID=%s, authorName=%s): expected role %s, got %s",
 				i, tc.authorID, tc.authorName, tc.expectedRole, fetched[i].Role)
 		}
+	}
+
+	// 4. Test beforeID filtering in fetchHistoryFromDB
+	filteredWithBefore, err := fetchHistoryFromDB(database, "role-test-chan", "msg-role-7", 50)
+	if err != nil {
+		t.Fatalf("fetchHistoryFromDB with beforeID failed: %v", err)
+	}
+	for _, m := range filteredWithBefore {
+		if m.ID == "msg-role-7" {
+			t.Errorf("expected msg-role-7 to be filtered out by beforeID, but it was found")
+		}
+	}
+
+	// 5. Test FilterAssistantMessages
+	if nilFiltered := FilterAssistantMessages(nil); nilFiltered != nil {
+		t.Errorf("expected nil for FilterAssistantMessages(nil)")
+	}
+	if emptyFiltered := FilterAssistantMessages([]HistoryMessage{}); emptyFiltered != nil {
+		t.Errorf("expected nil for FilterAssistantMessages empty slice")
+	}
+	assistantFiltered := FilterAssistantMessages(fetched)
+	for _, m := range assistantFiltered {
+		if m.Role == "Assistant" || m.AuthorName == "aerial" || m.AuthorName == "assistant" {
+			t.Errorf("FilterAssistantMessages failed to remove assistant message: %+v", m)
+		}
+	}
+
+	// 6. Test fetchHistoryFromDB with snowflake beforeID not in database
+	snowflakeFiltered, err := fetchHistoryFromDB(database, "role-test-chan", "123456789012345678", 50)
+	if err != nil {
+		t.Fatalf("fetchHistoryFromDB with snowflake failed: %v", err)
+	}
+	_ = snowflakeFiltered
+
+	// 7. Test SummarizeThreadHistory wrapper
+	sumRes, sumErr := SummarizeThreadHistory(context.Background(), func(ctx context.Context, model, prompt string) (string, error) {
+		return "<THREAD_SUMMARY>\nSummary result\n</THREAD_SUMMARY>", nil
+	}, "test-model", "thread-sum-wrapper", fetched)
+	if sumErr != nil || !strings.Contains(sumRes, "Summary result") {
+		t.Errorf("SummarizeThreadHistory failed: res=%q err=%v", sumRes, sumErr)
 	}
 }
 

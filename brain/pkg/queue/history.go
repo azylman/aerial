@@ -135,7 +135,7 @@ func DefaultHistoryFetcher(dg *discordgo.Session, database *sql.DB) HistoryFetch
 
 		// Non-snowflake check, nil session, or empty channelID -> fallback directly to database
 		if channelID == "" || !IsNumericSnowflake(channelID) || dg == nil {
-			return fetchHistoryFromDB(database, channelID, limit)
+			return fetchHistoryFromDB(database, channelID, beforeID, limit)
 		}
 
 		fetchCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
@@ -155,7 +155,7 @@ func DefaultHistoryFetcher(dg *discordgo.Session, database *sql.DB) HistoryFetch
 		if err != nil {
 			metrics.RecordChannelHistoryFetch("discord_api", "fallback", time.Since(start), 0)
 			log.Printf("[Queue] Discord ChannelMessages failed for %s (falling back to database): %v", channelID, err)
-			return fetchHistoryFromDB(database, channelID, limit)
+			return fetchHistoryFromDB(database, channelID, before, limit)
 		}
 
 		botUserID := ""
@@ -207,12 +207,47 @@ func DefaultHistoryFetcher(dg *discordgo.Session, database *sql.DB) HistoryFetch
 	}
 }
 
-func fetchHistoryFromDB(database *sql.DB, channelID string, limit int) ([]HistoryMessage, error) {
+// FilterAssistantMessages removes messages authored by Aerial or marked with Role "Assistant".
+// This prevents Aerial's own prior turns from being re-injected as historical context on warm turns.
+func FilterAssistantMessages(msgs []HistoryMessage) []HistoryMessage {
+	if len(msgs) == 0 {
+		return nil
+	}
+	filtered := make([]HistoryMessage, 0, len(msgs))
+	for _, m := range msgs {
+		if m.Role == "Assistant" || strings.EqualFold(m.AuthorName, "aerial") || strings.EqualFold(m.AuthorName, "assistant") {
+			continue
+		}
+		filtered = append(filtered, m)
+	}
+	return filtered
+}
+
+func fetchHistoryFromDB(database *sql.DB, channelID string, beforeID string, limit int) ([]HistoryMessage, error) {
 	start := time.Now()
 	if database == nil {
 		return nil, nil
 	}
-	msgs, err := db.GetRecentThreadMessages(database, channelID, limit)
+
+	var beforeTime time.Time
+	if beforeID != "" {
+		if beforeMsg, err := db.GetMessage(database, beforeID); err == nil && beforeMsg != nil && !beforeMsg.CreatedAt.IsZero() {
+			beforeTime = beforeMsg.CreatedAt
+		} else if IsNumericSnowflake(beforeID) {
+			if ts, err := discordgo.SnowflakeTimestamp(beforeID); err == nil {
+				beforeTime = ts
+			}
+		}
+	}
+
+	fetchLimit := limit
+	if beforeID != "" {
+		fetchLimit = limit * 2
+		if fetchLimit < 50 {
+			fetchLimit = 50
+		}
+	}
+	msgs, err := db.GetRecentThreadMessages(database, channelID, fetchLimit)
 	if err != nil {
 		metrics.RecordChannelHistoryFetch("database", "error", time.Since(start), 0)
 		return nil, err
@@ -220,6 +255,18 @@ func fetchHistoryFromDB(database *sql.DB, channelID string, limit int) ([]Histor
 
 	results := make([]HistoryMessage, 0, len(msgs))
 	for _, m := range msgs {
+		if beforeID != "" {
+			if m.ID == beforeID {
+				continue
+			}
+			if !beforeTime.IsZero() && !m.CreatedAt.Before(beforeTime) {
+				continue
+			}
+		}
+		if len(results) >= limit {
+			break
+		}
+
 		role := "User"
 		if m.AuthorID == "assistant" || strings.EqualFold(m.AuthorName, "aerial") || strings.EqualFold(m.AuthorName, "assistant") {
 			role = "Assistant"
@@ -252,7 +299,7 @@ func FetchRecentThreadHistory(ctx context.Context, dg *discordgo.Session, databa
 	}
 
 	// 1. Local DB First
-	msgs, err := fetchHistoryFromDB(database, threadID, limit)
+	msgs, err := fetchHistoryFromDB(database, threadID, "", limit)
 	if err == nil && len(msgs) > 0 {
 		return msgs, nil
 	}

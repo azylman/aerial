@@ -936,10 +936,15 @@ func (te *turnExecution) buildTurnPrompt() {
 	}
 
 	snap, _ := resolveChannelSnapshot(te.pool.getDiscordSession(), te.threadID)
-	isThreadColdStart := snap.IsThread && snap.ParentID != "" && snap.ParentID != snap.ID && te.currentSessionID == ""
-
 	isColdStart := te.currentSessionID == ""
-	hasHistoryNeed := isColdStart || te.wakeIdx > 0 || len(te.burst) > 1
+
+	// Policy mode dictates conversational engagement contract:
+	// - Channel Mode: Aerial wakes selectively. Ambient chatter bypasses session memory,
+	//   so history lookback is needed on EVERY wake turn (cold or warm).
+	// - Threads Mode: Aerial participates in every turn in the thread. Session memory already
+	//   retains all turns on warm resume. Only cold starts need summary / lookback fallback.
+	isChannelMode := strings.EqualFold(te.policy.Mode, "channel")
+	isThreadColdStart := snap.IsThread && snap.ParentID != "" && snap.ParentID != snap.ID && isColdStart && !isChannelMode
 
 	var summary string
 	if isThreadColdStart {
@@ -1005,9 +1010,23 @@ func (te *turnExecution) buildTurnPrompt() {
 		}
 	}
 
+	hasHistoryNeed := false
+	if isChannelMode {
+		hasHistoryNeed = true
+	} else if isColdStart && summary == "" {
+		hasHistoryNeed = true
+	} else if te.wakeIdx > 0 || len(te.burst) > 1 {
+		hasHistoryNeed = true
+	}
+
 	var lookbackMsgs []HistoryMessage
 	if hasHistoryNeed {
 		lookbackMsgs = getTurnHistory(10)
+		// On warm channel turns, filter out Assistant messages so Aerial's own prior turns
+		// are not re-injected as third-party chatter, preventing self-echo loops and prompt contradiction.
+		if isChannelMode && !isColdStart && len(lookbackMsgs) > 0 {
+			lookbackMsgs = FilterAssistantMessages(lookbackMsgs)
+		}
 		if len(lookbackMsgs) > 0 {
 			log.Printf("[WorkerPool] Injected channel history into prompt for thread %s", te.threadID)
 		}
