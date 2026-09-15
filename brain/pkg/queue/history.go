@@ -2,7 +2,6 @@ package queue
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"log"
 	"regexp"
@@ -10,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/azylman/aerial/brain/pkg/db"
 	"github.com/azylman/aerial/brain/pkg/metrics"
 	"github.com/bwmarrin/discordgo"
 	"golang.org/x/sync/singleflight"
@@ -129,13 +127,14 @@ func FormatChannelHistory(messages []HistoryMessage) string {
 // DefaultHistoryFetcher returns a HistoryFetcherFunc that fetches recent messages
 // from the Discord REST API (with a 2-second timeout) and falls back to persistent DB
 // if the channel is non-numeric, the session is nil, or the API request fails/times out.
-func DefaultHistoryFetcher(dg *discordgo.Session, database *sql.DB) HistoryFetcherFunc {
+func DefaultHistoryFetcher(dg *discordgo.Session, dbOrStore any) HistoryFetcherFunc {
+	store := resolveStore(dbOrStore)
 	return func(ctx context.Context, channelID string, beforeID string, limit int) ([]HistoryMessage, error) {
 		start := time.Now()
 
 		// Non-snowflake check, nil session, or empty channelID -> fallback directly to database
 		if channelID == "" || !IsNumericSnowflake(channelID) || dg == nil {
-			return fetchHistoryFromDB(database, channelID, beforeID, limit)
+			return fetchHistoryFromDB(store, channelID, beforeID, limit, ctx)
 		}
 
 		fetchCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
@@ -155,7 +154,7 @@ func DefaultHistoryFetcher(dg *discordgo.Session, database *sql.DB) HistoryFetch
 		if err != nil {
 			metrics.RecordChannelHistoryFetch("discord_api", "fallback", time.Since(start), 0)
 			log.Printf("[Queue] Discord ChannelMessages failed for %s (falling back to database): %v", channelID, err)
-			return fetchHistoryFromDB(database, channelID, before, limit)
+			return fetchHistoryFromDB(store, channelID, before, limit, ctx)
 		}
 
 		botUserID := ""
@@ -223,15 +222,20 @@ func FilterAssistantMessages(msgs []HistoryMessage) []HistoryMessage {
 	return filtered
 }
 
-func fetchHistoryFromDB(database *sql.DB, channelID string, beforeID string, limit int) ([]HistoryMessage, error) {
+func fetchHistoryFromDB(dbOrStore any, channelID string, beforeID string, limit int, ctxOpt ...context.Context) ([]HistoryMessage, error) {
 	start := time.Now()
-	if database == nil {
+	store := resolveStore(dbOrStore)
+	if store == nil {
 		return nil, nil
+	}
+	ctx := context.Background()
+	if len(ctxOpt) > 0 && ctxOpt[0] != nil {
+		ctx = ctxOpt[0]
 	}
 
 	var beforeTime time.Time
 	if beforeID != "" {
-		if beforeMsg, err := db.GetMessage(database, beforeID); err == nil && beforeMsg != nil && !beforeMsg.CreatedAt.IsZero() {
+		if beforeMsg, err := store.GetMessage(ctx, beforeID); err == nil && beforeMsg != nil && !beforeMsg.CreatedAt.IsZero() {
 			beforeTime = beforeMsg.CreatedAt
 		} else if IsNumericSnowflake(beforeID) {
 			if ts, err := discordgo.SnowflakeTimestamp(beforeID); err == nil {
@@ -247,7 +251,7 @@ func fetchHistoryFromDB(database *sql.DB, channelID string, beforeID string, lim
 			fetchLimit = 50
 		}
 	}
-	msgs, err := db.GetRecentThreadMessages(database, channelID, fetchLimit)
+	msgs, err := store.GetRecentThreadMessages(ctx, channelID, fetchLimit)
 	if err != nil {
 		metrics.RecordChannelHistoryFetch("database", "error", time.Since(start), 0)
 		return nil, err
@@ -289,8 +293,9 @@ func fetchHistoryFromDB(database *sql.DB, channelID string, beforeID string, lim
 
 // FetchRecentThreadHistory retrieves up to 100 recent messages for a thread.
 // It queries the local PostgreSQL `messages` table first, falling back to the Discord API.
-func FetchRecentThreadHistory(ctx context.Context, dg *discordgo.Session, database *sql.DB, threadID string, limit int) ([]HistoryMessage, error) {
+func FetchRecentThreadHistory(ctx context.Context, dg *discordgo.Session, dbOrStore any, threadID string, limit int) ([]HistoryMessage, error) {
 	start := time.Now()
+	store := resolveStore(dbOrStore)
 	
 	if limit <= 0 {
 		limit = 100
@@ -299,7 +304,7 @@ func FetchRecentThreadHistory(ctx context.Context, dg *discordgo.Session, databa
 	}
 
 	// 1. Local DB First
-	msgs, err := fetchHistoryFromDB(database, threadID, "", limit)
+	msgs, err := fetchHistoryFromDB(store, threadID, "", limit, ctx)
 	if err == nil && len(msgs) > 0 {
 		return msgs, nil
 	}
