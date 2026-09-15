@@ -971,6 +971,11 @@ func TestEmbeddedStaticAssetsIntegrity(t *testing.T) {
 		"static/index.html",
 		"static/style.css",
 		"static/app.js",
+		"static/favicon.ico",
+		"static/favicon.png",
+		"static/favicon-32x32.png",
+		"static/favicon-16x16.png",
+		"static/apple-touch-icon.png",
 	}
 
 	for _, reqFile := range requiredFiles {
@@ -1039,6 +1044,20 @@ func TestIndexHTMLRequiredDOMBindings(t *testing.T) {
 	for _, idAttr := range requiredIDs {
 		if !strings.Contains(htmlStr, idAttr) {
 			t.Errorf("required DOM ID binding missing in index.html: %q", idAttr)
+		}
+	}
+
+	requiredHeadElements := []string{
+		`href="favicon-32x32.png"`,
+		`href="favicon-16x16.png"`,
+		`href="favicon.ico"`,
+		`href="apple-touch-icon.png"`,
+		`name="theme-color" content="#06050a"`,
+		`name="apple-mobile-web-app-title" content="Aerial HUD"`,
+	}
+	for _, el := range requiredHeadElements {
+		if !strings.Contains(htmlStr, el) {
+			t.Errorf("required head element missing in index.html: %q", el)
 		}
 	}
 }
@@ -1225,6 +1244,68 @@ func TestAssetRegistry_ServeHTTP(t *testing.T) {
 
 		if rec.Code != http.StatusMethodNotAllowed {
 			t.Fatalf("expected status 405, got %d", rec.Code)
+		}
+	})
+
+	t.Run("serves favicon.ico with resilient mime type and 304 revalidation", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/favicon.ico", nil)
+		rec := httptest.NewRecorder()
+		reg.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected status 200, got %d", rec.Code)
+		}
+		ct := rec.Header().Get("Content-Type")
+		if ct != "image/x-icon" && ct != "image/vnd.microsoft.icon" {
+			t.Errorf("expected image/x-icon or image/vnd.microsoft.icon, got %q", ct)
+		}
+		etag := rec.Header().Get("ETag")
+		if etag == "" {
+			t.Errorf("expected non-empty ETag")
+		}
+		if rec.Body.Len() == 0 {
+			t.Errorf("expected non-empty favicon body")
+		}
+
+		req304 := httptest.NewRequest("GET", "/favicon.ico", nil)
+		req304.Header.Set("If-None-Match", etag)
+		rec304 := httptest.NewRecorder()
+		reg.ServeHTTP(rec304, req304)
+		if rec304.Code != http.StatusNotModified {
+			t.Fatalf("expected status 304, got %d", rec304.Code)
+		}
+		if rec304.Body.Len() != 0 {
+			t.Errorf("expected empty body on 304, got %d bytes", rec304.Body.Len())
+		}
+	})
+
+	t.Run("serves favicon png variants and apple-touch-icon", func(t *testing.T) {
+		targets := []string{"/favicon.png", "/favicon-32x32.png", "/favicon-16x16.png", "/apple-touch-icon.png"}
+		for _, target := range targets {
+			req := httptest.NewRequest("GET", target, nil)
+			rec := httptest.NewRecorder()
+			reg.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected status 200 for %s, got %d", target, rec.Code)
+			}
+			ct := rec.Header().Get("Content-Type")
+			if ct != "image/png" {
+				t.Errorf("expected image/png for %s, got %q", target, ct)
+			}
+			if rec.Body.Len() == 0 {
+				t.Errorf("expected non-empty body for %s", target)
+			}
+		}
+	})
+
+	t.Run("serves favicon via dashboard prefix path", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/dashboard/favicon.ico", nil)
+		rec := httptest.NewRecorder()
+		reg.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected status 200 for /dashboard/favicon.ico, got %d", rec.Code)
 		}
 	})
 }
