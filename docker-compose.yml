@@ -421,8 +421,7 @@ services:
   #      Out-of-the-box landing gateway with auto-discovered core services.
   # ----------------------------------------------------------------------------
   homepage:
-    image: ghcr.io/azylman/aerial-homepage:latest
-    build: ./homepage
+    image: ghcr.io/gethomepage/homepage:latest
     container_name: aerial-homepage
     restart: unless-stopped
     stop_grace_period: 15s
@@ -435,7 +434,32 @@ services:
       - LOG_LEVEL=info
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ${AERIAL_HOST_PROJECT_DIR:-${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}}/homepage/config:/app/core-config:ro
       - ${AERIAL_HOST_CONFIG_DIR:-${AERIAL_CONFIG_DIR:-/mnt/data/supervisor/share/aerial-config}}:/share/aerial-config:ro
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        mkdir -p /config
+        if [ -d /app/core-config ]; then
+            cp -rf /app/core-config/. /config/
+        fi
+        USER_DIR="/share/aerial-config/homepage"
+        if [ -d "$$USER_DIR" ]; then
+            for cfg in services.yaml widgets.yaml bookmarks.yaml settings.yaml docker.yaml; do
+                if [ -f "$$USER_DIR/$$cfg" ]; then
+                    cp -f "$$USER_DIR/$$cfg" "/config/$$cfg"
+                fi
+            done
+            if [ -f "$$USER_DIR/custom.css" ]; then
+                printf "\n\n/* --- User Overrides from aerial-config --- */\n" >> /config/custom.css
+                cat "$$USER_DIR/custom.css" >> /config/custom.css
+            fi
+        fi
+        if [ "$$(id -u)" = "0" ]; then
+            chown -R node:node /config 2>/dev/null || true
+        fi
+        exec /usr/local/bin/docker-entrypoint.sh node server.js
     networks:
       - aerial-net
     healthcheck:
