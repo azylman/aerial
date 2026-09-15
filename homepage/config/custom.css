@@ -1,0 +1,180 @@
+/* ==========================================================================
+   AERIAL PERMET COMMAND HUD V3.0 THEME FOR HOMEPAGE
+   Permet Score Mecha Aesthetic: Obsidian (#06050a), Royal Purple Bento (#301a52),
+   Permet Purple (#c084fc), Neon Cyan (#00f0ff), Neon Crimson (#ff2a85)
+   ========================================================================== */
+
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Space+Grotesk:wght@500;700;800&display=swap');
+
+:root,
+:root.dark,
+[data-theme="dark"],
+body {
+    color-scheme: dark !important;
+
+    /* Permet Core Backgrounds */
+    --bg-base: #06050a !important;
+    --bg-surface: rgba(48, 26, 82, 0.88) !important;
+    --bg-surface-hover: rgba(64, 34, 108, 0.92) !important;
+    --bg-inset: rgba(26, 14, 46, 0.90) !important;
+
+    /* Borders */
+    --border-default: rgba(168, 85, 247, 0.38) !important;
+    --border-muted: rgba(168, 85, 247, 0.22) !important;
+    --border-glow: rgba(0, 240, 255, 0.50) !important;
+
+    /* Typography */
+    --text-primary: #ffffff !important;
+    --text-secondary: #d8b4fe !important;
+    --text-muted: #9d8dbb !important;
+    --font-sans: 'Space Grotesk', -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif !important;
+    --font-mono: 'JetBrains Mono', monospace !important;
+
+    /* Permet Accents */
+    --permet-cyan: #00f0ff !important;
+    --permet-crimson: #ff2a85 !important;
+    --permet-purple: #c084fc !important;
+    --permet-green: #05ffa1 !important;
+    --permet-amber: #ffb703 !important;
+
+    /* Bento Radii & Glass Shadows */
+    --radius-sm: 6px !important;
+    --radius-md: 10px !important;
+    --radius-lg: 14px !important;
+    --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.7), inset 0 0 12px rgba(168, 85, 247, 0.08) !important;
+    --shadow-hover: 0 8px 32px rgba(0, 0, 0, 0.85), 0 0 20px rgba(0, 240, 255, 0.35), inset 0 0 16px rgba(192, 132, 252, 0.15) !important;
+}
+
+body {
+    background-color: var(--bg-base) !important;
+    color: var(--text-primary) !important;
+    font-family: var(--font-sans) !important;
+    min-height: 100vh;
+    overflow-x: hidden;
+    position: relative;
+}
+
+/* Typography Overrides */
+h1, h2, h3, h4, .service-title, [class*="group-title"], [class*="text-lg"], [class*="text-xl"], [class*="text-2xl"] {
+    font-family: var(--font-sans) !important;
+    letter-spacing: 0.02em !important;
+}
+
+input, .badge, .status, .metric-value, .ping, [class*="text-xs"], [class*="text-sm"], [class*="font-mono"] {
+    font-family: var(--font-mono) !important;
+}
+
+/* --- ANIMATED BACKGROUND CIRCUIT TRACES & AMBIENT ENERGY --- */
+body::before {
+    content: '';
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background-color: var(--bg-base);
+    background-image: 
+        radial-gradient(ellipse 70% 50% at 50% 0%, rgba(192, 132, 252, 0.07), transparent 75%),
+        radial-gradient(ellipse 60% 40% at 85% 70%, rgba(0, 240, 255, 0.04), transparent 70%),
+        url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' width='120' height='120' viewBox='0 0 120 120'><path d='M0 20 H40 L60 40 H120 M60 40 V80 L40 100 H0 M60 80 H100 L120 100 M90 0 V30 M30 90 V120' fill='none' stroke='rgba(168,85,247,0.12)' stroke-width='1.5'/><circle cx='40' cy='20' r='3' fill='rgba(192,132,252,0.30)'><animate attributeName='r' values='2.6;4.2;2.6' dur='4s' begin='0.8s' repeatCount='indefinite'/><animate attributeName='opacity' values='0.25;0.45;0.25' dur='4s' begin='0.8s' repeatCount='indefinite'/></circle><circle cx='40' cy='20' r='3' fill='none' stroke='rgba(192,132,252,0.25)' stroke-width='0.8'><animate attributeName='r' values='3;7;3' dur='4s' begin='0.8s' repeatCount='indefinite'/><animate attributeName='opacity' values='0.30;0;0.30' dur='4s' begin='0.8s' repeatCount='indefinite'/></circle><circle cx='100' cy='40' r='3.5' fill='rgba(0,240,255,0.35)'><animate attributeName='r' values='3.2;4.8;3.2' dur='3.2s' repeatCount='indefinite'/><animate attributeName='opacity' values='0.30;0.50;0.30' dur='3.2s' repeatCount='indefinite'/></circle><circle cx='100' cy='40' r='3.5' fill='none' stroke='rgba(0,240,255,0.30)' stroke-width='0.8'><animate attributeName='r' values='3.5;7.5;3.5' dur='3.2s' repeatCount='indefinite'/><animate attributeName='opacity' values='0.30;0;0.30' dur='3.2s' repeatCount='indefinite'/></circle><circle cx='60' cy='80' r='3' fill='rgba(255,42,133,0.30)'><animate attributeName='r' values='2.6;4.2;2.6' dur='3.6s' begin='1.6s' repeatCount='indefinite'/><animate attributeName='opacity' values='0.25;0.45;0.25' dur='3.6s' begin='1.6s' repeatCount='indefinite'/></circle><circle cx='60' cy='80' r='3' fill='none' stroke='rgba(255,42,133,0.25)' stroke-width='0.8'><animate attributeName='r' values='3;7;3' dur='3.6s' begin='1.6s' repeatCount='indefinite'/><animate attributeName='opacity' values='0.25;0;0.25' dur='3.6s' begin='1.6s' repeatCount='indefinite'/></circle><circle cx='40' cy='100' r='3' fill='rgba(168,85,247,0.30)'><animate attributeName='r' values='2.5;3.8;2.5' dur='4.4s' begin='2.2s' repeatCount='indefinite'/><animate attributeName='opacity' values='0.20;0.40;0.20' dur='4.4s' begin='2.2s' repeatCount='indefinite'/></circle><circle cx='40' cy='100' r='3' fill='none' stroke='rgba(168,85,247,0.25)' stroke-width='0.8'><animate attributeName='r' values='3;6.5;3' dur='4.4s' begin='2.2s' repeatCount='indefinite'/><animate attributeName='opacity' values='0.20;0;0.20' dur='4.4s' begin='2.2s' repeatCount='indefinite'/></circle></svg>");
+    background-size: 100% 100%, 100% 100%, 120px 120px;
+    background-repeat: no-repeat, no-repeat, repeat;
+    pointer-events: none;
+    z-index: 0;
+    animation: circuit-flow 90s linear infinite, circuit-glow-breathe 12s ease-in-out infinite;
+    will-change: background-position, opacity;
+}
+
+/* CRT Scanline Layer */
+body::after {
+    content: '';
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(rgba(18, 16, 26, 0) 50%, rgba(0, 0, 0, 0.25) 50%),
+                linear-gradient(90deg, rgba(255, 0, 0, 0.02), rgba(0, 255, 0, 0.01), rgba(0, 0, 255, 0.02));
+    background-size: 100% 3px, 6px 100%;
+    pointer-events: none;
+    z-index: 100;
+    opacity: 0.70;
+}
+
+@keyframes circuit-flow {
+    0% { background-position: 0 0, 0 0, 0 0; }
+    100% { background-position: 0 0, 0 0, 120px 120px; }
+}
+
+@keyframes circuit-glow-breathe {
+    0%, 100% { filter: drop-shadow(0 0 0px transparent); opacity: 0.65; }
+    50% { filter: drop-shadow(0 0 2px rgba(192, 132, 252, 0.25)); opacity: 0.85; }
+}
+
+/* --- BENTO SERVICE CARDS & GLASSMORPHISM --- */
+#services > div > div > div,
+.service-card,
+[class*="rounded-lg"],
+[class*="rounded-xl"] {
+    background: var(--bg-surface) !important;
+    border: 1px solid var(--border-default) !important;
+    box-shadow: var(--shadow-md) !important;
+    backdrop-filter: blur(12px) !important;
+    -webkit-backdrop-filter: blur(12px) !important;
+    border-radius: var(--radius-md) !important;
+    transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1) !important;
+    position: relative;
+    z-index: 1;
+}
+
+#services > div > div > div:hover,
+.service-card:hover {
+    border-color: var(--permet-cyan) !important;
+    box-shadow: var(--shadow-hover) !important;
+    transform: translateY(-2px);
+    background: var(--bg-surface-hover) !important;
+}
+
+/* --- FLAGSHIP CARD: AERIAL COMMAND HUD --- */
+div:has(a[href*="/dashboard/"]),
+a[href*="/dashboard/"] {
+    border-color: var(--permet-cyan) !important;
+    box-shadow: 0 0 16px rgba(0, 240, 255, 0.30), inset 0 0 14px rgba(192, 132, 252, 0.15) !important;
+}
+
+/* --- REACTOR STATUS PULSE --- */
+@keyframes cyber-pulse {
+    0%, 100% { opacity: 1; transform: scale(1); filter: drop-shadow(0 0 2px currentColor); }
+    50% { opacity: 0.65; transform: scale(0.88); filter: drop-shadow(0 0 8px currentColor); }
+}
+
+[class*="status-ping"], [class*="bg-emerald-"], [class*="bg-green-"] {
+    animation: cyber-pulse 2.5s infinite ease-in-out !important;
+}
+
+/* --- MOBILE RESPONSIVENESS & PERFORMANCE --- */
+@media (max-width: 768px) {
+    body::before {
+        background-size: 100% 100%, 100% 100%, 90px 90px;
+    }
+
+    /* Fallback to high-opacity solid surface on mobile to protect GPU */
+    #services > div > div > div,
+    .service-card,
+    [class*="rounded-lg"],
+    [class*="rounded-xl"] {
+        background: rgba(48, 26, 82, 0.95) !important;
+        backdrop-filter: none !important;
+        -webkit-backdrop-filter: none !important;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    body::before,
+    body::after,
+    [class*="status-ping"],
+    [class*="bg-emerald-"],
+    [class*="bg-green-"] {
+        animation: none !important;
+    }
+}
