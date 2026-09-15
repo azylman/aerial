@@ -436,35 +436,11 @@ services:
       - LOG_LEVEL=info
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - ${AERIAL_HOST_PROJECT_DIR:-${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}}/homepage/config:/app/core-config:ro
+      - ${AERIAL_HOST_PROJECT_DIR:-${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}}/homepage:/app/core-homepage:ro
       - ${AERIAL_HOST_CONFIG_DIR:-${AERIAL_CONFIG_DIR:-/mnt/data/supervisor/share/aerial-config}}:/share/aerial-config:ro
     entrypoint:
       - /bin/sh
-      - -c
-      - |
-        mkdir -p /config
-        if [ -d /app/core-config ]; then
-            cp -rf /app/core-config/. /config/
-        fi
-        if [ -f /app/core-config/custom.css ]; then
-            ln -sf /app/core-config/custom.css /config/custom.css
-        fi
-        USER_DIR="/share/aerial-config/homepage"
-        if [ -d "$$USER_DIR" ]; then
-            for cfg in services.yaml widgets.yaml bookmarks.yaml settings.yaml docker.yaml; do
-                if [ -f "$$USER_DIR/$$cfg" ]; then
-                    cp -f "$$USER_DIR/$$cfg" "/config/$$cfg"
-                fi
-            done
-            if [ -f "$$USER_DIR/custom.css" ]; then
-                rm -f /config/custom.css
-                cat /app/core-config/custom.css "$$USER_DIR/custom.css" > /config/custom.css
-            fi
-        fi
-        if [ "$$(id -u)" = "0" ]; then
-            chown -R node:node /config 2>/dev/null || true
-        fi
-        exec /usr/local/bin/docker-entrypoint.sh node server.js
+      - /app/core-homepage/entrypoint.sh
     networks:
       - aerial-net
     healthcheck:
