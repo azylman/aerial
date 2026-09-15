@@ -6592,6 +6592,108 @@ func TestResolveBotRoleIDs(t *testing.T) {
 	}
 }
 
+func TestResolveBotRoleIDs_RESTFallback(t *testing.T) {
+	origFetcher := guildMemberFetcher
+	defer func() { guildMemberFetcher = origFetcher }()
+
+	var fetchCalls int32
+	guildMemberFetcher = func(sess *discordgo.Session, guildID string, userID string) (*discordgo.Member, error) {
+		atomic.AddInt32(&fetchCalls, 1)
+		if guildID == "guild-1" && userID == "bot-1" {
+			return &discordgo.Member{
+				GuildID: guildID,
+				User:    &discordgo.User{ID: userID},
+				Roles:   []string{"1543462881624858624"},
+			}, nil
+		}
+		return nil, errors.New("not found")
+	}
+
+	s := &discordgo.Session{
+		State: discordgo.NewState(),
+	}
+	s.State.User = &discordgo.User{
+		ID:       "bot-1",
+		Username: "Aerial",
+	}
+
+	guild := &discordgo.Guild{
+		ID: "guild-1",
+		Roles: []*discordgo.Role{
+			{ID: "role-aerial-managed", Name: "Aerial", Managed: true},
+		},
+	}
+	_ = s.State.GuildAdd(guild)
+
+	roles := ResolveBotRoleIDs(s, "guild-1", "bot-1")
+	expected := []string{"1543462881624858624", "role-aerial-managed"}
+	sort.Strings(roles)
+	sort.Strings(expected)
+	if strings.Join(roles, ",") != strings.Join(expected, ",") {
+		t.Fatalf("First call expected %v, got %v", expected, roles)
+	}
+	if atomic.LoadInt32(&fetchCalls) != 1 {
+		t.Fatalf("Expected 1 fetch call, got %d", atomic.LoadInt32(&fetchCalls))
+	}
+
+	roles2 := ResolveBotRoleIDs(s, "guild-1", "bot-1")
+	sort.Strings(roles2)
+	if strings.Join(roles2, ",") != strings.Join(expected, ",") {
+		t.Fatalf("Second call expected %v, got %v", expected, roles2)
+	}
+	if atomic.LoadInt32(&fetchCalls) != 1 {
+		t.Fatalf("Expected fetcher not to be called again (cache hit), but fetchCalls=%d", atomic.LoadInt32(&fetchCalls))
+	}
+}
+
+func TestResolveBotRoleIDs_SingleflightDeduplication(t *testing.T) {
+	origFetcher := guildMemberFetcher
+	defer func() { guildMemberFetcher = origFetcher }()
+
+	var fetchCalls int32
+	blockCh := make(chan struct{})
+	guildMemberFetcher = func(sess *discordgo.Session, guildID string, userID string) (*discordgo.Member, error) {
+		atomic.AddInt32(&fetchCalls, 1)
+		<-blockCh
+		return &discordgo.Member{
+			GuildID: guildID,
+			User:    &discordgo.User{ID: userID},
+			Roles:   []string{"1543462881624858624"},
+		}, nil
+	}
+
+	s := &discordgo.Session{
+		State: discordgo.NewState(),
+	}
+	s.State.User = &discordgo.User{ID: "bot-sf", Username: "Aerial"}
+	guild := &discordgo.Guild{
+		ID: "guild-sf",
+	}
+	_ = s.State.GuildAdd(guild)
+
+	var wg sync.WaitGroup
+	numCallers := 10
+	wg.Add(numCallers)
+
+	for i := 0; i < numCallers; i++ {
+		go func() {
+			defer wg.Done()
+			roles := ResolveBotRoleIDs(s, "guild-sf", "bot-sf")
+			if len(roles) != 1 || roles[0] != "1543462881624858624" {
+				t.Errorf("Expected role 1543462881624858624, got %v", roles)
+			}
+		}()
+	}
+
+	time.Sleep(20 * time.Millisecond)
+	close(blockCh)
+	wg.Wait()
+
+	if calls := atomic.LoadInt32(&fetchCalls); calls != 1 {
+		t.Fatalf("Expected exactly 1 singleflight REST call for 10 concurrent requests, got %d", calls)
+	}
+}
+
 func TestProcessBurst_QuotaPause_SchedulesOneShotAndNotifies(t *testing.T) {
 	t.Parallel()
 	store := setupTestStore(t)

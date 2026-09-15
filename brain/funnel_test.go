@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unsafe"
@@ -1283,6 +1284,7 @@ channels:
 			{ID: "th-create-2", Name: "gc-thread", GuildID: "g-create-2", Type: discordgo.ChannelTypeGuildPublicThread},
 		},
 	}
+	_ = s.State.GuildAdd(g2)
 	dispatchSessionEvent(s, &discordgo.GuildCreate{Guild: g2})
 	if _, ok := queue.GetCachedChannel("ch-create-2"); !ok {
 		t.Errorf("Expected ch-create-2 to be cached on GuildCreate")
@@ -1330,6 +1332,19 @@ channels:
 	// 5. Disconnect and Resumed
 	dispatchSessionEvent(s, &discordgo.Disconnect{})
 	dispatchSessionEvent(s, &discordgo.Resumed{})
+
+	// 5b. GuildMemberUpdate
+	dispatchSessionEvent(s, &discordgo.GuildMemberUpdate{
+		Member: &discordgo.Member{
+			GuildID: "g-create-2",
+			User:    &discordgo.User{ID: "bot-aerial-id"},
+			Roles:   []string{"1543462881624858624"},
+		},
+	})
+	mUpdated, err := s.State.Member("g-create-2", "bot-aerial-id")
+	if err != nil || len(mUpdated.Roles) != 1 || mUpdated.Roles[0] != "1543462881624858624" {
+		t.Errorf("Expected bot member roles updated on GuildMemberUpdate, got %v (err: %v)", mUpdated, err)
+	}
 
 	// 6. MessageCreate: Self Bot Message (Ignored)
 	dispatchSessionEvent(s, &discordgo.MessageCreate{
@@ -2456,6 +2471,52 @@ channels:
 	thID2, _ := getOrCreateThreadID(s, msg, true)
 	if thID2 == "" {
 		t.Errorf("expected non-empty thread id when semaphore saturated")
+	}
+}
+
+func TestSyncBotMemberRoles(t *testing.T) {
+	origFetcher := funnelMemberFetcher
+	defer func() { funnelMemberFetcher = origFetcher }()
+
+	var fetchCalls int32
+	funnelMemberFetcher = func(s *discordgo.Session, guildID, userID string) (*discordgo.Member, error) {
+		atomic.AddInt32(&fetchCalls, 1)
+		return &discordgo.Member{
+			GuildID: guildID,
+			User:    &discordgo.User{ID: userID},
+			Roles:   []string{"1543462881624858624"},
+		}, nil
+	}
+
+	s := &discordgo.Session{
+		State: discordgo.NewState(),
+	}
+	s.State.User = &discordgo.User{ID: "bot-1"}
+	_ = s.State.GuildAdd(&discordgo.Guild{ID: "guild-1"})
+
+	// Nil / empty checks
+	syncBotMemberRoles(context.Background(), nil, "guild-1", "bot-1")
+	syncBotMemberRoles(context.Background(), s, "", "bot-1")
+	syncBotMemberRoles(context.Background(), s, "guild-1", "")
+	if atomic.LoadInt32(&fetchCalls) != 0 {
+		t.Fatalf("expected 0 calls for invalid args, got %d", fetchCalls)
+	}
+
+	// Successful sync
+	syncBotMemberRoles(context.Background(), s, "guild-1", "bot-1")
+	if atomic.LoadInt32(&fetchCalls) != 1 {
+		t.Fatalf("expected 1 call, got %d", fetchCalls)
+	}
+
+	m, err := s.State.Member("guild-1", "bot-1")
+	if err != nil || len(m.Roles) != 1 || m.Roles[0] != "1543462881624858624" {
+		t.Fatalf("expected cached member with role, got %v (err: %v)", m, err)
+	}
+
+	// Repeated sync when already cached with roles should be a no-op
+	syncBotMemberRoles(context.Background(), s, "guild-1", "bot-1")
+	if atomic.LoadInt32(&fetchCalls) != 1 {
+		t.Fatalf("expected fetchCalls to stay 1, got %d", fetchCalls)
 	}
 }
 

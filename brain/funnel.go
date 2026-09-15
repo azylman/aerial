@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
 	"strings"
 	"sync"
@@ -23,6 +24,35 @@ var discordSessionOpener = func(dg *discordgo.Session) error {
 	return dg.Open()
 }
 var funnelRetryBackoff = 2 * time.Second
+var funnelMemberFetcher = func(s *discordgo.Session, guildID, userID string) (*discordgo.Member, error) {
+	if s == nil {
+		return nil, errors.New("nil session")
+	}
+	return s.GuildMember(guildID, userID)
+}
+
+func syncBotMemberRoles(ctx context.Context, s *discordgo.Session, guildID, botID string) {
+	if s == nil || s.State == nil || guildID == "" || botID == "" {
+		return
+	}
+	if m, err := s.State.Member(guildID, botID); err == nil && m != nil && len(m.Roles) > 0 {
+		return
+	}
+	ctxTimeout, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	_ = ctxTimeout
+
+	m, err := funnelMemberFetcher(s, guildID, botID)
+	if err != nil || m == nil {
+		log.Printf("Warning: failed to fetch bot member roles for guild %s: %v", guildID, err)
+		return
+	}
+	if m.GuildID == "" {
+		m.GuildID = guildID
+	}
+	_ = s.State.MemberAdd(m)
+	log.Printf("Discord funnel cached %d bot role(s) for guild %s", len(m.Roles), guildID)
+}
 
 // SetFunnelConfig sets the active *config.Config for the Discord funnel.
 func SetFunnelConfig(cfg *config.Config) {
@@ -368,6 +398,9 @@ func connectDiscordFunnel(ctx context.Context, store db.Store, pool *queue.Worke
 			for _, th := range g.Threads {
 				queue.CacheDiscordChannel(th)
 			}
+			if s.State != nil && s.State.User != nil && s.State.User.ID != "" && g.ID != "" {
+				go syncBotMemberRoles(ctx, s, g.ID, s.State.User.ID)
+			}
 		}
 	})
 
@@ -423,6 +456,26 @@ func connectDiscordFunnel(ctx context.Context, store db.Store, pool *queue.Worke
 		metrics.DiscordEventsTotal.WithLabelValues("resumed").Inc()
 		metrics.RecordGatewayReconnect()
 		log.Printf("Discord funnel gateway connection resumed successfully")
+	})
+
+	dg.AddHandler(func(s *discordgo.Session, m *discordgo.GuildMemberUpdate) {
+		metrics.DiscordEventsTotal.WithLabelValues("guild_member_update").Inc()
+		if m == nil || m.Member == nil || s.State == nil || s.State.User == nil {
+			return
+		}
+		userID := ""
+		if m.User != nil {
+			userID = m.User.ID
+		} else if m.Member.User != nil {
+			userID = m.Member.User.ID
+		}
+		if userID != "" && userID == s.State.User.ID {
+			if m.GuildID != "" && m.Member.GuildID == "" {
+				m.Member.GuildID = m.GuildID
+			}
+			_ = s.State.MemberAdd(m.Member)
+			log.Printf("Discord funnel updated bot roles (%d roles) in real-time for guild %s", len(m.Member.Roles), m.Member.GuildID)
+		}
 	})
 
 	dg.AddHandler(func(s *discordgo.Session, m *discordgo.MessageCreate) {
@@ -482,7 +535,7 @@ func connectDiscordFunnel(ctx context.Context, store db.Store, pool *queue.Worke
 		}()
 	})
 
-	dg.Identify.Intents = discordgo.IntentsGuildMessages | discordgo.IntentsDirectMessages | discordgo.IntentMessageContent
+	dg.Identify.Intents = discordgo.IntentsGuilds | discordgo.IntentsGuildMessages | discordgo.IntentsDirectMessages | discordgo.IntentMessageContent
 	dg.SyncEvents = false
 
 	if err := discordSessionOpener(dg); err != nil {

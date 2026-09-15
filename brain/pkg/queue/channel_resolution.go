@@ -1,10 +1,12 @@
 package queue
 
 import (
+	"fmt"
 	"regexp"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/azylman/aerial/brain/pkg/db"
 	"github.com/bwmarrin/discordgo"
@@ -24,10 +26,25 @@ var (
 	channelCacheMu   sync.RWMutex
 	channelCache     = make(map[string]ChannelSnapshot)
 	restSingleFlight singleflight.Group
+	restCooldownMu   sync.RWMutex
+	restCooldown     = make(map[string]time.Time)
 
 	aerialExclusionRegex = regexp.MustCompile(`(?i)\baerial\s+(?:view|photo)s?\b`)
 	tier1KeywordRegex    = regexp.MustCompile(`(?i)\b(aerial|gundam)\b`)
 )
+
+func isRESTInCooldown(key string) bool {
+	restCooldownMu.RLock()
+	expiry, exists := restCooldown[key]
+	restCooldownMu.RUnlock()
+	return exists && time.Now().Before(expiry)
+}
+
+func setRESTCooldown(key string, duration time.Duration) {
+	restCooldownMu.Lock()
+	restCooldown[key] = time.Now().Add(duration)
+	restCooldownMu.Unlock()
+}
 
 // CacheDiscordChannel stores an immutable snapshot of a discordgo.Channel.
 func CacheDiscordChannel(ch *discordgo.Channel) {
@@ -180,6 +197,13 @@ func extractMessageBody(content string) string {
 	return trimmed
 }
 
+var guildMemberFetcher = func(sess *discordgo.Session, guildID string, userID string) (*discordgo.Member, error) {
+	if sess == nil || (sess.Client == nil && sess.Token == "") {
+		return nil, fmt.Errorf("uninitialized test session")
+	}
+	return sess.GuildMember(guildID, userID)
+}
+
 // ResolveBotRoleIDs returns all role IDs associated with the bot in the given guild.
 // This includes roles held by the bot member and any managed integration roles matching the bot name.
 func ResolveBotRoleIDs(sess *discordgo.Session, guildID string, botUserID string) []string {
@@ -216,6 +240,33 @@ func ResolveBotRoleIDs(sess *discordgo.Session, guildID string, botUserID string
 						roleSet[rID] = true
 					}
 				}
+			} else if sess != nil && guildID != "" {
+				sfKey := fmt.Sprintf("bot_member:%s:%s", g.ID, botUserID)
+				if !isRESTInCooldown(sfKey) {
+					res, sfErr, _ := restSingleFlight.Do(sfKey, func() (interface{}, error) {
+						fetchedMember, fetchErr := guildMemberFetcher(sess, g.ID, botUserID)
+						if fetchErr != nil || fetchedMember == nil {
+							return nil, fetchErr
+						}
+						if fetchedMember.GuildID == "" {
+							fetchedMember.GuildID = g.ID
+						}
+						_ = sess.State.MemberAdd(fetchedMember)
+						rolesCopy := append([]string(nil), fetchedMember.Roles...)
+						return rolesCopy, nil
+					})
+					if sfErr != nil {
+						setRESTCooldown(sfKey, 30*time.Second)
+					} else if res != nil {
+						if fetchedRoles, ok := res.([]string); ok {
+							for _, rID := range fetchedRoles {
+								if rID != "" {
+									roleSet[rID] = true
+								}
+							}
+						}
+					}
+				}
 			}
 		}
 		// 2. Roles in guild matching bot name or username
@@ -223,7 +274,8 @@ func ResolveBotRoleIDs(sess *discordgo.Session, guildID string, botUserID string
 			if r == nil {
 				continue
 			}
-			if strings.EqualFold(r.Name, "aerial") || strings.EqualFold(r.Name, "gundam") || (botUsername != "" && strings.EqualFold(r.Name, botUsername)) {
+			if strings.EqualFold(r.Name, "aerial") || strings.EqualFold(r.Name, "gundam") ||
+				(botUsername != "" && strings.EqualFold(r.Name, botUsername)) {
 				roleSet[r.ID] = true
 			}
 		}
