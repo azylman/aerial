@@ -327,6 +327,11 @@ services:
     labels:
       autoheal: "true"
       com.centurylinklabs.watchtower.enable: "true"
+      homepage.group: "Aerial AI & Mission Control"
+      homepage.name: "AgentsView"
+      homepage.icon: "terminal.png"
+      homepage.href: "/agentsview/"
+      homepage.description: "Live Agent Session Transcripts"
     environment:
       - AGENTSVIEW_DATA_DIR=/agentsview-data
     command:
@@ -353,6 +358,17 @@ services:
     labels:
       autoheal: "true"
       com.centurylinklabs.watchtower.enable: "true"
+      homepage.group: "Aerial AI & Mission Control"
+      homepage.name: "Aerial Command HUD"
+      homepage.icon: "cpu.png"
+      homepage.href: "/dashboard/"
+      homepage.description: "Autonomous Agent Mission Control"
+      homepage.widget.type: "customapi"
+      homepage.widget.url: "http://aerial-dashboard:8080/api/status"
+      homepage.widget.mappings[0].field: "active_tasks_count"
+      homepage.widget.mappings[0].label: "Active Tasks"
+      homepage.widget.mappings[1].field: "cluster_status"
+      homepage.widget.mappings[1].label: "Cluster Status"
     environment:
       - PORT=8080
       - BRAIN_URL=http://brain:8080
@@ -383,6 +399,11 @@ services:
     labels:
       autoheal: "true"
       com.centurylinklabs.watchtower.enable: "true"
+      homepage.group: "Aerial AI & Mission Control"
+      homepage.name: "System Docs"
+      homepage.icon: "book.png"
+      homepage.href: "/docs/"
+      homepage.description: "Architecture Specs & Runbooks"
     volumes:
       - ${AERIAL_HOST_CONFIG_DIR:-${AERIAL_CONFIG_DIR:-/mnt/data/supervisor/share/aerial-config}}:/share/aerial-config:ro
       - ${AERIAL_HOST_PROJECT_DIR:-${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}}/docs-service/app:/usr/share/nginx/html:ro
@@ -394,6 +415,35 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+
+  # ----------------------------------------------------------------------------
+  # 11.1 Root Landing Portal: Aerial Homepage (Gundam Cyberpunk HUD)
+  #      Out-of-the-box landing gateway with auto-discovered core services.
+  # ----------------------------------------------------------------------------
+  homepage:
+    image: ghcr.io/azylman/aerial-homepage:latest
+    build: ./homepage
+    container_name: aerial-homepage
+    restart: unless-stopped
+    stop_grace_period: 15s
+    labels:
+      autoheal: "true"
+      com.centurylinklabs.watchtower.enable: "true"
+    environment:
+      - PORT=3000
+      - HOMEPAGE_ALLOWED_HOSTS=*
+      - LOG_LEVEL=info
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ${AERIAL_HOST_CONFIG_DIR:-${AERIAL_CONFIG_DIR:-/mnt/data/supervisor/share/aerial-config}}:/share/aerial-config:ro
+    networks:
+      - aerial-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:3000/api/healthcheck || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
   # ----------------------------------------------------------------------------
   # 12. Edge Reverse Proxy Gateway: Aerial Proxy Gateway
@@ -430,6 +480,8 @@ services:
       agentsview:
         condition: service_started
       grafana:
+        condition: service_healthy
+      homepage:
         condition: service_healthy
 
   # ----------------------------------------------------------------------------
@@ -553,6 +605,15 @@ services:
     labels:
       autoheal: "true"
       com.centurylinklabs.watchtower.enable: "true"
+      homepage.group: "Observability"
+      homepage.name: "Grafana Telemetry"
+      homepage.icon: "grafana.png"
+      homepage.href: "/grafana/"
+      homepage.description: "Timeseries & Container Metrics"
+      homepage.widget.type: "grafana"
+      homepage.widget.url: "http://aerial-grafana:3000"
+      homepage.widget.username: "${GRAFANA_ADMIN_USER:-admin}"
+      homepage.widget.password: "${GRAFANA_ADMIN_PASSWORD:-aerial_metrics_pass}"
     environment:
       - GF_PATHS_PROVISIONING=/share/aerial/grafana/provisioning
       - GF_DATABASE_TYPE=postgres

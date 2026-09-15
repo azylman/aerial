@@ -1,0 +1,12 @@
+theme: dark
+color: slate
+cardBlur: md
+cardOpacity: 85
+headerStyle: clean
+layout:
+  Aerial AI & Mission Control:
+    style: row
+    columns: 4
+  Observability:
+    style: row
+    columns: 2
