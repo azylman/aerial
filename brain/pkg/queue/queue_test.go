@@ -4264,6 +4264,13 @@ func TestProcessBurst_Turn1ContextInjection(t *testing.T) {
 					Content:    "Second historical message",
 					CreatedAt:  time.Now().UTC().Add(-10 * time.Minute),
 				},
+				{
+					ID:         "hist-3",
+					AuthorName: "Aerial",
+					Role:       "Assistant",
+					Content:    "Previous assistant response",
+					CreatedAt:  time.Now().UTC().Add(-5 * time.Minute),
+				},
 			}, nil
 		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
@@ -4325,13 +4332,107 @@ func TestProcessBurst_Turn1ContextInjection(t *testing.T) {
 		t.Errorf("Expected Turn 1 to have empty sessionID, got %q", receivedSessionIDs[0])
 	}
 
-	// Turn 2 assertions
+	// Turn 2 assertions (In Channel Mode, history lookback is injected on EVERY wake, including warm turns)
 	turn2Prompt := capturedPrompts[1]
-	if strings.Contains(turn2Prompt, "<CHANNEL_HISTORY>") {
-		t.Errorf("Expected Turn 2 prompt to NOT contain <CHANNEL_HISTORY>, got:\n%s", turn2Prompt)
+	if !strings.Contains(turn2Prompt, "<CHANNEL_HISTORY>") {
+		t.Errorf("Expected Turn 2 prompt in channel mode to contain <CHANNEL_HISTORY>, got:\n%s", turn2Prompt)
+	}
+	if strings.Contains(turn2Prompt, "Previous assistant response") {
+		t.Errorf("Expected Turn 2 prompt to filter out previous assistant response, got:\n%s", turn2Prompt)
 	}
 	if receivedSessionIDs[1] != "e5b7fb78-d85d-4bd6-ba9e-330f1e30596f" {
 		t.Errorf("Expected Turn 2 to have sessionID == 'e5b7fb78-d85d-4bd6-ba9e-330f1e30596f', got %q", receivedSessionIDs[1])
+	}
+}
+
+func TestProcessBurst_ThreadsMode_WarmTurnSuppressesChannelHistory(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to initialize DB: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	threadID := "thread-history-suppress"
+
+	// Mock session dir for Turn 1 synchronized session
+	sessDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", "e5b7fb78-d85d-4bd6-ba9e-330f1e30596f")
+	_ = os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs"), 0755)
+	_ = os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte(`{"step_index":0}`+"\n"), 0644)
+
+	var mu sync.Mutex
+	var capturedPrompts []string
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		SessionManager: session.New(tmpDir, ""),
+		DB:             database,
+		HistoryFetcher: func(ctx context.Context, cID string, beforeID string, limit int) ([]HistoryMessage, error) {
+			return []HistoryMessage{
+				{
+					ID:         "hist-1",
+					AuthorName: "Alice",
+					Role:       "User",
+					Content:    "First historical message",
+					CreatedAt:  time.Now().UTC().Add(-15 * time.Minute),
+				},
+			}, nil
+		},
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			mu.Lock()
+			capturedPrompts = append(capturedPrompts, prompt)
+			mu.Unlock()
+			stderr := "Starting conversation update stream for e5b7fb78-d85d-4bd6-ba9e-330f1e30596f\n"
+			return mockJSONResponse("e5b7fb78-d85d-4bd6-ba9e-330f1e30596f", "Answering wake question!"), stderr, 0, nil
+		},
+		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
+			return config.ChannelPolicy{
+				Mode: "threads",
+			}
+		},
+	})
+
+	now := time.Now().UTC()
+	// Turn 1 on cold thread
+	msg1 := db.Message{
+		ID:         "msg-thread-turn-1",
+		ThreadID:   threadID,
+		AuthorName: "Charlie",
+		Content:    "Hey Aerial, turn 1 thread question",
+		Status:     db.StatusPending,
+		CreatedAt:  now,
+	}
+	_ = db.InsertMessage(database, msg1)
+	pool.processBurst([]db.Message{msg1})
+
+	// Turn 2 on now-warm thread
+	msg2 := db.Message{
+		ID:         "msg-thread-turn-2",
+		ThreadID:   threadID,
+		AuthorName: "Charlie",
+		Content:    "Hey Aerial, turn 2 follow-up question",
+		Status:     db.StatusPending,
+		CreatedAt:  now.Add(5 * time.Second),
+	}
+	_ = db.InsertMessage(database, msg2)
+	pool.processBurst([]db.Message{msg2})
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if len(capturedPrompts) != 2 {
+		t.Fatalf("Expected 2 runner prompts, got %d", len(capturedPrompts))
+	}
+
+	// Turn 1 (cold thread with no summary) falls back to <CHANNEL_HISTORY>
+	if !strings.Contains(capturedPrompts[0], "<CHANNEL_HISTORY>") {
+		t.Errorf("Expected Turn 1 prompt to contain <CHANNEL_HISTORY>, got:\n%s", capturedPrompts[0])
+	}
+
+	// Turn 2 (warm thread) MUST NOT contain <CHANNEL_HISTORY> because agy transcript retains history
+	if strings.Contains(capturedPrompts[1], "<CHANNEL_HISTORY>") {
+		t.Errorf("Expected Turn 2 prompt in threads mode to NOT contain <CHANNEL_HISTORY>, got:\n%s", capturedPrompts[1])
 	}
 }
 
