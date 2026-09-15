@@ -360,7 +360,7 @@ services:
       com.centurylinklabs.watchtower.enable: "true"
       homepage.group: "Aerial AI & Mission Control"
       homepage.name: "Aerial Command HUD"
-      homepage.icon: "dashboard-icons.png"
+      homepage.icon: "/dashboard/apple-touch-icon.png"
       homepage.href: "/dashboard/"
       homepage.description: "Autonomous Agent Mission Control"
       homepage.widget.type: "customapi"
