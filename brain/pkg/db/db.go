@@ -25,10 +25,15 @@ func RegisterSQLiteTestHook(fn func(string) (*sql.DB, error)) {
 	sqliteTestInitHook = fn
 }
 
-func isPostgres(database DBTX) bool {
+func isPostgres(database DBTX) (isPg bool) {
 	if database == nil {
 		return false
 	}
+	defer func() {
+		if r := recover(); r != nil {
+			isPg = false
+		}
+	}()
 	type driverGetter interface {
 		Driver() driver.Driver
 	}

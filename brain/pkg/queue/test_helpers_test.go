@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/azylman/aerial/brain/pkg/db"
-	_ "github.com/azylman/aerial/brain/pkg/db/dbtest"
 )
 
 // setupTestStore returns a clean FakeStore for testing.

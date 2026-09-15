@@ -19,7 +19,6 @@ import (
 	"github.com/azylman/aerial/brain/pkg/classifier"
 	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
-	_ "github.com/azylman/aerial/brain/pkg/db/dbtest"
 	"github.com/azylman/aerial/brain/pkg/queue"
 	"github.com/bwmarrin/discordgo"
 )
@@ -40,9 +39,18 @@ func setDiscordSessionOpenerForTest(t *testing.T, fn func(*discordgo.Session) er
 }
 
 // newTestWorkerPool instantiates a fully isolated WorkerPool with mocked runner, notifier, and delivery hooks.
-func newTestWorkerPool(database *sql.DB) *queue.WorkerPool {
+func newTestWorkerPool(dbOrStore any) *queue.WorkerPool {
+	var s db.Store
+	if dbOrStore != nil {
+		switch v := dbOrStore.(type) {
+		case db.Store:
+			s = v
+		case *sql.DB:
+			s = db.NewSQLStore(v)
+		}
+	}
 	return queue.NewWorkerPool(queue.WorkerPoolConfig{
-		DB: database,
+		Store: s,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			return `{"event":"result","result":{"status":"SUCCESS","response":"mock test response"}}`, "", 0, nil
 		},
@@ -671,18 +679,14 @@ channels:
 
 
 func TestFunnelStartupRecovery(t *testing.T) {
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize database: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := db.NewFakeStore()
 
-	pool := newTestWorkerPool(database)
+	pool := newTestWorkerPool(store)
 	pool.Start()
 	defer pool.Stop()
 
 	// Should run cleanly on empty DB
-	queue.RecoverInterrupted(database, pool)
+	queue.RecoverInterrupted(store, pool)
 }
 
 func TestIsMessageableChannel(t *testing.T) {
@@ -715,17 +719,13 @@ func TestIsMessageableChannel(t *testing.T) {
 func TestRunStartupCatchUpSweep_NilAndEmptySafeguards(t *testing.T) {
 	resetFunnelGlobals(t)
 	defer resetFunnelGlobals(t)
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to init DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := db.NewFakeStore()
 
-	pool := newTestWorkerPool(database)
+	pool := newTestWorkerPool(store)
 
 	// 1. Nil session / DB / pool should be safe no-op
 	RunStartupCatchUpSweep(context.Background(), nil, nil, nil)
-	RunStartupCatchUpSweep(context.Background(), database, pool, nil)
+	RunStartupCatchUpSweep(context.Background(), store, pool, nil)
 
 	// 2. Valid empty session should complete without panic
 	s := &discordgo.Session{
@@ -733,7 +733,7 @@ func TestRunStartupCatchUpSweep_NilAndEmptySafeguards(t *testing.T) {
 	}
 	s.State.User = &discordgo.User{ID: "bot-123", Username: "Aerial"}
 
-	RunStartupCatchUpSweep(context.Background(), database, pool, s)
+	RunStartupCatchUpSweep(context.Background(), store, pool, s)
 }
 
 type mockCatchUpRoundTripper func(*http.Request) (*http.Response, error)
@@ -757,13 +757,9 @@ channels:
     ignore_bots: true
 `)
 
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to init DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := db.NewFakeStore()
 
-	pool := newTestWorkerPool(database)
+	pool := newTestWorkerPool(store)
 	defer pool.Stop()
 
 	nowStr := time.Now().UTC().Format(time.RFC3339)
@@ -825,9 +821,9 @@ channels:
 	isSweeping.Store(false)
 	sweepMu.Unlock()
 
-	RunStartupCatchUpSweep(context.Background(), database, pool, s)
+	RunStartupCatchUpSweep(context.Background(), store, pool, s)
 
-	existsAllowed, err := db.MessageExists(database, "msg-bot-allowed")
+	existsAllowed, err := store.MessageExists(context.Background(), "msg-bot-allowed")
 	if err != nil {
 		t.Fatalf("Failed to check message existence: %v", err)
 	}
@@ -835,7 +831,7 @@ channels:
 		t.Errorf("Expected msg-bot-allowed to be retained and inserted into DB when ignore_bots is false")
 	}
 
-	existsIgnored, err := db.MessageExists(database, "msg-bot-ignored")
+	existsIgnored, err := store.MessageExists(context.Background(), "msg-bot-ignored")
 	if err != nil {
 		t.Fatalf("Failed to check message existence: %v", err)
 	}
@@ -1241,19 +1237,13 @@ channels:
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "funnel_test.db")
-	database, err := db.InitDB(dbPath)
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer database.Close()
+	store := db.NewFakeStore()
 
-	pool := newTestWorkerPool(database)
+	pool := newTestWorkerPool(store)
 	pool.Start()
 	defer pool.Stop()
 
-	s := connectDiscordFunnel(ctx, database, pool, "mock-valid-token-for-handlers")
+	s := connectDiscordFunnel(ctx, store, pool, "mock-valid-token-for-handlers")
 	if s == nil {
 		t.Fatalf("Expected non-nil discordgo.Session")
 	}
@@ -1366,7 +1356,7 @@ channels:
 	// Poll for message in DB
 	var dbMsg *db.Message
 	for i := 0; i < 50; i++ {
-		dbMsg, _ = db.GetMessage(database, "msg-incoming-100")
+		dbMsg, _ = store.GetMessage(context.Background(), "msg-incoming-100")
 		if dbMsg != nil {
 			break
 		}
@@ -1398,7 +1388,7 @@ channels:
 	})
 
 	time.Sleep(50 * time.Millisecond)
-	if ignoredMsg, _ := db.GetMessage(database, "msg-incoming-200"); ignoredMsg != nil {
+	if ignoredMsg, _ := store.GetMessage(context.Background(), "msg-incoming-200"); ignoredMsg != nil {
 		t.Errorf("Expected msg-incoming-200 to be ignored, but was found in DB")
 	}
 }
@@ -1596,15 +1586,9 @@ channels:
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "sweep_test.db")
-	database, err := db.InitDB(dbPath)
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer database.Close()
+	store := db.NewFakeStore()
 
-	pool := newTestWorkerPool(database)
+	pool := newTestWorkerPool(store)
 	pool.Start()
 	defer pool.Stop()
 
@@ -1625,7 +1609,7 @@ channels:
 	_ = s.State.GuildAdd(g)
 
 	// Pre-insert an existing message so it tests deduplication
-	_ = db.InsertMessage(database, db.Message{
+	_ = store.InsertMessage(context.Background(), db.Message{
 		ID:        "msg-existing-1",
 		ThreadID:  "ch-text-1",
 		GuildID:   "g-sweep-1",
@@ -1694,16 +1678,16 @@ channels:
 		}),
 	}
 
-	RunStartupCatchUpSweep(ctx, database, pool, s)
+	RunStartupCatchUpSweep(ctx, store, pool, s)
 
 	// Verify msg-new-sweep-1 was inserted and enqueued
-	dbMsg, err := db.GetMessage(database, "msg-new-sweep-1")
+	dbMsg, err := store.GetMessage(context.Background(), "msg-new-sweep-1")
 	if err != nil || dbMsg == nil {
 		t.Fatalf("Expected msg-new-sweep-1 to be inserted during sweep, got err: %v", err)
 	}
 
 	// 2. Test 2-minute rate limit cooldown
-	RunStartupCatchUpSweep(ctx, database, pool, s) // should exit immediately
+	RunStartupCatchUpSweep(ctx, store, pool, s) // should exit immediately
 
 	// 3. Test Circuit Breaker with 5 consecutive REST errors
 	resetFunnelGlobals(t)
@@ -1713,7 +1697,7 @@ channels:
 			Body:       io.NopCloser(bytes.NewReader([]byte(`{"message":"internal error"}`))),
 		}, nil
 	})
-	RunStartupCatchUpSweep(ctx, database, pool, s)
+	RunStartupCatchUpSweep(ctx, store, pool, s)
 }
 
 func TestGetOrCreateThreadID_AllDetailedBranches(t *testing.T) {
@@ -1881,11 +1865,11 @@ channels:
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	closedDB, _ := db.InitDB(":memory:")
-	_ = closedDB.Close()
+	closedStore := db.NewFakeStore()
+	_ = closedStore.Close()
 
-	pool := newTestWorkerPool(closedDB)
-	s := connectDiscordFunnel(ctx, closedDB, pool, "mock-token-closed-db")
+	pool := newTestWorkerPool(closedStore)
+	s := connectDiscordFunnel(ctx, closedStore, pool, "mock-token-closed-db")
 	if s == nil {
 		t.Fatalf("Expected non-nil session")
 	}
@@ -2029,13 +2013,9 @@ func TestConnectDiscordFunnel_NilContextAndEmptyToken(t *testing.T) {
 
 func TestRunStartupCatchUpSweep_ExtendedBranches(t *testing.T) {
 	resetFunnelGlobals(t)
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer database.Close()
+	store := db.NewFakeStore()
 
-	pool := newTestWorkerPool(database)
+	pool := newTestWorkerPool(store)
 	pool.Start()
 	defer pool.Stop()
 
@@ -2093,7 +2073,7 @@ func TestRunStartupCatchUpSweep_ExtendedBranches(t *testing.T) {
 		}),
 	}
 
-	RunStartupCatchUpSweep(context.Background(), database, pool, s)
+	RunStartupCatchUpSweep(context.Background(), store, pool, s)
 
 	// 2. Circuit breaker path (5 consecutive errors)
 	resetFunnelGlobals(t)
@@ -2135,7 +2115,7 @@ func TestRunStartupCatchUpSweep_ExtendedBranches(t *testing.T) {
 		}),
 	}
 
-	RunStartupCatchUpSweep(context.Background(), database, pool, sErr)
+	RunStartupCatchUpSweep(context.Background(), store, pool, sErr)
 
 	// 3. Bot-self message and untargeted message skipped
 	resetFunnelGlobals(t)
@@ -2185,13 +2165,13 @@ channels:
 		}),
 	}
 
-	RunStartupCatchUpSweep(context.Background(), database, pool, sTarget)
+	RunStartupCatchUpSweep(context.Background(), store, pool, sTarget)
 
 	// 4. Cancelled context aborting sweep loop
 	resetFunnelGlobals(t)
 	cancelCtx, cancelFn := context.WithCancel(context.Background())
 	cancelFn()
-	RunStartupCatchUpSweep(cancelCtx, database, pool, sTarget)
+	RunStartupCatchUpSweep(cancelCtx, store, pool, sTarget)
 }
 
 func TestGetOrCreateThreadID_160004_EmptyParentAndGuild(t *testing.T) {
@@ -2253,23 +2233,19 @@ channels:
 
 func TestRunStartupCatchUpSweep_AllDetailedBranches(t *testing.T) {
 	resetFunnelGlobals(t)
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer database.Close()
+	store := db.NewFakeStore()
 
-	pool := newTestWorkerPool(database)
+	pool := newTestWorkerPool(store)
 	pool.Start()
 	defer pool.Stop()
 
 	// 1. Nil context branch
-	RunStartupCatchUpSweep(nil, database, pool, nil)
+	RunStartupCatchUpSweep(nil, store, pool, nil)
 
 	// 2. Already sweeping branch
 	resetFunnelGlobals(t)
 	isSweeping.Store(true)
-	RunStartupCatchUpSweep(context.Background(), database, pool, &discordgo.Session{})
+	RunStartupCatchUpSweep(context.Background(), store, pool, &discordgo.Session{})
 	isSweeping.Store(false)
 
 	// 3. s.Token == "" with guilds in state (triggers break)
@@ -2279,7 +2255,7 @@ func TestRunStartupCatchUpSweep_AllDetailedBranches(t *testing.T) {
 		Token: "",
 	}
 	_ = sNoToken.State.GuildAdd(&discordgo.Guild{ID: "g-no-token"})
-	RunStartupCatchUpSweep(context.Background(), database, pool, sNoToken)
+	RunStartupCatchUpSweep(context.Background(), store, pool, sNoToken)
 
 	// 4. Permission denial, ignored channel, nil author, bot self, untargeted, and insert error
 	resetFunnelGlobals(t)
@@ -2393,13 +2369,13 @@ channels:
 	}
 
 	// Nil context
-	RunStartupCatchUpSweep(nil, database, pool, sFull)
+	RunStartupCatchUpSweep(nil, store, pool, sFull)
 
 	// Cancelled context
 	resetFunnelGlobals(t)
 	ctxCancel, cancel := context.WithCancel(context.Background())
 	cancel()
-	RunStartupCatchUpSweep(ctxCancel, database, pool, sFull)
+	RunStartupCatchUpSweep(ctxCancel, store, pool, sFull)
 
 	// Panic recovery
 	resetFunnelGlobals(t)
@@ -2413,13 +2389,13 @@ channels:
 		},
 	}
 	_ = sPanic.State.GuildAdd(&discordgo.Guild{ID: "g-panic"})
-	RunStartupCatchUpSweep(context.Background(), database, pool, sPanic)
+	RunStartupCatchUpSweep(context.Background(), store, pool, sPanic)
 
 	// 5. DB insert error during sweep
 	resetFunnelGlobals(t)
-	closedDB, _ := db.InitDB(":memory:")
-	_ = closedDB.Close()
-	RunStartupCatchUpSweep(context.Background(), closedDB, pool, sFull)
+	closedStore := db.NewFakeStore()
+	_ = closedStore.Close()
+	RunStartupCatchUpSweep(context.Background(), closedStore, pool, sFull)
 }
 
 func TestCreateThread_EdgeCases(t *testing.T) {
@@ -2457,14 +2433,10 @@ channels:
 	clsErr := classifier.New(currentFunnelConfig(), func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 		return "", "", 1, errors.New("summarizer forced failure")
 	})
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer database.Close()
+	store := db.NewFakeStore()
 	pool := queue.New(currentFunnelConfig(), queue.WorkerPoolConfig{
 		Classifier: clsErr,
-		DB:         database,
+		Store:      store,
 	})
 	SetFunnelPool(pool)
 	defer SetFunnelPool(nil)

@@ -486,3 +486,24 @@ func (s *SQLStore) GetSessionActivityStats(ctx context.Context, threadID string)
 	return GetSessionActivityStatsWithContext(ctx, s.db, threadID)
 }
 
+func (s *SQLStore) GetActiveTasks(ctx context.Context) ([]ActiveTask, error) {
+	if s == nil || isDBTXNil(s.db) {
+		return nil, fmt.Errorf("database is nil")
+	}
+	return GetActiveTasks(s.db)
+}
+
+func (s *SQLStore) GetExternalConversationID(ctx context.Context, internalID string) (string, error) {
+	if s == nil || isDBTXNil(s.db) {
+		return "", fmt.Errorf("database is nil")
+	}
+	return GetExternalConversationID(s.db, internalID)
+}
+
+func (s *SQLStore) SaveConversationMapping(ctx context.Context, externalID, internalID string) error {
+	if s == nil || isDBTXNil(s.db) {
+		return fmt.Errorf("database is nil")
+	}
+	return SaveConversationMapping(s.db, externalID, internalID)
+}
+

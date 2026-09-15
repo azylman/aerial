@@ -99,11 +99,7 @@ func mockJSONResponse(convID, responseText string) string {
 
 func TestQueueSuccessLifecycleAndSessionSaving(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	var deliveredText string
 	var deliveredChannel string
@@ -115,7 +111,7 @@ func TestQueueSuccessLifecycleAndSessionSaving(t *testing.T) {
 
 	pool := NewWorkerPool(WorkerPoolConfig{
 		SessionManager: session.New(tmpHome, ""),
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
@@ -155,7 +151,7 @@ func TestQueueSuccessLifecycleAndSessionSaving(t *testing.T) {
 		CreatedAt:  time.Now().UTC(),
 		UpdatedAt:  time.Now().UTC(),
 	}
-	if err := db.InsertMessage(database, msg); err != nil {
+	if err := insertMessage(store, msg); err != nil {
 		t.Fatalf("Failed to insert message: %v", err)
 	}
 
@@ -168,7 +164,7 @@ func TestQueueSuccessLifecycleAndSessionSaving(t *testing.T) {
 	}
 
 	// Verify DB state
-	dbMsg, err := db.GetMessage(database, "msg-101")
+	dbMsg, err := getMessage(store, "msg-101")
 	if err != nil || dbMsg == nil {
 		t.Fatalf("Failed to get message: %v", err)
 	}
@@ -177,7 +173,7 @@ func TestQueueSuccessLifecycleAndSessionSaving(t *testing.T) {
 	}
 
 	// Verify Session saved
-	savedSess, err := db.GetSessionID(database, "thread-202")
+	savedSess, err := getSessionID(store, "thread-202")
 	if err != nil || savedSess != "f1111111-2222-3333-4444-555555555555" {
 		t.Errorf("Expected saved session f1111111-2222-3333-4444-555555555555, got: %s (err: %v)", savedSess, err)
 	}
@@ -192,11 +188,7 @@ func TestQueueSuccessLifecycleAndSessionSaving(t *testing.T) {
 
 func TestQueueMultiThreadConcurrencyAndSingleThreadFIFO(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	var mu sync.Mutex
 	var executionOrder []string
@@ -207,7 +199,7 @@ func TestQueueMultiThreadConcurrencyAndSingleThreadFIFO(t *testing.T) {
 	b1Finished := make(chan struct{})
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
@@ -258,9 +250,9 @@ func TestQueueMultiThreadConcurrencyAndSingleThreadFIFO(t *testing.T) {
 	// Thread B: msg B1
 	msgB1 := db.Message{ID: "m-B1", ThreadID: "ThreadB", Content: "B1"}
 
-	_ = db.InsertMessage(database, msgA1)
-	_ = db.InsertMessage(database, msgA2)
-	_ = db.InsertMessage(database, msgB1)
+	_ = insertMessage(store, msgA1)
+	_ = insertMessage(store, msgA2)
+	_ = insertMessage(store, msgB1)
 
 	pool.Enqueue(msgA1)
 	pool.Enqueue(msgB1)
@@ -305,13 +297,9 @@ func TestQueueMultiThreadConcurrencyAndSingleThreadFIFO(t *testing.T) {
 
 func TestQueueTransientRetryPreservesSession(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
-	_ = db.SaveSessionID(database, "thread-retry", "b1111111-2222-3333-4444-555555555555")
+	_ = saveSessionID(store, "thread-retry", "b1111111-2222-3333-4444-555555555555")
 
 	attemptCount := 0
 	var receivedSessions []string
@@ -319,7 +307,7 @@ func TestQueueTransientRetryPreservesSession(t *testing.T) {
 	doneCh := make(chan struct{})
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
@@ -349,7 +337,7 @@ func TestQueueTransientRetryPreservesSession(t *testing.T) {
 	defer pool.Stop()
 
 	msg := db.Message{ID: "msg-retry-1", ThreadID: "thread-retry", Content: "Hello"}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 	pool.Enqueue(msg)
 
 	select {
@@ -369,7 +357,7 @@ func TestQueueTransientRetryPreservesSession(t *testing.T) {
 	}
 	mu.Unlock()
 
-	dbMsg, _ := db.GetMessage(database, "msg-retry-1")
+	dbMsg, _ := getMessage(store, "msg-retry-1")
 	if dbMsg.Status != db.StatusCompleted || dbMsg.RetryCount != 2 {
 		t.Errorf("Expected status COMPLETED and retry_count 2, got status=%s, count=%d", dbMsg.Status, dbMsg.RetryCount)
 	}
@@ -377,13 +365,9 @@ func TestQueueTransientRetryPreservesSession(t *testing.T) {
 
 func TestQueueSessionCorruptionRecovery(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
-	_ = db.SaveSessionID(database, "thread-corrupt", "a1111111-2222-3333-4444-555555555555")
+	_ = saveSessionID(store, "thread-corrupt", "a1111111-2222-3333-4444-555555555555")
 
 	var notifiedMessages []string
 	var sessionIDsPassed []string
@@ -394,7 +378,7 @@ func TestQueueSessionCorruptionRecovery(t *testing.T) {
 
 	pool := NewWorkerPool(WorkerPoolConfig{
 		SessionManager: session.New(tmpHome, ""),
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
@@ -433,7 +417,7 @@ func TestQueueSessionCorruptionRecovery(t *testing.T) {
 	defer pool.Stop()
 
 	msg := db.Message{ID: "msg-corrupt-1", ThreadID: "thread-corrupt", GuildID: "guild-1", Content: "Hello"}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 	pool.Enqueue(msg)
 
 	select {
@@ -455,7 +439,7 @@ func TestQueueSessionCorruptionRecovery(t *testing.T) {
 	mu.Unlock()
 
 	// Verify session in DB updated to fresh session
-	finalSess, _ := db.GetSessionID(database, "thread-corrupt")
+	finalSess, _ := getSessionID(store, "thread-corrupt")
 	if finalSess != "d8b5e679-7425-40de-944b-e07fc1f90ae7" {
 		t.Errorf("Expected final session d8b5e679-7425-40de-944b-e07fc1f90ae7, got: %s", finalSess)
 	}
@@ -463,18 +447,14 @@ func TestQueueSessionCorruptionRecovery(t *testing.T) {
 
 func TestQueueTotalExhaustion(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	var mu sync.Mutex
 	var deliveredNotifications []string
 	doneCh := make(chan struct{})
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
@@ -498,7 +478,7 @@ func TestQueueTotalExhaustion(t *testing.T) {
 	defer pool.Stop()
 
 	msg := db.Message{ID: "msg-exhaust", ThreadID: "thread-exhaust", GuildID: "guild-1", Content: "Hello"}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 	pool.Enqueue(msg)
 
 	select {
@@ -507,7 +487,7 @@ func TestQueueTotalExhaustion(t *testing.T) {
 		t.Fatal("Timeout waiting for message exhaustion")
 	}
 
-	dbMsg, _ := db.GetMessage(database, "msg-exhaust")
+	dbMsg, _ := getMessage(store, "msg-exhaust")
 	if dbMsg.Status != db.StatusFailed {
 		t.Errorf("Expected status FAILED, got: %s", dbMsg.Status)
 	}
@@ -525,11 +505,7 @@ func TestQueueTotalExhaustion(t *testing.T) {
 
 func TestRecoverInterrupted(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	t1 := time.Now().UTC().Add(-10 * time.Minute)
 	t2 := time.Now().UTC().Add(-5 * time.Minute)
@@ -540,9 +516,9 @@ func TestRecoverInterrupted(t *testing.T) {
 	msg2 := db.Message{ID: "m2", ThreadID: "thread-same", GuildID: "g1", Status: db.StatusProcessing, CreatedAt: t2}
 	msg3 := db.Message{ID: "m3", ThreadID: "thread-same", GuildID: "g1", Status: db.StatusCompleted, CreatedAt: t3}
 
-	_ = db.InsertMessage(database, msg1)
-	_ = db.InsertMessage(database, msg2)
-	_ = db.InsertMessage(database, msg3)
+	_ = insertMessage(store, msg1)
+	_ = insertMessage(store, msg2)
+	_ = insertMessage(store, msg3)
 
 	var recoveredIDs []string
 	var mu sync.Mutex
@@ -550,7 +526,7 @@ func TestRecoverInterrupted(t *testing.T) {
 	wg.Add(2)
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    1,
@@ -573,7 +549,7 @@ func TestRecoverInterrupted(t *testing.T) {
 	pool.Start()
 	defer pool.Stop()
 
-	RecoverInterrupted(database, pool)
+	RecoverInterrupted(store, pool)
 
 	wg.Wait()
 
@@ -590,11 +566,7 @@ func TestRecoverInterrupted(t *testing.T) {
 
 func TestRecoverInterruptedPoisonPill(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	t1 := time.Now().UTC().Add(-10 * time.Minute)
 	t2 := time.Now().UTC().Add(-5 * time.Minute)
@@ -623,8 +595,8 @@ func TestRecoverInterruptedPoisonPill(t *testing.T) {
 		CreatedAt:  t2,
 	}
 
-	_ = db.InsertMessage(database, msgPoison)
-	_ = db.InsertMessage(database, msgNormal)
+	_ = insertMessage(store, msgPoison)
+	_ = insertMessage(store, msgNormal)
 
 	var mu sync.Mutex
 	var deliveredNotifs []string
@@ -633,7 +605,7 @@ func TestRecoverInterruptedPoisonPill(t *testing.T) {
 	wg.Add(1) // Only msgNormal should be processed by worker pool
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    1,
@@ -662,7 +634,7 @@ func TestRecoverInterruptedPoisonPill(t *testing.T) {
 	// Fake session to allow delivery
 	pool.SetDiscordSession(&discordgo.Session{})
 
-	RecoverInterrupted(database, pool)
+	RecoverInterrupted(store, pool)
 
 	wg.Wait()
 
@@ -675,7 +647,7 @@ func TestRecoverInterruptedPoisonPill(t *testing.T) {
 	}
 
 	// Verify poison pill status in DB is FAILED
-	poisonDB, err := db.GetMessage(database, "msg-poison")
+	poisonDB, err := getMessage(store, "msg-poison")
 	if err != nil || poisonDB == nil {
 		t.Fatalf("Failed to query poison message: %v", err)
 	}
@@ -691,11 +663,7 @@ func TestRecoverInterruptedPoisonPill(t *testing.T) {
 
 func TestQueueSkipDiscordLogic(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	var mu sync.Mutex
 	var deliveredTo []string
@@ -703,7 +671,7 @@ func TestQueueSkipDiscordLogic(t *testing.T) {
 	wg.Add(3)
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    1,
@@ -756,9 +724,9 @@ func TestQueueSkipDiscordLogic(t *testing.T) {
 		Content:    "User prompt",
 	}
 
-	_ = db.InsertMessage(database, msgScheduler)
-	_ = db.InsertMessage(database, msgHTTP)
-	_ = db.InsertMessage(database, msgUser)
+	_ = insertMessage(store, msgScheduler)
+	_ = insertMessage(store, msgHTTP)
+	_ = insertMessage(store, msgUser)
 
 	pool.Enqueue(msgScheduler)
 	pool.Enqueue(msgHTTP)
@@ -788,18 +756,14 @@ func TestQueueSkipDiscordLogic(t *testing.T) {
 
 func TestWorkerPoolUpdateRuntimeConfig(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	var receivedModel string
 	var mu sync.Mutex
 	doneCh := make(chan struct{})
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		Model:          "initial-model-v1",
 		TimeoutMinutes: 10,
 		MaxAttempts:    1,
@@ -844,7 +808,7 @@ func TestWorkerPoolUpdateRuntimeConfig(t *testing.T) {
 		CreatedAt:  time.Now().UTC(),
 		UpdatedAt:  time.Now().UTC(),
 	}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 	pool.Enqueue(msg)
 
 	select {
@@ -862,16 +826,12 @@ func TestWorkerPoolUpdateRuntimeConfig(t *testing.T) {
 
 func TestQueueScheduleRunLifecycle_Success(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	doneCh := make(chan struct{})
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    1,
@@ -904,7 +864,7 @@ func TestQueueScheduleRunLifecycle_Success(t *testing.T) {
 		Status:       "enqueued",
 		StartedAt:    time.Now().UTC().Add(-1 * time.Second),
 	}
-	if err := db.CreateScheduleRun(database, run); err != nil {
+	if err := createScheduleRun(store, run); err != nil {
 		t.Fatalf("Failed to create schedule run: %v", err)
 	}
 
@@ -918,7 +878,7 @@ func TestQueueScheduleRunLifecycle_Success(t *testing.T) {
 		ScheduleRunID: runID,
 		CreatedAt:     time.Now().UTC(),
 	}
-	if err := db.InsertMessage(database, msg); err != nil {
+	if err := insertMessage(store, msg); err != nil {
 		t.Fatalf("Failed to insert message: %v", err)
 	}
 
@@ -931,7 +891,7 @@ func TestQueueScheduleRunLifecycle_Success(t *testing.T) {
 	}
 
 	// Verify schedule run status transitioned to completed
-	runs, total, err := db.GetScheduleRunsPaginated(database, 10, 0, "cron-s-1", "")
+	runs, total, err := getScheduleRunsPaginated(store, 10, 0, "cron-s-1", "")
 	if err != nil || total != 1 || len(runs) != 1 {
 		t.Fatalf("Failed to get schedule run: %v (total=%d)", err, total)
 	}
@@ -956,16 +916,12 @@ func TestQueueScheduleRunLifecycle_Success(t *testing.T) {
 
 func TestQueueScheduleRunLifecycle_Failure(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	doneCh := make(chan struct{})
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    2,
@@ -997,7 +953,7 @@ func TestQueueScheduleRunLifecycle_Failure(t *testing.T) {
 		Status:       "enqueued",
 		StartedAt:    time.Now().UTC().Add(-1 * time.Second),
 	}
-	if err := db.CreateScheduleRun(database, run); err != nil {
+	if err := createScheduleRun(store, run); err != nil {
 		t.Fatalf("Failed to create schedule run: %v", err)
 	}
 
@@ -1011,7 +967,7 @@ func TestQueueScheduleRunLifecycle_Failure(t *testing.T) {
 		ScheduleRunID: runID,
 		CreatedAt:     time.Now().UTC(),
 	}
-	if err := db.InsertMessage(database, msg); err != nil {
+	if err := insertMessage(store, msg); err != nil {
 		t.Fatalf("Failed to insert message: %v", err)
 	}
 
@@ -1024,7 +980,7 @@ func TestQueueScheduleRunLifecycle_Failure(t *testing.T) {
 	}
 
 	// Verify schedule run status transitioned to failed with error
-	runs, total, err := db.GetScheduleRunsPaginated(database, 10, 0, "cron-f-1", "")
+	runs, total, err := getScheduleRunsPaginated(store, 10, 0, "cron-f-1", "")
 	if err != nil || total != 1 || len(runs) != 1 {
 		t.Fatalf("Failed to get schedule run: %v (total=%d)", err, total)
 	}
@@ -1043,16 +999,12 @@ func TestQueueScheduleRunLifecycle_Failure(t *testing.T) {
 
 func TestQueueScheduleRunLifecycle_PanicRecovery(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	doneCh := make(chan struct{})
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    1,
@@ -1084,7 +1036,7 @@ func TestQueueScheduleRunLifecycle_PanicRecovery(t *testing.T) {
 		Status:       "enqueued",
 		StartedAt:    time.Now().UTC(),
 	}
-	if err := db.CreateScheduleRun(database, run); err != nil {
+	if err := createScheduleRun(store, run); err != nil {
 		t.Fatalf("Failed to create schedule run: %v", err)
 	}
 
@@ -1098,7 +1050,7 @@ func TestQueueScheduleRunLifecycle_PanicRecovery(t *testing.T) {
 		ScheduleRunID: runID,
 		CreatedAt:     time.Now().UTC(),
 	}
-	if err := db.InsertMessage(database, msg); err != nil {
+	if err := insertMessage(store, msg); err != nil {
 		t.Fatalf("Failed to insert message: %v", err)
 	}
 
@@ -1111,7 +1063,7 @@ func TestQueueScheduleRunLifecycle_PanicRecovery(t *testing.T) {
 	}
 
 	// Verify message in DB was marked FAILED
-	dbMsg, err := db.GetMessage(database, "msg-panic-1")
+	dbMsg, err := getMessage(store, "msg-panic-1")
 	if err != nil || dbMsg == nil {
 		t.Fatalf("Failed to get message: %v", err)
 	}
@@ -1120,7 +1072,7 @@ func TestQueueScheduleRunLifecycle_PanicRecovery(t *testing.T) {
 	}
 
 	// Verify schedule run was marked failed with panic info
-	runs, _, err := db.GetScheduleRunsPaginated(database, 10, 0, "cron-panic-sched", "")
+	runs, _, err := getScheduleRunsPaginated(store, 10, 0, "cron-panic-sched", "")
 	if err != nil || len(runs) != 1 {
 		t.Fatalf("Failed to get schedule run: %v", err)
 	}
@@ -1134,11 +1086,7 @@ func TestQueueScheduleRunLifecycle_PanicRecovery(t *testing.T) {
 
 func TestRecoverInterrupted_ReconcilesOrphanedScheduleRuns(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	// Insert orphaned runs stuck in 'enqueued' and 'running'
 	orphanedEnqueued := db.ScheduleRun{
@@ -1172,12 +1120,12 @@ func TestRecoverInterrupted_ReconcilesOrphanedScheduleRuns(t *testing.T) {
 		StartedAt:    time.Now().UTC().Add(-2 * time.Hour),
 	}
 
-	_ = db.CreateScheduleRun(database, orphanedEnqueued)
-	_ = db.CreateScheduleRun(database, orphanedRunning)
-	_ = db.CreateScheduleRun(database, completedRun)
+	_ = createScheduleRun(store, orphanedEnqueued)
+	_ = createScheduleRun(store, orphanedRunning)
+	_ = createScheduleRun(store, completedRun)
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB: database,
+		Store: store,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			return "", "", 0, nil
 		},
@@ -1185,10 +1133,10 @@ func TestRecoverInterrupted_ReconcilesOrphanedScheduleRuns(t *testing.T) {
 	pool.Start()
 	defer pool.Stop()
 
-	RecoverInterrupted(database, pool)
+	RecoverInterrupted(store, pool)
 
 	// Verify orphaned runs are reconciled to 'failed'
-	runs, _, err := db.GetScheduleRunsPaginated(database, 10, 0, "", "")
+	runs, _, err := getScheduleRunsPaginated(store, 10, 0, "", "")
 	if err != nil {
 		t.Fatalf("Failed to query schedule runs: %v", err)
 	}
@@ -1214,11 +1162,7 @@ func TestRecoverInterrupted_ReconcilesOrphanedScheduleRuns(t *testing.T) {
 
 func TestWorkerPool_InjectsSemanticMemoryFacts(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	var capturedPrompt string
 	doneCh := make(chan struct{})
@@ -1235,7 +1179,7 @@ func TestWorkerPool_InjectsSemanticMemoryFacts(t *testing.T) {
 	}
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:                  database,
+		Store: store,
 		MemoryRetrieverFunc: mockRetriever,
 		RunnerFunc:          mockRunner,
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
@@ -1260,7 +1204,7 @@ func TestWorkerPool_InjectsSemanticMemoryFacts(t *testing.T) {
 		Status:    db.StatusPending,
 		CreatedAt: time.Now().UTC(),
 	}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 	pool.Enqueue(msg)
 
 	select {
@@ -1279,7 +1223,7 @@ func TestWorkerPool_InjectsSemanticMemoryFacts(t *testing.T) {
 	}
 
 	// Verify DB message content was preserved as original
-	dbMsg, _ := db.GetMessage(database, "msg-mem-1")
+	dbMsg, _ := getMessage(store, "msg-mem-1")
 	if dbMsg.Content != originalContent {
 		t.Errorf("Expected DB message content to be %q, got %q", originalContent, dbMsg.Content)
 	}
@@ -1287,11 +1231,7 @@ func TestWorkerPool_InjectsSemanticMemoryFacts(t *testing.T) {
 
 func TestWorkerPool_SemanticMemoryGracefulFallbackOnError(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	var capturedPrompt string
 	doneCh := make(chan struct{})
@@ -1306,7 +1246,7 @@ func TestWorkerPool_SemanticMemoryGracefulFallbackOnError(t *testing.T) {
 	}
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:                  database,
+		Store: store,
 		MemoryRetrieverFunc: mockRetriever,
 		RunnerFunc:          mockRunner,
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
@@ -1331,7 +1271,7 @@ func TestWorkerPool_SemanticMemoryGracefulFallbackOnError(t *testing.T) {
 		Status:    db.StatusPending,
 		CreatedAt: time.Now().UTC(),
 	}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 	pool.Enqueue(msg)
 
 	select {
@@ -1348,18 +1288,14 @@ func TestWorkerPool_SemanticMemoryGracefulFallbackOnError(t *testing.T) {
 
 func TestQueueSilentSentinelSuppression(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	var deliveryCalls int
 	var mu sync.Mutex
 	doneCh := make(chan struct{})
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    1,
@@ -1393,7 +1329,7 @@ func TestQueueSilentSentinelSuppression(t *testing.T) {
 		Status:    db.StatusPending,
 		CreatedAt: time.Now().UTC(),
 	}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 	pool.Enqueue(msg)
 
 	select {
@@ -1409,7 +1345,7 @@ func TestQueueSilentSentinelSuppression(t *testing.T) {
 	mu.Unlock()
 
 	// Verify message in DB is COMPLETED
-	dbMsg, err := db.GetMessage(database, "msg-sentinel-1")
+	dbMsg, err := getMessage(store, "msg-sentinel-1")
 	if err != nil || dbMsg == nil {
 		t.Fatalf("Failed to query message: %v", err)
 	}
@@ -1423,11 +1359,7 @@ func TestQueueSilentSentinelSuppression(t *testing.T) {
 
 func TestQueueBurstCoalescing(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	var capturedPrompt string
 	var deliveredTexts []string
@@ -1436,7 +1368,7 @@ func TestQueueBurstCoalescing(t *testing.T) {
 	doneCh := make(chan struct{})
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    1,
@@ -1475,9 +1407,9 @@ func TestQueueBurstCoalescing(t *testing.T) {
 	msg2 := db.Message{ID: "m-b-2", ThreadID: "thread-burst", AuthorName: "Bob", Content: "Hello from Bob", Status: db.StatusPending, CreatedAt: t1}
 	msg3 := db.Message{ID: "m-b-3", ThreadID: "thread-burst", AuthorName: "Charlie", Content: "Hello from Charlie", Status: db.StatusPending, CreatedAt: t2}
 
-	_ = db.InsertMessage(database, msg1)
-	_ = db.InsertMessage(database, msg2)
-	_ = db.InsertMessage(database, msg3)
+	_ = insertMessage(store, msg1)
+	_ = insertMessage(store, msg2)
+	_ = insertMessage(store, msg3)
 
 	// Enqueue all 3 in rapid succession to form a burst
 	pool.EnqueueBurst(msg1, msg2, msg3)
@@ -1513,7 +1445,7 @@ func TestQueueBurstCoalescing(t *testing.T) {
 
 	// 2. Verify all messages marked COMPLETED in DB
 	for _, id := range []string{"m-b-1", "m-b-2", "m-b-3"} {
-		m, err := db.GetMessage(database, id)
+		m, err := getMessage(store, id)
 		if err != nil || m == nil || m.Status != db.StatusCompleted {
 			t.Errorf("Expected message %s to be COMPLETED, got: %+v (err: %v)", id, m, err)
 		}
@@ -1527,11 +1459,7 @@ func TestQueueBurstCoalescing(t *testing.T) {
 
 func TestQueueStalenessDrop(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	var runnerCalls int
 	var deliveryCalls int
@@ -1539,7 +1467,7 @@ func TestQueueStalenessDrop(t *testing.T) {
 	doneCh := make(chan struct{})
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    1,
@@ -1578,7 +1506,7 @@ func TestQueueStalenessDrop(t *testing.T) {
 		Status:    db.StatusPending,
 		CreatedAt: validCreatedAt,
 	}
-	_ = db.InsertMessage(database, msgValid)
+	_ = insertMessage(store, msgValid)
 	pool.Enqueue(msgValid)
 
 	select {
@@ -1610,7 +1538,7 @@ func TestQueueStalenessDrop(t *testing.T) {
 		Status:    db.StatusPending,
 		CreatedAt: staleCreatedAt,
 	}
-	_ = db.InsertMessage(database, msgStale)
+	_ = insertMessage(store, msgStale)
 	pool.Enqueue(msgStale)
 
 	select {
@@ -1626,7 +1554,7 @@ func TestQueueStalenessDrop(t *testing.T) {
 	mu.Unlock()
 
 	// Verify message marked COMPLETED with [EXPIRED_STALE]
-	dbMsg, err := db.GetMessage(database, "msg-stale-1")
+	dbMsg, err := getMessage(store, "msg-stale-1")
 	if err != nil || dbMsg == nil {
 		t.Fatalf("Failed to query stale message: %v", err)
 	}
@@ -1640,18 +1568,14 @@ func TestQueueStalenessDrop(t *testing.T) {
 
 func TestQueueCustomStalenessTTL(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	var runnerCalls int
 	var mu sync.Mutex
 	doneCh := make(chan struct{})
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    1,
@@ -1684,7 +1608,7 @@ func TestQueueCustomStalenessTTL(t *testing.T) {
 		Status:    db.StatusPending,
 		CreatedAt: time.Now().UTC().Add(-12 * time.Minute),
 	}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 	pool.Enqueue(msg)
 
 	select {
@@ -1699,7 +1623,7 @@ func TestQueueCustomStalenessTTL(t *testing.T) {
 	}
 	mu.Unlock()
 
-	dbMsg, err := db.GetMessage(database, "msg-custom-stale")
+	dbMsg, err := getMessage(store, "msg-custom-stale")
 	if err != nil || dbMsg == nil {
 		t.Fatalf("Failed to query custom stale message: %v", err)
 	}
@@ -1712,19 +1636,15 @@ func TestQueueTurnCountSessionRotation(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	channelID := "channel-rotation-test"
 	initialSessionID := "sess-channel-init-123"
-	_ = db.SaveSessionID(database, channelID, initialSessionID)
+	_ = saveSessionID(store, channelID, initialSessionID)
 
 	// Seed turn_count to DefaultMaxSessionTurns - 2 (8 turns)
 	for i := 0; i < DefaultMaxSessionTurns-2; i++ {
-		_, _ = db.IncrementSessionTurnCount(database, channelID)
+		_, _ = incrementSessionTurnCount(store, channelID)
 	}
 
 	sessMgr := session.New(tmpDir, "")
@@ -1737,7 +1657,7 @@ func TestQueueTurnCountSessionRotation(t *testing.T) {
 	var completedCh chan struct{}
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		SessionManager: sessMgr,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
@@ -1781,12 +1701,12 @@ func TestQueueTurnCountSessionRotation(t *testing.T) {
 	// Send turn DefaultMaxSessionTurns - 1 (turn 9)
 	completedCh = make(chan struct{}, 1)
 	msg1 := db.Message{ID: "m-rot-1", ThreadID: channelID, Content: fmt.Sprintf("Aerial Turn %d", DefaultMaxSessionTurns-1), CreatedAt: time.Now().UTC()}
-	_ = db.InsertMessage(database, msg1)
+	_ = insertMessage(store, msg1)
 	pool.Enqueue(msg1)
 	<-completedCh
 
-	c1, _ := db.GetSessionTurnCount(database, channelID)
-	s1, _ := db.GetSessionID(database, channelID)
+	c1, _ := getSessionTurnCount(store, channelID)
+	s1, _ := getSessionID(store, channelID)
 	if c1 != DefaultMaxSessionTurns-1 || s1 != initialSessionID {
 		t.Fatalf("Expected turn_count=%d and initial session ID after turn %d, got count=%d, sess=%s", DefaultMaxSessionTurns-1, DefaultMaxSessionTurns-1, c1, s1)
 	}
@@ -1794,14 +1714,14 @@ func TestQueueTurnCountSessionRotation(t *testing.T) {
 	// Send turn DefaultMaxSessionTurns (hits DefaultMaxSessionTurns limit)
 	completedCh = make(chan struct{}, 1)
 	msg2 := db.Message{ID: "m-rot-2", ThreadID: channelID, Content: fmt.Sprintf("Aerial Turn %d", DefaultMaxSessionTurns), CreatedAt: time.Now().UTC()}
-	_ = db.InsertMessage(database, msg2)
+	_ = insertMessage(store, msg2)
 	pool.Enqueue(msg2)
 	<-completedCh
 
 	// Verify post-rotation state:
 	// Session ID should be rotated to cold state ""
 	// turn_count should be reset to 0
-	finalSessionID, err := db.GetSessionID(database, channelID)
+	finalSessionID, err := getSessionID(store, channelID)
 	if err != nil {
 		t.Fatalf("Failed to query session ID: %v", err)
 	}
@@ -1809,7 +1729,7 @@ func TestQueueTurnCountSessionRotation(t *testing.T) {
 		t.Errorf("Expected session ID to be reset to cold state \"\", got: %s", finalSessionID)
 	}
 
-	finalTurnCount, err := db.GetSessionTurnCount(database, channelID)
+	finalTurnCount, err := getSessionTurnCount(store, channelID)
 	if err != nil {
 		t.Fatalf("Failed to query turn count: %v", err)
 	}
@@ -1820,18 +1740,18 @@ func TestQueueTurnCountSessionRotation(t *testing.T) {
 	// Send turn DefaultMaxSessionTurns + 1 (Turn 11, starts cold)
 	completedCh = make(chan struct{}, 1)
 	msg3 := db.Message{ID: "m-rot-3", ThreadID: channelID, Content: fmt.Sprintf("Aerial Turn %d", DefaultMaxSessionTurns+1), CreatedAt: time.Now().UTC()}
-	_ = db.InsertMessage(database, msg3)
+	_ = insertMessage(store, msg3)
 	pool.Enqueue(msg3)
 	<-completedCh
 
-	turn11Count, err := db.GetSessionTurnCount(database, channelID)
+	turn11Count, err := getSessionTurnCount(store, channelID)
 	if err != nil {
 		t.Fatalf("Failed to query turn count after turn 11: %v", err)
 	}
 	if turn11Count != 1 {
 		t.Errorf("Expected turn_count=1 after cold restart on turn 11, got %d", turn11Count)
 	}
-	turn11SessionID, err := db.GetSessionID(database, channelID)
+	turn11SessionID, err := getSessionID(store, channelID)
 	if err != nil {
 		t.Fatalf("Failed to query session ID after turn 11: %v", err)
 	}
@@ -1844,23 +1764,22 @@ func TestChannelSession_RotationOnIdleTimeout(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	channelID := "channel-idle-rot-test"
 	initialSessionID := "sess-channel-old-999"
-	_ = db.SaveSessionID(database, channelID, initialSessionID)
-	_, _ = db.IncrementSessionTurnCount(database, channelID)
+	_ = saveSessionID(store, channelID, initialSessionID)
+	_, _ = incrementSessionTurnCount(store, channelID)
 
 	// Set updated_at and created_at to 25 hours ago to simulate an idle session
 	idleTime := time.Now().UTC().Add(-25 * time.Hour)
-	_, err = database.Exec("UPDATE sessions SET created_at = $1, updated_at = $2 WHERE thread_id = $3", idleTime, idleTime, channelID)
-	if err != nil {
-		t.Fatalf("Failed to backdate session: %v", err)
-	}
+	store.SetSessionInfo(db.SessionInfo{
+		ThreadID:          channelID,
+		InternalSessionID: initialSessionID,
+		TurnCount:         1,
+		CreatedAt:         idleTime,
+		UpdatedAt:         idleTime,
+	})
 
 	sessMgr := session.New(tmpDir, "")
 	sessDir, _ := sessMgr.EnsureSessionDir(initialSessionID)
@@ -1882,7 +1801,7 @@ func TestChannelSession_RotationOnIdleTimeout(t *testing.T) {
 	var completedCh chan struct{}
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		SessionManager: sessMgr,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
@@ -1931,7 +1850,7 @@ func TestChannelSession_RotationOnIdleTimeout(t *testing.T) {
 	// 1. Send Turn 1 after 25h of idle time
 	completedCh = make(chan struct{}, 1)
 	msg1 := db.Message{ID: "m-idle-1", ThreadID: channelID, Content: "Aerial wake up", CreatedAt: time.Now().UTC()}
-	_ = db.InsertMessage(database, msg1)
+	_ = insertMessage(store, msg1)
 	pool.Enqueue(msg1)
 	<-completedCh
 
@@ -1946,12 +1865,12 @@ func TestChannelSession_RotationOnIdleTimeout(t *testing.T) {
 	mu.Unlock()
 
 	// Turn count should now be 1
-	c1, _ := db.GetSessionTurnCount(database, channelID)
+	c1, _ := getSessionTurnCount(store, channelID)
 	if c1 != 1 {
 		t.Errorf("Expected turn_count=1 after cold start, got %d", c1)
 	}
 
-	newSessID, _ := db.GetSessionID(database, channelID)
+	newSessID, _ := getSessionID(store, channelID)
 	if newSessID == "" || newSessID == initialSessionID {
 		t.Errorf("Expected a fresh session ID, got: %s", newSessID)
 	}
@@ -1959,7 +1878,7 @@ func TestChannelSession_RotationOnIdleTimeout(t *testing.T) {
 	// 2. Send Turn 2 immediately (5 seconds later). It should NOT rotate!
 	completedCh = make(chan struct{}, 1)
 	msg2 := db.Message{ID: "m-idle-2", ThreadID: channelID, Content: "Aerial follow up", CreatedAt: time.Now().UTC()}
-	_ = db.InsertMessage(database, msg2)
+	_ = insertMessage(store, msg2)
 	pool.Enqueue(msg2)
 	<-completedCh
 
@@ -1972,7 +1891,7 @@ func TestChannelSession_RotationOnIdleTimeout(t *testing.T) {
 	}
 	mu.Unlock()
 
-	c2, _ := db.GetSessionTurnCount(database, channelID)
+	c2, _ := getSessionTurnCount(store, channelID)
 	if c2 != 2 {
 		t.Errorf("Expected turn_count=2 after Turn 2, got %d", c2)
 	}
@@ -1982,22 +1901,21 @@ func TestThreadSession_RotationOnIdleTimeout(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	threadID := "thread-idle-rot-test"
 	initialSessionID := "sess-thread-old-888"
-	_ = db.SaveSessionID(database, threadID, initialSessionID)
-	_, _ = db.IncrementSessionTurnCount(database, threadID)
+	_ = saveSessionID(store, threadID, initialSessionID)
+	_, _ = incrementSessionTurnCount(store, threadID)
 
 	idleTime := time.Now().UTC().Add(-25 * time.Hour)
-	_, err = database.Exec("UPDATE sessions SET created_at = $1, updated_at = $2 WHERE thread_id = $3", idleTime, idleTime, threadID)
-	if err != nil {
-		t.Fatalf("Failed to backdate session: %v", err)
-	}
+	store.SetSessionInfo(db.SessionInfo{
+		ThreadID:          threadID,
+		InternalSessionID: initialSessionID,
+		TurnCount:         1,
+		CreatedAt:         idleTime,
+		UpdatedAt:         idleTime,
+	})
 
 	sessMgr := session.New(tmpDir, "")
 	sessDir, _ := sessMgr.EnsureSessionDir(initialSessionID)
@@ -2019,7 +1937,7 @@ func TestThreadSession_RotationOnIdleTimeout(t *testing.T) {
 	var completedCh chan struct{}
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		SessionManager: sessMgr,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
@@ -2065,7 +1983,7 @@ func TestThreadSession_RotationOnIdleTimeout(t *testing.T) {
 	// 1. Send Turn 1 after 25h of idle time
 	completedCh = make(chan struct{}, 1)
 	msg1 := db.Message{ID: "m-th-idle-1", ThreadID: threadID, Content: "Hello thread", CreatedAt: time.Now().UTC()}
-	_ = db.InsertMessage(database, msg1)
+	_ = insertMessage(store, msg1)
 	pool.Enqueue(msg1)
 	<-completedCh
 
@@ -2078,12 +1996,12 @@ func TestThreadSession_RotationOnIdleTimeout(t *testing.T) {
 	}
 	mu.Unlock()
 
-	c1, _ := db.GetSessionTurnCount(database, threadID)
+	c1, _ := getSessionTurnCount(store, threadID)
 	if c1 != 1 {
 		t.Errorf("Expected turn_count=1 after cold start, got %d", c1)
 	}
 
-	newSessID, _ := db.GetSessionID(database, threadID)
+	newSessID, _ := getSessionID(store, threadID)
 	if newSessID == "" || newSessID == initialSessionID {
 		t.Errorf("Expected a fresh session ID, got: %s", newSessID)
 	}
@@ -2091,7 +2009,7 @@ func TestThreadSession_RotationOnIdleTimeout(t *testing.T) {
 	// 2. Send Turn 2 immediately. It should retain the new session ID.
 	completedCh = make(chan struct{}, 1)
 	msg2 := db.Message{ID: "m-th-idle-2", ThreadID: threadID, Content: "Hello thread again", CreatedAt: time.Now().UTC()}
-	_ = db.InsertMessage(database, msg2)
+	_ = insertMessage(store, msg2)
 	pool.Enqueue(msg2)
 	<-completedCh
 
@@ -2104,7 +2022,7 @@ func TestThreadSession_RotationOnIdleTimeout(t *testing.T) {
 	}
 	mu.Unlock()
 
-	c2, _ := db.GetSessionTurnCount(database, threadID)
+	c2, _ := getSessionTurnCount(store, threadID)
 	if c2 != 2 {
 		t.Errorf("Expected turn_count=2 after Turn 2, got %d", c2)
 	}
@@ -2112,11 +2030,7 @@ func TestThreadSession_RotationOnIdleTimeout(t *testing.T) {
 
 func TestQueueUniversalActiveTurnTyping(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	var typingCalls int
 	var mu sync.Mutex
@@ -2132,7 +2046,7 @@ func TestQueueUniversalActiveTurnTyping(t *testing.T) {
 
 	threshold := 0.8
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    1,
@@ -2170,7 +2084,7 @@ func TestQueueUniversalActiveTurnTyping(t *testing.T) {
 	doneCh1 := make(chan struct{})
 	pool.cfg.OnMessageCompleted = func(msg db.Message, finalStatus string) { close(doneCh1) }
 	msg1 := db.Message{ID: "m-type-1", ThreadID: "th-active-1", Content: "Hello thread", CreatedAt: time.Now().UTC()}
-	_ = db.InsertMessage(database, msg1)
+	_ = insertMessage(store, msg1)
 	pool.Enqueue(msg1)
 	<-doneCh1
 
@@ -2189,7 +2103,7 @@ func TestQueueUniversalActiveTurnTyping(t *testing.T) {
 	doneCh2 := make(chan struct{})
 	pool.cfg.OnMessageCompleted = func(msg db.Message, finalStatus string) { close(doneCh2) }
 	msg2 := db.Message{ID: "m-type-2", ThreadID: "th-mention-yes", Content: "<@Aerial> help me", CreatedAt: time.Now().UTC()}
-	_ = db.InsertMessage(database, msg2)
+	_ = insertMessage(store, msg2)
 	pool.Enqueue(msg2)
 	<-doneCh2
 
@@ -2209,7 +2123,7 @@ func TestQueueUniversalActiveTurnTyping(t *testing.T) {
 	doneCh3 := make(chan struct{})
 	pool.cfg.OnMessageCompleted = func(msg db.Message, finalStatus string) { close(doneCh3) }
 	msg3 := db.Message{ID: "m-type-3", ThreadID: "th-ambient-wake", Content: "Let's change all of these to 8am", CreatedAt: time.Now().UTC()}
-	_ = db.InsertMessage(database, msg3)
+	_ = insertMessage(store, msg3)
 	pool.Enqueue(msg3)
 	<-doneCh3
 
@@ -2229,7 +2143,7 @@ func TestQueueUniversalActiveTurnTyping(t *testing.T) {
 	doneCh4 := make(chan struct{})
 	pool.cfg.OnMessageCompleted = func(msg db.Message, finalStatus string) { close(doneCh4) }
 	msg4 := db.Message{ID: "m-type-4", ThreadID: "th-ambient-drop", Content: "Just random human chat between people", CreatedAt: time.Now().UTC()}
-	_ = db.InsertMessage(database, msg4)
+	_ = insertMessage(store, msg4)
 	pool.Enqueue(msg4)
 	<-doneCh4
 
@@ -2248,7 +2162,7 @@ func TestQueueUniversalActiveTurnTyping(t *testing.T) {
 	doneCh5 := make(chan struct{})
 	pool.cfg.OnMessageCompleted = func(msg db.Message, finalStatus string) { close(doneCh5) }
 	msg5 := db.Message{ID: "m-type-5", ThreadID: "th-ignored", Content: "Ignored message @Aerial", CreatedAt: time.Now().UTC()}
-	_ = db.InsertMessage(database, msg5)
+	_ = insertMessage(store, msg5)
 	pool.Enqueue(msg5)
 	<-doneCh5
 
@@ -2267,7 +2181,7 @@ func TestQueueUniversalActiveTurnTyping(t *testing.T) {
 	doneCh6 := make(chan struct{})
 	pool.cfg.OnMessageCompleted = func(msg db.Message, finalStatus string) { close(doneCh6) }
 	msg6 := db.Message{ID: "m-type-6", ThreadID: "th-http", AuthorID: "http-client", Content: "CLI request", CreatedAt: time.Now().UTC()}
-	_ = db.InsertMessage(database, msg6)
+	_ = insertMessage(store, msg6)
 	pool.Enqueue(msg6)
 	<-doneCh6
 
@@ -2280,18 +2194,14 @@ func TestQueueUniversalActiveTurnTyping(t *testing.T) {
 
 func TestQueueIgnoredChannelPolicy(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	var mu sync.Mutex
 	runnerCalls := 0
 	deliveryCalls := 0
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    1,
@@ -2328,7 +2238,7 @@ func TestQueueIgnoredChannelPolicy(t *testing.T) {
 		Content:   "Hello ignored room",
 		CreatedAt: time.Now().UTC(),
 	}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 	pool.Enqueue(msg)
 
 	select {
@@ -2346,7 +2256,7 @@ func TestQueueIgnoredChannelPolicy(t *testing.T) {
 		t.Errorf("Expected 0 delivery calls for ignored channel, got %d", deliveryCalls)
 	}
 
-	savedMsg, err := db.GetMessage(database, "msg-ignored-1")
+	savedMsg, err := getMessage(store, "msg-ignored-1")
 	if err != nil || savedMsg == nil {
 		t.Fatalf("Failed to retrieve message: %v", err)
 	}
@@ -2360,14 +2270,10 @@ func TestQueueIgnoredChannelPolicy(t *testing.T) {
 
 func TestQueueIgnoredChannelPolicy_NilCallback(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    1,
@@ -2392,20 +2298,20 @@ func TestQueueIgnoredChannelPolicy_NilCallback(t *testing.T) {
 		Content:   "Testing nil callback safety",
 		CreatedAt: time.Now().UTC(),
 	}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 	pool.Enqueue(msg)
 
 	// Poll database for completion
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		m, err := db.GetMessage(database, "msg-nil-cb-1")
+		m, err := getMessage(store, "msg-nil-cb-1")
 		if err == nil && m != nil && m.Status == db.StatusCompleted {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 
-	savedMsg, err := db.GetMessage(database, "msg-nil-cb-1")
+	savedMsg, err := getMessage(store, "msg-nil-cb-1")
 	if err != nil || savedMsg == nil {
 		t.Fatalf("Failed to retrieve message: %v", err)
 	}
@@ -2416,11 +2322,7 @@ func TestQueueIgnoredChannelPolicy_NilCallback(t *testing.T) {
 
 func TestQueueThreadInheritsParentChannelPolicy(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	dg := &discordgo.Session{
 		State: discordgo.NewState(),
@@ -2450,7 +2352,7 @@ func TestQueueThreadInheritsParentChannelPolicy(t *testing.T) {
 	runnerCalls := 0
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    1,
@@ -2485,7 +2387,7 @@ func TestQueueThreadInheritsParentChannelPolicy(t *testing.T) {
 		Content:   "Hello in thread in spam",
 		CreatedAt: time.Now().UTC(),
 	}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 	pool.Enqueue(msg)
 
 	select {
@@ -2500,7 +2402,7 @@ func TestQueueThreadInheritsParentChannelPolicy(t *testing.T) {
 		t.Errorf("Expected 0 runner calls because thread parent #spam is ignored, got %d", runnerCalls)
 	}
 
-	savedMsg, err := db.GetMessage(database, "msg-thread-spam-1")
+	savedMsg, err := getMessage(store, "msg-thread-spam-1")
 	if err != nil || savedMsg == nil {
 		t.Fatalf("Failed to retrieve message: %v", err)
 	}
@@ -2514,17 +2416,13 @@ func TestQueueThreadInheritsParentChannelPolicy(t *testing.T) {
 
 func TestQueueHTTPClient_NotDroppedByDefaultDenyIgnore(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	var mu sync.Mutex
 	runnerCalls := 0
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    1,
@@ -2557,7 +2455,7 @@ func TestQueueHTTPClient_NotDroppedByDefaultDenyIgnore(t *testing.T) {
 		Content:   "Explain Kubernetes architecture",
 		CreatedAt: time.Now().UTC(),
 	}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 	pool.Enqueue(msg)
 
 	select {
@@ -2572,7 +2470,7 @@ func TestQueueHTTPClient_NotDroppedByDefaultDenyIgnore(t *testing.T) {
 		t.Errorf("Expected 1 runner call for HTTP prompt client despite default-deny ignore mode, got %d", runnerCalls)
 	}
 
-	savedMsg, err := db.GetMessage(database, "msg-http-prompt-1")
+	savedMsg, err := getMessage(store, "msg-http-prompt-1")
 	if err != nil || savedMsg == nil {
 		t.Fatalf("Failed to retrieve message: %v", err)
 	}
@@ -2592,18 +2490,14 @@ func TestProcessBurst_PureAmbient(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	sessionID := uuid.New().String()
-	if err := db.SaveSessionID(database, "chan-lounge", sessionID); err != nil {
+	if err := saveSessionID(store, "chan-lounge", sessionID); err != nil {
 		t.Fatalf("Failed to save session ID: %v", err)
 	}
 	sessMgr := session.New(tmpDir, "")
-	_, err = sessMgr.EnsureSessionDir(sessionID)
+	_, err := sessMgr.EnsureSessionDir(sessionID)
 	if err != nil {
 		t.Fatalf("EnsureSessionDir failed: %v", err)
 	}
@@ -2621,7 +2515,7 @@ func TestProcessBurst_PureAmbient(t *testing.T) {
 	}))
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		SessionManager: sessMgr,
 		TimeoutMinutes: 1,
 		Classifier:     cls,
@@ -2668,8 +2562,8 @@ func TestProcessBurst_PureAmbient(t *testing.T) {
 		Status:     db.StatusPending,
 		CreatedAt:  now.Add(5 * time.Second),
 	}
-	_ = db.InsertMessage(database, msg1)
-	_ = db.InsertMessage(database, msg2)
+	_ = insertMessage(store, msg1)
+	_ = insertMessage(store, msg2)
 
 	pool.processBurst([]db.Message{msg1, msg2})
 
@@ -2686,7 +2580,7 @@ func TestProcessBurst_PureAmbient(t *testing.T) {
 		t.Errorf("Expected 0 typing calls for pure ambient burst, got %d", typingCalls)
 	}
 
-	turnCount, err := db.GetSessionTurnCount(database, "chan-lounge")
+	turnCount, err := getSessionTurnCount(store, "chan-lounge")
 	if err != nil {
 		t.Fatalf("GetSessionTurnCount error: %v", err)
 	}
@@ -2695,7 +2589,7 @@ func TestProcessBurst_PureAmbient(t *testing.T) {
 	}
 
 	for _, id := range []string{"msg-amb-1", "msg-amb-2"} {
-		saved, err := db.GetMessage(database, id)
+		saved, err := getMessage(store, id)
 		if err != nil || saved == nil {
 			t.Fatalf("Failed to retrieve %s: %v", id, err)
 		}
@@ -2712,11 +2606,7 @@ func TestProcessBurst_Tier1Wake(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	sessionID := uuid.New().String()
 	sessMgr := session.New(tmpDir, "")
@@ -2734,7 +2624,7 @@ func TestProcessBurst_Tier1Wake(t *testing.T) {
 	s.State.User = &discordgo.User{ID: "bot-aerial-id", Username: "Aerial"}
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		SessionManager: sessMgr,
 		DiscordSession: s,
 		TimeoutMinutes: 1,
@@ -2777,7 +2667,7 @@ func TestProcessBurst_Tier1Wake(t *testing.T) {
 		Status:     db.StatusPending,
 		CreatedAt:  now,
 	}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 
 	pool.processBurst([]db.Message{msg})
 
@@ -2794,7 +2684,7 @@ func TestProcessBurst_Tier1Wake(t *testing.T) {
 		t.Errorf("Expected 1 delivery with response, got calls=%d, text=%q", deliveryCalls, deliveredText)
 	}
 
-	turnCount, err := db.GetSessionTurnCount(database, "chan-lounge")
+	turnCount, err := getSessionTurnCount(store, "chan-lounge")
 	if err != nil {
 		t.Fatalf("GetSessionTurnCount error: %v", err)
 	}
@@ -2802,7 +2692,7 @@ func TestProcessBurst_Tier1Wake(t *testing.T) {
 		t.Errorf("Expected turn_count to increment to 1, got %d", turnCount)
 	}
 
-	saved, err := db.GetMessage(database, "msg-tier1-1")
+	saved, err := getMessage(store, "msg-tier1-1")
 	if err != nil || saved == nil {
 		t.Fatalf("Failed to retrieve message: %v", err)
 	}
@@ -2818,14 +2708,10 @@ func TestProcessBurst_Tier2Wake(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	sessionID := uuid.New().String()
-	_ = db.SaveSessionID(database, "chan-lounge", sessionID)
+	_ = saveSessionID(store, "chan-lounge", sessionID)
 	sessMgr := session.New(tmpDir, "")
 	_, _ = sessMgr.EnsureSessionDir(sessionID)
 
@@ -2840,7 +2726,7 @@ func TestProcessBurst_Tier2Wake(t *testing.T) {
 	}))
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		SessionManager: sessMgr,
 		TimeoutMinutes: 1,
 		Classifier:     cls,
@@ -2884,7 +2770,7 @@ func TestProcessBurst_Tier2Wake(t *testing.T) {
 		Status:     db.StatusPending,
 		CreatedAt:  now,
 	}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 
 	pool.processBurst([]db.Message{msg})
 
@@ -2901,7 +2787,7 @@ func TestProcessBurst_Tier2Wake(t *testing.T) {
 		t.Errorf("Expected 1 delivery, got calls=%d, text=%q", deliveryCalls, deliveredText)
 	}
 
-	turnCount, err := db.GetSessionTurnCount(database, "chan-lounge")
+	turnCount, err := getSessionTurnCount(store, "chan-lounge")
 	if err != nil {
 		t.Fatalf("GetSessionTurnCount error: %v", err)
 	}
@@ -2909,7 +2795,7 @@ func TestProcessBurst_Tier2Wake(t *testing.T) {
 		t.Errorf("Expected turn_count to increment to 1, got %d", turnCount)
 	}
 
-	saved, err := db.GetMessage(database, "msg-tier2-1")
+	saved, err := getMessage(store, "msg-tier2-1")
 	if err != nil || saved == nil {
 		t.Fatalf("Failed to retrieve message: %v", err)
 	}
@@ -2922,14 +2808,10 @@ func TestProcessBurst_MixedBurst(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	sessionID := uuid.New().String()
-	_ = db.SaveSessionID(database, "chan-lounge", sessionID)
+	_ = saveSessionID(store, "chan-lounge", sessionID)
 	sessMgr := session.New(tmpDir, "")
 	_, _ = sessMgr.EnsureSessionDir(sessionID)
 	cliPbDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "conversations")
@@ -2946,7 +2828,7 @@ func TestProcessBurst_MixedBurst(t *testing.T) {
 	}))
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		SessionManager: sessMgr,
 		TimeoutMinutes: 1,
 		Classifier:     cls,
@@ -2993,8 +2875,8 @@ func TestProcessBurst_MixedBurst(t *testing.T) {
 		Status:     db.StatusPending,
 		CreatedAt:  now.Add(2 * time.Second),
 	}
-	_ = db.InsertMessage(database, msg1)
-	_ = db.InsertMessage(database, msg2)
+	_ = insertMessage(store, msg1)
+	_ = insertMessage(store, msg2)
 
 	pool.processBurst([]db.Message{msg1, msg2})
 
@@ -3014,16 +2896,16 @@ func TestProcessBurst_MixedBurst(t *testing.T) {
 
 
 	// Verify DB statuses
-	m1Saved, _ := db.GetMessage(database, "msg-mixed-1")
+	m1Saved, _ := getMessage(store, "msg-mixed-1")
 	if m1Saved == nil || m1Saved.Status != db.StatusCompleted || !strings.Contains(m1Saved.ErrorMessage, "[AMBIENT score=") {
 		t.Errorf("Expected msg1 to be COMPLETED with [AMBIENT score=...], got: %+v", m1Saved)
 	}
-	m2Saved, _ := db.GetMessage(database, "msg-mixed-2")
+	m2Saved, _ := getMessage(store, "msg-mixed-2")
 	if m2Saved == nil || m2Saved.Status != db.StatusCompleted || m2Saved.ResponseText != "Done deploying!" {
 		t.Errorf("Expected msg2 to be COMPLETED with response text, got: %+v", m2Saved)
 	}
 
-	turnCount, _ := db.GetSessionTurnCount(database, "chan-lounge")
+	turnCount, _ := getSessionTurnCount(store, "chan-lounge")
 	if turnCount != 1 {
 		t.Errorf("Expected turn_count = 1 after mixed burst, got %d", turnCount)
 	}
@@ -3103,15 +2985,11 @@ func TestProcessBurst_SessionRotationBeforeLeadingAmbient(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	channelID := "chan-rot-ambient"
 	initialSessionID := uuid.New().String()
-	_ = db.SaveSessionID(database, channelID, initialSessionID)
+	_ = saveSessionID(store, channelID, initialSessionID)
 	sessMgr := session.New(tmpDir, "")
 	_, _ = sessMgr.EnsureSessionDir(initialSessionID)
 	cliPbDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "conversations")
@@ -3123,7 +3001,7 @@ func TestProcessBurst_SessionRotationBeforeLeadingAmbient(t *testing.T) {
 	// Since wakeIdx = 1 and currentTurns + 1 = 10 >= DefaultMaxSessionTurns,
 	// pre-burst rotation resets session to cold state so Ambient1 is written to the NEW session directory.
 	for i := 0; i < DefaultMaxSessionTurns-1; i++ {
-		_, _ = db.IncrementSessionTurnCount(database, channelID)
+		_, _ = incrementSessionTurnCount(store, channelID)
 	}
 
 	var mu sync.Mutex
@@ -3135,7 +3013,7 @@ func TestProcessBurst_SessionRotationBeforeLeadingAmbient(t *testing.T) {
 	}))
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		SessionManager: sessMgr,
 		TimeoutMinutes: 1,
 		Classifier:     cls,
@@ -3180,8 +3058,8 @@ func TestProcessBurst_SessionRotationBeforeLeadingAmbient(t *testing.T) {
 		Status:     db.StatusPending,
 		CreatedAt:  now.Add(2 * time.Second),
 	}
-	_ = db.InsertMessage(database, msg1)
-	_ = db.InsertMessage(database, msg2)
+	_ = insertMessage(store, msg1)
+	_ = insertMessage(store, msg2)
 
 	pool.processBurst([]db.Message{msg1, msg2})
 
@@ -3204,7 +3082,7 @@ func TestProcessBurst_SessionRotationBeforeLeadingAmbient(t *testing.T) {
 		t.Errorf("Ambient message should NOT have been written to old session directory")
 	}
 
-	m1Saved, _ := db.GetMessage(database, "msg-rot-amb-1")
+	m1Saved, _ := getMessage(store, "msg-rot-amb-1")
 	if m1Saved == nil || m1Saved.Status != db.StatusCompleted || !strings.Contains(m1Saved.ErrorMessage, "[AMBIENT score=") {
 		t.Errorf("Expected leading ambient message to be marked COMPLETED with [AMBIENT score=...], got: %+v", m1Saved)
 	}
@@ -3214,14 +3092,10 @@ func TestProcessBurst_TrailingAmbient(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	sessionID := uuid.New().String()
-	_ = db.SaveSessionID(database, "chan-lounge", sessionID)
+	_ = saveSessionID(store, "chan-lounge", sessionID)
 	sessMgr := session.New(tmpDir, "")
 	_, _ = sessMgr.EnsureSessionDir(sessionID)
 	cliPbDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "conversations")
@@ -3237,7 +3111,7 @@ func TestProcessBurst_TrailingAmbient(t *testing.T) {
 	}))
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		SessionManager: sessMgr,
 		TimeoutMinutes: 1,
 		Classifier:     cls,
@@ -3283,8 +3157,8 @@ func TestProcessBurst_TrailingAmbient(t *testing.T) {
 		Status:     db.StatusPending,
 		CreatedAt:  now.Add(2 * time.Second),
 	}
-	_ = db.InsertMessage(database, msg1)
-	_ = db.InsertMessage(database, msg2)
+	_ = insertMessage(store, msg1)
+	_ = insertMessage(store, msg2)
 
 	pool.processBurst([]db.Message{msg1, msg2})
 
@@ -3302,7 +3176,7 @@ func TestProcessBurst_TrailingAmbient(t *testing.T) {
 
 
 	// Ambient2 in DB should have [AMBIENT score=...]
-	m2Saved, _ := db.GetMessage(database, "msg-trail-amb-2")
+	m2Saved, _ := getMessage(store, "msg-trail-amb-2")
 	if m2Saved == nil || m2Saved.Status != db.StatusCompleted || !strings.Contains(m2Saved.ErrorMessage, "[AMBIENT score=") {
 		t.Errorf("Expected trailing ambient msg to be COMPLETED with [AMBIENT score=...], got: %+v", m2Saved)
 	}
@@ -3310,11 +3184,7 @@ func TestProcessBurst_TrailingAmbient(t *testing.T) {
 
 func TestProcessBurst_CustomAmbientWakePrompt(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	var capturedPrompt string
 	var mu sync.Mutex
@@ -3330,7 +3200,7 @@ func TestProcessBurst_CustomAmbientWakePrompt(t *testing.T) {
 
 	runnerCalls := 0
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		Classifier:     cls,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
@@ -3363,7 +3233,7 @@ func TestProcessBurst_CustomAmbientWakePrompt(t *testing.T) {
 		Status:     db.StatusPending,
 		CreatedAt:  now,
 	}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 
 	pool.processBurst([]db.Message{msg})
 
@@ -3631,11 +3501,7 @@ func TestProcessBurst_ChannelInstructionsInjection(t *testing.T) {
 	config.ChannelInstructionsDirs = []string{channelsDir}
 	defer func() { config.ChannelInstructionsDirs = oldDirs }()
 
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to init DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	channelID := "100200300400500701"
 	CacheDiscordChannel(&discordgo.Channel{
@@ -3649,7 +3515,7 @@ func TestProcessBurst_ChannelInstructionsInjection(t *testing.T) {
 	var mu sync.Mutex
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    1,
@@ -3674,7 +3540,7 @@ func TestProcessBurst_ChannelInstructionsInjection(t *testing.T) {
 		Status:    db.StatusPending,
 		CreatedAt: time.Now().UTC(),
 	}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 
 	pool.processBurst([]db.Message{msg})
 
@@ -3705,11 +3571,7 @@ func TestProcessBurst_ChannelInstructionsThreadInheritance(t *testing.T) {
 	config.ChannelInstructionsDirs = []string{channelsDir}
 	defer func() { config.ChannelInstructionsDirs = oldDirs }()
 
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to init DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	parentID := "100200300400500702"
 	threadID := "100200300400500703"
@@ -3732,7 +3594,7 @@ func TestProcessBurst_ChannelInstructionsThreadInheritance(t *testing.T) {
 	var mu sync.Mutex
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    1,
@@ -3757,7 +3619,7 @@ func TestProcessBurst_ChannelInstructionsThreadInheritance(t *testing.T) {
 		Status:    db.StatusPending,
 		CreatedAt: time.Now().UTC(),
 	}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 
 	pool.processBurst([]db.Message{msg})
 
@@ -3785,11 +3647,7 @@ func TestProcessBurst_NoDuplicationOnRetry(t *testing.T) {
 	config.ChannelInstructionsDirs = []string{channelsDir}
 	defer func() { config.ChannelInstructionsDirs = oldDirs }()
 
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to init DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	channelID := "100200300400500704"
 	CacheDiscordChannel(&discordgo.Channel{
@@ -3804,7 +3662,7 @@ func TestProcessBurst_NoDuplicationOnRetry(t *testing.T) {
 	var mu sync.Mutex
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    5 * time.Millisecond,
 		MaxAttempts:    2,
@@ -3836,7 +3694,7 @@ func TestProcessBurst_NoDuplicationOnRetry(t *testing.T) {
 		Status:    db.StatusPending,
 		CreatedAt: time.Now().UTC(),
 	}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 
 	pool.processBurst([]db.Message{msg})
 
@@ -3864,11 +3722,7 @@ func TestProcessBurst_NoDuplicationOnRetry(t *testing.T) {
 
 func TestProcessBurst_Tier1PreScan_SkipsClassifier(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to init db: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	var classifierCalls int
 	cls := classifier.NewClassifier(
@@ -3880,7 +3734,7 @@ func TestProcessBurst_Tier1PreScan_SkipsClassifier(t *testing.T) {
 
 	var runnerCalls int
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:         database,
+		Store: store,
 		Classifier: cls,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			runnerCalls++
@@ -3917,9 +3771,9 @@ func TestProcessBurst_Tier1PreScan_SkipsClassifier(t *testing.T) {
 		Content:    "lol",
 		CreatedAt:  now.Add(2 * time.Second),
 	}
-	_ = db.InsertMessage(database, m1)
-	_ = db.InsertMessage(database, m2)
-	_ = db.InsertMessage(database, m3)
+	_ = insertMessage(store, m1)
+	_ = insertMessage(store, m2)
+	_ = insertMessage(store, m3)
 
 	pool.processBurst([]db.Message{m1, m2, m3})
 
@@ -3933,11 +3787,7 @@ func TestProcessBurst_Tier1PreScan_SkipsClassifier(t *testing.T) {
 
 func TestProcessBurst_CoalescedAmbientBurst(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to init db: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	var classifierCalls int
 	var capturedPrompt string
@@ -3951,7 +3801,7 @@ func TestProcessBurst_CoalescedAmbientBurst(t *testing.T) {
 
 	var runnerCalls int
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:         database,
+		Store: store,
 		Classifier: cls,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			runnerCalls++
@@ -3980,8 +3830,8 @@ func TestProcessBurst_CoalescedAmbientBurst(t *testing.T) {
 		Content:    "brb grabbing coffee",
 		CreatedAt:  now.Add(1 * time.Second),
 	}
-	_ = db.InsertMessage(database, m1)
-	_ = db.InsertMessage(database, m2)
+	_ = insertMessage(store, m1)
+	_ = insertMessage(store, m2)
 
 	pool.processBurst([]db.Message{m1, m2})
 
@@ -4000,14 +3850,10 @@ func TestProcessBurst_GhostSessionRecovery(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	channelID := "chan-lounge"
-	_ = db.SaveSessionID(database, channelID, "stale-ghost-uuid")
+	_ = saveSessionID(store, channelID, "stale-ghost-uuid")
 
 	// Create mock session dir on disk with non-empty transcript.jsonl for "a8b5e679-7425-40de-944b-e07fc1f90ae7"
 	sessDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", "a8b5e679-7425-40de-944b-e07fc1f90ae7")
@@ -4018,7 +3864,7 @@ func TestProcessBurst_GhostSessionRecovery(t *testing.T) {
 	runnerCalls := 0
 	pool := NewWorkerPool(WorkerPoolConfig{
 		SessionManager: session.New(tmpDir, ""),
-		DB: database,
+		Store: store,
 		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
 			return nil, nil
 		},
@@ -4045,7 +3891,7 @@ func TestProcessBurst_GhostSessionRecovery(t *testing.T) {
 		Status:     db.StatusPending,
 		CreatedAt:  now,
 	}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 
 	pool.processBurst([]db.Message{msg})
 
@@ -4057,7 +3903,7 @@ func TestProcessBurst_GhostSessionRecovery(t *testing.T) {
 		t.Fatalf("Expected 1 runner call, got %d", calls)
 	}
 
-	savedSessionID, err := db.GetSessionID(database, channelID)
+	savedSessionID, err := getSessionID(store, channelID)
 	if err != nil {
 		t.Fatalf("Failed to get session ID: %v", err)
 	}
@@ -4070,14 +3916,10 @@ func TestProcessBurst_MultiTurnContinuity_AfterRecovery(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	channelID := "chan-lounge"
-	_ = db.SaveSessionID(database, channelID, "stale-ghost-uuid")
+	_ = saveSessionID(store, channelID, "stale-ghost-uuid")
 
 	sessDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", "a8b5e679-7425-40de-944b-e07fc1f90ae7")
 	_ = os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs"), 0755)
@@ -4088,7 +3930,7 @@ func TestProcessBurst_MultiTurnContinuity_AfterRecovery(t *testing.T) {
 
 	pool := NewWorkerPool(WorkerPoolConfig{
 		SessionManager: session.New(tmpDir, ""),
-		DB: database,
+		Store: store,
 		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
 			return nil, nil
 		},
@@ -4116,7 +3958,7 @@ func TestProcessBurst_MultiTurnContinuity_AfterRecovery(t *testing.T) {
 		Status:     db.StatusPending,
 		CreatedAt:  now,
 	}
-	_ = db.InsertMessage(database, msg1)
+	_ = insertMessage(store, msg1)
 	pool.processBurst([]db.Message{msg1})
 
 	// Turn 2 (multi-turn follow-up)
@@ -4128,7 +3970,7 @@ func TestProcessBurst_MultiTurnContinuity_AfterRecovery(t *testing.T) {
 		Status:     db.StatusPending,
 		CreatedAt:  now.Add(1 * time.Second),
 	}
-	_ = db.InsertMessage(database, msg2)
+	_ = insertMessage(store, msg2)
 	pool.processBurst([]db.Message{msg2})
 
 	mu.Lock()
@@ -4151,11 +3993,7 @@ func TestProcessBurst_ColdChannel_NoStubDirectory(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	channelID := "chan-cold-123"
 
@@ -4166,7 +4004,7 @@ func TestProcessBurst_ColdChannel_NoStubDirectory(t *testing.T) {
 	var runnerCalls int
 	pool := NewWorkerPool(WorkerPoolConfig{
 		SessionManager: session.New(tmpDir, ""),
-		DB:         database,
+		Store: store,
 		Classifier: cls,
 		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
 			return nil, nil
@@ -4192,7 +4030,7 @@ func TestProcessBurst_ColdChannel_NoStubDirectory(t *testing.T) {
 		Status:     db.StatusPending,
 		CreatedAt:  now,
 	}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 
 	pool.processBurst([]db.Message{msg})
 
@@ -4200,7 +4038,7 @@ func TestProcessBurst_ColdChannel_NoStubDirectory(t *testing.T) {
 		t.Errorf("Expected 0 runner calls for pure ambient burst, got %d", runnerCalls)
 	}
 
-	sessID, err := db.GetSessionID(database, channelID)
+	sessID, err := getSessionID(store, channelID)
 	if err != nil {
 		t.Fatalf("GetSessionID failed: %v", err)
 	}
@@ -4225,11 +4063,7 @@ func TestProcessBurst_Turn1ContextInjection(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	channelID := "chan-history"
 
@@ -4244,7 +4078,7 @@ func TestProcessBurst_Turn1ContextInjection(t *testing.T) {
 
 	pool := NewWorkerPool(WorkerPoolConfig{
 		SessionManager: session.New(tmpDir, ""),
-		DB: database,
+		Store: store,
 		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
 			return nil, nil
 		},
@@ -4298,7 +4132,7 @@ func TestProcessBurst_Turn1ContextInjection(t *testing.T) {
 		Status:     db.StatusPending,
 		CreatedAt:  now,
 	}
-	_ = db.InsertMessage(database, msg1)
+	_ = insertMessage(store, msg1)
 	pool.processBurst([]db.Message{msg1})
 
 	// Turn 2 on now-warm channel
@@ -4310,7 +4144,7 @@ func TestProcessBurst_Turn1ContextInjection(t *testing.T) {
 		Status:     db.StatusPending,
 		CreatedAt:  now.Add(5 * time.Second),
 	}
-	_ = db.InsertMessage(database, msg2)
+	_ = insertMessage(store, msg2)
 	pool.processBurst([]db.Message{msg2})
 
 	mu.Lock()
@@ -4349,11 +4183,7 @@ func TestProcessBurst_ThreadsMode_WarmTurnSuppressesChannelHistory(t *testing.T)
 	t.Parallel()
 	tmpDir := t.TempDir()
 
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	threadID := "thread-history-suppress"
 
@@ -4367,7 +4197,7 @@ func TestProcessBurst_ThreadsMode_WarmTurnSuppressesChannelHistory(t *testing.T)
 
 	pool := NewWorkerPool(WorkerPoolConfig{
 		SessionManager: session.New(tmpDir, ""),
-		DB:             database,
+		Store: store,
 		HistoryFetcher: func(ctx context.Context, cID string, beforeID string, limit int) ([]HistoryMessage, error) {
 			return []HistoryMessage{
 				{
@@ -4403,7 +4233,7 @@ func TestProcessBurst_ThreadsMode_WarmTurnSuppressesChannelHistory(t *testing.T)
 		Status:     db.StatusPending,
 		CreatedAt:  now,
 	}
-	_ = db.InsertMessage(database, msg1)
+	_ = insertMessage(store, msg1)
 	pool.processBurst([]db.Message{msg1})
 
 	// Turn 2 on now-warm thread
@@ -4415,7 +4245,7 @@ func TestProcessBurst_ThreadsMode_WarmTurnSuppressesChannelHistory(t *testing.T)
 		Status:     db.StatusPending,
 		CreatedAt:  now.Add(5 * time.Second),
 	}
-	_ = db.InsertMessage(database, msg2)
+	_ = insertMessage(store, msg2)
 	pool.processBurst([]db.Message{msg2})
 
 	mu.Lock()
@@ -4440,11 +4270,7 @@ func TestProcessBurst_SessionRotation_ResetsToColdState(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	channelID := "chan-rotation-cold"
 
@@ -4462,7 +4288,7 @@ func TestProcessBurst_SessionRotation_ResetsToColdState(t *testing.T) {
 
 	pool := NewWorkerPool(WorkerPoolConfig{
 		SessionManager: session.New(tmpDir, ""),
-		DB: database,
+		Store: store,
 		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
 			return nil, nil
 		},
@@ -4512,24 +4338,24 @@ func TestProcessBurst_SessionRotation_ResetsToColdState(t *testing.T) {
 		Status:     db.StatusPending,
 		CreatedAt:  now,
 	}
-	_ = db.InsertMessage(database, msg1)
+	_ = insertMessage(store, msg1)
 	pool.processBurst([]db.Message{msg1})
 
-	tc1, err := db.GetSessionTurnCount(database, channelID)
+	tc1, err := getSessionTurnCount(store, channelID)
 	if err != nil {
 		t.Fatalf("Failed to get turn count after turn 1: %v", err)
 	}
 	if tc1 != 1 {
 		t.Errorf("Expected turnCount to become 1 after Turn 1, got %d", tc1)
 	}
-	s1, _ := db.GetSessionID(database, channelID)
+	s1, _ := getSessionID(store, channelID)
 	if s1 != "c9b5e679-7425-40de-944b-e07fc1f90ae7" {
 		t.Errorf("Expected session ID 'c9b5e679-7425-40de-944b-e07fc1f90ae7' after Turn 1, got %q", s1)
 	}
 
 	// Seed turn_count to DefaultMaxSessionTurns - 1 (9) so next turn hits 10 and triggers rotation
 	for i := 1; i < DefaultMaxSessionTurns-1; i++ {
-		_, _ = db.IncrementSessionTurnCount(database, channelID)
+		_, _ = incrementSessionTurnCount(store, channelID)
 	}
 
 	// 2. Process Turn 10 -> turnCount hits DefaultMaxSessionTurns (10), rotates session_id to ""
@@ -4541,10 +4367,10 @@ func TestProcessBurst_SessionRotation_ResetsToColdState(t *testing.T) {
 		Status:     db.StatusPending,
 		CreatedAt:  now.Add(2 * time.Second),
 	}
-	_ = db.InsertMessage(database, msg2)
+	_ = insertMessage(store, msg2)
 	pool.processBurst([]db.Message{msg2})
 
-	s2, err := db.GetSessionID(database, channelID)
+	s2, err := getSessionID(store, channelID)
 	if err != nil {
 		t.Fatalf("Failed to get session ID after turn 2: %v", err)
 	}
@@ -4561,7 +4387,7 @@ func TestProcessBurst_SessionRotation_ResetsToColdState(t *testing.T) {
 		Status:     db.StatusPending,
 		CreatedAt:  now.Add(4 * time.Second),
 	}
-	_ = db.InsertMessage(database, msg3)
+	_ = insertMessage(store, msg3)
 	pool.processBurst([]db.Message{msg3})
 
 	mu.Lock()
@@ -4597,11 +4423,7 @@ func TestProcessBurst_SessionRotation_SeedsPreviousSessionID(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	sess1 := "11111111-1111-1111-1111-111111111111"
 	sess2 := "22222222-2222-2222-2222-222222222222"
@@ -4618,7 +4440,7 @@ func TestProcessBurst_SessionRotation_SeedsPreviousSessionID(t *testing.T) {
 
 	pool := NewWorkerPool(WorkerPoolConfig{
 		SessionManager: session.New(tmpDir, ""),
-		DB:             database,
+		Store: store,
 		MaxAttempts:    1,
 		HistoryFetcher: func(ctx context.Context, channelID string, beforeID string, limit int) ([]HistoryMessage, error) {
 			return nil, nil
@@ -4654,7 +4476,7 @@ func TestProcessBurst_SessionRotation_SeedsPreviousSessionID(t *testing.T) {
 		Status:     db.StatusPending,
 		CreatedAt:  now,
 	}
-	_ = db.InsertMessage(database, msg1)
+	_ = insertMessage(store, msg1)
 	pool.processBurst([]db.Message{msg1})
 
 	mu.Lock()
@@ -4668,7 +4490,7 @@ func TestProcessBurst_SessionRotation_SeedsPreviousSessionID(t *testing.T) {
 
 	// Seed turn_count to DefaultMaxSessionTurns - 1 (9)
 	for i := 1; i < DefaultMaxSessionTurns-1; i++ {
-		_, _ = db.IncrementSessionTurnCount(database, channelID)
+		_, _ = incrementSessionTurnCount(store, channelID)
 	}
 
 	// 2. Turn 10 of Session 1 -> reaches turn limit, rotates session
@@ -4680,7 +4502,7 @@ func TestProcessBurst_SessionRotation_SeedsPreviousSessionID(t *testing.T) {
 		Status:     db.StatusPending,
 		CreatedAt:  now.Add(2 * time.Second),
 	}
-	_ = db.InsertMessage(database, msg2)
+	_ = insertMessage(store, msg2)
 	pool.processBurst([]db.Message{msg2})
 
 	mu.Lock()
@@ -4693,11 +4515,11 @@ func TestProcessBurst_SessionRotation_SeedsPreviousSessionID(t *testing.T) {
 	mu.Unlock()
 
 	// Verify DB state after rotation
-	currentSess, err := db.GetSessionID(database, channelID)
+	currentSess, err := getSessionID(store, channelID)
 	if err != nil || currentSess != "" {
 		t.Fatalf("Expected empty current session ID after rotation, got %q (err: %v)", currentSess, err)
 	}
-	prevSess, err := db.GetPreviousSessionID(database, channelID)
+	prevSess, err := getPreviousSessionID(store, channelID)
 	if err != nil || prevSess != sess1 {
 		t.Fatalf("Expected previous session ID %q after rotation, got %q (err: %v)", sess1, prevSess, err)
 	}
@@ -4711,7 +4533,7 @@ func TestProcessBurst_SessionRotation_SeedsPreviousSessionID(t *testing.T) {
 		Status:     db.StatusPending,
 		CreatedAt:  now.Add(4 * time.Second),
 	}
-	_ = db.InsertMessage(database, msg3)
+	_ = insertMessage(store, msg3)
 	pool.processBurst([]db.Message{msg3})
 
 	mu.Lock()
@@ -4739,7 +4561,7 @@ func TestProcessBurst_SessionRotation_SeedsPreviousSessionID(t *testing.T) {
 		Status:     db.StatusPending,
 		CreatedAt:  now.Add(6 * time.Second),
 	}
-	_ = db.InsertMessage(database, msg4)
+	_ = insertMessage(store, msg4)
 	pool.processBurst([]db.Message{msg4})
 
 	mu.Lock()
@@ -4757,18 +4579,14 @@ func TestProcessBurst_Turn1Crash_DoesNotPersistGhostUUID(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	channelID := "chan-crash"
 
 	var runnerCalls int
 	pool := NewWorkerPool(WorkerPoolConfig{
 		SessionManager: session.New(tmpDir, ""),
-		DB:          database,
+		Store: store,
 		MaxAttempts: 1,
 		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
 			return nil, nil
@@ -4794,7 +4612,7 @@ func TestProcessBurst_Turn1Crash_DoesNotPersistGhostUUID(t *testing.T) {
 		Status:     db.StatusPending,
 		CreatedAt:  now,
 	}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 
 	pool.processBurst([]db.Message{msg})
 
@@ -4802,7 +4620,7 @@ func TestProcessBurst_Turn1Crash_DoesNotPersistGhostUUID(t *testing.T) {
 		t.Errorf("Expected 1 runner call, got %d", runnerCalls)
 	}
 
-	sessID, err := db.GetSessionID(database, channelID)
+	sessID, err := getSessionID(store, channelID)
 	if err != nil {
 		t.Fatalf("GetSessionID failed: %v", err)
 	}
@@ -4816,11 +4634,7 @@ func TestProcessBurst_Turn1Crash_DoesNotPersistGhostUUID(t *testing.T) {
 
 func TestQueue_ClassifierParseErrorTriggersSystemAlert(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	var mu sync.Mutex
 	var alertChannel string
@@ -4844,7 +4658,7 @@ func TestQueue_ClassifierParseErrorTriggersSystemAlert(t *testing.T) {
 	}
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		DiscordSession: dgSession,
 		TimeoutMinutes: 1,
 		Classifier:     cls,
@@ -4878,7 +4692,7 @@ func TestQueue_ClassifierParseErrorTriggersSystemAlert(t *testing.T) {
 		Status:     db.StatusPending,
 		CreatedAt:  time.Now().UTC(),
 	}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 
 	pool.processBurst([]db.Message{msg})
 
@@ -4961,15 +4775,11 @@ func TestProcessBurst_WakeModeMention_BypassClassifier(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	sessionID := uuid.New().String()
 	channelID := "chan-lounge-mention"
-	_ = db.SaveSessionID(database, channelID, sessionID)
+	_ = saveSessionID(store, channelID, sessionID)
 	sessMgr := session.New(tmpDir, "")
 	_, _ = sessMgr.EnsureSessionDir(sessionID)
 	cliPbDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "conversations")
@@ -4982,7 +4792,7 @@ func TestProcessBurst_WakeModeMention_BypassClassifier(t *testing.T) {
 	var mu sync.Mutex
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		SessionManager: sessMgr,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
 			mu.Lock()
@@ -5023,7 +4833,7 @@ func TestProcessBurst_WakeModeMention_BypassClassifier(t *testing.T) {
 		Status:     db.StatusPending,
 		CreatedAt:  time.Now().UTC(),
 	}
-	_ = db.InsertMessage(database, msgAmbient)
+	_ = insertMessage(store, msgAmbient)
 
 	pool.processBurst([]db.Message{msgAmbient})
 
@@ -5046,15 +4856,11 @@ func TestProcessBurst_WakeModeMention_DirectMentionWakes(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	sessionID := uuid.New().String()
 	channelID := "chan-lounge-wake"
-	_ = db.SaveSessionID(database, channelID, sessionID)
+	_ = saveSessionID(store, channelID, sessionID)
 	sessMgr := session.New(tmpDir, "")
 	_, _ = sessMgr.EnsureSessionDir(sessionID)
 	cliPbDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "conversations")
@@ -5066,7 +4872,7 @@ func TestProcessBurst_WakeModeMention_DirectMentionWakes(t *testing.T) {
 	var mu sync.Mutex
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		SessionManager: sessMgr,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
 			mu.Lock()
@@ -5102,7 +4908,7 @@ func TestProcessBurst_WakeModeMention_DirectMentionWakes(t *testing.T) {
 		Status:    db.StatusPending,
 		CreatedAt: time.Now().UTC(),
 	}
-	_ = db.InsertMessage(database, msgMention)
+	_ = insertMessage(store, msgMention)
 
 	pool.processBurst([]db.Message{msgMention})
 
@@ -5119,11 +4925,7 @@ func TestProcessBurst_WakeModeMention_DirectMentionWakes(t *testing.T) {
 
 func TestWorkerPool_ImageDeliveryAndSanitization(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer database.Close()
+	store := setupTestStore(t)
 
 	tempDir := t.TempDir()
 	// Create a valid test PNG in tempDir
@@ -5139,7 +4941,7 @@ func TestWorkerPool_ImageDeliveryAndSanitization(t *testing.T) {
 	doneCh := make(chan struct{})
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
@@ -5175,7 +4977,7 @@ func TestWorkerPool_ImageDeliveryAndSanitization(t *testing.T) {
 		CreatedAt:  time.Now().UTC(),
 		UpdatedAt:  time.Now().UTC(),
 	}
-	if err := db.InsertMessage(database, msg); err != nil {
+	if err := insertMessage(store, msg); err != nil {
 		t.Fatalf("InsertMessage failed: %v", err)
 	}
 
@@ -5206,11 +5008,7 @@ func TestWorkerPool_ImageDeliveryAndSanitization(t *testing.T) {
 
 func TestWorkerPoolShutdown_PreservesProcessingMessageWithoutApology(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	var deliveredMessages []string
 	var mu sync.Mutex
@@ -5219,7 +5017,7 @@ func TestWorkerPoolShutdown_PreservesProcessingMessageWithoutApology(t *testing.
 	runnerBlock := make(chan struct{})
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
@@ -5260,7 +5058,7 @@ func TestWorkerPoolShutdown_PreservesProcessingMessageWithoutApology(t *testing.
 		CreatedAt:  time.Now().UTC(),
 		UpdatedAt:  time.Now().UTC(),
 	}
-	if err := db.InsertMessage(database, msg); err != nil {
+	if err := insertMessage(store, msg); err != nil {
 		t.Fatalf("InsertMessage failed: %v", err)
 	}
 
@@ -5283,11 +5081,12 @@ func TestWorkerPoolShutdown_PreservesProcessingMessageWithoutApology(t *testing.
 	mu.Unlock()
 
 	// Verify database state: message should be reset to PENDING (not FAILED or PROCESSING), and retry_count should NOT have incremented
-	var status string
-	var retryCount int
-	if err := database.QueryRow("SELECT status, retry_count FROM messages WHERE id = $1", msg.ID).Scan(&status, &retryCount); err != nil {
+	msgCheck, err := getMessage(store, msg.ID)
+	if err != nil || msgCheck == nil {
 		t.Fatalf("Query failed: %v", err)
 	}
+	status := msgCheck.Status
+	retryCount := msgCheck.RetryCount
 
 	if status != db.StatusPending {
 		t.Errorf("Expected message status %q in DB on shutdown, got %q", db.StatusPending, status)
@@ -5300,7 +5099,7 @@ func TestWorkerPoolShutdown_PreservesProcessingMessageWithoutApology(t *testing.
 	newDoneCh := make(chan struct{})
 	var finalDeliveredText string
 	newPool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
@@ -5327,7 +5126,7 @@ func TestWorkerPoolShutdown_PreservesProcessingMessageWithoutApology(t *testing.
 	defer newPool.Stop()
 
 	// Run RecoverInterrupted on fresh pool
-	RecoverInterrupted(database, newPool)
+	RecoverInterrupted(store, newPool)
 
 	select {
 	case <-newDoneCh:
@@ -5341,12 +5140,13 @@ func TestWorkerPoolShutdown_PreservesProcessingMessageWithoutApology(t *testing.
 	}
 	mu.Unlock()
 
-	// Verify final DB status
-	var finalStatus string
-	var finalRetryCount, finalRestartCount int
-	if err := database.QueryRow("SELECT status, retry_count, restart_count FROM messages WHERE id = $1", msg.ID).Scan(&finalStatus, &finalRetryCount, &finalRestartCount); err != nil {
+	msgFinal, err := getMessage(store, msg.ID)
+	if err != nil || msgFinal == nil {
 		t.Fatalf("Final DB query failed: %v", err)
 	}
+	finalStatus := msgFinal.Status
+	finalRetryCount := msgFinal.RetryCount
+	finalRestartCount := msgFinal.RestartCount
 	if finalStatus != db.StatusCompleted {
 		t.Errorf("Expected final message status %q, got %q", db.StatusCompleted, finalStatus)
 	}
@@ -5360,11 +5160,7 @@ func TestWorkerPoolShutdown_PreservesProcessingMessageWithoutApology(t *testing.
 
 func TestWorkerPoolShutdown_RunnerSuccessPreserved(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	var deliveredText string
 	var mu sync.Mutex
@@ -5373,7 +5169,7 @@ func TestWorkerPoolShutdown_RunnerSuccessPreserved(t *testing.T) {
 	doneCh := make(chan struct{})
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
@@ -5409,7 +5205,7 @@ func TestWorkerPoolShutdown_RunnerSuccessPreserved(t *testing.T) {
 		CreatedAt:  time.Now().UTC(),
 		UpdatedAt:  time.Now().UTC(),
 	}
-	if err := db.InsertMessage(database, msg); err != nil {
+	if err := insertMessage(store, msg); err != nil {
 		t.Fatalf("InsertMessage failed: %v", err)
 	}
 
@@ -5425,10 +5221,11 @@ func TestWorkerPoolShutdown_RunnerSuccessPreserved(t *testing.T) {
 		t.Errorf("Expected successful response delivered despite shutdown, got: %s", deliveredText)
 	}
 
-	var status string
-	if err := database.QueryRow("SELECT status FROM messages WHERE id = $1", msg.ID).Scan(&status); err != nil {
+	msgCheck, err := getMessage(store, msg.ID)
+	if err != nil {
 		t.Fatalf("DB query failed: %v", err)
 	}
+	status := msgCheck.Status
 	if status != db.StatusCompleted {
 		t.Errorf("Expected status %q, got %q", db.StatusCompleted, status)
 	}
@@ -5436,11 +5233,7 @@ func TestWorkerPoolShutdown_RunnerSuccessPreserved(t *testing.T) {
 
 func TestWorkerPoolShutdown_AmbientClassifierCancellationPreserved(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	classifyStarted := make(chan struct{})
 
@@ -5452,7 +5245,7 @@ func TestWorkerPoolShutdown_AmbientClassifierCancellationPreserved(t *testing.T)
 
 	// We configure a pool with a classifier that blocks until context is cancelled
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		DrainTimeout:   5 * time.Millisecond,
 		Classifier:     cls,
@@ -5486,7 +5279,7 @@ func TestWorkerPoolShutdown_AmbientClassifierCancellationPreserved(t *testing.T)
 		CreatedAt:  time.Now().UTC(),
 		UpdatedAt:  time.Now().UTC(),
 	}
-	if err := db.InsertMessage(database, msg); err != nil {
+	if err := insertMessage(store, msg); err != nil {
 		t.Fatalf("InsertMessage failed: %v", err)
 	}
 
@@ -5500,10 +5293,11 @@ func TestWorkerPoolShutdown_AmbientClassifierCancellationPreserved(t *testing.T)
 	pool.Stop()
 
 	// Verify database state: message should NOT be marked COMPLETED [AMBIENT]
-	var status string
-	if err := database.QueryRow("SELECT status FROM messages WHERE id = $1", msg.ID).Scan(&status); err != nil {
+	msgCheck, err := getMessage(store, msg.ID)
+	if err != nil {
 		t.Fatalf("DB query failed: %v", err)
 	}
+	status := msgCheck.Status
 	if status == db.StatusCompleted {
 		t.Errorf("Message was mistakenly marked COMPLETED [AMBIENT] during shutdown cancellation")
 	}
@@ -5514,11 +5308,7 @@ func TestWorkerPoolShutdown_AmbientClassifierCancellationPreserved(t *testing.T)
 
 func TestQueue_WatchdogInactivityRetryAndExhaustion(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	var runnerCalls int32
 	doneCh := make(chan struct{})
@@ -5528,7 +5318,7 @@ func TestQueue_WatchdogInactivityRetryAndExhaustion(t *testing.T) {
 	var mu sync.Mutex
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
@@ -5564,7 +5354,7 @@ func TestQueue_WatchdogInactivityRetryAndExhaustion(t *testing.T) {
 		CreatedAt:  time.Now().UTC(),
 		UpdatedAt:  time.Now().UTC(),
 	}
-	if err := db.InsertMessage(database, msg); err != nil {
+	if err := insertMessage(store, msg); err != nil {
 		t.Fatalf("Failed to insert message: %v", err)
 	}
 
@@ -5581,7 +5371,7 @@ func TestQueue_WatchdogInactivityRetryAndExhaustion(t *testing.T) {
 		t.Errorf("Expected RunnerFunc to be retried exactly 3 times, got: %d", calls)
 	}
 
-	dbMsg, err := db.GetMessage(database, "msg-watchdog-101")
+	dbMsg, err := getMessage(store, "msg-watchdog-101")
 	if err != nil || dbMsg == nil {
 		t.Fatalf("Failed to get message from DB: %v", err)
 	}
@@ -5601,11 +5391,7 @@ func TestQueue_WatchdogInactivityRetryAndExhaustion(t *testing.T) {
 
 func TestQueue_WatchdogInactivityRetryAndRecovery(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	var runnerCalls int32
 	var promptsSeen []string
@@ -5623,11 +5409,11 @@ func TestQueue_WatchdogInactivityRetryAndRecovery(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte("mock transcript data\n"), 0600); err != nil {
 		t.Fatalf("failed to write mock transcript: %v", err)
 	}
-	_ = db.SaveSessionID(database, "thread-recovery-505", mockSessID)
+	_ = saveSessionID(store, "thread-recovery-505", mockSessID)
 
 	pool := NewWorkerPool(WorkerPoolConfig{
 		SessionManager: session.New(tmpDir, ""),
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
@@ -5673,7 +5459,7 @@ func TestQueue_WatchdogInactivityRetryAndRecovery(t *testing.T) {
 		CreatedAt:  time.Now().UTC(),
 		UpdatedAt:  time.Now().UTC(),
 	}
-	if err := db.InsertMessage(database, msg); err != nil {
+	if err := insertMessage(store, msg); err != nil {
 		t.Fatalf("Failed to insert message: %v", err)
 	}
 
@@ -5706,7 +5492,7 @@ func TestQueue_WatchdogInactivityRetryAndRecovery(t *testing.T) {
 	}
 	mu.Unlock()
 
-	dbMsg, err := db.GetMessage(database, "msg-recovery-101")
+	dbMsg, err := getMessage(store, "msg-recovery-101")
 	if err != nil || dbMsg == nil {
 		t.Fatalf("Failed to get message from DB: %v", err)
 	}
@@ -5724,11 +5510,7 @@ func TestDefaultTimeoutMinutes_Is60(t *testing.T) {
 
 func TestProcessBurst_ColdStartWatchdogRecoveryAndContinuation(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	var runnerCalls int32
 	var promptsSeen []string
@@ -5752,7 +5534,7 @@ func TestProcessBurst_ColdStartWatchdogRecoveryAndContinuation(t *testing.T) {
 
 	pool := NewWorkerPool(WorkerPoolConfig{
 		SessionManager: session.New(tmpDir, ""),
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
@@ -5806,7 +5588,7 @@ func TestProcessBurst_ColdStartWatchdogRecoveryAndContinuation(t *testing.T) {
 		CreatedAt:  time.Now().UTC(),
 		UpdatedAt:  time.Now().UTC(),
 	}
-	if err := db.InsertMessage(database, msg); err != nil {
+	if err := insertMessage(store, msg); err != nil {
 		t.Fatalf("Failed to insert message: %v", err)
 	}
 
@@ -5848,7 +5630,7 @@ func TestProcessBurst_ColdStartWatchdogRecoveryAndContinuation(t *testing.T) {
 	mu.Unlock()
 
 	// Verify database has latched the session ID
-	savedSess, err := db.GetSessionID(database, "thread-cold-606")
+	savedSess, err := getSessionID(store, "thread-cold-606")
 	if err != nil || savedSess != coldSessID {
 		t.Errorf("Expected latched session %q in DB for thread, got: %q (err: %v)", coldSessID, savedSess, err)
 	}
@@ -5856,11 +5638,7 @@ func TestProcessBurst_ColdStartWatchdogRecoveryAndContinuation(t *testing.T) {
 
 func TestProcessBurst_ColdStartStreamJsonInitLatchingOnFailure(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	var runnerCalls int32
 	var promptsSeen []string
@@ -5882,7 +5660,7 @@ func TestProcessBurst_ColdStartStreamJsonInitLatchingOnFailure(t *testing.T) {
 
 	pool := NewWorkerPool(WorkerPoolConfig{
 		SessionManager: session.New(tmpDir, ""),
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
@@ -5934,7 +5712,7 @@ func TestProcessBurst_ColdStartStreamJsonInitLatchingOnFailure(t *testing.T) {
 		Status:    db.StatusPending,
 		CreatedAt: time.Now().UTC(),
 	}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 	pool.Enqueue(msg)
 
 	select {
@@ -5960,7 +5738,7 @@ func TestProcessBurst_ColdStartStreamJsonInitLatchingOnFailure(t *testing.T) {
 	}
 	mu.Unlock()
 
-	savedSess, err := db.GetSessionID(database, "thread-cold-stream-1")
+	savedSess, err := getSessionID(store, "thread-cold-stream-1")
 	if err != nil || savedSess != coldSessID {
 		t.Errorf("Expected latched session %q in DB, got: %q (err: %v)", coldSessID, savedSess, err)
 	}
@@ -5968,11 +5746,7 @@ func TestProcessBurst_ColdStartStreamJsonInitLatchingOnFailure(t *testing.T) {
 
 func TestProcessBurst_ColdStartTransientRecoveryAndContinuation(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	var runnerCalls int32
 	var promptsSeen []string
@@ -5991,7 +5765,7 @@ func TestProcessBurst_ColdStartTransientRecoveryAndContinuation(t *testing.T) {
 
 	pool := NewWorkerPool(WorkerPoolConfig{
 		SessionManager: session.New(tmpDir, ""),
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
@@ -6035,7 +5809,7 @@ func TestProcessBurst_ColdStartTransientRecoveryAndContinuation(t *testing.T) {
 		CreatedAt:  time.Now().UTC(),
 		UpdatedAt:  time.Now().UTC(),
 	}
-	if err := db.InsertMessage(database, msg); err != nil {
+	if err := insertMessage(store, msg); err != nil {
 		t.Fatalf("Failed to insert message: %v", err)
 	}
 
@@ -6071,7 +5845,7 @@ func TestProcessBurst_ColdStartTransientRecoveryAndContinuation(t *testing.T) {
 	}
 	mu.Unlock()
 
-	savedSess, err := db.GetSessionID(database, "thread-transient-707")
+	savedSess, err := getSessionID(store, "thread-transient-707")
 	if err != nil || savedSess != transientSessID {
 		t.Errorf("Expected latched session %q in DB, got: %q (err: %v)", transientSessID, savedSess, err)
 	}
@@ -6079,11 +5853,7 @@ func TestProcessBurst_ColdStartTransientRecoveryAndContinuation(t *testing.T) {
 
 func TestProcessBurst_EmptyStdout_TranscriptRecovery(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	tmpDir := t.TempDir()
 
@@ -6098,7 +5868,7 @@ func TestProcessBurst_EmptyStdout_TranscriptRecovery(t *testing.T) {
 		t.Fatalf("failed to write mock transcript: %v", err)
 	}
 
-	_ = db.SaveSessionID(database, "thread-empty-stdout-1", testSessID)
+	_ = saveSessionID(store, "thread-empty-stdout-1", testSessID)
 
 	var deliveredText string
 	var mu sync.Mutex
@@ -6106,7 +5876,7 @@ func TestProcessBurst_EmptyStdout_TranscriptRecovery(t *testing.T) {
 
 	pool := NewWorkerPool(WorkerPoolConfig{
 		SessionManager: session.New(tmpDir, ""),
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
@@ -6144,7 +5914,7 @@ func TestProcessBurst_EmptyStdout_TranscriptRecovery(t *testing.T) {
 		CreatedAt:  time.Now().UTC(),
 		UpdatedAt:  time.Now().UTC(),
 	}
-	if err := db.InsertMessage(database, msg); err != nil {
+	if err := insertMessage(store, msg); err != nil {
 		t.Fatalf("Failed to insert message: %v", err)
 	}
 
@@ -6162,7 +5932,7 @@ func TestProcessBurst_EmptyStdout_TranscriptRecovery(t *testing.T) {
 	}
 	mu.Unlock()
 
-	dbMsg, err := db.GetMessage(database, "msg-empty-1")
+	dbMsg, err := getMessage(store, "msg-empty-1")
 	if err != nil || dbMsg == nil {
 		t.Fatalf("Failed to retrieve message: %v", err)
 	}
@@ -6173,11 +5943,7 @@ func TestProcessBurst_EmptyStdout_TranscriptRecovery(t *testing.T) {
 
 func TestProcessBurst_StreamInterrupted_TranscriptRecovery(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	tmpDir := t.TempDir()
 
@@ -6193,7 +5959,7 @@ func TestProcessBurst_StreamInterrupted_TranscriptRecovery(t *testing.T) {
 		t.Fatalf("failed to write mock transcript: %v", err)
 	}
 
-	_ = db.SaveSessionID(database, "thread-interrupted-1", testSessID)
+	_ = saveSessionID(store, "thread-interrupted-1", testSessID)
 
 	var runnerCalls int32
 	var deliveredText string
@@ -6202,7 +5968,7 @@ func TestProcessBurst_StreamInterrupted_TranscriptRecovery(t *testing.T) {
 
 	pool := NewWorkerPool(WorkerPoolConfig{
 		SessionManager: session.New(tmpDir, ""),
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
@@ -6242,7 +6008,7 @@ func TestProcessBurst_StreamInterrupted_TranscriptRecovery(t *testing.T) {
 		CreatedAt:  time.Now().UTC(),
 		UpdatedAt:  time.Now().UTC(),
 	}
-	if err := db.InsertMessage(database, msg); err != nil {
+	if err := insertMessage(store, msg); err != nil {
 		t.Fatalf("Failed to insert message: %v", err)
 	}
 
@@ -6265,7 +6031,7 @@ func TestProcessBurst_StreamInterrupted_TranscriptRecovery(t *testing.T) {
 	}
 	mu.Unlock()
 
-	dbMsg, err := db.GetMessage(database, "msg-interrupted-1")
+	dbMsg, err := getMessage(store, "msg-interrupted-1")
 	if err != nil || dbMsg == nil {
 		t.Fatalf("Failed to retrieve message: %v", err)
 	}
@@ -6276,11 +6042,7 @@ func TestProcessBurst_StreamInterrupted_TranscriptRecovery(t *testing.T) {
 
 func TestProcessBurst_StreamInterrupted_NoResponse_RotatesSessionCorrupt(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	tmpDir := t.TempDir()
 
@@ -6296,7 +6058,7 @@ func TestProcessBurst_StreamInterrupted_NoResponse_RotatesSessionCorrupt(t *test
 		t.Fatalf("failed to write mock transcript: %v", err)
 	}
 
-	_ = db.SaveSessionID(database, "thread-interrupted-corrupt-2", testSessID)
+	_ = saveSessionID(store, "thread-interrupted-corrupt-2", testSessID)
 
 	var runnerCalls int32
 	var sessionsSeen []string
@@ -6306,7 +6068,7 @@ func TestProcessBurst_StreamInterrupted_NoResponse_RotatesSessionCorrupt(t *test
 
 	pool := NewWorkerPool(WorkerPoolConfig{
 		SessionManager: session.New(tmpDir, ""),
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
@@ -6355,7 +6117,7 @@ func TestProcessBurst_StreamInterrupted_NoResponse_RotatesSessionCorrupt(t *test
 		CreatedAt:  time.Now().UTC(),
 		UpdatedAt:  time.Now().UTC(),
 	}
-	if err := db.InsertMessage(database, msg); err != nil {
+	if err := insertMessage(store, msg); err != nil {
 		t.Fatalf("Failed to insert message: %v", err)
 	}
 
@@ -6384,7 +6146,7 @@ func TestProcessBurst_StreamInterrupted_NoResponse_RotatesSessionCorrupt(t *test
 	}
 	mu.Unlock()
 
-	dbMsg, err := db.GetMessage(database, "msg-interrupted-corrupt-2")
+	dbMsg, err := getMessage(store, "msg-interrupted-corrupt-2")
 	if err != nil || dbMsg == nil {
 		t.Fatalf("Failed to retrieve message: %v", err)
 	}
@@ -6395,11 +6157,7 @@ func TestProcessBurst_StreamInterrupted_NoResponse_RotatesSessionCorrupt(t *test
 
 func TestProcessBurst_EmptyStdout_TransientRetryAndContinuation(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	tmpDir := t.TempDir()
 
@@ -6414,7 +6172,7 @@ func TestProcessBurst_EmptyStdout_TransientRetryAndContinuation(t *testing.T) {
 		t.Fatalf("failed to write mock transcript: %v", err)
 	}
 
-	_ = db.SaveSessionID(database, "thread-empty-retry-2", testSessID)
+	_ = saveSessionID(store, "thread-empty-retry-2", testSessID)
 
 	var runnerCalls int32
 	var promptsSeen []string
@@ -6424,7 +6182,7 @@ func TestProcessBurst_EmptyStdout_TransientRetryAndContinuation(t *testing.T) {
 
 	pool := NewWorkerPool(WorkerPoolConfig{
 		SessionManager: session.New(tmpDir, ""),
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
@@ -6470,7 +6228,7 @@ func TestProcessBurst_EmptyStdout_TransientRetryAndContinuation(t *testing.T) {
 		CreatedAt:  time.Now().UTC(),
 		UpdatedAt:  time.Now().UTC(),
 	}
-	if err := db.InsertMessage(database, msg); err != nil {
+	if err := insertMessage(store, msg); err != nil {
 		t.Fatalf("Failed to insert message: %v", err)
 	}
 
@@ -6509,11 +6267,7 @@ func TestProcessBurst_EmptyStdout_TransientRetryAndContinuation(t *testing.T) {
 
 func TestProcessBurst_GeneralFailure_PreservesSessionOnDisk(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	tmpDir := t.TempDir()
 
@@ -6525,7 +6279,7 @@ func TestProcessBurst_GeneralFailure_PreservesSessionOnDisk(t *testing.T) {
 		t.Fatalf("failed to write mock transcript: %v", err)
 	}
 
-	_ = db.SaveSessionID(database, "thread-general-fail-3", testSessID)
+	_ = saveSessionID(store, "thread-general-fail-3", testSessID)
 
 	var runnerCalls int32
 	var promptsSeen []string
@@ -6535,7 +6289,7 @@ func TestProcessBurst_GeneralFailure_PreservesSessionOnDisk(t *testing.T) {
 
 	pool := NewWorkerPool(WorkerPoolConfig{
 		SessionManager: session.New(tmpDir, ""),
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
@@ -6581,7 +6335,7 @@ func TestProcessBurst_GeneralFailure_PreservesSessionOnDisk(t *testing.T) {
 		CreatedAt:  time.Now().UTC(),
 		UpdatedAt:  time.Now().UTC(),
 	}
-	if err := db.InsertMessage(database, msg); err != nil {
+	if err := insertMessage(store, msg); err != nil {
 		t.Fatalf("Failed to insert message: %v", err)
 	}
 
@@ -6620,18 +6374,14 @@ func TestProcessBurst_GeneralFailure_PreservesSessionOnDisk(t *testing.T) {
 
 func TestWorkerPool_FullBuffer_NoEvictionZombieRace(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	const totalMsgs = 150
 	var processedCount atomic.Int32
 	allCompleted := make(chan struct{})
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		IdleTimeout:    20 * time.Millisecond,
 		MaxAttempts:    1,
@@ -6672,7 +6422,7 @@ func TestWorkerPool_FullBuffer_NoEvictionZombieRace(t *testing.T) {
 				CreatedAt:  time.Now().UTC(),
 				UpdatedAt:  time.Now().UTC(),
 			}
-			_ = db.InsertMessage(database, m)
+			_ = insertMessage(store, m)
 			pool.Enqueue(m)
 		}(i)
 	}
@@ -6690,17 +6440,13 @@ func TestWorkerPool_FullBuffer_NoEvictionZombieRace(t *testing.T) {
 
 func TestProcessBurst_TransientError_RetainsOriginalPrompt(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	tmpDir := t.TempDir()
 
 	sessMgr := session.New(tmpDir, "")
 	testSessID := "sess-transient-503"
-	_, err = sessMgr.EnsureSessionDir(testSessID)
+	_, err := sessMgr.EnsureSessionDir(testSessID)
 	if err != nil {
 		t.Fatalf("EnsureSessionDir failed: %v", err)
 	}
@@ -6711,7 +6457,7 @@ func TestProcessBurst_TransientError_RetainsOriginalPrompt(t *testing.T) {
 	doneCh := make(chan struct{})
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		SessionManager: sessMgr,
 		TimeoutMinutes: 1,
 		BackoffBase:    5 * time.Millisecond,
@@ -6755,8 +6501,8 @@ func TestProcessBurst_TransientError_RetainsOriginalPrompt(t *testing.T) {
 		CreatedAt:  time.Now().UTC(),
 		UpdatedAt:  time.Now().UTC(),
 	}
-	_ = db.InsertMessage(database, msg)
-	_ = db.SaveSessionID(database, msg.ThreadID, testSessID)
+	_ = insertMessage(store, msg)
+	_ = saveSessionID(store, msg.ThreadID, testSessID)
 
 	pool.Enqueue(msg)
 
@@ -6848,11 +6594,7 @@ func TestResolveBotRoleIDs(t *testing.T) {
 
 func TestProcessBurst_QuotaPause_SchedulesOneShotAndNotifies(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to init DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	var runnerCalls int
 	var deliveredTexts []string
@@ -6860,7 +6602,7 @@ func TestProcessBurst_QuotaPause_SchedulesOneShotAndNotifies(t *testing.T) {
 	doneCh := make(chan struct{})
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
@@ -6892,7 +6634,7 @@ func TestProcessBurst_QuotaPause_SchedulesOneShotAndNotifies(t *testing.T) {
 		CreatedAt: time.Now().UTC(),
 		UpdatedAt: time.Now().UTC(),
 	}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 
 	pool.Enqueue(msg)
 
@@ -6926,12 +6668,12 @@ func TestProcessBurst_QuotaPause_SchedulesOneShotAndNotifies(t *testing.T) {
 	}
 
 	// 3. One-shot schedule must be inserted into database for this thread with future run_at
-	var schedPrompt string
-	var runAt time.Time
-	err = database.QueryRow(`SELECT prompt, run_at FROM one_shot_schedules WHERE thread_id = $1`, threadID).Scan(&schedPrompt, &runAt)
-	if err != nil {
-		t.Fatalf("Error querying one_shot_schedules: %v", err)
+	oneShots, err := store.GetAllOneShotSchedules(context.Background(), threadID)
+	if err != nil || len(oneShots) == 0 {
+		t.Fatalf("Error querying one_shot_schedules: %v (count=%d)", err, len(oneShots))
 	}
+	schedPrompt := oneShots[0].Prompt
+	runAt := oneShots[0].RunAt
 	if !strings.Contains(schedPrompt, "[QUOTA_RETRY]") || !strings.Contains(schedPrompt, "code coverage") {
 		t.Errorf("Expected retry prompt with [QUOTA_RETRY] and coverage query, got: %q", schedPrompt)
 	}
@@ -6940,7 +6682,7 @@ func TestProcessBurst_QuotaPause_SchedulesOneShotAndNotifies(t *testing.T) {
 	}
 
 	// 4. Triggering message marked FAILED with [QUOTA_PAUSED]
-	dbMsg, _ := db.GetMessage(database, msg.ID)
+	dbMsg, _ := getMessage(store, msg.ID)
 	if dbMsg.Status != db.StatusFailed {
 		t.Errorf("Expected message status FAILED, got %s", dbMsg.Status)
 	}
@@ -6951,11 +6693,7 @@ func TestProcessBurst_QuotaPause_SchedulesOneShotAndNotifies(t *testing.T) {
 
 func TestProcessBurst_QuotaPause_CircuitBreakerDoesNotReschedule(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to init DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	var runnerCalls int
 	var deliveredTexts []string
@@ -6963,7 +6701,7 @@ func TestProcessBurst_QuotaPause_CircuitBreakerDoesNotReschedule(t *testing.T) {
 	doneCh := make(chan struct{})
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
@@ -6997,7 +6735,7 @@ func TestProcessBurst_QuotaPause_CircuitBreakerDoesNotReschedule(t *testing.T) {
 		CreatedAt:     time.Now().UTC(),
 		UpdatedAt:     time.Now().UTC(),
 	}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 
 	pool.Enqueue(msg)
 
@@ -7011,8 +6749,8 @@ func TestProcessBurst_QuotaPause_CircuitBreakerDoesNotReschedule(t *testing.T) {
 	defer mu.Unlock()
 
 	// Circuit breaker: must NOT insert another one-shot schedule!
-	var schedCount int
-	_ = database.QueryRow(`SELECT COUNT(*) FROM one_shot_schedules WHERE thread_id = $1`, threadID).Scan(&schedCount)
+	oneShots, _ := store.GetAllOneShotSchedules(context.Background(), threadID)
+	schedCount := len(oneShots)
 	if schedCount != 0 {
 		t.Fatalf("Expected 0 one-shot schedules created on circuit breaker, got %d", schedCount)
 	}
@@ -7028,11 +6766,7 @@ func TestProcessBurst_QuotaPause_CircuitBreakerDoesNotReschedule(t *testing.T) {
 
 func TestProcessBurst_TrailingBurstSuppression_OnQuotaPause(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to init DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	var runnerCalls int
 	var mu sync.Mutex
@@ -7041,7 +6775,7 @@ func TestProcessBurst_TrailingBurstSuppression_OnQuotaPause(t *testing.T) {
 	doneCh := make(chan struct{})
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
@@ -7088,8 +6822,8 @@ func TestProcessBurst_TrailingBurstSuppression_OnQuotaPause(t *testing.T) {
 		CreatedAt: t0.Add(100 * time.Millisecond),
 		UpdatedAt: t0.Add(100 * time.Millisecond),
 	}
-	_ = db.InsertMessage(database, msg1)
-	_ = db.InsertMessage(database, msg2)
+	_ = insertMessage(store, msg1)
+	_ = insertMessage(store, msg2)
 
 	// Simulate burst arrival
 	pool.processBurst([]db.Message{msg1, msg2})
@@ -7103,7 +6837,7 @@ func TestProcessBurst_TrailingBurstSuppression_OnQuotaPause(t *testing.T) {
 	}
 
 	// Message 2 should be marked failed with trailing suppression reason
-	m2, _ := db.GetMessage(database, msg2.ID)
+	m2, _ := getMessage(store, msg2.ID)
 	if m2.Status != db.StatusFailed {
 		t.Errorf("Expected msg2 status FAILED, got %s", m2.Status)
 	}
@@ -7120,18 +6854,14 @@ func TestProcessBurst_TrailingBurstSuppression_OnQuotaPause(t *testing.T) {
 
 func TestQueueWorker_PerScopeSerialization(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	var mu sync.Mutex
 	var activeWorkers int
 	var maxActiveWorkers int
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    1,
@@ -7163,9 +6893,9 @@ func TestQueueWorker_PerScopeSerialization(t *testing.T) {
 	msg1 := db.Message{ID: "msg-scope-1", ThreadID: "thread-scope-test", Content: "Msg 1"}
 	msg2 := db.Message{ID: "msg-scope-2", ThreadID: "thread-scope-test", Content: "Msg 2"}
 	msg3 := db.Message{ID: "msg-scope-3", ThreadID: "thread-scope-test", Content: "Msg 3"}
-	_ = db.InsertMessage(database, msg1)
-	_ = db.InsertMessage(database, msg2)
-	_ = db.InsertMessage(database, msg3)
+	_ = insertMessage(store, msg1)
+	_ = insertMessage(store, msg2)
+	_ = insertMessage(store, msg3)
 
 	var wg sync.WaitGroup
 	wg.Add(3)
@@ -7183,15 +6913,11 @@ func TestQueueWorker_PerScopeSerialization(t *testing.T) {
 
 func TestThreadSession_RotationAtTurnLimit(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
-	_ = db.SaveSessionID(database, "thread-rotate-test", "old-session-id")
+	_ = saveSessionID(store, "thread-rotate-test", "old-session-id")
 	for i := 0; i < DefaultMaxSessionTurns; i++ {
-		_, _ = db.IncrementSessionTurnCount(database, "thread-rotate-test")
+		_, _ = incrementSessionTurnCount(store, "thread-rotate-test")
 	}
 
 	var mu sync.Mutex
@@ -7206,7 +6932,7 @@ func TestThreadSession_RotationAtTurnLimit(t *testing.T) {
 
 	pool := New(appCfg, WorkerPoolConfig{
 		SessionManager: session.New(t.TempDir(), ""),
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    1,
@@ -7230,7 +6956,7 @@ func TestThreadSession_RotationAtTurnLimit(t *testing.T) {
 	defer pool.Stop()
 
 	msg := db.Message{ID: "msg-rotate", ThreadID: "thread-rotate-test", Content: fmt.Sprintf("Turn %d", DefaultMaxSessionTurns+1)}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 	pool.Enqueue(msg)
 
 	select {
@@ -7248,18 +6974,14 @@ func TestThreadSession_RotationAtTurnLimit(t *testing.T) {
 
 func TestRunner_DefensiveLatchingAndCold429(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	var mu sync.Mutex
 	var receivedIDs []string
 	doneCh := make(chan struct{}, 2)
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
@@ -7291,7 +7013,7 @@ func TestRunner_DefensiveLatchingAndCold429(t *testing.T) {
 
 	// 1. Test Cold 429 (should not retry)
 	msg1 := db.Message{ID: "msg-429", ThreadID: "thread-429", Content: "Test429"}
-	_ = db.InsertMessage(database, msg1)
+	_ = insertMessage(store, msg1)
 	pool.Enqueue(msg1)
 
 	select {
@@ -7301,7 +7023,7 @@ func TestRunner_DefensiveLatchingAndCold429(t *testing.T) {
 	}
 
 	mu.Lock()
-	dbMsg1, _ := db.GetMessage(database, "msg-429")
+	dbMsg1, _ := getMessage(store, "msg-429")
 	if dbMsg1.Status != db.StatusFailed {
 		t.Errorf("Expected 429 to fail fast, got status: %s", dbMsg1.Status)
 	}
@@ -7309,7 +7031,7 @@ func TestRunner_DefensiveLatchingAndCold429(t *testing.T) {
 
 	// 2. Test Empty Latch (should not retry)
 	msg2 := db.Message{ID: "msg-latch", ThreadID: "thread-latch", Content: "TestEmptyLatch"}
-	_ = db.InsertMessage(database, msg2)
+	_ = insertMessage(store, msg2)
 	pool.Enqueue(msg2)
 
 	select {
@@ -7319,7 +7041,7 @@ func TestRunner_DefensiveLatchingAndCold429(t *testing.T) {
 	}
 
 	mu.Lock()
-	dbMsg2, _ := db.GetMessage(database, "msg-latch")
+	dbMsg2, _ := getMessage(store, "msg-latch")
 	if dbMsg2.Status != db.StatusFailed {
 		t.Errorf("Expected empty latch to fail fast, got status: %s", dbMsg2.Status)
 	}
@@ -7328,11 +7050,7 @@ func TestRunner_DefensiveLatchingAndCold429(t *testing.T) {
 
 func TestThreadColdStartSummarization_Integration(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	// Register channel snapshots in cache
 	CacheDiscordChannel(&discordgo.Channel{
@@ -7353,7 +7071,7 @@ func TestThreadColdStartSummarization_Integration(t *testing.T) {
 	doneCh := make(chan struct{}, 10)
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    1,
@@ -7406,7 +7124,7 @@ func TestThreadColdStartSummarization_Integration(t *testing.T) {
 	// 1. Thread Cold Start -> Should summarize and inject <THREAD_SUMMARY>
 	t.Run("Thread Cold Start Summarizes History", func(t *testing.T) {
 		msg := db.Message{ID: "m1", ThreadID: "thread-100", Content: "Hello thread"}
-		_ = db.InsertMessage(database, msg)
+		_ = insertMessage(store, msg)
 		pool.Enqueue(msg)
 
 		select {
@@ -7428,7 +7146,7 @@ func TestThreadColdStartSummarization_Integration(t *testing.T) {
 		}
 
 		// Verify saved summary and watermark in SQLite
-		sum, lastMsgID, err := db.GetThreadSummary(database, "thread-100")
+		sum, lastMsgID, err := getThreadSummary(store, "thread-100")
 		if err != nil || sum == "" || lastMsgID != "msg-hist-1" {
 			t.Errorf("Expected saved summary and watermark msg-hist-1, got sum=%q, watermark=%q, err=%v", sum, lastMsgID, err)
 		}
@@ -7441,7 +7159,7 @@ func TestThreadColdStartSummarization_Integration(t *testing.T) {
 		mu.Unlock()
 
 		msg := db.Message{ID: "m2", ThreadID: "channel-1", Content: "Hello main channel"}
-		_ = db.InsertMessage(database, msg)
+		_ = insertMessage(store, msg)
 		pool.Enqueue(msg)
 
 		select {
@@ -7474,10 +7192,10 @@ func TestThreadColdStartSummarization_Integration(t *testing.T) {
 			ParentID: "channel-1",
 			Type:     discordgo.ChannelTypeGuildPublicThread,
 		})
-		_ = db.SaveThreadSummary(database, "thread-cached", "<THREAD_SUMMARY>\n- Existing cached summary\n</THREAD_SUMMARY>", "msg-hist-1")
+		_ = saveThreadSummary(store, "thread-cached", "<THREAD_SUMMARY>\n- Existing cached summary\n</THREAD_SUMMARY>", "msg-hist-1")
 
 		msg := db.Message{ID: "m3", ThreadID: "thread-cached", Content: "Cached test"}
-		_ = db.InsertMessage(database, msg)
+		_ = insertMessage(store, msg)
 		pool.Enqueue(msg)
 
 		select {
@@ -7508,7 +7226,7 @@ func TestThreadColdStartSummarization_Integration(t *testing.T) {
 		})
 
 		msg := db.Message{ID: "m4", ThreadID: "thread-fail-llm", Content: "fail-llm request"}
-		_ = db.InsertMessage(database, msg)
+		_ = insertMessage(store, msg)
 		pool.Enqueue(msg)
 
 		select {
@@ -7534,11 +7252,7 @@ func TestProcessBurst_ColdStart429_RetriesTransiently(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	var mu sync.Mutex
 	attempts := 0
@@ -7551,7 +7265,7 @@ func TestProcessBurst_ColdStart429_RetriesTransiently(t *testing.T) {
 
 	pool := NewWorkerPool(WorkerPoolConfig{
 		SessionManager: session.New(tmpDir, ""),
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
@@ -7582,7 +7296,7 @@ func TestProcessBurst_ColdStart429_RetriesTransiently(t *testing.T) {
 	defer pool.Stop()
 
 	msg := db.Message{ID: "msg-cold-429", ThreadID: "thread-cold-429", Content: "Hello 429"}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 	pool.Enqueue(msg)
 
 	select {
@@ -7597,7 +7311,7 @@ func TestProcessBurst_ColdStart429_RetriesTransiently(t *testing.T) {
 		t.Errorf("Expected exactly 3 attempts (2 retries on 429 then success), got %d attempts", attempts)
 	}
 
-	dbMsg, _ := db.GetMessage(database, "msg-cold-429")
+	dbMsg, _ := getMessage(store, "msg-cold-429")
 	if dbMsg.Status != db.StatusCompleted {
 		t.Errorf("Expected message status to be COMPLETED, got %s", dbMsg.Status)
 	}
@@ -7607,14 +7321,10 @@ func TestProcessBurst_NonTransient_FailsFastOnAttempt1(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	existingSess := uuid.New().String()
-	_ = db.SaveSessionID(database, "thread-fast-fail", existingSess)
+	_ = saveSessionID(store, "thread-fast-fail", existingSess)
 
 	var mu sync.Mutex
 	attempts := 0
@@ -7623,7 +7333,7 @@ func TestProcessBurst_NonTransient_FailsFastOnAttempt1(t *testing.T) {
 
 	pool := NewWorkerPool(WorkerPoolConfig{
 		SessionManager: session.New(tmpDir, ""),
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
@@ -7650,7 +7360,7 @@ func TestProcessBurst_NonTransient_FailsFastOnAttempt1(t *testing.T) {
 	defer pool.Stop()
 
 	msg := db.Message{ID: "msg-auth-fail", ThreadID: "thread-fast-fail", Content: "Run with bad auth"}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 	pool.Enqueue(msg)
 
 	select {
@@ -7666,12 +7376,12 @@ func TestProcessBurst_NonTransient_FailsFastOnAttempt1(t *testing.T) {
 		t.Errorf("Expected exactly 1 attempt for non-transient error, got %d", attempts)
 	}
 
-	dbMsg, _ := db.GetMessage(database, "msg-auth-fail")
+	dbMsg, _ := getMessage(store, "msg-auth-fail")
 	if dbMsg.Status != db.StatusFailed {
 		t.Errorf("Expected message status to be FAILED, got %s", dbMsg.Status)
 	}
 
-	savedSess, _ := db.GetSessionID(database, "thread-fast-fail")
+	savedSess, _ := getSessionID(store, "thread-fast-fail")
 	if savedSess != "" {
 		t.Errorf("Expected latched session in DB to be cleared on non-transient fail-fast, got %q", savedSess)
 	}
@@ -7688,11 +7398,7 @@ func TestProcessBurst_Exit0_NonTransientJSON_FailsFastOnAttempt1(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	var mu sync.Mutex
 	attempts := 0
@@ -7700,7 +7406,7 @@ func TestProcessBurst_Exit0_NonTransientJSON_FailsFastOnAttempt1(t *testing.T) {
 
 	pool := NewWorkerPool(WorkerPoolConfig{
 		SessionManager: session.New(tmpDir, ""),
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
@@ -7724,7 +7430,7 @@ func TestProcessBurst_Exit0_NonTransientJSON_FailsFastOnAttempt1(t *testing.T) {
 	defer pool.Stop()
 
 	msg := db.Message{ID: "msg-flag-fail", ThreadID: "thread-flag-fail", Content: "Run with bad flag"}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 	pool.Enqueue(msg)
 
 	select {
@@ -7740,7 +7446,7 @@ func TestProcessBurst_Exit0_NonTransientJSON_FailsFastOnAttempt1(t *testing.T) {
 		t.Errorf("Expected exactly 1 attempt for exit 0 non-transient error, got %d", attempts)
 	}
 
-	dbMsg, _ := db.GetMessage(database, "msg-flag-fail")
+	dbMsg, _ := getMessage(store, "msg-flag-fail")
 	if dbMsg.Status != db.StatusFailed {
 		t.Errorf("Expected message status to be FAILED, got %s", dbMsg.Status)
 	}
@@ -7750,11 +7456,7 @@ func TestProcessBurst_UnknownError_RetriesTransientByDefault(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	var mu sync.Mutex
 	attempts := 0
@@ -7767,7 +7469,7 @@ func TestProcessBurst_UnknownError_RetriesTransientByDefault(t *testing.T) {
 
 	pool := NewWorkerPool(WorkerPoolConfig{
 		SessionManager: session.New(tmpDir, ""),
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
@@ -7797,7 +7499,7 @@ func TestProcessBurst_UnknownError_RetriesTransientByDefault(t *testing.T) {
 	defer pool.Stop()
 
 	msg := db.Message{ID: "msg-unknown-retry", ThreadID: "thread-unknown-retry", Content: "Run unknown error"}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 	pool.Enqueue(msg)
 
 	select {
@@ -7813,7 +7515,7 @@ func TestProcessBurst_UnknownError_RetriesTransientByDefault(t *testing.T) {
 		t.Errorf("Expected 3 attempts (transient-by-default retry), got %d", attempts)
 	}
 
-	dbMsg, _ := db.GetMessage(database, "msg-unknown-retry")
+	dbMsg, _ := getMessage(store, "msg-unknown-retry")
 	if dbMsg.Status != db.StatusCompleted {
 		t.Errorf("Expected message status to be COMPLETED, got %s", dbMsg.Status)
 	}
@@ -7823,11 +7525,7 @@ func TestProcessBurst_ColdStartContextWindow_FailsFast(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	var mu sync.Mutex
 	attempts := 0
@@ -7835,7 +7533,7 @@ func TestProcessBurst_ColdStartContextWindow_FailsFast(t *testing.T) {
 
 	pool := NewWorkerPool(WorkerPoolConfig{
 		SessionManager: session.New(tmpDir, ""),
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
@@ -7859,7 +7557,7 @@ func TestProcessBurst_ColdStartContextWindow_FailsFast(t *testing.T) {
 	defer pool.Stop()
 
 	msg := db.Message{ID: "msg-ctx-cold", ThreadID: "thread-ctx-cold", Content: "Massive prompt"}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 	pool.Enqueue(msg)
 
 	select {
@@ -7875,7 +7573,7 @@ func TestProcessBurst_ColdStartContextWindow_FailsFast(t *testing.T) {
 		t.Errorf("Expected exactly 1 attempt on cold start context window exceeded, got %d", attempts)
 	}
 
-	dbMsg, _ := db.GetMessage(database, "msg-ctx-cold")
+	dbMsg, _ := getMessage(store, "msg-ctx-cold")
 	if dbMsg.Status != db.StatusFailed {
 		t.Errorf("Expected message status to be FAILED, got %s", dbMsg.Status)
 	}
@@ -7883,11 +7581,7 @@ func TestProcessBurst_ColdStartContextWindow_FailsFast(t *testing.T) {
 
 func TestGetSessionLastActivity_ChecksBothDBAndDiskLogs(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	tmpDir := t.TempDir()
 	sessMgr := session.New(tmpDir, "")
@@ -7896,22 +7590,22 @@ func TestGetSessionLastActivity_ChecksBothDBAndDiskLogs(t *testing.T) {
 	sessionID := "sess-act-uuid-1"
 
 	// 1. Initially empty thread -> cold thread, zero time
-	act, isCold, err := GetSessionLastActivity(database, threadID, sessMgr)
+	act, isCold, err := GetSessionLastActivity(store, threadID, sessMgr)
 	if err != nil || !isCold || !act.IsZero() {
 		t.Fatalf("expected cold thread with zero time, got act=%v, isCold=%v, err=%v", act, isCold, err)
 	}
 
 	// 2. Insert session with updated_at = 20m ago
 	tSess := time.Now().UTC().Add(-20 * time.Minute).Truncate(time.Second)
-	_, err = database.Exec(`
-		INSERT INTO sessions (thread_id, internal_session_id, turn_count, updated_at)
-		VALUES ($1, $2, $3, $4)
-	`, threadID, sessionID, 1, tSess)
-	if err != nil {
-		t.Fatalf("failed to insert session: %v", err)
-	}
+	store.SetSessionInfo(db.SessionInfo{
+		ThreadID:          threadID,
+		InternalSessionID: sessionID,
+		TurnCount:         1,
+		CreatedAt:         tSess,
+		UpdatedAt:         tSess,
+	})
 
-	act, isCold, err = GetSessionLastActivity(database, threadID, sessMgr)
+	act, isCold, err = GetSessionLastActivity(store, threadID, sessMgr)
 	if err != nil || isCold {
 		t.Fatalf("expected non-cold thread, got act=%v, isCold=%v, err=%v", act, isCold, err)
 	}
@@ -7921,15 +7615,16 @@ func TestGetSessionLastActivity_ChecksBothDBAndDiskLogs(t *testing.T) {
 
 	// 3. Insert completed message with updated_at = 10m ago (newer than session updated_at)
 	tMsg := time.Now().UTC().Add(-10 * time.Minute).Truncate(time.Second)
-	_, err = database.Exec(`
-		INSERT INTO messages (id, thread_id, status, response_text, created_at, updated_at)
-		VALUES ('msg-1', $1, 'COMPLETED', 'some answer', $2, $2)
-	`, threadID, tMsg)
-	if err != nil {
-		t.Fatalf("failed to insert message: %v", err)
-	}
+	_ = insertMessage(store, db.Message{
+		ID:           "msg-1",
+		ThreadID:     threadID,
+		Status:       db.StatusCompleted,
+		ResponseText: "some answer",
+		CreatedAt:    tMsg,
+		UpdatedAt:    tMsg,
+	})
 
-	act, isCold, err = GetSessionLastActivity(database, threadID, sessMgr)
+	act, isCold, err = GetSessionLastActivity(store, threadID, sessMgr)
 	if err != nil || isCold {
 		t.Fatalf("expected non-cold thread, got act=%v, isCold=%v, err=%v", act, isCold, err)
 	}
@@ -7949,7 +7644,7 @@ func TestGetSessionLastActivity_ChecksBothDBAndDiskLogs(t *testing.T) {
 	}
 	_ = os.Chtimes(taskLog, tDisk, tDisk)
 
-	act, isCold, err = GetSessionLastActivity(database, threadID, sessMgr)
+	act, isCold, err = GetSessionLastActivity(store, threadID, sessMgr)
 	if err != nil || isCold {
 		t.Fatalf("expected non-cold thread, got act=%v, isCold=%v, err=%v", act, isCold, err)
 	}
@@ -7960,34 +7655,30 @@ func TestGetSessionLastActivity_ChecksBothDBAndDiskLogs(t *testing.T) {
 
 func TestGetSessionLastActivity_RotatedSessionNotNew(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	threadID := "thread-rotated-1"
 
 	// Session has reached turn limit and rotated: internal_session_id is "", turn_count is 0
-	_, err = database.Exec(`
-		INSERT INTO sessions (thread_id, internal_session_id, turn_count, updated_at)
-		VALUES ($1, '', 0, $2)
-	`, threadID, time.Now().UTC().Add(-15*time.Minute))
-	if err != nil {
-		t.Fatalf("failed to insert session: %v", err)
-	}
+	store.SetSessionInfo(db.SessionInfo{
+		ThreadID:          threadID,
+		InternalSessionID: "",
+		TurnCount:         0,
+		UpdatedAt:         time.Now().UTC().Add(-15 * time.Minute),
+	})
 
 	// But messages table has prior completed turn from 4 minutes ago
 	tCompleted := time.Now().UTC().Add(-4 * time.Minute).Truncate(time.Second)
-	_, err = database.Exec(`
-		INSERT INTO messages (id, thread_id, status, response_text, created_at, updated_at)
-		VALUES ('msg-prev', $1, 'COMPLETED', 'previous answer', $2, $2)
-	`, threadID, tCompleted)
-	if err != nil {
-		t.Fatalf("failed to insert message: %v", err)
-	}
+	_ = insertMessage(store, db.Message{
+		ID:           "msg-prev",
+		ThreadID:     threadID,
+		Status:       db.StatusCompleted,
+		ResponseText: "previous answer",
+		CreatedAt:    tCompleted,
+		UpdatedAt:    tCompleted,
+	})
 
-	act, isCold, err := GetSessionLastActivity(database, threadID)
+	act, isCold, err := GetSessionLastActivity(store, threadID)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -8001,34 +7692,28 @@ func TestGetSessionLastActivity_RotatedSessionNotNew(t *testing.T) {
 
 func TestGetSessionLastActivity_IgnoresExpiredStaleSentinel(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	threadID := "thread-stale-sentinel"
 
 	// Message completed with [EXPIRED_STALE]
-	_, err = database.Exec(`
-		INSERT INTO messages (id, thread_id, status, response_text, created_at, updated_at)
-		VALUES ('msg-stale-drop', $1, 'COMPLETED', '[EXPIRED_STALE]', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-	`, threadID)
-	if err != nil {
-		t.Fatalf("failed to insert message: %v", err)
-	}
+	_ = insertMessage(store, db.Message{
+		ID:           "msg-stale-drop",
+		ThreadID:     threadID,
+		Status:       db.StatusCompleted,
+		ResponseText: "[EXPIRED_STALE]",
+	})
 
 	// Also insert ambient evaluated message
-	_, err = database.Exec(`
-		INSERT INTO messages (id, thread_id, status, response_text, created_at, updated_at)
-		VALUES ('msg-ambient', $1, 'COMPLETED', '[AMBIENT: IGNORED]', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-	`, threadID)
-	if err != nil {
-		t.Fatalf("failed to insert message: %v", err)
-	}
+	_ = insertMessage(store, db.Message{
+		ID:           "msg-ambient",
+		ThreadID:     threadID,
+		Status:       db.StatusCompleted,
+		ResponseText: "[AMBIENT: IGNORED]",
+	})
 
 	// No real completed messages -> should be cold thread
-	act, isCold, err := GetSessionLastActivity(database, threadID)
+	act, isCold, err := GetSessionLastActivity(store, threadID)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -8042,11 +7727,7 @@ func TestGetSessionLastActivity_IgnoresExpiredStaleSentinel(t *testing.T) {
 
 func TestProcessBurst_Staleness_ExistingSessionRecentDiskActivity_Retained(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	tmpDir := t.TempDir()
 
@@ -8054,7 +7735,7 @@ func TestProcessBurst_Staleness_ExistingSessionRecentDiskActivity_Retained(t *te
 	sessionID := "sess-burst-disk-active"
 
 	// Session registered in DB
-	_ = db.SaveSessionID(database, threadID, sessionID)
+	_ = saveSessionID(store, threadID, sessionID)
 
 	// Task log active 5m ago
 	tasksDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", sessionID, ".system_generated", "tasks")
@@ -8070,7 +7751,7 @@ func TestProcessBurst_Staleness_ExistingSessionRecentDiskActivity_Retained(t *te
 
 	pool := NewWorkerPool(WorkerPoolConfig{
 		SessionManager: session.New(tmpDir, ""),
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    1,
@@ -8098,7 +7779,7 @@ func TestProcessBurst_Staleness_ExistingSessionRecentDiskActivity_Retained(t *te
 		Status:    db.StatusPending,
 		CreatedAt: time.Now().UTC().Add(-35 * time.Minute),
 	}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 	pool.Enqueue(msg)
 
 	select {
@@ -8115,7 +7796,7 @@ func TestProcessBurst_Staleness_ExistingSessionRecentDiskActivity_Retained(t *te
 		t.Errorf("Expected 1 runner call for message in active session, got %d", calls)
 	}
 
-	dbMsg, _ := db.GetMessage(database, "msg-old-retained")
+	dbMsg, _ := getMessage(store, "msg-old-retained")
 	if dbMsg.Status != db.StatusCompleted || dbMsg.ResponseText == "[EXPIRED_STALE]" {
 		t.Errorf("Expected message to be completed normally, got status=%s, response=%s", dbMsg.Status, dbMsg.ResponseText)
 	}
@@ -8123,27 +7804,27 @@ func TestProcessBurst_Staleness_ExistingSessionRecentDiskActivity_Retained(t *te
 
 func TestProcessBurst_Staleness_ExistingSessionRecentDBActivity_Retained(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	threadID := "thread-burst-db-active"
 
 	// Previous message completed 5 minutes ago
 	tPrev := time.Now().UTC().Add(-5 * time.Minute)
-	_, _ = database.Exec(`
-		INSERT INTO messages (id, thread_id, status, response_text, created_at, updated_at)
-		VALUES ('msg-prev-active', $1, 'COMPLETED', 'Finished earlier turn', $2, $2)
-	`, threadID, tPrev)
+	_ = insertMessage(store, db.Message{
+		ID:           "msg-prev-active",
+		ThreadID:     threadID,
+		Status:       db.StatusCompleted,
+		ResponseText: "Finished earlier turn",
+		CreatedAt:    tPrev,
+		UpdatedAt:    tPrev,
+	})
 
 	var runnerCalls int
 	var mu sync.Mutex
 	doneCh := make(chan struct{})
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    1,
@@ -8171,7 +7852,7 @@ func TestProcessBurst_Staleness_ExistingSessionRecentDBActivity_Retained(t *test
 		Status:    db.StatusPending,
 		CreatedAt: time.Now().UTC().Add(-35 * time.Minute),
 	}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 	pool.Enqueue(msg)
 
 	select {
@@ -8191,34 +7872,36 @@ func TestProcessBurst_Staleness_ExistingSessionRecentDBActivity_Retained(t *test
 
 func TestProcessBurst_Staleness_ExistingSessionInactive_Dropped(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	threadID := "thread-burst-inactive"
 	sessionID := "sess-burst-inactive"
 
 	// Session registered, but updated_at is 45m ago
 	tInactive := time.Now().UTC().Add(-45 * time.Minute)
-	_, _ = database.Exec(`
-		INSERT INTO sessions (thread_id, internal_session_id, turn_count, updated_at)
-		VALUES ($1, $2, 1, $3)
-	`, threadID, sessionID, tInactive)
+	store.SetSessionInfo(db.SessionInfo{
+		ThreadID:          threadID,
+		InternalSessionID: sessionID,
+		TurnCount:         1,
+		UpdatedAt:         tInactive,
+	})
 
 	// Previous turn completed 45m ago
-	_, _ = database.Exec(`
-		INSERT INTO messages (id, thread_id, status, response_text, created_at, updated_at)
-		VALUES ('msg-old-completed', $1, 'COMPLETED', 'old answer', $2, $2)
-	`, threadID, tInactive)
+	_ = insertMessage(store, db.Message{
+		ID:           "msg-old-completed",
+		ThreadID:     threadID,
+		Status:       db.StatusCompleted,
+		ResponseText: "old answer",
+		CreatedAt:    tInactive,
+		UpdatedAt:    tInactive,
+	})
 
 	var runnerCalls int
 	var mu sync.Mutex
 	doneCh := make(chan struct{})
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    1,
@@ -8246,7 +7929,7 @@ func TestProcessBurst_Staleness_ExistingSessionInactive_Dropped(t *testing.T) {
 		Status:    db.StatusPending,
 		CreatedAt: time.Now().UTC().Add(-35 * time.Minute),
 	}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 	pool.Enqueue(msg)
 
 	select {
@@ -8263,7 +7946,7 @@ func TestProcessBurst_Staleness_ExistingSessionInactive_Dropped(t *testing.T) {
 		t.Errorf("Expected 0 runner calls for inactive session, got %d", calls)
 	}
 
-	dbMsg, _ := db.GetMessage(database, "msg-inactive-dropped")
+	dbMsg, _ := getMessage(store, "msg-inactive-dropped")
 	if dbMsg.ResponseText != "[EXPIRED_STALE]" {
 		t.Errorf("Expected [EXPIRED_STALE], got %s", dbMsg.ResponseText)
 	}
@@ -8271,11 +7954,7 @@ func TestProcessBurst_Staleness_ExistingSessionInactive_Dropped(t *testing.T) {
 
 func TestProcessBurst_Staleness_NewSession_Dropped(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	threadID := "thread-new-drop"
 	var runnerCalls int
@@ -8283,7 +7962,7 @@ func TestProcessBurst_Staleness_NewSession_Dropped(t *testing.T) {
 	doneCh := make(chan struct{})
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    1,
@@ -8311,7 +7990,7 @@ func TestProcessBurst_Staleness_NewSession_Dropped(t *testing.T) {
 		Status:    db.StatusPending,
 		CreatedAt: time.Now().UTC().Add(-31 * time.Minute),
 	}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 	pool.Enqueue(msg)
 
 	select {
@@ -8328,7 +8007,7 @@ func TestProcessBurst_Staleness_NewSession_Dropped(t *testing.T) {
 		t.Errorf("Expected 0 runner calls, got %d", calls)
 	}
 
-	dbMsg, _ := db.GetMessage(database, "msg-new-stale")
+	dbMsg, _ := getMessage(store, "msg-new-stale")
 	if dbMsg.ResponseText != "[EXPIRED_STALE]" {
 		t.Errorf("Expected [EXPIRED_STALE], got %s", dbMsg.ResponseText)
 	}
@@ -8336,14 +8015,11 @@ func TestProcessBurst_Staleness_NewSession_Dropped(t *testing.T) {
 
 func TestGetSessionLastActivity_FailOpenOnDBError(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	_ = database.Close()
+	store := setupTestStore(t)
+	_ = store.Close()
 
 	// When DB is closed, GetSessionLastActivity returns error
-	act, isCold, err := GetSessionLastActivity(database, "thread-closed")
+	act, isCold, err := GetSessionLastActivity(store, "thread-closed")
 	if err == nil {
 		t.Fatalf("expected error from closed DB, got nil")
 	}
@@ -8357,30 +8033,32 @@ func TestGetSessionLastActivity_FailOpenOnDBError(t *testing.T) {
 
 func TestProcessBurst_Staleness_HardCeiling_Dropped(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	threadID := "thread-hard-ceiling"
 
 	// Session is actively running right now (updated 1 minute ago)
-	_, _ = database.Exec(`
-		INSERT INTO sessions (thread_id, internal_session_id, turn_count, updated_at)
-		VALUES ($1, 'sess-ceiling', 1, CURRENT_TIMESTAMP)
-	`, threadID)
-	_, _ = database.Exec(`
-		INSERT INTO messages (id, thread_id, status, response_text, created_at, updated_at)
-		VALUES ('msg-recent', $1, 'COMPLETED', 'recent turn', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-	`, threadID)
+	store.SetSessionInfo(db.SessionInfo{
+		ThreadID:          threadID,
+		InternalSessionID: "sess-ceiling",
+		TurnCount:         1,
+		UpdatedAt:         time.Now().UTC(),
+	})
+	_ = insertMessage(store, db.Message{
+		ID:           "msg-recent",
+		ThreadID:     threadID,
+		Status:       db.StatusCompleted,
+		ResponseText: "recent turn",
+		CreatedAt:    time.Now().UTC(),
+		UpdatedAt:    time.Now().UTC(),
+	})
 
 	var runnerCalls int
 	var mu sync.Mutex
 	doneCh := make(chan struct{})
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    1,
@@ -8408,7 +8086,7 @@ func TestProcessBurst_Staleness_HardCeiling_Dropped(t *testing.T) {
 		Status:    db.StatusPending,
 		CreatedAt: time.Now().UTC().Add(-130 * time.Minute),
 	}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 	pool.Enqueue(msg)
 
 	select {
@@ -8425,7 +8103,7 @@ func TestProcessBurst_Staleness_HardCeiling_Dropped(t *testing.T) {
 		t.Errorf("Expected 0 runner calls for message older than MaxMessageAbsoluteAge, got %d", calls)
 	}
 
-	dbMsg, _ := db.GetMessage(database, "msg-poison-pill")
+	dbMsg, _ := getMessage(store, "msg-poison-pill")
 	if dbMsg.ResponseText != "[EXPIRED_STALE]" {
 		t.Errorf("Expected [EXPIRED_STALE], got %s", dbMsg.ResponseText)
 	}
@@ -8433,11 +8111,7 @@ func TestProcessBurst_Staleness_HardCeiling_Dropped(t *testing.T) {
 
 func TestProcessBurst_Staleness_RecoveredMessage_Retained(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	threadID := "thread-recovered-msg"
 	var runnerCalls int
@@ -8445,7 +8119,7 @@ func TestProcessBurst_Staleness_RecoveredMessage_Retained(t *testing.T) {
 	doneCh := make(chan struct{})
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
@@ -8474,7 +8148,7 @@ func TestProcessBurst_Staleness_RecoveredMessage_Retained(t *testing.T) {
 		RetryCount: 1,
 		CreatedAt:  time.Now().UTC().Add(-45 * time.Minute),
 	}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 	pool.Enqueue(msg)
 
 	select {
@@ -8491,7 +8165,7 @@ func TestProcessBurst_Staleness_RecoveredMessage_Retained(t *testing.T) {
 		t.Errorf("Expected 1 runner call for recovered message with RetryCount > 0, got %d", calls)
 	}
 
-	dbMsg, _ := db.GetMessage(database, "msg-recovered-1")
+	dbMsg, _ := getMessage(store, "msg-recovered-1")
 	if dbMsg.ResponseText == "[EXPIRED_STALE]" {
 		t.Errorf("Recovered message should NOT be marked [EXPIRED_STALE]")
 	}
@@ -8499,11 +8173,7 @@ func TestProcessBurst_Staleness_RecoveredMessage_Retained(t *testing.T) {
 
 func TestRecoverInterrupted_PreservesExecutionRetryBudget(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	threadID := "thread-retry-budget"
 	msg := db.Message{
@@ -8517,7 +8187,7 @@ func TestRecoverInterrupted_PreservesExecutionRetryBudget(t *testing.T) {
 		CreatedAt:    time.Now().UTC().Add(-10 * time.Minute),
 		UpdatedAt:    time.Now().UTC().Add(-10 * time.Minute),
 	}
-	if err := db.InsertMessage(database, msg); err != nil {
+	if err := insertMessage(store, msg); err != nil {
 		t.Fatalf("InsertMessage failed: %v", err)
 	}
 
@@ -8526,7 +8196,7 @@ func TestRecoverInterrupted_PreservesExecutionRetryBudget(t *testing.T) {
 	doneCh := make(chan struct{})
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
@@ -8550,7 +8220,7 @@ func TestRecoverInterrupted_PreservesExecutionRetryBudget(t *testing.T) {
 	defer pool.Stop()
 
 	// RecoverInterrupted should reset status to PENDING and increment restart_count to 3, leaving retry_count at 0
-	RecoverInterrupted(database, pool)
+	RecoverInterrupted(store, pool)
 
 	select {
 	case <-doneCh:
@@ -8567,7 +8237,7 @@ func TestRecoverInterrupted_PreservesExecutionRetryBudget(t *testing.T) {
 		t.Errorf("Expected 3 runner execution attempts (full retry budget), got %d", calls)
 	}
 
-	dbMsg, err := db.GetMessage(database, "msg-restarted-budget")
+	dbMsg, err := getMessage(store, "msg-restarted-budget")
 	if err != nil || dbMsg == nil {
 		t.Fatalf("Failed to fetch message: %v", err)
 	}
@@ -8584,11 +8254,7 @@ func TestRecoverInterrupted_PreservesExecutionRetryBudget(t *testing.T) {
 
 func TestRecoverInterrupted_RestartPoisonPill_Boundaries(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	// msgPoison has StatusProcessing and RestartCount >= DefaultMaxRestarts (3)
 	msgPoison := db.Message{
@@ -8614,8 +8280,8 @@ func TestRecoverInterrupted_RestartPoisonPill_Boundaries(t *testing.T) {
 		CreatedAt:    time.Now().UTC().Add(-10 * time.Minute),
 	}
 
-	_ = db.InsertMessage(database, msgPoison)
-	_ = db.InsertMessage(database, msgValid)
+	_ = insertMessage(store, msgPoison)
+	_ = insertMessage(store, msgValid)
 
 	var mu sync.Mutex
 	var deliveredNotifs []string
@@ -8624,7 +8290,7 @@ func TestRecoverInterrupted_RestartPoisonPill_Boundaries(t *testing.T) {
 	wg.Add(1) // Only msgValid should be completed by worker pool
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
@@ -8652,7 +8318,7 @@ func TestRecoverInterrupted_RestartPoisonPill_Boundaries(t *testing.T) {
 	defer pool.Stop()
 	pool.SetDiscordSession(&discordgo.Session{})
 
-	RecoverInterrupted(database, pool)
+	RecoverInterrupted(store, pool)
 
 	wg.Wait()
 
@@ -8665,7 +8331,7 @@ func TestRecoverInterrupted_RestartPoisonPill_Boundaries(t *testing.T) {
 	}
 
 	// Verify msgPoison was dropped and marked FAILED with restart limit error
-	poisonDB, err := db.GetMessage(database, "msg-poison-restart")
+	poisonDB, err := getMessage(store, "msg-poison-restart")
 	if err != nil || poisonDB == nil {
 		t.Fatalf("Failed to query poison message: %v", err)
 	}
@@ -8677,7 +8343,7 @@ func TestRecoverInterrupted_RestartPoisonPill_Boundaries(t *testing.T) {
 	}
 
 	// Verify msgValid was successfully completed and restart_count incremented
-	validDB, err := db.GetMessage(database, "msg-valid-restart")
+	validDB, err := getMessage(store, "msg-valid-restart")
 	if err != nil || validDB == nil {
 		t.Fatalf("Failed to query valid message: %v", err)
 	}
@@ -8691,11 +8357,7 @@ func TestRecoverInterrupted_RestartPoisonPill_Boundaries(t *testing.T) {
 
 func TestProcessBurst_Staleness_RestartedMessage_Retained(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	threadID := "thread-restarted-staleness"
 	var runnerCalls int
@@ -8703,7 +8365,7 @@ func TestProcessBurst_Staleness_RestartedMessage_Retained(t *testing.T) {
 	doneCh := make(chan struct{})
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
@@ -8736,7 +8398,7 @@ func TestProcessBurst_Staleness_RestartedMessage_Retained(t *testing.T) {
 		RetryCount:   0,
 		CreatedAt:    time.Now().UTC().Add(-45 * time.Minute),
 	}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 	pool.Enqueue(msg)
 
 	select {
@@ -8753,7 +8415,7 @@ func TestProcessBurst_Staleness_RestartedMessage_Retained(t *testing.T) {
 		t.Errorf("Expected 1 runner call for restarted message with RestartCount > 0, got %d", calls)
 	}
 
-	dbMsg, _ := db.GetMessage(database, "msg-restarted-retained")
+	dbMsg, _ := getMessage(store, "msg-restarted-retained")
 	if dbMsg.ResponseText == "[EXPIRED_STALE]" {
 		t.Errorf("Restarted message should NOT be marked [EXPIRED_STALE]")
 	}
@@ -8761,11 +8423,7 @@ func TestProcessBurst_Staleness_RestartedMessage_Retained(t *testing.T) {
 
 func TestProcessBurst_Staleness_RestartedMessage_HardCeiling_Dropped(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	threadID := "thread-restarted-hard-ceiling"
 	var runnerCalls int
@@ -8773,7 +8431,7 @@ func TestProcessBurst_Staleness_RestartedMessage_HardCeiling_Dropped(t *testing.
 	doneCh := make(chan struct{})
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
@@ -8806,7 +8464,7 @@ func TestProcessBurst_Staleness_RestartedMessage_HardCeiling_Dropped(t *testing.
 		RetryCount:   0,
 		CreatedAt:    time.Now().UTC().Add(-130 * time.Minute),
 	}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 	pool.Enqueue(msg)
 
 	select {
@@ -8823,7 +8481,7 @@ func TestProcessBurst_Staleness_RestartedMessage_HardCeiling_Dropped(t *testing.
 		t.Errorf("Expected 0 runner calls for message exceeding MaxMessageAbsoluteAge (hard ceiling), got %d", calls)
 	}
 
-	dbMsg, _ := db.GetMessage(database, "msg-restarted-hard-ceiling")
+	dbMsg, _ := getMessage(store, "msg-restarted-hard-ceiling")
 	if dbMsg.ResponseText != "[EXPIRED_STALE]" {
 		t.Errorf("Expected [EXPIRED_STALE], got %s", dbMsg.ResponseText)
 	}
@@ -8831,11 +8489,7 @@ func TestProcessBurst_Staleness_RestartedMessage_HardCeiling_Dropped(t *testing.
 
 func TestWorkerPool_EffortRouting(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to init DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	var executedModels []string
 	var mu sync.Mutex
@@ -8852,7 +8506,7 @@ func TestWorkerPool_EffortRouting(t *testing.T) {
 
 	pool := New(appCfg, WorkerPoolConfig{
 		SessionManager: session.New(t.TempDir(), ""),
-		DB: database,
+		Store: store,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			mu.Lock()
 			executedModels = append(executedModels, model)
@@ -8870,7 +8524,7 @@ func TestWorkerPool_EffortRouting(t *testing.T) {
 
 	// 1. High effort / default message
 	runID1 := "run-high-1"
-	_ = db.CreateScheduleRun(database, db.ScheduleRun{
+	_ = createScheduleRun(store, db.ScheduleRun{
 		ID:           runID1,
 		ScheduleID:   "cron-high",
 		ScheduleType: "cron",
@@ -8894,7 +8548,7 @@ func TestWorkerPool_EffortRouting(t *testing.T) {
 		Effort:        "high",
 		CreatedAt:     time.Now().UTC(),
 	}
-	_ = db.InsertMessage(database, msgHigh)
+	_ = insertMessage(store, msgHigh)
 	pool.Enqueue(msgHigh)
 
 	select {
@@ -8905,7 +8559,7 @@ func TestWorkerPool_EffortRouting(t *testing.T) {
 
 	// 2. Low effort message
 	runID2 := "run-low-1"
-	_ = db.CreateScheduleRun(database, db.ScheduleRun{
+	_ = createScheduleRun(store, db.ScheduleRun{
 		ID:           runID2,
 		ScheduleID:   "cron-low",
 		ScheduleType: "cron",
@@ -8929,7 +8583,7 @@ func TestWorkerPool_EffortRouting(t *testing.T) {
 		Effort:        "low",
 		CreatedAt:     time.Now().UTC(),
 	}
-	_ = db.InsertMessage(database, msgLow)
+	_ = insertMessage(store, msgLow)
 	pool.Enqueue(msgLow)
 
 	select {
@@ -8953,28 +8607,24 @@ func TestWorkerPool_EffortRouting(t *testing.T) {
 	}
 
 	// Verify schedule run records recorded the executed model
-	runsHigh, _, _ := db.GetScheduleRunsPaginated(database, 10, 0, "cron-high", "")
+	runsHigh, _, _ := getScheduleRunsPaginated(store, 10, 0, "cron-high", "")
 	if len(runsHigh) != 1 || runsHigh[0].Model != "claude-opus-4-6-thinking" {
 		t.Errorf("Expected schedule run high model to be 'claude-opus-4-6-thinking', got %+v", runsHigh)
 	}
-	runsLow, _, _ := db.GetScheduleRunsPaginated(database, 10, 0, "cron-low", "")
+	runsLow, _, _ := getScheduleRunsPaginated(store, 10, 0, "cron-low", "")
 	if len(runsLow) != 1 || runsLow[0].Model != "claude-sonnet-4-6-thinking" {
 		t.Errorf("Expected schedule run low model to be 'claude-sonnet-4-6-thinking', got %+v", runsLow)
 	}
 }
 
 func TestProcessBurst_RecordsTokensTelemetry(t *testing.T) {
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	customModel := "test-token-model"
 	mockOutput := `{"conversation_id":"c1111111-1111-2222-3333-444444444444","status":"SUCCESS","response":"Done!","usage":{"input_tokens":150,"output_tokens":75,"thinking_tokens":30,"cache_read_tokens":10,"total_tokens":265}}`
 
 	pool := New(nil, WorkerPoolConfig{
-		DB:    database,
+		Store: store,
 		Model: customModel,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			return mockOutput, "", 0, nil
@@ -8993,7 +8643,7 @@ func TestProcessBurst_RecordsTokensTelemetry(t *testing.T) {
 		CreatedAt: t0,
 		UpdatedAt: t0,
 	}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 
 	pool.processBurst([]db.Message{msg})
 
@@ -9023,11 +8673,7 @@ func TestProcessBurst_RecordsTokensTelemetry(t *testing.T) {
 
 func TestThreadStatusQueueIntegration(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	threadID := "thread-status-test-123"
 
@@ -9051,7 +8697,7 @@ func TestThreadStatusQueueIntegration(t *testing.T) {
 	})
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    1,
@@ -9082,7 +8728,7 @@ func TestThreadStatusQueueIntegration(t *testing.T) {
 		Content:   "check my file",
 		CreatedAt: time.Now().UTC(),
 	}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 
 	pool.processBurst([]db.Message{msg})
 
@@ -9099,15 +8745,11 @@ func TestWorkerPool_HermeticByDefaultWithoutRetriever(t *testing.T) {
 		t.Errorf("Expected MemoryRetrieverFunc to be nil by default for hermetic test isolation, got non-nil func")
 	}
 
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize test DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	var runnerCalled bool
 	poolWithDB := NewWorkerPool(WorkerPoolConfig{
-		DB: database,
+		Store: store,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			runnerCalled = true
 			return mockJSONResponse("sess-test-1", "Test Response"), "", 0, nil
@@ -9123,7 +8765,7 @@ func TestWorkerPool_HermeticByDefaultWithoutRetriever(t *testing.T) {
 		Content:   "Hermetic test without retriever",
 		CreatedAt: time.Now().UTC(),
 	}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 
 	poolWithDB.processBurst([]db.Message{msg})
 	if !runnerCalled {
@@ -9133,11 +8775,7 @@ func TestWorkerPool_HermeticByDefaultWithoutRetriever(t *testing.T) {
 
 func TestWorkerPool_ExplicitMemoryRetrieverWiring(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to initialize test DB: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	var retrieverCalled bool
 	mockRetriever := func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
@@ -9149,7 +8787,7 @@ func TestWorkerPool_ExplicitMemoryRetrieverWiring(t *testing.T) {
 
 	var capturedPrompt string
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:                  database,
+		Store: store,
 		MemoryRetrieverFunc: mockRetriever,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			capturedPrompt = prompt
@@ -9166,7 +8804,7 @@ func TestWorkerPool_ExplicitMemoryRetrieverWiring(t *testing.T) {
 		Content:   "Question requiring facts",
 		CreatedAt: time.Now().UTC(),
 	}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 
 	pool.processBurst([]db.Message{msg})
 	if !retrieverCalled {
@@ -9179,11 +8817,7 @@ func TestWorkerPool_ExplicitMemoryRetrieverWiring(t *testing.T) {
 
 func TestProcessBurst_GracefulShutdown_ResetsToPendingWithoutRestartPenalty(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	msg := db.Message{
 		ID:           "msg-graceful-shutdown",
@@ -9194,21 +8828,21 @@ func TestProcessBurst_GracefulShutdown_ResetsToPendingWithoutRestartPenalty(t *t
 		RetryCount:   0,
 		CreatedAt:    time.Now().UTC(),
 	}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 
 	// Simulate cancelled pool context (SIGTERM)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // Pre-cancel context
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB: database,
+		Store: store,
 	})
 	pool.ctx = ctx
 
 	// Process burst under cancelled context
 	pool.processBurst([]db.Message{msg})
 
-	updated, err := db.GetMessage(database, "msg-graceful-shutdown")
+	updated, err := getMessage(store, "msg-graceful-shutdown")
 	if err != nil || updated == nil {
 		t.Fatalf("Failed to fetch message: %v", err)
 	}
@@ -9222,11 +8856,7 @@ func TestProcessBurst_GracefulShutdown_ResetsToPendingWithoutRestartPenalty(t *t
 
 func TestRecoverInterrupted_LongRunningTask_DeploymentVelocityProtection(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	// Message that ran for 5 minutes before being killed by deployment
 	msg := db.Message{
@@ -9240,15 +8870,15 @@ func TestRecoverInterrupted_LongRunningTask_DeploymentVelocityProtection(t *test
 		CreatedAt:    time.Now().UTC().Add(-10 * time.Minute),
 		UpdatedAt:    time.Now().UTC().Add(-5 * time.Minute), // Last active 5m ago (> 30s)
 	}
-	_ = db.InsertMessage(database, msg)
-	_, _ = database.Exec("UPDATE messages SET updated_at = $1 WHERE id = $2", time.Now().UTC().Add(-5*time.Minute), msg.ID)
+	_ = insertMessage(store, msg)
+	store.SetMessageUpdatedAt(msg.ID, time.Now().UTC().Add(-5*time.Minute))
 
 	var mu sync.Mutex
 	var completedIDs []string
 	doneCh := make(chan struct{})
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB: database,
+		Store: store,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			return mockJSONResponse("e1111111-2222-3333-4444-555555555555", "Recovered successfully"), "", 0, nil
 		},
@@ -9264,7 +8894,7 @@ func TestRecoverInterrupted_LongRunningTask_DeploymentVelocityProtection(t *test
 	pool.Start()
 	defer pool.Stop()
 
-	RecoverInterrupted(database, pool)
+	RecoverInterrupted(store, pool)
 
 	select {
 	case <-doneCh:
@@ -9272,7 +8902,7 @@ func TestRecoverInterrupted_LongRunningTask_DeploymentVelocityProtection(t *test
 		t.Fatal("Timeout waiting for long-running task to be recovered and completed")
 	}
 
-	updated, _ := db.GetMessage(database, "msg-long-running")
+	updated, _ := getMessage(store, "msg-long-running")
 	if updated.Status != db.StatusCompleted {
 		t.Errorf("Expected long running task to be completed, got %s", updated.Status)
 	}
@@ -9283,11 +8913,7 @@ func TestRecoverInterrupted_LongRunningTask_DeploymentVelocityProtection(t *test
 
 func TestRecoverInterrupted_PoisonPill_HardCeiling(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	// Message that has restarted 5 times (hard cap) even though UpdatedAt was > 30s ago
 	msg := db.Message{
@@ -9300,14 +8926,14 @@ func TestRecoverInterrupted_PoisonPill_HardCeiling(t *testing.T) {
 		RetryCount:   0,
 		CreatedAt:    time.Now().UTC().Add(-20 * time.Minute),
 	}
-	_ = db.InsertMessage(database, msg)
-	_, _ = database.Exec("UPDATE messages SET updated_at = $1 WHERE id = $2", time.Now().UTC().Add(-5*time.Minute), msg.ID)
+	_ = insertMessage(store, msg)
+	store.SetMessageUpdatedAt(msg.ID, time.Now().UTC().Add(-5*time.Minute))
 
 	var deliveredNotifs []string
 	var mu sync.Mutex
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB: database,
+		Store: store,
 		NotifierFunc: func(agyBin, apiKey, contextDescription string) string {
 			return "Poison pill dropped"
 		},
@@ -9321,9 +8947,9 @@ func TestRecoverInterrupted_PoisonPill_HardCeiling(t *testing.T) {
 	pool.Start()
 	defer pool.Stop()
 
-	RecoverInterrupted(database, pool)
+	RecoverInterrupted(store, pool)
 
-	updated, _ := db.GetMessage(database, "msg-hard-ceiling")
+	updated, _ := getMessage(store, "msg-hard-ceiling")
 	if updated.Status != db.StatusFailed {
 		t.Errorf("Expected hard ceiling message to be marked FAILED, got %s", updated.Status)
 	}
@@ -9339,11 +8965,7 @@ func TestRecoverInterrupted_PoisonPill_HardCeiling(t *testing.T) {
 
 func TestRecoverInterrupted_DiscordSessionDeliversPoisonNotice(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	msg := db.Message{
 		ID:           "msg-delivery-check",
@@ -9356,7 +8978,7 @@ func TestRecoverInterrupted_DiscordSessionDeliversPoisonNotice(t *testing.T) {
 		CreatedAt:    time.Now().UTC(),
 		UpdatedAt:    time.Now().UTC(), // instant crash (< 30s)
 	}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 
 	var capturedSession *discordgo.Session
 	var deliveredThreadID string
@@ -9368,7 +8990,7 @@ func TestRecoverInterrupted_DiscordSessionDeliversPoisonNotice(t *testing.T) {
 	}
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB: database,
+		Store: store,
 		NotifierFunc: func(agyBin, apiKey, contextDescription string) string {
 			return "Poison pill notice"
 		},
@@ -9385,7 +9007,7 @@ func TestRecoverInterrupted_DiscordSessionDeliversPoisonNotice(t *testing.T) {
 	pool.Start()
 	defer pool.Stop()
 
-	RecoverInterrupted(database, pool)
+	RecoverInterrupted(store, pool)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -9402,11 +9024,7 @@ func TestRecoverInterrupted_DiscordSessionDeliversPoisonNotice(t *testing.T) {
 
 func TestRecoverInterrupted_CoverageEdgeCases(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	msg := db.Message{
 		ID:           "msg-edge-case-cov",
@@ -9419,7 +9037,7 @@ func TestRecoverInterrupted_CoverageEdgeCases(t *testing.T) {
 		CreatedAt:    time.Now().UTC(),
 		UpdatedAt:    time.Now().UTC(),
 	}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 
 	mockSess := &discordgo.Session{State: discordgo.NewState()}
 	appCfg := config.NewFromData(&config.ConfigData{
@@ -9429,7 +9047,7 @@ func TestRecoverInterrupted_CoverageEdgeCases(t *testing.T) {
 	})
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:          database,
+		Store: store,
 		MaxAttempts: 0, // covers maxAttempts <= 0 fallback
 		NotifierFunc: func(agyBin, apiKey, contextDescription string) string {
 			if apiKey != "custom-api-key" || agyBin != "agy-custom" {
@@ -9450,9 +9068,9 @@ func TestRecoverInterrupted_CoverageEdgeCases(t *testing.T) {
 		t.Errorf("expected DiscordSession() to return mockSession")
 	}
 
-	RecoverInterrupted(database, pool)
+	RecoverInterrupted(store, pool)
 
-	updated, _ := db.GetMessage(database, "msg-edge-case-cov")
+	updated, _ := getMessage(store, "msg-edge-case-cov")
 	if updated.Status != db.StatusFailed {
 		t.Errorf("expected status FAILED, got %s", updated.Status)
 	}
@@ -9493,11 +9111,7 @@ func TestIsRateLimitError_ExtendedKeywords(t *testing.T) {
 
 func TestWorkerPool_WatchdogExhaustion_InvokesNotifierFunc(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	var capturedDesc string
 	var deliveredNotif string
@@ -9505,7 +9119,7 @@ func TestWorkerPool_WatchdogExhaustion_InvokesNotifierFunc(t *testing.T) {
 	doneCh := make(chan struct{}, 1)
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		MaxAttempts:    1,
 		TimeoutMinutes: 1,
 		BackoffBase:    5 * time.Millisecond,
@@ -9532,7 +9146,7 @@ func TestWorkerPool_WatchdogExhaustion_InvokesNotifierFunc(t *testing.T) {
 	defer pool.Stop()
 
 	msg := db.Message{ID: "msg-wd-exhaust", ThreadID: "thread-wd-1", Content: "heavy command"}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 	pool.Enqueue(msg)
 
 	select {
@@ -9553,11 +9167,7 @@ func TestWorkerPool_WatchdogExhaustion_InvokesNotifierFunc(t *testing.T) {
 
 func TestWorkerPool_NonTransient_InvokesNotifierFunc(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	var capturedDesc string
 	var deliveredNotif string
@@ -9565,7 +9175,7 @@ func TestWorkerPool_NonTransient_InvokesNotifierFunc(t *testing.T) {
 	doneCh := make(chan struct{}, 1)
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		MaxAttempts:    3,
 		TimeoutMinutes: 1,
 		BackoffBase:    5 * time.Millisecond,
@@ -9592,7 +9202,7 @@ func TestWorkerPool_NonTransient_InvokesNotifierFunc(t *testing.T) {
 	defer pool.Stop()
 
 	msg := db.Message{ID: "msg-nt-notif", ThreadID: "thread-nt-1", Content: "fatal command"}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 	pool.Enqueue(msg)
 
 	select {
@@ -9613,11 +9223,7 @@ func TestWorkerPool_NonTransient_InvokesNotifierFunc(t *testing.T) {
 
 func TestWorkerPool_RetryExhaustion_InvokesNotifierFunc(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	var capturedDesc string
 	var deliveredNotif string
@@ -9625,7 +9231,7 @@ func TestWorkerPool_RetryExhaustion_InvokesNotifierFunc(t *testing.T) {
 	doneCh := make(chan struct{}, 1)
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		MaxAttempts:    2,
 		TimeoutMinutes: 1,
 		BackoffBase:    5 * time.Millisecond,
@@ -9652,7 +9258,7 @@ func TestWorkerPool_RetryExhaustion_InvokesNotifierFunc(t *testing.T) {
 	defer pool.Stop()
 
 	msg := db.Message{ID: "msg-exhaust-notif", ThreadID: "thread-exhaust-1", Content: "flake command"}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 	pool.Enqueue(msg)
 
 	select {
@@ -9673,11 +9279,7 @@ func TestWorkerPool_RetryExhaustion_InvokesNotifierFunc(t *testing.T) {
 
 func TestWorkerPool_RateLimitBypassesNotifierFunc(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	notifierCalled := false
 	var deliveredNotif string
@@ -9685,7 +9287,7 @@ func TestWorkerPool_RateLimitBypassesNotifierFunc(t *testing.T) {
 	doneCh := make(chan struct{}, 1)
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		MaxAttempts:    1,
 		TimeoutMinutes: 1,
 		BackoffBase:    5 * time.Millisecond,
@@ -9712,7 +9314,7 @@ func TestWorkerPool_RateLimitBypassesNotifierFunc(t *testing.T) {
 	defer pool.Stop()
 
 	msg := db.Message{ID: "msg-rl-bypass", ThreadID: "thread-rl-1", Content: "rate limited turn"}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 	pool.Enqueue(msg)
 
 	select {
@@ -9733,11 +9335,7 @@ func TestWorkerPool_RateLimitBypassesNotifierFunc(t *testing.T) {
 
 func TestWorkerPool_Watchdog_RateLimitBypassesNotifier(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	notifierCalled := false
 	var deliveredNotif string
@@ -9745,7 +9343,7 @@ func TestWorkerPool_Watchdog_RateLimitBypassesNotifier(t *testing.T) {
 	doneCh := make(chan struct{}, 1)
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		MaxAttempts:    1,
 		TimeoutMinutes: 1,
 		BackoffBase:    5 * time.Millisecond,
@@ -9772,7 +9370,7 @@ func TestWorkerPool_Watchdog_RateLimitBypassesNotifier(t *testing.T) {
 	defer pool.Stop()
 
 	msg := db.Message{ID: "msg-wd-rl-bypass", ThreadID: "thread-wd-rl", Content: "watchdog quota test"}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 	pool.Enqueue(msg)
 
 	select {
@@ -9807,15 +9405,11 @@ func waitPoolWorkersDone(t *testing.T, pool *WorkerPool, timeout time.Duration) 
 
 func TestWorkerPool_Watchdog_CancelledDuringBackoff(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	var pool *WorkerPool
 	pool = NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		MaxAttempts:    3,
 		TimeoutMinutes: 1,
 		BackoffBase:    500 * time.Millisecond,
@@ -9834,7 +9428,7 @@ func TestWorkerPool_Watchdog_CancelledDuringBackoff(t *testing.T) {
 	defer pool.Stop()
 
 	runID := "run-wd-cancel"
-	_ = db.CreateScheduleRun(database, db.ScheduleRun{
+	_ = createScheduleRun(store, db.ScheduleRun{
 		ID:           runID,
 		ScheduleID:   "sched-1",
 		ScheduleType: "cron",
@@ -9842,12 +9436,12 @@ func TestWorkerPool_Watchdog_CancelledDuringBackoff(t *testing.T) {
 		StartedAt:    time.Now().UTC(),
 	})
 	msg := db.Message{ID: "msg-wd-cancel", ThreadID: "thread-wd-cancel", Content: "wd cancel test", ScheduleRunID: runID}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 	pool.Enqueue(msg)
 
 	waitPoolWorkersDone(t, pool, 2*time.Second)
 
-	dbMsg, err := db.GetMessage(database, "msg-wd-cancel")
+	dbMsg, _ := getMessage(store, "msg-wd-cancel")
 	if dbMsg.Status != db.StatusPending {
 		t.Errorf("Expected status PENDING after pool cancel during watchdog backoff, got: %s", dbMsg.Status)
 	}
@@ -9855,18 +9449,14 @@ func TestWorkerPool_Watchdog_CancelledDuringBackoff(t *testing.T) {
 
 func TestWorkerPool_Watchdog_CancelledPostWatchdog(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	var pool *WorkerPool
 	deliveredCalled := false
 	var mu sync.Mutex
 
 	pool = NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		MaxAttempts:    1,
 		TimeoutMinutes: 1,
 		BackoffBase:    5 * time.Millisecond,
@@ -9885,7 +9475,7 @@ func TestWorkerPool_Watchdog_CancelledPostWatchdog(t *testing.T) {
 	defer pool.Stop()
 
 	msg := db.Message{ID: "msg-wd-post-cancel", ThreadID: "thread-wd-post-cancel", Content: "wd post cancel"}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 	pool.Enqueue(msg)
 
 	waitPoolWorkersDone(t, pool, 2*time.Second)
@@ -9896,7 +9486,7 @@ func TestWorkerPool_Watchdog_CancelledPostWatchdog(t *testing.T) {
 	}
 	mu.Unlock()
 
-	dbMsg, _ := db.GetMessage(database, "msg-wd-post-cancel")
+	dbMsg, _ := getMessage(store, "msg-wd-post-cancel")
 	if dbMsg != nil && dbMsg.Status != db.StatusPending {
 		t.Errorf("Expected status PENDING after cancellation, got: %s", dbMsg.Status)
 	}
@@ -9904,18 +9494,14 @@ func TestWorkerPool_Watchdog_CancelledPostWatchdog(t *testing.T) {
 
 func TestWorkerPool_NonTransient_CancelledDuringTurn(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	var pool *WorkerPool
 	deliveredCalled := false
 	var mu sync.Mutex
 
 	pool = NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		MaxAttempts:    1,
 		TimeoutMinutes: 1,
 		BackoffBase:    5 * time.Millisecond,
@@ -9934,7 +9520,7 @@ func TestWorkerPool_NonTransient_CancelledDuringTurn(t *testing.T) {
 	defer pool.Stop()
 
 	msg := db.Message{ID: "msg-nt-cancel", ThreadID: "thread-nt-cancel", Content: "nt cancel"}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 	pool.Enqueue(msg)
 
 	waitPoolWorkersDone(t, pool, 2*time.Second)
@@ -9945,7 +9531,7 @@ func TestWorkerPool_NonTransient_CancelledDuringTurn(t *testing.T) {
 	}
 	mu.Unlock()
 
-	dbMsg, _ := db.GetMessage(database, "msg-nt-cancel")
+	dbMsg, _ := getMessage(store, "msg-nt-cancel")
 	if dbMsg != nil && dbMsg.Status != db.StatusPending {
 		t.Errorf("Expected status PENDING after cancellation, got: %s", dbMsg.Status)
 	}
@@ -9953,11 +9539,7 @@ func TestWorkerPool_NonTransient_CancelledDuringTurn(t *testing.T) {
 
 func TestWorkerPool_NonTransient_LongSnippetAndDeliveryErr(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	var capturedDesc string
 	var mu sync.Mutex
@@ -9965,7 +9547,7 @@ func TestWorkerPool_NonTransient_LongSnippetAndDeliveryErr(t *testing.T) {
 
 	longError := strings.Repeat("VeryBadError-", 50)
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		MaxAttempts:    1,
 		TimeoutMinutes: 1,
 		BackoffBase:    5 * time.Millisecond,
@@ -9989,7 +9571,7 @@ func TestWorkerPool_NonTransient_LongSnippetAndDeliveryErr(t *testing.T) {
 	defer pool.Stop()
 
 	msg := db.Message{ID: "msg-nt-long", ThreadID: "thread-nt-long", Content: "long err test"}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 	pool.Enqueue(msg)
 
 	select {
@@ -10007,15 +9589,11 @@ func TestWorkerPool_NonTransient_LongSnippetAndDeliveryErr(t *testing.T) {
 
 func TestWorkerPool_RetryExhaustion_CancelledWithScheduleRunID(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	var pool *WorkerPool
 	pool = NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		MaxAttempts:    2,
 		TimeoutMinutes: 1,
 		BackoffBase:    5 * time.Millisecond,
@@ -10031,7 +9609,7 @@ func TestWorkerPool_RetryExhaustion_CancelledWithScheduleRunID(t *testing.T) {
 	defer pool.Stop()
 
 	runID := "run-exh-cancel"
-	_ = db.CreateScheduleRun(database, db.ScheduleRun{
+	_ = createScheduleRun(store, db.ScheduleRun{
 		ID:           runID,
 		ScheduleID:   "sched-exh",
 		ScheduleType: "cron",
@@ -10039,12 +9617,12 @@ func TestWorkerPool_RetryExhaustion_CancelledWithScheduleRunID(t *testing.T) {
 		StartedAt:    time.Now().UTC(),
 	})
 	msg := db.Message{ID: "msg-exh-cancel", ThreadID: "thread-exh-cancel", Content: "exh cancel test", ScheduleRunID: runID}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 	pool.Enqueue(msg)
 
 	waitPoolWorkersDone(t, pool, 2*time.Second)
 
-	dbMsg, _ := db.GetMessage(database, "msg-exh-cancel")
+	dbMsg, _ := getMessage(store, "msg-exh-cancel")
 	if dbMsg != nil && dbMsg.Status != db.StatusPending {
 		t.Errorf("Expected status PENDING after cancel, got: %s", dbMsg.Status)
 	}
@@ -10052,15 +9630,11 @@ func TestWorkerPool_RetryExhaustion_CancelledWithScheduleRunID(t *testing.T) {
 
 func TestWorkerPool_New_NotifierRunnerFuncWrapped(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	runnerCalled := false
 	pool := New(nil, WorkerPoolConfig{
-		DB: database,
+		Store: store,
 		NotifierRunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			runnerCalled = true
 			return mockJSONResponse("", "DYNAMIC FALLBACK NOTICE"), "", 0, nil
@@ -10081,15 +9655,11 @@ func TestWorkerPool_New_NotifierRunnerFuncWrapped(t *testing.T) {
 
 func TestWorkerPool_RateLimit_CancelledDuringBackoff(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	var pool *WorkerPool
 	pool = NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		MaxAttempts:    3,
 		TimeoutMinutes: 1,
 		BackoffBase:    500 * time.Millisecond,
@@ -10108,7 +9678,7 @@ func TestWorkerPool_RateLimit_CancelledDuringBackoff(t *testing.T) {
 	defer pool.Stop()
 
 	runID := "run-rl-cancel"
-	_ = db.CreateScheduleRun(database, db.ScheduleRun{
+	_ = createScheduleRun(store, db.ScheduleRun{
 		ID:           runID,
 		ScheduleID:   "sched-rl",
 		ScheduleType: "cron",
@@ -10116,12 +9686,12 @@ func TestWorkerPool_RateLimit_CancelledDuringBackoff(t *testing.T) {
 		StartedAt:    time.Now().UTC(),
 	})
 	msg := db.Message{ID: "msg-rl-cancel", ThreadID: "thread-rl-cancel", Content: "rl cancel test", ScheduleRunID: runID}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 	pool.Enqueue(msg)
 
 	waitPoolWorkersDone(t, pool, 2*time.Second)
 
-	dbMsg, err := db.GetMessage(database, "msg-rl-cancel")
+	dbMsg, err := getMessage(store, "msg-rl-cancel")
 	if err != nil || dbMsg == nil {
 		t.Fatalf("GetMessage failed: %v", err)
 	}
@@ -10132,15 +9702,11 @@ func TestWorkerPool_RateLimit_CancelledDuringBackoff(t *testing.T) {
 
 func TestWorkerPool_Transient_CancelledDuringBackoff(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	var pool *WorkerPool
 	pool = NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		MaxAttempts:    3,
 		TimeoutMinutes: 1,
 		BackoffBase:    500 * time.Millisecond,
@@ -10159,7 +9725,7 @@ func TestWorkerPool_Transient_CancelledDuringBackoff(t *testing.T) {
 	defer pool.Stop()
 
 	runID := "run-tr-cancel"
-	_ = db.CreateScheduleRun(database, db.ScheduleRun{
+	_ = createScheduleRun(store, db.ScheduleRun{
 		ID:           runID,
 		ScheduleID:   "sched-tr",
 		ScheduleType: "cron",
@@ -10167,12 +9733,12 @@ func TestWorkerPool_Transient_CancelledDuringBackoff(t *testing.T) {
 		StartedAt:    time.Now().UTC(),
 	})
 	msg := db.Message{ID: "msg-tr-cancel", ThreadID: "thread-tr-cancel", Content: "tr cancel test", ScheduleRunID: runID}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 	pool.Enqueue(msg)
 
 	waitPoolWorkersDone(t, pool, 2*time.Second)
 
-	dbMsg, err := db.GetMessage(database, "msg-tr-cancel")
+	dbMsg, err := getMessage(store, "msg-tr-cancel")
 	if err != nil || dbMsg == nil {
 		t.Fatalf("GetMessage failed: %v", err)
 	}
@@ -10183,13 +9749,9 @@ func TestWorkerPool_Transient_CancelledDuringBackoff(t *testing.T) {
 
 func TestWorkerPool_SessionCorruption_RateLimitBypassesNotifier(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
-	_ = db.RotateSessionID(database, "thread-sc-rl", "sess-existing-1")
+	_ = rotateSessionID(store, "thread-sc-rl", "sess-existing-1")
 
 	notifierCalled := false
 	var deliveredNotif string
@@ -10197,7 +9759,7 @@ func TestWorkerPool_SessionCorruption_RateLimitBypassesNotifier(t *testing.T) {
 	doneCh := make(chan struct{}, 1)
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		DB:             database,
+		Store: store,
 		MaxAttempts:    1,
 		TimeoutMinutes: 1,
 		BackoffBase:    5 * time.Millisecond,
@@ -10224,7 +9786,7 @@ func TestWorkerPool_SessionCorruption_RateLimitBypassesNotifier(t *testing.T) {
 	defer pool.Stop()
 
 	msg := db.Message{ID: "msg-sc-rl", ThreadID: "thread-sc-rl", Content: "corrupt test"}
-	_ = db.InsertMessage(database, msg)
+	_ = insertMessage(store, msg)
 	pool.Enqueue(msg)
 
 	select {
@@ -10273,11 +9835,7 @@ func (m *mockWebhookDispatcher) CallPostTurnHook(ctx context.Context, endpoint *
 func TestOnWakeHook(t *testing.T) {
 	t.Parallel()
 	t.Run("WakeOverride", func(t *testing.T) {
-		database, err := db.InitDB(":memory:")
-		if err != nil {
-			t.Fatalf("Failed to initialize DB: %v", err)
-		}
-		defer func() { _ = database.Close() }()
+		store := setupTestStore(t)
 
 		var classifierCalled bool
 		cls := classifier.NewClassifier(classifier.WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
@@ -10296,7 +9854,7 @@ func TestOnWakeHook(t *testing.T) {
 		}
 
 		pool := NewWorkerPool(WorkerPoolConfig{
-			DB:                database,
+			Store: store,
 			Classifier:        cls,
 			WebhookDispatcher: mockDisp,
 		})
@@ -10310,7 +9868,7 @@ func TestOnWakeHook(t *testing.T) {
 			Status:     db.StatusProcessing,
 			CreatedAt:  now,
 		}
-		_ = db.InsertMessage(database, msg)
+		_ = insertMessage(store, msg)
 
 		te := &turnExecution{
 			pool:        pool,
@@ -10366,11 +9924,7 @@ func TestOnWakeHook(t *testing.T) {
 	})
 
 	t.Run("WakeOverride_MultiMessageBurstAndTurnCount", func(t *testing.T) {
-		database, err := db.InitDB(":memory:")
-		if err != nil {
-			t.Fatalf("Failed to initialize DB: %v", err)
-		}
-		defer func() { _ = database.Close() }()
+		store := setupTestStore(t)
 
 		var hookCalled bool
 		mockDisp := &mockWebhookDispatcher{
@@ -10381,7 +9935,7 @@ func TestOnWakeHook(t *testing.T) {
 		}
 
 		pool := NewWorkerPool(WorkerPoolConfig{
-			DB:                database,
+			Store: store,
 			WebhookDispatcher: mockDisp,
 		})
 
@@ -10402,8 +9956,8 @@ func TestOnWakeHook(t *testing.T) {
 			Status:     db.StatusProcessing,
 			CreatedAt:  now.Add(time.Second),
 		}
-		_ = db.InsertMessage(database, msg1)
-		_ = db.InsertMessage(database, msg2)
+		_ = insertMessage(store, msg1)
+		_ = insertMessage(store, msg2)
 
 		te := &turnExecution{
 			pool:        pool,
@@ -10438,7 +9992,7 @@ func TestOnWakeHook(t *testing.T) {
 			t.Errorf("expected trailingMsgs to contain second message, got %+v", te.trailingMsgs)
 		}
 
-		turnCount, err := db.GetSessionTurnCount(database, "chan-multi-test")
+		turnCount, err := getSessionTurnCount(store, "chan-multi-test")
 		if err != nil {
 			t.Fatalf("failed to get session turn count: %v", err)
 		}
@@ -10448,11 +10002,7 @@ func TestOnWakeHook(t *testing.T) {
 	})
 
 	t.Run("DropOverride", func(t *testing.T) {
-		database, err := db.InitDB(":memory:")
-		if err != nil {
-			t.Fatalf("Failed to initialize DB: %v", err)
-		}
-		defer func() { _ = database.Close() }()
+		store := setupTestStore(t)
 
 		var classifierCalled bool
 		cls := classifier.NewClassifier(
@@ -10472,7 +10022,7 @@ func TestOnWakeHook(t *testing.T) {
 		}
 
 		pool := NewWorkerPool(WorkerPoolConfig{
-			DB:                database,
+			Store: store,
 			Classifier:        cls,
 			WebhookDispatcher: mockDisp,
 		})
@@ -10486,7 +10036,7 @@ func TestOnWakeHook(t *testing.T) {
 			Status:     db.StatusProcessing,
 			CreatedAt:  now,
 		}
-		_ = db.InsertMessage(database, msg)
+		_ = insertMessage(store, msg)
 
 		te := &turnExecution{
 			pool:        pool,
@@ -10522,7 +10072,7 @@ func TestOnWakeHook(t *testing.T) {
 			t.Errorf("expected wakeIdx = -1, got %d", te.wakeIdx)
 		}
 
-		saved, err := db.GetMessage(database, "msg-drop-1")
+		saved, err := getMessage(store, "msg-drop-1")
 		if err != nil || saved == nil {
 			t.Fatalf("Failed to retrieve msg-drop-1: %v", err)
 		}
@@ -10535,11 +10085,7 @@ func TestOnWakeHook(t *testing.T) {
 	})
 
 	t.Run("TimeoutFallback_Classify", func(t *testing.T) {
-		database, err := db.InitDB(":memory:")
-		if err != nil {
-			t.Fatalf("Failed to initialize DB: %v", err)
-		}
-		defer func() { _ = database.Close() }()
+		store := setupTestStore(t)
 
 		var classifierCalled bool
 		cls := classifier.NewClassifier(
@@ -10557,7 +10103,7 @@ func TestOnWakeHook(t *testing.T) {
 		}
 
 		pool := NewWorkerPool(WorkerPoolConfig{
-			DB:                database,
+			Store: store,
 			Classifier:        cls,
 			WebhookDispatcher: mockDisp,
 		})
@@ -10571,7 +10117,7 @@ func TestOnWakeHook(t *testing.T) {
 			Status:     db.StatusProcessing,
 			CreatedAt:  now,
 		}
-		_ = db.InsertMessage(database, msg)
+		_ = insertMessage(store, msg)
 
 		te := &turnExecution{
 			pool:        pool,
@@ -10607,11 +10153,7 @@ func TestOnWakeHook(t *testing.T) {
 	})
 
 	t.Run("TimeoutFallback_Wake", func(t *testing.T) {
-		database, err := db.InitDB(":memory:")
-		if err != nil {
-			t.Fatalf("Failed to initialize DB: %v", err)
-		}
-		defer func() { _ = database.Close() }()
+		store := setupTestStore(t)
 
 		var classifierCalled bool
 		cls := classifier.NewClassifier(classifier.WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
@@ -10626,7 +10168,7 @@ func TestOnWakeHook(t *testing.T) {
 		}
 
 		pool := NewWorkerPool(WorkerPoolConfig{
-			DB:                database,
+			Store: store,
 			Classifier:        cls,
 			WebhookDispatcher: mockDisp,
 		})
@@ -10640,7 +10182,7 @@ func TestOnWakeHook(t *testing.T) {
 			Status:     db.StatusProcessing,
 			CreatedAt:  now,
 		}
-		_ = db.InsertMessage(database, msg)
+		_ = insertMessage(store, msg)
 
 		te := &turnExecution{
 			pool:        pool,
@@ -10676,11 +10218,7 @@ func TestOnWakeHook(t *testing.T) {
 	})
 
 	t.Run("TimeoutFallback_Drop", func(t *testing.T) {
-		database, err := db.InitDB(":memory:")
-		if err != nil {
-			t.Fatalf("Failed to initialize DB: %v", err)
-		}
-		defer func() { _ = database.Close() }()
+		store := setupTestStore(t)
 
 		var classifierCalled bool
 		cls := classifier.NewClassifier(classifier.WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
@@ -10695,7 +10233,7 @@ func TestOnWakeHook(t *testing.T) {
 		}
 
 		pool := NewWorkerPool(WorkerPoolConfig{
-			DB:                database,
+			Store: store,
 			Classifier:        cls,
 			WebhookDispatcher: mockDisp,
 		})
@@ -10709,7 +10247,7 @@ func TestOnWakeHook(t *testing.T) {
 			Status:     db.StatusProcessing,
 			CreatedAt:  now,
 		}
-		_ = db.InsertMessage(database, msg)
+		_ = insertMessage(store, msg)
 
 		te := &turnExecution{
 			pool:        pool,
@@ -10743,7 +10281,7 @@ func TestOnWakeHook(t *testing.T) {
 			t.Errorf("expected wakeIdx = -1, got %d", te.wakeIdx)
 		}
 
-		saved, err := db.GetMessage(database, "msg-timeout-drop")
+		saved, err := getMessage(store, "msg-timeout-drop")
 		if err != nil || saved == nil {
 			t.Fatalf("Failed to retrieve msg-timeout-drop: %v", err)
 		}
@@ -10754,11 +10292,7 @@ func TestOnWakeHook(t *testing.T) {
 
 	t.Run("FullProcessBurst_WakeAndDrop", func(t *testing.T) {
 		tmpDir := t.TempDir()
-		database, err := db.InitDB(":memory:")
-		if err != nil {
-			t.Fatalf("Failed to initialize DB: %v", err)
-		}
-		defer func() { _ = database.Close() }()
+		store := setupTestStore(t)
 
 		sessMgr := session.New(tmpDir, "")
 
@@ -10776,7 +10310,7 @@ func TestOnWakeHook(t *testing.T) {
 		}
 
 		pool := NewWorkerPool(WorkerPoolConfig{
-			DB:                database,
+			Store: store,
 			SessionManager:    sessMgr,
 			TimeoutMinutes:    1,
 			WebhookDispatcher: mockDisp,
@@ -10816,7 +10350,7 @@ func TestOnWakeHook(t *testing.T) {
 			Status:     db.StatusPending,
 			CreatedAt:  now,
 		}
-		_ = db.InsertMessage(database, msgDrop)
+		_ = insertMessage(store, msgDrop)
 		pool.processBurst([]db.Message{msgDrop})
 
 		mu.Lock()
@@ -10828,7 +10362,7 @@ func TestOnWakeHook(t *testing.T) {
 		}
 		mu.Unlock()
 
-		savedDrop, _ := db.GetMessage(database, "msg-burst-drop")
+		savedDrop, _ := getMessage(store, "msg-burst-drop")
 		if savedDrop == nil || savedDrop.Status != db.StatusCompleted || !strings.Contains(savedDrop.ErrorMessage, "[AMBIENT") {
 			t.Errorf("expected drop message to be completed as ambient, got %+v", savedDrop)
 		}
@@ -10842,7 +10376,7 @@ func TestOnWakeHook(t *testing.T) {
 			Status:     db.StatusPending,
 			CreatedAt:  now.Add(time.Second),
 		}
-		_ = db.InsertMessage(database, msgWake)
+		_ = insertMessage(store, msgWake)
 		pool.processBurst([]db.Message{msgWake})
 
 		mu.Lock()
@@ -10854,7 +10388,7 @@ func TestOnWakeHook(t *testing.T) {
 		}
 		mu.Unlock()
 
-		savedWake, _ := db.GetMessage(database, "msg-burst-wake")
+		savedWake, _ := getMessage(store, "msg-burst-wake")
 		if savedWake == nil || savedWake.Status != db.StatusCompleted || savedWake.ResponseText != "Bot response" {
 			t.Errorf("expected wake message to be completed with response, got %+v", savedWake)
 		}
@@ -10883,13 +10417,9 @@ func TestOnWakeHook(t *testing.T) {
 			t.Errorf("expected non-nil default dispatcher after SetWebhookDispatcher(nil)")
 		}
 
-		database, err := db.InitDB(":memory:")
-		if err != nil {
-			t.Fatalf("Failed to init DB: %v", err)
-		}
-		defer func() { _ = database.Close() }()
+		store := setupTestStore(t)
 
-		_ = db.CreateScheduleRun(database, db.ScheduleRun{
+		_ = createScheduleRun(store, db.ScheduleRun{
 			ID:           "sched-run-ambient",
 			ScheduleID:   "sched-1",
 			ScheduleType: "cron",
@@ -10910,7 +10440,7 @@ func TestOnWakeHook(t *testing.T) {
 		}
 
 		pool := NewWorkerPool(WorkerPoolConfig{
-			DB:                database,
+			Store: store,
 			WebhookDispatcher: mockDispWithCapture,
 		})
 
@@ -10924,7 +10454,7 @@ func TestOnWakeHook(t *testing.T) {
 			Status:        db.StatusProcessing,
 			CreatedAt:     now,
 		}
-		_ = db.InsertMessage(database, schedMsg)
+		_ = insertMessage(store, schedMsg)
 
 		teFallback := &turnExecution{
 			pool:          pool,
@@ -10951,10 +10481,11 @@ func TestOnWakeHook(t *testing.T) {
 			t.Errorf("expected capturedReq.ChannelID to fallback to te.threadID, got %+v", capturedReq)
 		}
 
-		var runStatus string
-		if err := database.QueryRowContext(context.Background(), "SELECT status FROM schedule_runs WHERE id = 'sched-run-ambient'").Scan(&runStatus); err != nil {
-			t.Fatalf("Failed to fetch schedule run status: %v", err)
+		runAmbient, err := getScheduleRun(store, "sched-run-ambient")
+		if err != nil || runAmbient == nil {
+			t.Fatalf("Failed to fetch schedule run: %v", err)
 		}
+		runStatus := runAmbient.Status
 		if runStatus != "completed" {
 			t.Errorf("expected schedule run status 'completed', got %q", runStatus)
 		}
@@ -10979,11 +10510,7 @@ func TestOnWakeHook(t *testing.T) {
 func TestPreTurnHook(t *testing.T) {
 	t.Parallel()
 	t.Run("Approved_WithInjectedContext", func(t *testing.T) {
-		database, err := db.InitDB(":memory:")
-		if err != nil {
-			t.Fatalf("Failed to initialize DB: %v", err)
-		}
-		defer func() { _ = database.Close() }()
+		store := setupTestStore(t)
 
 		tmpDir := t.TempDir()
 		sessMgr := session.New(tmpDir, "")
@@ -11009,7 +10536,7 @@ func TestPreTurnHook(t *testing.T) {
 		}
 
 		pool := NewWorkerPool(WorkerPoolConfig{
-			DB:                database,
+			Store: store,
 			SessionManager:    sessMgr,
 			TimeoutMinutes:    1,
 			MaxAttempts:       3,
@@ -11047,7 +10574,7 @@ func TestPreTurnHook(t *testing.T) {
 			Status:     db.StatusPending,
 			CreatedAt:  now,
 		}
-		if err := db.InsertMessage(database, msg); err != nil {
+		if err := insertMessage(store, msg); err != nil {
 			t.Fatalf("failed to insert message: %v", err)
 		}
 
@@ -11087,7 +10614,7 @@ func TestPreTurnHook(t *testing.T) {
 			t.Errorf("expected prompt to contain COORDINATION_CONTEXT, got:\n%s", capturedPrompt)
 		}
 
-		saved, err := db.GetMessage(database, "msg-preturn-1")
+		saved, err := getMessage(store, "msg-preturn-1")
 		if err != nil || saved == nil {
 			t.Fatalf("failed to retrieve message: %v", err)
 		}
@@ -11097,11 +10624,7 @@ func TestPreTurnHook(t *testing.T) {
 	})
 
 	t.Run("Rejected_DropAction", func(t *testing.T) {
-		database, err := db.InitDB(":memory:")
-		if err != nil {
-			t.Fatalf("Failed to initialize DB: %v", err)
-		}
-		defer func() { _ = database.Close() }()
+		store := setupTestStore(t)
 
 		tmpDir := t.TempDir()
 		sessMgr := session.New(tmpDir, "")
@@ -11124,7 +10647,7 @@ func TestPreTurnHook(t *testing.T) {
 		}
 
 		pool := NewWorkerPool(WorkerPoolConfig{
-			DB:                database,
+			Store: store,
 			SessionManager:    sessMgr,
 			TimeoutMinutes:    1,
 			MaxAttempts:       3,
@@ -11157,7 +10680,7 @@ func TestPreTurnHook(t *testing.T) {
 			Status:     db.StatusPending,
 			CreatedAt:  now,
 		}
-		_ = db.InsertMessage(database, msg)
+		_ = insertMessage(store, msg)
 
 		pool.processBurst([]db.Message{msg})
 
@@ -11171,7 +10694,7 @@ func TestPreTurnHook(t *testing.T) {
 			t.Errorf("expected 0 runner calls on drop, got %d", runnerCalls)
 		}
 
-		saved, err := db.GetMessage(database, "msg-preturn-drop")
+		saved, err := getMessage(store, "msg-preturn-drop")
 		if err != nil || saved == nil {
 			t.Fatalf("failed to retrieve message: %v", err)
 		}
@@ -11184,11 +10707,7 @@ func TestPreTurnHook(t *testing.T) {
 	})
 
 	t.Run("Rejected_RetryAction", func(t *testing.T) {
-		database, err := db.InitDB(":memory:")
-		if err != nil {
-			t.Fatalf("Failed to initialize DB: %v", err)
-		}
-		defer func() { _ = database.Close() }()
+		store := setupTestStore(t)
 
 		tmpDir := t.TempDir()
 		sessMgr := session.New(tmpDir, "")
@@ -11219,7 +10738,7 @@ func TestPreTurnHook(t *testing.T) {
 
 		completedChan := make(chan struct{})
 		pool := NewWorkerPool(WorkerPoolConfig{
-			DB:                 database,
+			Store: store,
 			SessionManager:     sessMgr,
 			TimeoutMinutes:     1,
 			MaxAttempts:        3,
@@ -11266,7 +10785,7 @@ func TestPreTurnHook(t *testing.T) {
 			RetryCount: 0,
 			CreatedAt:  now,
 		}
-		_ = db.InsertMessage(database, msg)
+		_ = insertMessage(store, msg)
 
 		pool.processBurst([]db.Message{msg})
 
@@ -11292,7 +10811,7 @@ func TestPreTurnHook(t *testing.T) {
 		}
 		mu.Unlock()
 
-		saved, err := db.GetMessage(database, "msg-preturn-retry")
+		saved, err := getMessage(store, "msg-preturn-retry")
 		if err != nil || saved == nil {
 			t.Fatalf("failed to retrieve message: %v", err)
 		}
@@ -11305,11 +10824,7 @@ func TestPreTurnHook(t *testing.T) {
 	})
 
 	t.Run("RetryExhaustion", func(t *testing.T) {
-		database, err := db.InitDB(":memory:")
-		if err != nil {
-			t.Fatalf("Failed to initialize DB: %v", err)
-		}
-		defer func() { _ = database.Close() }()
+		store := setupTestStore(t)
 
 		tmpDir := t.TempDir()
 		sessMgr := session.New(tmpDir, "")
@@ -11330,7 +10845,7 @@ func TestPreTurnHook(t *testing.T) {
 		}
 
 		pool := NewWorkerPool(WorkerPoolConfig{
-			DB:                database,
+			Store: store,
 			SessionManager:    sessMgr,
 			TimeoutMinutes:    1,
 			MaxAttempts:       3,
@@ -11371,8 +10886,8 @@ func TestPreTurnHook(t *testing.T) {
 			ScheduleRunID:  "run-exhaust-1",
 			CreatedAt:      now,
 		}
-		_ = db.InsertMessage(database, msg)
-		_ = db.CreateScheduleRun(database, db.ScheduleRun{
+		_ = insertMessage(store, msg)
+		_ = createScheduleRun(store, db.ScheduleRun{
 			ID:           "run-exhaust-1",
 			ScheduleID:   "sched-1",
 			ScheduleType: "cron",
@@ -11391,7 +10906,7 @@ func TestPreTurnHook(t *testing.T) {
 		}
 		mu.Unlock()
 
-		saved, err := db.GetMessage(database, "msg-preturn-exhaust")
+		saved, err := getMessage(store, "msg-preturn-exhaust")
 		if err != nil || saved == nil {
 			t.Fatalf("failed to retrieve message: %v", err)
 		}
@@ -11403,18 +10918,16 @@ func TestPreTurnHook(t *testing.T) {
 		}
 
 		var runStatus string
-		_ = database.QueryRowContext(context.Background(), "SELECT status FROM schedule_runs WHERE id = 'run-exhaust-1'").Scan(&runStatus)
+		if r, _ := getScheduleRun(store, "run-exhaust-1"); r != nil {
+			runStatus = r.Status
+		}
 		if runStatus != "failed" {
 			t.Errorf("expected schedule run status 'failed', got %q", runStatus)
 		}
 	})
 
 	t.Run("TimeoutFallback_Drop", func(t *testing.T) {
-		database, err := db.InitDB(":memory:")
-		if err != nil {
-			t.Fatalf("Failed to initialize DB: %v", err)
-		}
-		defer func() { _ = database.Close() }()
+		store := setupTestStore(t)
 
 		var mu sync.Mutex
 		runnerCalls := 0
@@ -11426,7 +10939,7 @@ func TestPreTurnHook(t *testing.T) {
 		}
 
 		pool := NewWorkerPool(WorkerPoolConfig{
-			DB:                database,
+			Store: store,
 			TimeoutMinutes:    1,
 			MaxAttempts:       3,
 			WebhookDispatcher: mockDisp,
@@ -11459,7 +10972,7 @@ func TestPreTurnHook(t *testing.T) {
 			Status:     db.StatusPending,
 			CreatedAt:  now,
 		}
-		_ = db.InsertMessage(database, msg)
+		_ = insertMessage(store, msg)
 
 		pool.processBurst([]db.Message{msg})
 
@@ -11469,7 +10982,7 @@ func TestPreTurnHook(t *testing.T) {
 		}
 		mu.Unlock()
 
-		saved, err := db.GetMessage(database, "msg-preturn-timeout-drop")
+		saved, err := getMessage(store, "msg-preturn-timeout-drop")
 		if err != nil || saved == nil {
 			t.Fatalf("failed to retrieve message: %v", err)
 		}
@@ -11482,11 +10995,7 @@ func TestPreTurnHook(t *testing.T) {
 	})
 
 	t.Run("TimeoutFallback_Proceed", func(t *testing.T) {
-		database, err := db.InitDB(":memory:")
-		if err != nil {
-			t.Fatalf("Failed to initialize DB: %v", err)
-		}
-		defer func() { _ = database.Close() }()
+		store := setupTestStore(t)
 
 		tmpDir := t.TempDir()
 		sessMgr := session.New(tmpDir, "")
@@ -11501,7 +11010,7 @@ func TestPreTurnHook(t *testing.T) {
 		}
 
 		pool := NewWorkerPool(WorkerPoolConfig{
-			DB:                database,
+			Store: store,
 			SessionManager:    sessMgr,
 			TimeoutMinutes:    1,
 			MaxAttempts:       3,
@@ -11538,7 +11047,7 @@ func TestPreTurnHook(t *testing.T) {
 			Status:     db.StatusPending,
 			CreatedAt:  now,
 		}
-		_ = db.InsertMessage(database, msg)
+		_ = insertMessage(store, msg)
 
 		pool.processBurst([]db.Message{msg})
 
@@ -11548,7 +11057,7 @@ func TestPreTurnHook(t *testing.T) {
 		}
 		mu.Unlock()
 
-		saved, err := db.GetMessage(database, "msg-preturn-timeout-proceed")
+		saved, err := getMessage(store, "msg-preturn-timeout-proceed")
 		if err != nil || saved == nil {
 			t.Fatalf("failed to retrieve message: %v", err)
 		}
@@ -11558,11 +11067,7 @@ func TestPreTurnHook(t *testing.T) {
 	})
 
 	t.Run("TimeoutFallback_Retry", func(t *testing.T) {
-		database, err := db.InitDB(":memory:")
-		if err != nil {
-			t.Fatalf("Failed to initialize DB: %v", err)
-		}
-		defer func() { _ = database.Close() }()
+		store := setupTestStore(t)
 
 		var mu sync.Mutex
 		runnerCalls := 0
@@ -11574,7 +11079,7 @@ func TestPreTurnHook(t *testing.T) {
 		}
 
 		pool := NewWorkerPool(WorkerPoolConfig{
-			DB:                database,
+			Store: store,
 			TimeoutMinutes:    1,
 			MaxAttempts:       3,
 			WebhookDispatcher: mockDisp,
@@ -11607,7 +11112,7 @@ func TestPreTurnHook(t *testing.T) {
 			Status:     db.StatusPending,
 			CreatedAt:  now,
 		}
-		_ = db.InsertMessage(database, msg)
+		_ = insertMessage(store, msg)
 
 		pool.processBurst([]db.Message{msg})
 
@@ -11617,7 +11122,7 @@ func TestPreTurnHook(t *testing.T) {
 		}
 		mu.Unlock()
 
-		saved, err := db.GetMessage(database, "msg-preturn-timeout-retry")
+		saved, err := getMessage(store, "msg-preturn-timeout-retry")
 		if err != nil || saved == nil {
 			t.Fatalf("failed to retrieve message: %v", err)
 		}
@@ -11661,15 +11166,11 @@ func TestPreTurnHook(t *testing.T) {
 		teNoPool.abortBurst("test drop nil pool")
 
 		// 4. abortBurst with ScheduleRunID and OnMessageCompleted
-		database, err := db.InitDB(":memory:")
-		if err != nil {
-			t.Fatalf("Failed to initialize DB: %v", err)
-		}
-		defer func() { _ = database.Close() }()
+		store := setupTestStore(t)
 
 		var completedStatus string
 		pool := NewWorkerPool(WorkerPoolConfig{
-			DB: database,
+			Store: store,
 			OnMessageCompleted: func(msg db.Message, status string) {
 				completedStatus = status
 			},
@@ -11681,8 +11182,8 @@ func TestPreTurnHook(t *testing.T) {
 			ScheduleRunID: "run-sched-abort",
 			Status:        db.StatusPending,
 		}
-		_ = db.InsertMessage(database, schedMsg)
-		_ = db.CreateScheduleRun(database, db.ScheduleRun{
+		_ = insertMessage(store, schedMsg)
+		_ = createScheduleRun(store, db.ScheduleRun{
 			ID:           "run-sched-abort",
 			ScheduleID:   "s1",
 			ScheduleType: "cron",
@@ -11702,7 +11203,9 @@ func TestPreTurnHook(t *testing.T) {
 		}
 
 		var runStatus string
-		_ = database.QueryRowContext(context.Background(), "SELECT status FROM schedule_runs WHERE id = 'run-sched-abort'").Scan(&runStatus)
+		if r, _ := getScheduleRun(store, "run-sched-abort"); r != nil {
+			runStatus = r.Status
+		}
 		if runStatus != "completed" {
 			t.Errorf("expected schedule run status 'completed', got %q", runStatus)
 		}
@@ -11727,11 +11230,7 @@ func mockJSONResponseWithUsage(convID, responseText string, usage runner.TokenUs
 func TestPostTurnHook(t *testing.T) {
 	t.Parallel()
 	t.Run("SuccessfulTurn", func(t *testing.T) {
-		database, err := db.InitDB(":memory:")
-		if err != nil {
-			t.Fatalf("Failed to initialize DB: %v", err)
-		}
-		defer func() { _ = database.Close() }()
+		store := setupTestStore(t)
 
 		var mu sync.Mutex
 		var postCalled bool
@@ -11767,7 +11266,7 @@ func TestPostTurnHook(t *testing.T) {
 		}
 
 		pool := NewWorkerPool(WorkerPoolConfig{
-			DB:                database,
+			Store: store,
 			TimeoutMinutes:    1,
 			MaxAttempts:       1,
 			WebhookDispatcher: mockDisp,
@@ -11799,7 +11298,7 @@ func TestPostTurnHook(t *testing.T) {
 			Status:     db.StatusPending,
 			CreatedAt:  now,
 		}
-		_ = db.InsertMessage(database, msg)
+		_ = insertMessage(store, msg)
 
 		pool.processBurst([]db.Message{msg})
 
@@ -11838,11 +11337,7 @@ func TestPostTurnHook(t *testing.T) {
 	})
 
 	t.Run("FailedTurn_AgyError", func(t *testing.T) {
-		database, err := db.InitDB(":memory:")
-		if err != nil {
-			t.Fatalf("Failed to initialize DB: %v", err)
-		}
-		defer func() { _ = database.Close() }()
+		store := setupTestStore(t)
 
 		var mu sync.Mutex
 		var postCalled bool
@@ -11860,7 +11355,7 @@ func TestPostTurnHook(t *testing.T) {
 		}
 
 		pool := NewWorkerPool(WorkerPoolConfig{
-			DB:                database,
+			Store: store,
 			TimeoutMinutes:    1,
 			MaxAttempts:       1,
 			WebhookDispatcher: mockDisp,
@@ -11889,7 +11384,7 @@ func TestPostTurnHook(t *testing.T) {
 			Status:     db.StatusPending,
 			CreatedAt:  now,
 		}
-		_ = db.InsertMessage(database, msg)
+		_ = insertMessage(store, msg)
 
 		pool.processBurst([]db.Message{msg})
 
@@ -11910,11 +11405,7 @@ func TestPostTurnHook(t *testing.T) {
 	})
 
 	t.Run("RunnerPanicRecovery", func(t *testing.T) {
-		database, err := db.InitDB(":memory:")
-		if err != nil {
-			t.Fatalf("Failed to initialize DB: %v", err)
-		}
-		defer func() { _ = database.Close() }()
+		store := setupTestStore(t)
 
 		var mu sync.Mutex
 		var postCalled bool
@@ -11932,7 +11423,7 @@ func TestPostTurnHook(t *testing.T) {
 		}
 
 		pool := NewWorkerPool(WorkerPoolConfig{
-			DB:                database,
+			Store: store,
 			TimeoutMinutes:    1,
 			MaxAttempts:       1,
 			WebhookDispatcher: mockDisp,
@@ -11961,7 +11452,7 @@ func TestPostTurnHook(t *testing.T) {
 			Status:     db.StatusPending,
 			CreatedAt:  now,
 		}
-		_ = db.InsertMessage(database, msg)
+		_ = insertMessage(store, msg)
 
 		pool.processBurst([]db.Message{msg})
 
@@ -11979,11 +11470,7 @@ func TestPostTurnHook(t *testing.T) {
 	})
 
 	t.Run("SerializedRelease", func(t *testing.T) {
-		database, err := db.InitDB(":memory:")
-		if err != nil {
-			t.Fatalf("Failed to initialize DB: %v", err)
-		}
-		defer func() { _ = database.Close() }()
+		store := setupTestStore(t)
 
 		var mu sync.Mutex
 		turn1PostStarted := make(chan struct{})
@@ -12023,7 +11510,7 @@ func TestPostTurnHook(t *testing.T) {
 		}
 
 		pool := NewWorkerPool(WorkerPoolConfig{
-			DB:                database,
+			Store: store,
 			TimeoutMinutes:    1,
 			MaxAttempts:       1,
 			WebhookDispatcher: mockDisp,
@@ -12063,8 +11550,8 @@ func TestPostTurnHook(t *testing.T) {
 			Status:     db.StatusPending,
 			CreatedAt:  now.Add(time.Millisecond),
 		}
-		_ = db.InsertMessage(database, msg1)
-		_ = db.InsertMessage(database, msg2)
+		_ = insertMessage(store, msg1)
+		_ = insertMessage(store, msg2)
 
 		var wg sync.WaitGroup
 		wg.Add(2)
@@ -12133,11 +11620,7 @@ func TestPostTurnHook(t *testing.T) {
 		}
 
 		// 4. PreTurn rejection means turn was never attempted; post_turn must NOT fire
-		database, err := db.InitDB(":memory:")
-		if err != nil {
-			t.Fatalf("Failed to initialize DB: %v", err)
-		}
-		defer func() { _ = database.Close() }()
+		store := setupTestStore(t)
 
 		var postHookFired bool
 		mockDisp := &mockWebhookDispatcher{
@@ -12155,7 +11638,7 @@ func TestPostTurnHook(t *testing.T) {
 		}
 
 		pool := NewWorkerPool(WorkerPoolConfig{
-			DB:                database,
+			Store: store,
 			TimeoutMinutes:    1,
 			MaxAttempts:       1,
 			WebhookDispatcher: mockDisp,
@@ -12183,7 +11666,7 @@ func TestPostTurnHook(t *testing.T) {
 			Status:     db.StatusPending,
 			CreatedAt:  time.Now().UTC(),
 		}
-		_ = db.InsertMessage(database, msgDrop)
+		_ = insertMessage(store, msgDrop)
 
 		pool.processBurst([]db.Message{msgDrop})
 
@@ -12209,11 +11692,7 @@ func mockMultiTurnJSONResponse(convID, responseText string, numTurns int) string
 
 func TestWorkerPool_MultiTurn_ExtractFinalSubstantiveTurnAndPreserveMedia(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer database.Close()
+	store := setupTestStore(t)
 
 	tempDir := t.TempDir()
 	convID := "c1111111-2222-3333-4444-555555555555"
@@ -12251,7 +11730,7 @@ func TestWorkerPool_MultiTurn_ExtractFinalSubstantiveTurnAndPreserveMedia(t *tes
 	sessMgr := session.New(tempDir, "")
 	pool := NewWorkerPool(WorkerPoolConfig{
 		SessionManager: sessMgr,
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    1,
@@ -12287,7 +11766,7 @@ func TestWorkerPool_MultiTurn_ExtractFinalSubstantiveTurnAndPreserveMedia(t *tes
 		CreatedAt:  time.Now().UTC(),
 		UpdatedAt:  time.Now().UTC(),
 	}
-	if err := db.InsertMessage(database, msg); err != nil {
+	if err := insertMessage(store, msg); err != nil {
 		t.Fatalf("InsertMessage failed: %v", err)
 	}
 
@@ -12317,7 +11796,7 @@ func TestWorkerPool_MultiTurn_ExtractFinalSubstantiveTurnAndPreserveMedia(t *tes
 		t.Errorf("Expected attachment preview.png, got %q", deliveredAttachments[0].Filename)
 	}
 
-	dbMsg, err := db.GetMessage(database, "msg-multiturn-1")
+	dbMsg, err := getMessage(store, "msg-multiturn-1")
 	if err != nil || dbMsg == nil {
 		t.Fatalf("GetMessage failed: %v", err)
 	}
@@ -12328,11 +11807,7 @@ func TestWorkerPool_MultiTurn_ExtractFinalSubstantiveTurnAndPreserveMedia(t *tes
 
 func TestWorkerPool_MultiTurn_SilentSentinel_DropsIntermediateChatter(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer database.Close()
+	store := setupTestStore(t)
 
 	tempDir := t.TempDir()
 	convID := "c2222222-2222-3333-4444-555555555555"
@@ -12358,7 +11833,7 @@ func TestWorkerPool_MultiTurn_SilentSentinel_DropsIntermediateChatter(t *testing
 	sessMgr := session.New(tempDir, "")
 	pool := NewWorkerPool(WorkerPoolConfig{
 		SessionManager: sessMgr,
-		DB:             database,
+		Store: store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    1,
@@ -12393,7 +11868,7 @@ func TestWorkerPool_MultiTurn_SilentSentinel_DropsIntermediateChatter(t *testing
 		CreatedAt:  time.Now().UTC(),
 		UpdatedAt:  time.Now().UTC(),
 	}
-	if err := db.InsertMessage(database, msg); err != nil {
+	if err := insertMessage(store, msg); err != nil {
 		t.Fatalf("InsertMessage failed: %v", err)
 	}
 
@@ -12412,7 +11887,7 @@ func TestWorkerPool_MultiTurn_SilentSentinel_DropsIntermediateChatter(t *testing
 		t.Errorf("DeliveryFunc was called when final response was a silent sentinel")
 	}
 
-	dbMsg, err := db.GetMessage(database, "msg-silent-1")
+	dbMsg, err := getMessage(store, "msg-silent-1")
 	if err != nil || dbMsg == nil {
 		t.Fatalf("GetMessage failed: %v", err)
 	}

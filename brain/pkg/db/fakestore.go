@@ -431,6 +431,59 @@ func (f *FakeStore) SetMessageUpdatedAt(id string, t time.Time) {
 	}
 }
 
+func (f *FakeStore) GetActiveTasks(ctx context.Context) ([]ActiveTask, error) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if err := f.checkClosedAndFail("GetActiveTasks"); err != nil {
+		return nil, err
+	}
+
+	var activeMsgs []*Message
+	for _, id := range f.messageOrder {
+		if m, ok := f.messages[id]; ok && m != nil {
+			if m.Status == StatusPending || m.Status == StatusProcessing {
+				activeMsgs = append(activeMsgs, m)
+			}
+		}
+	}
+
+	sort.Slice(activeMsgs, func(i, j int) bool {
+		return activeMsgs[i].CreatedAt.Before(activeMsgs[j].CreatedAt)
+	})
+
+	if len(activeMsgs) > 50 {
+		activeMsgs = activeMsgs[:50]
+	}
+
+	tasks := make([]ActiveTask, 0, len(activeMsgs))
+	for _, m := range activeMsgs {
+		sessionID := ""
+		if s, ok := f.sessions[m.ThreadID]; ok && s != nil {
+			sessionID = s.InternalSessionID
+		}
+		summary := m.Summary
+		if summary == "" {
+			summary = CleanTaskSummary(m.Content)
+		}
+		tasks = append(tasks, ActiveTask{
+			ID:            m.ID,
+			RowID:         m.RowID,
+			ThreadID:      m.ThreadID,
+			SessionID:     sessionID,
+			AuthorName:    m.AuthorName,
+			AuthorID:      m.AuthorID,
+			Prompt:        m.Content,
+			Summary:       summary,
+			Status:        m.Status,
+			RetryCount:    m.RetryCount,
+			ScheduleRunID: m.ScheduleRunID,
+			CreatedAt:     m.CreatedAt,
+			UpdatedAt:     m.UpdatedAt,
+		})
+	}
+	return tasks, nil
+}
+
 // =========================================================================
 // SessionStore implementation
 // =========================================================================
@@ -642,6 +695,27 @@ func (f *FakeStore) SetSessionInfo(s SessionInfo) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.sessions[s.ThreadID] = cloneSessionInfo(&s)
+}
+
+func (f *FakeStore) GetExternalConversationID(ctx context.Context, internalID string) (string, error) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if err := f.checkClosedAndFail("GetExternalConversationID"); err != nil {
+		return "", err
+	}
+	if internalID == "" {
+		return "", nil
+	}
+	for threadID, sess := range f.sessions {
+		if sess != nil && sess.InternalSessionID == internalID {
+			return threadID, nil
+		}
+	}
+	return "", nil
+}
+
+func (f *FakeStore) SaveConversationMapping(ctx context.Context, externalID, internalID string) error {
+	return f.SaveSessionID(ctx, externalID, internalID)
 }
 
 // =========================================================================
