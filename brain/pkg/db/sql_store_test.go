@@ -220,4 +220,110 @@ func TestSQLStoreNilDatabaseBranchCoverage(t *testing.T) {
 	if _, err := s.GetPreviousSessionID(ctx, "k"); err == nil {
 		t.Errorf("expected error on GetPreviousSessionID nil store")
 	}
+
+	if _, _, err := s.GetThreadSummary(ctx, "t"); err == nil {
+		t.Errorf("expected error on GetThreadSummary nil store")
+	}
+	if err := s.SaveThreadSummary(ctx, "t", "s", "w"); err == nil {
+		t.Errorf("expected error on SaveThreadSummary nil store")
+	}
+	if _, err := s.GetSessionActivityStats(ctx, "t"); err == nil {
+		t.Errorf("expected error on GetSessionActivityStats nil store")
+	}
+	if _, err := s.GetFactsMissingEmbeddings(ctx, 10); err == nil {
+		t.Errorf("expected error on GetFactsMissingEmbeddings nil store")
+	}
+	if err := s.UpdateFactEmbedding(ctx, 1, nil); err == nil {
+		t.Errorf("expected error on UpdateFactEmbedding nil store")
+	}
+}
+
+func TestSQLStoreHoistedMethods(t *testing.T) {
+	store := NewTestStore(t)
+	ctx := context.Background()
+
+	// 1. Thread summary
+	sum, wm, err := store.GetThreadSummary(ctx, "thread-test-1")
+	if err != nil {
+		t.Fatalf("GetThreadSummary failed: %v", err)
+	}
+	if sum != "" || wm != "" {
+		t.Fatalf("expected empty summary and watermark, got %q, %q", sum, wm)
+	}
+
+	err = store.SaveThreadSummary(ctx, "thread-test-1", "Summary of conversation", "msg-watermark-1")
+	if err != nil {
+		t.Fatalf("SaveThreadSummary failed: %v", err)
+	}
+
+	sum, wm, err = store.GetThreadSummary(ctx, "thread-test-1")
+	if err != nil {
+		t.Fatalf("GetThreadSummary after save failed: %v", err)
+	}
+	if sum != "Summary of conversation" || wm != "msg-watermark-1" {
+		t.Fatalf("expected saved summary, got %q, %q", sum, wm)
+	}
+
+	// 2. Session activity stats
+	emptyStats, err := store.GetSessionActivityStats(ctx, "   ")
+	if err != nil || emptyStats == nil {
+		t.Fatalf("expected empty stats for whitespace threadID")
+	}
+
+	stats, err := store.GetSessionActivityStats(ctx, "thread-test-1")
+	if err != nil {
+		t.Fatalf("GetSessionActivityStats failed: %v", err)
+	}
+	if stats == nil {
+		t.Fatalf("expected non-nil stats")
+	}
+
+	_ = store.SaveSessionID(ctx, "thread-test-1", "internal-sess-1")
+	stats, err = store.GetSessionActivityStats(ctx, "thread-test-1")
+	if err != nil || stats.InternalSessionID != "internal-sess-1" {
+		t.Fatalf("expected internal-sess-1 in stats, got %+v (err: %v)", stats, err)
+	}
+
+	// Insert completed message and re-check stats
+	_ = store.InsertMessage(ctx, Message{
+		ID:           "msg-stats-1",
+		ThreadID:     "thread-test-1",
+		Status:       StatusCompleted,
+		ResponseText: "Hello there!",
+	})
+	stats, err = store.GetSessionActivityStats(ctx, "thread-test-1")
+	if err != nil {
+		t.Fatalf("GetSessionActivityStats with completed message failed: %v", err)
+	}
+	if stats.CompletedTurns != 1 {
+		t.Fatalf("expected 1 completed turn, got %d", stats.CompletedTurns)
+	}
+
+	// 3. Facts missing embeddings & UpdateFactEmbedding
+	factID, err := store.InsertFact(ctx, "test", "Fact without embedding", 1.0, "thread-test-1", nil)
+	if err != nil {
+		t.Fatalf("InsertFact failed: %v", err)
+	}
+
+	missing, err := store.GetFactsMissingEmbeddings(ctx, 10)
+	if err != nil {
+		t.Fatalf("GetFactsMissingEmbeddings failed: %v", err)
+	}
+	var found bool
+	for _, f := range missing {
+		if f.ID == factID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected factID %d in missing embeddings list", factID)
+	}
+
+	emb := make([]float32, ExpectedEmbeddingDim)
+	emb[0] = 0.5
+	err = store.UpdateFactEmbedding(ctx, factID, emb)
+	if err != nil {
+		t.Fatalf("UpdateFactEmbedding failed: %v", err)
+	}
 }

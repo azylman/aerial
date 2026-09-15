@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -368,15 +369,12 @@ func GetInterruptedTurns(database DBTX) ([]ConversationTurnState, error) {
 	return results, nil
 }
 
-// SaveThreadSummary persists a thread summary and its last summarized message ID watermark in the sessions table.
-func SaveThreadSummary(database *sql.DB, threadID, summary, lastSummarizedMsgID string) error {
+// SaveThreadSummaryWithContext persists a thread summary and its last summarized message ID watermark in the sessions table.
+func SaveThreadSummaryWithContext(ctx context.Context, database DBTX, threadID, summary, lastSummarizedMsgID string) error {
 	if database == nil || threadID == "" {
 		return nil
 	}
 	now := time.Now().UTC()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
 	query := `
 	INSERT INTO sessions (thread_id, summary, last_summarized_message_id, created_at, updated_at)
 	VALUES ($1, $2, $3, $4, $4)
@@ -389,14 +387,21 @@ func SaveThreadSummary(database *sql.DB, threadID, summary, lastSummarizedMsgID 
 	return err
 }
 
-// GetThreadSummary retrieves the cached thread summary and last_summarized_message_id watermark for a thread.
-func GetThreadSummary(database *sql.DB, threadID string) (summary string, lastSummarizedMsgID string, err error) {
+// SaveThreadSummary persists a thread summary and its last summarized message ID watermark in the sessions table.
+func SaveThreadSummary(database *sql.DB, threadID, summary, lastSummarizedMsgID string) error {
 	if database == nil || threadID == "" {
-		return "", "", nil
+		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	return SaveThreadSummaryWithContext(ctx, database, threadID, summary, lastSummarizedMsgID)
+}
 
+// GetThreadSummaryWithContext retrieves the cached thread summary and last_summarized_message_id watermark for a thread.
+func GetThreadSummaryWithContext(ctx context.Context, database DBTX, threadID string) (summary string, lastSummarizedMsgID string, err error) {
+	if database == nil || threadID == "" {
+		return "", "", nil
+	}
 	var sum, lastMsgID sql.NullString
 	query := `SELECT summary, last_summarized_message_id FROM sessions WHERE thread_id = $1`
 	err = database.QueryRowContext(ctx, query, threadID).Scan(&sum, &lastMsgID)
@@ -407,5 +412,72 @@ func GetThreadSummary(database *sql.DB, threadID string) (summary string, lastSu
 		return "", "", err
 	}
 	return sum.String, lastMsgID.String, nil
+}
+
+// GetThreadSummary retrieves the cached thread summary and last_summarized_message_id watermark for a thread.
+func GetThreadSummary(database *sql.DB, threadID string) (summary string, lastSummarizedMsgID string, err error) {
+	if database == nil || threadID == "" {
+		return "", "", nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return GetThreadSummaryWithContext(ctx, database, threadID)
+}
+
+// GetSessionActivityStatsWithContext queries the database to determine the most recent session activity.
+func GetSessionActivityStatsWithContext(ctx context.Context, database DBTX, threadID string) (*SessionActivityStats, error) {
+	if database == nil || strings.TrimSpace(threadID) == "" {
+		return &SessionActivityStats{}, nil
+	}
+
+	var (
+		internalSessionID sql.NullString
+		turnCount         sql.NullInt64
+		rawSessUpdatedAt  any
+	)
+
+	err := database.QueryRowContext(
+		ctx,
+		`SELECT internal_session_id, turn_count, updated_at FROM sessions WHERE thread_id = $1`,
+		threadID,
+	).Scan(&internalSessionID, &turnCount, &rawSessUpdatedAt)
+
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("querying session for thread %s: %w", threadID, err)
+	}
+
+	var (
+		completedCount int64
+		rawMsgUpdated  any
+	)
+
+	msgErr := database.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*), MAX(updated_at) FROM messages 
+		 WHERE thread_id = $1 
+		   AND status = 'COMPLETED' 
+		   AND response_text NOT LIKE '[EXPIRED_STALE]%' 
+		   AND response_text NOT LIKE '[AMBIENT%' 
+		   AND response_text NOT LIKE '[IGNORED%'`,
+		threadID,
+	).Scan(&completedCount, &rawMsgUpdated)
+
+	if msgErr != nil && !errors.Is(msgErr, sql.ErrNoRows) {
+		return nil, fmt.Errorf("querying completed messages for thread %s: %w", threadID, msgErr)
+	}
+
+	stats := &SessionActivityStats{
+		InternalSessionID: internalSessionID.String,
+		TurnCount:         int(turnCount.Int64),
+		CompletedTurns:    completedCount,
+	}
+	if t, ok := ParseDBTime(rawSessUpdatedAt); ok {
+		stats.SessionUpdatedAt = t
+	}
+	if t, ok := ParseDBTime(rawMsgUpdated); ok {
+		stats.LastMessageAt = t
+	}
+
+	return stats, nil
 }
 
