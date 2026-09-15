@@ -50,64 +50,53 @@ TRANSCRIPT:
 `
 
 func BackfillMissingEmbeddings(ctx context.Context, database any, client *Client) (int, error) {
-	var dbtx db.DBTX
+	var factStore db.FactStore
 	switch v := database.(type) {
-	case db.DBTX:
-		dbtx = v
-	case interface{ DB() db.DBTX }:
-		dbtx = v.DB()
+	case db.FactStore:
+		factStore = v
+	case *sql.DB:
+		if v != nil {
+			factStore = db.NewSQLStore(v)
+		}
 	}
-	if dbtx == nil || client == nil {
+	if factStore == nil || client == nil {
 		return 0, fmt.Errorf("nil database or ollama client")
 	}
 
-	rows, err := dbtx.QueryContext(ctx, "SELECT id, fact_text FROM facts WHERE embedding IS NULL")
+	missingFacts, err := factStore.GetFactsMissingEmbeddings(ctx, 0)
 	if err != nil {
 		return 0, fmt.Errorf("failed to query facts missing embeddings: %w", err)
 	}
-	defer func() { _ = rows.Close() }()
 
-	type missingFact struct {
-		id   int64
-		text string
-	}
-	var toUpdate []missingFact
-
-	for rows.Next() {
-		var mf missingFact
-		if err := rows.Scan(&mf.id, &mf.text); err != nil {
-			return 0, err
-		}
-		if strings.TrimSpace(mf.text) != "" {
-			toUpdate = append(toUpdate, mf)
-		}
-	}
-
-	if len(toUpdate) == 0 {
+	if len(missingFacts) == 0 {
 		return 0, nil
 	}
 
-	log.Printf("[Memory] Backfilling vector embeddings for %d legacy fact(s)...", len(toUpdate))
+	log.Printf("[Memory] Backfilling vector embeddings for %d legacy fact(s)...", len(missingFacts))
 	backfilled := 0
 
-	for _, item := range toUpdate {
+	for _, item := range missingFacts {
 		select {
 		case <-ctx.Done():
 			return backfilled, ctx.Err()
 		default:
 		}
 
-		emb, err := client.GenerateEmbedding(ctx, item.text, false, 1)
+		if strings.TrimSpace(item.FactText) == "" {
+			continue
+		}
+
+		emb, err := client.GenerateEmbedding(ctx, item.FactText, false, 1)
 		if err != nil {
-			log.Printf("[Memory] Warning: Failed to generate embedding for fact ID %d: %v", item.id, err)
+			log.Printf("[Memory] Warning: Failed to generate embedding for fact ID %d: %v", item.ID, err)
 			continue
 		}
 		if len(emb) == 0 {
 			continue
 		}
 
-		if err := db.UpdateFactEmbedding(dbtx, item.id, emb); err != nil {
-			log.Printf("[Memory] Error updating embedding for fact ID %d: %v", item.id, err)
+		if err := factStore.UpdateFactEmbedding(ctx, item.ID, emb); err != nil {
+			log.Printf("[Memory] Error updating embedding for fact ID %d: %v", item.ID, err)
 		} else {
 			backfilled++
 		}
