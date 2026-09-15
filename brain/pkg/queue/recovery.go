@@ -1,7 +1,7 @@
 package queue
 
 import (
-	"database/sql"
+	"context"
 	"fmt"
 	"log"
 	"strings"
@@ -19,18 +19,21 @@ const (
 // RecoverInterrupted resumes all PENDING and PROCESSING messages from the database on startup in chronological order.
 // If a message in PROCESSING has restart_count >= DefaultMaxRestarts or retry_count >= maxAttempts (poison pill),
 // it is not re-enqueued; instead, a poison pill notification is sent and the message is marked FAILED.
-func RecoverInterrupted(database *sql.DB, pool *WorkerPool) {
-	if database == nil || pool == nil {
+func RecoverInterrupted(dbOrStore any, pool *WorkerPool) {
+	store := resolveStore(dbOrStore)
+	if store == nil || pool == nil {
 		return
 	}
 
-	if reconciled, err := db.ReconcileOrphanedScheduleRuns(database); err != nil {
+	ctx := context.Background()
+
+	if reconciled, err := store.ReconcileOrphanedScheduleRuns(ctx); err != nil {
 		log.Printf("[Startup Recovery] Error reconciling orphaned schedule runs: %v", err)
 	} else if reconciled > 0 {
 		log.Printf("[Startup Recovery] Reconciled %d orphaned schedule run(s) from previous run", reconciled)
 	}
 
-	messages, err := db.GetPendingOrProcessingMessages(database)
+	messages, err := store.GetPendingOrProcessingMessages(ctx, 0)
 	if err != nil {
 		log.Printf("[Startup Recovery] Error querying pending/processing messages: %v", err)
 		return
@@ -86,7 +89,7 @@ func RecoverInterrupted(database *sql.DB, pool *WorkerPool) {
 					log.Printf("[Startup Recovery] Failed to deliver poison pill notice for message %s: %v", m.ID, err)
 				}
 			}
-			_ = db.UpdateMessageStatus(database, m.ID, db.StatusFailed, reason)
+			_ = store.UpdateMessageStatus(ctx, m.ID, db.StatusFailed, reason)
 			continue
 		}
 
@@ -94,7 +97,7 @@ func RecoverInterrupted(database *sql.DB, pool *WorkerPool) {
 			if m.RestartCount >= DefaultMaxRestarts && !isInstantCrashLoop {
 				log.Printf("[Startup Recovery] Message %s was active for %v before restart (restart_count=%d < %d). Treating as long-running task interrupted by deployment rather than instant crash loop.", m.ID, time.Since(m.UpdatedAt), m.RestartCount, MaxHardRestarts)
 			}
-			_ = db.ResetMessageToPendingWithRestart(database, m.ID, "interrupted during restart")
+			_ = store.ResetMessageToPendingWithRestart(ctx, m.ID, "interrupted during restart")
 			m.Status = db.StatusPending
 			m.RestartCount++
 		}

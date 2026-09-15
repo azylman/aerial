@@ -171,11 +171,12 @@ func (f *FakeStore) InsertMessage(ctx context.Context, msg Message) error {
 
 	rowID := atomic.AddInt64(&f.nextRowID, 1)
 	msg.RowID = rowID
+	now := time.Now().UTC()
 	if msg.CreatedAt.IsZero() {
-		msg.CreatedAt = time.Now().UTC()
+		msg.CreatedAt = now
 	}
 	if msg.UpdatedAt.IsZero() {
-		msg.UpdatedAt = msg.CreatedAt
+		msg.UpdatedAt = now
 	}
 	if msg.Status == "" {
 		msg.Status = StatusPending
@@ -421,6 +422,15 @@ func (f *FakeStore) GetMaxMessageRowID(ctx context.Context, threadID string) (in
 	return maxID, nil
 }
 
+// SetMessageUpdatedAt updates the UpdatedAt timestamp of an existing message (useful in tests).
+func (f *FakeStore) SetMessageUpdatedAt(id string, t time.Time) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if m, ok := f.messages[id]; ok && m != nil {
+		m.UpdatedAt = t
+	}
+}
+
 // =========================================================================
 // SessionStore implementation
 // =========================================================================
@@ -625,6 +635,13 @@ func (f *FakeStore) GetSessionActivityStats(ctx context.Context, threadID string
 	stats.CompletedTurns = completedCount
 	stats.LastMessageAt = maxUpdated
 	return stats, nil
+}
+
+// SetSessionInfo sets or overwrites session info for a thread (useful in tests).
+func (f *FakeStore) SetSessionInfo(s SessionInfo) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sessions[s.ThreadID] = cloneSessionInfo(&s)
 }
 
 // =========================================================================
@@ -898,6 +915,20 @@ func (f *FakeStore) GetScheduleRunsPaginated(ctx context.Context, limit, offset 
 		end = total
 	}
 	return filtered[offset:end], total, nil
+}
+
+// GetScheduleRun retrieves a schedule run by its ID (useful in tests).
+func (f *FakeStore) GetScheduleRun(id string) (*ScheduleRun, error) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if err := f.checkClosedAndFail("GetScheduleRun"); err != nil {
+		return nil, err
+	}
+	r, ok := f.runs[id]
+	if !ok || r == nil {
+		return nil, sql.ErrNoRows
+	}
+	return cloneRun(r), nil
 }
 
 func (f *FakeStore) GetScheduleSummaryMetrics(ctx context.Context) (ScheduleSummaryMetrics, error) {

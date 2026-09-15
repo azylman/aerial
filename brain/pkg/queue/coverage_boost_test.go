@@ -3,6 +3,7 @@ package queue
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,22 +29,19 @@ import (
 
 func TestFetchRecentThreadHistory_EdgeCases(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
+	defer func() { _ = store.Close() }()
 
 	ctx := context.Background()
 
 	// 1. Limit clamping: <= 0 and > 100
 	t.Run("limit clamping", func(t *testing.T) {
 		// dg nil, threadID empty -> fails fallback
-		_, err := FetchRecentThreadHistory(ctx, nil, database, "", 0)
+		_, err := FetchRecentThreadHistory(ctx, nil, store, "", 0)
 		if err == nil {
 			t.Errorf("expected error for empty threadID")
 		}
-		_, err = FetchRecentThreadHistory(ctx, nil, database, "", 150)
+		_, err = FetchRecentThreadHistory(ctx, nil, store, "", 150)
 		if err == nil {
 			t.Errorf("expected error for empty threadID")
 		}
@@ -52,7 +50,7 @@ func TestFetchRecentThreadHistory_EdgeCases(t *testing.T) {
 	// 2. Local DB fast path
 	t.Run("db fast path", func(t *testing.T) {
 		now := time.Now().UTC()
-		err := db.InsertMessage(database, db.Message{
+		err := insertMessage(store, db.Message{
 			ID:         "msg-fast-1",
 			ThreadID:   "thread-fast-1",
 			AuthorID:   "user-1",
@@ -64,7 +62,7 @@ func TestFetchRecentThreadHistory_EdgeCases(t *testing.T) {
 			t.Fatalf("InsertMessage failed: %v", err)
 		}
 
-		msgs, err := FetchRecentThreadHistory(ctx, nil, database, "thread-fast-1", 10)
+		msgs, err := FetchRecentThreadHistory(ctx, nil, store, "thread-fast-1", 10)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -76,20 +74,20 @@ func TestFetchRecentThreadHistory_EdgeCases(t *testing.T) {
 	// 3. Fallback to Discord API checks
 	t.Run("fallback guards", func(t *testing.T) {
 		// dg == nil
-		_, err := FetchRecentThreadHistory(ctx, nil, database, "123456789012345678", 10)
+		_, err := FetchRecentThreadHistory(ctx, nil, store, "123456789012345678", 10)
 		if err == nil || !strings.Contains(err.Error(), "no database messages and discord fallback unavailable") {
 			t.Errorf("expected fallback unavailable error for dg==nil, got: %v", err)
 		}
 
 		dg, _ := discordgo.New("Bot test")
 		// threadID empty
-		_, err = FetchRecentThreadHistory(ctx, dg, database, "", 10)
+		_, err = FetchRecentThreadHistory(ctx, dg, store, "", 10)
 		if err == nil || !strings.Contains(err.Error(), "no database messages and discord fallback unavailable") {
 			t.Errorf("expected fallback unavailable error for empty threadID, got: %v", err)
 		}
 
 		// non-numeric snowflake
-		_, err = FetchRecentThreadHistory(ctx, dg, database, "not-numeric", 10)
+		_, err = FetchRecentThreadHistory(ctx, dg, store, "not-numeric", 10)
 		if err == nil || !strings.Contains(err.Error(), "no database messages and discord fallback unavailable") {
 			t.Errorf("expected fallback unavailable error for non-numeric, got: %v", err)
 		}
@@ -109,7 +107,7 @@ func TestFetchRecentThreadHistory_EdgeCases(t *testing.T) {
 		dg.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 			return nil, errors.New("simulated network failure")
 		})
-		_, err := FetchRecentThreadHistory(ctx, dg, database, "123456789012345678", 10)
+		_, err := FetchRecentThreadHistory(ctx, dg, store, "123456789012345678", 10)
 		if err == nil {
 			t.Errorf("expected error from ChannelMessages, got nil")
 		}
@@ -183,7 +181,7 @@ func TestFetchRecentThreadHistory_EdgeCases(t *testing.T) {
 			}, nil
 		})
 
-		history, err := FetchRecentThreadHistory(ctx, dg, database, "123456789012345678", 50)
+		history, err := FetchRecentThreadHistory(ctx, dg, store, "123456789012345678", 50)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -214,16 +212,13 @@ func TestFetchRecentThreadHistory_EdgeCases(t *testing.T) {
 
 func TestDefaultHistoryFetcher_AdditionalEdgeCases(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
+	defer func() { _ = store.Close() }()
 
 	ctx := context.Background()
 
 	// 1. ChannelID empty -> falls back to DB
-	fetcher := DefaultHistoryFetcher(nil, database)
+	fetcher := DefaultHistoryFetcher(nil, store)
 	msgs, err := fetcher(ctx, "", "", 10)
 	if err != nil || len(msgs) != 0 {
 		t.Errorf("expected empty result without error for empty channelID, got msgs=%v, err=%v", msgs, err)
@@ -259,7 +254,7 @@ func TestDefaultHistoryFetcher_AdditionalEdgeCases(t *testing.T) {
 		}, nil
 	})
 
-	fetcherREST := DefaultHistoryFetcher(dg, database)
+	fetcherREST := DefaultHistoryFetcher(dg, store)
 	// beforeID non-snowflake
 	res, err := fetcherREST(ctx, "123456789012345678", "non-numeric-before", -5)
 	if err != nil {
@@ -285,22 +280,16 @@ func TestFetchHistoryFromDB_EdgeCases(t *testing.T) {
 	}
 
 	// 2. Database error (closed db)
-	closedDB, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	_ = closedDB.Close()
-	_, err = fetchHistoryFromDB(closedDB, "chan-1", "", 10)
+	closedStore := setupTestStore(t)
+	_ = closedStore.Close()
+	_, err = fetchHistoryFromDB(closedStore, "chan-1", "", 10)
 	if err == nil {
 		t.Errorf("expected error querying closed database")
 	}
 
 	// 3. Role mappings
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
+	defer func() { _ = store.Close() }()
 
 	now := time.Now().UTC()
 	testCases := []struct {
@@ -319,7 +308,7 @@ func TestFetchHistoryFromDB_EdgeCases(t *testing.T) {
 	}
 
 	for i, tc := range testCases {
-		_ = db.InsertMessage(database, db.Message{
+		_ = insertMessage(store, db.Message{
 			ID:         fmt.Sprintf("msg-role-%d", i),
 			ThreadID:   "role-test-chan",
 			AuthorID:   tc.authorID,
@@ -329,7 +318,7 @@ func TestFetchHistoryFromDB_EdgeCases(t *testing.T) {
 		})
 	}
 
-	fetched, err := fetchHistoryFromDB(database, "role-test-chan", "", 50)
+	fetched, err := fetchHistoryFromDB(store, "role-test-chan", "", 50)
 	if err != nil {
 		t.Fatalf("fetchHistoryFromDB failed: %v", err)
 	}
@@ -344,7 +333,7 @@ func TestFetchHistoryFromDB_EdgeCases(t *testing.T) {
 	}
 
 	// 4. Test beforeID filtering in fetchHistoryFromDB
-	filteredWithBefore, err := fetchHistoryFromDB(database, "role-test-chan", "msg-role-7", 50)
+	filteredWithBefore, err := fetchHistoryFromDB(store, "role-test-chan", "msg-role-7", 50)
 	if err != nil {
 		t.Fatalf("fetchHistoryFromDB with beforeID failed: %v", err)
 	}
@@ -369,7 +358,7 @@ func TestFetchHistoryFromDB_EdgeCases(t *testing.T) {
 	}
 
 	// 6. Test fetchHistoryFromDB with snowflake beforeID not in database
-	snowflakeFiltered, err := fetchHistoryFromDB(database, "role-test-chan", "123456789012345678", 50)
+	snowflakeFiltered, err := fetchHistoryFromDB(store, "role-test-chan", "123456789012345678", 50)
 	if err != nil {
 		t.Fatalf("fetchHistoryFromDB with snowflake failed: %v", err)
 	}
@@ -1247,16 +1236,13 @@ func TestRecoverInterrupted_AllBranches(t *testing.T) {
 	// 1. database == nil or pool == nil
 	RecoverInterrupted(nil, nil)
 
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
+	defer func() { _ = store.Close() }()
 
-	RecoverInterrupted(database, nil)
+	RecoverInterrupted(store, nil)
 
 	// 2. Reconcile orphaned schedule runs
-	_ = db.CreateScheduleRun(database, db.ScheduleRun{
+	_ = createScheduleRun(store, db.ScheduleRun{
 		ID:           "orphan-run-1",
 		ScheduleID:   "sched-1",
 		ScheduleType: "cron",
@@ -1267,7 +1253,7 @@ func TestRecoverInterrupted_AllBranches(t *testing.T) {
 
 	// Pool setup
 	pool := New(nil, WorkerPoolConfig{
-		DB:           database,
+		Store:        store,
 		MaxAttempts:  3,
 		DrainTimeout: 1 * time.Millisecond,
 		IdleTimeout:  50 * time.Millisecond,
@@ -1278,11 +1264,11 @@ func TestRecoverInterrupted_AllBranches(t *testing.T) {
 	defer pool.Stop()
 
 	// 3. No messages in database
-	RecoverInterrupted(database, pool)
+	RecoverInterrupted(store, pool)
 
 	// 4. Poison pill messages:
 	// a) restart_count >= DefaultMaxRestarts (3) with http-client
-	err = db.InsertMessage(database, db.Message{
+	err := insertMessage(store, db.Message{
 		ID:           "poison-http",
 		ThreadID:     "thread-poison-http",
 		AuthorID:     "http-client",
@@ -1303,7 +1289,7 @@ func TestRecoverInterrupted_AllBranches(t *testing.T) {
 		return nil
 	}
 
-	err = db.InsertMessage(database, db.Message{
+	err = insertMessage(store, db.Message{
 		ID:           "poison-discord",
 		ThreadID:     "thread-poison-discord",
 		AuthorID:     "user-1",
@@ -1318,7 +1304,7 @@ func TestRecoverInterrupted_AllBranches(t *testing.T) {
 	}
 
 	// c) Normal processing message (should be reset to pending and recovered)
-	err = db.InsertMessage(database, db.Message{
+	err = insertMessage(store, db.Message{
 		ID:           "normal-interrupted",
 		ThreadID:     "thread-normal",
 		AuthorID:     "user-1",
@@ -1332,27 +1318,27 @@ func TestRecoverInterrupted_AllBranches(t *testing.T) {
 		t.Fatalf("InsertMessage failed: %v", err)
 	}
 
-	RecoverInterrupted(database, pool)
+	RecoverInterrupted(store, pool)
 
 	if deliveredPoison.Load() != 1 {
 		t.Errorf("expected 1 poison pill delivery for discord user, got %d", deliveredPoison.Load())
 	}
 
 	// Verify status in DB
-	msgPoisonHTTP, _ := db.GetMessage(database, "poison-http")
+	msgPoisonHTTP, _ := getMessage(store, "poison-http")
 	if msgPoisonHTTP.Status != db.StatusFailed {
 		t.Errorf("expected poison-http to be FAILED, got %s", msgPoisonHTTP.Status)
 	}
 
-	msgPoisonDiscord, _ := db.GetMessage(database, "poison-discord")
+	msgPoisonDiscord, _ := getMessage(store, "poison-discord")
 	if msgPoisonDiscord.Status != db.StatusFailed {
 		t.Errorf("expected poison-discord to be FAILED, got %s", msgPoisonDiscord.Status)
 	}
 
 	// 5. Query error path
-	closedDB, _ := db.InitDB(":memory:")
-	_ = closedDB.Close()
-	RecoverInterrupted(closedDB, pool)
+	closedStore := setupTestStore(t)
+	_ = closedStore.Close()
+	RecoverInterrupted(closedStore, pool)
 }
 
 func TestWorkerPool_NewPermutations(t *testing.T) {
@@ -1538,32 +1524,30 @@ func TestGetSessionLastActivity_ErrorAndEdgeCases(t *testing.T) {
 	}
 
 	// 2. Query error on sessions table (closed database)
-	closedDB, _ := db.InitDB(":memory:")
-	_ = closedDB.Close()
-	_, _, err = GetSessionLastActivity(closedDB, "thread-1")
+	closedStore := setupTestStore(t)
+	_ = closedStore.Close()
+	_, _, err = GetSessionLastActivity(closedStore, "thread-1")
 	if err == nil {
 		t.Errorf("expected error querying closed database")
 	}
 
 	// 3. Disk activity later than DB updated_at
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
+	defer func() { _ = store.Close() }()
 
 	tmpDir := t.TempDir()
 	sessMgr := session.New(filepath.Join(tmpDir, ".gemini"), tmpDir)
 
 	now := time.Now().UTC()
 	// Insert session with turn_count > 0
-	_, err = database.Exec(`INSERT INTO sessions (thread_id, internal_session_id, turn_count, updated_at)
-		VALUES ($1, $2, $3, $4)`, "thread-disk-test", "sess-disk-1", 2, now.Add(-10*time.Minute).Format(time.RFC3339))
-	if err != nil {
-		t.Fatalf("insert session failed: %v", err)
-	}
+	store.SetSessionInfo(db.SessionInfo{
+		ThreadID:          "thread-disk-test",
+		InternalSessionID: "sess-disk-1",
+		TurnCount:         2,
+		UpdatedAt:         now.Add(-10 * time.Minute),
+	})
 
-	act, isCold, err = GetSessionLastActivity(database, "thread-disk-test", sessMgr)
+	act, isCold, err = GetSessionLastActivity(store, "thread-disk-test", sessMgr)
 	if err != nil {
 		t.Fatalf("GetSessionLastActivity failed: %v", err)
 	}
@@ -1607,15 +1591,12 @@ func TestWorkerPool_EnqueueSlowPathAndWorkerIdle(t *testing.T) {
 
 func TestProcessBurst_AdditionalEdgeCases(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
+	defer func() { _ = store.Close() }()
 
 	// 1. Empty burst or cancelled context
 	pool := New(nil, WorkerPoolConfig{
-		DB: database,
+		Store: store,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			return mockJSONResponse("", "All good"), "", 0, nil
 		},
@@ -1629,7 +1610,7 @@ func TestProcessBurst_AdditionalEdgeCases(t *testing.T) {
 
 	// 2. Global Quota Pause Lockout in processBurst
 	poolQuota := New(nil, WorkerPoolConfig{
-		DB: database,
+		Store: store,
 		// currentAPIKey is empty -> OAuth mode
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			return mockJSONResponse("", "OK"), "", 0, nil
@@ -1639,7 +1620,7 @@ func TestProcessBurst_AdditionalEdgeCases(t *testing.T) {
 
 	// Insert pending message with ScheduleRunID
 	now := time.Now().UTC()
-	_ = db.CreateScheduleRun(database, db.ScheduleRun{
+	_ = createScheduleRun(store, db.ScheduleRun{
 		ID:           "sched-run-quota",
 		ScheduleID:   "sched-1",
 		ScheduleType: "cron",
@@ -1647,7 +1628,7 @@ func TestProcessBurst_AdditionalEdgeCases(t *testing.T) {
 		StartedAt:    now,
 		Status:       "running",
 	})
-	_ = db.InsertMessage(database, db.Message{
+	_ = insertMessage(store, db.Message{
 		ID:            "msg-quota-pause",
 		ThreadID:      "thread-quota-pause",
 		AuthorID:      "user-1",
@@ -1665,17 +1646,16 @@ func TestProcessBurst_AdditionalEdgeCases(t *testing.T) {
 		onCompletedStatus = finalStatus
 	}
 
-	msg, _ := db.GetMessage(database, "msg-quota-pause")
+	msg, _ := getMessage(store, "msg-quota-pause")
 	poolQuota.processBurst([]db.Message{*msg})
 
 	if onCompletedStatus != db.StatusFailed {
 		t.Errorf("expected StatusFailed on quota pause lockout, got %s", onCompletedStatus)
 	}
 
-	var runStatus string
-	_ = database.QueryRow(`SELECT status FROM schedule_runs WHERE id = $1`, "sched-run-quota").Scan(&runStatus)
-	if runStatus != "failed" {
-		t.Errorf("expected schedule run to be failed on quota pause, got %s", runStatus)
+	run, _ := getScheduleRun(store, "sched-run-quota")
+	if run == nil || run.Status != "failed" {
+		t.Errorf("expected schedule run to be failed on quota pause, got %+v", run)
 	}
 }
 
@@ -1691,11 +1671,8 @@ func (m *mockClaimStore) ClaimPendingMessage(ctx context.Context, id string) (bo
 
 func TestQueue_TargetedCoveragePush(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
+	defer func() { _ = store.Close() }()
 
 	// 1. StatusUpdater default sendFunc and text branches
 	t.Run("StatusUpdater defaults", func(t *testing.T) {
@@ -1730,13 +1707,13 @@ func TestQueue_TargetedCoveragePush(t *testing.T) {
 
 	// 2. Classifier OnParseError handler
 	t.Run("Classifier OnParseError", func(t *testing.T) {
-		pool1 := New(nil, WorkerPoolConfig{DB: database})
+		pool1 := New(nil, WorkerPoolConfig{Store: store})
 		if pool1.cfg.Classifier != nil && pool1.cfg.Classifier.OnParseError != nil {
 			// sess == nil
 			pool1.cfg.Classifier.OnParseError("model-1", "output ``` @everyone @here", errors.New("syntax error"))
 		}
 
-		pool2 := New(nil, WorkerPoolConfig{DB: database})
+		pool2 := New(nil, WorkerPoolConfig{Store: store})
 		if pool2.cfg.Classifier != nil && pool2.cfg.Classifier.OnParseError != nil {
 			dg, _ := discordgo.New("Bot fake")
 			pool2.SetDiscordSession(dg)
@@ -1756,9 +1733,7 @@ func TestQueue_TargetedCoveragePush(t *testing.T) {
 
 	// 3. ClaimPendingMessage branches
 	t.Run("ClaimPendingMessage branches", func(t *testing.T) {
-		store := db.NewSQLStore(database)
 		pool := New(nil, WorkerPoolConfig{
-			DB:    database,
 			Store: &mockClaimStore{Store: store, claimErr: errors.New("db lock error")},
 		})
 		// claimErr != nil -> continue
@@ -1766,7 +1741,6 @@ func TestQueue_TargetedCoveragePush(t *testing.T) {
 
 		// !claimed -> continue
 		pool2 := New(nil, WorkerPoolConfig{
-			DB:    database,
 			Store: &mockClaimStore{Store: store, claimed: false},
 		})
 		pool2.processBurst([]db.Message{{ID: "m-unclaimed", ThreadID: "t-claim"}})
@@ -1775,7 +1749,7 @@ func TestQueue_TargetedCoveragePush(t *testing.T) {
 	// 4. Stale message drop with ScheduleRunID
 	t.Run("dropBurstAsStale with ScheduleRun", func(t *testing.T) {
 		runID := "run-stale-burst-1"
-		_ = db.CreateScheduleRun(database, db.ScheduleRun{
+		_ = createScheduleRun(store, db.ScheduleRun{
 			ID:           runID,
 			ScheduleID:   "sched-stale",
 			ScheduleType: "cron",
@@ -1783,7 +1757,7 @@ func TestQueue_TargetedCoveragePush(t *testing.T) {
 			Status:       "running",
 		})
 		msgID := "msg-stale-burst-1"
-		_ = db.InsertMessage(database, db.Message{
+		_ = insertMessage(store, db.Message{
 			ID:            msgID,
 			ThreadID:      "thread-stale-burst",
 			AuthorID:      "user-1",
@@ -1792,21 +1766,20 @@ func TestQueue_TargetedCoveragePush(t *testing.T) {
 			Status:        db.StatusPending,
 			CreatedAt:     time.Now().UTC().Add(-2 * time.Hour),
 		})
-		pool := New(nil, WorkerPoolConfig{DB: database})
-		m, _ := db.GetMessage(database, msgID)
+		pool := New(nil, WorkerPoolConfig{Store: store})
+		m, _ := getMessage(store, msgID)
 		pool.processBurst([]db.Message{*m})
 
-		var runErr string
-		_ = database.QueryRow(`SELECT error FROM schedule_runs WHERE id = $1`, runID).Scan(&runErr)
-		if runErr != "[EXPIRED_STALE]" {
-			t.Errorf("expected [EXPIRED_STALE] error, got %s", runErr)
+		run, _ := getScheduleRun(store, runID)
+		if run == nil || run.Error != "[EXPIRED_STALE]" {
+			t.Errorf("expected [EXPIRED_STALE] error, got %+v", run)
 		}
 	})
 
 	// 5. Channel policy modes and wakeMode variants
 	t.Run("Channel policy modes and wakeModes", func(t *testing.T) {
 		baseCfg := WorkerPoolConfig{
-			DB: database,
+			Store: store,
 			RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 				return mockJSONResponse("", "Done"), "", 0, nil
 			},
@@ -1817,10 +1790,10 @@ func TestQueue_TargetedCoveragePush(t *testing.T) {
 		pAll.cfg.ResolveChannelPolicy = func(c, n string) config.ChannelPolicy {
 			return config.ChannelPolicy{Mode: "channel", WakeMode: "all"}
 		}
-		_ = db.InsertMessage(database, db.Message{ID: "m-all-1", ThreadID: "t-all", AuthorID: "u1", Content: "c1", Status: db.StatusPending, CreatedAt: time.Now().UTC()})
-		_ = db.InsertMessage(database, db.Message{ID: "m-all-2", ThreadID: "t-all", AuthorID: "u1", Content: "c2", Status: db.StatusPending, CreatedAt: time.Now().UTC()})
-		m1, _ := db.GetMessage(database, "m-all-1")
-		m2, _ := db.GetMessage(database, "m-all-2")
+		_ = insertMessage(store, db.Message{ID: "m-all-1", ThreadID: "t-all", AuthorID: "u1", Content: "c1", Status: db.StatusPending, CreatedAt: time.Now().UTC()})
+		_ = insertMessage(store, db.Message{ID: "m-all-2", ThreadID: "t-all", AuthorID: "u1", Content: "c2", Status: db.StatusPending, CreatedAt: time.Now().UTC()})
+		m1, _ := getMessage(store, "m-all-1")
+		m2, _ := getMessage(store, "m-all-2")
 		pAll.processBurst([]db.Message{*m1, *m2})
 
 		ptrF := func(v float64) *float64 { return &v }
@@ -1830,8 +1803,8 @@ func TestQueue_TargetedCoveragePush(t *testing.T) {
 		pZero.cfg.ResolveChannelPolicy = func(c, n string) config.ChannelPolicy {
 			return config.ChannelPolicy{Mode: "channel", AmbientWakeThreshold: ptrF(0.0)}
 		}
-		_ = db.InsertMessage(database, db.Message{ID: "m-zero-1", ThreadID: "t-zero", AuthorID: "u1", Content: "c1", Status: db.StatusPending, CreatedAt: time.Now().UTC()})
-		mz, _ := db.GetMessage(database, "m-zero-1")
+		_ = insertMessage(store, db.Message{ID: "m-zero-1", ThreadID: "t-zero", AuthorID: "u1", Content: "c1", Status: db.StatusPending, CreatedAt: time.Now().UTC()})
+		mz, _ := getMessage(store, "m-zero-1")
 		pZero.processBurst([]db.Message{*mz})
 
 		// allSkip (heuristic skip)
@@ -1839,8 +1812,8 @@ func TestQueue_TargetedCoveragePush(t *testing.T) {
 		pSkip.cfg.ResolveChannelPolicy = func(c, n string) config.ChannelPolicy {
 			return config.ChannelPolicy{Mode: "channel", AmbientWakeThreshold: ptrF(0.8)}
 		}
-		_ = db.InsertMessage(database, db.Message{ID: "m-skip-1", ThreadID: "t-skip", AuthorID: "u1", Content: "lol haha", Status: db.StatusPending, CreatedAt: time.Now().UTC()})
-		ms, _ := db.GetMessage(database, "m-skip-1")
+		_ = insertMessage(store, db.Message{ID: "m-skip-1", ThreadID: "t-skip", AuthorID: "u1", Content: "lol haha", Status: db.StatusPending, CreatedAt: time.Now().UTC()})
+		ms, _ := getMessage(store, "m-skip-1")
 		pSkip.processBurst([]db.Message{*ms})
 
 		// Classifier nil
@@ -1849,28 +1822,28 @@ func TestQueue_TargetedCoveragePush(t *testing.T) {
 		pNoClass.cfg.ResolveChannelPolicy = func(c, n string) config.ChannelPolicy {
 			return config.ChannelPolicy{Mode: "channel", AmbientWakeThreshold: ptrF(0.8)}
 		}
-		_ = db.InsertMessage(database, db.Message{ID: "m-noclass-1", ThreadID: "t-noclass", AuthorID: "u1", Content: "deep complex query", Status: db.StatusPending, CreatedAt: time.Now().UTC()})
-		mnc, _ := db.GetMessage(database, "m-noclass-1")
+		_ = insertMessage(store, db.Message{ID: "m-noclass-1", ThreadID: "t-noclass", AuthorID: "u1", Content: "deep complex query", Status: db.StatusPending, CreatedAt: time.Now().UTC()})
+		mnc, _ := getMessage(store, "m-noclass-1")
 		pNoClass.processBurst([]db.Message{*mnc})
 	})
 
 	// 6. Leading ambient, active wake, and trailing wake/ambient messages with ScheduleRunID
 	t.Run("Leading and trailing message partitioning", func(t *testing.T) {
 		runLead := "run-lead-part"
-		_ = db.CreateScheduleRun(database, db.ScheduleRun{ID: runLead, ScheduleID: "s1", ScheduleType: "cron", StartedAt: time.Now().UTC(), Status: "running"})
+		_ = createScheduleRun(store, db.ScheduleRun{ID: runLead, ScheduleID: "s1", ScheduleType: "cron", StartedAt: time.Now().UTC(), Status: "running"})
 
-		_ = db.InsertMessage(database, db.Message{ID: "m-lead", ThreadID: "t-part", AuthorID: "u1", ScheduleRunID: runLead, Content: "ambient chatter", Status: db.StatusPending, CreatedAt: time.Now().UTC()})
-		_ = db.InsertMessage(database, db.Message{ID: "m-wake", ThreadID: "t-part", AuthorID: "u1", Content: "<@aerial> wake up!", Status: db.StatusPending, CreatedAt: time.Now().UTC()})
-		_ = db.InsertMessage(database, db.Message{ID: "m-trail-amb", ThreadID: "t-part", AuthorID: "u1", Content: "more chatter", Status: db.StatusPending, CreatedAt: time.Now().UTC()})
-		_ = db.InsertMessage(database, db.Message{ID: "m-trail-wake", ThreadID: "t-part", AuthorID: "u1", Content: "<@aerial> second command", Status: db.StatusPending, CreatedAt: time.Now().UTC()})
+		_ = insertMessage(store, db.Message{ID: "m-lead", ThreadID: "t-part", AuthorID: "u1", ScheduleRunID: runLead, Content: "ambient chatter", Status: db.StatusPending, CreatedAt: time.Now().UTC()})
+		_ = insertMessage(store, db.Message{ID: "m-wake", ThreadID: "t-part", AuthorID: "u1", Content: "<@aerial> wake up!", Status: db.StatusPending, CreatedAt: time.Now().UTC()})
+		_ = insertMessage(store, db.Message{ID: "m-trail-amb", ThreadID: "t-part", AuthorID: "u1", Content: "more chatter", Status: db.StatusPending, CreatedAt: time.Now().UTC()})
+		_ = insertMessage(store, db.Message{ID: "m-trail-wake", ThreadID: "t-part", AuthorID: "u1", Content: "<@aerial> second command", Status: db.StatusPending, CreatedAt: time.Now().UTC()})
 
-		ml, _ := db.GetMessage(database, "m-lead")
-		mw, _ := db.GetMessage(database, "m-wake")
-		mta, _ := db.GetMessage(database, "m-trail-amb")
-		mtw, _ := db.GetMessage(database, "m-trail-wake")
+		ml, _ := getMessage(store, "m-lead")
+		mw, _ := getMessage(store, "m-wake")
+		mta, _ := getMessage(store, "m-trail-amb")
+		mtw, _ := getMessage(store, "m-trail-wake")
 
 		pool := New(nil, WorkerPoolConfig{
-			DB: database,
+			Store: store,
 			RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 				return mockJSONResponse("", "Processed wake"), "", 0, nil
 			},
@@ -1881,20 +1854,19 @@ func TestQueue_TargetedCoveragePush(t *testing.T) {
 
 		pool.processBurst([]db.Message{*ml, *mw, *mta, *mtw})
 
-		var leadStatus string
-		_ = database.QueryRow(`SELECT status FROM schedule_runs WHERE id = $1`, runLead).Scan(&leadStatus)
-		if leadStatus != "completed" {
-			t.Errorf("expected schedule run to be completed, got lead=%s", leadStatus)
+		run, _ := getScheduleRun(store, runLead)
+		if run == nil || run.Status != "completed" {
+			t.Errorf("expected schedule run to be completed, got lead=%+v", run)
 		}
 	})
 
 	// 7. ParseAgyOutput failure in processBurst
 	t.Run("ParseAgyOutput failure", func(t *testing.T) {
-		_ = db.InsertMessage(database, db.Message{ID: "m-badparse", ThreadID: "t-badparse", AuthorID: "u1", Content: "hello", Status: db.StatusPending, CreatedAt: time.Now().UTC()})
-		mb, _ := db.GetMessage(database, "m-badparse")
+		_ = insertMessage(store, db.Message{ID: "m-badparse", ThreadID: "t-badparse", AuthorID: "u1", Content: "hello", Status: db.StatusPending, CreatedAt: time.Now().UTC()})
+		mb, _ := getMessage(store, "m-badparse")
 
 		pool := New(nil, WorkerPoolConfig{
-			DB:          database,
+			Store:       store,
 			MaxAttempts: 1,
 			RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 				return "definitely not json and no markers", "", 0, nil
@@ -1902,7 +1874,7 @@ func TestQueue_TargetedCoveragePush(t *testing.T) {
 		})
 		pool.processBurst([]db.Message{*mb})
 
-		msg, _ := db.GetMessage(database, "m-badparse")
+		msg, _ := getMessage(store, "m-badparse")
 		if msg.Status != db.StatusFailed {
 			t.Errorf("expected message to fail on parse error, got %s", msg.Status)
 		}
@@ -1911,8 +1883,8 @@ func TestQueue_TargetedCoveragePush(t *testing.T) {
 	// 8. Rate limit failure with ScheduleRunID
 	t.Run("Rate limit failure with ScheduleRun", func(t *testing.T) {
 		runRate := "run-ratelimit-1"
-		_ = db.CreateScheduleRun(database, db.ScheduleRun{ID: runRate, ScheduleID: "s-rate", ScheduleType: "cron", StartedAt: time.Now().UTC(), Status: "running"})
-		_ = db.InsertMessage(database, db.Message{
+		_ = createScheduleRun(store, db.ScheduleRun{ID: runRate, ScheduleID: "s-rate", ScheduleType: "cron", StartedAt: time.Now().UTC(), Status: "running"})
+		_ = insertMessage(store, db.Message{
 			ID:            "m-rate-1",
 			ThreadID:      "t-rate",
 			AuthorID:      "u1",
@@ -1921,10 +1893,10 @@ func TestQueue_TargetedCoveragePush(t *testing.T) {
 			Status:        db.StatusPending,
 			CreatedAt:     time.Now().UTC(),
 		})
-		mr, _ := db.GetMessage(database, "m-rate-1")
+		mr, _ := getMessage(store, "m-rate-1")
 
 		pool := New(nil, WorkerPoolConfig{
-			DB:          database,
+			Store:       store,
 			BackoffBase: 1 * time.Millisecond,
 			RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 				return "", "Resource has been exhausted: rate limit exceeded 429", 1, errors.New("exit 1")
@@ -1932,10 +1904,9 @@ func TestQueue_TargetedCoveragePush(t *testing.T) {
 		})
 		pool.processBurst([]db.Message{*mr})
 
-		var runStatus string
-		_ = database.QueryRow(`SELECT status FROM schedule_runs WHERE id = $1`, runRate).Scan(&runStatus)
-		if runStatus != "failed" {
-			t.Errorf("expected schedule run to fail on rate limit, got %s", runStatus)
+		run, _ := getScheduleRun(store, runRate)
+		if run == nil || run.Status != "failed" {
+			t.Errorf("expected schedule run to fail on rate limit, got %+v", run)
 		}
 	})
 
@@ -1965,11 +1936,8 @@ func TestQueue_TargetedCoveragePush(t *testing.T) {
 
 func TestQueue_CoverageFinalSprint(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
+	defer func() { _ = store.Close() }()
 
 	// 1. resolveChannelSnapshot empty
 	snap, ok := resolveChannelSnapshot(nil, "")
@@ -1996,14 +1964,14 @@ func TestQueue_CoverageFinalSprint(t *testing.T) {
 	}
 
 	// 5. GetSessionLastActivity closed db error
-	dbClosed, _ := db.InitDB(":memory:")
+	dbClosed := setupTestStore(t)
 	_ = dbClosed.Close()
 	if _, _, err := GetSessionLastActivity(dbClosed, "thread-closed"); err == nil {
 		t.Errorf("expected error from GetSessionLastActivity on closed db")
 	}
 
 	// 6. runThreadWorker idle timer fire and channel close
-	p := New(nil, WorkerPoolConfig{DB: database, IdleTimeout: 5 * time.Millisecond})
+	p := New(nil, WorkerPoolConfig{Store: store, IdleTimeout: 5 * time.Millisecond})
 	stIdle := &threadWorkerState{ch: make(chan db.Message, 1)}
 	p.mu.Lock()
 	p.threadChs["t-idle-sprint"] = stIdle
@@ -2024,8 +1992,8 @@ func TestQueue_CoverageFinalSprint(t *testing.T) {
 
 	// 8. Policy ignored with ScheduleRunID
 	runIgnored := "run-ignored-sprint"
-	_ = db.CreateScheduleRun(database, db.ScheduleRun{ID: runIgnored, ScheduleID: "s-ign", ScheduleType: "cron", StartedAt: time.Now().UTC(), Status: "running"})
-	_ = db.InsertMessage(database, db.Message{
+	_ = createScheduleRun(store, db.ScheduleRun{ID: runIgnored, ScheduleID: "s-ign", ScheduleType: "cron", StartedAt: time.Now().UTC(), Status: "running"})
+	_ = insertMessage(store, db.Message{
 		ID:            "m-ign-sprint",
 		ThreadID:      "t-ign-sprint",
 		AuthorID:      "u1",
@@ -2034,10 +2002,10 @@ func TestQueue_CoverageFinalSprint(t *testing.T) {
 		Status:        db.StatusPending,
 		CreatedAt:     time.Now().UTC(),
 	})
-	mIgn, _ := db.GetMessage(database, "m-ign-sprint")
+	mIgn, _ := getMessage(store, "m-ign-sprint")
 
 	pIgn := New(nil, WorkerPoolConfig{
-		DB:           database,
+		Store:        store,
 		StalenessTTL: -1, // exercises stalenessTTL <= 0 -> 30m default
 	})
 	pIgn.cfg.ResolveChannelPolicy = func(c, n string) config.ChannelPolicy {
@@ -2045,14 +2013,13 @@ func TestQueue_CoverageFinalSprint(t *testing.T) {
 	}
 	pIgn.processBurst([]db.Message{*mIgn})
 
-	var ignStatus string
-	_ = database.QueryRow(`SELECT status FROM schedule_runs WHERE id = $1`, runIgnored).Scan(&ignStatus)
-	if ignStatus != "completed" {
-		t.Errorf("expected ignored schedule run to be completed, got %s", ignStatus)
+	run, _ := getScheduleRun(store, runIgnored)
+	if run == nil || run.Status != "completed" {
+		t.Errorf("expected ignored schedule run to be completed, got %+v", run)
 	}
 
 	// 9. Default ResolveChannelPolicy fallback when nil
-	_ = db.InsertMessage(database, db.Message{
+	_ = insertMessage(store, db.Message{
 		ID:        "m-def-pol",
 		ThreadID:  "t-def-pol",
 		AuthorID:  "u1",
@@ -2060,9 +2027,9 @@ func TestQueue_CoverageFinalSprint(t *testing.T) {
 		Status:    db.StatusPending,
 		CreatedAt: time.Now().UTC(),
 	})
-	mDef, _ := db.GetMessage(database, "m-def-pol")
+	mDef, _ := getMessage(store, "m-def-pol")
 	pDefPol := New(nil, WorkerPoolConfig{
-		DB: database,
+		Store: store,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			return mockJSONResponse("", "OK"), "", 0, nil
 		},
@@ -2071,13 +2038,13 @@ func TestQueue_CoverageFinalSprint(t *testing.T) {
 	pDefPol.processBurst([]db.Message{*mDef})
 
 	// 10. StopWithTimeout with drainTimeout <= 0 and p.cfg.DrainTimeout <= 0
-	pDrain := New(nil, WorkerPoolConfig{DB: database, DrainTimeout: -1})
+	pDrain := New(nil, WorkerPoolConfig{Store: store, DrainTimeout: -1})
 	pDrain.StopWithTimeout(0)
 
 	// 11. Trailing classifier without configured classifier
 	ptrF2 := func(v float64) *float64 { return &v }
 	pTrailNoClass := New(nil, WorkerPoolConfig{
-		DB: database,
+		Store: store,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			return mockJSONResponse("", "OK"), "", 0, nil
 		},
@@ -2086,10 +2053,10 @@ func TestQueue_CoverageFinalSprint(t *testing.T) {
 	pTrailNoClass.cfg.ResolveChannelPolicy = func(c, n string) config.ChannelPolicy {
 		return config.ChannelPolicy{Mode: "channel", WakeMode: "classifier", AmbientWakeThreshold: ptrF2(0.5)}
 	}
-	_ = db.InsertMessage(database, db.Message{ID: "m-w-lead", ThreadID: "t-trail-noclass", AuthorID: "u1", Content: "<@aerial> start", Status: db.StatusPending, CreatedAt: time.Now().UTC()})
-	_ = db.InsertMessage(database, db.Message{ID: "m-trail-query", ThreadID: "t-trail-noclass", AuthorID: "u1", Content: "why is the ocean blue", Status: db.StatusPending, CreatedAt: time.Now().UTC()})
-	mwLead, _ := db.GetMessage(database, "m-w-lead")
-	mtQuery, _ := db.GetMessage(database, "m-trail-query")
+	_ = insertMessage(store, db.Message{ID: "m-w-lead", ThreadID: "t-trail-noclass", AuthorID: "u1", Content: "<@aerial> start", Status: db.StatusPending, CreatedAt: time.Now().UTC()})
+	_ = insertMessage(store, db.Message{ID: "m-trail-query", ThreadID: "t-trail-noclass", AuthorID: "u1", Content: "why is the ocean blue", Status: db.StatusPending, CreatedAt: time.Now().UTC()})
+	mwLead, _ := getMessage(store, "m-w-lead")
+	mtQuery, _ := getMessage(store, "m-trail-query")
 	pTrailNoClass.processBurst([]db.Message{*mwLead, *mtQuery})
 
 	// 12. getTurnHistory slicing when turnHistoryFetched && len(turnHistory) > limit
@@ -2105,7 +2072,7 @@ func TestQueue_CoverageFinalSprint(t *testing.T) {
 	}
 
 	pHistSlice := New(nil, WorkerPoolConfig{
-		DB: database,
+		Store: store,
 		HistoryFetcher: func(ctx context.Context, channelID, beforeID string, limit int) ([]HistoryMessage, error) {
 			return hist15, nil
 		},
@@ -2113,7 +2080,7 @@ func TestQueue_CoverageFinalSprint(t *testing.T) {
 			return mockJSONResponse("", "OK"), "", 0, nil
 		},
 	})
-	_ = db.InsertMessage(database, db.Message{
+	_ = insertMessage(store, db.Message{
 		ID:        "m-hist-slice",
 		ThreadID:  "t-hist-slice-123",
 		AuthorID:  "u1",
@@ -2121,11 +2088,11 @@ func TestQueue_CoverageFinalSprint(t *testing.T) {
 		Status:    db.StatusPending,
 		CreatedAt: time.Now().UTC(),
 	})
-	mHistSlice, _ := db.GetMessage(database, "m-hist-slice")
+	mHistSlice, _ := getMessage(store, "m-hist-slice")
 	pHistSlice.processBurst([]db.Message{*mHistSlice})
 
 	// 13. Staleness fail-open on database error during GetSessionLastActivity
-	staleDB, _ := db.InitDB(":memory:")
+	staleStore := setupTestStore(t)
 	msgStale := db.Message{
 		ID:        "m-stale-failopen",
 		ThreadID:  "t-stale-failopen",
@@ -2134,12 +2101,181 @@ func TestQueue_CoverageFinalSprint(t *testing.T) {
 		Content:   "stale content",
 	}
 	pStale := New(nil, WorkerPoolConfig{
-		DB:          staleDB,
+		Store:       &mockClaimStore{Store: staleStore, claimed: true},
 		BackoffBase: 1 * time.Millisecond,
-		Store:       &mockClaimStore{Store: db.NewSQLStore(staleDB), claimed: true},
 	})
-	_ = staleDB.Close() // Force GetSessionLastActivity to return error
+	_ = staleStore.Close() // Force GetSessionLastActivity to return error
 	pStale.processBurst([]db.Message{msgStale})
+}
+
+func TestStoreAndTurnExecutionHelpers_Coverage(t *testing.T) {
+	t.Parallel()
+
+	// 1. resolveStore permutations
+	if s := resolveStore(nil); s != nil {
+		t.Errorf("expected nil from resolveStore(nil), got %v", s)
+	}
+	if s := resolveStore("unsupported string"); s != nil {
+		t.Errorf("expected nil from resolveStore(string), got %v", s)
+	}
+	if s := resolveStore((*db.FakeStore)(nil)); s != nil {
+		t.Errorf("expected nil from resolveStore((*FakeStore)(nil)), got %v", s)
+	}
+	if s := resolveStore((*db.SQLStore)(nil)); s != nil {
+		t.Errorf("expected nil from resolveStore((*SQLStore)(nil)), got %v", s)
+	}
+	if s := resolveStore((*sql.DB)(nil)); s != nil {
+		t.Errorf("expected nil from resolveStore((*sql.DB)(nil)), got %v", s)
+	}
+	fake := setupTestStore(t)
+	if s := resolveStore(fake); s != fake {
+		t.Errorf("expected same FakeStore from resolveStore, got %v", s)
+	}
+
+	// 2. WorkerPool.Store() and SummaryGroup() permutations
+	if s := (*WorkerPool)(nil).Store(); s != nil {
+		t.Errorf("expected nil from nil WorkerPool.Store(), got %v", s)
+	}
+	if sg := (*WorkerPool)(nil).SummaryGroup(); sg != nil {
+		t.Errorf("expected nil from nil WorkerPool.SummaryGroup(), got %v", sg)
+	}
+	pEmpty := &WorkerPool{}
+	if s := pEmpty.Store(); s != nil {
+		t.Errorf("expected nil from empty WorkerPool.Store(), got %v", s)
+	}
+	if sg := pEmpty.SummaryGroup(); sg == nil {
+		t.Errorf("expected non-nil summaryGroup from empty WorkerPool")
+	}
+	pFake := &WorkerPool{cfg: WorkerPoolConfig{Store: fake}}
+	if s := pFake.Store(); s != fake {
+		t.Errorf("expected fake from WorkerPool.Store(), got %v", s)
+	}
+
+	realDB, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer func() { _ = realDB.Close() }()
+	pDB := &WorkerPool{cfg: WorkerPoolConfig{DB: realDB}}
+	if s := pDB.Store(); s == nil {
+		t.Errorf("expected non-nil Store from WorkerPool with DB")
+	}
+	if s := resolveStore(realDB); s == nil {
+		t.Errorf("expected non-nil Store from resolveStore(*sql.DB)")
+	}
+
+	// 2b. GetSessionLastActivity edge cases
+	if _, isCold, err := GetSessionLastActivity("invalid-type", "t1"); err != nil || !isCold {
+		t.Errorf("expected true, nil for invalid type, got cold=%v err=%v", isCold, err)
+	}
+	_ = insertMessage(fake, db.Message{
+		ID:        "m-last-act",
+		ThreadID:  "t-last-act",
+		AuthorID:  "u1",
+		Status:    db.StatusCompleted,
+		CreatedAt: time.Now().UTC(),
+	})
+	if act, isCold, err := GetSessionLastActivity(fake, "t-last-act"); err != nil || isCold || act.IsZero() {
+		t.Errorf("expected non-zero activity, not cold for completed message, got act=%v cold=%v err=%v", act, isCold, err)
+	}
+
+	// 3. turnExecution helper nil-store branches
+	var teNil *turnExecution
+	if s := teNil.store(); s != nil {
+		t.Errorf("expected nil from nil te.store()")
+	}
+	teNoStore := &turnExecution{}
+	if s := teNoStore.store(); s != nil {
+		t.Errorf("expected nil from teNoStore.store()")
+	}
+
+	if err := teNoStore.updateMessageStatus("m1", "failed", "err"); err != nil {
+		t.Errorf("unexpected err: %v", err)
+	}
+	if err := teNoStore.updateScheduleRunStatus(db.UpdateRunParams{RunID: "r1"}); err != nil {
+		t.Errorf("unexpected err: %v", err)
+	}
+	if err := teNoStore.updateMessageCompleted("m1", "resp"); err != nil {
+		t.Errorf("unexpected err: %v", err)
+	}
+	if err := teNoStore.incrementMessageRetry("m1", "retry-err"); err != nil {
+		t.Errorf("unexpected err: %v", err)
+	}
+	if err := teNoStore.saveSessionID("t1", "s1"); err != nil {
+		t.Errorf("unexpected err: %v", err)
+	}
+	if err := teNoStore.rotateSessionID("t1", "s2"); err != nil {
+		t.Errorf("unexpected err: %v", err)
+	}
+	if count, err := teNoStore.getSessionTurnCount("t1"); count != 0 || err != nil {
+		t.Errorf("expected 0, nil, got %d, %v", count, err)
+	}
+	if count, err := teNoStore.incrementSessionTurnCount("t1"); count != 0 || err != nil {
+		t.Errorf("expected 0, nil, got %d, %v", count, err)
+	}
+	if sid, err := teNoStore.getSessionID("t1"); sid != "" || err != nil {
+		t.Errorf("expected '', nil, got %q, %v", sid, err)
+	}
+	if sid, err := teNoStore.getPreviousSessionID("t1"); sid != "" || err != nil {
+		t.Errorf("expected '', nil, got %q, %v", sid, err)
+	}
+	if err := teNoStore.createOneShotSchedule(db.OneShotSchedule{ID: "os1"}); err != nil {
+		t.Errorf("unexpected err: %v", err)
+	}
+	if sum, last, err := teNoStore.getThreadSummary("t1"); sum != "" || last != "" || err != nil {
+		t.Errorf("expected '', '', nil, got %q, %q, %v", sum, last, err)
+	}
+	if err := teNoStore.saveThreadSummary("t1", "summary", "last-m"); err != nil {
+		t.Errorf("unexpected err: %v", err)
+	}
+	if msgs, err := teNoStore.getRecentThreadMessages("t1", 10); msgs != nil || err != nil {
+		t.Errorf("expected nil, nil, got %v, %v", msgs, err)
+	}
+
+	// 4. turnExecution helper active-store branches
+	teStore := &turnExecution{pool: pFake}
+	if err := teStore.updateMessageStatus("m1", "processing"); err != nil {
+		t.Errorf("unexpected err: %v", err)
+	}
+	if err := teStore.updateScheduleRunStatus(db.UpdateRunParams{RunID: "r1"}); err != nil {
+		t.Errorf("unexpected err: %v", err)
+	}
+	if err := teStore.updateMessageCompleted("m1", "resp"); err != nil {
+		t.Errorf("unexpected err: %v", err)
+	}
+	if err := teStore.incrementMessageRetry("m1", "retry-err"); err != nil {
+		t.Errorf("unexpected err: %v", err)
+	}
+	if err := teStore.saveSessionID("t1", "s1"); err != nil {
+		t.Errorf("unexpected err: %v", err)
+	}
+	if err := teStore.rotateSessionID("t1", "s2"); err != nil {
+		t.Errorf("unexpected err: %v", err)
+	}
+	if _, err := teStore.getSessionTurnCount("t1"); err != nil {
+		t.Errorf("unexpected err: %v", err)
+	}
+	if _, err := teStore.incrementSessionTurnCount("t1"); err != nil {
+		t.Errorf("unexpected err: %v", err)
+	}
+	if _, err := teStore.getSessionID("t1"); err != nil {
+		t.Errorf("unexpected err: %v", err)
+	}
+	if _, err := teStore.getPreviousSessionID("t1"); err != nil {
+		t.Errorf("unexpected err: %v", err)
+	}
+	if err := teStore.createOneShotSchedule(db.OneShotSchedule{ID: "os1"}); err != nil {
+		t.Errorf("unexpected err: %v", err)
+	}
+	if _, _, err := teStore.getThreadSummary("t1"); err != nil {
+		t.Errorf("unexpected err: %v", err)
+	}
+	if err := teStore.saveThreadSummary("t1", "sum", "m1"); err != nil {
+		t.Errorf("unexpected err: %v", err)
+	}
+	if _, err := teStore.getRecentThreadMessages("t1", 10); err != nil {
+		t.Errorf("unexpected err: %v", err)
+	}
 }
 
 

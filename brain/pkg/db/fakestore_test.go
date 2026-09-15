@@ -716,6 +716,7 @@ func TestFakeStoreClosedCoverage(t *testing.T) {
 	_ = s.CreateScheduleRun(ctx, ScheduleRun{})
 	_ = s.UpdateScheduleRunStatus(ctx, UpdateRunParams{})
 	_, _, _ = s.GetScheduleRunsPaginated(ctx, 10, 0, "", "")
+	_, _ = s.GetScheduleRun("id")
 	_, _ = s.GetScheduleSummaryMetrics(ctx)
 	_, _ = s.ReconcileOrphanedScheduleRuns(ctx)
 	_, _ = s.PruneScheduleRuns(ctx, 10, time.Hour)
@@ -762,5 +763,51 @@ func TestFakeStoreWithTxFullState(t *testing.T) {
 	exists, _ := s.MessageExists(ctx, "m-tx-new")
 	if !exists {
 		t.Errorf("expected m-tx-new to exist after commit")
+	}
+}
+
+func TestFakeStoreTestHelpers(t *testing.T) {
+	s := NewFakeStore()
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	// 1. SetSessionInfo
+	s.SetSessionInfo(SessionInfo{
+		ThreadID:          "th-helper",
+		InternalSessionID: "sess-helper",
+		TurnCount:         5,
+		CreatedAt:         now.Add(-time.Hour),
+		UpdatedAt:         now.Add(-10 * time.Minute),
+	})
+	sess, err := s.GetSessionInfo(ctx, "th-helper")
+	if err != nil || sess == nil || sess.TurnCount != 5 || sess.InternalSessionID != "sess-helper" {
+		t.Fatalf("SetSessionInfo failed: sess=%+v, err=%v", sess, err)
+	}
+
+	// 2. SetMessageUpdatedAt
+	_ = s.InsertMessage(ctx, Message{ID: "m-helper", ThreadID: "th-helper", Status: StatusPending})
+	customTime := now.Add(-30 * time.Minute)
+	s.SetMessageUpdatedAt("m-helper", customTime)
+	s.SetMessageUpdatedAt("non-existent", customTime) // no-op branch
+	m, err := s.GetMessage(ctx, "m-helper")
+	if err != nil || m == nil || !m.UpdatedAt.Equal(customTime) {
+		t.Fatalf("SetMessageUpdatedAt failed: m=%+v, err=%v", m, err)
+	}
+
+	// 3. GetScheduleRun
+	_, err = s.GetScheduleRun("non-existent-run")
+	if !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("expected sql.ErrNoRows for non-existent run, got: %v", err)
+	}
+
+	_ = s.CreateScheduleRun(ctx, ScheduleRun{
+		ID:         "run-helper",
+		ScheduleID: "sched-helper",
+		Status:     "completed",
+		StartedAt:  now,
+	})
+	run, err := s.GetScheduleRun("run-helper")
+	if err != nil || run == nil || run.Status != "completed" {
+		t.Fatalf("GetScheduleRun failed: run=%+v, err=%v", run, err)
 	}
 }

@@ -107,6 +107,48 @@ func (p *WorkerPool) SummaryGroup() *singleflight.Group {
 	return &p.summaryGroup
 }
 
+// Store returns the configured db.Store, resolving cfg.Store or wrapping cfg.DB if necessary.
+func (p *WorkerPool) Store() db.Store {
+	if p == nil {
+		return nil
+	}
+	if p.cfg.Store != nil {
+		return p.cfg.Store
+	}
+	if p.cfg.DB != nil {
+		p.cfg.Store = db.NewSQLStore(p.cfg.DB)
+		return p.cfg.Store
+	}
+	return nil
+}
+
+func resolveStore(dbOrStore any) db.Store {
+	if dbOrStore == nil {
+		return nil
+	}
+	switch s := dbOrStore.(type) {
+	case *db.FakeStore:
+		if s == nil {
+			return nil
+		}
+		return s
+	case *db.SQLStore:
+		if s == nil {
+			return nil
+		}
+		return s
+	case db.Store:
+		return s
+	case *sql.DB:
+		if s == nil {
+			return nil
+		}
+		return db.NewSQLStore(s)
+	default:
+		return nil
+	}
+}
+
 // New creates a new WorkerPool with pure *config.Config dependency injection.
 func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 	if cfg.Store == nil && cfg.DB != nil {
@@ -259,7 +301,7 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 
 	if p.cfg.HistoryFetcher == nil {
 		p.cfg.HistoryFetcher = func(ctx context.Context, channelID string, beforeID string, limit int) ([]HistoryMessage, error) {
-			fetcher := DefaultHistoryFetcher(p.getDiscordSession(), p.cfg.DB)
+			fetcher := DefaultHistoryFetcher(p.getDiscordSession(), p.Store())
 			return fetcher(ctx, channelID, beforeID, limit)
 		}
 	}
@@ -462,7 +504,17 @@ func (p *WorkerPool) StopWithTimeout(drainTimeout time.Duration) {
 	}
 
 	// Stage 3: Atomic safety net: sweep any remaining PROCESSING messages to PENDING
-	if p.cfg.DB != nil {
+	if store := p.Store(); store != nil {
+		sweepCtx, sweepCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		if msgs, err := store.GetPendingOrProcessingMessages(sweepCtx, 0); err == nil {
+			for _, m := range msgs {
+				if m.Status == db.StatusProcessing {
+					_ = store.UpdateMessageStatus(sweepCtx, m.ID, db.StatusPending, "deployment_drain")
+				}
+			}
+		}
+		sweepCancel()
+	} else if p.cfg.DB != nil {
 		sweepCtx, sweepCancel := context.WithTimeout(context.Background(), 2*time.Second)
 		_, _ = p.cfg.DB.ExecContext(sweepCtx, "UPDATE messages SET status = 'PENDING', error_message = 'deployment_drain' WHERE status = 'PROCESSING'")
 		sweepCancel()

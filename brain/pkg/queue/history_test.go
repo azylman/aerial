@@ -257,14 +257,10 @@ func TestFormatChannelHistory_EmptyOrAllClamped(t *testing.T) {
 
 func TestDefaultHistoryFetcher_NonSnowflakeFallback(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	now := time.Now().UTC()
-	err = db.InsertMessage(database, db.Message{
+	err := insertMessage(store, db.Message{
 		ID:         "msg-1",
 		ThreadID:   "chan-test",
 		AuthorID:   "user-1",
@@ -276,7 +272,7 @@ func TestDefaultHistoryFetcher_NonSnowflakeFallback(t *testing.T) {
 		t.Fatalf("InsertMessage 1 failed: %v", err)
 	}
 
-	err = db.InsertMessage(database, db.Message{
+	err = insertMessage(store, db.Message{
 		ID:         "msg-2",
 		ThreadID:   "chan-test",
 		AuthorID:   "bot-1",
@@ -289,7 +285,7 @@ func TestDefaultHistoryFetcher_NonSnowflakeFallback(t *testing.T) {
 	}
 
 	// dg is nil, channelID is non-snowflake "chan-test"
-	fetcher := DefaultHistoryFetcher(nil, database)
+	fetcher := DefaultHistoryFetcher(nil, store)
 	history, err := fetcher(context.Background(), "chan-test", "", 10)
 	if err != nil {
 		t.Fatalf("fetcher returned unexpected error: %v", err)
@@ -398,14 +394,10 @@ func TestDefaultHistoryFetcher_DiscordAPISuccess(t *testing.T) {
 
 func TestDefaultHistoryFetcher_DiscordAPIErrorFallback(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	now := time.Now().UTC()
-	err = db.InsertMessage(database, db.Message{
+	err := insertMessage(store, db.Message{
 		ID:         "msg-db-1",
 		ThreadID:   "123456789012345678",
 		AuthorID:   "user-1",
@@ -426,7 +418,7 @@ func TestDefaultHistoryFetcher_DiscordAPIErrorFallback(t *testing.T) {
 		return nil, errors.New("discord API gateway 502 bad gateway")
 	})
 
-	fetcher := DefaultHistoryFetcher(dg, database)
+	fetcher := DefaultHistoryFetcher(dg, store)
 	history, err := fetcher(context.Background(), "123456789012345678", "", 10)
 	if err != nil {
 		t.Fatalf("expected successful fallback, got error: %v", err)
@@ -595,14 +587,10 @@ func TestSummarizeThreadHistory_Singleflight(t *testing.T) {
 
 func TestFetchRecentThreadHistory_DBFirst(t *testing.T) {
 	t.Parallel()
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := setupTestStore(t)
 
 	now := time.Now().UTC()
-	err = db.InsertMessage(database, db.Message{
+	err := insertMessage(store, db.Message{
 		ID:         "msg-db-thread-1",
 		ThreadID:   "111111111111111111",
 		AuthorID:   "user-1",
@@ -614,7 +602,7 @@ func TestFetchRecentThreadHistory_DBFirst(t *testing.T) {
 		t.Fatalf("InsertMessage failed: %v", err)
 	}
 
-	history, err := FetchRecentThreadHistory(context.Background(), nil, database, "111111111111111111", 10)
+	history, err := FetchRecentThreadHistory(context.Background(), nil, store, "111111111111111111", 10)
 	if err != nil {
 		t.Fatalf("FetchRecentThreadHistory failed: %v", err)
 	}
