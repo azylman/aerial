@@ -50,15 +50,15 @@ func BuildFactsUpstreamURL(brainBaseURL string, inQuery url.Values) (targetURL s
 
 	outQuery := target.Query()
 	if inQuery != nil {
-		if lStr := inQuery.Get("limit"); lStr != "" {
-			if n, err := strconv.Atoi(lStr); err == nil && n > 0 {
+		if limitStr := inQuery.Get("limit"); limitStr != "" {
+			if n, err := strconv.Atoi(limitStr); err == nil && n > 0 {
 				limit = n
 				outQuery.Set("limit", strconv.Itoa(limit))
 			}
 		}
 
-		if oStr := inQuery.Get("offset"); oStr != "" {
-			if n, err := strconv.Atoi(oStr); err == nil && n >= 0 {
+		if offsetStr := inQuery.Get("offset"); offsetStr != "" {
+			if n, err := strconv.Atoi(offsetStr); err == nil && n >= 0 {
 				offset = n
 				if offset > 0 {
 					outQuery.Set("offset", strconv.Itoa(offset))
