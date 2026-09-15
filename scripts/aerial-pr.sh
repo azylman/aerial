@@ -72,6 +72,137 @@ init_scratch() {
 
 SCRATCH_DIR_CLEANUP=""
 
+get_deploy_status() {
+    local target="${1:-}"
+    local commit_sha=""
+
+    # 1. If target is numeric, treat as PR number and resolve merged/head SHA
+    if [[ "$target" =~ ^[0-9]+$ ]]; then
+        local pr_raw=""
+        if [ -n "${GITHUB_PAT:-}" ]; then
+            pr_raw=$(curl -s --connect-timeout 2 -m 4 -H "Authorization: token ${GITHUB_PAT}" \
+                -H "Accept: application/vnd.github.v3+json" \
+                "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/pulls/${target}" 2>/dev/null || true)
+        fi
+        if [ -n "$pr_raw" ] && echo "$pr_raw" | jq -e . >/dev/null 2>&1; then
+            local is_merged
+            is_merged=$(echo "$pr_raw" | jq -r '.merged // false' 2>/dev/null || echo "false")
+            if [ "$is_merged" = "true" ]; then
+                commit_sha=$(echo "$pr_raw" | jq -r '.merge_commit_sha // empty' 2>/dev/null || true)
+            else
+                echo '{"deploy_state":"not_started","stage":"not_started","details":"PR is not merged yet; deployment starts upon merge"}'
+                return 0
+            fi
+        fi
+    else
+        commit_sha="$target"
+    fi
+
+    local short_sha=""
+    if [ -n "$commit_sha" ]; then
+        short_sha="${commit_sha:0:7}"
+    fi
+
+    # 2. Query Dashboard API (primary real-time source with strict SHA matching)
+    local dashboard_url="${AERIAL_DASHBOARD_URL:-http://aerial-dashboard:8080/api/status}"
+    local dash_resp=""
+    dash_resp=$(curl -s --connect-timeout 2 -m 3 "$dashboard_url" 2>/dev/null || true)
+
+    if [ -n "$dash_resp" ] && echo "$dash_resp" | jq -e '.deployments | arrays' >/dev/null 2>&1; then
+        local matching_dep=""
+        if [ -n "$short_sha" ]; then
+            matching_dep=$(echo "$dash_resp" | jq --arg sha "$short_sha" '[.deployments[]? | select(.commit != null and ((.commit | startswith($sha)) or ($sha | startswith(.commit))))] | first // empty' 2>/dev/null || true)
+        fi
+
+        if [ -n "$matching_dep" ] && [ "$matching_dep" != "null" ]; then
+            local stage progress matrix_summary
+            stage=$(echo "$matching_dep" | jq -r '.stage // "unknown"' 2>/dev/null || echo "unknown")
+            progress=$(echo "$matching_dep" | jq -r '.progress // 0' 2>/dev/null || echo 0)
+            matrix_summary=$(echo "$matching_dep" | jq -r '[.matrix_jobs[]? | "\(.name): \(.status)"] | join(", ")' 2>/dev/null || true)
+
+            case "$stage" in
+                live)
+                    echo "{\"deploy_state\":\"done\",\"stage\":\"done\",\"progress\":100,\"details\":\"Stack is live and healthy\"}"
+                    return 0
+                    ;;
+                queued)
+                    echo "{\"deploy_state\":\"ongoing\",\"stage\":\"queued\",\"progress\":${progress},\"details\":\"Continuous Delivery workflow queued\"}"
+                    return 0
+                    ;;
+                building)
+                    local detail_msg="CI Build & GHCR in progress"
+                    if [ -n "$matrix_summary" ]; then
+                        detail_msg="CI Build & GHCR (${matrix_summary})"
+                    fi
+                    echo "{\"deploy_state\":\"ongoing\",\"stage\":\"building\",\"progress\":${progress},\"details\":\"${detail_msg}\"}"
+                    return 0
+                    ;;
+                awaiting_pull)
+                    echo "{\"deploy_state\":\"ongoing\",\"stage\":\"awaiting_pull\",\"progress\":${progress},\"details\":\"Images published to GHCR; awaiting Watchtower pull\"}"
+                    return 0
+                    ;;
+                swapping)
+                    echo "{\"deploy_state\":\"ongoing\",\"stage\":\"swapping\",\"progress\":${progress},\"details\":\"Containers restarting / swapping\"}"
+                    return 0
+                    ;;
+                failed)
+                    echo "{\"deploy_state\":\"failed\",\"stage\":\"failed\",\"progress\":${progress},\"details\":\"Deployment failed\"}"
+                    return 0
+                    ;;
+                degraded)
+                    echo "{\"deploy_state\":\"degraded\",\"stage\":\"degraded\",\"progress\":${progress},\"details\":\"One or more containers unhealthy\"}"
+                    return 0
+                    ;;
+                *)
+                    echo "{\"deploy_state\":\"ongoing\",\"stage\":\"${stage}\",\"progress\":${progress},\"details\":\"Deployment in stage ${stage}\"}"
+                    return 0
+                    ;;
+            esac
+        fi
+    fi
+
+    # 3. Direct GitHub Actions API check (fallback & registration grace guard)
+    if [ -n "$commit_sha" ] && [ -n "${GITHUB_PAT:-}" ]; then
+        local gh_runs=""
+        gh_runs=$(curl -s --connect-timeout 2 -m 3 -H "Authorization: token ${GITHUB_PAT}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/actions/runs?head_sha=${commit_sha}&event=push" 2>/dev/null || true)
+
+        if [ -n "$gh_runs" ] && echo "$gh_runs" | jq -e '.workflow_runs | arrays' >/dev/null 2>&1; then
+            # Filter specifically to Continuous Delivery / docker-publish workflow
+            local cd_run
+            cd_run=$(echo "$gh_runs" | jq '[.workflow_runs[]? | select(.name == "Continuous Delivery" or (.path? | endswith("docker-publish.yml")))] | first // empty' 2>/dev/null || true)
+
+            if [ -z "$cd_run" ] || [ "$cd_run" = "null" ]; then
+                echo '{"deploy_state":"ongoing","stage":"pending_registration","details":"Continuous Delivery workflow pending registration in GitHub Actions"}'
+                return 0
+            fi
+
+            local run_status run_conclusion run_html
+            run_status=$(echo "$cd_run" | jq -r '.status // empty' 2>/dev/null || true)
+            run_conclusion=$(echo "$cd_run" | jq -r '.conclusion // empty' 2>/dev/null || true)
+            run_html=$(echo "$cd_run" | jq -r '.html_url // empty' 2>/dev/null || true)
+
+            if [ "$run_status" = "queued" ]; then
+                echo "{\"deploy_state\":\"ongoing\",\"stage\":\"queued\",\"details\":\"Continuous Delivery workflow queued\",\"html_url\":\"${run_html}\"}"
+                return 0
+            elif [ "$run_status" = "in_progress" ]; then
+                echo "{\"deploy_state\":\"ongoing\",\"stage\":\"building\",\"details\":\"Continuous Delivery workflow building in GitHub Actions\",\"html_url\":\"${run_html}\"}"
+                return 0
+            elif [ "$run_conclusion" = "failure" ]; then
+                echo "{\"deploy_state\":\"failed\",\"stage\":\"failed\",\"details\":\"Continuous Delivery workflow failed in GitHub Actions\",\"html_url\":\"${run_html}\"}"
+                return 0
+            elif [ "$run_conclusion" = "success" ]; then
+                echo "{\"deploy_state\":\"done\",\"stage\":\"done\",\"details\":\"Continuous Delivery completed successfully\",\"html_url\":\"${run_html}\"}"
+                return 0
+            fi
+        fi
+    fi
+
+    echo '{"deploy_state":"unknown","stage":"unknown","details":"Telemetry unavailable"}'
+    return 0
+}
+
 merge_pr() {
     local pr_num="${1:-}"
     local branch="${2:-}"
@@ -106,7 +237,9 @@ merge_pr() {
     if [ "$is_merged" = "true" ]; then
         local merged_sha
         merged_sha=$(echo "$pr_resp" | jq -r '.merge_commit_sha // empty')
-        echo "{\"status\":\"already_merged\",\"pr_url\":\"${pr_url}\",\"pr_number\":${pr_num},\"merged_sha\":\"${merged_sha}\"}"
+        local deploy_json
+        deploy_json=$(get_deploy_status "$merged_sha" 2>/dev/null || echo '{"deploy_state":"unknown","stage":"unknown","details":"Telemetry error"}')
+        echo "{\"status\":\"already_merged\",\"pr_url\":\"${pr_url}\",\"pr_number\":${pr_num},\"merged_sha\":\"${merged_sha}\",\"deployment\":${deploy_json}}"
         exit 0
     fi
 
@@ -135,7 +268,7 @@ merge_pr() {
     local mergeable_state
     mergeable_state=$(echo "$pr_resp" | jq -r '.mergeable_state // empty')
     if [ "$mergeable" = "false" ] || [ "$mergeable_state" = "dirty" ]; then
-        echo "{\"status\":\"conflict\",\"pr_url\":\"${pr_url}\",\"pr_number\":${pr_num},\"error\":\"Pull request has merge conflicts with base branch\"}"
+        echo "{\"status\":\"conflict\",\"pr_url\":\"${pr_url}\",\"pr_number\":${pr_num},\"error\":\"Pull request has merge conflicts with base branch\",\"deployment\":{\"deploy_state\":\"not_started\",\"stage\":\"not_started\",\"details\":\"Pull request has merge conflicts; deployment blocked\"}}"
         exit 1
     fi
 
@@ -172,11 +305,12 @@ merge_pr() {
     local pr_age=$((now_epoch - pr_created_epoch))
 
     if [ "$total_count" -eq 0 ]; then
+        local deploy_json='{"deploy_state":"not_started","stage":"not_started","details":"PR CI checks pending registration; deployment starts upon merge"}'
         if [ $pr_age -lt 60 ]; then
-            echo "{\"status\":\"pending\",\"pr_url\":\"${pr_url}\",\"pr_number\":${pr_num},\"pending_count\":1,\"failure_count\":0,\"total_runs\":0,\"message\":\"CI checks pending registration (PR age ${pr_age}s)\"}"
+            echo "{\"status\":\"pending\",\"pr_url\":\"${pr_url}\",\"pr_number\":${pr_num},\"pending_count\":1,\"failure_count\":0,\"total_runs\":0,\"message\":\"CI checks pending registration (PR age ${pr_age}s)\",\"deployment\":${deploy_json}}"
             exit 2
         fi
-        echo "{\"status\":\"pending\",\"pr_url\":\"${pr_url}\",\"pr_number\":${pr_num},\"pending_count\":0,\"failure_count\":0,\"total_runs\":0,\"message\":\"No CI runs registered yet after ${pr_age}s\"}"
+        echo "{\"status\":\"pending\",\"pr_url\":\"${pr_url}\",\"pr_number\":${pr_num},\"pending_count\":0,\"failure_count\":0,\"total_runs\":0,\"message\":\"No CI runs registered yet after ${pr_age}s\",\"deployment\":${deploy_json}}"
         exit 2
     fi
 
@@ -188,12 +322,14 @@ merge_pr() {
     if [ "$failure_count" -gt 0 ]; then
         local failed_runs
         failed_runs=$(echo "$check_resp" | jq '[.workflow_runs[]? | select(.conclusion != null and .conclusion != "success" and .conclusion != "neutral" and .conclusion != "skipped") | {name: .name, conclusion: .conclusion, html_url: .html_url}]')
-        echo "{\"status\":\"failed\",\"pr_url\":\"${pr_url}\",\"pr_number\":${pr_num},\"failure_count\":${failure_count},\"failed_runs\":${failed_runs}}"
+        local deploy_json='{"deploy_state":"not_started","stage":"not_started","details":"PR CI checks failed; deployment blocked"}'
+        echo "{\"status\":\"failed\",\"pr_url\":\"${pr_url}\",\"pr_number\":${pr_num},\"failure_count\":${failure_count},\"failed_runs\":${failed_runs},\"deployment\":${deploy_json}}"
         exit 1
     fi
 
     if [ "$pending_count" -gt 0 ]; then
-        echo "{\"status\":\"pending\",\"pr_url\":\"${pr_url}\",\"pr_number\":${pr_num},\"pending_count\":${pending_count},\"failure_count\":0,\"total_runs\":${total_count}}"
+        local deploy_json='{"deploy_state":"not_started","stage":"not_started","details":"PR CI checks in progress; deployment starts upon merge"}'
+        echo "{\"status\":\"pending\",\"pr_url\":\"${pr_url}\",\"pr_number\":${pr_num},\"pending_count\":${pending_count},\"failure_count\":0,\"total_runs\":${total_count},\"deployment\":${deploy_json}}"
         exit 2
     fi
 
@@ -215,10 +351,19 @@ merge_pr() {
     merge_resp=$(echo "$merge_raw" | sed '$d')
 
     if [ "$merge_code" -lt 200 ] || [ "$merge_code" -ge 300 ]; then
+        local recheck_raw
+        recheck_raw=$(curl -s -H "Authorization: token ${GITHUB_PAT}" "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/pulls/${pr_num}")
         local recheck_merged
-        recheck_merged=$(curl -s -H "Authorization: token ${GITHUB_PAT}" "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/pulls/${pr_num}" | jq -r '.merged // false')
+        recheck_merged=$(echo "$recheck_raw" | jq -r '.merged // false')
         if [ "$recheck_merged" = "true" ]; then
-            echo "{\"status\":\"already_merged\",\"pr_url\":\"${pr_url}\",\"pr_number\":${pr_num}}"
+            local recheck_sha
+            recheck_sha=$(echo "$recheck_raw" | jq -r '.merge_commit_sha // empty')
+            if [ -z "$recheck_sha" ]; then
+                recheck_sha="$commit_sha"
+            fi
+            local deploy_json
+            deploy_json=$(get_deploy_status "$recheck_sha" 2>/dev/null || echo '{"deploy_state":"unknown","stage":"unknown","details":"Telemetry error"}')
+            echo "{\"status\":\"already_merged\",\"pr_url\":\"${pr_url}\",\"pr_number\":${pr_num},\"merged_sha\":\"${recheck_sha}\",\"deployment\":${deploy_json}}"
             exit 0
         fi
         echo "{\"status\":\"error\",\"error_code\":${merge_code},\"message\":\"Failed to merge PR #${pr_num}: ${merge_resp}\"}" >&2
@@ -252,7 +397,10 @@ merge_pr() {
         sync_status="synced"
     fi
 
-    echo "{\"status\":\"merged\",\"pr_url\":\"${pr_url}\",\"pr_number\":${pr_num},\"merged_sha\":\"${merged_sha}\",\"sync_status\":\"${sync_status}\"}"
+    local deploy_json
+    deploy_json=$(get_deploy_status "$merged_sha" 2>/dev/null || echo '{"deploy_state":"unknown","stage":"unknown","details":"Telemetry error"}')
+
+    echo "{\"status\":\"merged\",\"pr_url\":\"${pr_url}\",\"pr_number\":${pr_num},\"merged_sha\":\"${merged_sha}\",\"sync_status\":\"${sync_status}\",\"deployment\":${deploy_json}}"
     exit 0
 }
 
@@ -278,11 +426,16 @@ schedule_pr_followup() {
     local prompt
     prompt=$(cat <<EOF
 Check on the status of Pull Request #${pr_num} on ${REPO_OWNER}/${REPO_NAME} (${pr_url}) for commit: "${pr_title}".
-1. Inspect CI status and PR state by running:
+1. Inspect CI status, PR state, and deployment state by running:
    scripts/${script_name} merge ${pr_num}
-2. If status is "merged" or "already_merged", confirm the successful merge and deployment to the user.
-3. If status is "pending", quietly reschedule a 2m follow-up check via scheduler_schedule_once with target_id "${target_id}" and suppress response output (empty stdout).
-4. If status is "failed" or "conflict", report the failure details to the user.
+2. If status is "pending":
+   Quietly reschedule a 2m follow-up check via schedule_once with target_id "${target_id}" and suppress response output (empty response) to avoid channel noise while CI is running.
+3. If status is "merged" or "already_merged":
+   Report the successful merge to the user, including the current deployment state:
+   - If deployment state is "done": confirm successful merge and completed deployment.
+   - If deployment state is "ongoing" (e.g. stage: queued, building, awaiting_pull, swapping) or "pending_registration": report the successful merge and current deployment stage, and reschedule a 2m follow-up check via schedule_once with target_id "${target_id}" to track deployment to completion.
+   - If deployment state is "failed": report the merge and the deployment failure details.
+4. If status is "failed" or "conflict", report the PR failure details to the user.
 EOF
 )
 
@@ -644,8 +797,11 @@ case "$cmd" in
     merge|monitor)
         merge_pr "$@"
         ;;
+    deploy-status|deployment-status|deployment)
+        get_deploy_status "$@"
+        ;;
     *)
-        echo "Usage: $0 {init|submit [-t <target_id>] [-d <delay>] [--no-schedule] [-b <body>|--body <body>|-f <file>|--body-file <file>] <scratch_dir> [commit_msg]|merge <pr_num> [branch] [commit_sha]}" >&2
+        echo "Usage: $0 {init|submit [-t <target_id>] [-d <delay>] [--no-schedule] [-b <body>|--body <body>|-f <file>|--body-file <file>] <scratch_dir> [commit_msg]|merge <pr_num> [branch] [commit_sha]|deploy-status <pr_num|commit_sha>}" >&2
         exit 1
         ;;
 esac
