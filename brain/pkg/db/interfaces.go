@@ -84,6 +84,7 @@ type MessageStore interface {
 	GetActiveRecentThreadIDs(ctx context.Context, since time.Duration) ([]string, error)
 	GetRecentThreadMessages(ctx context.Context, threadID string, limit int) ([]Message, error)
 	GetMaxMessageRowID(ctx context.Context, threadID string) (int64, error)
+	GetActiveTasks(ctx context.Context) ([]ActiveTask, error)
 }
 
 // SessionStore handles thread turn counts and session rotations.
@@ -99,6 +100,8 @@ type SessionStore interface {
 	GetThreadSummary(ctx context.Context, threadID string) (summary string, lastSummarizedMsgID string, err error)
 	SaveThreadSummary(ctx context.Context, threadID, summary, lastSummarizedMsgID string) error
 	GetSessionActivityStats(ctx context.Context, threadID string) (*SessionActivityStats, error)
+	GetExternalConversationID(ctx context.Context, internalID string) (string, error)
+	SaveConversationMapping(ctx context.Context, externalID, internalID string) error
 }
 
 // Store unifies all repository capabilities under a single interface.

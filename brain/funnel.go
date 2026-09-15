@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"log"
 	"strings"
 	"sync"
@@ -320,7 +319,7 @@ func isFunnelBotTargeted(s *discordgo.Session, m *discordgo.MessageCreate) bool 
 	return false
 }
 
-func connectDiscordFunnel(ctx context.Context, database *sql.DB, pool *queue.WorkerPool, token string) *discordgo.Session {
+func connectDiscordFunnel(ctx context.Context, store db.Store, pool *queue.WorkerPool, token string) *discordgo.Session {
 	if token == "" {
 		log.Println("Discord funnel disabled: DISCORD_BOT_TOKEN/DISCORD_TOKEN not configured")
 		return nil
@@ -357,7 +356,7 @@ func connectDiscordFunnel(ctx context.Context, database *sql.DB, pool *queue.Wor
 				}
 			}
 		}
-		go RunStartupCatchUpSweep(ctx, database, pool, s)
+		go RunStartupCatchUpSweep(ctx, store, pool, s)
 	})
 
 	dg.AddHandler(func(s *discordgo.Session, g *discordgo.GuildCreate) {
@@ -467,7 +466,10 @@ func connectDiscordFunnel(ctx context.Context, database *sql.DB, pool *queue.Wor
 				UpdatedAt:  time.Now().UTC(),
 			}
 
-			if err := db.InsertMessage(database, msg); err != nil {
+			insertCtx, insertCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			err := store.InsertMessage(insertCtx, msg)
+			insertCancel()
+			if err != nil {
 				log.Printf("Failed to insert message %s: %v", m.ID, err)
 				return
 			}
@@ -539,8 +541,8 @@ func isMessageableChannel(chType discordgo.ChannelType) bool {
 }
 
 // RunStartupCatchUpSweep safely sweeps active channels and threads for missed messages during downtime.
-func RunStartupCatchUpSweep(ctx context.Context, database *sql.DB, pool *queue.WorkerPool, s *discordgo.Session) {
-	if s == nil || database == nil || pool == nil {
+func RunStartupCatchUpSweep(ctx context.Context, store db.Store, pool *queue.WorkerPool, s *discordgo.Session) {
+	if s == nil || store == nil || pool == nil {
 		return
 	}
 	if ctx == nil {
@@ -586,7 +588,7 @@ func RunStartupCatchUpSweep(ctx context.Context, database *sql.DB, pool *queue.W
 	targetMap := make(map[string]bool)
 
 	// A. Recent threads from DB (last 48 hours)
-	if recentThreadIDs, err := db.GetActiveRecentThreadIDs(database, 48*time.Hour); err == nil {
+	if recentThreadIDs, err := store.GetActiveRecentThreadIDs(sweepCtx, 48*time.Hour); err == nil {
 		for _, thID := range recentThreadIDs {
 			if thID != "" {
 				targetMap[thID] = true
@@ -711,7 +713,7 @@ func RunStartupCatchUpSweep(ctx context.Context, database *sql.DB, pool *queue.W
 			}
 
 			// Check if already in DB
-			exists, _ := db.MessageExists(database, m.ID)
+			exists, _ := store.MessageExists(sweepCtx, m.ID)
 			if exists {
 				skippedCount++
 				continue
@@ -738,7 +740,7 @@ func RunStartupCatchUpSweep(ctx context.Context, database *sql.DB, pool *queue.W
 				UpdatedAt:  time.Now().UTC(),
 			}
 
-			if err := db.InsertMessage(database, msg); err != nil {
+			if err := store.InsertMessage(sweepCtx, msg); err != nil {
 				log.Printf("[CatchUpSweep] Failed to insert missed message %s: %v", m.ID, err)
 				continue
 			}

@@ -2151,11 +2151,7 @@ func TestStoreAndTurnExecutionHelpers_Coverage(t *testing.T) {
 		t.Errorf("expected fake from WorkerPool.Store(), got %v", s)
 	}
 
-	realDB, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer func() { _ = realDB.Close() }()
+	realDB := &sql.DB{}
 	pDB := &WorkerPool{cfg: WorkerPoolConfig{DB: realDB}}
 	if s := pDB.Store(); s == nil {
 		t.Errorf("expected non-nil Store from WorkerPool with DB")

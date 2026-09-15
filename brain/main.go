@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -42,7 +41,7 @@ type PromptRequest struct {
 	MessageID      string `json:"message_id,omitempty"`
 }
 
-func handlePrompt(database *sql.DB, pool *queue.WorkerPool) http.HandlerFunc {
+func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
@@ -89,8 +88,12 @@ func handlePrompt(database *sql.DB, pool *queue.WorkerPool) http.HandlerFunc {
 			UpdatedAt:  time.Now().UTC(),
 		}
 
-		if err := db.InsertMessage(database, msg); err != nil {
-			log.Printf("Failed to insert HTTP prompt message %s to DB: %v", msgID, err)
+		if store != nil {
+			insertCtx, insertCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if err := store.InsertMessage(insertCtx, msg); err != nil {
+				log.Printf("Failed to insert HTTP prompt message %s to DB: %v", msgID, err)
+			}
+			insertCancel()
 		}
 
 		if pool != nil {
@@ -130,7 +133,7 @@ func DefaultTranscriptRoots(cfg *config.Config) []string {
 	return roots
 }
 
-func handleTranscripts(database *sql.DB, searchPaths ...string) http.HandlerFunc {
+func handleTranscripts(store db.Store, searchPaths ...string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		type TranscriptEntry struct {
 			Path       string `json:"path"`
@@ -212,9 +215,13 @@ func handleTranscripts(database *sql.DB, searchPaths ...string) http.HandlerFunc
 					}
 				}
 
-				extID, err := db.GetExternalConversationID(database, internalID)
-				if err != nil {
-					log.Printf("Warning: GetExternalConversationID error for %s: %v", internalID, err)
+				var extID string
+				if store != nil {
+					var err error
+					extID, err = store.GetExternalConversationID(r.Context(), internalID)
+					if err != nil {
+						log.Printf("Warning: GetExternalConversationID error for %s: %v", internalID, err)
+					}
 				}
 
 				item := TranscriptEntry{
@@ -238,12 +245,17 @@ func handleTranscripts(database *sql.DB, searchPaths ...string) http.HandlerFunc
 	}
 }
 
-func handleFacts(database *sql.DB) http.HandlerFunc {
+func handleFacts(store db.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Method not allowed"})
+			return
+		}
+
+		if store == nil {
+			http.Error(w, `{"error":"Database not available"}`, http.StatusInternalServerError)
 			return
 		}
 
@@ -275,7 +287,7 @@ func handleFacts(database *sql.DB) http.HandlerFunc {
 			Offset:   offset,
 		}
 
-		result, err := db.GetFactsPaginated(database, filter)
+		result, err := store.GetFactsPaginated(r.Context(), filter)
 		if err != nil {
 			log.Printf("[HTTP] Error fetching facts: %v", err)
 			w.Header().Set("Content-Type", "application/json")
@@ -348,7 +360,7 @@ type schedulesCache struct {
 	oneShots  []OneShotScheduleJSON
 }
 
-func handleSchedules(database *sql.DB) http.HandlerFunc {
+func handleSchedules(store db.Store) http.HandlerFunc {
 	cache := &schedulesCache{}
 
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -356,6 +368,11 @@ func handleSchedules(database *sql.DB) http.HandlerFunc {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Method not allowed"})
+			return
+		}
+
+		if store == nil {
+			http.Error(w, `{"error":"Database not available"}`, http.StatusInternalServerError)
 			return
 		}
 
@@ -379,7 +396,7 @@ func handleSchedules(database *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		summary, err := db.GetScheduleSummaryMetrics(database)
+		summary, err := store.GetScheduleSummaryMetrics(r.Context())
 		if err != nil {
 			log.Printf("[HTTP] Error fetching schedule summary: %v", err)
 			w.Header().Set("Content-Type", "application/json")
@@ -388,7 +405,7 @@ func handleSchedules(database *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		rawCrons, err := db.GetAllCronSchedules(database, "")
+		rawCrons, err := store.GetAllCronSchedules(r.Context(), "")
 		if err != nil {
 			log.Printf("[HTTP] Error fetching cron schedules: %v", err)
 			w.Header().Set("Content-Type", "application/json")
@@ -397,7 +414,7 @@ func handleSchedules(database *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		rawOneShots, err := db.GetAllOneShotSchedules(database, "")
+		rawOneShots, err := store.GetAllOneShotSchedules(r.Context(), "")
 		if err != nil {
 			log.Printf("[HTTP] Error fetching one-shot schedules: %v", err)
 			w.Header().Set("Content-Type", "application/json")
@@ -454,12 +471,17 @@ func handleSchedules(database *sql.DB) http.HandlerFunc {
 	}
 }
 
-func handleScheduleRuns(database *sql.DB) http.HandlerFunc {
+func handleScheduleRuns(store db.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Method not allowed"})
+			return
+		}
+
+		if store == nil {
+			http.Error(w, `{"error":"Database not available"}`, http.StatusInternalServerError)
 			return
 		}
 
@@ -481,7 +503,7 @@ func handleScheduleRuns(database *sql.DB) http.HandlerFunc {
 		scheduleID := strings.TrimSpace(q.Get("schedule_id"))
 		status := strings.TrimSpace(q.Get("status"))
 
-		rawRuns, total, err := db.GetScheduleRunsPaginated(database, limit, offset, scheduleID, status)
+		rawRuns, total, err := store.GetScheduleRunsPaginated(r.Context(), limit, offset, scheduleID, status)
 		if err != nil {
 			log.Printf("[HTTP] Error fetching schedule runs: %v", err)
 			w.Header().Set("Content-Type", "application/json")
@@ -525,7 +547,7 @@ type tasksCache struct {
 	expiresAt time.Time
 }
 
-func handleTasks(database *sql.DB) http.HandlerFunc {
+func handleTasks(store db.Store) http.HandlerFunc {
 	cache := &tasksCache{}
 
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -533,6 +555,11 @@ func handleTasks(database *sql.DB) http.HandlerFunc {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Method not allowed"})
+			return
+		}
+
+		if store == nil {
+			http.Error(w, `{"error":"Database not available"}`, http.StatusInternalServerError)
 			return
 		}
 
@@ -553,7 +580,7 @@ func handleTasks(database *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		rawTasks, err := db.GetActiveTasks(database)
+		rawTasks, err := store.GetActiveTasks(r.Context())
 		if err != nil {
 			log.Printf("[HTTP] Error fetching active tasks: %v", err)
 			w.Header().Set("Content-Type", "application/json")
@@ -650,15 +677,15 @@ func metricsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func SetupBrainMux(database *sql.DB, pool *queue.WorkerPool, reloadFn func(string), searchPaths ...string) *http.ServeMux {
+func SetupBrainMux(store db.Store, pool *queue.WorkerPool, reloadFn func(string), searchPaths ...string) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", metrics.Handler())
-	mux.HandleFunc("/prompt", handlePrompt(database, pool))
-	mux.HandleFunc("/transcripts", handleTranscripts(database, searchPaths...))
-	mux.HandleFunc("/tasks", handleTasks(database))
-	mux.HandleFunc("/facts", handleFacts(database))
-	mux.HandleFunc("/schedules", handleSchedules(database))
-	mux.HandleFunc("/schedules/runs", handleScheduleRuns(database))
+	mux.HandleFunc("/prompt", handlePrompt(store, pool))
+	mux.HandleFunc("/transcripts", handleTranscripts(store, searchPaths...))
+	mux.HandleFunc("/tasks", handleTasks(store))
+	mux.HandleFunc("/facts", handleFacts(store))
+	mux.HandleFunc("/schedules", handleSchedules(store))
+	mux.HandleFunc("/schedules/runs", handleScheduleRuns(store))
 	mux.HandleFunc("/internal/reload", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
@@ -806,9 +833,23 @@ func CreateReloadConfigFunc(cfg *config.Config, opts ...ReloadOption) func(sourc
 	}
 }
 
+// BrainAppOption configures optional runtime dependencies for RunBrainApp.
+type BrainAppOption func(*brainAppOptions)
+
+type brainAppOptions struct {
+	store db.Store
+}
+
+// WithStore allows injecting a custom Store implementation (e.g. db.FakeStore for tests).
+func WithStore(store db.Store) BrainAppOption {
+	return func(o *brainAppOptions) {
+		o.store = store
+	}
+}
+
 var onServerReady func(addr string)
 
-func RunBrainApp(ctx context.Context, cfg *config.Config) error {
+func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption) error {
 	if cfg == nil {
 		return fmt.Errorf("brain: config cannot be nil")
 	}
@@ -816,8 +857,15 @@ func RunBrainApp(ctx context.Context, cfg *config.Config) error {
 		return nil
 	}
 
+	var appOpts brainAppOptions
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&appOpts)
+		}
+	}
+
 	cur := cfg.Current()
-	if cur.DatabaseURL == "" {
+	if appOpts.store == nil && cur.DatabaseURL == "" {
 		return fmt.Errorf("database URL or path is required")
 	}
 	if cur.GeminiHomeDir == "" {
@@ -834,15 +882,21 @@ func RunBrainApp(ctx context.Context, cfg *config.Config) error {
 	provisioner := env.NewFromConfig(cfg)
 	_ = InitializeBrainEnvironment(ctx, cfg)
 
-	database, err := db.New(cfg)
-	if err != nil {
-		return fmt.Errorf("failed to initialize database: %w", err)
-	}
-	defer func() {
-		if err := database.Close(); err != nil {
-			log.Printf("Error closing database: %v", err)
+	var store db.Store
+	if appOpts.store != nil {
+		store = appOpts.store
+	} else {
+		database, err := db.New(cfg)
+		if err != nil {
+			return fmt.Errorf("failed to initialize database: %w", err)
 		}
-	}()
+		defer func() {
+			if err := database.Close(); err != nil {
+				log.Printf("Error closing database: %v", err)
+			}
+		}()
+		store = db.NewSQLStore(database)
+	}
 
 	sanitizer.RegisterConfigTokens(cfg)
 
@@ -854,7 +908,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config) error {
 	cls := classifier.New(cfg, utilityRunner)
 
 	pool := queue.New(cfg, queue.WorkerPoolConfig{
-		DB:                    database,
+		Store:                 store,
 		Classifier:            cls,
 		RunnerFunc:            runner.RunAgy,
 		RunnerWithOptionsFunc: runner.RunAgyWithOptions,
@@ -864,14 +918,14 @@ func RunBrainApp(ctx context.Context, cfg *config.Config) error {
 	pool.Start()
 
 	SetFunnelConfig(cfg)
-	dgSession := connectDiscordFunnel(ctx, database, pool, cur.DiscordToken)
+	dgSession := connectDiscordFunnel(ctx, store, pool, cur.DiscordToken)
 	if pool != nil && dgSession != nil {
 		pool.SetDiscordSession(dgSession)
 	}
 
 	// Resume interrupted turns after Discord gateway session is registered
 	// so poison pill and recovery notifications can reliably deliver to Discord.
-	queue.RecoverInterrupted(database, pool)
+	queue.RecoverInterrupted(store, pool)
 	defer func() {
 		log.Printf("Draining worker pool (10s timeout)...")
 		pool.StopWithTimeout(10 * time.Second)
@@ -923,14 +977,14 @@ func RunBrainApp(ctx context.Context, cfg *config.Config) error {
 	}
 
 	// Start background scheduler monitor for due cron and one-shot routines
-	sched, err := scheduler.New(cfg, database, pool, scheduler.NewDiscordThreadCreator(dgSession), scheduler.WithRunnerFunc(utilityRunner), scheduler.WithSessionRoots(sessionMgr.Roots()...))
+	sched, err := scheduler.New(cfg, store, pool, scheduler.NewDiscordThreadCreator(dgSession), scheduler.WithRunnerFunc(utilityRunner), scheduler.WithSessionRoots(sessionMgr.Roots()...))
 	if err != nil {
 		return fmt.Errorf("failed to initialize scheduler: %w", err)
 	}
 	stopScheduler := sched.Start(ctx)
 	defer stopScheduler()
 
-	mux := SetupBrainMux(database, pool, reloadConfig, sessionMgr.Roots()...)
+	mux := SetupBrainMux(store, pool, reloadConfig, sessionMgr.Roots()...)
 
 	port := cur.Port
 	ln, err := net.Listen("tcp", ":"+port)

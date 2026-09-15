@@ -23,17 +23,13 @@ import (
 )
 
 func TestHandlePromptValidation(t *testing.T) {
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := db.NewFakeStore()
 
-	pool := newTestWorkerPool(database)
+	pool := newTestWorkerPool(store)
 	pool.Start()
 	defer pool.Stop()
 
-	handler := handlePrompt(database, pool)
+	handler := handlePrompt(store, pool)
 
 	// Test GET method not allowed
 	req := httptest.NewRequest(http.MethodGet, "/prompt", nil)
@@ -78,7 +74,7 @@ func TestHandlePromptValidation(t *testing.T) {
 	}
 
 	// Verify message persisted to DB
-	msg, err := db.GetMessage(database, "msg-123")
+	msg, err := store.GetMessage(context.Background(), "msg-123")
 	if err != nil || msg == nil {
 		t.Fatalf("Failed to retrieve persisted message: %v", err)
 	}
@@ -88,14 +84,10 @@ func TestHandlePromptValidation(t *testing.T) {
 }
 
 func TestHandleTranscripts(t *testing.T) {
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := db.NewFakeStore()
 
 	tmpHome := t.TempDir()
-	handler := handleTranscripts(database, tmpHome)
+	handler := handleTranscripts(store, tmpHome)
 
 	req := httptest.NewRequest(http.MethodGet, "/transcripts", nil)
 	w := httptest.NewRecorder()
@@ -169,11 +161,7 @@ func TestSanitizeString(t *testing.T) {
 }
 
 func TestSchedulesEndpoints(t *testing.T) {
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := db.NewFakeStore()
 
 	now := time.Now().UTC()
 
@@ -189,7 +177,7 @@ func TestSchedulesEndpoints(t *testing.T) {
 		Enabled:     true,
 		CreatedAt:   now,
 	}
-	if err := db.CreateCronSchedule(database, cron1); err != nil {
+	if err := store.CreateCronSchedule(context.Background(), cron1); err != nil {
 		t.Fatalf("CreateCronSchedule failed: %v", err)
 	}
 
@@ -201,7 +189,7 @@ func TestSchedulesEndpoints(t *testing.T) {
 		RunAt:     now.Add(30 * time.Minute),
 		CreatedAt: now,
 	}
-	if err := db.CreateOneShotSchedule(database, once1); err != nil {
+	if err := store.CreateOneShotSchedule(context.Background(), once1); err != nil {
 		t.Fatalf("CreateOneShotSchedule failed: %v", err)
 	}
 
@@ -219,7 +207,7 @@ func TestSchedulesEndpoints(t *testing.T) {
 		StartedAt:    now.Add(-2 * time.Hour),
 		DurationMs:   4500,
 	}
-	if err := db.CreateScheduleRun(database, runCompleted); err != nil {
+	if err := store.CreateScheduleRun(context.Background(), runCompleted); err != nil {
 		t.Fatalf("CreateScheduleRun failed: %v", err)
 	}
 
@@ -237,12 +225,12 @@ func TestSchedulesEndpoints(t *testing.T) {
 		DurationMs:   1200,
 		Error:        "Failed auth with token ghp_errorToken99999999",
 	}
-	if err := db.CreateScheduleRun(database, runFailed); err != nil {
+	if err := store.CreateScheduleRun(context.Background(), runFailed); err != nil {
 		t.Fatalf("CreateScheduleRun failed: %v", err)
 	}
 
 	// Test GET /schedules
-	schedulesHandler := handleSchedules(database)
+	schedulesHandler := handleSchedules(store)
 	req := httptest.NewRequest(http.MethodGet, "/schedules", nil)
 	w := httptest.NewRecorder()
 	schedulesHandler(w, req)
@@ -301,7 +289,7 @@ func TestSchedulesEndpoints(t *testing.T) {
 		Enabled:     true,
 		CreatedAt:   now,
 	}
-	_ = db.CreateCronSchedule(database, cron2)
+	_ = store.CreateCronSchedule(context.Background(), cron2)
 
 	wCached := httptest.NewRecorder()
 	schedulesHandler(wCached, req)
@@ -312,7 +300,7 @@ func TestSchedulesEndpoints(t *testing.T) {
 	}
 
 	// Test GET /schedules/runs
-	runsHandler := handleScheduleRuns(database)
+	runsHandler := handleScheduleRuns(store)
 	reqRuns := httptest.NewRequest(http.MethodGet, "/schedules/runs", nil)
 	wRuns := httptest.NewRecorder()
 	runsHandler(wRuns, reqRuns)
@@ -379,16 +367,12 @@ func TestSchedulesEndpoints(t *testing.T) {
 }
 
 func TestHandleTasks(t *testing.T) {
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := db.NewFakeStore()
 
 	now := time.Now().UTC()
 	longPrompt := strings.Repeat("A", 600) + " ghp_123456789012345678901234567890123456"
 
-	_ = db.InsertMessage(database, db.Message{
+	_ = store.InsertMessage(context.Background(), db.Message{
 		ID:         "msg-test-task",
 		ThreadID:   "thread-1",
 		AuthorID:   "user-1",
@@ -399,7 +383,7 @@ func TestHandleTasks(t *testing.T) {
 		UpdatedAt:  now,
 	})
 
-	handler := handleTasks(database)
+	handler := handleTasks(store)
 
 	// 1. Test GET request returns 200 OK
 	req := httptest.NewRequest(http.MethodGet, "/tasks", nil)
@@ -444,7 +428,7 @@ func TestHandleTasks(t *testing.T) {
 	}
 
 	// 3. Test 1s TTL Caching: inserting another active message should not appear immediately
-	_ = db.InsertMessage(database, db.Message{
+	_ = store.InsertMessage(context.Background(), db.Message{
 		ID:         "msg-test-task-2",
 		ThreadID:   "thread-2",
 		AuthorID:   "user-2",
@@ -608,17 +592,13 @@ func TestStatusRecorder_Flush(t *testing.T) {
 }
 
 func TestHandleFacts_Comprehensive(t *testing.T) {
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := db.NewFakeStore()
 
 	// Seed some facts
-	_, _ = db.InsertFact(database, "system", "Fact 1", 1.0, "t1", nil)
-	_, _ = db.InsertFact(database, "user_preference", "Fact 2", 1.0, "t2", nil)
+	_, _ = store.InsertFact(context.Background(), "system", "Fact 1", 1.0, "t1", nil)
+	_, _ = store.InsertFact(context.Background(), "user_preference", "Fact 2", 1.0, "t2", nil)
 
-	handler := handleFacts(database)
+	handler := handleFacts(store)
 
 	// 1. Method not allowed
 	reqPost := httptest.NewRequest(http.MethodPost, "/facts", nil)
@@ -646,9 +626,9 @@ func TestHandleFacts_Comprehensive(t *testing.T) {
 	}
 
 	// 4. Closed DB error branch
-	closedDB, _ := db.InitDB(":memory:")
-	_ = closedDB.Close()
-	handlerErr := handleFacts(closedDB)
+	closedStore := db.NewFakeStore()
+	_ = closedStore.Close()
+	handlerErr := handleFacts(closedStore)
 	wErr := httptest.NewRecorder()
 	handlerErr(wErr, req)
 	if wErr.Code != http.StatusInternalServerError {
@@ -725,11 +705,11 @@ func TestFormatCronDescription_AllVariations(t *testing.T) {
 }
 
 func TestHandleSchedules_And_Runs_ErrorBranches(t *testing.T) {
-	closedDB, _ := db.InitDB(":memory:")
-	_ = closedDB.Close()
+	closedStore := db.NewFakeStore()
+	_ = closedStore.Close()
 
 	// 1. handleSchedules with closed DB
-	schedHandler := handleSchedules(closedDB)
+	schedHandler := handleSchedules(closedStore)
 	req := httptest.NewRequest(http.MethodGet, "/schedules", nil)
 	w := httptest.NewRecorder()
 	schedHandler(w, req)
@@ -738,7 +718,7 @@ func TestHandleSchedules_And_Runs_ErrorBranches(t *testing.T) {
 	}
 
 	// 2. handleScheduleRuns with closed DB
-	runsHandler := handleScheduleRuns(closedDB)
+	runsHandler := handleScheduleRuns(closedStore)
 	reqRuns := httptest.NewRequest(http.MethodGet, "/schedules/runs", nil)
 	wRuns := httptest.NewRecorder()
 	runsHandler(wRuns, reqRuns)
@@ -747,7 +727,7 @@ func TestHandleSchedules_And_Runs_ErrorBranches(t *testing.T) {
 	}
 
 	// 3. handleTasks with closed DB
-	tasksHandler := handleTasks(closedDB)
+	tasksHandler := handleTasks(closedStore)
 	reqTasks := httptest.NewRequest(http.MethodGet, "/tasks", nil)
 	wTasks := httptest.NewRecorder()
 	tasksHandler(wTasks, reqTasks)
@@ -757,11 +737,7 @@ func TestHandleSchedules_And_Runs_ErrorBranches(t *testing.T) {
 }
 
 func TestSetupBrainMux_And_Endpoints(t *testing.T) {
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer func() { _ = database.Close() }()
+	store := db.NewFakeStore()
 
 	reloaded := false
 	reloadFn := func(source string) {
@@ -769,7 +745,7 @@ func TestSetupBrainMux_And_Endpoints(t *testing.T) {
 	}
 
 	tmpHome := t.TempDir()
-	mux := SetupBrainMux(database, nil, reloadFn, tmpHome)
+	mux := SetupBrainMux(store, nil, reloadFn, tmpHome)
 
 	// Test /health
 	reqHealth := httptest.NewRequest(http.MethodGet, "/health", nil)
@@ -824,13 +800,11 @@ func TestInitializeBrainEnvironment_And_Config(t *testing.T) {
 
 func TestRunBrainApp_Lifecycle(t *testing.T) {
 	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "test_brain.db")
 
 	cfg := config.NewTestConfig(func(d *config.ConfigData) {
 		d.Port = "0"
 		d.AgyBin = "/bin/true"
 		d.Model = "gemini-2.5-flash"
-		d.DatabaseURL = dbPath
 		d.SystemPrompt = "test"
 		d.GeminiHomeDir = tmpDir
 		d.DataDir = filepath.Join(tmpDir, "data")
@@ -854,7 +828,8 @@ func TestRunBrainApp_Lifecycle(t *testing.T) {
 		cancel()
 	}()
 
-	err := RunBrainApp(ctx, cfg)
+	mockStore := db.NewFakeStore()
+	err := RunBrainApp(ctx, cfg, WithStore(mockStore))
 	if err != nil && err != http.ErrServerClosed {
 		t.Errorf("Unexpected error running Brain app: %v", err)
 	}
@@ -878,16 +853,12 @@ func (errReader) Read(p []byte) (n int, err error) {
 }
 
 func TestHandlePrompt_ErrorBranches(t *testing.T) {
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer database.Close()
+	store := db.NewFakeStore()
 
-	pool := newTestWorkerPool(database)
+	pool := newTestWorkerPool(store)
 	// pool is not started so it won't trigger real background worker executions
 
-	handler := handlePrompt(database, pool)
+	handler := handlePrompt(store, pool)
 
 	// 1. Read body error
 	reqErr := httptest.NewRequest(http.MethodPost, "/prompt", errReader{})
@@ -914,9 +885,9 @@ func TestHandlePrompt_ErrorBranches(t *testing.T) {
 	}
 
 	// 4. Closed DB non-fatal handling
-	closedDB, _ := db.InitDB(":memory:")
-	_ = closedDB.Close()
-	handlerClosed := handlePrompt(closedDB, pool)
+	closedStore := db.NewFakeStore()
+	_ = closedStore.Close()
+	handlerClosed := handlePrompt(closedStore, pool)
 	reqClosed := httptest.NewRequest(http.MethodPost, "/prompt", strings.NewReader(`{"prompt":"hello fallback"}`))
 	wClosed := httptest.NewRecorder()
 	handlerClosed(wClosed, reqClosed)
@@ -925,7 +896,7 @@ func TestHandlePrompt_ErrorBranches(t *testing.T) {
 	}
 
 	// 5. Nil pool handling
-	handlerNilPool := handlePrompt(database, nil)
+	handlerNilPool := handlePrompt(store, nil)
 	reqNilPool := httptest.NewRequest(http.MethodPost, "/prompt", strings.NewReader(`{"prompt":"hello nil pool"}`))
 	wNilPool := httptest.NewRecorder()
 	handlerNilPool(wNilPool, reqNilPool)
@@ -937,14 +908,10 @@ func TestHandlePrompt_ErrorBranches(t *testing.T) {
 func TestHandleTranscripts_ErrorAndRawBranches(t *testing.T) {
 	tmpHome := t.TempDir()
 
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer database.Close()
+	store := db.NewFakeStore()
 
 	// Seed an external conversation ID mapping
-	_ = db.SaveConversationMapping(database, "thread-discord-100", "conv-alpha-100")
+	_ = store.SaveConversationMapping(context.Background(), "thread-discord-100", "conv-alpha-100")
 
 	// Create transcript folders
 	brainDir := filepath.Join(tmpHome, "brain")
@@ -962,7 +929,7 @@ not a valid json line
 		t.Fatalf("WriteFile failed: %v", err)
 	}
 
-	handler := handleTranscripts(database, brainDir)
+	handler := handleTranscripts(store, brainDir)
 
 	// GET transcripts with include_raw=true
 	reqGet := httptest.NewRequest(http.MethodGet, "/transcripts?include_raw=true", nil)
@@ -977,13 +944,9 @@ not a valid json line
 }
 
 func TestHandleFacts_TruncationAndErrors(t *testing.T) {
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer database.Close()
+	store := db.NewFakeStore()
 
-	handler := handleFacts(database)
+	handler := handleFacts(store)
 
 	// 1. Method Not Allowed
 	reqPost := httptest.NewRequest(http.MethodPost, "/facts", nil)
@@ -1003,9 +966,9 @@ func TestHandleFacts_TruncationAndErrors(t *testing.T) {
 	}
 
 	// 3. Closed DB error -> 500
-	closedDB, _ := db.InitDB(":memory:")
-	_ = closedDB.Close()
-	handlerClosed := handleFacts(closedDB)
+	closedStore := db.NewFakeStore()
+	_ = closedStore.Close()
+	handlerClosed := handleFacts(closedStore)
 	reqClosed := httptest.NewRequest(http.MethodGet, "/facts?q=test", nil)
 	wClosed := httptest.NewRecorder()
 	handlerClosed(wClosed, reqClosed)
@@ -1015,13 +978,9 @@ func TestHandleFacts_TruncationAndErrors(t *testing.T) {
 }
 
 func TestHandleSchedules_And_Runs_GranularErrors(t *testing.T) {
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer database.Close()
+	store := db.NewFakeStore()
 
-	handlerSched := handleSchedules(database)
+	handlerSched := handleSchedules(store)
 
 	// 1. handleSchedules: Method Not Allowed
 	reqPost := httptest.NewRequest(http.MethodPost, "/schedules", nil)
@@ -1032,9 +991,9 @@ func TestHandleSchedules_And_Runs_GranularErrors(t *testing.T) {
 	}
 
 	// 2. handleSchedules: Closed DB error on summary metrics -> 500
-	closedDB, _ := db.InitDB(":memory:")
-	_ = closedDB.Close()
-	handlerSchedClosed := handleSchedules(closedDB)
+	closedStore := db.NewFakeStore()
+	_ = closedStore.Close()
+	handlerSchedClosed := handleSchedules(closedStore)
 	reqClosed := httptest.NewRequest(http.MethodGet, "/schedules", nil)
 	wClosed := httptest.NewRecorder()
 	handlerSchedClosed(wClosed, reqClosed)
@@ -1043,7 +1002,7 @@ func TestHandleSchedules_And_Runs_GranularErrors(t *testing.T) {
 	}
 
 	// 3. handleScheduleRuns: Method Not Allowed
-	handlerRuns := handleScheduleRuns(database)
+	handlerRuns := handleScheduleRuns(store)
 	reqRunsPost := httptest.NewRequest(http.MethodPost, "/schedules/runs", nil)
 	wRunsPost := httptest.NewRecorder()
 	handlerRuns(wRunsPost, reqRunsPost)
@@ -1060,7 +1019,7 @@ func TestHandleSchedules_And_Runs_GranularErrors(t *testing.T) {
 	}
 
 	// 5. handleScheduleRuns: closed DB error -> 500
-	handlerRunsClosed := handleScheduleRuns(closedDB)
+	handlerRunsClosed := handleScheduleRuns(closedStore)
 	reqRunsClosed := httptest.NewRequest(http.MethodGet, "/schedules/runs", nil)
 	wRunsClosed := httptest.NewRecorder()
 	handlerRunsClosed(wRunsClosed, reqRunsClosed)
@@ -1070,13 +1029,9 @@ func TestHandleSchedules_And_Runs_GranularErrors(t *testing.T) {
 }
 
 func TestHandleTasks_GranularErrors(t *testing.T) {
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer database.Close()
+	store := db.NewFakeStore()
 
-	handler := handleTasks(database)
+	handler := handleTasks(store)
 
 	// 1. Method Not Allowed
 	reqPost := httptest.NewRequest(http.MethodPost, "/tasks", nil)
@@ -1087,9 +1042,9 @@ func TestHandleTasks_GranularErrors(t *testing.T) {
 	}
 
 	// 2. Closed DB error -> 500
-	closedDB, _ := db.InitDB(":memory:")
-	_ = closedDB.Close()
-	handlerClosed := handleTasks(closedDB)
+	closedStore := db.NewFakeStore()
+	_ = closedStore.Close()
+	handlerClosed := handleTasks(closedStore)
 	reqClosed := httptest.NewRequest(http.MethodGet, "/tasks", nil)
 	wClosed := httptest.NewRecorder()
 	handlerClosed(wClosed, reqClosed)
@@ -1125,13 +1080,11 @@ func TestCreateReloadConfigFunc_InvalidYAMLAndAlert(t *testing.T) {
 
 func TestRunBrainApp_ServerReadinessAndShutdown(t *testing.T) {
 	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "app_test.db")
 
 	cfg := config.NewTestConfig(func(d *config.ConfigData) {
 		d.Port = "0"
 		d.AgyBin = "/bin/true"
 		d.Model = "gemini-2.5-flash"
-		d.DatabaseURL = dbPath
 		d.SystemPrompt = "test"
 		d.GeminiHomeDir = tmpDir
 		d.DataDir = filepath.Join(tmpDir, "data")
@@ -1148,8 +1101,9 @@ func TestRunBrainApp_ServerReadinessAndShutdown(t *testing.T) {
 	defer func() { onServerReady = oldReady }()
 
 	errChan := make(chan error, 1)
+	mockStore := db.NewFakeStore()
 	go func() {
-		errChan <- RunBrainApp(ctx, cfg)
+		errChan <- RunBrainApp(ctx, cfg, WithStore(mockStore))
 	}()
 
 	<-ready
@@ -1166,14 +1120,10 @@ func TestRunBrainApp_ServerReadinessAndShutdown(t *testing.T) {
 }
 
 func TestHandleSchedules_DetailedCoverage(t *testing.T) {
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer database.Close()
+	store := db.NewFakeStore()
 
 	// Seed cron and one shot schedules
-	_ = db.CreateCronSchedule(database, db.CronSchedule{
+	_ = store.CreateCronSchedule(context.Background(), db.CronSchedule{
 		ID:          "cron-1",
 		TargetID:    "target-1",
 		TitlePrefix: "Daily Backup",
@@ -1183,7 +1133,7 @@ func TestHandleSchedules_DetailedCoverage(t *testing.T) {
 		Enabled:     true,
 		CreatedAt:   time.Now().UTC(),
 	})
-	_ = db.CreateOneShotSchedule(database, db.OneShotSchedule{
+	_ = store.CreateOneShotSchedule(context.Background(), db.OneShotSchedule{
 		ID:        "oneshot-1",
 		ThreadID:  "target-1",
 		Prompt:    "Run once",
@@ -1191,7 +1141,7 @@ func TestHandleSchedules_DetailedCoverage(t *testing.T) {
 		CreatedAt: time.Now().UTC(),
 	})
 
-	handler := handleSchedules(database)
+	handler := handleSchedules(store)
 
 	// 1. Initial request (cache miss)
 	req1 := httptest.NewRequest(http.MethodGet, "/schedules", nil)
@@ -1212,11 +1162,10 @@ func TestHandleSchedules_DetailedCoverage(t *testing.T) {
 		t.Errorf("Expected 200 on cached fetch, got %d", w2.Code)
 	}
 
-	// 3. Rename prompt column on cron_schedules to trigger GetAllCronSchedules error
-	dbCronErr, _ := db.InitDB(":memory:")
-	defer dbCronErr.Close()
-	_, _ = dbCronErr.Exec("ALTER TABLE cron_schedules RENAME COLUMN prompt TO old_prompt;")
-	handlerCronErr := handleSchedules(dbCronErr)
+	// 3. FailNext GetAllCronSchedules to trigger GetAllCronSchedules error
+	storeCronErr := db.NewFakeStore()
+	storeCronErr.FailNext("GetAllCronSchedules", errors.New("cron query forced error"))
+	handlerCronErr := handleSchedules(storeCronErr)
 	reqCronErr := httptest.NewRequest(http.MethodGet, "/schedules", nil)
 	wCronErr := httptest.NewRecorder()
 	handlerCronErr(wCronErr, reqCronErr)
@@ -1224,11 +1173,10 @@ func TestHandleSchedules_DetailedCoverage(t *testing.T) {
 		t.Errorf("Expected 500 for cron query error, got %d", wCronErr.Code)
 	}
 
-	// 4. Rename prompt column on one_shot_schedules to trigger GetAllOneShotSchedules error
-	dbOneShotErr, _ := db.InitDB(":memory:")
-	defer dbOneShotErr.Close()
-	_, _ = dbOneShotErr.Exec("ALTER TABLE one_shot_schedules RENAME COLUMN prompt TO old_prompt;")
-	handlerOneShotErr := handleSchedules(dbOneShotErr)
+	// 4. FailNext GetAllOneShotSchedules to trigger GetAllOneShotSchedules error
+	storeOneShotErr := db.NewFakeStore()
+	storeOneShotErr.FailNext("GetAllOneShotSchedules", errors.New("oneshot query forced error"))
+	handlerOneShotErr := handleSchedules(storeOneShotErr)
 	reqOneShotErr := httptest.NewRequest(http.MethodGet, "/schedules", nil)
 	wOneShotErr := httptest.NewRecorder()
 	handlerOneShotErr(wOneShotErr, reqOneShotErr)
@@ -1238,14 +1186,10 @@ func TestHandleSchedules_DetailedCoverage(t *testing.T) {
 }
 
 func TestHandleTasks_DetailedCoverage(t *testing.T) {
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer database.Close()
+	store := db.NewFakeStore()
 
 	longPrompt := strings.Repeat("a", 600)
-	_ = db.InsertMessage(database, db.Message{
+	_ = store.InsertMessage(context.Background(), db.Message{
 		ID:         "task-msg-1",
 		ThreadID:   "thread-1",
 		AuthorName: "Alice",
@@ -1255,7 +1199,7 @@ func TestHandleTasks_DetailedCoverage(t *testing.T) {
 		UpdatedAt:  time.Now().UTC(),
 	})
 
-	handler := handleTasks(database)
+	handler := handleTasks(store)
 
 	// 1. Initial request (cache miss)
 	req1 := httptest.NewRequest(http.MethodGet, "/tasks", nil)
@@ -1306,14 +1250,12 @@ func TestCreateReloadConfigFunc_SuccessCoverage(t *testing.T) {
 func TestRunBrainApp_DetailedOptions(t *testing.T) {
 	t.Run("with discord token", func(t *testing.T) {
 		tmpDir := t.TempDir()
-		dbPath := filepath.Join(tmpDir, "app_discord.db")
 		cfg := config.NewTestConfig(func(d *config.ConfigData) {
 			d.Port = "0"
 			d.AgyBin = "/bin/true"
 			d.Model = "gemini-2.5-flash"
 			d.APIKey = "test-key"
 			d.SystemPrompt = "test"
-			d.DatabaseURL = dbPath
 			d.DiscordToken = "mock-token"
 			d.GeminiHomeDir = tmpDir
 			d.DataDir = filepath.Join(tmpDir, "data")
@@ -1330,8 +1272,9 @@ func TestRunBrainApp_DetailedOptions(t *testing.T) {
 		defer func() { onServerReady = oldReady }()
 
 		errChan := make(chan error, 1)
+		mockStore := db.NewFakeStore()
 		go func() {
-			errChan <- RunBrainApp(ctx, cfg)
+			errChan <- RunBrainApp(ctx, cfg, WithStore(mockStore))
 		}()
 
 		<-ready
@@ -1354,13 +1297,13 @@ func TestRunBrainApp_DetailedOptions(t *testing.T) {
 			d.AgyBin = "/bin/true"
 			d.Model = "gemini-2.5-flash"
 			d.SystemPrompt = "test"
-			d.DatabaseURL = filepath.Join(tmpDir, "app_bad_port.db")
 			d.GeminiHomeDir = tmpDir
 			d.DataDir = filepath.Join(tmpDir, "data")
 		})
 		ctxBad, cancelBad := context.WithTimeout(context.Background(), 1*time.Second)
 		defer cancelBad()
-		_ = RunBrainApp(ctxBad, badPortCfg)
+		mockStore := db.NewFakeStore()
+		_ = RunBrainApp(ctxBad, badPortCfg, WithStore(mockStore))
 	})
 }
 
@@ -1493,13 +1436,9 @@ func TestRunBrainApp_ErrorBranches(t *testing.T) {
 }
 
 func TestHandleSchedules_ConcurrentDoubleCheck(t *testing.T) {
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer database.Close()
+	store := db.NewFakeStore()
 
-	handler := handleSchedules(database)
+	handler := handleSchedules(store)
 
 	var wg sync.WaitGroup
 	for i := 0; i < 20; i++ {
@@ -1515,13 +1454,9 @@ func TestHandleSchedules_ConcurrentDoubleCheck(t *testing.T) {
 }
 
 func TestHandleTasks_ConcurrentDoubleCheck(t *testing.T) {
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer database.Close()
+	store := db.NewFakeStore()
 
-	handler := handleTasks(database)
+	handler := handleTasks(store)
 
 	var wg sync.WaitGroup
 	for i := 0; i < 20; i++ {
@@ -1537,11 +1472,7 @@ func TestHandleTasks_ConcurrentDoubleCheck(t *testing.T) {
 }
 
 func TestHandleTranscripts_NonDirectoryAndBadHome(t *testing.T) {
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer database.Close()
+	store := db.NewFakeStore()
 
 	tmpDir := t.TempDir()
 
@@ -1549,7 +1480,7 @@ func TestHandleTranscripts_NonDirectoryAndBadHome(t *testing.T) {
 	_ = os.MkdirAll(brainDir, 0755)
 	_ = os.WriteFile(filepath.Join(brainDir, "regular_file.txt"), []byte("not a dir"), 0644)
 
-	handler := handleTranscripts(database, brainDir, "", "   ", "/nonexistent/dir")
+	handler := handleTranscripts(store, brainDir, "", "   ", "/nonexistent/dir")
 	req := httptest.NewRequest(http.MethodGet, "/transcripts", nil)
 	w := httptest.NewRecorder()
 	handler(w, req)
@@ -1598,10 +1529,10 @@ func TestHandleTranscripts_DBErrorBranch(t *testing.T) {
 	_ = os.MkdirAll(tDir, 0755)
 	_ = os.WriteFile(filepath.Join(tDir, "transcript.jsonl"), []byte(`{"status":"DONE"}`+"\n"), 0644)
 
-	closedDB, _ := db.InitDB(":memory:")
-	_ = closedDB.Close()
+	closedStore := db.NewFakeStore()
+	_ = closedStore.Close()
 
-	handler := handleTranscripts(closedDB, brainDir)
+	handler := handleTranscripts(closedStore, brainDir)
 	req := httptest.NewRequest(http.MethodGet, "/transcripts", nil)
 	w := httptest.NewRecorder()
 	handler(w, req)
@@ -1613,7 +1544,6 @@ func TestHandleTranscripts_DBErrorBranch(t *testing.T) {
 func TestRunBrainApp_PureConfig(t *testing.T) {
 	tmpDir := t.TempDir()
 	cfg := config.NewFromData(&config.ConfigData{
-		DatabaseURL:   filepath.Join(tmpDir, "brain_test.db"),
 		GeminiHomeDir: tmpDir,
 		DataDir:       filepath.Join(tmpDir, "data"),
 		Port:          "0",
@@ -1627,7 +1557,8 @@ func TestRunBrainApp_PureConfig(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // Immediate cancellation to test lifecycle shutdown
 
-	err := RunBrainApp(ctx, cfg)
+	mockStore := db.NewFakeStore()
+	err := RunBrainApp(ctx, cfg, WithStore(mockStore))
 	if err != nil && err != http.ErrServerClosed {
 		t.Errorf("expected clean shutdown, got %v", err)
 	}
@@ -1683,11 +1614,7 @@ func TestDefaultTranscriptRoots(t *testing.T) {
 }
 
 func TestHandleTranscripts_Deduplication(t *testing.T) {
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer database.Close()
+	store := db.NewFakeStore()
 
 	tmpDir := t.TempDir()
 	root1 := filepath.Join(tmpDir, "root1")
@@ -1701,7 +1628,7 @@ func TestHandleTranscripts_Deduplication(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(dir1, "transcript.jsonl"), []byte(`{"step_index":1,"status":"DONE"}`+"\n"), 0644)
 	_ = os.WriteFile(filepath.Join(dir2, "transcript.jsonl"), []byte(`{"step_index":1,"status":"DONE"}`+"\n"), 0644)
 
-	handler := handleTranscripts(database, root1, root2)
+	handler := handleTranscripts(store, root1, root2)
 	req := httptest.NewRequest(http.MethodGet, "/transcripts", nil)
 	w := httptest.NewRecorder()
 	handler(w, req)
@@ -1875,17 +1802,13 @@ func TestCreateReloadConfigFunc_ProvisionerError(t *testing.T) {
 }
 
 func TestHandleSessions_UnreadableTranscript(t *testing.T) {
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer database.Close()
+	store := db.NewFakeStore()
 
 	tmpDir := t.TempDir()
 	convDir := filepath.Join(tmpDir, "conv-no-transcript", ".system_generated", "logs")
 	_ = os.MkdirAll(convDir, 0755)
 
-	handler := handleTranscripts(database, tmpDir)
+	handler := handleTranscripts(store, tmpDir)
 	req := httptest.NewRequest(http.MethodGet, "/transcripts", nil)
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
@@ -1895,13 +1818,9 @@ func TestHandleSessions_UnreadableTranscript(t *testing.T) {
 }
 
 func TestHandleSchedules_CacheDoubleCheck(t *testing.T) {
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer database.Close()
+	store := db.NewFakeStore()
 
-	handler := handleSchedules(database)
+	handler := handleSchedules(store)
 
 	var wg sync.WaitGroup
 	for i := 0; i < 30; i++ {
@@ -1917,13 +1836,9 @@ func TestHandleSchedules_CacheDoubleCheck(t *testing.T) {
 }
 
 func TestHandleTasks_CacheDoubleCheck(t *testing.T) {
-	database, err := db.InitDB(":memory:")
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer database.Close()
+	store := db.NewFakeStore()
 
-	handler := handleTasks(database)
+	handler := handleTasks(store)
 
 	var wg sync.WaitGroup
 	for i := 0; i < 30; i++ {
@@ -1948,7 +1863,6 @@ func TestRunBrainApp_FullLifecycle(t *testing.T) {
 		t.Fatalf("LoadConfigFromPaths failed: %v", err)
 	}
 	cur := cfg.Current()
-	cur.DatabaseURL = ":memory:"
 	cur.DataDir = tmpDir
 	cur.GeminiHomeDir = tmpDir
 	cur.DiscordToken = "mock-discord-token"
@@ -1971,7 +1885,8 @@ func TestRunBrainApp_FullLifecycle(t *testing.T) {
 		cancel()
 	}()
 
-	err = RunBrainApp(ctx, cfg)
+	mockStore := db.NewFakeStore()
+	err = RunBrainApp(ctx, cfg, WithStore(mockStore))
 	if err != nil {
 		t.Fatalf("RunBrainApp failed: %v", err)
 	}
