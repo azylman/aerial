@@ -701,6 +701,9 @@ func TestFakeStoreClosedCoverage(t *testing.T) {
 	_, _, _ = s.GetThreadSummary(ctx, "t")
 	_ = s.SaveThreadSummary(ctx, "t", "s", "w")
 	_, _ = s.GetSessionActivityStats(ctx, "t")
+	_, _ = s.GetActiveTasks(ctx)
+	_, _ = s.GetExternalConversationID(ctx, "t")
+	_ = s.SaveConversationMapping(ctx, "ext", "int")
 
 	_ = s.CreateOneShotSchedule(ctx, OneShotSchedule{})
 	_, _ = s.GetDueOneShotSchedules(ctx)
@@ -811,3 +814,106 @@ func TestFakeStoreTestHelpers(t *testing.T) {
 		t.Fatalf("GetScheduleRun failed: run=%+v, err=%v", run, err)
 	}
 }
+
+func TestFakeStoreActiveTasksAndConversationMapping(t *testing.T) {
+	s := NewFakeStore()
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	// 1. GetActiveTasks on empty store
+	tasks, err := s.GetActiveTasks(ctx)
+	if err != nil {
+		t.Fatalf("GetActiveTasks on empty store failed: %v", err)
+	}
+	if len(tasks) != 0 {
+		t.Errorf("expected 0 tasks, got %d", len(tasks))
+	}
+
+	// 2. Add sessions and messages
+	_ = s.SaveSessionID(ctx, "th-1", "sess-1")
+	_ = s.InsertMessage(ctx, Message{
+		ID:        "m-1",
+		ThreadID:  "th-1",
+		Content:   "First task content",
+		Summary:   "Custom summary",
+		Status:    StatusPending,
+		CreatedAt: now.Add(-10 * time.Minute),
+	})
+	_ = s.InsertMessage(ctx, Message{
+		ID:        "m-2",
+		ThreadID:  "th-1",
+		Content:   "Second task content without summary",
+		Status:    StatusProcessing,
+		CreatedAt: now.Add(-5 * time.Minute),
+	})
+	_ = s.InsertMessage(ctx, Message{
+		ID:        "m-completed",
+		ThreadID:  "th-1",
+		Content:   "Completed task",
+		Status:    StatusCompleted,
+		CreatedAt: now.Add(-time.Hour),
+	})
+
+	tasks, err = s.GetActiveTasks(ctx)
+	if err != nil {
+		t.Fatalf("GetActiveTasks failed: %v", err)
+	}
+	if len(tasks) != 2 {
+		t.Fatalf("expected 2 active tasks, got %d", len(tasks))
+	}
+	if tasks[0].ID != "m-1" || tasks[0].SessionID != "sess-1" || tasks[0].Summary != "Custom summary" {
+		t.Errorf("unexpected task[0]: %+v", tasks[0])
+	}
+	if tasks[1].ID != "m-2" || tasks[1].Summary != "Second task content without summary" {
+		t.Errorf("unexpected task[1]: %+v", tasks[1])
+	}
+
+	// Clamping past 50 active tasks
+	for i := 3; i <= 60; i++ {
+		_ = s.InsertMessage(ctx, Message{
+			ID:        "m-bulk-" + string(rune(i)),
+			ThreadID:  "th-1",
+			Content:   "bulk task",
+			Status:    StatusPending,
+			CreatedAt: now.Add(time.Duration(i) * time.Second),
+		})
+	}
+	clampedTasks, err := s.GetActiveTasks(ctx)
+	if err != nil {
+		t.Fatalf("GetActiveTasks with >50 tasks failed: %v", err)
+	}
+	if len(clampedTasks) != 50 {
+		t.Errorf("expected 50 clamped tasks, got %d", len(clampedTasks))
+	}
+
+	// 3. GetExternalConversationID and SaveConversationMapping
+	if err := s.SaveConversationMapping(ctx, "ext-123", "internal-abc"); err != nil {
+		t.Fatalf("SaveConversationMapping failed: %v", err)
+	}
+	extID, err := s.GetExternalConversationID(ctx, "internal-abc")
+	if err != nil || extID != "ext-123" {
+		t.Errorf("GetExternalConversationID = (%q, %v), want ext-123", extID, err)
+	}
+
+	// Empty internalID returns empty string without error
+	emptyExt, err := s.GetExternalConversationID(ctx, "")
+	if err != nil || emptyExt != "" {
+		t.Errorf("GetExternalConversationID('') = (%q, %v), want empty", emptyExt, err)
+	}
+
+	// Non-existent internalID returns empty string
+	notFoundExt, err := s.GetExternalConversationID(ctx, "nonexistent-internal")
+	if err != nil || notFoundExt != "" {
+		t.Errorf("GetExternalConversationID('nonexistent') = (%q, %v), want empty", notFoundExt, err)
+	}
+
+	// 4. Closed store returns error
+	_ = s.Close()
+	if _, err := s.GetActiveTasks(ctx); !errors.Is(err, sql.ErrConnDone) {
+		t.Errorf("expected ErrConnDone on GetActiveTasks, got %v", err)
+	}
+	if _, err := s.GetExternalConversationID(ctx, "internal-abc"); !errors.Is(err, sql.ErrConnDone) {
+		t.Errorf("expected ErrConnDone on GetExternalConversationID, got %v", err)
+	}
+}
+

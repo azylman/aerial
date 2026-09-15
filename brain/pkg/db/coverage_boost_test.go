@@ -525,3 +525,70 @@ func TestInitDBPostgresInvalidConfig(t *testing.T) {
 		t.Errorf("expected error parsing postgres://%%zz, got nil")
 	}
 }
+
+func TestSQLStoreActiveTasksAndConversationMapping(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. Test nil store and nil db error returns
+	var nilStore *SQLStore
+	if _, err := nilStore.GetActiveTasks(ctx); err == nil {
+		t.Errorf("expected error calling GetActiveTasks on nil store")
+	}
+	if _, err := nilStore.GetExternalConversationID(ctx, "test"); err == nil {
+		t.Errorf("expected error calling GetExternalConversationID on nil store")
+	}
+	if err := nilStore.SaveConversationMapping(ctx, "ext", "int"); err == nil {
+		t.Errorf("expected error calling SaveConversationMapping on nil store")
+	}
+
+	storeWithNilDB := &SQLStore{db: nil}
+	if _, err := storeWithNilDB.GetActiveTasks(ctx); err == nil {
+		t.Errorf("expected error calling GetActiveTasks with nil db")
+	}
+	if _, err := storeWithNilDB.GetExternalConversationID(ctx, "test"); err == nil {
+		t.Errorf("expected error calling GetExternalConversationID with nil db")
+	}
+	if err := storeWithNilDB.SaveConversationMapping(ctx, "ext", "int"); err == nil {
+		t.Errorf("expected error calling SaveConversationMapping with nil db")
+	}
+
+	// 2. Test with real SQLite fixture DB
+	database := initTestSQLiteDB(t)
+	store := NewSQLStore(database)
+
+	// SaveConversationMapping & GetExternalConversationID
+	if err := store.SaveConversationMapping(ctx, "ext-thread-99", "internal-sess-99"); err != nil {
+		t.Fatalf("SaveConversationMapping failed: %v", err)
+	}
+	extID, err := store.GetExternalConversationID(ctx, "internal-sess-99")
+	if err != nil || extID != "ext-thread-99" {
+		t.Fatalf("GetExternalConversationID returned (%q, %v), want ext-thread-99", extID, err)
+	}
+
+	// GetActiveTasks
+	_ = store.InsertMessage(ctx, Message{
+		ID:        "m-sqlstore-task",
+		ThreadID:  "ext-thread-99",
+		Content:   "SQLStore task content",
+		Summary:   "SQLStore task summary",
+		Status:    StatusPending,
+		CreatedAt: time.Now().UTC(),
+	})
+	tasks, err := store.GetActiveTasks(ctx)
+	if err != nil {
+		t.Fatalf("SQLStore.GetActiveTasks failed: %v", err)
+	}
+	var found bool
+	for _, task := range tasks {
+		if task.ID == "m-sqlstore-task" {
+			found = true
+			if task.Summary != "SQLStore task summary" {
+				t.Errorf("expected summary 'SQLStore task summary', got %q", task.Summary)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected to find m-sqlstore-task in active tasks")
+	}
+}
+
