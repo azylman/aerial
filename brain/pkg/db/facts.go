@@ -3,7 +3,6 @@ package db
 import (
 	"context"
 	"database/sql"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"math"
@@ -36,27 +35,6 @@ type FactWithEmbedding struct {
 	Embedding []float32
 }
 
-func Float32ToBytes(slice []float32) []byte {
-	buf := make([]byte, len(slice)*4)
-	for i, f := range slice {
-		bits := math.Float32bits(f)
-		binary.LittleEndian.PutUint32(buf[i*4:], bits)
-	}
-	return buf
-}
-
-func BytesToFloat32(buf []byte) []float32 {
-	if len(buf)%4 != 0 {
-		return nil
-	}
-	slice := make([]float32, len(buf)/4)
-	for i := range slice {
-		bits := binary.LittleEndian.Uint32(buf[i*4:])
-		slice[i] = math.Float32frombits(bits)
-	}
-	return slice
-}
-
 func InsertFact(database DBTX, category, factText string, importance float64, threadID string, embedding []float32) (id int64, err error) {
 	return InsertFactWithContext(context.Background(), database, false, category, factText, importance, threadID, embedding)
 }
@@ -86,11 +64,7 @@ func InsertFactWithContext(ctx context.Context, database DBTX, isPg bool, catego
 
 	var vecVal interface{}
 	if len(embedding) == ExpectedEmbeddingDim {
-		if isPg || isPostgres(database) {
-			vecVal = pgvector.NewVector(embedding)
-		} else {
-			vecVal = Float32ToBytes(embedding)
-		}
+		vecVal = pgvector.NewVector(embedding)
 	}
 
 	if ctx == nil {
@@ -132,11 +106,6 @@ func (nv *NullVector) Scan(src any) error {
 		if err := vec.Scan(v); err == nil {
 			nv.Vector = vec.Slice()
 			nv.Valid = true
-			return nil
-		}
-		if len(v)%4 == 0 {
-			nv.Vector = BytesToFloat32(v)
-			nv.Valid = len(nv.Vector) > 0
 			return nil
 		}
 	}
@@ -759,11 +728,7 @@ func ReinforceFactWithContext(ctx context.Context, database DBTX, isPg bool, id 
 	var vecVal any
 	if strings.TrimSpace(newText) != "" && len(newEmbedding) == ExpectedEmbeddingDim {
 		updateText = true
-		if isPg || isPostgres(database) {
-			vecVal = pgvector.NewVector(newEmbedding)
-		} else {
-			vecVal = Float32ToBytes(newEmbedding)
-		}
+		vecVal = pgvector.NewVector(newEmbedding)
 	}
 
 	if isPg || isPostgres(database) {

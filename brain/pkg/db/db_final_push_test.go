@@ -30,12 +30,17 @@ func TestInitDBErrorBranchesAndSQLitePathCreation(t *testing.T) {
 		t.Errorf("expected error connecting to unreachable postgres port, got nil")
 	}
 
-	// 3. SQLite directory creation for non-existent subfolder
+	// 3. Reject non-postgres path in initDB
 	tmpDir := t.TempDir()
 	subFile := filepath.Join(tmpDir, "subfolder", "test.db")
-	db, err := initDB(subFile)
+	if _, err := initDB(subFile); err == nil {
+		t.Errorf("expected error for non-postgres dsn in initDB, got nil")
+	}
+
+	// 4. SQLite directory creation for non-existent subfolder via initTestSQLite
+	db, err := initTestSQLite(subFile)
 	if err != nil {
-		t.Fatalf("initDB with subfolder path failed: %v", err)
+		t.Fatalf("initTestSQLite with subfolder path failed: %v", err)
 	}
 	db.Close()
 	if _, err := os.Stat(subFile); os.IsNotExist(err) {
@@ -72,30 +77,30 @@ func TestSearchSimilarFactsFilterBranches(t *testing.T) {
 
 func TestInitDBDSNVariants(t *testing.T) {
 	// file: with existing query param ?
-	db1, err1 := initDB("file:mem_test_1?mode=memory&cache=shared")
+	db1, err1 := InitDB("file:mem_test_1?mode=memory&cache=shared")
 	if err1 != nil {
-		t.Fatalf("initDB with query param failed: %v", err1)
+		t.Fatalf("InitDB with query param failed: %v", err1)
 	}
 	db1.Close()
 
 	// file: without query param ?
-	db2, err2 := initDB("file:mem_test_2?mode=memory")
+	db2, err2 := InitDB("file:mem_test_2?mode=memory")
 	if err2 != nil {
-		t.Fatalf("initDB without query param failed: %v", err2)
+		t.Fatalf("InitDB without query param failed: %v", err2)
 	}
 	db2.Close()
 
 	// file: with existing _pragma
-	db3, err3 := initDB("file:mem_test_3?mode=memory&_pragma=busy_timeout(5000)")
+	db3, err3 := InitDB("file:mem_test_3?mode=memory&_pragma=busy_timeout(5000)")
 	if err3 != nil {
-		t.Fatalf("initDB with existing _pragma failed: %v", err3)
+		t.Fatalf("InitDB with existing _pragma failed: %v", err3)
 	}
 	db3.Close()
 
 	// sqlite://:memory:
-	db4, err4 := initDB("sqlite://:memory:")
+	db4, err4 := InitDB("sqlite://:memory:")
 	if err4 != nil {
-		t.Fatalf("initDB sqlite://:memory: failed: %v", err4)
+		t.Fatalf("InitDB sqlite://:memory: failed: %v", err4)
 	}
 	db4.Close()
 }
