@@ -35,12 +35,12 @@ func syncBotMemberRoles(ctx context.Context, s *discordgo.Session, guildID, botI
 	if s == nil || s.State == nil || guildID == "" || botID == "" {
 		return
 	}
-	if m, err := s.State.Member(guildID, botID); err == nil && m != nil && len(m.Roles) > 0 {
+	if ctx != nil && ctx.Err() != nil {
 		return
 	}
-	ctxTimeout, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	_ = ctxTimeout
+	if m, err := s.State.Member(guildID, botID); err == nil && m != nil {
+		return
+	}
 
 	m, err := funnelMemberFetcher(s, guildID, botID)
 	if err != nil || m == nil {
@@ -50,7 +50,9 @@ func syncBotMemberRoles(ctx context.Context, s *discordgo.Session, guildID, botI
 	if m.GuildID == "" {
 		m.GuildID = guildID
 	}
-	_ = s.State.MemberAdd(m)
+	if m.User != nil {
+		_ = s.State.MemberAdd(m)
+	}
 	log.Printf("Discord funnel cached %d bot role(s) for guild %s", len(m.Roles), guildID)
 }
 

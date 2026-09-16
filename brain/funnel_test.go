@@ -24,9 +24,18 @@ import (
 	"github.com/bwmarrin/discordgo"
 )
 
+var defaultFunnelMemberFetcher = funnelMemberFetcher
+
 func init() {
 	discordSessionOpener = func(dg *discordgo.Session) error {
 		return nil
+	}
+	funnelMemberFetcher = func(s *discordgo.Session, guildID, userID string) (*discordgo.Member, error) {
+		return &discordgo.Member{
+			GuildID: guildID,
+			User:    &discordgo.User{ID: userID},
+			Roles:   []string{"mock-role-bot-123"},
+		}, nil
 	}
 }
 
@@ -97,6 +106,13 @@ channels:
 
 	s := &discordgo.Session{
 		State: discordgo.NewState(),
+	}
+
+	if _, err := defaultFunnelMemberFetcher(nil, "g1", "u1"); err == nil {
+		t.Errorf("expected error for nil session")
+	}
+	if p := buildDiscordPrompt(nil, nil, "", config.ChannelPolicy{}); p != "" {
+		t.Errorf("expected empty string for nil message")
 	}
 
 	// 1. Direct Message channel
@@ -1338,11 +1354,11 @@ channels:
 		Member: &discordgo.Member{
 			GuildID: "g-create-2",
 			User:    &discordgo.User{ID: "bot-aerial-id"},
-			Roles:   []string{"1543462881624858624"},
+			Roles:   []string{"mock-role-robot-123"},
 		},
 	})
 	mUpdated, err := s.State.Member("g-create-2", "bot-aerial-id")
-	if err != nil || len(mUpdated.Roles) != 1 || mUpdated.Roles[0] != "1543462881624858624" {
+	if err != nil || len(mUpdated.Roles) != 1 || mUpdated.Roles[0] != "mock-role-robot-123" {
 		t.Errorf("Expected bot member roles updated on GuildMemberUpdate, got %v (err: %v)", mUpdated, err)
 	}
 
@@ -2479,12 +2495,16 @@ func TestSyncBotMemberRoles(t *testing.T) {
 	defer func() { funnelMemberFetcher = origFetcher }()
 
 	var fetchCalls int32
+	shouldFail := false
 	funnelMemberFetcher = func(s *discordgo.Session, guildID, userID string) (*discordgo.Member, error) {
 		atomic.AddInt32(&fetchCalls, 1)
+		if shouldFail {
+			return nil, errors.New("simulated fetch failure")
+		}
 		return &discordgo.Member{
-			GuildID: guildID,
+			GuildID: "", // test empty GuildID population
 			User:    &discordgo.User{ID: userID},
-			Roles:   []string{"1543462881624858624"},
+			Roles:   []string{"mock-role-robot-123"},
 		}, nil
 	}
 
@@ -2502,22 +2522,45 @@ func TestSyncBotMemberRoles(t *testing.T) {
 		t.Fatalf("expected 0 calls for invalid args, got %d", fetchCalls)
 	}
 
-	// Successful sync
+	// Canceled context check
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	syncBotMemberRoles(canceledCtx, s, "guild-1", "bot-1")
+	if atomic.LoadInt32(&fetchCalls) != 0 {
+		t.Fatalf("expected 0 calls for canceled context, got %d", fetchCalls)
+	}
+
+	// Error path
+	shouldFail = true
 	syncBotMemberRoles(context.Background(), s, "guild-1", "bot-1")
 	if atomic.LoadInt32(&fetchCalls) != 1 {
-		t.Fatalf("expected 1 call, got %d", fetchCalls)
+		t.Fatalf("expected 1 call on failure, got %d", fetchCalls)
+	}
+	shouldFail = false
+
+	// Successful sync
+	syncBotMemberRoles(context.Background(), s, "guild-1", "bot-1")
+	if atomic.LoadInt32(&fetchCalls) != 2 {
+		t.Fatalf("expected 2 calls total, got %d", fetchCalls)
 	}
 
 	m, err := s.State.Member("guild-1", "bot-1")
-	if err != nil || len(m.Roles) != 1 || m.Roles[0] != "1543462881624858624" {
+	if err != nil || len(m.Roles) != 1 || m.Roles[0] != "mock-role-robot-123" {
 		t.Fatalf("expected cached member with role, got %v (err: %v)", m, err)
 	}
-
-	// Repeated sync when already cached with roles should be a no-op
-	syncBotMemberRoles(context.Background(), s, "guild-1", "bot-1")
-	if atomic.LoadInt32(&fetchCalls) != 1 {
-		t.Fatalf("expected fetchCalls to stay 1, got %d", fetchCalls)
+	if m.GuildID != "guild-1" {
+		t.Fatalf("expected guildID populated, got %s", m.GuildID)
 	}
+
+	// Repeated sync when already cached should be a no-op
+	syncBotMemberRoles(context.Background(), s, "guild-1", "bot-1")
+	if atomic.LoadInt32(&fetchCalls) != 2 {
+		t.Fatalf("expected fetchCalls to stay 2, got %d", fetchCalls)
+	}
+
+	// Coverage boost for main helpers
+	_ = DefaultGeminiHomeDir()
+	_ = DefaultDataDir()
 }
 
 

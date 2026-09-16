@@ -6603,7 +6603,7 @@ func TestResolveBotRoleIDs_RESTFallback(t *testing.T) {
 			return &discordgo.Member{
 				GuildID: guildID,
 				User:    &discordgo.User{ID: userID},
-				Roles:   []string{"1543462881624858624"},
+				Roles:   []string{"mock-role-robot-123"},
 			}, nil
 		}
 		return nil, errors.New("not found")
@@ -6626,7 +6626,7 @@ func TestResolveBotRoleIDs_RESTFallback(t *testing.T) {
 	_ = s.State.GuildAdd(guild)
 
 	roles := ResolveBotRoleIDs(s, "guild-1", "bot-1")
-	expected := []string{"1543462881624858624", "role-aerial-managed"}
+	expected := []string{"mock-role-robot-123", "role-aerial-managed"}
 	sort.Strings(roles)
 	sort.Strings(expected)
 	if strings.Join(roles, ",") != strings.Join(expected, ",") {
@@ -6658,7 +6658,7 @@ func TestResolveBotRoleIDs_SingleflightDeduplication(t *testing.T) {
 		return &discordgo.Member{
 			GuildID: guildID,
 			User:    &discordgo.User{ID: userID},
-			Roles:   []string{"1543462881624858624"},
+			Roles:   []string{"mock-role-robot-123"},
 		}, nil
 	}
 
@@ -6679,8 +6679,8 @@ func TestResolveBotRoleIDs_SingleflightDeduplication(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			roles := ResolveBotRoleIDs(s, "guild-sf", "bot-sf")
-			if len(roles) != 1 || roles[0] != "1543462881624858624" {
-				t.Errorf("Expected role 1543462881624858624, got %v", roles)
+			if len(roles) != 1 || roles[0] != "mock-role-robot-123" {
+				t.Errorf("Expected role mock-role-robot-123, got %v", roles)
 			}
 		}()
 	}
@@ -6691,6 +6691,61 @@ func TestResolveBotRoleIDs_SingleflightDeduplication(t *testing.T) {
 
 	if calls := atomic.LoadInt32(&fetchCalls); calls != 1 {
 		t.Fatalf("Expected exactly 1 singleflight REST call for 10 concurrent requests, got %d", calls)
+	}
+}
+
+func TestResolveBotRoleIDs_CooldownAndUncachedGuild(t *testing.T) {
+	origFetcher := guildMemberFetcher
+	defer func() { guildMemberFetcher = origFetcher }()
+
+	var fetchCalls int32
+	shouldFail := true
+	guildMemberFetcher = func(sess *discordgo.Session, guildID string, userID string) (*discordgo.Member, error) {
+		atomic.AddInt32(&fetchCalls, 1)
+		if shouldFail {
+			return nil, errors.New("simulated 429 rate limit")
+		}
+		return &discordgo.Member{
+			GuildID: guildID,
+			User:    &discordgo.User{ID: userID},
+			Roles:   []string{"mock-role-robot-123"},
+		}, nil
+	}
+
+	s := &discordgo.Session{
+		State: discordgo.NewState(),
+	}
+	s.State.User = &discordgo.User{ID: "bot-cd", Username: "Aerial"}
+
+	// Note: Guild is NOT in s.State, testing fallback for uncached guild
+	// 1. First call fails and sets cooldown
+	roles := ResolveBotRoleIDs(s, "guild-uncached", "bot-cd")
+	if len(roles) != 0 {
+		t.Fatalf("expected empty roles on failure, got %v", roles)
+	}
+	if atomic.LoadInt32(&fetchCalls) != 1 {
+		t.Fatalf("expected 1 fetch call, got %d", fetchCalls)
+	}
+
+	// 2. Second call while in cooldown skips REST call
+	roles2 := ResolveBotRoleIDs(s, "guild-uncached", "bot-cd")
+	if len(roles2) != 0 {
+		t.Fatalf("expected empty roles, got %v", roles2)
+	}
+	if atomic.LoadInt32(&fetchCalls) != 1 {
+		t.Fatalf("expected fetchCalls to stay 1 due to cooldown, got %d", fetchCalls)
+	}
+
+	// 3. Test cooldown helper direct invocation for map pruning
+	for i := 0; i < 150; i++ {
+		setRESTCooldown(fmt.Sprintf("key-%d", i), -1*time.Minute)
+	}
+	setRESTCooldown("key-active", 1*time.Minute)
+	if !isRESTInCooldown("key-active") {
+		t.Fatalf("expected key-active to be in cooldown")
+	}
+	if isRESTInCooldown("key-expired") {
+		t.Fatalf("expected key-expired not to be in cooldown")
 	}
 }
 

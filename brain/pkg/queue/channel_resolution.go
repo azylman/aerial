@@ -42,8 +42,16 @@ func isRESTInCooldown(key string) bool {
 
 func setRESTCooldown(key string, duration time.Duration) {
 	restCooldownMu.Lock()
+	defer restCooldownMu.Unlock()
+	if len(restCooldown) > 128 {
+		now := time.Now()
+		for k, exp := range restCooldown {
+			if now.After(exp) {
+				delete(restCooldown, k)
+			}
+		}
+	}
 	restCooldown[key] = time.Now().Add(duration)
-	restCooldownMu.Unlock()
 }
 
 // CacheDiscordChannel stores an immutable snapshot of a discordgo.Channel.
@@ -228,43 +236,19 @@ func ResolveBotRoleIDs(sess *discordgo.Session, guildID string, botUserID string
 		botUsername = sess.State.User.Username
 	}
 
+	foundMemberInState := false
+
 	for _, g := range guilds {
 		if g == nil {
 			continue
 		}
-		// 1. Roles assigned to the bot member
+		// 1. Roles assigned to the bot member from state cache
 		if botUserID != "" {
 			if member, err := sess.State.Member(g.ID, botUserID); err == nil && member != nil {
+				foundMemberInState = true
 				for _, rID := range member.Roles {
 					if rID != "" {
 						roleSet[rID] = true
-					}
-				}
-			} else if sess != nil && guildID != "" {
-				sfKey := fmt.Sprintf("bot_member:%s:%s", g.ID, botUserID)
-				if !isRESTInCooldown(sfKey) {
-					res, sfErr, _ := restSingleFlight.Do(sfKey, func() (interface{}, error) {
-						fetchedMember, fetchErr := guildMemberFetcher(sess, g.ID, botUserID)
-						if fetchErr != nil || fetchedMember == nil {
-							return nil, fetchErr
-						}
-						if fetchedMember.GuildID == "" {
-							fetchedMember.GuildID = g.ID
-						}
-						_ = sess.State.MemberAdd(fetchedMember)
-						rolesCopy := append([]string(nil), fetchedMember.Roles...)
-						return rolesCopy, nil
-					})
-					if sfErr != nil {
-						setRESTCooldown(sfKey, 30*time.Second)
-					} else if res != nil {
-						if fetchedRoles, ok := res.([]string); ok {
-							for _, rID := range fetchedRoles {
-								if rID != "" {
-									roleSet[rID] = true
-								}
-							}
-						}
 					}
 				}
 			}
@@ -277,6 +261,38 @@ func ResolveBotRoleIDs(sess *discordgo.Session, guildID string, botUserID string
 			if strings.EqualFold(r.Name, "aerial") || strings.EqualFold(r.Name, "gundam") ||
 				(botUsername != "" && strings.EqualFold(r.Name, botUsername)) {
 				roleSet[r.ID] = true
+			}
+		}
+	}
+
+	// 3. Fallback: If guildID was specified and bot member wasn't in state cache, perform singleflight REST fetch
+	if botUserID != "" && guildID != "" && !foundMemberInState && sess != nil {
+		sfKey := fmt.Sprintf("bot_member:%s:%s", guildID, botUserID)
+		if !isRESTInCooldown(sfKey) {
+			res, sfErr, _ := restSingleFlight.Do(sfKey, func() (interface{}, error) {
+				fetchedMember, fetchErr := guildMemberFetcher(sess, guildID, botUserID)
+				if fetchErr != nil || fetchedMember == nil {
+					return nil, fetchErr
+				}
+				if fetchedMember.GuildID == "" {
+					fetchedMember.GuildID = guildID
+				}
+				if fetchedMember.User != nil {
+					_ = sess.State.MemberAdd(fetchedMember)
+				}
+				rolesCopy := append([]string(nil), fetchedMember.Roles...)
+				return rolesCopy, nil
+			})
+			if sfErr != nil {
+				setRESTCooldown(sfKey, 30*time.Second)
+			} else if res != nil {
+				if fetchedRoles, ok := res.([]string); ok {
+					for _, rID := range fetchedRoles {
+						if rID != "" {
+							roleSet[rID] = true
+						}
+					}
+				}
 			}
 		}
 	}
