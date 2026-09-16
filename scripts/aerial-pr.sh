@@ -431,11 +431,12 @@ Check on the status of Pull Request #${pr_num} on ${REPO_OWNER}/${REPO_NAME} (${
 2. If status is "pending":
    Quietly reschedule a 2m follow-up check via schedule_once with target_id "${target_id}" and suppress response output (empty response) to avoid channel noise while CI is running.
 3. If status is "merged" or "already_merged":
-   Report the successful merge to the user, including the current deployment state:
-   - If deployment state is "done": confirm successful merge and completed deployment.
-   - If deployment state is "ongoing" (e.g. stage: queued, building, awaiting_pull, swapping) or "pending_registration": report the successful merge and current deployment stage, and reschedule a 2m follow-up check via schedule_once with target_id "${target_id}" to track deployment to completion.
-   - If deployment state is "failed": report the merge and the deployment failure details.
-4. If status is "failed" or "conflict", report the PR failure details to the user.
+   Report status in plain prose (maximum two sentences). Do NOT output markdown bullet lists, task checklists, or forward-looking promises.
+   - If deployment state is "done": confirm merge and completed deployment in 1–2 sentences.
+   - If deployment state is "ongoing" (e.g. stage: queued, building, awaiting_pull, swapping) or "pending_registration": state the current deployment stage in 1–2 sentences, and reschedule a 2m follow-up check via schedule_once with target_id "${target_id}" to track deployment to completion. If status was already merged, report only the deployment stage update.
+   - If deployment state is "failed": the two-sentence limit does NOT apply; report full failure details, error logs, and diagnostic context immediately.
+4. If status is "failed" or "conflict", or if the merge command errors:
+   The two-sentence limit does NOT apply; report full PR/CI failure details, failing check names, and error logs to the user.
 EOF
 )
 
