@@ -1512,5 +1512,82 @@ func TestExtractFinalSubstantiveResponse_CoverageBoost(t *testing.T) {
 	}
 }
 
+func TestSession_RemediatedBranchesAndEdges(t *testing.T) {
+	mgr, tmpDir := setupTestManager(t)
+
+	// 1. ExtractResponseAndError with empty content and ToolCalls
+	convToolOnly := "conv-tool-only"
+	logsDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", convToolOnly, ".system_generated", "logs")
+	if err := os.MkdirAll(logsDir, 0755); err != nil {
+		t.Fatalf("failed to create logs dir: %v", err)
+	}
+	toolOnlyContent := `{"step_index":0,"source":"MODEL","type":"PLANNER_RESPONSE","content":"","tool_calls":[{"name":"bash"}]}`
+	if err := os.WriteFile(filepath.Join(logsDir, "transcript.jsonl"), []byte(toolOnlyContent), 0644); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+	resp, _ := mgr.ExtractResponseAndError(convToolOnly)
+	if !strings.HasPrefix(resp, "[Tool Call Requested]:") {
+		t.Errorf("expected '[Tool Call Requested]:', got %q", resp)
+	}
+
+	// 2. ExtractFinalSubstantiveResponse with loop-time context cancellation
+	ctxCancel, cancel := context.WithCancel(context.Background())
+	convCancel := "conv-cancel-loop"
+	logsDirCancel := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", convCancel, ".system_generated", "logs")
+	_ = os.MkdirAll(logsDirCancel, 0755)
+	_ = os.WriteFile(filepath.Join(logsDirCancel, "transcript_full.jsonl"), []byte(`{"step_index":0,"type":"USER_INPUT"}`), 0644)
+	_ = os.WriteFile(filepath.Join(logsDirCancel, "transcript.jsonl"), []byte(`{"step_index":0,"type":"USER_INPUT"}`), 0644)
+	cancel()
+	_, _, err := mgr.ExtractFinalSubstantiveResponse(ctxCancel, convCancel)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected context.Canceled, got %v", err)
+	}
+
+	// 3. ExtractFinalSubstantiveResponse with non-PLANNER_RESPONSE and unmarshal error traversed in reverse
+	convReverse := "conv-reverse-edge"
+	logsDirReverse := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", convReverse, ".system_generated", "logs")
+	_ = os.MkdirAll(logsDirReverse, 0755)
+	revContent := `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"hello"}
+{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","content":"Valid response"}
+{malformed json line}
+{"step_index":2,"source":"SYSTEM","type":"SYSTEM_NOTIFICATION","content":"info"}
+`
+	_ = os.WriteFile(filepath.Join(logsDirReverse, "transcript.jsonl"), []byte(revContent), 0644)
+	text, silent, err := mgr.ExtractFinalSubstantiveResponse(context.Background(), convReverse)
+	if err != nil || text != "Valid response" || silent {
+		t.Errorf("expected 'Valid response', got (%q, %v, %v)", text, silent, err)
+	}
+
+	// 4. HasSuccessfulToolCall with empty lines between steps
+	convEmptyLine := "conv-empty-line"
+	logsDirEmpty := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", convEmptyLine, ".system_generated", "logs")
+	_ = os.MkdirAll(logsDirEmpty, 0755)
+	emptyLineContent := `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"hello"}
+
+{"step_index":1,"source":"MODEL","type":"RUN_COMMAND","status":"DONE"}
+`
+	_ = os.WriteFile(filepath.Join(logsDirEmpty, "transcript.jsonl"), []byte(emptyLineContent), 0644)
+	hasTool := mgr.HasSuccessfulToolCall(convEmptyLine)
+	if !hasTool {
+		t.Errorf("expected HasSuccessfulToolCall to be true with empty line in transcript")
+	}
+
+	// 5. AppendAmbientTurn using candidate 2 directory path
+	convCand2 := "conv-cand-2"
+	cand2Logs := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", convCand2, convCand2, ".system_generated", "logs")
+	_ = os.MkdirAll(cand2Logs, 0755)
+	_ = os.WriteFile(filepath.Join(cand2Logs, "transcript.jsonl"), []byte(`{"step_index":0,"source":"USER_INPUT","content":"hello"}`+"\n"), 0644)
+	err = mgr.AppendAmbientTurn(convCand2, "general", "alice", "hello from cand2", time.Now())
+	if err != nil {
+		t.Errorf("expected nil error appending to cand2 logs, got %v", err)
+	}
+
+	// 6. Direct test of getLastStepIndex error path on a directory
+	_, err = getLastStepIndex(tmpDir)
+	if err == nil {
+		t.Errorf("expected error from getLastStepIndex on directory, got nil")
+	}
+}
+
 
 

@@ -193,7 +193,9 @@ func processThreadFacts(ctx context.Context, database any, client *Client, llmFu
 	}
 	if strings.TrimSpace(transcript) == "" {
 		log.Printf("[Memory] Empty transcript for thread %s, marking watermark.", threadID)
-		_ = factStore.UpdateConversationFactWatermark(ctx, threadID, maxRowID)
+		if err := factStore.UpdateConversationFactWatermark(ctx, threadID, maxRowID); err != nil {
+			log.Printf("[Memory] Warning updating conversation fact watermark for empty transcript (thread=%s): %v", threadID, err)
+		}
 		return nil
 	}
 
@@ -251,8 +253,12 @@ func processThreadFacts(ctx context.Context, database any, client *Client, llmFu
 		}
 	}
 
-	_ = factStore.UpdateConversationFactWatermark(ctx, threadID, maxRowID)
-	_ = factStore.UpdateConversationFactExtractedAt(ctx, threadID)
+	if err := factStore.UpdateConversationFactWatermark(ctx, threadID, maxRowID); err != nil {
+		log.Printf("[Memory] Warning updating conversation fact watermark (thread=%s): %v", threadID, err)
+	}
+	if err := factStore.UpdateConversationFactExtractedAt(ctx, threadID); err != nil {
+		log.Printf("[Memory] Warning updating conversation fact extracted_at (thread=%s): %v", threadID, err)
+	}
 	return nil
 }
 

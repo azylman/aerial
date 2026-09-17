@@ -3,8 +3,10 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -433,7 +435,9 @@ func (m *Manager) ExtractFinalSubstantiveResponse(ctx context.Context, convID st
 
 			fi, err := f.Stat()
 			if err != nil || fi.Size() == 0 {
-				_ = f.Close()
+				if closeErr := f.Close(); closeErr != nil {
+					log.Printf("[Session] Warning closing empty/unstat-able transcript file %s: %v", tPath, closeErr)
+				}
 				continue
 			}
 
@@ -448,7 +452,9 @@ func (m *Manager) ExtractFinalSubstantiveResponse(ctx context.Context, convID st
 
 			buf := make([]byte, readSize)
 			_, err = f.ReadAt(buf, offset)
-			_ = f.Close()
+			if closeErr := f.Close(); closeErr != nil {
+				log.Printf("[Session] Warning closing transcript file %s: %v", tPath, closeErr)
+			}
 			if err != nil && err != io.EOF {
 				continue
 			}
@@ -653,7 +659,9 @@ func (m *Manager) EnsureSessionDir(sessionID string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("failed to ensure %s: %w", name, err)
 		}
-		_ = f.Close()
+		if closeErr := f.Close(); closeErr != nil {
+			log.Printf("[Session] Warning closing newly created transcript %s: %v", filePath, closeErr)
+		}
 	}
 
 	return sessionDir, nil
@@ -746,7 +754,11 @@ func appendTranscriptStep(filePath string, lineBytes []byte) error {
 	if err != nil {
 		return err
 	}
-	defer func() { _ = f.Close() }()
+	defer func() {
+		if closeErr := f.Close(); closeErr != nil {
+			log.Printf("[Session] Warning closing transcript file %s on append: %v", filePath, closeErr)
+		}
+	}()
 
 	fi, err := f.Stat()
 	if err != nil {
@@ -785,7 +797,11 @@ func getLastStepIndex(filePath string) (int, error) {
 		}
 		return -1, err
 	}
-	defer func() { _ = f.Close() }()
+	defer func() {
+		if closeErr := f.Close(); closeErr != nil {
+			log.Printf("[Session] Warning closing transcript file %s on getLastStepIndex: %v", filePath, closeErr)
+		}
+	}()
 
 	fi, err := f.Stat()
 	if err != nil {
@@ -893,7 +909,9 @@ func CleanupEphemeralSession(convID string, searchRoots ...string) {
 			filepath.Join(cleanRoot, "brain", cleanConvID),
 		}
 		for _, d := range dirs {
-			_ = os.RemoveAll(d)
+			if rmErr := os.RemoveAll(d); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
+				log.Printf("[Session] Warning removing session dir %s: %v", d, rmErr)
+			}
 		}
 	}
 }

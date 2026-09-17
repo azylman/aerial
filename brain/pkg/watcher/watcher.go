@@ -191,7 +191,9 @@ func (w *Watcher) Start(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			_ = w.Close()
+			if closeErr := w.Close(); closeErr != nil {
+				log.Printf("[Watcher] Warning closing fsnotify watcher on ctx cancel: %v", closeErr)
+			}
 			return
 
 		case event, ok := <-w.fsw.Events:
@@ -219,7 +221,9 @@ func (w *Watcher) Start(ctx context.Context) {
 			// Dynamically add watch on newly created directory
 			if event.Op&fsnotify.Create != 0 {
 				if fi, err := os.Stat(event.Name); err == nil && fi.IsDir() {
-					_ = w.AddRecursive(event.Name)
+					if addErr := w.AddRecursive(event.Name); addErr != nil {
+						log.Printf("[Watcher] Warning adding recursive watch for %s: %v", event.Name, addErr)
+					}
 				}
 			}
 

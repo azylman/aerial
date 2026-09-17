@@ -1262,6 +1262,96 @@ func TestMemory_SettersAndNilClient(t *testing.T) {
 	}
 }
 
+type mockErrWatermarkFactStore struct {
+	*db.FakeStore
+	watermarkErr   error
+	extractedAtErr error
+}
+
+func (m *mockErrWatermarkFactStore) UpdateConversationFactWatermark(ctx context.Context, threadID string, maxRowID int64) error {
+	if m.watermarkErr != nil {
+		return m.watermarkErr
+	}
+	return m.FakeStore.UpdateConversationFactWatermark(ctx, threadID, maxRowID)
+}
+
+func (m *mockErrWatermarkFactStore) UpdateConversationFactExtractedAt(ctx context.Context, threadID string) error {
+	if m.extractedAtErr != nil {
+		return m.extractedAtErr
+	}
+	return m.FakeStore.UpdateConversationFactExtractedAt(ctx, threadID)
+}
+
+type mockCloseErrReader struct {
+	io.Reader
+}
+
+func (m *mockCloseErrReader) Close() error {
+	return errors.New("simulated close error")
+}
+
+func TestMemory_SwallowedErrorsBranches(t *testing.T) {
+	// 1. extractor.go:196 UpdateConversationFactWatermark error on empty transcript
+	fakeStore := db.NewFakeStore()
+	defer fakeStore.Close()
+	errStore := &mockErrWatermarkFactStore{
+		FakeStore:    fakeStore,
+		watermarkErr: errors.New("simulated watermark error on empty transcript"),
+	}
+	clientNoRoots := NewClient("http://127.0.0.1:11434")
+	err := processThreadFacts(context.Background(), errStore, clientNoRoots, func(ctx context.Context, p string) (string, error) {
+		return "", nil
+	}, "th-empty-warn")
+	if err != nil {
+		t.Errorf("expected nil error despite watermark warning, got %v", err)
+	}
+
+	// 2. extractor.go:256 & 259 UpdateConversationFactWatermark and UpdateConversationFactExtractedAt error on extracted facts
+	tmpDir := t.TempDir()
+	logsDir := filepath.Join(tmpDir, "th-warn-post", ".system_generated", "logs")
+	if err := os.MkdirAll(logsDir, 0755); err != nil {
+		t.Fatalf("failed to create logsDir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(logsDir, "transcript.jsonl"), []byte(`{"content":"Alex prefers matcha"}`), 0644); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+
+	clientWithRoots := newMockClient(func(req *http.Request) (*http.Response, error) {
+		return mockEmbeddingResponse(make([]float32, 384)), nil
+	}, tmpDir)
+
+	errStorePost := &mockErrWatermarkFactStore{
+		FakeStore:      fakeStore,
+		watermarkErr:   errors.New("simulated post-extraction watermark error"),
+		extractedAtErr: errors.New("simulated post-extraction extracted_at error"),
+	}
+
+	err = processThreadFacts(context.Background(), errStorePost, clientWithRoots, func(ctx context.Context, p string) (string, error) {
+		return `{"facts":[{"category":"user_preference","fact_text":"Alex prefers matcha","importance_score":0.9}]}`, nil
+	}, "th-warn-post")
+	if err != nil {
+		t.Errorf("expected nil error despite post-extraction warnings, got %v", err)
+	}
+
+	// 3. ollama.go:234 resp.Body.Close() error
+	cCloseErr := newMockClient(func(req *http.Request) (*http.Response, error) {
+		embJSON, _ := json.Marshal(EmbeddingResponse{Embedding: []float32{0.1, 0.2}})
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       &mockCloseErrReader{Reader: strings.NewReader(string(embJSON))},
+			Header:     make(http.Header),
+		}, nil
+	})
+	vec, err := cCloseErr.GenerateEmbedding(context.Background(), "test embedding", false, 0)
+	if err != nil {
+		t.Errorf("expected nil error from GenerateEmbedding when close fails, got %v", err)
+	}
+	if len(vec) != 2 {
+		t.Errorf("expected embedding vector length 2, got %d", len(vec))
+	}
+}
+
+
 
 
 
