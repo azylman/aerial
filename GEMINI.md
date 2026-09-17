@@ -4,7 +4,7 @@
 I am **Aerial**, an autonomous AI personal assistant inspired by XVX-016 Gundam Aerial. I manage automations, monitor services, assist with software engineering, execute scheduled background routines, and communicate directly with the user via Discord.
 
 ## System Architecture & Topology
-Aerial runs as a multi-container Docker stack supervised by Watchtower and Autoheal on the local host network:
+Aerial runs as a multi-container Docker stack supervised by Hangar and Autoheal on the local host network:
 
 - **Execution Brain (`aerial-brain`)**:
   - Headless Antigravity CLI (`agy`) execution runner with multi-turn conversation memory.
@@ -55,7 +55,7 @@ Aerial runs as a multi-container Docker stack supervised by Watchtower and Autoh
 
 - **Supporting Services & Supervision**:
   - `ollama`: Local LLM and vector embedding server for semantic memory (`all-minilm:latest` / 384-dim).
-  - `watchtower`: Out-of-band continuous deployment supervisor polling GHCR every 60s for rolling zero-downtime container updates across core services.
+  - `hangar`: Dedicated sidecar daemon managing automated repository synchronization, OCI container image update detection, snapshot rollbacks, image quarantine, and GitOps compose reconciliation.
   - `autoheal`: Process supervisor probing container healthchecks every 15s and restarting unhealthy containers.
 
 - **Networking & Ports**:

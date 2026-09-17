@@ -116,7 +116,12 @@ services:
       - ${AERIAL_HOST_PROJECT_DIR:-${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}}:/share/aerial:rw
       - /var/run/docker.sock:/var/run/docker.sock
     networks:
-      - aerial-net
+      aerial-net:
+        aliases:
+          - hangar
+          - aerial-hangar
+          - gitsync
+          - aerial-gitsync
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
       interval: 30s
@@ -691,7 +696,6 @@ services:
     stop_grace_period: 20s
     labels:
       autoheal: "true"
-      com.centurylinklabs.watchtower.enable: "true"
       homepage.group: "Observability"
       homepage.name: "Quickwit Logs"
       homepage.icon: "quickwit.png"
@@ -725,7 +729,6 @@ services:
     stop_grace_period: 15s
     labels:
       autoheal: "true"
-      com.centurylinklabs.watchtower.enable: "true"
       homepage.group: "Observability"
       homepage.name: "Vector Agent"
       homepage.icon: "vector.png"
