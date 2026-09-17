@@ -32,6 +32,7 @@
             "mode": "palette-classic"
           },
           "mappings": [],
+          "noValue": "0",
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -68,6 +69,17 @@
       "pluginVersion": "11.1.0",
       "targets": [
         {
+          "bucketAggs": [
+            {
+              "field": "timestamp",
+              "id": "2",
+              "settings": {
+                "interval": "auto",
+                "min_doc_count": "0"
+              },
+              "type": "date_histogram"
+            }
+          ],
           "datasource": {
             "type": "quickwit-quickwit-datasource",
             "uid": "quickwit-logs"
@@ -97,6 +109,7 @@
             "mode": "palette-classic"
           },
           "mappings": [],
+          "noValue": "0",
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -137,6 +150,17 @@
       "pluginVersion": "11.1.0",
       "targets": [
         {
+          "bucketAggs": [
+            {
+              "field": "timestamp",
+              "id": "2",
+              "settings": {
+                "interval": "auto",
+                "min_doc_count": "0"
+              },
+              "type": "date_histogram"
+            }
+          ],
           "datasource": {
             "type": "quickwit-quickwit-datasource",
             "uid": "quickwit-logs"
@@ -166,6 +190,7 @@
             "mode": "palette-classic"
           },
           "mappings": [],
+          "noValue": "0",
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -206,6 +231,17 @@
       "pluginVersion": "11.1.0",
       "targets": [
         {
+          "bucketAggs": [
+            {
+              "field": "timestamp",
+              "id": "2",
+              "settings": {
+                "interval": "auto",
+                "min_doc_count": "0"
+              },
+              "type": "date_histogram"
+            }
+          ],
           "datasource": {
             "type": "quickwit-quickwit-datasource",
             "uid": "quickwit-logs"
@@ -291,17 +327,8 @@
         {
           "bucketAggs": [
             {
-              "field": "timestamp",
-              "id": "2",
-              "settings": {
-                "interval": "auto",
-                "min_doc_count": "0"
-              },
-              "type": "date_histogram"
-            },
-            {
               "field": "container_name",
-              "id": "3",
+              "id": "2",
               "settings": {
                 "min_doc_count": "1",
                 "order": "desc",
@@ -309,6 +336,15 @@
                 "size": "10"
               },
               "type": "terms"
+            },
+            {
+              "field": "timestamp",
+              "id": "3",
+              "settings": {
+                "interval": "auto",
+                "min_doc_count": "0"
+              },
+              "type": "date_histogram"
             }
           ],
           "datasource": {
