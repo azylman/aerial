@@ -1,86 +1,107 @@
 package main
 
 import (
-	"encoding/json"
+	"bytes"
+	"context"
 	"errors"
-	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
 	"strings"
 	"syscall"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-type JSONRPCRequest struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      interface{}     `json:"id,omitempty"`
-	Method  string          `json:"method"`
-	Params  json.RawMessage `json:"params,omitempty"`
-}
-
-type JSONRPCResponse struct {
-	JSONRPC string      `json:"jsonrpc"`
-	ID      interface{} `json:"id,omitempty"`
-	Result  interface{} `json:"result,omitempty"`
-	Error   *RPCError   `json:"error,omitempty"`
-}
-
-type RPCError struct {
-	Code    int         `json:"code"`
-	Message string      `json:"message"`
-	Data    interface{} `json:"data,omitempty"`
-}
-
-type ToolCallParams struct {
-	Name      string          `json:"name"`
-	Arguments json.RawMessage `json:"arguments"`
-}
-
 type Server struct {
-	handler *ToolHandler
+	handler       *ToolHandler
+	mcpServer     *mcp.Server
+	opts          *mcp.StreamableHTTPOptions
+	streamHandler http.Handler
 }
 
 func NewServer(handler *ToolHandler) *Server {
-	return &Server{handler: handler}
+	if handler == nil {
+		panic("server: handler cannot be nil")
+	}
+
+	opts := &mcp.StreamableHTTPOptions{
+		Stateless:    true,
+		JSONResponse: true,
+	}
+
+	mcpServer := mcp.NewServer(&mcp.Implementation{
+		Name:    "scheduler-mcp",
+		Version: "1.0.0",
+	}, nil)
+
+	s := &Server{
+		handler:   handler,
+		mcpServer: mcpServer,
+		opts:      opts,
+	}
+	s.registerTools()
+
+	s.streamHandler = mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
+		return s.mcpServer
+	}, s.opts)
+
+	return s
+}
+
+func (s *Server) registerTools() {
+	mcp.AddTool(s.mcpServer, &mcp.Tool{
+		Name:        "schedule_recurring",
+		Description: "Register a persistent recurring schedule. Fresh Discord threads will be created in the target channel on each run.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args ScheduleRecurringArgs) (*mcp.CallToolResult, ScheduleRecurringOutput, error) {
+		out, err := s.handler.ScheduleRecurring(ctx, args)
+		return nil, out, err
+	})
+
+	mcp.AddTool(s.mcpServer, &mcp.Tool{
+		Name:        "update_cron_schedule",
+		Description: "Update an existing recurring cron schedule's effort tier, cron expression, prompt, title prefix, or timezone.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args UpdateCronScheduleArgs) (*mcp.CallToolResult, UpdateCronScheduleOutput, error) {
+		out, err := s.handler.UpdateCronSchedule(ctx, args)
+		return nil, out, err
+	})
+
+	mcp.AddTool(s.mcpServer, &mcp.Tool{
+		Name:        "schedule_once",
+		Description: "Register a persistent one-shot reminder that triggers once at a designated time or relative duration.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args ScheduleOnceArgs) (*mcp.CallToolResult, ScheduleOnceOutput, error) {
+		out, err := s.handler.ScheduleOnce(ctx, args)
+		return nil, out, err
+	})
+
+	mcp.AddTool(s.mcpServer, &mcp.Tool{
+		Name:        "list_schedules",
+		Description: "List all active recurring schedules and pending reminders.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args ListSchedulesArgs) (*mcp.CallToolResult, ListSchedulesOutput, error) {
+		out, err := s.handler.ListSchedules(ctx, args)
+		return nil, out, err
+	})
+
+	mcp.AddTool(s.mcpServer, &mcp.Tool{
+		Name:        "cancel_schedule",
+		Description: "Cancel and delete an existing schedule by schedule ID.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args CancelScheduleArgs) (*mcp.CallToolResult, CancelScheduleOutput, error) {
+		out, err := s.handler.CancelSchedule(ctx, args)
+		return nil, out, err
+	})
 }
 
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", s.handleHealth)
-	mux.HandleFunc("/mcp", s.handleMCP)
-	mux.HandleFunc("/sse", s.handleMCP)
-	mux.HandleFunc("/", s.handleMCP)
+
+	mcpBridge := http.HandlerFunc(s.handleMCP)
+	mux.Handle("/mcp", mcpBridge)
+	mux.Handle("/sse", mcpBridge)
+	mux.Handle("/", mcpBridge)
+
 	return mux
-}
-
-func isClientDisconnect(r *http.Request, err error) bool {
-	if err == nil {
-		return false
-	}
-	if r != nil && r.Context().Err() != nil {
-		return true
-	}
-	return errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, net.ErrClosed)
-}
-
-func writeResponse(w http.ResponseWriter, r *http.Request, data []byte) {
-	if _, err := w.Write(data); err != nil {
-		if !isClientDisconnect(r, err) {
-			log.Printf("[Scheduler Server] Failed to write response: %v", err)
-		}
-	}
-}
-
-func writeJSON(w http.ResponseWriter, r *http.Request, data interface{}) {
-	w.Header().Set("Content-Type", "application/json")
-	b, err := json.Marshal(data)
-	if err != nil {
-		log.Printf("[Scheduler Server] Failed to marshal JSON response: %v", err)
-		http.Error(w, `{"error":"Internal error"}`, http.StatusInternalServerError)
-		return
-	}
-	writeResponse(w, r, b)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -105,313 +126,63 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "GET, POST")
 		http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
 		return
 	}
 
+	// Read and normalize body
 	defer closeWarn(r.Body, "request body")
-
-	body, err := io.ReadAll(r.Body)
+	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, `{"error":"Failed to read request body"}`, http.StatusBadRequest)
 		return
 	}
 
-	trimmed := strings.TrimSpace(string(body))
+	trimmed := strings.TrimSpace(string(bodyBytes))
 	if trimmed == "" {
 		http.Error(w, `{"error":"Empty request body"}`, http.StatusBadRequest)
 		return
 	}
 
-	// Support JSON-RPC batch arrays if sent
-	if strings.HasPrefix(trimmed, "[") {
-		var requests []JSONRPCRequest
-		if err := json.Unmarshal(body, &requests); err != nil {
-			resp := JSONRPCResponse{
-				JSONRPC: "2.0",
-				Error:   &RPCError{Code: -32700, Message: "Parse error"},
-			}
-			writeJSON(w, r, resp)
-			return
-		}
-		var responses []JSONRPCResponse
-		for _, req := range requests {
-			resp := s.processRequest(req)
-			if resp != nil {
-				responses = append(responses, *resp)
-			}
-		}
-		writeJSON(w, r, responses)
-		return
+	// Intercept scheduler_ alias prefix in tool calls:
+	// Rewrite "name": "scheduler_<tool>" to "name": "<tool>"
+	// or "name":"scheduler_<tool>" to "name":"<tool>"
+	if strings.Contains(string(bodyBytes), "scheduler_") {
+		bodyBytes = bytes.ReplaceAll(bodyBytes, []byte(`"name":"scheduler_`), []byte(`"name":"`))
+		bodyBytes = bytes.ReplaceAll(bodyBytes, []byte(`"name": "scheduler_`), []byte(`"name": "`))
+		bodyBytes = bytes.ReplaceAll(bodyBytes, []byte(`"name":  "scheduler_`), []byte(`"name": "`))
 	}
 
-	// Single JSON-RPC request
-	var req JSONRPCRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		resp := JSONRPCResponse{
-			JSONRPC: "2.0",
-			Error:   &RPCError{Code: -32700, Message: "Parse error"},
-		}
-		writeJSON(w, r, resp)
-		return
+	r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+	r.ContentLength = int64(len(bodyBytes))
+
+	// Normalize headers to ensure maximum compatibility with single-shot curl clients:
+	// 1. Accept must contain both application/json and text/event-stream for Streamable HTTP
+	r.Header.Set("Accept", "application/json, text/event-stream")
+
+	// 2. Ensure Content-Type is set to application/json
+	if r.Header.Get("Content-Type") == "" {
+		r.Header.Set("Content-Type", "application/json")
 	}
 
-	resp := s.processRequest(req)
-	if resp != nil {
-		writeJSON(w, r, resp)
-	} else {
-		w.WriteHeader(http.StatusNoContent)
-	}
+	s.streamHandler.ServeHTTP(w, r)
 }
 
-var marshalIndentFn = json.MarshalIndent
-
-func (s *Server) processRequest(req JSONRPCRequest) *JSONRPCResponse {
-	// Notifications (no ID)
-	if req.ID == nil && strings.HasPrefix(req.Method, "notifications/") {
-		return nil
+func isClientDisconnect(r *http.Request, err error) bool {
+	if err == nil {
+		return false
 	}
-
-	switch req.Method {
-	case "initialize":
-		return &JSONRPCResponse{
-			JSONRPC: "2.0",
-			ID:      req.ID,
-			Result: map[string]interface{}{
-				"protocolVersion": "2024-11-05",
-				"capabilities": map[string]interface{}{
-					"tools": map[string]interface{}{},
-				},
-				"serverInfo": map[string]interface{}{
-					"name":    "scheduler-mcp",
-					"version": "1.0.0",
-				},
-			},
-		}
-
-	case "ping":
-		return &JSONRPCResponse{
-			JSONRPC: "2.0",
-			ID:      req.ID,
-			Result:  map[string]interface{}{},
-		}
-
-	case "tools/list":
-		return &JSONRPCResponse{
-			JSONRPC: "2.0",
-			ID:      req.ID,
-			Result: map[string]interface{}{
-				"tools": s.getToolsList(),
-			},
-		}
-
-	case "tools/call":
-		var params ToolCallParams
-		if err := json.Unmarshal(req.Params, &params); err != nil {
-			return &JSONRPCResponse{
-				JSONRPC: "2.0",
-				ID:      req.ID,
-				Error:   &RPCError{Code: -32602, Message: "Invalid params: " + err.Error()},
-			}
-		}
-
-		toolName := strings.TrimPrefix(params.Name, "scheduler_")
-
-		var result interface{}
-		var callErr error
-
-		switch toolName {
-		case "schedule_recurring":
-			result, callErr = s.handler.HandleScheduleRecurring(params.Arguments)
-		case "update_cron_schedule":
-			result, callErr = s.handler.HandleUpdateCronSchedule(params.Arguments)
-		case "schedule_once":
-			result, callErr = s.handler.HandleScheduleOnce(params.Arguments)
-		case "list_schedules":
-			result, callErr = s.handler.HandleListSchedules(params.Arguments)
-		case "cancel_schedule":
-			result, callErr = s.handler.HandleCancelSchedule(params.Arguments)
-		default:
-			return &JSONRPCResponse{
-				JSONRPC: "2.0",
-				ID:      req.ID,
-				Error:   &RPCError{Code: -32601, Message: fmt.Sprintf("Unknown tool: %s", params.Name)},
-			}
-		}
-
-		if callErr != nil {
-			return &JSONRPCResponse{
-				JSONRPC: "2.0",
-				ID:      req.ID,
-				Result: map[string]interface{}{
-					"isError": true,
-					"content": []map[string]interface{}{
-						{
-							"type": "text",
-							"text": fmt.Sprintf("Tool error: %v", callErr),
-						},
-					},
-				},
-			}
-		}
-
-		resultBytes, err := marshalIndentFn(result, "", "  ")
-		if err != nil {
-			return &JSONRPCResponse{
-				JSONRPC: "2.0",
-				ID:      req.ID,
-				Error:   &RPCError{Code: -32603, Message: fmt.Sprintf("Failed to marshal tool result: %v", err)},
-			}
-		}
-		return &JSONRPCResponse{
-			JSONRPC: "2.0",
-			ID:      req.ID,
-			Result: map[string]interface{}{
-				"content": []map[string]interface{}{
-					{
-						"type": "text",
-						"text": string(resultBytes),
-					},
-				},
-			},
-		}
-
-	default:
-		if req.ID == nil {
-			return nil
-		}
-		return &JSONRPCResponse{
-			JSONRPC: "2.0",
-			ID:      req.ID,
-			Error:   &RPCError{Code: -32601, Message: fmt.Sprintf("Method not found: %s", req.Method)},
-		}
+	if r != nil && r.Context().Err() != nil {
+		return true
 	}
+	return errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, net.ErrClosed)
 }
 
-func (s *Server) getToolsList() []map[string]interface{} {
-	return []map[string]interface{}{
-		{
-			"name":        "schedule_recurring",
-			"description": "Register a persistent recurring schedule. Fresh Discord threads will be created in the target channel on each run.",
-			"inputSchema": map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"channel_id": map[string]interface{}{
-						"type":        "string",
-						"description": "Discord Channel ID where fresh threads will be spawned.",
-					},
-					"cron_expression": map[string]interface{}{
-						"type":        "string",
-						"description": "Standard 5-field cron expression (e.g. '0 20 * * 5') or macro (@daily, @weekly, @monthly).",
-					},
-					"prompt": map[string]interface{}{
-						"type":        "string",
-						"description": "Instructions to execute on every occurrence.",
-					},
-					"title_prefix": map[string]interface{}{
-						"type":        "string",
-						"description": "Title prefix for spawned threads (e.g. 'Weekly Meal Plan').",
-					},
-					"timezone": map[string]interface{}{
-						"type":        "string",
-						"description": "Timezone for evaluation (e.g. 'America/Los_Angeles', 'America/New_York', or 'UTC'). Defaults to configured server timezone ('America/Los_Angeles').",
-					},
-					"effort": map[string]interface{}{
-						"type":        "string",
-						"enum":        []string{"high", "low"},
-						"description": "Effort tier for the routine: 'high' (uses primary high-effort model) or 'low' (uses lightweight low-effort model). Defaults to 'high'.",
-					},
-				},
-				"required": []string{"channel_id", "cron_expression", "prompt"},
-			},
-		},
-		{
-			"name":        "update_cron_schedule",
-			"description": "Update an existing recurring cron schedule's effort tier, cron expression, prompt, title prefix, or timezone.",
-			"inputSchema": map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"schedule_id": map[string]interface{}{
-						"type":        "string",
-						"description": "The ID of the recurring cron schedule to update.",
-					},
-					"effort": map[string]interface{}{
-						"type":        "string",
-						"enum":        []string{"high", "low"},
-						"description": "Effort tier for the routine: 'high' (uses primary high-effort model) or 'low' (uses lightweight low-effort model).",
-					},
-					"cron_expression": map[string]interface{}{
-						"type":        "string",
-						"description": "New 5-field cron expression or macro.",
-					},
-					"prompt": map[string]interface{}{
-						"type":        "string",
-						"description": "New prompt instructions to execute on every occurrence.",
-					},
-					"title_prefix": map[string]interface{}{
-						"type":        "string",
-						"description": "New title prefix for spawned threads.",
-					},
-					"timezone": map[string]interface{}{
-						"type":        "string",
-						"description": "New timezone for evaluation.",
-					},
-				},
-				"required": []string{"schedule_id"},
-			},
-		},
-		{
-			"name":        "schedule_once",
-			"description": "Register a persistent one-shot reminder that triggers once at a designated time or relative duration.",
-			"inputSchema": map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"target_id": map[string]interface{}{
-						"type":        "string",
-						"description": "Target Discord thread ID or channel ID where reminder will be delivered.",
-					},
-					"run_at": map[string]interface{}{
-						"type":        "string",
-						"description": "ISO 8601 timestamp (e.g. '2026-08-28T21:00:00Z') or relative duration (e.g. '30m', '2h', '1d').",
-					},
-					"prompt": map[string]interface{}{
-						"type":        "string",
-						"description": "Content/instructions of the reminder.",
-					},
-					"timezone": map[string]interface{}{
-						"type":        "string",
-						"description": "Timezone for absolute timestamp evaluation (e.g. 'America/Los_Angeles', 'America/New_York', or 'UTC'). Defaults to configured server timezone ('America/Los_Angeles').",
-					},
-				},
-				"required": []string{"target_id", "run_at", "prompt"},
-			},
-		},
-		{
-			"name":        "list_schedules",
-			"description": "List all active recurring schedules and pending reminders.",
-			"inputSchema": map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"target_id": map[string]interface{}{
-						"type":        "string",
-						"description": "Optional Discord Channel or Thread ID to filter schedules.",
-					},
-				},
-			},
-		},
-		{
-			"name":        "cancel_schedule",
-			"description": "Cancel and delete an existing schedule by schedule ID.",
-			"inputSchema": map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"schedule_id": map[string]interface{}{
-						"type":        "string",
-						"description": "The ID of the schedule to cancel.",
-					},
-				},
-				"required": []string{"schedule_id"},
-			},
-		},
+func writeResponse(w http.ResponseWriter, r *http.Request, data []byte) {
+	if _, err := w.Write(data); err != nil {
+		if !isClientDisconnect(r, err) {
+			log.Printf("[Scheduler Server] Failed to write response: %v", err)
+		}
 	}
 }
