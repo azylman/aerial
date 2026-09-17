@@ -19,7 +19,7 @@ Before making any changes, Aerial MUST determine the target repository:
   - **100% Generic & Domain-Agnostic**: All prompts, code, error handlers, and schemas must remain completely generic and reusable for any user.
   - **Zero Personal Data Invariant**: **NEVER** commit real names, Discord handles, usernames, family members, home addresses/locations, private device/entity IDs, or user-specific business logic into this repository.
   - **Zero Plaintext Secrets Invariant**: NEVER commit API keys, tokens, private webhook URLs, or GitHub PATs to disk.
-- **Deploy Path**: Commit and push to `azylman/aerial:main`. Watchtower builds & deploys container updates out-of-band.
+- **Deploy Path**: Commit and push to `azylman/aerial:main`. Hangar synchronizes code and reconciles container updates out-of-band.
 
 ### 1.2 User Configuration Repository (e.g. `azylman/aerial-config` at `/share/aerial-config`)
 - **Scope**: User options (`config.yaml`), persona overrides & user identity/aliases (`AGENTS.md`), private smart home/domain workflows (`custom-skills/`), sidecar containers (`docker-compose.override.yml`), and host environment secrets (`.env`).
@@ -205,4 +205,4 @@ Before modifying source code, Aerial MUST audit the plan according to the task's
 4. **Continuous Deployment Invariant**:
    - **DO NOT run `docker compose up`, `docker compose build`, or `docker restart` from inside the container.**
    - Pushing/merging to `origin/main` triggers GitHub Actions CI (`docker-publish.yml`) to build and publish container images to GitHub Container Registry (`ghcr.io`).
-   - Watchtower on the host automatically detects the new image and performs an out-of-band container swap within 60 seconds without interrupting execution or causing downtime.
+   - Hangar on the host automatically detects the new image and performs an out-of-band container swap without interrupting execution or causing downtime.

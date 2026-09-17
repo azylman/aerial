@@ -18,7 +18,7 @@ Aerial separates generic system code from private user configuration:
 | **Repository** | `azylman/aerial` (Public) | `azylman/aerial-config` (Private) |
 | **Contents** | Brain engine, MCPs, base skills, compose topology | `config.yaml`, `AGENTS.md`, `custom-skills/`, compose overrides |
 | **Invariants** | 100% generic, zero personal data/names, zero secrets | User persona, personal identity, private runbooks |
-| **Deployment** | GitHub Actions -> GHCR -> Watchtower (60s rolling update) | In-process `fsnotify` watcher + GitSync (immediate hot-reload) |
+| **Deployment** | GitHub Actions -> GHCR -> Hangar (automated GitOps & OCI container reconciliation) | In-process `fsnotify` watcher + Hangar (immediate hot-reload) |
 
 ---
 
@@ -58,10 +58,10 @@ git push origin main
 - **ZERO-BYPASS INVARIANT**: **Never commit or push unverified changes.** Ensure `./scripts/verify.sh --staged` or test commands pass cleanly with exit code 0. The local `.githooks/pre-commit` hook automatically checks staged static analysis in < 1s, and full verification is offloaded to GitHub Actions CI.
 - **Branch Protection**: When branch protection is active on `main`, checkout a feature branch (`git checkout -b fix/<topic>`), push, open a PR via GitHub MCP, and enable auto-merge (`gh pr merge --auto --squash`).
 
-### Step 5: Automated CD & Watchtower Invariant
+### Step 5: Automated CD & Hangar Invariant
 - **NEVER execute `docker compose up`, `docker compose build`, or `docker restart` from inside the container.**
 - GitHub Actions automatically builds and publishes GHCR images.
-- Watchtower on the host automatically updates containers out-of-band within 60 seconds.
+- Hangar on the host automatically synchronizes code and reconciles updated containers out-of-band.
 
 ---
 

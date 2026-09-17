@@ -356,10 +356,10 @@ function renderDeployments(deployments) {
             deployBadge.textContent = `⚡ 1 CI BUILD ACTIVE`;
             deployBadge.className = 'section-badge building';
         } else if (isSwapping) {
-            deployBadge.textContent = `🔄 WATCHTOWER SWAPPING`;
+            deployBadge.textContent = `🔄 HANGAR SWAPPING`;
             deployBadge.className = 'section-badge swapping';
         } else if (isAwaitingPull) {
-            deployBadge.textContent = `⬇️ AWAITING WATCHTOWER PULL`;
+            deployBadge.textContent = `⬇️ AWAITING HANGAR SYNC`;
             deployBadge.className = 'section-badge active';
         } else if (activeDeploys.length > 0) {
             deployBadge.textContent = `${activeDeploys.length} IN PROGRESS`;
@@ -383,7 +383,7 @@ function renderDeployments(deployments) {
                     <span class="pulse-dot healthy"></span>
                     <span>ALL SERVICES IN SYNC // NO PENDING DEPLOYS</span>
                 </div>
-                <div>WATCHTOWER POLLING GHCR (60s)</div>
+                <div>HANGAR RECONCILING</div>
             </div>
         `;
         return;
@@ -400,7 +400,7 @@ function renderDeployments(deployments) {
         const steps = dep.steps || [
             { name: "Commit Trigger", icon: "📦", status: "completed" },
             { name: "CI Build & GHCR", icon: "⚙️", status: "completed" },
-            { name: "Watchtower Pull", icon: "⬇️", status: "completed" },
+            { name: "Hangar Sync", icon: "⬇️", status: "completed" },
             { name: "Container Swap", icon: "🔄", status: isLive ? "completed" : "active" },
             { name: "Health Check", icon: "🩺", status: isLive ? "completed" : "pending" }
         ];
