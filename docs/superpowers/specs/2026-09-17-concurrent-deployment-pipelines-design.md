@@ -2,7 +2,7 @@
 
 - **Author**: Aerial
 - **Target Repository**: `azylman/aerial`
-- **Status**: Hardened & Approved
+- **Status**: Hardened & Approved by The Girl Gang Review Panel
 - **Date**: 2026-09-17
 
 ---
@@ -11,7 +11,7 @@
 
 Aerial's Permet HUD Dashboard (`aerial-dashboard`) previously tracked continuous deployments via a singleton state machine (`dep-aerial-stack`). When multiple commits are in-flight across different phases of the lifecycle—such as commit B building in GitHub Actions CI while commit A is being reconciled and swapped on the host by `aerial-hangar`—the singleton model forces an artificial either/or choice: either CI masks host activity, or host swap activity overwrites CI state.
 
-This technical design refactors the deployment tracking engine from a singleton model to a **Concurrent Multi-Pipeline Architecture**. Each active or recent commit diff maintains an independent, first-class deployment pipeline instance (`DeploymentStatus`). On the Permet HUD frontend, each in-flight diff renders as its own dedicated 5-step deployment card (`Commit Trigger` ➔ `CI Build & GHCR` ➔ `Hangar Sync` ➔ `Container Swap` ➔ `Health Check`) with scoped matrix chips, timers, and live progress indicators.
+This hardened technical design refactors the deployment tracking engine from a singleton model to a **Concurrent Multi-Pipeline Architecture**. Each active or recent commit diff maintains an independent, first-class deployment pipeline instance (`DeploymentStatus`). On the Permet HUD frontend, in-flight diffs render as dedicated 5-step deployment cards (`Commit Trigger` ➔ `CI Build & GHCR` ➔ `Hangar Sync` ➔ `Container Swap` ➔ `Health Check`) with strictly scoped matrix chips, timers, and live progress indicators.
 
 ---
 
@@ -25,22 +25,26 @@ This technical design refactors the deployment tracking engine from a singleton 
 2. **Targeted Telemetry & Scoping**:
    - `CI Build & GHCR` step chips strictly reflect GitHub Actions matrix jobs for *that specific commit run*.
    - `Container Swap` step chips strictly reflect Hangar's `TargetServices` and container creation timestamps for *that specific reconciliation*.
+   - Differentiate CI chips from container chips via explicit `type: "ci" | "container"` metadata to prevent telemetry loss during stage transitions.
 
 3. **Smooth Lifecycle & State Coalescence**:
    - Commits seamlessly advance through pipeline stages: `queued` ➔ `building` ➔ `awaiting_pull` ➔ `pulling` ➔ `swapping` ➔ `live` ➔ `idle`.
-   - When an active CI run completes and transitions to host reconciliation, the pipeline coalesces under the same commit SHA rather than creating duplicate tracks.
-   - Completed pipelines remain visible in `live` stage during a 5-minute grace window, then cleanly evaporate.
-   - When all pipelines are idle, the HUD renders the ambient `ALL SERVICES IN SYNC` card.
+   - Ingest both active runs and recent completed runs (< 30m) into the state accumulator to eliminate the CI-to-Hangar handover void.
+   - Strict monotonic state progression: pipelines advance forward and never retrogress from `live` back to `pulling`.
+   - Max 2 fully expanded cards simultaneously; completed or older pipelines collapse into compact 1-line cyber pill drawers.
+   - Dynamically compress `live` grace window from 300s to 60s when concurrent pipelines are active to prevent HUD scroll bloat.
 
 4. **Mobile-First & Purple Cyberpunk Permet HUD UX**:
    - Stacked card layout with 16px gap, responsive wrapping on mobile viewports (< 640px).
-   - High-contrast cyberpunk palette: dark violet background (`#0d0b14`), neon purple laser (`#b026ff`) for swapping, cyan (`#00f0ff`) for pulling, emerald (`#00ff9f`) for live.
-   - Touch-friendly tap targets (≥ 44px) for diagnostic drawer inspection.
+   - Fix mobile CSS selector (`.deploy-steps-grid`) and add `flex-wrap: wrap` to headers.
+   - Expand touch targets for matrix chips to $\ge 44\text{px}$ touch hit boundaries.
+   - Decouple CSS styling: neon purple laser (`#b026ff`) for swapping, cyan (`#00f0ff`) for pulling, and emerald (`#00ff9f`) for live.
 
 5. **Invariants Compliance & Test Rigor**:
-   - **Statement Coverage Floor ($\ge 95.0\%$)**: 100% verified via `scripts/check-coverage.sh`.
-   - **Zero Markdown Tables**: Output conforms strictly to Discord bulleted key-value constraints.
-   - **Backward Compatibility**: Preserves `/api/status` schema (`deployments: []DeploymentStatus`, `ongoing_deploy`, `is_deploying`).
+   - **Statement Coverage Floor ($\ge 95.0\%$)**: 100% verified via `scripts/check-coverage.sh` across both Go services and Permet HUD frontend (`dashboard/app.test.js`).
+   - **Zero Markdown Tables**: Conforms strictly to Discord bulleted key-value constraints.
+   - **Deterministic Map Ordering**: Sort by stage rank descending, then `StartedAt` descending, then `Commit` lexicographically.
+   - **Safe Nil Handling**: Access `run.HeadSHA` with safe length bounding and nil `HeadCommit` fallbacks.
 
 ---
 
@@ -53,26 +57,28 @@ This technical design refactors the deployment tracking engine from a singleton 
 │  ┌─────────────────────────┐                 ┌───────────────────────────┐  │
 │  │   GitHub Actions API    │                 │   aerial-hangar Sidecar   │  │
 │  │   - GET /actions/runs   │                 │   - GET /status           │  │
-│  │   - GET /jobs           │                 │   - Reconciliation State  │  │
+│  │   - (per_page=10, <30m) │                 │   - Reconciliation State  │  │
 │  └────────────┬────────────┘                 └─────────────┬─────────────┘  │
 │               │                                            │                │
 └───────────────┼────────────────────────────────────────────┼────────────────┘
                 │                                            │
                 ▼                                            ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                  aerial-dashboard Engine (dashboard/main.go)                │
+│                  aerial-dashboard Engine (dashboard/pure.go)                │
 │                                                                             │
-│   1. Fetch Active/Recent GitHub Runs (In-Progress, Queued, Recent Succeeded)│
+│   1. Fetch Active & Recent GitHub Runs (In-Progress, Queued, Succeeded <30m)│
 │   2. Fetch Hangar Reconciliation Telemetry (State, Targets, CommitSHA)      │
 │   3. Inspect Local Docker Containers (Image Revision Labels, Uptimes)       │
 │                                                                             │
 │   ┌──────────────────────────────────────────────────────────────────────┐  │
 │   │           MergeClusterDeploymentsWithHangar (Pure Aggregator)        │  │
 │   │   - Map Runs to Commit Pipelines (Stage: queued / building)          │  │
+│   │   - Bridge Completed Runs to Host Reconcile (Stage: awaiting_pull)   │  │
 │   │   - Map Hangar Reconcile to Host Pipeline (Stage: pulling / swapping)│  │
-│   │   - Map Container Rollout to Host Pipeline (Stage: swapping / live)  │  │
-│   │   - Deduplicate by CommitSHA (Normalize to 7-char short SHA)         │  │
-│   │   - Sort: In-Flight First (swapping > pulling > building), then Live │  │
+│   │   - Group Containers by Image Revision (Stage: swapping / live)      │  │
+│   │   - Canonical 40-Char SHA Deduplication                              │  │
+│   │   - Deterministic Sort: Rank desc > StartedAt desc > Commit asc      │  │
+│   │   - Defensive Cardinality Clamp (Max 3-5 pipelines)                  │  │
 │   └──────────────────────────────────┬───────────────────────────────────┘  │
 │                                      │                                      │
 └──────────────────────────────────────┼──────────────────────────────────────┘
@@ -83,101 +89,176 @@ This technical design refactors the deployment tracking engine from a singleton 
 │                       PERMET HUD FRONTEND (static/app.js)                   │
 │                                                                             │
 │   ┌──────────────────────────────────────────────────────────────────────┐  │
-│   │ Deploy Card 1: Commit B (e.g. 9b6b2aa)                               │  │
+│   │ Deploy Card 1: Commit B (e.g. 9b6b2aa) [ACTIVE / EXPANDED]           │  │
 │   │ [📦 Commit Trigger ✓] [⚙️ CI Build ⚡] [⬇️ Hangar ○] [🔄 Swap ○] ... │  │
 │   │ CI Matrix Chips: proxy (running), dashboard (done)...                │  │
 │   └──────────────────────────────────────────────────────────────────────┘  │
 │                                                                             │
 │   ┌──────────────────────────────────────────────────────────────────────┐  │
-│   │ Deploy Card 2: Commit A (e.g. c79d95c)                               │  │
+│   │ Deploy Card 2: Commit A (e.g. c79d95c) [ACTIVE / EXPANDED]           │  │
 │   │ [📦 Commit Trigger ✓] [⚙️ CI Build ✓] [⬇️ Hangar ✓] [🔄 Swap ⚡] ... │  │
 │   │ Host Swap Chips: aerial-dashboard (swapping)...                      │  │
+│   └──────────────────────────────────────────────────────────────────────┘  │
+│                                                                             │
+│   ┌──────────────────────────────────────────────────────────────────────┐  │
+│   │ [c5340be] aerial-stack • LIVE (2m ago) ▾ [COMPACT CYBER PILL DRAWER] │  │
 │   └──────────────────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 4. Component Specifications
+## 4. Detailed Component Specifications
 
-### 4.1 Backend Engine (`dashboard/main.go` & `dashboard/pure.go`)
+### 4.1 Backend Engine (`dashboard/pure.go` & `dashboard/main.go`)
 
-1. **Multi-Pipeline Collection**:
-   - Replace early-return singleton exits in `mergeClusterDeploymentsWithHangar` with a pipeline accumulator map: `map[string]*DeploymentStatus` keyed by normalized 7-character commit SHA.
-   - For every in-progress or queued GitHub Actions run:
-     - Instantiate or retrieve `DeploymentStatus` for `run.HeadCommit.SHA`.
-     - Populate `Stage: building` (or `queued`), progress, run timer, HTML run logs URL, and CI matrix jobs.
-   - For active Hangar reconciliation:
-     - Resolve target commit from `gitSync.Reconciliation.CommitSHA` (or disk HEAD if commit SHA is omitted).
-     - If the commit already exists from a completed CI run, advance its stage to `pulling` or `swapping`.
-     - Scope matrix chips via `BuildTargetContainerChips(aerialContainers, gitSync.Reconciliation.TargetServices, gitSync.Reconciliation.StartedAt, now)`.
-   - For local container rolling swaps (`minUptimeSec < 120` or unswapped containers):
-     - Identify newest container commit revision.
-     - Advance or attach host swap pipeline stage.
-   - For recent completions:
-     - Retain completed pipelines in stage `live` if completion or container creation was within the 300s (5-minute) grace window.
+1. **Relocate Aggregator to `dashboard/pure.go`**:
+   - Relocate `mergeClusterDeploymentsWithHangar` into `dashboard/pure.go` as a pure, hermetically testable function:
+     ```go
+     func MergeClusterDeploymentsWithHangar(
+         runs []GitHubRun,
+         jobs map[int64][]GitHubJob,
+         gitSync GitSyncStatusResponse,
+         aerialContainers []DockerContainerJSON,
+         currentCommit string,
+         refTime time.Time,
+     ) []DeploymentStatus
+     ```
+   - Provide backward-compatible forwarders in `dashboard/main.go`.
 
-2. **Pipeline Ordering & Priority**:
-   - Convert map to slice ordered deterministically:
-     1. Active host swaps (`swapping`, `pulling`)
-     2. Active CI builds (`building`, `queued`)
-     3. Failed pipelines (`failed`, `degraded`)
-     4. Live grace pipelines (`live`)
-   - Compute `ongoing_deploy` macro string from highest-priority active pipeline stage.
-   - Compute `is_deploying = len(activePipelines) > 0`.
+2. **Telemetry Ingestion & Safe Access**:
+   - Increase GitHub API polling pagination from `per_page=3` to `per_page=10` to avoid dropping rapid pushes.
+   - Always extract commit SHA via `run.HeadSHA` (checking non-empty before falling back to `run.HeadCommit.SHA`).
+   - Validate SHAs against hexadecimal format (`^[0-9a-fA-F]{7,40}$`) before canonical keying.
 
-### 4.2 Frontend Presentation (`dashboard/static/app.js` & `style.css`)
+3. **Multi-Pipeline Accumulator (`map[string]*DeploymentStatus`)**:
+   - Key the map by canonical full lowercase SHA (or synthetic ID `gh-run-<id>` when absent).
+   - Ingest:
+     - **Active CI Runs (`queued`, `in_progress`)**: Stage `queued` or `building` with CI matrix chips.
+     - **Recent Succeeded CI Runs (< 30m)**: If not yet picked up by Hangar or local containers, place in Stage `awaiting_pull` (bridge state) to eliminate the handover void.
+     - **Active Hangar Reconciliation (`pulling`, `swapping`)**: Resolve target commit from `gitSync.Reconciliation.CommitSHA` (or disk HEAD). Advance stage to `pulling` or `swapping` and attach scoped host container chips.
+     - **Local Container Groups**: Group running containers by image revision label (`org.opencontainers.image.revision` or `aerial.commit_sha`). If a commit has containers starting or with uptime < 120s, track as `swapping`. If all containers for that commit are healthy and recent, track as `live`.
+   - **Out-of-Order Fast-Forward Handling**: If a completed CI run's commit is an ancestor of the currently running host commit, mark it `superseded` or fold into `live` rather than tripping a 120s timeout failure.
 
-1. **Multi-Card Rendering**:
-   - `renderDeployments(deployments)` iterates over `deployments` slice.
-   - Each entry produces an independent `.deploy-card` element.
-   - Laser scan animation (`.deploy-card-laser`) runs on all cards in active stages (`building`, `pulling`, `swapping`).
+4. **Register `"pulling"` in `pure.go`**:
+   - Update `stageRank` in `pure.go`:
+     ```go
+     stageRank := map[string]int{
+         "swapping":      6,
+         "pulling":       5,
+         "building":      4,
+         "awaiting_pull": 3,
+         "queued":        2,
+         "failed":        1,
+         "degraded":      1,
+         "live":          0,
+     }
+     ```
+   - Add `"pulling"` to `IsDeployOngoing(stage)` so `is_deploying: true` remains active during image pulls.
 
+5. **Deterministic Sort & Cardinality Clamp**:
+   - Sort pipelines:
+     1. Stage priority descending (`swapping` > `pulling` > `building` > `awaiting_pull` > `failed` > `live`)
+     2. `StartedAt` descending (newest first)
+     3. `Commit` lexicographically ascending
+   - Clamp the final slice to a maximum of 3–5 pipelines to prevent HUD DOM bloat.
+
+### 4.2 Matrix Chip Scoping & Discriminator
+
+1. **`MatrixJobChip` Domain Type**:
+   - Add `Type string` (`"ci"` vs `"container"`) to `MatrixJobChip`:
+     ```go
+     type MatrixJobChip struct {
+         Name       string `json:"name"`
+         Status     string `json:"status"`
+         Conclusion string `json:"conclusion,omitempty"`
+         Duration   string `json:"duration,omitempty"`
+         Type       string `json:"type,omitempty"` // "ci" | "container"
+     }
+     ```
+   - In `parseMatrixJobChips`, assign `Type: "ci"`.
+   - In `BuildTargetContainerChips`, assign `Type: "container"`.
+   - Store both collections in `DeploymentStatus.MatrixJobs` without clobbering each other.
+
+### 4.3 Frontend Layout & Permet HUD UX (`dashboard/static/app.js` & `style.css`)
+
+1. **Multi-Card Rendering & Visual Hierarchy**:
+   - Max 2 expanded `.deploy-card` elements.
+   - Any 3rd+ pipeline or completed `live` pipeline (> 60s) renders as a compact 1-line cyber pill drawer:
+     ```html
+     <div class="deploy-card-compact stage-live">
+         <span class="compact-commit">c79d95c</span>
+         <span class="compact-title">aerial-stack</span>
+         <span class="compact-badge live">✓ LIVE (2m ago)</span>
+         <span class="compact-toggle">▾</span>
+     </div>
+     ```
 2. **Step Scoping**:
-   - In step 2 (`CI Build & GHCR`): render CI matrix chips (filter out host container names if needed).
-   - In step 4 (`Container Swap`): render host container chips (filter out CI test/lint jobs).
+   - Step 2 (`CI Build & GHCR`): filters chips by `c.type === 'ci'` (or fallback to test/lint/build keywords).
+   - Step 4 (`Container Swap`): filters chips by `c.type === 'container'` (or fallback to non-CI names).
 
-3. **Top-Level Header Badge (`#deploy-count-badge`)**:
-   - If `deployments.length === 0`: `SYSTEM IN SYNC` (neutral badge).
-   - If `activeDeploys.length === 1`: `⚡ 1 CI BUILD ACTIVE` or `🔄 HANGAR SWAPPING`.
-   - If `activeDeploys.length > 1`: `${activeDeploys.length} DEPLOYS IN PROGRESS` (pulsing active badge).
-   - If any failed: `🚨 DEPLOY FAILED` (red alert badge).
+3. **Top-Level Section Badge Logic Fix**:
+   - Patch `app.js` badge evaluation to evaluate multi-deploy concurrency BEFORE single-phase states:
+     ```javascript
+     if (hasFailed) {
+         deployBadge.textContent = '🚨 CI BUILD FAILED';
+         deployBadge.className = 'section-badge failed';
+     } else if (hasDegraded) {
+         deployBadge.textContent = '⚠️ STACK DEGRADED';
+         deployBadge.className = 'section-badge failed';
+     } else if (activeDeploys.length > 1) {
+         deployBadge.textContent = `${activeDeploys.length} DEPLOYS IN PROGRESS`;
+         deployBadge.className = 'section-badge active';
+     } else if (isSwapping) {
+         deployBadge.textContent = '🔄 HANGAR SWAPPING';
+         deployBadge.className = 'section-badge swapping';
+     } else if (isPulling) {
+         deployBadge.textContent = '⬇️ HANGAR PULLING';
+         deployBadge.className = 'section-badge pulling';
+     } else if (isBuilding) {
+         deployBadge.textContent = '⚡ 1 CI BUILD ACTIVE';
+         deployBadge.className = 'section-badge building';
+     } else if (isAwaitingPull) {
+         deployBadge.textContent = '⬇️ AWAITING HANGAR SYNC';
+         deployBadge.className = 'section-badge active';
+     }
+     ```
 
-4. **Mobile & PWA Optimizations**:
-   - Container cards use CSS grid / flex with `min-width: 0` to prevent horizontal blowouts on phones.
-   - Step icons and badges remain clearly visible on narrow viewports without truncation.
+4. **Styling & Cyberpunk Accents (`style.css`)**:
+   - Separate `.stage-swapping` (border: `rgba(176, 38, 255, 0.4)`, text/badge: `#b026ff`) from `.stage-pulling` (border: `rgba(0, 240, 255, 0.4)`, text/badge: `#00f0ff`).
+   - Fix responsive typo: change `.steps-grid` at line 2445 to `.deploy-steps-grid`.
+   - Add `flex-wrap: wrap` and `gap: 8px` to `.deploy-card-header`.
+   - Expand touch hit boundaries on `.matrix-chip` to satisfy PWA touch target standards ($\ge 44\text{px}$).
 
 ---
 
 ## 5. Error Handling & Edge Cases
 
-• **Orphaned CI Runs**: If a GitHub Actions run hangs or becomes orphaned, GitHub's run conclusion timeout (6 hours max, but our tracker bounds CI visibility to runs updated within the last 60 minutes) prevents permanent phantom cards.
-• **Concurrent Reconciliations on Host**: Hangar uses `sync.Mutex` (`reconcileStateMu`) and debounced channels (`reconcileCh`) to ensure host reconciliations run sequentially; the dashboard correctly observes the active reconciliation while queueing subsequent runs.
-• **Flapping Network / API Errors**: If GitHub API fails with 403 (rate limit) or Hangar is temporarily unreachable, existing cached pipelines are preserved with soft warnings rather than flashing blank cards.
-• **Unswapped Stale Containers**: Detected via `BuildTargetContainerChips` timestamp comparison; unswapped services show as pending/active until Docker confirms healthy status.
+• **Orphaned / Cancelled CI Runs**: Runs with `Conclusion == "cancelled"` immediately mark the pipeline as failed/cancelled rather than hanging. Active CI runs are bounded to updates within the last 15 minutes.
+• **Hangar Unreachable Heartbeat**: If Hangar is unreachable for > 30s during an active swap, the pipeline surfaces a clear diagnostic error rather than freezing indefinitely.
+• **CrashLoopBackOff Traps**: If a container in rolling swap has `RestartCount > 0`, the pipeline flags `degraded` immediately.
+• **Fast-Forwarded Commits**: Commits whose changes were superseded by newer deployments on `main` coalesce smoothly into `live` without triggering false 120s timeout errors.
 
 ---
 
 ## 6. Verification & Test Plan
 
-1. **Unit Tests (`dashboard/pure_test.go`)**:
-   - `TestMergeClusterDeployments_ConcurrentPipelines`: Mock concurrent CI run (Commit B) and Hangar swap (Commit A); verify both returned in slice.
-   - `TestMergeClusterDeployments_Deduplication`: Mock CI run and Hangar swap with identical commit SHA; verify single unified deployment object with advanced stage.
-   - `TestMergeClusterDeployments_GraceWindowExpiry`: Verify live deploy past 300s cleanly drops from return list.
-   - `TestMergeClusterDeployments_PrecedenceOrdering`: Verify swapping appears before building, which appears before live.
+1. **Pure Go Unit Tests (`dashboard/pure_test.go`)**:
+   - `TestMergeClusterDeployments_ConcurrentCIAndSwap`: Verify Commit B (building) and Commit A (swapping) return concurrently.
+   - `TestMergeClusterDeployments_AwaitingPullBridge`: Verify completed CI run transitions to `awaiting_pull` without vanishing.
+   - `TestMergeClusterDeployments_DeterministicSort`: Verify randomized map iteration always produces stable sorted order.
+   - `TestMergeClusterDeployments_MultiCommitContainerGrouping`: Verify earlier commit maintains `live` grace when newer commit swaps containers.
+   - `TestMergeClusterDeployments_SupersededFastForward`: Verify older ancestor commits coalesce without false timeouts.
+   - `TestMergeClusterDeployments_SafeNilHandling`: Verify nil `HeadCommit` or short SHAs never panic.
+   - `TestMergeClusterDeployments_CardinalityClamp`: Verify excess pipelines clamp to maximum 5.
+   - `TestCalculateDeployStatus_Pulling`: Verify `"pulling"` has rank 5 and keeps `IsDeployOngoing == true`.
 
-2. **Integration Tests (`dashboard/main_test.go`)**:
-   - Mock HTTP handlers for GitHub API and Hangar `/status` returning concurrent telemetry payloads; verify `/api/status` JSON response structure and fields.
+2. **Frontend Unit Tests (`dashboard/app.test.js`)**:
+   - Verify multi-card rendering when `deployments` has length > 1.
+   - Verify compact cyber pill drawer rendering for 3rd+ or live cards.
+   - Verify `#deploy-count-badge` displays `${activeDeploys.length} DEPLOYS IN PROGRESS` when multiple deploys run.
+   - Verify chip scoping distinguishes CI chips from container chips.
 
-3. **Monorepo Standards & Coverage Floor**:
-   - Run `scripts/verify.sh` for monorepo-wide pass.
-   - Run `scripts/check-coverage.sh --service dashboard` to ensure statement coverage $\ge 95.0\%$.
-
----
-
-## 7. Spec Self-Review Checklist
-
-• **Placeholder scan**: Zero "TBD", "TODO", or vague requirements.
-• **Internal consistency**: Data models, field names (`ongoing_deploy`, `TargetServices`, `CommitSHA`), and frontend classes match existing code conventions.
-• **Scope check**: Bounded strictly to `dashboard` backend and frontend; zero changes required to Hangar or CI workflows.
-• **Ambiguity check**: Stage precedence, deduplication key, and chip separation criteria are explicit.
+3. **Coverage & Monorepo Pass**:
+   - `scripts/verify.sh` passes 100% across all linters, BOM checks, and tests.
+   - `scripts/check-coverage.sh --service dashboard` achieves $\ge 95.0\%$ statement coverage on Go and frontend.
