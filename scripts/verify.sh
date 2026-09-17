@@ -18,6 +18,7 @@ for arg in "$@"; do
 done
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 echo "⚡ [Aerial Verify] Running $MODE verification checks..."
 
@@ -75,16 +76,16 @@ run_golangci_lint() {
     svc="$1"
     if [ -d "$svc" ]; then
         echo "   [golangci-lint] Linting $svc..."
-        if has_cmd golangci-lint && (cd "$svc" && golangci-lint run ./...); then
-            :
-        elif has_cmd go; then
-            echo "   (golangci-lint not compatible or not found, falling back to go vet for $svc)"
-            (cd "$svc" && go vet ./...)
+        if has_cmd golangci-lint; then
+            (cd "$svc" && golangci-lint run ./...)
         elif has_cmd docker; then
-            if ! docker run --rm -v "$(pwd)/$svc:/app" -w /app golangci/golangci-lint:v1.59.1 golangci-lint run ./... 2>/dev/null; then
-                echo "   (golangci-lint v1.59.1 incompatible with Go >= 1.24 export data, falling back to go vet in golang:1.24 for $svc)"
-                docker run --rm -v "$(pwd)/$svc:/app" -w /app golang:1.24 go vet ./...
-            fi
+            docker run --rm \
+                -v "$REPO_ROOT:/workspace" -w "/workspace/$svc" \
+                golangci/golangci-lint:v1.64.5 \
+                golangci-lint run --config /workspace/.golangci.yml ./...
+        elif has_cmd go; then
+            echo "   (golangci-lint not found, running go vet for $svc)"
+            (cd "$svc" && go vet ./...)
         else
             echo "🚨 [Aerial Verify] Error: Neither golangci-lint, docker, nor go found in PATH." >&2
             exit 1
@@ -202,7 +203,7 @@ if [ "$MODE" = "staged" ]; then
     # Check Go microservices
     for svc in $GO_SERVICES; do
         if echo "$STAGED_FILES" | grep -q "^$svc/"; then
-            run_go_vet "$svc"
+            run_golangci_lint "$svc"
         fi
     done
 

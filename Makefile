@@ -1,7 +1,7 @@
 .PHONY: all test lint tidy build help
 .DEFAULT_GOAL := help
 
-SERVICES := brain scheduler-mcp discord-mcp dashboard
+SERVICES := brain scheduler-mcp discord-mcp dashboard sidecars/gitsync
 
 help: ## Display available targets
 	@echo "Aerial Monorepo Development Commands:"
