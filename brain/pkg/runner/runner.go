@@ -481,6 +481,59 @@ func isPOSIXIdentifier(s string) bool {
 // StepUpdateHandler is an explicit callback for intermediate stream-json updates.
 type StepUpdateHandler func(ev *StepUpdateEvent)
 
+// CmdOptions configures execution parameters for a process runner.
+type CmdOptions struct {
+	Dir    string
+	Env    []string
+	Stdin  io.Reader
+	Stdout io.Writer
+	Stderr io.Writer
+}
+
+// ProcessRunner abstracts process execution and termination lifecycle.
+type ProcessRunner interface {
+	Start() error
+	Wait() error
+}
+
+// CmdRunner represents a factory for creating process runners.
+type CmdRunner interface {
+	Command(ctx context.Context, name string, args []string, opts CmdOptions) (ProcessRunner, error)
+}
+
+// CmdRunnerFunc allows using a function as a CmdRunner.
+type CmdRunnerFunc func(ctx context.Context, name string, args []string, opts CmdOptions) (ProcessRunner, error)
+
+// Command calls f(ctx, name, args, opts).
+func (f CmdRunnerFunc) Command(ctx context.Context, name string, args []string, opts CmdOptions) (ProcessRunner, error) {
+	return f(ctx, name, args, opts)
+}
+
+type defaultCmdRunner struct{}
+
+func (d *defaultCmdRunner) Command(ctx context.Context, name string, args []string, opts CmdOptions) (ProcessRunner, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = opts.Dir
+	cmd.Env = opts.Env
+	cmd.Stdin = opts.Stdin
+	cmd.Stdout = opts.Stdout
+	cmd.Stderr = opts.Stderr
+	configureSysProcAttr(cmd)
+	return &execProcessRunner{cmd: cmd}, nil
+}
+
+type execProcessRunner struct {
+	cmd *exec.Cmd
+}
+
+func (p *execProcessRunner) Start() error {
+	return p.cmd.Start()
+}
+
+func (p *execProcessRunner) Wait() error {
+	return p.cmd.Wait()
+}
+
 // WatchdogOptions configures execution timeouts and activity polling behavior.
 type WatchdogOptions struct {
 	HomeDir           string
@@ -492,6 +545,7 @@ type WatchdogOptions struct {
 	StepUpdateHandler StepUpdateHandler
 	TargetID          string
 	ExtraEnv          []string
+	CmdRunner         CmdRunner
 }
 
 // activityTap wraps an io.Writer, bumps the ActivityWriter timestamp on every write,
@@ -698,17 +752,15 @@ func RunAgyWithWatchdog(parentCtx context.Context, agyBin, prompt, sessionID, ap
 	runCtx, runCancel := context.WithCancel(parentCtx)
 	defer runCancel()
 
-	cmd := exec.CommandContext(runCtx, agyBin, args...)
+	cmdDir := "."
 	if _, statErr := os.Stat("/share/aerial"); statErr == nil {
-		cmd.Dir = "/share/aerial"
+		cmdDir = "/share/aerial"
 	} else if _, statErr := os.Stat("/app"); statErr == nil {
-		cmd.Dir = "/app"
-	} else {
-		cmd.Dir = "."
+		cmdDir = "/app"
 	}
-	cmd.Stdin = strings.NewReader("")
-	cmd.Env = BuildAgyEnv(AgyEnvInput{
-		BaseEnv:  cmd.Environ(),
+
+	cmdEnv := BuildAgyEnv(AgyEnvInput{
+		BaseEnv:  os.Environ(),
 		HomeDir:  opts.HomeDir,
 		APIKey:   apiKey,
 		TargetID: opts.TargetID,
@@ -718,10 +770,6 @@ func RunAgyWithWatchdog(parentCtx context.Context, agyBin, prompt, sessionID, ap
 	var outBuf bytes.Buffer
 	actWriter := NewActivityWriter(sessionID)
 	tap := newActivityTap(&outBuf, actWriter, outputFmt == "stream-json", opts.StepUpdateHandler)
-	cmd.Stdout = tap
-	cmd.Stderr = actWriter
-
-	configureSysProcAttr(cmd)
 
 	// Pre-flight: ensure settings.json matches authentication mode prior to executing agy
 	if strings.TrimSpace(opts.HomeDir) != "" {
@@ -730,7 +778,23 @@ func RunAgyWithWatchdog(parentCtx context.Context, agyBin, prompt, sessionID, ap
 		}
 	}
 
-	if startErr := cmd.Start(); startErr != nil {
+	cmdRunner := opts.CmdRunner
+	if cmdRunner == nil {
+		cmdRunner = &defaultCmdRunner{}
+	}
+
+	proc, err := cmdRunner.Command(runCtx, agyBin, args, CmdOptions{
+		Dir:    cmdDir,
+		Env:    cmdEnv,
+		Stdin:  strings.NewReader(""),
+		Stdout: tap,
+		Stderr: actWriter,
+	})
+	if err != nil {
+		return "", actWriter.String(), -1, err
+	}
+
+	if startErr := proc.Start(); startErr != nil {
 		return "", actWriter.String(), -1, startErr
 	}
 
@@ -800,7 +864,7 @@ func RunAgyWithWatchdog(parentCtx context.Context, agyBin, prompt, sessionID, ap
 		}
 	}()
 
-	runErr := cmd.Wait()
+	runErr := proc.Wait()
 	tap.Flush()
 	stopWatchdog()
 	watchdogWg.Wait()
@@ -825,8 +889,8 @@ func RunAgyWithWatchdog(parentCtx context.Context, agyBin, prompt, sessionID, ap
 	}
 
 	if runErr != nil {
-		if exitErr, ok := runErr.(*exec.ExitError); ok {
-			exitCode = exitErr.ExitCode()
+		if coder, ok := runErr.(interface{ ExitCode() int }); ok {
+			exitCode = coder.ExitCode()
 		} else {
 			exitCode = -1
 		}
