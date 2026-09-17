@@ -51,16 +51,17 @@ function Run-GoVet($svc) {
 function Run-GolangCILint($svc) {
     Write-Host "   [golangci-lint] Linting $svc..." -ForegroundColor DarkCyan
     $svcPath = Join-Path $repoRoot $svc
+    $normSvc = "$($svc.Replace('\', '/'))/"
     if ($hasLint) {
         Push-Location $svcPath
         try {
-            & golangci-lint run ./...
+            & golangci-lint run --path-prefix="$normSvc" --config "$repoRoot/.golangci.yml" ./...
             if ($LASTEXITCODE -ne 0) { throw "golangci-lint failed on $svc" }
         } finally {
             Pop-Location
         }
     } elseif ($hasDocker) {
-        docker run --rm -v "${repoRoot}:/workspace" -w "/workspace/$svc" golangci/golangci-lint:v1.64.5 golangci-lint run --config /workspace/.golangci.yml ./...
+        docker run --rm -v "${repoRoot}:/workspace" -w "/workspace/$svc" golangci/golangci-lint:v1.64.5 golangci-lint run --path-prefix="$normSvc" --config /workspace/.golangci.yml ./...
         if ($LASTEXITCODE -ne 0) { throw "golangci-lint (docker) failed on $svc" }
     } elseif ($hasGo) {
         Write-Host "   (golangci-lint not found, running go vet for $svc)" -ForegroundColor Yellow

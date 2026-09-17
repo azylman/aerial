@@ -26,9 +26,7 @@ func RunApp(ctx context.Context, cfg *Config) error {
 	if err != nil {
 		return err
 	}
-	defer func() {
-		_ = database.Close()
-	}()
+	defer closeWarn(database, "database on shutdown")
 
 	toolHandler := NewToolHandler(cfg, database)
 	server := NewServer(toolHandler)

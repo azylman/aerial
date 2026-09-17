@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -10,7 +11,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -293,23 +296,38 @@ func TestProxy_EdgeCasesAndErrors(t *testing.T) {
 	}
 
 	// 6. PollUpstream
-	if PollUpstream(context.Background(), "59994", 2, 5*time.Millisecond) {
+	lClosed, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen on ephemeral port: %v", err)
+	}
+	_, closedPort, err := net.SplitHostPort(lClosed.Addr().String())
+	if err != nil {
+		t.Fatalf("failed to parse port: %v", err)
+	}
+	_ = lClosed.Close()
+
+	if PollUpstream(context.Background(), closedPort, 2, 5*time.Millisecond) {
 		t.Error("expected false for closed port in PollUpstream")
 	}
 
 	// PollUpstream success
-	l, err := net.Listen("tcp", "127.0.0.1:59991")
-	if err == nil {
-		defer l.Close()
-		if !PollUpstream(context.Background(), "59991", 5, 10*time.Millisecond) {
-			t.Error("expected true for open port in PollUpstream")
-		}
+	lOpen, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen on ephemeral port: %v", err)
+	}
+	defer lOpen.Close()
+	_, openPort, err := net.SplitHostPort(lOpen.Addr().String())
+	if err != nil {
+		t.Fatalf("failed to parse port: %v", err)
+	}
+	if !PollUpstream(context.Background(), openPort, 5, 10*time.Millisecond) {
+		t.Error("expected true for open port in PollUpstream")
 	}
 
 	// PollUpstream canceled context
 	canceledCtx, cancelPoll := context.WithCancel(context.Background())
 	cancelPoll()
-	if PollUpstream(canceledCtx, "59991", 5, 10*time.Millisecond) {
+	if PollUpstream(canceledCtx, openPort, 5, 10*time.Millisecond) {
 		t.Error("expected false when context is canceled in PollUpstream")
 	}
 
@@ -852,6 +870,131 @@ func TestRunProxyApp_ListenFailure(t *testing.T) {
 		t.Error("expected error from invalid port")
 	}
 }
+
+type mockErrWriter struct {
+	header http.Header
+	err    error
+}
+
+func (m *mockErrWriter) Header() http.Header {
+	if m.header == nil {
+		m.header = make(http.Header)
+	}
+	return m.header
+}
+
+func (m *mockErrWriter) Write(p []byte) (int, error) {
+	return 0, m.err
+}
+
+func (m *mockErrWriter) WriteHeader(statusCode int) {}
+
+func TestWriteProxyResponse(t *testing.T) {
+	// 1. Successful write
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	writeProxyResponse(rec, req, []byte("ok"))
+	if rec.Body.String() != "ok" {
+		t.Errorf("expected ok, got %s", rec.Body.String())
+	}
+
+	// 2. Client context canceled - suppressed
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	reqCanceled := httptest.NewRequest(http.MethodGet, "/health", nil).WithContext(ctx)
+	mockErr := &mockErrWriter{err: errors.New("simulated network failure")}
+	writeProxyResponse(mockErr, reqCanceled, []byte("ignored"))
+
+	// 3. EPIPE error - suppressed
+	reqNormal := httptest.NewRequest(http.MethodGet, "/health", nil)
+	mockEpipe := &mockErrWriter{err: syscall.EPIPE}
+	writeProxyResponse(mockEpipe, reqNormal, []byte("ignored"))
+
+	// 4. Generic write error
+	mockGeneric := &mockErrWriter{err: errors.New("unexpected error")}
+	writeProxyResponse(mockGeneric, reqNormal, []byte("ignored"))
+}
+
+func TestKillProcess(t *testing.T) {
+	// 1. nil cmd
+	killProcess(nil)
+
+	// 2. cmd without process
+	cmdNoProc := exec.Command("true")
+	killProcess(cmdNoProc)
+
+	// 3. running process
+	cmdRunning := exec.Command("sleep", "1")
+	if err := cmdRunning.Start(); err == nil {
+		killProcess(cmdRunning)
+	}
+
+	// 4. already finished process
+	cmdFinished := exec.Command("true")
+	if err := cmdFinished.Run(); err == nil {
+		killProcess(cmdFinished)
+	}
+}
+
+type mockErrorCloserReader struct {
+	io.Reader
+}
+
+func (m *mockErrorCloserReader) Close() error {
+	return errors.New("simulated closer error")
+}
+
+type mockRoundTripper struct {
+	roundTripFn func(req *http.Request) (*http.Response, error)
+}
+
+func (m *mockRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return m.roundTripFn(req)
+}
+
+func TestIsClientDisconnect_EdgeCases(t *testing.T) {
+	if isClientDisconnect(nil, nil) {
+		t.Error("expected false for nil error")
+	}
+	if !isClientDisconnect(nil, syscall.ECONNRESET) {
+		t.Error("expected true for ECONNRESET")
+	}
+	if !isClientDisconnect(nil, net.ErrClosed) {
+		t.Error("expected true for net.ErrClosed")
+	}
+	if isClientDisconnect(nil, errors.New("other error")) {
+		t.Error("expected false for generic error")
+	}
+}
+
+func TestServeHTTP_UpstreamCloseError(t *testing.T) {
+	handler, err := NewProxyHandler("http://127.0.0.1:4005", BlockedToolNames)
+	if err != nil {
+		t.Fatalf("NewProxyHandler failed: %v", err)
+	}
+
+	handler.httpClient.Transport = &mockRoundTripper{
+		roundTripFn: func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       &mockErrorCloserReader{Reader: strings.NewReader(`{"jsonrpc":"2.0","result":{"tools":[]}}`)},
+			}, nil
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"jsonrpc":"2.0","method":"tools/list"}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d", rec.Code)
+	}
+}
+
+
+
+
 
 
 

@@ -2,10 +2,14 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log"
+	"net"
 	"net/http"
 	"strings"
+	"syscall"
 )
 
 type JSONRPCRequest struct {
@@ -50,10 +54,39 @@ func (s *Server) Routes() http.Handler {
 	return mux
 }
 
+func isClientDisconnect(r *http.Request, err error) bool {
+	if err == nil {
+		return false
+	}
+	if r != nil && r.Context().Err() != nil {
+		return true
+	}
+	return errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, net.ErrClosed)
+}
+
+func writeResponse(w http.ResponseWriter, r *http.Request, data []byte) {
+	if _, err := w.Write(data); err != nil {
+		if !isClientDisconnect(r, err) {
+			log.Printf("[Scheduler Server] Failed to write response: %v", err)
+		}
+	}
+}
+
+func writeJSON(w http.ResponseWriter, r *http.Request, data interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	b, err := json.Marshal(data)
+	if err != nil {
+		log.Printf("[Scheduler Server] Failed to marshal JSON response: %v", err)
+		http.Error(w, `{"error":"Internal error"}`, http.StatusInternalServerError)
+		return
+	}
+	writeResponse(w, r, b)
+}
+
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(`{"status":"ok"}`))
+	writeResponse(w, r, []byte(`{"status":"ok"}`))
 }
 
 func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
@@ -67,7 +100,7 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("MCP Scheduler Service Ready\n"))
+		writeResponse(w, r, []byte("MCP Scheduler Service Ready\n"))
 		return
 	}
 
@@ -76,20 +109,19 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	defer closeWarn(r.Body, "request body")
+
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, `{"error":"Failed to read request body"}`, http.StatusBadRequest)
 		return
 	}
-	_ = r.Body.Close()
 
 	trimmed := strings.TrimSpace(string(body))
 	if trimmed == "" {
 		http.Error(w, `{"error":"Empty request body"}`, http.StatusBadRequest)
 		return
 	}
-
-	w.Header().Set("Content-Type", "application/json")
 
 	// Support JSON-RPC batch arrays if sent
 	if strings.HasPrefix(trimmed, "[") {
@@ -99,7 +131,7 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 				JSONRPC: "2.0",
 				Error:   &RPCError{Code: -32700, Message: "Parse error"},
 			}
-			_ = json.NewEncoder(w).Encode(resp)
+			writeJSON(w, r, resp)
 			return
 		}
 		var responses []JSONRPCResponse
@@ -109,7 +141,7 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 				responses = append(responses, *resp)
 			}
 		}
-		_ = json.NewEncoder(w).Encode(responses)
+		writeJSON(w, r, responses)
 		return
 	}
 
@@ -120,17 +152,19 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 			JSONRPC: "2.0",
 			Error:   &RPCError{Code: -32700, Message: "Parse error"},
 		}
-		_ = json.NewEncoder(w).Encode(resp)
+		writeJSON(w, r, resp)
 		return
 	}
 
 	resp := s.processRequest(req)
 	if resp != nil {
-		_ = json.NewEncoder(w).Encode(resp)
+		writeJSON(w, r, resp)
 	} else {
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
+
+var marshalIndentFn = json.MarshalIndent
 
 func (s *Server) processRequest(req JSONRPCRequest) *JSONRPCResponse {
 	// Notifications (no ID)
@@ -221,7 +255,14 @@ func (s *Server) processRequest(req JSONRPCRequest) *JSONRPCResponse {
 			}
 		}
 
-		resultBytes, _ := json.MarshalIndent(result, "", "  ")
+		resultBytes, err := marshalIndentFn(result, "", "  ")
+		if err != nil {
+			return &JSONRPCResponse{
+				JSONRPC: "2.0",
+				ID:      req.ID,
+				Error:   &RPCError{Code: -32603, Message: fmt.Sprintf("Failed to marshal tool result: %v", err)},
+			}
+		}
 		return &JSONRPCResponse{
 			JSONRPC: "2.0",
 			ID:      req.ID,

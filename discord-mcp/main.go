@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -65,7 +66,9 @@ func PollUpstream(ctx context.Context, upstreamPort string, maxAttempts int, del
 		}
 		conn, err := net.DialTimeout("tcp", "127.0.0.1:"+upstreamPort, 200*time.Millisecond)
 		if err == nil {
-			_ = conn.Close()
+			if closeErr := conn.Close(); closeErr != nil {
+				log.Printf("[Discord-MCP] Warning closing probe connection: %v", closeErr)
+			}
 			return true
 		}
 		if i < maxAttempts-1 {
@@ -90,7 +93,7 @@ func StartProxyServer(port, upstreamBase string) (*http.Server, error) {
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(BuildHealthResponse("aerial-discord-mcp", DefaultBlockedToolList))
+		writeProxyResponse(w, r, BuildHealthResponse("aerial-discord-mcp", DefaultBlockedToolList))
 	})
 	mux.Handle("/mcp", proxyHandler)
 	mux.Handle("/", proxyHandler)
@@ -101,6 +104,24 @@ func StartProxyServer(port, upstreamBase string) (*http.Server, error) {
 	}
 
 	return srv, nil
+}
+
+func killProcess(cmd *exec.Cmd) {
+	if cmd == nil || cmd.Process == nil {
+		return
+	}
+	if err := cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) && !errors.Is(err, syscall.ESRCH) {
+		log.Printf("[Discord-MCP] Warning killing process: %v", err)
+	}
+	if err := cmd.Wait(); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return
+		}
+		if !errors.Is(err, os.ErrProcessDone) {
+			log.Printf("[Discord-MCP] Warning waiting for process: %v", err)
+		}
+	}
 }
 
 var (
@@ -133,20 +154,18 @@ func RunProxyApp(ctx context.Context, cfg *Config) error {
 
 	ln, err := net.Listen("tcp", ":"+cfg.Port)
 	if err != nil {
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
-			_ = cmd.Wait()
-		}
+		killProcess(cmd)
 		return err
 	}
-	defer ln.Close()
+	defer func() {
+		if closeErr := ln.Close(); closeErr != nil && !errors.Is(closeErr, net.ErrClosed) {
+			log.Printf("[Discord-MCP] Error closing listener: %v", closeErr)
+		}
+	}()
 
 	srv, err := StartProxyServer(cfg.Port, upstreamBase)
 	if err != nil {
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
-			_ = cmd.Wait()
-		}
+		killProcess(cmd)
 		return err
 	}
 
@@ -174,12 +193,11 @@ func RunProxyApp(ctx context.Context, cfg *Config) error {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer shutdownCancel()
 
-	_ = srv.Shutdown(shutdownCtx)
-
-	if cmd.Process != nil {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
+	if shutErr := srv.Shutdown(shutdownCtx); shutErr != nil && !errors.Is(shutErr, http.ErrServerClosed) {
+		log.Printf("[Discord-MCP] Server shutdown error: %v", shutErr)
 	}
+
+	killProcess(cmd)
 	log.Println("[Discord-MCP] Server stopped.")
 	return runErr
 }

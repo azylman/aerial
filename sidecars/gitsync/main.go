@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -33,6 +35,44 @@ var sanitizePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`\b(?:mfa\.[a-zA-Z0-9_-]{20,}|[a-zA-Z0-9_-]{24,28}\.[a-zA-Z0-9_-]{6}\.[a-zA-Z0-9_-]{27,38})`),
 	regexp.MustCompile(`\beyJ[a-zA-Z0-9_-]{10,}\.eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}`),
 	regexp.MustCompile(`postgres://[^:]+:[^@]+@[^/]+/[^?]+`),
+}
+
+func closeWarn(closer io.Closer, name string) {
+	if closer != nil {
+		if err := closer.Close(); err != nil {
+			log.Printf("[GitSync] Warning closing %s: %v", name, err)
+		}
+	}
+}
+
+func isClientDisconnect(r *http.Request, err error) bool {
+	if err == nil {
+		return false
+	}
+	if r != nil && r.Context().Err() != nil {
+		return true
+	}
+	return errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, net.ErrClosed)
+}
+
+func writeResponse(w http.ResponseWriter, r *http.Request, data []byte) {
+	if _, err := w.Write(data); err != nil {
+		if !isClientDisconnect(r, err) {
+			log.Printf("[GitSync:HTTP] Failed to write response: %v", err)
+		}
+	}
+}
+
+func writeJSON(w http.ResponseWriter, r *http.Request, status int, data interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	b, err := json.Marshal(data)
+	if err != nil {
+		log.Printf("[GitSync:HTTP] Failed to marshal JSON response: %v", err)
+		http.Error(w, `{"error":"Internal error"}`, http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(status)
+	writeResponse(w, r, b)
 }
 
 // SanitizeLog scrubs sensitive tokens from error and log messages.
@@ -629,7 +669,11 @@ func (d *SyncDaemon) SendDiscordAlert(ctx context.Context, title, repoPath, faul
 }
 
 func (d *SyncDaemon) sendWebhook(ctx context.Context, client *http.Client, webhookURL, content string) {
-	payloadBytes, _ := json.Marshal(map[string]string{"content": content})
+	payloadBytes, err := json.Marshal(map[string]string{"content": content})
+	if err != nil {
+		log.Printf("[GitSync:Discord] Error marshaling webhook payload: %s", d.SanitizeAll(err.Error()))
+		return
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, webhookURL, bytes.NewReader(payloadBytes))
 	if err != nil {
 		log.Printf("[GitSync:Discord] Error creating webhook request: %s", d.SanitizeAll(err.Error()))
@@ -642,7 +686,7 @@ func (d *SyncDaemon) sendWebhook(ctx context.Context, client *http.Client, webho
 		log.Printf("[GitSync:Discord] Webhook dispatch failed: %s", d.SanitizeAll(err.Error()))
 		return
 	}
-	defer resp.Body.Close()
+	defer closeWarn(resp.Body, "webhook response body")
 	if resp.StatusCode >= 400 {
 		log.Printf("[GitSync:Discord] Webhook returned HTTP %d", resp.StatusCode)
 	} else {
@@ -668,14 +712,14 @@ func (d *SyncDaemon) resolveChannelID(ctx context.Context, client *http.Client, 
 
 	reqGuilds, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://discord.com/api/v10/users/@me/guilds", nil)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to create guilds request: %w", err)
 	}
 	reqGuilds.Header.Set("Authorization", authHeader)
 	respGuilds, err := client.Do(reqGuilds)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to fetch guilds: %w", err)
 	}
-	defer respGuilds.Body.Close()
+	defer closeWarn(respGuilds.Body, "guilds response body")
 
 	if respGuilds.StatusCode >= 400 {
 		return "", fmt.Errorf("failed to fetch guilds: HTTP %d", respGuilds.StatusCode)
@@ -685,7 +729,7 @@ func (d *SyncDaemon) resolveChannelID(ctx context.Context, client *http.Client, 
 		ID string `json:"id"`
 	}
 	if err := json.NewDecoder(respGuilds.Body).Decode(&guilds); err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to decode guilds: %w", err)
 	}
 
 	for _, g := range guilds {
@@ -704,8 +748,11 @@ func (d *SyncDaemon) resolveChannelID(ctx context.Context, client *http.Client, 
 			Name string `json:"name"`
 			Type int    `json:"type"`
 		}
-		_ = json.NewDecoder(respChans.Body).Decode(&channels)
-		respChans.Body.Close()
+		if decErr := json.NewDecoder(respChans.Body).Decode(&channels); decErr != nil {
+			closeWarn(respChans.Body, "channels response body")
+			continue
+		}
+		closeWarn(respChans.Body, "channels response body")
 
 		for _, ch := range channels {
 			if strings.EqualFold(ch.Name, cleanName) {
@@ -722,7 +769,11 @@ func (d *SyncDaemon) resolveChannelID(ctx context.Context, client *http.Client, 
 
 func (d *SyncDaemon) postChannelMessage(ctx context.Context, client *http.Client, token, channelID, content string) {
 	url := fmt.Sprintf("https://discord.com/api/v10/channels/%s/messages", channelID)
-	payloadBytes, _ := json.Marshal(map[string]string{"content": content})
+	payloadBytes, err := json.Marshal(map[string]string{"content": content})
+	if err != nil {
+		log.Printf("[GitSync:Discord] Error marshaling message payload: %s", d.SanitizeAll(err.Error()))
+		return
+	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payloadBytes))
 	if err != nil {
@@ -737,7 +788,7 @@ func (d *SyncDaemon) postChannelMessage(ctx context.Context, client *http.Client
 		log.Printf("[GitSync:Discord] Channel message dispatch failed: %s", d.SanitizeAll(err.Error()))
 		return
 	}
-	defer resp.Body.Close()
+	defer closeWarn(resp.Body, "channel message response body")
 
 	if resp.StatusCode == http.StatusNotFound {
 		d.discordChannelMu.Lock()
@@ -785,7 +836,9 @@ func (d *SyncDaemon) executeRollback(ctx context.Context, pending []ComposeChang
 	valCtx, valCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer valCancel()
 
-	_ = d.CleanConflictContainers(valCtx)
+	if cleanErr := d.CleanConflictContainers(valCtx); cleanErr != nil {
+		log.Printf("[GitSync:GitOps] Warning cleaning conflict containers during rollback: %v", cleanErr)
+	}
 
 	restoredTargets, errTargets := d.GetReconcileTargets(valCtx, composeDir)
 	if errTargets != nil {
@@ -839,7 +892,9 @@ func (d *SyncDaemon) ReconcileCompose(parentCtx context.Context) (err error) {
 		log.Printf("[GitSync:GitOps] Warning: Failed to refresh Docker auth before reconciliation: %v", d.SanitizeAll(authErr.Error()))
 	}
 
-	_ = d.CleanConflictContainers(valCtx)
+	if cleanErr := d.CleanConflictContainers(valCtx); cleanErr != nil {
+		log.Printf("[GitSync:GitOps] Warning cleaning conflict containers: %v", cleanErr)
+	}
 
 	if valErr := d.ValidateCompose(valCtx, composeDir); valErr != nil {
 		log.Printf("[GitSync:GitOps] ERROR: Pre-flight validation failed: %v. Initiating automated rollback.", valErr)
@@ -932,7 +987,9 @@ func (d *SyncDaemon) StartReconcilerLoop(ctx context.Context) {
 					if elapsed := time.Since(d.lastReconcile); elapsed < reconcilerMinCooldown {
 						time.Sleep(reconcilerMinCooldown - elapsed)
 					}
-					_ = d.ReconcileCompose(context.Background())
+					if recErr := d.ReconcileCompose(context.Background()); recErr != nil {
+						log.Printf("[GitSync:GitOps] Debounced reconcile error: %v", recErr)
+					}
 				})
 			}
 		}
@@ -950,7 +1007,9 @@ func (d *SyncDaemon) EnsureRepo(ctx context.Context, repoPath, repoURL string) e
 	}
 
 	log.Printf("[GitSync] Bootstrapping repository at %s from %s...", repoPath, repoURL)
-	_ = os.MkdirAll(repoPath, 0755)
+	if err := os.MkdirAll(repoPath, 0755); err != nil {
+		return fmt.Errorf("failed to create repo directory %s: %w", repoPath, err)
+	}
 
 	entries, err := os.ReadDir(repoPath)
 	if err != nil {
@@ -966,15 +1025,24 @@ func (d *SyncDaemon) EnsureRepo(ctx context.Context, repoPath, repoURL string) e
 		return nil
 	}
 
-	_, _, _ = d.getGitExecutor()(ctx, repoPath, "init", "-b", "main")
-	_, _, _ = d.getGitExecutor()(ctx, repoPath, "remote", "add", "origin", repoURL)
+	if out, errBytes, err := d.getGitExecutor()(ctx, repoPath, "init", "-b", "main"); err != nil {
+		combined := string(append(out, errBytes...))
+		return fmt.Errorf("git init failed during adoption for %s: %s (%w)", repoPath, SanitizeLog(combined), err)
+	}
+	// Best-effort remote add: if origin already exists, do not fail
+	if _, _, err := d.getGitExecutor()(ctx, repoPath, "remote", "add", "origin", repoURL); err != nil {
+		log.Printf("[GitSync] Notice adding remote origin for %s (continuing): %v", repoPath, err)
+	}
 	out, errBytes, err := d.getGitExecutor()(ctx, repoPath, "fetch", "--depth", "1", "origin", "main")
 	if err != nil {
 		combined := string(append(out, errBytes...))
-		return fmt.Errorf("git fetch failed during adoption for %s: %s (%w)", repoPath, SanitizeLog(string(combined)), err)
+		return fmt.Errorf("git fetch failed during adoption for %s: %s (%w)", repoPath, SanitizeLog(combined), err)
 	}
 
-	_, _, _ = d.getGitExecutor()(ctx, repoPath, "reset", "--soft", "FETCH_HEAD")
+	if out, errBytes, err := d.getGitExecutor()(ctx, repoPath, "reset", "--soft", "FETCH_HEAD"); err != nil {
+		combined := string(append(out, errBytes...))
+		return fmt.Errorf("git reset soft failed during adoption for %s: %s (%w)", repoPath, SanitizeLog(combined), err)
+	}
 	return nil
 }
 
@@ -1031,7 +1099,9 @@ func (d *SyncDaemon) SyncRepo(ctx context.Context, repoPath string) (res RepoSyn
 	opCtx, cancel := context.WithTimeout(ctx, 40*time.Second)
 	defer cancel()
 
-	_, _, _ = d.getGitExecutor()(opCtx, "", "config", "--global", "safe.directory", "*")
+	if _, _, safeErr := d.getGitExecutor()(opCtx, "", "config", "--global", "safe.directory", "*"); safeErr != nil {
+		log.Printf("[GitSync] Notice: setting safe.directory failed (proceeding): %v", safeErr)
+	}
 
 	outBefore, _, err := d.getGitExecutor()(opCtx, repoPath, "rev-parse", "HEAD")
 	if err != nil {
@@ -1083,7 +1153,9 @@ func (d *SyncDaemon) SyncRepo(ctx context.Context, repoPath string) (res RepoSyn
 				return res
 			}
 
-			_, _, _ = d.getGitExecutor()(opCtx, repoPath, "clean", "-fd")
+			if _, _, cleanErr := d.getGitExecutor()(opCtx, repoPath, "clean", "-fd"); cleanErr != nil {
+				log.Printf("[GitSync] Notice: git clean -fd failed for %s (proceeding): %v", repoPath, cleanErr)
+			}
 
 			log.Printf("[GitSync] Successfully recovered %s via reset to FETCH_HEAD", repoPath)
 		}
@@ -1102,7 +1174,11 @@ func (d *SyncDaemon) SyncRepo(ctx context.Context, repoPath string) (res RepoSyn
 		d.clearQuarantineForRepo(repoPath, res.CurrentHead)
 		log.Printf("[GitSync] Repository %s updated: %s -> %s", repoPath, res.PreviousHead, res.CurrentHead)
 
-		if composeChanged, _ := d.HasComposeChanges(opCtx, repoPath, res.PreviousHead, res.CurrentHead); composeChanged {
+		composeChanged, composeErr := d.HasComposeChanges(opCtx, repoPath, res.PreviousHead, res.CurrentHead)
+		if composeErr != nil {
+			log.Printf("[GitSync:GitOps] Warning checking compose changes in %s: %v", repoPath, composeErr)
+		}
+		if composeChanged {
 			res.ComposeChanged = true
 			log.Printf("[GitSync:GitOps] Infrastructure/compose changes detected in %s (%s -> %s). Triggering debounced reconciliation.", repoPath, res.PreviousHead, res.CurrentHead)
 			d.recordPendingChange(ComposeChangeEvent{
@@ -1169,7 +1245,11 @@ func (d *SyncDaemon) TriggerSync() ([]RepoSyncResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	return val.([]RepoSyncResult), nil
+	res, ok := val.([]RepoSyncResult)
+	if !ok {
+		return nil, fmt.Errorf("unexpected return type from singleflight: %T", val)
+	}
+	return res, nil
 }
 
 // notifyBrainReload sends a best-effort POST request to Brain's internal reload endpoint.
@@ -1188,7 +1268,7 @@ func (d *SyncDaemon) notifyBrainReload() {
 	client := &http.Client{Timeout: 3 * time.Second}
 	resp, err := client.Do(req)
 	if err == nil {
-		_ = resp.Body.Close()
+		closeWarn(resp.Body, "brain reload response body")
 		log.Printf("[GitSync] Successfully dispatched internal reload trigger to Brain (%s)", brainURL)
 	}
 }
@@ -1207,7 +1287,9 @@ func (d *SyncDaemon) StartPeriodicLoop(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				_, _ = d.TriggerSync()
+				if _, syncErr := d.TriggerSync(); syncErr != nil {
+					log.Printf("[GitSync] Periodic sync error: %v", syncErr)
+				}
 			}
 		}
 	}()
@@ -1470,8 +1552,7 @@ func SetupMux(daemon *SyncDaemon) http.Handler {
 	mux.Handle("/metrics", metrics.Handler())
 
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		writeJSON(w, r, http.StatusOK, map[string]string{"status": "ok"})
 	})
 
 	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
@@ -1484,8 +1565,7 @@ func SetupMux(daemon *SyncDaemon) http.Handler {
 		defer cancel()
 
 		status := daemon.GetStatus(ctx)
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(status)
+		writeJSON(w, r, http.StatusOK, status)
 	})
 
 	mux.HandleFunc("/sync", func(w http.ResponseWriter, r *http.Request) {
@@ -1497,16 +1577,12 @@ func SetupMux(daemon *SyncDaemon) http.Handler {
 		results, err := daemon.TriggerSync()
 		if err != nil {
 			metrics.RecordSyncRequest("webhook", "error")
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			writeJSON(w, r, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
 
 		metrics.RecordSyncRequest("webhook", "synced")
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		writeJSON(w, r, http.StatusOK, map[string]interface{}{
 			"status":  "synced",
 			"results": results,
 		})
@@ -1516,6 +1592,10 @@ func SetupMux(daemon *SyncDaemon) http.Handler {
 		if r.Method != http.MethodPost {
 			http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
 			return
+		}
+
+		if r.Body != nil {
+			defer closeWarn(r.Body, "reconcile request body")
 		}
 
 		isSync := r.URL.Query().Get("sync") == "true"
@@ -1530,25 +1610,21 @@ func SetupMux(daemon *SyncDaemon) http.Handler {
 
 		if isSync {
 			if err := daemon.TriggerReconcile(r.Context(), false); err != nil {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusInternalServerError)
-				_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+				writeJSON(w, r, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 				return
 			}
 
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			writeJSON(w, r, http.StatusOK, map[string]interface{}{
 				"status":  "reconciled",
 				"applied": true,
 			})
 			return
 		}
 
-		_ = daemon.TriggerReconcile(r.Context(), true)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusAccepted)
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		if err := daemon.TriggerReconcile(r.Context(), true); err != nil {
+			log.Printf("[GitSync] Warning scheduling async reconcile: %v", err)
+		}
+		writeJSON(w, r, http.StatusAccepted, map[string]interface{}{
 			"status":           "queued",
 			"message":          "Docker Compose reconciliation scheduled",
 			"debounce_seconds": int(reconcilerDebounceDuration.Seconds()),

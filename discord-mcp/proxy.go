@@ -2,12 +2,15 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"syscall"
 )
 
 // ProxyHandler proxies MCP HTTP requests to the upstream server while filtering blocked tools.
@@ -47,7 +50,6 @@ func (p *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("failed to read request body: %v", err), http.StatusBadRequest)
 		return
 	}
-	_ = r.Body.Close()
 
 	// 1. Check if the request is attempting to call a blocked tool
 	isBlocked, reqID, toolName, err := IsBlockedToolCall(bodyBytes, p.blockedTools)
@@ -58,7 +60,7 @@ func (p *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Del("Transfer-Encoding")
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(errBytes)))
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(errBytes)
+		writeProxyResponse(w, r, errBytes)
 		return
 	}
 
@@ -87,7 +89,11 @@ func (p *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("upstream error: %v", err), http.StatusBadGateway)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			log.Printf("[Proxy] Warning: failed to close upstream response body: %v", closeErr)
+		}
+	}()
 
 	respBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -114,5 +120,23 @@ func (p *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Del("Transfer-Encoding")
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(respBytes)))
 	w.WriteHeader(resp.StatusCode)
-	_, _ = w.Write(respBytes)
+	writeProxyResponse(w, r, respBytes)
+}
+
+func isClientDisconnect(r *http.Request, err error) bool {
+	if err == nil {
+		return false
+	}
+	if r != nil && r.Context().Err() != nil {
+		return true
+	}
+	return errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, net.ErrClosed)
+}
+
+func writeProxyResponse(w http.ResponseWriter, r *http.Request, data []byte) {
+	if _, err := w.Write(data); err != nil {
+		if !isClientDisconnect(r, err) {
+			log.Printf("[Proxy] Failed to write response: %v", err)
+		}
+	}
 }

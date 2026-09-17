@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -2386,6 +2387,7 @@ func TestRunDaemon_NormalLifecycle(t *testing.T) {
 	go func() {
 		errCh <- RunDaemon(ctx, DaemonConfig{
 			Port:       port,
+			PAT:        "ghp_dummy_token_1234567890",
 			Interval:   time.Hour,
 			ComposeDir: t.TempDir(),
 			ConfigDir:  t.TempDir(),
@@ -3218,6 +3220,174 @@ func TestEnsureDockerAuth_TableDriven(t *testing.T) {
 			t.Errorf("auth mismatch: got %v, want %s", ghcrEntry["auth"], expectedAuth)
 		}
 	})
+}
+
+type mockErrReadCloser struct{}
+
+func (e *mockErrReadCloser) Read(p []byte) (int, error) {
+	return 0, io.EOF
+}
+
+func (e *mockErrReadCloser) Close() error {
+	return errors.New("simulated close error")
+}
+
+type mockErrResponseWriter struct {
+	header http.Header
+	err    error
+}
+
+func (m *mockErrResponseWriter) Header() http.Header {
+	if m.header == nil {
+		m.header = make(http.Header)
+	}
+	return m.header
+}
+
+func (m *mockErrResponseWriter) Write(p []byte) (int, error) {
+	return 0, m.err
+}
+
+func (m *mockErrResponseWriter) WriteHeader(statusCode int) {}
+
+func TestGitsync_Helpers(t *testing.T) {
+	// 1. closeWarn
+	closeWarn(nil, "nil closer")
+	closeWarn(io.NopCloser(strings.NewReader("")), "valid closer")
+	closeWarn(&mockErrReadCloser{}, "err closer")
+
+	// 2. isClientDisconnect
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	if isClientDisconnect(req, nil) {
+		t.Errorf("expected false for nil err")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	reqCanceled := httptest.NewRequest(http.MethodGet, "/health", nil).WithContext(ctx)
+	if !isClientDisconnect(reqCanceled, errors.New("err")) {
+		t.Errorf("expected true for canceled ctx")
+	}
+	if !isClientDisconnect(req, syscall.EPIPE) {
+		t.Errorf("expected true for EPIPE")
+	}
+	if !isClientDisconnect(req, syscall.ECONNRESET) {
+		t.Errorf("expected true for ECONNRESET")
+	}
+	if !isClientDisconnect(req, net.ErrClosed) {
+		t.Errorf("expected true for net.ErrClosed")
+	}
+
+	// 3. writeResponse
+	rec := httptest.NewRecorder()
+	writeResponse(rec, req, []byte("ok"))
+	if rec.Body.String() != "ok" {
+		t.Errorf("expected ok, got %s", rec.Body.String())
+	}
+	mockErr := &mockErrResponseWriter{err: errors.New("fail")}
+	writeResponse(mockErr, req, []byte("fail"))
+
+	// 4. writeJSON
+	recJSON := httptest.NewRecorder()
+	writeJSON(recJSON, req, http.StatusOK, map[string]string{"foo": "bar"})
+	if recJSON.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", recJSON.Code)
+	}
+	recErrJSON := httptest.NewRecorder()
+	writeJSON(recErrJSON, req, http.StatusOK, make(chan int))
+	if recErrJSON.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500, got %d", recErrJSON.Code)
+	}
+}
+
+func TestEnsureRepo_AdoptionErrors(t *testing.T) {
+	tempDir := t.TempDir()
+	adoptDir := filepath.Join(tempDir, "adopt")
+	if err := os.MkdirAll(adoptDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(adoptDir, "file.txt"), []byte("data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Init failure
+	dInitFail := &SyncDaemon{
+		gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			if len(args) > 0 && args[0] == "init" {
+				return nil, []byte("fatal: init error"), errors.New("init error")
+			}
+			return nil, nil, nil
+		},
+	}
+	if err := dInitFail.EnsureRepo(context.Background(), adoptDir, "https://example.com/repo.git"); err == nil {
+		t.Errorf("expected error on init failure")
+	}
+
+	// 2. Remote add failure (should NOT fail, should continue to fetch)
+	dRemoteFail := &SyncDaemon{
+		gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			if len(args) > 0 && args[0] == "remote" {
+				return nil, []byte("remote origin exists"), errors.New("remote exists")
+			}
+			if len(args) > 0 && args[0] == "fetch" {
+				return nil, []byte("fatal: fetch error"), errors.New("fetch error")
+			}
+			return nil, nil, nil
+		},
+	}
+	if err := dRemoteFail.EnsureRepo(context.Background(), adoptDir, "https://example.com/repo.git"); err == nil {
+		t.Errorf("expected error on fetch failure")
+	}
+
+	// 3. Reset soft failure
+	dResetFail := &SyncDaemon{
+		gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			if len(args) > 0 && args[0] == "reset" {
+				return nil, []byte("fatal: reset error"), errors.New("reset error")
+			}
+			return nil, nil, nil
+		},
+	}
+	if err := dResetFail.EnsureRepo(context.Background(), adoptDir, "https://example.com/repo.git"); err == nil {
+		t.Errorf("expected error on reset soft failure")
+	}
+}
+
+func TestTriggerSync_SingleflightInvalidType(t *testing.T) {
+	d := &SyncDaemon{}
+	started := make(chan struct{})
+	go func() {
+		_, _, _ = d.sfg.Do("sync", func() (interface{}, error) {
+			close(started)
+			time.Sleep(20 * time.Millisecond)
+			return "invalid-type", nil
+		})
+	}()
+	<-started
+	_, err := d.TriggerSync()
+	if err == nil || !strings.Contains(err.Error(), "unexpected return type") {
+		t.Errorf("expected unexpected return type error, got %v", err)
+	}
+}
+
+func TestSendWebhook_Errors(t *testing.T) {
+	d := &SyncDaemon{}
+	client := &http.Client{Timeout: 5 * time.Millisecond}
+	d.sendWebhook(context.Background(), client, "http://127.0.0.1:1/invalid", "msg")
+}
+
+func TestPostChannelMessage_Errors(t *testing.T) {
+	d := &SyncDaemon{}
+	client := &http.Client{Timeout: 5 * time.Millisecond}
+	d.postChannelMessage(context.Background(), client, "token", "chan-id", "msg")
+}
+
+func TestResolveChannelID_ClientFail(t *testing.T) {
+	d := &SyncDaemon{}
+	client := &http.Client{Timeout: 5 * time.Millisecond}
+	_, err := d.resolveChannelID(context.Background(), client, "token", "test-channel")
+	if err == nil {
+		t.Errorf("expected error from resolveChannelID on timeout/failure")
+	}
 }
 
 

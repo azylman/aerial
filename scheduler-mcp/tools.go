@@ -265,8 +265,10 @@ type ListSchedulesArgs struct {
 
 func (h *ToolHandler) HandleListSchedules(rawArgs json.RawMessage) (interface{}, error) {
 	var args ListSchedulesArgs
-	if len(rawArgs) > 0 {
-		_ = json.Unmarshal(rawArgs, &args)
+	if len(rawArgs) > 0 && string(rawArgs) != "null" {
+		if err := json.Unmarshal(rawArgs, &args); err != nil {
+			return nil, fmt.Errorf("invalid arguments: %w", err)
+		}
 	}
 	args.TargetID = strings.TrimSpace(args.TargetID)
 
