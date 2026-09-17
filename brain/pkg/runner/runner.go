@@ -534,6 +534,9 @@ func (p *execProcessRunner) Wait() error {
 	return p.cmd.Wait()
 }
 
+// ActivityLookupFunc returns the latest recorded activity timestamp for a given session.
+type ActivityLookupFunc func(sessionID string, transcriptDirs []string) (time.Time, error)
+
 // WatchdogOptions configures execution timeouts and activity polling behavior.
 type WatchdogOptions struct {
 	HomeDir           string
@@ -546,6 +549,7 @@ type WatchdogOptions struct {
 	TargetID          string
 	ExtraEnv          []string
 	CmdRunner         CmdRunner
+	ActivityLookup    ActivityLookupFunc
 }
 
 // activityTap wraps an io.Writer, bumps the ActivityWriter timestamp on every write,
@@ -812,6 +816,11 @@ func RunAgyWithWatchdog(parentCtx context.Context, agyBin, prompt, sessionID, ap
 		watchdogWg.Wait()
 	}()
 
+	activityLookup := opts.ActivityLookup
+	if activityLookup == nil {
+		activityLookup = session.LastActivityFromRoots
+	}
+
 	watchdogWg.Add(1)
 	go func() {
 		defer watchdogWg.Done()
@@ -820,7 +829,7 @@ func RunAgyWithWatchdog(parentCtx context.Context, agyBin, prompt, sessionID, ap
 
 		lastSeenDiskActivity := start
 		if sessionID != "" {
-			if initAct, actErr := session.LastActivityFromRoots(sessionID, opts.TranscriptDirs); actErr == nil && initAct.After(start) {
+			if initAct, actErr := activityLookup(sessionID, opts.TranscriptDirs); actErr == nil && initAct.After(start) {
 				lastSeenDiskActivity = initAct
 			}
 		}
@@ -835,7 +844,7 @@ func RunAgyWithWatchdog(parentCtx context.Context, agyBin, prompt, sessionID, ap
 				var latestActivity time.Time
 				activeSess := actWriter.SessionID()
 				if activeSess != "" {
-					if act, actErr := session.LastActivityFromRoots(activeSess, opts.TranscriptDirs); actErr == nil {
+					if act, actErr := activityLookup(activeSess, opts.TranscriptDirs); actErr == nil {
 						latestActivity = act
 					}
 				}
