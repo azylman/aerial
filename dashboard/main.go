@@ -700,7 +700,7 @@ func mergeClusterDeployments(
 				Steps: []DeploymentStep{
 					{Name: "Commit Trigger", Icon: "📦", Status: "completed"},
 					{Name: "CI Build & GHCR", Icon: "⚙️", Status: ciStatus},
-					{Name: "Watchtower Pull", Icon: "⬇️", Status: "pending"},
+					{Name: "Hangar Sync", Icon: "⬇️", Status: "pending"},
 					{Name: "Container Swap", Icon: "🔄", Status: "pending"},
 					{Name: "Health Check", Icon: "🩺", Status: "pending"},
 				},
@@ -724,7 +724,7 @@ func mergeClusterDeployments(
 				Steps: []DeploymentStep{
 					{Name: "Commit Trigger", Icon: "📦", Status: "completed"},
 					{Name: "CI Build & GHCR", Icon: "⚙️", Status: "failed"},
-					{Name: "Watchtower Pull", Icon: "⬇️", Status: "pending"},
+					{Name: "Hangar Sync", Icon: "⬇️", Status: "pending"},
 					{Name: "Container Swap", Icon: "🔄", Status: "pending"},
 					{Name: "Health Check", Icon: "🩺", Status: "pending"},
 				},
@@ -749,6 +749,20 @@ func mergeClusterDeployments(
 				hasRecentContainerSwap = true
 			}
 
+			// If the CI run completed and had zero container image build jobs,
+			// this commit only modified non-container assets (docs, dashboards, config, skills).
+			// It is GitOps synced by Hangar without requiring an OCI container recreation.
+			hasContainerBuilds := false
+			for _, j := range runJobs {
+				if strings.Contains(j.Name, "Build & Push Images") && j.Conclusion != "skipped" {
+					hasContainerBuilds = true
+					break
+				}
+			}
+			if len(runJobs) > 0 && !hasContainerBuilds {
+				hasRecentContainerSwap = true
+			}
+
 			for _, c := range rawContainers {
 				createdAt := time.Unix(c.Created, 0).UTC()
 				if createdAt.After(latestRun.CreatedAt.Add(-30*time.Second)) || (c.Health != nil && c.Health.Status == "starting") {
@@ -758,7 +772,7 @@ func mergeClusterDeployments(
 			}
 
 			if !hasRecentContainerSwap {
-				// If within 120s Watchtower polling window -> awaiting_pull
+				// If within 120s Hangar reconciliation window -> awaiting_pull
 				if ciElapsed <= 120*time.Second {
 					deployments = append(deployments, DeploymentStatus{
 						ID:         fmt.Sprintf("gh-run-%d", latestRun.ID),
@@ -772,7 +786,7 @@ func mergeClusterDeployments(
 						Steps: []DeploymentStep{
 							{Name: "Commit Trigger", Icon: "📦", Status: "completed"},
 							{Name: "CI Build & GHCR", Icon: "⚙️", Status: "completed"},
-							{Name: "Watchtower Pull", Icon: "⬇️", Status: "active"},
+							{Name: "Hangar Sync", Icon: "⬇️", Status: "active"},
 							{Name: "Container Swap", Icon: "🔄", Status: "pending"},
 							{Name: "Health Check", Icon: "🩺", Status: "pending"},
 						},
@@ -782,12 +796,12 @@ func mergeClusterDeployments(
 					return deployments
 				}
 
-				// If exceeded 120s without any container updating -> Watchtower pull timeout failure!
+				// If exceeded 120s without any container updating -> Hangar reconciliation timeout failure!
 				deployments = append(deployments, DeploymentStatus{
 					ID:         fmt.Sprintf("gh-run-%d", latestRun.ID),
 					Service:    "aerial-stack",
 					Commit:     shortSHA,
-					CommitMsg:  "Watchtower pull timed out (>120s)",
+					CommitMsg:  "Hangar reconciliation timed out (>120s)",
 					CommitTime: commitTime,
 					Stage:      "failed",
 					Progress:   55,
@@ -795,7 +809,7 @@ func mergeClusterDeployments(
 					Steps: []DeploymentStep{
 						{Name: "Commit Trigger", Icon: "📦", Status: "completed"},
 						{Name: "CI Build & GHCR", Icon: "⚙️", Status: "completed"},
-						{Name: "Watchtower Pull", Icon: "⬇️", Status: "failed"},
+						{Name: "Hangar Sync", Icon: "⬇️", Status: "failed"},
 						{Name: "Container Swap", Icon: "🔄", Status: "pending"},
 						{Name: "Health Check", Icon: "🩺", Status: "pending"},
 					},
@@ -909,7 +923,7 @@ func mergeClusterDeployments(
 			Steps: []DeploymentStep{
 				{Name: "Commit Trigger", Icon: "📦", Status: "completed"},
 				{Name: "CI Build & GHCR", Icon: "⚙️", Status: "completed"},
-				{Name: "Watchtower Pull", Icon: "⬇️", Status: "completed"},
+				{Name: "Hangar Sync", Icon: "⬇️", Status: "completed"},
 				{Name: "Container Swap", Icon: "🔄", Status: "completed"},
 				{Name: "Health Check", Icon: "🩺", Status: "failed"},
 			},
@@ -936,7 +950,7 @@ func mergeClusterDeployments(
 			Steps: []DeploymentStep{
 				{Name: "Commit Trigger", Icon: "📦", Status: "completed"},
 				{Name: "CI Build & GHCR", Icon: "⚙️", Status: "completed"},
-				{Name: "Watchtower Pull", Icon: "⬇️", Status: "completed"},
+				{Name: "Hangar Sync", Icon: "⬇️", Status: "completed"},
 				{Name: "Container Swap", Icon: "🔄", Status: "active"},
 				{Name: "Health Check", Icon: "🩺", Status: "active"},
 			},
@@ -945,8 +959,9 @@ func mergeClusterDeployments(
 		return deployments
 	}
 
-	// State 6: Synced Grace (< 600s / 10 minutes)
-	if minUptimeSec < 600 {
+	// State 6: Synced Grace (< 600s / 10 minutes from container restart or CI completion)
+	isRecentCI := len(runs) > 0 && runs[0].Conclusion == "success" && time.Since(runs[0].UpdatedAt) < 600*time.Second
+	if minUptimeSec < 600 || isRecentCI {
 		deployments = append(deployments, DeploymentStatus{
 			ID:         "dep-aerial-stack",
 			Service:    "aerial-stack",
@@ -959,7 +974,7 @@ func mergeClusterDeployments(
 			Steps: []DeploymentStep{
 				{Name: "Commit Trigger", Icon: "📦", Status: "completed"},
 				{Name: "CI Build & GHCR", Icon: "⚙️", Status: "completed"},
-				{Name: "Watchtower Pull", Icon: "⬇️", Status: "completed"},
+				{Name: "Hangar Sync", Icon: "⬇️", Status: "completed"},
 				{Name: "Container Swap", Icon: "🔄", Status: "completed"},
 				{Name: "Health Check", Icon: "🩺", Status: "completed"},
 			},
@@ -1238,7 +1253,7 @@ func statusHandler(brainURL, gitsyncURL, configPath, gitCommit string) http.Hand
 				{Name: "github-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
 				{Name: "ollama", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
 				{Name: "agentsview", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
-				{Name: "watchtower", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
+				{Name: "hangar", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
 				{Name: "autoheal", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
 				{Name: "proxy", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
 				{Name: "dashboard", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},

@@ -216,6 +216,8 @@ func ExtractServiceNameFromJobName(jobName string) string {
 		"github-mcp",
 		"ollama",
 		"agentsview",
+		"hangar",
+		"docs",
 	}
 	for _, s := range services {
 		if strings.Contains(lower, s) {

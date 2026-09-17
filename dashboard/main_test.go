@@ -458,7 +458,7 @@ func TestMergeClusterDeployments_FailedCIRun(t *testing.T) {
 	}
 }
 
-func TestMergeClusterDeployments_AwaitingWatchtowerPull(t *testing.T) {
+func TestMergeClusterDeployments_AwaitingHangarSync(t *testing.T) {
 	now := time.Now().UTC()
 	runs := []GitHubRun{
 		{
@@ -470,6 +470,11 @@ func TestMergeClusterDeployments_AwaitingWatchtowerPull(t *testing.T) {
 			CreatedAt:  now.Add(-4 * time.Minute),
 			UpdatedAt:  now.Add(-45 * time.Second), // <= 120s
 			HTMLURL:    "https://github.com/azylman/aerial/actions/runs/483",
+		},
+	}
+	jobs := map[int64][]GitHubJob{
+		483: {
+			{Name: "Build & Push Images to GHCR (brain)", Status: "completed", Conclusion: "success"},
 		},
 	}
 
@@ -484,7 +489,7 @@ func TestMergeClusterDeployments_AwaitingWatchtowerPull(t *testing.T) {
 		},
 	}
 
-	deploys := mergeClusterDeployments(containers, runs, nil, "old1234")
+	deploys := mergeClusterDeployments(containers, runs, jobs, "old1234")
 	if len(deploys) != 1 {
 		t.Fatalf("expected 1 deployment in awaiting_pull stage, got %d", len(deploys))
 	}
@@ -493,12 +498,15 @@ func TestMergeClusterDeployments_AwaitingWatchtowerPull(t *testing.T) {
 	if dep.Stage != "awaiting_pull" {
 		t.Errorf("expected stage 'awaiting_pull', got %s", dep.Stage)
 	}
+	if dep.Steps[2].Name != "Hangar Sync" {
+		t.Errorf("expected step 2 name 'Hangar Sync', got %s", dep.Steps[2].Name)
+	}
 	if dep.Steps[2].Status != "active" {
-		t.Errorf("expected Watchtower Pull step status 'active', got %s", dep.Steps[2].Status)
+		t.Errorf("expected Hangar Sync step status 'active', got %s", dep.Steps[2].Status)
 	}
 }
 
-func TestMergeClusterDeployments_WatchtowerPullTimeout(t *testing.T) {
+func TestMergeClusterDeployments_HangarSyncTimeout(t *testing.T) {
 	now := time.Now().UTC()
 	runs := []GitHubRun{
 		{
@@ -510,6 +518,11 @@ func TestMergeClusterDeployments_WatchtowerPullTimeout(t *testing.T) {
 			CreatedAt:  now.Add(-10 * time.Minute),
 			UpdatedAt:  now.Add(-150 * time.Second), // > 120s timeout
 			HTMLURL:    "https://github.com/azylman/aerial/actions/runs/484",
+		},
+	}
+	jobs := map[int64][]GitHubJob{
+		484: {
+			{Name: "Build & Push Images to GHCR (brain)", Status: "completed", Conclusion: "success"},
 		},
 	}
 
@@ -524,17 +537,78 @@ func TestMergeClusterDeployments_WatchtowerPullTimeout(t *testing.T) {
 		},
 	}
 
-	deploys := mergeClusterDeployments(containers, runs, nil, "old1234")
+	deploys := mergeClusterDeployments(containers, runs, jobs, "old1234")
 	if len(deploys) != 1 {
 		t.Fatalf("expected 1 deployment on pull timeout, got %d", len(deploys))
 	}
 
 	dep := deploys[0]
 	if dep.Stage != "failed" {
-		t.Errorf("expected stage 'failed' on Watchtower pull timeout, got %s", dep.Stage)
+		t.Errorf("expected stage 'failed' on Hangar sync timeout, got %s", dep.Stage)
+	}
+	if dep.CommitMsg != "Hangar reconciliation timed out (>120s)" {
+		t.Errorf("expected timeout message, got %s", dep.CommitMsg)
+	}
+	if dep.Steps[2].Name != "Hangar Sync" {
+		t.Errorf("expected step 2 name 'Hangar Sync', got %s", dep.Steps[2].Name)
 	}
 	if dep.Steps[2].Status != "failed" {
-		t.Errorf("expected Watchtower Pull step status 'failed', got %s", dep.Steps[2].Status)
+		t.Errorf("expected Hangar Sync step status 'failed', got %s", dep.Steps[2].Status)
+	}
+}
+
+func TestMergeClusterDeployments_NoContainerBuilds_ImmediateLive(t *testing.T) {
+	now := time.Now().UTC()
+	runs := []GitHubRun{
+		{
+			ID:         485,
+			Name:       "Continuous Delivery",
+			HeadSHA:    "purecode1234",
+			Status:     "completed",
+			Conclusion: "success",
+			CreatedAt:  now.Add(-10 * time.Minute),
+			UpdatedAt:  now.Add(-150 * time.Second), // > 120s, but zero container builds
+			HTMLURL:    "https://github.com/azylman/aerial/actions/runs/485",
+		},
+	}
+	// CI only ran tests & lint; container build was skipped
+	jobs := map[int64][]GitHubJob{
+		485: {
+			{Name: "Run Service Unit Tests", Status: "completed", Conclusion: "success"},
+			{Name: "Lint Microservices & Frontend", Status: "completed", Conclusion: "success"},
+			{Name: "Build & Push Images to GHCR (brain)", Status: "completed", Conclusion: "skipped"},
+		},
+	}
+
+	// Healthy running local containers
+	containers := []DockerContainerJSON{
+		{
+			ID:      "c1",
+			Names:   []string{"/aerial-brain"},
+			State:   "running",
+			Created: now.Add(-1 * time.Hour).Unix(),
+			Labels:  map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"},
+		},
+	}
+
+	deploys := mergeClusterDeployments(containers, runs, jobs, "old1234")
+	if len(deploys) != 1 {
+		t.Fatalf("expected 1 deployment, got %d", len(deploys))
+	}
+
+	dep := deploys[0]
+	// Because no containers needed rebuilding, it is immediately marked live / stack synced rather than timing out!
+	if dep.Stage != "live" {
+		t.Errorf("expected stage 'live', got %s", dep.Stage)
+	}
+	if dep.Progress != 100 {
+		t.Errorf("expected progress 100, got %d", dep.Progress)
+	}
+	if dep.Steps[2].Name != "Hangar Sync" {
+		t.Errorf("expected step 2 name 'Hangar Sync', got %s", dep.Steps[2].Name)
+	}
+	if dep.Steps[2].Status != "completed" {
+		t.Errorf("expected Hangar Sync step status 'completed', got %s", dep.Steps[2].Status)
 	}
 }
 

@@ -46,8 +46,8 @@ Aerial uses a decoupled **Two-Repository Architecture**:
 └───────────────────────────┘ └───────────────────────┘ └─────────────────────┘
                │                       │                      │
 ┌───────────────────────────┐ ┌───────────────────────┐ ┌─────────────────────┐
-│    victoriametrics-mcp    │ │   aerial-watchtower   │ │    aerial-proxy     │
-│ (Port 4004: Streamable    │ │ (GHCR CD Supervisor)  │ │ (Port 8089: Edge)   │
+│    victoriametrics-mcp    │ │     aerial-hangar     │ │    aerial-proxy     │
+│ (Port 4004: Streamable    │ │ (GitOps & OCI Recon)  │ │ (Port 8089: Edge)   │
 │   HTTP Metrics Inspection)│ └───────────────────────┘ └──────────┬──────────┘
 └───────────────────────────┘                                     │
                │                                                  │
@@ -336,7 +336,7 @@ Aerial uses an automated GitOps deployment and configuration pipeline:
 | **`aerial-postgres-exporter`**| `9187` (Internal) | PostgreSQL database metrics exporter gathering connection pools, locks, query stats, and buffer metrics. |
 | **`aerial-victoriametrics`**| `8428` (Internal) | VictoriaMetrics single-node TSDB scraping Prometheus metrics from all exporters with 5-year retention and dynamic `scrape.d/` config. |
 | **`aerial-grafana`** | `3000` (via proxy) | Grafana visual dashboards serving system HUD & container metrics with PostgreSQL persistent backend and pre-provisioned dashboards. |
-| **`aerial-watchtower`** | - | Out-of-band continuous deployment supervisor polling GHCR every 60 seconds. |
+| **`aerial-hangar`** | `8080` (Internal) | Automated GitOps synchronization and declarative container reconciliation sidecar. |
 | **`aerial-autoheal`** | - | Health supervisor probing container healthchecks every 15s and auto-restarting unhealthy containers. |
 
 
