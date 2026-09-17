@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1944,6 +1945,92 @@ func TestDefaultPaths(t *testing.T) {
 		t.Errorf("expected non-empty data dir, got empty")
 	}
 }
+
+type errorResponseWriter struct {
+	http.ResponseWriter
+}
+
+func (e *errorResponseWriter) Header() http.Header {
+	return e.ResponseWriter.Header()
+}
+
+func (e *errorResponseWriter) WriteHeader(statusCode int) {
+	e.ResponseWriter.WriteHeader(statusCode)
+}
+
+func (e *errorResponseWriter) Write([]byte) (int, error) {
+	return 0, errors.New("write error")
+}
+
+type errCloserReader struct {
+	io.Reader
+}
+
+func (r *errCloserReader) Close() error {
+	return errors.New("close error")
+}
+
+func TestWriteJSON_Error(t *testing.T) {
+	w := httptest.NewRecorder()
+	// Channels cannot be JSON-encoded
+	writeJSON(w, http.StatusOK, make(chan int))
+}
+
+func TestHandlePrompt_BodyCloseError(t *testing.T) {
+	store := db.NewFakeStore()
+	pool := newTestWorkerPool(store)
+	handler := handlePrompt(store, pool)
+
+	validPayload, _ := json.Marshal(map[string]string{
+		"prompt": "Test prompt",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/prompt", &errCloserReader{Reader: bytes.NewReader(validPayload)})
+	w := httptest.NewRecorder()
+	handler(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Errorf("expected 202, got %d", w.Code)
+	}
+}
+
+func TestSetupBrainMux_WriteErrors(t *testing.T) {
+	store := db.NewFakeStore()
+	pool := newTestWorkerPool(store)
+	mux := SetupBrainMux(store, pool, func(string) {})
+
+	// /internal/reload write error
+	reqReload := httptest.NewRequest(http.MethodPost, "/internal/reload", nil)
+	recReload := httptest.NewRecorder()
+	errWReload := &errorResponseWriter{ResponseWriter: recReload}
+	mux.ServeHTTP(errWReload, reqReload)
+
+	// /health write error
+	reqHealth := httptest.NewRequest(http.MethodGet, "/health", nil)
+	recHealth := httptest.NewRecorder()
+	errWHealth := &errorResponseWriter{ResponseWriter: recHealth}
+	mux.ServeHTTP(errWHealth, reqHealth)
+}
+
+func TestRunBrainApp_DefaultStoreError(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := config.NewTestConfig(func(d *config.ConfigData) {
+		d.Port = "0"
+		d.AgyBin = "/bin/true"
+		d.Model = "gemini-2.5-flash"
+		d.SystemPrompt = "test"
+		d.GeminiHomeDir = tmpDir
+		d.DataDir = filepath.Join(tmpDir, "data")
+		d.DatabaseURL = "invalid://schema"
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	err := RunBrainApp(ctx, cfg)
+	if err == nil || !strings.Contains(err.Error(), "failed to initialize database") {
+		t.Errorf("expected failed to initialize database error, got: %v", err)
+	}
+}
+
 
 
 

@@ -51,7 +51,9 @@ func syncBotMemberRoles(ctx context.Context, s *discordgo.Session, guildID, botI
 		m.GuildID = guildID
 	}
 	if m.User != nil {
-		_ = s.State.MemberAdd(m)
+		if err := s.State.MemberAdd(m); err != nil {
+			log.Printf("[WARN] Failed to add bot member %s to session state: %v", botID, err)
+		}
 	}
 	log.Printf("Discord funnel cached %d bot role(s) for guild %s", len(m.Roles), guildID)
 }
@@ -115,7 +117,9 @@ func getDiscordChannel(s *discordgo.Session, channelID string) *discordgo.Channe
 		if ch, err := s.Channel(channelID); err == nil && ch != nil {
 			queue.CacheDiscordChannel(ch)
 			if s.State != nil {
-				_ = s.State.ChannelAdd(ch)
+				if err := s.State.ChannelAdd(ch); err != nil {
+					log.Printf("[WARN] Failed to add channel %s to session state: %v", ch.ID, err)
+				}
 			}
 			return ch
 		}
@@ -233,7 +237,9 @@ func getOrCreateThreadID(s *discordgo.Session, m *discordgo.Message, allowSummar
 				}
 				queue.CacheDiscordChannel(existingThread)
 				if s.State != nil {
-					_ = s.State.ChannelAdd(existingThread)
+					if err := s.State.ChannelAdd(existingThread); err != nil {
+						log.Printf("[WARN] Failed to add existing thread %s to session state: %v", existingThread.ID, err)
+					}
 				}
 				return m.ID, true
 			}
@@ -250,7 +256,9 @@ func getOrCreateThreadID(s *discordgo.Session, m *discordgo.Message, allowSummar
 			}
 			queue.CacheDiscordChannel(thread)
 			if s.State != nil {
-				_ = s.State.ChannelAdd(thread)
+				if err := s.State.ChannelAdd(thread); err != nil {
+					log.Printf("[WARN] Failed to add thread %s to session state: %v", thread.ID, err)
+				}
 			}
 		}
 		log.Printf("Created new Discord thread %q (ID: %s) for message %s in channel %s", title, thread.ID, m.ID, m.ChannelID)
@@ -475,7 +483,9 @@ func connectDiscordFunnel(ctx context.Context, store db.Store, pool *queue.Worke
 			if m.GuildID != "" && m.Member.GuildID == "" {
 				m.Member.GuildID = m.GuildID
 			}
-			_ = s.State.MemberAdd(m.Member)
+			if err := s.State.MemberAdd(m.Member); err != nil {
+				log.Printf("[WARN] Failed to update member %s in session state: %v", userID, err)
+			}
 			log.Printf("Discord funnel updated bot roles (%d roles) in real-time for guild %s", len(m.Member.Roles), m.Member.GuildID)
 		}
 	})
@@ -768,7 +778,10 @@ func RunStartupCatchUpSweep(ctx context.Context, store db.Store, pool *queue.Wor
 			}
 
 			// Check if already in DB
-			exists, _ := store.MessageExists(sweepCtx, m.ID)
+			exists, err := store.MessageExists(sweepCtx, m.ID)
+			if err != nil {
+				log.Printf("[Startup Recovery] Warning checking message existence for %s: %v", m.ID, err)
+			}
 			if exists {
 				skippedCount++
 				continue
