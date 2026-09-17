@@ -16,6 +16,10 @@ func TestMetricsRegistryAndHandler(t *testing.T) {
 	RecordSyncRequest("webhook", "error")
 	RecordReconciliation("success", 3500*time.Millisecond)
 	RecordLastSync("/share/aerial", time.Now())
+	RecordRegistryManifest("ghcr.io", "success", 150*time.Millisecond)
+	RecordRollback("brain", "compose_up")
+	RecordImageQuarantine("brain", "healthcheck_failed")
+	RecordActiveQuarantines("brain", 1)
 
 	handler := Handler()
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
@@ -36,6 +40,14 @@ func TestMetricsRegistryAndHandler(t *testing.T) {
 		"aerial_gitsync_compose_duration_seconds",
 		"aerial_gitsync_last_sync_timestamp_seconds",
 		"aerial_gitsync_build_info",
+		"aerial_hangar_registry_manifest_requests_total",
+		"aerial_hangar_registry_manifest_duration_seconds",
+		"aerial_hangar_reconciliations_total",
+		"aerial_hangar_compose_duration_seconds",
+		"aerial_hangar_rollbacks_total",
+		"aerial_hangar_image_quarantines_total",
+		"aerial_hangar_active_quarantines",
+		"aerial_hangar_build_info",
 	}
 
 	for _, m := range expectedMetrics {
@@ -78,6 +90,10 @@ func TestSanitizeStatus(t *testing.T) {
 		{errors.New("git dir not found: /repo/.git"), "not_found"},
 		{errors.New("reset failed: fatal"), "git_error"},
 		{errors.New("compose up failed: exit status 1"), "apply_failed"},
+		{errors.New("quarantine active for image"), "quarantined"},
+		{errors.New("rollback executed successfully"), "rollback"},
+		{errors.New("manifest HEAD request failed"), "registry_error"},
+		{errors.New("digest mismatch detected"), "registry_error"},
 		{errors.New("unrecognized socket glitch"), "error"},
 	}
 
@@ -94,4 +110,8 @@ func TestEmptyMetricsEdgeCases(t *testing.T) {
 	RecordSyncRequest("", "")
 	RecordReconciliation("", 200*time.Millisecond)
 	RecordLastSync("", time.Time{})
+	RecordRegistryManifest("", "", 50*time.Millisecond)
+	RecordRollback("", "")
+	RecordImageQuarantine("", "")
+	RecordActiveQuarantines("", 0)
 }

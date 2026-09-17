@@ -1,4 +1,4 @@
-module github.com/azylman/aerial/sidecars/gitsync
+module github.com/azylman/aerial/sidecars/hangar
 
 go 1.24
 

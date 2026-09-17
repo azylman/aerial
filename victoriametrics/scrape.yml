@@ -23,9 +23,9 @@ scrape_configs:
     static_configs:
       - targets: ["brain:8080"]
 
-  - job_name: "aerial-gitsync"
+  - job_name: "aerial-hangar"
     static_configs:
-      - targets: ["gitsync:8080"]
+      - targets: ["hangar:8080"]
 
   - job_name: "postgres"
     static_configs:

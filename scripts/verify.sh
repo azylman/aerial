@@ -27,6 +27,10 @@ has_cmd() {
     command -v "$1" >/dev/null 2>&1
 }
 
+has_docker() {
+    has_cmd docker && docker info >/dev/null 2>&1
+}
+
 # Check for UTF-8 BOM (\xef\xbb\xbf)
 check_utf8_bom() {
     if has_cmd git; then
@@ -54,7 +58,7 @@ check_no_main_in_tests() {
 }
 
 # Go services in the monorepo
-GO_SERVICES="brain scheduler-mcp discord-mcp dashboard sidecars/gitsync"
+GO_SERVICES="brain scheduler-mcp discord-mcp dashboard sidecars/hangar"
 
 run_go_vet() {
     svc="$1"
@@ -62,7 +66,7 @@ run_go_vet() {
         echo "   [go vet] Checking $svc..."
         if has_cmd go; then
             (cd "$svc" && go vet ./...)
-        elif has_cmd docker; then
+        elif has_docker; then
             docker run --rm \
                 -v aerial-go-cache:/root/.cache/go-build \
                 -v aerial-go-pkg:/go/pkg/mod \
@@ -78,7 +82,7 @@ run_golangci_lint() {
         echo "   [golangci-lint] Linting $svc..."
         if has_cmd golangci-lint; then
             (cd "$svc" && golangci-lint run --path-prefix="$svc/" --config "$REPO_ROOT/.golangci.yml" ./...)
-        elif has_cmd docker; then
+        elif has_docker; then
             docker run --rm \
                 -v "$REPO_ROOT:/workspace" -w "/workspace/$svc" \
                 golangci/golangci-lint:v1.64.5 \
@@ -130,7 +134,7 @@ run_go_test() {
                 GIT_TERMINAL_PROMPT=0 \
                 CGO_ENABLED="$cgo_val" \
                 go test -v ./...)
-        elif has_cmd docker; then
+        elif has_docker; then
             docker run --rm \
                 -v aerial-go-cache:/root/.cache/go-build \
                 -v aerial-go-pkg:/go/pkg/mod \
@@ -158,7 +162,7 @@ run_node_syntax() {
         echo "   [node --check] Checking syntax of $file..."
         if has_cmd node; then
             node --check "$file"
-        elif has_cmd docker; then
+        elif has_docker; then
             cat "$file" | docker run --rm -i node:20 node --check
         fi
     fi
@@ -171,7 +175,7 @@ run_node_test() {
         echo "   [node --test] Testing in $dir ($test_pattern)..."
         if has_cmd node; then
             (cd "$dir" && node --test $test_pattern)
-        elif has_cmd docker; then
+        elif has_docker; then
             tar -cf - "$dir" | docker run --rm -i node:20 sh -c "tar -xf - && cd $dir && node --test $test_pattern"
         fi
     fi
@@ -183,7 +187,7 @@ run_json_syntax() {
         echo "   [json-check] Validating syntax of $file..."
         if has_cmd node; then
             node -e "JSON.parse(require('fs').readFileSync('$file', 'utf8'))"
-        elif has_cmd docker; then
+        elif has_docker; then
             cat "$file" | docker run --rm -i node:20 node -e "let d=''; process.stdin.on('data', c => d += c); process.stdin.on('end', () => JSON.parse(d));"
         fi
     fi

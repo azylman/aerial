@@ -10,7 +10,6 @@ services:
     stop_grace_period: 30s
     labels:
       autoheal: "true"
-      com.centurylinklabs.watchtower.enable: "true"
     environment:
       - POSTGRES_DB=${POSTGRES_DB:-aerial}
       - POSTGRES_USER=${POSTGRES_USER:-aerial}
@@ -46,7 +45,6 @@ services:
     stop_grace_period: 60s
     labels:
       autoheal: "true"
-      com.centurylinklabs.watchtower.enable: "true"
     environment:
       - PORT=8080
       - DATABASE_URL=${DATABASE_URL:-postgres://${POSTGRES_USER:-aerial}:${POSTGRES_PASSWORD:-aerial_secure_pass}@postgres:5432/${POSTGRES_DB:-aerial}?sslmode=disable}
@@ -92,21 +90,20 @@ services:
         condition: service_started
 
   # ----------------------------------------------------------------------------
-  # 1b. GitSync Sidecar: Aerial GitSync
-  #     Performs automated, single-flight Git synchronization for live repositories
-  #     and exposes on-demand sync webhook. Holds write volume mounts to prevent
+  # 1b. Hangar Sidecar: Aerial Hangar
+  #     Performs automated, single-flight Git synchronization and OCI container
+  #     reconciliation for live services. Holds write volume mounts to prevent
   #     unpushed commits from ever touching the execution brain.
   # ----------------------------------------------------------------------------
-  gitsync:
-    image: ghcr.io/azylman/aerial-gitsync:latest
+  hangar:
+    image: ghcr.io/azylman/aerial-hangar:latest
     build:
       context: .
-      dockerfile: sidecars/gitsync/Dockerfile
-    container_name: aerial-gitsync
+      dockerfile: sidecars/hangar/Dockerfile
+    container_name: aerial-hangar
     restart: unless-stopped
     labels:
       autoheal: "true"
-      com.centurylinklabs.watchtower.enable: "false"
     environment:
       - PORT=8080
       - GITHUB_PAT=${GITHUB_PAT}
@@ -127,34 +124,7 @@ services:
       retries: 3
 
   # ----------------------------------------------------------------------------
-  # 2. Automated Updates: Watchtower
-  #    Automatically monitors GHCR container images and performs rolling restarts.
-  # ----------------------------------------------------------------------------
-  watchtower:
-    image: aerial-updater:latest
-    build:
-      dockerfile_inline: |
-        FROM ghcr.io/nicholas-fedor/watchtower:latest
-    container_name: aerial-watchtower
-    restart: unless-stopped
-    labels:
-      autoheal: "true"
-      com.centurylinklabs.watchtower.enable: "false"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-    environment:
-      - WATCHTOWER_POLL_INTERVAL=60
-      - WATCHTOWER_CLEANUP=true
-      - WATCHTOWER_INCLUDE_SELF=false
-      - WATCHTOWER_ROLLING_RESTART=false
-      - WATCHTOWER_TIMEOUT=75s
-      - WATCHTOWER_LABEL_ENABLE=true
-      - DOCKER_API_VERSION=1.45
-    networks:
-      - aerial-net
-
-  # ----------------------------------------------------------------------------
-  # 3. Container Auto-Healing: Autoheal
+  # 2. Container Auto-Healing: Autoheal
   #    Monitors Docker healthchecks and restarts unhealthy containers automatically.
   # ----------------------------------------------------------------------------
   autoheal:
@@ -163,7 +133,6 @@ services:
     restart: unless-stopped
     labels:
       autoheal: "true"
-      com.centurylinklabs.watchtower.enable: "true"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
@@ -186,7 +155,6 @@ services:
     restart: unless-stopped
     labels:
       autoheal: "true"
-      com.centurylinklabs.watchtower.enable: "true"
     environment:
       - DATABASE_URL=${DATABASE_URL:-postgres://${POSTGRES_USER:-aerial}:${POSTGRES_PASSWORD:-aerial_secure_pass}@postgres:5432/${POSTGRES_DB:-aerial}?sslmode=disable}
       - DEFAULT_TIMEZONE=${DEFAULT_TIMEZONE:-America/Los_Angeles}
@@ -216,7 +184,6 @@ services:
     restart: unless-stopped
     labels:
       autoheal: "true"
-      com.centurylinklabs.watchtower.enable: "true"
     environment:
       - PORT=4001
       - DISCORD_TOKEN=${DISCORD_BOT_TOKEN}
@@ -245,7 +212,6 @@ services:
     init: true
     labels:
       autoheal: "true"
-      com.centurylinklabs.watchtower.enable: "true"
     environment:
       - PORT=4002
     volumes:
@@ -274,7 +240,6 @@ services:
     init: true
     labels:
       autoheal: "true"
-      com.centurylinklabs.watchtower.enable: "true"
     environment:
       - PORT=4003
       - GITHUB_PERSONAL_ACCESS_TOKEN=${GITHUB_PAT}
@@ -301,7 +266,6 @@ services:
     restart: unless-stopped
     labels:
       autoheal: "true"
-      com.centurylinklabs.watchtower.enable: "true"
     volumes:
       - aerial-ollama-data:/root/.ollama
     ports:
@@ -326,7 +290,6 @@ services:
     restart: unless-stopped
     labels:
       autoheal: "true"
-      com.centurylinklabs.watchtower.enable: "true"
       homepage.group: "Aerial AI & Mission Control"
       homepage.name: "AgentsView"
       homepage.icon: "terminal.png"
@@ -345,6 +308,12 @@ services:
       - aerial-brain-gemini:/root/.gemini:ro
     networks:
       - aerial-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:8080/agentsview/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
   # ----------------------------------------------------------------------------
   # 10. Core Status Dashboard: Aerial Status Microservice
@@ -357,7 +326,6 @@ services:
     restart: unless-stopped
     labels:
       autoheal: "true"
-      com.centurylinklabs.watchtower.enable: "true"
       homepage.group: "Aerial AI & Mission Control"
       homepage.name: "Aerial Command HUD"
       homepage.icon: "/dashboard/apple-touch-icon.png"
@@ -374,7 +342,8 @@ services:
     environment:
       - PORT=8080
       - BRAIN_URL=http://brain:8080
-      - GITSYNC_URL=http://gitsync:8080
+      - HANGAR_URL=http://hangar:8080
+      - GITSYNC_URL=http://hangar:8080
       - GITHUB_PAT=${GITHUB_PAT}
       - GITHUB_REPO=${GITHUB_REPO:-azylman/aerial}
     volumes:
@@ -400,7 +369,6 @@ services:
     restart: unless-stopped
     labels:
       autoheal: "true"
-      com.centurylinklabs.watchtower.enable: "true"
       homepage.group: "Aerial AI & Mission Control"
       homepage.name: "System Docs"
       homepage.icon: "docsify.png"
@@ -429,7 +397,6 @@ services:
     stop_grace_period: 15s
     labels:
       autoheal: "true"
-      com.centurylinklabs.watchtower.enable: "true"
     environment:
       - PORT=3000
       - HOMEPAGE_ALLOWED_HOSTS=*
@@ -463,7 +430,6 @@ services:
     stop_grace_period: 15s
     labels:
       autoheal: "true"
-      com.centurylinklabs.watchtower.enable: "true"
     volumes:
       - ${AERIAL_HOST_PROJECT_DIR:-${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}}/proxy/grafana-cyberpunk.css:/etc/nginx/grafana-cyberpunk.css:ro
       - ${AERIAL_HOST_PROJECT_DIR:-${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}}/proxy/agentsview-cyberpunk.css:/etc/nginx/agentsview-cyberpunk.css:ro
@@ -483,7 +449,7 @@ services:
       docs:
         condition: service_healthy
       agentsview:
-        condition: service_started
+        condition: service_healthy
       grafana:
         condition: service_healthy
       homepage:
@@ -501,7 +467,6 @@ services:
       - no-new-privileges:true
     labels:
       autoheal: "true"
-      com.centurylinklabs.watchtower.enable: "true"
     command:
       - "--docker_only=true"
       - "--housekeeping_interval=15s"
@@ -536,7 +501,6 @@ services:
       - no-new-privileges:true
     labels:
       autoheal: "true"
-      com.centurylinklabs.watchtower.enable: "true"
     command:
       - "--path.procfs=/host/proc"
       - "--path.sysfs=/host/sys"
@@ -568,7 +532,6 @@ services:
       - no-new-privileges:true
     labels:
       autoheal: "true"
-      com.centurylinklabs.watchtower.enable: "true"
     command:
       - "-storageDataPath=/victoria-metrics-data"
       - "-promscrape.config=/share/aerial/victoriametrics/scrape.yml"
@@ -609,7 +572,6 @@ services:
       - no-new-privileges:true
     labels:
       autoheal: "true"
-      com.centurylinklabs.watchtower.enable: "true"
       homepage.group: "Observability"
       homepage.name: "Grafana Telemetry"
       homepage.icon: "grafana.png"
@@ -671,7 +633,6 @@ services:
       - no-new-privileges:true
     labels:
       autoheal: "true"
-      com.centurylinklabs.watchtower.enable: "true"
     environment:
       - DATA_SOURCE_NAME=postgresql://${POSTGRES_USER:-aerial}:${POSTGRES_PASSWORD:-aerial_secure_pass}@postgres:5432/${POSTGRES_DB:-aerial}?sslmode=disable
       - PG_EXPORTER_DISABLE_SETTINGS_METRICS=true
@@ -699,7 +660,6 @@ services:
     restart: unless-stopped
     labels:
       autoheal: "true"
-      com.centurylinklabs.watchtower.enable: "true"
     environment:
       - MCP_SERVER_MODE=http
       - MCP_LISTEN_ADDR=:4004

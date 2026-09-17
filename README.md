@@ -32,7 +32,7 @@ Aerial uses a decoupled **Two-Repository Architecture**:
 └─────────────────────────────────────────────────────────────────────────────┘
                │                       │                      │
 ┌───────────────────────────┐ ┌───────────────────────┐ ┌─────────────────────┐
-│       aerial-gitsync      │ │       docker-mcp      │ │     github-mcp      │
+│       aerial-hangar       │ │       docker-mcp      │ │     github-mcp      │
 │  (Port 8080: Sidecar :rw) │ │ (Port 4002: Streamable│ │ (Port 4003: Streamable│
 │  • Declarative GitOps     │ │   HTTP MCP Transport) │ │   HTTP MCP Transport) │
 │    Compose Reconciler     │ └───────────────────────┘ └─────────────────────┘
@@ -268,7 +268,7 @@ Aerial includes an enterprise-grade, out-of-the-box observability matrix with si
 ├────────────────────────────┬─────────────────────────────┬────────────────────────────┤
 │ METRIC EXPORTERS           │ TIME-SERIES TSDB            │ VISUALIZATION & HUD        │
 │ • aerial-brain (:8080)     │                             │                            │
-│ • aerial-gitsync (:8080)   │ aerial-victoriametrics      │ aerial-grafana (:3000)     │
+│ • aerial-hangar (:8080)    │ aerial-victoriametrics      │ aerial-grafana (:3000)     │
 │ • postgres-exporter (:9187)│ (:8428)                     │ • Anonymous Admin HUD      │
 │ • cadvisor (:8080)         │ • 5-Year Retention          │ • Cyberpunk Permet Theme   │
 │ • node-exporter (:9100)    │ • Dynamic 15s Scrape Engine │ • Core Telemetry Dashboard │
@@ -285,7 +285,7 @@ Aerial includes an enterprise-grade, out-of-the-box observability matrix with si
 - **Single-Click Anonymous Admin Access**: Instant dashboard access without login friction.
 - **Persistent Backend**: Dashboards and user settings persist directly in PostgreSQL 16 (`GF_DATABASE_TYPE=postgres`).
 - **Pre-Provisioned Dashboard Suite**:
-  - **`⚡ Aerial Brain & GitSync Operations` (`core-telemetry.json`)**: Live turn execution latency (p50/p90/p95/p99), token usage, active worker pool depth, CAS task states, runner error taxonomy, Discord gateway ping, classifier triage decisions, Ollama vector search durations, and GitSync reconcile runs.
+  - **`⚡ Aerial Brain & Hangar Operations` (`core-telemetry.json`)**: Live turn execution latency (p50/p90/p95/p99), token usage, active worker pool depth, CAS task states, runner error taxonomy, Discord gateway ping, classifier triage decisions, Ollama vector search durations, GitSync and Hangar reconcile runs.
   - **`🐘 PostgreSQL Overview` (`postgres-overview.json`)**: Active backends, connection pool state, buffer cache hit ratio (>99%), commits/rollbacks, tuple read/write velocity, and lock contention.
   - **`🐳 Docker Containers Overview` (`docker-overview.json`)**: Per-container CPU %, working set memory curves, network RX/TX, and CFS CPU throttling periods.
   - **`🖥️ Host System & Hardware Overview` (`host-system-overview.json`)**: Host CPU load breakdown, thermal sensors per core, RAM utilization, root disk space, and load averages.
@@ -297,8 +297,9 @@ Aerial includes an enterprise-grade, out-of-the-box observability matrix with si
   - Classifier & Funnel: `aerial_brain_classifier_duration_seconds`, `aerial_brain_classifier_decisions_total`, `aerial_brain_classifier_confidence_score`, `aerial_brain_discord_events_total`, `aerial_brain_discord_gateway_latency_seconds`.
   - Memory & Embeddings: `aerial_brain_memory_operations_total`, `aerial_brain_memory_search_duration_seconds`, `aerial_brain_embeddings_generated_total`, `aerial_brain_facts_extracted_total`.
   - Database Connection Pool: `aerial_brain_db_query_duration_seconds`, `aerial_brain_db_open_connections`, `aerial_brain_db_in_use_connections`, `aerial_brain_db_idle_connections`, `aerial_brain_db_wait_count_total`.
-- **`aerial-gitsync`** (Exposed on internal `:8080/metrics`):
-  - `aerial_gitsync_pulls_total`, `aerial_gitsync_pull_duration_seconds`, `aerial_gitsync_sync_requests_total`, `aerial_gitsync_reconciliations_total`, `aerial_gitsync_compose_duration_seconds`, `aerial_gitsync_last_sync_timestamp_seconds`.
+- **`aerial-hangar`** (Exposed on internal `:8080/metrics`):
+  - Git-related: `aerial_gitsync_pulls_total`, `aerial_gitsync_pull_duration_seconds`, `aerial_gitsync_sync_requests_total`, `aerial_gitsync_last_sync_timestamp_seconds`.
+  - Reconcile & OCI: `aerial_hangar_reconciliations_total`, `aerial_hangar_compose_duration_seconds`, `aerial_hangar_registry_manifest_requests_total`, `aerial_hangar_registry_manifest_duration_seconds`, `aerial_hangar_rollbacks_total`, `aerial_hangar_image_quarantines_total`, `aerial_hangar_active_quarantines`, `aerial_hangar_build_info`.
 
 ---
 
@@ -306,11 +307,10 @@ Aerial includes an enterprise-grade, out-of-the-box observability matrix with si
 
 Aerial uses an automated GitOps deployment and configuration pipeline:
 1. **GitHub Actions Matrix Builds**: Triggers dynamic matrix builds only for modified microservices and publishes them to GitHub Container Registry (`ghcr.io/azylman/aerial-*`).
-2. **Watchtower Supervisor**: Polls GHCR every 60 seconds out-of-band and performs zero-downtime rolling container updates across core services.
-3. **Dedicated GitSync Sidecar (`aerial-gitsync`)**: A dedicated background daemon holding read-write mounts on `/share/aerial-config` and `/share/aerial`, pulling updates via singleflight fast-forward syncs every 60s and exposing a `POST /sync` trigger.
-4. **Declarative GitOps Compose Reconciler**: Whenever repository updates are synchronized (periodically or via webhook), `aerial-gitsync` automatically pre-flight validates and executes `docker compose up -d` with strict timeouts and token sanitization, reconciling any topology changes declaratively without manual container intervention.
-5. **Physical Immutability & Asynchronous PR Workflow**: The `aerial-brain` execution container mounts repositories strictly **read-only (`:ro`)**. When making configuration, persona, or skill adjustments, Aerial uses `scripts/aerial-config-pr.sh` to clone into an ephemeral `/dev/shm` scratch directory, run pre-flight YAML syntax checks, validate mandatory `PR_DESCRIPTION.md`, push a branch, open a GitHub PR, and schedule a one-shot follow-up reminder via `scheduler-mcp` (defaulting to 1m). When the reminder triggers, the waking agent runs `scripts/aerial-config-pr.sh merge <pr_num>` to verify green CI, squash-merge into `main`, and confirm live synchronization.
-6. **Core Engine Self-Improvement**: For changes to the Go monorepo (`azylman/aerial`), Aerial uses `.agents/skills/self-improvement/SKILL.md` to run local tests and static analysis (`./scripts/verify.sh --staged`), commit, push a branch, and open an asynchronous PR via `scripts/aerial-pr.sh submit` with an automated one-shot reminder scheduled via `scheduler-mcp` (defaulting to 2m) for deterministic single-shot merge verification.
+2. **Dedicated Hangar Sidecar (`aerial-hangar`)**: A dedicated background daemon holding read-write mounts on `/share/aerial-config` and `/share/aerial`, pulling updates via singleflight fast-forward syncs every 60s, querying OCI container registries for new image builds, and exposing `POST /sync` and `POST /reconcile` triggers.
+3. **Declarative GitOps Compose Reconciler**: Whenever repository updates or new container images are detected, `aerial-hangar` automatically pre-flight validates, pulls, and executes `docker compose up -d` with snapshot rollbacks, image quarantines, strict timeouts, and token sanitization.
+4. **Physical Immutability & Asynchronous PR Workflow**: The `aerial-brain` execution container mounts repositories strictly **read-only (`:ro`)**. When making configuration, persona, or skill adjustments, Aerial uses `scripts/aerial-config-pr.sh` to clone into an ephemeral `/dev/shm` scratch directory, run pre-flight YAML syntax checks, validate mandatory `PR_DESCRIPTION.md`, push a branch, open a GitHub PR, and schedule a one-shot follow-up reminder via `scheduler-mcp` (defaulting to 1m). When the reminder triggers, the waking agent runs `scripts/aerial-config-pr.sh merge <pr_num>` to verify green CI, squash-merge into `main`, and confirm live synchronization.
+5. **Core Engine Self-Improvement**: For changes to the Go monorepo (`azylman/aerial`), Aerial uses `.agents/skills/self-improvement/SKILL.md` to run local tests and static analysis (`./scripts/verify.sh --staged`), commit, push a branch, and open an asynchronous PR via `scripts/aerial-pr.sh submit` with an automated one-shot reminder scheduled via `scheduler-mcp` (defaulting to 2m) for deterministic single-shot merge verification.
 
 ---
 
@@ -320,7 +320,7 @@ Aerial uses an automated GitOps deployment and configuration pipeline:
 | :--- | :--- | :--- |
 | **`aerial-postgres`** | `5432` (Host `127.0.0.1:5432`) | Dedicated PostgreSQL 16 relational database with `pgvector` extension for production state, CAS task queues, vector memory, schedules, and Grafana storage. Production runs exclusively on PostgreSQL; SQLite is prohibited in production. |
 | **`aerial-brain`** | `8080` (Host `8088`) | Go execution daemon running `agy`, PostgreSQL memory, Discord funnel, Prometheus metrics (`:8080/metrics`), and file watcher. Mounted `:ro`. |
-| **`aerial-gitsync`** | `8080` (Internal) | Dedicated GitSync sidecar daemon managing automated repository synchronization, `/sync` webhooks, `/reconcile` GitOps endpoints, Prometheus metrics, and declarative GitOps compose reconciliation. Mounted `:rw`. |
+| **`aerial-hangar`** | `8080` (Internal) | Dedicated Hangar sidecar daemon managing automated repository synchronization, OCI container image update detection, snapshot rollbacks, image quarantine, `/sync` webhooks, `/reconcile` GitOps endpoints, and Prometheus metrics. Mounted `:rw`. |
 | **`aerial-scheduler-mcp`**| `8080` (Internal) | PostgreSQL-backed cron and one-shot reminder management server over HTTP MCP. |
 | **`aerial-discord-mcp`** | `4001` (Host `4001`) | Outbound MCP server providing Discord messaging, thread creation, and channel tools. |
 | **`aerial-docker-mcp`** | `4002` (Host `4002`) | Native in-image Docker MCP stdio server with `supergateway` translation proxy over `/var/run/docker.sock`. |
@@ -381,7 +381,7 @@ AERIAL_CONFIG_REPO_URL=https://github.com/your-username/my-aerial-config.git
 ```bash
 docker compose up -d
 ```
-On boot, `aerial-brain` and `aerial-gitsync` will automatically adopt or clone your private repository into `/share/aerial-config` using `GITHUB_PAT` and load your `config.yaml` settings.
+On boot, `aerial-brain` and `aerial-hangar` will automatically adopt or clone your private repository into `/share/aerial-config` using `GITHUB_PAT` and load your `config.yaml` settings.
 
 ### Step 5: Authenticate via Google OAuth (Recommended)
 If using OAuth (with `GEMINI_API_KEY` commented out):
@@ -414,8 +414,8 @@ docker compose logs -f brain
 | Start all services | `docker compose up -d` |
 | Stop all services | `docker compose down` |
 | View live logs | `docker compose logs -f` |
-| Trigger GitSync & GitOps Reconcile | `docker exec aerial-brain curl -s -X POST http://aerial-gitsync:8080/sync` |
-| Trigger Immediate GitOps Reconcile | `docker exec aerial-brain curl -s -X POST http://aerial-gitsync:8080/reconcile` |
+| Trigger Hangar Sync & GitOps Reconcile | `docker exec aerial-brain curl -s -X POST http://aerial-hangar:8080/sync` |
+| Trigger Immediate GitOps Reconcile | `docker exec aerial-brain curl -s -X POST http://aerial-hangar:8080/reconcile` |
 | Restart single service | `docker compose restart brain` |
 | Update images & rebuild | `docker compose build && docker compose up -d` |
 
