@@ -9,7 +9,7 @@ REPO_OWNER="azylman"
 REPO_NAME="aerial"
 REPO_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}.git"
 DEFAULT_BRANCH="main"
-SIDE_SYNC_URL="${AERIAL_GITSYNC_URL:-http://aerial-gitsync:8080/sync}"
+SIDE_SYNC_URL="${AERIAL_HANGAR_URL:-${AERIAL_GITSYNC_URL:-http://aerial-hangar:8080/sync}}"
 DEFAULT_PR_CHECK_DELAY="2m"
 
 cmd="${1:-}"
@@ -391,7 +391,7 @@ merge_pr() {
         -H "Accept: application/vnd.github.v3+json" \
         "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/git/refs/heads/${branch}" >/dev/null 2>&1 || true
 
-    # Trigger fast-path sync on aerial-gitsync sidecar
+    # Trigger fast-path sync on aerial-hangar sidecar
     local sync_status="skipped"
     if curl -s -f -X POST "$SIDE_SYNC_URL" >/dev/null 2>&1; then
         sync_status="synced"

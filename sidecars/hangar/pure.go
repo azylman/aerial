@@ -115,7 +115,7 @@ func ParseComposeServices(output string) []string {
 	for _, line := range lines {
 		svc := strings.TrimSpace(line)
 		svc = strings.TrimRight(svc, "\r")
-		if svc == "" || strings.EqualFold(svc, "gitsync") {
+		if svc == "" || strings.EqualFold(svc, "gitsync") || strings.EqualFold(svc, "hangar") {
 			continue
 		}
 		if _, exists := seen[svc]; !exists {
@@ -458,6 +458,176 @@ func ResolveDockerConfigPath(lookup func(string) string) string {
 			return filepath.Join(home, ".docker", "config.json")
 		}
 	}
-	return "/root/.docker/config.json"
+	return filepath.FromSlash("/root/.docker/config.json")
 }
+
+// ParseImageReference decomposes a container image reference into its registry,
+// repository path, and tag. Normalizes Docker Hub references (docker.io -> registry-1.docker.io
+// and library/ prefixing for official images).
+func ParseImageReference(ref string) (registry, repository, tag string, err error) {
+	trimmed := strings.TrimSpace(ref)
+	if trimmed == "" {
+		return "", "", "", fmt.Errorf("empty image reference")
+	}
+	if strings.Contains(trimmed, " ") {
+		return "", "", "", fmt.Errorf("image reference cannot contain spaces: %q", trimmed)
+	}
+
+	// Check for digest pin (@sha256:...)
+	if atIdx := strings.Index(trimmed, "@"); atIdx != -1 {
+		digestPart := trimmed[atIdx+1:]
+		trimmed = trimmed[:atIdx]
+		if !strings.HasPrefix(digestPart, "sha256:") {
+			return "", "", "", fmt.Errorf("invalid digest pin in image reference: %q", ref)
+		}
+		tag = digestPart
+	}
+
+	// Extract tag if present
+	var namePart string
+	if tag == "" {
+		lastColon := strings.LastIndex(trimmed, ":")
+		lastSlash := strings.LastIndex(trimmed, "/")
+		if lastColon != -1 && lastColon > lastSlash {
+			tag = trimmed[lastColon+1:]
+			namePart = trimmed[:lastColon]
+			if tag == "" || strings.Contains(tag, "/") {
+				return "", "", "", fmt.Errorf("invalid tag in image reference: %q", ref)
+			}
+		} else {
+			tag = "latest"
+			namePart = trimmed
+		}
+	} else {
+		namePart = trimmed
+	}
+
+	if namePart == "" {
+		return "", "", "", fmt.Errorf("missing repository name in image reference: %q", ref)
+	}
+
+	// Determine registry vs repository
+	slashIdx := strings.Index(namePart, "/")
+	if slashIdx != -1 {
+		firstSegment := namePart[:slashIdx]
+		if strings.Contains(firstSegment, ".") || strings.Contains(firstSegment, ":") || firstSegment == "localhost" {
+			registry = firstSegment
+			repository = namePart[slashIdx+1:]
+		} else {
+			registry = "registry-1.docker.io"
+			repository = namePart
+		}
+	} else {
+		registry = "registry-1.docker.io"
+		repository = "library/" + namePart
+	}
+
+	// Normalize docker.io aliases
+	if registry == "docker.io" || registry == "index.docker.io" {
+		registry = "registry-1.docker.io"
+	}
+	if registry == "registry-1.docker.io" && !strings.Contains(repository, "/") {
+		repository = "library/" + repository
+	}
+
+	if repository == "" {
+		return "", "", "", fmt.Errorf("empty repository path in image reference: %q", ref)
+	}
+
+	return registry, repository, tag, nil
+}
+
+// ParseWwwAuthenticate parses a Registry v2 Www-Authenticate challenge header
+// (e.g. Bearer realm="https://...",service="...",scope="...").
+func ParseWwwAuthenticate(header string) (realm, service, scope string, err error) {
+	trimmed := strings.TrimSpace(header)
+	if trimmed == "" {
+		return "", "", "", fmt.Errorf("empty Www-Authenticate header")
+	}
+
+	lower := strings.ToLower(trimmed)
+	if !strings.HasPrefix(lower, "bearer ") {
+		return "", "", "", fmt.Errorf("unsupported auth scheme in challenge header: %q", header)
+	}
+
+	paramsPart := strings.TrimSpace(trimmed[7:])
+	params := make(map[string]string)
+
+	for len(paramsPart) > 0 {
+		eqIdx := strings.Index(paramsPart, "=")
+		if eqIdx == -1 {
+			break
+		}
+		key := strings.ToLower(strings.TrimSpace(paramsPart[:eqIdx]))
+		rem := strings.TrimSpace(paramsPart[eqIdx+1:])
+
+		var val string
+		if strings.HasPrefix(rem, "\"") {
+			endQuote := strings.Index(rem[1:], "\"")
+			if endQuote == -1 {
+				val = strings.Trim(rem, "\"")
+				paramsPart = ""
+			} else {
+				val = rem[1 : endQuote+1]
+				remAfter := rem[endQuote+2:]
+				if commaIdx := strings.Index(remAfter, ","); commaIdx != -1 {
+					paramsPart = strings.TrimSpace(remAfter[commaIdx+1:])
+				} else {
+					paramsPart = ""
+				}
+			}
+		} else {
+			if commaIdx := strings.Index(rem, ","); commaIdx != -1 {
+				val = strings.TrimSpace(rem[:commaIdx])
+				paramsPart = strings.TrimSpace(rem[commaIdx+1:])
+			} else {
+				val = strings.TrimSpace(rem)
+				paramsPart = ""
+			}
+		}
+
+		if key != "" {
+			params[key] = val
+		}
+	}
+
+	realm = params["realm"]
+	if realm == "" {
+		return "", "", "", fmt.Errorf("missing realm in Www-Authenticate header: %q", header)
+	}
+	service = params["service"]
+	scope = params["scope"]
+
+	return realm, service, scope, nil
+}
+
+// ContainsDigest checks whether the specified target digest matches any entry in the image's RepoDigests.
+func ContainsDigest(repoDigests []string, targetDigest string) bool {
+	target := strings.TrimSpace(targetDigest)
+	if target == "" {
+		return false
+	}
+	for _, entry := range repoDigests {
+		e := strings.TrimSpace(entry)
+		if e == target {
+			return true
+		}
+		if strings.HasSuffix(e, "@"+target) {
+			return true
+		}
+		parts := strings.Split(e, "@")
+		if len(parts) == 2 && parts[1] == target {
+			return true
+		}
+	}
+	return false
+}
+
+// RollbackTagForService constructs the deterministic snapshot rollback tag for a service.
+func RollbackTagForService(service string) string {
+	trimmed := strings.TrimSpace(service)
+	trimmed = strings.TrimPrefix(trimmed, "aerial-")
+	return fmt.Sprintf("aerial-%s:rollback-target", trimmed)
+}
+
 

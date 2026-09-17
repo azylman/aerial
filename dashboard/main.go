@@ -1674,6 +1674,7 @@ type DashboardConfig struct {
 	GHToken    string
 	GitCommit  string
 	GitSyncURL string
+	HangarURL  string
 	ConfigPath string
 	APIBaseURL string
 }
@@ -1704,9 +1705,12 @@ func NewDashboardConfigFromLookup(lookup func(string) string) DashboardConfig {
 		port = "8080"
 	}
 
-	gitSyncURL := strings.TrimSpace(lookup("GITSYNC_URL"))
-	if gitSyncURL == "" {
-		gitSyncURL = "http://gitsync:8080"
+	hangarURL := strings.TrimSpace(lookup("HANGAR_URL"))
+	if hangarURL == "" {
+		hangarURL = strings.TrimSpace(lookup("GITSYNC_URL"))
+	}
+	if hangarURL == "" {
+		hangarURL = "http://hangar:8080"
 	}
 
 	configPath := strings.TrimSpace(lookup("AERIAL_CONFIG_PATH"))
@@ -1724,7 +1728,8 @@ func NewDashboardConfigFromLookup(lookup func(string) string) DashboardConfig {
 		BrainURL:   brainURL,
 		GHRepo:     ghRepo,
 		GHToken:    ghToken,
-		GitSyncURL: gitSyncURL,
+		GitSyncURL: hangarURL,
+		HangarURL:  hangarURL,
 		ConfigPath: configPath,
 		GitCommit:  gitCommit,
 	}

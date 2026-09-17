@@ -26,7 +26,7 @@ Aerial runs as a multi-container Docker stack supervised by Watchtower and Autoh
   - Production Database: Aerial runs exclusively on containerized PostgreSQL 16 in production. SQLite is strictly prohibited in production.
   - Centralized store for Discord messages, session tracking, atomic CAS task queues, recurring and one-shot schedules, vector embeddings, and Grafana dashboard persistence.
 
-- **Infrastructure, GitOps & Synchronization (`aerial-gitsync`)**:
+- **Infrastructure, GitOps & Synchronization (`aerial-hangar`)**:
   - Dedicated sidecar container holding read-write (`:rw`) volume mounts on `/share/aerial-config` and `/share/aerial`.
   - Performs singleflight periodic and webhook-triggered (`POST /sync`) Git synchronization with credential scrubbing and POSIX base64 tokens.
   - Automated Declarative GitOps Docker Compose Reconciler: pre-flight validates and executes `docker compose up -d` upon git sync, webhook trigger (`POST /sync`), or dedicated on-demand API trigger (`POST /reconcile`), keeping container topologies declaratively aligned with automated orphan cleanup.

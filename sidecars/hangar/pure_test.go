@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -127,13 +128,13 @@ func TestParseComposeServices_TableDriven(t *testing.T) {
 		expected []string
 	}{
 		{
-			name:     "standard services with gitsync excluded",
-			input:    "brain\ngitsync\ndashboard\nprometheus\n",
+			name:     "standard services with gitsync and hangar excluded",
+			input:    "brain\ngitsync\nhangar\nHANGAR\ndashboard\nprometheus\n",
 			expected: []string{"brain", "dashboard", "prometheus"},
 		},
 		{
-			name:     "case variants of gitsync",
-			input:    "GITSYNC\nservice1\nGitSync\nservice2\ngitsync\n",
+			name:     "case variants of gitsync and hangar",
+			input:    "GITSYNC\nservice1\nGitSync\nservice2\ngitsync\nHangar\n",
 			expected: []string{"service1", "service2"},
 		},
 		{
@@ -821,10 +822,354 @@ func TestResolveDockerConfigPath_TableDriven(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := ResolveDockerConfigPath(tt.lookup)
-			if got != tt.expected {
-				t.Errorf("ResolveDockerConfigPath() = %q, want %q", got, tt.expected)
+			if filepath.ToSlash(got) != tt.expected {
+				t.Errorf("ResolveDockerConfigPath() = %q, want %q", filepath.ToSlash(got), tt.expected)
 			}
 		})
 	}
 }
+
+func TestParseImageReference_TableDriven(t *testing.T) {
+	tests := []struct {
+		name       string
+		input      string
+		wantReg    string
+		wantRepo   string
+		wantTag    string
+		wantErr    bool
+	}{
+		{
+			name:     "official single segment",
+			input:    "nginx",
+			wantReg:  "registry-1.docker.io",
+			wantRepo: "library/nginx",
+			wantTag:  "latest",
+		},
+		{
+			name:     "official single segment with tag",
+			input:    "redis:alpine",
+			wantReg:  "registry-1.docker.io",
+			wantRepo: "library/redis",
+			wantTag:  "alpine",
+		},
+		{
+			name:     "namespaced docker hub",
+			input:    "pgvector/pgvector:pg16",
+			wantReg:  "registry-1.docker.io",
+			wantRepo: "pgvector/pgvector",
+			wantTag:  "pg16",
+		},
+		{
+			name:     "explicit docker.io domain",
+			input:    "docker.io/library/ubuntu:latest",
+			wantReg:  "registry-1.docker.io",
+			wantRepo: "library/ubuntu",
+			wantTag:  "latest",
+		},
+		{
+			name:     "explicit index.docker.io domain",
+			input:    "index.docker.io/prom/node-exporter:v1.8.2",
+			wantReg:  "registry-1.docker.io",
+			wantRepo: "prom/node-exporter",
+			wantTag:  "v1.8.2",
+		},
+		{
+			name:     "ghcr private monorepo reference",
+			input:    "ghcr.io/azylman/aerial-brain:latest",
+			wantReg:  "ghcr.io",
+			wantRepo: "azylman/aerial-brain",
+			wantTag:  "latest",
+		},
+		{
+			name:     "ghcr public reference without tag defaults to latest",
+			input:    "ghcr.io/gethomepage/homepage",
+			wantReg:  "ghcr.io",
+			wantRepo: "gethomepage/homepage",
+			wantTag:  "latest",
+		},
+		{
+			name:     "gcr third-party reference",
+			input:    "gcr.io/cadvisor/cadvisor:v0.49.1",
+			wantReg:  "gcr.io",
+			wantRepo: "cadvisor/cadvisor",
+			wantTag:  "v0.49.1",
+		},
+		{
+			name:     "localhost registry with port",
+			input:    "localhost:5000/my-app:1.0",
+			wantReg:  "localhost:5000",
+			wantRepo: "my-app",
+			wantTag:  "1.0",
+		},
+		{
+			name:     "custom domain with port",
+			input:    "registry.internal:8443/deep/path/svc:dev",
+			wantReg:  "registry.internal:8443",
+			wantRepo: "deep/path/svc",
+			wantTag:  "dev",
+		},
+		{
+			name:     "pinned sha256 digest reference",
+			input:    "ghcr.io/azylman/brain@sha256:1f9fd513925ef06272dea861c4c8cb7c10a9eb6b5a4e7ad0e4ca00b49fc27866",
+			wantReg:  "ghcr.io",
+			wantRepo: "azylman/brain",
+			wantTag:  "sha256:1f9fd513925ef06272dea861c4c8cb7c10a9eb6b5a4e7ad0e4ca00b49fc27866",
+		},
+		{
+			name:    "empty string errors",
+			input:   "",
+			wantErr: true,
+		},
+		{
+			name:    "whitespace only errors",
+			input:   "   ",
+			wantErr: true,
+		},
+		{
+			name:    "spaces in reference errors",
+			input:   "ghcr.io/ azylman/brain:latest",
+			wantErr: true,
+		},
+		{
+			name:    "invalid digest prefix errors",
+			input:   "redis@md5:12345",
+			wantErr: true,
+		},
+		{
+			name:    "trailing colon without tag errors",
+			input:   "redis:",
+			wantErr: true,
+		},
+		{
+			name:    "missing repository name errors",
+			input:   ":latest",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reg, repo, tag, err := ParseImageReference(tt.input)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for %q, got nil", tt.input)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error for %q: %v", tt.input, err)
+			}
+			if reg != tt.wantReg {
+				t.Errorf("registry = %q, want %q", reg, tt.wantReg)
+			}
+			if repo != tt.wantRepo {
+				t.Errorf("repository = %q, want %q", repo, tt.wantRepo)
+			}
+			if tag != tt.wantTag {
+				t.Errorf("tag = %q, want %q", tag, tt.wantTag)
+			}
+		})
+	}
+}
+
+func TestParseWwwAuthenticate_TableDriven(t *testing.T) {
+	tests := []struct {
+		name        string
+		header      string
+		wantRealm   string
+		wantService string
+		wantScope   string
+		wantErr     bool
+	}{
+		{
+			name:        "docker hub standard challenge with quotes",
+			header:      `Bearer realm="https://auth.docker.io/token",service="registry.docker.io",scope="repository:pgvector/pgvector:pull"`,
+			wantRealm:   "https://auth.docker.io/token",
+			wantService: "registry.docker.io",
+			wantScope:   "repository:pgvector/pgvector:pull",
+		},
+		{
+			name:        "ghcr standard challenge without scope",
+			header:      `Bearer realm="https://ghcr.io/token",service="ghcr.io"`,
+			wantRealm:   "https://ghcr.io/token",
+			wantService: "ghcr.io",
+			wantScope:   "",
+		},
+		{
+			name:        "case-insensitive bearer prefix and whitespace",
+			header:      `bearer  realm="https://auth.example.com/token" , service="example.com" `,
+			wantRealm:   "https://auth.example.com/token",
+			wantService: "example.com",
+			wantScope:   "",
+		},
+		{
+			name:        "unquoted values",
+			header:      `Bearer realm=https://auth.example.com/token,service=my.registry`,
+			wantRealm:   "https://auth.example.com/token",
+			wantService: "my.registry",
+			wantScope:   "",
+		},
+		{
+			name:        "unquoted single realm",
+			header:      `Bearer realm=https://auth.example.com/token`,
+			wantRealm:   "https://auth.example.com/token",
+			wantService: "",
+			wantScope:   "",
+		},
+		{
+			name:        "unclosed quote realm",
+			header:      `Bearer realm="https://auth.example.com/token`,
+			wantRealm:   "https://auth.example.com/token",
+			wantService: "",
+			wantScope:   "",
+		},
+		{
+			name:    "empty header",
+			header:  "",
+			wantErr: true,
+		},
+		{
+			name:    "non-bearer scheme",
+			header:  `Basic realm="WallyWorld"`,
+			wantErr: true,
+		},
+		{
+			name:    "missing realm",
+			header:  `Bearer service="registry.docker.io"`,
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			realm, service, scope, err := ParseWwwAuthenticate(tt.header)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for %q, got nil", tt.header)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error for %q: %v", tt.header, err)
+			}
+			if realm != tt.wantRealm {
+				t.Errorf("realm = %q, want %q", realm, tt.wantRealm)
+			}
+			if service != tt.wantService {
+				t.Errorf("service = %q, want %q", service, tt.wantService)
+			}
+			if scope != tt.wantScope {
+				t.Errorf("scope = %q, want %q", scope, tt.wantScope)
+			}
+		})
+	}
+}
+
+func TestContainsDigest_TableDriven(t *testing.T) {
+	tests := []struct {
+		name        string
+		repoDigests []string
+		target      string
+		want        bool
+	}{
+		{
+			name: "exact suffix match with repository",
+			repoDigests: []string{
+				"ghcr.io/azylman/aerial-brain@sha256:9302a45515e41263e8051f6be0a4b5295753259c3368134f59220afb23ae6aff",
+			},
+			target: "sha256:9302a45515e41263e8051f6be0a4b5295753259c3368134f59220afb23ae6aff",
+			want:   true,
+		},
+		{
+			name: "exact match without repo prefix",
+			repoDigests: []string{
+				"sha256:9302a45515e41263e8051f6be0a4b5295753259c3368134f59220afb23ae6aff",
+			},
+			target: "sha256:9302a45515e41263e8051f6be0a4b5295753259c3368134f59220afb23ae6aff",
+			want:   true,
+		},
+		{
+			name: "registry with port in repo digest",
+			repoDigests: []string{
+				"localhost:5000/aerial-brain@sha256:9302a45515e41263e8051f6be0a4b5295753259c3368134f59220afb23ae6aff",
+			},
+			target: "sha256:9302a45515e41263e8051f6be0a4b5295753259c3368134f59220afb23ae6aff",
+			want:   true,
+		},
+		{
+			name: "multiple digests with match in middle",
+			repoDigests: []string{
+				"docker.io/library/redis@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+				"redis@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+			},
+			target: "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+			want:   true,
+		},
+		{
+			name: "digest mismatch",
+			repoDigests: []string{
+				"ghcr.io/azylman/aerial-brain@sha256:9302a45515e41263e8051f6be0a4b5295753259c3368134f59220afb23ae6aff",
+			},
+			target: "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+			want:   false,
+		},
+		{
+			name:        "empty repo digests",
+			repoDigests: []string{},
+			target:      "sha256:9302a45515e41263e8051f6be0a4b5295753259c3368134f59220afb23ae6aff",
+			want:        false,
+		},
+		{
+			name: "empty target digest",
+			repoDigests: []string{
+				"ghcr.io/azylman/aerial-brain@sha256:9302a45515e41263e8051f6be0a4b5295753259c3368134f59220afb23ae6aff",
+			},
+			target: "",
+			want:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ContainsDigest(tt.repoDigests, tt.target)
+			if got != tt.want {
+				t.Errorf("ContainsDigest() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRollbackTagForService_TableDriven(t *testing.T) {
+	tests := []struct {
+		name    string
+		service string
+		want    string
+	}{
+		{
+			name:    "unprefixed service",
+			service: "brain",
+			want:    "aerial-brain:rollback-target",
+		},
+		{
+			name:    "already prefixed service",
+			service: "aerial-brain",
+			want:    "aerial-brain:rollback-target",
+		},
+		{
+			name:    "whitespace handling",
+			service: "  dashboard  ",
+			want:    "aerial-dashboard:rollback-target",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := RollbackTagForService(tt.service)
+			if got != tt.want {
+				t.Errorf("RollbackTagForService(%q) = %q, want %q", tt.service, got, tt.want)
+			}
+		})
+	}
+}
+
 

@@ -16,7 +16,7 @@ Usage: $0 [options]
 Options:
   --check               Exit with status 1 if any coverage threshold is violated
   --summary             Output Markdown summary table (also written to \$GITHUB_STEP_SUMMARY if set)
-  --service <name>      Target a specific microservice (brain, scheduler-mcp, discord-mcp, dashboard, sidecars/gitsync)
+  --service <name>      Target a specific microservice (brain, scheduler-mcp, discord-mcp, dashboard, sidecars/hangar)
   --profile-dir <dir>   Store intermediate coverage profiles in the specified directory
   -h, --help            Show this help message
 EOF
@@ -92,7 +92,7 @@ echo "${CYAN}⚡ [Aerial Coverage] Starting monorepo coverage measurement...${NC
 if [ -n "$TARGET_SERVICE" ]; then
     ALL_GO_SERVICES="$TARGET_SERVICE"
 else
-    ALL_GO_SERVICES="brain scheduler-mcp discord-mcp dashboard sidecars/gitsync"
+    ALL_GO_SERVICES="brain scheduler-mcp discord-mcp dashboard sidecars/hangar"
 fi
 
 # Target Minimum Monorepo Coverage Threshold (Uniform 95.0% floor)

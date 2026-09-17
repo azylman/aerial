@@ -1892,6 +1892,60 @@ func TestRunBrainApp_FullLifecycle(t *testing.T) {
 	}
 }
 
+func TestHandlers_NilStore(t *testing.T) {
+	// 1. handleFacts with nil store
+	reqFacts := httptest.NewRequest(http.MethodGet, "/facts", nil)
+	recFacts := httptest.NewRecorder()
+	handleFacts(nil)(recFacts, reqFacts)
+	if recFacts.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 for handleFacts(nil), got %d", recFacts.Code)
+	}
+
+	// 2. handleSchedules with nil store
+	reqSched := httptest.NewRequest(http.MethodGet, "/schedules", nil)
+	recSched := httptest.NewRecorder()
+	handleSchedules(nil)(recSched, reqSched)
+	if recSched.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 for handleSchedules(nil), got %d", recSched.Code)
+	}
+
+	// 3. handleScheduleRuns with nil store
+	reqRuns := httptest.NewRequest(http.MethodGet, "/schedule-runs", nil)
+	recRuns := httptest.NewRecorder()
+	handleScheduleRuns(nil)(recRuns, reqRuns)
+	if recRuns.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 for handleScheduleRuns(nil), got %d", recRuns.Code)
+	}
+
+	// 4. handleTasks with nil store
+	reqTasks := httptest.NewRequest(http.MethodGet, "/tasks", nil)
+	recTasks := httptest.NewRecorder()
+	handleTasks(nil)(recTasks, reqTasks)
+	if recTasks.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 for handleTasks(nil), got %d", recTasks.Code)
+	}
+}
+
+func TestDefaultPaths(t *testing.T) {
+	// 1. DefaultGeminiHomeDir with explicit HOME
+	t.Setenv("HOME", "/custom/gemini/home")
+	if dir := DefaultGeminiHomeDir(); dir != "/custom/gemini/home" {
+		t.Errorf("expected /custom/gemini/home, got %s", dir)
+	}
+
+	// 2. DefaultGeminiHomeDir with empty HOME in testing
+	t.Setenv("HOME", "")
+	if dir := DefaultGeminiHomeDir(); dir == "" {
+		t.Errorf("expected non-empty fallback directory, got empty")
+	}
+
+	// 3. DefaultDataDir in testing
+	if dir := DefaultDataDir(); dir == "" {
+		t.Errorf("expected non-empty data dir, got empty")
+	}
+}
+
+
 
 
 

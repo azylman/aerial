@@ -2009,13 +2009,13 @@ func TestExecuteRollback_Extended(t *testing.T) {
 	})
 
 	// 1. Empty pending
-	d.executeRollback(context.Background(), nil, "validation", errors.New("test err"))
+	_ = d.executeRollback(context.Background(), nil, "validation", errors.New("test err"), nil, nil, nil, nil)
 
 	// 2. ch with empty previousHead or repoPath
-	d.executeRollback(context.Background(), []ComposeChangeEvent{
+	_ = d.executeRollback(context.Background(), []ComposeChangeEvent{
 		{RepoPath: "", PreviousHead: "abc"},
 		{RepoPath: "/some/path", PreviousHead: ""},
-	}, "validation", errors.New("test err"))
+	}, "validation", errors.New("test err"), nil, nil, nil, nil)
 
 	// 3. Reset error branch and target discovery error
 	badYamlDir := t.TempDir()
@@ -2023,9 +2023,9 @@ func TestExecuteRollback_Extended(t *testing.T) {
 	// Write invalid docker-compose.yml so GetReconcileTargets fails
 	_ = os.WriteFile(filepath.Join(badYamlDir, "docker-compose.yml"), []byte("services: [invalid yaml"), 0644)
 
-	d.executeRollback(context.Background(), []ComposeChangeEvent{
+	_ = d.executeRollback(context.Background(), []ComposeChangeEvent{
 		{RepoPath: filepath.Join(badYamlDir, "nonexistent-repo"), PreviousHead: "deadbeef", CurrentHead: "cafebabe"},
-	}, "compose_up", errors.New("mock up failure"))
+	}, "compose_up", errors.New("mock up failure"), nil, nil, nil, nil)
 
 	// 4. Valid targets but composeExecutor returns error on up -d
 	validDir := t.TempDir()
@@ -2034,9 +2034,9 @@ func TestExecuteRollback_Extended(t *testing.T) {
 	d.composeExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
 		return nil, []byte("compose up error"), errors.New("compose up failed")
 	}
-	d.executeRollback(context.Background(), []ComposeChangeEvent{
+	_ = d.executeRollback(context.Background(), []ComposeChangeEvent{
 		{RepoPath: validDir, PreviousHead: "HEAD", CurrentHead: "HEAD"},
-	}, "compose_up", errors.New("mock fail"))
+	}, "compose_up", errors.New("mock fail"), nil, nil, nil, nil)
 }
 
 func TestSyncRepo_ResetRecovery(t *testing.T) {
@@ -2322,17 +2322,17 @@ func TestExecuteRollback_EmptyTargetsAndErrUp(t *testing.T) {
 	})
 
 	// Case 1: zero restoredTargets discovered (since targets filter for aerial services)
-	d.executeRollback(context.Background(), []ComposeChangeEvent{
+	_ = d.executeRollback(context.Background(), []ComposeChangeEvent{
 		{RepoPath: tempDir, PreviousHead: "HEAD"},
-	}, "validation", errors.New("target discovery empty"))
+	}, "validation", errors.New("target discovery empty"), nil, nil, nil, nil)
 
 	// Case 2: compose file with aerial service so targets > 0, but composeExecutor returns error
 	aerialDir := t.TempDir()
 	_ = os.WriteFile(filepath.Join(aerialDir, "docker-compose.yml"), []byte("version: '3.8'\nservices:\n  brain:\n    image: alpine\n"), 0644)
 	d.composeDir = aerialDir
-	d.executeRollback(context.Background(), []ComposeChangeEvent{
+	_ = d.executeRollback(context.Background(), []ComposeChangeEvent{
 		{RepoPath: aerialDir, PreviousHead: "HEAD"},
-	}, "compose_up", errors.New("up error test"))
+	}, "compose_up", errors.New("up error test"), nil, nil, nil, nil)
 
 	if !errUpCalled {
 		t.Errorf("expected mockExecutor to be called for up error test")
@@ -2950,9 +2950,9 @@ func TestExecuteRollback_ErrorBranches(t *testing.T) {
 		},
 	})
 
-	d.executeRollback(context.Background(), []ComposeChangeEvent{
+	_ = d.executeRollback(context.Background(), []ComposeChangeEvent{
 		{RepoPath: tempDir, PreviousHead: "head1", CurrentHead: "head2"},
-	}, "test_stage", errors.New("cause error"))
+	}, "test_stage", errors.New("cause error"), nil, nil, nil, nil)
 }
 
 func TestSyncRepo_ResetFailureAndPostMergeRevParseError(t *testing.T) {
@@ -3155,7 +3155,7 @@ func TestEnsureDockerAuth_TableDriven(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if writtenPath != "/mock/docker/config.json" {
+		if filepath.ToSlash(writtenPath) != "/mock/docker/config.json" {
 			t.Errorf("expected /mock/docker/config.json, got %s", writtenPath)
 		}
 		if writtenMode != 0600 {
@@ -3250,7 +3250,7 @@ func (m *mockErrResponseWriter) Write(p []byte) (int, error) {
 
 func (m *mockErrResponseWriter) WriteHeader(statusCode int) {}
 
-func TestGitsync_Helpers(t *testing.T) {
+func TestHangar_Helpers(t *testing.T) {
 	// 1. closeWarn
 	closeWarn(nil, "nil closer")
 	closeWarn(io.NopCloser(strings.NewReader("")), "valid closer")
@@ -3390,4 +3390,1386 @@ func TestResolveChannelID_ClientFail(t *testing.T) {
 	}
 }
 
+func TestImageQuarantine_Lifecycle(t *testing.T) {
+	d := NewDaemon(DaemonConfig{})
+
+	service := "brain"
+	digest := "sha256:1111222233334444555566667777888899990000111122223333444455556666"
+
+	// 1. Initially not quarantined
+	if d.isImageQuarantined(service, digest) {
+		t.Fatalf("expected digest %s not to be quarantined initially", digest)
+	}
+
+	// 2. Quarantine image
+	d.quarantineImage(service, digest, "crash loop on start")
+	if !d.isImageQuarantined(service, digest) {
+		t.Fatalf("expected digest %s to be quarantined", digest)
+	}
+
+	// Different digest for same service is not quarantined
+	otherDigest := "sha256:ffff222233334444555566667777888899990000111122223333444455556666"
+	if d.isImageQuarantined(service, otherDigest) {
+		t.Fatalf("expected different digest %s not to be quarantined", otherDigest)
+	}
+
+	// 3. TTL expiry test
+	key := fmt.Sprintf("%s@%s", service, digest)
+	d.imageQuarantineMu.Lock()
+	rec := d.imageQuarantine[key]
+	rec.QuarantinedAt = time.Now().Add(-61 * time.Minute)
+	d.imageQuarantine[key] = rec
+	d.imageQuarantineMu.Unlock()
+
+	if d.isImageQuarantined(service, digest) {
+		t.Fatalf("expected expired quarantine record to return false")
+	}
+
+	// 4. Clear quarantine
+	d.quarantineImage(service, digest, "broken again")
+	if !d.isImageQuarantined(service, digest) {
+		t.Fatalf("expected digest to be quarantined after re-adding")
+	}
+	d.clearImageQuarantine(service)
+	if d.isImageQuarantined(service, digest) {
+		t.Fatalf("expected quarantine to be cleared for service %s", service)
+	}
+
+	// 5. Nil receiver or nil map safety
+	nilD := &SyncDaemon{}
+	if nilD.isImageQuarantined(service, digest) {
+		t.Errorf("expected isImageQuarantined to return false on nil map")
+	}
+	nilD.clearImageQuarantine(service)
+}
+
+func TestGetRegistryClient_AndReconcileAccessors(t *testing.T) {
+	// Default client
+	dDefault := &SyncDaemon{}
+	c := dDefault.getRegistryClient()
+	if c == nil || c.Timeout != 10*time.Second {
+		t.Errorf("expected default registry client with 10s timeout, got %v", c)
+	}
+
+	// Custom client
+	custom := &http.Client{Timeout: 42 * time.Second}
+	dCustom := NewDaemon(DaemonConfig{RegistryClient: custom})
+	if dCustom.getRegistryClient() != custom {
+		t.Errorf("expected custom registry client to be returned")
+	}
+
+	// LastReconcile accessors
+	now := time.Now().Truncate(time.Second)
+	dCustom.SetLastReconcile(now)
+	if !dCustom.GetLastReconcile().Equal(now) {
+		t.Errorf("expected LastReconcile to equal %v, got %v", now, dCustom.GetLastReconcile())
+	}
+}
+
+func TestGetRemoteImageDigest_TableDriven(t *testing.T) {
+	validDigest := "sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
+
+	t.Run("invalid image reference returns error", func(t *testing.T) {
+		d := NewDaemon(DaemonConfig{})
+		_, err := d.GetRemoteImageDigest(context.Background(), "invalid reference with spaces")
+		if err == nil {
+			t.Fatalf("expected error for invalid reference, got nil")
+		}
+	})
+
+	t.Run("direct 200 with Docker-Content-Digest", func(t *testing.T) {
+		mockClient := &http.Client{
+			Transport: &roundTripperFunc{
+				fn: func(req *http.Request) (*http.Response, error) {
+					if req.Method != http.MethodHead {
+						t.Errorf("expected HEAD request, got %s", req.Method)
+					}
+					header := make(http.Header)
+					header.Set("Docker-Content-Digest", validDigest)
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     header,
+						Body:       ioNopCloser(strings.NewReader("")),
+					}, nil
+				},
+			},
+		}
+
+		d := NewDaemon(DaemonConfig{RegistryClient: mockClient})
+		digest, err := d.GetRemoteImageDigest(context.Background(), "ghcr.io/azylman/aerial-brain:latest")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if digest != validDigest {
+			t.Errorf("got %q, want %q", digest, validDigest)
+		}
+	})
+
+	t.Run("direct 200 with ETag fallback", func(t *testing.T) {
+		mockClient := &http.Client{
+			Transport: &roundTripperFunc{
+				fn: func(req *http.Request) (*http.Response, error) {
+					header := make(http.Header)
+					header.Set("ETag", `W/"`+validDigest+`"`)
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     header,
+						Body:       ioNopCloser(strings.NewReader("")),
+					}, nil
+				},
+			},
+		}
+
+		d := NewDaemon(DaemonConfig{RegistryClient: mockClient})
+		digest, err := d.GetRemoteImageDigest(context.Background(), "pgvector/pgvector:pg16")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if digest != validDigest {
+			t.Errorf("got %q, want %q", digest, validDigest)
+		}
+	})
+
+	t.Run("401 challenge exchange with GHCR and PAT", func(t *testing.T) {
+		var tokenRequested bool
+		var authHeadDone bool
+
+		mockClient := &http.Client{
+			Transport: &roundTripperFunc{
+				fn: func(req *http.Request) (*http.Response, error) {
+					if req.URL.Host == "ghcr.io" && req.URL.Path == "/v2/azylman/aerial-brain/manifests/latest" {
+						if req.Header.Get("Authorization") == "" {
+							header := make(http.Header)
+							header.Set("Www-Authenticate", `Bearer realm="https://ghcr.io/token",service="ghcr.io",scope="repository:azylman/aerial-brain:pull"`)
+							return &http.Response{
+								StatusCode: http.StatusUnauthorized,
+								Header:     header,
+								Body:       ioNopCloser(strings.NewReader("")),
+							}, nil
+						}
+						if req.Header.Get("Authorization") != "Bearer test-ghcr-token" {
+							t.Errorf("unexpected auth header: %s", req.Header.Get("Authorization"))
+						}
+						authHeadDone = true
+						header := make(http.Header)
+						header.Set("Docker-Content-Digest", validDigest)
+						return &http.Response{
+							StatusCode: http.StatusOK,
+							Header:     header,
+							Body:       ioNopCloser(strings.NewReader("")),
+						}, nil
+					}
+
+					if req.URL.Host == "ghcr.io" && req.URL.Path == "/token" {
+						tokenRequested = true
+						user, pass, ok := req.BasicAuth()
+						if !ok || pass != "secret-pat" {
+							t.Errorf("expected basic auth with secret-pat, got user=%s ok=%v", user, ok)
+						}
+						return &http.Response{
+							StatusCode: http.StatusOK,
+							Header:     make(http.Header),
+							Body:       ioNopCloser(strings.NewReader(`{"token":"test-ghcr-token"}`)),
+						}, nil
+					}
+
+					t.Fatalf("unexpected request: %s %s", req.Method, req.URL.String())
+					return nil, nil
+				},
+			},
+		}
+
+		d := NewDaemon(DaemonConfig{
+			PAT:            "secret-pat",
+			RegistryClient: mockClient,
+		})
+
+		digest, err := d.GetRemoteImageDigest(context.Background(), "ghcr.io/azylman/aerial-brain:latest")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !tokenRequested || !authHeadDone {
+			t.Errorf("expected token request and auth head to complete, got token=%v authHead=%v", tokenRequested, authHeadDone)
+		}
+		if digest != validDigest {
+			t.Errorf("got %q, want %q", digest, validDigest)
+		}
+	})
+
+	t.Run("401 challenge exchange with Docker Hub synthesized scope and access_token", func(t *testing.T) {
+		mockClient := &http.Client{
+			Transport: &roundTripperFunc{
+				fn: func(req *http.Request) (*http.Response, error) {
+					if req.URL.Host == "registry-1.docker.io" {
+						if req.Header.Get("Authorization") == "" {
+							header := make(http.Header)
+							header.Set("Www-Authenticate", `Bearer realm="https://auth.docker.io/token",service="registry.docker.io"`)
+							return &http.Response{
+								StatusCode: http.StatusUnauthorized,
+								Header:     header,
+								Body:       ioNopCloser(strings.NewReader("")),
+							}, nil
+						}
+						if req.Header.Get("Authorization") != "Bearer hub-token" {
+							t.Errorf("unexpected authorization: %s", req.Header.Get("Authorization"))
+						}
+						header := make(http.Header)
+						header.Set("Docker-Content-Digest", validDigest)
+						return &http.Response{
+							StatusCode: http.StatusOK,
+							Header:     header,
+							Body:       ioNopCloser(strings.NewReader("")),
+						}, nil
+					}
+
+					if req.URL.Host == "auth.docker.io" {
+						scope := req.URL.Query().Get("scope")
+						if scope != "repository:library/postgres:pull" {
+							t.Errorf("unexpected synthesized scope: %s", scope)
+						}
+						return &http.Response{
+							StatusCode: http.StatusOK,
+							Header:     make(http.Header),
+							Body:       ioNopCloser(strings.NewReader(`{"access_token":"hub-token"}`)),
+						}, nil
+					}
+
+					return nil, fmt.Errorf("unexpected host: %s", req.URL.Host)
+				},
+			},
+		}
+
+		d := NewDaemon(DaemonConfig{RegistryClient: mockClient})
+		digest, err := d.GetRemoteImageDigest(context.Background(), "postgres:16")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if digest != validDigest {
+			t.Errorf("got %q, want %q", digest, validDigest)
+		}
+	})
+
+	// Error branches
+	t.Run("network failure on initial HEAD", func(t *testing.T) {
+		mockClient := &http.Client{
+			Transport: &roundTripperFunc{
+				fn: func(req *http.Request) (*http.Response, error) {
+					return nil, errors.New("simulated dial timeout")
+				},
+			},
+		}
+		d := NewDaemon(DaemonConfig{RegistryClient: mockClient})
+		_, err := d.GetRemoteImageDigest(context.Background(), "ghcr.io/azylman/aerial-brain:latest")
+		if err == nil {
+			t.Fatalf("expected dial timeout error")
+		}
+	})
+
+	t.Run("401 with malformed authenticate header", func(t *testing.T) {
+		mockClient := &http.Client{
+			Transport: &roundTripperFunc{
+				fn: func(req *http.Request) (*http.Response, error) {
+					header := make(http.Header)
+					header.Set("Www-Authenticate", `Basic realm="foo"`)
+					return &http.Response{
+						StatusCode: http.StatusUnauthorized,
+						Header:     header,
+						Body:       ioNopCloser(strings.NewReader("")),
+					}, nil
+				},
+			},
+		}
+		d := NewDaemon(DaemonConfig{RegistryClient: mockClient})
+		_, err := d.GetRemoteImageDigest(context.Background(), "ghcr.io/azylman/aerial-brain:latest")
+		if err == nil {
+			t.Fatalf("expected error on malformed challenge")
+		}
+	})
+
+	t.Run("401 with invalid token realm url", func(t *testing.T) {
+		mockClient := &http.Client{
+			Transport: &roundTripperFunc{
+				fn: func(req *http.Request) (*http.Response, error) {
+					header := make(http.Header)
+					header.Set("Www-Authenticate", `Bearer realm="http://[::1]:namedport",service="test"`)
+					return &http.Response{
+						StatusCode: http.StatusUnauthorized,
+						Header:     header,
+						Body:       ioNopCloser(strings.NewReader("")),
+					}, nil
+				},
+			},
+		}
+		d := NewDaemon(DaemonConfig{RegistryClient: mockClient})
+		_, err := d.GetRemoteImageDigest(context.Background(), "ghcr.io/azylman/aerial-brain:latest")
+		if err == nil {
+			t.Fatalf("expected error on invalid realm url")
+		}
+	})
+
+	t.Run("401 with token network error", func(t *testing.T) {
+		mockClient := &http.Client{
+			Transport: &roundTripperFunc{
+				fn: func(req *http.Request) (*http.Response, error) {
+					if req.Method == http.MethodHead {
+						header := make(http.Header)
+						header.Set("Www-Authenticate", `Bearer realm="https://auth.docker.io/token",service="registry.docker.io"`)
+						return &http.Response{
+							StatusCode: http.StatusUnauthorized,
+							Header:     header,
+							Body:       ioNopCloser(strings.NewReader("")),
+						}, nil
+					}
+					return nil, errors.New("token endpoint refused")
+				},
+			},
+		}
+		d := NewDaemon(DaemonConfig{RegistryClient: mockClient})
+		_, err := d.GetRemoteImageDigest(context.Background(), "postgres:16")
+		if err == nil {
+			t.Fatalf("expected error on token network error")
+		}
+	})
+
+	t.Run("401 with token HTTP 500 error", func(t *testing.T) {
+		mockClient := &http.Client{
+			Transport: &roundTripperFunc{
+				fn: func(req *http.Request) (*http.Response, error) {
+					if req.Method == http.MethodHead {
+						header := make(http.Header)
+						header.Set("Www-Authenticate", `Bearer realm="https://auth.docker.io/token",service="registry.docker.io"`)
+						return &http.Response{
+							StatusCode: http.StatusUnauthorized,
+							Header:     header,
+							Body:       ioNopCloser(strings.NewReader("")),
+						}, nil
+					}
+					return &http.Response{
+						StatusCode: http.StatusInternalServerError,
+						Header:     make(http.Header),
+						Body:       ioNopCloser(strings.NewReader("internal error")),
+					}, nil
+				},
+			},
+		}
+		d := NewDaemon(DaemonConfig{RegistryClient: mockClient})
+		_, err := d.GetRemoteImageDigest(context.Background(), "postgres:16")
+		if err == nil {
+			t.Fatalf("expected error on token HTTP 500")
+		}
+	})
+
+	t.Run("401 with invalid token JSON and empty token", func(t *testing.T) {
+		mockClient := &http.Client{
+			Transport: &roundTripperFunc{
+				fn: func(req *http.Request) (*http.Response, error) {
+					if req.Method == http.MethodHead {
+						header := make(http.Header)
+						header.Set("Www-Authenticate", `Bearer realm="https://auth.docker.io/token",service="registry.docker.io"`)
+						return &http.Response{
+							StatusCode: http.StatusUnauthorized,
+							Header:     header,
+							Body:       ioNopCloser(strings.NewReader("")),
+						}, nil
+					}
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     make(http.Header),
+						Body:       ioNopCloser(strings.NewReader("invalid-json")),
+					}, nil
+				},
+			},
+		}
+		d := NewDaemon(DaemonConfig{RegistryClient: mockClient})
+		if _, err := d.GetRemoteImageDigest(context.Background(), "postgres:16"); err == nil {
+			t.Fatalf("expected error on invalid token json")
+		}
+
+		mockClientEmpty := &http.Client{
+			Transport: &roundTripperFunc{
+				fn: func(req *http.Request) (*http.Response, error) {
+					if req.Method == http.MethodHead {
+						header := make(http.Header)
+						header.Set("Www-Authenticate", `Bearer realm="https://auth.docker.io/token",service="registry.docker.io"`)
+						return &http.Response{
+							StatusCode: http.StatusUnauthorized,
+							Header:     header,
+							Body:       ioNopCloser(strings.NewReader("")),
+						}, nil
+					}
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     make(http.Header),
+						Body:       ioNopCloser(strings.NewReader(`{"token":""}`)),
+					}, nil
+				},
+			},
+		}
+		dEmpty := NewDaemon(DaemonConfig{RegistryClient: mockClientEmpty})
+		if _, err := dEmpty.GetRemoteImageDigest(context.Background(), "postgres:16"); err == nil {
+			t.Fatalf("expected error on empty token payload")
+		}
+	})
+
+	t.Run("401 with authenticated HEAD network failure", func(t *testing.T) {
+		mockClient := &http.Client{
+			Transport: &roundTripperFunc{
+				fn: func(req *http.Request) (*http.Response, error) {
+					if req.Header.Get("Authorization") == "" {
+						if req.Method == http.MethodHead {
+							header := make(http.Header)
+							header.Set("Www-Authenticate", `Bearer realm="https://auth.docker.io/token",service="registry.docker.io"`)
+							return &http.Response{
+								StatusCode: http.StatusUnauthorized,
+								Header:     header,
+								Body:       ioNopCloser(strings.NewReader("")),
+							}, nil
+						}
+						return &http.Response{
+							StatusCode: http.StatusOK,
+							Header:     make(http.Header),
+							Body:       ioNopCloser(strings.NewReader(`{"token":"abc"}`)),
+						}, nil
+					}
+					return nil, errors.New("auth head failed")
+				},
+			},
+		}
+		d := NewDaemon(DaemonConfig{RegistryClient: mockClient})
+		if _, err := d.GetRemoteImageDigest(context.Background(), "postgres:16"); err == nil {
+			t.Fatalf("expected error on auth head failure")
+		}
+	})
+
+	t.Run("non-200 manifest status returns error", func(t *testing.T) {
+		mockClient := &http.Client{
+			Transport: &roundTripperFunc{
+				fn: func(req *http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: http.StatusNotFound,
+						Header:     make(http.Header),
+						Body:       ioNopCloser(strings.NewReader("")),
+					}, nil
+				},
+			},
+		}
+		d := NewDaemon(DaemonConfig{RegistryClient: mockClient})
+		_, err := d.GetRemoteImageDigest(context.Background(), "ghcr.io/azylman/aerial-brain:latest")
+		if err == nil {
+			t.Fatalf("expected 404 error, got nil")
+		}
+	})
+
+	t.Run("200 OK without valid digest or etag returns error", func(t *testing.T) {
+		mockClient := &http.Client{
+			Transport: &roundTripperFunc{
+				fn: func(req *http.Request) (*http.Response, error) {
+					header := make(http.Header)
+					header.Set("ETag", `"not-a-sha256"`)
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     header,
+						Body:       ioNopCloser(strings.NewReader("")),
+					}, nil
+				},
+			},
+		}
+		d := NewDaemon(DaemonConfig{RegistryClient: mockClient})
+		_, err := d.GetRemoteImageDigest(context.Background(), "ghcr.io/azylman/aerial-brain:latest")
+		if err == nil {
+			t.Fatalf("expected error on missing/invalid digest, got nil")
+		}
+	})
+}
+
+func TestGetServiceImages_TableDriven(t *testing.T) {
+	tempDir := t.TempDir()
+
+	t.Run("success parsing valid compose json", func(t *testing.T) {
+		mockJSON := `{
+			"services": {
+				"brain": {"image": "ghcr.io/azylman/aerial-brain:latest"},
+				"postgres": {"image": "pgvector/pgvector:pg16"},
+				"gitsync": {"image": "ghcr.io/azylman/aerial-gitsync:latest"},
+				"hangar": {"image": "ghcr.io/azylman/aerial-hangar:latest"},
+				"noimage": {"image": ""}
+			}
+		}`
+		d := NewDaemon(DaemonConfig{
+			ComposeDir: tempDir,
+			ComposeExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+				return []byte(mockJSON), nil, nil
+			},
+		})
+
+		images, err := d.GetServiceImages(context.Background(), tempDir)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(images) != 2 {
+			t.Fatalf("expected 2 services, got %d (%v)", len(images), images)
+		}
+		if images["brain"] != "ghcr.io/azylman/aerial-brain:latest" {
+			t.Errorf("expected brain image, got %s", images["brain"])
+		}
+		if images["postgres"] != "pgvector/pgvector:pg16" {
+			t.Errorf("expected postgres image, got %s", images["postgres"])
+		}
+		if _, ok := images["gitsync"]; ok {
+			t.Errorf("expected gitsync to be filtered out")
+		}
+		if _, ok := images["hangar"]; ok {
+			t.Errorf("expected hangar to be filtered out")
+		}
+		if _, ok := images["noimage"]; ok {
+			t.Errorf("expected noimage to be omitted")
+		}
+	})
+
+	t.Run("executor error propagates", func(t *testing.T) {
+		d := NewDaemon(DaemonConfig{
+			ComposeDir: tempDir,
+			ComposeExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+				return nil, []byte("compose failure"), errors.New("compose exec error")
+			},
+		})
+
+		_, err := d.GetServiceImages(context.Background(), tempDir)
+		if err == nil {
+			t.Fatalf("expected compose error, got nil")
+		}
+	})
+
+	t.Run("json unmarshal error propagates", func(t *testing.T) {
+		d := NewDaemon(DaemonConfig{
+			ComposeDir: tempDir,
+			ComposeExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+				return []byte("not valid json"), nil, nil
+			},
+		})
+
+		_, err := d.GetServiceImages(context.Background(), tempDir)
+		if err == nil {
+			t.Fatalf("expected unmarshal error, got nil")
+		}
+	})
+}
+
+func TestGetServicesWithNewImages_TableDriven(t *testing.T) {
+	validLocalDigest := "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+	newRemoteDigest := "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+
+	t.Run("empty candidates returns nil", func(t *testing.T) {
+		d := NewDaemon(DaemonConfig{})
+		up, digests, err := d.GetServicesWithNewImages(context.Background(), nil, nil)
+		if err != nil || up != nil || digests != nil {
+			t.Errorf("expected nil result on empty candidates, got %v, %v, %v", up, digests, err)
+		}
+	})
+
+	t.Run("filters gitsync, hangar, and empty images", func(t *testing.T) {
+		d := NewDaemon(DaemonConfig{})
+		up, digests, err := d.GetServicesWithNewImages(context.Background(), []string{"gitsync", "hangar", "empty"}, map[string]string{
+			"gitsync": "ghcr.io/azylman/aerial-gitsync:latest",
+			"hangar":  "ghcr.io/azylman/aerial-hangar:latest",
+			"empty":   "",
+		})
+		if err != nil || len(up) != 0 || len(digests) != 0 {
+			t.Errorf("expected 0 services to update, got %v", up)
+		}
+	})
+
+	t.Run("container inspect error continues gracefully", func(t *testing.T) {
+		d := NewDaemon(DaemonConfig{
+			DockerExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+				return nil, []byte("no such container"), errors.New("container not found")
+			},
+		})
+		up, _, err := d.GetServicesWithNewImages(context.Background(), []string{"brain"}, map[string]string{
+			"brain": "ghcr.io/azylman/aerial-brain:latest",
+		})
+		if err != nil || len(up) != 0 {
+			t.Errorf("expected 0 updates on container inspect error, got %v, %v", up, err)
+		}
+	})
+
+	t.Run("image inspect error continues gracefully", func(t *testing.T) {
+		d := NewDaemon(DaemonConfig{
+			DockerExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+				if len(args) > 0 && args[0] == "inspect" {
+					return []byte("sha256:imageid123"), nil, nil
+				}
+				return nil, []byte("image inspect err"), errors.New("image not found")
+			},
+		})
+		up, _, err := d.GetServicesWithNewImages(context.Background(), []string{"brain"}, map[string]string{
+			"brain": "ghcr.io/azylman/aerial-brain:latest",
+		})
+		if err != nil || len(up) != 0 {
+			t.Errorf("expected 0 updates on image inspect error, got %v, %v", up, err)
+		}
+	})
+
+	t.Run("invalid json in RepoDigests continues gracefully", func(t *testing.T) {
+		d := NewDaemon(DaemonConfig{
+			DockerExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+				if len(args) > 0 && args[0] == "inspect" {
+					return []byte("sha256:imageid123"), nil, nil
+				}
+				return []byte("not-valid-json"), nil, nil
+			},
+		})
+		up, _, err := d.GetServicesWithNewImages(context.Background(), []string{"brain"}, map[string]string{
+			"brain": "ghcr.io/azylman/aerial-brain:latest",
+		})
+		if err != nil || len(up) != 0 {
+			t.Errorf("expected 0 updates on invalid json, got %v, %v", up, err)
+		}
+	})
+
+	t.Run("detects new image builds when digest differs", func(t *testing.T) {
+		mockClient := &http.Client{
+			Transport: &roundTripperFunc{
+				fn: func(req *http.Request) (*http.Response, error) {
+					header := make(http.Header)
+					header.Set("Docker-Content-Digest", newRemoteDigest)
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     header,
+						Body:       ioNopCloser(strings.NewReader("")),
+					}, nil
+				},
+			},
+		}
+
+		d := NewDaemon(DaemonConfig{
+			RegistryClient: mockClient,
+			DockerExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+				if len(args) > 0 && args[0] == "inspect" {
+					return []byte("sha256:imageid123"), nil, nil
+				}
+				jsonBytes, _ := json.Marshal([]string{"ghcr.io/azylman/aerial-brain@" + validLocalDigest})
+				return jsonBytes, nil, nil
+			},
+		})
+
+		up, digests, err := d.GetServicesWithNewImages(context.Background(), []string{"brain"}, map[string]string{
+			"brain": "ghcr.io/azylman/aerial-brain:latest",
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(up) != 1 || up[0] != "brain" {
+			t.Errorf("expected brain in services to update, got %v", up)
+		}
+		if digests["brain"] != newRemoteDigest {
+			t.Errorf("got digest %s, want %s", digests["brain"], newRemoteDigest)
+		}
+	})
+
+	t.Run("skips update if digest matches local repo digests", func(t *testing.T) {
+		mockClient := &http.Client{
+			Transport: &roundTripperFunc{
+				fn: func(req *http.Request) (*http.Response, error) {
+					header := make(http.Header)
+					header.Set("Docker-Content-Digest", validLocalDigest)
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     header,
+						Body:       ioNopCloser(strings.NewReader("")),
+					}, nil
+				},
+			},
+		}
+
+		d := NewDaemon(DaemonConfig{
+			RegistryClient: mockClient,
+			DockerExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+				if len(args) > 0 && args[0] == "inspect" {
+					return []byte("sha256:imageid123"), nil, nil
+				}
+				jsonBytes, _ := json.Marshal([]string{"ghcr.io/azylman/aerial-brain@" + validLocalDigest})
+				return jsonBytes, nil, nil
+			},
+		})
+
+		up, digests, err := d.GetServicesWithNewImages(context.Background(), []string{"brain"}, map[string]string{
+			"brain": "ghcr.io/azylman/aerial-brain:latest",
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(up) != 0 || len(digests) != 0 {
+			t.Errorf("expected 0 services to update when matching, got %v", up)
+		}
+	})
+
+	t.Run("skips update if remote digest is quarantined", func(t *testing.T) {
+		mockClient := &http.Client{
+			Transport: &roundTripperFunc{
+				fn: func(req *http.Request) (*http.Response, error) {
+					header := make(http.Header)
+					header.Set("Docker-Content-Digest", newRemoteDigest)
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     header,
+						Body:       ioNopCloser(strings.NewReader("")),
+					}, nil
+				},
+			},
+		}
+
+		d := NewDaemon(DaemonConfig{
+			RegistryClient: mockClient,
+			DockerExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+				if len(args) > 0 && args[0] == "inspect" {
+					return []byte("sha256:imageid123"), nil, nil
+				}
+				jsonBytes, _ := json.Marshal([]string{"ghcr.io/azylman/aerial-brain@" + validLocalDigest})
+				return jsonBytes, nil, nil
+			},
+		})
+
+		d.quarantineImage("brain", newRemoteDigest, "fails health checks")
+
+		up, _, err := d.GetServicesWithNewImages(context.Background(), []string{"brain"}, map[string]string{
+			"brain": "ghcr.io/azylman/aerial-brain:latest",
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(up) != 0 {
+			t.Errorf("expected quarantined image to be skipped, got %v", up)
+		}
+	})
+}
+
+func TestCheckAndReconcileNewImages_TableDriven(t *testing.T) {
+	tempDir := t.TempDir()
+
+	t.Run("no docker-compose.yml returns nil", func(t *testing.T) {
+		d := NewDaemon(DaemonConfig{ComposeDir: filepath.Join(tempDir, "nonexistent")})
+		if err := d.CheckAndReconcileNewImages(context.Background()); err != nil {
+			t.Fatalf("expected nil when compose file absent, got %v", err)
+		}
+	})
+
+	t.Run("GetServiceImages error propagates", func(t *testing.T) {
+		composeFile := filepath.Join(tempDir, "docker-compose.yml")
+		_ = os.WriteFile(composeFile, []byte("services:\n"), 0644)
+
+		d := NewDaemon(DaemonConfig{
+			ComposeDir: tempDir,
+			ComposeExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+				return nil, []byte("config error"), errors.New("compose config error")
+			},
+		})
+
+		if err := d.CheckAndReconcileNewImages(context.Background()); err == nil {
+			t.Fatalf("expected error from GetServiceImages")
+		}
+	})
+
+	t.Run("triggers reconcile when new images detected", func(t *testing.T) {
+		composeFile := filepath.Join(tempDir, "docker-compose.yml")
+		_ = os.WriteFile(composeFile, []byte("services:\n"), 0644)
+
+		newDigest := "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+
+		mockClient := &http.Client{
+			Transport: &roundTripperFunc{
+				fn: func(req *http.Request) (*http.Response, error) {
+					header := make(http.Header)
+					header.Set("Docker-Content-Digest", newDigest)
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     header,
+						Body:       ioNopCloser(strings.NewReader("")),
+					}, nil
+				},
+			},
+		}
+
+		mockCompose := func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			mockJSON := `{"services": {"brain": {"image": "ghcr.io/azylman/aerial-brain:latest"}}}`
+			return []byte(mockJSON), nil, nil
+		}
+
+		mockDocker := func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			if len(args) > 0 && args[0] == "inspect" {
+				return []byte("sha256:currentid"), nil, nil
+			}
+			return []byte(`["ghcr.io/azylman/aerial-brain@sha256:olddigest"]`), nil, nil
+		}
+
+		d := NewDaemon(DaemonConfig{
+			ComposeDir:      tempDir,
+			RegistryClient:  mockClient,
+			ComposeExecutor: mockCompose,
+			DockerExecutor:  mockDocker,
+		})
+
+		if err := d.CheckAndReconcileNewImages(context.Background()); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		select {
+		case <-d.reconcileCh:
+		default:
+			t.Errorf("expected reconciliation to be queued onto reconcileCh")
+		}
+	})
+}
+
+func TestReconcileCompose_PreFlightAndHealthGating(t *testing.T) {
+	tempDir := t.TempDir()
+	composeFile := filepath.Join(tempDir, "docker-compose.yml")
+	_ = os.WriteFile(composeFile, []byte("services:\n  brain:\n    image: ghcr.io/azylman/aerial-brain:latest\n"), 0644)
+
+	var pullExecuted bool
+	var snapshotCreated bool
+	var rmiExecuted bool
+
+	mockCompose := func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+		argsStr := strings.Join(args, " ")
+		if strings.Contains(argsStr, "config --services") {
+			return []byte("brain\n"), nil, nil
+		}
+		if strings.Contains(argsStr, "config --quiet") {
+			return nil, nil, nil
+		}
+		if strings.Contains(argsStr, "config --format json") {
+			return []byte(`{"services": {"brain": {"image": "ghcr.io/azylman/aerial-brain:latest"}}}`), nil, nil
+		}
+		if strings.Contains(argsStr, "pull") {
+			pullExecuted = true
+			return []byte("Pulled"), nil, nil
+		}
+		if strings.Contains(argsStr, "up -d") {
+			if !strings.Contains(argsStr, "--wait") || !strings.Contains(argsStr, "--wait-timeout 180") {
+				t.Errorf("expected --wait and --wait-timeout 180 in compose up args: %v", args)
+			}
+			return []byte("Started"), nil, nil
+		}
+		return nil, nil, nil
+	}
+
+	mockDocker := func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+		if len(args) > 0 {
+			switch args[0] {
+			case "inspect":
+				return []byte("sha256:current-working-image-id"), nil, nil
+			case "tag":
+				snapshotCreated = true
+				return nil, nil, nil
+			case "rmi":
+				rmiExecuted = true
+				return nil, nil, nil
+			}
+		}
+		return nil, nil, nil
+	}
+
+	d := NewDaemon(DaemonConfig{
+		ComposeDir:      tempDir,
+		ComposeExecutor: mockCompose,
+		DockerExecutor:  mockDocker,
+	})
+
+	d.quarantineImage("brain", "sha256:oldbad", "previous failure")
+
+	err := d.ReconcileCompose(context.Background(), "brain")
+	if err != nil {
+		t.Fatalf("unexpected reconcile error: %v", err)
+	}
+
+	if !snapshotCreated {
+		t.Errorf("expected snapshot tag to be created before pull")
+	}
+	if !pullExecuted {
+		t.Errorf("expected compose pull to be executed")
+	}
+	if !rmiExecuted {
+		t.Errorf("expected snapshot tag to be removed via rmi on success")
+	}
+	if d.isImageQuarantined("brain", "sha256:oldbad") {
+		t.Errorf("expected quarantine to be cleared on successful deploy")
+	}
+	if d.GetLastReconcile().IsZero() {
+		t.Errorf("expected LastReconcile to be set on success")
+	}
+}
+
+func TestReconcileCompose_PullFailureTriggersRollback(t *testing.T) {
+	tempDir := t.TempDir()
+	composeFile := filepath.Join(tempDir, "docker-compose.yml")
+	_ = os.WriteFile(composeFile, []byte("services:\n  brain:\n    image: ghcr.io/azylman/aerial-brain:latest\n"), 0644)
+
+	mockCompose := func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+		argsStr := strings.Join(args, " ")
+		if strings.Contains(argsStr, "config --services") {
+			return []byte("brain\n"), nil, nil
+		}
+		if strings.Contains(argsStr, "config --quiet") {
+			return nil, nil, nil
+		}
+		if strings.Contains(argsStr, "config --format json") {
+			return []byte(`{"services": {"brain": {"image": "ghcr.io/azylman/aerial-brain:latest"}}}`), nil, nil
+		}
+		if strings.Contains(argsStr, "pull") {
+			return nil, []byte("pull network error"), errors.New("pull failed")
+		}
+		return nil, nil, nil
+	}
+
+	d := NewDaemon(DaemonConfig{
+		ComposeDir:      tempDir,
+		ComposeExecutor: mockCompose,
+		DockerExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			return nil, nil, nil
+		},
+	})
+
+	err := d.ReconcileCompose(context.Background(), "brain")
+	if err == nil {
+		t.Fatalf("expected error from pull failure, got nil")
+	}
+	if !strings.Contains(err.Error(), "compose pull failed") {
+		t.Errorf("expected error message to contain 'compose pull failed', got: %v", err)
+	}
+}
+
+func TestReconcileCompose_WaitFailureWithQuarantineAndRollback(t *testing.T) {
+	tempDir := t.TempDir()
+	composeFile := filepath.Join(tempDir, "docker-compose.yml")
+	_ = os.WriteFile(composeFile, []byte("services:\n  brain:\n    image: ghcr.io/azylman/aerial-brain:latest\n"), 0644)
+
+	failedDigest := "sha256:" + strings.Repeat("b", 64)
+	var tagRestored bool
+
+	mockClient := &http.Client{
+		Transport: &roundTripperFunc{
+			fn: func(req *http.Request) (*http.Response, error) {
+				header := make(http.Header)
+				header.Set("Docker-Content-Digest", failedDigest)
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     header,
+					Body:       ioNopCloser(strings.NewReader("")),
+				}, nil
+			},
+		},
+	}
+
+	isFirstUp := true
+	mockCompose := func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+		argsStr := strings.Join(args, " ")
+		if strings.Contains(argsStr, "config --services") {
+			return []byte("brain\n"), nil, nil
+		}
+		if strings.Contains(argsStr, "config --quiet") {
+			return nil, nil, nil
+		}
+		if strings.Contains(argsStr, "config --format json") {
+			return []byte(`{"services": {"brain": {"image": "ghcr.io/azylman/aerial-brain:latest"}}}`), nil, nil
+		}
+		if strings.Contains(argsStr, "pull") {
+			return []byte("Pulled"), nil, nil
+		}
+		if strings.Contains(argsStr, "up -d") {
+			if isFirstUp {
+				isFirstUp = false
+				return nil, []byte("container unhealthy timeout 180s"), errors.New("healthcheck failed")
+			}
+			return []byte("Restored"), nil, nil
+		}
+		return nil, nil, nil
+	}
+
+	mockDocker := func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+		if len(args) > 0 {
+			switch args[0] {
+			case "inspect":
+				return []byte("sha256:working-sha"), nil, nil
+			case "tag":
+				if len(args) >= 3 && args[1] == "aerial-brain:rollback-target" {
+					tagRestored = true
+				}
+				return nil, nil, nil
+			case "rmi":
+				return nil, nil, nil
+			}
+		}
+		return nil, nil, nil
+	}
+
+	d := NewDaemon(DaemonConfig{
+		ComposeDir:      tempDir,
+		RegistryClient:  mockClient,
+		ComposeExecutor: mockCompose,
+		DockerExecutor:  mockDocker,
+	})
+
+	err := d.ReconcileCompose(context.Background(), "brain")
+	if err == nil {
+		t.Fatalf("expected error from compose up failure, got nil")
+	}
+
+	if !tagRestored {
+		t.Errorf("expected snapshot tag to be restored during rollback")
+	}
+	if !d.isImageQuarantined("brain", failedDigest) {
+		t.Errorf("expected failing digest %s to be quarantined", failedDigest)
+	}
+}
+
+func TestExecuteRollback_ImageAndTagRestorationError(t *testing.T) {
+	tempDir := t.TempDir()
+	composeFile := filepath.Join(tempDir, "docker-compose.yml")
+	_ = os.WriteFile(composeFile, []byte("services:\n  brain:\n    image: ghcr.io/azylman/aerial-brain:latest\n"), 0644)
+
+	d := NewDaemon(DaemonConfig{
+		ComposeDir: tempDir,
+		ComposeExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			argsStr := strings.Join(args, " ")
+			if strings.Contains(argsStr, "config --services") {
+				return []byte("brain\n"), nil, nil
+			}
+			return []byte("Restored"), nil, nil
+		},
+		DockerExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			if len(args) > 0 && args[0] == "tag" {
+				return nil, []byte("tag error: permission denied"), errors.New("tag failed")
+			}
+			return nil, nil, nil
+		},
+	})
+
+	err := d.executeRollback(
+		context.Background(),
+		nil,
+		"compose apply",
+		errors.New("initial up fail"),
+		[]string{"brain"},
+		map[string]string{"brain": "aerial-brain:rollback-target"},
+		map[string]string{"brain": "ghcr.io/azylman/aerial-brain:latest"},
+		map[string]string{"brain": "sha256:bad123"},
+	)
+
+	if err == nil {
+		t.Fatalf("expected rollback error due to tag restoration failure, got nil")
+	}
+	if !strings.Contains(err.Error(), "failed to restore image tag") {
+		t.Errorf("expected error message about image tag restoration, got: %v", err)
+	}
+}
+
+func TestEnsureRepo_RemediatedErrors(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// 1. git init error
+	dInitFail := NewDaemon(DaemonConfig{
+		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			if len(args) > 0 && args[0] == "init" {
+				return nil, []byte("init permission denied"), errors.New("init failed")
+			}
+			return nil, nil, nil
+		},
+	})
+	nonEmptyDir := filepath.Join(tempDir, "nonempty1")
+	_ = os.MkdirAll(nonEmptyDir, 0755)
+	_ = os.WriteFile(filepath.Join(nonEmptyDir, "file.txt"), []byte("data"), 0644)
+
+	if err := dInitFail.EnsureRepo(context.Background(), nonEmptyDir, "https://github.com/org/repo.git"); err == nil {
+		t.Fatalf("expected git init error, got nil")
+	}
+
+	// 2. git remote add origin warning branch
+	dRemoteFail := NewDaemon(DaemonConfig{
+		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			if len(args) > 0 {
+				if args[0] == "init" {
+					return nil, nil, nil
+				}
+				if args[0] == "remote" {
+					return nil, []byte("fatal: remote origin already exists"), errors.New("already exists")
+				}
+				if args[0] == "fetch" {
+					return nil, nil, nil
+				}
+				if args[0] == "reset" {
+					return nil, nil, nil
+				}
+			}
+			return nil, nil, nil
+		},
+	})
+	nonEmptyDir2 := filepath.Join(tempDir, "nonempty2")
+	_ = os.MkdirAll(nonEmptyDir2, 0755)
+	_ = os.WriteFile(filepath.Join(nonEmptyDir2, "file.txt"), []byte("data"), 0644)
+	if err := dRemoteFail.EnsureRepo(context.Background(), nonEmptyDir2, "https://github.com/org/repo.git"); err != nil {
+		t.Fatalf("expected already exists remote error to be non-fatal, got %v", err)
+	}
+
+	// 3. git reset --soft error
+	dResetFail := NewDaemon(DaemonConfig{
+		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			if len(args) > 0 {
+				if args[0] == "reset" && args[1] == "--soft" {
+					return nil, []byte("soft reset failed"), errors.New("soft reset error")
+				}
+			}
+			return nil, nil, nil
+		},
+	})
+	nonEmptyDir3 := filepath.Join(tempDir, "nonempty3")
+	_ = os.MkdirAll(nonEmptyDir3, 0755)
+	_ = os.WriteFile(filepath.Join(nonEmptyDir3, "file.txt"), []byte("data"), 0644)
+	if err := dResetFail.EnsureRepo(context.Background(), nonEmptyDir3, "https://github.com/org/repo.git"); err == nil {
+		t.Fatalf("expected git reset --soft error, got nil")
+	}
+}
+
+func TestImageQuarantine_DirectNilInitialization(t *testing.T) {
+	d := &SyncDaemon{}
+	validDigest := "sha256:" + strings.Repeat("c", 64)
+	d.quarantineImage("brain", validDigest, "initialization test")
+	if !d.isImageQuarantined("brain", validDigest) {
+		t.Errorf("expected image to be quarantined after initializing nil map")
+	}
+}
+
+func TestGetServicesWithNewImages_EmptyImageIDAndRemoteError(t *testing.T) {
+	// 1. Empty image ID branch
+	dEmptyID := NewDaemon(DaemonConfig{
+		DockerExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			return []byte("   \n"), nil, nil
+		},
+	})
+	up, digests, err := dEmptyID.GetServicesWithNewImages(context.Background(), []string{"brain"}, map[string]string{
+		"brain": "ghcr.io/azylman/aerial-brain:latest",
+	})
+	if err != nil || len(up) != 0 || len(digests) != 0 {
+		t.Errorf("expected 0 updates on empty image ID, got up=%v digests=%v err=%v", up, digests, err)
+	}
+
+	// 2. Remote digest error branch
+	client500 := &http.Client{
+		Transport: &roundTripperFunc{
+			fn: func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusInternalServerError,
+					Header:     make(http.Header),
+					Body:       ioNopCloser(strings.NewReader("server error")),
+				}, nil
+			},
+		},
+	}
+	dRemoteErr := NewDaemon(DaemonConfig{
+		RegistryClient: client500,
+		DockerExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			if len(args) > 0 && args[0] == "inspect" {
+				return []byte("sha256:currentid"), nil, nil
+			}
+			return []byte(`["ghcr.io/azylman/aerial-brain@sha256:old"]`), nil, nil
+		},
+	})
+	up, digests, err = dRemoteErr.GetServicesWithNewImages(context.Background(), []string{"brain"}, map[string]string{
+		"brain": "ghcr.io/azylman/aerial-brain:latest",
+	})
+	if err != nil || len(up) != 0 || len(digests) != 0 {
+		t.Errorf("expected 0 updates on remote digest error, got up=%v digests=%v err=%v", up, digests, err)
+	}
+}
+
+func TestCheckAndReconcileNewImages_NoChangesReturnsNil(t *testing.T) {
+	tempDir := t.TempDir()
+	composeFile := filepath.Join(tempDir, "docker-compose.yml")
+	_ = os.WriteFile(composeFile, []byte("services:\n"), 0644)
+
+	matchingDigest := "sha256:" + strings.Repeat("d", 64)
+
+	mockClient := &http.Client{
+		Transport: &roundTripperFunc{
+			fn: func(req *http.Request) (*http.Response, error) {
+				header := make(http.Header)
+				header.Set("Docker-Content-Digest", matchingDigest)
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     header,
+					Body:       ioNopCloser(strings.NewReader("")),
+				}, nil
+			},
+		},
+	}
+
+	mockCompose := func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+		mockJSON := `{"services": {"brain": {"image": "ghcr.io/azylman/aerial-brain:latest"}}}`
+		return []byte(mockJSON), nil, nil
+	}
+
+	mockDocker := func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+		if len(args) > 0 && args[0] == "inspect" {
+			return []byte("sha256:currentid"), nil, nil
+		}
+		return []byte(fmt.Sprintf(`["ghcr.io/azylman/aerial-brain@%s"]`, matchingDigest)), nil, nil
+	}
+
+	d := NewDaemon(DaemonConfig{
+		ComposeDir:      tempDir,
+		RegistryClient:  mockClient,
+		ComposeExecutor: mockCompose,
+		DockerExecutor:  mockDocker,
+	})
+
+	if err := d.CheckAndReconcileNewImages(context.Background()); err != nil {
+		t.Fatalf("expected nil when no new images, got %v", err)
+	}
+
+	select {
+	case <-d.reconcileCh:
+		t.Errorf("expected no reconciliation to be queued onto reconcileCh")
+	default:
+	}
+}
+
+func TestReconcileCompose_ValidationAndDiscoveryFailures(t *testing.T) {
+	tempDir := t.TempDir()
+	composeFile := filepath.Join(tempDir, "docker-compose.yml")
+	_ = os.WriteFile(composeFile, []byte("services:\n"), 0644)
+
+	// 1. Validation failure triggers rollback
+	dValFail := NewDaemon(DaemonConfig{
+		ComposeDir: tempDir,
+		ComposeExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			argsStr := strings.Join(args, " ")
+			if strings.Contains(argsStr, "config --quiet") {
+				return nil, []byte("yaml syntax error"), errors.New("invalid syntax")
+			}
+			return []byte("ok"), nil, nil
+		},
+		DockerExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			return nil, nil, nil
+		},
+	})
+	if err := dValFail.ReconcileCompose(context.Background()); err == nil {
+		t.Errorf("expected validation failure error, got nil")
+	}
+
+	// 2. Service discovery failure triggers rollback
+	dDiscFail := NewDaemon(DaemonConfig{
+		ComposeDir: tempDir,
+		ComposeExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			argsStr := strings.Join(args, " ")
+			if strings.Contains(argsStr, "config --quiet") {
+				return nil, nil, nil
+			}
+			if strings.Contains(argsStr, "config --services") {
+				return nil, []byte("services inspect fail"), errors.New("cannot list services")
+			}
+			return []byte("ok"), nil, nil
+		},
+		DockerExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			return nil, nil, nil
+		},
+	})
+	if err := dDiscFail.ReconcileCompose(context.Background()); err == nil {
+		t.Errorf("expected discovery failure error, got nil")
+	}
+
+	// 3. Zero targets returns nil cleanly
+	dZeroTargets := NewDaemon(DaemonConfig{
+		ComposeDir: tempDir,
+		ComposeExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			argsStr := strings.Join(args, " ")
+			if strings.Contains(argsStr, "config --quiet") {
+				return nil, nil, nil
+			}
+			if strings.Contains(argsStr, "config --services") {
+				return []byte("gitsync\n"), nil, nil // Only gitsync, which is filtered out
+			}
+			return []byte("ok"), nil, nil
+		},
+		DockerExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			return nil, nil, nil
+		},
+	})
+	if err := dZeroTargets.ReconcileCompose(context.Background()); err != nil {
+		t.Errorf("expected nil for zero external targets, got %v", err)
+	}
+
+	// 4. Tag failure logs warning and proceeds with pull and up
+	tagErrEncountered := false
+	dTagWarn := NewDaemon(DaemonConfig{
+		ComposeDir: tempDir,
+		ComposeExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			argsStr := strings.Join(args, " ")
+			if strings.Contains(argsStr, "config --services") {
+				return []byte("brain\n"), nil, nil
+			}
+			return []byte("ok"), nil, nil
+		},
+		DockerExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			if len(args) > 0 {
+				if args[0] == "inspect" {
+					return []byte("sha256:img123"), nil, nil
+				}
+				if args[0] == "tag" {
+					tagErrEncountered = true
+					return nil, []byte("tag error: disk full"), errors.New("tag fail")
+				}
+			}
+			return nil, nil, nil
+		},
+	})
+	if err := dTagWarn.ReconcileCompose(context.Background(), "brain"); err != nil {
+		t.Errorf("expected ReconcileCompose to proceed despite tag error, got %v", err)
+	}
+	if !tagErrEncountered {
+		t.Errorf("expected tag error to be encountered")
+	}
+
+	// 5. Pull failure with rollback failure joins both errors
+	dPullAndRollbackFail := NewDaemon(DaemonConfig{
+		ComposeDir: tempDir,
+		ComposeExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			argsStr := strings.Join(args, " ")
+			if strings.Contains(argsStr, "config --services") {
+				return []byte("brain\n"), nil, nil
+			}
+			if strings.Contains(argsStr, "pull") {
+				return nil, []byte("pull fatal"), errors.New("pull err")
+			}
+			if strings.Contains(argsStr, "up -d") {
+				return nil, []byte("rollback up fatal"), errors.New("rollback up err")
+			}
+			return []byte("ok"), nil, nil
+		},
+		DockerExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			return nil, nil, nil
+		},
+	})
+	errJoined := dPullAndRollbackFail.ReconcileCompose(context.Background(), "brain")
+	if errJoined == nil {
+		t.Fatalf("expected joined error on pull and rollback failure, got nil")
+	}
+	if !strings.Contains(errJoined.Error(), "compose pull failed") {
+		t.Errorf("expected pull error in joined message: %v", errJoined)
+	}
+}
+
+func TestStartPeriodicLoop_ExecutionAndShutdown(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	d := NewDaemon(DaemonConfig{
+		Interval: 10 * time.Millisecond,
+		ComposeDir: t.TempDir(),
+	})
+
+	d.StartPeriodicLoop(ctx)
+	time.Sleep(35 * time.Millisecond)
+	cancel()
+	time.Sleep(10 * time.Millisecond)
+}
 

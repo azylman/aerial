@@ -34,7 +34,7 @@ jobs:
       docs: ${{ steps.filter.outputs.docs }}
       proxy: ${{ steps.filter.outputs.proxy }}
       ollama: ${{ steps.filter.outputs.ollama }}
-      gitsync: ${{ steps.filter.outputs.gitsync }}
+      hangar: ${{ steps.filter.outputs.hangar }}
       matrix: ${{ steps.set-matrix.outputs.matrix }}
       has_builds: ${{ steps.set-matrix.outputs.has_builds }}
     steps:
@@ -64,8 +64,8 @@ jobs:
               - 'proxy/**'
             ollama:
               - 'docker/ollama/**'
-            gitsync:
-              - 'sidecars/gitsync/**'
+            hangar:
+              - 'sidecars/hangar/**'
 
       - name: Compute Dynamic Build Matrix
         id: set-matrix
@@ -81,7 +81,7 @@ jobs:
               docs: "${{ steps.filter.outputs.docs }}",
               proxy: "${{ steps.filter.outputs.proxy }}",
               ollama: "${{ steps.filter.outputs.ollama }}",
-              gitsync: "${{ steps.filter.outputs.gitsync }}"
+              hangar: "${{ steps.filter.outputs.hangar }}"
             };
 
             const catalog = [
@@ -94,7 +94,7 @@ jobs:
               { service: "docs", context: "./docs-service", file: "./docs-service/Dockerfile", image_name: "aerial-docs" },
               { service: "proxy", context: "./proxy", file: "./proxy/Dockerfile", image_name: "aerial-proxy" },
               { service: "ollama", context: "./docker/ollama", file: "./docker/ollama/Dockerfile", image_name: "aerial-ollama" },
-              { service: "gitsync", context: ".", file: "./sidecars/gitsync/Dockerfile", image_name: "aerial-gitsync" }
+              { service: "hangar", context: ".", file: "./sidecars/hangar/Dockerfile", image_name: "aerial-hangar" }
             ];
 
             const forceAll = "${{ inputs.force_all }}" === "true";
@@ -125,6 +125,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
+
 
       - name: Verify Monorepo Test Coverage & Gating
         run: |
@@ -209,11 +210,11 @@ jobs:
           cd dashboard
           golangci-lint run --path-prefix=dashboard/ ./...
 
-      - name: Lint Sidecars GitSync
-        if: needs.changes.outputs.gitsync == 'true'
+      - name: Lint Sidecars Hangar
+        if: needs.changes.outputs.hangar == 'true'
         run: |
-          cd sidecars/gitsync
-          golangci-lint run --path-prefix=sidecars/gitsync/ ./...
+          cd sidecars/hangar
+          golangci-lint run --path-prefix=sidecars/hangar/ ./...
 
       - name: Lint Permet HUD Frontend Syntax
         if: needs.changes.outputs.dashboard == 'true'

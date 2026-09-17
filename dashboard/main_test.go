@@ -1915,6 +1915,7 @@ func TestNewDashboardConfigFromLookup_Custom(t *testing.T) {
 		"GITHUB_REPO":                  "custom/repo",
 		"GITHUB_PAT":                   "custom_pat",
 		"GITHUB_PERSONAL_ACCESS_TOKEN": "fallback_token",
+		"HANGAR_URL":                   "http://hangar-custom:9090",
 		"GITSYNC_URL":                  "http://gitsync-custom:9090",
 		"AERIAL_CONFIG_PATH":           "/custom/config.yaml",
 		"GIT_COMMIT":                   "0123456789",
@@ -1934,14 +1935,21 @@ func TestNewDashboardConfigFromLookup_Custom(t *testing.T) {
 	if cfg.GHToken != "custom_pat" {
 		t.Errorf("expected pat custom_pat, got %q", cfg.GHToken)
 	}
-	if cfg.GitSyncURL != "http://gitsync-custom:9090" {
-		t.Errorf("expected gitsync URL http://gitsync-custom:9090, got %q", cfg.GitSyncURL)
+	if cfg.GitSyncURL != "http://hangar-custom:9090" || cfg.HangarURL != "http://hangar-custom:9090" {
+		t.Errorf("expected hangar URL http://hangar-custom:9090, got %q / %q", cfg.GitSyncURL, cfg.HangarURL)
 	}
 	if cfg.ConfigPath != "/custom/config.yaml" {
 		t.Errorf("expected config path /custom/config.yaml, got %q", cfg.ConfigPath)
 	}
 	if cfg.GitCommit != "0123456" {
 		t.Errorf("expected git commit 0123456, got %q", cfg.GitCommit)
+	}
+
+	// Fallback to GITSYNC_URL if HANGAR_URL is unset
+	delete(envMap, "HANGAR_URL")
+	cfgFallbackSync := NewDashboardConfigFromLookup(lookup)
+	if cfgFallbackSync.GitSyncURL != "http://gitsync-custom:9090" || cfgFallbackSync.HangarURL != "http://gitsync-custom:9090" {
+		t.Errorf("expected fallback to GITSYNC_URL, got %q / %q", cfgFallbackSync.GitSyncURL, cfgFallbackSync.HangarURL)
 	}
 }
 
@@ -1960,8 +1968,8 @@ func TestNewDashboardConfigFromLookup_Defaults(t *testing.T) {
 	if cfgNil.GHToken != "" {
 		t.Errorf("expected empty default token, got %q", cfgNil.GHToken)
 	}
-	if cfgNil.GitSyncURL != "http://gitsync:8080" {
-		t.Errorf("expected default gitsync URL http://gitsync:8080, got %q", cfgNil.GitSyncURL)
+	if cfgNil.GitSyncURL != "http://hangar:8080" || cfgNil.HangarURL != "http://hangar:8080" {
+		t.Errorf("expected default hangar URL http://hangar:8080, got %q / %q", cfgNil.GitSyncURL, cfgNil.HangarURL)
 	}
 	if cfgNil.ConfigPath != "/share/aerial-config/config.yaml" {
 		t.Errorf("expected default config path /share/aerial-config/config.yaml, got %q", cfgNil.ConfigPath)
