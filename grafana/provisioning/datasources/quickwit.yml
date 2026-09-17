@@ -1,0 +1,17 @@
+apiVersion: 1
+
+datasources:
+  - name: Quickwit
+    type: elasticsearch
+    uid: quickwit-logs
+    access: proxy
+    url: http://quickwit:7280/api/v1/_elastic
+    isDefault: false
+    jsonData:
+      esVersion: "7.10.0"
+      timeField: "timestamp"
+      interval: "Daily"
+      index: "docker-logs"
+      logMessageField: "message"
+      logLevelField: "level"
+    editable: false

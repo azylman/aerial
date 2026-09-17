@@ -1,0 +1,18 @@
+version: 0.8
+cluster_id: aerial-cluster
+node_id: aerial-quickwit-node
+data_dir: /quickwit/qwdata
+
+listen_address: 0.0.0.0
+
+rest:
+  listen_port: 7280
+
+metastore_uri: /quickwit/qwdata/indexes
+default_index_root_uri: /quickwit/qwdata/indexes
+
+indexer:
+  enable_otlp_endpoint: true
+
+searcher:
+  fast_field_cache_capacity: 100_000_000

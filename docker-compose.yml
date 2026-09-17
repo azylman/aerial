@@ -656,6 +656,8 @@ services:
         condition: service_healthy
       victoriametrics:
         condition: service_healthy
+      quickwit:
+        condition: service_healthy
 
   # ----------------------------------------------------------------------------
   # 17. Observability: PostgreSQL Metrics Exporter
@@ -718,6 +720,75 @@ services:
       victoriametrics:
         condition: service_started
 
+  # ----------------------------------------------------------------------------
+  # 19. Observability: Quickwit Distributed Log Search Engine
+  #     Sub-second full-text indexing with native Tantivy search and Elasticsearch compatibility.
+  # ----------------------------------------------------------------------------
+  quickwit:
+    image: quickwit/quickwit:v0.8.2
+    container_name: aerial-quickwit
+    restart: unless-stopped
+    stop_grace_period: 20s
+    labels:
+      autoheal: "true"
+      com.centurylinklabs.watchtower.enable: "true"
+      homepage.group: "Observability"
+      homepage.name: "Quickwit Logs"
+      homepage.icon: "quickwit.png"
+      homepage.description: "Full-Text Log Search Engine"
+    entrypoint: ["/bin/sh", "/quickwit/config/entrypoint.sh"]
+    environment:
+      - NO_COLOR=1
+      - QW_CONFIG=/quickwit/config/quickwit.yaml
+    volumes:
+      - aerial-quickwit-data:/quickwit/qwdata
+      - ${AERIAL_HOST_PROJECT_DIR:-${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}}/quickwit:/quickwit/config:ro
+    ports:
+      - "${QUICKWIT_HOST_PORT:-7280}:7280"
+    networks:
+      - aerial-net
+    healthcheck:
+      test: ["CMD-SHELL", "quickwit index list --endpoint http://127.0.0.1:7280 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # ----------------------------------------------------------------------------
+  # 20. Observability: Vector Log Shipper & Transformation Pipeline
+  #     Scrapes Docker container stdout/stderr, normalizes logs via VRL, and ships to Quickwit.
+  # ----------------------------------------------------------------------------
+  vector:
+    image: timberio/vector:0.40.0-alpine
+    container_name: aerial-vector
+    restart: unless-stopped
+    stop_grace_period: 15s
+    labels:
+      autoheal: "true"
+      com.centurylinklabs.watchtower.enable: "true"
+      homepage.group: "Observability"
+      homepage.name: "Vector Agent"
+      homepage.icon: "vector.png"
+      homepage.description: "High-Performance Observability Router"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - aerial-vector-data:/var/lib/vector
+      - ${AERIAL_HOST_PROJECT_DIR:-${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}}/vector/vector.yaml:/etc/vector/vector.yaml:ro
+    ports:
+      - "${VECTOR_API_PORT:-8686}:8686"
+    networks:
+      - aerial-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:8686/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    depends_on:
+      quickwit:
+        condition: service_healthy
+
 networks:
   aerial-net:
     name: aerial-net
@@ -736,6 +807,10 @@ volumes:
     name: aerial-postgres-data
   aerial-victoriametrics-data:
     name: aerial-victoriametrics-data
+  aerial-quickwit-data:
+    name: aerial-quickwit-data
+  aerial-vector-data:
+    name: aerial-vector-data
 
 
 
