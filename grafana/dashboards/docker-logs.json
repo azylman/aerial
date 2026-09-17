@@ -23,7 +23,7 @@
     },
     {
       "datasource": {
-        "type": "elasticsearch",
+        "type": "quickwit-quickwit-datasource",
         "uid": "quickwit-logs"
       },
       "fieldConfig": {
@@ -69,7 +69,7 @@
       "targets": [
         {
           "datasource": {
-            "type": "elasticsearch",
+            "type": "quickwit-quickwit-datasource",
             "uid": "quickwit-logs"
           },
           "metrics": [
@@ -88,7 +88,7 @@
     },
     {
       "datasource": {
-        "type": "elasticsearch",
+        "type": "quickwit-quickwit-datasource",
         "uid": "quickwit-logs"
       },
       "fieldConfig": {
@@ -138,7 +138,7 @@
       "targets": [
         {
           "datasource": {
-            "type": "elasticsearch",
+            "type": "quickwit-quickwit-datasource",
             "uid": "quickwit-logs"
           },
           "metrics": [
@@ -157,7 +157,7 @@
     },
     {
       "datasource": {
-        "type": "elasticsearch",
+        "type": "quickwit-quickwit-datasource",
         "uid": "quickwit-logs"
       },
       "fieldConfig": {
@@ -207,7 +207,7 @@
       "targets": [
         {
           "datasource": {
-            "type": "elasticsearch",
+            "type": "quickwit-quickwit-datasource",
             "uid": "quickwit-logs"
           },
           "metrics": [
@@ -226,7 +226,7 @@
     },
     {
       "datasource": {
-        "type": "elasticsearch",
+        "type": "quickwit-quickwit-datasource",
         "uid": "quickwit-logs"
       },
       "fieldConfig": {
@@ -312,7 +312,7 @@
             }
           ],
           "datasource": {
-            "type": "elasticsearch",
+            "type": "quickwit-quickwit-datasource",
             "uid": "quickwit-logs"
           },
           "metrics": [
@@ -331,7 +331,7 @@
     },
     {
       "datasource": {
-        "type": "elasticsearch",
+        "type": "quickwit-quickwit-datasource",
         "uid": "quickwit-logs"
       },
       "gridPos": {
@@ -355,7 +355,7 @@
       "targets": [
         {
           "datasource": {
-            "type": "elasticsearch",
+            "type": "quickwit-quickwit-datasource",
             "uid": "quickwit-logs"
           },
           "metrics": [
