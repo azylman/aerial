@@ -613,7 +613,7 @@ services:
       - GF_AUTH_DISABLE_LOGIN_FORM=true
       - GF_AUTH_DISABLE_SIGNOUT_MENU=true
       - GF_PANELS_DISABLE_SANITIZE_HTML=true
-      - GF_INSTALL_PLUGINS=quickwit-quickwit-datasource
+      - "GF_INSTALL_PLUGINS=https://github.com/quickwit-oss/quickwit-datasource/releases/download/v0.5.0/quickwit-quickwit-datasource-0.5.0.zip;quickwit-quickwit-datasource"
       - GF_LOG_MODE=console
       - GF_LOG_CONSOLE_FORMAT=json
     volumes:
