@@ -12053,6 +12053,597 @@ func TestWorkerPool_MultiTurn_SilentSentinel_DropsIntermediateChatter(t *testing
 	}
 }
 
+func TestSession_RotationAtStepLimit_PreFlight(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+
+	tmpDir := t.TempDir()
+	sessMgr := session.New(tmpDir, "")
+
+	oldSessionID := "sess-step-limit-old"
+	sessDir, err := sessMgr.EnsureSessionDir(oldSessionID)
+	if err != nil {
+		t.Fatalf("failed to create session dir: %v", err)
+	}
+
+	// Create transcript with step_index reaching DefaultMaxSessionSteps (350) -> last step_index 349
+	tPath := filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl")
+	transcriptContent := fmt.Sprintf(`{"step_index": 0, "type": "USER_INPUT"}
+{"step_index": %d, "type": "PLANNER_RESPONSE"}
+`, DefaultMaxSessionSteps-1)
+	if err := os.WriteFile(tPath, []byte(transcriptContent), 0644); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+
+	_ = saveSessionID(store, "thread-step-limit-test", oldSessionID)
+	_, _ = incrementSessionTurnCount(store, "thread-step-limit-test") // turn 1
+
+	var mu sync.Mutex
+	var gotSessionID string
+	doneCh := make(chan struct{})
+
+	appCfg := config.NewFromData(&config.ConfigData{
+		Channels: map[string]config.ChannelPolicy{
+			"default": {Mode: "thread"},
+		},
+	})
+
+	pool := New(appCfg, WorkerPoolConfig{
+		SessionManager: sessMgr,
+		Store:          store,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    1,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			mu.Lock()
+			gotSessionID = sessionID
+			mu.Unlock()
+			return mockJSONResponse(uuid.New().String(), "OK"), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			close(doneCh)
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{ID: "msg-step-rot", ThreadID: "thread-step-limit-test", Content: "Run tool steps"}
+	_ = insertMessage(store, msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Timeout waiting for message")
+	}
+
+	mu.Lock()
+	if gotSessionID != "" {
+		t.Errorf("Expected cold start (empty session ID) after %d steps, got: %q", DefaultMaxSessionSteps, gotSessionID)
+	}
+	mu.Unlock()
+
+	prevSess, _ := getPreviousSessionID(store, "thread-step-limit-test")
+	if prevSess != oldSessionID {
+		t.Errorf("Expected previous session ID %q in store, got %q", oldSessionID, prevSess)
+	}
+}
+
+func TestSession_RotationAtByteLimit_PreFlight(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+
+	tmpDir := t.TempDir()
+	sessMgr := session.New(tmpDir, "")
+
+	oldSessionID := "sess-byte-limit-old"
+	sessDir, err := sessMgr.EnsureSessionDir(oldSessionID)
+	if err != nil {
+		t.Fatalf("failed to create session dir: %v", err)
+	}
+
+	// Create transcript file exceeding DefaultMaxTranscriptBytes (1MB)
+	tPath := filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl")
+	blob := make([]byte, DefaultMaxTranscriptBytes+1024)
+	for i := range blob {
+		blob[i] = 'A'
+	}
+	if err := os.WriteFile(tPath, blob, 0644); err != nil {
+		t.Fatalf("failed to write bloated transcript: %v", err)
+	}
+
+	_ = saveSessionID(store, "thread-byte-limit-test", oldSessionID)
+	_, _ = incrementSessionTurnCount(store, "thread-byte-limit-test") // turn 1
+
+	var mu sync.Mutex
+	var gotSessionID string
+	doneCh := make(chan struct{})
+
+	appCfg := config.NewFromData(&config.ConfigData{
+		Channels: map[string]config.ChannelPolicy{
+			"default": {Mode: "thread"},
+		},
+	})
+
+	pool := New(appCfg, WorkerPoolConfig{
+		SessionManager: sessMgr,
+		Store:          store,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    1,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			mu.Lock()
+			gotSessionID = sessionID
+			mu.Unlock()
+			return mockJSONResponse(uuid.New().String(), "OK"), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			close(doneCh)
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{ID: "msg-byte-rot", ThreadID: "thread-byte-limit-test", Content: "Run heavy output"}
+	_ = insertMessage(store, msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Timeout waiting for message")
+	}
+
+	mu.Lock()
+	if gotSessionID != "" {
+		t.Errorf("Expected cold start (empty session ID) after %d bytes, got: %q", DefaultMaxTranscriptBytes, gotSessionID)
+	}
+	mu.Unlock()
+
+	prevSess, _ := getPreviousSessionID(store, "thread-byte-limit-test")
+	if prevSess != oldSessionID {
+		t.Errorf("Expected previous session ID %q in store, got %q", oldSessionID, prevSess)
+	}
+}
+
+func TestSession_RotationAtLimit_PostExecution(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+
+	tmpDir := t.TempDir()
+	sessMgr := session.New(tmpDir, "")
+
+	executedSessionID := uuid.New().String()
+	sessDir, err := sessMgr.EnsureSessionDir(executedSessionID)
+	if err != nil {
+		t.Fatalf("failed to create session dir: %v", err)
+	}
+
+	doneCh := make(chan struct{})
+
+	appCfg := config.NewFromData(&config.ConfigData{
+		Channels: map[string]config.ChannelPolicy{
+			"default": {Mode: "thread"},
+		},
+	})
+
+	pool := New(appCfg, WorkerPoolConfig{
+		SessionManager: sessMgr,
+		Store:          store,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    1,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			// During execution, write transcript that hits DefaultMaxSessionSteps
+			tPath := filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl")
+			content := fmt.Sprintf(`{"step_index": %d, "type": "PLANNER_RESPONSE"}%s`, DefaultMaxSessionSteps, "\n")
+			_ = os.WriteFile(tPath, []byte(content), 0644)
+			return mockJSONResponse(executedSessionID, "Execution finished with many steps"), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			close(doneCh)
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{ID: "msg-post-rot", ThreadID: "thread-post-rot-test", Content: "Initial turn"}
+	_ = insertMessage(store, msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Timeout waiting for message")
+	}
+
+	// In post-execution, since steps exceeded DefaultMaxSessionSteps, session should be rotated to ""
+	curSess, _ := getSessionID(store, "thread-post-rot-test")
+	if curSess != "" {
+		t.Errorf("Expected session to be rotated (empty) post execution, got: %q", curSess)
+	}
+
+	prevSess, _ := getPreviousSessionID(store, "thread-post-rot-test")
+	if prevSess != executedSessionID {
+		t.Errorf("Expected previous session ID %q post execution, got %q", executedSessionID, prevSess)
+	}
+}
+
+func TestWatchdog_RotationCircuitBreaker_OnBloat(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+
+	tmpDir := t.TempDir()
+	sessMgr := session.New(tmpDir, "")
+
+	bloatedSessionID := "sess-wd-bloat"
+	sessDir, err := sessMgr.EnsureSessionDir(bloatedSessionID)
+	if err != nil {
+		t.Fatalf("failed to create session dir: %v", err)
+	}
+
+	_ = saveSessionID(store, "thread-wd-bloat", bloatedSessionID)
+
+	var mu sync.Mutex
+	var attempts []string
+	doneCh := make(chan struct{}, 1)
+
+	appCfg := config.NewFromData(&config.ConfigData{
+		Channels: map[string]config.ChannelPolicy{
+			"default": {Mode: "thread"},
+		},
+	})
+
+	pool := New(appCfg, WorkerPoolConfig{
+		SessionManager: sessMgr,
+		Store:          store,
+		TimeoutMinutes: 1,
+		BackoffBase:    5 * time.Millisecond,
+		MaxAttempts:    2,
+		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+			mu.Lock()
+			attempts = append(attempts, sessionID)
+			currentAttempt := len(attempts)
+			mu.Unlock()
+
+			if currentAttempt == 1 {
+				// During attempt 1, write a bloated transcript (exceeding DefaultMaxTranscriptBytes)
+				tPath := filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl")
+				blob := make([]byte, DefaultMaxTranscriptBytes+2048)
+				_ = os.WriteFile(tPath, blob, 0644)
+				return "", "inactivity timeout exceeded [watchdog]", 124, errors.New("watchdog timeout")
+			}
+
+			// Attempt 2 succeeds
+			return mockJSONResponse(uuid.New().String(), "Recovered on cold retry"), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			doneCh <- struct{}{}
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{ID: "msg-wd-bloat", ThreadID: "thread-wd-bloat", Content: "Run long task"}
+	_ = insertMessage(store, msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Timeout waiting for message completed")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(attempts) != 2 {
+		t.Fatalf("Expected 2 attempts, got %d", len(attempts))
+	}
+	if attempts[0] != bloatedSessionID {
+		t.Errorf("Expected attempt 1 to use session %q, got %q", bloatedSessionID, attempts[0])
+	}
+	if attempts[1] != "" {
+		t.Errorf("Expected attempt 2 to have rotated to empty session (cold start), got: %q", attempts[1])
+	}
+}
+
+func TestSession_Rotation_ChannelModeAndRemainingBranches(t *testing.T) {
+	t.Parallel()
+
+	// 1. Channel mode pre-flight byte limit
+	t.Run("ChannelMode_PreFlight_ByteLimit", func(t *testing.T) {
+		t.Parallel()
+		store := setupTestStore(t)
+		tmpDir := t.TempDir()
+		sessMgr := session.New(tmpDir, "")
+
+		oldSess := "sess-chan-byte"
+		sessDir, _ := sessMgr.EnsureSessionDir(oldSess)
+		tPath := filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl")
+		_ = os.WriteFile(tPath, make([]byte, DefaultMaxTranscriptBytes+100), 0644)
+
+		_ = saveSessionID(store, "chan-byte-test", oldSess)
+		_, _ = incrementSessionTurnCount(store, "chan-byte-test")
+
+		var mu sync.Mutex
+		var gotSessionID string
+		doneCh := make(chan struct{})
+
+		appCfg := config.NewFromData(&config.ConfigData{
+			Channels: map[string]config.ChannelPolicy{
+				"default": {Mode: "channel"},
+			},
+		})
+
+		pool := New(appCfg, WorkerPoolConfig{
+			SessionManager: sessMgr,
+			Store:          store,
+			TimeoutMinutes: 1,
+			BackoffBase:    10 * time.Millisecond,
+			MaxAttempts:    1,
+			RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+				mu.Lock()
+				gotSessionID = sessionID
+				mu.Unlock()
+				return mockJSONResponse(uuid.New().String(), "OK"), "", 0, nil
+			},
+			DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+				return nil
+			},
+			TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+				return func() {}
+			},
+			OnMessageCompleted: func(msg db.Message, finalStatus string) {
+				close(doneCh)
+			},
+		})
+		pool.Start()
+		defer pool.Stop()
+
+		msg := db.Message{ID: "msg-chan-b", ThreadID: "chan-byte-test", Content: "Aerial hello world"}
+		_ = insertMessage(store, msg)
+		pool.Enqueue(msg)
+
+		select {
+		case <-doneCh:
+		case <-time.After(3 * time.Second):
+			t.Fatal("Timeout waiting for message")
+		}
+
+		mu.Lock()
+		if gotSessionID != "" {
+			t.Errorf("Expected cold start (empty session ID) in channel mode byte limit, got: %q", gotSessionID)
+		}
+		mu.Unlock()
+	})
+
+	// 2. Channel mode pre-flight step limit
+	t.Run("ChannelMode_PreFlight_StepLimit", func(t *testing.T) {
+		t.Parallel()
+		store := setupTestStore(t)
+		tmpDir := t.TempDir()
+		sessMgr := session.New(tmpDir, "")
+
+		oldSess := "sess-chan-step"
+		sessDir, _ := sessMgr.EnsureSessionDir(oldSess)
+		tPath := filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl")
+		content := fmt.Sprintf(`{"step_index": %d, "type": "PLANNER_RESPONSE"}`+"\n", DefaultMaxSessionSteps)
+		_ = os.WriteFile(tPath, []byte(content), 0644)
+
+		_ = saveSessionID(store, "chan-step-test", oldSess)
+		_, _ = incrementSessionTurnCount(store, "chan-step-test")
+
+		var mu sync.Mutex
+		var gotSessionID string
+		doneCh := make(chan struct{})
+
+		appCfg := config.NewFromData(&config.ConfigData{
+			Channels: map[string]config.ChannelPolicy{
+				"default": {Mode: "channel"},
+			},
+		})
+
+		pool := New(appCfg, WorkerPoolConfig{
+			SessionManager: sessMgr,
+			Store:          store,
+			TimeoutMinutes: 1,
+			BackoffBase:    10 * time.Millisecond,
+			MaxAttempts:    1,
+			RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+				mu.Lock()
+				gotSessionID = sessionID
+				mu.Unlock()
+				return mockJSONResponse(uuid.New().String(), "OK"), "", 0, nil
+			},
+			DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+				return nil
+			},
+			TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+				return func() {}
+			},
+			OnMessageCompleted: func(msg db.Message, finalStatus string) {
+				close(doneCh)
+			},
+		})
+		pool.Start()
+		defer pool.Stop()
+
+		msg := db.Message{ID: "msg-chan-s", ThreadID: "chan-step-test", Content: "Aerial wake up"}
+		_ = insertMessage(store, msg)
+		pool.Enqueue(msg)
+
+		select {
+		case <-doneCh:
+		case <-time.After(3 * time.Second):
+			t.Fatal("Timeout waiting for message")
+		}
+
+		mu.Lock()
+		if gotSessionID != "" {
+			t.Errorf("Expected cold start (empty session ID) in channel mode step limit, got: %q", gotSessionID)
+		}
+		mu.Unlock()
+	})
+
+	// 3. Post-execution byte limit rotation
+	t.Run("PostExecution_ByteLimit", func(t *testing.T) {
+		t.Parallel()
+		store := setupTestStore(t)
+		tmpDir := t.TempDir()
+		sessMgr := session.New(tmpDir, "")
+
+		executedSessionID := uuid.New().String()
+		sessDir, _ := sessMgr.EnsureSessionDir(executedSessionID)
+
+		doneCh := make(chan struct{})
+		appCfg := config.NewFromData(&config.ConfigData{
+			Channels: map[string]config.ChannelPolicy{
+				"default": {Mode: "thread"},
+			},
+		})
+
+		pool := New(appCfg, WorkerPoolConfig{
+			SessionManager: sessMgr,
+			Store:          store,
+			TimeoutMinutes: 1,
+			BackoffBase:    10 * time.Millisecond,
+			MaxAttempts:    1,
+			RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+				tPath := filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl")
+				_ = os.WriteFile(tPath, make([]byte, DefaultMaxTranscriptBytes+500), 0644)
+				return mockJSONResponse(executedSessionID, "Execution heavy output"), "", 0, nil
+			},
+			DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+				return nil
+			},
+			TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+				return func() {}
+			},
+			OnMessageCompleted: func(msg db.Message, finalStatus string) {
+				close(doneCh)
+			},
+		})
+		pool.Start()
+		defer pool.Stop()
+
+		msg := db.Message{ID: "msg-post-byte", ThreadID: "thread-post-byte-test", Content: "Run byte heavy"}
+		_ = insertMessage(store, msg)
+		pool.Enqueue(msg)
+
+		select {
+		case <-doneCh:
+		case <-time.After(3 * time.Second):
+			t.Fatal("Timeout waiting for message")
+		}
+
+		curSess, _ := getSessionID(store, "thread-post-byte-test")
+		if curSess != "" {
+			t.Errorf("Expected rotated session ID, got: %q", curSess)
+		}
+	})
+
+	// 4. Watchdog step limit circuit breaker
+	t.Run("Watchdog_StepLimit", func(t *testing.T) {
+		t.Parallel()
+		store := setupTestStore(t)
+		tmpDir := t.TempDir()
+		sessMgr := session.New(tmpDir, "")
+
+		bloatedSessionID := "sess-wd-steplimit"
+		sessDir, _ := sessMgr.EnsureSessionDir(bloatedSessionID)
+		_ = saveSessionID(store, "thread-wd-step", bloatedSessionID)
+
+		var mu sync.Mutex
+		var attempts []string
+		doneCh := make(chan struct{}, 1)
+
+		appCfg := config.NewFromData(&config.ConfigData{
+			Channels: map[string]config.ChannelPolicy{
+				"default": {Mode: "thread"},
+			},
+		})
+
+		pool := New(appCfg, WorkerPoolConfig{
+			SessionManager: sessMgr,
+			Store:          store,
+			TimeoutMinutes: 1,
+			BackoffBase:    5 * time.Millisecond,
+			MaxAttempts:    2,
+			RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+				mu.Lock()
+				attempts = append(attempts, sessionID)
+				currentAttempt := len(attempts)
+				mu.Unlock()
+
+				if currentAttempt == 1 {
+					tPath := filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl")
+					content := fmt.Sprintf(`{"step_index": %d, "type": "PLANNER_RESPONSE"}`+"\n", DefaultMaxSessionSteps)
+					_ = os.WriteFile(tPath, []byte(content), 0644)
+					return "", "inactivity timeout exceeded [watchdog]", 124, errors.New("watchdog timeout")
+				}
+
+				return mockJSONResponse(uuid.New().String(), "Recovered on cold retry"), "", 0, nil
+			},
+			DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+				return nil
+			},
+			TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+				return func() {}
+			},
+			OnMessageCompleted: func(msg db.Message, finalStatus string) {
+				doneCh <- struct{}{}
+			},
+		})
+		pool.Start()
+		defer pool.Stop()
+
+		msg := db.Message{ID: "msg-wd-step-test", ThreadID: "thread-wd-step", Content: "Run long task with steps"}
+		_ = insertMessage(store, msg)
+		pool.Enqueue(msg)
+
+		select {
+		case <-doneCh:
+		case <-time.After(3 * time.Second):
+			t.Fatal("Timeout waiting for message completed")
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+		if len(attempts) != 2 {
+			t.Fatalf("Expected 2 attempts, got %d", len(attempts))
+		}
+		if attempts[1] != "" {
+			t.Errorf("Expected attempt 2 to have rotated to empty session (cold start), got: %q", attempts[1])
+		}
+	})
+}
+
+
+
 
 
 

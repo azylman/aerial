@@ -26,6 +26,8 @@ import (
 
 const (
 	DefaultMaxSessionTurns     = session.DefaultMaxSessionTurns
+	DefaultMaxSessionSteps     = session.DefaultMaxSessionSteps
+	DefaultMaxTranscriptBytes = session.DefaultMaxTranscriptBytes
 	DefaultMaxSessionIdleTime  = 24 * time.Hour
 	DefaultTimeoutMinutes      = 60
 	DefaultMaxRestarts         = 3

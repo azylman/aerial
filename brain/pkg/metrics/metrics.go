@@ -362,6 +362,15 @@ var (
 		[]string{"hook"},
 	)
 
+	// Session Rotation Telemetry
+	SessionRotationsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "aerial_brain_session_rotations_total",
+			Help: "Total count of session rotations triggered by phase, scope, and reason.",
+		},
+		[]string{"phase", "scope", "reason"},
+	)
+
 	BuildInfo = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "aerial_brain_build_info",
@@ -419,6 +428,7 @@ func init() {
 		ConfigReloadsTotal,
 		WebhooksDispatchedTotal,
 		WebhookDurationSeconds,
+		SessionRotationsTotal,
 		BuildInfo,
 	)
 
@@ -644,4 +654,19 @@ func RecordWebhookDispatch(hook, status string, duration time.Duration) {
 	WebhooksDispatchedTotal.WithLabelValues(hook, status).Inc()
 	WebhookDurationSeconds.WithLabelValues(hook).Observe(duration.Seconds())
 }
+
+// RecordSessionRotation records a session rotation event with phase, scope, and reason.
+func RecordSessionRotation(phase, scope, reason string) {
+	if phase == "" {
+		phase = "unknown"
+	}
+	if scope == "" {
+		scope = "thread"
+	}
+	if reason == "" {
+		reason = "unknown"
+	}
+	SessionRotationsTotal.WithLabelValues(phase, scope, reason).Inc()
+}
+
 
