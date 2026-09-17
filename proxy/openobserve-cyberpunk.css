@@ -1,0 +1,592 @@
+/* ==========================================================================
+   AERIAL PERMET COMMAND HUD V3.0 THEME FOR OPENOBSERVE
+   Permet Score Mecha Aesthetic: Obsidian (#06050a), Royal Purple Bento (#301a52),
+   Permet Purple (#c084fc), Neon Cyan (#00f0ff), Neon Magenta (#ff2a85)
+   ========================================================================== */
+
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Space+Grotesk:wght@500;700&display=swap');
+
+:root,
+:root.dark,
+.dark,
+body.body--dark,
+[data-theme="dark"] {
+    /* Aerial Design Tokens */
+    --aerial-bg-base: #06050a !important;
+    --aerial-card-bg: rgba(48, 26, 82, 0.88) !important;
+    --aerial-card-elevated: rgba(64, 34, 108, 0.92) !important;
+    --aerial-card-border: rgba(168, 85, 247, 0.38) !important;
+    --aerial-card-border-hover: rgba(192, 132, 252, 0.7) !important;
+    --aerial-neon-cyan: #00f0ff !important;
+    --aerial-neon-magenta: #ff2a85 !important;
+    --aerial-neon-purple: #c084fc !important;
+    --aerial-neon-green: #05ffa1 !important;
+    --aerial-neon-red: #ff3366 !important;
+    --aerial-neon-amber: #ffb703 !important;
+    --aerial-text-primary: #ffffff !important;
+    --aerial-text-muted: #d8b4fe !important;
+    --aerial-text-dim: #9d8dbb !important;
+    --aerial-font-mono: 'JetBrains Mono', monospace !important;
+    --aerial-font-heading: 'Space Grotesk', sans-serif !important;
+    --aerial-card-radius: 14px !important;
+    --aerial-glass-backdrop: blur(16px) !important;
+
+    /* OpenObserve Root Theme Overrides */
+    --color-theme-body-bg-primary: #06050a !important;
+    --color-theme-body-bg-secondary: rgba(26, 14, 46, 0.95) !important;
+    --color-theme-header-menu-bg: rgba(26, 14, 46, 0.92) !important;
+    --color-theme-menu-color: #ffffff !important;
+    --color-theme-menu-gradient-start: rgba(168, 85, 247, 0.35) !important;
+    --color-theme-menu-gradient-end: rgba(0, 240, 255, 0.25) !important;
+    --color-theme-accent: #c084fc !important;
+    --color-theme-tab-bg: rgba(48, 26, 82, 0.88) !important;
+    --color-theme-tab-bg-inactive: rgba(26, 14, 46, 0.85) !important;
+    --color-theme-table-header-bg: rgba(30, 16, 54, 0.95) !important;
+
+    /* Surface Tokens */
+    --color-surface-base: #06050a !important;
+    --color-surface-panel: rgba(48, 26, 82, 0.88) !important;
+    --color-surface-chrome: rgba(26, 14, 46, 0.92) !important;
+    --color-surface-chrome-deeper: rgba(18, 9, 32, 0.95) !important;
+    --color-surface-overlay: rgba(30, 16, 54, 0.96) !important;
+    --color-surface-subtle: rgba(64, 34, 108, 0.6) !important;
+    --color-surface-subtle-hover: rgba(64, 34, 108, 0.85) !important;
+    --color-surface-accent: #c084fc !important;
+    --color-surface-accent-hover: #d8b4fe !important;
+    --color-surface-chip: rgba(48, 26, 82, 0.7) !important;
+
+    /* Borders */
+    --color-border-default: rgba(168, 85, 247, 0.38) !important;
+    --color-border-strong: rgba(192, 132, 252, 0.6) !important;
+    --color-border-subtle: rgba(168, 85, 247, 0.25) !important;
+    --color-border-control: rgba(168, 85, 247, 0.38) !important;
+
+    /* Text */
+    --color-text-heading: #ffffff !important;
+    --color-text-body: #ffffff !important;
+    --color-text-muted: #d8b4fe !important;
+    --color-text-secondary: #d8b4fe !important;
+    --color-text-soft: #9d8dbb !important;
+    --color-text-code: #00f0ff !important;
+    --color-text-link: #00f0ff !important;
+    --color-text-link-hover: #ff2a85 !important;
+    --color-text-placeholder: #9d8dbb !important;
+
+    /* JSON Syntax Tokens */
+    --color-json-key: #00f0ff !important;
+    --color-json-string: #05ffa1 !important;
+    --color-json-number: #c084fc !important;
+    --color-json-boolean: #ffb703 !important;
+    --color-json-null: #ff2a85 !important;
+    --color-json-object: #ffffff !important;
+
+    /* Quasar Color System */
+    --q-primary: #c084fc !important;
+    --q-secondary: #00f0ff !important;
+    --q-accent: #ff2a85 !important;
+    --q-dark: #06050a !important;
+    --q-dark-page: #06050a !important;
+    --q-positive: #05ffa1 !important;
+    --q-negative: #ff3366 !important;
+    --q-info: #00f0ff !important;
+    --q-warning: #ffb703 !important;
+
+    /* Scrollbars */
+    --color-scrollbar-thumb: rgba(168, 85, 247, 0.35) !important;
+    --color-scrollbar-thumb-hover: rgba(0, 240, 255, 0.65) !important;
+}
+
+/* ==========================================================================
+   GLOBAL BODY & ANIMATED CIRCUIT BACKGROUND
+   ========================================================================== */
+html,
+body {
+    background-color: var(--aerial-bg-base) !important;
+    color: var(--aerial-text-primary) !important;
+    font-family: var(--aerial-font-mono) !important;
+    min-height: 100vh !important;
+    position: relative !important;
+}
+
+/* Animated SVG Circuit Traces & Permet Field */
+body::before {
+    content: '' !important;
+    position: fixed !important;
+    top: 0 !important;
+    left: 0 !important;
+    width: 100% !important;
+    height: 100% !important;
+    background-color: var(--aerial-bg-base) !important;
+    background-image: 
+        radial-gradient(ellipse 70% 50% at 50% 0%, rgba(192, 132, 252, 0.07), transparent 75%),
+        radial-gradient(ellipse 60% 40% at 85% 70%, rgba(0, 240, 255, 0.04), transparent 70%),
+        url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' width='120' height='120' viewBox='0 0 120 120'><path d='M0 20 H40 L60 40 H120 M60 40 V80 L40 100 H0 M60 80 H100 L120 100 M90 0 V30 M30 90 V120' fill='none' stroke='rgba(168,85,247,0.12)' stroke-width='1.5'/><circle cx='40' cy='20' r='3' fill='rgba(192,132,252,0.30)'><animate attributeName='r' values='2.6;4.2;2.6' dur='4s' begin='0.8s' repeatCount='indefinite'/><animate attributeName='opacity' values='0.25;0.45;0.25' dur='4s' begin='0.8s' repeatCount='indefinite'/></circle><circle cx='40' cy='20' r='3' fill='none' stroke='rgba(192,132,252,0.25)' stroke-width='0.8'><animate attributeName='r' values='3;7;3' dur='4s' begin='0.8s' repeatCount='indefinite'/><animate attributeName='opacity' values='0.30;0;0.30' dur='4s' begin='0.8s' repeatCount='indefinite'/></circle><circle cx='100' cy='40' r='3.5' fill='rgba(0,240,255,0.35)'><animate attributeName='r' values='3.2;4.8;3.2' dur='3.2s' repeatCount='indefinite'/><animate attributeName='opacity' values='0.30;0.50;0.30' dur='3.2s' repeatCount='indefinite'/></circle><circle cx='100' cy='40' r='3.5' fill='none' stroke='rgba(0,240,255,0.30)' stroke-width='0.8'><animate attributeName='r' values='3.5;7.5;3.5' dur='3.2s' repeatCount='indefinite'/><animate attributeName='opacity' values='0.30;0;0.30' dur='3.2s' repeatCount='indefinite'/></circle><circle cx='60' cy='80' r='3' fill='rgba(255,42,133,0.30)'><animate attributeName='r' values='2.6;4.2;2.6' dur='3.6s' begin='1.6s' repeatCount='indefinite'/><animate attributeName='opacity' values='0.25;0.45;0.25' dur='3.6s' begin='1.6s' repeatCount='indefinite'/></circle><circle cx='60' cy='80' r='3' fill='none' stroke='rgba(255,42,133,0.25)' stroke-width='0.8'><animate attributeName='r' values='3;7;3' dur='3.6s' begin='1.6s' repeatCount='indefinite'/><animate attributeName='opacity' values='0.25;0;0.25' dur='3.6s' begin='1.6s' repeatCount='indefinite'/></circle><circle cx='40' cy='100' r='3' fill='rgba(168,85,247,0.30)'><animate attributeName='r' values='2.5;3.8;2.5' dur='4.4s' begin='2.2s' repeatCount='indefinite'/><animate attributeName='opacity' values='0.20;0.40;0.20' dur='4.4s' begin='2.2s' repeatCount='indefinite'/></circle><circle cx='40' cy='100' r='3' fill='none' stroke='rgba(168,85,247,0.25)' stroke-width='0.8'><animate attributeName='r' values='3;6.5;3' dur='4.4s' begin='2.2s' repeatCount='indefinite'/><animate attributeName='opacity' values='0.20;0;0.20' dur='4.4s' begin='2.2s' repeatCount='indefinite'/></circle></svg>") !important;
+    background-size: 100% 100%, 100% 100%, 120px 120px !important;
+    background-repeat: no-repeat, no-repeat, repeat !important;
+    pointer-events: none !important;
+    z-index: 0 !important;
+    animation: circuit-flow 90s linear infinite, circuit-glow-breathe 12s ease-in-out infinite !important;
+    will-change: background-position, opacity !important;
+}
+
+/* Ambient Permet Aura */
+body::after {
+    content: '' !important;
+    position: fixed !important;
+    top: -50% !important;
+    left: -50% !important;
+    width: 200% !important;
+    height: 200% !important;
+    background: radial-gradient(circle at center, rgba(168, 85, 247, 0.04) 0%, rgba(0, 240, 255, 0.02) 35%, transparent 65%) !important;
+    pointer-events: none !important;
+    z-index: 0 !important;
+    animation: circuit-energy-surge 18s ease-in-out infinite alternate !important;
+}
+
+@keyframes circuit-flow {
+    0% {
+        background-position: 0 0, 0 0, 0 0;
+    }
+    100% {
+        background-position: 0 0, 0 0, 120px 120px;
+    }
+}
+
+@keyframes circuit-glow-breathe {
+    0%, 100% {
+        filter: drop-shadow(0 0 0px transparent);
+        opacity: 0.65;
+    }
+    50% {
+        filter: drop-shadow(0 0 2px rgba(192, 132, 252, 0.25));
+        opacity: 0.80;
+    }
+}
+
+@keyframes circuit-energy-surge {
+    0% {
+        transform: translate(-3%, -3%) scale(0.96);
+        opacity: 0.45;
+    }
+    50% {
+        transform: translate(2%, 3%) scale(1.04);
+        opacity: 0.8;
+    }
+    100% {
+        transform: translate(-1%, 2%) scale(1.0);
+        opacity: 0.5;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    body::before,
+    body::after {
+        animation: none !important;
+    }
+}
+
+/* ==========================================================================
+   APP WRAPPER & QUASAR LAYOUT TRANSPARENCY
+   ========================================================================== */
+#q-app,
+#app,
+.q-layout,
+.q-page-container,
+.q-page {
+    position: relative !important;
+    z-index: 1 !important;
+    background: transparent !important;
+    background-color: transparent !important;
+}
+
+/* ==========================================================================
+   HEADER & TOP NAVIGATION
+   ========================================================================== */
+.q-header,
+header {
+    background: rgba(26, 14, 46, 0.9) !important;
+    background-color: rgba(26, 14, 46, 0.9) !important;
+    backdrop-filter: blur(14px) !important;
+    -webkit-backdrop-filter: blur(14px) !important;
+    border-bottom: 1px solid rgba(168, 85, 247, 0.3) !important;
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.5) !important;
+}
+
+.q-header .q-toolbar {
+    min-height: 56px !important;
+}
+
+.q-header .q-toolbar__title {
+    font-family: var(--aerial-font-heading) !important;
+    font-weight: 700 !important;
+    color: #ffffff !important;
+    letter-spacing: -0.01em !important;
+}
+
+/* ==========================================================================
+   SIDEBAR & DRAWER NAVIGATION
+   ========================================================================== */
+.q-drawer,
+aside,
+.q-drawer--left {
+    background: rgba(18, 9, 32, 0.92) !important;
+    background-color: rgba(18, 9, 32, 0.92) !important;
+    backdrop-filter: blur(16px) !important;
+    -webkit-backdrop-filter: blur(16px) !important;
+    border-right: 1px solid rgba(168, 85, 247, 0.28) !important;
+}
+
+.q-drawer .q-item {
+    border-radius: 8px !important;
+    margin: 4px 8px !important;
+    color: var(--aerial-text-muted) !important;
+    transition: all 0.2s ease !important;
+    font-family: var(--aerial-font-heading) !important;
+}
+
+.q-drawer .q-item:hover {
+    background: rgba(64, 34, 108, 0.6) !important;
+    color: var(--aerial-neon-cyan) !important;
+    transform: translateX(2px) !important;
+}
+
+.q-drawer .q-item.q-router-link--active,
+.q-drawer .q-item--active {
+    background: rgba(192, 132, 252, 0.18) !important;
+    color: #ffffff !important;
+    border-left: 3px solid var(--aerial-neon-cyan) !important;
+    box-shadow: inset 0 0 12px rgba(0, 240, 255, 0.15) !important;
+}
+
+.q-drawer .q-item__section--avatar .q-icon {
+    color: var(--aerial-neon-purple) !important;
+    transition: color 0.2s ease !important;
+}
+
+.q-drawer .q-item:hover .q-item__section--avatar .q-icon,
+.q-drawer .q-item--active .q-item__section--avatar .q-icon {
+    color: var(--aerial-neon-cyan) !important;
+    filter: drop-shadow(0 0 6px rgba(0, 240, 255, 0.5)) !important;
+}
+
+/* ==========================================================================
+   BENTO CARDS & GLASSMORPHISM PANELS
+   ========================================================================== */
+.q-card,
+.grid-stack-item-content,
+.dashboard-card,
+.bento-card,
+.o2-card {
+    background: rgba(48, 26, 82, 0.88) !important;
+    background-color: rgba(48, 26, 82, 0.88) !important;
+    border: 1px solid rgba(168, 85, 247, 0.38) !important;
+    border-radius: var(--aerial-card-radius) !important;
+    backdrop-filter: var(--aerial-glass-backdrop) !important;
+    -webkit-backdrop-filter: var(--aerial-glass-backdrop) !important;
+    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.65), inset 0 0 14px rgba(168, 85, 247, 0.08) !important;
+    transition: border-color 0.25s ease, box-shadow 0.25s ease, transform 0.2s ease !important;
+}
+
+.q-card:hover,
+.grid-stack-item-content:hover,
+.dashboard-card:hover {
+    border-color: var(--aerial-card-border-hover) !important;
+    box-shadow: 0 8px 32px rgba(168, 85, 247, 0.25), inset 0 0 20px rgba(192, 132, 252, 0.07) !important;
+}
+
+.q-card--bordered {
+    border: 1px solid rgba(168, 85, 247, 0.38) !important;
+}
+
+/* ==========================================================================
+   LOGS EXPLORER & TELEMETRY TABLES
+   ========================================================================== */
+.q-table__container,
+.q-table__card {
+    background: rgba(48, 26, 82, 0.88) !important;
+    background-color: rgba(48, 26, 82, 0.88) !important;
+    border: 1px solid rgba(168, 85, 247, 0.38) !important;
+    border-radius: var(--aerial-card-radius) !important;
+    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.65) !important;
+    overflow: hidden !important;
+}
+
+.q-table thead tr,
+.q-table th {
+    background: rgba(30, 16, 54, 0.95) !important;
+    background-color: rgba(30, 16, 54, 0.95) !important;
+    color: var(--aerial-neon-purple) !important;
+    font-family: var(--aerial-font-heading) !important;
+    font-weight: 700 !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.05em !important;
+    font-size: 0.75rem !important;
+    border-bottom: 1px solid rgba(168, 85, 247, 0.4) !important;
+}
+
+.q-table tbody tr {
+    background: transparent !important;
+    transition: background 0.15s ease !important;
+    border-bottom: 1px solid rgba(168, 85, 247, 0.18) !important;
+}
+
+.q-table tbody tr:hover {
+    background: rgba(64, 34, 108, 0.45) !important;
+}
+
+.q-table tbody td {
+    font-family: var(--aerial-font-mono) !important;
+    color: var(--aerial-text-primary) !important;
+    border-bottom: 1px solid rgba(168, 85, 247, 0.18) !important;
+}
+
+/* Timestamps in Log Stream */
+.timestamp-col,
+.q-table td.timestamp,
+[data-column="timestamp"] {
+    color: var(--aerial-text-muted) !important;
+    font-size: 0.82rem !important;
+    white-space: nowrap !important;
+}
+
+/* Log Level Badges & Status Indicators */
+.log-level-error,
+.badge-error,
+[data-level="error"],
+[data-level="fatal"] {
+    background: rgba(255, 51, 102, 0.2) !important;
+    color: var(--aerial-neon-red) !important;
+    border: 1px solid rgba(255, 51, 102, 0.5) !important;
+    border-radius: 4px !important;
+    font-weight: 700 !important;
+    text-shadow: 0 0 8px rgba(255, 51, 102, 0.5) !important;
+}
+
+.log-level-warn,
+.badge-warn,
+.badge-warning,
+[data-level="warn"],
+[data-level="warning"] {
+    background: rgba(255, 183, 3, 0.2) !important;
+    color: var(--aerial-neon-amber) !important;
+    border: 1px solid rgba(255, 183, 3, 0.5) !important;
+    border-radius: 4px !important;
+    font-weight: 700 !important;
+    text-shadow: 0 0 8px rgba(255, 183, 3, 0.5) !important;
+}
+
+.log-level-info,
+.badge-info,
+[data-level="info"] {
+    background: rgba(0, 240, 255, 0.18) !important;
+    color: var(--aerial-neon-cyan) !important;
+    border: 1px solid rgba(0, 240, 255, 0.45) !important;
+    border-radius: 4px !important;
+    font-weight: 600 !important;
+    text-shadow: 0 0 8px rgba(0, 240, 255, 0.4) !important;
+}
+
+.log-level-debug,
+.badge-debug,
+[data-level="debug"],
+[data-level="trace"] {
+    background: rgba(192, 132, 252, 0.18) !important;
+    color: var(--aerial-neon-purple) !important;
+    border: 1px solid rgba(192, 132, 252, 0.45) !important;
+    border-radius: 4px !important;
+    font-weight: 600 !important;
+}
+
+/* ==========================================================================
+   MONACO EDITOR & QUERY CONSOLE
+   ========================================================================== */
+.monaco-editor,
+.monaco-editor-background,
+.monaco-editor .inputarea.ime-input {
+    background-color: rgba(9, 6, 20, 0.95) !important;
+    font-family: var(--aerial-font-mono) !important;
+}
+
+.monaco-editor {
+    border: 1px solid rgba(168, 85, 247, 0.35) !important;
+    border-radius: 8px !important;
+    box-shadow: inset 0 0 16px rgba(0, 0, 0, 0.7) !important;
+}
+
+.monaco-editor .margin {
+    background-color: rgba(18, 9, 32, 0.95) !important;
+    border-right: 1px solid rgba(168, 85, 247, 0.25) !important;
+}
+
+.monaco-editor .line-numbers {
+    color: var(--aerial-text-dim) !important;
+}
+
+.monaco-editor .current-line {
+    background: rgba(64, 34, 108, 0.3) !important;
+    border: none !important;
+}
+
+/* Query Builder Container */
+.o2-query-editor,
+.query-editor-container {
+    background: rgba(26, 14, 46, 0.92) !important;
+    border: 1px solid rgba(168, 85, 247, 0.35) !important;
+    border-radius: 10px !important;
+    padding: 8px !important;
+}
+
+/* ==========================================================================
+   INPUTS, DROPDOWNS, SEARCH & DATEPICKERS
+   ========================================================================== */
+.q-field__control,
+input,
+select,
+.q-select {
+    background: rgba(26, 14, 46, 0.9) !important;
+    background-color: rgba(26, 14, 46, 0.9) !important;
+    border: 1px solid rgba(168, 85, 247, 0.38) !important;
+    color: var(--aerial-text-primary) !important;
+    border-radius: 8px !important;
+    font-family: var(--aerial-font-mono) !important;
+    transition: all 0.2s ease !important;
+}
+
+.q-field--focused .q-field__control,
+input:focus,
+select:focus,
+.q-field__control:focus-within {
+    border-color: var(--aerial-neon-cyan) !important;
+    box-shadow: 0 0 12px rgba(0, 240, 255, 0.35) !important;
+    outline: none !important;
+}
+
+.q-field__label {
+    color: var(--aerial-text-muted) !important;
+    font-family: var(--aerial-font-heading) !important;
+}
+
+.q-field--focused .q-field__label {
+    color: var(--aerial-neon-cyan) !important;
+}
+
+/* ==========================================================================
+   BUTTONS & ACTIONS
+   ========================================================================== */
+.q-btn {
+    font-family: var(--aerial-font-heading) !important;
+    font-weight: 600 !important;
+    border-radius: 8px !important;
+    transition: all 0.2s ease !important;
+}
+
+/* Primary Action Buttons */
+.q-btn.bg-primary,
+.q-btn--standard.bg-primary {
+    background: var(--aerial-neon-purple) !important;
+    background-color: var(--aerial-neon-purple) !important;
+    color: #06050a !important;
+    font-weight: 700 !important;
+    box-shadow: 0 0 14px rgba(192, 132, 252, 0.4) !important;
+}
+
+.q-btn.bg-primary:hover,
+.q-btn--standard.bg-primary:hover {
+    background: #d8b4fe !important;
+    background-color: #d8b4fe !important;
+    box-shadow: 0 0 20px rgba(192, 132, 252, 0.7) !important;
+    transform: translateY(-1px) !important;
+}
+
+/* Secondary / Outline Buttons */
+.q-btn--outline {
+    border: 1px solid rgba(168, 85, 247, 0.45) !important;
+    color: #ffffff !important;
+}
+
+.q-btn--outline:hover {
+    border-color: var(--aerial-neon-cyan) !important;
+    color: var(--aerial-neon-cyan) !important;
+    box-shadow: 0 0 10px rgba(0, 240, 255, 0.25) !important;
+}
+
+/* ==========================================================================
+   MODALS, MENUS & DIALOGS
+   ========================================================================== */
+.q-menu,
+.q-dialog .q-card,
+.q-menu--square,
+.q-menu.q-position-engine {
+    background: rgba(30, 16, 54, 0.96) !important;
+    background-color: rgba(30, 16, 54, 0.96) !important;
+    border: 1px solid rgba(168, 85, 247, 0.45) !important;
+    border-radius: var(--aerial-card-radius) !important;
+    backdrop-filter: blur(24px) !important;
+    -webkit-backdrop-filter: blur(24px) !important;
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.85), 0 0 24px rgba(168, 85, 247, 0.15) !important;
+}
+
+.q-menu .q-item {
+    color: var(--aerial-text-primary) !important;
+    transition: background 0.15s ease !important;
+}
+
+.q-menu .q-item:hover {
+    background: rgba(64, 34, 108, 0.7) !important;
+    color: var(--aerial-neon-cyan) !important;
+}
+
+/* ==========================================================================
+   CODE BLOCKS & PREFORMATTED LOG TEXT
+   ========================================================================== */
+pre,
+code,
+.o2-code-pre {
+    font-family: var(--aerial-font-mono) !important;
+}
+
+pre,
+.o2-code-pre {
+    background: rgba(9, 6, 20, 0.95) !important;
+    border: 1px solid rgba(168, 85, 247, 0.3) !important;
+    border-radius: 8px !important;
+    padding: 8px 12px !important;
+}
+
+/* ==========================================================================
+   TYPOGRAPHY & HEADINGS
+   ========================================================================== */
+h1, h2, h3, h4, h5, h6,
+.text-h1, .text-h2, .text-h3, .text-h4, .text-h5, .text-h6 {
+    font-family: var(--aerial-font-heading) !important;
+    font-weight: 700 !important;
+    color: #ffffff !important;
+    letter-spacing: -0.01em !important;
+}
+
+/* ==========================================================================
+   HIGH-TECH CYBER SCROLLBARS & SELECTION
+   ========================================================================== */
+::-webkit-scrollbar {
+    width: 6px !important;
+    height: 6px !important;
+}
+
+::-webkit-scrollbar-track {
+    background: rgba(6, 5, 10, 0.6) !important;
+}
+
+::-webkit-scrollbar-thumb {
+    background: rgba(168, 85, 247, 0.35) !important;
+    border-radius: 3px !important;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: rgba(0, 240, 255, 0.65) !important;
+    box-shadow: 0 0 8px rgba(0, 240, 255, 0.5) !important;
+}
+
+::selection {
+    background: rgba(0, 240, 255, 0.35) !important;
+    color: #ffffff !important;
+}
