@@ -708,7 +708,7 @@ services:
       autoheal: "true"
       homepage.group: "Observability"
       homepage.name: "OpenObserve Logs"
-      homepage.icon: "openobserve.png"
+      homepage.icon: "open-observe.png"
       homepage.description: "Full-Stack Log & Telemetry Explorer"
       homepage.href: "/openobserve/"
     environment:
