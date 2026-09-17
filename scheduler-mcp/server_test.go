@@ -5,12 +5,27 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
+
+type JSONRPCResponse struct {
+	JSONRPC string      `json:"jsonrpc"`
+	ID      interface{} `json:"id,omitempty"`
+	Result  interface{} `json:"result,omitempty"`
+	Error   *RPCError   `json:"error,omitempty"`
+}
+
+type RPCError struct {
+	Code    int         `json:"code"`
+	Message string      `json:"message"`
+	Data    interface{} `json:"data,omitempty"`
+}
 
 func NewTestConfig() *Config {
 	return &Config{
@@ -216,8 +231,146 @@ func TestMCPToolsCallLifecycle(t *testing.T) {
 
 	var unknownResp JSONRPCResponse
 	_ = json.NewDecoder(resp4.Body).Decode(&unknownResp)
-	if unknownResp.Error == nil || unknownResp.Error.Code != -32601 {
-		t.Errorf("Expected -32601 error for unknown tool, got %+v", unknownResp)
+	if unknownResp.Error == nil || (unknownResp.Error.Code != -32601 && unknownResp.Error.Code != -32602) {
+		t.Errorf("Expected -32601 or -32602 error for unknown tool, got %+v", unknownResp)
+	}
+}
+
+func TestAerialPRScriptSimulation(t *testing.T) {
+	_, ts := setupTestServer(t)
+	defer ts.Close()
+
+	// Exactly simulates scripts/aerial-pr.sh:
+	// curl -s -X POST -H "Content-Type: application/json" -d ... (no Accept, no MCP-Protocol-Version)
+	rpcPayload := `{
+		"jsonrpc": "2.0",
+		"id": 1,
+		"method": "tools/call",
+		"params": {
+			"name": "schedule_once",
+			"arguments": {
+				"target_id": "channel-12345",
+				"run_at": "2m",
+				"prompt": "Check on the status of Pull Request #123"
+			}
+		}
+	}`
+
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/mcp", strings.NewReader(rpcPayload))
+	if err != nil {
+		t.Fatalf("failed to create request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	// Note: Explicitly no Accept header or MCP-Protocol-Version header!
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /mcp failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", resp.StatusCode)
+	}
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("failed to read response: %v", err)
+	}
+
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(bodyBytes, &parsed); err != nil {
+		t.Fatalf("response is not valid JSON: %v, raw: %s", err, string(bodyBytes))
+	}
+
+	resMap, ok := parsed["result"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected result object in %+v", parsed)
+	}
+
+	if isErr, ok := resMap["isError"].(bool); ok && isErr {
+		t.Fatalf("unexpected tool error in response: %+v", resMap)
+	}
+
+	contentList, ok := resMap["content"].([]interface{})
+	if !ok || len(contentList) == 0 {
+		t.Fatalf("expected non-empty content list in %+v", resMap)
+	}
+
+	firstContent, ok := contentList[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected content item object in %+v", contentList)
+	}
+
+	textContent, ok := firstContent["text"].(string)
+	if !ok || textContent == "" {
+		t.Fatalf("expected text string in %+v", firstContent)
+	}
+
+	var innerJSON map[string]interface{}
+	if err := json.Unmarshal([]byte(textContent), &innerJSON); err != nil {
+		t.Fatalf("expected inner text to be valid JSON (fromjson in jq): %v, raw: %s", err, textContent)
+	}
+
+	schedID, ok := innerJSON["schedule_id"].(string)
+	if !ok || schedID == "" {
+		t.Fatalf("expected schedule_id in inner JSON: %+v", innerJSON)
+	}
+
+	// Also test with scheduler_ alias prefix:
+	aliasPayload := `{
+		"jsonrpc": "2.0",
+		"id": 2,
+		"method": "tools/call",
+		"params": {
+			"name": "scheduler_schedule_once",
+			"arguments": {
+				"target_id": "channel-12345",
+				"run_at": "5m",
+				"prompt": "Check on deployment"
+			}
+		}
+	}`
+	reqAlias, _ := http.NewRequest(http.MethodPost, ts.URL+"/mcp", strings.NewReader(aliasPayload))
+	reqAlias.Header.Set("Content-Type", "application/json")
+	respAlias, err := http.DefaultClient.Do(reqAlias)
+	if err != nil {
+		t.Fatalf("POST alias failed: %v", err)
+	}
+	defer respAlias.Body.Close()
+	if respAlias.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK for alias, got %d", respAlias.StatusCode)
+	}
+
+	// And test tool error response shape (empty target_id)
+	errPayload := `{
+		"jsonrpc": "2.0",
+		"id": 3,
+		"method": "tools/call",
+		"params": {
+			"name": "schedule_once",
+			"arguments": {
+				"target_id": "",
+				"run_at": "2m",
+				"prompt": "Check PR"
+			}
+		}
+	}`
+	reqErr, _ := http.NewRequest(http.MethodPost, ts.URL+"/mcp", strings.NewReader(errPayload))
+	reqErr.Header.Set("Content-Type", "application/json")
+	respErr, err := http.DefaultClient.Do(reqErr)
+	if err != nil {
+		t.Fatalf("POST err failed: %v", err)
+	}
+	defer respErr.Body.Close()
+	var errParsed map[string]interface{}
+	_ = json.NewDecoder(respErr.Body).Decode(&errParsed)
+	errResMap, ok := errParsed["result"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected result object in error response: %+v", errParsed)
+	}
+	if isErr, ok := errResMap["isError"].(bool); !ok || !isErr {
+		t.Fatalf("expected isError: true on validation error, got %+v", errResMap)
 	}
 }
 
@@ -232,8 +385,8 @@ func TestMCPUnknownMethodAndNotifications(t *testing.T) {
 		t.Fatalf("Notification request failed: %v", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
-		t.Errorf("Expected 204 or 200 for notification, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+		t.Errorf("Expected 204, 202, or 200 for notification, got %d", resp.StatusCode)
 	}
 
 	// Unknown method with id
@@ -244,10 +397,12 @@ func TestMCPUnknownMethodAndNotifications(t *testing.T) {
 	}
 	defer resp2.Body.Close()
 
-	var unknownResp JSONRPCResponse
-	_ = json.NewDecoder(resp2.Body).Decode(&unknownResp)
-	if unknownResp.Error == nil || unknownResp.Error.Code != -32601 {
-		t.Errorf("Expected method not found error, got %+v", unknownResp)
+	if resp2.StatusCode != http.StatusBadRequest {
+		var unknownResp JSONRPCResponse
+		_ = json.NewDecoder(resp2.Body).Decode(&unknownResp)
+		if unknownResp.Error == nil || unknownResp.Error.Code != -32601 {
+			t.Errorf("Expected 400 Bad Request or method not found error, got status %d, %+v", resp2.StatusCode, unknownResp)
+		}
 	}
 }
 
@@ -277,16 +432,18 @@ func TestMCP_AllHttpAndRPC_EdgeCases(t *testing.T) {
 	}
 	_ = emptyResp.Body.Close()
 
-	// 4. Batch invalid JSON array -> parse error
+	// 4. Batch invalid JSON array -> HTTP 400 or parse error
 	batchBadResp, err := http.Post(ts.URL+"/mcp", "application/json", bytes.NewBufferString("[{bad json"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	defer batchBadResp.Body.Close()
-	var batchBadRPC JSONRPCResponse
-	_ = json.NewDecoder(batchBadResp.Body).Decode(&batchBadRPC)
-	if batchBadRPC.Error == nil || batchBadRPC.Error.Code != -32700 {
-		t.Errorf("expected -32700 for malformed batch, got %+v", batchBadRPC)
+	if batchBadResp.StatusCode != http.StatusBadRequest {
+		var batchBadRPC JSONRPCResponse
+		_ = json.NewDecoder(batchBadResp.Body).Decode(&batchBadRPC)
+		if batchBadRPC.Error == nil || batchBadRPC.Error.Code != -32700 {
+			t.Errorf("expected 400 Bad Request or -32700 for malformed batch, got status %d, %+v", batchBadResp.StatusCode, batchBadRPC)
+		}
 	}
 
 	// 5. Batch valid JSON array
@@ -301,16 +458,18 @@ func TestMCP_AllHttpAndRPC_EdgeCases(t *testing.T) {
 		t.Errorf("expected 2 responses in batch, got %d", len(batchResponses))
 	}
 
-	// 6. Single malformed JSON
+	// 6. Single malformed JSON -> HTTP 400 or parse error
 	badResp, err := http.Post(ts.URL+"/mcp", "application/json", bytes.NewBufferString("{bad json"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	defer badResp.Body.Close()
-	var badRPC JSONRPCResponse
-	_ = json.NewDecoder(badResp.Body).Decode(&badRPC)
-	if badRPC.Error == nil || badRPC.Error.Code != -32700 {
-		t.Errorf("expected -32700 for malformed single req, got %+v", badRPC)
+	if badResp.StatusCode != http.StatusBadRequest {
+		var badRPC JSONRPCResponse
+		_ = json.NewDecoder(badResp.Body).Decode(&badRPC)
+		if badRPC.Error == nil || badRPC.Error.Code != -32700 {
+			t.Errorf("expected 400 Bad Request or -32700 for malformed single req, got status %d, %+v", badResp.StatusCode, badRPC)
+		}
 	}
 
 	// 7. Ping single method

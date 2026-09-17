@@ -381,39 +381,20 @@ func TestServer_ProcessRequest_AndEdgeCases(t *testing.T) {
 		t.Errorf("expected 400 for read error, got %d", rec.Code)
 	}
 
-	// processRequest tools/call invalid params JSON
-	respInvParams := server.processRequest(JSONRPCRequest{
-		JSONRPC: "2.0",
-		ID:      100,
-		Method:  "tools/call",
-		Params:  json.RawMessage(`"not an object"`),
-	})
-	if respInvParams == nil || respInvParams.Error == nil || respInvParams.Error.Code != -32602 {
-		t.Errorf("expected -32602 for invalid params, got %+v", respInvParams)
+	// handleMCP empty body
+	recEmpty := httptest.NewRecorder()
+	reqEmpty := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader("   "))
+	server.handleMCP(recEmpty, reqEmpty)
+	if recEmpty.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for empty body, got %d", recEmpty.Code)
 	}
 
-	// processRequest notification with unknown method without ID
-	respUnknownNotif := server.processRequest(JSONRPCRequest{
-		JSONRPC: "2.0",
-		Method:  "custom/unknown_notification",
-	})
-	if respUnknownNotif != nil {
-		t.Errorf("expected nil response for unknown notification without ID, got %+v", respUnknownNotif)
-	}
-
-	// processRequest tools/call execution error (callErr != nil)
-	respToolErr := server.processRequest(JSONRPCRequest{
-		JSONRPC: "2.0",
-		ID:      101,
-		Method:  "tools/call",
-		Params:  json.RawMessage(`{"name":"schedule_recurring","arguments":{"channel_id":""}}`),
-	})
-	if respToolErr == nil || respToolErr.Result == nil {
-		t.Fatalf("expected tool error result, got %+v", respToolErr)
-	}
-	resMap := respToolErr.Result.(map[string]interface{})
-	if resMap["isError"] != true {
-		t.Errorf("expected isError true, got %+v", resMap)
+	// handleMCP method not allowed
+	recMethod := httptest.NewRecorder()
+	reqMethod := httptest.NewRequest(http.MethodDelete, "/mcp", nil)
+	server.handleMCP(recMethod, reqMethod)
+	if recMethod.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405 for DELETE, got %d", recMethod.Code)
 	}
 }
 
@@ -485,20 +466,6 @@ func TestServer_WriteResponseAndDisconnect(t *testing.T) {
 	// 7. Generic error write
 	mockGeneric := &mockErrWriter{err: errors.New("disk full")}
 	writeResponse(mockGeneric, req, []byte("data"))
-
-	// 8. writeJSON success and failure
-	recJSON := httptest.NewRecorder()
-	writeJSON(recJSON, req, map[string]string{"foo": "bar"})
-	if recJSON.Code != http.StatusOK {
-		t.Errorf("expected 200, got %d", recJSON.Code)
-	}
-
-	// Marshal error on channel type
-	recErrJSON := httptest.NewRecorder()
-	writeJSON(recErrJSON, req, make(chan int))
-	if recErrJSON.Code != http.StatusInternalServerError {
-		t.Errorf("expected 500 on marshal error, got %d", recErrJSON.Code)
-	}
 }
 
 type errReadCloser struct{}
@@ -543,22 +510,4 @@ func TestDB_UnsupportedScheme(t *testing.T) {
 	}
 }
 
-func TestServer_MarshalIndentFailure(t *testing.T) {
-	server, _ := setupTestServer(t)
-	old := marshalIndentFn
-	defer func() { marshalIndentFn = old }()
-	marshalIndentFn = func(v interface{}, prefix, indent string) ([]byte, error) {
-		return nil, errors.New("simulated marshal error")
-	}
-
-	resp := server.processRequest(JSONRPCRequest{
-		JSONRPC: "2.0",
-		ID:      200,
-		Method:  "tools/call",
-		Params:  json.RawMessage(`{"name":"list_schedules","arguments":{}}`),
-	})
-	if resp == nil || resp.Error == nil || resp.Error.Code != -32603 {
-		t.Errorf("expected -32603 on marshal error, got %+v", resp)
-	}
-}
 
