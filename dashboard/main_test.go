@@ -3194,3 +3194,183 @@ func TestDashboard_CloseWarnAndDisconnect(t *testing.T) {
 	writeJSON(mockWJSONErr, reqActive, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+func TestMergeClusterDeploymentsWithHangar_HangarActiveSuppresses120sTimeout(t *testing.T) {
+	now := time.Now().UTC()
+	runs := []GitHubRun{
+		{
+			ID:         101,
+			HeadSHA:    "abc1234567890",
+			Status:     "completed",
+			Conclusion: "success",
+			CreatedAt:  now.Add(-300 * time.Second),
+			UpdatedAt:  now.Add(-200 * time.Second), // 200s ago (> 120s timeout window)
+			HTMLURL:    "https://github.com/azylman/aerial/actions/runs/101",
+		},
+	}
+	jobs := map[int64][]GitHubJob{
+		101: {
+			{Name: "Build & Push Images (dashboard)", Status: "completed", Conclusion: "success"},
+		},
+	}
+	gitSync := GitSyncStatusResponse{
+		Status: "synced",
+		Reconciliation: &ReconciliationStatus{
+			Active:         true,
+			State:          "pulling",
+			Stage:          "pulling",
+			TargetServices: []string{"dashboard"},
+		},
+	}
+
+	deps := mergeClusterDeploymentsWithHangar(nil, runs, jobs, gitSync, "oldcommit")
+	if len(deps) == 0 {
+		t.Fatalf("expected non-empty deployments")
+	}
+	dep := deps[0]
+	if dep.Stage != "awaiting_pull" {
+		t.Errorf("expected stage 'awaiting_pull' when Hangar is active, got %q", dep.Stage)
+	}
+	if dep.Steps[2].Status != "active" {
+		t.Errorf("expected Hangar Sync step active, got %q", dep.Steps[2].Status)
+	}
+}
+
+func TestMergeClusterDeploymentsWithHangar_HangarFailedFastFail(t *testing.T) {
+	now := time.Now().UTC()
+	runs := []GitHubRun{
+		{
+			ID:         102,
+			HeadSHA:    "def5678901234",
+			Status:     "completed",
+			Conclusion: "success",
+			CreatedAt:  now.Add(-60 * time.Second),
+			UpdatedAt:  now.Add(-30 * time.Second),
+			HTMLURL:    "https://github.com/azylman/aerial/actions/runs/102",
+		},
+	}
+	gitSync := GitSyncStatusResponse{
+		Status: "error",
+		Reconciliation: &ReconciliationStatus{
+			Active: false,
+			State:  "failed",
+			Stage:  "failed",
+			Error:  "manifest unknown",
+		},
+	}
+
+	deps := mergeClusterDeploymentsWithHangar(nil, runs, nil, gitSync, "oldcommit")
+	if len(deps) == 0 {
+		t.Fatalf("expected non-empty deployments")
+	}
+	dep := deps[0]
+	if dep.Stage != "failed" {
+		t.Errorf("expected stage 'failed', got %q", dep.Stage)
+	}
+	if !strings.Contains(dep.CommitMsg, "manifest unknown") {
+		t.Errorf("expected error in commit msg, got %q", dep.CommitMsg)
+	}
+	if dep.Steps[2].Status != "failed" {
+		t.Errorf("expected Hangar Sync step failed, got %q", dep.Steps[2].Status)
+	}
+}
+
+func TestMergeClusterDeploymentsWithHangar_TargetServicesScoping(t *testing.T) {
+	now := time.Now().UTC()
+	rawContainers := []DockerContainerJSON{
+		{
+			Names:   []string{"/aerial-dashboard"},
+			Created: now.Add(-30 * time.Second).Unix(),
+			State:   "running",
+			Labels: map[string]string{
+				"com.docker.compose.project": "aerial",
+				"com.docker.compose.service": "dashboard",
+			},
+		},
+		{
+			Names:   []string{"/aerial-brain"},
+			Created: now.Add(-5 * 3600 * time.Second).Unix(),
+			State:   "running",
+			Labels: map[string]string{
+				"com.docker.compose.project": "aerial",
+				"com.docker.compose.service": "brain",
+			},
+		},
+		{
+			Names:   []string{"/aerial-proxy"},
+			Created: now.Add(-5 * 3600 * time.Second).Unix(),
+			State:   "running",
+			Labels: map[string]string{
+				"com.docker.compose.project": "aerial",
+				"com.docker.compose.service": "proxy",
+			},
+		},
+	}
+
+	gitSync := GitSyncStatusResponse{
+		Status: "synced",
+		Reconciliation: &ReconciliationStatus{
+			Active:         true,
+			State:          "swapping",
+			Stage:          "swapping",
+			TargetServices: []string{"dashboard"},
+			CommitSHA:      "548c826",
+			StartedAt:      now.Add(-60 * time.Second),
+		},
+	}
+
+	deps := mergeClusterDeploymentsWithHangar(rawContainers, nil, nil, gitSync, "current")
+	if len(deps) == 0 {
+		t.Fatalf("expected non-empty deployments")
+	}
+	dep := deps[0]
+	if dep.Stage != "swapping" {
+		t.Errorf("expected stage 'swapping', got %q", dep.Stage)
+	}
+	if dep.Commit != "548c826" {
+		t.Errorf("expected commit '548c826', got %q", dep.Commit)
+	}
+	// Crucial assertion: MatrixJobs must ONLY contain the target service 'dashboard'
+	if len(dep.MatrixJobs) != 1 {
+		t.Fatalf("expected exactly 1 scoped chip for target service, got %d: %+v", len(dep.MatrixJobs), dep.MatrixJobs)
+	}
+	if dep.MatrixJobs[0].Name != "dashboard" {
+		t.Errorf("expected dashboard chip, got %s", dep.MatrixJobs[0].Name)
+	}
+}
+
+func TestMergeClusterDeploymentsWithHangar_DegradedWithoutHangarFailure(t *testing.T) {
+	now := time.Now().UTC()
+	rawContainers := []DockerContainerJSON{
+		{
+			ID:      "c-unhealthy",
+			Names:   []string{"/aerial-brain"},
+			State:   "running",
+			Created: now.Add(-10 * time.Minute).Unix(),
+			Labels: map[string]string{
+				"com.docker.compose.project": "aerial",
+				"com.docker.compose.service": "brain",
+			},
+			Health: &DockerContainerHealth{Status: "unhealthy"},
+		},
+	}
+	gitSync := GitSyncStatusResponse{
+		Status: "synced",
+	}
+
+	deps := mergeClusterDeploymentsWithHangar(rawContainers, nil, nil, gitSync, "commit123")
+	if len(deps) == 0 {
+		t.Fatalf("expected non-empty deployments for degraded container")
+	}
+	dep := deps[0]
+	if dep.Stage != "degraded" {
+		t.Errorf("expected stage 'degraded', got %q", dep.Stage)
+	}
+	if dep.Steps[3].Status != "completed" {
+		t.Errorf("expected Container Swap completed, got %s", dep.Steps[3].Status)
+	}
+	if dep.Steps[4].Status != "failed" {
+		t.Errorf("expected Health Check failed, got %s", dep.Steps[4].Status)
+	}
+}
+
+

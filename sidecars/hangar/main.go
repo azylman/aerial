@@ -160,12 +160,26 @@ type RepoStatus struct {
 	Error             string     `json:"error,omitempty"`
 }
 
+// ReconciliationStatus captures in-memory state of active and recent Docker Compose reconciliations.
+type ReconciliationStatus struct {
+	Active         bool      `json:"active"`
+	State          string    `json:"state"`                     // "idle", "pulling", "swapping", "rolling_back", "healthy", "failed"
+	Stage          string    `json:"stage"`                     // alias to State for backward compatibility
+	Trigger        string    `json:"trigger,omitempty"`         // "image_poll", "git_sync", "manual_api"
+	TargetServices []string  `json:"target_services,omitempty"` // services planned/targeted for reconciliation
+	CommitSHA      string    `json:"commit_sha,omitempty"`
+	StartedAt      time.Time `json:"started_at,omitempty"`
+	CompletedAt    time.Time `json:"completed_at,omitempty"`
+	Error          string    `json:"error,omitempty"`
+}
+
 // HangarStatusResponse is the aggregated telemetry payload returned by GET /status.
 type HangarStatusResponse struct {
-	Status        string                `json:"status"` // "synced", "lagging", "quarantined", "error"
-	MaxLagSeconds int64                 `json:"max_lag_seconds"`
-	LastSyncTime  time.Time             `json:"last_sync_time"`
-	Repos         map[string]RepoStatus `json:"repos"`
+	Status         string                `json:"status"` // "synced", "lagging", "quarantined", "error"
+	MaxLagSeconds  int64                 `json:"max_lag_seconds"`
+	LastSyncTime   time.Time             `json:"last_sync_time"`
+	Repos          map[string]RepoStatus `json:"repos"`
+	Reconciliation *ReconciliationStatus `json:"reconciliation,omitempty"`
 }
 
 // GitSyncStatusResponse is an alias for backward compatibility.
@@ -288,6 +302,10 @@ type SyncDaemon struct {
 	repoLocks          map[string]*sync.Mutex
 	pendingChangesMu   sync.Mutex
 	pendingChanges     []ComposeChangeEvent
+	pendingTargetsMu   sync.Mutex
+	pendingTargets     map[string]struct{}
+	reconcileStateMu   sync.RWMutex
+	reconcileStatus    ReconciliationStatus
 	quarantineMu       sync.RWMutex
 	quarantinedCommits map[QuarantineKey]QuarantineRecord
 	imageQuarantineMu  sync.RWMutex
@@ -410,6 +428,77 @@ func (d *SyncDaemon) SetLastReconcile(t time.Time) {
 	d.statusMu.Lock()
 	defer d.statusMu.Unlock()
 	d.lastReconcile = t
+}
+
+func (d *SyncDaemon) recordPendingTargets(services []string) {
+	if d == nil || len(services) == 0 {
+		return
+	}
+	d.pendingTargetsMu.Lock()
+	defer d.pendingTargetsMu.Unlock()
+	if d.pendingTargets == nil {
+		d.pendingTargets = make(map[string]struct{})
+	}
+	for _, s := range services {
+		s = strings.TrimSpace(s)
+		if s != "" {
+			d.pendingTargets[s] = struct{}{}
+		}
+	}
+}
+
+func (d *SyncDaemon) drainPendingTargets() []string {
+	if d == nil {
+		return nil
+	}
+	d.pendingTargetsMu.Lock()
+	defer d.pendingTargetsMu.Unlock()
+	if len(d.pendingTargets) == 0 {
+		return nil
+	}
+	result := make([]string, 0, len(d.pendingTargets))
+	for s := range d.pendingTargets {
+		result = append(result, s)
+	}
+	d.pendingTargets = make(map[string]struct{})
+	return result
+}
+
+func (d *SyncDaemon) updateReconcileStatus(fn func(*ReconciliationStatus)) {
+	if d == nil || fn == nil {
+		return
+	}
+	d.reconcileStateMu.Lock()
+	defer d.reconcileStateMu.Unlock()
+	fn(&d.reconcileStatus)
+}
+
+// GetReconciliationStatus returns a safe snapshot of the current or recent reconciliation status.
+func (d *SyncDaemon) GetReconciliationStatus() ReconciliationStatus {
+	if d == nil {
+		return ReconciliationStatus{State: "idle", Stage: "idle"}
+	}
+	d.reconcileStateMu.RLock()
+	defer d.reconcileStateMu.RUnlock()
+
+	cp := d.reconcileStatus
+	// Check completion TTL (5 minutes grace period before reverting to idle)
+	if !cp.Active && (cp.State == "healthy" || cp.State == "failed") {
+		if !cp.CompletedAt.IsZero() && time.Since(cp.CompletedAt) > 5*time.Minute {
+			return ReconciliationStatus{State: "idle", Stage: "idle"}
+		}
+	}
+	if len(d.reconcileStatus.TargetServices) > 0 {
+		cp.TargetServices = make([]string, len(d.reconcileStatus.TargetServices))
+		copy(cp.TargetServices, d.reconcileStatus.TargetServices)
+	}
+	if cp.State == "" {
+		cp.State = "idle"
+	}
+	if cp.Stage == "" {
+		cp.Stage = cp.State
+	}
+	return cp
 }
 
 // resolveGitDir checks if repoPath contains a .git directory or a .git file (e.g., worktree/submodule).
@@ -858,6 +947,7 @@ func (d *SyncDaemon) CheckAndReconcileNewImages(ctx context.Context) error {
 
 	if len(servicesWithNewImages) > 0 {
 		log.Printf("[Hangar:ImagePoll] Triggering reconciliation for %d services with new images: %v", len(servicesWithNewImages), servicesWithNewImages)
+		d.recordPendingTargets(servicesWithNewImages)
 		return d.TriggerReconcile(ctx, true)
 	}
 
@@ -1183,6 +1273,11 @@ func (d *SyncDaemon) executeRollback(
 	rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 180*time.Second)
 	defer cancel()
 
+	d.updateReconcileStatus(func(s *ReconciliationStatus) {
+		s.State = "rolling_back"
+		s.Stage = "rolling_back"
+	})
+
 	var rollbackErrs []error
 
 	// 1. Image restoration & quarantining
@@ -1304,6 +1399,7 @@ func (d *SyncDaemon) ReconcileCompose(parentCtx context.Context, targetServices 
 	}
 
 	pending := d.drainPendingChanges()
+	drainedTargets := d.drainPendingTargets()
 
 	// 1. Conflict container cleanup & pre-flight validation gate
 	valCtx, valCancel := context.WithTimeout(parentCtx, 30*time.Second)
@@ -1334,8 +1430,13 @@ func (d *SyncDaemon) ReconcileCompose(parentCtx context.Context, targetServices 
 	}
 
 	var targets []string
+	trigger := "git_sync"
 	if len(targetServices) > 0 && len(pending) == 0 {
 		targets = targetServices
+		trigger = "manual_api"
+	} else if len(drainedTargets) > 0 && len(pending) == 0 {
+		targets = drainedTargets
+		trigger = "image_poll"
 	} else {
 		allTargets, targetErr := d.GetReconcileTargets(valCtx, composeDir)
 		if targetErr != nil {
@@ -1347,12 +1448,49 @@ func (d *SyncDaemon) ReconcileCompose(parentCtx context.Context, targetServices 
 			return targetErr
 		}
 		targets = allTargets
+		trigger = "git_sync"
 	}
 
 	if len(targets) == 0 {
 		log.Printf("[Hangar:GitOps] Notice: No external services to reconcile in %s (gitsync excluded)", composeDir)
 		return nil
 	}
+
+	diskHead := ""
+	if out, _, hErr := d.getGitExecutor()(valCtx, composeDir, "rev-parse", "HEAD"); hErr == nil {
+		diskHead = strings.TrimSpace(string(out))
+		if len(diskHead) > 7 {
+			diskHead = diskHead[:7]
+		}
+	}
+
+	d.updateReconcileStatus(func(s *ReconciliationStatus) {
+		s.Active = true
+		s.State = "pulling"
+		s.Stage = "pulling"
+		s.Trigger = trigger
+		s.CommitSHA = diskHead
+		s.TargetServices = append([]string(nil), targets...)
+		s.StartedAt = time.Now().UTC()
+		s.CompletedAt = time.Time{}
+		s.Error = ""
+	})
+
+	defer func() {
+		d.updateReconcileStatus(func(s *ReconciliationStatus) {
+			s.Active = false
+			s.CompletedAt = time.Now().UTC()
+			if err != nil {
+				s.State = "failed"
+				s.Stage = "failed"
+				s.Error = err.Error()
+			} else {
+				s.State = "healthy"
+				s.Stage = "healthy"
+				s.Error = ""
+			}
+		})
+	}()
 
 	// 3. Pre-flight snapshotting of running container images BEFORE pull
 	snapshots := make(map[string]string)
@@ -1395,6 +1533,11 @@ func (d *SyncDaemon) ReconcileCompose(parentCtx context.Context, targetServices 
 	defer cancel()
 
 	log.Printf("[Hangar:GitOps] Reconciling Docker Compose state for %d services (%v) in %s...", len(targets), targets, composeDir)
+
+	d.updateReconcileStatus(func(s *ReconciliationStatus) {
+		s.State = "swapping"
+		s.Stage = "swapping"
+	})
 
 	upArgs := append([]string{"up", "-d", "--wait", "--wait-timeout", "180", "--remove-orphans", "--no-build"}, targets...)
 	stdout, stderr, cmdErr := d.getComposeExecutor()(ctx, composeDir, d.getComposeArgs(composeDir, upArgs...)...)
@@ -1833,9 +1976,11 @@ func getRepoCommit(ctx context.Context, repoPath, ref, pat string) (string, *tim
 
 // GetStatus computes real-time synchronization telemetry across all configured repositories.
 func (d *SyncDaemon) GetStatus(ctx context.Context) GitSyncStatusResponse {
+	rec := d.GetReconciliationStatus()
 	resp := GitSyncStatusResponse{
-		Status: "synced",
-		Repos:  make(map[string]RepoStatus),
+		Status:         "synced",
+		Repos:          make(map[string]RepoStatus),
+		Reconciliation: &rec,
 	}
 
 	d.statusMu.RLock()
@@ -1984,6 +2129,11 @@ func NewDaemon(cfg DaemonConfig) *SyncDaemon {
 		repoLocks:          make(map[string]*sync.Mutex),
 		quarantinedCommits: make(map[QuarantineKey]QuarantineRecord),
 		imageQuarantine:    make(map[string]ImageQuarantineRecord),
+		reconcileStatus: ReconciliationStatus{
+			State: "idle",
+			Stage: "idle",
+		},
+		pendingTargets:     make(map[string]struct{}),
 		lastAlertTimes:     make(map[string]time.Time),
 	}
 }

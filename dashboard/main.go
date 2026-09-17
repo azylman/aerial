@@ -121,11 +121,25 @@ type RepoStatus struct {
 	Error            string     `json:"error,omitempty"`
 }
 
+type ReconciliationStatus struct {
+	Active         bool      `json:"active"`
+	State          string    `json:"state"`                     // "idle", "pulling", "swapping", "rolling_back", "healthy", "failed"
+	Stage          string    `json:"stage"`                     // alias to State for backward compatibility
+	Trigger        string    `json:"trigger,omitempty"`         // "image_poll", "git_sync", "manual_api"
+	TargetServices []string  `json:"target_services,omitempty"` // services planned/targeted for reconciliation
+	CommitSHA      string    `json:"commit_sha,omitempty"`
+	StartedAt      time.Time `json:"started_at,omitempty"`
+	CompletedAt    time.Time `json:"completed_at,omitempty"`
+	Error          string    `json:"error,omitempty"`
+}
+
 type GitSyncStatusResponse struct {
-	Status        string                `json:"status"` // "synced", "lagging", "error"
-	MaxLagSeconds int64                 `json:"max_lag_seconds"`
-	LastSyncTime  time.Time             `json:"last_sync_time"`
-	Repos         map[string]RepoStatus `json:"repos,omitempty"`
+	Status         string                `json:"status"` // "synced", "lagging", "error"
+	MaxLagSeconds  int64                 `json:"max_lag_seconds"`
+	LastSyncTime   time.Time             `json:"last_sync_time"`
+	Repos          map[string]RepoStatus `json:"repos,omitempty"`
+	Reconciliation *ReconciliationStatus `json:"reconciliation,omitempty"`
+	Error          string                `json:"error,omitempty"`
 }
 
 type ClusterResponse struct {
@@ -313,17 +327,19 @@ var dockerSocketClient = &http.Client{
 	},
 }
 
+type DockerContainerHealth = struct {
+	Status string `json:"Status"`
+}
+
 type DockerContainerJSON struct {
-	ID      string            `json:"Id"`
-	Names   []string          `json:"Names"`
-	Image   string            `json:"Image"`
-	Created int64             `json:"Created"`
-	State   string            `json:"State"`
-	Status  string            `json:"Status"`
-	Labels  map[string]string `json:"Labels"`
-	Health  *struct {
-		Status string `json:"Status"`
-	} `json:"Health,omitempty"`
+	ID      string                 `json:"Id"`
+	Names   []string               `json:"Names"`
+	Image   string                 `json:"Image"`
+	Created int64                  `json:"Created"`
+	State   string                 `json:"State"`
+	Status  string                 `json:"Status"`
+	Labels  map[string]string      `json:"Labels"`
+	Health  *DockerContainerHealth `json:"Health,omitempty"`
 }
 
 var defaultGitCommitPaths = []string{
@@ -643,6 +659,16 @@ func mergeClusterDeployments(
 	jobs map[int64][]GitHubJob,
 	currentCommit string,
 ) []DeploymentStatus {
+	return mergeClusterDeploymentsWithHangar(rawContainers, runs, jobs, GitSyncStatusResponse{}, currentCommit)
+}
+
+func mergeClusterDeploymentsWithHangar(
+	rawContainers []DockerContainerJSON,
+	runs []GitHubRun,
+	jobs map[int64][]GitHubJob,
+	gitSync GitSyncStatusResponse,
+	currentCommit string,
+) []DeploymentStatus {
 	var deployments []DeploymentStatus
 	now := time.Now().UTC()
 
@@ -772,8 +798,37 @@ func mergeClusterDeployments(
 			}
 
 			if !hasRecentContainerSwap {
-				// If within 120s Hangar reconciliation window -> awaiting_pull
-				if ciElapsed <= 120*time.Second {
+				// Fast-fail if Hangar explicitly failed reconciliation
+				if gitSync.Reconciliation != nil && gitSync.Reconciliation.State == "failed" {
+					failMsg := "Hangar reconciliation failed"
+					if gitSync.Reconciliation.Error != "" {
+						failMsg = fmt.Sprintf("Hangar reconciliation failed: %s", gitSync.Reconciliation.Error)
+					}
+					deployments = append(deployments, DeploymentStatus{
+						ID:         fmt.Sprintf("gh-run-%d", latestRun.ID),
+						Service:    "aerial-stack",
+						Commit:     shortSHA,
+						CommitMsg:  failMsg,
+						CommitTime: commitTime,
+						Stage:      "failed",
+						Progress:   55,
+						HTMLURL:    latestRun.HTMLURL,
+						Steps: []DeploymentStep{
+							{Name: "Commit Trigger", Icon: "📦", Status: "completed"},
+							{Name: "CI Build & GHCR", Icon: "⚙️", Status: "completed"},
+							{Name: "Hangar Sync", Icon: "⬇️", Status: "failed"},
+							{Name: "Container Swap", Icon: "🔄", Status: "pending"},
+							{Name: "Health Check", Icon: "🩺", Status: "pending"},
+						},
+						MatrixJobs: matrixChips,
+						StartedAt:  latestRun.CreatedAt,
+					})
+					return deployments
+				}
+
+				// If within 120s Hangar reconciliation window or Hangar is actively pulling/swapping/rolling_back -> awaiting_pull
+				isHangarActive := gitSync.Reconciliation != nil && gitSync.Reconciliation.Active
+				if isHangarActive || ciElapsed <= 120*time.Second {
 					deployments = append(deployments, DeploymentStatus{
 						ID:         fmt.Sprintf("gh-run-%d", latestRun.ID),
 						Service:    "aerial-stack",
@@ -796,7 +851,7 @@ func mergeClusterDeployments(
 					return deployments
 				}
 
-				// If exceeded 120s without any container updating -> Hangar reconciliation timeout failure!
+				// If exceeded 120s without any container updating and Hangar is not active -> Hangar reconciliation timeout failure!
 				deployments = append(deployments, DeploymentStatus{
 					ID:         fmt.Sprintf("gh-run-%d", latestRun.ID),
 					Service:    "aerial-stack",
@@ -875,14 +930,17 @@ func mergeClusterDeployments(
 		return deployments
 	}
 
-	// Resolve commit SHA: Primary from successful GH run, fallback to core container label, then currentCommit
+	// Resolve commit SHA: Primary from Hangar reconciliation or successful GH run, fallback to core container label, then currentCommit
 	resolvedCommit := ""
 	var commitTime *time.Time
 	resolvedCommitMsg := ""
 
+	if gitSync.Reconciliation != nil && gitSync.Reconciliation.CommitSHA != "" {
+		resolvedCommit = gitSync.Reconciliation.CommitSHA
+	}
 	if len(runs) > 0 {
 		latest := runs[0]
-		if latest.Conclusion == "success" && latest.HeadSHA != "" {
+		if latest.Conclusion == "success" && latest.HeadSHA != "" && resolvedCommit == "" {
 			resolvedCommit = latest.HeadSHA
 		}
 		if latest.HeadCommit != nil {
@@ -907,25 +965,45 @@ func mergeClusterDeployments(
 		resolvedCommit = resolvedCommit[:7]
 	}
 
-	containerChips := buildContainerChips(aerialContainers)
+	var containerChips []MatrixJobChip
+	if gitSync.Reconciliation != nil && len(gitSync.Reconciliation.TargetServices) > 0 {
+		containerChips = BuildTargetContainerChips(aerialContainers, gitSync.Reconciliation.TargetServices, gitSync.Reconciliation.StartedAt, now)
+	} else {
+		containerChips = buildContainerChips(aerialContainers)
+	}
 
-	// State: Degraded
-	if hasDegraded {
+	isHangarActive := gitSync.Reconciliation != nil && gitSync.Reconciliation.Active
+	isHangarFailed := gitSync.Reconciliation != nil && gitSync.Reconciliation.State == "failed"
+
+	// State: Degraded or Failed
+	if hasDegraded || isHangarFailed {
+		failMsg := resolvedCommitMsg
+		if isHangarFailed && gitSync.Reconciliation.Error != "" {
+			failMsg = fmt.Sprintf("Hangar reconciliation failed: %s", gitSync.Reconciliation.Error)
+		}
+		stage := "degraded"
+		swapStatus := "completed"
+		healthStatus := "failed"
+		if isHangarFailed {
+			stage = "failed"
+			swapStatus = "failed"
+			healthStatus = "pending"
+		}
 		deployments = append(deployments, DeploymentStatus{
 			ID:         "dep-aerial-stack",
 			Service:    "aerial-stack",
 			Commit:     resolvedCommit,
-			CommitMsg:  resolvedCommitMsg,
+			CommitMsg:  failMsg,
 			CommitTime: commitTime,
-			Stage:      "degraded",
+			Stage:      stage,
 			Progress:   85,
 			StartedAt:  latestCreatedAt,
 			Steps: []DeploymentStep{
 				{Name: "Commit Trigger", Icon: "📦", Status: "completed"},
 				{Name: "CI Build & GHCR", Icon: "⚙️", Status: "completed"},
 				{Name: "Hangar Sync", Icon: "⬇️", Status: "completed"},
-				{Name: "Container Swap", Icon: "🔄", Status: "completed"},
-				{Name: "Health Check", Icon: "🩺", Status: "failed"},
+				{Name: "Container Swap", Icon: "🔄", Status: swapStatus},
+				{Name: "Health Check", Icon: "🩺", Status: healthStatus},
 			},
 			MatrixJobs: containerChips,
 		})
@@ -933,10 +1011,14 @@ func mergeClusterDeployments(
 	}
 
 	// State 5: Rolling Swap
-	if hasStarting || minUptimeSec < 120 {
+	if hasStarting || minUptimeSec < 120 || isHangarActive {
 		progress := 60
 		if len(aerialContainers) > 0 {
 			progress = 60 + int(float64(healthyCount)/float64(len(aerialContainers))*25)
+		}
+		swapStatus := "active"
+		if isHangarActive && gitSync.Reconciliation.State == "pulling" {
+			swapStatus = "pending"
 		}
 		deployments = append(deployments, DeploymentStatus{
 			ID:         "dep-aerial-stack",
@@ -951,7 +1033,7 @@ func mergeClusterDeployments(
 				{Name: "Commit Trigger", Icon: "📦", Status: "completed"},
 				{Name: "CI Build & GHCR", Icon: "⚙️", Status: "completed"},
 				{Name: "Hangar Sync", Icon: "⬇️", Status: "completed"},
-				{Name: "Container Swap", Icon: "🔄", Status: "active"},
+				{Name: "Container Swap", Icon: "🔄", Status: swapStatus},
 				{Name: "Health Check", Icon: "🩺", Status: "active"},
 			},
 			MatrixJobs: containerChips,
@@ -1181,22 +1263,26 @@ func fetchGitSyncStatus(ctx context.Context, gitsyncURL string) GitSyncStatusRes
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(gitsyncURL, "/")+"/status", nil)
 	if err != nil {
+		fallback.Error = err.Error()
 		return fallback
 	}
 
 	client := &http.Client{Timeout: 2 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
+		fallback.Error = err.Error()
 		return fallback
 	}
 	defer drainAndClose(resp.Body, "gitsync response body")
 
 	if resp.StatusCode != http.StatusOK {
+		fallback.Error = fmt.Sprintf("HTTP %d", resp.StatusCode)
 		return fallback
 	}
 
 	var status GitSyncStatusResponse
 	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+		fallback.Error = err.Error()
 		return fallback
 	}
 
@@ -1226,7 +1312,8 @@ func statusHandler(brainURL, gitsyncURL, configPath, gitCommit string) http.Hand
 			ghRuns, ghJobs = globalGHPoller.GetSnapshot()
 		}
 
-		deployments := mergeClusterDeployments(rawContainers, ghRuns, ghJobs, currentCommit)
+		gitSync := fetchGitSyncStatus(ctx, gitsyncURL)
+		deployments := mergeClusterDeploymentsWithHangar(rawContainers, ghRuns, ghJobs, gitSync, currentCommit)
 		if deployments == nil {
 			deployments = []DeploymentStatus{}
 		}
@@ -1240,7 +1327,6 @@ func statusHandler(brainURL, gitsyncURL, configPath, gitCommit string) http.Hand
 			activeTasks = []ActiveTaskStatus{}
 		}
 
-		gitSync := fetchGitSyncStatus(ctx, gitsyncURL)
 		quickLinks := loadQuickLaunchLinks(configPath)
 
 		if err != nil || len(services) == 0 {

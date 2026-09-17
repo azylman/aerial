@@ -1085,3 +1085,213 @@ func TestCalculateDeployStatus_TableDriven(t *testing.T) {
 	}
 }
 
+func TestBuildTargetContainerChips_TableDriven(t *testing.T) {
+	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	startedAt := now.Add(-60 * time.Second) // 1 minute ago
+
+	rawContainers := []DockerContainerJSON{
+		{
+			Names:   []string{"/aerial-dashboard"},
+			Created: now.Add(-30 * time.Second).Unix(), // recently created (after startedAt)
+			State:   "running",
+			Labels: map[string]string{
+				"com.docker.compose.project": "aerial",
+				"com.docker.compose.service": "dashboard",
+			},
+		},
+		{
+			Names:   []string{"/aerial-brain"},
+			Created: now.Add(-3 * 3600 * time.Second).Unix(), // 3 hours ago (stale, before startedAt)
+			State:   "running",
+			Labels: map[string]string{
+				"com.docker.compose.project": "aerial",
+				"com.docker.compose.service": "brain",
+			},
+		},
+		{
+			Names:   []string{"/aerial-proxy"},
+			Created: now.Add(-10 * time.Second).Unix(),
+			State:   "running",
+			Health:  &DockerContainerHealth{Status: "starting"},
+			Labels: map[string]string{
+				"com.docker.compose.project": "aerial",
+				"com.docker.compose.service": "proxy",
+			},
+		},
+		{
+			Names:   []string{"/aerial-docs"},
+			Created: now.Add(-5 * time.Second).Unix(),
+			State:   "exited",
+			Labels: map[string]string{
+				"com.docker.compose.project": "aerial",
+				"com.docker.compose.service": "docs",
+			},
+		},
+	}
+
+	tests := []struct {
+		name             string
+		targets          []string
+		startedAt        time.Time
+		wantLen          int
+		customContainers []DockerContainerJSON
+		check            func(t *testing.T, chips []MatrixJobChip)
+	}{
+		{
+			name:      "nil targets falls back to all containers",
+			targets:   nil,
+			startedAt: startedAt,
+			wantLen:   4,
+			check: func(t *testing.T, chips []MatrixJobChip) {
+				names := make(map[string]bool)
+				for _, c := range chips {
+					names[c.Name] = true
+				}
+				if !names["dashboard"] || !names["brain"] || !names["proxy"] || !names["docs"] {
+					t.Errorf("expected all containers in fallback, got %v", names)
+				}
+			},
+		},
+		{
+			name:      "empty targets falls back to all containers",
+			targets:   []string{},
+			startedAt: startedAt,
+			wantLen:   4,
+		},
+		{
+			name:      "scoped to single recently created target",
+			targets:   []string{"dashboard"},
+			startedAt: startedAt,
+			wantLen:   1,
+			check: func(t *testing.T, chips []MatrixJobChip) {
+				chip := chips[0]
+				if chip.Name != "dashboard" {
+					t.Errorf("expected dashboard chip, got %s", chip.Name)
+				}
+				if chip.Status != "completed" || chip.Conclusion != "success" {
+					t.Errorf("expected completed/success, got status=%s conclusion=%s", chip.Status, chip.Conclusion)
+				}
+				if chip.Duration != "30s" {
+					t.Errorf("expected 30s uptime, got %s", chip.Duration)
+				}
+			},
+		},
+		{
+			name:      "stale container reports active and pending duration",
+			targets:   []string{"brain"},
+			startedAt: startedAt,
+			wantLen:   1,
+			check: func(t *testing.T, chips []MatrixJobChip) {
+				chip := chips[0]
+				if chip.Name != "brain" {
+					t.Errorf("expected brain chip, got %s", chip.Name)
+				}
+				if chip.Status != "active" || chip.Duration != "pending" {
+					t.Errorf("expected active/pending for stale container, got status=%s duration=%s", chip.Status, chip.Duration)
+				}
+			},
+		},
+		{
+			name:      "missing container reports active and pending duration",
+			targets:   []string{"scheduler-mcp"},
+			startedAt: startedAt,
+			wantLen:   1,
+			check: func(t *testing.T, chips []MatrixJobChip) {
+				chip := chips[0]
+				if chip.Name != "scheduler-mcp" {
+					t.Errorf("expected scheduler-mcp chip, got %s", chip.Name)
+				}
+				if chip.Status != "active" || chip.Duration != "pending" {
+					t.Errorf("expected active/pending for missing container, got status=%s duration=%s", chip.Status, chip.Duration)
+				}
+			},
+		},
+		{
+			name:      "starting health reports active and non-empty duration",
+			targets:   []string{"proxy"},
+			startedAt: startedAt,
+			wantLen:   1,
+			check: func(t *testing.T, chips []MatrixJobChip) {
+				chip := chips[0]
+				if chip.Status != "active" || chip.Conclusion != "" {
+					t.Errorf("expected active/empty conclusion for starting container, got status=%s", chip.Status)
+				}
+			},
+		},
+		{
+			name:      "exited container reports failed and failure conclusion",
+			targets:   []string{"docs"},
+			startedAt: startedAt,
+			wantLen:   1,
+			check: func(t *testing.T, chips []MatrixJobChip) {
+				chip := chips[0]
+				if chip.Status != "failed" || chip.Conclusion != "failure" {
+					t.Errorf("expected failed/failure for exited container, got status=%s", chip.Status)
+				}
+			},
+		},
+		{
+			name:      "multiple targets deduplicated and trimmed",
+			targets:   []string{"dashboard", " dashboard ", "docs", ""},
+			startedAt: startedAt,
+			wantLen:   2,
+		},
+		{
+			name:      "zero reference time defaults now to time.Now().UTC()",
+			targets:   []string{"dashboard"},
+			startedAt: startedAt,
+			wantLen:   1,
+			customContainers: rawContainers,
+			check: func(t *testing.T, chips []MatrixJobChip) {
+				if chips[0].Duration == "" {
+					t.Errorf("expected non-empty duration with zero time fallback")
+				}
+			},
+		},
+		{
+			name:      "container name prefix fallback and newer container wins",
+			targets:   []string{"brain"},
+			startedAt: startedAt,
+			wantLen:   1,
+			customContainers: []DockerContainerJSON{
+				{
+					Names:   []string{"/aerial-brain"},
+					State:   "running",
+					Created: startedAt.Add(5 * time.Second).Unix(),
+				},
+				{
+					Names:   []string{"/aerial-brain"},
+					State:   "exited",
+					Created: startedAt.Add(-100 * time.Second).Unix(),
+				},
+			},
+			check: func(t *testing.T, chips []MatrixJobChip) {
+				if chips[0].Status != "completed" {
+					t.Errorf("expected newest running container to win, got %s", chips[0].Status)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			containers := rawContainers
+			if tt.customContainers != nil {
+				containers = tt.customContainers
+			}
+			refTime := now
+			if tt.name == "zero reference time defaults now to time.Now().UTC()" {
+				refTime = time.Time{}
+			}
+			got := BuildTargetContainerChips(containers, tt.targets, tt.startedAt, refTime)
+			if len(got) != tt.wantLen {
+				t.Fatalf("BuildTargetContainerChips() returned %d chips, want %d", len(got), tt.wantLen)
+			}
+			if tt.check != nil {
+				tt.check(t, got)
+			}
+		})
+	}
+}
+
+

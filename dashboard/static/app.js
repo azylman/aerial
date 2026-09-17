@@ -342,6 +342,7 @@ function renderDeployments(deployments) {
     const hasDegraded = deploys.some(dep => dep.stage === 'degraded');
     const isBuilding = deploys.some(dep => dep.stage === 'building' || dep.stage === 'queued');
     const isSwapping = deploys.some(dep => dep.stage === 'swapping');
+    const isPulling = deploys.some(dep => dep.stage === 'pulling');
     const isAwaitingPull = deploys.some(dep => dep.stage === 'awaiting_pull');
     const activeDeploys = deploys.filter(dep => dep.stage !== 'live' && dep.stage !== 'completed');
 
@@ -352,12 +353,15 @@ function renderDeployments(deployments) {
         } else if (hasDegraded) {
             deployBadge.textContent = `⚠️ STACK DEGRADED`;
             deployBadge.className = 'section-badge failed';
-        } else if (isBuilding) {
-            deployBadge.textContent = `⚡ 1 CI BUILD ACTIVE`;
-            deployBadge.className = 'section-badge building';
         } else if (isSwapping) {
             deployBadge.textContent = `🔄 HANGAR SWAPPING`;
             deployBadge.className = 'section-badge swapping';
+        } else if (isPulling) {
+            deployBadge.textContent = `⬇️ HANGAR PULLING`;
+            deployBadge.className = 'section-badge pulling';
+        } else if (isBuilding) {
+            deployBadge.textContent = `⚡ 1 CI BUILD ACTIVE`;
+            deployBadge.className = 'section-badge building';
         } else if (isAwaitingPull) {
             deployBadge.textContent = `⬇️ AWAITING HANGAR SYNC`;
             deployBadge.className = 'section-badge active';
@@ -394,6 +398,7 @@ function renderDeployments(deployments) {
         const isFailed = dep.stage === 'failed';
         const isDegraded = dep.stage === 'degraded';
         const isSwapping = dep.stage === 'swapping';
+        const isPulling = dep.stage === 'pulling';
         const isAwaitingPull = dep.stage === 'awaiting_pull';
         const isBuildingStage = dep.stage === 'building' || dep.stage === 'queued';
 
@@ -405,7 +410,7 @@ function renderDeployments(deployments) {
             { name: "Health Check", icon: "🩺", status: isLive ? "completed" : "pending" }
         ];
 
-        const isHostPhase = isSwapping || isLive || isDegraded;
+        const isHostPhase = isPulling || isSwapping || isLive || isDegraded;
         const allChips = Array.isArray(dep.matrix_jobs) ? dep.matrix_jobs : [];
         const gateChips = allChips.filter(c => c.name && (c.name.includes('test') || c.name.includes('lint')));
         const serviceChips = allChips.filter(c => c.name && (!c.name.includes('test') && !c.name.includes('lint')));
@@ -473,7 +478,7 @@ function renderDeployments(deployments) {
         }
 
         let timerMarkup = '';
-        if ((isBuildingStage || isSwapping || isAwaitingPull) && dep.started_at) {
+        if ((isBuildingStage || isPulling || isSwapping || isAwaitingPull) && dep.started_at) {
             timerMarkup = `
                 <div class="deploy-timer-badge">
                     <span class="pulse-indicator"></span>
@@ -482,13 +487,13 @@ function renderDeployments(deployments) {
             `;
         }
 
-        const cardClass = isLive ? 'stage-live' : (isFailed || isDegraded) ? 'stage-failed' : isSwapping ? 'stage-swapping' : (isBuildingStage || isAwaitingPull) ? 'stage-building' : 'stage-active';
-        const badgeClass = isLive ? 'live' : (isFailed || isDegraded) ? 'failed' : isSwapping ? 'swapping' : 'active';
+        const cardClass = isLive ? 'stage-live' : (isFailed || isDegraded) ? 'stage-failed' : isSwapping ? 'stage-swapping' : isPulling ? 'stage-pulling' : (isBuildingStage || isAwaitingPull) ? 'stage-building' : 'stage-active';
+        const badgeClass = isLive ? 'live' : (isFailed || isDegraded) ? 'failed' : isSwapping ? 'swapping' : isPulling ? 'pulling' : 'active';
 
         const card = document.createElement('div');
         card.className = `deploy-card ${cardClass}`;
         card.innerHTML = `
-            ${(isBuildingStage || isSwapping || isAwaitingPull) ? '<div class="deploy-card-laser"></div>' : ''}
+            ${(isBuildingStage || isPulling || isSwapping || isAwaitingPull) ? '<div class="deploy-card-laser"></div>' : ''}
             <div class="deploy-card-header">
                 <div class="deploy-target">
                     ${commitMarkup}
