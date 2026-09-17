@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -988,7 +989,11 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	if err != nil {
 		return err
 	}
-	defer ln.Close()
+	defer func() {
+		if err := ln.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			log.Printf("[WARN] Error closing listener: %v", err)
+		}
+	}()
 
 	srv := &http.Server{
 		Handler: metricsMiddleware(mux),
