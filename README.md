@@ -223,6 +223,7 @@ By default, Aerial automatically mounts:
 - **`github`** (`http://github-mcp:4003/mcp` - Native in-image execution with PAT auth)
 - **`scheduler`** (`http://scheduler-mcp:8080/mcp` - PostgreSQL-backed cron & reminder manager)
 - **`victoriametrics`** (`http://victoriametrics-mcp:4004/mcp` - Streamable HTTP TSDB metric querying & alert rule inspection)
+- **`openobserve`** (`http://openobserve:5080/openobserve/api/default/mcp` - Native telemetry, log exploration, and SQL search)
 
 
 #### Custom MCP Servers (`config.yaml`)

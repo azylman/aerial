@@ -14,6 +14,12 @@
     },
     "victoriametrics": {
       "serverUrl": "http://victoriametrics-mcp:4004/mcp"
+    },
+    "openobserve": {
+      "headers": {
+        "Authorization": "Basic YWRtaW5AYWVyaWFsLmxvY2FsOkFlcmlhbCFMb2dzMjAyNiM="
+      },
+      "serverUrl": "http://openobserve:5080/openobserve/api/default/mcp"
     }
   }
 }

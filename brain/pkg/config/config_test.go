@@ -2036,6 +2036,29 @@ func TestApplyEnvironmentOverrides_TableDriven(t *testing.T) {
 			},
 		},
 		{
+			name: "OPENOBSERVE overrides",
+			envMap: map[string]string{
+				"OPENOBSERVE_URL":                "http://oo.internal:5080/openobserve",
+				"OPENOBSERVE_ORG":                "myorg",
+				"OPENOBSERVE_ROOT_USER_EMAIL":    "admin@test.local",
+				"OPENOBSERVE_ROOT_USER_PASSWORD": "secret_pass_123",
+			},
+			assertFn: func(t *testing.T, d *ConfigData) {
+				if d.OpenObserveURL != "http://oo.internal:5080/openobserve" {
+					t.Errorf("expected OpenObserveURL override, got %q", d.OpenObserveURL)
+				}
+				if d.OpenObserveOrg != "myorg" {
+					t.Errorf("expected OpenObserveOrg override, got %q", d.OpenObserveOrg)
+				}
+				if d.OpenObserveUser != "admin@test.local" {
+					t.Errorf("expected OpenObserveUser override, got %q", d.OpenObserveUser)
+				}
+				if d.OpenObservePassword != "secret_pass_123" {
+					t.Errorf("expected OpenObservePassword override, got %q", d.OpenObservePassword)
+				}
+			},
+		},
+		{
 			name:   "DATABASE_URL direct override",
 			envMap: map[string]string{"DATABASE_URL": "postgres://db.prod:5432/mydb"},
 			assertFn: func(t *testing.T, d *ConfigData) {

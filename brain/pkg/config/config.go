@@ -164,6 +164,10 @@ type ConfigData struct {
 	SystemPrompt    string                     `yaml:"system_prompt" json:"system_prompt"`
 	DiscordToken    string                     `yaml:"discord_token" json:"discord_token"`
 	GitHubPAT       string                     `yaml:"github_pat" json:"github_pat"`
+	OpenObserveURL  string                     `yaml:"openobserve_url,omitempty" json:"openobserve_url,omitempty"`
+	OpenObserveOrg  string                     `yaml:"openobserve_org,omitempty" json:"openobserve_org,omitempty"`
+	OpenObserveUser string                     `yaml:"openobserve_user,omitempty" json:"openobserve_user,omitempty"`
+	OpenObservePassword string                     `yaml:"openobserve_password,omitempty" json:"openobserve_password,omitempty"`
 	Ollama          OllamaConfig               `yaml:"ollama" json:"ollama"`
 	LowEffortModel  string                     `yaml:"low_effort_model" json:"low_effort_model"`
 	ClassifierModel string                     `yaml:"classifier_model,omitempty" json:"classifier_model,omitempty"` // Deprecated alias
@@ -174,23 +178,27 @@ type ConfigData struct {
 
 func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 	type rawConfigHelper struct {
-		GeminiHomeDir   string                     `yaml:"gemini_home_dir"`
-		DataDir         string                     `yaml:"data_dir"`
-		Model           string                     `yaml:"model"`
-		Timezone        string                     `yaml:"timezone"`
-		SystemChannel   string                     `yaml:"system_channel"`
-		AdminUsers      []string                   `yaml:"admin_users"`
-		Channels        map[string]ChannelPolicy   `yaml:"channels"`
-		GitSync         GitSyncConfig              `yaml:"git_sync"`
-		McpServers      map[string]interface{}     `yaml:"mcp_servers"`
-		DatabaseURL     string                     `yaml:"database_url"`
-		DBPath          string                     `yaml:"db_path"`
-		Port            string                     `yaml:"port"`
-		AgyBin          string                     `yaml:"agy_bin"`
-		APIKey          string                     `yaml:"api_key"`
-		SystemPrompt    string                     `yaml:"system_prompt"`
-		DiscordToken    string                     `yaml:"discord_token"`
-		GitHubPAT       string                     `yaml:"github_pat"`
+		GeminiHomeDir       string                     `yaml:"gemini_home_dir"`
+		DataDir             string                     `yaml:"data_dir"`
+		Model               string                     `yaml:"model"`
+		Timezone            string                     `yaml:"timezone"`
+		SystemChannel       string                     `yaml:"system_channel"`
+		AdminUsers          []string                   `yaml:"admin_users"`
+		Channels            map[string]ChannelPolicy   `yaml:"channels"`
+		GitSync             GitSyncConfig              `yaml:"git_sync"`
+		McpServers          map[string]interface{}     `yaml:"mcp_servers"`
+		DatabaseURL         string                     `yaml:"database_url"`
+		DBPath              string                     `yaml:"db_path"`
+		Port                string                     `yaml:"port"`
+		AgyBin              string                     `yaml:"agy_bin"`
+		APIKey              string                     `yaml:"api_key"`
+		SystemPrompt        string                     `yaml:"system_prompt"`
+		DiscordToken        string                     `yaml:"discord_token"`
+		GitHubPAT           string                     `yaml:"github_pat"`
+		OpenObserveURL      string                     `yaml:"openobserve_url"`
+		OpenObserveOrg      string                     `yaml:"openobserve_org"`
+		OpenObserveUser     string                     `yaml:"openobserve_user"`
+		OpenObservePassword string                     `yaml:"openobserve_password"`
 		Ollama          OllamaConfig               `yaml:"ollama"`
 		LowEffortModel  string                     `yaml:"low_effort_model"`
 		ClassifierModel string                     `yaml:"classifier_model"`
@@ -218,6 +226,10 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 	c.SystemPrompt = raw.SystemPrompt
 	c.DiscordToken = raw.DiscordToken
 	c.GitHubPAT = raw.GitHubPAT
+	c.OpenObserveURL = raw.OpenObserveURL
+	c.OpenObserveOrg = raw.OpenObserveOrg
+	c.OpenObserveUser = raw.OpenObserveUser
+	c.OpenObservePassword = raw.OpenObservePassword
 	c.Ollama = raw.Ollama
 	c.LowEffortModel = strings.TrimSpace(raw.LowEffortModel)
 	if c.LowEffortModel == "" && strings.TrimSpace(raw.ClassifierModel) != "" {
@@ -524,6 +536,18 @@ func applyEnvironmentOverrides(data *ConfigData, lookup func(string) string) {
 	}
 	if mcp := getEnvFromLookup(lookup, "MCP_CONFIG", ""); mcp != "" {
 		data.MCPConfig = mcp
+	}
+	if oUrl := getEnvFromLookup(lookup, "OPENOBSERVE_URL", ""); oUrl != "" {
+		data.OpenObserveURL = oUrl
+	}
+	if oOrg := getEnvFromLookup(lookup, "OPENOBSERVE_ORG", ""); oOrg != "" {
+		data.OpenObserveOrg = oOrg
+	}
+	if oUser := getEnvFromLookup(lookup, "OPENOBSERVE_ROOT_USER_EMAIL", getEnvFromLookup(lookup, "OPENOBSERVE_USER", "")); oUser != "" {
+		data.OpenObserveUser = oUser
+	}
+	if oPass := getEnvFromLookup(lookup, "OPENOBSERVE_ROOT_USER_PASSWORD", getEnvFromLookup(lookup, "OPENOBSERVE_PASSWORD", "")); oPass != "" {
+		data.OpenObservePassword = oPass
 	}
 }
 
