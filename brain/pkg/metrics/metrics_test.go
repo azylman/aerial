@@ -29,6 +29,7 @@ func TestMetricsRegistryAndHandler(t *testing.T) {
 	RecordChannelHistoryFetch("discord_api", "success", 150*time.Millisecond, 15)
 	RecordFallbackNotification("session_reset", "dynamic", 600*time.Millisecond)
 	RecordWebhookDispatch("on_wake", "success", 25*time.Millisecond)
+	RecordSessionRotation("pre_flight", "channel", "turns")
 
 	ActiveWorkers.Set(2)
 	QueueDepth.Set(5)
@@ -101,6 +102,7 @@ func TestMetricsRegistryAndHandler(t *testing.T) {
 		"aerial_brain_config_reloads_total",
 		"aerial_brain_webhooks_dispatched_total",
 		"aerial_brain_webhook_duration_seconds",
+		"aerial_brain_session_rotations_total",
 		"aerial_brain_build_info",
 	}
 
@@ -129,6 +131,7 @@ func TestMetricsDefaultFallbackBranches(t *testing.T) {
 	RecordChannelHistoryFetch("", "", 10*time.Millisecond, 0)
 	RecordFallbackNotification("", "", 10*time.Millisecond)
 	RecordWebhookDispatch("", "", 10*time.Millisecond)
+	RecordSessionRotation("", "", "")
 }
 
 func TestRecordTokens_AutoCalculatesTotalWhenZero(t *testing.T) {

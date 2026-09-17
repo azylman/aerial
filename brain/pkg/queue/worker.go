@@ -666,13 +666,29 @@ func (te *turnExecution) evaluateAmbientWake() (shouldExit bool) {
 		// Check session rotation timing before Phase 1:
 		currentTurns, _ := te.getSessionTurnCount(te.threadID)
 		lastActivity, isCold, _ := GetSessionLastActivity(te.store(), te.threadID, te.pool.sessionMgr)
+		var currentBytes int64
+		var currentSteps int
+		if te.pool != nil && te.pool.sessionMgr != nil && te.currentSessionID != "" {
+			currentBytes = te.pool.sessionMgr.GetTranscriptSize(te.currentSessionID)
+			currentSteps = te.pool.sessionMgr.CountTranscriptSteps(te.currentSessionID)
+		}
 		isTurnLimit := currentTurns >= DefaultMaxSessionTurns || (plan.WakeIndex > 0 && currentTurns+1 >= DefaultMaxSessionTurns)
 		isIdleLimit := te.currentSessionID != "" && !isCold && !lastActivity.IsZero() && time.Since(lastActivity) >= DefaultMaxSessionIdleTime
-		if isTurnLimit || isIdleLimit {
-			if isIdleLimit {
+		isStepLimit := currentSteps >= DefaultMaxSessionSteps
+		isByteLimit := currentBytes >= DefaultMaxTranscriptBytes
+		if isTurnLimit || isIdleLimit || isStepLimit || isByteLimit {
+			if isByteLimit {
+				log.Printf("[Queue] Scope session reached transcript size limit (%d >= %d bytes). Resetting to cold state for fresh session initialization.", currentBytes, DefaultMaxTranscriptBytes)
+				metrics.RecordSessionRotation("pre_flight", "channel", "bytes")
+			} else if isStepLimit {
+				log.Printf("[Queue] Scope session reached step limit (%d >= %d steps). Resetting to cold state for fresh session initialization.", currentSteps, DefaultMaxSessionSteps)
+				metrics.RecordSessionRotation("pre_flight", "channel", "steps")
+			} else if isIdleLimit {
 				log.Printf("[Queue] Scope session reached idle limit (%v >= %v). Resetting to cold state for fresh session initialization.", time.Since(lastActivity).Round(time.Minute), DefaultMaxSessionIdleTime)
+				metrics.RecordSessionRotation("pre_flight", "channel", "idle")
 			} else {
 				log.Printf("[Queue] Scope session reached turn limit (%d/%d). Resetting to cold state for fresh session initialization.", currentTurns, DefaultMaxSessionTurns)
+				metrics.RecordSessionRotation("pre_flight", "channel", "turns")
 			}
 			if te.currentSessionID != "" {
 				te.previousSessionID = te.currentSessionID
@@ -728,13 +744,33 @@ func (te *turnExecution) evaluateAmbientWake() (shouldExit bool) {
 	// Run BEFORE IncrementSessionTurnCount to prevent premature rotation and double-rotation.
 	currentTurns, _ := te.getSessionTurnCount(te.threadID)
 	lastActivity, isCold, _ := GetSessionLastActivity(te.store(), te.threadID, te.pool.sessionMgr)
+	var currentBytes int64
+	var currentSteps int
+	if te.pool != nil && te.pool.sessionMgr != nil && te.currentSessionID != "" {
+		currentBytes = te.pool.sessionMgr.GetTranscriptSize(te.currentSessionID)
+		currentSteps = te.pool.sessionMgr.CountTranscriptSteps(te.currentSessionID)
+	}
+	scope := "thread"
+	if strings.EqualFold(te.policy.Mode, "channel") {
+		scope = "channel"
+	}
 	isTurnLimit := currentTurns >= DefaultMaxSessionTurns
 	isIdleLimit := te.currentSessionID != "" && !isCold && !lastActivity.IsZero() && time.Since(lastActivity) >= DefaultMaxSessionIdleTime
-	if isTurnLimit || isIdleLimit {
-		if isIdleLimit {
+	isStepLimit := currentSteps >= DefaultMaxSessionSteps
+	isByteLimit := currentBytes >= DefaultMaxTranscriptBytes
+	if isTurnLimit || isIdleLimit || isStepLimit || isByteLimit {
+		if isByteLimit {
+			log.Printf("[Queue] Scope session reached transcript size limit (%d >= %d bytes). Resetting to cold state for fresh session initialization.", currentBytes, DefaultMaxTranscriptBytes)
+			metrics.RecordSessionRotation("pre_flight", scope, "bytes")
+		} else if isStepLimit {
+			log.Printf("[Queue] Scope session reached step limit (%d >= %d steps). Resetting to cold state for fresh session initialization.", currentSteps, DefaultMaxSessionSteps)
+			metrics.RecordSessionRotation("pre_flight", scope, "steps")
+		} else if isIdleLimit {
 			log.Printf("[Queue] Scope session reached idle limit (%v >= %v). Resetting to cold state for fresh session initialization.", time.Since(lastActivity).Round(time.Minute), DefaultMaxSessionIdleTime)
+			metrics.RecordSessionRotation("pre_flight", scope, "idle")
 		} else {
 			log.Printf("[Queue] Scope session reached turn limit (%d/%d). Resetting to cold state for fresh session initialization.", currentTurns, DefaultMaxSessionTurns)
+			metrics.RecordSessionRotation("pre_flight", scope, "turns")
 		}
 		if te.currentSessionID != "" {
 			te.previousSessionID = te.currentSessionID
@@ -1503,8 +1539,32 @@ func (te *turnExecution) executeWithRetries() {
 					if te.statusUpdater != nil {
 						te.statusUpdater.Reset()
 					}
+					var watchBytes int64
+					var watchSteps int
+					if te.pool != nil && te.pool.sessionMgr != nil && te.currentSessionID != "" {
+						watchBytes = te.pool.sessionMgr.GetTranscriptSize(te.currentSessionID)
+						watchSteps = te.pool.sessionMgr.CountTranscriptSteps(te.currentSessionID)
+					}
+					if watchBytes >= DefaultMaxTranscriptBytes || watchSteps >= DefaultMaxSessionSteps {
+						scope := "thread"
+						if strings.EqualFold(te.policy.Mode, "channel") {
+							scope = "channel"
+						}
+						reason := "bytes"
+						if watchSteps >= DefaultMaxSessionSteps {
+							reason = "steps"
+						}
+						log.Printf("[WorkerPool] Watchdog timeout session %s exceeded guardrails (steps=%d/%d, bytes=%d/%d). Resetting session for cold retry.",
+							te.currentSessionID, watchSteps, DefaultMaxSessionSteps, watchBytes, DefaultMaxTranscriptBytes)
+						metrics.RecordSessionRotation("watchdog", scope, reason)
+						if te.currentSessionID != "" {
+							te.previousSessionID = te.currentSessionID
+						}
+						_ = te.rotateSessionID(te.threadID, "")
+						te.currentSessionID = ""
+					}
 					backoff := time.Duration(attempt) * te.pool.cfg.BackoffBase
-					log.Printf("[WorkerPool] Retrying watchdog timeout in %v (attempt %d/%d, preserving session %s)", backoff, attempt, maxAttempts, te.currentSessionID)
+					log.Printf("[WorkerPool] Retrying watchdog timeout in %v (attempt %d/%d, session %s)", backoff, attempt, maxAttempts, te.currentSessionID)
 					select {
 					case <-time.After(backoff):
 					case <-te.pool.ctx.Done():
@@ -1672,8 +1732,33 @@ func (te *turnExecution) executeWithRetries() {
 						}
 					}
 
-					if te.turnCount >= DefaultMaxSessionTurns {
-						log.Printf("[Queue] Scope session reached turn limit (%d/%d). Resetting to cold state for fresh session initialization.", te.turnCount, DefaultMaxSessionTurns)
+					scope := "thread"
+					if strings.EqualFold(te.policy.Mode, "channel") {
+						scope = "channel"
+					}
+					var postBytes int64
+					var postSteps int
+					if te.pool != nil && te.pool.sessionMgr != nil && te.currentSessionID != "" {
+						postBytes = te.pool.sessionMgr.GetTranscriptSize(te.currentSessionID)
+						postSteps = te.pool.sessionMgr.CountTranscriptSteps(te.currentSessionID)
+					}
+					isTurnLimit := te.turnCount >= DefaultMaxSessionTurns
+					isStepLimit := postSteps >= DefaultMaxSessionSteps
+					isByteLimit := postBytes >= DefaultMaxTranscriptBytes
+					if isTurnLimit || isStepLimit || isByteLimit {
+						if isByteLimit {
+							log.Printf("[Queue] Scope session reached transcript size limit (%d >= %d bytes). Resetting to cold state for fresh session initialization.", postBytes, DefaultMaxTranscriptBytes)
+							metrics.RecordSessionRotation("post_execution", scope, "bytes")
+						} else if isStepLimit {
+							log.Printf("[Queue] Scope session reached step limit (%d >= %d steps). Resetting to cold state for fresh session initialization.", postSteps, DefaultMaxSessionSteps)
+							metrics.RecordSessionRotation("post_execution", scope, "steps")
+						} else {
+							log.Printf("[Queue] Scope session reached turn limit (%d/%d). Resetting to cold state for fresh session initialization.", te.turnCount, DefaultMaxSessionTurns)
+							metrics.RecordSessionRotation("post_execution", scope, "turns")
+						}
+						if te.currentSessionID != "" {
+							te.previousSessionID = te.currentSessionID
+						}
 						_ = te.rotateSessionID(te.threadID, "")
 						te.currentSessionID = ""
 					}

@@ -1589,5 +1589,143 @@ func TestSession_RemediatedBranchesAndEdges(t *testing.T) {
 	}
 }
 
+func TestSessionRotationConstants(t *testing.T) {
+	if DefaultMaxSessionTurns != 10 {
+		t.Errorf("expected DefaultMaxSessionTurns=10, got %d", DefaultMaxSessionTurns)
+	}
+	if DefaultMaxSessionSteps != 350 {
+		t.Errorf("expected DefaultMaxSessionSteps=350, got %d", DefaultMaxSessionSteps)
+	}
+	if DefaultMaxTranscriptBytes != 1024*1024 {
+		t.Errorf("expected DefaultMaxTranscriptBytes=1048576, got %d", DefaultMaxTranscriptBytes)
+	}
+}
+
+func TestManager_GetTranscriptSize(t *testing.T) {
+	tmpDir := t.TempDir()
+	mgr := New(tmpDir, tmpDir)
+
+	// 1. Nil manager
+	var nilMgr *Manager
+	if sz := nilMgr.GetTranscriptSize("sess-1"); sz != 0 {
+		t.Errorf("expected 0 from nil manager, got %d", sz)
+	}
+
+	// 2. Empty / whitespace session ID
+	if sz := mgr.GetTranscriptSize(""); sz != 0 {
+		t.Errorf("expected 0 for empty session ID, got %d", sz)
+	}
+	if sz := mgr.GetTranscriptSize("   "); sz != 0 {
+		t.Errorf("expected 0 for whitespace session ID, got %d", sz)
+	}
+
+	// 3. Security: path traversal
+	if sz := mgr.GetTranscriptSize("../../etc/passwd"); sz != 0 {
+		t.Errorf("expected 0 for path traversal, got %d", sz)
+	}
+	if sz := mgr.GetTranscriptSize("a/b"); sz != 0 {
+		t.Errorf("expected 0 for slash in session ID, got %d", sz)
+	}
+
+	// 4. Non-existent session
+	if sz := mgr.GetTranscriptSize("non-existent-sess"); sz != 0 {
+		t.Errorf("expected 0 for non-existent session, got %d", sz)
+	}
+
+	// 5. Valid session with transcript.jsonl
+	sessID := "sess-size-test"
+	sessDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", sessID, ".system_generated", "logs")
+	if err := os.MkdirAll(sessDir, 0755); err != nil {
+		t.Fatalf("failed to create logs dir: %v", err)
+	}
+	tPath := filepath.Join(sessDir, "transcript.jsonl")
+	content := []byte(`{"step_index": 0, "type": "USER_INPUT"}` + "\n")
+	if err := os.WriteFile(tPath, content, 0644); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+
+	expectedSize := int64(len(content))
+	if sz := mgr.GetTranscriptSize(sessID); sz != expectedSize {
+		t.Errorf("expected size %d, got %d", expectedSize, sz)
+	}
+
+	// 6. Dual-file: transcript_full.jsonl is larger
+	fullPath := filepath.Join(sessDir, "transcript_full.jsonl")
+	fullContent := append(content, []byte(`{"step_index": 1, "type": "PLANNER_RESPONSE", "extra": "large payload data here"}` + "\n")...)
+	if err := os.WriteFile(fullPath, fullContent, 0644); err != nil {
+		t.Fatalf("failed to write transcript_full: %v", err)
+	}
+	expectedFullSize := int64(len(fullContent))
+	if sz := mgr.GetTranscriptSize(sessID); sz != expectedFullSize {
+		t.Errorf("expected max size %d, got %d", expectedFullSize, sz)
+	}
+}
+
+func TestManager_CountTranscriptSteps(t *testing.T) {
+	tmpDir := t.TempDir()
+	mgr := New(tmpDir, tmpDir)
+
+	// 1. Nil manager
+	var nilMgr *Manager
+	if steps := nilMgr.CountTranscriptSteps("sess-1"); steps != 0 {
+		t.Errorf("expected 0 steps from nil manager, got %d", steps)
+	}
+
+	// 2. Empty / whitespace session ID
+	if steps := mgr.CountTranscriptSteps(""); steps != 0 {
+		t.Errorf("expected 0 steps for empty session ID, got %d", steps)
+	}
+	if steps := mgr.CountTranscriptSteps("   "); steps != 0 {
+		t.Errorf("expected 0 steps for whitespace session ID, got %d", steps)
+	}
+
+	// 3. Security: path traversal
+	if steps := mgr.CountTranscriptSteps("../../../root"); steps != 0 {
+		t.Errorf("expected 0 steps for path traversal, got %d", steps)
+	}
+
+	// 4. Non-existent session
+	if steps := mgr.CountTranscriptSteps("sess-ghost"); steps != 0 {
+		t.Errorf("expected 0 steps for ghost session, got %d", steps)
+	}
+
+	// 5. Valid session with empty file -> 0 steps
+	sessID := "sess-step-test"
+	sessDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", sessID, ".system_generated", "logs")
+	if err := os.MkdirAll(sessDir, 0755); err != nil {
+		t.Fatalf("failed to create logs dir: %v", err)
+	}
+	tPath := filepath.Join(sessDir, "transcript.jsonl")
+	if err := os.WriteFile(tPath, []byte(""), 0644); err != nil {
+		t.Fatalf("failed to create empty file: %v", err)
+	}
+	if steps := mgr.CountTranscriptSteps(sessID); steps != 0 {
+		t.Errorf("expected 0 steps for empty file, got %d", steps)
+	}
+
+	// 6. Transcript with monotonic steps: last step_index is 41 -> 42 total steps
+	lines := `{"step_index": 0, "type": "USER_INPUT"}
+{"step_index": 1, "type": "PLANNER_RESPONSE"}
+{"step_index": 41, "type": "PLANNER_RESPONSE"}
+`
+	if err := os.WriteFile(tPath, []byte(lines), 0644); err != nil {
+		t.Fatalf("failed to write lines: %v", err)
+	}
+	if steps := mgr.CountTranscriptSteps(sessID); steps != 42 {
+		t.Errorf("expected 42 steps, got %d", steps)
+	}
+
+	// 7. transcript_full.jsonl has higher step index 99 -> 100 total steps
+	fullPath := filepath.Join(sessDir, "transcript_full.jsonl")
+	fullLines := lines + `{"step_index": 99, "type": "PLANNER_RESPONSE"}` + "\n"
+	if err := os.WriteFile(fullPath, []byte(fullLines), 0644); err != nil {
+		t.Fatalf("failed to write full lines: %v", err)
+	}
+	if steps := mgr.CountTranscriptSteps(sessID); steps != 100 {
+		t.Errorf("expected 100 steps from larger full transcript, got %d", steps)
+	}
+}
+
+
 
 

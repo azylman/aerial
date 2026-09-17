@@ -20,6 +20,12 @@ import (
 // DefaultMaxSessionTurns defines the engine-wide maximum turn limit before an agy session is rotated.
 const DefaultMaxSessionTurns = 10
 
+// DefaultMaxSessionSteps defines the engine-wide maximum cumulative internal tool steps before session rotation.
+const DefaultMaxSessionSteps = 350
+
+// DefaultMaxTranscriptBytes defines the engine-wide maximum transcript file size in bytes (1 MB) before session rotation.
+const DefaultMaxTranscriptBytes = 1024 * 1024
+
 // SourceAmbient represents ambient chat messages appended to session transcripts.
 const SourceAmbient = "AMBIENT"
 
@@ -915,5 +921,60 @@ func CleanupEphemeralSession(convID string, searchRoots ...string) {
 		}
 	}
 }
+
+// GetTranscriptSize returns the maximum file size across transcript.jsonl and transcript_full.jsonl
+// for the given session ID across configured session roots.
+// Returns 0 if manager is nil, sessionID is empty/invalid, or files do not exist.
+func (m *Manager) GetTranscriptSize(sessionID string) int64 {
+	cleanID := strings.TrimSpace(sessionID)
+	if m == nil || cleanID == "" || strings.ContainsAny(cleanID, `/\:`) || strings.Contains(cleanID, "..") {
+		return 0
+	}
+
+	var maxSize int64
+	for _, root := range m.roots {
+		sessDir := filepath.Join(root, cleanID)
+		logsDir := filepath.Join(sessDir, ".system_generated", "logs")
+		for _, name := range []string{"transcript.jsonl", "transcript_full.jsonl"} {
+			filePath := filepath.Join(logsDir, name)
+			if fi, err := os.Stat(filePath); err == nil && !fi.IsDir() {
+				if fi.Size() > maxSize {
+					maxSize = fi.Size()
+				}
+			}
+		}
+	}
+	return maxSize
+}
+
+// CountTranscriptSteps returns the total internal steps for the session by inspecting
+// the monotonic step_index at the tail of the transcript file. Returns 0 if empty, invalid, or not found.
+func (m *Manager) CountTranscriptSteps(sessionID string) int {
+	cleanID := strings.TrimSpace(sessionID)
+	if m == nil || cleanID == "" || strings.ContainsAny(cleanID, `/\:`) || strings.Contains(cleanID, "..") {
+		return 0
+	}
+
+	m.appendMu.Lock()
+	defer m.appendMu.Unlock()
+
+	var maxSteps int
+	for _, root := range m.roots {
+		sessDir := filepath.Join(root, cleanID)
+		logsDir := filepath.Join(sessDir, ".system_generated", "logs")
+		for _, name := range []string{"transcript.jsonl", "transcript_full.jsonl"} {
+			filePath := filepath.Join(logsDir, name)
+			lastIdx, err := getLastStepIndex(filePath)
+			if err == nil && lastIdx >= 0 {
+				steps := lastIdx + 1
+				if steps > maxSteps {
+					maxSteps = steps
+				}
+			}
+		}
+	}
+	return maxSteps
+}
+
 
 
