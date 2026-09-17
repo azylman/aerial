@@ -291,24 +291,24 @@
         {
           "bucketAggs": [
             {
-              "field": "timestamp",
+              "field": "container_name",
               "id": "2",
+              "settings": {
+                "min_doc_count": "1",
+                "order": "desc",
+                "orderBy": "_count",
+                "size": "25"
+              },
+              "type": "terms"
+            },
+            {
+              "field": "timestamp",
+              "id": "3",
               "settings": {
                 "interval": "auto",
                 "min_doc_count": "0"
               },
               "type": "date_histogram"
-            },
-            {
-              "field": "container_name",
-              "id": "3",
-              "settings": {
-                "min_doc_count": "1",
-                "order": "desc",
-                "orderBy": "_count",
-                "size": "10"
-              },
-              "type": "terms"
             }
           ],
           "datasource": {
