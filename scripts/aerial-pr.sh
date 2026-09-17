@@ -138,7 +138,7 @@ get_deploy_status() {
                     return 0
                     ;;
                 awaiting_pull)
-                    echo "{\"deploy_state\":\"ongoing\",\"stage\":\"awaiting_pull\",\"progress\":${progress},\"details\":\"Images published to GHCR; awaiting Watchtower pull\"}"
+                    echo "{\"deploy_state\":\"ongoing\",\"stage\":\"awaiting_pull\",\"progress\":${progress},\"details\":\"Images published to GHCR; awaiting Hangar pull\"}"
                     return 0
                     ;;
                 swapping)
