@@ -314,7 +314,11 @@ services:
     networks:
       - aerial-net
     healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:8080/agentsview/ || exit 1"]
+      test:
+        - CMD
+        - /bin/bash
+        - -c
+        - 'exec 3<>/dev/tcp/127.0.0.1/8080 && printf "GET /agentsview/ HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n" >&3 && grep -q "200 OK" <&3'
       interval: 15s
       timeout: 5s
       retries: 3
