@@ -1,13 +1,19 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -420,3 +426,139 @@ func TestServer_HandleMCP_HealthDirect(t *testing.T) {
 		t.Errorf("expected 200 for handleMCP /health, got %d", rec.Code)
 	}
 }
+
+type mockErrWriter struct {
+	header http.Header
+	err    error
+}
+
+func (m *mockErrWriter) Header() http.Header {
+	if m.header == nil {
+		m.header = make(http.Header)
+	}
+	return m.header
+}
+
+func (m *mockErrWriter) Write(p []byte) (int, error) {
+	return 0, m.err
+}
+
+func (m *mockErrWriter) WriteHeader(statusCode int) {}
+
+func TestServer_WriteResponseAndDisconnect(t *testing.T) {
+	// 1. Successful write
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	writeResponse(rec, req, []byte("ok"))
+	if rec.Body.String() != "ok" {
+		t.Errorf("expected ok, got %s", rec.Body.String())
+	}
+
+	// 2. isClientDisconnect with nil error
+	if isClientDisconnect(req, nil) {
+		t.Errorf("expected false for nil error")
+	}
+
+	// 3. Client context canceled
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	reqCanceled := httptest.NewRequest(http.MethodGet, "/health", nil).WithContext(ctx)
+	if !isClientDisconnect(reqCanceled, errors.New("write err")) {
+		t.Errorf("expected true for canceled context")
+	}
+
+	// 4. EPIPE error
+	if !isClientDisconnect(req, syscall.EPIPE) {
+		t.Errorf("expected true for EPIPE")
+	}
+
+	// 5. ECONNRESET error
+	if !isClientDisconnect(req, syscall.ECONNRESET) {
+		t.Errorf("expected true for ECONNRESET")
+	}
+
+	// 6. net.ErrClosed error
+	if !isClientDisconnect(req, net.ErrClosed) {
+		t.Errorf("expected true for net.ErrClosed")
+	}
+
+	// 7. Generic error write
+	mockGeneric := &mockErrWriter{err: errors.New("disk full")}
+	writeResponse(mockGeneric, req, []byte("data"))
+
+	// 8. writeJSON success and failure
+	recJSON := httptest.NewRecorder()
+	writeJSON(recJSON, req, map[string]string{"foo": "bar"})
+	if recJSON.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", recJSON.Code)
+	}
+
+	// Marshal error on channel type
+	recErrJSON := httptest.NewRecorder()
+	writeJSON(recErrJSON, req, make(chan int))
+	if recErrJSON.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 on marshal error, got %d", recErrJSON.Code)
+	}
+}
+
+type errReadCloser struct{}
+
+func (e *errReadCloser) Read(p []byte) (int, error) {
+	return 0, io.EOF
+}
+
+func (e *errReadCloser) Close() error {
+	return errors.New("simulated close error")
+}
+
+func TestCloseWarn(t *testing.T) {
+	// 1. nil closer
+	closeWarn(nil, "nil closer")
+
+	// 2. valid closer
+	closeWarn(io.NopCloser(strings.NewReader("")), "valid closer")
+
+	// 3. error closer
+	closeWarn(&errReadCloser{}, "error closer")
+}
+
+func TestTools_HandleListSchedules_InvalidJSON(t *testing.T) {
+	cfg := &Config{DatabaseURL: ":memory:", Timezone: "America/Los_Angeles"}
+	db, err := InitDB(cfg)
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer db.Close()
+	h := NewToolHandler(cfg, db)
+	_, err = h.HandleListSchedules(json.RawMessage(`{invalid`))
+	if err == nil {
+		t.Errorf("expected error on invalid JSON arguments")
+	}
+}
+
+func TestDB_UnsupportedScheme(t *testing.T) {
+	_, err := initDB("unsupported://foo")
+	if err == nil {
+		t.Errorf("expected error on unsupported scheme")
+	}
+}
+
+func TestServer_MarshalIndentFailure(t *testing.T) {
+	server, _ := setupTestServer(t)
+	old := marshalIndentFn
+	defer func() { marshalIndentFn = old }()
+	marshalIndentFn = func(v interface{}, prefix, indent string) ([]byte, error) {
+		return nil, errors.New("simulated marshal error")
+	}
+
+	resp := server.processRequest(JSONRPCRequest{
+		JSONRPC: "2.0",
+		ID:      200,
+		Method:  "tools/call",
+		Params:  json.RawMessage(`{"name":"list_schedules","arguments":{}}`),
+	})
+	if resp == nil || resp.Error == nil || resp.Error.Code != -32603 {
+		t.Errorf("expected -32603 on marshal error, got %+v", resp)
+	}
+}
+

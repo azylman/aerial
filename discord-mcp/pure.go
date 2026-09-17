@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -219,6 +220,8 @@ func IsToolsListRequest(rawReq []byte) bool {
 	return strings.TrimSpace(req.Method) == "tools/list"
 }
 
+var marshalFn = json.Marshal
+
 // BuildJSONRPCErrorResponse constructs a compact JSON-RPC 2.0 error response byte slice.
 // If id is nil, it serializes "id": null.
 func BuildJSONRPCErrorResponse(id interface{}, code int, message string) []byte {
@@ -230,7 +233,10 @@ func BuildJSONRPCErrorResponse(id interface{}, code int, message string) []byte 
 			Message: message,
 		},
 	}
-	b, _ := json.Marshal(resp)
+	b, err := marshalFn(resp)
+	if err != nil {
+		return []byte(`{"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":"internal error marshalling response"}}`)
+	}
 	return b
 }
 
@@ -250,7 +256,10 @@ func BuildHealthResponse(wrapper string, blockedTools []string) []byte {
 		Wrapper:      w,
 		BlockedTools: tools,
 	}
-	b, _ := json.Marshal(resp)
+	b, err := marshalFn(resp)
+	if err != nil {
+		return []byte(`{"status":"error","wrapper":` + strconv.Quote(w) + `,"blocked_tools":[]}`)
+	}
 	return b
 }
 

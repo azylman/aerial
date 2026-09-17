@@ -77,12 +77,12 @@ run_golangci_lint() {
     if [ -d "$svc" ]; then
         echo "   [golangci-lint] Linting $svc..."
         if has_cmd golangci-lint; then
-            (cd "$svc" && golangci-lint run ./...)
+            (cd "$svc" && golangci-lint run --path-prefix="$svc/" --config "$REPO_ROOT/.golangci.yml" ./...)
         elif has_cmd docker; then
             docker run --rm \
                 -v "$REPO_ROOT:/workspace" -w "/workspace/$svc" \
                 golangci/golangci-lint:v1.64.5 \
-                golangci-lint run --config /workspace/.golangci.yml ./...
+                golangci-lint run --path-prefix="$svc/" --config /workspace/.golangci.yml ./...
         elif has_cmd go; then
             echo "   (golangci-lint not found, running go vet for $svc)"
             (cd "$svc" && go vet ./...)

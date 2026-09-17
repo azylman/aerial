@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -690,3 +691,32 @@ func TestFormatUpstreamURL_TableDriven(t *testing.T) {
 		})
 	}
 }
+
+func TestMarshalFallbacks(t *testing.T) {
+	// 1. BuildJSONRPCErrorResponse with un-marshallable ID
+	resp := BuildJSONRPCErrorResponse(make(chan int), -32603, "internal error")
+	if !strings.Contains(string(resp), "internal error marshalling response") {
+		t.Errorf("expected fallback error response, got %s", string(resp))
+	}
+
+	// 2. BuildHealthResponse with marshal failure
+	oldMarshal := marshalFn
+	defer func() { marshalFn = oldMarshal }()
+	marshalFn = func(v interface{}) ([]byte, error) {
+		return nil, errors.New("simulated marshal error")
+	}
+
+	health := BuildHealthResponse("test-service", []string{"tool1"})
+	if !strings.Contains(string(health), `"status":"error"`) {
+		t.Errorf("expected fallback health response, got %s", string(health))
+	}
+}
+
+func TestIsToolNameBlocked_MixedCase(t *testing.T) {
+	blocked := map[string]bool{"  DISCORD_SEND  ": true}
+	if !isToolNameBlocked("discord_send", blocked) {
+		t.Error("expected true for mixed-case key in blocked map")
+	}
+}
+
+

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -75,6 +76,14 @@ func rebindQuery(query string, isPg bool) string {
 	return b.String()
 }
 
+func closeWarn(closer io.Closer, name string) {
+	if closer != nil {
+		if err := closer.Close(); err != nil {
+			log.Printf("[Scheduler DB] Warning closing %s: %v", name, err)
+		}
+	}
+}
+
 var (
 	postgresMaxAttempts = 10
 	postgresRetryBase   = 500 * time.Millisecond
@@ -108,7 +117,7 @@ func initDB(dsn string) (*sql.DB, error) {
 				if err == nil {
 					break
 				}
-				_ = database.Close()
+				closeWarn(database, "database on ping failure")
 			}
 			log.Printf("[Scheduler DB] Waiting for PostgreSQL (attempt %d/%d): %v", attempt, maxAttempts, err)
 			time.Sleep(backoff)
@@ -126,22 +135,29 @@ func initDB(dsn string) (*sql.DB, error) {
 		database.SetConnMaxLifetime(30 * time.Minute)
 		database.SetConnMaxIdleTime(5 * time.Minute)
 
+		var success bool
+		defer func() {
+			if !success {
+				closeWarn(database, "database on initialization failure")
+			}
+		}()
+
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
 		conn, err := database.Conn(ctx)
 		if err != nil {
-			_ = database.Close()
 			return nil, fmt.Errorf("failed to acquire connection for migrations: %w", err)
 		}
-		defer func() { _ = conn.Close() }()
+		defer closeWarn(conn, "migration conn")
 
 		if _, err := conn.ExecContext(ctx, "SELECT pg_advisory_lock($1);", migrationLockID); err != nil {
-			_ = database.Close()
 			return nil, fmt.Errorf("failed to acquire migration advisory lock: %w", err)
 		}
 		defer func() {
-			_, _ = conn.ExecContext(context.Background(), "SELECT pg_advisory_unlock($1);", migrationLockID)
+			if _, unlockErr := conn.ExecContext(context.Background(), "SELECT pg_advisory_unlock($1);", migrationLockID); unlockErr != nil {
+				log.Printf("[Scheduler DB] Warning releasing migration advisory lock: %v", unlockErr)
+			}
 		}()
 
 		schema := `
@@ -169,13 +185,15 @@ func initDB(dsn string) (*sql.DB, error) {
 		CREATE INDEX IF NOT EXISTS idx_one_shot_schedules_run_at ON one_shot_schedules(run_at);
 		`
 		if _, err := conn.ExecContext(ctx, schema); err != nil {
-			_ = database.Close()
 			return nil, fmt.Errorf("failed to execute postgres schema: %w", err)
 		}
 
-		_, _ = conn.ExecContext(ctx, "ALTER TABLE cron_schedules ADD COLUMN IF NOT EXISTS effort TEXT NOT NULL DEFAULT 'high';")
+		if _, alterErr := conn.ExecContext(ctx, "ALTER TABLE cron_schedules ADD COLUMN IF NOT EXISTS effort TEXT NOT NULL DEFAULT 'high';"); alterErr != nil {
+			log.Printf("[Scheduler DB] Warning adding postgres effort column: %v", alterErr)
+		}
 
 		log.Printf("[Scheduler DB] PostgreSQL initialized successfully at %s", trimmed)
+		success = true
 		return database, nil
 	}
 
@@ -238,14 +256,20 @@ func initDB(dsn string) (*sql.DB, error) {
 	CREATE INDEX IF NOT EXISTS idx_one_shot_schedules_run_at ON one_shot_schedules(run_at);
 	`
 	if _, err := database.Exec(schema); err != nil {
-		_ = database.Close()
+		closeWarn(database, "database on schema error")
 		return nil, err
 	}
 
 	// Safe column migrations on existing tables
-	_, _ = database.Exec(`ALTER TABLE cron_schedules ADD COLUMN title_prefix TEXT NOT NULL DEFAULT '';`)
-	_, _ = database.Exec(`ALTER TABLE cron_schedules ADD COLUMN timezone TEXT NOT NULL DEFAULT 'America/Los_Angeles';`)
-	_, _ = database.Exec(`ALTER TABLE cron_schedules ADD COLUMN effort TEXT NOT NULL DEFAULT 'high';`)
+	for _, alterStmt := range []string{
+		`ALTER TABLE cron_schedules ADD COLUMN title_prefix TEXT NOT NULL DEFAULT '';`,
+		`ALTER TABLE cron_schedules ADD COLUMN timezone TEXT NOT NULL DEFAULT 'America/Los_Angeles';`,
+		`ALTER TABLE cron_schedules ADD COLUMN effort TEXT NOT NULL DEFAULT 'high';`,
+	} {
+		if _, alterErr := database.Exec(alterStmt); alterErr != nil {
+			log.Printf("[Scheduler DB] Column migration notice (safe to ignore if exists): %v", alterErr)
+		}
+	}
 
 	log.Printf("[Scheduler DB] SQLite database initialized at %s", trimmed)
 	return database, nil
@@ -314,7 +338,7 @@ func ListCronSchedules(database *sql.DB, targetID string) ([]CronSchedule, error
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
+	defer closeWarn(rows, "rows")
 
 	var results []CronSchedule
 	for rows.Next() {
@@ -323,6 +347,9 @@ func ListCronSchedules(database *sql.DB, targetID string) ([]CronSchedule, error
 			return nil, err
 		}
 		results = append(results, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return results, nil
 }
@@ -380,7 +407,10 @@ func UpdateCronSchedule(database *sql.DB, id string, effort *string, cronExpr *s
 	if err != nil {
 		return err
 	}
-	rowsAffected, _ := res.RowsAffected()
+	rowsAffected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to determine rows affected: %w", err)
+	}
 	if rowsAffected == 0 {
 		return fmt.Errorf("cron schedule %q not found", id)
 	}
@@ -409,7 +439,7 @@ func ListOneShotSchedules(database *sql.DB, targetID string) ([]OneShotSchedule,
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
+	defer closeWarn(rows, "rows")
 
 	var results []OneShotSchedule
 	for rows.Next() {
@@ -418,6 +448,9 @@ func ListOneShotSchedules(database *sql.DB, targetID string) ([]OneShotSchedule,
 			return nil, err
 		}
 		results = append(results, s)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return results, nil
 }
@@ -431,14 +464,20 @@ func DeleteSchedule(database *sql.DB, scheduleID string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	cronRows, _ := resCron.RowsAffected()
+	cronRows, err := resCron.RowsAffected()
+	if err != nil {
+		log.Printf("[Scheduler DB] Warning getting cron rows affected: %v", err)
+	}
 
 	queryOneShot := rebindQuery("DELETE FROM one_shot_schedules WHERE id = ?", isPostgres(database))
 	resOneShot, err := database.Exec(queryOneShot, scheduleID)
 	if err != nil {
 		return false, err
 	}
-	oneShotRows, _ := resOneShot.RowsAffected()
+	oneShotRows, err := resOneShot.RowsAffected()
+	if err != nil {
+		log.Printf("[Scheduler DB] Warning getting one-shot rows affected: %v", err)
+	}
 
 	return (cronRows > 0 || oneShotRows > 0), nil
 }
