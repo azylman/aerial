@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -436,7 +437,11 @@ func ResolveAndValidateLocalImage(rawPath string, baseDir string) (*Attachment, 
 	if err != nil {
 		return nil, fmt.Errorf("failed to open file: %w", err)
 	}
-	defer f.Close()
+	defer func() {
+		if closeErr := f.Close(); closeErr != nil {
+			log.Printf("[Delivery] Warning: failed to close media file %s: %v", canonicalPath, closeErr)
+		}
+	}()
 
 	// 4. Verify regular file (reject sockets, pipes, devices)
 	stat, err := f.Stat()

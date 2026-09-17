@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -231,7 +232,11 @@ func (c *Client) doRequest(ctx context.Context, body []byte) ([]float32, error) 
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			log.Printf("[Memory] Warning closing ollama response body: %v", closeErr)
+		}
+	}()
 
 	respBytes, err := io.ReadAll(resp.Body)
 	if err != nil {

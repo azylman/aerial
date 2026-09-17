@@ -2,6 +2,7 @@ package watcher
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -538,5 +539,24 @@ func TestWatcher_NestedDirectoryRemoval(t *testing.T) {
 	waitForCondition(t, 2*time.Second, func() bool {
 		return !isDirWatched(w, child) && !isDirWatched(w, filepath.Join(parent, "virtual_sub"))
 	})
+}
+
+func TestWatcher_ErrorChannelAndCloseError(t *testing.T) {
+	w, err := NewWatcher()
+	if err != nil {
+		t.Fatalf("NewWatcher failed: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go w.Start(ctx)
+
+	// Inject error into w.fsw.Errors to cover the error channel select case
+	w.fsw.Errors <- errors.New("simulated fsnotify error")
+	time.Sleep(20 * time.Millisecond)
+
+	// Close the underlying fsw first so that w.Close() on ctx cancel triggers the close error branch
+	_ = w.fsw.Close()
+	cancel()
+	time.Sleep(20 * time.Millisecond)
 }
 

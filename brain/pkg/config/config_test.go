@@ -2797,3 +2797,45 @@ channels:
 		}
 	})
 }
+
+func TestConfig_SwallowedErrorsRemediationCoverage(t *testing.T) {
+	// 1. Deprecated classifier_model in UnmarshalYAML
+	yamlData := []byte("classifier_model: gemini-test-deprecated\n")
+	var c ConfigData
+	if err := yaml.Unmarshal(yamlData, &c); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+	if c.LowEffortModel != "gemini-test-deprecated" {
+		t.Errorf("expected LowEffortModel to be set from classifier_model, got %q", c.LowEffortModel)
+	}
+
+	// 2. writeAtomicFile where targetPath is a non-empty directory
+	tmpDir := t.TempDir()
+	targetDir := filepath.Join(tmpDir, "directory_target")
+	if err := os.MkdirAll(filepath.Join(targetDir, "sub"), 0755); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+	err := writeAtomicFile(targetDir, "sample content")
+	if err == nil {
+		t.Errorf("expected writeAtomicFile to error when target is directory")
+	}
+
+	// 3. LoadConfigFromLookup with data_dir that cannot be written to (file as directory)
+	fileBlocker := filepath.Join(tmpDir, "file_blocker")
+	if err := os.WriteFile(fileBlocker, []byte("x"), 0644); err != nil {
+		t.Fatalf("write blocker failed: %v", err)
+	}
+	badDataDir := filepath.Join(fileBlocker, "sub")
+	cfgContent := fmt.Sprintf("data_dir: %q\nmodel: gemini-flash\nchannels:\n  default:\n    mode: channel\n    wake_mode: mention\n", badDataDir)
+	cfgPath := filepath.Join(tmpDir, "valid_cfg.yaml")
+	if err := os.WriteFile(cfgPath, []byte(cfgContent), 0644); err != nil {
+		t.Fatalf("write cfgPath failed: %v", err)
+	}
+	loaded, loadErr := LoadConfigFromLookup(func(string) string { return "" }, cfgPath)
+	if loadErr != nil {
+		t.Fatalf("LoadConfigFromLookup failed: %v", loadErr)
+	}
+	if loaded == nil {
+		t.Fatalf("expected non-nil config")
+	}
+}

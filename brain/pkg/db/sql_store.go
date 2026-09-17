@@ -73,9 +73,7 @@ func (s *SQLStore) WithTx(ctx context.Context, fn func(txStore Store) error) err
 	if err != nil {
 		return fmt.Errorf("failed to begin tx: %w", err)
 	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
+	defer rollbackWarn(tx, "tx")
 
 	txStore := NewTxStore(tx, s.isPostgres)
 	if err := fn(txStore); err != nil {

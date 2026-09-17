@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"strings"
 	"time"
@@ -120,7 +122,7 @@ func initDB(dsn string) (*sql.DB, error) {
 				break
 			}
 			err = pingErr
-			_ = database.Close()
+			closeWarn(database, "database")
 		}
 		log.Printf("[DB] Waiting for PostgreSQL (attempt %d/%d): %v", attempt, postgresMaxAttempts, err)
 		time.Sleep(time.Duration(attempt) * postgresRetryBase)
@@ -140,11 +142,27 @@ func initDB(dsn string) (*sql.DB, error) {
 	defer cancel()
 
 	if err := initSchemaPostgres(ctx, database); err != nil {
-		_ = database.Close()
+		closeWarn(database, "database")
 		return nil, err
 	}
 
 	log.Printf("[DB] PostgreSQL initialized successfully with pgvector at %s", trimmed)
 	metrics.RegisterDBStats(database)
 	return database, nil
+}
+
+func closeWarn(closer io.Closer, name string) {
+	if closer != nil {
+		if err := closer.Close(); err != nil {
+			log.Printf("[DB] Warning closing %s: %v", name, err)
+		}
+	}
+}
+
+func rollbackWarn(tx *sql.Tx, name string) {
+	if tx != nil {
+		if err := tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+			log.Printf("[DB] Warning rolling back %s: %v", name, err)
+		}
+	}
 }

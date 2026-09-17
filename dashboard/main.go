@@ -420,6 +420,54 @@ func (p *GitHubPoller) Start(ctx context.Context) {
 	}()
 }
 
+func closeWarn(closer io.Closer, name string) {
+	if closer != nil {
+		if err := closer.Close(); err != nil {
+			log.Printf("[Dashboard] Warning closing %s: %v", name, err)
+		}
+	}
+}
+
+func drainAndClose(body io.ReadCloser, name string) {
+	if body == nil {
+		return
+	}
+	if _, err := io.Copy(io.Discard, io.LimitReader(body, 32*1024)); err != nil {
+		log.Printf("[Dashboard] Warning draining %s: %v", name, err)
+	}
+	closeWarn(body, name)
+}
+
+func isClientDisconnect(r *http.Request, err error) bool {
+	if err == nil {
+		return false
+	}
+	if r != nil && r.Context().Err() != nil {
+		return true
+	}
+	return errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, net.ErrClosed)
+}
+
+func writeResponse(w http.ResponseWriter, r *http.Request, data []byte) {
+	if _, err := w.Write(data); err != nil {
+		if !isClientDisconnect(r, err) {
+			log.Printf("[Dashboard:HTTP] Failed to write response: %v", err)
+		}
+	}
+}
+
+func writeJSON(w http.ResponseWriter, r *http.Request, status int, data interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	b, err := json.Marshal(data)
+	if err != nil {
+		log.Printf("[Dashboard:HTTP] Failed to marshal JSON response: %v", err)
+		http.Error(w, `{"error":"Internal error"}`, http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(status)
+	writeResponse(w, r, b)
+}
+
 func (p *GitHubPoller) pollOnce(ctx context.Context) bool {
 	baseURL := p.apiBaseURL
 	if baseURL == "" {
@@ -447,10 +495,7 @@ func (p *GitHubPoller) pollOnce(ctx context.Context) bool {
 		p.mu.Unlock()
 		return false
 	}
-	defer func() {
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
-	}()
+	defer drainAndClose(resp.Body, "runs response body")
 
 	if resp.StatusCode == http.StatusNotModified {
 		p.mu.RLock()
@@ -552,10 +597,7 @@ func (p *GitHubPoller) fetchJobsForRun(ctx context.Context, runID int64) {
 	if err != nil {
 		return
 	}
-	defer func() {
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
-	}()
+	defer drainAndClose(resp.Body, "jobs response body")
 
 	if resp.StatusCode == http.StatusNotModified {
 		return
@@ -939,10 +981,7 @@ func fetchDockerClusterState(ctx context.Context) ([]ServiceStatus, []DockerCont
 	if err != nil {
 		return nil, nil, err
 	}
-	defer func() {
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
-	}()
+	defer drainAndClose(resp.Body, "docker response body")
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, nil, fmt.Errorf("docker API status %d", resp.StatusCode)
@@ -1018,10 +1057,7 @@ func fetchActiveTasksFromBrain(ctx context.Context, brainURL string) ([]ActiveTa
 	if err != nil {
 		return []ActiveTaskStatus{}, err
 	}
-	defer func() {
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
-	}()
+	defer drainAndClose(resp.Body, "brain tasks response body")
 
 	if resp.StatusCode != http.StatusOK {
 		return []ActiveTaskStatus{}, fmt.Errorf("brain returned HTTP %d", resp.StatusCode)
@@ -1137,7 +1173,7 @@ func fetchGitSyncStatus(ctx context.Context, gitsyncURL string) GitSyncStatusRes
 	if err != nil {
 		return fallback
 	}
-	defer resp.Body.Close()
+	defer drainAndClose(resp.Body, "gitsync response body")
 
 	if resp.StatusCode != http.StatusOK {
 		return fallback
@@ -1224,9 +1260,8 @@ func statusHandler(brainURL, gitsyncURL, configPath, gitCommit string) http.Hand
 			OngoingDeploy:    ongoingDeploy,
 			IsDeploying:      isDeploying,
 		}
-		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-		_ = json.NewEncoder(w).Encode(resp)
+		writeJSON(w, r, http.StatusOK, resp)
 	}
 }
 
@@ -1259,8 +1294,7 @@ func factsHandler(brainBaseURL string) http.HandlerFunc {
 		resp, err := brainHTTPClient.Do(req)
 		if err != nil {
 			log.Printf("[Dashboard] Upstream brain request failed (%s): %v", targetURL, err)
-			w.WriteHeader(http.StatusServiceUnavailable)
-			_ = json.NewEncoder(w).Encode(FactsAPIResponse{
+			writeJSON(w, r, http.StatusServiceUnavailable, FactsAPIResponse{
 				Facts:  []FactItem{},
 				Total:  0,
 				Limit:  limit,
@@ -1270,15 +1304,11 @@ func factsHandler(brainBaseURL string) http.HandlerFunc {
 			})
 			return
 		}
-		defer func() {
-			_, _ = io.Copy(io.Discard, resp.Body)
-			_ = resp.Body.Close()
-		}()
+		defer drainAndClose(resp.Body, "brain facts response body")
 
 		if resp.StatusCode != http.StatusOK {
 			log.Printf("[Dashboard] Upstream brain returned status %d", resp.StatusCode)
-			w.WriteHeader(resp.StatusCode)
-			_ = json.NewEncoder(w).Encode(FactsAPIResponse{
+			writeJSON(w, r, resp.StatusCode, FactsAPIResponse{
 				Facts:  []FactItem{},
 				Total:  0,
 				Limit:  limit,
@@ -1291,8 +1321,7 @@ func factsHandler(brainBaseURL string) http.HandlerFunc {
 
 		var data FactsAPIResponse
 		if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-			w.WriteHeader(http.StatusBadGateway)
-			_ = json.NewEncoder(w).Encode(FactsAPIResponse{
+			writeJSON(w, r, http.StatusBadGateway, FactsAPIResponse{
 				Facts:  []FactItem{},
 				Total:  0,
 				Limit:  limit,
@@ -1307,8 +1336,7 @@ func factsHandler(brainBaseURL string) http.HandlerFunc {
 			data.Facts = []FactItem{}
 		}
 
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(data)
+		writeJSON(w, r, http.StatusOK, data)
 	}
 }
 
@@ -1342,8 +1370,7 @@ func schedulesHandler(brainBaseURL string) http.HandlerFunc {
 		resp, err := brainHTTPClient.Do(req)
 		if err != nil {
 			log.Printf("[Dashboard] Upstream brain request failed (%s): %v", targetURL, err)
-			w.WriteHeader(http.StatusServiceUnavailable)
-			_ = json.NewEncoder(w).Encode(SchedulesAPIResponse{
+			writeJSON(w, r, http.StatusServiceUnavailable, SchedulesAPIResponse{
 				Status: "degraded",
 				Error:  "Brain service unreachable. Retrying...",
 				Summary: ScheduleSummaryMetrics{
@@ -1358,15 +1385,11 @@ func schedulesHandler(brainBaseURL string) http.HandlerFunc {
 			})
 			return
 		}
-		defer func() {
-			_, _ = io.Copy(io.Discard, resp.Body)
-			_ = resp.Body.Close()
-		}()
+		defer drainAndClose(resp.Body, "brain schedules response body")
 
 		if resp.StatusCode != http.StatusOK {
 			log.Printf("[Dashboard] Upstream brain returned status %d", resp.StatusCode)
-			w.WriteHeader(resp.StatusCode)
-			_ = json.NewEncoder(w).Encode(SchedulesAPIResponse{
+			writeJSON(w, r, resp.StatusCode, SchedulesAPIResponse{
 				Status: "error",
 				Error:  "Upstream brain error occurred",
 				Summary: ScheduleSummaryMetrics{
@@ -1384,8 +1407,7 @@ func schedulesHandler(brainBaseURL string) http.HandlerFunc {
 
 		var data SchedulesAPIResponse
 		if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-			w.WriteHeader(http.StatusBadGateway)
-			_ = json.NewEncoder(w).Encode(SchedulesAPIResponse{
+			writeJSON(w, r, http.StatusBadGateway, SchedulesAPIResponse{
 				Status: "error",
 				Error:  "Failed to decode upstream brain response",
 				Summary: ScheduleSummaryMetrics{
@@ -1408,8 +1430,7 @@ func schedulesHandler(brainBaseURL string) http.HandlerFunc {
 			data.OneShots = []OneShotSchedule{}
 		}
 
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(data)
+		writeJSON(w, r, http.StatusOK, data)
 	}
 }
 
@@ -1443,8 +1464,7 @@ func scheduleRunsHandler(brainBaseURL string) http.HandlerFunc {
 		resp, err := brainHTTPClient.Do(req)
 		if err != nil {
 			log.Printf("[Dashboard] Upstream brain request failed (%s): %v", targetURL, err)
-			w.WriteHeader(http.StatusServiceUnavailable)
-			_ = json.NewEncoder(w).Encode(ScheduleRunsAPIResponse{
+			writeJSON(w, r, http.StatusServiceUnavailable, ScheduleRunsAPIResponse{
 				Status: "degraded",
 				Error:  "Brain service unreachable. Retrying...",
 				Total:  0,
@@ -1454,15 +1474,11 @@ func scheduleRunsHandler(brainBaseURL string) http.HandlerFunc {
 			})
 			return
 		}
-		defer func() {
-			_, _ = io.Copy(io.Discard, resp.Body)
-			_ = resp.Body.Close()
-		}()
+		defer drainAndClose(resp.Body, "brain schedule runs response body")
 
 		if resp.StatusCode != http.StatusOK {
 			log.Printf("[Dashboard] Upstream brain returned status %d", resp.StatusCode)
-			w.WriteHeader(resp.StatusCode)
-			_ = json.NewEncoder(w).Encode(ScheduleRunsAPIResponse{
+			writeJSON(w, r, resp.StatusCode, ScheduleRunsAPIResponse{
 				Status: "error",
 				Error:  "Upstream brain error occurred",
 				Total:  0,
@@ -1475,8 +1491,7 @@ func scheduleRunsHandler(brainBaseURL string) http.HandlerFunc {
 
 		var data ScheduleRunsAPIResponse
 		if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-			w.WriteHeader(http.StatusBadGateway)
-			_ = json.NewEncoder(w).Encode(ScheduleRunsAPIResponse{
+			writeJSON(w, r, http.StatusBadGateway, ScheduleRunsAPIResponse{
 				Status: "error",
 				Error:  "Failed to decode upstream brain response",
 				Total:  0,
@@ -1491,8 +1506,7 @@ func scheduleRunsHandler(brainBaseURL string) http.HandlerFunc {
 			data.Runs = []ScheduleRun{}
 		}
 
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(data)
+		writeJSON(w, r, http.StatusOK, data)
 	}
 }
 
@@ -1502,7 +1516,7 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("OK"))
+	writeResponse(w, r, []byte("OK"))
 }
 
 func securityHeadersMiddleware(next http.Handler) http.Handler {
@@ -1649,7 +1663,7 @@ func (ar *AssetRegistry) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodHead {
 		return
 	}
-	_, _ = w.Write(asset.Data)
+	writeResponse(w, r, asset.Data)
 }
 
 // DashboardConfig holds configuration settings for the dashboard web server.

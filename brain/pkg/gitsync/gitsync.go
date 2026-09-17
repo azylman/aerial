@@ -134,7 +134,9 @@ func EnsureRepo(ctx context.Context, repoPath, repoUrl, pat string) error {
 	execGit := getGitExecutor()
 
 	// Configure safe.directory to prevent ownership conflicts
-	_, _, _ = execGit(ctx, "", BuildSafeDirectoryArgs()...)
+	if out, errOut, err := execGit(ctx, "", BuildSafeDirectoryArgs()...); err != nil {
+		log.Printf("[GitSync] Warning configuring safe.directory: %s %s %v", string(out), string(errOut), err)
+	}
 
 	entries, readErr := os.ReadDir(repoPath)
 	isEmptyOrNotExist := readErr != nil || len(entries) == 0
@@ -166,7 +168,9 @@ func EnsureRepo(ctx context.Context, repoPath, repoUrl, pat string) error {
 	}
 
 	// 2. git config --global safe.directory "*"
-	_, _, _ = execGit(ctx, "", BuildSafeDirectoryArgs()...)
+	if out, errOut, err := execGit(ctx, "", BuildSafeDirectoryArgs()...); err != nil {
+		log.Printf("[GitSync] Warning configuring safe.directory: %s %s %v", string(out), string(errOut), err)
+	}
 
 	// 3. git remote add origin <cleanRepoUrl>
 	outRemote, errRemote, err := execGit(ctx, repoPath, "remote", "add", "origin", cleanRepoUrl)
@@ -197,7 +201,9 @@ func EnsureRepo(ctx context.Context, repoPath, repoUrl, pat string) error {
 	}
 
 	// 5. git branch -M targetBranch & reset --soft
-	_, _, _ = execGit(ctx, repoPath, BuildBranchRenameArgs(targetBranch)...)
+	if out, errOut, err := execGit(ctx, repoPath, BuildBranchRenameArgs(targetBranch)...); err != nil {
+		log.Printf("[GitSync] Warning renaming branch to %s for %s: %s %s %v", targetBranch, repoPath, string(out), string(errOut), err)
+	}
 
 	outReset, errReset, err := execGit(ctx, repoPath, BuildResetSoftArgs("origin/"+targetBranch)...)
 	if err != nil {
@@ -208,7 +214,9 @@ func EnsureRepo(ctx context.Context, repoPath, repoUrl, pat string) error {
 		}
 	}
 
-	_, _, _ = execGit(ctx, repoPath, BuildBranchTrackArgs("origin", targetBranch)...)
+	if out, errOut, err := execGit(ctx, repoPath, BuildBranchTrackArgs("origin", targetBranch)...); err != nil {
+		log.Printf("[GitSync] Warning setting upstream branch tracking origin/%s for %s: %s %s %v", targetBranch, repoPath, string(out), string(errOut), err)
+	}
 	return nil
 }
 
@@ -244,7 +252,9 @@ func SyncRepo(ctx context.Context, repoPath string, cfg *config.Config) (bool, e
 	execGit := getGitExecutor()
 
 	// 4. Configure safe.directory
-	_, _, _ = execGit(opCtx, "", BuildSafeDirectoryArgs()...)
+	if out, errOut, err := execGit(opCtx, "", BuildSafeDirectoryArgs()...); err != nil {
+		log.Printf("[GitSync] Warning configuring safe.directory: %s %s %v", string(out), string(errOut), err)
+	}
 
 	// 5. Rev-parse HEAD before pull
 	outBefore, errBefore, err := execGit(opCtx, repoPath, "rev-parse", "HEAD")

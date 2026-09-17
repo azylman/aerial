@@ -2,6 +2,7 @@ package delivery
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -587,5 +588,59 @@ func TestDelivery_ExtendedBranches(t *testing.T) {
 	if att.ContentType != "image/png" {
 		t.Errorf("expected image/png content type, got %s", att.ContentType)
 	}
+}
+
+func TestDelivery_SwallowedErrorsRemediationCoverage(t *testing.T) {
+	// 1. StartTyping with error from ChannelTyping
+	sess := newMockDiscordSession(func(req *http.Request) (*http.Response, error) {
+		return nil, errors.New("simulated network typing failure")
+	})
+	stop := StartTyping(sess, "chan-typing-error")
+	time.Sleep(10 * time.Millisecond)
+	stop()
+
+	// 2. MergeAttachments with primary exceeding MaxAttachmentsPerMessage
+	primary := make([]*Attachment, 12)
+	for i := 0; i < 12; i++ {
+		primary[i] = &Attachment{Filename: fmt.Sprintf("file%d.png", i)}
+	}
+	secondary := []*Attachment{{Filename: "extra.png"}}
+	merged := MergeAttachments(primary, secondary)
+	if len(merged) != MaxAttachmentsPerMessage {
+		t.Errorf("expected %d attachments, got %d", MaxAttachmentsPerMessage, len(merged))
+	}
+
+	// 3. ResolveAndValidateLocalImage with octet-stream falling back to jpg, gif, webp and non-existent root
+	tmpMediaDir := t.TempDir()
+	origRoots := AllowedAttachmentRoots
+	AllowedAttachmentRoots = []string{tmpMediaDir, "/non/existent/path/for/eval/symlink"}
+	defer func() { AllowedAttachmentRoots = origRoots }()
+
+	for _, ext := range []string{".jpg", ".gif", ".webp"} {
+		testFile := filepath.Join(tmpMediaDir, "test"+ext)
+		if err := os.WriteFile(testFile, []byte("\x00\x01\x02\x03\x04\x05\x06\x07"), 0644); err != nil {
+			t.Fatalf("write failed: %v", err)
+		}
+		att, err := ResolveAndValidateLocalImage(testFile, "")
+		if err != nil {
+			t.Fatalf("ResolveAndValidateLocalImage failed for %s: %v", ext, err)
+		}
+		if !strings.HasPrefix(att.ContentType, "image/") {
+			t.Errorf("expected image/* content type for %s, got %s", ext, att.ContentType)
+		}
+	}
+
+	// 4. ResolveChannelByNameOrID with GuildChannels API error
+	sessGuildErr := newMockDiscordSession(func(req *http.Request) (*http.Response, error) {
+		if strings.Contains(req.URL.Path, "/users/@me/guilds") {
+			return mockJSONResponse(http.StatusOK, `[{"id":"g-err","name":"Error Guild"}]`)
+		}
+		if strings.Contains(req.URL.Path, "/guilds/g-err/channels") {
+			return nil, errors.New("guild channels fetch failed")
+		}
+		return mockJSONResponse(http.StatusNotFound, `{"message":"not found"}`)
+	})
+	sessGuildErr.Token = "Bot mock-token"
+	_, _ = ResolveChannelByNameOrID(sessGuildErr, "any-channel")
 }
 

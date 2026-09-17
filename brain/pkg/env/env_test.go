@@ -894,3 +894,45 @@ func TestSyncSkills_AndLinkSkills_Branches(t *testing.T) {
 	}
 }
 
+func TestEnv_SwallowedErrorsRemediationCoverage(t *testing.T) {
+	// 1. writeAtomic with targetPath being a non-empty directory (triggers rename error, remove error, warning log)
+	tmpDir := t.TempDir()
+	targetDir := filepath.Join(tmpDir, "blocking_dir")
+	if err := os.MkdirAll(filepath.Join(targetDir, "child"), 0755); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+	p := New(tmpDir, tmpDir)
+	if err := p.writeAtomic(targetDir, "content"); err == nil {
+		t.Errorf("expected writeAtomic to fail when target is a directory")
+	}
+
+	// 2. SyncRules with bad dataDir so LKGC write fails
+	blockFile := filepath.Join(tmpDir, "block_file")
+	if err := os.WriteFile(blockFile, []byte("x"), 0644); err != nil {
+		t.Fatalf("write blocker failed: %v", err)
+	}
+	badDataDir := filepath.Join(blockFile, "sub")
+	pBadData := New(tmpDir, badDataDir)
+	agentsFile := filepath.Join(tmpDir, "AGENTS.md")
+	if err := os.WriteFile(agentsFile, []byte("test persona"), 0644); err != nil {
+		t.Fatalf("write agents file failed: %v", err)
+	}
+	pBadData.SetAgentInstructionsSearchPaths([]string{agentsFile})
+	if err := pBadData.SyncRules(""); err != nil {
+		t.Fatalf("SyncRules failed: %v", err)
+	}
+
+	// 3. sweepOrphanedSymlinks with an orphaned symlink that gets removed
+	sweepDir := t.TempDir()
+	nonExistentTarget := filepath.Join(t.TempDir(), "ghost.txt")
+	brokenLink := filepath.Join(sweepDir, "broken_link")
+	if err := os.Symlink(nonExistentTarget, brokenLink); err != nil {
+		t.Fatalf("symlink failed: %v", err)
+	}
+	sweepOrphanedSymlinks([]string{sweepDir})
+	if _, err := os.Lstat(brokenLink); !os.IsNotExist(err) {
+		t.Errorf("expected broken symlink to be swept, err=%v", err)
+	}
+}
+
+

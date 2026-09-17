@@ -210,7 +210,7 @@ func GetPendingOrProcessingMessages(database DBTX) (msgs []Message, err error) {
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
+	defer closeWarn(rows, "rows")
 
 	var results []Message
 	for rows.Next() {
@@ -360,7 +360,7 @@ func GetActiveRecentThreadIDs(database DBTX, since time.Duration) ([]string, err
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
+	defer closeWarn(rows, "rows")
 
 	var threadIDs []string
 	for rows.Next() {
@@ -411,7 +411,7 @@ func GetRecentThreadMessages(database DBTX, threadID string, limit int) (msgs []
 	if err != nil {
 		return nil, fmt.Errorf("failed to query recent thread messages: %w", err)
 	}
-	defer func() { _ = rows.Close() }()
+	defer closeWarn(rows, "rows")
 
 	msgs = make([]Message, 0)
 	for rows.Next() {

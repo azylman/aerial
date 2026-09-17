@@ -2352,6 +2352,48 @@ func TestSchemaContract_NoPrematureIndexes(t *testing.T) {
 	}
 }
 
+type dummyTestCloser struct {
+	err error
+}
+
+func (d *dummyTestCloser) Close() error {
+	return d.err
+}
+
+func TestDB_CloseWarnAndRollbackWarn(t *testing.T) {
+	// 1. closeWarn with nil closer (no-op)
+	closeWarn(nil, "nil-closer")
+
+	// 2. closeWarn with successful closer
+	closeWarn(&dummyTestCloser{err: nil}, "ok-closer")
+
+	// 3. closeWarn with error closer (logs warning)
+	closeWarn(&dummyTestCloser{err: fmt.Errorf("simulated close error")}, "err-closer")
+
+	// 4. rollbackWarn with nil tx (no-op)
+	rollbackWarn(nil, "nil-tx")
+
+	// 5. rollbackWarn with active transaction
+	database := setupTestDB(t)
+	defer func() { _ = database.Close() }()
+
+	tx1, err := database.Begin()
+	if err != nil {
+		t.Fatalf("failed to begin tx: %v", err)
+	}
+	rollbackWarn(tx1, "active-tx")
+
+	// 6. rollbackWarn with already committed transaction (sql.ErrTxDone suppressed)
+	tx2, err := database.Begin()
+	if err != nil {
+		t.Fatalf("failed to begin tx2: %v", err)
+	}
+	if err := tx2.Commit(); err != nil {
+		t.Fatalf("failed to commit tx2: %v", err)
+	}
+	rollbackWarn(tx2, "committed-tx")
+}
+
 
 
 
