@@ -2,7 +2,9 @@ package env
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -119,11 +121,15 @@ func (p *Provisioner) writeAtomic(targetPath, content string) error {
 	}
 	tmpName := f.Name()
 	defer func() {
-		_ = os.Remove(tmpName)
+		if rmErr := os.Remove(tmpName); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
+			log.Printf("[Env] Warning removing temporary file %s: %v", tmpName, rmErr)
+		}
 	}()
 
 	if _, err := f.WriteString(content); err != nil {
-		_ = f.Close()
+		if closeErr := f.Close(); closeErr != nil {
+			log.Printf("[Env] Warning closing temporary file %s: %v", tmpName, closeErr)
+		}
 		return err
 	}
 	if err := f.Close(); err != nil {
@@ -131,8 +137,9 @@ func (p *Provisioner) writeAtomic(targetPath, content string) error {
 	}
 
 	if err := os.Rename(tmpName, targetPath); err != nil {
-		// Fallback for filesystems (e.g. Windows) where rename doesn't overwrite existing files
-		_ = os.Remove(targetPath)
+		if rmErr := os.Remove(targetPath); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
+			log.Printf("[Env] Warning removing target file %s prior to fallback rename: %v", targetPath, rmErr)
+		}
 		return os.Rename(tmpName, targetPath)
 	}
 	return nil

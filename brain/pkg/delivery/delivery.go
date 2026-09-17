@@ -3,6 +3,7 @@ package delivery
 import (
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -253,7 +254,9 @@ func StartTyping(s *discordgo.Session, channelID string) (stop func()) {
 	}
 
 	metrics.DiscordTypingSessionsActive.Inc()
-	_ = s.ChannelTyping(channelID)
+	if err := s.ChannelTyping(channelID); err != nil {
+		log.Printf("[Delivery] Warning: failed to send typing indicator to channel %s: %v", channelID, err)
+	}
 	stopChan := make(chan struct{})
 	var once sync.Once
 
@@ -263,7 +266,9 @@ func StartTyping(s *discordgo.Session, channelID string) (stop func()) {
 		for {
 			select {
 			case <-ticker.C:
-				_ = s.ChannelTyping(channelID)
+				if err := s.ChannelTyping(channelID); err != nil {
+					log.Printf("[Delivery] Warning: failed to send typing indicator to channel %s: %v", channelID, err)
+				}
 			case <-stopChan:
 				return
 			}

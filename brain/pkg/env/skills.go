@@ -1,6 +1,7 @@
 package env
 
 import (
+	"errors"
 	"log"
 	"os"
 	"path/filepath"
@@ -75,9 +76,13 @@ func LinkSkills(targetSkillDirs, sourceDirs []string) int {
 			for _, targetDir := range targetSkillDirs {
 				destPath := filepath.Join(targetDir, skillName)
 				tmpDest := destPath + ".tmp"
-				_ = os.Remove(tmpDest)
+				if err := os.Remove(tmpDest); err != nil && !errors.Is(err, os.ErrNotExist) {
+					log.Printf("[Skills] Warning removing stale temp skill %s: %v", tmpDest, err)
+				}
 				if err := os.Symlink(srcPath, tmpDest); err != nil {
-					_ = os.Remove(destPath)
+					if err := os.Remove(destPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+						log.Printf("[Skills] Warning removing existing destination skill %s: %v", destPath, err)
+					}
 					if err := os.Symlink(srcPath, destPath); err != nil {
 						log.Printf("Warning: failed to symlink skill %s -> %s: %v", srcPath, destPath, err)
 					} else {
@@ -85,8 +90,12 @@ func LinkSkills(targetSkillDirs, sourceDirs []string) int {
 					}
 				} else {
 					if err := os.Rename(tmpDest, destPath); err != nil {
-						_ = os.Remove(destPath)
-						_ = os.Rename(tmpDest, destPath)
+						if err := os.Remove(destPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+							log.Printf("[Skills] Warning removing destination skill %s prior to rename: %v", destPath, err)
+						}
+						if err := os.Rename(tmpDest, destPath); err != nil {
+							log.Printf("[Skills] Warning renaming %s -> %s: %v", tmpDest, destPath, err)
+						}
 					}
 					installedCount++
 				}
@@ -110,8 +119,9 @@ func sweepOrphanedSymlinks(targetSkillDirs []string) {
 			}
 			if fi.Mode()&os.ModeSymlink != 0 {
 				if _, err := os.Stat(linkPath); os.IsNotExist(err) {
-					log.Printf("[Skills] Removing orphaned symlink: %s", linkPath)
-					_ = os.Remove(linkPath)
+					if err := os.Remove(linkPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+						log.Printf("[Skills] Warning removing orphaned symlink %s: %v", linkPath, err)
+					}
 				}
 			}
 		}

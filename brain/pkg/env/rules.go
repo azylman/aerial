@@ -2,6 +2,7 @@ package env
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -79,7 +80,9 @@ func (p *Provisioner) SyncRules(customPrompt string) error {
 		p.lkgcPersona = personaContent
 		p.lkgcPersonaSource = personaSource
 		if personaSource != ".AGENTS.md.lkgc" && p.dataDir != "" {
-			_ = p.writeAtomic(filepath.Join(p.dataDir, ".AGENTS.md.lkgc"), personaContent)
+			if err := p.writeAtomic(filepath.Join(p.dataDir, ".AGENTS.md.lkgc"), personaContent); err != nil {
+				log.Printf("[Env] Warning writing persona LKGC: %v", err)
+			}
 		}
 	}
 	p.mu.Unlock()
@@ -148,7 +151,9 @@ func (p *Provisioner) SyncRules(customPrompt string) error {
 		"/app/.agents/rules/gemini.md",
 	}
 	for _, stale := range staleRuleFiles {
-		_ = os.Remove(stale)
+		if err := os.Remove(stale); err != nil && !errors.Is(err, os.ErrNotExist) {
+			log.Printf("[Env] Warning removing stale rule file %s: %v", stale, err)
+		}
 	}
 
 	primaryRuleFile := filepath.Join(primaryRulesDir, "user_persona.md")
@@ -159,7 +164,9 @@ func (p *Provisioner) SyncRules(customPrompt string) error {
 
 	// Also sync to ~/.gemini/config/rules for compatibility
 	configRuleFile := filepath.Join(configRulesDir, "user_persona.md")
-	_ = p.writeAtomic(configRuleFile, content)
+	if err := p.writeAtomic(configRuleFile, content); err != nil {
+		log.Printf("[Env] Warning syncing user persona to config rules: %v", err)
+	}
 
 	return nil
 }

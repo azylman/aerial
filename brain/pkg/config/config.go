@@ -3,6 +3,7 @@ package config
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -669,7 +670,9 @@ func LoadConfigFromLookup(lookup func(string) string, paths ...string) (*Config,
 			target = "/data/.config.yaml.lkgc"
 		}
 		if p != target {
-			_ = writeAtomicFile(target, string(rawData))
+			if writeErr := writeAtomicFile(target, string(rawData)); writeErr != nil {
+				log.Printf("[Config] Warning writing fallback configuration to %s: %v", target, writeErr)
+			}
 		}
 		break
 	}
@@ -1060,7 +1063,9 @@ func LoadChannelInstructions(channelName string) string {
 				continue
 			}
 			data, err := io.ReadAll(io.LimitReader(f, 64*1024))
-			_ = f.Close()
+			if closeErr := f.Close(); closeErr != nil {
+				log.Printf("[Config] Warning closing instructions file %s: %v", cleanTarget, closeErr)
+			}
 			if err != nil {
 				continue
 			}
@@ -1098,11 +1103,15 @@ func writeAtomicFile(targetPath, content string) error {
 	}
 	tmpName := f.Name()
 	defer func() {
-		_ = os.Remove(tmpName)
+		if rmErr := os.Remove(tmpName); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
+			log.Printf("[Config] Warning removing temporary atomic file %s: %v", tmpName, rmErr)
+		}
 	}()
 
 	if _, err := f.WriteString(content); err != nil {
-		_ = f.Close()
+		if closeErr := f.Close(); closeErr != nil {
+			log.Printf("[Config] Warning closing temporary atomic file %s: %v", tmpName, closeErr)
+		}
 		return err
 	}
 	if err := f.Close(); err != nil {
@@ -1110,7 +1119,9 @@ func writeAtomicFile(targetPath, content string) error {
 	}
 
 	if err := os.Rename(tmpName, targetPath); err != nil {
-		_ = os.Remove(targetPath)
+		if rmErr := os.Remove(targetPath); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
+			log.Printf("[Config] Warning removing target file %s prior to fallback rename: %v", targetPath, rmErr)
+		}
 		return os.Rename(tmpName, targetPath)
 	}
 	return nil
