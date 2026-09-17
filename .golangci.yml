@@ -53,8 +53,11 @@ issues:
       linters:
         - unused
 
-    # 4. Burndown Quarantine for errcheck (Phases 2-3: brain and dashboard)
-    - path: ^brain/
+    # 4. Burndown Quarantine for errcheck (Phase 3: brain core engines)
+    - path: ^brain/(main|funnel)\.go$
+      linters:
+        - errcheck
+    - path: ^brain/pkg/(queue|runner)/
       linters:
         - errcheck
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
 )
 
 const migrationLockID = 849201948201
@@ -122,13 +123,15 @@ func initSchemaPostgres(ctx context.Context, database *sql.DB) error {
 	if err != nil {
 		return fmt.Errorf("failed to acquire db connection for migrations: %w", err)
 	}
-	defer func() { _ = conn.Close() }()
+	defer closeWarn(conn, "migration connection")
 
 	if _, err := conn.ExecContext(ctx, "SELECT pg_advisory_lock($1);", migrationLockID); err != nil {
 		return fmt.Errorf("failed to acquire migration advisory lock: %w", err)
 	}
 	defer func() {
-		_, _ = conn.ExecContext(context.Background(), "SELECT pg_advisory_unlock($1);", migrationLockID)
+		if _, err := conn.ExecContext(context.Background(), "SELECT pg_advisory_unlock($1);", migrationLockID); err != nil {
+			log.Printf("[DB] Warning releasing migration advisory lock: %v", err)
+		}
 	}()
 
 	if _, err := conn.ExecContext(ctx, postgresSchema); err != nil {
@@ -139,25 +142,31 @@ func initSchemaPostgres(ctx context.Context, database *sql.DB) error {
 		return fmt.Errorf("failed to add restart_count column to messages: %w", err)
 	}
 
-	_, _ = conn.ExecContext(ctx, "ALTER TABLE messages ADD COLUMN IF NOT EXISTS effort TEXT NOT NULL DEFAULT ''")
-	_, _ = conn.ExecContext(ctx, "ALTER TABLE cron_schedules ADD COLUMN IF NOT EXISTS effort TEXT NOT NULL DEFAULT 'high'")
-	_, _ = conn.ExecContext(ctx, "ALTER TABLE schedule_runs ADD COLUMN IF NOT EXISTS effort TEXT NOT NULL DEFAULT 'high'")
-	_, _ = conn.ExecContext(ctx, "ALTER TABLE schedule_runs ADD COLUMN IF NOT EXISTS model TEXT NOT NULL DEFAULT ''")
+	execNotice := func(query string) {
+		if _, err := conn.ExecContext(ctx, query); err != nil {
+			log.Printf("[DB] Notice executing schema migration (%s): %v", query, err)
+		}
+	}
 
-	_, _ = conn.ExecContext(ctx, "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS summary TEXT NOT NULL DEFAULT ''")
-	_, _ = conn.ExecContext(ctx, "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS last_summarized_message_id TEXT NOT NULL DEFAULT ''")
+	execNotice("ALTER TABLE messages ADD COLUMN IF NOT EXISTS effort TEXT NOT NULL DEFAULT ''")
+	execNotice("ALTER TABLE cron_schedules ADD COLUMN IF NOT EXISTS effort TEXT NOT NULL DEFAULT 'high'")
+	execNotice("ALTER TABLE schedule_runs ADD COLUMN IF NOT EXISTS effort TEXT NOT NULL DEFAULT 'high'")
+	execNotice("ALTER TABLE schedule_runs ADD COLUMN IF NOT EXISTS model TEXT NOT NULL DEFAULT ''")
+
+	execNotice("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS summary TEXT NOT NULL DEFAULT ''")
+	execNotice("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS last_summarized_message_id TEXT NOT NULL DEFAULT ''")
 	if _, err := conn.ExecContext(ctx, "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS previous_session_id TEXT NOT NULL DEFAULT ''"); err != nil {
 		return fmt.Errorf("failed to add previous_session_id column to sessions: %w", err)
 	}
 
-	_, _ = conn.ExecContext(ctx, "ALTER TABLE facts ADD COLUMN IF NOT EXISTS last_reinforced_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP")
-	_, _ = conn.ExecContext(ctx, "ALTER TABLE facts ADD COLUMN IF NOT EXISTS last_decayed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP")
-	_, _ = conn.ExecContext(ctx, "ALTER TABLE facts ADD COLUMN IF NOT EXISTS reinforce_count INTEGER NOT NULL DEFAULT 1")
-	_, _ = conn.ExecContext(ctx, "CREATE INDEX IF NOT EXISTS idx_facts_last_reinforced_at ON facts(last_reinforced_at DESC)")
-	_, _ = conn.ExecContext(ctx, "UPDATE facts SET last_reinforced_at = created_at WHERE reinforce_count = 1 AND last_reinforced_at > created_at")
+	execNotice("ALTER TABLE facts ADD COLUMN IF NOT EXISTS last_reinforced_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP")
+	execNotice("ALTER TABLE facts ADD COLUMN IF NOT EXISTS last_decayed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP")
+	execNotice("ALTER TABLE facts ADD COLUMN IF NOT EXISTS reinforce_count INTEGER NOT NULL DEFAULT 1")
+	execNotice("CREATE INDEX IF NOT EXISTS idx_facts_last_reinforced_at ON facts(last_reinforced_at DESC)")
+	execNotice("UPDATE facts SET last_reinforced_at = created_at WHERE reinforce_count = 1 AND last_reinforced_at > created_at")
 
 	// Idempotent sequence resynchronization in case of manual data restoration
-	_, _ = conn.ExecContext(ctx, `
+	execNotice(`
 		SELECT setval(pg_get_serial_sequence('facts', 'id'), COALESCE((SELECT MAX(id) FROM facts), 1), (SELECT COUNT(*) > 0 FROM facts));
 		SELECT setval(pg_get_serial_sequence('messages', 'row_id'), COALESCE((SELECT MAX(row_id) FROM messages), 1), (SELECT COUNT(*) > 0 FROM messages));
 	`)

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"sort"
 	"strings"
@@ -223,7 +224,7 @@ func GetFactsMissingEmbeddingsWithContext(ctx context.Context, database DBTX, li
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
+	defer closeWarn(rows, "rows")
 
 	var results []Fact
 	for rows.Next() {
@@ -252,7 +253,7 @@ func GetAllFactsWithEmbeddings(database DBTX) ([]FactWithEmbedding, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
+	defer closeWarn(rows, "rows")
 
 	var results []FactWithEmbedding
 	for rows.Next() {
@@ -297,7 +298,7 @@ func GetFactsByThreadWithEmbeddings(database DBTX, threadID string) ([]FactWithE
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
+	defer closeWarn(rows, "rows")
 
 	var results []FactWithEmbedding
 	for rows.Next() {
@@ -423,7 +424,7 @@ func SearchSimilarFactsWithContext(ctx context.Context, database DBTX, isPg bool
 	if err != nil {
 		return nil, fmt.Errorf("vector search failed: %w", err)
 	}
-	defer func() { _ = rows.Close() }()
+	defer closeWarn(rows, "rows")
 
 	var facts []Fact
 	for rows.Next() {
@@ -467,7 +468,7 @@ func GetActiveConversationsForExtraction(database DBTX, activeHours int) ([]stri
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
+	defer closeWarn(rows, "rows")
 
 	var tids []string
 	for rows.Next() {
@@ -507,7 +508,10 @@ func UpdateConversationFactWatermark(database DBTX, threadID string, maxRowID in
 }
 
 func UpdateConversationFactExtractedAt(database DBTX, threadID string) error {
-	maxRowID, _ := GetMaxMessageRowID(database, threadID)
+	maxRowID, err := GetMaxMessageRowID(database, threadID)
+	if err != nil {
+		log.Printf("[DB] Warning getting max message row ID for thread %s: %v", threadID, err)
+	}
 	return UpdateConversationFactWatermark(database, threadID, maxRowID)
 }
 
@@ -609,7 +613,7 @@ func GetFactsPaginatedWithContext(ctx context.Context, database DBTX, isPg bool,
 	if err != nil {
 		return nil, fmt.Errorf("failed to query facts: %w", err)
 	}
-	defer func() { _ = rows.Close() }()
+	defer closeWarn(rows, "rows")
 
 	facts := make([]Fact, 0)
 	for rows.Next() {
@@ -851,7 +855,11 @@ func DecayAndPruneFactsWithContext(ctx context.Context, database DBTX, isPg bool
 		if err != nil {
 			return 0, 0, fmt.Errorf("failed to decay facts: %w", err)
 		}
-		decayedCount, _ = resDecay.RowsAffected()
+		if n, err := resDecay.RowsAffected(); err == nil {
+			decayedCount = n
+		} else {
+			log.Printf("[DB] Warning getting rows affected for decay: %v", err)
+		}
 
 		pruneQuery := `
 			DELETE FROM facts
@@ -862,7 +870,11 @@ func DecayAndPruneFactsWithContext(ctx context.Context, database DBTX, isPg bool
 		if err != nil {
 			return decayedCount, 0, fmt.Errorf("failed to prune facts: %w", err)
 		}
-		prunedCount, _ = resPrune.RowsAffected()
+		if n, err := resPrune.RowsAffected(); err == nil {
+			prunedCount = n
+		} else {
+			log.Printf("[DB] Warning getting rows affected for prune: %v", err)
+		}
 
 		return decayedCount, prunedCount, nil
 	}
@@ -880,7 +892,11 @@ func DecayAndPruneFactsWithContext(ctx context.Context, database DBTX, isPg bool
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to decay facts in sqlite: %w", err)
 	}
-	decayedCount, _ = resDecay.RowsAffected()
+	if n, err := resDecay.RowsAffected(); err == nil {
+		decayedCount = n
+	} else {
+		log.Printf("[DB] Warning getting rows affected for decay: %v", err)
+	}
 
 	pruneQuery := `
 		DELETE FROM facts
@@ -891,7 +907,11 @@ func DecayAndPruneFactsWithContext(ctx context.Context, database DBTX, isPg bool
 	if err != nil {
 		return decayedCount, 0, fmt.Errorf("failed to prune facts in sqlite: %w", err)
 	}
-	prunedCount, _ = resPrune.RowsAffected()
+	if n, err := resPrune.RowsAffected(); err == nil {
+		prunedCount = n
+	} else {
+		log.Printf("[DB] Warning getting rows affected for prune: %v", err)
+	}
 
 	return decayedCount, prunedCount, nil
 }

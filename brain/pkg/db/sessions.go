@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 )
@@ -313,7 +314,10 @@ func GetTurnState(database DBTX, externalID string) (*ConversationTurnState, err
 	if database == nil || externalID == "" {
 		return nil, nil
 	}
-	sessID, _ := GetSessionID(database, externalID)
+	sessID, err := GetSessionID(database, externalID)
+	if err != nil {
+		log.Printf("[DB] Warning resolving session ID for thread %s: %v", externalID, err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -325,7 +329,7 @@ func GetTurnState(database DBTX, externalID string) (*ConversationTurnState, err
 	ORDER BY created_at DESC
 	LIMIT 1
 	`
-	err := database.QueryRowContext(ctx, query, externalID).Scan(&m.ID, &m.ThreadID, &m.Status, &m.Content, &m.UpdatedAt)
+	err = database.QueryRowContext(ctx, query, externalID).Scan(&m.ID, &m.ThreadID, &m.Status, &m.Content, &m.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return &ConversationTurnState{
 			ExternalID: externalID,
@@ -356,7 +360,10 @@ func GetInterruptedTurns(database DBTX) ([]ConversationTurnState, error) {
 	}
 	var results []ConversationTurnState
 	for _, m := range messages {
-		sessID, _ := GetSessionID(database, m.ThreadID)
+		sessID, err := GetSessionID(database, m.ThreadID)
+		if err != nil {
+			log.Printf("[DB] Warning resolving session ID for thread %s: %v", m.ThreadID, err)
+		}
 		results = append(results, ConversationTurnState{
 			ExternalID:    m.ThreadID,
 			InternalID:    sessID,
