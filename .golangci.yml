@@ -57,6 +57,4 @@ issues:
     - path: ^brain/
       linters:
         - errcheck
-    - path: ^dashboard/
-      linters:
-        - errcheck
+

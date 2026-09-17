@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -2982,3 +2983,132 @@ func TestGitHubPoller_CoverageBoost(t *testing.T) {
 
 	p2.fetchJobsForRun(ctx, 100)
 }
+
+type mockCloser struct {
+	err error
+}
+
+func (m *mockCloser) Close() error {
+	return m.err
+}
+
+type mockReadCloser struct {
+	io.Reader
+	closeErr error
+}
+
+func (m *mockReadCloser) Close() error {
+	return m.closeErr
+}
+
+type mockErrReader struct {
+	err error
+}
+
+func (m *mockErrReader) Read(p []byte) (int, error) {
+	return 0, m.err
+}
+
+func (m *mockErrReader) Close() error {
+	return nil
+}
+
+type mockErrWriter struct {
+	err         error
+	header      http.Header
+	statusCode  int
+	wroteHeader bool
+}
+
+func newMockErrWriter(err error) *mockErrWriter {
+	return &mockErrWriter{
+		err:    err,
+		header: make(http.Header),
+	}
+}
+
+func (m *mockErrWriter) Header() http.Header {
+	return m.header
+}
+
+func (m *mockErrWriter) Write(p []byte) (int, error) {
+	if m.err != nil {
+		return 0, m.err
+	}
+	return len(p), nil
+}
+
+func (m *mockErrWriter) WriteHeader(statusCode int) {
+	m.statusCode = statusCode
+	m.wroteHeader = true
+}
+
+func TestDashboard_CloseWarnAndDisconnect(t *testing.T) {
+	// 1. closeWarn with nil, success, and error
+	closeWarn(nil, "nil closer")
+	closerOk := &mockCloser{err: nil}
+	closeWarn(closerOk, "ok closer")
+	closerErr := &mockCloser{err: errors.New("simulated close error")}
+	closeWarn(closerErr, "err closer")
+
+	// 2. drainAndClose with nil, success, copy error, and close error
+	drainAndClose(nil, "nil body")
+	drainAndClose(&mockReadCloser{Reader: strings.NewReader("clean body content"), closeErr: nil}, "clean body")
+	drainAndClose(&mockErrReader{err: errors.New("simulated copy read error")}, "read err body")
+	drainAndClose(&mockReadCloser{Reader: strings.NewReader("hello"), closeErr: errors.New("simulated close error")}, "mock body")
+
+	// 3. isClientDisconnect
+	if isClientDisconnect(nil, nil) {
+		t.Error("expected false for nil error")
+	}
+	ctxCanceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	reqCanceled := httptest.NewRequest(http.MethodGet, "/", nil).WithContext(ctxCanceled)
+	if !isClientDisconnect(reqCanceled, errors.New("some network abort")) {
+		t.Error("expected true when request context is canceled")
+	}
+	reqActive := httptest.NewRequest(http.MethodGet, "/", nil)
+	if isClientDisconnect(reqActive, errors.New("unrelated error")) {
+		t.Error("expected false for unrelated error with active context")
+	}
+	if !isClientDisconnect(nil, syscall.EPIPE) {
+		t.Error("expected true for EPIPE")
+	}
+	if !isClientDisconnect(nil, syscall.ECONNRESET) {
+		t.Error("expected true for ECONNRESET")
+	}
+	if !isClientDisconnect(nil, net.ErrClosed) {
+		t.Error("expected true for net.ErrClosed")
+	}
+
+	// 4. writeResponse
+	rr := httptest.NewRecorder()
+	writeResponse(rr, reqActive, []byte("success payload"))
+	if rr.Body.String() != "success payload" {
+		t.Errorf("expected 'success payload', got %q", rr.Body.String())
+	}
+	mockWDisconnect := newMockErrWriter(syscall.EPIPE)
+	writeResponse(mockWDisconnect, reqActive, []byte("data"))
+	mockWOtherErr := newMockErrWriter(errors.New("other write failure"))
+	writeResponse(mockWOtherErr, reqActive, []byte("data"))
+
+	// 5. writeJSON: success, marshal error, and write error
+	rrJSON := httptest.NewRecorder()
+	writeJSON(rrJSON, reqActive, http.StatusCreated, map[string]string{"status": "ok"})
+	if rrJSON.Code != http.StatusCreated {
+		t.Errorf("expected 201 Created, got %d", rrJSON.Code)
+	}
+	if ct := rrJSON.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("expected Content-Type application/json, got %q", ct)
+	}
+
+	rrMarshalErr := httptest.NewRecorder()
+	writeJSON(rrMarshalErr, reqActive, http.StatusOK, make(chan int))
+	if rrMarshalErr.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 InternalServerError on marshal failure, got %d", rrMarshalErr.Code)
+	}
+
+	mockWJSONErr := newMockErrWriter(errors.New("write failure"))
+	writeJSON(mockWJSONErr, reqActive, http.StatusOK, map[string]string{"status": "ok"})
+}
+
