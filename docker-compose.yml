@@ -58,6 +58,10 @@ services:
       - DEFAULT_TIMEZONE=${DEFAULT_TIMEZONE:-America/Los_Angeles}
       - TZ=${DEFAULT_TIMEZONE:-America/Los_Angeles}
       - GIT_TERMINAL_PROMPT=0
+      - OPENOBSERVE_URL=${OPENOBSERVE_URL:-http://openobserve:5080/openobserve}
+      - OPENOBSERVE_ORG=${OPENOBSERVE_ORG:-default}
+      - OPENOBSERVE_ROOT_USER_EMAIL=${OPENOBSERVE_ROOT_USER_EMAIL:-admin@aerial.local}
+      - OPENOBSERVE_ROOT_USER_PASSWORD=${OPENOBSERVE_ROOT_USER_PASSWORD:-Aerial!Logs2026#}
     shm_size: '512mb'
     volumes:
       - aerial-brain-data:/data
@@ -87,6 +91,8 @@ services:
       discord-mcp:
         condition: service_started
       victoriametrics-mcp:
+        condition: service_started
+      openobserve:
         condition: service_started
 
   # ----------------------------------------------------------------------------

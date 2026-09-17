@@ -3,6 +3,7 @@ package env
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -37,6 +38,27 @@ func (p *Provisioner) LoadMCPConfig(cfg *config.Config) json.RawMessage {
 	if gitHubPAT != "" {
 		mergedServers["github"] = map[string]interface{}{
 			"serverUrl": "http://github-mcp:4003/mcp",
+		}
+	}
+	if cfg != nil {
+		cur := cfg.Current()
+		if cur.OpenObserveUser != "" && cur.OpenObservePassword != "" {
+			ooURL := cur.OpenObserveURL
+			if ooURL == "" {
+				ooURL = "http://openobserve:5080/openobserve"
+			}
+			ooOrg := cur.OpenObserveOrg
+			if ooOrg == "" {
+				ooOrg = "default"
+			}
+			mcpEndpoint := fmt.Sprintf("%s/api/%s/mcp", strings.TrimSuffix(ooURL, "/"), ooOrg)
+			authVal := base64.StdEncoding.EncodeToString([]byte(cur.OpenObserveUser + ":" + cur.OpenObservePassword))
+			mergedServers["openobserve"] = map[string]interface{}{
+				"serverUrl": mcpEndpoint,
+				"headers": map[string]string{
+					"Authorization": "Basic " + authVal,
+				},
+			}
 		}
 	}
 

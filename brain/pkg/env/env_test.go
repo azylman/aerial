@@ -393,6 +393,8 @@ func TestLoadMCPConfig_ConfigDataPropagation(t *testing.T) {
 	cfg := config.NewTestConfig(func(d *config.ConfigData) {
 		d.GitHubPAT = "ghp_mock_token_123"
 		d.MCPConfig = `{"mcpServers":{"custom":{"serverUrl":"http://custom:5000/mcp"}}}`
+		d.OpenObserveUser = "admin@aerial.local"
+		d.OpenObservePassword = "secure_password"
 	})
 
 	raw := p.LoadMCPConfig(cfg)
@@ -418,17 +420,33 @@ func TestLoadMCPConfig_ConfigDataPropagation(t *testing.T) {
 		t.Errorf("expected github server to be enabled when GitHubPAT is set in config")
 	}
 
-	// 3. Custom server enabled via cfg.Current().MCPConfig
+	// 3. OpenObserve server enabled via OpenObserveUser / OpenObservePassword
+	if ooSrv, exists := servers["openobserve"]; !exists {
+		t.Errorf("expected openobserve server to be enabled when credentials are set")
+	} else if ooMap, ok := ooSrv.(map[string]interface{}); !ok {
+		t.Errorf("expected openobserve to be a map, got %+v", ooSrv)
+	} else {
+		if ooMap["serverUrl"] != "http://openobserve:5080/openobserve/api/default/mcp" {
+			t.Errorf("expected serverUrl 'http://openobserve:5080/openobserve/api/default/mcp', got %v", ooMap["serverUrl"])
+		}
+		if headers, ok := ooMap["headers"].(map[string]interface{}); !ok || headers["Authorization"] == "" {
+			t.Errorf("expected non-empty Authorization header, got %+v", ooMap["headers"])
+		}
+	}
+
+	// 4. Custom server enabled via cfg.Current().MCPConfig
 	if customSrv, exists := servers["custom"]; !exists {
 		t.Errorf("expected custom server to be enabled from cfg.MCPConfig")
 	} else if customMap, ok := customSrv.(map[string]interface{}); !ok || customMap["serverUrl"] != "http://custom:5000/mcp" {
 		t.Errorf("expected custom serverUrl 'http://custom:5000/mcp', got %+v", customSrv)
 	}
 
-	// 4. Test without GitHubPAT and without MCPConfig
+	// 5. Test without GitHubPAT, without OpenObserve, and without MCPConfig
 	cfgEmpty := config.NewTestConfig(func(d *config.ConfigData) {
 		d.GitHubPAT = ""
 		d.MCPConfig = ""
+		d.OpenObserveUser = ""
+		d.OpenObservePassword = ""
 	})
 	rawEmpty := p.LoadMCPConfig(cfgEmpty)
 	var parsedEmpty map[string]interface{}
@@ -436,6 +454,9 @@ func TestLoadMCPConfig_ConfigDataPropagation(t *testing.T) {
 	serversEmpty := parsedEmpty["mcpServers"].(map[string]interface{})
 	if _, exists := serversEmpty["github"]; exists {
 		t.Errorf("expected github server to be absent when GitHubPAT is empty")
+	}
+	if _, exists := serversEmpty["openobserve"]; exists {
+		t.Errorf("expected openobserve server to be absent when credentials are empty")
 	}
 	if _, exists := serversEmpty["custom"]; exists {
 		t.Errorf("expected custom server to be absent when MCPConfig is empty")

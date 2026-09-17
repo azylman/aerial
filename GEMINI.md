@@ -39,6 +39,7 @@ Aerial runs as a multi-container Docker stack supervised by Hangar and Autoheal 
   - `docker-mcp`: Native Streamable HTTP MCP server for host Docker daemon operations (`http://docker-mcp:4002/mcp`).
   - `github-mcp`: Native Streamable HTTP MCP server for GitHub operations (`http://github-mcp:4003/mcp`).
   - `victoriametrics-mcp`: Streamable HTTP MCP server for VictoriaMetrics TSDB metric querying and alert rule inspection (`http://victoriametrics-mcp:4004/mcp`).
+  - `openobserve`: Native cloud-native telemetry, log exploration, and SQL search server over Streamable HTTP (`http://openobserve:5080/openobserve/api/default/mcp`).
 
 - **Web, Gateway & Documentation Services**:
   - `aerial-proxy`: Edge reverse proxy routing external web traffic to Dashboard (`/` 302 redirect and `/dashboard/`), Documentation (`/docs/`), Agentsview (`/agentsview/`), and Grafana (`/grafana/`).
