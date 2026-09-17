@@ -167,6 +167,13 @@ transforms:
         }
       }
 
+      # Map to OpenObserve native microsecond timestamp column
+      ._timestamp, err = to_unix_timestamp(.timestamp, "microseconds")
+      if err != null {
+        ._timestamp = to_unix_timestamp(now(), "microseconds")
+      }
+      del(.timestamp)
+
       # Drop verbose internal docker metadata
       del(.label)
       del(.container_id)
@@ -174,14 +181,28 @@ transforms:
       del(.source_type)
 
 sinks:
-  quickwit:
-    type: elasticsearch
+  openobserve:
+    type: http
     inputs:
       - normalize_logs
-    endpoints:
-      - "http://quickwit:7280/api/v1/_elastic"
-    mode: bulk
-    bulk:
-      action: "create"
-      index: "docker-logs"
-    compression: none
+    uri: "http://openobserve:5080/openobserve/api/default/docker-logs/_json"
+    method: post
+    auth:
+      strategy: basic
+      user: "${OPENOBSERVE_ROOT_USER_EMAIL:-admin@aerial.local}"
+      password: "${OPENOBSERVE_ROOT_USER_PASSWORD}"
+    compression: gzip
+    encoding:
+      codec: json
+    batch:
+      max_events: 1000
+      timeout_secs: 1.0
+      max_bytes: 5242880
+    buffer:
+      type: disk
+      max_size: 268435488 # 256 MiB minimum
+      when_full: block
+    healthcheck:
+      enabled: true
+      uri: "http://openobserve:5080/openobserve/healthz"
+
