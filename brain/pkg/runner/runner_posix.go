@@ -3,6 +3,9 @@
 package runner
 
 import (
+	"errors"
+	"log"
+	"os"
 	"os/exec"
 	"syscall"
 	"time"
@@ -19,10 +22,21 @@ func configureSysProcAttr(cmd *exec.Cmd) {
 	cmd.WaitDelay = 3 * time.Second
 }
 
+func isIgnorableKillError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, os.ErrProcessDone) || errors.Is(err, syscall.ESRCH)
+}
+
 func killProcessGroup(cmd *exec.Cmd) {
 	if cmd != nil && cmd.Process != nil && cmd.Process.Pid > 0 {
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		_ = cmd.Process.Kill()
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && !isIgnorableKillError(err) {
+			log.Printf("[WARN] Failed to kill process group %d: %v", cmd.Process.Pid, err)
+		}
+		if err := cmd.Process.Kill(); err != nil && !isIgnorableKillError(err) {
+			log.Printf("[WARN] Failed to kill process %d: %v", cmd.Process.Pid, err)
+		}
 	}
 }
 

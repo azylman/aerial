@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
+	"net"
 	"os"
 	"os/exec"
 	"strconv"
@@ -89,20 +91,14 @@ func NegotiateHandshake(ctx context.Context, r *bufio.Reader, closer io.Closer, 
 
 	select {
 	case <-ctx.Done():
-		if closer != nil {
-			_ = closer.Close()
-		}
+		closeWarn(closer, "worker handshake closer on ctx cancel")
 		return "", ctx.Err()
 	case <-time.After(timeout):
-		if closer != nil {
-			_ = closer.Close()
-		}
+		closeWarn(closer, "worker handshake closer on timeout")
 		return "", ErrHandshakeTimeout
 	case res := <-initCh:
 		if res.err != nil {
-			if closer != nil {
-				_ = closer.Close()
-			}
+			closeWarn(closer, "worker handshake closer on init error")
 			return "", fmt.Errorf("%w: %v", ErrInvalidHandshake, res.err)
 		}
 		return res.convID, nil
@@ -141,12 +137,8 @@ func NewWorkerInstanceFromStreams(ctx context.Context, stdin io.WriteCloser, std
 		if cancel != nil {
 			cancel()
 		}
-		if stdin != nil {
-			_ = stdin.Close()
-		}
-		if stdout != nil {
-			_ = stdout.Close()
-		}
+		closeWarn(stdin, "worker stdin on handshake failure")
+		closeWarn(stdout, "worker stdout on handshake failure")
 		return nil, err
 	}
 
@@ -202,14 +194,14 @@ func NewWorkerInstance(ctx context.Context, opts WorkerOptions) (*WorkerInstance
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
 		workerCancel()
-		_ = stdinPipe.Close()
+		closeWarn(stdinPipe, "stdin pipe")
 		return nil, fmt.Errorf("failed to create stdout pipe: %w", err)
 	}
 
 	if err := cmd.Start(); err != nil {
 		workerCancel()
-		_ = stdinPipe.Close()
-		_ = stdoutPipe.Close()
+		closeWarn(stdinPipe, "stdin pipe")
+		closeWarn(stdoutPipe, "stdout pipe")
 		return nil, fmt.Errorf("failed to start worker process: %w", err)
 	}
 
@@ -308,12 +300,8 @@ func (w *WorkerInstance) markDeadAndKill() {
 	if w.cancel != nil {
 		w.cancel()
 	}
-	if w.stdin != nil {
-		_ = w.stdin.Close()
-	}
-	if w.stdoutCloser != nil {
-		_ = w.stdoutCloser.Close()
-	}
+	closeWarn(w.stdin, "worker stdin on markDead")
+	closeWarn(w.stdoutCloser, "worker stdout on markDead")
 	if w.cmd != nil && w.cmd.Process != nil {
 		// Kill process group
 		killProcessGroup(w.cmd)
@@ -343,17 +331,15 @@ func (w *WorkerInstance) Close() {
 		w.cancel()
 	}
 
-	if w.stdin != nil {
-		_ = w.stdin.Close()
-	}
-	if w.stdoutCloser != nil {
-		_ = w.stdoutCloser.Close()
-	}
+	closeWarn(w.stdin, "worker stdin on Close")
+	closeWarn(w.stdoutCloser, "worker stdout on Close")
 
 	if w.cmd != nil && w.cmd.Process != nil {
 		done := make(chan struct{})
 		go func() {
-			_ = w.cmd.Wait()
+			if err := w.cmd.Wait(); err != nil && !isIgnorableProcessError(err) {
+				log.Printf("[WARN] Failed waiting for worker process to exit: %v", err)
+			}
 			close(done)
 		}()
 
@@ -368,3 +354,27 @@ func (w *WorkerInstance) Close() {
 		session.CleanupEphemeralSession(w.convID, w.roots...)
 	}
 }
+
+func closeWarn(closer io.Closer, name string) {
+	if closer != nil {
+		if err := closer.Close(); err != nil && !isIgnorableCloseError(err) {
+			log.Printf("[WARN] Failed to close %s: %v", name, err)
+		}
+	}
+}
+
+func isIgnorableCloseError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, os.ErrClosed) || errors.Is(err, io.ErrClosedPipe) || errors.Is(err, net.ErrClosed)
+}
+
+func isIgnorableProcessError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var exitErr *exec.ExitError
+	return errors.Is(err, os.ErrProcessDone) || errors.As(err, &exitErr)
+}
+

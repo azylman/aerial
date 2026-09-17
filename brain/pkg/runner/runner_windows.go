@@ -3,6 +3,9 @@
 package runner
 
 import (
+	"errors"
+	"log"
+	"os"
 	"os/exec"
 	"time"
 )
@@ -13,7 +16,9 @@ func configureSysProcAttr(cmd *exec.Cmd) {
 
 func killProcessGroup(cmd *exec.Cmd) {
 	if cmd != nil && cmd.Process != nil {
-		_ = cmd.Process.Kill()
+		if err := cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			log.Printf("[WARN] Failed to kill process %d: %v", cmd.Process.Pid, err)
+		}
 	}
 }
 
