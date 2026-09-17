@@ -613,7 +613,6 @@ services:
       - GF_AUTH_DISABLE_LOGIN_FORM=true
       - GF_AUTH_DISABLE_SIGNOUT_MENU=true
       - GF_PANELS_DISABLE_SANITIZE_HTML=true
-      - "GF_INSTALL_PLUGINS=https://github.com/quickwit-oss/quickwit-datasource/releases/download/v0.5.0/quickwit-quickwit-datasource-0.5.0.zip;quickwit-quickwit-datasource"
       - GF_LOG_MODE=console
       - GF_LOG_CONSOLE_FORMAT=json
     volumes:
@@ -631,8 +630,6 @@ services:
       postgres:
         condition: service_healthy
       victoriametrics:
-        condition: service_healthy
-      quickwit:
         condition: service_healthy
 
   # ----------------------------------------------------------------------------
@@ -697,41 +694,49 @@ services:
         condition: service_started
 
   # ----------------------------------------------------------------------------
-  # 19. Observability: Quickwit Distributed Log Search Engine
-  #     Sub-second full-text indexing with native Tantivy search and Elasticsearch compatibility.
+  # 19. Observability: OpenObserve Cloud-Native Telemetry & Log Engine
+  #     Full-stack search, SQL/Lucene querying, and real-time dashboarding.
   # ----------------------------------------------------------------------------
-  quickwit:
-    image: quickwit/quickwit:v0.8.2
-    container_name: aerial-quickwit
+  openobserve:
+    image: public.ecr.aws/zinclabs/openobserve:v1.0.2-debug
+    container_name: aerial-openobserve
     restart: unless-stopped
-    stop_grace_period: 20s
+    stop_grace_period: 30s
+    mem_limit: 2g
+    cpus: 1.5
     labels:
       autoheal: "true"
       homepage.group: "Observability"
-      homepage.name: "Quickwit Logs"
-      homepage.icon: "quickwit.png"
-      homepage.description: "Full-Text Log Search Engine"
-    entrypoint: ["/bin/sh", "/quickwit/config/entrypoint.sh"]
+      homepage.name: "OpenObserve Logs"
+      homepage.icon: "openobserve.png"
+      homepage.description: "Full-Stack Log & Telemetry Explorer"
+      homepage.href: "/openobserve/"
     environment:
-      - NO_COLOR=1
-      - QW_CONFIG=/quickwit/config/quickwit.yaml
+      - ZO_ROOT_USER_EMAIL=${OPENOBSERVE_ROOT_USER_EMAIL:-admin@aerial.local}
+      - ZO_ROOT_USER_PASSWORD=${OPENOBSERVE_ROOT_USER_PASSWORD:-Aerial!Logs2026#}
+      - ZO_DATA_DIR=/data
+      - ZO_BASE_URI=/openobserve
+      - ZO_TELEMETRY=false
+      - ZO_COLS_PER_RECORD_LIMIT=5000
+      - ZO_INGEST_FLATTEN_LEVEL=2
+      - ZO_WIDENING_SCHEMA_EVOLUTION=true
+      - ZO_MEMORY_CACHE_MAX_SIZE=512
     volumes:
-      - aerial-quickwit-data:/quickwit/qwdata
-      - ${AERIAL_HOST_PROJECT_DIR:-${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}}/quickwit:/quickwit/config:ro
+      - aerial-openobserve-data:/data
     ports:
-      - "${QUICKWIT_HOST_PORT:-7280}:7280"
+      - "${OPENOBSERVE_HOST_PORT:-127.0.0.1:5080}:5080"
     networks:
       - aerial-net
     healthcheck:
-      test: ["CMD-SHELL", "quickwit index list --endpoint http://127.0.0.1:7280 || exit 1"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:5080/openobserve/healthz"]
       interval: 15s
       timeout: 5s
       retries: 3
-      start_period: 15s
+      start_period: 20s
 
   # ----------------------------------------------------------------------------
   # 20. Observability: Vector Log Shipper & Transformation Pipeline
-  #     Scrapes Docker container stdout/stderr, normalizes logs via VRL, and ships to Quickwit.
+  #     Scrapes Docker container stdout/stderr, normalizes logs via VRL, and ships to OpenObserve.
   # ----------------------------------------------------------------------------
   vector:
     image: timberio/vector:0.40.0-alpine
@@ -746,6 +751,9 @@ services:
       homepage.description: "High-Performance Observability Router"
     environment:
       - VECTOR_LOG_FORMAT=json
+      - VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION=true
+      - OPENOBSERVE_ROOT_USER_EMAIL=${OPENOBSERVE_ROOT_USER_EMAIL:-admin@aerial.local}
+      - OPENOBSERVE_ROOT_USER_PASSWORD=${OPENOBSERVE_ROOT_USER_PASSWORD:-Aerial!Logs2026#}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - /var/lib/docker/containers:/var/lib/docker/containers:ro
@@ -762,7 +770,7 @@ services:
       retries: 3
       start_period: 10s
     depends_on:
-      quickwit:
+      openobserve:
         condition: service_healthy
 
 networks:
@@ -783,8 +791,8 @@ volumes:
     name: aerial-postgres-data
   aerial-victoriametrics-data:
     name: aerial-victoriametrics-data
-  aerial-quickwit-data:
-    name: aerial-quickwit-data
+  aerial-openobserve-data:
+    name: aerial-openobserve-data
   aerial-vector-data:
     name: aerial-vector-data
 
