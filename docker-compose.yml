@@ -515,6 +515,7 @@ services:
       - "--path.sysfs=/host/sys"
       - "--path.rootfs=/rootfs"
       - "--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)"
+      - "--log.format=json"
     volumes:
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
@@ -546,6 +547,7 @@ services:
       - "-promscrape.config=/share/aerial/victoriametrics/scrape.yml"
       - "-promscrape.configCheckInterval=15s"
       - "-retentionPeriod=${VICTORIAMETRICS_RETENTION_PERIOD:-5y}"
+      - "-loggerFormat=json"
     environment:
       - HA_METRICS_TOKEN=${HA_METRICS_TOKEN:-}
     volumes:
@@ -612,6 +614,8 @@ services:
       - GF_AUTH_DISABLE_SIGNOUT_MENU=true
       - GF_PANELS_DISABLE_SANITIZE_HTML=true
       - GF_INSTALL_PLUGINS=quickwit-quickwit-datasource
+      - GF_LOG_MODE=console
+      - GF_LOG_CONSOLE_FORMAT=json
     volumes:
       - ${AERIAL_HOST_PROJECT_DIR:-${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}}:/share/aerial:ro
       - ${AERIAL_HOST_CONFIG_DIR:-${AERIAL_CONFIG_DIR:-/mnt/data/supervisor/share/aerial-config}}:/share/aerial-config:ro
@@ -643,6 +647,8 @@ services:
       - no-new-privileges:true
     labels:
       autoheal: "true"
+    command:
+      - "--log.format=json"
     environment:
       - DATA_SOURCE_NAME=postgresql://${POSTGRES_USER:-aerial}:${POSTGRES_PASSWORD:-aerial_secure_pass}@postgres:5432/${POSTGRES_DB:-aerial}?sslmode=disable
       - PG_EXPORTER_DISABLE_SETTINGS_METRICS=true
@@ -738,6 +744,8 @@ services:
       homepage.name: "Vector Agent"
       homepage.icon: "vector.png"
       homepage.description: "High-Performance Observability Router"
+    environment:
+      - VECTOR_LOG_FORMAT=json
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - /var/lib/docker/containers:/var/lib/docker/containers:ro

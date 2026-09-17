@@ -18,36 +18,153 @@ transforms:
     inputs:
       - docker_logs
     source: |
-      # Strip leading slash from container_name
-      .container_name = replace(to_string!(.container_name), r'^/', "")
+      # 1. Sanitize input & strip ANSI escape codes before parsing
+      if is_string(.message) {
+        .message = strip_ansi_escape_codes(to_string!(.message))
+      }
 
-      # Resolve compose service name if available, otherwise default to container_name
+      # 2. Normalize container and service names
+      .container_name = replace(to_string!(.container_name), r'^/', "")
       if exists(.label."com.docker.compose.service") {
         .service = to_string!(.label."com.docker.compose.service")
       } else {
         .service = .container_name
       }
 
-      # Strip ANSI escape codes
-      if is_string(.message) {
-        .message = strip_ansi_escape_codes(to_string!(.message))
-      }
-
-      # Ensure timestamp exists
+      # 3. Ensure baseline timestamp exists from Docker
       if !exists(.timestamp) {
         .timestamp = now()
       }
 
-      # Detect log level
-      msg = downcase(to_string!(.message))
-      if contains(msg, "error") || contains(msg, "fatal") || contains(msg, "panic") || .stream == "stderr" {
-        .level = "error"
-      } else if contains(msg, "warn") {
-        .level = "warn"
-      } else if contains(msg, "debug") || contains(msg, "trace") {
-        .level = "debug"
+      # 4. Attempt structured JSON parsing
+      parsed, err = parse_json(.message)
+
+      if err == null && is_object(parsed) {
+        # Extract message / msg
+        if is_string(parsed.msg) {
+          .message = string!(parsed.msg)
+          del(parsed.msg)
+        } else if is_string(parsed.message) {
+          .message = string!(parsed.message)
+          del(parsed.message)
+        } else if exists(parsed.msg) {
+          .message = to_string(parsed.msg) ?? .message
+          del(parsed.msg)
+        } else if exists(parsed.message) {
+          .message = to_string(parsed.message) ?? .message
+          del(parsed.message)
+        }
+
+        # Level extraction, normalization, and promotion for bridged stdlib logs
+        raw_level = null
+        if exists(parsed.level) {
+          raw_level = parsed.level
+        } else if exists(parsed.lvl) {
+          raw_level = parsed.lvl
+        } else if exists(parsed.severity) {
+          raw_level = parsed.severity
+        }
+
+        if raw_level != null {
+          lvl = downcase(to_string(raw_level) ?? "")
+          if contains(lvl, "err") || contains(lvl, "fatal") || contains(lvl, "panic") || contains(lvl, "crit") {
+            .level = "error"
+          } else if contains(lvl, "warn") {
+            .level = "warn"
+          } else if contains(lvl, "debug") || contains(lvl, "trace") {
+            .level = "debug"
+          } else {
+            # Inspect message only for explicit error/fatal prefixes to support bridged Go stdlib logs
+            msg_str = to_string(.message) ?? ""
+            if match(msg_str, r'^(?i)(\[[^\]]+\]\s*)?(error|fatal|panic):') {
+              .level = "error"
+            } else {
+              .level = "info"
+            }
+          }
+          del(parsed.level)
+          del(parsed.lvl)
+          del(parsed.severity)
+        } else {
+          msg_lower = downcase(to_string!(.message))
+          if contains(msg_lower, "error") || contains(msg_lower, "fatal") || contains(msg_lower, "panic") || .stream == "stderr" {
+            .level = "error"
+          } else if contains(msg_lower, "warn") {
+            .level = "warn"
+          } else {
+            .level = "info"
+          }
+        }
+
+        # Timestamp extraction with epoch magnitude check
+        raw_ts = null
+        if exists(parsed.time) {
+          raw_ts = parsed.time
+        } else if exists(parsed.timestamp) {
+          raw_ts = parsed.timestamp
+        } else if exists(parsed.ts) {
+          raw_ts = parsed.ts
+        } else if exists(parsed."@timestamp") {
+          raw_ts = parsed."@timestamp"
+        }
+
+        if raw_ts != null {
+          parsed_ts = null
+          if is_string(raw_ts) {
+            ts_val, ts_err = parse_timestamp(string!(raw_ts), "%+")
+            if ts_err == null {
+              parsed_ts = ts_val
+            }
+          } else if is_integer(raw_ts) {
+            ts_int = int!(raw_ts)
+            if ts_int > 1000000000000000000 {
+              parsed_ts = from_unix_timestamp(ts_int, unit: "nanoseconds") ?? null
+            } else if ts_int > 1000000000000000 {
+              parsed_ts = from_unix_timestamp(ts_int, unit: "microseconds") ?? null
+            } else if ts_int > 100000000000 {
+              parsed_ts = from_unix_timestamp(ts_int, unit: "milliseconds") ?? null
+            } else if ts_int > 0 {
+              parsed_ts = from_unix_timestamp(ts_int, unit: "seconds") ?? null
+            }
+          } else if is_float(raw_ts) {
+            ts_flt = float!(raw_ts)
+            if ts_flt > 100000000000.0 {
+              parsed_ts = from_unix_timestamp(int!(floor(ts_flt)), unit: "milliseconds") ?? null
+            } else if ts_flt > 0.0 {
+              parsed_ts = from_unix_timestamp(int!(floor(ts_flt)), unit: "seconds") ?? null
+            }
+          }
+
+          if parsed_ts != null {
+            .timestamp = parsed_ts
+            del(parsed.time)
+            del(parsed.timestamp)
+            del(parsed.ts)
+            del(parsed."@timestamp")
+          }
+        }
+
+        # Drop internal container metadata if redundantly present in JSON
+        del(parsed.container_name)
+        del(parsed.service)
+        del(parsed.stream)
+
+        # Assign remaining structured attributes
+        if length(object!(parsed)) > 0 {
+          .attributes = parsed
+        }
       } else {
-        .level = "info"
+        # Plain text fallback
+        msg = downcase(to_string!(.message))
+        if contains(msg, "error") || contains(msg, "fatal") || contains(msg, "panic") || .stream == "stderr" {
+          .level = "error"
+        } else if contains(msg, "warn") {
+          .level = "warn"
+        } else if contains(msg, "debug") || contains(msg, "trace") {
+          .level = "debug"
+        } else {
+          .level = "info"
+        }
       }
 
       # Drop verbose internal docker metadata
