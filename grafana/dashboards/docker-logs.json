@@ -379,10 +379,13 @@
       "id": 5,
       "options": {
         "dedupStrategy": "none",
+        "displayedFields": [
+          "service"
+        ],
         "enableLogDetails": true,
         "prettifyLogMessage": false,
         "showCommonLabels": false,
-        "showLabels": true,
+        "showLabels": false,
         "showTime": true,
         "sortOrder": "Descending",
         "wrapLogMessage": true
@@ -424,7 +427,7 @@
           "selected": false,
           "value": ""
         },
-        "description": "Full-text Lucene query (e.g. error, container_name:aerial-brain, timeout)",
+        "description": "Full-text Lucene query (e.g. error, service:brain, container_name:aerial-brain, timeout)",
         "hide": 0,
         "label": "Full-Text Query",
         "name": "search",
