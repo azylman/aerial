@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -4772,4 +4773,186 @@ func TestStartPeriodicLoop_ExecutionAndShutdown(t *testing.T) {
 	cancel()
 	time.Sleep(10 * time.Millisecond)
 }
+
+func TestPendingTargets_UnionAndDrain(t *testing.T) {
+	d := NewDaemon(DaemonConfig{})
+
+	// nil/empty calls are safe
+	d.recordPendingTargets(nil)
+	d.recordPendingTargets([]string{})
+	if targets := d.drainPendingTargets(); len(targets) != 0 {
+		t.Fatalf("expected empty drained targets, got %v", targets)
+	}
+
+	// union of multiple calls
+	d.recordPendingTargets([]string{"brain", "dashboard"})
+	d.recordPendingTargets([]string{"dashboard", "proxy", "  "})
+	targets := d.drainPendingTargets()
+	if len(targets) != 3 {
+		t.Fatalf("expected 3 deduplicated targets, got %v", targets)
+	}
+	sort.Strings(targets)
+	expected := []string{"brain", "dashboard", "proxy"}
+	for i, s := range expected {
+		if targets[i] != s {
+			t.Errorf("expected target %s at %d, got %s", s, i, targets[i])
+		}
+	}
+
+	// second drain is empty
+	if drainedAgain := d.drainPendingTargets(); len(drainedAgain) != 0 {
+		t.Errorf("expected second drain to be empty, got %v", drainedAgain)
+	}
+}
+
+func TestReconciliationStatus_TrackingAndLifecycle(t *testing.T) {
+	tempDir := t.TempDir()
+	composePath := filepath.Join(tempDir, "docker-compose.yml")
+	composeContent := `
+services:
+  brain:
+    image: ghcr.io/azylman/aerial-brain:latest
+`
+	if err := os.WriteFile(composePath, []byte(composeContent), 0644); err != nil {
+		t.Fatalf("failed to write compose file: %v", err)
+	}
+
+	d := NewDaemon(DaemonConfig{
+		ComposeDir: tempDir,
+		ComposeExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			return []byte("ok"), nil, nil
+		},
+		DockerExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			return []byte("ok"), nil, nil
+		},
+		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			return []byte("abc1234\n"), nil, nil
+		},
+	})
+
+	// Initial cold start state is idle
+	initial := d.GetReconciliationStatus()
+	if initial.State != "idle" || initial.Stage != "idle" || initial.Active {
+		t.Fatalf("expected idle cold start, got %+v", initial)
+	}
+
+	// Record pending targets to simulate image poll
+	d.recordPendingTargets([]string{"brain"})
+
+	// Intercept execution and check status
+	err := d.ReconcileCompose(context.Background())
+	if err != nil {
+		t.Fatalf("expected ReconcileCompose to succeed, got %v", err)
+	}
+
+	finalStatus := d.GetReconciliationStatus()
+	if finalStatus.State != "healthy" || finalStatus.Stage != "healthy" {
+		t.Errorf("expected healthy final status, got %+v", finalStatus)
+	}
+	if finalStatus.Active {
+		t.Errorf("expected Active to be false after completion, got true")
+	}
+	if len(finalStatus.TargetServices) != 1 || finalStatus.TargetServices[0] != "brain" {
+		t.Errorf("expected targetServices [brain], got %v", finalStatus.TargetServices)
+	}
+	if finalStatus.Trigger != "image_poll" {
+		t.Errorf("expected trigger image_poll, got %s", finalStatus.Trigger)
+	}
+	if finalStatus.CommitSHA != "abc1234" {
+		t.Errorf("expected commit abc1234, got %s", finalStatus.CommitSHA)
+	}
+
+	// Verify deep copy does not mutate daemon internal state
+	finalStatus.TargetServices[0] = "mutated"
+	freshStatus := d.GetReconciliationStatus()
+	if freshStatus.TargetServices[0] != "brain" {
+		t.Errorf("expected deep copy, but internal state was mutated to %s", freshStatus.TargetServices[0])
+	}
+}
+
+func TestReconciliationStatus_TTLReset(t *testing.T) {
+	d := NewDaemon(DaemonConfig{})
+	d.updateReconcileStatus(func(s *ReconciliationStatus) {
+		s.Active = false
+		s.State = "healthy"
+		s.Stage = "healthy"
+		s.TargetServices = []string{"brain"}
+		s.CompletedAt = time.Now().Add(-6 * time.Minute)
+	})
+
+	// Since CompletedAt is > 5m ago, GetReconciliationStatus returns idle
+	status := d.GetReconciliationStatus()
+	if status.State != "idle" || status.Stage != "idle" {
+		t.Errorf("expected TTL to reset state to idle, got %+v", status)
+	}
+}
+
+func TestReconciliationStatus_FailureAndRollback(t *testing.T) {
+	tempDir := t.TempDir()
+	composePath := filepath.Join(tempDir, "docker-compose.yml")
+	composeContent := `
+services:
+  dashboard:
+    image: ghcr.io/azylman/aerial-dashboard:latest
+`
+	if err := os.WriteFile(composePath, []byte(composeContent), 0644); err != nil {
+		t.Fatalf("failed to write compose file: %v", err)
+	}
+
+	d := NewDaemon(DaemonConfig{
+		ComposeDir: tempDir,
+		ComposeExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			argsStr := strings.Join(args, " ")
+			if strings.Contains(argsStr, "pull") {
+				return nil, []byte("fatal: image not found"), errors.New("pull failed")
+			}
+			return []byte("ok"), nil, nil
+		},
+		DockerExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			return []byte("ok"), nil, nil
+		},
+		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			return []byte("def5678\n"), nil, nil
+		},
+	})
+
+	err := d.ReconcileCompose(context.Background(), "dashboard")
+	if err == nil {
+		t.Fatalf("expected ReconcileCompose to return pull error, got nil")
+	}
+
+	status := d.GetReconciliationStatus()
+	if status.State != "failed" || status.Stage != "failed" {
+		t.Errorf("expected state failed, got %+v", status)
+	}
+	if !strings.Contains(status.Error, "pull failed") {
+		t.Errorf("expected pull failed in status error, got %s", status.Error)
+	}
+	if status.Active {
+		t.Errorf("expected Active=false after failure, got true")
+	}
+}
+
+func TestReconciliationStatus_ExposedInGetStatus(t *testing.T) {
+	d := NewDaemon(DaemonConfig{})
+	d.updateReconcileStatus(func(s *ReconciliationStatus) {
+		s.Active = true
+		s.State = "swapping"
+		s.Stage = "swapping"
+		s.TargetServices = []string{"scheduler-mcp"}
+		s.StartedAt = time.Now().UTC()
+	})
+
+	statusResp := d.GetStatus(context.Background())
+	if statusResp.Reconciliation == nil {
+		t.Fatalf("expected non-nil Reconciliation in GetStatus")
+	}
+	if statusResp.Reconciliation.State != "swapping" {
+		t.Errorf("expected state swapping, got %s", statusResp.Reconciliation.State)
+	}
+	if len(statusResp.Reconciliation.TargetServices) != 1 || statusResp.Reconciliation.TargetServices[0] != "scheduler-mcp" {
+		t.Errorf("expected target services [scheduler-mcp], got %v", statusResp.Reconciliation.TargetServices)
+	}
+}
+
 

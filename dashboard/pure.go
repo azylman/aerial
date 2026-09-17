@@ -342,6 +342,106 @@ func BuildContainerChips(rawContainers []DockerContainerJSON, now time.Time) []M
 	return chips
 }
 
+// BuildTargetContainerChips constructs Permet HUD service chips scoped to targeted services.
+// If targets is empty, it falls back to BuildContainerChips.
+// It iterates over targets as canonical keys to ensure missing or pending containers are visibly represented.
+func BuildTargetContainerChips(rawContainers []DockerContainerJSON, targets []string, startedAt time.Time, now time.Time) []MatrixJobChip {
+	if len(targets) == 0 {
+		return BuildContainerChips(rawContainers, now)
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+
+	containerByService := make(map[string]DockerContainerJSON)
+	for _, c := range rawContainers {
+		isAerial := false
+		var svcName string
+
+		if proj, ok := c.Labels["com.docker.compose.project"]; ok && proj == "aerial" {
+			isAerial = true
+			svcName = c.Labels["com.docker.compose.service"]
+		} else if len(c.Names) > 0 {
+			name := strings.TrimPrefix(c.Names[0], "/")
+			if strings.HasPrefix(name, "aerial-") {
+				isAerial = true
+				svcName = strings.TrimPrefix(name, "aerial-")
+			}
+		}
+
+		if isAerial && svcName != "" {
+			if existing, ok := containerByService[svcName]; !ok || c.Created > existing.Created {
+				containerByService[svcName] = c
+			}
+		}
+	}
+
+	chips := make([]MatrixJobChip, 0, len(targets))
+	seen := make(map[string]bool)
+
+	for _, target := range targets {
+		svc := strings.TrimSpace(target)
+		if svc == "" || seen[svc] {
+			continue
+		}
+		seen[svc] = true
+
+		c, found := containerByService[svc]
+		if !found {
+			chips = append(chips, MatrixJobChip{
+				Name:       svc,
+				Status:     "active",
+				Conclusion: "",
+				Duration:   "pending",
+			})
+			continue
+		}
+
+		createdAt := time.Unix(c.Created, 0).UTC()
+		isRecentlyRecreated := true
+		if !startedAt.IsZero() && createdAt.Before(startedAt.Add(-30*time.Second)) {
+			isRecentlyRecreated = false
+		}
+
+		if !isRecentlyRecreated {
+			chips = append(chips, MatrixJobChip{
+				Name:       svc,
+				Status:     "active",
+				Conclusion: "",
+				Duration:   "pending",
+			})
+			continue
+		}
+
+		status := "completed"
+		conclusion := "success"
+		if c.Health != nil && c.Health.Status == "starting" {
+			status = "active"
+			conclusion = ""
+		} else if c.State != "running" || (c.Health != nil && c.Health.Status == "unhealthy") {
+			status = "failed"
+			conclusion = "failure"
+		}
+
+		durStr := "0s"
+		if c.Created > 0 {
+			durSec := int(now.Sub(createdAt).Seconds())
+			if durSec > 0 {
+				durStr = FormatUptimeString(durSec)
+			}
+		}
+
+		chips = append(chips, MatrixJobChip{
+			Name:       svc,
+			Status:     status,
+			Conclusion: conclusion,
+			Duration:   durStr,
+		})
+	}
+
+	return chips
+}
+
 // GetContainerCommit extracts and truncates the 7-character commit SHA from container labels.
 func GetContainerCommit(containers []DockerContainerJSON) string {
 	for _, c := range containers {

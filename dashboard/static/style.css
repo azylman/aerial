@@ -906,7 +906,7 @@ body::after {
     animation: pulse-border 1s infinite alternate;
 }
 
-.section-badge.swapping {
+.section-badge.swapping, .section-badge.pulling {
     background: rgba(0, 242, 254, 0.2);
     color: var(--neon-cyan);
     border-color: var(--neon-cyan);
@@ -917,7 +917,7 @@ body::after {
     box-shadow: 0 0 20px rgba(0, 255, 135, 0.08);
 }
 
-.deploy-card.stage-swapping, .deploy-card.stage-awaiting_pull {
+.deploy-card.stage-swapping, .deploy-card.stage-awaiting_pull, .deploy-card.stage-pulling {
     border-color: rgba(0, 242, 254, 0.35);
     box-shadow: 0 0 25px rgba(0, 242, 254, 0.15);
     position: relative;
@@ -1081,7 +1081,7 @@ body::after {
     box-shadow: 0 0 10px rgba(0, 255, 135, 0.3);
 }
 
-.deploy-stage-badge.swapping {
+.deploy-stage-badge.swapping, .deploy-stage-badge.pulling {
     background: rgba(0, 242, 254, 0.2);
     color: var(--neon-cyan);
     border-color: var(--neon-cyan);
