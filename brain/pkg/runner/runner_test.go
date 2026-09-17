@@ -700,29 +700,56 @@ func TestActivityWriter_ThreadSafetyAndSessionDiscovery(t *testing.T) {
 	}
 }
 
+func TestRunAgyWithWatchdog_InProcessRunnerMock(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	mockRunner := CmdRunnerFunc(func(ctx context.Context, name string, args []string, opts CmdOptions) (ProcessRunner, error) {
+		return &mockProcess{
+			wait: func() error {
+				fmt.Fprintln(opts.Stdout, `{"event":"result","result":{"status":"SUCCESS"}}`)
+				return nil
+			},
+		}, nil
+	})
+
+	opts := WatchdogOptions{
+		InactivityTimeout: 1 * time.Second,
+		MaxDuration:       2 * time.Second,
+		PollInterval:      10 * time.Millisecond,
+		CmdRunner:         mockRunner,
+	}
+
+	stdout, stderr, exitCode, err := RunAgyWithWatchdog(ctx, "mock-agy", "test prompt", "", "", "", opts)
+	if err != nil || exitCode != 0 {
+		t.Fatalf("unexpected failure: err=%v, code=%d, stderr=%q", err, exitCode, stderr)
+	}
+	if !strings.Contains(stdout, `"SUCCESS"`) {
+		t.Errorf("expected SUCCESS in stdout, got %q", stdout)
+	}
+}
+
 func TestRunAgyWithWatchdog_InactivityTimeout(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	tmpHome := t.TempDir()
-	bin := getHelperProcessBin(t)
+
+	mockRunner := CmdRunnerFunc(func(ctx context.Context, name string, args []string, opts CmdOptions) (ProcessRunner, error) {
+		return &mockProcess{
+			wait: func() error {
+				<-ctx.Done()
+				return ctx.Err()
+			},
+		}, nil
+	})
+
 	opts := WatchdogOptions{
-		HomeDir:           tmpHome,
-		InactivityTimeout: 150 * time.Millisecond,
+		InactivityTimeout: 50 * time.Millisecond,
 		MaxDuration:       2 * time.Second,
 		PollInterval:      10 * time.Millisecond,
-		ExtraEnv:          []string{"GO_WANT_HELPER_PROCESS=1", "MOCK_MODE=hang"},
+		CmdRunner:         mockRunner,
 	}
 
-	stdout, stderr, exitCode, err := RunAgyWithWatchdog(
-		ctx,
-		bin,
-		"prompt",
-		"",
-		"",
-		"",
-		opts,
-	)
-
+	stdout, stderr, exitCode, err := RunAgyWithWatchdog(ctx, "mock-agy", "prompt", "", "", "", opts)
 	if exitCode == 0 {
 		t.Errorf("expected non-zero exit code on inactivity timeout, got 0")
 	}
@@ -738,27 +765,32 @@ func TestRunAgyWithWatchdog_InactivityTimeout(t *testing.T) {
 func TestRunAgyWithWatchdog_ActiveStderrHeartbeat(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	tmpHome := t.TempDir()
-	bin := getHelperProcessBin(t)
+
+	mockRunner := CmdRunnerFunc(func(ctx context.Context, name string, args []string, opts CmdOptions) (ProcessRunner, error) {
+		return &mockProcess{
+			wait: func() error {
+				for i := 1; i <= 3; i++ {
+					select {
+					case <-ctx.Done():
+						return ctx.Err()
+					case <-time.After(20 * time.Millisecond):
+						fmt.Fprintf(opts.Stderr, "pulse %d\n", i)
+					}
+				}
+				fmt.Fprintln(opts.Stdout, `{"event":"result","result":{"status":"SUCCESS"}}`)
+				return nil
+			},
+		}, nil
+	})
 
 	opts := WatchdogOptions{
-		HomeDir:           tmpHome,
-		InactivityTimeout: 200 * time.Millisecond,
+		InactivityTimeout: 60 * time.Millisecond,
 		MaxDuration:       5 * time.Second,
 		PollInterval:      10 * time.Millisecond,
-		ExtraEnv:          []string{"GO_WANT_HELPER_PROCESS=1", "MOCK_MODE=pulse_stderr", "MOCK_PULSES=3"},
+		CmdRunner:         mockRunner,
 	}
 
-	stdout, stderr, exitCode, err := RunAgyWithWatchdog(
-		ctx,
-		bin,
-		"prompt",
-		"",
-		"",
-		"",
-		opts,
-	)
-
+	stdout, stderr, exitCode, err := RunAgyWithWatchdog(ctx, "mock-agy", "prompt", "", "", "", opts)
 	if err != nil {
 		t.Fatalf("unexpected error: %v (stderr: %q, stdout: %q)", err, stderr, stdout)
 	}
@@ -776,27 +808,32 @@ func TestRunAgyWithWatchdog_ActiveStderrHeartbeat(t *testing.T) {
 func TestRunAgyWithWatchdog_ActiveStdoutHeartbeat(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	tmpHome := t.TempDir()
-	bin := getHelperProcessBin(t)
+
+	mockRunner := CmdRunnerFunc(func(ctx context.Context, name string, args []string, opts CmdOptions) (ProcessRunner, error) {
+		return &mockProcess{
+			wait: func() error {
+				for i := 1; i <= 3; i++ {
+					select {
+					case <-ctx.Done():
+						return ctx.Err()
+					case <-time.After(20 * time.Millisecond):
+						fmt.Fprintf(opts.Stdout, "stdout pulse %d\n", i)
+					}
+				}
+				fmt.Fprintln(opts.Stdout, `{"event":"result","result":{"status":"SUCCESS"}}`)
+				return nil
+			},
+		}, nil
+	})
 
 	opts := WatchdogOptions{
-		HomeDir:           tmpHome,
-		InactivityTimeout: 200 * time.Millisecond,
+		InactivityTimeout: 60 * time.Millisecond,
 		MaxDuration:       5 * time.Second,
 		PollInterval:      10 * time.Millisecond,
-		ExtraEnv:          []string{"GO_WANT_HELPER_PROCESS=1", "MOCK_MODE=pulse_stdout", "MOCK_PULSES=3"},
+		CmdRunner:         mockRunner,
 	}
 
-	stdout, stderr, exitCode, err := RunAgyWithWatchdog(
-		ctx,
-		bin,
-		"prompt",
-		"",
-		"",
-		"",
-		opts,
-	)
-
+	stdout, stderr, exitCode, err := RunAgyWithWatchdog(ctx, "mock-agy", "prompt", "", "", "", opts)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -815,7 +852,6 @@ func TestRunAgyWithWatchdog_CustomTranscriptDirs(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	tempDir := t.TempDir()
-	bin := getHelperProcessBin(t)
 	testSessionID := "custom-sess-9988"
 	customLogDir := filepath.Join(tempDir, "custom-logs", testSessionID, ".system_generated", "logs")
 	if err := os.MkdirAll(customLogDir, 0755); err != nil {
@@ -823,25 +859,38 @@ func TestRunAgyWithWatchdog_CustomTranscriptDirs(t *testing.T) {
 	}
 	transcriptFile := filepath.Join(customLogDir, "transcript.jsonl")
 
+	mockRunner := CmdRunnerFunc(func(ctx context.Context, name string, args []string, opts CmdOptions) (ProcessRunner, error) {
+		return &mockProcess{
+			wait: func() error {
+				for i := 1; i <= 3; i++ {
+					select {
+					case <-ctx.Done():
+						return ctx.Err()
+					case <-time.After(20 * time.Millisecond):
+						f, err := os.OpenFile(transcriptFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+						if err == nil {
+							_, _ = fmt.Fprintf(f, "{\"step\": %d}\n", i)
+							_ = f.Sync()
+							_ = f.Close()
+						}
+					}
+				}
+				fmt.Fprintln(opts.Stdout, `{"event":"result","result":{"status":"SUCCESS"}}`)
+				return nil
+			},
+		}, nil
+	})
+
 	opts := WatchdogOptions{
 		HomeDir:           tempDir,
-		InactivityTimeout: 200 * time.Millisecond,
+		InactivityTimeout: 60 * time.Millisecond,
 		MaxDuration:       5 * time.Second,
 		PollInterval:      10 * time.Millisecond,
 		TranscriptDirs:    []string{filepath.Join(tempDir, "custom-logs")},
-		ExtraEnv:          []string{"GO_WANT_HELPER_PROCESS=1", "MOCK_MODE=pulse_file", "MOCK_LOG_FILE=" + transcriptFile, "MOCK_PULSES=3"},
+		CmdRunner:         mockRunner,
 	}
 
-	stdout, stderr, exitCode, err := RunAgyWithWatchdog(
-		ctx,
-		bin,
-		"prompt",
-		testSessionID,
-		"",
-		"",
-		opts,
-	)
-
+	stdout, stderr, exitCode, err := RunAgyWithWatchdog(ctx, "mock-agy", "prompt", testSessionID, "", "", opts)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -861,33 +910,44 @@ func TestRunAgyWithWatchdog_TranscriptHeartbeat(t *testing.T) {
 	ctx := context.Background()
 	testSessionID := "test-transcript-session-12345"
 	tempDir := t.TempDir()
-	bin := getHelperProcessBin(t)
 
 	logDir := filepath.Join(tempDir, ".gemini", "antigravity-cli", "brain", testSessionID, ".system_generated", "logs")
 	if err := os.MkdirAll(logDir, 0755); err != nil {
 		t.Fatalf("failed to create mock log dir: %v", err)
 	}
-
 	transcriptFile := filepath.Join(logDir, "transcript.jsonl")
 
+	mockRunner := CmdRunnerFunc(func(ctx context.Context, name string, args []string, opts CmdOptions) (ProcessRunner, error) {
+		return &mockProcess{
+			wait: func() error {
+				for i := 1; i <= 3; i++ {
+					select {
+					case <-ctx.Done():
+						return ctx.Err()
+					case <-time.After(20 * time.Millisecond):
+						f, err := os.OpenFile(transcriptFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+						if err == nil {
+							_, _ = fmt.Fprintf(f, "{\"step\": %d}\n", i)
+							_ = f.Sync()
+							_ = f.Close()
+						}
+					}
+				}
+				fmt.Fprintln(opts.Stdout, `{"event":"result","result":{"status":"SUCCESS"}}`)
+				return nil
+			},
+		}, nil
+	})
+
 	opts := WatchdogOptions{
-		InactivityTimeout: 200 * time.Millisecond,
+		InactivityTimeout: 60 * time.Millisecond,
 		MaxDuration:       5 * time.Second,
 		PollInterval:      10 * time.Millisecond,
 		TranscriptDirs:    []string{filepath.Join(tempDir, ".gemini", "antigravity-cli", "brain")},
-		ExtraEnv:          []string{"GO_WANT_HELPER_PROCESS=1", "MOCK_MODE=pulse_file", "MOCK_LOG_FILE=" + transcriptFile, "MOCK_PULSES=3"},
+		CmdRunner:         mockRunner,
 	}
 
-	stdout, stderr, exitCode, err := RunAgyWithWatchdog(
-		ctx,
-		bin,
-		"prompt",
-		testSessionID,
-		"",
-		"",
-		opts,
-	)
-
+	stdout, stderr, exitCode, err := RunAgyWithWatchdog(ctx, "mock-agy", "prompt", testSessionID, "", "", opts)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -907,33 +967,44 @@ func TestRunAgyWithWatchdog_BackgroundTaskLogHeartbeat(t *testing.T) {
 	ctx := context.Background()
 	testSessionID := "test-task-session-12345"
 	tempDir := t.TempDir()
-	bin := getHelperProcessBin(t)
 
 	tasksDir := filepath.Join(tempDir, ".gemini", "antigravity-cli", "brain", testSessionID, ".system_generated", "tasks")
 	if err := os.MkdirAll(tasksDir, 0755); err != nil {
 		t.Fatalf("failed to create mock tasks dir: %v", err)
 	}
-
 	taskLog := filepath.Join(tasksDir, "task-1.log")
 
+	mockRunner := CmdRunnerFunc(func(ctx context.Context, name string, args []string, opts CmdOptions) (ProcessRunner, error) {
+		return &mockProcess{
+			wait: func() error {
+				for i := 1; i <= 3; i++ {
+					select {
+					case <-ctx.Done():
+						return ctx.Err()
+					case <-time.After(20 * time.Millisecond):
+						f, err := os.OpenFile(taskLog, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+						if err == nil {
+							_, _ = fmt.Fprintf(f, "{\"step\": %d}\n", i)
+							_ = f.Sync()
+							_ = f.Close()
+						}
+					}
+				}
+				fmt.Fprintln(opts.Stdout, `{"event":"result","result":{"status":"SUCCESS"}}`)
+				return nil
+			},
+		}, nil
+	})
+
 	opts := WatchdogOptions{
-		InactivityTimeout: 200 * time.Millisecond,
+		InactivityTimeout: 60 * time.Millisecond,
 		MaxDuration:       5 * time.Second,
 		PollInterval:      10 * time.Millisecond,
 		TranscriptDirs:    []string{filepath.Join(tempDir, ".gemini", "antigravity-cli", "brain")},
-		ExtraEnv:          []string{"GO_WANT_HELPER_PROCESS=1", "MOCK_MODE=pulse_file", "MOCK_LOG_FILE=" + taskLog, "MOCK_PULSES=3"},
+		CmdRunner:         mockRunner,
 	}
 
-	stdout, stderr, exitCode, err := RunAgyWithWatchdog(
-		ctx,
-		bin,
-		"prompt",
-		testSessionID,
-		"",
-		"",
-		opts,
-	)
-
+	stdout, stderr, exitCode, err := RunAgyWithWatchdog(ctx, "mock-agy", "prompt", testSessionID, "", "", opts)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -953,33 +1024,37 @@ func TestRunAgyWithWatchdog_BackgroundTaskLogStall_Timeout(t *testing.T) {
 	ctx := context.Background()
 	testSessionID := "test-task-stall-6789"
 	tempDir := t.TempDir()
-	bin := getHelperProcessBin(t)
 
 	tasksDir := filepath.Join(tempDir, ".gemini", "antigravity-cli", "brain", testSessionID, ".system_generated", "tasks")
 	if err := os.MkdirAll(tasksDir, 0755); err != nil {
 		t.Fatalf("failed to create mock tasks dir: %v", err)
 	}
-
 	taskLog := filepath.Join(tasksDir, "task-1.log")
 
+	mockRunner := CmdRunnerFunc(func(ctx context.Context, name string, args []string, opts CmdOptions) (ProcessRunner, error) {
+		return &mockProcess{
+			wait: func() error {
+				f, err := os.OpenFile(taskLog, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+				if err == nil {
+					_, _ = fmt.Fprintln(f, "started build")
+					_ = f.Sync()
+					_ = f.Close()
+				}
+				<-ctx.Done()
+				return ctx.Err()
+			},
+		}, nil
+	})
+
 	opts := WatchdogOptions{
-		InactivityTimeout: 150 * time.Millisecond,
+		InactivityTimeout: 50 * time.Millisecond,
 		MaxDuration:       2 * time.Second,
 		PollInterval:      10 * time.Millisecond,
 		TranscriptDirs:    []string{filepath.Join(tempDir, ".gemini", "antigravity-cli", "brain")},
-		ExtraEnv:          []string{"GO_WANT_HELPER_PROCESS=1", "MOCK_MODE=stall_file", "MOCK_LOG_FILE=" + taskLog, "MOCK_STALL_MS=300"},
+		CmdRunner:         mockRunner,
 	}
 
-	stdout, stderr, exitCode, err := RunAgyWithWatchdog(
-		ctx,
-		bin,
-		"prompt",
-		testSessionID,
-		"",
-		"",
-		opts,
-	)
-
+	stdout, stderr, exitCode, err := RunAgyWithWatchdog(ctx, "mock-agy", "prompt", testSessionID, "", "", opts)
 	if exitCode == 0 {
 		t.Errorf("expected non-zero exit code on task stall timeout, got 0")
 	}
@@ -995,26 +1070,32 @@ func TestRunAgyWithWatchdog_BackgroundTaskLogStall_Timeout(t *testing.T) {
 func TestRunAgyWithWatchdog_MaxDuration(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	tmpHome := t.TempDir()
-	bin := getHelperProcessBin(t)
+
+	mockRunner := CmdRunnerFunc(func(ctx context.Context, name string, args []string, opts CmdOptions) (ProcessRunner, error) {
+		return &mockProcess{
+			wait: func() error {
+				ticker := time.NewTicker(10 * time.Millisecond)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-ctx.Done():
+						return ctx.Err()
+					case <-ticker.C:
+						fmt.Fprintln(opts.Stderr, "alive pulse")
+					}
+				}
+			},
+		}, nil
+	})
+
 	opts := WatchdogOptions{
-		HomeDir:           tmpHome,
 		InactivityTimeout: 500 * time.Millisecond,
-		MaxDuration:       150 * time.Millisecond,
+		MaxDuration:       50 * time.Millisecond,
 		PollInterval:      10 * time.Millisecond,
-		ExtraEnv:          []string{"GO_WANT_HELPER_PROCESS=1", "MOCK_MODE=hang"},
+		CmdRunner:         mockRunner,
 	}
 
-	stdout, stderr, exitCode, err := RunAgyWithWatchdog(
-		ctx,
-		bin,
-		"prompt",
-		"",
-		"",
-		"",
-		opts,
-	)
-
+	stdout, stderr, exitCode, err := RunAgyWithWatchdog(ctx, "mock-agy", "prompt", "", "", "", opts)
 	if exitCode == 0 {
 		t.Errorf("expected non-zero exit code on max duration exceeded, got 0")
 	}
@@ -1025,6 +1106,18 @@ func TestRunAgyWithWatchdog_MaxDuration(t *testing.T) {
 		t.Errorf("expected [watchdog] max duration exceeded in stderr, got: %s", stderr)
 	}
 	_ = stdout
+}
+
+func TestRunAgyWithWatchdog_CmdRunnerError(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mockRunner := CmdRunnerFunc(func(ctx context.Context, name string, args []string, opts CmdOptions) (ProcessRunner, error) {
+		return nil, errors.New("command creation failed")
+	})
+	_, _, exitCode, err := RunAgyWithWatchdog(ctx, "mock-agy", "prompt", "", "", "", WatchdogOptions{CmdRunner: mockRunner})
+	if exitCode != -1 || err == nil || !strings.Contains(err.Error(), "command creation failed") {
+		t.Errorf("expected exitCode -1 and command creation failed error, got code=%d, err=%v", exitCode, err)
+	}
 }
 
 func TestClassifyError_WatchdogInactivityNotTransient(t *testing.T) {

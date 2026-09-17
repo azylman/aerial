@@ -433,3 +433,39 @@ func NewMockStreamWorker(t *testing.T, cfg MockStreamWorkerConfig) (*WorkerInsta
 
 	return worker, harness
 }
+
+type mockProcess struct {
+	start func() error
+	wait  func() error
+}
+
+func (m *mockProcess) Start() error {
+	if m.start != nil {
+		return m.start()
+	}
+	return nil
+}
+
+func (m *mockProcess) Wait() error {
+	if m.wait != nil {
+		return m.wait()
+	}
+	return nil
+}
+
+type mockExitError struct {
+	code int
+	msg  string
+}
+
+func (e *mockExitError) Error() string {
+	if e.msg != "" {
+		return e.msg
+	}
+	return fmt.Sprintf("exit status %d", e.code)
+}
+
+func (e *mockExitError) ExitCode() int {
+	return e.code
+}
+
