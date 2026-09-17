@@ -1,0 +1,62 @@
+run:
+  timeout: 5m
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - ineffassign
+    - typecheck
+    - unused
+    - errname
+
+linters-settings:
+  errcheck:
+    check-type-assertions: true
+    check-blank: true
+    exclude-functions:
+      - (*bytes.Buffer).Write
+      - (*bytes.Buffer).WriteString
+      - (*bytes.Buffer).WriteByte
+      - (*bytes.Buffer).WriteRune
+      - (*strings.Builder).Write
+      - (*strings.Builder).WriteString
+      - (*strings.Builder).WriteByte
+      - (*strings.Builder).WriteRune
+      - hash.Hash.Write
+
+issues:
+  exclude-use-default: false
+  exclude-rules:
+    # 1. Monorepo-wide test exclusions
+    - path: _test\.go
+      linters:
+        - errcheck
+        - ineffassign
+        - staticcheck
+        - unused
+
+    # 2. SA1019 deprecation shims for backward compatibility
+    - text: "SA1019:.*ResolveChannelPolicy is deprecated"
+      linters:
+        - staticcheck
+
+    # 3. Unmigrated unused / ineffectual assignments
+    - path: pkg/config/config\.go
+      linters:
+        - unused
+    - path: pkg/queue/worker\.go
+      linters:
+        - ineffassign
+    - path: pure\.go
+      linters:
+        - unused
+
+    # 4. Burndown Quarantine for errcheck (Phases 1-3)
+    - path: ^(server|tools|db|proxy|pure|main|funnel)\.go$
+      linters:
+        - errcheck
+    - path: pkg/(db|queue|runner|env|session|config|gitsync|memory|delivery|watcher)/
+      linters:
+        - errcheck

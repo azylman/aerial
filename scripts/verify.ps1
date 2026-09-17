@@ -60,12 +60,8 @@ function Run-GolangCILint($svc) {
             Pop-Location
         }
     } elseif ($hasDocker) {
-        docker run --rm -v "${svcPath}:/app" -w /app golangci/golangci-lint:v1.59.1 golangci-lint run ./...
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host "   (golangci-lint v1.59.1 incompatible with Go >= 1.24 export data, falling back to go vet in golang:1.24 for $svc)" -ForegroundColor Yellow
-            docker run --rm -v "${svcPath}:/app" -w /app golang:1.24 go vet ./...
-            if ($LASTEXITCODE -ne 0) { throw "go vet (docker) failed on $svc" }
-        }
+        docker run --rm -v "${repoRoot}:/workspace" -w "/workspace/$svc" golangci/golangci-lint:v1.64.5 golangci-lint run --config /workspace/.golangci.yml ./...
+        if ($LASTEXITCODE -ne 0) { throw "golangci-lint (docker) failed on $svc" }
     } elseif ($hasGo) {
         Write-Host "   (golangci-lint not found, running go vet for $svc)" -ForegroundColor Yellow
         Run-GoVet $svc
