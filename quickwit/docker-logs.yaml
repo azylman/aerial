@@ -31,6 +31,12 @@ doc_mapping:
       type: text
       tokenizer: default
       record: position
+    - name: attributes
+      type: json
+      tokenizer: default
+      record: basic
+      fast: true
+      expand_dots: true
 
 search_settings:
   default_search_fields:

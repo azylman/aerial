@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -1047,6 +1048,10 @@ func DefaultDataDir() string {
 }
 
 func main() {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	})))
+
 	cfg, err := config.New()
 	if err != nil {
 		log.Printf("Warning: initial LoadConfig error: %v", err)
