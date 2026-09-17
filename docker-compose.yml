@@ -717,7 +717,7 @@ services:
       homepage.name: "OpenObserve Logs"
       homepage.icon: "open-observe.png"
       homepage.description: "Full-Stack Log & Telemetry Explorer"
-      homepage.href: "/openobserve/"
+      homepage.href: "/openobserve/web/logs?stream=docker_logs&stream_type=logs"
     environment:
       - ZO_ROOT_USER_EMAIL=${OPENOBSERVE_ROOT_USER_EMAIL:-admin@aerial.local}
       - ZO_ROOT_USER_PASSWORD=${OPENOBSERVE_ROOT_USER_PASSWORD:-Aerial!Logs2026#}
