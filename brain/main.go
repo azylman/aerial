@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -42,6 +43,16 @@ type PromptRequest struct {
 	MessageID      string `json:"message_id,omitempty"`
 }
 
+func writeJSON(w http.ResponseWriter, status int, data any) {
+	if w.Header().Get("Content-Type") == "" {
+		w.Header().Set("Content-Type", "application/json")
+	}
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(data); err != nil {
+		log.Printf("[HTTP] Failed to encode JSON response: %v", err)
+	}
+}
+
 func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -50,17 +61,17 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 		}
 
 		body, err := io.ReadAll(r.Body)
+		if closeErr := r.Body.Close(); closeErr != nil {
+			log.Printf("[HTTP] Warning closing request body: %v", closeErr)
+		}
 		if err != nil {
 			http.Error(w, `{"error":"Failed to read request body"}`, http.StatusBadRequest)
 			return
 		}
-		_ = r.Body.Close()
 
 		var req PromptRequest
 		if err := json.Unmarshal(body, &req); err != nil || strings.TrimSpace(req.Prompt) == "" {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(map[string]string{
+			writeJSON(w, http.StatusBadRequest, map[string]string{
 				"error": "Invalid payload: 'prompt' field is required and cannot be empty",
 			})
 			return
@@ -101,9 +112,7 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 			pool.Enqueue(msg)
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusAccepted)
-		_ = json.NewEncoder(w).Encode(map[string]string{
+		writeJSON(w, http.StatusAccepted, map[string]string{
 			"status":          "accepted",
 			"conversation_id": threadID,
 			"message_id":      msgID,
@@ -173,7 +182,10 @@ func handleTranscripts(store db.Store, searchPaths ...string) http.HandlerFunc {
 				tStat, err := os.Stat(tPath)
 				if err != nil {
 					tPath = filepath.Join(root, internalID, ".system_generated", "logs", "transcript.jsonl")
-					tStat, _ = os.Stat(tPath)
+					tStat, err = os.Stat(tPath)
+					if err != nil {
+						tStat = nil
+					}
 				}
 
 				data, err := os.ReadFile(tPath)
@@ -241,17 +253,14 @@ func handleTranscripts(store db.Store, searchPaths ...string) http.HandlerFunc {
 			}
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(results)
+		writeJSON(w, http.StatusOK, results)
 	}
 }
 
 func handleFacts(store db.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Method not allowed"})
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "Method not allowed"})
 			return
 		}
 
@@ -291,16 +300,13 @@ func handleFacts(store db.Store) http.HandlerFunc {
 		result, err := store.GetFactsPaginated(r.Context(), filter)
 		if err != nil {
 			log.Printf("[HTTP] Error fetching facts: %v", err)
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to fetch facts"})
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to fetch facts"})
 			return
 		}
 
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(result)
+		writeJSON(w, http.StatusOK, result)
 	}
 }
 
@@ -366,9 +372,7 @@ func handleSchedules(store db.Store) http.HandlerFunc {
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Method not allowed"})
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "Method not allowed"})
 			return
 		}
 
@@ -392,35 +396,28 @@ func handleSchedules(store db.Store) http.HandlerFunc {
 			}
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 			w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-			w.WriteHeader(http.StatusOK)
-			_ = json.NewEncoder(w).Encode(resp)
+			writeJSON(w, http.StatusOK, resp)
 			return
 		}
 
 		summary, err := store.GetScheduleSummaryMetrics(r.Context())
 		if err != nil {
 			log.Printf("[HTTP] Error fetching schedule summary: %v", err)
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to fetch schedule summary"})
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to fetch schedule summary"})
 			return
 		}
 
 		rawCrons, err := store.GetAllCronSchedules(r.Context(), "")
 		if err != nil {
 			log.Printf("[HTTP] Error fetching cron schedules: %v", err)
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to fetch cron schedules"})
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to fetch cron schedules"})
 			return
 		}
 
 		rawOneShots, err := store.GetAllOneShotSchedules(r.Context(), "")
 		if err != nil {
 			log.Printf("[HTTP] Error fetching one-shot schedules: %v", err)
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to fetch one-shot schedules"})
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to fetch one-shot schedules"})
 			return
 		}
 
@@ -467,17 +464,14 @@ func handleSchedules(store db.Store) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(resp)
+		writeJSON(w, http.StatusOK, resp)
 	}
 }
 
 func handleScheduleRuns(store db.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Method not allowed"})
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "Method not allowed"})
 			return
 		}
 
@@ -507,9 +501,7 @@ func handleScheduleRuns(store db.Store) http.HandlerFunc {
 		rawRuns, total, err := store.GetScheduleRunsPaginated(r.Context(), limit, offset, scheduleID, status)
 		if err != nil {
 			log.Printf("[HTTP] Error fetching schedule runs: %v", err)
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to fetch schedule runs"})
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to fetch schedule runs"})
 			return
 		}
 
@@ -531,8 +523,7 @@ func handleScheduleRuns(store db.Store) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(resp)
+		writeJSON(w, http.StatusOK, resp)
 	}
 }
 
@@ -553,9 +544,7 @@ func handleTasks(store db.Store) http.HandlerFunc {
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Method not allowed"})
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "Method not allowed"})
 			return
 		}
 
@@ -572,8 +561,7 @@ func handleTasks(store db.Store) http.HandlerFunc {
 		if now.Before(cache.expiresAt) && cache.tasks != nil {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 			w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-			w.WriteHeader(http.StatusOK)
-			_ = json.NewEncoder(w).Encode(TasksResponse{
+			writeJSON(w, http.StatusOK, TasksResponse{
 				Status: "ok",
 				Total:  len(cache.tasks),
 				Tasks:  cache.tasks,
@@ -584,9 +572,7 @@ func handleTasks(store db.Store) http.HandlerFunc {
 		rawTasks, err := store.GetActiveTasks(r.Context())
 		if err != nil {
 			log.Printf("[HTTP] Error fetching active tasks: %v", err)
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to fetch active tasks"})
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to fetch active tasks"})
 			return
 		}
 
@@ -608,8 +594,7 @@ func handleTasks(store db.Store) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(TasksResponse{
+		writeJSON(w, http.StatusOK, TasksResponse{
 			Status: "ok",
 			Total:  len(tasks),
 			Tasks:  tasks,
@@ -697,12 +682,16 @@ func SetupBrainMux(store db.Store, pool *queue.WorkerPool, reloadFn func(string)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"reloaded"}`))
+		if _, err := w.Write([]byte(`{"status":"reloaded"}`)); err != nil {
+			log.Printf("[HTTP] Failed to write reload response: %v", err)
+		}
 	})
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
+		if _, err := w.Write([]byte(`{"status":"ok"}`)); err != nil {
+			log.Printf("[HTTP] Failed to write health response: %v", err)
+		}
 	})
 	return mux
 }
@@ -800,7 +789,9 @@ func CreateReloadConfigFunc(cfg *config.Config, opts ...ReloadOption) func(sourc
 				log.Printf("[%s] Warning: Failed to reload config: %v", source, err)
 				if options.dgSession != nil {
 					alertMsg := fmt.Sprintf("Failed to reload config:\n```\n%v\n```\nAerial has retained the Last Known Good Configuration (LKGC).", err)
-					_ = delivery.SendSystemAlert(options.dgSession, cfg.Current().SystemChannel, "Invalid Configuration File", alertMsg)
+					if alertErr := delivery.SendSystemAlert(options.dgSession, cfg.Current().SystemChannel, "Invalid Configuration File", alertMsg); alertErr != nil {
+						log.Printf("[%s] Warning: Failed to send system alert for config reload failure: %v", source, alertErr)
+					}
 				}
 				return
 			}
@@ -881,7 +872,9 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 
 	homeDir := cur.GeminiHomeDir
 	provisioner := env.NewFromConfig(cfg)
-	_ = InitializeBrainEnvironment(ctx, cfg)
+	if err := InitializeBrainEnvironment(ctx, cfg); err != nil {
+		log.Printf("Warning initializing brain environment: %v", err)
+	}
 
 	var store db.Store
 	if appOpts.store != nil {
@@ -932,7 +925,9 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		pool.StopWithTimeout(10 * time.Second)
 		if dgSession != nil {
 			log.Printf("Closing Discord gateway session...")
-			_ = dgSession.Close()
+			if err := dgSession.Close(); err != nil {
+				log.Printf("[WARN] Failed to close Discord gateway session: %v", err)
+			}
 		}
 	}()
 
@@ -972,7 +967,9 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		}()
 		defer func() {
 			watcherCancel()
-			_ = fileWatcher.Close()
+			if err := fileWatcher.Close(); err != nil {
+				log.Printf("Warning closing file watcher: %v", err)
+			}
 			watcherWg.Wait()
 		}()
 	}
@@ -992,7 +989,11 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	if err != nil {
 		return err
 	}
-	defer ln.Close()
+	defer func() {
+		if err := ln.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			log.Printf("[WARN] Error closing listener: %v", err)
+		}
+	}()
 
 	srv := &http.Server{
 		Handler: metricsMiddleware(mux),

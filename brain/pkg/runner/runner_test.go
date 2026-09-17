@@ -2010,3 +2010,16 @@ func TestActivityTap_Branches(t *testing.T) {
 		t.Errorf("expected (5, nil) on tap with nil writer, got (%d, %v)", n, err)
 	}
 }
+
+func TestActivityTap_StepUpdateUnmarshalError(t *testing.T) {
+	t.Parallel()
+	var outBuf bytes.Buffer
+	actWriter := NewActivityWriter("test-sess")
+	tap := newActivityTap(&outBuf, actWriter, true, func(ev *StepUpdateEvent) {})
+
+	// Trigger step_update with invalid JSON in step_update field
+	_, err := tap.Write([]byte(`{"event":"step_update","step_update":"not-json-object"}` + "\n"))
+	if err != nil {
+		t.Fatalf("unexpected write error: %v", err)
+	}
+}

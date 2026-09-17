@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path"
@@ -572,7 +573,9 @@ func (t *activityTap) processLine(line []byte) {
 			}
 		}
 		if t.w != nil {
-			_, _ = t.w.Write(line)
+			if _, err := t.w.Write(line); err != nil {
+				log.Printf("[WARN] Failed to write to tap destination: %v", err)
+			}
 		}
 		return
 	}
@@ -580,7 +583,9 @@ func (t *activityTap) processLine(line []byte) {
 	// Preserve final result event in the output buffer
 	if bytes.Contains(trimmed, []byte(`"event"`)) && bytes.Contains(trimmed, []byte(`"result"`)) {
 		if t.w != nil {
-			_, _ = t.w.Write(line)
+			if _, err := t.w.Write(line); err != nil {
+				log.Printf("[WARN] Failed to write to tap destination: %v", err)
+			}
 		}
 		return
 	}
@@ -601,7 +606,9 @@ func (t *activityTap) processLine(line []byte) {
 			if err := json.Unmarshal(trimmed, &raw); err == nil {
 				var ev StepUpdateEvent
 				if len(raw.StepUpdate) > 0 {
-					_ = json.Unmarshal(raw.StepUpdate, &ev)
+					if err := json.Unmarshal(raw.StepUpdate, &ev); err != nil {
+						log.Printf("[WARN] Failed to unmarshal step_update event: %v", err)
+					}
 				} else {
 					ev.Type = raw.Type
 					ev.Name = raw.Name
@@ -620,7 +627,9 @@ func (t *activityTap) processLine(line []byte) {
 
 	// Pass through any other output (e.g. non-event output, legacy json)
 	if t.w != nil {
-		_, _ = t.w.Write(line)
+		if _, err := t.w.Write(line); err != nil {
+			log.Printf("[WARN] Failed to write to tap destination: %v", err)
+		}
 	}
 }
 
@@ -716,7 +725,9 @@ func RunAgyWithWatchdog(parentCtx context.Context, agyBin, prompt, sessionID, ap
 
 	// Pre-flight: ensure settings.json matches authentication mode prior to executing agy
 	if strings.TrimSpace(opts.HomeDir) != "" {
-		_ = env.EnsureAgySettingsForHome(strings.TrimSpace(opts.HomeDir), apiKey, model)
+		if err := env.EnsureAgySettingsForHome(strings.TrimSpace(opts.HomeDir), apiKey, model); err != nil {
+			log.Printf("[WARN] Failed to ensure agy settings for home: %v", err)
+		}
 	}
 
 	if startErr := cmd.Start(); startErr != nil {
@@ -745,7 +756,7 @@ func RunAgyWithWatchdog(parentCtx context.Context, agyBin, prompt, sessionID, ap
 
 		lastSeenDiskActivity := start
 		if sessionID != "" {
-			if initAct, _ := session.LastActivityFromRoots(sessionID, opts.TranscriptDirs); initAct.After(start) {
+			if initAct, actErr := session.LastActivityFromRoots(sessionID, opts.TranscriptDirs); actErr == nil && initAct.After(start) {
 				lastSeenDiskActivity = initAct
 			}
 		}
@@ -760,7 +771,9 @@ func RunAgyWithWatchdog(parentCtx context.Context, agyBin, prompt, sessionID, ap
 				var latestActivity time.Time
 				activeSess := actWriter.SessionID()
 				if activeSess != "" {
-					latestActivity, _ = session.LastActivityFromRoots(activeSess, opts.TranscriptDirs)
+					if act, actErr := session.LastActivityFromRoots(activeSess, opts.TranscriptDirs); actErr == nil {
+						latestActivity = act
+					}
 				}
 
 				decision := EvaluateWatchdogStatus(WatchdogStatusInput{
@@ -819,7 +832,9 @@ func RunAgyWithWatchdog(parentCtx context.Context, agyBin, prompt, sessionID, ap
 		}
 		err = runErr
 		if strings.Contains(strings.ToLower(stderr), "modelprovider is set to \"gemini\"") && apiKey == "" && strings.TrimSpace(opts.HomeDir) != "" {
-			_ = env.EnsureAgySettingsForHome(strings.TrimSpace(opts.HomeDir), "", model)
+			if err := env.EnsureAgySettingsForHome(strings.TrimSpace(opts.HomeDir), "", model); err != nil {
+				log.Printf("[WARN] Failed to ensure fallback agy settings for home: %v", err)
+			}
 		}
 	} else {
 		exitCode = 0

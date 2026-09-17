@@ -2185,24 +2185,12 @@ func TestStoreAndTurnExecutionHelpers_Coverage(t *testing.T) {
 		t.Errorf("expected nil from teNoStore.store()")
 	}
 
-	if err := teNoStore.updateMessageStatus("m1", "failed", "err"); err != nil {
-		t.Errorf("unexpected err: %v", err)
-	}
-	if err := teNoStore.updateScheduleRunStatus(db.UpdateRunParams{RunID: "r1"}); err != nil {
-		t.Errorf("unexpected err: %v", err)
-	}
-	if err := teNoStore.updateMessageCompleted("m1", "resp"); err != nil {
-		t.Errorf("unexpected err: %v", err)
-	}
-	if err := teNoStore.incrementMessageRetry("m1", "retry-err"); err != nil {
-		t.Errorf("unexpected err: %v", err)
-	}
-	if err := teNoStore.saveSessionID("t1", "s1"); err != nil {
-		t.Errorf("unexpected err: %v", err)
-	}
-	if err := teNoStore.rotateSessionID("t1", "s2"); err != nil {
-		t.Errorf("unexpected err: %v", err)
-	}
+	teNoStore.updateMessageStatus("m1", "failed", "err")
+	teNoStore.updateScheduleRunStatus(db.UpdateRunParams{RunID: "r1"})
+	teNoStore.updateMessageCompleted("m1", "resp")
+	teNoStore.incrementMessageRetry("m1", "retry-err")
+	teNoStore.saveSessionID("t1", "s1")
+	teNoStore.rotateSessionID("t1", "s2")
 	if count, err := teNoStore.getSessionTurnCount("t1"); count != 0 || err != nil {
 		t.Errorf("expected 0, nil, got %d, %v", count, err)
 	}
@@ -2230,24 +2218,12 @@ func TestStoreAndTurnExecutionHelpers_Coverage(t *testing.T) {
 
 	// 4. turnExecution helper active-store branches
 	teStore := &turnExecution{pool: pFake}
-	if err := teStore.updateMessageStatus("m1", "processing"); err != nil {
-		t.Errorf("unexpected err: %v", err)
-	}
-	if err := teStore.updateScheduleRunStatus(db.UpdateRunParams{RunID: "r1"}); err != nil {
-		t.Errorf("unexpected err: %v", err)
-	}
-	if err := teStore.updateMessageCompleted("m1", "resp"); err != nil {
-		t.Errorf("unexpected err: %v", err)
-	}
-	if err := teStore.incrementMessageRetry("m1", "retry-err"); err != nil {
-		t.Errorf("unexpected err: %v", err)
-	}
-	if err := teStore.saveSessionID("t1", "s1"); err != nil {
-		t.Errorf("unexpected err: %v", err)
-	}
-	if err := teStore.rotateSessionID("t1", "s2"); err != nil {
-		t.Errorf("unexpected err: %v", err)
-	}
+	teStore.updateMessageStatus("m1", "processing")
+	teStore.updateScheduleRunStatus(db.UpdateRunParams{RunID: "r1"})
+	teStore.updateMessageCompleted("m1", "resp")
+	teStore.incrementMessageRetry("m1", "retry-err")
+	teStore.saveSessionID("t1", "s1")
+	teStore.rotateSessionID("t1", "s2")
 	if _, err := teStore.getSessionTurnCount("t1"); err != nil {
 		t.Errorf("unexpected err: %v", err)
 	}
@@ -2273,6 +2249,252 @@ func TestStoreAndTurnExecutionHelpers_Coverage(t *testing.T) {
 		t.Errorf("unexpected err: %v", err)
 	}
 }
+
+type errQueueStore struct {
+	db.Store
+}
+
+func (e *errQueueStore) UpdateMessageStatus(ctx context.Context, id, status, errorMsg string) error {
+	return errors.New("errQueueStore: update message status error")
+}
+
+func (e *errQueueStore) UpdateScheduleRunStatus(ctx context.Context, params db.UpdateRunParams) error {
+	return errors.New("errQueueStore: update schedule run status error")
+}
+
+func (e *errQueueStore) UpdateMessageCompleted(ctx context.Context, id, responseText string) error {
+	return errors.New("errQueueStore: update message completed error")
+}
+
+func (e *errQueueStore) IncrementMessageRetry(ctx context.Context, id, errorMsg string) error {
+	return errors.New("errQueueStore: increment message retry error")
+}
+
+func (e *errQueueStore) SaveSessionID(ctx context.Context, threadID, sessionID string) error {
+	return errors.New("errQueueStore: save session id error")
+}
+
+func (e *errQueueStore) RotateSessionID(ctx context.Context, threadID, newSessionID string) error {
+	return errors.New("errQueueStore: rotate session id error")
+}
+
+func TestTurnExecution_StoreErrorBranches(t *testing.T) {
+	fake := setupTestStore(t)
+	pErr := &WorkerPool{cfg: WorkerPoolConfig{Store: &errQueueStore{Store: fake}}}
+	te := &turnExecution{pool: pErr}
+
+	te.updateMessageStatus("m1", "failed", "err")
+	te.updateScheduleRunStatus(db.UpdateRunParams{RunID: "r1"})
+	te.updateMessageCompleted("m1", "resp")
+	te.incrementMessageRetry("m1", "retry-err")
+	te.saveSessionID("t1", "s1")
+	te.rotateSessionID("t1", "s2")
+}
+
+func TestStatusUpdater_DeleteErrorBranches(t *testing.T) {
+	u := NewStatusUpdater(nil, "t1", true)
+	u.deleteFunc = func(threadID, messageID string) error {
+		return errors.New("discord deletion error")
+	}
+	u.sendFunc = func(threadID, content string) (string, error) {
+		u.mu.Lock()
+		u.disabled = true
+		u.mu.Unlock()
+		return "msg1", nil
+	}
+	u.activeTool = "bash"
+	u.flush()
+
+	u.statusMessageID = "msg2"
+	u.Reset()
+
+	u.statusMessageID = "msg3"
+	u.DeleteStatusMessage()
+	time.Sleep(15 * time.Millisecond)
+}
+
+func TestSummarizeThreadHistory_InvalidTypeAssertion(t *testing.T) {
+	sg := &singleflight.Group{}
+	start := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		close(start)
+		_, _, _ = sg.Do("test-invalid-type", func() (interface{}, error) {
+			<-done
+			return 12345, nil
+		})
+	}()
+	<-start
+	time.Sleep(5 * time.Millisecond)
+
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		close(done)
+	}()
+
+	msgs := []HistoryMessage{{AuthorName: "alice", Content: "hello"}}
+	_, err := SummarizeThreadHistoryWithGroup(context.Background(), sg, nil, "model", "test-invalid-type", msgs)
+	if err == nil {
+		t.Errorf("expected error for non-string thread summary, got nil")
+	}
+}
+
+func TestAssembleTurnPrompt_EmptyBase(t *testing.T) {
+	// 1. Layer 6 only
+	p6 := AssembleTurnPrompt(TurnPromptInput{
+		ThreadSummary: "summary text",
+	})
+	if !strings.Contains(p6, "summary text") {
+		t.Errorf("expected summary text, got %q", p6)
+	}
+
+	// 2. Layer 5 only
+	p5 := AssembleTurnPrompt(TurnPromptInput{
+		LookbackHistory: []HistoryMessage{{AuthorName: "alice", Content: "hi", CreatedAt: time.Now()}},
+	})
+	if !strings.Contains(p5, "@alice") {
+		t.Errorf("expected lookback history, got %q", p5)
+	}
+
+	// Also exercise PlanBurstExecution wake mode branches
+	_ = PlanBurstExecution(BurstPlanInput{Burst: []db.Message{{ID: "m1"}}, WakeMode: "mentions"})
+	_ = PlanBurstExecution(BurstPlanInput{Burst: []db.Message{{ID: "m1"}}, WakeMode: "direct"})
+	_ = PlanBurstExecution(BurstPlanInput{Burst: []db.Message{{ID: "m1"}}, WakeMode: "always"})
+
+	// 3. Layer 4 only
+	p4 := AssembleTurnPrompt(TurnPromptInput{
+		IsColdStart:       true,
+		PreviousSessionID: "prev-sess-123",
+	})
+	if !strings.Contains(p4, "prev-sess-123") {
+		t.Errorf("expected prev session, got %q", p4)
+	}
+
+	// 4. Layer 3 only
+	p3 := AssembleTurnPrompt(TurnPromptInput{
+		SemanticMemoryFacts: []db.Fact{{FactText: "fact 1"}},
+	})
+	if !strings.Contains(p3, "fact 1") {
+		t.Errorf("expected memory facts, got %q", p3)
+	}
+
+	// 5. Layer 2 only
+	p2 := AssembleTurnPrompt(TurnPromptInput{
+		ChannelInstructions: "instructions",
+	})
+	if !strings.Contains(p2, "instructions") {
+		t.Errorf("expected instructions, got %q", p2)
+	}
+
+	// 6. Layer 1 only
+	p1 := AssembleTurnPrompt(TurnPromptInput{
+		InjectedHookContext: "hook context",
+	})
+	if !strings.Contains(p1, "hook context") {
+		t.Errorf("expected hook context, got %q", p1)
+	}
+}
+
+type mockDrainErrStore struct {
+	db.Store
+}
+
+func (m *mockDrainErrStore) GetPendingOrProcessingMessages(ctx context.Context, limit int) ([]db.Message, error) {
+	return []db.Message{
+		{ID: "msg-proc-1", Status: db.StatusProcessing},
+	}, nil
+}
+
+func (m *mockDrainErrStore) UpdateMessageStatus(ctx context.Context, id, status, errReason string) error {
+	return errors.New("drain update status error")
+}
+
+func TestWorkerPool_DrainErrorBranches(t *testing.T) {
+	s := setupTestStore(t)
+	mock := &mockDrainErrStore{Store: s}
+	p := New(nil, WorkerPoolConfig{Store: mock, DrainTimeout: 10 * time.Millisecond})
+	p.StopWithTimeout(0)
+
+	tmpDBPath := filepath.Join(t.TempDir(), "closed_pool.db")
+	sqlDB, err := db.InitDB(tmpDBPath)
+	if err == nil {
+		_ = sqlDB.Close()
+		pDB := New(nil, WorkerPoolConfig{DB: sqlDB, DrainTimeout: 10 * time.Millisecond})
+		pDB.StopWithTimeout(10 * time.Millisecond)
+	}
+}
+
+func TestRecoverInterrupted_DrainErrorBranches(t *testing.T) {
+	s := setupTestStore(t)
+	mock := &mockDrainErrStore{Store: s}
+	pool := New(nil, WorkerPoolConfig{Store: mock})
+	RecoverInterrupted(mock, pool)
+
+	tmpDBPath := filepath.Join(t.TempDir(), "closed_recovery.db")
+	sqlDB, err := db.InitDB(tmpDBPath)
+	if err == nil {
+		_ = sqlDB.Close()
+		RecoverInterrupted(sqlDB, pool)
+	}
+}
+
+func TestResolveBotRoleIDs_MemberAddError(t *testing.T) {
+	origFetcher := guildMemberFetcher
+	defer func() { guildMemberFetcher = origFetcher }()
+
+	guildMemberFetcher = func(s *discordgo.Session, guildID, userID string) (*discordgo.Member, error) {
+		return &discordgo.Member{
+			GuildID: guildID,
+			User:    &discordgo.User{ID: userID},
+			Roles:   []string{"role1"},
+		}, nil
+	}
+
+	sess := &discordgo.Session{State: discordgo.NewState()}
+	roles := ResolveBotRoleIDs(sess, "guild-not-in-state", "bot-1")
+	if len(roles) != 1 || roles[0] != "role1" {
+		t.Errorf("expected [role1], got %v", roles)
+	}
+}
+
+func TestWorkerPool_EnqueueBurst_Empty(t *testing.T) {
+	p := New(nil, WorkerPoolConfig{})
+	p.EnqueueBurst() // Empty call exercises early return
+}
+
+func TestTurnExecution_BuildTurnPrompt_CachedSummary(t *testing.T) {
+	store := setupTestStore(t)
+	_ = store.SaveThreadSummary(context.Background(), "t-cached-sum", "<THREAD_SUMMARY>hi</THREAD_SUMMARY>", "msg-1")
+
+	CacheDiscordChannel(&discordgo.Channel{
+		ID:       "t-cached-sum",
+		GuildID:  "g1",
+		ParentID: "parent-chan",
+		Type:     discordgo.ChannelTypeGuildPublicThread,
+	})
+
+	dgSession := &discordgo.Session{State: discordgo.NewState()}
+	pool := New(nil, WorkerPoolConfig{
+		DiscordSession: dgSession,
+		Store:          store,
+		HistoryFetcher: func(ctx context.Context, threadID, beforeID string, limit int) ([]HistoryMessage, error) {
+			return []HistoryMessage{
+				{ID: "msg-1", AuthorName: "user", Content: "hello", CreatedAt: time.Now()},
+			}, nil
+		},
+	})
+
+	te := &turnExecution{
+		pool:     pool,
+		threadID: "t-cached-sum",
+		burst:    []db.Message{{ID: "m1", ThreadID: "t-cached-sum", Content: "current"}},
+	}
+	te.buildTurnPrompt()
+	if !strings.Contains(te.turnPrompt, "<THREAD_SUMMARY>hi</THREAD_SUMMARY>") {
+		t.Errorf("expected cached summary in prompt, got %q", te.turnPrompt)
+	}
+}
+
 
 
 

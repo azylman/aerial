@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -2558,10 +2559,53 @@ func TestSyncBotMemberRoles(t *testing.T) {
 		t.Fatalf("expected fetchCalls to stay 2, got %d", fetchCalls)
 	}
 
+	// MemberAdd error branch (guild not present in session State)
+	syncBotMemberRoles(context.Background(), s, "guild-not-in-state", "bot-1")
+
 	// Coverage boost for main helpers
 	_ = DefaultGeminiHomeDir()
 	_ = DefaultDataDir()
 }
+
+type errExistsStore struct {
+	db.Store
+}
+
+func (e *errExistsStore) MessageExists(ctx context.Context, id string) (bool, error) {
+	return false, errors.New("simulated message exists error")
+}
+
+func TestRunStartupCatchUpSweep_MessageExistsError(t *testing.T) {
+	fake := db.NewFakeStore()
+	store := &errExistsStore{Store: fake}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]*discordgo.Message{
+			{
+				ID:        "msg-sweep-err",
+				ChannelID: "chan-sweep-1",
+				Content:   "<@!bot-1> test sweep",
+				Author:    &discordgo.User{ID: "user-1"},
+			},
+		})
+	}))
+	defer server.Close()
+
+	s, _ := discordgo.New("Bot test-token")
+	s.Client = server.Client()
+	s.State = discordgo.NewState()
+	s.State.User = &discordgo.User{ID: "bot-1"}
+	_ = s.State.GuildAdd(&discordgo.Guild{ID: "guild-sweep"})
+	_ = s.State.ChannelAdd(&discordgo.Channel{ID: "chan-sweep-1", GuildID: "guild-sweep", Type: discordgo.ChannelTypeGuildText})
+
+	pool := newTestWorkerPool(store)
+	pool.Start()
+	defer pool.Stop()
+
+	RunStartupCatchUpSweep(context.Background(), store, pool, s)
+}
+
 
 
 

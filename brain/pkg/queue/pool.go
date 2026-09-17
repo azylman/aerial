@@ -511,14 +511,18 @@ func (p *WorkerPool) StopWithTimeout(drainTimeout time.Duration) {
 		if msgs, err := store.GetPendingOrProcessingMessages(sweepCtx, 0); err == nil {
 			for _, m := range msgs {
 				if m.Status == db.StatusProcessing {
-					_ = store.UpdateMessageStatus(sweepCtx, m.ID, db.StatusPending, "deployment_drain")
+					if err := store.UpdateMessageStatus(sweepCtx, m.ID, db.StatusPending, "deployment_drain"); err != nil {
+						log.Printf("[WorkerPool] Warning: failed to reset message %s to pending on drain: %v", m.ID, err)
+					}
 				}
 			}
 		}
 		sweepCancel()
 	} else if p.cfg.DB != nil {
 		sweepCtx, sweepCancel := context.WithTimeout(context.Background(), 2*time.Second)
-		_, _ = p.cfg.DB.ExecContext(sweepCtx, "UPDATE messages SET status = 'PENDING', error_message = 'deployment_drain' WHERE status = 'PROCESSING'")
+		if _, err := p.cfg.DB.ExecContext(sweepCtx, "UPDATE messages SET status = 'PENDING', error_message = 'deployment_drain' WHERE status = 'PROCESSING'"); err != nil {
+			log.Printf("[WorkerPool] Warning: failed to sweep processing messages to pending on drain: %v", err)
+		}
 		sweepCancel()
 	}
 }

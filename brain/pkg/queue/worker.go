@@ -97,7 +97,11 @@ func GetSessionLastActivity(dbOrStore any, threadID string, mgr ...*session.Mana
 	var diskActivity time.Time
 	if strings.TrimSpace(stats.InternalSessionID) != "" {
 		if len(mgr) > 0 && mgr[0] != nil {
-			diskActivity, _ = mgr[0].GetSessionLastActivity(stats.InternalSessionID)
+			var actErr error
+			diskActivity, actErr = mgr[0].GetSessionLastActivity(stats.InternalSessionID)
+			if actErr != nil {
+				log.Printf("[Worker] Warning getting session last activity for %s: %v", stats.InternalSessionID, actErr)
+			}
 		}
 	}
 
@@ -127,50 +131,56 @@ func (te *turnExecution) store() db.Store {
 	return te.pool.Store()
 }
 
-func (te *turnExecution) updateMessageStatus(id, status string, errorMsg ...string) error {
+func (te *turnExecution) updateMessageStatus(id, status string, errorMsg ...string) {
 	errMsg := ""
 	if len(errorMsg) > 0 {
 		errMsg = errorMsg[0]
 	}
 	if s := te.store(); s != nil {
-		return s.UpdateMessageStatus(context.Background(), id, status, errMsg)
+		if err := s.UpdateMessageStatus(context.Background(), id, status, errMsg); err != nil {
+			log.Printf("[Worker] Warning updating message %s status to %s: %v", id, status, err)
+		}
 	}
-	return nil
 }
 
-func (te *turnExecution) updateScheduleRunStatus(params db.UpdateRunParams) error {
+func (te *turnExecution) updateScheduleRunStatus(params db.UpdateRunParams) {
 	if s := te.store(); s != nil {
-		return s.UpdateScheduleRunStatus(context.Background(), params)
+		if err := s.UpdateScheduleRunStatus(context.Background(), params); err != nil {
+			log.Printf("[Worker] Warning updating schedule run %s status: %v", params.RunID, err)
+		}
 	}
-	return nil
 }
 
-func (te *turnExecution) updateMessageCompleted(id, responseText string) error {
+func (te *turnExecution) updateMessageCompleted(id, responseText string) {
 	if s := te.store(); s != nil {
-		return s.UpdateMessageCompleted(context.Background(), id, responseText)
+		if err := s.UpdateMessageCompleted(context.Background(), id, responseText); err != nil {
+			log.Printf("[Worker] Warning updating message %s completed: %v", id, err)
+		}
 	}
-	return nil
 }
 
-func (te *turnExecution) incrementMessageRetry(id, errorMsg string) error {
+func (te *turnExecution) incrementMessageRetry(id, errorMsg string) {
 	if s := te.store(); s != nil {
-		return s.IncrementMessageRetry(context.Background(), id, errorMsg)
+		if err := s.IncrementMessageRetry(context.Background(), id, errorMsg); err != nil {
+			log.Printf("[Worker] Warning incrementing retry for message %s: %v", id, err)
+		}
 	}
-	return nil
 }
 
-func (te *turnExecution) saveSessionID(threadID, sessionID string) error {
+func (te *turnExecution) saveSessionID(threadID, sessionID string) {
 	if s := te.store(); s != nil {
-		return s.SaveSessionID(context.Background(), threadID, sessionID)
+		if err := s.SaveSessionID(context.Background(), threadID, sessionID); err != nil {
+			log.Printf("[Worker] Warning saving session ID for thread %s: %v", threadID, err)
+		}
 	}
-	return nil
 }
 
-func (te *turnExecution) rotateSessionID(threadID, newSessionID string) error {
+func (te *turnExecution) rotateSessionID(threadID, newSessionID string) {
 	if s := te.store(); s != nil {
-		return s.RotateSessionID(context.Background(), threadID, newSessionID)
+		if err := s.RotateSessionID(context.Background(), threadID, newSessionID); err != nil {
+			log.Printf("[Worker] Warning rotating session ID for thread %s: %v", threadID, err)
+		}
 	}
-	return nil
 }
 
 func (te *turnExecution) getSessionTurnCount(threadID string) (int, error) {
@@ -275,7 +285,11 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 	log.Printf("[WorkerPool] Processing burst of %d message(s) for thread %s", len(burst), threadID)
 
 	lockVal, _ := p.scopeLocks.LoadOrStore(threadID, &sync.Mutex{})
-	scopeLock := lockVal.(*sync.Mutex)
+	scopeLock, ok := lockVal.(*sync.Mutex)
+	if !ok {
+		scopeLock = &sync.Mutex{}
+		p.scopeLocks.Store(threadID, scopeLock)
+	}
 	scopeLock.Lock()
 	defer scopeLock.Unlock()
 
@@ -344,9 +358,9 @@ func (p *WorkerPool) processBurst(burst []db.Message) {
 			te.turnError = errMsg
 			te.turnDurationMs = time.Since(te.execStart).Milliseconds()
 			for _, m := range te.burst {
-				_ = te.updateMessageStatus(m.ID, db.StatusFailed, errMsg)
+				te.updateMessageStatus(m.ID, db.StatusFailed, errMsg)
 				if m.ScheduleRunID != "" {
-					_ = te.updateScheduleRunStatus(db.UpdateRunParams{
+					te.updateScheduleRunStatus(db.UpdateRunParams{
 						RunID:       m.ScheduleRunID,
 						MessageID:   m.ID,
 						Status:      "failed",
@@ -465,9 +479,9 @@ func (te *turnExecution) claimAndFilterStale() bool {
 		log.Printf("[WorkerPool] Dropping stale message(s) in thread %s (%s). Marked [EXPIRED_STALE].", te.threadID, reason)
 		metrics.RecordTurnCompleted("stale", te.triggerType, "none", time.Since(latestMsg.CreatedAt))
 		for _, m := range te.burst {
-			_ = te.updateMessageCompleted(m.ID, "[EXPIRED_STALE]")
+			te.updateMessageCompleted(m.ID, "[EXPIRED_STALE]")
 			if m.ScheduleRunID != "" {
-				_ = te.updateScheduleRunStatus(db.UpdateRunParams{
+				te.updateScheduleRunStatus(db.UpdateRunParams{
 					RunID:       m.ScheduleRunID,
 					MessageID:   m.ID,
 					Status:      "completed",
@@ -512,7 +526,7 @@ func (te *turnExecution) claimAndFilterStale() bool {
 	te.execStart = time.Now().UTC()
 	for _, m := range te.burst {
 		if m.ScheduleRunID != "" {
-			_ = te.updateScheduleRunStatus(db.UpdateRunParams{
+			te.updateScheduleRunStatus(db.UpdateRunParams{
 				RunID:     m.ScheduleRunID,
 				MessageID: m.ID,
 				Status:    "running",
@@ -543,9 +557,9 @@ func (te *turnExecution) resolveTurnPolicy() bool {
 		log.Printf("[WorkerPool] Channel %s policy is ignored (mode=%s). Marking %d message(s) completed without execution.", te.threadID, te.policy.Mode, len(te.burst))
 		metrics.RecordTurnCompleted("ignored", te.triggerType, "none", time.Since(te.execStart))
 		for _, m := range te.burst {
-			_ = te.updateMessageStatus(m.ID, db.StatusCompleted, fmt.Sprintf("[%s]", strings.ToUpper(strings.TrimSpace(te.policy.Mode))))
+			te.updateMessageStatus(m.ID, db.StatusCompleted, fmt.Sprintf("[%s]", strings.ToUpper(strings.TrimSpace(te.policy.Mode))))
 			if m.ScheduleRunID != "" {
-				_ = te.updateScheduleRunStatus(db.UpdateRunParams{
+				te.updateScheduleRunStatus(db.UpdateRunParams{
 					RunID:       m.ScheduleRunID,
 					MessageID:   m.ID,
 					Status:      "completed",
@@ -560,7 +574,11 @@ func (te *turnExecution) resolveTurnPolicy() bool {
 	}
 
 	te.statusUpdater = NewStatusUpdater(te.pool.getDiscordSession(), te.threadID, te.isThread && !te.skipDiscord)
-	te.currentSessionID, _ = te.getSessionID(te.threadID)
+	var getSessErr error
+	te.currentSessionID, getSessErr = te.getSessionID(te.threadID)
+	if getSessErr != nil {
+		log.Printf("[Worker] Warning getting session ID for thread %s: %v", te.threadID, getSessErr)
+	}
 
 	return true
 }
@@ -619,7 +637,11 @@ func (te *turnExecution) evaluateAmbientWake() (shouldExit bool) {
 		classifierFn := func(msgs []db.Message) (float64, string) {
 			var recentContext []db.Message
 			if te.pool != nil {
-				recentContext, _ = te.getRecentThreadMessages(te.threadID, 10)
+				var msgErr error
+				recentContext, msgErr = te.getRecentThreadMessages(te.threadID, 10)
+				if msgErr != nil {
+					log.Printf("[Worker] Warning getting recent messages for thread %s: %v", te.threadID, msgErr)
+				}
 			}
 			if te.pool == nil || te.pool.cfg.Classifier == nil {
 				return 0.0, "no classifier configured"
@@ -652,7 +674,7 @@ func (te *turnExecution) evaluateAmbientWake() (shouldExit bool) {
 				log.Printf("[WorkerPool] Context cancelled during ambient classification for thread %s. Resetting to PENDING for clean deployment recovery.", te.threadID)
 				metrics.RecordTurnCompleted("cancelled", te.triggerType, "classifier", time.Since(te.execStart))
 				for _, m := range te.burst {
-					_ = te.updateMessageStatus(m.ID, db.StatusPending, "interrupted by graceful deployment")
+					te.updateMessageStatus(m.ID, db.StatusPending, "interrupted by graceful deployment")
 				}
 				return true
 			}
@@ -664,8 +686,14 @@ func (te *turnExecution) evaluateAmbientWake() (shouldExit bool) {
 
 		// wakeIdx >= 0
 		// Check session rotation timing before Phase 1:
-		currentTurns, _ := te.getSessionTurnCount(te.threadID)
-		lastActivity, isCold, _ := GetSessionLastActivity(te.store(), te.threadID, te.pool.sessionMgr)
+		currentTurns, turnErr := te.getSessionTurnCount(te.threadID)
+		if turnErr != nil {
+			log.Printf("[Worker] Warning getting turn count for thread %s: %v", te.threadID, turnErr)
+		}
+		lastActivity, isCold, actErr := GetSessionLastActivity(te.store(), te.threadID, te.pool.sessionMgr)
+		if actErr != nil {
+			log.Printf("[Worker] Warning getting session last activity for thread %s: %v", te.threadID, actErr)
+		}
 		var currentBytes int64
 		var currentSteps int
 		if te.pool != nil && te.pool.sessionMgr != nil && te.currentSessionID != "" {
@@ -693,19 +721,25 @@ func (te *turnExecution) evaluateAmbientWake() (shouldExit bool) {
 			if te.currentSessionID != "" {
 				te.previousSessionID = te.currentSessionID
 			}
-			_ = te.rotateSessionID(te.threadID, "")
+			te.rotateSessionID(te.threadID, "")
 			te.currentSessionID = ""
 		}
 
 		if te.currentSessionID == "" {
-			te.currentSessionID, _ = te.getSessionID(te.threadID)
+			var sessErr error
+			te.currentSessionID, sessErr = te.getSessionID(te.threadID)
+			if sessErr != nil {
+				log.Printf("[Worker] Warning getting session ID for thread %s: %v", te.threadID, sessErr)
+			}
 		}
 		if te.currentSessionID != "" && te.pool.sessionMgr != nil && !te.pool.sessionMgr.SessionExistsOnDisk(te.currentSessionID) {
 			log.Printf("[Queue] Session %s for thread %s not found on disk. Clearing for fresh Turn 1.", te.currentSessionID, te.threadID)
 			te.currentSessionID = ""
 		}
 		if te.currentSessionID != "" && te.pool.sessionMgr != nil {
-			_, _ = te.pool.sessionMgr.EnsureSessionDir(te.currentSessionID)
+			if _, dirErr := te.pool.sessionMgr.EnsureSessionDir(te.currentSessionID); dirErr != nil {
+				log.Printf("[Worker] Warning ensuring session dir for %s: %v", te.currentSessionID, dirErr)
+			}
 		}
 
 		// Phase 1 (Leading ambient messages)
@@ -713,9 +747,9 @@ func (te *turnExecution) evaluateAmbientWake() (shouldExit bool) {
 			info := plan.WakeInfos[i]
 			metrics.DiscordMessagesProcessedTotal.WithLabelValues("true", "ambient").Inc()
 			telemetry := fmt.Sprintf("[AMBIENT score=%.2f/%.2f reason=%q]", info.Score, info.Threshold, info.Reason)
-			_ = te.updateMessageStatus(m.ID, db.StatusCompleted, telemetry)
+			te.updateMessageStatus(m.ID, db.StatusCompleted, telemetry)
 			if m.ScheduleRunID != "" {
-				_ = te.updateScheduleRunStatus(db.UpdateRunParams{
+				te.updateScheduleRunStatus(db.UpdateRunParams{
 					RunID:       m.ScheduleRunID,
 					MessageID:   m.ID,
 					Status:      "completed",
@@ -742,8 +776,14 @@ func (te *turnExecution) evaluateAmbientWake() (shouldExit bool) {
 
 	// Pre-execution turn limit and idle rotation check (applies to both channel and thread modes)
 	// Run BEFORE IncrementSessionTurnCount to prevent premature rotation and double-rotation.
-	currentTurns, _ := te.getSessionTurnCount(te.threadID)
-	lastActivity, isCold, _ := GetSessionLastActivity(te.store(), te.threadID, te.pool.sessionMgr)
+	currentTurns, turnErr := te.getSessionTurnCount(te.threadID)
+	if turnErr != nil {
+		log.Printf("[Queue] Warning getting turn count for thread %s: %v", te.threadID, turnErr)
+	}
+	lastActivity, isCold, actErr := GetSessionLastActivity(te.store(), te.threadID, te.pool.sessionMgr)
+	if actErr != nil {
+		log.Printf("[Worker] Warning getting session last activity for thread %s: %v", te.threadID, actErr)
+	}
 	var currentBytes int64
 	var currentSteps int
 	if te.pool != nil && te.pool.sessionMgr != nil && te.currentSessionID != "" {
@@ -775,7 +815,7 @@ func (te *turnExecution) evaluateAmbientWake() (shouldExit bool) {
 		if te.currentSessionID != "" {
 			te.previousSessionID = te.currentSessionID
 		}
-		_ = te.rotateSessionID(te.threadID, "")
+		te.rotateSessionID(te.threadID, "")
 		te.currentSessionID = ""
 	}
 
@@ -794,7 +834,9 @@ func (te *turnExecution) markAmbientBurst() {
 	}
 	hasDiskSession := te.currentSessionID != "" && te.pool.sessionMgr != nil && te.pool.sessionMgr.SessionExistsOnDisk(te.currentSessionID)
 	if hasDiskSession && te.pool.sessionMgr != nil {
-		_, _ = te.pool.sessionMgr.EnsureSessionDir(te.currentSessionID)
+		if _, dirErr := te.pool.sessionMgr.EnsureSessionDir(te.currentSessionID); dirErr != nil {
+			log.Printf("[Queue] Warning ensuring session dir for %s: %v", te.currentSessionID, dirErr)
+		}
 	}
 
 	metrics.RecordTurnCompleted("ambient", te.triggerType, "classifier", time.Since(te.execStart))
@@ -806,9 +848,9 @@ func (te *turnExecution) markAmbientBurst() {
 		}
 		metrics.DiscordMessagesProcessedTotal.WithLabelValues("true", "ambient").Inc()
 		telemetry := fmt.Sprintf("[AMBIENT score=%.2f/%.2f reason=%q]", info.Score, info.Threshold, info.Reason)
-		_ = te.updateMessageStatus(m.ID, db.StatusCompleted, telemetry)
+		te.updateMessageStatus(m.ID, db.StatusCompleted, telemetry)
 		if m.ScheduleRunID != "" {
-			_ = te.updateScheduleRunStatus(db.UpdateRunParams{
+			te.updateScheduleRunStatus(db.UpdateRunParams{
 				RunID:       m.ScheduleRunID,
 				MessageID:   m.ID,
 				Status:      "completed",
@@ -894,9 +936,9 @@ func (te *turnExecution) abortBurst(reason string) {
 	}
 	telemetry := fmt.Sprintf("[SKIPPED %s]", reason)
 	for _, m := range te.burst {
-		_ = te.updateMessageStatus(m.ID, db.StatusCompleted, telemetry)
+		te.updateMessageStatus(m.ID, db.StatusCompleted, telemetry)
 		if m.ScheduleRunID != "" {
-			_ = te.updateScheduleRunStatus(db.UpdateRunParams{
+			te.updateScheduleRunStatus(db.UpdateRunParams{
 				RunID:       m.ScheduleRunID,
 				MessageID:   m.ID,
 				Status:      "completed",
@@ -928,9 +970,9 @@ func (te *turnExecution) rescheduleBurst(delaySeconds int) {
 	for _, m := range te.burst {
 		if m.RetryCount+1 >= maxAttempts {
 			log.Printf("[WorkerPool] Message %s in thread %s exceeded max retry attempts (%d). Marking FAILED.", m.ID, te.threadID, maxAttempts)
-			_ = te.updateMessageStatus(m.ID, db.StatusFailed, "[EXHAUSTED_PRE_TURN_RETRIES]")
+			te.updateMessageStatus(m.ID, db.StatusFailed, "[EXHAUSTED_PRE_TURN_RETRIES]")
 			if m.ScheduleRunID != "" {
-				_ = te.updateScheduleRunStatus(db.UpdateRunParams{
+				te.updateScheduleRunStatus(db.UpdateRunParams{
 					RunID:       m.ScheduleRunID,
 					MessageID:   m.ID,
 					Status:      "failed",
@@ -944,8 +986,8 @@ func (te *turnExecution) rescheduleBurst(delaySeconds int) {
 			}
 			continue
 		}
-		_ = te.incrementMessageRetry(m.ID, "pre_turn_deferred")
-		_ = te.updateMessageStatus(m.ID, db.StatusPending, "pre_turn_deferred")
+		te.incrementMessageRetry(m.ID, "pre_turn_deferred")
+		te.updateMessageStatus(m.ID, db.StatusPending, "pre_turn_deferred")
 		m.RetryCount++
 		m.Status = db.StatusPending
 		mCopy := m
@@ -978,9 +1020,9 @@ func (te *turnExecution) handleTrailing() {
 				metrics.DiscordMessagesProcessedTotal.WithLabelValues("true", "ambient").Inc()
 			}
 			telemetry := "[QUOTA_PAUSED] Trailing message suppressed due to active quota lockout"
-			_ = te.updateMessageStatus(m.ID, db.StatusFailed, telemetry)
+			te.updateMessageStatus(m.ID, db.StatusFailed, telemetry)
 			if m.ScheduleRunID != "" {
-				_ = te.updateScheduleRunStatus(db.UpdateRunParams{
+				te.updateScheduleRunStatus(db.UpdateRunParams{
 					RunID:       m.ScheduleRunID,
 					MessageID:   m.ID,
 					Status:      "failed",
@@ -996,9 +1038,9 @@ func (te *turnExecution) handleTrailing() {
 		if !info.IsWake {
 			metrics.DiscordMessagesProcessedTotal.WithLabelValues("true", "ambient").Inc()
 			telemetry := fmt.Sprintf("[AMBIENT score=%.2f/%.2f reason=%q]", info.Score, info.Threshold, info.Reason)
-			_ = te.updateMessageStatus(m.ID, db.StatusCompleted, telemetry)
+			te.updateMessageStatus(m.ID, db.StatusCompleted, telemetry)
 			if m.ScheduleRunID != "" {
-				_ = te.updateScheduleRunStatus(db.UpdateRunParams{
+				te.updateScheduleRunStatus(db.UpdateRunParams{
 					RunID:       m.ScheduleRunID,
 					MessageID:   m.ID,
 					Status:      "completed",
@@ -1010,7 +1052,7 @@ func (te *turnExecution) handleTrailing() {
 			}
 		} else {
 			metrics.DiscordMessagesProcessedTotal.WithLabelValues("false", "wake").Inc()
-			_ = te.updateMessageStatus(m.ID, db.StatusPending, "")
+			te.updateMessageStatus(m.ID, db.StatusPending, "")
 			m.Status = db.StatusPending
 			if te.pool != nil {
 				te.pool.Enqueue(m)
@@ -1060,7 +1102,10 @@ func (te *turnExecution) buildTurnPrompt() {
 
 	var summary string
 	if isThreadColdStart {
-		cachedSum, lastMsgID, _ := te.getThreadSummary(te.threadID)
+		cachedSum, lastMsgID, getSumErr := te.getThreadSummary(te.threadID)
+		if getSumErr != nil {
+			log.Printf("[WorkerPool] Warning getting thread summary for %s: %v", te.threadID, getSumErr)
+		}
 
 		histMsgs := getTurnHistory(100)
 
@@ -1148,7 +1193,11 @@ func (te *turnExecution) buildTurnPrompt() {
 	if isColdStart {
 		prevID = te.previousSessionID
 		if prevID == "" {
-			prevID, _ = te.getPreviousSessionID(te.threadID)
+			var prevErr error
+			prevID, prevErr = te.getPreviousSessionID(te.threadID)
+			if prevErr != nil {
+				log.Printf("[WorkerPool] Warning getting previous session ID for %s: %v", te.threadID, prevErr)
+			}
 		}
 		if prevID != "" {
 			log.Printf("[WorkerPool] Injected previous session identifier (%s) into prompt for thread %s", prevID, te.threadID)
@@ -1304,12 +1353,14 @@ func (te *turnExecution) executeWithRetries() {
 					te.turnDurationMs = time.Since(te.execStart).Milliseconds()
 					if !te.skipDiscord && te.pool.cfg.DeliveryFunc != nil {
 						pauseMsg := notifier.FormatQuotaPauseMessage(remaining, lockedUntil, false, false)
-						_ = te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), te.threadID, pauseMsg)
+						if err := te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), te.threadID, pauseMsg); err != nil {
+							log.Printf("[WorkerPool] Failed to deliver quota pause message to thread %s: %v", te.threadID, err)
+						}
 					}
 					for _, m := range te.burst {
-						_ = te.updateMessageStatus(m.ID, db.StatusFailed, reason)
+						te.updateMessageStatus(m.ID, db.StatusFailed, reason)
 						if m.ScheduleRunID != "" {
-							_ = te.updateScheduleRunStatus(db.UpdateRunParams{
+							te.updateScheduleRunStatus(db.UpdateRunParams{
 								RunID:       m.ScheduleRunID,
 								MessageID:   m.ID,
 								Status:      "failed",
@@ -1416,7 +1467,7 @@ func (te *turnExecution) executeWithRetries() {
 					isTransient = false
 					if te.currentSessionID == "" {
 						te.currentSessionID = targetSess
-						_ = te.saveSessionID(te.threadID, te.currentSessionID)
+						te.saveSessionID(te.threadID, te.currentSessionID)
 					}
 					stdout = fmt.Sprintf(`{"conversation_id":%q,"status":"SUCCESS","response":%q}`, te.currentSessionID, respText)
 				}
@@ -1428,7 +1479,7 @@ func (te *turnExecution) executeWithRetries() {
 			if isFailure && te.currentSessionID == "" && !isSessionCorruption && targetSess != "" {
 				log.Printf("[Queue] Latched active session from output on failure (attempt %d/%d) for thread %s: %s", attempt, maxAttempts, te.threadID, targetSess)
 				te.currentSessionID = targetSess
-				_ = te.saveSessionID(te.threadID, te.currentSessionID)
+				te.saveSessionID(te.threadID, te.currentSessionID)
 			}
 		}
 
@@ -1444,7 +1495,7 @@ func (te *turnExecution) executeWithRetries() {
 					combinedOutput := stdout + "\n" + stderr
 					if extSess := runner.ExtractSessionID(combinedOutput, te.execStart); extSess != "" && te.pool.sessionMgr != nil && te.pool.sessionMgr.SessionExistsOnDisk(extSess) {
 						te.currentSessionID = extSess
-						_ = te.saveSessionID(te.threadID, te.currentSessionID)
+						te.saveSessionID(te.threadID, te.currentSessionID)
 					}
 				}
 
@@ -1499,9 +1550,9 @@ func (te *turnExecution) executeWithRetries() {
 				te.turnError = reason
 				te.turnDurationMs = time.Since(te.execStart).Milliseconds()
 				for _, m := range te.burst {
-					_ = te.updateMessageStatus(m.ID, db.StatusFailed, reason)
+					te.updateMessageStatus(m.ID, db.StatusFailed, reason)
 					if m.ScheduleRunID != "" {
-						_ = te.updateScheduleRunStatus(db.UpdateRunParams{
+						te.updateScheduleRunStatus(db.UpdateRunParams{
 							RunID:       m.ScheduleRunID,
 							MessageID:   m.ID,
 							Status:      "failed",
@@ -1533,7 +1584,7 @@ func (te *turnExecution) executeWithRetries() {
 
 			if isWatchdog {
 				for _, m := range te.burst {
-					_ = te.incrementMessageRetry(m.ID, errDetail)
+					te.incrementMessageRetry(m.ID, errDetail)
 				}
 				if attempt < maxAttempts {
 					if te.statusUpdater != nil {
@@ -1560,7 +1611,7 @@ func (te *turnExecution) executeWithRetries() {
 						if te.currentSessionID != "" {
 							te.previousSessionID = te.currentSessionID
 						}
-						_ = te.rotateSessionID(te.threadID, "")
+						te.rotateSessionID(te.threadID, "")
 						te.currentSessionID = ""
 					}
 					backoff := time.Duration(attempt) * te.pool.cfg.BackoffBase
@@ -1573,9 +1624,9 @@ func (te *turnExecution) executeWithRetries() {
 						te.turnError = "context cancelled during execution"
 						te.turnDurationMs = time.Since(te.execStart).Milliseconds()
 						for _, m := range te.burst {
-							_ = te.updateMessageStatus(m.ID, db.StatusPending, "interrupted by graceful deployment")
+							te.updateMessageStatus(m.ID, db.StatusPending, "interrupted by graceful deployment")
 							if m.ScheduleRunID != "" {
-								_ = te.updateScheduleRunStatus(db.UpdateRunParams{
+								te.updateScheduleRunStatus(db.UpdateRunParams{
 									RunID:       m.ScheduleRunID,
 									MessageID:   m.ID,
 									Status:      "failed",
@@ -1605,12 +1656,12 @@ func (te *turnExecution) executeWithRetries() {
 					te.turnError = "context cancelled during execution"
 					te.turnDurationMs = time.Since(te.execStart).Milliseconds()
 					for _, m := range te.burst {
-						_ = te.updateMessageStatus(m.ID, db.StatusPending, "interrupted by graceful deployment")
+						te.updateMessageStatus(m.ID, db.StatusPending, "interrupted by graceful deployment")
 					}
 					return
 				}
 
-				_ = te.rotateSessionID(te.threadID, "")
+				te.rotateSessionID(te.threadID, "")
 				metrics.RecordTurnCompleted("watchdog_timeout", te.triggerType, currentModel, time.Since(te.execStart))
 
 				if !te.skipDiscord {
@@ -1634,9 +1685,9 @@ func (te *turnExecution) executeWithRetries() {
 				te.turnError = sanitizedErr
 				te.turnDurationMs = time.Since(te.execStart).Milliseconds()
 				for _, m := range te.burst {
-					_ = te.updateMessageStatus(m.ID, db.StatusFailed, sanitizedErr)
+					te.updateMessageStatus(m.ID, db.StatusFailed, sanitizedErr)
 					if m.ScheduleRunID != "" {
-						_ = te.updateScheduleRunStatus(db.UpdateRunParams{
+						te.updateScheduleRunStatus(db.UpdateRunParams{
 							RunID:       m.ScheduleRunID,
 							MessageID:   m.ID,
 							Status:      "failed",
@@ -1675,7 +1726,7 @@ func (te *turnExecution) executeWithRetries() {
 					if extSess != "" && extSess != te.currentSessionID {
 						log.Printf("[Queue] Active session synchronized for thread %s: %s -> %s", te.threadID, te.currentSessionID, extSess)
 						te.currentSessionID = extSess
-						_ = te.saveSessionID(te.threadID, te.currentSessionID)
+						te.saveSessionID(te.threadID, te.currentSessionID)
 					}
 					te.stopTyping()
 					if te.statusUpdater != nil {
@@ -1759,7 +1810,7 @@ func (te *turnExecution) executeWithRetries() {
 						if te.currentSessionID != "" {
 							te.previousSessionID = te.currentSessionID
 						}
-						_ = te.rotateSessionID(te.threadID, "")
+						te.rotateSessionID(te.threadID, "")
 						te.currentSessionID = ""
 					}
 
@@ -1771,9 +1822,9 @@ func (te *turnExecution) executeWithRetries() {
 					te.turnTokenUsage = resp.Usage
 					te.turnDurationMs = time.Since(te.execStart).Milliseconds()
 					for _, m := range te.burst {
-						_ = te.updateMessageCompleted(m.ID, cleanText)
+						te.updateMessageCompleted(m.ID, cleanText)
 						if m.ScheduleRunID != "" {
-							_ = te.updateScheduleRunStatus(db.UpdateRunParams{
+							te.updateScheduleRunStatus(db.UpdateRunParams{
 								RunID:       m.ScheduleRunID,
 								MessageID:   m.ID,
 								Status:      "completed",
@@ -1804,7 +1855,7 @@ func (te *turnExecution) executeWithRetries() {
 			te.turnError = "interrupted by graceful deployment"
 			te.turnDurationMs = time.Since(te.execStart).Milliseconds()
 			for _, m := range te.burst {
-				_ = te.updateMessageStatus(m.ID, db.StatusPending, "interrupted by graceful deployment")
+				te.updateMessageStatus(m.ID, db.StatusPending, "interrupted by graceful deployment")
 			}
 			return
 		}
@@ -1814,7 +1865,7 @@ func (te *turnExecution) executeWithRetries() {
 
 		if isSessionCorruption {
 			for _, m := range te.burst {
-				_ = te.incrementMessageRetry(m.ID, errDetail)
+				te.incrementMessageRetry(m.ID, errDetail)
 			}
 			if te.statusUpdater != nil {
 				te.statusUpdater.Reset()
@@ -1830,7 +1881,7 @@ func (te *turnExecution) executeWithRetries() {
 					log.Printf("[WorkerPool] Failed to deliver session reset notice for thread %s: %v", te.threadID, err)
 				}
 			}
-			_ = te.rotateSessionID(te.threadID, "")
+			te.rotateSessionID(te.threadID, "")
 			te.currentSessionID = ""
 
 			if attempt < maxAttempts {
@@ -1843,9 +1894,9 @@ func (te *turnExecution) executeWithRetries() {
 					te.turnError = "context cancelled during execution"
 					te.turnDurationMs = time.Since(te.execStart).Milliseconds()
 					for _, m := range te.burst {
-						_ = te.updateMessageStatus(m.ID, db.StatusPending, "interrupted by graceful deployment")
+						te.updateMessageStatus(m.ID, db.StatusPending, "interrupted by graceful deployment")
 						if m.ScheduleRunID != "" {
-							_ = te.updateScheduleRunStatus(db.UpdateRunParams{
+							te.updateScheduleRunStatus(db.UpdateRunParams{
 								RunID:       m.ScheduleRunID,
 								MessageID:   m.ID,
 								Status:      "failed",
@@ -1864,7 +1915,7 @@ func (te *turnExecution) executeWithRetries() {
 
 		if isTransient {
 			for _, m := range te.burst {
-				_ = te.incrementMessageRetry(m.ID, errDetail)
+				te.incrementMessageRetry(m.ID, errDetail)
 			}
 			if attempt < maxAttempts {
 				if te.statusUpdater != nil {
@@ -1880,9 +1931,9 @@ func (te *turnExecution) executeWithRetries() {
 					te.turnError = "context cancelled during execution"
 					te.turnDurationMs = time.Since(te.execStart).Milliseconds()
 					for _, m := range te.burst {
-						_ = te.updateMessageStatus(m.ID, db.StatusPending, "interrupted by graceful deployment")
+						te.updateMessageStatus(m.ID, db.StatusPending, "interrupted by graceful deployment")
 						if m.ScheduleRunID != "" {
-							_ = te.updateScheduleRunStatus(db.UpdateRunParams{
+							te.updateScheduleRunStatus(db.UpdateRunParams{
 								RunID:       m.ScheduleRunID,
 								MessageID:   m.ID,
 								Status:      "failed",
@@ -1912,13 +1963,13 @@ func (te *turnExecution) executeWithRetries() {
 			te.turnError = "interrupted by graceful deployment"
 			te.turnDurationMs = time.Since(te.execStart).Milliseconds()
 			for _, m := range te.burst {
-				_ = te.updateMessageStatus(m.ID, db.StatusPending, "interrupted by graceful deployment")
+				te.updateMessageStatus(m.ID, db.StatusPending, "interrupted by graceful deployment")
 			}
 			return
 		}
 
 		if te.currentSessionID != "" {
-			_ = te.rotateSessionID(te.threadID, "")
+			te.rotateSessionID(te.threadID, "")
 			te.currentSessionID = ""
 		}
 
@@ -1945,10 +1996,10 @@ func (te *turnExecution) executeWithRetries() {
 		}
 
 		for _, m := range te.burst {
-			_ = te.incrementMessageRetry(m.ID, errDetail)
-			_ = te.updateMessageStatus(m.ID, db.StatusFailed, sanitizedErr)
+			te.incrementMessageRetry(m.ID, errDetail)
+			te.updateMessageStatus(m.ID, db.StatusFailed, sanitizedErr)
 			if m.ScheduleRunID != "" {
-				_ = te.updateScheduleRunStatus(db.UpdateRunParams{
+				te.updateScheduleRunStatus(db.UpdateRunParams{
 					RunID:       m.ScheduleRunID,
 					MessageID:   m.ID,
 					Status:      "failed",
@@ -1980,9 +2031,9 @@ func (te *turnExecution) executeWithRetries() {
 		te.turnError = "context cancelled during execution"
 		te.turnDurationMs = time.Since(te.execStart).Milliseconds()
 		for _, m := range te.burst {
-			_ = te.updateMessageStatus(m.ID, db.StatusPending, "interrupted by graceful deployment")
+			te.updateMessageStatus(m.ID, db.StatusPending, "interrupted by graceful deployment")
 			if m.ScheduleRunID != "" {
-				_ = te.updateScheduleRunStatus(db.UpdateRunParams{
+				te.updateScheduleRunStatus(db.UpdateRunParams{
 					RunID:       m.ScheduleRunID,
 					MessageID:   m.ID,
 					Status:      "failed",
@@ -2016,9 +2067,9 @@ func (te *turnExecution) executeWithRetries() {
 	te.turnDurationMs = time.Since(te.execStart).Milliseconds()
 	metrics.RecordTurnCompleted("failed", te.triggerType, currentModel, time.Since(te.execStart))
 	for _, m := range te.burst {
-		_ = te.updateMessageStatus(m.ID, db.StatusFailed, sanitizedErr)
+		te.updateMessageStatus(m.ID, db.StatusFailed, sanitizedErr)
 		if m.ScheduleRunID != "" {
-			_ = te.updateScheduleRunStatus(db.UpdateRunParams{
+			te.updateScheduleRunStatus(db.UpdateRunParams{
 				RunID:       m.ScheduleRunID,
 				MessageID:   m.ID,
 				Status:      "failed",

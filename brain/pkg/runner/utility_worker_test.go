@@ -2,7 +2,9 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -274,3 +276,96 @@ func TestWorkerInstance_ParseErrorOnResult(t *testing.T) {
 		t.Fatal("expected parse error, got nil")
 	}
 }
+
+type failCloser struct {
+	err error
+}
+
+func (f *failCloser) Close() error {
+	return f.err
+}
+
+type failWriter struct {
+	err error
+}
+
+func (f *failWriter) Write(p []byte) (n int, err error) {
+	return 0, f.err
+}
+
+func TestUtilityWorker_CloseWarnAndIgnorableErrors(t *testing.T) {
+	// closeWarn with nil
+	closeWarn(nil, "nil-closer")
+
+	// closeWarn with clean closer
+	closeWarn(io.NopCloser(strings.NewReader("")), "nop-closer")
+
+	// closeWarn with ignorable error
+	closeWarn(&failCloser{err: os.ErrClosed}, "closed-closer")
+
+	// closeWarn with logged error
+	closeWarn(&failCloser{err: errors.New("custom error")}, "custom-closer")
+
+	// isIgnorableCloseError
+	if isIgnorableCloseError(nil) {
+		t.Errorf("expected false for nil")
+	}
+	if !isIgnorableCloseError(os.ErrClosed) {
+		t.Errorf("expected true for os.ErrClosed")
+	}
+	if !isIgnorableCloseError(io.ErrClosedPipe) {
+		t.Errorf("expected true for io.ErrClosedPipe")
+	}
+	if !isIgnorableCloseError(net.ErrClosed) {
+		t.Errorf("expected true for net.ErrClosed")
+	}
+	if isIgnorableCloseError(errors.New("other")) {
+		t.Errorf("expected false for other")
+	}
+
+	// isIgnorableProcessError
+	if isIgnorableProcessError(nil) {
+		t.Errorf("expected false for nil")
+	}
+	if !isIgnorableProcessError(os.ErrProcessDone) {
+		t.Errorf("expected true for os.ErrProcessDone")
+	}
+	if isIgnorableProcessError(errors.New("other")) {
+		t.Errorf("expected false for other")
+	}
+}
+
+func TestActivityTap_WriteErrorBranches(t *testing.T) {
+	fw := &failWriter{err: errors.New("write failed")}
+	actWriter := NewActivityWriter("test-sess")
+	tap := newActivityTap(fw, actWriter, true, nil)
+
+	// Test init line write failure
+	tap.Write([]byte("Starting conversation update stream for test-sess\n"))
+
+	// Test result line write failure
+	tap.Write([]byte(`{"event":"result"}` + "\n"))
+
+	// Test regular line write failure
+	tap.Write([]byte("plain line\n"))
+}
+
+func TestWorkerInstance_MarkDeadAndKillBranches(t *testing.T) {
+	cmd := exec.Command("sleep", "10")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("failed to start sleep: %v", err)
+	}
+	defer func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	}()
+
+	w := &WorkerInstance{
+		cmd: cmd,
+	}
+	w.markDeadAndKill()
+	if !w.IsDead() {
+		t.Errorf("expected worker to be dead")
+	}
+}
+

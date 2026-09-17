@@ -2,6 +2,7 @@ package queue
 
 import (
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -316,7 +317,9 @@ func (u *StatusUpdater) flush() {
 			// Turn completed, cancelled, or deleted while sendFunc was in flight.
 			// Delete immediately to prevent permanent zombie message leak.
 			u.mu.Unlock()
-			_ = u.deleteFunc(u.threadID, newID)
+			if err := u.deleteFunc(u.threadID, newID); err != nil && !delivery.IsMessageNotFoundError(err) {
+				log.Printf("[StatusUpdater] Warning deleting cancelled status message: %v", err)
+			}
 			return
 		}
 		u.statusMessageID = newID
@@ -373,7 +376,9 @@ func (u *StatusUpdater) Reset() {
 
 	if msgID != "" {
 		go func(threadID, messageID string) {
-			_ = u.deleteFunc(threadID, messageID)
+			if err := u.deleteFunc(threadID, messageID); err != nil && !delivery.IsMessageNotFoundError(err) {
+				log.Printf("[StatusUpdater] Warning deleting status message: %v", err)
+			}
 		}(u.threadID, msgID)
 	}
 }
@@ -394,7 +399,9 @@ func (u *StatusUpdater) DeleteStatusMessage() {
 
 	if msgID != "" {
 		go func(threadID, messageID string) {
-			_ = u.deleteFunc(threadID, messageID)
+			if err := u.deleteFunc(threadID, messageID); err != nil && !delivery.IsMessageNotFoundError(err) {
+				log.Printf("[StatusUpdater] Warning deleting status message on shutdown: %v", err)
+			}
 		}(u.threadID, msgID)
 	}
 }
