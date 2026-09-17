@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -213,10 +214,17 @@ func (d *DefaultWebhookDispatcher) dispatch(ctx context.Context, hook string, en
 		}
 		return fmt.Errorf("webhook http request failed: %w", err)
 	}
-	defer httpResp.Body.Close()
+	defer func() {
+		if closeErr := httpResp.Body.Close(); closeErr != nil {
+			log.Printf("[Webhook] Warning closing response body: %v", closeErr)
+		}
+	}()
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		respBody, _ := io.ReadAll(io.LimitReader(httpResp.Body, 2048))
+		respBody, readErr := io.ReadAll(io.LimitReader(httpResp.Body, 2048))
+		if readErr != nil {
+			return fmt.Errorf("webhook endpoint returned status %d (failed to read body: %v)", httpResp.StatusCode, readErr)
+		}
 		return fmt.Errorf("webhook endpoint returned status %d: %s", httpResp.StatusCode, string(respBody))
 	}
 

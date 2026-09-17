@@ -430,7 +430,11 @@ func SummarizeThreadHistoryWithGroup(ctx context.Context, sfg *singleflight.Grou
 		return "", err
 	}
 
-	return v.(string), nil
+	s, ok := v.(string)
+	if !ok {
+		return "", fmt.Errorf("unexpected thread summary type: %T", v)
+	}
+	return s, nil
 }
 
 // FormatPreviousSession formats the previous session ID into a secure <PREVIOUS_SESSION> block.

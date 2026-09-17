@@ -2,6 +2,7 @@ package queue
 
 import (
 	"fmt"
+	"log"
 	"regexp"
 	"sort"
 	"strings"
@@ -130,7 +131,9 @@ func resolveChannelSnapshot(s *discordgo.Session, channelID string) (ChannelSnap
 			if ch, ok := res.(*discordgo.Channel); ok && ch != nil {
 				CacheDiscordChannel(ch)
 				if s.State != nil {
-					_ = s.State.ChannelAdd(ch)
+					if err := s.State.ChannelAdd(ch); err != nil {
+						log.Printf("[WARN] Failed to add channel %s to session state: %v", ch.ID, err)
+					}
 				}
 				if snap, ok := GetCachedChannel(channelID); ok {
 					return snap, true
@@ -278,7 +281,9 @@ func ResolveBotRoleIDs(sess *discordgo.Session, guildID string, botUserID string
 					fetchedMember.GuildID = guildID
 				}
 				if fetchedMember.User != nil {
-					_ = sess.State.MemberAdd(fetchedMember)
+					if err := sess.State.MemberAdd(fetchedMember); err != nil {
+						log.Printf("[WARN] Failed to add member %s to session state: %v", botUserID, err)
+					}
 				}
 				rolesCopy := append([]string(nil), fetchedMember.Roles...)
 				return rolesCopy, nil

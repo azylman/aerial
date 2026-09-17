@@ -89,7 +89,9 @@ func RecoverInterrupted(dbOrStore any, pool *WorkerPool) {
 					log.Printf("[Startup Recovery] Failed to deliver poison pill notice for message %s: %v", m.ID, err)
 				}
 			}
-			_ = store.UpdateMessageStatus(ctx, m.ID, db.StatusFailed, reason)
+			if err := store.UpdateMessageStatus(ctx, m.ID, db.StatusFailed, reason); err != nil {
+				log.Printf("[Startup Recovery] Failed to update message %s status to failed: %v", m.ID, err)
+			}
 			continue
 		}
 
@@ -97,7 +99,9 @@ func RecoverInterrupted(dbOrStore any, pool *WorkerPool) {
 			if m.RestartCount >= DefaultMaxRestarts && !isInstantCrashLoop {
 				log.Printf("[Startup Recovery] Message %s was active for %v before restart (restart_count=%d < %d). Treating as long-running task interrupted by deployment rather than instant crash loop.", m.ID, time.Since(m.UpdatedAt), m.RestartCount, MaxHardRestarts)
 			}
-			_ = store.ResetMessageToPendingWithRestart(ctx, m.ID, "interrupted during restart")
+			if err := store.ResetMessageToPendingWithRestart(ctx, m.ID, "interrupted during restart"); err != nil {
+				log.Printf("[Startup Recovery] Failed to reset message %s to pending: %v", m.ID, err)
+			}
 			m.Status = db.StatusPending
 			m.RestartCount++
 		}
