@@ -15,4 +15,4 @@ indexer:
   enable_otlp_endpoint: true
 
 searcher:
-  fast_field_cache_capacity: 100_000_000
+  fast_field_cache_capacity: 100MB
