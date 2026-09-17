@@ -1,0 +1,70 @@
+api:
+  enabled: true
+  address: 0.0.0.0:8686
+
+data_dir: /var/lib/vector
+
+sources:
+  docker_logs:
+    type: docker_logs
+    docker_host: "unix:///var/run/docker.sock"
+    exclude_containers:
+      - "aerial-vector"
+    auto_partial_merge: true
+
+transforms:
+  normalize_logs:
+    type: remap
+    inputs:
+      - docker_logs
+    source: |
+      # Strip leading slash from container_name
+      .container_name = replace(to_string!(.container_name), r'^/', "")
+
+      # Resolve compose service name if available, otherwise default to container_name
+      if exists(.label."com.docker.compose.service") {
+        .service = to_string!(.label."com.docker.compose.service")
+      } else {
+        .service = .container_name
+      }
+
+      # Strip ANSI escape codes
+      if is_string(.message) {
+        .message = strip_ansi_escape_codes(to_string!(.message))
+      }
+
+      # Ensure timestamp exists
+      if !exists(.timestamp) {
+        .timestamp = now()
+      }
+
+      # Detect log level
+      msg = downcase(to_string!(.message))
+      if contains(msg, "error") || contains(msg, "fatal") || contains(msg, "panic") || .stream == "stderr" {
+        .level = "error"
+      } else if contains(msg, "warn") {
+        .level = "warn"
+      } else if contains(msg, "debug") || contains(msg, "trace") {
+        .level = "debug"
+      } else {
+        .level = "info"
+      }
+
+      # Drop verbose internal docker metadata
+      del(.label)
+      del(.container_id)
+      del(.image)
+      del(.source_type)
+
+sinks:
+  quickwit:
+    type: elasticsearch
+    inputs:
+      - normalize_logs
+    endpoints:
+      - "http://quickwit:7280/api/v1/_elastic"
+    mode: bulk
+    bulk:
+      action: "create"
+      index: "docker-logs"
+    compression: none
