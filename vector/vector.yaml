@@ -155,6 +155,12 @@ transforms:
         }
       } else {
         # Plain text fallback
+        # Strip supergateway wrapper prefix if present
+        if starts_with(string!(.message), "[supergateway] Child stderr: ") {
+          .message = replace(string!(.message), r'^\[supergateway\] Child stderr:\s*', "")
+        }
+
+        # Service-specific format parsers
         if .service == "cadvisor" {
           klog, err = parse_klog(.message)
           if err == null {
@@ -187,10 +193,127 @@ transforms:
             .attributes.pid = parsed.pid
             .attributes.severity = parsed.severity
           }
+        } else if .service == "anomaly-detector" {
+          parsed, err = parse_regex(.message, r'^(?P<py_timestamp>\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:,\d+)?)\s+\[(?P<severity>[A-Z]+)\]\s+(?:(?P<logger>[^:]+):\s+)?(?P<msg>.*)$')
+          if err == null {
+            .message = parsed.msg
+            sev = string!(parsed.severity)
+            if sev == "ERROR" || sev == "CRITICAL" {
+              .level = "error"
+            } else if sev == "WARNING" || sev == "WARN" {
+              .level = "warn"
+            } else if starts_with(sev, "DEBUG") {
+              .level = "debug"
+            } else {
+              .level = "info"
+            }
+            if !exists(.attributes) {
+              .attributes = {}
+            }
+            if exists(parsed.logger) {
+              .attributes.logger = parsed.logger
+            }
+          }
         }
 
+        # Key-value / logfmt parser (e.g. victoriametrics-mcp, Go stdlib)
         if !exists(.level) {
-          msg = downcase(to_string!(.message))
+          kv, err = parse_logfmt(.message)
+          if err == null && is_object(kv) && (exists(kv.level) || exists(kv.lvl) || exists(kv.severity)) {
+            if is_string(kv.msg) {
+              .message = string!(kv.msg)
+              del(kv.msg)
+            } else if is_string(kv.message) {
+              .message = string!(kv.message)
+              del(kv.message)
+            }
+            raw_level = null
+            if exists(kv.level) {
+              raw_level = kv.level
+            } else if exists(kv.lvl) {
+              raw_level = kv.lvl
+            } else if exists(kv.severity) {
+              raw_level = kv.severity
+            }
+            if raw_level != null {
+              lvl = downcase(to_string(raw_level) ?? "")
+              if contains(lvl, "err") || contains(lvl, "fatal") || contains(lvl, "panic") || contains(lvl, "crit") {
+                .level = "error"
+              } else if contains(lvl, "warn") {
+                .level = "warn"
+              } else if contains(lvl, "debug") || contains(lvl, "trace") {
+                .level = "debug"
+              } else {
+                .level = "info"
+              }
+              del(kv.level)
+              del(kv.lvl)
+              del(kv.severity)
+            }
+            if length(object(kv)) > 0 {
+              if !exists(.attributes) {
+                .attributes = kv
+              } else {
+                .attributes = merge!(.attributes, kv)
+              }
+            }
+          }
+        }
+
+        # Standard Go logger / Hangar reconciliation / Docker status / Supergateway / Service-specific fallbacks
+        if !exists(.level) {
+          parsed, err = parse_regex(.message, r'^(?P<go_timestamp>\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2})\s+(?:\[(?P<tag>[^\]]+)\]\s+)?(?P<msg>.*)$')
+          if err == null {
+            .message = parsed.msg
+            msg_lower = downcase(string!(.message))
+            if contains(msg_lower, "error") || contains(msg_lower, "fatal") || contains(msg_lower, "fail") {
+              .level = "error"
+            } else if contains(msg_lower, "warn") {
+              .level = "warn"
+            } else {
+              .level = "info"
+            }
+            if !exists(.attributes) {
+              .attributes = {}
+            }
+            if exists(parsed.tag) {
+              .attributes.tag = parsed.tag
+            }
+          } else if match(string!(.message), r'^\s*Container\s+[a-zA-Z0-9_-]+\s+(Healthy|Running|Started|Created)') {
+            .level = "info"
+          } else if starts_with(string!(.message), "[supergateway]") {
+            msg_lower = downcase(string!(.message))
+            if contains(msg_lower, "error") || contains(msg_lower, "fail") || contains(msg_lower, "exception") {
+              .level = "error"
+            } else if contains(msg_lower, "warn") {
+              .level = "warn"
+            } else {
+              .level = "info"
+            }
+          } else if .service == "discord-mcp" {
+            msg_lower = downcase(string!(.message))
+            if contains(msg_lower, "error") || contains(msg_lower, "fail") || contains(msg_lower, "fatal") {
+              .level = "error"
+            } else if contains(msg_lower, "warn") {
+              .level = "warn"
+            } else {
+              .level = "info"
+            }
+          } else if .service == "ollama" {
+            msg_lower = downcase(string!(.message))
+            if contains(msg_lower, "error") || contains(msg_lower, "fail") || contains(msg_lower, "fatal") {
+              .level = "error"
+            } else if contains(msg_lower, "warn") {
+              .level = "warn"
+            } else {
+              .level = "info"
+            }
+          }
+        }
+
+        # Strict unparsed fallback: unrecognized logs on stderr remain errors
+        if !exists(.level) {
+          msg = downcase(string!(.message))
           if contains(msg, "error") || contains(msg, "fatal") || contains(msg, "panic") || .stream == "stderr" {
             .level = "error"
           } else if contains(msg, "warn") {

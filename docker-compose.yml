@@ -530,7 +530,7 @@ services:
     networks:
       - aerial-net
     healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:9100/metrics || exit 1"]
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:9100/ || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 3
