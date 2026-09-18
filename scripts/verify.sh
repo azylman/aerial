@@ -193,6 +193,22 @@ run_json_syntax() {
     fi
 }
 
+run_vector_syntax() {
+    file="$1"
+    if [ -f "$file" ]; then
+        echo "   [vector validate] Validating $file..."
+        if docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^aerial-vector$'; then
+            docker cp "$file" aerial-vector:/tmp/verify-vector.yaml >/dev/null 2>&1
+            docker exec aerial-vector vector validate --skip-healthchecks /tmp/verify-vector.yaml
+            docker exec aerial-vector rm -f /tmp/verify-vector.yaml >/dev/null 2>&1
+        elif has_cmd vector; then
+            OPENOBSERVE_ROOT_USER_PASSWORD=dummy OPENOBSERVE_ROOT_USER_EMAIL=dummy@local vector validate --skip-healthchecks "$file"
+        elif has_docker; then
+            cat "$file" | docker run --rm -i -e OPENOBSERVE_ROOT_USER_PASSWORD=dummy -e OPENOBSERVE_ROOT_USER_EMAIL=dummy@local --entrypoint sh timberio/vector:0.40.0-alpine -c 'cat > /tmp/v.yaml && vector validate --skip-healthchecks /tmp/v.yaml'
+        fi
+    fi
+}
+
 if [ "$MODE" = "staged" ]; then
     # Fast path: check only services that have staged changes
     check_utf8_bom
@@ -237,6 +253,11 @@ if [ "$MODE" = "staged" ]; then
         done
     fi
 
+    # Check Vector configuration syntax
+    if echo "$STAGED_FILES" | grep -q "^vector/"; then
+        run_vector_syntax "vector/vector.yaml"
+    fi
+
     echo "✅ [Aerial Verify] Fast pre-commit checks passed cleanly."
     exit 0
 fi
@@ -259,6 +280,7 @@ run_node_syntax "homepage/prepare-config.js"
 for jf in grafana/dashboards/*.json; do
     run_json_syntax "$jf"
 done
+run_vector_syntax "vector/vector.yaml"
 
 echo "=== 3. Unit Test Suites ==="
 for svc in $GO_SERVICES; do
