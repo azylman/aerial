@@ -69,6 +69,7 @@ const {
     renderQuickLaunchDock,
     parseFactImportance,
     compareFactsImportanceDesc,
+    renderDeployments,
     TABS
 } = sandbox;
 
@@ -731,6 +732,216 @@ describe('Permet HUD Pure Logic Unit Tests', () => {
             sandbox.console.log('info');
             sandbox.console.warn('warning');
             sandbox.console.error('error');
+        });
+    });
+
+    describe('Permet HUD Deployment Pipeline Rendering (renderDeployments)', () => {
+        let elements;
+        let originalCreateElement;
+        let originalGetElementById;
+
+        const createMockNode = (tag = 'div') => {
+            const node = {
+                tagName: tag.toUpperCase(),
+                className: '',
+                innerHTML: '',
+                textContent: '',
+                children: [],
+                appendChild: (child) => {
+                    node.children.push(child);
+                    return child;
+                }
+            };
+            return node;
+        };
+
+        const setupDOM = () => {
+            elements = {
+                'deployments-container': createMockNode('div'),
+                'deploy-count-badge': createMockNode('span')
+            };
+            originalCreateElement = sandbox.document.createElement;
+            originalGetElementById = sandbox.document.getElementById;
+            sandbox.document.createElement = (tag) => createMockNode(tag);
+            sandbox.document.getElementById = (id) => elements[id] || null;
+        };
+
+        const teardownDOM = () => {
+            sandbox.document.createElement = originalCreateElement;
+            sandbox.document.getElementById = originalGetElementById;
+        };
+
+        it('renders multiple .deploy-card elements when 2 in-flight deploys exist', () => {
+            setupDOM();
+            try {
+                const deployments = [
+                    {
+                        commit: 'abc1234',
+                        stage: 'swapping',
+                        service: 'aerial-stack',
+                        steps: [
+                            { name: 'Commit Trigger', status: 'completed' },
+                            { name: 'CI Build & GHCR', status: 'completed' },
+                            { name: 'Hangar Sync', status: 'completed' },
+                            { name: 'Container Swap', status: 'active' },
+                            { name: 'Health Check', status: 'pending' }
+                        ]
+                    },
+                    {
+                        commit: 'def5678',
+                        stage: 'building',
+                        service: 'aerial-stack',
+                        steps: [
+                            { name: 'Commit Trigger', status: 'completed' },
+                            { name: 'CI Build & GHCR', status: 'active' },
+                            { name: 'Hangar Sync', status: 'pending' },
+                            { name: 'Container Swap', status: 'pending' },
+                            { name: 'Health Check', status: 'pending' }
+                        ]
+                    }
+                ];
+
+                renderDeployments(deployments);
+
+                const container = elements['deployments-container'];
+                assert.equal(container.children.length, 2);
+                assert.ok(container.children[0].className.includes('deploy-card stage-swapping'));
+                assert.ok(!container.children[0].className.includes('deploy-card-compact'));
+                assert.ok(container.children[1].className.includes('deploy-card stage-building'));
+                assert.ok(!container.children[1].className.includes('deploy-card-compact'));
+            } finally {
+                teardownDOM();
+            }
+        });
+
+        it('renders 3rd+ or live deployments as .deploy-card-compact', () => {
+            setupDOM();
+            try {
+                const deployments = [
+                    { commit: 'aaa1111', stage: 'swapping', service: 'aerial-stack' },
+                    { commit: 'bbb2222', stage: 'building', service: 'aerial-stack' },
+                    { commit: 'ccc3333', stage: 'queued', service: 'aerial-stack' },
+                    { commit: 'ddd4444', stage: 'live', service: 'aerial-stack' }
+                ];
+
+                renderDeployments(deployments);
+
+                const container = elements['deployments-container'];
+                assert.equal(container.children.length, 4);
+                // First 2 should be expanded deploy cards
+                assert.ok(container.children[0].className.includes('deploy-card stage-swapping'));
+                assert.ok(!container.children[0].className.includes('deploy-card-compact'));
+                assert.ok(container.children[1].className.includes('deploy-card stage-building'));
+                assert.ok(!container.children[1].className.includes('deploy-card-compact'));
+                // 3rd and 4th should be compact cards
+                assert.ok(container.children[2].className.includes('deploy-card-compact'));
+                assert.ok(container.children[2].innerHTML.includes('ccc3333'));
+                assert.ok(container.children[3].className.includes('deploy-card-compact'));
+                assert.ok(container.children[3].innerHTML.includes('ddd4444'));
+            } finally {
+                teardownDOM();
+            }
+        });
+
+        it('renders live deployment as compact when multi-deploy occurs', () => {
+            setupDOM();
+            try {
+                const deployments = [
+                    { commit: 'aaa1111', stage: 'building', service: 'aerial-stack' },
+                    { commit: 'bbb2222', stage: 'live', service: 'aerial-stack' }
+                ];
+
+                renderDeployments(deployments);
+
+                const container = elements['deployments-container'];
+                assert.equal(container.children.length, 2);
+                assert.ok(container.children[0].className.includes('deploy-card stage-building'));
+                assert.ok(container.children[1].className.includes('deploy-card-compact stage-live'));
+            } finally {
+                teardownDOM();
+            }
+        });
+
+        it('prioritizes multi-deploy badge precedence and displays N DEPLOYS IN PROGRESS', () => {
+            setupDOM();
+            try {
+                const deployments = [
+                    { commit: 'aaa1111', stage: 'swapping', service: 'aerial-stack' },
+                    { commit: 'bbb2222', stage: 'building', service: 'aerial-stack' }
+                ];
+
+                renderDeployments(deployments);
+
+                const badge = elements['deploy-count-badge'];
+                assert.equal(badge.textContent, '2 DEPLOYS IN PROGRESS');
+                assert.equal(badge.className, 'section-badge active');
+            } finally {
+                teardownDOM();
+            }
+        });
+
+        it('displays failed and degraded badges with higher precedence over active deploys', () => {
+            setupDOM();
+            try {
+                const deployments = [
+                    { commit: 'aaa1111', stage: 'failed', service: 'aerial-stack' },
+                    { commit: 'bbb2222', stage: 'building', service: 'aerial-stack' }
+                ];
+
+                renderDeployments(deployments);
+
+                const badge = elements['deploy-count-badge'];
+                assert.equal(badge.textContent, '🚨 CI BUILD FAILED');
+                assert.equal(badge.className, 'section-badge failed');
+            } finally {
+                teardownDOM();
+            }
+        });
+
+        it('strictly scopes Step 2 to CI chips and Step 4 to container chips', () => {
+            setupDOM();
+            try {
+                const deployments = [
+                    {
+                        commit: 'abc1234',
+                        stage: 'swapping',
+                        service: 'aerial-stack',
+                        matrix_jobs: [
+                            { name: 'test-backend', type: 'ci', status: 'completed' },
+                            { name: 'lint-go', type: 'ci', status: 'completed' },
+                            { name: 'aerial-brain', type: 'container', status: 'active' },
+                            { name: 'aerial-dashboard', type: 'container', status: 'completed' }
+                        ]
+                    }
+                ];
+
+                renderDeployments(deployments);
+
+                const container = elements['deployments-container'];
+                assert.equal(container.children.length, 1);
+                const html = container.children[0].innerHTML;
+
+                // Step 2 panel must contain CI chips, not container chips
+                const step2Index = html.indexOf('CI Build &amp; GHCR');
+                const step4Index = html.indexOf('Container Swap');
+                assert.ok(step2Index !== -1, 'Step 2 should be rendered');
+                assert.ok(step4Index !== -1, 'Step 4 should be rendered');
+
+                const step2Section = html.slice(step2Index, step4Index);
+                const step4Section = html.slice(step4Index);
+
+                assert.ok(step2Section.includes('test-backend'));
+                assert.ok(step2Section.includes('lint-go'));
+                assert.ok(!step2Section.includes('aerial-brain'));
+                assert.ok(!step2Section.includes('aerial-dashboard'));
+
+                assert.ok(step4Section.includes('aerial-brain'));
+                assert.ok(step4Section.includes('aerial-dashboard'));
+                assert.ok(!step4Section.includes('test-backend'));
+                assert.ok(!step4Section.includes('lint-go'));
+            } finally {
+                teardownDOM();
+            }
         });
     });
 });

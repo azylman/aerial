@@ -823,6 +823,8 @@ body::after {
     justify-content: space-between;
     align-items: center;
     margin-bottom: 0.8rem;
+    flex-wrap: wrap;
+    gap: 8px;
 }
 
 .deploy-target {
@@ -906,7 +908,14 @@ body::after {
     animation: pulse-border 1s infinite alternate;
 }
 
-.section-badge.swapping, .section-badge.pulling {
+.section-badge.swapping {
+    background: rgba(176, 38, 255, 0.2);
+    color: #b026ff;
+    border-color: #b026ff;
+    box-shadow: 0 0 15px rgba(176, 38, 255, 0.35);
+}
+
+.section-badge.pulling {
     background: rgba(0, 242, 254, 0.2);
     color: var(--neon-cyan);
     border-color: var(--neon-cyan);
@@ -917,7 +926,14 @@ body::after {
     box-shadow: 0 0 20px rgba(0, 255, 135, 0.08);
 }
 
-.deploy-card.stage-swapping, .deploy-card.stage-awaiting_pull, .deploy-card.stage-pulling {
+.deploy-card.stage-swapping {
+    border-color: rgba(176, 38, 255, 0.4);
+    box-shadow: 0 0 25px rgba(176, 38, 255, 0.2);
+    position: relative;
+    overflow: hidden;
+}
+
+.deploy-card.stage-awaiting_pull, .deploy-card.stage-pulling {
     border-color: rgba(0, 242, 254, 0.35);
     box-shadow: 0 0 25px rgba(0, 242, 254, 0.15);
     position: relative;
@@ -935,6 +951,103 @@ body::after {
     border-color: var(--neon-red);
     box-shadow: 0 0 30px rgba(255, 42, 109, 0.35);
     animation: hud-glitch 0.4s ease-out;
+}
+
+/* Compact Cyber Pill Drawer */
+.deploy-card-compact {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 8px 14px;
+    margin-bottom: 8px;
+    background: rgba(10, 10, 20, 0.6);
+    border: 1px solid rgba(255, 0, 127, 0.25);
+    border-radius: 8px;
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    backdrop-filter: var(--glass-backdrop);
+}
+
+.deploy-card-compact:hover {
+    background: rgba(20, 20, 40, 0.85);
+    border-color: rgba(255, 0, 127, 0.5);
+    transform: translateY(-1px);
+}
+
+.deploy-card-compact.stage-live {
+    border-color: rgba(0, 255, 135, 0.25);
+}
+
+.deploy-card-compact.stage-swapping {
+    border-color: rgba(176, 38, 255, 0.35);
+}
+
+.deploy-card-compact.stage-pulling, .deploy-card-compact.stage-awaiting_pull {
+    border-color: rgba(0, 242, 254, 0.3);
+}
+
+.deploy-card-compact.stage-failed, .deploy-card-compact.stage-degraded {
+    border-color: rgba(255, 42, 109, 0.4);
+}
+
+.compact-commit {
+    font-family: var(--font-mono);
+    color: var(--neon-cyan);
+    font-weight: 700;
+}
+
+.compact-title {
+    flex: 1;
+    color: var(--text-dim);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.compact-badge {
+    font-size: 0.7rem;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.compact-badge.live {
+    background: rgba(0, 255, 135, 0.15);
+    color: var(--neon-green);
+    border: 1px solid rgba(0, 255, 135, 0.3);
+}
+
+.compact-badge.swapping {
+    background: rgba(176, 38, 255, 0.15);
+    color: #b026ff;
+    border: 1px solid rgba(176, 38, 255, 0.3);
+}
+
+.compact-badge.pulling {
+    background: rgba(0, 242, 254, 0.15);
+    color: var(--neon-cyan);
+    border: 1px solid rgba(0, 242, 254, 0.3);
+}
+
+.compact-badge.failed {
+    background: rgba(255, 42, 109, 0.2);
+    color: var(--neon-red);
+    border: 1px solid rgba(255, 42, 109, 0.4);
+}
+
+.compact-badge.active {
+    background: rgba(255, 0, 127, 0.15);
+    color: var(--neon-magenta);
+    border: 1px solid rgba(255, 0, 127, 0.3);
+}
+
+.compact-toggle {
+    color: var(--text-dim);
+    font-size: 0.85rem;
 }
 
 .deploy-card-laser {
@@ -1021,13 +1134,27 @@ body::after {
 .matrix-chip {
     font-size: 0.62rem;
     font-weight: 700;
-    padding: 1px 6px;
-    border-radius: 3px;
+    padding: 3px 8px;
+    border-radius: 4px;
     letter-spacing: 0.5px;
     text-transform: uppercase;
     cursor: pointer;
     transition: all 0.2s ease;
     user-select: none;
+    touch-action: manipulation;
+    min-height: 24px;
+    display: inline-flex;
+    align-items: center;
+    position: relative;
+}
+
+.matrix-chip::after {
+    content: '';
+    position: absolute;
+    top: -10px;
+    bottom: -10px;
+    left: -4px;
+    right: -4px;
 }
 
 .matrix-chip:hover {
@@ -1081,7 +1208,14 @@ body::after {
     box-shadow: 0 0 10px rgba(0, 255, 135, 0.3);
 }
 
-.deploy-stage-badge.swapping, .deploy-stage-badge.pulling {
+.deploy-stage-badge.swapping {
+    background: rgba(176, 38, 255, 0.2);
+    color: #b026ff;
+    border-color: #b026ff;
+    animation: pulse-border 1.5s infinite alternate;
+}
+
+.deploy-stage-badge.pulling {
     background: rgba(0, 242, 254, 0.2);
     color: var(--neon-cyan);
     border-color: var(--neon-cyan);
@@ -2442,6 +2576,7 @@ body::after {
         padding: 6px 12px;
         font-size: 0.72rem;
     }
+    .deploy-steps-grid,
     .steps-grid {
         grid-template-columns: 1fr;
     }
