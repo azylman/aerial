@@ -46,6 +46,7 @@ type MatrixJobChip struct {
 	Status     string `json:"status"`               // "completed", "active", "pending", "failed"
 	Conclusion string `json:"conclusion,omitempty"` // "success", "failure", "skipped", ""
 	Duration   string `json:"duration,omitempty"`   // e.g. "45s"
+	Type       string `json:"type,omitempty"`       // "ci" | "container"
 }
 
 type DeploymentStep struct {
