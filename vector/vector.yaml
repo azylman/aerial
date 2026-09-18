@@ -335,7 +335,7 @@ transforms:
                 .level = "info"
               }
             }
-          } else if ends_with(string!(.service), "-mcp") {
+          } else if ends_with(to_string(.service), "-mcp") {
             trimmed = strip_whitespace(string!(.message))
             if trimmed == "" || match(trimmed, r'^(GitHub MCP Server running on stdio|server run cancelled)') {
               .level = "info"
