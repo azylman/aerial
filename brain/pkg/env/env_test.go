@@ -356,6 +356,49 @@ func TestLinkSkillsWithFilter(t *testing.T) {
 	}
 }
 
+func TestProvisioner_BlockedSkillsAccessors(t *testing.T) {
+	p := New(t.TempDir(), t.TempDir())
+	blocked := p.BlockedSkills()
+	if !blocked["using-git-worktrees"] {
+		t.Errorf("Expected using-git-worktrees to be in default blocked skills")
+	}
+
+	p.SetBlockedSkills(map[string]bool{"custom-blocked": true})
+	updated := p.BlockedSkills()
+	if !updated["custom-blocked"] || updated["using-git-worktrees"] {
+		t.Errorf("SetBlockedSkills failed to update blocked skills")
+	}
+
+	p.SetBlockedSkills(nil)
+	if p.BlockedSkills() != nil {
+		t.Errorf("Expected nil from BlockedSkills when set to nil")
+	}
+
+	// Test SyncSkills with nil blockedSkills fallback to defaults
+	if err := p.SyncSkills(); err != nil {
+		t.Errorf("SyncSkills failed with nil blockedSkills: %v", err)
+	}
+}
+
+func TestPruneBlockedSkills_Branches(t *testing.T) {
+	// 1. len(blockedSkills) == 0 early return
+	pruneBlockedSkills([]string{t.TempDir()}, nil)
+	pruneBlockedSkills([]string{t.TempDir()}, map[string]bool{})
+
+	// 2. Non-existent dir
+	pruneBlockedSkills([]string{filepath.Join(t.TempDir(), "nonexistent")}, map[string]bool{"foo": true})
+
+	// 3. LinkSkillsWithFilter with nil filter
+	targetDir := t.TempDir()
+	srcDir := t.TempDir()
+	skillDir := filepath.Join(srcDir, "nil-filter-skill")
+	_ = os.MkdirAll(skillDir, 0755)
+	_ = os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("# Nil Filter"), 0644)
+	count := LinkSkillsWithFilter([]string{targetDir}, []string{srcDir}, nil)
+	if count != 1 {
+		t.Errorf("Expected 1 skill linked with nil filter, got %d", count)
+	}
+}
 
 func TestSyncRules_Concurrent(t *testing.T) {
 	tmpHome := t.TempDir()
