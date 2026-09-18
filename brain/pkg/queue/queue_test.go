@@ -11962,7 +11962,7 @@ func TestWorkerPool_MultiTurn_ExtractFinalSubstantiveTurnAndPreserveMedia(t *tes
 	}
 }
 
-func TestWorkerPool_MultiTurn_SilentSentinel_DropsIntermediateChatter(t *testing.T) {
+func TestWorkerPool_MultiTurn_AlwaysDeliversFinalOutputText(t *testing.T) {
 	t.Parallel()
 	store := setupTestStore(t)
 
@@ -11983,6 +11983,7 @@ func TestWorkerPool_MultiTurn_SilentSentinel_DropsIntermediateChatter(t *testing
 		t.Fatalf("WriteFile failed: %v", err)
 	}
 
+	var deliveredText string
 	var deliveryCalled bool
 	var mu sync.Mutex
 	doneCh := make(chan struct{})
@@ -11990,7 +11991,7 @@ func TestWorkerPool_MultiTurn_SilentSentinel_DropsIntermediateChatter(t *testing
 	sessMgr := session.New(tempDir, "")
 	pool := NewWorkerPool(WorkerPoolConfig{
 		SessionManager: sessMgr,
-		Store: store,
+		Store:          store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    1,
@@ -12001,6 +12002,7 @@ func TestWorkerPool_MultiTurn_SilentSentinel_DropsIntermediateChatter(t *testing
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
 			mu.Lock()
 			deliveryCalled = true
+			deliveredText = text
 			mu.Unlock()
 			return nil
 		},
@@ -12015,8 +12017,8 @@ func TestWorkerPool_MultiTurn_SilentSentinel_DropsIntermediateChatter(t *testing
 	defer pool.Stop()
 
 	msg := db.Message{
-		ID:         "msg-silent-1",
-		ThreadID:   "thread-silent-1",
+		ID:         "msg-delivered-1",
+		ThreadID:   "thread-delivered-1",
 		GuildID:    "guild-1",
 		AuthorID:   "user-1",
 		AuthorName: "User",
@@ -12040,16 +12042,23 @@ func TestWorkerPool_MultiTurn_SilentSentinel_DropsIntermediateChatter(t *testing
 	mu.Lock()
 	defer mu.Unlock()
 
-	if deliveryCalled {
-		t.Errorf("DeliveryFunc was called when final response was a silent sentinel")
+	if !deliveryCalled {
+		t.Errorf("Expected DeliveryFunc to be called for final output text")
+	}
+	expected := "Wait for background task task-645 to complete."
+	if deliveredText != expected {
+		t.Errorf("Expected delivered text %q, got: %q", expected, deliveredText)
 	}
 
-	dbMsg, err := getMessage(store, "msg-silent-1")
+	dbMsg, err := getMessage(store, "msg-delivered-1")
 	if err != nil || dbMsg == nil {
 		t.Fatalf("GetMessage failed: %v", err)
 	}
 	if dbMsg.Status != db.StatusCompleted {
 		t.Errorf("Expected status COMPLETED, got: %s", dbMsg.Status)
+	}
+	if dbMsg.ResponseText != expected {
+		t.Errorf("Expected DB response text %q, got: %q", expected, dbMsg.ResponseText)
 	}
 }
 

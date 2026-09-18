@@ -1301,9 +1301,9 @@ func TestExtractFinalSubstantiveResponse_MultiTurnExcludesChatter(t *testing.T) 
 	}
 }
 
-func TestExtractFinalSubstantiveResponse_SilentSentinel(t *testing.T) {
+func TestExtractFinalSubstantiveResponse_WaitNoticesDelivered(t *testing.T) {
 	mgr, tmpDir := setupTestManager(t)
-	convID := "silent-sentinel-123"
+	convID := "wait-notice-delivered-123"
 	logsDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", convID, ".system_generated", "logs")
 	if err := os.MkdirAll(logsDir, 0755); err != nil {
 		t.Fatalf("Failed to create temp logs dir: %v", err)
@@ -1322,11 +1322,12 @@ func TestExtractFinalSubstantiveResponse_SilentSentinel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
-	if !isSilent {
-		t.Errorf("Expected isSilent to be true, got false")
+	if isSilent {
+		t.Errorf("Expected isSilent to be false, got true")
 	}
-	if finalText != "" {
-		t.Errorf("Expected empty finalText on silent sentinel, got %q", finalText)
+	expected := "wait for background task 123 to complete"
+	if finalText != expected {
+		t.Errorf("Expected %q, got %q", expected, finalText)
 	}
 }
 
