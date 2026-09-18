@@ -1,33 +1,81 @@
 ---
 name: self-improvement
-description: Use this skill whenever Aerial needs to modify, enhance, debug, or refactor its own codebase, skills, or system configuration, commit changes, pull updates, or deploy updates via CI/CD.
+description: Mandatory skill whenever Aerial must inspect, modify, enhance, debug, or refactor its own Go codebase, system skills, or configuration repos (aerial / aerial-config), author scratch PRs, OR pull upstream git releases and trigger Hangar container deployment syncs. DO NOT use for managing Home Assistant devices, user tasks, calendar events, recipes, or external domain operations.
 ---
 
 # Aerial Self-Improvement & Continuous Engineering Workflow
 
-This skill defines the mandatory, rigorous development workflow Aerial must follow whenever designing, implementing, refactoring, or modifying its own codebase, skills, configurations, or Docker container stack.
+This skill defines how Aerial safely manages its own lifecycle across two operational paths:
+1. **Path A (Operational Maintenance & Rollout)**: Fast-path upstream syncs, container reconciliations, and deployment status checks.
+2. **Path B (Autonomous Self-Engineering)**: Multi-agent tiered review, TDD implementation, and scratch PR automation across the dual-repository architecture.
 
 ---
 
-## 1. Two-Repository Separation of Concerns & Scope Gate
+## 1. Intent Triage Matrix (Decision Gate)
 
-Before making any changes, Aerial MUST determine the target repository:
+Before running any commands or dispatching review subagents, determine which operational path applies:
 
-### 1.1 Core Engine Repository (`azylman/aerial` at `/share/aerial`)
+• **Path A: Operational Maintenance & Container Rollout (Zero Code Changes)**
+  - **Triggers**: *"Update Aerial"*, *"Update yourself"*, *"Pull latest code / git sync"*, *"Reconcile containers"*, *"Check deployment status"*.
+  - **Target Action**: Pull upstream images/git and reconcile runtime containers via Hangar daemon.
+  - **Subagent Review Overhead**: **None (Bypassed)**. Execute Hangar endpoints directly in root turn.
+  - **Execution Reference**: Proceed directly to **Section 2**.
+
+• **Path B: Autonomous Self-Engineering (Code & Configuration Changes)**
+  - **Triggers**: *"Fix bug in X"*, *"Add feature / MCP service"*, *"Modify skill or prompt"*, *"Edit config.yaml / AGENTS.md"*.
+  - **Target Action**: Implement, test, verify, and submit code or configuration changes via scratch PR workflows.
+  - **Subagent Review Overhead**: **Tiered (Tiers 0–3)**. Scaled review panels, TDD, and scratch PR automation.
+  - **Execution Reference**: Proceed directly to **Sections 3–5**.
+
+---
+
+## 2. Path A: Operational Maintenance & Container Rollout Runbook
+
+When instructed to update Aerial, pull latest code, or deploy system updates without modifying code:
+
+### Step 1: Trigger Fast-Path Git Sync & Reconciliation
+Because `/share/aerial` and `/share/aerial-config` are mounted read-only (`:ro`), Aerial triggers the host Hangar daemon to pull upstream changes and reconcile containers out-of-band:
+```bash
+# Trigger GitOps repository sync on Hangar:
+curl -s -f -X POST http://aerial-hangar:8080/sync
+
+# Reconcile container topology (if services require recreation):
+curl -s -f -X POST http://aerial-hangar:8080/reconcile
+```
+
+### Step 2: Track Deployment & Container Rollout
+Check active deployment and container swap progress:
+```bash
+/share/aerial/scripts/aerial-pr.sh deploy-status main
+```
+- **Response Format Invariant**: Report deployment status in plain prose strictly capped at 2 sentences max (zero markdown bullet lists, tables, or forward-looking checklists).
+- If deployment is ongoing, reschedule a 2-minute follow-up check via `scheduler-mcp` (`schedule_once`).
+
+---
+
+## 3. Path B: Two-Repository Separation of Concerns & Scratch PR Gate
+
+When undertaking code or configuration changes, Aerial cleanly separates generic system code from private user configuration:
+
+### 3.1 Core Engine Repository (`azylman/aerial` at `/share/aerial`)
 - **Scope**: Generic Go execution engine (`brain/`), built-in MCP microservices (`scheduler-mcp`, `discord-mcp`, `docker-mcp`, `github-mcp`), base system skills, Docker topology, and core architecture docs.
 - **Strict Invariants**:
   - **100% Generic & Domain-Agnostic**: All prompts, code, error handlers, and schemas must remain completely generic and reusable for any user.
   - **Zero Personal Data Invariant**: **NEVER** commit real names, Discord handles, usernames, family members, home addresses/locations, private device/entity IDs, or user-specific business logic into this repository.
   - **Zero Plaintext Secrets Invariant**: NEVER commit API keys, tokens, private webhook URLs, or GitHub PATs to disk.
-- **Deploy Path**: Commit and push to `azylman/aerial:main`. Hangar synchronizes code and reconciles container updates out-of-band.
+- **Deployment Flow**: GitHub Actions builds and publishes images to GHCR; Hangar on the host reconciles updated containers out-of-band.
 
-### 1.2 User Configuration Repository (e.g. `azylman/aerial-config` at `/share/aerial-config`)
+### 3.2 User Configuration Repository (`azylman/aerial-config` at `/share/aerial-config`)
 - **Scope**: User options (`config.yaml`), persona overrides & user identity/aliases (`AGENTS.md`), private smart home/domain workflows (`custom-skills/`), sidecar containers (`docker-compose.override.yml`), and host environment secrets (`.env`).
-- **Deploy Path**: Commit and push to the user's private configuration repository. Hot-reloaded automatically in-process.
+- **Strict Invariants**: User identity, personal aliases, private credentials. Filesystem is mounted read-only (`:ro`) inside the container.
+- **Deployment Flow**: In-process `fsnotify` watcher hot-reloads configuration and skills dynamically within milliseconds; Hangar pulls git updates.
+
+### 3.3 Read-Only Mount Invariant
+**NEVER** run `git pull`, `git checkout`, `git commit`, or edit files in `/share/aerial` or `/share/aerial-config` directly. All changes must be authored in an ephemeral scratch workspace via `scripts/aerial-pr.sh init` or `scripts/aerial-config-pr.sh init`.
 
 ---
 
-## 2. The Tiered Engineering & Review Workflow
+## 4. The Tiered Engineering & Review Workflow
 
 Whenever undertaking feature development, architectural changes, bug fixes, or system modifications, Aerial follows a **Tiered Engineering Workflow** scaled dynamically by the complexity and blast radius of the change.
 
@@ -106,10 +154,8 @@ Stage 6: Commit, Push & Asynchronous PR Deployment
 ### Stage 1: Brainstorming & Architectural Specification
 1. **Explore Intent & Scope**:
    - Clarify scope, system constraints, persistence schemas, concurrency boundaries, and failure modes before writing code.
-2. **Sync Workspace**:
-   ```bash
-   git pull --rebase origin main
-   ```
+2. **Initialize Workspace**:
+   - Workspaces are initialized into ephemeral scratch directories via `scripts/aerial-pr.sh init` or `scripts/aerial-config-pr.sh init`.
 3. **Draft Implementation Plan**:
    - Tier 0: Omitted (proceed directly to implementation).
    - Tier 1: Lightweight task list in `implementation_plan.md`.
@@ -175,31 +221,62 @@ Before modifying source code, Aerial MUST audit the plan according to the task's
 ---
 
 ### Stage 6: Commit, Push & Continuous Deployment
+Follow the automated scratch PR workflows detailed in **Section 5**.
 
-1. **Review Diffs & Status**:
+---
+
+## 5. Asynchronous Scratch PR Automation
+
+All code and configuration changes must follow the automated PR workflow:
+
+### 5.1 Core Engine PR Workflow (`scripts/aerial-pr.sh`)
+1. **Initialize Scratch Workspace**:
    ```bash
-   git status && git diff
+   /share/aerial/scripts/aerial-pr.sh init
    ```
-2. **Commit with Conventional Messages**:
+   Clones `azylman/aerial:main` into an isolated scratch directory (`/data/scratch/aerial-code-scratch.XXXXXX`) on an ephemeral branch.
+2. **Implement & Author PR Description**:
+   - Write tests and code following TDD.
+   - Author `PR_DESCRIPTION.md` in the scratch root (mandatory; submissions fail without a description).
+3. **Submit Asynchronously**:
    ```bash
-   git add -A && git commit -m "feat(module): clear description of changes"
+   /share/aerial/scripts/aerial-pr.sh submit <scratch_dir> "feat(module): description"
    ```
-   *The fast-path pre-commit hook verifies staged syntax and BOM hygiene automatically in < 1s.*
+   - Automatically runs fast pre-flight verification (`./scripts/verify.sh --staged`).
+   - Pushes branch, creates PR with auto-merge, and schedules follow-up check via `scheduler-mcp`.
+   - Cleans up scratch directory immediately. **Do not poll CI in foreground; end active execution turn.**
+4. **Verify & Merge on Scheduled Wake-up**:
+   ```bash
+   /share/aerial/scripts/aerial-pr.sh merge <pr_num>
+   ```
+   - If CI is still pending (exit code 2), quietly reschedule follow-up check.
+   - Upon green merge, confirms merge and tracks container swap to completion in max 2 sentences.
 
-3. **Push to Remote & Branch Protection Awareness**:
-   - When pushing directly to `main`:
-     ```bash
-     git push origin main
-     ```
-     *Pushes proceed immediately without pre-push hook latency; GitHub Actions CI validates the build out-of-band.*
-   - When branch protection is active on `main`:
-     ```bash
-     git checkout -b fix/<topic>
-     git push origin fix/<topic>
-     ```
-     Open a Pull Request via GitHub MCP (`create_pull_request`), enable auto-merge (`gh pr merge --auto --squash`), and let CI verify and merge asynchronously into `main`.
+### 5.2 Configuration PR Workflow (`scripts/aerial-config-pr.sh`)
+1. **Initialize Scratch Workspace**:
+   ```bash
+   /share/aerial/scripts/aerial-config-pr.sh init
+   ```
+2. **Implement & Author PR Description**:
+   - Update YAML, prompts, or custom skills.
+   - Author `PR_DESCRIPTION.md` in the scratch root.
+3. **Submit Asynchronously**:
+   ```bash
+   /share/aerial/scripts/aerial-config-pr.sh submit <scratch_dir> "chore(config): description"
+   ```
+   - Automatically validates YAML syntax and schema.
+   - Pushes branch, creates PR, and schedules follow-up check via `scheduler-mcp`.
+4. **Verify & Merge on Scheduled Wake-up**:
+   ```bash
+   /share/aerial/scripts/aerial-config-pr.sh merge <pr_num>
+   ```
+   - Hangar syncs repository and in-process watcher hot-reloads changes without container downtime.
 
-4. **Continuous Deployment Invariant**:
-   - **DO NOT run `docker compose up`, `docker compose build`, or `docker restart` from inside the container.**
-   - Pushing/merging to `origin/main` triggers GitHub Actions CI (`docker-publish.yml`) to build and publish container images to GitHub Container Registry (`ghcr.io`).
-   - Hangar on the host automatically detects the new image and performs an out-of-band container swap without interrupting execution or causing downtime.
+---
+
+## 6. Operational Invariants
+
+• **Container Execution Invariant**: NEVER execute `docker compose up`, `docker compose build`, or `docker restart` from inside the container. All image builds occur in GitHub Actions CI, and container swaps are handled by Hangar.
+• **Scheduling Invariant**: Never schedule manual follow-up timers after calling `submit`; `aerial-pr.sh submit` automatically registers the follow-up reminder via `scheduler-mcp`.
+• **Response Format Invariant**: Merge and deployment confirmations must be reported in plain prose strictly capped at 2 sentences max (no markdown checklists, tables, or forward-looking promises).
+• **ZERO-BYPASS INVARIANT**: Verification checks (`./scripts/verify.sh --staged`) are strictly blocking; `--no-verify` is forbidden.
