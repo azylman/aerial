@@ -155,15 +155,31 @@ transforms:
         }
       } else {
         # Plain text fallback
-        msg = downcase(to_string!(.message))
-        if contains(msg, "error") || contains(msg, "fatal") || contains(msg, "panic") || .stream == "stderr" {
-          .level = "error"
-        } else if contains(msg, "warn") {
-          .level = "warn"
-        } else if contains(msg, "debug") || contains(msg, "trace") {
-          .level = "debug"
-        } else {
-          .level = "info"
+        if .service == "cadvisor" {
+          klog, err = parse_klog(.message)
+          if err == null {
+            .message = klog.message
+            .level = if klog.level == "warning" { "warn" } else { klog.level }
+            .timestamp = klog.timestamp
+            if !exists(.attributes) {
+              .attributes = {}
+            }
+            .attributes.file = klog.file
+            .attributes.line = klog.line
+          }
+        }
+
+        if !exists(.level) {
+          msg = downcase(to_string!(.message))
+          if contains(msg, "error") || contains(msg, "fatal") || contains(msg, "panic") || .stream == "stderr" {
+            .level = "error"
+          } else if contains(msg, "warn") {
+            .level = "warn"
+          } else if contains(msg, "debug") || contains(msg, "trace") {
+            .level = "debug"
+          } else {
+            .level = "info"
+          }
         }
       }
 
