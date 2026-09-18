@@ -87,7 +87,9 @@ transforms:
           del(parsed.severity)
         } else {
           msg_lower = downcase(to_string!(.message))
-          if contains(msg_lower, "error") || contains(msg_lower, "fatal") || contains(msg_lower, "panic") || .stream == "stderr" {
+          if .service == "github-mcp" && (msg_lower == "server run cancelled" || (exists(parsed.error) && (to_string(parsed.error) ?? "") == "context canceled")) {
+            .level = "info"
+          } else if contains(msg_lower, "error") || contains(msg_lower, "fatal") || contains(msg_lower, "panic") || .stream == "stderr" {
             .level = "error"
           } else if contains(msg_lower, "warn") {
             .level = "warn"
@@ -335,11 +337,6 @@ transforms:
                 .level = "info"
               }
             }
-          } else if ends_with(to_string(.service), "-mcp") {
-            trimmed = strip_whitespace(string!(.message))
-            if trimmed == "" || match(trimmed, r'^(GitHub MCP Server running on stdio|server run cancelled)') {
-              .level = "info"
-            }
           } else if .service == "discord-mcp" {
             msg_lower = downcase(string!(.message))
             if contains(msg_lower, "error") || contains(msg_lower, "fail") || contains(msg_lower, "fatal") {
@@ -347,6 +344,11 @@ transforms:
             } else if contains(msg_lower, "warn") {
               .level = "warn"
             } else {
+              .level = "info"
+            }
+          } else if ends_with(to_string(.service), "-mcp") {
+            trimmed = strip_whitespace(string!(.message))
+            if trimmed == "" || match(trimmed, r'^(GitHub MCP Server running on stdio|server run cancelled)') {
               .level = "info"
             }
           } else if .service == "ollama" {
