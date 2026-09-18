@@ -167,6 +167,26 @@ transforms:
             .attributes.file = klog.file
             .attributes.line = klog.line
           }
+        } else if .service == "postgres" {
+          parsed, err = parse_regex(.message, r'^(?P<pg_timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)? [A-Z]+) \[(?P<pid>\d+)\] (?P<severity>[A-Z0-9]+):\s+(?P<message>.*)$')
+          if err == null {
+            .message = parsed.message
+            sev = string!(parsed.severity)
+            if sev == "ERROR" || sev == "FATAL" || sev == "PANIC" {
+              .level = "error"
+            } else if sev == "WARNING" {
+              .level = "warn"
+            } else if starts_with(sev, "DEBUG") {
+              .level = "debug"
+            } else {
+              .level = "info"
+            }
+            if !exists(.attributes) {
+              .attributes = {}
+            }
+            .attributes.pid = parsed.pid
+            .attributes.severity = parsed.severity
+          }
         }
 
         if !exists(.level) {
