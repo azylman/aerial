@@ -729,6 +729,10 @@ services:
       - ZO_INGEST_FLATTEN_LEVEL=2
       - ZO_WIDENING_SCHEMA_EVOLUTION=true
       - ZO_MEMORY_CACHE_MAX_SIZE=512
+      - ZO_QUICK_MODE_ENABLED=false
+      - ZO_QUICK_MODE_FORCE_ENABLED=false
+      - ZO_QUICK_MODE_NUM_FIELDS=2000
+      - ZO_QUICK_MODE_STRATEGY=both
     volumes:
       - aerial-openobserve-data:/data
     ports:
