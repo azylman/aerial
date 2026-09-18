@@ -145,7 +145,9 @@ function mergeWidgets(core, user) {
 
 /**
  * Merges settings.yaml.
- * Shallow merges root styling keys; deep merges `layout` mapping to preserve core layout order.
+ * Shallow merges root styling keys; merges `layout` mapping.
+ * If user explicitly provides layout entries starting from the root group, user layout order takes precedence;
+ * otherwise core group ordering is preserved with user additions appended.
  */
 function mergeSettings(core, user) {
   const coreObj = normalizeObject(core);
@@ -154,13 +156,37 @@ function mergeSettings(core, user) {
   const coreLayout = normalizeObject(coreObj.layout);
   const userLayout = normalizeObject(userObj.layout);
 
+  const userKeys = Object.keys(userLayout);
+  let layout;
+  if (userKeys.length > 0) {
+    layout = {};
+    if (userKeys.includes('Aerial AI & Mission Control') || !('Aerial AI & Mission Control' in coreLayout)) {
+      for (const [k, v] of Object.entries(userLayout)) {
+        layout[k] = { ...(coreLayout[k] || {}), ...v };
+      }
+      for (const [k, v] of Object.entries(coreLayout)) {
+        if (!(k in layout)) {
+          layout[k] = v;
+        }
+      }
+    } else {
+      for (const [k, v] of Object.entries(coreLayout)) {
+        layout[k] = { ...v, ...(userLayout[k] || {}) };
+      }
+      for (const [k, v] of Object.entries(userLayout)) {
+        if (!(k in layout)) {
+          layout[k] = v;
+        }
+      }
+    }
+  } else {
+    layout = { ...coreLayout };
+  }
+
   return {
     ...coreObj,
     ...userObj,
-    layout: {
-      ...coreLayout,
-      ...userLayout
-    }
+    layout
   };
 }
 
