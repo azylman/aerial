@@ -8,23 +8,19 @@ Aerial runs as a multi-container Docker stack supervised by Hangar and Autoheal 
 
 - **Execution Brain (`aerial-brain`)**:
   - Headless Antigravity CLI (`agy`) execution runner with multi-turn conversation memory.
-  - Integrated Discord Gateway event funnel capturing mentions and thread messages.
-  - Hardened turn ingestion with 30-minute message staleness TTL and Error 160004 thread deduplication recovery.
+  - Integrated Discord Gateway event funnel capturing mentions and thread messages with hardened turn ingestion (see Invariant 11).
   - Fast ambient relevance classifier standardized on canonical `Gemini 3.8 Flash (Low)`.
   - In-memory serialized thread worker pool with PostgreSQL 16 and pgvector state persistence.
   - Kernel-enforced read-only filesystem mounts on `/share/aerial-config:ro` and `/share/aerial:ro` with `shm_size: 512mb` to prevent unpushed repository corruption.
   - Deep Prometheus metrics telemetry exposed on internal port `8080/metrics` (host `8088/metrics`).
-  - Empty response suppression: turns with empty or whitespace-only stdout silently skip Discord delivery (purged legacy `[NO_REPLY]` sentinels).
-  - Automatic turn-end Markdown output delivery directly to the active Discord thread.
+  - Automatic turn-end Markdown output delivery directly to the active Discord thread (empty or whitespace stdout silently suppresses delivery; see Invariant 5).
   - In-process file watcher dynamically hot-reloading rules, skills, and configuration without process restarts.
   - Background scheduler monitor evaluating recurring crons and one-shot reminders every 30 seconds.
   - Semantic memory RAG subsystem extracting conversation facts and querying 384-dimensional vector embeddings via Ollama.
   - Channel lifecycle webhook interceptors (`on_wake`, `pre_turn`, `post_turn`) providing a generic harness extension mechanism to programmatically override wake triage, gate execution, inject runtime context, and capture turn telemetry.
 
 - **Persistence Layer (`aerial-postgres`)**:
-  - PostgreSQL 16 relational database with `pgvector` extension.
-  - Production Database: Aerial runs exclusively on containerized PostgreSQL 16 in production. SQLite is strictly prohibited in production.
-  - Centralized store for Discord messages, session tracking, atomic CAS task queues, recurring and one-shot schedules, vector embeddings, and Grafana dashboard persistence.
+  - PostgreSQL 16 relational database with `pgvector` extension for production persistence (messages, sessions, atomic CAS task queues, recurring and one-shot schedules, vector embeddings, and Grafana). Embedded SQLite is strictly prohibited in production (see Invariant 7).
 
 - **Infrastructure, GitOps & Synchronization (`aerial-hangar`)**:
   - Dedicated sidecar container holding read-write (`:rw`) volume mounts on `/share/aerial-config` and `/share/aerial`.
@@ -72,7 +68,7 @@ Aerial operates on a strict **Two-Repository Separation of Concerns**:
 - **Strict Invariants**:
   - **100% Generic & Domain-Agnostic**: All prompts, code, error handlers, and schemas must remain completely generic and reusable for any user.
   - **Zero Personal Data Invariant**: NEVER commit real names, Discord handles, usernames, family members, home addresses, private device/entity IDs, or user-specific business logic into this repository.
-  - **Zero Plaintext Token Invariant**: NEVER commit API keys, tokens, private webhook URLs, or GitHub PATs to disk.
+  - **Zero Plaintext Token Invariant**: NEVER commit API keys, tokens, private webhook URLs, or GitHub PATs to disk (see Invariant 3).
 
 ### 2. User Configuration Repository (e.g. `azylman/aerial-config` at `/share/aerial-config`)
 - **Purpose**: Private user customization, personal persona, user identity/aliases, domain skills, and environment-specific integrations. Starter template available at [azylman/aerial-config-example](https://github.com/azylman/aerial-config-example).
@@ -85,19 +81,12 @@ Aerial operates on a strict **Two-Repository Separation of Concerns**:
   - **`docs/`**: Living Docsify documentation portal served dynamically at `/docs/`.
   - **`docker-compose.override.yml`**: User-defined sidecar containers or extra local MCP servers, natively merged by Docker Compose on the host via the top-level `include:` directive.
 
-### 3. Physical Immutability & Two-Phase PR Workflow
+### 3. Physical Immutability & Ephemeral Workspaces
 - **Kernel Read-Only Invariant**: `/share/aerial-config` and `/share/aerial` are mounted strictly **read-only (`:ro`)** into `aerial-brain`. Any direct file writes or local git operations targeting `/share/aerial-config` or `/share/aerial` will fail with `EROFS: Read-only file system`.
-- **Automated Two-Phase PR Workflow (`aerial-config-pr.sh`)**:
-  All configuration, persona, and skill updates must follow the automated PR workflow:
-  1. `aerial-config-pr.sh init`: Creates an isolated, shallow clone in `/dev/shm` on an ephemeral branch.
-  2. Edit files inside the returned scratch path using standard editing tools. Author a mandatory `PR_DESCRIPTION.md`.
-  3. `aerial-config-pr.sh submit <scratch_dir> "<commit message>"`: Performs pre-flight YAML validation, validates the mandatory PR description, pushes the branch, opens a Pull Request on GitHub, automatically schedules a one-shot follow-up reminder via `scheduler-mcp` (defaulting to 1m), and discards the scratch clone.
-- **Evidence-Before-Assertion**: Never report completion or assert that configuration changes are active until `aerial-config-pr.sh submit` completes successfully with exit code 0 and confirms the PR creation. Confirm merge and synchronization into the live mount once the scheduled follow-up reminder wakes up.
-
+- **Ephemeral Scratch Workspaces**: All configuration, persona, skill, and engine updates must be authored in isolated scratch clones initialized via `scripts/aerial-config-pr.sh init` or `scripts/aerial-pr.sh init`, submitted asynchronously per Invariant 6, and verified prior to commit.
 
 ### 4. Extensibility & Precedence Rules
-- **Persona Precedence**: Instructions in `aerial-config/AGENTS.md` strictly take precedence over default persona instructions in `GEMINI.md`.
-- **Per-Channel Instructions**: Markdown files placed in `/share/aerial-config/channels/<channel-name>.md` are auto-discovered and injected dynamically into `<CHANNEL_INSTRUCTIONS>` on each turn.
+- Rules and persona overrides resolve strictly according to the **Instruction Precedence Hierarchy** (Invariant 12).
 - **Skill Precedence**: Custom skills in `/share/aerial-config/custom-skills/` take highest priority, shadowing built-in skills of the same name.
 
 ## Core Invariants & Operational Rules
@@ -115,21 +104,16 @@ Aerial operates on a strict **Two-Repository Separation of Concerns**:
 
 4. **Scheduling Invariant**:
    - **Persistent Schedules & Follow-Up Reminders**: **ALWAYS** use the persistent scheduler MCP tools (`scheduler_schedule_recurring`, `scheduler_schedule_once`, `scheduler_list_schedules`, `scheduler_cancel_schedule`). NEVER use the built-in CLI `schedule` tool for user reminders, cron jobs, or PR follow-ups.
-   - **Ephemeral In-Turn Subagent Keep-Alive Anchor**: The built-in ephemeral CLI `schedule` tool is **strictly restricted** to holding the process event loop open when dispatching concurrent subagents in Tiers 2 & 3 or parallel research (`schedule(DurationSeconds: 120, TimerCondition: "any")`). It MUST NOT be used for any cross-turn or persistent scheduling.
+   - **Ephemeral In-Turn Subagent Keep-Alive Anchor**: The built-in ephemeral CLI `schedule` tool is **strictly restricted** to holding the process event loop open when dispatching concurrent subagents in Tiers 2 & 3 or parallel research per Invariant 8 (`schedule(DurationSeconds: 120, TimerCondition: "any")`). It MUST NOT be used for any cross-turn or persistent scheduling.
 
 5. **Discord Messaging, Tool Execution & Token Conservation Invariants**:
-   - Deliver responses via Markdown directly in Discord at the end of the turn. The user only receives the final result message so do not bother to send intermediate status updates.
-   - **Empty Response Suppression**: Pure whitespace or empty stdout triggers silent delivery suppression. Under NO circumstance should `[NO_REPLY]` or dummy sentinel strings be emitted or instructed.
+   - **Discord Output Delivery & Empty Response Suppression**: Deliver responses via Markdown directly in Discord at the end of the turn (the user only receives the final substantive result). Pure whitespace or empty stdout triggers silent delivery suppression. Under NO circumstance should `[NO_REPLY]` or dummy sentinel strings be emitted or instructed.
    - **Silent Multi-Step Execution (No Self-Narration / Task Chatter)**: When executing multi-step tool calls, commands, or background tasks, NEVER emit intermediate play-by-play status chatter ("I have initiated a search...", "I will review results when the task finishes..."). Execute intermediate tool steps completely silently and deliver strictly the final substantive answer or deliverable.
    - **Parallel Tool Batching Invariant**: When reading, inspecting, or searching files across packages, ALWAYS emit all `view_file`, `grep_search`, and read tool calls in parallel within a single turn rather than serializing them one file at a time. Never execute sequential single-file read or search loops when target files, directories, or symbols are known.
    - **Coarse-Grained Code Editing Invariant**: Avoid iterative micro-chunk editing loops. Formulate the complete target diff for each file and apply it in a single comprehensive `replace_file_content` or `write_to_file` invocation per file instead of making multiple small 3–5 line edits. Never interleave edits with redundant read-verify loops on the same file.
    - **Zero-Polling Policy**: NEVER enter manual status polling loops on background tasks (`manage_task status`) or repeatedly set short `schedule` timers. Run background tasks reactively and wait for completion notifications to prevent context inflation.
-   - **Subagent Offloading Threshold**: When a task involves deep multi-file exploration, extensive file viewing (>10 files), or repetitive test/coverage cycles, delegate the work to an isolated subagent (`invoke_subagent`). Subagents execute in fresh, minimal context windows and pass back only their final findings.
-   - **Single-Turn Tool Budget Ceiling**: Maintain a clean, concise execution trajectory. If a single turn reaches 30 internal tool steps without completing, stop and offload remaining sub-tasks to subagents rather than accumulating bloated context.
-   - **GitHub Web Links Only (No `file:///` Links)**: When linking to files, Aerial MUST always provide a web link to the files in GitHub (e.g. `https://github.com/azylman/aerial/blob/main/...` or `https://github.com/azylman/aerial-config/blob/main/...`) rather than a `file:///` link to the local copy. Local filesystem paths and `file:///` URIs are completely inaccessible from Discord.
-   - **NEVER** output `file://` or `file:///` scheme URLs or masked file links (e.g. `[file](file:///...)`).
-   - Reference filenames, paths, and code identifiers using clean inline backticks (e.g. `GEMINI.md`) when not providing a GitHub web link.
-   - Masked links (`[label](url)`) are ONLY permitted for valid `https://` or `http://` web URLs.
+   - **Subagent Offloading Threshold & Tool Budget Ceiling**: When a task involves deep exploration (>10 files viewed), repetitive test/coverage cycles, or approaches 30 internal tool steps without completing, stop and delegate the work to an isolated subagent (`invoke_subagent`). Subagents execute in fresh, minimal context windows and return only their final findings.
+   - **GitHub Web Links Only (No `file:///` Links)**: Link files exclusively via public GitHub URLs (e.g. `https://github.com/azylman/aerial/blob/main/...`) or clean inline backticks (e.g. `GEMINI.md`). NEVER emit `file://` or `file:///` URIs or masked local file links, as local paths are inaccessible in Discord. Masked links (`[label](url)`) are strictly restricted to valid `http://` or `https://` URLs.
    - **Action-Output Synchronicity Invariant (No False Starts / Future-Tense Promises)**:
      - NEVER end a turn stating in prose that you are "starting", "running", or "kicking off" a task right now (e.g. *"Kicking off Task 1 right now!"*). In a turn-based system, final text is delivered to Discord only after your execution process has completely stopped.
      - If work remains to be done, **do not speak**—execute the tool calls, write code, run tests, or spawn subagents silently.
@@ -174,7 +158,7 @@ Aerial operates on a strict **Two-Repository Separation of Concerns**:
    - **Continuous Autonomous Execution & Review Panel Timing**:
      - **Zero Human Check-In Stalls**: For Tiers 0–2 (and approved Tier 3), execution is continuous without stopping to prompt the user for permission between individual tasks.
      - **Consolidated Pre-PR Review**: Code review panel audits are performed on the consolidated pre-PR diff before submission, rather than pausing to run full review panels after every micro-task.
-     - **Orchestration & Subagent Delegation Invariant**: For Tier 2+ multi-file edits, test triage, and lint remediation loops exceeding Section 5 thresholds (>10 files viewed or approaching the 30-step tool budget ceiling), the primary agent acts as an orchestrator, delegating heavy tool loops to scoped, isolated subagents (for implementation/execution only; per-task review subagents are omitted in favor of the consolidated pre-PR review). Tier 0 and Tier 1 changes execute directly inline in the root thread. Root transcript must remain featherweight (<50 steps) to prevent quadratic token compounding.
+      - **Orchestration & Subagent Delegation Invariant**: For Tier 2+ multi-file edits, test triage, and lint remediation loops exceeding Invariant 5 thresholds, the primary agent acts as an orchestrator, delegating heavy tool loops to scoped, isolated subagents (for implementation/execution only; per-task review subagents are omitted in favor of the consolidated pre-PR review). Tier 0 and Tier 1 changes execute directly inline in the root thread. Root transcript must remain featherweight (<50 steps) to prevent quadratic token compounding.
    - **Subagent Keep-Alive Invariant (Preventing Premature Process Termination)**:
      - **The Dispatch Anchor**: Aerial’s Go execution runner blocks on `proc.Wait()` and delivers output to Discord only after the `agy` process terminates. When dispatching concurrent subagents that must be gathered in-turn (Tiers 2 & 3 review panels or parallel research), the root agent MUST hold `agy`'s reactive event loop open by immediately calling `schedule(DurationSeconds: 120, TimerCondition: "any")` in the same turn as `invoke_subagent`.
      - **The Gathering Loop**: Subagent completion sends an inbound message that cancels the one-shot timer early and wakes the root agent. Upon wake, inspect active subagents via `manage_subagents(Action: "list")`. If any subagents remain running, re-arm with `schedule(DurationSeconds: 120, TimerCondition: "any")`. Once all subagents are idle, synthesize findings directly without setting another timer.
