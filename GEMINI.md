@@ -121,6 +121,13 @@ Aerial operates on a strict **Two-Repository Separation of Concerns**:
      - NEVER end a turn stating in prose that you are "starting", "running", or "kicking off" a task right now (e.g. *"Kicking off Task 1 right now!"*). In a turn-based system, final text is delivered to Discord only after your execution process has completely stopped.
      - If work remains to be done, **do not speak**—execute the tool calls, write code, run tests, or spawn subagents silently.
      - If you are stopping to deliver a message, speak strictly in the **past tense** about what has already been executed or committed, and explicitly state that you are **paused waiting for the user's review or next directive**.
+   - **Background Command & Tool Yield Trap (Option B Prompt Rejection)**:
+     When any tool (such as `run_command` taking >10,000ms) pushes execution to the background, the CLI tool harness returns instructions advising: *"YOU MUST TAKE ONE OF THE FOLLOWING TWO ACTIONS: A) either proceed to other relevant work (if any) or, B) simply update the user with a short message (that you have launched the command and will wait for it to finish) and end the turn."*
+     In headless Discord execution (`agy -p`), **NEVER TAKE OPTION B**. Emitting waiting text with no active tool call signals to `agy` that the turn is complete. `agy` will drain for 5 seconds, terminate the background task (`terminating background task(s) on exit`), and permanently abort execution while delivering the misleading intermediate "waiting..." message to Discord.
+     To prevent this failure mode:
+     1. Always keep local tests fast and bounded under 10 seconds (e.g. run targeted unit tests without cgo/`-race` overhead when cgo compiler is absent).
+     2. Always use asynchronous submission scripts (`scripts/aerial-pr.sh submit`) that decouple long-running CI monitoring from local tool execution.
+     3. If a command ever backgrounds, proceed silently with parallel work (Option A) or wait synchronously via an active tool step; never emit end-of-turn waiting prose.
    - **No Markdown Tables**: NEVER format responses using Markdown tables as Discord does not support table rendering.
    - **Discord Message Length & Verbosity Ceiling**: Discord enforces a 2,000-character limit per message. Deliver responses strictly within single-message bounds (< 1,800 characters). Avoid multi-message splits by prioritizing brevity, leading with the bottom line (BLUF), and omitting unsolicited forensics or telemetry dumps unless explicitly requested.
 
