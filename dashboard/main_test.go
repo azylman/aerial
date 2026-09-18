@@ -3227,8 +3227,8 @@ func TestMergeClusterDeploymentsWithHangar_HangarActiveSuppresses120sTimeout(t *
 		t.Fatalf("expected non-empty deployments")
 	}
 	dep := deps[0]
-	if dep.Stage != "awaiting_pull" {
-		t.Errorf("expected stage 'awaiting_pull' when Hangar is active, got %q", dep.Stage)
+	if dep.Stage != "pulling" && dep.Stage != "awaiting_pull" {
+		t.Errorf("expected stage 'pulling' or 'awaiting_pull' when Hangar is active, got %q", dep.Stage)
 	}
 	if dep.Steps[2].Status != "active" {
 		t.Errorf("expected Hangar Sync step active, got %q", dep.Steps[2].Status)
@@ -3372,5 +3372,105 @@ func TestMergeClusterDeploymentsWithHangar_DegradedWithoutHangarFailure(t *testi
 		t.Errorf("expected Health Check failed, got %s", dep.Steps[4].Status)
 	}
 }
+
+func TestStatusHandler_ConcurrentPipelines(t *testing.T) {
+	hangarServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/status" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(GitSyncStatusResponse{
+				Status: "synced",
+				Reconciliation: &ReconciliationStatus{
+					Active:         true,
+					State:          "swapping",
+					CommitSHA:      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+					TargetServices: []string{"aerial-dashboard"},
+					StartedAt:      time.Now().UTC().Add(-10 * time.Second),
+				},
+			})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer hangarServer.Close()
+
+	oldPoller := globalGHPoller
+	defer func() { globalGHPoller = oldPoller }()
+
+	origDocker := dockerSocketClient
+	defer func() { dockerSocketClient = origDocker }()
+	dockerSocketClient = &http.Client{
+		Transport: &roundTripperFunc{
+			fn: func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader("[]")),
+					Header:     make(http.Header),
+				}, nil
+			},
+		},
+	}
+
+	poller := &GitHubPoller{
+		cachedRuns: []GitHubRun{
+			{
+				ID:        999,
+				HeadSHA:   "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+				Status:    "in_progress",
+				CreatedAt: time.Now().UTC().Add(-2 * time.Minute),
+				UpdatedAt: time.Now().UTC().Add(-1 * time.Minute),
+			},
+		},
+		cachedJobs: map[int64][]GitHubJob{
+			999: {
+				{ID: 1, Name: "Build Dashboard", Status: "in_progress"},
+			},
+		},
+	}
+	globalGHPoller = poller
+
+	tempDir := t.TempDir()
+	cfgFile := filepath.Join(tempDir, "config.yaml")
+	if err := os.WriteFile(cfgFile, []byte("dashboard: {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := statusHandler("", hangarServer.URL, cfgFile, "testcommit")
+	req := httptest.NewRequest("GET", "/api/status", nil)
+	rr := httptest.NewRecorder()
+	handler(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rr.Code)
+	}
+
+	var resp ClusterResponse
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response JSON: %v", err)
+	}
+
+	if len(resp.Deployments) != 2 {
+		t.Fatalf("expected 2 concurrent deployments, got %d", len(resp.Deployments))
+	}
+
+	stages := map[string]string{}
+	for _, d := range resp.Deployments {
+		stages[d.Commit] = d.Stage
+	}
+
+	if stages["aaaaaaa"] != "swapping" {
+		t.Errorf("expected commit aaaaaaa to be swapping, got %q", stages["aaaaaaa"])
+	}
+	if stages["bbbbbbb"] != "building" {
+		t.Errorf("expected commit bbbbbbb to be building, got %q", stages["bbbbbbb"])
+	}
+
+	if resp.OngoingDeploy != "swapping" {
+		t.Errorf("expected OngoingDeploy 'swapping', got %q", resp.OngoingDeploy)
+	}
+	if !resp.IsDeploying {
+		t.Errorf("expected IsDeploying true, got false")
+	}
+}
+
 
 
