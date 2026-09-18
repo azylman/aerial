@@ -486,7 +486,7 @@ services:
     command:
       - "--docker_only=true"
       - "--housekeeping_interval=15s"
-      - "--disable_metrics=percpu,sched,tcp,udp,advtcp,process"
+      - "--disable_metrics=percpu,sched,tcp,udp,advtcp,process,referenced_memory,hugetlb,memory_numa,cpu_topology,resctrl,cpuset"
       - "--store_container_labels=false"
     volumes:
       - /:/rootfs:ro
