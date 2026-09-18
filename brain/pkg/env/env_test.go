@@ -247,6 +247,116 @@ func TestSyncSkills(t *testing.T) {
 	}
 }
 
+func TestSyncSkills_BlockedSkills(t *testing.T) {
+	tmpHome := t.TempDir()
+	tmpCustomSkills := t.TempDir()
+	tmpSuperpowers := t.TempDir()
+
+	p := New(tmpHome, t.TempDir())
+	p.SetCustomSkillsDir(tmpCustomSkills)
+	p.SetSuperpowersDir(tmpSuperpowers)
+	p.SetAgentsSkillsDir(t.TempDir())
+
+	// Custom skill
+	customDir := filepath.Join(tmpCustomSkills, "my-custom-skill")
+	_ = os.MkdirAll(customDir, 0755)
+	_ = os.WriteFile(filepath.Join(customDir, "SKILL.md"), []byte("# My Custom Skill"), 0644)
+
+	// Superpowers skills: 1 allowed, 4 blocked
+	allowedSuperpower := filepath.Join(tmpSuperpowers, "test-driven-development")
+	_ = os.MkdirAll(allowedSuperpower, 0755)
+	_ = os.WriteFile(filepath.Join(allowedSuperpower, "SKILL.md"), []byte("# TDD"), 0644)
+
+	blockedSkills := []string{
+		"using-git-worktrees",
+		"finishing-a-development-branch",
+		"requesting-code-review",
+		"subagent-driven-development",
+	}
+	for _, name := range blockedSkills {
+		dir := filepath.Join(tmpSuperpowers, name)
+		_ = os.MkdirAll(dir, 0755)
+		_ = os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("# Blocked"), 0644)
+	}
+
+	if err := p.SyncSkills(); err != nil {
+		t.Fatalf("SyncSkills failed: %v", err)
+	}
+
+	skillsRoot := filepath.Join(tmpHome, ".gemini", "config", "skills")
+
+	// Allowed skills must exist
+	for _, name := range []string{"my-custom-skill", "test-driven-development"} {
+		path := filepath.Join(skillsRoot, name, "SKILL.md")
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("Expected allowed skill %s at %s, but stat failed: %v", name, path, err)
+		}
+	}
+
+	// Blocked skills must NOT exist
+	for _, name := range blockedSkills {
+		path := filepath.Join(skillsRoot, name)
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Errorf("Expected blocked skill %s to be omitted, but found at %s", name, path)
+		}
+	}
+}
+
+func TestSyncSkills_PrunePreviouslyLinkedBlockedSkills(t *testing.T) {
+	tmpHome := t.TempDir()
+	p := New(tmpHome, t.TempDir())
+	p.SetCustomSkillsDir(t.TempDir())
+	p.SetSuperpowersDir(t.TempDir())
+	p.SetAgentsSkillsDir(t.TempDir())
+
+	skillsRoot := filepath.Join(tmpHome, ".gemini", "config", "skills")
+	_ = os.MkdirAll(skillsRoot, 0755)
+
+	// Pre-create stale symlinks/dirs for blocked skills
+	staleBlocked := filepath.Join(skillsRoot, "using-git-worktrees")
+	_ = os.MkdirAll(staleBlocked, 0755)
+	_ = os.WriteFile(filepath.Join(staleBlocked, "SKILL.md"), []byte("# Stale"), 0644)
+
+	if err := p.SyncSkills(); err != nil {
+		t.Fatalf("SyncSkills failed: %v", err)
+	}
+
+	if _, err := os.Lstat(staleBlocked); !os.IsNotExist(err) {
+		t.Errorf("Expected stale blocked skill %s to be pruned during SyncSkills", staleBlocked)
+	}
+}
+
+func TestLinkSkillsWithFilter(t *testing.T) {
+	targetDir := t.TempDir()
+	srcDir := t.TempDir()
+
+	for _, name := range []string{"allowed-one", "blocked-one", "allowed-two"} {
+		dir := filepath.Join(srcDir, name)
+		_ = os.MkdirAll(dir, 0755)
+		_ = os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("# "+name), 0644)
+	}
+
+	filter := map[string]bool{
+		"blocked-one": true,
+	}
+
+	count := LinkSkillsWithFilter([]string{targetDir}, []string{srcDir}, filter)
+	if count != 2 {
+		t.Errorf("Expected 2 skills linked, got %d", count)
+	}
+
+	if _, err := os.Stat(filepath.Join(targetDir, "allowed-one", "SKILL.md")); err != nil {
+		t.Errorf("Expected allowed-one to be linked")
+	}
+	if _, err := os.Stat(filepath.Join(targetDir, "allowed-two", "SKILL.md")); err != nil {
+		t.Errorf("Expected allowed-two to be linked")
+	}
+	if _, err := os.Lstat(filepath.Join(targetDir, "blocked-one")); !os.IsNotExist(err) {
+		t.Errorf("Expected blocked-one to be filtered out")
+	}
+}
+
+
 func TestSyncRules_Concurrent(t *testing.T) {
 	tmpHome := t.TempDir()
 	p := New(tmpHome, t.TempDir())

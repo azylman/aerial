@@ -7,6 +7,14 @@ import (
 	"path/filepath"
 )
 
+// DefaultBlockedSkills defines skill names excluded from runtime symlinking to prevent clashes with Aerial invariants.
+var DefaultBlockedSkills = map[string]bool{
+	"using-git-worktrees":            true,
+	"finishing-a-development-branch": true,
+	"requesting-code-review":         true,
+	"subagent-driven-development":    true,
+}
+
 // SyncSkills symlinks custom and built-in skills into ~/.gemini/config/skills.
 func (p *Provisioner) SyncSkills() error {
 	if p == nil || p.homeDir == "" {
@@ -32,6 +40,14 @@ func (p *Provisioner) SyncSkills() error {
 		}
 	}
 
+	blocked := p.blockedSkills
+	if blocked == nil {
+		blocked = DefaultBlockedSkills
+	}
+
+	// Clean up any previously linked blocked skills in target directories
+	pruneBlockedSkills(targetSkillDirs, blocked)
+
 	// Orphaned Symlink Sweeper: Clean up dead links before scanning
 	sweepOrphanedSymlinks(targetSkillDirs)
 
@@ -42,17 +58,25 @@ func (p *Provisioner) SyncSkills() error {
 		p.agentsSkillsDir,
 	}
 
-	installedCount := LinkSkills(targetSkillDirs, sourceDirs)
+	installedCount := LinkSkillsWithFilter(targetSkillDirs, sourceDirs, blocked)
 
-	// Final sweep to remove any remaining broken symlinks
+	// Final sweep to remove any remaining broken symlinks and prune any blocked skills
 	sweepOrphanedSymlinks(targetSkillDirs)
+	pruneBlockedSkills(targetSkillDirs, blocked)
 
 	log.Printf("Skills subsystem initialized: %d skill links verified across target directories", installedCount)
 	return nil
 }
 
-// LinkSkills iterates through sourceDirs in priority order, symlinking non-duplicate skills to targetSkillDirs.
+// LinkSkills iterates through sourceDirs in priority order, symlinking non-duplicate skills to targetSkillDirs,
+// filtering out DefaultBlockedSkills.
 func LinkSkills(targetSkillDirs, sourceDirs []string) int {
+	return LinkSkillsWithFilter(targetSkillDirs, sourceDirs, DefaultBlockedSkills)
+}
+
+// LinkSkillsWithFilter iterates through sourceDirs in priority order, symlinking non-duplicate skills
+// to targetSkillDirs while filtering out any skills in blockedSkills.
+func LinkSkillsWithFilter(targetSkillDirs, sourceDirs []string, blockedSkills map[string]bool) int {
 	seenSkills := make(map[string]bool)
 	installedCount := 0
 	for _, srcDir := range sourceDirs {
@@ -72,6 +96,9 @@ func LinkSkills(targetSkillDirs, sourceDirs []string) int {
 			}
 
 			skillName := entry.Name()
+			if blockedSkills != nil && blockedSkills[skillName] {
+				continue
+			}
 			if seenSkills[skillName] {
 				continue
 			}
@@ -115,6 +142,26 @@ func LinkSkills(targetSkillDirs, sourceDirs []string) int {
 	return installedCount
 }
 
+func pruneBlockedSkills(targetSkillDirs []string, blockedSkills map[string]bool) {
+	if len(blockedSkills) == 0 {
+		return
+	}
+	for _, dir := range targetSkillDirs {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if blockedSkills[entry.Name()] {
+				targetPath := filepath.Join(dir, entry.Name())
+				if err := os.RemoveAll(targetPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+					log.Printf("[Skills] Warning removing blocked skill %s: %v", targetPath, err)
+				}
+			}
+		}
+	}
+}
+
 func sweepOrphanedSymlinks(targetSkillDirs []string) {
 	for _, dir := range targetSkillDirs {
 		entries, err := os.ReadDir(dir)
@@ -137,3 +184,4 @@ func sweepOrphanedSymlinks(targetSkillDirs []string) {
 		}
 	}
 }
+
