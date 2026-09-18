@@ -1856,7 +1856,6 @@ func TestHandleTasks_CacheDoubleCheck(t *testing.T) {
 
 func TestRunBrainApp_FullLifecycle(t *testing.T) {
 	tmpDir := t.TempDir()
-	_ = os.MkdirAll(filepath.Join(tmpDir, ".gemini", "skills"), 0755)
 	_ = os.MkdirAll(filepath.Join(tmpDir, ".gemini", "config", "skills"), 0755)
 
 	cfg, err := config.LoadConfigFromPaths()

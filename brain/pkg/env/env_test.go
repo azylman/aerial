@@ -220,10 +220,20 @@ func TestSyncSkills(t *testing.T) {
 		t.Fatalf("SyncSkills failed: %v", err)
 	}
 
-	targetDir := filepath.Join(tmpHome, ".gemini", "skills", "test-skill")
+	targetDir := filepath.Join(tmpHome, ".gemini", "config", "skills", "test-skill")
 	targetSkillMD := filepath.Join(targetDir, "SKILL.md")
 	if _, err := os.Stat(targetSkillMD); err != nil {
 		t.Fatalf("Expected symlinked skill at %s: %v", targetSkillMD, err)
+	}
+
+	// Verify legacy ~/.gemini/skills directory is purged
+	legacyDir := filepath.Join(tmpHome, ".gemini", "skills")
+	_ = os.MkdirAll(legacyDir, 0755)
+	if err := p.SyncSkills(); err != nil {
+		t.Fatalf("SyncSkills with legacy dir failed: %v", err)
+	}
+	if _, err := os.Stat(legacyDir); !os.IsNotExist(err) {
+		t.Errorf("Expected legacy skills directory %s to be purged", legacyDir)
 	}
 
 	// Test orphaned symlink cleanup
@@ -825,9 +835,9 @@ func TestSyncSkills_AndLinkSkills_Branches(t *testing.T) {
 	// 1. SyncSkills MkdirAll warning branch
 	tmpHome := t.TempDir()
 	p := New(tmpHome, t.TempDir())
-	// Block .gemini/skills with a regular file
-	_ = os.MkdirAll(filepath.Join(tmpHome, ".gemini"), 0755)
-	_ = os.WriteFile(filepath.Join(tmpHome, ".gemini", "skills"), []byte("blocking-file"), 0644)
+	// Block .gemini/config/skills with a regular file
+	_ = os.MkdirAll(filepath.Join(tmpHome, ".gemini", "config"), 0755)
+	_ = os.WriteFile(filepath.Join(tmpHome, ".gemini", "config", "skills"), []byte("blocking-file"), 0644)
 	if err := p.SyncSkills(); err != nil {
 		t.Errorf("Expected SyncSkills to handle MkdirAll warning gracefully, got: %v", err)
 	}

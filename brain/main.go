@@ -946,7 +946,6 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 			"/share/aerial-config",
 			"/share/aerial",
 			"/app/.agents/skills",
-			filepath.Join(homeDir, ".gemini", "skills"),
 			filepath.Join(homeDir, ".gemini", "config", "skills"),
 		}
 

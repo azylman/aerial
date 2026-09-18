@@ -7,14 +7,24 @@ import (
 	"path/filepath"
 )
 
-// SyncSkills symlinks custom and built-in skills into ~/.gemini/skills directories.
+// SyncSkills symlinks custom and built-in skills into ~/.gemini/config/skills.
 func (p *Provisioner) SyncSkills() error {
 	if p == nil || p.homeDir == "" {
 		return nil
 	}
+
+	// Clean up legacy ~/.gemini/skills directory if present to eliminate redundant skill trees
+	legacySkillsDir := filepath.Join(p.homeDir, ".gemini", "skills")
+	if fi, err := os.Lstat(legacySkillsDir); err == nil {
+		if fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 {
+			if rmErr := os.RemoveAll(legacySkillsDir); rmErr != nil {
+				log.Printf("[Skills] Warning removing legacy skills directory %s: %v", legacySkillsDir, rmErr)
+			}
+		}
+	}
+
 	targetSkillDirs := []string{
 		filepath.Join(p.homeDir, ".gemini", "config", "skills"),
-		filepath.Join(p.homeDir, ".gemini", "skills"),
 	}
 	for _, dir := range targetSkillDirs {
 		if err := os.MkdirAll(dir, 0755); err != nil {
