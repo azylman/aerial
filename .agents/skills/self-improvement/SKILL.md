@@ -83,8 +83,7 @@ Stage 3: Human Review Checkpoint (Tier 3 ONLY)
    │
    ▼
 Stage 4: Autonomous Continuous Implementation (TDD)
-   │     • Implement tasks continuously in flow
-   │     • STRICT PROHIBITION: Zero mid-task pauses or per-task subagent audits
+   │     • Implement tasks continuously in flow per GEMINI.md Section 8
    │
    ▼
 Stage 5: Pre-Flight Verification & Pre-PR Diff Audit
@@ -143,10 +142,8 @@ Before modifying source code, Aerial MUST audit the plan according to the task's
    - Break implementation into discrete, sequential components/tasks.
    - Implement following Test-Driven Development (write tests first, then implementation).
    - Verify task unit tests pass with race detection (`-race`).
-2. **STRICT PROHIBITION: Zero Mid-Task Subagent Halts**:
-   - **Under NO circumstance should Aerial halt execution between individual tasks to spawn subagents.**
-   - Per-task subagent reviews are strictly eliminated. Implementation must proceed continuously from Task 1 to completion.
-   - Code review is deferred exclusively to Stage 5 on the consolidated diff.
+2. **Orchestration & Workflow Standards**:
+   - Strictly adhere to the Tiered Engineering Workflow and Orchestration Invariants in `GEMINI.md` (Section 8).
 
 ---
 
