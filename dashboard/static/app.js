@@ -360,7 +360,8 @@ function renderDeployments(deployments) {
             deployBadge.textContent = `⬇️ HANGAR PULLING`;
             deployBadge.className = 'section-badge pulling';
         } else if (isBuilding) {
-            deployBadge.textContent = `⚡ 1 CI BUILD ACTIVE`;
+            const buildingCount = deploys.filter(dep => dep.stage === 'building' || dep.stage === 'queued').length;
+            deployBadge.textContent = buildingCount > 1 ? `⚡ ${buildingCount} CI BUILDS ACTIVE` : `⚡ 1 CI BUILD ACTIVE`;
             deployBadge.className = 'section-badge building';
         } else if (isAwaitingPull) {
             deployBadge.textContent = `⬇️ AWAITING HANGAR SYNC`;
@@ -458,9 +459,20 @@ function renderDeployments(deployments) {
 
         const isHexSha = /^[0-9a-f]{7,40}$/i.test(String(dep.commit || '').trim());
         const safeCommit = escapeHtml(dep.commit || 'latest');
+        const rawRepo = (typeof dep.repository === 'string' && /^[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+$/.test(dep.repository.trim()))
+            ? dep.repository.trim()
+            : 'azylman/aerial';
+        const repoParts = rawRepo.split('/');
+        const safeRepoUrl = `https://github.com/${encodeURIComponent(repoParts[0])}/${encodeURIComponent(repoParts[1])}`;
         const commitMarkup = isHexSha
-            ? `<a href="https://github.com/azylman/aerial/commit/${encodeURIComponent(dep.commit.trim())}" target="_blank" rel="noopener" class="deploy-commit-link" title="View commit on GitHub">${safeCommit} ↗</a>`
+            ? `<a href="${safeRepoUrl}/commit/${encodeURIComponent(dep.commit.trim())}" target="_blank" rel="noopener" class="deploy-commit-link" title="View commit on GitHub">${safeCommit} ↗</a>`
             : `<span class="deploy-commit">${safeCommit}</span>`;
+
+        let repoMarkup = '';
+        if (dep.repository && typeof dep.repository === 'string') {
+            const safeRepo = escapeHtml(dep.repository);
+            repoMarkup = `<span class="deploy-repo-badge" title="Repository: ${safeRepo}">📦 ${safeRepo}</span>`;
+        }
 
         let commitTimeMarkup = '';
         const rawTimeStr = dep.commit_time || dep.started_at;
@@ -496,6 +508,7 @@ function renderDeployments(deployments) {
             ${(isBuildingStage || isPulling || isSwapping || isAwaitingPull) ? '<div class="deploy-card-laser"></div>' : ''}
             <div class="deploy-card-header">
                 <div class="deploy-target">
+                    ${repoMarkup}
                     ${commitMarkup}
                     ${commitTimeMarkup}
                     ${runLinkMarkup}
