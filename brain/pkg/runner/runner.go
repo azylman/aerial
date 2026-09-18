@@ -224,20 +224,6 @@ func ParseAgyOutput(stdout string) (*AgyResponse, error) {
 	return resultResp, nil
 }
 
-var silentWaitRegex = regexp.MustCompile(`(?i)^wait for (background task|subagent|remaining subagent|the final subagent).*\.?$`)
-
-// IsSilentSentinel checks whether stdout is empty, consists solely of whitespace,
-// or matches internal CLI task-wait notices that should not be delivered to users.
-// Returns true if empty string, whitespace, or internal wait chatter.
-// Returns false for visible conversational responses.
-func IsSilentSentinel(stdout string) bool {
-	trimmed := strings.TrimSpace(stdout)
-	if trimmed == "" {
-		return true
-	}
-	return silentWaitRegex.MatchString(trimmed)
-}
-
 var (
 	ErrInactivityTimeout = errors.New("watchdog: inactivity timeout exceeded")
 	ErrMaxDuration       = errors.New("watchdog: max duration exceeded")

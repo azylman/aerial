@@ -9,7 +9,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -401,16 +400,6 @@ func (m *Manager) ExtractResponseAndError(convID string) (string, string) {
 	return lastResponse, lastError
 }
 
-var silentWaitRegex = regexp.MustCompile(`(?i)^wait for (background task|subagent|remaining subagent|the final subagent).*\.?$`)
-
-func isSilentSentinel(s string) bool {
-	trimmed := strings.TrimSpace(s)
-	if trimmed == "" {
-		return true
-	}
-	return silentWaitRegex.MatchString(trimmed)
-}
-
 // ExtractFinalSubstantiveResponse extracts strictly the terminal conversational PLANNER_RESPONSE
 // step for an active conversation turn, bypassing multi-turn tool progress chatter concatenated by agy.
 // It returns the substantive response text, whether the turn was explicitly silent, and any error.
@@ -543,7 +532,7 @@ func (m *Manager) ExtractFinalSubstantiveResponse(ctx context.Context, convID st
 					break
 				}
 
-				if isSilentSentinel(trimmedContent) {
+				if trimmedContent == "" {
 					return "", true, nil
 				}
 

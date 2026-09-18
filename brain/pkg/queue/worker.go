@@ -1766,7 +1766,7 @@ func (te *turnExecution) executeWithRetries() {
 					attachments := delivery.MergeAttachments(finalAttachments, fullAttachments)
 					attachments = delivery.AutoAttachNewMedia(baseDir, te.execStart, attachments)
 
-					isSilent := runner.IsSilentSentinel(cleanText) && len(attachments) == 0
+					isSilent := strings.TrimSpace(cleanText) == "" && len(attachments) == 0
 					if isSilent {
 						log.Printf("[Queue] Output is empty. Skipping Discord delivery.")
 					} else {
