@@ -53,25 +53,12 @@ Check active deployment and container swap progress:
 
 ---
 
-## 3. Path B: Two-Repository Separation of Concerns & Scratch PR Gate
+## 3. Path B: Dual-Repository Architecture & Ephemeral Workspaces
 
-When undertaking code or configuration changes, Aerial cleanly separates generic system code from private user configuration:
-
-### 3.1 Core Engine Repository (`azylman/aerial` at `/share/aerial`)
-- **Scope**: Generic Go execution engine (`brain/`), built-in MCP microservices (`scheduler-mcp`, `discord-mcp`, `docker-mcp`, `github-mcp`), base system skills, Docker topology, and core architecture docs.
-- **Strict Invariants**:
-  - **100% Generic & Domain-Agnostic**: All prompts, code, error handlers, and schemas must remain completely generic and reusable for any user.
-  - **Zero Personal Data Invariant**: **NEVER** commit real names, Discord handles, usernames, family members, home addresses/locations, private device/entity IDs, or user-specific business logic into this repository.
-  - **Zero Plaintext Secrets Invariant**: NEVER commit API keys, tokens, private webhook URLs, or GitHub PATs to disk.
-- **Deployment Flow**: GitHub Actions builds and publishes images to GHCR; Hangar on the host reconciles updated containers out-of-band.
-
-### 3.2 User Configuration Repository (`azylman/aerial-config` at `/share/aerial-config`)
-- **Scope**: User options (`config.yaml`), persona overrides & user identity/aliases (`AGENTS.md`), private smart home/domain workflows (`custom-skills/`), sidecar containers (`docker-compose.override.yml`), and host environment secrets (`.env`).
-- **Strict Invariants**: User identity, personal aliases, private credentials. Filesystem is mounted read-only (`:ro`) inside the container.
-- **Deployment Flow**: In-process `fsnotify` watcher hot-reloads configuration and skills dynamically within milliseconds; Hangar pulls git updates.
-
-### 3.3 Read-Only Mount Invariant
-**NEVER** run `git pull`, `git checkout`, `git commit`, or edit files in `/share/aerial` or `/share/aerial-config` directly. All changes must be authored in an ephemeral scratch workspace via `scripts/aerial-pr.sh init` or `scripts/aerial-config-pr.sh init`.
+Code and configuration changes are governed by the two-repository separation and kernel `:ro` immutability defined in `GEMINI.md` ("Decoupled Configuration & Repository Separation"):
+- **Core Engine (`azylman/aerial`)**: Generic execution engine, base skills, and Docker topology. Zero personal data; zero plaintext tokens.
+- **User Configuration (`azylman/aerial-config`)**: Private options, persona overrides, and domain skills.
+- **Ephemeral Scratch Workspaces**: Because `/share/aerial` and `/share/aerial-config` are mounted read-only (`:ro`), all changes must be authored in isolated scratch clones initialized via `scripts/aerial-pr.sh init` or `scripts/aerial-config-pr.sh init`.
 
 ---
 
@@ -184,30 +171,24 @@ Follow the automated scratch PR workflows detailed in **Section 5**.
 
 ## 5. Asynchronous Scratch PR Automation
 
-All code and configuration changes must follow the automated PR workflow:
+All code and configuration changes must follow the automated scratch PR workflow per `GEMINI.md` Invariant 6:
 
 ### 5.1 Core Engine PR Workflow (`scripts/aerial-pr.sh`)
 1. **Initialize Scratch Workspace**:
    ```bash
    /share/aerial/scripts/aerial-pr.sh init
    ```
-   Clones `azylman/aerial:main` into an isolated scratch directory (`/data/scratch/aerial-code-scratch.XXXXXX`) on an ephemeral branch.
 2. **Implement & Author PR Description**:
    - Write tests and code following TDD.
-   - Author `PR_DESCRIPTION.md` in the scratch root (mandatory; submissions fail without a description).
+   - Author mandatory `PR_DESCRIPTION.md` in the scratch root.
 3. **Submit Asynchronously**:
    ```bash
    /share/aerial/scripts/aerial-pr.sh submit <scratch_dir> "feat(module): description"
    ```
-   - Automatically runs fast pre-flight verification (`./scripts/verify.sh --staged`).
-   - Pushes branch, creates PR with auto-merge, and schedules follow-up check via `scheduler-mcp`.
-   - Cleans up scratch directory immediately. **Do not poll CI in foreground; end active execution turn.**
 4. **Verify & Merge on Scheduled Wake-up**:
    ```bash
    /share/aerial/scripts/aerial-pr.sh merge <pr_num>
    ```
-   - If CI is still pending (exit code 2), quietly reschedule follow-up check.
-   - Upon green merge, confirms merge and tracks container swap to completion in max 2 sentences.
 
 ### 5.2 Configuration PR Workflow (`scripts/aerial-config-pr.sh`)
 1. **Initialize Scratch Workspace**:
@@ -216,24 +197,22 @@ All code and configuration changes must follow the automated PR workflow:
    ```
 2. **Implement & Author PR Description**:
    - Update YAML, prompts, or custom skills.
-   - Author `PR_DESCRIPTION.md` in the scratch root.
+   - Author mandatory `PR_DESCRIPTION.md` in the scratch root.
 3. **Submit Asynchronously**:
    ```bash
    /share/aerial/scripts/aerial-config-pr.sh submit <scratch_dir> "chore(config): description"
    ```
-   - Automatically validates YAML syntax and schema.
-   - Pushes branch, creates PR, and schedules follow-up check via `scheduler-mcp`.
 4. **Verify & Merge on Scheduled Wake-up**:
    ```bash
    /share/aerial/scripts/aerial-config-pr.sh merge <pr_num>
    ```
-   - Hangar syncs repository and in-process watcher hot-reloads changes without container downtime.
 
 ---
 
 ## 6. Operational Invariants
 
-• **Container Execution Invariant**: NEVER execute `docker compose up`, `docker compose build`, or `docker restart` from inside the container. All image builds occur in GitHub Actions CI, and container swaps are handled by Hangar.
-• **Scheduling Invariant**: Never schedule manual follow-up timers after calling `submit`; `aerial-pr.sh submit` automatically registers the follow-up reminder via `scheduler-mcp`.
-• **Response Format Invariant**: Merge and deployment confirmations must be reported in plain prose strictly capped at 2 sentences max (no markdown checklists, tables, or forward-looking promises).
-• **ZERO-BYPASS INVARIANT**: Verification checks (`./scripts/verify.sh --staged`) are strictly blocking; `--no-verify` is forbidden.
+All engineering operations must strictly adhere to the canonical invariants defined in `GEMINI.md` ("Core Invariants & Operational Rules"):
+• **Scheduling Invariant (Invariant 4)**: Persistent reminders and PR follow-ups exclusively via `scheduler-mcp`. The built-in ephemeral CLI `schedule` tool is restricted to in-turn subagent keep-alive.
+• **Asynchronous PR Workflow (Invariant 6)**: Exclusively asynchronous submission with automated follow-up scheduling. Mandatory `PR_DESCRIPTION.md`. Zero-bypass pre-flight verification (`./scripts/verify.sh --staged`). Response confirmations strictly capped at 2 sentences max in plain prose.
+• **Hermetic Testing & Environment Boundaries (Invariants 7 & 15)**: Host-native test execution; zero arbitrary `time.Sleep`; zero in-container `docker compose` mutations.
+
