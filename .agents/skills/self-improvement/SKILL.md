@@ -84,7 +84,7 @@ Stage 3: Human Review Checkpoint (Tier 3 ONLY)
    ▼
 Stage 4: Autonomous Continuous Implementation (TDD)
    │     • Implement tasks continuously in flow
-   │     • STRICT PROHIBITION: Zero mid-task pauses or per-task subagent audits
+   │     • Continuous flow: zero human check-in stalls; subagent delegation for heavy implementation chunks
    │
    ▼
 Stage 5: Pre-Flight Verification & Pre-PR Diff Audit
@@ -143,10 +143,10 @@ Before modifying source code, Aerial MUST audit the plan according to the task's
    - Break implementation into discrete, sequential components/tasks.
    - Implement following Test-Driven Development (write tests first, then implementation).
    - Verify task unit tests pass with race detection (`-race`).
-2. **STRICT PROHIBITION: Zero Mid-Task Subagent Halts**:
-   - **Under NO circumstance should Aerial halt execution between individual tasks to spawn subagents.**
-   - Per-task subagent reviews are strictly eliminated. Implementation must proceed continuously from Task 1 to completion.
-   - Code review is deferred exclusively to Stage 5 on the consolidated diff.
+2. **Continuous Execution & Subagent Delegation**:
+   - **Zero Human Check-In Stalls**: Implementation proceeds continuously from Task 1 to completion without pausing to prompt the human user for permission between individual tasks.
+   - **Consolidated Pre-PR Review**: Per-task subagent review audits are strictly eliminated; code review panel audits are deferred exclusively to Stage 5 on the consolidated diff.
+   - **Orchestration & Subagent Delegation Invariant**: For Tier 1+ multi-file edits, test triage, and lint remediation loops exceeding Section 5 thresholds (>10 files viewed or approaching the 30-step tool ceiling), Aerial acts as an orchestrator, delegating discrete implementation chunks to scoped subagents. Subagents focus strictly on implementation/execution without spawning nested review subagents. The root session transcript remains featherweight (<50 steps) to prevent quadratic context compounding.
 
 ---
 
