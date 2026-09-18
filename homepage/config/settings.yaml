@@ -6,7 +6,7 @@ headerStyle: clean
 layout:
   Aerial AI & Mission Control:
     style: row
-    columns: 4
+    columns: 3
   Observability:
     style: row
     columns: 2

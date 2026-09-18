@@ -752,10 +752,6 @@ services:
     stop_grace_period: 15s
     labels:
       autoheal: "true"
-      homepage.group: "Observability"
-      homepage.name: "Vector Agent"
-      homepage.icon: "vector.png"
-      homepage.description: "High-Performance Observability Router"
     environment:
       - VECTOR_LOG_FORMAT=json
       - VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION=true
