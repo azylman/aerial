@@ -212,7 +212,7 @@ All code and configuration changes must follow the automated scratch PR workflow
 ## 6. Operational Invariants
 
 All engineering operations must strictly adhere to the canonical invariants defined in `GEMINI.md` ("Core Invariants & Operational Rules"):
-• **Scheduling Invariant (Invariant 4)**: Persistent reminders and PR follow-ups exclusively via `scheduler-mcp`. The built-in ephemeral CLI `schedule` tool is restricted to in-turn subagent keep-alive.
+• **Scheduling Invariant (Invariant 4)**: Persistent reminders and PR follow-ups exclusively via `scheduler-mcp`. The built-in ephemeral CLI `schedule` tool is strictly prohibited (causes print-mode drain and premature termination).
 • **Asynchronous PR Workflow (Invariant 6)**: Exclusively asynchronous submission with automated follow-up scheduling. Mandatory `PR_DESCRIPTION.md`. Zero-bypass pre-flight verification (`./scripts/verify.sh --staged`). Response confirmations strictly capped at 2 sentences max in plain prose.
 • **Hermetic Testing & Environment Boundaries (Invariants 7 & 15)**: Host-native test execution; zero arbitrary `time.Sleep`; zero in-container `docker compose` mutations.
 
