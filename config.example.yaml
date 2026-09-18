@@ -103,3 +103,16 @@ git_sync:
 # ------------------------------------------------------------------------------
 # Additional MCP servers to merge into ~/.gemini/config/mcp_config.json
 mcp_servers: {}
+
+# ------------------------------------------------------------------------------
+# Dashboard Configuration
+# ------------------------------------------------------------------------------
+# Configures CI and pipeline monitoring in the Aerial Command HUD (aerial-dashboard).
+dashboard:
+  # Repositories to monitor in the CI pipeline fanout.
+  # When configured, the poller checks GitHub Actions runs across all declared repos.
+  github_repos:
+    - your-org/aerial
+    # - your-org/aerial-sidecars
+    # - your-org/aerial-config
+

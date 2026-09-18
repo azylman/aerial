@@ -3373,4 +3373,412 @@ func TestMergeClusterDeploymentsWithHangar_DegradedWithoutHangarFailure(t *testi
 	}
 }
 
+func TestLoadDashboardRepos_TableDriven(t *testing.T) {
+	tempDir := t.TempDir()
+
+	tests := []struct {
+		name     string
+		yamlData string
+		noFile   bool
+		expected []string
+	}{
+		{
+			name:     "empty path returns nil",
+			yamlData: "",
+			noFile:   true,
+			expected: nil,
+		},
+		{
+			name:     "non-existent file returns nil",
+			yamlData: "",
+			noFile:   true,
+			expected: nil,
+		},
+		{
+			name:     "invalid yaml returns nil",
+			yamlData: "dashboard: [invalid-yaml",
+			expected: nil,
+		},
+		{
+			name: "dashboard.github_repos valid list with trimming and deduplication",
+			yamlData: `
+dashboard:
+  github_repos:
+    - " azylman/aerial "
+    - "azylman/aerial-sidecars"
+    - "azylman/aerial-config"
+    - "azylman/aerial"
+    - ""
+`,
+			expected: []string{"azylman/aerial", "azylman/aerial-sidecars", "azylman/aerial-config"},
+		},
+		{
+			name: "dashboard.repos fallback",
+			yamlData: `
+dashboard:
+  repos:
+    - "org/repo-a"
+    - "org/repo-b"
+`,
+			expected: []string{"org/repo-a", "org/repo-b"},
+		},
+		{
+			name: "root github_repos fallback",
+			yamlData: `
+github_repos:
+  - "root/repo-1"
+  - "root/repo-2"
+`,
+			expected: []string{"root/repo-1", "root/repo-2"},
+		},
+		{
+			name: "empty lists return nil",
+			yamlData: `
+dashboard:
+  github_repos: []
+`,
+			expected: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := ""
+			if !tt.noFile {
+				f := filepath.Join(tempDir, tt.name+".yaml")
+				if err := os.WriteFile(f, []byte(tt.yamlData), 0644); err != nil {
+					t.Fatalf("failed to write test yaml: %v", err)
+				}
+				path = f
+			} else if tt.name == "non-existent file returns nil" {
+				path = filepath.Join(tempDir, "non-existent.yaml")
+			}
+
+			got := loadDashboardRepos(path)
+			if len(got) != len(tt.expected) {
+				t.Fatalf("expected %v, got %v (length mismatch: %d vs %d)", tt.expected, got, len(tt.expected), len(got))
+			}
+			for i := range got {
+				if got[i] != tt.expected[i] {
+					t.Errorf("expected [%d]=%q, got %q", i, tt.expected[i], got[i])
+				}
+			}
+		})
+	}
+}
+
+func TestNewDashboardConfigFromLookup_MultiRepo(t *testing.T) {
+	// 1. GITHUB_REPOS set
+	lookupWithRepos := func(key string) string {
+		switch key {
+		case "GITHUB_REPOS":
+			return "azylman/aerial, azylman/aerial-sidecars, azylman/aerial-config"
+		default:
+			return ""
+		}
+	}
+	cfg1 := NewDashboardConfigFromLookup(lookupWithRepos)
+	expectedRepos1 := []string{"azylman/aerial", "azylman/aerial-sidecars", "azylman/aerial-config"}
+	if len(cfg1.GHRepos) != len(expectedRepos1) {
+		t.Fatalf("expected %d repos, got %d: %+v", len(expectedRepos1), len(cfg1.GHRepos), cfg1.GHRepos)
+	}
+	for i, r := range cfg1.GHRepos {
+		if r != expectedRepos1[i] {
+			t.Errorf("expected [%d]=%q, got %q", i, expectedRepos1[i], r)
+		}
+	}
+	if cfg1.GHRepo != "azylman/aerial" {
+		t.Errorf("expected GHRepo to match first repo 'azylman/aerial', got %q", cfg1.GHRepo)
+	}
+
+	// 2. GITHUB_REPO set without GITHUB_REPOS
+	lookupSingle := func(key string) string {
+		switch key {
+		case "GITHUB_REPO":
+			return "custom/single-repo"
+		default:
+			return ""
+		}
+	}
+	cfg2 := NewDashboardConfigFromLookup(lookupSingle)
+	if len(cfg2.GHRepos) != 1 || cfg2.GHRepos[0] != "custom/single-repo" {
+		t.Errorf("expected GHRepos=[custom/single-repo], got %+v", cfg2.GHRepos)
+	}
+	if cfg2.GHRepo != "custom/single-repo" {
+		t.Errorf("expected GHRepo=custom/single-repo, got %q", cfg2.GHRepo)
+	}
+
+	// 3. Default fallback when neither is set
+	cfg3 := NewDashboardConfigFromLookup(func(string) string { return "" })
+	if len(cfg3.GHRepos) != 1 || cfg3.GHRepos[0] != "azylman/aerial" {
+		t.Errorf("expected default GHRepos=[azylman/aerial], got %+v", cfg3.GHRepos)
+	}
+	if cfg3.GHRepo != "azylman/aerial" {
+		t.Errorf("expected default GHRepo=azylman/aerial, got %q", cfg3.GHRepo)
+	}
+}
+
+func TestMultiRepoGitHubPoller_FanoutAndSnapshot(t *testing.T) {
+	runIDAerial := int64(1001)
+	runIDSidecars := int64(2001)
+	now := time.Now().UTC()
+
+	mockGH := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/repos/azylman/aerial/actions/runs":
+			if r.Header.Get("If-None-Match") == "etag-aerial-1" {
+				w.WriteHeader(http.StatusNotModified)
+				return
+			}
+			w.Header().Set("ETag", "etag-aerial-1")
+			_ = json.NewEncoder(w).Encode(GitHubRunsResponse{
+				TotalCount: 1,
+				WorkflowRuns: []GitHubRun{
+					{
+						ID:         runIDAerial,
+						Name:       "CI",
+						HeadSHA:    "1111aaa",
+						Status:     "completed",
+						Conclusion: "success",
+						CreatedAt:  now.Add(-10 * time.Minute),
+						UpdatedAt:  now.Add(-8 * time.Minute),
+						HTMLURL:    "https://github.com/azylman/aerial/actions/runs/1001",
+					},
+				},
+			})
+		case r.URL.Path == "/repos/azylman/aerial-sidecars/actions/runs":
+			if r.Header.Get("If-None-Match") == "etag-sidecars-1" {
+				w.WriteHeader(http.StatusNotModified)
+				return
+			}
+			w.Header().Set("ETag", "etag-sidecars-1")
+			_ = json.NewEncoder(w).Encode(GitHubRunsResponse{
+				TotalCount: 1,
+				WorkflowRuns: []GitHubRun{
+					{
+						ID:         runIDSidecars,
+						Name:       "Build Sidecars",
+						HeadSHA:    "2222bbb",
+						Status:     "in_progress",
+						Conclusion: "",
+						CreatedAt:  now.Add(-2 * time.Minute),
+						UpdatedAt:  now.Add(-10 * time.Second),
+						HTMLURL:    "https://github.com/azylman/aerial-sidecars/actions/runs/2001",
+					},
+				},
+			})
+		case r.URL.Path == fmt.Sprintf("/repos/azylman/aerial/actions/runs/%d/jobs", runIDAerial):
+			_ = json.NewEncoder(w).Encode(GitHubJobsResponse{
+				TotalCount: 1,
+				Jobs: []GitHubJob{
+					{
+						ID:         11,
+						RunID:      runIDAerial,
+						Name:       "test (brain)",
+						Status:     "completed",
+						Conclusion: "success",
+					},
+				},
+			})
+		case r.URL.Path == fmt.Sprintf("/repos/azylman/aerial-sidecars/actions/runs/%d/jobs", runIDSidecars):
+			_ = json.NewEncoder(w).Encode(GitHubJobsResponse{
+				TotalCount: 1,
+				Jobs: []GitHubJob{
+					{
+						ID:        22,
+						RunID:     runIDSidecars,
+						Name:      "Build & Push Images to GHCR (aura-farming)",
+						Status:    "in_progress",
+						StartedAt: now.Add(-60 * time.Second),
+					},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer mockGH.Close()
+
+	repos := []string{"azylman/aerial", "azylman/aerial-sidecars"}
+	poller := NewMultiGitHubPoller(repos, "test-token")
+	poller.apiBaseURL = mockGH.URL
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Initial poll - should fan out to both repos
+	hasActive := poller.pollOnce(ctx)
+	if !hasActive {
+		t.Errorf("expected hasActive=true because aerial-sidecars is in_progress")
+	}
+
+	runs, jobs := poller.GetSnapshot()
+	if len(runs) != 2 {
+		t.Fatalf("expected 2 runs across both repos, got %d: %+v", len(runs), runs)
+	}
+
+	// Active run from sidecars should be prioritized first in cachedRuns
+	if runs[0].ID != runIDSidecars || runs[0].Repository != "azylman/aerial-sidecars" {
+		t.Errorf("expected first run to be active sidecars run %d with repo azylman/aerial-sidecars, got %+v", runIDSidecars, runs[0])
+	}
+	if runs[1].ID != runIDAerial || runs[1].Repository != "azylman/aerial" {
+		t.Errorf("expected second run to be aerial run %d with repo azylman/aerial, got %+v", runIDAerial, runs[1])
+	}
+
+	// Verify jobs for BOTH repos were preserved without being wiped out by subsequent repo polls
+	if len(jobs[runIDAerial]) != 1 {
+		t.Errorf("expected 1 job for aerial run %d, got %+v", runIDAerial, jobs[runIDAerial])
+	}
+	if len(jobs[runIDSidecars]) != 1 {
+		t.Errorf("expected 1 job for sidecars run %d, got %+v", runIDSidecars, jobs[runIDSidecars])
+	}
+
+	// Second poll - both repos return 304 Not Modified
+	hasActive2 := poller.pollOnce(ctx)
+	if !hasActive2 {
+		t.Errorf("expected hasActive2=true on 304 because sidecars is still in_progress")
+	}
+
+	runs2, jobs2 := poller.GetSnapshot()
+	if len(runs2) != 2 {
+		t.Fatalf("expected 2 runs to persist after 304, got %d", len(runs2))
+	}
+	if len(jobs2[runIDAerial]) != 1 || len(jobs2[runIDSidecars]) != 1 {
+		t.Errorf("expected jobs to persist after 304 poll")
+	}
+}
+
+func TestMultiRepoGitHubPoller_DynamicConfigReload(t *testing.T) {
+	tempDir := t.TempDir()
+	cfgFile := filepath.Join(tempDir, "config.yaml")
+
+	// Initially only aerial is configured
+	initialYaml := `
+dashboard:
+  github_repos:
+    - "azylman/aerial"
+`
+	if err := os.WriteFile(cfgFile, []byte(initialYaml), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	callCountAerial := 0
+	callCountSidecars := 0
+	mockGH := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/repos/azylman/aerial/actions/runs":
+			callCountAerial++
+			_ = json.NewEncoder(w).Encode(GitHubRunsResponse{})
+		case "/repos/azylman/aerial-sidecars/actions/runs":
+			callCountSidecars++
+			_ = json.NewEncoder(w).Encode(GitHubRunsResponse{})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer mockGH.Close()
+
+	poller := NewMultiGitHubPoller([]string{"azylman/aerial"}, "token")
+	poller.apiBaseURL = mockGH.URL
+	poller.configPath = cfgFile
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// First poll - only aerial is queried
+	_ = poller.pollOnce(ctx)
+	if callCountAerial != 1 || callCountSidecars != 0 {
+		t.Fatalf("expected 1 aerial call, 0 sidecars calls; got aerial=%d, sidecars=%d", callCountAerial, callCountSidecars)
+	}
+
+	// Update config.yaml to include aerial-sidecars
+	updatedYaml := `
+dashboard:
+  github_repos:
+    - "azylman/aerial"
+    - "azylman/aerial-sidecars"
+`
+	if err := os.WriteFile(cfgFile, []byte(updatedYaml), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Second poll - both should be queried now!
+	_ = poller.pollOnce(ctx)
+	if callCountAerial != 2 || callCountSidecars != 1 {
+		t.Fatalf("expected 2 aerial calls, 1 sidecars call; got aerial=%d, sidecars=%d", callCountAerial, callCountSidecars)
+	}
+}
+
+func TestMergeClusterDeployments_MultiRepoActiveFanout(t *testing.T) {
+	now := time.Now().UTC()
+	runs := []GitHubRun{
+		{
+			ID:         101,
+			Repository: "azylman/aerial",
+			Name:       "CI",
+			HeadSHA:    "1111aaa",
+			Status:     "in_progress",
+			CreatedAt:  now.Add(-2 * time.Minute),
+			HTMLURL:    "https://github.com/azylman/aerial/actions/runs/101",
+		},
+		{
+			ID:         201,
+			Repository: "azylman/aerial-sidecars",
+			Name:       "Build Sidecars",
+			HeadSHA:    "2222bbb",
+			Status:     "in_progress",
+			CreatedAt:  now.Add(-1 * time.Minute),
+			HTMLURL:    "https://github.com/azylman/aerial-sidecars/actions/runs/201",
+		},
+	}
+
+	deploys := mergeClusterDeployments(nil, runs, nil, "0000000")
+	if len(deploys) != 2 {
+		t.Fatalf("expected 2 active deployments across repos, got %d", len(deploys))
+	}
+	if deploys[0].Repository != "azylman/aerial" || deploys[0].Stage != "building" {
+		t.Errorf("unexpected deploy 0: %+v", deploys[0])
+	}
+	if deploys[1].Repository != "azylman/aerial-sidecars" || deploys[1].Stage != "building" {
+		t.Errorf("unexpected deploy 1: %+v", deploys[1])
+	}
+}
+
+func TestMergeClusterDeployments_NonContainerRepoNoTimeout(t *testing.T) {
+	now := time.Now().UTC()
+	// Successful run for aerial-config (updated 150s ago, normally >120s timeout)
+	runs := []GitHubRun{
+		{
+			ID:         301,
+			Repository: "azylman/aerial-config",
+			Name:       "Config Validation",
+			HeadSHA:    "3333ccc",
+			Status:     "completed",
+			Conclusion: "success",
+			CreatedAt:  now.Add(-5 * time.Minute),
+			UpdatedAt:  now.Add(-150 * time.Second),
+			HTMLURL:    "https://github.com/azylman/aerial-config/actions/runs/301",
+		},
+	}
+
+	// Local containers running older core commit
+	containers := []DockerContainerJSON{
+		{
+			ID:      "c1",
+			Names:   []string{"/aerial-brain"},
+			State:   "running",
+			Created: now.Add(-10 * time.Hour).Unix(),
+			Labels:  map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"},
+		},
+	}
+
+	deploys := mergeClusterDeployments(containers, runs, nil, "oldcorecommit")
+	// Because aerial-config does not build containers, it should NOT fail with "Hangar reconciliation timed out"
+	if len(deploys) > 0 && deploys[0].Stage == "failed" && deploys[0].CommitMsg == "Hangar reconciliation timed out (>120s)" {
+		t.Errorf("expected non-container repo aerial-config to NOT trigger Hangar reconciliation timeout failure, got %+v", deploys[0])
+	}
+}
+
 

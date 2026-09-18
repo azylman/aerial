@@ -19,6 +19,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -56,6 +57,7 @@ type DeploymentStep struct {
 type DeploymentStatus struct {
 	ID         string           `json:"id"`
 	Service    string           `json:"service"`
+	Repository string           `json:"repository,omitempty"`
 	Commit     string           `json:"commit"`
 	CommitMsg  string           `json:"commit_msg,omitempty"`
 	CommitTime *time.Time       `json:"commit_time,omitempty"`
@@ -158,6 +160,7 @@ type ClusterResponse struct {
 type GitHubRun struct {
 	ID         int64  `json:"id"`
 	Name       string `json:"name"`
+	Repository string `json:"repository,omitempty"`
 	HeadSHA    string `json:"head_sha"`
 	HeadBranch string `json:"head_branch"`
 	HeadCommit *struct {
@@ -193,20 +196,24 @@ type GitHubJobsResponse struct {
 }
 
 type GitHubPoller struct {
-	repo         string
-	token        string
-	client       *http.Client
-	runsETag     string
-	jobsETagMap  map[int64]string
-	apiBaseURL   string
-	pollInterval time.Duration
+	repo             string
+	repos            []string
+	token            string
+	client           *http.Client
+	configPath       string
+	runsETag         string
+	runsETagMap      map[string]string
+	jobsETagMap      map[int64]string
+	apiBaseURL       string
+	pollInterval     time.Duration
 
-	mu           sync.RWMutex
-	cachedRuns   []GitHubRun
-	cachedJobs   map[int64][]GitHubJob
-	lastPollTime time.Time
-	lastError    error
-	stopCh       chan struct{}
+	mu               sync.RWMutex
+	cachedRunsByRepo map[string][]GitHubRun
+	cachedRuns       []GitHubRun
+	cachedJobs       map[int64][]GitHubJob
+	lastPollTime     time.Time
+	lastError        error
+	stopCh           chan struct{}
 }
 
 var globalGHPoller *GitHubPoller
@@ -385,11 +392,36 @@ func getGitCommit(customPaths ...string) string {
 }
 
 func NewGitHubPoller(repo, token string) *GitHubPoller {
+	var repos []string
+	if strings.TrimSpace(repo) != "" {
+		repos = []string{strings.TrimSpace(repo)}
+	}
+	return NewMultiGitHubPoller(repos, token)
+}
+
+func NewMultiGitHubPoller(repos []string, token string) *GitHubPoller {
+	var cleaned []string
+	seen := make(map[string]bool)
+	for _, r := range repos {
+		trimmed := strings.TrimSpace(r)
+		if trimmed != "" && !seen[trimmed] {
+			seen[trimmed] = true
+			cleaned = append(cleaned, trimmed)
+		}
+	}
+	primary := ""
+	if len(cleaned) > 0 {
+		primary = cleaned[0]
+	}
+
 	return &GitHubPoller{
-		repo:        repo,
-		token:       token,
-		jobsETagMap: make(map[int64]string),
-		cachedJobs:  make(map[int64][]GitHubJob),
+		repo:             primary,
+		repos:            cleaned,
+		token:            token,
+		runsETagMap:      make(map[string]string),
+		jobsETagMap:      make(map[int64]string),
+		cachedRunsByRepo: make(map[string][]GitHubRun),
+		cachedJobs:       make(map[int64][]GitHubJob),
 		client: &http.Client{
 			Timeout: 4 * time.Second,
 			Transport: &http.Transport{
@@ -402,8 +434,34 @@ func NewGitHubPoller(repo, token string) *GitHubPoller {
 	}
 }
 
+func (p *GitHubPoller) getActiveRepos() []string {
+	if p == nil {
+		return nil
+	}
+	if p.configPath != "" {
+		if cfgRepos := loadDashboardRepos(p.configPath); len(cfgRepos) > 0 {
+			return cfgRepos
+		}
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if len(p.repos) > 0 {
+		res := make([]string, len(p.repos))
+		copy(res, p.repos)
+		return res
+	}
+	if p.repo != "" {
+		return []string{p.repo}
+	}
+	return nil
+}
+
 func (p *GitHubPoller) Start(ctx context.Context) {
-	if p.repo == "" {
+	if p == nil {
+		return
+	}
+	repos := p.getActiveRepos()
+	if len(repos) == 0 {
 		return
 	}
 	go func() {
@@ -486,111 +544,194 @@ func writeJSON(w http.ResponseWriter, r *http.Request, status int, data interfac
 }
 
 func (p *GitHubPoller) pollOnce(ctx context.Context) bool {
+	if p == nil {
+		return false
+	}
+	repos := p.getActiveRepos()
+	if len(repos) == 0 {
+		return false
+	}
+
 	baseURL := p.apiBaseURL
 	if baseURL == "" {
 		baseURL = "https://api.github.com"
 	}
-	reqURL := fmt.Sprintf("%s/repos/%s/actions/runs?per_page=3&event=push&branch=main", baseURL, p.repo)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
-	if err != nil {
-		return false
-	}
 
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	if p.token != "" {
-		req.Header.Set("Authorization", "Bearer "+p.token)
-	}
-	if p.runsETag != "" {
-		req.Header.Set("If-None-Match", p.runsETag)
-	}
+	allActiveRunIDs := make(map[int64]bool)
+	hasActive := false
 
-	resp, err := p.client.Do(req)
-	if err != nil {
-		p.mu.Lock()
-		p.lastError = err
-		p.mu.Unlock()
-		return false
-	}
-	defer drainAndClose(resp.Body, "runs response body")
-
-	if resp.StatusCode == http.StatusNotModified {
-		p.mu.RLock()
-		defer p.mu.RUnlock()
-		for _, r := range p.cachedRuns {
-			if r.Status == "in_progress" || r.Status == "queued" {
-				return true
-			}
+	for _, repo := range repos {
+		reqURL := fmt.Sprintf("%s/repos/%s/actions/runs?per_page=3&event=push&branch=main", baseURL, repo)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+		if err != nil {
+			continue
 		}
-		return false
-	}
 
-	if resp.StatusCode == http.StatusOK {
-		p.runsETag = resp.Header.Get("ETag")
-		var runData GitHubRunsResponse
-		if err := json.NewDecoder(resp.Body).Decode(&runData); err == nil {
-			// Sanitize commit messages
-			for i := range runData.WorkflowRuns {
-				if runData.WorkflowRuns[i].HeadCommit != nil {
-					rawMsg := runData.WorkflowRuns[i].HeadCommit.Message
-					firstLine := strings.SplitN(rawMsg, "\n", 2)[0]
-					// Truncate to 72 runes
-					runes := []rune(firstLine)
-					if len(runes) > 72 {
-						firstLine = string(runes[:72]) + "…"
-					}
-					// Strip any token-like substrings
-					for _, sens := range sensitiveKeys {
-						firstLine = strings.ReplaceAll(firstLine, sens, "[REDACTED]")
-					}
-					runData.WorkflowRuns[i].HeadCommit.Message = firstLine
-				}
-			}
+		req.Header.Set("Accept", "application/vnd.github+json")
+		req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+		if p.token != "" {
+			req.Header.Set("Authorization", "Bearer "+p.token)
+		}
 
+		p.mu.RLock()
+		etag := p.runsETagMap[repo]
+		if etag == "" && repo == p.repo && p.runsETag != "" {
+			etag = p.runsETag
+		}
+		p.mu.RUnlock()
+
+		if etag != "" {
+			req.Header.Set("If-None-Match", etag)
+		}
+
+		resp, err := p.client.Do(req)
+		if err != nil {
 			p.mu.Lock()
-			p.cachedRuns = runData.WorkflowRuns
-			p.lastPollTime = time.Now().UTC()
-			p.lastError = nil
-
-			// Prune old jobs and ETags not in current active runs
-			activeIDs := make(map[int64]bool)
-			for _, r := range runData.WorkflowRuns {
-				activeIDs[r.ID] = true
-			}
-			for id := range p.cachedJobs {
-				if !activeIDs[id] {
-					delete(p.cachedJobs, id)
-				}
-			}
-			for id := range p.jobsETagMap {
-				if !activeIDs[id] {
-					delete(p.jobsETagMap, id)
-				}
-			}
+			p.lastError = err
 			p.mu.Unlock()
+			continue
+		}
 
-			hasActive := false
-			for _, r := range runData.WorkflowRuns {
-				if r.Status == "in_progress" || r.Status == "queued" || time.Since(r.UpdatedAt) < 10*time.Minute {
-					p.fetchJobsForRun(ctx, r.ID)
-				}
+		if resp.StatusCode == http.StatusNotModified {
+			drainAndClose(resp.Body, "runs response body")
+			p.mu.RLock()
+			for _, r := range p.cachedRunsByRepo[repo] {
+				allActiveRunIDs[r.ID] = true
 				if r.Status == "in_progress" || r.Status == "queued" {
 					hasActive = true
 				}
 			}
-			return hasActive
+			p.mu.RUnlock()
+			continue
+		}
+
+		if resp.StatusCode == http.StatusOK {
+			newETag := resp.Header.Get("ETag")
+			var runData GitHubRunsResponse
+			decodeErr := json.NewDecoder(resp.Body).Decode(&runData)
+			drainAndClose(resp.Body, "runs response body")
+			if decodeErr == nil {
+				// Sanitize commit messages and tag repository
+				for i := range runData.WorkflowRuns {
+					runData.WorkflowRuns[i].Repository = repo
+					if runData.WorkflowRuns[i].HeadCommit != nil {
+						rawMsg := runData.WorkflowRuns[i].HeadCommit.Message
+						firstLine := strings.SplitN(rawMsg, "\n", 2)[0]
+						// Truncate to 72 runes
+						runes := []rune(firstLine)
+						if len(runes) > 72 {
+							firstLine = string(runes[:72]) + "…"
+						}
+						// Strip any token-like substrings
+						for _, sens := range sensitiveKeys {
+							firstLine = strings.ReplaceAll(firstLine, sens, "[REDACTED]")
+						}
+						runData.WorkflowRuns[i].HeadCommit.Message = firstLine
+					}
+				}
+
+				p.mu.Lock()
+				if newETag != "" {
+					p.runsETagMap[repo] = newETag
+					if repo == p.repo {
+						p.runsETag = newETag
+					}
+				}
+				p.cachedRunsByRepo[repo] = runData.WorkflowRuns
+				p.mu.Unlock()
+
+				for _, r := range runData.WorkflowRuns {
+					allActiveRunIDs[r.ID] = true
+					if r.Status == "in_progress" || r.Status == "queued" || time.Since(r.UpdatedAt) < 10*time.Minute {
+						p.fetchJobsForRun(ctx, r.ID, repo)
+					}
+					if r.Status == "in_progress" || r.Status == "queued" {
+						hasActive = true
+					}
+				}
+			}
+			continue
+		}
+
+		drainAndClose(resp.Body, "runs response body")
+		if resp.StatusCode == http.StatusForbidden || resp.StatusCode == 429 {
+			log.Printf("[Dashboard:GitHub] Warning: rate limited on %s: HTTP %d", repo, resp.StatusCode)
+		} else {
+			log.Printf("[Dashboard:GitHub] Warning: unexpected HTTP %d querying %s", resp.StatusCode, repo)
 		}
 	}
 
-	return false
+	// Rebuild and sort aggregated cachedRuns under lock
+	p.mu.Lock()
+	var allRuns []GitHubRun
+	activeRepoMap := make(map[string]bool)
+	for _, repo := range repos {
+		activeRepoMap[repo] = true
+		allRuns = append(allRuns, p.cachedRunsByRepo[repo]...)
+	}
+	// Prune any removed repositories from cache
+	for r := range p.cachedRunsByRepo {
+		if !activeRepoMap[r] {
+			delete(p.cachedRunsByRepo, r)
+			delete(p.runsETagMap, r)
+		}
+	}
+
+	// Sort runs: active runs first (newest CreatedAt first), then completed runs (newest CreatedAt first)
+	sort.SliceStable(allRuns, func(i, j int) bool {
+		iActive := allRuns[i].Status == "queued" || allRuns[i].Status == "in_progress"
+		jActive := allRuns[j].Status == "queued" || allRuns[j].Status == "in_progress"
+		if iActive != jActive {
+			return iActive
+		}
+		return allRuns[i].CreatedAt.After(allRuns[j].CreatedAt)
+	})
+
+	for _, r := range allRuns {
+		if r.Status == "in_progress" || r.Status == "queued" {
+			hasActive = true
+		}
+	}
+
+	p.cachedRuns = allRuns
+	p.lastPollTime = time.Now().UTC()
+	p.lastError = nil
+
+	// Global job and job ETag pruning across all active run IDs
+	for id := range p.cachedJobs {
+		if !allActiveRunIDs[id] {
+			delete(p.cachedJobs, id)
+		}
+	}
+	for id := range p.jobsETagMap {
+		if !allActiveRunIDs[id] {
+			delete(p.jobsETagMap, id)
+		}
+	}
+	p.mu.Unlock()
+
+	return hasActive
 }
 
-func (p *GitHubPoller) fetchJobsForRun(ctx context.Context, runID int64) {
+func (p *GitHubPoller) fetchJobsForRun(ctx context.Context, runID int64, optionalRepo ...string) {
 	baseURL := p.apiBaseURL
 	if baseURL == "" {
 		baseURL = "https://api.github.com"
 	}
-	reqURL := fmt.Sprintf("%s/repos/%s/actions/runs/%d/jobs", baseURL, p.repo, runID)
+	repo := ""
+	if len(optionalRepo) > 0 && optionalRepo[0] != "" {
+		repo = optionalRepo[0]
+	} else {
+		repos := p.getActiveRepos()
+		if len(repos) > 0 {
+			repo = repos[0]
+		}
+	}
+	if repo == "" {
+		return
+	}
+
+	reqURL := fmt.Sprintf("%s/repos/%s/actions/runs/%d/jobs", baseURL, repo, runID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
 		return
@@ -672,7 +813,74 @@ func mergeClusterDeploymentsWithHangar(
 	var deployments []DeploymentStatus
 	now := time.Now().UTC()
 
-	// 1. Check for Active or Recent Cloud Runs in GitHub Actions (inspect latest run first)
+	// 1. Check for Active Cloud Runs across all configured repositories
+	var activeDeployments []DeploymentStatus
+	for _, run := range runs {
+		if run.Status == "queued" || run.Status == "in_progress" {
+			shortSHA := run.HeadSHA
+			if len(shortSHA) > 7 {
+				shortSHA = shortSHA[:7]
+			}
+			commitMsg := ""
+			var commitTime *time.Time
+			if run.HeadCommit != nil {
+				commitMsg = run.HeadCommit.Message
+				if !run.HeadCommit.Timestamp.IsZero() {
+					t := run.HeadCommit.Timestamp
+					commitTime = &t
+				}
+			} else if !run.CreatedAt.IsZero() {
+				t := run.CreatedAt
+				commitTime = &t
+			}
+
+			runJobs := jobs[run.ID]
+			matrixChips := parseMatrixJobChips(runJobs)
+
+			stage := "building"
+			progress := 25
+			ciStatus := "active"
+			if run.Status == "queued" {
+				stage = "queued"
+				progress = 15
+				ciStatus = "pending"
+			} else if len(matrixChips) > 0 {
+				doneCount := 0
+				for _, c := range matrixChips {
+					if c.Status == "completed" {
+						doneCount++
+					}
+				}
+				progress = 20 + int(float64(doneCount)/float64(len(matrixChips))*30)
+			}
+
+			activeDeployments = append(activeDeployments, DeploymentStatus{
+				ID:         fmt.Sprintf("gh-run-%d", run.ID),
+				Repository: run.Repository,
+				Service:    "aerial-stack",
+				Commit:     shortSHA,
+				CommitMsg:  commitMsg,
+				CommitTime: commitTime,
+				Stage:      stage,
+				Progress:   progress,
+				HTMLURL:    run.HTMLURL,
+				Steps: []DeploymentStep{
+					{Name: "Commit Trigger", Icon: "📦", Status: "completed"},
+					{Name: "CI Build & GHCR", Icon: "⚙️", Status: ciStatus},
+					{Name: "Hangar Sync", Icon: "⬇️", Status: "pending"},
+					{Name: "Container Swap", Icon: "🔄", Status: "pending"},
+					{Name: "Health Check", Icon: "🩺", Status: "pending"},
+				},
+				MatrixJobs: matrixChips,
+				StartedAt:  run.CreatedAt,
+			})
+		}
+	}
+	if len(activeDeployments) > 0 {
+		return activeDeployments
+	}
+
+	// 2. Check for recent completed/failed Cloud Runs (inspect latest run first)
 	if len(runs) > 0 {
 		latestRun := runs[0]
 		shortSHA := latestRun.HeadSHA
@@ -695,51 +903,11 @@ func mergeClusterDeploymentsWithHangar(
 		runJobs := jobs[latestRun.ID]
 		matrixChips := parseMatrixJobChips(runJobs)
 
-		// State 1 & 2: CI Queued or In Progress
-		if latestRun.Status == "queued" || latestRun.Status == "in_progress" {
-			stage := "building"
-			progress := 25
-			ciStatus := "active"
-			if latestRun.Status == "queued" {
-				stage = "queued"
-				progress = 15
-				ciStatus = "pending"
-			} else if len(matrixChips) > 0 {
-				doneCount := 0
-				for _, c := range matrixChips {
-					if c.Status == "completed" {
-						doneCount++
-					}
-				}
-				progress = 20 + int(float64(doneCount)/float64(len(matrixChips))*30)
-			}
-
-			deployments = append(deployments, DeploymentStatus{
-				ID:         fmt.Sprintf("gh-run-%d", latestRun.ID),
-				Service:    "aerial-stack",
-				Commit:     shortSHA,
-				CommitMsg:  commitMsg,
-				CommitTime: commitTime,
-				Stage:      stage,
-				Progress:   progress,
-				HTMLURL:    latestRun.HTMLURL,
-				Steps: []DeploymentStep{
-					{Name: "Commit Trigger", Icon: "📦", Status: "completed"},
-					{Name: "CI Build & GHCR", Icon: "⚙️", Status: ciStatus},
-					{Name: "Hangar Sync", Icon: "⬇️", Status: "pending"},
-					{Name: "Container Swap", Icon: "🔄", Status: "pending"},
-					{Name: "Health Check", Icon: "🩺", Status: "pending"},
-				},
-				MatrixJobs: matrixChips,
-				StartedAt:  latestRun.CreatedAt,
-			})
-			return deployments
-		}
-
 		// State 3: CI Failed within last 30 minutes
 		if latestRun.Conclusion == "failure" && time.Since(latestRun.UpdatedAt) < 30*time.Minute {
 			deployments = append(deployments, DeploymentStatus{
 				ID:         fmt.Sprintf("gh-run-%d", latestRun.ID),
+				Repository: latestRun.Repository,
 				Service:    "aerial-stack",
 				Commit:     shortSHA,
 				CommitMsg:  commitMsg,
@@ -787,6 +955,9 @@ func mergeClusterDeploymentsWithHangar(
 			}
 			if len(runJobs) > 0 && !hasContainerBuilds {
 				hasRecentContainerSwap = true
+			} else if latestRun.Repository != "" && !strings.HasSuffix(latestRun.Repository, "/aerial") && !hasContainerBuilds {
+				// Non-container repo (e.g. aerial-config or repos without container builds)
+				hasRecentContainerSwap = true
 			}
 
 			for _, c := range rawContainers {
@@ -806,6 +977,7 @@ func mergeClusterDeploymentsWithHangar(
 					}
 					deployments = append(deployments, DeploymentStatus{
 						ID:         fmt.Sprintf("gh-run-%d", latestRun.ID),
+						Repository: latestRun.Repository,
 						Service:    "aerial-stack",
 						Commit:     shortSHA,
 						CommitMsg:  failMsg,
@@ -831,6 +1003,7 @@ func mergeClusterDeploymentsWithHangar(
 				if isHangarActive || ciElapsed <= 120*time.Second {
 					deployments = append(deployments, DeploymentStatus{
 						ID:         fmt.Sprintf("gh-run-%d", latestRun.ID),
+						Repository: latestRun.Repository,
 						Service:    "aerial-stack",
 						Commit:     shortSHA,
 						CommitMsg:  commitMsg,
@@ -854,6 +1027,7 @@ func mergeClusterDeploymentsWithHangar(
 				// If exceeded 120s without any container updating and Hangar is not active -> Hangar reconciliation timeout failure!
 				deployments = append(deployments, DeploymentStatus{
 					ID:         fmt.Sprintf("gh-run-%d", latestRun.ID),
+					Repository: latestRun.Repository,
 					Service:    "aerial-stack",
 					Commit:     shortSHA,
 					CommitMsg:  "Hangar reconciliation timed out (>120s)",
@@ -935,11 +1109,13 @@ func mergeClusterDeploymentsWithHangar(
 	var commitTime *time.Time
 	resolvedCommitMsg := ""
 
+	resolvedRepo := ""
 	if gitSync.Reconciliation != nil && gitSync.Reconciliation.CommitSHA != "" {
 		resolvedCommit = gitSync.Reconciliation.CommitSHA
 	}
 	if len(runs) > 0 {
 		latest := runs[0]
+		resolvedRepo = latest.Repository
 		if latest.Conclusion == "success" && latest.HeadSHA != "" && resolvedCommit == "" {
 			resolvedCommit = latest.HeadSHA
 		}
@@ -991,6 +1167,7 @@ func mergeClusterDeploymentsWithHangar(
 		}
 		deployments = append(deployments, DeploymentStatus{
 			ID:         "dep-aerial-stack",
+			Repository: resolvedRepo,
 			Service:    "aerial-stack",
 			Commit:     resolvedCommit,
 			CommitMsg:  failMsg,
@@ -1022,6 +1199,7 @@ func mergeClusterDeploymentsWithHangar(
 		}
 		deployments = append(deployments, DeploymentStatus{
 			ID:         "dep-aerial-stack",
+			Repository: resolvedRepo,
 			Service:    "aerial-stack",
 			Commit:     resolvedCommit,
 			CommitMsg:  resolvedCommitMsg,
@@ -1046,6 +1224,7 @@ func mergeClusterDeploymentsWithHangar(
 	if minUptimeSec < 600 || isRecentCI {
 		deployments = append(deployments, DeploymentStatus{
 			ID:         "dep-aerial-stack",
+			Repository: resolvedRepo,
 			Service:    "aerial-stack",
 			Commit:     resolvedCommit,
 			CommitMsg:  resolvedCommitMsg,
@@ -1202,8 +1381,52 @@ type rawUserConfig struct {
 	Dashboard struct {
 		QuickLinks       []QuickLaunchLink `yaml:"quick_links"`
 		QuickLaunchLinks []QuickLaunchLink `yaml:"quick_launch_links"`
+		GitHubRepos      []string          `yaml:"github_repos"`
+		Repos            []string          `yaml:"repos"`
 	} `yaml:"dashboard"`
-	QuickLinks []QuickLaunchLink `yaml:"quick_links"`
+	QuickLinks  []QuickLaunchLink `yaml:"quick_links"`
+	GitHubRepos []string          `yaml:"github_repos"`
+}
+
+// loadDashboardRepos parses the list of GitHub repositories configured for status dashboard monitoring.
+func loadDashboardRepos(configPath string) []string {
+	configPath = strings.TrimSpace(configPath)
+	if configPath == "" {
+		return nil
+	}
+	configPath = filepath.Clean(configPath)
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return nil
+	}
+
+	var cfg rawUserConfig
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		log.Printf("[Dashboard] Warning: failed to parse %s for dashboard repos: %v", configPath, err)
+		return nil
+	}
+
+	rawList := cfg.Dashboard.GitHubRepos
+	if len(rawList) == 0 {
+		rawList = cfg.Dashboard.Repos
+	}
+	if len(rawList) == 0 {
+		rawList = cfg.GitHubRepos
+	}
+
+	var repos []string
+	seen := make(map[string]bool)
+	for _, r := range rawList {
+		trimmed := strings.TrimSpace(r)
+		if trimmed == "" || seen[trimmed] {
+			continue
+		}
+		seen[trimmed] = true
+		repos = append(repos, trimmed)
+	}
+
+	return repos
 }
 
 // loadQuickLaunchLinks merges default core links with custom links defined in config.yaml.
@@ -1773,6 +1996,7 @@ type DashboardConfig struct {
 	Port       string
 	BrainURL   string
 	GHRepo     string
+	GHRepos    []string
 	GHToken    string
 	GitCommit  string
 	GitSyncURL string
@@ -1792,9 +2016,29 @@ func NewDashboardConfigFromLookup(lookup func(string) string) DashboardConfig {
 		brainURL = "http://brain:8080"
 	}
 
+	var ghRepos []string
+	rawGHRepos := strings.TrimSpace(lookup("GITHUB_REPOS"))
+	if rawGHRepos != "" {
+		seen := make(map[string]bool)
+		for _, part := range strings.Split(rawGHRepos, ",") {
+			trimmed := strings.TrimSpace(part)
+			if trimmed != "" && !seen[trimmed] {
+				seen[trimmed] = true
+				ghRepos = append(ghRepos, trimmed)
+			}
+		}
+	}
+
 	ghRepo := strings.TrimSpace(lookup("GITHUB_REPO"))
-	if ghRepo == "" {
+	if len(ghRepos) > 0 {
+		if ghRepo == "" {
+			ghRepo = ghRepos[0]
+		}
+	} else if ghRepo != "" {
+		ghRepos = []string{ghRepo}
+	} else {
 		ghRepo = "azylman/aerial"
+		ghRepos = []string{"azylman/aerial"}
 	}
 
 	ghToken := strings.TrimSpace(lookup("GITHUB_PAT"))
@@ -1829,6 +2073,7 @@ func NewDashboardConfigFromLookup(lookup func(string) string) DashboardConfig {
 		Port:       port,
 		BrainURL:   brainURL,
 		GHRepo:     ghRepo,
+		GHRepos:    ghRepos,
 		GHToken:    ghToken,
 		GitSyncURL: hangarURL,
 		HangarURL:  hangarURL,
@@ -1884,8 +2129,13 @@ func RunDashboardServer(ctx context.Context, cfg DashboardConfig) error {
 		return fmt.Errorf("failed to initialize asset registry: %w", err)
 	}
 
-	if cfg.GHRepo != "" {
-		globalGHPoller = NewGitHubPoller(cfg.GHRepo, cfg.GHToken)
+	repos := cfg.GHRepos
+	if len(repos) == 0 && cfg.GHRepo != "" {
+		repos = []string{cfg.GHRepo}
+	}
+	if len(repos) > 0 {
+		globalGHPoller = NewMultiGitHubPoller(repos, cfg.GHToken)
+		globalGHPoller.configPath = cfg.ConfigPath
 		if cfg.APIBaseURL != "" {
 			globalGHPoller.apiBaseURL = cfg.APIBaseURL
 		}

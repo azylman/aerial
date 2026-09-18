@@ -266,6 +266,59 @@ describe('Permet HUD Pure Logic Unit Tests', () => {
             assert.equal(isHexSha(null), false);
             assert.equal(isHexSha(undefined), false);
         });
+
+        it('verifies dynamic repo commit URL resolution', () => {
+            const resolveCommitUrl = (repository, commit) => {
+                const rawRepo = (typeof repository === 'string' && /^[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+$/.test(repository.trim()))
+                    ? repository.trim()
+                    : 'azylman/aerial';
+                const repoParts = rawRepo.split('/');
+                return `https://github.com/${encodeURIComponent(repoParts[0])}/${encodeURIComponent(repoParts[1])}/commit/${encodeURIComponent(commit.trim())}`;
+            };
+
+            assert.equal(
+                resolveCommitUrl('azylman/aerial', 'e056544'),
+                'https://github.com/azylman/aerial/commit/e056544'
+            );
+            assert.equal(
+                resolveCommitUrl('azylman/aerial-sidecars', 'a1b2c3d'),
+                'https://github.com/azylman/aerial-sidecars/commit/a1b2c3d'
+            );
+            assert.equal(
+                resolveCommitUrl('azylman/aerial-config', '9988776'),
+                'https://github.com/azylman/aerial-config/commit/9988776'
+            );
+            assert.equal(
+                resolveCommitUrl(null, 'e056544'),
+                'https://github.com/azylman/aerial/commit/e056544'
+            );
+            assert.equal(
+                resolveCommitUrl('invalid repo string with spaces', 'e056544'),
+                'https://github.com/azylman/aerial/commit/e056544'
+            );
+        });
+
+        it('verifies deploy-repo-badge rendered and deploy-service-name absent', () => {
+            assert.equal(appJsCode.includes('deploy-repo-badge'), true, 'Expected deploy-repo-badge in app.js');
+            assert.equal(appJsCode.includes('deploy-service-name'), false, 'Found forbidden deploy-service-name in app.js');
+        });
+
+        it('verifies dynamic active CI builds badge text pluralization', () => {
+            const formatBuildingBadge = (deploys) => {
+                const buildingCount = deploys.filter(dep => dep.stage === 'building' || dep.stage === 'queued').length;
+                return buildingCount > 1 ? `⚡ ${buildingCount} CI BUILDS ACTIVE` : `⚡ 1 CI BUILD ACTIVE`;
+            };
+
+            assert.equal(formatBuildingBadge([{ stage: 'building' }]), '⚡ 1 CI BUILD ACTIVE');
+            assert.equal(
+                formatBuildingBadge([{ stage: 'building' }, { stage: 'queued' }]),
+                '⚡ 2 CI BUILDS ACTIVE'
+            );
+            assert.equal(
+                formatBuildingBadge([{ stage: 'building' }, { stage: 'building' }, { stage: 'building' }]),
+                '⚡ 3 CI BUILDS ACTIVE'
+            );
+        });
     });
 
     describe('Privacy & Zero-Hardcoded IP Guarantee', () => {
