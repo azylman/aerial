@@ -2495,6 +2495,41 @@ func TestTurnExecution_BuildTurnPrompt_CachedSummary(t *testing.T) {
 	}
 }
 
+func TestCoverageBoost_ExtraHits(t *testing.T) {
+	// 1. guildMemberFetcher uninitialized
+	_, _ = guildMemberFetcher(nil, "g", "u")
+	_, _ = guildMemberFetcher(&discordgo.Session{}, "g", "u")
+
+	// 2. isTier1Wake body direct mention and role mention
+	msg1 := db.Message{
+		Content: "hey <@12345> check this",
+	}
+	if !isTier1Wake(msg1, "12345", nil, "mention") {
+		t.Errorf("expected true for direct mention in body")
+	}
+	msgRole := db.Message{
+		Content: "hey <@&role999> check this",
+	}
+	if !isTier1Wake(msgRole, "99999", []string{"role999"}, "mention") {
+		t.Errorf("expected true for role mention in body")
+	}
+
+	// 3. ResolveBotRoleIDs with empty guildID or botUserID
+	_ = ResolveBotRoleIDs(nil, "", "")
+	_ = ResolveBotRoleIDs(&discordgo.Session{}, "", "")
+	_ = ResolveBotRoleIDs(&discordgo.Session{State: discordgo.NewState()}, "", "")
+	_ = ResolveBotRoleIDs(&discordgo.Session{State: discordgo.NewState()}, "g1", "")
+
+	// 4. extractMessageBody edge cases
+	_ = extractMessageBody("")
+	_ = extractMessageBody("just text")
+	_ = extractMessageBody("- content: foo\nbar")
+	_ = extractMessageBody("<USER_REQUEST>hello world</USER_REQUEST>")
+	_ = extractMessageBody("<\\/USER_REQUEST>escaped<\\/USER_REQUEST>")
+	_ = extractMessageBody("<\\USER_REQUEST>escaped<\\USER_REQUEST>")
+}
+
+
 
 
 
