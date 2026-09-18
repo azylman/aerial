@@ -1633,3 +1633,295 @@ func TestMergeClusterDeployments_CardinalityClamp(t *testing.T) {
 	}
 }
 
+func TestExtractSingleContainerCommit_TableDriven(t *testing.T) {
+	tests := []struct {
+		name      string
+		container DockerContainerJSON
+		want      string
+	}{
+		{
+			name:      "nil_labels",
+			container: DockerContainerJSON{Labels: nil},
+			want:      "",
+		},
+		{
+			name:      "empty_labels",
+			container: DockerContainerJSON{Labels: map[string]string{}},
+			want:      "",
+		},
+		{
+			name: "opencontainers_revision_priority",
+			container: DockerContainerJSON{
+				Labels: map[string]string{
+					"org.opencontainers.image.revision": "1111111111111111111111111111111111111111",
+					"aerial.commit_sha":                 "2222222222222222222222222222222222222222",
+					"vcs-ref":                           "3333333333333333333333333333333333333333",
+				},
+			},
+			want: "1111111111111111111111111111111111111111",
+		},
+		{
+			name: "aerial_commit_sha_fallback",
+			container: DockerContainerJSON{
+				Labels: map[string]string{
+					"aerial.commit_sha": "2222222222222222222222222222222222222222",
+					"vcs-ref":           "3333333333333333333333333333333333333333",
+				},
+			},
+			want: "2222222222222222222222222222222222222222",
+		},
+		{
+			name: "vcs_ref_fallback",
+			container: DockerContainerJSON{
+				Labels: map[string]string{
+					"vcs-ref": "3333333333333333333333333333333333333333",
+				},
+			},
+			want: "3333333333333333333333333333333333333333",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ExtractSingleContainerCommit(tt.container)
+			if got != tt.want {
+				t.Errorf("ExtractSingleContainerCommit() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsDeployOngoing_TableDriven(t *testing.T) {
+	ongoingDep := DeploymentStatus{Stage: "pulling"}
+	idleDep := DeploymentStatus{Stage: "live"}
+
+	tests := []struct {
+		name  string
+		input any
+		want  bool
+	}{
+		{name: "string_queued", input: "queued", want: true},
+		{name: "string_building", input: "building", want: true},
+		{name: "string_awaiting_pull", input: "awaiting_pull", want: true},
+		{name: "string_pulling", input: "pulling", want: true},
+		{name: "string_swapping", input: "swapping", want: true},
+		{name: "string_failed", input: "failed", want: false},
+		{name: "string_live", input: "live", want: false},
+		{name: "string_unknown", input: "idle", want: false},
+		{name: "dep_struct_ongoing", input: ongoingDep, want: true},
+		{name: "dep_struct_idle", input: idleDep, want: false},
+		{name: "dep_ptr_ongoing", input: &ongoingDep, want: true},
+		{name: "dep_ptr_idle", input: &idleDep, want: false},
+		{name: "dep_ptr_nil", input: (*DeploymentStatus)(nil), want: false},
+		{name: "dep_slice_empty", input: []DeploymentStatus{}, want: false},
+		{name: "dep_slice_has_ongoing", input: []DeploymentStatus{idleDep, ongoingDep}, want: true},
+		{name: "dep_slice_all_idle", input: []DeploymentStatus{idleDep}, want: false},
+		{name: "dep_ptr_slice_nil_elem", input: []*DeploymentStatus{nil}, want: false},
+		{name: "dep_ptr_slice_has_ongoing", input: []*DeploymentStatus{&idleDep, &ongoingDep}, want: true},
+		{name: "dep_ptr_slice_all_idle", input: []*DeploymentStatus{&idleDep}, want: false},
+		{name: "unsupported_type", input: 12345, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := IsDeployOngoing(tt.input)
+			if got != tt.want {
+				t.Errorf("IsDeployOngoing(%v) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMergeClusterDeployments_PullingNotPromotedToSwapping(t *testing.T) {
+	refTime := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	gitSync := GitSyncStatusResponse{
+		Status: "synced",
+		Reconciliation: &ReconciliationStatus{
+			Active:         true,
+			State:          "pulling",
+			CommitSHA:      "7777777777777777777777777777777777777777",
+			StartedAt:      refTime.Add(-15 * time.Second),
+			TargetServices: []string{"aerial-dashboard"},
+		},
+	}
+
+	// Existing containers with uptime > 120s and healthy status (not starting)
+	containers := []DockerContainerJSON{
+		{
+			Names:   []string{"/aerial-dashboard"},
+			Created: refTime.Add(-300 * time.Second).Unix(),
+			State:   "running",
+			Labels: map[string]string{
+				"org.opencontainers.image.revision": "7777777777777777777777777777777777777777",
+			},
+		},
+	}
+
+	deps := MergeClusterDeploymentsWithHangar(nil, nil, gitSync, containers, "", refTime)
+	if len(deps) == 0 {
+		t.Fatalf("expected 1 deployment, got 0")
+	}
+	dep := deps[0]
+	if dep.Stage != "pulling" {
+		t.Fatalf("expected stage pulling (not promoted to swapping), got %q", dep.Stage)
+	}
+	if dep.Steps[2].Status != "active" {
+		t.Errorf("expected Step 3 (Hangar Sync) active, got %q", dep.Steps[2].Status)
+	}
+	if dep.Steps[3].Status != "pending" {
+		t.Errorf("expected Step 4 (Container Swap) pending, got %q", dep.Steps[3].Status)
+	}
+}
+
+func TestMergeClusterDeployments_DegradedAndFailedBranches(t *testing.T) {
+	refTime := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+
+	// Test degraded container
+	degradedContainers := []DockerContainerJSON{
+		{
+			Names:   []string{"/aerial-dashboard"},
+			Created: refTime.Add(-60 * time.Second).Unix(),
+			State:   "exited",
+			Labels: map[string]string{
+				"org.opencontainers.image.revision": "8888888888888888888888888888888888888888",
+			},
+		},
+	}
+	deps := MergeClusterDeploymentsWithHangar(nil, nil, GitSyncStatusResponse{}, degradedContainers, "", refTime)
+	if len(deps) == 0 || deps[0].Stage != "degraded" {
+		t.Fatalf("expected degraded stage for exited container, got %+v", deps)
+	}
+	if deps[0].Steps[4].Status != "failed" {
+		t.Errorf("expected health check failed for degraded, got %q", deps[0].Steps[4].Status)
+	}
+
+	// Test Hangar reconciliation failed with error
+	gitSyncFailed := GitSyncStatusResponse{
+		Reconciliation: &ReconciliationStatus{
+			State:     "failed",
+			CommitSHA: "9999999999999999999999999999999999999999",
+			Error:     "failed to pull image: auth expired",
+		},
+	}
+	depsFailed := MergeClusterDeploymentsWithHangar(nil, nil, gitSyncFailed, nil, "", refTime)
+	if len(depsFailed) == 0 || depsFailed[0].Stage != "failed" {
+		t.Fatalf("expected failed stage for Hangar error, got %+v", depsFailed)
+	}
+	if !strings.Contains(depsFailed[0].CommitMsg, "auth expired") {
+		t.Errorf("expected error in CommitMsg, got %q", depsFailed[0].CommitMsg)
+	}
+
+	// Test Hangar reconciliation failed without error message
+	gitSyncFailedNoErr := GitSyncStatusResponse{
+		Reconciliation: &ReconciliationStatus{
+			State:     "failed",
+			CommitSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		},
+	}
+	depsFailedNoErr := MergeClusterDeploymentsWithHangar(nil, nil, gitSyncFailedNoErr, nil, "", refTime)
+	if len(depsFailedNoErr) == 0 || depsFailedNoErr[0].Stage != "failed" {
+		t.Fatalf("expected failed stage, got %+v", depsFailedNoErr)
+	}
+}
+
+func TestMergeClusterDeployments_MultiRunSameCommitAndSortTies(t *testing.T) {
+	refTime := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+
+	// Two runs for same commit: older completed/success vs newer in_progress
+	sameCommitRuns := []GitHubRun{
+		{
+			ID:         111,
+			HeadSHA:    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			Status:     "completed",
+			Conclusion: "success",
+			CreatedAt:  refTime.Add(-10 * time.Minute),
+			UpdatedAt:  refTime.Add(-5 * time.Minute),
+		},
+		{
+			ID:        112,
+			HeadSHA:   "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			Status:    "in_progress",
+			CreatedAt: refTime.Add(-1 * time.Minute),
+			UpdatedAt: refTime.Add(-30 * time.Second),
+		},
+	}
+	depsSame := MergeClusterDeploymentsWithHangar(sameCommitRuns, nil, GitSyncStatusResponse{}, nil, "", refTime)
+	if len(depsSame) != 1 {
+		t.Fatalf("expected 1 deduplicated deployment, got %d", len(depsSame))
+	}
+	// in_progress (building, rank 4) > awaiting_pull (rank 3)
+	if depsSame[0].Stage != "building" {
+		t.Errorf("expected higher stage building to win, got %q", depsSame[0].Stage)
+	}
+
+	// Test sort ties: same stage, same StartedAt, different commits -> lexicographical sort
+	sameStageRuns := []GitHubRun{
+		{
+			ID:        201,
+			HeadSHA:   "ffffffffffffffffffffffffffffffffffffffff",
+			Status:    "in_progress",
+			CreatedAt: refTime.Add(-2 * time.Minute),
+			UpdatedAt: refTime.Add(-1 * time.Minute),
+		},
+		{
+			ID:        202,
+			HeadSHA:   "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+			Status:    "in_progress",
+			CreatedAt: refTime.Add(-2 * time.Minute),
+			UpdatedAt: refTime.Add(-1 * time.Minute),
+		},
+	}
+	depsTies := MergeClusterDeploymentsWithHangar(sameStageRuns, nil, GitSyncStatusResponse{}, nil, "", refTime)
+	if len(depsTies) != 2 {
+		t.Fatalf("expected 2 deployments, got %d", len(depsTies))
+	}
+	if depsTies[0].Commit != "eeeeeee" || depsTies[1].Commit != "fffffff" {
+		t.Errorf("expected lexicographical sort order eeeeeee < fffffff, got %s, %s", depsTies[0].Commit, depsTies[1].Commit)
+	}
+
+	// Test sort tie between failed and degraded
+	failedDegradedRuns := []GitHubRun{
+		{
+			ID:         301,
+			HeadSHA:    "1111111111111111111111111111111111111111",
+			Status:     "completed",
+			Conclusion: "failure",
+			CreatedAt:  refTime.Add(-5 * time.Minute),
+			UpdatedAt:  refTime.Add(-5 * time.Minute),
+		},
+	}
+	degradedCont := []DockerContainerJSON{
+		{
+			Names:   []string{"/aerial-proxy"},
+			Created: refTime.Add(-5 * time.Minute).Unix(),
+			State:   "exited",
+			Labels: map[string]string{
+				"org.opencontainers.image.revision": "2222222222222222222222222222222222222222",
+			},
+		},
+	}
+	depsTieRanks := MergeClusterDeploymentsWithHangar(failedDegradedRuns, nil, GitSyncStatusResponse{}, degradedCont, "", refTime)
+	if len(depsTieRanks) != 2 {
+		t.Fatalf("expected 2 deployments, got %d", len(depsTieRanks))
+	}
+	if depsTieRanks[0].Stage != "failed" || depsTieRanks[1].Stage != "degraded" {
+		t.Errorf("expected failed to precede degraded, got %s, %s", depsTieRanks[0].Stage, depsTieRanks[1].Stage)
+	}
+
+	// Test expired runs (>30m) ignored
+	expiredRun := []GitHubRun{
+		{
+			ID:         401,
+			HeadSHA:    "3333333333333333333333333333333333333333",
+			Status:     "completed",
+			Conclusion: "success",
+			CreatedAt:  refTime.Add(-40 * time.Minute),
+			UpdatedAt:  refTime.Add(-35 * time.Minute),
+		},
+	}
+	depsExpired := MergeClusterDeploymentsWithHangar(expiredRun, nil, GitSyncStatusResponse{}, nil, "", refTime)
+	if len(depsExpired) != 0 {
+		t.Errorf("expected expired run to be ignored, got %d deployments", len(depsExpired))
+	}
+}
+
