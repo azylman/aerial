@@ -214,6 +214,25 @@ transforms:
               .attributes.logger = parsed.logger
             }
           }
+        } else if .service == "openobserve" {
+          parsed, err = parse_regex(.message, r'^(?P<oo_timestamp>\S+)\s+(?P<severity>[A-Z]+)\s+(?P<target>\S+):\s+(?P<msg>.*)$')
+          if err == null {
+            .message = parsed.msg
+            sev = string!(parsed.severity)
+            if sev == "ERROR" || sev == "CRITICAL" {
+              .level = "error"
+            } else if sev == "WARN" || sev == "WARNING" {
+              .level = "warn"
+            } else if starts_with(sev, "DEBUG") || sev == "TRACE" {
+              .level = "debug"
+            } else {
+              .level = "info"
+            }
+            if !exists(.attributes) {
+              .attributes = {}
+            }
+            .attributes.target = parsed.target
+          }
         }
 
         # Key-value / logfmt parser (e.g. victoriametrics-mcp, Go stdlib)
@@ -260,6 +279,24 @@ transforms:
           }
         }
 
+        # Generic bracketed severity parser (e.g. google-mcp, standard CLI logs)
+        if !exists(.level) {
+          parsed, err = parse_regex(.message, r'^\[(?P<severity>INFO|WARN|WARNING|ERROR|FATAL|CRITICAL|DEBUG|TRACE)\]\s+(?P<msg>.*)$')
+          if err == null {
+            .message = parsed.msg
+            sev = string!(parsed.severity)
+            if sev == "ERROR" || sev == "FATAL" || sev == "CRITICAL" {
+              .level = "error"
+            } else if sev == "WARN" || sev == "WARNING" {
+              .level = "warn"
+            } else if sev == "DEBUG" || sev == "TRACE" {
+              .level = "debug"
+            } else {
+              .level = "info"
+            }
+          }
+        }
+
         # Standard Go logger / Hangar reconciliation / Docker status / Supergateway / Service-specific fallbacks
         if !exists(.level) {
           parsed, err = parse_regex(.message, r'^(?P<go_timestamp>\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2})\s+(?:\[(?P<tag>[^\]]+)\]\s+)?(?P<msg>.*)$')
@@ -282,12 +319,25 @@ transforms:
           } else if match(string!(.message), r'^\s*Container\s+[a-zA-Z0-9_-]+\s+(Healthy|Running|Started|Created)') {
             .level = "info"
           } else if starts_with(string!(.message), "[supergateway]") {
-            msg_lower = downcase(string!(.message))
-            if contains(msg_lower, "error") || contains(msg_lower, "fail") || contains(msg_lower, "exception") {
-              .level = "error"
-            } else if contains(msg_lower, "warn") {
-              .level = "warn"
+            if starts_with(string!(.message), "[supergateway] Child → StreamableHttp:") || starts_with(string!(.message), "[supergateway] StreamableHttp → Child:") {
+              if contains(string!(.message), "\"error\":{\"code\"") || contains(string!(.message), "\"error\": {\"code\"") {
+                .level = "error"
+              } else {
+                .level = "info"
+              }
             } else {
+              msg_lower = downcase(string!(.message))
+              if match(msg_lower, r'\b(error|fatal|panic|exception)\b') {
+                .level = "error"
+              } else if match(msg_lower, r'\b(warn|warning)\b') {
+                .level = "warn"
+              } else {
+                .level = "info"
+              }
+            }
+          } else if ends_with(string!(.service), "-mcp") {
+            trimmed = strip_whitespace(string!(.message))
+            if trimmed == "" || match(trimmed, r'^(GitHub MCP Server running on stdio|server run cancelled)') {
               .level = "info"
             }
           } else if .service == "discord-mcp" {
