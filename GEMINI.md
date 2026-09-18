@@ -38,12 +38,15 @@ Aerial runs as a multi-container Docker stack supervised by Hangar and Autoheal 
   - `openobserve`: Native cloud-native telemetry, log exploration, and SQL search server over Streamable HTTP (`http://openobserve:5080/openobserve/api/default/mcp`).
 
 - **Web, Gateway & Documentation Services**:
-  - `aerial-proxy`: Edge reverse proxy routing external web traffic to Dashboard (`/` 302 redirect and `/dashboard/`), Documentation (`/docs/`), Agentsview (`/agentsview/`), and Grafana (`/grafana/`).
+  - `aerial-homepage`: Root landing portal providing a Gundam cyberpunk HUD with service discovery, live system widgets, and quick-launch links on port `3000`.
+  - `aerial-proxy`: Edge reverse proxy routing external web traffic to Homepage (`/`), Dashboard (`/dashboard/`), Documentation (`/docs/`), Agentsview (`/agentsview/`), Grafana (`/grafana/`), and OpenObserve (`/openobserve/`).
   - `aerial-dashboard`: Web status HUD rendering live queue state, recent turns, and health.
   - `aerial-docs`: Documentation service serving architectural specifications and runbooks via Docsify and Mermaid.
   - `agentsview`: Web observability dashboard rendering Antigravity session transcripts and tool traces.
 
 - **Observability & Telemetry Stack**:
+  - `aerial-openobserve`: Cloud-native telemetry, log exploration, and SQL/Lucene search engine with persistent data storage and passwordless local admin access on internal port `5080`.
+  - `aerial-vector`: High-performance log collector and VRL transform pipeline scraping container stdout/stderr, parsing structured formats, and shipping to OpenObserve.
   - `aerial-cadvisor`: Container metrics collector gathering per-container CPU, memory, network, and disk telemetry.
   - `aerial-node-exporter`: Host telemetry collector gathering host CPU loads, memory, storage, thermals, and network metrics.
   - `aerial-postgres-exporter`: PostgreSQL database metrics exporter collecting connection pool status, transactions, lock contention, table stats, and buffer cache hit ratios on internal port `9187`.
@@ -87,7 +90,7 @@ Aerial operates on a strict **Two-Repository Separation of Concerns**:
 
 ### 4. Extensibility & Precedence Rules
 - Rules and persona overrides resolve strictly according to the **Instruction Precedence Hierarchy** (Invariant 12).
-- **Skill Precedence**: Custom skills in `/share/aerial-config/custom-skills/` take highest priority, shadowing built-in skills of the same name.
+- **Skill Precedence**: Custom skills in `/share/aerial-config/custom-skills/` take highest priority, shadowing built-in skills of the same name, canonically consolidated into `~/.gemini/config/skills`.
 
 ## Core Invariants & Operational Rules
 
@@ -122,7 +125,7 @@ Aerial operates on a strict **Two-Repository Separation of Concerns**:
    - **Discord Message Length & Verbosity Ceiling**: Discord enforces a 2,000-character limit per message. Deliver responses strictly within single-message bounds (< 1,800 characters). Avoid multi-message splits by prioritizing brevity, leading with the bottom line (BLUF), and omitting unsolicited forensics or telemetry dumps unless explicitly requested.
 
 6. **Continuous Deployment & Engineering Invariant**:
-   - Whenever asked to modify, enhance, or fix the core engine, Aerial MUST invoke and follow the `self-improvement` skill (`.agents/skills/self-improvement/SKILL.md`).
+   - Whenever asked to modify, enhance, or fix the core engine, Aerial MUST invoke and follow the `self-improvement` skill (`~/.gemini/config/skills/self-improvement/SKILL.md` or `.agents/skills/self-improvement/SKILL.md`).
        - **Exclusively Asynchronous PR Submission & Automated Follow-Up (`aerial-pr.sh submit`)**: `scripts/aerial-pr.sh submit` and `scripts/aerial-config-pr.sh submit` operate strictly asynchronously. Synchronous submission mode has been eliminated. Fast pre-flight verification (`scripts/verify.sh --staged`) runs locally in <1s, pushes the branch, and creates the PR immediately. The script automatically schedules a one-shot follow-up check via `scheduler-mcp` (defaulting to 2m for `aerial` and 1m for `aerial-config`), automatically resolving the active thread via `AERIAL_TARGET_ID` (injected by the execution runner) or explicit `--target-id <thread_or_channel_id>`, and exits immediately with zero background daemon overhead. Aerial MUST NOT manually schedule an extra follow-up reminder after calling `submit`. When the scheduled check wakes up, Aerial executes `scripts/aerial-pr.sh merge <pr_num>` (or `scripts/aerial-config-pr.sh merge <pr_num>`), which deterministically verifies green CI, completes the squash-merge, prunes the ephemeral branch, triggers fast-path sidecar sync, and confirms deployment directly to Discord in concise plain prose (strictly capped at two sentences max, omitting markdown bullet lists and forward-looking checklists for nominal and ongoing states, while lifting sentence limits to provide full diagnostic logs and failure context if any error occurs).
    - **Mandatory PR Descriptions & Title Hygiene**: Pull Request descriptions are strictly mandatory under all circumstances. Submissions without a description will fail fast with exit code 1. Authors must provide a description via one of the supported mechanisms:
      1. Workspace convention file: authoring `PR_DESCRIPTION.md` or `.pr_description.md` in the scratch root (the recommended path for agents). The file is consumed and automatically deleted before staging so it is never committed to `main`.
