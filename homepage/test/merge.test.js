@@ -170,6 +170,32 @@ test('mergeSettings: deep merges layout and allows root styling overrides', () =
   });
 });
 
+test('mergeSettings: preserves explicit user layout order when root group is specified', () => {
+  const core = {
+    layout: {
+      'Aerial AI & Mission Control': { style: 'row', columns: 3 },
+      Observability: { style: 'row', columns: 2 }
+    }
+  };
+
+  const user = {
+    layout: {
+      'Aerial AI & Mission Control': { style: 'row', columns: 3 },
+      Applications: { style: 'row', columns: 2 },
+      Observability: { style: 'row', columns: 2 },
+      'Smart Home': { style: 'row', columns: 1 }
+    }
+  };
+
+  const merged = mergeSettings(core, user);
+  assert.deepEqual(Object.keys(merged.layout), [
+    'Aerial AI & Mission Control',
+    'Applications',
+    'Observability',
+    'Smart Home'
+  ]);
+});
+
 test('mergeDocker: deep merges multi-host Docker connection objects', () => {
   const core = {
     'my-docker': {
