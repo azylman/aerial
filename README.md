@@ -194,7 +194,7 @@ custom-skills/
 `aerial-brain` automatically discovers custom skills in `/share/aerial-config/custom-skills` and symlinks them into `/root/.gemini/skills/` with highest priority. Orphaned or dead symlinks are automatically swept when skills are renamed or removed.
 
 #### B. Built-in Skills (`azylman/aerial/.agents/skills/`)
-Core system skills (such as `self-improvement` and `self-update`) are baked into the `brain` image during build.
+Core system skills (such as `self-improvement`) are baked into the `brain` image during build.
 
 #### Skill File Structure (`SKILL.md`)
 ```markdown
