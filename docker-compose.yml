@@ -717,13 +717,14 @@ services:
       homepage.name: "OpenObserve Logs"
       homepage.icon: "open-observe.png"
       homepage.description: "Full-Stack Log & Telemetry Explorer"
-      homepage.href: "/openobserve/web/logs?stream=docker_logs&stream_type=logs"
+      homepage.href: "/openobserve/web/logs"
     environment:
       - ZO_ROOT_USER_EMAIL=${OPENOBSERVE_ROOT_USER_EMAIL:-admin@aerial.local}
       - ZO_ROOT_USER_PASSWORD=${OPENOBSERVE_ROOT_USER_PASSWORD:-Aerial!Logs2026#}
       - ZO_DATA_DIR=/data
       - ZO_BASE_URI=/openobserve
       - ZO_TELEMETRY=false
+      - ZO_AUTO_QUERY_ENABLED=true
       - ZO_COLS_PER_RECORD_LIMIT=5000
       - ZO_INGEST_FLATTEN_LEVEL=2
       - ZO_WIDENING_SCHEMA_EVOLUTION=true
