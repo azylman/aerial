@@ -21,6 +21,9 @@ transforms:
       # 1. Sanitize input & strip ANSI escape codes before parsing
       if is_string(.message) {
         .message = strip_ansi_escape_codes(to_string!(.message))
+        if strip_whitespace(.message) == "" {
+          abort
+        }
       }
 
       # 2. Normalize container and service names
@@ -75,7 +78,7 @@ transforms:
             .level = "debug"
           } else {
             # Inspect message only for explicit error/fatal prefixes to support bridged Go stdlib logs
-            msg_str = to_string(.message) ?? ""
+            msg_str = to_string!(.message)
             if match(msg_str, r'^(?i)(\[[^\]]+\]\s*)?(error|fatal|panic):') {
               .level = "error"
             } else {
@@ -150,6 +153,24 @@ transforms:
         del(parsed.container_name)
         del(parsed.service)
         del(parsed.stream)
+
+        # Sanitize verbose JSON-RPC / MCP schema definitions to prevent schema explosion
+        if exists(parsed.jsonrpc) {
+          if exists(parsed.result.tools) && is_array(parsed.result.tools) {
+            parsed.tools_count = length(array!(parsed.result.tools))
+            del(parsed.result.tools)
+          }
+          if exists(parsed.tools) && is_array(parsed.tools) {
+            parsed.tools_count = length(array!(parsed.tools))
+            del(parsed.tools)
+          }
+          if exists(parsed.result.prompts) && is_array(parsed.result.prompts) {
+            del(parsed.result.prompts)
+          }
+          if exists(parsed.result.resources) && is_array(parsed.result.resources) {
+            del(parsed.result.resources)
+          }
+        }
 
         # Assign remaining structured attributes
         if length(object!(parsed)) > 0 {
