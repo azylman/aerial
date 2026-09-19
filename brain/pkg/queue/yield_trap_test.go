@@ -11,14 +11,14 @@ import (
 	"time"
 
 	"github.com/bwmarrin/discordgo"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/azylman/aerial/brain/pkg/db"
+	"github.com/azylman/aerial/brain/pkg/metrics"
 	"github.com/azylman/aerial/brain/pkg/session"
 )
 
 func TestYieldTrap_AutoResumption_Success(t *testing.T) {
-	t.Parallel()
-
 	store := setupTestStore(t)
 	tmpHome := t.TempDir()
 	sessID := "f2222222-3333-4444-5555-666666666666"
@@ -90,6 +90,9 @@ func TestYieldTrap_AutoResumption_Success(t *testing.T) {
 		t.Fatalf("Failed to insert message: %v", err)
 	}
 
+	model := pool.GetRuntimeConfig()
+	initialResumed := testutil.ToFloat64(metrics.YieldTrapEventsTotal.WithLabelValues("resumed", "stderr_signature", model))
+
 	pool.Enqueue(msg)
 
 	select {
@@ -116,11 +119,14 @@ func TestYieldTrap_AutoResumption_Success(t *testing.T) {
 	if deliveredText != "Job completed after resumption!" {
 		t.Errorf("expected final substantive output, got %q", deliveredText)
 	}
+
+	newResumed := testutil.ToFloat64(metrics.YieldTrapEventsTotal.WithLabelValues("resumed", "stderr_signature", model))
+	if newResumed != initialResumed+1 {
+		t.Errorf("expected resumed metric to increment by 1, got delta %.0f", newResumed-initialResumed)
+	}
 }
 
 func TestYieldTrap_CircuitBreaker_TripsAfterMaxResumes(t *testing.T) {
-	t.Parallel()
-
 	store := setupTestStore(t)
 	tmpHome := t.TempDir()
 	sessID := "f3333333-4444-5555-6666-777777777777"
@@ -179,6 +185,9 @@ func TestYieldTrap_CircuitBreaker_TripsAfterMaxResumes(t *testing.T) {
 		t.Fatalf("Failed to insert message: %v", err)
 	}
 
+	model := pool.GetRuntimeConfig()
+	initialCB := testutil.ToFloat64(metrics.YieldTrapEventsTotal.WithLabelValues("circuit_breaker", "stderr_signature", model))
+
 	pool.Enqueue(msg)
 
 	select {
@@ -197,11 +206,14 @@ func TestYieldTrap_CircuitBreaker_TripsAfterMaxResumes(t *testing.T) {
 	if deliveredText != "Still waiting turn 3" {
 		t.Errorf("expected final invocation output delivered on circuit breaker trip, got %q", deliveredText)
 	}
+
+	newCB := testutil.ToFloat64(metrics.YieldTrapEventsTotal.WithLabelValues("circuit_breaker", "stderr_signature", model))
+	if newCB != initialCB+1 {
+		t.Errorf("expected circuit_breaker metric to increment by 1, got delta %.0f", newCB-initialCB)
+	}
 }
 
 func TestYieldTrap_TranscriptAudit_TriggersAutoResumption(t *testing.T) {
-	t.Parallel()
-
 	store := setupTestStore(t)
 	tmpHome := t.TempDir()
 	sessID := "f4444444-5555-6666-7777-888888888888"
@@ -276,6 +288,9 @@ func TestYieldTrap_TranscriptAudit_TriggersAutoResumption(t *testing.T) {
 		t.Fatalf("Failed to insert message: %v", err)
 	}
 
+	model := pool.GetRuntimeConfig()
+	initialAudit := testutil.ToFloat64(metrics.YieldTrapEventsTotal.WithLabelValues("resumed", "session_audit", model))
+
 	pool.Enqueue(msg)
 
 	select {
@@ -292,6 +307,11 @@ func TestYieldTrap_TranscriptAudit_TriggersAutoResumption(t *testing.T) {
 	defer deliveredMu.Unlock()
 	if deliveredText != "Recovered via transcript audit!" {
 		t.Errorf("expected final substantive output, got %q", deliveredText)
+	}
+
+	newAudit := testutil.ToFloat64(metrics.YieldTrapEventsTotal.WithLabelValues("resumed", "session_audit", model))
+	if newAudit != initialAudit+1 {
+		t.Errorf("expected session_audit resumed metric to increment by 1, got delta %.0f", newAudit-initialAudit)
 	}
 }
 

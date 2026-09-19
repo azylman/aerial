@@ -1739,18 +1739,20 @@ func (te *turnExecution) executeWithRetries() {
 					// Option B Background Command Yield Trap Interception:
 					isYield, taskCount := runner.IsYieldTrap(exitCode, stdout, stderr)
 					var unfinishedTaskID string
+					detectionSource := "stderr_signature"
 					if !isYield && te.pool != nil && te.pool.sessionMgr != nil && te.currentSessionID != "" {
 						if hasUnfinished, tID, err := te.pool.sessionMgr.HasUnfinishedBackgroundTask(te.currentSessionID); err == nil && hasUnfinished {
 							isYield = true
 							unfinishedTaskID = tID
+							detectionSource = "session_audit"
 						}
 					}
 
 					if isYield {
 						if autoResumeCount < MaxYieldTrapAutoResumes {
 							autoResumeCount++
-							log.Printf("[Queue] Yield trap intercepted for thread %s in session %s (auto-resume %d/%d, taskCount=%d, taskID=%s): background tasks terminated prematurely. Suppressing intermediate output and resuming turn.",
-								te.threadID, te.currentSessionID, autoResumeCount, MaxYieldTrapAutoResumes, taskCount, unfinishedTaskID)
+							log.Printf("[YieldTrap] Intercepted background command exit for thread %s in session %s (auto-resume %d/%d, source=%s, taskCount=%d, taskID=%s): suppressing intermediate waiting output and auto-resuming turn.",
+								te.threadID, te.currentSessionID, autoResumeCount, MaxYieldTrapAutoResumes, detectionSource, taskCount, unfinishedTaskID)
 
 							// 1. Accumulate token usage across sub-turns
 							accumulatedUsage.InputTokens += resp.Usage.InputTokens
@@ -1765,6 +1767,7 @@ func (te *turnExecution) executeWithRetries() {
 							promptToSend = YieldTrapResumePrompt
 
 							// 4. Record metric
+							metrics.RecordYieldTrap("resumed", detectionSource, currentModel)
 							metrics.RecordRunnerError("yield_trap_intercepted", currentModel)
 
 							// 5. Decrement attempt and re-run runner immediately
@@ -1773,8 +1776,9 @@ func (te *turnExecution) executeWithRetries() {
 						}
 
 						// Circuit breaker tripped!
-						log.Printf("[WorkerPool] Yield trap circuit breaker tripped for thread %s after %d auto-resumptions. Delivering final output.",
-							te.threadID, autoResumeCount)
+						log.Printf("[YieldTrap] Circuit breaker tripped for thread %s in session %s after %d auto-resumptions (source=%s, taskID=%s). Delivering final output.",
+							te.threadID, te.currentSessionID, autoResumeCount, detectionSource, unfinishedTaskID)
+						metrics.RecordYieldTrap("circuit_breaker", detectionSource, currentModel)
 						metrics.RecordRunnerError("yield_trap_circuit_breaker", currentModel)
 					}
 
