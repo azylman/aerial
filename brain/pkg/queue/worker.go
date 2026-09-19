@@ -1258,6 +1258,12 @@ func (te *turnExecution) buildTurnPrompt() {
 }
 
 func (te *turnExecution) executeWithRetries() {
+	defer func() {
+		if te.pool != nil && te.pool.daemonPool != nil {
+			te.pool.daemonPool.ReleaseDaemon(te.threadID)
+		}
+	}()
+
 	maxAttempts := te.pool.cfg.MaxAttempts
 	lastErrDetail := ""
 	lastStderr := ""
@@ -1400,7 +1406,10 @@ func (te *turnExecution) executeWithRetries() {
 		var exitCode int
 		var err error
 
-		if te.pool.cfg.UsePersistentDaemons && te.pool.daemonPool != nil {
+		if te.pool.daemonPool != nil && te.pool.cfg.UsePersistentDaemons {
+			if te.statusUpdater != nil {
+				te.statusUpdater.MarkTurnStarted()
+			}
 			daemon, daemonErr := te.pool.daemonPool.GetOrCreateDaemon(runCtx, te.threadID, te.currentSessionID, currentModel)
 			if daemonErr != nil {
 				stdout = ""
@@ -1408,7 +1417,11 @@ func (te *turnExecution) executeWithRetries() {
 				exitCode = 1
 				err = daemonErr
 			} else {
-				turnRes, turnErr := daemon.ExecuteTurn(runCtx, promptToSend)
+				var stepHandler runner.StepUpdateHandler
+				if te.statusUpdater != nil {
+					stepHandler = te.statusUpdater.HandleStep
+				}
+				turnRes, turnErr := daemon.ExecuteTurnWithHandler(runCtx, promptToSend, stepHandler)
 				if turnErr != nil {
 					stdout = ""
 					stderr = turnErr.Error()
@@ -1768,19 +1781,10 @@ func (te *turnExecution) executeWithRetries() {
 						taskCount = 1
 						detectionSource = "daemon_tracker"
 					}
-					if !isYield && te.pool != nil && te.pool.sessionMgr != nil && te.currentSessionID != "" {
-						if hasUnfinished, tID, err := te.pool.sessionMgr.HasUnfinishedBackgroundTask(te.currentSessionID); err == nil && hasUnfinished {
-							isYield = true
-							unfinishedTaskID = tID
-							detectionSource = "session_audit"
-						}
-					}
 
 					if isYield {
 						if autoResumeCount < MaxYieldTrapAutoResumes {
 							autoResumeCount++
-							log.Printf("[YieldTrap] Intercepted background command exit for thread %s in session %s (auto-resume %d/%d, source=%s, taskCount=%d, taskID=%s): suppressing intermediate waiting output and auto-resuming turn.",
-								te.threadID, te.currentSessionID, autoResumeCount, MaxYieldTrapAutoResumes, detectionSource, taskCount, unfinishedTaskID)
 
 							// 1. Accumulate token usage across sub-turns
 							accumulatedUsage.InputTokens += resp.Usage.InputTokens
@@ -1792,11 +1796,34 @@ func (te *turnExecution) executeWithRetries() {
 							// 2. Keep Discord typing heartbeat active without resetting status updater (do not call te.stopTyping())
 
 							// 3. Set prompt for immediate in-session auto-resumption
-							if unfinishedTaskID != "" {
-								promptToSend = fmt.Sprintf(TaskCompletionResumePrompt, unfinishedTaskID, 0, "")
-							} else {
-								promptToSend = YieldTrapResumePrompt
+							if detectionSource == "daemon_tracker" && te.pool.daemonPool != nil {
+								tasks := te.pool.daemonPool.ActiveTasks(te.threadID)
+								if len(tasks) > 0 {
+									activeTask := tasks[0]
+									unfinishedTaskID = activeTask.TaskID
+									if te.pool.sessionMgr != nil && te.currentSessionID != "" {
+										if sessDir, sErr := te.pool.sessionMgr.GetSessionDir(te.currentSessionID); sErr == nil && sessDir != "" {
+											waitCtx, waitCancel := context.WithTimeout(runCtx, 2*time.Second)
+											exitCode, logPath, wErr := watchTaskCompletion(waitCtx, sessDir, activeTask.TaskID)
+											waitCancel()
+											if wErr == nil {
+												te.pool.daemonPool.RemoveTask(te.threadID, activeTask.TaskID)
+												promptToSend = fmt.Sprintf(TaskCompletionResumePrompt, unfinishedTaskID, exitCode, logPath)
+											}
+										}
+									}
+								}
 							}
+							if promptToSend == te.turnPrompt || promptToSend == "" {
+								if unfinishedTaskID != "" {
+									promptToSend = fmt.Sprintf(TaskCompletionResumePrompt, unfinishedTaskID, 0, "")
+								} else {
+									promptToSend = YieldTrapResumePrompt
+								}
+							}
+
+							log.Printf("[YieldTrap] Intercepted background command exit for thread %s in session %s (auto-resume %d/%d, source=%s, taskCount=%d, taskID=%s): suppressing intermediate waiting output and auto-resuming turn.",
+								te.threadID, te.currentSessionID, autoResumeCount, MaxYieldTrapAutoResumes, detectionSource, taskCount, unfinishedTaskID)
 
 							// 4. Record metric
 							metrics.RecordYieldTrap("resumed", detectionSource, currentModel)

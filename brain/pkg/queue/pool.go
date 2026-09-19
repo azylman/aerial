@@ -207,6 +207,7 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 			return cfg.RunnerWithOptionsFunc(ctx, agyBin, prompt, sessionID, apiKey, model, runner.DefaultWatchdogOptions(timeoutMinutes))
 		}
 	} else if cfg.RunnerWithOptionsFunc == nil && cfg.RunnerFunc == nil {
+		cfg.UsePersistentDaemons = true
 		cfg.RunnerFunc = func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			return "", "", 1, fmt.Errorf("queue: RunnerFunc not configured on WorkerPool")
 		}
@@ -465,6 +466,25 @@ func (p *WorkerPool) SessionManager() *session.Manager {
 func (p *WorkerPool) Start() {
 	// WorkerPool starts workers lazily per active thread
 	log.Printf("[WorkerPool] Started queue worker pool with max %d attempts per turn", p.cfg.MaxAttempts)
+	if p.daemonPool != nil {
+		p.wg.Add(1)
+		go func() {
+			defer p.wg.Done()
+			ticker := time.NewTicker(30 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-p.ctx.Done():
+					return
+				case <-ticker.C:
+					p.daemonPool.PruneIdle(5 * time.Minute)
+					p.daemonPool.CheckMemoryPressureAndEvict()
+					p.daemonPool.MonitorZombieTasks(1 * time.Hour)
+					p.daemonPool.UpdateMemoryMetrics()
+				}
+			}
+		}()
+	}
 }
 
 // StopWithTimeout initiates a bounded graceful drain of the worker pool, allowing inflight turns

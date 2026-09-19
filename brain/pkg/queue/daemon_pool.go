@@ -125,10 +125,12 @@ func (p *DaemonPool) GetOrCreateDaemon(ctx context.Context, threadID string, ses
 	}
 
 	// Enforce concurrency ceiling via LRU eviction
-	data := p.cfg.Get()
-	ceiling := data.MaxConcurrentDaemons
-	if ceiling <= 0 {
-		ceiling = 40
+	ceiling := 40
+	if p.cfg != nil {
+		data := p.cfg.Get()
+		if data.MaxConcurrentDaemons > 0 {
+			ceiling = data.MaxConcurrentDaemons
+		}
 	}
 
 	if len(p.daemons) >= ceiling {
@@ -137,14 +139,18 @@ func (p *DaemonPool) GetOrCreateDaemon(ctx context.Context, threadID string, ses
 		}
 	}
 
-	// Spawn fresh daemon
+	geminiHome := ""
+	if p.cfg != nil {
+		geminiHome = p.cfg.GeminiHomeDir()
+	}
 	dCfg := runner.DaemonConfig{
-		SessionID: sessionID,
-		ThreadID:  threadID,
-		Model:     model,
-		AgyBin:    p.agyBin,
-		Cwd:       p.cwd,
-		Env:       p.env,
+		SessionID:     sessionID,
+		ThreadID:      threadID,
+		Model:         model,
+		AgyBin:        p.agyBin,
+		Cwd:           p.cwd,
+		Env:           p.env,
+		GeminiHomeDir: geminiHome,
 	}
 
 	d, err := runner.StartDaemon(ctx, dCfg)
@@ -167,6 +173,41 @@ func (p *DaemonPool) HasActiveTasks(threadID string) bool {
 		return d.TaskTracker().ActiveCount() > 0
 	}
 	return false
+}
+
+// ActiveTasks returns active tasks for the daemon associated with threadID.
+func (p *DaemonPool) ActiveTasks(threadID string) []runner.TaskMetadata {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if d, ok := p.daemons[threadID]; ok && d != nil {
+		return d.TaskTracker().ActiveTasks()
+	}
+	return nil
+}
+
+// RemoveTask removes a tracked task from the daemon associated with threadID.
+func (p *DaemonPool) RemoveTask(threadID, taskID string) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if d, ok := p.daemons[threadID]; ok && d != nil {
+		res := d.TaskTracker().Remove(taskID)
+		metrics.ActiveTasksGauge.WithLabelValues(threadID).Set(float64(d.TaskTracker().ActiveCount()))
+		return res
+	}
+	return false
+}
+
+// UpdateMemoryMetrics calculates aggregate RSS across active daemons and sets metrics.DaemonMemoryBytes.
+func (p *DaemonPool) UpdateMemoryMetrics() {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	var totalRSS uint64
+	for _, d := range p.daemons {
+		if d != nil {
+			totalRSS += d.RSSBytes()
+		}
+	}
+	metrics.DaemonMemoryBytes.Set(float64(totalRSS))
 }
 
 // ReleaseDaemon handles cleanup of dirty daemons once a turn completes.

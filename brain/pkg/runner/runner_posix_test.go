@@ -53,4 +53,11 @@ func TestRunnerPosix_KillHelpers(t *testing.T) {
 		_ = cmd.Wait()
 		killProcessGroup(cmd)
 	}
+
+	cmdAlive := exec.Command("sleep", "10")
+	configureSysProcAttr(cmdAlive)
+	if err := cmdAlive.Start(); err == nil {
+		killProcessGroup(cmdAlive)
+		_ = cmdAlive.Wait()
+	}
 }
