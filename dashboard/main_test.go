@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -3778,6 +3779,164 @@ func TestMergeClusterDeployments_NonContainerRepoNoTimeout(t *testing.T) {
 	// Because aerial-config does not build containers, it should NOT fail with "Hangar reconciliation timed out"
 	if len(deploys) > 0 && deploys[0].Stage == "failed" && deploys[0].CommitMsg == "Hangar reconciliation timed out (>120s)" {
 		t.Errorf("expected non-container repo aerial-config to NOT trigger Hangar reconciliation timeout failure, got %+v", deploys[0])
+	}
+}
+
+func TestExtractServiceNameFromJobName_ParenthesesSidecars(t *testing.T) {
+	cases := []struct {
+		jobName  string
+		expected string
+	}{
+		{"Build & Push Sidecar Images to GHCR (aura-farming)", "aura-farming"},
+		{"Build & Push Sidecar Images to GHCR (banana)", "banana"},
+		{"Build & Push Images (dashboard)", "dashboard"},
+		{"Run Sidecar Tests & Lint", "unit-tests"},
+	}
+	for _, tc := range cases {
+		if got := ExtractServiceNameFromJobName(tc.jobName); got != tc.expected {
+			t.Errorf("ExtractServiceNameFromJobName(%q) = %q; want %q", tc.jobName, got, tc.expected)
+		}
+	}
+}
+
+func TestMultiRepoGitHubPoller_IncludesPullRequestRuns(t *testing.T) {
+	now := time.Now().UTC()
+	var queriedQuery url.Values
+
+	mockGH := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/actions/runs") {
+			queriedQuery = r.URL.Query()
+			resp := GitHubRunsResponse{
+				TotalCount: 1,
+				WorkflowRuns: []GitHubRun{
+					{
+						ID:         9001,
+						Name:       "Continuous Delivery",
+						Event:      "pull_request",
+						HeadBranch: "feat/sidecars-pr",
+						HeadSHA:    "aabbccdd1122",
+						Status:     "in_progress",
+						CreatedAt:  now.Add(-1 * time.Minute),
+						UpdatedAt:  now.Add(-30 * time.Second),
+						HTMLURL:    "https://github.com/azylman/aerial-sidecars/actions/runs/9001",
+					},
+				},
+			}
+			_ = json.NewEncoder(w).Encode(resp)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer mockGH.Close()
+
+	poller := NewMultiGitHubPoller([]string{"azylman/aerial-sidecars"}, "token")
+	poller.apiBaseURL = mockGH.URL
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	hasActive := poller.pollOnce(ctx)
+	if !hasActive {
+		t.Errorf("expected pollOnce to return hasActive=true for in_progress PR run")
+	}
+
+	// Verify query params do not filter out PR events or branch names
+	if queriedQuery.Get("event") != "" {
+		t.Errorf("expected no event filter in GitHub Actions runs query, got %q", queriedQuery.Get("event"))
+	}
+	if queriedQuery.Get("branch") != "" {
+		t.Errorf("expected no branch filter in GitHub Actions runs query, got %q", queriedQuery.Get("branch"))
+	}
+
+	runs, _ := poller.GetSnapshot()
+	if len(runs) != 1 {
+		t.Fatalf("expected 1 run in snapshot, got %d", len(runs))
+	}
+	if runs[0].ID != 9001 || runs[0].Event != "pull_request" {
+		t.Errorf("unexpected run in snapshot: %+v", runs[0])
+	}
+}
+
+func TestMergeClusterDeployments_ActivePRRunShowsBuilding(t *testing.T) {
+	now := time.Now().UTC()
+	runs := []GitHubRun{
+		{
+			ID:         9001,
+			Repository: "azylman/aerial-sidecars",
+			Name:       "Continuous Delivery",
+			Event:      "pull_request",
+			HeadBranch: "feat/sidecars-pr",
+			HeadSHA:    "aabbccdd1122",
+			Status:     "in_progress",
+			CreatedAt:  now.Add(-1 * time.Minute),
+			UpdatedAt:  now.Add(-30 * time.Second),
+			HTMLURL:    "https://github.com/azylman/aerial-sidecars/actions/runs/9001",
+		},
+	}
+	jobs := map[int64][]GitHubJob{
+		9001: {
+			{Name: "Run Sidecar Tests & Lint", Status: "completed", Conclusion: "success"},
+			{Name: "Build & Push Sidecar Images to GHCR (aura-farming)", Status: "in_progress"},
+		},
+	}
+
+	deploys := mergeClusterDeployments(nil, runs, jobs, "0000000")
+	if len(deploys) != 1 {
+		t.Fatalf("expected 1 active deployment for PR run, got %d", len(deploys))
+	}
+	dep := deploys[0]
+	if dep.Repository != "azylman/aerial-sidecars" {
+		t.Errorf("expected repository azylman/aerial-sidecars, got %q", dep.Repository)
+	}
+	if dep.Stage != "building" {
+		t.Errorf("expected stage 'building', got %q", dep.Stage)
+	}
+	if len(dep.MatrixJobs) != 2 {
+		t.Fatalf("expected 2 matrix chips, got %d: %+v", len(dep.MatrixJobs), dep.MatrixJobs)
+	}
+	if dep.MatrixJobs[1].Name != "aura-farming" {
+		t.Errorf("expected chip name 'aura-farming', got %q", dep.MatrixJobs[1].Name)
+	}
+}
+
+func TestMergeClusterDeployments_CompletedPRRunDoesNotTimeout(t *testing.T) {
+	now := time.Now().UTC()
+	// Successful PR run completed 200s ago (exceeding standard 120s container swap timeout)
+	runs := []GitHubRun{
+		{
+			ID:         9002,
+			Repository: "azylman/aerial-sidecars",
+			Name:       "Continuous Delivery",
+			Event:      "pull_request",
+			HeadBranch: "feat/sidecars-pr",
+			HeadSHA:    "aabbccdd1122",
+			Status:     "completed",
+			Conclusion: "success",
+			CreatedAt:  now.Add(-300 * time.Second),
+			UpdatedAt:  now.Add(-200 * time.Second),
+			HTMLURL:    "https://github.com/azylman/aerial-sidecars/actions/runs/9002",
+		},
+	}
+	jobs := map[int64][]GitHubJob{
+		9002: {
+			{Name: "Build & Push Sidecar Images to GHCR (aura-farming)", Status: "completed", Conclusion: "success"},
+		},
+	}
+
+	containers := []DockerContainerJSON{
+		{
+			ID:      "c1",
+			Names:   []string{"/aerial-brain"},
+			State:   "running",
+			Created: now.Add(-10 * time.Hour).Unix(),
+			Labels:  map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"},
+		},
+	}
+
+	deploys := mergeClusterDeployments(containers, runs, jobs, "oldcorecommit")
+	if len(deploys) > 0 && deploys[0].Stage == "failed" && deploys[0].CommitMsg == "Hangar reconciliation timed out (>120s)" {
+		t.Errorf("expected completed PR run to NOT trigger Hangar reconciliation timeout failure, got %+v", deploys[0])
 	}
 }
 

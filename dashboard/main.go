@@ -163,6 +163,7 @@ type GitHubRun struct {
 	Repository string `json:"repository,omitempty"`
 	HeadSHA    string `json:"head_sha"`
 	HeadBranch string `json:"head_branch"`
+	Event      string `json:"event,omitempty"`
 	HeadCommit *struct {
 		Message   string    `json:"message"`
 		Timestamp time.Time `json:"timestamp"`
@@ -561,7 +562,7 @@ func (p *GitHubPoller) pollOnce(ctx context.Context) bool {
 	hasActive := false
 
 	for _, repo := range repos {
-		reqURL := fmt.Sprintf("%s/repos/%s/actions/runs?per_page=3&event=push&branch=main", baseURL, repo)
+		reqURL := fmt.Sprintf("%s/repos/%s/actions/runs?per_page=10", baseURL, repo)
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 		if err != nil {
 			continue
@@ -943,12 +944,17 @@ func mergeClusterDeploymentsWithHangar(
 				hasRecentContainerSwap = true
 			}
 
+			// Non-main branches and PR runs do not swap host containers in production
+			if (latestRun.HeadBranch != "" && latestRun.HeadBranch != "main" && latestRun.HeadBranch != "master") || latestRun.Event == "pull_request" {
+				hasRecentContainerSwap = true
+			}
+
 			// If the CI run completed and had zero container image build jobs,
 			// this commit only modified non-container assets (docs, dashboards, config, skills).
 			// It is GitOps synced by Hangar without requiring an OCI container recreation.
 			hasContainerBuilds := false
 			for _, j := range runJobs {
-				if strings.Contains(j.Name, "Build & Push Images") && j.Conclusion != "skipped" {
+				if strings.Contains(j.Name, "Build & Push") && strings.Contains(j.Name, "Images") && j.Conclusion != "skipped" {
 					hasContainerBuilds = true
 					break
 				}
@@ -1116,7 +1122,7 @@ func mergeClusterDeploymentsWithHangar(
 	if len(runs) > 0 {
 		latest := runs[0]
 		resolvedRepo = latest.Repository
-		if latest.Conclusion == "success" && latest.HeadSHA != "" && resolvedCommit == "" {
+		if latest.Conclusion == "success" && latest.HeadSHA != "" && resolvedCommit == "" && (latest.HeadBranch == "main" || latest.HeadBranch == "master" || latest.HeadBranch == "") && latest.Event != "pull_request" {
 			resolvedCommit = latest.HeadSHA
 		}
 		if latest.HeadCommit != nil {
