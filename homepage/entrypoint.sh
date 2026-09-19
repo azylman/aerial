@@ -14,6 +14,9 @@ if [ "$(id -u)" = "0" ]; then
     chown -R node:node /config 2>/dev/null || true
 fi
 
+# Start background configuration watcher to hot-reload on git syncs or config updates
+NODE_PATH=/app/node_modules node /app/core-homepage/prepare-config.js --watch &
+
 # Pass through arguments or default to server.js
 if [ $# -eq 0 ]; then
     set -- node server.js

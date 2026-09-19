@@ -100,18 +100,22 @@ function copyFallback(srcDir, dstDir) {
   }
 }
 
-function run() {
-  console.log(`[prepare-config] Initializing Homepage configuration...`);
-  console.log(`[prepare-config] Core: ${CORE_DIR} | User: ${USER_DIR} | Target: ${TARGET_DIR}`);
+function run(dirs = {}) {
+  const coreDir = dirs.coreDir || process.env.CORE_CONFIG_DIR || CORE_DIR;
+  const userDir = dirs.userDir || process.env.USER_CONFIG_DIR || USER_DIR;
+  const targetDir = dirs.targetDir || process.env.TARGET_CONFIG_DIR || TARGET_DIR;
 
-  if (!fs.existsSync(TARGET_DIR)) {
-    fs.mkdirSync(TARGET_DIR, { recursive: true, mode: 0o755 });
+  console.log(`[prepare-config] Initializing Homepage configuration...`);
+  console.log(`[prepare-config] Core: ${coreDir} | User: ${userDir} | Target: ${targetDir}`);
+
+  if (!fs.existsSync(targetDir)) {
+    fs.mkdirSync(targetDir, { recursive: true, mode: 0o755 });
   }
 
   const yaml = resolveYamlParser();
   if (!yaml) {
     console.error(`[prepare-config] js-yaml not found in container environment. Falling back to raw core copy.`);
-    copyFallback(CORE_DIR, TARGET_DIR);
+    copyFallback(coreDir, targetDir);
     return;
   }
 
@@ -128,8 +132,8 @@ function run() {
 
   for (const cfg of configFiles) {
     try {
-      const corePath = path.join(CORE_DIR, cfg.name);
-      const userPath = path.join(USER_DIR, cfg.name);
+      const corePath = path.join(coreDir, cfg.name);
+      const userPath = path.join(userDir, cfg.name);
 
       const coreRaw = safeRead(corePath);
       const userRaw = safeRead(userPath);
@@ -152,22 +156,22 @@ function run() {
 
         const defaultFallback = (cfg.name === 'settings.yaml' || cfg.name === 'docker.yaml') ? {} : [];
         const dumped = yaml.dump(finalObj !== null && finalObj !== undefined ? finalObj : defaultFallback);
-        writeAtomic(TARGET_DIR, cfg.name, dumped);
+        writeAtomic(targetDir, cfg.name, dumped);
       } else {
         // Custom CSS
         const mergedCss = cfg.merger(coreRaw, userRaw);
-        writeAtomic(TARGET_DIR, cfg.name, mergedCss);
+        writeAtomic(targetDir, cfg.name, mergedCss);
         logEntries.push(`${cfg.name}: concatenated successfully`);
       }
     } catch (err) {
       console.error(`[prepare-config] Error processing ${cfg.name}: ${err.message}`);
       logEntries.push(`${cfg.name}: failed (${err.message})`);
       // Fallback: copy core file directly if present
-      const corePath = path.join(CORE_DIR, cfg.name);
+      const corePath = path.join(coreDir, cfg.name);
       if (fs.existsSync(corePath)) {
         try {
           const content = fs.readFileSync(corePath, 'utf8');
-          writeAtomic(TARGET_DIR, cfg.name, content);
+          writeAtomic(targetDir, cfg.name, content);
         } catch (_) {}
       }
     }
@@ -175,15 +179,15 @@ function run() {
 
   // Copy any extra core files not explicitly merged (e.g. custom.js, icons, etc.)
   try {
-    if (fs.existsSync(CORE_DIR)) {
-      const coreFiles = fs.readdirSync(CORE_DIR);
+    if (fs.existsSync(coreDir)) {
+      const coreFiles = fs.readdirSync(coreDir);
       for (const file of coreFiles) {
         if (!configFiles.some(c => c.name === file)) {
-          const src = path.join(CORE_DIR, file);
-          const dst = path.join(TARGET_DIR, file);
+          const src = path.join(coreDir, file);
+          const dst = path.join(targetDir, file);
           if (fs.statSync(src).isFile() && !fs.existsSync(dst)) {
             const data = fs.readFileSync(src);
-            writeAtomic(TARGET_DIR, file, data);
+            writeAtomic(targetDir, file, data);
             logEntries.push(`${file}: copied from core`);
           }
         }
@@ -196,19 +200,161 @@ function run() {
   try {
     const summary = `Homepage Config Merge Summary - ${new Date().toISOString()}\n` +
       logEntries.map(e => ` • ${e}`).join('\n') + '\n';
-    fs.writeFileSync(path.join(TARGET_DIR, 'merge-summary.log'), summary, { mode: 0o644 });
+    fs.writeFileSync(path.join(targetDir, 'merge-summary.log'), summary, { mode: 0o644 });
   } catch (_) {}
 
   console.log(`[prepare-config] Configuration preparation complete.`);
 }
 
-try {
-  run();
-} catch (fatalErr) {
-  console.error(`[prepare-config] Fatal error during config preparation: ${fatalErr.message}`);
-  console.error(`[prepare-config] Copying raw core configs to prevent container crash loop.`);
-  copyFallback(CORE_DIR, TARGET_DIR);
+function startWatcher(options = {}) {
+  const coreDir = options.coreDir || process.env.CORE_CONFIG_DIR || CORE_DIR;
+  const userDir = options.userDir || process.env.USER_CONFIG_DIR || USER_DIR;
+  const targetDir = options.targetDir || process.env.TARGET_CONFIG_DIR || TARGET_DIR;
+  const pollIntervalMs = options.pollIntervalMs !== undefined ? options.pollIntervalMs : 5000;
+  const debounceMs = options.debounceMs !== undefined ? options.debounceMs : 500;
+  const onRecompile = options.onRecompile || null;
+
+  console.log(`[prepare-config] Starting background configuration watcher...`);
+  console.log(`[prepare-config] Monitoring: User=${userDir} | Core=${coreDir} -> Target=${targetDir}`);
+
+  let debounceTimer = null;
+  const triggerRecompile = (source) => {
+    if (debounceTimer) clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(() => {
+      console.log(`[prepare-config] Configuration change detected via ${source}, recompiling...`);
+      try {
+        run({ coreDir, userDir, targetDir });
+        if (typeof onRecompile === 'function') {
+          onRecompile(null);
+        }
+      } catch (err) {
+        console.error(`[prepare-config] Recompile error: ${err.message}`);
+        if (typeof onRecompile === 'function') {
+          onRecompile(err);
+        }
+      }
+    }, debounceMs);
+  };
+
+  const watchDirs = [userDir, coreDir];
+  const watchers = [];
+
+  for (const dir of watchDirs) {
+    try {
+      if (fs.existsSync(dir)) {
+        const w = fs.watch(dir, (eventType, filename) => {
+          if (filename && !filename.endsWith('.tmp') && !filename.includes('.git')) {
+            triggerRecompile(`fs.watch (${filename})`);
+          }
+        });
+        watchers.push(w);
+        console.log(`[prepare-config] Watching ${dir} for changes via fs.watch.`);
+      }
+    } catch (err) {
+      console.warn(`[prepare-config] Warning: Could not attach inotify to ${dir} (${err.message}); falling back to polling.`);
+    }
+  }
+
+  // Track mtime of every configuration file for reliable cross-mount change detection
+  const fileMtimes = new Map();
+  let isInitial = true;
+  function checkMtimes() {
+    let changed = false;
+    let changedFile = '';
+    const currentFiles = new Set();
+
+    for (const dir of watchDirs) {
+      try {
+        if (!fs.existsSync(dir)) continue;
+        const entries = fs.readdirSync(dir);
+        for (const f of entries) {
+          if (f.endsWith('.yaml') || f.endsWith('.yml') || f.endsWith('.css')) {
+            const fullPath = path.join(dir, f);
+            currentFiles.add(fullPath);
+            try {
+              const stat = fs.statSync(fullPath);
+              const prev = fileMtimes.get(fullPath);
+              if (prev === undefined) {
+                fileMtimes.set(fullPath, stat.mtimeMs);
+                if (!isInitial) {
+                  changed = true;
+                  changedFile = f;
+                }
+              } else if (prev !== stat.mtimeMs) {
+                fileMtimes.set(fullPath, stat.mtimeMs);
+                changed = true;
+                changedFile = f;
+              }
+            } catch (_) {}
+          }
+        }
+      } catch (_) {}
+    }
+
+    // Check for deleted files
+    for (const trackedPath of fileMtimes.keys()) {
+      if (!currentFiles.has(trackedPath)) {
+        fileMtimes.delete(trackedPath);
+        if (!isInitial) {
+          changed = true;
+          changedFile = path.basename(trackedPath);
+        }
+      }
+    }
+
+    if (isInitial) {
+      isInitial = false;
+    } else if (changed) {
+      triggerRecompile(`poll (${changedFile})`);
+    }
+  }
+
+  // Initialize baseline mtimes
+  checkMtimes();
+
+  let intervalTimer = null;
+  if (pollIntervalMs > 0) {
+    intervalTimer = setInterval(checkMtimes, pollIntervalMs);
+  }
+
+  return {
+    close: () => {
+      if (debounceTimer) clearTimeout(debounceTimer);
+      if (intervalTimer) clearInterval(intervalTimer);
+      for (const w of watchers) {
+        try { w.close(); } catch (_) {}
+      }
+    }
+  };
 }
 
-// Ensure clean exit code 0 so container continues to server.js
-process.exit(0);
+if (require.main === module) {
+  const isWatchMode = process.argv.includes('--watch') || process.argv.includes('-w');
+  try {
+    run();
+    if (isWatchMode) {
+      startWatcher();
+    } else {
+      process.exit(0);
+    }
+  } catch (fatalErr) {
+    console.error(`[prepare-config] Fatal error during config preparation: ${fatalErr.message}`);
+    console.error(`[prepare-config] Copying raw core configs to prevent container crash loop.`);
+    copyFallback(CORE_DIR, TARGET_DIR);
+    if (isWatchMode) {
+      startWatcher();
+    } else {
+      process.exit(0);
+    }
+  }
+}
+
+module.exports = {
+  run,
+  startWatcher,
+  resolveYamlParser,
+  parseYaml,
+  safeRead,
+  writeAtomic,
+  copyFallback
+};
