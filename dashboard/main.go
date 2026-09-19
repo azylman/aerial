@@ -621,9 +621,6 @@ func (p *GitHubPoller) pollOnce(ctx context.Context) bool {
 			// Sanitize commit messages and tag repository
 			for i := range runData.WorkflowRuns {
 				runData.WorkflowRuns[i].Repository = repo
-				if runData.WorkflowRuns[i].Repository == "" && runData.WorkflowRuns[i].RepoObj != nil && runData.WorkflowRuns[i].RepoObj.FullName != "" {
-					runData.WorkflowRuns[i].Repository = runData.WorkflowRuns[i].RepoObj.FullName
-				}
 				if runData.WorkflowRuns[i].HeadCommit != nil {
 					rawMsg := runData.WorkflowRuns[i].HeadCommit.Message
 					firstLine := strings.SplitN(rawMsg, "\n", 2)[0]

@@ -4015,3 +4015,84 @@ func TestGitHubPoller_DecodesWorkflowRunsWithRepositoryObject(t *testing.T) {
 		t.Errorf("expected 1 cached job for run 9999, got %d", len(jobs[9999]))
 	}
 }
+
+func TestGitHubPoller_DecodeErrorLogsAndSkips(t *testing.T) {
+	mockGH := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// Return invalid JSON payload to exercise decodeErr logging branch in pollOnce
+		_, _ = w.Write([]byte(`{not valid json`))
+	}))
+	defer mockGH.Close()
+
+	poller := NewMultiGitHubPoller([]string{"azylman/aerial"}, "test-token")
+	poller.apiBaseURL = mockGH.URL
+
+	ctx := context.Background()
+	hasActive := poller.pollOnce(ctx)
+	if hasActive {
+		t.Errorf("expected pollOnce to return false on decode error, got true")
+	}
+
+	runs, _ := poller.GetSnapshot()
+	if len(runs) != 0 {
+		t.Errorf("expected 0 cached runs on decode error, got %d", len(runs))
+	}
+}
+
+func TestGitHubPoller_RateLimitAndUnexpectedStatus(t *testing.T) {
+	callCount := 0
+	mockGH := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		if callCount == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"message": "rate limit exceeded"}`))
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"message": "internal server error"}`))
+	}))
+	defer mockGH.Close()
+
+	poller := NewMultiGitHubPoller([]string{"repo1", "repo2"}, "test-token")
+	poller.apiBaseURL = mockGH.URL
+
+	ctx := context.Background()
+	hasActive := poller.pollOnce(ctx)
+	if hasActive {
+		t.Errorf("expected pollOnce to return false on HTTP errors, got true")
+	}
+}
+
+func TestGitHubPoller_GetActiveReposEdgeCases(t *testing.T) {
+	var nilPoller *GitHubPoller
+	if got := nilPoller.getActiveRepos(); got != nil {
+		t.Errorf("expected nil for nil poller, got %v", got)
+	}
+
+	singleRepoPoller := &GitHubPoller{
+		repo: "azylman/aerial",
+	}
+	if got := singleRepoPoller.getActiveRepos(); len(got) != 1 || got[0] != "azylman/aerial" {
+		t.Errorf("expected [azylman/aerial], got %v", got)
+	}
+
+	emptyPoller := &GitHubPoller{}
+	if got := emptyPoller.getActiveRepos(); got != nil {
+		t.Errorf("expected nil for empty poller, got %v", got)
+	}
+}
+
+func TestFormatUptimeString_BackwardCompatibilityWrapper(t *testing.T) {
+	if got := formatUptimeString(120); got != "2m" {
+		t.Errorf("expected 2m, got %q", got)
+	}
+}
+
+func TestBuildSchedulesUpstreamURL_ErrorHandling(t *testing.T) {
+	if _, err := BuildSchedulesUpstreamURL(""); err == nil {
+		t.Errorf("expected error for empty brain URL, got nil")
+	}
+	if _, err := BuildSchedulesUpstreamURL("http://localhost:8080\tinvalid"); err == nil {
+		t.Errorf("expected error for control char URL, got nil")
+	}
+}
