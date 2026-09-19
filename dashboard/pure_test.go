@@ -1925,3 +1925,213 @@ func TestMergeClusterDeployments_MultiRunSameCommitAndSortTies(t *testing.T) {
 	}
 }
 
+func TestPure_TargetedCoverageBoost(t *testing.T) {
+	refTime := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+
+	// 1. Zero-time defaults for ParseMatrixJobChips and BuildContainerChips
+	jobs := []GitHubJob{
+		{
+			ID:        1,
+			Name:      "Build & Push Images (proxy)",
+			Status:    "in_progress",
+			StartedAt: time.Now().Add(-10 * time.Second),
+		},
+	}
+	chips := ParseMatrixJobChips(jobs, time.Time{})
+	if len(chips) != 1 || chips[0].Name != "proxy" {
+		t.Errorf("expected 1 chip for proxy, got %+v", chips)
+	}
+
+	containers := []DockerContainerJSON{
+		{
+			ID:      "c1",
+			Names:   []string{"/aerial-brain"},
+			State:   "running",
+			Created: time.Now().Add(-60 * time.Second).Unix(),
+			Labels:  map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"},
+		},
+	}
+	containerChips := BuildContainerChips(containers, time.Time{})
+	if len(containerChips) != 1 || containerChips[0].Name != "brain" {
+		t.Errorf("expected 1 container chip for brain, got %+v", containerChips)
+	}
+
+	// 2. url.Parse error branches using invalid ports / characters
+	invalidURL := "http://[::1]:namedport"
+	if _, _, _, err := BuildFactsUpstreamURL(invalidURL, nil); err == nil {
+		t.Errorf("expected url.Parse error for invalid facts URL")
+	}
+	if _, err := BuildSchedulesUpstreamURL(invalidURL); err == nil {
+		t.Errorf("expected url.Parse error for invalid schedules URL")
+	}
+	if _, _, _, err := BuildScheduleRunsUpstreamURL(invalidURL, nil); err == nil {
+		t.Errorf("expected url.Parse error for invalid schedule runs URL")
+	}
+
+	// 3. Cardinality clamping to max 5 deployments
+	var manyRuns []GitHubRun
+	for i := 1; i <= 8; i++ {
+		sha := fmt.Sprintf("%040d", i)
+		manyRuns = append(manyRuns, GitHubRun{
+			ID:        int64(1000 + i),
+			HeadSHA:   sha,
+			Status:    "in_progress",
+			CreatedAt: refTime.Add(-time.Duration(i) * time.Minute),
+		})
+	}
+	clampedDeps := MergeClusterDeploymentsWithHangar(manyRuns, nil, GitSyncStatusResponse{}, nil, "", refTime)
+	if len(clampedDeps) != 5 {
+		t.Errorf("expected exactly 5 clamped deployments, got %d", len(clampedDeps))
+	}
+
+	// 4. TargetServices matching container without commit label
+	syncWithTarget := GitSyncStatusResponse{
+		Status: "synced",
+		Reconciliation: &ReconciliationStatus{
+			Active:         true,
+			State:          "pulling",
+			CommitSHA:      "8888888888888888888888888888888888888888",
+			TargetServices: []string{"proxy"},
+			StartedAt:      refTime.Add(-15 * time.Second),
+		},
+	}
+	proxyWithoutLabel := []DockerContainerJSON{
+		{
+			ID:      "p1",
+			Names:   []string{"/aerial-proxy"},
+			State:   "running",
+			Created: refTime.Add(-10 * time.Second).Unix(),
+			Labels:  map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "proxy"},
+		},
+	}
+	targetDeps := MergeClusterDeploymentsWithHangar(nil, nil, syncWithTarget, proxyWithoutLabel, "", refTime)
+	if len(targetDeps) == 0 || targetDeps[0].Commit != "8888888" || len(targetDeps[0].MatrixJobs) == 0 {
+		t.Errorf("expected deployment with target container chip, got %+v", targetDeps)
+	}
+
+	// 5. Short steps (< 5) coverage on Hangar reconciliation failure
+	failedSync := GitSyncStatusResponse{
+		Status: "error",
+		Reconciliation: &ReconciliationStatus{
+			Active:    false,
+			State:     "failed",
+			Error:     "docker compose build failed",
+			CommitSHA: "9999999999999999999999999999999999999999",
+			StartedAt: refTime.Add(-2 * time.Minute),
+		},
+	}
+	failedDeps := MergeClusterDeploymentsWithHangar(nil, nil, failedSync, nil, "", refTime)
+	if len(failedDeps) == 0 || failedDeps[0].Stage != "failed" || len(failedDeps[0].Steps) != 5 {
+		t.Errorf("expected failed deployment with 5 steps, got %+v", failedDeps)
+	}
+
+	// 6. Reconciliation with empty CommitSHA and empty currentCommit -> fallback to "hangar"
+	emptyReconSync := GitSyncStatusResponse{
+		Status: "synced",
+		Reconciliation: &ReconciliationStatus{
+			Active:    true,
+			State:     "pulling",
+			CommitSHA: "",
+			StartedAt: refTime.Add(-10 * time.Second),
+		},
+	}
+	emptyReconDeps := MergeClusterDeploymentsWithHangar(nil, nil, emptyReconSync, nil, "", refTime)
+	if len(emptyReconDeps) == 0 || emptyReconDeps[0].Commit != "dep-aerial-stack-hangar" {
+		t.Errorf("expected fallback to commit dep-aerial-stack-hangar, got %+v", emptyReconDeps)
+	}
+
+	// 7. Pre-existing run (with 5 steps) updated by reconciliation swapping and failure
+	sameSHA := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	preRun := []GitHubRun{
+		{
+			ID:        777,
+			HeadSHA:   sameSHA,
+			Status:    "in_progress",
+			CreatedAt: refTime.Add(-2 * time.Minute),
+		},
+	}
+	swapSync := GitSyncStatusResponse{
+		Status: "synced",
+		Reconciliation: &ReconciliationStatus{
+			Active:         true,
+			State:          "swapping",
+			CommitSHA:      sameSHA,
+			TargetServices: []string{"brain"},
+			StartedAt:      refTime.Add(-30 * time.Second),
+		},
+	}
+	swappedDeps := MergeClusterDeploymentsWithHangar(preRun, nil, swapSync, nil, "", refTime)
+	if len(swappedDeps) == 0 || swappedDeps[0].Stage != "swapping" || swappedDeps[0].Steps[3].Status != "active" {
+		t.Errorf("expected existing steps updated to swapping, got %+v", swappedDeps)
+	}
+
+	// 8. Pre-existing run updated by reconciliation failure
+	failedExistingSync := GitSyncStatusResponse{
+		Status: "error",
+		Reconciliation: &ReconciliationStatus{
+			Active:    false,
+			State:     "failed",
+			Error:     "host crash",
+			CommitSHA: sameSHA,
+			StartedAt: refTime.Add(-10 * time.Second),
+		},
+	}
+	failedExistingDeps := MergeClusterDeploymentsWithHangar(preRun, nil, failedExistingSync, nil, "", refTime)
+	if len(failedExistingDeps) == 0 || failedExistingDeps[0].Steps[2].Status != "failed" {
+		t.Errorf("expected existing step 2 failed, got %+v", failedExistingDeps)
+	}
+
+	// 9. 40-char SHA run matched by 7-char prefix container
+	prefixRun := []GitHubRun{
+		{
+			ID:        888,
+			HeadSHA:   "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			Status:    "in_progress",
+			CreatedAt: refTime.Add(-3 * time.Minute),
+		},
+	}
+	prefixCont := []DockerContainerJSON{
+		{
+			ID:      "c2",
+			Names:   []string{"/aerial-proxy"},
+			Created: refTime.Add(-20 * time.Second).Unix(),
+			State:   "running",
+			Labels: map[string]string{
+				"com.docker.compose.project":        "aerial",
+				"com.docker.compose.service":        "proxy",
+				"org.opencontainers.image.revision": "bbbbbbb",
+			},
+		},
+	}
+	prefixDeps := MergeClusterDeploymentsWithHangar(prefixRun, nil, GitSyncStatusResponse{}, prefixCont, "", refTime)
+	if len(prefixDeps) == 0 || prefixDeps[0].Commit != "bbbbbbb" {
+		t.Errorf("expected prefix match for container, got %+v", prefixDeps)
+	}
+
+	// 10. Degraded vs Failed tie-breaking in sort where degraded is element i and failed is element j
+	degradedFirstRuns := []GitHubRun{
+		{
+			ID:         901,
+			HeadSHA:    "1111111111111111111111111111111111111111",
+			Status:     "completed",
+			Conclusion: "failure",
+			CreatedAt:  refTime.Add(-5 * time.Minute),
+			UpdatedAt:  refTime.Add(-5 * time.Minute),
+		},
+	}
+	degradedContOnly := []DockerContainerJSON{
+		{
+			Names:   []string{"/aerial-brain"},
+			Created: refTime.Add(-5 * time.Minute).Unix(),
+			State:   "exited",
+			Labels: map[string]string{
+				"org.opencontainers.image.revision": "2222222222222222222222222222222222222222",
+			},
+		},
+	}
+	tieDeps := MergeClusterDeploymentsWithHangar(degradedFirstRuns, nil, GitSyncStatusResponse{}, degradedContOnly, "", refTime)
+	if len(tieDeps) != 2 || tieDeps[0].Stage != "failed" || tieDeps[1].Stage != "degraded" {
+		t.Errorf("expected failed to sort before degraded, got %+v", tieDeps)
+	}
+}
+

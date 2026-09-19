@@ -4204,3 +4204,105 @@ func TestBuildSchedulesUpstreamURL_ErrorHandling(t *testing.T) {
 		t.Errorf("expected error for control char URL, got nil")
 	}
 }
+
+func TestFetchGitSyncStatus_ErrorHandling(t *testing.T) {
+	ctx := context.Background()
+
+	// Empty URL returns fallback
+	res := fetchGitSyncStatus(ctx, "")
+	if res.Status != "synced" || res.Error != "" {
+		t.Errorf("expected fallback synced status for empty URL, got %+v", res)
+	}
+
+	// Invalid URL returns error
+	resInvalid := fetchGitSyncStatus(ctx, "http://[::1]:namedport")
+	if resInvalid.Error == "" {
+		t.Errorf("expected error for invalid URL, got empty error")
+	}
+
+	// Server returning non-200
+	srv500 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "server error", http.StatusInternalServerError)
+	}))
+	defer srv500.Close()
+	res500 := fetchGitSyncStatus(ctx, srv500.URL)
+	if res500.Error != "HTTP 500" {
+		t.Errorf("expected 'HTTP 500', got %q", res500.Error)
+	}
+
+	// Server returning invalid JSON
+	srvBadJSON := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("not json"))
+	}))
+	defer srvBadJSON.Close()
+	resBadJSON := fetchGitSyncStatus(ctx, srvBadJSON.URL)
+	if resBadJSON.Error == "" {
+		t.Errorf("expected decode error, got empty error")
+	}
+}
+
+func TestFetchJobsForRun_Branches(t *testing.T) {
+	ctx := context.Background()
+	poller := &GitHubPoller{
+		client:      &http.Client{Timeout: 2 * time.Second},
+		jobsETagMap: make(map[int64]string),
+		cachedJobs:  make(map[int64][]GitHubJob),
+	}
+
+	// 1. Empty repo returns early without error
+	poller.fetchJobsForRun(ctx, 123)
+
+	// 2. 304 Not Modified
+	srv304 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotModified)
+	}))
+	defer srv304.Close()
+
+	poller.apiBaseURL = srv304.URL
+	poller.repo = "azylman/aerial"
+	poller.fetchJobsForRun(ctx, 456)
+}
+
+func TestGitHubPoller_TargetedCoverageBoost(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// 1. nil poller Start and pollOnce
+	var nilPoller *GitHubPoller
+	nilPoller.Start(ctx)
+	if nilPoller.pollOnce(ctx) {
+		t.Errorf("expected nil poller pollOnce to return false")
+	}
+
+	// 2. empty poller pollOnce (zero repos)
+	emptyPoller := &GitHubPoller{}
+	if emptyPoller.pollOnce(ctx) {
+		t.Errorf("expected empty poller pollOnce to return false")
+	}
+
+	// 3. Fallback to runsETag and repo pruning
+	srvPrune := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("If-None-Match") != "legacy-etag" {
+			t.Errorf("expected If-None-Match: legacy-etag, got %q", r.Header.Get("If-None-Match"))
+		}
+		w.WriteHeader(http.StatusNotModified)
+	}))
+	defer srvPrune.Close()
+
+	prunePoller := &GitHubPoller{
+		repo:             "azylman/aerial",
+		runsETag:         "legacy-etag",
+		runsETagMap:      map[string]string{"old/removed": "etag-old"},
+		cachedRunsByRepo: map[string][]GitHubRun{"old/removed": {{ID: 999}}},
+		client:           &http.Client{Timeout: 2 * time.Second},
+		apiBaseURL:       srvPrune.URL,
+	}
+
+	prunePoller.pollOnce(ctx)
+	prunePoller.mu.RLock()
+	if _, exists := prunePoller.cachedRunsByRepo["old/removed"]; exists {
+		t.Errorf("expected removed repository to be pruned from cache")
+	}
+	prunePoller.mu.RUnlock()
+}
