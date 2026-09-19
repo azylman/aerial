@@ -227,6 +227,9 @@ func TestYieldTrap_DaemonTracker_TriggersAutoResumption(t *testing.T) {
 	_ = os.MkdirAll(tasksDir, 0755)
 	_ = os.WriteFile(filepath.Join(tasksDir, "task-999.log"), []byte("Task output\n"), 0644)
 
+	mockBin := filepath.Join(tmpHome, "mock_agy.sh")
+	_ = os.WriteFile(mockBin, []byte("#!/bin/sh\nwhile true; do sleep 1; done\n"), 0755)
+
 	var runnerInvocations atomic.Int32
 	var deliveredMu sync.Mutex
 	var deliveredText string
@@ -237,6 +240,7 @@ func TestYieldTrap_DaemonTracker_TriggersAutoResumption(t *testing.T) {
 	pool := NewWorkerPool(WorkerPoolConfig{
 		SessionManager: sessMgr,
 		Store:          store,
+		AgyBin:         mockBin,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
