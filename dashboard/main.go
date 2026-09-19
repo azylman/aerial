@@ -158,9 +158,12 @@ type ClusterResponse struct {
 }
 
 type GitHubRun struct {
-	ID         int64  `json:"id"`
-	Name       string `json:"name"`
-	Repository string `json:"repository,omitempty"`
+	ID      int64  `json:"id"`
+	Name    string `json:"name"`
+	RepoObj *struct {
+		FullName string `json:"full_name"`
+	} `json:"repository,omitempty"`
+	Repository string `json:"-"`
 	HeadSHA    string `json:"head_sha"`
 	HeadBranch string `json:"head_branch"`
 	Event      string `json:"event,omitempty"`
@@ -197,16 +200,16 @@ type GitHubJobsResponse struct {
 }
 
 type GitHubPoller struct {
-	repo             string
-	repos            []string
-	token            string
-	client           *http.Client
-	configPath       string
-	runsETag         string
-	runsETagMap      map[string]string
-	jobsETagMap      map[int64]string
-	apiBaseURL       string
-	pollInterval     time.Duration
+	repo         string
+	repos        []string
+	token        string
+	client       *http.Client
+	configPath   string
+	runsETag     string
+	runsETagMap  map[string]string
+	jobsETagMap  map[int64]string
+	apiBaseURL   string
+	pollInterval time.Duration
 
 	mu               sync.RWMutex
 	cachedRunsByRepo map[string][]GitHubRun
@@ -611,44 +614,46 @@ func (p *GitHubPoller) pollOnce(ctx context.Context) bool {
 			var runData GitHubRunsResponse
 			decodeErr := json.NewDecoder(resp.Body).Decode(&runData)
 			drainAndClose(resp.Body, "runs response body")
-			if decodeErr == nil {
-				// Sanitize commit messages and tag repository
-				for i := range runData.WorkflowRuns {
-					runData.WorkflowRuns[i].Repository = repo
-					if runData.WorkflowRuns[i].HeadCommit != nil {
-						rawMsg := runData.WorkflowRuns[i].HeadCommit.Message
-						firstLine := strings.SplitN(rawMsg, "\n", 2)[0]
-						// Truncate to 72 runes
-						runes := []rune(firstLine)
-						if len(runes) > 72 {
-							firstLine = string(runes[:72]) + "…"
-						}
-						// Strip any token-like substrings
-						for _, sens := range sensitiveKeys {
-							firstLine = strings.ReplaceAll(firstLine, sens, "[REDACTED]")
-						}
-						runData.WorkflowRuns[i].HeadCommit.Message = firstLine
+			if decodeErr != nil {
+				log.Printf("[Dashboard:GitHub] Error decoding runs for %s: %v", repo, decodeErr)
+				continue
+			}
+			// Sanitize commit messages and tag repository
+			for i := range runData.WorkflowRuns {
+				runData.WorkflowRuns[i].Repository = repo
+				if runData.WorkflowRuns[i].HeadCommit != nil {
+					rawMsg := runData.WorkflowRuns[i].HeadCommit.Message
+					firstLine := strings.SplitN(rawMsg, "\n", 2)[0]
+					// Truncate to 72 runes
+					runes := []rune(firstLine)
+					if len(runes) > 72 {
+						firstLine = string(runes[:72]) + "…"
 					}
+					// Strip any token-like substrings
+					for _, sens := range sensitiveKeys {
+						firstLine = strings.ReplaceAll(firstLine, sens, "[REDACTED]")
+					}
+					runData.WorkflowRuns[i].HeadCommit.Message = firstLine
 				}
+			}
 
-				p.mu.Lock()
-				if newETag != "" {
-					p.runsETagMap[repo] = newETag
-					if repo == p.repo {
-						p.runsETag = newETag
-					}
+			p.mu.Lock()
+			if newETag != "" {
+				p.runsETagMap[repo] = newETag
+				if repo == p.repo {
+					p.runsETag = newETag
 				}
-				p.cachedRunsByRepo[repo] = runData.WorkflowRuns
-				p.mu.Unlock()
+			}
+			p.cachedRunsByRepo[repo] = runData.WorkflowRuns
+			p.mu.Unlock()
 
-				for _, r := range runData.WorkflowRuns {
-					allActiveRunIDs[r.ID] = true
-					if r.Status == "in_progress" || r.Status == "queued" || time.Since(r.UpdatedAt) < 10*time.Minute {
-						p.fetchJobsForRun(ctx, r.ID, repo)
-					}
-					if r.Status == "in_progress" || r.Status == "queued" {
-						hasActive = true
-					}
+			for _, r := range runData.WorkflowRuns {
+				allActiveRunIDs[r.ID] = true
+				if r.Status == "in_progress" || r.Status == "queued" || time.Since(r.UpdatedAt) < 10*time.Minute {
+					p.fetchJobsForRun(ctx, r.ID, repo)
+				}
+				if r.Status == "in_progress" || r.Status == "queued" {
+					hasActive = true
 				}
 			}
 			continue

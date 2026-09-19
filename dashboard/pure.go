@@ -230,6 +230,9 @@ func ExtractServiceNameFromJobName(jobName string) string {
 	if strings.Contains(lower, "lint") {
 		return "lint"
 	}
+	if strings.Contains(lower, "config") {
+		return "config"
+	}
 	if start := strings.Index(lower, "("); start != -1 {
 		if end := strings.Index(lower[start+1:], ")"); end != -1 {
 			target := strings.TrimSpace(lower[start+1 : start+1+end])

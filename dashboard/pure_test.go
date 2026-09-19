@@ -550,6 +550,8 @@ func TestExtractServiceNameFromJobName_TableDriven(t *testing.T) {
 		{name: "unit test generic", jobName: "Unit Test Matrix", expected: "unit-tests"},
 		{name: "test generic", jobName: "Service Integration Test", expected: "unit-tests"},
 		{name: "lint job", jobName: "GolangCI Lint Run", expected: "lint"},
+		{name: "validate-config job", jobName: "validate-config", expected: "config"},
+		{name: "Validate Configuration job", jobName: "Validate Configuration", expected: "config"},
 		{name: "unrelated job", jobName: "Cleanup Stale Artifacts", expected: ""},
 	}
 
@@ -1237,10 +1239,10 @@ func TestBuildTargetContainerChips_TableDriven(t *testing.T) {
 			wantLen:   2,
 		},
 		{
-			name:      "zero reference time defaults now to time.Now().UTC()",
-			targets:   []string{"dashboard"},
-			startedAt: startedAt,
-			wantLen:   1,
+			name:             "zero reference time defaults now to time.Now().UTC()",
+			targets:          []string{"dashboard"},
+			startedAt:        startedAt,
+			wantLen:          1,
 			customContainers: rawContainers,
 			check: func(t *testing.T, chips []MatrixJobChip) {
 				if chips[0].Duration == "" {
@@ -1293,5 +1295,3 @@ func TestBuildTargetContainerChips_TableDriven(t *testing.T) {
 		})
 	}
 }
-
-
