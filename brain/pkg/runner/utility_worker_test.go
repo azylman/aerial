@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -351,7 +352,12 @@ func TestActivityTap_WriteErrorBranches(t *testing.T) {
 }
 
 func TestWorkerInstance_MarkDeadAndKillBranches(t *testing.T) {
-	cmd := exec.Command("sleep", "10")
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		cmd = exec.Command("powershell", "-Command", "Start-Sleep 10")
+	} else {
+		cmd = exec.Command("sleep", "10")
+	}
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("failed to start sleep: %v", err)
 	}

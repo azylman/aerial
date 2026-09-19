@@ -2264,3 +2264,112 @@ func TestIsYieldTrap(t *testing.T) {
 	}
 }
 
+func TestExtractSessionID_JSONUnmarshal(t *testing.T) {
+	t.Parallel()
+	targetUUID := "12345678-abcd-ef01-2345-6789abcdef01"
+
+	cases := []struct {
+		name  string
+		input string
+	}{
+		{
+			name:  "Inverted key ordering with conversation_id first",
+			input: fmt.Sprintf("{\"conversation_id\":%q,\"event\":\"init\"}\n", targetUUID),
+		},
+		{
+			name:  "session_id key",
+			input: fmt.Sprintf("{\"event\":\"init\",\"session_id\":%q}\n", targetUUID),
+		},
+		{
+			name:  "camelCase conversationId key",
+			input: fmt.Sprintf("{\"event\":\"init\",\"conversationId\":%q}\n", targetUUID),
+		},
+		{
+			name:  "camelCase sessionId key",
+			input: fmt.Sprintf("{\"event\":\"init\",\"sessionId\":%q}\n", targetUUID),
+		},
+		{
+			name:  "Session in step_update event",
+			input: fmt.Sprintf("{\"event\":\"step_update\",\"session_id\":%q,\"type\":\"tool_call\"}\n", targetUUID),
+		},
+		{
+			name:  "Session in result event",
+			input: fmt.Sprintf("{\"event\":\"result\",\"session_id\":%q,\"status\":\"SUCCESS\"}\n", targetUUID),
+		},
+		{
+			name:  "Nested session in data payload",
+			input: fmt.Sprintf("{\"event\":\"init\",\"data\":{\"conversation_id\":%q}}\n", targetUUID),
+		},
+		{
+			name:  "Nested session in result payload",
+			input: fmt.Sprintf("{\"event\":\"result\",\"result\":{\"conversation_id\":%q,\"status\":\"SUCCESS\"}}\n", targetUUID),
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := ExtractSessionID(tc.input, time.Now())
+			if got != targetUUID {
+				t.Errorf("ExtractSessionID(%s) = %q, want %q", tc.name, got, targetUUID)
+			}
+		})
+	}
+}
+
+func TestParseAgyOutput_JSONVariations(t *testing.T) {
+	t.Parallel()
+	targetUUID := "87654321-4321-4321-4321-210987654321"
+
+	// 1. stream-json where init uses session_id instead of conversation_id
+	streamJSON := fmt.Sprintf("{\"event\":\"init\",\"session_id\":%q}\n{\"event\":\"result\",\"status\":\"SUCCESS\",\"response\":\"done\"}\n", targetUUID)
+	resp, err := ParseAgyOutput(streamJSON)
+	if err != nil {
+		t.Fatalf("ParseAgyOutput failed: %v", err)
+	}
+	if resp.ConversationID != targetUUID {
+		t.Errorf("expected ConversationID %q, got %q", targetUUID, resp.ConversationID)
+	}
+
+	// 2. stream-json where init uses conversationId camelCase and inverted keys
+	streamJSON2 := fmt.Sprintf("{\"conversationId\":%q,\"event\":\"init\"}\n{\"event\":\"result\",\"status\":\"SUCCESS\",\"response\":\"done\"}\n", targetUUID)
+	resp2, err := ParseAgyOutput(streamJSON2)
+	if err != nil {
+		t.Fatalf("ParseAgyOutput failed: %v", err)
+	}
+	if resp2.ConversationID != targetUUID {
+		t.Errorf("expected ConversationID %q, got %q", targetUUID, resp2.ConversationID)
+	}
+}
+
+func TestActivityTap_SniffSessionID_JSONUnmarshal(t *testing.T) {
+	t.Parallel()
+	targetUUID := "12345678-abcd-ef01-2345-6789abcdef01"
+	actWriter := NewActivityWriter("")
+	var outBuf bytes.Buffer
+	tap := newActivityTap(&outBuf, actWriter, true, nil)
+
+	// Inverted key order in init
+	line := []byte(fmt.Sprintf("{\"conversation_id\":%q,\"event\":\"init\"}\n", targetUUID))
+	_, err := tap.Write(line)
+	if err != nil {
+		t.Fatalf("tap.Write failed: %v", err)
+	}
+	if actWriter.SessionID() != targetUUID {
+		t.Errorf("expected actWriter.SessionID() = %q, got %q", targetUUID, actWriter.SessionID())
+	}
+
+	// Also verify sniffing from a step_update line when actWriter has no session yet
+	actWriter2 := NewActivityWriter("")
+	var outBuf2 bytes.Buffer
+	tap2 := newActivityTap(&outBuf2, actWriter2, true, nil)
+	stepLine := []byte(fmt.Sprintf("{\"event\":\"step_update\",\"session_id\":%q,\"type\":\"tool_call\"}\n", targetUUID))
+	_, err = tap2.Write(stepLine)
+	if err != nil {
+		t.Fatalf("tap2.Write failed: %v", err)
+	}
+	if actWriter2.SessionID() != targetUUID {
+		t.Errorf("expected actWriter2.SessionID() from step_update = %q, got %q", targetUUID, actWriter2.SessionID())
+	}
+}

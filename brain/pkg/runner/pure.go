@@ -197,13 +197,10 @@ func ParseInitEvent(line string) (string, bool) {
 		return "", false
 	}
 
-	var ev struct {
-		Event          string `json:"event"`
-		ConversationID string `json:"conversation_id"`
-	}
-	if err := json.Unmarshal([]byte(trimmed), &ev); err == nil {
-		if ev.Event == "init" && IsValidUUID(ev.ConversationID) {
-			return ev.ConversationID, true
+	var probe sessionProbe
+	if err := json.Unmarshal([]byte(trimmed), &probe); err == nil {
+		if (probe.Event == "init" || probe.Type == "init") && probe.extractUUID() != "" {
+			return probe.extractUUID(), true
 		}
 	}
 

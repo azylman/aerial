@@ -36,6 +36,45 @@ func IsValidUUID(s string) bool {
 	return reStrictUUID.MatchString(s)
 }
 
+// sessionProbe provides structured JSON unmarshaling for discovering conversation / session UUIDs.
+type sessionProbe struct {
+	Event          string          `json:"event,omitempty"`
+	Type           string          `json:"type,omitempty"`
+	ConversationID string          `json:"conversation_id,omitempty"`
+	SessionID      string          `json:"session_id,omitempty"`
+	AltConvID      string          `json:"conversationId,omitempty"`
+	AltSessID      string          `json:"sessionId,omitempty"`
+	Data           json.RawMessage `json:"data,omitempty"`
+	Result         json.RawMessage `json:"result,omitempty"`
+}
+
+func (p *sessionProbe) extractUUID() string {
+	for _, candidate := range []string{p.ConversationID, p.SessionID, p.AltConvID, p.AltSessID} {
+		candidate = strings.TrimSpace(candidate)
+		if IsValidUUID(candidate) {
+			return candidate
+		}
+	}
+	if len(p.Data) > 0 {
+		var sub sessionProbe
+		if err := json.Unmarshal(p.Data, &sub); err == nil {
+			if id := sub.extractUUID(); id != "" {
+				return id
+			}
+		}
+	}
+	if len(p.Result) > 0 {
+		var sub sessionProbe
+		if err := json.Unmarshal(p.Result, &sub); err == nil {
+			if id := sub.extractUUID(); id != "" {
+				return id
+			}
+		}
+	}
+	return ""
+}
+
+
 // ActivityWriter is a thread-safe buffer that tracks write activity timestamps
 // and sniffs conversation UUIDs from stderr streams.
 type ActivityWriter struct {
@@ -179,33 +218,36 @@ func ParseAgyOutput(stdout string) (*AgyResponse, error) {
 			continue
 		}
 
-		if !strings.Contains(line, `"event"`) {
+		var probe sessionProbe
+		if err := json.Unmarshal([]byte(line), &probe); err != nil {
 			continue
 		}
 
-		var ev struct {
-			Event          string          `json:"event"`
-			ConversationID string          `json:"conversation_id,omitempty"`
-			Result         json.RawMessage `json:"result,omitempty"`
-		}
-		if err := json.Unmarshal([]byte(line), &ev); err != nil {
-			continue
+		if id := probe.extractUUID(); id != "" {
+			if initConvID == "" {
+				initConvID = id
+			}
 		}
 
-		switch ev.Event {
+		switch probe.Event {
 		case "init":
-			if ev.ConversationID != "" {
-				initConvID = ev.ConversationID
+			if id := probe.extractUUID(); id != "" {
+				initConvID = id
 			}
 		case "result":
 			var res AgyResponse
-			if len(ev.Result) > 0 {
-				if err := json.Unmarshal(ev.Result, &res); err == nil {
+			if len(probe.Result) > 0 {
+				if err := json.Unmarshal(probe.Result, &res); err == nil {
 					resultResp = &res
 				}
 			} else {
 				if err := json.Unmarshal([]byte(line), &res); err == nil {
 					resultResp = &res
+				}
+			}
+			if resultResp != nil && resultResp.ConversationID == "" {
+				if id := probe.extractUUID(); id != "" {
+					resultResp.ConversationID = id
 				}
 			}
 		}
@@ -607,16 +649,20 @@ func (t *activityTap) processLine(line []byte) {
 		return
 	}
 
-	// Sniff session ID from {"event":"init","conversation_id":"..."}
-	if bytes.Contains(trimmed, []byte(`"event"`)) && bytes.Contains(trimmed, []byte(`"init"`)) {
-		if t.actWriter != nil {
-			if match := reNDJSONInitSession.FindSubmatch(trimmed); len(match) > 1 {
-				sessID := strings.TrimSpace(string(match[1]))
-				if IsValidUUID(sessID) {
+	// Sniff session ID from any incoming JSON line if not yet latched
+	if t.actWriter != nil && t.actWriter.SessionID() == "" {
+		if bytes.HasPrefix(trimmed, []byte("{")) && bytes.HasSuffix(trimmed, []byte("}")) {
+			var probe sessionProbe
+			if err := json.Unmarshal(trimmed, &probe); err == nil {
+				if sessID := probe.extractUUID(); sessID != "" {
 					t.actWriter.SetSessionID(sessID)
 				}
 			}
 		}
+	}
+
+	// Preserve init event in the output buffer
+	if bytes.Contains(trimmed, []byte(`"event"`)) && bytes.Contains(trimmed, []byte(`"init"`)) {
 		if t.w != nil {
 			if _, err := t.w.Write(line); err != nil {
 				log.Printf("[WARN] Failed to write to tap destination: %v", err)
@@ -919,6 +965,19 @@ func RunAgyWithOptions(ctx context.Context, agyBin, prompt, sessionID, apiKey, m
 // ExtractSessionID searches output (stdout or stderr) for an active session/conversation UUID.
 func ExtractSessionID(output string, _ time.Time) string {
 	if output != "" {
+		lines := strings.Split(output, "\n")
+		for _, rawLine := range lines {
+			line := strings.TrimSpace(rawLine)
+			if strings.HasPrefix(line, "{") && strings.HasSuffix(line, "}") {
+				var probe sessionProbe
+				if err := json.Unmarshal([]byte(line), &probe); err == nil {
+					if id := probe.extractUUID(); id != "" {
+						return id
+					}
+				}
+			}
+		}
+
 		if match := reNDJSONInitSession.FindStringSubmatch(output); len(match) > 1 {
 			candidate := strings.TrimSpace(match[1])
 			if IsValidUUID(candidate) {
@@ -947,6 +1006,7 @@ func ExtractSessionID(output string, _ time.Time) string {
 
 	return ""
 }
+
 
 // IsInactivityTimeout checks if the error message or stderr indicates an inactivity watchdog timeout.
 func IsInactivityTimeout(errDetail, stderr string) bool {

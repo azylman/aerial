@@ -540,12 +540,9 @@ func (m *Manager) ExtractFinalSubstantiveResponse(ctx context.Context, convID st
 				if hasToolCalls {
 					break
 				}
-
-				if trimmedContent == "" {
-					return "", true, nil
+				if trimmedContent != "" {
+					return step.Content, false, nil
 				}
-
-				return step.Content, false, nil
 			}
 		}
 	}
@@ -929,6 +926,9 @@ func getLastStepIndex(filePath string) (int, error) {
 	fi, err := f.Stat()
 	if err != nil {
 		return -1, err
+	}
+	if fi.IsDir() {
+		return -1, fmt.Errorf("path %s is a directory, not a file", filePath)
 	}
 	if fi.Size() == 0 {
 		return -1, nil

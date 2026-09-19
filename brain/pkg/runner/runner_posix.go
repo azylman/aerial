@@ -40,3 +40,20 @@ func killProcessGroup(cmd *exec.Cmd) {
 	}
 }
 
+func terminateProcessGroup(cmd *exec.Cmd) {
+	if cmd != nil && cmd.Process != nil && cmd.Process.Pid > 0 {
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM); err != nil && !isIgnorableKillError(err) {
+			log.Printf("[WARN] Failed to send SIGTERM to process group %d: %v", cmd.Process.Pid, err)
+		}
+	}
+}
+
+func isProcessTerminatedBySignal(exitErr *exec.ExitError) bool {
+	if exitErr == nil {
+		return false
+	}
+	if status, ok := exitErr.Sys().(syscall.WaitStatus); ok {
+		return status.Signaled() && (status.Signal() == syscall.SIGTERM || status.Signal() == syscall.SIGKILL)
+	}
+	return false
+}
