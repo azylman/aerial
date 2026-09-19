@@ -24,6 +24,10 @@ transforms:
         if strip_whitespace(.message) == "" {
           abort
         }
+        # Drop benign journald inotify watch exhaustion notices from container churn
+        if contains(to_string(.message), "error initializing inotify watches") {
+          abort
+        }
       }
 
       # 2. Normalize container and service names
@@ -339,7 +343,11 @@ transforms:
             if exists(parsed.tag) {
               .attributes.tag = parsed.tag
             }
-          } else if match(string!(.message), r'^\s*Container\s+[a-zA-Z0-9_-]+\s+(Healthy|Running|Started|Created)') {
+          } else if match(string!(.message), r'^\s*Container\s+[a-zA-Z0-9_-]+\s+(Healthy|Running|Started|Created|Waiting|Recreated|Recreate|Stopping|Stopped)') {
+            .level = "info"
+          } else if .service == "photos-sync" && starts_with(string!(.message), "Finished run:") {
+            .level = "info"
+          } else if .service == "google-mcp" && match(string!(.message), r'^\[(OAUTH|TOOL|GMAIL|CALENDAR|TASKS)\]') {
             .level = "info"
           } else if starts_with(string!(.message), "[supergateway]") {
             if starts_with(string!(.message), "[supergateway] Child → StreamableHttp:") || starts_with(string!(.message), "[supergateway] StreamableHttp → Child:") {
