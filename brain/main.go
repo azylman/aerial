@@ -701,6 +701,7 @@ func InitializeBrainEnvironment(ctx context.Context, cfg *config.Config) error {
 	provisioner := env.NewFromConfig(cfg)
 	if err := provisioner.Sync(ctx, cfg); err != nil {
 		log.Printf("Warning: env sync error: %v", err)
+		return err
 	}
 
 	dataDir := cfg.DataDir()
@@ -870,7 +871,9 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 
 	homeDir := cur.GeminiHomeDir
 	provisioner := env.NewFromConfig(cfg)
-	_ = InitializeBrainEnvironment(ctx, cfg)
+	if err := InitializeBrainEnvironment(ctx, cfg); err != nil {
+		log.Printf("Warning initializing brain environment: %v", err)
+	}
 
 	var store db.Store
 	if appOpts.store != nil {

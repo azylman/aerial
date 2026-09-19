@@ -1666,12 +1666,24 @@ func TestDefaultGeminiHomeDir_Extended(t *testing.T) {
 		t.Errorf("expected non-empty default gemini home dir")
 	}
 
-	// 3. Direct helper test with isTesting=false
-	if got := defaultGeminiHomeDir("", false); got == "" {
-		t.Errorf("expected non-empty defaultGeminiHomeDir with isTesting=false")
+	// 3. Direct helper tests for defaultGeminiHomeDirWithLookup
+	if got := defaultGeminiHomeDirWithLookup("/custom/home", false, nil); got != "/custom/home" {
+		t.Errorf("expected /custom/home, got %s", got)
+	}
+	if got := defaultGeminiHomeDirWithLookup("", true, nil); !strings.Contains(got, "aerial-test-gemini") {
+		t.Errorf("expected temp aerial-test-gemini, got %s", got)
+	}
+	if got := defaultGeminiHomeDirWithLookup("", false, func() (string, error) { return "/home/testuser", nil }); got != "/home/testuser" {
+		t.Errorf("expected /home/testuser, got %s", got)
+	}
+	if got := defaultGeminiHomeDirWithLookup("", false, func() (string, error) { return "  ", nil }); got != "/root" {
+		t.Errorf("expected /root for whitespace user home dir, got %s", got)
 	}
 	if got := defaultGeminiHomeDirWithLookup("", false, func() (string, error) { return "", errors.New("err") }); got != "/root" {
 		t.Errorf("expected /root when lookup fails, got %s", got)
+	}
+	if got := defaultGeminiHomeDirWithLookup("", false, nil); got != "/root" {
+		t.Errorf("expected /root when lookup fn is nil, got %s", got)
 	}
 	if got := defaultDataDir(false); got != "/data" {
 		t.Errorf("expected /data from defaultDataDir(false), got %s", got)
@@ -1741,6 +1753,19 @@ func TestRunBrainApp_EarlyReturns(t *testing.T) {
 	})
 	if err := RunBrainApp(ctx, cfg); err != nil {
 		t.Errorf("expected nil for cancelled context, got %v", err)
+	}
+
+	// 2b. Cancelled context with provisioner sync error in InitializeBrainEnvironment
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	cancel2()
+	blockingDir := filepath.Join(t.TempDir(), "block")
+	_ = os.WriteFile(blockingDir, []byte("file"), 0644)
+	cfgInitErr := config.NewTestConfig(func(d *config.ConfigData) {
+		d.GeminiHomeDir = blockingDir
+		d.DataDir = filepath.Join(tmpDir, "data")
+	})
+	if err := RunBrainApp(ctx2, cfgInitErr); err != nil {
+		t.Errorf("expected nil for cancelled context with init error, got %v", err)
 	}
 
 	// 3. Missing DatabaseURL

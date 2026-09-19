@@ -387,6 +387,28 @@ func handleDiscordReady(ctx context.Context, s *discordgo.Session, r *discordgo.
 	}
 }
 
+func handleGuildMemberUpdate(s *discordgo.Session, m *discordgo.GuildMemberUpdate) {
+	metrics.DiscordEventsTotal.WithLabelValues("guild_member_update").Inc()
+	if m == nil || m.Member == nil || s == nil || s.State == nil || s.State.User == nil {
+		return
+	}
+	userID := ""
+	if m.User != nil {
+		userID = m.User.ID
+	} else if m.Member.User != nil {
+		userID = m.Member.User.ID
+	}
+	if userID != "" && userID == s.State.User.ID {
+		if m.GuildID != "" && m.Member.GuildID == "" {
+			m.Member.GuildID = m.GuildID
+		}
+		if err := s.State.MemberAdd(m.Member); err != nil {
+			log.Printf("[WARN] Failed to update member %s in session state: %v", userID, err)
+		}
+		log.Printf("Discord funnel updated bot roles (%d roles) in real-time for guild %s", len(m.Member.Roles), m.Member.GuildID)
+	}
+}
+
 func connectDiscordFunnel(ctx context.Context, store db.Store, pool *queue.WorkerPool, token string) *discordgo.Session {
 	if token == "" {
 		log.Println("Discord funnel disabled: DISCORD_BOT_TOKEN/DISCORD_TOKEN not configured")
@@ -483,25 +505,7 @@ func connectDiscordFunnel(ctx context.Context, store db.Store, pool *queue.Worke
 	})
 
 	dg.AddHandler(func(s *discordgo.Session, m *discordgo.GuildMemberUpdate) {
-		metrics.DiscordEventsTotal.WithLabelValues("guild_member_update").Inc()
-		if m == nil || m.Member == nil || s.State == nil || s.State.User == nil {
-			return
-		}
-		userID := ""
-		if m.User != nil {
-			userID = m.User.ID
-		} else if m.Member.User != nil {
-			userID = m.Member.User.ID
-		}
-		if userID != "" && userID == s.State.User.ID {
-			if m.GuildID != "" && m.Member.GuildID == "" {
-				m.Member.GuildID = m.GuildID
-			}
-			if err := s.State.MemberAdd(m.Member); err != nil {
-				log.Printf("[WARN] Failed to update member %s in session state: %v", userID, err)
-			}
-			log.Printf("Discord funnel updated bot roles (%d roles) in real-time for guild %s", len(m.Member.Roles), m.Member.GuildID)
-		}
+		handleGuildMemberUpdate(s, m)
 	})
 
 	dg.AddHandler(func(s *discordgo.Session, m *discordgo.MessageCreate) {
