@@ -2862,3 +2862,42 @@ func TestConfig_SwallowedErrorsRemediationCoverage(t *testing.T) {
 		t.Fatalf("expected non-nil config")
 	}
 }
+
+func TestConfig_DaemonParameters(t *testing.T) {
+	yamlContent := `
+daemon_idle_timeout: 12h
+max_concurrent_daemons: 25
+max_background_task_duration: 90m
+`
+	cfg, err := LoadConfigFromBytes([]byte(yamlContent))
+	if err != nil {
+		t.Fatalf("LoadConfigFromBytes failed: %v", err)
+	}
+
+	data := cfg.Get()
+	if data.DaemonIdleTimeout != 12*time.Hour {
+		t.Errorf("expected 12h daemon idle timeout, got %v", data.DaemonIdleTimeout)
+	}
+	if data.MaxConcurrentDaemons != 25 {
+		t.Errorf("expected 25 max concurrent daemons, got %d", data.MaxConcurrentDaemons)
+	}
+	if data.MaxBackgroundTaskDuration != 90*time.Minute {
+		t.Errorf("expected 90m max background task duration, got %v", data.MaxBackgroundTaskDuration)
+	}
+
+	// Also verify defaults when omitted
+	defaultCfg, err := LoadConfigFromBytes([]byte("{}"))
+	if err != nil {
+		t.Fatalf("LoadConfigFromBytes on empty failed: %v", err)
+	}
+	defData := defaultCfg.Get()
+	if defData.DaemonIdleTimeout != 24*time.Hour {
+		t.Errorf("expected 24h default daemon idle timeout, got %v", defData.DaemonIdleTimeout)
+	}
+	if defData.MaxConcurrentDaemons != 40 {
+		t.Errorf("expected 40 default max concurrent daemons, got %d", defData.MaxConcurrentDaemons)
+	}
+	if defData.MaxBackgroundTaskDuration != 2*time.Hour {
+		t.Errorf("expected 2h default max background task duration, got %v", defData.MaxBackgroundTaskDuration)
+	}
+}

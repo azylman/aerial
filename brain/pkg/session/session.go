@@ -29,6 +29,14 @@ const DefaultMaxTranscriptBytes = 1024 * 1024
 // SourceAmbient represents ambient chat messages appended to session transcripts.
 const SourceAmbient = "AMBIENT"
 
+// TaskMetadata contains execution details for a running background task.
+type TaskMetadata struct {
+	TaskID      string    `json:"task_id"`
+	ToolName    string    `json:"tool_name"`
+	CommandLine string    `json:"command_line,omitempty"`
+	StartedAt   time.Time `json:"started_at"`
+}
+
 // Manager manages session directories, transcripts, and activity tracking
 // with explicitly injected homeDir and dataDir paths.
 type Manager struct {
@@ -1083,6 +1091,65 @@ func (m *Manager) CountTranscriptSteps(sessionID string) int {
 		}
 	}
 	return maxSteps
+}
+
+// GetSessionDir returns the canonical directory path for a session ID.
+func (m *Manager) GetSessionDir(sessionID string) (string, error) {
+	if m == nil {
+		return "", errors.New("session manager is nil")
+	}
+	cleanID := strings.TrimSpace(sessionID)
+	if cleanID == "" || strings.ContainsAny(cleanID, `/\:`) || strings.Contains(cleanID, "..") {
+		return "", fmt.Errorf("invalid session ID: %q", sessionID)
+	}
+	for _, dir := range m.getTargetDirs(cleanID) {
+		if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
+			return dir, nil
+		}
+	}
+	baseDir := m.resolveBaseDir(cleanID)
+	if baseDir == "" {
+		return "", errors.New("no session roots configured")
+	}
+	return filepath.Join(baseDir, cleanID), nil
+}
+
+// SaveActiveTasks persists active tasks to the session's .system_generated directory.
+func (m *Manager) SaveActiveTasks(sessionID string, tasks []TaskMetadata) error {
+	sessDir, err := m.GetSessionDir(sessionID)
+	if err != nil {
+		return err
+	}
+	taskDir := filepath.Join(sessDir, ".system_generated")
+	if err := os.MkdirAll(taskDir, 0755); err != nil {
+		return err
+	}
+	data, err := json.Marshal(tasks)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(taskDir, "active_tasks.json"), data, 0644)
+}
+
+// GetActiveTasks loads active tasks from the session's .system_generated directory.
+func (m *Manager) GetActiveTasks(sessionID string) ([]TaskMetadata, error) {
+	sessDir, err := m.GetSessionDir(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	path := filepath.Join(sessDir, ".system_generated", "active_tasks.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var tasks []TaskMetadata
+	if err := json.Unmarshal(data, &tasks); err != nil {
+		return nil, err
+	}
+	return tasks, nil
 }
 
 

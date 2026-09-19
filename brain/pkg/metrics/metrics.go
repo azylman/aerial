@@ -101,6 +101,52 @@ var (
 		[]string{"action", "source", "model"},
 	)
 
+	// Persistent Daemon & Background Task Telemetry
+	DaemonsActive = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "aerial_brain_daemons_active",
+			Help: "Current count of active persistent agy daemons.",
+		},
+	)
+
+	DaemonSpawnsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "aerial_brain_daemon_spawns_total",
+			Help: "Total number of agy daemon initializations.",
+		},
+		[]string{"reason"},
+	)
+
+	DaemonPrunesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "aerial_brain_daemon_prunes_total",
+			Help: "Total number of agy daemon prunings.",
+		},
+		[]string{"reason"},
+	)
+
+	ActiveTasksGauge = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "aerial_brain_active_tasks",
+			Help: "Active background tasks per thread.",
+		},
+		[]string{"thread_id"},
+	)
+
+	DaemonMemoryBytes = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "aerial_brain_daemon_memory_bytes",
+			Help: "Aggregate RSS memory consumed by agy daemons.",
+		},
+	)
+
+	TaskTimeoutsTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "aerial_brain_task_timeouts_total",
+			Help: "Total background tasks terminated by safety timeout.",
+		},
+	)
+
 	// Classifier Telemetry (Ambient Relevance & Latency)
 	ClassifierDurationSeconds = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
@@ -439,6 +485,12 @@ func init() {
 		WebhookDurationSeconds,
 		SessionRotationsTotal,
 		YieldTrapEventsTotal,
+		DaemonsActive,
+		DaemonSpawnsTotal,
+		DaemonPrunesTotal,
+		ActiveTasksGauge,
+		DaemonMemoryBytes,
+		TaskTimeoutsTotal,
 		BuildInfo,
 	)
 

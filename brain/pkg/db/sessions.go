@@ -3,11 +3,14 @@ package db
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"strings"
 	"time"
+
+	"github.com/azylman/aerial/brain/pkg/session"
 )
 
 type ConversationTurnState struct {
@@ -486,5 +489,53 @@ func GetSessionActivityStatsWithContext(ctx context.Context, database DBTX, thre
 	}
 
 	return stats, nil
+}
+
+// SaveActiveTasks mirrors active background task metadata into PostgreSQL for cold-boot recovery using atomic upsert.
+func SaveActiveTasks(database DBTX, threadID string, tasks []session.TaskMetadata) error {
+	if database == nil || threadID == "" {
+		return nil
+	}
+	encoded, err := json.Marshal(tasks)
+	if err != nil {
+		return fmt.Errorf("failed to marshal active tasks: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	query := `
+	INSERT INTO sessions (thread_id, active_tasks, created_at, updated_at)
+	VALUES ($1, $2, $3, $3)
+	ON CONFLICT (thread_id) DO UPDATE SET
+		active_tasks = EXCLUDED.active_tasks,
+		updated_at = EXCLUDED.updated_at
+	`
+	now := time.Now().UTC()
+	_, err = database.ExecContext(ctx, query, threadID, string(encoded), now)
+	return err
+}
+
+// GetSessionActiveTasks retrieves mirrored active background tasks from PostgreSQL upon cold boot.
+func GetSessionActiveTasks(database DBTX, threadID string) ([]session.TaskMetadata, error) {
+	if database == nil || threadID == "" {
+		return nil, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var tasksJSON string
+	err := database.QueryRowContext(ctx, "SELECT COALESCE(active_tasks, '[]') FROM sessions WHERE thread_id = $1", threadID).Scan(&tasksJSON)
+	if err == sql.ErrNoRows || strings.TrimSpace(tasksJSON) == "" {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var tasks []session.TaskMetadata
+	if err := json.Unmarshal([]byte(tasksJSON), &tasks); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal active tasks: %w", err)
+	}
+	return tasks, nil
 }
 
