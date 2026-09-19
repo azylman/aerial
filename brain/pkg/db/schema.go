@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 	fact_extracted_at TIMESTAMPTZ,
 	summary TEXT NOT NULL DEFAULT '',
 	last_summarized_message_id TEXT NOT NULL DEFAULT '',
+	active_tasks TEXT NOT NULL DEFAULT '[]',
 	created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
 	updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -155,6 +156,7 @@ func initSchemaPostgres(ctx context.Context, database *sql.DB) error {
 
 	execNotice("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS summary TEXT NOT NULL DEFAULT ''")
 	execNotice("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS last_summarized_message_id TEXT NOT NULL DEFAULT ''")
+	execNotice("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS active_tasks TEXT NOT NULL DEFAULT '[]'")
 	if _, err := conn.ExecContext(ctx, "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS previous_session_id TEXT NOT NULL DEFAULT ''"); err != nil {
 		return fmt.Errorf("failed to add previous_session_id column to sessions: %w", err)
 	}

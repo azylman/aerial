@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -1399,7 +1400,29 @@ func (te *turnExecution) executeWithRetries() {
 		var exitCode int
 		var err error
 
-		if te.pool.cfg.RunnerWithOptionsFunc != nil {
+		if te.pool.cfg.UsePersistentDaemons && te.pool.daemonPool != nil {
+			daemon, daemonErr := te.pool.daemonPool.GetOrCreateDaemon(runCtx, te.threadID, te.currentSessionID, currentModel)
+			if daemonErr != nil {
+				stdout = ""
+				stderr = daemonErr.Error()
+				exitCode = 1
+				err = daemonErr
+			} else {
+				turnRes, turnErr := daemon.ExecuteTurn(runCtx, promptToSend)
+				if turnErr != nil {
+					stdout = ""
+					stderr = turnErr.Error()
+					exitCode = 1
+					err = turnErr
+				} else {
+					stdout = fmt.Sprintf(`{"conversation_id":%q,"status":"SUCCESS","response":%q,"usage":{"input_tokens":%d,"output_tokens":%d,"total_tokens":%d}}`,
+						daemon.SessionID(), turnRes.Content, turnRes.Usage.InputTokens, turnRes.Usage.OutputTokens, turnRes.Usage.TotalTokens)
+					stderr = ""
+					exitCode = turnRes.ExitCode
+					err = nil
+				}
+			}
+		} else if te.pool.cfg.RunnerWithOptionsFunc != nil {
 			watchdogOpts := runner.DefaultWatchdogOptions(currentTimeout)
 			if te.pool.sessionMgr != nil {
 				watchdogOpts.TranscriptDirs = te.pool.sessionMgr.Roots()
@@ -1740,6 +1763,11 @@ func (te *turnExecution) executeWithRetries() {
 					isYield, taskCount := runner.IsYieldTrap(exitCode, stdout, stderr)
 					var unfinishedTaskID string
 					detectionSource := "stderr_signature"
+					if !isYield && te.pool != nil && te.pool.daemonPool != nil && te.pool.daemonPool.HasActiveTasks(te.threadID) {
+						isYield = true
+						taskCount = 1
+						detectionSource = "daemon_tracker"
+					}
 					if !isYield && te.pool != nil && te.pool.sessionMgr != nil && te.currentSessionID != "" {
 						if hasUnfinished, tID, err := te.pool.sessionMgr.HasUnfinishedBackgroundTask(te.currentSessionID); err == nil && hasUnfinished {
 							isYield = true
@@ -1764,7 +1792,11 @@ func (te *turnExecution) executeWithRetries() {
 							// 2. Keep Discord typing heartbeat active without resetting status updater (do not call te.stopTyping())
 
 							// 3. Set prompt for immediate in-session auto-resumption
-							promptToSend = YieldTrapResumePrompt
+							if unfinishedTaskID != "" {
+								promptToSend = fmt.Sprintf(TaskCompletionResumePrompt, unfinishedTaskID, 0, "")
+							} else {
+								promptToSend = YieldTrapResumePrompt
+							}
 
 							// 4. Record metric
 							metrics.RecordYieldTrap("resumed", detectionSource, currentModel)
@@ -2145,4 +2177,25 @@ func (te *turnExecution) executeWithRetries() {
 		}
 	}
 	log.Printf("[WorkerPool] %d message(s) in thread %s marked FAILED after exhausting all %d attempts", len(te.burst), te.threadID, maxAttempts)
+}
+
+// watchTaskCompletion polls for background task completion logs in .system_generated/tasks/<taskID>.log.
+func watchTaskCompletion(ctx context.Context, sessionDir, taskID string) (int, string, error) {
+	logPath := filepath.Join(sessionDir, ".system_generated", "tasks", taskID+".log")
+	if _, err := os.Stat(logPath); err == nil {
+		return 0, logPath, nil
+	}
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return -1, logPath, ctx.Err()
+		case <-ticker.C:
+			if _, err := os.Stat(logPath); err == nil {
+				return 0, logPath, nil
+			}
+		}
+	}
 }

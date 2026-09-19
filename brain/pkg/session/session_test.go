@@ -1822,6 +1822,70 @@ func TestHasUnfinishedBackgroundTask(t *testing.T) {
 	}
 }
 
+func TestSession_ActiveTaskPersistence(t *testing.T) {
+	tempHome := t.TempDir()
+	tempData := t.TempDir()
+	mgr := New(tempHome, tempData)
+
+	sessDir := filepath.Join(tempData, "brain", "sess-active")
+	if err := os.MkdirAll(sessDir, 0755); err != nil {
+		t.Fatalf("failed to create session dir: %v", err)
+	}
+
+	tasks := []TaskMetadata{
+		{TaskID: "task-persist-1", ToolName: "run_command", CommandLine: "sleep 30", StartedAt: time.Now()},
+	}
+
+	if err := mgr.SaveActiveTasks("sess-active", tasks); err != nil {
+		t.Fatalf("SaveActiveTasks failed: %v", err)
+	}
+
+	loaded, err := mgr.GetActiveTasks("sess-active")
+	if err != nil {
+		t.Fatalf("GetActiveTasks failed: %v", err)
+	}
+	if len(loaded) != 1 || loaded[0].TaskID != "task-persist-1" {
+		t.Errorf("expected loaded task-persist-1, got %v", loaded)
+	}
+
+	// Non-existent session
+	loadedNone, err := mgr.GetActiveTasks("non-existent-sess")
+	if err != nil || loadedNone != nil {
+		t.Errorf("expected nil, nil for non-existent session, got %v, %v", loadedNone, err)
+	}
+
+	// Corrupted active_tasks.json
+	corruptFile := filepath.Join(sessDir, ".system_generated", "active_tasks.json")
+	if err := os.WriteFile(corruptFile, []byte("{invalid json"), 0644); err != nil {
+		t.Fatalf("failed to write corrupt file: %v", err)
+	}
+	if _, err := mgr.GetActiveTasks("sess-active"); err == nil {
+		t.Errorf("expected unmarshal error on corrupt active_tasks.json")
+	}
+
+	// Invalid session IDs
+	if _, err := mgr.GetSessionDir(""); err == nil {
+		t.Errorf("expected error on empty session ID")
+	}
+	if _, err := mgr.GetSessionDir("../escape"); err == nil {
+		t.Errorf("expected error on path traversal session ID")
+	}
+	var nilMgr *Manager
+	if _, err := nilMgr.GetSessionDir("sess-1"); err == nil {
+		t.Errorf("expected error on nil manager")
+	}
+	mgrNoRoots := New("", "")
+	if _, err := mgrNoRoots.GetSessionDir("sess-1"); err == nil {
+		t.Errorf("expected error on manager with no roots")
+	}
+	if err := mgr.SaveActiveTasks("", tasks); err == nil {
+		t.Errorf("expected error on SaveActiveTasks with empty sessionID")
+	}
+	if _, err := mgr.GetActiveTasks(""); err == nil {
+		t.Errorf("expected error on GetActiveTasks with empty sessionID")
+	}
+}
+
 
 
 

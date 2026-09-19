@@ -41,6 +41,10 @@ while [ $# -gt 0 ]; do
             CUSTOM_PROFILE_DIR="$2"
             shift 2
             ;;
+        --parallel)
+            PARALLEL_JOBS="$2"
+            shift 2
+            ;;
         -h|--help)
             usage
             ;;
@@ -132,7 +136,7 @@ if [ -z "$cgo_val" ]; then
     fi
 fi
 
-PARALLEL_JOBS="${AERIAL_COVERAGE_JOBS:-${PARALLEL_JOBS:-6}}"
+PARALLEL_JOBS="${PARALLEL_JOBS:-${AERIAL_COVERAGE_JOBS:-6}}"
 
 for svc in $ALL_GO_SERVICES; do
     if [ ! -d "$svc" ]; then

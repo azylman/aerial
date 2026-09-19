@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/brain/pkg/config"
+	"github.com/azylman/aerial/brain/pkg/session"
 	"github.com/pgvector/pgvector-go"
 )
 
@@ -2392,6 +2393,48 @@ func TestDB_CloseWarnAndRollbackWarn(t *testing.T) {
 		t.Fatalf("failed to commit tx2: %v", err)
 	}
 	rollbackWarn(tx2, "committed-tx")
+}
+
+func TestDB_ActiveTaskPersistence(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	_ = SaveSessionID(database, "thread-active-db", "sess-active-db")
+
+	tasks := []session.TaskMetadata{
+		{TaskID: "task-db-42", ToolName: "run_command", CommandLine: "sleep 20", StartedAt: time.Now()},
+	}
+
+	if err := SaveActiveTasks(database, "thread-active-db", tasks); err != nil {
+		t.Fatalf("SaveActiveTasks failed: %v", err)
+	}
+
+	loaded, err := GetSessionActiveTasks(database, "thread-active-db")
+	if err != nil {
+		t.Fatalf("GetSessionActiveTasks failed: %v", err)
+	}
+	if len(loaded) != 1 || loaded[0].TaskID != "task-db-42" {
+		t.Errorf("expected loaded task-db-42 from database, got %v", loaded)
+	}
+
+	// Nil / empty thread handling
+	if err := SaveActiveTasks(nil, "thread-active-db", tasks); err != nil {
+		t.Errorf("expected nil error on nil db")
+	}
+	if err := SaveActiveTasks(database, "", tasks); err != nil {
+		t.Errorf("expected nil error on empty threadID")
+	}
+	if l, err := GetSessionActiveTasks(nil, "thread-active-db"); l != nil || err != nil {
+		t.Errorf("expected nil, nil on nil db")
+	}
+	if l, err := GetSessionActiveTasks(database, ""); l != nil || err != nil {
+		t.Errorf("expected nil, nil on empty threadID")
+	}
+
+	// Non-existent thread
+	if l, err := GetSessionActiveTasks(database, "non-existent-thread"); l != nil || err != nil {
+		t.Errorf("expected nil, nil on non-existent thread, got %v, %v", l, err)
+	}
 }
 
 

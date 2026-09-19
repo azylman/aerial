@@ -65,7 +65,12 @@ func (p *WorkerPool) runThreadWorker(threadID string, state *threadWorkerState) 
 
 	idleTimeout := p.cfg.IdleTimeout
 	if idleTimeout <= 0 {
-		idleTimeout = 30 * time.Second
+		if p.appCfg != nil {
+			idleTimeout = p.appCfg.Get().DaemonIdleTimeout
+		}
+		if idleTimeout <= 0 {
+			idleTimeout = DefaultMaxSessionIdleTime
+		}
 	}
 	idleTimer := time.NewTimer(idleTimeout)
 	defer idleTimer.Stop()
@@ -120,6 +125,11 @@ func (p *WorkerPool) runThreadWorker(threadID string, state *threadWorkerState) 
 		case <-idleTimer.C:
 			p.mu.Lock()
 			if len(state.ch) == 0 && state.activeEnqueuers == 0 {
+				if p.daemonPool != nil && p.daemonPool.HasActiveTasks(threadID) {
+					p.mu.Unlock()
+					idleTimer.Reset(idleTimeout)
+					continue
+				}
 				delete(p.threadChs, threadID)
 				p.scopeLocks.Delete(threadID)
 				p.mu.Unlock()

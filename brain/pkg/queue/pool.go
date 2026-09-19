@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -35,6 +36,7 @@ const (
 	ContinuationPromptTemplate = "Your previous execution timed out or was interrupted while working. Please inspect where you left off in the conversation transcript and continue the task to completion.\n\nOriginal user request:\n%s"
 	MaxYieldTrapAutoResumes    = 2
 	YieldTrapResumePrompt      = "[SYSTEM NOTICE]: Your previous turn yielded prematurely while background task(s) were still running, causing the runtime to terminate them. Inspect current status (check git status, PR state, or process logs) and continue your workflow to completion. Do NOT end the turn with waiting text."
+	TaskCompletionResumePrompt = "[SYSTEM NOTICE]: Background task %s has finished with exit code %d. Logs are available at %s. Continue your workflow to completion. Do NOT end the turn with waiting text."
 )
 
 func sanitizeErrorText(errStr string) string {
@@ -62,6 +64,7 @@ type WorkerPoolConfig struct {
 	DrainTimeout       time.Duration
 	RetryDelayOverride time.Duration
 	SessionManager     *session.Manager
+	UsePersistentDaemons bool
 
 	// Optional hooks for testing/custom overrides
 	RunnerFunc                  func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error)
@@ -101,6 +104,7 @@ type WorkerPool struct {
 	scopeLocks        sync.Map
 	webhookDispatcher WebhookDispatcher
 	summaryGroup      singleflight.Group
+	daemonPool        *DaemonPool
 }
 
 // SummaryGroup returns the singleflight.Group coordinating thread summarizations for this pool instance.
@@ -302,6 +306,16 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 		cancel:            cancel,
 		webhookDispatcher: cfg.WebhookDispatcher,
 	}
+
+	daemonBin := cfg.AgyBin
+	if daemonBin == "" && appCfg != nil {
+		daemonBin = appCfg.Current().AgyBin
+	}
+	daemonDataDir := ""
+	if appCfg != nil {
+		daemonDataDir = appCfg.Current().DataDir
+	}
+	p.daemonPool = NewDaemonPool(appCfg, daemonBin, os.Environ(), daemonDataDir)
 
 	if p.cfg.HistoryFetcher == nil {
 		p.cfg.HistoryFetcher = func(ctx context.Context, channelID string, beforeID string, limit int) ([]HistoryMessage, error) {
@@ -531,5 +545,18 @@ func (p *WorkerPool) StopWithTimeout(drainTimeout time.Duration) {
 
 func (p *WorkerPool) Stop() {
 	p.StopWithTimeout(p.cfg.DrainTimeout)
+	if p.daemonPool != nil {
+		if closeErr := p.daemonPool.Close(); closeErr != nil {
+			log.Printf("[WorkerPool] Warning: failed to close daemon pool: %v", closeErr)
+		}
+	}
 	log.Printf("[WorkerPool] Queue worker pool stopped cleanly")
+}
+
+// DaemonPool returns the associated DaemonPool instance.
+func (p *WorkerPool) DaemonPool() *DaemonPool {
+	if p == nil {
+		return nil
+	}
+	return p.daemonPool
 }

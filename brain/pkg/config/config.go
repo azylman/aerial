@@ -171,38 +171,44 @@ type ConfigData struct {
 	Ollama          OllamaConfig               `yaml:"ollama" json:"ollama"`
 	LowEffortModel  string                     `yaml:"low_effort_model" json:"low_effort_model"`
 	ClassifierModel string                     `yaml:"classifier_model,omitempty" json:"classifier_model,omitempty"` // Deprecated alias
-	GeminiHomeDir   string                     `yaml:"gemini_home_dir,omitempty" json:"gemini_home_dir,omitempty"`
-	DataDir         string                     `yaml:"data_dir,omitempty" json:"data_dir,omitempty"`
-	MCPConfig       string                     `yaml:"mcp_config,omitempty" json:"mcp_config,omitempty"`
+	GeminiHomeDir       string                     `yaml:"gemini_home_dir,omitempty" json:"gemini_home_dir,omitempty"`
+	DataDir             string                     `yaml:"data_dir,omitempty" json:"data_dir,omitempty"`
+	MCPConfig           string                     `yaml:"mcp_config,omitempty" json:"mcp_config,omitempty"`
+	DaemonIdleTimeout   time.Duration              `yaml:"daemon_idle_timeout,omitempty" json:"daemon_idle_timeout,omitempty"`
+	MaxConcurrentDaemons int                       `yaml:"max_concurrent_daemons,omitempty" json:"max_concurrent_daemons,omitempty"`
+	MaxBackgroundTaskDuration time.Duration        `yaml:"max_background_task_duration,omitempty" json:"max_background_task_duration,omitempty"`
 }
 
 func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 	type rawConfigHelper struct {
-		GeminiHomeDir       string                     `yaml:"gemini_home_dir"`
-		DataDir             string                     `yaml:"data_dir"`
-		Model               string                     `yaml:"model"`
-		Timezone            string                     `yaml:"timezone"`
-		SystemChannel       string                     `yaml:"system_channel"`
-		AdminUsers          []string                   `yaml:"admin_users"`
-		Channels            map[string]ChannelPolicy   `yaml:"channels"`
-		GitSync             GitSyncConfig              `yaml:"git_sync"`
-		McpServers          map[string]interface{}     `yaml:"mcp_servers"`
-		DatabaseURL         string                     `yaml:"database_url"`
-		DBPath              string                     `yaml:"db_path"`
-		Port                string                     `yaml:"port"`
-		AgyBin              string                     `yaml:"agy_bin"`
-		APIKey              string                     `yaml:"api_key"`
-		SystemPrompt        string                     `yaml:"system_prompt"`
-		DiscordToken        string                     `yaml:"discord_token"`
-		GitHubPAT           string                     `yaml:"github_pat"`
-		OpenObserveURL      string                     `yaml:"openobserve_url"`
-		OpenObserveOrg      string                     `yaml:"openobserve_org"`
-		OpenObserveUser     string                     `yaml:"openobserve_user"`
-		OpenObservePassword string                     `yaml:"openobserve_password"`
-		Ollama          OllamaConfig               `yaml:"ollama"`
-		LowEffortModel  string                     `yaml:"low_effort_model"`
-		ClassifierModel string                     `yaml:"classifier_model"`
-		MCPConfig       interface{}                `yaml:"mcp_config"`
+		GeminiHomeDir             string                   `yaml:"gemini_home_dir"`
+		DataDir                   string                   `yaml:"data_dir"`
+		Model                     string                   `yaml:"model"`
+		Timezone                  string                   `yaml:"timezone"`
+		SystemChannel             string                   `yaml:"system_channel"`
+		AdminUsers                []string                 `yaml:"admin_users"`
+		Channels                  map[string]ChannelPolicy `yaml:"channels"`
+		GitSync                   GitSyncConfig            `yaml:"git_sync"`
+		McpServers                map[string]interface{}   `yaml:"mcp_servers"`
+		DatabaseURL               string                   `yaml:"database_url"`
+		DBPath                    string                   `yaml:"db_path"`
+		Port                      string                   `yaml:"port"`
+		AgyBin                    string                   `yaml:"agy_bin"`
+		APIKey                    string                   `yaml:"api_key"`
+		SystemPrompt              string                   `yaml:"system_prompt"`
+		DiscordToken              string                   `yaml:"discord_token"`
+		GitHubPAT                 string                   `yaml:"github_pat"`
+		OpenObserveURL            string                   `yaml:"openobserve_url"`
+		OpenObserveOrg            string                   `yaml:"openobserve_org"`
+		OpenObserveUser           string                   `yaml:"openobserve_user"`
+		OpenObservePassword       string                   `yaml:"openobserve_password"`
+		Ollama                    OllamaConfig             `yaml:"ollama"`
+		LowEffortModel            string                   `yaml:"low_effort_model"`
+		ClassifierModel           string                   `yaml:"classifier_model"`
+		MCPConfig                 interface{}              `yaml:"mcp_config"`
+		DaemonIdleTimeout         time.Duration            `yaml:"daemon_idle_timeout"`
+		MaxConcurrentDaemons      int                      `yaml:"max_concurrent_daemons"`
+		MaxBackgroundTaskDuration time.Duration            `yaml:"max_background_task_duration"`
 	}
 
 	var raw rawConfigHelper
@@ -239,6 +245,22 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 	c.ClassifierModel = raw.ClassifierModel
 	c.GeminiHomeDir = raw.GeminiHomeDir
 	c.DataDir = raw.DataDir
+
+	if raw.DaemonIdleTimeout > 0 {
+		c.DaemonIdleTimeout = raw.DaemonIdleTimeout
+	} else {
+		c.DaemonIdleTimeout = 24 * time.Hour
+	}
+	if raw.MaxConcurrentDaemons > 0 {
+		c.MaxConcurrentDaemons = raw.MaxConcurrentDaemons
+	} else {
+		c.MaxConcurrentDaemons = 40
+	}
+	if raw.MaxBackgroundTaskDuration > 0 {
+		c.MaxBackgroundTaskDuration = raw.MaxBackgroundTaskDuration
+	} else {
+		c.MaxBackgroundTaskDuration = 2 * time.Hour
+	}
 
 	if raw.MCPConfig != nil {
 		switch v := raw.MCPConfig.(type) {
@@ -355,6 +377,9 @@ func DefaultConfigData() *ConfigData {
 			Model:       "all-minilm",
 			QueryPrefix: "Represent this sentence for searching relevant passages: ",
 		},
+		DaemonIdleTimeout:         24 * time.Hour,
+		MaxConcurrentDaemons:      40,
+		MaxBackgroundTaskDuration: 2 * time.Hour,
 	}
 }
 
@@ -367,6 +392,22 @@ func (c *Config) Current() *ConfigData {
 		return DefaultConfigData()
 	}
 	return cur
+}
+
+// Get returns the current ConfigData pointer (alias for Current).
+func (c *Config) Get() *ConfigData {
+	return c.Current()
+}
+
+// LoadConfigFromBytes parses YAML bytes into a Config instance.
+func LoadConfigFromBytes(data []byte) (*Config, error) {
+	var cfgData ConfigData
+	if err := yaml.Unmarshal(data, &cfgData); err != nil {
+		return nil, err
+	}
+	cfg := &Config{}
+	cfg.current.Store(&cfgData)
+	return cfg, nil
 }
 
 // GeminiHomeDir returns the configured base directory for .gemini files.

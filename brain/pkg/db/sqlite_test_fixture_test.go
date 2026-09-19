@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 	fact_extracted_at DATETIME,
 	summary TEXT NOT NULL DEFAULT '',
 	last_summarized_message_id TEXT NOT NULL DEFAULT '',
+	active_tasks TEXT NOT NULL DEFAULT '[]',
 	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 	updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -144,6 +145,7 @@ func initSchemaSQLite(database *sql.DB) error {
 
 	_, _ = database.Exec("ALTER TABLE sessions ADD COLUMN summary TEXT NOT NULL DEFAULT ''")
 	_, _ = database.Exec("ALTER TABLE sessions ADD COLUMN last_summarized_message_id TEXT NOT NULL DEFAULT ''")
+	_, _ = database.Exec("ALTER TABLE sessions ADD COLUMN active_tasks TEXT NOT NULL DEFAULT '[]'")
 	if _, err := database.Exec("ALTER TABLE sessions ADD COLUMN previous_session_id TEXT NOT NULL DEFAULT ''"); err != nil {
 		if !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 			return fmt.Errorf("failed to add previous_session_id column to sessions: %w", err)
