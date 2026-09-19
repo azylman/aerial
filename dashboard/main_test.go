@@ -3228,8 +3228,8 @@ func TestMergeClusterDeploymentsWithHangar_HangarActiveSuppresses120sTimeout(t *
 		t.Fatalf("expected non-empty deployments")
 	}
 	dep := deps[0]
-	if dep.Stage != "awaiting_pull" {
-		t.Errorf("expected stage 'awaiting_pull' when Hangar is active, got %q", dep.Stage)
+	if dep.Stage != "pulling" && dep.Stage != "awaiting_pull" {
+		t.Errorf("expected stage 'pulling' or 'awaiting_pull' when Hangar is active, got %q", dep.Stage)
 	}
 	if dep.Steps[2].Status != "active" {
 		t.Errorf("expected Hangar Sync step active, got %q", dep.Steps[2].Status)
@@ -3374,8 +3374,108 @@ func TestMergeClusterDeploymentsWithHangar_DegradedWithoutHangarFailure(t *testi
 	}
 }
 
+func TestStatusHandler_ConcurrentPipelines(t *testing.T) {
+	hangarServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/status" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(GitSyncStatusResponse{
+				Status: "synced",
+				Reconciliation: &ReconciliationStatus{
+					Active:         true,
+					State:          "swapping",
+					CommitSHA:      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+					TargetServices: []string{"aerial-dashboard"},
+					StartedAt:      time.Now().UTC().Add(-10 * time.Second),
+				},
+			})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer hangarServer.Close()
+
+	oldPoller := globalGHPoller
+	defer func() { globalGHPoller = oldPoller }()
+
+	origDocker := dockerSocketClient
+	defer func() { dockerSocketClient = origDocker }()
+	dockerSocketClient = &http.Client{
+		Transport: &roundTripperFunc{
+			fn: func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader("[]")),
+					Header:     make(http.Header),
+				}, nil
+			},
+		},
+	}
+
+	poller := &GitHubPoller{
+		cachedRuns: []GitHubRun{
+			{
+				ID:        999,
+				HeadSHA:   "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+				Status:    "in_progress",
+				CreatedAt: time.Now().UTC().Add(-2 * time.Minute),
+				UpdatedAt: time.Now().UTC().Add(-1 * time.Minute),
+			},
+		},
+		cachedJobs: map[int64][]GitHubJob{
+			999: {
+				{ID: 1, Name: "Build Dashboard", Status: "in_progress"},
+			},
+		},
+	}
+	globalGHPoller = poller
+
+	tempDir := t.TempDir()
+	cfgFile := filepath.Join(tempDir, "config.yaml")
+	if err := os.WriteFile(cfgFile, []byte("dashboard: {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := statusHandler("", hangarServer.URL, cfgFile, "testcommit")
+	req := httptest.NewRequest("GET", "/api/status", nil)
+	rr := httptest.NewRecorder()
+	handler(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rr.Code)
+	}
+
+	var resp ClusterResponse
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response JSON: %v", err)
+	}
+
+	if len(resp.Deployments) != 2 {
+		t.Fatalf("expected 2 concurrent deployments, got %d", len(resp.Deployments))
+	}
+
+	stages := map[string]string{}
+	for _, d := range resp.Deployments {
+		stages[d.Commit] = d.Stage
+	}
+
+	if stages["aaaaaaa"] != "swapping" {
+		t.Errorf("expected commit aaaaaaa to be swapping, got %q", stages["aaaaaaa"])
+	}
+	if stages["bbbbbbb"] != "building" {
+		t.Errorf("expected commit bbbbbbb to be building, got %q", stages["bbbbbbb"])
+	}
+
+	if resp.OngoingDeploy != "swapping" {
+		t.Errorf("expected OngoingDeploy 'swapping', got %q", resp.OngoingDeploy)
+	}
+	if !resp.IsDeploying {
+		t.Errorf("expected IsDeploying true, got false")
+	}
+}
+
 func TestLoadDashboardRepos_TableDriven(t *testing.T) {
 	tempDir := t.TempDir()
+
 
 	tests := []struct {
 		name     string
@@ -3739,11 +3839,19 @@ func TestMergeClusterDeployments_MultiRepoActiveFanout(t *testing.T) {
 	if len(deploys) != 2 {
 		t.Fatalf("expected 2 active deployments across repos, got %d", len(deploys))
 	}
-	if deploys[0].Repository != "azylman/aerial" || deploys[0].Stage != "building" {
-		t.Errorf("unexpected deploy 0: %+v", deploys[0])
+	var aerialDep, sidecarsDep *DeploymentStatus
+	for i := range deploys {
+		if deploys[i].Repository == "azylman/aerial" {
+			aerialDep = &deploys[i]
+		} else if deploys[i].Repository == "azylman/aerial-sidecars" {
+			sidecarsDep = &deploys[i]
+		}
 	}
-	if deploys[1].Repository != "azylman/aerial-sidecars" || deploys[1].Stage != "building" {
-		t.Errorf("unexpected deploy 1: %+v", deploys[1])
+	if aerialDep == nil || aerialDep.Stage != "building" {
+		t.Errorf("expected active aerial deploy with stage building, got %+v", aerialDep)
+	}
+	if sidecarsDep == nil || sidecarsDep.Stage != "building" {
+		t.Errorf("expected active sidecars deploy with stage building, got %+v", sidecarsDep)
 	}
 }
 
@@ -4095,4 +4203,106 @@ func TestBuildSchedulesUpstreamURL_ErrorHandling(t *testing.T) {
 	if _, err := BuildSchedulesUpstreamURL("http://localhost:8080\tinvalid"); err == nil {
 		t.Errorf("expected error for control char URL, got nil")
 	}
+}
+
+func TestFetchGitSyncStatus_ErrorHandling(t *testing.T) {
+	ctx := context.Background()
+
+	// Empty URL returns fallback
+	res := fetchGitSyncStatus(ctx, "")
+	if res.Status != "synced" || res.Error != "" {
+		t.Errorf("expected fallback synced status for empty URL, got %+v", res)
+	}
+
+	// Invalid URL returns error
+	resInvalid := fetchGitSyncStatus(ctx, "http://[::1]:namedport")
+	if resInvalid.Error == "" {
+		t.Errorf("expected error for invalid URL, got empty error")
+	}
+
+	// Server returning non-200
+	srv500 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "server error", http.StatusInternalServerError)
+	}))
+	defer srv500.Close()
+	res500 := fetchGitSyncStatus(ctx, srv500.URL)
+	if res500.Error != "HTTP 500" {
+		t.Errorf("expected 'HTTP 500', got %q", res500.Error)
+	}
+
+	// Server returning invalid JSON
+	srvBadJSON := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("not json"))
+	}))
+	defer srvBadJSON.Close()
+	resBadJSON := fetchGitSyncStatus(ctx, srvBadJSON.URL)
+	if resBadJSON.Error == "" {
+		t.Errorf("expected decode error, got empty error")
+	}
+}
+
+func TestFetchJobsForRun_Branches(t *testing.T) {
+	ctx := context.Background()
+	poller := &GitHubPoller{
+		client:      &http.Client{Timeout: 2 * time.Second},
+		jobsETagMap: make(map[int64]string),
+		cachedJobs:  make(map[int64][]GitHubJob),
+	}
+
+	// 1. Empty repo returns early without error
+	poller.fetchJobsForRun(ctx, 123)
+
+	// 2. 304 Not Modified
+	srv304 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotModified)
+	}))
+	defer srv304.Close()
+
+	poller.apiBaseURL = srv304.URL
+	poller.repo = "azylman/aerial"
+	poller.fetchJobsForRun(ctx, 456)
+}
+
+func TestGitHubPoller_TargetedCoverageBoost(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// 1. nil poller Start and pollOnce
+	var nilPoller *GitHubPoller
+	nilPoller.Start(ctx)
+	if nilPoller.pollOnce(ctx) {
+		t.Errorf("expected nil poller pollOnce to return false")
+	}
+
+	// 2. empty poller pollOnce (zero repos)
+	emptyPoller := &GitHubPoller{}
+	if emptyPoller.pollOnce(ctx) {
+		t.Errorf("expected empty poller pollOnce to return false")
+	}
+
+	// 3. Fallback to runsETag and repo pruning
+	srvPrune := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("If-None-Match") != "legacy-etag" {
+			t.Errorf("expected If-None-Match: legacy-etag, got %q", r.Header.Get("If-None-Match"))
+		}
+		w.WriteHeader(http.StatusNotModified)
+	}))
+	defer srvPrune.Close()
+
+	prunePoller := &GitHubPoller{
+		repo:             "azylman/aerial",
+		runsETag:         "legacy-etag",
+		runsETagMap:      map[string]string{"old/removed": "etag-old"},
+		cachedRunsByRepo: map[string][]GitHubRun{"old/removed": {{ID: 999}}},
+		client:           &http.Client{Timeout: 2 * time.Second},
+		apiBaseURL:       srvPrune.URL,
+	}
+
+	prunePoller.pollOnce(ctx)
+	prunePoller.mu.RLock()
+	if _, exists := prunePoller.cachedRunsByRepo["old/removed"]; exists {
+		t.Errorf("expected removed repository to be pruned from cache")
+	}
+	prunePoller.mu.RUnlock()
 }

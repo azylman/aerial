@@ -353,6 +353,9 @@ function renderDeployments(deployments) {
         } else if (hasDegraded) {
             deployBadge.textContent = `⚠️ STACK DEGRADED`;
             deployBadge.className = 'section-badge failed';
+        } else if (activeDeploys.length > 1) {
+            deployBadge.textContent = `${activeDeploys.length} DEPLOYS IN PROGRESS`;
+            deployBadge.className = 'section-badge active';
         } else if (isSwapping) {
             deployBadge.textContent = `🔄 HANGAR SWAPPING`;
             deployBadge.className = 'section-badge swapping';
@@ -394,7 +397,7 @@ function renderDeployments(deployments) {
         return;
     }
 
-    deploys.forEach(dep => {
+    deploys.forEach((dep, idx) => {
         const isLive = dep.stage === 'live';
         const isFailed = dep.stage === 'failed';
         const isDegraded = dep.stage === 'degraded';
@@ -402,6 +405,23 @@ function renderDeployments(deployments) {
         const isPulling = dep.stage === 'pulling';
         const isAwaitingPull = dep.stage === 'awaiting_pull';
         const isBuildingStage = dep.stage === 'building' || dep.stage === 'queued';
+
+        const isCompact = (idx >= 2) || (isLive && deploys.length > 1);
+        if (isCompact) {
+            const compactCard = document.createElement('div');
+            compactCard.className = `deploy-card-compact stage-${escapeHtml(dep.stage || 'active')}`;
+            const safeCommit = escapeHtml(dep.commit || 'latest');
+            const badgeClass = isLive ? 'live' : (isFailed || isDegraded) ? 'failed' : isSwapping ? 'swapping' : isPulling ? 'pulling' : 'active';
+            const statusLabel = isLive ? '✓ LIVE' : (isFailed || isDegraded) ? '✕ FAILED' : String(dep.stage || 'ACTIVE').toUpperCase();
+            compactCard.innerHTML = `
+                <span class="compact-commit">${safeCommit}</span>
+                <span class="compact-title">${escapeHtml(dep.service || 'aerial-stack')}${dep.commit_msg ? ` • ${escapeHtml(dep.commit_msg)}` : ''}</span>
+                <span class="compact-badge ${badgeClass}">${statusLabel}</span>
+                <span class="compact-toggle">▾</span>
+            `;
+            deploysContainer.appendChild(compactCard);
+            return;
+        }
 
         const steps = dep.steps || [
             { name: "Commit Trigger", icon: "📦", status: "completed" },
@@ -413,21 +433,17 @@ function renderDeployments(deployments) {
 
         const isHostPhase = isPulling || isSwapping || isLive || isDegraded;
         const allChips = Array.isArray(dep.matrix_jobs) ? dep.matrix_jobs : [];
-        const gateChips = allChips.filter(c => c.name && (c.name.includes('test') || c.name.includes('lint')));
-        const serviceChips = allChips.filter(c => c.name && (!c.name.includes('test') && !c.name.includes('lint')));
+        const ciChips = allChips.filter(c => c.type === 'ci' || (!c.type && c.name && (c.name.includes('test') || c.name.includes('lint') || c.name.includes('build') || c.name.includes('Build'))));
+        const containerChips = allChips.filter(c => c.type === 'container' || (!c.type && c.name && (!c.name.includes('test') && !c.name.includes('lint'))));
 
         const stepsHTML = steps.map(step => {
             let matrixHTML = '';
             let targetChips = [];
 
             if (step.name && step.name.includes("CI Build")) {
-                if (isBuildingStage || (isFailed && step.status === 'failed')) {
-                    targetChips = allChips;
-                } else if (gateChips.length > 0) {
-                    targetChips = gateChips;
-                }
+                targetChips = ciChips;
             } else if (step.name && step.name.includes("Container Swap") && isHostPhase) {
-                targetChips = serviceChips.length > 0 ? serviceChips : allChips;
+                targetChips = containerChips;
             }
 
             if (targetChips.length > 0) {
