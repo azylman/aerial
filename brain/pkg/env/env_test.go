@@ -1119,4 +1119,168 @@ func TestEnv_SwallowedErrorsRemediationCoverage(t *testing.T) {
 	}
 }
 
+func TestSyncRules_CompositePersonaAndSystemInstructions(t *testing.T) {
+	t.Parallel()
+
+	tmpHome := t.TempDir()
+	tmpData := t.TempDir()
+	p := New(tmpHome, tmpData)
+
+	srcDir := t.TempDir()
+	agentsPath := filepath.Join(srcDir, "AGENTS.md")
+	geminiPath := filepath.Join(srcDir, "GEMINI.md")
+
+	if err := os.WriteFile(agentsPath, []byte("ABG Baddie Persona"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(geminiPath, []byte("Core Invariant 5: No Option B"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	p.SetAgentInstructionsSearchPaths([]string{agentsPath})
+	p.SetSystemInstructionsSearchPaths([]string{geminiPath})
+
+	// 1. Verify composite generation
+	if err := p.SyncRules("Custom Prompt"); err != nil {
+		t.Fatalf("SyncRules failed: %v", err)
+	}
+
+	ruleFile := filepath.Join(tmpHome, ".gemini", "rules", "user_persona.md")
+	data, err := os.ReadFile(ruleFile)
+	if err != nil {
+		t.Fatalf("Failed to read user_persona.md: %v", err)
+	}
+	content := string(data)
+
+	if !strings.Contains(content, "# User Persona Overrides (AGENTS.md)") {
+		t.Errorf("expected persona header, got:\n%s", content)
+	}
+	if !strings.Contains(content, "ABG Baddie Persona") {
+		t.Errorf("expected persona content, got:\n%s", content)
+	}
+	if !strings.Contains(content, "# Base System Architecture & Operational Rules (GEMINI.md)") {
+		t.Errorf("expected gemini header, got:\n%s", content)
+	}
+	if !strings.Contains(content, "Core Invariant 5: No Option B") {
+		t.Errorf("expected gemini content, got:\n%s", content)
+	}
+	if !strings.Contains(content, "# Environment Prompt Override") {
+		t.Errorf("expected env prompt header, got:\n%s", content)
+	}
+
+	// 2. Verify torn read fallback for GEMINI.md
+	if err := os.WriteFile(geminiPath, []byte(""), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.SyncRules(""); err != nil {
+		t.Fatalf("SyncRules failed on torn read: %v", err)
+	}
+	dataAfterTorn, err := os.ReadFile(ruleFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contentAfterTorn := string(dataAfterTorn)
+	if !strings.Contains(contentAfterTorn, "Core Invariant 5: No Option B") {
+		t.Errorf("expected LKGC gemini content to persist after torn read, got:\n%s", contentAfterTorn)
+	}
+}
+
+func TestSyncRules_EdgeCasesAndCoverage(t *testing.T) {
+	if len(DefaultSystemInstructionsSearchPaths) == 0 {
+		t.Error("expected non-empty DefaultSystemInstructionsSearchPaths")
+	}
+
+	// 1. Nil provisioner and empty home dir
+	var nilP *Provisioner
+	if err := nilP.SyncRules("prompt"); err != nil {
+		t.Errorf("expected nil provisioner SyncRules to return nil, got %v", err)
+	}
+	emptyP := New("", t.TempDir())
+	if err := emptyP.SyncRules("prompt"); err != nil {
+		t.Errorf("expected empty homeDir SyncRules to return nil, got %v", err)
+	}
+	if err := nilP.Sync(context.Background(), nil); err != nil {
+		t.Errorf("expected nil provisioner Sync to return nil, got %v", err)
+	}
+	if err := emptyP.Sync(context.Background(), nil); err != nil {
+		t.Errorf("expected empty homeDir Sync to return nil, got %v", err)
+	}
+
+	// 2. Default SystemInstructions search paths fallback (when slice is empty)
+	tmpHome := t.TempDir()
+	tmpData := t.TempDir()
+	p := New(tmpHome, tmpData)
+	p.SetSystemInstructionsSearchPaths(nil)
+	p.SetAgentInstructionsSearchPaths([]string{filepath.Join(t.TempDir(), "nonexistent.md")})
+	// Sync with custom prompt -> verifies DefaultSystemInstructionsSearchPaths loaded
+	if err := p.SyncRules("Test Prompt"); err != nil {
+		t.Fatalf("expected SyncRules to succeed with default system paths, got %v", err)
+	}
+
+	// 3. No instructions found anywhere: first sync returns nil, subsequent uses LKGC
+	tmpHome2 := t.TempDir()
+	p2 := New(tmpHome2, t.TempDir())
+	nonexistent := filepath.Join(t.TempDir(), "nonexistent.md")
+	p2.SetAgentInstructionsSearchPaths([]string{nonexistent})
+	p2.SetSystemInstructionsSearchPaths([]string{nonexistent})
+
+	if err := p2.SyncRules(""); err != nil {
+		t.Fatalf("expected SyncRules to return nil when no rules found and no LKGC, got %v", err)
+	}
+
+	if err := p2.SyncRules("Initial Prompt Setting LKGC"); err != nil {
+		t.Fatalf("failed to set initial LKGC rules: %v", err)
+	}
+	if err := p2.SyncRules(""); err != nil {
+		t.Fatalf("failed to sync with LKGC rules: %v", err)
+	}
+	ruleFile := filepath.Join(tmpHome2, ".gemini", "rules", "user_persona.md")
+	data, err := os.ReadFile(ruleFile)
+	if err != nil {
+		t.Fatalf("failed to read user_persona.md: %v", err)
+	}
+	if !strings.Contains(string(data), "Initial Prompt Setting LKGC") {
+		t.Errorf("expected LKGC rules content, got %s", string(data))
+	}
+
+	// 4. Torn read of GEMINI on initial attempt when p.lkgcGeminiSource is empty
+	pTorn := New(t.TempDir(), t.TempDir())
+	emptyGemini := filepath.Join(t.TempDir(), "GEMINI.md")
+	if err := os.WriteFile(emptyGemini, []byte("   "), 0644); err != nil {
+		t.Fatal(err)
+	}
+	pTorn.SetSystemInstructionsSearchPaths([]string{emptyGemini})
+	pTorn.SetAgentInstructionsSearchPaths([]string{filepath.Join(t.TempDir(), "nonexistent.md")})
+	if err := pTorn.SyncRules("Custom Prompt"); err != nil {
+		t.Fatalf("SyncRules failed: %v", err)
+	}
+
+	// 5. GEMINI LKGC file persistence and LKGC read path
+	tmpHome3 := t.TempDir()
+	tmpData3 := t.TempDir()
+	p3 := New(tmpHome3, tmpData3)
+	geminiSrc := filepath.Join(t.TempDir(), "GEMINI.md")
+	if err := os.WriteFile(geminiSrc, []byte("Gemini Rules To Persist"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	p3.SetAgentInstructionsSearchPaths([]string{filepath.Join(t.TempDir(), "nonexistent.md")})
+	p3.SetSystemInstructionsSearchPaths([]string{geminiSrc})
+	if err := p3.SyncRules(""); err != nil {
+		t.Fatalf("SyncRules failed: %v", err)
+	}
+	lkgcFile := filepath.Join(tmpData3, ".GEMINI.md.lkgc")
+	if lkgcData, err := os.ReadFile(lkgcFile); err != nil || !strings.Contains(string(lkgcData), "Gemini Rules To Persist") {
+		t.Errorf("expected .GEMINI.md.lkgc to be written with content, got %s (err: %v)", string(lkgcData), err)
+	}
+
+	// Now read from .GEMINI.md.lkgc directly to cover personaSource == ".GEMINI.md.lkgc" bypass
+	p4 := New(t.TempDir(), tmpData3)
+	p4.SetAgentInstructionsSearchPaths([]string{filepath.Join(t.TempDir(), "nonexistent.md")})
+	p4.SetSystemInstructionsSearchPaths([]string{lkgcFile})
+	if err := p4.SyncRules(""); err != nil {
+		t.Fatalf("SyncRules with .GEMINI.md.lkgc failed: %v", err)
+	}
+}
+
+
 

@@ -25,9 +25,21 @@ var (
 		"./AGENTS.local.md",
 		"./AGENTS.md",
 	}
+
+	// DefaultSystemInstructionsSearchPaths specifies standard locations for GEMINI.md in priority order.
+	DefaultSystemInstructionsSearchPaths = []string{
+		"/share/aerial-config/GEMINI.local.md",
+		"/share/aerial-config/GEMINI.md",
+		"/share/aerial/GEMINI.md",
+		"/app/GEMINI.md",
+		"/data/GEMINI.md",
+		"/data/.GEMINI.md.lkgc",
+		"./GEMINI.local.md",
+		"./GEMINI.md",
+	}
 )
 
-// SyncRules compiles the user persona, AGENTS.md, and custom system prompt into ~/.gemini rules.
+// SyncRules compiles the user persona, AGENTS.md, GEMINI.md system rules, and custom system prompt into ~/.gemini rules.
 func (p *Provisioner) SyncRules(customPrompt string) error {
 	if p == nil || p.homeDir == "" {
 		return nil
@@ -36,7 +48,7 @@ func (p *Provisioner) SyncRules(customPrompt string) error {
 	defer systemRulesMu.Unlock()
 
 	var sb strings.Builder
-	sb.WriteString("---\ndescription: User persona, tone, and identity overrides\ntrigger: always_on\n---\n\n")
+	sb.WriteString("---\ndescription: User persona, tone, operational invariants, and system guidelines\ntrigger: always_on\n---\n\n")
 
 	foundPersona := false
 	tornRead := false
@@ -66,6 +78,34 @@ func (p *Provisioner) SyncRules(customPrompt string) error {
 		break
 	}
 
+	foundGemini := false
+	tornGeminiRead := false
+	var geminiContent string
+	var geminiSource string
+
+	systemPaths := p.systemInstructionsPaths
+	if len(systemPaths) == 0 {
+		systemPaths = DefaultSystemInstructionsSearchPaths
+	}
+
+	for _, path := range systemPaths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		if len(bytes.TrimSpace(data)) > 0 {
+			geminiContent = string(data)
+			geminiSource = filepath.Base(path)
+			foundGemini = true
+			log.Printf("Loaded system instructions from %s", path)
+			break
+		}
+		// File exists but is 0-bytes or whitespace-only (torn read during git sync)
+		log.Printf("[Env] Active system instructions file %s is empty (possible GitSync torn read), engaging Last Known Good System Instructions (LKGC)", path)
+		tornGeminiRead = true
+		break
+	}
+
 	p.mu.Lock()
 	if tornRead {
 		personaContent = p.lkgcPersona
@@ -85,11 +125,35 @@ func (p *Provisioner) SyncRules(customPrompt string) error {
 			}
 		}
 	}
+
+	if tornGeminiRead {
+		geminiContent = p.lkgcGemini
+		geminiSource = p.lkgcGeminiSource
+		if geminiSource == "" {
+			geminiSource = "GEMINI.md"
+		}
+		if geminiContent != "" {
+			foundGemini = true
+		}
+	} else if foundGemini {
+		p.lkgcGemini = geminiContent
+		p.lkgcGeminiSource = geminiSource
+		if geminiSource != ".GEMINI.md.lkgc" && p.dataDir != "" {
+			if err := p.writeAtomic(filepath.Join(p.dataDir, ".GEMINI.md.lkgc"), geminiContent); err != nil {
+				log.Printf("[Env] Warning writing gemini LKGC: %v", err)
+			}
+		}
+	}
 	p.mu.Unlock()
 
 	foundInstructions := false
 	if foundPersona && personaContent != "" {
 		sb.WriteString(fmt.Sprintf("# User Persona Overrides (%s)\n\n%s\n\n", personaSource, personaContent))
+		foundInstructions = true
+	}
+
+	if foundGemini && geminiContent != "" {
+		sb.WriteString(fmt.Sprintf("# Base System Architecture & Operational Rules (%s)\n\n%s\n\n", geminiSource, geminiContent))
 		foundInstructions = true
 	}
 

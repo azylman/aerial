@@ -2169,3 +2169,94 @@ func TestActivityTap_StepUpdateUnmarshalError(t *testing.T) {
 		t.Fatalf("unexpected write error: %v", err)
 	}
 }
+
+func TestIsYieldTrap(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		exitCode  int
+		stdout    string
+		stderr    string
+		wantYield bool
+		wantCount int
+	}{
+		{
+			name:      "Clean exit code 0 without background tasks",
+			exitCode:  0,
+			stdout:    `{"status":"SUCCESS","response":"All tasks complete."}`,
+			stderr:    "",
+			wantYield: false,
+			wantCount: 0,
+		},
+		{
+			name:      "Non-zero exit code with terminating background tasks ignored",
+			exitCode:  1,
+			stdout:    "",
+			stderr:    "terminating 1 background task(s) on exit",
+			wantYield: false,
+			wantCount: 0,
+		},
+		{
+			name:      "Exit 0 with 1 terminating background task on exit in stderr",
+			exitCode:  0,
+			stdout:    `{"status":"SUCCESS","response":"Waiting on background task."}`,
+			stderr:    "terminating 1 background task(s) on exit\n",
+			wantYield: true,
+			wantCount: 1,
+		},
+		{
+			name:      "Exit 0 with multiple terminating background tasks",
+			exitCode:  0,
+			stdout:    `{"status":"SUCCESS","response":"Waiting on tasks."}`,
+			stderr:    "terminating 3 background task(s) on exit\n",
+			wantYield: true,
+			wantCount: 3,
+		},
+		{
+			name:      "Exit 0 with terminating background tasks and leaving daemon tasks",
+			exitCode:  0,
+			stdout:    `{"status":"SUCCESS","response":"Waiting on tasks."}`,
+			stderr:    "terminating 2 background task(s), leaving 1 daemon task(s) running on exit\n",
+			wantYield: true,
+			wantCount: 2,
+		},
+		{
+			name:      "Exit 0 with only leaving daemon tasks (no terminating tasks)",
+			exitCode:  0,
+			stdout:    `{"status":"SUCCESS","response":"Done."}`,
+			stderr:    "leaving 1 daemon task(s) running on exit\n",
+			wantYield: false,
+			wantCount: 0,
+		},
+		{
+			name:      "Exit 0 with terminating 0 background tasks",
+			exitCode:  0,
+			stdout:    `{"status":"SUCCESS","response":"Done."}`,
+			stderr:    "terminating 0 background task(s) on exit\n",
+			wantYield: false,
+			wantCount: 0,
+		},
+		{
+			name:      "Exit 0 with background task notice in stdout fallback",
+			exitCode:  0,
+			stdout:    "terminating 1 background task(s) on exit\n",
+			stderr:    "",
+			wantYield: true,
+			wantCount: 1,
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			gotYield, gotCount := IsYieldTrap(tc.exitCode, tc.stdout, tc.stderr)
+			if gotYield != tc.wantYield || gotCount != tc.wantCount {
+				t.Errorf("IsYieldTrap(%d, stdout, stderr) = (%v, %d); want (%v, %d)",
+					tc.exitCode, gotYield, gotCount, tc.wantYield, tc.wantCount)
+			}
+		})
+	}
+}
+

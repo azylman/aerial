@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -602,6 +603,125 @@ func (m *Manager) HasSuccessfulToolCall(convID string) bool {
 		}
 	}
 	return false
+}
+
+var (
+	reBackgroundTaskStarted = regexp.MustCompile(`(?i)Tool is running as a background task with task id:\s*([^\s\r\n]+)`)
+	reTaskMessageSender     = regexp.MustCompile(`(?i)sender=([^\s\r\n]+)`)
+	reTaskFinishedContent   = regexp.MustCompile(`(?i)Task id\s*["\']?([^"\'\s]+)["\']?\s*finished with result:`)
+)
+
+// HasUnfinishedBackgroundTask inspects the latest turn in session transcripts
+// and returns whether a background task was launched in the latest turn but never
+// completed before the turn ended.
+func (m *Manager) HasUnfinishedBackgroundTask(convID string) (bool, string, error) {
+	if m == nil {
+		return false, "", nil
+	}
+	trimmed := strings.TrimSpace(convID)
+	if trimmed == "" || strings.ContainsAny(trimmed, `/\:`) || strings.Contains(trimmed, "..") {
+		return false, "", nil
+	}
+
+	targetDirs := m.getTargetDirs(trimmed)
+	for _, dir := range targetDirs {
+		for _, name := range []string{"transcript_full.jsonl", "transcript.jsonl"} {
+			tPath := filepath.Join(dir, ".system_generated", "logs", name)
+			data, err := os.ReadFile(tPath)
+			if err != nil {
+				continue
+			}
+
+			lines := strings.Split(string(data), "\n")
+			lastUserInputIdx := -1
+			for i, rawLine := range lines {
+				line := strings.TrimSpace(rawLine)
+				if line == "" {
+					continue
+				}
+				var step struct {
+					Source  string `json:"source"`
+					Type    string `json:"type"`
+					Content string `json:"content"`
+				}
+				if err := json.Unmarshal([]byte(line), &step); err == nil {
+					isAmbient := step.Source == SourceAmbient || (step.Type == "USER_INPUT" && strings.HasPrefix(step.Content, "[Chat #"))
+					if step.Type == "USER_INPUT" && !isAmbient {
+						lastUserInputIdx = i
+					}
+				}
+			}
+
+			startIdx := 0
+			if lastUserInputIdx >= 0 {
+				startIdx = lastUserInputIdx + 1
+			}
+
+			startedTasks := make(map[string]bool)
+			taskOrder := make([]string, 0)
+
+			for i := startIdx; i < len(lines); i++ {
+				rawLine := strings.TrimSpace(lines[i])
+				if rawLine == "" {
+					continue
+				}
+
+				var step struct {
+					Source  string `json:"source"`
+					Type    string `json:"type"`
+					Content string `json:"content"`
+				}
+				targetText := rawLine
+				if err := json.Unmarshal([]byte(rawLine), &step); err == nil && step.Content != "" {
+					targetText = step.Content
+				}
+
+				// Check if a task was started
+				if match := reBackgroundTaskStarted.FindStringSubmatch(targetText); len(match) > 1 {
+					tID := strings.Trim(strings.TrimSpace(match[1]), `"'\,;`)
+					if tID != "" && !startedTasks[tID] {
+						startedTasks[tID] = true
+						taskOrder = append(taskOrder, tID)
+					}
+				}
+
+				// Check if a task was completed via sender
+				if match := reTaskMessageSender.FindStringSubmatch(targetText); len(match) > 1 {
+					s := strings.Trim(strings.TrimSpace(match[1]), `"'\,;`)
+					for tID := range startedTasks {
+						if tID == s || strings.HasSuffix(tID, "/"+s) || strings.HasSuffix(s, "/"+tID) || (strings.Contains(tID, "/") && filepath.Base(tID) == filepath.Base(s)) {
+							delete(startedTasks, tID)
+						}
+					}
+				}
+
+				// Check if a task was completed via finished result text
+				if match := reTaskFinishedContent.FindStringSubmatch(targetText); len(match) > 1 {
+					s := strings.Trim(strings.TrimSpace(match[1]), `"'\,;`)
+					for tID := range startedTasks {
+						if tID == s || strings.HasSuffix(tID, "/"+s) || strings.HasSuffix(s, "/"+tID) || (strings.Contains(tID, "/") && filepath.Base(tID) == filepath.Base(s)) {
+							delete(startedTasks, tID)
+						}
+					}
+				}
+			}
+
+			if len(startedTasks) > 0 {
+				// Return the first started task that remains unfinished
+				for _, tID := range taskOrder {
+					if startedTasks[tID] {
+						return true, tID, nil
+					}
+				}
+				for tID := range startedTasks {
+					return true, tID, nil
+				}
+			}
+			return false, "", nil
+		}
+	}
+
+	return false, "", nil
 }
 
 // resolveBaseDir locates the appropriate brain base directory for sessions.

@@ -1727,6 +1727,102 @@ func TestManager_CountTranscriptSteps(t *testing.T) {
 	}
 }
 
+func TestHasUnfinishedBackgroundTask(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	mgr := New("", tmpDir)
+
+	// 1. Nil manager or invalid ID
+	var nilMgr *Manager
+	if has, _, _ := nilMgr.HasUnfinishedBackgroundTask("test"); has {
+		t.Error("expected false for nil manager")
+	}
+	if has, _, _ := mgr.HasUnfinishedBackgroundTask(""); has {
+		t.Error("expected false for empty convID")
+	}
+	if has, _, _ := mgr.HasUnfinishedBackgroundTask("../bad"); has {
+		t.Error("expected false for path traversal")
+	}
+
+	// 2. Non-existent session
+	if has, _, _ := mgr.HasUnfinishedBackgroundTask("non-existent-sess"); has {
+		t.Error("expected false for non-existent session")
+	}
+
+	// 3. Completed background task in latest turn
+	sessCompleted := "sess-completed-task"
+	logsDir1 := filepath.Join(tmpDir, "brain", sessCompleted, ".system_generated", "logs")
+	if err := os.MkdirAll(logsDir1, 0755); err != nil {
+		t.Fatal(err)
+	}
+	linesCompleted := `{"step_index": 0, "source": "USER_EXPLICIT", "type": "USER_INPUT", "content": "run task"}
+{"step_index": 1, "source": "MODEL", "type": "GENERIC", "status": "RUNNING", "content": "Tool is running as a background task with task id: sess-completed-task/task-1\nTask Description: test"}
+{"step_index": 2, "source": "SYSTEM", "type": "SYSTEM_MESSAGE", "status": "DONE", "content": "[Message] sender=sess-completed-task/task-1 content=Task id \"sess-completed-task/task-1\" finished with result:\nSuccess"}
+{"step_index": 3, "source": "MODEL", "type": "PLANNER_RESPONSE", "status": "DONE", "content": "Finished successfully."}
+`
+	if err := os.WriteFile(filepath.Join(logsDir1, "transcript.jsonl"), []byte(linesCompleted), 0644); err != nil {
+		t.Fatal(err)
+	}
+	has, taskID, err := mgr.HasUnfinishedBackgroundTask(sessCompleted)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if has {
+		t.Errorf("expected has=false for completed task, got true with taskID=%s", taskID)
+	}
+
+	// 4. Unfinished background task in latest turn
+	sessUnfinished := "sess-unfinished-task"
+	logsDir2 := filepath.Join(tmpDir, "brain", sessUnfinished, ".system_generated", "logs")
+	if err := os.MkdirAll(logsDir2, 0755); err != nil {
+		t.Fatal(err)
+	}
+	linesUnfinished := `{"step_index": 0, "source": "USER_EXPLICIT", "type": "USER_INPUT", "content": "submit PR"}
+{"step_index": 1, "source": "MODEL", "type": "GENERIC", "status": "RUNNING", "content": "Tool is running as a background task with task id: sess-unfinished-task/task-444\nTask Description: aerial-pr.sh submit"}
+{"step_index": 2, "source": "MODEL", "type": "PLANNER_RESPONSE", "status": "DONE", "content": "Waiting on background task task-444 to complete."}
+`
+	if err := os.WriteFile(filepath.Join(logsDir2, "transcript.jsonl"), []byte(linesUnfinished), 0644); err != nil {
+		t.Fatal(err)
+	}
+	has, taskID, err = mgr.HasUnfinishedBackgroundTask(sessUnfinished)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !has {
+		t.Error("expected has=true for unfinished task, got false")
+	}
+	if taskID != "sess-unfinished-task/task-444" {
+		t.Errorf("expected taskID=sess-unfinished-task/task-444, got %s", taskID)
+	}
+
+	// 5. Multi-turn: task completed in Turn 1, Turn 2 has a new unfinished task
+	sessMultiTurn := "sess-multiturn-tasks"
+	logsDir3 := filepath.Join(tmpDir, "brain", sessMultiTurn, ".system_generated", "logs")
+	if err := os.MkdirAll(logsDir3, 0755); err != nil {
+		t.Fatal(err)
+	}
+	linesMultiTurn := `{"step_index": 0, "source": "USER_EXPLICIT", "type": "USER_INPUT", "content": "first turn"}
+{"step_index": 1, "source": "MODEL", "type": "GENERIC", "status": "RUNNING", "content": "Tool is running as a background task with task id: sess-multiturn-tasks/task-1"}
+{"step_index": 2, "source": "SYSTEM", "type": "SYSTEM_MESSAGE", "status": "DONE", "content": "Task id \"sess-multiturn-tasks/task-1\" finished with result:\nDone"}
+{"step_index": 3, "source": "MODEL", "type": "PLANNER_RESPONSE", "status": "DONE", "content": "Turn 1 done"}
+{"step_index": 4, "source": "USER_EXPLICIT", "type": "USER_INPUT", "content": "second turn"}
+{"step_index": 5, "source": "MODEL", "type": "GENERIC", "status": "RUNNING", "content": "Tool is running as a background task with task id: sess-multiturn-tasks/task-99"}
+{"step_index": 6, "source": "MODEL", "type": "PLANNER_RESPONSE", "status": "DONE", "content": "Waiting on background task task-99"}
+`
+	if err := os.WriteFile(filepath.Join(logsDir3, "transcript.jsonl"), []byte(linesMultiTurn), 0644); err != nil {
+		t.Fatal(err)
+	}
+	has, taskID, err = mgr.HasUnfinishedBackgroundTask(sessMultiTurn)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !has || taskID != "sess-multiturn-tasks/task-99" {
+		t.Errorf("expected has=true with taskID=sess-multiturn-tasks/task-99, got (%v, %s)", has, taskID)
+	}
+}
+
+
 
 
 
