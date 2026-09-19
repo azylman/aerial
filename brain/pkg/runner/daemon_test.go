@@ -3,10 +3,13 @@ package runner
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
+
 
 func TestDaemon_LifecycleAndTurnExecution(t *testing.T) {
 	tempDir := t.TempDir()
@@ -517,3 +520,93 @@ exit 0
 		t.Errorf("expected EOF error on closed stream")
 	}
 }
+
+func TestDaemon_RSSBytesDetailed(t *testing.T) {
+	t.Parallel()
+	dNil := &Daemon{}
+	if rss := dNil.RSSBytes(); rss != 0 {
+		t.Errorf("expected 0 for nil daemon, got %d", rss)
+	}
+
+	dNeg := &Daemon{
+		cmd: &exec.Cmd{Process: &os.Process{Pid: -1}},
+	}
+	if rss := dNeg.RSSBytes(); rss != 0 {
+		t.Errorf("expected 0 for negative pid, got %d", rss)
+	}
+
+	dNon := &Daemon{
+		cmd: &exec.Cmd{Process: &os.Process{Pid: 999999999}},
+	}
+	if rss := dNon.RSSBytes(); rss != 0 {
+		t.Errorf("expected 0 for nonexistent pid, got %d", rss)
+	}
+
+	if runtime.GOOS != "windows" && filepath.Separator != '\\' {
+		dLive := &Daemon{
+			cmd: &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}},
+		}
+		if rss := dLive.RSSBytes(); rss == 0 {
+			t.Errorf("expected non-zero RSS for live process on Linux, got %d", rss)
+		}
+	}
+}
+
+func TestDaemon_TurnStreamEdgeCases(t *testing.T) {
+	tempDir := t.TempDir()
+	mockBin := filepath.Join(tempDir, "mock_edge.sh")
+	script := `#!/bin/sh
+read -r line
+# 1. Empty line
+echo ''
+# 2. Non-event json line
+echo '{"unrecognized":"field"}'
+# 3. Flat step_update (without step_update wrapper)
+echo '{"event":"step_update","type":"tool","tool_name":"flat_tool","tool_output":"Tool is running as a background task with task id: bg-1"}'
+# 4. Message from sender task (with ThreadID set on daemon)
+echo '{"event":"step_update","step_update":{"tool_name":"task_sender","tool_output":"sender=bg-1"}}'
+# 5. Add another task and finish it
+echo '{"event":"step_update","step_update":{"tool_name":"run_command","tool_output":"Tool is running as a background task with task id: bg-2"}}'
+echo '{"event":"step_update","step_update":{"tool_name":"finisher","tool_output":"Task id \"bg-2\" finished with result: done"}}'
+
+# 6. Final result
+echo '{"event":"result","content":"finished all edge cases","usage":{"total_tokens":10}}'
+`
+	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
+		t.Fatalf("failed to write mock script: %v", err)
+	}
+
+	ctx := context.Background()
+	d, err := StartDaemon(ctx, DaemonConfig{
+		AgyBin:        mockBin,
+		Cwd:           tempDir,
+		ThreadID:      "thread-edge-cases",
+		SessionID:     "11111111-2222-3333-4444-555555555555",
+		Model:         "gemini-2.5-flash",
+		GeminiHomeDir: tempDir,
+	})
+	if err != nil {
+		t.Fatalf("StartDaemon failed: %v", err)
+	}
+	defer d.Close()
+
+	var flatReceived bool
+	res, err := d.ExecuteTurnWithHandler(ctx, "run edge cases", func(ev *StepUpdateEvent) {
+		if ev.ResolvedToolName() == "flat_tool" {
+			flatReceived = true
+		}
+	})
+	if err != nil {
+		t.Fatalf("ExecuteTurnWithHandler failed: %v", err)
+	}
+	if !flatReceived {
+		t.Errorf("expected flat_tool step update to be received by handler")
+	}
+	if res.Content != "finished all edge cases" {
+		t.Errorf("unexpected content: %q", res.Content)
+	}
+	if d.TaskTracker().ActiveCount() != 0 {
+		t.Errorf("expected 0 active tasks after cleanup, got %d", d.TaskTracker().ActiveCount())
+	}
+}
+

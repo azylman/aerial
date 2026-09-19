@@ -68,6 +68,30 @@ func TestRunnerPosix_KillHelpers(t *testing.T) {
 	configureSysProcAttr(cmdAlive)
 	if err := cmdAlive.Start(); err == nil {
 		killProcessGroup(cmdAlive)
-		_ = cmdAlive.Wait()
+		err := cmdAlive.Wait()
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			if !isProcessTerminatedBySignal(exitErr) {
+				t.Errorf("expected true from isProcessTerminatedBySignal for SIGKILL exit")
+			}
+		}
 	}
+
+	// Test non-signaled exit (e.g. exit code 1) returns false from isProcessTerminatedBySignal
+	cmdExit := exec.Command("sh", "-c", "exit 1")
+	if err := cmdExit.Run(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			if isProcessTerminatedBySignal(exitErr) {
+				t.Errorf("expected false from isProcessTerminatedBySignal for normal exit 1")
+			}
+		}
+	}
+
+	// Edge case process group calls with negative/zero pid or nil process
+	terminateProcessGroup(&exec.Cmd{Process: &os.Process{Pid: -1}})
+	terminateProcessGroup(&exec.Cmd{Process: &os.Process{Pid: 0}})
+	terminateProcessGroup(&exec.Cmd{})
+	killProcessGroup(&exec.Cmd{Process: &os.Process{Pid: -1}})
+	killProcessGroup(&exec.Cmd{Process: &os.Process{Pid: 0}})
+	killProcessGroup(&exec.Cmd{})
 }
+

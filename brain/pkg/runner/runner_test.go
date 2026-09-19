@@ -2413,3 +2413,81 @@ func TestExtractSessionID_AllFallbacks(t *testing.T) {
 	}
 }
 
+func TestExtractSessionID_RegexInitFallback(t *testing.T) {
+	t.Parallel()
+	targetUUID := "11111111-2222-3333-4444-555555555555"
+
+	// 1. Line does not start with { but contains init conversation_id JSON matching reNDJSONInitSession
+	rawLog := fmt.Sprintf("raw stdout log: {\"event\": \"init\", \"conversation_id\": %q}", targetUUID)
+	if got := ExtractSessionID(rawLog, time.Now()); got != targetUUID {
+		t.Errorf("expected %q, got %q", targetUUID, got)
+	}
+
+	// 2. Line matches reNDJSONInitSession but has invalid UUID, followed by text with valid UUID
+	rawLogInvalid := fmt.Sprintf("raw stdout log: {\"event\": \"init\", \"conversation_id\": \"not-a-uuid\"}\nsubsequent text %s", targetUUID)
+	if got := ExtractSessionID(rawLogInvalid, time.Now()); got != targetUUID {
+		t.Errorf("expected %q, got %q", targetUUID, got)
+	}
+}
+
+func TestExtractCommandName_EnvComplexFlag(t *testing.T) {
+	t.Parallel()
+	if got := ExtractCommandName("env -u FOO python script.py"); got != "env" {
+		t.Errorf("expected 'env', got %q", got)
+	}
+}
+
+func TestClassifyError_ResponseErrorBranches(t *testing.T) {
+	t.Parallel()
+	// 1. Session corruption in resp.Error
+	isFail, isTrans, isCorrupt, detail := ClassifyError(0, `{"error":"session corrupt: malformed database"}`, "")
+	if !isFail || !isCorrupt || isTrans {
+		t.Errorf("expected corruption failure, got fail=%v trans=%v corrupt=%v detail=%q", isFail, isTrans, isCorrupt, detail)
+	}
+
+	// 2. Non-transient in resp.Error
+	isFail, isTrans, _, detail = ClassifyError(0, `{"error":"invalid api key provided"}`, "")
+	if !isFail || isTrans {
+		t.Errorf("expected non-transient failure, got fail=%v trans=%v detail=%q", isFail, isTrans, detail)
+	}
+
+	// 3. Fallback when errDetail is empty with long stdout (> 300 bytes) and exitCode != 0
+	longStdout := strings.Repeat("unparseable text ", 30)
+	isFail, _, _, detail = ClassifyError(42, longStdout, "")
+	if !isFail || !strings.Contains(detail, "exit code 42") {
+		t.Errorf("expected exit code 42 detail, got %q", detail)
+	}
+}
+
+func TestParseAgyOutput_EmptyLinesAndProbeSession(t *testing.T) {
+	t.Parallel()
+	targetUUID := "22222222-3333-4444-5555-666666666666"
+	output := fmt.Sprintf("\n\n{\"event\":\"result\",\"session_id\":%q,\"content\":\"ok\"}\n\n", targetUUID)
+	resp, err := ParseAgyOutput(output)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.ConversationID != targetUUID {
+		t.Errorf("expected ConversationID %q, got %q", targetUUID, resp.ConversationID)
+	}
+}
+
+func TestActivityTap_DirectWriteAndEmptyLines(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	act := NewActivityWriter("")
+	tap := newActivityTap(&buf, act, false, nil)
+	n, err := tap.Write([]byte("hello unfiltered\n"))
+	if err != nil || n == 0 {
+		t.Errorf("unexpected write result: n=%d, err=%v", n, err)
+	}
+	if buf.String() != "hello unfiltered\n" {
+		t.Errorf("unexpected buffer content: %q", buf.String())
+	}
+
+	var buf2 bytes.Buffer
+	tap2 := newActivityTap(&buf2, act, true, nil)
+	_, _ = tap2.Write([]byte("\n\n"))
+}
+
+
