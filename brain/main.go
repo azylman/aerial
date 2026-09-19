@@ -196,8 +196,6 @@ func handleTranscripts(store db.Store, searchPaths ...string) http.HandlerFunc {
 				modTime := ""
 				if tStat != nil {
 					modTime = tStat.ModTime().Format(time.RFC3339)
-				} else if info, err := entry.Info(); err == nil {
-					modTime = info.ModTime().Format(time.RFC3339)
 				}
 				lines := strings.Split(string(data), "\n")
 				totalSteps := 0
@@ -703,6 +701,7 @@ func InitializeBrainEnvironment(ctx context.Context, cfg *config.Config) error {
 	provisioner := env.NewFromConfig(cfg)
 	if err := provisioner.Sync(ctx, cfg); err != nil {
 		log.Printf("Warning: env sync error: %v", err)
+		return err
 	}
 
 	dataDir := cfg.DataDir()
@@ -1025,21 +1024,35 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 
 // DefaultGeminiHomeDir returns the production default base directory for .gemini files.
 func DefaultGeminiHomeDir() string {
-	if h := os.Getenv("HOME"); strings.TrimSpace(h) != "" {
-		return strings.TrimSpace(h)
+	return defaultGeminiHomeDir(os.Getenv("HOME"), testing.Testing())
+}
+
+func defaultGeminiHomeDir(home string, isTesting bool) string {
+	return defaultGeminiHomeDirWithLookup(home, isTesting, os.UserHomeDir)
+}
+
+func defaultGeminiHomeDirWithLookup(home string, isTesting bool, userHomeDirFn func() (string, error)) string {
+	if strings.TrimSpace(home) != "" {
+		return strings.TrimSpace(home)
 	}
-	if testing.Testing() {
+	if isTesting {
 		return filepath.Join(os.TempDir(), "aerial-test-gemini")
 	}
-	if h, err := os.UserHomeDir(); err == nil && strings.TrimSpace(h) != "" {
-		return strings.TrimSpace(h)
+	if userHomeDirFn != nil {
+		if h, err := userHomeDirFn(); err == nil && strings.TrimSpace(h) != "" {
+			return strings.TrimSpace(h)
+		}
 	}
 	return "/root"
 }
 
 // DefaultDataDir returns the production default base directory for persistent data.
 func DefaultDataDir() string {
-	if testing.Testing() {
+	return defaultDataDir(testing.Testing())
+}
+
+func defaultDataDir(isTesting bool) string {
+	if isTesting {
 		return filepath.Join(os.TempDir(), "aerial-test-data")
 	}
 	return "/data"

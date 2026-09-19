@@ -2606,6 +2606,85 @@ func TestRunStartupCatchUpSweep_MessageExistsError(t *testing.T) {
 	RunStartupCatchUpSweep(context.Background(), store, pool, s)
 }
 
+func TestHandleDiscordReady(t *testing.T) {
+	// Nil ready
+	handleDiscordReady(nil, nil, nil, nil, nil)
+
+	// Ready with guild, channels, and threads
+	s := &discordgo.Session{
+		State: discordgo.NewState(),
+	}
+	g := &discordgo.Guild{
+		ID: "g-ready-1",
+		Channels: []*discordgo.Channel{
+			{ID: "c-ready-1", GuildID: "g-ready-1", Type: discordgo.ChannelTypeGuildText},
+		},
+		Threads: []*discordgo.Channel{
+			{ID: "t-ready-1", GuildID: "g-ready-1", Type: discordgo.ChannelTypeGuildPublicThread},
+		},
+	}
+	s.State.GuildAdd(g)
+
+	ready := &discordgo.Ready{
+		User: &discordgo.User{
+			ID:            "bot-ready-1",
+			Username:      "AerialBot",
+			Discriminator: "0001",
+		},
+	}
+	mockStore := db.NewFakeStore()
+	pool := newTestWorkerPool(mockStore)
+	handleDiscordReady(context.Background(), s, ready, mockStore, pool)
+}
+
+func TestHandleGuildMemberUpdate(t *testing.T) {
+	// 1. Nil cases
+	handleGuildMemberUpdate(nil, nil)
+
+	s := &discordgo.Session{
+		State: discordgo.NewState(),
+	}
+	s.State.User = &discordgo.User{ID: "bot-123"}
+
+	// 2. Member update for different user
+	mOther := &discordgo.GuildMemberUpdate{
+		Member: &discordgo.Member{
+			User: &discordgo.User{ID: "user-456"},
+		},
+	}
+	handleGuildMemberUpdate(s, mOther)
+
+	// 3. Member update for bot with m.User != nil
+	mBot1 := &discordgo.GuildMemberUpdate{
+		Member: &discordgo.Member{
+			User:    &discordgo.User{ID: "bot-123"},
+			GuildID: "guild-1",
+			Roles:   []string{"role-1"},
+		},
+	}
+	mBot1.User = &discordgo.User{ID: "bot-123"}
+	handleGuildMemberUpdate(s, mBot1)
+
+	// 4. Member update for bot with m.User == nil and m.GuildID set
+	mBot2 := &discordgo.GuildMemberUpdate{
+		Member: &discordgo.Member{
+			User:    &discordgo.User{ID: "bot-123"},
+			GuildID: "guild-2",
+			Roles:   []string{"role-2"},
+		},
+	}
+	mBot2.User = nil
+	mBot2.GuildID = "guild-2"
+	mBot2.Member.GuildID = ""
+	handleGuildMemberUpdate(s, mBot2)
+}
+
+func TestFunnelDefaultFuncs(t *testing.T) {
+	_ = discordSessionOpener(&discordgo.Session{})
+	_, _ = funnelMemberFetcher(&discordgo.Session{}, "g1", "u1")
+}
+
+
 
 
 

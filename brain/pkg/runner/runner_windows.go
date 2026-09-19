@@ -22,3 +22,13 @@ func killProcessGroup(cmd *exec.Cmd) {
 	}
 }
 
+func terminateProcessGroup(cmd *exec.Cmd) {
+	killProcessGroup(cmd)
+}
+
+func isProcessTerminatedBySignal(exitErr *exec.ExitError) bool {
+	if exitErr == nil {
+		return false
+	}
+	return true
+}

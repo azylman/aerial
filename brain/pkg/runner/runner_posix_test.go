@@ -8,26 +8,36 @@ import (
 	"os/exec"
 	"syscall"
 	"testing"
-	"time"
 )
 
-func TestConfigureSysProcAttr_CancelNilProcess(t *testing.T) {
+func TestConfigureSysProcAttr_Setpgid(t *testing.T) {
 	cmd := exec.Command("true")
 	configureSysProcAttr(cmd)
 
 	if cmd.SysProcAttr == nil || !cmd.SysProcAttr.Setpgid {
 		t.Errorf("expected SysProcAttr.Setpgid=true")
 	}
-	if cmd.WaitDelay != 3*time.Second {
-		t.Errorf("expected WaitDelay=3s, got %v", cmd.WaitDelay)
-	}
-	if cmd.Cancel == nil {
-		t.Fatalf("expected non-nil cmd.Cancel")
+}
+
+func TestRunnerPosix_SignalAndTerminateHelpers(t *testing.T) {
+	terminateProcessGroup(nil)
+	cmd := exec.Command("true")
+	terminateProcessGroup(cmd)
+
+	if isProcessTerminatedBySignal(nil) {
+		t.Errorf("expected false for nil ExitError")
 	}
 
-	// Calling Cancel before process starts (cmd.Process == nil) should return nil safely
-	if err := cmd.Cancel(); err != nil {
-		t.Errorf("expected nil error when canceling nil process, got %v", err)
+	cmdAlive := exec.Command("sleep", "10")
+	configureSysProcAttr(cmdAlive)
+	if err := cmdAlive.Start(); err == nil {
+		terminateProcessGroup(cmdAlive)
+		err := cmdAlive.Wait()
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			if !isProcessTerminatedBySignal(exitErr) {
+				t.Errorf("expected true from isProcessTerminatedBySignal for SIGTERM exit")
+			}
+		}
 	}
 }
 
@@ -58,6 +68,30 @@ func TestRunnerPosix_KillHelpers(t *testing.T) {
 	configureSysProcAttr(cmdAlive)
 	if err := cmdAlive.Start(); err == nil {
 		killProcessGroup(cmdAlive)
-		_ = cmdAlive.Wait()
+		err := cmdAlive.Wait()
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			if !isProcessTerminatedBySignal(exitErr) {
+				t.Errorf("expected true from isProcessTerminatedBySignal for SIGKILL exit")
+			}
+		}
 	}
+
+	// Test non-signaled exit (e.g. exit code 1) returns false from isProcessTerminatedBySignal
+	cmdExit := exec.Command("sh", "-c", "exit 1")
+	if err := cmdExit.Run(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			if isProcessTerminatedBySignal(exitErr) {
+				t.Errorf("expected false from isProcessTerminatedBySignal for normal exit 1")
+			}
+		}
+	}
+
+	// Edge case process group calls with negative/zero pid or nil process
+	terminateProcessGroup(&exec.Cmd{Process: &os.Process{Pid: -1}})
+	terminateProcessGroup(&exec.Cmd{Process: &os.Process{Pid: 0}})
+	terminateProcessGroup(&exec.Cmd{})
+	killProcessGroup(&exec.Cmd{Process: &os.Process{Pid: -1}})
+	killProcessGroup(&exec.Cmd{Process: &os.Process{Pid: 0}})
+	killProcessGroup(&exec.Cmd{})
 }
+

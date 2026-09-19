@@ -11,10 +11,10 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/azylman/aerial/brain/pkg/metrics"
@@ -90,6 +90,15 @@ func StartDaemon(ctx context.Context, cfg DaemonConfig) (*Daemon, error) {
 	}
 
 	cmd := exec.Command(cfg.AgyBin, args...)
+	if runtime.GOOS == "windows" && strings.HasSuffix(cfg.AgyBin, ".sh") {
+		shBin := "sh"
+		if p, err := exec.LookPath("sh"); err == nil {
+			shBin = p
+		} else if _, err := os.Stat(`C:\Users\alexz\AppData\Local\Programs\MinGit\usr\bin\sh.exe`); err == nil {
+			shBin = `C:\Users\alexz\AppData\Local\Programs\MinGit\usr\bin\sh.exe`
+		}
+		cmd = exec.Command(shBin, append([]string{cfg.AgyBin}, args...)...)
+	}
 	if cfg.Cwd != "" {
 		cmd.Dir = cfg.Cwd
 	}
@@ -97,7 +106,7 @@ func StartDaemon(ctx context.Context, cfg DaemonConfig) (*Daemon, error) {
 	if cfg.GeminiHomeDir != "" {
 		cmd.Env = append(cmd.Env, "GEMINI_CLI_HOME="+cfg.GeminiHomeDir)
 	}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	configureSysProcAttr(cmd)
 
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {
@@ -213,9 +222,7 @@ func (d *Daemon) ExecuteTurnWithHandler(ctx context.Context, prompt string, hand
 			d.state = StateClosed
 			d.dirty = true
 			if d.cmd != nil && d.cmd.Process != nil {
-				if killErr := syscall.Kill(-d.cmd.Process.Pid, syscall.SIGTERM); killErr != nil {
-					log.Printf("[Daemon] Warning: failed to send SIGTERM to process group on context cancellation: %v", killErr)
-				}
+				terminateProcessGroup(d.cmd)
 			}
 			d.mu.Unlock()
 		case <-doneChan:
@@ -403,10 +410,7 @@ func (d *Daemon) Close() error {
 	}
 
 	if d.cmd != nil && d.cmd.Process != nil {
-		pid := d.cmd.Process.Pid
-		if killErr := syscall.Kill(-pid, syscall.SIGTERM); killErr != nil {
-			log.Printf("[Daemon] Warning: failed to send SIGTERM to process group %d on close: %v", pid, killErr)
-		}
+		terminateProcessGroup(d.cmd)
 
 		done := make(chan error, 1)
 		go func() {
@@ -418,18 +422,14 @@ func (d *Daemon) Close() error {
 			if err != nil {
 				var exitErr *exec.ExitError
 				if errors.As(err, &exitErr) {
-					if status, ok := exitErr.Sys().(syscall.WaitStatus); ok {
-						if status.Signaled() && (status.Signal() == syscall.SIGTERM || status.Signal() == syscall.SIGKILL) {
-							return nil
-						}
+					if isProcessTerminatedBySignal(exitErr) {
+						return nil
 					}
 				}
 			}
 			return err
 		case <-time.After(closeGracePeriod):
-			if killErr := syscall.Kill(-pid, syscall.SIGKILL); killErr != nil {
-				log.Printf("[Daemon] Warning: failed to send SIGKILL to process group %d on close: %v", pid, killErr)
-			}
+			killProcessGroup(d.cmd)
 			<-done
 			return nil
 		}

@@ -2264,3 +2264,230 @@ func TestIsYieldTrap(t *testing.T) {
 	}
 }
 
+func TestExtractSessionID_JSONUnmarshal(t *testing.T) {
+	t.Parallel()
+	targetUUID := "12345678-abcd-ef01-2345-6789abcdef01"
+
+	cases := []struct {
+		name  string
+		input string
+	}{
+		{
+			name:  "Inverted key ordering with conversation_id first",
+			input: fmt.Sprintf("{\"conversation_id\":%q,\"event\":\"init\"}\n", targetUUID),
+		},
+		{
+			name:  "session_id key",
+			input: fmt.Sprintf("{\"event\":\"init\",\"session_id\":%q}\n", targetUUID),
+		},
+		{
+			name:  "camelCase conversationId key",
+			input: fmt.Sprintf("{\"event\":\"init\",\"conversationId\":%q}\n", targetUUID),
+		},
+		{
+			name:  "camelCase sessionId key",
+			input: fmt.Sprintf("{\"event\":\"init\",\"sessionId\":%q}\n", targetUUID),
+		},
+		{
+			name:  "Session in step_update event",
+			input: fmt.Sprintf("{\"event\":\"step_update\",\"session_id\":%q,\"type\":\"tool_call\"}\n", targetUUID),
+		},
+		{
+			name:  "Session in result event",
+			input: fmt.Sprintf("{\"event\":\"result\",\"session_id\":%q,\"status\":\"SUCCESS\"}\n", targetUUID),
+		},
+		{
+			name:  "Nested session in data payload",
+			input: fmt.Sprintf("{\"event\":\"init\",\"data\":{\"conversation_id\":%q}}\n", targetUUID),
+		},
+		{
+			name:  "Nested session in result payload",
+			input: fmt.Sprintf("{\"event\":\"result\",\"result\":{\"conversation_id\":%q,\"status\":\"SUCCESS\"}}\n", targetUUID),
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := ExtractSessionID(tc.input, time.Now())
+			if got != targetUUID {
+				t.Errorf("ExtractSessionID(%s) = %q, want %q", tc.name, got, targetUUID)
+			}
+		})
+	}
+}
+
+func TestParseAgyOutput_JSONVariations(t *testing.T) {
+	t.Parallel()
+	targetUUID := "87654321-4321-4321-4321-210987654321"
+
+	// 1. stream-json where init uses session_id instead of conversation_id
+	streamJSON := fmt.Sprintf("{\"event\":\"init\",\"session_id\":%q}\n{\"event\":\"result\",\"status\":\"SUCCESS\",\"response\":\"done\"}\n", targetUUID)
+	resp, err := ParseAgyOutput(streamJSON)
+	if err != nil {
+		t.Fatalf("ParseAgyOutput failed: %v", err)
+	}
+	if resp.ConversationID != targetUUID {
+		t.Errorf("expected ConversationID %q, got %q", targetUUID, resp.ConversationID)
+	}
+
+	// 2. stream-json where init uses conversationId camelCase and inverted keys
+	streamJSON2 := fmt.Sprintf("{\"conversationId\":%q,\"event\":\"init\"}\n{\"event\":\"result\",\"status\":\"SUCCESS\",\"response\":\"done\"}\n", targetUUID)
+	resp2, err := ParseAgyOutput(streamJSON2)
+	if err != nil {
+		t.Fatalf("ParseAgyOutput failed: %v", err)
+	}
+	if resp2.ConversationID != targetUUID {
+		t.Errorf("expected ConversationID %q, got %q", targetUUID, resp2.ConversationID)
+	}
+}
+
+func TestActivityTap_SniffSessionID_JSONUnmarshal(t *testing.T) {
+	t.Parallel()
+	targetUUID := "12345678-abcd-ef01-2345-6789abcdef01"
+	actWriter := NewActivityWriter("")
+	var outBuf bytes.Buffer
+	tap := newActivityTap(&outBuf, actWriter, true, nil)
+
+	// Inverted key order in init
+	line := []byte(fmt.Sprintf("{\"conversation_id\":%q,\"event\":\"init\"}\n", targetUUID))
+	_, err := tap.Write(line)
+	if err != nil {
+		t.Fatalf("tap.Write failed: %v", err)
+	}
+	if actWriter.SessionID() != targetUUID {
+		t.Errorf("expected actWriter.SessionID() = %q, got %q", targetUUID, actWriter.SessionID())
+	}
+
+	// Also verify sniffing from a step_update line when actWriter has no session yet
+	actWriter2 := NewActivityWriter("")
+	var outBuf2 bytes.Buffer
+	tap2 := newActivityTap(&outBuf2, actWriter2, true, nil)
+	stepLine := []byte(fmt.Sprintf("{\"event\":\"step_update\",\"session_id\":%q,\"type\":\"tool_call\"}\n", targetUUID))
+	_, err = tap2.Write(stepLine)
+	if err != nil {
+		t.Fatalf("tap2.Write failed: %v", err)
+	}
+	if actWriter2.SessionID() != targetUUID {
+		t.Errorf("expected actWriter2.SessionID() from step_update = %q, got %q", targetUUID, actWriter2.SessionID())
+	}
+}
+
+func TestExtractSessionID_AllFallbacks(t *testing.T) {
+	targetUUID := "123e4567-e89b-12d3-a456-426614174000"
+
+	// 1. JSON session_id
+	if got := ExtractSessionID(fmt.Sprintf("{\"event\":\"init\",\"session_id\":%q}", targetUUID), time.Now()); got != targetUUID {
+		t.Errorf("expected %q, got %q", targetUUID, got)
+	}
+
+	// 2. JSON conversation_id
+	if got := ExtractSessionID(fmt.Sprintf("{\"event\":\"init\",\"conversation_id\":%q}", targetUUID), time.Now()); got != targetUUID {
+		t.Errorf("expected %q, got %q", targetUUID, got)
+	}
+
+	// 3. JSON nested in step_update
+	if got := ExtractSessionID(fmt.Sprintf("{\"event\":\"step_update\",\"step_update\":{\"session_id\":%q}}", targetUUID), time.Now()); got != targetUUID {
+		t.Errorf("expected %q, got %q", targetUUID, got)
+	}
+
+	// 4. NDJSON init session fallback
+	if got := ExtractSessionID(fmt.Sprintf("{\"event\":\"init\",\"session\":%q}", targetUUID), time.Now()); got != targetUUID {
+		t.Errorf("expected %q, got %q", targetUUID, got)
+	}
+
+	// 5. Update stream fallback
+	if got := ExtractSessionID(fmt.Sprintf("session_id: %s", targetUUID), time.Now()); got != targetUUID {
+		t.Errorf("expected %q, got %q", targetUUID, got)
+	}
+
+	// 6. UUID in arbitrary text
+	if got := ExtractSessionID(fmt.Sprintf("some raw prefix %s suffix", targetUUID), time.Now()); got != targetUUID {
+		t.Errorf("expected %q, got %q", targetUUID, got)
+	}
+
+	// 7. Empty output
+	if got := ExtractSessionID("", time.Now()); got != "" {
+		t.Errorf("expected empty string for empty output, got %q", got)
+	}
+}
+
+func TestExtractSessionID_RegexInitFallback(t *testing.T) {
+	t.Parallel()
+	targetUUID := "11111111-2222-3333-4444-555555555555"
+
+	// 1. Line does not start with { but contains init conversation_id JSON matching reNDJSONInitSession
+	rawLog := fmt.Sprintf("raw stdout log: {\"event\": \"init\", \"conversation_id\": %q}", targetUUID)
+	if got := ExtractSessionID(rawLog, time.Now()); got != targetUUID {
+		t.Errorf("expected %q, got %q", targetUUID, got)
+	}
+
+	// 2. Line matches reNDJSONInitSession but has invalid UUID, followed by text with valid UUID
+	rawLogInvalid := fmt.Sprintf("raw stdout log: {\"event\": \"init\", \"conversation_id\": \"not-a-uuid\"}\nsubsequent text %s", targetUUID)
+	if got := ExtractSessionID(rawLogInvalid, time.Now()); got != targetUUID {
+		t.Errorf("expected %q, got %q", targetUUID, got)
+	}
+}
+
+func TestExtractCommandName_EnvComplexFlag(t *testing.T) {
+	t.Parallel()
+	if got := ExtractCommandName("env -u FOO python script.py"); got != "env" {
+		t.Errorf("expected 'env', got %q", got)
+	}
+}
+
+func TestClassifyError_ResponseErrorBranches(t *testing.T) {
+	t.Parallel()
+	// 1. Session corruption in resp.Error
+	isFail, isTrans, isCorrupt, detail := ClassifyError(0, `{"error":"session corrupt: malformed database"}`, "")
+	if !isFail || !isCorrupt || isTrans {
+		t.Errorf("expected corruption failure, got fail=%v trans=%v corrupt=%v detail=%q", isFail, isTrans, isCorrupt, detail)
+	}
+
+	// 2. Non-transient in resp.Error
+	isFail, isTrans, _, detail = ClassifyError(0, `{"error":"invalid api key provided"}`, "")
+	if !isFail || isTrans {
+		t.Errorf("expected non-transient failure, got fail=%v trans=%v detail=%q", isFail, isTrans, detail)
+	}
+
+	// 3. Fallback when errDetail is empty with long stdout (> 300 bytes) and exitCode != 0
+	longStdout := strings.Repeat("unparseable text ", 30)
+	isFail, _, _, detail = ClassifyError(42, longStdout, "")
+	if !isFail || !strings.Contains(detail, "exit code 42") {
+		t.Errorf("expected exit code 42 detail, got %q", detail)
+	}
+}
+
+func TestParseAgyOutput_EmptyLinesAndProbeSession(t *testing.T) {
+	t.Parallel()
+	targetUUID := "22222222-3333-4444-5555-666666666666"
+	output := fmt.Sprintf("\n\n{\"event\":\"result\",\"session_id\":%q,\"content\":\"ok\"}\n\n", targetUUID)
+	resp, err := ParseAgyOutput(output)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.ConversationID != targetUUID {
+		t.Errorf("expected ConversationID %q, got %q", targetUUID, resp.ConversationID)
+	}
+}
+
+func TestActivityTap_DirectWriteAndEmptyLines(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	act := NewActivityWriter("")
+	tap := newActivityTap(&buf, act, false, nil)
+	n, err := tap.Write([]byte("hello unfiltered\n"))
+	if err != nil || n == 0 {
+		t.Errorf("unexpected write result: n=%d, err=%v", n, err)
+	}
+	if buf.String() != "hello unfiltered\n" {
+		t.Errorf("unexpected buffer content: %q", buf.String())
+	}
+
+	var buf2 bytes.Buffer
+	tap2 := newActivityTap(&buf2, act, true, nil)
+	_, _ = tap2.Write([]byte("\n\n"))
+}
+
+

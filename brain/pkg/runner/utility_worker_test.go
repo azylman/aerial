@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -171,7 +172,16 @@ func TestWorkerInstance_SpawnFailures(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), ErrInvalidHandshake.Error()) {
 		t.Errorf("expected ErrInvalidHandshake, got %v", err)
 	}
+
+	// 4. Empty binary defaults to "agy"
+	ctx4, cancel4 := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel4()
+	_, err = NewWorkerInstance(ctx4, WorkerOptions{AgyBin: ""})
+	if err == nil {
+		t.Error("expected error when spawning default agy binary in test environment")
+	}
 }
+
 
 func TestStreamIO_NilSafety(t *testing.T) {
 	t.Parallel()
@@ -351,7 +361,12 @@ func TestActivityTap_WriteErrorBranches(t *testing.T) {
 }
 
 func TestWorkerInstance_MarkDeadAndKillBranches(t *testing.T) {
-	cmd := exec.Command("sleep", "10")
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		cmd = exec.Command("powershell", "-Command", "Start-Sleep 10")
+	} else {
+		cmd = exec.Command("sleep", "10")
+	}
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("failed to start sleep: %v", err)
 	}

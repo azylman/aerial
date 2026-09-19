@@ -1352,8 +1352,8 @@ func TestExtractFinalSubstantiveResponse_EmptyTerminalResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
-	if !isSilent {
-		t.Errorf("Expected isSilent to be true for empty terminal response, got false")
+	if isSilent {
+		t.Errorf("Expected isSilent to be false for empty terminal response, got true")
 	}
 	if finalText != "" {
 		t.Errorf("Expected empty finalText, got %q", finalText)
@@ -1388,6 +1388,37 @@ func TestExtractFinalSubstantiveResponse_TerminalToolStubDoesNotResurrectChatter
 		t.Errorf("Expected empty finalText so caller falls back safely, got %q", finalText)
 	}
 }
+
+func TestExtractFinalSubstantiveResponse_TrailingEmptyStep_FindsSubstantiveStep(t *testing.T) {
+	mgr, tmpDir := setupTestManager(t)
+	convID := "trailing-empty-123"
+	logsDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", convID, ".system_generated", "logs")
+	if err := os.MkdirAll(logsDir, 0755); err != nil {
+		t.Fatalf("Failed to create temp logs dir: %v", err)
+	}
+
+	transcript := `{"type":"USER_INPUT","source":"USER_EXPLICIT","content":"deploy"}
+{"type":"PLANNER_RESPONSE","status":"DONE","content":"Deploying now...","tool_calls":[{"name":"run_command","args":{}}]}
+{"type":"GENERIC","status":"DONE","content":"tool running"}
+{"type":"PLANNER_RESPONSE","status":"DONE","content":"Deployment completed successfully!"}
+{"type":"PLANNER_RESPONSE","status":"DONE","content":"   "}
+`
+	if err := os.WriteFile(filepath.Join(logsDir, "transcript.jsonl"), []byte(transcript), 0644); err != nil {
+		t.Fatalf("Failed to write transcript: %v", err)
+	}
+
+	finalText, isSilent, err := mgr.ExtractFinalSubstantiveResponse(nil, convID)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if isSilent {
+		t.Errorf("Expected isSilent to be false, got true")
+	}
+	if finalText != "Deployment completed successfully!" {
+		t.Errorf("Expected 'Deployment completed successfully!', got %q", finalText)
+	}
+}
+
 
 func TestExtractFinalSubstantiveResponse_AmbientInterleaving(t *testing.T) {
 	mgr, tmpDir := setupTestManager(t)

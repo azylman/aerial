@@ -1665,6 +1665,29 @@ func TestDefaultGeminiHomeDir_Extended(t *testing.T) {
 	if gotEmpty == "" {
 		t.Errorf("expected non-empty default gemini home dir")
 	}
+
+	// 3. Direct helper tests for defaultGeminiHomeDirWithLookup
+	if got := defaultGeminiHomeDirWithLookup("/custom/home", false, nil); got != "/custom/home" {
+		t.Errorf("expected /custom/home, got %s", got)
+	}
+	if got := defaultGeminiHomeDirWithLookup("", true, nil); !strings.Contains(got, "aerial-test-gemini") {
+		t.Errorf("expected temp aerial-test-gemini, got %s", got)
+	}
+	if got := defaultGeminiHomeDirWithLookup("", false, func() (string, error) { return "/home/testuser", nil }); got != "/home/testuser" {
+		t.Errorf("expected /home/testuser, got %s", got)
+	}
+	if got := defaultGeminiHomeDirWithLookup("", false, func() (string, error) { return "  ", nil }); got != "/root" {
+		t.Errorf("expected /root for whitespace user home dir, got %s", got)
+	}
+	if got := defaultGeminiHomeDirWithLookup("", false, func() (string, error) { return "", errors.New("err") }); got != "/root" {
+		t.Errorf("expected /root when lookup fails, got %s", got)
+	}
+	if got := defaultGeminiHomeDirWithLookup("", false, nil); got != "/root" {
+		t.Errorf("expected /root when lookup fn is nil, got %s", got)
+	}
+	if got := defaultDataDir(false); got != "/data" {
+		t.Errorf("expected /data from defaultDataDir(false), got %s", got)
+	}
 }
 
 func TestMetricsMiddleware_EmptyMethod(t *testing.T) {
@@ -1732,6 +1755,19 @@ func TestRunBrainApp_EarlyReturns(t *testing.T) {
 		t.Errorf("expected nil for cancelled context, got %v", err)
 	}
 
+	// 2b. Cancelled context with provisioner sync error in InitializeBrainEnvironment
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	cancel2()
+	blockingDir := filepath.Join(t.TempDir(), "block")
+	_ = os.WriteFile(blockingDir, []byte("file"), 0644)
+	cfgInitErr := config.NewTestConfig(func(d *config.ConfigData) {
+		d.GeminiHomeDir = blockingDir
+		d.DataDir = filepath.Join(tmpDir, "data")
+	})
+	if err := RunBrainApp(ctx2, cfgInitErr); err != nil {
+		t.Errorf("expected nil for cancelled context with init error, got %v", err)
+	}
+
 	// 3. Missing DatabaseURL
 	ctxLive := context.Background()
 	cfg2 := config.NewTestConfig(func(d *config.ConfigData) {
@@ -1794,7 +1830,9 @@ func TestRunBrainApp_EarlyReturns(t *testing.T) {
 func TestCreateReloadConfigFunc_ProvisionerError(t *testing.T) {
 	cfg, _ := config.LoadConfigFromPaths()
 	cur := cfg.Current()
-	cur.GeminiHomeDir = "/dev/null/nonexistent"
+	tmpFile := filepath.Join(t.TempDir(), "blocking_file")
+	_ = os.WriteFile(tmpFile, []byte("file"), 0644)
+	cur.GeminiHomeDir = tmpFile
 	cfg.Update(cur)
 
 	prov := env.NewFromConfig(cfg)
@@ -1882,6 +1920,7 @@ func TestRunBrainApp_FullLifecycle(t *testing.T) {
 
 	go func() {
 		<-ready
+		time.Sleep(30 * time.Millisecond)
 		cancel()
 	}()
 
@@ -2029,6 +2068,8 @@ func TestRunBrainApp_DefaultStoreError(t *testing.T) {
 		t.Errorf("expected failed to initialize database error, got: %v", err)
 	}
 }
+
+
 
 
 

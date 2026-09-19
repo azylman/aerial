@@ -1253,6 +1253,9 @@ func (f *FakeStore) GetFactsByThreadWithEmbeddings(ctx context.Context, threadID
 		}
 	}
 	sort.Slice(results, func(i, j int) bool {
+		if results[i].Fact.CreatedAt.Equal(results[j].Fact.CreatedAt) {
+			return results[i].Fact.ID < results[j].Fact.ID
+		}
 		return results[i].Fact.CreatedAt.Before(results[j].Fact.CreatedAt)
 	})
 	return results, nil
