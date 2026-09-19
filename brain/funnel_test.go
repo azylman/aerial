@@ -2606,6 +2606,35 @@ func TestRunStartupCatchUpSweep_MessageExistsError(t *testing.T) {
 	RunStartupCatchUpSweep(context.Background(), store, pool, s)
 }
 
+func TestHandleDiscordReady(t *testing.T) {
+	// Nil ready
+	handleDiscordReady(nil, nil, nil, nil, nil)
+
+	// Ready with guild, channels, and threads
+	s := &discordgo.Session{
+		State: discordgo.NewState(),
+	}
+	g := &discordgo.Guild{
+		ID: "g-ready-1",
+		Channels: []*discordgo.Channel{
+			{ID: "c-ready-1", GuildID: "g-ready-1", Type: discordgo.ChannelTypeGuildText},
+		},
+		Threads: []*discordgo.Channel{
+			{ID: "t-ready-1", GuildID: "g-ready-1", Type: discordgo.ChannelTypeGuildPublicThread},
+		},
+	}
+	s.State.GuildAdd(g)
+
+	ready := &discordgo.Ready{
+		User: &discordgo.User{
+			ID:            "bot-ready-1",
+			Username:      "AerialBot",
+			Discriminator: "0001",
+		},
+	}
+	handleDiscordReady(context.Background(), s, ready, nil, nil)
+}
+
 
 
 

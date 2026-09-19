@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"strings"
 	"sync"
@@ -359,6 +360,33 @@ func isFunnelBotTargeted(s *discordgo.Session, m *discordgo.MessageCreate) bool 
 	return false
 }
 
+func handleDiscordReady(ctx context.Context, s *discordgo.Session, r *discordgo.Ready, store db.Store, pool *queue.WorkerPool) {
+	if r == nil {
+		return
+	}
+	metrics.DiscordEventsTotal.WithLabelValues("ready").Inc()
+	userStr := ""
+	if r.User != nil {
+		userStr = fmt.Sprintf("%s#%s (user ID %s)", r.User.Username, r.User.Discriminator, r.User.ID)
+	}
+	log.Printf("Discord funnel gateway session ready as %s", userStr)
+	if s != nil && s.State != nil {
+		for _, g := range s.State.Guilds {
+			if g != nil {
+				for _, ch := range g.Channels {
+					queue.CacheDiscordChannel(ch)
+				}
+				for _, th := range g.Threads {
+					queue.CacheDiscordChannel(th)
+				}
+			}
+		}
+	}
+	if ctx != nil && store != nil && pool != nil && s != nil {
+		go RunStartupCatchUpSweep(ctx, store, pool, s)
+	}
+}
+
 func connectDiscordFunnel(ctx context.Context, store db.Store, pool *queue.WorkerPool, token string) *discordgo.Session {
 	if token == "" {
 		log.Println("Discord funnel disabled: DISCORD_BOT_TOKEN/DISCORD_TOKEN not configured")
@@ -382,21 +410,7 @@ func connectDiscordFunnel(ctx context.Context, store db.Store, pool *queue.Worke
 	}
 
 	dg.AddHandler(func(s *discordgo.Session, r *discordgo.Ready) {
-		metrics.DiscordEventsTotal.WithLabelValues("ready").Inc()
-		log.Printf("Discord funnel gateway session ready as %s#%s (user ID %s)", r.User.Username, r.User.Discriminator, r.User.ID)
-		if s.State != nil {
-			for _, g := range s.State.Guilds {
-				if g != nil {
-					for _, ch := range g.Channels {
-						queue.CacheDiscordChannel(ch)
-					}
-					for _, th := range g.Threads {
-						queue.CacheDiscordChannel(th)
-					}
-				}
-			}
-		}
-		go RunStartupCatchUpSweep(ctx, store, pool, s)
+		handleDiscordReady(ctx, s, r, store, pool)
 	})
 
 	dg.AddHandler(func(s *discordgo.Session, g *discordgo.GuildCreate) {

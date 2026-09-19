@@ -1665,6 +1665,17 @@ func TestDefaultGeminiHomeDir_Extended(t *testing.T) {
 	if gotEmpty == "" {
 		t.Errorf("expected non-empty default gemini home dir")
 	}
+
+	// 3. Direct helper test with isTesting=false
+	if got := defaultGeminiHomeDir("", false); got == "" {
+		t.Errorf("expected non-empty defaultGeminiHomeDir with isTesting=false")
+	}
+	if got := defaultGeminiHomeDirWithLookup("", false, func() (string, error) { return "", errors.New("err") }); got != "/root" {
+		t.Errorf("expected /root when lookup fails, got %s", got)
+	}
+	if got := defaultDataDir(false); got != "/data" {
+		t.Errorf("expected /data from defaultDataDir(false), got %s", got)
+	}
 }
 
 func TestMetricsMiddleware_EmptyMethod(t *testing.T) {
@@ -1794,7 +1805,9 @@ func TestRunBrainApp_EarlyReturns(t *testing.T) {
 func TestCreateReloadConfigFunc_ProvisionerError(t *testing.T) {
 	cfg, _ := config.LoadConfigFromPaths()
 	cur := cfg.Current()
-	cur.GeminiHomeDir = "/dev/null/nonexistent"
+	tmpFile := filepath.Join(t.TempDir(), "blocking_file")
+	_ = os.WriteFile(tmpFile, []byte("file"), 0644)
+	cur.GeminiHomeDir = tmpFile
 	cfg.Update(cur)
 
 	prov := env.NewFromConfig(cfg)
@@ -1882,6 +1895,7 @@ func TestRunBrainApp_FullLifecycle(t *testing.T) {
 
 	go func() {
 		<-ready
+		time.Sleep(30 * time.Millisecond)
 		cancel()
 	}()
 
@@ -2029,6 +2043,8 @@ func TestRunBrainApp_DefaultStoreError(t *testing.T) {
 		t.Errorf("expected failed to initialize database error, got: %v", err)
 	}
 }
+
+
 
 
 

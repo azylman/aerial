@@ -14,15 +14,18 @@ func TestDaemon_LifecycleAndTurnExecution(t *testing.T) {
 	script := `#!/bin/sh
 echo '{"event":"init","init":{"tools":["run_command"]}}'
 while IFS= read -r line; do
-  if echo "$line" | grep -q "notask"; then
-    echo '{"event":"step_update","step_update":{"step_index":1,"state":"DONE","step_type":"agent_response"}}'
-    echo '{"event":"result","content":"Turn execution complete","usage":{"input_tokens":50,"output_tokens":25,"total_tokens":75}}'
-  else
-    echo '{"event":"step_update","step_update":{"step_index":1,"state":"ACTIVE","step_type":"tool","tool_name":"run_command","tool_info":{"parameters":{"CommandLine":"sleep 20"}}}}'
-    echo '{"event":"step_update","step_update":{"step_index":2,"state":"DONE","step_type":"tool","tool_name":"run_command","tool_output":"Tool is running as a background task with task id: test-task-42"}}'
-    echo '{"event":"step_update","step_update":{"step_index":3,"state":"DONE","step_type":"agent_response"}}'
-    echo '{"event":"result","content":"Turn execution complete","usage":{"input_tokens":100,"output_tokens":50,"total_tokens":150}}'
-  fi
+  case "$line" in
+    *notask*)
+      echo '{"event":"step_update","step_update":{"step_index":1,"state":"DONE","step_type":"agent_response"}}'
+      echo '{"event":"result","content":"Turn execution complete","usage":{"input_tokens":50,"output_tokens":25,"total_tokens":75}}'
+      ;;
+    *)
+      echo '{"event":"step_update","step_update":{"step_index":1,"state":"ACTIVE","step_type":"tool","tool_name":"run_command","tool_info":{"parameters":{"CommandLine":"sleep 20"}}}}'
+      echo '{"event":"step_update","step_update":{"step_index":2,"state":"DONE","step_type":"tool","tool_name":"run_command","tool_output":"Tool is running as a background task with task id: test-task-42"}}'
+      echo '{"event":"step_update","step_update":{"step_index":3,"state":"DONE","step_type":"agent_response"}}'
+      echo '{"event":"result","content":"Turn execution complete","usage":{"input_tokens":100,"output_tokens":50,"total_tokens":150}}'
+      ;;
+  esac
 done
 `
 	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
