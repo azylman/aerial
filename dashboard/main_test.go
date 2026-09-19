@@ -3940,4 +3940,78 @@ func TestMergeClusterDeployments_CompletedPRRunDoesNotTimeout(t *testing.T) {
 	}
 }
 
+func TestGitHubPoller_DecodesWorkflowRunsWithRepositoryObject(t *testing.T) {
+	rawJSON := `{
+		"total_count": 1,
+		"workflow_runs": [
+			{
+				"id": 9999,
+				"name": "Validate Configuration",
+				"head_branch": "update/config-123",
+				"head_sha": "1234567890abcdef",
+				"event": "pull_request",
+				"status": "in_progress",
+				"conclusion": null,
+				"created_at": "2026-09-19T02:48:54Z",
+				"updated_at": "2026-09-19T02:49:34Z",
+				"html_url": "https://github.com/azylman/aerial-config/actions/runs/9999",
+				"repository": {
+					"id": 1350916489,
+					"name": "aerial-config",
+					"full_name": "azylman/aerial-config"
+				}
+			}
+		]
+	}`
 
+	var resp GitHubRunsResponse
+	if err := json.Unmarshal([]byte(rawJSON), &resp); err != nil {
+		t.Fatalf("failed to unmarshal GitHubRunsResponse with repository object: %v", err)
+	}
+
+	if len(resp.WorkflowRuns) != 1 {
+		t.Fatalf("expected 1 workflow run, got %d", len(resp.WorkflowRuns))
+	}
+	run := resp.WorkflowRuns[0]
+	if run.ID != 9999 {
+		t.Errorf("expected ID 9999, got %d", run.ID)
+	}
+	if run.RepoObj == nil || run.RepoObj.FullName != "azylman/aerial-config" {
+		t.Errorf("expected RepoObj full_name azylman/aerial-config, got %+v", run.RepoObj)
+	}
+
+	// Test full pollOnce flow with mock GitHub returning repository object
+	mockGH := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/actions/runs") {
+			_, _ = w.Write([]byte(rawJSON))
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/jobs") {
+			_, _ = w.Write([]byte(`{"total_count": 1, "jobs": [{"id": 1, "run_id": 9999, "name": "validate-config", "status": "in_progress"}]}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer mockGH.Close()
+
+	poller := NewMultiGitHubPoller([]string{"azylman/aerial-config"}, "test-token")
+	poller.apiBaseURL = mockGH.URL
+
+	ctx := context.Background()
+	hasActive := poller.pollOnce(ctx)
+	if !hasActive {
+		t.Errorf("expected poller.pollOnce to return true for in_progress run")
+	}
+
+	runs, jobs := poller.GetSnapshot()
+	if len(runs) != 1 {
+		t.Fatalf("expected 1 cached run, got %d", len(runs))
+	}
+	if runs[0].Repository != "azylman/aerial-config" {
+		t.Errorf("expected run repository azylman/aerial-config, got %q", runs[0].Repository)
+	}
+	if len(jobs[9999]) != 1 {
+		t.Errorf("expected 1 cached job for run 9999, got %d", len(jobs[9999]))
+	}
+}
