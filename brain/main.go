@@ -902,12 +902,10 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	cls := classifier.New(cfg, utilityRunner)
 
 	pool := queue.New(cfg, queue.WorkerPoolConfig{
-		Store:                 store,
-		Classifier:            cls,
-		RunnerFunc:            runner.RunAgy,
-		RunnerWithOptionsFunc: runner.RunAgyWithOptions,
-		MemoryRetrieverFunc:   memory.RetrieveRelevantFacts,
-		SessionManager:        sessionMgr,
+		Store:               store,
+		Classifier:          cls,
+		MemoryRetrieverFunc: memory.RetrieveRelevantFacts,
+		SessionManager:      sessionMgr,
 	})
 	pool.Start()
 

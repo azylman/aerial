@@ -101,6 +101,13 @@ done
 	if !daemon.IsDirty() {
 		t.Errorf("expected daemon dirty after SetDirty(true)")
 	}
+	_, err = daemon.ExecuteTurn(ctx, "Hello world turn 4 dirty")
+	if err != nil {
+		t.Fatalf("ExecuteTurn 4 failed: %v", err)
+	}
+	if daemon.State() != StateClosed {
+		t.Errorf("expected daemon to transition to StateClosed after turn on dirty daemon, got %s", daemon.State())
+	}
 
 	// Verify SessionID and LastUsed
 	if daemon.SessionID() != "sess-1234" {
@@ -327,5 +334,183 @@ done
 	}
 	if d.State() != StateClosed {
 		t.Errorf("expected state CLOSED, got %s", d.State())
+	}
+}
+
+func TestDaemon_ExecuteClosedAndDoubleClose(t *testing.T) {
+	tempDir := t.TempDir()
+	mockBin := filepath.Join(tempDir, "mock_simple.sh")
+	script := `#!/bin/sh
+read -r line
+echo '{"event":"result","content":"ok","usage":{}}'
+`
+	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
+		t.Fatalf("failed to write mock script: %v", err)
+	}
+
+	ctx := context.Background()
+	d, err := StartDaemon(ctx, DaemonConfig{
+		AgyBin: mockBin,
+		Cwd:    tempDir,
+	})
+	if err != nil {
+		t.Fatalf("StartDaemon failed: %v", err)
+	}
+
+	if err := d.Close(); err != nil {
+		t.Fatalf("first Close failed: %v", err)
+	}
+	// Double close should succeed immediately
+	if err := d.Close(); err != nil {
+		t.Fatalf("second Close failed: %v", err)
+	}
+
+	// Executing on closed daemon returns error
+	_, err = d.ExecuteTurn(ctx, "hello")
+	if err == nil {
+		t.Errorf("expected error executing turn on closed daemon")
+	}
+
+	// Nil cmd RSSBytes returns 0
+	nilDaemon := &Daemon{}
+	if rss := nilDaemon.RSSBytes(); rss != 0 {
+		t.Errorf("expected 0 RSS for nil cmd, got %d", rss)
+	}
+}
+
+func TestDaemon_ExecuteTurnWithHandler(t *testing.T) {
+	tempDir := t.TempDir()
+	mockBin := filepath.Join(tempDir, "mock_stream.sh")
+	script := `#!/bin/sh
+read -r line
+echo '{"event":"step_update","step_update":{"step_index":1,"state":"ACTIVE","step_type":"tool","tool_name":"test_tool"}}'
+echo '{"event":"result","content":"all done","usage":{"total_tokens":42}}'
+`
+	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
+		t.Fatalf("failed to write mock script: %v", err)
+	}
+
+	ctx := context.Background()
+	d, err := StartDaemon(ctx, DaemonConfig{
+		AgyBin:   mockBin,
+		Cwd:      tempDir,
+		ThreadID: "test-thread-123",
+	})
+	if err != nil {
+		t.Fatalf("StartDaemon failed: %v", err)
+	}
+	defer d.Close()
+
+	// Verify RSSBytes works on live process
+	_ = d.RSSBytes()
+
+	var receivedStep *StepUpdateEvent
+	handler := func(ev *StepUpdateEvent) {
+		receivedStep = ev
+	}
+
+	res, err := d.ExecuteTurnWithHandler(ctx, "hello with handler", handler)
+	if err != nil {
+		t.Fatalf("ExecuteTurnWithHandler failed: %v", err)
+	}
+	if res.Content != "all done" {
+		t.Errorf("expected 'all done', got %q", res.Content)
+	}
+	if receivedStep == nil {
+		t.Fatalf("expected step update event to be received by handler")
+	}
+	if receivedStep.ResolvedToolName() != "test_tool" {
+		t.Errorf("expected tool_name 'test_tool', got %q", receivedStep.ResolvedToolName())
+	}
+}
+
+func TestDaemon_StartFailures(t *testing.T) {
+	ctx := context.Background()
+	_, err := StartDaemon(ctx, DaemonConfig{
+		AgyBin: "/path/to/nonexistent/binary/404",
+	})
+	if err == nil {
+		t.Errorf("expected StartDaemon to fail for nonexistent binary")
+	}
+}
+
+func TestDaemon_CoverageBoost(t *testing.T) {
+	tempDir := t.TempDir()
+	mockBin := filepath.Join(tempDir, "mock_env.sh")
+	script := `#!/bin/sh
+read -r line
+echo '{"event":"result","content":"env ok","usage":{}}'
+`
+	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
+		t.Fatalf("failed to write mock script: %v", err)
+	}
+
+	ctx := context.Background()
+	d, err := StartDaemon(ctx, DaemonConfig{
+		AgyBin:        mockBin,
+		Cwd:           tempDir,
+		Model:         "gemini-test",
+		GeminiHomeDir: "/tmp/gemini-home",
+	})
+	if err != nil {
+		t.Fatalf("StartDaemon failed: %v", err)
+	}
+	defer d.Close()
+
+	// Test stdin write error by closing stdin manually
+	_ = d.stdin.Close()
+	_, err = d.ExecuteTurn(ctx, "hello")
+	if err == nil {
+		t.Errorf("expected error executing turn on closed stdin")
+	}
+
+	// Close on nil stdin/cmd
+	emptyD := &Daemon{}
+	if err := emptyD.Close(); err != nil {
+		t.Errorf("expected clean Close on empty daemon, got: %v", err)
+	}
+}
+
+func TestDaemon_InvokeSubagentAndEOF(t *testing.T) {
+	tempDir := t.TempDir()
+	mockBin := filepath.Join(tempDir, "mock_subagent.sh")
+	script := `#!/bin/sh
+read -r line
+echo ''
+echo '{"event":"step_update","step_update":{"tool_name":"invoke_subagent","tool_output":"Launched subagent {\"conversationId\": \"sub-999\"}"}}'
+echo '{"event":"result","content":"subagent launched","usage":{}}'
+# Now terminate to trigger EOF on next read
+exit 0
+`
+	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
+		t.Fatalf("failed to write mock script: %v", err)
+	}
+
+	ctx := context.Background()
+	d, err := StartDaemon(ctx, DaemonConfig{
+		AgyBin:   mockBin,
+		Cwd:      tempDir,
+		ThreadID: "thread-sub",
+	})
+	if err != nil {
+		t.Fatalf("StartDaemon failed: %v", err)
+	}
+	defer d.Close()
+
+	res, err := d.ExecuteTurn(ctx, "run subagent")
+	if err != nil {
+		t.Fatalf("ExecuteTurn failed: %v", err)
+	}
+	if !d.TaskTracker().Has("sub-999") {
+		t.Errorf("expected sub-999 to be tracked")
+	}
+	if !res.IsYieldTrap {
+		t.Errorf("expected IsYieldTrap=true")
+	}
+
+	// Next turn encounters EOF because mock script exited
+	_, err = d.ExecuteTurn(ctx, "turn after exit")
+	if err == nil {
+		t.Errorf("expected EOF error on closed stream")
 	}
 }

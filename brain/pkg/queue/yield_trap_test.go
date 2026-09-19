@@ -15,6 +15,7 @@ import (
 
 	"github.com/azylman/aerial/brain/pkg/db"
 	"github.com/azylman/aerial/brain/pkg/metrics"
+	"github.com/azylman/aerial/brain/pkg/runner"
 	"github.com/azylman/aerial/brain/pkg/session"
 )
 
@@ -213,48 +214,48 @@ func TestYieldTrap_CircuitBreaker_TripsAfterMaxResumes(t *testing.T) {
 	}
 }
 
-func TestYieldTrap_TranscriptAudit_TriggersAutoResumption(t *testing.T) {
+func TestYieldTrap_DaemonTracker_TriggersAutoResumption(t *testing.T) {
 	store := setupTestStore(t)
 	tmpHome := t.TempDir()
 	sessID := "f4444444-5555-6666-7777-888888888888"
+	sessMgr := session.New(tmpHome, "")
+	sessDir, err := sessMgr.EnsureSessionDir(sessID)
+	if err != nil {
+		t.Fatalf("Failed to ensure session dir: %v", err)
+	}
+	tasksDir := filepath.Join(sessDir, ".system_generated", "tasks")
+	_ = os.MkdirAll(tasksDir, 0755)
+	_ = os.WriteFile(filepath.Join(tasksDir, "task-999.log"), []byte("Task output\n"), 0644)
+
+	mockBin := filepath.Join(tmpHome, "mock_agy.sh")
+	_ = os.WriteFile(mockBin, []byte("#!/bin/sh\nwhile true; do sleep 1; done\n"), 0755)
 
 	var runnerInvocations atomic.Int32
 	var deliveredMu sync.Mutex
 	var deliveredText string
 	doneCh := make(chan struct{})
+	threadID := "thread-audit-1"
 
+	var daemon *runner.Daemon
 	pool := NewWorkerPool(WorkerPoolConfig{
-		SessionManager: session.New(tmpHome, ""),
+		SessionManager: sessMgr,
 		Store:          store,
+		AgyBin:         mockBin,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
 			inv := runnerInvocations.Add(1)
-			sessDir := filepath.Join(tmpHome, ".gemini", "antigravity-cli", "brain", sessID)
-			logsDir := filepath.Join(sessDir, ".system_generated", "logs")
-			_ = os.MkdirAll(logsDir, 0755)
 
 			if inv == 1 {
-				// Turn 1 writes an unfinished background task to transcript, but stderr is empty
-				transcript := `{"step_index": 0, "source": "USER_EXPLICIT", "type": "USER_INPUT", "content": "run task"}
-{"step_index": 1, "source": "MODEL", "type": "GENERIC", "status": "RUNNING", "content": "Tool is running as a background task with task id: ` + sessID + `/task-999"}
-{"step_index": 2, "source": "MODEL", "type": "PLANNER_RESPONSE", "status": "DONE", "content": "Waiting on background task task-999 to complete."}
-`
-				_ = os.WriteFile(filepath.Join(logsDir, "transcript.jsonl"), []byte(transcript), 0644)
 				out := fmt.Sprintf(`{"conversation_id":%q,"status":"SUCCESS","response":"Waiting on background task task-999 to complete.","usage":{"input_tokens":100,"output_tokens":25,"total_tokens":125}}`, sessID)
-				// Zero stderr notice, but transcript shows unfinished task!
 				return out, "", 0, nil
 			}
 
-			// Resumed turn marks task finished in transcript
-			transcript := `{"step_index": 0, "source": "USER_EXPLICIT", "type": "USER_INPUT", "content": "run task"}
-{"step_index": 1, "source": "MODEL", "type": "GENERIC", "status": "RUNNING", "content": "Tool is running as a background task with task id: ` + sessID + `/task-999"}
-{"step_index": 2, "source": "SYSTEM", "type": "SYSTEM_MESSAGE", "status": "DONE", "content": "Task id \"` + sessID + `/task-999\" finished with result:\nDone"}
-{"step_index": 3, "source": "MODEL", "type": "PLANNER_RESPONSE", "status": "DONE", "content": "Recovered via transcript audit!"}
-`
-			_ = os.WriteFile(filepath.Join(logsDir, "transcript.jsonl"), []byte(transcript), 0644)
-			out := fmt.Sprintf(`{"conversation_id":%q,"status":"SUCCESS","response":"Recovered via transcript audit!","usage":{"input_tokens":120,"output_tokens":30,"total_tokens":150}}`, sessID)
+			if daemon != nil {
+				daemon.TaskTracker().Remove("task-999")
+			}
+			out := fmt.Sprintf(`{"conversation_id":%q,"status":"SUCCESS","response":"Recovered via daemon tracker!","usage":{"input_tokens":120,"output_tokens":30,"total_tokens":150}}`, sessID)
 			return out, "", 0, nil
 		},
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
@@ -273,9 +274,20 @@ func TestYieldTrap_TranscriptAudit_TriggersAutoResumption(t *testing.T) {
 	pool.Start()
 	defer pool.Stop()
 
+	// Pre-create daemon with active background task
+	ctx := context.Background()
+	daemon, err = pool.DaemonPool().GetOrCreateDaemon(ctx, threadID, sessID, "")
+	if err != nil {
+		t.Fatalf("Failed to create daemon: %v", err)
+	}
+	daemon.TaskTracker().Add(runner.TaskMetadata{
+		TaskID:    "task-999",
+		StartedAt: time.Now(),
+	})
+
 	msg := db.Message{
 		ID:         "msg-audit-1",
-		ThreadID:   "thread-audit-1",
+		ThreadID:   threadID,
 		GuildID:    "guild-1",
 		AuthorID:   "user-1",
 		AuthorName: "Alex",
@@ -289,29 +301,29 @@ func TestYieldTrap_TranscriptAudit_TriggersAutoResumption(t *testing.T) {
 	}
 
 	model := pool.GetRuntimeConfig()
-	initialAudit := testutil.ToFloat64(metrics.YieldTrapEventsTotal.WithLabelValues("resumed", "session_audit", model))
+	initialAudit := testutil.ToFloat64(metrics.YieldTrapEventsTotal.WithLabelValues("resumed", "daemon_tracker", model))
 
 	pool.Enqueue(msg)
 
 	select {
 	case <-doneCh:
 	case <-time.After(5 * time.Second):
-		t.Fatal("Timeout waiting for transcript audit test to complete")
+		t.Fatal("Timeout waiting for daemon tracker test to complete")
 	}
 
 	if runnerInvocations.Load() != 2 {
-		t.Fatalf("expected 2 runner invocations (1 intercepted via transcript + 1 auto-resume), got %d", runnerInvocations.Load())
+		t.Fatalf("expected 2 runner invocations (1 intercepted via daemon tracker + 1 auto-resume), got %d", runnerInvocations.Load())
 	}
 
 	deliveredMu.Lock()
 	defer deliveredMu.Unlock()
-	if deliveredText != "Recovered via transcript audit!" {
+	if deliveredText != "Recovered via daemon tracker!" {
 		t.Errorf("expected final substantive output, got %q", deliveredText)
 	}
 
-	newAudit := testutil.ToFloat64(metrics.YieldTrapEventsTotal.WithLabelValues("resumed", "session_audit", model))
+	newAudit := testutil.ToFloat64(metrics.YieldTrapEventsTotal.WithLabelValues("resumed", "daemon_tracker", model))
 	if newAudit != initialAudit+1 {
-		t.Errorf("expected session_audit resumed metric to increment by 1, got delta %.0f", newAudit-initialAudit)
+		t.Errorf("expected daemon_tracker resumed metric to increment by 1, got delta %.0f", newAudit-initialAudit)
 	}
 }
 

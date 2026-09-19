@@ -8,12 +8,16 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/azylman/aerial/brain/pkg/metrics"
 )
 
 var (
@@ -74,6 +78,7 @@ func StartDaemon(ctx context.Context, cfg DaemonConfig) (*Daemon, error) {
 	}
 
 	args := []string{
+		"--dangerously-skip-permissions",
 		"--input-format", "stream-json",
 		"--output-format", "stream-json",
 	}
@@ -147,6 +152,10 @@ type streamInputMessage struct {
 }
 
 func (d *Daemon) ExecuteTurn(ctx context.Context, prompt string) (*TurnResult, error) {
+	return d.ExecuteTurnWithHandler(ctx, prompt, nil)
+}
+
+func (d *Daemon) ExecuteTurnWithHandler(ctx context.Context, prompt string, handler StepUpdateHandler) (*TurnResult, error) {
 	d.mu.Lock()
 	if d.state == StateClosed {
 		d.mu.Unlock()
@@ -159,7 +168,10 @@ func (d *Daemon) ExecuteTurn(ctx context.Context, prompt string) (*TurnResult, e
 	defer func() {
 		d.mu.Lock()
 		if d.state != StateClosed {
-			if d.taskTracker.ActiveCount() > 0 {
+			if ctx.Err() != nil || d.dirty {
+				d.state = StateClosed
+				d.dirty = true
+			} else if d.taskTracker.ActiveCount() > 0 {
 				d.state = StateYieldWaiting
 			} else {
 				d.state = StateReady
@@ -184,6 +196,10 @@ func (d *Daemon) ExecuteTurn(ctx context.Context, prompt string) (*TurnResult, e
 	encoded = append(encoded, '\n')
 
 	if _, err := d.stdin.Write(encoded); err != nil {
+		d.mu.Lock()
+		d.state = StateClosed
+		d.dirty = true
+		d.mu.Unlock()
 		return nil, fmt.Errorf("failed to write prompt to daemon stdin: %w", err)
 	}
 
@@ -194,7 +210,9 @@ func (d *Daemon) ExecuteTurn(ctx context.Context, prompt string) (*TurnResult, e
 		select {
 		case <-ctx.Done():
 			d.mu.Lock()
-			if d.state != StateClosed && d.cmd != nil && d.cmd.Process != nil {
+			d.state = StateClosed
+			d.dirty = true
+			if d.cmd != nil && d.cmd.Process != nil {
 				if killErr := syscall.Kill(-d.cmd.Process.Pid, syscall.SIGTERM); killErr != nil {
 					log.Printf("[Daemon] Warning: failed to send SIGTERM to process group on context cancellation: %v", killErr)
 				}
@@ -212,6 +230,10 @@ func (d *Daemon) ExecuteTurn(ctx context.Context, prompt string) (*TurnResult, e
 	for {
 		line, readErr := d.stdout.ReadString('\n')
 		if readErr != nil {
+			d.mu.Lock()
+			d.state = StateClosed
+			d.dirty = true
+			d.mu.Unlock()
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
@@ -237,6 +259,24 @@ func (d *Daemon) ExecuteTurn(ctx context.Context, prompt string) (*TurnResult, e
 		}
 		switch event {
 		case "step_update":
+			if handler != nil {
+				var rawStep struct {
+					StepUpdate json.RawMessage `json:"step_update,omitempty"`
+				}
+				var stepEv StepUpdateEvent
+				if err := json.Unmarshal([]byte(line), &rawStep); err == nil {
+					var uErr error
+					if len(rawStep.StepUpdate) > 0 {
+						uErr = json.Unmarshal(rawStep.StepUpdate, &stepEv)
+					} else {
+						uErr = json.Unmarshal([]byte(line), &stepEv)
+					}
+					if uErr == nil && (stepEv.ResolvedType() != "" || stepEv.ResolvedToolName() != "") {
+						handler(&stepEv)
+					}
+				}
+			}
+
 			stepUpdate, ok := raw["step_update"].(map[string]interface{})
 			if ok && stepUpdate != nil {
 				if toolName, ok := stepUpdate["tool_name"].(string); ok && toolName != "" {
@@ -259,6 +299,9 @@ func (d *Daemon) ExecuteTurn(ctx context.Context, prompt string) (*TurnResult, e
 							CommandLine: lastToolCmd,
 							StartedAt:   time.Now(),
 						})
+						if d.cfg.ThreadID != "" {
+							metrics.ActiveTasksGauge.WithLabelValues(d.cfg.ThreadID).Set(float64(d.taskTracker.ActiveCount()))
+						}
 					}
 					if lastToolName == "invoke_subagent" {
 						if m := reSubagentStarted.FindStringSubmatch(toolOut); len(m) > 1 {
@@ -268,6 +311,9 @@ func (d *Daemon) ExecuteTurn(ctx context.Context, prompt string) (*TurnResult, e
 								ToolName:  "invoke_subagent",
 								StartedAt: time.Now(),
 							})
+							if d.cfg.ThreadID != "" {
+								metrics.ActiveTasksGauge.WithLabelValues(d.cfg.ThreadID).Set(float64(d.taskTracker.ActiveCount()))
+							}
 						}
 					}
 					if m := reTaskMessageSender.FindStringSubmatch(toolOut); len(m) > 1 {
@@ -277,6 +323,9 @@ func (d *Daemon) ExecuteTurn(ctx context.Context, prompt string) (*TurnResult, e
 								d.taskTracker.Remove(t.TaskID)
 							}
 						}
+						if d.cfg.ThreadID != "" {
+							metrics.ActiveTasksGauge.WithLabelValues(d.cfg.ThreadID).Set(float64(d.taskTracker.ActiveCount()))
+						}
 					}
 					if m := reTaskFinishedContent.FindStringSubmatch(toolOut); len(m) > 1 {
 						finishedID := strings.Trim(strings.TrimSpace(m[1]), `"'\,;`)
@@ -284,6 +333,9 @@ func (d *Daemon) ExecuteTurn(ctx context.Context, prompt string) (*TurnResult, e
 							if t.TaskID == finishedID || strings.HasSuffix(t.TaskID, "/"+finishedID) || strings.HasSuffix(finishedID, "/"+t.TaskID) {
 								d.taskTracker.Remove(t.TaskID)
 							}
+						}
+						if d.cfg.ThreadID != "" {
+							metrics.ActiveTasksGauge.WithLabelValues(d.cfg.ThreadID).Set(float64(d.taskTracker.ActiveCount()))
 						}
 					}
 				}
@@ -340,6 +392,10 @@ func (d *Daemon) Close() error {
 	d.state = StateClosed
 	d.mu.Unlock()
 
+	if d.cfg.ThreadID != "" {
+		metrics.ActiveTasksGauge.WithLabelValues(d.cfg.ThreadID).Set(0)
+	}
+
 	if d.stdin != nil {
 		if closeErr := d.stdin.Close(); closeErr != nil {
 			log.Printf("[Daemon] Warning: failed to close daemon stdin on close: %v", closeErr)
@@ -379,6 +435,29 @@ func (d *Daemon) Close() error {
 		}
 	}
 	return nil
+}
+
+// RSSBytes returns the resident set size (RSS) in bytes of the daemon subprocess on Linux, or 0 if unavailable.
+func (d *Daemon) RSSBytes() uint64 {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.cmd == nil || d.cmd.Process == nil || d.cmd.Process.Pid <= 0 {
+		return 0
+	}
+	statmPath := fmt.Sprintf("/proc/%d/statm", d.cmd.Process.Pid)
+	data, err := os.ReadFile(statmPath)
+	if err != nil {
+		return 0
+	}
+	fields := strings.Fields(string(data))
+	if len(fields) < 2 {
+		return 0
+	}
+	pages, err := strconv.ParseUint(fields[1], 10, 64)
+	if err != nil {
+		return 0
+	}
+	return pages * uint64(os.Getpagesize())
 }
 
 func (d *Daemon) State() DaemonState         { d.mu.Lock(); defer d.mu.Unlock(); return d.state }

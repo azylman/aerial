@@ -495,3 +495,44 @@ func TestUtilityDaemon_ExecuteClosedMidAttempt(t *testing.T) {
 
 	_, _ = daemon.Execute(context.Background(), "mid-attempt")
 }
+
+func TestUtilityDaemon_ZeroTurnTimeout(t *testing.T) {
+	daemon := NewUtilityDaemon(nil,
+		WithSpawner(newMockSpawner(t)),
+		WithTurnTimeout(0),
+	)
+	defer daemon.Close()
+	ctx := context.Background()
+	res, err := daemon.Execute(ctx, "test zero timeout")
+	if err != nil {
+		t.Fatalf("expected success with zero timeout: %v", err)
+	}
+	if res == "" {
+		t.Errorf("expected non-empty response")
+	}
+}
+
+func TestUtilityDaemon_StandbyConcurrency(t *testing.T) {
+	daemon := NewUtilityDaemon(nil,
+		WithSpawner(newMockSpawner(t)),
+	)
+	defer daemon.Close()
+	waitForStandby(t, daemon)
+
+	// Case 1: Calling ensureStandbyLocked while standby already healthy
+	daemon.mu.Lock()
+	daemon.ensureStandbyLocked()
+	daemon.mu.Unlock()
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Case 2: Dead standby being replaced (oldStandby != nil)
+	daemon.mu.Lock()
+	if daemon.standbyWorker != nil {
+		daemon.standbyWorker.isDead.Store(true)
+		daemon.ensureStandbyLocked()
+	}
+	daemon.mu.Unlock()
+
+	time.Sleep(50 * time.Millisecond)
+}

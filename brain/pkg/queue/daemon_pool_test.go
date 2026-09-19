@@ -326,3 +326,46 @@ func TestWorkerPool_StopIdempotency(t *testing.T) {
 	pool.Stop()
 }
 
+func TestDaemonPool_ActiveTasksAndMemoryMetrics(t *testing.T) {
+	tempDir := t.TempDir()
+	mockBin := filepath.Join(tempDir, "mock_agy.sh")
+	_ = os.WriteFile(mockBin, []byte("#!/bin/sh\nwhile true; do sleep 1; done\n"), 0755)
+
+	pool := NewDaemonPool(nil, mockBin, nil, tempDir)
+	defer pool.Close()
+
+	ctx := context.Background()
+	d, err := pool.GetOrCreateDaemon(ctx, "thread-active-tasks", "sess-active", "model-a")
+	if err != nil {
+		t.Fatalf("failed to create daemon: %v", err)
+	}
+
+	// Initial active tasks empty
+	if tasks := pool.ActiveTasks("thread-active-tasks"); len(tasks) != 0 {
+		t.Errorf("expected 0 active tasks, got %d", len(tasks))
+	}
+	if tasks := pool.ActiveTasks("nonexistent-thread"); tasks != nil {
+		t.Errorf("expected nil active tasks for nonexistent thread")
+	}
+
+	// Add task
+	d.TaskTracker().Add(runner.TaskMetadata{
+		TaskID:    "task-test-1",
+		StartedAt: time.Now(),
+	})
+	if tasks := pool.ActiveTasks("thread-active-tasks"); len(tasks) != 1 || tasks[0].TaskID != "task-test-1" {
+		t.Errorf("expected task-test-1, got %v", tasks)
+	}
+
+	// Remove task
+	if !pool.RemoveTask("thread-active-tasks", "task-test-1") {
+		t.Errorf("expected RemoveTask to return true")
+	}
+	if pool.RemoveTask("nonexistent-thread", "task-test-1") {
+		t.Errorf("expected RemoveTask to return false for nonexistent thread")
+	}
+
+	// Update memory metrics
+	pool.UpdateMemoryMetrics()
+}
+
