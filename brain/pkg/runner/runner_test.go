@@ -2373,3 +2373,43 @@ func TestActivityTap_SniffSessionID_JSONUnmarshal(t *testing.T) {
 		t.Errorf("expected actWriter2.SessionID() from step_update = %q, got %q", targetUUID, actWriter2.SessionID())
 	}
 }
+
+func TestExtractSessionID_AllFallbacks(t *testing.T) {
+	targetUUID := "123e4567-e89b-12d3-a456-426614174000"
+
+	// 1. JSON session_id
+	if got := ExtractSessionID(fmt.Sprintf("{\"event\":\"init\",\"session_id\":%q}", targetUUID), time.Now()); got != targetUUID {
+		t.Errorf("expected %q, got %q", targetUUID, got)
+	}
+
+	// 2. JSON conversation_id
+	if got := ExtractSessionID(fmt.Sprintf("{\"event\":\"init\",\"conversation_id\":%q}", targetUUID), time.Now()); got != targetUUID {
+		t.Errorf("expected %q, got %q", targetUUID, got)
+	}
+
+	// 3. JSON nested in step_update
+	if got := ExtractSessionID(fmt.Sprintf("{\"event\":\"step_update\",\"step_update\":{\"session_id\":%q}}", targetUUID), time.Now()); got != targetUUID {
+		t.Errorf("expected %q, got %q", targetUUID, got)
+	}
+
+	// 4. NDJSON init session fallback
+	if got := ExtractSessionID(fmt.Sprintf("{\"event\":\"init\",\"session\":%q}", targetUUID), time.Now()); got != targetUUID {
+		t.Errorf("expected %q, got %q", targetUUID, got)
+	}
+
+	// 5. Update stream fallback
+	if got := ExtractSessionID(fmt.Sprintf("session_id: %s", targetUUID), time.Now()); got != targetUUID {
+		t.Errorf("expected %q, got %q", targetUUID, got)
+	}
+
+	// 6. UUID in arbitrary text
+	if got := ExtractSessionID(fmt.Sprintf("some raw prefix %s suffix", targetUUID), time.Now()); got != targetUUID {
+		t.Errorf("expected %q, got %q", targetUUID, got)
+	}
+
+	// 7. Empty output
+	if got := ExtractSessionID("", time.Now()); got != "" {
+		t.Errorf("expected empty string for empty output, got %q", got)
+	}
+}
+

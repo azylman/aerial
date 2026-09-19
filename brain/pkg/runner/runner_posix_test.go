@@ -27,6 +27,18 @@ func TestRunnerPosix_SignalAndTerminateHelpers(t *testing.T) {
 	if isProcessTerminatedBySignal(nil) {
 		t.Errorf("expected false for nil ExitError")
 	}
+
+	cmdAlive := exec.Command("sleep", "10")
+	configureSysProcAttr(cmdAlive)
+	if err := cmdAlive.Start(); err == nil {
+		terminateProcessGroup(cmdAlive)
+		err := cmdAlive.Wait()
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			if !isProcessTerminatedBySignal(exitErr) {
+				t.Errorf("expected true from isProcessTerminatedBySignal for SIGTERM exit")
+			}
+		}
+	}
 }
 
 func TestRunnerPosix_KillHelpers(t *testing.T) {
