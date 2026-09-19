@@ -92,6 +92,15 @@ var (
 		[]string{"error_type", "model"},
 	)
 
+	// Yield Trap Telemetry
+	YieldTrapEventsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "aerial_brain_yield_trap_total",
+			Help: "Total background task yield trap events intercepted by Aerial Brain.",
+		},
+		[]string{"action", "source", "model"},
+	)
+
 	// Classifier Telemetry (Ambient Relevance & Latency)
 	ClassifierDurationSeconds = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
@@ -429,6 +438,7 @@ func init() {
 		WebhooksDispatchedTotal,
 		WebhookDurationSeconds,
 		SessionRotationsTotal,
+		YieldTrapEventsTotal,
 		BuildInfo,
 	)
 
@@ -512,6 +522,20 @@ func RecordRunnerError(errorType, model string) {
 		model = "default"
 	}
 	RunnerErrorsTotal.WithLabelValues(errorType, model).Inc()
+}
+
+// RecordYieldTrap records an intercepted yield trap event or circuit breaker trip.
+func RecordYieldTrap(action, source, model string) {
+	if action == "" {
+		action = "resumed"
+	}
+	if source == "" {
+		source = "unknown"
+	}
+	if model == "" {
+		model = "default"
+	}
+	YieldTrapEventsTotal.WithLabelValues(action, source, model).Inc()
 }
 
 // RecordClassifierRun records ambient classifier execution duration, status, and confidence score.

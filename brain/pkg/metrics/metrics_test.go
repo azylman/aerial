@@ -30,6 +30,7 @@ func TestMetricsRegistryAndHandler(t *testing.T) {
 	RecordFallbackNotification("session_reset", "dynamic", 600*time.Millisecond)
 	RecordWebhookDispatch("on_wake", "success", 25*time.Millisecond)
 	RecordSessionRotation("pre_flight", "channel", "turns")
+	RecordYieldTrap("resumed", "stderr_signature", "gemini-2.5-pro")
 
 	ActiveWorkers.Set(2)
 	QueueDepth.Set(5)
@@ -103,6 +104,7 @@ func TestMetricsRegistryAndHandler(t *testing.T) {
 		"aerial_brain_webhooks_dispatched_total",
 		"aerial_brain_webhook_duration_seconds",
 		"aerial_brain_session_rotations_total",
+		"aerial_brain_yield_trap_total",
 		"aerial_brain_build_info",
 	}
 
@@ -132,6 +134,7 @@ func TestMetricsDefaultFallbackBranches(t *testing.T) {
 	RecordFallbackNotification("", "", 10*time.Millisecond)
 	RecordWebhookDispatch("", "", 10*time.Millisecond)
 	RecordSessionRotation("", "", "")
+	RecordYieldTrap("", "", "")
 }
 
 func TestRecordTokens_AutoCalculatesTotalWhenZero(t *testing.T) {
