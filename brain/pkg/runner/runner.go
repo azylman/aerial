@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1308,3 +1309,30 @@ func ExtractQuotaResetDuration(errDetail, stderr string) (time.Duration, bool) {
 	}
 	return 20 * time.Minute, false
 }
+
+var reTerminatingBackgroundTasks = regexp.MustCompile(`(?i)terminating\s+([1-9]\d*)\s+background\s+task\(s\)`)
+
+// IsYieldTrap returns true if an execution with exitCode 0 prematurely terminated
+// running background tasks on process exit (e.g. print-mode idle drain).
+// It returns whether a yield trap was detected and the number of terminated background tasks.
+func IsYieldTrap(exitCode int, stdout, stderr string) (bool, int) {
+	if exitCode != 0 {
+		return false, 0
+	}
+	if match := reTerminatingBackgroundTasks.FindStringSubmatch(stderr); len(match) > 1 {
+		count := 1
+		if c, err := strconv.Atoi(match[1]); err == nil && c > 0 {
+			count = c
+		}
+		return true, count
+	}
+	if match := reTerminatingBackgroundTasks.FindStringSubmatch(stdout); len(match) > 1 {
+		count := 1
+		if c, err := strconv.Atoi(match[1]); err == nil && c > 0 {
+			count = c
+		}
+		return true, count
+	}
+	return false, 0
+}
+

@@ -33,6 +33,8 @@ const (
 	DefaultMaxRestarts         = 3
 	MaxMessageAbsoluteAge      = 2 * time.Hour
 	ContinuationPromptTemplate = "Your previous execution timed out or was interrupted while working. Please inspect where you left off in the conversation transcript and continue the task to completion.\n\nOriginal user request:\n%s"
+	MaxYieldTrapAutoResumes    = 2
+	YieldTrapResumePrompt      = "[SYSTEM NOTICE]: Your previous turn yielded prematurely while background task(s) were still running, causing the runtime to terminate them. Inspect current status (check git status, PR state, or process logs) and continue your workflow to completion. Do NOT end the turn with waiting text."
 )
 
 func sanitizeErrorText(errStr string) string {

@@ -1285,6 +1285,10 @@ func (te *turnExecution) executeWithRetries() {
 		}
 	}
 
+	var autoResumeCount int
+	var accumulatedUsage runner.TokenUsage
+	promptToSend := te.turnPrompt
+
 	for attempt := initialRetryCount + 1; attempt <= maxAttempts; attempt++ {
 		te.pool.mu.Lock()
 		currentModel = te.pool.cfg.Model
@@ -1379,8 +1383,10 @@ func (te *turnExecution) executeWithRetries() {
 			}
 		}
 
-		promptToSend := te.turnPrompt
-		if attempt > 1 {
+		if promptToSend == "" {
+			promptToSend = te.turnPrompt
+		}
+		if attempt > 1 && promptToSend == te.turnPrompt {
 			if (runner.IsInactivityTimeout(lastErrDetail, lastStderr) || strings.Contains(lastErrDetail, "max duration exceeded")) && te.currentSessionID != "" && te.pool.sessionMgr != nil && te.pool.sessionMgr.SessionExistsOnDisk(te.currentSessionID) {
 				promptToSend = fmt.Sprintf(ContinuationPromptTemplate, te.turnPrompt)
 			}
@@ -1447,6 +1453,7 @@ func (te *turnExecution) executeWithRetries() {
 		lastStderr = stderr
 
 		if isFailure {
+			promptToSend = te.turnPrompt
 			targetSess := te.currentSessionID
 			if targetSess == "" {
 				combinedOutput := stdout + "\n" + stderr
@@ -1728,6 +1735,49 @@ func (te *turnExecution) executeWithRetries() {
 						te.currentSessionID = extSess
 						te.saveSessionID(te.threadID, te.currentSessionID)
 					}
+
+					// Option B Background Command Yield Trap Interception:
+					isYield, taskCount := runner.IsYieldTrap(exitCode, stdout, stderr)
+					var unfinishedTaskID string
+					if !isYield && te.pool != nil && te.pool.sessionMgr != nil && te.currentSessionID != "" {
+						if hasUnfinished, tID, err := te.pool.sessionMgr.HasUnfinishedBackgroundTask(te.currentSessionID); err == nil && hasUnfinished {
+							isYield = true
+							unfinishedTaskID = tID
+						}
+					}
+
+					if isYield {
+						if autoResumeCount < MaxYieldTrapAutoResumes {
+							autoResumeCount++
+							log.Printf("[Queue] Yield trap intercepted for thread %s in session %s (auto-resume %d/%d, taskCount=%d, taskID=%s): background tasks terminated prematurely. Suppressing intermediate output and resuming turn.",
+								te.threadID, te.currentSessionID, autoResumeCount, MaxYieldTrapAutoResumes, taskCount, unfinishedTaskID)
+
+							// 1. Accumulate token usage across sub-turns
+							accumulatedUsage.InputTokens += resp.Usage.InputTokens
+							accumulatedUsage.OutputTokens += resp.Usage.OutputTokens
+							accumulatedUsage.ThinkingTokens += resp.Usage.ThinkingTokens
+							accumulatedUsage.CacheReadTokens += resp.Usage.CacheReadTokens
+							accumulatedUsage.TotalTokens += resp.Usage.TotalTokens
+
+							// 2. Keep Discord typing heartbeat active without resetting status updater (do not call te.stopTyping())
+
+							// 3. Set prompt for immediate in-session auto-resumption
+							promptToSend = YieldTrapResumePrompt
+
+							// 4. Record metric
+							metrics.RecordRunnerError("yield_trap_intercepted", currentModel)
+
+							// 5. Decrement attempt and re-run runner immediately
+							attempt--
+							continue
+						}
+
+						// Circuit breaker tripped!
+						log.Printf("[WorkerPool] Yield trap circuit breaker tripped for thread %s after %d auto-resumptions. Delivering final output.",
+							te.threadID, autoResumeCount)
+						metrics.RecordRunnerError("yield_trap_circuit_breaker", currentModel)
+					}
+
 					te.stopTyping()
 					if te.statusUpdater != nil {
 						te.statusUpdater.Stop()
@@ -1813,6 +1863,13 @@ func (te *turnExecution) executeWithRetries() {
 						te.rotateSessionID(te.threadID, "")
 						te.currentSessionID = ""
 					}
+
+					// Combine accumulated sub-turn usage from any intercepted yield traps into final turn usage
+					resp.Usage.InputTokens += accumulatedUsage.InputTokens
+					resp.Usage.OutputTokens += accumulatedUsage.OutputTokens
+					resp.Usage.ThinkingTokens += accumulatedUsage.ThinkingTokens
+					resp.Usage.CacheReadTokens += accumulatedUsage.CacheReadTokens
+					resp.Usage.TotalTokens += accumulatedUsage.TotalTokens
 
 					// Mark all messages in the burst as completed with unpacked clean text
 					metrics.RecordTurnCompleted("success", te.triggerType, currentModel, time.Since(te.execStart))

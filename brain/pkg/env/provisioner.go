@@ -15,17 +15,20 @@ import (
 
 // Provisioner manages filesystem provisioning and synchronization of ~/.gemini runtime environments.
 type Provisioner struct {
-	homeDir                string
-	dataDir                string
-	customSkillsDir        string
-	superpowersDir         string
-	agentsSkillsDir        string
-	agentInstructionsPaths []string
-	blockedSkills          map[string]bool
+	homeDir                 string
+	dataDir                 string
+	customSkillsDir         string
+	superpowersDir          string
+	agentsSkillsDir         string
+	agentInstructionsPaths  []string
+	systemInstructionsPaths []string
+	blockedSkills           map[string]bool
 
 	mu                sync.Mutex
 	lkgcPersona       string
 	lkgcPersonaSource string
+	lkgcGemini        string
+	lkgcGeminiSource  string
 	lkgcRules         string
 }
 
@@ -36,13 +39,14 @@ func New(homeDir, dataDir string) *Provisioner {
 		blocked[k] = v
 	}
 	return &Provisioner{
-		homeDir:                strings.TrimSpace(homeDir),
-		dataDir:                strings.TrimSpace(dataDir),
-		customSkillsDir:        "/share/aerial-config/custom-skills",
-		superpowersDir:         "/opt/superpowers/skills",
-		agentsSkillsDir:        "/app/.agents/skills",
-		agentInstructionsPaths: DefaultAgentInstructionsSearchPaths,
-		blockedSkills:          blocked,
+		homeDir:                 strings.TrimSpace(homeDir),
+		dataDir:                 strings.TrimSpace(dataDir),
+		customSkillsDir:         "/share/aerial-config/custom-skills",
+		superpowersDir:          "/opt/superpowers/skills",
+		agentsSkillsDir:         "/app/.agents/skills",
+		agentInstructionsPaths:  DefaultAgentInstructionsSearchPaths,
+		systemInstructionsPaths: DefaultSystemInstructionsSearchPaths,
+		blockedSkills:           blocked,
 	}
 }
 
@@ -89,6 +93,11 @@ func (p *Provisioner) BlockedSkills() map[string]bool {
 // SetAgentInstructionsSearchPaths sets the search paths for AGENTS.md instructions.
 func (p *Provisioner) SetAgentInstructionsSearchPaths(paths []string) {
 	p.agentInstructionsPaths = paths
+}
+
+// SetSystemInstructionsSearchPaths sets the search paths for GEMINI.md system instructions.
+func (p *Provisioner) SetSystemInstructionsSearchPaths(paths []string) {
+	p.systemInstructionsPaths = paths
 }
 
 // HomeDir returns the target home directory for this Provisioner.

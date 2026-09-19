@@ -1119,4 +1119,71 @@ func TestEnv_SwallowedErrorsRemediationCoverage(t *testing.T) {
 	}
 }
 
+func TestSyncRules_CompositePersonaAndSystemInstructions(t *testing.T) {
+	t.Parallel()
+
+	tmpHome := t.TempDir()
+	tmpData := t.TempDir()
+	p := New(tmpHome, tmpData)
+
+	srcDir := t.TempDir()
+	agentsPath := filepath.Join(srcDir, "AGENTS.md")
+	geminiPath := filepath.Join(srcDir, "GEMINI.md")
+
+	if err := os.WriteFile(agentsPath, []byte("ABG Baddie Persona"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(geminiPath, []byte("Core Invariant 5: No Option B"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	p.SetAgentInstructionsSearchPaths([]string{agentsPath})
+	p.SetSystemInstructionsSearchPaths([]string{geminiPath})
+
+	// 1. Verify composite generation
+	if err := p.SyncRules("Custom Prompt"); err != nil {
+		t.Fatalf("SyncRules failed: %v", err)
+	}
+
+	ruleFile := filepath.Join(tmpHome, ".gemini", "rules", "user_persona.md")
+	data, err := os.ReadFile(ruleFile)
+	if err != nil {
+		t.Fatalf("Failed to read user_persona.md: %v", err)
+	}
+	content := string(data)
+
+	if !strings.Contains(content, "# User Persona Overrides (AGENTS.md)") {
+		t.Errorf("expected persona header, got:\n%s", content)
+	}
+	if !strings.Contains(content, "ABG Baddie Persona") {
+		t.Errorf("expected persona content, got:\n%s", content)
+	}
+	if !strings.Contains(content, "# Base System Architecture & Operational Rules (GEMINI.md)") {
+		t.Errorf("expected gemini header, got:\n%s", content)
+	}
+	if !strings.Contains(content, "Core Invariant 5: No Option B") {
+		t.Errorf("expected gemini content, got:\n%s", content)
+	}
+	if !strings.Contains(content, "# Environment Prompt Override") {
+		t.Errorf("expected env prompt header, got:\n%s", content)
+	}
+
+	// 2. Verify torn read fallback for GEMINI.md
+	if err := os.WriteFile(geminiPath, []byte(""), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.SyncRules(""); err != nil {
+		t.Fatalf("SyncRules failed on torn read: %v", err)
+	}
+	dataAfterTorn, err := os.ReadFile(ruleFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contentAfterTorn := string(dataAfterTorn)
+	if !strings.Contains(contentAfterTorn, "Core Invariant 5: No Option B") {
+		t.Errorf("expected LKGC gemini content to persist after torn read, got:\n%s", contentAfterTorn)
+	}
+}
+
+
 
