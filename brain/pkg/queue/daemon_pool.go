@@ -153,6 +153,7 @@ func (p *DaemonPool) GetOrCreateDaemon(ctx context.Context, threadID string, ses
 		Cwd:           p.cwd,
 		Env:           p.env,
 		GeminiHomeDir: geminiHome,
+		Timeout:       60 * time.Minute,
 	}
 
 	d, err := runner.StartDaemon(ctx, dCfg)
