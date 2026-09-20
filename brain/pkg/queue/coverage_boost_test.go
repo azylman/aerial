@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -2528,6 +2529,126 @@ func TestCoverageBoost_ExtraHits(t *testing.T) {
 	_ = extractMessageBody("<\\/USER_REQUEST>escaped<\\/USER_REQUEST>")
 	_ = extractMessageBody("<\\USER_REQUEST>escaped<\\USER_REQUEST>")
 }
+
+func TestCoverageBoost_DaemonTurnMarshalError(t *testing.T) {
+	orig := daemonTurnMarshaler
+	daemonTurnMarshaler = func(v any) ([]byte, error) {
+		return nil, errors.New("simulated marshal error")
+	}
+	defer func() { daemonTurnMarshaler = orig }()
+
+	store := setupTestStore(t)
+	tmpHome := t.TempDir()
+	tempData := t.TempDir()
+
+	mockBin := filepath.Join(tmpHome, "mock_agy.sh")
+	script := `#!/bin/sh
+while IFS= read -r line; do
+  echo '{"event":"result","result":{"status":"SUCCESS","response":"Executed via persistent daemon","usage":{"total_tokens":10}}}'
+done
+`
+	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
+		t.Fatalf("failed to write mock script: %v", err)
+	}
+
+	cfg := config.NewTestConfig(func(d *config.ConfigData) {
+		d.AgyBin = mockBin
+		d.DataDir = tempData
+	})
+
+	doneCh := make(chan struct{})
+	pool := New(cfg, WorkerPoolConfig{
+		SessionManager:       session.New(tmpHome, tempData),
+		Store:                store,
+		TimeoutMinutes:       1,
+		MaxAttempts:          1,
+		UsePersistentDaemons: true,
+		OnMessageCompleted: func(msg db.Message, status string) {
+			if status == db.StatusFailed {
+				select {
+				case <-doneCh:
+				default:
+					close(doneCh)
+				}
+			}
+		},
+	})
+	defer pool.Stop()
+
+	threadID := "thread-persist-marshal-err"
+	sessID := "b1111111-2222-3333-4444-555555555555"
+	_ = store.SaveSessionID(context.Background(), threadID, sessID)
+
+	msg := db.Message{
+		ID:        "msg-persist-marshal-err",
+		ThreadID:  threadID,
+		Content:   "Hello error",
+		Status:    db.StatusPending,
+		CreatedAt: time.Now(),
+	}
+	_ = store.InsertMessage(context.Background(), msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for message completion")
+	}
+}
+
+func TestCoverageBoost_DefaultLinuxMemoryChecker(t *testing.T) {
+	orig := meminfoPath
+	defer func() { meminfoPath = orig }()
+
+	tempDir := t.TempDir()
+	mockMeminfo := filepath.Join(tempDir, "meminfo")
+	content := "MemTotal:        16000000 kB\nMemAvailable:     8000000 kB\n"
+	if err := os.WriteFile(mockMeminfo, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write mock meminfo: %v", err)
+	}
+	meminfoPath = mockMeminfo
+
+	frac, err := DefaultLinuxMemoryChecker()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if frac < 0.49 || frac > 0.51 {
+		t.Errorf("expected approx 0.50, got %f", frac)
+	}
+
+	meminfoPath = filepath.Join(tempDir, "nonexistent")
+	frac, err = DefaultLinuxMemoryChecker()
+	if err == nil {
+		t.Errorf("expected error for nonexistent meminfo")
+	}
+	if frac != 1.0 {
+		t.Errorf("expected 1.0 headroom on error, got %f", frac)
+	}
+}
+
+func TestCoverageBoost_PoolStoreResolutionAndOptions(t *testing.T) {
+	var nilSQLStore *db.SQLStore
+	if s := resolveStore(nilSQLStore); s != nil {
+		t.Errorf("expected nil for nil *db.SQLStore, got %v", s)
+	}
+
+	rawDB, err := sql.Open("sqlite3", ":memory:")
+	if err == nil {
+		defer rawDB.Close()
+		sqlStore := db.NewSQLStore(rawDB)
+		if s := resolveStore(sqlStore); s == nil {
+			t.Errorf("expected non-nil for valid *db.SQLStore")
+		}
+
+		p := New(nil, WorkerPoolConfig{
+			DB: rawDB,
+		})
+		if p.Store() == nil {
+			t.Errorf("expected store populated from DB")
+		}
+	}
+}
+
 
 
 

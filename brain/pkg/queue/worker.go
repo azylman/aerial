@@ -26,6 +26,8 @@ import (
 
 type wakeInfo = WakeInfo
 
+var daemonTurnMarshaler = json.Marshal
+
 type turnExecution struct {
 	pool                *WorkerPool
 	burst               []db.Message
@@ -1439,7 +1441,7 @@ func (te *turnExecution) executeWithRetries() {
 							daemon.SetSessionID(latest)
 						}
 					}
-					payload, marshalErr := json.Marshal(map[string]interface{}{
+					payload, marshalErr := daemonTurnMarshaler(map[string]interface{}{
 						"conversation_id": convID,
 						"status":          "SUCCESS",
 						"response":        turnRes.Response,
