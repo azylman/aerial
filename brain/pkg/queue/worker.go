@@ -1439,28 +1439,16 @@ func (te *turnExecution) executeWithRetries() {
 							daemon.SetSessionID(latest)
 						}
 					}
-					payload := map[string]interface{}{
+					payload, _ := json.Marshal(map[string]interface{}{
 						"conversation_id": convID,
 						"status":          "SUCCESS",
 						"response":        turnRes.Response,
-						"usage": map[string]interface{}{
-							"input_tokens":  turnRes.Usage.InputTokens,
-							"output_tokens": turnRes.Usage.OutputTokens,
-							"total_tokens":  turnRes.Usage.TotalTokens,
-						},
-					}
-					data, marshalErr := json.Marshal(payload)
-					if marshalErr != nil {
-						stdout = ""
-						stderr = marshalErr.Error()
-						exitCode = 1
-						err = marshalErr
-					} else {
-						stdout = string(data)
-						stderr = ""
-						exitCode = turnRes.ExitCode
-						err = nil
-					}
+						"usage":           turnRes.Usage,
+					})
+					stdout = string(payload)
+					stderr = ""
+					exitCode = turnRes.ExitCode
+					err = nil
 				}
 			}
 		} else if te.pool.cfg.RunnerWithOptionsFunc != nil {
