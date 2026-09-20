@@ -2562,7 +2562,6 @@ done
 		Store:                store,
 		TimeoutMinutes:       1,
 		MaxAttempts:          1,
-		UsePersistentDaemons: true,
 		OnMessageCompleted: func(msg db.Message, status string) {
 			if status == db.StatusFailed {
 				select {

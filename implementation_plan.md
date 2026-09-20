@@ -1,53 +1,69 @@
-# Implementation Plan: Eliminate P0 Regex Parsing of JSON & Structured Payloads
+# Implementation Plan: Purge Ephemeral Runner Suite & Fallback Toggles
 
-## Problem Statement
-The codebase contains brittle regular expressions for parsing structured JSON and event payloads:
-1. `brain/pkg/runner/pure.go` and `runner.go` use `reNDJSONInitSession` (`"event"\s*:\s*"init"[^}]*"conversation_id"\s*:\s*"([^"]+)"`) to extract conversation IDs from raw log lines.
-2. `brain/pkg/runner/daemon.go` uses `reSubagentStarted` (`"conversationId":\s*"([^"]+)"`) to extract subagent IDs from `invoke_subagent` tool outputs.
-3. `brain/pkg/runner/daemon.go` and `brain/pkg/session/session.go` use regexes (`reBackgroundTaskStarted`, `reTaskMessageSender`, `reTaskFinishedContent`) to scrape task and sender IDs from output strings.
+## 1. Overview & Architectural Motivation
+Now that persistent streaming daemons (`runner.Daemon` via `DaemonPool`, and `runner.UtilityDaemon`) are the standard, verified execution engine for all Discord threads, sessions, and ambient classification turns, the legacy ephemeral single-turn execution path is obsolete.
+Previously, when persistent daemons were introduced in PR #320, the ephemeral process spawner (`RunAgyWithWatchdog`, `RunAgy`, `RunAgyWithOptions`, `DefaultWatchdogOptions`, `WatchdogOptions`, `activityTap`, `CmdRunner`, `defaultCmdRunner`, `execProcessRunner`, and `-p` print-mode CLI arguments) was retained behind a config flag (`WorkerPoolConfig.UsePersistentDaemons`) and fallback branches in `worker.go` (`te.pool.cfg.RunnerWithOptionsFunc` and `te.pool.cfg.RunnerFunc`).
 
-This pattern is brittle, vulnerable to ordering or formatting changes, prone to self-poisoning when command outputs or test logs quote task signatures, and incurs unnecessary regex engine overhead.
+The objective is to eliminate this ~1,400-line dead code path, remove `UsePersistentDaemons`, purge the ephemeral single-turn subprocess spawner from `runner.go` and `pure.go`, and streamline turn execution.
 
-## Architecture & Replacements (Approved by The Girl Gang Review Panel)
+---
 
-### 1. Centralized Task Parsers in `brain/pkg/session/task_parsers.go`
-Rather than duplicating parsers across `runner` and `session`, define pure, deterministic parsers in `session` (which `runner` already imports):
-- `ParseBackgroundTaskStarted(s string) string`:
-  - Case-insensitive search for `"tool is running as a background task with task id:"`.
-  - Extracts the subsequent non-whitespace token, strips quotes and punctuation, returns `strings.Clone(token)`.
-- `ParseTaskMessageSender(s string) string`:
-  - Case-insensitive search for `"sender="`.
-  - Extracts the subsequent non-whitespace token, strips quotes and punctuation, returns `strings.Clone(token)`.
-- `ParseTaskFinishedContent(s string) string`:
-  - Finds `"task id"` and verifies `"finished with result:"` appears subsequently.
-  - Slices intermediate substring; verifies it is a SINGLE non-whitespace token (rejects any internal whitespace).
-  - Trims quotes and whitespace, returns `strings.Clone(token)`.
+## 2. Scope & Changes
 
-### 2. `brain/pkg/runner/pure.go` & `runner.go` (`ParseInitEvent` and `ExtractSessionID`)
-- Remove `reNDJSONInitSession = regexp.MustCompile(...)` completely from `runner.go`.
-- Implement robust JSON unmarshaling into `sessionProbe`:
-  - Fast path: Direct `json.Unmarshal([]byte(trimmed), &probe)` if string starts with `{` and ends with `}`.
-  - Embedded JSON fallback: Locate candidate opening brace `idx := strings.Index(line, `{"event"`)` or `json.NewDecoder` stream decoding to avoid brace contamination from logger prefixes like `[2026-09-19 {thread-1}]`.
-  - Validate candidate UUID using `IsValidUUID`.
+### 2.1 Brain Runner Package (`brain/pkg/runner/`)
+- **`brain/pkg/runner/runner.go`**:
+  - Remove `RunAgyWithWatchdog`, `RunAgy`, and `RunAgyWithOptions`.
+  - Remove `DefaultWatchdogOptions` and `WatchdogOptions`.
+  - Remove `CmdRunnerFunc`, `CmdRunner`, `defaultCmdRunner`, `execProcessRunner`, and `activityTap` (which were only used by `RunAgyWithWatchdog`).
+  - Keep all shared utilities actively used by `daemon.go`, `utility_worker.go`, `worker.go`, etc.:
+    - `IsValidUUID`
+    - `sessionProbe`, `extractUUID`
+    - `ActivityWriter`
+    - `ParseAgyOutput`, `AgyResponse`, `AgyUsage`
+    - `StepUpdateEvent`, `StepUpdateHandler`, `ResolvedType`, `ResolvedToolName`, `ResolvedCommandName`, `ExtractCommandName`, `tokenizeCommandLine`, `isPOSIXIdentifier`
+    - `ClassifyError`, `IsInactivityTimeout`, `IsQuotaPause`, `ExtractQuotaResetDuration`, `IsYieldTrap`, `extractErrorDetail`, `containsFatalStderrError`
+    - `ExtractSessionID`
+- **`brain/pkg/runner/pure.go`**:
+  - Remove dead watchdog types: `WatchdogAction`, `WatchdogStatusInput`, `WatchdogDecision`, `EvaluateWatchdogStatus`.
+  - In `BuildAgyArgs`: Remove `-p` prompt appending and single-turn CLI args (`--print-timeout`, `--conversation` with `-p`); standardize on persistent streaming arguments.
+- **`brain/pkg/runner/utility_daemon.go`**:
+  - In `(d *UtilityDaemon) RunnerFunc()`: Remove the bypass to `RunAgyWithWatchdog` when `sessionID != ""`. The utility daemon directly executes via `d.Execute(ctx, prompt)`.
+- **`brain/pkg/runner/runner_test.go` & `pure_test.go`**:
+  - Remove tests for `RunAgyWithWatchdog`, `RunAgy`, `RunAgyWithOptions`, and `EvaluateWatchdogStatus`.
+  - Retain and verify tests for `IsValidUUID`, `ParseAgyOutput`, `ClassifyError`, `ExtractCommandName`, `tokenizeCommandLine`, `ActivityWriter`, and `BuildAgyArgs`.
 
-### 3. `brain/pkg/runner/daemon.go`
-- Implement `extractSubagentID(toolOut string) string`:
-  - Handles direct JSON objects, array payloads `[...]`, and tool output with text prefixes.
-  - Deserializes into struct supporting both `conversationId` and `conversation_id`.
-  - Returns `strings.Clone(id)`.
-- Replace regex calls with `session.ParseBackgroundTaskStarted`, `session.ParseTaskMessageSender`, and `session.ParseTaskFinishedContent`.
-- Remove all 4 regexes (`reBackgroundTaskStarted`, `reSubagentStarted`, `reTaskMessageSender`, `reTaskFinishedContent`) and the `"regexp"` import from `daemon.go`.
+### 2.2 Brain Queue Package (`brain/pkg/queue/`)
+- **`brain/pkg/queue/pool.go`**:
+  - Remove `UsePersistentDaemons bool` from `WorkerPoolConfig`. Persistent daemons are the one and only execution architecture.
+  - Simplify `New(...)`:
+    - Remove `cfg.UsePersistentDaemons = true` assignment.
+    - Remove conversion between `RunnerWithOptionsFunc` and `runner.WatchdogOptions`.
+    - If a test passes `RunnerFunc` or `RunnerWithOptionsFunc`, retain the ability for test doubles to intercept turn execution for hermetic unit testing without relying on the ephemeral runner engine.
+- **`brain/pkg/queue/worker.go`**:
+  - In `executeWithRetries()` (line 1412):
+    - Remove `&& te.pool.cfg.UsePersistentDaemons` check.
+    - Production always routes through `te.pool.daemonPool.GetOrCreateDaemon(...)`.
+    - Clean up the fallback `else if te.pool.cfg.RunnerWithOptionsFunc != nil` block that constructed `watchdogOpts := runner.DefaultWatchdogOptions(currentTimeout)`.
+- **`brain/pkg/queue/worker_test.go`**:
+  - Remove redundant `UsePersistentDaemons: true` assignments across test cases.
+- **`brain/pkg/queue/coverage_boost_test.go`**:
+  - Update tests asserting on `UsePersistentDaemons` or `RunnerWithOptionsFunc not configured`.
 
-### 4. `brain/pkg/session/session.go`
-- Update `HasUnfinishedBackgroundTask` to use `ParseBackgroundTaskStarted`, `ParseTaskMessageSender`, and `ParseTaskFinishedContent`.
-- Remove all 3 regexes and the `"regexp"` import from `session.go`.
+---
 
-### 5. Verification & TDD
-- Write tests in `brain/pkg/session/task_parsers_test.go`:
-  - Task started: quotes, whitespace, punctuation, newlines, case insensitivity.
-  - Task sender: quotes, whitespace, priority attributes.
-  - Task finished: quotes, prefix matching, non-whitespace constraint (reject internal spaces).
-- Update and add tests in `brain/pkg/runner/pure_test.go` and `brain/pkg/runner/runner_test.go`:
-  - `ParseInitEvent` with JSON prefixes, logger tags, invalid JSON, and valid UUIDs.
-  - `extractSubagentID` with camelCase, snake_case, array payloads, and leading text.
-- Verify full test suite passes with `go test -count=1 ./pkg/runner/... ./pkg/session/...`.
+## 3. Invariants & Guardrails
+- **PostgreSQL 16 & pgvector Invariant (Invariant 7)**: No database schema or driver changes; PostgreSQL remains exclusively utilized.
+- **Continuous Deployment & Verification (Invariant 6)**: Must pass clean-room verification (`./scripts/verify.sh --staged`) and satisfy coverage floor (>= 95.0%).
+- **Token Isolation & Subagent Execution**: Consolidated review subagent executes The Girl Gang review panel, and Devil's Advocate subagent audits the diff prior to PR submission.
+- **Single-Message Plain Prose Output**: Final response to Discord must be concise plain prose (< 1,800 chars, no markdown tables, valid GitHub web links only).
+
+---
+
+## 4. Verification Plan
+1. Local targeted tests:
+   - `go test -v ./pkg/runner/...`
+   - `go test -v ./pkg/queue/...`
+2. Statement coverage floor verification:
+   - Verify coverage in `pkg/runner` (>= 95.0%) and `pkg/queue` (>= 95.0%).
+3. Clean-room monorepo verification:
+   - `./scripts/verify.sh --staged`

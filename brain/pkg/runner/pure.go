@@ -5,25 +5,13 @@ import (
 	"fmt"
 	"io"
 	"strings"
-	"time"
-)
-
-// WatchdogAction represents the action recommended by watchdog evaluation.
-type WatchdogAction int
-
-const (
-	WatchdogActionNone WatchdogAction = iota
-	WatchdogActionKillInactivity
-	WatchdogActionKillMaxDuration
 )
 
 // AgyArgsInput holds the configuration parameters for building CLI arguments.
 type AgyArgsInput struct {
 	OutputFormat string
 	Model        string
-	MaxDuration  time.Duration
 	SessionID    string
-	Prompt       string
 	WorkerMode   bool
 }
 
@@ -40,25 +28,12 @@ func BuildAgyArgs(input AgyArgsInput) []string {
 	}
 	args = append(args, "--output-format", outputFmt)
 
+	if sessionID := strings.TrimSpace(input.SessionID); sessionID != "" {
+		args = append(args, "--conversation", sessionID)
+	}
+
 	if model := strings.TrimSpace(input.Model); model != "" {
 		args = append(args, "--model", model)
-	}
-
-	if input.MaxDuration > 0 {
-		if input.MaxDuration >= time.Minute {
-			args = append(args, "--print-timeout", fmt.Sprintf("%dm", int(input.MaxDuration.Minutes())))
-		} else {
-			args = append(args, "--print-timeout", fmt.Sprintf("%ds", int(input.MaxDuration.Seconds())))
-		}
-	}
-
-	if !input.WorkerMode {
-		if sessionID := strings.TrimSpace(input.SessionID); sessionID != "" {
-			args = append(args, "--conversation", sessionID)
-		}
-		if input.Prompt != "" {
-			args = append(args, "-p", input.Prompt)
-		}
 	}
 
 	return args
@@ -112,69 +87,6 @@ func BuildAgyEnv(input AgyEnvInput) []string {
 	return cmdEnv
 }
 
-// WatchdogStatusInput holds timing state for watchdog threshold evaluation.
-type WatchdogStatusInput struct {
-	Now                  time.Time
-	StartTime            time.Time
-	LastActivityTime     time.Time
-	LatestDiskActivity   time.Time
-	LastSeenDiskActivity time.Time
-	InactivityTimeout    time.Duration
-	MaxDuration          time.Duration
-}
-
-// WatchdogDecision represents the decision produced by EvaluateWatchdogStatus.
-type WatchdogDecision struct {
-	Action              WatchdogAction
-	Reason              string
-	NewLastSeenDisk     time.Time
-	UpdatedActivityTime time.Time
-}
-
-// EvaluateWatchdogStatus evaluates elapsed durations against inactivity and max duration thresholds.
-func EvaluateWatchdogStatus(input WatchdogStatusInput) WatchdogDecision {
-	now := input.Now
-	if now.IsZero() {
-		now = time.Now()
-	}
-
-	inactivityTimeout := input.InactivityTimeout
-	if inactivityTimeout <= 0 {
-		inactivityTimeout = 5 * time.Minute
-	}
-
-	maxDuration := input.MaxDuration
-	if maxDuration <= 0 {
-		maxDuration = 60 * time.Minute
-	}
-
-	decision := WatchdogDecision{
-		Action:              WatchdogActionNone,
-		NewLastSeenDisk:     input.LastSeenDiskActivity,
-		UpdatedActivityTime: input.LastActivityTime,
-	}
-
-	effectiveActivity := input.LastActivityTime
-	if input.LatestDiskActivity.After(input.LastSeenDiskActivity) {
-		decision.NewLastSeenDisk = input.LatestDiskActivity
-		decision.UpdatedActivityTime = now
-		effectiveActivity = now
-	}
-
-	if now.Sub(effectiveActivity) > inactivityTimeout {
-		decision.Action = WatchdogActionKillInactivity
-		decision.Reason = fmt.Sprintf("inactivity timeout exceeded (%v without output or transcript update)", inactivityTimeout)
-		return decision
-	}
-
-	if !input.StartTime.IsZero() && now.Sub(input.StartTime) > maxDuration {
-		decision.Action = WatchdogActionKillMaxDuration
-		decision.Reason = fmt.Sprintf("max duration exceeded (%v total duration cap)", maxDuration)
-		return decision
-	}
-
-	return decision
-}
 
 // ShouldRotateWorker evaluates whether a persistent worker should be rotated.
 func ShouldRotateWorker(turnsUsed, turnBudget int, rssBytes, maxRSSBytes uint64, isDead bool) (bool, string) {

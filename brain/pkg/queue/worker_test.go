@@ -80,9 +80,7 @@ func TestWorker_WatchTaskCompletion_TickerTrigger(t *testing.T) {
 
 func TestWorker_PoolDaemonAccessors(t *testing.T) {
 	cfg := config.NewTestConfig()
-	pool := NewWorkerPool(WorkerPoolConfig{
-		UsePersistentDaemons: true,
-	})
+	pool := NewWorkerPool(WorkerPoolConfig{})
 	defer pool.Stop()
 
 	if pool.DaemonPool() == nil {
@@ -122,7 +120,6 @@ done
 		SessionManager:       session.New(tmpHome, tempData),
 		Store:                store,
 		TimeoutMinutes:       1,
-		UsePersistentDaemons: true,
 		OnMessageCompleted: func(msg db.Message, status string) {
 			if status == db.StatusCompleted {
 				select {
@@ -198,7 +195,6 @@ done
 		TimeoutMinutes:       1,
 		MaxAttempts:          1,
 		IdleTimeout:          20 * time.Millisecond,
-		UsePersistentDaemons: true,
 		OnMessageCompleted: func(msg db.Message, status string) {
 			select {
 			case <-doneCh:
@@ -281,7 +277,6 @@ func TestWorker_PersistentDaemonExecutionErrors(t *testing.T) {
 		Store:                store,
 		TimeoutMinutes:       1,
 		MaxAttempts:          1,
-		UsePersistentDaemons: true,
 		OnMessageCompleted: func(msg db.Message, status string) {
 			if status == db.StatusFailed {
 				select {
@@ -331,7 +326,6 @@ exit 1
 		Store:                store,
 		TimeoutMinutes:       1,
 		MaxAttempts:          1,
-		UsePersistentDaemons: true,
 		OnMessageCompleted: func(msg db.Message, status string) {
 			if status == db.StatusFailed {
 				select {
@@ -393,7 +387,6 @@ done
 		SessionManager:       session.New(tmpHome, tempData),
 		Store:                store,
 		TimeoutMinutes:       1,
-		UsePersistentDaemons: true,
 		DeliveryFunc: func(sess *discordgo.Session, channelID, content string) error {
 			deliveredText = content
 			return nil
@@ -468,7 +461,6 @@ done
 		SessionManager:       session.New(tmpHome, tempData),
 		Store:                store,
 		TimeoutMinutes:       1,
-		UsePersistentDaemons: true,
 		DeliveryFunc: func(sess *discordgo.Session, channelID, content string) error {
 			deliveredText = content
 			return nil
@@ -558,7 +550,6 @@ done
 		SessionManager:       session.New(tmpHome, tempData),
 		Store:                store,
 		TimeoutMinutes:       1,
-		UsePersistentDaemons: true,
 		DeliveryFunc: func(sess *discordgo.Session, channelID, content string) error {
 			deliveredText = content
 			return nil

@@ -300,7 +300,7 @@ func TestUtilityDaemon_WorkerOptsConfigFallback(t *testing.T) {
 	}
 }
 
-func TestUtilityDaemon_RunnerFuncSessionBypassAndError(t *testing.T) {
+func TestUtilityDaemon_RunnerFuncClosedError(t *testing.T) {
 	t.Parallel()
 	daemon := NewUtilityDaemon(nil,
 		WithSpawner(newMockSpawner(t)),
@@ -309,14 +309,7 @@ func TestUtilityDaemon_RunnerFuncSessionBypassAndError(t *testing.T) {
 
 	fn := daemon.RunnerFunc()
 
-	// 1. Non-empty sessionID -> routes to RunAgyWithWatchdog (bypasses daemon)
-	// We pass a dummy binary that fails fast or exits to test sessionID != "" branch
-	_, _, _, err := fn(context.Background(), "/nonexistent/agy", "hello", "session-12345", "", "", 1)
-	if err == nil {
-		t.Error("expected error for nonexistent agy in watchdog branch")
-	}
-
-	// 2. Closed daemon -> Execute returns error in RunnerFunc
+	// Closed daemon -> Execute returns error in RunnerFunc
 	daemon.Close()
 	_, stderr, exitCode, err := fn(context.Background(), "mock", "hello", "", "", "", 1)
 	if err == nil || exitCode != -1 || !strings.Contains(stderr, "utility daemon error") {

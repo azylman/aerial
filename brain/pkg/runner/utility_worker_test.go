@@ -295,14 +295,6 @@ func (f *failCloser) Close() error {
 	return f.err
 }
 
-type failWriter struct {
-	err error
-}
-
-func (f *failWriter) Write(p []byte) (n int, err error) {
-	return 0, f.err
-}
-
 func TestUtilityWorker_CloseWarnAndIgnorableErrors(t *testing.T) {
 	// closeWarn with nil
 	closeWarn(nil, "nil-closer")
@@ -343,21 +335,6 @@ func TestUtilityWorker_CloseWarnAndIgnorableErrors(t *testing.T) {
 	if isIgnorableProcessError(errors.New("other")) {
 		t.Errorf("expected false for other")
 	}
-}
-
-func TestActivityTap_WriteErrorBranches(t *testing.T) {
-	fw := &failWriter{err: errors.New("write failed")}
-	actWriter := NewActivityWriter("test-sess")
-	tap := newActivityTap(fw, actWriter, true, nil)
-
-	// Test init line write failure
-	tap.Write([]byte("Starting conversation update stream for test-sess\n"))
-
-	// Test result line write failure
-	tap.Write([]byte(`{"event":"result"}` + "\n"))
-
-	// Test regular line write failure
-	tap.Write([]byte("plain line\n"))
 }
 
 func TestWorkerInstance_MarkDeadAndKillBranches(t *testing.T) {

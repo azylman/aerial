@@ -5,7 +5,6 @@ import (
 	"errors"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestBuildAgyArgs(t *testing.T) {
@@ -20,7 +19,7 @@ func TestBuildAgyArgs(t *testing.T) {
 			name:     "Defaults",
 			input:    AgyArgsInput{},
 			contains: []string{"--dangerously-skip-permissions", "--output-format", "stream-json"},
-			omits:    []string{"--input-format", "--model", "--print-timeout", "--conversation", "-p"},
+			omits:    []string{"--input-format", "--model", "--conversation"},
 		},
 		{
 			name: "Interactive Run With Model and Conversation",
@@ -28,25 +27,14 @@ func TestBuildAgyArgs(t *testing.T) {
 				OutputFormat: "json",
 				Model:        "gemini-2.5-flash",
 				SessionID:    "11111111-2222-3333-4444-555555555555",
-				Prompt:       "Hello world",
-				MaxDuration:  10 * time.Minute,
 			},
 			contains: []string{
 				"--dangerously-skip-permissions",
 				"--output-format", "json",
 				"--model", "gemini-2.5-flash",
-				"--print-timeout", "10m",
 				"--conversation", "11111111-2222-3333-4444-555555555555",
-				"-p", "Hello world",
 			},
 			omits: []string{"--input-format"},
-		},
-		{
-			name: "Seconds MaxDuration",
-			input: AgyArgsInput{
-				MaxDuration: 45 * time.Second,
-			},
-			contains: []string{"--print-timeout", "45s"},
 		},
 		{
 			name: "Worker Mode",
@@ -54,7 +42,6 @@ func TestBuildAgyArgs(t *testing.T) {
 				WorkerMode:   true,
 				OutputFormat: "stream-json",
 				Model:        "gemini-pro",
-				Prompt:       "ignored prompt in worker mode",
 				SessionID:    "22222222-3333-4444-5555-666666666666",
 			},
 			contains: []string{
@@ -62,8 +49,9 @@ func TestBuildAgyArgs(t *testing.T) {
 				"--input-format", "stream-json",
 				"--output-format", "stream-json",
 				"--model", "gemini-pro",
+				"--conversation", "22222222-3333-4444-5555-666666666666",
 			},
-			omits: []string{"-p", "--conversation"},
+			omits: []string{},
 		},
 	}
 
@@ -141,79 +129,6 @@ func TestBuildAgyEnv(t *testing.T) {
 	}
 }
 
-func TestEvaluateWatchdogStatus(t *testing.T) {
-	t.Parallel()
-	now := time.Now()
-	startTime := now.Add(-10 * time.Minute)
-
-	tests := []struct {
-		name         string
-		input        WatchdogStatusInput
-		wantAction   WatchdogAction
-		reasonSubstr string
-	}{
-		{
-			name: "Healthy Activity - No Timeout",
-			input: WatchdogStatusInput{
-				Now:               now,
-				StartTime:         startTime,
-				LastActivityTime:  now.Add(-30 * time.Second),
-				InactivityTimeout: 5 * time.Minute,
-				MaxDuration:       60 * time.Minute,
-			},
-			wantAction: WatchdogActionNone,
-		},
-		{
-			name: "Inactivity Timeout Exceeded",
-			input: WatchdogStatusInput{
-				Now:               now,
-				StartTime:         startTime,
-				LastActivityTime:  now.Add(-6 * time.Minute),
-				InactivityTimeout: 5 * time.Minute,
-				MaxDuration:       60 * time.Minute,
-			},
-			wantAction:   WatchdogActionKillInactivity,
-			reasonSubstr: "inactivity timeout exceeded",
-		},
-		{
-			name: "Inactivity Rescued by Advancing Disk Activity",
-			input: WatchdogStatusInput{
-				Now:                  now,
-				StartTime:            startTime,
-				LastActivityTime:     now.Add(-6 * time.Minute),
-				LastSeenDiskActivity: now.Add(-10 * time.Minute),
-				LatestDiskActivity:   now.Add(-10 * time.Second),
-				InactivityTimeout:    5 * time.Minute,
-				MaxDuration:          60 * time.Minute,
-			},
-			wantAction: WatchdogActionNone,
-		},
-		{
-			name: "Max Duration Exceeded",
-			input: WatchdogStatusInput{
-				Now:               now,
-				StartTime:         now.Add(-65 * time.Minute),
-				LastActivityTime:  now.Add(-10 * time.Second),
-				InactivityTimeout: 5 * time.Minute,
-				MaxDuration:       60 * time.Minute,
-			},
-			wantAction:   WatchdogActionKillMaxDuration,
-			reasonSubstr: "max duration exceeded",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			decision := EvaluateWatchdogStatus(tt.input)
-			if decision.Action != tt.wantAction {
-				t.Errorf("expected action %v, got %v (reason: %q)", tt.wantAction, decision.Action, decision.Reason)
-			}
-			if tt.reasonSubstr != "" && !strings.Contains(decision.Reason, tt.reasonSubstr) {
-				t.Errorf("expected reason to contain %q, got: %q", tt.reasonSubstr, decision.Reason)
-			}
-		})
-	}
-}
 
 func TestShouldRotateWorker(t *testing.T) {
 	t.Parallel()
@@ -417,26 +332,6 @@ func TestWriteWorkerTurn(t *testing.T) {
 	})
 }
 
-func TestEvaluateWatchdogStatus_Defaults(t *testing.T) {
-	t.Parallel()
-	now := time.Now()
-	// Zero Now, InactivityTimeout <= 0, MaxDuration <= 0
-	d1 := EvaluateWatchdogStatus(WatchdogStatusInput{
-		StartTime:        now.Add(-2 * time.Hour),
-		LastActivityTime: now,
-	})
-	if d1.Action != WatchdogActionKillMaxDuration {
-		t.Errorf("expected max duration kill with default 60m cap, got %v", d1.Action)
-	}
-
-	d2 := EvaluateWatchdogStatus(WatchdogStatusInput{
-		StartTime:        now,
-		LastActivityTime: now.Add(-10 * time.Minute),
-	})
-	if d2.Action != WatchdogActionKillInactivity {
-		t.Errorf("expected inactivity kill with default 5m cap, got %v", d2.Action)
-	}
-}
 
 func TestExtractSubagentID(t *testing.T) {
 	t.Parallel()

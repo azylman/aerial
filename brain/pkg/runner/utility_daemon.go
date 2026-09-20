@@ -339,16 +339,9 @@ func (d *UtilityDaemon) Execute(ctx context.Context, prompt string) (string, err
 	return "", fmt.Errorf("utility execution failed after retry")
 }
 
-// RunnerFunc returns a runner.RunnerFunc that routes utility calls (sessionID == "") to the daemon
-// and conversational calls (sessionID != "") to the standard RunAgyWithWatchdog.
+// RunnerFunc returns a runner.RunnerFunc that routes calls directly through the persistent utility daemon.
 func (d *UtilityDaemon) RunnerFunc() RunnerFunc {
 	return func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
-		if strings.TrimSpace(sessionID) != "" {
-			// Interactive session turn: bypass utility daemon
-			return RunAgyWithWatchdog(ctx, agyBin, prompt, sessionID, apiKey, model, DefaultWatchdogOptions(timeoutMinutes))
-		}
-
-		// Stateless one-off utility turn: route through persistent daemon
 		out, err := d.Execute(ctx, prompt)
 		if err != nil {
 			return "", fmt.Sprintf("utility daemon error: %v", err), -1, err
