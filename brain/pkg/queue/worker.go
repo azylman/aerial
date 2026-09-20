@@ -1428,8 +1428,18 @@ func (te *turnExecution) executeWithRetries() {
 					exitCode = 1
 					err = turnErr
 				} else {
+					convID := daemon.SessionID()
+					if convID == "" && turnRes.ConversationID != "" {
+						convID = turnRes.ConversationID
+					}
+					if convID == "" && te.pool != nil && te.pool.sessionMgr != nil {
+						if latest := te.pool.sessionMgr.FindLatestSessionDir(te.execStart); latest != "" && runner.IsValidUUID(latest) {
+							convID = latest
+							daemon.SetSessionID(latest)
+						}
+					}
 					stdout = fmt.Sprintf(`{"conversation_id":%q,"status":"SUCCESS","response":%q,"usage":{"input_tokens":%d,"output_tokens":%d,"total_tokens":%d}}`,
-						daemon.SessionID(), turnRes.Content, turnRes.Usage.InputTokens, turnRes.Usage.OutputTokens, turnRes.Usage.TotalTokens)
+						convID, turnRes.Content, turnRes.Usage.InputTokens, turnRes.Usage.OutputTokens, turnRes.Usage.TotalTokens)
 					stderr = ""
 					exitCode = turnRes.ExitCode
 					err = nil
@@ -1760,10 +1770,16 @@ func (te *turnExecution) executeWithRetries() {
 				if extSess == "" {
 					extSess = runner.ExtractSessionID(stdout+"\n"+stderr, te.execStart)
 				}
+				if extSess == "" && te.pool != nil && te.pool.sessionMgr != nil {
+					if latest := te.pool.sessionMgr.FindLatestSessionDir(te.execStart); latest != "" && runner.IsValidUUID(latest) {
+						extSess = latest
+					}
+				}
 				if te.currentSessionID == "" && (extSess == "" || !runner.IsValidUUID(extSess)) {
 					isFailure = true
 					isTransient = false
 					lastErrDetail = "failed to latch active session UUID on cold start"
+					errDetail = lastErrDetail
 					log.Printf("[Queue] Defensive Failure: %s for thread %s", lastErrDetail, te.threadID)
 				} else {
 					if extSess != "" && extSess != te.currentSessionID {

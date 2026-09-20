@@ -51,12 +51,13 @@ type DaemonConfig struct {
 }
 
 type TurnResult struct {
-	Content     string
-	Usage       AgyUsage
-	ActiveTasks []TaskMetadata
-	IsYieldTrap bool
-	ExitCode    int
-	Duration    time.Duration
+	ConversationID string
+	Content        string
+	Usage          AgyUsage
+	ActiveTasks    []TaskMetadata
+	IsYieldTrap    bool
+	ExitCode       int
+	Duration       time.Duration
 }
 
 type Daemon struct {
@@ -70,6 +71,7 @@ type Daemon struct {
 	mu          sync.Mutex
 	dirty       bool
 	lastUsed    time.Time
+	sessionID   string
 }
 
 func StartDaemon(ctx context.Context, cfg DaemonConfig) (*Daemon, error) {
@@ -142,6 +144,7 @@ func StartDaemon(ctx context.Context, cfg DaemonConfig) (*Daemon, error) {
 		taskTracker: NewTaskTracker(),
 		state:       StateStarting,
 		lastUsed:    time.Now(),
+		sessionID:   cfg.SessionID,
 	}
 
 	d.mu.Lock()
@@ -265,6 +268,33 @@ func (d *Daemon) ExecuteTurnWithHandler(ctx context.Context, prompt string, hand
 			continue
 		}
 		switch event {
+		case "init":
+			var probe sessionProbe
+			if err := json.Unmarshal([]byte(line), &probe); err == nil {
+				if id := probe.extractUUID(); id != "" {
+					d.mu.Lock()
+					if d.sessionID == "" {
+						d.sessionID = id
+						d.cfg.SessionID = id
+					}
+					d.mu.Unlock()
+					if d.stderrBuf != nil {
+						d.stderrBuf.SetSessionID(id)
+					}
+				}
+			}
+			if id, ok := ParseInitEvent(line); ok && IsValidUUID(id) {
+				d.mu.Lock()
+				if d.sessionID == "" {
+					d.sessionID = id
+					d.cfg.SessionID = id
+				}
+				d.mu.Unlock()
+				if d.stderrBuf != nil {
+					d.stderrBuf.SetSessionID(id)
+				}
+			}
+
 		case "step_update":
 			if handler != nil {
 				var rawStep struct {
@@ -355,16 +385,34 @@ func (d *Daemon) ExecuteTurnWithHandler(ctx context.Context, prompt string, hand
 			if u, ok := raw["usage"].(map[string]interface{}); ok {
 				turnUsage = parseRawUsage(u)
 			}
+			var resConvID string
+			if id, ok := raw["conversation_id"].(string); ok && IsValidUUID(id) {
+				resConvID = id
+			} else if id, ok := raw["session_id"].(string); ok && IsValidUUID(id) {
+				resConvID = id
+			}
+			if resConvID != "" {
+				d.mu.Lock()
+				if d.sessionID == "" {
+					d.sessionID = resConvID
+					d.cfg.SessionID = resConvID
+				}
+				d.mu.Unlock()
+				if d.stderrBuf != nil {
+					d.stderrBuf.SetSessionID(resConvID)
+				}
+			}
 			activeTasks := d.taskTracker.ActiveTasks()
 			isYield := len(activeTasks) > 0
 
 			return &TurnResult{
-				Content:     turnContent.String(),
-				Usage:       turnUsage,
-				ActiveTasks: activeTasks,
-				IsYieldTrap: isYield,
-				ExitCode:    0,
-				Duration:    time.Since(start),
+				ConversationID: d.SessionID(),
+				Content:        turnContent.String(),
+				Usage:          turnUsage,
+				ActiveTasks:    activeTasks,
+				IsYieldTrap:    isYield,
+				ExitCode:       0,
+				Duration:       time.Since(start),
 			}, nil
 		}
 	}
@@ -461,7 +509,31 @@ func (d *Daemon) RSSBytes() uint64 {
 }
 
 func (d *Daemon) State() DaemonState         { d.mu.Lock(); defer d.mu.Unlock(); return d.state }
-func (d *Daemon) SessionID() string         { return d.cfg.SessionID }
+func (d *Daemon) SessionID() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.sessionID != "" {
+		return d.sessionID
+	}
+	if d.stderrBuf != nil {
+		if id := d.stderrBuf.SessionID(); id != "" {
+			d.sessionID = id
+			d.cfg.SessionID = id
+			return id
+		}
+	}
+	return d.cfg.SessionID
+}
+
+func (d *Daemon) SetSessionID(id string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.sessionID = id
+	d.cfg.SessionID = id
+	if d.stderrBuf != nil {
+		d.stderrBuf.SetSessionID(id)
+	}
+}
 func (d *Daemon) TaskTracker() *TaskTracker { return d.taskTracker }
 func (d *Daemon) SetDirty(dirty bool)       { d.mu.Lock(); defer d.mu.Unlock(); d.dirty = dirty }
 func (d *Daemon) IsDirty() bool             { d.mu.Lock(); defer d.mu.Unlock(); return d.dirty }

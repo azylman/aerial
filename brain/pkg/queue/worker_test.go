@@ -2,10 +2,14 @@ package queue
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/bwmarrin/discordgo"
 
 	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
@@ -359,3 +363,162 @@ exit 1
 		t.Fatalf("timed out waiting for turn error failure")
 	}
 }
+
+func TestWorkerPool_PersistentDaemon_ColdStart_Success(t *testing.T) {
+	tmpHome := t.TempDir()
+	tempData := t.TempDir()
+
+	store := setupTestStore(t)
+
+	validUUID := "c1111111-2222-3333-4444-555555555555"
+	mockBin := filepath.Join(tmpHome, "mock_agy.sh")
+	script := fmt.Sprintf(`#!/bin/sh
+echo '{"event":"init","conversation_id":%q}'
+while IFS= read -r line; do
+  echo '{"event":"result","content":"Cold start completed successfully!","usage":{"total_tokens":25}}'
+done
+`, validUUID)
+	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
+		t.Fatalf("failed to write mock script: %v", err)
+	}
+
+	cfg := config.NewTestConfig(func(d *config.ConfigData) {
+		d.AgyBin = mockBin
+		d.DataDir = tempData
+	})
+
+	var deliveredText string
+	doneCh := make(chan struct{})
+	pool := New(cfg, WorkerPoolConfig{
+		SessionManager:       session.New(tmpHome, tempData),
+		Store:                store,
+		TimeoutMinutes:       1,
+		UsePersistentDaemons: true,
+		DeliveryFunc: func(sess *discordgo.Session, channelID, content string) error {
+			deliveredText = content
+			return nil
+		},
+		OnMessageCompleted: func(msg db.Message, status string) {
+			if status == db.StatusCompleted {
+				select {
+				case <-doneCh:
+				default:
+					close(doneCh)
+				}
+			}
+		},
+	})
+	defer pool.Stop()
+
+	threadID := "thread-cold-persist-success"
+	// Ensure NO session is pre-saved in DB (clean cold start)
+	msg := db.Message{
+		ID:        "msg-cold-1",
+		ThreadID:  threadID,
+		Content:   "cold start hello",
+		Status:    db.StatusPending,
+		CreatedAt: time.Now(),
+	}
+	_ = store.InsertMessage(context.Background(), msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for cold start message completion")
+	}
+
+	savedSess, err := store.GetSessionID(context.Background(), threadID)
+	if err != nil {
+		t.Fatalf("failed to get session id: %v", err)
+	}
+	if savedSess != validUUID {
+		t.Errorf("expected session synchronized to %q, got %q", validUUID, savedSess)
+	}
+	if !strings.Contains(deliveredText, "Cold start completed successfully!") {
+		t.Errorf("expected delivered text to contain completion response, got: %q", deliveredText)
+	}
+}
+
+func TestWorkerPool_PersistentDaemon_ColdStart_SessionMgrFallback(t *testing.T) {
+	tmpHome := t.TempDir()
+	tempData := t.TempDir()
+
+	store := setupTestStore(t)
+
+	diskUUID := "f1111111-2222-3333-4444-555555555555"
+	mockBin := filepath.Join(tmpHome, "mock_agy.sh")
+	script := `#!/bin/sh
+while IFS= read -r line; do
+  echo '{"event":"result","content":"Turn completed with fallback session","usage":{"total_tokens":15}}'
+done
+`
+	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
+		t.Fatalf("failed to write mock script: %v", err)
+	}
+
+	cfg := config.NewTestConfig(func(d *config.ConfigData) {
+		d.AgyBin = mockBin
+		d.DataDir = tempData
+	})
+
+	var deliveredText string
+	doneCh := make(chan struct{})
+	pool := New(cfg, WorkerPoolConfig{
+		SessionManager:       session.New(tmpHome, tempData),
+		Store:                store,
+		TimeoutMinutes:       1,
+		UsePersistentDaemons: true,
+		DeliveryFunc: func(sess *discordgo.Session, channelID, content string) error {
+			deliveredText = content
+			return nil
+		},
+		OnMessageCompleted: func(msg db.Message, status string) {
+			if status == db.StatusCompleted {
+				select {
+				case <-doneCh:
+				default:
+					close(doneCh)
+				}
+			}
+		},
+	})
+	defer pool.Stop()
+
+	// Pre-create session directory in session roots after execStart
+	threadID := "thread-cold-persist-fallback"
+	msg := db.Message{
+		ID:        "msg-cold-fallback",
+		ThreadID:  threadID,
+		Content:   "cold start fallback",
+		Status:    db.StatusPending,
+		CreatedAt: time.Now(),
+	}
+	_ = store.InsertMessage(context.Background(), msg)
+
+	// Create disk session dir with a future modtime so FindLatestSessionDir picks it up
+	brainDir := filepath.Join(tempData, "brain", diskUUID)
+	_ = os.MkdirAll(brainDir, 0755)
+	futureTime := time.Now().Add(5 * time.Second)
+	_ = os.Chtimes(brainDir, futureTime, futureTime)
+
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for fallback session message completion")
+	}
+
+	savedSess, err := store.GetSessionID(context.Background(), threadID)
+	if err != nil {
+		t.Fatalf("failed to get session id: %v", err)
+	}
+	if savedSess != diskUUID {
+		t.Errorf("expected session synchronized to diskUUID %q, got %q", diskUUID, savedSess)
+	}
+	if !strings.Contains(deliveredText, "Turn completed with fallback session") {
+		t.Errorf("expected delivered text to contain completion response, got: %q", deliveredText)
+	}
+}
+
