@@ -64,7 +64,6 @@ type WorkerPoolConfig struct {
 	DrainTimeout       time.Duration
 	RetryDelayOverride time.Duration
 	SessionManager     *session.Manager
-	UsePersistentDaemons bool
 
 	// Optional hooks for testing/custom overrides
 	RunnerFunc                  func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error)
@@ -93,6 +92,7 @@ type WorkerPool struct {
 	appCfg            *config.Config
 	overrideModel     string
 	cfg               WorkerPoolConfig
+	hasCustomRunner   bool
 	sessionMgr        *session.Manager
 	mu                sync.Mutex
 	threadChs         map[string]*threadWorkerState
@@ -191,6 +191,7 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 	if cfg.DrainTimeout <= 0 {
 		cfg.DrainTimeout = 10 * time.Second
 	}
+	hasCustomRunner := cfg.RunnerFunc != nil || cfg.RunnerWithOptionsFunc != nil
 	if cfg.RunnerWithOptionsFunc == nil && cfg.RunnerFunc != nil {
 		cfg.RunnerWithOptionsFunc = func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
 			timeoutMins := int(opts.MaxDuration / time.Minute)
@@ -207,7 +208,6 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 			return cfg.RunnerWithOptionsFunc(ctx, agyBin, prompt, sessionID, apiKey, model, runner.DefaultWatchdogOptions(timeoutMinutes))
 		}
 	} else if cfg.RunnerWithOptionsFunc == nil && cfg.RunnerFunc == nil {
-		cfg.UsePersistentDaemons = true
 		cfg.RunnerFunc = func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			return "", "", 1, fmt.Errorf("queue: RunnerFunc not configured on WorkerPool")
 		}
@@ -301,6 +301,7 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 	p := &WorkerPool{
 		appCfg:            appCfg,
 		cfg:               cfg,
+		hasCustomRunner:   hasCustomRunner,
 		sessionMgr:        sessMgr,
 		threadChs:         make(map[string]*threadWorkerState),
 		ctx:               ctx,

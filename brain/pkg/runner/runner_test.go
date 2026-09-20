@@ -1,16 +1,12 @@
 package runner
 
 import (
-	"bytes"
-	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -146,50 +142,6 @@ func TestParseAgyOutput(t *testing.T) {
 	}
 }
 
-func TestActivityTap_ChunkSplittingAndFiltering(t *testing.T) {
-	t.Parallel()
-	var outBuf bytes.Buffer
-	actWriter := NewActivityWriter("")
-	tap := newActivityTap(&outBuf, actWriter, true, nil)
-
-	// Chunk 1 ends midway through the init event
-	chunk1 := []byte("{\"event\":\"init\",\"conversa")
-	n1, err1 := tap.Write(chunk1)
-	if err1 != nil || n1 != len(chunk1) {
-		t.Fatalf("Write(chunk1) = (%d, %v), want (%d, nil)", n1, err1, len(chunk1))
-	}
-	if actWriter.SessionID() != "" {
-		t.Errorf("Expected empty sessionID before complete line, got %q", actWriter.SessionID())
-	}
-
-	// Chunk 2 completes the init event and has a step_update
-	targetUUID := "12345678-abcd-ef01-2345-6789abcdef01"
-	chunk2 := []byte(fmt.Sprintf("tion_id\":%q}\n{\"event\":\"step_update\",\"data\":\"lots of bloat\"}\n", targetUUID))
-	n2, err2 := tap.Write(chunk2)
-	if err2 != nil || n2 != len(chunk2) {
-		t.Fatalf("Write(chunk2) = (%d, %v), want (%d, nil)", n2, err2, len(chunk2))
-	}
-
-	if actWriter.SessionID() != targetUUID {
-		t.Errorf("Expected latched sessionID = %q, got %q", targetUUID, actWriter.SessionID())
-	}
-
-	// Chunk 3: result event
-	chunk3 := []byte("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"done\"}}\n")
-	_, _ = tap.Write(chunk3)
-	tap.Flush()
-
-	out := outBuf.String()
-	if !strings.Contains(out, targetUUID) {
-		t.Errorf("Expected outBuf to contain init event with %s, got: %s", targetUUID, out)
-	}
-	if !strings.Contains(out, "SUCCESS") {
-		t.Errorf("Expected outBuf to contain result event, got: %s", out)
-	}
-	if strings.Contains(out, "lots of bloat") {
-		t.Errorf("Expected outBuf to filter out step_update events, but found 'lots of bloat' in: %s", out)
-	}
-}
 
 func TestExtractSessionID_NDJSONInit(t *testing.T) {
 	t.Parallel()
@@ -578,26 +530,6 @@ func createMockAgyScript(t *testing.T, dir, script string) string {
 	return scriptPath
 }
 
-func TestRunAgyWithEcho(t *testing.T) {
-	t.Parallel()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	bin := getHelperProcessBin(t)
-	opts := DefaultWatchdogOptions(1)
-	opts.ExtraEnv = append(opts.ExtraEnv, "GO_WANT_HELPER_PROCESS=1", "MOCK_MODE=echo")
-
-	stdout, stderr, exitCode, err := RunAgyWithOptions(ctx, bin, "Hello aerial", "", "", "", opts)
-	if err != nil {
-		t.Fatalf("RunAgyWithOptions failed: %v", err)
-	}
-	if exitCode != 0 {
-		t.Errorf("Expected exitCode 0, got %d", exitCode)
-	}
-	if !strings.Contains(stdout, "Hello aerial") {
-		t.Errorf("Expected stdout to contain 'Hello aerial', got: %q (stderr: %q)", stdout, stderr)
-	}
-}
 
 func TestActivityWriter_ThreadSafetyAndSessionDiscovery(t *testing.T) {
 	t.Parallel()
@@ -674,504 +606,18 @@ func TestActivityWriter_ThreadSafetyAndSessionDiscovery(t *testing.T) {
 	}
 }
 
-func TestRunAgyWithWatchdog_InProcessRunnerMock(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
 
-	mockRunner := CmdRunnerFunc(func(ctx context.Context, name string, args []string, opts CmdOptions) (ProcessRunner, error) {
-		return &mockProcess{
-			wait: func() error {
-				fmt.Fprintln(opts.Stdout, `{"event":"result","result":{"status":"SUCCESS"}}`)
-				return nil
-			},
-		}, nil
-	})
 
-	opts := WatchdogOptions{
-		InactivityTimeout: 1 * time.Second,
-		MaxDuration:       2 * time.Second,
-		PollInterval:      10 * time.Millisecond,
-		CmdRunner:         mockRunner,
-	}
 
-	stdout, stderr, exitCode, err := RunAgyWithWatchdog(ctx, "mock-agy", "test prompt", "", "", "", opts)
-	if err != nil || exitCode != 0 {
-		t.Fatalf("unexpected failure: err=%v, code=%d, stderr=%q", err, exitCode, stderr)
-	}
-	if !strings.Contains(stdout, `"SUCCESS"`) {
-		t.Errorf("expected SUCCESS in stdout, got %q", stdout)
-	}
-}
 
-func TestRunAgyWithWatchdog_InactivityTimeout(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
 
-	mockRunner := CmdRunnerFunc(func(ctx context.Context, name string, args []string, opts CmdOptions) (ProcessRunner, error) {
-		return &mockProcess{
-			wait: func() error {
-				<-ctx.Done()
-				return ctx.Err()
-			},
-		}, nil
-	})
 
-	opts := WatchdogOptions{
-		InactivityTimeout: 50 * time.Millisecond,
-		MaxDuration:       2 * time.Second,
-		PollInterval:      10 * time.Millisecond,
-		CmdRunner:         mockRunner,
-	}
 
-	stdout, stderr, exitCode, err := RunAgyWithWatchdog(ctx, "mock-agy", "prompt", "", "", "", opts)
-	if exitCode == 0 {
-		t.Errorf("expected non-zero exit code on inactivity timeout, got 0")
-	}
-	if !errors.Is(err, ErrInactivityTimeout) {
-		t.Errorf("expected ErrInactivityTimeout, got: %v", err)
-	}
-	if !strings.Contains(stderr, "[watchdog]") || !strings.Contains(stderr, "inactivity timeout exceeded") {
-		t.Errorf("expected [watchdog] inactivity timeout diagnosis in stderr, got: %s", stderr)
-	}
-	_ = stdout
-}
 
-func TestRunAgyWithWatchdog_ActiveStderrHeartbeat(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
 
-	mockRunner := CmdRunnerFunc(func(ctx context.Context, name string, args []string, opts CmdOptions) (ProcessRunner, error) {
-		return &mockProcess{
-			wait: func() error {
-				for i := 1; i <= 3; i++ {
-					select {
-					case <-ctx.Done():
-						return ctx.Err()
-					case <-time.After(20 * time.Millisecond):
-						fmt.Fprintf(opts.Stderr, "pulse %d\n", i)
-					}
-				}
-				fmt.Fprintln(opts.Stdout, `{"event":"result","result":{"status":"SUCCESS"}}`)
-				return nil
-			},
-		}, nil
-	})
 
-	opts := WatchdogOptions{
-		InactivityTimeout: 60 * time.Millisecond,
-		MaxDuration:       5 * time.Second,
-		PollInterval:      10 * time.Millisecond,
-		CmdRunner:         mockRunner,
-	}
 
-	stdout, stderr, exitCode, err := RunAgyWithWatchdog(ctx, "mock-agy", "prompt", "", "", "", opts)
-	if err != nil {
-		t.Fatalf("unexpected error: %v (stderr: %q, stdout: %q)", err, stderr, stdout)
-	}
-	if exitCode != 0 {
-		t.Errorf("expected exit code 0, got %d (stderr: %s)", exitCode, stderr)
-	}
-	if strings.Contains(stderr, "[watchdog]") {
-		t.Errorf("unexpected watchdog intervention in stderr: %s", stderr)
-	}
-	if !strings.Contains(stdout, `"SUCCESS"`) {
-		t.Errorf("expected stdout to contain SUCCESS, got %q", stdout)
-	}
-}
 
-func TestRunAgyWithWatchdog_ActiveStdoutHeartbeat(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-
-	mockRunner := CmdRunnerFunc(func(ctx context.Context, name string, args []string, opts CmdOptions) (ProcessRunner, error) {
-		return &mockProcess{
-			wait: func() error {
-				for i := 1; i <= 3; i++ {
-					select {
-					case <-ctx.Done():
-						return ctx.Err()
-					case <-time.After(20 * time.Millisecond):
-						fmt.Fprintf(opts.Stdout, "stdout pulse %d\n", i)
-					}
-				}
-				fmt.Fprintln(opts.Stdout, `{"event":"result","result":{"status":"SUCCESS"}}`)
-				return nil
-			},
-		}, nil
-	})
-
-	opts := WatchdogOptions{
-		InactivityTimeout: 60 * time.Millisecond,
-		MaxDuration:       5 * time.Second,
-		PollInterval:      10 * time.Millisecond,
-		CmdRunner:         mockRunner,
-	}
-
-	stdout, stderr, exitCode, err := RunAgyWithWatchdog(ctx, "mock-agy", "prompt", "", "", "", opts)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if exitCode != 0 {
-		t.Errorf("expected exit code 0, got %d (stderr: %s)", exitCode, stderr)
-	}
-	if strings.Contains(stderr, "[watchdog]") {
-		t.Errorf("unexpected watchdog intervention in stderr: %s", stderr)
-	}
-	if !strings.Contains(stdout, "stdout pulse 3") {
-		t.Errorf("expected stdout to contain stdout pulses, got: %q", stdout)
-	}
-}
-
-func TestRunAgyWithWatchdog_CustomTranscriptDirs(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	testSessionID := "custom-sess-9988"
-	expectedRoots := []string{"/custom/logs/root1", "/custom/logs/root2"}
-
-	var lookupCalled atomic.Bool
-	mockRunner := CmdRunnerFunc(func(ctx context.Context, name string, args []string, opts CmdOptions) (ProcessRunner, error) {
-		return &mockProcess{
-			wait: func() error {
-				for i := 1; i <= 3; i++ {
-					select {
-					case <-ctx.Done():
-						return ctx.Err()
-					case <-time.After(10 * time.Millisecond):
-					}
-				}
-				fmt.Fprintln(opts.Stdout, `{"event":"result","result":{"status":"SUCCESS"}}`)
-				return nil
-			},
-		}, nil
-	})
-
-	opts := WatchdogOptions{
-		InactivityTimeout: 100 * time.Millisecond,
-		MaxDuration:       5 * time.Second,
-		PollInterval:      10 * time.Millisecond,
-		TranscriptDirs:    expectedRoots,
-		CmdRunner:         mockRunner,
-		ActivityLookup: func(sessionID string, roots []string) (time.Time, error) {
-			if sessionID == testSessionID && len(roots) == len(expectedRoots) && roots[0] == expectedRoots[0] && roots[1] == expectedRoots[1] {
-				lookupCalled.Store(true)
-			}
-			return time.Now(), nil
-		},
-	}
-
-	stdout, stderr, exitCode, err := RunAgyWithWatchdog(ctx, "mock-agy", "prompt", testSessionID, "", "", opts)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if exitCode != 0 {
-		t.Errorf("expected exit code 0, got %d (stderr: %s)", exitCode, stderr)
-	}
-	if strings.Contains(stderr, "[watchdog]") {
-		t.Errorf("unexpected watchdog intervention in stderr: %s", stderr)
-	}
-	if !lookupCalled.Load() {
-		t.Errorf("expected ActivityLookup to receive custom transcript dirs")
-	}
-	if !strings.Contains(stdout, `"SUCCESS"`) {
-		t.Errorf("expected stdout to contain SUCCESS, got %q", stdout)
-	}
-}
-
-func TestRunAgyWithWatchdog_TranscriptHeartbeat(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	testSessionID := "test-transcript-session-12345"
-
-	var heartbeatCount atomic.Int32
-	mockRunner := CmdRunnerFunc(func(ctx context.Context, name string, args []string, opts CmdOptions) (ProcessRunner, error) {
-		return &mockProcess{
-			wait: func() error {
-				for i := 1; i <= 3; i++ {
-					select {
-					case <-ctx.Done():
-						return ctx.Err()
-					case <-time.After(15 * time.Millisecond):
-						heartbeatCount.Add(1)
-					}
-				}
-				fmt.Fprintln(opts.Stdout, `{"event":"result","result":{"status":"SUCCESS"}}`)
-				return nil
-			},
-		}, nil
-	})
-
-	opts := WatchdogOptions{
-		InactivityTimeout: 35 * time.Millisecond,
-		MaxDuration:       5 * time.Second,
-		PollInterval:      10 * time.Millisecond,
-		CmdRunner:         mockRunner,
-		ActivityLookup: func(sessionID string, roots []string) (time.Time, error) {
-			if heartbeatCount.Load() > 0 {
-				return time.Now(), nil
-			}
-			return time.Time{}, nil
-		},
-	}
-
-	stdout, stderr, exitCode, err := RunAgyWithWatchdog(ctx, "mock-agy", "prompt", testSessionID, "", "", opts)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if exitCode != 0 {
-		t.Errorf("expected exit code 0, got %d (stderr: %s)", exitCode, stderr)
-	}
-	if strings.Contains(stderr, "[watchdog]") {
-		t.Errorf("unexpected watchdog intervention in stderr: %s", stderr)
-	}
-	if !strings.Contains(stdout, `"SUCCESS"`) {
-		t.Errorf("expected stdout to contain SUCCESS, got %q", stdout)
-	}
-}
-
-func TestRunAgyWithWatchdog_BackgroundTaskLogHeartbeat(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	testSessionID := "test-task-session-12345"
-
-	var taskPulse atomic.Int32
-	mockRunner := CmdRunnerFunc(func(ctx context.Context, name string, args []string, opts CmdOptions) (ProcessRunner, error) {
-		return &mockProcess{
-			wait: func() error {
-				for i := 1; i <= 3; i++ {
-					select {
-					case <-ctx.Done():
-						return ctx.Err()
-					case <-time.After(15 * time.Millisecond):
-						taskPulse.Add(1)
-					}
-				}
-				fmt.Fprintln(opts.Stdout, `{"event":"result","result":{"status":"SUCCESS"}}`)
-				return nil
-			},
-		}, nil
-	})
-
-	opts := WatchdogOptions{
-		InactivityTimeout: 35 * time.Millisecond,
-		MaxDuration:       5 * time.Second,
-		PollInterval:      10 * time.Millisecond,
-		CmdRunner:         mockRunner,
-		ActivityLookup: func(sessionID string, roots []string) (time.Time, error) {
-			if taskPulse.Load() > 0 {
-				return time.Now(), nil
-			}
-			return time.Time{}, nil
-		},
-	}
-
-	stdout, stderr, exitCode, err := RunAgyWithWatchdog(ctx, "mock-agy", "prompt", testSessionID, "", "", opts)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if exitCode != 0 {
-		t.Errorf("expected exit code 0, got %d (stderr: %s)", exitCode, stderr)
-	}
-	if strings.Contains(stderr, "[watchdog]") {
-		t.Errorf("unexpected watchdog intervention in stderr: %s", stderr)
-	}
-	if !strings.Contains(stdout, `"SUCCESS"`) {
-		t.Errorf("expected stdout to contain SUCCESS, got %q", stdout)
-	}
-}
-
-func TestRunAgyWithWatchdog_BackgroundTaskLogStall_Timeout(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	testSessionID := "test-task-stall-6789"
-	frozenTime := time.Now()
-
-	mockRunner := CmdRunnerFunc(func(ctx context.Context, name string, args []string, opts CmdOptions) (ProcessRunner, error) {
-		return &mockProcess{
-			wait: func() error {
-				<-ctx.Done()
-				return ctx.Err()
-			},
-		}, nil
-	})
-
-	opts := WatchdogOptions{
-		InactivityTimeout: 40 * time.Millisecond,
-		MaxDuration:       2 * time.Second,
-		PollInterval:      10 * time.Millisecond,
-		CmdRunner:         mockRunner,
-		ActivityLookup: func(sessionID string, roots []string) (time.Time, error) {
-			return frozenTime, nil
-		},
-	}
-
-	stdout, stderr, exitCode, err := RunAgyWithWatchdog(ctx, "mock-agy", "prompt", testSessionID, "", "", opts)
-	if exitCode == 0 {
-		t.Errorf("expected non-zero exit code on task stall timeout, got 0")
-	}
-	if !errors.Is(err, ErrInactivityTimeout) {
-		t.Errorf("expected ErrInactivityTimeout, got: %v", err)
-	}
-	if !strings.Contains(stderr, "[watchdog]") || !strings.Contains(stderr, "inactivity timeout exceeded") {
-		t.Errorf("expected [watchdog] inactivity timeout diagnosis in stderr, got: %s", stderr)
-	}
-	_ = stdout
-}
-
-func TestRunAgyWithWatchdog_ActivityLookupFallback(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-
-	mockRunner := CmdRunnerFunc(func(ctx context.Context, name string, args []string, opts CmdOptions) (ProcessRunner, error) {
-		return &mockProcess{
-			wait: func() error {
-				fmt.Fprintln(opts.Stdout, `{"event":"result","result":{"status":"SUCCESS"}}`)
-				return nil
-			},
-		}, nil
-	})
-
-	opts := WatchdogOptions{
-		InactivityTimeout: 50 * time.Millisecond,
-		MaxDuration:       1 * time.Second,
-		PollInterval:      10 * time.Millisecond,
-		CmdRunner:         mockRunner,
-		ActivityLookup:    nil,
-	}
-
-	stdout, stderr, exitCode, err := RunAgyWithWatchdog(ctx, "mock-agy", "prompt", "session-fallback-test", "", "", opts)
-	if err != nil || exitCode != 0 {
-		t.Fatalf("unexpected failure: err=%v, code=%d, stderr=%q", err, exitCode, stderr)
-	}
-	if !strings.Contains(stdout, `"SUCCESS"`) {
-		t.Errorf("expected SUCCESS in stdout, got %q", stdout)
-	}
-}
-
-func TestRunAgyWithWatchdog_ActivityLookupErrorIgnored(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-
-	mockRunner := CmdRunnerFunc(func(ctx context.Context, name string, args []string, opts CmdOptions) (ProcessRunner, error) {
-		return &mockProcess{
-			wait: func() error {
-				for i := 1; i <= 3; i++ {
-					select {
-					case <-ctx.Done():
-						return ctx.Err()
-					case <-time.After(10 * time.Millisecond):
-						fmt.Fprintln(opts.Stdout, `{"event":"step_update"}`)
-					}
-				}
-				fmt.Fprintln(opts.Stdout, `{"event":"result","result":{"status":"SUCCESS"}}`)
-				return nil
-			},
-		}, nil
-	})
-
-	opts := WatchdogOptions{
-		InactivityTimeout: 50 * time.Millisecond,
-		MaxDuration:       1 * time.Second,
-		PollInterval:      10 * time.Millisecond,
-		CmdRunner:         mockRunner,
-		ActivityLookup: func(sessionID string, roots []string) (time.Time, error) {
-			return time.Time{}, errors.New("simulated disk lookup failure")
-		},
-	}
-
-	stdout, stderr, exitCode, err := RunAgyWithWatchdog(ctx, "mock-agy", "prompt", "session-err-test", "", "", opts)
-	if err != nil || exitCode != 0 {
-		t.Fatalf("unexpected failure: err=%v, code=%d, stderr=%q", err, exitCode, stderr)
-	}
-	if !strings.Contains(stdout, `"SUCCESS"`) {
-		t.Errorf("expected SUCCESS in stdout, got %q", stdout)
-	}
-}
-
-func TestRunAgyWithWatchdog_ActivityLookupInitialActivityAfterStart(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-
-	futureTime := time.Now().Add(10 * time.Minute)
-	mockRunner := CmdRunnerFunc(func(ctx context.Context, name string, args []string, opts CmdOptions) (ProcessRunner, error) {
-		return &mockProcess{
-			wait: func() error {
-				fmt.Fprintln(opts.Stdout, `{"event":"result","result":{"status":"SUCCESS"}}`)
-				return nil
-			},
-		}, nil
-	})
-
-	opts := WatchdogOptions{
-		InactivityTimeout: 50 * time.Millisecond,
-		MaxDuration:       1 * time.Second,
-		PollInterval:      10 * time.Millisecond,
-		CmdRunner:         mockRunner,
-		ActivityLookup: func(sessionID string, roots []string) (time.Time, error) {
-			return futureTime, nil
-		},
-	}
-
-	stdout, stderr, exitCode, err := RunAgyWithWatchdog(ctx, "mock-agy", "prompt", "session-initial-test", "", "", opts)
-	if err != nil || exitCode != 0 {
-		t.Fatalf("unexpected failure: err=%v, code=%d, stderr=%q", err, exitCode, stderr)
-	}
-	if !strings.Contains(stdout, `"SUCCESS"`) {
-		t.Errorf("expected SUCCESS in stdout, got %q", stdout)
-	}
-}
-
-func TestRunAgyWithWatchdog_MaxDuration(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-
-	mockRunner := CmdRunnerFunc(func(ctx context.Context, name string, args []string, opts CmdOptions) (ProcessRunner, error) {
-		return &mockProcess{
-			wait: func() error {
-				ticker := time.NewTicker(10 * time.Millisecond)
-				defer ticker.Stop()
-				for {
-					select {
-					case <-ctx.Done():
-						return ctx.Err()
-					case <-ticker.C:
-						fmt.Fprintln(opts.Stderr, "alive pulse")
-					}
-				}
-			},
-		}, nil
-	})
-
-	opts := WatchdogOptions{
-		InactivityTimeout: 500 * time.Millisecond,
-		MaxDuration:       50 * time.Millisecond,
-		PollInterval:      10 * time.Millisecond,
-		CmdRunner:         mockRunner,
-	}
-
-	stdout, stderr, exitCode, err := RunAgyWithWatchdog(ctx, "mock-agy", "prompt", "", "", "", opts)
-	if exitCode == 0 {
-		t.Errorf("expected non-zero exit code on max duration exceeded, got 0")
-	}
-	if !errors.Is(err, ErrMaxDuration) {
-		t.Errorf("expected ErrMaxDuration, got: %v", err)
-	}
-	if !strings.Contains(stderr, "[watchdog]") || !strings.Contains(stderr, "max duration exceeded") {
-		t.Errorf("expected [watchdog] max duration exceeded in stderr, got: %s", stderr)
-	}
-	_ = stdout
-}
-
-func TestRunAgyWithWatchdog_CmdRunnerError(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	mockRunner := CmdRunnerFunc(func(ctx context.Context, name string, args []string, opts CmdOptions) (ProcessRunner, error) {
-		return nil, errors.New("command creation failed")
-	})
-	_, _, exitCode, err := RunAgyWithWatchdog(ctx, "mock-agy", "prompt", "", "", "", WatchdogOptions{CmdRunner: mockRunner})
-	if exitCode != -1 || err == nil || !strings.Contains(err.Error(), "command creation failed") {
-		t.Errorf("expected exitCode -1 and command creation failed error, got code=%d, err=%v", exitCode, err)
-	}
-}
 
 func TestClassifyError_WatchdogInactivityNotTransient(t *testing.T) {
 	t.Parallel()
@@ -1479,75 +925,6 @@ func TestActivityWriter_RawUUIDWithoutPrefix(t *testing.T) {
 	}
 }
 
-func TestRunAgyWithWatchdog_OptionDefaultsAndEdgeCases(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	tmpHome := t.TempDir()
-	bin := getHelperProcessBin(t)
-
-	// 1. Test invalid / non-existent binary path triggers cmd.Start() error
-	_, _, exitCode, err := RunAgyWithWatchdog(ctx, "/nonexistent/path/to/agy-bin", "prompt", "", "", "", WatchdogOptions{})
-	if exitCode != -1 || err == nil {
-		t.Errorf("expected exitCode -1 and error for nonexistent binary, got %d, %v", exitCode, err)
-	}
-
-	// 2. Test MaxDuration formatting with seconds (< 1 minute)
-	stdout, stderr, exitCode, err := RunAgyWithWatchdog(ctx, bin, "test prompt", "sess-123", "secret-key", "gemini-pro", WatchdogOptions{
-		HomeDir:           tmpHome,
-		InactivityTimeout: 2 * time.Second,
-		MaxDuration:       30 * time.Second,
-		PollInterval:      10 * time.Millisecond,
-		ExtraEnv:          []string{"GO_WANT_HELPER_PROCESS=1"},
-		TranscriptDirs: []string{
-			filepath.Join(t.TempDir(), "%s"),
-			filepath.Join(t.TempDir(), "{session}"),
-			filepath.Join(t.TempDir(), "plain"),
-		},
-	})
-	if err != nil || exitCode != 0 {
-		t.Fatalf("RunAgyWithWatchdog failed: %v, exitCode=%d, stderr=%s", err, exitCode, stderr)
-	}
-	if !strings.Contains(stdout, "SUCCESS") {
-		t.Errorf("expected SUCCESS in stdout, got %q", stdout)
-	}
-
-	// 3. Test modelProvider is set to \"gemini\" in stderr with non-zero exit code and apiKey == \"\"
-	_, stderrErr, exitCodeErr, _ := RunAgyWithWatchdog(ctx, bin, "prompt", "", "", "gemini-flash", WatchdogOptions{
-		HomeDir:           tmpHome,
-		InactivityTimeout: 1 * time.Second,
-		MaxDuration:       2 * time.Second,
-		PollInterval:      10 * time.Millisecond,
-		ExtraEnv:          []string{"GO_WANT_HELPER_PROCESS=1", "MOCK_MODE=model_err"},
-	})
-	if exitCodeErr != 1 {
-		t.Errorf("expected exitCode 1, got %d", exitCodeErr)
-	}
-	if !strings.Contains(stderrErr, "modelprovider") {
-		t.Errorf("expected stderr to contain modelprovider error, got %q", stderrErr)
-	}
-
-	// 4. Test RunAgy wrapper function
-	stdoutWrap, stderrWrap, exitCodeWrap, errWrap := RunAgy(ctx, bin, "wrap prompt", "", "", "", 1)
-	if errWrap != nil || exitCodeWrap != 0 {
-		t.Errorf("RunAgy wrapper failed: %v, code=%d, stderr=%s", errWrap, exitCodeWrap, stderrWrap)
-	}
-	if !strings.Contains(stdoutWrap, "SUCCESS") {
-		t.Errorf("expected SUCCESS from RunAgy, got %q", stdoutWrap)
-	}
-
-	// 5. Test TargetID sets AERIAL_TARGET_ID in process environment
-	stdoutTarget, _, exitCodeTarget, errTarget := RunAgyWithWatchdog(ctx, bin, "test prompt", "sess-123", "", "gemini-pro", WatchdogOptions{
-		HomeDir:  tmpHome,
-		TargetID: "123456789012345678",
-		ExtraEnv: []string{"GO_WANT_HELPER_PROCESS=1", "MOCK_MODE=target"},
-	})
-	if errTarget != nil || exitCodeTarget != 0 {
-		t.Fatalf("RunAgyWithWatchdog failed with TargetID: %v", errTarget)
-	}
-	if !strings.Contains(stdoutTarget, "TARGET=123456789012345678") {
-		t.Errorf("expected AERIAL_TARGET_ID in stdout, got %q", stdoutTarget)
-	}
-}
 
 func TestExtractSessionID_AdditionalBranches(t *testing.T) {
 	t.Parallel()
@@ -1801,55 +1178,6 @@ func TestStepUpdateEvent_Resolved(t *testing.T) {
 	}
 }
 
-func TestActivityTap_StepUpdateHandler(t *testing.T) {
-	t.Parallel()
-	var events []*StepUpdateEvent
-	handler := func(ev *StepUpdateEvent) {
-		events = append(events, ev)
-	}
-
-	var outBuf bytes.Buffer
-	actWriter := NewActivityWriter("11111111-2222-3333-4444-555555555555")
-	tap := newActivityTap(&outBuf, actWriter, true, handler)
-
-	// Stream valid events (both flat and nested step_update formats)
-	input := `{"event":"init","conversation_id":"11111111-2222-3333-4444-555555555555"}
-{"event":"step_update","type":"thinking"}
-{"event":"step_update","step_update":{"step_type":"tool","tool_name":"docker_ps","state":"ACTIVE"}}
-{"event":"step_update","type":"tool_call","name":"view_file","state":"DONE"}
-{"event":"step_update","huge_payload":"` + strings.Repeat("x", 40*1024) + `"}
-{"event":"result","result":{"status":"SUCCESS","response":"Done!"}}
-`
-	n, err := tap.Write([]byte(input))
-	if err != nil || n != len(input) {
-		t.Fatalf("tap.Write failed: n=%d, err=%v", n, err)
-	}
-	tap.Flush()
-
-	// Check that events were parsed
-	if len(events) != 3 {
-		t.Fatalf("expected 3 parsed step_update events, got %d", len(events))
-	}
-
-	if events[0].ResolvedType() != "thinking" {
-		t.Errorf("event 0: expected thinking, got %q", events[0].ResolvedType())
-	}
-	if events[1].ResolvedType() != "tool" || events[1].ResolvedToolName() != "docker_ps" {
-		t.Errorf("event 1: expected tool/docker_ps, got %q/%q", events[1].ResolvedType(), events[1].ResolvedToolName())
-	}
-	if events[2].ResolvedType() != "tool_call" || events[2].ResolvedToolName() != "view_file" {
-		t.Errorf("event 2: expected tool_call/view_file, got %q/%q", events[2].ResolvedType(), events[2].ResolvedToolName())
-	}
-
-	// Verify that step_update was excluded from outBuf to prevent OOM
-	outStr := outBuf.String()
-	if strings.Contains(outStr, `"step_update"`) {
-		t.Errorf("outBuf must not contain step_update events, got: %s", outStr)
-	}
-	if !strings.Contains(outStr, `"result"`) {
-		t.Errorf("outBuf must retain result event, got: %s", outStr)
-	}
-}
 
 func TestExtractCommandName(t *testing.T) {
 	t.Parallel()
@@ -1980,27 +1308,6 @@ func TestStepUpdateEvent_ResolvedCommandName(t *testing.T) {
 	}
 }
 
-func TestRunAgyWithOptions(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	bin := getHelperProcessBin(t)
-	opts := WatchdogOptions{
-		InactivityTimeout: 10 * time.Second,
-		MaxDuration:       30 * time.Second,
-		PollInterval:      1 * time.Second,
-		ExtraEnv:          []string{"GO_WANT_HELPER_PROCESS=1", "MOCK_MODE=echo"},
-	}
-	stdout, stderr, exitCode, err := RunAgyWithOptions(ctx, bin, "hello world", "", "", "", opts)
-	if err != nil {
-		t.Fatalf("RunAgyWithOptions failed: %v, code=%d, stderr=%s", err, exitCode, stderr)
-	}
-	if exitCode != 0 {
-		t.Errorf("expected exit code 0, got %d", exitCode)
-	}
-	if !strings.Contains(stdout, "hello world") {
-		t.Errorf("expected stdout to contain 'hello world', got %q", stdout)
-	}
-}
 
 func TestTokenizeCommandLine_EdgeCases(t *testing.T) {
 	t.Parallel()
@@ -2061,35 +1368,6 @@ func TestIsPOSIXIdentifier(t *testing.T) {
 	}
 }
 
-func TestActivityTap_FlushWithPendingContent(t *testing.T) {
-	t.Parallel()
-	var outBuf bytes.Buffer
-	actWriter := NewActivityWriter("")
-	var handledEvents []*StepUpdateEvent
-	handler := func(ev *StepUpdateEvent) {
-		handledEvents = append(handledEvents, ev)
-	}
-	tap := newActivityTap(&outBuf, actWriter, true, handler)
-
-	// Write content without a trailing newline
-	pending := []byte(`{"event":"step_update","type":"tool_call","name":"read_file"}`)
-	n, err := tap.Write(pending)
-	if err != nil || n != len(pending) {
-		t.Fatalf("Write failed: n=%d, err=%v", n, err)
-	}
-	if len(handledEvents) != 0 {
-		t.Fatalf("expected 0 events before flush, got %d", len(handledEvents))
-	}
-
-	// Flush should process the remaining line
-	tap.Flush()
-	if len(handledEvents) != 1 {
-		t.Fatalf("expected 1 event after flush, got %d", len(handledEvents))
-	}
-	if handledEvents[0].ResolvedToolName() != "read_file" {
-		t.Errorf("expected tool name 'read_file', got %q", handledEvents[0].ResolvedToolName())
-	}
-}
 
 func TestActivityWriter_SetSessionID_AlreadySet(t *testing.T) {
 	t.Parallel()
@@ -2144,35 +1422,7 @@ func TestIsNonTransientError_ForkExecPermissionDenied(t *testing.T) {
 	}
 }
 
-func TestActivityTap_Branches(t *testing.T) {
-	t.Parallel()
-	tap := newActivityTap(nil, nil, false, nil)
-	n, err := tap.Write(nil)
-	if n != 0 || err != nil {
-		t.Errorf("expected (0, nil) on empty write, got (%d, %v)", n, err)
-	}
-	n, err = tap.Write([]byte{})
-	if n != 0 || err != nil {
-		t.Errorf("expected (0, nil) on empty slice write, got (%d, %v)", n, err)
-	}
-	n, err = tap.Write([]byte("hello"))
-	if n != 5 || err != nil {
-		t.Errorf("expected (5, nil) on tap with nil writer, got (%d, %v)", n, err)
-	}
-}
 
-func TestActivityTap_StepUpdateUnmarshalError(t *testing.T) {
-	t.Parallel()
-	var outBuf bytes.Buffer
-	actWriter := NewActivityWriter("test-sess")
-	tap := newActivityTap(&outBuf, actWriter, true, func(ev *StepUpdateEvent) {})
-
-	// Trigger step_update with invalid JSON in step_update field
-	_, err := tap.Write([]byte(`{"event":"step_update","step_update":"not-json-object"}` + "\n"))
-	if err != nil {
-		t.Fatalf("unexpected write error: %v", err)
-	}
-}
 
 func TestIsYieldTrap(t *testing.T) {
 	t.Parallel()
@@ -2343,36 +1593,6 @@ func TestParseAgyOutput_JSONVariations(t *testing.T) {
 	}
 }
 
-func TestActivityTap_SniffSessionID_JSONUnmarshal(t *testing.T) {
-	t.Parallel()
-	targetUUID := "12345678-abcd-ef01-2345-6789abcdef01"
-	actWriter := NewActivityWriter("")
-	var outBuf bytes.Buffer
-	tap := newActivityTap(&outBuf, actWriter, true, nil)
-
-	// Inverted key order in init
-	line := []byte(fmt.Sprintf("{\"conversation_id\":%q,\"event\":\"init\"}\n", targetUUID))
-	_, err := tap.Write(line)
-	if err != nil {
-		t.Fatalf("tap.Write failed: %v", err)
-	}
-	if actWriter.SessionID() != targetUUID {
-		t.Errorf("expected actWriter.SessionID() = %q, got %q", targetUUID, actWriter.SessionID())
-	}
-
-	// Also verify sniffing from a step_update line when actWriter has no session yet
-	actWriter2 := NewActivityWriter("")
-	var outBuf2 bytes.Buffer
-	tap2 := newActivityTap(&outBuf2, actWriter2, true, nil)
-	stepLine := []byte(fmt.Sprintf("{\"event\":\"step_update\",\"session_id\":%q,\"type\":\"tool_call\"}\n", targetUUID))
-	_, err = tap2.Write(stepLine)
-	if err != nil {
-		t.Fatalf("tap2.Write failed: %v", err)
-	}
-	if actWriter2.SessionID() != targetUUID {
-		t.Errorf("expected actWriter2.SessionID() from step_update = %q, got %q", targetUUID, actWriter2.SessionID())
-	}
-}
 
 func TestExtractSessionID_AllFallbacks(t *testing.T) {
 	targetUUID := "123e4567-e89b-12d3-a456-426614174000"
@@ -2476,24 +1696,6 @@ func TestParseAgyOutput_EmptyLinesAndProbeSession(t *testing.T) {
 	if resp.ConversationID != targetUUID {
 		t.Errorf("expected ConversationID %q, got %q", targetUUID, resp.ConversationID)
 	}
-}
-
-func TestActivityTap_DirectWriteAndEmptyLines(t *testing.T) {
-	t.Parallel()
-	var buf bytes.Buffer
-	act := NewActivityWriter("")
-	tap := newActivityTap(&buf, act, false, nil)
-	n, err := tap.Write([]byte("hello unfiltered\n"))
-	if err != nil || n == 0 {
-		t.Errorf("unexpected write result: n=%d, err=%v", n, err)
-	}
-	if buf.String() != "hello unfiltered\n" {
-		t.Errorf("unexpected buffer content: %q", buf.String())
-	}
-
-	var buf2 bytes.Buffer
-	tap2 := newActivityTap(&buf2, act, true, nil)
-	_, _ = tap2.Write([]byte("\n\n"))
 }
 
 

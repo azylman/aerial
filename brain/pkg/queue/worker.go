@@ -1409,7 +1409,7 @@ func (te *turnExecution) executeWithRetries() {
 		var exitCode int
 		var err error
 
-		if te.pool.daemonPool != nil && te.pool.cfg.UsePersistentDaemons {
+		if !te.pool.hasCustomRunner && te.pool.daemonPool != nil {
 			if te.statusUpdater != nil {
 				te.statusUpdater.MarkTurnStarted()
 			}
