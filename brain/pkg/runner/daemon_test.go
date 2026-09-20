@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -771,6 +772,92 @@ echo '{"event":"result","result":12345}'
 	_, err = d.ExecuteTurn(ctx, "turn 3")
 	if err == nil {
 		t.Errorf("expected error for numeric result payload")
+	}
+}
+
+func TestStartDaemon_TargetIDEnvironment(t *testing.T) {
+	tempDir := t.TempDir()
+	envFile := filepath.Join(tempDir, "env_out.txt")
+	mockBin := filepath.Join(tempDir, "mock_env_agy.sh")
+	script := fmt.Sprintf(`#!/bin/sh
+echo "AERIAL_TARGET_ID=$AERIAL_TARGET_ID" > "%s"
+echo "DISCORD_THREAD_ID=$DISCORD_THREAD_ID" >> "%s"
+echo '{"event":"init","init":{"tools":[]}}'
+while IFS= read -r line; do
+  echo '{"event":"result","result":{"status":"SUCCESS","response":"ok","usage":{}}}'
+done
+`, envFile, envFile)
+	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
+		t.Fatalf("failed to write mock agy: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	cfg := DaemonConfig{
+		ThreadID: "target-thread-9999",
+		AgyBin:   mockBin,
+		Cwd:      tempDir,
+	}
+
+	daemon, err := StartDaemon(ctx, cfg)
+	if err != nil {
+		t.Fatalf("StartDaemon failed: %v", err)
+	}
+	defer daemon.Close()
+
+	if _, err := daemon.ExecuteTurn(ctx, "check env"); err != nil {
+		t.Fatalf("ExecuteTurn failed: %v", err)
+	}
+
+	outBytes, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatalf("failed to read envFile: %v", err)
+	}
+	outStr := string(outBytes)
+	if !strings.Contains(outStr, "AERIAL_TARGET_ID=target-thread-9999") {
+		t.Errorf("expected AERIAL_TARGET_ID=target-thread-9999 in daemon env, got:\n%s", outStr)
+	}
+	if !strings.Contains(outStr, "DISCORD_THREAD_ID=target-thread-9999") {
+		t.Errorf("expected DISCORD_THREAD_ID=target-thread-9999 in daemon env, got:\n%s", outStr)
+	}
+
+	// Subtest: Empty ThreadID should leave vars empty
+	envFileEmpty := filepath.Join(tempDir, "env_empty_out.txt")
+	mockBinEmpty := filepath.Join(tempDir, "mock_empty_agy.sh")
+	scriptEmpty := fmt.Sprintf(`#!/bin/sh
+echo "AERIAL_TARGET_ID=$AERIAL_TARGET_ID" > "%s"
+echo "DISCORD_THREAD_ID=$DISCORD_THREAD_ID" >> "%s"
+echo '{"event":"init","init":{"tools":[]}}'
+while IFS= read -r line; do
+  echo '{"event":"result","result":{"status":"SUCCESS","response":"ok","usage":{}}}'
+done
+`, envFileEmpty, envFileEmpty)
+	if err := os.WriteFile(mockBinEmpty, []byte(scriptEmpty), 0755); err != nil {
+		t.Fatalf("failed to write mock agy: %v", err)
+	}
+
+	daemonEmpty, err := StartDaemon(ctx, DaemonConfig{
+		ThreadID: "   ",
+		AgyBin:   mockBinEmpty,
+		Cwd:      tempDir,
+	})
+	if err != nil {
+		t.Fatalf("StartDaemon failed: %v", err)
+	}
+	defer daemonEmpty.Close()
+
+	if _, err := daemonEmpty.ExecuteTurn(ctx, "check empty env"); err != nil {
+		t.Fatalf("ExecuteTurn failed: %v", err)
+	}
+
+	outEmptyBytes, err := os.ReadFile(envFileEmpty)
+	if err != nil {
+		t.Fatalf("failed to read envFileEmpty: %v", err)
+	}
+	outEmptyStr := string(outEmptyBytes)
+	if strings.Contains(outEmptyStr, "AERIAL_TARGET_ID= ") {
+		t.Errorf("expected AERIAL_TARGET_ID to not contain spaces, got:\n%s", outEmptyStr)
 	}
 }
 
