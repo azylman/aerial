@@ -87,23 +87,6 @@ func (p *Provisioner) LoadMCPConfig(cfg *config.Config) json.RawMessage {
 		rawBytes = []byte(cfg.Current().MCPConfig)
 	}
 
-	if len(rawBytes) == 0 && p != nil && p.dataDir != "" {
-		optionsPath := filepath.Join(p.dataDir, "options.json")
-		if data, err := os.ReadFile(optionsPath); err == nil {
-			var opts struct {
-				McpConfig json.RawMessage `json:"mcp_config"`
-			}
-			if err := json.Unmarshal(data, &opts); err == nil && len(opts.McpConfig) > 0 {
-				var strVal string
-				if err := json.Unmarshal(opts.McpConfig, &strVal); err == nil && strVal != "" {
-					rawBytes = []byte(strVal)
-				} else {
-					rawBytes = opts.McpConfig
-				}
-			}
-		}
-	}
-
 	if len(rawBytes) > 0 {
 		var parsed map[string]interface{}
 		if err := json.Unmarshal(rawBytes, &parsed); err == nil {

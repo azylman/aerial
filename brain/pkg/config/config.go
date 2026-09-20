@@ -590,17 +590,7 @@ var activeGlobalConfig = NewFromData(DefaultConfigData())
 func getFallbackDefaults() ConfigData {
 	data := DefaultConfigData()
 
-	// 1. Check /data/options.json
-	if fData, err := os.ReadFile("/data/options.json"); err == nil {
-		var opts Options
-		if err := json.Unmarshal(fData, &opts); err == nil {
-			if strings.TrimSpace(opts.Model) != "" {
-				data.Model = opts.Model
-			}
-		}
-	}
-
-	// 2. Read from active config snapshot (zero ambient reads)
+	// Read from active config snapshot (zero ambient reads)
 	cfg := activeGlobalConfig.Current()
 	if cfg != nil {
 		if strings.TrimSpace(cfg.Model) != "" {
@@ -905,15 +895,6 @@ func validateHooks(channelName string, hooks ChannelHooksConfig, targetPath stri
 		}
 	}
 	return nil
-}
-
-type Options struct {
-	Port         int             `json:"port"`
-	AgyBin       string          `json:"agy_bin"`
-	ApiKey       string          `json:"api_key"`
-	Model        string          `json:"model"`
-	SystemPrompt string          `json:"system_prompt"`
-	McpConfig    json.RawMessage `json:"mcp_config"`
 }
 
 func IsAdmin(adminUsers []string, identifiers ...string) bool {
