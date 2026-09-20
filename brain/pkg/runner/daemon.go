@@ -108,6 +108,12 @@ func StartDaemon(ctx context.Context, cfg DaemonConfig) (*Daemon, error) {
 	if cfg.GeminiHomeDir != "" {
 		cmd.Env = append(cmd.Env, "GEMINI_CLI_HOME="+cfg.GeminiHomeDir)
 	}
+	if target := strings.TrimSpace(cfg.ThreadID); target != "" {
+		cmd.Env = append(cmd.Env,
+			"AERIAL_TARGET_ID="+target,
+			"DISCORD_THREAD_ID="+target,
+		)
+	}
 	configureSysProcAttr(cmd)
 
 	stdinPipe, err := cmd.StdinPipe()
