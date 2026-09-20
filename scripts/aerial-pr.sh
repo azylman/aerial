@@ -235,11 +235,24 @@ merge_pr() {
     local is_merged
     is_merged=$(echo "$pr_resp" | jq -r '.merged // false')
     if [ "$is_merged" = "true" ]; then
+        if [ -z "$branch" ]; then
+            branch=$(echo "$pr_resp" | jq -r '.head.ref // empty')
+        fi
+        if [ -n "$branch" ]; then
+            curl -s -X DELETE \
+                -H "Authorization: token ${GITHUB_PAT}" \
+                -H "Accept: application/vnd.github.v3+json" \
+                "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/git/refs/heads/${branch}" >/dev/null 2>&1 || true
+        fi
+        local sync_status="skipped"
+        if curl -s -f -X POST "$SIDE_SYNC_URL" >/dev/null 2>&1; then
+            sync_status="synced"
+        fi
         local merged_sha
         merged_sha=$(echo "$pr_resp" | jq -r '.merge_commit_sha // empty')
         local deploy_json
         deploy_json=$(get_deploy_status "$merged_sha" 2>/dev/null || echo '{"deploy_state":"unknown","stage":"unknown","details":"Telemetry error"}')
-        echo "{\"status\":\"already_merged\",\"pr_url\":\"${pr_url}\",\"pr_number\":${pr_num},\"merged_sha\":\"${merged_sha}\",\"deployment\":${deploy_json}}"
+        echo "{\"status\":\"already_merged\",\"pr_url\":\"${pr_url}\",\"pr_number\":${pr_num},\"merged_sha\":\"${merged_sha}\",\"sync_status\":\"${sync_status}\",\"deployment\":${deploy_json}}"
         exit 0
     fi
 
@@ -498,6 +511,46 @@ EOF
         echo "⚠️ [aerial-pr] Warning: Scheduler MCP did not return a valid schedule ID." >&2
     fi
     return 0
+}
+
+enable_github_auto_merge() {
+    local node_id="$1"
+    local pr_num="${2:-}"
+    if [ -z "$node_id" ] || [ -z "${GITHUB_PAT:-}" ]; then
+        return 0
+    fi
+
+    local query='mutation($input: EnablePullRequestAutoMergeInput!) {
+        enablePullRequestAutoMerge(input: $input) {
+            pullRequest {
+                autoMergeRequest {
+                    enabledAt
+                    mergeMethod
+                }
+            }
+        }
+    }'
+
+    local payload
+    payload=$(jq -n \
+        --arg query "$query" \
+        --arg node_id "$node_id" \
+        '{query: $query, variables: {input: {pullRequestId: $node_id, mergeMethod: "SQUASH"}}}')
+
+    local resp
+    resp=$(curl -s --connect-timeout 3 -m 5 -X POST \
+        -H "Authorization: token ${GITHUB_PAT}" \
+        -H "Content-Type: application/json" \
+        "https://api.github.com/graphql" \
+        -d "$payload" 2>/dev/null || true)
+
+    if echo "$resp" | jq -e '.data.enablePullRequestAutoMerge.pullRequest.autoMergeRequest != null' >/dev/null 2>&1; then
+        echo "🤖 [aerial-pr] Native GitHub auto-merge enabled for PR #${pr_num} (SQUASH)." >&2
+    else
+        local err_msg
+        err_msg=$(echo "$resp" | jq -r '.errors[0].message // "unknown error"' 2>/dev/null || echo "failed")
+        echo "⚠️ [aerial-pr] Warning: Could not enable native GitHub auto-merge on PR #${pr_num}: ${err_msg}" >&2
+    fi
 }
 
 submit_scratch() {
@@ -763,6 +816,11 @@ submit_scratch() {
     pr_num=$(echo "$pr_resp" | jq -r '.number')
     local pr_url
     pr_url=$(echo "$pr_resp" | jq -r '.html_url')
+    local pr_node_id
+    pr_node_id=$(echo "$pr_resp" | jq -r '.node_id // empty')
+
+    # Enable native GitHub auto-merge (SQUASH)
+    enable_github_auto_merge "$pr_node_id" "$pr_num"
 
     # Asynchronous Submission: Disarm cleanup trap and remove scratch workspace immediately
     if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
