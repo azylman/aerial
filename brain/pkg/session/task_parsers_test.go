@@ -40,6 +40,11 @@ func TestParseBackgroundTaskStarted(t *testing.T) {
 			expected: "task-sentence-end",
 		},
 		{
+			name:     "punctuation only token",
+			input:    "Tool is running as a background task with task id: ;;;;",
+			expected: "",
+		},
+		{
 			name:     "empty string",
 			input:    "",
 			expected: "",
@@ -111,6 +116,16 @@ func TestParseTaskMessageSender(t *testing.T) {
 			input:    "[Message] sender=task-period. priority=HIGH",
 			expected: "task-period",
 		},
+		{
+			name:     "sender with whitespace only",
+			input:    "[Message] sender=    ",
+			expected: "",
+		},
+		{
+			name:     "sender with punctuation only",
+			input:    "[Message] sender=;;; ",
+			expected: "",
+		},
 	}
 
 	for _, tc := range tests {
@@ -164,6 +179,16 @@ func TestParseTaskFinishedContent(t *testing.T) {
 			expected: "task-multi-prev",
 		},
 		{
+			name:     "missing task id before finished marker",
+			input:    "Build finished with result: ok",
+			expected: "",
+		},
+		{
+			name:     "punctuation only token",
+			input:    "Task id ;;;; finished with result: ok",
+			expected: "",
+		},
+		{
 			name:     "reject multi-word false positive",
 			input:    "Task id is required for cancellation. Build finished with result: ok",
 			expected: "",
@@ -190,4 +215,49 @@ func TestParseTaskFinishedContent(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestIndexFoldAndLastIndexFold(t *testing.T) {
+	t.Parallel()
+
+	t.Run("IndexFold branches", func(t *testing.T) {
+		t.Parallel()
+		if got := session.IndexFoldForTest("hello", ""); got != 0 {
+			t.Errorf("expected 0 for empty substr, got %d", got)
+		}
+		if got := session.IndexFoldForTest("hi", "hello"); got != -1 {
+			t.Errorf("expected -1 when string shorter, got %d", got)
+		}
+		if got := session.IndexFoldForTest("Hello World", "WORLD"); got != 6 {
+			t.Errorf("expected 6 for uppercase match, got %d", got)
+		}
+		if got := session.IndexFoldForTest("123 ABC 456", "ABC"); got != 4 {
+			t.Errorf("expected 4, got %d", got)
+		}
+		if got := session.IndexFoldForTest("123 ABC 456", "123"); got != 0 {
+			t.Errorf("expected 0 for non-letter match, got %d", got)
+		}
+		if got := session.IndexFoldForTest("hello", "xyz"); got != -1 {
+			t.Errorf("expected -1 for not found, got %d", got)
+		}
+	})
+
+	t.Run("LastIndexFold branches", func(t *testing.T) {
+		t.Parallel()
+		if got := session.LastIndexFoldForTest("hello", ""); got != 5 {
+			t.Errorf("expected 5 for empty substr, got %d", got)
+		}
+		if got := session.LastIndexFoldForTest("hi", "hello"); got != -1 {
+			t.Errorf("expected -1 when string shorter, got %d", got)
+		}
+		if got := session.LastIndexFoldForTest("hello WORLD hello", "WORLD"); got != 6 {
+			t.Errorf("expected 6 for match, got %d", got)
+		}
+		if got := session.LastIndexFoldForTest("123 456 123", "123"); got != 8 {
+			t.Errorf("expected 8 for non-letter match, got %d", got)
+		}
+		if got := session.LastIndexFoldForTest("hello", "xyz"); got != -1 {
+			t.Errorf("expected -1 for not found, got %d", got)
+		}
+	})
 }

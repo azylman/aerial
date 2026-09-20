@@ -1803,6 +1803,28 @@ func TestHasUnfinishedBackgroundTask(t *testing.T) {
 		t.Errorf("expected has=false for completed task, got true with taskID=%s", taskID)
 	}
 
+	// 3b. Completed background task via finished result text only (no sender)
+	sessCompletedResultOnly := "sess-completed-result-only"
+	logsDirResultOnly := filepath.Join(tmpDir, "brain", sessCompletedResultOnly, ".system_generated", "logs")
+	if err := os.MkdirAll(logsDirResultOnly, 0755); err != nil {
+		t.Fatal(err)
+	}
+	linesResultOnly := `{"step_index": 0, "source": "USER_EXPLICIT", "type": "USER_INPUT", "content": "run task"}
+{"step_index": 1, "source": "MODEL", "type": "GENERIC", "status": "RUNNING", "content": "Tool is running as a background task with task id: sess-completed-result-only/task-2"}
+{"step_index": 2, "source": "SYSTEM", "type": "SYSTEM_MESSAGE", "status": "DONE", "content": "Task id \"sess-completed-result-only/task-2\" finished with result:\nSuccess"}
+{"step_index": 3, "source": "MODEL", "type": "PLANNER_RESPONSE", "status": "DONE", "content": "Finished successfully."}
+`
+	if err := os.WriteFile(filepath.Join(logsDirResultOnly, "transcript.jsonl"), []byte(linesResultOnly), 0644); err != nil {
+		t.Fatal(err)
+	}
+	has, taskID, err = mgr.HasUnfinishedBackgroundTask(sessCompletedResultOnly)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if has {
+		t.Errorf("expected has=false for task completed via result text, got true with taskID=%s", taskID)
+	}
+
 	// 4. Unfinished background task in latest turn
 	sessUnfinished := "sess-unfinished-task"
 	logsDir2 := filepath.Join(tmpDir, "brain", sessUnfinished, ".system_generated", "logs")
