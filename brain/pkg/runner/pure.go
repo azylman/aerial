@@ -204,10 +204,16 @@ func ParseInitEvent(line string) (string, bool) {
 		}
 	}
 
-	if match := reNDJSONInitSession.FindStringSubmatch(trimmed); len(match) > 1 {
-		candidate := strings.TrimSpace(match[1])
-		if IsValidUUID(candidate) {
-			return candidate, true
+	// Embedded JSON fallback for lines with logging prefixes
+	for i := 0; i < len(trimmed); i++ {
+		if trimmed[i] == '{' {
+			var embedded sessionProbe
+			dec := json.NewDecoder(strings.NewReader(trimmed[i:]))
+			if err := dec.Decode(&embedded); err == nil {
+				if (embedded.Event == "init" || embedded.Type == "init") && embedded.extractUUID() != "" {
+					return embedded.extractUUID(), true
+				}
+			}
 		}
 	}
 

@@ -2413,17 +2413,23 @@ func TestExtractSessionID_AllFallbacks(t *testing.T) {
 	}
 }
 
-func TestExtractSessionID_RegexInitFallback(t *testing.T) {
+func TestExtractSessionID_EmbeddedJSONFallback(t *testing.T) {
 	t.Parallel()
 	targetUUID := "11111111-2222-3333-4444-555555555555"
 
-	// 1. Line does not start with { but contains init conversation_id JSON matching reNDJSONInitSession
+	// 1. Line does not start with { but contains init conversation_id JSON
 	rawLog := fmt.Sprintf("raw stdout log: {\"event\": \"init\", \"conversation_id\": %q}", targetUUID)
 	if got := ExtractSessionID(rawLog, time.Now()); got != targetUUID {
 		t.Errorf("expected %q, got %q", targetUUID, got)
 	}
 
-	// 2. Line matches reNDJSONInitSession but has invalid UUID, followed by text with valid UUID
+	// 2. Line contains logger prefix with braces before the actual JSON object
+	rawLogBraces := fmt.Sprintf("[2026-09-19 {thread-1}] {\"event\": \"init\", \"conversation_id\": %q}", targetUUID)
+	if got := ExtractSessionID(rawLogBraces, time.Now()); got != targetUUID {
+		t.Errorf("expected %q, got %q", targetUUID, got)
+	}
+
+	// 3. Line matches embedded JSON but has invalid UUID, followed by text with valid UUID
 	rawLogInvalid := fmt.Sprintf("raw stdout log: {\"event\": \"init\", \"conversation_id\": \"not-a-uuid\"}\nsubsequent text %s", targetUUID)
 	if got := ExtractSessionID(rawLogInvalid, time.Now()); got != targetUUID {
 		t.Errorf("expected %q, got %q", targetUUID, got)

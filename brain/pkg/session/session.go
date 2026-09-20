@@ -9,7 +9,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -610,12 +609,6 @@ func (m *Manager) HasSuccessfulToolCall(convID string) bool {
 	return false
 }
 
-var (
-	reBackgroundTaskStarted = regexp.MustCompile(`(?i)Tool is running as a background task with task id:\s*([^\s\r\n]+)`)
-	reTaskMessageSender     = regexp.MustCompile(`(?i)sender=([^\s\r\n]+)`)
-	reTaskFinishedContent   = regexp.MustCompile(`(?i)Task id\s*["\']?([^"\'\s]+)["\']?\s*finished with result:`)
-)
-
 // HasUnfinishedBackgroundTask inspects the latest turn in session transcripts
 // and returns whether a background task was launched in the latest turn but never
 // completed before the turn ended.
@@ -682,17 +675,15 @@ func (m *Manager) HasUnfinishedBackgroundTask(convID string) (bool, string, erro
 				}
 
 				// Check if a task was started
-				if match := reBackgroundTaskStarted.FindStringSubmatch(targetText); len(match) > 1 {
-					tID := strings.Trim(strings.TrimSpace(match[1]), `"'\,;`)
-					if tID != "" && !startedTasks[tID] {
+				if tID := ParseBackgroundTaskStarted(targetText); tID != "" {
+					if !startedTasks[tID] {
 						startedTasks[tID] = true
 						taskOrder = append(taskOrder, tID)
 					}
 				}
 
 				// Check if a task was completed via sender
-				if match := reTaskMessageSender.FindStringSubmatch(targetText); len(match) > 1 {
-					s := strings.Trim(strings.TrimSpace(match[1]), `"'\,;`)
+				if s := ParseTaskMessageSender(targetText); s != "" {
 					for tID := range startedTasks {
 						if tID == s || strings.HasSuffix(tID, "/"+s) || strings.HasSuffix(s, "/"+tID) || (strings.Contains(tID, "/") && filepath.Base(tID) == filepath.Base(s)) {
 							delete(startedTasks, tID)
@@ -701,8 +692,7 @@ func (m *Manager) HasUnfinishedBackgroundTask(convID string) (bool, string, erro
 				}
 
 				// Check if a task was completed via finished result text
-				if match := reTaskFinishedContent.FindStringSubmatch(targetText); len(match) > 1 {
-					s := strings.Trim(strings.TrimSpace(match[1]), `"'\,;`)
+				if s := ParseTaskFinishedContent(targetText); s != "" {
 					for tID := range startedTasks {
 						if tID == s || strings.HasSuffix(tID, "/"+s) || strings.HasSuffix(s, "/"+tID) || (strings.Contains(tID, "/") && filepath.Base(tID) == filepath.Base(s)) {
 							delete(startedTasks, tID)

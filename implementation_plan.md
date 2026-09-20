@@ -1,57 +1,53 @@
-# Implementation Plan: Dockerfile-Curated Skills & Code Simplification
+# Implementation Plan: Eliminate P0 Regex Parsing of JSON & Structured Payloads
 
-## Problem & Context
-Previously, `brain/Dockerfile` cloned the entire upstream `obra/superpowers` repository into `/opt/superpowers`. Because the full repository included runtime-clashing skills (`using-git-worktrees`, `finishing-a-development-branch`, `requesting-code-review`, `subagent-driven-development`) and the prompt-bloating `using-superpowers` meta-enforcer, Go code in `brain/pkg/env` had to maintain a blacklist (`DefaultBlockedSkills`), filtering methods (`LinkSkillsWithFilter`), and pruning logic (`pruneBlockedSkills`).
+## Problem Statement
+The codebase contains brittle regular expressions for parsing structured JSON and event payloads:
+1. `brain/pkg/runner/pure.go` and `runner.go` use `reNDJSONInitSession` (`"event"\s*:\s*"init"[^}]*"conversation_id"\s*:\s*"([^"]+)"`) to extract conversation IDs from raw log lines.
+2. `brain/pkg/runner/daemon.go` uses `reSubagentStarted` (`"conversationId":\s*"([^"]+)"`) to extract subagent IDs from `invoke_subagent` tool outputs.
+3. `brain/pkg/runner/daemon.go` and `brain/pkg/session/session.go` use regexes (`reBackgroundTaskStarted`, `reTaskMessageSender`, `reTaskFinishedContent`) to scrape task and sender IDs from output strings.
 
-Per user instruction ("as much as possible should be in the Dockerfile and not in code"):
-We curate the installed engineering skills directly during container image build in `brain/Dockerfile`. By only copying approved methodology skills into `/opt/skills` and creating a clean symlink to `/opt/superpowers/skills` for backwards compatibility, the unwanted clashing skills are never present in the image. This allows removing all blacklist, filtering, and pruning logic from Go code, making `brain/pkg/env` clean, robust, and agnostic.
+This pattern is brittle, vulnerable to ordering or formatting changes, prone to self-poisoning when command outputs or test logs quote task signatures, and incurs unnecessary regex engine overhead.
 
-## Approved Methodology Skills to Curate in Dockerfile
-- `systematic-debugging`
-- `test-driven-development`
-- `verification-before-completion`
-- `brainstorming`
-- `writing-plans`
-- `dispatching-parallel-agents`
-- `receiving-code-review`
-- `writing-skills`
+## Architecture & Replacements (Approved by The Girl Gang Review Panel)
 
-## Unwanted Clashes Excluded from Image
-- `using-superpowers` (removes conversation latency and auto-viewing on every turn)
-- `using-git-worktrees` (incompatible with kernel `:ro` mounts)
-- `finishing-a-development-branch` (interactive merge prompts)
-- `requesting-code-review` & `subagent-driven-development` (chattery per-task loops)
-- `executing-plans` (depends on `using-git-worktrees` and `finishing-a-development-branch`)
+### 1. Centralized Task Parsers in `brain/pkg/session/task_parsers.go`
+Rather than duplicating parsers across `runner` and `session`, define pure, deterministic parsers in `session` (which `runner` already imports):
+- `ParseBackgroundTaskStarted(s string) string`:
+  - Case-insensitive search for `"tool is running as a background task with task id:"`.
+  - Extracts the subsequent non-whitespace token, strips quotes and punctuation, returns `strings.Clone(token)`.
+- `ParseTaskMessageSender(s string) string`:
+  - Case-insensitive search for `"sender="`.
+  - Extracts the subsequent non-whitespace token, strips quotes and punctuation, returns `strings.Clone(token)`.
+- `ParseTaskFinishedContent(s string) string`:
+  - Finds `"task id"` and verifies `"finished with result:"` appears subsequently.
+  - Slices intermediate substring; verifies it is a SINGLE non-whitespace token (rejects any internal whitespace).
+  - Trims quotes and whitespace, returns `strings.Clone(token)`.
 
-## Proposed Changes
+### 2. `brain/pkg/runner/pure.go` & `runner.go` (`ParseInitEvent` and `ExtractSessionID`)
+- Remove `reNDJSONInitSession = regexp.MustCompile(...)` completely from `runner.go`.
+- Implement robust JSON unmarshaling into `sessionProbe`:
+  - Fast path: Direct `json.Unmarshal([]byte(trimmed), &probe)` if string starts with `{` and ends with `}`.
+  - Embedded JSON fallback: Locate candidate opening brace `idx := strings.Index(line, `{"event"`)` or `json.NewDecoder` stream decoding to avoid brace contamination from logger prefixes like `[2026-09-19 {thread-1}]`.
+  - Validate candidate UUID using `IsValidUUID`.
 
-### 1. `brain/Dockerfile`
-- Replace raw `git clone ... /opt/superpowers` with curated extraction:
-  - Clone `obra/superpowers` to a temporary directory `/tmp/superpowers`.
-  - Copy only the 8 approved methodology skills into `/opt/skills/`.
-  - Remove `/tmp/superpowers`.
-  - Symlink `/opt/skills` to `/opt/superpowers/skills` for backwards compatibility.
+### 3. `brain/pkg/runner/daemon.go`
+- Implement `extractSubagentID(toolOut string) string`:
+  - Handles direct JSON objects, array payloads `[...]`, and tool output with text prefixes.
+  - Deserializes into struct supporting both `conversationId` and `conversation_id`.
+  - Returns `strings.Clone(id)`.
+- Replace regex calls with `session.ParseBackgroundTaskStarted`, `session.ParseTaskMessageSender`, and `session.ParseTaskFinishedContent`.
+- Remove all 4 regexes (`reBackgroundTaskStarted`, `reSubagentStarted`, `reTaskMessageSender`, `reTaskFinishedContent`) and the `"regexp"` import from `daemon.go`.
 
-### 2. `brain/pkg/env/skills.go`
-- Remove `DefaultBlockedSkills`.
-- Remove `pruneBlockedSkills()`.
-- Replace `LinkSkillsWithFilter` with clean, direct `LinkSkills(targetSkillDirs, sourceDirs []string) int`.
-- In `SyncSkills()`:
-  - Keep legacy `~/.gemini/skills` directory cleanup.
-  - Keep `sweepOrphanedSymlinks(targetSkillDirs)` (which automatically cleans up any legacy symlinks to skills no longer present on disk).
-  - Call `LinkSkills(targetSkillDirs, sourceDirs)`.
-  - Perform final `sweepOrphanedSymlinks`.
+### 4. `brain/pkg/session/session.go`
+- Update `HasUnfinishedBackgroundTask` to use `ParseBackgroundTaskStarted`, `ParseTaskMessageSender`, and `ParseTaskFinishedContent`.
+- Remove all 3 regexes and the `"regexp"` import from `session.go`.
 
-### 3. `brain/pkg/env/provisioner.go`
-- Remove `blockedSkills` field from `Provisioner`.
-- Remove `SetBlockedSkills` and `BlockedSkills` methods.
-- Initialize `superpowersDir` to `/opt/skills` (with fallback to `/opt/superpowers/skills`).
-
-### 4. `brain/pkg/env/env_test.go`
-- Replace tests for `DefaultBlockedSkills`, `LinkSkillsWithFilter`, and `pruneBlockedSkills` with comprehensive tests verifying clean symlinking, source priority shadowing, and orphaned symlink cleanup.
-
-## Verification & Deployment Plan
-1. Run targeted Go package unit tests: `go test -v -race ./brain/pkg/env/...`
-2. Run local pre-flight verification: `./scripts/verify.sh --staged`
-3. Audit pre-PR diff with Devil's Advocate subagent
-4. Author `PR_DESCRIPTION.md` and submit asynchronously via `scripts/aerial-pr.sh submit`
+### 5. Verification & TDD
+- Write tests in `brain/pkg/session/task_parsers_test.go`:
+  - Task started: quotes, whitespace, punctuation, newlines, case insensitivity.
+  - Task sender: quotes, whitespace, priority attributes.
+  - Task finished: quotes, prefix matching, non-whitespace constraint (reject internal spaces).
+- Update and add tests in `brain/pkg/runner/pure_test.go` and `brain/pkg/runner/runner_test.go`:
+  - `ParseInitEvent` with JSON prefixes, logger tags, invalid JSON, and valid UUIDs.
+  - `extractSubagentID` with camelCase, snake_case, array payloads, and leading text.
+- Verify full test suite passes with `go test -count=1 ./pkg/runner/... ./pkg/session/...`.

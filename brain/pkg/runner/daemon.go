@@ -10,7 +10,6 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -18,14 +17,10 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/brain/pkg/metrics"
+	"github.com/azylman/aerial/brain/pkg/session"
 )
 
 var (
-	reBackgroundTaskStarted = regexp.MustCompile(`(?i)Tool is running as a background task with task id:\s*([^\s\r\n]+)`)
-	reSubagentStarted       = regexp.MustCompile(`"conversationId":\s*"([^"]+)"`)
-	reTaskMessageSender     = regexp.MustCompile(`(?i)sender=([^\s\r\n]+)`)
-	reTaskFinishedContent   = regexp.MustCompile(`(?i)Task id\s*["\']?([^"\'\s]+)["\']?\s*finished with result:`)
-
 	closeGracePeriod = 3 * time.Second
 )
 
@@ -334,8 +329,7 @@ func (d *Daemon) ExecuteTurnWithHandler(ctx context.Context, prompt string, hand
 				}
 
 				if toolOut, ok := stepUpdate["tool_output"].(string); ok {
-					if m := reBackgroundTaskStarted.FindStringSubmatch(toolOut); len(m) > 1 {
-						taskID := strings.Trim(strings.TrimSpace(m[1]), `"'\,;`)
+					if taskID := session.ParseBackgroundTaskStarted(toolOut); taskID != "" {
 						d.taskTracker.Add(TaskMetadata{
 							TaskID:      taskID,
 							ToolName:    lastToolName,
@@ -347,8 +341,7 @@ func (d *Daemon) ExecuteTurnWithHandler(ctx context.Context, prompt string, hand
 						}
 					}
 					if lastToolName == "invoke_subagent" {
-						if m := reSubagentStarted.FindStringSubmatch(toolOut); len(m) > 1 {
-							subagentID := strings.Trim(strings.TrimSpace(m[1]), `"'\,;`)
+						if subagentID := extractSubagentID(toolOut); subagentID != "" {
 							d.taskTracker.Add(TaskMetadata{
 								TaskID:    subagentID,
 								ToolName:  "invoke_subagent",
@@ -359,8 +352,7 @@ func (d *Daemon) ExecuteTurnWithHandler(ctx context.Context, prompt string, hand
 							}
 						}
 					}
-					if m := reTaskMessageSender.FindStringSubmatch(toolOut); len(m) > 1 {
-						sender := strings.Trim(strings.TrimSpace(m[1]), `"'\,;`)
+					if sender := session.ParseTaskMessageSender(toolOut); sender != "" {
 						for _, t := range d.taskTracker.ActiveTasks() {
 							if t.TaskID == sender || strings.HasSuffix(t.TaskID, "/"+sender) || strings.HasSuffix(sender, "/"+t.TaskID) {
 								d.taskTracker.Remove(t.TaskID)
@@ -370,8 +362,7 @@ func (d *Daemon) ExecuteTurnWithHandler(ctx context.Context, prompt string, hand
 							metrics.ActiveTasksGauge.WithLabelValues(d.cfg.ThreadID).Set(float64(d.taskTracker.ActiveCount()))
 						}
 					}
-					if m := reTaskFinishedContent.FindStringSubmatch(toolOut); len(m) > 1 {
-						finishedID := strings.Trim(strings.TrimSpace(m[1]), `"'\,;`)
+					if finishedID := session.ParseTaskFinishedContent(toolOut); finishedID != "" {
 						for _, t := range d.taskTracker.ActiveTasks() {
 							if t.TaskID == finishedID || strings.HasSuffix(t.TaskID, "/"+finishedID) || strings.HasSuffix(finishedID, "/"+t.TaskID) {
 								d.taskTracker.Remove(t.TaskID)
@@ -580,3 +571,73 @@ func (d *Daemon) TaskTracker() *TaskTracker { return d.taskTracker }
 func (d *Daemon) SetDirty(dirty bool)       { d.mu.Lock(); defer d.mu.Unlock(); d.dirty = dirty }
 func (d *Daemon) IsDirty() bool             { d.mu.Lock(); defer d.mu.Unlock(); return d.dirty }
 func (d *Daemon) LastUsed() time.Time       { d.mu.Lock(); defer d.mu.Unlock(); return d.lastUsed }
+
+// extractSubagentID extracts a subagent conversation ID from invoke_subagent tool output.
+// It parses JSON objects and arrays via json.Unmarshal / json.Decoder, supporting both
+// camelCase ("conversationId") and snake_case ("conversation_id") keys.
+func extractSubagentID(toolOut string) string {
+	trimmed := strings.TrimSpace(toolOut)
+	if trimmed == "" {
+		return ""
+	}
+
+	type subagentItem struct {
+		ConversationID string `json:"conversationId"`
+		AltConvID      string `json:"conversation_id"`
+	}
+
+	// 1. If it's a JSON array [...]
+	if strings.HasPrefix(trimmed, "[") {
+		var list []subagentItem
+		if err := json.Unmarshal([]byte(trimmed), &list); err == nil && len(list) > 0 {
+			for _, item := range list {
+				id := item.ConversationID
+				if id == "" {
+					id = item.AltConvID
+				}
+				id = strings.Trim(strings.TrimSpace(id), `"'\,;`)
+				if id != "" {
+					return strings.Clone(id)
+				}
+			}
+		}
+	}
+
+	// 2. Direct JSON object unmarshal or embedded JSON object scan
+	for i := 0; i < len(trimmed); i++ {
+		if trimmed[i] == '{' {
+			var payload struct {
+				ConversationID string         `json:"conversationId"`
+				AltConvID      string         `json:"conversation_id"`
+				Subagents      []subagentItem `json:"subagents"`
+			}
+			dec := json.NewDecoder(strings.NewReader(trimmed[i:]))
+			if err := dec.Decode(&payload); err == nil {
+				id := payload.ConversationID
+				if id == "" {
+					id = payload.AltConvID
+				}
+				if id == "" {
+					for _, item := range payload.Subagents {
+						subID := item.ConversationID
+						if subID == "" {
+							subID = item.AltConvID
+						}
+						subID = strings.Trim(strings.TrimSpace(subID), `"'\,;.:`)
+						if subID != "" {
+							id = subID
+							break
+						}
+					}
+				}
+				id = strings.Trim(strings.TrimSpace(id), `"'\,;.:`)
+				if id != "" {
+					return strings.Clone(id)
+				}
+			}
+		}
+	}
+
+	return ""
+}
+

@@ -24,11 +24,10 @@ import (
 )
 
 var (
-	reStrictUUID        = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
-	reUUIDInText        = regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`)
-	reUpdateStream      = regexp.MustCompile(`Starting conversation update stream for ([^\s\r\n]+)`)
-	reGeneralSession    = regexp.MustCompile(`(?i)(?:conversation|session)(?:_id)?[:\s=]+([a-zA-Z0-9\-]+)`)
-	reNDJSONInitSession = regexp.MustCompile(`"event"\s*:\s*"init"[^}]*"conversation_id"\s*:\s*"([^"]+)"`)
+	reStrictUUID     = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+	reUUIDInText     = regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`)
+	reUpdateStream   = regexp.MustCompile(`Starting conversation update stream for ([^\s\r\n]+)`)
+	reGeneralSession = regexp.MustCompile(`(?i)(?:conversation|session)(?:_id)?[:\s=]+([a-zA-Z0-9\-]+)`)
 )
 
 // IsValidUUID validates that a string strictly matches RFC 4122 UUID format.
@@ -968,6 +967,9 @@ func ExtractSessionID(output string, _ time.Time) string {
 		lines := strings.Split(output, "\n")
 		for _, rawLine := range lines {
 			line := strings.TrimSpace(rawLine)
+			if line == "" {
+				continue
+			}
 			if strings.HasPrefix(line, "{") && strings.HasSuffix(line, "}") {
 				var probe sessionProbe
 				if err := json.Unmarshal([]byte(line), &probe); err == nil {
@@ -976,12 +978,17 @@ func ExtractSessionID(output string, _ time.Time) string {
 					}
 				}
 			}
-		}
-
-		if match := reNDJSONInitSession.FindStringSubmatch(output); len(match) > 1 {
-			candidate := strings.TrimSpace(match[1])
-			if IsValidUUID(candidate) {
-				return candidate
+			// Embedded JSON fallback for lines with logging prefixes
+			for i := 0; i < len(line); i++ {
+				if line[i] == '{' {
+					var embedded sessionProbe
+					dec := json.NewDecoder(strings.NewReader(line[i:]))
+					if err := dec.Decode(&embedded); err == nil {
+						if (embedded.Event == "init" || embedded.Type == "init") && embedded.extractUUID() != "" {
+							return embedded.extractUUID()
+						}
+					}
+				}
 			}
 		}
 
