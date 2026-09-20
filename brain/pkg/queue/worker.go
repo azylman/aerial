@@ -2,6 +2,7 @@ package queue
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"math/rand"
@@ -1438,11 +1439,28 @@ func (te *turnExecution) executeWithRetries() {
 							daemon.SetSessionID(latest)
 						}
 					}
-					stdout = fmt.Sprintf(`{"conversation_id":%q,"status":"SUCCESS","response":%q,"usage":{"input_tokens":%d,"output_tokens":%d,"total_tokens":%d}}`,
-						convID, turnRes.Content, turnRes.Usage.InputTokens, turnRes.Usage.OutputTokens, turnRes.Usage.TotalTokens)
-					stderr = ""
-					exitCode = turnRes.ExitCode
-					err = nil
+					payload := map[string]interface{}{
+						"conversation_id": convID,
+						"status":          "SUCCESS",
+						"response":        turnRes.Response,
+						"usage": map[string]interface{}{
+							"input_tokens":  turnRes.Usage.InputTokens,
+							"output_tokens": turnRes.Usage.OutputTokens,
+							"total_tokens":  turnRes.Usage.TotalTokens,
+						},
+					}
+					data, marshalErr := json.Marshal(payload)
+					if marshalErr != nil {
+						stdout = ""
+						stderr = marshalErr.Error()
+						exitCode = 1
+						err = marshalErr
+					} else {
+						stdout = string(data)
+						stderr = ""
+						exitCode = turnRes.ExitCode
+						err = nil
+					}
 				}
 			}
 		} else if te.pool.cfg.RunnerWithOptionsFunc != nil {
@@ -1880,8 +1898,8 @@ func (te *turnExecution) executeWithRetries() {
 					// Pre-extract attachments from full response to ensure media generated in earlier turns is never lost
 					_, fullAttachments := delivery.ExtractAndSanitizeMedia(resp.Response, baseDir)
 
-					// For multi-turn runs, attempt to extract strictly the final substantive turn from transcript
-					if resp.NumTurns > 1 && te.pool != nil && te.pool.sessionMgr != nil && te.currentSessionID != "" {
+					// For multi-turn runs or when responseText is empty, attempt to extract strictly the final substantive turn from transcript
+					if (resp.NumTurns > 1 || strings.TrimSpace(responseText) == "") && te.pool != nil && te.pool.sessionMgr != nil && te.currentSessionID != "" {
 						if finalText, isSilent, err := te.pool.sessionMgr.ExtractFinalSubstantiveResponse(poolCtx, te.currentSessionID); err == nil {
 							if isSilent {
 								responseText = ""

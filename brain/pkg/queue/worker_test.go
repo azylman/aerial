@@ -105,7 +105,7 @@ func TestWorker_PersistentDaemonTurnExecution(t *testing.T) {
 	mockBin := filepath.Join(tmpHome, "mock_agy.sh")
 	script := `#!/bin/sh
 while IFS= read -r line; do
-  echo '{"event":"result","content":"Executed via persistent daemon","usage":{"total_tokens":10}}'
+  echo '{"event":"result","result":{"status":"SUCCESS","response":"Executed via persistent daemon","usage":{"total_tokens":10}}}'
 done
 `
 	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
@@ -172,7 +172,7 @@ func TestWorker_ThreadWorker_ActiveTasksPreventReap(t *testing.T) {
 	mockBin := filepath.Join(tmpHome, "mock_agy.sh")
 	script := `#!/bin/sh
 while IFS= read -r line; do
-  echo '{"event":"result","content":"ok","usage":{"total_tokens":5}}'
+  echo '{"event":"result","result":{"status":"SUCCESS","response":"ok","usage":{"total_tokens":5}}}'
 done
 `
 	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
@@ -375,7 +375,7 @@ func TestWorkerPool_PersistentDaemon_ColdStart_Success(t *testing.T) {
 	script := fmt.Sprintf(`#!/bin/sh
 echo '{"event":"init","conversation_id":%q}'
 while IFS= read -r line; do
-  echo '{"event":"result","content":"Cold start completed successfully!","usage":{"total_tokens":25}}'
+  echo '{"event":"result","result":{"status":"SUCCESS","response":"Cold start completed successfully!","usage":{"total_tokens":25}}}'
 done
 `, validUUID)
 	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
@@ -450,7 +450,7 @@ func TestWorkerPool_PersistentDaemon_ColdStart_SessionMgrFallback(t *testing.T) 
 	mockBin := filepath.Join(tmpHome, "mock_agy.sh")
 	script := `#!/bin/sh
 while IFS= read -r line; do
-  echo '{"event":"result","content":"Turn completed with fallback session","usage":{"total_tokens":15}}'
+  echo '{"event":"result","result":{"status":"SUCCESS","response":"Turn completed with fallback session","usage":{"total_tokens":15}}}'
 done
 `
 	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
