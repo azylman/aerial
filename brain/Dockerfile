@@ -44,10 +44,23 @@ ENV PATH="/usr/local/go/bin:/root/go/bin:${PATH}"
 # Install official Antigravity CLI binary
 RUN curl -fsSL https://antigravity.google/cli/install.sh | bash -s -- -d /usr/local/bin
 
-# Clone superpowers into /opt/superpowers (outside /root/.gemini so volume mounts don't mask it)
+# Clone superpowers and extract only approved engineering methodology skills into /opt/skills
 ARG SUPERPOWERS_CACHEBUST=1
-RUN git clone --depth 1 https://github.com/obra/superpowers.git /opt/superpowers && \
-    rm -rf /opt/superpowers/.git
+RUN git clone --depth 1 --branch v6.3.0 https://github.com/obra/superpowers.git /tmp/superpowers && \
+    mkdir -p /opt/skills /opt/superpowers && \
+    for skill in \
+        systematic-debugging \
+        test-driven-development \
+        verification-before-completion \
+        brainstorming \
+        writing-plans \
+        dispatching-parallel-agents \
+        receiving-code-review \
+        writing-skills; do \
+        cp -a "/tmp/superpowers/skills/$skill" /opt/skills/; \
+    done && \
+    rm -rf /tmp/superpowers && \
+    ln -s /opt/skills /opt/superpowers/skills
 
 WORKDIR /app
 

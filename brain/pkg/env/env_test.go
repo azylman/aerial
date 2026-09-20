@@ -247,7 +247,27 @@ func TestSyncSkills(t *testing.T) {
 	}
 }
 
-func TestSyncSkills_BlockedSkills(t *testing.T) {
+func TestSyncSkills_LegacyPluginDirPruned(t *testing.T) {
+	tmpHome := t.TempDir()
+	p := New(tmpHome, t.TempDir())
+	p.SetCustomSkillsDir(t.TempDir())
+	p.SetSuperpowersDir(t.TempDir())
+	p.SetAgentsSkillsDir(t.TempDir())
+
+	pluginDir := filepath.Join(tmpHome, ".gemini", "config", "plugins", "superpowers")
+	_ = os.MkdirAll(pluginDir, 0755)
+	_ = os.WriteFile(filepath.Join(pluginDir, "SKILL.md"), []byte("# Legacy Plugin"), 0644)
+
+	if err := p.SyncSkills(); err != nil {
+		t.Fatalf("SyncSkills failed: %v", err)
+	}
+
+	if _, err := os.Lstat(pluginDir); !os.IsNotExist(err) {
+		t.Errorf("Expected legacy plugin directory %s to be pruned", pluginDir)
+	}
+}
+
+func TestSyncSkills_CuratedSkills(t *testing.T) {
 	tmpHome := t.TempDir()
 	tmpCustomSkills := t.TempDir()
 	tmpSuperpowers := t.TempDir()
@@ -262,141 +282,99 @@ func TestSyncSkills_BlockedSkills(t *testing.T) {
 	_ = os.MkdirAll(customDir, 0755)
 	_ = os.WriteFile(filepath.Join(customDir, "SKILL.md"), []byte("# My Custom Skill"), 0644)
 
-	// Superpowers skills: 1 allowed, 4 blocked
-	allowedSuperpower := filepath.Join(tmpSuperpowers, "test-driven-development")
-	_ = os.MkdirAll(allowedSuperpower, 0755)
-	_ = os.WriteFile(filepath.Join(allowedSuperpower, "SKILL.md"), []byte("# TDD"), 0644)
-
-	blockedSkills := []string{
-		"using-git-worktrees",
-		"finishing-a-development-branch",
-		"requesting-code-review",
-		"subagent-driven-development",
-	}
-	for _, name := range blockedSkills {
-		dir := filepath.Join(tmpSuperpowers, name)
-		_ = os.MkdirAll(dir, 0755)
-		_ = os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("# Blocked"), 0644)
-	}
+	// Curated methodology skill
+	tddDir := filepath.Join(tmpSuperpowers, "test-driven-development")
+	_ = os.MkdirAll(tddDir, 0755)
+	_ = os.WriteFile(filepath.Join(tddDir, "SKILL.md"), []byte("# TDD"), 0644)
 
 	if err := p.SyncSkills(); err != nil {
 		t.Fatalf("SyncSkills failed: %v", err)
 	}
 
 	skillsRoot := filepath.Join(tmpHome, ".gemini", "config", "skills")
-
-	// Allowed skills must exist
 	for _, name := range []string{"my-custom-skill", "test-driven-development"} {
 		path := filepath.Join(skillsRoot, name, "SKILL.md")
 		if _, err := os.Stat(path); err != nil {
-			t.Errorf("Expected allowed skill %s at %s, but stat failed: %v", name, path, err)
-		}
-	}
-
-	// Blocked skills must NOT exist
-	for _, name := range blockedSkills {
-		path := filepath.Join(skillsRoot, name)
-		if _, err := os.Lstat(path); !os.IsNotExist(err) {
-			t.Errorf("Expected blocked skill %s to be omitted, but found at %s", name, path)
+			t.Errorf("Expected skill %s at %s, but stat failed: %v", name, path, err)
 		}
 	}
 }
 
-func TestSyncSkills_PrunePreviouslyLinkedBlockedSkills(t *testing.T) {
-	tmpHome := t.TempDir()
-	p := New(tmpHome, t.TempDir())
-	p.SetCustomSkillsDir(t.TempDir())
-	p.SetSuperpowersDir(t.TempDir())
-	p.SetAgentsSkillsDir(t.TempDir())
-
-	skillsRoot := filepath.Join(tmpHome, ".gemini", "config", "skills")
-	_ = os.MkdirAll(skillsRoot, 0755)
-
-	// Pre-create stale symlinks/dirs for blocked skills
-	staleBlocked := filepath.Join(skillsRoot, "using-git-worktrees")
-	_ = os.MkdirAll(staleBlocked, 0755)
-	_ = os.WriteFile(filepath.Join(staleBlocked, "SKILL.md"), []byte("# Stale"), 0644)
-
-	if err := p.SyncSkills(); err != nil {
-		t.Fatalf("SyncSkills failed: %v", err)
-	}
-
-	if _, err := os.Lstat(staleBlocked); !os.IsNotExist(err) {
-		t.Errorf("Expected stale blocked skill %s to be pruned during SyncSkills", staleBlocked)
-	}
-}
-
-func TestLinkSkillsWithFilter(t *testing.T) {
+func TestLinkSkills_Branches(t *testing.T) {
 	targetDir := t.TempDir()
-	srcDir := t.TempDir()
+	srcDir1 := t.TempDir()
+	srcDir2 := t.TempDir()
 
-	for _, name := range []string{"allowed-one", "blocked-one", "allowed-two"} {
-		dir := filepath.Join(srcDir, name)
-		_ = os.MkdirAll(dir, 0755)
-		_ = os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("# "+name), 0644)
-	}
+	// 1. Skill in srcDir1 with SKILL.md
+	s1 := filepath.Join(srcDir1, "skill-one")
+	_ = os.MkdirAll(s1, 0755)
+	_ = os.WriteFile(filepath.Join(s1, "SKILL.md"), []byte("# S1"), 0644)
 
-	filter := map[string]bool{
-		"blocked-one": true,
-	}
+	// 2. Duplicate skill in srcDir2 (should be shadowed by srcDir1)
+	s1Dup := filepath.Join(srcDir2, "skill-one")
+	_ = os.MkdirAll(s1Dup, 0755)
+	_ = os.WriteFile(filepath.Join(s1Dup, "SKILL.md"), []byte("# S1 Dup"), 0644)
 
-	count := LinkSkillsWithFilter([]string{targetDir}, []string{srcDir}, filter)
+	// 3. Skill in srcDir2 missing SKILL.md (should be ignored)
+	sNoSkillMD := filepath.Join(srcDir2, "no-md")
+	_ = os.MkdirAll(sNoSkillMD, 0755)
+
+	// 4. Regular non-directory file in srcDir1 (should be ignored)
+	_ = os.WriteFile(filepath.Join(srcDir1, "regular-file.txt"), []byte("hello"), 0644)
+
+	// 5. Symlink to a directory with SKILL.md in srcDir2
+	realTarget := filepath.Join(t.TempDir(), "symlinked-skill")
+	_ = os.MkdirAll(realTarget, 0755)
+	_ = os.WriteFile(filepath.Join(realTarget, "SKILL.md"), []byte("# Symlinked"), 0644)
+	_ = os.Symlink(realTarget, filepath.Join(srcDir2, "symlinked-skill"))
+
+	// 6. Symlink to a file in srcDir2 (not a dir, should be ignored)
+	realFile := filepath.Join(t.TempDir(), "some-file")
+	_ = os.WriteFile(realFile, []byte("file"), 0644)
+	_ = os.Symlink(realFile, filepath.Join(srcDir2, "file-symlink"))
+
+	// 7. Non-existent source dir in sourceDirs list
+	count := LinkSkills([]string{targetDir}, []string{srcDir1, srcDir2, filepath.Join(t.TempDir(), "nonexistent")})
 	if count != 2 {
-		t.Errorf("Expected 2 skills linked, got %d", count)
+		t.Errorf("Expected 2 skills linked (skill-one and symlinked-skill), got %d", count)
 	}
 
-	if _, err := os.Stat(filepath.Join(targetDir, "allowed-one", "SKILL.md")); err != nil {
-		t.Errorf("Expected allowed-one to be linked")
-	}
-	if _, err := os.Stat(filepath.Join(targetDir, "allowed-two", "SKILL.md")); err != nil {
-		t.Errorf("Expected allowed-two to be linked")
-	}
-	if _, err := os.Lstat(filepath.Join(targetDir, "blocked-one")); !os.IsNotExist(err) {
-		t.Errorf("Expected blocked-one to be filtered out")
+	// 8. Re-run LinkSkills when target already has destinations and stale tmp files
+	staleTmp := filepath.Join(targetDir, "skill-one.tmp")
+	_ = os.WriteFile(staleTmp, []byte("stale tmp"), 0644)
+	count2 := LinkSkills([]string{targetDir}, []string{srcDir1})
+	if count2 != 1 {
+		t.Errorf("Expected 1 skill linked on re-run, got %d", count2)
 	}
 }
 
-func TestProvisioner_BlockedSkillsAccessors(t *testing.T) {
-	p := New(t.TempDir(), t.TempDir())
-	blocked := p.BlockedSkills()
-	if !blocked["using-git-worktrees"] {
-		t.Errorf("Expected using-git-worktrees to be in default blocked skills")
-	}
+func TestSweepOrphanedSymlinks_Branches(t *testing.T) {
+	// 1. Non-existent target directory
+	sweepOrphanedSymlinks([]string{filepath.Join(t.TempDir(), "nonexistent")})
 
-	p.SetBlockedSkills(map[string]bool{"custom-blocked": true})
-	updated := p.BlockedSkills()
-	if !updated["custom-blocked"] || updated["using-git-worktrees"] {
-		t.Errorf("SetBlockedSkills failed to update blocked skills")
-	}
-
-	p.SetBlockedSkills(nil)
-	if p.BlockedSkills() != nil {
-		t.Errorf("Expected nil from BlockedSkills when set to nil")
-	}
-
-	// Test SyncSkills with nil blockedSkills fallback to defaults
-	if err := p.SyncSkills(); err != nil {
-		t.Errorf("SyncSkills failed with nil blockedSkills: %v", err)
-	}
-}
-
-func TestPruneBlockedSkills_Branches(t *testing.T) {
-	// 1. len(blockedSkills) == 0 early return
-	pruneBlockedSkills([]string{t.TempDir()}, nil)
-	pruneBlockedSkills([]string{t.TempDir()}, map[string]bool{})
-
-	// 2. Non-existent dir
-	pruneBlockedSkills([]string{filepath.Join(t.TempDir(), "nonexistent")}, map[string]bool{"foo": true})
-
-	// 3. LinkSkillsWithFilter with nil filter
+	// 2. Real directory, regular file, valid symlink, and broken symlink
 	targetDir := t.TempDir()
-	srcDir := t.TempDir()
-	skillDir := filepath.Join(srcDir, "nil-filter-skill")
-	_ = os.MkdirAll(skillDir, 0755)
-	_ = os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("# Nil Filter"), 0644)
-	count := LinkSkillsWithFilter([]string{targetDir}, []string{srcDir}, nil)
-	if count != 1 {
-		t.Errorf("Expected 1 skill linked with nil filter, got %d", count)
+	_ = os.MkdirAll(filepath.Join(targetDir, "normal-dir"), 0755)
+	_ = os.WriteFile(filepath.Join(targetDir, "normal-file"), []byte("data"), 0644)
+
+	validTarget := filepath.Join(t.TempDir(), "valid-target")
+	_ = os.MkdirAll(validTarget, 0755)
+	validLink := filepath.Join(targetDir, "valid-link")
+	_ = os.Symlink(validTarget, validLink)
+
+	brokenTarget := filepath.Join(t.TempDir(), "broken-target")
+	_ = os.MkdirAll(brokenTarget, 0755)
+	brokenLink := filepath.Join(targetDir, "broken-link")
+	_ = os.Symlink(brokenTarget, brokenLink)
+	_ = os.RemoveAll(brokenTarget) // break the symlink
+
+	sweepOrphanedSymlinks([]string{targetDir})
+
+	if _, err := os.Lstat(validLink); err != nil {
+		t.Errorf("Expected valid link to remain: %v", err)
+	}
+	if _, err := os.Lstat(brokenLink); !os.IsNotExist(err) {
+		t.Errorf("Expected broken link to be removed")
 	}
 }
 
