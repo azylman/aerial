@@ -21,13 +21,13 @@ while IFS= read -r line; do
   case "$line" in
     *notask*)
       echo '{"event":"step_update","step_update":{"step_index":1,"state":"DONE","step_type":"agent_response"}}'
-      echo '{"event":"result","content":"Turn execution complete","usage":{"input_tokens":50,"output_tokens":25,"total_tokens":75}}'
+      echo '{"event":"result","result":{"status":"SUCCESS","response":"Turn execution complete","usage":{"input_tokens":50,"output_tokens":25,"total_tokens":75}}}'
       ;;
     *)
       echo '{"event":"step_update","step_update":{"step_index":1,"state":"ACTIVE","step_type":"tool","tool_name":"run_command","tool_info":{"parameters":{"CommandLine":"sleep 20"}}}}'
       echo '{"event":"step_update","step_update":{"step_index":2,"state":"DONE","step_type":"tool","tool_name":"run_command","tool_output":"Tool is running as a background task with task id: test-task-42"}}'
       echo '{"event":"step_update","step_update":{"step_index":3,"state":"DONE","step_type":"agent_response"}}'
-      echo '{"event":"result","content":"Turn execution complete","usage":{"input_tokens":100,"output_tokens":50,"total_tokens":150}}'
+      echo '{"event":"result","result":{"status":"SUCCESS","response":"Turn execution complete","usage":{"input_tokens":100,"output_tokens":50,"total_tokens":150}}}'
       ;;
   esac
 done
@@ -62,8 +62,8 @@ done
 	if err != nil {
 		t.Fatalf("ExecuteTurn failed: %v", err)
 	}
-	if res.Content != "Turn execution complete" {
-		t.Errorf("expected content 'Turn execution complete', got %q", res.Content)
+	if res.Response != "Turn execution complete" {
+		t.Errorf("expected response 'Turn execution complete', got %q", res.Response)
 	}
 	if res.Usage.TotalTokens != 150 {
 		t.Errorf("expected 150 total tokens, got %d", res.Usage.TotalTokens)
@@ -80,8 +80,8 @@ done
 	if err != nil {
 		t.Fatalf("ExecuteTurn 2 failed: %v", err)
 	}
-	if res2.Content != "Turn execution complete" {
-		t.Errorf("expected content 'Turn execution complete', got %q", res2.Content)
+	if res2.Response != "Turn execution complete" {
+		t.Errorf("expected response 'Turn execution complete', got %q", res2.Response)
 	}
 
 	// Verify state while yield-waiting
@@ -168,7 +168,7 @@ echo ""
 echo "not valid json"
 echo '{"event":"step_update","step_update":{"tool_name":"invoke_subagent","tool_output":"Subagent conversation started with conversation ID: subagent-777, {\"conversationId\": \"subagent-777\"}"}}'
 echo '{"event":"step_update","step_update":{"tool_output":"Task id \"subagent-777\" finished with result:"}}'
-echo '{"event":"result","content":"Done edge","usage":{"input_tokens":10,"output_tokens":20,"thinking_tokens":5,"cache_read_tokens":15,"total_tokens":50}}'
+echo '{"event":"result","result":{"status":"SUCCESS","response":"Done edge","usage":{"input_tokens":10,"output_tokens":20,"thinking_tokens":5,"cache_read_tokens":15,"total_tokens":50}}}'
 exit 0
 `
 	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
@@ -190,8 +190,8 @@ exit 0
 	if err != nil {
 		t.Fatalf("ExecuteTurn failed: %v", err)
 	}
-	if res.Content != "Done edge" {
-		t.Errorf("expected content 'Done edge', got %q", res.Content)
+	if res.Response != "Done edge" {
+		t.Errorf("expected response 'Done edge', got %q", res.Response)
 	}
 	if res.Usage.ThinkingTokens != 5 || res.Usage.CacheReadTokens != 15 {
 		t.Errorf("expected thinking=5 and cache_read=15, got %d and %d", res.Usage.ThinkingTokens, res.Usage.CacheReadTokens)
@@ -219,7 +219,7 @@ echo '{"event":"step_update","step_update":{"tool_output":"[Message] sender=task
 echo '{"event":"step_update","step_update":{"tool_output":"[Message] sender=task-sender-suffix priority=HIGH content=done"}}'
 echo '{"event":"step_update","step_update":{"tool_output":"Task id \"task-fin-99\" finished with result: ok"}}'
 echo '{"event":"step_update","step_update":{"tool_output":"Task id \"prefix/task-fin-suffix\" finished with result: ok"}}'
-echo '{"event":"result","content":"Task sender done","usage":{"total_tokens":20}}'
+echo '{"event":"result","result":{"status":"SUCCESS","response":"Task sender done","usage":{"total_tokens":20}}}'
 exit 0
 `
 	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
@@ -257,8 +257,8 @@ exit 0
 	if err != nil {
 		t.Fatalf("ExecuteTurn failed: %v", err)
 	}
-	if res.Content != "Task sender done" {
-		t.Errorf("expected 'Task sender done', got %q", res.Content)
+	if res.Response != "Task sender done" {
+		t.Errorf("expected 'Task sender done', got %q", res.Response)
 	}
 	if res.Duration < 0 {
 		t.Errorf("expected non-negative duration, got %v", res.Duration)
@@ -349,7 +349,7 @@ func TestDaemon_ExecuteClosedAndDoubleClose(t *testing.T) {
 	mockBin := filepath.Join(tempDir, "mock_simple.sh")
 	script := `#!/bin/sh
 read -r line
-echo '{"event":"result","content":"ok","usage":{}}'
+echo '{"event":"result","result":{"status":"SUCCESS","response":"ok","usage":{}}}'
 `
 	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
 		t.Fatalf("failed to write mock script: %v", err)
@@ -391,7 +391,7 @@ func TestDaemon_ExecuteTurnWithHandler(t *testing.T) {
 	script := `#!/bin/sh
 read -r line
 echo '{"event":"step_update","step_update":{"step_index":1,"state":"ACTIVE","step_type":"tool","tool_name":"test_tool"}}'
-echo '{"event":"result","content":"all done","usage":{"total_tokens":42}}'
+echo '{"event":"result","result":{"status":"SUCCESS","response":"all done","usage":{"total_tokens":42}}}'
 `
 	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
 		t.Fatalf("failed to write mock script: %v", err)
@@ -420,8 +420,8 @@ echo '{"event":"result","content":"all done","usage":{"total_tokens":42}}'
 	if err != nil {
 		t.Fatalf("ExecuteTurnWithHandler failed: %v", err)
 	}
-	if res.Content != "all done" {
-		t.Errorf("expected 'all done', got %q", res.Content)
+	if res.Response != "all done" {
+		t.Errorf("expected 'all done', got %q", res.Response)
 	}
 	if receivedStep == nil {
 		t.Fatalf("expected step update event to be received by handler")
@@ -446,7 +446,7 @@ func TestDaemon_CoverageBoost(t *testing.T) {
 	mockBin := filepath.Join(tempDir, "mock_env.sh")
 	script := `#!/bin/sh
 read -r line
-echo '{"event":"result","content":"env ok","usage":{}}'
+echo '{"event":"result","result":{"status":"SUCCESS","response":"env ok","usage":{}}}'
 `
 	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
 		t.Fatalf("failed to write mock script: %v", err)
@@ -485,7 +485,7 @@ func TestDaemon_InvokeSubagentAndEOF(t *testing.T) {
 read -r line
 echo ''
 echo '{"event":"step_update","step_update":{"tool_name":"invoke_subagent","tool_output":"Launched subagent {\"conversationId\": \"sub-999\"}"}}'
-echo '{"event":"result","content":"subagent launched","usage":{}}'
+echo '{"event":"result","result":{"status":"SUCCESS","response":"subagent launched","usage":{}}}'
 # Now terminate to trigger EOF on next read
 exit 0
 `
@@ -571,7 +571,7 @@ echo '{"event":"step_update","step_update":{"tool_name":"run_command","tool_outp
 echo '{"event":"step_update","step_update":{"tool_name":"finisher","tool_output":"Task id \"bg-2\" finished with result: done"}}'
 
 # 6. Final result
-echo '{"event":"result","content":"finished all edge cases","usage":{"total_tokens":10}}'
+echo '{"event":"result","result":{"status":"SUCCESS","response":"finished all edge cases","usage":{"total_tokens":10}}}'
 `
 	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
 		t.Fatalf("failed to write mock script: %v", err)
@@ -603,8 +603,8 @@ echo '{"event":"result","content":"finished all edge cases","usage":{"total_toke
 	if !flatReceived {
 		t.Errorf("expected flat_tool step update to be received by handler")
 	}
-	if res.Content != "finished all edge cases" {
-		t.Errorf("unexpected content: %q", res.Content)
+	if res.Response != "finished all edge cases" {
+		t.Errorf("unexpected response: %q", res.Response)
 	}
 	if d.TaskTracker().ActiveCount() != 0 {
 		t.Errorf("expected 0 active tasks after cleanup, got %d", d.TaskTracker().ActiveCount())
@@ -618,7 +618,7 @@ func TestDaemon_ColdStartSessionIDLatching_InitEvent(t *testing.T) {
 	script := fmt.Sprintf(`#!/bin/sh
 echo '{"event":"init","conversation_id":%q}'
 while IFS= read -r line; do
-  echo '{"event":"result","content":"Cold start turn done","usage":{"total_tokens":42}}'
+  echo '{"event":"result","result":{"status":"SUCCESS","response":"Cold start turn done","usage":{"total_tokens":42}}}'
 done
 `, validUUID)
 	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
@@ -660,7 +660,7 @@ func TestDaemon_ColdStartSessionIDLatching_ResultEvent(t *testing.T) {
 	validUUID := "33333333-4444-5555-6666-777777777777"
 	script := fmt.Sprintf(`#!/bin/sh
 while IFS= read -r line; do
-  echo '{"event":"result","conversation_id":%q,"content":"Result session latched","usage":{"total_tokens":10}}'
+  echo '{"event":"result","result":{"conversation_id":%q,"status":"SUCCESS","response":"Result session latched","usage":{"total_tokens":10}}}'
 done
 `, validUUID)
 	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
@@ -710,6 +710,67 @@ func TestDaemon_SessionID_FallbackStderrAndSetter(t *testing.T) {
 	d.SetSessionID(manualUUID)
 	if d.SessionID() != manualUUID {
 		t.Errorf("expected SessionID=%q after SetSessionID, got %q", manualUUID, d.SessionID())
+	}
+}
+
+func TestDaemon_ResultEventVariations(t *testing.T) {
+	tempDir := t.TempDir()
+	mockBin := filepath.Join(tempDir, "mock_variations.sh")
+	script := `#!/bin/sh
+# Turn 1: flat response
+read -r line
+echo '{"event":"result","response":"flat text","status":"SUCCESS","usage":{"total_tokens":55}}'
+
+# Turn 2: raw string in result field
+read -r line
+echo '{"event":"result","result":"raw string text","usage":{"input_tokens":10,"output_tokens":20}}'
+
+# Turn 3: invalid structure in result field triggering error
+read -r line
+echo '{"event":"result","result":12345}'
+`
+	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
+		t.Fatalf("failed to write mock script: %v", err)
+	}
+
+	ctx := context.Background()
+	d, err := StartDaemon(ctx, DaemonConfig{
+		AgyBin: mockBin,
+		Cwd:    tempDir,
+	})
+	if err != nil {
+		t.Fatalf("StartDaemon failed: %v", err)
+	}
+	defer d.Close()
+
+	// Turn 1
+	res1, err := d.ExecuteTurn(ctx, "turn 1")
+	if err != nil {
+		t.Fatalf("Turn 1 failed: %v", err)
+	}
+	if res1.Response != "flat text" {
+		t.Errorf("expected 'flat text', got %q", res1.Response)
+	}
+	if res1.Usage.TotalTokens != 55 {
+		t.Errorf("expected 55 total tokens, got %d", res1.Usage.TotalTokens)
+	}
+
+	// Turn 2
+	res2, err := d.ExecuteTurn(ctx, "turn 2")
+	if err != nil {
+		t.Fatalf("Turn 2 failed: %v", err)
+	}
+	if res2.Response != "raw string text" {
+		t.Errorf("expected 'raw string text', got %q", res2.Response)
+	}
+	if res2.Usage.TotalTokens != 30 {
+		t.Errorf("expected 30 total tokens (10+20), got %d", res2.Usage.TotalTokens)
+	}
+
+	// Turn 3
+	_, err = d.ExecuteTurn(ctx, "turn 3")
+	if err == nil {
+		t.Errorf("expected error for numeric result payload")
 	}
 }
 

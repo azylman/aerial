@@ -48,9 +48,11 @@ func parseMeminfo(r io.Reader) (float64, error) {
 	return 1.0, nil
 }
 
+var meminfoPath = "/proc/meminfo"
+
 // DefaultLinuxMemoryChecker inspects /proc/meminfo to calculate available memory headroom.
 func DefaultLinuxMemoryChecker() (float64, error) {
-	file, err := os.Open("/proc/meminfo")
+	file, err := os.Open(meminfoPath)
 	if err != nil {
 		return 1.0, err
 	}

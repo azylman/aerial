@@ -105,7 +105,7 @@ func TestWorker_PersistentDaemonTurnExecution(t *testing.T) {
 	mockBin := filepath.Join(tmpHome, "mock_agy.sh")
 	script := `#!/bin/sh
 while IFS= read -r line; do
-  echo '{"event":"result","content":"Executed via persistent daemon","usage":{"total_tokens":10}}'
+  echo '{"event":"result","result":{"status":"SUCCESS","response":"Executed via persistent daemon","usage":{"total_tokens":10}}}'
 done
 `
 	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
@@ -172,7 +172,7 @@ func TestWorker_ThreadWorker_ActiveTasksPreventReap(t *testing.T) {
 	mockBin := filepath.Join(tmpHome, "mock_agy.sh")
 	script := `#!/bin/sh
 while IFS= read -r line; do
-  echo '{"event":"result","content":"ok","usage":{"total_tokens":5}}'
+  echo '{"event":"result","result":{"status":"SUCCESS","response":"ok","usage":{"total_tokens":5}}}'
 done
 `
 	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
@@ -375,7 +375,7 @@ func TestWorkerPool_PersistentDaemon_ColdStart_Success(t *testing.T) {
 	script := fmt.Sprintf(`#!/bin/sh
 echo '{"event":"init","conversation_id":%q}'
 while IFS= read -r line; do
-  echo '{"event":"result","content":"Cold start completed successfully!","usage":{"total_tokens":25}}'
+  echo '{"event":"result","result":{"status":"SUCCESS","response":"Cold start completed successfully!","usage":{"total_tokens":25}}}'
 done
 `, validUUID)
 	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
@@ -450,7 +450,7 @@ func TestWorkerPool_PersistentDaemon_ColdStart_SessionMgrFallback(t *testing.T) 
 	mockBin := filepath.Join(tmpHome, "mock_agy.sh")
 	script := `#!/bin/sh
 while IFS= read -r line; do
-  echo '{"event":"result","content":"Turn completed with fallback session","usage":{"total_tokens":15}}'
+  echo '{"event":"result","result":{"status":"SUCCESS","response":"Turn completed with fallback session","usage":{"total_tokens":15}}}'
 done
 `
 	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
@@ -519,6 +519,81 @@ done
 	}
 	if !strings.Contains(deliveredText, "Turn completed with fallback session") {
 		t.Errorf("expected delivered text to contain completion response, got: %q", deliveredText)
+	}
+}
+
+func TestWorkerPool_EmptyResponse_TranscriptFallback(t *testing.T) {
+	tmpHome := t.TempDir()
+	tempData := t.TempDir()
+
+	store := setupTestStore(t)
+
+	validUUID := "e1111111-2222-3333-4444-555555555555"
+	mockBin := filepath.Join(tmpHome, "mock_agy.sh")
+	// Runner returns empty response in result event
+	script := fmt.Sprintf(`#!/bin/sh
+echo '{"event":"init","conversation_id":%q}'
+while IFS= read -r line; do
+  echo '{"event":"result","result":{"status":"SUCCESS","response":"","usage":{"total_tokens":10}}}'
+done
+`, validUUID)
+	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
+		t.Fatalf("failed to write mock script: %v", err)
+	}
+
+	// Prepare transcript on disk with substantive text
+	sessDir := filepath.Join(tempData, "brain", validUUID, ".system_generated", "logs")
+	_ = os.MkdirAll(sessDir, 0755)
+	transcriptLine := `{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","content":"Recovered from transcript!"}` + "\n"
+	_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(transcriptLine), 0644)
+
+	cfg := config.NewTestConfig(func(d *config.ConfigData) {
+		d.AgyBin = mockBin
+		d.DataDir = tempData
+	})
+
+	var deliveredText string
+	doneCh := make(chan struct{})
+	pool := New(cfg, WorkerPoolConfig{
+		SessionManager:       session.New(tmpHome, tempData),
+		Store:                store,
+		TimeoutMinutes:       1,
+		UsePersistentDaemons: true,
+		DeliveryFunc: func(sess *discordgo.Session, channelID, content string) error {
+			deliveredText = content
+			return nil
+		},
+		OnMessageCompleted: func(msg db.Message, status string) {
+			if status == db.StatusCompleted {
+				select {
+				case <-doneCh:
+				default:
+					close(doneCh)
+				}
+			}
+		},
+	})
+	defer pool.Stop()
+
+	threadID := "thread-empty-resp-fallback"
+	msg := db.Message{
+		ID:        "msg-empty-resp",
+		ThreadID:  threadID,
+		Content:   "test empty resp",
+		Status:    db.StatusPending,
+		CreatedAt: time.Now(),
+	}
+	_ = store.InsertMessage(context.Background(), msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for message completion")
+	}
+
+	if !strings.Contains(deliveredText, "Recovered from transcript!") {
+		t.Errorf("expected delivered text to contain recovered transcript content, got: %q", deliveredText)
 	}
 }
 

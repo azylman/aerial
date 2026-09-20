@@ -52,7 +52,7 @@ type DaemonConfig struct {
 
 type TurnResult struct {
 	ConversationID string
-	Content        string
+	Response       string
 	Usage          AgyUsage
 	ActiveTasks    []TaskMetadata
 	IsYieldTrap    bool
@@ -232,7 +232,7 @@ func (d *Daemon) ExecuteTurnWithHandler(ctx context.Context, prompt string, hand
 		}
 	}()
 
-	var turnContent strings.Builder
+	var turnResponse strings.Builder
 	var turnUsage AgyUsage
 	var lastToolName string
 	var lastToolCmd string
@@ -379,17 +379,50 @@ func (d *Daemon) ExecuteTurnWithHandler(ctx context.Context, prompt string, hand
 			}
 
 		case "result":
-			if c, ok := raw["content"].(string); ok {
-				turnContent.WriteString(c)
+			var probe sessionProbe
+			if err := json.Unmarshal([]byte(line), &probe); err != nil {
+				return nil, fmt.Errorf("failed to parse daemon result probe: %w", err)
 			}
-			if u, ok := raw["usage"].(map[string]interface{}); ok {
-				turnUsage = parseRawUsage(u)
+
+			var res AgyResponse
+			if len(probe.Result) > 0 {
+				if err := json.Unmarshal(probe.Result, &res); err != nil {
+					var rawStr string
+					if strErr := json.Unmarshal(probe.Result, &rawStr); strErr == nil {
+						res.Response = rawStr
+					} else {
+						return nil, fmt.Errorf("failed to parse daemon result object: %w", err)
+					}
+				}
+			} else {
+				if err := json.Unmarshal([]byte(line), &res); err != nil {
+					return nil, fmt.Errorf("failed to parse daemon result line: %w", err)
+				}
 			}
-			var resConvID string
-			if id, ok := raw["conversation_id"].(string); ok && IsValidUUID(id) {
-				resConvID = id
-			} else if id, ok := raw["session_id"].(string); ok && IsValidUUID(id) {
-				resConvID = id
+
+			if res.Response != "" {
+				turnResponse.WriteString(res.Response)
+			}
+			turnUsage = res.Usage
+			if turnUsage.TotalTokens == 0 && (res.Usage.InputTokens > 0 || res.Usage.OutputTokens > 0) {
+				turnUsage.TotalTokens = turnUsage.InputTokens + turnUsage.OutputTokens
+			}
+			if turnUsage.TotalTokens == 0 && turnUsage.InputTokens == 0 && turnUsage.OutputTokens == 0 {
+				if u, ok := raw["usage"].(map[string]interface{}); ok {
+					turnUsage = parseRawUsage(u)
+				}
+			}
+
+			resConvID := res.ConversationID
+			if !IsValidUUID(resConvID) {
+				resConvID = probe.extractUUID()
+			}
+			if !IsValidUUID(resConvID) {
+				if id, ok := raw["conversation_id"].(string); ok && IsValidUUID(id) {
+					resConvID = id
+				} else if id, ok := raw["session_id"].(string); ok && IsValidUUID(id) {
+					resConvID = id
+				}
 			}
 			if resConvID != "" {
 				d.mu.Lock()
@@ -407,7 +440,7 @@ func (d *Daemon) ExecuteTurnWithHandler(ctx context.Context, prompt string, hand
 
 			return &TurnResult{
 				ConversationID: d.SessionID(),
-				Content:        turnContent.String(),
+				Response:       turnResponse.String(),
 				Usage:          turnUsage,
 				ActiveTasks:    activeTasks,
 				IsYieldTrap:    isYield,
@@ -434,6 +467,9 @@ func parseRawUsage(u map[string]interface{}) AgyUsage {
 	}
 	if v, ok := u["total_tokens"].(float64); ok {
 		usage.TotalTokens = int(v)
+	}
+	if usage.TotalTokens == 0 && (usage.InputTokens > 0 || usage.OutputTokens > 0) {
+		usage.TotalTokens = usage.InputTokens + usage.OutputTokens
 	}
 	return usage
 }
