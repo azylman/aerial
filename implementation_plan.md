@@ -1,39 +1,53 @@
-# Implementation Plan: Purge Legacy SQLite Fallbacks & Unused Configs
+# Implementation Plan: Eliminate P0 Regex Parsing of JSON & Structured Payloads
 
-## 1. Overview & Objective
-Purge legacy SQLite configuration parameters (`db_path` in YAML, `DB_PATH` in environment variables) from `brain` and `scheduler-mcp`, and decouple the `modernc.org/sqlite` driver from production code in `scheduler-mcp` so that production strictly requires PostgreSQL 16 (`aerial-postgres`) per Invariant 7, while preserving hermetic test fixtures for in-memory unit tests.
+## Problem Statement
+The codebase contains brittle regular expressions for parsing structured JSON and event payloads:
+1. `brain/pkg/runner/pure.go` and `runner.go` use `reNDJSONInitSession` (`"event"\s*:\s*"init"[^}]*"conversation_id"\s*:\s*"([^"]+)"`) to extract conversation IDs from raw log lines.
+2. `brain/pkg/runner/daemon.go` uses `reSubagentStarted` (`"conversationId":\s*"([^"]+)"`) to extract subagent IDs from `invoke_subagent` tool outputs.
+3. `brain/pkg/runner/daemon.go` and `brain/pkg/session/session.go` use regexes (`reBackgroundTaskStarted`, `reTaskMessageSender`, `reTaskFinishedContent`) to scrape task and sender IDs from output strings.
 
-## 2. Proposed Changes
+This pattern is brittle, vulnerable to ordering or formatting changes, prone to self-poisoning when command outputs or test logs quote task signatures, and incurs unnecessary regex engine overhead.
 
-### 2.1 Brain Configuration (`brain/pkg/config/config.go`)
-- Remove `DBPath` field from `rawConfigHelper` struct.
-- Remove `raw.DBPath` fallback when `raw.DatabaseURL` is empty.
-- Remove `DB_PATH` lookup from `buildPostgresDSN(lookup)`.
-- Update `brain/pkg/config/config_test.go` to remove assertions asserting `DB_PATH` lookup and verify PostgreSQL env vars take precedence.
+## Architecture & Replacements (Approved by The Girl Gang Review Panel)
 
-### 2.2 Scheduler MCP Server (`scheduler-mcp/config.go` & `scheduler-mcp/db.go`)
-- In `scheduler-mcp/config.go`:
-  - Remove `DB_PATH` check in `LoadConfigFromLookup`.
-  - Update error message to specify `DATABASE_URL` or `POSTGRES_HOST`.
-- In `scheduler-mcp/db.go`:
-  - Remove `_ "modernc.org/sqlite"` from production imports.
-  - Introduce `sqliteTestInitHook func(string) (*sql.DB, error)` and `RegisterSQLiteTestHook(fn)`.
-  - In `initDB(dsn string)`:
-    - If `sqliteTestInitHook != nil && (isMemoryOrSqliteScheme)`, delegate to hook.
-    - Strictly validate that `dsn` starts with `postgres://` or `postgresql://`. Return error otherwise.
-    - Remove embedded SQLite table creation, PRAGMAs, and SQLite migration code from production binary.
-  - Wire `InitDB(cfg)` to call `NewDB(cfg)`.
-- In `scheduler-mcp/sqlite_test_fixture_test.go`:
-  - New test file linking `_ "modernc.org/sqlite"`.
-  - Implements SQLite schema setup, PRAGMAs, and migrations for unit tests (`:memory:`).
-  - Automatically registers `sqliteTestInitHook` in `init()`.
-- In `scheduler-mcp/server_test.go`:
-  - Update tests that tested `DB_PATH` env loading to verify rejection.
-  - Add `TestDB_SchemeValidationWithoutHook` to test rejection of SQLite schemes when hook is nil.
+### 1. Centralized Task Parsers in `brain/pkg/session/task_parsers.go`
+Rather than duplicating parsers across `runner` and `session`, define pure, deterministic parsers in `session` (which `runner` already imports):
+- `ParseBackgroundTaskStarted(s string) string`:
+  - Case-insensitive search for `"tool is running as a background task with task id:"`.
+  - Extracts the subsequent non-whitespace token, strips quotes and punctuation, returns `strings.Clone(token)`.
+- `ParseTaskMessageSender(s string) string`:
+  - Case-insensitive search for `"sender="`.
+  - Extracts the subsequent non-whitespace token, strips quotes and punctuation, returns `strings.Clone(token)`.
+- `ParseTaskFinishedContent(s string) string`:
+  - Finds `"task id"` and verifies `"finished with result:"` appears subsequently.
+  - Slices intermediate substring; verifies it is a SINGLE non-whitespace token (rejects any internal whitespace).
+  - Trims quotes and whitespace, returns `strings.Clone(token)`.
 
-## 3. Verification & Testing Strategy
-- Unit tests: Run `go test -v ./...` in `brain` and `scheduler-mcp`.
-- Statement coverage: Run `./scripts/check-coverage.sh --service scheduler-mcp` (verified 95.5% >= 95.0% floor).
-- Clean-room verification: Execute `./scripts/verify.sh --staged` in the scratch directory.
-- Diff audit: Devil's Advocate sign-off complete.
-- Scratch PR submission: Execute `/share/aerial/scripts/aerial-pr.sh submit`.
+### 2. `brain/pkg/runner/pure.go` & `runner.go` (`ParseInitEvent` and `ExtractSessionID`)
+- Remove `reNDJSONInitSession = regexp.MustCompile(...)` completely from `runner.go`.
+- Implement robust JSON unmarshaling into `sessionProbe`:
+  - Fast path: Direct `json.Unmarshal([]byte(trimmed), &probe)` if string starts with `{` and ends with `}`.
+  - Embedded JSON fallback: Locate candidate opening brace `idx := strings.Index(line, `{"event"`)` or `json.NewDecoder` stream decoding to avoid brace contamination from logger prefixes like `[2026-09-19 {thread-1}]`.
+  - Validate candidate UUID using `IsValidUUID`.
+
+### 3. `brain/pkg/runner/daemon.go`
+- Implement `extractSubagentID(toolOut string) string`:
+  - Handles direct JSON objects, array payloads `[...]`, and tool output with text prefixes.
+  - Deserializes into struct supporting both `conversationId` and `conversation_id`.
+  - Returns `strings.Clone(id)`.
+- Replace regex calls with `session.ParseBackgroundTaskStarted`, `session.ParseTaskMessageSender`, and `session.ParseTaskFinishedContent`.
+- Remove all 4 regexes (`reBackgroundTaskStarted`, `reSubagentStarted`, `reTaskMessageSender`, `reTaskFinishedContent`) and the `"regexp"` import from `daemon.go`.
+
+### 4. `brain/pkg/session/session.go`
+- Update `HasUnfinishedBackgroundTask` to use `ParseBackgroundTaskStarted`, `ParseTaskMessageSender`, and `ParseTaskFinishedContent`.
+- Remove all 3 regexes and the `"regexp"` import from `session.go`.
+
+### 5. Verification & TDD
+- Write tests in `brain/pkg/session/task_parsers_test.go`:
+  - Task started: quotes, whitespace, punctuation, newlines, case insensitivity.
+  - Task sender: quotes, whitespace, priority attributes.
+  - Task finished: quotes, prefix matching, non-whitespace constraint (reject internal spaces).
+- Update and add tests in `brain/pkg/runner/pure_test.go` and `brain/pkg/runner/runner_test.go`:
+  - `ParseInitEvent` with JSON prefixes, logger tags, invalid JSON, and valid UUIDs.
+  - `extractSubagentID` with camelCase, snake_case, array payloads, and leading text.
+- Verify full test suite passes with `go test -count=1 ./pkg/runner/... ./pkg/session/...`.

@@ -437,3 +437,71 @@ func TestEvaluateWatchdogStatus_Defaults(t *testing.T) {
 		t.Errorf("expected inactivity kill with default 5m cap, got %v", d2.Action)
 	}
 }
+
+func TestExtractSubagentID(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "standard camelCase object",
+			input:    `{"conversationId": "sub-123"}`,
+			expected: "sub-123",
+		},
+		{
+			name:     "snake_case object",
+			input:    `{"conversation_id": "sub-456"}`,
+			expected: "sub-456",
+		},
+		{
+			name:     "array payload",
+			input:    `[{"conversationId": "sub-789"}]`,
+			expected: "sub-789",
+		},
+		{
+			name:     "array payload with snake_case",
+			input:    `[{"conversation_id": "sub-array-snake"}]`,
+			expected: "sub-array-snake",
+		},
+		{
+			name:     "text prefix with embedded JSON",
+			input:    `Subagent conversation started with conversation ID: subagent-777, {"conversationId": "subagent-777"}`,
+			expected: "subagent-777",
+		},
+		{
+			name:     "nested subagents list",
+			input:    `{"subagents": [{"conversationId": "sub-nested-1"}]}`,
+			expected: "sub-nested-1",
+		},
+		{
+			name:     "logger prefix with braces before JSON",
+			input:    `[2026-09-19 {worker-1}] {"conversationId": "sub-logger-id"}`,
+			expected: "sub-logger-id",
+		},
+		{
+			name:     "empty input",
+			input:    "",
+			expected: "",
+		},
+		{
+			name:     "unrelated string",
+			input:    "Command completed with status 0",
+			expected: "",
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := extractSubagentID(tc.input)
+			if got != tc.expected {
+				t.Errorf("extractSubagentID(%q) = %q, want %q", tc.input, got, tc.expected)
+			}
+		})
+	}
+}
+
