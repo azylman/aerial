@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -609,4 +610,107 @@ echo '{"event":"result","content":"finished all edge cases","usage":{"total_toke
 		t.Errorf("expected 0 active tasks after cleanup, got %d", d.TaskTracker().ActiveCount())
 	}
 }
+
+func TestDaemon_ColdStartSessionIDLatching_InitEvent(t *testing.T) {
+	tempDir := t.TempDir()
+	mockBin := filepath.Join(tempDir, "mock_agy.sh")
+	validUUID := "22222222-3333-4444-5555-666666666666"
+	script := fmt.Sprintf(`#!/bin/sh
+echo '{"event":"init","conversation_id":%q}'
+while IFS= read -r line; do
+  echo '{"event":"result","content":"Cold start turn done","usage":{"total_tokens":42}}'
+done
+`, validUUID)
+	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
+		t.Fatalf("failed to write mock script: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	d, err := StartDaemon(ctx, DaemonConfig{
+		AgyBin:   mockBin,
+		Cwd:      tempDir,
+		ThreadID: "thread-cold-start",
+	})
+	if err != nil {
+		t.Fatalf("StartDaemon failed: %v", err)
+	}
+	defer d.Close()
+
+	if d.SessionID() != "" {
+		t.Errorf("expected initially empty SessionID before turn, got %q", d.SessionID())
+	}
+
+	res, err := d.ExecuteTurn(ctx, "cold start test prompt")
+	if err != nil {
+		t.Fatalf("ExecuteTurn failed: %v", err)
+	}
+	if res.ConversationID != validUUID {
+		t.Errorf("expected res.ConversationID=%q, got %q", validUUID, res.ConversationID)
+	}
+	if d.SessionID() != validUUID {
+		t.Errorf("expected d.SessionID()=%q, got %q", validUUID, d.SessionID())
+	}
+}
+
+func TestDaemon_ColdStartSessionIDLatching_ResultEvent(t *testing.T) {
+	tempDir := t.TempDir()
+	mockBin := filepath.Join(tempDir, "mock_agy.sh")
+	validUUID := "33333333-4444-5555-6666-777777777777"
+	script := fmt.Sprintf(`#!/bin/sh
+while IFS= read -r line; do
+  echo '{"event":"result","conversation_id":%q,"content":"Result session latched","usage":{"total_tokens":10}}'
+done
+`, validUUID)
+	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
+		t.Fatalf("failed to write mock script: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	d, err := StartDaemon(ctx, DaemonConfig{
+		AgyBin:   mockBin,
+		Cwd:      tempDir,
+		ThreadID: "thread-cold-result",
+	})
+	if err != nil {
+		t.Fatalf("StartDaemon failed: %v", err)
+	}
+	defer d.Close()
+
+	res, err := d.ExecuteTurn(ctx, "test prompt")
+	if err != nil {
+		t.Fatalf("ExecuteTurn failed: %v", err)
+	}
+	if res.ConversationID != validUUID {
+		t.Errorf("expected res.ConversationID=%q, got %q", validUUID, res.ConversationID)
+	}
+	if d.SessionID() != validUUID {
+		t.Errorf("expected d.SessionID()=%q, got %q", validUUID, d.SessionID())
+	}
+}
+
+func TestDaemon_SessionID_FallbackStderrAndSetter(t *testing.T) {
+	d := &Daemon{
+		stderrBuf: NewActivityWriter(""),
+	}
+	if d.SessionID() != "" {
+		t.Errorf("expected empty SessionID, got %q", d.SessionID())
+	}
+
+	validUUID := "44444444-5555-6666-7777-888888888888"
+	d.stderrBuf.SetSessionID(validUUID)
+	if d.SessionID() != validUUID {
+		t.Errorf("expected SessionID from stderrBuf=%q, got %q", validUUID, d.SessionID())
+	}
+
+	manualUUID := "55555555-6666-7777-8888-999999999999"
+	d.SetSessionID(manualUUID)
+	if d.SessionID() != manualUUID {
+		t.Errorf("expected SessionID=%q after SetSessionID, got %q", manualUUID, d.SessionID())
+	}
+}
+
 

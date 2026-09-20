@@ -114,7 +114,7 @@ func (p *DaemonPool) GetOrCreateDaemon(ctx context.Context, threadID string, ses
 
 	// Check existing
 	if d, ok := p.daemons[threadID]; ok {
-		if !d.IsDirty() && d.State() != runner.StateClosed && (sessionID == "" || d.SessionID() == sessionID) {
+		if !d.IsDirty() && d.State() != runner.StateClosed && (sessionID == "" || d.SessionID() == "" || d.SessionID() == sessionID) {
 			return d, nil
 		}
 		// Close dirty, dead, or rotated daemon
