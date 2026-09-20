@@ -756,27 +756,17 @@ func TestLoadMCPConfig_FileOverridesAndNormalizations(t *testing.T) {
 		t.Errorf("Expected 'from-file' in raw config, got: %s", string(raw))
 	}
 
-	// Remove mcp.config.json so options.json can be tested
+	// Remove mcp.config.json so cfg.MCPConfig fallback can be tested
 	_ = os.Remove(filepath.Join(tmpData, "mcp.config.json"))
 
-	// 2. Load from dataDir/options.json (string value)
-	optsStrJSON := `{"mcp_config": "{\"mcpServers\":{\"from-opts-str\":{\"serverUrl\":\"http://opts-str:8001/mcp\"}}}"}`
-	_ = os.WriteFile(filepath.Join(tmpData, "options.json"), []byte(optsStrJSON), 0644)
-	raw = p.LoadMCPConfig(nil)
-	if !strings.Contains(string(raw), "from-opts-str") {
-		t.Errorf("Expected 'from-opts-str' in raw config, got: %s", string(raw))
+	// 2. Load from cfg.Current().MCPConfig
+	cfgWithMCP := config.NewTestConfig(func(d *config.ConfigData) {
+		d.MCPConfig = `{"mcpServers":{"from-cfg":{"serverUrl":"http://from-cfg:8001/mcp"}}}`
+	})
+	raw = p.LoadMCPConfig(cfgWithMCP)
+	if !strings.Contains(string(raw), "from-cfg") {
+		t.Errorf("Expected 'from-cfg' in raw config, got: %s", string(raw))
 	}
-
-	// 3. Load from dataDir/options.json (raw JSON object value)
-	optsObjJSON := `{"mcp_config": {"mcpServers":{"from-opts-obj":{"serverUrl":"http://opts-obj:8002/mcp"}}}}`
-	_ = os.WriteFile(filepath.Join(tmpData, "options.json"), []byte(optsObjJSON), 0644)
-	raw = p.LoadMCPConfig(nil)
-	if !strings.Contains(string(raw), "from-opts-obj") {
-		t.Errorf("Expected 'from-opts-obj' in raw config, got: %s", string(raw))
-	}
-
-	// Clean up options.json
-	_ = os.Remove(filepath.Join(tmpData, "options.json"))
 
 	// 4. cur.McpServers with unmarshalable JSON value (exercises `mergedServers[k] = v` and json.Marshal error branch)
 	cfgInvalid := config.NewTestConfig(func(d *config.ConfigData) {
@@ -1257,6 +1247,66 @@ func TestSyncRules_EdgeCasesAndCoverage(t *testing.T) {
 	p4.SetSystemInstructionsSearchPaths([]string{lkgcFile})
 	if err := p4.SyncRules(""); err != nil {
 		t.Fatalf("SyncRules with .GEMINI.md.lkgc failed: %v", err)
+	}
+}
+
+func TestProvisioner_NilAndEmptyEdgeCases(t *testing.T) {
+	var pNil *Provisioner
+	if err := pNil.Sync(context.Background(), nil); err != nil {
+		t.Errorf("Expected nil error for nil provisioner Sync, got %v", err)
+	}
+	if err := pNil.SyncSkills(); err != nil {
+		t.Errorf("Expected nil error for nil provisioner SyncSkills, got %v", err)
+	}
+	pEmpty := &Provisioner{}
+	if err := pEmpty.Sync(context.Background(), nil); err != nil {
+		t.Errorf("Expected nil error for empty homeDir provisioner Sync, got %v", err)
+	}
+	if err := pEmpty.SyncSkills(); err != nil {
+		t.Errorf("Expected nil error for empty homeDir provisioner SyncSkills, got %v", err)
+	}
+	if pEmpty.HomeDir() != "" {
+		t.Errorf("Expected empty HomeDir, got %s", pEmpty.HomeDir())
+	}
+	if pEmpty.DataDir() != "" {
+		t.Errorf("Expected empty DataDir, got %s", pEmpty.DataDir())
+	}
+
+	// Test legacy directories cleanup in SyncSkills
+	tmpHome := t.TempDir()
+	pLegacy := New(tmpHome, t.TempDir())
+	legacySkills := filepath.Join(tmpHome, ".gemini", "skills")
+	legacyPlugins := filepath.Join(tmpHome, ".gemini", "config", "plugins", "superpowers")
+	_ = os.MkdirAll(legacySkills, 0755)
+	_ = os.MkdirAll(legacyPlugins, 0755)
+	if err := pLegacy.SyncSkills(); err != nil {
+		t.Fatalf("SyncSkills failed with legacy dirs: %v", err)
+	}
+	if _, err := os.Stat(legacySkills); !os.IsNotExist(err) {
+		t.Errorf("expected legacy skills dir to be removed")
+	}
+	if _, err := os.Stat(legacyPlugins); !os.IsNotExist(err) {
+		t.Errorf("expected legacy plugins dir to be removed")
+	}
+}
+
+func TestSyncRules_ConfigRuleWriteFailure(t *testing.T) {
+	tmpHome := t.TempDir()
+	p := New(tmpHome, t.TempDir())
+	configRulesDir := filepath.Join(tmpHome, ".gemini", "config", "rules")
+	_ = os.MkdirAll(configRulesDir, 0755)
+	// Create user_persona.md as a non-empty directory so writeAtomic fails
+	blockedPersona := filepath.Join(configRulesDir, "user_persona.md")
+	_ = os.MkdirAll(filepath.Join(blockedPersona, "sub"), 0755)
+
+	srcDir := t.TempDir()
+	agentsPath := filepath.Join(srcDir, "AGENTS.md")
+	_ = os.WriteFile(agentsPath, []byte("Content"), 0644)
+	p.SetAgentInstructionsSearchPaths([]string{agentsPath})
+
+	// SyncRules should succeed overall and log a warning for config rules
+	if err := p.SyncRules(""); err != nil {
+		t.Fatalf("SyncRules failed: %v", err)
 	}
 }
 

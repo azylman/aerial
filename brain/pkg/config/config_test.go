@@ -1722,32 +1722,6 @@ func TestResolveChannelPolicy_WakeModeInheritance(t *testing.T) {
 	}
 }
 
-func TestGetFallbackDefaults_DataOptions(t *testing.T) {
-	if _, err := os.Stat("/data"); err == nil {
-		origOptions, readErr := os.ReadFile("/data/options.json")
-		defer func() {
-			if readErr == nil {
-				_ = os.WriteFile("/data/options.json", origOptions, 0644)
-			} else {
-				_ = os.Remove("/data/options.json")
-			}
-		}()
-
-		origGlobal := activeGlobalConfig.Current()
-		defer func() {
-			activeGlobalConfig.update(origGlobal)
-		}()
-		activeGlobalConfig.update(&ConfigData{})
-
-		// 1. Model override in /data/options.json
-		_ = os.WriteFile("/data/options.json", []byte(`{"model":"gemini-custom-data"}`), 0644)
-		fb := getFallbackDefaults()
-		if fb.Model != "gemini-custom-data" {
-			t.Errorf("Expected Model=gemini-custom-data from /data/options.json, got %s", fb.Model)
-		}
-	}
-}
-
 func TestLoadChannelInstructions_PathAndFileEdgeCases(t *testing.T) {
 	tmpDir := t.TempDir()
 	instructionsDir := filepath.Join(tmpDir, "channels")
