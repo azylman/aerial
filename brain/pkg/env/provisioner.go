@@ -22,7 +22,6 @@ type Provisioner struct {
 	agentsSkillsDir         string
 	agentInstructionsPaths  []string
 	systemInstructionsPaths []string
-	blockedSkills           map[string]bool
 
 	mu                sync.Mutex
 	lkgcPersona       string
@@ -34,19 +33,20 @@ type Provisioner struct {
 
 // New creates a Provisioner targeting the given homeDir and dataDir.
 func New(homeDir, dataDir string) *Provisioner {
-	blocked := make(map[string]bool, len(DefaultBlockedSkills))
-	for k, v := range DefaultBlockedSkills {
-		blocked[k] = v
+	skillsDir := "/opt/skills"
+	if _, err := os.Stat(skillsDir); err != nil {
+		if _, errLegacy := os.Stat("/opt/superpowers/skills"); errLegacy == nil {
+			skillsDir = "/opt/superpowers/skills"
+		}
 	}
 	return &Provisioner{
 		homeDir:                 strings.TrimSpace(homeDir),
 		dataDir:                 strings.TrimSpace(dataDir),
 		customSkillsDir:         "/share/aerial-config/custom-skills",
-		superpowersDir:          "/opt/superpowers/skills",
+		superpowersDir:          skillsDir,
 		agentsSkillsDir:         "/app/.agents/skills",
 		agentInstructionsPaths:  DefaultAgentInstructionsSearchPaths,
 		systemInstructionsPaths: DefaultSystemInstructionsSearchPaths,
-		blockedSkills:           blocked,
 	}
 }
 
@@ -63,7 +63,7 @@ func (p *Provisioner) SetCustomSkillsDir(dir string) {
 	p.customSkillsDir = dir
 }
 
-// SetSuperpowersDir sets the search path for superpowers skills.
+// SetSuperpowersDir sets the search path for methodology skills.
 func (p *Provisioner) SetSuperpowersDir(dir string) {
 	p.superpowersDir = dir
 }
@@ -71,23 +71,6 @@ func (p *Provisioner) SetSuperpowersDir(dir string) {
 // SetAgentsSkillsDir sets the search path for application built-in skills.
 func (p *Provisioner) SetAgentsSkillsDir(dir string) {
 	p.agentsSkillsDir = dir
-}
-
-// SetBlockedSkills sets the set of skill names excluded from runtime linking.
-func (p *Provisioner) SetBlockedSkills(blocked map[string]bool) {
-	p.blockedSkills = blocked
-}
-
-// BlockedSkills returns a copy of the set of skill names excluded from runtime linking.
-func (p *Provisioner) BlockedSkills() map[string]bool {
-	if p.blockedSkills == nil {
-		return nil
-	}
-	copyMap := make(map[string]bool, len(p.blockedSkills))
-	for k, v := range p.blockedSkills {
-		copyMap[k] = v
-	}
-	return copyMap
 }
 
 // SetAgentInstructionsSearchPaths sets the search paths for AGENTS.md instructions.
