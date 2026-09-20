@@ -513,9 +513,9 @@ func TestMCP_DB_AllBranches(t *testing.T) {
 	env2 := map[string]string{
 		"DB_PATH": "/tmp/local.db",
 	}
-	cfg2, err := LoadConfigFromLookup(func(k string) string { return env2[k] })
-	if err != nil || cfg2.DatabaseURL != "/tmp/local.db" || cfg2.Port != "8080" || cfg2.Timezone != DefaultTimezone {
-		t.Errorf("expected DB_PATH to be loaded, got %+v, err=%v", cfg2, err)
+	_, err2 := LoadConfigFromLookup(func(k string) string { return env2[k] })
+	if err2 == nil {
+		t.Errorf("expected error when only legacy DB_PATH is set, got nil")
 	}
 
 	env3 := map[string]string{
@@ -649,5 +649,18 @@ func TestMCP_DB_AllBranches(t *testing.T) {
 		t.Fatalf("failed to init sqlite with query params: %v", errParams)
 	}
 	_ = dbParams.Close()
+}
+
+func TestDB_SchemeValidationWithoutHook(t *testing.T) {
+	oldHook := sqliteTestInitHook
+	sqliteTestInitHook = nil
+	defer func() { sqliteTestInitHook = oldHook }()
+
+	for _, invalidScheme := range []string{":memory:", "sqlite://scheduler.db", "file:scheduler.db?mode=memory", "/var/data/scheduler.db"} {
+		_, err := initDB(invalidScheme)
+		if err == nil {
+			t.Errorf("expected error for unhooked sqlite scheme %q in initDB, got nil", invalidScheme)
+		}
+	}
 }
 

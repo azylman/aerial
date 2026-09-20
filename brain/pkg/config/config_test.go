@@ -2305,15 +2305,15 @@ func TestBuildPostgresDSN_Lookup(t *testing.T) {
 		t.Errorf("expected direct DATABASE_URL, got %q", dsn)
 	}
 
-	// 2. Direct DB_PATH
+	// 2. DB_PATH is ignored (returns empty when no Postgres vars set)
 	lookup2 := func(k string) string {
 		if k == "DB_PATH" {
 			return "/var/data/app.db"
 		}
 		return ""
 	}
-	if dsn := buildPostgresDSN(lookup2); dsn != "/var/data/app.db" {
-		t.Errorf("expected direct DB_PATH, got %q", dsn)
+	if dsn := buildPostgresDSN(lookup2); dsn != "" {
+		t.Errorf("expected DB_PATH to be ignored, got %q", dsn)
 	}
 
 	// 3. Components

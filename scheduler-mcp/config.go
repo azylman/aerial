@@ -57,9 +57,6 @@ func LoadConfigFromLookup(lookup func(string) string) (*Config, error) {
 
 	dbURL := strings.TrimSpace(lookup("DATABASE_URL"))
 	if dbURL == "" {
-		dbURL = strings.TrimSpace(lookup("DB_PATH"))
-	}
-	if dbURL == "" {
 		dbHost := strings.TrimSpace(lookup("POSTGRES_HOST"))
 		if dbHost != "" {
 			dbUser := strings.TrimSpace(lookup("POSTGRES_USER"))
@@ -83,7 +80,7 @@ func LoadConfigFromLookup(lookup func(string) string) (*Config, error) {
 	}
 
 	if dbURL == "" {
-		return nil, fmt.Errorf("database connection string is required (set DATABASE_URL, DB_PATH, or POSTGRES_HOST)")
+		return nil, fmt.Errorf("database connection string is required (set DATABASE_URL or POSTGRES_HOST)")
 	}
 
 	return &Config{
