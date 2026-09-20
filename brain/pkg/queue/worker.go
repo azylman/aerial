@@ -1397,7 +1397,7 @@ func (te *turnExecution) executeWithRetries() {
 			promptToSend = te.turnPrompt
 		}
 		if attempt > 1 && promptToSend == te.turnPrompt {
-			if (runner.IsInactivityTimeout(lastErrDetail, lastStderr) || strings.Contains(lastErrDetail, "max duration exceeded")) && te.currentSessionID != "" && te.pool.sessionMgr != nil && te.pool.sessionMgr.SessionExistsOnDisk(te.currentSessionID) {
+			if (runner.IsInactivityTimeout(lastErrDetail, lastStderr) || strings.Contains(lastErrDetail, "max duration exceeded") || strings.Contains(lastErrDetail, "print timeout") || strings.Contains(lastErrDetail, "empty response after")) && te.currentSessionID != "" && te.pool.sessionMgr != nil && te.pool.sessionMgr.SessionExistsOnDisk(te.currentSessionID) {
 				promptToSend = fmt.Sprintf(ContinuationPromptTemplate, te.turnPrompt)
 			}
 		}

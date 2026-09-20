@@ -69,11 +69,8 @@ type Daemon struct {
 	sessionID   string
 }
 
-func StartDaemon(ctx context.Context, cfg DaemonConfig) (*Daemon, error) {
-	if cfg.AgyBin == "" {
-		cfg.AgyBin = "agy"
-	}
-
+// BuildDaemonArgs constructs the CLI arguments for launching an agy streaming daemon process.
+func BuildDaemonArgs(cfg DaemonConfig) []string {
 	args := []string{
 		"--dangerously-skip-permissions",
 		"--input-format", "stream-json",
@@ -85,6 +82,26 @@ func StartDaemon(ctx context.Context, cfg DaemonConfig) (*Daemon, error) {
 	if cfg.Model != "" {
 		args = append(args, "--model", cfg.Model)
 	}
+
+	printTimeout := cfg.Timeout
+	if printTimeout <= 0 {
+		printTimeout = 60 * time.Minute
+	}
+	if int(printTimeout.Seconds())%60 == 0 {
+		args = append(args, "--print-timeout", fmt.Sprintf("%dm", int(printTimeout.Minutes())))
+	} else {
+		args = append(args, "--print-timeout", fmt.Sprintf("%ds", int(printTimeout.Seconds())))
+	}
+
+	return args
+}
+
+func StartDaemon(ctx context.Context, cfg DaemonConfig) (*Daemon, error) {
+	if cfg.AgyBin == "" {
+		cfg.AgyBin = "agy"
+	}
+
+	args := BuildDaemonArgs(cfg)
 
 	cmd := exec.Command(cfg.AgyBin, args...)
 	if runtime.GOOS == "windows" && strings.HasSuffix(cfg.AgyBin, ".sh") {
@@ -237,6 +254,7 @@ func (d *Daemon) ExecuteTurnWithHandler(ctx context.Context, prompt string, hand
 	var turnUsage AgyUsage
 	var lastToolName string
 	var lastToolCmd string
+	var toolCallCount int
 
 	for {
 		line, readErr := d.stdout.ReadString('\n')
@@ -319,6 +337,7 @@ func (d *Daemon) ExecuteTurnWithHandler(ctx context.Context, prompt string, hand
 			if ok && stepUpdate != nil {
 				if toolName, ok := stepUpdate["tool_name"].(string); ok && toolName != "" {
 					lastToolName = toolName
+					toolCallCount++
 				}
 				if toolInfo, ok := stepUpdate["tool_info"].(map[string]interface{}); ok {
 					if params, ok := toolInfo["parameters"].(map[string]interface{}); ok {
@@ -435,6 +454,18 @@ func (d *Daemon) ExecuteTurnWithHandler(ctx context.Context, prompt string, hand
 			activeTasks := d.taskTracker.ActiveTasks()
 			isYield := len(activeTasks) > 0
 
+			hasPrintTimeout := d.stderrBuf != nil && strings.Contains(strings.ToLower(d.stderrBuf.String()), "print timeout")
+			if turnResponse.Len() == 0 && !isYield && (hasPrintTimeout || toolCallCount > 0) {
+				d.mu.Lock()
+				d.dirty = true
+				d.state = StateClosed
+				d.mu.Unlock()
+				if hasPrintTimeout {
+					return nil, fmt.Errorf("daemon turn timed out waiting for output (print timeout): %s", d.stderrBuf.String())
+				}
+				return nil, fmt.Errorf("daemon turn completed with empty response after %d tool call(s) (possible print timeout or aborted turn)", toolCallCount)
+			}
+
 			return &TurnResult{
 				ConversationID: d.SessionID(),
 				Response:       turnResponse.String(),
@@ -541,7 +572,7 @@ func (d *Daemon) RSSBytes() uint64 {
 	return pages * uint64(os.Getpagesize())
 }
 
-func (d *Daemon) State() DaemonState         { d.mu.Lock(); defer d.mu.Unlock(); return d.state }
+func (d *Daemon) State() DaemonState { d.mu.Lock(); defer d.mu.Unlock(); return d.state }
 func (d *Daemon) SessionID() string {
 	d.mu.Lock()
 	defer d.mu.Unlock()

@@ -12,7 +12,6 @@ import (
 	"time"
 )
 
-
 func TestDaemon_LifecycleAndTurnExecution(t *testing.T) {
 	tempDir := t.TempDir()
 	mockBin := filepath.Join(tempDir, "mock_agy.sh")
@@ -861,4 +860,160 @@ done
 	}
 }
 
+func TestBuildDaemonArgs(t *testing.T) {
+	tests := []struct {
+		name     string
+		cfg      DaemonConfig
+		contains []string
+		omits    []string
+	}{
+		{
+			name: "Default timeout 60m",
+			cfg: DaemonConfig{
+				SessionID: "sess-abc",
+				Model:     "gemini-test",
+			},
+			contains: []string{
+				"--dangerously-skip-permissions",
+				"--input-format", "stream-json",
+				"--output-format", "stream-json",
+				"--conversation", "sess-abc",
+				"--model", "gemini-test",
+				"--print-timeout", "60m",
+			},
+		},
+		{
+			name: "Custom minute timeout",
+			cfg: DaemonConfig{
+				Timeout: 15 * time.Minute,
+			},
+			contains: []string{
+				"--print-timeout", "15m",
+			},
+			omits: []string{"--conversation", "--model"},
+		},
+		{
+			name: "Custom second timeout",
+			cfg: DaemonConfig{
+				Timeout: 45 * time.Second,
+			},
+			contains: []string{
+				"--print-timeout", "45s",
+			},
+		},
+	}
 
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			args := BuildDaemonArgs(tc.cfg)
+			for i := 0; i < len(tc.contains); i++ {
+				expected := tc.contains[i]
+				found := false
+				for j, arg := range args {
+					if arg == expected {
+						if i+1 < len(tc.contains) && !strings.HasPrefix(tc.contains[i+1], "--") {
+							if j+1 < len(args) && args[j+1] == tc.contains[i+1] {
+								found = true
+								i++
+								break
+							}
+						} else {
+							found = true
+							break
+						}
+					}
+				}
+				if !found {
+					t.Errorf("expected args to contain %q, but got %v", expected, args)
+				}
+			}
+
+			for _, omitted := range tc.omits {
+				for _, arg := range args {
+					if arg == omitted {
+						t.Errorf("expected args to omit %q, but found it in %v", omitted, args)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestDaemon_EmptyResponseAndPrintTimeoutSafeguard(t *testing.T) {
+	tempDir := t.TempDir()
+	mockBin := filepath.Join(tempDir, "mock_safeguard.sh")
+	script := `#!/bin/sh
+echo '{"event":"init","init":{"tools":["run_command"]}}'
+while IFS= read -r line; do
+  case "$line" in
+    *print_timeout*)
+      echo "W0919 22:52:39.500551 1 poll.go:204] Print mode: print timeout after 5m0s with turn in progress" >&2
+      echo '{"event":"step_update","step_update":{"step_index":1,"state":"ACTIVE","step_type":"tool","tool_name":"run_command"}}'
+      echo '{"event":"result","result":{"status":"SUCCESS","response":""}}'
+      ;;
+    *empty_with_tools*)
+      echo '{"event":"step_update","step_update":{"step_index":1,"state":"ACTIVE","step_type":"tool","tool_name":"run_command"}}'
+      echo '{"event":"result","result":{"status":"SUCCESS","response":""}}'
+      ;;
+    *)
+      echo '{"event":"result","result":{"status":"SUCCESS","response":"ok response"}}'
+      ;;
+  esac
+done
+`
+	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
+		t.Fatalf("failed to write mock script: %v", err)
+	}
+
+	ctx := context.Background()
+
+	t.Run("Print Timeout Triggers Error", func(t *testing.T) {
+		d, err := StartDaemon(ctx, DaemonConfig{
+			AgyBin: mockBin,
+			Cwd:    tempDir,
+		})
+		if err != nil {
+			t.Fatalf("StartDaemon failed: %v", err)
+		}
+		defer d.Close()
+
+		_, turnErr := d.ExecuteTurn(ctx, "trigger print_timeout")
+		if turnErr == nil {
+			t.Fatalf("expected error for print timeout turn, got nil")
+		}
+		if !strings.Contains(turnErr.Error(), "print timeout") {
+			t.Errorf("expected error to mention 'print timeout', got: %v", turnErr)
+		}
+		if !d.IsDirty() {
+			t.Errorf("expected daemon to be marked dirty after print timeout")
+		}
+		if d.State() != StateClosed {
+			t.Errorf("expected daemon state to be CLOSED, got: %s", d.State())
+		}
+	})
+
+	t.Run("Empty Response After Tools Triggers Error", func(t *testing.T) {
+		d, err := StartDaemon(ctx, DaemonConfig{
+			AgyBin: mockBin,
+			Cwd:    tempDir,
+		})
+		if err != nil {
+			t.Fatalf("StartDaemon failed: %v", err)
+		}
+		defer d.Close()
+
+		_, turnErr := d.ExecuteTurn(ctx, "trigger empty_with_tools")
+		if turnErr == nil {
+			t.Fatalf("expected error for empty response after tools, got nil")
+		}
+		if !strings.Contains(turnErr.Error(), "empty response after") {
+			t.Errorf("expected error to mention 'empty response after', got: %v", turnErr)
+		}
+		if !d.IsDirty() {
+			t.Errorf("expected daemon to be marked dirty after empty response")
+		}
+		if d.State() != StateClosed {
+			t.Errorf("expected daemon state to be CLOSED, got: %s", d.State())
+		}
+	})
+}
