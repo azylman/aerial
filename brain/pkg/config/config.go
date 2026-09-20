@@ -191,7 +191,6 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 		GitSync                   GitSyncConfig            `yaml:"git_sync"`
 		McpServers                map[string]interface{}   `yaml:"mcp_servers"`
 		DatabaseURL               string                   `yaml:"database_url"`
-		DBPath                    string                   `yaml:"db_path"`
 		Port                      string                   `yaml:"port"`
 		AgyBin                    string                   `yaml:"agy_bin"`
 		APIKey                    string                   `yaml:"api_key"`
@@ -223,9 +222,6 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 	c.Channels = raw.Channels
 	c.GitSync = raw.GitSync
 	c.DatabaseURL = raw.DatabaseURL
-	if c.DatabaseURL == "" {
-		c.DatabaseURL = raw.DBPath
-	}
 	c.Port = raw.Port
 	c.AgyBin = raw.AgyBin
 	c.APIKey = raw.APIKey
@@ -488,9 +484,6 @@ func buildPostgresDSN(lookup func(string) string) string {
 	}
 	if envDSN := strings.TrimSpace(lookup("DATABASE_URL")); envDSN != "" {
 		return envDSN
-	}
-	if envDBPath := strings.TrimSpace(lookup("DB_PATH")); envDBPath != "" {
-		return envDBPath
 	}
 	dbHost := strings.TrimSpace(lookup("POSTGRES_HOST"))
 	if dbHost == "" {
