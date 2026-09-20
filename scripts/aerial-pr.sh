@@ -1,16 +1,100 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# scripts/aerial-pr.sh - Monorepo PR Automation & Continuous Integration Verifier
-# Safely clones azylman/aerial into ephemeral scratch space, verifies changes with scripts/verify.sh,
-# creates Pull Requests, schedules follow-up checks via scheduler-mcp, and provides single-shot merge verification.
+# scripts/aerial-pr.sh - Unified Monorepo PR Automation & Continuous Integration Verifier
+# Safely clones repositories into ephemeral scratch space, enforces the universal
+# verification contract (scripts/verify.sh --staged), creates Pull Requests with auto-merge,
+# schedules follow-up checks via scheduler-mcp, and provides single-shot merge verification.
 
 REPO_OWNER="azylman"
-REPO_NAME="aerial"
-REPO_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}.git"
+DEFAULT_REPO="aerial"
+REPO_NAME="${AERIAL_REPO_NAME:-$DEFAULT_REPO}"
+REPO_NAME_EXPLICIT=0
 DEFAULT_BRANCH="main"
 SIDE_SYNC_URL="${AERIAL_HANGAR_URL:-${AERIAL_GITSYNC_URL:-http://aerial-hangar:8080/sync}}"
 DEFAULT_PR_CHECK_DELAY="2m"
+
+normalize_repo() {
+    local r="${1:-}"
+    # Strip any leading owner/ prefix (e.g. azylman/aerial-config -> aerial-config)
+    r="${r##*/}"
+    # Strip .git suffix if present
+    r="${r%.git}"
+    case "$r" in
+        core|aerial)
+            echo "aerial"
+            ;;
+        config|aerial-config)
+            echo "aerial-config"
+            ;;
+        sidecars|aerial-sidecars)
+            echo "aerial-sidecars"
+            ;;
+        *)
+            echo "$r"
+            ;;
+    esac
+}
+
+extract_remote_repo() {
+    local remote_url="${1:-}"
+    PARSED_OWNER=""
+    PARSED_REPO=""
+    local clean_url="${remote_url%/}"
+    clean_url="${clean_url%.git}"
+    if [[ "$clean_url" =~ github\.com[:/]([^/]+)/([^/]+)$ ]]; then
+        PARSED_OWNER="${BASH_REMATCH[1]}"
+        PARSED_REPO="${BASH_REMATCH[2]}"
+    fi
+}
+
+run_preflight_verification() {
+    local target_dir="${1:-.}"
+    if [ -f "${target_dir}/scripts/verify.sh" ]; then
+        echo "⚡ Running pre-flight verification checks in scratch checkout..." >&2
+        chmod +x "${target_dir}/scripts/verify.sh" 2>/dev/null || true
+        if ! (cd "${target_dir}" && ./scripts/verify.sh --staged) >&2; then
+            echo "ERROR: Pre-flight verification failed in scratch workspace. Aborting submit." >&2
+            if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
+                echo "💾 [aerial-pr] Scratch workspace preserved at: ${SCRATCH_DIR_CLEANUP}" >&2
+                SCRATCH_DIR_CLEANUP=""
+            fi
+            return 1
+        fi
+    fi
+    return 0
+}
+
+# Testing hook: allow unit tests to source helper functions without executing command dispatch
+if [ "${REPO_TEST_MODE:-0}" = "1" ] || [ "${1:-}" = "--source-only" ]; then
+    return 0 2>/dev/null || exit 0
+fi
+
+# Pre-dispatch global flag parsing (allows --repo before or after command)
+PRE_ARGS=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --repo|-r)
+            if [ $# -lt 2 ]; then
+                echo "ERROR: $1 requires a repository name." >&2
+                exit 1
+            fi
+            REPO_NAME="$(normalize_repo "$2")"
+            REPO_NAME_EXPLICIT=1
+            shift 2
+            ;;
+        --repo=*)
+            REPO_NAME="$(normalize_repo "${1#*=}")"
+            REPO_NAME_EXPLICIT=1
+            shift 1
+            ;;
+        *)
+            PRE_ARGS+=("$1")
+            shift 1
+            ;;
+    esac
+done
+set -- "${PRE_ARGS[@]}"
 
 cmd="${1:-}"
 if [ -n "$cmd" ]; then
@@ -27,6 +111,39 @@ build_auth_header() {
 }
 
 init_scratch() {
+    # If first positional arg is given and not an option, treat as target repo
+    if [ $# -gt 0 ] && [[ "$1" != -* ]]; then
+        REPO_NAME="$(normalize_repo "$1")"
+        REPO_NAME_EXPLICIT=1
+        shift
+    fi
+
+    # Allow trailing --repo inside init
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --repo|-r)
+                if [ $# -lt 2 ]; then
+                    echo "ERROR: $1 requires a repository name." >&2
+                    exit 1
+                fi
+                REPO_NAME="$(normalize_repo "$2")"
+                REPO_NAME_EXPLICIT=1
+                shift 2
+                ;;
+            --repo=*)
+                REPO_NAME="$(normalize_repo "${1#*=}")"
+                REPO_NAME_EXPLICIT=1
+                shift 1
+                ;;
+            *)
+                echo "ERROR: Unexpected argument to init: $1" >&2
+                exit 1
+                ;;
+        esac
+    done
+
+    REPO_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}.git"
+
     local auth_header
     auth_header=$(build_auth_header)
 
@@ -40,13 +157,34 @@ init_scratch() {
         mkdir -p "$base_dir"
     fi
 
+    local scratch_prefix="aerial-code-scratch"
+    local branch_prefix="feat/aerial-pr"
+    case "$REPO_NAME" in
+        aerial)
+            scratch_prefix="aerial-code-scratch"
+            branch_prefix="feat/aerial-pr"
+            ;;
+        aerial-config)
+            scratch_prefix="aerial-config-scratch"
+            branch_prefix="update/config"
+            ;;
+        aerial-sidecars)
+            scratch_prefix="aerial-sidecars-scratch"
+            branch_prefix="feat/sidecars-pr"
+            ;;
+        *)
+            scratch_prefix="${REPO_NAME}-scratch"
+            branch_prefix="feat/${REPO_NAME}-pr"
+            ;;
+    esac
+
     local scratch_dir
-    scratch_dir=$(mktemp -d "${base_dir}/aerial-code-scratch.XXXXXX")
+    scratch_dir=$(mktemp -d "${base_dir}/${scratch_prefix}.XXXXXX")
     chmod 700 "$scratch_dir"
 
     local rand_suffix
     rand_suffix=$(head -c 16 /dev/urandom | md5sum | head -c 6)
-    local branch_name="feat/aerial-pr-$(date +%Y%m%d%H%M%S)-${rand_suffix}"
+    local branch_name="${branch_prefix}-$(date +%Y%m%d%H%M%S)-${rand_suffix}"
 
     export GIT_TERMINAL_PROMPT=0
     export GIT_CONFIG_COUNT=2
@@ -61,13 +199,13 @@ init_scratch() {
         rm -rf "$scratch_dir"
         exit 1
     fi
-    
+
     cd "$scratch_dir"
     git checkout -b "$branch_name" >/dev/null 2>&1
     git config user.name "Aerial"
     git config user.email "aerial@noreply.github.com"
 
-    echo "{\"status\":\"initialized\",\"scratch_dir\":\"${scratch_dir}\",\"branch\":\"${branch_name}\"}"
+    echo "{\"status\":\"initialized\",\"scratch_dir\":\"${scratch_dir}\",\"branch\":\"${branch_name}\",\"repo\":\"${REPO_NAME}\"}"
 }
 
 SCRATCH_DIR_CLEANUP=""
@@ -80,7 +218,7 @@ get_deploy_status() {
     if [[ "$target" =~ ^[0-9]+$ ]]; then
         local pr_raw=""
         if [ -n "${GITHUB_PAT:-}" ]; then
-            pr_raw=$(curl -s --connect-timeout 2 -m 4 -H "Authorization: token ${GITHUB_PAT}" \
+            pr_raw=$(curl -s --connect-timeout 3 -m 10 -H "Authorization: token ${GITHUB_PAT}" \
                 -H "Accept: application/vnd.github.v3+json" \
                 "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/pulls/${target}" 2>/dev/null || true)
         fi
@@ -103,10 +241,52 @@ get_deploy_status() {
         short_sha="${commit_sha:0:7}"
     fi
 
-    # 2. Query Dashboard API (primary real-time source with strict SHA matching)
     local dashboard_url="${AERIAL_DASHBOARD_URL:-http://aerial-dashboard:8080/api/status}"
+
+    # Branch deployment tracking for aerial-config (git-sync driven)
+    if [ "$REPO_NAME" = "aerial-config" ]; then
+        local dash_resp=""
+        dash_resp=$(curl -s --connect-timeout 3 -m 10 "$dashboard_url" 2>/dev/null || true)
+        if [ -n "$dash_resp" ] && echo "$dash_resp" | jq -e '.git_sync.repos | objects' >/dev/null 2>&1; then
+            local cfg_repo
+            cfg_repo=$(echo "$dash_resp" | jq '.git_sync.repos["/share/aerial-config"] // empty' 2>/dev/null || true)
+            if [ -n "$cfg_repo" ] && [ "$cfg_repo" != "null" ]; then
+                local sync_status disk_commit remote_commit
+                sync_status=$(echo "$cfg_repo" | jq -r '.sync_status // "unknown"' 2>/dev/null || echo "unknown")
+                disk_commit=$(echo "$cfg_repo" | jq -r '.disk_commit // empty' 2>/dev/null || true)
+                remote_commit=$(echo "$cfg_repo" | jq -r '.remote_commit // empty' 2>/dev/null || true)
+
+                local matches_commit=0
+                if [ -n "$short_sha" ]; then
+                    if [[ "$disk_commit" == "$short_sha"* ]] || [[ "$remote_commit" == "$short_sha"* ]]; then
+                        matches_commit=1
+                    fi
+                else
+                    matches_commit=1
+                fi
+
+                if [ "$matches_commit" -eq 1 ] && [ "$sync_status" = "synced" ]; then
+                    echo '{"deploy_state":"done","stage":"done","details":"Configuration synced and hot-reloaded via gitsync"}'
+                    return 0
+                elif [ "$sync_status" = "synced" ]; then
+                    echo '{"deploy_state":"ongoing","stage":"syncing","details":"Configuration sync in progress for merged commit"}'
+                    return 0
+                elif [ "$sync_status" = "error" ]; then
+                    echo '{"deploy_state":"failed","stage":"failed","details":"Configuration git-sync error"}'
+                    return 0
+                else
+                    echo "{\"deploy_state\":\"ongoing\",\"stage\":\"${sync_status}\",\"details\":\"Configuration git-sync status: ${sync_status}\"}"
+                    return 0
+                fi
+            fi
+        fi
+        echo '{"deploy_state":"unknown","stage":"unknown","details":"Telemetry unavailable"}'
+        return 0
+    fi
+
+    # 2. Query Dashboard API (primary real-time source with strict SHA matching)
     local dash_resp=""
-    dash_resp=$(curl -s --connect-timeout 2 -m 3 "$dashboard_url" 2>/dev/null || true)
+    dash_resp=$(curl -s --connect-timeout 3 -m 10 "$dashboard_url" 2>/dev/null || true)
 
     if [ -n "$dash_resp" ] && echo "$dash_resp" | jq -e '.deployments | arrays' >/dev/null 2>&1; then
         local matching_dep=""
@@ -164,7 +344,7 @@ get_deploy_status() {
     # 3. Direct GitHub Actions API check (fallback & registration grace guard)
     if [ -n "$commit_sha" ] && [ -n "${GITHUB_PAT:-}" ]; then
         local gh_runs=""
-        gh_runs=$(curl -s --connect-timeout 2 -m 3 -H "Authorization: token ${GITHUB_PAT}" \
+        gh_runs=$(curl -s --connect-timeout 3 -m 10 -H "Authorization: token ${GITHUB_PAT}" \
             -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/actions/runs?head_sha=${commit_sha}&event=push" 2>/dev/null || true)
 
@@ -204,9 +384,38 @@ get_deploy_status() {
 }
 
 merge_pr() {
-    local pr_num="${1:-}"
-    local branch="${2:-}"
-    local commit_sha="${3:-}"
+    local pr_num=""
+    local branch=""
+    local commit_sha=""
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --repo|-r)
+                if [ $# -lt 2 ]; then
+                    echo "ERROR: $1 requires a repository name." >&2
+                    exit 1
+                fi
+                REPO_NAME="$(normalize_repo "$2")"
+                REPO_NAME_EXPLICIT=1
+                shift 2
+                ;;
+            --repo=*)
+                REPO_NAME="$(normalize_repo "${1#*=}")"
+                REPO_NAME_EXPLICIT=1
+                shift 1
+                ;;
+            *)
+                if [ -z "$pr_num" ]; then
+                    pr_num="$1"
+                elif [ -z "$branch" ]; then
+                    branch="$1"
+                elif [ -z "$commit_sha" ]; then
+                    commit_sha="$1"
+                fi
+                shift
+                ;;
+        esac
+    done
 
     if [ -z "$pr_num" ] || ! [[ "$pr_num" =~ ^[0-9]+$ ]]; then
         echo "ERROR: Valid numeric pr_num required for merge." >&2
@@ -217,7 +426,7 @@ merge_pr() {
 
     # 1. Fetch Pull Request details to check state and resolve branch/sha
     local pr_raw
-    pr_raw=$(curl -s --retry 3 --retry-delay 2 --retry-connrefused -w "\n%{http_code}" -X GET \
+    pr_raw=$(curl -s --connect-timeout 3 -m 10 --retry 3 --retry-delay 2 --retry-connrefused -w "\n%{http_code}" -X GET \
         -H "Authorization: token ${GITHUB_PAT}" \
         -H "Accept: application/vnd.github.v3+json" \
         "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/pulls/${pr_num}")
@@ -239,25 +448,28 @@ merge_pr() {
             branch=$(echo "$pr_resp" | jq -r '.head.ref // empty')
         fi
         if [ -n "$branch" ]; then
-            curl -s -X DELETE \
+            curl -s --connect-timeout 3 -m 10 -X DELETE \
                 -H "Authorization: token ${GITHUB_PAT}" \
                 -H "Accept: application/vnd.github.v3+json" \
                 "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/git/refs/heads/${branch}" >/dev/null 2>&1 || true
         fi
         local sync_status="skipped"
-        if curl -s -f -X POST "$SIDE_SYNC_URL" >/dev/null 2>&1; then
+        if curl -s --connect-timeout 3 -m 10 -f -X POST "$SIDE_SYNC_URL" >/dev/null 2>&1; then
             sync_status="synced"
         fi
-        local merged_sha
-        merged_sha=$(echo "$pr_resp" | jq -r '.merge_commit_sha // empty')
+        local recheck_sha
+        recheck_sha=$(echo "$pr_resp" | jq -r '.merge_commit_sha // empty')
+        if [ -z "$recheck_sha" ]; then
+            recheck_sha="$commit_sha"
+        fi
         local deploy_json
-        deploy_json=$(get_deploy_status "$merged_sha" 2>/dev/null || echo '{"deploy_state":"unknown","stage":"unknown","details":"Telemetry error"}')
-        echo "{\"status\":\"already_merged\",\"pr_url\":\"${pr_url}\",\"pr_number\":${pr_num},\"merged_sha\":\"${merged_sha}\",\"sync_status\":\"${sync_status}\",\"deployment\":${deploy_json}}"
+        deploy_json=$(get_deploy_status "$recheck_sha" 2>/dev/null || echo '{"deploy_state":"unknown","stage":"unknown","details":"Telemetry error"}')
+        echo "{\"status\":\"already_merged\",\"pr_url\":\"${pr_url}\",\"pr_number\":${pr_num},\"merged_sha\":\"${recheck_sha}\",\"sync_status\":\"${sync_status}\",\"deployment\":${deploy_json}}"
         exit 0
     fi
 
     local state
-    state=$(echo "$pr_resp" | jq -r '.state // empty')
+    state=$(echo "$pr_resp" | jq -r '.state')
     if [ "$state" = "closed" ]; then
         echo "{\"status\":\"closed\",\"pr_url\":\"${pr_url}\",\"pr_number\":${pr_num},\"message\":\"Pull Request is closed without being merged\"}"
         exit 1
@@ -285,78 +497,53 @@ merge_pr() {
         exit 1
     fi
 
-    # 2. Check GitHub Actions CI runs for head_sha
+    # 2. Check commit status / check runs
     local check_raw
-    check_raw=$(curl -s --retry 3 --retry-delay 2 --retry-connrefused -w "\n%{http_code}" -X GET \
+    check_raw=$(curl -s --connect-timeout 3 -m 10 --retry 3 --retry-delay 2 --retry-connrefused -w "\n%{http_code}" -X GET \
         -H "Authorization: token ${GITHUB_PAT}" \
         -H "Accept: application/vnd.github.v3+json" \
-        "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/actions/runs?head_sha=${commit_sha}")
+        "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/commits/${commit_sha}/check-runs")
 
     local check_code
     check_code=$(echo "$check_raw" | tail -n1)
     local check_resp
     check_resp=$(echo "$check_raw" | sed '$d')
 
-    if [ "$check_code" -lt 200 ] || [ "$check_code" -ge 300 ]; then
-        echo "{\"status\":\"error\",\"error_code\":${check_code},\"message\":\"Failed to query CI runs for commit ${commit_sha}\"}" >&2
-        exit 1
+    local total_count=0
+    local pending_count=0
+    local failure_count=0
+    local check_details=""
+
+    if [ "$check_code" -ge 200 ] && [ "$check_code" -lt 300 ]; then
+        total_count=$(echo "$check_resp" | jq -r '.total_count // 0')
+        pending_count=$(echo "$check_resp" | jq '[.check_runs[]? | select(.status != "completed")] | length')
+        failure_count=$(echo "$check_resp" | jq '[.check_runs[]? | select(.conclusion != null and .conclusion != "success" and .conclusion != "neutral" and .conclusion != "skipped")] | length')
+        check_details=$(echo "$check_resp" | jq -r '[.check_runs[]? | "\(.name): status=\(.status) conclusion=\(.conclusion // "none")"] | join(", ")')
     fi
 
-    local total_count
-    total_count=$(echo "$check_resp" | jq -r '.total_count // 0')
-
-    # Guard: CI Registration Grace Period
-    # If no runs registered yet, check PR age. If PR was created < 60s ago, consider it pending registration.
-    local created_at
-    created_at=$(echo "$pr_resp" | jq -r '.created_at // empty')
-    local pr_created_epoch=0
-    if [ -n "$created_at" ]; then
-        pr_created_epoch=$(date -d "$created_at" +%s 2>/dev/null || date -jf "%Y-%m-%dT%H:%M:%SZ" "$created_at" +%s 2>/dev/null || echo 0)
-    fi
-    local now_epoch
-    now_epoch=$(date +%s)
-    local pr_age=$((now_epoch - pr_created_epoch))
-
-    if [ "$total_count" -eq 0 ]; then
-        local deploy_json='{"deploy_state":"not_started","stage":"not_started","details":"PR CI checks pending registration; deployment starts upon merge"}'
-        if [ $pr_age -lt 60 ]; then
-            echo "{\"status\":\"pending\",\"pr_url\":\"${pr_url}\",\"pr_number\":${pr_num},\"pending_count\":1,\"failure_count\":0,\"total_runs\":0,\"message\":\"CI checks pending registration (PR age ${pr_age}s)\",\"deployment\":${deploy_json}}"
-            exit 2
-        fi
-        echo "{\"status\":\"pending\",\"pr_url\":\"${pr_url}\",\"pr_number\":${pr_num},\"pending_count\":0,\"failure_count\":0,\"total_runs\":0,\"message\":\"No CI runs registered yet after ${pr_age}s\",\"deployment\":${deploy_json}}"
-        exit 2
+    # Check runs haven't registered yet or are still running
+    if [ "$total_count" -eq 0 ] || [ "$pending_count" -gt 0 ]; then
+        echo "{\"status\":\"pending\",\"pr_url\":\"${pr_url}\",\"pr_number\":${pr_num},\"pending_checks\":${pending_count},\"total_checks\":${total_count},\"details\":\"${check_details}\",\"deployment\":{\"deploy_state\":\"not_started\",\"stage\":\"not_started\",\"details\":\"CI checks are pending; deployment starts upon merge\"}}"
+        exit 0
     fi
 
-    local pending_count
-    pending_count=$(echo "$check_resp" | jq '[.workflow_runs[]? | select(.status != "completed")] | length')
-    local failure_count
-    failure_count=$(echo "$check_resp" | jq '[.workflow_runs[]? | select(.conclusion != null and .conclusion != "success" and .conclusion != "neutral" and .conclusion != "skipped")] | length')
-
+    # If any check runs failed, report failure and do not merge
     if [ "$failure_count" -gt 0 ]; then
-        local failed_runs
-        failed_runs=$(echo "$check_resp" | jq '[.workflow_runs[]? | select(.conclusion != null and .conclusion != "success" and .conclusion != "neutral" and .conclusion != "skipped") | {name: .name, conclusion: .conclusion, html_url: .html_url}]')
-        local deploy_json='{"deploy_state":"not_started","stage":"not_started","details":"PR CI checks failed; deployment blocked"}'
-        echo "{\"status\":\"failed\",\"pr_url\":\"${pr_url}\",\"pr_number\":${pr_num},\"failure_count\":${failure_count},\"failed_runs\":${failed_runs},\"deployment\":${deploy_json}}"
+        local failing_runs
+        failing_runs=$(echo "$check_resp" | jq -r '[.check_runs[]? | select(.conclusion != null and .conclusion != "success" and .conclusion != "neutral" and .conclusion != "skipped") | "\(.name) (\(.conclusion))"] | join(", ")')
+        echo "{\"status\":\"failed\",\"pr_url\":\"${pr_url}\",\"pr_number\":${pr_num},\"failed_checks\":${failure_count},\"failing_runs\":\"${failing_runs}\",\"details\":\"${check_details}\",\"deployment\":{\"deploy_state\":\"not_started\",\"stage\":\"not_started\",\"details\":\"CI failed; merge blocked\"}}"
         exit 1
     fi
 
-    if [ "$pending_count" -gt 0 ]; then
-        local deploy_json='{"deploy_state":"not_started","stage":"not_started","details":"PR CI checks in progress; deployment starts upon merge"}'
-        echo "{\"status\":\"pending\",\"pr_url\":\"${pr_url}\",\"pr_number\":${pr_num},\"pending_count\":${pending_count},\"failure_count\":0,\"total_runs\":${total_count},\"deployment\":${deploy_json}}"
-        exit 2
-    fi
-
-    # All CI runs are green (pending_count == 0 && failure_count == 0)
-    echo "✅ [aerial-pr] All GitHub Actions CI checks passed for PR #${pr_num}." >&2
+    # 3. All checks passed: Squash-merge PR into DEFAULT_BRANCH
     echo "🔀 [aerial-pr] Squash-merging PR #${pr_num} into ${DEFAULT_BRANCH}..." >&2
 
-    local merge_payload='{"merge_method":"squash"}'
     local merge_raw
-    merge_raw=$(curl -s --retry 3 --retry-delay 2 --retry-connrefused -w "\n%{http_code}" -X PUT \
+    merge_raw=$(curl -s --connect-timeout 3 -m 10 -w "\n%{http_code}" -X PUT \
         -H "Authorization: token ${GITHUB_PAT}" \
         -H "Accept: application/vnd.github.v3+json" \
         "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/pulls/${pr_num}/merge" \
-        -d "$merge_payload")
+        -d '{"merge_method":"squash"}')
 
     local merge_code
     merge_code=$(echo "$merge_raw" | tail -n1)
@@ -364,16 +551,22 @@ merge_pr() {
     merge_resp=$(echo "$merge_raw" | sed '$d')
 
     if [ "$merge_code" -lt 200 ] || [ "$merge_code" -ge 300 ]; then
+        # Check if it was already merged concurrently by native auto-merge
         local recheck_raw
-        recheck_raw=$(curl -s -H "Authorization: token ${GITHUB_PAT}" "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/pulls/${pr_num}")
+        recheck_raw=$(curl -s --connect-timeout 3 -m 10 -H "Authorization: token ${GITHUB_PAT}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/pulls/${pr_num}")
         local recheck_merged
-        recheck_merged=$(echo "$recheck_raw" | jq -r '.merged // false')
+        recheck_merged=$(echo "$recheck_raw" | jq -r '.merged // false' 2>/dev/null || echo "false")
         if [ "$recheck_merged" = "true" ]; then
             local recheck_sha
             recheck_sha=$(echo "$recheck_raw" | jq -r '.merge_commit_sha // empty')
-            if [ -z "$recheck_sha" ]; then
-                recheck_sha="$commit_sha"
-            fi
+            # Clean up branch if still present
+            curl -s --connect-timeout 3 -m 10 -X DELETE \
+                -H "Authorization: token ${GITHUB_PAT}" \
+                -H "Accept: application/vnd.github.v3+json" \
+                "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/git/refs/heads/${branch}" >/dev/null 2>&1 || true
+            curl -s --connect-timeout 3 -m 10 -f -X POST "$SIDE_SYNC_URL" >/dev/null 2>&1 || true
             local deploy_json
             deploy_json=$(get_deploy_status "$recheck_sha" 2>/dev/null || echo '{"deploy_state":"unknown","stage":"unknown","details":"Telemetry error"}')
             echo "{\"status\":\"already_merged\",\"pr_url\":\"${pr_url}\",\"pr_number\":${pr_num},\"merged_sha\":\"${recheck_sha}\",\"deployment\":${deploy_json}}"
@@ -399,14 +592,14 @@ merge_pr() {
     echo "🎉 [aerial-pr] Successfully merged PR #${pr_num} (commit ${merged_sha})." >&2
 
     # Delete remote ephemeral feature branch
-    curl -s -X DELETE \
+    curl -s --connect-timeout 3 -m 10 -X DELETE \
         -H "Authorization: token ${GITHUB_PAT}" \
         -H "Accept: application/vnd.github.v3+json" \
         "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/git/refs/heads/${branch}" >/dev/null 2>&1 || true
 
     # Trigger fast-path sync on aerial-hangar sidecar
     local sync_status="skipped"
-    if curl -s -f -X POST "$SIDE_SYNC_URL" >/dev/null 2>&1; then
+    if curl -s --connect-timeout 3 -m 10 -f -X POST "$SIDE_SYNC_URL" >/dev/null 2>&1; then
         sync_status="synced"
     fi
 
@@ -418,8 +611,8 @@ merge_pr() {
 }
 
 schedule_pr_followup() {
-    local pr_num="$1"
-    local pr_url="$2"
+    local pr_num="${1:-}"
+    local pr_url="${2:-}"
     local target_id="${3:-}"
     local delay="${4:-}"
     local pr_title="${5:-}"
@@ -440,13 +633,13 @@ schedule_pr_followup() {
     prompt=$(cat <<EOF
 Check on the status of Pull Request #${pr_num} on ${REPO_OWNER}/${REPO_NAME} (${pr_url}) for commit: "${pr_title}".
 1. Inspect CI status, PR state, and deployment state by running:
-   scripts/${script_name} merge ${pr_num}
+   scripts/${script_name} --repo ${REPO_NAME} merge ${pr_num}
 2. If status is "pending":
-   Quietly reschedule a 2m follow-up check via schedule_once with target_id "${target_id}" and suppress response output (empty response) to avoid channel noise while CI is running.
+   Quietly reschedule a ${delay} follow-up check via schedule_once with target_id "${target_id}" and suppress response output (empty response) to avoid channel noise while CI is running.
 3. If status is "merged" or "already_merged":
    Report status in plain prose (maximum two sentences). Do NOT output markdown bullet lists, task checklists, or forward-looking promises.
    - If deployment state is "done": confirm merge and completed deployment in 1–2 sentences.
-   - If deployment state is "ongoing" (e.g. stage: queued, building, awaiting_pull, swapping) or "pending_registration": state the current deployment stage in 1–2 sentences, and reschedule a 2m follow-up check via schedule_once with target_id "${target_id}" to track deployment to completion. If status was already merged, report only the deployment stage update.
+   - If deployment state is "ongoing" (e.g. stage: queued, building, awaiting_pull, swapping) or "pending_registration": state the current deployment stage in 1–2 sentences, and reschedule a ${delay} follow-up check via schedule_once with target_id "${target_id}" to track deployment to completion. If status was already merged, report only the deployment stage update.
    - If deployment state is "failed": the two-sentence limit does NOT apply; report full failure details, error logs, and diagnostic context immediately.
 4. If status is "failed" or "conflict", or if the merge command errors:
    The two-sentence limit does NOT apply; report full PR/CI failure details, failing check names, and error logs to the user.
@@ -476,7 +669,7 @@ EOF
 
     # Execute curl with bounded network timeout and error suppression
     local mcp_resp=""
-    mcp_resp=$(curl -s --connect-timeout 2 -m 5 -X POST \
+    mcp_resp=$(curl -s --connect-timeout 3 -m 10 -X POST \
         -H "Content-Type: application/json" \
         -d "$rpc_payload" \
         "$scheduler_url" 2>/dev/null) || {
@@ -538,7 +731,7 @@ enable_github_auto_merge() {
         '{query: $query, variables: {input: {pullRequestId: $node_id, mergeMethod: "SQUASH"}}}')
 
     local resp
-    resp=$(curl -s --connect-timeout 3 -m 5 -X POST \
+    resp=$(curl -s --connect-timeout 3 -m 10 -X POST \
         -H "Authorization: token ${GITHUB_PAT}" \
         -H "Content-Type: application/json" \
         "https://api.github.com/graphql" \
@@ -564,6 +757,20 @@ submit_scratch() {
 
     while [ $# -gt 0 ]; do
         case "$1" in
+            --repo|-r)
+                if [ $# -lt 2 ]; then
+                    echo "ERROR: $1 requires a repository argument." >&2
+                    exit 1
+                fi
+                REPO_NAME="$(normalize_repo "$2")"
+                REPO_NAME_EXPLICIT=1
+                shift 2
+                ;;
+            --repo=*)
+                REPO_NAME="$(normalize_repo "${1#*=}")"
+                REPO_NAME_EXPLICIT=1
+                shift 1
+                ;;
             --async|-a)
                 # Accepted as no-op for backwards compatibility; async is now the only mode
                 shift
@@ -686,8 +893,46 @@ submit_scratch() {
         pr_body=$(cat "$resolved_body_file")
     fi
 
+    SCRATCH_DIR_CLEANUP="$scratch_dir"
+    # Ensure cleanup of scratch directory on exit
+    trap 'if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then rm -rf "${SCRATCH_DIR_CLEANUP}"; fi' EXIT INT TERM
+
+    cd "$scratch_dir"
+
+    # Auto-detect remote repository from origin URL if not explicitly set via --repo
+    local remote_url
+    remote_url=$(git remote get-url origin 2>/dev/null || echo "")
+    extract_remote_repo "$remote_url"
+    if [ -n "${PARSED_REPO:-}" ]; then
+        REPO_OWNER="${PARSED_OWNER:-$REPO_OWNER}"
+        if [ "$REPO_NAME_EXPLICIT" -eq 0 ]; then
+            REPO_NAME="$(normalize_repo "$PARSED_REPO")"
+        fi
+    fi
+
+    local default_title="feat(core): automated update by Aerial"
+    local default_delay="2m"
+    case "$REPO_NAME" in
+        aerial)
+            default_title="feat(core): automated update by Aerial"
+            default_delay="2m"
+            ;;
+        aerial-config)
+            default_title="chore(config): automated configuration update by Aerial"
+            default_delay="1m"
+            ;;
+        aerial-sidecars)
+            default_title="feat(sidecars): automated sidecars update by Aerial"
+            default_delay="2m"
+            ;;
+        *)
+            default_title="feat(${REPO_NAME}): automated update by Aerial"
+            default_delay="2m"
+            ;;
+    esac
+
     if [ -z "$commit_msg" ]; then
-        commit_msg="feat(core): automated update by Aerial"
+        commit_msg="$default_title"
     fi
 
     # Resolve PR description from convention file in scratch workspace if not explicitly passed
@@ -707,7 +952,7 @@ submit_scratch() {
     local clean_title
     clean_title=$(printf "%s\n" "$commit_msg" | awk 'NF {print; exit}' | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | cut -c 1-256)
     if [ -z "$clean_title" ]; then
-        clean_title="feat(core): automated update by Aerial"
+        clean_title="$default_title"
     fi
 
     # Mandatory PR Description Invariant: PR description must not be empty
@@ -726,12 +971,6 @@ submit_scratch() {
 > ⚠️ **[Aerial Notice]**: PR description was truncated because it exceeded 60,000 characters."
     fi
 
-    SCRATCH_DIR_CLEANUP="$scratch_dir"
-    # Ensure cleanup of scratch directory on exit
-    trap 'if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then rm -rf "${SCRATCH_DIR_CLEANUP}"; fi' EXIT INT TERM
-
-    cd "$scratch_dir"
-
     # 1. Check for modifications
     if git diff --quiet && git diff --staged --quiet; then
         echo "{\"status\":\"no_changes\",\"message\":\"No modifications detected in scratch directory.\"}"
@@ -742,13 +981,9 @@ submit_scratch() {
     git add -A
     git rm --cached -f PR_DESCRIPTION.md .pr_description.md 2>/dev/null || true
 
-    # 3. Pre-flight verification (run fast staged verify suite on staged changes)
-    if [ -f "scripts/verify.sh" ]; then
-        echo "⚡ Running pre-flight verification checks in scratch checkout..." >&2
-        if ! sh scripts/verify.sh --staged >&2; then
-            echo "ERROR: Pre-flight verification failed in scratch workspace. Aborting submit." >&2
-            exit 1
-        fi
+    # 3. Pre-flight verification (universal contract: run repo-defined staged verify suite on staged changes)
+    if ! run_preflight_verification "."; then
+        exit 1
     fi
 
     # 4. Commit (preserves complete multi-line commit message in git history)
@@ -769,14 +1004,18 @@ submit_scratch() {
     export GIT_CONFIG_KEY_1="http.version"
     export GIT_CONFIG_VALUE_1="HTTP/1.1"
 
-    # 4. Push branch to remote
-    echo "📤 [aerial-pr] Pushing feature branch ${branch} to origin..." >&2
+    # 5. Push branch to remote
+    echo "📤 [aerial-pr] Pushing feature branch ${branch} to origin (${REPO_OWNER}/${REPO_NAME})..." >&2
     git push -u origin "$branch" >/dev/null 2>&1 || {
         echo "ERROR: Failed to push branch ${branch} to GitHub." >&2
+        if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
+            echo "💾 [aerial-pr] Scratch workspace preserved at: ${SCRATCH_DIR_CLEANUP}" >&2
+            SCRATCH_DIR_CLEANUP=""
+        fi
         exit 1
     }
 
-    # 5. Open Pull Request via GitHub REST API safely using jq
+    # 6. Open Pull Request via GitHub REST API safely using jq
     local pr_payload
     pr_payload=$(jq -n \
         --arg title "$clean_title" \
@@ -786,7 +1025,7 @@ submit_scratch() {
         '{title: $title, head: $head, base: $base, body: $body}')
 
     local pr_raw
-    pr_raw=$(curl -s -w "\n%{http_code}" -X POST \
+    pr_raw=$(curl -s --connect-timeout 3 -m 10 -w "\n%{http_code}" -X POST \
         -H "Authorization: token ${GITHUB_PAT}" \
         -H "Accept: application/vnd.github.v3+json" \
         "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/pulls" \
@@ -800,7 +1039,7 @@ submit_scratch() {
     if [ "$pr_code" -lt 200 ] || [ "$pr_code" -ge 300 ]; then
         echo "ERROR: Failed to create Pull Request (HTTP ${pr_code}): ${pr_resp}" >&2
         # Prune remote branch
-        curl -s -X DELETE \
+        curl -s --connect-timeout 3 -m 10 -X DELETE \
             -H "Authorization: token ${GITHUB_PAT}" \
             -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/git/refs/heads/${branch}" >/dev/null 2>&1 || true
@@ -829,7 +1068,7 @@ submit_scratch() {
     fi
 
     local sched_id=""
-    local effective_delay="${check_delay:-${AERIAL_PR_CHECK_DELAY:-$DEFAULT_PR_CHECK_DELAY}}"
+    local effective_delay="${check_delay:-${AERIAL_PR_CHECK_DELAY:-$default_delay}}"
     if [ "$no_schedule" -eq 0 ]; then
         sched_id=$(schedule_pr_followup "$pr_num" "$pr_url" "$target_id" "$effective_delay" "$clean_title" | tail -n 1)
     fi
@@ -842,13 +1081,13 @@ submit_scratch() {
 ================================================================================
 EOF
 
-    echo "{\"status\":\"submitted\",\"pr_url\":\"${pr_url}\",\"pr_number\":${pr_num},\"branch\":\"${branch}\",\"commit_sha\":\"${commit_sha}\",\"async\":true,\"scheduled_check\":\"${effective_delay}\",\"schedule_id\":\"${sched_id}\",\"turn_action\":\"end_turn\",\"message\":\"PR #${pr_num} submitted. Follow-up check scheduled. Do not poll CI in foreground; end active turn now.\"}"
+    echo "{\"status\":\"submitted\",\"pr_url\":\"${pr_url}\",\"pr_number\":${pr_num},\"branch\":\"${branch}\",\"commit_sha\":\"${commit_sha}\",\"async\":true,\"scheduled_check\":\"${effective_delay}\",\"schedule_id\":\"${sched_id}\",\"repo\":\"${REPO_NAME}\",\"turn_action\":\"end_turn\",\"message\":\"PR #${pr_num} submitted on ${REPO_OWNER}/${REPO_NAME}. Follow-up check scheduled. Do not poll CI in foreground; end active turn now.\"}"
     return 0
 }
 
 case "$cmd" in
     init)
-        init_scratch
+        init_scratch "$@"
         ;;
     submit)
         submit_scratch "$@"
@@ -860,7 +1099,7 @@ case "$cmd" in
         get_deploy_status "$@"
         ;;
     *)
-        echo "Usage: $0 {init|submit [-t <target_id>] [-d <delay>] [--no-schedule] [-b <body>|--body <body>|-f <file>|--body-file <file>] <scratch_dir> [commit_msg]|merge <pr_num> [branch] [commit_sha]|deploy-status <pr_num|commit_sha>}" >&2
+        echo "Usage: $0 [--repo <name>] {init [repo]|submit [-t <target_id>] [-d <delay>] [--no-schedule] [-b <body>|--body <body>|-f <file>|--body-file <file>] <scratch_dir> [commit_msg]|merge <pr_num> [branch] [commit_sha]|deploy-status <pr_num|commit_sha>}" >&2
         exit 1
         ;;
 esac
