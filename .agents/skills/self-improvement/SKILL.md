@@ -135,7 +135,12 @@ Before modifying source code, Aerial MUST audit the plan according to the classi
    - Break implementation into discrete, sequential components/tasks.
    - Implement following Test-Driven Development (write tests first, then implementation).
    - Verify task unit tests pass with race detection (`-race`).
-2. **Orchestration & Workflow Standards**:
+2. **Coding & Architectural Review Standards**:
+   - **No Change Detectors & Hand-Derived Literals**: Tests must verify observable behavior, never internal constants, private struct fields, or exact log wording. Expected values must be hand-derived literals or static fixtures—never computed using the same builder or helper logic under test.
+   - **Defense-in-Depth Validation**: When designing or validating input handling, validate across all layers (API entry point, domain business logic, environment guards) so invalid states become structurally impossible to reach.
+   - **Test Double & Production Purity**: Never assert on a mock's internal calls; assert real component outcomes. Mock only external boundaries (slow I/O, network), never domain business logic. Production structs carry production methods only—keep test-only reset or lifecycle hooks in test utilities.
+   - **Scope Discipline & File Health**: Speculative abstractions and unrequested "nice-to-haves" are flagged as architectural defects ("Extra") on equal footing with missed requirements ("Missing"). Block changes that significantly bloat already large files; decompose cohesive units behind narrow interface boundaries.
+3. **Orchestration & Workflow Standards**:
    - Strictly adhere to the Tiered Engineering Workflow and Orchestration Invariants in `GEMINI.md` (Section 8).
 
 ---
