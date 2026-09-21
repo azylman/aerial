@@ -178,9 +178,9 @@ Aerial operates on a strict **Two-Repository Separation of Concerns**:
 10. **In-Channel Interaction, Wake Modes & Channel Lifecycle Webhooks**:
     - Channel policies support three sensitivity levels via `wake_mode`:
       - `wake_mode: "mention"`: Aerial only wakes on explicit mentions (`@Aerial`) or direct replies. Bare keywords and LLM classifier are bypassed. Ambient channel messages are silently recorded into `transcript.jsonl`, accumulating conversational context so Aerial has complete history when pinged.
-      - `wake_mode: "classifier"` (or `"ambient"`): Direct mentions, replies, keywords, AND ambient relevance scoring via `Gemini 3.8 Flash (Low)` against `ambient_wake_prompt`.
+      - `wake_mode: "classifier"` (or `"ambient"`): Tier-1 wakes strictly on direct user/role mentions and direct replies; Tier-2 ambient messages are scored by `Gemini 3.8 Flash (Low)` against `ambient_wake_prompt`. Plaintext keywords and name-drops do not trigger Tier-1 wakes.
       - `wake_mode: "all"` (or `"always"`): Responds to every message (default for active threads).
-    - Typing indicators continuously pulse on all active response turns (direct mentions, keywords, ambient wakes, and thread messages) while non-wake background chatter remains silent.
+    - Typing indicators continuously pulse on all active response turns (direct mentions, ambient wakes, and thread messages) while non-wake background chatter remains silent.
     - **Channel Lifecycle Webhook Interceptors (General-Purpose Harness Extensibility)**:
       - Channels can define HTTP lifecycle hooks (`hooks:` in `config.yaml`) allowing external services or sidecars to inspect, gate, or enrich turns:
         - **`on_wake`**: Dispatched on inbound message arrival. The webhook receives `WakeRequest` (message author, content, channel, thread) and can return `override: "wake" | "drop" | "classify"` to programmatically dictate wake triage. Fallback on timeout is controlled by `on_timeout` (defaults to `"classify"`).

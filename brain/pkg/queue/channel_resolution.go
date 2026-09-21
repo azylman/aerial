@@ -3,7 +3,6 @@ package queue
 import (
 	"fmt"
 	"log"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -29,9 +28,6 @@ var (
 	restSingleFlight singleflight.Group
 	restCooldownMu   sync.RWMutex
 	restCooldown     = make(map[string]time.Time)
-
-	aerialExclusionRegex = regexp.MustCompile(`(?i)\baerial\s+(?:view|photo)s?\b`)
-	tier1KeywordRegex    = regexp.MustCompile(`(?i)\b(aerial|gundam)\b`)
 )
 
 func isRESTInCooldown(key string) bool {
@@ -399,15 +395,5 @@ func isTier1Wake(m db.Message, botUserID string, botRoleIDs []string, wakeMode s
 			return true
 		}
 	}
-
-	// If wake_mode is "mention", plaintext keywords / name drops do NOT trigger a wake.
-	if strings.ToLower(strings.TrimSpace(wakeMode)) == "mention" {
-		return false
-	}
-
-	// Keyword trigger matching word boundary regex (?i)\b(aerial|gundam)\b in extractMessageBody(m.Content)
-	// excluding "aerial view" and "aerial photo"
-	body := extractMessageBody(m.Content)
-	cleanedBody := aerialExclusionRegex.ReplaceAllString(body, "")
-	return tier1KeywordRegex.MatchString(cleanedBody)
+	return false
 }

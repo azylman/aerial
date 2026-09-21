@@ -1209,25 +1209,20 @@ func TestIsTier1Wake_AllVariants(t *testing.T) {
 		t.Errorf("expected <@!aerial to wake")
 	}
 
-	// 7. wakeMode == "mention" suppresses plain keywords
+	// 7. Plaintext keywords never trigger Tier-1 wake in any mode
 	if isTier1Wake(db.Message{Content: "hello aerial"}, "", nil, "mention") {
 		t.Errorf("expected wakeMode=mention to suppress plaintext keyword")
 	}
-
-	// 8. Plain keywords vs exclusions
-	if isTier1Wake(db.Message{Content: "what a nice aerial view of the city"}, "", nil, "keyword") {
-		t.Errorf("expected 'aerial view' to be excluded")
+	if isTier1Wake(db.Message{Content: "hello aerial help me"}, "", nil, "classifier") {
+		t.Errorf("expected wakeMode=classifier to suppress plaintext keyword")
 	}
-	if isTier1Wake(db.Message{Content: "take an aerial photo please"}, "", nil, "keyword") {
-		t.Errorf("expected 'aerial photo' to be excluded")
+	if isTier1Wake(db.Message{Content: "launch the gundam unit"}, "", nil, "classifier") {
+		t.Errorf("expected 'gundam' keyword to not wake Tier 1")
 	}
-	if !isTier1Wake(db.Message{Content: "hello aerial help me"}, "", nil, "keyword") {
-		t.Errorf("expected 'aerial' keyword to wake")
+	if isTier1Wake(db.Message{Content: "what a nice aerial view of the city"}, "", nil, "classifier") {
+		t.Errorf("expected 'aerial view' to not wake Tier 1")
 	}
-	if !isTier1Wake(db.Message{Content: "launch the gundam unit"}, "", nil, "keyword") {
-		t.Errorf("expected 'gundam' keyword to wake")
-	}
-	if isTier1Wake(db.Message{Content: "hello world unrelated"}, "", nil, "keyword") {
+	if isTier1Wake(db.Message{Content: "hello world unrelated"}, "", nil, "classifier") {
 		t.Errorf("expected unrelated text to not wake")
 	}
 }

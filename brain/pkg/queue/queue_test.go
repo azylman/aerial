@@ -1700,7 +1700,7 @@ func TestQueueTurnCountSessionRotation(t *testing.T) {
 
 	// Send turn DefaultMaxSessionTurns - 1 (turn 9)
 	completedCh = make(chan struct{}, 1)
-	msg1 := db.Message{ID: "m-rot-1", ThreadID: channelID, Content: fmt.Sprintf("Aerial Turn %d", DefaultMaxSessionTurns-1), CreatedAt: time.Now().UTC()}
+	msg1 := db.Message{ID: "m-rot-1", ThreadID: channelID, Content: fmt.Sprintf("<@aerial> Turn %d", DefaultMaxSessionTurns-1), CreatedAt: time.Now().UTC()}
 	_ = insertMessage(store, msg1)
 	pool.Enqueue(msg1)
 	<-completedCh
@@ -1713,7 +1713,7 @@ func TestQueueTurnCountSessionRotation(t *testing.T) {
 
 	// Send turn DefaultMaxSessionTurns (hits DefaultMaxSessionTurns limit)
 	completedCh = make(chan struct{}, 1)
-	msg2 := db.Message{ID: "m-rot-2", ThreadID: channelID, Content: fmt.Sprintf("Aerial Turn %d", DefaultMaxSessionTurns), CreatedAt: time.Now().UTC()}
+	msg2 := db.Message{ID: "m-rot-2", ThreadID: channelID, Content: fmt.Sprintf("<@aerial> Turn %d", DefaultMaxSessionTurns), CreatedAt: time.Now().UTC()}
 	_ = insertMessage(store, msg2)
 	pool.Enqueue(msg2)
 	<-completedCh
@@ -1739,7 +1739,7 @@ func TestQueueTurnCountSessionRotation(t *testing.T) {
 
 	// Send turn DefaultMaxSessionTurns + 1 (Turn 11, starts cold)
 	completedCh = make(chan struct{}, 1)
-	msg3 := db.Message{ID: "m-rot-3", ThreadID: channelID, Content: fmt.Sprintf("Aerial Turn %d", DefaultMaxSessionTurns+1), CreatedAt: time.Now().UTC()}
+	msg3 := db.Message{ID: "m-rot-3", ThreadID: channelID, Content: fmt.Sprintf("<@aerial> Turn %d", DefaultMaxSessionTurns+1), CreatedAt: time.Now().UTC()}
 	_ = insertMessage(store, msg3)
 	pool.Enqueue(msg3)
 	<-completedCh
@@ -1849,7 +1849,7 @@ func TestChannelSession_RotationOnIdleTimeout(t *testing.T) {
 
 	// 1. Send Turn 1 after 25h of idle time
 	completedCh = make(chan struct{}, 1)
-	msg1 := db.Message{ID: "m-idle-1", ThreadID: channelID, Content: "Aerial wake up", CreatedAt: time.Now().UTC()}
+	msg1 := db.Message{ID: "m-idle-1", ThreadID: channelID, Content: "<@aerial> wake up", CreatedAt: time.Now().UTC()}
 	_ = insertMessage(store, msg1)
 	pool.Enqueue(msg1)
 	<-completedCh
@@ -1877,7 +1877,7 @@ func TestChannelSession_RotationOnIdleTimeout(t *testing.T) {
 
 	// 2. Send Turn 2 immediately (5 seconds later). It should NOT rotate!
 	completedCh = make(chan struct{}, 1)
-	msg2 := db.Message{ID: "m-idle-2", ThreadID: channelID, Content: "Aerial follow up", CreatedAt: time.Now().UTC()}
+	msg2 := db.Message{ID: "m-idle-2", ThreadID: channelID, Content: "<@aerial> follow up", CreatedAt: time.Now().UTC()}
 	_ = insertMessage(store, msg2)
 	pool.Enqueue(msg2)
 	<-completedCh
@@ -2866,12 +2866,12 @@ func TestProcessBurst_MixedBurst(t *testing.T) {
 		Status:     db.StatusPending,
 		CreatedAt:  now,
 	}
-	// Wake2 (Tier 1 keyword wake)
+	// Wake2 (Tier 1 mention wake)
 	msg2 := db.Message{
 		ID:         "msg-mixed-2",
 		ThreadID:   "chan-lounge",
 		AuthorName: "Bob",
-		Content:    "Hey Aerial, please deploy the backend",
+		Content:    "<@aerial> please deploy the backend",
 		Status:     db.StatusPending,
 		CreatedAt:  now.Add(2 * time.Second),
 	}
@@ -3054,7 +3054,7 @@ func TestProcessBurst_SessionRotationBeforeLeadingAmbient(t *testing.T) {
 		ID:         "msg-rot-wake-2",
 		ThreadID:   channelID,
 		AuthorName: "Bob",
-		Content:    "Hey Aerial, what is 2+2?",
+		Content:    "Hey <@aerial>, what is 2+2?",
 		Status:     db.StatusPending,
 		CreatedAt:  now.Add(2 * time.Second),
 	}
@@ -3145,7 +3145,7 @@ func TestProcessBurst_TrailingAmbient(t *testing.T) {
 		ID:         "msg-trail-wake-1",
 		ThreadID:   "chan-lounge",
 		AuthorName: "Alice",
-		Content:    "Hey Aerial, explain gravity",
+		Content:    "<@aerial> explain gravity",
 		Status:     db.StatusPending,
 		CreatedAt:  now,
 	}
@@ -3761,7 +3761,7 @@ func TestProcessBurst_Tier1PreScan_SkipsClassifier(t *testing.T) {
 		ID:         "msg-prescan-2",
 		ThreadID:   "chan-lounge",
 		AuthorName: "Bob",
-		Content:    "@Aerial what's up?",
+		Content:    "<@aerial> what's up?",
 		CreatedAt:  now.Add(1 * time.Second),
 	}
 	m3 := db.Message{
@@ -3887,7 +3887,7 @@ func TestProcessBurst_GhostSessionRecovery(t *testing.T) {
 		ID:         "msg-ghost-recovery-1",
 		ThreadID:   channelID,
 		AuthorName: "Alice",
-		Content:    "Hey Aerial, are you awake?",
+		Content:    "<@aerial> are you awake?",
 		Status:     db.StatusPending,
 		CreatedAt:  now,
 	}
@@ -3954,7 +3954,7 @@ func TestProcessBurst_MultiTurnContinuity_AfterRecovery(t *testing.T) {
 		ID:         "msg-recov-turn-1",
 		ThreadID:   channelID,
 		AuthorName: "Alice",
-		Content:    "Hello Aerial",
+		Content:    "<@aerial> hello",
 		Status:     db.StatusPending,
 		CreatedAt:  now,
 	}
@@ -3966,7 +3966,7 @@ func TestProcessBurst_MultiTurnContinuity_AfterRecovery(t *testing.T) {
 		ID:         "msg-recov-turn-2",
 		ThreadID:   channelID,
 		AuthorName: "Alice",
-		Content:    "Hey Aerial, what did I just say?",
+		Content:    "<@aerial> what did I just say?",
 		Status:     db.StatusPending,
 		CreatedAt:  now.Add(1 * time.Second),
 	}
@@ -4128,7 +4128,7 @@ func TestProcessBurst_Turn1ContextInjection(t *testing.T) {
 		ID:         "msg-hist-turn-1",
 		ThreadID:   channelID,
 		AuthorName: "Charlie",
-		Content:    "Hey Aerial, turn 1 wake question",
+		Content:    "<@aerial> turn 1 wake question",
 		Status:     db.StatusPending,
 		CreatedAt:  now,
 	}
@@ -4140,7 +4140,7 @@ func TestProcessBurst_Turn1ContextInjection(t *testing.T) {
 		ID:         "msg-hist-turn-2",
 		ThreadID:   channelID,
 		AuthorName: "Charlie",
-		Content:    "Hey Aerial, turn 2 follow-up question",
+		Content:    "<@aerial> turn 2 follow-up question",
 		Status:     db.StatusPending,
 		CreatedAt:  now.Add(5 * time.Second),
 	}
@@ -4334,7 +4334,7 @@ func TestProcessBurst_SessionRotation_ResetsToColdState(t *testing.T) {
 		ID:         "msg-turn-1",
 		ThreadID:   channelID,
 		AuthorName: "Alice",
-		Content:    "Aerial Turn 1",
+		Content:    "<@aerial> Turn 1",
 		Status:     db.StatusPending,
 		CreatedAt:  now,
 	}
@@ -4363,7 +4363,7 @@ func TestProcessBurst_SessionRotation_ResetsToColdState(t *testing.T) {
 		ID:         "msg-turn-2",
 		ThreadID:   channelID,
 		AuthorName: "Alice",
-		Content:    fmt.Sprintf("Aerial Turn %d", DefaultMaxSessionTurns),
+		Content:    fmt.Sprintf("<@aerial> Turn %d", DefaultMaxSessionTurns),
 		Status:     db.StatusPending,
 		CreatedAt:  now.Add(2 * time.Second),
 	}
@@ -4383,7 +4383,7 @@ func TestProcessBurst_SessionRotation_ResetsToColdState(t *testing.T) {
 		ID:         "msg-turn-3",
 		ThreadID:   channelID,
 		AuthorName: "Alice",
-		Content:    "Aerial Turn 3",
+		Content:    "<@aerial> Turn 3",
 		Status:     db.StatusPending,
 		CreatedAt:  now.Add(4 * time.Second),
 	}
@@ -4472,7 +4472,7 @@ func TestProcessBurst_SessionRotation_SeedsPreviousSessionID(t *testing.T) {
 		ID:         "msg-seed-1",
 		ThreadID:   channelID,
 		AuthorName: "Alice",
-		Content:    "Aerial Turn 1",
+		Content:    "<@aerial> Turn 1",
 		Status:     db.StatusPending,
 		CreatedAt:  now,
 	}
@@ -4498,7 +4498,7 @@ func TestProcessBurst_SessionRotation_SeedsPreviousSessionID(t *testing.T) {
 		ID:         "msg-seed-2",
 		ThreadID:   channelID,
 		AuthorName: "Alice",
-		Content:    fmt.Sprintf("Aerial Turn %d", DefaultMaxSessionTurns),
+		Content:    fmt.Sprintf("<@aerial> Turn %d", DefaultMaxSessionTurns),
 		Status:     db.StatusPending,
 		CreatedAt:  now.Add(2 * time.Second),
 	}
@@ -4529,7 +4529,7 @@ func TestProcessBurst_SessionRotation_SeedsPreviousSessionID(t *testing.T) {
 		ID:         "msg-seed-3",
 		ThreadID:   channelID,
 		AuthorName: "Alice",
-		Content:    "Aerial Turn 1 of Session 2",
+		Content:    "<@aerial> Turn 1 of Session 2",
 		Status:     db.StatusPending,
 		CreatedAt:  now.Add(4 * time.Second),
 	}
@@ -4557,7 +4557,7 @@ func TestProcessBurst_SessionRotation_SeedsPreviousSessionID(t *testing.T) {
 		ID:         "msg-seed-4",
 		ThreadID:   channelID,
 		AuthorName: "Alice",
-		Content:    "Aerial Turn 2 of Session 2",
+		Content:    "<@aerial> Turn 2 of Session 2",
 		Status:     db.StatusPending,
 		CreatedAt:  now.Add(6 * time.Second),
 	}
@@ -4746,19 +4746,22 @@ func TestIsTier1Wake_WakeModeMention(t *testing.T) {
 		t.Errorf("expected isTier1Wake to be TRUE for mentions envelope in mention mode")
 	}
 
-	// 4. Plaintext name drop "aerial is great"
+	// 4. Plaintext name drop "aerial is great" (must NOT wake Tier 1 in any mode)
 	msgBareKeyword := db.Message{Content: "I think aerial is a great anime"}
 	if isTier1Wake(msgBareKeyword, botID, nil, "mention") {
 		t.Errorf("expected isTier1Wake to be FALSE for bare keyword in mention mode")
 	}
-	if !isTier1Wake(msgBareKeyword, botID, nil, "classifier") {
-		t.Errorf("expected isTier1Wake to be TRUE for bare keyword in classifier mode")
+	if isTier1Wake(msgBareKeyword, botID, nil, "classifier") {
+		t.Errorf("expected isTier1Wake to be FALSE for bare keyword in classifier mode")
 	}
 
-	// 5. Plaintext keyword "gundam"
+	// 5. Plaintext keyword "gundam" (must NOT wake Tier 1 in any mode)
 	msgGundam := db.Message{Content: "I love gundam models"}
 	if isTier1Wake(msgGundam, botID, nil, "mention") {
 		t.Errorf("expected isTier1Wake to be FALSE for 'gundam' in mention mode")
+	}
+	if isTier1Wake(msgGundam, botID, nil, "classifier") {
+		t.Errorf("expected isTier1Wake to be FALSE for 'gundam' in classifier mode")
 	}
 
 	// 6. Direct role mention <@&role-123> with botRoleIDs matching
@@ -7004,7 +7007,7 @@ func TestProcessBurst_TrailingBurstSuppression_OnQuotaPause(t *testing.T) {
 	msg1 := db.Message{
 		ID:        "msg-burst-1",
 		ThreadID:  threadID,
-		Content:   "Aerial Question 1",
+		Content:   "<@aerial> Question 1",
 		Status:    db.StatusPending,
 		CreatedAt: t0,
 		UpdatedAt: t0,
@@ -7012,7 +7015,7 @@ func TestProcessBurst_TrailingBurstSuppression_OnQuotaPause(t *testing.T) {
 	msg2 := db.Message{
 		ID:        "msg-burst-2",
 		ThreadID:  threadID,
-		Content:   "Aerial Question 2",
+		Content:   "<@aerial> Question 2",
 		Status:    db.StatusPending,
 		CreatedAt: t0.Add(100 * time.Millisecond),
 		UpdatedAt: t0.Add(100 * time.Millisecond),
@@ -8833,7 +8836,7 @@ func TestProcessBurst_RecordsTokensTelemetry(t *testing.T) {
 	msg := db.Message{
 		ID:        "msg-token-1",
 		ThreadID:  threadID,
-		Content:   "Aerial Question Token Test",
+		Content:   "<@aerial> Question Token Test",
 		Status:    db.StatusPending,
 		CreatedAt: t0,
 		UpdatedAt: t0,
@@ -12471,7 +12474,7 @@ func TestSession_Rotation_ChannelModeAndRemainingBranches(t *testing.T) {
 		pool.Start()
 		defer pool.Stop()
 
-		msg := db.Message{ID: "msg-chan-b", ThreadID: "chan-byte-test", Content: "Aerial hello world"}
+		msg := db.Message{ID: "msg-chan-b", ThreadID: "chan-byte-test", Content: "<@aerial> hello world"}
 		_ = insertMessage(store, msg)
 		pool.Enqueue(msg)
 
@@ -12539,7 +12542,7 @@ func TestSession_Rotation_ChannelModeAndRemainingBranches(t *testing.T) {
 		pool.Start()
 		defer pool.Stop()
 
-		msg := db.Message{ID: "msg-chan-s", ThreadID: "chan-step-test", Content: "Aerial wake up"}
+		msg := db.Message{ID: "msg-chan-s", ThreadID: "chan-step-test", Content: "<@aerial> wake up"}
 		_ = insertMessage(store, msg)
 		pool.Enqueue(msg)
 
