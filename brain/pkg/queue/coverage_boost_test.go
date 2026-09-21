@@ -1911,11 +1911,18 @@ func TestQueue_TargetedCoveragePush(t *testing.T) {
 		}
 	})
 
-	// 9. isTier1Wake body mention and replying_to non-matching variants
-	t.Run("isTier1Wake additional variants", func(t *testing.T) {
-		mRole := db.Message{Content: "<USER_REQUEST>\n- content: check this <@&999888>\n</USER_REQUEST>"}
+	// 9. isTier1Wake structured mentions and quoted content rejection
+	t.Run("isTier1Wake structured mentions and quoted content rejection", func(t *testing.T) {
+		// Quoted role snowflake in message content without mention_role_ids MUST NOT wake
+		mRoleQuoted := db.Message{Content: "<USER_REQUEST>\n- content: check this '<@&999888>'\n- mention_role_ids: []\n</USER_REQUEST>"}
+		if isTier1Wake(mRoleQuoted, "123", []string{"999888"}, "mention") {
+			t.Errorf("expected quoted role snowflake without mention_role_ids to not wake")
+		}
+
+		// Structured role mention in mention_role_ids MUST wake
+		mRole := db.Message{Content: "<USER_REQUEST>\n- content: check this\n- mention_role_ids: [999888]\n</USER_REQUEST>"}
 		if !isTier1Wake(mRole, "123", []string{"999888"}, "mention") {
-			t.Errorf("expected role mention in body to wake")
+			t.Errorf("expected role in mention_role_ids to wake")
 		}
 
 		mRep := db.Message{Content: "<USER_REQUEST>\n- replying_to:\n  author: @random_user\n- content: hi\n</USER_REQUEST>"}
@@ -1923,14 +1930,16 @@ func TestQueue_TargetedCoveragePush(t *testing.T) {
 			t.Errorf("expected non-matching replying_to author to not wake")
 		}
 
-		mBodyBot := db.Message{Content: "<USER_REQUEST>\n- content: please help <@123>\n</USER_REQUEST>"}
-		if !isTier1Wake(mBodyBot, "123", nil, "mention") {
-			t.Errorf("expected botUserID in body to wake")
+		// Structured user mention in mention_user_ids MUST wake
+		mUser := db.Message{Content: "<USER_REQUEST>\n- content: please help\n- mention_user_ids: [123]\n</USER_REQUEST>"}
+		if !isTier1Wake(mUser, "123", nil, "mention") {
+			t.Errorf("expected botUserID in mention_user_ids to wake")
 		}
 
-		mBodyAerial := db.Message{Content: "<USER_REQUEST>\n- content: hello <@aerial>\n</USER_REQUEST>"}
-		if !isTier1Wake(mBodyAerial, "123", nil, "mention") {
-			t.Errorf("expected <@aerial> in body to wake")
+		// Zero's exact incident: role snowflake in content, other user in mentions
+		mZero := db.Message{Content: "<USER_REQUEST>\n- content: verified '<@&1543462881624858624>' role snowflake\n- mentions: [harperwallbanger]\n- mention_user_ids: [179407724335988736]\n- mention_role_ids: []\n</USER_REQUEST>"}
+		if isTier1Wake(mZero, "1542035925603713086", []string{"1543462881624858624"}, "mention") {
+			t.Errorf("expected Zero's quoted role snowflake message to not wake")
 		}
 	})
 }

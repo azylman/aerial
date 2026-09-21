@@ -220,7 +220,7 @@ func TestBuildDiscordPrompt_TableDriven(t *testing.T) {
 				Bot:        false,
 			},
 			Mentions: []*discordgo.User{
-				{Username: "AerialBot"},
+				{ID: "bot-123", Username: "AerialBot"},
 			},
 			MentionRoles: []string{"role-dev"},
 			Attachments: []*discordgo.MessageAttachment{
@@ -252,6 +252,12 @@ func TestBuildDiscordPrompt_TableDriven(t *testing.T) {
 		}
 		if !strings.Contains(prompt, "- mentions: [AerialBot Developers]\n") {
 			t.Errorf("unexpected mentions in prompt: %s", prompt)
+		}
+		if !strings.Contains(prompt, "- mention_user_ids: [bot-123]\n") {
+			t.Errorf("unexpected mention_user_ids in prompt: %s", prompt)
+		}
+		if !strings.Contains(prompt, "- mention_role_ids: [role-dev]\n") {
+			t.Errorf("unexpected mention_role_ids in prompt: %s", prompt)
 		}
 		if !strings.Contains(prompt, "- attachments: [https://cdn.discord.com/patch.diff]\n") {
 			t.Errorf("unexpected attachments in prompt: %s", prompt)

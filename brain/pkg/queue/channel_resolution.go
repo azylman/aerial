@@ -310,26 +310,48 @@ func ResolveBotRoleIDs(sess *discordgo.Session, guildID string, botUserID string
 	return res
 }
 
+func containsToken(s, token string) bool {
+	if token == "" {
+		return false
+	}
+	for _, f := range strings.Fields(s) {
+		if f == token {
+			return true
+		}
+	}
+	return false
+}
+
 func isTier1Wake(m db.Message, botUserID string, botRoleIDs []string, wakeMode string) bool {
 	if m.AuthorID == "http-client" || m.AuthorID == "scheduler" || m.ScheduleRunID != "" {
 		return true
 	}
 
-	// Direct user mentions: <@botUserID>, <@!botUserID>
-	if botUserID != "" {
-		if strings.Contains(m.Content, "<@"+botUserID+">") || strings.Contains(m.Content, "<@!"+botUserID+">") {
-			return true
+	// 1. Structured Discord Gateway User Mentions from Prompt Envelope:
+	// - mention_user_ids: [12345 67890]
+	if idx := strings.Index(m.Content, "- mention_user_ids: ["); idx != -1 {
+		if endIdx := strings.Index(m.Content[idx:], "]"); endIdx != -1 {
+			inside := m.Content[idx+len("- mention_user_ids: [") : idx+endIdx]
+			if botUserID != "" && containsToken(inside, botUserID) {
+				return true
+			}
 		}
 	}
 
-	// Direct role mentions: <@&botRoleID> for any role associated with the bot
-	for _, rID := range botRoleIDs {
-		if rID != "" && strings.Contains(m.Content, "<@&"+rID+">") {
-			return true
+	// 2. Structured Discord Gateway Role Mentions from Prompt Envelope:
+	// - mention_role_ids: [role1 role2]
+	if idx := strings.Index(m.Content, "- mention_role_ids: ["); idx != -1 {
+		if endIdx := strings.Index(m.Content[idx:], "]"); endIdx != -1 {
+			inside := m.Content[idx+len("- mention_role_ids: [") : idx+endIdx]
+			for _, rID := range botRoleIDs {
+				if rID != "" && containsToken(inside, rID) {
+					return true
+				}
+			}
 		}
 	}
 
-	// Mentions list in Discord prompt envelope containing bot name, botUserID, or botRoleIDs
+	// 3. Mentions list in Discord prompt envelope containing bot name, botUserID, or botRoleIDs
 	if idx := strings.Index(m.Content, "- mentions: ["); idx != -1 {
 		if endIdx := strings.Index(m.Content[idx:], "]"); endIdx != -1 {
 			inside := strings.ToLower(m.Content[idx+len("- mentions: [") : idx+endIdx])
@@ -344,7 +366,7 @@ func isTier1Wake(m db.Message, botUserID string, botRoleIDs []string, wakeMode s
 		}
 	}
 
-	// Explicit reply to Aerial: check ONLY the author line under - replying_to:
+	// 4. Explicit reply to Aerial: check ONLY the author line under - replying_to:
 	if idx := strings.Index(m.Content, "- replying_to:"); idx != -1 {
 		lines := strings.Split(m.Content[idx:], "\n")
 		for _, line := range lines {
@@ -362,19 +384,20 @@ func isTier1Wake(m db.Message, botUserID string, botRoleIDs []string, wakeMode s
 		}
 	}
 
-	// Check message body direct mentions
-	body := extractMessageBody(m.Content)
-	if botUserID != "" && (strings.Contains(body, "<@"+botUserID+">") || strings.Contains(body, "<@!"+botUserID+">")) {
-		return true
-	}
-	for _, rID := range botRoleIDs {
-		if rID != "" && strings.Contains(body, "<@&"+rID+">") {
+	// 5. Fallback for un-enveloped messages (e.g. ad-hoc unit test fixtures without <USER_REQUEST>):
+	if !strings.Contains(m.Content, "<USER_REQUEST>") {
+		if botUserID != "" && (strings.Contains(m.Content, "<@"+botUserID+">") || strings.Contains(m.Content, "<@!"+botUserID+">")) {
 			return true
 		}
-	}
-	bodyLower := strings.ToLower(body)
-	if strings.Contains(bodyLower, "<@aerial") || strings.Contains(bodyLower, "<@!aerial") {
-		return true
+		for _, rID := range botRoleIDs {
+			if rID != "" && strings.Contains(m.Content, "<@&"+rID+">") {
+				return true
+			}
+		}
+		contentLower := strings.ToLower(m.Content)
+		if strings.Contains(contentLower, "<@aerial") || strings.Contains(contentLower, "<@!aerial") {
+			return true
+		}
 	}
 
 	// If wake_mode is "mention", plaintext keywords / name drops do NOT trigger a wake.
@@ -384,6 +407,7 @@ func isTier1Wake(m db.Message, botUserID string, botRoleIDs []string, wakeMode s
 
 	// Keyword trigger matching word boundary regex (?i)\b(aerial|gundam)\b in extractMessageBody(m.Content)
 	// excluding "aerial view" and "aerial photo"
+	body := extractMessageBody(m.Content)
 	cleanedBody := aerialExclusionRegex.ReplaceAllString(body, "")
 	return tier1KeywordRegex.MatchString(cleanedBody)
 }

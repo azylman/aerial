@@ -4769,6 +4769,44 @@ func TestIsTier1Wake_WakeModeMention(t *testing.T) {
 	if isTier1Wake(msgRoleMention, botID, []string{"role-unrelated"}, "mention") {
 		t.Errorf("expected isTier1Wake to be FALSE for unrelated role mention in mention mode")
 	}
+
+	// 7. Structured mention_user_ids in prompt envelope
+	msgStructuredUser := db.Message{Content: `<USER_REQUEST>
+- mention_user_ids: [bot-12345 98765]
+- content: Hello bot!
+</USER_REQUEST>`}
+	if !isTier1Wake(msgStructuredUser, botID, nil, "mention") {
+		t.Errorf("expected isTier1Wake to be TRUE for structured mention_user_ids")
+	}
+
+	// 8. Structured mention_role_ids in prompt envelope
+	msgStructuredRole := db.Message{Content: `<USER_REQUEST>
+- mention_role_ids: [role-aerial-managed]
+- content: Ping all robots
+</USER_REQUEST>`}
+	if !isTier1Wake(msgStructuredRole, botID, []string{"role-aerial-managed"}, "mention") {
+		t.Errorf("expected isTier1Wake to be TRUE for structured mention_role_ids")
+	}
+
+	// 9. Quoted role snowflake in prompt envelope without mention_role_ids MUST NOT wake
+	msgQuotedRole := db.Message{Content: `<USER_REQUEST>
+- content: Here is the role '<@&role-aerial-managed>' in quotes
+- mention_role_ids: []
+- mentions: [harperwallbanger]
+</USER_REQUEST>`}
+	if isTier1Wake(msgQuotedRole, botID, []string{"role-aerial-managed"}, "mention") {
+		t.Errorf("expected isTier1Wake to be FALSE for quoted role snowflake in envelope content")
+	}
+
+	// 10. Quoted user snowflake in prompt envelope without mention_user_ids MUST NOT wake
+	msgQuotedUser := db.Message{Content: `<USER_REQUEST>
+- content: Did you see '<@bot-12345>' in code?
+- mention_user_ids: []
+- mentions: []
+</USER_REQUEST>`}
+	if isTier1Wake(msgQuotedUser, botID, nil, "mention") {
+		t.Errorf("expected isTier1Wake to be FALSE for quoted user snowflake in envelope content")
+	}
 }
 
 func TestProcessBurst_WakeModeMention_BypassClassifier(t *testing.T) {

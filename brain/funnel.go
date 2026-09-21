@@ -341,8 +341,7 @@ func isFunnelBotTargeted(s *discordgo.Session, m *discordgo.MessageCreate) bool 
 		return true
 	}
 	contentLower := strings.ToLower(m.Content)
-	if strings.Contains(m.Content, "<@") ||
-		strings.Contains(contentLower, "aerial") ||
+	if strings.Contains(contentLower, "aerial") ||
 		strings.Contains(contentLower, "gundam") ||
 		strings.Contains(contentLower, "brain") ||
 		strings.Contains(contentLower, "bot") {
