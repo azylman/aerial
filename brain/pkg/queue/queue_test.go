@@ -4746,19 +4746,22 @@ func TestIsTier1Wake_WakeModeMention(t *testing.T) {
 		t.Errorf("expected isTier1Wake to be TRUE for mentions envelope in mention mode")
 	}
 
-	// 4. Plaintext name drop "aerial is great"
+	// 4. Plaintext name drop "aerial is great" (must NOT wake Tier 1 in any mode)
 	msgBareKeyword := db.Message{Content: "I think aerial is a great anime"}
 	if isTier1Wake(msgBareKeyword, botID, nil, "mention") {
 		t.Errorf("expected isTier1Wake to be FALSE for bare keyword in mention mode")
 	}
-	if !isTier1Wake(msgBareKeyword, botID, nil, "classifier") {
-		t.Errorf("expected isTier1Wake to be TRUE for bare keyword in classifier mode")
+	if isTier1Wake(msgBareKeyword, botID, nil, "classifier") {
+		t.Errorf("expected isTier1Wake to be FALSE for bare keyword in classifier mode")
 	}
 
-	// 5. Plaintext keyword "gundam"
+	// 5. Plaintext keyword "gundam" (must NOT wake Tier 1 in any mode)
 	msgGundam := db.Message{Content: "I love gundam models"}
 	if isTier1Wake(msgGundam, botID, nil, "mention") {
 		t.Errorf("expected isTier1Wake to be FALSE for 'gundam' in mention mode")
+	}
+	if isTier1Wake(msgGundam, botID, nil, "classifier") {
+		t.Errorf("expected isTier1Wake to be FALSE for 'gundam' in classifier mode")
 	}
 
 	// 6. Direct role mention <@&role-123> with botRoleIDs matching

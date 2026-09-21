@@ -157,7 +157,7 @@ User configuration and persona rules live in your private configuration reposito
      - `ignore` (or `disabled`): Channel is completely ignored (no messages evaluated, no startup sweeps).
    - **Wake Sensitivity Modes (`wake_mode`)**:
      - `mention` (or `mentions`, `direct`): Aerial responds strictly to explicit user pings (`@Aerial`) and direct replies. Keyword triggers and LLM classification are bypassed with zero token cost. Ambient channel chatter is silently appended into `transcript.jsonl` so Aerial retains complete conversational lookback when subsequently pinged.
-     - `classifier` (or `ambient`): Tier 1 wakes on direct mentions, replies, or keywords (`aerial`, `gundam`); Tier 2 ambient messages are scored (0.0 to 1.0) by `Gemini 3.8 Flash (Low)` against `ambient_wake_prompt` using recent channel context.
+     - `classifier` (or `ambient`): Tier 1 wakes strictly on direct mentions and direct replies; Tier 2 ambient messages are scored (0.0 to 1.0) by `Gemini 3.8 Flash (Low)` against `ambient_wake_prompt` using recent channel context. Plaintext keywords do not trigger Tier 1 wakes.
      - `all` (or `always`): Responds to every incoming message (default inside active threads).
    - **Channel Lifecycle Webhook Interceptors (`hooks:`)**:
      - Generic harness extension points allowing user services or sidecars to programmatically modify turn behavior:
