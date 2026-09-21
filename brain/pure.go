@@ -251,12 +251,17 @@ func BuildDiscordPrompt(input DiscordPromptInput) string {
 	sb.WriteString(fmt.Sprintf("- timestamp: %s\n", m.Timestamp.Format(time.RFC3339)))
 
 	var mentions []string
+	var mentionUserIDs []string
 	for _, u := range m.Mentions {
 		if u != nil {
 			cleanU := strings.ReplaceAll(strings.ReplaceAll(u.Username, "\n", " "), "\r", "")
 			mentions = append(mentions, cleanU)
+			if u.ID != "" {
+				mentionUserIDs = append(mentionUserIDs, u.ID)
+			}
 		}
 	}
+	var mentionRoleIDs []string
 	for _, roleID := range m.MentionRoles {
 		roleName := roleID
 		if input.RoleNames != nil {
@@ -266,8 +271,13 @@ func BuildDiscordPrompt(input DiscordPromptInput) string {
 		}
 		cleanR := strings.ReplaceAll(strings.ReplaceAll(roleName, "\n", " "), "\r", "")
 		mentions = append(mentions, cleanR)
+		if roleID != "" {
+			mentionRoleIDs = append(mentionRoleIDs, roleID)
+		}
 	}
 	sb.WriteString(fmt.Sprintf("- mentions: %v\n", mentions))
+	sb.WriteString(fmt.Sprintf("- mention_user_ids: %v\n", mentionUserIDs))
+	sb.WriteString(fmt.Sprintf("- mention_role_ids: %v\n", mentionRoleIDs))
 
 	var attachments []string
 	for _, a := range m.Attachments {
