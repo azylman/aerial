@@ -1939,7 +1939,17 @@ func TestSession_ActiveTaskPersistence(t *testing.T) {
 	}
 }
 
-
-
-
-
+func TestFormatStepError_Coverage(t *testing.T) {
+	if s := formatStepError(nil); s != "" {
+		t.Errorf("expected empty string, got %q", s)
+	}
+	if s := formatStepError("error string"); s != "error string" {
+		t.Errorf("expected 'error string', got %q", s)
+	}
+	if s := formatStepError(map[string]any{"code": 500, "msg": "server error"}); !strings.Contains(s, "server error") {
+		t.Errorf("expected json containing server error, got %q", s)
+	}
+	if s := formatStepError(12345); s != "12345" {
+		t.Errorf("expected '12345', got %q", s)
+	}
+}
