@@ -998,16 +998,6 @@ func (c *Config) getChannelPolicyRaw(key string) (ChannelPolicy, bool) {
 	return getChannelPolicyRaw(c.Current().Channels, key)
 }
 
-// Deprecated: Shim for backward compatibility during migration.
-func (c ConfigData) ResolveChannelPolicy(channelID, channelName string) ChannelPolicy {
-	return ResolveChannelPolicy(c.Channels, channelID, channelName)
-}
-
-// Deprecated: Shim for backward compatibility during migration.
-func (c ConfigData) IsAdmin(identifiers ...string) bool {
-	return IsAdmin(c.AdminUsers, identifiers...)
-}
-
 func getEnvFromLookup(lookup func(string) string, key, defaultVal string) string {
 	if lookup == nil {
 		return defaultVal

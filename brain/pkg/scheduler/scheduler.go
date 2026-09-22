@@ -174,7 +174,7 @@ func processDueSchedulesStore(ctx context.Context, cfg *config.Config, store db.
 			}
 		}
 
-		policy := cfg.Current().ResolveChannelPolicy(c.TargetID, channelName)
+		policy := cfg.ResolveChannelPolicy(c.TargetID, channelName)
 		action := PlanDueCronTurn(c, now, isAlreadyThread, policy.Mode, threadCreator != nil, tz)
 
 		if action.NextRunError != nil {

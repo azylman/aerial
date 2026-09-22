@@ -546,7 +546,7 @@ func (te *turnExecution) resolveTurnPolicy() bool {
 	if te.pool.cfg.ResolveChannelPolicy != nil {
 		te.policy = te.pool.cfg.ResolveChannelPolicy(te.effectiveID, te.effectiveName)
 	} else {
-		te.policy = config.GetRuntimeConfig().ResolveChannelPolicy(te.effectiveID, te.effectiveName)
+		te.policy = config.ActiveConfig().ResolveChannelPolicy(te.effectiveID, te.effectiveName)
 	}
 
 	te.skipDiscord = true
