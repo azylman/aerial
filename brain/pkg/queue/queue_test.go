@@ -1167,7 +1167,7 @@ func TestWorkerPool_InjectsSemanticMemoryFacts(t *testing.T) {
 	var capturedPrompt string
 	doneCh := make(chan struct{})
 
-	mockRetriever := func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+	mockRetriever := func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
 		return []db.Fact{
 			{Category: "system_config", FactText: "Server runs on port 8080", Importance: 1.0},
 		}, nil
@@ -1236,7 +1236,7 @@ func TestWorkerPool_SemanticMemoryGracefulFallbackOnError(t *testing.T) {
 	var capturedPrompt string
 	doneCh := make(chan struct{})
 
-	mockRetriever := func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+	mockRetriever := func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
 		return nil, fmt.Errorf("ollama connection refused")
 	}
 
@@ -1299,7 +1299,7 @@ func TestQueueSilentSentinelSuppression(t *testing.T) {
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    1,
-		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
 			return nil, nil
 		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
@@ -1372,7 +1372,7 @@ func TestQueueBurstCoalescing(t *testing.T) {
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    1,
-		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
 			return nil, nil
 		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
@@ -1471,7 +1471,7 @@ func TestQueueStalenessDrop(t *testing.T) {
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    1,
-		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
 			return nil, nil
 		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
@@ -1667,7 +1667,7 @@ func TestQueueTurnCountSessionRotation(t *testing.T) {
 				Mode: "channel",
 			}
 		},
-		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
 			return nil, nil
 		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
@@ -1811,7 +1811,7 @@ func TestChannelSession_RotationOnIdleTimeout(t *testing.T) {
 				Mode: "channel",
 			}
 		},
-		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
 			return nil, nil
 		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
@@ -2056,7 +2056,7 @@ func TestQueueUniversalActiveTurnTyping(t *testing.T) {
 			defer mu.Unlock()
 			return currentPolicy
 		},
-		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
 			return nil, nil
 		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
@@ -2647,7 +2647,7 @@ func TestProcessBurst_Tier1Wake(t *testing.T) {
 			mu.Unlock()
 			return func() {}
 		},
-		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
 			return nil, nil
 		},
 		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
@@ -2749,7 +2749,7 @@ func TestProcessBurst_Tier2Wake(t *testing.T) {
 			mu.Unlock()
 			return func() {}
 		},
-		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
 			return nil, nil
 		},
 		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
@@ -2845,7 +2845,7 @@ func TestProcessBurst_MixedBurst(t *testing.T) {
 		TypingFunc: func(sess *discordgo.Session, channelID string) func() {
 			return func() {}
 		},
-		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
 			return nil, nil
 		},
 		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
@@ -3030,7 +3030,7 @@ func TestProcessBurst_SessionRotationBeforeLeadingAmbient(t *testing.T) {
 		TypingFunc: func(sess *discordgo.Session, channelID string) func() {
 			return func() {}
 		},
-		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
 			return nil, nil
 		},
 		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
@@ -3128,7 +3128,7 @@ func TestProcessBurst_TrailingAmbient(t *testing.T) {
 		TypingFunc: func(sess *discordgo.Session, channelID string) func() {
 			return func() {}
 		},
-		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
 			return nil, nil
 		},
 		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
@@ -3865,7 +3865,7 @@ func TestProcessBurst_GhostSessionRecovery(t *testing.T) {
 	pool := NewWorkerPool(WorkerPoolConfig{
 		SessionManager: session.New(tmpDir, ""),
 		Store: store,
-		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
 			return nil, nil
 		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
@@ -3931,7 +3931,7 @@ func TestProcessBurst_MultiTurnContinuity_AfterRecovery(t *testing.T) {
 	pool := NewWorkerPool(WorkerPoolConfig{
 		SessionManager: session.New(tmpDir, ""),
 		Store: store,
-		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
 			return nil, nil
 		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
@@ -4006,7 +4006,7 @@ func TestProcessBurst_ColdChannel_NoStubDirectory(t *testing.T) {
 		SessionManager: session.New(tmpDir, ""),
 		Store: store,
 		Classifier: cls,
-		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
 			return nil, nil
 		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
@@ -4079,7 +4079,7 @@ func TestProcessBurst_Turn1ContextInjection(t *testing.T) {
 	pool := NewWorkerPool(WorkerPoolConfig{
 		SessionManager: session.New(tmpDir, ""),
 		Store: store,
-		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
 			return nil, nil
 		},
 		HistoryFetcher: func(ctx context.Context, cID string, beforeID string, limit int) ([]HistoryMessage, error) {
@@ -4289,7 +4289,7 @@ func TestProcessBurst_SessionRotation_ResetsToColdState(t *testing.T) {
 	pool := NewWorkerPool(WorkerPoolConfig{
 		SessionManager: session.New(tmpDir, ""),
 		Store: store,
-		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
 			return nil, nil
 		},
 		HistoryFetcher: func(ctx context.Context, cID string, beforeID string, limit int) ([]HistoryMessage, error) {
@@ -4588,7 +4588,7 @@ func TestProcessBurst_Turn1Crash_DoesNotPersistGhostUUID(t *testing.T) {
 		SessionManager: session.New(tmpDir, ""),
 		Store: store,
 		MaxAttempts: 1,
-		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
 			return nil, nil
 		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
@@ -5082,7 +5082,7 @@ func TestWorkerPoolShutdown_PreservesProcessingMessageWithoutApology(t *testing.
 		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
 			return func() {}
 		},
-		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
 			return nil, nil
 		},
 	})
@@ -5156,7 +5156,7 @@ func TestWorkerPoolShutdown_PreservesProcessingMessageWithoutApology(t *testing.
 		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
 			return func() {}
 		},
-		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
 			return nil, nil
 		},
 		OnMessageCompleted: func(m db.Message, finalStatus string) {
@@ -5579,7 +5579,7 @@ func TestProcessBurst_ColdStartWatchdogRecoveryAndContinuation(t *testing.T) {
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
-		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
 			return nil, nil
 		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
@@ -5705,7 +5705,7 @@ func TestProcessBurst_ColdStartStreamJsonInitLatchingOnFailure(t *testing.T) {
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
-		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
 			return nil, nil
 		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
@@ -5810,7 +5810,7 @@ func TestProcessBurst_ColdStartTransientRecoveryAndContinuation(t *testing.T) {
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
-		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
 			return nil, nil
 		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
@@ -5921,7 +5921,7 @@ func TestProcessBurst_EmptyStdout_TranscriptRecovery(t *testing.T) {
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
-		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
 			return nil, nil
 		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
@@ -6013,7 +6013,7 @@ func TestProcessBurst_StreamInterrupted_TranscriptRecovery(t *testing.T) {
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
-		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
 			return nil, nil
 		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
@@ -6113,7 +6113,7 @@ func TestProcessBurst_StreamInterrupted_NoResponse_RotatesSessionCorrupt(t *test
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
-		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
 			return nil, nil
 		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
@@ -6227,7 +6227,7 @@ func TestProcessBurst_EmptyStdout_TransientRetryAndContinuation(t *testing.T) {
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
-		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
 			return nil, nil
 		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
@@ -6334,7 +6334,7 @@ func TestProcessBurst_GeneralFailure_PreservesSessionOnDisk(t *testing.T) {
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
-		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
 			return nil, nil
 		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
@@ -6426,7 +6426,7 @@ func TestWorkerPool_FullBuffer_NoEvictionZombieRace(t *testing.T) {
 		TimeoutMinutes: 1,
 		IdleTimeout:    20 * time.Millisecond,
 		MaxAttempts:    1,
-		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
 			return nil, nil
 		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
@@ -6503,7 +6503,7 @@ func TestProcessBurst_TransientError_RetainsOriginalPrompt(t *testing.T) {
 		TimeoutMinutes: 1,
 		BackoffBase:    5 * time.Millisecond,
 		MaxAttempts:    2,
-		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
 			return nil, nil
 		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
@@ -8407,7 +8407,7 @@ func TestRecoverInterrupted_PreservesExecutionRetryBudget(t *testing.T) {
 		},
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
 		TypingFunc:   func(s *discordgo.Session, channelID string) func() { return func() {} },
-		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
 			return nil, nil
 		},
 		OnMessageCompleted: func(msg db.Message, finalStatus string) {
@@ -8502,7 +8502,7 @@ func TestRecoverInterrupted_RestartPoisonPill_Boundaries(t *testing.T) {
 			return nil
 		},
 		TypingFunc: func(s *discordgo.Session, channelID string) func() { return func() {} },
-		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
 			return nil, nil
 		},
 		OnMessageCompleted: func(msg db.Message, finalStatus string) {
@@ -8575,7 +8575,7 @@ func TestProcessBurst_Staleness_RestartedMessage_Retained(t *testing.T) {
 		},
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
 		TypingFunc:   func(s *discordgo.Session, channelID string) func() { return func() {} },
-		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
 			return nil, nil
 		},
 		OnMessageCompleted: func(msg db.Message, finalStatus string) {
@@ -8641,7 +8641,7 @@ func TestProcessBurst_Staleness_RestartedMessage_HardCeiling_Dropped(t *testing.
 		},
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
 		TypingFunc:   func(s *discordgo.Session, channelID string) func() { return func() {} },
-		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
 			return nil, nil
 		},
 		OnMessageCompleted: func(msg db.Message, finalStatus string) {
@@ -8899,7 +8899,7 @@ func TestThreadStatusQueueIntegration(t *testing.T) {
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    1,
-		MemoryRetrieverFunc: func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
 			return nil, nil
 		},
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
@@ -8976,7 +8976,7 @@ func TestWorkerPool_ExplicitMemoryRetrieverWiring(t *testing.T) {
 	store := setupTestStore(t)
 
 	var retrieverCalled bool
-	mockRetriever := func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
+	mockRetriever := func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
 		retrieverCalled = true
 		return []db.Fact{
 			{Category: "test_cat", FactText: "Explicit retriever fact", Importance: 1.0},

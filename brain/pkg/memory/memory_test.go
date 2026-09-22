@@ -2,7 +2,6 @@ package memory
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1063,7 +1062,7 @@ func (e *errFactStore) SearchSimilarFacts(ctx context.Context, queryVector []flo
 }
 
 type errInsertFactStore struct {
-	db.FactStore
+	*db.FakeStore
 }
 
 func (e *errInsertFactStore) GetMaxMessageRowID(ctx context.Context, threadID string) (int64, error) {
@@ -1103,17 +1102,17 @@ func TestMemory_RetrieveRelevantFacts_TypesAndErrors(t *testing.T) {
 	}
 	_ = facts
 
-	// 2. Nil *sql.DB
-	var nilDB *sql.DB
-	facts, err = RetrieveRelevantFacts(context.Background(), nilDB, c, "hello", 5)
+	// 2. Nil FactStore
+	var nilFactStore db.FactStore
+	facts, err = RetrieveRelevantFacts(context.Background(), nilFactStore, c, "hello", 5)
 	if facts != nil || err != nil {
-		t.Errorf("expected nil, nil for nil *sql.DB, got %v, %v", facts, err)
+		t.Errorf("expected nil, nil for nil FactStore, got %v, %v", facts, err)
 	}
 
-	// 3. Unsupported database type
-	facts, err = RetrieveRelevantFacts(context.Background(), "not a database", c, "hello", 5)
-	if err == nil || !strings.Contains(err.Error(), "unsupported database type") {
-		t.Errorf("expected unsupported database type error, got %v", err)
+	// 3. Nil client
+	facts, err = RetrieveRelevantFacts(context.Background(), memStore, nil, "hello", 5)
+	if facts != nil || err != nil {
+		t.Errorf("expected nil, nil for nil client, got %v, %v", facts, err)
 	}
 
 	// 4. FactStore interface directly
@@ -1189,11 +1188,11 @@ func TestMemory_AdditionalCoverage(t *testing.T) {
 		t.Errorf("expected default ollama URL for uninitialized config, got %s", cfgRes.BaseURL)
 	}
 
-	// 4. extractor.go BackfillMissingEmbeddings with nil *sql.DB
-	var nilDB *sql.DB
-	_, err = BackfillMissingEmbeddings(context.Background(), nilDB, c)
+	// 4. extractor.go BackfillMissingEmbeddings with nil FactStore
+	var nilFactStore db.FactStore
+	_, err = BackfillMissingEmbeddings(context.Background(), nilFactStore, c)
 	if err == nil {
-		t.Errorf("expected error for nil *sql.DB in BackfillMissingEmbeddings")
+		t.Errorf("expected error for nil FactStore in BackfillMissingEmbeddings")
 	}
 
 	// 5. extractor.go BackfillMissingEmbeddings with cancelled context during iteration
@@ -1234,7 +1233,8 @@ func TestMemory_AdditionalCoverage(t *testing.T) {
 	_, _ = loadThreadTranscript(sessStore, cWithRoot, "th-sess-test")
 
 	// 9. extractor.go processThreadFacts with InsertFact error
-	insErrStore := &errInsertFactStore{}
+	insErrStore := &errInsertFactStore{FakeStore: db.NewFakeStore()}
+	defer insErrStore.Close()
 	_ = processThreadFacts(context.Background(), insErrStore, c, func(ctx context.Context, p string) (string, error) {
 		return `{"facts":[{"category":"user_pref","fact_text":"Fact to fail","importance_score":1.0}]}`, nil
 	}, "th-ins-err")

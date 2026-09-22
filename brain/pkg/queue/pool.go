@@ -43,7 +43,7 @@ func sanitizeErrorText(errStr string) string {
 	return sanitizer.SanitizeLog(errStr)
 }
 
-type MemoryRetrieverFunc func(ctx context.Context, database any, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error)
+type MemoryRetrieverFunc func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error)
 
 type WorkerPoolConfig struct {
 	DB             *sql.DB

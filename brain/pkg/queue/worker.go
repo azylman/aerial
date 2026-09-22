@@ -1214,18 +1214,18 @@ func (te *turnExecution) buildTurnPrompt() {
 
 	var facts []db.Fact
 	if te.pool != nil && te.pool.cfg.MemoryRetrieverFunc != nil && strings.TrimSpace(queryText) != "" {
-		dbArg := any(te.store())
-		if dbArg == nil {
-			dbArg = te.pool.cfg.DB
+		st := te.store()
+		if st == nil {
+			st = te.pool.Store()
 		}
-		if dbArg != nil {
+		if st != nil {
 			maxFacts := 10
 			if isThreadColdStart {
 				maxFacts = 5
 			}
 			retrievalCtx, retrievalCancel := context.WithTimeout(te.pool.ctx, 2500*time.Millisecond)
 			var err error
-			facts, err = te.pool.cfg.MemoryRetrieverFunc(retrievalCtx, dbArg, te.pool.cfg.MemoryClient, queryText, maxFacts)
+			facts, err = te.pool.cfg.MemoryRetrieverFunc(retrievalCtx, st, te.pool.cfg.MemoryClient, queryText, maxFacts)
 			retrievalCancel()
 			if err != nil {
 				log.Printf("[WorkerPool] Warning: Semantic memory retrieval failed for thread %s: %v. Proceeding without injected facts.", te.threadID, err)

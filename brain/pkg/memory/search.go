@@ -2,7 +2,6 @@ package memory
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"log"
 	"regexp"
@@ -129,9 +128,9 @@ func RankFacts(queryVector []float32, facts []db.FactWithEmbedding, minScore flo
 // RetrieveRelevantFacts fetches relevant stored facts for a given query string.
 // Accepts either a db.FactStore interface or a legacy *sql.DB pointer.
 // If vector embedding generation fails or times out (1s timeout + 1 retry), logs warning and returns empty slice gracefully.
-func RetrieveRelevantFacts(ctx context.Context, database any, client *Client, queryText string, maxFacts int) ([]db.Fact, error) {
+func RetrieveRelevantFacts(ctx context.Context, factStore db.FactStore, client *Client, queryText string, maxFacts int) ([]db.Fact, error) {
 	queryText = strings.TrimSpace(queryText)
-	if database == nil || client == nil || queryText == "" {
+	if factStore == nil || client == nil || queryText == "" {
 		return nil, nil
 	}
 	if len(queryText) > 1000 {
@@ -142,19 +141,6 @@ func RetrieveRelevantFacts(ctx context.Context, database any, client *Client, qu
 	defer func() {
 		metrics.MemorySearchDurationSeconds.Observe(time.Since(start).Seconds())
 	}()
-
-	var factStore db.FactStore
-	switch v := database.(type) {
-	case db.FactStore:
-		factStore = v
-	case *sql.DB:
-		if v == nil {
-			return nil, nil
-		}
-		factStore = db.NewSQLStore(v)
-	default:
-		return nil, fmt.Errorf("unsupported database type in RetrieveRelevantFacts: %T", database)
-	}
 
 	// Generate query embedding with BGE query prefix and 1 retry
 	queryVector, err := client.GenerateEmbedding(ctx, queryText, true, 1)
