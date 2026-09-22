@@ -142,14 +142,6 @@ User configuration and persona rules live in your private configuration reposito
      # Ignore specific noisy channels
      memes:
        mode: "ignore"
-
-   git_sync:
-     enabled: true
-     interval: "60s"
-     config_repo_url: "https://github.com/your-username/your-aerial-config.git"
-     repositories:
-       - "/share/aerial-config"
-       - "/share/aerial"
    ```
    - **Interaction Modes (`mode`)**:
      - `threads`: Direct messages or mentions spawn and route to a Discord thread (default).

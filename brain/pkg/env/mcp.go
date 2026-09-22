@@ -113,18 +113,6 @@ func (p *Provisioner) LoadMCPConfig(cfg *config.Config) json.RawMessage {
 		}
 	}
 
-	// 4. Normalize legacy SSE endpoints to Streamable HTTP
-	for _, svc := range []string{"docker", "github", "victoriametrics"} {
-		if rawSvc, ok := mergedServers[svc].(map[string]interface{}); ok {
-			if url, ok := rawSvc["serverUrl"].(string); ok {
-				if strings.HasSuffix(url, "/sse") {
-					rawSvc["serverUrl"] = strings.TrimSuffix(url, "/sse") + "/mcp"
-					log.Printf("[LoadMCPConfig] Transparently normalized %s serverUrl from /sse to /mcp", svc)
-				}
-			}
-		}
-	}
-
 	finalConfig := map[string]interface{}{
 		"mcpServers": mergedServers,
 	}

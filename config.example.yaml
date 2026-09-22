@@ -88,17 +88,6 @@ channels:
     mode: ignore
 
 # ------------------------------------------------------------------------------
-# GitSync Configuration
-# ------------------------------------------------------------------------------
-git_sync:
-  enabled: true
-  interval: 1m
-  config_repo_url: https://github.com/your-username/aerial-config
-  repositories:
-    - /share/aerial-config
-    - /share/aerial
-
-# ------------------------------------------------------------------------------
 # Custom MCP Servers
 # ------------------------------------------------------------------------------
 # Additional MCP servers to merge into ~/.gemini/config/mcp_config.json

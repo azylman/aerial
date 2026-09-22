@@ -192,7 +192,7 @@ func TestSyncMCP(t *testing.T) {
 		t.Errorf("Missing built-in 'discord' MCP server")
 	}
 
-	// Verify custom server was merged and /sse normalized to /mcp
+	// Verify custom server was merged
 	custom, ok := root.McpServers["my-custom-mcp"]
 	if !ok {
 		t.Fatalf("Missing custom MCP server 'my-custom-mcp'")
@@ -779,24 +779,21 @@ func TestLoadMCPConfig_FileOverridesAndNormalizations(t *testing.T) {
 		t.Errorf("Expected fallback empty mcpServers on marshal error, got: %s", string(raw))
 	}
 
-	// 5. Normalization of legacy /sse endpoints to /mcp for docker, github, victoriametrics
-	cfgSSE := config.NewTestConfig(func(d *config.ConfigData) {
+	// 5. Custom MCP servers preserve declared serverUrl verbatim without rewrite
+	cfgCustom := config.NewTestConfig(func(d *config.ConfigData) {
 		d.GitHubPAT = "dummy-pat"
 		d.McpServers = map[string]json.RawMessage{
-			"docker":          json.RawMessage(`{"serverUrl":"http://docker-mcp:4002/sse"}`),
-			"github":          json.RawMessage(`{"serverUrl":"http://github-mcp:4003/sse"}`),
-			"victoriametrics": json.RawMessage(`{"serverUrl":"http://victoriametrics-mcp:4004/sse"}`),
+			"docker":          json.RawMessage(`{"serverUrl":"http://docker-mcp:4002/mcp"}`),
+			"custom-sse":      json.RawMessage(`{"serverUrl":"http://custom-server:9000/sse"}`),
+			"victoriametrics": json.RawMessage(`{"serverUrl":"http://victoriametrics-mcp:4004/mcp"}`),
 		}
 	})
-	raw = p.LoadMCPConfig(cfgSSE)
+	raw = p.LoadMCPConfig(cfgCustom)
 	rawStr := string(raw)
-	for _, svc := range []string{"docker-mcp:4002/mcp", "github-mcp:4003/mcp", "victoriametrics-mcp:4004/mcp"} {
+	for _, svc := range []string{"docker-mcp:4002/mcp", "custom-server:9000/sse", "victoriametrics-mcp:4004/mcp"} {
 		if !strings.Contains(rawStr, svc) {
-			t.Errorf("Expected normalized endpoint %q in config, got: %s", svc, rawStr)
+			t.Errorf("Expected endpoint %q preserved in config, got: %s", svc, rawStr)
 		}
-	}
-	if strings.Contains(rawStr, "/sse") {
-		t.Errorf("Expected no /sse endpoints in config, got: %s", rawStr)
 	}
 }
 

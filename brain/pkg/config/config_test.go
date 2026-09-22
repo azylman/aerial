@@ -122,12 +122,6 @@ mcp_servers:
 	if c.SystemChannel != "my-alerts" {
 		t.Errorf("Expected system channel 'my-alerts', got %q", c.SystemChannel)
 	}
-	if !c.GitSync.Enabled || c.GitSync.Interval != "30s" || c.GitSync.ConfigRepoUrl != "https://github.com/example/repo.git" {
-		t.Errorf("Unexpected GitSyncConfig: %+v", c.GitSync)
-	}
-	if len(c.GitSync.Repositories) != 2 || c.GitSync.Repositories[0] != "/custom/path1" {
-		t.Errorf("Unexpected GitSync Repositories: %v", c.GitSync.Repositories)
-	}
 	if len(c.McpServers) != 1 || c.McpServers["weather"] == nil {
 		t.Errorf("Unexpected McpServers: %v", c.McpServers)
 	}
@@ -206,8 +200,8 @@ func TestLoadConfigEnvInterpolation(t *testing.T) {
 			return "interpolated-gemini-model"
 		case "TEST_EXPAND_CHAN":
 			return "interpolated-channel"
-		case "TEST_EXPAND_REPO":
-			return "https://github.com/interpolated/repo.git"
+		case "TEST_EXPAND_PORT":
+			return "9090"
 		default:
 			return ""
 		}
@@ -216,11 +210,10 @@ func TestLoadConfigEnvInterpolation(t *testing.T) {
 	yamlContent := `
 model: "${TEST_EXPAND_MODEL}"
 system_channel: "${TEST_EXPAND_CHAN}"
+port: "${TEST_EXPAND_PORT}"
 channels:
   default:
     mode: "threads"
-git_sync:
-  config_repo_url: "${TEST_EXPAND_REPO}"
 `
 	if err := os.WriteFile(yamlPath, []byte(yamlContent), 0644); err != nil {
 		t.Fatalf("Failed to write yaml: %v", err)
@@ -237,8 +230,8 @@ git_sync:
 	if cfg.Current().SystemChannel != "interpolated-channel" {
 		t.Errorf("Expected interpolated system_channel 'interpolated-channel', got %q", cfg.Current().SystemChannel)
 	}
-	if cfg.Current().GitSync.ConfigRepoUrl != "https://github.com/interpolated/repo.git" {
-		t.Errorf("Expected interpolated repo url, got %q", cfg.Current().GitSync.ConfigRepoUrl)
+	if cfg.Current().Port != "9090" {
+		t.Errorf("Expected interpolated port '9090', got %q", cfg.Current().Port)
 	}
 }
 
@@ -1830,7 +1823,6 @@ func TestConfig_ExhaustiveDeepClone_OCP(t *testing.T) {
 		AdminUsers: []string{"admin1", "admin2"},
 		Channels:   map[string]ChannelPolicy{"default": {Mode: "threads"}},
 		McpServers: map[string]json.RawMessage{"srv": json.RawMessage(`{"url":"http://localhost"}`)},
-		GitSync:    GitSyncConfig{Repositories: []string{"/repo1", "/repo2"}},
 	}
 
 	cloned := cloneConfigData(orig)
@@ -1838,9 +1830,6 @@ func TestConfig_ExhaustiveDeepClone_OCP(t *testing.T) {
 	// Slice pointer independence
 	if len(orig.AdminUsers) > 0 && &orig.AdminUsers[0] == &cloned.AdminUsers[0] {
 		t.Fatalf("OCP violation: AdminUsers slice backing array was not cloned")
-	}
-	if len(orig.GitSync.Repositories) > 0 && &orig.GitSync.Repositories[0] == &cloned.GitSync.Repositories[0] {
-		t.Fatalf("OCP violation: GitSync.Repositories backing array was not cloned")
 	}
 
 	// Map independence
@@ -2081,7 +2070,7 @@ func TestApplyEnvironmentOverrides_TableDriven(t *testing.T) {
 			name:   "LOW_EFFORT_MODEL override",
 			envMap: map[string]string{"LOW_EFFORT_MODEL": "gemini-mini"},
 			assertFn: func(t *testing.T, d *ConfigData) {
-				if d.LowEffortModel != "gemini-mini" || d.ClassifierModel != "gemini-mini" {
+				if d.LowEffortModel != "gemini-mini" {
 					t.Errorf("expected LowEffortModel=gemini-mini, got %q", d.LowEffortModel)
 				}
 			},
@@ -2090,7 +2079,7 @@ func TestApplyEnvironmentOverrides_TableDriven(t *testing.T) {
 			name:   "AMBIENT_CLASSIFIER_MODEL fallback override",
 			envMap: map[string]string{"AMBIENT_CLASSIFIER_MODEL": "gemini-ambient"},
 			assertFn: func(t *testing.T, d *ConfigData) {
-				if d.LowEffortModel != "gemini-ambient" || d.ClassifierModel != "gemini-ambient" {
+				if d.LowEffortModel != "gemini-ambient" {
 					t.Errorf("expected LowEffortModel=gemini-ambient, got %q", d.LowEffortModel)
 				}
 			},
@@ -2099,7 +2088,7 @@ func TestApplyEnvironmentOverrides_TableDriven(t *testing.T) {
 			name:   "CLASSIFIER_MODEL fallback override",
 			envMap: map[string]string{"CLASSIFIER_MODEL": "gemini-legacy-classifier"},
 			assertFn: func(t *testing.T, d *ConfigData) {
-				if d.LowEffortModel != "gemini-legacy-classifier" || d.ClassifierModel != "gemini-legacy-classifier" {
+				if d.LowEffortModel != "gemini-legacy-classifier" {
 					t.Errorf("expected LowEffortModel=gemini-legacy-classifier, got %q", d.LowEffortModel)
 				}
 			},
@@ -2814,14 +2803,14 @@ channels:
 }
 
 func TestConfig_SwallowedErrorsRemediationCoverage(t *testing.T) {
-	// 1. Deprecated classifier_model in UnmarshalYAML
-	yamlData := []byte("classifier_model: gemini-test-deprecated\n")
+	// 1. Unknown YAML keys (e.g. deprecated git_sync or classifier_model) unmarshal safely without error
+	yamlData := []byte("git_sync:\n  enabled: true\nclassifier_model: gemini-test-deprecated\nlow_effort_model: gemini-test-lem\n")
 	var c ConfigData
 	if err := yaml.Unmarshal(yamlData, &c); err != nil {
-		t.Fatalf("unmarshal failed: %v", err)
+		t.Fatalf("unmarshal failed on unknown keys: %v", err)
 	}
-	if c.LowEffortModel != "gemini-test-deprecated" {
-		t.Errorf("expected LowEffortModel to be set from classifier_model, got %q", c.LowEffortModel)
+	if c.LowEffortModel != "gemini-test-lem" {
+		t.Errorf("expected LowEffortModel to be set, got %q", c.LowEffortModel)
 	}
 
 	// 2. writeAtomicFile where targetPath is a non-empty directory

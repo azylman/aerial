@@ -1143,8 +1143,6 @@ func (te *turnExecution) buildTurnPrompt() {
 					cur := te.pool.appCfg.Current()
 					if cur.LowEffortModel != "" {
 						flashModel = cur.LowEffortModel
-					} else {
-						flashModel = cur.ClassifierModel
 					}
 				}
 				if flashModel == "" {

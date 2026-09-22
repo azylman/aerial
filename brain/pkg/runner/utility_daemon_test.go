@@ -274,29 +274,17 @@ func TestUtilityDaemon_WorkerOptsConfigFallback(t *testing.T) {
 		t.Errorf("unexpected opts for nil config: %+v", opts1)
 	}
 
-	// 2. Config with ClassifierModel but no LowEffortModel
+	// 2. Config with LowEffortModel
 	c2 := config.NewFromData(&config.ConfigData{
-		AgyBin:          "/custom/agy",
-		ClassifierModel: "gemini-classifier",
-		LowEffortModel:  "",
-		APIKey:          "secret-key",
-		GeminiHomeDir:   "/home/test",
+		AgyBin:         "/custom/agy",
+		LowEffortModel: "gemini-classifier",
+		APIKey:         "secret-key",
+		GeminiHomeDir:  "/home/test",
 	})
 	d2 := &UtilityDaemon{cfg: c2}
 	opts2 := d2.workerOpts()
 	if opts2.AgyBin != "/custom/agy" || opts2.Model != "gemini-classifier" || opts2.APIKey != "secret-key" || opts2.HomeDir != "/home/test" {
-		t.Errorf("unexpected opts for fallback config: %+v", opts2)
-	}
-
-	// 3. Config with LowEffortModel overriding ClassifierModel
-	c3 := config.NewFromData(&config.ConfigData{
-		LowEffortModel:  "gemini-low-effort",
-		ClassifierModel: "gemini-classifier",
-	})
-	d3 := &UtilityDaemon{cfg: c3}
-	opts3 := d3.workerOpts()
-	if opts3.Model != "gemini-low-effort" {
-		t.Errorf("expected LowEffortModel to take precedence, got %s", opts3.Model)
+		t.Errorf("unexpected opts for config with LowEffortModel: %+v", opts2)
 	}
 }
 
