@@ -135,7 +135,7 @@ func ParseInitEvent(line string) (string, bool) {
 // IsResultEvent checks if an output line represents a stream-json result event.
 func IsResultEvent(line string) bool {
 	trimmed := strings.TrimSpace(line)
-	if trimmed == "" {
+	if trimmed == "" || !strings.Contains(trimmed, "result") {
 		return false
 	}
 
@@ -146,8 +146,21 @@ func IsResultEvent(line string) bool {
 		return ev.Event == "result"
 	}
 
-	normalized := strings.ReplaceAll(trimmed, " ", "")
-	return strings.HasPrefix(normalized, `{"event":"result"`)
+	// Embedded JSON fallback for lines with logging prefixes
+	for i := 0; i < len(trimmed); i++ {
+		if trimmed[i] == '{' {
+			var embedded struct {
+				Event string `json:"event"`
+			}
+			dec := json.NewDecoder(strings.NewReader(trimmed[i:]))
+			if err := dec.Decode(&embedded); err == nil && embedded.Event != "" {
+				return embedded.Event == "result"
+			}
+			break
+		}
+	}
+
+	return false
 }
 
 // WriteWorkerTurn serializes and writes a prompt turn to the given io.Writer.

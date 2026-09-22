@@ -210,17 +210,27 @@ func handleTranscripts(store db.Store, searchPaths ...string) http.HandlerFunc {
 					totalSteps++
 
 					var step struct {
-						Status string          `json:"status"`
-						Error  json.RawMessage `json:"error"`
+						Status string `json:"status"`
+						Error  any    `json:"error"`
 					}
 					if err := json.Unmarshal([]byte(line), &step); err == nil {
 						if step.Status != "" {
 							lastStatus = step.Status
 						}
-						if len(step.Error) > 0 {
-							errStr := string(step.Error)
-							if errStr != "null" && errStr != "" {
-								lastError = errStr
+						if step.Error != nil {
+							switch v := step.Error.(type) {
+							case string:
+								if trimmed := strings.TrimSpace(v); trimmed != "" {
+									lastError = trimmed
+								}
+							case map[string]interface{}:
+								if b, err := json.Marshal(v); err == nil {
+									lastError = string(b)
+								}
+							default:
+								if s := strings.TrimSpace(fmt.Sprintf("%v", v)); s != "" && s != "<nil>" {
+									lastError = s
+								}
 							}
 						}
 					}

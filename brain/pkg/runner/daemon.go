@@ -616,54 +616,75 @@ func extractSubagentID(toolOut string) string {
 		ConversationID string `json:"conversationId"`
 		AltConvID      string `json:"conversation_id"`
 	}
+	type subagentPayload struct {
+		ConversationID string         `json:"conversationId"`
+		AltConvID      string         `json:"conversation_id"`
+		Subagents      []subagentItem `json:"subagents"`
+	}
 
-	// 1. If it's a JSON array [...]
-	if strings.HasPrefix(trimmed, "[") {
-		var list []subagentItem
-		if err := json.Unmarshal([]byte(trimmed), &list); err == nil && len(list) > 0 {
-			for _, item := range list {
-				id := item.ConversationID
-				if id == "" {
-					id = item.AltConvID
-				}
-				id = strings.Trim(strings.TrimSpace(id), `"'\,;`)
-				if id != "" {
-					return strings.Clone(id)
-				}
+	extractFromItem := func(item subagentItem) string {
+		id := strings.TrimSpace(item.ConversationID)
+		if id == "" {
+			id = strings.TrimSpace(item.AltConvID)
+		}
+		if id != "" {
+			return strings.Clone(id)
+		}
+		return ""
+	}
+
+	extractFromPayload := func(payload subagentPayload) string {
+		id := strings.TrimSpace(payload.ConversationID)
+		if id == "" {
+			id = strings.TrimSpace(payload.AltConvID)
+		}
+		if id != "" {
+			return strings.Clone(id)
+		}
+		for _, item := range payload.Subagents {
+			if subID := extractFromItem(item); subID != "" {
+				return subID
+			}
+		}
+		return ""
+	}
+
+	// 1. Direct array unmarshal
+	var list []subagentItem
+	if err := json.Unmarshal([]byte(trimmed), &list); err == nil {
+		for _, item := range list {
+			if id := extractFromItem(item); id != "" {
+				return id
 			}
 		}
 	}
 
-	// 2. Direct JSON object unmarshal or embedded JSON object scan
+	// 2. Direct object unmarshal
+	var payload subagentPayload
+	if err := json.Unmarshal([]byte(trimmed), &payload); err == nil {
+		if id := extractFromPayload(payload); id != "" {
+			return id
+		}
+	}
+
+	// 3. Embedded JSON fallback for lines with prefixes
 	for i := 0; i < len(trimmed); i++ {
-		if trimmed[i] == '{' {
-			var payload struct {
-				ConversationID string         `json:"conversationId"`
-				AltConvID      string         `json:"conversation_id"`
-				Subagents      []subagentItem `json:"subagents"`
-			}
+		if trimmed[i] == '[' {
+			var embeddedList []subagentItem
 			dec := json.NewDecoder(strings.NewReader(trimmed[i:]))
-			if err := dec.Decode(&payload); err == nil {
-				id := payload.ConversationID
-				if id == "" {
-					id = payload.AltConvID
-				}
-				if id == "" {
-					for _, item := range payload.Subagents {
-						subID := item.ConversationID
-						if subID == "" {
-							subID = item.AltConvID
-						}
-						subID = strings.Trim(strings.TrimSpace(subID), `"'\,;.:`)
-						if subID != "" {
-							id = subID
-							break
-						}
+			if err := dec.Decode(&embeddedList); err == nil {
+				for _, item := range embeddedList {
+					if id := extractFromItem(item); id != "" {
+						return id
 					}
 				}
-				id = strings.Trim(strings.TrimSpace(id), `"'\,;.:`)
-				if id != "" {
-					return strings.Clone(id)
+			}
+		} else if trimmed[i] == '{' {
+			var embeddedPayload subagentPayload
+			dec := json.NewDecoder(strings.NewReader(trimmed[i:]))
+			if err := dec.Decode(&embeddedPayload); err == nil {
+				if id := extractFromPayload(embeddedPayload); id != "" {
+					return id
 				}
 			}
 		}

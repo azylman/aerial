@@ -278,6 +278,21 @@ func TestIsResultEvent(t *testing.T) {
 			want: false,
 		},
 		{
+			name: "Prefixed Log Line with Result Event",
+			line: `[2026-09-22 13:00:00] {"event":"result","result":{"status":"SUCCESS"}}`,
+			want: true,
+		},
+		{
+			name: "Step Update with Result Text in Tool Output",
+			line: `{"event":"step_update","tool_output":"task finished with result: OK"}`,
+			want: false,
+		},
+		{
+			name: "Step Update with Interior JSON in Tool Output",
+			line: `{"event":"step_update","tool_output":"{\"event\":\"result\"}"}`,
+			want: false,
+		},
+		{
 			name: "Empty Line",
 			line: `   `,
 			want: false,

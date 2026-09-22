@@ -102,20 +102,33 @@ func (w *ActivityWriter) Write(p []byte) (int, error) {
 		if len(window) > 512 {
 			window = window[len(window)-512:]
 		}
-		if match := reUpdateStream.FindSubmatch(window); len(match) > 1 {
-			sess := strings.TrimSpace(string(match[1]))
-			if IsValidUUID(sess) {
-				w.sessionID.Store(&sess)
+		if firstBrace := bytes.IndexByte(window, '{'); firstBrace >= 0 {
+			if lastBrace := bytes.LastIndexByte(window, '}'); lastBrace > firstBrace {
+				var probe sessionProbe
+				dec := json.NewDecoder(bytes.NewReader(window[firstBrace : lastBrace+1]))
+				if err := dec.Decode(&probe); err == nil {
+					if id := probe.extractUUID(); id != "" {
+						w.sessionID.Store(&id)
+					}
+				}
 			}
-		} else if match := reGeneralSession.FindSubmatch(window); len(match) > 1 {
-			sess := strings.TrimSpace(string(match[1]))
-			if IsValidUUID(sess) {
-				w.sessionID.Store(&sess)
-			}
-		} else if match := reUUIDInText.Find(window); len(match) > 0 {
-			sess := strings.TrimSpace(string(match))
-			if IsValidUUID(sess) {
-				w.sessionID.Store(&sess)
+		}
+		if w.sessionID.Load() == nil {
+			if match := reUpdateStream.FindSubmatch(window); len(match) > 1 {
+				sess := strings.TrimSpace(string(match[1]))
+				if IsValidUUID(sess) {
+					w.sessionID.Store(&sess)
+				}
+			} else if match := reGeneralSession.FindSubmatch(window); len(match) > 1 {
+				sess := strings.TrimSpace(string(match[1]))
+				if IsValidUUID(sess) {
+					w.sessionID.Store(&sess)
+				}
+			} else if match := reUUIDInText.Find(window); len(match) > 0 {
+				sess := strings.TrimSpace(string(match))
+				if IsValidUUID(sess) {
+					w.sessionID.Store(&sess)
+				}
 			}
 		}
 	}
@@ -534,23 +547,25 @@ func ExtractSessionID(output string, _ time.Time) string {
 			if line == "" {
 				continue
 			}
-			if strings.HasPrefix(line, "{") && strings.HasSuffix(line, "}") {
+			if line[0] == '{' {
 				var probe sessionProbe
 				if err := json.Unmarshal([]byte(line), &probe); err == nil {
 					if id := probe.extractUUID(); id != "" {
 						return id
 					}
 				}
-			}
-			// Embedded JSON fallback for lines with logging prefixes
-			for i := 0; i < len(line); i++ {
-				if line[i] == '{' {
-					var embedded sessionProbe
-					dec := json.NewDecoder(strings.NewReader(line[i:]))
-					if err := dec.Decode(&embedded); err == nil {
-						if (embedded.Event == "init" || embedded.Type == "init") && embedded.extractUUID() != "" {
-							return embedded.extractUUID()
+			} else {
+				// Embedded JSON fallback for lines with logging prefixes
+				for i := 0; i < len(line); i++ {
+					if line[i] == '{' {
+						var embedded sessionProbe
+						dec := json.NewDecoder(strings.NewReader(line[i:]))
+						if err := dec.Decode(&embedded); err == nil {
+							if (embedded.Event == "init" || embedded.Type == "init") && embedded.extractUUID() != "" {
+								return embedded.extractUUID()
+							}
 						}
+						break
 					}
 				}
 			}

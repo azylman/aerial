@@ -49,8 +49,8 @@ func TestFindLatestSessionDirAndExtract(t *testing.T) {
 	if resp != "Hello world!" {
 		t.Errorf("Expected response 'Hello world!', got: '%s'", resp)
 	}
-	if errStr != `"something went wrong"` {
-		t.Errorf("Expected error '\"something went wrong\"', got: '%s'", errStr)
+	if errStr != "something went wrong" {
+		t.Errorf("Expected error 'something went wrong', got: '%s'", errStr)
 	}
 
 	diag := mgr.DumpSessionDiagnosticLogs(convID)
