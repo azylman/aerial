@@ -268,10 +268,6 @@ func runGitCommand(ctx context.Context, dir, pat string, args ...string) ([]byte
 	return stdout.Bytes(), stderr.Bytes(), err
 }
 
-func defaultGitExecutor(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-	return runGitCommand(ctx, dir, "", args...)
-}
-
 // SyncDaemon coordinates periodic and on-demand repository synchronizations.
 type SyncDaemon struct {
 	sfg           singleflight.Group
@@ -530,11 +526,6 @@ func resolveGitDir(repoPath string) (string, error) {
 		return filepath.Clean(target), nil
 	}
 	return gitPath, nil
-}
-
-// buildGitEnv builds the environment variables for git execution with secret hygiene.
-func buildGitEnv(pat string) []string {
-	return BuildGitEnv(pat, os.Environ())
 }
 
 // HasComposeChanges checks whether compose or environment configuration files changed between commits.
@@ -1980,11 +1971,6 @@ func (d *SyncDaemon) getRepoCommit(ctx context.Context, repoPath, ref string) (s
 		return sha, nil, nil
 	}
 	return sha, &t, nil
-}
-
-func getRepoCommit(ctx context.Context, repoPath, ref, pat string) (string, *time.Time, error) {
-	d := &SyncDaemon{pat: pat}
-	return d.getRepoCommit(ctx, repoPath, ref)
 }
 
 // GetStatus computes real-time synchronization telemetry across all configured repositories.

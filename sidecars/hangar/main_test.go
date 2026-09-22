@@ -75,7 +75,7 @@ func TestSanitizeLog(t *testing.T) {
 }
 
 func TestBuildGitEnv(t *testing.T) {
-	env := buildGitEnv("my_test_pat")
+	env := BuildGitEnv("my_test_pat", os.Environ())
 	foundAuth := false
 	for _, e := range env {
 		if strings.HasPrefix(e, "GIT_CONFIG_VALUE_0=") {
@@ -86,10 +86,10 @@ func TestBuildGitEnv(t *testing.T) {
 		}
 	}
 	if !foundAuth {
-		t.Errorf("buildGitEnv() did not produce GIT_CONFIG_VALUE_0 auth header")
+		t.Errorf("BuildGitEnv() did not produce GIT_CONFIG_VALUE_0 auth header")
 	}
 
-	emptyEnv := buildGitEnv("")
+	emptyEnv := BuildGitEnv("", os.Environ())
 	for _, e := range emptyEnv {
 		if strings.HasPrefix(e, "GIT_CONFIG_COUNT=") || strings.HasPrefix(e, "GIT_CONFIG_KEY_") || strings.HasPrefix(e, "GIT_CONFIG_VALUE_") {
 			t.Errorf("unexpected auth GIT_CONFIG in empty PAT env: %s", e)
@@ -2651,24 +2651,6 @@ func TestNotifyBrainReload_Success(t *testing.T) {
 	dEmpty.notifyBrainReload()
 }
 
-func TestDefaultGitExecutor_Coverage(t *testing.T) {
-	// 1. Success execution with version
-	stdout, _, _ := defaultGitExecutor(context.Background(), "", "version")
-	_ = stdout
-
-	// 2. Execution with directory
-	tempDir := t.TempDir()
-	_, _, _ = defaultGitExecutor(context.Background(), tempDir, "version")
-
-	// 3. Pre-canceled context
-	ctxCancelled, cancel := context.WithCancel(context.Background())
-	cancel()
-	_, _, _ = defaultGitExecutor(ctxCancelled, "", "version")
-
-	// 4. Invalid command
-	_, _, _ = defaultGitExecutor(context.Background(), "", "invalid-git-subcommand-nonexistent")
-}
-
 func TestHasComposeChanges_Coverage(t *testing.T) {
 	d := &SyncDaemon{}
 
@@ -2802,12 +2784,6 @@ func TestGetRepoCommit_DetailedCoverage(t *testing.T) {
 	sha, tm, err = d.getRepoCommit(context.Background(), "/repo", "HEAD")
 	if err != nil || sha != "abc1234" || tm == nil || tm.Year() != 2026 {
 		t.Errorf("expected valid sha and time, got %v, %v, %v", sha, tm, err)
-	}
-
-	// 5. Package-level getRepoCommit
-	sha, tm, _ = getRepoCommit(context.Background(), "/repo", "HEAD", "fake-pat")
-	if sha == "" && tm == nil {
-		// Executed cleanly
 	}
 }
 
