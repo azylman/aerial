@@ -59,6 +59,8 @@ func TestShouldIgnore(t *testing.T) {
 		"/home/user/.gemini/rules/system_instructions.md",
 		"user_persona.md",
 		"/share/aerial/.gemini/rules/user_persona.md",
+		"system_invariants.md",
+		"/share/aerial/.gemini/rules/system_invariants.md",
 		"/share/aerial/.agents/rules",
 		"/app/.agents/rules",
 		"/path/to/rules/custom.md",
@@ -415,6 +417,7 @@ func TestShouldIgnore_AdditionalPatterns(t *testing.T) {
 		ignore bool
 	}{
 		{"/a/b/user_persona.md", true},
+		{"/a/b/system_invariants.md", true},
 		{"/a/b/file.swp", true},
 		{"/a/b/file.swx", true},
 		{"/a/b/.#lockfile", true},

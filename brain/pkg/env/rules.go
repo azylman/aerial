@@ -39,16 +39,14 @@ var (
 	}
 )
 
-// SyncRules compiles the user persona, AGENTS.md, GEMINI.md system rules, and custom system prompt into ~/.gemini rules.
+// SyncRules compiles the user persona (AGENTS.md) and base system architecture/invariants (GEMINI.md)
+// into separate ~/.gemini rules (user_persona.md and system_invariants.md).
 func (p *Provisioner) SyncRules(customPrompt string) error {
 	if p == nil || p.homeDir == "" {
 		return nil
 	}
 	systemRulesMu.Lock()
 	defer systemRulesMu.Unlock()
-
-	var sb strings.Builder
-	sb.WriteString("---\ndescription: User persona, tone, operational invariants, and system guidelines\ntrigger: always_on\n---\n\n")
 
 	foundPersona := false
 	tornRead := false
@@ -146,35 +144,49 @@ func (p *Provisioner) SyncRules(customPrompt string) error {
 	}
 	p.mu.Unlock()
 
-	foundInstructions := false
-	if foundPersona && personaContent != "" {
-		sb.WriteString(fmt.Sprintf("# User Persona Overrides (%s)\n\n%s\n\n", personaSource, personaContent))
-		foundInstructions = true
-	}
-
-	if foundGemini && geminiContent != "" {
-		sb.WriteString(fmt.Sprintf("# Base System Architecture & Operational Rules (%s)\n\n%s\n\n", geminiSource, geminiContent))
-		foundInstructions = true
-	}
-
-	// Environment Prompt Override
-	if strings.TrimSpace(customPrompt) != "" {
-		sb.WriteString(fmt.Sprintf("# Environment Prompt Override\n\n%s\n\n", strings.TrimSpace(customPrompt)))
-		foundInstructions = true
-	}
-
-	var content string
-	p.mu.Lock()
-	if foundInstructions {
-		content = sb.String()
-		p.lkgcRules = content
-	} else {
-		content = p.lkgcRules
-		if content == "" {
-			p.mu.Unlock()
-			return nil
+	var personaRuleContent string
+	if (foundPersona && personaContent != "") || strings.TrimSpace(customPrompt) != "" {
+		var personaSB strings.Builder
+		personaSB.WriteString("---\ndescription: User persona, tone, and identity overrides\ntrigger: always_on\n---\n\n")
+		if foundPersona && personaContent != "" {
+			personaSB.WriteString(fmt.Sprintf("# User Persona Overrides (%s)\n\n%s\n\n", personaSource, personaContent))
 		}
-		log.Printf("Using Last Known Good Configuration (LKGC) for system rules")
+		if strings.TrimSpace(customPrompt) != "" {
+			personaSB.WriteString(fmt.Sprintf("# Environment Prompt Override\n\n%s\n\n", strings.TrimSpace(customPrompt)))
+		}
+		personaRuleContent = personaSB.String()
+	}
+
+	var geminiRuleContent string
+	if foundGemini && geminiContent != "" {
+		var geminiSB strings.Builder
+		geminiSB.WriteString("---\ndescription: Base system architecture, operational invariants, and guidelines\ntrigger: always_on\n---\n\n")
+		geminiSB.WriteString(fmt.Sprintf("# Base System Architecture & Operational Rules (%s)\n\n%s\n\n", geminiSource, geminiContent))
+		geminiRuleContent = geminiSB.String()
+	}
+
+	p.mu.Lock()
+	if personaRuleContent != "" {
+		p.lkgcPersonaRule = personaRuleContent
+	} else {
+		personaRuleContent = p.lkgcPersonaRule
+		if personaRuleContent != "" {
+			log.Printf("Using Last Known Good Configuration (LKGC) for user persona")
+		}
+	}
+
+	if geminiRuleContent != "" {
+		p.lkgcGeminiRule = geminiRuleContent
+	} else {
+		geminiRuleContent = p.lkgcGeminiRule
+		if geminiRuleContent != "" {
+			log.Printf("Using Last Known Good Configuration (LKGC) for system invariants")
+		}
+	}
+
+	if personaRuleContent == "" && geminiRuleContent == "" {
+		p.mu.Unlock()
+		return nil
 	}
 	p.mu.Unlock()
 
@@ -220,16 +232,32 @@ func (p *Provisioner) SyncRules(customPrompt string) error {
 		}
 	}
 
-	primaryRuleFile := filepath.Join(primaryRulesDir, "user_persona.md")
-	if err := p.writeAtomic(primaryRuleFile, content); err != nil {
-		return fmt.Errorf("failed to write primary system rules: %w", err)
-	}
-	log.Printf("Configured always_on user persona in %s", primaryRuleFile)
+	if personaRuleContent != "" {
+		primaryRuleFile := filepath.Join(primaryRulesDir, "user_persona.md")
+		if err := p.writeAtomic(primaryRuleFile, personaRuleContent); err != nil {
+			return fmt.Errorf("failed to write primary system rules: %w", err)
+		}
+		log.Printf("Configured always_on user persona in %s", primaryRuleFile)
 
-	// Also sync to ~/.gemini/config/rules for compatibility
-	configRuleFile := filepath.Join(configRulesDir, "user_persona.md")
-	if err := p.writeAtomic(configRuleFile, content); err != nil {
-		log.Printf("[Env] Warning syncing user persona to config rules: %v", err)
+		// Also sync to ~/.gemini/config/rules for compatibility
+		configRuleFile := filepath.Join(configRulesDir, "user_persona.md")
+		if err := p.writeAtomic(configRuleFile, personaRuleContent); err != nil {
+			log.Printf("[Env] Warning syncing user persona to config rules: %v", err)
+		}
+	}
+
+	if geminiRuleContent != "" {
+		primaryGeminiFile := filepath.Join(primaryRulesDir, "system_invariants.md")
+		if err := p.writeAtomic(primaryGeminiFile, geminiRuleContent); err != nil {
+			return fmt.Errorf("failed to write primary system invariants: %w", err)
+		}
+		log.Printf("Configured always_on system invariants in %s", primaryGeminiFile)
+
+		// Also sync to ~/.gemini/config/rules for compatibility
+		configGeminiFile := filepath.Join(configRulesDir, "system_invariants.md")
+		if err := p.writeAtomic(configGeminiFile, geminiRuleContent); err != nil {
+			log.Printf("[Env] Warning syncing system invariants to config rules: %v", err)
+		}
 	}
 
 	return nil
