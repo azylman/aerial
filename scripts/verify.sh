@@ -57,6 +57,25 @@ check_no_main_in_tests() {
     fi
 }
 
+# Check rule file sizes (GEMINI.md, AGENTS.md) do not exceed 23,040 bytes (22.5 KB)
+# to ensure compiled runtime rules stay strictly beneath Antigravity's 24 KB truncation ceiling.
+check_rule_file_sizes() {
+    MAX_BYTES=23040 # 22.5 KB (leaves 512B buffer for SyncRules frontmatter wrapper)
+    for rule_file in "$REPO_ROOT/GEMINI.md" "$REPO_ROOT/AGENTS.md"; do
+        if [ -f "$rule_file" ]; then
+            size=$(wc -c < "$rule_file" 2>/dev/null | tr -d '[:space:]')
+            if [ -n "$size" ] && [ "$size" -gt "$MAX_BYTES" ]; then
+                base_name=$(basename "$rule_file")
+                echo "🚨 [Aerial Verify] Error: Rule file '$base_name' exceeds size limit!" >&2
+                echo "   Current size: $size bytes (limit: $MAX_BYTES bytes / 22.5 KB)" >&2
+                echo "   Antigravity truncates prompt context when compiled rules exceed 23 KB." >&2
+                echo "   Action: Condense guidelines or migrate procedural runbooks to custom skills." >&2
+                exit 1
+            fi
+        fi
+    done
+}
+
 # Go services in the monorepo
 GO_SERVICES="brain scheduler-mcp discord-mcp dashboard sidecars/hangar"
 
@@ -213,6 +232,7 @@ if [ "$MODE" = "staged" ]; then
     # Fast path: check only services that have staged changes
     check_utf8_bom
     check_no_main_in_tests
+    check_rule_file_sizes
 
     STAGED_FILES=$(git diff --cached --name-only 2>/dev/null || true)
     if [ -z "$STAGED_FILES" ]; then
@@ -266,6 +286,7 @@ fi
 echo "=== 0. Encoding & BOM Hygiene ==="
 check_utf8_bom
 check_no_main_in_tests
+check_rule_file_sizes
 
 echo "=== 1. Static Analysis & Linting ==="
 for svc in $GO_SERVICES; do

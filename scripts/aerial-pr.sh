@@ -50,6 +50,23 @@ extract_remote_repo() {
 
 run_preflight_verification() {
     local target_dir="${1:-.}"
+    local max_rule_bytes=23040 # 22.5 KB (leaves 512B buffer for SyncRules frontmatter wrapper)
+    for rf in "${target_dir}/GEMINI.md" "${target_dir}/AGENTS.md"; do
+        if [ -f "$rf" ]; then
+            local size
+            size=$(wc -c < "$rf" 2>/dev/null | tr -d '[:space:]')
+            if [ -n "$size" ] && [ "$size" -gt "$max_rule_bytes" ]; then
+                echo "ERROR: Rule file '$(basename "$rf")' in scratch workspace ($size bytes) exceeds 22.5 KB ceiling ($max_rule_bytes bytes)." >&2
+                echo "       Antigravity truncates prompt context when compiled rules exceed 23 KB." >&2
+                if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
+                    echo "💾 [aerial-pr] Scratch workspace preserved at: ${SCRATCH_DIR_CLEANUP}" >&2
+                    SCRATCH_DIR_CLEANUP=""
+                fi
+                return 1
+            fi
+        fi
+    done
+
     if [ -f "${target_dir}/scripts/verify.sh" ]; then
         echo "⚡ Running pre-flight verification checks in scratch checkout..." >&2
         chmod +x "${target_dir}/scripts/verify.sh" 2>/dev/null || true

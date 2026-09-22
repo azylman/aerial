@@ -121,9 +121,21 @@ function Run-NodeTest($relDir, $testPattern) {
             if ($LASTEXITCODE -ne 0) { throw "Node unit tests (docker) failed in $relDir" }
         }
     }
+function Check-RuleFileSizes {
+    $maxBytes = 23040 # 22.5 KB (leaves 512B buffer for SyncRules frontmatter wrapper)
+    foreach ($name in @("GEMINI.md", "AGENTS.md")) {
+        $path = Join-Path $repoRoot $name
+        if (Test-Path $path) {
+            $len = (Get-Item $path).Length
+            if ($len -gt $maxBytes) {
+                throw "Rule file '$name' ($len bytes) exceeds size limit ($maxBytes bytes / 22.5 KB). Antigravity truncates prompt context when compiled rules exceed 23 KB."
+            }
+        }
+    }
 }
 
 if ($Staged) {
+    Check-RuleFileSizes
     $stagedFiles = & $gitCmd diff --cached --name-only
     if (-not $stagedFiles) {
         Write-Host "✅ [Aerial Verify] No staged files to verify." -ForegroundColor Green
@@ -147,6 +159,9 @@ if ($Staged) {
     Write-Host "✅ [Aerial Verify] Fast pre-commit checks passed cleanly." -ForegroundColor Green
     exit 0
 }
+
+Write-Host "=== 0. Rule File Size Budget ===" -ForegroundColor Yellow
+Check-RuleFileSizes
 
 Write-Host "=== 1. Static Analysis & Linting ===" -ForegroundColor Yellow
 foreach ($svc in $goServices) {
