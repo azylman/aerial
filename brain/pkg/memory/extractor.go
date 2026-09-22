@@ -272,14 +272,18 @@ func loadThreadTranscript(sessStore db.SessionStore, client *Client, threadID st
 
 func parseFactsJSON(raw string) (*ExtractedFactsPayload, error) {
 	clean := strings.TrimSpace(raw)
-	if idx := strings.Index(clean, "{"); idx != -1 {
-		if lastIdx := strings.LastIndex(clean, "}"); lastIdx != -1 && lastIdx > idx {
-			clean = clean[idx : lastIdx+1]
-		}
+	if clean == "" {
+		return nil, fmt.Errorf("empty raw facts payload")
+	}
+
+	firstBrace := strings.Index(clean, "{")
+	if firstBrace == -1 {
+		return nil, fmt.Errorf("no json object found in raw output")
 	}
 
 	var payload ExtractedFactsPayload
-	if err := json.Unmarshal([]byte(clean), &payload); err != nil {
+	dec := json.NewDecoder(strings.NewReader(clean[firstBrace:]))
+	if err := dec.Decode(&payload); err != nil {
 		return nil, err
 	}
 	return &payload, nil

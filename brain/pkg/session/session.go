@@ -328,12 +328,41 @@ func (m *Manager) getTargetDirs(convID string) []string {
 	return targetDirs
 }
 
+// formatStepError safely formats a deserialized JSON error field (string or object)
+// without fragile string comparisons to "null".
+func formatStepError(errVal any) string {
+	if errVal == nil {
+		return ""
+	}
+	switch v := errVal.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case map[string]interface{}:
+		b, err := json.Marshal(v)
+		if err == nil {
+			return string(b)
+		}
+		return fmt.Sprintf("%v", v)
+	default:
+		s := strings.TrimSpace(fmt.Sprintf("%v", v))
+		if s == "<nil>" {
+			return ""
+		}
+		return s
+	}
+}
+
 // ExtractResponseAndError parses transcript files to extract the last response and error for a conversation.
 func (m *Manager) ExtractResponseAndError(convID string) (string, string) {
 	if m == nil {
 		return "", ""
 	}
-	targetDirs := m.getTargetDirs(convID)
+	trimmedID := strings.TrimSpace(convID)
+	if trimmedID == "" || strings.ContainsAny(trimmedID, "/\\:") || strings.Contains(trimmedID, "..") {
+		return "", ""
+	}
+
+	targetDirs := m.getTargetDirs(trimmedID)
 
 	var lastResponse string
 	var lastError string
@@ -378,24 +407,26 @@ func (m *Manager) ExtractResponseAndError(convID string) (string, string) {
 					continue
 				}
 				var step struct {
-					Type      string          `json:"type"`
-					Status    string          `json:"status"`
-					Error     json.RawMessage `json:"error"`
-					Content   string          `json:"content"`
-					Thinking  string          `json:"thinking"`
-					ToolCalls json.RawMessage `json:"tool_calls"`
+					Type      string            `json:"type"`
+					Status    string            `json:"status"`
+					Error     any               `json:"error"`
+					Content   string            `json:"content"`
+					Thinking  string            `json:"thinking"`
+					ToolCalls []json.RawMessage `json:"tool_calls"`
 				}
 				if err := json.Unmarshal([]byte(line), &step); err == nil {
-					if (step.Status == "ERROR" || len(step.Error) > 0) && lastError == "" {
-						if errStr := strings.TrimSpace(string(step.Error)); errStr != "" && errStr != "null" {
+					if (step.Status == "ERROR" || step.Error != nil) && lastError == "" {
+						if errStr := formatStepError(step.Error); errStr != "" {
 							lastError = errStr
 						}
 					}
 					if step.Type == "PLANNER_RESPONSE" && lastResponse == "" {
 						if strings.TrimSpace(step.Content) != "" {
 							lastResponse = step.Content
-						} else if len(step.ToolCalls) > 2 && string(step.ToolCalls) != "[]" && string(step.ToolCalls) != "null" {
-							lastResponse = fmt.Sprintf("[Tool Call Requested]: %s", string(step.ToolCalls))
+						} else if len(step.ToolCalls) > 0 {
+							if toolCallsBytes, err := json.Marshal(step.ToolCalls); err == nil {
+								lastResponse = fmt.Sprintf("[Tool Call Requested]: %s", string(toolCallsBytes))
+							}
 						}
 					}
 				}
@@ -521,10 +552,10 @@ func (m *Manager) ExtractFinalSubstantiveResponse(ctx context.Context, convID st
 					continue
 				}
 				var step struct {
-					Type      string          `json:"type"`
-					Status    string          `json:"status"`
-					Content   string          `json:"content"`
-					ToolCalls json.RawMessage `json:"tool_calls"`
+					Type      string            `json:"type"`
+					Status    string            `json:"status"`
+					Content   string            `json:"content"`
+					ToolCalls []json.RawMessage `json:"tool_calls"`
 				}
 				if err := json.Unmarshal([]byte(line), &step); err != nil {
 					continue
@@ -533,7 +564,7 @@ func (m *Manager) ExtractFinalSubstantiveResponse(ctx context.Context, convID st
 					continue
 				}
 
-				hasToolCalls := len(step.ToolCalls) > 2 && string(step.ToolCalls) != "[]" && string(step.ToolCalls) != "null"
+				hasToolCalls := len(step.ToolCalls) > 0
 				trimmedContent := strings.TrimSpace(step.Content)
 
 				if hasToolCalls {
@@ -669,9 +700,14 @@ func (m *Manager) HasUnfinishedBackgroundTask(convID string) (bool, string, erro
 					Type    string `json:"type"`
 					Content string `json:"content"`
 				}
-				targetText := rawLine
-				if err := json.Unmarshal([]byte(rawLine), &step); err == nil && step.Content != "" {
+				targetText := ""
+				if err := json.Unmarshal([]byte(rawLine), &step); err == nil {
 					targetText = step.Content
+				} else if !strings.HasPrefix(rawLine, "{") {
+					targetText = rawLine
+				}
+				if targetText == "" {
+					continue
 				}
 
 				// Check if a task was started

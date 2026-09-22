@@ -278,6 +278,21 @@ func TestIsResultEvent(t *testing.T) {
 			want: false,
 		},
 		{
+			name: "Prefixed Log Line with Result Event",
+			line: `[2026-09-22 13:00:00] {"event":"result","result":{"status":"SUCCESS"}}`,
+			want: true,
+		},
+		{
+			name: "Step Update with Result Text in Tool Output",
+			line: `{"event":"step_update","tool_output":"task finished with result: OK"}`,
+			want: false,
+		},
+		{
+			name: "Step Update with Interior JSON in Tool Output",
+			line: `{"event":"step_update","tool_output":"{\"event\":\"result\"}"}`,
+			want: false,
+		},
+		{
 			name: "Empty Line",
 			line: `   `,
 			want: false,
@@ -386,6 +401,21 @@ func TestExtractSubagentID(t *testing.T) {
 			input:    "Command completed with status 0",
 			expected: "",
 		},
+		{
+			name:     "embedded array with snake_case conversation_id",
+			input:    `log prefix [{"conversation_id": "sub-alt-1"}]`,
+			expected: "sub-alt-1",
+		},
+		{
+			name:     "direct object with snake_case conversation_id",
+			input:    `{"conversation_id": "sub-snake-1"}`,
+			expected: "sub-snake-1",
+		},
+		{
+			name:     "direct object with subagents snake_case",
+			input:    `{"subagents": [{"conversation_id": "sub-snake-sub"}]}`,
+			expected: "sub-snake-sub",
+		},
 	}
 
 	for _, tc := range tests {
@@ -400,3 +430,43 @@ func TestExtractSubagentID(t *testing.T) {
 	}
 }
 
+func TestWriteWorkerTurn_NilWriter(t *testing.T) {
+	if err := WriteWorkerTurn(nil, "hello"); err == nil {
+		t.Errorf("expected error on nil writer")
+	}
+}
+
+func TestActivityWriter_SessionProbe(t *testing.T) {
+	w := NewActivityWriter("")
+	n, err := w.Write(nil)
+	if n != 0 || err != nil {
+		t.Fatalf("expected 0, nil from empty write")
+	}
+
+	jsonPayload := []byte(`some log prefix {"session_id": "123e4567-e89b-12d3-a456-426614174000"} some suffix`)
+	n, err = w.Write(jsonPayload)
+	if err != nil || n != len(jsonPayload) {
+		t.Fatalf("write failed: %v", err)
+	}
+	if w.SessionID() != "123e4567-e89b-12d3-a456-426614174000" {
+		t.Errorf("expected session ID extracted via sessionProbe, got %q", w.SessionID())
+	}
+
+	// Another writer testing reUpdateStream
+	w2 := NewActivityWriter("")
+	streamMsg := []byte("Starting conversation update stream for 223e4567-e89b-12d3-a456-426614174000\n")
+	_, _ = w2.Write(streamMsg)
+	if w2.SessionID() != "223e4567-e89b-12d3-a456-426614174000" {
+		t.Errorf("expected session ID from update stream, got %q", w2.SessionID())
+	}
+}
+
+func TestDefaultWatchdogOptions(t *testing.T) {
+	opts := DefaultWatchdogOptions(5)
+	if opts.InactivityTimeout == 0 {
+		t.Errorf("expected non-zero InactivityTimeout")
+	}
+	if opts.MaxDuration == 0 {
+		t.Errorf("expected non-zero MaxDuration")
+	}
+}
