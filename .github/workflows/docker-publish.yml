@@ -33,7 +33,6 @@ jobs:
       dashboard: ${{ steps.filter.outputs.dashboard }}
       docs: ${{ steps.filter.outputs.docs }}
       proxy: ${{ steps.filter.outputs.proxy }}
-      ollama: ${{ steps.filter.outputs.ollama }}
       hangar: ${{ steps.filter.outputs.hangar }}
       matrix: ${{ steps.set-matrix.outputs.matrix }}
       has_builds: ${{ steps.set-matrix.outputs.has_builds }}
@@ -62,8 +61,6 @@ jobs:
               - 'docs-service/**'
             proxy:
               - 'proxy/**'
-            ollama:
-              - 'docker/ollama/**'
             hangar:
               - 'sidecars/hangar/**'
 
@@ -80,7 +77,6 @@ jobs:
               dashboard: "${{ steps.filter.outputs.dashboard }}",
               docs: "${{ steps.filter.outputs.docs }}",
               proxy: "${{ steps.filter.outputs.proxy }}",
-              ollama: "${{ steps.filter.outputs.ollama }}",
               hangar: "${{ steps.filter.outputs.hangar }}"
             };
 
@@ -93,7 +89,6 @@ jobs:
               { service: "dashboard", context: "./dashboard", file: "./dashboard/Dockerfile", image_name: "aerial-dashboard" },
               { service: "docs", context: "./docs-service", file: "./docs-service/Dockerfile", image_name: "aerial-docs" },
               { service: "proxy", context: "./proxy", file: "./proxy/Dockerfile", image_name: "aerial-proxy" },
-              { service: "ollama", context: "./docker/ollama", file: "./docker/ollama/Dockerfile", image_name: "aerial-ollama" },
               { service: "hangar", context: ".", file: "./sidecars/hangar/Dockerfile", image_name: "aerial-hangar" }
             ];
 

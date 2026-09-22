@@ -2141,6 +2141,24 @@ func TestApplyEnvironmentOverrides_TableDriven(t *testing.T) {
 			},
 		},
 		{
+			name:   "OLLAMA_NUM_CTX override",
+			envMap: map[string]string{"OLLAMA_NUM_CTX": "1024"},
+			assertFn: func(t *testing.T, d *ConfigData) {
+				if d.Ollama.NumCtx != 1024 {
+					t.Errorf("expected Ollama NumCtx override, got %d", d.Ollama.NumCtx)
+				}
+			},
+		},
+		{
+			name:   "EMBEDDING_NUM_CTX fallback override",
+			envMap: map[string]string{"EMBEDDING_NUM_CTX": "2048"},
+			assertFn: func(t *testing.T, d *ConfigData) {
+				if d.Ollama.NumCtx != 2048 {
+					t.Errorf("expected Ollama NumCtx override, got %d", d.Ollama.NumCtx)
+				}
+			},
+		},
+		{
 			name:   "GEMINI_HOME override",
 			envMap: map[string]string{"GEMINI_HOME": "/custom/gemini/home"},
 			assertFn: func(t *testing.T, d *ConfigData) {

@@ -132,10 +132,12 @@ func TestFormatMemoryContext(t *testing.T) {
 
 func TestMockOllamaClient(t *testing.T) {
 	var receivedPrompt string
+	var receivedOptions map[string]any
 	rt := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		var r EmbeddingRequest
 		_ = json.NewDecoder(req.Body).Decode(&r)
 		receivedPrompt = r.Prompt
+		receivedOptions = r.Options
 		return mockJSONResponse(http.StatusOK, `{"embedding":[0.1, 0.2, 0.3]}`), nil
 	})
 
@@ -162,6 +164,9 @@ func TestMockOllamaClient(t *testing.T) {
 	if receivedPrompt != "test query" {
 		t.Errorf("expected clean prompt 'test query', got: %s", receivedPrompt)
 	}
+	if receivedOptions == nil || receivedOptions["num_ctx"] != float64(512) {
+		t.Errorf("expected default options num_ctx 512, got: %v", receivedOptions)
+	}
 
 	// Test query embedding with QueryPrefix configured in Config
 	cfgPrefixed := config.NewFromData(&config.ConfigData{
@@ -184,6 +189,9 @@ func TestMockOllamaClient(t *testing.T) {
 	if receivedPrompt != "Represent this query: test query 2" {
 		t.Errorf("expected prefixed prompt, got: %s", receivedPrompt)
 	}
+	if receivedOptions == nil || receivedOptions["num_ctx"] != float64(512) {
+		t.Errorf("expected default options num_ctx 512, got: %v", receivedOptions)
+	}
 
 	// Test document embedding (should NOT prepend prefix)
 	embDoc, err := client.GenerateEmbedding(ctx, "test doc", false, 1)
@@ -195,6 +203,28 @@ func TestMockOllamaClient(t *testing.T) {
 	}
 	if receivedPrompt != "test doc" {
 		t.Errorf("expected document prompt 'test doc', got: %s", receivedPrompt)
+	}
+	if receivedOptions == nil || receivedOptions["num_ctx"] != float64(512) {
+		t.Errorf("expected default options num_ctx 512, got: %v", receivedOptions)
+	}
+
+	// Test custom NumCtx configured in Config
+	cfgCustomCtx := config.NewFromData(&config.ConfigData{
+		Ollama: config.OllamaConfig{
+			BaseURL: "http://mock-ollama:11434",
+			NumCtx:  1024,
+		},
+	})
+	clientCustomCtx := New(cfgCustomCtx)
+	clientCustomCtx.httpClient = &http.Client{Transport: rt}
+	clientCustomCtx.retryDelay = -1
+
+	_, err = clientCustomCtx.GenerateEmbedding(ctx, "test custom ctx", false, 1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if receivedOptions == nil || receivedOptions["num_ctx"] != float64(1024) {
+		t.Errorf("expected custom options num_ctx 1024, got: %v", receivedOptions)
 	}
 }
 
@@ -973,10 +1003,16 @@ func TestMemory_NewClient_Variants(t *testing.T) {
 	if cfgNil.BaseURL != DefaultOllamaURL {
 		t.Errorf("expected default ollama url, got %s", cfgNil.BaseURL)
 	}
+	if cfgNil.NumCtx != 512 {
+		t.Errorf("expected default num_ctx 512 for nil client, got %d", cfgNil.NumCtx)
+	}
 	cEmpty := &Client{}
 	cfgEmpty := cEmpty.getOllamaConfig()
 	if cfgEmpty.BaseURL != DefaultOllamaURL {
 		t.Errorf("expected default ollama url, got %s", cfgEmpty.BaseURL)
+	}
+	if cfgEmpty.NumCtx != 512 {
+		t.Errorf("expected default num_ctx 512 for empty client, got %d", cfgEmpty.NumCtx)
 	}
 }
 
