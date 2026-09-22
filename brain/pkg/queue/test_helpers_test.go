@@ -114,21 +114,3 @@ func rotateSessionID(store db.Store, sessionKey, newSessionID string) error {
 	}
 	return store.RotateSessionID(context.Background(), sessionKey, newSessionID)
 }
-
-func updateMessageStatus(store db.Store, id string, status string, errorMsg ...string) error {
-	if store == nil {
-		return nil
-	}
-	errMsg := ""
-	if len(errorMsg) > 0 {
-		errMsg = errorMsg[0]
-	}
-	return store.UpdateMessageStatus(context.Background(), id, status, errMsg)
-}
-
-func updateMessageCompleted(store db.Store, id, responseText string) error {
-	if store == nil {
-		return nil
-	}
-	return store.UpdateMessageCompleted(context.Background(), id, responseText)
-}

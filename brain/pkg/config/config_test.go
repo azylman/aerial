@@ -2345,7 +2345,6 @@ func TestConfig_PackageLevelAndUncoveredHelpers(t *testing.T) {
 	if dsn := buildPostgresDSN(lookupHostOnly); dsn != expectedDefault {
 		t.Errorf("expected default postgres DSN %q, got %q", expectedDefault, dsn)
 	}
-	_ = buildPostgresDSNFromEnv()
 
 	// 5. Reload nil check
 	if err := Reload(nil); err == nil {

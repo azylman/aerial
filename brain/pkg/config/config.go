@@ -483,10 +483,6 @@ func buildPostgresDSN(lookup func(string) string) string {
 	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", dbUser, dbPass, dbHost, dbPort, dbName)
 }
 
-func buildPostgresDSNFromEnv() string {
-	return buildPostgresDSN(os.Getenv)
-}
-
 func applyEnvironmentOverrides(data *ConfigData, lookup func(string) string) {
 	if data == nil {
 		return
