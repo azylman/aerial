@@ -2,7 +2,6 @@ package scheduler
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"log"
 	"strings"
@@ -52,7 +51,6 @@ type MessageEnqueuer interface {
 
 type Scheduler struct {
 	cfg           *config.Config
-	db            *sql.DB
 	store         db.Store
 	enqueuer      MessageEnqueuer
 	threadCreator ThreadCreator
@@ -84,25 +82,13 @@ func WithSessionRoots(roots ...string) Option {
 	}
 }
 
-// New constructs a Scheduler supporting both legacy *sql.DB and db.Store interface parameters.
-func New(cfg *config.Config, dbOrStore any, enqueuer MessageEnqueuer, threadCreator ThreadCreator, opts ...Option) (*Scheduler, error) {
+// New constructs a Scheduler with a db.Store persistence contract.
+func New(cfg *config.Config, store db.Store, enqueuer MessageEnqueuer, threadCreator ThreadCreator, opts ...Option) (*Scheduler, error) {
 	if cfg == nil || cfg.Current() == nil {
 		return nil, fmt.Errorf("scheduler: config cannot be nil")
 	}
-	var database *sql.DB
-	var store db.Store
-	switch v := dbOrStore.(type) {
-	case db.Store:
-		store = v
-	case *sql.DB:
-		database = v
-		if v != nil {
-			store = db.NewSQLStore(v)
-		}
-	}
 	s := &Scheduler{
 		cfg:           cfg,
-		db:            database,
 		store:         store,
 		enqueuer:      enqueuer,
 		threadCreator: threadCreator,
@@ -119,21 +105,16 @@ func (s *Scheduler) getStore() db.Store {
 	if s == nil {
 		return nil
 	}
-	if s.store != nil {
-		return s.store
-	}
-	if s.db != nil {
-		return db.NewSQLStore(s.db)
-	}
-	return nil
+	return s.store
 }
+
 func NewWithStore(cfg *config.Config, store db.Store, enqueuer MessageEnqueuer, threadCreator ThreadCreator, opts ...Option) (*Scheduler, error) {
 	return New(cfg, store, enqueuer, threadCreator, opts...)
 }
 
 // NewScheduler is a compatibility wrapper for New.
-func NewScheduler(cfg *config.Config, dbOrStore any, enqueuer MessageEnqueuer, threadCreator ThreadCreator, opts ...Option) (*Scheduler, error) {
-	return New(cfg, dbOrStore, enqueuer, threadCreator, opts...)
+func NewScheduler(cfg *config.Config, store db.Store, enqueuer MessageEnqueuer, threadCreator ThreadCreator, opts ...Option) (*Scheduler, error) {
+	return New(cfg, store, enqueuer, threadCreator, opts...)
 }
 
 // ProcessDueSchedules evaluates and processes due cron and one-shot schedules.
@@ -148,8 +129,8 @@ func (s *Scheduler) ProcessDueSchedules(ctx context.Context) error {
 }
 
 // ProcessDueSchedules evaluates and processes due cron and one-shot schedules (compatibility wrapper).
-func ProcessDueSchedules(ctx context.Context, cfg *config.Config, dbOrStore any, enqueuer MessageEnqueuer, threadCreator ThreadCreator) error {
-	s, err := New(cfg, dbOrStore, enqueuer, threadCreator)
+func ProcessDueSchedules(ctx context.Context, cfg *config.Config, store db.Store, enqueuer MessageEnqueuer, threadCreator ThreadCreator) error {
+	s, err := New(cfg, store, enqueuer, threadCreator)
 	if err != nil {
 		return err
 	}
@@ -303,9 +284,9 @@ func (s *Scheduler) Start(ctx context.Context) (stop func()) {
 }
 
 // Start launches the background scheduler monitor daemon with a 30-second ticker (compatibility wrapper).
-func Start(ctx context.Context, cfg *config.Config, dbOrStore any, pool *queue.WorkerPool, dg *discordgo.Session) (stop func()) {
+func Start(ctx context.Context, cfg *config.Config, store db.Store, pool *queue.WorkerPool, dg *discordgo.Session) (stop func()) {
 	threadCreator := NewDiscordThreadCreator(dg)
-	s, err := New(cfg, dbOrStore, pool, threadCreator)
+	s, err := New(cfg, store, pool, threadCreator)
 	if err != nil {
 		log.Printf("[Scheduler] Error: %v", err)
 		return func() {}
@@ -352,24 +333,12 @@ func ExtractFactsLLM(ctx context.Context, prompt string) (string, error) {
 }
 
 // RunPruneRetention executes schedule run retention cleanup.
-func RunPruneRetention(dbOrStore any) {
-	RunPruneRetentionWithContext(context.Background(), dbOrStore)
+func RunPruneRetention(store db.Store) {
+	RunPruneRetentionWithContext(context.Background(), store)
 }
 
 // RunPruneRetentionWithContext executes schedule run retention cleanup with the provided context.
-func RunPruneRetentionWithContext(ctx context.Context, dbOrStore any) {
-	if dbOrStore == nil {
-		return
-	}
-	var store db.Store
-	switch v := dbOrStore.(type) {
-	case db.Store:
-		store = v
-	case *sql.DB:
-		if v != nil {
-			store = db.NewSQLStore(v)
-		}
-	}
+func RunPruneRetentionWithContext(ctx context.Context, store db.Store) {
 	if store == nil {
 		return
 	}
@@ -385,14 +354,14 @@ func RunPruneRetentionWithContext(ctx context.Context, dbOrStore any) {
 }
 
 // RunFactExtraction triggers embedding backfill and active conversation fact extraction.
-func RunFactExtraction(ctx context.Context, dbOrStore any, client *memory.Client, llmFunc memory.LLMClientFunc) {
-	if dbOrStore == nil || client == nil || llmFunc == nil {
+func RunFactExtraction(ctx context.Context, store db.Store, client *memory.Client, llmFunc memory.LLMClientFunc) {
+	if store == nil || client == nil || llmFunc == nil {
 		return
 	}
 	if ctx.Err() != nil {
 		return
 	}
-	if backfilled, err := memory.BackfillMissingEmbeddings(ctx, dbOrStore, client); err != nil {
+	if backfilled, err := memory.BackfillMissingEmbeddings(ctx, store, client); err != nil {
 		if ctx.Err() == nil {
 			log.Printf("[Scheduler] Embedding backfill error: %v", err)
 		}
@@ -402,7 +371,7 @@ func RunFactExtraction(ctx context.Context, dbOrStore any, client *memory.Client
 	if ctx.Err() != nil {
 		return
 	}
-	if err := memory.ExtractActiveConversationFacts(ctx, dbOrStore, client, llmFunc, 12); err != nil {
+	if err := memory.ExtractActiveConversationFacts(ctx, store, client, llmFunc, 12); err != nil {
 		if ctx.Err() == nil {
 			log.Printf("[Scheduler] Fact extraction error: %v", err)
 		}
@@ -412,13 +381,13 @@ func RunFactExtraction(ctx context.Context, dbOrStore any, client *memory.Client
 var decayMutex sync.Mutex
 
 // RunMemoryDecay executes fact importance decay and stale fact pruning.
-func RunMemoryDecay(dbOrStore any) {
-	RunMemoryDecayWithContext(context.Background(), dbOrStore)
+func RunMemoryDecay(factStore db.FactStore) {
+	RunMemoryDecayWithContext(context.Background(), factStore)
 }
 
 // RunMemoryDecayWithContext executes fact importance decay and pruning with the provided context.
-func RunMemoryDecayWithContext(ctx context.Context, dbOrStore any) {
-	if dbOrStore == nil {
+func RunMemoryDecayWithContext(ctx context.Context, factStore db.FactStore) {
+	if factStore == nil {
 		return
 	}
 	if !decayMutex.TryLock() {
@@ -426,19 +395,6 @@ func RunMemoryDecayWithContext(ctx context.Context, dbOrStore any) {
 		return
 	}
 	defer decayMutex.Unlock()
-
-	var factStore db.FactStore
-	switch v := dbOrStore.(type) {
-	case db.FactStore:
-		factStore = v
-	case *sql.DB:
-		if v != nil {
-			factStore = db.NewSQLStore(v)
-		}
-	}
-	if factStore == nil {
-		return
-	}
 
 	decayCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
@@ -546,8 +502,8 @@ func (s *Scheduler) Run(ctx context.Context, interval time.Duration) {
 }
 
 // Run executes the monitoring loop with ticker interval and context cancellation (compatibility wrapper).
-func Run(ctx context.Context, cfg *config.Config, dbOrStore any, enqueuer MessageEnqueuer, threadCreator ThreadCreator, interval time.Duration) {
-	s, err := New(cfg, dbOrStore, enqueuer, threadCreator)
+func Run(ctx context.Context, cfg *config.Config, store db.Store, enqueuer MessageEnqueuer, threadCreator ThreadCreator, interval time.Duration) {
+	s, err := New(cfg, store, enqueuer, threadCreator)
 	if err != nil {
 		log.Printf("[Scheduler] Error: %v", err)
 		return

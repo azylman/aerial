@@ -2,7 +2,6 @@ package scheduler
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -1607,18 +1606,10 @@ func TestGetStore_AllBranches(t *testing.T) {
 		t.Errorf("expected s.store, got %v", st)
 	}
 
-	// 3. s.db is set and s.store is nil
-	dummyDB, _ := sql.Open("pgx", "postgres://mock:mock@127.0.0.1:5432/mock")
-	defer dummyDB.Close()
-	sDB := &Scheduler{db: dummyDB}
-	if st := sDB.getStore(); st == nil {
-		t.Errorf("expected non-nil store from s.db")
-	}
-
-	// 4. both s.store and s.db are nil
-	sBothNil := &Scheduler{}
-	if st := sBothNil.getStore(); st != nil {
-		t.Errorf("expected nil store when both s.store and s.db are nil, got %v", st)
+	// 3. s.store is nil
+	sNil := &Scheduler{}
+	if st := sNil.getStore(); st != nil {
+		t.Errorf("expected nil store when s.store is nil, got %v", st)
 	}
 }
 
@@ -1635,8 +1626,8 @@ func TestNew_StoreAndWrappers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New with db.Store failed: %v", err)
 	}
-	if s1.store != store || s1.db != nil {
-		t.Errorf("expected s1.store to be store and s1.db to be nil")
+	if s1.store != store {
+		t.Errorf("expected s1.store to be store")
 	}
 
 	// 2. NewWithStore
