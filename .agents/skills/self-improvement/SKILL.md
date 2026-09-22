@@ -67,9 +67,47 @@ Code and configuration changes are governed by the two-repository separation and
 Whenever undertaking feature development, architectural changes, bug fixes, or system modifications, Aerial follows a **Tiered Engineering Workflow** scaled dynamically by the complexity and blast radius of the change.
 
 ### Complexity Tiers & Review Matrix
-Use your classification tiers defined in `GEMINI.md` Section 8 (**Tier 0 through Tier 3**) to evaluate task scope and govern execution:
-• **Single Source of Truth**: All tier thresholds, review panel compositions, human approval gates (Tier 3 stop), and orchestration invariants are canonically defined in `GEMINI.md` Section 8.
-• **Negative Scope Blacklist**: Strictly forbidden from Tier 0: SQL/database schemas, security/auth primitives, concurrency/mutex logic, Docker topology, or core runner loops (auto-escalates to Tier 1+ per `GEMINI.md`).
+
+Code review and execution are structured dynamically across four complexity tiers:
+
+• **Tier 0 (≤ 5 LOC, single-line changes, config tweaks, doc typos)**:
+  - **Review Overhead**: Zero review. Both plan review and diff review subagents are completely bypassed. Direct implementation in the root thread with automated pre-flight syntax/YAML verification.
+  - **Negative Scope Blacklist**: Strictly forbidden from Tier 0: SQL/database schemas, security/auth primitives, concurrency/mutex logic, Docker topology, or core runner loops (any touch auto-escalates to Tier 1+).
+
+• **Tier 1 (< 50 LOC, targeted bugfixes & test additions)**:
+  - **Review Overhead**: Inline root-thread execution. Plan and diff review subagents are completely bypassed to eliminate delegation overhead and premature yield chatter.
+  - **Execution**: Autonomous continuous execution (no mandatory stop) directly in the root thread, verified via targeted package unit tests and local pre-flight verification (`./scripts/verify.sh --staged`).
+
+• **Tier 2 (50–200 LOC, standard features & multi-package refactors)**:
+  - **Plan Review**: The Girl Gang review panel audits the plan in an isolated subagent across 4 disciplines (~45s).
+  - **Execution**: Autonomous execution (no mandatory stop; directly incorporates plan feedback). Zero mid-task pauses during coding.
+  - **Diff Review**: Consolidated Devil's Advocate audits the unified `git diff` via isolated review subagent before opening the PR (~30s).
+
+• **Tier 3 (> 200 LOC, core architecture, database migrations, breaking changes)**:
+  - **Plan Review**: The Girl Gang review panel audits the plan in an isolated subagent across 4 disciplines (~45s).
+  - **Human Checkpoint**: **MANDATORY HUMAN REVIEW CHECKPOINT (STOP)**: synthesize panel findings and wait for explicit user approval before touching code.
+  - **Execution**: Continuous implementation once approved (zero mid-task pauses).
+  - **Diff Review**: The Girl Gang review panel audits the unified `git diff` via isolated subagent before merge (~45s).
+
+### Review Panel Composition & Subagent Execution Invariants
+
+• **Review Panel Invariant**: For Tiers 2 & 3, review panels (The Girl Gang) consist of exactly **4 reviewers / disciplines**:
+  - **3 relevant Domain Specialists** dynamically tailored to the specific change (e.g. Systems/Concurrency, Architecture, Security, Data Integrity, or PWA/Frontend when user-facing UI is touched). PWA/Frontend is NOT mandated for every change, but included only when relevant.
+  - **1 mandatory Adversarial Devil's Advocate** focused on failure mode analysis, edge cases, and architectural risk.
+
+• **Consolidated Review Subagent Execution (Token Isolation & Atomic Gathering Invariant)**:
+  - In headless Discord bot turns (`agy -p`), review panels (The Girl Gang) MUST execute within a **single consolidated review subagent** (e.g. `role: "TheGirlGangReviewer"`, `TypeName: "research"`).
+  - Dispatching multiple independent review subagents is strictly prohibited because asynchronous completion times tempt the root agent into emitting intermediate waiting chatter to Discord, which triggers `agy`'s print-mode drain and kills in-flight subagents.
+  - Running reviews inline in the root thread is prohibited for Tier 2 and Tier 3 because multi-expert critiques dump thousands of tokens into `transcript.jsonl`, compounding quadratically across subsequent tool calls.
+  - The consolidated review subagent audits across all 4 disciplines in its own isolated context and returns a single, structured synthesis back to the root agent. The root agent MUST NOT emit conversational text to Discord while the review subagent is in flight.
+
+• **Continuous Autonomous Execution & Review Panel Timing**:
+  - **Zero Human Check-In Stalls**: For Tiers 0–2 (and approved Tier 3), execution is continuous without stopping to prompt the user for permission between individual tasks.
+  - **Consolidated Pre-PR Review**: Code review panel audits are performed on the consolidated pre-PR diff before submission, rather than pausing to run full review panels after every micro-task.
+
+• **Orchestration & Subagent Delegation Invariant**:
+  - For Tier 2+ multi-file edits, test triage, and lint remediation loops exceeding tool budget thresholds, the primary agent acts as an orchestrator, delegating heavy tool loops to scoped, isolated subagents (for implementation/execution only).
+  - Tier 0 and Tier 1 changes execute directly inline in the root thread. Root transcript must remain featherweight (<50 steps) to prevent quadratic token compounding.
 
 ---
 
@@ -140,8 +178,15 @@ Before modifying source code, Aerial MUST audit the plan according to the classi
    - **Defense-in-Depth Validation**: When designing or validating input handling, validate across all layers (API entry point, domain business logic, environment guards) so invalid states become structurally impossible to reach.
    - **Test Double & Production Purity**: Never assert on a mock's internal calls; assert real component outcomes. Mock only external boundaries (slow I/O, network), never domain business logic. Production structs carry production methods only—keep test-only reset or lifecycle hooks in test utilities.
    - **Scope Discipline & File Health**: Speculative abstractions and unrequested "nice-to-haves" are flagged as architectural defects ("Extra") on equal footing with missed requirements ("Missing"). Block changes that significantly bloat already large files; decompose cohesive units behind narrow interface boundaries.
-3. **Orchestration & Workflow Standards**:
-   - Strictly adhere to the Tiered Engineering Workflow and Orchestration Invariants in `GEMINI.md` (Section 8).
+3. **Functional Core, Imperative Shell (Decoupling Logic from Concurrency & I/O)**:
+   - When designing new features or bugfixes, business logic, prompt formatting, state transitions, session key calculation, and decision rules MUST be factored into pure, deterministic functions (e.g. `AssembleTurnPrompt`, `PlanBurstExecution`, `DetermineSessionAction`, `CalculateBackoffDelay`) that accept values and return values.
+   - **Table-Driven Unit Tests as Primary Vehicle**: Unit tests for business logic permutations and edge cases MUST target these pure functions directly using fast, table-driven tests (< 1ms) with zero chance of channel deadlocks, race conditions, or timing flakiness.
+   - **Reserve Mock Runner / Subprocess Orchestration for Plumbing Only**: Tests that instantiate mock subprocesses (`createMockAgyScript`), mock runners (`RunnerFunc`), goroutine worker pools, channel select loops, and context timeouts MUST be strictly limited to verifying concurrency plumbing (e.g., watchdog timeouts, process group kills, startup catch-up sweeps). Never test business logic variants via end-to-end mock runner pipelines.
+   - **Zero Arbitrary Sleeps Invariant (`time.Sleep` Elimination)**: Arbitrary sleeps (`time.Sleep`) are strictly prohibited in tests and production plumbing. Asynchronous coordination must use event-driven signaling, condition variables, channel selects, or injected delay overrides (`RetryDelayOverride`) to guarantee fast, deterministic execution without timing flakes.
+   - **Hermetic In-Memory Test Fixtures**: All storage and database contract tests MUST use airgapped, in-memory database handles or `t.TempDir()` isolated files strictly for fast, hermetic unit testing. Unit tests MUST NEVER write to shared host database paths, `/data`, or `/share`.
+   - **Interface Abstraction at External Boundaries**: Abstract external system boundaries (git commands, Docker sockets, Discord REST, database drivers) behind interfaces (e.g. `GitExecutor`) so packages can be tested hermetically with in-memory mocks without disk or subprocess overhead.
+4. **Orchestration & Workflow Standards**:
+   - Strictly adhere to the Tiered Engineering Workflow and Orchestration Invariants detailed above.
 
 ---
 
@@ -211,6 +256,12 @@ All code and configuration changes must follow the automated scratch PR workflow
    ```bash
    /share/aerial/scripts/aerial-config-pr.sh merge <pr_num>
    ```
+
+### 5.3 PR Submission, Description & Status Reporting Standards
+- **Mandatory PR Descriptions**: Pull Request descriptions are strictly mandatory under all circumstances. Submissions without a description will fail fast with exit code 1. Authors must provide a description via `PR_DESCRIPTION.md` in the scratch root (the recommended path for agents; automatically consumed and deleted before staging) or `--body-file <path>`.
+- **Title Hygiene**: PR titles are automatically sanitized (first non-empty line, stripped of `\r\n`, clamped to 256 characters) to prevent literal `\n` pollution in GitHub titles.
+- **Inverted Pyramid Format**: PR descriptions should follow the Inverted Pyramid format (concise summary first, key changes as bulleted key-value lists, verification evidence last) with zero markdown tables.
+- **Two-Sentence Plain Prose Confirmation**: On PR merge and deployment confirmation, responses must be delivered in plain prose strictly capped at two sentences max, omitting markdown bullet lists and forward-looking checklists for nominal and ongoing states. The sentence limit is lifted only for failures to provide full diagnostic logs and failure context.
 
 ---
 
