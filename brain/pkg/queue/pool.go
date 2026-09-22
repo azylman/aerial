@@ -282,11 +282,9 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 	if cfg.ResolveChannelPolicy == nil {
 		cfg.ResolveChannelPolicy = func(channelID, channelName string) config.ChannelPolicy {
 			if appCfg != nil {
-				if cur := appCfg.Current(); cur != nil {
-					return cur.ResolveChannelPolicy(channelID, channelName)
-				}
+				return appCfg.ResolveChannelPolicy(channelID, channelName)
 			}
-			return config.GetRuntimeConfig().ResolveChannelPolicy(channelID, channelName)
+			return config.ActiveConfig().ResolveChannelPolicy(channelID, channelName)
 		}
 	}
 	if cfg.SystemAlertFunc == nil {

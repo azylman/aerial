@@ -2329,22 +2329,7 @@ func TestConfig_PackageLevelAndUncoveredHelpers(t *testing.T) {
 		t.Errorf("expected non-nil ActiveConfig")
 	}
 
-	// 2. Deprecated ConfigData methods
-	cd := ConfigData{
-		AdminUsers: []string{"admin1", "admin2"},
-		Channels: map[string]ChannelPolicy{
-			"chan1": {Mode: "threads"},
-		},
-	}
-	if !cd.IsAdmin("admin1") {
-		t.Errorf("expected cd.IsAdmin('admin1') to be true")
-	}
-	p := cd.ResolveChannelPolicy("chan1", "chan1")
-	if p.Mode != "threads" {
-		t.Errorf("expected threads mode, got %s", p.Mode)
-	}
-
-	// 3. getEnv
+	// 2. getEnv
 	if val := getEnv("SOME_DEFINITELY_UNSET_KEY_ABC123", "default_val"); val != "default_val" {
 		t.Errorf("expected default_val, got %s", val)
 	}
