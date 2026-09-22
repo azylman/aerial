@@ -1144,7 +1144,7 @@ func TestSessionTurnMapping(t *testing.T) {
 		t.Fatalf("SaveConversationMapping failed: %v", err)
 	}
 
-	intID, err := GetInternalConversationID(database, "ext-1")
+	intID, err := GetSessionID(database, "ext-1")
 	if err != nil || intID != "int-1" {
 		t.Errorf("expected int-1, got %s (err: %v)", intID, err)
 	}

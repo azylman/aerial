@@ -1027,11 +1027,6 @@ func getEnv(key, defaultVal string) string {
 	return getEnvFromLookup(os.Getenv, key, defaultVal)
 }
 
-// Deprecated: GetEnv is deprecated. Subpackages should read from cfg.Current().
-func GetEnv(key, defaultVal string) string {
-	return getEnvFromLookup(os.Getenv, key, defaultVal)
-}
-
 // NormalizeChannelName standardizes channel names for config key and file lookups.
 // It trims whitespace, strips any leading '#', lowercases, and strictly blocks directory traversal.
 func NormalizeChannelName(channelName string) string {
