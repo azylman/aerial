@@ -255,11 +255,6 @@ func GetSessionTurnCount(database DBTX, sessionKey string) (int, error) {
 	return count, err
 }
 
-// GetInternalConversationID is a legacy helper returning the internal session ID for an external ID.
-func GetInternalConversationID(database DBTX, externalID string) (string, error) {
-	return GetSessionID(database, externalID)
-}
-
 // GetExternalConversationID retrieves the external thread ID given an internal session ID.
 func GetExternalConversationID(database DBTX, internalID string) (string, error) {
 	if database == nil || internalID == "" {

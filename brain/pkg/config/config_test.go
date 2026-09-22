@@ -29,9 +29,6 @@ func TestGetEnv(t *testing.T) {
 	if val := GetEnvFromLookup(nil, "TEST_VAR_12345", "default_val"); val != "default_val" {
 		t.Errorf("Expected default_val with nil lookup, got %s", val)
 	}
-	if val := GetEnv("NON_EXISTENT_VAR_12345", "default_val"); val != "default_val" {
-		t.Errorf("Expected default_val from GetEnv fallback, got %s", val)
-	}
 }
 
 func TestWriteAtomicFile(t *testing.T) {
@@ -2347,11 +2344,8 @@ func TestConfig_PackageLevelAndUncoveredHelpers(t *testing.T) {
 		t.Errorf("expected threads mode, got %s", p.Mode)
 	}
 
-	// 3. getEnv and GetEnv
+	// 3. getEnv
 	if val := getEnv("SOME_DEFINITELY_UNSET_KEY_ABC123", "default_val"); val != "default_val" {
-		t.Errorf("expected default_val, got %s", val)
-	}
-	if val := GetEnv("SOME_DEFINITELY_UNSET_KEY_ABC123", "default_val"); val != "default_val" {
 		t.Errorf("expected default_val, got %s", val)
 	}
 

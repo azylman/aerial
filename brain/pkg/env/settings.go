@@ -54,11 +54,6 @@ func (p *Provisioner) SyncSettings(apiKey, model string) error {
 	return p.writeAtomic(settingsPath, string(updatedData))
 }
 
-// EnsureAgySettings is a deprecated no-op helper for callers without an explicit home directory.
-func EnsureAgySettings(apiKey, model string) error {
-	return EnsureAgySettingsForHome("", apiKey, model)
-}
-
 // EnsureAgySettingsForHome configures settings.json under a specific home directory.
 func EnsureAgySettingsForHome(homeDir, apiKey, model string) error {
 	cleanHome := strings.TrimSpace(homeDir)

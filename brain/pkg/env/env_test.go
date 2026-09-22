@@ -497,10 +497,7 @@ func TestProvisioner_ZeroAmbientDefaultsAndNoOps(t *testing.T) {
 		t.Errorf("Expected nil error from SyncSkills on nil Provisioner, got: %v", err)
 	}
 
-	// 4. EnsureAgySettings and EnsureAgySettingsForHome with empty homeDir
-	if err := EnsureAgySettings("key", "model"); err != nil {
-		t.Errorf("Expected nil error from EnsureAgySettings, got: %v", err)
-	}
+	// 4. EnsureAgySettingsForHome with empty homeDir
 	if err := EnsureAgySettingsForHome("", "key", "model"); err != nil {
 		t.Errorf("Expected nil error from EnsureAgySettingsForHome(\"\"), got: %v", err)
 	}
