@@ -1197,6 +1197,19 @@ func TestSyncRules_SeparatePersonaAndSystemInvariants(t *testing.T) {
 	if !strings.Contains(personaContentAfterTorn, "ABG Baddie Persona") {
 		t.Errorf("expected LKGC persona content to persist after torn read, got:\n%s", personaContentAfterTorn)
 	}
+
+	// 4. Verify LKGC fallback for system_invariants.md when search path produces no file at all
+	p.SetSystemInstructionsSearchPaths([]string{filepath.Join(srcDir, "nonexistent_gemini.md")})
+	if err := p.SyncRules(""); err != nil {
+		t.Fatalf("SyncRules failed when gemini instructions path missing: %v", err)
+	}
+	geminiDataAfterMissing, err := os.ReadFile(geminiRuleFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(geminiDataAfterMissing), "Core Invariant 5: No Option B") {
+		t.Errorf("expected lkgcGeminiRule to persist when file not found, got:\n%s", string(geminiDataAfterMissing))
+	}
 }
 
 func TestSyncRules_EdgeCasesAndCoverage(t *testing.T) {
@@ -1341,20 +1354,78 @@ func TestSyncRules_ConfigRuleWriteFailure(t *testing.T) {
 	p := New(tmpHome, t.TempDir())
 	configRulesDir := filepath.Join(tmpHome, ".gemini", "config", "rules")
 	_ = os.MkdirAll(configRulesDir, 0755)
-	// Create user_persona.md as a non-empty directory so writeAtomic fails
+	// Create user_persona.md and system_invariants.md as non-empty directories so writeAtomic fails
 	blockedPersona := filepath.Join(configRulesDir, "user_persona.md")
 	_ = os.MkdirAll(filepath.Join(blockedPersona, "sub"), 0755)
+	blockedGemini := filepath.Join(configRulesDir, "system_invariants.md")
+	_ = os.MkdirAll(filepath.Join(blockedGemini, "sub"), 0755)
 
 	srcDir := t.TempDir()
 	agentsPath := filepath.Join(srcDir, "AGENTS.md")
 	_ = os.WriteFile(agentsPath, []byte("Content"), 0644)
+	geminiPath := filepath.Join(srcDir, "GEMINI.md")
+	_ = os.WriteFile(geminiPath, []byte("Gemini Content"), 0644)
 	p.SetAgentInstructionsSearchPaths([]string{agentsPath})
+	p.SetSystemInstructionsSearchPaths([]string{geminiPath})
 
-	// SyncRules should succeed overall and log a warning for config rules
+	// SyncRules should succeed overall and log warnings for config rules
 	if err := p.SyncRules(""); err != nil {
 		t.Fatalf("SyncRules failed: %v", err)
 	}
 }
+
+func TestSyncRules_PrimaryWriteFailure(t *testing.T) {
+	t.Parallel()
+	tmpHome := t.TempDir()
+	p := New(tmpHome, t.TempDir())
+	primaryRulesDir := filepath.Join(tmpHome, ".gemini", "rules")
+	_ = os.MkdirAll(primaryRulesDir, 0755)
+
+	srcDir := t.TempDir()
+	agentsPath := filepath.Join(srcDir, "AGENTS.md")
+	_ = os.WriteFile(agentsPath, []byte("Persona Content"), 0644)
+	geminiPath := filepath.Join(srcDir, "GEMINI.md")
+	_ = os.WriteFile(geminiPath, []byte("Gemini Content"), 0644)
+	p.SetAgentInstructionsSearchPaths([]string{agentsPath})
+	p.SetSystemInstructionsSearchPaths([]string{geminiPath})
+
+	// 1. Fail persona write
+	blockedPersona := filepath.Join(primaryRulesDir, "user_persona.md")
+	_ = os.MkdirAll(filepath.Join(blockedPersona, "sub"), 0755)
+	if err := p.SyncRules(""); err == nil {
+		t.Errorf("expected SyncRules to fail when primary user_persona.md cannot be written")
+	}
+	_ = os.RemoveAll(blockedPersona)
+
+	// 2. Fail gemini write
+	blockedGemini := filepath.Join(primaryRulesDir, "system_invariants.md")
+	_ = os.MkdirAll(filepath.Join(blockedGemini, "sub"), 0755)
+	if err := p.SyncRules(""); err == nil {
+		t.Errorf("expected SyncRules to fail when primary system_invariants.md cannot be written")
+	}
+}
+
+func TestProvisioner_WriteAtomicAndDirErrors(t *testing.T) {
+	t.Parallel()
+	tmpHome := t.TempDir()
+	p := New(tmpHome, t.TempDir())
+
+	// Test writeAtomic failure when parent directory cannot be created (blocked by file)
+	blockFile := filepath.Join(tmpHome, "block_file")
+	if err := os.WriteFile(blockFile, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.writeAtomic(filepath.Join(blockFile, "sub", "impossible.txt"), "data"); err == nil {
+		t.Errorf("expected writeAtomic to fail when parent dir creation fails")
+	}
+
+	// Test primaryRulesDir creation error
+	pBadHome := New(filepath.Join(blockFile, "subhome"), t.TempDir())
+	if err := pBadHome.SyncRules("prompt"); err == nil {
+		t.Errorf("expected SyncRules to fail when primaryRulesDir creation fails")
+	}
+}
+
 
 
 
