@@ -658,9 +658,9 @@ func TestOrdinal_AllCases(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		got := ordinal(tc.n)
+		got := Ordinal(tc.n)
 		if got != tc.want {
-			t.Errorf("ordinal(%d) = %q, want %q", tc.n, got, tc.want)
+			t.Errorf("Ordinal(%d) = %q, want %q", tc.n, got, tc.want)
 		}
 	}
 }

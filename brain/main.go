@@ -313,10 +313,6 @@ func SanitizeString(input string) string {
 	return sanitizer.SanitizeString(input)
 }
 
-func ordinal(n int) string {
-	return Ordinal(n)
-}
-
 // Telemetry & Schedules Data Structures
 
 type CronScheduleWithDesc struct {

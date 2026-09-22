@@ -2,10 +2,6 @@ package runner
 
 import (
 	"fmt"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -492,44 +488,6 @@ func TestExtractSessionID(t *testing.T) {
 		t.Errorf("Expected extracted ID aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee, got %s", id2)
 	}
 }
-
-func createMockAgyScript(t *testing.T, dir, script string) string {
-	t.Helper()
-	if runtime.GOOS == "windows" {
-		shPath, err := exec.LookPath("sh")
-		if err != nil {
-			for _, cand := range []string{
-				`C:\Users\alexz\AppData\Local\Programs\MinGit\usr\bin\sh.exe`,
-				`C:\Program Files\Git\bin\sh.exe`,
-				`C:\Program Files\Git\usr\bin\sh.exe`,
-			} {
-				if _, statErr := os.Stat(cand); statErr == nil {
-					shPath = cand
-					break
-				}
-			}
-		}
-		if shPath == "" {
-			t.Skip("skipping shell script test on Windows: sh not found")
-		}
-		shFile := filepath.Join(dir, "mock-agy.sh")
-		if err := os.WriteFile(shFile, []byte(script), 0755); err != nil {
-			t.Fatalf("failed to write script: %v", err)
-		}
-		batFile := filepath.Join(dir, "mock-agy.bat")
-		batContent := fmt.Sprintf("@echo off\r\n\"%s\" \"%s\" %%*\r\n", shPath, filepath.ToSlash(shFile))
-		if err := os.WriteFile(batFile, []byte(batContent), 0755); err != nil {
-			t.Fatalf("failed to write bat: %v", err)
-		}
-		return batFile
-	}
-	scriptPath := filepath.Join(dir, "mock-agy")
-	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {
-		t.Fatalf("failed to write mock script: %v", err)
-	}
-	return scriptPath
-}
-
 
 func TestActivityWriter_ThreadSafetyAndSessionDiscovery(t *testing.T) {
 	t.Parallel()
