@@ -21,9 +21,6 @@ import (
 )
 
 var (
-	runtimeConfigMu      sync.RWMutex
-	currentRuntimeConfig Config
-
 	instructionsCacheMu sync.RWMutex
 	instructionsCache   = make(map[string]string)
 
