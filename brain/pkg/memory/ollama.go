@@ -102,6 +102,7 @@ func (c *Client) getOllamaConfig() config.OllamaConfig {
 		return config.OllamaConfig{
 			BaseURL: DefaultOllamaURL,
 			Model:   DefaultEmbeddingModel,
+			NumCtx:  512,
 		}
 	}
 	cur := c.cfg.Current()
@@ -109,6 +110,7 @@ func (c *Client) getOllamaConfig() config.OllamaConfig {
 		return config.OllamaConfig{
 			BaseURL: DefaultOllamaURL,
 			Model:   DefaultEmbeddingModel,
+			NumCtx:  512,
 		}
 	}
 	cfg := cur.Ollama
@@ -118,6 +120,9 @@ func (c *Client) getOllamaConfig() config.OllamaConfig {
 	if cfg.Model == "" {
 		cfg.Model = DefaultEmbeddingModel
 	}
+	if cfg.NumCtx <= 0 {
+		cfg.NumCtx = 512
+	}
 	return cfg
 }
 
@@ -126,8 +131,9 @@ func (c *Client) BaseURL() string {
 }
 
 type EmbeddingRequest struct {
-	Model  string `json:"model"`
-	Prompt string `json:"prompt"`
+	Model   string         `json:"model"`
+	Prompt  string         `json:"prompt"`
+	Options map[string]any `json:"options,omitempty"`
 }
 
 type EmbeddingResponse struct {
@@ -174,6 +180,9 @@ func (c *Client) GenerateEmbedding(ctx context.Context, text string, isQuery boo
 	reqBody, err := json.Marshal(EmbeddingRequest{
 		Model:  model,
 		Prompt: prompt,
+		Options: map[string]any{
+			"num_ctx": ollamaCfg.NumCtx,
+		},
 	})
 	if err != nil {
 		retErr = err

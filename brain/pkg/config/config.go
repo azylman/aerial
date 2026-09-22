@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -147,6 +148,7 @@ type OllamaConfig struct {
 	BaseURL     string `yaml:"base_url" json:"base_url"`
 	Model       string `yaml:"model" json:"model"`
 	QueryPrefix string `yaml:"query_prefix" json:"query_prefix"`
+	NumCtx      int    `yaml:"num_ctx" json:"num_ctx"`
 }
 
 type ConfigData struct {
@@ -372,6 +374,7 @@ func DefaultConfigData() *ConfigData {
 			BaseURL:     "http://ollama:11434",
 			Model:       "all-minilm",
 			QueryPrefix: "Represent this sentence for searching relevant passages: ",
+			NumCtx:      512,
 		},
 		DaemonIdleTimeout:         24 * time.Hour,
 		MaxConcurrentDaemons:      40,
@@ -561,6 +564,11 @@ func applyEnvironmentOverrides(data *ConfigData, lookup func(string) string) {
 	}
 	if qp := getEnvFromLookup(lookup, "EMBEDDING_QUERY_PREFIX", ""); qp != "" {
 		data.Ollama.QueryPrefix = qp
+	}
+	if ncStr := getEnvFromLookup(lookup, "OLLAMA_NUM_CTX", getEnvFromLookup(lookup, "EMBEDDING_NUM_CTX", "")); ncStr != "" {
+		if nc, err := strconv.Atoi(strings.TrimSpace(ncStr)); err == nil && nc > 0 {
+			data.Ollama.NumCtx = nc
+		}
 	}
 	if gh := getEnvFromLookup(lookup, "GEMINI_HOME", ""); gh != "" {
 		data.GeminiHomeDir = gh

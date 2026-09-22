@@ -271,8 +271,7 @@ services:
   #    Provides local AI models & embedding generations with persistent storage.
   # ----------------------------------------------------------------------------
   ollama:
-    image: ghcr.io/azylman/aerial-ollama:latest
-    build: ./docker/ollama
+    image: ollama/ollama:latest
     container_name: aerial-ollama
     restart: unless-stopped
     labels:
@@ -283,12 +282,24 @@ services:
       - "${OLLAMA_HOST_PORT:-11434}:11434"
     networks:
       - aerial-net
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        /bin/ollama serve &
+        pid=$$!
+        trap 'kill -TERM $$pid' TERM INT
+        (
+          until /bin/ollama list >/dev/null 2>&1; do sleep 1; done
+          /bin/ollama pull all-minilm
+        ) &
+        wait $$pid
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:11434/api/version"]
+      test: ["CMD", "/bin/ollama", "list"]
       interval: 30s
       timeout: 10s
       retries: 4
-      start_period: 180s
+      start_period: 30s
 
   # ----------------------------------------------------------------------------
   # 9. Observability & Visualization: Agentsview Web Dashboard
