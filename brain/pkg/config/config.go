@@ -45,13 +45,6 @@ var ChannelInstructionsDirs = []string{
 	"./channels",
 }
 
-type GitSyncConfig struct {
-	Enabled       bool     `yaml:"enabled" json:"enabled"`
-	Interval      string   `yaml:"interval" json:"interval"`
-	ConfigRepoUrl string   `yaml:"config_repo_url" json:"config_repo_url"`
-	Repositories  []string `yaml:"repositories" json:"repositories"`
-}
-
 type WebhookEndpoint struct {
 	URL             string `yaml:"url" json:"url"`
 	TimeoutMs       int    `yaml:"timeout_ms,omitempty" json:"timeout_ms,omitempty"`
@@ -157,7 +150,6 @@ type ConfigData struct {
 	SystemChannel   string                     `yaml:"system_channel" json:"system_channel"`
 	AdminUsers      []string                   `yaml:"admin_users" json:"admin_users"`
 	Channels        map[string]ChannelPolicy   `yaml:"channels" json:"channels"`
-	GitSync         GitSyncConfig              `yaml:"git_sync" json:"git_sync"`
 	McpServers      map[string]json.RawMessage `yaml:"mcp_servers,omitempty" json:"mcp_servers,omitempty"`
 	DatabaseURL     string                     `yaml:"database_url" json:"database_url"`
 	Port            string                     `yaml:"port" json:"port"`
@@ -172,7 +164,6 @@ type ConfigData struct {
 	OpenObservePassword string                     `yaml:"openobserve_password,omitempty" json:"openobserve_password,omitempty"`
 	Ollama          OllamaConfig               `yaml:"ollama" json:"ollama"`
 	LowEffortModel  string                     `yaml:"low_effort_model" json:"low_effort_model"`
-	ClassifierModel string                     `yaml:"classifier_model,omitempty" json:"classifier_model,omitempty"` // Deprecated alias
 	GeminiHomeDir       string                     `yaml:"gemini_home_dir,omitempty" json:"gemini_home_dir,omitempty"`
 	DataDir             string                     `yaml:"data_dir,omitempty" json:"data_dir,omitempty"`
 	MCPConfig           string                     `yaml:"mcp_config,omitempty" json:"mcp_config,omitempty"`
@@ -190,7 +181,6 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 		SystemChannel             string                   `yaml:"system_channel"`
 		AdminUsers                []string                 `yaml:"admin_users"`
 		Channels                  map[string]ChannelPolicy `yaml:"channels"`
-		GitSync                   GitSyncConfig            `yaml:"git_sync"`
 		McpServers                map[string]interface{}   `yaml:"mcp_servers"`
 		DatabaseURL               string                   `yaml:"database_url"`
 		Port                      string                   `yaml:"port"`
@@ -205,7 +195,6 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 		OpenObservePassword       string                   `yaml:"openobserve_password"`
 		Ollama                    OllamaConfig             `yaml:"ollama"`
 		LowEffortModel            string                   `yaml:"low_effort_model"`
-		ClassifierModel           string                   `yaml:"classifier_model"`
 		MCPConfig                 interface{}              `yaml:"mcp_config"`
 		DaemonIdleTimeout         time.Duration            `yaml:"daemon_idle_timeout"`
 		MaxConcurrentDaemons      int                      `yaml:"max_concurrent_daemons"`
@@ -222,7 +211,6 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 	c.SystemChannel = raw.SystemChannel
 	c.AdminUsers = raw.AdminUsers
 	c.Channels = raw.Channels
-	c.GitSync = raw.GitSync
 	c.DatabaseURL = raw.DatabaseURL
 	c.Port = raw.Port
 	c.AgyBin = raw.AgyBin
@@ -236,11 +224,6 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 	c.OpenObservePassword = raw.OpenObservePassword
 	c.Ollama = raw.Ollama
 	c.LowEffortModel = strings.TrimSpace(raw.LowEffortModel)
-	if c.LowEffortModel == "" && strings.TrimSpace(raw.ClassifierModel) != "" {
-		c.LowEffortModel = strings.TrimSpace(raw.ClassifierModel)
-		log.Printf("[Config] Warning: 'classifier_model' key in config is deprecated; please rename to 'low_effort_model'")
-	}
-	c.ClassifierModel = raw.ClassifierModel
 	c.GeminiHomeDir = raw.GeminiHomeDir
 	c.DataDir = raw.DataDir
 
@@ -331,10 +314,6 @@ func cloneConfigData(src *ConfigData) *ConfigData {
 			dst.Channels[k] = cloneChannelPolicy(v)
 		}
 	}
-	if src.GitSync.Repositories != nil {
-		dst.GitSync.Repositories = make([]string, len(src.GitSync.Repositories))
-		copy(dst.GitSync.Repositories, src.GitSync.Repositories)
-	}
 	if src.McpServers != nil {
 		dst.McpServers = make(map[string]json.RawMessage, len(src.McpServers))
 		for k, v := range src.McpServers {
@@ -357,17 +336,10 @@ func DefaultConfigData() *ConfigData {
 				IgnoreBots: &defaultIgnoreBots,
 			},
 		},
-		GitSync: GitSyncConfig{
-			Enabled:       true,
-			Interval:      "60s",
-			ConfigRepoUrl: "https://github.com/azylman/aerial-config.git",
-			Repositories:  []string{"/share/aerial-config", "/share/aerial"},
-		},
 		McpServers:      make(map[string]json.RawMessage),
 		Port:            "8080",
 		AgyBin:          "agy",
 		LowEffortModel:  "Gemini 3.8 Flash (Low)",
-		ClassifierModel: "Gemini 3.8 Flash (Low)",
 		DataDir:         "",
 		GeminiHomeDir:   "",
 		Ollama: OllamaConfig{
@@ -554,7 +526,6 @@ func applyEnvironmentOverrides(data *ConfigData, lookup func(string) string) {
 	}
 	if lem := getEnvFromLookup(lookup, "LOW_EFFORT_MODEL", getEnvFromLookup(lookup, "AMBIENT_CLASSIFIER_MODEL", getEnvFromLookup(lookup, "CLASSIFIER_MODEL", ""))); lem != "" {
 		data.LowEffortModel = lem
-		data.ClassifierModel = lem
 	}
 	if ou := getEnvFromLookup(lookup, "OLLAMA_URL", ""); ou != "" {
 		data.Ollama.BaseURL = ou
@@ -775,7 +746,6 @@ func validateChannels(parsed *ConfigData, targetPath string) error {
 	}
 	if strings.TrimSpace(parsed.LowEffortModel) == "" {
 		parsed.LowEffortModel = DefaultConfigData().LowEffortModel
-		parsed.ClassifierModel = DefaultConfigData().LowEffortModel
 	}
 
 	if parsed.Channels == nil {

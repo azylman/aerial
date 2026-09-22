@@ -122,8 +122,6 @@ func (d *UtilityDaemon) workerOpts() WorkerOptions {
 			}
 			if strings.TrimSpace(cur.LowEffortModel) != "" {
 				model = strings.TrimSpace(cur.LowEffortModel)
-			} else if strings.TrimSpace(cur.ClassifierModel) != "" {
-				model = strings.TrimSpace(cur.ClassifierModel)
 			}
 			if strings.TrimSpace(cur.APIKey) != "" {
 				apiKey = strings.TrimSpace(cur.APIKey)

@@ -385,8 +385,6 @@ func (c *Classifier) classifyWithPrompt(ctx context.Context, prompt string) Clas
 		if cur := c.cfg.Current(); cur != nil {
 			if strings.TrimSpace(cur.LowEffortModel) != "" {
 				model = cur.LowEffortModel
-			} else if strings.TrimSpace(cur.ClassifierModel) != "" {
-				model = cur.ClassifierModel
 			}
 		}
 	}

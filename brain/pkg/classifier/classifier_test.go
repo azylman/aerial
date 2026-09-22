@@ -748,7 +748,7 @@ func TestClassifier_ClassifyBurst(t *testing.T) {
 
 func TestClassifier_ConfigInjection(t *testing.T) {
 	appCfg := config.NewFromData(&config.ConfigData{
-		ClassifierModel: "custom-flash-model",
+		LowEffortModel: "custom-flash-model",
 	})
 	var receivedModel string
 	var runnerFn runner.RunnerFunc = func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
