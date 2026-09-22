@@ -1777,7 +1777,6 @@ func (te *turnExecution) executeWithRetries() {
 			if parseErr != nil {
 				log.Printf("[Queue] Failed to parse runner output despite exit 0: %v", parseErr)
 				lastErrDetail = parseErr.Error()
-				isFailure = true
 			} else {
 				extSess := resp.ConversationID
 				if extSess == "" {
@@ -1789,7 +1788,6 @@ func (te *turnExecution) executeWithRetries() {
 					}
 				}
 				if te.currentSessionID == "" && (extSess == "" || !runner.IsValidUUID(extSess)) {
-					isFailure = true
 					isTransient = false
 					lastErrDetail = "failed to latch active session UUID on cold start"
 					errDetail = lastErrDetail

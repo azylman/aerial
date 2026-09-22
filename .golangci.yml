@@ -43,12 +43,6 @@ issues:
         - staticcheck
 
     # 3. Unmigrated unused / ineffectual assignments
-    - path: pkg/config/config\.go
-      linters:
-        - unused
-    - path: pkg/queue/worker\.go
-      linters:
-        - ineffassign
     - path: pure\.go
       linters:
         - unused
