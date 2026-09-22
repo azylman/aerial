@@ -1087,7 +1087,7 @@ func TestEnv_SwallowedErrorsRemediationCoverage(t *testing.T) {
 	}
 }
 
-func TestSyncRules_CompositePersonaAndSystemInstructions(t *testing.T) {
+func TestSyncRules_SeparatePersonaAndSystemInvariants(t *testing.T) {
 	t.Parallel()
 
 	tmpHome := t.TempDir()
@@ -1108,32 +1108,62 @@ func TestSyncRules_CompositePersonaAndSystemInstructions(t *testing.T) {
 	p.SetAgentInstructionsSearchPaths([]string{agentsPath})
 	p.SetSystemInstructionsSearchPaths([]string{geminiPath})
 
-	// 1. Verify composite generation
+	// 1. Verify separate generation
 	if err := p.SyncRules("Custom Prompt"); err != nil {
 		t.Fatalf("SyncRules failed: %v", err)
 	}
 
-	ruleFile := filepath.Join(tmpHome, ".gemini", "rules", "user_persona.md")
-	data, err := os.ReadFile(ruleFile)
+	personaRuleFile := filepath.Join(tmpHome, ".gemini", "rules", "user_persona.md")
+	personaData, err := os.ReadFile(personaRuleFile)
 	if err != nil {
 		t.Fatalf("Failed to read user_persona.md: %v", err)
 	}
-	content := string(data)
+	personaContent := string(personaData)
 
-	if !strings.Contains(content, "# User Persona Overrides (AGENTS.md)") {
-		t.Errorf("expected persona header, got:\n%s", content)
+	if !strings.Contains(personaContent, "# User Persona Overrides (AGENTS.md)") {
+		t.Errorf("expected persona header, got:\n%s", personaContent)
 	}
-	if !strings.Contains(content, "ABG Baddie Persona") {
-		t.Errorf("expected persona content, got:\n%s", content)
+	if !strings.Contains(personaContent, "ABG Baddie Persona") {
+		t.Errorf("expected persona content, got:\n%s", personaContent)
 	}
-	if !strings.Contains(content, "# Base System Architecture & Operational Rules (GEMINI.md)") {
-		t.Errorf("expected gemini header, got:\n%s", content)
+	if !strings.Contains(personaContent, "# Environment Prompt Override") {
+		t.Errorf("expected env prompt header, got:\n%s", personaContent)
 	}
-	if !strings.Contains(content, "Core Invariant 5: No Option B") {
-		t.Errorf("expected gemini content, got:\n%s", content)
+	if !strings.Contains(personaContent, "Custom Prompt") {
+		t.Errorf("expected custom prompt, got:\n%s", personaContent)
 	}
-	if !strings.Contains(content, "# Environment Prompt Override") {
-		t.Errorf("expected env prompt header, got:\n%s", content)
+	if strings.Contains(personaContent, "# Base System Architecture & Operational Rules") {
+		t.Errorf("user_persona.md must NOT contain gemini system rules, got:\n%s", personaContent)
+	}
+	if len(personaData) >= 24000 {
+		t.Errorf("user_persona.md must be under 24,000-byte AGY ceiling, got %d bytes", len(personaData))
+	}
+
+	geminiRuleFile := filepath.Join(tmpHome, ".gemini", "rules", "system_invariants.md")
+	geminiData, err := os.ReadFile(geminiRuleFile)
+	if err != nil {
+		t.Fatalf("Failed to read system_invariants.md: %v", err)
+	}
+	geminiContent := string(geminiData)
+
+	if !strings.Contains(geminiContent, "# Base System Architecture & Operational Rules (GEMINI.md)") {
+		t.Errorf("expected gemini header, got:\n%s", geminiContent)
+	}
+	if !strings.Contains(geminiContent, "Core Invariant 5: No Option B") {
+		t.Errorf("expected gemini content, got:\n%s", geminiContent)
+	}
+	if strings.Contains(geminiContent, "# User Persona Overrides") {
+		t.Errorf("system_invariants.md must NOT contain persona overrides, got:\n%s", geminiContent)
+	}
+
+	// Verify copies in config rules directory
+	configPersona := filepath.Join(tmpHome, ".gemini", "config", "rules", "user_persona.md")
+	if _, err := os.Stat(configPersona); err != nil {
+		t.Errorf("expected config user_persona.md copy to exist: %v", err)
+	}
+	configGemini := filepath.Join(tmpHome, ".gemini", "config", "rules", "system_invariants.md")
+	if _, err := os.Stat(configGemini); err != nil {
+		t.Errorf("expected config system_invariants.md copy to exist: %v", err)
 	}
 
 	// 2. Verify torn read fallback for GEMINI.md
@@ -1143,13 +1173,42 @@ func TestSyncRules_CompositePersonaAndSystemInstructions(t *testing.T) {
 	if err := p.SyncRules(""); err != nil {
 		t.Fatalf("SyncRules failed on torn read: %v", err)
 	}
-	dataAfterTorn, err := os.ReadFile(ruleFile)
+	geminiDataAfterTorn, err := os.ReadFile(geminiRuleFile)
 	if err != nil {
 		t.Fatal(err)
 	}
-	contentAfterTorn := string(dataAfterTorn)
-	if !strings.Contains(contentAfterTorn, "Core Invariant 5: No Option B") {
-		t.Errorf("expected LKGC gemini content to persist after torn read, got:\n%s", contentAfterTorn)
+	geminiContentAfterTorn := string(geminiDataAfterTorn)
+	if !strings.Contains(geminiContentAfterTorn, "Core Invariant 5: No Option B") {
+		t.Errorf("expected LKGC gemini content to persist after torn read, got:\n%s", geminiContentAfterTorn)
+	}
+
+	// 3. Verify torn read fallback for AGENTS.md
+	if err := os.WriteFile(agentsPath, []byte(""), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.SyncRules(""); err != nil {
+		t.Fatalf("SyncRules failed on torn read for persona: %v", err)
+	}
+	personaDataAfterTorn, err := os.ReadFile(personaRuleFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	personaContentAfterTorn := string(personaDataAfterTorn)
+	if !strings.Contains(personaContentAfterTorn, "ABG Baddie Persona") {
+		t.Errorf("expected LKGC persona content to persist after torn read, got:\n%s", personaContentAfterTorn)
+	}
+
+	// 4. Verify LKGC fallback for system_invariants.md when search path produces no file at all
+	p.SetSystemInstructionsSearchPaths([]string{filepath.Join(srcDir, "nonexistent_gemini.md")})
+	if err := p.SyncRules(""); err != nil {
+		t.Fatalf("SyncRules failed when gemini instructions path missing: %v", err)
+	}
+	geminiDataAfterMissing, err := os.ReadFile(geminiRuleFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(geminiDataAfterMissing), "Core Invariant 5: No Option B") {
+		t.Errorf("expected lkgcGeminiRule to persist when file not found, got:\n%s", string(geminiDataAfterMissing))
 	}
 }
 
@@ -1295,20 +1354,78 @@ func TestSyncRules_ConfigRuleWriteFailure(t *testing.T) {
 	p := New(tmpHome, t.TempDir())
 	configRulesDir := filepath.Join(tmpHome, ".gemini", "config", "rules")
 	_ = os.MkdirAll(configRulesDir, 0755)
-	// Create user_persona.md as a non-empty directory so writeAtomic fails
+	// Create user_persona.md and system_invariants.md as non-empty directories so writeAtomic fails
 	blockedPersona := filepath.Join(configRulesDir, "user_persona.md")
 	_ = os.MkdirAll(filepath.Join(blockedPersona, "sub"), 0755)
+	blockedGemini := filepath.Join(configRulesDir, "system_invariants.md")
+	_ = os.MkdirAll(filepath.Join(blockedGemini, "sub"), 0755)
 
 	srcDir := t.TempDir()
 	agentsPath := filepath.Join(srcDir, "AGENTS.md")
 	_ = os.WriteFile(agentsPath, []byte("Content"), 0644)
+	geminiPath := filepath.Join(srcDir, "GEMINI.md")
+	_ = os.WriteFile(geminiPath, []byte("Gemini Content"), 0644)
 	p.SetAgentInstructionsSearchPaths([]string{agentsPath})
+	p.SetSystemInstructionsSearchPaths([]string{geminiPath})
 
-	// SyncRules should succeed overall and log a warning for config rules
+	// SyncRules should succeed overall and log warnings for config rules
 	if err := p.SyncRules(""); err != nil {
 		t.Fatalf("SyncRules failed: %v", err)
 	}
 }
+
+func TestSyncRules_PrimaryWriteFailure(t *testing.T) {
+	t.Parallel()
+	tmpHome := t.TempDir()
+	p := New(tmpHome, t.TempDir())
+	primaryRulesDir := filepath.Join(tmpHome, ".gemini", "rules")
+	_ = os.MkdirAll(primaryRulesDir, 0755)
+
+	srcDir := t.TempDir()
+	agentsPath := filepath.Join(srcDir, "AGENTS.md")
+	_ = os.WriteFile(agentsPath, []byte("Persona Content"), 0644)
+	geminiPath := filepath.Join(srcDir, "GEMINI.md")
+	_ = os.WriteFile(geminiPath, []byte("Gemini Content"), 0644)
+	p.SetAgentInstructionsSearchPaths([]string{agentsPath})
+	p.SetSystemInstructionsSearchPaths([]string{geminiPath})
+
+	// 1. Fail persona write
+	blockedPersona := filepath.Join(primaryRulesDir, "user_persona.md")
+	_ = os.MkdirAll(filepath.Join(blockedPersona, "sub"), 0755)
+	if err := p.SyncRules(""); err == nil {
+		t.Errorf("expected SyncRules to fail when primary user_persona.md cannot be written")
+	}
+	_ = os.RemoveAll(blockedPersona)
+
+	// 2. Fail gemini write
+	blockedGemini := filepath.Join(primaryRulesDir, "system_invariants.md")
+	_ = os.MkdirAll(filepath.Join(blockedGemini, "sub"), 0755)
+	if err := p.SyncRules(""); err == nil {
+		t.Errorf("expected SyncRules to fail when primary system_invariants.md cannot be written")
+	}
+}
+
+func TestProvisioner_WriteAtomicAndDirErrors(t *testing.T) {
+	t.Parallel()
+	tmpHome := t.TempDir()
+	p := New(tmpHome, t.TempDir())
+
+	// Test writeAtomic failure when parent directory cannot be created (blocked by file)
+	blockFile := filepath.Join(tmpHome, "block_file")
+	if err := os.WriteFile(blockFile, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.writeAtomic(filepath.Join(blockFile, "sub", "impossible.txt"), "data"); err == nil {
+		t.Errorf("expected writeAtomic to fail when parent dir creation fails")
+	}
+
+	// Test primaryRulesDir creation error
+	pBadHome := New(filepath.Join(blockFile, "subhome"), t.TempDir())
+	if err := pBadHome.SyncRules("prompt"); err == nil {
+		t.Errorf("expected SyncRules to fail when primaryRulesDir creation fails")
+	}
+}
+
 
 
 

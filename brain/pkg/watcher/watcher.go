@@ -64,7 +64,7 @@ func NewWatcher(opts ...Option) (*Watcher, error) {
 // ShouldIgnore returns true for .git, .gemini, *.db*, system_instructions.md, rules directories, and editor/process temporary files.
 func ShouldIgnore(path string) bool {
 	base := filepath.Base(path)
-	if base == ".git" || base == ".gemini" || base == "system_instructions.md" || base == "user_persona.md" {
+	if base == ".git" || base == ".gemini" || base == "system_instructions.md" || base == "user_persona.md" || base == "system_invariants.md" {
 		return true
 	}
 

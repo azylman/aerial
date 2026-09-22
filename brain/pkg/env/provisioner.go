@@ -28,7 +28,8 @@ type Provisioner struct {
 	lkgcPersonaSource string
 	lkgcGemini        string
 	lkgcGeminiSource  string
-	lkgcRules         string
+	lkgcPersonaRule   string
+	lkgcGeminiRule    string
 }
 
 // New creates a Provisioner targeting the given homeDir and dataDir.
