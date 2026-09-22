@@ -121,6 +121,8 @@ function Run-NodeTest($relDir, $testPattern) {
             if ($LASTEXITCODE -ne 0) { throw "Node unit tests (docker) failed in $relDir" }
         }
     }
+}
+
 function Check-RuleFileSizes {
     $maxBytes = 23040 # 22.5 KB (leaves 512B buffer for SyncRules frontmatter wrapper)
     foreach ($name in @("GEMINI.md", "AGENTS.md")) {
