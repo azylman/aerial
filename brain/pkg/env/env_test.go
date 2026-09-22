@@ -1135,8 +1135,8 @@ func TestSyncRules_SeparatePersonaAndSystemInvariants(t *testing.T) {
 	if strings.Contains(personaContent, "# Base System Architecture & Operational Rules") {
 		t.Errorf("user_persona.md must NOT contain gemini system rules, got:\n%s", personaContent)
 	}
-	if len(personaData) >= 24000 {
-		t.Errorf("user_persona.md must be under 24,000-byte AGY ceiling, got %d bytes", len(personaData))
+	if len(personaData) > MaxRuleFileSizeBytes {
+		t.Errorf("user_persona.md must be <= %d-byte ceiling, got %d bytes", MaxRuleFileSizeBytes, len(personaData))
 	}
 
 	geminiRuleFile := filepath.Join(tmpHome, ".gemini", "rules", "system_invariants.md")
@@ -1145,6 +1145,9 @@ func TestSyncRules_SeparatePersonaAndSystemInvariants(t *testing.T) {
 		t.Fatalf("Failed to read system_invariants.md: %v", err)
 	}
 	geminiContent := string(geminiData)
+	if len(geminiData) > MaxRuleFileSizeBytes {
+		t.Errorf("system_invariants.md must be <= %d-byte ceiling, got %d bytes", MaxRuleFileSizeBytes, len(geminiData))
+	}
 
 	if !strings.Contains(geminiContent, "# Base System Architecture & Operational Rules (GEMINI.md)") {
 		t.Errorf("expected gemini header, got:\n%s", geminiContent)
@@ -1425,6 +1428,102 @@ func TestProvisioner_WriteAtomicAndDirErrors(t *testing.T) {
 		t.Errorf("expected SyncRules to fail when primaryRulesDir creation fails")
 	}
 }
+
+func TestSyncRules_RuleFileSizeCeiling(t *testing.T) {
+	t.Parallel()
+	tmpHome := t.TempDir()
+	tmpData := t.TempDir()
+	p := New(tmpHome, tmpData)
+
+	dir := t.TempDir()
+	agentsPath := filepath.Join(dir, "AGENTS.md")
+	geminiPath := filepath.Join(dir, "GEMINI.md")
+
+	// 1. Valid compliant content under ceiling
+	validContent := strings.Repeat("A", 1000)
+	if err := os.WriteFile(agentsPath, []byte(validContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(geminiPath, []byte(validContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	p.SetAgentInstructionsSearchPaths([]string{agentsPath})
+	p.SetSystemInstructionsSearchPaths([]string{geminiPath})
+
+	if err := p.SyncRules(""); err != nil {
+		t.Fatalf("SyncRules failed with compliant files: %v", err)
+	}
+
+	personaFile := filepath.Join(tmpHome, ".gemini", "rules", "user_persona.md")
+	personaBytes, err := os.ReadFile(personaFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(personaBytes) > MaxRuleFileSizeBytes {
+		t.Errorf("persona rule should be <= %d, got %d", MaxRuleFileSizeBytes, len(personaBytes))
+	}
+
+	geminiFile := filepath.Join(tmpHome, ".gemini", "rules", "system_invariants.md")
+	geminiBytes, err := os.ReadFile(geminiFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(geminiBytes) > MaxRuleFileSizeBytes {
+		t.Errorf("gemini rule should be <= %d, got %d", MaxRuleFileSizeBytes, len(geminiBytes))
+	}
+
+	// 2. Oversized content (> 23 KB): verify LKGC fallback prevents prompt truncation
+	oversizedContent := strings.Repeat("B", MaxRuleFileSizeBytes+100)
+	if err := os.WriteFile(geminiPath, []byte(oversizedContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := p.SyncRules(""); err != nil {
+		t.Fatalf("SyncRules should not fail on oversized rule, got error: %v", err)
+	}
+
+	geminiBytesAfter, err := os.ReadFile(geminiFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Should fall back to LKGC version (which is <= MaxRuleFileSizeBytes) rather than the oversized version
+	if len(geminiBytesAfter) > MaxRuleFileSizeBytes {
+		t.Errorf("expected LKGC fallback under %d bytes, got %d bytes", MaxRuleFileSizeBytes, len(geminiBytesAfter))
+	}
+	if strings.Contains(string(geminiBytesAfter), strings.Repeat("B", 100)) {
+		t.Errorf("oversized content should not have overwritten compliant LKGC rule")
+	}
+
+	// 3. Oversized persona content: verify persona LKGC fallback
+	oversizedPersona := strings.Repeat("C", MaxRuleFileSizeBytes+100)
+	if err := os.WriteFile(agentsPath, []byte(oversizedPersona), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := p.SyncRules(""); err != nil {
+		t.Fatalf("SyncRules should not fail on oversized persona, got error: %v", err)
+	}
+
+	personaBytesAfter, err := os.ReadFile(personaFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(personaBytesAfter) > MaxRuleFileSizeBytes {
+		t.Errorf("expected persona LKGC fallback under %d bytes, got %d bytes", MaxRuleFileSizeBytes, len(personaBytesAfter))
+	}
+	if strings.Contains(string(personaBytesAfter), strings.Repeat("C", 100)) {
+		t.Errorf("oversized persona should not have overwritten compliant LKGC rule")
+	}
+
+	// 4. Verify repo GEMINI.md stays strictly under MaxSourceRuleFileSizeBytes
+	repoGemini := filepath.Join("..", "..", "GEMINI.md")
+	if data, err := os.ReadFile(repoGemini); err == nil {
+		if len(data) > MaxSourceRuleFileSizeBytes {
+			t.Errorf("Repository GEMINI.md (%d bytes) exceeds MaxSourceRuleFileSizeBytes (%d bytes)", len(data), MaxSourceRuleFileSizeBytes)
+		}
+	}
+}
+
 
 
 

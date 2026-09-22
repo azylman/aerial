@@ -11,6 +11,16 @@ import (
 	"sync"
 )
 
+const (
+	// MaxRuleFileSizeBytes is the maximum allowed byte length for compiled runtime rules
+	// in ~/.gemini/rules/ to prevent silent Antigravity prompt truncation (23 KB hard ceiling).
+	MaxRuleFileSizeBytes = 23 * 1024
+
+	// MaxSourceRuleFileSizeBytes is the maximum allowed byte length for source rule files
+	// (GEMINI.md, AGENTS.md), leaving buffer for YAML frontmatter and header wrapping.
+	MaxSourceRuleFileSizeBytes = 23040
+)
+
 var (
 	systemRulesMu sync.Mutex
 
@@ -167,7 +177,15 @@ func (p *Provisioner) SyncRules(customPrompt string) error {
 
 	p.mu.Lock()
 	if personaRuleContent != "" {
-		p.lkgcPersonaRule = personaRuleContent
+		if len(personaRuleContent) > MaxRuleFileSizeBytes {
+			log.Printf("[Env] ERROR: user_persona.md exceeds 23 KB ceiling (%d bytes > %d bytes); Antigravity prompt truncation will occur!", len(personaRuleContent), MaxRuleFileSizeBytes)
+			if p.lkgcPersonaRule != "" && len(p.lkgcPersonaRule) <= MaxRuleFileSizeBytes {
+				log.Printf("[Env] Falling back to Last Known Good Configuration (LKGC) for user_persona.md to prevent prompt truncation")
+				personaRuleContent = p.lkgcPersonaRule
+			}
+		} else {
+			p.lkgcPersonaRule = personaRuleContent
+		}
 	} else {
 		personaRuleContent = p.lkgcPersonaRule
 		if personaRuleContent != "" {
@@ -176,7 +194,15 @@ func (p *Provisioner) SyncRules(customPrompt string) error {
 	}
 
 	if geminiRuleContent != "" {
-		p.lkgcGeminiRule = geminiRuleContent
+		if len(geminiRuleContent) > MaxRuleFileSizeBytes {
+			log.Printf("[Env] ERROR: system_invariants.md exceeds 23 KB ceiling (%d bytes > %d bytes); Antigravity prompt truncation will occur!", len(geminiRuleContent), MaxRuleFileSizeBytes)
+			if p.lkgcGeminiRule != "" && len(p.lkgcGeminiRule) <= MaxRuleFileSizeBytes {
+				log.Printf("[Env] Falling back to Last Known Good Configuration (LKGC) for system_invariants.md to prevent prompt truncation")
+				geminiRuleContent = p.lkgcGeminiRule
+			}
+		} else {
+			p.lkgcGeminiRule = geminiRuleContent
+		}
 	} else {
 		geminiRuleContent = p.lkgcGeminiRule
 		if geminiRuleContent != "" {
