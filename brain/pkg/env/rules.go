@@ -125,12 +125,16 @@ func (p *Provisioner) SyncRules(customPrompt string) error {
 			foundPersona = true
 		}
 	} else if foundPersona {
-		p.lkgcPersona = personaContent
-		p.lkgcPersonaSource = personaSource
-		if personaSource != ".AGENTS.md.lkgc" && p.dataDir != "" {
-			if err := p.writeAtomic(filepath.Join(p.dataDir, ".AGENTS.md.lkgc"), personaContent); err != nil {
-				log.Printf("[Env] Warning writing persona LKGC: %v", err)
+		if len(personaContent) <= MaxSourceRuleFileSizeBytes {
+			p.lkgcPersona = personaContent
+			p.lkgcPersonaSource = personaSource
+			if personaSource != ".AGENTS.md.lkgc" && p.dataDir != "" {
+				if err := p.writeAtomic(filepath.Join(p.dataDir, ".AGENTS.md.lkgc"), personaContent); err != nil {
+					log.Printf("[Env] Warning writing persona LKGC: %v", err)
+				}
 			}
+		} else {
+			log.Printf("[Env] Refusing to persist oversized persona to LKGC (%d bytes > %d bytes)", len(personaContent), MaxSourceRuleFileSizeBytes)
 		}
 	}
 
@@ -144,12 +148,16 @@ func (p *Provisioner) SyncRules(customPrompt string) error {
 			foundGemini = true
 		}
 	} else if foundGemini {
-		p.lkgcGemini = geminiContent
-		p.lkgcGeminiSource = geminiSource
-		if geminiSource != ".GEMINI.md.lkgc" && p.dataDir != "" {
-			if err := p.writeAtomic(filepath.Join(p.dataDir, ".GEMINI.md.lkgc"), geminiContent); err != nil {
-				log.Printf("[Env] Warning writing gemini LKGC: %v", err)
+		if len(geminiContent) <= MaxSourceRuleFileSizeBytes {
+			p.lkgcGemini = geminiContent
+			p.lkgcGeminiSource = geminiSource
+			if geminiSource != ".GEMINI.md.lkgc" && p.dataDir != "" {
+				if err := p.writeAtomic(filepath.Join(p.dataDir, ".GEMINI.md.lkgc"), geminiContent); err != nil {
+					log.Printf("[Env] Warning writing gemini LKGC: %v", err)
+				}
 			}
+		} else {
+			log.Printf("[Env] Refusing to persist oversized system instructions to LKGC (%d bytes > %d bytes)", len(geminiContent), MaxSourceRuleFileSizeBytes)
 		}
 	}
 	p.mu.Unlock()

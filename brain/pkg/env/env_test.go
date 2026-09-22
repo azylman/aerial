@@ -1494,6 +1494,12 @@ func TestSyncRules_RuleFileSizeCeiling(t *testing.T) {
 		t.Errorf("oversized content should not have overwritten compliant LKGC rule")
 	}
 
+	// Verify disk LKGC for GEMINI was not poisoned with oversized content
+	diskGeminiLKGC, err := os.ReadFile(filepath.Join(tmpData, ".GEMINI.md.lkgc"))
+	if err == nil && strings.Contains(string(diskGeminiLKGC), strings.Repeat("B", 100)) {
+		t.Errorf("disk LKGC .GEMINI.md.lkgc should not be poisoned by oversized rule")
+	}
+
 	// 3. Oversized persona content: verify persona LKGC fallback
 	oversizedPersona := strings.Repeat("C", MaxRuleFileSizeBytes+100)
 	if err := os.WriteFile(agentsPath, []byte(oversizedPersona), 0644); err != nil {
@@ -1513,6 +1519,12 @@ func TestSyncRules_RuleFileSizeCeiling(t *testing.T) {
 	}
 	if strings.Contains(string(personaBytesAfter), strings.Repeat("C", 100)) {
 		t.Errorf("oversized persona should not have overwritten compliant LKGC rule")
+	}
+
+	// Verify disk LKGC for AGENTS was not poisoned with oversized persona
+	diskPersonaLKGC, err := os.ReadFile(filepath.Join(tmpData, ".AGENTS.md.lkgc"))
+	if err == nil && strings.Contains(string(diskPersonaLKGC), strings.Repeat("C", 100)) {
+		t.Errorf("disk LKGC .AGENTS.md.lkgc should not be poisoned by oversized persona")
 	}
 
 	// 4. Verify repo GEMINI.md stays strictly under MaxSourceRuleFileSizeBytes
