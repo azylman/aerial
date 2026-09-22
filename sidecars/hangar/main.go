@@ -296,6 +296,7 @@ type SyncDaemon struct {
 	composeExecutor  ComposeExecutor
 	dockerExecutor   DockerExecutor
 	gitExecutor      GitExecutor
+	composePullTimeout time.Duration
 
 	// Concurrency & Quarantine
 	repoLocksMu        sync.Mutex
@@ -359,7 +360,10 @@ func (d *SyncDaemon) getRegistryClient() *http.Client {
 	return &http.Client{Timeout: 10 * time.Second}
 }
 
-const imageQuarantineTTL = 60 * time.Minute
+const (
+	imageQuarantineTTL        = 60 * time.Minute
+	defaultComposePullTimeout = 10 * time.Minute
+)
 
 func (d *SyncDaemon) quarantineImage(service, digest, reason string) {
 	d.imageQuarantineMu.Lock()
@@ -1515,8 +1519,15 @@ func (d *SyncDaemon) ReconcileCompose(parentCtx context.Context, targetServices 
 	}
 
 	// 4. Pre-flight pull
+	pullTimeout := d.composePullTimeout
+	if pullTimeout <= 0 {
+		pullTimeout = defaultComposePullTimeout
+	}
+	pullCtx, pullCancel := context.WithTimeout(parentCtx, pullTimeout)
+	defer pullCancel()
+
 	pullArgs := append([]string{"pull"}, targets...)
-	pullStdout, pullStderr, pullErr := d.getComposeExecutor()(valCtx, composeDir, d.getComposeArgs(composeDir, pullArgs...)...)
+	pullStdout, pullStderr, pullErr := d.getComposeExecutor()(pullCtx, composeDir, d.getComposeArgs(composeDir, pullArgs...)...)
 	if pullErr != nil {
 		combinedPull := string(append(pullStdout, pullStderr...))
 		sanitizedPull := SanitizeLog(strings.TrimSpace(combinedPull))
@@ -1579,8 +1590,10 @@ func (d *SyncDaemon) ReconcileCompose(parentCtx context.Context, targetServices 
 	}
 
 	// Delete temporary snapshots
+	cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(parentCtx), 30*time.Second)
+	defer cleanupCancel()
 	for _, snapshotTag := range snapshots {
-		if _, rmiStderr, rmiErr := d.getDockerExecutor()(valCtx, "rmi", snapshotTag); rmiErr != nil {
+		if _, rmiStderr, rmiErr := d.getDockerExecutor()(cleanupCtx, "rmi", snapshotTag); rmiErr != nil {
 			log.Printf("[Hangar:GitOps] Notice: temporary snapshot tag %s cleanup: %s (%v)", snapshotTag, SanitizeLog(strings.TrimSpace(string(rmiStderr))), rmiErr)
 		}
 	}
@@ -2093,6 +2106,7 @@ type DaemonConfig struct {
 	DockerExecutor    DockerExecutor
 	GitExecutor       GitExecutor
 	RegistryClient    *http.Client
+	ComposePullTimeout time.Duration
 }
 
 // NewDaemon initializes a new SyncDaemon from config.
@@ -2108,6 +2122,17 @@ func NewDaemon(cfg DaemonConfig) *SyncDaemon {
 	}
 	if cfg.BrainInternalURL == "" {
 		cfg.BrainInternalURL = "http://brain:8080/internal/reload"
+	}
+	pullTimeout := cfg.ComposePullTimeout
+	if pullTimeout <= 0 {
+		if raw := os.Getenv("COMPOSE_PULL_TIMEOUT"); raw != "" {
+			if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+				pullTimeout = d
+			}
+		}
+	}
+	if pullTimeout <= 0 {
+		pullTimeout = defaultComposePullTimeout
 	}
 	return &SyncDaemon{
 		repos:              cfg.Repos,
@@ -2125,6 +2150,7 @@ func NewDaemon(cfg DaemonConfig) *SyncDaemon {
 		dockerExecutor:     cfg.DockerExecutor,
 		gitExecutor:        cfg.GitExecutor,
 		registryClient:     cfg.RegistryClient,
+		composePullTimeout: pullTimeout,
 		reconcileCh:        make(chan struct{}, 1),
 		repoLocks:          make(map[string]*sync.Mutex),
 		quarantinedCommits: make(map[QuarantineKey]QuarantineRecord),

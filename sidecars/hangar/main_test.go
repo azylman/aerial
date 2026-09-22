@@ -4244,6 +4244,14 @@ func TestReconcileCompose_PreFlightAndHealthGating(t *testing.T) {
 		}
 		if strings.Contains(argsStr, "pull") {
 			pullExecuted = true
+			if dl, ok := ctx.Deadline(); ok {
+				remaining := time.Until(dl)
+				if remaining < 5*time.Minute {
+					t.Errorf("expected pull context to have generous timeout (> 5m), got remaining %v", remaining)
+				}
+			} else {
+				t.Errorf("expected pull context to have a deadline")
+			}
 			return []byte("Pulled"), nil, nil
 		}
 		if strings.Contains(argsStr, "up -d") {
@@ -4298,6 +4306,88 @@ func TestReconcileCompose_PreFlightAndHealthGating(t *testing.T) {
 	}
 	if d.GetLastReconcile().IsZero() {
 		t.Errorf("expected LastReconcile to be set on success")
+	}
+}
+
+func TestReconcileCompose_CustomPullTimeoutAndCleanupContext(t *testing.T) {
+	tempDir := t.TempDir()
+	composeFile := filepath.Join(tempDir, "docker-compose.yml")
+	_ = os.WriteFile(composeFile, []byte("services:\n  brain:\n    image: ghcr.io/azylman/aerial-brain:latest\n"), 0644)
+
+	var pullDeadline time.Time
+	var rmiCtxActive bool
+
+	mockCompose := func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+		argsStr := strings.Join(args, " ")
+		if strings.Contains(argsStr, "config --services") {
+			return []byte("brain\n"), nil, nil
+		}
+		if strings.Contains(argsStr, "config --quiet") {
+			return nil, nil, nil
+		}
+		if strings.Contains(argsStr, "config --format json") {
+			return []byte(`{"services": {"brain": {"image": "ghcr.io/azylman/aerial-brain:latest"}}}`), nil, nil
+		}
+		if strings.Contains(argsStr, "pull") {
+			if dl, ok := ctx.Deadline(); ok {
+				pullDeadline = dl
+			}
+			return []byte("Pulled"), nil, nil
+		}
+		if strings.Contains(argsStr, "up -d") {
+			return []byte("Started"), nil, nil
+		}
+		return nil, nil, nil
+	}
+
+	mockDocker := func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+		if len(args) > 0 {
+			switch args[0] {
+			case "inspect":
+				return []byte("sha256:current-working-image-id"), nil, nil
+			case "tag":
+				return nil, nil, nil
+			case "rmi":
+				if ctx.Err() == nil {
+					rmiCtxActive = true
+				}
+				return nil, nil, nil
+			}
+		}
+		return nil, nil, nil
+	}
+
+	customTimeout := 15 * time.Minute
+	d := NewDaemon(DaemonConfig{
+		ComposeDir:         tempDir,
+		ComposeExecutor:    mockCompose,
+		DockerExecutor:     mockDocker,
+		ComposePullTimeout: customTimeout,
+	})
+
+	err := d.ReconcileCompose(context.Background(), "brain")
+	if err != nil {
+		t.Fatalf("unexpected reconcile error: %v", err)
+	}
+
+	if pullDeadline.IsZero() {
+		t.Fatalf("expected pull to have a deadline set")
+	}
+	remaining := time.Until(pullDeadline)
+	if remaining < 10*time.Minute || remaining > 16*time.Minute {
+		t.Errorf("expected pull context remaining duration ~15m, got %v", remaining)
+	}
+	if !rmiCtxActive {
+		t.Errorf("expected snapshot rmi cleanup to be executed with an active, uncancelled context")
+	}
+
+	// Test environment variable override when cfg.ComposePullTimeout is not set
+	t.Setenv("COMPOSE_PULL_TIMEOUT", "7m")
+	dEnv := NewDaemon(DaemonConfig{
+		ComposeDir: tempDir,
+	})
+	if dEnv.composePullTimeout != 7*time.Minute {
+		t.Errorf("expected COMPOSE_PULL_TIMEOUT env var to set composePullTimeout to 7m, got %v", dEnv.composePullTimeout)
 	}
 }
 
