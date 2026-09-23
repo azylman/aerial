@@ -1936,88 +1936,86 @@ func (te *turnExecution) executeWithRetries() {
 
 					if strings.TrimSpace(cleanText) == "" && len(attachments) == 0 {
 						log.Printf("[Queue] Agent produced empty response for thread %s on attempt %d/%d; treating as failure", te.threadID, attempt, maxAttempts)
-						isFailure = true
-						errDetail = "agent produced empty response"
-						lastErrDetail = errDetail
-						continue
-					}
+						lastErrDetail = "agent produced empty response"
+						errDetail = lastErrDetail
+					} else {
+						if !te.skipDiscord {
+							var deliveryErr error
+							if te.pool.cfg.DeliveryWithAttachmentsFunc != nil {
+								deliveryErr = te.pool.cfg.DeliveryWithAttachmentsFunc(te.pool.getDiscordSession(), te.threadID, cleanText, attachments)
+							} else if te.pool.cfg.DeliveryFunc != nil {
+								deliveryErr = te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), te.threadID, cleanText)
+							}
+							if deliveryErr != nil {
+								log.Printf("[WorkerPool] Failed to deliver response for thread %s: %v", te.threadID, deliveryErr)
+							}
+						}
 
-					if !te.skipDiscord {
-						var deliveryErr error
-						if te.pool.cfg.DeliveryWithAttachmentsFunc != nil {
-							deliveryErr = te.pool.cfg.DeliveryWithAttachmentsFunc(te.pool.getDiscordSession(), te.threadID, cleanText, attachments)
-						} else if te.pool.cfg.DeliveryFunc != nil {
-							deliveryErr = te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), te.threadID, cleanText)
+						scope := "thread"
+						if strings.EqualFold(te.policy.Mode, "channel") {
+							scope = "channel"
 						}
-						if deliveryErr != nil {
-							log.Printf("[WorkerPool] Failed to deliver response for thread %s: %v", te.threadID, deliveryErr)
+						var postBytes int64
+						var postSteps int
+						if te.pool != nil && te.pool.sessionMgr != nil && te.currentSessionID != "" {
+							postBytes = te.pool.sessionMgr.GetTranscriptSize(te.currentSessionID)
+							postSteps = te.pool.sessionMgr.CountTranscriptSteps(te.currentSessionID)
 						}
-					}
+						isTurnLimit := te.turnCount >= DefaultMaxSessionTurns
+						isStepLimit := postSteps >= DefaultMaxSessionSteps
+						isByteLimit := postBytes >= DefaultMaxTranscriptBytes
+						if isTurnLimit || isStepLimit || isByteLimit {
+							if isByteLimit {
+								log.Printf("[Queue] Scope session reached transcript size limit (%d >= %d bytes). Resetting to cold state for fresh session initialization.", postBytes, DefaultMaxTranscriptBytes)
+								metrics.RecordSessionRotation("post_execution", scope, "bytes")
+							} else if isStepLimit {
+								log.Printf("[Queue] Scope session reached step limit (%d >= %d steps). Resetting to cold state for fresh session initialization.", postSteps, DefaultMaxSessionSteps)
+								metrics.RecordSessionRotation("post_execution", scope, "steps")
+							} else {
+								log.Printf("[Queue] Scope session reached turn limit (%d/%d). Resetting to cold state for fresh session initialization.", te.turnCount, DefaultMaxSessionTurns)
+								metrics.RecordSessionRotation("post_execution", scope, "turns")
+							}
+							if te.currentSessionID != "" {
+								te.previousSessionID = te.currentSessionID
+							}
+							te.rotateSessionID(te.threadID, "")
+							te.currentSessionID = ""
+						}
 
-					scope := "thread"
-					if strings.EqualFold(te.policy.Mode, "channel") {
-						scope = "channel"
-					}
-					var postBytes int64
-					var postSteps int
-					if te.pool != nil && te.pool.sessionMgr != nil && te.currentSessionID != "" {
-						postBytes = te.pool.sessionMgr.GetTranscriptSize(te.currentSessionID)
-						postSteps = te.pool.sessionMgr.CountTranscriptSteps(te.currentSessionID)
-					}
-					isTurnLimit := te.turnCount >= DefaultMaxSessionTurns
-					isStepLimit := postSteps >= DefaultMaxSessionSteps
-					isByteLimit := postBytes >= DefaultMaxTranscriptBytes
-					if isTurnLimit || isStepLimit || isByteLimit {
-						if isByteLimit {
-							log.Printf("[Queue] Scope session reached transcript size limit (%d >= %d bytes). Resetting to cold state for fresh session initialization.", postBytes, DefaultMaxTranscriptBytes)
-							metrics.RecordSessionRotation("post_execution", scope, "bytes")
-						} else if isStepLimit {
-							log.Printf("[Queue] Scope session reached step limit (%d >= %d steps). Resetting to cold state for fresh session initialization.", postSteps, DefaultMaxSessionSteps)
-							metrics.RecordSessionRotation("post_execution", scope, "steps")
-						} else {
-							log.Printf("[Queue] Scope session reached turn limit (%d/%d). Resetting to cold state for fresh session initialization.", te.turnCount, DefaultMaxSessionTurns)
-							metrics.RecordSessionRotation("post_execution", scope, "turns")
-						}
-						if te.currentSessionID != "" {
-							te.previousSessionID = te.currentSessionID
-						}
-						te.rotateSessionID(te.threadID, "")
-						te.currentSessionID = ""
-					}
+						// Combine accumulated sub-turn usage from any intercepted yield traps into final turn usage
+						resp.Usage.InputTokens += accumulatedUsage.InputTokens
+						resp.Usage.OutputTokens += accumulatedUsage.OutputTokens
+						resp.Usage.ThinkingTokens += accumulatedUsage.ThinkingTokens
+						resp.Usage.CacheReadTokens += accumulatedUsage.CacheReadTokens
+						resp.Usage.TotalTokens += accumulatedUsage.TotalTokens
 
-					// Combine accumulated sub-turn usage from any intercepted yield traps into final turn usage
-					resp.Usage.InputTokens += accumulatedUsage.InputTokens
-					resp.Usage.OutputTokens += accumulatedUsage.OutputTokens
-					resp.Usage.ThinkingTokens += accumulatedUsage.ThinkingTokens
-					resp.Usage.CacheReadTokens += accumulatedUsage.CacheReadTokens
-					resp.Usage.TotalTokens += accumulatedUsage.TotalTokens
+						// Mark all messages in the burst as completed with unpacked clean text
+						metrics.RecordTurnCompleted("success", te.triggerType, currentModel, time.Since(te.execStart))
+						metrics.RecordTokens(currentModel, resp.Usage.InputTokens, resp.Usage.OutputTokens, resp.Usage.ThinkingTokens, resp.Usage.CacheReadTokens, resp.Usage.TotalTokens)
+						te.turnStatus = "success"
+						te.turnResponseText = cleanText
+						te.turnTokenUsage = resp.Usage
+						te.turnDurationMs = time.Since(te.execStart).Milliseconds()
+						for _, m := range te.burst {
+							te.updateMessageCompleted(m.ID, cleanText)
+							if m.ScheduleRunID != "" {
+								te.updateScheduleRunStatus(db.UpdateRunParams{
+									RunID:       m.ScheduleRunID,
+									MessageID:   m.ID,
+									Status:      "completed",
+									CompletedAt: time.Now().UTC(),
+									DurationMs:  time.Since(te.execStart).Milliseconds(),
+									Model:       currentModel,
+								})
+							}
+							if te.pool.cfg.OnMessageCompleted != nil {
+								te.pool.cfg.OnMessageCompleted(m, db.StatusCompleted)
+							}
+						}
+						log.Printf("[WorkerPool] %d message(s) in thread %s completed successfully on attempt %d/%d", len(te.burst), te.threadID, attempt, maxAttempts)
 
-					// Mark all messages in the burst as completed with unpacked clean text
-					metrics.RecordTurnCompleted("success", te.triggerType, currentModel, time.Since(te.execStart))
-					metrics.RecordTokens(currentModel, resp.Usage.InputTokens, resp.Usage.OutputTokens, resp.Usage.ThinkingTokens, resp.Usage.CacheReadTokens, resp.Usage.TotalTokens)
-					te.turnStatus = "success"
-					te.turnResponseText = cleanText
-					te.turnTokenUsage = resp.Usage
-					te.turnDurationMs = time.Since(te.execStart).Milliseconds()
-					for _, m := range te.burst {
-						te.updateMessageCompleted(m.ID, cleanText)
-						if m.ScheduleRunID != "" {
-							te.updateScheduleRunStatus(db.UpdateRunParams{
-								RunID:       m.ScheduleRunID,
-								MessageID:   m.ID,
-								Status:      "completed",
-								CompletedAt: time.Now().UTC(),
-								DurationMs:  time.Since(te.execStart).Milliseconds(),
-								Model:       currentModel,
-							})
-						}
-						if te.pool.cfg.OnMessageCompleted != nil {
-							te.pool.cfg.OnMessageCompleted(m, db.StatusCompleted)
-						}
+						return
 					}
-					log.Printf("[WorkerPool] %d message(s) in thread %s completed successfully on attempt %d/%d", len(te.burst), te.threadID, attempt, maxAttempts)
-
-					return
 				}
 			}
 		}

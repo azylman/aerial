@@ -2097,3 +2097,79 @@ func TestExtractLastTurnError_CoverageBoost(t *testing.T) {
 	}
 }
 
+func TestFormatStepError_DetailedCoverage(t *testing.T) {
+	var p *int = nil
+	if s := formatStepError(p); s != "" {
+		t.Errorf("expected empty string for typed nil, got %q", s)
+	}
+	unmarshalable := map[string]any{"bad": func() {}}
+	if s := formatStepError(unmarshalable); s == "" {
+		t.Errorf("expected string representation for unmarshalable map, got empty string")
+	}
+}
+
+func TestManager_TasksCoverage(t *testing.T) {
+	mgr, tmpDir := setupTestManager(t)
+	sessID := "task-cov-sess"
+	sessDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", sessID)
+	_ = os.MkdirAll(sessDir, 0755)
+
+	tasks := []TaskMetadata{
+		{TaskID: "task-1", ToolName: "run_command", CommandLine: "echo test", StartedAt: time.Now()},
+	}
+	if err := mgr.SaveActiveTasks(sessID, tasks); err != nil {
+		t.Fatalf("SaveActiveTasks failed: %v", err)
+	}
+
+	loaded, err := mgr.GetActiveTasks(sessID)
+	if err != nil {
+		t.Fatalf("GetActiveTasks failed: %v", err)
+	}
+	if len(loaded) != 1 || loaded[0].TaskID != "task-1" {
+		t.Errorf("unexpected loaded tasks: %+v", loaded)
+	}
+
+	// Corrupt active_tasks.json
+	taskPath := filepath.Join(sessDir, ".system_generated", "active_tasks.json")
+	_ = os.WriteFile(taskPath, []byte("invalid-json"), 0644)
+	if _, err := mgr.GetActiveTasks(sessID); err == nil {
+		t.Errorf("expected error reading corrupted active_tasks.json")
+	}
+}
+
+func TestExtractLastTurnError_MoreEdgeCases(t *testing.T) {
+	mgr, tmpDir := setupTestManager(t)
+	convID := "edge-turn-error-conv"
+	logsDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", convID, ".system_generated", "logs")
+	_ = os.MkdirAll(logsDir, 0755)
+
+	// Step with quoted error string in json.RawMessage
+	stepQuoted := `{"step_index":0,"source":"MODEL","type":"ERROR_MESSAGE","status":"ERROR","error":"quoted error string"}
+`
+	_ = os.WriteFile(filepath.Join(logsDir, "transcript.jsonl"), []byte(stepQuoted), 0644)
+	errStr, err := mgr.ExtractLastTurnError(context.Background(), convID, time.Time{})
+	if err != nil || errStr != "quoted error string" {
+		t.Errorf("expected 'quoted error string', got (%q, %v)", errStr, err)
+	}
+
+	// Step with unquoted/raw numeric error
+	stepNumeric := `{"step_index":0,"source":"MODEL","type":"ERROR_MESSAGE","status":"ERROR","error":502}
+`
+	_ = os.WriteFile(filepath.Join(logsDir, "transcript.jsonl"), []byte(stepNumeric), 0644)
+	errStr, err = mgr.ExtractLastTurnError(context.Background(), convID, time.Time{})
+	if err != nil || errStr != "502" {
+		t.Errorf("expected '502', got (%q, %v)", errStr, err)
+	}
+
+	// Step before 'since' with RFC3339 timestamp
+	oldTime := time.Now().Add(-2 * time.Hour)
+	stepOld := fmt.Sprintf(`{"step_index":0,"source":"MODEL","type":"ERROR_MESSAGE","status":"ERROR","content":"ancient error","created_at":%q}
+`, oldTime.Format(time.RFC3339))
+	_ = os.WriteFile(filepath.Join(logsDir, "transcript.jsonl"), []byte(stepOld), 0644)
+	errStr, err = mgr.ExtractLastTurnError(context.Background(), convID, time.Now())
+	if err != nil || errStr != "" {
+		t.Errorf("expected empty string for ancient error, got (%q, %v)", errStr, err)
+	}
+}
+
+

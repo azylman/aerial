@@ -470,7 +470,9 @@ func (m *Manager) ExtractLastTurnError(ctx context.Context, convID string, since
 
 			fi, err := f.Stat()
 			if err != nil || fi.Size() == 0 {
-				_ = f.Close()
+				if closeErr := f.Close(); closeErr != nil {
+					log.Printf("[Session] Warning: failed to close file %s: %v", tPath, closeErr)
+				}
 				continue
 			}
 
@@ -485,7 +487,9 @@ func (m *Manager) ExtractLastTurnError(ctx context.Context, convID string, since
 
 			buf := make([]byte, readSize)
 			_, err = f.ReadAt(buf, offset)
-			_ = f.Close()
+			if closeErr := f.Close(); closeErr != nil {
+				log.Printf("[Session] Warning: failed to close file %s: %v", tPath, closeErr)
+			}
 			if err != nil && err != io.EOF {
 				continue
 			}

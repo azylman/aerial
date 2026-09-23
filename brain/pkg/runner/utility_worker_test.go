@@ -361,3 +361,35 @@ func TestWorkerInstance_MarkDeadAndKillBranches(t *testing.T) {
 	}
 }
 
+func TestWorkerInstance_RSSBytesDetailed(t *testing.T) {
+	t.Parallel()
+	wNil := &WorkerInstance{}
+	if rss := wNil.RSSBytes(); rss != 0 {
+		t.Errorf("expected 0 for nil/empty worker, got %d", rss)
+	}
+
+	wNeg := &WorkerInstance{
+		cmd: &exec.Cmd{Process: &os.Process{Pid: -1}},
+	}
+	if rss := wNeg.RSSBytes(); rss != 0 {
+		t.Errorf("expected 0 for negative pid, got %d", rss)
+	}
+
+	wNon := &WorkerInstance{
+		cmd: &exec.Cmd{Process: &os.Process{Pid: 999999999}},
+	}
+	if rss := wNon.RSSBytes(); rss != 0 {
+		t.Errorf("expected 0 for nonexistent pid, got %d", rss)
+	}
+
+	if runtime.GOOS != "windows" {
+		wLive := &WorkerInstance{
+			cmd: &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}},
+		}
+		if rss := wLive.RSSBytes(); rss == 0 {
+			t.Errorf("expected non-zero RSS for live process on Linux, got %d", rss)
+		}
+	}
+}
+
+

@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"sync/atomic"
@@ -517,3 +518,21 @@ func TestUtilityDaemon_StandbyConcurrency(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 }
+
+func TestUtilityDaemon_ExecuteClosedAndNilWorker(t *testing.T) {
+	t.Parallel()
+	dClosed := NewUtilityDaemon(nil, WithSpawner(newMockSpawner(t)))
+	dClosed.Close()
+	if _, err := dClosed.Execute(context.Background(), "test"); !errors.Is(err, ErrWorkerDead) {
+		t.Errorf("expected ErrWorkerDead, got %v", err)
+	}
+
+	dNoWorker := NewUtilityDaemon(nil, WithSpawner(func(ctx context.Context, opts WorkerOptions) (*WorkerInstance, error) {
+		return nil, errors.New("spawn failed")
+	}))
+	defer dNoWorker.Close()
+	if _, err := dNoWorker.Execute(context.Background(), "test"); err == nil {
+		t.Errorf("expected error from daemon with no worker, got nil")
+	}
+}
+

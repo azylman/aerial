@@ -553,6 +553,30 @@ func TestDaemon_RSSBytesDetailed(t *testing.T) {
 	}
 }
 
+func TestDaemon_ParseRawUsageDetailed(t *testing.T) {
+	t.Parallel()
+	rawAll := map[string]interface{}{
+		"input_tokens":      float64(10),
+		"output_tokens":     float64(20),
+		"thinking_tokens":   float64(5),
+		"cache_read_tokens": float64(2),
+		"total_tokens":      float64(37),
+	}
+	uAll := parseRawUsage(rawAll)
+	if uAll.InputTokens != 10 || uAll.OutputTokens != 20 || uAll.ThinkingTokens != 5 || uAll.CacheReadTokens != 2 || uAll.TotalTokens != 37 {
+		t.Errorf("unexpected usage: %+v", uAll)
+	}
+
+	rawNoTotal := map[string]interface{}{
+		"input_tokens":  float64(10),
+		"output_tokens": float64(20),
+	}
+	uNoTotal := parseRawUsage(rawNoTotal)
+	if uNoTotal.TotalTokens != 30 {
+		t.Errorf("expected total tokens 30, got %d", uNoTotal.TotalTokens)
+	}
+}
+
 func TestDaemon_TurnStreamEdgeCases(t *testing.T) {
 	tempDir := t.TempDir()
 	mockBin := filepath.Join(tempDir, "mock_edge.sh")
