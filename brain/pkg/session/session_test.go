@@ -2269,6 +2269,227 @@ func TestManager_GetTargetDirs_Empty(t *testing.T) {
 	}
 }
 
+func TestExtractLastTurnError_LargeFileAndOffset(t *testing.T) {
+	tempHome := t.TempDir()
+	tempData := t.TempDir()
+	mgr := New(tempHome, tempData)
+
+	convID := "large-conv-1"
+	logsDir := filepath.Join(tempHome, ".gemini", "antigravity-cli", "brain", convID, ".system_generated", "logs")
+	if err := os.MkdirAll(logsDir, 0755); err != nil {
+		t.Fatalf("failed to create logsDir: %v", err)
+	}
+
+	// 1. Write an empty transcript file (fi.Size() == 0 branch)
+	emptyPath := filepath.Join(logsDir, "transcript_full.jsonl")
+	if err := os.WriteFile(emptyPath, []byte(""), 0644); err != nil {
+		t.Fatalf("failed to write empty transcript: %v", err)
+	}
+
+	// 2. Write a large transcript.jsonl (> 1MB) where user input is at the beginning
+	// and last 1MB chunk has no user input, forcing fallback to os.ReadFile(tPath).
+	tPath := filepath.Join(logsDir, "transcript.jsonl")
+	f, err := os.Create(tPath)
+	if err != nil {
+		t.Fatalf("failed to create large transcript: %v", err)
+	}
+
+	// First line: USER_INPUT
+	userStep := `{"source":"USER_EXPLICIT","type":"USER_INPUT","content":"Run long process"}` + "\n"
+	if _, err := f.WriteString(userStep); err != nil {
+		_ = f.Close()
+		t.Fatalf("write failed: %v", err)
+	}
+
+	// Middle lines: fill > 1.1 MB with MODEL steps
+	filler := `{"source":"MODEL","type":"PLANNER_RESPONSE","content":"working..."}` + "\n"
+	targetBytes := 1100000
+	written := len(userStep)
+	for written < targetBytes {
+		n, err := f.WriteString(filler)
+		if err != nil {
+			_ = f.Close()
+			t.Fatalf("write filler failed: %v", err)
+		}
+		written += n
+	}
+
+	// Last line: ERROR_MESSAGE
+	errStep := `{"source":"SYSTEM","type":"ERROR_MESSAGE","content":"Resource exhausted: quota limit reached","created_at":"2026-09-22T20:00:00Z"}` + "\n"
+	if _, err := f.WriteString(errStep); err != nil {
+		_ = f.Close()
+		t.Fatalf("write err step failed: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close failed: %v", err)
+	}
+
+	// Test ExtractLastTurnError on large file
+	extracted, err := mgr.ExtractLastTurnError(context.Background(), convID, time.Time{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(extracted, "Resource exhausted") {
+		t.Errorf("expected Resource exhausted in extracted error, got %q", extracted)
+	}
+
+	// Test ExtractLastTurnError with canceled context
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := mgr.ExtractLastTurnError(canceledCtx, convID, time.Now()); err == nil {
+		t.Errorf("expected context canceled error")
+	}
+}
+
+func TestSaveAndGetActiveTasks_EdgeCases(t *testing.T) {
+	tempHome := t.TempDir()
+	mgr := New(tempHome, "")
+
+	convID := "tasks-conv-1"
+
+	// 1. GetActiveTasks on non-existent session returns nil, nil
+	tasks, err := mgr.GetActiveTasks("non-existent-conv")
+	if err != nil || tasks != nil {
+		t.Errorf("expected nil, nil for non-existent session, got tasks=%v, err=%v", tasks, err)
+	}
+
+	// 2. SaveActiveTasks with invalid convID returns error
+	if err := mgr.SaveActiveTasks("../escape", nil); err == nil {
+		t.Errorf("expected error saving tasks to invalid session ID")
+	}
+
+	// 3. SaveActiveTasks successfully
+	sampleTasks := []TaskMetadata{
+		{TaskID: "task-101", ToolName: "bash", CommandLine: "ls -la"},
+	}
+	if err := mgr.SaveActiveTasks(convID, sampleTasks); err != nil {
+		t.Fatalf("SaveActiveTasks failed: %v", err)
+	}
+
+	// 4. GetActiveTasks successfully retrieves saved tasks
+	gotTasks, err := mgr.GetActiveTasks(convID)
+	if err != nil || len(gotTasks) != 1 || gotTasks[0].TaskID != "task-101" {
+		t.Fatalf("GetActiveTasks mismatch: got %v, err %v", gotTasks, err)
+	}
+
+	// 5. GetActiveTasks with corrupted JSON file
+	sessDir, err := mgr.GetSessionDir(convID)
+	if err != nil {
+		t.Fatalf("GetSessionDir failed: %v", err)
+	}
+	tasksFile := filepath.Join(sessDir, ".system_generated", "active_tasks.json")
+	if err := os.WriteFile(tasksFile, []byte("{invalid-json"), 0644); err != nil {
+		t.Fatalf("failed to write corrupted json: %v", err)
+	}
+	if _, err := mgr.GetActiveTasks(convID); err == nil {
+		t.Errorf("expected unmarshal error on corrupt active_tasks.json")
+	}
+
+	// 6. GetActiveTasks when path is a directory (os.ReadFile returns non-NotExist error)
+	_ = os.Remove(tasksFile)
+	if err := os.MkdirAll(tasksFile, 0755); err != nil {
+		t.Fatalf("failed to create directory in place of file: %v", err)
+	}
+	if _, err := mgr.GetActiveTasks(convID); err == nil {
+		t.Errorf("expected error reading directory as file in GetActiveTasks")
+	}
+
+	// 7. GetActiveTasks with invalid session ID returns error
+	if _, err := mgr.GetActiveTasks("../../bad-id"); err == nil {
+		t.Errorf("expected error from GetActiveTasks with invalid session ID")
+	}
+}
+
+func TestGetLastStepIndex_DirectoryAndEmpty(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// 1. Directory path returns error
+	if idx, err := getLastStepIndex(tempDir); err == nil || idx != -1 {
+		t.Errorf("expected error for directory path in getLastStepIndex, got idx=%d, err=%v", idx, err)
+	}
+
+	// 2. Empty file returns -1, nil
+	emptyFile := filepath.Join(tempDir, "empty.jsonl")
+	if err := os.WriteFile(emptyFile, []byte{}, 0644); err != nil {
+		t.Fatalf("failed to create empty file: %v", err)
+	}
+	if idx, err := getLastStepIndex(emptyFile); err != nil || idx != -1 {
+		t.Errorf("expected -1, nil for empty file, got idx=%d, err=%v", idx, err)
+	}
+}
+
+func TestExtractResponseAndError_ErrorMessageOnly(t *testing.T) {
+	tempHome := t.TempDir()
+	mgr := New(tempHome, "")
+
+	convID := "err-msg-conv"
+	logsDir := filepath.Join(tempHome, ".gemini", "antigravity-cli", "brain", convID, ".system_generated", "logs")
+	if err := os.MkdirAll(logsDir, 0755); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+
+	// Write ERROR_MESSAGE turn without step.Error field, but with step.Content
+	line := `{"source":"SYSTEM","type":"ERROR_MESSAGE","content":"Fatal quota exhausted message"}` + "\n"
+	if err := os.WriteFile(filepath.Join(logsDir, "transcript.jsonl"), []byte(line), 0644); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+
+	_, lastErr := mgr.ExtractResponseAndError(convID)
+	if lastErr != "Fatal quota exhausted message" {
+		t.Errorf("expected 'Fatal quota exhausted message', got %q", lastErr)
+	}
+}
+
+func TestExtractFinalSubstantiveResponse_LargeFileAndEmpty(t *testing.T) {
+	tempHome := t.TempDir()
+	mgr := New(tempHome, "")
+
+	convID := "final-subst-large"
+	logsDir := filepath.Join(tempHome, ".gemini", "antigravity-cli", "brain", convID, ".system_generated", "logs")
+	if err := os.MkdirAll(logsDir, 0755); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+
+	// 1. Write empty transcript_full.jsonl
+	if err := os.WriteFile(filepath.Join(logsDir, "transcript_full.jsonl"), []byte(""), 0644); err != nil {
+		t.Fatalf("write empty failed: %v", err)
+	}
+
+	// 2. Write large transcript.jsonl (> 1MB)
+	tPath := filepath.Join(logsDir, "transcript.jsonl")
+	f, err := os.Create(tPath)
+	if err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+
+	// First line: user input
+	userStep := `{"source":"USER_EXPLICIT","type":"USER_INPUT","content":"Start"}` + "\n"
+	_, _ = f.WriteString(userStep)
+
+	filler := `{"source":"MODEL","type":"PLANNER_RESPONSE","content":"working..."}` + "\n"
+	for i := 0; i < 18000; i++ {
+		_, _ = f.WriteString(filler)
+	}
+
+	finalStep := `{"source":"MODEL","type":"PLANNER_RESPONSE","content":"Final substantive message"}` + "\n"
+	_, _ = f.WriteString(finalStep)
+	_ = f.Close()
+
+	resp, isSilent, err := mgr.ExtractFinalSubstantiveResponse(context.Background(), convID)
+	if err != nil || isSilent || !strings.Contains(resp, "Final substantive message") {
+		t.Errorf("unexpected: resp=%q, isSilent=%v, err=%v", resp, isSilent, err)
+	}
+
+	// Canceled context inside loop
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := mgr.ExtractFinalSubstantiveResponse(canceledCtx, convID); err == nil {
+		t.Errorf("expected context canceled error")
+	}
+}
+
+
+
 
 
 

@@ -95,3 +95,16 @@ func TestRunnerPosix_KillHelpers(t *testing.T) {
 	killProcessGroup(&exec.Cmd{})
 }
 
+func TestRunnerPosix_ProcessGroupKillWarning(t *testing.T) {
+	// In Linux CI test containers, PID 1 belongs to the container supervisor or init and cannot be signaled by an unprivileged process (EPERM).
+	// This exercises the warning log branches for non-ignorable kill errors.
+	cmd := &exec.Cmd{Process: &os.Process{Pid: 1}}
+	killProcessGroup(cmd)
+	terminateProcessGroup(cmd)
+
+	if isIgnorableKillError(syscall.EPERM) {
+		t.Errorf("expected false for EPERM")
+	}
+}
+
+

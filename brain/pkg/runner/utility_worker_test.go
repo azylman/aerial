@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"io"
@@ -332,6 +333,10 @@ func TestUtilityWorker_CloseWarnAndIgnorableErrors(t *testing.T) {
 	if !isIgnorableProcessError(os.ErrProcessDone) {
 		t.Errorf("expected true for os.ErrProcessDone")
 	}
+	exitErr := &exec.ExitError{}
+	if !isIgnorableProcessError(exitErr) {
+		t.Errorf("expected true for ExitError")
+	}
 	if isIgnorableProcessError(errors.New("other")) {
 		t.Errorf("expected false for other")
 	}
@@ -391,5 +396,32 @@ func TestWorkerInstance_RSSBytesDetailed(t *testing.T) {
 		}
 	}
 }
+
+func TestReadWorkerTurn_DetailedBranches(t *testing.T) {
+	t.Parallel()
+
+	// 1. Read error (EOF before newline)
+	rEOF := bufio.NewReader(strings.NewReader("incomplete line"))
+	if _, err := ReadWorkerTurn(rEOF); err == nil {
+		t.Errorf("expected error on unexpected EOF")
+	}
+
+	// 2. Result event but ParseAgyOutput failure
+	badJSON := bufio.NewReader(strings.NewReader("{\"event\":\"result\",\"error\":bad\n"))
+	if _, err := ReadWorkerTurn(badJSON); err == nil {
+		t.Errorf("expected error on unparseable result event")
+	}
+
+	// 3. Result event success with preceding non-result line
+	goodJSON := bufio.NewReader(strings.NewReader("{\"event\":\"status\",\"message\":\"starting\"}\n{\"event\":\"result\",\"status\":\"SUCCESS\",\"response\":\"hello\"}\n"))
+	resp, err := ReadWorkerTurn(goodJSON)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp == nil || resp.Response != "hello" {
+		t.Errorf("expected response 'hello', got %v", resp)
+	}
+}
+
 
 

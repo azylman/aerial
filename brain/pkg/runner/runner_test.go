@@ -1703,4 +1703,20 @@ func TestParseAgyOutput_EmptyLinesAndProbeSession(t *testing.T) {
 	}
 }
 
+func TestParseAgyOutput_InitEventConvIDFallback(t *testing.T) {
+	t.Parallel()
+
+	initUUID := "11111111-2222-3333-4444-555555555555"
+	// Event "init" specifies conversation_id, subsequent "result" event has empty conversation ID
+	output := fmt.Sprintf("{\"event\":\"init\",\"session_id\":%q}\n{\"event\":\"result\",\"response\":\"finished\"}\n", initUUID)
+	resp, err := ParseAgyOutput(output)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.ConversationID != initUUID {
+		t.Errorf("expected ConversationID propagated from init event: %q, got %q", initUUID, resp.ConversationID)
+	}
+}
+
+
 
