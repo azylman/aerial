@@ -212,6 +212,39 @@ Before modifying source code, Aerial MUST audit the plan according to the classi
    - Fresh verification evidence must exist in the turn transcript prior to commit.
    - If a check fails, fix the code/tests, re-run `./scripts/verify.sh --staged` until exit code is 0, and proceed.
 
+4. **Single-Pass Coverage Audit & Deficit Resolution Runbook**:
+   - **The Anti-Pattern (Micro-Pushes)**: Never push exploratory single-statement tests to remote CI. Pushing incremental fixes burns 3 minutes per CI cycle and compounds turn latency. Always resolve coverage deficits locally in a single unified pass.
+   - **Platform-Aware Coverage Dynamics**:
+     - **In-Container Execution (Linux Daemon / MiniPC Host)**:
+       - Runs directly inside the Linux container where statement counts include all `*_linux.go` and POSIX files natively.
+       - Enforces the strict `>= 95.0%` floor per package.
+       - If coverage fails, execute:
+         ```bash
+         ./scripts/check-coverage.sh --service brain --check --gaps
+         ```
+         This instantly outputs the exact statement deficit (`Missing N stmts to reach 95.0%`) and the top 5 uncovered functions.
+       - Or inspect raw gaps on an individual package:
+         ```bash
+         go test -coverprofile=cov.out ./pkg/<name>
+         go tool cover -func=cov.out | awk '$1 !~ /^total:/ && $NF != "100.0%"' | sort -k3 -n
+         ```
+     - **Windows Host Execution (Local Workstation Development)**:
+       - Windows test runs omit `*_linux.go` and POSIX signaling files, resulting in a smaller statement denominator.
+       - **The Windows Margin Rule (>= 96.5% Target)**: A package passing at 95.1% on Windows can easily fail at 94.7% on Linux CI due to platform statement denominator differences. When developing on Windows, always target **>= 96.5%** local coverage before committing.
+       - Check gaps and coverage locally via:
+         ```powershell
+         powershell -ExecutionPolicy Bypass -File scripts/verify.ps1 -CoverageGaps
+         ```
+       - Verify Linux cross-compilation and build tags in seconds without Docker overhead:
+         ```powershell
+         powershell -ExecutionPolicy Bypass -File scripts/test-linux.ps1
+         ```
+   - **The 4-Step Single-Pass Resolution Process**:
+     - **Step 1: Calculate the Exact Deficit**: Compute the required statement delta where statements needed equals the ceiling of total statements multiplied by target (0.95 on Linux, 0.965 on Windows) minus covered statements.
+     - **Step 2: Audit High-Yield Uncovered Blocks**: Identify the top 2-3 functions with the largest clusters of uncovered statements (e.g. error handling branches, handshake negotiation, retry loops).
+     - **Step 3: Batch-Implement Tests in a Single Pass**: Write table-driven test cases covering those branches to satisfy at least 2x the deficit.
+     - **Step 4: Re-Verify Locally**: Ensure local verification passes 100% green before staging changes.
+
 ---
 
 ### Stage 6: Commit, Push & Continuous Deployment

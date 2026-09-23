@@ -4,8 +4,19 @@ set -eu
 # scripts/check-coverage.sh - Native Monorepo Test Coverage & Threshold Gating Engine
 # Zero external SaaS dependencies. Statement-weighted Go coverage + Node.js frontend coverage.
 
+# Ensure MinGit / MSYS binaries (/usr/bin, /mingw64/bin, /cmd) are in PATH
+for p in /usr/bin /mingw64/bin /cmd; do
+    if [ -d "$p" ]; then
+        case ":$PATH:" in
+            *:"$p":*) ;;
+            *) PATH="$p:$PATH" ;;
+        esac
+    fi
+done
+
 CHECK_MODE=0
 SUMMARY_MODE=0
+GAPS_MODE=0
 TARGET_SERVICE=""
 CUSTOM_PROFILE_DIR=""
 
@@ -16,6 +27,7 @@ Usage: $0 [options]
 Options:
   --check               Exit with status 1 if any coverage threshold is violated
   --summary             Output Markdown summary table (also written to \$GITHUB_STEP_SUMMARY if set)
+  --gaps                Print top uncovered functions and statement deficit for below-target packages
   --service <name>      Target a specific microservice (brain, scheduler-mcp, discord-mcp, dashboard, sidecars/hangar)
   --profile-dir <dir>   Store intermediate coverage profiles in the specified directory
   -h, --help            Show this help message
@@ -31,6 +43,10 @@ while [ $# -gt 0 ]; do
             ;;
         --summary)
             SUMMARY_MODE=1
+            shift
+            ;;
+        --gaps)
+            GAPS_MODE=1
             shift
             ;;
         --service)
@@ -55,8 +71,12 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+case "$0" in
+    */*) SCRIPT_DIR="${0%/*}" ;;
+    *) SCRIPT_DIR="." ;;
+esac
+SCRIPT_DIR="$(cd "$SCRIPT_DIR" && (pwd -W 2>/dev/null || pwd))"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && (pwd -W 2>/dev/null || pwd))"
 cd "$REPO_ROOT"
 
 # Determine Profile Directory
@@ -245,6 +265,17 @@ for svc in $ALL_GO_SERVICES; do
             if [ "$is_violation" -eq 1 ]; then
                 status="FAIL"
                 record_violation "Package $pkg coverage ($pct_val%) is below required floor (${thresh}%)"
+            fi
+
+            if [ "$is_violation" -eq 1 ] || [ "$GAPS_MODE" -eq 1 ]; then
+                needed=$(awk "BEGIN { req = int(($pkg_tot * $thresh + 99) / 100); diff = req - $pkg_cov; print (diff > 0) ? diff : 0 }")
+                if [ "$is_violation" -eq 1 ] || [ "$needed" -gt 0 ]; then
+                    echo "   🔍 [Coverage Audit] $pkg: $pkg_cov / $pkg_tot stmts ($pct_val%). Deficit: $needed stmts to reach ${thresh}%."
+                    if [ -f "$prof_file" ] && command -v go >/dev/null 2>&1; then
+                        echo "      Top uncovered functions in $pkg:"
+                        (cd "$svc" && go tool cover -func="$prof_file" 2>/dev/null | awk '$1 !~ /^total:/ && $NF != "100.0%"' | sort -k3 -n | head -n 5 | sed 's/^/      • /') || true
+                    fi
+                fi
             fi
         else
             status="N/A"

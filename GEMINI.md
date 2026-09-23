@@ -116,6 +116,7 @@ Aerial operates on a strict **Two-Repository Separation of Concerns**:
    - **Functional Core, Imperative Shell**: Factor business logic into pure, deterministic functions tested via fast, table-driven unit tests (< 1ms). Reserve mock runner and subprocess orchestration strictly for concurrency plumbing. Detailed testing guidelines are codified in `self-improvement` skill.
    - **Zero Arbitrary Sleeps**: Arbitrary sleeps (`time.Sleep`) are strictly prohibited in tests and production plumbing. Asynchronous coordination must use event-driven signaling, condition variables, channel selects, or injected delay overrides.
    - **External Boundary Abstraction & Test Isolation**: Abstract external boundaries (git, Docker sockets, Discord REST, database) behind interfaces with full intra-package test parallelism (`t.Parallel()`).
+   - **Single-Pass Coverage Audit Invariant**: Committing or pushing exploratory single-statement micro-tests to remote CI is strictly prohibited. When statement coverage falls below the required threshold (or below 96.5% on Windows to protect against the Linux denominator deficit), developers and agents must audit uncovered blocks locally and satisfy the deficit in a single verification pass prior to commit.
 
 8. **Multi-Agent Review Panel & Tiered Engineering Workflow**:
    - Code changes follow the Tiered Engineering Workflow dynamically scaled across four complexity tiers (Tier 0 through Tier 3) canonically detailed in the `self-improvement` skill (`.agents/skills/self-improvement/SKILL.md`):
