@@ -589,7 +589,7 @@ func handleTasks(store db.Store) http.HandlerFunc {
 			}
 			task.Prompt = sanitizedPrompt
 			task.Summary = SanitizeString(task.Summary)
-			task.AuthorName = SanitizeString(task.AuthorName)
+			task.AuthorName = SanitizeString(sanitizer.SanitizeAuthor(task.AuthorName))
 			tasks = append(tasks, task)
 		}
 

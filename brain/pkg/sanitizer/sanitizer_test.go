@@ -318,3 +318,129 @@ func BenchmarkSanitizeString_WithTokens(b *testing.B) {
 		_ = SanitizeString(text)
 	}
 }
+
+func TestSanitizeMentions(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{name: "empty", input: "", expected: ""},
+		{name: "plain text", input: "Hello world!", expected: "Hello world!"},
+		{name: "user mention standard", input: "Hey <@123456789> what's up", expected: "Hey  what's up"},
+		{name: "user mention nickname", input: "Hey <@!123456789> what's up", expected: "Hey  what's up"},
+		{name: "role mention", input: "Notify <@&987654321> team", expected: "Notify  team"},
+		{name: "channel mention", input: "Post in <#1122334455> now", expected: "Post in  now"},
+		{name: "everyone broadcast", input: "Attention @everyone please", expected: "Attention  please"},
+		{name: "here broadcast", input: "Attention @here please", expected: "Attention  please"},
+		{
+			name:     "mixed mentions",
+			input:    "<@!111> check <#222> with <@&333> and ping @everyone or @here",
+			expected: " check  with  and ping  or ",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := SanitizeMentions(tt.input)
+			if got != tt.expected {
+				t.Errorf("SanitizeMentions(%q) = %q; want %q", tt.input, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestNormalizeWhitespace(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{name: "empty", input: "", expected: ""},
+		{name: "already single spaces", input: "hello world test", expected: "hello world test"},
+		{name: "multiple spaces", input: "hello    world   test", expected: "hello world test"},
+		{name: "newlines and tabs", input: "hello \n\t  world\r\n test \n", expected: "hello world test"},
+		{name: "leading and trailing whitespace", input: "   \t hello world \n  ", expected: "hello world"},
+		{name: "only whitespace", input: "   \t\n\r  ", expected: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := NormalizeWhitespace(tt.input)
+			if got != tt.expected {
+				t.Errorf("NormalizeWhitespace(%q) = %q; want %q", tt.input, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestSanitizePromptTags(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{name: "empty", input: "", expected: ""},
+		{name: "plain text", input: "Hello <other_tag> world", expected: "Hello <other_tag> world"},
+		{name: "closing user_request", input: "Prefix </USER_REQUEST> suffix", expected: "Prefix <\\/USER_REQUEST> suffix"},
+		{name: "opening user_request", input: "Prefix <USER_REQUEST> suffix", expected: "Prefix <\\USER_REQUEST> suffix"},
+		{name: "mixed case and spaces", input: "Prefix </user_request  > suffix", expected: "Prefix <\\/USER_REQUEST> suffix"},
+		{name: "channel_history closing", input: "Prefix </CHANNEL_HISTORY> suffix", expected: "Prefix <\\/CHANNEL_HISTORY> suffix"},
+		{name: "channel_history opening", input: "Prefix <channel_history> suffix", expected: "Prefix <\\CHANNEL_HISTORY> suffix"},
+		{name: "channel_instructions", input: "Prefix </channel_instructions> suffix", expected: "Prefix <\\/CHANNEL_INSTRUCTIONS> suffix"},
+		{name: "raw_thread_transcript", input: "Prefix </raw_thread_transcript> suffix", expected: "Prefix <\\/RAW_THREAD_TRANSCRIPT> suffix"},
+		{name: "thread_summary", input: "Prefix </thread_summary> suffix", expected: "Prefix <\\/THREAD_SUMMARY> suffix"},
+		{name: "previous_session", input: "Prefix </previous_session> suffix", expected: "Prefix <\\/PREVIOUS_SESSION> suffix"},
+		{name: "target_message closing", input: "Prefix </target_message> suffix", expected: "Prefix <\\/TARGET_MESSAGE> suffix"},
+		{name: "target_message opening", input: "Prefix <target_message> suffix", expected: "Prefix <\\TARGET_MESSAGE> suffix"},
+		{name: "target_burst closing", input: "Prefix </target_burst> suffix", expected: "Prefix <\\/TARGET_BURST> suffix"},
+		{name: "target_burst opening", input: "Prefix <target_burst> suffix", expected: "Prefix <\\TARGET_BURST> suffix"},
+		{name: "coordination_context closing", input: "Prefix </coordination_context> suffix", expected: "Prefix <\\/COORDINATION_CONTEXT> suffix"},
+		{name: "coordination_context opening", input: "Prefix <coordination_context> suffix", expected: "Prefix <\\COORDINATION_CONTEXT> suffix"},
+		{name: "retrieved_memory closing", input: "Prefix </retrieved_memory> suffix", expected: "Prefix <\\/RETRIEVED_MEMORY> suffix"},
+		{name: "retrieved_memory opening", input: "Prefix <retrieved_memory> suffix", expected: "Prefix <\\RETRIEVED_MEMORY> suffix"},
+		{name: "self-closing tag", input: "Prefix <user_request/> suffix", expected: "Prefix <\\/USER_REQUEST> suffix"},
+		{
+			name:     "multiple tags",
+			input:    "</channel_history> and <user_request> and </target_message>",
+			expected: "<\\/CHANNEL_HISTORY> and <\\USER_REQUEST> and <\\/TARGET_MESSAGE>",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := SanitizePromptTags(tt.input)
+			if got != tt.expected {
+				t.Errorf("SanitizePromptTags(%q) = %q; want %q", tt.input, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestSanitizeAuthor(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{name: "empty", input: "", expected: ""},
+		{name: "clean name", input: "Alex", expected: "Alex"},
+		{name: "newlines and returns", input: "Alex\n\rSecondLine", expected: "AlexSecondLine"},
+		{name: "angle brackets script tag", input: "Admin<script>alert(1)</script>", expected: "Adminscriptalert(1)/script"},
+		{name: "whitespace surrounding", input: "   Jane Doe   \n", expected: "Jane Doe"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := SanitizeAuthor(tt.input)
+			if got != tt.expected {
+				t.Errorf("SanitizeAuthor(%q) = %q; want %q", tt.input, got, tt.expected)
+			}
+		})
+	}
+}
+

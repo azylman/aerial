@@ -116,7 +116,7 @@ function Ensure-Deadcode {
     if ($script:hasDeadcode) { return }
     if ($hasGo) {
         Write-Host "   [deadcode] Installing deadcode via go install..." -ForegroundColor Yellow
-        & go install golang.org/x/tools/cmd/deadcode@v0.50.0
+        & go install golang.org/x/tools/cmd/deadcode@v0.30.0
         if ($goBinPath -and (Test-Path (Join-Path $goBinPath "deadcode.exe"))) {
             if (-not ($env:PATH -split ';' -contains $goBinPath)) {
                 $env:PATH = "$goBinPath;" + $env:PATH

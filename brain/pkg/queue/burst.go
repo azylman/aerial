@@ -10,6 +10,7 @@ import (
 	"github.com/azylman/aerial/brain/pkg/db"
 	"github.com/azylman/aerial/brain/pkg/memory"
 	"github.com/azylman/aerial/brain/pkg/metrics"
+	"github.com/azylman/aerial/brain/pkg/sanitizer"
 )
 
 func (p *WorkerPool) Enqueue(msg db.Message) {
@@ -171,13 +172,11 @@ func FormatSingleDiscordPrompt(m db.Message) string {
 			authorName = "@" + authorName
 		}
 		sb.WriteString(fmt.Sprintf("    author: %q\n", authorName))
-		cleanRefContent := strings.ReplaceAll(m.Metadata.ReplyingToContent, "</USER_REQUEST>", "<\\/USER_REQUEST>")
-		cleanRefContent = strings.ReplaceAll(cleanRefContent, "<USER_REQUEST>", "<\\USER_REQUEST>")
+		cleanRefContent := sanitizer.SanitizePromptTags(m.Metadata.ReplyingToContent)
 		sb.WriteString(fmt.Sprintf("    content: %q\n", cleanRefContent))
 	}
 
-	sanitizedContent := strings.ReplaceAll(m.Content, "</USER_REQUEST>", "<\\/USER_REQUEST>")
-	sanitizedContent = strings.ReplaceAll(sanitizedContent, "<USER_REQUEST>", "<\\USER_REQUEST>")
+	sanitizedContent := sanitizer.SanitizePromptTags(m.Content)
 	sb.WriteString(fmt.Sprintf("- content: %s\n", sanitizedContent))
 	ts := m.CreatedAt
 	if ts.IsZero() {
@@ -238,7 +237,7 @@ func CoalesceBurstPrompt(burst []db.Message) string {
 		if m.CreatedAt.IsZero() {
 			timeStr = time.Now().UTC().Format("15:04:05")
 		}
-		body := m.BodyText()
+		body := sanitizer.SanitizePromptTags(m.BodyText())
 		sb.WriteString(fmt.Sprintf("--- Message %d (by %s at %s) ---\n%s\n\n", i+1, author, timeStr, body))
 	}
 	sb.WriteString("</USER_REQUEST>")

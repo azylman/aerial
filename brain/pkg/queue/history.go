@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/brain/pkg/metrics"
+	"github.com/azylman/aerial/brain/pkg/sanitizer"
 	"github.com/bwmarrin/discordgo"
 	"golang.org/x/sync/singleflight"
 )
@@ -21,13 +22,7 @@ const (
 )
 
 var (
-	reChannelHistoryTag      = regexp.MustCompile(`(?i)<\s*/?\s*channel_history\s*>`)
-	reUserRequestTag         = regexp.MustCompile(`(?i)<\s*/?\s*user_request\s*>`)
-	reChannelInstructionsTag = regexp.MustCompile(`(?i)<\s*/?\s*channel_instructions\s*>`)
-	reRawThreadTranscriptTag = regexp.MustCompile(`(?i)<\s*/?\s*raw_thread_transcript\s*>`)
-	reThreadSummaryTag       = regexp.MustCompile(`(?i)<\s*/?\s*thread_summary\s*>`)
-	rePreviousSessionTag     = regexp.MustCompile(`(?i)<\s*/?\s*previous_session\s*>`)
-	reValidSessionID         = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,128}$`)
+	reValidSessionID = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,128}$`)
 )
 
 // HistoryMessage represents a normalized message retrieved for channel context.
@@ -45,13 +40,7 @@ type HistoryFetcherFunc func(ctx context.Context, channelID string, beforeID str
 // SanitizeHistoryContent escapes XML delimiter opening and closing tags in history message content
 // to prevent prompt breakout, opening fake instruction blocks, or early closing of prompt framing blocks.
 func SanitizeHistoryContent(s string) string {
-	s = reChannelHistoryTag.ReplaceAllString(s, "<\\/CHANNEL_HISTORY>")
-	s = reUserRequestTag.ReplaceAllString(s, "<\\/USER_REQUEST>")
-	s = reChannelInstructionsTag.ReplaceAllString(s, "<\\/CHANNEL_INSTRUCTIONS>")
-	s = reRawThreadTranscriptTag.ReplaceAllString(s, "<\\/RAW_THREAD_TRANSCRIPT>")
-	s = reThreadSummaryTag.ReplaceAllString(s, "<\\/THREAD_SUMMARY>")
-	s = rePreviousSessionTag.ReplaceAllString(s, "<\\/PREVIOUS_SESSION>")
-	return s
+	return sanitizer.SanitizePromptTags(s)
 }
 
 // FormatChannelHistory filters out messages older than 4 hours, truncates oversized

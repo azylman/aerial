@@ -40,6 +40,12 @@ var (
 
 	// Key-Value Configuration / CLI assignments (preserves label)
 	reKeyValue = regexp.MustCompile(`(?i)\b(GEMINI_API_KEY|ANTIGRAVITY_API_KEY|DISCORD_BOT_TOKEN|DISCORD_TOKEN|GITHUB_PAT|HA_TOKEN|OPENAI_API_KEY|ANTHROPIC_API_KEY|POSTGRES_PASSWORD|GRAFANA_ADMIN_PASSWORD|DATABASE_URL|PASSWORD|SECRET|TOKEN|KEY)\s*([:=]\s*)([^\s,;]+)`)
+
+	// Discord Mentions (user, role, channel, broadcast)
+	reDiscordMention = regexp.MustCompile(`<@[!&]?[0-9]+>|<#[0-9]+>|@everyone|@here`)
+
+	// Prompt Delimiter Tags (case-insensitive opening, closing, and self-closing system prompt tags)
+	rePromptTag = regexp.MustCompile(`(?i)<\s*(/)?\s*(channel_history|user_request|channel_instructions|raw_thread_transcript|thread_summary|previous_session|target_message|target_burst|coordination_context|retrieved_memory)\s*(/)?\s*>`)
 )
 
 var (
@@ -243,4 +249,50 @@ func SanitizeEnvVars(envVars []string) []string {
 	}
 
 	return cleaned
+}
+
+// SanitizeMentions strips Discord user mentions (<@123>, <@!123>), role mentions (<@&123>),
+// channel mentions (<#123>), and broad broadcast mentions (@everyone, @here).
+func SanitizeMentions(input string) string {
+	if input == "" {
+		return ""
+	}
+	return reDiscordMention.ReplaceAllString(input, "")
+}
+
+// NormalizeWhitespace collapses consecutive whitespace runes (spaces, tabs, newlines)
+// into a single space and trims leading and trailing whitespace.
+func NormalizeWhitespace(input string) string {
+	if input == "" {
+		return ""
+	}
+	return strings.Join(strings.Fields(input), " ")
+}
+
+// SanitizePromptTags escapes XML prompt tags to prevent prompt injection or envelope breakouts.
+// Closing (or self-closing) tags are escaped to <\/TAG> and opening tags to <\TAG>.
+func SanitizePromptTags(input string) string {
+	if input == "" {
+		return ""
+	}
+	return rePromptTag.ReplaceAllStringFunc(input, func(m string) string {
+		tagUpper := strings.ToUpper(strings.Trim(m, "<>/ \t\r\n"))
+		if strings.Contains(m, "/") {
+			return "<\\/" + tagUpper + ">"
+		}
+		return "<\\" + tagUpper + ">"
+	})
+}
+
+// SanitizeAuthor cleans untrusted author strings by stripping newlines, carriage returns,
+// and angle brackets, and trimming whitespace.
+func SanitizeAuthor(name string) string {
+	if name == "" {
+		return ""
+	}
+	name = strings.ReplaceAll(name, "\n", "")
+	name = strings.ReplaceAll(name, "\r", "")
+	name = strings.ReplaceAll(name, "<", "")
+	name = strings.ReplaceAll(name, ">", "")
+	return strings.TrimSpace(name)
 }

@@ -190,22 +190,12 @@ func (c *Classifier) ConsecutiveFailures() int {
 
 // SanitizeContent neutralizes XML tag injection attempts in user content.
 func SanitizeContent(s string) string {
-	s = strings.ReplaceAll(s, "</target_message>", "<\\/target_message>")
-	s = strings.ReplaceAll(s, "<target_message>", "<\\target_message>")
-	s = strings.ReplaceAll(s, "</target_burst>", "<\\/target_burst>")
-	s = strings.ReplaceAll(s, "<target_burst>", "<\\target_burst>")
-	s = strings.ReplaceAll(s, "</channel_history>", "<\\/channel_history>")
-	s = strings.ReplaceAll(s, "<channel_history>", "<\\channel_history>")
-	return s
+	return sanitizer.SanitizePromptTags(s)
 }
 
 // SanitizeAuthor cleans untrusted author strings.
 func SanitizeAuthor(name string) string {
-	name = strings.ReplaceAll(name, "\n", "")
-	name = strings.ReplaceAll(name, "\r", "")
-	name = strings.ReplaceAll(name, "<", "")
-	name = strings.ReplaceAll(name, ">", "")
-	return strings.TrimSpace(name)
+	return sanitizer.SanitizeAuthor(name)
 }
 
 // FormatMessage formats a single db.Message into [@AuthorName] (timestamp): Content.
@@ -473,8 +463,7 @@ func (c *Classifier) ClassifyBurst(ctx context.Context, targetBurst []db.Message
 // CleanThreadTitle cleans and formats raw LLM output for use as a Discord thread title.
 func CleanThreadTitle(raw string) string {
 	cleaned := sanitizer.SanitizeString(raw)
-	reMention := regexp.MustCompile(`<@[!&]?[0-9]+>|<#[0-9]+>|@everyone|@here`)
-	cleaned = reMention.ReplaceAllString(cleaned, "")
+	cleaned = sanitizer.SanitizeMentions(cleaned)
 	cleaned = strings.ReplaceAll(cleaned, "`", "")
 	cleaned = strings.TrimSpace(cleaned)
 	cleaned = strings.Trim(cleaned, `"'`)
@@ -485,7 +474,7 @@ func CleanThreadTitle(raw string) string {
 	for _, l := range lines {
 		trimmed := strings.TrimSpace(l)
 		if trimmed != "" {
-			cleaned = trimmed
+			cleaned = sanitizer.NormalizeWhitespace(trimmed)
 			break
 		}
 	}
