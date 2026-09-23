@@ -1593,6 +1593,28 @@ func (te *turnExecution) executeWithRetries() {
 					}
 				}
 
+				// If session exceeded guardrails (steps or bytes), rotate so retry starts with a fresh session
+				if te.currentSessionID != "" && te.pool != nil && te.pool.sessionMgr != nil {
+					pauseSteps := te.pool.sessionMgr.CountTranscriptSteps(te.currentSessionID)
+					pauseBytes := te.pool.sessionMgr.GetTranscriptSize(te.currentSessionID)
+					if pauseSteps >= DefaultMaxSessionSteps || pauseBytes >= DefaultMaxTranscriptBytes {
+						scope := "thread"
+						if strings.EqualFold(te.policy.Mode, "channel") {
+							scope = "channel"
+						}
+						reason := "bytes"
+						if pauseSteps >= DefaultMaxSessionSteps {
+							reason = "steps"
+						}
+						log.Printf("[WorkerPool] Quota paused session %s exceeded guardrails (steps=%d/%d, bytes=%d/%d). Resetting session for fresh retry.",
+							te.currentSessionID, pauseSteps, DefaultMaxSessionSteps, pauseBytes, DefaultMaxTranscriptBytes)
+						metrics.RecordSessionRotation("quota_pause", scope, reason)
+						te.previousSessionID = te.currentSessionID
+						te.rotateSessionID(te.threadID, "")
+						te.currentSessionID = ""
+					}
+				}
+
 				// Circuit breaker: check if this turn was already a quota auto-retry
 				isAlreadyRetry := te.burst[0].ScheduleRunID != "" || strings.HasPrefix(te.burst[0].Content, "[QUOTA_RETRY]") || strings.Contains(te.turnPrompt, "[QUOTA_RETRY]")
 
@@ -2097,6 +2119,27 @@ func (te *turnExecution) executeWithRetries() {
 				if te.statusUpdater != nil {
 					te.statusUpdater.Reset()
 				}
+				// If session exceeded guardrails (steps or bytes), rotate so transient retry starts cold
+				if te.currentSessionID != "" && te.pool != nil && te.pool.sessionMgr != nil {
+					transSteps := te.pool.sessionMgr.CountTranscriptSteps(te.currentSessionID)
+					transBytes := te.pool.sessionMgr.GetTranscriptSize(te.currentSessionID)
+					if transSteps >= DefaultMaxSessionSteps || transBytes >= DefaultMaxTranscriptBytes {
+						scope := "thread"
+						if strings.EqualFold(te.policy.Mode, "channel") {
+							scope = "channel"
+						}
+						reason := "bytes"
+						if transSteps >= DefaultMaxSessionSteps {
+							reason = "steps"
+						}
+						log.Printf("[WorkerPool] Transient failure session %s exceeded guardrails (steps=%d/%d, bytes=%d/%d). Resetting session for cold retry.",
+							te.currentSessionID, transSteps, DefaultMaxSessionSteps, transBytes, DefaultMaxTranscriptBytes)
+						metrics.RecordSessionRotation("transient_retry", scope, reason)
+						te.previousSessionID = te.currentSessionID
+						te.rotateSessionID(te.threadID, "")
+						te.currentSessionID = ""
+					}
+				}
 				backoff := time.Duration(attempt) * te.pool.cfg.BackoffBase
 				log.Printf("[WorkerPool] Retrying transient error in %v (preserving session %s)", backoff, te.currentSessionID)
 				select {
@@ -2145,6 +2188,7 @@ func (te *turnExecution) executeWithRetries() {
 		}
 
 		if te.currentSessionID != "" {
+			te.previousSessionID = te.currentSessionID
 			te.rotateSessionID(te.threadID, "")
 			te.currentSessionID = ""
 		}

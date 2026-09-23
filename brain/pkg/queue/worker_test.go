@@ -6,10 +6,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
+	"github.com/google/uuid"
 
 	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
@@ -693,6 +695,201 @@ done
 		if !found {
 			t.Errorf("expected one-shot retry schedule for thread %s with [QUOTA_RETRY]", threadID)
 		}
+	}
+}
+
+func TestWorkerPool_QuotaPause_RotatesBloatedSession(t *testing.T) {
+	tmpHome := t.TempDir()
+	tempData := t.TempDir()
+
+	store := setupTestStore(t)
+
+	validUUID := "b3333333-4444-5555-6666-777777777777"
+	mockBin := filepath.Join(tmpHome, "mock_agy.sh")
+	script := fmt.Sprintf(`#!/bin/sh
+echo '{"event":"init","conversation_id":%q}'
+while IFS= read -r line; do
+  echo '{"event":"result","result":{"status":"SUCCESS","response":"","usage":{"total_tokens":0}}}'
+done
+`, validUUID)
+	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
+		t.Fatalf("failed to write mock script: %v", err)
+	}
+
+	// Prepare transcript on disk with step_index >= DefaultMaxSessionSteps and quota exhaustion error
+	sessDir := filepath.Join(tempData, "brain", validUUID, ".system_generated", "logs")
+	_ = os.MkdirAll(sessDir, 0755)
+	tNow := time.Now().UTC()
+	transcriptContent := fmt.Sprintf(`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"hello"}
+{"step_index":%d,"source":"MODEL","type":"ERROR_MESSAGE","status":"ERROR","content":"RESOURCE_EXHAUSTED: Google Gemini API quota reached. resets in 2h30m.","created_at":%q}
+`, DefaultMaxSessionSteps, tNow.Format(time.RFC3339))
+	_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(transcriptContent), 0644)
+
+	cfg := config.NewTestConfig(func(d *config.ConfigData) {
+		d.AgyBin = mockBin
+		d.DataDir = tempData
+	})
+
+	threadID := "thread-quota-bloat-rotation"
+	_ = store.SaveSessionID(context.Background(), threadID, validUUID)
+
+	doneCh := make(chan struct{})
+	pool := New(cfg, WorkerPoolConfig{
+		SessionManager: session.New(tmpHome, tempData),
+		Store:          store,
+		TimeoutMinutes: 1,
+		DeliveryFunc: func(sess *discordgo.Session, channelID, content string) error {
+			return nil
+		},
+		OnMessageCompleted: func(msg db.Message, status string) {
+			if status == db.StatusFailed {
+				select {
+				case <-doneCh:
+				default:
+					close(doneCh)
+				}
+			}
+		},
+	})
+	defer pool.Stop()
+
+	msg := db.Message{
+		ID:        "msg-quota-bloated",
+		ThreadID:  threadID,
+		Content:   "run big workflow",
+		Status:    db.StatusPending,
+		CreatedAt: time.Now(),
+	}
+	_ = store.InsertMessage(context.Background(), msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for quota failure completion")
+	}
+
+	// Session should be rotated to cold state "" because steps >= DefaultMaxSessionSteps
+	currSess, err := store.GetSessionID(context.Background(), threadID)
+	if err != nil {
+		t.Fatalf("failed to query session ID: %v", err)
+	}
+	if currSess != "" {
+		t.Errorf("expected session ID to be rotated to empty \"\", got %q", currSess)
+	}
+
+	prevSess, err := store.GetPreviousSessionID(context.Background(), threadID)
+	if err != nil {
+		t.Fatalf("failed to query previous session ID: %v", err)
+	}
+	if prevSess != validUUID {
+		t.Errorf("expected previous session ID to be %q, got %q", validUUID, prevSess)
+	}
+}
+
+func TestWorkerPool_TransientRetry_RotatesBloatedSession(t *testing.T) {
+	tmpHome := t.TempDir()
+	tempData := t.TempDir()
+
+	store := setupTestStore(t)
+
+	validUUID := "c4444444-5555-6666-7777-888888888888"
+
+	// Prepare transcript on disk with initial steps below guardrail (e.g. 100 < 180)
+	sessDir := filepath.Join(tempData, "brain", validUUID, ".system_generated", "logs")
+	_ = os.MkdirAll(sessDir, 0755)
+	tNow := time.Now().UTC()
+	transcriptFile := filepath.Join(sessDir, "transcript.jsonl")
+	transcriptContent := fmt.Sprintf(`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"hello"}
+{"step_index":100,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","content":"working...","created_at":%q}
+`, tNow.Format(time.RFC3339))
+	_ = os.WriteFile(transcriptFile, []byte(transcriptContent), 0644)
+
+	cfg := config.NewTestConfig(func(d *config.ConfigData) {
+		d.DataDir = tempData
+	})
+
+	threadID := "thread-transient-bloat-rotation"
+	_ = store.SaveSessionID(context.Background(), threadID, validUUID)
+
+	var sessionsSeen []string
+	var mu sync.Mutex
+	doneCh := make(chan struct{})
+
+	pool := New(cfg, WorkerPoolConfig{
+		SessionManager: session.New(tmpHome, tempData),
+		Store:          store,
+		TimeoutMinutes: 1,
+		MaxAttempts:    2,
+		BackoffBase:    10 * time.Millisecond,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			mu.Lock()
+			sessionsSeen = append(sessionsSeen, sessionID)
+			attemptNum := len(sessionsSeen)
+			mu.Unlock()
+
+			if attemptNum == 1 {
+				// During attempt 1, the session executes steps that exceed the guardrail
+				bloatedContent := fmt.Sprintf(`{"step_index":%d,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","content":"tool runaway","created_at":%q}`+"\n",
+					DefaultMaxSessionSteps+5, time.Now().UTC().Format(time.RFC3339))
+				f, _ := os.OpenFile(transcriptFile, os.O_APPEND|os.O_WRONLY, 0644)
+				if f != nil {
+					_, _ = f.WriteString(bloatedContent)
+					_ = f.Close()
+				}
+				return "", fmt.Sprintf("Starting conversation update stream for %s\nError 503: high demand service unavailable", validUUID), 1, fmt.Errorf("exit status 1")
+			}
+			return mockJSONResponse(uuid.New().String(), "Recovered successfully"), "", 0, nil
+		},
+		DeliveryFunc: func(sess *discordgo.Session, channelID, content string) error {
+			return nil
+		},
+		OnMessageCompleted: func(msg db.Message, status string) {
+			if status == db.StatusCompleted {
+				select {
+				case <-doneCh:
+				default:
+					close(doneCh)
+				}
+			}
+		},
+	})
+	defer pool.Stop()
+
+	msg := db.Message{
+		ID:        "msg-transient-bloated",
+		ThreadID:  threadID,
+		Content:   "run transient test",
+		Status:    db.StatusPending,
+		CreatedAt: time.Now(),
+	}
+	_ = store.InsertMessage(context.Background(), msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for transient recovery completion")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(sessionsSeen) != 2 {
+		t.Fatalf("expected 2 runner attempts, got %d", len(sessionsSeen))
+	}
+	if sessionsSeen[0] != validUUID {
+		t.Errorf("expected attempt 1 to use session %q, got %q", validUUID, sessionsSeen[0])
+	}
+	if sessionsSeen[1] != "" {
+		t.Errorf("expected attempt 2 to be cold retry (empty session ID) due to guardrail rotation, got %q", sessionsSeen[1])
+	}
+
+	prevSess, err := store.GetPreviousSessionID(context.Background(), threadID)
+	if err != nil {
+		t.Fatalf("failed to query previous session ID: %v", err)
+	}
+	if prevSess != validUUID {
+		t.Errorf("expected previous session ID to be %q, got %q", validUUID, prevSess)
 	}
 }
 

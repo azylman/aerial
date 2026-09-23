@@ -437,7 +437,7 @@ func SummarizeThreadHistoryWithGroup(ctx context.Context, sfg *singleflight.Grou
 	return s, nil
 }
 
-// FormatPreviousSession formats the previous session ID into a secure <PREVIOUS_SESSION> block.
+// FormatPreviousSession formats an advisory <PREVIOUS_SESSION> block indicating that session rotation occurred.
 // Returns an empty string if sessionID is empty, whitespace-only, or contains invalid characters.
 func FormatPreviousSession(sessionID string) string {
 	cleanID := strings.TrimSpace(sessionID)
@@ -450,9 +450,8 @@ func FormatPreviousSession(sessionID string) string {
 
 	var sb strings.Builder
 	sb.WriteString("<PREVIOUS_SESSION>\n")
-	sb.WriteString(fmt.Sprintf("Previous session ID: %s\n", cleanID))
-	sb.WriteString(fmt.Sprintf("Prior conversation transcript on disk: /root/.gemini/antigravity-cli/brain/%s/.system_generated/logs/transcript.jsonl\n", cleanID))
-	sb.WriteString("Note: This thread was recently rotated to preserve token budget. If past technical context, prior decisions, or code changes are required, use grep_search or view_file to inspect the prior transcript. Do not load the full file unless necessary.\n")
+	sb.WriteString("Note: This thread was recently rotated to preserve token budget and optimize context window performance.\n")
+	sb.WriteString("Prior conversation context, active decisions, and recent channel history are summarized in thread summary and channel message history. Semantic facts and user preferences are preserved in long-term memory. Do not attempt to re-hydrate or inspect raw prior transcripts unless explicitly instructed by the user.\n")
 	sb.WriteString("</PREVIOUS_SESSION>")
 	return sb.String()
 }

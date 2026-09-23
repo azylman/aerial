@@ -4405,8 +4405,8 @@ func TestProcessBurst_SessionRotation_ResetsToColdState(t *testing.T) {
 	if !strings.Contains(capturedPrompts[2], "<PREVIOUS_SESSION>") {
 		t.Errorf("Expected Turn 3 prompt to contain <PREVIOUS_SESSION>, got:\n%s", capturedPrompts[2])
 	}
-	if !strings.Contains(capturedPrompts[2], "Previous session ID: c9b5e679-7425-40de-944b-e07fc1f90ae7") {
-		t.Errorf("Expected Turn 3 prompt to contain previous session ID, got:\n%s", capturedPrompts[2])
+	if strings.Contains(capturedPrompts[2], "c9b5e679-7425-40de-944b-e07fc1f90ae7") {
+		t.Errorf("Expected Turn 3 prompt to NOT contain raw session ID, got:\n%s", capturedPrompts[2])
 	}
 	if strings.Contains(capturedPrompts[0], "<PREVIOUS_SESSION>") {
 		t.Errorf("Expected Turn 1 (fresh channel) to NOT contain <PREVIOUS_SESSION>, got:\n%s", capturedPrompts[0])
@@ -4541,11 +4541,11 @@ func TestProcessBurst_SessionRotation_SeedsPreviousSessionID(t *testing.T) {
 	if !strings.Contains(turn3Prompt, "<PREVIOUS_SESSION>") {
 		t.Fatalf("Expected Turn 3 to contain <PREVIOUS_SESSION>, got:\n%s", turn3Prompt)
 	}
-	if !strings.Contains(turn3Prompt, "Previous session ID: "+sess1) {
-		t.Errorf("Expected Turn 3 prompt to contain Previous session ID %s, got:\n%s", sess1, turn3Prompt)
+	if strings.Contains(turn3Prompt, sess1) {
+		t.Errorf("Expected Turn 3 prompt to NOT contain raw session ID %s, got:\n%s", sess1, turn3Prompt)
 	}
-	if !strings.Contains(turn3Prompt, "/root/.gemini/antigravity-cli/brain/"+sess1+"/.system_generated/logs/transcript.jsonl") {
-		t.Errorf("Expected Turn 3 prompt to contain transcript path for %s, got:\n%s", sess1, turn3Prompt)
+	if strings.Contains(turn3Prompt, "transcript.jsonl") {
+		t.Errorf("Expected Turn 3 prompt to NOT contain transcript path, got:\n%s", turn3Prompt)
 	}
 	mu.Unlock()
 

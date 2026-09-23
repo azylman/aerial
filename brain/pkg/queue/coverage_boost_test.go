@@ -2371,8 +2371,8 @@ func TestAssembleTurnPrompt_EmptyBase(t *testing.T) {
 		IsColdStart:       true,
 		PreviousSessionID: "prev-sess-123",
 	})
-	if !strings.Contains(p4, "prev-sess-123") {
-		t.Errorf("expected prev session, got %q", p4)
+	if !strings.Contains(p4, "<PREVIOUS_SESSION>") {
+		t.Errorf("expected prev session block, got %q", p4)
 	}
 
 	// 4. Layer 3 only
