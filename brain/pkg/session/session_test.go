@@ -2223,5 +2223,52 @@ func TestAppendTranscriptStep_NoTrailingNewline(t *testing.T) {
 	}
 }
 
+func TestDumpSessionDiagnosticLogs_Coverage(t *testing.T) {
+	tempHome := t.TempDir()
+	tempData := t.TempDir()
+	mgr := New(tempHome, tempData)
+
+	convID := "diag-conv-1"
+	logsDir := filepath.Join(tempHome, ".gemini", "antigravity-cli", "brain", convID, ".system_generated", "logs")
+	_ = os.MkdirAll(logsDir, 0755)
+
+	// Write log file with > 50 lines
+	var lines []string
+	for i := 0; i < 60; i++ {
+		lines = append(lines, fmt.Sprintf("Log line %d in diagnosis", i))
+	}
+	_ = os.WriteFile(filepath.Join(logsDir, "test.log"), []byte(strings.Join(lines, "\n")), 0644)
+
+	diagOutput := mgr.DumpSessionDiagnosticLogs(convID)
+	if !strings.Contains(diagOutput, "[...showing last 50 lines...]") {
+		t.Errorf("expected diagnostic output to include truncated marker, got %s", diagOutput)
+	}
+
+	var nilMgr *Manager
+	if s := nilMgr.DumpSessionDiagnosticLogs(convID); s != "" {
+		t.Errorf("expected empty string for nil manager, got %q", s)
+	}
+}
+
+func TestManager_GetTargetDirs_Empty(t *testing.T) {
+	tempHome := t.TempDir()
+	mgr := New(tempHome, "")
+
+	// Create subfolder in root
+	sub := filepath.Join(tempHome, ".gemini", "antigravity-cli", "brain", "sub-1")
+	_ = os.MkdirAll(sub, 0755)
+
+	dirs := mgr.getTargetDirs("")
+	if len(dirs) == 0 {
+		t.Errorf("expected target dirs when convID is empty")
+	}
+
+	var nilMgr *Manager
+	if d := nilMgr.getTargetDirs(""); d != nil {
+		t.Errorf("expected nil for nil manager")
+	}
+}
+
+
 
 

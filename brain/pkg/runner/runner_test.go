@@ -1148,6 +1148,41 @@ func TestStepUpdateEvent_Resolved(t *testing.T) {
 	}
 }
 
+func TestClassifyError_DetailedBranches(t *testing.T) {
+	t.Parallel()
+
+	// 1. exit code 0, unparseable JSON with context window keyword
+	fail, trans, corrupt, detail := ClassifyError(0, "not json", "error: maximum context length exceeded")
+	if !fail || trans || !corrupt || detail != "context window exceeded" {
+		t.Errorf("unexpected: (%v, %v, %v, %q)", fail, trans, corrupt, detail)
+	}
+
+	// 2. exit code 0, unparseable JSON with corruption keyword
+	fail, trans, corrupt, detail = ClassifyError(0, "not json", "corrupted transcript detected")
+	if !fail || trans || !corrupt {
+		t.Errorf("unexpected: (%v, %v, %v, %q)", fail, trans, corrupt, detail)
+	}
+
+	// 3. exit code 0, unparseable JSON with fatal keyword
+	fail, trans, corrupt, detail = ClassifyError(0, "not json", "fatal: unrecoverable crash")
+	if !fail || trans || corrupt {
+		t.Errorf("unexpected: (%v, %v, %v, %q)", fail, trans, corrupt, detail)
+	}
+
+	// 4. exit code 0, parsed JSON with Status != SUCCESS and corruption keyword
+	jsonCorrupt := `{"event":"result","status":"ERROR","error":"session corrupt error"}`
+	fail, trans, corrupt, detail = ClassifyError(0, jsonCorrupt, "")
+	if !fail || trans || !corrupt || detail != "session corrupt error" {
+		t.Errorf("unexpected: (%v, %v, %v, %q)", fail, trans, corrupt, detail)
+	}
+
+	// 5. exit code 0, parsed JSON with Status != SUCCESS and no error message
+	jsonNoErr := `{"event":"result","status":"FAILED"}`
+	fail, trans, corrupt, detail = ClassifyError(0, jsonNoErr, "")
+	if !fail || !trans || corrupt || detail != "runner status: FAILED" {
+		t.Errorf("unexpected: (%v, %v, %v, %q)", fail, trans, corrupt, detail)
+	}
+}
 
 func TestExtractCommandName(t *testing.T) {
 	t.Parallel()
