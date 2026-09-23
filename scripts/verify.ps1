@@ -45,6 +45,21 @@ $hasLint = if (Get-Command "golangci-lint" -ErrorAction SilentlyContinue) {
 } else { 
     $false 
 }
+$hasDeadcode = if (Get-Command "deadcode" -ErrorAction SilentlyContinue) { 
+    $true 
+} elseif ($goBinPath -and (Test-Path (Join-Path $goBinPath "deadcode.exe"))) {
+    if (-not ($env:PATH -split ';' -contains $goBinPath)) {
+        $env:PATH = "$goBinPath;" + $env:PATH
+    }
+    $true
+} elseif (Test-Path (Join-Path $userGoBin "deadcode.exe")) {
+    if (-not ($env:PATH -split ';' -contains $userGoBin)) {
+        $env:PATH = "$userGoBin;" + $env:PATH
+    }
+    $true
+} else { 
+    $false 
+}
 $hasDocker = if (Get-Command "docker" -ErrorAction SilentlyContinue) {
     try { & docker version *>$null; $LASTEXITCODE -eq 0 } catch { $false }
 } else { $false }
@@ -94,6 +109,50 @@ function Run-GolangCILint($svc, $targetPkg = "./...") {
         Run-GoVet $svc
     } else {
         throw "Neither golangci-lint, docker, nor go found in PATH."
+    }
+}
+
+function Ensure-Deadcode {
+    if ($script:hasDeadcode) { return }
+    if ($hasGo) {
+        Write-Host "   [deadcode] Installing deadcode via go install..." -ForegroundColor Yellow
+        & go install golang.org/x/tools/cmd/deadcode@v0.50.0
+        if ($goBinPath -and (Test-Path (Join-Path $goBinPath "deadcode.exe"))) {
+            if (-not ($env:PATH -split ';' -contains $goBinPath)) {
+                $env:PATH = "$goBinPath;" + $env:PATH
+            }
+            $script:hasDeadcode = $true
+            return
+        }
+        if (Test-Path (Join-Path $userGoBin "deadcode.exe")) {
+            if (-not ($env:PATH -split ';' -contains $userGoBin)) {
+                $env:PATH = "$userGoBin;" + $env:PATH
+            }
+            $script:hasDeadcode = $true
+            return
+        }
+    }
+    throw "Neither deadcode nor go found in PATH to perform dead code analysis."
+}
+
+function Run-Deadcode($svc) {
+    Write-Host "   [deadcode] Checking $svc for unreachable code..." -ForegroundColor DarkCyan
+    Ensure-Deadcode
+    $svcPath = Join-Path $repoRoot $svc
+    Push-Location $svcPath
+    try {
+        $output = & deadcode -test ./... 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw "deadcode analysis failed on $svc: $output"
+        }
+        if ($output) {
+            $errLines = ($output | Out-String).Trim()
+            if ($errLines) {
+                throw "Dead code detected in $svc:`n$errLines"
+            }
+        }
+    } finally {
+        Pop-Location
     }
 }
 
@@ -206,6 +265,7 @@ if ($Staged) {
             foreach ($p in $pkgs) {
                 Run-GolangCILint $svc $p
             }
+            Run-Deadcode $svc
         }
     }
 
@@ -227,6 +287,7 @@ Check-RuleFileSizes
 Write-Host "=== 1. Static Analysis & Linting ===" -ForegroundColor Yellow
 foreach ($svc in $goServices) {
     Run-GolangCILint $svc
+    Run-Deadcode $svc
     Run-GoLinuxCompileCheck $svc
 }
 
