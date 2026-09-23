@@ -2,7 +2,8 @@
 [CmdletBinding()]
 param (
     [switch]$Staged,
-    [switch]$Full
+    [switch]$Full,
+    [switch]$CoverageGaps
 )
 
 $ErrorActionPreference = "Stop"
@@ -245,11 +246,15 @@ if (Test-Path (Join-Path $repoRoot "dashboard/app.test.js")) {
 Write-Host "=== 4. Test Coverage Gating ===" -ForegroundColor Yellow
 $checkCovScript = Join-Path $repoRoot "scripts\check-coverage.sh"
 if (Test-Path $checkCovScript) {
+    $covArgs = @("--check")
+    if ($CoverageGaps) {
+        $covArgs += "--gaps"
+    }
     if (Get-Command "sh" -ErrorAction SilentlyContinue) {
-        & sh $checkCovScript --check
+        & sh $checkCovScript $covArgs
         if ($LASTEXITCODE -ne 0) { throw "Coverage threshold verification failed" }
     } elseif ($hasDocker) {
-        docker run --rm -v "${repoRoot}:/app" -w /app golang:1.24 sh scripts/check-coverage.sh --check
+        docker run --rm -v "${repoRoot}:/app" -w /app golang:1.24 sh scripts/check-coverage.sh $covArgs
         if ($LASTEXITCODE -ne 0) { throw "Coverage threshold verification (docker) failed" }
     }
 }

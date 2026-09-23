@@ -2,7 +2,9 @@
 [CmdletBinding()]
 param (
     [string]$Service = "",
-    [switch]$Check
+    [switch]$Check,
+    [switch]$Gaps,
+    [switch]$StartDocker
 )
 
 $ErrorActionPreference = "Stop"
@@ -10,35 +12,56 @@ $ErrorActionPreference = "Stop"
 Write-Host "⚡ [Aerial Test Linux] Running Linux verification on Windows..." -ForegroundColor Cyan
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
+$normRepoRoot = $repoRoot.ToString().Replace('\', '/')
 $goServices = if ($Service) { @($Service) } else { @("brain", "scheduler-mcp", "discord-mcp", "dashboard", "sidecars/hangar") }
 
-# 1. Fast Docker Status Probe (2-second ceiling)
-$hasDocker = $false
-if (Get-Command "docker" -ErrorAction SilentlyContinue) {
+# 1. Fast Docker Status Probe
+$hasDocker = if (Get-Command "docker" -ErrorAction SilentlyContinue) {
     try {
-        $dockerCheck = Start-Process -FilePath "docker" -ArgumentList "version --format '{{.Server.Version}}'" -NoNewWindow -PassThru -RedirectStandardOutput "$env:TEMP\aerial-docker-out.tmp" -RedirectStandardError "$env:TEMP\aerial-docker-err.tmp"
-        if ($dockerCheck.WaitForExit(2000) -and $dockerCheck.ExitCode -eq 0) {
-            $hasDocker = $true
-        } else {
-            if (-not $dockerCheck.HasExited) {
-                $dockerCheck.Kill()
-            }
-        }
+        & docker version *>$null
+        $LASTEXITCODE -eq 0
     } catch {
-        $hasDocker = $false
-    } finally {
-        Remove-Item "$env:TEMP\aerial-docker-out.tmp" -Force -ErrorAction SilentlyContinue
-        Remove-Item "$env:TEMP\aerial-docker-err.tmp" -Force -ErrorAction SilentlyContinue
+        $false
+    }
+} else {
+    $false
+}
+
+# Auto-start Docker Desktop if requested and daemon is not yet ready
+if (-not $hasDocker -and $StartDocker) {
+    $dockerExe = "C:\Program Files\Docker\Docker\Docker Desktop.exe"
+    if (Test-Path $dockerExe) {
+        Write-Host "   [Docker] Launching Docker Desktop and waiting for daemon initialization..." -ForegroundColor Yellow
+        Start-Process $dockerExe
+        for ($i = 0; $i -lt 30; $i++) {
+            Start-Sleep -Seconds 2
+            try {
+                & docker version *>$null
+                if ($LASTEXITCODE -eq 0) {
+                    $hasDocker = $true
+                    Write-Host "   [Docker] Docker daemon is ready!" -ForegroundColor Green
+                    break
+                }
+            } catch {}
+        }
     }
 }
 
-# 2. Check WSL Availability with accessible /mnt/c
+# 2. Check WSL Availability with accessible /mnt/c or /mnt/host/c
 $hasWsl = $false
+$wslCPath = ""
 if (-not $hasDocker -and (Get-Command "wsl" -ErrorAction SilentlyContinue)) {
     try {
         & wsl test -d /mnt/c *>$null
         if ($LASTEXITCODE -eq 0) {
             $hasWsl = $true
+            $wslCPath = "/mnt/c"
+        } else {
+            & wsl test -d /mnt/host/c *>$null
+            if ($LASTEXITCODE -eq 0) {
+                $hasWsl = $true
+                $wslCPath = "/mnt/host/c"
+            }
         }
     } catch {
         $hasWsl = $false
@@ -50,7 +73,8 @@ if ($hasDocker) {
     Write-Host "   [Docker] Detected active Docker daemon. Running Linux coverage in golang:1.24..." -ForegroundColor DarkCyan
     $svcArg = if ($Service) { "--service $Service" } else { "" }
     $checkArg = if ($Check) { "--check" } else { "" }
-    docker run --rm -v "${repoRoot}:/app" -w /app golang:1.24 sh -c "sh scripts/check-coverage.sh $svcArg $checkArg"
+    $gapsArg = if ($Gaps) { "--gaps" } else { "" }
+    docker run --rm -v "${normRepoRoot}:/app" -w /app golang:1.24 sh -c "sh scripts/check-coverage.sh $svcArg $checkArg $gapsArg"
     if ($LASTEXITCODE -ne 0) {
         throw "Linux test coverage check failed inside Docker container"
     }

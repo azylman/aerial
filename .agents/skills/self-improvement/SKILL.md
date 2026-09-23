@@ -212,6 +212,26 @@ Before modifying source code, Aerial MUST audit the plan according to the classi
    - Fresh verification evidence must exist in the turn transcript prior to commit.
    - If a check fails, fix the code/tests, re-run `./scripts/verify.sh --staged` until exit code is 0, and proceed.
 
+4. **Single-Pass Coverage Audit & Deficit Resolution Runbook**:
+   - **The Anti-Pattern (Micro-Pushes)**: Never push exploratory single-statement tests to remote CI. Pushing incremental fixes burns 3 minutes per CI cycle and compounds turn latency. Always resolve coverage deficits locally in a single unified pass.
+   - **Unified Linux Coverage Execution Across Platforms**:
+     - Both Linux environments (Aerial's in-container runtime, GitHub Actions CI) and Windows development hosts (via Docker Desktop in `scripts/test-linux.ps1`) execute the identical `golang:1.24` Linux test suite with identical statement denominators.
+     - The universal hard floor across all Go packages is **`>= 95.0%`**.
+     - **On Linux / Container**:
+       ```bash
+       ./scripts/check-coverage.sh --service brain --check --gaps
+       ```
+     - **On Windows Workstation**:
+       ```powershell
+       powershell -ExecutionPolicy Bypass -File scripts/test-linux.ps1 -Service brain -Check -Gaps
+       ```
+     - Both commands execute the Linux test engine and output the exact statement deficit and top 5 uncovered functions directly in the terminal.
+   - **The 4-Step Single-Pass Resolution Process**:
+     - **Step 1: Calculate the Exact Deficit**: Compute statements needed: required delta equals the ceiling of total statements multiplied by 0.95 minus covered statements.
+     - **Step 2: Audit High-Yield Uncovered Blocks**: Identify the top 2-3 functions with the largest clusters of uncovered statements (e.g. error handling branches, handshake negotiation, retry loops).
+     - **Step 3: Batch-Implement Tests in a Single Pass**: Write table-driven test cases covering those branches to satisfy at least 2x the deficit.
+     - **Step 4: Re-Verify Locally**: Run local verification to confirm all packages meet or exceed 95.0% before staging changes.
+
 ---
 
 ### Stage 6: Commit, Push & Continuous Deployment
