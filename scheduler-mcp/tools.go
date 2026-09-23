@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -207,25 +206,6 @@ func (h *ToolHandler) ScheduleRecurring(ctx context.Context, args ScheduleRecurr
 	}, nil
 }
 
-func (h *ToolHandler) HandleScheduleRecurring(rawArgs json.RawMessage) (interface{}, error) {
-	var args ScheduleRecurringArgs
-	if err := json.Unmarshal(rawArgs, &args); err != nil {
-		return nil, fmt.Errorf("invalid arguments: %w", err)
-	}
-	out, err := h.ScheduleRecurring(context.Background(), args)
-	if err != nil {
-		return nil, err
-	}
-	return map[string]interface{}{
-		"status":          out.Status,
-		"schedule_id":     out.ScheduleID,
-		"cron_expression": out.CronExpression,
-		"next_run_at":     out.NextRunAt,
-		"channel_id":      out.ChannelID,
-		"effort":          out.Effort,
-		"message":         out.Message,
-	}, nil
-}
 
 type ScheduleOnceArgs struct {
 	TargetID string `json:"target_id" jsonschema:"Target Discord thread ID or channel ID where reminder will be delivered."`
@@ -287,22 +267,6 @@ func (h *ToolHandler) ScheduleOnce(ctx context.Context, args ScheduleOnceArgs) (
 	}, nil
 }
 
-func (h *ToolHandler) HandleScheduleOnce(rawArgs json.RawMessage) (interface{}, error) {
-	var args ScheduleOnceArgs
-	if err := json.Unmarshal(rawArgs, &args); err != nil {
-		return nil, fmt.Errorf("invalid arguments: %w", err)
-	}
-	out, err := h.ScheduleOnce(context.Background(), args)
-	if err != nil {
-		return nil, err
-	}
-	return map[string]interface{}{
-		"status":      out.Status,
-		"schedule_id": out.ScheduleID,
-		"run_at":      out.RunAt,
-		"message":     out.Message,
-	}, nil
-}
 
 type ListSchedulesArgs struct {
 	TargetID string `json:"target_id,omitempty" jsonschema:"Optional Discord Channel or Thread ID to filter schedules."`
@@ -338,22 +302,6 @@ func (h *ToolHandler) ListSchedules(ctx context.Context, args ListSchedulesArgs)
 	}, nil
 }
 
-func (h *ToolHandler) HandleListSchedules(rawArgs json.RawMessage) (interface{}, error) {
-	var args ListSchedulesArgs
-	if len(rawArgs) > 0 && string(rawArgs) != "null" {
-		if err := json.Unmarshal(rawArgs, &args); err != nil {
-			return nil, fmt.Errorf("invalid arguments: %w", err)
-		}
-	}
-	out, err := h.ListSchedules(context.Background(), args)
-	if err != nil {
-		return nil, err
-	}
-	return map[string]interface{}{
-		"recurring": out.Recurring,
-		"one_shot":  out.OneShot,
-	}, nil
-}
 
 type CancelScheduleArgs struct {
 	ScheduleID string `json:"schedule_id" jsonschema:"The ID of the schedule to cancel."`
@@ -387,21 +335,6 @@ func (h *ToolHandler) CancelSchedule(ctx context.Context, args CancelScheduleArg
 	}, nil
 }
 
-func (h *ToolHandler) HandleCancelSchedule(rawArgs json.RawMessage) (interface{}, error) {
-	var args CancelScheduleArgs
-	if err := json.Unmarshal(rawArgs, &args); err != nil {
-		return nil, fmt.Errorf("invalid arguments: %w", err)
-	}
-	out, err := h.CancelSchedule(context.Background(), args)
-	if err != nil {
-		return nil, err
-	}
-	return map[string]interface{}{
-		"status":      out.Status,
-		"schedule_id": out.ScheduleID,
-		"message":     out.Message,
-	}, nil
-}
 
 type UpdateCronScheduleArgs struct {
 	ScheduleID     string  `json:"schedule_id" jsonschema:"The ID of the recurring cron schedule to update."`
@@ -461,25 +394,3 @@ func (h *ToolHandler) UpdateCronSchedule(ctx context.Context, args UpdateCronSch
 	return resp, nil
 }
 
-func (h *ToolHandler) HandleUpdateCronSchedule(rawArgs json.RawMessage) (interface{}, error) {
-	var args UpdateCronScheduleArgs
-	if err := json.Unmarshal(rawArgs, &args); err != nil {
-		return nil, fmt.Errorf("invalid arguments: %w", err)
-	}
-	out, err := h.UpdateCronSchedule(context.Background(), args)
-	if err != nil {
-		return nil, err
-	}
-	resp := map[string]interface{}{
-		"status":      out.Status,
-		"schedule_id": out.ScheduleID,
-		"message":     out.Message,
-	}
-	if out.Effort != "" {
-		resp["effort"] = out.Effort
-	}
-	if out.NextRunAt != "" {
-		resp["next_run_at"] = out.NextRunAt
-	}
-	return resp, nil
-}

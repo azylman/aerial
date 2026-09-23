@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -24,16 +23,9 @@ import (
 // 1. config.go coverage
 // -------------------------------------------------------------
 func TestConfig_NewAndLoadCoverage(t *testing.T) {
-	// NewConfig with empty fallbacks
-	c1 := NewConfig("file:mem_sched_mcp?mode=memory&cache=shared", "", "")
-	if c1.Timezone != DefaultTimezone || c1.Port != DefaultPort {
-		t.Errorf("expected default tz and port, got tz=%s, port=%s", c1.Timezone, c1.Port)
-	}
-
-	// NewConfig explicit
-	c2 := NewConfig("file:mem_sched_mcp?mode=memory&cache=shared", "America/Denver", "9099")
-	if c2.Timezone != "America/Denver" || c2.Port != "9099" {
-		t.Errorf("expected custom tz and port, got tz=%s, port=%s", c2.Timezone, c2.Port)
+	// Nil lookup error check
+	if _, err := LoadConfigFromLookup(nil); err == nil {
+		t.Error("expected error when lookup is nil")
 	}
 
 	// LoadConfigFromLookup with only POSTGRES_HOST (covering default user/pass/port/db)
@@ -75,7 +67,7 @@ func TestTools_ParseRunAt_Overflow(t *testing.T) {
 	}
 }
 
-func TestTools_HandleUpdateCronSchedule_AllBranches(t *testing.T) {
+func TestTools_UpdateCronSchedule_AllBranches(t *testing.T) {
 	cfg := &Config{DatabaseURL: ":memory:", Timezone: "America/Los_Angeles"}
 	db, err := InitDB(cfg)
 	if err != nil {
@@ -83,35 +75,31 @@ func TestTools_HandleUpdateCronSchedule_AllBranches(t *testing.T) {
 	}
 	defer db.Close()
 	h := NewToolHandler(cfg, db)
-
-	// Malformed JSON
-	if _, err := h.HandleUpdateCronSchedule([]byte("{bad")); err == nil {
-		t.Error("expected error on malformed json")
-	}
+	ctx := context.Background()
 
 	// Empty schedule_id
-	if _, err := h.HandleUpdateCronSchedule([]byte(`{"schedule_id":"  "}`)); err == nil {
+	if _, err := h.UpdateCronSchedule(ctx, UpdateCronScheduleArgs{ScheduleID: "  "}); err == nil {
 		t.Error("expected error on empty schedule_id")
 	}
 
 	// Insert a schedule to update
-	insertRes, err := h.HandleScheduleRecurring([]byte(`{
-		"channel_id": "chan-test",
-		"cron_expression": "0 10 * * *",
-		"prompt": "original prompt",
-		"effort": "high"
-	}`))
+	insertRes, err := h.ScheduleRecurring(ctx, ScheduleRecurringArgs{
+		ChannelID:      "chan-test",
+		CronExpression: "0 10 * * *",
+		Prompt:         "original prompt",
+		Effort:         "high",
+	})
 	if err != nil {
-		t.Fatalf("HandleScheduleRecurring failed: %v", err)
+		t.Fatalf("ScheduleRecurring failed: %v", err)
 	}
-	schedID := insertRes.(map[string]interface{})["schedule_id"].(string)
+	schedID := insertRes.ScheduleID
 
 	// Invalid cron expression in update
-	badCronPayload, _ := json.Marshal(map[string]string{
-		"schedule_id":     schedID,
-		"cron_expression": "invalid-cron",
-	})
-	if _, err := h.HandleUpdateCronSchedule(badCronPayload); err == nil {
+	badCron := "invalid-cron"
+	if _, err := h.UpdateCronSchedule(ctx, UpdateCronScheduleArgs{
+		ScheduleID:     schedID,
+		CronExpression: &badCron,
+	}); err == nil {
 		t.Error("expected error on invalid cron expression")
 	}
 
@@ -121,7 +109,7 @@ func TestTools_HandleUpdateCronSchedule_AllBranches(t *testing.T) {
 	prompt := "updated prompt"
 	prefix := "updated prefix"
 	tz := "America/New_York"
-	goodPayload, _ := json.Marshal(UpdateCronScheduleArgs{
+	res, err := h.UpdateCronSchedule(ctx, UpdateCronScheduleArgs{
 		ScheduleID:     schedID,
 		Effort:         &effLow,
 		CronExpression: &cronExpr,
@@ -129,43 +117,38 @@ func TestTools_HandleUpdateCronSchedule_AllBranches(t *testing.T) {
 		TitlePrefix:    &prefix,
 		Timezone:       &tz,
 	})
-	res, err := h.HandleUpdateCronSchedule(goodPayload)
 	if err != nil {
-		t.Fatalf("HandleUpdateCronSchedule failed: %v", err)
+		t.Fatalf("UpdateCronSchedule failed: %v", err)
 	}
-	resMap := res.(map[string]interface{})
-	if resMap["status"] != "success" || resMap["effort"] != "low" || resMap["next_run_at"] == nil {
-		t.Errorf("unexpected update response: %+v", resMap)
+	if res.Status != "success" || res.Effort != "low" || res.NextRunAt == "" {
+		t.Errorf("unexpected update response: %+v", res)
 	}
 
 	// Valid update with cron_expression without timezone (fallback to handler timezone) and effort != "low" ("HIGH")
 	effHigh := "HIGH"
 	cronExpr2 := "0 14 * * *"
-	goodPayload2, _ := json.Marshal(UpdateCronScheduleArgs{
+	res2, err := h.UpdateCronSchedule(ctx, UpdateCronScheduleArgs{
 		ScheduleID:     schedID,
 		Effort:         &effHigh,
 		CronExpression: &cronExpr2,
 	})
-	res2, err := h.HandleUpdateCronSchedule(goodPayload2)
 	if err != nil {
-		t.Fatalf("HandleUpdateCronSchedule failed: %v", err)
+		t.Fatalf("UpdateCronSchedule failed: %v", err)
 	}
-	resMap2 := res2.(map[string]interface{})
-	if resMap2["effort"] != "high" {
-		t.Errorf("expected effort high, got %v", resMap2["effort"])
+	if res2.Effort != "high" {
+		t.Errorf("expected effort high, got %v", res2.Effort)
 	}
 
 	// Update non-existent schedule -> db error
-	nonExistPayload, _ := json.Marshal(UpdateCronScheduleArgs{
+	if _, err := h.UpdateCronSchedule(ctx, UpdateCronScheduleArgs{
 		ScheduleID: "nonexistent",
 		Prompt:     &prompt,
-	})
-	if _, err := h.HandleUpdateCronSchedule(nonExistPayload); err == nil {
+	}); err == nil {
 		t.Error("expected error when updating nonexistent schedule")
 	}
 }
 
-func TestTools_HandleListSchedules_EmptyAndError(t *testing.T) {
+func TestTools_ListSchedules_EmptyAndError(t *testing.T) {
 	cfg := &Config{DatabaseURL: ":memory:", Timezone: "America/Los_Angeles"}
 	db, err := InitDB(cfg)
 	if err != nil {
@@ -173,22 +156,22 @@ func TestTools_HandleListSchedules_EmptyAndError(t *testing.T) {
 	}
 	defer db.Close()
 	h := NewToolHandler(cfg, db)
+	ctx := context.Background()
 
 	// Empty database -> crons == nil and oneShots == nil branches executed
-	res, err := h.HandleListSchedules([]byte(`{}`))
+	res, err := h.ListSchedules(ctx, ListSchedulesArgs{})
 	if err != nil {
-		t.Fatalf("HandleListSchedules failed on empty db: %v", err)
+		t.Fatalf("ListSchedules failed on empty db: %v", err)
 	}
-	resMap := res.(map[string]interface{})
-	if len(resMap["recurring"].([]CronSchedule)) != 0 || len(resMap["one_shot"].([]OneShotSchedule)) != 0 {
-		t.Errorf("expected empty slices, got %+v", resMap)
+	if len(res.Recurring) != 0 || len(res.OneShot) != 0 {
+		t.Errorf("expected empty slices, got %+v", res)
 	}
 
 	// Drop one_shot_schedules table so ListCronSchedules succeeds but ListOneShotSchedules fails
 	if _, err := db.Exec("DROP TABLE one_shot_schedules;"); err != nil {
 		t.Fatalf("failed to drop table: %v", err)
 	}
-	if _, err := h.HandleListSchedules(nil); err == nil {
+	if _, err := h.ListSchedules(ctx, ListSchedulesArgs{}); err == nil {
 		t.Error("expected error when one_shot_schedules table is dropped")
 	}
 }
@@ -489,19 +472,6 @@ func TestCloseWarn(t *testing.T) {
 	closeWarn(&errReadCloser{}, "error closer")
 }
 
-func TestTools_HandleListSchedules_InvalidJSON(t *testing.T) {
-	cfg := &Config{DatabaseURL: ":memory:", Timezone: "America/Los_Angeles"}
-	db, err := InitDB(cfg)
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	defer db.Close()
-	h := NewToolHandler(cfg, db)
-	_, err = h.HandleListSchedules(json.RawMessage(`{invalid`))
-	if err == nil {
-		t.Errorf("expected error on invalid JSON arguments")
-	}
-}
 
 func TestDB_UnsupportedScheme(t *testing.T) {
 	_, err := initDB("unsupported://foo")

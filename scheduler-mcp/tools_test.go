@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -206,102 +205,81 @@ func TestToolHandlerOperations(t *testing.T) {
 	}
 	defer func() { _ = db.Close() }()
 
+	ctx := context.Background()
 	handler := NewToolHandler(cfg, db)
 
-	// 1. Schedule recurring (explicit timezone America/Los_Angeles)
-	recArgJSON := []byte(`{
-		"channel_id": "1542423172400291873",
-		"cron_expression": "0 20 * * 5",
-		"prompt": "Message me with a weekly meal plan",
-		"title_prefix": "Weekly Meal Plan",
-		"timezone": "America/Los_Angeles"
-	}`)
-
-	recRes, err := handler.HandleScheduleRecurring(recArgJSON)
+	// 1. Schedule recurring (explicit timezone America/Los_Angeles and low effort)
+	recRes, err := handler.ScheduleRecurring(ctx, ScheduleRecurringArgs{
+		ChannelID:      "1542423172400291873",
+		CronExpression: "0 20 * * 5",
+		Prompt:         "Message me with a weekly meal plan",
+		TitlePrefix:    "Weekly Meal Plan",
+		Timezone:       "America/Los_Angeles",
+		Effort:         "low",
+	})
 	if err != nil {
-		t.Fatalf("HandleScheduleRecurring failed: %v", err)
+		t.Fatalf("ScheduleRecurring failed: %v", err)
 	}
-	recMap, ok := recRes.(map[string]interface{})
-	if !ok || recMap["status"] != "success" {
+	if recRes.Status != "success" || recRes.ScheduleID == "" || recRes.Effort != "low" {
 		t.Fatalf("Unexpected recurring response: %+v", recRes)
 	}
-	schedID, ok := recMap["schedule_id"].(string)
-	if !ok || schedID == "" {
-		t.Fatalf("Expected schedule_id in response")
-	}
+	schedID := recRes.ScheduleID
 
 	// 2. Schedule one-shot (relative duration)
-	onceArgJSON := []byte(`{
-		"target_id": "thread-456",
-		"run_at": "30m",
-		"prompt": "Remind me about the appointment"
-	}`)
-
-	onceRes, err := handler.HandleScheduleOnce(onceArgJSON)
+	onceRes, err := handler.ScheduleOnce(ctx, ScheduleOnceArgs{
+		TargetID: "thread-456",
+		RunAt:    "30m",
+		Prompt:   "Remind me about the appointment",
+	})
 	if err != nil {
-		t.Fatalf("HandleScheduleOnce failed: %v", err)
+		t.Fatalf("ScheduleOnce failed: %v", err)
 	}
-	onceMap, ok := onceRes.(map[string]interface{})
-	if !ok || onceMap["status"] != "success" {
+	if onceRes.Status != "success" || onceRes.ScheduleID == "" {
 		t.Fatalf("Unexpected once response: %+v", onceRes)
 	}
-	onceID, ok := onceMap["schedule_id"].(string)
-	if !ok || onceID == "" {
-		t.Fatalf("Expected schedule_id in response")
-	}
+	onceID := onceRes.ScheduleID
 
 	// 3. List schedules (all)
-	listRes, err := handler.HandleListSchedules(nil)
+	listRes, err := handler.ListSchedules(ctx, ListSchedulesArgs{})
 	if err != nil {
-		t.Fatalf("HandleListSchedules failed: %v", err)
+		t.Fatalf("ListSchedules failed: %v", err)
 	}
-	listMap := listRes.(map[string]interface{})
-	recList := listMap["recurring"].([]CronSchedule)
-	onceList := listMap["one_shot"].([]OneShotSchedule)
-	if len(recList) != 1 || len(onceList) != 1 {
-		t.Errorf("Expected 1 recurring and 1 once, got %d, %d", len(recList), len(onceList))
+	if len(listRes.Recurring) != 1 || len(listRes.OneShot) != 1 {
+		t.Errorf("Expected 1 recurring and 1 once, got %d, %d", len(listRes.Recurring), len(listRes.OneShot))
 	}
-	if recList[0].Timezone != "America/Los_Angeles" {
-		t.Errorf("Expected timezone 'America/Los_Angeles', got %q", recList[0].Timezone)
+	if listRes.Recurring[0].Timezone != "America/Los_Angeles" {
+		t.Errorf("Expected timezone 'America/Los_Angeles', got %q", listRes.Recurring[0].Timezone)
 	}
 
 	// 4. List schedules filtered by target_id
-	filterJSON, _ := json.Marshal(map[string]string{"target_id": "1542423172400291873"})
-	filteredRes, err := handler.HandleListSchedules(filterJSON)
+	filteredRes, err := handler.ListSchedules(ctx, ListSchedulesArgs{TargetID: "1542423172400291873"})
 	if err != nil {
-		t.Fatalf("Filtered HandleListSchedules failed: %v", err)
+		t.Fatalf("Filtered ListSchedules failed: %v", err)
 	}
-	filteredMap := filteredRes.(map[string]interface{})
-	fRec := filteredMap["recurring"].([]CronSchedule)
-	fOnce := filteredMap["one_shot"].([]OneShotSchedule)
-	if len(fRec) != 1 || len(fOnce) != 0 {
-		t.Errorf("Expected 1 recurring and 0 once for target_id, got %d, %d", len(fRec), len(fOnce))
+	if len(filteredRes.Recurring) != 1 || len(filteredRes.OneShot) != 0 {
+		t.Errorf("Expected 1 recurring and 0 once for target_id, got %d, %d", len(filteredRes.Recurring), len(filteredRes.OneShot))
 	}
 
 	// 5. Cancel schedule (recurring)
-	cancelRecJSON, _ := json.Marshal(map[string]string{"schedule_id": schedID})
-	cancelRecRes, err := handler.HandleCancelSchedule(cancelRecJSON)
+	cancelRecRes, err := handler.CancelSchedule(ctx, CancelScheduleArgs{ScheduleID: schedID})
 	if err != nil {
-		t.Fatalf("HandleCancelSchedule recurring failed: %v", err)
+		t.Fatalf("CancelSchedule recurring failed: %v", err)
 	}
-	cancelRecMap := cancelRecRes.(map[string]interface{})
-	if cancelRecMap["status"] != "success" {
+	if cancelRecRes.Status != "success" {
 		t.Errorf("Expected success cancel response, got %+v", cancelRecRes)
 	}
 
 	// 6. Cancel schedule (one-shot)
-	cancelOnceJSON, _ := json.Marshal(map[string]string{"schedule_id": onceID})
-	cancelOnceRes, err := handler.HandleCancelSchedule(cancelOnceJSON)
+	cancelOnceRes, err := handler.CancelSchedule(ctx, CancelScheduleArgs{ScheduleID: onceID})
 	if err != nil {
-		t.Fatalf("HandleCancelSchedule once failed: %v", err)
+		t.Fatalf("CancelSchedule once failed: %v", err)
 	}
-	cancelOnceMap := cancelOnceRes.(map[string]interface{})
-	if cancelOnceMap["status"] != "success" {
+	if cancelOnceRes.Status != "success" {
 		t.Errorf("Expected success cancel response, got %+v", cancelOnceRes)
 	}
 
 	// 7. Cancel non-existent schedule
-	_, err = handler.HandleCancelSchedule([]byte(`{"schedule_id":"non-existent"}`))
+	_, err = handler.CancelSchedule(ctx, CancelScheduleArgs{ScheduleID: "non-existent"})
 	if err == nil {
 		t.Error("Expected error canceling non-existent schedule")
 	}
@@ -317,19 +295,17 @@ func TestToolHandler_DefaultTimezoneFallback(t *testing.T) {
 
 	handler := NewToolHandler(cfg, db)
 
-	// Omitted timezone in recurring schedule should default to America/Los_Angeles
-	recArgJSON := []byte(`{
-		"channel_id": "chan-default-tz",
-		"cron_expression": "0 9 * * *",
-		"prompt": "Morning routine without timezone"
-	}`)
-
-	recRes, err := handler.HandleScheduleRecurring(recArgJSON)
+	// Omitted timezone in recurring schedule should default to America/Los_Angeles (and effort != "low" defaults to "high")
+	recRes, err := handler.ScheduleRecurring(context.Background(), ScheduleRecurringArgs{
+		ChannelID:      "chan-default-tz",
+		CronExpression: "0 9 * * *",
+		Prompt:         "Morning routine without timezone",
+		Effort:         "high",
+	})
 	if err != nil {
-		t.Fatalf("HandleScheduleRecurring failed: %v", err)
+		t.Fatalf("ScheduleRecurring failed: %v", err)
 	}
-	recMap := recRes.(map[string]interface{})
-	schedID := recMap["schedule_id"].(string)
+	schedID := recRes.ScheduleID
 
 	crons, err := ListCronSchedules(db, "chan-default-tz")
 	if err != nil || len(crons) != 1 {
@@ -341,6 +317,9 @@ func TestToolHandler_DefaultTimezoneFallback(t *testing.T) {
 	if crons[0].Timezone != "America/Los_Angeles" {
 		t.Errorf("Expected default Timezone 'America/Los_Angeles', got %q", crons[0].Timezone)
 	}
+	if crons[0].Effort != "high" {
+		t.Errorf("Expected effort 'high', got %q", crons[0].Effort)
+	}
 }
 
 func TestToolHandlerValidationErrors(t *testing.T) {
@@ -348,27 +327,28 @@ func TestToolHandlerValidationErrors(t *testing.T) {
 	db, _ := InitDB(cfg)
 	defer func() { _ = db.Close() }()
 	handler := NewToolHandler(cfg, db)
+	ctx := context.Background()
 
 	// Missing channel_id
-	_, err := handler.HandleScheduleRecurring([]byte(`{"cron_expression":"0 20 * * 5","prompt":"p"}`))
+	_, err := handler.ScheduleRecurring(ctx, ScheduleRecurringArgs{CronExpression: "0 20 * * 5", Prompt: "p"})
 	if err == nil {
 		t.Error("Expected error for missing channel_id")
 	}
 
 	// Missing cron_expression
-	_, err = handler.HandleScheduleRecurring([]byte(`{"channel_id":"123","prompt":"p"}`))
+	_, err = handler.ScheduleRecurring(ctx, ScheduleRecurringArgs{ChannelID: "123", Prompt: "p"})
 	if err == nil {
 		t.Error("Expected error for missing cron_expression")
 	}
 
 	// Missing prompt in once
-	_, err = handler.HandleScheduleOnce([]byte(`{"target_id":"123","run_at":"30m"}`))
+	_, err = handler.ScheduleOnce(ctx, ScheduleOnceArgs{TargetID: "123", RunAt: "30m"})
 	if err == nil {
 		t.Error("Expected error for missing prompt")
 	}
 
 	// Missing schedule_id in cancel
-	_, err = handler.HandleCancelSchedule([]byte(`{}`))
+	_, err = handler.CancelSchedule(ctx, CancelScheduleArgs{})
 	if err == nil {
 		t.Error("Expected error for missing schedule_id")
 	}
@@ -430,26 +410,23 @@ func TestHandleScheduleOnce_WithTimezone(t *testing.T) {
 	defer func() { _ = db.Close() }()
 	handler := NewToolHandler(cfg, db)
 
-	payload := []byte(`{
-		"target_id": "thread-tz-test",
-		"run_at": "2026-08-28 20:00:00",
-		"prompt": "Timezone reminder",
-		"timezone": "America/Los_Angeles"
-	}`)
-
-	res, err := handler.HandleScheduleOnce(payload)
+	res, err := handler.ScheduleOnce(context.Background(), ScheduleOnceArgs{
+		TargetID: "thread-tz-test",
+		RunAt:    "2026-08-28 20:00:00",
+		Prompt:   "Timezone reminder",
+		Timezone: "America/Los_Angeles",
+	})
 	if err != nil {
-		t.Fatalf("HandleScheduleOnce with timezone failed: %v", err)
+		t.Fatalf("ScheduleOnce with timezone failed: %v", err)
 	}
-	resMap := res.(map[string]interface{})
-	if resMap["status"] != "success" {
-		t.Errorf("Expected success, got %+v", resMap)
+	if res.Status != "success" {
+		t.Errorf("Expected success, got %+v", res)
 	}
 
 	// 20:00 PDT = 03:00 UTC (Aug 29)
 	expectedUTC := "2026-08-29T03:00:00Z"
-	if resMap["run_at"] != expectedUTC {
-		t.Errorf("Expected run_at %s, got %v", expectedUTC, resMap["run_at"])
+	if res.RunAt != expectedUTC {
+		t.Errorf("Expected run_at %s, got %v", expectedUTC, res.RunAt)
 	}
 }
 
@@ -555,48 +532,41 @@ func TestToolHandlers_ArgumentValidationErrors(t *testing.T) {
 	defer db.Close()
 	h := NewToolHandler(cfg, db)
 
-	// 1. HandleScheduleRecurring errors
-	if _, err := h.HandleScheduleRecurring([]byte("{bad json")); err == nil {
-		t.Error("expected error for malformed json")
-	}
-	if _, err := h.HandleScheduleRecurring([]byte(`{"cron_expression":"* * * * *","prompt":"p"}`)); err == nil {
+	ctx := context.Background()
+
+	// 1. ScheduleRecurring errors
+	if _, err := h.ScheduleRecurring(ctx, ScheduleRecurringArgs{CronExpression: "* * * * *", Prompt: "p"}); err == nil {
 		t.Error("expected error for missing channel_id")
 	}
-	if _, err := h.HandleScheduleRecurring([]byte(`{"channel_id":"c","prompt":"p"}`)); err == nil {
+	if _, err := h.ScheduleRecurring(ctx, ScheduleRecurringArgs{ChannelID: "c", Prompt: "p"}); err == nil {
 		t.Error("expected error for missing cron_expression")
 	}
-	if _, err := h.HandleScheduleRecurring([]byte(`{"channel_id":"c","cron_expression":"* * * * *"}`)); err == nil {
+	if _, err := h.ScheduleRecurring(ctx, ScheduleRecurringArgs{ChannelID: "c", CronExpression: "* * * * *"}); err == nil {
 		t.Error("expected error for missing prompt")
 	}
-	if _, err := h.HandleScheduleRecurring([]byte(`{"channel_id":"c","cron_expression":"invalid cron","prompt":"p"}`)); err == nil {
+	if _, err := h.ScheduleRecurring(ctx, ScheduleRecurringArgs{ChannelID: "c", CronExpression: "invalid cron", Prompt: "p"}); err == nil {
 		t.Error("expected error for invalid cron expr")
 	}
 
-	// 2. HandleScheduleOnce errors
-	if _, err := h.HandleScheduleOnce([]byte("{bad json")); err == nil {
-		t.Error("expected error for malformed json")
-	}
-	if _, err := h.HandleScheduleOnce([]byte(`{"run_at":"15m","prompt":"p"}`)); err == nil {
+	// 2. ScheduleOnce errors
+	if _, err := h.ScheduleOnce(ctx, ScheduleOnceArgs{RunAt: "15m", Prompt: "p"}); err == nil {
 		t.Error("expected error for missing target_id")
 	}
-	if _, err := h.HandleScheduleOnce([]byte(`{"target_id":"t","prompt":"p"}`)); err == nil {
+	if _, err := h.ScheduleOnce(ctx, ScheduleOnceArgs{TargetID: "t", Prompt: "p"}); err == nil {
 		t.Error("expected error for missing run_at")
 	}
-	if _, err := h.HandleScheduleOnce([]byte(`{"target_id":"t","run_at":"15m"}`)); err == nil {
+	if _, err := h.ScheduleOnce(ctx, ScheduleOnceArgs{TargetID: "t", RunAt: "15m"}); err == nil {
 		t.Error("expected error for missing prompt")
 	}
-	if _, err := h.HandleScheduleOnce([]byte(`{"target_id":"t","run_at":"unparseable-date","prompt":"p"}`)); err == nil {
+	if _, err := h.ScheduleOnce(ctx, ScheduleOnceArgs{TargetID: "t", RunAt: "unparseable-date", Prompt: "p"}); err == nil {
 		t.Error("expected error for unparseable run_at")
 	}
 
-	// 3. HandleCancelSchedule errors
-	if _, err := h.HandleCancelSchedule([]byte("{bad json")); err == nil {
-		t.Error("expected error for malformed json")
-	}
-	if _, err := h.HandleCancelSchedule([]byte(`{"schedule_id":""}`)); err == nil {
+	// 3. CancelSchedule errors
+	if _, err := h.CancelSchedule(ctx, CancelScheduleArgs{ScheduleID: ""}); err == nil {
 		t.Error("expected error for empty schedule_id")
 	}
-	if _, err := h.HandleCancelSchedule([]byte(`{"schedule_id":"non-existent"}`)); err == nil {
+	if _, err := h.CancelSchedule(ctx, CancelScheduleArgs{ScheduleID: "non-existent"}); err == nil {
 		t.Error("expected error for non-existent schedule")
 	}
 
@@ -605,17 +575,17 @@ func TestToolHandlers_ArgumentValidationErrors(t *testing.T) {
 	_ = closedDB.Close()
 	hClosed := NewToolHandler(cfg, closedDB)
 
-	if _, err := hClosed.HandleScheduleRecurring([]byte(`{"channel_id":"c","cron_expression":"* * * * *","prompt":"p"}`)); err == nil {
-		t.Error("expected error with closed db in HandleScheduleRecurring")
+	if _, err := hClosed.ScheduleRecurring(ctx, ScheduleRecurringArgs{ChannelID: "c", CronExpression: "* * * * *", Prompt: "p"}); err == nil {
+		t.Error("expected error with closed db in ScheduleRecurring")
 	}
-	if _, err := hClosed.HandleScheduleOnce([]byte(`{"target_id":"t","run_at":"15m","prompt":"p"}`)); err == nil {
-		t.Error("expected error with closed db in HandleScheduleOnce")
+	if _, err := hClosed.ScheduleOnce(ctx, ScheduleOnceArgs{TargetID: "t", RunAt: "15m", Prompt: "p"}); err == nil {
+		t.Error("expected error with closed db in ScheduleOnce")
 	}
-	if _, err := hClosed.HandleListSchedules([]byte(`{"target_id":"t"}`)); err == nil {
-		t.Error("expected error with closed db in HandleListSchedules")
+	if _, err := hClosed.ListSchedules(ctx, ListSchedulesArgs{TargetID: "t"}); err == nil {
+		t.Error("expected error with closed db in ListSchedules")
 	}
-	if _, err := hClosed.HandleCancelSchedule([]byte(`{"schedule_id":"s1"}`)); err == nil {
-		t.Error("expected error with closed db in HandleCancelSchedule")
+	if _, err := hClosed.CancelSchedule(ctx, CancelScheduleArgs{ScheduleID: "s1"}); err == nil {
+		t.Error("expected error with closed db in CancelSchedule")
 	}
 
 	// 5. RunApp startup failure with invalid DSN and invalid port
