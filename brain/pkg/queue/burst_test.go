@@ -403,7 +403,7 @@ func TestAssembleTurnPrompt(t *testing.T) {
 				// Layer 3: SEMANTIC_MEMORY
 				idxMem := strings.Index(prompt, "192.168.1.14")
 				// Layer 4: PREVIOUS_SESSION
-				idxPrev := strings.Index(prompt, "sess-old-456")
+				idxPrev := strings.Index(prompt, "<PREVIOUS_SESSION>")
 				// Layer 5: CHANNEL_HISTORY
 				idxHist := strings.Index(prompt, "previous message in channel")
 				// Layer 6: THREAD_SUMMARY

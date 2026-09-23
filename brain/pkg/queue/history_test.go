@@ -627,19 +627,24 @@ func TestFormatPreviousSession(t *testing.T) {
 	if !strings.Contains(formatted, "<PREVIOUS_SESSION>") || !strings.Contains(formatted, "</PREVIOUS_SESSION>") {
 		t.Fatalf("expected formatted block with <PREVIOUS_SESSION> tags, got:\n%s", formatted)
 	}
-	if !strings.Contains(formatted, "Previous session ID: "+uuid) {
-		t.Errorf("expected Previous session ID line, got:\n%s", formatted)
+	if strings.Contains(formatted, uuid) {
+		t.Errorf("expected session UUID to be omitted to prevent transcript re-hydration, got:\n%s", formatted)
 	}
-	expectedPath := "/root/.gemini/antigravity-cli/brain/" + uuid + "/.system_generated/logs/transcript.jsonl"
-	if !strings.Contains(formatted, expectedPath) {
-		t.Errorf("expected transcript path %q, got:\n%s", expectedPath, formatted)
+	if strings.Contains(formatted, "transcript.jsonl") {
+		t.Errorf("expected transcript path to be omitted, got:\n%s", formatted)
+	}
+	if !strings.Contains(formatted, "thread summary") {
+		t.Errorf("expected reference to thread summary, got:\n%s", formatted)
 	}
 
 	// 3. Valid synthetic ID
 	mockID := "sess-existing-1"
 	formattedMock := FormatPreviousSession(mockID)
-	if !strings.Contains(formattedMock, "Previous session ID: "+mockID) {
-		t.Errorf("expected Previous session ID for mock, got:\n%s", formattedMock)
+	if !strings.Contains(formattedMock, "<PREVIOUS_SESSION>") {
+		t.Errorf("expected <PREVIOUS_SESSION> for mock ID, got:\n%s", formattedMock)
+	}
+	if strings.Contains(formattedMock, mockID) {
+		t.Errorf("expected mock ID to be omitted from prompt block, got:\n%s", formattedMock)
 	}
 
 	// 4. Hostile inputs containing tag injection or invalid characters

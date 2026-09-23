@@ -1262,8 +1262,8 @@ func TestCleanupEphemeralSession(t *testing.T) {
 }
 
 func TestDefaultMaxSessionTurnsConstant(t *testing.T) {
-	if DefaultMaxSessionTurns != 10 {
-		t.Errorf("expected DefaultMaxSessionTurns to be 10, got %d", DefaultMaxSessionTurns)
+	if DefaultMaxSessionTurns != 8 {
+		t.Errorf("expected DefaultMaxSessionTurns to be 8, got %d", DefaultMaxSessionTurns)
 	}
 }
 
@@ -1622,14 +1622,14 @@ func TestSession_RemediatedBranchesAndEdges(t *testing.T) {
 }
 
 func TestSessionRotationConstants(t *testing.T) {
-	if DefaultMaxSessionTurns != 10 {
-		t.Errorf("expected DefaultMaxSessionTurns=10, got %d", DefaultMaxSessionTurns)
+	if DefaultMaxSessionTurns != 8 {
+		t.Errorf("expected DefaultMaxSessionTurns=8, got %d", DefaultMaxSessionTurns)
 	}
-	if DefaultMaxSessionSteps != 350 {
-		t.Errorf("expected DefaultMaxSessionSteps=350, got %d", DefaultMaxSessionSteps)
+	if DefaultMaxSessionSteps != 180 {
+		t.Errorf("expected DefaultMaxSessionSteps=180, got %d", DefaultMaxSessionSteps)
 	}
-	if DefaultMaxTranscriptBytes != 1024*1024 {
-		t.Errorf("expected DefaultMaxTranscriptBytes=1048576, got %d", DefaultMaxTranscriptBytes)
+	if DefaultMaxTranscriptBytes != 500*1024 {
+		t.Errorf("expected DefaultMaxTranscriptBytes=512000, got %d", DefaultMaxTranscriptBytes)
 	}
 }
 

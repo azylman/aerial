@@ -17,13 +17,13 @@ import (
 
 
 // DefaultMaxSessionTurns defines the engine-wide maximum turn limit before an agy session is rotated.
-const DefaultMaxSessionTurns = 10
+const DefaultMaxSessionTurns = 8
 
 // DefaultMaxSessionSteps defines the engine-wide maximum cumulative internal tool steps before session rotation.
-const DefaultMaxSessionSteps = 350
+const DefaultMaxSessionSteps = 180
 
-// DefaultMaxTranscriptBytes defines the engine-wide maximum transcript file size in bytes (1 MB) before session rotation.
-const DefaultMaxTranscriptBytes = 1024 * 1024
+// DefaultMaxTranscriptBytes defines the engine-wide maximum transcript file size in bytes (500 KB) before session rotation.
+const DefaultMaxTranscriptBytes = 500 * 1024
 
 // SourceAmbient represents ambient chat messages appended to session transcripts.
 const SourceAmbient = "AMBIENT"

@@ -696,4 +696,93 @@ done
 	}
 }
 
+func TestWorkerPool_QuotaPause_RotatesBloatedSession(t *testing.T) {
+	tmpHome := t.TempDir()
+	tempData := t.TempDir()
+
+	store := setupTestStore(t)
+
+	validUUID := "b3333333-4444-5555-6666-777777777777"
+	mockBin := filepath.Join(tmpHome, "mock_agy.sh")
+	script := fmt.Sprintf(`#!/bin/sh
+echo '{"event":"init","conversation_id":%q}'
+while IFS= read -r line; do
+  echo '{"event":"result","result":{"status":"SUCCESS","response":"","usage":{"total_tokens":0}}}'
+done
+`, validUUID)
+	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
+		t.Fatalf("failed to write mock script: %v", err)
+	}
+
+	// Prepare transcript on disk with step_index >= DefaultMaxSessionSteps and quota exhaustion error
+	sessDir := filepath.Join(tempData, "brain", validUUID, ".system_generated", "logs")
+	_ = os.MkdirAll(sessDir, 0755)
+	tNow := time.Now().UTC()
+	transcriptContent := fmt.Sprintf(`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"hello"}
+{"step_index":%d,"source":"MODEL","type":"ERROR_MESSAGE","status":"ERROR","content":"RESOURCE_EXHAUSTED: Google Gemini API quota reached. resets in 2h30m.","created_at":%q}
+`, DefaultMaxSessionSteps, tNow.Format(time.RFC3339))
+	_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(transcriptContent), 0644)
+
+	cfg := config.NewTestConfig(func(d *config.ConfigData) {
+		d.AgyBin = mockBin
+		d.DataDir = tempData
+	})
+
+	threadID := "thread-quota-bloat-rotation"
+	_ = store.SaveSessionID(context.Background(), threadID, validUUID)
+
+	doneCh := make(chan struct{})
+	pool := New(cfg, WorkerPoolConfig{
+		SessionManager: session.New(tmpHome, tempData),
+		Store:          store,
+		TimeoutMinutes: 1,
+		DeliveryFunc: func(sess *discordgo.Session, channelID, content string) error {
+			return nil
+		},
+		OnMessageCompleted: func(msg db.Message, status string) {
+			if status == db.StatusFailed {
+				select {
+				case <-doneCh:
+				default:
+					close(doneCh)
+				}
+			}
+		},
+	})
+	defer pool.Stop()
+
+	msg := db.Message{
+		ID:        "msg-quota-bloated",
+		ThreadID:  threadID,
+		Content:   "run big workflow",
+		Status:    db.StatusPending,
+		CreatedAt: time.Now(),
+	}
+	_ = store.InsertMessage(context.Background(), msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for quota failure completion")
+	}
+
+	// Session should be rotated to cold state "" because steps >= DefaultMaxSessionSteps
+	currSess, err := store.GetSessionID(context.Background(), threadID)
+	if err != nil {
+		t.Fatalf("failed to query session ID: %v", err)
+	}
+	if currSess != "" {
+		t.Errorf("expected session ID to be rotated to empty \"\", got %q", currSess)
+	}
+
+	prevSess, err := store.GetPreviousSessionID(context.Background(), threadID)
+	if err != nil {
+		t.Fatalf("failed to query previous session ID: %v", err)
+	}
+	if prevSess != validUUID {
+		t.Errorf("expected previous session ID to be %q, got %q", validUUID, prevSess)
+	}
+}
+
 
