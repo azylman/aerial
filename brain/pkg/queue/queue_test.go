@@ -1286,7 +1286,7 @@ func TestWorkerPool_SemanticMemoryGracefulFallbackOnError(t *testing.T) {
 	}
 }
 
-func TestQueueSilentSentinelSuppression(t *testing.T) {
+func TestQueueEmptyResponseFailure(t *testing.T) {
 	t.Parallel()
 	store := setupTestStore(t)
 
@@ -1295,7 +1295,7 @@ func TestQueueSilentSentinelSuppression(t *testing.T) {
 	doneCh := make(chan struct{})
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store,
+		Store:          store,
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    1,
@@ -1315,17 +1315,23 @@ func TestQueueSilentSentinelSuppression(t *testing.T) {
 			return func() {}
 		},
 		OnMessageCompleted: func(msg db.Message, finalStatus string) {
-			close(doneCh)
+			if finalStatus == db.StatusFailed {
+				select {
+				case <-doneCh:
+				default:
+					close(doneCh)
+				}
+			}
 		},
 	})
 	pool.Start()
 	defer pool.Stop()
 
 	msg := db.Message{
-		ID:        "msg-sentinel-1",
-		ThreadID:  "thread-sentinel",
+		ID:        "msg-empty-resp-1",
+		ThreadID:  "thread-empty-resp",
 		AuthorID:  "user-1",
-		Content:   "Silent prompt",
+		Content:   "Empty response prompt",
 		Status:    db.StatusPending,
 		CreatedAt: time.Now().UTC(),
 	}
@@ -1335,25 +1341,16 @@ func TestQueueSilentSentinelSuppression(t *testing.T) {
 	select {
 	case <-doneCh:
 	case <-time.After(3 * time.Second):
-		t.Fatal("Timeout waiting for sentinel message processing")
+		t.Fatal("Timeout waiting for message processing")
 	}
 
-	mu.Lock()
-	if deliveryCalls != 0 {
-		t.Errorf("Expected 0 delivery calls for empty response, got %d", deliveryCalls)
-	}
-	mu.Unlock()
-
-	// Verify message in DB is COMPLETED
-	dbMsg, err := getMessage(store, "msg-sentinel-1")
+	// Verify message in DB is marked FAILED, never silently COMPLETED
+	dbMsg, err := getMessage(store, "msg-empty-resp-1")
 	if err != nil || dbMsg == nil {
 		t.Fatalf("Failed to query message: %v", err)
 	}
-	if dbMsg.Status != db.StatusCompleted {
-		t.Errorf("Expected status COMPLETED, got %s", dbMsg.Status)
-	}
-	if dbMsg.ResponseText != "" {
-		t.Errorf("Expected empty response text, got %q", dbMsg.ResponseText)
+	if dbMsg.Status != db.StatusFailed {
+		t.Errorf("Expected status FAILED on empty unrecovered response, got %s", dbMsg.Status)
 	}
 }
 

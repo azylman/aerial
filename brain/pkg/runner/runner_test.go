@@ -171,13 +171,14 @@ func TestClassifyError(t *testing.T) {
 			wantCorrupt:   false,
 		},
 		{
-			name:          "Empty Response With Status SUCCESS On Exit 0 (Silent Sentinel)",
-			exitCode:      0,
-			stdout:        `{"conversation_id":"abc","status":"SUCCESS","response":""}`,
-			stderr:        "",
-			wantFailure:   false,
-			wantTransient: false,
-			wantCorrupt:   false,
+			name:                 "Empty Response With Status SUCCESS On Exit 0 (Empty Response Failure)",
+			exitCode:             0,
+			stdout:               `{"conversation_id":"abc","status":"SUCCESS","response":""}`,
+			stderr:               "",
+			wantFailure:          true,
+			wantTransient:        false,
+			wantCorrupt:          false,
+			errDetailMustContain: "empty response",
 		},
 		{
 			name:          "Clean Success: Conversational response discussing maximum context length and 503 errors",
@@ -519,6 +520,17 @@ func TestActivityWriter_ThreadSafetyAndSessionDiscovery(t *testing.T) {
 	if nZero != 0 || errZero != nil {
 		t.Errorf("expected 0, nil from empty write, got %d, %v", nZero, errZero)
 	}
+
+	// Test ResetBuffer clears buffer but preserves session ID
+	w.ResetBuffer()
+	if w.String() != "" {
+		t.Errorf("expected empty string after ResetBuffer, got %q", w.String())
+	}
+	if w.SessionID() != "12345678-abcd-ef01-2345-6789abcdef01" {
+		t.Errorf("expected session ID preserved after ResetBuffer, got %q", w.SessionID())
+	}
+	var nilW *ActivityWriter
+	nilW.ResetBuffer() // Nil safety check
 
 	// Test initialized session ID retains value
 	wPre := NewActivityWriter("11111111-2222-3333-4444-555555555555")

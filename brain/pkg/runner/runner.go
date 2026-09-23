@@ -143,6 +143,16 @@ func (w *ActivityWriter) String() string {
 	return w.buf.String()
 }
 
+// ResetBuffer thread-safely clears the internal buffer while retaining session discovery and timestamps.
+func (w *ActivityWriter) ResetBuffer() {
+	if w == nil {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.buf.Reset()
+}
+
 // LastActivity returns the timestamp of the most recent write.
 func (w *ActivityWriter) LastActivity() time.Time {
 	return time.Unix(0, w.lastActivity.Load())
@@ -804,7 +814,10 @@ func ClassifyError(exitCode int, stdout, stderr string) (isFailure bool, isTrans
 		// CRITICAL ADVERSARIAL GUARD: If resp.Status == "SUCCESS" (or empty) and resp.Error == ""
 		// with non-empty resp.Response, return clean success. Under no circumstances inspect
 		// resp.Response for corruption or non-transient keywords.
-		return false, false, false, ""
+		if strings.TrimSpace(resp.Response) != "" {
+			return false, false, false, ""
+		}
+		return true, false, false, "process produced empty response"
 	}
 
 	// Non-zero exit code
@@ -942,6 +955,7 @@ func ExtractQuotaResetDuration(errDetail, stderr string) (time.Duration, bool) {
 		raw = strings.ReplaceAll(raw, "secs", "s")
 		raw = strings.ReplaceAll(raw, "sec", "s")
 		raw = reWhitespace.ReplaceAllString(raw, "")
+		raw = strings.Trim(raw, ".\"')[] ")
 
 		if d, err := time.ParseDuration(raw); err == nil && d > 0 {
 			// Safety clamping: min 10s, max 24h

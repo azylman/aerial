@@ -1452,7 +1452,7 @@ func (te *turnExecution) executeWithRetries() {
 						err = marshalErr
 					} else {
 						stdout = string(payload)
-						stderr = ""
+						stderr = turnRes.Stderr
 						exitCode = turnRes.ExitCode
 						err = nil
 					}
@@ -1520,6 +1520,16 @@ func (te *turnExecution) executeWithRetries() {
 					targetSess = extSess
 				}
 			}
+			if targetSess == "" && te.pool != nil && te.pool.daemonPool != nil {
+				if d, ok := te.pool.daemonPool.Get(te.threadID); ok && d != nil && d.SessionID() != "" {
+					targetSess = d.SessionID()
+				}
+			}
+			if targetSess == "" && te.pool != nil && te.pool.sessionMgr != nil {
+				if latest := te.pool.sessionMgr.FindLatestSessionDir(te.execStart); latest != "" && te.pool.sessionMgr.SessionExistsOnDisk(latest) {
+					targetSess = latest
+				}
+			}
 
 			// Transcript Recovery on Exit Code 0:
 			// If agy completed with exit code 0 but was flagged as a failure (e.g. empty stdout from buffering,
@@ -1539,6 +1549,21 @@ func (te *turnExecution) executeWithRetries() {
 				}
 			}
 
+			// If response was not recovered from transcript, inspect transcript for turn errors (e.g. Gemini 429 quota exhaustion)
+			if isFailure && targetSess != "" && te.pool.sessionMgr != nil && te.pool.sessionMgr.SessionExistsOnDisk(targetSess) {
+				poolCtx := context.Background()
+				if te.pool != nil && te.pool.ctx != nil {
+					poolCtx = te.pool.ctx
+				}
+				if transcriptErr, tErr := te.pool.sessionMgr.ExtractLastTurnError(poolCtx, targetSess, te.execStart); tErr == nil && transcriptErr != "" {
+					log.Printf("[Queue] Extracted turn error from session %s transcript: %s", targetSess, transcriptErr)
+					errDetail = transcriptErr
+					stderr = transcriptErr
+					lastErrDetail = transcriptErr
+					lastStderr = transcriptErr
+				}
+			}
+
 			// Cold-Start Dynamic Session Latching:
 			// If this was a cold start and remains an unrecovered failure, only latch the active session
 			// if the failure was NOT session corruption (so retries won't inherit corrupted state).
@@ -1555,6 +1580,9 @@ func (te *turnExecution) executeWithRetries() {
 				te.isQuotaPaused = true
 				te.stopTyping()
 				log.Printf("[WorkerPool] Quota pause detected for thread %s on attempt %d/%d: %s", te.threadID, attempt, maxAttempts, errDetail)
+				if te.pool != nil && te.pool.daemonPool != nil {
+					te.pool.daemonPool.Evict(te.threadID)
+				}
 
 				// Cold-start dynamic session latching if available
 				if te.currentSessionID == "" && !isSessionCorruption {
@@ -1906,20 +1934,23 @@ func (te *turnExecution) executeWithRetries() {
 					attachments := delivery.MergeAttachments(finalAttachments, fullAttachments)
 					attachments = delivery.AutoAttachNewMedia(baseDir, te.execStart, attachments)
 
-					isSilent := strings.TrimSpace(cleanText) == "" && len(attachments) == 0
-					if isSilent {
-						log.Printf("[Queue] Output is empty. Skipping Discord delivery.")
-					} else {
-						if !te.skipDiscord {
-							var deliveryErr error
-							if te.pool.cfg.DeliveryWithAttachmentsFunc != nil {
-								deliveryErr = te.pool.cfg.DeliveryWithAttachmentsFunc(te.pool.getDiscordSession(), te.threadID, cleanText, attachments)
-							} else if te.pool.cfg.DeliveryFunc != nil {
-								deliveryErr = te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), te.threadID, cleanText)
-							}
-							if deliveryErr != nil {
-								log.Printf("[WorkerPool] Failed to deliver response for thread %s: %v", te.threadID, deliveryErr)
-							}
+					if strings.TrimSpace(cleanText) == "" && len(attachments) == 0 {
+						log.Printf("[Queue] Agent produced empty response for thread %s on attempt %d/%d; treating as failure", te.threadID, attempt, maxAttempts)
+						isFailure = true
+						errDetail = "agent produced empty response"
+						lastErrDetail = errDetail
+						continue
+					}
+
+					if !te.skipDiscord {
+						var deliveryErr error
+						if te.pool.cfg.DeliveryWithAttachmentsFunc != nil {
+							deliveryErr = te.pool.cfg.DeliveryWithAttachmentsFunc(te.pool.getDiscordSession(), te.threadID, cleanText, attachments)
+						} else if te.pool.cfg.DeliveryFunc != nil {
+							deliveryErr = te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), te.threadID, cleanText)
+						}
+						if deliveryErr != nil {
+							log.Printf("[WorkerPool] Failed to deliver response for thread %s: %v", te.threadID, deliveryErr)
 						}
 					}
 

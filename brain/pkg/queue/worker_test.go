@@ -588,3 +588,112 @@ done
 	}
 }
 
+func TestWorkerPool_QuotaExhaustion_FromTranscript(t *testing.T) {
+	tmpHome := t.TempDir()
+	tempData := t.TempDir()
+
+	store := setupTestStore(t)
+
+	validUUID := "f2222222-3333-4444-5555-666666666666"
+	mockBin := filepath.Join(tmpHome, "mock_agy.sh")
+	// Runner returns empty response with exit 0 (emulating agy daemon on 429 quota exhaustion)
+	script := fmt.Sprintf(`#!/bin/sh
+echo '{"event":"init","conversation_id":%q}'
+while IFS= read -r line; do
+  echo '{"event":"result","result":{"status":"SUCCESS","response":"","usage":{"total_tokens":0}}}'
+done
+`, validUUID)
+	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
+		t.Fatalf("failed to write mock script: %v", err)
+	}
+
+	// Prepare transcript on disk with Gemini 429 quota exhaustion ERROR_MESSAGE
+	sessDir := filepath.Join(tempData, "brain", validUUID, ".system_generated", "logs")
+	_ = os.MkdirAll(sessDir, 0755)
+	tNow := time.Now().UTC()
+	transcriptLine := fmt.Sprintf(`{"step_index":1,"source":"MODEL","type":"ERROR_MESSAGE","status":"ERROR","content":"RESOURCE_EXHAUSTED: Google Gemini API quota reached. resets in 4h51m59s.","created_at":%q}`+"\n", tNow.Format(time.RFC3339))
+	_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(transcriptLine), 0644)
+
+	cfg := config.NewTestConfig(func(d *config.ConfigData) {
+		d.AgyBin = mockBin
+		d.DataDir = tempData
+	})
+
+	var deliveredText string
+	doneCh := make(chan struct{})
+	pool := New(cfg, WorkerPoolConfig{
+		SessionManager: session.New(tmpHome, tempData),
+		Store:          store,
+		TimeoutMinutes: 1,
+		DeliveryFunc: func(sess *discordgo.Session, channelID, content string) error {
+			deliveredText = content
+			return nil
+		},
+		OnMessageCompleted: func(msg db.Message, status string) {
+			if status == db.StatusFailed {
+				select {
+				case <-doneCh:
+				default:
+					close(doneCh)
+				}
+			}
+		},
+	})
+	defer pool.Stop()
+
+	threadID := "thread-quota-exhaustion-test"
+	msg := db.Message{
+		ID:        "msg-quota-429",
+		ThreadID:  threadID,
+		Content:   "are you alive",
+		Status:    db.StatusPending,
+		CreatedAt: time.Now(),
+	}
+	_ = store.InsertMessage(context.Background(), msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for quota failure completion")
+	}
+
+	// 1. Verify message in DB is marked FAILED with [QUOTA_PAUSED]
+	dbMsg, err := store.GetMessage(context.Background(), "msg-quota-429")
+	if err != nil || dbMsg == nil {
+		t.Fatalf("failed to query message: %v", err)
+	}
+	if dbMsg.Status != db.StatusFailed {
+		t.Errorf("expected message status %s, got %s", db.StatusFailed, dbMsg.Status)
+	}
+	if !strings.Contains(dbMsg.ErrorMessage, "[QUOTA_PAUSED") {
+		t.Errorf("expected error to contain [QUOTA_PAUSED], got %q", dbMsg.ErrorMessage)
+	}
+
+	// 2. Verify DeliveryFunc received quota pause notice
+	if !strings.Contains(deliveredText, "Gemini API quota") && !strings.Contains(deliveredText, "Paused") && !strings.Contains(deliveredText, "resets in") {
+		t.Errorf("expected delivery text to announce quota pause, got: %q", deliveredText)
+	}
+
+	// 3. Verify one-shot retry schedule was created
+	schedules, err := store.GetAllOneShotSchedules(context.Background(), threadID)
+	if err != nil {
+		t.Fatalf("failed to list one-shot schedules: %v", err)
+	}
+	if len(schedules) == 0 {
+		t.Errorf("expected at least 1 one-shot retry schedule, got 0")
+	} else {
+		found := false
+		for _, s := range schedules {
+			if s.ThreadID == threadID && strings.Contains(s.Prompt, "[QUOTA_RETRY]") {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected one-shot retry schedule for thread %s with [QUOTA_RETRY]", threadID)
+		}
+	}
+}
+
+

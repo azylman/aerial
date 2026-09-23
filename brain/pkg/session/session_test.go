@@ -1953,3 +1953,147 @@ func TestFormatStepError_Coverage(t *testing.T) {
 		t.Errorf("expected '12345', got %q", s)
 	}
 }
+
+func TestExtractLastTurnError(t *testing.T) {
+	mgr, tmpDir := setupTestManager(t)
+
+	convID := "test-turn-error-123"
+	logsDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", convID, ".system_generated", "logs")
+	if err := os.MkdirAll(logsDir, 0755); err != nil {
+		t.Fatalf("Failed to create temp logs dir: %v", err)
+	}
+
+	t0 := time.Now().Add(-10 * time.Minute)
+	t1 := time.Now().Add(-5 * time.Minute)
+	t2 := time.Now().Add(-1 * time.Minute)
+
+	// Turn 1 had an old error. Turn 2 had a quota exhaustion error.
+	transcript := fmt.Sprintf(`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"Turn 1 request","created_at":%q}
+{"step_index":1,"source":"MODEL","type":"ERROR_MESSAGE","status":"ERROR","content":"Old error from turn 1","created_at":%q}
+{"step_index":2,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"Turn 2 request","created_at":%q}
+{"step_index":3,"source":"MODEL","type":"ERROR_MESSAGE","status":"ERROR","content":"RESOURCE_EXHAUSTED: Google Gemini API quota reached. resets in 4h51m59s.","created_at":%q}
+`, t0.Format(time.RFC3339), t0.Add(time.Second).Format(time.RFC3339), t1.Format(time.RFC3339), t2.Format(time.RFC3339))
+
+	tPath := filepath.Join(logsDir, "transcript.jsonl")
+	if err := os.WriteFile(tPath, []byte(transcript), 0644); err != nil {
+		t.Fatalf("Failed to write transcript.jsonl: %v", err)
+	}
+
+	// 1. Inspecting with since = t1 (turn 2 start) should find the quota error
+	errStr, err := mgr.ExtractLastTurnError(context.Background(), convID, t1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(errStr, "RESOURCE_EXHAUSTED") {
+		t.Errorf("expected quota error, got %q", errStr)
+	}
+
+	// 2. Inspecting with since = now (after turn 2) should NOT find the error
+	errAfter, err := mgr.ExtractLastTurnError(context.Background(), convID, time.Now())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if errAfter != "" {
+		t.Errorf("expected no error after current turn, got %q", errAfter)
+	}
+
+	// 3. Inspecting with unquoted error field
+	convID2 := "test-turn-error-unquoted"
+	logsDir2 := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", convID2, ".system_generated", "logs")
+	_ = os.MkdirAll(logsDir2, 0755)
+	transcript2 := fmt.Sprintf(`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"Req","created_at":%q}
+{"step_index":1,"source":"MODEL","type":"ERROR_MESSAGE","status":"ERROR","error":"quoted JSON error message","created_at":%q}
+`, t1.Format(time.RFC3339), t2.Format(time.RFC3339))
+	_ = os.WriteFile(filepath.Join(logsDir2, "transcript.jsonl"), []byte(transcript2), 0644)
+
+	errStr2, err := mgr.ExtractLastTurnError(context.Background(), convID2, t1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if errStr2 != "quoted JSON error message" {
+		t.Errorf("expected unquoted error message, got %q", errStr2)
+	}
+
+	// 4. Edge cases: nil manager, empty ID, path traversal, cancelled context
+	var nilMgr *Manager
+	if e, _ := nilMgr.ExtractLastTurnError(context.Background(), "any", time.Time{}); e != "" {
+		t.Errorf("expected empty from nil manager, got %q", e)
+	}
+	if e, _ := mgr.ExtractLastTurnError(context.Background(), "", time.Time{}); e != "" {
+		t.Errorf("expected empty from empty convID, got %q", e)
+	}
+	if e, _ := mgr.ExtractLastTurnError(context.Background(), "../escape", time.Time{}); e != "" {
+		t.Errorf("expected empty from traversal, got %q", e)
+	}
+	ctxCancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := mgr.ExtractLastTurnError(ctxCancelled, convID, time.Time{}); err == nil {
+		t.Errorf("expected context cancellation error")
+	}
+}
+
+func TestExtractLastTurnError_CoverageBoost(t *testing.T) {
+	mgr, tmpDir := setupTestManager(t)
+
+	// 1. Empty transcript file (size 0)
+	convEmpty := "empty-err-conv"
+	emptyLogs := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", convEmpty, ".system_generated", "logs")
+	_ = os.MkdirAll(emptyLogs, 0755)
+	_ = os.WriteFile(filepath.Join(emptyLogs, "transcript.jsonl"), []byte(""), 0644)
+	errStr, err := mgr.ExtractLastTurnError(context.Background(), convEmpty, time.Time{})
+	if err != nil || errStr != "" {
+		t.Errorf("expected empty error for empty file, got (%q, %v)", errStr, err)
+	}
+
+	// 2. Large transcript file (> 1MB) with user input in tail chunk and error at end
+	convLarge1 := "large-err-tail"
+	largeLogs1 := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", convLarge1, ".system_generated", "logs")
+	_ = os.MkdirAll(largeLogs1, 0755)
+	padding := strings.Repeat(`{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","content":"padding"}
+`, 15000)
+	tailWithError := `{"step_index":20000,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"run command"}
+{"step_index":20001,"source":"MODEL","type":"ERROR_MESSAGE","status":"ERROR","content":"fatal: tail error detected"}
+`
+	_ = os.WriteFile(filepath.Join(largeLogs1, "transcript.jsonl"), []byte(padding+tailWithError), 0644)
+	errStr, err = mgr.ExtractLastTurnError(context.Background(), convLarge1, time.Time{})
+	if err != nil || errStr != "fatal: tail error detected" {
+		t.Errorf("expected 'fatal: tail error detected', got (%q, %v)", errStr, err)
+	}
+
+	// 3. Large transcript file (> 1MB) where user input is at beginning (head)
+	convLarge2 := "large-err-head"
+	largeLogs2 := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", convLarge2, ".system_generated", "logs")
+	_ = os.MkdirAll(largeLogs2, 0755)
+	headWithInput := `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"start long process"}
+`
+	tailOnlyError := `{"step_index":20001,"source":"MODEL","type":"ERROR_MESSAGE","status":"ERROR","content":"head error recovered"}
+`
+	_ = os.WriteFile(filepath.Join(largeLogs2, "transcript.jsonl"), []byte(headWithInput+padding+tailOnlyError), 0644)
+	errStr, err = mgr.ExtractLastTurnError(context.Background(), convLarge2, time.Time{})
+	if err != nil || errStr != "head error recovered" {
+		t.Errorf("expected 'head error recovered', got (%q, %v)", errStr, err)
+	}
+
+	// 4. Corrupted JSON and fallback to content when step.Error is null
+	convCorrupt := "corrupt-err-conv"
+	corruptLogs := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", convCorrupt, ".system_generated", "logs")
+	_ = os.MkdirAll(corruptLogs, 0755)
+	corruptContent := `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"test"}
+{bad json line}
+{"step_index":1,"source":"MODEL","type":"ERROR_MESSAGE","status":"ERROR","error":null,"content":"fallback content error"}
+`
+	_ = os.WriteFile(filepath.Join(corruptLogs, "transcript.jsonl"), []byte(corruptContent), 0644)
+	errStr, err = mgr.ExtractLastTurnError(context.Background(), convCorrupt, time.Time{})
+	if err != nil || errStr != "fallback content error" {
+		t.Errorf("expected 'fallback content error', got (%q, %v)", errStr, err)
+	}
+
+	// 5. Context cancellation in middle of reverse scan loop
+	ctxCancel, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = mgr.ExtractLastTurnError(ctxCancel, convLarge1, time.Time{})
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected context.Canceled, got %v", err)
+	}
+}
+

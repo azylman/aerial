@@ -28,7 +28,7 @@ Aerial uses a decoupled **Two-Repository Architecture**:
 │  • PostgreSQL 16 Multi-Turn Thread Memory & Atomic CAS Task State           │
 │  • Semantic Memory Native pgvector RAG (HNSW Cosine ops / 384-dim)          │
 │  • Deep Prometheus Telemetry Instrumentation (:8080/metrics)                │
-│  • Empty Response Suppression (Purged [NO_REPLY] Sentinel)                  │
+│  • Substantive Response Enforcement (Zero Swallowed Turns)                 │
 └─────────────────────────────────────────────────────────────────────────────┘
                │                       │                      │
 ┌───────────────────────────┐ ┌───────────────────────┐ ┌─────────────────────┐
@@ -156,7 +156,7 @@ User configuration and persona rules live in your private configuration reposito
        - `on_wake`: Intercepts raw messages to override wake decisions (`wake`, `drop`, `classify`).
        - `pre_turn`: Execution gating (`proceed`, `drop`, `retry`) and dynamic operational context injection (`injected_context` wrapped in `<COORDINATION_CONTEXT>`).
        - `post_turn`: Captures turn outcome, error messages, duration, and LLM token usage.
-   - **Empty Response Suppression**: Agent turns with empty or whitespace-only stdout silently skip Discord message delivery without error, eliminating fragile `[NO_REPLY]` prompt sentinels.
+   - **Substantive Response Enforcement**: Agent turns must always produce substantive output; unrecovered empty stdout or missing responses trigger automatic retry and failure handling without swallowed turns.
    - **Server Whitelisting (Default-Deny)**: Set `channels.default.mode: "ignore"` to ignore the entire server by default, responding only in explicitly declared channels.
    - **Hot-Reloading & LKGC**: Changes to `config.yaml` are detected instantly via `fsnotify` and reconfigured in-memory without restarting the daemon. If invalid YAML is saved, Aerial retains the **Last Known Good Configuration (LKGC)** in memory and posts a diagnostic alert to `#aerial-dev`.
 
