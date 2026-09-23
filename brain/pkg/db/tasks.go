@@ -11,7 +11,7 @@ import (
 
 var (
 	tagRegex      = regexp.MustCompile(`(?s)<[A-Za-z0-9_-]+.*?>.*?</[A-Za-z0-9_-]+>|<[^>]+>`)
-	mentionRegex  = regexp.MustCompile(`<@!?[0-9]+>`)
+	mentionRegex  = regexp.MustCompile(`<@!?[0-9]+>|<@&[0-9]+>|<#[0-9]+>`)
 	markdownRegex = regexp.MustCompile(`[#*_` + "`" + `>]+`)
 	spaceRegex    = regexp.MustCompile(`\s+`)
 )
@@ -40,43 +40,9 @@ func CleanTaskSummary(content string) string {
 		return "Agent Task"
 	}
 
-	if strings.Contains(trimmed, "<USER_REQUEST>") {
-		lines := strings.Split(trimmed, "\n")
-		var extracted string
-		for i, line := range lines {
-			lineTrimmed := strings.TrimSpace(line)
-			if strings.HasPrefix(lineTrimmed, "- content:") {
-				val := strings.TrimSpace(strings.TrimPrefix(lineTrimmed, "- content:"))
-				if val != "" {
-					extracted = val
-					break
-				}
-			}
-			if strings.HasPrefix(lineTrimmed, "Prompt:") {
-				val := strings.TrimSpace(strings.TrimPrefix(lineTrimmed, "Prompt:"))
-				if val != "" {
-					extracted = val
-					break
-				} else if i+1 < len(lines) {
-					for j := i + 1; j < len(lines); j++ {
-						nextTrimmed := strings.TrimSpace(lines[j])
-						if nextTrimmed != "" && !strings.HasPrefix(nextTrimmed, "</USER_REQUEST>") {
-							extracted = nextTrimmed
-							break
-						}
-					}
-					if extracted != "" {
-						break
-					}
-				}
-			}
-		}
-		if extracted != "" {
-			trimmed = extracted
-		}
-	}
+	body := ExtractMessageBody(trimmed)
 
-	cleaned := tagRegex.ReplaceAllString(trimmed, " ")
+	cleaned := tagRegex.ReplaceAllString(body, " ")
 	cleaned = mentionRegex.ReplaceAllString(cleaned, "")
 	cleaned = markdownRegex.ReplaceAllString(cleaned, "")
 	cleaned = strings.TrimSpace(spaceRegex.ReplaceAllString(cleaned, " "))

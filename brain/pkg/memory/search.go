@@ -14,8 +14,6 @@ import (
 )
 
 var (
-	reDiscordContent = regexp.MustCompile(`(?s)(?:^|\n)- content:\s*(.+?)(?:\n- timestamp:|\n- mentions:|\n- attachments:|\n</USER_REQUEST>|\z)`)
-	reUserRequest    = regexp.MustCompile(`(?s)<USER_REQUEST>(.*?)</USER_REQUEST>`)
 	reDiscordMention          = regexp.MustCompile(`<@!?[0-9]+>|<@&[0-9]+>|<#[0-9]+>`)
 	reWhitespace              = regexp.MustCompile(`\s+`)
 	rePreviousSessionEnvelope = regexp.MustCompile(`(?s)<PREVIOUS_SESSION>.*?</PREVIOUS_SESSION>`)
@@ -31,33 +29,16 @@ func sanitizeQueryText(text string) string {
 	return cleaned
 }
 
-// ExtractQueryText extracts the core user utterance from structured prompt envelopes (e.g. Discord funnel or XML blocks).
+// ExtractQueryText extracts the core user utterance from prompt envelopes or raw text for vector search.
 func ExtractQueryText(content string) string {
 	clean := strings.TrimSpace(content)
 	if clean == "" {
 		return ""
 	}
 
-	// 1. Check for Discord funnel format: "- content: <user utterance>"
-	if m := reDiscordContent.FindStringSubmatch(clean); len(m) > 1 {
-		userText := strings.TrimSpace(m[1])
-		if userText != "" {
-			return sanitizeQueryText(userText)
-		}
-	}
-
-	// 2. Check for XML wrapper <USER_REQUEST>...</USER_REQUEST>
-	if m := reUserRequest.FindStringSubmatch(clean); len(m) > 1 {
-		inner := strings.TrimSpace(m[1])
-		if inner != "" {
-			return sanitizeQueryText(inner)
-		}
-	}
-
-	// 3. Raw text fallback
 	clean = rePreviousSessionEnvelope.ReplaceAllString(clean, "")
-	clean = strings.TrimSpace(clean)
-	return sanitizeQueryText(clean)
+	body := db.ExtractMessageBody(clean)
+	return sanitizeQueryText(body)
 }
 
 const (
