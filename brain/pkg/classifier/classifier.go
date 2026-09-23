@@ -343,7 +343,7 @@ func NewAgyLLMFunc(agyBin, apiKey string, runnerFn func(ctx context.Context, agy
 
 		stdout, stderr, exitCode, err := runnerFn(ctx, agyBin, prompt, ephemeralID, apiKey, model, 1)
 		if err != nil || exitCode != 0 {
-			return "", fmt.Errorf("agy classification failed (exit %d): %v, stderr: %s", exitCode, err, stderr)
+			return "", fmt.Errorf("agy classification failed (exit %d): %w, stderr: %s", exitCode, err, stderr)
 		}
 		resp, parseErr := runner.ParseAgyOutput(stdout)
 		if parseErr != nil {

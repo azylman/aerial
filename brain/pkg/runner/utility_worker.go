@@ -99,7 +99,7 @@ func NegotiateHandshake(ctx context.Context, r *bufio.Reader, closer io.Closer, 
 	case res := <-initCh:
 		if res.err != nil {
 			closeWarn(closer, "worker handshake closer on init error")
-			return "", fmt.Errorf("%w: %v", ErrInvalidHandshake, res.err)
+			return "", fmt.Errorf("%w: %w", ErrInvalidHandshake, res.err)
 		}
 		return res.convID, nil
 	}

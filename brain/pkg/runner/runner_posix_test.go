@@ -33,7 +33,8 @@ func TestRunnerPosix_SignalAndTerminateHelpers(t *testing.T) {
 	if err := cmdAlive.Start(); err == nil {
 		terminateProcessGroup(cmdAlive)
 		err := cmdAlive.Wait()
-		if exitErr, ok := err.(*exec.ExitError); ok {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
 			if !isProcessTerminatedBySignal(exitErr) {
 				t.Errorf("expected true from isProcessTerminatedBySignal for SIGTERM exit")
 			}
@@ -69,7 +70,8 @@ func TestRunnerPosix_KillHelpers(t *testing.T) {
 	if err := cmdAlive.Start(); err == nil {
 		killProcessGroup(cmdAlive)
 		err := cmdAlive.Wait()
-		if exitErr, ok := err.(*exec.ExitError); ok {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
 			if !isProcessTerminatedBySignal(exitErr) {
 				t.Errorf("expected true from isProcessTerminatedBySignal for SIGKILL exit")
 			}
@@ -79,7 +81,8 @@ func TestRunnerPosix_KillHelpers(t *testing.T) {
 	// Test non-signaled exit (e.g. exit code 1) returns false from isProcessTerminatedBySignal
 	cmdExit := exec.Command("sh", "-c", "exit 1")
 	if err := cmdExit.Run(); err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
 			if isProcessTerminatedBySignal(exitErr) {
 				t.Errorf("expected false from isProcessTerminatedBySignal for normal exit 1")
 			}

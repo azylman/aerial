@@ -261,7 +261,7 @@ func TestUtilityDaemon_OptionsAndAccessors(t *testing.T) {
 
 	// Execute when closed
 	_, err := daemon.Execute(context.Background(), "test closed")
-	if err != ErrWorkerDead {
+	if !errors.Is(err, ErrWorkerDead) {
 		t.Errorf("expected ErrWorkerDead when closed, got %v", err)
 	}
 }

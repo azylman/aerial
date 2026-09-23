@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -1836,7 +1837,7 @@ func TestProcessDueSchedules_StoreErrorsAndEdgeCases(t *testing.T) {
 		},
 	}
 	sCancel, _ := New(cfg, mockStoreOneShotCancel, enqueuer, threadCreator)
-	if err := sCancel.ProcessDueSchedules(cancellingCtx); err != context.Canceled {
+	if err := sCancel.ProcessDueSchedules(cancellingCtx); !errors.Is(err, context.Canceled) {
 		t.Errorf("expected context.Canceled, got %v", err)
 	}
 }

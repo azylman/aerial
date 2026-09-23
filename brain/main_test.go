@@ -831,7 +831,7 @@ func TestRunBrainApp_Lifecycle(t *testing.T) {
 
 	mockStore := db.NewFakeStore()
 	err := RunBrainApp(ctx, cfg, WithStore(mockStore))
-	if err != nil && err != http.ErrServerClosed {
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		t.Errorf("Unexpected error running Brain app: %v", err)
 	}
 	onServerReady = oldReady
@@ -1112,7 +1112,7 @@ func TestRunBrainApp_ServerReadinessAndShutdown(t *testing.T) {
 
 	select {
 	case err := <-errChan:
-		if err != nil && err != http.ErrServerClosed {
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			t.Errorf("RunBrainApp returned unexpected error: %v", err)
 		}
 	case <-time.After(5 * time.Second):
@@ -1283,7 +1283,7 @@ func TestRunBrainApp_DetailedOptions(t *testing.T) {
 
 		select {
 		case err := <-errChan:
-			if err != nil && err != http.ErrServerClosed {
+			if err != nil && !errors.Is(err, http.ErrServerClosed) {
 				t.Errorf("RunBrainApp returned unexpected error: %v", err)
 			}
 		case <-time.After(5 * time.Second):
@@ -1560,7 +1560,7 @@ func TestRunBrainApp_PureConfig(t *testing.T) {
 
 	mockStore := db.NewFakeStore()
 	err := RunBrainApp(ctx, cfg, WithStore(mockStore))
-	if err != nil && err != http.ErrServerClosed {
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		t.Errorf("expected clean shutdown, got %v", err)
 	}
 }

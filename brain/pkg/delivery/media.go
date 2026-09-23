@@ -2,6 +2,7 @@ package delivery
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -460,7 +461,7 @@ func ResolveAndValidateLocalImage(rawPath string, baseDir string) (*Attachment, 
 	// 6. Sniff MIME type using first 512 bytes
 	header := make([]byte, 512)
 	n, err := f.Read(header)
-	if err != nil && err != io.EOF {
+	if err != nil && !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("failed to read file header: %w", err)
 	}
 	mimeType := http.DetectContentType(header[:n])

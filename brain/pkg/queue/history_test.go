@@ -523,7 +523,7 @@ func TestSummarizeThreadHistory_TimeoutFallback(t *testing.T) {
 	}
 
 	_, err := SummarizeThreadHistoryWithGroup(context.Background(), new(singleflight.Group), mockLLM, "test-model", "thread-timeout", msgs)
-	if !errors.Is(err, context.DeadlineExceeded) && err != context.DeadlineExceeded {
+	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("expected DeadlineExceeded error, got %v", err)
 	}
 }
