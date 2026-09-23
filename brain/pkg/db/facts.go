@@ -224,7 +224,7 @@ func GetFactsMissingEmbeddingsWithContext(ctx context.Context, database DBTX, li
 	if err != nil {
 		return nil, err
 	}
-	defer closeWarn(rows, "rows")
+	defer rows.Close()
 
 	var results []Fact
 	for rows.Next() {
@@ -253,7 +253,7 @@ func GetAllFactsWithEmbeddings(database DBTX) ([]FactWithEmbedding, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer closeWarn(rows, "rows")
+	defer rows.Close()
 
 	var results []FactWithEmbedding
 	for rows.Next() {
@@ -298,7 +298,7 @@ func GetFactsByThreadWithEmbeddings(database DBTX, threadID string) ([]FactWithE
 	if err != nil {
 		return nil, err
 	}
-	defer closeWarn(rows, "rows")
+	defer rows.Close()
 
 	var results []FactWithEmbedding
 	for rows.Next() {
@@ -424,7 +424,7 @@ func SearchSimilarFactsWithContext(ctx context.Context, database DBTX, isPg bool
 	if err != nil {
 		return nil, fmt.Errorf("vector search failed: %w", err)
 	}
-	defer closeWarn(rows, "rows")
+	defer rows.Close()
 
 	var facts []Fact
 	for rows.Next() {
@@ -468,7 +468,7 @@ func GetActiveConversationsForExtraction(database DBTX, activeHours int) ([]stri
 	if err != nil {
 		return nil, err
 	}
-	defer closeWarn(rows, "rows")
+	defer rows.Close()
 
 	var tids []string
 	for rows.Next() {
@@ -613,7 +613,7 @@ func GetFactsPaginatedWithContext(ctx context.Context, database DBTX, isPg bool,
 	if err != nil {
 		return nil, fmt.Errorf("failed to query facts: %w", err)
 	}
-	defer closeWarn(rows, "rows")
+	defer rows.Close()
 
 	facts := make([]Fact, 0)
 	for rows.Next() {

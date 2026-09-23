@@ -62,7 +62,6 @@ func TestParseBackgroundTaskStarted(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			got := session.ParseBackgroundTaskStarted(tc.input)
@@ -129,7 +128,6 @@ func TestParseTaskMessageSender(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			got := session.ParseTaskMessageSender(tc.input)
@@ -206,7 +204,6 @@ func TestParseTaskFinishedContent(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			got := session.ParseTaskFinishedContent(tc.input)

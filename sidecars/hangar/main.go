@@ -782,6 +782,7 @@ func (d *SyncDaemon) GetRemoteImageDigest(ctx context.Context, imageRef string) 
 		if dErr != nil {
 			return "", fmt.Errorf("token request failed for %s: %w", imageRef, dErr)
 		}
+		defer tokResp.Body.Close()
 
 		if tokResp.StatusCode != http.StatusOK {
 			closeWarn(tokResp.Body, "token error response body")
@@ -1199,11 +1200,12 @@ func (d *SyncDaemon) resolveChannelID(ctx context.Context, client *http.Client, 
 			Name string `json:"name"`
 			Type int    `json:"type"`
 		}
-		if decErr := json.NewDecoder(respChans.Body).Decode(&channels); decErr != nil {
-			closeWarn(respChans.Body, "channels response body")
+		decErr := json.NewDecoder(respChans.Body).Decode(&channels)
+		closeWarn(respChans.Body, "channels response body")
+		respChans.Body.Close()
+		if decErr != nil {
 			continue
 		}
-		closeWarn(respChans.Body, "channels response body")
 
 		for _, ch := range channels {
 			if strings.EqualFold(ch.Name, cleanName) {
@@ -1966,11 +1968,10 @@ func (d *SyncDaemon) getRepoCommit(ctx context.Context, repoPath, ref string) (s
 		return strings.TrimSpace(string(out)), nil, nil
 	}
 	sha := strings.TrimSpace(parts[0])
-	t, err := time.Parse(time.RFC3339, strings.TrimSpace(parts[1]))
-	if err != nil {
-		return sha, nil, nil
+	if t, parseErr := time.Parse(time.RFC3339, strings.TrimSpace(parts[1])); parseErr == nil {
+		return sha, &t, nil
 	}
-	return sha, &t, nil
+	return sha, nil, nil
 }
 
 // GetStatus computes real-time synchronization telemetry across all configured repositories.
