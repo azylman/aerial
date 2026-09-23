@@ -223,7 +223,7 @@ func (d *DefaultWebhookDispatcher) dispatch(ctx context.Context, hook string, en
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		respBody, readErr := io.ReadAll(io.LimitReader(httpResp.Body, 2048))
 		if readErr != nil {
-			return fmt.Errorf("webhook endpoint returned status %d (failed to read body: %v)", httpResp.StatusCode, readErr)
+			return fmt.Errorf("webhook endpoint returned status %d (failed to read body: %w)", httpResp.StatusCode, readErr)
 		}
 		return fmt.Errorf("webhook endpoint returned status %d: %s", httpResp.StatusCode, string(respBody))
 	}

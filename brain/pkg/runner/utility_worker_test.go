@@ -77,7 +77,7 @@ func TestWorkerInstance_BrokenPipeDetection(t *testing.T) {
 
 	// Subsequent execute must fail immediately with ErrWorkerDead
 	_, err = w.Execute(ctx, "after crash")
-	if err != ErrWorkerDead {
+	if !errors.Is(err, ErrWorkerDead) {
 		t.Errorf("expected ErrWorkerDead, got %v", err)
 	}
 }
@@ -159,7 +159,7 @@ func TestWorkerInstance_SpawnFailures(t *testing.T) {
 		Timeout:  20 * time.Millisecond,
 		ExtraEnv: []string{"GO_WANT_HELPER_PROCESS=1", "MOCK_MODE=hang"},
 	})
-	if err != ErrHandshakeTimeout {
+	if !errors.Is(err, ErrHandshakeTimeout) {
 		t.Errorf("expected ErrHandshakeTimeout, got %v", err)
 	}
 

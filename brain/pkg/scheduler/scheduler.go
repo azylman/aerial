@@ -317,7 +317,7 @@ func (s *Scheduler) ExtractFactsLLM(ctx context.Context, prompt string) (string,
 	}
 	stdout, _, exitCode, err := s.runnerFn(ctx, agyBin, prompt, "", apiKey, model, 5)
 	if exitCode != 0 || err != nil {
-		return "", fmt.Errorf("agy fact extraction exitCode=%d err=%v", exitCode, err)
+		return "", fmt.Errorf("agy fact extraction exitCode=%d err=%w", exitCode, err)
 	}
 	resp, parseErr := runner.ParseAgyOutput(stdout)
 	if parseErr != nil {

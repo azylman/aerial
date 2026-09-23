@@ -328,7 +328,7 @@ func GetTurnState(database DBTX, externalID string) (*ConversationTurnState, err
 	LIMIT 1
 	`
 	err = database.QueryRowContext(ctx, query, externalID).Scan(&m.ID, &m.ThreadID, &m.Status, &m.Content, &m.UpdatedAt)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return &ConversationTurnState{
 			ExternalID: externalID,
 			InternalID: sessID,

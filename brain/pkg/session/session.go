@@ -490,7 +490,7 @@ func (m *Manager) ExtractLastTurnError(ctx context.Context, convID string, since
 			if closeErr := f.Close(); closeErr != nil {
 				log.Printf("[Session] Warning: failed to close file %s: %v", tPath, closeErr)
 			}
-			if err != nil && err != io.EOF {
+			if err != nil && !errors.Is(err, io.EOF) {
 				continue
 			}
 
@@ -645,7 +645,7 @@ func (m *Manager) ExtractFinalSubstantiveResponse(ctx context.Context, convID st
 			if closeErr := f.Close(); closeErr != nil {
 				log.Printf("[Session] Warning closing transcript file %s: %v", tPath, closeErr)
 			}
-			if err != nil && err != io.EOF {
+			if err != nil && !errors.Is(err, io.EOF) {
 				continue
 			}
 

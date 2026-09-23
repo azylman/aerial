@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"log/slog"
@@ -77,7 +78,7 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	if err := RunApp(ctx, cfg); err != nil && err != http.ErrServerClosed {
+	if err := RunApp(ctx, cfg); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("Server failure: %v", err)
 	}
 }

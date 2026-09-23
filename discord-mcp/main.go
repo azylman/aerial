@@ -213,7 +213,7 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	if err := runProxyApp(ctx, cfg); err != nil && err != http.ErrServerClosed {
+	if err := runProxyApp(ctx, cfg); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		exitFn("[Discord-MCP] Error: %v", err)
 	}
 }

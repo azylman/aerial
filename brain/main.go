@@ -1097,7 +1097,7 @@ func main() {
 		cancel()
 	}()
 
-	if err := RunBrainApp(ctx, cfg); err != nil && err != http.ErrServerClosed {
+	if err := RunBrainApp(ctx, cfg); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("Server failed: %v", err)
 	}
 }

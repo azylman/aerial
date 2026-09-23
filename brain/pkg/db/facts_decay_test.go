@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -168,7 +169,7 @@ func TestSQLStoreReinforceAndDecay(t *testing.T) {
 
 	// Reinforce on non-existent fact should return ErrFactNotFound
 	errNotFound := store.ReinforceFact(ctx, 999999, "missing", emb, 0.15)
-	if errNotFound != ErrFactNotFound && !strings.Contains(errNotFound.Error(), "fact not found") {
+	if !errors.Is(errNotFound, ErrFactNotFound) && !strings.Contains(errNotFound.Error(), "fact not found") {
 		t.Errorf("expected ErrFactNotFound, got %v", errNotFound)
 	}
 }
@@ -366,7 +367,7 @@ func TestFacts_PostgresBranchCoverage(t *testing.T) {
 		},
 	}
 	err = ReinforceFactWithContext(ctx, mockDBZero, true, 999, "", nil, 0.15)
-	if err != ErrFactNotFound {
+	if !errors.Is(err, ErrFactNotFound) {
 		t.Errorf("expected ErrFactNotFound, got %v", err)
 	}
 
