@@ -1718,5 +1718,30 @@ func TestParseAgyOutput_InitEventConvIDFallback(t *testing.T) {
 	}
 }
 
+func TestParseAgyOutput_EmptyLines(t *testing.T) {
+	t.Parallel()
+
+	input := "{\"event\":\"init\",\"conversation_id\":\"test-conv-id\"}\n\n   \n\n{\"event\":\"result\",\"response\":\"success\"}"
+	resp, err := ParseAgyOutput(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.Response != "success" {
+		t.Errorf("expected response 'success', got %q", resp.Response)
+	}
+}
+
+func TestClassifyError_ShortStdoutFallback(t *testing.T) {
+	t.Parallel()
+
+	// When exitCode != 0, stderr is empty, and stdout is non-empty short text (<300 chars) that is not JSON,
+	// ClassifyError falls back to trimmedStdout as errDetail.
+	isFail, _, _, detail := ClassifyError(1, "custom python failure on line 42", "")
+	if !isFail || detail != "custom python failure on line 42" {
+		t.Errorf("expected 'custom python failure on line 42', got isFail=%v, detail=%q", isFail, detail)
+	}
+}
+
+
 
 

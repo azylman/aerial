@@ -596,6 +596,16 @@ func TestDaemon_ExtractSubagentIDDetailed(t *testing.T) {
 	if id := extractSubagentID(embeddedList); id != "sub-embedded-456" {
 		t.Errorf("expected 'sub-embedded-456', got %q", id)
 	}
+
+	// List with item having empty ID
+	if id := extractSubagentID(`[{"role":"writer"}]`); id != "" {
+		t.Errorf("expected empty string for item without ID, got %q", id)
+	}
+
+	// Payload with empty subagents list
+	if id := extractSubagentID(`{"role":"test","subagents":[]}`); id != "" {
+		t.Errorf("expected empty string for payload without ID, got %q", id)
+	}
 }
 
 func TestParseAgyOutputDetailed(t *testing.T) {

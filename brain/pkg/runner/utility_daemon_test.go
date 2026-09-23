@@ -583,4 +583,44 @@ func TestUtilityDaemon_RunnerFuncAndRestart(t *testing.T) {
 	}
 }
 
+func TestUtilityDaemon_NoWorkerAvailable(t *testing.T) {
+	t.Parallel()
+
+	failingSpawner := func(ctx context.Context, opts WorkerOptions) (*WorkerInstance, error) {
+		return nil, errors.New("simulated spawn failure")
+	}
+
+	daemon := NewUtilityDaemon(nil,
+		WithSpawner(failingSpawner),
+	)
+	defer daemon.Close()
+
+	_, err := daemon.Execute(context.Background(), "test no worker")
+	if err == nil || !strings.Contains(err.Error(), "no utility worker available") {
+		t.Fatalf("expected 'no utility worker available' error, got %v", err)
+	}
+}
+
+func TestUtilityDaemon_ExecuteFailedAfterRetry(t *testing.T) {
+	t.Parallel()
+
+	failingWorkerSpawner := func(ctx context.Context, opts WorkerOptions) (*WorkerInstance, error) {
+		w, _ := NewMockStreamWorker(t, MockStreamWorkerConfig{
+			BadResult: true,
+		})
+		return w, nil
+	}
+
+	daemon := NewUtilityDaemon(nil,
+		WithSpawner(failingWorkerSpawner),
+	)
+	defer daemon.Close()
+
+	_, err := daemon.Execute(context.Background(), "test retry exhaustion")
+	if err == nil {
+		t.Fatalf("expected error on retry failure, got nil")
+	}
+}
+
+
 

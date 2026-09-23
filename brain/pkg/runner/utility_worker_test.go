@@ -423,5 +423,81 @@ func TestReadWorkerTurn_DetailedBranches(t *testing.T) {
 	}
 }
 
+func TestNegotiateHandshake_Detailed(t *testing.T) {
+	t.Parallel()
+
+	// 1. Timeout branch
+	pipeR, pipeW := io.Pipe()
+	defer pipeW.Close()
+	_, err := NegotiateHandshake(context.Background(), bufio.NewReader(pipeR), pipeR, 10*time.Millisecond)
+	if !errors.Is(err, ErrHandshakeTimeout) {
+		t.Errorf("expected ErrHandshakeTimeout, got %v", err)
+	}
+
+	// 2. Init error on premature EOF
+	rEOF := bufio.NewReader(strings.NewReader("noise line without init\n"))
+	_, err = NegotiateHandshake(context.Background(), rEOF, io.NopCloser(strings.NewReader("")), 1*time.Second)
+	if !errors.Is(err, ErrInvalidHandshake) {
+		t.Errorf("expected ErrInvalidHandshake, got %v", err)
+	}
+
+	// 3. Context cancellation
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	pipeR2, pipeW2 := io.Pipe()
+	defer pipeW2.Close()
+	_, err = NegotiateHandshake(canceledCtx, bufio.NewReader(pipeR2), pipeR2, 1*time.Second)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected context.Canceled, got %v", err)
+	}
+}
+
+func TestNewWorkerInstanceFromStreams_DetailedHandshakeFailure(t *testing.T) {
+	t.Parallel()
+
+	// Case 1: cancel != nil is called on handshake failure
+	ctx, cancel := context.WithCancel(context.Background())
+	var cancelCalled bool
+	trackedCancel := func() {
+		cancelCalled = true
+		cancel()
+	}
+
+	stdinPipeR, stdinPipeW := io.Pipe()
+	defer stdinPipeR.Close()
+	emptyStdout := io.NopCloser(strings.NewReader(""))
+
+	w, err := NewWorkerInstanceFromStreams(ctx, stdinPipeW, emptyStdout, trackedCancel, nil, 100*time.Millisecond, nil)
+	if err == nil || w != nil {
+		t.Fatalf("expected error on empty stdout, got w=%v, err=%v", w, err)
+	}
+	if !cancelCalled {
+		t.Errorf("expected cancel func to be invoked on handshake failure")
+	}
+
+	// Case 2: cancel == nil handles nil safely
+	stdinPipeR2, stdinPipeW2 := io.Pipe()
+	defer stdinPipeR2.Close()
+	emptyStdout2 := io.NopCloser(strings.NewReader(""))
+
+	w2, err2 := NewWorkerInstanceFromStreams(context.Background(), stdinPipeW2, emptyStdout2, nil, nil, 100*time.Millisecond, nil)
+	if err2 == nil || w2 != nil {
+		t.Fatalf("expected error on empty stdout, got w2=%v, err2=%v", w2, err2)
+	}
+}
+
+func TestReadWorkerTurn_ResultWithMalformedAgyResponse(t *testing.T) {
+	t.Parallel()
+
+	// Valid result event JSON that fails unmarshaling into AgyResponse (num_turns is string instead of int)
+	malformedResult := "{\"event\":\"result\",\"num_turns\":\"not_an_integer\"}\n"
+	r := bufio.NewReader(strings.NewReader(malformedResult))
+	_, err := ReadWorkerTurn(r)
+	if err == nil || !strings.Contains(err.Error(), "failed to parse worker result output") {
+		t.Fatalf("expected 'failed to parse worker result output' error, got %v", err)
+	}
+}
+
+
 
 
