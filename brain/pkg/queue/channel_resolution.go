@@ -286,7 +286,7 @@ func containsToken(s, token string) bool {
 	return false
 }
 
-func isTier1Wake(m db.Message, botUserID string, botRoleIDs []string, wakeMode string) bool {
+func isTier1Wake(m db.Message, botUserID string, botRoleIDs []string, _ string) bool {
 	if m.AuthorID == "http-client" || m.AuthorID == "scheduler" || m.ScheduleRunID != "" {
 		return true
 	}

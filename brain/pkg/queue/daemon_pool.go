@@ -42,6 +42,9 @@ func parseMeminfo(r io.Reader) (float64, error) {
 			}
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		return 0, err
+	}
 	if total > 0 {
 		return avail / total, nil
 	}
