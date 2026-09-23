@@ -206,7 +206,10 @@ func initDB(dsn string) (*sql.DB, error) {
 	return database, nil
 }
 
-func InsertCronSchedule(database *sql.DB, c CronSchedule) error {
+func InsertCronSchedule(ctx context.Context, database *sql.DB, c CronSchedule) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if database == nil {
 		return fmt.Errorf("database is nil")
 	}
@@ -226,11 +229,14 @@ func InsertCronSchedule(database *sql.DB, c CronSchedule) error {
 	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 	query = rebindQuery(query, isPostgres(database))
-	_, err := database.Exec(query, c.ID, c.TargetID, c.TitlePrefix, c.CronExpr, c.Prompt, c.Timezone, c.NextRunAt, c.Enabled, c.CreatedAt, c.Effort)
+	_, err := database.ExecContext(ctx, query, c.ID, c.TargetID, c.TitlePrefix, c.CronExpr, c.Prompt, c.Timezone, c.NextRunAt, c.Enabled, c.CreatedAt, c.Effort)
 	return err
 }
 
-func InsertOneShotSchedule(database *sql.DB, s OneShotSchedule) error {
+func InsertOneShotSchedule(ctx context.Context, database *sql.DB, s OneShotSchedule) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if database == nil {
 		return fmt.Errorf("database is nil")
 	}
@@ -242,11 +248,14 @@ func InsertOneShotSchedule(database *sql.DB, s OneShotSchedule) error {
 	VALUES (?, ?, ?, ?, ?)
 	`
 	query = rebindQuery(query, isPostgres(database))
-	_, err := database.Exec(query, s.ID, s.ThreadID, s.Prompt, s.RunAt, s.CreatedAt)
+	_, err := database.ExecContext(ctx, query, s.ID, s.ThreadID, s.Prompt, s.RunAt, s.CreatedAt)
 	return err
 }
 
-func ListCronSchedules(database *sql.DB, targetID string) ([]CronSchedule, error) {
+func ListCronSchedules(ctx context.Context, database *sql.DB, targetID string) ([]CronSchedule, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if database == nil {
 		return nil, fmt.Errorf("database is nil")
 	}
@@ -260,11 +269,11 @@ func ListCronSchedules(database *sql.DB, targetID string) ([]CronSchedule, error
 	if targetID != "" {
 		query += " AND target_id = ? ORDER BY created_at ASC"
 		query = rebindQuery(query, isPostgres(database))
-		rows, err = database.Query(query, targetID)
+		rows, err = database.QueryContext(ctx, query, targetID)
 	} else {
 		query += " ORDER BY created_at ASC"
 		query = rebindQuery(query, isPostgres(database))
-		rows, err = database.Query(query)
+		rows, err = database.QueryContext(ctx, query)
 	}
 	if err != nil {
 		return nil, err
@@ -285,7 +294,10 @@ func ListCronSchedules(database *sql.DB, targetID string) ([]CronSchedule, error
 	return results, nil
 }
 
-func UpdateCronSchedule(database *sql.DB, id string, effort *string, cronExpr *string, prompt *string, titlePrefix *string, timezone *string, nextRunAt *time.Time) error {
+func UpdateCronSchedule(ctx context.Context, database *sql.DB, id string, effort *string, cronExpr *string, prompt *string, titlePrefix *string, timezone *string, nextRunAt *time.Time) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if database == nil {
 		return fmt.Errorf("database is nil")
 	}
@@ -327,6 +339,9 @@ func UpdateCronSchedule(database *sql.DB, id string, effort *string, cronExpr *s
 	}
 
 	if len(sets) == 0 {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		return nil
 	}
 
@@ -334,7 +349,7 @@ func UpdateCronSchedule(database *sql.DB, id string, effort *string, cronExpr *s
 	args = append(args, id)
 	query = rebindQuery(query, isPostgres(database))
 
-	res, err := database.Exec(query, args...)
+	res, err := database.ExecContext(ctx, query, args...)
 	if err != nil {
 		return err
 	}
@@ -348,7 +363,10 @@ func UpdateCronSchedule(database *sql.DB, id string, effort *string, cronExpr *s
 	return nil
 }
 
-func ListOneShotSchedules(database *sql.DB, targetID string) ([]OneShotSchedule, error) {
+func ListOneShotSchedules(ctx context.Context, database *sql.DB, targetID string) ([]OneShotSchedule, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if database == nil {
 		return nil, fmt.Errorf("database is nil")
 	}
@@ -361,11 +379,11 @@ func ListOneShotSchedules(database *sql.DB, targetID string) ([]OneShotSchedule,
 	if targetID != "" {
 		query += " WHERE thread_id = ? ORDER BY run_at ASC"
 		query = rebindQuery(query, isPostgres(database))
-		rows, err = database.Query(query, targetID)
+		rows, err = database.QueryContext(ctx, query, targetID)
 	} else {
 		query += " ORDER BY run_at ASC"
 		query = rebindQuery(query, isPostgres(database))
-		rows, err = database.Query(query)
+		rows, err = database.QueryContext(ctx, query)
 	}
 	if err != nil {
 		return nil, err
@@ -386,12 +404,15 @@ func ListOneShotSchedules(database *sql.DB, targetID string) ([]OneShotSchedule,
 	return results, nil
 }
 
-func DeleteSchedule(database *sql.DB, scheduleID string) (bool, error) {
+func DeleteSchedule(ctx context.Context, database *sql.DB, scheduleID string) (bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if database == nil {
 		return false, fmt.Errorf("database is nil")
 	}
 	queryCron := rebindQuery("DELETE FROM cron_schedules WHERE id = ?", isPostgres(database))
-	resCron, err := database.Exec(queryCron, scheduleID)
+	resCron, err := database.ExecContext(ctx, queryCron, scheduleID)
 	if err != nil {
 		return false, err
 	}
@@ -401,7 +422,7 @@ func DeleteSchedule(database *sql.DB, scheduleID string) (bool, error) {
 	}
 
 	queryOneShot := rebindQuery("DELETE FROM one_shot_schedules WHERE id = ?", isPostgres(database))
-	resOneShot, err := database.Exec(queryOneShot, scheduleID)
+	resOneShot, err := database.ExecContext(ctx, queryOneShot, scheduleID)
 	if err != nil {
 		return false, err
 	}

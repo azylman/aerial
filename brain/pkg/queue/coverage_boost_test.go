@@ -1156,72 +1156,72 @@ func TestResolveBotRoleIDs_AllVariants(t *testing.T) {
 func TestIsTier1Wake_AllVariants(t *testing.T) {
 	t.Parallel()
 	// 1. System authors / schedule runs
-	if !isTier1Wake(db.Message{AuthorID: "http-client"}, "", nil, "") {
+	if !isTier1Wake(db.Message{AuthorID: "http-client"}, "", nil) {
 		t.Errorf("expected http-client to wake")
 	}
-	if !isTier1Wake(db.Message{AuthorID: "scheduler"}, "", nil, "") {
+	if !isTier1Wake(db.Message{AuthorID: "scheduler"}, "", nil) {
 		t.Errorf("expected scheduler to wake")
 	}
-	if !isTier1Wake(db.Message{ScheduleRunID: "run-123"}, "", nil, "") {
+	if !isTier1Wake(db.Message{ScheduleRunID: "run-123"}, "", nil) {
 		t.Errorf("expected ScheduleRunID to wake")
 	}
 
 	// 2. Direct user mentions in content
-	if !isTier1Wake(db.Message{Content: "Hey <@bot-123>"}, "bot-123", nil, "") {
+	if !isTier1Wake(db.Message{Content: "Hey <@bot-123>"}, "bot-123", nil) {
 		t.Errorf("expected <@bot-123> to wake")
 	}
-	if !isTier1Wake(db.Message{Content: "Hey <@!bot-123>"}, "bot-123", nil, "") {
+	if !isTier1Wake(db.Message{Content: "Hey <@!bot-123>"}, "bot-123", nil) {
 		t.Errorf("expected <@!bot-123> to wake")
 	}
 
 	// 3. Direct role mentions
-	if !isTier1Wake(db.Message{Content: "Alert <@&role-999>"}, "", []string{"role-999"}, "") {
+	if !isTier1Wake(db.Message{Content: "Alert <@&role-999>"}, "", []string{"role-999"}) {
 		t.Errorf("expected <@&role-999> to wake")
 	}
 
 	// 4. - mentions: [ ... ]
-	if !isTier1Wake(db.Message{Content: "<USER_REQUEST>\n- mentions: [aerial, alice]\n</USER_REQUEST>"}, "", nil, "") {
+	if !isTier1Wake(db.Message{Content: "<USER_REQUEST>\n- mentions: [aerial, alice]\n</USER_REQUEST>"}, "", nil) {
 		t.Errorf("expected - mentions: [aerial] to wake")
 	}
-	if !isTier1Wake(db.Message{Content: "<USER_REQUEST>\n- mentions: [bot-123]\n</USER_REQUEST>"}, "bot-123", nil, "") {
+	if !isTier1Wake(db.Message{Content: "<USER_REQUEST>\n- mentions: [bot-123]\n</USER_REQUEST>"}, "bot-123", nil) {
 		t.Errorf("expected - mentions: [bot-123] to wake")
 	}
-	if !isTier1Wake(db.Message{Content: "<USER_REQUEST>\n- mentions: [role-999]\n</USER_REQUEST>"}, "", []string{"role-999"}, "") {
+	if !isTier1Wake(db.Message{Content: "<USER_REQUEST>\n- mentions: [role-999]\n</USER_REQUEST>"}, "", []string{"role-999"}) {
 		t.Errorf("expected - mentions: [role-999] to wake")
 	}
 
 	// 5. - replying_to: with author
 	replyingAerial := "<USER_REQUEST>\n- replying_to:\n  author: aerial\n  content: hi\n- content: yes</USER_REQUEST>"
-	if !isTier1Wake(db.Message{Content: replyingAerial}, "", nil, "") {
+	if !isTier1Wake(db.Message{Content: replyingAerial}, "", nil) {
 		t.Errorf("expected replying to aerial to wake")
 	}
 	replyingBotID := "<USER_REQUEST>\n- replying_to:\n  author: bot-123\n  content: hi\n- content: yes</USER_REQUEST>"
-	if !isTier1Wake(db.Message{Content: replyingBotID}, "bot-123", nil, "") {
+	if !isTier1Wake(db.Message{Content: replyingBotID}, "bot-123", nil) {
 		t.Errorf("expected replying to bot-123 to wake")
 	}
 
 	// 6. Body mentions
-	if !isTier1Wake(db.Message{Content: "Hey <@aerial how are you"}, "", nil, "") {
+	if !isTier1Wake(db.Message{Content: "Hey <@aerial how are you"}, "", nil) {
 		t.Errorf("expected <@aerial to wake")
 	}
-	if !isTier1Wake(db.Message{Content: "Hey <@!aerial how are you"}, "", nil, "") {
+	if !isTier1Wake(db.Message{Content: "Hey <@!aerial how are you"}, "", nil) {
 		t.Errorf("expected <@!aerial to wake")
 	}
 
 	// 7. Plaintext keywords never trigger Tier-1 wake in any mode
-	if isTier1Wake(db.Message{Content: "hello aerial"}, "", nil, "mention") {
+	if isTier1Wake(db.Message{Content: "hello aerial"}, "", nil) {
 		t.Errorf("expected wakeMode=mention to suppress plaintext keyword")
 	}
-	if isTier1Wake(db.Message{Content: "hello aerial help me"}, "", nil, "classifier") {
+	if isTier1Wake(db.Message{Content: "hello aerial help me"}, "", nil) {
 		t.Errorf("expected wakeMode=classifier to suppress plaintext keyword")
 	}
-	if isTier1Wake(db.Message{Content: "launch the gundam unit"}, "", nil, "classifier") {
+	if isTier1Wake(db.Message{Content: "launch the gundam unit"}, "", nil) {
 		t.Errorf("expected 'gundam' keyword to not wake Tier 1")
 	}
-	if isTier1Wake(db.Message{Content: "what a nice aerial view of the city"}, "", nil, "classifier") {
+	if isTier1Wake(db.Message{Content: "what a nice aerial view of the city"}, "", nil) {
 		t.Errorf("expected 'aerial view' to not wake Tier 1")
 	}
-	if isTier1Wake(db.Message{Content: "hello world unrelated"}, "", nil, "classifier") {
+	if isTier1Wake(db.Message{Content: "hello world unrelated"}, "", nil) {
 		t.Errorf("expected unrelated text to not wake")
 	}
 }
@@ -1908,30 +1908,30 @@ func TestQueue_TargetedCoveragePush(t *testing.T) {
 	t.Run("isTier1Wake structured mentions and quoted content rejection", func(t *testing.T) {
 		// Quoted role snowflake in message content without mention_role_ids MUST NOT wake
 		mRoleQuoted := db.Message{Content: "<USER_REQUEST>\n- content: check this '<@&999888>'\n- mention_role_ids: []\n</USER_REQUEST>"}
-		if isTier1Wake(mRoleQuoted, "123", []string{"999888"}, "mention") {
+		if isTier1Wake(mRoleQuoted, "123", []string{"999888"}) {
 			t.Errorf("expected quoted role snowflake without mention_role_ids to not wake")
 		}
 
 		// Structured role mention in mention_role_ids MUST wake
 		mRole := db.Message{Content: "<USER_REQUEST>\n- content: check this\n- mention_role_ids: [999888]\n</USER_REQUEST>"}
-		if !isTier1Wake(mRole, "123", []string{"999888"}, "mention") {
+		if !isTier1Wake(mRole, "123", []string{"999888"}) {
 			t.Errorf("expected role in mention_role_ids to wake")
 		}
 
 		mRep := db.Message{Content: "<USER_REQUEST>\n- replying_to:\n  author: @random_user\n- content: hi\n</USER_REQUEST>"}
-		if isTier1Wake(mRep, "123", nil, "mention") {
+		if isTier1Wake(mRep, "123", nil) {
 			t.Errorf("expected non-matching replying_to author to not wake")
 		}
 
 		// Structured user mention in mention_user_ids MUST wake
 		mUser := db.Message{Content: "<USER_REQUEST>\n- content: please help\n- mention_user_ids: [123]\n</USER_REQUEST>"}
-		if !isTier1Wake(mUser, "123", nil, "mention") {
+		if !isTier1Wake(mUser, "123", nil) {
 			t.Errorf("expected botUserID in mention_user_ids to wake")
 		}
 
 		// Zero's exact incident: role snowflake in content, other user in mentions
 		mZero := db.Message{Content: "<USER_REQUEST>\n- content: verified '<@&1543462881624858624>' role snowflake\n- mentions: [harperwallbanger]\n- mention_user_ids: [179407724335988736]\n- mention_role_ids: []\n</USER_REQUEST>"}
-		if isTier1Wake(mZero, "1542035925603713086", []string{"1543462881624858624"}, "mention") {
+		if isTier1Wake(mZero, "1542035925603713086", []string{"1543462881624858624"}) {
 			t.Errorf("expected Zero's quoted role snowflake message to not wake")
 		}
 	})
@@ -1962,7 +1962,7 @@ func TestQueue_CoverageFinalSprint(t *testing.T) {
 
 	// 4. isTier1Wake replying_to without author line
 	mRepNoAuth := db.Message{Content: "<USER_REQUEST>\n- replying_to:\n- mentions: [user]\n- content: hi\n</USER_REQUEST>"}
-	if isTier1Wake(mRepNoAuth, "bot-123", nil, "mention") {
+	if isTier1Wake(mRepNoAuth, "bot-123", nil) {
 		t.Errorf("expected false for replying_to without author line")
 	}
 
@@ -2507,13 +2507,13 @@ func TestCoverageBoost_ExtraHits(t *testing.T) {
 	msg1 := db.Message{
 		Content: "hey <@12345> check this",
 	}
-	if !isTier1Wake(msg1, "12345", nil, "mention") {
+	if !isTier1Wake(msg1, "12345", nil) {
 		t.Errorf("expected true for direct mention in body")
 	}
 	msgRole := db.Message{
 		Content: "hey <@&role999> check this",
 	}
-	if !isTier1Wake(msgRole, "99999", []string{"role999"}, "mention") {
+	if !isTier1Wake(msgRole, "99999", []string{"role999"}) {
 		t.Errorf("expected true for role mention in body")
 	}
 

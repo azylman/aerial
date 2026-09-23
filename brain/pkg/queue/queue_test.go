@@ -2973,7 +2973,7 @@ Please formulate your response and output it clearly.
 		CreatedAt: time.Now().UTC(),
 	}
 
-	if isTier1Wake(msg, "bot-aerial-id", nil, "classifier") {
+	if isTier1Wake(msg, "bot-aerial-id", nil) {
 		t.Errorf("Expected isTier1Wake to be FALSE when replying to @bob whose content contains 'aerial photo'")
 	}
 }
@@ -4719,7 +4719,7 @@ func TestIsTier1Wake_WakeModeMention(t *testing.T) {
 
 	// 1. Direct mention <@bot-12345>
 	msgMention := db.Message{Content: "Hey <@" + botID + "> how are you?"}
-	if !isTier1Wake(msgMention, botID, nil, "mention") {
+	if !isTier1Wake(msgMention, botID, nil) {
 		t.Errorf("expected isTier1Wake to be TRUE for direct mention in mention mode")
 	}
 
@@ -4730,7 +4730,7 @@ func TestIsTier1Wake_WakeModeMention(t *testing.T) {
     content: "previous response"
 - content: What was that?
 </USER_REQUEST>`}
-	if !isTier1Wake(msgReply, botID, nil, "mention") {
+	if !isTier1Wake(msgReply, botID, nil) {
 		t.Errorf("expected isTier1Wake to be TRUE for reply to Aerial in mention mode")
 	}
 
@@ -4739,34 +4739,34 @@ func TestIsTier1Wake_WakeModeMention(t *testing.T) {
 - mentions: [Aerial]
 - content: Hello there!
 </USER_REQUEST>`}
-	if !isTier1Wake(msgEnvelopeMention, botID, nil, "mention") {
+	if !isTier1Wake(msgEnvelopeMention, botID, nil) {
 		t.Errorf("expected isTier1Wake to be TRUE for mentions envelope in mention mode")
 	}
 
 	// 4. Plaintext name drop "aerial is great" (must NOT wake Tier 1 in any mode)
 	msgBareKeyword := db.Message{Content: "I think aerial is a great anime"}
-	if isTier1Wake(msgBareKeyword, botID, nil, "mention") {
+	if isTier1Wake(msgBareKeyword, botID, nil) {
 		t.Errorf("expected isTier1Wake to be FALSE for bare keyword in mention mode")
 	}
-	if isTier1Wake(msgBareKeyword, botID, nil, "classifier") {
+	if isTier1Wake(msgBareKeyword, botID, nil) {
 		t.Errorf("expected isTier1Wake to be FALSE for bare keyword in classifier mode")
 	}
 
 	// 5. Plaintext keyword "gundam" (must NOT wake Tier 1 in any mode)
 	msgGundam := db.Message{Content: "I love gundam models"}
-	if isTier1Wake(msgGundam, botID, nil, "mention") {
+	if isTier1Wake(msgGundam, botID, nil) {
 		t.Errorf("expected isTier1Wake to be FALSE for 'gundam' in mention mode")
 	}
-	if isTier1Wake(msgGundam, botID, nil, "classifier") {
+	if isTier1Wake(msgGundam, botID, nil) {
 		t.Errorf("expected isTier1Wake to be FALSE for 'gundam' in classifier mode")
 	}
 
 	// 6. Direct role mention <@&role-123> with botRoleIDs matching
 	msgRoleMention := db.Message{Content: "Hey <@&role-aerial-managed> check this out"}
-	if !isTier1Wake(msgRoleMention, botID, []string{"role-aerial-managed"}, "mention") {
+	if !isTier1Wake(msgRoleMention, botID, []string{"role-aerial-managed"}) {
 		t.Errorf("expected isTier1Wake to be TRUE for bot role mention in mention mode")
 	}
-	if isTier1Wake(msgRoleMention, botID, []string{"role-unrelated"}, "mention") {
+	if isTier1Wake(msgRoleMention, botID, []string{"role-unrelated"}) {
 		t.Errorf("expected isTier1Wake to be FALSE for unrelated role mention in mention mode")
 	}
 
@@ -4775,7 +4775,7 @@ func TestIsTier1Wake_WakeModeMention(t *testing.T) {
 - mention_user_ids: [bot-12345 98765]
 - content: Hello bot!
 </USER_REQUEST>`}
-	if !isTier1Wake(msgStructuredUser, botID, nil, "mention") {
+	if !isTier1Wake(msgStructuredUser, botID, nil) {
 		t.Errorf("expected isTier1Wake to be TRUE for structured mention_user_ids")
 	}
 
@@ -4784,7 +4784,7 @@ func TestIsTier1Wake_WakeModeMention(t *testing.T) {
 - mention_role_ids: [role-aerial-managed]
 - content: Ping all robots
 </USER_REQUEST>`}
-	if !isTier1Wake(msgStructuredRole, botID, []string{"role-aerial-managed"}, "mention") {
+	if !isTier1Wake(msgStructuredRole, botID, []string{"role-aerial-managed"}) {
 		t.Errorf("expected isTier1Wake to be TRUE for structured mention_role_ids")
 	}
 
@@ -4794,7 +4794,7 @@ func TestIsTier1Wake_WakeModeMention(t *testing.T) {
 - mention_role_ids: []
 - mentions: [harperwallbanger]
 </USER_REQUEST>`}
-	if isTier1Wake(msgQuotedRole, botID, []string{"role-aerial-managed"}, "mention") {
+	if isTier1Wake(msgQuotedRole, botID, []string{"role-aerial-managed"}) {
 		t.Errorf("expected isTier1Wake to be FALSE for quoted role snowflake in envelope content")
 	}
 
@@ -4804,7 +4804,7 @@ func TestIsTier1Wake_WakeModeMention(t *testing.T) {
 - mention_user_ids: []
 - mentions: []
 </USER_REQUEST>`}
-	if isTier1Wake(msgQuotedUser, botID, nil, "mention") {
+	if isTier1Wake(msgQuotedUser, botID, nil) {
 		t.Errorf("expected isTier1Wake to be FALSE for quoted user snowflake in envelope content")
 	}
 }
@@ -6573,7 +6573,7 @@ func TestIsTier1Wake_SchedulerMessage(t *testing.T) {
 		Content:   "check system health",
 		CreatedAt: time.Now().UTC(),
 	}
-	if !isTier1Wake(msgSched, "bot-123", nil, "mention") {
+	if !isTier1Wake(msgSched, "bot-123", nil) {
 		t.Errorf("Expected isTier1Wake to return true for AuthorID == scheduler in mention mode")
 	}
 
@@ -6585,7 +6585,7 @@ func TestIsTier1Wake_SchedulerMessage(t *testing.T) {
 		Content:       "run cron report",
 		CreatedAt:     time.Now().UTC(),
 	}
-	if !isTier1Wake(msgRun, "bot-123", nil, "mention") {
+	if !isTier1Wake(msgRun, "bot-123", nil) {
 		t.Errorf("Expected isTier1Wake to return true for non-empty ScheduleRunID in mention mode")
 	}
 }

@@ -307,7 +307,7 @@ func TestToolHandler_DefaultTimezoneFallback(t *testing.T) {
 	}
 	schedID := recRes.ScheduleID
 
-	crons, err := ListCronSchedules(db, "chan-default-tz")
+	crons, err := ListCronSchedules(context.Background(), db, "chan-default-tz")
 	if err != nil || len(crons) != 1 {
 		t.Fatalf("Expected 1 cron in DB, got %v (err: %v)", crons, err)
 	}

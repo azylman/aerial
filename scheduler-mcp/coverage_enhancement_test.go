@@ -233,6 +233,7 @@ func TestDB_UpdateCronSchedule_Branches(t *testing.T) {
 		t.Fatalf("InitDB failed: %v", err)
 	}
 	defer db.Close()
+	ctx := context.Background()
 
 	// Insert low effort schedule
 	sched := CronSchedule{
@@ -245,12 +246,12 @@ func TestDB_UpdateCronSchedule_Branches(t *testing.T) {
 		Enabled:   true,
 		Effort:    "low",
 	}
-	if err := InsertCronSchedule(db, sched); err != nil {
+	if err := InsertCronSchedule(ctx, db, sched); err != nil {
 		t.Fatalf("InsertCronSchedule failed: %v", err)
 	}
 
 	// len(sets) == 0 (no updates)
-	if err := UpdateCronSchedule(db, "test-cron-1", nil, nil, nil, nil, nil, nil); err != nil {
+	if err := UpdateCronSchedule(ctx, db, "test-cron-1", nil, nil, nil, nil, nil, nil); err != nil {
 		t.Errorf("expected nil error on empty sets, got %v", err)
 	}
 
@@ -261,25 +262,25 @@ func TestDB_UpdateCronSchedule_Branches(t *testing.T) {
 	prefix := "new prefix"
 	tz := "America/Chicago"
 	nextRun := time.Now().UTC().Add(time.Hour)
-	if err := UpdateCronSchedule(db, "test-cron-1", &eff, &cronExpr, &prompt, &prefix, &tz, &nextRun); err != nil {
+	if err := UpdateCronSchedule(ctx, db, "test-cron-1", &eff, &cronExpr, &prompt, &prefix, &tz, &nextRun); err != nil {
 		t.Fatalf("UpdateCronSchedule failed: %v", err)
 	}
 
 	// Update with effort != low (high)
 	effHigh := "high"
-	if err := UpdateCronSchedule(db, "test-cron-1", &effHigh, nil, nil, nil, nil, nil); err != nil {
+	if err := UpdateCronSchedule(ctx, db, "test-cron-1", &effHigh, nil, nil, nil, nil, nil); err != nil {
 		t.Fatalf("UpdateCronSchedule failed: %v", err)
 	}
 
 	// Schedule not found
-	if err := UpdateCronSchedule(db, "non-existent-cron", &effHigh, nil, nil, nil, nil, nil); err == nil {
+	if err := UpdateCronSchedule(ctx, db, "non-existent-cron", &effHigh, nil, nil, nil, nil, nil); err == nil {
 		t.Error("expected error when updating nonexistent schedule")
 	}
 
 	// DB error on closed db
 	closedDB, _ := sql.Open("sqlite", ":memory:")
 	_ = closedDB.Close()
-	if err := UpdateCronSchedule(closedDB, "test-cron-1", &effHigh, nil, nil, nil, nil, nil); err == nil {
+	if err := UpdateCronSchedule(ctx, closedDB, "test-cron-1", &effHigh, nil, nil, nil, nil, nil); err == nil {
 		t.Error("expected error on closed db")
 	}
 }
@@ -290,8 +291,9 @@ func TestUpdateCronSchedule_EmptyID(t *testing.T) {
 		t.Fatalf("InitDB failed: %v", err)
 	}
 	defer db.Close()
+	ctx := context.Background()
 
-	if err := UpdateCronSchedule(db, "   ", nil, nil, nil, nil, nil, nil); err == nil {
+	if err := UpdateCronSchedule(ctx, db, "   ", nil, nil, nil, nil, nil, nil); err == nil {
 		t.Error("expected error for empty schedule ID")
 	}
 }
@@ -302,21 +304,22 @@ func TestDB_ListAndScanErrors(t *testing.T) {
 		t.Fatalf("InitDB failed: %v", err)
 	}
 	defer db.Close()
+	ctx := context.Background()
 
 	// Insert valid data with Enabled: true
-	_ = InsertCronSchedule(db, CronSchedule{ID: "c1", TargetID: "t1", CronExpr: "* * * * *", Prompt: "p", NextRunAt: time.Now(), Enabled: true})
-	_ = InsertOneShotSchedule(db, OneShotSchedule{ID: "o1", ThreadID: "t1", Prompt: "p", RunAt: time.Now()})
+	_ = InsertCronSchedule(ctx, db, CronSchedule{ID: "c1", TargetID: "t1", CronExpr: "* * * * *", Prompt: "p", NextRunAt: time.Now(), Enabled: true})
+	_ = InsertOneShotSchedule(ctx, db, OneShotSchedule{ID: "o1", ThreadID: "t1", Prompt: "p", RunAt: time.Now()})
 
 	// ListCronSchedules scan error: update next_run_at to unparseable string
 	if _, err := db.Exec("UPDATE cron_schedules SET next_run_at = 'not-a-date';"); err == nil {
-		if _, err := ListCronSchedules(db, ""); err == nil {
+		if _, err := ListCronSchedules(ctx, db, ""); err == nil {
 			t.Error("expected scan error on invalid next_run_at")
 		}
 	}
 
 	// ListOneShotSchedules scan error: update run_at to unparseable string
 	if _, err := db.Exec("UPDATE one_shot_schedules SET run_at = 'not-a-date';"); err == nil {
-		if _, err := ListOneShotSchedules(db, ""); err == nil {
+		if _, err := ListOneShotSchedules(ctx, db, ""); err == nil {
 			t.Error("expected scan error on invalid run_at")
 		}
 	}
@@ -325,12 +328,12 @@ func TestDB_ListAndScanErrors(t *testing.T) {
 	if _, err := db.Exec("DROP TABLE one_shot_schedules;"); err != nil {
 		t.Fatalf("failed to drop table: %v", err)
 	}
-	if _, err := ListOneShotSchedules(db, ""); err == nil {
+	if _, err := ListOneShotSchedules(ctx, db, ""); err == nil {
 		t.Error("expected query error when table dropped")
 	}
 
 	// DeleteSchedule error on second query: since one_shot_schedules is dropped, resOneShot returns error!
-	if _, err := DeleteSchedule(db, "c1"); err == nil {
+	if _, err := DeleteSchedule(ctx, db, "c1"); err == nil {
 		t.Error("expected error in DeleteSchedule when one_shot_schedules is dropped")
 	}
 }

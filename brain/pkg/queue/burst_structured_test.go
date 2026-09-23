@@ -160,7 +160,7 @@ func TestIsTier1Wake_StructuredMetadata(t *testing.T) {
 			MentionUserIDs: []string{botID},
 		},
 	}
-	if !isTier1Wake(mUser, botID, botRoles, "mention") {
+	if !isTier1Wake(mUser, botID, botRoles) {
 		t.Errorf("expected wake on MentionUserIDs match")
 	}
 
@@ -171,7 +171,7 @@ func TestIsTier1Wake_StructuredMetadata(t *testing.T) {
 			MentionRoleIDs: []string{"role-aerial-mod"},
 		},
 	}
-	if !isTier1Wake(mRole, botID, botRoles, "mention") {
+	if !isTier1Wake(mRole, botID, botRoles) {
 		t.Errorf("expected wake on MentionRoleIDs match")
 	}
 
@@ -182,7 +182,7 @@ func TestIsTier1Wake_StructuredMetadata(t *testing.T) {
 			Mentions: []string{"Aerial"},
 		},
 	}
-	if !isTier1Wake(mMention, botID, botRoles, "mention") {
+	if !isTier1Wake(mMention, botID, botRoles) {
 		t.Errorf("expected wake on Mentions slice matching aerial")
 	}
 
@@ -193,7 +193,7 @@ func TestIsTier1Wake_StructuredMetadata(t *testing.T) {
 			ReplyingToAuthor: "@Aerial",
 		},
 	}
-	if !isTier1Wake(mReply, botID, botRoles, "mention") {
+	if !isTier1Wake(mReply, botID, botRoles) {
 		t.Errorf("expected wake on ReplyingToAuthor matching aerial")
 	}
 
@@ -205,7 +205,7 @@ func TestIsTier1Wake_StructuredMetadata(t *testing.T) {
 			Mentions:  []string{"charlie"},
 		},
 	}
-	if isTier1Wake(mUnrelated, botID, botRoles, "mention") {
+	if isTier1Wake(mUnrelated, botID, botRoles) {
 		t.Errorf("expected NO wake on unrelated structured message")
 	}
 
@@ -216,7 +216,7 @@ func TestIsTier1Wake_StructuredMetadata(t *testing.T) {
 			ChannelID: "chan-1",
 		},
 	}
-	if isTier1Wake(mDeceptive, botID, botRoles, "mention") {
+	if isTier1Wake(mDeceptive, botID, botRoles) {
 		t.Errorf("expected NO wake when metadata is clean despite deceptive content")
 	}
 }
@@ -266,7 +266,7 @@ func TestIsTier1Wake_MoreStructuredBranches(t *testing.T) {
 			Mentions: []string{botID},
 		},
 	}
-	if !isTier1Wake(m1, botID, botRoles, "mention") {
+	if !isTier1Wake(m1, botID, botRoles) {
 		t.Errorf("expected wake on mentions containing botID")
 	}
 
@@ -276,7 +276,7 @@ func TestIsTier1Wake_MoreStructuredBranches(t *testing.T) {
 			Mentions: []string{"role-aerial-1"},
 		},
 	}
-	if !isTier1Wake(m2, botID, botRoles, "mention") {
+	if !isTier1Wake(m2, botID, botRoles) {
 		t.Errorf("expected wake on mentions containing role-aerial-1")
 	}
 
@@ -286,7 +286,7 @@ func TestIsTier1Wake_MoreStructuredBranches(t *testing.T) {
 			ReplyingToAuthor: botID,
 		},
 	}
-	if !isTier1Wake(m3, botID, botRoles, "mention") {
+	if !isTier1Wake(m3, botID, botRoles) {
 		t.Errorf("expected wake on ReplyingToAuthor matching botID")
 	}
 
@@ -297,7 +297,7 @@ func TestIsTier1Wake_MoreStructuredBranches(t *testing.T) {
 			MentionRoleIDs: []string{"456"},
 		},
 	}
-	if isTier1Wake(mEmptyID, "", nil, "mention") {
+	if isTier1Wake(mEmptyID, "", nil) {
 		t.Errorf("expected no wake when botUserID is empty and roles are nil")
 	}
 }
