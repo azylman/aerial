@@ -102,6 +102,18 @@ func cloneMessage(m *Message) *Message {
 		return nil
 	}
 	cp := *m
+	if m.Metadata.Mentions != nil {
+		cp.Metadata.Mentions = append([]string(nil), m.Metadata.Mentions...)
+	}
+	if m.Metadata.MentionUserIDs != nil {
+		cp.Metadata.MentionUserIDs = append([]string(nil), m.Metadata.MentionUserIDs...)
+	}
+	if m.Metadata.MentionRoleIDs != nil {
+		cp.Metadata.MentionRoleIDs = append([]string(nil), m.Metadata.MentionRoleIDs...)
+	}
+	if m.Metadata.Attachments != nil {
+		cp.Metadata.Attachments = append([]string(nil), m.Metadata.Attachments...)
+	}
 	return &cp
 }
 

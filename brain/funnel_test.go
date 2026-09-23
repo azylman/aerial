@@ -2684,6 +2684,86 @@ func TestFunnelDefaultFuncs(t *testing.T) {
 	_, _ = funnelMemberFetcher(&discordgo.Session{}, "g1", "u1")
 }
 
+func TestExtractDiscordMetadata(t *testing.T) {
+	// 1. Nil message
+	empty := extractDiscordMetadata(nil, nil, "")
+	if !empty.IsEmpty() {
+		t.Errorf("expected empty metadata for nil message")
+	}
+
+	// 2. Full message with session state roles
+	s := &discordgo.Session{
+		State: discordgo.NewState(),
+	}
+	s.State.GuildAdd(&discordgo.Guild{
+		ID: "guild-1",
+		Roles: []*discordgo.Role{
+			{ID: "role-mod", Name: "Moderator"},
+		},
+	})
+
+	m := &discordgo.Message{
+		ID:        "msg-1",
+		ChannelID: "chan-1",
+		GuildID:   "guild-1",
+		Content:   "test content",
+		Author: &discordgo.User{
+			ID:         "user-1",
+			Username:   "testuser\n",
+			GlobalName: "Test User\r",
+			Bot:        false,
+		},
+		ReferencedMessage: &discordgo.Message{
+			Author: &discordgo.User{
+				Username: "bob",
+			},
+			Content: "hello ref",
+		},
+		Mentions: []*discordgo.User{
+			nil,
+			{ID: "u-mention-1", Username: "alice\n"},
+		},
+		MentionRoles: []string{"role-mod", "role-unknown"},
+		Attachments: []*discordgo.MessageAttachment{
+			nil,
+			{URL: "https://example.com/att.png"},
+			{URL: ""},
+		},
+	}
+
+	meta := extractDiscordMetadata(s, m, "thread-1")
+	if meta.ChannelID != "chan-1" || meta.TargetThreadID != "thread-1" || meta.GuildID != "guild-1" {
+		t.Errorf("metadata IDs mismatch: %+v", meta)
+	}
+	if meta.AuthorUsername != "testuser\n" || meta.AuthorGlobalName != "Test User\r" {
+		t.Errorf("author name mismatch: %+v", meta)
+	}
+	if meta.ReplyingToAuthor != "@bob" || meta.ReplyingToContent != "hello ref" {
+		t.Errorf("replyingTo mismatch: %s / %s", meta.ReplyingToAuthor, meta.ReplyingToContent)
+	}
+	if len(meta.MentionUserIDs) != 1 || meta.MentionUserIDs[0] != "u-mention-1" {
+		t.Errorf("mentionUserIDs mismatch: %v", meta.MentionUserIDs)
+	}
+	if len(meta.MentionRoleIDs) != 2 || meta.MentionRoleIDs[0] != "role-mod" {
+		t.Errorf("mentionRoleIDs mismatch: %v", meta.MentionRoleIDs)
+	}
+	if len(meta.Attachments) != 1 || meta.Attachments[0] != "https://example.com/att.png" {
+		t.Errorf("attachments mismatch: %v", meta.Attachments)
+	}
+
+	// 3. Message with nil author and referenced message with nil author
+	mNilAuth := &discordgo.Message{
+		ChannelID: "chan-2",
+		ReferencedMessage: &discordgo.Message{
+			Content: "no author ref",
+		},
+	}
+	metaNilAuth := extractDiscordMetadata(nil, mNilAuth, "thread-2")
+	if metaNilAuth.ReplyingToAuthor != "Unknown" {
+		t.Errorf("expected 'Unknown' for referenced message with nil author, got %q", metaNilAuth.ReplyingToAuthor)
+	}
+}
+
 
 
 

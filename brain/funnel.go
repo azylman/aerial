@@ -298,6 +298,93 @@ func buildDiscordPrompt(s *discordgo.Session, m *discordgo.Message, targetThread
 	return BuildDiscordPrompt(input)
 }
 
+// extractDiscordMetadata extracts structured metadata from a discordgo.Message.
+func extractDiscordMetadata(s *discordgo.Session, m *discordgo.Message, targetThreadID string) db.MessageMetadata {
+	if m == nil {
+		return db.MessageMetadata{}
+	}
+	roleNames := make(map[string]string)
+	if s != nil && s.State != nil && m.GuildID != "" {
+		for _, roleID := range m.MentionRoles {
+			if r, err := s.State.Role(m.GuildID, roleID); err == nil && r != nil && r.Name != "" {
+				roleNames[roleID] = r.Name
+			}
+		}
+	}
+	var adminUsers []string
+	if cfg := currentFunnelConfig(); cfg != nil {
+		cur := cfg.Current()
+		adminUsers = cur.AdminUsers
+	}
+	isAdmin := false
+	globalName := ""
+	authorBot := false
+	username := ""
+	if m.Author != nil {
+		isAdmin = config.IsAdmin(adminUsers, m.Author.ID, m.Author.Username, m.Author.GlobalName)
+		username = m.Author.Username
+		globalName = m.Author.GlobalName
+		authorBot = m.Author.Bot
+	}
+
+	var replyingToAuthor, replyingToContent string
+	if m.ReferencedMessage != nil {
+		replyingToAuthor = "Unknown"
+		if m.ReferencedMessage.Author != nil {
+			replyingToAuthor = "@" + strings.ReplaceAll(strings.ReplaceAll(m.ReferencedMessage.Author.Username, "\n", " "), "\r", "")
+		}
+		replyingToContent = m.ReferencedMessage.Content
+	}
+
+	var mentions []string
+	var mentionUserIDs []string
+	for _, u := range m.Mentions {
+		if u != nil {
+			cleanU := strings.ReplaceAll(strings.ReplaceAll(u.Username, "\n", " "), "\r", "")
+			mentions = append(mentions, cleanU)
+			if u.ID != "" {
+				mentionUserIDs = append(mentionUserIDs, u.ID)
+			}
+		}
+	}
+
+	var mentionRoleIDs []string
+	for _, roleID := range m.MentionRoles {
+		roleName := roleID
+		if rName, ok := roleNames[roleID]; ok && rName != "" {
+			roleName = rName
+		}
+		cleanR := strings.ReplaceAll(strings.ReplaceAll(roleName, "\n", " "), "\r", "")
+		mentions = append(mentions, cleanR)
+		if roleID != "" {
+			mentionRoleIDs = append(mentionRoleIDs, roleID)
+		}
+	}
+
+	var attachments []string
+	for _, a := range m.Attachments {
+		if a != nil && a.URL != "" {
+			attachments = append(attachments, a.URL)
+		}
+	}
+
+	return db.MessageMetadata{
+		ChannelID:         m.ChannelID,
+		TargetThreadID:    targetThreadID,
+		GuildID:           m.GuildID,
+		AuthorUsername:    username,
+		AuthorGlobalName:  globalName,
+		AuthorBot:         authorBot,
+		IsAdmin:           isAdmin,
+		Mentions:          mentions,
+		MentionUserIDs:    mentionUserIDs,
+		MentionRoleIDs:    mentionRoleIDs,
+		ReplyingToAuthor:  replyingToAuthor,
+		ReplyingToContent: replyingToContent,
+		Attachments:       attachments,
+	}
+}
+
 // resolveEffectiveChannelPolicy resolves the ChannelPolicy for a channel or thread.
 // If channelID is a Discord thread, it resolves the parent channel's policy so threads
 // inherit ignore/whitelisting rules from their parent channel.
@@ -521,13 +608,12 @@ func connectDiscordFunnel(ctx context.Context, store db.Store, pool *queue.Worke
 			}
 
 			targetThreadID, isThread := getOrCreateThreadID(s, m.Message)
-			policy, _ := resolveEffectiveChannelPolicy(s, m.ChannelID)
 			resolvedGuildID := resolveGuildID(s, m.Message)
 			m.GuildID = resolvedGuildID
 			if m.Message != nil {
 				m.Message.GuildID = resolvedGuildID
 			}
-			prompt := buildDiscordPrompt(s, m.Message, targetThreadID, policy)
+			metadata := extractDiscordMetadata(s, m.Message, targetThreadID)
 
 			authorID := ""
 			authorName := "Discord User"
@@ -536,13 +622,19 @@ func connectDiscordFunnel(ctx context.Context, store db.Store, pool *queue.Worke
 				authorName = m.Author.Username
 			}
 
+			rawContent := ""
+			if m.Message != nil {
+				rawContent = m.Message.Content
+			}
+
 			msg := db.Message{
 				ID:         m.ID,
 				ThreadID:   targetThreadID,
 				GuildID:    resolvedGuildID,
 				AuthorID:   authorID,
 				AuthorName: authorName,
-				Content:    prompt,
+				Content:    rawContent,
+				Metadata:   metadata,
 				Status:     db.StatusPending,
 				CreatedAt:  m.Timestamp,
 				UpdatedAt:  time.Now().UTC(),
@@ -805,10 +897,9 @@ func RunStartupCatchUpSweep(ctx context.Context, store db.Store, pool *queue.Wor
 			}
 
 			targetThreadID, isThread := getOrCreateThreadID(s, m, false)
-			sweepPolicy, _ := resolveEffectiveChannelPolicy(s, m.ChannelID)
 			resolvedGuildID := resolveGuildID(s, m)
 			m.GuildID = resolvedGuildID
-			prompt := buildDiscordPrompt(s, m, targetThreadID, sweepPolicy)
+			metadata := extractDiscordMetadata(s, m, targetThreadID)
 
 			authorID := m.Author.ID
 			authorName := m.Author.Username
@@ -819,7 +910,8 @@ func RunStartupCatchUpSweep(ctx context.Context, store db.Store, pool *queue.Wor
 				GuildID:    resolvedGuildID,
 				AuthorID:   authorID,
 				AuthorName: authorName,
-				Content:    prompt,
+				Content:    m.Content,
+				Metadata:   metadata,
 				Status:     db.StatusPending,
 				CreatedAt:  msgTime,
 				UpdatedAt:  time.Now().UTC(),

@@ -141,12 +141,86 @@ func (p *WorkerPool) runThreadWorker(threadID string, state *threadWorkerState) 
 	}
 }
 
+// FormatSingleDiscordPrompt formats a single structured Discord message into the canonical <USER_REQUEST> prompt envelope JIT.
+func FormatSingleDiscordPrompt(m db.Message) string {
+	var sb strings.Builder
+	sb.WriteString("<USER_REQUEST>\nHere's a message someone sent you from Discord:\n\n")
+	sb.WriteString(fmt.Sprintf("- id: %s\n", m.ID))
+	channelID := m.Metadata.ChannelID
+	if channelID == "" {
+		channelID = m.ThreadID
+	}
+	sb.WriteString(fmt.Sprintf("- channel_id: %s\n", channelID))
+	sb.WriteString(fmt.Sprintf("- thread_id: %s\n", m.ThreadID))
+	sb.WriteString(fmt.Sprintf("- guild_id: %s\n", m.GuildID))
+	sb.WriteString(fmt.Sprintf("- author_id: %s\n", m.AuthorID))
+	cleanUsername := strings.ReplaceAll(strings.ReplaceAll(m.AuthorName, "\n", " "), "\r", "")
+	cleanGlobalName := strings.ReplaceAll(strings.ReplaceAll(m.Metadata.AuthorGlobalName, "\n", " "), "\r", "")
+	sb.WriteString(fmt.Sprintf("- author_username: %s\n", cleanUsername))
+	sb.WriteString(fmt.Sprintf("- author_global_name: %s\n", cleanGlobalName))
+	sb.WriteString(fmt.Sprintf("- author_bot: %t\n", m.Metadata.AuthorBot))
+	sb.WriteString(fmt.Sprintf("- is_admin: %t\n", m.Metadata.IsAdmin))
+
+	if m.Metadata.ReplyingToAuthor != "" || m.Metadata.ReplyingToContent != "" {
+		sb.WriteString("- replying_to:\n")
+		authorName := m.Metadata.ReplyingToAuthor
+		if authorName == "" {
+			authorName = "Unknown"
+		}
+		if !strings.HasPrefix(authorName, "@") && authorName != "Unknown" {
+			authorName = "@" + authorName
+		}
+		sb.WriteString(fmt.Sprintf("    author: %q\n", authorName))
+		cleanRefContent := strings.ReplaceAll(m.Metadata.ReplyingToContent, "</USER_REQUEST>", "<\\/USER_REQUEST>")
+		cleanRefContent = strings.ReplaceAll(cleanRefContent, "<USER_REQUEST>", "<\\USER_REQUEST>")
+		sb.WriteString(fmt.Sprintf("    content: %q\n", cleanRefContent))
+	}
+
+	sanitizedContent := strings.ReplaceAll(m.Content, "</USER_REQUEST>", "<\\/USER_REQUEST>")
+	sanitizedContent = strings.ReplaceAll(sanitizedContent, "<USER_REQUEST>", "<\\USER_REQUEST>")
+	sb.WriteString(fmt.Sprintf("- content: %s\n", sanitizedContent))
+	ts := m.CreatedAt
+	if ts.IsZero() {
+		ts = time.Now().UTC()
+	}
+	sb.WriteString(fmt.Sprintf("- timestamp: %s\n", ts.Format(time.RFC3339)))
+
+	mentions := m.Metadata.Mentions
+	if mentions == nil {
+		mentions = []string{}
+	}
+	mentionUserIDs := m.Metadata.MentionUserIDs
+	if mentionUserIDs == nil {
+		mentionUserIDs = []string{}
+	}
+	mentionRoleIDs := m.Metadata.MentionRoleIDs
+	if mentionRoleIDs == nil {
+		mentionRoleIDs = []string{}
+	}
+	attachments := m.Metadata.Attachments
+	if attachments == nil {
+		attachments = []string{}
+	}
+
+	sb.WriteString(fmt.Sprintf("- mentions: %v\n", mentions))
+	sb.WriteString(fmt.Sprintf("- mention_user_ids: %v\n", mentionUserIDs))
+	sb.WriteString(fmt.Sprintf("- mention_role_ids: %v\n", mentionRoleIDs))
+	sb.WriteString(fmt.Sprintf("- attachments: %v\n\n", attachments))
+
+	sb.WriteString("Only formulate and output your final response once all immediate work is complete. It will be delivered directly to Discord.\n")
+	sb.WriteString("</USER_REQUEST>")
+	return sb.String()
+}
+
 // CoalesceBurstPrompt formats a burst of messages into a single coalesced multi-message prompt turn.
 func CoalesceBurstPrompt(burst []db.Message) string {
 	if len(burst) == 0 {
 		return ""
 	}
 	if len(burst) == 1 {
+		if !burst[0].Metadata.IsEmpty() {
+			return FormatSingleDiscordPrompt(burst[0])
+		}
 		return burst[0].Content
 	}
 
@@ -164,7 +238,7 @@ func CoalesceBurstPrompt(burst []db.Message) string {
 		if m.CreatedAt.IsZero() {
 			timeStr = time.Now().UTC().Format("15:04:05")
 		}
-		body := extractMessageBody(m.Content)
+		body := m.BodyText()
 		sb.WriteString(fmt.Sprintf("--- Message %d (by %s at %s) ---\n%s\n\n", i+1, author, timeStr, body))
 	}
 	sb.WriteString("</USER_REQUEST>")

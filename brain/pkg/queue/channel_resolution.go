@@ -3,6 +3,7 @@ package queue
 import (
 	"fmt"
 	"log"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -168,40 +169,7 @@ func ResolveEffectiveChannel(s *discordgo.Session, channelID string) (effectiveI
 }
 
 func extractMessageBody(content string) string {
-	trimmed := strings.TrimSpace(content)
-	if strings.Contains(trimmed, "<USER_REQUEST>") {
-		contentMarker := "- content:"
-		idx := strings.Index(trimmed, contentMarker)
-		if idx != -1 {
-			start := idx + len(contentMarker)
-			rest := trimmed[start:]
-
-			// Find boundary of next envelope field
-			endIdx := -1
-			markers := []string{"\n- timestamp:", "\n- mentions:", "\n- attachments:", "\n- ", "\n</USER_REQUEST>"}
-			for _, m := range markers {
-				if pos := strings.Index(rest, m); pos != -1 {
-					if endIdx == -1 || pos < endIdx {
-						endIdx = pos
-					}
-				}
-			}
-			var val string
-			if endIdx != -1 {
-				val = rest[:endIdx]
-			} else {
-				val = rest
-			}
-			val = strings.TrimSpace(val)
-			val = strings.ReplaceAll(val, "<\\/USER_REQUEST>", "</USER_REQUEST>")
-			val = strings.ReplaceAll(val, "<\\USER_REQUEST>", "<USER_REQUEST>")
-			return val
-		}
-		inner := strings.TrimPrefix(trimmed, "<USER_REQUEST>")
-		inner = strings.TrimSuffix(inner, "</USER_REQUEST>")
-		return strings.TrimSpace(inner)
-	}
-	return trimmed
+	return db.ExtractMessageBody(content)
 }
 
 var guildMemberFetcher = func(sess *discordgo.Session, guildID string, userID string) (*discordgo.Member, error) {
@@ -321,6 +289,39 @@ func containsToken(s, token string) bool {
 func isTier1Wake(m db.Message, botUserID string, botRoleIDs []string, wakeMode string) bool {
 	if m.AuthorID == "http-client" || m.AuthorID == "scheduler" || m.ScheduleRunID != "" {
 		return true
+	}
+
+	if !m.Metadata.IsEmpty() {
+		// 1. Direct slice lookup for User IDs
+		if botUserID != "" && slices.Contains(m.Metadata.MentionUserIDs, botUserID) {
+			return true
+		}
+		// 2. Direct slice lookup for Role IDs
+		for _, rID := range botRoleIDs {
+			if rID != "" && slices.Contains(m.Metadata.MentionRoleIDs, rID) {
+				return true
+			}
+		}
+		// 3. Mentions check (username or role name)
+		for _, mention := range m.Metadata.Mentions {
+			mentionLower := strings.ToLower(mention)
+			if strings.Contains(mentionLower, "aerial") || (botUserID != "" && strings.Contains(mentionLower, strings.ToLower(botUserID))) {
+				return true
+			}
+			for _, rID := range botRoleIDs {
+				if rID != "" && strings.Contains(mentionLower, strings.ToLower(rID)) {
+					return true
+				}
+			}
+		}
+		// 4. Replying to author
+		if m.Metadata.ReplyingToAuthor != "" {
+			authorLower := strings.ToLower(m.Metadata.ReplyingToAuthor)
+			if strings.Contains(authorLower, "aerial") || (botUserID != "" && strings.Contains(authorLower, strings.ToLower(botUserID))) {
+				return true
+			}
+		}
+		return false
 	}
 
 	// 1. Structured Discord Gateway User Mentions from Prompt Envelope:

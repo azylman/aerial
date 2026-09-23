@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS messages (
 	error_message TEXT,
 	response_text TEXT,
 	schedule_run_id TEXT NOT NULL DEFAULT '',
+	metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
 	created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
 	updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -150,6 +151,7 @@ func initSchemaPostgres(ctx context.Context, database *sql.DB) error {
 	}
 
 	execNotice("ALTER TABLE messages ADD COLUMN IF NOT EXISTS effort TEXT NOT NULL DEFAULT ''")
+	execNotice("ALTER TABLE messages ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb")
 	execNotice("ALTER TABLE cron_schedules ADD COLUMN IF NOT EXISTS effort TEXT NOT NULL DEFAULT 'high'")
 	execNotice("ALTER TABLE schedule_runs ADD COLUMN IF NOT EXISTS effort TEXT NOT NULL DEFAULT 'high'")
 	execNotice("ALTER TABLE schedule_runs ADD COLUMN IF NOT EXISTS model TEXT NOT NULL DEFAULT ''")

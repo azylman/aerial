@@ -282,7 +282,7 @@ func fetchHistoryFromDB(dbOrStore any, channelID string, beforeID string, limit 
 			ID:         m.ID,
 			AuthorName: m.AuthorName,
 			Role:       role,
-			Content:    extractMessageBody(m.Content),
+			Content:    m.BodyText(),
 			CreatedAt:  m.CreatedAt,
 		})
 	}
