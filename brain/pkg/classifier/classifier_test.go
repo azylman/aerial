@@ -152,6 +152,99 @@ func TestClassifier_AuthorFallbacks(t *testing.T) {
 	}
 }
 
+func TestClassifier_FormatMessage_ReplyMetadata(t *testing.T) {
+	ts := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name     string
+		msg      db.Message
+		expected string
+	}{
+		{
+			name: "structured metadata with leading @",
+			msg: db.Message{
+				AuthorName: "ryan",
+				Content:    "did you run the tests?",
+				CreatedAt:  ts,
+				Metadata: db.MessageMetadata{
+					ReplyingToAuthor:  "@Amos",
+					ReplyingToContent: "running them now",
+				},
+			},
+			expected: "[@ryan] (replying to @Amos) (2026-09-02T12:00:00Z): did you run the tests?",
+		},
+		{
+			name: "structured metadata without leading @",
+			msg: db.Message{
+				AuthorName: "ryan",
+				Content:    "can you check this?",
+				CreatedAt:  ts,
+				Metadata: db.MessageMetadata{
+					ReplyingToAuthor: "amos",
+				},
+			},
+			expected: "[@ryan] (replying to @amos) (2026-09-02T12:00:00Z): can you check this?",
+		},
+		{
+			name: "structured metadata with Unknown",
+			msg: db.Message{
+				AuthorName: "ryan",
+				Content:    "who was that?",
+				CreatedAt:  ts,
+				Metadata: db.MessageMetadata{
+					ReplyingToAuthor: "Unknown",
+				},
+			},
+			expected: "[@ryan] (replying to Unknown) (2026-09-02T12:00:00Z): who was that?",
+		},
+		{
+			name: "legacy prompt envelope format",
+			msg: db.Message{
+				AuthorName: "ryan",
+				Content: "<USER_REQUEST>\n- id: 123\n- replying_to:\n    author: \"@Amos\"\n    content: \"hello\"\n- content: tests passed!\n</USER_REQUEST>",
+				CreatedAt:  ts,
+			},
+			expected: "[@ryan] (replying to @Amos) (2026-09-02T12:00:00Z): tests passed!",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := FormatMessage(tt.msg)
+			if got != tt.expected {
+				t.Errorf("FormatMessage() = %q, want %q", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestClassifier_PromptFormatting_WithReplies(t *testing.T) {
+	ts := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
+	target := db.Message{
+		AuthorName: "ryan",
+		Content:    "what about this fix?",
+		CreatedAt:  ts,
+		Metadata: db.MessageMetadata{
+			ReplyingToAuthor: "@amos",
+		},
+	}
+	recent := []db.Message{
+		{
+			AuthorName: "amos",
+			Content:    "working on the issue",
+			CreatedAt:  ts.Add(-time.Minute),
+		},
+	}
+
+	prompt := BuildBurstPrompt([]db.Message{target}, recent, "")
+	if !strings.Contains(prompt, "[@ryan] (replying to @amos)") {
+		t.Errorf("expected prompt to contain reply metadata, got:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "General questions, replies, or remarks directed at other humans or bots where AI input is uninvited.") {
+		t.Errorf("expected prompt to contain updated evaluation rubric, got:\n%s", prompt)
+	}
+}
+
 func TestClassifier_JSONParsing(t *testing.T) {
 	tests := []struct {
 		name           string

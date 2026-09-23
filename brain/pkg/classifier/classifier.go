@@ -198,7 +198,29 @@ func SanitizeAuthor(name string) string {
 	return sanitizer.SanitizeAuthor(name)
 }
 
+// ExtractReplyingToAuthor retrieves the author being replied to, checking structured metadata first,
+// then falling back to legacy prompt envelope formats.
+func ExtractReplyingToAuthor(m db.Message) string {
+	if m.Metadata.ReplyingToAuthor != "" {
+		return m.Metadata.ReplyingToAuthor
+	}
+	if strings.Contains(m.Content, "- replying_to:") {
+		idx := strings.Index(m.Content, "- replying_to:")
+		rest := m.Content[idx:]
+		if authIdx := strings.Index(rest, "author:"); authIdx != -1 {
+			authRest := rest[authIdx+len("author:"):]
+			if lineEnd := strings.Index(authRest, "\n"); lineEnd != -1 {
+				line := strings.TrimSpace(authRest[:lineEnd])
+				line = strings.Trim(line, `"'`)
+				return line
+			}
+		}
+	}
+	return ""
+}
+
 // FormatMessage formats a single db.Message into [@AuthorName] (timestamp): Content.
+// If the message is replying to another author, it formats as [@AuthorName] (replying to @TargetAuthor) (timestamp): Content.
 func FormatMessage(m db.Message) string {
 	author := SanitizeAuthor(m.AuthorName)
 	if author == "" {
@@ -207,8 +229,20 @@ func FormatMessage(m db.Message) string {
 	if author == "" {
 		author = "unknown"
 	}
+
+	replyTo := ""
+	if targetAuthor := ExtractReplyingToAuthor(m); targetAuthor != "" {
+		cleanTarget := SanitizeAuthor(targetAuthor)
+		if cleanTarget != "" {
+			if !strings.HasPrefix(cleanTarget, "@") && !strings.EqualFold(cleanTarget, "unknown") {
+				cleanTarget = "@" + cleanTarget
+			}
+			replyTo = fmt.Sprintf(" (replying to %s)", cleanTarget)
+		}
+	}
+
 	ts := m.CreatedAt.UTC().Format(time.RFC3339)
-	return fmt.Sprintf("[@%s] (%s): %s", author, ts, SanitizeContent(m.BodyText()))
+	return fmt.Sprintf("[@%s]%s (%s): %s", author, replyTo, ts, SanitizeContent(m.BodyText()))
 }
 
 // DefaultAmbientWakePrompt is the default evaluation directive used by the ambient relevance classifier.
@@ -259,9 +293,9 @@ func BuildBurstPrompt(targetBurst []db.Message, recentContext []db.Message, cust
 
 	sb.WriteString("Evaluation Rubric:\n")
 	sb.WriteString("- 0.0 to 0.2: Casual banter, jokes, emojis, greetings, or conversations exclusively between humans.\n")
-	sb.WriteString("- 0.3 to 0.5: General questions or remarks directed at other humans where AI input is uninvited.\n")
+	sb.WriteString("- 0.3 to 0.5: General questions, replies, or remarks directed at other humans or bots where AI input is uninvited.\n")
 	sb.WriteString("- 0.6 to 0.7: Technical discussions where AI knowledge could be helpful, but no clear request was made.\n")
-	sb.WriteString("- 0.8 to 1.0: Clear requests for assistance, direct questions, open questions to the room, or follow-ups to Aerial.\n\n")
+	sb.WriteString("- 0.8 to 1.0: Clear requests for assistance, direct questions, open questions to the room, or follow-ups/replies to Aerial.\n\n")
 
 	sb.WriteString("Evaluate whether Aerial should participate or respond to any topic, question, or discussion contained in the target message or burst.\n")
 	sb.WriteString("Respond ONLY with a valid, raw JSON object. Do NOT wrap in markdown code fences (no ``` or ```json). Do NOT include any explanations, preamble, or trailing text outside the JSON object.\n")
