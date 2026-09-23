@@ -7,13 +7,13 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/azylman/aerial/brain/pkg/sanitizer"
 )
 
 var (
 	tagRegex      = regexp.MustCompile(`(?s)<[A-Za-z0-9_-]+.*?>.*?</[A-Za-z0-9_-]+>|<[^>]+>`)
-	mentionRegex  = regexp.MustCompile(`<@!?[0-9]+>|<@&[0-9]+>|<#[0-9]+>`)
 	markdownRegex = regexp.MustCompile(`[#*_` + "`" + `>]+`)
-	spaceRegex    = regexp.MustCompile(`\s+`)
 )
 
 type ActiveTask struct {
@@ -43,9 +43,9 @@ func CleanTaskSummary(content string) string {
 	body := ExtractMessageBody(trimmed)
 
 	cleaned := tagRegex.ReplaceAllString(body, " ")
-	cleaned = mentionRegex.ReplaceAllString(cleaned, "")
+	cleaned = sanitizer.SanitizeMentions(cleaned)
 	cleaned = markdownRegex.ReplaceAllString(cleaned, "")
-	cleaned = strings.TrimSpace(spaceRegex.ReplaceAllString(cleaned, " "))
+	cleaned = sanitizer.NormalizeWhitespace(cleaned)
 
 	if cleaned == "" {
 		cleaned = "Agent Task"

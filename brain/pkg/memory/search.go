@@ -11,18 +11,16 @@ import (
 
 	"github.com/azylman/aerial/brain/pkg/db"
 	"github.com/azylman/aerial/brain/pkg/metrics"
+	"github.com/azylman/aerial/brain/pkg/sanitizer"
 )
 
 var (
-	reDiscordMention          = regexp.MustCompile(`<@!?[0-9]+>|<@&[0-9]+>|<#[0-9]+>`)
-	reWhitespace              = regexp.MustCompile(`\s+`)
 	rePreviousSessionEnvelope = regexp.MustCompile(`(?s)<PREVIOUS_SESSION>.*?</PREVIOUS_SESSION>`)
 )
 
 func sanitizeQueryText(text string) string {
-	cleaned := reDiscordMention.ReplaceAllString(text, "")
-	cleaned = reWhitespace.ReplaceAllString(cleaned, " ")
-	cleaned = strings.TrimSpace(cleaned)
+	cleaned := sanitizer.SanitizeMentions(text)
+	cleaned = sanitizer.NormalizeWhitespace(cleaned)
 	if len(cleaned) > 1000 {
 		cleaned = cleaned[:1000]
 	}
