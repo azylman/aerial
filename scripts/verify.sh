@@ -114,7 +114,7 @@ run_golangci_lint() {
     if [ -d "$svc" ]; then
         echo "   [golangci-lint] Linting $svc..."
         if has_cmd golangci-lint; then
-            export GOTOOLCHAIN=go1.24.1
+            export GOTOOLCHAIN="${GOTOOLCHAIN:-local}"
             (cd "$svc" && golangci-lint run --path-prefix="$svc/" --config "$REPO_ROOT/.golangci.yml" ./...)
         elif has_docker; then
             docker run --rm \

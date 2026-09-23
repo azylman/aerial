@@ -116,7 +116,7 @@ func (w *Watcher) AddRecursive(dir string) error {
 
 	return filepath.WalkDir(dir, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
-			return nil
+			return walkErr
 		}
 		if d.IsDir() {
 			if ShouldIgnore(path) {

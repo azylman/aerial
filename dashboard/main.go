@@ -515,7 +515,9 @@ func drainAndClose(body io.ReadCloser, name string) {
 	if _, err := io.Copy(io.Discard, io.LimitReader(body, 32*1024)); err != nil {
 		log.Printf("[Dashboard] Warning draining %s: %v", name, err)
 	}
-	closeWarn(body, name)
+	if err := body.Close(); err != nil {
+		log.Printf("[Dashboard] Warning closing %s: %v", name, err)
+	}
 }
 
 func isClientDisconnect(r *http.Request, err error) bool {
@@ -565,105 +567,8 @@ func (p *GitHubPoller) pollOnce(ctx context.Context) bool {
 	hasActive := false
 
 	for _, repo := range repos {
-		reqURL := fmt.Sprintf("%s/repos/%s/actions/runs?per_page=10", baseURL, repo)
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
-		if err != nil {
-			continue
-		}
-
-		req.Header.Set("Accept", "application/vnd.github+json")
-		req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-		if p.token != "" {
-			req.Header.Set("Authorization", "Bearer "+p.token)
-		}
-
-		p.mu.RLock()
-		etag := p.runsETagMap[repo]
-		if etag == "" && repo == p.repo && p.runsETag != "" {
-			etag = p.runsETag
-		}
-		p.mu.RUnlock()
-
-		if etag != "" {
-			req.Header.Set("If-None-Match", etag)
-		}
-
-		resp, err := p.client.Do(req)
-		if err != nil {
-			p.mu.Lock()
-			p.lastError = err
-			p.mu.Unlock()
-			continue
-		}
-
-		if resp.StatusCode == http.StatusNotModified {
-			drainAndClose(resp.Body, "runs response body")
-			p.mu.RLock()
-			for _, r := range p.cachedRunsByRepo[repo] {
-				allActiveRunIDs[r.ID] = true
-				if r.Status == "in_progress" || r.Status == "queued" {
-					hasActive = true
-				}
-			}
-			p.mu.RUnlock()
-			continue
-		}
-
-		if resp.StatusCode == http.StatusOK {
-			newETag := resp.Header.Get("ETag")
-			var runData GitHubRunsResponse
-			decodeErr := json.NewDecoder(resp.Body).Decode(&runData)
-			drainAndClose(resp.Body, "runs response body")
-			if decodeErr != nil {
-				log.Printf("[Dashboard:GitHub] Error decoding runs for %s: %v", repo, decodeErr)
-				continue
-			}
-			// Sanitize commit messages and tag repository
-			for i := range runData.WorkflowRuns {
-				runData.WorkflowRuns[i].Repository = repo
-				if runData.WorkflowRuns[i].HeadCommit != nil {
-					rawMsg := runData.WorkflowRuns[i].HeadCommit.Message
-					firstLine := strings.SplitN(rawMsg, "\n", 2)[0]
-					// Truncate to 72 runes
-					runes := []rune(firstLine)
-					if len(runes) > 72 {
-						firstLine = string(runes[:72]) + "…"
-					}
-					// Strip any token-like substrings
-					for _, sens := range sensitiveKeys {
-						firstLine = strings.ReplaceAll(firstLine, sens, "[REDACTED]")
-					}
-					runData.WorkflowRuns[i].HeadCommit.Message = firstLine
-				}
-			}
-
-			p.mu.Lock()
-			if newETag != "" {
-				p.runsETagMap[repo] = newETag
-				if repo == p.repo {
-					p.runsETag = newETag
-				}
-			}
-			p.cachedRunsByRepo[repo] = runData.WorkflowRuns
-			p.mu.Unlock()
-
-			for _, r := range runData.WorkflowRuns {
-				allActiveRunIDs[r.ID] = true
-				if r.Status == "in_progress" || r.Status == "queued" || time.Since(r.UpdatedAt) < 10*time.Minute {
-					p.fetchJobsForRun(ctx, r.ID, repo)
-				}
-				if r.Status == "in_progress" || r.Status == "queued" {
-					hasActive = true
-				}
-			}
-			continue
-		}
-
-		drainAndClose(resp.Body, "runs response body")
-		if resp.StatusCode == http.StatusForbidden || resp.StatusCode == 429 {
-			log.Printf("[Dashboard:GitHub] Warning: rate limited on %s: HTTP %d", repo, resp.StatusCode)
-		} else {
-			log.Printf("[Dashboard:GitHub] Warning: unexpected HTTP %d querying %s", resp.StatusCode, repo)
+		if p.pollRepo(ctx, repo, baseURL, allActiveRunIDs) {
+			hasActive = true
 		}
 	}
 
@@ -719,6 +624,111 @@ func (p *GitHubPoller) pollOnce(ctx context.Context) bool {
 	return hasActive
 }
 
+func (p *GitHubPoller) pollRepo(ctx context.Context, repo, baseURL string, allActiveRunIDs map[int64]bool) bool {
+	reqURL := fmt.Sprintf("%s/repos/%s/actions/runs?per_page=10", baseURL, repo)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return false
+	}
+
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	if p.token != "" {
+		req.Header.Set("Authorization", "Bearer "+p.token)
+	}
+
+	p.mu.RLock()
+	etag := p.runsETagMap[repo]
+	if etag == "" && repo == p.repo && p.runsETag != "" {
+		etag = p.runsETag
+	}
+	p.mu.RUnlock()
+
+	if etag != "" {
+		req.Header.Set("If-None-Match", etag)
+	}
+
+	resp, err := p.client.Do(req)
+	if err != nil {
+		p.mu.Lock()
+		p.lastError = err
+		p.mu.Unlock()
+		return false
+	}
+	defer resp.Body.Close()
+	defer drainAndClose(resp.Body, "runs response body")
+
+	if resp.StatusCode == http.StatusNotModified {
+		hasActive := false
+		p.mu.RLock()
+		for _, r := range p.cachedRunsByRepo[repo] {
+			allActiveRunIDs[r.ID] = true
+			if r.Status == "in_progress" || r.Status == "queued" {
+				hasActive = true
+			}
+		}
+		p.mu.RUnlock()
+		return hasActive
+	}
+
+	if resp.StatusCode == http.StatusOK {
+		newETag := resp.Header.Get("ETag")
+		var runData GitHubRunsResponse
+		decodeErr := json.NewDecoder(resp.Body).Decode(&runData)
+		if decodeErr != nil {
+			log.Printf("[Dashboard:GitHub] Error decoding runs for %s: %v", repo, decodeErr)
+			return false
+		}
+		// Sanitize commit messages and tag repository
+		for i := range runData.WorkflowRuns {
+			runData.WorkflowRuns[i].Repository = repo
+			if runData.WorkflowRuns[i].HeadCommit != nil {
+				rawMsg := runData.WorkflowRuns[i].HeadCommit.Message
+				firstLine := strings.SplitN(rawMsg, "\n", 2)[0]
+				// Truncate to 72 runes
+				runes := []rune(firstLine)
+				if len(runes) > 72 {
+					firstLine = string(runes[:72]) + "…"
+				}
+				// Strip any token-like substrings
+				for _, sens := range sensitiveKeys {
+					firstLine = strings.ReplaceAll(firstLine, sens, "[REDACTED]")
+				}
+				runData.WorkflowRuns[i].HeadCommit.Message = firstLine
+			}
+		}
+
+		p.mu.Lock()
+		if newETag != "" {
+			p.runsETagMap[repo] = newETag
+			if repo == p.repo {
+				p.runsETag = newETag
+			}
+		}
+		p.cachedRunsByRepo[repo] = runData.WorkflowRuns
+		p.mu.Unlock()
+
+		hasActive := false
+		for _, r := range runData.WorkflowRuns {
+			allActiveRunIDs[r.ID] = true
+			if r.Status == "in_progress" || r.Status == "queued" || time.Since(r.UpdatedAt) < 10*time.Minute {
+				p.fetchJobsForRun(ctx, r.ID, repo)
+			}
+			if r.Status == "in_progress" || r.Status == "queued" {
+				hasActive = true
+			}
+		}
+		return hasActive
+	}
+
+	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == 429 {
+		log.Printf("[Dashboard:GitHub] Warning: rate limited on %s: HTTP %d", repo, resp.StatusCode)
+	} else {
+		log.Printf("[Dashboard:GitHub] Warning: unexpected HTTP %d querying %s", resp.StatusCode, repo)
+	}
+	return false
+}
+
 func (p *GitHubPoller) fetchJobsForRun(ctx context.Context, runID int64, optionalRepo ...string) {
 	baseURL := p.apiBaseURL
 	if baseURL == "" {
@@ -761,6 +771,7 @@ func (p *GitHubPoller) fetchJobsForRun(ctx context.Context, runID int64, optiona
 	if err != nil {
 		return
 	}
+	defer resp.Body.Close()
 	defer drainAndClose(resp.Body, "jobs response body")
 
 	if resp.StatusCode == http.StatusNotModified {
@@ -829,6 +840,7 @@ func fetchDockerClusterState(ctx context.Context) ([]ServiceStatus, []DockerCont
 	if err != nil {
 		return nil, nil, err
 	}
+	defer resp.Body.Close()
 	defer drainAndClose(resp.Body, "docker response body")
 
 	if resp.StatusCode != http.StatusOK {
@@ -905,6 +917,7 @@ func fetchActiveTasksFromBrain(ctx context.Context, brainURL string) ([]ActiveTa
 	if err != nil {
 		return []ActiveTaskStatus{}, err
 	}
+	defer resp.Body.Close()
 	defer drainAndClose(resp.Body, "brain tasks response body")
 
 	if resp.StatusCode != http.StatusOK {
@@ -1067,6 +1080,7 @@ func fetchGitSyncStatus(ctx context.Context, gitsyncURL string) GitSyncStatusRes
 		fallback.Error = err.Error()
 		return fallback
 	}
+	defer resp.Body.Close()
 	defer drainAndClose(resp.Body, "gitsync response body")
 
 	if resp.StatusCode != http.StatusOK {
@@ -1200,6 +1214,7 @@ func factsHandler(brainBaseURL string) http.HandlerFunc {
 			})
 			return
 		}
+		defer resp.Body.Close()
 		defer drainAndClose(resp.Body, "brain facts response body")
 
 		if resp.StatusCode != http.StatusOK {
@@ -1281,6 +1296,7 @@ func schedulesHandler(brainBaseURL string) http.HandlerFunc {
 			})
 			return
 		}
+		defer resp.Body.Close()
 		defer drainAndClose(resp.Body, "brain schedules response body")
 
 		if resp.StatusCode != http.StatusOK {
@@ -1370,6 +1386,7 @@ func scheduleRunsHandler(brainBaseURL string) http.HandlerFunc {
 			})
 			return
 		}
+		defer resp.Body.Close()
 		defer drainAndClose(resp.Body, "brain schedule runs response body")
 
 		if resp.StatusCode != http.StatusOK {

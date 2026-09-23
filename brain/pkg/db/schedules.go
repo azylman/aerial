@@ -94,7 +94,7 @@ func GetDueOneShotSchedules(database DBTX) ([]OneShotSchedule, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer closeWarn(rows, "rows")
+	defer rows.Close()
 
 	var results []OneShotSchedule
 	for rows.Next() {
@@ -199,7 +199,7 @@ func GetAllOneShotSchedules(database DBTX, threadID string) ([]OneShotSchedule, 
 	if err != nil {
 		return nil, err
 	}
-	defer closeWarn(rows, "rows")
+	defer rows.Close()
 
 	var results []OneShotSchedule
 	for rows.Next() {
@@ -247,7 +247,7 @@ func GetDueCronSchedules(database DBTX) ([]CronSchedule, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer closeWarn(rows, "rows")
+	defer rows.Close()
 
 	var results []CronSchedule
 	for rows.Next() {
@@ -280,7 +280,7 @@ func GetAllCronSchedules(database DBTX, targetID string) ([]CronSchedule, error)
 	if err != nil {
 		return nil, err
 	}
-	defer closeWarn(rows, "rows")
+	defer rows.Close()
 
 	var results []CronSchedule
 	for rows.Next() {
@@ -494,7 +494,7 @@ func GetScheduleRunsPaginated(database DBTX, limit, offset int, scheduleID, stat
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to query schedule runs: %w", err)
 	}
-	defer closeWarn(rows, "rows")
+	defer rows.Close()
 
 	runs := make([]ScheduleRun, 0)
 	for rows.Next() {

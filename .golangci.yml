@@ -10,6 +10,10 @@ linters:
     - typecheck
     - unused
     - errname
+    - sqlclosecheck
+    - bodyclose
+    - nilerr
+    - copyloopvar
 
 linters-settings:
   errcheck:
@@ -25,6 +29,9 @@ linters-settings:
       - (*strings.Builder).WriteByte
       - (*strings.Builder).WriteRune
       - hash.Hash.Write
+      - (*database/sql.Rows).Close
+      - (io.Closer).Close
+      - (io.ReadCloser).Close
 
 issues:
   exclude-use-default: false

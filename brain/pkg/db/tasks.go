@@ -105,7 +105,7 @@ func GetActiveTasks(database DBTX) ([]ActiveTask, error) {
 	if err != nil {
 		return nil, fmt.Errorf("query active tasks: %w", err)
 	}
-	defer closeWarn(rows, "rows")
+	defer rows.Close()
 
 	tasks := make([]ActiveTask, 0)
 	for rows.Next() {
