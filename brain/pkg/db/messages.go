@@ -139,6 +139,20 @@ func ExtractMessageBody(content string) string {
 			val = strings.ReplaceAll(val, "<\\USER_REQUEST>", "<USER_REQUEST>")
 			return val
 		}
+
+		promptMarker := "Prompt:"
+		if pIdx := strings.Index(trimmed, promptMarker); pIdx != -1 {
+			start := pIdx + len(promptMarker)
+			rest := trimmed[start:]
+			if endIdx := strings.Index(rest, "</USER_REQUEST>"); endIdx != -1 {
+				rest = rest[:endIdx]
+			}
+			val := strings.TrimSpace(rest)
+			val = strings.ReplaceAll(val, "<\\/USER_REQUEST>", "</USER_REQUEST>")
+			val = strings.ReplaceAll(val, "<\\USER_REQUEST>", "<USER_REQUEST>")
+			return val
+		}
+
 		inner := strings.TrimPrefix(trimmed, "<USER_REQUEST>")
 		inner = strings.TrimSuffix(inner, "</USER_REQUEST>")
 		return strings.TrimSpace(inner)

@@ -441,6 +441,18 @@ Please formulate your response and output it clearly. It will be delivered direc
 	if ExtractQueryText("") != "" {
 		t.Errorf("expected empty string for empty input")
 	}
+
+	// Case 5: Role and channel mentions stripped
+	mentionText := "Hey <@&987654> check <#123456> please"
+	if extracted := ExtractQueryText(mentionText); extracted != "Hey check please" {
+		t.Errorf("expected 'Hey check please', got %q", extracted)
+	}
+
+	// Case 6: Previous session envelope stripped
+	prevSessionText := "<PREVIOUS_SESSION>\nPrior context\n</PREVIOUS_SESSION>\nWhat is my schedule?"
+	if extracted := ExtractQueryText(prevSessionText); extracted != "What is my schedule?" {
+		t.Errorf("expected 'What is my schedule?', got %q", extracted)
+	}
 }
 
 func TestBackfillMissingEmbeddings(t *testing.T) {

@@ -166,10 +166,31 @@ func TestExtractMessageBody_EdgeCases(t *testing.T) {
 		t.Errorf("expected 'inner content', got %q", b)
 	}
 
+	// Envelope with Prompt: marker
+	rawPrompt := "<USER_REQUEST>\nPrompt:\nRun backup immediately\n</USER_REQUEST>"
+	if b := ExtractMessageBody(rawPrompt); b != "Run backup immediately" {
+		t.Errorf("expected 'Run backup immediately', got %q", b)
+	}
+
+	// Envelope with inline Prompt: marker
+	rawInlinePrompt := "<USER_REQUEST>\nPrompt: Inline prompt text\n</USER_REQUEST>"
+	if b := ExtractMessageBody(rawInlinePrompt); b != "Inline prompt text" {
+		t.Errorf("expected 'Inline prompt text', got %q", b)
+	}
+
 	// Non-envelope text
 	plain := "plain text"
 	if b := ExtractMessageBody(plain); b != plain {
 		t.Errorf("expected %q, got %q", plain, b)
+	}
+}
+
+func TestCleanTaskSummary_RoleAndChannelMentions(t *testing.T) {
+	// Verify that user, role, and channel mentions are all stripped
+	input := "Alert <@!12345> and notify <@&67890> in <#1122334455>!"
+	expected := "Alert and notify in !"
+	if got := CleanTaskSummary(input); got != expected {
+		t.Errorf("CleanTaskSummary() = %q, want %q", got, expected)
 	}
 }
 
