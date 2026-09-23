@@ -577,6 +577,44 @@ func TestDaemon_ParseRawUsageDetailed(t *testing.T) {
 	}
 }
 
+func TestDaemon_ExtractSubagentIDDetailed(t *testing.T) {
+	t.Parallel()
+	if id := extractSubagentID(""); id != "" {
+		t.Errorf("expected empty string for empty input, got %q", id)
+	}
+
+	// Payload with subagents list and snake_case conversation_id
+	payloadNested := `{"subagents":[{"conversation_id":"sub-agent-123"}]}`
+	if id := extractSubagentID(payloadNested); id != "sub-agent-123" {
+		t.Errorf("expected 'sub-agent-123', got %q", id)
+	}
+
+	// Embedded list with prefix
+	embeddedList := `Prefix chatter before json: [{"conversationId":"sub-embedded-456"}]`
+	if id := extractSubagentID(embeddedList); id != "sub-embedded-456" {
+		t.Errorf("expected 'sub-embedded-456', got %q", id)
+	}
+}
+
+func TestParseAgyOutputDetailed(t *testing.T) {
+	t.Parallel()
+	// Flat result event
+	flat := `{"event":"init","session_id":"11111111-2222-3333-4444-555555555555"}
+{"event":"result","status":"SUCCESS","response":"flat model response"}
+`
+	res, err := ParseAgyOutput(flat)
+	if err != nil || res.Response != "flat model response" || res.ConversationID != "11111111-2222-3333-4444-555555555555" {
+		t.Errorf("unexpected parse result for flat output: (%+v, %v)", res, err)
+	}
+
+	// Missing result event but valid legacy JSON fallback
+	legacyFallback := `{"status":"SUCCESS","response":"legacy response","conversation_id":"sess-legacy"}`
+	res, err = ParseAgyOutput(legacyFallback)
+	if err != nil || res.Response != "legacy response" {
+		t.Errorf("unexpected parse result for legacy fallback: (%+v, %v)", res, err)
+	}
+}
+
 func TestDaemon_TurnStreamEdgeCases(t *testing.T) {
 	tempDir := t.TempDir()
 	mockBin := filepath.Join(tempDir, "mock_edge.sh")

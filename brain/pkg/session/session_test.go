@@ -2172,4 +2172,56 @@ func TestExtractLastTurnError_MoreEdgeCases(t *testing.T) {
 	}
 }
 
+func TestGetLastStepIndex_Coverage(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// 1. Non-existent file
+	idx, err := getLastStepIndex(filepath.Join(tempDir, "nonexistent.jsonl"))
+	if err != nil || idx != -1 {
+		t.Errorf("expected (-1, nil) for nonexistent file, got (%d, %v)", idx, err)
+	}
+
+	// 2. Directory instead of file
+	dirPath := filepath.Join(tempDir, "subfolder")
+	_ = os.MkdirAll(dirPath, 0755)
+	if _, err := getLastStepIndex(dirPath); err == nil {
+		t.Errorf("expected error when checking directory, got nil")
+	}
+
+	// 3. Empty file
+	emptyFile := filepath.Join(tempDir, "empty.jsonl")
+	_ = os.WriteFile(emptyFile, []byte(""), 0644)
+	idx, err = getLastStepIndex(emptyFile)
+	if err != nil || idx != -1 {
+		t.Errorf("expected (-1, nil) for empty file, got (%d, %v)", idx, err)
+	}
+
+	// 4. File with lines missing step_index or negative
+	badSteps := filepath.Join(tempDir, "badsteps.jsonl")
+	_ = os.WriteFile(badSteps, []byte("{\"other\":\"field\"}\n{\"step_index\":-1}\n"), 0644)
+	idx, err = getLastStepIndex(badSteps)
+	if err != nil || idx != -1 {
+		t.Errorf("expected (-1, nil) for file without valid step_index, got (%d, %v)", idx, err)
+	}
+}
+
+func TestAppendTranscriptStep_NoTrailingNewline(t *testing.T) {
+	tempDir := t.TempDir()
+	filePath := filepath.Join(tempDir, "no_newline.jsonl")
+	// Write file without trailing newline
+	_ = os.WriteFile(filePath, []byte("{\"step_index\":0}"), 0644)
+
+	err := appendTranscriptStep(filePath, []byte("{\"step_index\":1}"))
+	if err != nil {
+		t.Fatalf("appendTranscriptStep failed: %v", err)
+	}
+
+	data, _ := os.ReadFile(filePath)
+	expected := "{\"step_index\":0}\n{\"step_index\":1}\n"
+	if string(data) != expected {
+		t.Errorf("expected %q, got %q", expected, string(data))
+	}
+}
+
+
 
