@@ -1452,7 +1452,7 @@ func (te *turnExecution) executeWithRetries() {
 						err = marshalErr
 					} else {
 						stdout = string(payload)
-						stderr = ""
+						stderr = turnRes.Stderr
 						exitCode = turnRes.ExitCode
 						err = nil
 					}
@@ -1520,6 +1520,16 @@ func (te *turnExecution) executeWithRetries() {
 					targetSess = extSess
 				}
 			}
+			if targetSess == "" && te.pool != nil && te.pool.daemonPool != nil {
+				if d, ok := te.pool.daemonPool.Get(te.threadID); ok && d != nil && d.SessionID() != "" {
+					targetSess = d.SessionID()
+				}
+			}
+			if targetSess == "" && te.pool != nil && te.pool.sessionMgr != nil {
+				if latest := te.pool.sessionMgr.FindLatestSessionDir(te.execStart); latest != "" && te.pool.sessionMgr.SessionExistsOnDisk(latest) {
+					targetSess = latest
+				}
+			}
 
 			// Transcript Recovery on Exit Code 0:
 			// If agy completed with exit code 0 but was flagged as a failure (e.g. empty stdout from buffering,
@@ -1539,6 +1549,21 @@ func (te *turnExecution) executeWithRetries() {
 				}
 			}
 
+			// If response was not recovered from transcript, inspect transcript for turn errors (e.g. Gemini 429 quota exhaustion)
+			if isFailure && targetSess != "" && te.pool.sessionMgr != nil && te.pool.sessionMgr.SessionExistsOnDisk(targetSess) {
+				poolCtx := context.Background()
+				if te.pool != nil && te.pool.ctx != nil {
+					poolCtx = te.pool.ctx
+				}
+				if transcriptErr, tErr := te.pool.sessionMgr.ExtractLastTurnError(poolCtx, targetSess, te.execStart); tErr == nil && transcriptErr != "" {
+					log.Printf("[Queue] Extracted turn error from session %s transcript: %s", targetSess, transcriptErr)
+					errDetail = transcriptErr
+					stderr = transcriptErr
+					lastErrDetail = transcriptErr
+					lastStderr = transcriptErr
+				}
+			}
+
 			// Cold-Start Dynamic Session Latching:
 			// If this was a cold start and remains an unrecovered failure, only latch the active session
 			// if the failure was NOT session corruption (so retries won't inherit corrupted state).
@@ -1555,6 +1580,9 @@ func (te *turnExecution) executeWithRetries() {
 				te.isQuotaPaused = true
 				te.stopTyping()
 				log.Printf("[WorkerPool] Quota pause detected for thread %s on attempt %d/%d: %s", te.threadID, attempt, maxAttempts, errDetail)
+				if te.pool != nil && te.pool.daemonPool != nil {
+					te.pool.daemonPool.Evict(te.threadID)
+				}
 
 				// Cold-start dynamic session latching if available
 				if te.currentSessionID == "" && !isSessionCorruption {
@@ -1906,9 +1934,10 @@ func (te *turnExecution) executeWithRetries() {
 					attachments := delivery.MergeAttachments(finalAttachments, fullAttachments)
 					attachments = delivery.AutoAttachNewMedia(baseDir, te.execStart, attachments)
 
-					isSilent := strings.TrimSpace(cleanText) == "" && len(attachments) == 0
-					if isSilent {
-						log.Printf("[Queue] Output is empty. Skipping Discord delivery.")
+					if strings.TrimSpace(cleanText) == "" && len(attachments) == 0 {
+						log.Printf("[Queue] Agent produced empty response for thread %s on attempt %d/%d; treating as failure", te.threadID, attempt, maxAttempts)
+						lastErrDetail = "agent produced empty response"
+						errDetail = lastErrDetail
 					} else {
 						if !te.skipDiscord {
 							var deliveryErr error
@@ -1921,72 +1950,72 @@ func (te *turnExecution) executeWithRetries() {
 								log.Printf("[WorkerPool] Failed to deliver response for thread %s: %v", te.threadID, deliveryErr)
 							}
 						}
-					}
 
-					scope := "thread"
-					if strings.EqualFold(te.policy.Mode, "channel") {
-						scope = "channel"
-					}
-					var postBytes int64
-					var postSteps int
-					if te.pool != nil && te.pool.sessionMgr != nil && te.currentSessionID != "" {
-						postBytes = te.pool.sessionMgr.GetTranscriptSize(te.currentSessionID)
-						postSteps = te.pool.sessionMgr.CountTranscriptSteps(te.currentSessionID)
-					}
-					isTurnLimit := te.turnCount >= DefaultMaxSessionTurns
-					isStepLimit := postSteps >= DefaultMaxSessionSteps
-					isByteLimit := postBytes >= DefaultMaxTranscriptBytes
-					if isTurnLimit || isStepLimit || isByteLimit {
-						if isByteLimit {
-							log.Printf("[Queue] Scope session reached transcript size limit (%d >= %d bytes). Resetting to cold state for fresh session initialization.", postBytes, DefaultMaxTranscriptBytes)
-							metrics.RecordSessionRotation("post_execution", scope, "bytes")
-						} else if isStepLimit {
-							log.Printf("[Queue] Scope session reached step limit (%d >= %d steps). Resetting to cold state for fresh session initialization.", postSteps, DefaultMaxSessionSteps)
-							metrics.RecordSessionRotation("post_execution", scope, "steps")
-						} else {
-							log.Printf("[Queue] Scope session reached turn limit (%d/%d). Resetting to cold state for fresh session initialization.", te.turnCount, DefaultMaxSessionTurns)
-							metrics.RecordSessionRotation("post_execution", scope, "turns")
+						scope := "thread"
+						if strings.EqualFold(te.policy.Mode, "channel") {
+							scope = "channel"
 						}
-						if te.currentSessionID != "" {
-							te.previousSessionID = te.currentSessionID
+						var postBytes int64
+						var postSteps int
+						if te.pool != nil && te.pool.sessionMgr != nil && te.currentSessionID != "" {
+							postBytes = te.pool.sessionMgr.GetTranscriptSize(te.currentSessionID)
+							postSteps = te.pool.sessionMgr.CountTranscriptSteps(te.currentSessionID)
 						}
-						te.rotateSessionID(te.threadID, "")
-						te.currentSessionID = ""
-					}
+						isTurnLimit := te.turnCount >= DefaultMaxSessionTurns
+						isStepLimit := postSteps >= DefaultMaxSessionSteps
+						isByteLimit := postBytes >= DefaultMaxTranscriptBytes
+						if isTurnLimit || isStepLimit || isByteLimit {
+							if isByteLimit {
+								log.Printf("[Queue] Scope session reached transcript size limit (%d >= %d bytes). Resetting to cold state for fresh session initialization.", postBytes, DefaultMaxTranscriptBytes)
+								metrics.RecordSessionRotation("post_execution", scope, "bytes")
+							} else if isStepLimit {
+								log.Printf("[Queue] Scope session reached step limit (%d >= %d steps). Resetting to cold state for fresh session initialization.", postSteps, DefaultMaxSessionSteps)
+								metrics.RecordSessionRotation("post_execution", scope, "steps")
+							} else {
+								log.Printf("[Queue] Scope session reached turn limit (%d/%d). Resetting to cold state for fresh session initialization.", te.turnCount, DefaultMaxSessionTurns)
+								metrics.RecordSessionRotation("post_execution", scope, "turns")
+							}
+							if te.currentSessionID != "" {
+								te.previousSessionID = te.currentSessionID
+							}
+							te.rotateSessionID(te.threadID, "")
+							te.currentSessionID = ""
+						}
 
-					// Combine accumulated sub-turn usage from any intercepted yield traps into final turn usage
-					resp.Usage.InputTokens += accumulatedUsage.InputTokens
-					resp.Usage.OutputTokens += accumulatedUsage.OutputTokens
-					resp.Usage.ThinkingTokens += accumulatedUsage.ThinkingTokens
-					resp.Usage.CacheReadTokens += accumulatedUsage.CacheReadTokens
-					resp.Usage.TotalTokens += accumulatedUsage.TotalTokens
+						// Combine accumulated sub-turn usage from any intercepted yield traps into final turn usage
+						resp.Usage.InputTokens += accumulatedUsage.InputTokens
+						resp.Usage.OutputTokens += accumulatedUsage.OutputTokens
+						resp.Usage.ThinkingTokens += accumulatedUsage.ThinkingTokens
+						resp.Usage.CacheReadTokens += accumulatedUsage.CacheReadTokens
+						resp.Usage.TotalTokens += accumulatedUsage.TotalTokens
 
-					// Mark all messages in the burst as completed with unpacked clean text
-					metrics.RecordTurnCompleted("success", te.triggerType, currentModel, time.Since(te.execStart))
-					metrics.RecordTokens(currentModel, resp.Usage.InputTokens, resp.Usage.OutputTokens, resp.Usage.ThinkingTokens, resp.Usage.CacheReadTokens, resp.Usage.TotalTokens)
-					te.turnStatus = "success"
-					te.turnResponseText = cleanText
-					te.turnTokenUsage = resp.Usage
-					te.turnDurationMs = time.Since(te.execStart).Milliseconds()
-					for _, m := range te.burst {
-						te.updateMessageCompleted(m.ID, cleanText)
-						if m.ScheduleRunID != "" {
-							te.updateScheduleRunStatus(db.UpdateRunParams{
-								RunID:       m.ScheduleRunID,
-								MessageID:   m.ID,
-								Status:      "completed",
-								CompletedAt: time.Now().UTC(),
-								DurationMs:  time.Since(te.execStart).Milliseconds(),
-								Model:       currentModel,
-							})
+						// Mark all messages in the burst as completed with unpacked clean text
+						metrics.RecordTurnCompleted("success", te.triggerType, currentModel, time.Since(te.execStart))
+						metrics.RecordTokens(currentModel, resp.Usage.InputTokens, resp.Usage.OutputTokens, resp.Usage.ThinkingTokens, resp.Usage.CacheReadTokens, resp.Usage.TotalTokens)
+						te.turnStatus = "success"
+						te.turnResponseText = cleanText
+						te.turnTokenUsage = resp.Usage
+						te.turnDurationMs = time.Since(te.execStart).Milliseconds()
+						for _, m := range te.burst {
+							te.updateMessageCompleted(m.ID, cleanText)
+							if m.ScheduleRunID != "" {
+								te.updateScheduleRunStatus(db.UpdateRunParams{
+									RunID:       m.ScheduleRunID,
+									MessageID:   m.ID,
+									Status:      "completed",
+									CompletedAt: time.Now().UTC(),
+									DurationMs:  time.Since(te.execStart).Milliseconds(),
+									Model:       currentModel,
+								})
+							}
+							if te.pool.cfg.OnMessageCompleted != nil {
+								te.pool.cfg.OnMessageCompleted(m, db.StatusCompleted)
+							}
 						}
-						if te.pool.cfg.OnMessageCompleted != nil {
-							te.pool.cfg.OnMessageCompleted(m, db.StatusCompleted)
-						}
+						log.Printf("[WorkerPool] %d message(s) in thread %s completed successfully on attempt %d/%d", len(te.burst), te.threadID, attempt, maxAttempts)
+
+						return
 					}
-					log.Printf("[WorkerPool] %d message(s) in thread %s completed successfully on attempt %d/%d", len(te.burst), te.threadID, attempt, maxAttempts)
-
-					return
 				}
 			}
 		}

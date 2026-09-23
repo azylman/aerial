@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"sync/atomic"
@@ -517,3 +518,109 @@ func TestUtilityDaemon_StandbyConcurrency(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 }
+
+func TestUtilityDaemon_ExecuteClosedAndNilWorker(t *testing.T) {
+	t.Parallel()
+	dClosed := NewUtilityDaemon(nil, WithSpawner(newMockSpawner(t)))
+	dClosed.Close()
+	if _, err := dClosed.Execute(context.Background(), "test"); !errors.Is(err, ErrWorkerDead) {
+		t.Errorf("expected ErrWorkerDead, got %v", err)
+	}
+
+	dNoWorker := NewUtilityDaemon(nil, WithSpawner(func(ctx context.Context, opts WorkerOptions) (*WorkerInstance, error) {
+		return nil, errors.New("spawn failed")
+	}))
+	defer dNoWorker.Close()
+	if _, err := dNoWorker.Execute(context.Background(), "test"); err == nil {
+		t.Errorf("expected error from daemon with no worker, got nil")
+	}
+}
+
+func TestUtilityDaemon_RunnerFuncAndRestart(t *testing.T) {
+	t.Parallel()
+
+	daemon := NewUtilityDaemon(nil,
+		WithSpawner(newMockSpawner(t)),
+	)
+	defer daemon.Close()
+	waitForStandby(t, daemon)
+
+	// 1. RunnerFunc success
+	rf := daemon.RunnerFunc()
+	stdout, stderr, code, err := rf(context.Background(), "agy", "hello", "sess-1", "key", "model", 1)
+	if err != nil || code != 0 || stderr != "" {
+		t.Fatalf("RunnerFunc failed: stdout=%q, stderr=%q, code=%d, err=%v", stdout, stderr, code, err)
+	}
+	if !strings.Contains(stdout, "hello") {
+		t.Errorf("expected synthetic result to contain response 'hello', got %s", stdout)
+	}
+
+	// 2. TriggerRestartNow (debounce <= 0)
+	initialConvID := daemon.ActiveConvID()
+	daemon.TriggerRestartNow("test immediate reload")
+	if daemon.ActiveConvID() == initialConvID {
+		t.Errorf("expected active convID to rotate after TriggerRestartNow")
+	}
+
+	// 3. TriggerRestartWithDebounce (debounced reload) and consecutive triggers replacing reloadTimer
+	convAfterNow := daemon.ActiveConvID()
+	daemon.TriggerRestartWithDebounce("test debounced 1", 10*time.Millisecond)
+	daemon.TriggerRestartWithDebounce("test debounced 2", 10*time.Millisecond)
+	waitForReload(t, daemon, convAfterNow)
+
+	// 4. Default turnTimeout <= 0 branch in Execute
+	daemon.turnTimeout = 0
+	out, err := daemon.Execute(context.Background(), "test timeout zero")
+	if err != nil || out == "" {
+		t.Errorf("expected successful execution with default 15s timeout, got out=%q, err=%v", out, err)
+	}
+
+	// 5. RunnerFunc failure when closed
+	daemon.Close()
+	_, stderr, code, err = rf(context.Background(), "agy", "hello after close", "sess-1", "key", "model", 1)
+	if err == nil || code != -1 || !strings.Contains(stderr, "utility daemon error") {
+		t.Errorf("expected failure when runner called on closed daemon, got stderr=%q, code=%d, err=%v", stderr, code, err)
+	}
+}
+
+func TestUtilityDaemon_NoWorkerAvailable(t *testing.T) {
+	t.Parallel()
+
+	failingSpawner := func(ctx context.Context, opts WorkerOptions) (*WorkerInstance, error) {
+		return nil, errors.New("simulated spawn failure")
+	}
+
+	daemon := NewUtilityDaemon(nil,
+		WithSpawner(failingSpawner),
+	)
+	defer daemon.Close()
+
+	_, err := daemon.Execute(context.Background(), "test no worker")
+	if err == nil || !strings.Contains(err.Error(), "no utility worker available") {
+		t.Fatalf("expected 'no utility worker available' error, got %v", err)
+	}
+}
+
+func TestUtilityDaemon_ExecuteFailedAfterRetry(t *testing.T) {
+	t.Parallel()
+
+	failingWorkerSpawner := func(ctx context.Context, opts WorkerOptions) (*WorkerInstance, error) {
+		w, _ := NewMockStreamWorker(t, MockStreamWorkerConfig{
+			BadResult: true,
+		})
+		return w, nil
+	}
+
+	daemon := NewUtilityDaemon(nil,
+		WithSpawner(failingWorkerSpawner),
+	)
+	defer daemon.Close()
+
+	_, err := daemon.Execute(context.Background(), "test retry exhaustion")
+	if err == nil {
+		t.Fatalf("expected error on retry failure, got nil")
+	}
+}
+
+
+

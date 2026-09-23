@@ -109,6 +109,27 @@ func (p *DaemonPool) HasDaemon(threadID string) bool {
 	return ok
 }
 
+// Get returns the active persistent daemon for threadID if present.
+func (p *DaemonPool) Get(threadID string) (*runner.Daemon, bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	d, ok := p.daemons[threadID]
+	return d, ok
+}
+
+// Evict explicitly closes and removes the persistent daemon for threadID.
+func (p *DaemonPool) Evict(threadID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if d, ok := p.daemons[threadID]; ok {
+		if closeErr := d.Close(); closeErr != nil {
+			log.Printf("[DaemonPool] Warning: failed to close evicted daemon for thread %s: %v", threadID, closeErr)
+		}
+		delete(p.daemons, threadID)
+		metrics.DaemonsActive.Set(float64(len(p.daemons)))
+	}
+}
+
 // GetOrCreateDaemon returns an existing persistent daemon for threadID, or starts a fresh one.
 func (p *DaemonPool) GetOrCreateDaemon(ctx context.Context, threadID string, sessionID string, model string) (*runner.Daemon, error) {
 	p.mu.Lock()

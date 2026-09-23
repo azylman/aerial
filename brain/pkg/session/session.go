@@ -415,9 +415,11 @@ func (m *Manager) ExtractResponseAndError(convID string) (string, string) {
 					ToolCalls []json.RawMessage `json:"tool_calls"`
 				}
 				if err := json.Unmarshal([]byte(line), &step); err == nil {
-					if (step.Status == "ERROR" || step.Error != nil) && lastError == "" {
+					if (step.Status == "ERROR" || step.Error != nil || step.Type == "ERROR_MESSAGE") && lastError == "" {
 						if errStr := formatStepError(step.Error); errStr != "" {
 							lastError = errStr
+						} else if strings.TrimSpace(step.Content) != "" {
+							lastError = strings.TrimSpace(step.Content)
 						}
 					}
 					if step.Type == "PLANNER_RESPONSE" && lastResponse == "" {
@@ -437,6 +439,160 @@ func (m *Manager) ExtractResponseAndError(convID string) (string, string) {
 		}
 	}
 	return lastResponse, lastError
+}
+
+// ExtractLastTurnError parses transcript files to extract any error step specifically occurring
+// during the active turn (strictly after 'since' or after the latest non-ambient USER_INPUT).
+func (m *Manager) ExtractLastTurnError(ctx context.Context, convID string, since time.Time) (string, error) {
+	if m == nil {
+		return "", nil
+	}
+	trimmedID := strings.TrimSpace(convID)
+	if trimmedID == "" || strings.ContainsAny(trimmedID, "/\\:") || strings.Contains(trimmedID, "..") {
+		return "", nil
+	}
+	if ctx != nil && ctx.Err() != nil {
+		return "", ctx.Err()
+	}
+
+	targetDirs := m.getTargetDirs(trimmedID)
+
+	for _, dir := range targetDirs {
+		for _, name := range []string{"transcript_full.jsonl", "transcript.jsonl"} {
+			if ctx != nil && ctx.Err() != nil {
+				return "", ctx.Err()
+			}
+			tPath := filepath.Join(dir, ".system_generated", "logs", name)
+			f, err := os.Open(tPath)
+			if err != nil {
+				continue
+			}
+
+			fi, err := f.Stat()
+			if err != nil || fi.Size() == 0 {
+				if closeErr := f.Close(); closeErr != nil {
+					log.Printf("[Session] Warning: failed to close file %s: %v", tPath, closeErr)
+				}
+				continue
+			}
+
+			fileSize := fi.Size()
+			readSize := fileSize
+			var offset int64 = 0
+			const maxChunk = int64(1024 * 1024)
+			if fileSize > maxChunk {
+				readSize = maxChunk
+				offset = fileSize - maxChunk
+			}
+
+			buf := make([]byte, readSize)
+			_, err = f.ReadAt(buf, offset)
+			if closeErr := f.Close(); closeErr != nil {
+				log.Printf("[Session] Warning: failed to close file %s: %v", tPath, closeErr)
+			}
+			if err != nil && err != io.EOF {
+				continue
+			}
+
+			lines := strings.Split(string(buf), "\n")
+			if offset > 0 && len(lines) > 1 {
+				lines = lines[1:]
+			}
+
+			lastUserInputIdx := -1
+			for i, rawLine := range lines {
+				line := strings.TrimSpace(rawLine)
+				if line == "" {
+					continue
+				}
+				var step struct {
+					Source  string `json:"source"`
+					Type    string `json:"type"`
+					Content string `json:"content"`
+				}
+				if err := json.Unmarshal([]byte(line), &step); err == nil {
+					isAmbient := step.Source == SourceAmbient || (step.Type == "USER_INPUT" && strings.HasPrefix(step.Content, "[Chat #") && step.Source != "USER_EXPLICIT")
+					if step.Type == "USER_INPUT" && !isAmbient {
+						lastUserInputIdx = i
+					}
+				}
+			}
+
+			if lastUserInputIdx == -1 && offset > 0 {
+				fullData, readErr := os.ReadFile(tPath)
+				if readErr == nil {
+					lines = strings.Split(string(fullData), "\n")
+					for i, rawLine := range lines {
+						line := strings.TrimSpace(rawLine)
+						if line == "" {
+							continue
+						}
+						var step struct {
+							Source  string `json:"source"`
+							Type    string `json:"type"`
+							Content string `json:"content"`
+						}
+						if err := json.Unmarshal([]byte(line), &step); err == nil {
+							isAmbient := step.Source == SourceAmbient || (step.Type == "USER_INPUT" && strings.HasPrefix(step.Content, "[Chat #") && step.Source != "USER_EXPLICIT")
+							if step.Type == "USER_INPUT" && !isAmbient {
+								lastUserInputIdx = i
+							}
+						}
+					}
+				}
+			}
+
+			startIdx := 0
+			if lastUserInputIdx >= 0 {
+				startIdx = lastUserInputIdx + 1
+			}
+
+			for i := len(lines) - 1; i >= startIdx; i-- {
+				if ctx != nil && ctx.Err() != nil {
+					return "", ctx.Err()
+				}
+				line := strings.TrimSpace(lines[i])
+				if line == "" {
+					continue
+				}
+				var step struct {
+					Type      string          `json:"type"`
+					Status    string          `json:"status"`
+					Error     json.RawMessage `json:"error"`
+					Content   string          `json:"content"`
+					CreatedAt string          `json:"created_at"`
+				}
+				if err := json.Unmarshal([]byte(line), &step); err == nil {
+					if !since.IsZero() && step.CreatedAt != "" {
+						if t, pErr := time.Parse(time.RFC3339Nano, step.CreatedAt); pErr == nil {
+							if t.Before(since.Add(-10 * time.Second)) {
+								break
+							}
+						} else if t, pErr := time.Parse(time.RFC3339, step.CreatedAt); pErr == nil {
+							if t.Before(since.Add(-10 * time.Second)) {
+								break
+							}
+						}
+					}
+
+					if step.Status == "ERROR" || len(step.Error) > 0 || step.Type == "ERROR_MESSAGE" {
+						if errStr := strings.TrimSpace(string(step.Error)); errStr != "" && errStr != "null" {
+							var unquoted string
+							if json.Unmarshal(step.Error, &unquoted) == nil && unquoted != "" {
+								return unquoted, nil
+							}
+							return strings.Trim(errStr, "\""), nil
+						}
+						if trimmedContent := strings.TrimSpace(step.Content); trimmedContent != "" {
+							return trimmedContent, nil
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return "", nil
 }
 
 // ExtractFinalSubstantiveResponse extracts strictly the terminal conversational PLANNER_RESPONSE

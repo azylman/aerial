@@ -171,13 +171,14 @@ func TestClassifyError(t *testing.T) {
 			wantCorrupt:   false,
 		},
 		{
-			name:          "Empty Response With Status SUCCESS On Exit 0 (Silent Sentinel)",
-			exitCode:      0,
-			stdout:        `{"conversation_id":"abc","status":"SUCCESS","response":""}`,
-			stderr:        "",
-			wantFailure:   false,
-			wantTransient: false,
-			wantCorrupt:   false,
+			name:                 "Empty Response With Status SUCCESS On Exit 0 (Empty Response Failure)",
+			exitCode:             0,
+			stdout:               `{"conversation_id":"abc","status":"SUCCESS","response":""}`,
+			stderr:               "",
+			wantFailure:          true,
+			wantTransient:        false,
+			wantCorrupt:          false,
+			errDetailMustContain: "empty response",
 		},
 		{
 			name:          "Clean Success: Conversational response discussing maximum context length and 503 errors",
@@ -519,6 +520,17 @@ func TestActivityWriter_ThreadSafetyAndSessionDiscovery(t *testing.T) {
 	if nZero != 0 || errZero != nil {
 		t.Errorf("expected 0, nil from empty write, got %d, %v", nZero, errZero)
 	}
+
+	// Test ResetBuffer clears buffer but preserves session ID
+	w.ResetBuffer()
+	if w.String() != "" {
+		t.Errorf("expected empty string after ResetBuffer, got %q", w.String())
+	}
+	if w.SessionID() != "12345678-abcd-ef01-2345-6789abcdef01" {
+		t.Errorf("expected session ID preserved after ResetBuffer, got %q", w.SessionID())
+	}
+	var nilW *ActivityWriter
+	nilW.ResetBuffer() // Nil safety check
 
 	// Test initialized session ID retains value
 	wPre := NewActivityWriter("11111111-2222-3333-4444-555555555555")
@@ -1136,6 +1148,41 @@ func TestStepUpdateEvent_Resolved(t *testing.T) {
 	}
 }
 
+func TestClassifyError_DetailedBranches(t *testing.T) {
+	t.Parallel()
+
+	// 1. exit code 0, unparseable JSON with context window keyword
+	fail, trans, corrupt, detail := ClassifyError(0, "not json", "error: maximum context length exceeded")
+	if !fail || trans || !corrupt || detail != "context window exceeded" {
+		t.Errorf("unexpected: (%v, %v, %v, %q)", fail, trans, corrupt, detail)
+	}
+
+	// 2. exit code 0, unparseable JSON with corruption keyword
+	fail, trans, corrupt, detail = ClassifyError(0, "not json", "corrupted transcript detected")
+	if !fail || trans || !corrupt {
+		t.Errorf("unexpected: (%v, %v, %v, %q)", fail, trans, corrupt, detail)
+	}
+
+	// 3. exit code 0, unparseable JSON with fatal keyword
+	fail, trans, corrupt, detail = ClassifyError(0, "not json", "fatal: unrecoverable crash")
+	if !fail || trans || corrupt {
+		t.Errorf("unexpected: (%v, %v, %v, %q)", fail, trans, corrupt, detail)
+	}
+
+	// 4. exit code 0, parsed JSON with Status != SUCCESS and corruption keyword
+	jsonCorrupt := `{"event":"result","status":"ERROR","error":"session corrupt error"}`
+	fail, trans, corrupt, detail = ClassifyError(0, jsonCorrupt, "")
+	if !fail || trans || !corrupt || detail != "session corrupt error" {
+		t.Errorf("unexpected: (%v, %v, %v, %q)", fail, trans, corrupt, detail)
+	}
+
+	// 5. exit code 0, parsed JSON with Status != SUCCESS and no error message
+	jsonNoErr := `{"event":"result","status":"FAILED"}`
+	fail, trans, corrupt, detail = ClassifyError(0, jsonNoErr, "")
+	if !fail || !trans || corrupt || detail != "runner status: FAILED" {
+		t.Errorf("unexpected: (%v, %v, %v, %q)", fail, trans, corrupt, detail)
+	}
+}
 
 func TestExtractCommandName(t *testing.T) {
 	t.Parallel()
@@ -1655,5 +1702,46 @@ func TestParseAgyOutput_EmptyLinesAndProbeSession(t *testing.T) {
 		t.Errorf("expected ConversationID %q, got %q", targetUUID, resp.ConversationID)
 	}
 }
+
+func TestParseAgyOutput_InitEventConvIDFallback(t *testing.T) {
+	t.Parallel()
+
+	initUUID := "11111111-2222-3333-4444-555555555555"
+	// Event "init" specifies conversation_id, subsequent "result" event has empty conversation ID
+	output := fmt.Sprintf("{\"event\":\"init\",\"session_id\":%q}\n{\"event\":\"result\",\"response\":\"finished\"}\n", initUUID)
+	resp, err := ParseAgyOutput(output)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.ConversationID != initUUID {
+		t.Errorf("expected ConversationID propagated from init event: %q, got %q", initUUID, resp.ConversationID)
+	}
+}
+
+func TestParseAgyOutput_EmptyLines(t *testing.T) {
+	t.Parallel()
+
+	input := "{\"event\":\"init\",\"conversation_id\":\"test-conv-id\"}\n\n   \n\n{\"event\":\"result\",\"response\":\"success\"}"
+	resp, err := ParseAgyOutput(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.Response != "success" {
+		t.Errorf("expected response 'success', got %q", resp.Response)
+	}
+}
+
+func TestClassifyError_ShortStdoutFallback(t *testing.T) {
+	t.Parallel()
+
+	// When exitCode != 0, stderr is empty, and stdout is non-empty short text (<300 chars) that is not JSON,
+	// ClassifyError falls back to trimmedStdout as errDetail.
+	isFail, _, _, detail := ClassifyError(1, "custom python failure on line 42", "")
+	if !isFail || detail != "custom python failure on line 42" {
+		t.Errorf("expected 'custom python failure on line 42', got isFail=%v, detail=%q", isFail, detail)
+	}
+}
+
+
 
 

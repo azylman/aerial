@@ -48,6 +48,7 @@ type DaemonConfig struct {
 type TurnResult struct {
 	ConversationID string
 	Response       string
+	Stderr         string
 	Usage          AgyUsage
 	ActiveTasks    []TaskMetadata
 	IsYieldTrap    bool
@@ -212,6 +213,9 @@ func (d *Daemon) ExecuteTurnWithHandler(ctx context.Context, prompt string, hand
 	}()
 
 	start := time.Now()
+	if d.stderrBuf != nil {
+		d.stderrBuf.ResetBuffer()
+	}
 
 	wireMsg := streamInputPayload{
 		Event: "user",
@@ -416,6 +420,25 @@ func (d *Daemon) ExecuteTurnWithHandler(ctx context.Context, prompt string, hand
 				}
 			}
 
+			if res.Status != "" && !strings.EqualFold(res.Status, "SUCCESS") {
+				errMsg := res.Error
+				if errMsg == "" {
+					errMsg = fmt.Sprintf("daemon returned status %s", res.Status)
+				}
+				d.mu.Lock()
+				d.dirty = true
+				d.state = StateClosed
+				d.mu.Unlock()
+				return nil, errors.New(errMsg)
+			}
+			if res.Error != "" {
+				d.mu.Lock()
+				d.dirty = true
+				d.state = StateClosed
+				d.mu.Unlock()
+				return nil, errors.New(res.Error)
+			}
+
 			if res.Response != "" {
 				turnResponse.WriteString(res.Response)
 			}
@@ -454,14 +477,19 @@ func (d *Daemon) ExecuteTurnWithHandler(ctx context.Context, prompt string, hand
 			activeTasks := d.taskTracker.ActiveTasks()
 			isYield := len(activeTasks) > 0
 
-			hasPrintTimeout := d.stderrBuf != nil && strings.Contains(strings.ToLower(d.stderrBuf.String()), "print timeout")
+			var currentStderr string
+			if d.stderrBuf != nil {
+				currentStderr = d.stderrBuf.String()
+			}
+
+			hasPrintTimeout := strings.Contains(strings.ToLower(currentStderr), "print timeout")
 			if turnResponse.Len() == 0 && !isYield && (hasPrintTimeout || toolCallCount > 0) {
 				d.mu.Lock()
 				d.dirty = true
 				d.state = StateClosed
 				d.mu.Unlock()
 				if hasPrintTimeout {
-					return nil, fmt.Errorf("daemon turn timed out waiting for output (print timeout): %s", d.stderrBuf.String())
+					return nil, fmt.Errorf("daemon turn timed out waiting for output (print timeout): %s", currentStderr)
 				}
 				return nil, fmt.Errorf("daemon turn completed with empty response after %d tool call(s) (possible print timeout or aborted turn)", toolCallCount)
 			}
@@ -469,6 +497,7 @@ func (d *Daemon) ExecuteTurnWithHandler(ctx context.Context, prompt string, hand
 			return &TurnResult{
 				ConversationID: d.SessionID(),
 				Response:       turnResponse.String(),
+				Stderr:         currentStderr,
 				Usage:          turnUsage,
 				ActiveTasks:    activeTasks,
 				IsYieldTrap:    isYield,

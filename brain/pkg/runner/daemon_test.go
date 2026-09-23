@@ -1,7 +1,9 @@
 package runner
 
 import (
+	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -553,6 +555,78 @@ func TestDaemon_RSSBytesDetailed(t *testing.T) {
 	}
 }
 
+func TestDaemon_ParseRawUsageDetailed(t *testing.T) {
+	t.Parallel()
+	rawAll := map[string]interface{}{
+		"input_tokens":      float64(10),
+		"output_tokens":     float64(20),
+		"thinking_tokens":   float64(5),
+		"cache_read_tokens": float64(2),
+		"total_tokens":      float64(37),
+	}
+	uAll := parseRawUsage(rawAll)
+	if uAll.InputTokens != 10 || uAll.OutputTokens != 20 || uAll.ThinkingTokens != 5 || uAll.CacheReadTokens != 2 || uAll.TotalTokens != 37 {
+		t.Errorf("unexpected usage: %+v", uAll)
+	}
+
+	rawNoTotal := map[string]interface{}{
+		"input_tokens":  float64(10),
+		"output_tokens": float64(20),
+	}
+	uNoTotal := parseRawUsage(rawNoTotal)
+	if uNoTotal.TotalTokens != 30 {
+		t.Errorf("expected total tokens 30, got %d", uNoTotal.TotalTokens)
+	}
+}
+
+func TestDaemon_ExtractSubagentIDDetailed(t *testing.T) {
+	t.Parallel()
+	if id := extractSubagentID(""); id != "" {
+		t.Errorf("expected empty string for empty input, got %q", id)
+	}
+
+	// Payload with subagents list and snake_case conversation_id
+	payloadNested := `{"subagents":[{"conversation_id":"sub-agent-123"}]}`
+	if id := extractSubagentID(payloadNested); id != "sub-agent-123" {
+		t.Errorf("expected 'sub-agent-123', got %q", id)
+	}
+
+	// Embedded list with prefix
+	embeddedList := `Prefix chatter before json: [{"conversationId":"sub-embedded-456"}]`
+	if id := extractSubagentID(embeddedList); id != "sub-embedded-456" {
+		t.Errorf("expected 'sub-embedded-456', got %q", id)
+	}
+
+	// List with item having empty ID
+	if id := extractSubagentID(`[{"role":"writer"}]`); id != "" {
+		t.Errorf("expected empty string for item without ID, got %q", id)
+	}
+
+	// Payload with empty subagents list
+	if id := extractSubagentID(`{"role":"test","subagents":[]}`); id != "" {
+		t.Errorf("expected empty string for payload without ID, got %q", id)
+	}
+}
+
+func TestParseAgyOutputDetailed(t *testing.T) {
+	t.Parallel()
+	// Flat result event
+	flat := `{"event":"init","session_id":"11111111-2222-3333-4444-555555555555"}
+{"event":"result","status":"SUCCESS","response":"flat model response"}
+`
+	res, err := ParseAgyOutput(flat)
+	if err != nil || res.Response != "flat model response" || res.ConversationID != "11111111-2222-3333-4444-555555555555" {
+		t.Errorf("unexpected parse result for flat output: (%+v, %v)", res, err)
+	}
+
+	// Missing result event but valid legacy JSON fallback
+	legacyFallback := `{"status":"SUCCESS","response":"legacy response","conversation_id":"sess-legacy"}`
+	res, err = ParseAgyOutput(legacyFallback)
+	if err != nil || res.Response != "legacy response" {
+		t.Errorf("unexpected parse result for legacy fallback: (%+v, %v)", res, err)
+	}
+}
+
 func TestDaemon_TurnStreamEdgeCases(t *testing.T) {
 	tempDir := t.TempDir()
 	mockBin := filepath.Join(tempDir, "mock_edge.sh")
@@ -1017,3 +1091,104 @@ done
 		}
 	})
 }
+
+type failWriteCloser struct {
+	writeErr error
+	closeErr error
+}
+
+func (f failWriteCloser) Write(p []byte) (int, error) {
+	if f.writeErr != nil {
+		return 0, f.writeErr
+	}
+	return len(p), nil
+}
+
+func (f failWriteCloser) Close() error {
+	return f.closeErr
+}
+
+type failReader struct {
+	err error
+}
+
+func (f failReader) Read(p []byte) (int, error) {
+	return 0, f.err
+}
+
+func TestDaemon_ExecuteTurn_StdinWriteError(t *testing.T) {
+	t.Parallel()
+
+	d := &Daemon{
+		state:       StateReady,
+		stdin:       failWriteCloser{writeErr: errors.New("broken pipe")},
+		taskTracker: NewTaskTracker(),
+	}
+
+	_, err := d.ExecuteTurn(context.Background(), "hello")
+	if err == nil || !strings.Contains(err.Error(), "failed to write prompt") {
+		t.Errorf("expected failed to write prompt error, got %v", err)
+	}
+	if d.State() != StateClosed {
+		t.Errorf("expected state to be StateClosed, got %v", d.State())
+	}
+}
+
+func TestDaemon_ExecuteTurn_YieldWaitingState(t *testing.T) {
+	t.Parallel()
+
+	tracker := NewTaskTracker()
+	tracker.Add(TaskMetadata{TaskID: "task-123"})
+
+	stdoutBuf := bufio.NewReader(strings.NewReader("{\"event\":\"result\",\"status\":\"SUCCESS\",\"response\":\"done\"}\n"))
+
+	d := &Daemon{
+		state:       StateReady,
+		stdin:       failWriteCloser{},
+		stdout:      stdoutBuf,
+		taskTracker: tracker,
+		cfg:         DaemonConfig{SessionID: "sess-1"},
+	}
+
+	res, err := d.ExecuteTurn(context.Background(), "hello")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Response != "done" {
+		t.Errorf("expected response 'done', got %q", res.Response)
+	}
+	if d.State() != StateYieldWaiting {
+		t.Errorf("expected state StateYieldWaiting when active tasks exist, got %v", d.State())
+	}
+}
+
+func TestDaemon_ExecuteTurn_NonEOFReadError(t *testing.T) {
+	t.Parallel()
+
+	d := &Daemon{
+		state:       StateReady,
+		stdin:       failWriteCloser{},
+		stdout:      bufio.NewReader(failReader{err: errors.New("read error occurred")}),
+		taskTracker: NewTaskTracker(),
+		cfg:         DaemonConfig{SessionID: "sess-1"},
+	}
+
+	_, err := d.ExecuteTurn(context.Background(), "hello")
+	if err == nil || !strings.Contains(err.Error(), "error reading daemon stream") {
+		t.Errorf("expected error reading daemon stream, got %v", err)
+	}
+}
+
+func TestDaemon_Close_StdinCloseError(t *testing.T) {
+	t.Parallel()
+
+	d := &Daemon{
+		state: StateReady,
+		stdin: failWriteCloser{closeErr: errors.New("failed to close stdin")},
+	}
+
+	if err := d.Close(); err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
