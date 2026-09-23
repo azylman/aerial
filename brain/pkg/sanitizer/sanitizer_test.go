@@ -343,6 +343,7 @@ func TestSanitizeMentions(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			got := SanitizeMentions(tt.input)
 			if got != tt.expected {
 				t.Errorf("SanitizeMentions(%q) = %q; want %q", tt.input, got, tt.expected)
@@ -368,6 +369,7 @@ func TestNormalizeWhitespace(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			got := NormalizeWhitespace(tt.input)
 			if got != tt.expected {
 				t.Errorf("NormalizeWhitespace(%q) = %q; want %q", tt.input, got, tt.expected)
@@ -412,6 +414,7 @@ func TestSanitizePromptTags(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			got := SanitizePromptTags(tt.input)
 			if got != tt.expected {
 				t.Errorf("SanitizePromptTags(%q) = %q; want %q", tt.input, got, tt.expected)
@@ -436,6 +439,7 @@ func TestSanitizeAuthor(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			got := SanitizeAuthor(tt.input)
 			if got != tt.expected {
 				t.Errorf("SanitizeAuthor(%q) = %q; want %q", tt.input, got, tt.expected)

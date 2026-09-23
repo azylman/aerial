@@ -116,6 +116,7 @@ func TestParseAgyOutput(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			resp, err := ParseAgyOutput(tt.stdout)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("ParseAgyOutput() error = %v, wantErr %v", err, tt.wantErr)
@@ -458,6 +459,7 @@ func TestClassifyError(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			isFailure, isTransient, isCorrupt, errDetail := ClassifyError(tt.exitCode, tt.stdout, tt.stderr)
 			if isFailure != tt.wantFailure {
 				t.Errorf("isFailure = %v, want %v", isFailure, tt.wantFailure)
@@ -681,6 +683,7 @@ func TestIsInactivityTimeout(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			got := IsInactivityTimeout(tt.errDetail, tt.stderr)
 			if got != tt.want {
 				t.Errorf("IsInactivityTimeout(%q, %q) = %v, want %v", tt.errDetail, tt.stderr, got, tt.want)
@@ -733,6 +736,7 @@ func TestExtractSessionID_StrictUUID_IgnoresCommonWords(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			got := ExtractSessionID(tt.stderr, time.Now())
 			if got != tt.wantUUID {
 				t.Errorf("ExtractSessionID(%q) = %q, want %q", tt.stderr, got, tt.wantUUID)
@@ -807,6 +811,7 @@ func TestIsQuotaPause(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			got := IsQuotaPause(tt.errDetail, tt.stderr)
 			if got != tt.want {
 				t.Errorf("IsQuotaPause(%q, %q) = %v, want %v", tt.errDetail, tt.stderr, got, tt.want)
@@ -870,6 +875,7 @@ func TestExtractQuotaResetDuration(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			gotDur, gotExact := ExtractQuotaResetDuration(tt.errDetail, tt.stderr)
 			if gotDur != tt.wantDur || gotExact != tt.wantExact {
 				t.Errorf("ExtractQuotaResetDuration(%q, %q) = (%v, %v), want (%v, %v)",

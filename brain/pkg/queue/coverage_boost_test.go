@@ -29,7 +29,6 @@ import (
 // ---------------------------------------------------------------------------
 
 func TestFetchRecentThreadHistory_EdgeCases(t *testing.T) {
-	t.Parallel()
 	store := setupTestStore(t)
 	defer func() { _ = store.Close() }()
 
@@ -1666,7 +1665,6 @@ func (m *mockClaimStore) ClaimPendingMessage(ctx context.Context, id string) (bo
 }
 
 func TestQueue_TargetedCoveragePush(t *testing.T) {
-	t.Parallel()
 	store := setupTestStore(t)
 	defer func() { _ = store.Close() }()
 

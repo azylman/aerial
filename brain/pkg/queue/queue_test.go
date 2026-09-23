@@ -7244,7 +7244,6 @@ func TestRunner_DefensiveLatchingAndCold429(t *testing.T) {
 }
 
 func TestThreadColdStartSummarization_Integration(t *testing.T) {
-	t.Parallel()
 	store := setupTestStore(t)
 
 	// Register channel snapshots in cache
@@ -10028,7 +10027,6 @@ func (m *mockWebhookDispatcher) CallPostTurnHook(ctx context.Context, endpoint *
 }
 
 func TestOnWakeHook(t *testing.T) {
-	t.Parallel()
 	t.Run("WakeOverride", func(t *testing.T) {
 		store := setupTestStore(t)
 
@@ -10703,7 +10701,6 @@ func TestOnWakeHook(t *testing.T) {
 }
 
 func TestPreTurnHook(t *testing.T) {
-	t.Parallel()
 	t.Run("Approved_WithInjectedContext", func(t *testing.T) {
 		store := setupTestStore(t)
 
@@ -11423,7 +11420,6 @@ func mockJSONResponseWithUsage(convID, responseText string, usage runner.TokenUs
 }
 
 func TestPostTurnHook(t *testing.T) {
-	t.Parallel()
 	t.Run("SuccessfulTurn", func(t *testing.T) {
 		store := setupTestStore(t)
 
