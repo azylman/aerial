@@ -41,9 +41,3 @@ issues:
     - text: "SA1019:.*ResolveChannelPolicy is deprecated"
       linters:
         - staticcheck
-
-    # 3. Unmigrated unused / ineffectual assignments
-    - path: pure\.go
-      linters:
-        - unused
-
