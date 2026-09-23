@@ -36,8 +36,3 @@ issues:
         - ineffassign
         - staticcheck
         - unused
-
-    # 2. SA1019 deprecation shims for backward compatibility
-    - text: "SA1019:.*ResolveChannelPolicy is deprecated"
-      linters:
-        - staticcheck
