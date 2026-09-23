@@ -155,3 +155,8 @@ Aerial operates on a strict **Two-Repository Separation of Concerns**:
     - **Host-Native Execution**: When planning or executing builds, tests, lints, or script validations (`go test`, `node --test`, `golangci-lint run`, `./scripts/verify.sh`), always invoke the installed binaries directly in the workspace shell (`run_command`). Never wrap standard unit test commands in `docker run`.
     - **Ephemeral Container Cleanup**: External containers strictly required for tests (e.g. pgvector) must implement deterministic cleanup (`defer`, `t.Cleanup()`, or shell traps) with unique timestamped names.
     - **BuildKit**: Always execute image builds with Docker BuildKit enabled (`DOCKER_BUILDKIT=1`).
+
+16. **Subprocess Signal Safety & Test Mocking Invariant**:
+    - **Zero Raw Signal Broadcasts**: Unit tests must never execute raw POSIX signal broadcasts (`syscall.Kill` with negative or arbitrary PIDs) against the host environment.
+    - **Dependency-Injected Mocking**: Subprocess signals, group termination, and error branches must be tested using managed dependency-injected mock functions (`killProcessGroupWith`, `terminateProcessGroupWith`) or dedicated child subprocesses.
+
