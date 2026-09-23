@@ -536,3 +536,51 @@ func TestUtilityDaemon_ExecuteClosedAndNilWorker(t *testing.T) {
 	}
 }
 
+func TestUtilityDaemon_RunnerFuncAndRestart(t *testing.T) {
+	t.Parallel()
+
+	daemon := NewUtilityDaemon(nil,
+		WithSpawner(newMockSpawner(t)),
+	)
+	defer daemon.Close()
+	waitForStandby(t, daemon)
+
+	// 1. RunnerFunc success
+	rf := daemon.RunnerFunc()
+	stdout, stderr, code, err := rf(context.Background(), "agy", "hello", "sess-1", "key", "model", 1)
+	if err != nil || code != 0 || stderr != "" {
+		t.Fatalf("RunnerFunc failed: stdout=%q, stderr=%q, code=%d, err=%v", stdout, stderr, code, err)
+	}
+	if !strings.Contains(stdout, "hello") {
+		t.Errorf("expected synthetic result to contain response 'hello', got %s", stdout)
+	}
+
+	// 2. TriggerRestartNow (debounce <= 0)
+	initialConvID := daemon.ActiveConvID()
+	daemon.TriggerRestartNow("test immediate reload")
+	if daemon.ActiveConvID() == initialConvID {
+		t.Errorf("expected active convID to rotate after TriggerRestartNow")
+	}
+
+	// 3. TriggerRestartWithDebounce (debounced reload) and consecutive triggers replacing reloadTimer
+	convAfterNow := daemon.ActiveConvID()
+	daemon.TriggerRestartWithDebounce("test debounced 1", 10*time.Millisecond)
+	daemon.TriggerRestartWithDebounce("test debounced 2", 10*time.Millisecond)
+	waitForReload(t, daemon, convAfterNow)
+
+	// 4. Default turnTimeout <= 0 branch in Execute
+	daemon.turnTimeout = 0
+	out, err := daemon.Execute(context.Background(), "test timeout zero")
+	if err != nil || out == "" {
+		t.Errorf("expected successful execution with default 15s timeout, got out=%q, err=%v", out, err)
+	}
+
+	// 5. RunnerFunc failure when closed
+	daemon.Close()
+	_, stderr, code, err = rf(context.Background(), "agy", "hello after close", "sess-1", "key", "model", 1)
+	if err == nil || code != -1 || !strings.Contains(stderr, "utility daemon error") {
+		t.Errorf("expected failure when runner called on closed daemon, got stderr=%q, code=%d, err=%v", stderr, code, err)
+	}
+}
+
+
