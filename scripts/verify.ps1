@@ -25,7 +25,25 @@ $gitCmd = if (Get-Command "git" -ErrorAction SilentlyContinue) { "git" }
           else { "git" }
 
 $hasGo = [bool](Get-Command "go" -ErrorAction SilentlyContinue)
-$hasLint = [bool](Get-Command "golangci-lint" -ErrorAction SilentlyContinue)
+$goBinPath = if ($hasGo) {
+    try { Join-Path (& go env GOPATH) "bin" } catch { "" }
+} else { "" }
+$userGoBin = Join-Path $env:USERPROFILE "go\bin"
+$hasLint = if (Get-Command "golangci-lint" -ErrorAction SilentlyContinue) { 
+    $true 
+} elseif ($goBinPath -and (Test-Path (Join-Path $goBinPath "golangci-lint.exe"))) {
+    if (-not ($env:PATH -split ';' -contains $goBinPath)) {
+        $env:PATH = "$goBinPath;" + $env:PATH
+    }
+    $true
+} elseif (Test-Path (Join-Path $userGoBin "golangci-lint.exe")) {
+    if (-not ($env:PATH -split ';' -contains $userGoBin)) {
+        $env:PATH = "$userGoBin;" + $env:PATH
+    }
+    $true
+} else { 
+    $false 
+}
 $hasDocker = if (Get-Command "docker" -ErrorAction SilentlyContinue) {
     try { & docker version *>$null; $LASTEXITCODE -eq 0 } catch { $false }
 } else { $false }
@@ -48,26 +66,53 @@ function Run-GoVet($svc) {
     }
 }
 
-function Run-GolangCILint($svc) {
-    Write-Host "   [golangci-lint] Linting $svc..." -ForegroundColor DarkCyan
+function Run-GolangCILint($svc, $targetPkg = "./...") {
+    Write-Host "   [golangci-lint] Linting $svc ($targetPkg)..." -ForegroundColor DarkCyan
     $svcPath = Join-Path $repoRoot $svc
     $normSvc = "$($svc.Replace('\', '/'))/"
     if ($hasLint) {
         Push-Location $svcPath
+        $prevToolchain = $env:GOTOOLCHAIN
         try {
-            & golangci-lint run --path-prefix="$normSvc" --config "$repoRoot/.golangci.yml" ./...
-            if ($LASTEXITCODE -ne 0) { throw "golangci-lint failed on $svc" }
+            $env:GOTOOLCHAIN = "go1.24.1"
+            & golangci-lint run --path-prefix="$normSvc" --config "$repoRoot/.golangci.yml" $targetPkg
+            if ($LASTEXITCODE -ne 0) { throw "golangci-lint failed on $svc ($targetPkg)" }
         } finally {
+            if ($null -ne $prevToolchain) {
+                $env:GOTOOLCHAIN = $prevToolchain
+            } else {
+                Remove-Item Env:\GOTOOLCHAIN -ErrorAction SilentlyContinue
+            }
             Pop-Location
         }
     } elseif ($hasDocker) {
-        docker run --rm -v "${repoRoot}:/workspace" -w "/workspace/$svc" golangci/golangci-lint:v1.64.5 golangci-lint run --path-prefix="$normSvc" --config /workspace/.golangci.yml ./...
+        docker run --rm -v "${repoRoot}:/workspace" -w "/workspace/$svc" golangci/golangci-lint:v1.64.5 golangci-lint run --path-prefix="$normSvc" --config /workspace/.golangci.yml $targetPkg
         if ($LASTEXITCODE -ne 0) { throw "golangci-lint (docker) failed on $svc" }
     } elseif ($hasGo) {
         Write-Host "   (golangci-lint not found, running go vet for $svc)" -ForegroundColor Yellow
         Run-GoVet $svc
     } else {
         throw "Neither golangci-lint, docker, nor go found in PATH."
+    }
+}
+
+function Run-GoLinuxCompileCheck($svc) {
+    Write-Host "   [linux-cross-compile] Checking $svc for GOOS=linux..." -ForegroundColor DarkCyan
+    $svcPath = Join-Path $repoRoot $svc
+    if ($hasGo) {
+        Push-Location $svcPath
+        $prevGOOS = $env:GOOS
+        $prevGOARCH = $env:GOARCH
+        try {
+            $env:GOOS = "linux"
+            $env:GOARCH = "amd64"
+            & go test -exec "cmd.exe /c exit 0" ./...
+            if ($LASTEXITCODE -ne 0) { throw "Linux cross-compilation failed on $svc" }
+        } finally {
+            if ($null -ne $prevGOOS) { $env:GOOS = $prevGOOS } else { Remove-Item Env:\GOOS -ErrorAction SilentlyContinue }
+            if ($null -ne $prevGOARCH) { $env:GOARCH = $prevGOARCH } else { Remove-Item Env:\GOARCH -ErrorAction SilentlyContinue }
+            Pop-Location
+        }
     }
 }
 
@@ -145,8 +190,21 @@ if ($Staged) {
     }
 
     foreach ($svc in $goServices) {
-        if ($stagedFiles | Where-Object { $_ -like "$svc/*" }) {
-            Run-GoVet $svc
+        $svcStaged = $stagedFiles | Where-Object { $_ -like "$svc/*.go" }
+        if ($svcStaged) {
+            # Extract distinct package subdirectories relative to the service
+            $pkgs = @()
+            foreach ($file in $svcStaged) {
+                $relFile = $file.Substring($svc.Length + 1)
+                $dir = [System.IO.Path]::GetDirectoryName($relFile).Replace('\', '/')
+                $pkg = if ([string]::IsNullOrEmpty($dir)) { "." } else { "./$dir" }
+                if ($pkgs -notcontains $pkg) {
+                    $pkgs += $pkg
+                }
+            }
+            foreach ($p in $pkgs) {
+                Run-GolangCILint $svc $p
+            }
         }
     }
 
@@ -168,6 +226,7 @@ Check-RuleFileSizes
 Write-Host "=== 1. Static Analysis & Linting ===" -ForegroundColor Yellow
 foreach ($svc in $goServices) {
     Run-GolangCILint $svc
+    Run-GoLinuxCompileCheck $svc
 }
 
 Write-Host "=== 2. Frontend & Script Syntax Checks ===" -ForegroundColor Yellow

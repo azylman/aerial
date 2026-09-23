@@ -5,6 +5,16 @@ set -eu
 export MSYS_NO_PATHCONV=1
 export DOCKER_BUILDKIT=1
 
+# Ensure MinGit / MSYS binaries (/usr/bin, /mingw64/bin, /cmd) are in PATH
+for p in /usr/bin /mingw64/bin /cmd; do
+    if [ -d "$p" ]; then
+        case ":$PATH:" in
+            *:"$p":*) ;;
+            *) PATH="$p:$PATH" ;;
+        esac
+    fi
+done
+
 MODE="full"
 for arg in "$@"; do
     case "$arg" in
@@ -17,8 +27,12 @@ for arg in "$@"; do
     esac
 done
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+case "$0" in
+    */*) SCRIPT_DIR="${0%/*}" ;;
+    *) SCRIPT_DIR="." ;;
+esac
+SCRIPT_DIR="$(cd "$SCRIPT_DIR" && (pwd -W 2>/dev/null || pwd))"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && (pwd -W 2>/dev/null || pwd))"
 
 echo "⚡ [Aerial Verify] Running $MODE verification checks..."
 
@@ -65,7 +79,7 @@ check_rule_file_sizes() {
         if [ -f "$rule_file" ]; then
             size=$(wc -c < "$rule_file" 2>/dev/null | tr -d '[:space:]')
             if [ -n "$size" ] && [ "$size" -gt "$MAX_BYTES" ]; then
-                base_name=$(basename "$rule_file")
+                base_name="${rule_file##*/}"
                 echo "🚨 [Aerial Verify] Error: Rule file '$base_name' exceeds size limit!" >&2
                 echo "   Current size: $size bytes (limit: $MAX_BYTES bytes / 22.5 KB)" >&2
                 echo "   Antigravity truncates prompt context when compiled rules exceed 23 KB." >&2
@@ -100,6 +114,7 @@ run_golangci_lint() {
     if [ -d "$svc" ]; then
         echo "   [golangci-lint] Linting $svc..."
         if has_cmd golangci-lint; then
+            export GOTOOLCHAIN=go1.24.1
             (cd "$svc" && golangci-lint run --path-prefix="$svc/" --config "$REPO_ROOT/.golangci.yml" ./...)
         elif has_docker; then
             docker run --rm \

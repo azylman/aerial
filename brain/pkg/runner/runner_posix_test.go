@@ -93,6 +93,36 @@ func TestRunnerPosix_KillHelpers(t *testing.T) {
 	killProcessGroup(&exec.Cmd{Process: &os.Process{Pid: -1}})
 	killProcessGroup(&exec.Cmd{Process: &os.Process{Pid: 0}})
 	killProcessGroup(&exec.Cmd{})
+
+	// Test killProcessGroupWith and terminateProcessGroupWith with injected mocks
+	var mockSigKillCalled, mockProcKillCalled bool
+	mockCmd := &exec.Cmd{Process: &os.Process{Pid: 98765}}
+	killProcessGroupWith(mockCmd, func(pid int, sig syscall.Signal) error {
+		mockSigKillCalled = true
+		if pid != -98765 || sig != syscall.SIGKILL {
+			t.Errorf("unexpected signal args: pid=%d, sig=%v", pid, sig)
+		}
+		return errors.New("simulated sigkill error")
+	}, func(p *os.Process) error {
+		mockProcKillCalled = true
+		return errors.New("simulated prockill error")
+	})
+	if !mockSigKillCalled || !mockProcKillCalled {
+		t.Errorf("expected both signal and process kill mocks to be called")
+	}
+
+	var mockSigTermCalled bool
+	terminateProcessGroupWith(mockCmd, func(pid int, sig syscall.Signal) error {
+		mockSigTermCalled = true
+		if pid != -98765 || sig != syscall.SIGTERM {
+			t.Errorf("unexpected signal args: pid=%d, sig=%v", pid, sig)
+		}
+		return errors.New("simulated sigterm error")
+	})
+	if !mockSigTermCalled {
+		t.Errorf("expected signal term mock to be called")
+	}
 }
+
 
 
