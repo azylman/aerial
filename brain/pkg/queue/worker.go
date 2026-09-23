@@ -1206,8 +1206,13 @@ func (te *turnExecution) buildTurnPrompt() {
 		}
 	}
 
-	baseCoalesced := CoalesceBurstPrompt(te.burst)
-	queryText := memory.ExtractQueryText(baseCoalesced)
+	var queryText string
+	if len(te.burst) == 1 {
+		queryText = memory.ExtractQueryText(te.burst[0].BodyText())
+	} else {
+		baseCoalesced := CoalesceBurstPrompt(te.burst)
+		queryText = memory.ExtractQueryText(baseCoalesced)
+	}
 	if queryText == "" && summary != "" {
 		queryText = memory.ExtractQueryText(summary)
 	}

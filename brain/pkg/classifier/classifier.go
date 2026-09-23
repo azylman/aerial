@@ -218,7 +218,7 @@ func FormatMessage(m db.Message) string {
 		author = "unknown"
 	}
 	ts := m.CreatedAt.UTC().Format(time.RFC3339)
-	return fmt.Sprintf("[@%s] (%s): %s", author, ts, SanitizeContent(m.Content))
+	return fmt.Sprintf("[@%s] (%s): %s", author, ts, SanitizeContent(m.BodyText()))
 }
 
 // DefaultAmbientWakePrompt is the default evaluation directive used by the ambient relevance classifier.

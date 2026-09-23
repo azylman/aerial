@@ -1,54 +1,138 @@
-# Implementation Plan: Dead Code Pruning Step 3 (scheduler-mcp)
+# Implementation Plan: Structured Message Lifecycle & JIT Prompt Flattening
 
-## 1. Problem Statement & Scope
-During the dead code static analysis and pruning initiative across the monorepo, Steps 1 (brain, PR #353) and 2 (hangar, PR #354) were completed and deployed. Step 3 targets `scheduler-mcp` to prune legacy, uncalled JSON-RPC shim handlers and unused constructor functions left behind after the migration to typed Model Context Protocol (MCP) Go SDK handlers (`mcp.AddTool`):
-- `HandleScheduleRecurring(json.RawMessage)`
-- `HandleScheduleOnce(json.RawMessage)`
-- `HandleListSchedules(json.RawMessage)`
-- `HandleCancelSchedule(json.RawMessage)`
-- `HandleUpdateCronSchedule(json.RawMessage)`
-- `NewConfig(databaseURL, timezone, port string)`
+## 1. Problem Statement & Architectural Context
+Currently, when a Discord event arrives at `brain/funnel.go`, `buildDiscordPrompt` immediately flattens `discordgo.Message` into a pseudo-YAML prompt envelope string (`<USER_REQUEST>\nHere's a message...\n- content: ...\n- mention_user_ids: [123]...`) and stores it directly into `db.Message.Content`.
 
-These methods are never called by production code (`server.go` or `main.go`). All MCP tool calls are dispatched through typed SDK methods:
-- `ScheduleRecurring(ctx context.Context, args ScheduleRecurringArgs) (ScheduleRecurringOutput, error)`
-- `ScheduleOnce(ctx context.Context, args ScheduleOnceArgs) (ScheduleOnceOutput, error)`
-- `ListSchedules(ctx context.Context, args ListSchedulesArgs) (ListSchedulesOutput, error)`
-- `CancelSchedule(ctx context.Context, args CancelScheduleArgs) (CancelScheduleOutput, error)`
-- `UpdateCronSchedule(ctx context.Context, args UpdateCronScheduleArgs) (UpdateCronScheduleOutput, error)`
+Because downstream queue workers and components only possess this flat string:
+1. **`isTier1Wake` in `brain/pkg/queue/channel_resolution.go`**: Performs brittle string searches (`strings.Index(m.Content, "- mention_user_ids: [")`, bracket extraction, and line splitting for `replying_to:`) to detect bot mentions and replies.
+2. **`extractMessageBody` in `brain/pkg/queue/channel_resolution.go`**: Performs delimiter hunting (`- content:`, `\n- timestamp:`, `\n- mentions:`) to slice out the user's utterance. If a user pastes markdown or code containing these markers, the utterance is truncated or broken.
+3. **`CoalesceBurstPrompt` in `brain/pkg/queue/burst.go`**: Re-slices prompt envelopes using `extractMessageBody` to construct multi-message prompts, creating an asymmetric flow where single messages bypass coalescing while bursts undergo re-parsing.
+4. **`FormatMessage` in `brain/pkg/classifier/classifier.go`**: Injects the entire prompt envelope into the ambient classifier prompt, inflating tokens by ~80% and degrading classification accuracy.
+5. **`CleanTaskSummary` in `brain/pkg/db/tasks.go`**: Splits lines hunting for `- content:` and `Prompt:` to generate task previews.
+6. **`ExtractQueryText` in `brain/pkg/memory/search.go`**: Uses regex `reDiscordContent` to fish for `- content:` to extract search queries for vector memory retrieval.
 
-The only callers of the legacy `Handle*` shims are existing unit tests in `tools_test.go` and `coverage_enhancement_test.go`.
+The architectural fix requested by Alex is: **keep the value structured as long as possible, and only flatten it into a prompt string immediately prior to dispatching to `agy`**.
 
-## 2. Proposed Changes (Incorporating Review Panel Feedback)
+---
 
-### 2.1 `scheduler-mcp/tools.go`
-- Delete `HandleScheduleRecurring` (lines 210-228)
-- Delete `HandleScheduleOnce` (lines 290-305)
-- Delete `HandleListSchedules` (lines 341-356)
-- Delete `HandleCancelSchedule` (lines 390-404)
-- Delete `HandleUpdateCronSchedule` (lines 464-485)
-- Remove `"encoding/json"` from `tools.go` imports to prevent compiler `imported and not used: "encoding/json"` error.
-- Prune ~88 LOC of dead JSON-RPC untyped shims.
+## 2. Proposed Architecture & Schema Specification
 
-### 2.2 `scheduler-mcp/config.go`
-- Delete `NewConfig(databaseURL, timezone, port string)` (lines 23-36). Production loads configuration via `LoadConfig()` or `LoadConfigFromLookup(lookup)`.
-- Prune ~14 LOC of unused configuration constructor.
+### 2.1 Database Schema Migration & `db.Message` Refactor
+Add a structured `metadata JSONB` column to the `messages` table in PostgreSQL and `TEXT` in SQLite test fixtures.
 
-### 2.3 `scheduler-mcp/tools_test.go`
-- Migrate `TestToolHandler_CRUD`: call typed methods `ScheduleRecurring`, `ScheduleOnce`, `ListSchedules`, `CancelSchedule` directly with typed argument structs. Verify both `Effort: "low"` and `Effort: "high"` to preserve 100% effort normalization branch coverage.
-- Migrate `TestToolHandler_DefaultTimezoneFallback`: call typed `ScheduleRecurring`.
-- Migrate `TestToolHandlerValidationErrors`: test validation directly against typed methods (`ScheduleRecurring`, `ScheduleOnce`, `CancelSchedule`).
-- Migrate `TestHandleScheduleOnce_WithTimezone` -> `TestToolHandler_ScheduleOnce_WithTimezone`: call typed `ScheduleOnce`.
-- Migrate `TestToolHandlerErrorCases`: remove raw `{bad json` checks (since parameter unmarshaling is handled by MCP SDK, verified in `server_test.go`); update domain error cases (missing required fields, unparseable date/cron, closed DB) to invoke typed methods with struct arguments.
-- Prune unused `"encoding/json"` from import block if no longer required.
+#### Go Struct Definitions (`brain/pkg/db/messages.go`):
+```go
+// MessageMetadata stores structured Discord and source metadata preserved throughout the queue lifecycle.
+type MessageMetadata struct {
+	ChannelID         string   `json:"channel_id,omitempty"`
+	TargetThreadID    string   `json:"target_thread_id,omitempty"`
+	GuildID           string   `json:"guild_id,omitempty"`
+	AuthorGlobalName  string   `json:"author_global_name,omitempty"`
+	AuthorBot         bool     `json:"author_bot,omitempty"`
+	IsAdmin           bool     `json:"is_admin,omitempty"`
+	Mentions          []string `json:"mentions,omitempty"`
+	MentionUserIDs    []string `json:"mention_user_ids,omitempty"`
+	MentionRoleIDs    []string `json:"mention_role_ids,omitempty"`
+	ReplyingToAuthor  string   `json:"replying_to_author,omitempty"`
+	ReplyingToContent string   `json:"replying_to_content,omitempty"`
+	Attachments       []string `json:"attachments,omitempty"`
+}
 
-### 2.4 `scheduler-mcp/coverage_enhancement_test.go`
-- Update `TestConfig_NewAndLoadCoverage`: remove calls to `NewConfig`. Test `LoadConfigFromLookup` and `LoadConfig` directly.
-- Migrate `TestTools_HandleUpdateCronSchedule_AllBranches`: remove raw `{bad` check; update to invoke `h.UpdateCronSchedule(ctx, args)` directly with structured arguments across valid updates, effort permutations, and closed DB / nonexistent schedule branches.
-- Migrate `TestTools_HandleListSchedules_EmptyAndError`: update to invoke `h.ListSchedules(ctx, args)` directly.
-- Remove `TestTools_HandleListSchedules_InvalidJSON` since JSON unmarshaling is now entirely handled by the MCP SDK's `mcp.AddTool` deserializer.
-- Clean up unused imports.
+type Message struct {
+	ID            string          `json:"id"`
+	RowID         int64           `json:"row_id,omitempty"`
+	ThreadID      string          `json:"thread_id"`
+	GuildID       string          `json:"guild_id"`
+	AuthorID      string          `json:"author_id"`
+	AuthorName    string          `json:"author_name"`
+	Content       string          `json:"content"` // Raw user utterance (or prompt if from HTTP/scheduler)
+	Summary       string          `json:"summary"`
+	Status        string          `json:"status"`
+	RetryCount    int             `json:"retry_count"`
+	RestartCount  int             `json:"restart_count"`
+	Effort        string          `json:"effort,omitempty"`
+	ErrorMessage  string          `json:"error_message,omitempty"`
+	ResponseText  string          `json:"response_text,omitempty"`
+	ScheduleRunID string          `json:"schedule_run_id,omitempty"`
+	Metadata      MessageMetadata `json:"metadata,omitempty"`
+	CreatedAt     time.Time       `json:"created_at"`
+	UpdatedAt     time.Time       `json:"updated_at"`
+}
+```
 
-## 3. Verification & Gating
-- Unit tests: `go test -v ./...` in `scheduler-mcp` must pass 100%.
-- Coverage check: Statement coverage in `scheduler-mcp` must remain `>= 95.0%`.
-- Monorepo staged verification: `./scripts/verify.sh --staged` must exit 0.
+#### Backward-Compatibility Accessor (`brain/pkg/db/messages.go`):
+```go
+// BodyText returns the clean user utterance. If Content contains a legacy prompt envelope,
+// it extracts the body for backward compatibility with historical DB rows and unmigrated test fixtures.
+func (m Message) BodyText() string {
+	if strings.Contains(m.Content, "<USER_REQUEST>") {
+		return extractMessageBody(m.Content)
+	}
+	return m.Content
+}
+```
+
+#### PostgreSQL Migration (`brain/pkg/db/schema.go`):
+```sql
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb;
+```
+
+#### SQLite Test Fixture (`brain/pkg/db/sqlite_test_fixture_test.go`):
+```sql
+metadata TEXT NOT NULL DEFAULT '{}'
+```
+
+### 2.2 Ingestion & Funnel (`brain/funnel.go`)
+When a Discord message arrives:
+1. Extract author metadata, admin status, mentions, role IDs, reply author/content, and attachment URLs directly into `db.MessageMetadata`.
+2. Populate `db.Message`:
+   - `Content`: `m.Content` (the raw utterance typed by the user, WITHOUT prompt envelope wrapping).
+   - `Metadata`: the populated `MessageMetadata`.
+   - `AuthorID`, `AuthorName`, `ThreadID`, `GuildID`, `CreatedAt`.
+3. Insert into `store.InsertMessage` and enqueue into `WorkerPool`.
+4. Bypasses premature call to `BuildDiscordPrompt`!
+
+### 2.3 Queue & Decision Logic (`brain/pkg/queue/`)
+1. **`isTier1Wake`**:
+   - Primary: Directly inspect `m.Metadata.MentionUserIDs`, `m.Metadata.MentionRoleIDs`, `m.Metadata.ReplyingToAuthor`, and `m.Metadata.Mentions`.
+   - Fallback: If `m.Metadata` is empty (legacy test fixtures or DB rows), fall back to checking `m.Content` for bracket syntax or un-enveloped `<@id>` mentions.
+   - Eliminates `strings.Index` bracket searches and line splits in production.
+2. **`PlanBurstExecution`**:
+   - Uses `m.BodyText()` when checking `classifier.IsHeuristicSkip`.
+3. **`classifier.BuildBurstPrompt` & `FormatMessage`**:
+   - `FormatMessage(m)` uses `m.BodyText()`.
+   - The classifier receives only `[@Author] (ts): <utterance>` without prompt envelope noise.
+4. **`CleanTaskSummary` & `ExtractQueryText`**:
+   - Receives clean `m.BodyText()` directly.
+
+### 2.4 JIT Prompt Assembly (`brain/pkg/queue/burst.go`)
+In `AssembleTurnPrompt(input TurnPromptInput)`:
+Right before dispatch to `agy`:
+1. If `len(burst) == 1`:
+   - If `burst[0].Metadata` is present: format the canonical single-message `<USER_REQUEST>` prompt envelope JIT using `FormatSingleDiscordPrompt(burst[0])`.
+   - If `burst[0].Metadata` is empty and `burst[0].Content` is already a prompt (e.g. scheduler or legacy), use `burst[0].Content`.
+2. If `len(burst) > 1`:
+   - Coalesce into `<USER_REQUEST>\n[Multiple messages received in channel]\n--- Message 1 (by @author at HH:MM:SS) ---\n<body1>\n...` using `m.BodyText()`.
+3. Apply standard layers: Coordination Context Hook, Channel Instructions, Semantic Memory Facts, Previous Session, Channel History, Thread Summary.
+
+---
+
+## 3. Review Panel Composition & Scope (The Girl Gang)
+In accordance with `GEMINI.md` Invariant 8, a single consolidated review subagent will audit this architecture across 4 disciplines:
+1. **Architecture & Gateway Specialist**: Funnel data flow, JIT prompt assembly, and envelope lifecycle.
+2. **Database & Persistence Specialist**: PostgreSQL JSONB column, SQLite compatibility, zero-downtime migration, and SQL query serialization.
+3. **Queue & Concurrency Specialist**: `WorkerPool`, `PlanBurstExecution`, thread state, and latency implications.
+4. **Mandatory Adversarial Devil's Advocate**: Failure modes, edge cases (empty metadata, legacy envelopes, user markdown breaking envelopes, SQL injection/escaping).
+
+---
+
+## 4. Test Strategy & Verification Contract
+1. **Unit Tests (TDD)**:
+   - `messages_test.go`: Verify `InsertMessage`, `GetRecentMessages`, `GetPendingMessages` correctly round-trip `MessageMetadata` across PostgreSQL and SQLite.
+   - `channel_resolution_test.go`: Verify `isTier1Wake` with populated `Metadata` (mentions, roles, reply) and verify backward compatibility fallback with legacy envelope strings.
+   - `burst_test.go`: Verify JIT prompt assembly for both single message and burst messages.
+   - `classifier_test.go`: Verify `FormatMessage` emits clean utterance without envelope overhead.
+2. **Coverage Floor Contract**:
+   - Maintain statement coverage strictly above 95.0% across all packages (`db`, `queue`, `classifier`, `runner`, `session`).
+3. **Pre-Flight Verification**:
+   - `./scripts/verify.sh --staged` passing with exit code 0.
