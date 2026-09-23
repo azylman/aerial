@@ -181,11 +181,26 @@ jobs:
         run: |
           curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v1.64.5
 
+      - name: Install deadcode
+        run: |
+          go install golang.org/x/tools/cmd/deadcode@v0.50.0
+
       - name: Lint Brain
         if: needs.changes.outputs.brain == 'true'
         run: |
           cd brain
           golangci-lint run --path-prefix=brain/ ./...
+
+      - name: Check Dead Code in Brain
+        if: needs.changes.outputs.brain == 'true'
+        run: |
+          cd brain
+          DEAD=$(deadcode -test ./...)
+          if [ -n "$DEAD" ]; then
+            echo "::error::Unreachable dead code detected in brain:"
+            echo "$DEAD"
+            exit 1
+          fi
 
       - name: Lint Scheduler MCP
         if: needs.changes.outputs.scheduler-mcp == 'true'
@@ -193,11 +208,33 @@ jobs:
           cd scheduler-mcp
           golangci-lint run --path-prefix=scheduler-mcp/ ./...
 
+      - name: Check Dead Code in Scheduler MCP
+        if: needs.changes.outputs.scheduler-mcp == 'true'
+        run: |
+          cd scheduler-mcp
+          DEAD=$(deadcode -test ./...)
+          if [ -n "$DEAD" ]; then
+            echo "::error::Unreachable dead code detected in scheduler-mcp:"
+            echo "$DEAD"
+            exit 1
+          fi
+
       - name: Lint Discord MCP
         if: needs.changes.outputs.discord-mcp == 'true'
         run: |
           cd discord-mcp
           golangci-lint run --path-prefix=discord-mcp/ ./...
+
+      - name: Check Dead Code in Discord MCP
+        if: needs.changes.outputs.discord-mcp == 'true'
+        run: |
+          cd discord-mcp
+          DEAD=$(deadcode -test ./...)
+          if [ -n "$DEAD" ]; then
+            echo "::error::Unreachable dead code detected in discord-mcp:"
+            echo "$DEAD"
+            exit 1
+          fi
 
       - name: Lint Status Dashboard Go Backend
         if: needs.changes.outputs.dashboard == 'true'
@@ -205,11 +242,33 @@ jobs:
           cd dashboard
           golangci-lint run --path-prefix=dashboard/ ./...
 
+      - name: Check Dead Code in Status Dashboard
+        if: needs.changes.outputs.dashboard == 'true'
+        run: |
+          cd dashboard
+          DEAD=$(deadcode -test ./...)
+          if [ -n "$DEAD" ]; then
+            echo "::error::Unreachable dead code detected in dashboard:"
+            echo "$DEAD"
+            exit 1
+          fi
+
       - name: Lint Sidecars Hangar
         if: needs.changes.outputs.hangar == 'true'
         run: |
           cd sidecars/hangar
           golangci-lint run --path-prefix=sidecars/hangar/ ./...
+
+      - name: Check Dead Code in Sidecars Hangar
+        if: needs.changes.outputs.hangar == 'true'
+        run: |
+          cd sidecars/hangar
+          DEAD=$(deadcode -test ./...)
+          if [ -n "$DEAD" ]; then
+            echo "::error::Unreachable dead code detected in sidecars/hangar:"
+            echo "$DEAD"
+            exit 1
+          fi
 
       - name: Lint Permet HUD Frontend Syntax
         if: needs.changes.outputs.dashboard == 'true'

@@ -131,6 +131,61 @@ run_golangci_lint() {
     fi
 }
 
+DEADCODE_BIN=""
+
+ensure_deadcode() {
+    if [ -n "$DEADCODE_BIN" ]; then
+        return 0
+    fi
+    if has_cmd deadcode; then
+        DEADCODE_BIN="deadcode"
+        return 0
+    fi
+    if has_cmd go; then
+        gopath="$(go env GOPATH 2>/dev/null || true)"
+        if [ -n "$gopath" ] && [ -x "$gopath/bin/deadcode" ]; then
+            DEADCODE_BIN="$gopath/bin/deadcode"
+            return 0
+        fi
+        if [ -x "$HOME/go/bin/deadcode" ]; then
+            DEADCODE_BIN="$HOME/go/bin/deadcode"
+            return 0
+        fi
+        echo "   [deadcode] Installing deadcode via go install..."
+        go install golang.org/x/tools/cmd/deadcode@v0.50.0
+        if [ -n "$gopath" ] && [ -x "$gopath/bin/deadcode" ]; then
+            DEADCODE_BIN="$gopath/bin/deadcode"
+            return 0
+        elif [ -x "$HOME/go/bin/deadcode" ]; then
+            DEADCODE_BIN="$HOME/go/bin/deadcode"
+            return 0
+        elif has_cmd deadcode; then
+            DEADCODE_BIN="deadcode"
+            return 0
+        fi
+    fi
+    echo "🚨 [Aerial Verify] Error: Neither deadcode nor go found in PATH to perform dead code analysis." >&2
+    exit 1
+}
+
+run_deadcode() {
+    svc="$1"
+    if [ -d "$svc" ]; then
+        echo "   [deadcode] Checking $svc for unreachable code..."
+        ensure_deadcode
+        dead_output=$(cd "$svc" && "$DEADCODE_BIN" -test ./... 2>&1) || {
+            echo "🚨 [Aerial Verify] Error: deadcode execution failed on $svc:" >&2
+            echo "$dead_output" >&2
+            exit 1
+        }
+        if [ -n "$dead_output" ]; then
+            echo "🚨 [Aerial Verify] Dead code detected in $svc:" >&2
+            echo "$dead_output" | sed 's/^/   • /' >&2
+            exit 1
+        fi
+    fi
+}
+
 run_go_test() {
     svc="$1"
     if [ -d "$svc" ]; then
@@ -259,6 +314,9 @@ if [ "$MODE" = "staged" ]; then
     for svc in $GO_SERVICES; do
         if echo "$STAGED_FILES" | grep -q "^$svc/"; then
             run_golangci_lint "$svc"
+            if echo "$STAGED_FILES" | grep -q "^$svc/.*\.go$"; then
+                run_deadcode "$svc"
+            fi
         fi
     done
 
@@ -306,6 +364,7 @@ check_rule_file_sizes
 echo "=== 1. Static Analysis & Linting ==="
 for svc in $GO_SERVICES; do
     run_golangci_lint "$svc"
+    run_deadcode "$svc"
 done
 
 echo "=== 2. Frontend & Script Syntax Checks ==="
