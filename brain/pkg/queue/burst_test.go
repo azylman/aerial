@@ -282,6 +282,7 @@ func TestPlanBurstExecution(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			plan := PlanBurstExecution(tc.input)
 			if plan.WakeIndex != tc.expectedWakeIdx {
 				t.Errorf("expected WakeIndex %d, got %d", tc.expectedWakeIdx, plan.WakeIndex)
@@ -426,6 +427,7 @@ func TestAssembleTurnPrompt(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			result := AssembleTurnPrompt(tc.input)
 			if tc.expected != "" && result != tc.expected {
 				t.Errorf("expected:\n%s\ngot:\n%s", tc.expected, result)
@@ -573,6 +575,7 @@ func TestEvaluateBurstStaleness(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			stale, reason := EvaluateBurstStaleness(tc.burst, tc.ttl, tc.isCold, tc.lastActivity, tc.now)
 			if stale != tc.expectedStale {
 				t.Errorf("expected stale=%t, got %t (reason: %s)", tc.expectedStale, stale, reason)

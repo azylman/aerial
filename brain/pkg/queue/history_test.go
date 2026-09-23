@@ -79,6 +79,7 @@ func TestSanitizeHistoryContent(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			got := SanitizeHistoryContent(tc.input)
 			if got != tc.expected {
 				t.Errorf("SanitizeHistoryContent(%q) = %q, want %q", tc.input, got, tc.expected)
@@ -478,6 +479,7 @@ func TestSummarizeThreadHistory_XMLValidation(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			mockLLM := func(ctx context.Context, model, prompt string) (string, error) {
 				return tc.mockOutput, nil
 			}

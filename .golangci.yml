@@ -16,6 +16,9 @@ linters:
     - copyloopvar
     - errorlint
     - errchkjson
+    - noctx
+    - fatcontext
+    - tparallel
 
 linters-settings:
   errcheck:
@@ -46,3 +49,4 @@ issues:
         - ineffassign
         - staticcheck
         - unused
+        - noctx

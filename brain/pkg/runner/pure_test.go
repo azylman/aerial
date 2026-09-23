@@ -57,6 +57,7 @@ func TestBuildAgyArgs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			args := BuildAgyArgs(tt.input)
 			joined := strings.Join(args, " ")
 			for _, c := range tt.contains {
@@ -118,6 +119,7 @@ func TestBuildAgyEnv(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			env := BuildAgyEnv(tt.input)
 			joined := strings.Join(env, "\n")
 			for _, c := range tt.contains {
@@ -187,6 +189,7 @@ func TestShouldRotateWorker(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			rotate, reason := ShouldRotateWorker(tt.turnsUsed, tt.turnBudget, tt.rssBytes, tt.maxRSSBytes, tt.isDead)
 			if rotate != tt.wantRotate {
 				t.Errorf("expected rotate=%v, got %v (reason: %q)", tt.wantRotate, rotate, reason)
@@ -239,6 +242,7 @@ func TestParseInitEvent(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			id, ok := ParseInitEvent(tt.line)
 			if ok != tt.wantOk {
 				t.Errorf("expected ok=%v, got %v", tt.wantOk, ok)
@@ -301,6 +305,7 @@ func TestIsResultEvent(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			if got := IsResultEvent(tt.line); got != tt.want {
 				t.Errorf("IsResultEvent(%q) = %v, want %v", tt.line, got, tt.want)
 			}
@@ -319,6 +324,7 @@ func (e *errWriter) Write(p []byte) (int, error) {
 func TestWriteWorkerTurn(t *testing.T) {
 	t.Parallel()
 	t.Run("Nil Writer", func(t *testing.T) {
+		t.Parallel()
 		err := WriteWorkerTurn(nil, "hello")
 		if err == nil {
 			t.Fatal("expected error on nil writer")
@@ -326,6 +332,7 @@ func TestWriteWorkerTurn(t *testing.T) {
 	})
 
 	t.Run("Valid Write", func(t *testing.T) {
+		t.Parallel()
 		var buf bytes.Buffer
 		err := WriteWorkerTurn(&buf, "hello world")
 		if err != nil {
@@ -338,6 +345,7 @@ func TestWriteWorkerTurn(t *testing.T) {
 	})
 
 	t.Run("Writer Error Surfaces", func(t *testing.T) {
+		t.Parallel()
 		expectedErr := errors.New("disk full")
 		ew := &errWriter{err: expectedErr}
 		err := WriteWorkerTurn(ew, "hello")
