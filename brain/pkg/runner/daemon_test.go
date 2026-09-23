@@ -1,7 +1,9 @@
 package runner
 
 import (
+	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -1079,3 +1081,104 @@ done
 		}
 	})
 }
+
+type failWriteCloser struct {
+	writeErr error
+	closeErr error
+}
+
+func (f failWriteCloser) Write(p []byte) (int, error) {
+	if f.writeErr != nil {
+		return 0, f.writeErr
+	}
+	return len(p), nil
+}
+
+func (f failWriteCloser) Close() error {
+	return f.closeErr
+}
+
+type failReader struct {
+	err error
+}
+
+func (f failReader) Read(p []byte) (int, error) {
+	return 0, f.err
+}
+
+func TestDaemon_ExecuteTurn_StdinWriteError(t *testing.T) {
+	t.Parallel()
+
+	d := &Daemon{
+		state:       StateReady,
+		stdin:       failWriteCloser{writeErr: errors.New("broken pipe")},
+		taskTracker: NewTaskTracker(),
+	}
+
+	_, err := d.ExecuteTurn(context.Background(), "hello")
+	if err == nil || !strings.Contains(err.Error(), "failed to write prompt") {
+		t.Errorf("expected failed to write prompt error, got %v", err)
+	}
+	if d.State() != StateClosed {
+		t.Errorf("expected state to be StateClosed, got %v", d.State())
+	}
+}
+
+func TestDaemon_ExecuteTurn_YieldWaitingState(t *testing.T) {
+	t.Parallel()
+
+	tracker := NewTaskTracker()
+	tracker.Add(TaskMetadata{TaskID: "task-123"})
+
+	stdoutBuf := bufio.NewReader(strings.NewReader("{\"event\":\"result\",\"status\":\"SUCCESS\",\"response\":\"done\"}\n"))
+
+	d := &Daemon{
+		state:       StateReady,
+		stdin:       failWriteCloser{},
+		stdout:      stdoutBuf,
+		taskTracker: tracker,
+		cfg:         DaemonConfig{SessionID: "sess-1"},
+	}
+
+	res, err := d.ExecuteTurn(context.Background(), "hello")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Response != "done" {
+		t.Errorf("expected response 'done', got %q", res.Response)
+	}
+	if d.State() != StateYieldWaiting {
+		t.Errorf("expected state StateYieldWaiting when active tasks exist, got %v", d.State())
+	}
+}
+
+func TestDaemon_ExecuteTurn_NonEOFReadError(t *testing.T) {
+	t.Parallel()
+
+	d := &Daemon{
+		state:       StateReady,
+		stdin:       failWriteCloser{},
+		stdout:      bufio.NewReader(failReader{err: errors.New("read error occurred")}),
+		taskTracker: NewTaskTracker(),
+		cfg:         DaemonConfig{SessionID: "sess-1"},
+	}
+
+	_, err := d.ExecuteTurn(context.Background(), "hello")
+	if err == nil || !strings.Contains(err.Error(), "error reading daemon stream") {
+		t.Errorf("expected error reading daemon stream, got %v", err)
+	}
+}
+
+func TestDaemon_Close_StdinCloseError(t *testing.T) {
+	t.Parallel()
+
+	d := &Daemon{
+		state: StateReady,
+		stdin: failWriteCloser{closeErr: errors.New("failed to close stdin")},
+	}
+
+	if err := d.Close(); err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
