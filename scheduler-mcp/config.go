@@ -20,20 +20,6 @@ type Config struct {
 	Port        string
 }
 
-// NewConfig creates a Config instance with explicit values.
-func NewConfig(databaseURL, timezone, port string) *Config {
-	if timezone == "" {
-		timezone = DefaultTimezone
-	}
-	if port == "" {
-		port = DefaultPort
-	}
-	return &Config{
-		DatabaseURL: databaseURL,
-		Timezone:    timezone,
-		Port:        port,
-	}
-}
 
 // LoadConfigFromLookup reads configuration using the provided environment lookup function.
 // Returns an error if lookup is nil or if no valid database connection string can be constructed.
