@@ -398,8 +398,8 @@ func TestUtilityDaemon_DefaultTurnBudgetConstant(t *testing.T) {
 	if DefaultTurnBudget != session.DefaultMaxSessionTurns {
 		t.Errorf("expected DefaultTurnBudget (%d) to match session.DefaultMaxSessionTurns (%d)", DefaultTurnBudget, session.DefaultMaxSessionTurns)
 	}
-	if DefaultTurnBudget != 10 {
-		t.Errorf("expected DefaultTurnBudget to be 10, got %d", DefaultTurnBudget)
+	if DefaultTurnBudget != 8 {
+		t.Errorf("expected DefaultTurnBudget to be 8, got %d", DefaultTurnBudget)
 	}
 
 	d := NewUtilityDaemon(nil,
@@ -408,8 +408,8 @@ func TestUtilityDaemon_DefaultTurnBudgetConstant(t *testing.T) {
 		}),
 	)
 	defer d.Close()
-	if d.turnBudget != 10 {
-		t.Errorf("expected default turnBudget to be 10, got %d", d.turnBudget)
+	if d.turnBudget != DefaultTurnBudget {
+		t.Errorf("expected default turnBudget to be %d, got %d", DefaultTurnBudget, d.turnBudget)
 	}
 }
 
