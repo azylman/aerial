@@ -219,9 +219,8 @@ func BuildDiscordPrompt(input DiscordPromptInput) string {
 	sb.WriteString(fmt.Sprintf("- thread_id: %s\n", input.TargetThreadID))
 	sb.WriteString(fmt.Sprintf("- guild_id: %s\n", m.GuildID))
 
-	isAdmin := false
 	if m.Author != nil {
-		isAdmin = config.IsAdmin(input.AdminUsers, m.Author.ID, m.Author.Username, m.Author.GlobalName)
+		isAdmin := config.IsAdmin(input.AdminUsers, m.Author.ID, m.Author.Username, m.Author.GlobalName)
 		cleanUsername := strings.ReplaceAll(strings.ReplaceAll(m.Author.Username, "\n", " "), "\r", "")
 		cleanGlobalName := strings.ReplaceAll(strings.ReplaceAll(m.Author.GlobalName, "\n", " "), "\r", "")
 		sb.WriteString(fmt.Sprintf("- author_id: %s\n", m.Author.ID))

@@ -19,6 +19,10 @@ linters:
     - noctx
     - fatcontext
     - tparallel
+    - unparam
+    - predeclared
+    - wastedassign
+    - unconvert
 
 linters-settings:
   errcheck:
@@ -50,3 +54,5 @@ issues:
         - staticcheck
         - unused
         - noctx
+        - unparam
+        - wastedassign

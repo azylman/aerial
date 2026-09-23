@@ -859,6 +859,9 @@ func (d *SyncDaemon) GetServicesWithNewImages(
 	newDigests := make(map[string]string)
 
 	for _, svc := range candidateServices {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
 		if strings.EqualFold(svc, "gitsync") || strings.EqualFold(svc, "hangar") {
 			continue
 		}
@@ -1675,7 +1678,7 @@ func (d *SyncDaemon) EnsureRepo(ctx context.Context, repoPath, repoURL string) e
 		out, errBytes, err := d.getGitExecutor()(ctx, "", "clone", "--depth", "1", "-b", "main", repoURL, repoPath)
 		if err != nil {
 			combined := string(append(out, errBytes...))
-			return fmt.Errorf("git clone failed for %s: %s (%w)", repoPath, SanitizeLog(string(combined)), err)
+			return fmt.Errorf("git clone failed for %s: %s (%w)", repoPath, SanitizeLog(combined), err)
 		}
 		return nil
 	}
