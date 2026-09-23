@@ -560,25 +560,26 @@ func TestMCP_DB_AllBranches(t *testing.T) {
 	}
 
 	// 4. nil DB checks for db.go methods
-	if err := InsertCronSchedule(nil, CronSchedule{}); err == nil {
+	ctx := context.Background()
+	if err := InsertCronSchedule(ctx, nil, CronSchedule{}); err == nil {
 		t.Error("expected error inserting cron with nil db")
 	}
-	if err := InsertOneShotSchedule(nil, OneShotSchedule{}); err == nil {
+	if err := InsertOneShotSchedule(ctx, nil, OneShotSchedule{}); err == nil {
 		t.Error("expected error inserting one shot with nil db")
 	}
-	if _, err := ListCronSchedules(nil, ""); err == nil {
+	if _, err := ListCronSchedules(ctx, nil, ""); err == nil {
 		t.Error("expected error listing crons with nil db")
 	}
-	if _, err := ListOneShotSchedules(nil, ""); err == nil {
+	if _, err := ListOneShotSchedules(ctx, nil, ""); err == nil {
 		t.Error("expected error listing one shots with nil db")
 	}
-	if _, err := DeleteSchedule(nil, "s1"); err == nil {
+	if _, err := DeleteSchedule(ctx, nil, "s1"); err == nil {
 		t.Error("expected error deleting schedule with nil db")
 	}
-	if err := UpdateCronSchedule(nil, "s1", nil, nil, nil, nil, nil, nil); err == nil {
+	if err := UpdateCronSchedule(ctx, nil, "s1", nil, nil, nil, nil, nil, nil); err == nil {
 		t.Error("expected error updating cron with nil db")
 	}
-	if err := UpdateCronSchedule(nil, "", nil, nil, nil, nil, nil, nil); err == nil {
+	if err := UpdateCronSchedule(ctx, nil, "", nil, nil, nil, nil, nil, nil); err == nil {
 		t.Error("expected error updating cron with empty id")
 	}
 
@@ -600,14 +601,14 @@ func TestMCP_DB_AllBranches(t *testing.T) {
 	}
 	defer db.Close()
 
-	_ = InsertCronSchedule(db, CronSchedule{ID: "c1", TargetID: "t1", CronExpr: "0 0 * * *", Prompt: "P", NextRunAt: time.Now(), Enabled: true})
-	_ = InsertOneShotSchedule(db, OneShotSchedule{ID: "o1", ThreadID: "t1", Prompt: "P", RunAt: time.Now()})
+	_ = InsertCronSchedule(ctx, db, CronSchedule{ID: "c1", TargetID: "t1", CronExpr: "0 0 * * *", Prompt: "P", NextRunAt: time.Now(), Enabled: true})
+	_ = InsertOneShotSchedule(ctx, db, OneShotSchedule{ID: "o1", ThreadID: "t1", Prompt: "P", RunAt: time.Now()})
 
-	cList, err := ListCronSchedules(db, "t1")
+	cList, err := ListCronSchedules(ctx, db, "t1")
 	if err != nil || len(cList) != 1 {
 		t.Errorf("expected 1 cron schedule for t1, got %v, err: %v", cList, err)
 	}
-	oList, err := ListOneShotSchedules(db, "t1")
+	oList, err := ListOneShotSchedules(ctx, db, "t1")
 	if err != nil || len(oList) != 1 {
 		t.Errorf("expected 1 one-shot schedule for t1, got %v, err: %v", oList, err)
 	}
@@ -628,11 +629,11 @@ func TestMCP_DB_AllBranches(t *testing.T) {
 	}
 
 	// 8. DeleteSchedule existing vs non-existing
-	delFalse, err := DeleteSchedule(db, "non-existent-id")
+	delFalse, err := DeleteSchedule(ctx, db, "non-existent-id")
 	if err != nil || delFalse {
 		t.Errorf("expected false, nil for non-existent schedule, got %v, %v", delFalse, err)
 	}
-	delTrue, err := DeleteSchedule(db, "c1")
+	delTrue, err := DeleteSchedule(ctx, db, "c1")
 	if err != nil || !delTrue {
 		t.Errorf("expected true, nil for existing schedule, got %v, %v", delTrue, err)
 	}

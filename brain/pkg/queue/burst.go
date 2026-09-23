@@ -346,7 +346,7 @@ func PlanBurstExecution(input BurstPlanInput) BurstPlan {
 
 	// Safeguard 1: Tier-1 Pre-Scan (Direct Mentions / Replies / Keywords)
 	for i, m := range input.Burst {
-		if isTier1Wake(m, input.BotUserID, input.BotRoleIDs, wm) {
+		if isTier1Wake(m, input.BotUserID, input.BotRoleIDs) {
 			wakeInfos[i] = WakeInfo{
 				IsWake:    true,
 				Score:     1.0,
@@ -373,7 +373,7 @@ func PlanBurstExecution(input BurstPlanInput) BurstPlan {
 		// Trailing messages after wake message
 		for i := wakeIdx + 1; i < len(input.Burst); i++ {
 			m := input.Burst[i]
-			if isTier1Wake(m, input.BotUserID, input.BotRoleIDs, wm) {
+			if isTier1Wake(m, input.BotUserID, input.BotRoleIDs) {
 				wakeInfos[i] = WakeInfo{
 					IsWake:    true,
 					Score:     1.0,

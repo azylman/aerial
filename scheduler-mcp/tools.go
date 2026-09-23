@@ -147,7 +147,7 @@ type ScheduleRecurringOutput struct {
 	Message        string `json:"message"`
 }
 
-func (h *ToolHandler) ScheduleRecurring(_ context.Context, args ScheduleRecurringArgs) (ScheduleRecurringOutput, error) {
+func (h *ToolHandler) ScheduleRecurring(ctx context.Context, args ScheduleRecurringArgs) (ScheduleRecurringOutput, error) {
 	args.ChannelID = strings.TrimSpace(args.ChannelID)
 	args.CronExpression = strings.TrimSpace(args.CronExpression)
 	args.Prompt = strings.TrimSpace(args.Prompt)
@@ -191,7 +191,7 @@ func (h *ToolHandler) ScheduleRecurring(_ context.Context, args ScheduleRecurrin
 		Effort:      args.Effort,
 	}
 
-	if err := InsertCronSchedule(h.db, sched); err != nil {
+	if err := InsertCronSchedule(ctx, h.db, sched); err != nil {
 		return ScheduleRecurringOutput{}, fmt.Errorf("failed to persist recurring schedule: %w", err)
 	}
 
@@ -221,7 +221,7 @@ type ScheduleOnceOutput struct {
 	Message    string `json:"message"`
 }
 
-func (h *ToolHandler) ScheduleOnce(_ context.Context, args ScheduleOnceArgs) (ScheduleOnceOutput, error) {
+func (h *ToolHandler) ScheduleOnce(ctx context.Context, args ScheduleOnceArgs) (ScheduleOnceOutput, error) {
 	args.TargetID = strings.TrimSpace(args.TargetID)
 	args.RunAt = strings.TrimSpace(args.RunAt)
 	args.Prompt = strings.TrimSpace(args.Prompt)
@@ -255,7 +255,7 @@ func (h *ToolHandler) ScheduleOnce(_ context.Context, args ScheduleOnceArgs) (Sc
 		CreatedAt: now,
 	}
 
-	if err := InsertOneShotSchedule(h.db, sched); err != nil {
+	if err := InsertOneShotSchedule(ctx, h.db, sched); err != nil {
 		return ScheduleOnceOutput{}, fmt.Errorf("failed to persist one-shot schedule: %w", err)
 	}
 
@@ -277,10 +277,10 @@ type ListSchedulesOutput struct {
 	OneShot   []OneShotSchedule `json:"one_shot"`
 }
 
-func (h *ToolHandler) ListSchedules(_ context.Context, args ListSchedulesArgs) (ListSchedulesOutput, error) {
+func (h *ToolHandler) ListSchedules(ctx context.Context, args ListSchedulesArgs) (ListSchedulesOutput, error) {
 	args.TargetID = strings.TrimSpace(args.TargetID)
 
-	crons, err := ListCronSchedules(h.db, args.TargetID)
+	crons, err := ListCronSchedules(ctx, h.db, args.TargetID)
 	if err != nil {
 		return ListSchedulesOutput{}, fmt.Errorf("failed to query recurring schedules: %w", err)
 	}
@@ -288,7 +288,7 @@ func (h *ToolHandler) ListSchedules(_ context.Context, args ListSchedulesArgs) (
 		crons = []CronSchedule{}
 	}
 
-	oneShots, err := ListOneShotSchedules(h.db, args.TargetID)
+	oneShots, err := ListOneShotSchedules(ctx, h.db, args.TargetID)
 	if err != nil {
 		return ListSchedulesOutput{}, fmt.Errorf("failed to query one-shot schedules: %w", err)
 	}
@@ -313,13 +313,13 @@ type CancelScheduleOutput struct {
 	Message    string `json:"message"`
 }
 
-func (h *ToolHandler) CancelSchedule(_ context.Context, args CancelScheduleArgs) (CancelScheduleOutput, error) {
+func (h *ToolHandler) CancelSchedule(ctx context.Context, args CancelScheduleArgs) (CancelScheduleOutput, error) {
 	args.ScheduleID = strings.TrimSpace(args.ScheduleID)
 	if args.ScheduleID == "" {
 		return CancelScheduleOutput{}, fmt.Errorf("'schedule_id' is required")
 	}
 
-	deleted, err := DeleteSchedule(h.db, args.ScheduleID)
+	deleted, err := DeleteSchedule(ctx, h.db, args.ScheduleID)
 	if err != nil {
 		return CancelScheduleOutput{}, fmt.Errorf("failed to delete schedule %s: %w", args.ScheduleID, err)
 	}
@@ -353,7 +353,7 @@ type UpdateCronScheduleOutput struct {
 	NextRunAt  string `json:"next_run_at,omitempty"`
 }
 
-func (h *ToolHandler) UpdateCronSchedule(_ context.Context, args UpdateCronScheduleArgs) (UpdateCronScheduleOutput, error) {
+func (h *ToolHandler) UpdateCronSchedule(ctx context.Context, args UpdateCronScheduleArgs) (UpdateCronScheduleOutput, error) {
 	args.ScheduleID = strings.TrimSpace(args.ScheduleID)
 	if args.ScheduleID == "" {
 		return UpdateCronScheduleOutput{}, fmt.Errorf("'schedule_id' is required")
@@ -372,7 +372,7 @@ func (h *ToolHandler) UpdateCronSchedule(_ context.Context, args UpdateCronSched
 		nextRun = &computed
 	}
 
-	if err := UpdateCronSchedule(h.db, args.ScheduleID, args.Effort, args.CronExpression, args.Prompt, args.TitlePrefix, args.Timezone, nextRun); err != nil {
+	if err := UpdateCronSchedule(ctx, h.db, args.ScheduleID, args.Effort, args.CronExpression, args.Prompt, args.TitlePrefix, args.Timezone, nextRun); err != nil {
 		return UpdateCronScheduleOutput{}, fmt.Errorf("failed to update recurring schedule: %w", err)
 	}
 
