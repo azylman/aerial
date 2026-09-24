@@ -297,6 +297,9 @@ func BuildBurstPrompt(targetBurst []db.Message, recentContext []db.Message, cust
 	sb.WriteString("- 0.6 to 0.7: Technical discussions where AI knowledge could be helpful, but no clear request was made.\n")
 	sb.WriteString("- 0.8 to 1.0: Clear requests for assistance, direct questions, open questions to the room, or follow-ups/replies to Aerial.\n\n")
 
+	sb.WriteString("Conversational Handoff & Peer Redirect Rule:\n")
+	sb.WriteString("If a user recently tagged, replied to, or addressed another user or bot, that conversation has transitioned to a direct peer exchange. Any prior invitation or active context for Aerial is revoked. All subsequent questions, remarks, and follow-ups in that peer exchange are directed at the other participant, NOT Aerial. Rate these strictly low (0.0 to 0.3) unless Aerial is explicitly re-tagged or directly addressed.\n\n")
+
 	sb.WriteString("Evaluate whether Aerial should participate or respond to any topic, question, or discussion contained in the target message or burst.\n")
 	sb.WriteString("Respond ONLY with a valid, raw JSON object. Do NOT wrap in markdown code fences (no ``` or ```json). Do NOT include any explanations, preamble, or trailing text outside the JSON object.\n")
 	sb.WriteString("{\n")

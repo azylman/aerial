@@ -243,6 +243,9 @@ func TestClassifier_PromptFormatting_WithReplies(t *testing.T) {
 	if !strings.Contains(prompt, "General questions, replies, or remarks directed at other humans or bots where AI input is uninvited.") {
 		t.Errorf("expected prompt to contain updated evaluation rubric, got:\n%s", prompt)
 	}
+	if !strings.Contains(prompt, "Conversational Handoff & Peer Redirect Rule:") {
+		t.Errorf("expected prompt to contain Conversational Handoff & Peer Redirect Rule, got:\n%s", prompt)
+	}
 }
 
 func TestClassifier_JSONParsing(t *testing.T) {
