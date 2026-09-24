@@ -260,7 +260,7 @@ get_deploy_status() {
 
     local dashboard_url="${AERIAL_DASHBOARD_URL:-http://aerial-dashboard:8080/api/status}"
 
-    # Branch deployment tracking for aerial-config (git-sync driven)
+    # Branch deployment tracking for aerial-config (Hangar sync driven)
     if [ "$REPO_NAME" = "aerial-config" ]; then
         local dash_resp=""
         dash_resp=$(curl -s --connect-timeout 3 -m 10 "$dashboard_url" 2>/dev/null || true)
@@ -283,16 +283,16 @@ get_deploy_status() {
                 fi
 
                 if [ "$matches_commit" -eq 1 ] && [ "$sync_status" = "synced" ]; then
-                    echo '{"deploy_state":"done","stage":"done","details":"Configuration synced and hot-reloaded via gitsync"}'
+                    echo '{"deploy_state":"done","stage":"done","details":"Configuration synced and hot-reloaded via Hangar"}'
                     return 0
                 elif [ "$sync_status" = "synced" ]; then
                     echo '{"deploy_state":"ongoing","stage":"syncing","details":"Configuration sync in progress for merged commit"}'
                     return 0
                 elif [ "$sync_status" = "error" ]; then
-                    echo '{"deploy_state":"failed","stage":"failed","details":"Configuration git-sync error"}'
+                    echo '{"deploy_state":"failed","stage":"failed","details":"Configuration sync error"}'
                     return 0
                 else
-                    echo "{\"deploy_state\":\"ongoing\",\"stage\":\"${sync_status}\",\"details\":\"Configuration git-sync status: ${sync_status}\"}"
+                    echo "{\"deploy_state\":\"ongoing\",\"stage\":\"${sync_status}\",\"details\":\"Configuration sync status: ${sync_status}\"}"
                     return 0
                 fi
             fi
