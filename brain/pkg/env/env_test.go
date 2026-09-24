@@ -271,11 +271,12 @@ func TestSyncSkills_CuratedSkills(t *testing.T) {
 	tmpHome := t.TempDir()
 	tmpCustomSkills := t.TempDir()
 	tmpSuperpowers := t.TempDir()
+	tmpAgentsSkills := t.TempDir()
 
 	p := New(tmpHome, t.TempDir())
 	p.SetCustomSkillsDir(tmpCustomSkills)
 	p.SetSuperpowersDir(tmpSuperpowers)
-	p.SetAgentsSkillsDir(t.TempDir())
+	p.SetAgentsSkillsDir(tmpAgentsSkills)
 
 	// Custom skill
 	customDir := filepath.Join(tmpCustomSkills, "my-custom-skill")
@@ -287,12 +288,17 @@ func TestSyncSkills_CuratedSkills(t *testing.T) {
 	_ = os.MkdirAll(tddDir, 0755)
 	_ = os.WriteFile(filepath.Join(tddDir, "SKILL.md"), []byte("# TDD"), 0644)
 
+	// Core built-in skill
+	incidentDir := filepath.Join(tmpAgentsSkills, "incident-triage")
+	_ = os.MkdirAll(incidentDir, 0755)
+	_ = os.WriteFile(filepath.Join(incidentDir, "SKILL.md"), []byte("# Incident Triage"), 0644)
+
 	if err := p.SyncSkills(); err != nil {
 		t.Fatalf("SyncSkills failed: %v", err)
 	}
 
 	skillsRoot := filepath.Join(tmpHome, ".gemini", "config", "skills")
-	for _, name := range []string{"my-custom-skill", "test-driven-development"} {
+	for _, name := range []string{"my-custom-skill", "test-driven-development", "incident-triage"} {
 		path := filepath.Join(skillsRoot, name, "SKILL.md")
 		if _, err := os.Stat(path); err != nil {
 			t.Errorf("Expected skill %s at %s, but stat failed: %v", name, path, err)
