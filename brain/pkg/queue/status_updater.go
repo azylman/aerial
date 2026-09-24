@@ -137,7 +137,10 @@ func NewStatusUpdater(s *discordgo.Session, threadID string, enabled bool, opts 
 		if u.s == nil {
 			return "", fmt.Errorf("discord session is nil")
 		}
-		msg, err := u.s.ChannelMessageSend(channelID, text)
+		msg, err := u.s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
+			Content: text,
+			Flags:   discordgo.MessageFlagsSuppressEmbeds,
+		})
 		if err != nil {
 			return "", err
 		}

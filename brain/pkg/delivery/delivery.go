@@ -222,6 +222,7 @@ func SendMessageWithAttachments(s *discordgo.Session, channelID, text string, at
 	if len(chunks) == 0 && len(discordFiles) > 0 {
 		msg := &discordgo.MessageSend{
 			Files: discordFiles,
+			Flags: discordgo.MessageFlagsSuppressEmbeds,
 		}
 		if _, sendErr := s.ChannelMessageSendComplex(channelID, msg); sendErr != nil {
 			return fmt.Errorf("failed to send attachments: %w", sendErr)
@@ -235,6 +236,7 @@ func SendMessageWithAttachments(s *discordgo.Session, channelID, text string, at
 		}
 		msg := &discordgo.MessageSend{
 			Content: chunk,
+			Flags:   discordgo.MessageFlagsSuppressEmbeds,
 		}
 		if i == len(chunks)-1 && len(discordFiles) > 0 {
 			msg.Files = discordFiles
@@ -378,7 +380,10 @@ func EditMessage(s *discordgo.Session, channelID, messageID, text string) error 
 		trimmed = string([]rune(trimmed)[:MaxDiscordMessageLength])
 	}
 
-	_, err := s.ChannelMessageEdit(channelID, messageID, trimmed)
+	edit := discordgo.NewMessageEdit(channelID, messageID)
+	edit.SetContent(trimmed)
+	edit.Flags = discordgo.MessageFlagsSuppressEmbeds
+	_, err := s.ChannelMessageEditComplex(edit)
 	return err
 }
 
