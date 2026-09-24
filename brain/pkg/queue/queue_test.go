@@ -12777,6 +12777,99 @@ func TestWorkerPool_MultiTurn_TranscriptSilent_PreservesSubstantiveRunnerRespons
 	}
 }
 
+func TestWorkerPool_DaemonMode_ExtractsFinalSubstantiveTurnAndExcludesSystemMessage(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+
+	tempDir := t.TempDir()
+	convID := "c4444444-4444-5555-6666-777777777777"
+
+	sessDir := filepath.Join(tempDir, ".gemini", "antigravity-cli", "brain", convID)
+	if err := os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs"), 0755); err != nil {
+		t.Fatalf("MkdirAll failed: %v", err)
+	}
+
+	transcriptContent := `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"Check backup status"}
+{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","content":"Checking status now...","tool_calls":[{"name":"ha_manage_backup"}]}
+{"step_index":2,"source":"SYSTEM","type":"USER_INPUT","content":"<SYSTEM_MESSAGE>Backup complete</SYSTEM_MESSAGE>"}
+{"step_index":3,"source":"MODEL","type":"PLANNER_RESPONSE","content":"All backups are fully synchronized!"}
+`
+	if err := os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte(transcriptContent), 0644); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	var deliveredText string
+	var mu sync.Mutex
+	doneCh := make(chan struct{})
+
+	sessMgr := session.New(tempDir, "")
+	rawAggregatedOutput := "Checking status now...\n<SYSTEM_MESSAGE>Backup complete</SYSTEM_MESSAGE>\nAll backups are fully synchronized!"
+	expectedFinalText := "All backups are fully synchronized!"
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		SessionManager: sessMgr,
+		Store:          store,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    1,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			return mockMultiTurnJSONResponse(convID, rawAggregatedOutput, 0), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			mu.Lock()
+			deliveredText = text
+			mu.Unlock()
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) func() {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			close(doneCh)
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{
+		ID:         "msg-daemon-substantive-1",
+		ThreadID:   "thread-daemon-substantive-1",
+		GuildID:    "guild-1",
+		AuthorID:   "user-1",
+		AuthorName: "User",
+		Content:    "Check backup status",
+		Status:     db.StatusPending,
+		CreatedAt:  time.Now().UTC(),
+		UpdatedAt:  time.Now().UTC(),
+	}
+	if err := insertMessage(store, msg); err != nil {
+		t.Fatalf("InsertMessage failed: %v", err)
+	}
+
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Timeout waiting for message processing")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if deliveredText != expectedFinalText {
+		t.Errorf("Delivered text mismatch:\ngot:  %q\nwant: %q", deliveredText, expectedFinalText)
+	}
+
+	dbMsg, err := getMessage(store, "msg-daemon-substantive-1")
+	if err != nil || dbMsg == nil {
+		t.Fatalf("GetMessage failed: %v", err)
+	}
+	if dbMsg.ResponseText != expectedFinalText {
+		t.Errorf("DB response text mismatch:\ngot:  %q\nwant: %q", dbMsg.ResponseText, expectedFinalText)
+	}
+}
+
 
 
 

@@ -1946,8 +1946,8 @@ func (te *turnExecution) executeWithRetries() {
 					// Pre-extract attachments from full response to ensure media generated in earlier turns is never lost
 					_, fullAttachments := delivery.ExtractAndSanitizeMedia(resp.Response, baseDir)
 
-					// For multi-turn runs or when responseText is empty, attempt to extract strictly the final substantive turn from transcript
-					if (resp.NumTurns > 1 || strings.TrimSpace(responseText) == "") && te.pool != nil && te.pool.sessionMgr != nil && te.currentSessionID != "" {
+					// Attempt to extract strictly the final substantive turn from transcript
+					if te.pool != nil && te.pool.sessionMgr != nil && te.currentSessionID != "" {
 						if finalText, isSilent, err := te.pool.sessionMgr.ExtractFinalSubstantiveResponse(poolCtx, te.currentSessionID); err == nil {
 							if isSilent {
 								responseText = ""
