@@ -248,13 +248,21 @@ func mockJSONResponse(status int, body string) (*http.Response, error) {
 }
 
 func TestSendMessageWithAttachments_MockSession(t *testing.T) {
+	var sentPayloads []string
 	sess := newMockDiscordSession(func(req *http.Request) (*http.Response, error) {
+		if req.Body != nil {
+			bodyBytes, _ := io.ReadAll(req.Body)
+			sentPayloads = append(sentPayloads, string(bodyBytes))
+		}
 		return mockJSONResponse(http.StatusOK, `{"id":"msg-123","channel_id":"12345","content":"ok"}`)
 	})
 
 	// 1. Single message
 	if err := SendMessage(sess, "12345", "Hello world"); err != nil {
 		t.Fatalf("SendMessage failed: %v", err)
+	}
+	if len(sentPayloads) == 0 || !strings.Contains(sentPayloads[0], `"flags":4`) {
+		t.Errorf("expected payload to contain flags:4, got %+v", sentPayloads)
 	}
 
 	// 2. Multi-chunk message with attachment
@@ -375,10 +383,15 @@ func TestEditMessage_And_DeleteMessage(t *testing.T) {
 
 	// 2. Successful mock calls
 	var lastMethod, lastPath string
+	var lastPatchBody string
 	sess := newMockDiscordSession(func(req *http.Request) (*http.Response, error) {
 		lastMethod = req.Method
 		lastPath = req.URL.Path
 		if req.Method == http.MethodPatch {
+			if req.Body != nil {
+				b, _ := io.ReadAll(req.Body)
+				lastPatchBody = string(b)
+			}
 			return mockJSONResponse(http.StatusOK, `{"id":"msg1","channel_id":"ch1","content":"updated"}`)
 		}
 		if req.Method == http.MethodDelete {
@@ -392,6 +405,9 @@ func TestEditMessage_And_DeleteMessage(t *testing.T) {
 	}
 	if lastMethod != http.MethodPatch || !strings.Contains(lastPath, "/channels/ch1/messages/msg1") {
 		t.Errorf("unexpected edit request: %s %s", lastMethod, lastPath)
+	}
+	if !strings.Contains(lastPatchBody, `"flags":4`) {
+		t.Errorf("expected edit request body to contain flags:4, got %s", lastPatchBody)
 	}
 
 	if err := DeleteMessage(sess, "ch1", "msg1"); err != nil {
