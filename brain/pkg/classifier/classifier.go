@@ -383,8 +383,8 @@ func IsHeuristicSkip(content string) bool {
 		return true
 	}
 
-	// Very short message (< 15 chars) without query intent or alert keywords
-	if len(trimmed) < 15 {
+	// Very short message (< 10 chars) without query intent or alert keywords
+	if len(trimmed) < 10 {
 		return true
 	}
 
