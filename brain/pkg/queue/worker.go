@@ -2018,7 +2018,17 @@ func (te *turnExecution) executeWithRetries() {
 
 						// Mark all messages in the burst as completed with unpacked clean text
 						metrics.RecordTurnCompleted("success", te.triggerType, currentModel, time.Since(te.execStart))
-						metrics.RecordTokens(currentModel, resp.Usage.InputTokens, resp.Usage.OutputTokens, resp.Usage.ThinkingTokens, resp.Usage.CacheReadTokens, resp.Usage.TotalTokens)
+						tokenChannel := te.effectiveName
+						if tokenChannel == "" {
+							if te.triggerType == "schedule" {
+								tokenChannel = "schedule"
+							} else if te.triggerType == "http" {
+								tokenChannel = "http"
+							} else if !IsNumericSnowflake(te.threadID) && te.threadID != "" {
+								tokenChannel = te.threadID
+							}
+						}
+						metrics.RecordTokens(currentModel, tokenChannel, resp.Usage.InputTokens, resp.Usage.OutputTokens, resp.Usage.ThinkingTokens, resp.Usage.CacheReadTokens, resp.Usage.TotalTokens)
 						te.turnStatus = "success"
 						te.turnResponseText = cleanText
 						te.turnTokenUsage = resp.Usage

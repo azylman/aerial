@@ -8848,20 +8848,65 @@ func TestProcessBurst_RecordsTokensTelemetry(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 
 	body := rec.Body.String()
-	if !strings.Contains(body, `aerial_brain_tokens_total{model="test-token-model",type="total"} 265`) {
+	if !strings.Contains(body, `aerial_brain_tokens_total{channel="chan-token-test-1",model="test-token-model",type="total"} 265`) {
 		t.Errorf("expected total tokens 265 for test-token-model, got metrics body: %s", body)
 	}
-	if !strings.Contains(body, `aerial_brain_tokens_total{model="test-token-model",type="input"} 150`) {
+	if !strings.Contains(body, `aerial_brain_tokens_total{channel="chan-token-test-1",model="test-token-model",type="input"} 150`) {
 		t.Errorf("expected input tokens 150 for test-token-model, got metrics body: %s", body)
 	}
-	if !strings.Contains(body, `aerial_brain_tokens_total{model="test-token-model",type="output"} 75`) {
+	if !strings.Contains(body, `aerial_brain_tokens_total{channel="chan-token-test-1",model="test-token-model",type="output"} 75`) {
 		t.Errorf("expected output tokens 75 for test-token-model, got metrics body: %s", body)
 	}
-	if !strings.Contains(body, `aerial_brain_tokens_total{model="test-token-model",type="thinking"} 30`) {
+	if !strings.Contains(body, `aerial_brain_tokens_total{channel="chan-token-test-1",model="test-token-model",type="thinking"} 30`) {
 		t.Errorf("expected thinking tokens 30 for test-token-model, got metrics body: %s", body)
 	}
-	if !strings.Contains(body, `aerial_brain_tokens_total{model="test-token-model",type="cache_read"} 10`) {
+	if !strings.Contains(body, `aerial_brain_tokens_total{channel="chan-token-test-1",model="test-token-model",type="cache_read"} 10`) {
 		t.Errorf("expected cache_read tokens 10 for test-token-model, got metrics body: %s", body)
+	}
+}
+
+func TestProcessBurst_RecordsTokensTelemetry_SnowflakeChannelSanitized(t *testing.T) {
+	store := setupTestStore(t)
+
+	customModel := "test-snowflake-model"
+	mockOutput := `{"conversation_id":"c2222222-1111-2222-3333-444444444444","status":"SUCCESS","response":"Done!","usage":{"input_tokens":100,"output_tokens":50,"thinking_tokens":20,"cache_read_tokens":5,"total_tokens":175}}`
+
+	pool := New(nil, WorkerPoolConfig{
+		Store: store,
+		Model: customModel,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			return mockOutput, "", 0, nil
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	// Use numeric Discord snowflake ID
+	threadID := "1534436119888793750"
+	t0 := time.Now().UTC()
+	msg := db.Message{
+		ID:        "msg-token-snowflake-1",
+		ThreadID:  threadID,
+		Content:   "<@aerial> Test snowflake sanitization",
+		Status:    db.StatusPending,
+		CreatedAt: t0,
+		UpdatedAt: t0,
+	}
+	_ = insertMessage(store, msg)
+
+	pool.processBurst([]db.Message{msg})
+
+	handler := metrics.Handler()
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	if strings.Contains(body, "1534436119888793750") {
+		t.Errorf("expected snowflake ID not to appear in metrics body, got: %s", body)
+	}
+	if !strings.Contains(body, `aerial_brain_tokens_total{channel="unknown",model="test-snowflake-model",type="total"} 175`) {
+		t.Errorf("expected total tokens 175 for test-snowflake-model under channel unknown, got metrics body: %s", body)
 	}
 }
 
