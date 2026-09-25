@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"net/http"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -42,7 +43,7 @@ var (
 			Name: "aerial_brain_tokens_total",
 			Help: "Total number of LLM tokens consumed by Aerial Brain turns.",
 		},
-		[]string{"type", "model"},
+		[]string{"type", "model", "channel"},
 	)
 
 	ActiveWorkers = prometheus.NewGauge(
@@ -528,28 +529,51 @@ func RecordTurnCompleted(status, triggerType, model string, duration time.Durati
 	TurnDurationSeconds.WithLabelValues(status, triggerType, model).Observe(duration.Seconds())
 }
 
-// RecordTokens records LLM token usage categorized by token type and model.
-func RecordTokens(model string, input, output, thinking, cacheRead, total int) {
+// SanitizeChannelLabel ensures metric labels for channels never contain snowflake IDs,
+// raw UUIDs, empty strings, or high-cardinality values.
+func SanitizeChannelLabel(channel string) string {
+	channel = strings.TrimSpace(strings.ToLower(channel))
+	channel = strings.TrimPrefix(channel, "#")
+	if channel == "" {
+		return "unknown"
+	}
+	// Check if channel is numeric snowflake
+	isNumeric := true
+	for i := 0; i < len(channel); i++ {
+		if channel[i] < '0' || channel[i] > '9' {
+			isNumeric = false
+			break
+		}
+	}
+	if isNumeric {
+		return "unknown"
+	}
+	return channel
+}
+
+// RecordTokens records LLM token usage categorized by token type, model, and channel.
+func RecordTokens(model, channel string, input, output, thinking, cacheRead, total int) {
 	if model == "" {
 		model = "default"
 	}
+	channel = SanitizeChannelLabel(channel)
 	if total <= 0 && (input > 0 || output > 0 || thinking > 0 || cacheRead > 0) {
 		total = input + output + thinking + cacheRead
 	}
 	if input > 0 {
-		TokensTotal.WithLabelValues("input", model).Add(float64(input))
+		TokensTotal.WithLabelValues("input", model, channel).Add(float64(input))
 	}
 	if output > 0 {
-		TokensTotal.WithLabelValues("output", model).Add(float64(output))
+		TokensTotal.WithLabelValues("output", model, channel).Add(float64(output))
 	}
 	if thinking > 0 {
-		TokensTotal.WithLabelValues("thinking", model).Add(float64(thinking))
+		TokensTotal.WithLabelValues("thinking", model, channel).Add(float64(thinking))
 	}
 	if cacheRead > 0 {
-		TokensTotal.WithLabelValues("cache_read", model).Add(float64(cacheRead))
+		TokensTotal.WithLabelValues("cache_read", model, channel).Add(float64(cacheRead))
 	}
 	if total > 0 {
-		TokensTotal.WithLabelValues("total", model).Add(float64(total))
+		TokensTotal.WithLabelValues("total", model, channel).Add(float64(total))
 	}
 }
 

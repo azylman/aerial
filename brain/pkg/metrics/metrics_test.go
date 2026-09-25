@@ -13,7 +13,7 @@ import (
 
 func TestMetricsRegistryAndHandler(t *testing.T) {
 	RecordTurnCompleted("success", "direct", "gemini-2.5-pro", 1500*time.Millisecond)
-	RecordTokens("gemini-2.5-pro", 100, 50, 25, 10, 185)
+	RecordTokens("gemini-2.5-pro", "general", 100, 50, 25, 10, 185)
 	RecordClassifierRun("success", "gemini-2.5-flash", 250*time.Millisecond, 0.95, "triage_pass")
 	RecordRunnerExecution("success", "gemini-2.5-pro", 2000*time.Millisecond)
 	RecordRunnerError("transient", "gemini-2.5-pro")
@@ -118,7 +118,7 @@ func TestMetricsRegistryAndHandler(t *testing.T) {
 func TestMetricsDefaultFallbackBranches(t *testing.T) {
 	// Call every recorder with empty strings / negative numbers to exercise fallback defaults
 	RecordTurnCompleted("", "", "", 10*time.Millisecond)
-	RecordTokens("", 0, 0, 0, 0, 0)
+	RecordTokens("", "", 0, 0, 0, 0, 0)
 	RecordRunnerExecution("", "", 10*time.Millisecond)
 	RecordRunnerError("", "")
 	RecordClassifierRun("", "", 10*time.Millisecond, -1.0, "")
@@ -139,7 +139,7 @@ func TestMetricsDefaultFallbackBranches(t *testing.T) {
 
 func TestRecordTokens_AutoCalculatesTotalWhenZero(t *testing.T) {
 	// Exercise auto-summing of total tokens when individual counts exist but total is 0
-	RecordTokens("gemini-test-model", 120, 80, 50, 20, 0)
+	RecordTokens("gemini-test-model", "test-chan", 120, 80, 50, 20, 0)
 
 	handler := Handler()
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
@@ -147,10 +147,35 @@ func TestRecordTokens_AutoCalculatesTotalWhenZero(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 
 	body := rec.Body.String()
-	if !strings.Contains(body, `aerial_brain_tokens_total{model="gemini-test-model",type="total"} 270`) {
+	if !strings.Contains(body, `aerial_brain_tokens_total{channel="test-chan",model="gemini-test-model",type="total"} 270`) {
 		t.Errorf("expected total tokens metric of 270, got body: %s", body)
 	}
-	if !strings.Contains(body, `aerial_brain_tokens_total{model="gemini-test-model",type="input"} 120`) {
+	if !strings.Contains(body, `aerial_brain_tokens_total{channel="test-chan",model="gemini-test-model",type="input"} 120`) {
 		t.Errorf("expected input tokens metric of 120, got body: %s", body)
+	}
+}
+
+func TestSanitizeChannelLabel(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"", "unknown"},
+		{"   ", "unknown"},
+		{"#the-banana-stand", "the-banana-stand"},
+		{"Lounge", "lounge"},
+		{"#Dev-Chat", "dev-chat"},
+		{"1534436119888793750", "unknown"},
+		{"9999999999", "unknown"},
+		{"schedule", "schedule"},
+		{"http", "http"},
+		{"chan-token-test-1", "chan-token-test-1"},
+	}
+
+	for _, tc := range tests {
+		got := SanitizeChannelLabel(tc.input)
+		if got != tc.expected {
+			t.Errorf("SanitizeChannelLabel(%q) = %q, expected %q", tc.input, got, tc.expected)
+		}
 	}
 }
