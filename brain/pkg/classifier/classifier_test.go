@@ -218,6 +218,26 @@ func TestClassifier_FormatMessage_ReplyMetadata(t *testing.T) {
 	}
 }
 
+func TestClassifier_FormatMessage_SnowflakeResolution(t *testing.T) {
+	ts := time.Date(2026, 9, 25, 14, 44, 29, 0, time.UTC)
+	msg := db.Message{
+		AuthorName: "harperwallbanger",
+		Content:    "<@1542285964213358633> work on tasks 265, 263 and check <@&999888> in <@!12345>",
+		CreatedAt:  ts,
+		Metadata: db.MessageMetadata{
+			MentionUserIDs: []string{"1542285964213358633", "12345"},
+			MentionRoleIDs: []string{"999888"},
+			Mentions:       []string{"Zero", "Alice", "Engineers"},
+		},
+	}
+
+	got := FormatMessage(msg)
+	expected := "[@harperwallbanger] (2026-09-25T14:44:29Z): @Zero work on tasks 265, 263 and check @Engineers in @Alice"
+	if got != expected {
+		t.Errorf("FormatMessage() = %q, want %q", got, expected)
+	}
+}
+
 func TestClassifier_PromptFormatting_WithReplies(t *testing.T) {
 	ts := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
 	target := db.Message{
