@@ -298,6 +298,34 @@ func buildDiscordPrompt(s *discordgo.Session, m *discordgo.Message, targetThread
 	return BuildDiscordPrompt(input)
 }
 
+// resolveMessageContent resolves Discord mention snowflakes (<@ID>, <@!ID>, <@&ID>, <#ID>)
+// to human-readable names using cached session state and incoming payload mentions.
+func resolveMessageContent(s *discordgo.Session, m *discordgo.Message) string {
+	if m == nil {
+		return ""
+	}
+	content := m.Content
+	if s != nil {
+		if resolved, err := m.ContentWithMoreMentionsReplaced(s); err == nil && resolved != "" {
+			content = resolved
+		} else if fallback := m.ContentWithMentionsReplaced(); fallback != "" {
+			content = fallback
+		}
+		if s.State != nil && m.GuildID != "" && len(m.MentionRoles) > 0 {
+			for _, roleID := range m.MentionRoles {
+				if r, err := s.State.Role(m.GuildID, roleID); err == nil && r != nil && r.Name != "" {
+					content = strings.ReplaceAll(content, "<@&"+roleID+">", "@"+r.Name)
+				}
+			}
+		}
+		return content
+	}
+	if resolved := m.ContentWithMentionsReplaced(); resolved != "" {
+		return resolved
+	}
+	return m.Content
+}
+
 // extractDiscordMetadata extracts structured metadata from a discordgo.Message.
 func extractDiscordMetadata(s *discordgo.Session, m *discordgo.Message, targetThreadID string) db.MessageMetadata {
 	if m == nil {
@@ -333,7 +361,7 @@ func extractDiscordMetadata(s *discordgo.Session, m *discordgo.Message, targetTh
 		if m.ReferencedMessage.Author != nil {
 			replyingToAuthor = "@" + strings.ReplaceAll(strings.ReplaceAll(m.ReferencedMessage.Author.Username, "\n", " "), "\r", "")
 		}
-		replyingToContent = m.ReferencedMessage.Content
+		replyingToContent = resolveMessageContent(s, m.ReferencedMessage)
 	}
 
 	var mentions []string
@@ -624,7 +652,7 @@ func connectDiscordFunnel(ctx context.Context, store db.Store, pool *queue.Worke
 
 			rawContent := ""
 			if m.Message != nil {
-				rawContent = m.Message.Content
+				rawContent = resolveMessageContent(s, m.Message)
 			}
 
 			msg := db.Message{
@@ -910,7 +938,7 @@ func RunStartupCatchUpSweep(ctx context.Context, store db.Store, pool *queue.Wor
 				GuildID:    resolvedGuildID,
 				AuthorID:   authorID,
 				AuthorName: authorName,
-				Content:    m.Content,
+				Content:    resolveMessageContent(s, m),
 				Metadata:   metadata,
 				Status:     db.StatusPending,
 				CreatedAt:  msgTime,

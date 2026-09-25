@@ -241,8 +241,33 @@ func FormatMessage(m db.Message) string {
 		}
 	}
 
+	bodyText := SanitizeContent(m.BodyText())
+	if len(m.Metadata.MentionUserIDs) > 0 && len(m.Metadata.Mentions) > 0 {
+		for i, uID := range m.Metadata.MentionUserIDs {
+			if i < len(m.Metadata.Mentions) && uID != "" {
+				name := m.Metadata.Mentions[i]
+				if name != "" {
+					bodyText = strings.ReplaceAll(bodyText, "<@"+uID+">", "@"+name)
+					bodyText = strings.ReplaceAll(bodyText, "<@!"+uID+">", "@"+name)
+				}
+			}
+		}
+	}
+	if len(m.Metadata.MentionRoleIDs) > 0 && len(m.Metadata.Mentions) > 0 {
+		userCount := len(m.Metadata.MentionUserIDs)
+		for i, rID := range m.Metadata.MentionRoleIDs {
+			roleIdx := userCount + i
+			if roleIdx < len(m.Metadata.Mentions) && rID != "" {
+				name := m.Metadata.Mentions[roleIdx]
+				if name != "" {
+					bodyText = strings.ReplaceAll(bodyText, "<@&"+rID+">", "@"+name)
+				}
+			}
+		}
+	}
+
 	ts := m.CreatedAt.UTC().Format(time.RFC3339)
-	return fmt.Sprintf("[@%s]%s (%s): %s", author, replyTo, ts, SanitizeContent(m.BodyText()))
+	return fmt.Sprintf("[@%s]%s (%s): %s", author, replyTo, ts, bodyText)
 }
 
 // DefaultAmbientWakePrompt is the default evaluation directive used by the ambient relevance classifier.

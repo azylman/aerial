@@ -2764,6 +2764,56 @@ func TestExtractDiscordMetadata(t *testing.T) {
 	}
 }
 
+func TestResolveMessageContent(t *testing.T) {
+	// 1. Nil message
+	if got := resolveMessageContent(nil, nil); got != "" {
+		t.Errorf("expected empty string for nil message, got %q", got)
+	}
+
+	// 2. Mentions replaced without session (payload mentions fallback)
+	m := &discordgo.Message{
+		Content: "<@1542285964213358633> work on tasks 265, 263",
+		Mentions: []*discordgo.User{
+			{ID: "1542285964213358633", Username: "Zero"},
+		},
+	}
+	got := resolveMessageContent(nil, m)
+	expected := "@Zero work on tasks 265, 263"
+	if got != expected {
+		t.Errorf("resolveMessageContent(nil, m) = %q, want %q", got, expected)
+	}
+
+	// 3. Session with cached state for roles and members
+	s := &discordgo.Session{
+		State: discordgo.NewState(),
+	}
+	s.State.GuildAdd(&discordgo.Guild{
+		ID: "guild-1",
+		Roles: []*discordgo.Role{
+			{ID: "role-1", Name: "Admins", Mentionable: false},
+		},
+	})
+	s.State.ChannelAdd(&discordgo.Channel{
+		ID:      "chan-1",
+		GuildID: "guild-1",
+	})
+	mWithRoles := &discordgo.Message{
+		ChannelID: "chan-1",
+		GuildID:   "guild-1",
+		Content:   "Pinging <@&role-1> and <@1542285964213358633>",
+		Mentions: []*discordgo.User{
+			{ID: "1542285964213358633", Username: "Zero"},
+		},
+		MentionRoles: []string{"role-1"},
+	}
+	gotSession := resolveMessageContent(s, mWithRoles)
+	expectedSession := "Pinging @Admins and @Zero"
+	if gotSession != expectedSession {
+		t.Errorf("resolveMessageContent(s, mWithRoles) = %q, want %q", gotSession, expectedSession)
+	}
+}
+
+
 
 
 
