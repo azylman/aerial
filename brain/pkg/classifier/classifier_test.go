@@ -782,7 +782,12 @@ func TestClassifier_IsHeuristicSkip(t *testing.T) {
 		{"k8s node died", false},
 		{"postgres crashed", false},
 		{"prod 500 error", false},
-		{"service fail", false},
+		// Boundary around 10-character length threshold
+		{"move on", true},       // 7 chars (< 10)
+		{"short msg", true},     // 9 chars (< 10)
+		{"0123456789", false},    // 10 chars (>= 10)
+		{"yup do this", false},   // 11 chars (>= 10)
+		{"continue on", false},   // 11 chars (>= 10)
 		// Longer substantive discussions
 		{"I wonder if we can use raft consensus for distributed state locking", false},
 	}
