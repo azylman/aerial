@@ -2481,6 +2481,71 @@
       "title": "Token Consumption Breakdown by Type",
       "description": "Stacked per-minute token usage across input, output, thinking, and cache-read tokens.",
       "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "VictoriaMetrics"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "Tokens / Min",
+            "axisPlacement": "auto",
+            "fillOpacity": 15,
+            "gradientMode": "none",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            }
+          },
+          "unit": "tokens/min"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 89
+      },
+      "id": 39,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "11.1.0",
+      "targets": [
+        {
+          "expr": "sum by (channel) (rate(aerial_brain_tokens_total{type=\"total\", channel!=\"\"}[5m])) * 60",
+          "legendFormat": "Channel: {{channel}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Token Burn Rate by Channel",
+      "description": "Rolling per-minute token consumption velocity partitioned by Discord channel.",
+      "type": "timeseries"
     }
   ],
   "refresh": "10s",
