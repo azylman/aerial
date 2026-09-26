@@ -33,7 +33,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     docker-compose-v2 \
     python3 \
     python3-yaml \
+    openssh-client \
     && rm -rf /var/lib/apt/lists/*
+
+# Configure default SSH client with include for aerial-config
+RUN mkdir -p -m 0700 /root/.ssh && \
+    echo "Include /share/aerial-config/ssh/config" > /root/.ssh/config && \
+    chmod 0600 /root/.ssh/config
 
 # Copy Go SDK, Node.js 20 LTS runtime, and golangci-lint from builders for local tool parity
 COPY --from=builder /usr/local/go /usr/local/go
