@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"golang.org/x/sync/singleflight"
 
 	"github.com/azylman/aerial/brain/pkg/classifier"
@@ -80,6 +81,7 @@ type WorkerPoolConfig struct {
 	SystemAlertFunc             func(s *discordgo.Session, channelNameOrID, title, alertBody string) error
 	LLMFunc                     LLMFunc
 	WebhookDispatcher           WebhookDispatcher
+	VoiceRunnerFunc             func(ctx context.Context, prompt, sessionID string, onStatus func(string)) (reply string, convID string, err error)
 }
 
 type threadWorkerState struct {
@@ -579,3 +581,129 @@ func (p *WorkerPool) DaemonPool() *DaemonPool {
 	}
 	return p.daemonPool
 }
+
+// LowEffortModel returns the configured low effort reasoning model name.
+func (p *WorkerPool) LowEffortModel() string {
+	if p == nil {
+		return config.DefaultConfigData().LowEffortModel
+	}
+	if p.appCfg != nil {
+		if cur := p.appCfg.Current(); cur != nil && strings.TrimSpace(cur.LowEffortModel) != "" {
+			return strings.TrimSpace(cur.LowEffortModel)
+		}
+	}
+	if strings.TrimSpace(p.cfg.LowEffortModel) != "" {
+		return strings.TrimSpace(p.cfg.LowEffortModel)
+	}
+	return config.DefaultConfigData().LowEffortModel
+}
+
+// ExecuteVoiceTurn synchronously executes a turn for voice queries, enforcing low effort reasoning
+// and streaming intermediate tool execution status callbacks.
+func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID string, onStatus func(status string)) (string, string, error) {
+	if p == nil {
+		return "", "", fmt.Errorf("worker pool is uninitialized")
+	}
+
+	p.mu.Lock()
+	if p.stopped {
+		p.mu.Unlock()
+		return "", "", fmt.Errorf("brain is shutting down")
+	}
+	p.mu.Unlock()
+
+	// Guard against background pool context cancellation or caller cancellation
+	select {
+	case <-p.ctx.Done():
+		return "", "", fmt.Errorf("brain is shutting down")
+	case <-ctx.Done():
+		return "", "", ctx.Err()
+	default:
+	}
+
+	convID := strings.TrimSpace(sessionID)
+	if convID == "" {
+		convID = uuid.New().String()
+	}
+	threadID := "voice-" + convID
+
+	// Mutual exclusion on session / threadID to prevent concurrent turn collisions
+	lockVal, _ := p.scopeLocks.LoadOrStore(threadID, &sync.Mutex{})
+	scopeLock, ok := lockVal.(*sync.Mutex)
+	if !ok {
+		scopeLock = &sync.Mutex{}
+		p.scopeLocks.Store(threadID, scopeLock)
+	}
+	scopeLock.Lock()
+	defer scopeLock.Unlock()
+
+	// Testing hook: If VoiceRunnerFunc is configured, delegate directly
+	if p.cfg.VoiceRunnerFunc != nil {
+		return p.cfg.VoiceRunnerFunc(ctx, prompt, convID, onStatus)
+	}
+
+	// Custom runner fallback (for unit tests using legacy RunnerFunc / RunnerWithOptionsFunc)
+	if p.hasCustomRunner {
+		if onStatus != nil {
+			onStatus(FormatToolStatus("processing", "", 0))
+		}
+		model := p.LowEffortModel()
+		timeout := p.cfg.TimeoutMinutes
+		if timeout <= 0 {
+			timeout = DefaultTimeoutMinutes
+		}
+		stdout, stderr, exitCode, err := p.cfg.RunnerWithOptionsFunc(ctx, p.cfg.AgyBin, prompt, convID, p.cfg.APIKey, model, runner.DefaultWatchdogOptions(timeout))
+		if err != nil {
+			return "", convID, err
+		}
+		if exitCode != 0 {
+			return "", convID, fmt.Errorf("runner failed with exit code %d: %s", exitCode, stderr)
+		}
+		resp, parseErr := runner.ParseAgyOutput(stdout)
+		if parseErr != nil {
+			return strings.TrimSpace(stdout), convID, nil
+		}
+		if resp.Response != "" {
+			return strings.TrimSpace(resp.Response), convID, nil
+		}
+		return strings.TrimSpace(stdout), convID, nil
+	}
+
+	if p.daemonPool == nil {
+		return "", convID, fmt.Errorf("daemon pool unavailable")
+	}
+
+	defer p.daemonPool.ReleaseDaemon(threadID)
+
+	model := p.LowEffortModel()
+	daemon, dErr := p.daemonPool.GetOrCreateDaemon(ctx, threadID, convID, model)
+	if dErr != nil {
+		return "", convID, fmt.Errorf("failed to acquire voice daemon: %w", dErr)
+	}
+
+	stepHandler := func(step *runner.StepUpdateEvent) {
+		if onStatus == nil || step == nil {
+			return
+		}
+		typ := step.ResolvedType()
+		if (typ == "tool_call" || typ == "tool") && step.State != "DONE" && step.State != "ERROR" {
+			toolName := step.ResolvedToolName()
+			cmdName := step.ResolvedCommandName()
+			if toolName != "" || cmdName != "" {
+				onStatus(FormatToolStatus(toolName, cmdName, 0))
+			}
+		}
+	}
+
+	turnRes, turnErr := daemon.ExecuteTurnWithHandler(ctx, prompt, stepHandler)
+	if turnErr != nil {
+		return "", daemon.SessionID(), turnErr
+	}
+
+	activeSession := daemon.SessionID()
+	if activeSession == "" {
+		activeSession = convID
+	}
+	return strings.TrimSpace(turnRes.Response), activeSession, nil
+}
+
