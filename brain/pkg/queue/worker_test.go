@@ -1,8 +1,13 @@
 package queue
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -892,5 +897,169 @@ func TestWorkerPool_TransientRetry_RotatesBloatedSession(t *testing.T) {
 		t.Errorf("expected previous session ID to be %q, got %q", validUUID, prevSess)
 	}
 }
+
+func TestTurnExecution_GetRecentThreadMessages_Discord(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC()
+	t1 := now.Add(-10 * time.Minute)
+	t2 := now.Add(-5 * time.Minute)
+
+	mockDiscordMsgs := []*discordgo.Message{
+		nil, // dm == nil test
+		{
+			ID:        "1552732003076669002",
+			ChannelID: "1552732003076669460",
+			Content:   "Can we add the SVG icon?",
+			Timestamp: t2,
+			Author: &discordgo.User{
+				ID:       "169260920550195200",
+				Username: "arcane103",
+			},
+			Mentions: []*discordgo.User{
+				{ID: "bot-123", Username: "Aerial"},
+			},
+			ReferencedMessage: &discordgo.Message{
+				Author: &discordgo.User{
+					Username: "Aerial",
+				},
+			},
+		},
+		{
+			ID:        "1552732003076669001",
+			ChannelID: "1552732003076669460",
+			Content:   "Weather widget looks good",
+			Timestamp: t1,
+			Author: &discordgo.User{
+				ID:       "169260920550195200",
+				Username: "arcane103",
+			},
+		},
+		{
+			ID:        "1552732003076669000",
+			ChannelID: "1552732003076669460",
+			Content:   "Webhook notification",
+			Timestamp: time.Time{}, // zero timestamp to test SnowflakeTimestamp fallback
+			WebhookID: "hook-123",
+		},
+		{
+			ID:        "1552732003076669099",
+			ChannelID: "1552732003076669460",
+			Content:   "Current burst message to filter",
+			Timestamp: now,
+		},
+	}
+
+	dg, err := discordgo.New("Bot test-token")
+	if err != nil {
+		t.Fatalf("discordgo.New failed: %v", err)
+	}
+	dg.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		body, _ := json.Marshal(mockDiscordMsgs)
+		return &http.Response{
+			StatusCode: 200,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(bytes.NewReader(body)),
+		}, nil
+	})
+
+	pool := &WorkerPool{
+		cfg: WorkerPoolConfig{
+			DiscordSession: dg,
+		},
+	}
+	te := &turnExecution{
+		pool: pool,
+		burst: []db.Message{
+			{ID: "1552732003076669099"},
+		},
+	}
+
+	msgs, err := te.getRecentThreadMessages("1552732003076669460", 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// 1 nil skipped, 1 burst skipped, 3 valid messages returned
+	if len(msgs) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(msgs))
+	}
+
+	// Verified chronological order: oldest (1552732003076669000) first, newest (1552732003076669002) last
+	if msgs[0].ID != "1552732003076669000" {
+		t.Errorf("expected oldest message first, got %s", msgs[0].ID)
+	}
+	if msgs[0].AuthorName != "Webhook" {
+		t.Errorf("expected Webhook author name, got %s", msgs[0].AuthorName)
+	}
+	if msgs[2].ID != "1552732003076669002" {
+		t.Errorf("expected newest message last, got %s", msgs[2].ID)
+	}
+	if msgs[2].Metadata.ReplyingToAuthor != "@Aerial" {
+		t.Errorf("expected replying to @Aerial, got %s", msgs[2].Metadata.ReplyingToAuthor)
+	}
+	if len(msgs[2].Metadata.Mentions) != 1 || msgs[2].Metadata.Mentions[0] != "Aerial" {
+		t.Errorf("expected mention of Aerial, got %+v", msgs[2].Metadata.Mentions)
+	}
+}
+
+func TestTurnExecution_GetRecentThreadMessages_FallbackFiltered(t *testing.T) {
+	t.Parallel()
+	fakeStore := db.NewFakeStore()
+	ctx := context.Background()
+
+	// Insert normal user message
+	_ = fakeStore.InsertMessage(ctx, db.Message{
+		ID:         "msg-1",
+		ThreadID:   "1552732003076669460",
+		AuthorName: "arcane103",
+		Content:    "Normal chat message",
+		CreatedAt:  time.Now().Add(-2 * time.Minute),
+	})
+	// Insert scheduler prompt injection message
+	_ = fakeStore.InsertMessage(ctx, db.Message{
+		ID:            "msg-sched",
+		ThreadID:      "1552732003076669460",
+		AuthorName:    "Scheduler",
+		Content:       "Check on PR status and deployment prompt injection...",
+		ScheduleRunID: "run-123",
+		CreatedAt:     time.Now().Add(-1 * time.Minute),
+	})
+
+	// Discord session errors, triggering database fallback
+	dg, _ := discordgo.New("Bot test")
+	dg.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		return nil, errors.New("discord simulated network error")
+	})
+
+	pool := &WorkerPool{
+		cfg: WorkerPoolConfig{
+			DiscordSession: dg,
+			Store:          fakeStore,
+		},
+	}
+	te := &turnExecution{pool: pool}
+
+	msgs, err := te.getRecentThreadMessages("1552732003076669460", 0) // limit 0 -> defaults to 10
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 message (scheduler filtered out), got %d: %+v", len(msgs), msgs)
+	}
+	if msgs[0].ID != "msg-1" {
+		t.Errorf("expected msg-1, got %s", msgs[0].ID)
+	}
+
+	// Test limit clamp > 100
+	msgsClamped, err := te.getRecentThreadMessages("1552732003076669460", 200)
+	if err != nil {
+		t.Fatalf("unexpected error on clamped limit: %v", err)
+	}
+	if len(msgsClamped) != 1 {
+		t.Errorf("expected 1 message, got %d", len(msgsClamped))
+	}
+}
+
 
 
