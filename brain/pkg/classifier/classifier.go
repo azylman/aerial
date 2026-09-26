@@ -724,9 +724,10 @@ func (c *Classifier) SummarizeThreadTitle(ctx context.Context, question string) 
 	}
 
 	prompt := fmt.Sprintf(
-		"Based on the starting question below, summarize the upcoming discussion in 6 words or less for a Discord thread title.\n"+
-			"Output strictly the title text with no surrounding quotes, markdown, or commentary.\n\n"+
-			"<starting_question>\n%s\n</starting_question>",
+		"Summarize the following message into a concise 3 to 5 word topic title for a Discord thread.\n"+
+			"Output ONLY the raw title text. Never include labels, prefixes (such as \"Title:\" or \"Thread:\"), quotes, markdown, or punctuation.\n\n"+
+			"Message: %s\n"+
+			"Title:",
 		sanitizedQuestion,
 	)
 
