@@ -161,6 +161,8 @@ type ConfigData struct {
 	OpenObservePassword string                     `yaml:"openobserve_password,omitempty" json:"openobserve_password,omitempty"`
 	Ollama          OllamaConfig               `yaml:"ollama" json:"ollama"`
 	LowEffortModel  string                     `yaml:"low_effort_model" json:"low_effort_model"`
+	ClassifierURL   string                     `yaml:"classifier_url,omitempty" json:"classifier_url,omitempty"`
+	ClassifierModel string                     `yaml:"classifier_model,omitempty" json:"classifier_model,omitempty"`
 	GeminiHomeDir       string                     `yaml:"gemini_home_dir,omitempty" json:"gemini_home_dir,omitempty"`
 	DataDir             string                     `yaml:"data_dir,omitempty" json:"data_dir,omitempty"`
 	MCPConfig           string                     `yaml:"mcp_config,omitempty" json:"mcp_config,omitempty"`
@@ -192,6 +194,8 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 		OpenObservePassword       string                   `yaml:"openobserve_password"`
 		Ollama                    OllamaConfig             `yaml:"ollama"`
 		LowEffortModel            string                   `yaml:"low_effort_model"`
+		ClassifierURL             string                   `yaml:"classifier_url"`
+		ClassifierModel           string                   `yaml:"classifier_model"`
 		MCPConfig                 interface{}              `yaml:"mcp_config"`
 		DaemonIdleTimeout         time.Duration            `yaml:"daemon_idle_timeout"`
 		MaxConcurrentDaemons      int                      `yaml:"max_concurrent_daemons"`
@@ -221,6 +225,8 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 	c.OpenObservePassword = raw.OpenObservePassword
 	c.Ollama = raw.Ollama
 	c.LowEffortModel = strings.TrimSpace(raw.LowEffortModel)
+	c.ClassifierURL = strings.TrimSpace(raw.ClassifierURL)
+	c.ClassifierModel = strings.TrimSpace(raw.ClassifierModel)
 	c.GeminiHomeDir = raw.GeminiHomeDir
 	c.DataDir = raw.DataDir
 
@@ -337,6 +343,8 @@ func DefaultConfigData() *ConfigData {
 		Port:            "8080",
 		AgyBin:          "agy",
 		LowEffortModel:  "Gemini 3.8 Flash (Low)",
+		ClassifierURL:   "",
+		ClassifierModel: "",
 		DataDir:         "",
 		GeminiHomeDir:   "",
 		Ollama: OllamaConfig{
@@ -517,8 +525,14 @@ func applyEnvironmentOverrides(data *ConfigData, lookup func(string) string) {
 	if sc := getEnvFromLookup(lookup, "SYSTEM_CHANNEL", ""); sc != "" {
 		data.SystemChannel = sc
 	}
-	if lem := getEnvFromLookup(lookup, "LOW_EFFORT_MODEL", getEnvFromLookup(lookup, "AMBIENT_CLASSIFIER_MODEL", getEnvFromLookup(lookup, "CLASSIFIER_MODEL", ""))); lem != "" {
+	if lem := getEnvFromLookup(lookup, "LOW_EFFORT_MODEL", getEnvFromLookup(lookup, "AMBIENT_CLASSIFIER_MODEL", "")); lem != "" {
 		data.LowEffortModel = lem
+	}
+	if cu := getEnvFromLookup(lookup, "CLASSIFIER_URL", ""); cu != "" {
+		data.ClassifierURL = cu
+	}
+	if cm := getEnvFromLookup(lookup, "CLASSIFIER_MODEL", ""); cm != "" {
+		data.ClassifierModel = cm
 	}
 	if ou := getEnvFromLookup(lookup, "OLLAMA_URL", ""); ou != "" {
 		data.Ollama.BaseURL = ou
