@@ -163,6 +163,8 @@ type ConfigData struct {
 	LowEffortModel  string                     `yaml:"low_effort_model" json:"low_effort_model"`
 	ClassifierURL   string                     `yaml:"classifier_url,omitempty" json:"classifier_url,omitempty"`
 	ClassifierModel string                     `yaml:"classifier_model,omitempty" json:"classifier_model,omitempty"`
+	ThreadTitleURL   string                     `yaml:"thread_title_url,omitempty" json:"thread_title_url,omitempty"`
+	ThreadTitleModel string                     `yaml:"thread_title_model,omitempty" json:"thread_title_model,omitempty"`
 	GeminiHomeDir       string                     `yaml:"gemini_home_dir,omitempty" json:"gemini_home_dir,omitempty"`
 	DataDir             string                     `yaml:"data_dir,omitempty" json:"data_dir,omitempty"`
 	MCPConfig           string                     `yaml:"mcp_config,omitempty" json:"mcp_config,omitempty"`
@@ -196,6 +198,8 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 		LowEffortModel            string                   `yaml:"low_effort_model"`
 		ClassifierURL             string                   `yaml:"classifier_url"`
 		ClassifierModel           string                   `yaml:"classifier_model"`
+		ThreadTitleURL             string                   `yaml:"thread_title_url"`
+		ThreadTitleModel           string                   `yaml:"thread_title_model"`
 		MCPConfig                 interface{}              `yaml:"mcp_config"`
 		DaemonIdleTimeout         time.Duration            `yaml:"daemon_idle_timeout"`
 		MaxConcurrentDaemons      int                      `yaml:"max_concurrent_daemons"`
@@ -227,6 +231,8 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 	c.LowEffortModel = strings.TrimSpace(raw.LowEffortModel)
 	c.ClassifierURL = strings.TrimSpace(raw.ClassifierURL)
 	c.ClassifierModel = strings.TrimSpace(raw.ClassifierModel)
+	c.ThreadTitleURL = strings.TrimSpace(raw.ThreadTitleURL)
+	c.ThreadTitleModel = strings.TrimSpace(raw.ThreadTitleModel)
 	c.GeminiHomeDir = raw.GeminiHomeDir
 	c.DataDir = raw.DataDir
 
@@ -345,6 +351,8 @@ func DefaultConfigData() *ConfigData {
 		LowEffortModel:  "Gemini 3.8 Flash (Low)",
 		ClassifierURL:   "",
 		ClassifierModel: "",
+		ThreadTitleURL:   "",
+		ThreadTitleModel: "",
 		DataDir:         "",
 		GeminiHomeDir:   "",
 		Ollama: OllamaConfig{
@@ -533,6 +541,12 @@ func applyEnvironmentOverrides(data *ConfigData, lookup func(string) string) {
 	}
 	if cm := getEnvFromLookup(lookup, "CLASSIFIER_MODEL", ""); cm != "" {
 		data.ClassifierModel = cm
+	}
+	if tu := getEnvFromLookup(lookup, "THREAD_TITLE_URL", ""); tu != "" {
+		data.ThreadTitleURL = tu
+	}
+	if tm := getEnvFromLookup(lookup, "THREAD_TITLE_MODEL", ""); tm != "" {
+		data.ThreadTitleModel = tm
 	}
 	if ou := getEnvFromLookup(lookup, "OLLAMA_URL", ""); ou != "" {
 		data.Ollama.BaseURL = ou

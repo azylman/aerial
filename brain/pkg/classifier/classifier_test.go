@@ -1545,5 +1545,155 @@ func TestClassifier_CoverageBoost(t *testing.T) {
 	}
 }
 
+func TestSummarizeThreadTitle_WithThreadTitleURL(t *testing.T) {
+	t.Parallel()
+
+	var receivedModel string
+	var receivedPrompt string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req ollamaGenerateRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		receivedModel = req.Model
+		receivedPrompt = req.Prompt
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(ollamaGenerateResponse{
+			Response: "Weather Graph Optimization",
+			Done:     true,
+		})
+	}))
+	defer ts.Close()
+
+	var runnerCalled bool
+	var mockRunner runner.RunnerFunc = func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+		runnerCalled = true
+		return `{"conversation_id":"ambient-eval-123","status":"SUCCESS","response":"{\"confidence\": 0.9, \"reason\": \"wake up\"}"}`, "", 0, nil
+	}
+
+	cfgData := config.DefaultConfigData()
+	cfgData.ThreadTitleURL = ts.URL
+	cfgData.ThreadTitleModel = "qwen2.5:3b"
+	cfgData.ClassifierURL = "" // Ambient classifier remains on cloud Flash!
+	cfg := config.NewFromData(cfgData)
+
+	cls := New(cfg, mockRunner)
+
+	// 1. Thread title summarization should hit Ollama at ThreadTitleURL
+	title, err := cls.SummarizeThreadTitle(context.Background(), "How do we optimize the weather curve?")
+	if err != nil {
+		t.Fatalf("SummarizeThreadTitle failed: %v", err)
+	}
+	if title != "Weather Graph Optimization" {
+		t.Errorf("expected title 'Weather Graph Optimization', got %q", title)
+	}
+	if receivedModel != "qwen2.5:3b" {
+		t.Errorf("expected model qwen2.5:3b, got %q", receivedModel)
+	}
+	if !strings.Contains(receivedPrompt, "How do we optimize the weather curve?") {
+		t.Errorf("expected prompt to contain question, got %q", receivedPrompt)
+	}
+
+	// 2. Ambient relevance classification should hit mockRunner (cloud Flash)
+	res := cls.Classify(context.Background(), db.Message{Content: "Hey Aerial"}, nil, "")
+	if !runnerCalled {
+		t.Error("expected ambient classifier to call mockRunner when ClassifierURL is unset")
+	}
+	if res.Confidence != 0.9 {
+		t.Errorf("expected confidence 0.9 from runner, got %f", res.Confidence)
+	}
+}
+
+func TestSummarizeThreadTitle_WithTitleLLMFunc(t *testing.T) {
+	t.Parallel()
+
+	var calledTitleFn bool
+	customTitleFn := func(ctx context.Context, model, prompt string) (string, error) {
+		calledTitleFn = true
+		return "Custom Thread Title", nil
+	}
+
+	cls := New(nil, nil, WithTitleLLMFunc(customTitleFn))
+	title, err := cls.SummarizeThreadTitle(context.Background(), "Testing custom title LLM func")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !calledTitleFn {
+		t.Error("expected custom TitleLLMFunc to be called")
+	}
+	if title != "Custom Thread Title" {
+		t.Errorf("expected 'Custom Thread Title', got %q", title)
+	}
+}
+
+func TestClassifier_ResolveTitleModel(t *testing.T) {
+	t.Parallel()
+
+	// 1. Explicit ThreadTitleModel configured
+	c1 := &Classifier{
+		cfg: config.NewFromData(&config.ConfigData{
+			ThreadTitleURL:   "http://localhost:11434",
+			ThreadTitleModel: "title-specific-model",
+		}),
+	}
+	if got := c1.resolveTitleModel(); got != "title-specific-model" {
+		t.Errorf("expected title-specific-model, got %q", got)
+	}
+
+	// 2. ThreadTitleURL configured without model -> DefaultOllamaClassifierModel
+	c2 := &Classifier{
+		cfg: config.NewFromData(&config.ConfigData{
+			ThreadTitleURL: "http://localhost:11434",
+		}),
+	}
+	if got := c2.resolveTitleModel(); got != DefaultOllamaClassifierModel {
+		t.Errorf("expected DefaultOllamaClassifierModel, got %q", got)
+	}
+
+	// 3. Fallback: ClassifierURL configured with ClassifierModel
+	c3 := &Classifier{
+		cfg: config.NewFromData(&config.ConfigData{
+			ClassifierURL:   "http://localhost:11434",
+			ClassifierModel: "classifier-fallback-model",
+		}),
+	}
+	if got := c3.resolveTitleModel(); got != "classifier-fallback-model" {
+		t.Errorf("expected classifier-fallback-model, got %q", got)
+	}
+
+	// 4. Fallback: ClassifierURL configured without model -> DefaultOllamaClassifierModel
+	c4 := &Classifier{
+		cfg: config.NewFromData(&config.ConfigData{
+			ClassifierURL: "http://localhost:11434",
+		}),
+	}
+	if got := c4.resolveTitleModel(); got != DefaultOllamaClassifierModel {
+		t.Errorf("expected DefaultOllamaClassifierModel, got %q", got)
+	}
+
+	// 5. Cloud fallback: LowEffortModel in config
+	c5 := &Classifier{
+		cfg: config.NewFromData(&config.ConfigData{
+			LowEffortModel: "gemini-flash-low",
+		}),
+	}
+	if got := c5.resolveTitleModel(); got != "gemini-flash-low" {
+		t.Errorf("expected gemini-flash-low, got %q", got)
+	}
+
+	// 6. Custom c.Model set
+	c6 := &Classifier{
+		Model: "custom-user-model",
+	}
+	if got := c6.resolveTitleModel(); got != "custom-user-model" {
+		t.Errorf("expected custom-user-model, got %q", got)
+	}
+
+	// 7. Everything unset -> Default LowEffortModel
+	c7 := &Classifier{}
+	if got := c7.resolveTitleModel(); got != config.DefaultConfigData().LowEffortModel {
+		t.Errorf("expected default LowEffortModel, got %q", got)
+	}
+}
+
+
 
 

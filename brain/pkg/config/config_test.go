@@ -2903,3 +2903,62 @@ classifier_model: qwen2.5:3b
 		t.Errorf("expected empty default ClassifierModel, got %q", defData.ClassifierModel)
 	}
 }
+
+func TestConfig_ThreadTitleURLAndModel_YAML(t *testing.T) {
+	t.Parallel()
+
+	yamlContent := `
+thread_title_url: http://192.168.1.70:11434
+thread_title_model: qwen2.5:3b
+`
+	cfg, err := LoadConfigFromBytes([]byte(yamlContent))
+	if err != nil {
+		t.Fatalf("LoadConfigFromBytes failed: %v", err)
+	}
+
+	data := cfg.Get()
+	if data.ThreadTitleURL != "http://192.168.1.70:11434" {
+		t.Errorf("expected ThreadTitleURL=http://192.168.1.70:11434, got %q", data.ThreadTitleURL)
+	}
+	if data.ThreadTitleModel != "qwen2.5:3b" {
+		t.Errorf("expected ThreadTitleModel=qwen2.5:3b, got %q", data.ThreadTitleModel)
+	}
+
+	// Verify defaults when omitted
+	defaultCfg, err := LoadConfigFromBytes([]byte("{}"))
+	if err != nil {
+		t.Fatalf("LoadConfigFromBytes on empty failed: %v", err)
+	}
+	defData := defaultCfg.Get()
+	if defData.ThreadTitleURL != "" {
+		t.Errorf("expected empty default ThreadTitleURL, got %q", defData.ThreadTitleURL)
+	}
+	if defData.ThreadTitleModel != "" {
+		t.Errorf("expected empty default ThreadTitleModel, got %q", defData.ThreadTitleModel)
+	}
+}
+
+func TestConfig_ThreadTitleURLAndModel_Env(t *testing.T) {
+	t.Parallel()
+
+	data := DefaultConfigData()
+	lookup := func(key string) string {
+		switch key {
+		case "THREAD_TITLE_URL":
+			return "http://edge.lan:11434"
+		case "THREAD_TITLE_MODEL":
+			return "llama3.2:1b"
+		default:
+			return ""
+		}
+	}
+
+	applyEnvironmentOverrides(data, lookup)
+	if data.ThreadTitleURL != "http://edge.lan:11434" {
+		t.Errorf("expected ThreadTitleURL=http://edge.lan:11434, got %q", data.ThreadTitleURL)
+	}
+	if data.ThreadTitleModel != "llama3.2:1b" {
+		t.Errorf("expected ThreadTitleModel=llama3.2:1b, got %q", data.ThreadTitleModel)
+	}
+}
+

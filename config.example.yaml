@@ -12,10 +12,16 @@ timezone: America/Los_Angeles
 system_channel: aerial-dev
 
 # Optional Local/Edge Classifier Endpoint (Ollama)
-# When specified, ambient triage and thread titling calls route to this Ollama instance.
-# If omitted or empty, Aerial keeps existing logic using cloud low_effort_model via Agy.
+# When specified, ambient triage calls route to this Ollama instance.
+# If omitted or empty, ambient triage uses cloud low_effort_model via Agy.
 # classifier_url: http://192.168.1.70:11434
 # classifier_model: qwen2.5:3b # Defaults to qwen2.5:3b if classifier_url is set but model is omitted
+
+# Optional Local/Edge Thread Title Summarization Endpoint (Ollama)
+# When specified, thread titling calls route to this endpoint (runs in ~300ms locally).
+# If omitted, falls back to classifier_url if set, else uses cloud low_effort_model.
+# thread_title_url: http://192.168.1.70:11434
+# thread_title_model: qwen2.5:3b # Defaults to qwen2.5:3b if thread_title_url is set
 
 # ------------------------------------------------------------------------------
 # Administrator Allowlist

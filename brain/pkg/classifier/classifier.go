@@ -70,6 +70,7 @@ type ClassificationResult struct {
 type Classifier struct {
 	cfg              *config.Config
 	LLMFunc          func(ctx context.Context, model, prompt string) (string, error)
+	TitleLLMFunc     func(ctx context.Context, model, prompt string) (string, error)
 	Model            string
 	Timeout          time.Duration
 	FailureThreshold int
@@ -97,6 +98,13 @@ func WithOnParseError(fn func(model, raw string, err error)) Option {
 func WithLLMFunc(fn func(ctx context.Context, model, prompt string) (string, error)) Option {
 	return func(c *Classifier) {
 		c.LLMFunc = fn
+	}
+}
+
+// WithTitleLLMFunc sets the LLM invocation function for thread title summarization.
+func WithTitleLLMFunc(fn func(ctx context.Context, model, prompt string) (string, error)) Option {
+	return func(c *Classifier) {
+		c.TitleLLMFunc = fn
 	}
 }
 
@@ -156,6 +164,39 @@ func New(cfg *config.Config, runnerFn runner.RunnerFunc, opts ...Option) *Classi
 				return "", fmt.Errorf("failed to initialize ollama client: %w", err)
 			}
 			return ollamaFn(ctx, model, prompt)
+		}
+		if runnerFn == nil {
+			return "", errors.New("no runner function configured")
+		}
+		agyBin := "agy"
+		apiKey := ""
+		if cur != nil {
+			if cur.AgyBin != "" {
+				agyBin = cur.AgyBin
+			}
+			apiKey = cur.APIKey
+		}
+		return NewAgyLLMFunc(agyBin, apiKey, runnerFn)(ctx, model, prompt)
+	}
+	c.TitleLLMFunc = func(ctx context.Context, model, prompt string) (string, error) {
+		cur := c.cfg.Current()
+		targetURL := ""
+		if cur != nil {
+			if cur.ThreadTitleURL != "" {
+				targetURL = cur.ThreadTitleURL
+			} else if cur.ClassifierURL != "" {
+				targetURL = cur.ClassifierURL
+			}
+		}
+		if targetURL != "" {
+			ollamaFn, err := NewOllamaLLMFunc(targetURL, nil)
+			if err != nil {
+				return "", fmt.Errorf("failed to initialize ollama client for thread title: %w", err)
+			}
+			return ollamaFn(ctx, model, prompt)
+		}
+		if c.LLMFunc != nil {
+			return c.LLMFunc(ctx, model, prompt)
 		}
 		if runnerFn == nil {
 			return "", errors.New("no runner function configured")
@@ -609,6 +650,41 @@ func (c *Classifier) resolveModel() string {
 	return config.DefaultConfigData().LowEffortModel
 }
 
+func (c *Classifier) resolveTitleModel() string {
+	if c.cfg != nil {
+		if cur := c.cfg.Current(); cur != nil {
+			if cur.ThreadTitleModel != "" {
+				return cur.ThreadTitleModel
+			}
+			if cur.ThreadTitleURL != "" {
+				if c.Model != "" && c.Model != "Gemini 3.8 Flash (Low)" {
+					return c.Model
+				}
+				return DefaultOllamaClassifierModel
+			}
+			if cur.ClassifierURL != "" {
+				if cur.ClassifierModel != "" {
+					return cur.ClassifierModel
+				}
+				if c.Model != "" && c.Model != "Gemini 3.8 Flash (Low)" {
+					return c.Model
+				}
+				return DefaultOllamaClassifierModel
+			}
+			if c.Model != "" && c.Model != "Gemini 3.8 Flash (Low)" {
+				return c.Model
+			}
+			if strings.TrimSpace(cur.LowEffortModel) != "" {
+				return cur.LowEffortModel
+			}
+		}
+	}
+	if strings.TrimSpace(c.Model) != "" {
+		return c.Model
+	}
+	return config.DefaultConfigData().LowEffortModel
+}
+
 func (c *Classifier) classifyWithPrompt(ctx context.Context, prompt string) ClassificationResult {
 	if ctx == nil {
 		ctx = context.Background()
@@ -728,9 +804,17 @@ func CleanThreadTitle(raw string) string {
 	return string(runes)
 }
 
-// SummarizeThreadTitle uses the low-effort Flash model to generate a concise thread title summary (≤6 words).
+// SummarizeThreadTitle uses the configured model to generate a concise thread title summary (≤6 words).
 func (c *Classifier) SummarizeThreadTitle(ctx context.Context, question string) (string, error) {
-	if c == nil || c.LLMFunc == nil {
+	if c == nil {
+		return "", errors.New("classifier or LLMFunc not initialized")
+	}
+
+	llmFn := c.TitleLLMFunc
+	if llmFn == nil {
+		llmFn = c.LLMFunc
+	}
+	if llmFn == nil {
 		return "", errors.New("classifier or LLMFunc not initialized")
 	}
 
@@ -747,10 +831,24 @@ func (c *Classifier) SummarizeThreadTitle(ctx context.Context, question string) 
 		sanitizedQuestion,
 	)
 
-	model := c.resolveModel()
+	callCtx := ctx
+	if callCtx == nil {
+		callCtx = context.Background()
+	}
+	if _, hasDeadline := callCtx.Deadline(); !hasDeadline {
+		timeout := c.Timeout
+		if timeout <= 0 {
+			timeout = 12 * time.Second
+		}
+		var cancel context.CancelFunc
+		callCtx, cancel = context.WithTimeout(callCtx, timeout)
+		defer cancel()
+	}
+
+	model := c.resolveTitleModel()
 
 	start := time.Now()
-	resp, err := c.LLMFunc(ctx, model, prompt)
+	resp, err := llmFn(callCtx, model, prompt)
 	duration := time.Since(start)
 	if err != nil {
 		metrics.RecordThreadTitleDuration("error", model, duration)
