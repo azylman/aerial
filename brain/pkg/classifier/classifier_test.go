@@ -961,6 +961,12 @@ func TestSummarizeThreadTitle(t *testing.T) {
 		if !strings.Contains(capturedPrompt, "Why is the database queries taking so long?") {
 			t.Errorf("expected prompt to contain question, got %q", capturedPrompt)
 		}
+		if !strings.Contains(capturedPrompt, "Output ONLY the raw title text") {
+			t.Errorf("expected prompt to contain raw title instruction, got %q", capturedPrompt)
+		}
+		if !strings.HasSuffix(capturedPrompt, "Title:") {
+			t.Errorf("expected prompt to end with 'Title:', got %q", capturedPrompt)
+		}
 	})
 }
 
