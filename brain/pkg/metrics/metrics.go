@@ -174,6 +174,16 @@ var (
 		},
 	)
 
+	// Thread Title Summarization Telemetry
+	ThreadTitleDurationSeconds = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "aerial_brain_thread_title_duration_seconds",
+			Help:    "Latency of Discord thread title summarization in seconds.",
+			Buckets: []float64{0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 10.0},
+		},
+		[]string{"status", "model"},
+	)
+
 	// Discord Funnel & Gateway Telemetry
 	DiscordEventsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -455,6 +465,7 @@ func init() {
 		ClassifierDurationSeconds,
 		ClassifierDecisionsTotal,
 		ClassifierConfidenceScore,
+		ThreadTitleDurationSeconds,
 		DiscordEventsTotal,
 		DiscordMessagesProcessedTotal,
 		DiscordGatewayLatencySeconds,
@@ -630,6 +641,17 @@ func RecordClassifierRun(status, model string, duration time.Duration, score flo
 	if score >= 0 {
 		ClassifierConfidenceScore.Observe(score)
 	}
+}
+
+// RecordThreadTitleDuration records thread title summarization latency and status.
+func RecordThreadTitleDuration(status, model string, duration time.Duration) {
+	if status == "" {
+		status = "unknown"
+	}
+	if model == "" {
+		model = "default"
+	}
+	ThreadTitleDurationSeconds.WithLabelValues(status, model).Observe(duration.Seconds())
 }
 
 // RecordDelivery records Discord outbound message delivery outcome and latency.
