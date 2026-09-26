@@ -82,11 +82,6 @@ run_preflight_verification() {
     return 0
 }
 
-# Testing hook: allow unit tests to source helper functions without executing command dispatch
-if [ "${REPO_TEST_MODE:-0}" = "1" ] || [ "${1:-}" = "--source-only" ]; then
-    return 0 2>/dev/null || exit 0
-fi
-
 # Pre-dispatch global flag parsing (allows --repo before or after command)
 PRE_ARGS=()
 while [ $# -gt 0 ]; do
@@ -652,14 +647,16 @@ Check on the status of Pull Request #${pr_num} on ${REPO_OWNER}/${REPO_NAME} (${
 1. Inspect CI status, PR state, and deployment state by running:
    scripts/${script_name} --repo ${REPO_NAME} merge ${pr_num}
 2. If status is "pending":
-   Quietly reschedule a ${delay} follow-up check via schedule_once with target_id "${target_id}" and suppress response output (empty response) to avoid channel noise while CI is running.
+   Quietly reschedule a ${delay} follow-up check via schedule_once targeting this active thread/channel (target_id: "${target_id}") and suppress response output (empty response) to avoid channel noise while CI is running.
 3. If status is "merged" or "already_merged":
    Report status in plain prose (maximum two sentences). Do NOT output markdown bullet lists, task checklists, or forward-looking promises.
    - If deployment state is "done": confirm merge and completed deployment in 1–2 sentences.
-   - If deployment state is "ongoing" (e.g. stage: queued, building, awaiting_pull, swapping) or "pending_registration": state the current deployment stage in 1–2 sentences, and reschedule a ${delay} follow-up check via schedule_once with target_id "${target_id}" to track deployment to completion. If status was already merged, report only the deployment stage update.
+   - If deployment state is "ongoing" (e.g. stage: queued, building, awaiting_pull, swapping) or "pending_registration": state the current deployment stage in 1–2 sentences, and reschedule a ${delay} follow-up check via schedule_once targeting this active thread/channel (target_id: "${target_id}") to track deployment to completion. If status was already merged, report only the deployment stage update.
    - If deployment state is "failed": the two-sentence limit does NOT apply; report full failure details, error logs, and diagnostic context immediately.
 4. If status is "failed" or "conflict", or if the merge command errors:
    The two-sentence limit does NOT apply; report full PR/CI failure details, failing check names, and error logs to the user.
+
+(Note: target_id "${target_id}" represents the active thread/channel for this conversation; never hardcode or generalize this ID across other threads or sessions.)
 EOF
 )
 
@@ -764,7 +761,7 @@ enable_github_auto_merge() {
 }
 
 submit_scratch() {
-    local target_id=""
+    local target_id="${AERIAL_TARGET_ID:-${DISCORD_THREAD_ID:-${DISCORD_CHANNEL_ID:-1542423172400291873}}}"
     local check_delay=""
     local no_schedule=0
     local scratch_dir=""
@@ -796,17 +793,9 @@ submit_scratch() {
                 echo "ERROR: Synchronous submit mode has been eliminated. Submissions are strictly asynchronous." >&2
                 exit 1
                 ;;
-            --target-id|--target|-t)
-                if [ $# -lt 2 ]; then
-                    echo "ERROR: $1 requires a target ID argument." >&2
-                    exit 1
-                fi
-                target_id="$2"
-                shift 2
-                ;;
-            --target-id=*|--target=*)
-                target_id="${1#*=}"
-                shift 1
+            --target-id|--target|-t|--target-id=*|--target=*)
+                echo "ERROR: Target ID cannot be specified manually ($1 is removed). Target ID is strictly inherited from the active Discord environment (AERIAL_TARGET_ID / DISCORD_THREAD_ID)." >&2
+                exit 1
                 ;;
             --delay|--run-at|-d)
                 if [ $# -lt 2 ]; then
@@ -1102,6 +1091,11 @@ EOF
     return 0
 }
 
+# Testing hook: allow unit tests to source all functions without executing command dispatch
+if [ "${REPO_TEST_MODE:-0}" = "1" ] || [ "${cmd:-}" = "--source-only" ]; then
+    return 0 2>/dev/null || exit 0
+fi
+
 case "$cmd" in
     init)
         init_scratch "$@"
@@ -1116,7 +1110,7 @@ case "$cmd" in
         get_deploy_status "$@"
         ;;
     *)
-        echo "Usage: $0 [--repo <name>] {init [repo]|submit [-t <target_id>] [-d <delay>] [--no-schedule] [-b <body>|--body <body>|-f <file>|--body-file <file>] <scratch_dir> [commit_msg]|merge <pr_num> [branch] [commit_sha]|deploy-status <pr_num|commit_sha>}" >&2
+        echo "Usage: $0 [--repo <name>] {init [repo]|submit [-d <delay>] [--no-schedule] [-b <body>|--body <body>|-f <file>|--body-file <file>] <scratch_dir> [commit_msg]|merge <pr_num> [branch] [commit_sha]|deploy-status <pr_num|commit_sha>}" >&2
         exit 1
         ;;
 esac
