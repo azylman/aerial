@@ -1402,4 +1402,110 @@ func TestClassifier_ResolveModel(t *testing.T) {
 	}
 }
 
+func TestClassifier_CoverageBoost(t *testing.T) {
+	t.Parallel()
+
+	// 1. New with invalid ClassifierURL -> c.LLMFunc error
+	cfgInvalidURL := config.NewFromData(&config.ConfigData{
+		ClassifierURL: "http://",
+	})
+	c1 := New(cfgInvalidURL, nil)
+	if _, err := c1.LLMFunc(context.Background(), "model", "prompt"); err == nil {
+		t.Error("expected error for invalid ClassifierURL in LLMFunc")
+	}
+
+	// 2. New with empty ClassifierURL and nil runnerFn -> c.LLMFunc error
+	cfgNoURL := config.NewFromData(&config.ConfigData{})
+	c2 := New(cfgNoURL, nil)
+	if _, err := c2.LLMFunc(context.Background(), "model", "prompt"); err == nil {
+		t.Error("expected error when runnerFn is nil")
+	}
+
+	// 3. NormalizeOllamaEndpoint invalid URL parse error
+	if _, err := NormalizeOllamaEndpoint(":\x7f"); err == nil {
+		t.Error("expected error for invalid URL parse in NormalizeOllamaEndpoint")
+	}
+
+	// 4. NewOllamaLLMFunc HTTP error with >200 byte response body (tests truncation)
+	longErrMsg := strings.Repeat("error-detail-", 25)
+	tsLongErr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, longErrMsg, http.StatusInternalServerError)
+	}))
+	defer tsLongErr.Close()
+
+	fnLongErr, err := NewOllamaLLMFunc(tsLongErr.URL, tsLongErr.Client())
+	if err != nil {
+		t.Fatalf("NewOllamaLLMFunc failed: %v", err)
+	}
+	_, err = fnLongErr(context.Background(), "model", "prompt")
+	if err == nil || !strings.Contains(err.Error(), "...") {
+		t.Errorf("expected truncated error with '...', got %v", err)
+	}
+
+	// 5. NewAgyLLMFunc with nil runnerFn
+	nilRunnerFn := NewAgyLLMFunc("agy", "key", nil)
+	if _, err := nilRunnerFn(context.Background(), "model", "prompt"); err == nil {
+		t.Error("expected error for nil runner in NewAgyLLMFunc")
+	}
+
+	// 6. NewAgyLLMFunc with non-zero exit code
+	failRunnerFn := NewAgyLLMFunc("agy", "key", func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+		return "", "process died", 1, nil
+	})
+	if _, err := failRunnerFn(context.Background(), "model", "prompt"); err == nil {
+		t.Error("expected error when runner exitCode != 0")
+	}
+
+	// 7. NewAgyLLMFunc with invalid JSON stdout
+	badJSONRunnerFn := NewAgyLLMFunc("agy", "key", func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+		return "not valid json", "", 0, nil
+	})
+	if _, err := badJSONRunnerFn(context.Background(), "model", "prompt"); err == nil {
+		t.Error("expected error when runner returns bad JSON stdout")
+	}
+
+	// 8. resolveModel with ClassifierURL set and custom c.Model
+	cCustomModel := &Classifier{
+		Model: "my-custom-qwen",
+		cfg: config.NewFromData(&config.ConfigData{
+			ClassifierURL: "http://localhost:11434",
+		}),
+	}
+	if got := cCustomModel.resolveModel(); got != "my-custom-qwen" {
+		t.Errorf("expected my-custom-qwen, got %q", got)
+	}
+
+	// 9. resolveModel with ClassifierURL unset and custom c.Model
+	cCustomNoURL := &Classifier{
+		Model: "gemini-custom-flash",
+		cfg: config.NewFromData(&config.ConfigData{
+			LowEffortModel: "gemini-default",
+		}),
+	}
+	if got := cCustomNoURL.resolveModel(); got != "gemini-custom-flash" {
+		t.Errorf("expected gemini-custom-flash, got %q", got)
+	}
+
+	// 10. classifyWithPrompt with nil LLMFunc
+	cNilLLM := &Classifier{
+		Model: "test-model",
+	}
+	resNil := cNilLLM.classifyWithPrompt(context.Background(), "prompt")
+	if resNil.Confidence != 0.0 || !strings.Contains(resNil.Reason, "no LLMFunc configured") {
+		t.Errorf("expected error for nil LLMFunc, got %+v", resNil)
+	}
+
+	// 11. classifyWithPrompt with open circuit breaker
+	cCircuit := &Classifier{
+		Model:            "test-model",
+		circuitOpen:      true,
+		circuitOpenUntil: time.Now().Add(10 * time.Minute),
+	}
+	resCircuit := cCircuit.classifyWithPrompt(context.Background(), "prompt")
+	if resCircuit.Confidence != 0.0 || resCircuit.Reason != "circuit breaker open" {
+		t.Errorf("expected circuit breaker open, got %+v", resCircuit)
+	}
+}
+
+
 
