@@ -21,6 +21,7 @@ import (
 	"github.com/azylman/aerial/brain/pkg/notifier"
 	"github.com/azylman/aerial/brain/pkg/runner"
 	"github.com/azylman/aerial/brain/pkg/session"
+	"github.com/bwmarrin/discordgo"
 	"github.com/google/uuid"
 )
 
@@ -236,9 +237,107 @@ func (te *turnExecution) saveThreadSummary(threadID, summary, lastMsgID string) 
 	return nil
 }
 
+func (te *turnExecution) isBurstMessage(id string) bool {
+	for _, m := range te.burst {
+		if m.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
 func (te *turnExecution) getRecentThreadMessages(threadID string, limit int) ([]db.Message, error) {
+	if limit <= 0 {
+		limit = 10
+	} else if limit > 100 {
+		limit = 100
+	}
+
+	// 1. Prefer live Discord messages if session and valid snowflake are available.
+	if te.pool != nil {
+		if dg := te.pool.getDiscordSession(); dg != nil && threadID != "" && IsNumericSnowflake(threadID) {
+			fetchCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+
+			beforeID := ""
+			if len(te.burst) > 0 && IsNumericSnowflake(te.burst[0].ID) {
+				beforeID = te.burst[0].ID
+			}
+
+			discordMsgs, err := dg.ChannelMessages(threadID, limit, beforeID, "", "", discordgo.WithContext(fetchCtx))
+			if err == nil {
+				msgs := make([]db.Message, 0, len(discordMsgs))
+				// ChannelMessages returns newest-first; iterate backwards for chronological order.
+				for i := len(discordMsgs) - 1; i >= 0; i-- {
+					dm := discordMsgs[i]
+					if dm == nil {
+						continue
+					}
+					if te.isBurstMessage(dm.ID) {
+						continue
+					}
+					authorID := ""
+					authorName := ""
+					if dm.Author != nil {
+						authorID = dm.Author.ID
+						authorName = dm.Author.Username
+					} else if dm.WebhookID != "" {
+						authorName = "Webhook"
+					}
+					createdAt := dm.Timestamp
+					if createdAt.IsZero() {
+						if ts, tsErr := discordgo.SnowflakeTimestamp(dm.ID); tsErr == nil {
+							createdAt = ts
+						} else {
+							createdAt = time.Now().UTC()
+						}
+					}
+					var mentions []string
+					var mentionUserIDs []string
+					for _, u := range dm.Mentions {
+						if u != nil {
+							mentions = append(mentions, u.Username)
+							mentionUserIDs = append(mentionUserIDs, u.ID)
+						}
+					}
+					var replyingToAuthor string
+					if dm.ReferencedMessage != nil && dm.ReferencedMessage.Author != nil {
+						replyingToAuthor = "@" + dm.ReferencedMessage.Author.Username
+					}
+					msgs = append(msgs, db.Message{
+						ID:         dm.ID,
+						ThreadID:   threadID,
+						AuthorID:   authorID,
+						AuthorName: authorName,
+						Content:    dm.Content,
+						CreatedAt:  createdAt,
+						Metadata: db.MessageMetadata{
+							Mentions:         mentions,
+							MentionUserIDs:   mentionUserIDs,
+							ReplyingToAuthor: replyingToAuthor,
+						},
+					})
+				}
+				return msgs, nil
+			}
+			log.Printf("[Worker] Discord ChannelMessages failed for thread %s (falling back to database): %v", threadID, err)
+		}
+	}
+
+	// 2. Fallback to database on disk (ignoring internal scheduler prompts to avoid prompt injection).
 	if s := te.store(); s != nil {
-		return s.GetRecentThreadMessages(context.Background(), threadID, limit)
+		dbMsgs, err := s.GetRecentThreadMessages(context.Background(), threadID, limit)
+		if err != nil {
+			return nil, err
+		}
+		filtered := make([]db.Message, 0, len(dbMsgs))
+		for _, m := range dbMsgs {
+			if m.ScheduleRunID != "" || strings.EqualFold(m.AuthorName, "Scheduler") {
+				continue
+			}
+			filtered = append(filtered, m)
+		}
+		return filtered, nil
 	}
 	return nil, nil
 }
