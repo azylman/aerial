@@ -1201,6 +1201,38 @@ func TestNewOllamaLLMFunc_SuccessAndFormat(t *testing.T) {
 	}
 }
 
+func TestNewOllamaLLMFunc_TelemetryRecorded(t *testing.T) {
+	t.Parallel()
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(ollamaGenerateResponse{
+			Response:           `{"confidence": 0.85, "reason": "telemetry verified"}`,
+			Done:               true,
+			PromptEvalCount:    35,
+			PromptEvalDuration: 450000000,
+			EvalCount:          140,
+			EvalDuration:       2000000000,
+			LoadDuration:       60000000,
+			TotalDuration:      2510000000,
+		})
+	}))
+	defer ts.Close()
+
+	fn, err := NewOllamaLLMFunc(ts.URL, ts.Client())
+	if err != nil {
+		t.Fatalf("NewOllamaLLMFunc failed: %v", err)
+	}
+
+	resp, err := fn(context.Background(), "telemetry-qwen", "test prompt")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(resp, "telemetry verified") {
+		t.Errorf("unexpected response: %q", resp)
+	}
+}
+
 func TestNewOllamaLLMFunc_Errors(t *testing.T) {
 	t.Parallel()
 

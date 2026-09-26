@@ -32,6 +32,7 @@ func TestMetricsRegistryAndHandler(t *testing.T) {
 	RecordWebhookDispatch("on_wake", "success", 25*time.Millisecond)
 	RecordSessionRotation("pre_flight", "channel", "turns")
 	RecordYieldTrap("resumed", "stderr_signature", "gemini-2.5-pro")
+	RecordOllamaInference("qwen2.5:3b", 25, 150, 200*time.Millisecond, 1500*time.Millisecond, 50*time.Millisecond, 1750*time.Millisecond)
 
 	ActiveWorkers.Set(2)
 	QueueDepth.Set(5)
@@ -106,6 +107,9 @@ func TestMetricsRegistryAndHandler(t *testing.T) {
 		"aerial_brain_webhook_duration_seconds",
 		"aerial_brain_session_rotations_total",
 		"aerial_brain_yield_trap_total",
+		"aerial_brain_ollama_eval_tokens_total",
+		"aerial_brain_ollama_eval_duration_seconds",
+		"aerial_brain_ollama_tokens_per_second",
 		"aerial_brain_build_info",
 	}
 
@@ -120,6 +124,7 @@ func TestMetricsDefaultFallbackBranches(t *testing.T) {
 	// Call every recorder with empty strings / negative numbers to exercise fallback defaults
 	RecordTurnCompleted("", "", "", 10*time.Millisecond)
 	RecordTokens("", "", 0, 0, 0, 0, 0)
+	RecordOllamaInference("", 0, 0, 0, 0, 0, 0)
 	RecordRunnerExecution("", "", 10*time.Millisecond)
 	RecordRunnerError("", "")
 	RecordClassifierRun("", "", 10*time.Millisecond, -1.0, "")
@@ -179,5 +184,34 @@ func TestSanitizeChannelLabel(t *testing.T) {
 		if got != tc.expected {
 			t.Errorf("SanitizeChannelLabel(%q) = %q, expected %q", tc.input, got, tc.expected)
 		}
+	}
+}
+
+func TestRecordOllamaInference(t *testing.T) {
+	// Test normal inference recording
+	RecordOllamaInference("qwen2.5:3b-instruct", 42, 128, 300*time.Millisecond, 2*time.Second, 15*time.Millisecond, 2315*time.Millisecond)
+
+	// Test zero tokens / zero durations branches
+	RecordOllamaInference("zero-model", 0, 0, 0, 0, 0)
+
+	// Test whitespace model fallback
+	RecordOllamaInference("   ", 10, 20, 100*time.Millisecond, 500*time.Millisecond, 10*time.Millisecond)
+
+	// Verify metrics endpoint serves them
+	handler := Handler()
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rec.Code)
+	}
+
+	body := rec.Body.String()
+	if !strings.Contains(body, `aerial_brain_ollama_eval_tokens_total{model="qwen2.5:3b-instruct",type="prompt"} 42`) {
+		t.Errorf("expected prompt tokens metric, got body:\n%s", body)
+	}
+	if !strings.Contains(body, `aerial_brain_ollama_eval_tokens_total{model="qwen2.5:3b-instruct",type="eval"} 128`) {
+		t.Errorf("expected eval tokens metric, got body:\n%s", body)
 	}
 }

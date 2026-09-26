@@ -44,9 +44,15 @@ type ollamaGenerateRequest struct {
 }
 
 type ollamaGenerateResponse struct {
-	Response string `json:"response"`
-	Done     bool   `json:"done"`
-	Error    string `json:"error,omitempty"`
+	Response           string `json:"response"`
+	Done               bool   `json:"done"`
+	Error              string `json:"error,omitempty"`
+	TotalDuration      int64  `json:"total_duration,omitempty"`
+	LoadDuration       int64  `json:"load_duration,omitempty"`
+	PromptEvalCount    int    `json:"prompt_eval_count,omitempty"`
+	PromptEvalDuration int64  `json:"prompt_eval_duration,omitempty"`
+	EvalCount          int    `json:"eval_count,omitempty"`
+	EvalDuration       int64  `json:"eval_duration,omitempty"`
 }
 
 var (
@@ -531,6 +537,16 @@ func NewOllamaLLMFunc(endpointURL string, httpClient *http.Client) (func(ctx con
 		if ollamaResp.Error != "" {
 			return "", fmt.Errorf("ollama error: %s", ollamaResp.Error)
 		}
+
+		metrics.RecordOllamaInference(
+			selectedModel,
+			ollamaResp.PromptEvalCount,
+			ollamaResp.EvalCount,
+			time.Duration(ollamaResp.PromptEvalDuration),
+			time.Duration(ollamaResp.EvalDuration),
+			time.Duration(ollamaResp.LoadDuration),
+			time.Duration(ollamaResp.TotalDuration),
+		)
 
 		return ollamaResp.Response, nil
 	}, nil
