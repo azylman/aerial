@@ -574,14 +574,19 @@ func (c *Classifier) SummarizeThreadTitle(ctx context.Context, question string) 
 		model = config.DefaultConfigData().LowEffortModel
 	}
 
+	start := time.Now()
 	resp, err := c.LLMFunc(ctx, model, prompt)
+	duration := time.Since(start)
 	if err != nil {
+		metrics.RecordThreadTitleDuration("error", model, duration)
 		return "", fmt.Errorf("LLM thread title call failed: %w", err)
 	}
 
 	cleaned := CleanThreadTitle(resp)
 	if cleaned == "" {
+		metrics.RecordThreadTitleDuration("empty", model, duration)
 		return "", errors.New("LLM returned empty thread title after cleaning")
 	}
+	metrics.RecordThreadTitleDuration("success", model, duration)
 	return cleaned, nil
 }
