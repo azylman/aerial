@@ -11,6 +11,12 @@ timezone: America/Los_Angeles
 # Discord system channel name or snowflake ID for startup and error alerts
 system_channel: aerial-dev
 
+# Optional Local/Edge Classifier Endpoint (Ollama)
+# When specified, ambient triage and thread titling calls route to this Ollama instance.
+# If omitted or empty, Aerial keeps existing logic using cloud low_effort_model via Agy.
+# classifier_url: http://192.168.1.70:11434
+# classifier_model: qwen2.5:3b # Defaults to qwen2.5:3b if classifier_url is set but model is omitted
+
 # ------------------------------------------------------------------------------
 # Administrator Allowlist
 # ------------------------------------------------------------------------------

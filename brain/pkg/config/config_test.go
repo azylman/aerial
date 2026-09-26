@@ -2082,11 +2082,20 @@ func TestApplyEnvironmentOverrides_TableDriven(t *testing.T) {
 			},
 		},
 		{
-			name:   "CLASSIFIER_MODEL fallback override",
-			envMap: map[string]string{"CLASSIFIER_MODEL": "gemini-legacy-classifier"},
+			name:   "CLASSIFIER_MODEL override",
+			envMap: map[string]string{"CLASSIFIER_MODEL": "qwen2.5:3b"},
 			assertFn: func(t *testing.T, d *ConfigData) {
-				if d.LowEffortModel != "gemini-legacy-classifier" {
-					t.Errorf("expected LowEffortModel=gemini-legacy-classifier, got %q", d.LowEffortModel)
+				if d.ClassifierModel != "qwen2.5:3b" {
+					t.Errorf("expected ClassifierModel=qwen2.5:3b, got %q", d.ClassifierModel)
+				}
+			},
+		},
+		{
+			name:   "CLASSIFIER_URL override",
+			envMap: map[string]string{"CLASSIFIER_URL": "http://192.168.1.70:11434"},
+			assertFn: func(t *testing.T, d *ConfigData) {
+				if d.ClassifierURL != "http://192.168.1.70:11434" {
+					t.Errorf("expected ClassifierURL=http://192.168.1.70:11434, got %q", d.ClassifierURL)
 				}
 			},
 		},
@@ -2858,5 +2867,39 @@ max_background_task_duration: 90m
 	}
 	if defData.MaxBackgroundTaskDuration != 2*time.Hour {
 		t.Errorf("expected 2h default max background task duration, got %v", defData.MaxBackgroundTaskDuration)
+	}
+}
+
+func TestConfig_ClassifierURLAndModel_YAML(t *testing.T) {
+	t.Parallel()
+
+	yamlContent := `
+classifier_url: http://192.168.1.70:11434
+classifier_model: qwen2.5:3b
+`
+	cfg, err := LoadConfigFromBytes([]byte(yamlContent))
+	if err != nil {
+		t.Fatalf("LoadConfigFromBytes failed: %v", err)
+	}
+
+	data := cfg.Get()
+	if data.ClassifierURL != "http://192.168.1.70:11434" {
+		t.Errorf("expected ClassifierURL=http://192.168.1.70:11434, got %q", data.ClassifierURL)
+	}
+	if data.ClassifierModel != "qwen2.5:3b" {
+		t.Errorf("expected ClassifierModel=qwen2.5:3b, got %q", data.ClassifierModel)
+	}
+
+	// Verify defaults when omitted
+	defaultCfg, err := LoadConfigFromBytes([]byte("{}"))
+	if err != nil {
+		t.Fatalf("LoadConfigFromBytes on empty failed: %v", err)
+	}
+	defData := defaultCfg.Get()
+	if defData.ClassifierURL != "" {
+		t.Errorf("expected empty default ClassifierURL, got %q", defData.ClassifierURL)
+	}
+	if defData.ClassifierModel != "" {
+		t.Errorf("expected empty default ClassifierModel, got %q", defData.ClassifierModel)
 	}
 }
