@@ -1151,4 +1151,26 @@ func TestTurnExecution_GetRecentThreadMessages_FallbackFiltered(t *testing.T) {
 	if len(msgsClamped) != 1 {
 		t.Errorf("expected 1 message, got %d", len(msgsClamped))
 	}
+
+	// Test DB store error branch
+	errStore := &mockErrRecentStore{}
+	teErr := &turnExecution{pool: &WorkerPool{cfg: WorkerPoolConfig{Store: errStore}}}
+	if _, err := teErr.getRecentThreadMessages("1552732003076669460", 10); err == nil {
+		t.Errorf("expected error on store failure")
+	}
+
+	// Test nil pool and nil store returns nil, nil
+	teNil := &turnExecution{}
+	if msgs, err := teNil.getRecentThreadMessages("1552732003076669460", 10); msgs != nil || err != nil {
+		t.Errorf("expected nil, nil on nil store, got %v, %v", msgs, err)
+	}
 }
+
+type mockErrRecentStore struct {
+	db.Store
+}
+
+func (m *mockErrRecentStore) GetRecentThreadMessages(ctx context.Context, threadID string, limit int) ([]db.Message, error) {
+	return nil, errors.New("simulated db failure")
+}
+
