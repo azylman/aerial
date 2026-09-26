@@ -121,6 +121,131 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 	}
 }
 
+type VoiceAskRequest struct {
+	Prompt         string `json:"prompt"`
+	SessionID      string `json:"session_id,omitempty"`
+	ConversationID string `json:"conversation_id,omitempty"`
+	Effort         string `json:"effort,omitempty"`
+}
+
+type VoiceAskResponse struct {
+	Reply          string `json:"reply"`
+	ConversationID string `json:"conversation_id,omitempty"`
+	SessionID      string `json:"session_id,omitempty"`
+}
+
+func handleVoiceAsk(pool *queue.WorkerPool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", "POST")
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "Method not allowed"})
+			return
+		}
+
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1MB ceiling
+		body, err := io.ReadAll(r.Body)
+		if closeErr := r.Body.Close(); closeErr != nil {
+			log.Printf("[HTTP] Warning closing voice request body: %v", closeErr)
+		}
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Failed to read request body"})
+			return
+		}
+
+		var req VoiceAskRequest
+		if err := json.Unmarshal(body, &req); err != nil || strings.TrimSpace(req.Prompt) == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "Invalid payload: 'prompt' field is required and cannot be empty",
+			})
+			return
+		}
+
+		sessionID := strings.TrimSpace(req.SessionID)
+		if sessionID == "" {
+			sessionID = strings.TrimSpace(req.ConversationID)
+		}
+
+		isSSE := strings.Contains(r.Header.Get("Accept"), "text/event-stream") || r.URL.Query().Get("stream") == "true"
+
+		if isSSE {
+			flusher, ok := w.(http.Flusher)
+			if !ok {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Streaming not supported by client connection"})
+				return
+			}
+
+			w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+			w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate, no-transform")
+			w.Header().Set("Connection", "keep-alive")
+			w.Header().Set("X-Accel-Buffering", "no")
+			w.WriteHeader(http.StatusOK)
+			flusher.Flush()
+
+			var writeMu sync.Mutex
+			emitSSE := func(event string, data any) {
+				if r.Context().Err() != nil {
+					return
+				}
+				payload, mErr := json.Marshal(data)
+				if mErr != nil {
+					log.Printf("[VoiceAsk] Failed to marshal SSE payload: %v", mErr)
+					return
+				}
+				writeMu.Lock()
+				defer writeMu.Unlock()
+				if _, wErr := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, string(payload)); wErr != nil {
+					log.Printf("[VoiceAsk] Failed to write SSE chunk: %v", wErr)
+					return
+				}
+				flusher.Flush()
+			}
+
+			onStatus := func(status string) {
+				emitSSE("status", map[string]string{"status": status})
+			}
+
+			if pool == nil {
+				emitSSE("error", map[string]string{"error": "worker pool is uninitialized"})
+				emitSSE("done", map[string]any{})
+				return
+			}
+
+			reply, convID, turnErr := pool.ExecuteVoiceTurn(r.Context(), req.Prompt, sessionID, onStatus)
+			if turnErr != nil {
+				if r.Context().Err() == nil {
+					sanitizedErr := sanitizer.SanitizeString(turnErr.Error())
+					emitSSE("error", map[string]string{"error": sanitizedErr})
+					emitSSE("done", map[string]any{})
+				}
+				return
+			}
+
+			emitSSE("reply", map[string]string{"reply": reply, "conversation_id": convID})
+			emitSSE("done", map[string]any{"conversation_id": convID})
+			return
+		}
+
+		// Standard JSON response mode
+		if pool == nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "worker pool is uninitialized"})
+			return
+		}
+
+		reply, convID, turnErr := pool.ExecuteVoiceTurn(r.Context(), req.Prompt, sessionID, nil)
+		if turnErr != nil {
+			sanitizedErr := sanitizer.SanitizeString(turnErr.Error())
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": sanitizedErr})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, VoiceAskResponse{
+			Reply:          reply,
+			ConversationID: convID,
+			SessionID:      convID,
+		})
+	}
+}
+
 // DefaultTranscriptRoots returns the search roots for conversation transcripts
 // based on the provided configuration. In production, this includes the persistent
 // data brain directory as well as CLI and Antigravity brain directories under GeminiHomeDir.
@@ -626,6 +751,8 @@ func normalizeRoute(path string) string {
 	switch {
 	case path == "/prompt":
 		return "/prompt"
+	case path == "/voice/ask" || path == "/api/voice/ask":
+		return "/voice/ask"
 	case path == "/transcripts" || strings.HasPrefix(path, "/transcripts/"):
 		return "/transcripts"
 	case path == "/tasks" || strings.HasPrefix(path, "/tasks/"):
@@ -671,6 +798,8 @@ func SetupBrainMux(store db.Store, pool *queue.WorkerPool, reloadFn func(string)
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", metrics.Handler())
 	mux.HandleFunc("/prompt", handlePrompt(store, pool))
+	mux.HandleFunc("/voice/ask", handleVoiceAsk(pool))
+	mux.HandleFunc("/api/voice/ask", handleVoiceAsk(pool))
 	mux.HandleFunc("/transcripts", handleTranscripts(store, searchPaths...))
 	mux.HandleFunc("/tasks", handleTasks(store))
 	mux.HandleFunc("/facts", handleFacts(store))

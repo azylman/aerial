@@ -19,6 +19,7 @@ import (
 	"github.com/azylman/aerial/brain/pkg/db"
 	"github.com/azylman/aerial/brain/pkg/env"
 	"github.com/azylman/aerial/brain/pkg/metrics"
+	"github.com/azylman/aerial/brain/pkg/queue"
 	"github.com/azylman/aerial/brain/pkg/runner"
 	"github.com/bwmarrin/discordgo"
 )
@@ -2068,6 +2069,195 @@ func TestRunBrainApp_DefaultStoreError(t *testing.T) {
 		t.Errorf("expected failed to initialize database error, got: %v", err)
 	}
 }
+
+func TestHandleVoiceAsk_Validation(t *testing.T) {
+	store := db.NewFakeStore()
+	pool := newTestWorkerPool(store)
+	pool.Start()
+	defer pool.Stop()
+
+	handler := handleVoiceAsk(pool)
+
+	// 1. GET not allowed
+	req := httptest.NewRequest(http.MethodGet, "/voice/ask", nil)
+	w := httptest.NewRecorder()
+	handler(w, req)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405 MethodNotAllowed, got %d", w.Code)
+	}
+	if w.Header().Get("Allow") != "POST" {
+		t.Errorf("expected Allow: POST header, got %q", w.Header().Get("Allow"))
+	}
+
+	// 2. Empty prompt
+	req = httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":""}`))
+	w = httptest.NewRecorder()
+	handler(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 BadRequest for empty prompt, got %d", w.Code)
+	}
+
+	// 3. Malformed JSON
+	req = httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{invalid-json`))
+	w = httptest.NewRecorder()
+	handler(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 BadRequest for malformed JSON, got %d", w.Code)
+	}
+}
+
+func TestHandleVoiceAsk_SSE_Success(t *testing.T) {
+	store := db.NewFakeStore()
+	pool := queue.NewWorkerPool(queue.WorkerPoolConfig{
+		Store: store,
+		VoiceRunnerFunc: func(ctx context.Context, prompt, sessionID string, onStatus func(string)) (string, string, error) {
+			if onStatus != nil {
+				onStatus("⚡ Checking smart lights...")
+			}
+			return "Lights have been turned off.", "sess-test-456", nil
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	handler := handleVoiceAsk(pool)
+
+	payload := `{"prompt":"turn off the lights","session_id":"sess-test-456"}`
+	req := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(payload))
+	req.Header.Set("Accept", "text/event-stream")
+
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", w.Code)
+	}
+	if !strings.Contains(w.Header().Get("Content-Type"), "text/event-stream") {
+		t.Errorf("expected Content-Type text/event-stream, got %q", w.Header().Get("Content-Type"))
+	}
+	if w.Header().Get("X-Accel-Buffering") != "no" {
+		t.Errorf("expected X-Accel-Buffering: no, got %q", w.Header().Get("X-Accel-Buffering"))
+	}
+
+	body := w.Body.String()
+	if !strings.Contains(body, "event: status\ndata: {\"status\":\"⚡ Checking smart lights...\"}\n\n") {
+		t.Errorf("expected status event in SSE stream, got:\n%s", body)
+	}
+	if !strings.Contains(body, "event: reply\ndata: {\"conversation_id\":\"sess-test-456\",\"reply\":\"Lights have been turned off.\"}\n\n") {
+		t.Errorf("expected reply event with conversation_id in SSE stream, got:\n%s", body)
+	}
+	if !strings.Contains(body, "event: done\ndata: {\"conversation_id\":\"sess-test-456\"}\n\n") {
+		t.Errorf("expected done event in SSE stream, got:\n%s", body)
+	}
+}
+
+func TestHandleVoiceAsk_JSON_Success(t *testing.T) {
+	store := db.NewFakeStore()
+	pool := queue.NewWorkerPool(queue.WorkerPoolConfig{
+		Store: store,
+		VoiceRunnerFunc: func(ctx context.Context, prompt, sessionID string, onStatus func(string)) (string, string, error) {
+			return "JSON voice reply", "sess-json-123", nil
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	handler := handleVoiceAsk(pool)
+
+	payload := `{"prompt":"what is the weather?"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/voice/ask", strings.NewReader(payload))
+	req.Header.Set("Accept", "application/json")
+
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", w.Code)
+	}
+
+	var resp VoiceAskResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if resp.Reply != "JSON voice reply" || resp.ConversationID != "sess-json-123" {
+		t.Errorf("unexpected response: %+v", resp)
+	}
+}
+
+func TestHandleVoiceAsk_Errors(t *testing.T) {
+	store := db.NewFakeStore()
+
+	// 1. SSE mode with error
+	poolErr := queue.NewWorkerPool(queue.WorkerPoolConfig{
+		Store: store,
+		VoiceRunnerFunc: func(ctx context.Context, prompt, sessionID string, onStatus func(string)) (string, string, error) {
+			return "", "", errors.New("deliberation timed out")
+		},
+	})
+	poolErr.Start()
+	defer poolErr.Stop()
+
+	hErr := handleVoiceAsk(poolErr)
+	req := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"fail"}`))
+	req.Header.Set("Accept", "text/event-stream")
+	w := httptest.NewRecorder()
+	hErr(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200 OK for committed SSE stream, got %d", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "event: error\ndata: {\"error\":\"deliberation timed out\"}\n\n") {
+		t.Errorf("expected error event, got:\n%s", body)
+	}
+	if !strings.Contains(body, "event: done\ndata: {}\n\n") {
+		t.Errorf("expected done event after error, got:\n%s", body)
+	}
+
+	// 2. JSON mode with error
+	reqJSON := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"fail"}`))
+	reqJSON.Header.Set("Accept", "application/json")
+	wJSON := httptest.NewRecorder()
+	hErr(wJSON, reqJSON)
+
+	if wJSON.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 InternalServerError, got %d", wJSON.Code)
+	}
+	if !strings.Contains(wJSON.Body.String(), "deliberation timed out") {
+		t.Errorf("expected error detail in response, got:\n%s", wJSON.Body.String())
+	}
+
+	// 3. Nil pool handling
+	hNil := handleVoiceAsk(nil)
+	reqNil := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello"}`))
+	wNil := httptest.NewRecorder()
+	hNil(wNil, reqNil)
+	if wNil.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 for nil pool, got %d", wNil.Code)
+	}
+
+	// Nil pool SSE mode
+	reqNilSSE := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello"}`))
+	reqNilSSE.Header.Set("Accept", "text/event-stream")
+	wNilSSE := httptest.NewRecorder()
+	hNil(wNilSSE, reqNilSSE)
+	if wNilSSE.Code != http.StatusOK {
+		t.Errorf("expected 200 for SSE with nil pool, got %d", wNilSSE.Code)
+	}
+	if !strings.Contains(wNilSSE.Body.String(), "event: error") {
+		t.Errorf("expected error event for nil pool SSE, got:\n%s", wNilSSE.Body.String())
+	}
+}
+
+func TestNormalizeRoute_Voice(t *testing.T) {
+	if got := normalizeRoute("/voice/ask"); got != "/voice/ask" {
+		t.Errorf("normalizeRoute(/voice/ask) = %q, want /voice/ask", got)
+	}
+	if got := normalizeRoute("/api/voice/ask"); got != "/voice/ask" {
+		t.Errorf("normalizeRoute(/api/voice/ask) = %q, want /voice/ask", got)
+	}
+}
+
 
 
 
