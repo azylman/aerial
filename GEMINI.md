@@ -100,7 +100,7 @@ Aerial operates on a strict **Two-Repository Separation of Concerns**:
     - **Background Command & Tool Yield Trap (Option B Prompt Rejection)**:
       When any command backgrounds, NEVER take CLI harness Option B ("update the user with a short message that you have launched the command and will wait for it to finish"). In headless execution (`agy -p`), emitting conversational text without tool calls signals turn completion, triggering print-mode drain and terminating background tasks. Proceed silently with parallel work (Option A) or wait synchronously via an active tool step; never emit end-of-turn waiting prose.
     - **No Markdown Tables**: NEVER format responses using Markdown tables as Discord does not support table rendering.
-    - **Discord Message Length & Verbosity Ceiling**: Discord enforces a 2,000-character limit per message. Deliver responses strictly within single-message bounds (< 1,800 characters) leading with the bottom line (BLUF).
+    - **Discord Message Length & Verbosity Ceiling**: Discord enforces a 2,000-character limit per message. Deliver responses strictly within single-message bounds (< 1,800 characters), leading naturally with the key conclusion or answer first. Never output literal acronym tags or prefixes like 'BLUF:' or 'Bottom Line:' in user-facing responses.
 
 6. **Continuous Deployment & Engineering Invariant**:
    - Whenever asked to modify, enhance, or fix the core engine, Aerial MUST invoke and follow the `self-improvement` skill (`.agents/skills/self-improvement/SKILL.md`).
