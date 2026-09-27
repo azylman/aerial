@@ -921,7 +921,7 @@ func extractErrorDetail(stderr string, exitCode int) string {
 }
 
 var (
-	reQuotaResetIn = regexp.MustCompile(`(?i)resets in\s+([0-9a-zA-Z\s]+?)(?:\.|\n|\r|$)`)
+	reQuotaResetIn = regexp.MustCompile(`(?i)(?:resets in|reset after)\s+([0-9a-zA-Z\s]+?)(?:\.|\n|\r|$)`)
 	reWhitespace   = regexp.MustCompile(`\s+`)
 )
 
@@ -932,6 +932,7 @@ func IsQuotaPause(errDetail, stderr string) bool {
 	// Direct subscription quota markers
 	if strings.Contains(combined, "individual quota reached") ||
 		strings.Contains(combined, "please upgrade your subscription") ||
+		strings.Contains(combined, "exhausted your capacity on this model") ||
 		strings.Contains(combined, "brain bucket resets in") {
 		return true
 	}
@@ -940,7 +941,7 @@ func IsQuotaPause(errDetail, stderr string) bool {
 	hasQuotaWord := strings.Contains(combined, "quota") ||
 		strings.Contains(combined, "resource_exhausted") ||
 		strings.Contains(combined, "resource has been exhausted")
-	hasResetTimer := strings.Contains(combined, "resets in")
+	hasResetTimer := strings.Contains(combined, "resets in") || strings.Contains(combined, "reset after")
 	hasUpgradePrompt := strings.Contains(combined, "upgrade your subscription")
 
 	if hasQuotaWord && (hasResetTimer || hasUpgradePrompt) {
@@ -950,7 +951,7 @@ func IsQuotaPause(errDetail, stderr string) bool {
 	return false
 }
 
-// ExtractQuotaResetDuration parses compound reset countdowns (e.g. "16m58s", "16m 58s", "1h 15m", "45s", "15 minutes").
+// ExtractQuotaResetDuration parses compound reset countdowns (e.g. "16m58s", "16m 58s", "1h 15m", "45s", "15 minutes", "0s").
 // Normalizes unit words and strips internal whitespace. Clamps between 10s and 24h.
 // Falls back to (20 * time.Minute, false) if missing or unparseable.
 func ExtractQuotaResetDuration(errDetail, stderr string) (time.Duration, bool) {
@@ -975,8 +976,8 @@ func ExtractQuotaResetDuration(errDetail, stderr string) (time.Duration, bool) {
 		raw = reWhitespace.ReplaceAllString(raw, "")
 		raw = strings.Trim(raw, ".\"')[] ")
 
-		if d, err := time.ParseDuration(raw); err == nil && d > 0 {
-			// Safety clamping: min 10s, max 24h
+		if d, err := time.ParseDuration(raw); err == nil && d >= 0 {
+			// Safety clamping: min 10s (clamp 0s-9s to 30s for safe capacity cooldown), max 24h
 			if d < 10*time.Second {
 				d = 30 * time.Second
 			} else if d > 24*time.Hour {

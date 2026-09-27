@@ -299,8 +299,27 @@ func (m *Manager) getTargetDirs(convID string) []string {
 
 	if convID != "" {
 		var res []string
+		seen := make(map[string]bool)
 		for _, root := range m.roots {
-			res = append(res, filepath.Join(root, convID))
+			p := filepath.Join(root, convID)
+			if !seen[p] {
+				res = append(res, p)
+				seen[p] = true
+			}
+		}
+		if m.dataDir != "" {
+			for _, runtime := range []string{"discord", "voice"} {
+				p := filepath.Join(m.dataDir, "runtimes", runtime, ".gemini", "antigravity-cli", "brain", convID)
+				if !seen[p] {
+					res = append(res, p)
+					seen[p] = true
+				}
+				p2 := filepath.Join(m.dataDir, "runtimes", runtime, ".gemini", "antigravity", "brain", convID)
+				if !seen[p2] {
+					res = append(res, p2)
+					seen[p2] = true
+				}
+			}
 		}
 		return res
 	}
@@ -1187,6 +1206,18 @@ func (m *Manager) SessionExistsOnDisk(sessionID string) bool {
 			return true
 		}
 	}
+	if m.dataDir != "" {
+		dataConvPb := filepath.Join(m.dataDir, "conversations", trimmed+".pb")
+		if fi, err := os.Stat(dataConvPb); err == nil && !fi.IsDir() && fi.Size() > 0 {
+			return true
+		}
+		for _, runtime := range []string{"discord", "voice"} {
+			rtConvPb := filepath.Join(m.dataDir, "runtimes", runtime, ".gemini", "antigravity-cli", "conversations", trimmed+".pb")
+			if fi, err := os.Stat(rtConvPb); err == nil && !fi.IsDir() && fi.Size() > 0 {
+				return true
+			}
+		}
+	}
 
 	// 2. Check transcript.jsonl non-empty status
 	for _, dir := range m.getTargetDirs(trimmed) {
@@ -1234,8 +1265,7 @@ func (m *Manager) GetTranscriptSize(sessionID string) int64 {
 	}
 
 	var maxSize int64
-	for _, root := range m.roots {
-		sessDir := filepath.Join(root, cleanID)
+	for _, sessDir := range m.getTargetDirs(cleanID) {
 		logsDir := filepath.Join(sessDir, ".system_generated", "logs")
 		for _, name := range []string{"transcript.jsonl", "transcript_full.jsonl"} {
 			filePath := filepath.Join(logsDir, name)
@@ -1261,8 +1291,7 @@ func (m *Manager) CountTranscriptSteps(sessionID string) int {
 	defer m.appendMu.Unlock()
 
 	var maxSteps int
-	for _, root := range m.roots {
-		sessDir := filepath.Join(root, cleanID)
+	for _, sessDir := range m.getTargetDirs(cleanID) {
 		logsDir := filepath.Join(sessDir, ".system_generated", "logs")
 		for _, name := range []string{"transcript.jsonl", "transcript_full.jsonl"} {
 			filePath := filepath.Join(logsDir, name)

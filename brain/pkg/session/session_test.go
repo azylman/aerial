@@ -2514,3 +2514,49 @@ func TestExtractFinalSubstantiveResponse_LargeFileAndEmpty(t *testing.T) {
 		t.Errorf("expected context canceled error")
 	}
 }
+
+func TestManager_UnifiedRuntimeTranscriptDiscovery(t *testing.T) {
+	t.Parallel()
+	tempHome := t.TempDir()
+	tempData := t.TempDir()
+
+	mgr := New(tempHome, tempData)
+	convID := uuid.New().String()
+
+	// 1. Create transcript inside dataDir/runtimes/discord/.gemini/antigravity-cli/brain/<convID>
+	sessDir := filepath.Join(tempData, "runtimes", "discord", ".gemini", "antigravity-cli", "brain", convID)
+	logsDir := filepath.Join(sessDir, ".system_generated", "logs")
+	if err := os.MkdirAll(logsDir, 0755); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+
+	transcriptContent := fmt.Sprintf(`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"hello"}` + "\n" +
+		`{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","content":"hi"}` + "\n")
+	if err := os.WriteFile(filepath.Join(logsDir, "transcript.jsonl"), []byte(transcriptContent), 0644); err != nil {
+		t.Fatalf("write transcript failed: %v", err)
+	}
+
+	// 2. Create conversation protobuf in dataDir/conversations/<convID>.pb
+	convDir := filepath.Join(tempData, "conversations")
+	if err := os.MkdirAll(convDir, 0755); err != nil {
+		t.Fatalf("mkdir conversations failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(convDir, convID+".pb"), []byte("protobuf content"), 0644); err != nil {
+		t.Fatalf("write pb failed: %v", err)
+	}
+
+	// 3. Test discovery
+	steps := mgr.CountTranscriptSteps(convID)
+	if steps != 2 {
+		t.Errorf("expected 2 transcript steps from runtime fallback, got %d", steps)
+	}
+
+	size := mgr.GetTranscriptSize(convID)
+	if size != int64(len(transcriptContent)) {
+		t.Errorf("expected size %d, got %d", len(transcriptContent), size)
+	}
+
+	if !mgr.SessionExistsOnDisk(convID) {
+		t.Errorf("expected SessionExistsOnDisk to return true for runtime fallback session")
+	}
+}
