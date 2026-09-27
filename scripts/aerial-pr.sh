@@ -654,7 +654,8 @@ Check on the status of Pull Request #${pr_num} on ${REPO_OWNER}/${REPO_NAME} (${
    - If deployment state is "ongoing" (e.g. stage: queued, building, awaiting_pull, swapping) or "pending_registration": state the current deployment stage in 1–2 sentences, and reschedule a ${delay} follow-up check via schedule_once targeting this active thread/channel (target_id: "${target_id}") to track deployment to completion. If status was already merged, report only the deployment stage update.
    - If deployment state is "failed": the two-sentence limit does NOT apply; report full failure details, error logs, and diagnostic context immediately.
 4. If status is "failed" or "conflict", or if the merge command errors:
-   The two-sentence limit does NOT apply; report full PR/CI failure details, failing check names, and error logs to the user.
+   - Be proactive on small, deterministic fixes (e.g. test coverage deficits, linting errors, minor test assertion fixes, formatting): do NOT ask for user confirmation. Inspect failing checks/logs, check out the PR branch in an ephemeral scratch workspace, implement and verify the fix locally (./scripts/verify.sh --staged), push directly to the PR branch, and quietly reschedule a ${delay} follow-up check via schedule_once targeting this active thread/channel (target_id: "${target_id}").
+   - If the failure is a merge conflict, an unrecoverable architectural/design issue, or persists after an attempted fix: the two-sentence limit does NOT apply; report full PR/CI failure details, failing check names, and error logs to the user immediately.
 
 (Note: target_id "${target_id}" represents the active thread/channel for this conversation; never hardcode or generalize this ID across other threads or sessions.)
 EOF
