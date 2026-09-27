@@ -181,6 +181,14 @@ func (te *turnExecution) saveSessionID(threadID, sessionID string) {
 }
 
 func (te *turnExecution) rotateSessionID(threadID, newSessionID string) {
+	if te.pool != nil && newSessionID == "" {
+		if te.pool.daemonPool != nil {
+			te.pool.daemonPool.Evict(threadID)
+		}
+		if te.pool.voiceDaemonPool != nil {
+			te.pool.voiceDaemonPool.Evict(threadID)
+		}
+	}
 	if s := te.store(); s != nil {
 		if err := s.RotateSessionID(context.Background(), threadID, newSessionID); err != nil {
 			log.Printf("[Worker] Warning rotating session ID for thread %s: %v", threadID, err)
@@ -798,17 +806,24 @@ func (te *turnExecution) evaluateAmbientWake() (shouldExit bool) {
 			log.Printf("[Worker] Warning getting session last activity for thread %s: %v", te.threadID, actErr)
 		}
 		var currentBytes int64
+		var currentDBBytes int64
 		var currentSteps int
 		if te.pool != nil && te.pool.sessionMgr != nil && te.currentSessionID != "" {
 			currentBytes = te.pool.sessionMgr.GetTranscriptSize(te.currentSessionID)
+			currentDBBytes = te.pool.sessionMgr.GetSessionDBSize(te.currentSessionID)
 			currentSteps = te.pool.sessionMgr.CountTranscriptSteps(te.currentSessionID)
 		}
 		isTurnLimit := currentTurns >= DefaultMaxSessionTurns || (plan.WakeIndex > 0 && currentTurns+1 >= DefaultMaxSessionTurns)
 		isIdleLimit := te.currentSessionID != "" && !isCold && !lastActivity.IsZero() && time.Since(lastActivity) >= DefaultMaxSessionIdleTime
 		isStepLimit := currentSteps >= DefaultMaxSessionSteps
-		isByteLimit := currentBytes >= DefaultMaxTranscriptBytes
+		isTranscriptByteLimit := currentBytes >= DefaultMaxTranscriptBytes
+		isDBByteLimit := currentDBBytes >= DefaultMaxSessionDBBytes
+		isByteLimit := isTranscriptByteLimit || isDBByteLimit
 		if isTurnLimit || isIdleLimit || isStepLimit || isByteLimit {
-			if isByteLimit {
+			if isDBByteLimit {
+				log.Printf("[Queue] Scope session reached DB size limit (%d >= %d bytes). Resetting to cold state for fresh session initialization.", currentDBBytes, DefaultMaxSessionDBBytes)
+				metrics.RecordSessionRotation("pre_flight", "channel", "bytes")
+			} else if isTranscriptByteLimit {
 				log.Printf("[Queue] Scope session reached transcript size limit (%d >= %d bytes). Resetting to cold state for fresh session initialization.", currentBytes, DefaultMaxTranscriptBytes)
 				metrics.RecordSessionRotation("pre_flight", "channel", "bytes")
 			} else if isStepLimit {
@@ -888,9 +903,11 @@ func (te *turnExecution) evaluateAmbientWake() (shouldExit bool) {
 		log.Printf("[Worker] Warning getting session last activity for thread %s: %v", te.threadID, actErr)
 	}
 	var currentBytes int64
+	var currentDBBytes int64
 	var currentSteps int
 	if te.pool != nil && te.pool.sessionMgr != nil && te.currentSessionID != "" {
 		currentBytes = te.pool.sessionMgr.GetTranscriptSize(te.currentSessionID)
+		currentDBBytes = te.pool.sessionMgr.GetSessionDBSize(te.currentSessionID)
 		currentSteps = te.pool.sessionMgr.CountTranscriptSteps(te.currentSessionID)
 	}
 	scope := "thread"
@@ -900,9 +917,14 @@ func (te *turnExecution) evaluateAmbientWake() (shouldExit bool) {
 	isTurnLimit := currentTurns >= DefaultMaxSessionTurns
 	isIdleLimit := te.currentSessionID != "" && !isCold && !lastActivity.IsZero() && time.Since(lastActivity) >= DefaultMaxSessionIdleTime
 	isStepLimit := currentSteps >= DefaultMaxSessionSteps
-	isByteLimit := currentBytes >= DefaultMaxTranscriptBytes
+	isTranscriptByteLimit := currentBytes >= DefaultMaxTranscriptBytes
+	isDBByteLimit := currentDBBytes >= DefaultMaxSessionDBBytes
+	isByteLimit := isTranscriptByteLimit || isDBByteLimit
 	if isTurnLimit || isIdleLimit || isStepLimit || isByteLimit {
-		if isByteLimit {
+		if isDBByteLimit {
+			log.Printf("[Queue] Scope session reached DB size limit (%d >= %d bytes). Resetting to cold state for fresh session initialization.", currentDBBytes, DefaultMaxSessionDBBytes)
+			metrics.RecordSessionRotation("pre_flight", scope, "bytes")
+		} else if isTranscriptByteLimit {
 			log.Printf("[Queue] Scope session reached transcript size limit (%d >= %d bytes). Resetting to cold state for fresh session initialization.", currentBytes, DefaultMaxTranscriptBytes)
 			metrics.RecordSessionRotation("pre_flight", scope, "bytes")
 		} else if isStepLimit {
@@ -1709,7 +1731,8 @@ func (te *turnExecution) executeWithRetries() {
 				if te.currentSessionID != "" && te.pool != nil && te.pool.sessionMgr != nil {
 					pauseSteps := te.pool.sessionMgr.CountTranscriptSteps(te.currentSessionID)
 					pauseBytes := te.pool.sessionMgr.GetTranscriptSize(te.currentSessionID)
-					if pauseSteps >= DefaultMaxSessionSteps || pauseBytes >= DefaultMaxTranscriptBytes {
+					pauseDBBytes := te.pool.sessionMgr.GetSessionDBSize(te.currentSessionID)
+					if pauseSteps >= DefaultMaxSessionSteps || pauseBytes >= DefaultMaxTranscriptBytes || pauseDBBytes >= DefaultMaxQuotaPauseDBBytes {
 						scope := "thread"
 						if strings.EqualFold(te.policy.Mode, "channel") {
 							scope = "channel"
@@ -1718,8 +1741,8 @@ func (te *turnExecution) executeWithRetries() {
 						if pauseSteps >= DefaultMaxSessionSteps {
 							reason = "steps"
 						}
-						log.Printf("[WorkerPool] Quota paused session %s exceeded guardrails (steps=%d/%d, bytes=%d/%d). Resetting session for fresh retry.",
-							te.currentSessionID, pauseSteps, DefaultMaxSessionSteps, pauseBytes, DefaultMaxTranscriptBytes)
+						log.Printf("[WorkerPool] Quota paused session %s exceeded guardrails (steps=%d/%d, bytes=%d/%d, db_bytes=%d/%d). Resetting session for fresh retry.",
+							te.currentSessionID, pauseSteps, DefaultMaxSessionSteps, pauseBytes, DefaultMaxTranscriptBytes, pauseDBBytes, DefaultMaxQuotaPauseDBBytes)
 						metrics.RecordSessionRotation("quota_pause", scope, reason)
 						te.previousSessionID = te.currentSessionID
 						te.rotateSessionID(te.threadID, "")
@@ -1819,12 +1842,14 @@ func (te *turnExecution) executeWithRetries() {
 						te.statusUpdater.Reset()
 					}
 					var watchBytes int64
+					var watchDBBytes int64
 					var watchSteps int
 					if te.pool != nil && te.pool.sessionMgr != nil && te.currentSessionID != "" {
 						watchBytes = te.pool.sessionMgr.GetTranscriptSize(te.currentSessionID)
+						watchDBBytes = te.pool.sessionMgr.GetSessionDBSize(te.currentSessionID)
 						watchSteps = te.pool.sessionMgr.CountTranscriptSteps(te.currentSessionID)
 					}
-					if watchBytes >= DefaultMaxTranscriptBytes || watchSteps >= DefaultMaxSessionSteps {
+					if watchBytes >= DefaultMaxTranscriptBytes || watchDBBytes >= DefaultMaxSessionDBBytes || watchSteps >= DefaultMaxSessionSteps {
 						scope := "thread"
 						if strings.EqualFold(te.policy.Mode, "channel") {
 							scope = "channel"
@@ -1833,8 +1858,8 @@ func (te *turnExecution) executeWithRetries() {
 						if watchSteps >= DefaultMaxSessionSteps {
 							reason = "steps"
 						}
-						log.Printf("[WorkerPool] Watchdog timeout session %s exceeded guardrails (steps=%d/%d, bytes=%d/%d). Resetting session for cold retry.",
-							te.currentSessionID, watchSteps, DefaultMaxSessionSteps, watchBytes, DefaultMaxTranscriptBytes)
+						log.Printf("[WorkerPool] Watchdog timeout session %s exceeded guardrails (steps=%d/%d, bytes=%d/%d, db_bytes=%d/%d). Resetting session for cold retry.",
+							te.currentSessionID, watchSteps, DefaultMaxSessionSteps, watchBytes, DefaultMaxTranscriptBytes, watchDBBytes, DefaultMaxSessionDBBytes)
 						metrics.RecordSessionRotation("watchdog", scope, reason)
 						if te.currentSessionID != "" {
 							te.previousSessionID = te.currentSessionID
@@ -2090,16 +2115,23 @@ func (te *turnExecution) executeWithRetries() {
 							scope = "channel"
 						}
 						var postBytes int64
+						var postDBBytes int64
 						var postSteps int
 						if te.pool != nil && te.pool.sessionMgr != nil && te.currentSessionID != "" {
 							postBytes = te.pool.sessionMgr.GetTranscriptSize(te.currentSessionID)
+							postDBBytes = te.pool.sessionMgr.GetSessionDBSize(te.currentSessionID)
 							postSteps = te.pool.sessionMgr.CountTranscriptSteps(te.currentSessionID)
 						}
 						isTurnLimit := te.turnCount >= DefaultMaxSessionTurns
 						isStepLimit := postSteps >= DefaultMaxSessionSteps
-						isByteLimit := postBytes >= DefaultMaxTranscriptBytes
+						isTranscriptByteLimit := postBytes >= DefaultMaxTranscriptBytes
+						isDBByteLimit := postDBBytes >= DefaultMaxSessionDBBytes
+						isByteLimit := isTranscriptByteLimit || isDBByteLimit
 						if isTurnLimit || isStepLimit || isByteLimit {
-							if isByteLimit {
+							if isDBByteLimit {
+								log.Printf("[Queue] Scope session reached DB size limit (%d >= %d bytes). Resetting to cold state for fresh session initialization.", postDBBytes, DefaultMaxSessionDBBytes)
+								metrics.RecordSessionRotation("post_execution", scope, "bytes")
+							} else if isTranscriptByteLimit {
 								log.Printf("[Queue] Scope session reached transcript size limit (%d >= %d bytes). Resetting to cold state for fresh session initialization.", postBytes, DefaultMaxTranscriptBytes)
 								metrics.RecordSessionRotation("post_execution", scope, "bytes")
 							} else if isStepLimit {
@@ -2245,7 +2277,8 @@ func (te *turnExecution) executeWithRetries() {
 				if te.currentSessionID != "" && te.pool != nil && te.pool.sessionMgr != nil {
 					transSteps := te.pool.sessionMgr.CountTranscriptSteps(te.currentSessionID)
 					transBytes := te.pool.sessionMgr.GetTranscriptSize(te.currentSessionID)
-					if transSteps >= DefaultMaxSessionSteps || transBytes >= DefaultMaxTranscriptBytes {
+					transDBBytes := te.pool.sessionMgr.GetSessionDBSize(te.currentSessionID)
+					if transSteps >= DefaultMaxSessionSteps || transBytes >= DefaultMaxTranscriptBytes || transDBBytes >= DefaultMaxSessionDBBytes {
 						scope := "thread"
 						if strings.EqualFold(te.policy.Mode, "channel") {
 							scope = "channel"
@@ -2254,8 +2287,8 @@ func (te *turnExecution) executeWithRetries() {
 						if transSteps >= DefaultMaxSessionSteps {
 							reason = "steps"
 						}
-						log.Printf("[WorkerPool] Transient failure session %s exceeded guardrails (steps=%d/%d, bytes=%d/%d). Resetting session for cold retry.",
-							te.currentSessionID, transSteps, DefaultMaxSessionSteps, transBytes, DefaultMaxTranscriptBytes)
+						log.Printf("[WorkerPool] Transient failure session %s exceeded guardrails (steps=%d/%d, bytes=%d/%d, db_bytes=%d/%d). Resetting session for cold retry.",
+							te.currentSessionID, transSteps, DefaultMaxSessionSteps, transBytes, DefaultMaxTranscriptBytes, transDBBytes, DefaultMaxSessionDBBytes)
 						metrics.RecordSessionRotation("transient_retry", scope, reason)
 						te.previousSessionID = te.currentSessionID
 						te.rotateSessionID(te.threadID, "")

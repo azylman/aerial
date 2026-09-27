@@ -1630,6 +1630,12 @@ func TestSessionRotationConstants(t *testing.T) {
 	if DefaultMaxTranscriptBytes != 500*1024 {
 		t.Errorf("expected DefaultMaxTranscriptBytes=512000, got %d", DefaultMaxTranscriptBytes)
 	}
+	if DefaultMaxSessionDBBytes != 1536*1024 {
+		t.Errorf("expected DefaultMaxSessionDBBytes=1572864, got %d", DefaultMaxSessionDBBytes)
+	}
+	if DefaultMaxQuotaPauseDBBytes != 1200*1024 {
+		t.Errorf("expected DefaultMaxQuotaPauseDBBytes=1228800, got %d", DefaultMaxQuotaPauseDBBytes)
+	}
 }
 
 func TestManager_GetTranscriptSize(t *testing.T) {
@@ -2573,4 +2579,191 @@ func TestManager_UnifiedRuntimeTranscriptDiscovery(t *testing.T) {
 		t.Errorf("expected SessionExistsOnDisk to return true for runtime voice conversation pb")
 	}
 }
+
+func TestManager_GetSessionDBSize(t *testing.T) {
+	tempHome := t.TempDir()
+	tempData := t.TempDir()
+	mgr := New(tempHome, tempData)
+
+	// 1. Nil manager
+	var nilMgr *Manager
+	if sz := nilMgr.GetSessionDBSize("sess-nil"); sz != 0 {
+		t.Errorf("expected 0 from nil manager, got %d", sz)
+	}
+
+	// 2. Empty / whitespace session ID
+	if sz := mgr.GetSessionDBSize(""); sz != 0 {
+		t.Errorf("expected 0 for empty session ID, got %d", sz)
+	}
+	if sz := mgr.GetSessionDBSize("   \t  "); sz != 0 {
+		t.Errorf("expected 0 for whitespace session ID, got %d", sz)
+	}
+
+	// 3. Path traversal / illegal characters
+	for _, badID := range []string{"../escape", `..\escape`, "foo/bar", `foo\bar`, "foo:bar", "...."} {
+		if sz := mgr.GetSessionDBSize(badID); sz != 0 {
+			t.Errorf("expected 0 for path traversal ID %q, got %d", badID, sz)
+		}
+	}
+
+	// 4. Non-existent session
+	if sz := mgr.GetSessionDBSize(uuid.New().String()); sz != 0 {
+		t.Errorf("expected 0 for non-existent session, got %d", sz)
+	}
+
+	// 5. Zero-byte files (should return 0)
+	zeroID := uuid.New().String()
+	dataConvDir := filepath.Join(tempData, "conversations")
+	if err := os.MkdirAll(dataConvDir, 0755); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dataConvDir, zeroID+".db"), []byte{}, 0644); err != nil {
+		t.Fatalf("write zero db failed: %v", err)
+	}
+	if sz := mgr.GetSessionDBSize(zeroID); sz != 0 {
+		t.Errorf("expected 0 for 0-byte db, got %d", sz)
+	}
+
+	// 6. SQLite .db file alone
+	sess1 := uuid.New().String()
+	db1Content := make([]byte, 500*1024) // 500 KB
+	if err := os.WriteFile(filepath.Join(dataConvDir, sess1+".db"), db1Content, 0644); err != nil {
+		t.Fatalf("write sess1.db failed: %v", err)
+	}
+	if sz := mgr.GetSessionDBSize(sess1); sz != int64(len(db1Content)) {
+		t.Errorf("expected %d bytes, got %d", len(db1Content), sz)
+	}
+
+	// 7. SQLite .db file + .db-wal file (summed)
+	wal1Content := make([]byte, 300*1024) // 300 KB
+	if err := os.WriteFile(filepath.Join(dataConvDir, sess1+".db-wal"), wal1Content, 0644); err != nil {
+		t.Fatalf("write sess1.db-wal failed: %v", err)
+	}
+	expectedTotal := int64(len(db1Content) + len(wal1Content))
+	if sz := mgr.GetSessionDBSize(sess1); sz != expectedTotal {
+		t.Errorf("expected %d bytes (db+wal), got %d", expectedTotal, sz)
+	}
+
+	// 8. Protobuf (.pb) file
+	sess2 := uuid.New().String()
+	pbContent := make([]byte, 120*1024)
+	if err := os.WriteFile(filepath.Join(dataConvDir, sess2+".pb"), pbContent, 0644); err != nil {
+		t.Fatalf("write sess2.pb failed: %v", err)
+	}
+	if sz := mgr.GetSessionDBSize(sess2); sz != int64(len(pbContent)) {
+		t.Errorf("expected %d bytes for pb, got %d", len(pbContent), sz)
+	}
+
+	// 9. Runtime fallback discovery in runtimes/discord and runtimes/voice
+	sessDiscord := uuid.New().String()
+	discordDir := filepath.Join(tempData, "runtimes", "discord", ".gemini", "antigravity-cli", "conversations")
+	if err := os.MkdirAll(discordDir, 0755); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+	discordContent := make([]byte, 250*1024)
+	if err := os.WriteFile(filepath.Join(discordDir, sessDiscord+".db"), discordContent, 0644); err != nil {
+		t.Fatalf("write discord db failed: %v", err)
+	}
+	if sz := mgr.GetSessionDBSize(sessDiscord); sz != int64(len(discordContent)) {
+		t.Errorf("expected %d bytes from discord runtime, got %d", len(discordContent), sz)
+	}
+
+	sessVoice := uuid.New().String()
+	voiceDir := filepath.Join(tempData, "runtimes", "voice", ".gemini", "antigravity", "conversations")
+	if err := os.MkdirAll(voiceDir, 0755); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+	voiceContent := make([]byte, 180*1024)
+	if err := os.WriteFile(filepath.Join(voiceDir, sessVoice+".db"), voiceContent, 0644); err != nil {
+		t.Fatalf("write voice db failed: %v", err)
+	}
+	if sz := mgr.GetSessionDBSize(sessVoice); sz != int64(len(voiceContent)) {
+		t.Errorf("expected %d bytes from voice runtime, got %d", len(voiceContent), sz)
+	}
+
+	// 10. HomeDir discovery
+	sessHome := uuid.New().String()
+	homeConvDir := filepath.Join(tempHome, ".gemini", "antigravity", "conversations")
+	if err := os.MkdirAll(homeConvDir, 0755); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+	homeContent := make([]byte, 400*1024)
+	if err := os.WriteFile(filepath.Join(homeConvDir, sessHome+".db"), homeContent, 0644); err != nil {
+		t.Fatalf("write home db failed: %v", err)
+	}
+	if sz := mgr.GetSessionDBSize(sessHome); sz != int64(len(homeContent)) {
+		t.Errorf("expected %d bytes from home dir, got %d", len(homeContent), sz)
+	}
+
+	// 11. Multi-root precedence / max sizing
+	sessMulti := uuid.New().String()
+	smallDataContent := make([]byte, 100*1024)
+	largeHomeContent := make([]byte, 900*1024)
+	_ = os.WriteFile(filepath.Join(dataConvDir, sessMulti+".db"), smallDataContent, 0644)
+	_ = os.WriteFile(filepath.Join(homeConvDir, sessMulti+".db"), largeHomeContent, 0644)
+	if sz := mgr.GetSessionDBSize(sessMulti); sz != int64(len(largeHomeContent)) {
+		t.Errorf("expected max size %d across roots, got %d", len(largeHomeContent), sz)
+	}
+
+	// 12. Candidate directory is a file or error path
+	mgrBroken := New("", "")
+	if sz := mgrBroken.GetSessionDBSize("any-id"); sz != 0 {
+		t.Errorf("expected 0 with empty dataDir and homeDir, got %d", sz)
+	}
+}
+
+func TestSessionExistsOnDisk_DBAndWAL(t *testing.T) {
+	tempHome := t.TempDir()
+	tempData := t.TempDir()
+	mgr := New(tempHome, tempData)
+
+	// Nil manager
+	var nilMgr *Manager
+	if nilMgr.SessionExistsOnDisk("any") {
+		t.Errorf("expected false from nil manager")
+	}
+
+	// Invalid session IDs
+	for _, badID := range []string{"", "  ", "../bad", `foo\bar`} {
+		if mgr.SessionExistsOnDisk(badID) {
+			t.Errorf("expected false for invalid ID %q", badID)
+		}
+	}
+
+	// Exists via .db file
+	sessDB := uuid.New().String()
+	dataConvDir := filepath.Join(tempData, "conversations")
+	_ = os.MkdirAll(dataConvDir, 0755)
+	_ = os.WriteFile(filepath.Join(dataConvDir, sessDB+".db"), []byte("sqlite content"), 0644)
+	if !mgr.SessionExistsOnDisk(sessDB) {
+		t.Errorf("expected true for session with .db file")
+	}
+
+	// Zero-byte .db file
+	sessZero := uuid.New().String()
+	_ = os.WriteFile(filepath.Join(dataConvDir, sessZero+".db"), []byte{}, 0644)
+	if mgr.SessionExistsOnDisk(sessZero) {
+		t.Errorf("expected false for 0-byte .db file")
+	}
+
+	// Exists via .pb file
+	sessPB := uuid.New().String()
+	_ = os.WriteFile(filepath.Join(dataConvDir, sessPB+".pb"), []byte("pb content"), 0644)
+	if !mgr.SessionExistsOnDisk(sessPB) {
+		t.Errorf("expected true for session with .pb file")
+	}
+
+	// nil conversationCandidateDirs
+	if dirs := nilMgr.conversationCandidateDirs(); dirs != nil {
+		t.Errorf("expected nil from nilMgr.conversationCandidateDirs, got %v", dirs)
+	}
+
+	// HomeDir only manager
+	homeOnlyMgr := New(tempHome, "")
+	if dirs := homeOnlyMgr.conversationCandidateDirs(); len(dirs) != 2 {
+		t.Errorf("expected 2 home dirs from homeOnlyMgr, got %d", len(dirs))
+	}
+}
+
+
 

@@ -22,6 +22,12 @@ func TestStaticFallback(t *testing.T) {
 		t.Errorf("Expected bare ModelUnavailableMessage for 503, got: %q", msg503)
 	}
 
+	// Capacity
+	msgCapacity := StaticFallback("resource_exhausted: You have exhausted your capacity on this model")
+	if !strings.Contains(msgCapacity, "Model capacity temporarily reached") {
+		t.Errorf("Expected capacity fallback message, got: %q", msgCapacity)
+	}
+
 	// Quota
 	msgQuota := StaticFallback("resource_exhausted: quota reached")
 	if !strings.Contains(msgQuota, "quota limit reached") {
@@ -217,6 +223,46 @@ func TestFormatQuotaPauseMessage(t *testing.T) {
 	}
 	if !strings.Contains(msgCircuit, "Automated retries have been paused") && !strings.Contains(msgCircuit, "paused automated retries") {
 		t.Errorf("Expected paused automated retries notice, got: %s", msgCircuit)
+	}
+
+	// Capacity Pause (resetDur <= 60s): Scheduled = true
+	durCap := 30 * time.Second
+	msgCapScheduled := FormatQuotaPauseMessage(durCap, runAt, true, false)
+	if !strings.Contains(msgCapScheduled, "Model capacity temporarily reached") {
+		t.Errorf("Expected capacity message, got: %s", msgCapScheduled)
+	}
+	if !strings.Contains(msgCapScheduled, "Capacity clears in **30s**") {
+		t.Errorf("Expected 'Capacity clears in **30s**', got: %s", msgCapScheduled)
+	}
+	if !strings.Contains(msgCapScheduled, "<t:1725678900:R>") {
+		t.Errorf("Expected live Discord countdown tag, got: %s", msgCapScheduled)
+	}
+	if strings.Contains(msgCapScheduled, "Personal subscription") {
+		t.Errorf("Did not expect personal subscription mention in capacity message, got: %s", msgCapScheduled)
+	}
+
+	// Capacity Pause: Scheduled = false (unscheduled)
+	msgCapUnscheduled := FormatQuotaPauseMessage(durCap, runAt, false, false)
+	if !strings.Contains(msgCapUnscheduled, "Model capacity temporarily reached") {
+		t.Errorf("Expected capacity message, got: %s", msgCapUnscheduled)
+	}
+	if !strings.Contains(msgCapUnscheduled, "Please try again in a moment") {
+		t.Errorf("Expected 'Please try again in a moment', got: %s", msgCapUnscheduled)
+	}
+
+	// Capacity Pause: Circuit breaker = true
+	msgCapCircuit := FormatQuotaPauseMessage(durCap, runAt, false, true)
+	if !strings.Contains(msgCapCircuit, "Model capacity temporarily reached again following a scheduled retry") {
+		t.Errorf("Expected capacity circuit breaker notice, got: %s", msgCapCircuit)
+	}
+	if strings.Contains(msgCapCircuit, "GEMINI_API_KEY") {
+		t.Errorf("Did not expect GEMINI_API_KEY advice in capacity circuit breaker, got: %s", msgCapCircuit)
+	}
+
+	// Zero timestamp (runAt.IsZero())
+	msgZeroTime := FormatQuotaPauseMessage(durCap, time.Time{}, true, false)
+	if strings.Contains(msgZeroTime, "<t:") {
+		t.Errorf("Did not expect timestamp tag when runAt is zero, got: %s", msgZeroTime)
 	}
 }
 
