@@ -60,10 +60,6 @@ Aerial operates on a strict **Two-Repository Separation of Concerns**:
   - **`docs/`**: Living Docsify documentation portal served dynamically at `/docs/`.
   - **`docker-compose.override.yml`**: User-defined sidecar containers or extra local MCP servers, natively merged by Docker Compose on the host via the top-level `include:` directive.
 
-### 3. Physical Immutability & Ephemeral Workspaces
-- **Kernel Read-Only Invariant**: `/share/aerial-config` and `/share/aerial` are mounted strictly **read-only (`:ro`)** into `aerial-brain`. Any direct file writes or local git operations targeting `/share/aerial-config` or `/share/aerial` will fail with `EROFS: Read-only file system`.
-- **Ephemeral Scratch Workspaces**: All configuration, persona, skill, and engine updates must be authored in isolated scratch clones initialized via `scripts/aerial-config-pr.sh init` or `scripts/aerial-pr.sh init`, submitted asynchronously per Invariant 6, and verified prior to commit.
-
-### 4. Extensibility & Precedence Rules
+### 3. Extensibility & Precedence Rules
 - Rules and persona overrides resolve strictly according to the **Instruction Precedence Hierarchy**.
 - **Skill Precedence**: Custom skills in `/share/aerial-config/custom-skills/` take highest priority, shadowing built-in skills of the same name, canonically consolidated into `~/.gemini/config/skills`.
