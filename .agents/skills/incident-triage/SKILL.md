@@ -1,6 +1,7 @@
 ---
 name: incident-triage
-description: Forensic runbook and root-cause triage workflow whenever asked to investigate why an Aerial turn, Discord message, or automated task failed, duplicated, timed out, misrouted, or was unexpectedly silenced (e.g. "what happened here: <discord-link>", "why did you reply there", "why didn't you respond"). Strictly relies on generic core stack components (PostgreSQL, OpenObserve, Docker MCP, VictoriaMetrics MCP, Discord API).
+description: >-
+  Forensic runbook and root-cause triage workflow whenever asked to investigate why an Aerial turn, Discord message, or automated task failed, duplicated, timed out, misrouted, or was unexpectedly silenced (e.g. "what happened here: <discord-link>", "why did you reply there", "why didn't you respond"). Strictly relies on generic core stack components (PostgreSQL, OpenObserve, Docker MCP, VictoriaMetrics MCP, Discord API).
 ---
 
 # Aerial Incident Triage & Forensic Runbook
