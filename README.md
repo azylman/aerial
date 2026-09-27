@@ -85,8 +85,8 @@ User configuration and persona rules live in your private configuration reposito
 
 1. **`config.yaml`** (Agent Options, Channel Policies, & MCP Tools):
    ```yaml
-   model: "Gemini 3.8 Flash (High)"
-   low_effort_model: "Gemini 3.8 Flash (Low)"
+   model: "gemini-3.8-flash-high"
+   low_effort_model: "gemini-3.8-flash-low"
    timezone: "America/Los_Angeles"
    system_channel: "aerial-dev"
 

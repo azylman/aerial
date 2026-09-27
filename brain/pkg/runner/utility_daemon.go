@@ -110,7 +110,7 @@ func NewUtilityDaemon(cfg *config.Config, opts ...DaemonOption) *UtilityDaemon {
 
 func (d *UtilityDaemon) workerOpts() WorkerOptions {
 	agyBin := "agy"
-	model := "Gemini 3.8 Flash (Low)"
+	model := "gemini-3.8-flash-low"
 	apiKey := ""
 	homeDir := ""
 

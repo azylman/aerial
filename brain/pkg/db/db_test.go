@@ -2224,7 +2224,7 @@ func TestCronScheduleAndMessageEffortRouting(t *testing.T) {
 		Status:      "completed",
 		CompletedAt: now,
 		DurationMs:  1234,
-		Model:       "Gemini 3.8 Flash (Low)",
+		Model:       "gemini-3.8-flash-low",
 	}); err != nil {
 		t.Fatalf("UpdateScheduleRunStatus failed: %v", err)
 	}
@@ -2232,8 +2232,8 @@ func TestCronScheduleAndMessageEffortRouting(t *testing.T) {
 	if err != nil || len(runsAfter) == 0 {
 		t.Fatalf("failed fetching completed runs: %v", err)
 	}
-	if runsAfter[0].Model != "Gemini 3.8 Flash (Low)" {
-		t.Errorf("expected updated model='Gemini 3.8 Flash (Low)', got %q", runsAfter[0].Model)
+	if runsAfter[0].Model != "gemini-3.8-flash-low" {
+		t.Errorf("expected updated model='gemini-3.8-flash-low', got %q", runsAfter[0].Model)
 	}
 
 	// 7. Test Message with Effort

@@ -27,7 +27,7 @@ func TestSanitizeEnvVars(t *testing.T) {
 		"GITHUB_PAT=pat_xyz",
 		"HA_TOKEN=ha_abc",
 		"PORT=8080",
-		"AGY_MODEL=Gemini 3.6 Flash",
+		"AGY_MODEL=gemini-3.6-flash-low",
 	}
 
 	sanitized := SanitizeEnvVars(input)

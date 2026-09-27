@@ -271,7 +271,7 @@ func TestUtilityDaemon_WorkerOptsConfigFallback(t *testing.T) {
 	// 1. Nil config
 	d1 := &UtilityDaemon{roots: []string{"/tmp/r1"}}
 	opts1 := d1.workerOpts()
-	if opts1.AgyBin != "agy" || opts1.Model != "Gemini 3.8 Flash (Low)" {
+	if opts1.AgyBin != "agy" || opts1.Model != "gemini-3.8-flash-low" {
 		t.Errorf("unexpected opts for nil config: %+v", opts1)
 	}
 

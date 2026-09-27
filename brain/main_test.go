@@ -473,8 +473,8 @@ func TestMetricsEndpoint(t *testing.T) {
 	mux.Handle("/metrics", metrics.Handler())
 
 	// Record sample metrics to instantiate metric vectors
-	metrics.RecordTurnCompleted("success", "discord", "Gemini 3.8 Flash (Low)", 2*time.Second)
-	metrics.RecordClassifierRun("success", "Gemini 3.8 Flash (Low)", 500*time.Millisecond, 0.95, "wake")
+	metrics.RecordTurnCompleted("success", "discord", "gemini-3.8-flash-low", 2*time.Second)
+	metrics.RecordClassifierRun("success", "gemini-3.8-flash-low", 500*time.Millisecond, 0.95, "wake")
 	metrics.DiscordEventsTotal.WithLabelValues("ready").Inc()
 	metrics.DiscordMessagesProcessedTotal.WithLabelValues("false", "enqueued").Inc()
 	metrics.SchedulerExecutionsTotal.WithLabelValues("cron", "enqueued").Inc()

@@ -338,7 +338,7 @@ func cloneConfigData(src *ConfigData) *ConfigData {
 func DefaultConfigData() *ConfigData {
 	defaultIgnoreBots := true
 	return &ConfigData{
-		Model:         "Gemini 3.6 Flash (Low)",
+		Model:         "gemini-3.6-flash-low",
 		Timezone:      "America/Los_Angeles",
 		SystemChannel: "aerial-dev",
 		AdminUsers:    []string{},
@@ -351,7 +351,7 @@ func DefaultConfigData() *ConfigData {
 		McpServers:      make(map[string]json.RawMessage),
 		Port:            "8080",
 		AgyBin:          "agy",
-		LowEffortModel:  "Gemini 3.8 Flash (Low)",
+		LowEffortModel:  "gemini-3.8-flash-low",
 		ClassifierURL:   "",
 		ClassifierModel: "",
 		ThreadTitleURL:   "",
