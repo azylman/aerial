@@ -27,6 +27,9 @@ import (
 // DefaultOllamaClassifierModel is the default local model used when ClassifierURL is configured but model is omitted.
 const DefaultOllamaClassifierModel = "qwen2.5:3b"
 
+// DefaultAGYClassifierModel is the default canonical agy model used for classification.
+const DefaultAGYClassifierModel = "gemini-3.8-flash-low"
+
 var defaultOllamaHTTPClient = &http.Client{
 	Timeout: 12 * time.Second,
 	Transport: &http.Transport{
@@ -150,7 +153,7 @@ func New(cfg *config.Config, runnerFn runner.RunnerFunc, opts ...Option) *Classi
 	}
 	c := &Classifier{
 		cfg:              cfg,
-		Model:            "Gemini 3.8 Flash (Low)",
+		Model:            DefaultAGYClassifierModel,
 		Timeout:          12 * time.Second,
 		FailureThreshold: 3,
 		CooldownDuration: 60 * time.Second,
@@ -631,12 +634,12 @@ func (c *Classifier) resolveModel() string {
 				if cur.ClassifierModel != "" {
 					return cur.ClassifierModel
 				}
-				if c.Model != "" && c.Model != "Gemini 3.8 Flash (Low)" {
+				if c.Model != "" && c.Model != DefaultAGYClassifierModel {
 					return c.Model
 				}
 				return DefaultOllamaClassifierModel
 			}
-			if c.Model != "" && c.Model != "Gemini 3.8 Flash (Low)" {
+			if c.Model != "" && c.Model != DefaultAGYClassifierModel {
 				return c.Model
 			}
 			if strings.TrimSpace(cur.LowEffortModel) != "" {
@@ -657,7 +660,7 @@ func (c *Classifier) resolveTitleModel() string {
 				return cur.ThreadTitleModel
 			}
 			if cur.ThreadTitleURL != "" {
-				if c.Model != "" && c.Model != "Gemini 3.8 Flash (Low)" {
+				if c.Model != "" && c.Model != DefaultAGYClassifierModel {
 					return c.Model
 				}
 				return DefaultOllamaClassifierModel
@@ -666,12 +669,12 @@ func (c *Classifier) resolveTitleModel() string {
 				if cur.ClassifierModel != "" {
 					return cur.ClassifierModel
 				}
-				if c.Model != "" && c.Model != "Gemini 3.8 Flash (Low)" {
+				if c.Model != "" && c.Model != DefaultAGYClassifierModel {
 					return c.Model
 				}
 				return DefaultOllamaClassifierModel
 			}
-			if c.Model != "" && c.Model != "Gemini 3.8 Flash (Low)" {
+			if c.Model != "" && c.Model != DefaultAGYClassifierModel {
 				return c.Model
 			}
 			if strings.TrimSpace(cur.LowEffortModel) != "" {
