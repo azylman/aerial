@@ -111,19 +111,20 @@ run_go_vet() {
 
 run_golangci_lint() {
     svc="$1"
+    targetPkg="${2:-./...}"
     if [ -d "$svc" ]; then
-        echo "   [golangci-lint] Linting $svc..."
+        echo "   [golangci-lint] Linting $svc ($targetPkg)..."
         if has_cmd golangci-lint; then
-            export GOTOOLCHAIN="${GOTOOLCHAIN:-local}"
-            (cd "$svc" && golangci-lint run --path-prefix="$svc/" --config "$REPO_ROOT/.golangci.yml" ./...)
+            export GOTOOLCHAIN="${GOTOOLCHAIN:-go1.24.1}"
+            (cd "$svc" && golangci-lint run --path-prefix="$svc/" --config "$REPO_ROOT/.golangci.yml" "$targetPkg")
         elif has_docker; then
             docker run --rm \
                 -v "$REPO_ROOT:/workspace" -w "/workspace/$svc" \
                 golangci/golangci-lint:v1.64.5 \
-                golangci-lint run --path-prefix="$svc/" --config /workspace/.golangci.yml ./...
+                golangci-lint run --path-prefix="$svc/" --config /workspace/.golangci.yml "$targetPkg"
         elif has_cmd go; then
             echo "   (golangci-lint not found, running go vet for $svc)"
-            (cd "$svc" && go vet ./...)
+            (cd "$svc" && go vet "$targetPkg")
         else
             echo "🚨 [Aerial Verify] Error: Neither golangci-lint, docker, nor go found in PATH." >&2
             exit 1
@@ -313,9 +314,18 @@ if [ "$MODE" = "staged" ]; then
     # Check Go microservices
     for svc in $GO_SERVICES; do
         if echo "$STAGED_FILES" | grep -q "^$svc/"; then
-            run_golangci_lint "$svc"
-            if echo "$STAGED_FILES" | grep -q "^$svc/.*\.go$"; then
+            pkgs=$(echo "$STAGED_FILES" | grep "^$svc/.*\.go$" | sed "s|^$svc/||" | while read -r f; do dirname "$f"; done | sort -u)
+            if [ -n "$pkgs" ]; then
+                for p in $pkgs; do
+                    if [ "$p" = "." ]; then
+                        run_golangci_lint "$svc" "."
+                    else
+                        run_golangci_lint "$svc" "./$p"
+                    fi
+                done
                 run_deadcode "$svc"
+            else
+                run_golangci_lint "$svc"
             fi
         fi
     done

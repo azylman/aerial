@@ -65,7 +65,6 @@ func (p *sessionProbe) extractUUID() string {
 	return ""
 }
 
-
 // ActivityWriter is a thread-safe buffer that tracks write activity timestamps
 // and sniffs conversation UUIDs from stderr streams.
 type ActivityWriter struct {
@@ -314,6 +313,26 @@ type StepUpdateEvent struct {
 	ConversationID string        `json:"conversation_id,omitempty"`
 	StepIndex      int           `json:"step_index,omitempty"`
 	ToolInfo       *StepToolInfo `json:"tool_info,omitempty"`
+	TextDelta      string        `json:"text_delta,omitempty"`
+	Delta          string        `json:"delta,omitempty"`
+	Content        string        `json:"content,omitempty"`
+}
+
+// ResolvedTextDelta returns the accumulated or streamed text chunk if present.
+func (e *StepUpdateEvent) ResolvedTextDelta() string {
+	if e == nil {
+		return ""
+	}
+	if e.TextDelta != "" {
+		return e.TextDelta
+	}
+	if e.Delta != "" {
+		return e.Delta
+	}
+	if e.ResolvedType() == "agent_response" && e.Content != "" {
+		return e.Content
+	}
+	return ""
 }
 
 // ResolvedType returns the normalized event type across both AGY NDJSON variants.
@@ -602,7 +621,6 @@ func ExtractSessionID(output string, _ time.Time) string {
 
 	return ""
 }
-
 
 // IsInactivityTimeout checks if the error message or stderr indicates an inactivity watchdog timeout.
 func IsInactivityTimeout(errDetail, stderr string) bool {
@@ -995,4 +1013,3 @@ func IsYieldTrap(exitCode int, stdout, stderr string) (bool, int) {
 	}
 	return false, 0
 }
-

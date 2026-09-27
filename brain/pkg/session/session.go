@@ -14,8 +14,6 @@ import (
 	"time"
 )
 
-
-
 // DefaultMaxSessionTurns defines the engine-wide maximum turn limit before an agy session is rotated.
 const DefaultMaxSessionTurns = 8
 
@@ -415,7 +413,8 @@ func (m *Manager) ExtractResponseAndError(convID string) (string, string) {
 					ToolCalls []json.RawMessage `json:"tool_calls"`
 				}
 				if err := json.Unmarshal([]byte(line), &step); err == nil {
-					if (step.Status == "ERROR" || step.Error != nil || step.Type == "ERROR_MESSAGE") && lastError == "" {
+					isToolOrUser := step.Type == "GENERIC" || step.Type == "USER_INPUT"
+					if !isToolOrUser && (step.Status == "ERROR" || step.Error != nil || step.Type == "ERROR_MESSAGE") && lastError == "" {
 						if errStr := formatStepError(step.Error); errStr != "" {
 							lastError = errStr
 						} else if strings.TrimSpace(step.Content) != "" {
@@ -573,6 +572,10 @@ func (m *Manager) ExtractLastTurnError(ctx context.Context, convID string, since
 								break
 							}
 						}
+					}
+
+					if step.Type == "GENERIC" || step.Type == "USER_INPUT" {
+						continue
 					}
 
 					if step.Status == "ERROR" || len(step.Error) > 0 || step.Type == "ERROR_MESSAGE" {
@@ -1333,6 +1336,3 @@ func (m *Manager) GetActiveTasks(sessionID string) ([]TaskMetadata, error) {
 	}
 	return tasks, nil
 }
-
-
-

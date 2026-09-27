@@ -139,7 +139,6 @@ func TestParseAgyOutput(t *testing.T) {
 	}
 }
 
-
 func TestExtractSessionID_NDJSONInit(t *testing.T) {
 	t.Parallel()
 	targetUUID := "88888888-9999-aaaa-bbbb-cccccccccccc"
@@ -578,19 +577,6 @@ func TestActivityWriter_ThreadSafetyAndSessionDiscovery(t *testing.T) {
 	}
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
 func TestClassifyError_WatchdogInactivityNotTransient(t *testing.T) {
 	t.Parallel()
 	stderr := "Starting conversation update stream for uuid-123\n[watchdog] inactivity timeout exceeded (5m without output or transcript update)"
@@ -901,7 +887,6 @@ func TestActivityWriter_RawUUIDWithoutPrefix(t *testing.T) {
 	}
 }
 
-
 func TestExtractSessionID_AdditionalBranches(t *testing.T) {
 	t.Parallel()
 	// Empty stderr
@@ -1154,6 +1139,40 @@ func TestStepUpdateEvent_Resolved(t *testing.T) {
 	}
 }
 
+func TestStepUpdateEvent_ResolvedTextDelta(t *testing.T) {
+	t.Parallel()
+	var nilEv *StepUpdateEvent
+	if nilEv.ResolvedTextDelta() != "" {
+		t.Errorf("expected empty string for nil event")
+	}
+
+	ev1 := &StepUpdateEvent{TextDelta: "chunk 1"}
+	if ev1.ResolvedTextDelta() != "chunk 1" {
+		t.Errorf("expected 'chunk 1', got %q", ev1.ResolvedTextDelta())
+	}
+
+	ev2 := &StepUpdateEvent{Delta: "chunk 2"}
+	if ev2.ResolvedTextDelta() != "chunk 2" {
+		t.Errorf("expected 'chunk 2', got %q", ev2.ResolvedTextDelta())
+	}
+
+	ev3 := &StepUpdateEvent{
+		StepType: "agent_response",
+		Content:  "chunk 3",
+	}
+	if ev3.ResolvedTextDelta() != "chunk 3" {
+		t.Errorf("expected 'chunk 3', got %q", ev3.ResolvedTextDelta())
+	}
+
+	ev4 := &StepUpdateEvent{
+		StepType: "tool",
+		Content:  "tool output content",
+	}
+	if ev4.ResolvedTextDelta() != "" {
+		t.Errorf("expected empty string for non-agent_response content, got %q", ev4.ResolvedTextDelta())
+	}
+}
+
 func TestClassifyError_DetailedBranches(t *testing.T) {
 	t.Parallel()
 
@@ -1319,7 +1338,6 @@ func TestStepUpdateEvent_ResolvedCommandName(t *testing.T) {
 	}
 }
 
-
 func TestTokenizeCommandLine_EdgeCases(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -1379,7 +1397,6 @@ func TestIsPOSIXIdentifier(t *testing.T) {
 	}
 }
 
-
 func TestActivityWriter_SetSessionID_AlreadySet(t *testing.T) {
 	t.Parallel()
 	w := NewActivityWriter("")
@@ -1432,8 +1449,6 @@ func TestIsNonTransientError_ForkExecPermissionDenied(t *testing.T) {
 		t.Errorf("expected true for fork/exec permission denied")
 	}
 }
-
-
 
 func TestIsYieldTrap(t *testing.T) {
 	t.Parallel()
@@ -1602,7 +1617,6 @@ func TestParseAgyOutput_JSONVariations(t *testing.T) {
 	}
 }
 
-
 func TestExtractSessionID_AllFallbacks(t *testing.T) {
 	targetUUID := "123e4567-e89b-12d3-a456-426614174000"
 
@@ -1745,7 +1759,3 @@ func TestClassifyError_ShortStdoutFallback(t *testing.T) {
 		t.Errorf("expected 'custom python failure on line 42', got isFail=%v, detail=%q", isFail, detail)
 	}
 }
-
-
-
-

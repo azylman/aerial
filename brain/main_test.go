@@ -2070,6 +2070,24 @@ func TestRunBrainApp_DefaultStoreError(t *testing.T) {
 	}
 }
 
+func TestRunBrainApp_DefaultStoreSuccess(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := config.NewTestConfig(func(d *config.ConfigData) {
+		d.Port = "0"
+		d.AgyBin = "/bin/true"
+		d.Model = "gemini-2.5-flash"
+		d.SystemPrompt = "test"
+		d.GeminiHomeDir = tmpDir
+		d.DataDir = filepath.Join(tmpDir, "data")
+		d.DatabaseURL = filepath.Join(tmpDir, "test.db")
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(50*time.Millisecond, cancel)
+
+	_ = RunBrainApp(ctx, cfg)
+}
+
 func TestHandleVoiceAsk_Validation(t *testing.T) {
 	store := db.NewFakeStore()
 	pool := newTestWorkerPool(store)
@@ -2104,6 +2122,56 @@ func TestHandleVoiceAsk_Validation(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 BadRequest for malformed JSON, got %d", w.Code)
 	}
+
+	// 4. Request body read error
+	reqErrBody := httptest.NewRequest(http.MethodPost, "/voice/ask", &errTestReader{})
+	wErrBody := httptest.NewRecorder()
+	handler(wErrBody, reqErrBody)
+	if wErrBody.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 BadRequest for body read error, got %d", wErrBody.Code)
+	}
+
+	// 5. Non-flusher response writer for SSE
+	reqSSE := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello"}`))
+	reqSSE.Header.Set("Accept", "text/event-stream")
+	nonFlusher := &nonFlusherTestWriter{}
+	handler(nonFlusher, reqSSE)
+	if nonFlusher.code != http.StatusInternalServerError {
+		t.Errorf("expected 500 for non-flusher SSE, got %d", nonFlusher.code)
+	}
+
+	// 6. conversation_id fallback when session_id is empty
+	reqConvID := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"conversation_id":"conv-123","prompt":"hello"}`))
+	wConvID := httptest.NewRecorder()
+	handler(wConvID, reqConvID)
+	if wConvID.Code != http.StatusOK {
+		t.Errorf("expected 200 OK for conversation_id fallback, got %d", wConvID.Code)
+	}
+}
+
+type errTestReader struct{}
+
+func (e *errTestReader) Read(p []byte) (int, error) {
+	return 0, errors.New("simulated body read error")
+}
+
+type nonFlusherTestWriter struct {
+	header http.Header
+	code   int
+	body   bytes.Buffer
+}
+
+func (n *nonFlusherTestWriter) Header() http.Header {
+	if n.header == nil {
+		n.header = make(http.Header)
+	}
+	return n.header
+}
+func (n *nonFlusherTestWriter) Write(b []byte) (int, error) {
+	return n.body.Write(b)
+}
+func (n *nonFlusherTestWriter) WriteHeader(statusCode int) {
+	n.code = statusCode
 }
 
 func TestHandleVoiceAsk_SSE_Success(t *testing.T) {

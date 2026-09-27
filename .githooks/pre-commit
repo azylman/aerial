@@ -5,7 +5,9 @@ set -eu
 export MSYS_NO_PATHCONV=1
 
 # Fast-path pre-commit static verification (< 1s, BOM hygiene and syntax checks)
-if [ -f "./scripts/verify.sh" ]; then
+if command -v powershell.exe >/dev/null 2>&1 && [ -f "./scripts/verify.ps1" ]; then
+    powershell.exe -ExecutionPolicy Bypass -File ./scripts/verify.ps1 -Staged
+elif [ -f "./scripts/verify.sh" ]; then
     ./scripts/verify.sh --staged
 elif [ -f "scripts/verify.sh" ]; then
     sh scripts/verify.sh --staged

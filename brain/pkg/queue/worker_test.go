@@ -126,9 +126,9 @@ done
 
 	doneCh := make(chan struct{})
 	pool := New(cfg, WorkerPoolConfig{
-		SessionManager:       session.New(tmpHome, tempData),
-		Store:                store,
-		TimeoutMinutes:       1,
+		SessionManager: session.New(tmpHome, tempData),
+		Store:          store,
+		TimeoutMinutes: 1,
 		OnMessageCompleted: func(msg db.Message, status string) {
 			if status == db.StatusCompleted {
 				select {
@@ -213,11 +213,11 @@ done
 
 	doneCh := make(chan struct{})
 	pool := New(cfg, WorkerPoolConfig{
-		SessionManager:       session.New(tmpHome, tempData),
-		Store:                store,
-		TimeoutMinutes:       1,
-		MaxAttempts:          1,
-		IdleTimeout:          20 * time.Millisecond,
+		SessionManager: session.New(tmpHome, tempData),
+		Store:          store,
+		TimeoutMinutes: 1,
+		MaxAttempts:    1,
+		IdleTimeout:    20 * time.Millisecond,
 		OnMessageCompleted: func(msg db.Message, status string) {
 			select {
 			case <-doneCh:
@@ -296,10 +296,10 @@ func TestWorker_PersistentDaemonExecutionErrors(t *testing.T) {
 
 	failedCh := make(chan struct{})
 	poolBadBin := New(cfgBadBin, WorkerPoolConfig{
-		SessionManager:       session.New(tmpHome, tempData),
-		Store:                store,
-		TimeoutMinutes:       1,
-		MaxAttempts:          1,
+		SessionManager: session.New(tmpHome, tempData),
+		Store:          store,
+		TimeoutMinutes: 1,
+		MaxAttempts:    1,
 		OnMessageCompleted: func(msg db.Message, status string) {
 			if status == db.StatusFailed {
 				select {
@@ -345,10 +345,10 @@ exit 1
 
 	failedTurnCh := make(chan struct{})
 	poolErr := New(cfgErr, WorkerPoolConfig{
-		SessionManager:       session.New(tmpHome, tempData),
-		Store:                store,
-		TimeoutMinutes:       1,
-		MaxAttempts:          1,
+		SessionManager: session.New(tmpHome, tempData),
+		Store:          store,
+		TimeoutMinutes: 1,
+		MaxAttempts:    1,
 		OnMessageCompleted: func(msg db.Message, status string) {
 			if status == db.StatusFailed {
 				select {
@@ -407,9 +407,9 @@ done
 	var deliveredText string
 	doneCh := make(chan struct{})
 	pool := New(cfg, WorkerPoolConfig{
-		SessionManager:       session.New(tmpHome, tempData),
-		Store:                store,
-		TimeoutMinutes:       1,
+		SessionManager: session.New(tmpHome, tempData),
+		Store:          store,
+		TimeoutMinutes: 1,
 		DeliveryFunc: func(sess *discordgo.Session, channelID, content string) error {
 			deliveredText = content
 			return nil
@@ -481,9 +481,9 @@ done
 	var deliveredText string
 	doneCh := make(chan struct{})
 	pool := New(cfg, WorkerPoolConfig{
-		SessionManager:       session.New(tmpHome, tempData),
-		Store:                store,
-		TimeoutMinutes:       1,
+		SessionManager: session.New(tmpHome, tempData),
+		Store:          store,
+		TimeoutMinutes: 1,
 		DeliveryFunc: func(sess *discordgo.Session, channelID, content string) error {
 			deliveredText = content
 			return nil
@@ -570,9 +570,9 @@ done
 	var deliveredText string
 	doneCh := make(chan struct{})
 	pool := New(cfg, WorkerPoolConfig{
-		SessionManager:       session.New(tmpHome, tempData),
-		Store:                store,
-		TimeoutMinutes:       1,
+		SessionManager: session.New(tmpHome, tempData),
+		Store:          store,
+		TimeoutMinutes: 1,
 		DeliveryFunc: func(sess *discordgo.Session, channelID, content string) error {
 			deliveredText = content
 			return nil
@@ -607,6 +607,82 @@ done
 	}
 
 	if !strings.Contains(deliveredText, "Recovered from transcript!") {
+		t.Errorf("expected delivered text to contain recovered transcript content, got: %q", deliveredText)
+	}
+}
+
+func TestWorkerPool_DaemonEmptyResponse_TranscriptFallback(t *testing.T) {
+	tmpHome := t.TempDir()
+	tempData := t.TempDir()
+
+	store := setupTestStore(t)
+
+	validUUID := "e3333333-4444-5555-6666-777777777777"
+	mockBin := filepath.Join(tmpHome, "mock_agy.sh")
+	// Runner simulates daemon emitting a tool call followed by an empty response on result
+	script := fmt.Sprintf(`#!/bin/sh
+echo '{"event":"init","conversation_id":%q}'
+while IFS= read -r line; do
+  echo '{"event":"step_update","step_update":{"step_index":1,"step_type":"tool","tool_name":"run_command"}}'
+  echo '{"event":"result","result":{"status":"SUCCESS","response":""}}'
+done
+`, validUUID)
+	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
+		t.Fatalf("failed to write mock script: %v", err)
+	}
+
+	// Prepare transcript on disk with substantive text
+	sessDir := filepath.Join(tempData, "brain", validUUID, ".system_generated", "logs")
+	_ = os.MkdirAll(sessDir, 0755)
+	transcriptLine := `{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","content":"Recovered after daemon empty response!"}` + "\n"
+	_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(transcriptLine), 0644)
+
+	cfg := config.NewTestConfig(func(d *config.ConfigData) {
+		d.AgyBin = mockBin
+		d.DataDir = tempData
+	})
+
+	var deliveredText string
+	doneCh := make(chan struct{})
+	pool := New(cfg, WorkerPoolConfig{
+		SessionManager: session.New(tmpHome, tempData),
+		Store:          store,
+		TimeoutMinutes: 1,
+		DeliveryFunc: func(sess *discordgo.Session, channelID, content string) error {
+			deliveredText = content
+			return nil
+		},
+		OnMessageCompleted: func(msg db.Message, status string) {
+			if status == db.StatusCompleted {
+				select {
+				case <-doneCh:
+				default:
+					close(doneCh)
+				}
+			}
+		},
+	})
+	defer pool.Stop()
+
+	threadID := "thread-daemon-empty-fallback"
+
+	msg := db.Message{
+		ID:        "msg-daemon-empty",
+		ThreadID:  threadID,
+		Content:   "test daemon empty",
+		Status:    db.StatusPending,
+		CreatedAt: time.Now(),
+	}
+	_ = store.InsertMessage(context.Background(), msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for message completion")
+	}
+
+	if !strings.Contains(deliveredText, "Recovered after daemon empty response!") {
 		t.Errorf("expected delivered text to contain recovered transcript content, got: %q", deliveredText)
 	}
 }
@@ -1076,6 +1152,3 @@ func TestTurnExecution_GetRecentThreadMessages_FallbackFiltered(t *testing.T) {
 		t.Errorf("expected 1 message, got %d", len(msgsClamped))
 	}
 }
-
-
-
