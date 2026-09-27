@@ -75,7 +75,7 @@ check_no_main_in_tests() {
 # to ensure compiled runtime rules stay strictly beneath Antigravity's 24 KB truncation ceiling.
 check_rule_file_sizes() {
     MAX_BYTES=23040 # 22.5 KB (leaves 512B buffer for SyncRules frontmatter wrapper)
-    for rule_file in "$REPO_ROOT/GEMINI.md" "$REPO_ROOT/AGENTS.md"; do
+    for rule_file in "$REPO_ROOT/rules"/*/*.md "$REPO_ROOT/GEMINI.md" "$REPO_ROOT/AGENTS.md"; do
         if [ -f "$rule_file" ]; then
             size=$(wc -c < "$rule_file" 2>/dev/null | tr -d '[:space:]')
             if [ -n "$size" ] && [ "$size" -gt "$MAX_BYTES" ]; then

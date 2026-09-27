@@ -426,3 +426,62 @@ func TestContainsToken_TableDriven(t *testing.T) {
 		})
 	}
 }
+
+func TestWorkerPool_VoiceDaemonPool_And_MarkDirty(t *testing.T) {
+	var nilPool *WorkerPool
+	if nilPool.VoiceDaemonPool() != nil {
+		t.Errorf("expected nil from nil WorkerPool.VoiceDaemonPool()")
+	}
+	nilPool.MarkDirty()
+
+	tempDir := t.TempDir()
+	appCfg := config.NewTestConfig(func(d *config.ConfigData) {
+		d.DataDir = tempDir
+	})
+	pool := New(appCfg, WorkerPoolConfig{})
+	if pool.VoiceDaemonPool() == nil {
+		t.Errorf("expected non-nil VoiceDaemonPool")
+	}
+	pool.MarkDirty()
+	pool.Stop()
+}
+
+func TestWorkerPool_ExecuteVoiceTurn_PoolUnavailable(t *testing.T) {
+	pool := New(nil, WorkerPoolConfig{})
+	pool.daemonPool = nil
+	pool.voiceDaemonPool = nil
+	_, _, err := pool.ExecuteVoiceTurn(context.Background(), "hello", "sess-1", nil)
+	if err == nil || !strings.Contains(err.Error(), "voice daemon pool unavailable") {
+		t.Errorf("expected voice daemon pool unavailable error, got %v", err)
+	}
+}
+
+func TestWorkerPool_ExecuteVoiceTurn_VoicePoolFallbackToDaemonPool(t *testing.T) {
+	tempDir := t.TempDir()
+	mockBin := filepath.Join(tempDir, "mock_agy.sh")
+	script := `#!/bin/sh
+echo '{"event":"init"}'
+while IFS= read -r line; do
+	echo '{"event":"result","result":{"status":"SUCCESS","response":"fallback ok"}}'
+done
+`
+	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
+		t.Fatalf("failed to write mock script: %v", err)
+	}
+	appCfg := config.NewTestConfig(func(d *config.ConfigData) {
+		d.AgyBin = mockBin
+		d.DataDir = tempDir
+	})
+	pool := New(appCfg, WorkerPoolConfig{
+		AgyBin: mockBin,
+	})
+	pool.voiceDaemonPool = nil
+	reply, _, err := pool.ExecuteVoiceTurn(context.Background(), "test fallback", "sess-fallback", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if reply != "fallback ok" {
+		t.Errorf("expected 'fallback ok', got %q", reply)
+	}
+	pool.Stop()
+}

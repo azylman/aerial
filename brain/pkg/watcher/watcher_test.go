@@ -5,11 +5,24 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func newTestWatcher(t *testing.T, opts ...Option) *Watcher {
+	t.Helper()
+	w, err := NewWatcher(opts...)
+	if err != nil {
+		if strings.Contains(err.Error(), "too many open files") {
+			t.Skipf("skipping inotify test: host inotify instance quota reached (%v)", err)
+		}
+		t.Fatalf("failed to create watcher: %v", err)
+	}
+	return w
+}
 
 func isDirWatched(w *Watcher, dir string) bool {
 	w.mu.Lock()
@@ -63,7 +76,7 @@ func TestShouldIgnore(t *testing.T) {
 		"/share/aerial/.gemini/rules/system_invariants.md",
 		"/share/aerial/.agents/rules",
 		"/app/.agents/rules",
-		"/path/to/rules/custom.md",
+		"/home/user/.gemini/rules/compiled.md",
 		"aerial.db",
 		"/data/aerial.db-wal",
 		"/data/aerial.db-shm",
@@ -84,6 +97,10 @@ func TestShouldIgnore(t *testing.T) {
 	}
 
 	allowedPaths := []string{
+		"/share/aerial/rules/common/01-architecture.md",
+		"/share/aerial-config/rules/common/01-identity.md",
+		"/share/aerial/rules/discord/01-messaging.md",
+		"/share/aerial/rules/voice/01-spoken-output.md",
 		"AGENTS.md",
 		"/share/aerial-config/AGENTS.md",
 		"GEMINI.md",
@@ -115,10 +132,7 @@ func TestWatcherRecursiveAndIgnore(t *testing.T) {
 	_ = os.MkdirAll(geminiDir, 0755)
 	_ = os.MkdirAll(rulesDir, 0755)
 
-	w, err := NewWatcher()
-	if err != nil {
-		t.Fatalf("Failed to create watcher: %v", err)
-	}
+	w := newTestWatcher(t)
 	defer func() { _ = w.Close() }()
 
 	if err := w.AddRecursive(tmpDir); err != nil {
@@ -139,15 +153,12 @@ func TestWatcherDebounceAndDynamicDir(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	var callbackCount int32
-	w, err := NewWatcher(
+	w := newTestWatcher(t,
 		WithDebounce(15*time.Millisecond),
 		WithCallback(func() {
 			atomic.AddInt32(&callbackCount, 1)
 		}),
 	)
-	if err != nil {
-		t.Fatalf("Failed to create watcher: %v", err)
-	}
 	defer func() { _ = w.Close() }()
 
 	if err := w.AddRecursive(tmpDir); err != nil {
@@ -189,15 +200,12 @@ func TestWatcherDebounceAndDynamicDir(t *testing.T) {
 func TestWatcher_PureInotifyNoPhantomCallbacks(t *testing.T) {
 	tmpDir := t.TempDir()
 	var callbackCount int32
-	w, err := NewWatcher(
+	w := newTestWatcher(t,
 		WithDebounce(15*time.Millisecond),
 		WithCallback(func() {
 			atomic.AddInt32(&callbackCount, 1)
 		}),
 	)
-	if err != nil {
-		t.Fatalf("Failed to create watcher: %v", err)
-	}
 	defer func() { _ = w.Close() }()
 
 	if err := w.AddRecursive(tmpDir); err != nil {
@@ -224,15 +232,12 @@ func TestWatcher_RecreatedDirectory(t *testing.T) {
 	_ = os.Mkdir(subDir, 0755)
 
 	var callbackCount int32
-	w, err := NewWatcher(
+	w := newTestWatcher(t,
 		WithDebounce(15*time.Millisecond),
 		WithCallback(func() {
 			atomic.AddInt32(&callbackCount, 1)
 		}),
 	)
-	if err != nil {
-		t.Fatalf("Failed to create watcher: %v", err)
-	}
 	defer func() { _ = w.Close() }()
 
 	if err := w.AddRecursive(tmpDir); err != nil {
@@ -281,7 +286,7 @@ func TestWatcher_ConcurrentCallbacks(t *testing.T) {
 	entered := make(chan struct{}, 1)
 	proceed := make(chan struct{})
 
-	w, err := NewWatcher(
+	w := newTestWatcher(t,
 		WithDebounce(10*time.Millisecond),
 		WithCallback(func() {
 			current := atomic.AddInt32(&running, 1)
@@ -304,9 +309,6 @@ func TestWatcher_ConcurrentCallbacks(t *testing.T) {
 			<-proceed
 		}),
 	)
-	if err != nil {
-		t.Fatalf("Failed to create watcher: %v", err)
-	}
 	defer func() { _ = w.Close() }()
 
 	// Start goroutine 0 to acquire cbMu
@@ -342,10 +344,7 @@ func TestWatcher_ConcurrentCallbacks(t *testing.T) {
 }
 
 func TestAddCallbackAndClose(t *testing.T) {
-	w, err := NewWatcher()
-	if err != nil {
-		t.Fatalf("Failed to create watcher: %v", err)
-	}
+	w := newTestWatcher(t)
 
 	var called bool
 	w.AddCallback(func() {
@@ -371,13 +370,10 @@ func TestAddCallbackAndClose(t *testing.T) {
 }
 
 func TestWatcher_NonExistentDir(t *testing.T) {
-	w, err := NewWatcher()
-	if err != nil {
-		t.Fatalf("Failed to create watcher: %v", err)
-	}
+	w := newTestWatcher(t)
 	defer func() { _ = w.Close() }()
 
-	err = w.AddRecursive("/path/to/definitely/nonexistent/directory")
+	err := w.AddRecursive("/path/to/definitely/nonexistent/directory")
 	if err == nil {
 		t.Errorf("expected error when adding non-existent directory")
 	}
@@ -391,10 +387,7 @@ func TestWatcher_NonExistentDir(t *testing.T) {
 }
 
 func TestWatcher_StartContextCancel(t *testing.T) {
-	w, err := NewWatcher()
-	if err != nil {
-		t.Fatalf("failed to create watcher: %v", err)
-	}
+	w := newTestWatcher(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -433,10 +426,7 @@ func TestShouldIgnore_AdditionalPatterns(t *testing.T) {
 }
 
 func TestWatcher_StartClose(t *testing.T) {
-	w, err := NewWatcher()
-	if err != nil {
-		t.Fatalf("failed to create watcher: %v", err)
-	}
+	w := newTestWatcher(t)
 
 	done := make(chan struct{})
 	go func() {
@@ -459,10 +449,7 @@ func TestWatcher_AddRecursive_SkipDir(t *testing.T) {
 	_ = os.Mkdir(gitDir, 0755)
 	_ = os.WriteFile(filepath.Join(gitDir, "HEAD"), []byte("ref: refs/heads/main"), 0644)
 
-	w, err := NewWatcher()
-	if err != nil {
-		t.Fatalf("failed to create watcher: %v", err)
-	}
+	w := newTestWatcher(t)
 	defer func() { _ = w.Close() }()
 
 	if err := w.AddRecursive(tmpDir); err != nil {
@@ -477,10 +464,7 @@ func TestWatcher_AddRecursive_SkipDir(t *testing.T) {
 	}
 
 	// Test WithCallback with nil callback
-	w2, err := NewWatcher(WithCallback(nil))
-	if err != nil {
-		t.Fatalf("NewWatcher failed: %v", err)
-	}
+	w2 := newTestWatcher(t, WithCallback(nil))
 	_ = w2.Close()
 
 	if !ShouldIgnore("cache.tmp") {
@@ -495,15 +479,12 @@ func TestWatcher_NestedDirectoryRemoval(t *testing.T) {
 	_ = os.MkdirAll(child, 0755)
 
 	var callbackCount int32
-	w, err := NewWatcher(
+	w := newTestWatcher(t,
 		WithDebounce(15*time.Millisecond),
 		WithCallback(func() {
 			atomic.AddInt32(&callbackCount, 1)
 		}),
 	)
-	if err != nil {
-		t.Fatalf("NewWatcher failed: %v", err)
-	}
 	defer func() { _ = w.Close() }()
 
 	if err := w.AddRecursive(parent); err != nil {
@@ -545,10 +526,7 @@ func TestWatcher_NestedDirectoryRemoval(t *testing.T) {
 }
 
 func TestWatcher_ErrorChannelAndCloseError(t *testing.T) {
-	w, err := NewWatcher()
-	if err != nil {
-		t.Fatalf("NewWatcher failed: %v", err)
-	}
+	w := newTestWatcher(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go w.Start(ctx)

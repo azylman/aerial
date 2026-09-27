@@ -2,13 +2,15 @@ package env
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
+
+	"github.com/google/uuid"
 )
 
 const (
@@ -16,15 +18,42 @@ const (
 	// in ~/.gemini/rules/ to prevent silent Antigravity prompt truncation (23 KB hard ceiling).
 	MaxRuleFileSizeBytes = 23 * 1024
 
-	// MaxSourceRuleFileSizeBytes is the maximum allowed byte length for source rule files
-	// (GEMINI.md, AGENTS.md), leaving buffer for YAML frontmatter and header wrapping.
+	// MaxSourceRuleFileSizeBytes is the maximum allowed byte length for source rule files,
+	// leaving buffer for YAML frontmatter and header wrapping.
 	MaxSourceRuleFileSizeBytes = 23040
+)
+
+// RuleTarget specifies the destination execution environment for compiled rules.
+type RuleTarget string
+
+const (
+	TargetDiscord RuleTarget = "discord"
+	TargetVoice   RuleTarget = "voice"
 )
 
 var (
 	systemRulesMu sync.Mutex
 
-	// DefaultAgentInstructionsSearchPaths specifies standard locations for AGENTS.md in priority order.
+	// DefaultAerialRulesPaths specifies standard search roots for aerial system rules in priority order.
+	DefaultAerialRulesPaths = []string{
+		"/share/aerial/rules",
+		"./rules",
+		"../rules",
+		"/app/rules",
+		"../../rules",
+		"../../../rules",
+	}
+
+	// DefaultConfigRulesPaths specifies standard search roots for aerial-config user rules in priority order.
+	DefaultConfigRulesPaths = []string{
+		"/share/aerial-config/rules",
+		"./aerial-config/rules",
+		"../aerial-config/rules",
+		"../../aerial-config/rules",
+		"../../../aerial-config/rules",
+	}
+
+	// DefaultAgentInstructionsSearchPaths specifies standard locations for legacy AGENTS.md (deprecated).
 	DefaultAgentInstructionsSearchPaths = []string{
 		"/share/aerial-config/AGENTS.local.md",
 		"/share/aerial-config/AGENTS.md",
@@ -36,7 +65,7 @@ var (
 		"./AGENTS.md",
 	}
 
-	// DefaultSystemInstructionsSearchPaths specifies standard locations for GEMINI.md in priority order.
+	// DefaultSystemInstructionsSearchPaths specifies standard locations for legacy GEMINI.md (deprecated).
 	DefaultSystemInstructionsSearchPaths = []string{
 		"/share/aerial-config/GEMINI.local.md",
 		"/share/aerial-config/GEMINI.md",
@@ -49,8 +78,256 @@ var (
 	}
 )
 
-// SyncRules compiles the user persona (AGENTS.md) and base system architecture/invariants (GEMINI.md)
-// into separate ~/.gemini rules (user_persona.md and system_invariants.md).
+type ruleSourceFile struct {
+	path     string
+	filename string
+	content  string
+	prefix   string
+}
+
+// resolveDir checks the configured path and fallback candidates for an existing directory.
+func resolveDir(configured string, candidates []string) string {
+	if configured != "" {
+		if fi, err := os.Stat(configured); err == nil && fi.IsDir() {
+			return configured
+		}
+	}
+	for _, c := range candidates {
+		if fi, err := os.Stat(c); err == nil && fi.IsDir() {
+			return c
+		}
+	}
+	return configured
+}
+
+// discoverRuleFiles collects .md files from a subfolder (e.g. "common" or target) in lexical order.
+func discoverRuleFiles(dir, subfolder, prefix string) ([]ruleSourceFile, error) {
+	if dir == "" {
+		return nil, nil
+	}
+	targetDir := filepath.Join(dir, subfolder)
+	entries, err := os.ReadDir(targetDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to read rules directory %s: %w", targetDir, err)
+	}
+
+	var files []ruleSourceFile
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
+			continue
+		}
+		fullPath := filepath.Join(targetDir, e.Name())
+		data, readErr := os.ReadFile(fullPath)
+		if readErr != nil {
+			return nil, fmt.Errorf("failed to read rule file %s: %w", fullPath, readErr)
+		}
+		trimmed := bytes.TrimSpace(data)
+		if len(trimmed) == 0 {
+			// Torn read during git sync
+			return nil, fmt.Errorf("source rule file %s is empty (possible git sync torn read)", fullPath)
+		}
+		if len(data) > MaxSourceRuleFileSizeBytes {
+			return nil, fmt.Errorf("rule file %s exceeds %d bytes (%d bytes)", fullPath, MaxSourceRuleFileSizeBytes, len(data))
+		}
+
+		content := string(data)
+		// Ensure standard YAML frontmatter trigger: always_on is present
+		if !strings.HasPrefix(content, "---") {
+			desc := strings.TrimSuffix(e.Name(), ".md")
+			content = fmt.Sprintf("---\ndescription: %s\ntrigger: always_on\n---\n\n%s\n", desc, content)
+		}
+
+		files = append(files, ruleSourceFile{
+			path:     fullPath,
+			filename: e.Name(),
+			content:  content,
+			prefix:   prefix,
+		})
+	}
+
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].filename < files[j].filename
+	})
+	return files, nil
+}
+
+func (p *Provisioner) compileTargetRules(target RuleTarget, customPrompt string) ([]ruleSourceFile, error) {
+	aerialDir := resolveDir(p.aerialRulesDir, DefaultAerialRulesPaths)
+	configDir := resolveDir(p.configRulesDir, DefaultConfigRulesPaths)
+
+	// 1. Common rules from aerial: prefix 00_aerial_common_
+	aerialCommon, err := discoverRuleFiles(aerialDir, "common", "00_aerial_common_")
+	if err != nil {
+		return nil, err
+	}
+
+	// 2. Common rules from aerial-config: prefix 10_user_common_
+	configCommon, err := discoverRuleFiles(configDir, "common", "10_user_common_")
+	if err != nil {
+		return nil, err
+	}
+
+	// Lobotomy Guardrail: if 0 common rule files discovered across both, abort!
+	if len(aerialCommon)+len(configCommon) == 0 {
+		return nil, fmt.Errorf("rules compilation aborted: common rules directory has 0 files (potential mount or git sync failure)")
+	}
+
+	// 3. Target rules from aerial: prefix 20_aerial_<target>_
+	aerialTarget, err := discoverRuleFiles(aerialDir, string(target), fmt.Sprintf("20_aerial_%s_", target))
+	if err != nil {
+		return nil, err
+	}
+
+	// 4. Target rules from aerial-config: prefix 30_user_<target>_
+	configTarget, err := discoverRuleFiles(configDir, string(target), fmt.Sprintf("30_user_%s_", target))
+	if err != nil {
+		return nil, err
+	}
+
+	var allRules []ruleSourceFile
+	allRules = append(allRules, aerialCommon...)
+	allRules = append(allRules, configCommon...)
+	allRules = append(allRules, aerialTarget...)
+	allRules = append(allRules, configTarget...)
+
+	if target == TargetDiscord && strings.TrimSpace(customPrompt) != "" {
+		allRules = append(allRules, ruleSourceFile{
+			filename: "99_custom_prompt.md",
+			prefix:   "",
+			content:  fmt.Sprintf("---\ndescription: Environment Prompt Override\ntrigger: always_on\n---\n\n# Environment Prompt Override\n\n%s\n", strings.TrimSpace(customPrompt)),
+		})
+	}
+
+	return allRules, nil
+}
+
+func (p *Provisioner) atomicSwapRulesDir(rules []ruleSourceFile, targetDir string) error {
+	parentDir := filepath.Dir(targetDir)
+	if err := os.MkdirAll(parentDir, 0755); err != nil {
+		return err
+	}
+
+	randSuffix := uuid.New().String()[:8]
+	stagingDir := filepath.Join(parentDir, fmt.Sprintf(".rules.tmp.%s", randSuffix))
+	if err := os.MkdirAll(stagingDir, 0755); err != nil {
+		return err
+	}
+	defer func() {
+		_ = os.RemoveAll(stagingDir) // nolint:errcheck
+	}()
+
+	for _, r := range rules {
+		destName := r.prefix + r.filename
+		destPath := filepath.Join(stagingDir, destName)
+		if err := os.WriteFile(destPath, []byte(r.content), 0644); err != nil {
+			return fmt.Errorf("failed to write rule file %s in staging: %w", destName, err)
+		}
+	}
+
+	// Verify staging has files
+	entries, err := os.ReadDir(stagingDir)
+	if err != nil || len(entries) == 0 {
+		return fmt.Errorf("staging rules directory is empty, aborting swap")
+	}
+
+	// Atomic directory swap
+	backupDir := filepath.Join(parentDir, fmt.Sprintf(".rules.backup.%s", randSuffix))
+	hasActive := false
+	if fi, statErr := os.Stat(targetDir); statErr == nil && fi.IsDir() {
+		hasActive = true
+		if renErr := os.Rename(targetDir, backupDir); renErr != nil {
+			return fmt.Errorf("failed to backup existing rules dir: %w", renErr)
+		}
+	}
+
+	if renErr := os.Rename(stagingDir, targetDir); renErr != nil {
+		if hasActive {
+			_ = os.Rename(backupDir, targetDir) // nolint:errcheck
+		}
+		return fmt.Errorf("failed to move staging rules to target dir: %w", renErr)
+	}
+
+	if hasActive {
+		_ = os.RemoveAll(backupDir) // nolint:errcheck
+	}
+	return nil
+}
+
+func (p *Provisioner) syncRulesToDir(rules []ruleSourceFile, geminiDir string) error {
+	if err := os.MkdirAll(geminiDir, 0755); err != nil {
+		return err
+	}
+
+	primaryRulesDir := filepath.Join(geminiDir, "rules")
+	configRulesDir := filepath.Join(geminiDir, "config", "rules")
+
+	// Atomically swap primary rules directory
+	if err := p.atomicSwapRulesDir(rules, primaryRulesDir); err != nil {
+		return fmt.Errorf("failed to swap primary rules: %w", err)
+	}
+
+	// Atomically swap config rules directory (for compatibility)
+	if err := p.atomicSwapRulesDir(rules, configRulesDir); err != nil {
+		log.Printf("[Env] Warning: failed to swap config rules: %v", err)
+	}
+
+	return nil
+}
+
+func (p *Provisioner) provisionRuntimeSharedAssets(runtimeHome string) {
+	runtimeGemini := filepath.Join(runtimeHome, ".gemini")
+	primaryGemini := filepath.Join(p.homeDir, ".gemini")
+
+	if err := os.MkdirAll(filepath.Join(runtimeGemini, "antigravity-cli"), 0755); err != nil {
+		log.Printf("[Env] Warning: failed to mkdir antigravity-cli: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(runtimeGemini, "config"), 0755); err != nil {
+		log.Printf("[Env] Warning: failed to mkdir config: %v", err)
+	}
+
+	primarySettings := filepath.Join(primaryGemini, "antigravity-cli", "settings.json")
+	targetSettings := filepath.Join(runtimeGemini, "antigravity-cli", "settings.json")
+	if _, err := os.Stat(primarySettings); err == nil {
+		if data, rErr := os.ReadFile(primarySettings); rErr == nil {
+			if err := p.writeAtomic(targetSettings, string(data)); err != nil {
+				log.Printf("[Env] Warning: failed to write target settings: %v", err)
+			}
+		}
+	}
+
+	primaryMcp := filepath.Join(primaryGemini, "config", "mcp_config.json")
+	targetMcp := filepath.Join(runtimeGemini, "config", "mcp_config.json")
+	if _, err := os.Stat(primaryMcp); err == nil {
+		if data, rErr := os.ReadFile(primaryMcp); rErr == nil {
+			if err := p.writeAtomic(targetMcp, string(data)); err != nil {
+				log.Printf("[Env] Warning: failed to write target mcp: %v", err)
+			}
+		}
+	}
+
+	primarySkills := filepath.Join(primaryGemini, "config", "skills")
+	targetSkills := filepath.Join(runtimeGemini, "config", "skills")
+	if _, err := os.Stat(primarySkills); err == nil {
+		_ = os.Remove(targetSkills) // nolint:errcheck
+		if err := os.Symlink(primarySkills, targetSkills); err != nil {
+			log.Printf("[Env] Warning: failed to symlink primary skills: %v", err)
+		}
+	}
+
+	legacySkills := filepath.Join(primaryGemini, "skills")
+	targetLegacySkills := filepath.Join(runtimeGemini, "skills")
+	if _, err := os.Stat(legacySkills); err == nil {
+		_ = os.Remove(targetLegacySkills) // nolint:errcheck
+		if err := os.Symlink(legacySkills, targetLegacySkills); err != nil {
+			log.Printf("[Env] Warning: failed to symlink legacy skills: %v", err)
+		}
+	}
+}
+
+// SyncRules compiles the modular rules into target runtime directories and primary home.
 func (p *Provisioner) SyncRules(customPrompt string) error {
 	if p == nil || p.homeDir == "" {
 		return nil
@@ -58,239 +335,45 @@ func (p *Provisioner) SyncRules(customPrompt string) error {
 	systemRulesMu.Lock()
 	defer systemRulesMu.Unlock()
 
-	foundPersona := false
-	tornRead := false
-	var personaContent string
-	var personaSource string
-
-	searchPaths := p.agentInstructionsPaths
-	if len(searchPaths) == 0 {
-		searchPaths = DefaultAgentInstructionsSearchPaths
+	// 1. Compile Discord target rules
+	discordRules, dErr := p.compileTargetRules(TargetDiscord, customPrompt)
+	if dErr != nil {
+		log.Printf("[Env] ERROR: Failed to compile Discord rules: %v; retaining existing rules", dErr)
+		return dErr
 	}
 
-	for _, path := range searchPaths {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		if len(bytes.TrimSpace(data)) > 0 {
-			personaContent = string(data)
-			personaSource = filepath.Base(path)
-			foundPersona = true
-			log.Printf("Loaded agent instructions from %s", path)
-			break
-		}
-		// File exists but is 0-bytes or whitespace-only (torn read during git sync)
-		log.Printf("[Env] Active agent instructions file %s is empty (possible GitSync torn read), engaging Last Known Good Persona (LKGC)", path)
-		tornRead = true
-		break
+	// 2. Compile Voice target rules
+	voiceRules, vErr := p.compileTargetRules(TargetVoice, "")
+	if vErr != nil {
+		log.Printf("[Env] ERROR: Failed to compile Voice rules: %v; retaining existing rules", vErr)
+		return vErr
 	}
 
-	foundGemini := false
-	tornGeminiRead := false
-	var geminiContent string
-	var geminiSource string
-
-	systemPaths := p.systemInstructionsPaths
-	if len(systemPaths) == 0 {
-		systemPaths = DefaultSystemInstructionsSearchPaths
+	// 3. Sync to primary homeDir (.gemini) with Discord target as default
+	primaryGemini := filepath.Join(p.homeDir, ".gemini")
+	if err := p.syncRulesToDir(discordRules, primaryGemini); err != nil {
+		return fmt.Errorf("failed to sync rules to primary home: %w", err)
 	}
+	log.Printf("[Env] Configured modular rules in %s (target: discord)", primaryGemini)
 
-	for _, path := range systemPaths {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		if len(bytes.TrimSpace(data)) > 0 {
-			geminiContent = string(data)
-			geminiSource = filepath.Base(path)
-			foundGemini = true
-			log.Printf("Loaded system instructions from %s", path)
-			break
-		}
-		// File exists but is 0-bytes or whitespace-only (torn read during git sync)
-		log.Printf("[Env] Active system instructions file %s is empty (possible GitSync torn read), engaging Last Known Good System Instructions (LKGC)", path)
-		tornGeminiRead = true
-		break
-	}
+	// 4. If dataDir is configured, provision isolated runtimes for discord and voice
+	if p.dataDir != "" {
+		runtimesRoot := filepath.Join(p.dataDir, "runtimes")
 
-	p.mu.Lock()
-	if tornRead {
-		personaContent = p.lkgcPersona
-		personaSource = p.lkgcPersonaSource
-		if personaSource == "" {
-			personaSource = "AGENTS.md"
-		}
-		if personaContent != "" {
-			foundPersona = true
-		}
-	} else if foundPersona {
-		if len(personaContent) <= MaxSourceRuleFileSizeBytes {
-			p.lkgcPersona = personaContent
-			p.lkgcPersonaSource = personaSource
-			if personaSource != ".AGENTS.md.lkgc" && p.dataDir != "" {
-				if err := p.writeAtomic(filepath.Join(p.dataDir, ".AGENTS.md.lkgc"), personaContent); err != nil {
-					log.Printf("[Env] Warning writing persona LKGC: %v", err)
-				}
-			}
+		discordHome := filepath.Join(runtimesRoot, string(TargetDiscord))
+		discordGemini := filepath.Join(discordHome, ".gemini")
+		if err := p.syncRulesToDir(discordRules, discordGemini); err != nil {
+			log.Printf("[Env] Warning: failed to sync rules to discord runtime: %v", err)
 		} else {
-			log.Printf("[Env] Refusing to persist oversized persona to LKGC (%d bytes > %d bytes)", len(personaContent), MaxSourceRuleFileSizeBytes)
+			p.provisionRuntimeSharedAssets(discordHome)
 		}
-	}
 
-	if tornGeminiRead {
-		geminiContent = p.lkgcGemini
-		geminiSource = p.lkgcGeminiSource
-		if geminiSource == "" {
-			geminiSource = "GEMINI.md"
-		}
-		if geminiContent != "" {
-			foundGemini = true
-		}
-	} else if foundGemini {
-		if len(geminiContent) <= MaxSourceRuleFileSizeBytes {
-			p.lkgcGemini = geminiContent
-			p.lkgcGeminiSource = geminiSource
-			if geminiSource != ".GEMINI.md.lkgc" && p.dataDir != "" {
-				if err := p.writeAtomic(filepath.Join(p.dataDir, ".GEMINI.md.lkgc"), geminiContent); err != nil {
-					log.Printf("[Env] Warning writing gemini LKGC: %v", err)
-				}
-			}
+		voiceHome := filepath.Join(runtimesRoot, string(TargetVoice))
+		voiceGemini := filepath.Join(voiceHome, ".gemini")
+		if err := p.syncRulesToDir(voiceRules, voiceGemini); err != nil {
+			log.Printf("[Env] Warning: failed to sync rules to voice runtime: %v", err)
 		} else {
-			log.Printf("[Env] Refusing to persist oversized system instructions to LKGC (%d bytes > %d bytes)", len(geminiContent), MaxSourceRuleFileSizeBytes)
-		}
-	}
-	p.mu.Unlock()
-
-	var personaRuleContent string
-	if (foundPersona && personaContent != "") || strings.TrimSpace(customPrompt) != "" {
-		var personaSB strings.Builder
-		personaSB.WriteString("---\ndescription: User persona, tone, and identity overrides\ntrigger: always_on\n---\n\n")
-		if foundPersona && personaContent != "" {
-			personaSB.WriteString(fmt.Sprintf("# User Persona Overrides (%s)\n\n%s\n\n", personaSource, personaContent))
-		}
-		if strings.TrimSpace(customPrompt) != "" {
-			personaSB.WriteString(fmt.Sprintf("# Environment Prompt Override\n\n%s\n\n", strings.TrimSpace(customPrompt)))
-		}
-		personaRuleContent = personaSB.String()
-	}
-
-	var geminiRuleContent string
-	if foundGemini && geminiContent != "" {
-		var geminiSB strings.Builder
-		geminiSB.WriteString("---\ndescription: Base system architecture, operational invariants, and guidelines\ntrigger: always_on\n---\n\n")
-		geminiSB.WriteString(fmt.Sprintf("# Base System Architecture & Operational Rules (%s)\n\n%s\n\n", geminiSource, geminiContent))
-		geminiRuleContent = geminiSB.String()
-	}
-
-	p.mu.Lock()
-	if personaRuleContent != "" {
-		if len(personaRuleContent) > MaxRuleFileSizeBytes {
-			log.Printf("[Env] ERROR: user_persona.md exceeds 23 KB ceiling (%d bytes > %d bytes); Antigravity prompt truncation will occur!", len(personaRuleContent), MaxRuleFileSizeBytes)
-			if p.lkgcPersonaRule != "" && len(p.lkgcPersonaRule) <= MaxRuleFileSizeBytes {
-				log.Printf("[Env] Falling back to Last Known Good Configuration (LKGC) for user_persona.md to prevent prompt truncation")
-				personaRuleContent = p.lkgcPersonaRule
-			}
-		} else {
-			p.lkgcPersonaRule = personaRuleContent
-		}
-	} else {
-		personaRuleContent = p.lkgcPersonaRule
-		if personaRuleContent != "" {
-			log.Printf("Using Last Known Good Configuration (LKGC) for user persona")
-		}
-	}
-
-	if geminiRuleContent != "" {
-		if len(geminiRuleContent) > MaxRuleFileSizeBytes {
-			log.Printf("[Env] ERROR: system_invariants.md exceeds 23 KB ceiling (%d bytes > %d bytes); Antigravity prompt truncation will occur!", len(geminiRuleContent), MaxRuleFileSizeBytes)
-			if p.lkgcGeminiRule != "" && len(p.lkgcGeminiRule) <= MaxRuleFileSizeBytes {
-				log.Printf("[Env] Falling back to Last Known Good Configuration (LKGC) for system_invariants.md to prevent prompt truncation")
-				geminiRuleContent = p.lkgcGeminiRule
-			}
-		} else {
-			p.lkgcGeminiRule = geminiRuleContent
-		}
-	} else {
-		geminiRuleContent = p.lkgcGeminiRule
-		if geminiRuleContent != "" {
-			log.Printf("Using Last Known Good Configuration (LKGC) for system invariants")
-		}
-	}
-
-	if personaRuleContent == "" && geminiRuleContent == "" {
-		p.mu.Unlock()
-		return nil
-	}
-	p.mu.Unlock()
-
-	primaryRulesDir := filepath.Join(p.homeDir, ".gemini", "rules")
-	if err := os.MkdirAll(primaryRulesDir, 0755); err != nil {
-		return fmt.Errorf("failed to create primary rules directory: %w", err)
-	}
-
-	configRulesDir := filepath.Join(p.homeDir, ".gemini", "config", "rules")
-	if err := os.MkdirAll(configRulesDir, 0755); err != nil {
-		return fmt.Errorf("failed to create config rules directory: %w", err)
-	}
-
-	// Clean up any legacy, conflicting, or repository-level generated rule files
-	staleRuleFiles := []string{
-		filepath.Join(primaryRulesDir, "system_instructions.md"),
-		filepath.Join(primaryRulesDir, "SYSTEM_INSTRUCTIONS.md"),
-		filepath.Join(primaryRulesDir, "system.md"),
-		filepath.Join(primaryRulesDir, "SYSTEM.md"),
-		filepath.Join(primaryRulesDir, "gemini.md"),
-		filepath.Join(primaryRulesDir, "GEMINI.md"),
-		filepath.Join(primaryRulesDir, "agents.md"),
-		filepath.Join(primaryRulesDir, "custom_instructions.md"),
-
-		filepath.Join(configRulesDir, "system_instructions.md"),
-		filepath.Join(configRulesDir, "SYSTEM_INSTRUCTIONS.md"),
-		filepath.Join(configRulesDir, "system.md"),
-		filepath.Join(configRulesDir, "SYSTEM.md"),
-		filepath.Join(configRulesDir, "gemini.md"),
-		filepath.Join(configRulesDir, "GEMINI.md"),
-		filepath.Join(configRulesDir, "agents.md"),
-		filepath.Join(configRulesDir, "custom_instructions.md"),
-
-		"/app/.agents/rules/system_instructions.md",
-		"/app/.agents/rules/custom_instructions.md",
-		"/app/.agents/rules/agents.md",
-		"/app/.agents/rules/system.md",
-		"/app/.agents/rules/gemini.md",
-	}
-	for _, stale := range staleRuleFiles {
-		if err := os.Remove(stale); err != nil && !errors.Is(err, os.ErrNotExist) {
-			log.Printf("[Env] Warning removing stale rule file %s: %v", stale, err)
-		}
-	}
-
-	if personaRuleContent != "" {
-		primaryRuleFile := filepath.Join(primaryRulesDir, "user_persona.md")
-		if err := p.writeAtomic(primaryRuleFile, personaRuleContent); err != nil {
-			return fmt.Errorf("failed to write primary system rules: %w", err)
-		}
-		log.Printf("Configured always_on user persona in %s", primaryRuleFile)
-
-		// Also sync to ~/.gemini/config/rules for compatibility
-		configRuleFile := filepath.Join(configRulesDir, "user_persona.md")
-		if err := p.writeAtomic(configRuleFile, personaRuleContent); err != nil {
-			log.Printf("[Env] Warning syncing user persona to config rules: %v", err)
-		}
-	}
-
-	if geminiRuleContent != "" {
-		primaryGeminiFile := filepath.Join(primaryRulesDir, "system_invariants.md")
-		if err := p.writeAtomic(primaryGeminiFile, geminiRuleContent); err != nil {
-			return fmt.Errorf("failed to write primary system invariants: %w", err)
-		}
-		log.Printf("Configured always_on system invariants in %s", primaryGeminiFile)
-
-		// Also sync to ~/.gemini/config/rules for compatibility
-		configGeminiFile := filepath.Join(configRulesDir, "system_invariants.md")
-		if err := p.writeAtomic(configGeminiFile, geminiRuleContent); err != nil {
-			log.Printf("[Env] Warning syncing system invariants to config rules: %v", err)
+			p.provisionRuntimeSharedAssets(voiceHome)
 		}
 	}
 

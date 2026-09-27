@@ -76,12 +76,9 @@ func ShouldIgnore(path string) bool {
 		}
 	}
 
-	// Ignore .agents/rules, /rules/, or trailing /rules
+	// Ignore compiled rule output directories (.agents/rules)
 	if strings.Contains(normalized, "/.agents/rules") ||
-		strings.Contains(normalized, ".agents/rules") ||
-		strings.Contains(normalized, "/rules/") ||
-		strings.HasSuffix(normalized, "/rules") ||
-		base == "rules" {
+		strings.Contains(normalized, ".agents/rules") {
 		return true
 	}
 
