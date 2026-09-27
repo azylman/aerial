@@ -79,9 +79,10 @@ func TestBuildAgyArgs(t *testing.T) {
 func TestBuildAgyEnv(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name     string
-		input    AgyEnvInput
-		contains []string
+		name        string
+		input       AgyEnvInput
+		contains    []string
+		notContains []string
 	}{
 		{
 			name:  "Defaults Only",
@@ -115,6 +116,28 @@ func TestBuildAgyEnv(t *testing.T) {
 				"EXTRA_KEY=foo",
 			},
 		},
+		{
+			name: "Ambient API Keys Filtered When APIKey Is Empty",
+			input: AgyEnvInput{
+				BaseEnv: []string{
+					"CUSTOM_BASE=1",
+					"GEMINI_API_KEY=ambient-key",
+					"ANTIGRAVITY_API_KEY=ambient-key",
+					"GOOGLE_GENAI_API_KEY=ambient-key",
+					"OTHER_ENV=kept",
+				},
+				APIKey: "",
+			},
+			contains: []string{
+				"CUSTOM_BASE=1",
+				"OTHER_ENV=kept",
+			},
+			notContains: []string{
+				"GEMINI_API_KEY",
+				"ANTIGRAVITY_API_KEY",
+				"GOOGLE_GENAI_API_KEY",
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -127,7 +150,40 @@ func TestBuildAgyEnv(t *testing.T) {
 					t.Errorf("expected env to contain %q, got: %v", c, env)
 				}
 			}
+			for _, nc := range tt.notContains {
+				if strings.Contains(joined, nc) {
+					t.Errorf("expected env to NOT contain %q, got: %v", nc, env)
+				}
+			}
 		})
+	}
+}
+
+func TestFilterAgyBaseEnv(t *testing.T) {
+	t.Parallel()
+	input := []string{
+		"FOO=bar",
+		"GEMINI_API_KEY=secret1",
+		"gemini_api_key=secret2",
+		"ANTIGRAVITY_API_KEY=secret3",
+		"GOOGLE_GENAI_API_KEY=secret4",
+		"MALFORMED_NO_EQUALS",
+		"PATH=/usr/bin",
+	}
+
+	result := FilterAgyBaseEnv(input)
+	joined := strings.Join(result, "\n")
+
+	if strings.Contains(joined, "secret1") || strings.Contains(joined, "secret2") ||
+		strings.Contains(joined, "secret3") || strings.Contains(joined, "secret4") {
+		t.Errorf("FilterAgyBaseEnv leaked sensitive keys: %v", result)
+	}
+
+	expectedKept := []string{"FOO=bar", "MALFORMED_NO_EQUALS", "PATH=/usr/bin"}
+	for _, exp := range expectedKept {
+		if !strings.Contains(joined, exp) {
+			t.Errorf("FilterAgyBaseEnv should have kept %q, got: %v", exp, result)
+		}
 	}
 }
 

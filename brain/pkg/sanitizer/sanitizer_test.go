@@ -10,17 +10,21 @@ import (
 func TestSanitizer_RegisterConfigTokens(t *testing.T) {
 	ResetSensitiveTokens()
 	cfg := config.NewFromData(&config.ConfigData{
-		APIKey:       "gemini_secret_api_key_12345",
-		DiscordToken: "discord_token_secret_abcdef",
-		GitHubPAT:    "ghp_testpersonalaccesstoken123456",
-		DatabaseURL:  "postgres://aerial:supersecretpass@localhost:5432/aerial",
+		APIKey:        "gemini_secret_api_key_12345",
+		HarnessAPIKey: "harness_secret_api_key_67890",
+		DiscordToken:  "discord_token_secret_abcdef",
+		GitHubPAT:     "ghp_testpersonalaccesstoken123456",
+		DatabaseURL:   "postgres://aerial:supersecretpass@localhost:5432/aerial",
 	})
 	RegisterConfigTokens(cfg)
 
-	input := "Error calling Gemini with key gemini_secret_api_key_12345 and db pass supersecretpass"
+	input := "Error calling Gemini with key gemini_secret_api_key_12345, harness key harness_secret_api_key_67890, and db pass supersecretpass"
 	sanitized := SanitizeString(input)
 	if strings.Contains(sanitized, "gemini_secret_api_key_12345") {
 		t.Errorf("APIKey was not sanitized: %s", sanitized)
+	}
+	if strings.Contains(sanitized, "harness_secret_api_key_67890") {
+		t.Errorf("HarnessAPIKey was not sanitized: %s", sanitized)
 	}
 	if strings.Contains(sanitized, "supersecretpass") {
 		t.Errorf("Database password was not sanitized: %s", sanitized)
@@ -152,6 +156,11 @@ func TestSanitizeString_Tokens(t *testing.T) {
 			name:     "key-value assignment preserving label",
 			input:    "GEMINI_API_KEY=" + "AIza" + "SyD1234567890abcdefghijklmnopqrstuvw and HA_TOKEN: custom_long_token_value_123",
 			expected: "GEMINI_API_KEY=[REDACTED] and HA_TOKEN: [REDACTED]",
+		},
+		{
+			name:     "key-value assignment with GEMINI_HARNESS_API_KEY",
+			input:    "GEMINI_HARNESS_API_KEY=" + "AIza" + "SyD1234567890abcdefghijklmnopqrstuvw",
+			expected: "GEMINI_HARNESS_API_KEY=[REDACTED]",
 		},
 	}
 

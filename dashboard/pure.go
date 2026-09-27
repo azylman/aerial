@@ -12,6 +12,8 @@ import (
 )
 
 var sensitiveKeys = []string{
+	"GEMINI_HARNESS_API_KEY",
+	"AERIAL_GEMINI_API_KEY",
 	"GEMINI_API_KEY",
 	"DISCORD_TOKEN",
 	"DISCORD_BOT_TOKEN",
