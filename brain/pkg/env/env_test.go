@@ -1346,6 +1346,35 @@ func TestProvisionRuntimeSharedAssets_Comprehensive(t *testing.T) {
 	_ = os.MkdirAll(filepath.Join(blockedFilesRuntime, ".gemini", "antigravity-cli", "antigravity-oauth-token", "blocker"), 0755)
 	_ = os.MkdirAll(filepath.Join(blockedFilesRuntime, ".gemini", "mcp_oauth_tokens.json", "blocker"), 0755)
 	p.provisionRuntimeSharedAssets(blockedFilesRuntime)
+
+	// 5. Test forced symlink failure on platforms where symlinks succeed (e.g. Linux CI)
+	// to deterministically exercise the fallback atomic copy across all shared assets.
+	origSymlink := symlinkRuntimeAsset
+	defer func() { symlinkRuntimeAsset = origSymlink }()
+
+	symlinkRuntimeAsset = func(src, dst string) error {
+		return errors.New("simulated symlink error")
+	}
+
+	fallbackRuntime := t.TempDir()
+	p.provisionRuntimeSharedAssets(fallbackRuntime)
+
+	fallbackGemini := filepath.Join(fallbackRuntime, ".gemini")
+	if data, err := os.ReadFile(filepath.Join(fallbackGemini, "antigravity-cli", "antigravity-oauth-token")); err != nil || string(data) != `{"token":"secret"}` {
+		t.Errorf("antigravity-oauth-token not copied in fallback: %v, %s", err, string(data))
+	}
+	if data, err := os.ReadFile(filepath.Join(fallbackGemini, "mcp_oauth_tokens.json")); err != nil || string(data) != `{"root_mcp":"secret"}` {
+		t.Errorf("mcp_oauth_tokens.json not copied in fallback: %v, %s", err, string(data))
+	}
+
+	// 6. Test fallback when primary files are unreadable (e.g. directory instead of file)
+	unreadableRuntime := t.TempDir()
+	badPrimaryHome := t.TempDir()
+	pBad := New(badPrimaryHome, t.TempDir())
+	badGemini := filepath.Join(badPrimaryHome, ".gemini")
+	_ = os.MkdirAll(filepath.Join(badGemini, "antigravity-cli", "antigravity-oauth-token"), 0755)
+	_ = os.MkdirAll(filepath.Join(badGemini, "mcp_oauth_tokens.json"), 0755)
+	pBad.provisionRuntimeSharedAssets(unreadableRuntime)
 }
 
 func TestAtomicSwapRulesDir_RollbackAndErrors(t *testing.T) {

@@ -32,8 +32,9 @@ const (
 )
 
 var (
-	systemRulesMu  sync.Mutex
-	renameRulesDir = os.Rename
+	systemRulesMu       sync.Mutex
+	renameRulesDir      = os.Rename
+	symlinkRuntimeAsset = os.Symlink
 
 	// DefaultAerialRulesPaths specifies standard search roots for aerial system rules in priority order.
 	DefaultAerialRulesPaths = []string{
@@ -361,7 +362,7 @@ func (p *Provisioner) provisionRuntimeSharedAssets(runtimeHome string) {
 			if rErr := os.Remove(targetFile); rErr != nil && !os.IsNotExist(rErr) {
 				log.Printf("[Env] Warning: failed to remove existing %s in runtime before link: %v", fname, rErr)
 			}
-			if sErr := os.Symlink(primaryFile, targetFile); sErr != nil {
+			if sErr := symlinkRuntimeAsset(primaryFile, targetFile); sErr != nil {
 				data, rErr := os.ReadFile(primaryFile)
 				if rErr != nil {
 					log.Printf("[Env] Warning: failed to read %s for runtime copy: %v", fname, rErr)
@@ -378,7 +379,7 @@ func (p *Provisioner) provisionRuntimeSharedAssets(runtimeHome string) {
 		if rErr := os.Remove(targetMcpTokens); rErr != nil && !os.IsNotExist(rErr) {
 			log.Printf("[Env] Warning: failed to remove target mcp_oauth_tokens.json before link: %v", rErr)
 		}
-		if sErr := os.Symlink(primaryMcpTokens, targetMcpTokens); sErr != nil {
+		if sErr := symlinkRuntimeAsset(primaryMcpTokens, targetMcpTokens); sErr != nil {
 			data, rErr := os.ReadFile(primaryMcpTokens)
 			if rErr != nil {
 				log.Printf("[Env] Warning: failed to read primary mcp_oauth_tokens.json for runtime copy: %v", rErr)
