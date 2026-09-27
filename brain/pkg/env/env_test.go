@@ -1280,6 +1280,269 @@ func TestSyncRules_RuleFileSizeCeiling(t *testing.T) {
 	}
 }
 
+func TestProvisionRuntimeSharedAssets_Comprehensive(t *testing.T) {
+	primaryHome := t.TempDir()
+	runtimeHome := t.TempDir()
+
+	p := New(primaryHome, t.TempDir())
+
+	// 1. Setup primary files
+	primaryGemini := filepath.Join(primaryHome, ".gemini")
+	_ = os.MkdirAll(filepath.Join(primaryGemini, "antigravity-cli"), 0755)
+	_ = os.MkdirAll(filepath.Join(primaryGemini, "config", "skills"), 0755)
+	_ = os.MkdirAll(filepath.Join(primaryGemini, "skills"), 0755)
+
+	_ = os.WriteFile(filepath.Join(primaryGemini, "antigravity-cli", "settings.json"), []byte(`{"model":"gemini-test"}`), 0644)
+	_ = os.WriteFile(filepath.Join(primaryGemini, "config", "mcp_config.json"), []byte(`{"mcpServers":{}}`), 0644)
+	_ = os.WriteFile(filepath.Join(primaryGemini, "config", "skills", "test.txt"), []byte("skill-data"), 0644)
+	_ = os.WriteFile(filepath.Join(primaryGemini, "skills", "legacy.txt"), []byte("legacy-data"), 0644)
+
+	// Call provisionRuntimeSharedAssets - covers settings, mcp, skills, legacy skills copying/symlinks
+	p.provisionRuntimeSharedAssets(runtimeHome)
+
+	targetGemini := filepath.Join(runtimeHome, ".gemini")
+	if data, err := os.ReadFile(filepath.Join(targetGemini, "antigravity-cli", "settings.json")); err != nil || string(data) != `{"model":"gemini-test"}` {
+		t.Errorf("settings.json not copied correctly: %v, %s", err, string(data))
+	}
+	if data, err := os.ReadFile(filepath.Join(targetGemini, "config", "mcp_config.json")); err != nil || string(data) != `{"mcpServers":{}}` {
+		t.Errorf("mcp_config.json not copied correctly: %v, %s", err, string(data))
+	}
+
+	// 2. Call again to test removing existing symlinks and replacing them
+	p.provisionRuntimeSharedAssets(runtimeHome)
+
+	// 3. Error branches: blocked mkdir
+	blockedRuntime := t.TempDir()
+	_ = os.WriteFile(filepath.Join(blockedRuntime, ".gemini"), []byte("blocker"), 0644)
+	p.provisionRuntimeSharedAssets(blockedRuntime)
+
+	// 4. Blocked write for settings and mcp
+	blockedFilesRuntime := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(blockedFilesRuntime, ".gemini", "antigravity-cli", "settings.json"), 0755)
+	_ = os.MkdirAll(filepath.Join(blockedFilesRuntime, ".gemini", "config", "mcp_config.json"), 0755)
+	_ = os.MkdirAll(filepath.Join(blockedFilesRuntime, ".gemini", "config", "skills", "blocker"), 0755)
+	_ = os.MkdirAll(filepath.Join(blockedFilesRuntime, ".gemini", "skills", "blocker"), 0755)
+	p.provisionRuntimeSharedAssets(blockedFilesRuntime)
+}
+
+func TestAtomicSwapRulesDir_RollbackAndErrors(t *testing.T) {
+	tmpDir := t.TempDir()
+	p := New(tmpDir, tmpDir)
+
+	// 1. Invalid parentDir (cannot mkdir staging)
+	blocker := filepath.Join(tmpDir, "file_parent")
+	_ = os.WriteFile(blocker, []byte("blocker"), 0644)
+	err := p.atomicSwapRulesDir([]ruleSourceFile{{filename: "01.md", content: "test"}}, filepath.Join(blocker, "sub", "rules"))
+	if err == nil {
+		t.Errorf("expected error when staging directory cannot be created")
+	}
+
+	// 2. Empty rules slice (staging directory is empty)
+	targetDir := filepath.Join(tmpDir, "target_rules")
+	err = p.atomicSwapRulesDir(nil, targetDir)
+	if err == nil || !strings.Contains(err.Error(), "staging rules directory is empty") {
+		t.Errorf("expected staging rules directory is empty error, got: %v", err)
+	}
+
+	// 3. Successful swap followed by swap over active directory
+	validRules := []ruleSourceFile{
+		{filename: "01-invariants.md", content: "# Invariants\n", prefix: "00_"},
+	}
+	if err := p.atomicSwapRulesDir(validRules, targetDir); err != nil {
+		t.Fatalf("first swap failed: %v", err)
+	}
+	validRules2 := []ruleSourceFile{
+		{filename: "01-invariants.md", content: "# Invariants V2\n", prefix: "00_"},
+	}
+	if err := p.atomicSwapRulesDir(validRules2, targetDir); err != nil {
+		t.Fatalf("second swap failed: %v", err)
+	}
+}
+
+func TestWriteAtomic_Errors(t *testing.T) {
+	p := New("", "")
+	tmpDir := t.TempDir()
+	blocker := filepath.Join(tmpDir, "blocker")
+	_ = os.WriteFile(blocker, []byte("file"), 0644)
+	err := p.writeAtomic(filepath.Join(blocker, "sub", "file.txt"), "data")
+	if err == nil {
+		t.Errorf("expected error when directory creation fails")
+	}
+
+	targetDir := filepath.Join(tmpDir, "target_dir")
+	_ = os.MkdirAll(targetDir, 0755)
+	_ = os.WriteFile(filepath.Join(targetDir, "keep.txt"), []byte("keep"), 0644)
+	err = p.writeAtomic(targetDir, "data")
+	if err == nil {
+		t.Errorf("expected error when target is non-empty directory")
+	}
+}
+
+func TestNew_SkillsDirFallback(t *testing.T) {
+	p := New("/custom/home", "/custom/data")
+	if p.HomeDir() != "/custom/home" || p.DataDir() != "/custom/data" {
+		t.Errorf("unexpected provisioner dirs: %s, %s", p.HomeDir(), p.DataDir())
+	}
+	pNil := NewFromConfig(nil)
+	if pNil.HomeDir() != "" {
+		t.Errorf("expected empty home for nil config")
+	}
+}
+
+func TestCompileTargetRules_VoiceErrorAndDiscoveryBranches(t *testing.T) {
+	// 1. resolveDir fallback to configured when nothing exists
+	got := resolveDir("/nonexistent/custom", []string{"/nonexistent/c1", "/nonexistent/c2"})
+	if got != "/nonexistent/custom" {
+		t.Errorf("expected fallback to configured, got: %s", got)
+	}
+
+	// 2. discoverRuleFiles with empty dir
+	res, err := discoverRuleFiles("", "common", "00_")
+	if res != nil || err != nil {
+		t.Errorf("expected nil, nil for empty dir, got %v, %v", res, err)
+	}
+
+	// 3. discoverRuleFiles with subdirs and non-md files
+	tmpDir := t.TempDir()
+	commonDir := filepath.Join(tmpDir, "common")
+	_ = os.MkdirAll(filepath.Join(commonDir, "nested_dir"), 0755)
+	_ = os.WriteFile(filepath.Join(commonDir, "notes.txt"), []byte("not a rule"), 0644)
+	_ = os.WriteFile(filepath.Join(commonDir, "01.md"), []byte("valid rule"), 0644)
+	files, err := discoverRuleFiles(tmpDir, "common", "00_")
+	if err != nil || len(files) != 1 {
+		t.Errorf("expected 1 file, got %d files, err: %v", len(files), err)
+	}
+
+	// 4. Voice target compilation error (oversized rule in rules/voice)
+	p := New(t.TempDir(), t.TempDir())
+	p.SetAerialRulesDir(tmpDir)
+	_ = os.MkdirAll(filepath.Join(tmpDir, "voice"), 0755)
+	_ = os.WriteFile(filepath.Join(tmpDir, "voice", "01.md"), []byte(strings.Repeat("X", MaxSourceRuleFileSizeBytes+100)), 0644)
+	if err := p.SyncRules(""); err == nil {
+		t.Errorf("expected SyncRules to fail when voice rules has oversized rule")
+	}
+
+	// 5. User target rules discovery error (oversized rule in user rules/voice)
+	userRulesDir := t.TempDir()
+	p.SetConfigRulesDir(userRulesDir)
+	_ = os.MkdirAll(filepath.Join(userRulesDir, "voice"), 0755)
+	_ = os.WriteFile(filepath.Join(userRulesDir, "voice", "01.md"), []byte(strings.Repeat("Y", MaxSourceRuleFileSizeBytes+100)), 0644)
+	_ = os.Remove(filepath.Join(tmpDir, "voice", "01.md"))
+	_ = os.WriteFile(filepath.Join(tmpDir, "voice", "01.md"), []byte("valid voice"), 0644)
+	if err := p.SyncRules(""); err == nil {
+		t.Errorf("expected SyncRules to fail when user config voice rules has oversized rule")
+	}
+}
+
+func TestSyncSkills_LegacyDirectoriesAndOrphanedSymlinks(t *testing.T) {
+	homeDir := t.TempDir()
+	p := New(homeDir, t.TempDir())
+
+	// 1. Create legacy ~/.gemini/skills and legacy plugin dir
+	legacySkillsDir := filepath.Join(homeDir, ".gemini", "skills")
+	_ = os.MkdirAll(legacySkillsDir, 0755)
+	legacyPluginDir := filepath.Join(homeDir, ".gemini", "config", "plugins", "superpowers")
+	_ = os.MkdirAll(legacyPluginDir, 0755)
+
+	// 2. Create an orphaned symlink in target skills directory
+	targetSkillsDir := filepath.Join(homeDir, ".gemini", "config", "skills")
+	_ = os.MkdirAll(targetSkillsDir, 0755)
+	orphanedLink := filepath.Join(targetSkillsDir, "orphaned-skill")
+	_ = os.Symlink(filepath.Join(homeDir, "nonexistent-target"), orphanedLink)
+
+	// SyncSkills removes legacy dirs and sweeps orphaned symlink
+	if err := p.SyncSkills(); err != nil {
+		t.Fatalf("SyncSkills failed: %v", err)
+	}
+
+	if _, err := os.Stat(legacySkillsDir); err == nil {
+		t.Errorf("legacy skills dir should have been removed")
+	}
+	if _, err := os.Stat(legacyPluginDir); err == nil {
+		t.Errorf("legacy plugin dir should have been removed")
+	}
+	if _, err := os.Lstat(orphanedLink); err == nil {
+		t.Errorf("orphaned symlink should have been removed")
+	}
+}
+
+func TestProvisioner_NilReceiverCoverage(t *testing.T) {
+	var nilP *Provisioner
+	if err := nilP.SyncSkills(); err != nil {
+		t.Errorf("expected nil from nilP.SyncSkills()")
+	}
+	if err := nilP.SyncRules(""); err != nil {
+		t.Errorf("expected nil from nilP.SyncRules()")
+	}
+	if err := nilP.SyncSettings("", ""); err != nil {
+		t.Errorf("expected nil from nilP.SyncSettings()")
+	}
+	if err := nilP.Sync(context.Background(), nil); err != nil {
+		t.Errorf("expected nil from nilP.Sync()")
+	}
+}
+
+func TestAtomicSwapRulesDir_WriteFailureInStaging(t *testing.T) {
+	tmpDir := t.TempDir()
+	p := New(tmpDir, tmpDir)
+	invalidRules := []ruleSourceFile{
+		{filename: "nonexistent_sub/rule.md", content: "data", prefix: "00_"},
+	}
+	err := p.atomicSwapRulesDir(invalidRules, filepath.Join(tmpDir, "target"))
+	if err == nil || !strings.Contains(err.Error(), "failed to write rule file") {
+		t.Errorf("expected failed to write rule file error, got: %v", err)
+	}
+}
+
+func TestDiscoverRuleFiles_NotADirectory(t *testing.T) {
+	tmpDir := t.TempDir()
+	// create a regular file instead of subfolder directory to trigger ReadDir ENOTDIR
+	_ = os.WriteFile(filepath.Join(tmpDir, "common"), []byte("file-not-dir"), 0644)
+	res, err := discoverRuleFiles(tmpDir, "common", "00_")
+	if err == nil || !strings.Contains(err.Error(), "failed to read rules directory") {
+		t.Errorf("expected failed to read rules directory error, got: %v, %v", res, err)
+	}
+
+	// Test compileTargetRules when user target rules returns an error (user target is a file)
+	p := New(t.TempDir(), t.TempDir())
+	validAerial := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(validAerial, "common"), 0755)
+	_ = os.WriteFile(filepath.Join(validAerial, "common", "01.md"), []byte("aerial common"), 0644)
+	p.SetAerialRulesDir(validAerial)
+
+	badConfig := t.TempDir()
+	_ = os.WriteFile(filepath.Join(badConfig, "discord"), []byte("file-not-dir"), 0644)
+	p.SetConfigRulesDir(badConfig)
+
+	_, err = p.compileTargetRules(TargetDiscord, "")
+	if err == nil || !strings.Contains(err.Error(), "failed to read rules directory") {
+		t.Errorf("expected error when user target rules dir is a file, got: %v", err)
+	}
+
+	// Test compileTargetRules when aerial target rules dir is a file
+	_ = os.WriteFile(filepath.Join(validAerial, "discord"), []byte("file-not-dir"), 0644)
+	p.SetConfigRulesDir(t.TempDir())
+	_, err = p.compileTargetRules(TargetDiscord, "")
+	if err == nil || !strings.Contains(err.Error(), "failed to read rules directory") {
+		t.Errorf("expected error when aerial target rules dir is a file, got: %v", err)
+	}
+}
+
+func TestLinkSkills_DestinationCollision(t *testing.T) {
+	targetDir := t.TempDir()
+	srcDir := t.TempDir()
+	skillDir := filepath.Join(srcDir, "my-skill")
+	_ = os.MkdirAll(skillDir, 0755)
+	_ = os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("# Skill"), 0644)
+
+	// Block destPath with a non-empty directory so os.Remove(destPath) fails
+	destPath := filepath.Join(targetDir, "my-skill")
+	_ = os.MkdirAll(filepath.Join(destPath, "nested"), 0755)
+	_ = os.WriteFile(filepath.Join(destPath, "nested", "file"), []byte("data"), 0644)
+
+	LinkSkills([]string{targetDir}, []string{srcDir})
+}
+
 
 
 

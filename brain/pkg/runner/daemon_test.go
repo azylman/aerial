@@ -1342,7 +1342,7 @@ func TestDaemon_EnvironmentHomeOverride(t *testing.T) {
 	script := `#!/bin/sh
 echo '{"event":"init","init":{"tools":["run_command"]}}'
 while IFS= read -r line; do
-  echo "{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"HOME=$HOME;USERPROFILE=$USERPROFILE;GEMINI=$GEMINI_CLI_HOME\"}}"
+  echo "{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"HOME=$HOME;USERPROFILE=$USERPROFILE;GEMINI=$GEMINI_CLI_HOME;EXTRA=$EXTRA\"}}"
 done
 `
 	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
@@ -1353,12 +1353,14 @@ done
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	// 1. With GeminiHomeDir and pre-existing environment variables to filter
 	cfg := DaemonConfig{
 		SessionID:     "sess-env",
 		ThreadID:      "thread-env",
 		AgyBin:        mockBin,
 		Cwd:           tempDir,
 		GeminiHomeDir: customHome,
+		Env:           []string{"home=old-home", "userprofile=old-user", "gemini_cli_home=old-cli", "EXTRA=kept"},
 		Timeout:       5 * time.Second,
 	}
 
@@ -1372,9 +1374,31 @@ done
 	if err != nil {
 		t.Fatalf("ExecuteTurn failed: %v", err)
 	}
-	expected := fmt.Sprintf("HOME=%s;USERPROFILE=%s;GEMINI=%s", customHome, customHome, customHome)
+	expected := fmt.Sprintf("HOME=%s;USERPROFILE=%s;GEMINI=%s;EXTRA=kept", customHome, customHome, customHome)
 	if res.Response != expected {
 		t.Errorf("expected response %q, got %q", expected, res.Response)
+	}
+
+	// 2. Without GeminiHomeDir (exercises cmd.Env = combined else branch)
+	cfgEmptyHome := DaemonConfig{
+		SessionID: "sess-env-empty",
+		ThreadID:  "thread-env-empty",
+		AgyBin:    mockBin,
+		Cwd:       tempDir,
+		Env:       []string{"EXTRA=combined-only"},
+		Timeout:   5 * time.Second,
+	}
+	daemonEmpty, err := StartDaemon(ctx, cfgEmptyHome)
+	if err != nil {
+		t.Fatalf("StartDaemon empty home failed: %v", err)
+	}
+	defer daemonEmpty.Close()
+	resEmpty, err := daemonEmpty.ExecuteTurn(ctx, "check")
+	if err != nil {
+		t.Fatalf("ExecuteTurn empty home failed: %v", err)
+	}
+	if !strings.Contains(resEmpty.Response, "EXTRA=combined-only") {
+		t.Errorf("expected EXTRA=combined-only in response, got %q", resEmpty.Response)
 	}
 }
 

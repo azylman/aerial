@@ -2326,6 +2326,106 @@ func TestNormalizeRoute_Voice(t *testing.T) {
 	}
 }
 
+func TestCreateReloadConfigFunc_WithWorkerPool(t *testing.T) {
+	cfg := config.NewTestConfig()
+	pool := queue.New(cfg, queue.WorkerPoolConfig{})
+	reloadFn := CreateReloadConfigFunc(cfg,
+		WithSkipEnvironmentSync(),
+		WithReloadSupplier(func(active *config.Config) error {
+			return nil
+		}),
+		WithWorkerPool(pool),
+	)
+	reloadFn("TestWithWorkerPool")
+}
+
+type nonFlusherResponseWriter struct {
+	header http.Header
+	code   int
+	body   bytes.Buffer
+}
+
+func (w *nonFlusherResponseWriter) Header() http.Header {
+	if w.header == nil {
+		w.header = make(http.Header)
+	}
+	return w.header
+}
+
+func (w *nonFlusherResponseWriter) Write(b []byte) (int, error) {
+	return w.body.Write(b)
+}
+
+func (w *nonFlusherResponseWriter) WriteHeader(statusCode int) {
+	w.code = statusCode
+}
+
+func TestHandleVoiceAsk_NonFlusherStreamingError(t *testing.T) {
+	handler := handleVoiceAsk(nil)
+	req := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello"}`))
+	req.Header.Set("Accept", "text/event-stream")
+
+	w := &nonFlusherResponseWriter{}
+	handler(w, req)
+	if w.code != http.StatusInternalServerError {
+		t.Errorf("expected 500 for non-flusher streaming, got %d", w.code)
+	}
+	if !strings.Contains(w.body.String(), "Streaming not supported") {
+		t.Errorf("expected streaming not supported error, got: %s", w.body.String())
+	}
+}
+
+func TestHandleVoiceAsk_InvalidPayload(t *testing.T) {
+	handler := handleVoiceAsk(nil)
+	reqEmpty := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"   "}`))
+	wEmpty := httptest.NewRecorder()
+	handler(wEmpty, reqEmpty)
+	if wEmpty.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for empty prompt, got %d", wEmpty.Code)
+	}
+
+	reqBadJSON := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{invalid-json`))
+	wBadJSON := httptest.NewRecorder()
+	handler(wBadJSON, reqBadJSON)
+	if wBadJSON.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for malformed json, got %d", wBadJSON.Code)
+	}
+}
+
+func TestHandleTranscripts_NonStringError(t *testing.T) {
+	store := db.NewFakeStore()
+	tmpDir := t.TempDir()
+	convDir := filepath.Join(tmpDir, "conv-err", ".system_generated", "logs")
+	_ = os.MkdirAll(convDir, 0755)
+	_ = os.WriteFile(filepath.Join(convDir, "transcript.jsonl"), []byte(`{"step_index":1,"error":99999}`+"\n"), 0644)
+
+	handler := handleTranscripts(store, tmpDir)
+	req := httptest.NewRequest(http.MethodGet, "/transcripts", nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Errorf("expected 200 OK, got %d", rr.Code)
+	}
+	if !strings.Contains(rr.Body.String(), "99999") {
+		t.Errorf("expected 99999 in response, got %s", rr.Body.String())
+	}
+}
+
+func TestInitializeBrainEnvironment_SymlinkParentBlocker(t *testing.T) {
+	tmpDir := t.TempDir()
+	geminiDir := filepath.Join(tmpDir, "home", ".gemini")
+	_ = os.MkdirAll(geminiDir, 0755)
+	_ = os.WriteFile(filepath.Join(geminiDir, "antigravity-cli"), []byte("blocking-file"), 0644)
+
+	cfg := config.NewTestConfig(func(d *config.ConfigData) {
+		d.GeminiHomeDir = filepath.Join(tmpDir, "home")
+		d.DataDir = filepath.Join(tmpDir, "data")
+	})
+	_ = os.MkdirAll(filepath.Join(tmpDir, "data"), 0755)
+
+	_ = InitializeBrainEnvironment(context.Background(), cfg)
+}
+
 
 
 
