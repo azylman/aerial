@@ -2818,15 +2818,16 @@ func TestResolveMessageContent(t *testing.T) {
 		t.Errorf("expected empty string for empty content, got %q", got)
 	}
 
-	// 5. Session fallback when ContentWithMoreMentionsReplaced fails (s.State is nil)
-	sNilState := &discordgo.Session{State: nil}
+	// 5. Session fallback when ContentWithMoreMentionsReplaced fails (StateEnabled=true but channel not found in state)
+	sStateErr := &discordgo.Session{StateEnabled: true, State: discordgo.NewState()}
 	mFallback := &discordgo.Message{
-		Content: "Pinging <@1542285964213358633>",
+		ChannelID: "chan-not-found",
+		Content:   "Pinging <@1542285964213358633>",
 		Mentions: []*discordgo.User{
 			{ID: "1542285964213358633", Username: "Zero"},
 		},
 	}
-	if got := resolveMessageContent(sNilState, mFallback); got != "Pinging @Zero" {
+	if got := resolveMessageContent(sStateErr, mFallback); got != "Pinging @Zero" {
 		t.Errorf("expected 'Pinging @Zero', got %q", got)
 	}
 

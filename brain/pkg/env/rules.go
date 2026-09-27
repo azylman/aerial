@@ -38,6 +38,7 @@ var (
 	DefaultAerialRulesPaths = []string{
 		"/share/aerial/rules",
 		"./rules",
+		"../rules",
 		"/app/rules",
 		"../../rules",
 		"../../../rules",
@@ -47,6 +48,7 @@ var (
 	DefaultConfigRulesPaths = []string{
 		"/share/aerial-config/rules",
 		"./aerial-config/rules",
+		"../aerial-config/rules",
 		"../../aerial-config/rules",
 		"../../../aerial-config/rules",
 	}

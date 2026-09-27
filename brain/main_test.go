@@ -2426,6 +2426,54 @@ func TestInitializeBrainEnvironment_SymlinkParentBlocker(t *testing.T) {
 	_ = InitializeBrainEnvironment(context.Background(), cfg)
 }
 
+type errCloseReader struct {
+	io.Reader
+}
+
+func (e *errCloseReader) Close() error {
+	return errors.New("simulated close error")
+}
+
+func TestHandleVoiceAsk_BodyCloseError(t *testing.T) {
+	store := db.NewFakeStore()
+	pool := queue.NewWorkerPool(queue.WorkerPoolConfig{
+		Store: store,
+		VoiceRunnerFunc: func(c context.Context, prompt, sessionID string, onStatus func(string)) (string, string, error) {
+			return "done", "sess-1", nil
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	handler := handleVoiceAsk(pool)
+	req := httptest.NewRequest(http.MethodPost, "/voice/ask", &errCloseReader{Reader: strings.NewReader(`{"prompt":"hello"}`)})
+	w := httptest.NewRecorder()
+	handler(w, req)
+}
+
+func TestHandleVoiceAsk_SSE_CancelledContext(t *testing.T) {
+	store := db.NewFakeStore()
+	ctx, cancel := context.WithCancel(context.Background())
+	pool := queue.NewWorkerPool(queue.WorkerPoolConfig{
+		Store: store,
+		VoiceRunnerFunc: func(c context.Context, prompt, sessionID string, onStatus func(string)) (string, string, error) {
+			cancel()
+			if onStatus != nil {
+				onStatus("status after cancel")
+			}
+			return "done", "sess-1", nil
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	handler := handleVoiceAsk(pool)
+	req := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello"}`)).WithContext(ctx)
+	req.Header.Set("Accept", "text/event-stream")
+	w := httptest.NewRecorder()
+	handler(w, req)
+}
+
 
 
 
