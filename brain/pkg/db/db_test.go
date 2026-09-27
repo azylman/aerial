@@ -2201,7 +2201,7 @@ func TestCronScheduleAndMessageEffortRouting(t *testing.T) {
 		Status:       "enqueued",
 		StartedAt:    time.Now().UTC(),
 		Effort:       "low",
-		Model:        "Claude Sonnet 4.6 (Thinking)",
+		Model:        "gemini-3.7-flash-low",
 	}
 	if err := store.CreateScheduleRun(ctx, run); err != nil {
 		t.Fatalf("CreateScheduleRun failed: %v", err)
@@ -2213,8 +2213,8 @@ func TestCronScheduleAndMessageEffortRouting(t *testing.T) {
 	if total != 1 || len(runs) != 1 {
 		t.Fatalf("expected 1 run, got %d (total %d)", len(runs), total)
 	}
-	if runs[0].Effort != "low" || runs[0].Model != "Claude Sonnet 4.6 (Thinking)" {
-		t.Errorf("expected effort='low' and model='Claude Sonnet 4.6 (Thinking)', got effort=%q model=%q", runs[0].Effort, runs[0].Model)
+	if runs[0].Effort != "low" || runs[0].Model != "gemini-3.7-flash-low" {
+		t.Errorf("expected effort='low' and model='gemini-3.7-flash-low', got effort=%q model=%q", runs[0].Effort, runs[0].Model)
 	}
 
 	// 6. Test UpdateScheduleRunStatus with Model
