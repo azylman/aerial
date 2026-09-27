@@ -635,7 +635,17 @@ func TestMergeClusterDeployments_RollingSwap(t *testing.T) {
 		},
 	}
 
-	deploys := mergeClusterDeployments(containers, nil, nil, "abc9999")
+	parentRunsSwap := []GitHubRun{
+		{
+			ID:         101,
+			HeadSHA:    "abc9999999",
+			Status:     "completed",
+			Conclusion: "success",
+			CreatedAt:  now.Add(-2 * time.Minute),
+			UpdatedAt:  now.Add(-1 * time.Minute),
+		},
+	}
+	deploys := mergeClusterDeployments(containers, parentRunsSwap, nil, "abc9999")
 	if len(deploys) != 1 {
 		t.Fatalf("expected 1 unified deployment on rolling swap, got %d", len(deploys))
 	}
@@ -677,7 +687,17 @@ func TestMergeClusterDeployments_SyncedGrace(t *testing.T) {
 		},
 	}
 
-	deploys := mergeClusterDeployments(containers, nil, nil, "live123")
+	parentRunsGrace := []GitHubRun{
+		{
+			ID:         102,
+			HeadSHA:    "live123",
+			Status:     "completed",
+			Conclusion: "success",
+			CreatedAt:  now.Add(-5 * time.Minute),
+			UpdatedAt:  now.Add(-4 * time.Minute),
+		},
+	}
+	deploys := mergeClusterDeployments(containers, parentRunsGrace, nil, "live123")
 	if len(deploys) != 1 {
 		t.Fatalf("expected 1 unified deployment in synced grace, got %d", len(deploys))
 	}
@@ -721,7 +741,17 @@ func TestMergeClusterDeployments_DegradedState(t *testing.T) {
 		},
 	}
 
-	deploys := mergeClusterDeployments(containers, nil, nil, "deg1234")
+	parentRunsDegraded := []GitHubRun{
+		{
+			ID:         103,
+			HeadSHA:    "deg1234",
+			Status:     "completed",
+			Conclusion: "success",
+			CreatedAt:  now.Add(-5 * time.Minute),
+			UpdatedAt:  now.Add(-3 * time.Minute),
+		},
+	}
+	deploys := mergeClusterDeployments(containers, parentRunsDegraded, nil, "deg1234")
 	if len(deploys) != 1 {
 		t.Fatalf("expected 1 unified deployment on degraded state, got %d", len(deploys))
 	}
@@ -779,7 +809,17 @@ func TestMergeClusterDeployments_AdversarialNilLabelsAndNilHealth(t *testing.T) 
 		},
 	}
 
-	deploys := mergeClusterDeployments(containers, nil, nil, "test1234")
+	parentRunsNil := []GitHubRun{
+		{
+			ID:         104,
+			HeadSHA:    "test1234",
+			Status:     "completed",
+			Conclusion: "success",
+			CreatedAt:  now.Add(-2 * time.Minute),
+			UpdatedAt:  now.Add(-1 * time.Minute),
+		},
+	}
+	deploys := mergeClusterDeployments(containers, parentRunsNil, nil, "test1234")
 	if len(deploys) != 1 {
 		t.Fatalf("expected 1 deployment, got %d", len(deploys))
 	}
@@ -3358,7 +3398,18 @@ func TestMergeClusterDeploymentsWithHangar_DegradedWithoutHangarFailure(t *testi
 		Status: "synced",
 	}
 
-	deps := mergeClusterDeploymentsWithHangar(rawContainers, nil, nil, gitSync, "commit123")
+	parentRuns := []GitHubRun{
+		{
+			ID:         105,
+			HeadSHA:    "commit123",
+			Status:     "completed",
+			Conclusion: "success",
+			CreatedAt:  now.Add(-15 * time.Minute),
+			UpdatedAt:  now.Add(-12 * time.Minute),
+		},
+	}
+
+	deps := mergeClusterDeploymentsWithHangar(rawContainers, parentRuns, nil, gitSync, "commit123")
 	if len(deps) == 0 {
 		t.Fatalf("expected non-empty deployments for degraded container")
 	}
@@ -4306,3 +4357,159 @@ func TestGitHubPoller_TargetedCoverageBoost(t *testing.T) {
 	}
 	prunePoller.mu.RUnlock()
 }
+
+func TestFetchHangarRepos_TableDriven(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. Empty URL
+	if res := fetchHangarRepos(ctx, "", nil); res != nil {
+		t.Errorf("expected nil for empty URL, got %v", res)
+	}
+
+	// 2. Unreachable URL
+	if res := fetchHangarRepos(ctx, "http://127.0.0.1:54320/unreachable", &http.Client{Timeout: 50 * time.Millisecond}); res != nil {
+		t.Errorf("expected nil for unreachable URL, got %v", res)
+	}
+
+	// 3. HTTP 500 Error
+	srv500 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv500.Close()
+	if res := fetchHangarRepos(ctx, srv500.URL, srv500.Client()); res != nil {
+		t.Errorf("expected nil for 500 response, got %v", res)
+	}
+
+	// 4. Invalid JSON
+	srvBadJSON := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("{invalid-json"))
+	}))
+	defer srvBadJSON.Close()
+	if res := fetchHangarRepos(ctx, srvBadJSON.URL, srvBadJSON.Client()); res != nil {
+		t.Errorf("expected nil for bad JSON, got %v", res)
+	}
+
+	// 5. Successful response with valid repos, casing, and deduplication
+	srvOK := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/status" {
+			t.Errorf("expected path /status, got %q", r.URL.Path)
+		}
+		resp := GitSyncStatusResponse{
+			Status: "synced",
+			Repos: map[string]RepoStatus{
+				"/share/aerial": {
+					Repo:       "/share/aerial",
+					GitHubRepo: "azylman/aerial",
+				},
+				"/share/mirrormere": {
+					Repo:       "/share/mirrormere",
+					GitHubRepo: "Azylman/MirrorMere",
+				},
+				"/share/aerial-alias": {
+					Repo:       "/share/aerial-alias",
+					GitHubRepo: "azylman/aerial",
+				},
+				"/share/no-github": {
+					Repo:       "/share/no-github",
+					GitHubRepo: "",
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srvOK.Close()
+
+	res := fetchHangarRepos(ctx, srvOK.URL, srvOK.Client())
+	expected := []string{"azylman/aerial", "azylman/mirrormere"}
+	if len(res) != len(expected) {
+		t.Fatalf("expected %d repos, got %d: %v", len(expected), len(res), res)
+	}
+	for i, exp := range expected {
+		if res[i] != exp {
+			t.Errorf("res[%d] = %q, want %q", i, res[i], exp)
+		}
+	}
+}
+
+func TestGitHubPoller_DynamicHangarDiscovery(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	hangarCallCount := 0
+	hangarShouldFail := false
+	srvHangar := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hangarCallCount++
+		if hangarShouldFail {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		resp := GitSyncStatusResponse{
+			Status: "synced",
+			Repos: map[string]RepoStatus{
+				"/share/mirrormere": {
+					Repo:       "/share/mirrormere",
+					GitHubRepo: "azylman/mirrormere",
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srvHangar.Close()
+
+	ghCallCount := 0
+	srvGH := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ghCallCount++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"total_count": 1,
+			"workflow_runs": [
+				{
+					"id": 888,
+					"name": "CI",
+					"head_sha": "5c89fb19f99d8f42dfc358633e6d11fa320bfb15",
+					"status": "completed",
+					"conclusion": "success",
+					"created_at": "2026-09-27T05:10:00Z",
+					"updated_at": "2026-09-27T05:12:00Z"
+				}
+			]
+		}`))
+	}))
+	defer srvGH.Close()
+
+	poller := NewMultiGitHubPoller([]string{"azylman/aerial"}, "test-token")
+	poller.apiBaseURL = srvGH.URL
+	poller.SetHangarURL(srvHangar.URL)
+
+	// Verify getActiveRepos initially combines static + dynamic (dynamic empty at start)
+	initialRepos := poller.getActiveRepos()
+	if len(initialRepos) != 1 || initialRepos[0] != "azylman/aerial" {
+		t.Fatalf("expected initial repos [azylman/aerial], got %v", initialRepos)
+	}
+
+	// First pollOnce: should discover azylman/mirrormere from Hangar and poll both repos
+	poller.pollOnce(ctx)
+	activeRepos := poller.getActiveRepos()
+	if len(activeRepos) != 2 {
+		t.Fatalf("expected 2 active repos after Hangar discovery, got %d: %v", len(activeRepos), activeRepos)
+	}
+	if activeRepos[0] != "azylman/aerial" || activeRepos[1] != "azylman/mirrormere" {
+		t.Errorf("expected [azylman/aerial, azylman/mirrormere], got %v", activeRepos)
+	}
+
+	// Second pollOnce with Hangar failing: should retain azylman/mirrormere via LKGC
+	hangarShouldFail = true
+	poller.pollOnce(ctx)
+	retainedRepos := poller.getActiveRepos()
+	if len(retainedRepos) != 2 {
+		t.Fatalf("expected 2 repos retained under LKGC on Hangar failure, got %d: %v", len(retainedRepos), retainedRepos)
+	}
+
+	// Test SetHangarURL with nil receiver
+	var nilPoller *GitHubPoller
+	nilPoller.SetHangarURL("http://example.com")
+}
+

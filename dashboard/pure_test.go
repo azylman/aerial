@@ -1413,6 +1413,14 @@ func TestMergeClusterDeployments_DeterministicSort(t *testing.T) {
 	refTime := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 	runs := []GitHubRun{
 		{
+			ID:         100,
+			HeadSHA:    "1111111111111111111111111111111111111111",
+			Status:     "completed",
+			Conclusion: "success",
+			CreatedAt:  refTime.Add(-10 * time.Minute),
+			UpdatedAt:  refTime.Add(-2 * time.Minute),
+		},
+		{
 			ID:        101,
 			HeadSHA:   "3333333333333333333333333333333333333333",
 			Status:    "in_progress",
@@ -1507,8 +1515,26 @@ func TestMergeClusterDeployments_MultiCommitContainerGrouping(t *testing.T) {
 			},
 		},
 	}
+	parentRuns := []GitHubRun{
+		{
+			ID:         1,
+			HeadSHA:    "aaaaaaa123456789",
+			Status:     "completed",
+			Conclusion: "success",
+			CreatedAt:  refTime.Add(-10 * time.Minute),
+			UpdatedAt:  refTime.Add(-5 * time.Minute),
+		},
+		{
+			ID:         2,
+			HeadSHA:    "bbbbbbb123456789",
+			Status:     "completed",
+			Conclusion: "success",
+			CreatedAt:  refTime.Add(-2 * time.Minute),
+			UpdatedAt:  refTime.Add(-1 * time.Minute),
+		},
+	}
 
-	deps := MergeClusterDeploymentsWithHangar(nil, nil, GitSyncStatusResponse{}, containers, "aaaaaaa", refTime)
+	deps := MergeClusterDeploymentsWithHangar(parentRuns, nil, GitSyncStatusResponse{}, containers, "aaaaaaa", refTime)
 	if len(deps) != 2 {
 		t.Fatalf("expected 2 deployments, got %d", len(deps))
 	}
@@ -1787,7 +1813,17 @@ func TestMergeClusterDeployments_DegradedAndFailedBranches(t *testing.T) {
 			},
 		},
 	}
-	deps := MergeClusterDeploymentsWithHangar(nil, nil, GitSyncStatusResponse{}, degradedContainers, "", refTime)
+	parentRun := []GitHubRun{
+		{
+			ID:         801,
+			HeadSHA:    "8888888888888888888888888888888888888888",
+			Status:     "completed",
+			Conclusion: "success",
+			CreatedAt:  refTime.Add(-5 * time.Minute),
+			UpdatedAt:  refTime.Add(-2 * time.Minute),
+		},
+	}
+	deps := MergeClusterDeploymentsWithHangar(parentRun, nil, GitSyncStatusResponse{}, degradedContainers, "", refTime)
 	if len(deps) == 0 || deps[0].Stage != "degraded" {
 		t.Fatalf("expected degraded stage for exited container, got %+v", deps)
 	}
@@ -1879,13 +1915,20 @@ func TestMergeClusterDeployments_MultiRunSameCommitAndSortTies(t *testing.T) {
 		t.Errorf("expected lexicographical sort order eeeeeee < fffffff, got %s, %s", depsTies[0].Commit, depsTies[1].Commit)
 	}
 
-	// Test sort tie between failed and degraded
 	failedDegradedRuns := []GitHubRun{
 		{
 			ID:         301,
 			HeadSHA:    "1111111111111111111111111111111111111111",
 			Status:     "completed",
 			Conclusion: "failure",
+			CreatedAt:  refTime.Add(-5 * time.Minute),
+			UpdatedAt:  refTime.Add(-5 * time.Minute),
+		},
+		{
+			ID:         302,
+			HeadSHA:    "2222222222222222222222222222222222222222",
+			Status:     "completed",
+			Conclusion: "success",
 			CreatedAt:  refTime.Add(-5 * time.Minute),
 			UpdatedAt:  refTime.Add(-5 * time.Minute),
 		},
@@ -2118,6 +2161,14 @@ func TestPure_TargetedCoverageBoost(t *testing.T) {
 			CreatedAt:  refTime.Add(-5 * time.Minute),
 			UpdatedAt:  refTime.Add(-5 * time.Minute),
 		},
+		{
+			ID:         902,
+			HeadSHA:    "2222222222222222222222222222222222222222",
+			Status:     "completed",
+			Conclusion: "success",
+			CreatedAt:  refTime.Add(-5 * time.Minute),
+			UpdatedAt:  refTime.Add(-5 * time.Minute),
+		},
 	}
 	degradedContOnly := []DockerContainerJSON{
 		{
@@ -2132,6 +2183,36 @@ func TestPure_TargetedCoverageBoost(t *testing.T) {
 	tieDeps := MergeClusterDeploymentsWithHangar(degradedFirstRuns, nil, GitSyncStatusResponse{}, degradedContOnly, "", refTime)
 	if len(tieDeps) != 2 || tieDeps[0].Stage != "failed" || tieDeps[1].Stage != "degraded" {
 		t.Errorf("expected failed to sort before degraded, got %+v", tieDeps)
+	}
+}
+
+func TestMergeClusterDeployments_UnparentedContainersDoNotSpawnCards(t *testing.T) {
+	refTime := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	// Containers for postgres, vector, or unexpected local restarts without GitHub runs or Hangar reconciliation
+	unparentedContainers := []DockerContainerJSON{
+		{
+			ID:      "c-postgres",
+			Names:   []string{"/aerial-postgres"},
+			Created: refTime.Add(-30 * time.Second).Unix(),
+			State:   "running",
+			Labels: map[string]string{
+				"com.docker.compose.service": "postgres",
+			},
+		},
+		{
+			ID:      "c-vector",
+			Names:   []string{"/aerial-vector"},
+			Created: refTime.Add(-10 * time.Second).Unix(),
+			State:   "exited",
+			Labels: map[string]string{
+				"com.docker.compose.service": "vector",
+			},
+		},
+	}
+
+	deps := MergeClusterDeploymentsWithHangar(nil, nil, GitSyncStatusResponse{}, unparentedContainers, "livecommit", refTime)
+	if len(deps) != 0 {
+		t.Fatalf("expected 0 deployments for unparented containers in strictly top-down pipeline, got %d: %+v", len(deps), deps)
 	}
 }
 

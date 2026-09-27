@@ -5021,4 +5021,48 @@ func TestReconciliationStatus_ExposedInGetStatus(t *testing.T) {
 	}
 }
 
+func TestGetStatus_PopulatesAndCachesGitHubRepo(t *testing.T) {
+	remoteCalls := 0
+	d := NewDaemon(DaemonConfig{
+		Repos: []string{"/share/mirrormere"},
+		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			if len(args) >= 3 && args[0] == "remote" && args[1] == "get-url" && args[2] == "origin" {
+				remoteCalls++
+				return []byte("https://github.com/azylman/mirrormere.git\n"), nil, nil
+			}
+			if len(args) >= 4 && args[0] == "log" && args[1] == "-1" {
+				return []byte("abc1234\x002026-09-26T20:00:00Z\n"), nil, nil
+			}
+			return nil, nil, nil
+		},
+	})
+
+	// First call resolves and caches
+	st1 := d.GetStatus(context.Background())
+	repoSt1, ok := st1.Repos["/share/mirrormere"]
+	if !ok {
+		t.Fatalf("expected /share/mirrormere in repos")
+	}
+	if repoSt1.GitHubRepo != "azylman/mirrormere" {
+		t.Errorf("expected GitHubRepo 'azylman/mirrormere', got %q", repoSt1.GitHubRepo)
+	}
+	if remoteCalls != 1 {
+		t.Errorf("expected 1 remote call, got %d", remoteCalls)
+	}
+
+	// Second call uses cached slug, remoteCalls should stay 1
+	st2 := d.GetStatus(context.Background())
+	repoSt2, ok := st2.Repos["/share/mirrormere"]
+	if !ok {
+		t.Fatalf("expected /share/mirrormere in repos on second call")
+	}
+	if repoSt2.GitHubRepo != "azylman/mirrormere" {
+		t.Errorf("expected cached GitHubRepo 'azylman/mirrormere', got %q", repoSt2.GitHubRepo)
+	}
+	if remoteCalls != 1 {
+		t.Errorf("expected remoteCalls to remain 1 after cached call, got %d", remoteCalls)
+	}
+}
+
+
 
