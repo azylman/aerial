@@ -509,13 +509,8 @@ func handleGuildMemberUpdate(s *discordgo.Session, m *discordgo.GuildMemberUpdat
 	userID := ""
 	if m.User != nil {
 		userID = m.User.ID
-	} else if m.Member.User != nil {
-		userID = m.Member.User.ID
 	}
 	if userID != "" && userID == s.State.User.ID {
-		if m.GuildID != "" && m.Member.GuildID == "" {
-			m.Member.GuildID = m.GuildID
-		}
 		if err := s.State.MemberAdd(m.Member); err != nil {
 			log.Printf("[WARN] Failed to update member %s in session state: %v", userID, err)
 		}

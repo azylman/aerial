@@ -2811,6 +2811,24 @@ func TestResolveMessageContent(t *testing.T) {
 	if gotSession != expectedSession {
 		t.Errorf("resolveMessageContent(s, mWithRoles) = %q, want %q", gotSession, expectedSession)
 	}
+
+	// 4. Message without mentions returning m.Content
+	mEmpty := &discordgo.Message{Content: ""}
+	if got := resolveMessageContent(nil, mEmpty); got != "" {
+		t.Errorf("expected empty string for empty content, got %q", got)
+	}
+
+	// 5. Session fallback when ContentWithMoreMentionsReplaced fails (s.State is nil)
+	sNilState := &discordgo.Session{State: nil}
+	mFallback := &discordgo.Message{
+		Content: "Pinging <@1542285964213358633>",
+		Mentions: []*discordgo.User{
+			{ID: "1542285964213358633", Username: "Zero"},
+		},
+	}
+	if got := resolveMessageContent(sNilState, mFallback); got != "Pinging @Zero" {
+		t.Errorf("expected 'Pinging @Zero', got %q", got)
+	}
 }
 
 
