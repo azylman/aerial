@@ -1942,8 +1942,8 @@ func TestApplyEnvironmentOverrides_TableDriven(t *testing.T) {
 			},
 		},
 		{
-			name:   "GEMINI_API_KEY override",
-			envMap: map[string]string{"GEMINI_API_KEY": "test-key-1"},
+			name:   "AGY_GEMINI_API_KEY override",
+			envMap: map[string]string{"AGY_GEMINI_API_KEY": "test-key-1"},
 			assertFn: func(t *testing.T, d *ConfigData) {
 				if d.APIKey != "test-key-1" {
 					t.Errorf("expected APIKey=test-key-1, got %q", d.APIKey)
@@ -1951,11 +1951,47 @@ func TestApplyEnvironmentOverrides_TableDriven(t *testing.T) {
 			},
 		},
 		{
-			name:   "ANTIGRAVITY_API_KEY fallback override",
-			envMap: map[string]string{"ANTIGRAVITY_API_KEY": "test-key-2"},
+			name:   "AGY_API_KEY fallback override",
+			envMap: map[string]string{"AGY_API_KEY": "test-key-2"},
 			assertFn: func(t *testing.T, d *ConfigData) {
 				if d.APIKey != "test-key-2" {
 					t.Errorf("expected APIKey=test-key-2, got %q", d.APIKey)
+				}
+			},
+		},
+		{
+			name:   "GEMINI_HARNESS_API_KEY override",
+			envMap: map[string]string{"GEMINI_HARNESS_API_KEY": "harness-key-1"},
+			assertFn: func(t *testing.T, d *ConfigData) {
+				if d.HarnessAPIKey != "harness-key-1" {
+					t.Errorf("expected HarnessAPIKey=harness-key-1, got %q", d.HarnessAPIKey)
+				}
+				if d.APIKey != "" {
+					t.Errorf("expected empty APIKey, got %q", d.APIKey)
+				}
+			},
+		},
+		{
+			name:   "AERIAL_GEMINI_API_KEY fallback override",
+			envMap: map[string]string{"AERIAL_GEMINI_API_KEY": "harness-key-2"},
+			assertFn: func(t *testing.T, d *ConfigData) {
+				if d.HarnessAPIKey != "harness-key-2" {
+					t.Errorf("expected HarnessAPIKey=harness-key-2, got %q", d.HarnessAPIKey)
+				}
+				if d.APIKey != "" {
+					t.Errorf("expected empty APIKey, got %q", d.APIKey)
+				}
+			},
+		},
+		{
+			name:   "ambient GEMINI_API_KEY is not mapped to APIKey or HarnessAPIKey",
+			envMap: map[string]string{"GEMINI_API_KEY": "ambient-key"},
+			assertFn: func(t *testing.T, d *ConfigData) {
+				if d.APIKey != "" {
+					t.Errorf("expected empty APIKey, got %q", d.APIKey)
+				}
+				if d.HarnessAPIKey != "" {
+					t.Errorf("expected empty HarnessAPIKey, got %q", d.HarnessAPIKey)
 				}
 			},
 		},

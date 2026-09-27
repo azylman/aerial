@@ -117,7 +117,8 @@ func StartDaemon(ctx context.Context, cfg DaemonConfig) (*Daemon, error) {
 	if cfg.Cwd != "" {
 		cmd.Dir = cfg.Cwd
 	}
-	cmd.Env = append(cmd.Environ(), cfg.Env...)
+	baseEnv := FilterAgyBaseEnv(cmd.Environ())
+	cmd.Env = append(baseEnv, cfg.Env...)
 	if cfg.GeminiHomeDir != "" {
 		cmd.Env = append(cmd.Env, "GEMINI_CLI_HOME="+cfg.GeminiHomeDir)
 	}

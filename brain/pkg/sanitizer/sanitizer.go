@@ -39,7 +39,7 @@ var (
 	reURIWithPassword = regexp.MustCompile(`(?i)([a-zA-Z][a-zA-Z0-9+.-]+://[^:\s/@]*:)([^@\s]+)(@[a-zA-Z0-9_.-]+(?::[0-9]+)?(?:/[^\s]*)?)`)
 
 	// Key-Value Configuration / CLI assignments (preserves label)
-	reKeyValue = regexp.MustCompile(`(?i)\b(GEMINI_API_KEY|ANTIGRAVITY_API_KEY|DISCORD_BOT_TOKEN|DISCORD_TOKEN|GITHUB_PAT|HA_TOKEN|OPENAI_API_KEY|ANTHROPIC_API_KEY|POSTGRES_PASSWORD|GRAFANA_ADMIN_PASSWORD|DATABASE_URL|PASSWORD|SECRET|TOKEN|KEY)\s*([:=]\s*)([^\s,;]+)`)
+	reKeyValue = regexp.MustCompile(`(?i)\b(GEMINI_HARNESS_API_KEY|AERIAL_GEMINI_API_KEY|AGY_GEMINI_API_KEY|GEMINI_API_KEY|ANTIGRAVITY_API_KEY|DISCORD_BOT_TOKEN|DISCORD_TOKEN|GITHUB_PAT|HA_TOKEN|OPENAI_API_KEY|ANTHROPIC_API_KEY|POSTGRES_PASSWORD|GRAFANA_ADMIN_PASSWORD|DATABASE_URL|PASSWORD|SECRET|TOKEN|KEY)\s*([:=]\s*)([^\s,;]+)`)
 
 	// Discord Mentions (user, role, channel, broadcast)
 	reDiscordMention = regexp.MustCompile(`<@[!&]?[0-9]+>|<#[0-9]+>|@everyone|@here`)
@@ -109,6 +109,9 @@ func RegisterConfigTokens(cfg *config.Config) {
 	var tokens []string
 	if cur.APIKey != "" {
 		tokens = append(tokens, cur.APIKey)
+	}
+	if cur.HarnessAPIKey != "" {
+		tokens = append(tokens, cur.HarnessAPIKey)
 	}
 	if cur.DiscordToken != "" {
 		tokens = append(tokens, cur.DiscordToken)

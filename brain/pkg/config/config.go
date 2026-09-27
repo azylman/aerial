@@ -152,6 +152,7 @@ type ConfigData struct {
 	Port            string                     `yaml:"port" json:"port"`
 	AgyBin          string                     `yaml:"agy_bin" json:"agy_bin"`
 	APIKey          string                     `yaml:"api_key" json:"api_key"`
+	HarnessAPIKey   string                     `yaml:"harness_api_key,omitempty" json:"harness_api_key,omitempty"`
 	SystemPrompt    string                     `yaml:"system_prompt" json:"system_prompt"`
 	DiscordToken    string                     `yaml:"discord_token" json:"discord_token"`
 	GitHubPAT       string                     `yaml:"github_pat" json:"github_pat"`
@@ -187,6 +188,7 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 		Port                      string                   `yaml:"port"`
 		AgyBin                    string                   `yaml:"agy_bin"`
 		APIKey                    string                   `yaml:"api_key"`
+		HarnessAPIKey             string                   `yaml:"harness_api_key"`
 		SystemPrompt              string                   `yaml:"system_prompt"`
 		DiscordToken              string                   `yaml:"discord_token"`
 		GitHubPAT                 string                   `yaml:"github_pat"`
@@ -220,6 +222,7 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 	c.Port = raw.Port
 	c.AgyBin = raw.AgyBin
 	c.APIKey = raw.APIKey
+	c.HarnessAPIKey = raw.HarnessAPIKey
 	c.SystemPrompt = raw.SystemPrompt
 	c.DiscordToken = raw.DiscordToken
 	c.GitHubPAT = raw.GitHubPAT
@@ -426,6 +429,7 @@ func NewTestConfig(mutators ...func(*ConfigData)) *Config {
 	data.Port = "0"
 	data.DiscordToken = ""
 	data.APIKey = ""
+	data.HarnessAPIKey = ""
 	data.GitHubPAT = ""
 	data.GeminiHomeDir = filepath.Join(os.TempDir(), "aerial-test-gemini")
 	data.DataDir = filepath.Join(os.TempDir(), "aerial-test-data")
@@ -509,8 +513,11 @@ func applyEnvironmentOverrides(data *ConfigData, lookup func(string) string) {
 	if b := getEnvFromLookup(lookup, "AGY_BIN", ""); b != "" {
 		data.AgyBin = b
 	}
-	if k := getEnvFromLookup(lookup, "GEMINI_API_KEY", getEnvFromLookup(lookup, "ANTIGRAVITY_API_KEY", "")); k != "" {
+	if k := getEnvFromLookup(lookup, "AGY_GEMINI_API_KEY", getEnvFromLookup(lookup, "AGY_API_KEY", "")); k != "" {
 		data.APIKey = k
+	}
+	if hk := getEnvFromLookup(lookup, "GEMINI_HARNESS_API_KEY", getEnvFromLookup(lookup, "AERIAL_GEMINI_API_KEY", "")); hk != "" {
+		data.HarnessAPIKey = hk
 	}
 	if sp := getEnvFromLookup(lookup, "SYSTEM_PROMPT", ""); sp != "" {
 		data.SystemPrompt = sp

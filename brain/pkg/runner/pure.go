@@ -48,11 +48,34 @@ type AgyEnvInput struct {
 	ExtraEnv []string
 }
 
+// FilterAgyBaseEnv removes ambient GEMINI_API_KEY, ANTIGRAVITY_API_KEY, and GOOGLE_GENAI_API_KEY
+// from an environment slice unless they are explicitly desired.
+func FilterAgyBaseEnv(env []string) []string {
+	filtered := make([]string, 0, len(env))
+	for _, e := range env {
+		key, _, ok := strings.Cut(e, "=")
+		if !ok {
+			filtered = append(filtered, e)
+			continue
+		}
+		upper := strings.ToUpper(strings.TrimSpace(key))
+		if upper == "GEMINI_API_KEY" || upper == "ANTIGRAVITY_API_KEY" || upper == "GOOGLE_GENAI_API_KEY" {
+			continue
+		}
+		filtered = append(filtered, e)
+	}
+	return filtered
+}
+
 // BuildAgyEnv constructs the process environment slice for agy execution.
 func BuildAgyEnv(input AgyEnvInput) []string {
 	var cmdEnv []string
 	if len(input.BaseEnv) > 0 {
-		cmdEnv = append(cmdEnv, input.BaseEnv...)
+		base := input.BaseEnv
+		if strings.TrimSpace(input.APIKey) == "" {
+			base = FilterAgyBaseEnv(base)
+		}
+		cmdEnv = append(cmdEnv, base...)
 	}
 
 	cmdEnv = append(cmdEnv,

@@ -1299,3 +1299,40 @@ func TestDaemon_Close_StdinCloseError(t *testing.T) {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
+
+func TestStartDaemon_FiltersAmbientGeminiAPIKey(t *testing.T) {
+	t.Setenv("GEMINI_API_KEY", "ambient-secret-123")
+	t.Setenv("ANTIGRAVITY_API_KEY", "ambient-secret-456")
+	t.Setenv("GOOGLE_GENAI_API_KEY", "ambient-secret-789")
+
+	tempDir := t.TempDir()
+	mockBin := filepath.Join(tempDir, "mock_agy.sh")
+	script := `#!/bin/sh
+cat << 'EOF'
+{"event":"result","result":{"status":"SUCCESS","response":"ok"}}
+EOF
+`
+	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
+		t.Fatalf("failed to write mock script: %v", err)
+	}
+
+	ctx := context.Background()
+	d, err := StartDaemon(ctx, DaemonConfig{
+		AgyBin: mockBin,
+		Cwd:    tempDir,
+	})
+	if err != nil {
+		t.Fatalf("StartDaemon failed: %v", err)
+	}
+	defer d.Close()
+
+	for _, e := range d.cmd.Env {
+		if strings.Contains(e, "ambient-secret") {
+			t.Errorf("StartDaemon leaked ambient secret into cmd.Env: %s", e)
+		}
+		if strings.HasPrefix(e, "GEMINI_API_KEY=") || strings.HasPrefix(e, "ANTIGRAVITY_API_KEY=") || strings.HasPrefix(e, "GOOGLE_GENAI_API_KEY=") {
+			t.Errorf("StartDaemon cmd.Env contains filtered key: %s", e)
+		}
+	}
+}
+

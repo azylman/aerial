@@ -2477,6 +2477,8 @@ func NewConfigFromLookup(lookup func(string) string) DaemonConfig {
 	extraSecretCandidates := []string{
 		lookup("POSTGRES_PASSWORD"),
 		lookup("HA_TOKEN"),
+		lookup("GEMINI_HARNESS_API_KEY"),
+		lookup("AERIAL_GEMINI_API_KEY"),
 		lookup("GEMINI_API_KEY"),
 		lookup("GITHUB_PAT"),
 	}

@@ -361,8 +361,9 @@ cp .env.example .env
 ```
 Edit `.env` and configure your credentials and config repo URL:
 ```ini
-# Recommended: Leave GEMINI_API_KEY commented out for Google OAuth authentication!
-# GEMINI_API_KEY=your_gemini_api_key_here
+# Recommended: Antigravity CLI uses Google OAuth subscription authentication by default.
+# For harness tests, benchmarks, or direct Gemini API scripts, you can optionally provide:
+# GEMINI_HARNESS_API_KEY=your_gemini_api_key_here
 
 DISCORD_BOT_TOKEN=your_discord_bot_token_here
 GITHUB_PAT=your_github_personal_access_token_here
@@ -378,7 +379,7 @@ docker compose up -d
 On boot, `aerial-brain` and `aerial-hangar` will automatically adopt or clone your private repository into `/share/aerial-config` using `GITHUB_PAT` and load your `config.yaml` settings.
 
 ### Step 5: Authenticate via Google OAuth (Recommended)
-If using OAuth (with `GEMINI_API_KEY` commented out):
+By default, Aerial runs `agy` in Google OAuth / subscription mode:
 1. Run the interactive `agy` CLI inside the running container:
    ```bash
    docker exec -it aerial-brain agy
