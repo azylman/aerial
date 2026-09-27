@@ -319,19 +319,22 @@ func (d *Daemon) ExecuteTurnWithHandler(ctx context.Context, prompt string, hand
 			}
 
 		case "step_update":
-			if handler != nil {
-				var rawStep struct {
-					StepUpdate json.RawMessage `json:"step_update,omitempty"`
+			var stepEv StepUpdateEvent
+			var rawStep struct {
+				StepUpdate json.RawMessage `json:"step_update,omitempty"`
+			}
+			if err := json.Unmarshal([]byte(line), &rawStep); err == nil {
+				var uErr error
+				if len(rawStep.StepUpdate) > 0 {
+					uErr = json.Unmarshal(rawStep.StepUpdate, &stepEv)
+				} else {
+					uErr = json.Unmarshal([]byte(line), &stepEv)
 				}
-				var stepEv StepUpdateEvent
-				if err := json.Unmarshal([]byte(line), &rawStep); err == nil {
-					var uErr error
-					if len(rawStep.StepUpdate) > 0 {
-						uErr = json.Unmarshal(rawStep.StepUpdate, &stepEv)
-					} else {
-						uErr = json.Unmarshal([]byte(line), &stepEv)
+				if uErr == nil {
+					if delta := stepEv.ResolvedTextDelta(); delta != "" {
+						turnResponse.WriteString(delta)
 					}
-					if uErr == nil && (stepEv.ResolvedType() != "" || stepEv.ResolvedToolName() != "") {
+					if handler != nil && (stepEv.ResolvedType() != "" || stepEv.ResolvedToolName() != "" || stepEv.ResolvedTextDelta() != "") {
 						handler(&stepEv)
 					}
 				}
@@ -339,6 +342,13 @@ func (d *Daemon) ExecuteTurnWithHandler(ctx context.Context, prompt string, hand
 
 			stepUpdate, ok := raw["step_update"].(map[string]interface{})
 			if ok && stepUpdate != nil {
+				if stepEv.ResolvedTextDelta() == "" {
+					if td, ok := stepUpdate["text_delta"].(string); ok && td != "" {
+						turnResponse.WriteString(td)
+					} else if d, ok := stepUpdate["delta"].(string); ok && d != "" {
+						turnResponse.WriteString(d)
+					}
+				}
 				if toolName, ok := stepUpdate["tool_name"].(string); ok && toolName != "" {
 					lastToolName = toolName
 					toolCallCount++
@@ -396,6 +406,12 @@ func (d *Daemon) ExecuteTurnWithHandler(ctx context.Context, prompt string, hand
 						}
 					}
 				}
+			} else if stepEv.ResolvedTextDelta() == "" {
+				if td, ok := raw["text_delta"].(string); ok && td != "" {
+					turnResponse.WriteString(td)
+				} else if d, ok := raw["delta"].(string); ok && d != "" {
+					turnResponse.WriteString(d)
+				}
 			}
 
 		case "result":
@@ -440,7 +456,20 @@ func (d *Daemon) ExecuteTurnWithHandler(ctx context.Context, prompt string, hand
 			}
 
 			if res.Response != "" {
-				turnResponse.WriteString(res.Response)
+				accum := turnResponse.String()
+				if accum == "" {
+					turnResponse.WriteString(res.Response)
+				} else if res.Response == accum {
+					// Duplicate full response already accumulated from stream-json deltas.
+				} else if strings.HasPrefix(res.Response, accum) {
+					// res.Response contains the full response superset.
+					turnResponse.Reset()
+					turnResponse.WriteString(res.Response)
+				} else if strings.HasPrefix(accum, res.Response) {
+					// accum already contains res.Response prefix.
+				} else {
+					turnResponse.WriteString(res.Response)
+				}
 			}
 			turnUsage = res.Usage
 			if turnUsage.TotalTokens == 0 && (res.Usage.InputTokens > 0 || res.Usage.OutputTokens > 0) {
@@ -721,4 +750,3 @@ func extractSubagentID(toolOut string) string {
 
 	return ""
 }
-

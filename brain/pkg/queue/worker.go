@@ -1636,13 +1636,13 @@ func (te *turnExecution) executeWithRetries() {
 				}
 			}
 
-			// Transcript Recovery on Exit Code 0:
-			// If agy completed with exit code 0 but was flagged as a failure (e.g. empty stdout from buffering,
-			// or stream-json reporting an error status despite the model successfully generating a response),
+			// Transcript Recovery on Exit Code 0 or Daemon Empty Response:
+			// If agy completed with exit code 0 or failed with an empty response / aborted turn from daemon buffering,
 			// check if the session transcript on disk contains a valid PLANNER_RESPONSE turn.
-			if exitCode == 0 && targetSess != "" && te.pool.sessionMgr != nil && te.pool.sessionMgr.SessionExistsOnDisk(targetSess) {
+			isDaemonEmpty := isFailure && (strings.Contains(errDetail, "daemon turn completed with empty response") || strings.Contains(stderr, "daemon turn completed with empty response"))
+			if (exitCode == 0 || isDaemonEmpty) && targetSess != "" && te.pool.sessionMgr != nil && te.pool.sessionMgr.SessionExistsOnDisk(targetSess) {
 				if respText, _ := te.pool.sessionMgr.ExtractResponseAndError(targetSess); respText != "" && !strings.HasPrefix(respText, "[Tool Call Requested]:") {
-					log.Printf("[Queue] Recovered response directly from session %s transcript after runner failure on exit 0", targetSess)
+					log.Printf("[Queue] Recovered response directly from session %s transcript after runner failure (exit %d, isDaemonEmpty=%v)", targetSess, exitCode, isDaemonEmpty)
 					isFailure = false
 					isSessionCorruption = false
 					isTransient = false

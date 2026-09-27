@@ -1419,7 +1419,6 @@ func TestExtractFinalSubstantiveResponse_TrailingEmptyStep_FindsSubstantiveStep(
 	}
 }
 
-
 func TestExtractFinalSubstantiveResponse_AmbientInterleaving(t *testing.T) {
 	mgr, tmpDir := setupTestManager(t)
 	convID := "ambient-interleave-123"
@@ -1683,7 +1682,7 @@ func TestManager_GetTranscriptSize(t *testing.T) {
 
 	// 6. Dual-file: transcript_full.jsonl is larger
 	fullPath := filepath.Join(sessDir, "transcript_full.jsonl")
-	fullContent := append(content, []byte(`{"step_index": 1, "type": "PLANNER_RESPONSE", "extra": "large payload data here"}` + "\n")...)
+	fullContent := append(content, []byte(`{"step_index": 1, "type": "PLANNER_RESPONSE", "extra": "large payload data here"}`+"\n")...)
 	if err := os.WriteFile(fullPath, fullContent, 0644); err != nil {
 		t.Fatalf("failed to write transcript_full: %v", err)
 	}
@@ -2029,6 +2028,34 @@ func TestExtractLastTurnError(t *testing.T) {
 	cancel()
 	if _, err := mgr.ExtractLastTurnError(ctxCancelled, convID, time.Time{}); err == nil {
 		t.Errorf("expected context cancellation error")
+	}
+
+	// 5. Tool execution outputs (type: GENERIC or USER_INPUT) containing quota/error text must NEVER be extracted as turn error
+	convID3 := "test-turn-generic-tool-output"
+	logsDir3 := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", convID3, ".system_generated", "logs")
+	_ = os.MkdirAll(logsDir3, 0755)
+	transcript3 := fmt.Sprintf(`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"Check database for errors","created_at":%q}
+{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","content":"Running query...","tool_calls":[{"name":"run_command"}],"created_at":%q}
+{"step_index":2,"source":"TOOL","type":"GENERIC","status":"ERROR","content":"SELECT id, error FROM messages;\n1 | Individual quota reached. Resets in 42m56s","created_at":%q}
+{"step_index":3,"source":"MODEL","type":"PLANNER_RESPONSE","content":"I checked the messages table and found old errors.","created_at":%q}
+`, t1.Format(time.RFC3339), t1.Add(time.Second).Format(time.RFC3339), t1.Add(2*time.Second).Format(time.RFC3339), t1.Add(3*time.Second).Format(time.RFC3339))
+	_ = os.WriteFile(filepath.Join(logsDir3, "transcript.jsonl"), []byte(transcript3), 0644)
+
+	errStr3, err := mgr.ExtractLastTurnError(context.Background(), convID3, t1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if errStr3 != "" {
+		t.Errorf("expected empty error because GENERIC tool output must be ignored, got %q", errStr3)
+	}
+
+	// Also verify ExtractResponseAndError ignores GENERIC error
+	respStr, lastErr := mgr.ExtractResponseAndError(convID3)
+	if lastErr != "" {
+		t.Errorf("expected empty lastErr in ExtractResponseAndError, got %q", lastErr)
+	}
+	if respStr != "I checked the messages table and found old errors." {
+		t.Errorf("expected substantive response, got %q", respStr)
 	}
 }
 
@@ -2487,9 +2514,3 @@ func TestExtractFinalSubstantiveResponse_LargeFileAndEmpty(t *testing.T) {
 		t.Errorf("expected context canceled error")
 	}
 }
-
-
-
-
-
-

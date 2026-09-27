@@ -433,6 +433,114 @@ echo '{"event":"result","result":{"status":"SUCCESS","response":"all done","usag
 	}
 }
 
+func TestDaemon_ExecuteTurnWithStreamedDeltas(t *testing.T) {
+	tempDir := t.TempDir()
+	mockBin := filepath.Join(tempDir, "mock_stream_deltas.sh")
+	script := `#!/bin/sh
+read -r line
+echo '{"event":"step_update","step_update":{"step_index":1,"state":"ACTIVE","step_type":"tool","tool_name":"sql_query"}}'
+echo '{"event":"step_update","step_update":{"step_index":2,"state":"DONE","step_type":"tool","tool_name":"sql_query","tool_output":"result rows"}}'
+echo '{"event":"step_update","step_update":{"step_index":3,"state":"ACTIVE","step_type":"agent_response","text_delta":"Hello, "}}'
+echo '{"event":"step_update","step_update":{"step_index":4,"state":"ACTIVE","step_type":"agent_response","text_delta":"I found the records "}}'
+echo '{"event":"step_update","step_update":{"step_index":5,"state":"DONE","step_type":"agent_response","delta":"successfully."}}'
+echo '{"event":"result","result":{"status":"SUCCESS","response":"","usage":{"total_tokens":55}}}'
+`
+	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
+		t.Fatalf("failed to write mock script: %v", err)
+	}
+
+	ctx := context.Background()
+	d, err := StartDaemon(ctx, DaemonConfig{
+		AgyBin:   mockBin,
+		Cwd:      tempDir,
+		ThreadID: "test-thread-stream",
+	})
+	if err != nil {
+		t.Fatalf("StartDaemon failed: %v", err)
+	}
+	defer d.Close()
+
+	var receivedDeltas []string
+	handler := func(ev *StepUpdateEvent) {
+		if d := ev.ResolvedTextDelta(); d != "" {
+			receivedDeltas = append(receivedDeltas, d)
+		}
+	}
+
+	res, err := d.ExecuteTurnWithHandler(ctx, "query database", handler)
+	if err != nil {
+		t.Fatalf("ExecuteTurnWithHandler failed: %v", err)
+	}
+	expected := "Hello, I found the records successfully."
+	if res.Response != expected {
+		t.Errorf("expected response %q, got %q", expected, res.Response)
+	}
+	if len(receivedDeltas) != 3 {
+		t.Errorf("expected 3 deltas received by handler, got %d: %v", len(receivedDeltas), receivedDeltas)
+	}
+}
+
+func TestDaemon_ResultResponseDeduplication(t *testing.T) {
+	tempDir := t.TempDir()
+	mockBin := filepath.Join(tempDir, "mock_dedup.sh")
+	script := `#!/bin/sh
+read -r line
+# Case 1: Streamed deltas followed by identical response in result
+echo '{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"Exact "}}'
+echo '{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"match"}}'
+echo '{"event":"result","result":{"status":"SUCCESS","response":"Exact match"}}'
+read -r line
+# Case 2: Streamed deltas followed by superset response in result
+echo '{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"Prefix "}}'
+echo '{"event":"result","result":{"status":"SUCCESS","response":"Prefix and more content"}}'
+read -r line
+# Case 3: Streamed deltas followed by subset response in result
+echo '{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"Full streamed message"}}'
+echo '{"event":"result","result":{"status":"SUCCESS","response":"Full streamed"}}'
+`
+	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
+		t.Fatalf("failed to write mock script: %v", err)
+	}
+
+	ctx := context.Background()
+	d, err := StartDaemon(ctx, DaemonConfig{
+		AgyBin:   mockBin,
+		Cwd:      tempDir,
+		ThreadID: "test-thread-dedup",
+	})
+	if err != nil {
+		t.Fatalf("StartDaemon failed: %v", err)
+	}
+	defer d.Close()
+
+	// Case 1: Exact match
+	res1, err := d.ExecuteTurnWithHandler(ctx, "turn 1", nil)
+	if err != nil {
+		t.Fatalf("turn 1 failed: %v", err)
+	}
+	if res1.Response != "Exact match" {
+		t.Errorf("turn 1: expected 'Exact match', got %q", res1.Response)
+	}
+
+	// Case 2: Superset in result
+	res2, err := d.ExecuteTurnWithHandler(ctx, "turn 2", nil)
+	if err != nil {
+		t.Fatalf("turn 2 failed: %v", err)
+	}
+	if res2.Response != "Prefix and more content" {
+		t.Errorf("turn 2: expected 'Prefix and more content', got %q", res2.Response)
+	}
+
+	// Case 3: Subset in result (accum stays)
+	res3, err := d.ExecuteTurnWithHandler(ctx, "turn 3", nil)
+	if err != nil {
+		t.Fatalf("turn 3 failed: %v", err)
+	}
+	if res3.Response != "Full streamed message" {
+		t.Errorf("turn 3: expected 'Full streamed message', got %q", res3.Response)
+	}
+}
+
 func TestDaemon_StartFailures(t *testing.T) {
 	ctx := context.Background()
 	_, err := StartDaemon(ctx, DaemonConfig{
@@ -1191,4 +1299,3 @@ func TestDaemon_Close_StdinCloseError(t *testing.T) {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
-

@@ -143,12 +143,12 @@ function Run-Deadcode($svc) {
     try {
         $output = & deadcode -test ./... 2>&1
         if ($LASTEXITCODE -ne 0) {
-            throw "deadcode analysis failed on $svc: $output"
+            throw "deadcode analysis failed on ${svc}: $output"
         }
         if ($output) {
             $errLines = ($output | Out-String).Trim()
             if ($errLines) {
-                throw "Dead code detected in $svc:`n$errLines"
+                throw "Dead code detected in ${svc}:`n$errLines"
             }
         }
     } finally {
