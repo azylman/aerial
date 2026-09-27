@@ -74,6 +74,9 @@ func StaticFallback(contextDescription string) string {
 	if strings.Contains(lower, "reset") || strings.Contains(lower, "corrupt") || strings.Contains(lower, "session") {
 		return "The conversation context became corrupted and has been reset. Please try sending your message again."
 	}
+	if strings.Contains(lower, "authentication failed") || strings.Contains(lower, "auth failed") || strings.Contains(lower, "unauthorized") || strings.Contains(lower, "invalid api key") || strings.Contains(lower, "invalid_api_key") {
+		return "Authentication failed while processing the request. Please check your API credentials or re-authenticate."
+	}
 	if strings.Contains(lower, "watchdog") || strings.Contains(lower, "inactivity") || strings.Contains(lower, "max duration") || strings.Contains(lower, "timed out") {
 		return "Execution timed out while processing the request. Please try again or break the request into smaller steps."
 	}
@@ -107,6 +110,8 @@ func GenerateDynamicNotification(agyBin, apiKey, contextDescription string, runn
 		trigger = "session_reset"
 	} else if strings.Contains(lowerDesc, "poison") || strings.Contains(lowerDesc, "dropped") {
 		trigger = "poison_pill"
+	} else if strings.Contains(lowerDesc, "authentication failed") || strings.Contains(lowerDesc, "auth failed") || strings.Contains(lowerDesc, "unauthorized") || strings.Contains(lowerDesc, "invalid api key") || strings.Contains(lowerDesc, "invalid_api_key") {
+		trigger = "auth_error"
 	} else if strings.Contains(lowerDesc, "watchdog") || strings.Contains(lowerDesc, "timed out") {
 		trigger = "watchdog"
 	} else if strings.Contains(lowerDesc, "non-transient") || strings.Contains(lowerDesc, "exhausting") {
@@ -121,7 +126,7 @@ func GenerateDynamicNotification(agyBin, apiKey, contextDescription string, runn
 	}()
 
 	fallback := StaticFallback(contextDescription)
-	if trigger == "outage" || strings.Contains(lowerDesc, "quota") || strings.Contains(lowerDesc, "rate limit") {
+	if trigger == "outage" || trigger == "auth_error" || strings.Contains(lowerDesc, "quota") || strings.Contains(lowerDesc, "rate limit") {
 		return fallback
 	}
 

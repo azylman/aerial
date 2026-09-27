@@ -46,6 +46,20 @@ func TestStaticFallback(t *testing.T) {
 		t.Errorf("Expected watchdog timeout fallback message, got: %q", msgWatchdog)
 	}
 
+	// Auth failures (including "authentication failed or timed out" from agy)
+	msgAuthTimedOut := StaticFallback("authentication failed or timed out")
+	if !strings.Contains(msgAuthTimedOut, "Authentication failed") {
+		t.Errorf("Expected auth failure message for 'authentication failed or timed out', got: %q", msgAuthTimedOut)
+	}
+	if strings.Contains(msgAuthTimedOut, "timed out") {
+		t.Errorf("Did not expect timeout message for auth failure, got: %q", msgAuthTimedOut)
+	}
+
+	msgAuthKey := StaticFallback("execution failed with non-transient error: invalid api key")
+	if !strings.Contains(msgAuthKey, "Authentication failed") {
+		t.Errorf("Expected auth failure message for invalid api key, got: %q", msgAuthKey)
+	}
+
 	// General error
 	msgGeneral := StaticFallback("Fatal unknown error")
 	if !strings.Contains(msgGeneral, "unexpected error occurred") {
@@ -114,6 +128,15 @@ func TestGenerateDynamicNotification_SuccessfulAgyRun(t *testing.T) {
 	res503 := GenerateDynamicNotification("agy", "valid_key", "Error 503: unavailable", mockRunner)
 	if res503 != ModelUnavailableMessage() {
 		t.Errorf("Expected neutral ModelUnavailableMessage for 503 outage, got: %q", res503)
+	}
+
+	// Test with auth failure context description: must bypass dynamic generation and return neutral auth fallback
+	resAuth := GenerateDynamicNotification("agy", "valid_key", "authentication failed or timed out", mockRunner)
+	if !strings.Contains(resAuth, "Authentication failed") {
+		t.Errorf("Expected neutral auth failure fallback, got: %q", resAuth)
+	}
+	if strings.Contains(resAuth, "bestie") {
+		t.Errorf("Auth failure should bypass dynamic runner and return static fallback, got: %q", resAuth)
 	}
 
 	// Test OAuth environment: apiKey is empty, runner still succeeds
