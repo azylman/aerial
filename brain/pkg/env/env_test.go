@@ -3,6 +3,7 @@ package env
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1296,8 +1297,13 @@ func TestProvisionRuntimeSharedAssets_Comprehensive(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(primaryGemini, "config", "mcp_config.json"), []byte(`{"mcpServers":{}}`), 0644)
 	_ = os.WriteFile(filepath.Join(primaryGemini, "config", "skills", "test.txt"), []byte("skill-data"), 0644)
 	_ = os.WriteFile(filepath.Join(primaryGemini, "skills", "legacy.txt"), []byte("legacy-data"), 0644)
+	_ = os.WriteFile(filepath.Join(primaryGemini, "antigravity-cli", "antigravity-oauth-token"), []byte(`{"token":"secret"}`), 0644)
+	_ = os.WriteFile(filepath.Join(primaryGemini, "antigravity-cli", "mcp_oauth_tokens.json"), []byte(`{"mcp":"secret"}`), 0644)
+	_ = os.WriteFile(filepath.Join(primaryGemini, "antigravity-cli", "installation_id"), []byte("uuid-1234"), 0644)
+	_ = os.WriteFile(filepath.Join(primaryGemini, "antigravity-cli", "jetski_state.pbtxt"), []byte("jetski: true"), 0644)
+	_ = os.WriteFile(filepath.Join(primaryGemini, "mcp_oauth_tokens.json"), []byte(`{"root_mcp":"secret"}`), 0644)
 
-	// Call provisionRuntimeSharedAssets - covers settings, mcp, skills, legacy skills copying/symlinks
+	// Call provisionRuntimeSharedAssets - covers settings, mcp, skills, legacy skills copying/symlinks, and shared credentials
 	p.provisionRuntimeSharedAssets(runtimeHome)
 
 	targetGemini := filepath.Join(runtimeHome, ".gemini")
@@ -1307,8 +1313,23 @@ func TestProvisionRuntimeSharedAssets_Comprehensive(t *testing.T) {
 	if data, err := os.ReadFile(filepath.Join(targetGemini, "config", "mcp_config.json")); err != nil || string(data) != `{"mcpServers":{}}` {
 		t.Errorf("mcp_config.json not copied correctly: %v, %s", err, string(data))
 	}
+	if data, err := os.ReadFile(filepath.Join(targetGemini, "antigravity-cli", "antigravity-oauth-token")); err != nil || string(data) != `{"token":"secret"}` {
+		t.Errorf("antigravity-oauth-token not provisioned correctly: %v, %s", err, string(data))
+	}
+	if data, err := os.ReadFile(filepath.Join(targetGemini, "antigravity-cli", "mcp_oauth_tokens.json")); err != nil || string(data) != `{"mcp":"secret"}` {
+		t.Errorf("mcp_oauth_tokens.json not provisioned correctly: %v, %s", err, string(data))
+	}
+	if data, err := os.ReadFile(filepath.Join(targetGemini, "antigravity-cli", "installation_id")); err != nil || string(data) != "uuid-1234" {
+		t.Errorf("installation_id not provisioned correctly: %v, %s", err, string(data))
+	}
+	if data, err := os.ReadFile(filepath.Join(targetGemini, "antigravity-cli", "jetski_state.pbtxt")); err != nil || string(data) != "jetski: true" {
+		t.Errorf("jetski_state.pbtxt not provisioned correctly: %v, %s", err, string(data))
+	}
+	if data, err := os.ReadFile(filepath.Join(targetGemini, "mcp_oauth_tokens.json")); err != nil || string(data) != `{"root_mcp":"secret"}` {
+		t.Errorf("root mcp_oauth_tokens.json not provisioned correctly: %v, %s", err, string(data))
+	}
 
-	// 2. Call again to test removing existing symlinks and replacing them
+	// 2. Call again to test removing existing symlinks/files and replacing them
 	p.provisionRuntimeSharedAssets(runtimeHome)
 
 	// 3. Error branches: blocked mkdir
@@ -1316,13 +1337,44 @@ func TestProvisionRuntimeSharedAssets_Comprehensive(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(blockedRuntime, ".gemini"), []byte("blocker"), 0644)
 	p.provisionRuntimeSharedAssets(blockedRuntime)
 
-	// 4. Blocked write for settings and mcp
+	// 4. Blocked write for settings, mcp, skills, and credentials
 	blockedFilesRuntime := t.TempDir()
 	_ = os.MkdirAll(filepath.Join(blockedFilesRuntime, ".gemini", "antigravity-cli", "settings.json"), 0755)
 	_ = os.MkdirAll(filepath.Join(blockedFilesRuntime, ".gemini", "config", "mcp_config.json"), 0755)
 	_ = os.MkdirAll(filepath.Join(blockedFilesRuntime, ".gemini", "config", "skills", "blocker"), 0755)
 	_ = os.MkdirAll(filepath.Join(blockedFilesRuntime, ".gemini", "skills", "blocker"), 0755)
+	_ = os.MkdirAll(filepath.Join(blockedFilesRuntime, ".gemini", "antigravity-cli", "antigravity-oauth-token", "blocker"), 0755)
+	_ = os.MkdirAll(filepath.Join(blockedFilesRuntime, ".gemini", "mcp_oauth_tokens.json", "blocker"), 0755)
 	p.provisionRuntimeSharedAssets(blockedFilesRuntime)
+
+	// 5. Test forced symlink failure on platforms where symlinks succeed (e.g. Linux CI)
+	// to deterministically exercise the fallback atomic copy across all shared assets.
+	origSymlink := symlinkRuntimeAsset
+	defer func() { symlinkRuntimeAsset = origSymlink }()
+
+	symlinkRuntimeAsset = func(src, dst string) error {
+		return errors.New("simulated symlink error")
+	}
+
+	fallbackRuntime := t.TempDir()
+	p.provisionRuntimeSharedAssets(fallbackRuntime)
+
+	fallbackGemini := filepath.Join(fallbackRuntime, ".gemini")
+	if data, err := os.ReadFile(filepath.Join(fallbackGemini, "antigravity-cli", "antigravity-oauth-token")); err != nil || string(data) != `{"token":"secret"}` {
+		t.Errorf("antigravity-oauth-token not copied in fallback: %v, %s", err, string(data))
+	}
+	if data, err := os.ReadFile(filepath.Join(fallbackGemini, "mcp_oauth_tokens.json")); err != nil || string(data) != `{"root_mcp":"secret"}` {
+		t.Errorf("mcp_oauth_tokens.json not copied in fallback: %v, %s", err, string(data))
+	}
+
+	// 6. Test fallback when primary files are unreadable (e.g. directory instead of file)
+	unreadableRuntime := t.TempDir()
+	badPrimaryHome := t.TempDir()
+	pBad := New(badPrimaryHome, t.TempDir())
+	badGemini := filepath.Join(badPrimaryHome, ".gemini")
+	_ = os.MkdirAll(filepath.Join(badGemini, "antigravity-cli", "antigravity-oauth-token"), 0755)
+	_ = os.MkdirAll(filepath.Join(badGemini, "mcp_oauth_tokens.json"), 0755)
+	pBad.provisionRuntimeSharedAssets(unreadableRuntime)
 }
 
 func TestAtomicSwapRulesDir_RollbackAndErrors(t *testing.T) {
@@ -1543,7 +1595,95 @@ func TestLinkSkills_DestinationCollision(t *testing.T) {
 	LinkSkills([]string{targetDir}, []string{srcDir})
 }
 
+func TestSync_AdditionalErrorBranches(t *testing.T) {
+	// 1. SyncSettings failure (blocked path in primaryHome)
+	badPrimary := t.TempDir()
+	_ = os.WriteFile(filepath.Join(badPrimary, ".gemini"), []byte("not-a-dir"), 0644)
+	p := New(badPrimary, t.TempDir())
+	err := p.Sync(context.Background(), nil)
+	if err == nil || !strings.Contains(err.Error(), "failed to sync settings") {
+		t.Errorf("expected failed to sync settings error, got: %v", err)
+	}
 
+	// 2. SyncRules failure (file exceeding size ceiling)
+	goodPrimary := t.TempDir()
+	rulesDir := t.TempDir()
+	commonDir := filepath.Join(rulesDir, "common")
+	_ = os.MkdirAll(commonDir, 0755)
+	hugeContent := strings.Repeat("A", MaxSourceRuleFileSizeBytes+100)
+	_ = os.WriteFile(filepath.Join(commonDir, "01.md"), []byte(hugeContent), 0644)
 
+	pRules := New(goodPrimary, t.TempDir())
+	pRules.SetAerialRulesDir(rulesDir)
+	err = pRules.Sync(context.Background(), nil)
+	if err == nil || !strings.Contains(err.Error(), "failed to sync rules") {
+		t.Errorf("expected failed to sync rules error, got: %v", err)
+	}
+}
 
+func TestSweepOrphanedSymlinks_Coverage(t *testing.T) {
+	tmpDir := t.TempDir()
+	targetDir := filepath.Join(tmpDir, "skills")
+	_ = os.MkdirAll(targetDir, 0755)
+
+	// Valid file, not a symlink
+	_ = os.WriteFile(filepath.Join(targetDir, "regular.txt"), []byte("file"), 0644)
+
+	// Non-existent directory handling
+	sweepOrphanedSymlinks([]string{filepath.Join(tmpDir, "nonexistent"), targetDir})
+}
+
+func TestAtomicSwapRulesDir_RollbackAndErrors_Extended(t *testing.T) {
+	tmpDir := t.TempDir()
+	p := New(tmpDir, tmpDir)
+	rules := []ruleSourceFile{{filename: "01.md", content: "data", prefix: "00_"}}
+	targetDir := filepath.Join(tmpDir, "swap_target")
+
+	// 1. First swap succeeds, creates targetDir
+	if err := p.atomicSwapRulesDir(rules, targetDir); err != nil {
+		t.Fatalf("setup swap failed: %v", err)
+	}
+
+	origRename := renameRulesDir
+	defer func() { renameRulesDir = origRename }()
+
+	// 2. Backup failure: renameRulesDir fails on targetDir -> backupDir
+	renameRulesDir = func(src, dst string) error {
+		if strings.Contains(dst, ".rules.backup.") {
+			return errors.New("simulated backup error")
+		}
+		return os.Rename(src, dst)
+	}
+	err := p.atomicSwapRulesDir(rules, targetDir)
+	if err == nil || !strings.Contains(err.Error(), "failed to backup existing rules dir") {
+		t.Errorf("expected backup failure error, got: %v", err)
+	}
+
+	// 3. Staging rename failure with successful restore
+	renameRulesDir = func(src, dst string) error {
+		if strings.Contains(src, ".rules.tmp.") && dst == targetDir {
+			return errors.New("simulated move error")
+		}
+		return os.Rename(src, dst)
+	}
+	err = p.atomicSwapRulesDir(rules, targetDir)
+	if err == nil || !strings.Contains(err.Error(), "failed to move staging rules to target dir") {
+		t.Errorf("expected move failure error, got: %v", err)
+	}
+
+	// 4. Staging rename failure with restore failure
+	renameRulesDir = func(src, dst string) error {
+		if strings.Contains(src, ".rules.tmp.") && dst == targetDir {
+			return errors.New("simulated move error")
+		}
+		if strings.Contains(src, ".rules.backup.") && dst == targetDir {
+			return errors.New("simulated restore error")
+		}
+		return os.Rename(src, dst)
+	}
+	err = p.atomicSwapRulesDir(rules, targetDir)
+	if err == nil || !strings.Contains(err.Error(), "failed to move staging rules to target dir") {
+		t.Errorf("expected move failure error with restore error log, got: %v", err)
+	}
+}
 
