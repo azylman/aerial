@@ -1338,13 +1338,18 @@ EOF
 
 func TestDaemon_EnvironmentHomeOverride(t *testing.T) {
 	tempDir := t.TempDir()
+	envFile := filepath.Join(tempDir, "env_out.txt")
 	mockBin := filepath.Join(tempDir, "mock_env.sh")
-	script := `#!/bin/sh
+	script := fmt.Sprintf(`#!/bin/sh
+echo "HOME=$HOME" > "%s"
+echo "USERPROFILE=$USERPROFILE" >> "%s"
+echo "GEMINI_CLI_HOME=$GEMINI_CLI_HOME" >> "%s"
+echo "EXTRA=$EXTRA" >> "%s"
 echo '{"event":"init","init":{"tools":["run_command"]}}'
 while IFS= read -r line; do
-  echo "{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"HOME=$HOME;USERPROFILE=$USERPROFILE;GEMINI=$GEMINI_CLI_HOME;EXTRA=$EXTRA\"}}"
+  echo '{"event":"result","result":{"status":"SUCCESS","response":"ok","usage":{}}}'
 done
-`
+`, filepath.ToSlash(envFile), filepath.ToSlash(envFile), filepath.ToSlash(envFile), filepath.ToSlash(envFile))
 	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
 		t.Fatalf("failed to write mock agy: %v", err)
 	}
@@ -1372,18 +1377,42 @@ done
 
 	res, err := daemon.ExecuteTurn(ctx, "check")
 	if err != nil {
-		t.Fatalf("ExecuteTurn failed: %v", err)
+		t.Fatalf("ExecuteTurn failed: %v (stderr: %s)", err, daemon.stderrBuf.String())
 	}
-	expected := fmt.Sprintf("HOME=%s;USERPROFILE=%s;GEMINI=%s;EXTRA=kept", customHome, customHome, customHome)
-	if res.Response != expected {
-		t.Errorf("expected response %q, got %q", expected, res.Response)
+	if res.Response != "ok" {
+		t.Errorf("expected response 'ok', got %q", res.Response)
+	}
+
+	outBytes, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatalf("failed to read envFile: %v", err)
+	}
+	outStr := string(outBytes)
+	if !strings.Contains(outStr, "EXTRA=kept") {
+		t.Errorf("expected EXTRA=kept in env output, got: %s", outStr)
+	}
+	if strings.Contains(outStr, "old-home") || strings.Contains(outStr, "old-user") || strings.Contains(outStr, "old-cli") {
+		t.Errorf("expected old home/userprofile/cli env to be stripped, got: %s", outStr)
 	}
 
 	// 2. Without GeminiHomeDir (exercises cmd.Env = combined else branch)
+	envFileEmpty := filepath.Join(tempDir, "env_empty_out.txt")
+	mockBinEmpty := filepath.Join(tempDir, "mock_env_empty.sh")
+	scriptEmpty := fmt.Sprintf(`#!/bin/sh
+echo "EXTRA=$EXTRA" > "%s"
+echo '{"event":"init","init":{"tools":["run_command"]}}'
+while IFS= read -r line; do
+  echo '{"event":"result","result":{"status":"SUCCESS","response":"ok","usage":{}}}'
+done
+`, filepath.ToSlash(envFileEmpty))
+	if err := os.WriteFile(mockBinEmpty, []byte(scriptEmpty), 0755); err != nil {
+		t.Fatalf("failed to write mock agy empty: %v", err)
+	}
+
 	cfgEmptyHome := DaemonConfig{
 		SessionID: "sess-env-empty",
 		ThreadID:  "thread-env-empty",
-		AgyBin:    mockBin,
+		AgyBin:    mockBinEmpty,
 		Cwd:       tempDir,
 		Env:       []string{"EXTRA=combined-only"},
 		Timeout:   5 * time.Second,
@@ -1397,9 +1426,18 @@ done
 	if err != nil {
 		t.Fatalf("ExecuteTurn empty home failed: %v", err)
 	}
-	if !strings.Contains(resEmpty.Response, "EXTRA=combined-only") {
-		t.Errorf("expected EXTRA=combined-only in response, got %q", resEmpty.Response)
+	if resEmpty.Response != "ok" {
+		t.Errorf("expected response 'ok', got %q", resEmpty.Response)
+	}
+
+	outBytesEmpty, err := os.ReadFile(envFileEmpty)
+	if err != nil {
+		t.Fatalf("failed to read envFileEmpty: %v", err)
+	}
+	if !strings.Contains(string(outBytesEmpty), "EXTRA=combined-only") {
+		t.Errorf("expected EXTRA=combined-only in env output, got: %s", string(outBytesEmpty))
 	}
 }
+
 
 

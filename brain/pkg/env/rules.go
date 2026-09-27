@@ -32,7 +32,8 @@ const (
 )
 
 var (
-	systemRulesMu sync.Mutex
+	systemRulesMu  sync.Mutex
+	renameRulesDir = os.Rename
 
 	// DefaultAerialRulesPaths specifies standard search roots for aerial system rules in priority order.
 	DefaultAerialRulesPaths = []string{
@@ -106,11 +107,18 @@ func discoverRuleFiles(dir, subfolder, prefix string) ([]ruleSourceFile, error) 
 		return nil, nil
 	}
 	targetDir := filepath.Join(dir, subfolder)
-	entries, err := os.ReadDir(targetDir)
-	if err != nil {
-		if os.IsNotExist(err) {
+	fi, statErr := os.Stat(targetDir)
+	if statErr != nil {
+		if os.IsNotExist(statErr) {
 			return nil, nil
 		}
+		return nil, fmt.Errorf("failed to read rules directory %s: %w", targetDir, statErr)
+	}
+	if !fi.IsDir() {
+		return nil, fmt.Errorf("failed to read rules directory %s: not a directory", targetDir)
+	}
+	entries, err := os.ReadDir(targetDir)
+	if err != nil {
 		return nil, fmt.Errorf("failed to read rules directory %s: %w", targetDir, err)
 	}
 
@@ -216,7 +224,9 @@ func (p *Provisioner) atomicSwapRulesDir(rules []ruleSourceFile, targetDir strin
 		return err
 	}
 	defer func() {
-		_ = os.RemoveAll(stagingDir) // nolint:errcheck
+		if rmErr := os.RemoveAll(stagingDir); rmErr != nil && !os.IsNotExist(rmErr) {
+			log.Printf("[Env] Warning removing staging rules dir %s: %v", stagingDir, rmErr)
+		}
 	}()
 
 	for _, r := range rules {
@@ -236,22 +246,29 @@ func (p *Provisioner) atomicSwapRulesDir(rules []ruleSourceFile, targetDir strin
 	// Atomic directory swap
 	backupDir := filepath.Join(parentDir, fmt.Sprintf(".rules.backup.%s", randSuffix))
 	hasActive := false
-	if fi, statErr := os.Stat(targetDir); statErr == nil && fi.IsDir() {
+	if fi, statErr := os.Stat(targetDir); statErr == nil {
+		if !fi.IsDir() {
+			return fmt.Errorf("target rules path %s is not a directory", targetDir)
+		}
 		hasActive = true
-		if renErr := os.Rename(targetDir, backupDir); renErr != nil {
+		if renErr := renameRulesDir(targetDir, backupDir); renErr != nil {
 			return fmt.Errorf("failed to backup existing rules dir: %w", renErr)
 		}
 	}
 
-	if renErr := os.Rename(stagingDir, targetDir); renErr != nil {
+	if renErr := renameRulesDir(stagingDir, targetDir); renErr != nil {
 		if hasActive {
-			_ = os.Rename(backupDir, targetDir) // nolint:errcheck
+			if rbErr := renameRulesDir(backupDir, targetDir); rbErr != nil {
+				log.Printf("[Env] ERROR: failed to restore backup rules dir %s -> %s: %v", backupDir, targetDir, rbErr)
+			}
 		}
 		return fmt.Errorf("failed to move staging rules to target dir: %w", renErr)
 	}
 
 	if hasActive {
-		_ = os.RemoveAll(backupDir) // nolint:errcheck
+		if rmErr := os.RemoveAll(backupDir); rmErr != nil && !os.IsNotExist(rmErr) {
+			log.Printf("[Env] Warning removing backup rules dir %s: %v", backupDir, rmErr)
+		}
 	}
 	return nil
 }
@@ -311,7 +328,9 @@ func (p *Provisioner) provisionRuntimeSharedAssets(runtimeHome string) {
 	primarySkills := filepath.Join(primaryGemini, "config", "skills")
 	targetSkills := filepath.Join(runtimeGemini, "config", "skills")
 	if _, err := os.Stat(primarySkills); err == nil {
-		_ = os.Remove(targetSkills) // nolint:errcheck
+		if rErr := os.Remove(targetSkills); rErr != nil && !os.IsNotExist(rErr) {
+			log.Printf("[Env] Warning: failed to remove target skills symlink: %v", rErr)
+		}
 		if err := os.Symlink(primarySkills, targetSkills); err != nil {
 			log.Printf("[Env] Warning: failed to symlink primary skills: %v", err)
 		}
@@ -320,9 +339,52 @@ func (p *Provisioner) provisionRuntimeSharedAssets(runtimeHome string) {
 	legacySkills := filepath.Join(primaryGemini, "skills")
 	targetLegacySkills := filepath.Join(runtimeGemini, "skills")
 	if _, err := os.Stat(legacySkills); err == nil {
-		_ = os.Remove(targetLegacySkills) // nolint:errcheck
+		if rErr := os.Remove(targetLegacySkills); rErr != nil && !os.IsNotExist(rErr) {
+			log.Printf("[Env] Warning: failed to remove target legacy skills symlink: %v", rErr)
+		}
 		if err := os.Symlink(legacySkills, targetLegacySkills); err != nil {
 			log.Printf("[Env] Warning: failed to symlink legacy skills: %v", err)
+		}
+	}
+
+	// Share authentication credentials and CLI state across isolated runtimes
+	sharedCliFiles := []string{
+		"antigravity-oauth-token",
+		"mcp_oauth_tokens.json",
+		"installation_id",
+		"jetski_state.pbtxt",
+	}
+	for _, fname := range sharedCliFiles {
+		primaryFile := filepath.Join(primaryGemini, "antigravity-cli", fname)
+		targetFile := filepath.Join(runtimeGemini, "antigravity-cli", fname)
+		if _, err := os.Stat(primaryFile); err == nil {
+			if rErr := os.Remove(targetFile); rErr != nil && !os.IsNotExist(rErr) {
+				log.Printf("[Env] Warning: failed to remove existing %s in runtime before link: %v", fname, rErr)
+			}
+			if sErr := os.Symlink(primaryFile, targetFile); sErr != nil {
+				data, rErr := os.ReadFile(primaryFile)
+				if rErr != nil {
+					log.Printf("[Env] Warning: failed to read %s for runtime copy: %v", fname, rErr)
+				} else if wErr := p.writeAtomic(targetFile, string(data)); wErr != nil {
+					log.Printf("[Env] Warning: failed to copy %s to runtime: %v", fname, wErr)
+				}
+			}
+		}
+	}
+
+	primaryMcpTokens := filepath.Join(primaryGemini, "mcp_oauth_tokens.json")
+	targetMcpTokens := filepath.Join(runtimeGemini, "mcp_oauth_tokens.json")
+	if _, err := os.Stat(primaryMcpTokens); err == nil {
+		if rErr := os.Remove(targetMcpTokens); rErr != nil && !os.IsNotExist(rErr) {
+			log.Printf("[Env] Warning: failed to remove target mcp_oauth_tokens.json before link: %v", rErr)
+		}
+		if sErr := os.Symlink(primaryMcpTokens, targetMcpTokens); sErr != nil {
+			data, rErr := os.ReadFile(primaryMcpTokens)
+			if rErr != nil {
+				log.Printf("[Env] Warning: failed to read primary mcp_oauth_tokens.json for runtime copy: %v", rErr)
+			} else if wErr := p.writeAtomic(targetMcpTokens, string(data)); wErr != nil {
+				log.Printf("[Env] Warning: failed to copy mcp_oauth_tokens.json to runtime: %v", wErr)
+			}
 		}
 	}
 }
