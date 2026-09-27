@@ -1172,4 +1172,122 @@ func TestRollbackTagForService_TableDriven(t *testing.T) {
 	}
 }
 
+func TestParseGitHubRepo_TableDriven(t *testing.T) {
+	tests := []struct {
+		name    string
+		repoURL string
+		want    string
+	}{
+		{
+			name:    "empty string",
+			repoURL: "",
+			want:    "",
+		},
+		{
+			name:    "whitespace only",
+			repoURL: "   ",
+			want:    "",
+		},
+		{
+			name:    "https with .git",
+			repoURL: "https://github.com/azylman/aerial.git",
+			want:    "azylman/aerial",
+		},
+		{
+			name:    "https without .git",
+			repoURL: "https://github.com/azylman/mirrormere",
+			want:    "azylman/mirrormere",
+		},
+		{
+			name:    "https with trailing slash",
+			repoURL: "https://github.com/azylman/aerial/",
+			want:    "azylman/aerial",
+		},
+		{
+			name:    "https with userinfo token",
+			repoURL: "https://x-access-token:ghp_secretToken12345@github.com/azylman/mirrormere.git",
+			want:    "azylman/mirrormere",
+		},
+		{
+			name:    "https with username only",
+			repoURL: "https://azylman@github.com/azylman/mirrormere.git",
+			want:    "azylman/mirrormere",
+		},
+		{
+			name:    "ssh format with git@",
+			repoURL: "git@github.com:azylman/mirrormere.git",
+			want:    "azylman/mirrormere",
+		},
+		{
+			name:    "ssh format without .git",
+			repoURL: "git@github.com:azylman/mirrormere",
+			want:    "azylman/mirrormere",
+		},
+		{
+			name:    "ssh scheme with userinfo",
+			repoURL: "ssh://git@github.com/azylman/mirrormere.git",
+			want:    "azylman/mirrormere",
+		},
+		{
+			name:    "git scheme",
+			repoURL: "git://github.com/azylman/aerial.git",
+			want:    "azylman/aerial",
+		},
+		{
+			name:    "uppercase scheme and host",
+			repoURL: "HTTPS://GITHUB.COM/azylman/aerial.git",
+			want:    "azylman/aerial",
+		},
+		{
+			name:    "host with port",
+			repoURL: "https://github.com:443/azylman/aerial.git",
+			want:    "azylman/aerial",
+		},
+		{
+			name:    "no scheme github.com prefix",
+			repoURL: "github.com/azylman/aerial.git",
+			want:    "azylman/aerial",
+		},
+		{
+			name:    "gitlab repo rejected",
+			repoURL: "https://gitlab.com/azylman/mirrormere.git",
+			want:    "",
+		},
+		{
+			name:    "gitlab ssh rejected",
+			repoURL: "git@gitlab.com:azylman/mirrormere.git",
+			want:    "",
+		},
+		{
+			name:    "local filesystem path rejected",
+			repoURL: "/share/aerial",
+			want:    "",
+		},
+		{
+			name:    "single segment path rejected",
+			repoURL: "https://github.com/azylman",
+			want:    "",
+		},
+		{
+			name:    "deep path rejected",
+			repoURL: "https://github.com/azylman/aerial/tree/main",
+			want:    "",
+		},
+		{
+			name:    "host only without path rejected",
+			repoURL: "https://github.com",
+			want:    "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ParseGitHubRepo(tt.repoURL)
+			if got != tt.want {
+				t.Errorf("ParseGitHubRepo(%q) = %q, want %q", tt.repoURL, got, tt.want)
+			}
+		})
+	}
+}
+
 

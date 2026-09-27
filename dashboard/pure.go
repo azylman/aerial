@@ -953,7 +953,7 @@ func MergeClusterDeploymentsWithHangar(
 	}
 
 	// 2. Ingest Hangar Reconciliation
-	if gitSync.Reconciliation != nil && (gitSync.Reconciliation.Active || gitSync.Reconciliation.State == "failed" || gitSync.Reconciliation.State == "pulling" || gitSync.Reconciliation.State == "swapping") {
+	if gitSync.Reconciliation != nil && (gitSync.Reconciliation.Active || gitSync.Reconciliation.State == "failed" || gitSync.Reconciliation.State == "pulling" || gitSync.Reconciliation.State == "swapping" || (gitSync.Reconciliation.State == "healthy" && !gitSync.Reconciliation.CompletedAt.IsZero() && refTime.Sub(gitSync.Reconciliation.CompletedAt) < 5*time.Minute)) {
 		recon := gitSync.Reconciliation
 		reconSHA := recon.CommitSHA
 		if reconSHA == "" {
@@ -1013,6 +1013,24 @@ func MergeClusterDeploymentsWithHangar(
 				dep.Steps[3].Status = "active"
 				dep.Steps[4].Status = "active"
 			}
+		case "healthy":
+			if stageRank[dep.Stage] <= stageRank["live"] {
+				dep.Stage = "live"
+				dep.Progress = 100
+			}
+			if len(dep.Steps) < 5 {
+				dep.Steps = []DeploymentStep{
+					{Name: "Commit Trigger", Icon: "📦", Status: "completed"},
+					{Name: "CI Build & GHCR", Icon: "⚙️", Status: "completed"},
+					{Name: "Hangar Sync", Icon: "⬇️", Status: "completed"},
+					{Name: "Container Swap", Icon: "🔄", Status: "completed"},
+					{Name: "Health Check", Icon: "🩺", Status: "completed"},
+				}
+			} else {
+				for i := range dep.Steps {
+					dep.Steps[i].Status = "completed"
+				}
+			}
 		case "failed":
 			dep.Stage = "failed"
 			dep.Progress = 55
@@ -1040,20 +1058,27 @@ func MergeClusterDeploymentsWithHangar(
 		}
 	}
 
-	// 3. Ingest Local Containers grouped by commit
+	// 3. Ingest Local Containers grouped by commit (enrichment only)
 	groupsByCommit := make(map[string][]DockerContainerJSON)
 	for _, c := range aerialContainers {
-		if !IsCoreAerialContainer(c) {
+		svcName := ""
+		if c.Labels != nil {
+			svcName = c.Labels["com.docker.compose.service"]
+		}
+		if svcName == "" && len(c.Names) > 0 {
+			name := strings.TrimPrefix(c.Names[0], "/")
+			svcName = strings.TrimPrefix(name, "aerial-")
+		}
+		svcName = strings.ToLower(svcName)
+		switch svcName {
+		case "agentsview", "watchtower", "autoheal", "ollama":
 			continue
 		}
+
 		commit := ExtractSingleContainerCommit(c)
 		if commit == "" && gitSync.Reconciliation != nil && len(gitSync.Reconciliation.TargetServices) > 0 {
-			svc := c.Labels["com.docker.compose.service"]
-			if svc == "" && len(c.Names) > 0 {
-				svc = strings.TrimPrefix(strings.TrimPrefix(c.Names[0], "/"), "aerial-")
-			}
 			for _, ts := range gitSync.Reconciliation.TargetServices {
-				if ts == svc {
+				if ts == svcName {
 					if gitSync.Reconciliation.CommitSHA != "" {
 						commit = gitSync.Reconciliation.CommitSHA
 					}
@@ -1062,7 +1087,7 @@ func MergeClusterDeploymentsWithHangar(
 			}
 		}
 		if commit == "" {
-			commit = currentCommit
+			continue
 		}
 		norm := normalizeSHA(commit)
 		matchedKey := ""
@@ -1080,6 +1105,14 @@ func MergeClusterDeploymentsWithHangar(
 	}
 
 	for groupSHA, groupContainers := range groupsByCommit {
+		entry := findEntry(groupSHA)
+		if entry == nil {
+			// Strictly top-down: containers only enrich existing deployment cards
+			// originating from GitHub CI runs or Hangar reconciliations.
+			continue
+		}
+		dep := entry.dep
+
 		var latestCreatedAt time.Time
 		minUptimeSec := int64(999999999)
 		hasStarting := false
@@ -1104,33 +1137,6 @@ func MergeClusterDeploymentsWithHangar(
 				hasDegraded = true
 			} else {
 				healthyCount++
-			}
-		}
-
-		shortSHA := shortenSHA(groupSHA)
-		if shortSHA == "" {
-			shortSHA = "aerial-stack"
-		}
-
-		entry := findEntry(groupSHA)
-		var dep *DeploymentStatus
-		isNewEntry := false
-		if entry != nil {
-			dep = entry.dep
-		} else {
-			isNewEntry = true
-			dep = &DeploymentStatus{
-				ID:        fmt.Sprintf("dep-aerial-stack-%s", shortSHA),
-				Service:   "aerial-stack",
-				Commit:    shortSHA,
-				StartedAt: latestCreatedAt,
-				Steps: []DeploymentStep{
-					{Name: "Commit Trigger", Icon: "📦", Status: "completed"},
-					{Name: "CI Build & GHCR", Icon: "⚙️", Status: "completed"},
-					{Name: "Hangar Sync", Icon: "⬇️", Status: "completed"},
-					{Name: "Container Swap", Icon: "🔄", Status: "completed"},
-					{Name: "Health Check", Icon: "🩺", Status: "completed"},
-				},
 			}
 		}
 
@@ -1159,9 +1165,6 @@ func MergeClusterDeploymentsWithHangar(
 				dep.Steps[4].Status = "failed"
 			}
 			attachContainerChips(dep, groupContainers)
-			if isNewEntry {
-				entries = append(entries, &pipelineEntry{dep: dep, canonical: groupSHA})
-			}
 		} else if hasStarting || minUptimeSec < 120 || isHangarSwapping {
 			if stageRank[dep.Stage] < stageRank["swapping"] {
 				dep.Stage = "swapping"
@@ -1187,9 +1190,6 @@ func MergeClusterDeploymentsWithHangar(
 				dep.Steps[4].Status = "active"
 			}
 			attachContainerChips(dep, groupContainers)
-			if isNewEntry {
-				entries = append(entries, &pipelineEntry{dep: dep, canonical: groupSHA})
-			}
 		} else if isHangarPulling {
 			if stageRank[dep.Stage] < stageRank["pulling"] {
 				dep.Stage = "pulling"
@@ -1210,9 +1210,6 @@ func MergeClusterDeploymentsWithHangar(
 				dep.Steps[4].Status = "pending"
 			}
 			attachContainerChips(dep, groupContainers)
-			if isNewEntry {
-				entries = append(entries, &pipelineEntry{dep: dep, canonical: groupSHA})
-			}
 		} else if minUptimeSec < 600 {
 			// Live grace window
 			if dep.Stage == "" || dep.Stage == "awaiting_pull" || stageRank[dep.Stage] <= stageRank["live"] {
@@ -1232,9 +1229,6 @@ func MergeClusterDeploymentsWithHangar(
 					}
 				}
 				attachContainerChips(dep, groupContainers)
-				if isNewEntry {
-					entries = append(entries, &pipelineEntry{dep: dep, canonical: groupSHA})
-				}
 			}
 		}
 	}

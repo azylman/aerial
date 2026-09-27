@@ -447,6 +447,76 @@ func ResolveRegistryUser(repoURL string, lookup func(string) string) string {
 	return "x-access-token"
 }
 
+// ParseGitHubRepo extracts the "owner/repo" slug from a GitHub URL or git remote.
+// It strips embedded credentials and requires host to be github.com.
+// Returns an empty string if the URL is empty, non-GitHub, or malformed.
+func ParseGitHubRepo(repoURL string) string {
+	raw := strings.TrimSpace(repoURL)
+	if raw == "" {
+		return ""
+	}
+
+	// Strip .git suffix and trailing slashes
+	raw = strings.TrimSuffix(strings.TrimRight(raw, "/"), ".git")
+
+	var host string
+	var pathPart string
+
+	if idx := strings.Index(raw, "://"); idx != -1 {
+		// URL scheme (https://, http://, ssh://, git://)
+		rest := raw[idx+3:]
+		// Strip userinfo if present: user:pass@host/path
+		if atIdx := strings.Index(rest, "@"); atIdx != -1 {
+			rest = rest[atIdx+1:]
+		}
+		slashIdx := strings.Index(rest, "/")
+		if slashIdx == -1 {
+			return ""
+		}
+		host = rest[:slashIdx]
+		pathPart = rest[slashIdx+1:]
+	} else if atIdx := strings.Index(raw, "@"); atIdx != -1 {
+		// SCP-like SSH: git@github.com:owner/repo
+		rest := raw[atIdx+1:]
+		colonIdx := strings.Index(rest, ":")
+		if colonIdx == -1 {
+			return ""
+		}
+		host = rest[:colonIdx]
+		pathPart = rest[colonIdx+1:]
+	} else {
+		// No scheme or userinfo (e.g. github.com/owner/repo)
+		slashIdx := strings.Index(raw, "/")
+		if slashIdx == -1 {
+			return ""
+		}
+		potentialHost := raw[:slashIdx]
+		if strings.EqualFold(potentialHost, "github.com") {
+			host = potentialHost
+			pathPart = raw[slashIdx+1:]
+		} else {
+			return ""
+		}
+	}
+
+	// Remove port from host if present (e.g. github.com:443)
+	if colonIdx := strings.Index(host, ":"); colonIdx != -1 {
+		host = host[:colonIdx]
+	}
+
+	if !strings.EqualFold(host, "github.com") {
+		return ""
+	}
+
+	parts := strings.Split(strings.Trim(pathPart, "/"), "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return ""
+	}
+
+	return parts[0] + "/" + parts[1]
+}
+
+
 // ResolveDockerConfigPath returns the absolute path to the Docker config.json file
 // based on DOCKER_CONFIG or HOME environment variables.
 func ResolveDockerConfigPath(lookup func(string) string) string {

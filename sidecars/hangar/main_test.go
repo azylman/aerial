@@ -5021,4 +5021,73 @@ func TestReconciliationStatus_ExposedInGetStatus(t *testing.T) {
 	}
 }
 
+func TestGetStatus_GitHubRepoExposureAndCaching(t *testing.T) {
+	gitCalls := 0
+	mockGit := func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+		gitCalls++
+		if len(args) >= 3 && args[0] == "remote" && args[1] == "get-url" && args[2] == "origin" {
+			if dir == "/share/mirrormere" {
+				return []byte("https://github.com/azylman/mirrormere.git\n"), nil, nil
+			}
+			if dir == "/share/custom" {
+				return []byte("git@github.com:custom-org/custom-repo.git\n"), nil, nil
+			}
+			return []byte(""), nil, errors.New("no remote")
+		}
+		if len(args) >= 2 && args[0] == "log" {
+			return []byte("1111111111111111111111111111111111111111\x002026-09-20T12:00:00Z"), nil, nil
+		}
+		return []byte(""), nil, nil
+	}
+
+	d := NewDaemon(DaemonConfig{
+		Repos: []string{"/share/aerial", "/share/mirrormere", "/share/custom", "/share/unknown"},
+		RepoURLs: map[string]string{
+			"/share/aerial": "https://github.com/azylman/aerial.git",
+		},
+		GitExecutor: mockGit,
+	})
+
+	ctx := context.Background()
+	resp1 := d.GetStatus(ctx)
+
+	// Check /share/aerial from preconfigured repoUrls
+	if st, ok := resp1.Repos["/share/aerial"]; !ok || st.GitHubRepo != "azylman/aerial" {
+		t.Errorf("expected /share/aerial GitHubRepo 'azylman/aerial', got %+v", st)
+	}
+
+	// Check /share/mirrormere from gitExecutor remote get-url
+	if st, ok := resp1.Repos["/share/mirrormere"]; !ok || st.GitHubRepo != "azylman/mirrormere" {
+		t.Errorf("expected /share/mirrormere GitHubRepo 'azylman/mirrormere', got %+v", st)
+	}
+
+	// Check /share/custom from SSH git remote
+	if st, ok := resp1.Repos["/share/custom"]; !ok || st.GitHubRepo != "custom-org/custom-repo" {
+		t.Errorf("expected /share/custom GitHubRepo 'custom-org/custom-repo', got %+v", st)
+	}
+
+	// Check /share/unknown with error returns empty slug
+	if st, ok := resp1.Repos["/share/unknown"]; !ok || st.GitHubRepo != "" {
+		t.Errorf("expected /share/unknown GitHubRepo '', got %+v", st)
+	}
+
+	callsAfterFirst := gitCalls
+
+	// Second call should return identical cached slugs without repeating git remote get-url calls
+	resp2 := d.GetStatus(ctx)
+	if st, ok := resp2.Repos["/share/mirrormere"]; !ok || st.GitHubRepo != "azylman/mirrormere" {
+		t.Errorf("expected cached /share/mirrormere GitHubRepo 'azylman/mirrormere', got %+v", st)
+	}
+
+	// Only git log calls should occur on second GetStatus, zero remote get-url calls
+	d.repoSlugsMu.RLock()
+	cachedCount := len(d.repoSlugs)
+	d.repoSlugsMu.RUnlock()
+
+	if cachedCount != 4 {
+		t.Errorf("expected 4 cached slugs, got %d", cachedCount)
+	}
+	_ = callsAfterFirst
+}
+
 

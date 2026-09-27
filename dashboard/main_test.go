@@ -631,11 +631,19 @@ func TestMergeClusterDeployments_RollingSwap(t *testing.T) {
 			Names:   []string{"/aerial-dashboard"},
 			State:   "running",
 			Created: now.Add(-10 * time.Second).Unix(),
-			Labels:  map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "dashboard"},
+			Labels:  map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "dashboard", "org.opencontainers.image.revision": "abc9999999"},
 		},
 	}
 
-	deploys := mergeClusterDeployments(containers, nil, nil, "abc9999")
+	runs := []GitHubRun{
+		{
+			ID:        101,
+			HeadSHA:   "abc9999999",
+			Status:    "in_progress",
+			CreatedAt: now.Add(-30 * time.Second),
+		},
+	}
+	deploys := mergeClusterDeployments(containers, runs, nil, "abc9999")
 	if len(deploys) != 1 {
 		t.Fatalf("expected 1 unified deployment on rolling swap, got %d", len(deploys))
 	}
@@ -660,7 +668,7 @@ func TestMergeClusterDeployments_SyncedGrace(t *testing.T) {
 			Names:   []string{"/aerial-brain"},
 			State:   "running",
 			Created: now.Add(-3 * time.Minute).Unix(),
-			Labels:  map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"},
+			Labels:  map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain", "org.opencontainers.image.revision": "live1234567"},
 			Health: &struct {
 				Status string `json:"Status"`
 			}{Status: "healthy"},
@@ -670,14 +678,24 @@ func TestMergeClusterDeployments_SyncedGrace(t *testing.T) {
 			Names:   []string{"/aerial-dashboard"},
 			State:   "running",
 			Created: now.Add(-3 * time.Minute).Unix(),
-			Labels:  map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "dashboard"},
+			Labels:  map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "dashboard", "org.opencontainers.image.revision": "live1234567"},
 			Health: &struct {
 				Status string `json:"Status"`
 			}{Status: "healthy"},
 		},
 	}
 
-	deploys := mergeClusterDeployments(containers, nil, nil, "live123")
+	runs := []GitHubRun{
+		{
+			ID:         102,
+			HeadSHA:    "live1234567",
+			Status:     "completed",
+			Conclusion: "success",
+			CreatedAt:  now.Add(-4 * time.Minute),
+			UpdatedAt:  now.Add(-3 * time.Minute),
+		},
+	}
+	deploys := mergeClusterDeployments(containers, runs, nil, "live123")
 	if len(deploys) != 1 {
 		t.Fatalf("expected 1 unified deployment in synced grace, got %d", len(deploys))
 	}
@@ -704,7 +722,7 @@ func TestMergeClusterDeployments_DegradedState(t *testing.T) {
 			Names:   []string{"/aerial-brain"},
 			State:   "running",
 			Created: now.Add(-2 * time.Minute).Unix(),
-			Labels:  map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"},
+			Labels:  map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain", "org.opencontainers.image.revision": "deg1234567"},
 			Health: &struct {
 				Status string `json:"Status"`
 			}{Status: "unhealthy"},
@@ -714,14 +732,24 @@ func TestMergeClusterDeployments_DegradedState(t *testing.T) {
 			Names:   []string{"/aerial-dashboard"},
 			State:   "running",
 			Created: now.Add(-2 * time.Minute).Unix(),
-			Labels:  map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "dashboard"},
+			Labels:  map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "dashboard", "org.opencontainers.image.revision": "deg1234567"},
 			Health: &struct {
 				Status string `json:"Status"`
 			}{Status: "healthy"},
 		},
 	}
 
-	deploys := mergeClusterDeployments(containers, nil, nil, "deg1234")
+	runs := []GitHubRun{
+		{
+			ID:         103,
+			HeadSHA:    "deg1234567",
+			Status:     "completed",
+			Conclusion: "success",
+			CreatedAt:  now.Add(-3 * time.Minute),
+			UpdatedAt:  now.Add(-2 * time.Minute),
+		},
+	}
+	deploys := mergeClusterDeployments(containers, runs, nil, "deg1234")
 	if len(deploys) != 1 {
 		t.Fatalf("expected 1 unified deployment on degraded state, got %d", len(deploys))
 	}
@@ -779,7 +807,16 @@ func TestMergeClusterDeployments_AdversarialNilLabelsAndNilHealth(t *testing.T) 
 		},
 	}
 
-	deploys := mergeClusterDeployments(containers, nil, nil, "test1234")
+	gitSync := GitSyncStatusResponse{
+		Reconciliation: &ReconciliationStatus{
+			Active:         true,
+			State:          "swapping",
+			CommitSHA:      "test1234",
+			StartedAt:      now.Add(-30 * time.Second),
+			TargetServices: []string{"brain", "dashboard"},
+		},
+	}
+	deploys := mergeClusterDeploymentsWithHangar(containers, nil, nil, gitSync, "test1234")
 	if len(deploys) != 1 {
 		t.Fatalf("expected 1 deployment, got %d", len(deploys))
 	}
@@ -3348,8 +3385,9 @@ func TestMergeClusterDeploymentsWithHangar_DegradedWithoutHangarFailure(t *testi
 			State:   "running",
 			Created: now.Add(-10 * time.Minute).Unix(),
 			Labels: map[string]string{
-				"com.docker.compose.project": "aerial",
-				"com.docker.compose.service": "brain",
+				"com.docker.compose.project":        "aerial",
+				"com.docker.compose.service":        "brain",
+				"org.opencontainers.image.revision": "commit1234567",
 			},
 			Health: &DockerContainerHealth{Status: "unhealthy"},
 		},
@@ -3357,8 +3395,18 @@ func TestMergeClusterDeploymentsWithHangar_DegradedWithoutHangarFailure(t *testi
 	gitSync := GitSyncStatusResponse{
 		Status: "synced",
 	}
+	runs := []GitHubRun{
+		{
+			ID:         701,
+			HeadSHA:    "commit1234567",
+			Status:     "completed",
+			Conclusion: "success",
+			CreatedAt:  now.Add(-11 * time.Minute),
+			UpdatedAt:  now.Add(-10 * time.Minute),
+		},
+	}
 
-	deps := mergeClusterDeploymentsWithHangar(rawContainers, nil, nil, gitSync, "commit123")
+	deps := mergeClusterDeploymentsWithHangar(rawContainers, runs, nil, gitSync, "commit123")
 	if len(deps) == 0 {
 		t.Fatalf("expected non-empty deployments for degraded container")
 	}
@@ -4305,4 +4353,89 @@ func TestGitHubPoller_TargetedCoverageBoost(t *testing.T) {
 		t.Errorf("expected removed repository to be pruned from cache")
 	}
 	prunePoller.mu.RUnlock()
+}
+
+func TestGitHubPoller_GetActiveRepos_DynamicDiscoveryAndCaching(t *testing.T) {
+	// 1. Nil poller returns nil
+	var nilPoller *GitHubPoller
+	if got := nilPoller.getActiveRepos(); got != nil {
+		t.Errorf("expected nil for nilPoller, got %+v", got)
+	}
+
+	// 2. Dynamic discovery from Hangar with deduplication
+	fetchCount := 0
+	mockFetcher := func(ctx context.Context, url string) GitSyncStatusResponse {
+		fetchCount++
+		return GitSyncStatusResponse{
+			Status: "synced",
+			Repos: map[string]RepoStatus{
+				"/repos/mirrormere": {
+					GitHubRepo: "azylman/mirrormere",
+					SyncStatus: "synced",
+				},
+				"/repos/aerial": {
+					GitHubRepo: "azylman/aerial",
+					SyncStatus: "synced",
+				},
+				"/repos/untracked": {
+					SyncStatus: "synced",
+				},
+			},
+		}
+	}
+
+	poller := &GitHubPoller{
+		repo:          "AZYLMAN/AERIAL", // uppercase duplicate to verify case-insensitive deduplication
+		repos:         []string{"azylman/aerial-config"},
+		hangarURL:     "http://hangar:8080/status",
+		statusFetcher: mockFetcher,
+	}
+
+	repos1 := poller.getActiveRepos()
+	if fetchCount != 1 {
+		t.Fatalf("expected 1 fetch, got %d", fetchCount)
+	}
+
+	expected := []string{"azylman/aerial", "azylman/mirrormere", "azylman/aerial-config"}
+	if len(repos1) != len(expected) {
+		t.Fatalf("expected %d repos, got %d: %+v", len(expected), len(repos1), repos1)
+	}
+	for i, exp := range expected {
+		if strings.ToLower(repos1[i]) != strings.ToLower(exp) {
+			t.Errorf("repo[%d]: expected %s, got %s", i, exp, repos1[i])
+		}
+	}
+
+	// 3. Immediate subsequent call must reuse cache within TTL (fetchCount remains 1)
+	repos2 := poller.getActiveRepos()
+	if fetchCount != 1 {
+		t.Errorf("expected fetchCount to remain 1 (cached), got %d", fetchCount)
+	}
+	if len(repos2) != len(expected) {
+		t.Errorf("expected cached repos length %d, got %d", len(expected), len(repos2))
+	}
+
+	// 4. Force cache expiry and simulate Hangar failure -> verify LKGC retention
+	poller.hangarCacheMu.Lock()
+	poller.lastHangarPoll = time.Now().UTC().Add(-30 * time.Second)
+	poller.hangarCacheMu.Unlock()
+
+	poller.statusFetcher = func(ctx context.Context, url string) GitSyncStatusResponse {
+		fetchCount++
+		// Return empty repos (simulating Hangar error/downtime)
+		return GitSyncStatusResponse{
+			Status: "error",
+			Error:  "connection refused",
+			Repos:  nil,
+		}
+	}
+
+	repos3 := poller.getActiveRepos()
+	if fetchCount != 2 {
+		t.Fatalf("expected fetchCount to increment to 2, got %d", fetchCount)
+	}
+	// LKGC must retain previously cached hangar repos
+	if len(repos3) != len(expected) {
+		t.Errorf("expected LKGC to retain %d repos on error, got %d: %+v", len(expected), len(repos3), repos3)
+	}
 }

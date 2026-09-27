@@ -1434,6 +1434,13 @@ func TestMergeClusterDeployments_DeterministicSort(t *testing.T) {
 			CreatedAt: refTime.Add(-1 * time.Minute),
 			UpdatedAt: refTime.Add(-1 * time.Minute),
 		},
+		{
+			ID:        104,
+			HeadSHA:   "1111111111111111111111111111111111111111",
+			Status:    "in_progress",
+			CreatedAt: refTime.Add(-2 * time.Minute),
+			UpdatedAt: refTime.Add(-1 * time.Minute),
+		},
 	}
 
 	gitSync := GitSyncStatusResponse{
@@ -1485,6 +1492,23 @@ func TestMergeClusterDeployments_DeterministicSort(t *testing.T) {
 
 func TestMergeClusterDeployments_MultiCommitContainerGrouping(t *testing.T) {
 	refTime := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	runs := []GitHubRun{
+		{
+			ID:         201,
+			HeadSHA:    "aaaaaaa123456789",
+			Status:     "completed",
+			Conclusion: "success",
+			CreatedAt:  refTime.Add(-6 * time.Minute),
+			UpdatedAt:  refTime.Add(-5 * time.Minute),
+		},
+		{
+			ID:        202,
+			HeadSHA:   "bbbbbbb123456789",
+			Status:    "in_progress",
+			CreatedAt: refTime.Add(-1 * time.Minute),
+			UpdatedAt: refTime.Add(-30 * time.Second),
+		},
+	}
 	containers := []DockerContainerJSON{
 		{
 			Names:   []string{"/aerial-brain"},
@@ -1508,7 +1532,7 @@ func TestMergeClusterDeployments_MultiCommitContainerGrouping(t *testing.T) {
 		},
 	}
 
-	deps := MergeClusterDeploymentsWithHangar(nil, nil, GitSyncStatusResponse{}, containers, "aaaaaaa", refTime)
+	deps := MergeClusterDeploymentsWithHangar(runs, nil, GitSyncStatusResponse{}, containers, "aaaaaaa", refTime)
 	if len(deps) != 2 {
 		t.Fatalf("expected 2 deployments, got %d", len(deps))
 	}
@@ -1787,7 +1811,17 @@ func TestMergeClusterDeployments_DegradedAndFailedBranches(t *testing.T) {
 			},
 		},
 	}
-	deps := MergeClusterDeploymentsWithHangar(nil, nil, GitSyncStatusResponse{}, degradedContainers, "", refTime)
+	runsDegraded := []GitHubRun{
+		{
+			ID:         801,
+			HeadSHA:    "8888888888888888888888888888888888888888",
+			Status:     "completed",
+			Conclusion: "success",
+			CreatedAt:  refTime.Add(-2 * time.Minute),
+			UpdatedAt:  refTime.Add(-1 * time.Minute),
+		},
+	}
+	deps := MergeClusterDeploymentsWithHangar(runsDegraded, nil, GitSyncStatusResponse{}, degradedContainers, "", refTime)
 	if len(deps) == 0 || deps[0].Stage != "degraded" {
 		t.Fatalf("expected degraded stage for exited container, got %+v", deps)
 	}
@@ -1887,6 +1921,14 @@ func TestMergeClusterDeployments_MultiRunSameCommitAndSortTies(t *testing.T) {
 			Status:     "completed",
 			Conclusion: "failure",
 			CreatedAt:  refTime.Add(-5 * time.Minute),
+			UpdatedAt:  refTime.Add(-5 * time.Minute),
+		},
+		{
+			ID:         302,
+			HeadSHA:    "2222222222222222222222222222222222222222",
+			Status:     "completed",
+			Conclusion: "success",
+			CreatedAt:  refTime.Add(-6 * time.Minute),
 			UpdatedAt:  refTime.Add(-5 * time.Minute),
 		},
 	}
@@ -2118,6 +2160,14 @@ func TestPure_TargetedCoverageBoost(t *testing.T) {
 			CreatedAt:  refTime.Add(-5 * time.Minute),
 			UpdatedAt:  refTime.Add(-5 * time.Minute),
 		},
+		{
+			ID:         902,
+			HeadSHA:    "2222222222222222222222222222222222222222",
+			Status:     "completed",
+			Conclusion: "success",
+			CreatedAt:  refTime.Add(-6 * time.Minute),
+			UpdatedAt:  refTime.Add(-5 * time.Minute),
+		},
 	}
 	degradedContOnly := []DockerContainerJSON{
 		{
@@ -2132,6 +2182,37 @@ func TestPure_TargetedCoverageBoost(t *testing.T) {
 	tieDeps := MergeClusterDeploymentsWithHangar(degradedFirstRuns, nil, GitSyncStatusResponse{}, degradedContOnly, "", refTime)
 	if len(tieDeps) != 2 || tieDeps[0].Stage != "failed" || tieDeps[1].Stage != "degraded" {
 		t.Errorf("expected failed to sort before degraded, got %+v", tieDeps)
+	}
+}
+
+func TestMergeClusterDeployments_TopDown_NoPhantomCardsFromContainersAlone(t *testing.T) {
+	refTime := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	// Unmanaged / restarting containers without any active GitHub Actions CI run or Hangar reconciliation
+	containers := []DockerContainerJSON{
+		{
+			Names:   []string{"/aerial-postgres"},
+			Created: refTime.Add(-10 * time.Second).Unix(),
+			State:   "running",
+			Labels: map[string]string{
+				"com.docker.compose.project": "aerial",
+				"com.docker.compose.service": "postgres",
+			},
+		},
+		{
+			Names:   []string{"/aerial-brain"},
+			Created: refTime.Add(-30 * time.Second).Unix(),
+			State:   "running",
+			Labels: map[string]string{
+				"com.docker.compose.project":        "aerial",
+				"com.docker.compose.service":        "brain",
+				"org.opencontainers.image.revision": "untracked123456",
+			},
+		},
+	}
+
+	deps := MergeClusterDeploymentsWithHangar(nil, nil, GitSyncStatusResponse{}, containers, "untracked123456", refTime)
+	if len(deps) != 0 {
+		t.Fatalf("expected 0 deployments (no phantom cards from containers alone), got %d: %+v", len(deps), deps)
 	}
 }
 

@@ -147,6 +147,7 @@ type RepoSyncResult struct {
 // RepoStatus holds git commit and timestamp metadata for an individual repository.
 type RepoStatus struct {
 	Repo              string     `json:"repo"`
+	GitHubRepo        string     `json:"github_repo,omitempty"`
 	DiskCommit        string     `json:"disk_commit"`
 	DiskCommitTime    *time.Time `json:"disk_commit_time,omitempty"`
 	RemoteCommit      string     `json:"remote_commit"`
@@ -307,6 +308,10 @@ type SyncDaemon struct {
 	quarantinedCommits map[QuarantineKey]QuarantineRecord
 	imageQuarantineMu  sync.RWMutex
 	imageQuarantine    map[string]ImageQuarantineRecord
+
+	// Cached GitHub Slugs
+	repoSlugsMu sync.RWMutex
+	repoSlugs   map[string]string
 
 	// HTTP & Registry
 	registryClient *http.Client
@@ -1977,6 +1982,47 @@ func (d *SyncDaemon) getRepoCommit(ctx context.Context, repoPath, ref string) (s
 	return sha, nil, nil
 }
 
+// getRepoGitHubSlug retrieves or lazily resolves and caches the GitHub owner/repo slug for a repository.
+func (d *SyncDaemon) getRepoGitHubSlug(ctx context.Context, repoPath string) string {
+	if d == nil || repoPath == "" {
+		return ""
+	}
+
+	d.repoSlugsMu.RLock()
+	if slug, ok := d.repoSlugs[repoPath]; ok {
+		d.repoSlugsMu.RUnlock()
+		return slug
+	}
+	d.repoSlugsMu.RUnlock()
+
+	var remoteURL string
+	if d.repoUrls != nil {
+		remoteURL = d.repoUrls[repoPath]
+	}
+	if remoteURL == "" {
+		out, _, err := d.getGitExecutor()(ctx, repoPath, "remote", "get-url", "origin")
+		if err == nil && strings.TrimSpace(string(out)) != "" {
+			remoteURL = strings.TrimSpace(string(out))
+		} else {
+			outCfg, _, errCfg := d.getGitExecutor()(ctx, repoPath, "config", "--get", "remote.origin.url")
+			if errCfg == nil && strings.TrimSpace(string(outCfg)) != "" {
+				remoteURL = strings.TrimSpace(string(outCfg))
+			}
+		}
+	}
+
+	slug := ParseGitHubRepo(remoteURL)
+
+	d.repoSlugsMu.Lock()
+	if d.repoSlugs == nil {
+		d.repoSlugs = make(map[string]string)
+	}
+	d.repoSlugs[repoPath] = slug
+	d.repoSlugsMu.Unlock()
+
+	return slug
+}
+
 // GetStatus computes real-time synchronization telemetry across all configured repositories.
 func (d *SyncDaemon) GetStatus(ctx context.Context) GitSyncStatusResponse {
 	rec := d.GetReconciliationStatus()
@@ -1999,6 +2045,7 @@ func (d *SyncDaemon) GetStatus(ctx context.Context) GitSyncStatusResponse {
 	for _, repo := range d.repos {
 		st := RepoStatus{
 			Repo:       repo,
+			GitHubRepo: d.getRepoGitHubSlug(ctx, repo),
 			SyncStatus: "synced",
 		}
 
@@ -2151,6 +2198,7 @@ func NewDaemon(cfg DaemonConfig) *SyncDaemon {
 		},
 		pendingTargets:     make(map[string]struct{}),
 		lastAlertTimes:     make(map[string]time.Time),
+		repoSlugs:          make(map[string]string),
 	}
 }
 

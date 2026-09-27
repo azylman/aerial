@@ -114,6 +114,7 @@ type QuickLaunchLink struct {
 
 type RepoStatus struct {
 	Repo             string     `json:"repo"`
+	GitHubRepo       string     `json:"github_repo,omitempty"`
 	DiskCommit       string     `json:"disk_commit"`
 	DiskCommitTime   *time.Time `json:"disk_commit_time,omitempty"`
 	RemoteCommit     string     `json:"remote_commit"`
@@ -219,6 +220,12 @@ type GitHubPoller struct {
 	lastPollTime     time.Time
 	lastError        error
 	stopCh           chan struct{}
+
+	hangarURL         string
+	statusFetcher     func(context.Context, string) GitSyncStatusResponse
+	hangarCacheMu     sync.Mutex
+	cachedHangarRepos []string
+	lastHangarPoll    time.Time
 }
 
 var globalGHPoller *GitHubPoller
@@ -325,6 +332,23 @@ var brainHTTPClient = &http.Client{
 		MaxIdleConnsPerHost:   20,
 		IdleConnTimeout:       90 * time.Second,
 		ResponseHeaderTimeout: 4 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	},
+}
+
+// Singleton tuned HTTP client for upstream hangar / gitsync communication
+var hangarHTTPClient = &http.Client{
+	Timeout: 3 * time.Second,
+	Transport: &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   1 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		MaxIdleConns:          20,
+		MaxIdleConnsPerHost:   10,
+		IdleConnTimeout:       60 * time.Second,
+		ResponseHeaderTimeout: 3 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 	},
 }
@@ -443,30 +467,74 @@ func (p *GitHubPoller) getActiveRepos() []string {
 	if p == nil {
 		return nil
 	}
-	if p.configPath != "" {
-		if cfgRepos := loadDashboardRepos(p.configPath); len(cfgRepos) > 0 {
-			return cfgRepos
+
+	// 1. Ingest dynamic Hangar repos if hangarURL configured
+	if p.hangarURL != "" {
+		p.hangarCacheMu.Lock()
+		now := time.Now().UTC()
+		if p.cachedHangarRepos == nil || now.Sub(p.lastHangarPoll) >= 15*time.Second {
+			fetcher := p.statusFetcher
+			if fetcher == nil {
+				fetcher = fetchGitSyncStatus
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			st := fetcher(ctx, p.hangarURL)
+			cancel()
+			if len(st.Repos) > 0 {
+				var repos []string
+				for _, rSt := range st.Repos {
+					if rSt.GitHubRepo != "" {
+						repos = append(repos, rSt.GitHubRepo)
+					}
+				}
+				sort.Strings(repos)
+				p.cachedHangarRepos = repos
+			}
+			p.lastHangarPoll = now
+		}
+		p.hangarCacheMu.Unlock()
+	}
+
+	var discovered []string
+	seen := make(map[string]bool)
+	addRepo := func(r string) {
+		trimmed := strings.TrimSpace(r)
+		if trimmed == "" {
+			return
+		}
+		key := strings.ToLower(trimmed)
+		if !seen[key] {
+			seen[key] = true
+			discovered = append(discovered, trimmed)
 		}
 	}
+
+	p.hangarCacheMu.Lock()
+	for _, r := range p.cachedHangarRepos {
+		addRepo(r)
+	}
+	p.hangarCacheMu.Unlock()
+
+	if p.configPath != "" {
+		for _, r := range loadDashboardRepos(p.configPath) {
+			addRepo(r)
+		}
+	}
+
 	p.mu.RLock()
-	defer p.mu.RUnlock()
-	if len(p.repos) > 0 {
-		res := make([]string, len(p.repos))
-		copy(res, p.repos)
-		return res
+	for _, r := range p.repos {
+		addRepo(r)
 	}
 	if p.repo != "" {
-		return []string{p.repo}
+		addRepo(p.repo)
 	}
-	return nil
+	p.mu.RUnlock()
+
+	return discovered
 }
 
 func (p *GitHubPoller) Start(ctx context.Context) {
 	if p == nil {
-		return
-	}
-	repos := p.getActiveRepos()
-	if len(repos) == 0 {
 		return
 	}
 	go func() {
@@ -1074,8 +1142,7 @@ func fetchGitSyncStatus(ctx context.Context, gitsyncURL string) GitSyncStatusRes
 		return fallback
 	}
 
-	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := hangarHTTPClient.Do(req)
 	if err != nil {
 		fallback.Error = err.Error()
 		return fallback
@@ -1721,9 +1788,10 @@ func RunDashboardServer(ctx context.Context, cfg DashboardConfig) error {
 	if len(repos) == 0 && cfg.GHRepo != "" {
 		repos = []string{cfg.GHRepo}
 	}
-	if len(repos) > 0 {
+	if len(repos) > 0 || cfg.GitSyncURL != "" || cfg.ConfigPath != "" {
 		globalGHPoller = NewMultiGitHubPoller(repos, cfg.GHToken)
 		globalGHPoller.configPath = cfg.ConfigPath
+		globalGHPoller.hangarURL = cfg.GitSyncURL
 		if cfg.APIBaseURL != "" {
 			globalGHPoller.apiBaseURL = cfg.APIBaseURL
 		}
