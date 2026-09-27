@@ -388,6 +388,82 @@ func (p *Provisioner) provisionRuntimeSharedAssets(runtimeHome string) {
 			}
 		}
 	}
+
+	// Unify brain transcripts and conversations across runtimes into shared storage
+	canonicalBrain := filepath.Join(p.dataDir, "brain")
+	canonicalConversations := filepath.Join(p.dataDir, "conversations")
+	if p.dataDir == "" {
+		canonicalBrain = filepath.Join(primaryGemini, "antigravity-cli", "brain")
+		canonicalConversations = filepath.Join(primaryGemini, "antigravity-cli", "conversations")
+	}
+	if err := os.MkdirAll(canonicalBrain, 0755); err != nil {
+		log.Printf("[Env] Warning: failed to ensure canonical brain directory %s: %v", canonicalBrain, err)
+	}
+	if err := os.MkdirAll(canonicalConversations, 0755); err != nil {
+		log.Printf("[Env] Warning: failed to ensure canonical conversations directory %s: %v", canonicalConversations, err)
+	}
+	p.linkSharedSessionStorage(runtimeGemini, canonicalBrain, canonicalConversations)
+}
+
+func (p *Provisioner) linkSharedSessionStorage(targetGemini, canonicalBrain, canonicalConversations string) {
+	shared := []struct {
+		targetRel string
+		canonical string
+	}{
+		{targetRel: filepath.Join("antigravity-cli", "brain"), canonical: canonicalBrain},
+		{targetRel: "brain", canonical: canonicalBrain},
+		{targetRel: filepath.Join("antigravity-cli", "conversations"), canonical: canonicalConversations},
+		{targetRel: "conversations", canonical: canonicalConversations},
+	}
+
+	for _, item := range shared {
+		targetDir := filepath.Join(targetGemini, item.targetRel)
+		cleanTarget := filepath.Clean(targetDir)
+		cleanCanonical := filepath.Clean(item.canonical)
+		if cleanTarget == cleanCanonical {
+			continue
+		}
+
+		if fi, err := os.Lstat(targetDir); err == nil {
+			if fi.Mode()&os.ModeSymlink != 0 {
+				if linkTarget, rErr := os.Readlink(targetDir); rErr == nil && filepath.Clean(linkTarget) == cleanCanonical {
+					continue
+				}
+				if rErr := os.Remove(targetDir); rErr != nil && !os.IsNotExist(rErr) {
+					log.Printf("[Env] Warning: failed to remove outdated symlink %s: %v", targetDir, rErr)
+				}
+			} else if fi.IsDir() {
+				// Migrate any existing files or sessions to canonical directory
+				if entries, rErr := os.ReadDir(targetDir); rErr == nil {
+					for _, entry := range entries {
+						src := filepath.Join(targetDir, entry.Name())
+						dst := filepath.Join(item.canonical, entry.Name())
+						if _, dErr := os.Stat(dst); os.IsNotExist(dErr) {
+							if mErr := os.Rename(src, dst); mErr != nil {
+								log.Printf("[Env] Warning: failed to migrate %s to canonical dir %s: %v", src, dst, mErr)
+							}
+						}
+					}
+				}
+				if rmErr := os.RemoveAll(targetDir); rmErr != nil {
+					log.Printf("[Env] Warning: failed to remove existing dir %s before symlink: %v", targetDir, rmErr)
+				}
+			} else {
+				if rmErr := os.Remove(targetDir); rmErr != nil && !os.IsNotExist(rmErr) {
+					log.Printf("[Env] Warning: failed to remove file %s before symlink: %v", targetDir, rmErr)
+				}
+			}
+		}
+
+		// Ensure parent directory exists (e.g. targetGemini/antigravity-cli)
+		if pErr := os.MkdirAll(filepath.Dir(targetDir), 0755); pErr != nil {
+			log.Printf("[Env] Warning: failed to create parent dir for %s: %v", targetDir, pErr)
+		}
+
+		if sErr := symlinkRuntimeAsset(item.canonical, targetDir); sErr != nil {
+			log.Printf("[Env] Warning: failed to link shared storage %s -> %s: %v", targetDir, item.canonical, sErr)
+		}
+	}
 }
 
 // SyncRules compiles the modular rules into target runtime directories and primary home.
@@ -418,6 +494,17 @@ func (p *Provisioner) SyncRules(customPrompt string) error {
 		return fmt.Errorf("failed to sync rules to primary home: %w", err)
 	}
 	log.Printf("[Env] Configured modular rules in %s (target: discord)", primaryGemini)
+	if p.dataDir != "" {
+		canonicalBrain := filepath.Join(p.dataDir, "brain")
+		canonicalConversations := filepath.Join(p.dataDir, "conversations")
+		if err := os.MkdirAll(canonicalBrain, 0755); err != nil {
+			log.Printf("[Env] Warning: failed to ensure canonical brain directory %s: %v", canonicalBrain, err)
+		}
+		if err := os.MkdirAll(canonicalConversations, 0755); err != nil {
+			log.Printf("[Env] Warning: failed to ensure canonical conversations directory %s: %v", canonicalConversations, err)
+		}
+		p.linkSharedSessionStorage(primaryGemini, canonicalBrain, canonicalConversations)
+	}
 
 	// 4. If dataDir is configured, provision isolated runtimes for discord and voice
 	if p.dataDir != "" {

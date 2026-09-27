@@ -1687,3 +1687,174 @@ func TestAtomicSwapRulesDir_RollbackAndErrors_Extended(t *testing.T) {
 	}
 }
 
+func TestLinkSharedSessionStorage_Comprehensive(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	canonicalBrain := filepath.Join(tmpDir, "data", "brain")
+	canonicalConv := filepath.Join(tmpDir, "data", "conversations")
+	if err := os.MkdirAll(canonicalBrain, 0755); err != nil {
+		t.Fatalf("mkdir canonicalBrain failed: %v", err)
+	}
+	if err := os.MkdirAll(canonicalConv, 0755); err != nil {
+		t.Fatalf("mkdir canonicalConv failed: %v", err)
+	}
+
+	// 1. Pre-create a file in canonicalBrain
+	if err := os.WriteFile(filepath.Join(canonicalBrain, "existing_canon.txt"), []byte("canon"), 0644); err != nil {
+		t.Fatalf("write existing_canon failed: %v", err)
+	}
+
+	targetGemini := filepath.Join(tmpDir, "runtime", ".gemini")
+
+	// Pre-create an existing directory at targetGemini/antigravity-cli/brain with a file to migrate
+	oldTargetDir := filepath.Join(targetGemini, "antigravity-cli", "brain")
+	if err := os.MkdirAll(oldTargetDir, 0755); err != nil {
+		t.Fatalf("mkdir oldTargetDir failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(oldTargetDir, "migrated.txt"), []byte("migrated_content"), 0644); err != nil {
+		t.Fatalf("write migrated.txt failed: %v", err)
+	}
+	// Also put existing_canon.txt in oldTargetDir to hit the dErr == nil (already exists) branch
+	if err := os.WriteFile(filepath.Join(oldTargetDir, "existing_canon.txt"), []byte("old_canon"), 0644); err != nil {
+		t.Fatalf("write dup file failed: %v", err)
+	}
+
+	// Pre-create a regular file where brain symlink should be
+	regFile := filepath.Join(targetGemini, "brain")
+	if err := os.WriteFile(regFile, []byte("im a file"), 0644); err != nil {
+		t.Fatalf("write regFile failed: %v", err)
+	}
+
+	// Pre-create an outdated symlink for conversations
+	outdatedSymlink := filepath.Join(targetGemini, "antigravity-cli", "conversations")
+	bogusTarget := filepath.Join(tmpDir, "bogus")
+	_ = os.MkdirAll(bogusTarget, 0755)
+	_ = symlinkRuntimeAsset(bogusTarget, outdatedSymlink)
+
+	p := New(filepath.Join(tmpDir, "home"), filepath.Join(tmpDir, "data"))
+
+	// First run: exercises migration, regular file removal, outdated symlink removal, and symlink creation
+	p.linkSharedSessionStorage(targetGemini, canonicalBrain, canonicalConv)
+
+	// Verify migrated file landed in canonicalBrain
+	migratedContent, err := os.ReadFile(filepath.Join(canonicalBrain, "migrated.txt"))
+	if err != nil || string(migratedContent) != "migrated_content" {
+		t.Errorf("expected migrated.txt in canonicalBrain, got %v (content: %s)", err, string(migratedContent))
+	}
+	// Verify existing_canon was preserved
+	canonContent, err := os.ReadFile(filepath.Join(canonicalBrain, "existing_canon.txt"))
+	if err != nil || string(canonContent) != "canon" {
+		t.Errorf("expected canon in canonicalBrain, got %v", err)
+	}
+
+	// Second run: exercises linkTarget == cleanCanonical (idempotent skip)
+	p.linkSharedSessionStorage(targetGemini, canonicalBrain, canonicalConv)
+
+	// Third run: pass targetGemini where filepath.Join(targetGemini, "brain") == canonicalBrain to hit cleanTarget == cleanCanonical
+	p.linkSharedSessionStorage(filepath.Join(tmpDir, "data"), canonicalBrain, canonicalConv)
+
+	// 4. Test writeAtomic error when target directory is blocked by a file
+	blockerFile := filepath.Join(tmpDir, "blocker")
+	if err := os.WriteFile(blockerFile, []byte("blocker"), 0644); err != nil {
+		t.Fatalf("write blocker failed: %v", err)
+	}
+	invalidPath := filepath.Join(blockerFile, "subfile.txt")
+	if err := p.writeAtomic(invalidPath, "content"); err == nil {
+		t.Errorf("expected writeAtomic to fail when dir is a file")
+	}
+
+	// 5. Test provisionRuntimeSharedAssets when p.dataDir is empty
+	pNoData := New(filepath.Join(tmpDir, "home_nodata"), "")
+	pNoData.provisionRuntimeSharedAssets(filepath.Join(tmpDir, "runtime_nodata"))
+
+	// 6. Test SyncRules with configured dataDir to exercise lines 498-507 (canonical brain linking)
+	syncHome := t.TempDir()
+	syncData := t.TempDir()
+	rulesDir := filepath.Join(syncHome, "rules", "common")
+	if err := os.MkdirAll(rulesDir, 0755); err != nil {
+		t.Fatalf("mkdir rules failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(rulesDir, "00_test.md"), []byte("# Test Rule"), 0644); err != nil {
+		t.Fatalf("write rule failed: %v", err)
+	}
+	pSync := New(syncHome, syncData)
+	pSync.SetAerialRulesDir(filepath.Join(syncHome, "rules"))
+	pSync.SetConfigRulesDir(filepath.Join(syncHome, "config-rules"))
+	if err := pSync.SyncRules(""); err != nil {
+		t.Errorf("SyncRules with dataDir failed: %v", err)
+	}
+
+	// 7. Test linkSharedSessionStorage when symlinkRuntimeAsset fails
+	origSymlink := symlinkRuntimeAsset
+	symlinkRuntimeAsset = func(target, link string) error {
+		return errors.New("mock symlink failure")
+	}
+	p.linkSharedSessionStorage(filepath.Join(tmpDir, "runtime_symlink_err", ".gemini"), canonicalBrain, canonicalConv)
+	symlinkRuntimeAsset = origSymlink
+
+	// 8. Test linkSharedSessionStorage when parent dir creation fails (blocked by file)
+	blockedGemini := filepath.Join(tmpDir, "blocked_gemini")
+	if err := os.MkdirAll(blockedGemini, 0755); err != nil {
+		t.Fatalf("mkdir blockedGemini failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(blockedGemini, "antigravity-cli"), []byte("blocking-file"), 0644); err != nil {
+		t.Fatalf("write blocking-file failed: %v", err)
+	}
+	p.linkSharedSessionStorage(blockedGemini, canonicalBrain, canonicalConv)
+
+	// 9. Test provisionRuntimeSharedAssets when canonical dirs cannot be created
+	blockedDataHome := t.TempDir()
+	pBlockedData := New(t.TempDir(), blockedDataHome)
+	if err := os.WriteFile(filepath.Join(blockedDataHome, "brain"), []byte("file-blocking-brain"), 0644); err != nil {
+		t.Fatalf("write file-blocking-brain failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(blockedDataHome, "conversations"), []byte("file-blocking-conv"), 0644); err != nil {
+		t.Fatalf("write file-blocking-conv failed: %v", err)
+	}
+	pBlockedData.provisionRuntimeSharedAssets(filepath.Join(t.TempDir(), "runtime"))
+
+	// 10. Test SyncRules when canonical dirs cannot be created
+	blockedSyncHome := t.TempDir()
+	blockedSyncData := t.TempDir()
+	if err := os.WriteFile(filepath.Join(blockedSyncData, "brain"), []byte("file-blocking-brain"), 0644); err != nil {
+		t.Fatalf("write file-blocking-brain failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(blockedSyncData, "conversations"), []byte("file-blocking-conv"), 0644); err != nil {
+		t.Fatalf("write file-blocking-conv failed: %v", err)
+	}
+	pSyncBlocked := New(blockedSyncHome, blockedSyncData)
+	pSyncBlocked.SetAerialRulesDir(filepath.Join(syncHome, "rules"))
+	pSyncBlocked.SetConfigRulesDir(filepath.Join(syncHome, "config-rules"))
+	if err := pSyncBlocked.SyncRules(""); err != nil {
+		t.Errorf("SyncRules with blocked data dirs failed: %v", err)
+	}
+
+	// 11. Test SyncRules when discord and voice runtimes cannot sync rules (blocked by file)
+	runtimeBlockedHome := t.TempDir()
+	runtimeBlockedData := t.TempDir()
+	discordRuntimeGemini := filepath.Join(runtimeBlockedData, "runtimes", string(TargetDiscord), ".gemini")
+	if err := os.MkdirAll(filepath.Dir(discordRuntimeGemini), 0755); err != nil {
+		t.Fatalf("mkdir discord runtime failed: %v", err)
+	}
+	if err := os.WriteFile(discordRuntimeGemini, []byte("file-blocking-gemini"), 0644); err != nil {
+		t.Fatalf("write file-blocking-gemini failed: %v", err)
+	}
+	voiceRuntimeGemini := filepath.Join(runtimeBlockedData, "runtimes", string(TargetVoice), ".gemini")
+	if err := os.MkdirAll(filepath.Dir(voiceRuntimeGemini), 0755); err != nil {
+		t.Fatalf("mkdir voice runtime failed: %v", err)
+	}
+	if err := os.WriteFile(voiceRuntimeGemini, []byte("file-blocking-gemini"), 0644); err != nil {
+		t.Fatalf("write file-blocking-gemini failed: %v", err)
+	}
+	pRuntimeBlocked := New(runtimeBlockedHome, runtimeBlockedData)
+	pRuntimeBlocked.SetAerialRulesDir(filepath.Join(syncHome, "rules"))
+	pRuntimeBlocked.SetConfigRulesDir(filepath.Join(syncHome, "config-rules"))
+	if err := pRuntimeBlocked.SyncRules(""); err != nil {
+		t.Errorf("SyncRules with blocked runtime dirs failed: %v", err)
+	}
+}
+
+
+
+
+

@@ -793,6 +793,18 @@ func TestIsQuotaPause(t *testing.T) {
 			stderr:    "",
 			want:      false,
 		},
+		{
+			name:      "Google capacity exhausted reset after 0s",
+			errDetail: "API error (attempt 2): RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Your quota will reset after 0s.",
+			stderr:    "",
+			want:      true,
+		},
+		{
+			name:      "Google capacity exhausted reset after 1s",
+			errDetail: "API error (attempt 1): RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Your quota will reset after 1s.",
+			stderr:    "",
+			want:      true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -848,6 +860,27 @@ func TestExtractQuotaResetDuration(t *testing.T) {
 			errDetail: "Resets in 1h 15m.",
 			stderr:    "",
 			wantDur:   1*time.Hour + 15*time.Minute,
+			wantExact: true,
+		},
+		{
+			name:      "Reset after 0s clamped to 30s",
+			errDetail: "You have exhausted your capacity on this model. Your quota will reset after 0s.",
+			stderr:    "",
+			wantDur:   30 * time.Second,
+			wantExact: true,
+		},
+		{
+			name:      "Reset after 1s clamped to 30s",
+			errDetail: "You have exhausted your capacity on this model. Your quota will reset after 1s.",
+			stderr:    "",
+			wantDur:   30 * time.Second,
+			wantExact: true,
+		},
+		{
+			name:      "Reset after compound duration",
+			errDetail: "Your quota will reset after 2m 15s.",
+			stderr:    "",
+			wantDur:   2*time.Minute + 15*time.Second,
 			wantExact: true,
 		},
 		{
