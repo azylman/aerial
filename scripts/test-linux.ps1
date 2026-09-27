@@ -85,7 +85,8 @@ if ($hasDocker) {
 # Branch B: Active WSL -> Run check-coverage.sh via WSL
 if ($hasWsl) {
     Write-Host "   [WSL] Detected active WSL environment. Running Linux coverage via WSL..." -ForegroundColor DarkCyan
-    $wslRepoRoot = "/mnt/" + $repoRoot.Substring(0, 1).ToLower() + "/" + $repoRoot.Substring(3).Replace('\', '/')
+    $rootStr = $repoRoot.Path
+    $wslRepoRoot = $wslCPath + "/" + $rootStr.Substring(3).Replace('\', '/')
     $svcArg = if ($Service) { "--service $Service" } else { "" }
     $checkArg = if ($Check) { "--check" } else { "" }
     & wsl sh -c "cd '$wslRepoRoot' && sh scripts/check-coverage.sh $svcArg $checkArg"

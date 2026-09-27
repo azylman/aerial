@@ -1688,7 +1688,6 @@ func TestAtomicSwapRulesDir_RollbackAndErrors_Extended(t *testing.T) {
 }
 
 func TestLinkSharedSessionStorage_Comprehensive(t *testing.T) {
-	t.Parallel()
 	tmpDir := t.TempDir()
 
 	canonicalBrain := filepath.Join(tmpDir, "data", "brain")
@@ -1767,7 +1766,25 @@ func TestLinkSharedSessionStorage_Comprehensive(t *testing.T) {
 	// 5. Test provisionRuntimeSharedAssets when p.dataDir is empty
 	pNoData := New(filepath.Join(tmpDir, "home_nodata"), "")
 	pNoData.provisionRuntimeSharedAssets(filepath.Join(tmpDir, "runtime_nodata"))
+
+	// 6. Test SyncRules with configured dataDir to exercise lines 498-507 (canonical brain linking)
+	syncHome := t.TempDir()
+	syncData := t.TempDir()
+	rulesDir := filepath.Join(syncHome, "rules", "common")
+	if err := os.MkdirAll(rulesDir, 0755); err != nil {
+		t.Fatalf("mkdir rules failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(rulesDir, "00_test.md"), []byte("# Test Rule"), 0644); err != nil {
+		t.Fatalf("write rule failed: %v", err)
+	}
+	pSync := New(syncHome, syncData)
+	pSync.SetAerialRulesDir(filepath.Join(syncHome, "rules"))
+	pSync.SetConfigRulesDir(filepath.Join(syncHome, "config-rules"))
+	if err := pSync.SyncRules(""); err != nil {
+		t.Errorf("SyncRules with dataDir failed: %v", err)
+	}
 }
+
 
 
 

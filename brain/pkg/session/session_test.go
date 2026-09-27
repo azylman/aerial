@@ -2559,4 +2559,18 @@ func TestManager_UnifiedRuntimeTranscriptDiscovery(t *testing.T) {
 	if !mgr.SessionExistsOnDisk(convID) {
 		t.Errorf("expected SessionExistsOnDisk to return true for runtime fallback session")
 	}
+
+	// 4. Test runtime conversation pb discovery in SessionExistsOnDisk
+	voiceConvID := uuid.New().String()
+	rtVoiceConvDir := filepath.Join(tempData, "runtimes", "voice", ".gemini", "antigravity-cli", "conversations")
+	if err := os.MkdirAll(rtVoiceConvDir, 0755); err != nil {
+		t.Fatalf("mkdir rtVoiceConvDir failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(rtVoiceConvDir, voiceConvID+".pb"), []byte("voice pb"), 0644); err != nil {
+		t.Fatalf("write voice pb failed: %v", err)
+	}
+	if !mgr.SessionExistsOnDisk(voiceConvID) {
+		t.Errorf("expected SessionExistsOnDisk to return true for runtime voice conversation pb")
+	}
 }
+
