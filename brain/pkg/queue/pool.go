@@ -19,6 +19,7 @@ import (
 	"github.com/azylman/aerial/brain/pkg/db"
 	"github.com/azylman/aerial/brain/pkg/delivery"
 	"github.com/azylman/aerial/brain/pkg/memory"
+	"github.com/azylman/aerial/brain/pkg/metrics"
 	"github.com/azylman/aerial/brain/pkg/notifier"
 	"github.com/azylman/aerial/brain/pkg/runner"
 	"github.com/azylman/aerial/brain/pkg/sanitizer"
@@ -639,7 +640,14 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 
 	// Testing hook: If VoiceRunnerFunc is configured, delegate directly
 	if p.cfg.VoiceRunnerFunc != nil {
-		return p.cfg.VoiceRunnerFunc(ctx, prompt, convID, onStatus)
+		start := time.Now()
+		reply, conv, err := p.cfg.VoiceRunnerFunc(ctx, prompt, convID, onStatus)
+		runStatus := "success"
+		if err != nil {
+			runStatus = "error"
+		}
+		metrics.RecordRunnerExecution(runStatus, p.LowEffortModel(), "voice", time.Since(start))
+		return reply, conv, err
 	}
 
 	// Custom runner fallback (for unit tests using legacy RunnerFunc / RunnerWithOptionsFunc)
@@ -652,7 +660,13 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 		if timeout <= 0 {
 			timeout = DefaultTimeoutMinutes
 		}
+		start := time.Now()
 		stdout, stderr, exitCode, err := p.cfg.RunnerWithOptionsFunc(ctx, p.cfg.AgyBin, prompt, convID, p.cfg.APIKey, model, runner.DefaultWatchdogOptions(timeout))
+		runStatus := "success"
+		if err != nil || exitCode != 0 {
+			runStatus = "error"
+		}
+		metrics.RecordRunnerExecution(runStatus, model, "voice", time.Since(start))
 		if err != nil {
 			return "", convID, err
 		}
@@ -676,8 +690,10 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 	defer p.daemonPool.ReleaseDaemon(threadID)
 
 	model := p.LowEffortModel()
+	start := time.Now()
 	daemon, dErr := p.daemonPool.GetOrCreateDaemon(ctx, threadID, convID, model)
 	if dErr != nil {
+		metrics.RecordRunnerExecution("error", model, "voice", time.Since(start))
 		return "", convID, fmt.Errorf("failed to acquire voice daemon: %w", dErr)
 	}
 
@@ -696,6 +712,11 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 	}
 
 	turnRes, turnErr := daemon.ExecuteTurnWithHandler(ctx, prompt, stepHandler)
+	runStatus := "success"
+	if turnErr != nil || (turnRes != nil && turnRes.ExitCode != 0) {
+		runStatus = "error"
+	}
+	metrics.RecordRunnerExecution(runStatus, model, "voice", time.Since(start))
 	if turnErr != nil {
 		return "", daemon.SessionID(), turnErr
 	}
@@ -703,6 +724,9 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 	activeSession := daemon.SessionID()
 	if activeSession == "" {
 		activeSession = convID
+	}
+	if turnRes != nil && turnRes.Usage.TotalTokens > 0 {
+		metrics.RecordTokens(model, "voice", turnRes.Usage.InputTokens, turnRes.Usage.OutputTokens, turnRes.Usage.ThinkingTokens, turnRes.Usage.CacheReadTokens, turnRes.Usage.TotalTokens)
 	}
 	return strings.TrimSpace(turnRes.Response), activeSession, nil
 }

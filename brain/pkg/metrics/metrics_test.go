@@ -15,7 +15,8 @@ func TestMetricsRegistryAndHandler(t *testing.T) {
 	RecordTurnCompleted("success", "direct", "gemini-2.5-pro", 1500*time.Millisecond)
 	RecordTokens("gemini-2.5-pro", "general", 100, 50, 25, 10, 185)
 	RecordClassifierRun("success", "gemini-2.5-flash", 250*time.Millisecond, 0.95, "triage_pass")
-	RecordRunnerExecution("success", "gemini-2.5-pro", 2000*time.Millisecond)
+	RecordRunnerExecution("success", "gemini-2.5-pro", "discord", 2000*time.Millisecond)
+	RecordRunnerExecution("success", "gemini-2.5-flash", "voice", 350*time.Millisecond)
 	RecordRunnerError("transient", "gemini-2.5-pro")
 	RecordDelivery("success", 120*time.Millisecond)
 	RecordMessageChunked()
@@ -125,7 +126,7 @@ func TestMetricsDefaultFallbackBranches(t *testing.T) {
 	RecordTurnCompleted("", "", "", 10*time.Millisecond)
 	RecordTokens("", "", 0, 0, 0, 0, 0)
 	RecordOllamaInference("", 0, 0, 0, 0, 0, 0)
-	RecordRunnerExecution("", "", 10*time.Millisecond)
+	RecordRunnerExecution("", "", "", 10*time.Millisecond)
 	RecordRunnerError("", "")
 	RecordClassifierRun("", "", 10*time.Millisecond, -1.0, "")
 	RecordDelivery("", 10*time.Millisecond)
@@ -213,5 +214,40 @@ func TestRecordOllamaInference(t *testing.T) {
 	}
 	if !strings.Contains(body, `aerial_brain_ollama_eval_tokens_total{model="qwen2.5:3b-instruct",type="eval"} 128`) {
 		t.Errorf("expected eval tokens metric, got body:\n%s", body)
+	}
+}
+
+func TestRecordRunnerExecution_SourceLabelAndBuckets(t *testing.T) {
+	RecordRunnerExecution("success", "gemini-2.5-pro", "discord", 1200*time.Millisecond)
+	RecordRunnerExecution("success", "gemini-2.5-flash", "voice", 240*time.Millisecond)
+	RecordRunnerExecution("error", "gemini-2.5-flash", "voice", 50*time.Millisecond)
+
+	handler := Handler()
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rec.Code)
+	}
+
+	body := rec.Body.String()
+	// Verify discord execution counter and histogram bucket
+	if !strings.Contains(body, `aerial_brain_runner_executions_total{model="gemini-2.5-pro",`+`source="discord",status="success"}`) &&
+		!strings.Contains(body, `aerial_brain_runner_executions_total{model="gemini-2.5-pro",`+`status="success",source="discord"}`) &&
+		!strings.Contains(body, `source="discord"`) {
+		t.Errorf("expected runner execution metric with source=discord, got:\n%s", body)
+	}
+
+	// Verify voice execution counter and histogram bucket
+	if !strings.Contains(body, `aerial_brain_runner_executions_total{model="gemini-2.5-flash",`+`source="voice",status="success"}`) &&
+		!strings.Contains(body, `aerial_brain_runner_executions_total{model="gemini-2.5-flash",`+`status="success",source="voice"}`) &&
+		!strings.Contains(body, `source="voice"`) {
+		t.Errorf("expected runner execution metric with source=voice, got:\n%s", body)
+	}
+
+	// Verify 0.25 bucket exists in output (proves 250ms bucket resolution for fast voice turns)
+	if !strings.Contains(body, `aerial_brain_runner_duration_seconds_bucket{`) || !strings.Contains(body, `le="0.25"`) {
+		t.Errorf("expected runner duration bucket le=0.25 to exist, got:\n%s", body)
 	}
 }

@@ -1510,6 +1510,7 @@ func (te *turnExecution) executeWithRetries() {
 		var stdout, stderr string
 		var exitCode int
 		var err error
+		runStart := time.Now()
 
 		if !te.pool.hasCustomRunner && te.pool.daemonPool != nil {
 			if te.statusUpdater != nil {
@@ -1677,6 +1678,13 @@ func (te *turnExecution) executeWithRetries() {
 				te.saveSessionID(te.threadID, te.currentSessionID)
 			}
 		}
+
+		runDur := time.Since(runStart)
+		runStatus := "success"
+		if isFailure {
+			runStatus = "error"
+		}
+		metrics.RecordRunnerExecution(runStatus, currentModel, te.triggerType, runDur)
 
 		if isFailure {
 			// Quota Lockout Fail-Fast & Auto-Retry Check

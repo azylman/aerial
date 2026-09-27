@@ -775,17 +775,17 @@
       "pluginVersion": "11.1.0",
       "targets": [
         {
-          "expr": "histogram_quantile(0.90, sum by (le, model) (rate(aerial_brain_runner_duration_seconds_bucket[5m])))",
-          "legendFormat": "{{model}} (p90)",
+          "expr": "histogram_quantile(0.90, sum by (le, source, model) (rate(aerial_brain_runner_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{source}} - {{model}} (p90)",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.50, sum by (le, model) (rate(aerial_brain_runner_duration_seconds_bucket[5m])))",
-          "legendFormat": "{{model}} (p50)",
+          "expr": "histogram_quantile(0.50, sum by (le, source, model) (rate(aerial_brain_runner_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{source}} - {{model}} (p50)",
           "refId": "B"
         }
       ],
-      "title": "Runner Execution Latency by Model",
+      "title": "Runner Execution Latency by Source & Model",
       "type": "timeseries"
     },
     {

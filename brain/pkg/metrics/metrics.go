@@ -73,16 +73,16 @@ var (
 			Name: "aerial_brain_runner_executions_total",
 			Help: "Total number of Antigravity CLI (agy) subprocess executions.",
 		},
-		[]string{"status", "model"},
+		[]string{"status", "model", "source"},
 	)
 
 	RunnerDurationSeconds = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:    "aerial_brain_runner_duration_seconds",
 			Help:    "Execution duration of Antigravity CLI subprocesses in seconds.",
-			Buckets: []float64{0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 900.0},
+			Buckets: []float64{0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0, 900.0},
 		},
-		[]string{"status", "model"},
+		[]string{"status", "model", "source"},
 	)
 
 	RunnerErrorsTotal = prometheus.NewCounterVec(
@@ -618,16 +618,19 @@ func RecordTokens(model, channel string, input, output, thinking, cacheRead, tot
 	}
 }
 
-// RecordRunnerExecution records runner subprocess duration and status.
-func RecordRunnerExecution(status, model string, duration time.Duration) {
+// RecordRunnerExecution records runner subprocess duration and status with its caller source.
+func RecordRunnerExecution(status, model, source string, duration time.Duration) {
 	if status == "" {
 		status = "unknown"
 	}
 	if model == "" {
 		model = "default"
 	}
-	RunnerExecutionsTotal.WithLabelValues(status, model).Inc()
-	RunnerDurationSeconds.WithLabelValues(status, model).Observe(duration.Seconds())
+	if source == "" {
+		source = "unknown"
+	}
+	RunnerExecutionsTotal.WithLabelValues(status, model, source).Inc()
+	RunnerDurationSeconds.WithLabelValues(status, model, source).Observe(duration.Seconds())
 }
 
 // RecordRunnerError records categorized error occurrences.

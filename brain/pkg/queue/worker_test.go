@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
+	"github.com/azylman/aerial/brain/pkg/metrics"
 	"github.com/azylman/aerial/brain/pkg/runner"
 	"github.com/azylman/aerial/brain/pkg/session"
 )
@@ -165,6 +167,20 @@ done
 
 	if pool.DaemonPool() == nil || !pool.DaemonPool().HasDaemon(threadID) {
 		t.Errorf("expected daemon to exist for thread %s in pool", threadID)
+	}
+
+	// Verify runner execution and latency metrics recorded with source="discord"
+	rec := httptest.NewRecorder()
+	metrics.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	metricsBody := rec.Body.String()
+	if !strings.Contains(metricsBody, `source="discord"`) {
+		t.Errorf("expected metrics to contain source=discord, got:\n%s", metricsBody)
+	}
+	if !strings.Contains(metricsBody, `aerial_brain_runner_executions_total{`) || !strings.Contains(metricsBody, `source="discord"`) {
+		t.Errorf("expected runner executions metric with source=discord, got:\n%s", metricsBody)
+	}
+	if !strings.Contains(metricsBody, `aerial_brain_runner_duration_seconds_bucket{`) || !strings.Contains(metricsBody, `source="discord"`) {
+		t.Errorf("expected runner duration bucket metric with source=discord, got:\n%s", metricsBody)
 	}
 }
 
