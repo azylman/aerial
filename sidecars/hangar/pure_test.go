@@ -1172,4 +1172,127 @@ func TestRollbackTagForService_TableDriven(t *testing.T) {
 	}
 }
 
+func TestParseGitHubSlug_TableDriven(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "standard https with .git",
+			input:    "https://github.com/azylman/aerial.git",
+			expected: "azylman/aerial",
+		},
+		{
+			name:     "standard https without .git",
+			input:    "https://github.com/azylman/mirrormere",
+			expected: "azylman/mirrormere",
+		},
+		{
+			name:     "https with trailing slash",
+			input:    "https://github.com/azylman/mirrormere/",
+			expected: "azylman/mirrormere",
+		},
+		{
+			name:     "https with auth credentials / token",
+			input:    "https://x-access-token:ghp_secret12345@github.com/azylman/mirrormere.git",
+			expected: "azylman/mirrormere",
+		},
+		{
+			name:     "scp-like ssh syntax with .git",
+			input:    "git@github.com:azylman/aerial.git",
+			expected: "azylman/aerial",
+		},
+		{
+			name:     "scp-like ssh syntax without .git",
+			input:    "git@github.com:azylman/aerial",
+			expected: "azylman/aerial",
+		},
+		{
+			name:     "ssh scheme with user",
+			input:    "ssh://git@github.com/azylman/aerial.git",
+			expected: "azylman/aerial",
+		},
+		{
+			name:     "ssh scheme with port",
+			input:    "ssh://git@github.com:22/azylman/aerial.git",
+			expected: "azylman/aerial",
+		},
+		{
+			name:     "mixed casing normalized to lowercase",
+			input:    "https://github.com/Azylman/MirrorMere.git",
+			expected: "azylman/mirrormere",
+		},
+		{
+			name:     "with query params and fragment",
+			input:    "https://github.com/azylman/aerial.git?ref=main#readme",
+			expected: "azylman/aerial",
+		},
+		{
+			name:     "leading and trailing whitespace and newlines",
+			input:    "  \n\thttps://github.com/azylman/aerial.git \r\n ",
+			expected: "azylman/aerial",
+		},
+		{
+			name:     "gitlab rejected",
+			input:    "https://gitlab.com/azylman/aerial.git",
+			expected: "",
+		},
+		{
+			name:     "spoofed host rejected",
+			input:    "https://notgithub.com/azylman/aerial.git",
+			expected: "",
+		},
+		{
+			name:     "subdomain spoof rejected",
+			input:    "https://github.com.evil.com/azylman/aerial.git",
+			expected: "",
+		},
+		{
+			name:     "gitlab ssh rejected",
+			input:    "git@gitlab.com:azylman/aerial.git",
+			expected: "",
+		},
+		{
+			name:     "local path rejected",
+			input:    "/share/aerial",
+			expected: "",
+		},
+		{
+			name:     "empty input",
+			input:    "",
+			expected: "",
+		},
+		{
+			name:     "whitespace only",
+			input:    "   \n\t  ",
+			expected: "",
+		},
+		{
+			name:     "root github url rejected",
+			input:    "https://github.com/",
+			expected: "",
+		},
+		{
+			name:     "single segment path rejected",
+			input:    "https://github.com/azylman",
+			expected: "",
+		},
+		{
+			name:     "extra path segments rejected",
+			input:    "https://github.com/azylman/aerial/tree/main",
+			expected: "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ParseGitHubSlug(tc.input)
+			if got != tc.expected {
+				t.Errorf("ParseGitHubSlug(%q) = %q, want %q", tc.input, got, tc.expected)
+			}
+		})
+	}
+}
+
 

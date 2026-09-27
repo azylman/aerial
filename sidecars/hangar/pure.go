@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path"
@@ -628,6 +629,64 @@ func RollbackTagForService(service string) string {
 	trimmed := strings.TrimSpace(service)
 	trimmed = strings.TrimPrefix(trimmed, "aerial-")
 	return fmt.Sprintf("aerial-%s:rollback-target", trimmed)
+}
+
+// ParseGitHubSlug extracts and lowercases the "owner/repo" slug from a GitHub remote URL.
+// It strips embedded credentials/tokens and returns "" if the URL is invalid or not strictly github.com.
+func ParseGitHubSlug(rawRemoteURL string) string {
+	raw := strings.TrimSpace(rawRemoteURL)
+	if raw == "" {
+		return ""
+	}
+
+	// Handle standard SCP-like SSH syntax: git@github.com:owner/repo(.git)
+	if strings.HasPrefix(raw, "git@") {
+		cleanSSH := strings.TrimPrefix(raw, "git@")
+		colonIdx := strings.Index(cleanSSH, ":")
+		if colonIdx != -1 {
+			host := cleanSSH[:colonIdx]
+			pathPart := cleanSSH[colonIdx+1:]
+			if strings.EqualFold(host, "github.com") {
+				return cleanSlugPath(pathPart)
+			}
+		}
+		return ""
+	}
+
+	// URL parsing for HTTP(S) or SSH schemes (e.g. ssh://git@github.com/owner/repo or ssh://git@github.com:22/owner/repo)
+	if strings.Contains(raw, "://") {
+		u, err := url.Parse(raw)
+		if err != nil {
+			return ""
+		}
+		host := strings.ToLower(u.Hostname())
+		if host != "github.com" {
+			return ""
+		}
+		return cleanSlugPath(u.Path)
+	}
+
+	return ""
+}
+
+func cleanSlugPath(p string) string {
+	p = strings.Trim(p, "/")
+	p = strings.TrimSuffix(p, ".git")
+	p = strings.Trim(p, "/")
+	// Strip any query or fragment if present
+	if qIdx := strings.IndexAny(p, "?#"); qIdx != -1 {
+		p = p[:qIdx]
+	}
+	parts := strings.Split(p, "/")
+	if len(parts) != 2 {
+		return ""
+	}
+	owner := strings.TrimSpace(parts[0])
+	repo := strings.TrimSpace(parts[1])
+	if owner == "" || repo == "" {
+		return ""
+	}
+	return strings.ToLower(fmt.Sprintf("%s/%s", owner, repo))
 }
 
 

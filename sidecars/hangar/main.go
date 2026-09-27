@@ -147,6 +147,7 @@ type RepoSyncResult struct {
 // RepoStatus holds git commit and timestamp metadata for an individual repository.
 type RepoStatus struct {
 	Repo              string     `json:"repo"`
+	GitHubRepo        string     `json:"github_repo,omitempty"`
 	DiskCommit        string     `json:"disk_commit"`
 	DiskCommitTime    *time.Time `json:"disk_commit_time,omitempty"`
 	RemoteCommit      string     `json:"remote_commit"`
@@ -282,8 +283,9 @@ type SyncDaemon struct {
 	reconcileCh   chan struct{}
 	composeMu     sync.Mutex
 	lastReconcile time.Time
-	lastSyncTimes map[string]time.Time
-	statusMu      sync.RWMutex
+	lastSyncTimes   map[string]time.Time
+	repoGitHubSlugs map[string]string
+	statusMu        sync.RWMutex
 	triggerFn     func() ([]RepoSyncResult, error)
 	reconcileFn   func(ctx context.Context) error
 
@@ -2002,6 +2004,38 @@ func (d *SyncDaemon) GetStatus(ctx context.Context) GitSyncStatusResponse {
 			SyncStatus: "synced",
 		}
 
+		var ghSlug string
+		d.statusMu.RLock()
+		if d.repoGitHubSlugs != nil {
+			ghSlug = d.repoGitHubSlugs[repo]
+		}
+		d.statusMu.RUnlock()
+		if ghSlug == "" {
+			out, _, err := d.getGitExecutor()(ctx, repo, "remote", "get-url", "origin")
+			if err != nil || len(out) == 0 {
+				out, _, err = d.getGitExecutor()(ctx, repo, "config", "--get", "remote.origin.url")
+			}
+			if err != nil {
+				out = nil
+			}
+			rawURL := strings.TrimSpace(string(out))
+			if rawURL == "" && d.repoUrls != nil {
+				rawURL = d.repoUrls[repo]
+			}
+			if rawURL != "" {
+				ghSlug = ParseGitHubSlug(rawURL)
+				if ghSlug != "" {
+					d.statusMu.Lock()
+					if d.repoGitHubSlugs == nil {
+						d.repoGitHubSlugs = make(map[string]string)
+					}
+					d.repoGitHubSlugs[repo] = ghSlug
+					d.statusMu.Unlock()
+				}
+			}
+		}
+		st.GitHubRepo = ghSlug
+
 		if t, ok := syncTimes[repo]; ok {
 			st.LastSyncTime = t
 			if t.After(latestSync) {
@@ -2151,6 +2185,7 @@ func NewDaemon(cfg DaemonConfig) *SyncDaemon {
 		},
 		pendingTargets:     make(map[string]struct{}),
 		lastAlertTimes:     make(map[string]time.Time),
+		repoGitHubSlugs:    make(map[string]string),
 	}
 }
 
