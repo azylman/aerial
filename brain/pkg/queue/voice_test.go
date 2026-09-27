@@ -3,6 +3,8 @@ package queue
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +12,7 @@ import (
 
 	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
+	"github.com/azylman/aerial/brain/pkg/metrics"
 	"github.com/azylman/aerial/brain/pkg/runner"
 )
 
@@ -223,7 +226,7 @@ while IFS= read -r line; do
 	echo '{"event":"step_update","step_update":{"state":"RUNNING","type":"tool","tool_name":"","tool_info":{"parameters":{"CommandLine":"system-health"}}}}'
 	echo '{"event":"step_update","step_update":{"state":"DONE","type":"tool_call","tool_name":"ha_call_service"}}'
 	echo '{"event":"step_update","step_update":{"state":"ERROR","type":"tool_call","tool_name":"ha_call_service"}}'
-	echo '{"event":"result","result":{"status":"SUCCESS","response":"daemon voice turn reply","conversation_id":"550e8400-e29b-41d4-a716-446655440000"}}'
+	echo '{"event":"result","result":{"status":"SUCCESS","response":"daemon voice turn reply","conversation_id":"550e8400-e29b-41d4-a716-446655440000","usage":{"input_tokens":60,"output_tokens":40,"total_tokens":100}}}'
 done
 `
 	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
@@ -270,6 +273,24 @@ done
 	reply3, _, err3 := pool.ExecuteVoiceTurn(context.Background(), "test", "sess-bad-lock", nil)
 	if err3 != nil || reply3 != "daemon voice turn reply" {
 		t.Errorf("unexpected error on recovered bad scopeLock: %v", err3)
+	}
+
+	// Verify Prometheus metrics for voice runner execution and tokens
+	rec := httptest.NewRecorder()
+	metrics.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := rec.Body.String()
+
+	if !strings.Contains(body, `source="voice"`) {
+		t.Errorf("expected metrics to contain source=voice, got body:\n%s", body)
+	}
+	if !strings.Contains(body, `aerial_brain_runner_executions_total{`) || !strings.Contains(body, `source="voice"`) {
+		t.Errorf("expected runner executions metric with source=voice, got body:\n%s", body)
+	}
+	if !strings.Contains(body, `aerial_brain_runner_duration_seconds_bucket{`) || !strings.Contains(body, `source="voice"`) {
+		t.Errorf("expected runner duration bucket metric with source=voice, got body:\n%s", body)
+	}
+	if !strings.Contains(body, `channel="voice"`) {
+		t.Errorf("expected token metrics with channel=voice, got body:\n%s", body)
 	}
 }
 
