@@ -118,9 +118,23 @@ func StartDaemon(ctx context.Context, cfg DaemonConfig) (*Daemon, error) {
 		cmd.Dir = cfg.Cwd
 	}
 	baseEnv := FilterAgyBaseEnv(cmd.Environ())
-	cmd.Env = append(baseEnv, cfg.Env...)
+	combined := append(baseEnv, cfg.Env...)
 	if cfg.GeminiHomeDir != "" {
-		cmd.Env = append(cmd.Env, "GEMINI_CLI_HOME="+cfg.GeminiHomeDir)
+		cleanEnv := make([]string, 0, len(combined)+3)
+		for _, e := range combined {
+			key, _, ok := strings.Cut(e, "=")
+			if ok && (strings.EqualFold(key, "HOME") || strings.EqualFold(key, "USERPROFILE") || strings.EqualFold(key, "GEMINI_CLI_HOME")) {
+				continue
+			}
+			cleanEnv = append(cleanEnv, e)
+		}
+		cmd.Env = append(cleanEnv,
+			"HOME="+cfg.GeminiHomeDir,
+			"USERPROFILE="+cfg.GeminiHomeDir,
+			"GEMINI_CLI_HOME="+cfg.GeminiHomeDir,
+		)
+	} else {
+		cmd.Env = combined
 	}
 	if target := strings.TrimSpace(cfg.ThreadID); target != "" {
 		cmd.Env = append(cmd.Env,

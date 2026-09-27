@@ -69,13 +69,15 @@ func DefaultLinuxMemoryChecker() (float64, error) {
 
 // DaemonPool manages a pool of persistent streaming agy daemons mapped by thread ID.
 type DaemonPool struct {
-	cfg        *config.Config
-	agyBin     string
-	env        []string
-	cwd        string
-	daemons    map[string]*runner.Daemon
-	mu         sync.RWMutex
-	memChecker MemoryChecker
+	cfg                *config.Config
+	agyBin             string
+	env                []string
+	cwd                string
+	daemons            map[string]*runner.Daemon
+	mu                 sync.RWMutex
+	memChecker         MemoryChecker
+	geminiHomeOverride string
+	maxDaemons         int
 }
 
 // NewDaemonPool constructs an initialized DaemonPool.
@@ -88,6 +90,20 @@ func NewDaemonPool(cfg *config.Config, agyBin string, env []string, cwd string) 
 		daemons:    make(map[string]*runner.Daemon),
 		memChecker: DefaultLinuxMemoryChecker,
 	}
+}
+
+// SetGeminiHomeDir overrides the Gemini runtime home directory for daemons spawned by this pool.
+func (p *DaemonPool) SetGeminiHomeDir(dir string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.geminiHomeOverride = dir
+}
+
+// SetMaxDaemons overrides the maximum concurrency ceiling for this pool.
+func (p *DaemonPool) SetMaxDaemons(maxDaemons int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.maxDaemons = maxDaemons
 }
 
 // SetMemoryChecker overrides the memory checker function (primarily for testing).
@@ -152,7 +168,9 @@ func (p *DaemonPool) GetOrCreateDaemon(ctx context.Context, threadID string, ses
 
 	// Enforce concurrency ceiling via LRU eviction
 	ceiling := 40
-	if p.cfg != nil {
+	if p.maxDaemons > 0 {
+		ceiling = p.maxDaemons
+	} else if p.cfg != nil {
 		data := p.cfg.Get()
 		if data.MaxConcurrentDaemons > 0 {
 			ceiling = data.MaxConcurrentDaemons
@@ -165,8 +183,8 @@ func (p *DaemonPool) GetOrCreateDaemon(ctx context.Context, threadID string, ses
 		}
 	}
 
-	geminiHome := ""
-	if p.cfg != nil {
+	geminiHome := p.geminiHomeOverride
+	if geminiHome == "" && p.cfg != nil {
 		geminiHome = p.cfg.GeminiHomeDir()
 	}
 	dCfg := runner.DaemonConfig{

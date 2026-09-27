@@ -867,6 +867,7 @@ type reloadConfigOptions struct {
 	skipEnvironmentSync bool
 	provisioner         *env.Provisioner
 	utilityDaemon       *runner.UtilityDaemon
+	workerPool          *queue.WorkerPool
 }
 
 func WithDiscordSession(s *discordgo.Session) ReloadOption {
@@ -896,6 +897,12 @@ func WithProvisioner(p *env.Provisioner) ReloadOption {
 func WithUtilityDaemon(d *runner.UtilityDaemon) ReloadOption {
 	return func(o *reloadConfigOptions) {
 		o.utilityDaemon = d
+	}
+}
+
+func WithWorkerPool(pool *queue.WorkerPool) ReloadOption {
+	return func(o *reloadConfigOptions) {
+		o.workerPool = pool
 	}
 }
 
@@ -954,6 +961,10 @@ func CreateReloadConfigFunc(cfg *config.Config, opts ...ReloadOption) func(sourc
 
 			if options.utilityDaemon != nil {
 				options.utilityDaemon.TriggerRestart(source)
+			}
+
+			if options.workerPool != nil {
+				options.workerPool.MarkDirty()
 			}
 		}
 	}
@@ -1063,7 +1074,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		}
 	}()
 
-	reloadConfig := CreateReloadConfigFunc(cfg, WithDiscordSession(dgSession), WithProvisioner(provisioner), WithUtilityDaemon(utilityDaemon))
+	reloadConfig := CreateReloadConfigFunc(cfg, WithDiscordSession(dgSession), WithProvisioner(provisioner), WithUtilityDaemon(utilityDaemon), WithWorkerPool(pool))
 
 	// Start background file watcher for atomic hot-reloading of prompts and skills
 	fileWatcher, err := watcher.NewWatcher(

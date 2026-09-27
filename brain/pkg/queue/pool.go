@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -108,6 +109,7 @@ type WorkerPool struct {
 	webhookDispatcher WebhookDispatcher
 	summaryGroup      singleflight.Group
 	daemonPool        *DaemonPool
+	voiceDaemonPool   *DaemonPool
 }
 
 // SummaryGroup returns the singleflight.Group coordinating thread summarizations for this pool instance.
@@ -319,6 +321,14 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 		daemonDataDir = appCfg.Current().DataDir
 	}
 	p.daemonPool = NewDaemonPool(appCfg, daemonBin, os.Environ(), daemonDataDir)
+	p.voiceDaemonPool = NewDaemonPool(appCfg, daemonBin, os.Environ(), daemonDataDir)
+
+	if daemonDataDir != "" {
+		p.daemonPool.SetGeminiHomeDir(filepath.Join(daemonDataDir, "runtimes", "discord"))
+		p.voiceDaemonPool.SetGeminiHomeDir(filepath.Join(daemonDataDir, "runtimes", "voice"))
+	}
+	p.daemonPool.SetMaxDaemons(35)
+	p.voiceDaemonPool.SetMaxDaemons(5)
 
 	if p.cfg.HistoryFetcher == nil {
 		p.cfg.HistoryFetcher = func(ctx context.Context, channelID string, beforeID string, limit int) ([]HistoryMessage, error) {
@@ -468,7 +478,7 @@ func (p *WorkerPool) SessionManager() *session.Manager {
 func (p *WorkerPool) Start() {
 	// WorkerPool starts workers lazily per active thread
 	log.Printf("[WorkerPool] Started queue worker pool with max %d attempts per turn", p.cfg.MaxAttempts)
-	if p.daemonPool != nil {
+	if p.daemonPool != nil || p.voiceDaemonPool != nil {
 		p.wg.Add(1)
 		go func() {
 			defer p.wg.Done()
@@ -479,10 +489,17 @@ func (p *WorkerPool) Start() {
 				case <-p.ctx.Done():
 					return
 				case <-ticker.C:
-					p.daemonPool.PruneIdle(5 * time.Minute)
-					p.daemonPool.CheckMemoryPressureAndEvict()
-					p.daemonPool.MonitorZombieTasks(1 * time.Hour)
-					p.daemonPool.UpdateMemoryMetrics()
+					if p.daemonPool != nil {
+						p.daemonPool.PruneIdle(5 * time.Minute)
+						p.daemonPool.CheckMemoryPressureAndEvict()
+						p.daemonPool.MonitorZombieTasks(1 * time.Hour)
+						p.daemonPool.UpdateMemoryMetrics()
+					}
+					if p.voiceDaemonPool != nil {
+						p.voiceDaemonPool.PruneIdle(5 * time.Minute)
+						p.voiceDaemonPool.CheckMemoryPressureAndEvict()
+						p.voiceDaemonPool.MonitorZombieTasks(1 * time.Hour)
+					}
 				}
 			}
 		}()
@@ -572,6 +589,11 @@ func (p *WorkerPool) Stop() {
 			log.Printf("[WorkerPool] Warning: failed to close daemon pool: %v", closeErr)
 		}
 	}
+	if p.voiceDaemonPool != nil {
+		if closeErr := p.voiceDaemonPool.Close(); closeErr != nil {
+			log.Printf("[WorkerPool] Warning: failed to close voice daemon pool: %v", closeErr)
+		}
+	}
 	log.Printf("[WorkerPool] Queue worker pool stopped cleanly")
 }
 
@@ -581,6 +603,27 @@ func (p *WorkerPool) DaemonPool() *DaemonPool {
 		return nil
 	}
 	return p.daemonPool
+}
+
+// VoiceDaemonPool returns the associated voice DaemonPool instance.
+func (p *WorkerPool) VoiceDaemonPool() *DaemonPool {
+	if p == nil {
+		return nil
+	}
+	return p.voiceDaemonPool
+}
+
+// MarkDirty notifies both the primary (Discord) and voice daemon pools to mark active daemons dirty and evict idle daemons.
+func (p *WorkerPool) MarkDirty() {
+	if p == nil {
+		return
+	}
+	if p.daemonPool != nil {
+		p.daemonPool.MarkDirty()
+	}
+	if p.voiceDaemonPool != nil {
+		p.voiceDaemonPool.MarkDirty()
+	}
 }
 
 // LowEffortModel returns the configured low effort reasoning model name.
@@ -683,15 +726,19 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 		return strings.TrimSpace(stdout), convID, nil
 	}
 
-	if p.daemonPool == nil {
-		return "", convID, fmt.Errorf("daemon pool unavailable")
+	voicePool := p.voiceDaemonPool
+	if voicePool == nil {
+		voicePool = p.daemonPool
+	}
+	if voicePool == nil {
+		return "", convID, fmt.Errorf("voice daemon pool unavailable")
 	}
 
-	defer p.daemonPool.ReleaseDaemon(threadID)
+	defer voicePool.ReleaseDaemon(threadID)
 
 	model := p.LowEffortModel()
 	start := time.Now()
-	daemon, dErr := p.daemonPool.GetOrCreateDaemon(ctx, threadID, convID, model)
+	daemon, dErr := voicePool.GetOrCreateDaemon(ctx, threadID, convID, model)
 	if dErr != nil {
 		metrics.RecordRunnerExecution("error", model, "voice", time.Since(start))
 		return "", convID, fmt.Errorf("failed to acquire voice daemon: %w", dErr)

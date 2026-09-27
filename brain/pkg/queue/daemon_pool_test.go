@@ -369,3 +369,40 @@ func TestDaemonPool_ActiveTasksAndMemoryMetrics(t *testing.T) {
 	pool.UpdateMemoryMetrics()
 }
 
+func TestDaemonPool_IsolatedRuntimesAndCeilings(t *testing.T) {
+	tempDir := t.TempDir()
+	mockBin := filepath.Join(tempDir, "mock_agy.sh")
+	_ = os.WriteFile(mockBin, []byte("#!/bin/sh\nwhile true; do sleep 1; done\n"), 0755)
+
+	pool := NewDaemonPool(nil, mockBin, nil, tempDir)
+	defer pool.Close()
+
+	customHome := filepath.Join(tempDir, "runtimes", "voice")
+	pool.SetGeminiHomeDir(customHome)
+	pool.SetMaxDaemons(3)
+
+	ctx := context.Background()
+	d1, err := pool.GetOrCreateDaemon(ctx, "voice-1", "sess-1", "model-a")
+	if err != nil {
+		t.Fatalf("failed to create voice daemon 1: %v", err)
+	}
+	if d1 == nil {
+		t.Fatalf("expected non-nil daemon")
+	}
+
+	_, _ = pool.GetOrCreateDaemon(ctx, "voice-2", "sess-2", "model-a")
+	_, _ = pool.GetOrCreateDaemon(ctx, "voice-3", "sess-3", "model-a")
+	if pool.ActiveCount() != 3 {
+		t.Errorf("expected 3 active daemons, got %d", pool.ActiveCount())
+	}
+
+	// 4th daemon should trigger LRU eviction under maxDaemons=3 ceiling
+	_, _ = pool.GetOrCreateDaemon(ctx, "voice-4", "sess-4", "model-a")
+	if pool.ActiveCount() > 3 {
+		t.Errorf("expected count bounded by maxDaemons ceiling (3), got %d", pool.ActiveCount())
+	}
+	if pool.HasDaemon("voice-1") {
+		t.Errorf("expected voice-1 to be evicted by LRU under maxDaemons ceiling")
+	}
+}
+

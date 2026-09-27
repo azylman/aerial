@@ -22,14 +22,10 @@ type Provisioner struct {
 	agentsSkillsDir         string
 	agentInstructionsPaths  []string
 	systemInstructionsPaths []string
+	aerialRulesDir          string
+	configRulesDir          string
 
-	mu                sync.Mutex
-	lkgcPersona       string
-	lkgcPersonaSource string
-	lkgcGemini        string
-	lkgcGeminiSource  string
-	lkgcPersonaRule   string
-	lkgcGeminiRule    string
+	mu sync.Mutex
 }
 
 // New creates a Provisioner targeting the given homeDir and dataDir.
@@ -46,6 +42,8 @@ func New(homeDir, dataDir string) *Provisioner {
 		customSkillsDir:         "/share/aerial-config/custom-skills",
 		superpowersDir:          skillsDir,
 		agentsSkillsDir:         "/app/.agents/skills",
+		aerialRulesDir:          "/share/aerial/rules",
+		configRulesDir:          "/share/aerial-config/rules",
 		agentInstructionsPaths:  DefaultAgentInstructionsSearchPaths,
 		systemInstructionsPaths: DefaultSystemInstructionsSearchPaths,
 	}
@@ -74,14 +72,23 @@ func (p *Provisioner) SetAgentsSkillsDir(dir string) {
 	p.agentsSkillsDir = dir
 }
 
+// SetAerialRulesDir sets the search path for aerial system rules.
+func (p *Provisioner) SetAerialRulesDir(dir string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.aerialRulesDir = dir
+}
+
+// SetConfigRulesDir sets the search path for aerial-config user rules.
+func (p *Provisioner) SetConfigRulesDir(dir string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.configRulesDir = dir
+}
+
 // SetAgentInstructionsSearchPaths sets the search paths for AGENTS.md instructions.
 func (p *Provisioner) SetAgentInstructionsSearchPaths(paths []string) {
 	p.agentInstructionsPaths = paths
-}
-
-// SetSystemInstructionsSearchPaths sets the search paths for GEMINI.md system instructions.
-func (p *Provisioner) SetSystemInstructionsSearchPaths(paths []string) {
-	p.systemInstructionsPaths = paths
 }
 
 // HomeDir returns the target home directory for this Provisioner.

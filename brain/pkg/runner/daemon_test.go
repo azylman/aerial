@@ -1336,3 +1336,46 @@ EOF
 	}
 }
 
+func TestDaemon_EnvironmentHomeOverride(t *testing.T) {
+	tempDir := t.TempDir()
+	mockBin := filepath.Join(tempDir, "mock_env.sh")
+	script := `#!/bin/sh
+echo '{"event":"init","init":{"tools":["run_command"]}}'
+while IFS= read -r line; do
+  echo "{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"HOME=$HOME;USERPROFILE=$USERPROFILE;GEMINI=$GEMINI_CLI_HOME\"}}"
+done
+`
+	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
+		t.Fatalf("failed to write mock agy: %v", err)
+	}
+
+	customHome := filepath.Join(tempDir, "custom_home")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cfg := DaemonConfig{
+		SessionID:     "sess-env",
+		ThreadID:      "thread-env",
+		AgyBin:        mockBin,
+		Cwd:           tempDir,
+		GeminiHomeDir: customHome,
+		Timeout:       5 * time.Second,
+	}
+
+	daemon, err := StartDaemon(ctx, cfg)
+	if err != nil {
+		t.Fatalf("StartDaemon failed: %v", err)
+	}
+	defer daemon.Close()
+
+	res, err := daemon.ExecuteTurn(ctx, "check")
+	if err != nil {
+		t.Fatalf("ExecuteTurn failed: %v", err)
+	}
+	expected := fmt.Sprintf("HOME=%s;USERPROFILE=%s;GEMINI=%s", customHome, customHome, customHome)
+	if res.Response != expected {
+		t.Errorf("expected response %q, got %q", expected, res.Response)
+	}
+}
+
+

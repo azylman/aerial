@@ -73,7 +73,7 @@ WORKDIR /app
 COPY --from=builder /aerial-brain /usr/local/bin/aerial-brain
 COPY scripts/ /usr/local/bin/
 RUN chmod +x /usr/local/bin/*.sh || true
-COPY GEMINI.md /app/GEMINI.md
+COPY rules /app/rules
 COPY .agents /app/.agents
 
 ENV GIT_TERMINAL_PROMPT=0
