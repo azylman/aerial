@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/azylman/aerial/brain/pkg/config"
+	"gopkg.in/yaml.v3"
 )
 
 func TestSyncSettings_APIKeyAndOAuth(t *testing.T) {
@@ -1853,6 +1854,52 @@ func TestLinkSharedSessionStorage_Comprehensive(t *testing.T) {
 		t.Errorf("SyncRules with blocked runtime dirs failed: %v", err)
 	}
 }
+
+func TestRepositorySkills_ValidYAMLFrontmatter(t *testing.T) {
+	skillsDir := filepath.Join("..", "..", "..", ".agents", "skills")
+	if fi, err := os.Stat(skillsDir); err != nil || !fi.IsDir() {
+		t.Skip("Repository .agents/skills not found (isolated environment)")
+	}
+
+	entries, err := os.ReadDir(skillsDir)
+	if err != nil {
+		t.Fatalf("Failed to read skills directory: %v", err)
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		skillFile := filepath.Join(skillsDir, entry.Name(), "SKILL.md")
+		data, err := os.ReadFile(skillFile)
+		if err != nil {
+			t.Errorf("Missing or unreadable SKILL.md in %s: %v", entry.Name(), err)
+			continue
+		}
+
+		parts := strings.SplitN(string(data), "---", 3)
+		if len(parts) < 3 {
+			t.Errorf("SKILL.md in %s does not contain YAML frontmatter enclosed in '---': %v", entry.Name(), err)
+			continue
+		}
+
+		var meta struct {
+			Name        string `yaml:"name"`
+			Description string `yaml:"description"`
+		}
+		if err := yaml.Unmarshal([]byte(parts[1]), &meta); err != nil {
+			t.Errorf("SKILL.md in %s has invalid YAML frontmatter: %v", entry.Name(), err)
+			continue
+		}
+		if strings.TrimSpace(meta.Name) == "" {
+			t.Errorf("SKILL.md in %s has empty 'name' field", entry.Name())
+		}
+		if strings.TrimSpace(meta.Description) == "" {
+			t.Errorf("SKILL.md in %s has empty 'description' field", entry.Name())
+		}
+	}
+}
+
 
 
 
