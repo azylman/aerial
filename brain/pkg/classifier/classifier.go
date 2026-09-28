@@ -827,8 +827,8 @@ func (c *Classifier) SummarizeThreadTitle(ctx context.Context, question string) 
 	}
 
 	prompt := fmt.Sprintf(
-		"Summarize the following message into a concise 3 to 5 word topic title for a Discord thread.\n"+
-			"Output ONLY the raw title text. Never include labels, prefixes (such as \"Title:\" or \"Thread:\"), quotes, markdown, or punctuation.\n\n"+
+		"Summarize the following message into a concise 3 to 5 word phrase for a Discord thread topic title.\n"+
+			"Output ONLY the raw title text as a coherent phrase, not a list of random keywords or words. Never include labels, prefixes (such as \"Title:\" or \"Thread:\"), quotes, markdown, or punctuation.\n\n"+
 			"Message: %s\n"+
 			"Title:",
 		sanitizedQuestion,
