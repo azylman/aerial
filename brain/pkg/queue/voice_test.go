@@ -216,6 +216,59 @@ func TestWorkerPool_ExecuteVoiceTurn_VoiceRunnerHook(t *testing.T) {
 	}
 }
 
+func TestWorkerPool_ExecuteVoiceTurn_VoiceStreamRunnerHook(t *testing.T) {
+	t.Parallel()
+
+	pool := New(nil, WorkerPoolConfig{
+		VoiceStreamRunnerFunc: func(ctx context.Context, prompt, sessionID string, onStatus func(string), onSentence func(string)) (string, string, error) {
+			if onStatus != nil {
+				onStatus("⚡ Streaming hook running...")
+			}
+			if onSentence != nil {
+				onSentence("Streaming sentence.")
+			}
+			return "voice stream reply", sessionID, nil
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	var statusCalled string
+	var sentenceCalled string
+	reply, convID, err := pool.ExecuteVoiceTurn(context.Background(), "hello", "sess-stream-hook-1", func(s string) {
+		statusCalled = s
+	}, func(sent string) {
+		sentenceCalled = sent
+	})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if reply != "voice stream reply" || convID != "sess-stream-hook-1" {
+		t.Errorf("unexpected result: reply=%q convID=%q", reply, convID)
+	}
+	if statusCalled != "⚡ Streaming hook running..." {
+		t.Errorf("unexpected status: %q", statusCalled)
+	}
+	if sentenceCalled != "Streaming sentence." {
+		t.Errorf("unexpected sentence: %q", sentenceCalled)
+	}
+
+	// Error branch test
+	poolErr := New(nil, WorkerPoolConfig{
+		VoiceStreamRunnerFunc: func(ctx context.Context, prompt, sessionID string, onStatus func(string), onSentence func(string)) (string, string, error) {
+			return "", sessionID, errors.New("simulated stream failure")
+		},
+	})
+	poolErr.Start()
+	defer poolErr.Stop()
+
+	_, _, err = poolErr.ExecuteVoiceTurn(context.Background(), "hello", "sess-err", nil, func(sent string) {})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+}
+
 func TestWorkerPool_ExecuteVoiceTurn_ProcessPool_Success(t *testing.T) {
 	mockSpawner := &runner.MockDaemonSpawner{
 		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
