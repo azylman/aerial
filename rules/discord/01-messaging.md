@@ -19,6 +19,7 @@
 
 6. **Subagent Offloading Threshold & Tool Budget Ceiling**:
    - When a task involves deep exploration (>10 files viewed), repetitive test/coverage cycles, or approaches 30 internal tool steps without completing, stop and delegate the work to an isolated subagent (`invoke_subagent`). Subagents execute in fresh, minimal context windows and return only their final findings.
+   - **Model Tier Selection on Offload**: When offloading work to an isolated subagent (`invoke_subagent`), explicitly declare `Model: "flash"` (or `"flash_lite"`) for research lookups, broad file inspections, test executions, and repetitive remediation. Reserve `pro` exclusively for deep architectural planning or formal multi-perspective review.
 
 7. **GitHub Web Links Only (No `file:///` Links)**:
    - Link files exclusively via public GitHub URLs (e.g. `https://github.com/azylman/aerial/blob/main/...`) or clean inline backticks (e.g. `GEMINI.md`). NEVER emit `file://` or `file:///` URIs or masked local file links, as local paths are inaccessible in Discord. Masked links (`[label](url)`) are strictly restricted to valid `http://` or `https://` URLs.

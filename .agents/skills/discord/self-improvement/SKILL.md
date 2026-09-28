@@ -109,6 +109,11 @@ Code review and execution are structured dynamically across four complexity tier
   - For Tier 2+ multi-file edits, test triage, and lint remediation loops exceeding tool budget thresholds, the primary agent acts as an orchestrator, delegating heavy tool loops to scoped, isolated subagents (for implementation/execution only).
   - Tier 0 and Tier 1 changes execute directly inline in the root thread. Root transcript must remain featherweight (<50 steps) to prevent quadratic token compounding.
 
+• **Subagent Model Allocation Matrix**:
+  - **Implementation Subagents (Low-Effort Tier)**: When dispatching subagents to write code or tests per an implementation plan, always specify `Model: "flash"` (or `"flash_lite"`). Implementing code from an approved plan is transcription and verification, not open-ended reasoning. Using high-effort models for routine coding burns quota and increases turn latency.
+  - **Review Subagents (High-Effort Tier)**: Consolidated review panels (The Girl Gang) and final pre-PR diff reviewers must use `Model: "pro"` or `Model: "inherit"` to ensure rigorous critique and edge-case discovery.
+  - **Fix-Loop Escalation**: Use `Model: "flash"` for initial fix attempts (rounds 1–3); escalate to `Model: "pro"` only if an implementer remains stuck on round 4 or 5.
+
 ---
 
 ### Universal Workflow Stages
@@ -186,7 +191,7 @@ Before modifying source code, Aerial MUST audit the plan according to the classi
    - **Hermetic In-Memory Test Fixtures**: All storage and database contract tests MUST use airgapped, in-memory database handles or `t.TempDir()` isolated files strictly for fast, hermetic unit testing. Unit tests MUST NEVER write to shared host database paths, `/data`, or `/share`.
    - **Interface Abstraction at External Boundaries**: Abstract external system boundaries (git commands, Docker sockets, Discord REST, database drivers) behind interfaces (e.g. `GitExecutor`) so packages can be tested hermetically with in-memory mocks without disk or subprocess overhead.
 4. **Orchestration & Workflow Standards**:
-   - Strictly adhere to the Tiered Engineering Workflow and Orchestration Invariants detailed above.
+   - Strictly adhere to the Tiered Engineering Workflow, Orchestration Invariants, and Subagent Model Allocation Matrix detailed above (mandatory `Model: "flash"` or `Model: "flash_lite"` for all implementer subagent dispatches).
 
 ---
 

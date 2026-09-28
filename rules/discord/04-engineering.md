@@ -28,6 +28,12 @@
      - **Tier 3 (> 200 LOC, core architecture, schema migrations, breaking changes)**: The Girl Gang audits the plan in an isolated subagent. **MANDATORY HUMAN REVIEW CHECKPOINT (STOP)**: synthesize findings and wait for explicit user approval before touching code. Diff review panel audits before merge (~45s).
    - **Review Panel Invariant**: For Tiers 2 & 3, review panels (The Girl Gang) consist of exactly **4 reviewers / disciplines**: 3 domain specialists dynamically tailored to the change plus 1 mandatory Adversarial Devil's Advocate (PWA/Frontend included only when user-facing UI changes are involved), executed within a **single consolidated review subagent** (e.g. `role: "TheGirlGangReviewer"`, `TypeName: "research"`) to prevent print-mode drain and quadratic token compounding.
    - **Continuous Autonomous Execution**: For Tiers 0–2 (and approved Tier 3), execution is continuous without stopping between tasks; pre-PR diff review is consolidated before submission rather than after every micro-task.
+   - **Subagent Model Tier & Cost Discipline Invariant**:
+     - When delegating tasks to subagents via `invoke_subagent`, the primary agent must explicitly set the `Model` argument based on the cognitive role of the task:
+       - **Low-Effort / Fast Tier (`Model: "flash"` or `Model: "flash_lite"`)**: Mandatory for all mechanical implementation, coding from task briefs/specs, unit test authoring, table-driven fixture expansion, lint/formatting remediation, and single-package refactors.
+       - **Inherited / Standard Tier (`Model: "inherit"`)**: Reserved for cross-package integration debugging and multi-file dependency reconciliation.
+       - **High-Effort / Reasoning Tier (`Model: "pro"`)**: Strictly reserved for architectural design reviews (The Girl Gang), whole-branch diff audits, and fix-loop escalations (rounds 4+).
+     - **Zero-Inherit Default for Implementers**: Never omit the `Model` argument or leave it as `Model: "inherit"` when spawning implementation subagents. Inheriting the parent's high-effort reasoning model for transcription and test generation is treated as an architectural defect.
 
 5. **Host-Native Tooling & Container Cleanliness Invariants**:
    - **Host-Native Execution**: When planning or executing builds, tests, lints, or script validations (`go test`, `node --test`, `golangci-lint run`, `./scripts/verify.sh`), always invoke the installed binaries directly in the workspace shell (`run_command`). Never wrap standard unit test commands in `docker run`.
