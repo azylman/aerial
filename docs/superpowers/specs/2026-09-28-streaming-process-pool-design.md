@@ -208,13 +208,15 @@ The `UnifiedProcessPool` in [`brain/pkg/runner`](file:///C:/Users/alexz/.gemini/
   - **Voice**: `deviceID` (e.g. `"kiosk"` or hardware client ID). Voice processes are long-running and persistent—they are **never** torn down on connection close, ensuring zero-latency conversational continuity.
 - **Throwaway Executions**: Handled via warm shared role keys (e.g. `"ephemeral:classifier"` and `"ephemeral:summarizer"`).
 
-### 4.2 Boot-Time Pre-Warming (`PrewarmedTargets`)
+### 4.2 Boot-Time Pre-Warming & Singleflight Synchronization
 To prevent cold-start latency after container deployments (so the first kiosk voice interaction or first ambient message is immediately responsive):
 - **Configuration**:
   - `PrewarmedTargets []string`: List of target keys to pre-spawn at startup (e.g. `["kiosk", "ephemeral:classifier", "ephemeral:summarizer"]`).
-- **Startup Protocol**:
-  - When `UnifiedProcessPool.Initialize(ctx)` runs on Brain boot, it launches background goroutines to spawn and perform the initial `init` handshake for all targets in `PrewarmedTargets`.
-  - By the time the Discord gateway connects and voice sockets open, these daemons are already in `StateReady` state.
+- **Startup Protocol & Synchronization**:
+  - `UnifiedProcessPool.Initialize(ctx)` launches pre-warming with a 5-second per-target timeout and structured diagnostic logging (non-blocking to HTTP health probes).
+  - Uses a `singleflight.Group` keyed by `targetKey`: If an incoming voice or Discord request arrives while a daemon is mid-handshake, `GetOrCreate` safely joins the in-flight initialization rather than spawning a duplicate process.
+- **Memory Pressure Hysteresis**:
+  - Under system memory pressure (available RAM < 15%), automatic background re-spawning of pre-warmed targets is strictly suppressed to prevent thrashing. Re-spawning resumes only after host memory stabilizes above 25% for at least 60 seconds.
 
 ### 4.3 Pool-Managed Rotation Thresholds
 The pool inspects daemon health pre-turn and post-turn across all daemons (Discord, Voice, and throwaways):
@@ -222,17 +224,18 @@ The pool inspects daemon health pre-turn and post-turn across all daemons (Disco
 - **Tool Step Count**: Rotates after **180 cumulative tool steps** (`DefaultMaxSessionSteps`).
 - **Transcript Byte Ceiling**: Rotates when `.system_generated/logs/transcript.jsonl` exceeds **500 KB** (`DefaultMaxTranscriptBytes`).
 - **Session DB Byte Ceiling**: Rotates when `<session-id>.pb` or SQLite DB exceeds **1.5 MB** (`DefaultMaxSessionDBBytes`).
-- **Idle TTL**: Closes after **24 hours** of zero activity and zero running background tasks (`len(activeTasks) == 0`). Note: pre-warmed daemons (like `"kiosk"`) are automatically re-spawned if evicted by idle TTL.
+- **Idle TTL**: Closes after **24 hours** of zero activity and zero running background tasks (`len(activeTasks) == 0`).
+- **Turn Boundary Gating**: Rotation is strictly evaluated at turn boundaries when `len(d.inflight) == 0`. It never interrupts an active speech utterance or in-flight tool call.
 
-### 4.4 Clean Rotation Flow
-1. Active turn finishes completely.
+### 4.4 Clean Rotation Flow & Hardware Context Compaction
+1. Active turn finishes completely (`len(d.inflight) == 0`).
 2. Pool checks rotation criteria (`ShouldRotateDaemon`).
 3. If rotation required:
-   - Compacts conversation by generating a thread summary.
-   - Saves summary to database (`sessions.summary`).
+   - **For Discord Threads**: Compacts conversation via `SummarizeThreadHistory` and stores in `sessions.summary`.
+   - **For Hardware Voice (Kiosk)**: Compacts conversation via `SummarizeVoiceSession`, focusing strictly on physical entity states ("island pendant is on", "temperature 72") and pronoun referents ("it" = island pendant), generating a `<HARDWARE_CONTEXT>` block (< 250 tokens).
    - Closes old daemon gracefully (killing process group `-pgid`).
    - Clears session ID mapping.
-4. Next turn initializes a fresh daemon with a new session UUID, injecting the compacted summary and lookback history. If the target was pre-warmed, a replacement daemon can be spawned immediately in the background.
+4. Next turn initializes a fresh daemon with a new session UUID, injecting the compacted summary and lookback history. If the target was pre-warmed, a replacement daemon is spawned asynchronously in the background.
 
 ---
 
@@ -275,14 +278,23 @@ type TurnSink interface {
 
 #### 5.2.2 `VoiceTurnSink`
 - **Fields**:
-  - `conn *websocket.Conn` (or voice audio pipe)
-  - `deviceID string` (e.g. `"kiosk"`)
+  - `conn *RebindableVoiceConn`: Mutex-guarded wrapper around the active WebSocket connection (or voice audio pipe).
+  - `deviceID string`: Target hardware identifier (e.g. `"kiosk"`).
+  - `replayBuf *RingBuffer[TokenChunk]`: Sliding token replay ring buffer holding up to 1024 token chunks for reconnection resilience.
+  - `seq atomic.Uint64`: Monotonically increasing token chunk sequence counter.
 - **Behavior**:
   - `OnToolCall`: Sends lightweight JSON control packet over WebSocket for UI animation / chime.
-  - `OnTextDelta`: Streams raw token chunks directly into voice pipeline / TTS synthesizer with zero buffering.
-  - `OnResult`: Sends end-of-turn audio delimiter frame.
-  - `OnError`: Sends error frame over WebSocket.
-  - **Connection Close / Persistence**: When the client disconnects or an utterance finishes, the connection closes and `VoiceTurnSink` is detached, but the underlying `StreamingDaemon` is **never** torn down. It remains warm in `p.daemons[deviceID]`, ready for the next interaction with zero process boot latency.
+  - `OnTextDelta`:
+    - Wraps token in sequenced chunk (`TokenChunk{Seq: seq.Add(1), Delta: delta}`).
+    - Appends chunk to sliding replay buffer (`replayBuf.Push(chunk)`).
+    - Streams raw token chunks directly into voice pipeline / TTS synthesizer with zero buffering via `conn.WriteJSON(chunk)`.
+  - `OnResult`: Sends end-of-turn audio delimiter frame and clears the replay buffer.
+  - `OnError`: Sends error frame over WebSocket and logs error details.
+  - **Connection Close & Re-Binding**:
+    - When a transient Wi-Fi drop occurs mid-turn, the client reconnects with its last acknowledged sequence number (`lastAckSeq`).
+    - Calling `VoiceTurnSink.Rebind(newConn, lastAckSeq)` swaps the underlying socket under mutex guard and immediately replays unacknowledged chunks from the ring buffer (`replayBuf.GetSince(lastAckSeq)`).
+    - Audio output continues uninterrupted without restarting the turn or dropping speech syllables.
+  - **Process Persistence**: When the client finishes an utterance or disconnects, the socket closes and `VoiceTurnSink` detaches, but the underlying `StreamingDaemon` is **never** torn down. It remains warm in `p.daemons[deviceID]`, ready for the next interaction with zero process boot latency.
 
 #### 5.2.3 `ThrowawayTurnSink`
 - **Fields**:
@@ -306,13 +318,19 @@ When `agy` emits a 429 `RESOURCE_EXHAUSTED` (or returns a capacity phrase with c
   `pool.quotaLockedUntil.Store(time.Now().UTC().Add(resetDur).Unix())`
 
 ### 6.2 The Dual-Action Policy (Reject New, Preserve Existing)
+- **Centralized Resume Coordination (`quotaResumeCh`)**:
+  - The pool supervisor maintains an atomic broadcast channel (`quotaResumeCh chan struct{}`) and an expiration timer.
+  - When a lockout is triggered, the previous resume channel is replaced under `mu.Lock()`.
+  - Upon lockout expiration (`time.Now().Unix() >= quotaLockedUntil.Load()`), the supervisor closes `quotaResumeCh`, waking all blocked worker goroutines simultaneously.
+  - To prevent a thundering herd against Google Gemini or PostgreSQL, each woken worker applies a randomized jitter delay (100ms - 1500ms) before popping its next pending message.
 - **Action for CURRENTLY PENDING Messages**:
   - Any message already in Postgres (`status = pending`) or currently in flight when the lockout starts is **preserved**.
   - Messages in flight are rolled back to `status = pending` with retry reason `[QUOTA_PAUSED reset_in=...]`.
-  - The worker queue suspends dispatch loop execution until `time.Now().Unix() >= quotaLockedUntil.Load()`.
-  - When the block expires, the queue resumes popping existing pending messages across all threads. Zero sibling messages are dropped or marked failed.
+  - The worker queue suspends dispatch loop execution by selecting on `<-pool.quotaResumeCh`, `<-ctx.Done()`, or a fallback ticker.
+  - When the block expires and `quotaResumeCh` closes, the queue resumes popping existing pending messages across all threads. Zero sibling messages are dropped or marked failed.
 - **Action for NEW Incoming Messages**:
-  - Any new message arriving via Discord gateway or Voice WebSocket while `time.Now().Unix() < quotaLockedUntil.Load()` is **fast-failed / rejected immediately**.
+  - Any new message arriving via Discord gateway or Voice WebSocket while `time.Now().Unix() < quotaLockedUntil.Load()` is **fast-failed / rejected immediately at gateway edge**.
+  - **Fast Edge Rejection**: Ingress checks `quotaLockedUntil.Load()` before assembling prompt context or inserting rows into Postgres.
   - **Discord**: Ingress returns an immediate quota notification (`notifier.FormatQuotaPauseMessage`) and marks the newly arrived message `StatusFailed` with `[QUOTA_LOCKED]`.
   - **Voice**: Ingress immediately sends an unavailable voice frame and closes the turn without queueing.
   - **Rationale**: Prevents users who speak to the bot during an active 4-hour pause from hanging silently for hours with no feedback.
@@ -349,12 +367,26 @@ When `agy` emits a 429 `RESOURCE_EXHAUSTED` (or returns a capacity phrase with c
 ## 8. Verification & Statement Coverage Strategy
 
 ### 8.1 95.0% Statement Coverage Floor
-To ensure `brain/pkg/runner` (baseline 95.3%) and `brain/pkg/queue` (baseline 95.7%) stay >= 95.0%:
+To ensure `brain/pkg/runner` (baseline 95.3%) and `brain/pkg/queue` (baseline 95.7%) maintain strictly >= 95.0% statement coverage:
 - All streaming daemon tests will use pure in-memory pipes (`io.Pipe()`, `bytes.Buffer`) rather than spawning external shell processes in CI.
 - Mock streams will simulate:
-  - Immediate `init` handshake.
+  - Immediate `init` handshake and session UUID latching.
   - Rapid multi-turn `step_update` and `result` frames.
-  - Mid-turn EOF and broken pipe errors.
-  - 429 quota pause frames.
+  - Mid-turn EOF, broken pipe errors, and subprocess crashes.
+  - 429 quota pause frames and capacity blip strings.
+  - Mid-turn WebSocket disconnects and ring buffer replay recovery.
 - TurnSink implementations will be tested with mock Discord and WebSocket sessions, verifying clean status message deletion and zero swallowed errors.
-- Pre-submit verification script `./scripts/verify.sh` will enforce test execution and statement coverage gating.
+- Pre-submit verification script `./scripts/verify.ps1` will enforce test execution and statement coverage gating.
+
+### 8.2 Hermetic Test Dependency Injection Interfaces
+To avoid spawning real OS processes or opening real network ports during unit testing, the architecture introduces clear injectable interfaces:
+- **`DaemonSpawner` Interface**:
+  - Signature: `Spawn(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error)`
+  - Production implementation wraps `exec.Command` with platform process groups / job objects.
+  - Test double (`MockDaemonSpawner`) returns connected `io.Pipe()` pairs, allowing deterministic injection of arbitrary NDJSON stream chunks and EOF events.
+- **`WebSocketWriter` Interface**:
+  - Signature: `WriteJSON(v any) error`, `WriteControl(messageType int, data []byte, deadline time.Time) error`, `Close() error`
+  - Allows `VoiceTurnSink` tests to simulate transient connection failures, re-binding, and sequence verification in memory.
+- **`DiscordMessageEditor` Interface**:
+  - Signature: `ChannelMessageEdit(channelID, messageID, content string) error`, `ChannelMessageDelete(channelID, messageID string) error`
+  - Guarantees 100% test coverage of intermediate badge lifecycle without touching the Discord gateway API.
