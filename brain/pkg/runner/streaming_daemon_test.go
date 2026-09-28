@@ -3,6 +3,7 @@ package runner
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"sync"
@@ -18,6 +19,11 @@ type mockTurnSink struct {
 	deltas    []string
 	result    *TurnResult
 	err       error
+	done      chan struct{}
+}
+
+func newMockTurnSink() *mockTurnSink {
+	return &mockTurnSink{done: make(chan struct{})}
 }
 
 func (s *mockTurnSink) OnTurnStarted() {
@@ -46,14 +52,28 @@ func (s *mockTurnSink) OnTextDelta(delta string) {
 
 func (s *mockTurnSink) OnResult(res *TurnResult) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.result = res
+	if s.done != nil {
+		select {
+		case <-s.done:
+		default:
+			close(s.done)
+		}
+	}
+	s.mu.Unlock()
 }
 
 func (s *mockTurnSink) OnError(err error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.err = err
+	if s.done != nil {
+		select {
+		case <-s.done:
+		default:
+			close(s.done)
+		}
+	}
+	s.mu.Unlock()
 }
 
 func TestStreamingDaemon_HandshakeSuccess(t *testing.T) {
@@ -867,4 +887,214 @@ func TestStreamingDaemon_StderrClosedOnClose(t *testing.T) {
 	}
 	closeQuietly(outW)
 }
+
+func TestStreamingDaemon_SendFIFOPipelining(t *testing.T) {
+	outR, outW := io.Pipe()
+	inR, inW := io.Pipe()
+	errR, _ := io.Pipe()
+
+	mock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			return inW, outR, errR, &MockProcessHandle{pid: 888}, nil
+		},
+	}
+
+	go func() {
+		_, _ = outW.Write([]byte(`{"event":"init","session_id":"00000000-0000-0000-0000-000000000002"}` + "\n"))
+	}()
+
+	cfg := DaemonConfig{SessionID: "00000000-0000-0000-0000-000000000002"}
+	daemon, err := StartStreamingDaemon(context.Background(), cfg, mock)
+	if err != nil {
+		t.Fatalf("failed to start daemon: %v", err)
+	}
+	defer inR.Close()
+	defer daemon.Close()
+
+	go func() {
+		_, _ = io.Copy(io.Discard, inR)
+	}()
+
+	sink1 := newMockTurnSink()
+	turn1 := &TurnContext{TurnID: "turn-1", Prompt: "first prompt", Sink: sink1, CreatedAt: time.Now()}
+	sink2 := newMockTurnSink()
+	turn2 := &TurnContext{TurnID: "turn-2", Prompt: "second prompt", Sink: sink2, CreatedAt: time.Now()}
+
+	if err := daemon.Send(turn1.Prompt, turn1); err != nil {
+		t.Fatalf("failed sending turn1: %v", err)
+	}
+	if err := daemon.Send(turn2.Prompt, turn2); err != nil {
+		t.Fatalf("failed sending turn2: %v", err)
+	}
+
+	if daemon.InflightCount() != 2 {
+		t.Fatalf("expected 2 inflight turns, got %d", daemon.InflightCount())
+	}
+
+	// Emit events for turn 1
+	go func() {
+		_, _ = outW.Write([]byte(`{"event":"step_update","delta":"hello "}` + "\n"))
+		_, _ = outW.Write([]byte(`{"event":"result","result":{"response":"hello world"}}` + "\n"))
+
+		// Emit events for turn 2
+		_, _ = outW.Write([]byte(`{"event":"step_update","delta":"second "}` + "\n"))
+		_, _ = outW.Write([]byte(`{"event":"result","result":{"response":"second response"}}` + "\n"))
+	}()
+
+	select {
+	case <-sink1.done:
+		if sink1.result == nil || sink1.result.Response != "hello world" {
+			t.Errorf("turn 1 unexpected result: %+v", sink1.result)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("turn 1 timed out")
+	}
+
+	select {
+	case <-sink2.done:
+		if sink2.result == nil || sink2.result.Response != "second response" {
+			t.Errorf("turn 2 unexpected result: %+v", sink2.result)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("turn 2 timed out")
+	}
+
+	if daemon.InflightCount() != 0 {
+		t.Errorf("expected 0 inflight turns remaining, got %d", daemon.InflightCount())
+	}
+}
+
+func TestStreamingDaemon_SendClosed(t *testing.T) {
+	outR, outW := io.Pipe()
+	inR, inW := io.Pipe()
+	errR, _ := io.Pipe()
+
+	mock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			return inW, outR, errR, &MockProcessHandle{pid: 888}, nil
+		},
+	}
+
+	go func() {
+		_, _ = outW.Write([]byte(`{"event":"init","session_id":"00000000-0000-0000-0000-000000000003"}` + "\n"))
+	}()
+
+	cfg := DaemonConfig{SessionID: "00000000-0000-0000-0000-000000000003"}
+	daemon, err := StartStreamingDaemon(context.Background(), cfg, mock)
+	if err != nil {
+		t.Fatalf("failed to start daemon: %v", err)
+	}
+	defer inR.Close()
+
+	if daemon.IsDirty() {
+		t.Error("expected fresh daemon not to be dirty")
+	}
+
+	if err := daemon.Close(); err != nil {
+		t.Fatalf("failed to close daemon: %v", err)
+	}
+
+	turn := &TurnContext{TurnID: "turn-closed", Prompt: "test"}
+	err = daemon.Send(turn.Prompt, turn)
+	if err == nil || !strings.Contains(err.Error(), "cannot send to closed streaming daemon") {
+		t.Fatalf("expected 'cannot send to closed streaming daemon', got: %v", err)
+	}
+}
+
+func TestStreamingDaemon_SendStdinWriteError(t *testing.T) {
+	outR, outW := io.Pipe()
+	inR, inW := io.Pipe()
+	errR, _ := io.Pipe()
+
+	mock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			return inW, outR, errR, &MockProcessHandle{pid: 888}, nil
+		},
+	}
+
+	go func() {
+		_, _ = outW.Write([]byte(`{"event":"init","session_id":"00000000-0000-0000-0000-000000000004"}` + "\n"))
+	}()
+
+	cfg := DaemonConfig{SessionID: "00000000-0000-0000-0000-000000000004"}
+	daemon, err := StartStreamingDaemon(context.Background(), cfg, mock)
+	if err != nil {
+		t.Fatalf("failed to start daemon: %v", err)
+	}
+	defer daemon.Close()
+
+	// Close stdin pipe so writing fails
+	_ = inR.Close()
+	_ = inW.Close()
+
+	sink := newMockTurnSink()
+	turn := &TurnContext{TurnID: "turn-write-err", Prompt: "fail", Sink: sink}
+	err = daemon.Send(turn.Prompt, turn)
+	if err == nil || !strings.Contains(err.Error(), "failed writing prompt to daemon stdin") {
+		t.Fatalf("expected write error, got: %v", err)
+	}
+
+	if !daemon.IsDirty() {
+		t.Error("expected daemon to be marked dirty after stdin write error")
+	}
+	if daemon.State() != StateClosed {
+		t.Errorf("expected daemon state %s after write error, got %s", StateClosed, daemon.State())
+	}
+}
+
+func TestStreamingDaemon_SendConcurrency(t *testing.T) {
+	outR, outW := io.Pipe()
+	inR, inW := io.Pipe()
+	errR, _ := io.Pipe()
+
+	mock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			return inW, outR, errR, &MockProcessHandle{pid: 888}, nil
+		},
+	}
+
+	go func() {
+		_, _ = outW.Write([]byte(`{"event":"init","session_id":"00000000-0000-0000-0000-000000000005"}` + "\n"))
+	}()
+
+	cfg := DaemonConfig{SessionID: "00000000-0000-0000-0000-000000000005"}
+	daemon, err := StartStreamingDaemon(context.Background(), cfg, mock)
+	if err != nil {
+		t.Fatalf("failed to start daemon: %v", err)
+	}
+	defer inR.Close()
+	defer daemon.Close()
+
+	go func() {
+		_, _ = io.Copy(io.Discard, inR)
+	}()
+
+	const concurrency = 20
+	var wg sync.WaitGroup
+	errCh := make(chan error, concurrency)
+
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			sink := newMockTurnSink()
+			turn := &TurnContext{TurnID: fmt.Sprintf("turn-%d", idx), Sink: sink, CreatedAt: time.Now()}
+			if sendErr := daemon.Send(fmt.Sprintf("prompt-%d", idx), turn); sendErr != nil {
+				errCh <- sendErr
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	close(errCh)
+
+	for sendErr := range errCh {
+		t.Errorf("concurrent send failed: %v", sendErr)
+	}
+
+	if daemon.InflightCount() != concurrency {
+		t.Errorf("expected %d inflight turns, got %d", concurrency, daemon.InflightCount())
+	}
+}
+
 

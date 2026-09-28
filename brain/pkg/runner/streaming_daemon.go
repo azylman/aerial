@@ -46,8 +46,10 @@ type StreamingDaemon struct {
 	taskTracker  *TaskTracker
 
 	mu        sync.RWMutex
+	stdinMu   sync.Mutex
 	state     DaemonState
 	sessionID string
+	dirty     bool
 	lastUsed  time.Time
 	turnCount int
 	stepCount int
@@ -197,6 +199,69 @@ func (d *StreamingDaemon) LastUsed() time.Time {
 // TaskTracker returns the background task tracker instance for this daemon.
 func (d *StreamingDaemon) TaskTracker() *TaskTracker {
 	return d.taskTracker
+}
+
+// InflightCount returns the number of active in-flight turns currently queued or executing.
+func (d *StreamingDaemon) InflightCount() int {
+	d.inflightMu.Lock()
+	defer d.inflightMu.Unlock()
+	return len(d.inflight)
+}
+
+// IsDirty reports whether the daemon encountered an unrecoverable write error or closed state.
+func (d *StreamingDaemon) IsDirty() bool {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.dirty
+}
+
+// Send serializes prompt input writing to the daemon stdin under stdinMu mutex protection,
+// tracks the TurnContext in the in-flight FIFO queue, and transitions daemon state to StateExecuting.
+func (d *StreamingDaemon) Send(prompt string, turnCtx *TurnContext) error {
+	d.stdinMu.Lock()
+	defer d.stdinMu.Unlock()
+
+	d.mu.RLock()
+	if d.state == StateClosed || d.closed.Load() {
+		d.mu.RUnlock()
+		return errors.New("cannot send to closed streaming daemon")
+	}
+	d.mu.RUnlock()
+
+	wireMsg := streamInputPayload{
+		Event: "user",
+		Message: streamInputMessage{
+			Content: prompt,
+		},
+	}
+	encoded, err := json.Marshal(wireMsg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal turn prompt: %w", err)
+	}
+	encoded = append(encoded, '\n')
+
+	d.inflightMu.Lock()
+	d.inflight = append(d.inflight, turnCtx)
+	d.inflightMu.Unlock()
+
+	d.mu.Lock()
+	d.state = StateExecuting
+	d.lastUsed = time.Now()
+	d.mu.Unlock()
+
+	if turnCtx != nil && turnCtx.Sink != nil {
+		turnCtx.Sink.OnTurnStarted()
+	}
+
+	if _, err := d.stdin.Write(encoded); err != nil {
+		d.mu.Lock()
+		d.dirty = true
+		d.state = StateClosed
+		d.mu.Unlock()
+		return fmt.Errorf("failed writing prompt to daemon stdin: %w", err)
+	}
+
+	return nil
 }
 
 // Close gracefully terminates the daemon process, closes streams, and notifies any in-flight turns.
