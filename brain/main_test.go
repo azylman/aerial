@@ -2116,7 +2116,7 @@ func TestHandleVoiceAsk_Validation(t *testing.T) {
 	}
 
 	// 5. Non-flusher response writer for SSE
-	reqSSE := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello"}`))
+	reqSSE := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello","session_id":"kiosk"}`))
 	reqSSE.Header.Set("Accept", "text/event-stream")
 	nonFlusher := &nonFlusherTestWriter{}
 	handler(nonFlusher, reqSSE)
@@ -2130,6 +2130,17 @@ func TestHandleVoiceAsk_Validation(t *testing.T) {
 	handler(wConvID, reqConvID)
 	if wConvID.Code != http.StatusOK {
 		t.Errorf("expected 200 OK for conversation_id fallback, got %d", wConvID.Code)
+	}
+
+	// 7. Missing session_id and conversation_id returns 400 Bad Request
+	reqNoID := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello"}`))
+	wNoID := httptest.NewRecorder()
+	handler(wNoID, reqNoID)
+	if wNoID.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 BadRequest for missing session_id, got %d", wNoID.Code)
+	}
+	if !strings.Contains(wNoID.Body.String(), "session_id") {
+		t.Errorf("expected session_id required error message, got %s", wNoID.Body.String())
 	}
 }
 
@@ -2279,7 +2290,7 @@ func TestHandleVoiceAsk_JSON_Success(t *testing.T) {
 
 	handler := handleVoiceAsk(pool)
 
-	payload := `{"prompt":"what is the weather?"}`
+	payload := `{"prompt":"what is the weather?","session_id":"sess-json-123"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/voice/ask", strings.NewReader(payload))
 	req.Header.Set("Accept", "application/json")
 
@@ -2319,7 +2330,7 @@ func TestHandleVoiceAsk_Errors(t *testing.T) {
 	defer poolErr.Stop()
 
 	hErr := handleVoiceAsk(poolErr)
-	req := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"fail"}`))
+	req := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"fail","session_id":"sess-err-1"}`))
 	req.Header.Set("Accept", "text/event-stream")
 	w := httptest.NewRecorder()
 	hErr(w, req)
@@ -2336,7 +2347,7 @@ func TestHandleVoiceAsk_Errors(t *testing.T) {
 	}
 
 	// 2. JSON mode with error
-	reqJSON := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"fail"}`))
+	reqJSON := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"fail","session_id":"sess-err-2"}`))
 	reqJSON.Header.Set("Accept", "application/json")
 	wJSON := httptest.NewRecorder()
 	hErr(wJSON, reqJSON)
@@ -2350,7 +2361,7 @@ func TestHandleVoiceAsk_Errors(t *testing.T) {
 
 	// 3. Nil pool handling
 	hNil := handleVoiceAsk(nil)
-	reqNil := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello"}`))
+	reqNil := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello","session_id":"sess-nil"}`))
 	wNil := httptest.NewRecorder()
 	hNil(wNil, reqNil)
 	if wNil.Code != http.StatusInternalServerError {
@@ -2358,7 +2369,7 @@ func TestHandleVoiceAsk_Errors(t *testing.T) {
 	}
 
 	// Nil pool SSE mode
-	reqNilSSE := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello"}`))
+	reqNilSSE := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello","session_id":"sess-nil-sse"}`))
 	reqNilSSE.Header.Set("Accept", "text/event-stream")
 	wNilSSE := httptest.NewRecorder()
 	hNil(wNilSSE, reqNilSSE)
@@ -2424,7 +2435,7 @@ func (w *nonFlusherResponseWriter) WriteHeader(statusCode int) {
 
 func TestHandleVoiceAsk_NonFlusherStreamingError(t *testing.T) {
 	handler := handleVoiceAsk(nil)
-	req := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello"}`))
+	req := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello","session_id":"kiosk"}`))
 	req.Header.Set("Accept", "text/event-stream")
 
 	w := &nonFlusherResponseWriter{}
@@ -2508,7 +2519,7 @@ func TestHandleVoiceAsk_BodyCloseError(t *testing.T) {
 	defer pool.Stop()
 
 	handler := handleVoiceAsk(pool)
-	req := httptest.NewRequest(http.MethodPost, "/voice/ask", &errCloseReader{Reader: strings.NewReader(`{"prompt":"hello"}`)})
+	req := httptest.NewRequest(http.MethodPost, "/voice/ask", &errCloseReader{Reader: strings.NewReader(`{"prompt":"hello","session_id":"kiosk"}`)})
 	w := httptest.NewRecorder()
 	handler(w, req)
 }
@@ -2530,7 +2541,7 @@ func TestHandleVoiceAsk_SSE_CancelledContext(t *testing.T) {
 	defer pool.Stop()
 
 	handler := handleVoiceAsk(pool)
-	req := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello"}`)).WithContext(ctx)
+	req := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello","session_id":"kiosk"}`)).WithContext(ctx)
 	req.Header.Set("Accept", "text/event-stream")
 	w := httptest.NewRecorder()
 	handler(w, req)
@@ -2551,7 +2562,7 @@ func TestHandleVoiceAsk_SSE_VoiceRunnerError(t *testing.T) {
 	defer pool.Stop()
 
 	handler := handleVoiceAsk(pool)
-	req := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello"}`))
+	req := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello","session_id":"kiosk"}`))
 	req.Header.Set("Accept", "text/event-stream")
 	w := httptest.NewRecorder()
 	handler(w, req)
@@ -2589,7 +2600,7 @@ func TestHandleVoiceAsk_SSE_WriteError(t *testing.T) {
 	defer pool.Stop()
 
 	handler := handleVoiceAsk(pool)
-	req := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello"}`))
+	req := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello","session_id":"kiosk"}`))
 	req.Header.Set("Accept", "text/event-stream")
 	w := &errFlusherWriter{}
 	handler(w, req)
@@ -2731,6 +2742,72 @@ func TestUnifiedPool_EphemeralLLMFuncErrors(t *testing.T) {
 		t.Fatal("expected error from closed pool")
 	}
 }
+
+func TestDualProcessPool_InitializationAndWiring(t *testing.T) {
+	mockSpawner := runner.NewMockDaemonSpawner()
+	tmpDir := t.TempDir()
+
+	discordPool := runner.NewUnifiedProcessPool(runner.PoolConfig{
+		GeminiHomeDir:    filepath.Join(tmpDir, "runtimes", "discord"),
+		PrewarmedTargets: []string{"ephemeral:classifier", "ephemeral:summarizer"},
+		DefaultModel:     "gemini-2.5-flash",
+	}, mockSpawner)
+	defer discordPool.Close()
+
+	voicePool := runner.NewUnifiedProcessPool(runner.PoolConfig{
+		GeminiHomeDir:    filepath.Join(tmpDir, "runtimes", "voice"),
+		PrewarmedTargets: []string{"kiosk"},
+		DefaultModel:     "gemini-2.5-flash",
+	}, mockSpawner)
+	defer voicePool.Close()
+
+	initCtx, initCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer initCancel()
+	if err := discordPool.Initialize(initCtx); err != nil {
+		t.Fatalf("failed initializing discord pool: %v", err)
+	}
+	if err := voicePool.Initialize(initCtx); err != nil {
+		t.Fatalf("failed initializing voice pool: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if discordPool.HasDaemon("ephemeral:classifier") &&
+			discordPool.HasDaemon("ephemeral:summarizer") &&
+			voicePool.HasDaemon("kiosk") {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if !discordPool.HasDaemon("ephemeral:classifier") {
+		t.Errorf("expected discordPool to have ephemeral:classifier pre-warmed")
+	}
+	if !discordPool.HasDaemon("ephemeral:summarizer") {
+		t.Errorf("expected discordPool to have ephemeral:summarizer pre-warmed")
+	}
+	if !voicePool.HasDaemon("kiosk") {
+		t.Errorf("expected voicePool to have kiosk pre-warmed")
+	}
+
+	store := db.NewFakeStore()
+	pool := queue.New(nil, queue.WorkerPoolConfig{
+		Store:            store,
+		ProcessPool:      discordPool,
+		VoiceProcessPool: voicePool,
+	})
+	pool.Start()
+
+	if pool.ProcessPool() != discordPool {
+		t.Errorf("expected pool.ProcessPool() to be discordPool")
+	}
+	if pool.VoiceProcessPool() != voicePool {
+		t.Errorf("expected pool.VoiceProcessPool() to be voicePool")
+	}
+
+	pool.Stop()
+}
+
 
 
 
