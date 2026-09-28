@@ -105,10 +105,6 @@ func TestStreamingDaemon_HandshakeSuccess(t *testing.T) {
 }
 
 func TestStreamingDaemon_HandshakeTimeout(t *testing.T) {
-	origTimeout := streamingHandshakeTimeout
-	streamingHandshakeTimeout = 50 * time.Millisecond
-	defer func() { streamingHandshakeTimeout = origTimeout }()
-
 	outR, outW := io.Pipe()
 	inR, inW := io.Pipe()
 	errR, errW := io.Pipe()
@@ -124,7 +120,10 @@ func TestStreamingDaemon_HandshakeTimeout(t *testing.T) {
 		},
 	}
 
-	cfg := DaemonConfig{SessionID: "00000000-0000-0000-0000-000000000001"}
+	cfg := DaemonConfig{
+		SessionID: "00000000-0000-0000-0000-000000000001",
+		Timeout:   50 * time.Millisecond,
+	}
 	daemon, err := StartStreamingDaemon(context.Background(), cfg, mock)
 	if err == nil {
 		if daemon != nil {
@@ -694,5 +693,178 @@ func TestStreamingDaemon_DispatchEdgeCases(t *testing.T) {
 	if res := extractResponseString(map[string]any{"result": "not-a-map"}); res != "" {
 		t.Errorf("expected empty string for non-map result, got %q", res)
 	}
+}
+
+func TestStreamingDaemon_ResultAfterCloseDoesNotReopenState(t *testing.T) {
+	outR, outW := io.Pipe()
+	inR, inW := io.Pipe()
+	errR, errW := io.Pipe()
+	defer closeQuietly(inR)
+	defer closeQuietly(errW)
+
+	mock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			return inW, outR, errR, &MockProcessHandle{pid: 456}, nil
+		},
+	}
+
+	go func() {
+		_, _ = outW.Write([]byte(`{"event":"init","session_id":"00000000-0000-0000-0000-000000000001"}` + "\n"))
+	}()
+
+	cfg := DaemonConfig{SessionID: "00000000-0000-0000-0000-000000000001"}
+	daemon, err := StartStreamingDaemon(context.Background(), cfg, mock)
+	if err != nil {
+		t.Fatalf("failed starting daemon: %v", err)
+	}
+
+	sink := &mockTurnSink{}
+	turn := &TurnContext{
+		TurnID:    "turn-close-race",
+		Sink:      sink,
+		CreatedAt: time.Now(),
+	}
+
+	daemon.inflightMu.Lock()
+	daemon.inflight = append(daemon.inflight, turn)
+	daemon.inflightMu.Unlock()
+
+	// Explicitly close the daemon
+	if err := daemon.Close(); err != nil {
+		t.Fatalf("failed to close daemon: %v", err)
+	}
+	closeQuietly(outW)
+
+	if daemon.State() != StateClosed {
+		t.Fatalf("expected StateClosed after Close(), got %s", daemon.State())
+	}
+
+	// Dispatch late-arriving result event
+	daemon.dispatchNDJSONLine(`{"event":"result","result":{"response":"late result"}}`)
+
+	// Daemon must remain StateClosed
+	if daemon.State() != StateClosed {
+		t.Errorf("daemon state regressed from StateClosed to %s on late result event", daemon.State())
+	}
+}
+
+func TestStreamingDaemon_NilSinkCleanlyPopsOnResult(t *testing.T) {
+	outR, outW := io.Pipe()
+	inR, inW := io.Pipe()
+	errR, errW := io.Pipe()
+	defer closeQuietly(inR)
+	defer closeQuietly(errW)
+
+	mock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			return inW, outR, errR, &MockProcessHandle{pid: 789}, nil
+		},
+	}
+
+	go func() {
+		_, _ = outW.Write([]byte(`{"event":"init","session_id":"00000000-0000-0000-0000-000000000001"}` + "\n"))
+	}()
+
+	cfg := DaemonConfig{SessionID: "00000000-0000-0000-0000-000000000001"}
+	daemon, err := StartStreamingDaemon(context.Background(), cfg, mock)
+	if err != nil {
+		t.Fatalf("failed starting daemon: %v", err)
+	}
+	defer daemon.Close()
+
+	// Turn 1: nil sink (e.g. fire-and-forget or background turn)
+	turn1 := &TurnContext{
+		TurnID:    "turn-nil-sink",
+		Sink:      nil,
+		CreatedAt: time.Now(),
+	}
+
+	// Turn 2: active sink
+	sink2 := &mockTurnSink{}
+	turn2 := &TurnContext{
+		TurnID:    "turn-with-sink",
+		Sink:      sink2,
+		CreatedAt: time.Now(),
+	}
+
+	daemon.inflightMu.Lock()
+	daemon.inflight = append(daemon.inflight, turn1, turn2)
+	daemon.inflightMu.Unlock()
+
+	// Dispatch step_update for turn 1 with nil sink (should not panic or stall)
+	daemon.dispatchNDJSONLine(`{"event":"step_update","delta":"nil-sink-delta"}`)
+
+	// Dispatch result for turn 1 (must pop turn1 from queue even though sink is nil)
+	daemon.dispatchNDJSONLine(`{"event":"result","result":{"response":"turn1 answer"}}`)
+
+	daemon.inflightMu.Lock()
+	remaining := len(daemon.inflight)
+	var headTurnID string
+	if remaining > 0 {
+		headTurnID = daemon.inflight[0].TurnID
+	}
+	daemon.inflightMu.Unlock()
+
+	if remaining != 1 {
+		t.Fatalf("expected 1 turn remaining in inflight queue, got %d", remaining)
+	}
+	if headTurnID != "turn-with-sink" {
+		t.Fatalf("expected head of queue to be turn-with-sink, got %s", headTurnID)
+	}
+	if daemon.TurnCount() != 1 {
+		t.Errorf("expected turnCount to be 1, got %d", daemon.TurnCount())
+	}
+
+	// Now dispatch step_update and result for turn 2
+	daemon.dispatchNDJSONLine(`{"event":"step_update","delta":"turn2-delta"}`)
+	daemon.dispatchNDJSONLine(`{"event":"result","result":{"response":"turn2 answer"}}`)
+
+	sink2.mu.Lock()
+	defer sink2.mu.Unlock()
+
+	if len(sink2.deltas) != 1 || sink2.deltas[0] != "turn2-delta" {
+		t.Errorf("expected turn2 deltas, got %v", sink2.deltas)
+	}
+	if sink2.result == nil || sink2.result.Response != "turn2 answer" {
+		t.Errorf("expected turn2 result, got %+v", sink2.result)
+	}
+	if daemon.TurnCount() != 2 {
+		t.Errorf("expected turnCount to be 2, got %d", daemon.TurnCount())
+	}
+}
+
+func TestStreamingDaemon_StderrClosedOnClose(t *testing.T) {
+	outR, outW := io.Pipe()
+	inR, inW := io.Pipe()
+	errR, errW := io.Pipe()
+	defer closeQuietly(inR)
+
+	mock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			return inW, outR, errR, &MockProcessHandle{pid: 321}, nil
+		},
+	}
+
+	go func() {
+		_, _ = outW.Write([]byte(`{"event":"init","session_id":"00000000-0000-0000-0000-000000000001"}` + "\n"))
+	}()
+
+	cfg := DaemonConfig{SessionID: "00000000-0000-0000-0000-000000000001"}
+	daemon, err := StartStreamingDaemon(context.Background(), cfg, mock)
+	if err != nil {
+		t.Fatalf("failed starting daemon: %v", err)
+	}
+
+	// Write stderr data
+	go func() {
+		_, _ = errW.Write([]byte("some stderr log\n"))
+		closeQuietly(errW)
+	}()
+
+	// Closing daemon should close stderrCloser cleanly without error
+	if err := daemon.Close(); err != nil {
+		t.Fatalf("unexpected Close error: %v", err)
+	}
+	closeQuietly(outW)
 }
 

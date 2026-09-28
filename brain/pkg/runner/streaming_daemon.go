@@ -8,14 +8,11 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
-)
-
-var (
-	streamingHandshakeTimeout = 5 * time.Second
 )
 
 // TurnSink receives streaming notifications and results during an active turn.
@@ -39,13 +36,14 @@ type TurnContext struct {
 // StreamingDaemon manages a long-lived streaming agy subprocess, its lifecycle state,
 // and the stdout NDJSON event streaming loop.
 type StreamingDaemon struct {
-	cfg         DaemonConfig
-	spawner     DaemonSpawner
-	handle      ProcessHandle
-	stdin       io.WriteCloser
-	stdout      io.ReadCloser
-	stderr      *ActivityWriter
-	taskTracker *TaskTracker
+	cfg          DaemonConfig
+	spawner      DaemonSpawner
+	handle       ProcessHandle
+	stdin        io.WriteCloser
+	stdout       io.ReadCloser
+	stderrCloser io.Closer
+	stderr       *ActivityWriter
+	taskTracker  *TaskTracker
 
 	mu        sync.RWMutex
 	state     DaemonState
@@ -64,7 +62,7 @@ type StreamingDaemon struct {
 
 func closeStreamQuietly(c io.Closer, name string) {
 	if c != nil {
-		if err := c.Close(); err != nil {
+		if err := c.Close(); err != nil && !errors.Is(err, io.ErrClosedPipe) && !errors.Is(err, os.ErrClosed) {
 			log.Printf("[StreamingDaemon] Warning: failed to close %s: %v", name, err)
 		}
 	}
@@ -92,25 +90,33 @@ func StartStreamingDaemon(ctx context.Context, cfg DaemonConfig, spawner DaemonS
 	if stderr != nil {
 		go func() {
 			defer closeStreamQuietly(stderr, "stderr")
-			if _, copyErr := io.Copy(actWriter, stderr); copyErr != nil && !errors.Is(copyErr, io.EOF) {
+			if _, copyErr := io.Copy(actWriter, stderr); copyErr != nil && !errors.Is(copyErr, io.EOF) && !errors.Is(copyErr, io.ErrClosedPipe) && !errors.Is(copyErr, os.ErrClosed) {
 				log.Printf("[StreamingDaemon] Warning: error copying stderr: %v", copyErr)
 			}
 		}()
 	}
 
 	d := &StreamingDaemon{
-		cfg:         cfg,
-		spawner:     spawner,
-		handle:      handle,
-		stdin:       stdin,
-		stdout:      stdout,
-		stderr:      actWriter,
-		taskTracker: NewTaskTracker(),
-		state:       StateStarting,
-		lastUsed:    time.Now(),
+		cfg:          cfg,
+		spawner:      spawner,
+		handle:       handle,
+		stdin:        stdin,
+		stdout:       stdout,
+		stderrCloser: stderr,
+		stderr:       actWriter,
+		taskTracker:  NewTaskTracker(),
+		state:        StateStarting,
+		lastUsed:     time.Now(),
 	}
 
-	// Perform synchronous handshake with deadline
+	// Determine handshake timeout from cfg.Timeout if provided, defaulting to 5s
+	handshakeTimeout := 5 * time.Second
+	if cfg.Timeout > 0 {
+		handshakeTimeout = cfg.Timeout
+	}
+	timer := time.NewTimer(handshakeTimeout)
+	defer timer.Stop()
+
 	reader := bufio.NewReader(stdout)
 	lineChan := make(chan string, 1)
 	errChan := make(chan error, 1)
@@ -128,7 +134,7 @@ func StartStreamingDaemon(ctx context.Context, cfg DaemonConfig, spawner DaemonS
 	case <-ctx.Done():
 		d.closeOnStartupError("cancelled")
 		return nil, fmt.Errorf("daemon startup cancelled: %w", ctx.Err())
-	case <-time.After(streamingHandshakeTimeout):
+	case <-timer.C:
 		d.closeOnStartupError("timeout")
 		return nil, errors.New("daemon startup timed out waiting for init event")
 	case readErr := <-errChan:
@@ -204,6 +210,7 @@ func (d *StreamingDaemon) Close() error {
 
 		closeStreamQuietly(d.stdin, "stdin")
 		closeStreamQuietly(d.stdout, "stdout")
+		closeStreamQuietly(d.stderrCloser, "stderr")
 		if d.handle != nil {
 			if err := d.handle.Kill(); err != nil {
 				log.Printf("[StreamingDaemon] Warning: failed to kill process handle: %v", err)
@@ -281,7 +288,7 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 	}
 	d.inflightMu.Unlock()
 
-	if activeTurn == nil || activeTurn.Sink == nil {
+	if activeTurn == nil {
 		return
 	}
 
@@ -291,21 +298,23 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 		d.stepCount++
 		d.mu.Unlock()
 
-		if toolCall, ok := raw["tool_call"].(map[string]any); ok {
-			var toolName, cmdName string
-			if n, ok := toolCall["name"].(string); ok {
-				toolName = n
+		if activeTurn.Sink != nil {
+			if toolCall, ok := raw["tool_call"].(map[string]any); ok {
+				var toolName, cmdName string
+				if n, ok := toolCall["name"].(string); ok {
+					toolName = n
+				}
+				if c, ok := toolCall["command"].(string); ok {
+					cmdName = c
+				}
+				activeTurn.Sink.OnToolCall(toolName, cmdName)
 			}
-			if c, ok := toolCall["command"].(string); ok {
-				cmdName = c
+			if delta, ok := raw["delta"].(string); ok && delta != "" {
+				activeTurn.Sink.OnTextDelta(delta)
 			}
-			activeTurn.Sink.OnToolCall(toolName, cmdName)
-		}
-		if delta, ok := raw["delta"].(string); ok && delta != "" {
-			activeTurn.Sink.OnTextDelta(delta)
-		}
-		if _, ok := raw["thinking"]; ok {
-			activeTurn.Sink.OnThinking()
+			if _, ok := raw["thinking"]; ok {
+				activeTurn.Sink.OnThinking()
+			}
 		}
 
 	case "result":
@@ -320,7 +329,7 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 		d.mu.Lock()
 		d.turnCount++
 		d.lastUsed = time.Now()
-		if !hasMoreInflight {
+		if !hasMoreInflight && d.state != StateClosed {
 			if d.taskTracker != nil && d.taskTracker.ActiveCount() > 0 {
 				d.state = StateYieldWaiting
 			} else {
@@ -329,12 +338,14 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 		}
 		d.mu.Unlock()
 
-		res := &TurnResult{
-			ConversationID: d.SessionID(),
-			Response:       extractResponseString(raw),
-			Duration:       time.Since(activeTurn.CreatedAt),
+		if activeTurn.Sink != nil {
+			res := &TurnResult{
+				ConversationID: d.SessionID(),
+				Response:       extractResponseString(raw),
+				Duration:       time.Since(activeTurn.CreatedAt),
+			}
+			activeTurn.Sink.OnResult(res)
 		}
-		activeTurn.Sink.OnResult(res)
 	}
 }
 
