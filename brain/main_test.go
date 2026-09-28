@@ -17,12 +17,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/azylman/aerial/brain/pkg/classifier"
 	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
 	"github.com/azylman/aerial/brain/pkg/env"
 	"github.com/azylman/aerial/brain/pkg/metrics"
 	"github.com/azylman/aerial/brain/pkg/queue"
 	"github.com/azylman/aerial/brain/pkg/runner"
+	"github.com/azylman/aerial/brain/pkg/scheduler"
 	"github.com/bwmarrin/discordgo"
 )
 
@@ -1263,6 +1265,7 @@ func TestRunBrainApp_DetailedOptions(t *testing.T) {
 			d.DiscordToken = "mock-token"
 			d.GeminiHomeDir = tmpDir
 			d.DataDir = filepath.Join(tmpDir, "data")
+			d.LowEffortModel = "custom-flash-low"
 		})
 
 		ctx, cancel := context.WithCancel(context.Background())
@@ -1746,6 +1749,9 @@ func TestRunBrainApp_EarlyReturns(t *testing.T) {
 		t.Errorf("expected nil for cancelled context with init error, got %v", err)
 	}
 
+	// 2c. Live context with init error in InitializeBrainEnvironment
+	_ = RunBrainApp(context.Background(), cfgInitErr)
+
 	// 3. Missing DatabaseURL
 	ctxLive := context.Background()
 	cfg2 := config.NewTestConfig(func(d *config.ConfigData) {
@@ -1884,6 +1890,7 @@ func TestRunBrainApp_FullLifecycle(t *testing.T) {
 	cur.DiscordToken = "mock-discord-token"
 	cur.Port = "0"
 	cur.AgyBin = "/bin/true"
+	cur.LowEffortModel = ""
 	cfg.Update(cur)
 
 	ready := make(chan struct{})
@@ -2472,7 +2479,82 @@ func TestHandleVoiceAsk_SSE_CancelledContext(t *testing.T) {
 	handler(w, req)
 }
 
-func TestCreateEphemeralRunner_ClassifierAndSummarizer(t *testing.T) {
+func TestHandleVoiceAsk_SSE_VoiceRunnerError(t *testing.T) {
+	store := db.NewFakeStore()
+	pool := queue.NewWorkerPool(queue.WorkerPoolConfig{
+		Store: store,
+		VoiceRunnerFunc: func(c context.Context, prompt, sessionID string, onStatus func(string)) (string, string, error) {
+			if onStatus != nil {
+				onStatus("working")
+			}
+			return "", "", errors.New("synthetic voice failure")
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	handler := handleVoiceAsk(pool)
+	req := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello"}`))
+	req.Header.Set("Accept", "text/event-stream")
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	if !strings.Contains(w.Body.String(), "event: error") {
+		t.Errorf("expected SSE error event, got %q", w.Body.String())
+	}
+}
+
+type errFlusherWriter struct {
+	header http.Header
+}
+
+func (e *errFlusherWriter) Header() http.Header {
+	if e.header == nil {
+		e.header = make(http.Header)
+	}
+	return e.header
+}
+func (e *errFlusherWriter) Write(p []byte) (int, error) {
+	return 0, errors.New("simulated write error")
+}
+func (e *errFlusherWriter) WriteHeader(statusCode int) {}
+func (e *errFlusherWriter) Flush()                    {}
+
+func TestHandleVoiceAsk_SSE_WriteError(t *testing.T) {
+	store := db.NewFakeStore()
+	pool := queue.NewWorkerPool(queue.WorkerPoolConfig{
+		Store: store,
+		VoiceRunnerFunc: func(c context.Context, prompt, sessionID string, onStatus func(string)) (string, string, error) {
+			return "done", "sess-1", nil
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	handler := handleVoiceAsk(pool)
+	req := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello"}`))
+	req.Header.Set("Accept", "text/event-stream")
+	w := &errFlusherWriter{}
+	handler(w, req)
+}
+
+func TestInitializeBrainEnvironment_SymlinkError(t *testing.T) {
+	tmpHome := t.TempDir()
+	tmpData := t.TempDir()
+	cfg := config.NewTestConfig(func(d *config.ConfigData) {
+		d.GeminiHomeDir = tmpHome
+		d.DataDir = tmpData
+	})
+
+	parent := filepath.Join(tmpHome, ".gemini", "antigravity-cli")
+	_ = os.MkdirAll(parent, 0755)
+	_ = os.Chmod(parent, 0555)
+	defer func() { _ = os.Chmod(parent, 0755) }()
+
+	_ = InitializeBrainEnvironment(context.Background(), cfg)
+}
+
+func TestUnifiedPool_EphemeralLLMFuncIntegration(t *testing.T) {
 	mockSpawner := &runner.MockDaemonSpawner{
 		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
 			inR, inW := io.Pipe()
@@ -2484,13 +2566,13 @@ func TestCreateEphemeralRunner_ClassifierAndSummarizer(t *testing.T) {
 				scanner := bufio.NewScanner(inR)
 				for scanner.Scan() {
 					line := scanner.Text()
-					var prompt string
+					var response string
 					if strings.Contains(line, "summarize") || strings.Contains(line, "title") {
-						prompt = "title summary ok"
+						response = "title summary ok"
 					} else {
-						prompt = "classification ok"
+						response = `{"confidence":0.9,"reasoning":"test"}`
 					}
-					_, _ = fmt.Fprintf(outW, "{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":%q}}\n", prompt)
+					_, _ = fmt.Fprintf(outW, "{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":%q}}\n", response)
 				}
 			}()
 			return inW, outR, errR, runner.NewMockProcessHandle(12345), nil
@@ -2499,49 +2581,62 @@ func TestCreateEphemeralRunner_ClassifierAndSummarizer(t *testing.T) {
 
 	pool := runner.NewUnifiedProcessPool(runner.PoolConfig{
 		DefaultModel: "gemini-2.5-flash",
+		TargetModels: map[string]string{
+			"ephemeral:classifier": "gemini-3.8-flash-low",
+			"ephemeral:summarizer": "gemini-3.8-flash-low",
+		},
 	}, mockSpawner)
 	defer pool.Close()
 
-	runnerFn := createEphemeralRunner(pool)
-
-	// 1. Classifier target
 	ctx := context.Background()
-	res, _, code, err := runnerFn(ctx, "agy", "classify this task", "", "", "gemini-2.5-flash", 1)
+
+	// 1. EphemeralLLMFunc for classifier
+	classifierLLM := pool.EphemeralLLMFunc("ephemeral:classifier")
+	clsRes, err := classifierLLM(ctx, "", "classify this prompt")
 	if err != nil {
-		t.Fatalf("expected nil error on classifier runner, got: %v", err)
+		t.Fatalf("unexpected error from classifierLLM: %v", err)
 	}
-	if code != 0 || res != "classification ok" {
-		t.Fatalf("expected 'classification ok' with code 0, got %q (code %d)", res, code)
-	}
-
-	// 2. Summarizer target
-	res2, _, code2, err2 := runnerFn(ctx, "agy", "please summarize title", "", "", "gemini-2.5-flash", 1)
-	if err2 != nil {
-		t.Fatalf("expected nil error on summarizer runner, got: %v", err2)
-	}
-	if code2 != 0 || res2 != "title summary ok" {
-		t.Fatalf("expected 'title summary ok' with code 0, got %q (code %d)", res2, code2)
+	if clsRes != `{"confidence":0.9,"reasoning":"test"}` {
+		t.Fatalf("unexpected classifier result: %q", clsRes)
 	}
 
-	// 3. Acquire error when pool is closed
-	closedPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, mockSpawner)
-	_ = closedPool.Close()
-	runnerClosed := createEphemeralRunner(closedPool)
-	_, _, codeErr, errAcq := runnerClosed(ctx, "agy", "classify prompt", "", "", "gemini-2.5-flash", 1)
-	if errAcq == nil || codeErr != 1 {
-		t.Fatalf("expected acquire error with code 1, got code %d, err %v", codeErr, errAcq)
+	// 2. EphemeralLLMFunc for summarizer
+	summarizerLLM := pool.EphemeralLLMFunc("ephemeral:summarizer")
+	sumRes, err := summarizerLLM(ctx, "", "please summarize title")
+	if err != nil {
+		t.Fatalf("unexpected error from summarizerLLM: %v", err)
+	}
+	if sumRes != "title summary ok" {
+		t.Fatalf("unexpected summarizer result: %q", sumRes)
 	}
 
-	// 4. Context cancelled during result wait
-	ctxCancelled, cancel := context.WithCancel(context.Background())
-	cancel()
-	_, _, codeCancel, errCancel := runnerFn(ctxCancelled, "agy", "classify fast", "", "", "gemini-2.5-flash", 1)
-	if errCancel == nil || codeCancel != 1 {
-		t.Fatalf("expected context error with code 1, got code %d, err %v", codeCancel, errCancel)
+	// 3. Classifier integration with WithProcessPool
+	cfg, _ := config.LoadConfigFromPaths()
+	cur := cfg.Current()
+	cur.Ollama.BaseURL = "" // Ensure primary LLMFunc is used
+	cfg.Update(cur)
+	cls := classifier.New(cfg, nil, classifier.WithProcessPool(pool))
+	cRes, err := cls.LLMFunc(ctx, "", "classify ambient message")
+	if err != nil {
+		t.Fatalf("unexpected error from cls.LLMFunc: %v", err)
+	}
+	if cRes != `{"confidence":0.9,"reasoning":"test"}` {
+		t.Fatalf("unexpected cls.LLMFunc result: %q", cRes)
+	}
+
+	// 4. Scheduler integration with WithLLMFunc
+	store := db.NewFakeStore()
+	wPool := newTestWorkerPool(store)
+	sched, err := scheduler.New(cfg, store, wPool, nil, scheduler.WithLLMFunc(summarizerLLM))
+	if err != nil {
+		t.Fatalf("failed to create scheduler: %v", err)
+	}
+	if sched == nil {
+		t.Fatal("expected non-nil scheduler")
 	}
 }
 
-func TestCreateEphemeralRunner_DaemonExecutionError(t *testing.T) {
+func TestUnifiedPool_EphemeralLLMFuncErrors(t *testing.T) {
 	mockSpawner := &runner.MockDaemonSpawner{
 		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
 			inR, inW := io.Pipe()
@@ -2564,13 +2659,19 @@ func TestCreateEphemeralRunner_DaemonExecutionError(t *testing.T) {
 	}, mockSpawner)
 	defer pool.Close()
 
-	runnerFn := createEphemeralRunner(pool)
-	_, _, code, err := runnerFn(context.Background(), "agy", "classify this task", "", "", "gemini-2.5-flash", 1)
+	llmFn := pool.EphemeralLLMFunc("ephemeral:classifier")
+	_, err := llmFn(context.Background(), "", "classify this task")
 	if err == nil || !strings.Contains(err.Error(), "daemon turn crashed") {
-		t.Fatalf("expected 'daemon turn crashed' error, got: %v (code %d)", err, code)
+		t.Fatalf("expected 'daemon turn crashed' error, got: %v", err)
 	}
-	if code != 1 {
-		t.Fatalf("expected code 1, got %d", code)
+
+	// Closed pool error
+	closedPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, mockSpawner)
+	_ = closedPool.Close()
+	closedLLM := closedPool.EphemeralLLMFunc("ephemeral:classifier")
+	_, errClosed := closedLLM(context.Background(), "", "classify prompt")
+	if errClosed == nil {
+		t.Fatal("expected error from closed pool")
 	}
 }
 

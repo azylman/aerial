@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -14,6 +16,7 @@ import (
 type PoolConfig struct {
 	PrewarmedTargets []string
 	DefaultModel     string
+	TargetModels     map[string]string
 	AgyBin           string
 	Cwd              string
 	Env              []string
@@ -96,9 +99,16 @@ func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string) 
 		}
 		p.mu.RUnlock()
 
+		targetModel := p.cfg.DefaultModel
+		if p.cfg.TargetModels != nil {
+			if m, ok := p.cfg.TargetModels[targetKey]; ok && m != "" {
+				targetModel = m
+			}
+		}
+
 		daemonCfg := DaemonConfig{
 			ThreadID: targetKey,
-			Model:    p.cfg.DefaultModel,
+			Model:    targetModel,
 			AgyBin:   p.cfg.AgyBin,
 			Cwd:      p.cfg.Cwd,
 			Env:      p.cfg.Env,
@@ -244,4 +254,60 @@ func (p *UnifiedProcessPool) RotateDaemon(ctx context.Context, targetKey string,
 	}
 
 	return newDaemon, nil
+}
+
+// ExecuteEphemeral dispatches a prompt to targetKey's daemon and synchronously awaits the response.
+// It performs proactive input validation and automatically triggers asynchronous session rotation
+// if the daemon reaches its lifetime thresholds (10 turns).
+func (p *UnifiedProcessPool) ExecuteEphemeral(ctx context.Context, targetKey, prompt string) (string, error) {
+	if p == nil {
+		return "", fmt.Errorf("process pool is nil")
+	}
+	if strings.TrimSpace(targetKey) == "" {
+		return "", fmt.Errorf("target key cannot be empty")
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	daemon, err := p.GetOrCreate(ctx, targetKey)
+	if err != nil {
+		return "", fmt.Errorf("failed to acquire ephemeral daemon for %q: %w", targetKey, err)
+	}
+	sink := NewThrowawayTurnSink()
+	turnCtx := &TurnContext{
+		TurnID:    uuid.New().String(),
+		Prompt:    prompt,
+		Sink:      sink,
+		CreatedAt: time.Now(),
+	}
+	if err := daemon.Send(prompt, turnCtx); err != nil {
+		return "", fmt.Errorf("failed sending turn to ephemeral daemon %q: %w", targetKey, err)
+	}
+	res, err := sink.ResultContext(ctx)
+	if err != nil {
+		return "", err
+	}
+
+	// Context hygiene: rotate ephemeral daemon if turn limits reached
+	if should, _ := p.ShouldRotate(daemon); should {
+		go func() {
+			rotCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if _, rotErr := p.RotateDaemon(rotCtx, targetKey, ""); rotErr != nil {
+				log.Printf("[UnifiedProcessPool] Warning: ephemeral daemon rotation failed for %q: %v", targetKey, rotErr)
+			}
+		}()
+	}
+
+	return res, nil
+}
+
+// EphemeralLLMFunc returns a runner.LLMFunc that executes prompts against targetKey.
+func (p *UnifiedProcessPool) EphemeralLLMFunc(targetKey string) LLMFunc {
+	return func(ctx context.Context, model, prompt string) (string, error) {
+		if p == nil {
+			return "", fmt.Errorf("process pool is nil")
+		}
+		return p.ExecuteEphemeral(ctx, targetKey, prompt)
+	}
 }

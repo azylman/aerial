@@ -55,6 +55,7 @@ type Scheduler struct {
 	enqueuer      MessageEnqueuer
 	threadCreator ThreadCreator
 	runnerFn      runner.RunnerFunc
+	llmFn         runner.LLMFunc
 	sessionRoots  []string
 	wg            sync.WaitGroup
 }
@@ -66,6 +67,13 @@ type Option func(*Scheduler)
 func WithRunnerFunc(fn runner.RunnerFunc) Option {
 	return func(s *Scheduler) {
 		s.runnerFn = fn
+	}
+}
+
+// WithLLMFunc sets the runner.LLMFunc used by Scheduler for LLM fact extraction.
+func WithLLMFunc(fn runner.LLMFunc) Option {
+	return func(s *Scheduler) {
+		s.llmFn = fn
 	}
 }
 
@@ -294,24 +302,30 @@ func Start(ctx context.Context, cfg *config.Config, store db.Store, pool *queue.
 	return s.Start(ctx)
 }
 
-// ExtractFactsLLM extracts facts using the primary LLM via the configured runner function.
+// ExtractFactsLLM extracts facts using the primary LLM via the configured LLMFunc or runner function.
 func (s *Scheduler) ExtractFactsLLM(ctx context.Context, prompt string) (string, error) {
-	if s == nil || s.runnerFn == nil {
+	if s == nil {
+		return "", fmt.Errorf("scheduler: not initialized")
+	}
+	if s.llmFn == nil && s.runnerFn == nil {
 		return "", fmt.Errorf("scheduler: RunnerFunc not configured for fact extraction")
 	}
 	if s.cfg == nil || s.cfg.Current() == nil {
 		return "", fmt.Errorf("scheduler: config cannot be nil")
 	}
 	cur := s.cfg.Current()
-	apiKey := cur.APIKey
 	model := cur.LowEffortModel
 	if model == "" {
 		model = cur.Model
 	}
-	agyBin := cur.AgyBin
 	if strings.TrimSpace(model) == "" {
 		return "", fmt.Errorf("scheduler fact extraction error: model is not configured")
 	}
+	if s.llmFn != nil {
+		return s.llmFn(ctx, model, prompt)
+	}
+	apiKey := cur.APIKey
+	agyBin := cur.AgyBin
 	if agyBin == "" {
 		agyBin = "agy"
 	}

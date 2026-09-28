@@ -998,37 +998,6 @@ func WithProcessSpawner(spawner runner.DaemonSpawner) BrainAppOption {
 	}
 }
 
-func createEphemeralRunner(unifiedPool *runner.UnifiedProcessPool) runner.RunnerFunc {
-	return func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-		if err := ctx.Err(); err != nil {
-			return "", fmt.Sprintf("context cancelled before execution: %v", err), 1, err
-		}
-		targetKey := "ephemeral:classifier"
-		if strings.Contains(prompt, "summarize") || strings.Contains(prompt, "title") {
-			targetKey = "ephemeral:summarizer"
-		}
-		daemon, err := unifiedPool.GetOrCreate(ctx, targetKey)
-		if err != nil {
-			return "", "", 1, fmt.Errorf("failed to acquire ephemeral daemon: %w", err)
-		}
-		sink := queue.NewThrowawayTurnSink()
-		turnCtx := &runner.TurnContext{
-			TurnID:    uuid.New().String(),
-			Prompt:    prompt,
-			Sink:      sink,
-			CreatedAt: time.Now(),
-		}
-		if err := daemon.Send(prompt, turnCtx); err != nil {
-			return "", "", 1, fmt.Errorf("failed sending turn to ephemeral daemon: %w", err)
-		}
-		res, err := sink.ResultContext(ctx)
-		if err != nil {
-			return "", "", 1, err
-		}
-		return res, "", 0, nil
-	}
-}
-
 var onServerReady func(addr string)
 
 func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption) error {
@@ -1086,8 +1055,17 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 
 	sessionMgr := session.New(cfg.GeminiHomeDir(), cfg.DataDir())
 
+	lowEffortModel := cur.LowEffortModel
+	if lowEffortModel == "" {
+		lowEffortModel = "gemini-3.8-flash-low"
+	}
+
 	unifiedPool := runner.NewUnifiedProcessPool(runner.PoolConfig{
 		PrewarmedTargets: []string{"kiosk", "ephemeral:classifier", "ephemeral:summarizer"},
+		TargetModels: map[string]string{
+			"ephemeral:classifier": lowEffortModel,
+			"ephemeral:summarizer": lowEffortModel,
+		},
 		DefaultModel:     cur.Model,
 		AgyBin:           cur.AgyBin,
 		Cwd:              cur.DataDir,
@@ -1099,8 +1077,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		}
 	}()
 
-	ephemeralRunner := createEphemeralRunner(unifiedPool)
-	cls := classifier.New(cfg, ephemeralRunner)
+	cls := classifier.New(cfg, nil, classifier.WithProcessPool(unifiedPool))
 
 	pool := queue.New(cfg, queue.WorkerPoolConfig{
 		Store:               store,
@@ -1174,7 +1151,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	}
 
 	// Start background scheduler monitor for due cron and one-shot routines
-	sched, err := scheduler.New(cfg, store, pool, scheduler.NewDiscordThreadCreator(dgSession), scheduler.WithRunnerFunc(ephemeralRunner), scheduler.WithSessionRoots(sessionMgr.Roots()...))
+	sched, err := scheduler.New(cfg, store, pool, scheduler.NewDiscordThreadCreator(dgSession), scheduler.WithLLMFunc(unifiedPool.EphemeralLLMFunc("ephemeral:summarizer")), scheduler.WithSessionRoots(sessionMgr.Roots()...))
 	if err != nil {
 		return fmt.Errorf("failed to initialize scheduler: %w", err)
 	}

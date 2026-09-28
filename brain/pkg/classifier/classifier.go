@@ -71,15 +71,17 @@ type ClassificationResult struct {
 
 // Classifier evaluates whether an ambient channel message requires assistant response.
 type Classifier struct {
-	cfg              *config.Config
-	LLMFunc          func(ctx context.Context, model, prompt string) (string, error)
-	TitleLLMFunc     func(ctx context.Context, model, prompt string) (string, error)
-	Model            string
-	Timeout          time.Duration
-	FailureThreshold int
-	CooldownDuration time.Duration
-	Clock            func() time.Time
-	OnParseError     func(model, raw string, err error)
+	cfg                 *config.Config
+	LLMFunc             func(ctx context.Context, model, prompt string) (string, error)
+	TitleLLMFunc        func(ctx context.Context, model, prompt string) (string, error)
+	primaryLLMFunc      runner.LLMFunc
+	primaryTitleLLMFunc runner.LLMFunc
+	Model               string
+	Timeout             time.Duration
+	FailureThreshold    int
+	CooldownDuration    time.Duration
+	Clock               func() time.Time
+	OnParseError        func(model, raw string, err error)
 
 	mu                  sync.Mutex
 	consecutiveFailures int
@@ -94,6 +96,31 @@ type Option func(*Classifier)
 func WithOnParseError(fn func(model, raw string, err error)) Option {
 	return func(c *Classifier) {
 		c.OnParseError = fn
+	}
+}
+
+// WithPrimaryLLMFunc sets the underlying primary runner.LLMFunc used when ClassifierURL is unconfigured.
+func WithPrimaryLLMFunc(fn runner.LLMFunc) Option {
+	return func(c *Classifier) {
+		c.primaryLLMFunc = fn
+	}
+}
+
+// WithPrimaryTitleLLMFunc sets the underlying primary runner.LLMFunc used for thread title summarization.
+func WithPrimaryTitleLLMFunc(fn runner.LLMFunc) Option {
+	return func(c *Classifier) {
+		c.primaryTitleLLMFunc = fn
+	}
+}
+
+// WithProcessPool configures primary LLM functions backed by the given UnifiedProcessPool.
+func WithProcessPool(pool *runner.UnifiedProcessPool) Option {
+	return func(c *Classifier) {
+		if pool == nil {
+			return
+		}
+		c.primaryLLMFunc = pool.EphemeralLLMFunc("ephemeral:classifier")
+		c.primaryTitleLLMFunc = pool.EphemeralLLMFunc("ephemeral:summarizer")
 	}
 }
 
@@ -168,6 +195,9 @@ func New(cfg *config.Config, runnerFn runner.RunnerFunc, opts ...Option) *Classi
 			}
 			return ollamaFn(ctx, model, prompt)
 		}
+		if c.primaryLLMFunc != nil {
+			return c.primaryLLMFunc(ctx, model, prompt)
+		}
 		if runnerFn == nil {
 			return "", errors.New("no runner function configured")
 		}
@@ -197,6 +227,9 @@ func New(cfg *config.Config, runnerFn runner.RunnerFunc, opts ...Option) *Classi
 				return "", fmt.Errorf("failed to initialize ollama client for thread title: %w", err)
 			}
 			return ollamaFn(ctx, model, prompt)
+		}
+		if c.primaryTitleLLMFunc != nil {
+			return c.primaryTitleLLMFunc(ctx, model, prompt)
 		}
 		if c.LLMFunc != nil {
 			return c.LLMFunc(ctx, model, prompt)
