@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestBuildAgyArgs(t *testing.T) {
@@ -69,6 +70,87 @@ func TestBuildAgyArgs(t *testing.T) {
 				for _, arg := range args {
 					if arg == o {
 						t.Errorf("expected args to omit %q, but found in %v", o, args)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestBuildDaemonArgs(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		cfg      DaemonConfig
+		contains []string
+		omits    []string
+	}{
+		{
+			name: "Default timeout 60m",
+			cfg: DaemonConfig{
+				SessionID: "sess-abc",
+				Model:     "gemini-test",
+			},
+			contains: []string{
+				"--dangerously-skip-permissions",
+				"--input-format", "stream-json",
+				"--output-format", "stream-json",
+				"--conversation", "sess-abc",
+				"--model", "gemini-test",
+				"--print-timeout", "60m",
+			},
+		},
+		{
+			name: "Custom minute timeout",
+			cfg: DaemonConfig{
+				Timeout: 15 * time.Minute,
+			},
+			contains: []string{
+				"--print-timeout", "15m",
+			},
+			omits: []string{"--conversation", "--model"},
+		},
+		{
+			name: "Custom second timeout",
+			cfg: DaemonConfig{
+				Timeout: 45 * time.Second,
+			},
+			contains: []string{
+				"--print-timeout", "45s",
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			args := BuildDaemonArgs(tc.cfg)
+			for i := 0; i < len(tc.contains); i++ {
+				expected := tc.contains[i]
+				found := false
+				for j, arg := range args {
+					if arg == expected {
+						if i+1 < len(tc.contains) && !strings.HasPrefix(tc.contains[i+1], "--") {
+							if j+1 < len(args) && args[j+1] == tc.contains[i+1] {
+								found = true
+								i++
+								break
+							}
+						} else {
+							found = true
+							break
+						}
+					}
+				}
+				if !found {
+					t.Errorf("expected args to contain %q, but got %v", expected, args)
+				}
+			}
+
+			for _, omitted := range tc.omits {
+				for _, arg := range args {
+					if arg == omitted {
+						t.Errorf("expected args to omit %q, but found it in %v", omitted, args)
 					}
 				}
 			}
