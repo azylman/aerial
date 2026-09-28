@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -112,8 +111,6 @@ type WorkerPool struct {
 	scopeLocks        sync.Map
 	webhookDispatcher WebhookDispatcher
 	summaryGroup      singleflight.Group
-	daemonPool        *DaemonPool
-	voiceDaemonPool   *DaemonPool
 	processPool       *runner.UnifiedProcessPool
 }
 
@@ -318,23 +315,26 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 		webhookDispatcher: cfg.WebhookDispatcher,
 	}
 
-	daemonBin := cfg.AgyBin
-	if daemonBin == "" && appCfg != nil {
-		daemonBin = appCfg.Current().AgyBin
+	if p.processPool == nil && isExplicitAppCfg {
+		daemonBin := cfg.AgyBin
+		if daemonBin == "" && appCfg.Current() != nil {
+			daemonBin = appCfg.Current().AgyBin
+		}
+		daemonDataDir := ""
+		if appCfg.Current() != nil {
+			daemonDataDir = appCfg.Current().DataDir
+		}
+		defaultModel := cfg.Model
+		if defaultModel == "" && appCfg.Current() != nil {
+			defaultModel = appCfg.Current().Model
+		}
+		p.processPool = runner.NewUnifiedProcessPool(runner.PoolConfig{
+			AgyBin:       daemonBin,
+			Cwd:          daemonDataDir,
+			Env:          os.Environ(),
+			DefaultModel: defaultModel,
+		}, nil)
 	}
-	daemonDataDir := ""
-	if appCfg != nil {
-		daemonDataDir = appCfg.Current().DataDir
-	}
-	p.daemonPool = NewDaemonPool(appCfg, daemonBin, os.Environ(), daemonDataDir)
-	p.voiceDaemonPool = NewDaemonPool(appCfg, daemonBin, os.Environ(), daemonDataDir)
-
-	if daemonDataDir != "" {
-		p.daemonPool.SetGeminiHomeDir(filepath.Join(daemonDataDir, "runtimes", "discord"))
-		p.voiceDaemonPool.SetGeminiHomeDir(filepath.Join(daemonDataDir, "runtimes", "voice"))
-	}
-	p.daemonPool.SetMaxDaemons(35)
-	p.voiceDaemonPool.SetMaxDaemons(5)
 
 	if p.cfg.HistoryFetcher == nil {
 		p.cfg.HistoryFetcher = func(ctx context.Context, channelID string, beforeID string, limit int) ([]HistoryMessage, error) {
@@ -484,7 +484,7 @@ func (p *WorkerPool) SessionManager() *session.Manager {
 func (p *WorkerPool) Start() {
 	// WorkerPool starts workers lazily per active thread
 	log.Printf("[WorkerPool] Started queue worker pool with max %d attempts per turn", p.cfg.MaxAttempts)
-	if p.daemonPool != nil || p.voiceDaemonPool != nil {
+	if p.processPool != nil {
 		p.wg.Add(1)
 		go func() {
 			defer p.wg.Done()
@@ -499,14 +499,7 @@ func (p *WorkerPool) Start() {
 				case <-p.ctx.Done():
 					return
 				case <-ticker.C:
-					if p.daemonPool != nil {
-						p.daemonPool.PruneIdle(5 * time.Minute)
-						p.daemonPool.MonitorZombieTasks(1 * time.Hour)
-					}
-					if p.voiceDaemonPool != nil {
-						p.voiceDaemonPool.PruneIdle(5 * time.Minute)
-						p.voiceDaemonPool.MonitorZombieTasks(1 * time.Hour)
-					}
+					// Periodic maintenance tick
 				}
 			}
 		}()
@@ -591,18 +584,11 @@ func (p *WorkerPool) StopWithTimeout(drainTimeout time.Duration) {
 
 func (p *WorkerPool) Stop() {
 	p.StopWithTimeout(p.cfg.DrainTimeout)
-	if p.daemonPool != nil {
-		if closeErr := p.daemonPool.Close(); closeErr != nil {
-			log.Printf("[WorkerPool] Warning: failed to close daemon pool: %v", closeErr)
-		}
-	}
-	if p.voiceDaemonPool != nil {
-		if closeErr := p.voiceDaemonPool.Close(); closeErr != nil {
-			log.Printf("[WorkerPool] Warning: failed to close voice daemon pool: %v", closeErr)
-		}
-	}
-	if p.processPool != nil {
-		if closeErr := p.processPool.Close(); closeErr != nil {
+	p.mu.Lock()
+	procPool := p.processPool
+	p.mu.Unlock()
+	if procPool != nil {
+		if closeErr := procPool.Close(); closeErr != nil {
 			log.Printf("[WorkerPool] Warning: failed to close unified process pool: %v", closeErr)
 		}
 	}
@@ -619,32 +605,16 @@ func (p *WorkerPool) ProcessPool() *runner.UnifiedProcessPool {
 	return p.processPool
 }
 
-// DaemonPool returns the associated DaemonPool instance.
-func (p *WorkerPool) DaemonPool() *DaemonPool {
-	if p == nil {
-		return nil
-	}
-	return p.daemonPool
-}
-
-// VoiceDaemonPool returns the associated voice DaemonPool instance.
-func (p *WorkerPool) VoiceDaemonPool() *DaemonPool {
-	if p == nil {
-		return nil
-	}
-	return p.voiceDaemonPool
-}
-
-// MarkDirty notifies both the primary (Discord) and voice daemon pools to mark active daemons dirty and evict idle daemons.
+// MarkDirty notifies the process pool to mark active daemons dirty and evict idle daemons.
 func (p *WorkerPool) MarkDirty() {
 	if p == nil {
 		return
 	}
-	if p.daemonPool != nil {
-		p.daemonPool.MarkDirty()
-	}
-	if p.voiceDaemonPool != nil {
-		p.voiceDaemonPool.MarkDirty()
+	p.mu.Lock()
+	procPool := p.processPool
+	p.mu.Unlock()
+	if procPool != nil {
+		procPool.MarkDirty()
 	}
 }
 
@@ -748,55 +718,91 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 		return strings.TrimSpace(stdout), convID, nil
 	}
 
-	voicePool := p.voiceDaemonPool
-	if voicePool == nil {
-		voicePool = p.daemonPool
-	}
-	if voicePool == nil {
+	p.mu.Lock()
+	procPool := p.processPool
+	p.mu.Unlock()
+	if procPool == nil {
 		return "", convID, fmt.Errorf("voice daemon pool unavailable")
 	}
 
-	defer voicePool.ReleaseDaemon(threadID)
-
 	model := p.LowEffortModel()
 	start := time.Now()
-	daemon, dErr := voicePool.GetOrCreateDaemon(ctx, threadID, convID, model)
+	daemon, dErr := procPool.GetOrCreate(ctx, threadID)
 	if dErr != nil {
 		metrics.RecordRunnerExecution("error", model, "voice", time.Since(start))
 		return "", convID, fmt.Errorf("failed to acquire voice daemon: %w", dErr)
 	}
 
-	stepHandler := func(step *runner.StepUpdateEvent) {
-		if onStatus == nil || step == nil {
-			return
-		}
-		typ := step.ResolvedType()
-		if (typ == "tool_call" || typ == "tool") && step.State != "DONE" && step.State != "ERROR" {
-			toolName := step.ResolvedToolName()
-			cmdName := step.ResolvedCommandName()
-			if toolName != "" || cmdName != "" {
-				onStatus(FormatToolStatus(toolName, cmdName, 0))
-			}
-		}
+	sink := &voiceTurnSink{
+		onStatus: onStatus,
+		resCh:    make(chan *runner.TurnResult, 1),
+		errCh:    make(chan error, 1),
+	}
+	turnCtx := &runner.TurnContext{
+		TurnID:    uuid.New().String(),
+		Prompt:    prompt,
+		Sink:      sink,
+		CreatedAt: time.Now(),
 	}
 
-	turnRes, turnErr := daemon.ExecuteTurnWithHandler(ctx, prompt, stepHandler)
-	runStatus := "success"
-	if turnErr != nil || (turnRes != nil && turnRes.ExitCode != 0) {
-		runStatus = "error"
-	}
-	metrics.RecordRunnerExecution(runStatus, model, "voice", time.Since(start))
-	if turnErr != nil {
-		return "", daemon.SessionID(), turnErr
+	if sendErr := daemon.Send(prompt, turnCtx); sendErr != nil {
+		metrics.RecordRunnerExecution("error", model, "voice", time.Since(start))
+		return "", convID, fmt.Errorf("failed sending turn to voice daemon: %w", sendErr)
 	}
 
-	activeSession := daemon.SessionID()
-	if activeSession == "" {
-		activeSession = convID
+	select {
+	case <-ctx.Done():
+		metrics.RecordRunnerExecution("error", model, "voice", time.Since(start))
+		return "", convID, ctx.Err()
+	case err := <-sink.errCh:
+		metrics.RecordRunnerExecution("error", model, "voice", time.Since(start))
+		return "", daemon.SessionID(), err
+	case turnRes := <-sink.resCh:
+		runStatus := "success"
+		if turnRes != nil && turnRes.ExitCode != 0 {
+			runStatus = "error"
+		}
+		metrics.RecordRunnerExecution(runStatus, model, "voice", time.Since(start))
+		activeSession := daemon.SessionID()
+		if activeSession == "" {
+			activeSession = convID
+		}
+		if turnRes != nil && turnRes.Usage.TotalTokens > 0 {
+			metrics.RecordTokens(model, "voice", turnRes.Usage.InputTokens, turnRes.Usage.OutputTokens, turnRes.Usage.ThinkingTokens, turnRes.Usage.CacheReadTokens, turnRes.Usage.TotalTokens)
+		}
+		var reply string
+		if turnRes != nil {
+			reply = strings.TrimSpace(turnRes.Response)
+		}
+		return reply, activeSession, nil
 	}
-	if turnRes != nil && turnRes.Usage.TotalTokens > 0 {
-		metrics.RecordTokens(model, "voice", turnRes.Usage.InputTokens, turnRes.Usage.OutputTokens, turnRes.Usage.ThinkingTokens, turnRes.Usage.CacheReadTokens, turnRes.Usage.TotalTokens)
+}
+
+type voiceTurnSink struct {
+	onStatus func(status string)
+	resCh    chan *runner.TurnResult
+	errCh    chan error
+	once     sync.Once
+}
+
+var _ runner.TurnSink = (*voiceTurnSink)(nil)
+
+func (s *voiceTurnSink) OnTurnStarted() {}
+func (s *voiceTurnSink) OnThinking()    {}
+func (s *voiceTurnSink) OnToolCall(toolName, commandName string) {
+	if s.onStatus != nil && (toolName != "" || commandName != "") {
+		s.onStatus(FormatToolStatus(toolName, commandName, 0))
 	}
-	return strings.TrimSpace(turnRes.Response), activeSession, nil
+}
+func (s *voiceTurnSink) OnTextDelta(delta string) {}
+func (s *voiceTurnSink) OnResult(res *runner.TurnResult) {
+	s.once.Do(func() {
+		s.resCh <- res
+	})
+}
+func (s *voiceTurnSink) OnError(err error) {
+	s.once.Do(func() {
+		s.errCh <- err
+	})
 }
 

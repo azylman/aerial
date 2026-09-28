@@ -1,7 +1,6 @@
 package queue
 
 import (
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -69,30 +68,11 @@ func TestWorkerPool_UnifiedProcessPoolWiring(t *testing.T) {
 			MaintenanceInterval: 10 * time.Millisecond,
 		})
 
-		var memCheckerCalled atomic.Int32
-		if p.DaemonPool() != nil {
-			p.DaemonPool().SetMemoryChecker(func() (float64, error) {
-				memCheckerCalled.Add(1)
-				return 0.05, nil
-			})
-		}
-		if p.VoiceDaemonPool() != nil {
-			p.VoiceDaemonPool().SetMemoryChecker(func() (float64, error) {
-				memCheckerCalled.Add(1)
-				return 0.05, nil
-			})
-		}
-
 		p.Start()
 
 		// Allow maintenance loop to tick multiple times
 		time.Sleep(50 * time.Millisecond)
 
-		// Explicit call to runMaintenance if accessible, or relying on ticker ticks
 		p.Stop()
-
-		if count := memCheckerCalled.Load(); count != 0 {
-			t.Errorf("expected 0 memory checker calls in maintenance loop, got %d", count)
-		}
 	})
 }

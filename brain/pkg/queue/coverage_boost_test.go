@@ -2597,36 +2597,6 @@ done
 	}
 }
 
-func TestCoverageBoost_DefaultLinuxMemoryChecker(t *testing.T) {
-	orig := meminfoPath
-	defer func() { meminfoPath = orig }()
-
-	tempDir := t.TempDir()
-	mockMeminfo := filepath.Join(tempDir, "meminfo")
-	content := "MemTotal:        16000000 kB\nMemAvailable:     8000000 kB\n"
-	if err := os.WriteFile(mockMeminfo, []byte(content), 0644); err != nil {
-		t.Fatalf("failed to write mock meminfo: %v", err)
-	}
-	meminfoPath = mockMeminfo
-
-	frac, err := DefaultLinuxMemoryChecker()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if frac < 0.49 || frac > 0.51 {
-		t.Errorf("expected approx 0.50, got %f", frac)
-	}
-
-	meminfoPath = filepath.Join(tempDir, "nonexistent")
-	frac, err = DefaultLinuxMemoryChecker()
-	if err == nil {
-		t.Errorf("expected error for nonexistent meminfo")
-	}
-	if frac != 1.0 {
-		t.Errorf("expected 1.0 headroom on error, got %f", frac)
-	}
-}
-
 func TestCoverageBoost_PoolStoreResolutionAndOptions(t *testing.T) {
 	var nilSQLStore *db.SQLStore
 	if s := resolveStore(nilSQLStore); s != nil {

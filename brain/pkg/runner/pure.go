@@ -2,6 +2,7 @@ package runner
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -184,6 +185,18 @@ func IsResultEvent(line string) bool {
 	}
 
 	return false
+}
+
+// ErrWorkerDead is returned when writing to an uninitialized or dead worker.
+var ErrWorkerDead = errors.New("utility worker is dead")
+
+type streamUserMessage struct {
+	Event   string                `json:"event"`
+	Message streamUserMessageBody `json:"message"`
+}
+
+type streamUserMessageBody struct {
+	Content string `json:"content"`
 }
 
 // WriteWorkerTurn serializes and writes a prompt turn to the given io.Writer.

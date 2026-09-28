@@ -157,6 +157,40 @@ func (p *UnifiedProcessPool) Close() error {
 	return p.closeErr
 }
 
+// Get returns the active StreamingDaemon for targetKey if present and not closed.
+func (p *UnifiedProcessPool) Get(targetKey string) (*StreamingDaemon, bool) {
+	if p == nil {
+		return nil, false
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	d, ok := p.daemons[targetKey]
+	if !ok || d == nil || d.State() == StateClosed {
+		return nil, false
+	}
+	return d, true
+}
+
+// HasDaemon reports whether an active StreamingDaemon exists for targetKey.
+func (p *UnifiedProcessPool) HasDaemon(targetKey string) bool {
+	_, ok := p.Get(targetKey)
+	return ok
+}
+
+// MarkDirty marks all active daemons as dirty.
+func (p *UnifiedProcessPool) MarkDirty() {
+	if p == nil {
+		return
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	for _, d := range p.daemons {
+		if d != nil {
+			d.MarkDirty()
+		}
+	}
+}
+
 // Session rotation thresholds for memory pressure mitigation and context compaction.
 const (
 	DefaultMaxSessionTurns   = 10

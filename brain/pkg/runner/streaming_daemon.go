@@ -215,6 +215,23 @@ func (d *StreamingDaemon) IsDirty() bool {
 	return d.dirty
 }
 
+// SetSessionID updates the session ID latched to this daemon.
+func (d *StreamingDaemon) SetSessionID(id string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.sessionID = id
+	if d.stderr != nil {
+		d.stderr.SetSessionID(id)
+	}
+}
+
+// MarkDirty marks the daemon dirty so it will be rotated or recreated on next use.
+func (d *StreamingDaemon) MarkDirty() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.dirty = true
+}
+
 // Send serializes prompt input writing to the daemon stdin under stdinMu mutex protection,
 // tracks the TurnContext in the in-flight FIFO queue, and transitions daemon state to StateExecuting.
 func (d *StreamingDaemon) Send(prompt string, turnCtx *TurnContext) error {
@@ -364,14 +381,37 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 		d.mu.Unlock()
 
 		if activeTurn.Sink != nil {
+			var toolName, cmdName string
 			if toolCall, ok := raw["tool_call"].(map[string]any); ok {
-				var toolName, cmdName string
 				if n, ok := toolCall["name"].(string); ok {
 					toolName = n
 				}
 				if c, ok := toolCall["command"].(string); ok {
 					cmdName = c
 				}
+			}
+			if su, ok := raw["step_update"].(map[string]any); ok {
+				var state, typ string
+				if s, ok := su["state"].(string); ok {
+					state = s
+				}
+				if t, ok := su["type"].(string); ok {
+					typ = t
+				}
+				if (typ == "tool_call" || typ == "tool") && state != "DONE" && state != "ERROR" {
+					if tn, ok := su["tool_name"].(string); ok && tn != "" {
+						toolName = tn
+					}
+					if info, ok := su["tool_info"].(map[string]any); ok {
+						if params, ok := info["parameters"].(map[string]any); ok {
+							if cl, ok := params["CommandLine"].(string); ok && cl != "" {
+								cmdName = cl
+							}
+						}
+					}
+				}
+			}
+			if toolName != "" || cmdName != "" {
 				activeTurn.Sink.OnToolCall(toolName, cmdName)
 			}
 			if delta, ok := raw["delta"].(string); ok && delta != "" {
@@ -404,10 +444,42 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 		d.mu.Unlock()
 
 		if activeTurn.Sink != nil {
+			if resObj, ok := raw["result"].(map[string]any); ok {
+				if status, ok := resObj["status"].(string); ok && status == "ERROR" {
+					var errMsg string
+					if em, ok := resObj["error"].(string); ok {
+						errMsg = em
+					}
+					if errMsg == "" {
+						errMsg = "daemon execution failed"
+					}
+					activeTurn.Sink.OnError(errors.New(errMsg))
+					return
+				}
+			}
 			res := &TurnResult{
 				ConversationID: d.SessionID(),
 				Response:       extractResponseString(raw),
 				Duration:       time.Since(activeTurn.CreatedAt),
+			}
+			if resObj, ok := raw["result"].(map[string]any); ok {
+				if u, ok := resObj["usage"].(map[string]any); ok {
+					if it, ok := u["input_tokens"].(float64); ok {
+						res.Usage.InputTokens = int(it)
+					}
+					if ot, ok := u["output_tokens"].(float64); ok {
+						res.Usage.OutputTokens = int(ot)
+					}
+					if tt, ok := u["thinking_tokens"].(float64); ok {
+						res.Usage.ThinkingTokens = int(tt)
+					}
+					if crt, ok := u["cache_read_tokens"].(float64); ok {
+						res.Usage.CacheReadTokens = int(crt)
+					}
+					if tot, ok := u["total_tokens"].(float64); ok {
+						res.Usage.TotalTokens = int(tot)
+					}
+				}
 			}
 			activeTurn.Sink.OnResult(res)
 		}

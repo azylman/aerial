@@ -20,7 +20,6 @@ import (
 	"github.com/azylman/aerial/brain/pkg/env"
 	"github.com/azylman/aerial/brain/pkg/metrics"
 	"github.com/azylman/aerial/brain/pkg/queue"
-	"github.com/azylman/aerial/brain/pkg/runner"
 	"github.com/bwmarrin/discordgo"
 )
 
@@ -1367,31 +1366,6 @@ func TestCreateReloadConfigFunc_Complete(t *testing.T) {
 	reloadFn("TestErrorSource")
 }
 
-func TestCreateReloadConfigFunc_WithUtilityDaemon(t *testing.T) {
-	tmpDir := t.TempDir()
-	cfg := config.NewTestConfig(func(d *config.ConfigData) {
-		d.GeminiHomeDir = tmpDir
-		d.DataDir = tmpDir
-	})
-
-	daemon := runner.NewUtilityDaemon(cfg,
-		runner.WithTurnBudget(10),
-		runner.WithSpawner(func(ctx context.Context, opts runner.WorkerOptions) (*runner.WorkerInstance, error) {
-			return &runner.WorkerInstance{}, nil
-		}),
-	)
-	defer daemon.Close()
-
-	reloadFn := CreateReloadConfigFunc(cfg,
-		WithSkipEnvironmentSync(),
-		WithReloadSupplier(func(active *config.Config) error {
-			return nil
-		}),
-		WithUtilityDaemon(daemon),
-	)
-
-	reloadFn("TestWithDaemon")
-}
 
 func TestRunBrainApp_ErrorBranches(t *testing.T) {
 	tmpDir := t.TempDir()

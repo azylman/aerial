@@ -480,3 +480,189 @@ func TestUnifiedProcessPool_RotateDaemon_Errors(t *testing.T) {
 		t.Errorf("expected failed creating rotated daemon error, got %v", errFail)
 	}
 }
+
+func TestUnifiedProcessPool_GetHasDaemonAndMarkDirty(t *testing.T) {
+	var nilPool *UnifiedProcessPool
+	if d, ok := nilPool.Get("kiosk"); ok || d != nil {
+		t.Errorf("expected nil from nil UnifiedProcessPool.Get")
+	}
+	if nilPool.HasDaemon("kiosk") {
+		t.Errorf("expected false from nil UnifiedProcessPool.HasDaemon")
+	}
+	nilPool.MarkDirty()
+
+	mock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			outR, outW := io.Pipe()
+			inR, inW := io.Pipe()
+			errR, _ := io.Pipe()
+			go func() {
+				defer outW.Close()
+				_, _ = outW.Write([]byte(`{"event":"init","session_id":"00000000-0000-0000-0000-000000000099"}` + "\n"))
+			}()
+			_ = inR.Close()
+			return inW, outR, errR, &MockProcessHandle{pid: 99}, nil
+		},
+	}
+
+	pool := NewUnifiedProcessPool(PoolConfig{}, mock)
+	defer pool.Close()
+
+	if pool.HasDaemon("kiosk") {
+		t.Errorf("expected false for unspawned target")
+	}
+
+	d, err := pool.GetOrCreate(context.Background(), "kiosk")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !pool.HasDaemon("kiosk") {
+		t.Errorf("expected true for spawned target")
+	}
+	if got, ok := pool.Get("kiosk"); !ok || got != d {
+		t.Errorf("expected pool.Get to return daemon %p, got %p, ok=%v", d, got, ok)
+	}
+
+	d.SetSessionID("00000000-0000-0000-0000-000000000098")
+	if d.SessionID() != "00000000-0000-0000-0000-000000000098" {
+		t.Errorf("expected session ID to update to 00000000-0000-0000-0000-000000000098")
+	}
+
+	if d.IsDirty() {
+		t.Errorf("expected daemon not dirty initially")
+	}
+	pool.MarkDirty()
+	if !d.IsDirty() {
+		t.Errorf("expected daemon to be dirty after pool.MarkDirty()")
+	}
+
+	_ = d.Close()
+	if _, ok := pool.Get("kiosk"); ok {
+		t.Errorf("expected false for closed daemon from pool.Get")
+	}
+}
+
+type mockSinkCapture struct {
+	toolName    string
+	commandName string
+	delta       string
+	thinking    bool
+	result      *TurnResult
+	err         error
+}
+
+func (s *mockSinkCapture) OnTurnStarted() {}
+func (s *mockSinkCapture) OnThinking()    { s.thinking = true }
+func (s *mockSinkCapture) OnToolCall(tool, cmd string) {
+	s.toolName = tool
+	s.commandName = cmd
+}
+func (s *mockSinkCapture) OnTextDelta(delta string) { s.delta += delta }
+func (s *mockSinkCapture) OnResult(res *TurnResult) { s.result = res }
+func (s *mockSinkCapture) OnError(err error)        { s.err = err }
+
+func TestStreamingDaemon_DispatchNDJSONLine_Scenarios(t *testing.T) {
+	outR, outW := io.Pipe()
+	inR, inW := io.Pipe()
+	errR, _ := io.Pipe()
+
+	mock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			return inW, outR, errR, &MockProcessHandle{pid: 777}, nil
+		},
+	}
+
+	go func() {
+		_, _ = outW.Write([]byte(`{"event":"init","session_id":"00000000-0000-0000-0000-000000000077"}` + "\n"))
+	}()
+
+	daemon, err := StartStreamingDaemon(context.Background(), DaemonConfig{}, mock)
+	if err != nil {
+		t.Fatalf("failed starting daemon: %v", err)
+	}
+	go func() { _, _ = io.Copy(io.Discard, inR) }()
+	defer inR.Close()
+	defer daemon.Close()
+
+	sink := &mockSinkCapture{}
+	turnCtx := &TurnContext{
+		TurnID:    "t-1",
+		Prompt:    "hello",
+		Sink:      sink,
+		CreatedAt: time.Now(),
+	}
+
+	if err := daemon.Send("hello", turnCtx); err != nil {
+		t.Fatalf("failed sending turn: %v", err)
+	}
+
+	// 1. Nested step_update with CommandLine
+	stepPayload := `{"event":"step_update","step_update":{"state":"RUNNING","type":"tool_call","tool_name":"cmd_exec","tool_info":{"parameters":{"CommandLine":"git status"}}}}` + "\n"
+	_, _ = outW.Write([]byte(stepPayload))
+
+	// 2. Text delta and thinking
+	deltaPayload := `{"event":"step_update","delta":"chunk1","thinking":true}` + "\n"
+	_, _ = outW.Write([]byte(deltaPayload))
+
+	// 3. Result with token usage
+	resPayload := `{"event":"result","result":{"status":"SUCCESS","response":"all done","usage":{"input_tokens":10,"output_tokens":20,"thinking_tokens":5,"cache_read_tokens":2,"total_tokens":37}}}` + "\n"
+	_, _ = outW.Write([]byte(resPayload))
+
+	time.Sleep(50 * time.Millisecond)
+
+	if sink.toolName != "cmd_exec" || sink.commandName != "git status" {
+		t.Errorf("unexpected tool call capture: %s / %s", sink.toolName, sink.commandName)
+	}
+	if sink.delta != "chunk1" {
+		t.Errorf("unexpected delta: %q", sink.delta)
+	}
+	if !sink.thinking {
+		t.Errorf("expected thinking=true")
+	}
+	if sink.result == nil || sink.result.Response != "all done" {
+		t.Errorf("unexpected result: %+v", sink.result)
+	}
+	if sink.result != nil && sink.result.Usage.TotalTokens != 37 {
+		t.Errorf("unexpected total tokens: %d", sink.result.Usage.TotalTokens)
+	}
+
+	// 4. Test error result
+	sinkErr := &mockSinkCapture{}
+	turnCtxErr := &TurnContext{
+		TurnID:    "t-2",
+		Prompt:    "err test",
+		Sink:      sinkErr,
+		CreatedAt: time.Now(),
+	}
+	if err := daemon.Send("err test", turnCtxErr); err != nil {
+		t.Fatalf("failed sending err turn: %v", err)
+	}
+	errPayload := `{"event":"result","result":{"status":"ERROR","error":"custom failure message"}}` + "\n"
+	_, _ = outW.Write([]byte(errPayload))
+
+	time.Sleep(50 * time.Millisecond)
+	if sinkErr.err == nil || !strings.Contains(sinkErr.err.Error(), "custom failure message") {
+		t.Errorf("expected custom failure message error, got %v", sinkErr.err)
+	}
+
+	// 5. Test empty error string default
+	sinkErrDef := &mockSinkCapture{}
+	turnCtxDef := &TurnContext{
+		TurnID:    "t-3",
+		Prompt:    "def err test",
+		Sink:      sinkErrDef,
+		CreatedAt: time.Now(),
+	}
+	if err := daemon.Send("def err test", turnCtxDef); err != nil {
+		t.Fatalf("failed sending def err turn: %v", err)
+	}
+	errDefPayload := `{"event":"result","result":{"status":"ERROR"}}` + "\n"
+	_, _ = outW.Write([]byte(errDefPayload))
+
+	time.Sleep(50 * time.Millisecond)
+	if sinkErrDef.err == nil || !strings.Contains(sinkErrDef.err.Error(), "daemon execution failed") {
+		t.Errorf("expected daemon execution failed error, got %v", sinkErrDef.err)
+	}
+}
+

@@ -883,7 +883,6 @@ type reloadConfigOptions struct {
 	reloadSupplier      func(active *config.Config) error
 	skipEnvironmentSync bool
 	provisioner         *env.Provisioner
-	utilityDaemon       *runner.UtilityDaemon
 	workerPool          *queue.WorkerPool
 }
 
@@ -908,12 +907,6 @@ func WithSkipEnvironmentSync() ReloadOption {
 func WithProvisioner(p *env.Provisioner) ReloadOption {
 	return func(o *reloadConfigOptions) {
 		o.provisioner = p
-	}
-}
-
-func WithUtilityDaemon(d *runner.UtilityDaemon) ReloadOption {
-	return func(o *reloadConfigOptions) {
-		o.utilityDaemon = d
 	}
 }
 
@@ -974,10 +967,6 @@ func CreateReloadConfigFunc(cfg *config.Config, opts ...ReloadOption) func(sourc
 				if err := options.provisioner.Sync(context.Background(), cfg); err != nil {
 					log.Printf("[%s] Warning: env sync error: %v", source, err)
 				}
-			}
-
-			if options.utilityDaemon != nil {
-				options.utilityDaemon.TriggerRestart(source)
 			}
 
 			if options.workerPool != nil {
@@ -1057,11 +1046,6 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	sanitizer.RegisterConfigTokens(cfg)
 
 	sessionMgr := session.New(cfg.GeminiHomeDir(), cfg.DataDir())
-	utilityDaemon := runner.NewUtilityDaemon(cfg, runner.WithSessionRoots(sessionMgr.Roots()...))
-	defer utilityDaemon.Close()
-
-	utilityRunner := utilityDaemon.RunnerFunc()
-	cls := classifier.New(cfg, utilityRunner)
 
 	unifiedPool := runner.NewUnifiedProcessPool(runner.PoolConfig{
 		PrewarmedTargets: []string{"kiosk", "ephemeral:classifier", "ephemeral:summarizer"},
@@ -1075,6 +1059,33 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 			log.Printf("[WARN] Failed to close unified process pool: %v", err)
 		}
 	}()
+
+	ephemeralRunner := func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+		targetKey := "ephemeral:classifier"
+		if strings.Contains(prompt, "summarize") || strings.Contains(prompt, "title") {
+			targetKey = "ephemeral:summarizer"
+		}
+		daemon, err := unifiedPool.GetOrCreate(ctx, targetKey)
+		if err != nil {
+			return "", "", 1, fmt.Errorf("failed to acquire ephemeral daemon: %w", err)
+		}
+		sink := queue.NewThrowawayTurnSink()
+		turnCtx := &runner.TurnContext{
+			TurnID:    uuid.New().String(),
+			Prompt:    prompt,
+			Sink:      sink,
+			CreatedAt: time.Now(),
+		}
+		if err := daemon.Send(prompt, turnCtx); err != nil {
+			return "", "", 1, fmt.Errorf("failed sending turn to ephemeral daemon: %w", err)
+		}
+		res, err := sink.Result()
+		if err != nil {
+			return "", "", 1, err
+		}
+		return res, "", 0, nil
+	}
+	cls := classifier.New(cfg, ephemeralRunner)
 
 	pool := queue.New(cfg, queue.WorkerPoolConfig{
 		Store:               store,
@@ -1105,7 +1116,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		}
 	}()
 
-	reloadConfig := CreateReloadConfigFunc(cfg, WithDiscordSession(dgSession), WithProvisioner(provisioner), WithUtilityDaemon(utilityDaemon), WithWorkerPool(pool))
+	reloadConfig := CreateReloadConfigFunc(cfg, WithDiscordSession(dgSession), WithProvisioner(provisioner), WithWorkerPool(pool))
 
 	// Start background file watcher for atomic hot-reloading of prompts and skills
 	fileWatcher, err := watcher.NewWatcher(
@@ -1148,7 +1159,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	}
 
 	// Start background scheduler monitor for due cron and one-shot routines
-	sched, err := scheduler.New(cfg, store, pool, scheduler.NewDiscordThreadCreator(dgSession), scheduler.WithRunnerFunc(utilityRunner), scheduler.WithSessionRoots(sessionMgr.Roots()...))
+	sched, err := scheduler.New(cfg, store, pool, scheduler.NewDiscordThreadCreator(dgSession), scheduler.WithRunnerFunc(ephemeralRunner), scheduler.WithSessionRoots(sessionMgr.Roots()...))
 	if err != nil {
 		return fmt.Errorf("failed to initialize scheduler: %w", err)
 	}
