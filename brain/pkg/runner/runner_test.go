@@ -863,17 +863,17 @@ func TestExtractQuotaResetDuration(t *testing.T) {
 			wantExact: true,
 		},
 		{
-			name:      "Reset after 0s clamped to 30s",
+			name:      "Reset after 0s preserved exact",
 			errDetail: "You have exhausted your capacity on this model. Your quota will reset after 0s.",
 			stderr:    "",
-			wantDur:   30 * time.Second,
+			wantDur:   0 * time.Second,
 			wantExact: true,
 		},
 		{
-			name:      "Reset after 1s clamped to 30s",
+			name:      "Reset after 1s preserved exact",
 			errDetail: "You have exhausted your capacity on this model. Your quota will reset after 1s.",
 			stderr:    "",
-			wantDur:   30 * time.Second,
+			wantDur:   1 * time.Second,
 			wantExact: true,
 		},
 		{
@@ -899,6 +899,89 @@ func TestExtractQuotaResetDuration(t *testing.T) {
 			if gotDur != tt.wantDur || gotExact != tt.wantExact {
 				t.Errorf("ExtractQuotaResetDuration(%q, %q) = (%v, %v), want (%v, %v)",
 					tt.errDetail, tt.stderr, gotDur, gotExact, tt.wantDur, tt.wantExact)
+			}
+		})
+	}
+}
+
+func TestIsCapacityBlip(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		errDetail string
+		stderr    string
+		want      bool
+	}{
+		{
+			name:      "Google capacity exhaustion with 0s countdown",
+			errDetail: "RESOURCE_EXHAUSTED: You have exhausted your capacity on this model. Your quota will reset after 0s.",
+			want:      true,
+		},
+		{
+			name:      "Google capacity exhaustion with 1s countdown in stderr",
+			errDetail: "",
+			stderr:    "You have exhausted your capacity on this model. Your quota will reset after 1s.",
+			want:      true,
+		},
+		{
+			name:      "Model capacity marker without reset time",
+			errDetail: "exhausted your capacity on this model",
+			want:      true,
+		},
+		{
+			name:      "Rate limit reached phrase",
+			errDetail: "Rate limit reached on model gemini-2.5-pro",
+			want:      true,
+		},
+		{
+			name:      "Short reset duration <= 5s without subscription phrases",
+			errDetail: "RESOURCE_EXHAUSTED (code 429). Resets in 3s.",
+			want:      true,
+		},
+		{
+			name:      "Subscription quota exhaustion with short countdown - subscription takes precedence",
+			errDetail: "Individual quota reached. Please upgrade your subscription. Resets in 2s.",
+			want:      false,
+		},
+		{
+			name:      "Multi-hour individual quota pause",
+			errDetail: "Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 4h 54m.",
+			want:      false,
+		},
+		{
+			name:      "Subscription phrase upgrade prompt",
+			errDetail: "Please upgrade your subscription to increase your limits.",
+			want:      false,
+		},
+		{
+			name:      "Exceeded current quota phrase",
+			errDetail: "You exceeded your current quota, please check your plan and billing details.",
+			want:      false,
+		},
+		{
+			name:      "Resource exhausted with long reset countdown",
+			errDetail: "Resource has been exhausted. Resets in 45s.",
+			want:      false,
+		},
+		{
+			name:      "Unrelated generic error",
+			errDetail: "execution failed with exit code 1",
+			want:      false,
+		},
+		{
+			name:      "Empty inputs",
+			errDetail: "",
+			stderr:    "",
+			want:      false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := IsCapacityBlip(tt.errDetail, tt.stderr)
+			if got != tt.want {
+				t.Errorf("IsCapacityBlip(%q, %q) = %v, want %v", tt.errDetail, tt.stderr, got, tt.want)
 			}
 		})
 	}
@@ -1104,10 +1187,16 @@ Actual error occurred here
 
 func TestExtractQuotaResetDuration_ClampingAndEdgeCases(t *testing.T) {
 	t.Parallel()
-	// Clamped < 10s -> 30s
+	// Short duration <= 5s preserved exact
 	durShort, exactShort := ExtractQuotaResetDuration("Resets in 5s.", "")
-	if !exactShort || durShort != 30*time.Second {
-		t.Errorf("expected 30s clamping for 5s, got %v, %v", durShort, exactShort)
+	if !exactShort || durShort != 5*time.Second {
+		t.Errorf("expected exact 5s for 5s, got %v, %v", durShort, exactShort)
+	}
+
+	// Negative duration clamped to 0s
+	durNeg, exactNeg := ExtractQuotaResetDuration("Resets in -5s.", "")
+	if !exactNeg || durNeg != 0*time.Second {
+		t.Errorf("expected 0s clamping for negative duration, got %v, %v", durNeg, exactNeg)
 	}
 
 	// Clamped > 24h -> 24h

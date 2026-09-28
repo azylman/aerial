@@ -921,7 +921,7 @@ func extractErrorDetail(stderr string, exitCode int) string {
 }
 
 var (
-	reQuotaResetIn = regexp.MustCompile(`(?i)(?:resets in|reset after)\s+([0-9a-zA-Z\s]+?)(?:\.|\n|\r|$)`)
+	reQuotaResetIn = regexp.MustCompile(`(?i)(?:resets in|reset after)\s+([-0-9a-zA-Z\s]+?)(?:\.|\n|\r|$)`)
 	reWhitespace   = regexp.MustCompile(`\s+`)
 )
 
@@ -951,8 +951,36 @@ func IsQuotaPause(errDetail, stderr string) bool {
 	return false
 }
 
+// IsCapacityBlip detects transient model capacity throttles (e.g. 0s-5s capacity exhaustions,
+// rate limit spikes) distinct from true account subscription exhaustion.
+func IsCapacityBlip(errDetail, stderr string) bool {
+	combined := strings.ToLower(errDetail + "\n" + stderr)
+
+	// True account subscription exhaustion markers take precedence and are NOT capacity blips
+	if strings.Contains(combined, "individual quota reached") ||
+		strings.Contains(combined, "please upgrade your subscription") ||
+		strings.Contains(combined, "upgrade your subscription") ||
+		strings.Contains(combined, "exceeded your current quota") {
+		return false
+	}
+
+	// Direct capacity markers from Google API
+	if strings.Contains(combined, "exhausted your capacity on this model") ||
+		strings.Contains(combined, "capacity on this model") ||
+		strings.Contains(combined, "rate limit reached") {
+		return true
+	}
+
+	// Short reset duration (<= 5s) indicates a transient capacity throttle
+	if dur, exact := ExtractQuotaResetDuration(errDetail, stderr); exact && dur <= 5*time.Second {
+		return true
+	}
+
+	return false
+}
+
 // ExtractQuotaResetDuration parses compound reset countdowns (e.g. "16m58s", "16m 58s", "1h 15m", "45s", "15 minutes", "0s").
-// Normalizes unit words and strips internal whitespace. Clamps between 10s and 24h.
+// Normalizes unit words and strips internal whitespace. Clamps between 0s and 24h.
 // Falls back to (20 * time.Minute, false) if missing or unparseable.
 func ExtractQuotaResetDuration(errDetail, stderr string) (time.Duration, bool) {
 	combined := errDetail + "\n" + stderr
@@ -976,10 +1004,9 @@ func ExtractQuotaResetDuration(errDetail, stderr string) (time.Duration, bool) {
 		raw = reWhitespace.ReplaceAllString(raw, "")
 		raw = strings.Trim(raw, ".\"')[] ")
 
-		if d, err := time.ParseDuration(raw); err == nil && d >= 0 {
-			// Safety clamping: min 10s (clamp 0s-9s to 30s for safe capacity cooldown), max 24h
-			if d < 10*time.Second {
-				d = 30 * time.Second
+		if d, err := time.ParseDuration(raw); err == nil {
+			if d < 0 {
+				d = 0
 			} else if d > 24*time.Hour {
 				d = 24 * time.Hour
 			}

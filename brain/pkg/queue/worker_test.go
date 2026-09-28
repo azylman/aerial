@@ -1708,4 +1708,355 @@ func TestWorker_SessionDBRotation_TransientRetry(t *testing.T) {
 	}
 }
 
+func TestWorkerPool_CapacityBlip_LocalRetry_Success(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	tmpDir := t.TempDir()
+	sessMgr := session.New(tmpDir, tmpDir)
+
+	var mu sync.Mutex
+	var attemptCount int
+	var deliveredText string
+	doneCh := make(chan struct{}, 1)
+
+	appCfg := config.NewFromData(&config.ConfigData{
+		Channels: map[string]config.ChannelPolicy{
+			"default": {Mode: "thread"},
+		},
+	})
+
+	pool := New(appCfg, WorkerPoolConfig{
+		SessionManager: sessMgr,
+		Store:          store,
+		TimeoutMinutes: 1,
+		BackoffBase:    5 * time.Millisecond,
+		MaxAttempts:    2,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			mu.Lock()
+			attemptCount++
+			cur := attemptCount
+			mu.Unlock()
+
+			if cur == 1 {
+				// Capacity blip with 0s countdown
+				return "", "RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Your quota will reset after 0s.", 1, errors.New("exit code 1")
+			}
+			return mockJSONResponse(uuid.New().String(), "Recovered on attempt 2!"), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			mu.Lock()
+			deliveredText = text
+			mu.Unlock()
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			select {
+			case doneCh <- struct{}{}:
+			default:
+			}
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{ID: "msg-cap-retry-succ", ThreadID: "thread-cap-succ", Content: "hello"}
+	_ = insertMessage(store, msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Timeout waiting for message completed")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if attemptCount != 2 {
+		t.Fatalf("Expected 2 attempts for capacity blip retry, got %d", attemptCount)
+	}
+
+	dbMsg, err := store.GetMessage(context.Background(), "msg-cap-retry-succ")
+	if err != nil || dbMsg == nil {
+		t.Fatalf("failed to query message: %v", err)
+	}
+	if dbMsg.Status != db.StatusCompleted {
+		t.Errorf("Expected StatusCompleted, got %s (err: %s)", dbMsg.Status, dbMsg.ErrorMessage)
+	}
+	if !strings.Contains(deliveredText, "Recovered on attempt 2!") {
+		t.Errorf("Expected delivery text to contain recovered response, got %q", deliveredText)
+	}
+
+	// Verify global queue was NEVER locked
+	if lockedUntil := pool.quotaLockedUntil.Load(); lockedUntil > 0 {
+		t.Errorf("Expected quotaLockedUntil to remain 0, got %d", lockedUntil)
+	}
+}
+
+func TestWorkerPool_CapacityBlip_DoesNotBlockConcurrentThreads(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	tmpDir := t.TempDir()
+	sessMgr := session.New(tmpDir, tmpDir)
+
+	var mu sync.Mutex
+	var threadAAttempts int
+	var threadBCompleted time.Time
+	var threadACompleted time.Time
+	doneA := make(chan struct{}, 1)
+	doneB := make(chan struct{}, 1)
+
+	appCfg := config.NewFromData(&config.ConfigData{
+		Channels: map[string]config.ChannelPolicy{
+			"default": {Mode: "thread"},
+		},
+	})
+
+	pool := New(appCfg, WorkerPoolConfig{
+		SessionManager: sessMgr,
+		Store:          store,
+		TimeoutMinutes: 1,
+		BackoffBase:    5 * time.Millisecond,
+		MaxAttempts:    2,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			if strings.Contains(prompt, "Thread A") {
+				// Thread A hits capacity blip on attempt 1, succeeds on attempt 2
+				mu.Lock()
+				threadAAttempts++
+				att := threadAAttempts
+				mu.Unlock()
+				if att == 1 {
+					return "", "RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Your quota will reset after 0s.", 1, errors.New("exit code 1")
+				}
+				return mockJSONResponse(uuid.New().String(), "Thread A success"), "", 0, nil
+			}
+			// Thread B succeeds immediately
+			return mockJSONResponse(uuid.New().String(), "Thread B success"), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			mu.Lock()
+			defer mu.Unlock()
+			if msg.ThreadID == "thread-A" && finalStatus == db.StatusCompleted {
+				threadACompleted = time.Now()
+				select {
+				case doneA <- struct{}{}:
+				default:
+				}
+			} else if msg.ThreadID == "thread-B" && finalStatus == db.StatusCompleted {
+				threadBCompleted = time.Now()
+				select {
+				case doneB <- struct{}{}:
+				default:
+				}
+			}
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	msgA := db.Message{ID: "msg-thread-A", ThreadID: "thread-A", Content: "Thread A prompt"}
+	msgB := db.Message{ID: "msg-thread-B", ThreadID: "thread-B", Content: "Thread B prompt"}
+	_ = insertMessage(store, msgA)
+	_ = insertMessage(store, msgB)
+
+	// Enqueue Thread A first
+	pool.Enqueue(msgA)
+	// Enqueue Thread B immediately
+	pool.Enqueue(msgB)
+
+	select {
+	case <-doneB:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Timeout waiting for Thread B completed")
+	}
+
+	select {
+	case <-doneA:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Timeout waiting for Thread A completed")
+	}
+
+	// Verify global queue was NEVER locked
+	if lockedUntil := pool.quotaLockedUntil.Load(); lockedUntil > 0 {
+		t.Errorf("Expected quotaLockedUntil to remain 0, got %d", lockedUntil)
+	}
+
+	mu.Lock()
+	if threadBCompleted.IsZero() {
+		t.Errorf("Expected Thread B to complete successfully")
+	}
+	if threadACompleted.IsZero() {
+		t.Errorf("Expected Thread A to complete successfully")
+	}
+	mu.Unlock()
+
+	dbMsgB, _ := store.GetMessage(context.Background(), "msg-thread-B")
+	if dbMsgB == nil || dbMsgB.Status != db.StatusCompleted {
+		t.Errorf("Expected Thread B to be StatusCompleted, got %v", dbMsgB)
+	}
+}
+
+func TestWorkerPool_CapacityBlip_ContextCancellation(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	tmpDir := t.TempDir()
+	sessMgr := session.New(tmpDir, tmpDir)
+
+	startedCh := make(chan struct{}, 1)
+
+	appCfg := config.NewFromData(&config.ConfigData{
+		Channels: map[string]config.ChannelPolicy{
+			"default": {Mode: "thread"},
+		},
+	})
+
+	pool := New(appCfg, WorkerPoolConfig{
+		SessionManager: sessMgr,
+		Store:          store,
+		TimeoutMinutes: 1,
+		BackoffBase:    5 * time.Millisecond,
+		MaxAttempts:    2,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			select {
+			case startedCh <- struct{}{}:
+			default:
+			}
+			return "", "RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Your quota will reset after 0s.", 1, errors.New("exit code 1")
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+			return func() {}
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{ID: "msg-cap-cancel", ThreadID: "thread-cap-cancel", Content: "cancel me"}
+	_ = insertMessage(store, msg)
+	pool.Enqueue(msg)
+
+	// Wait for attempt 1 to hit capacity blip
+	select {
+	case <-startedCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Timeout waiting for attempt 1")
+	}
+
+	// Cancel pool context while worker is in capacity backoff sleep (delay is 2s-3s)
+	time.Sleep(100 * time.Millisecond)
+	pool.cancel()
+
+	// Wait a moment for worker goroutine to process pool.ctx.Done()
+	time.Sleep(300 * time.Millisecond)
+
+	dbMsg, err := store.GetMessage(context.Background(), "msg-cap-cancel")
+	if err != nil || dbMsg == nil {
+		t.Fatalf("failed to query message: %v", err)
+	}
+	if dbMsg.Status != db.StatusPending {
+		t.Errorf("Expected StatusPending on graceful shutdown, got %s (err: %s)", dbMsg.Status, dbMsg.ErrorMessage)
+	}
+	if !strings.Contains(dbMsg.ErrorMessage, "interrupted by graceful deployment") {
+		t.Errorf("Expected error to contain 'interrupted by graceful deployment', got %q", dbMsg.ErrorMessage)
+	}
+	if lockedUntil := pool.quotaLockedUntil.Load(); lockedUntil > 0 {
+		t.Errorf("Expected quotaLockedUntil to remain 0, got %d", lockedUntil)
+	}
+}
+
+func TestWorkerPool_CapacityBlip_Exhaustion_LocalFailure(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	tmpDir := t.TempDir()
+	sessMgr := session.New(tmpDir, tmpDir)
+
+	var deliveredText string
+	var mu sync.Mutex
+	doneCh := make(chan struct{}, 1)
+
+	appCfg := config.NewFromData(&config.ConfigData{
+		Channels: map[string]config.ChannelPolicy{
+			"default": {Mode: "thread"},
+		},
+	})
+
+	pool := New(appCfg, WorkerPoolConfig{
+		SessionManager: sessMgr,
+		Store:          store,
+		TimeoutMinutes: 1,
+		BackoffBase:    5 * time.Millisecond,
+		MaxAttempts:    1,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			return "", "RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Your quota will reset after 0s.", 1, errors.New("exit code 1")
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			mu.Lock()
+			deliveredText = text
+			mu.Unlock()
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			select {
+			case doneCh <- struct{}{}:
+			default:
+			}
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{ID: "msg-cap-exhaust", ThreadID: "thread-cap-exhaust", Content: "exhaust me"}
+	_ = insertMessage(store, msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Timeout waiting for message completion")
+	}
+
+	dbMsg, err := store.GetMessage(context.Background(), "msg-cap-exhaust")
+	if err != nil || dbMsg == nil {
+		t.Fatalf("failed to query message: %v", err)
+	}
+	if dbMsg.Status != db.StatusFailed {
+		t.Errorf("Expected StatusFailed, got %s", dbMsg.Status)
+	}
+	if !strings.Contains(dbMsg.ErrorMessage, "[CAPACITY_EXHAUSTED") {
+		t.Errorf("Expected error to contain [CAPACITY_EXHAUSTED], got %q", dbMsg.ErrorMessage)
+	}
+
+	// Verify global queue was NEVER locked
+	if lockedUntil := pool.quotaLockedUntil.Load(); lockedUntil > 0 {
+		t.Errorf("Expected quotaLockedUntil to remain 0, got %d", lockedUntil)
+	}
+
+	// Verify no one-shot schedules were created for quota pause
+	schedules, _ := store.GetAllOneShotSchedules(context.Background(), "thread-cap-exhaust")
+	if len(schedules) > 0 {
+		t.Errorf("Expected 0 one-shot schedules on capacity blip exhaustion, got %d", len(schedules))
+	}
+
+	mu.Lock()
+	if !strings.Contains(deliveredText, "Gemini API quota") && !strings.Contains(deliveredText, "Paused") && !strings.Contains(deliveredText, "capacity") {
+		t.Errorf("Expected capacity pause notice in delivered text, got %q", deliveredText)
+	}
+	mu.Unlock()
+}
+
+
 

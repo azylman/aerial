@@ -1711,17 +1711,10 @@ func (te *turnExecution) executeWithRetries() {
 		if isFailure {
 			// Quota Lockout Fail-Fast & Auto-Retry Check
 			if runner.IsQuotaPause(errDetail, stderr) {
-				te.isQuotaPaused = true
-				te.stopTyping()
-				log.Printf("[WorkerPool] Quota pause detected for thread %s on attempt %d/%d: %s", te.threadID, attempt, maxAttempts, errDetail)
-				if te.pool != nil && te.pool.daemonPool != nil {
-					te.pool.daemonPool.Evict(te.threadID)
-				}
-
 				// Cold-start dynamic session latching if available
 				if te.currentSessionID == "" && !isSessionCorruption {
 					combinedOutput := stdout + "\n" + stderr
-					if extSess := runner.ExtractSessionID(combinedOutput, te.execStart); extSess != "" && te.pool.sessionMgr != nil && te.pool.sessionMgr.SessionExistsOnDisk(extSess) {
+					if extSess := runner.ExtractSessionID(combinedOutput, te.execStart); extSess != "" && te.pool != nil && te.pool.sessionMgr != nil && te.pool.sessionMgr.SessionExistsOnDisk(extSess) {
 						te.currentSessionID = extSess
 						te.saveSessionID(te.threadID, te.currentSessionID)
 					}
@@ -1750,14 +1743,107 @@ func (te *turnExecution) executeWithRetries() {
 					}
 				}
 
+				resetDur, _ := runner.ExtractQuotaResetDuration(errDetail, stderr)
+				isCapacity := runner.IsCapacityBlip(errDetail, stderr) || resetDur <= 5*time.Second
+
+				if isCapacity {
+					// Transient capacity blip (e.g. 0s-5s capacity exhaustions, rate limit spikes).
+					// Decouple from the global queue lock: do NOT call SetQuotaLockedUntil so other Discord
+					// threads remain completely unblocked and active.
+					// Keep the warm daemon alive and typing active, retrying locally with jitter.
+					log.Printf("[WorkerPool] Capacity blip detected for thread %s on attempt %d/%d (reset=%v): %s. Retrying locally without global queue lock.",
+						te.threadID, attempt, maxAttempts, resetDur, errDetail)
+
+					if attempt < maxAttempts {
+						metrics.RecordRunnerError("capacity_throttle", currentModel)
+						for _, m := range te.burst {
+							te.incrementMessageRetry(m.ID, errDetail)
+						}
+
+						delay := resetDur
+						if delay < 2*time.Second {
+							delay = 2 * time.Second
+						}
+						delay += time.Duration(rand.Intn(1000)) * time.Millisecond
+
+						var cancelChan <-chan struct{}
+						if te.pool != nil && te.pool.ctx != nil {
+							cancelChan = te.pool.ctx.Done()
+						}
+
+						select {
+						case <-time.After(delay):
+							continue
+						case <-cancelChan:
+							log.Printf("[WorkerPool] Context cancelled during capacity blip backoff for thread %s", te.threadID)
+							te.stopTyping()
+							te.turnStatus = "pending"
+							te.turnError = "interrupted by graceful deployment"
+							te.turnDurationMs = time.Since(te.execStart).Milliseconds()
+							for _, m := range te.burst {
+								te.updateMessageStatus(m.ID, db.StatusPending, "interrupted by graceful deployment")
+							}
+							return
+						}
+					}
+
+					// If maxAttempts is exhausted on capacity blips, do NOT globally lock the queue.
+					// Mark failure locally for this turn and notify Discord if needed.
+					log.Printf("[WorkerPool] Capacity blip retry budget exhausted for thread %s after %d attempts", te.threadID, maxAttempts)
+					te.stopTyping()
+					if te.statusUpdater != nil {
+						te.statusUpdater.Stop()
+						te.statusUpdater.DeleteStatusMessage()
+					}
+					reason := fmt.Sprintf("[CAPACITY_EXHAUSTED reset_in=%v] %s", resetDur, sanitizeErrorText(errDetail))
+					metrics.RecordRunnerError("capacity_exhausted", currentModel)
+					metrics.RecordTurnCompleted("capacity_exhausted", te.triggerType, currentModel, time.Since(te.execStart))
+					te.turnStatus = "failed"
+					te.turnError = reason
+					te.turnDurationMs = time.Since(te.execStart).Milliseconds()
+					for _, m := range te.burst {
+						te.updateMessageStatus(m.ID, db.StatusFailed, reason)
+						if m.ScheduleRunID != "" {
+							te.updateScheduleRunStatus(db.UpdateRunParams{
+								RunID:       m.ScheduleRunID,
+								MessageID:   m.ID,
+								Status:      "failed",
+								CompletedAt: time.Now().UTC(),
+								DurationMs:  time.Since(te.execStart).Milliseconds(),
+								Error:       reason,
+								Model:       currentModel,
+							})
+						}
+						if te.pool != nil && te.pool.cfg.OnMessageCompleted != nil {
+							te.pool.cfg.OnMessageCompleted(m, db.StatusFailed)
+						}
+					}
+					if !te.skipDiscord && te.pool != nil && te.pool.cfg.DeliveryFunc != nil {
+						pauseMsg := notifier.FormatQuotaPauseMessage(resetDur, time.Now().UTC().Add(resetDur), false, false)
+						if err := te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), te.threadID, pauseMsg); err != nil {
+							log.Printf("[WorkerPool] Failed to deliver capacity pause notice for thread %s: %v", te.threadID, err)
+						}
+					}
+					return
+				}
+
+				// True account subscription quota exhaustion: lock pool and schedule one-shot retry
+				te.isQuotaPaused = true
+				te.stopTyping()
+				log.Printf("[WorkerPool] Quota pause detected for thread %s on attempt %d/%d: %s", te.threadID, attempt, maxAttempts, errDetail)
+				if te.pool != nil && te.pool.daemonPool != nil {
+					te.pool.daemonPool.Evict(te.threadID)
+				}
+
 				// Circuit breaker: check if this turn was already a quota auto-retry
 				isAlreadyRetry := te.burst[0].ScheduleRunID != "" || strings.HasPrefix(te.burst[0].Content, "[QUOTA_RETRY]") || strings.Contains(te.turnPrompt, "[QUOTA_RETRY]")
 
-				resetDur, _ := runner.ExtractQuotaResetDuration(errDetail, stderr)
 				jitterSec := 5 + rand.Intn(16) // 5s to 20s jitter
 				runAt := time.Now().UTC().Add(resetDur).Add(30 * time.Second).Add(time.Duration(jitterSec) * time.Second)
 
-				te.pool.quotaLockedUntil.Store(runAt.Unix())
+				if te.pool != nil {
+					te.pool.quotaLockedUntil.Store(runAt.Unix())
+				}
 
 				var scheduled bool
 				if !isAlreadyRetry {
