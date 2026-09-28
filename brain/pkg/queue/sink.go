@@ -67,12 +67,21 @@ func (s *ThrowawayTurnSink) OnError(err error) {
 
 // ResultContext blocks waiting for turn result, error, or context cancellation.
 func (s *ThrowawayTurnSink) ResultContext(ctx context.Context) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	select {
 	case <-ctx.Done():
 		return "", ctx.Err()
 	case res := <-s.resCh:
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		return res, nil
 	case err := <-s.errCh:
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", ctxErr
+		}
 		return "", err
 	}
 }

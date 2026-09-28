@@ -1000,6 +1000,9 @@ func WithProcessSpawner(spawner runner.DaemonSpawner) BrainAppOption {
 
 func createEphemeralRunner(unifiedPool *runner.UnifiedProcessPool) runner.RunnerFunc {
 	return func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+		if err := ctx.Err(); err != nil {
+			return "", fmt.Sprintf("context cancelled before execution: %v", err), 1, err
+		}
 		targetKey := "ephemeral:classifier"
 		if strings.Contains(prompt, "summarize") || strings.Contains(prompt, "title") {
 			targetKey = "ephemeral:summarizer"
