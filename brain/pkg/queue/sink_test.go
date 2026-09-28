@@ -674,4 +674,106 @@ func TestVoiceTurnSink_ConcurrentAccess(t *testing.T) {
 	wg.Wait()
 }
 
+func TestTurnSinks_NoopInterfaceMethods(t *testing.T) {
+	// ThrowawayTurnSink
+	tSink := NewThrowawayTurnSink()
+	tSink.OnTurnStarted()
+	tSink.OnThinking()
+	tSink.OnToolCall("test-tool", "test-cmd")
+	tSink.OnTextDelta("delta")
+
+	// DiscordTurnSink
+	dSink := NewDiscordTurnSink(nil, "chan-1", "msg-1", nil, nil)
+	dSink.OnTurnStarted()
+	dSink.OnThinking()
+
+	// voiceTurnSink
+	var voiceStatus string
+	vSink := &voiceTurnSink{
+		resCh:    make(chan *runner.TurnResult, 2),
+		errCh:    make(chan error, 2),
+		onStatus: func(s string) { voiceStatus = s },
+	}
+	vSink.OnTurnStarted()
+	vSink.OnThinking()
+	vSink.OnTextDelta("voice-delta")
+	vSink.OnToolCall("run_cmd", "sleep 1")
+	if voiceStatus == "" {
+		t.Errorf("expected non-empty voice status")
+	}
+	vSink.OnToolCall("", "")
+	vSinkNilStatus := &voiceTurnSink{
+		resCh: make(chan *runner.TurnResult, 2),
+		errCh: make(chan error, 2),
+	}
+	vSinkNilStatus.OnToolCall("tool", "cmd")
+	vSink.OnResult(&runner.TurnResult{Response: "voice-1"})
+	vSink.OnResult(&runner.TurnResult{Response: "voice-2"})
+	vSink.OnError(errors.New("err-1"))
+	vSink.OnError(errors.New("err-2"))
+
+	// turnResultSink
+	rSink := &turnResultSink{
+		resCh: make(chan *runner.TurnResult, 2),
+		errCh: make(chan error, 2),
+	}
+	rSink.OnTurnStarted()
+	rSink.OnThinking()
+	rSink.OnTextDelta("turn-delta")
+	rSink.OnToolCall("tool", "cmd")
+	rSink.OnToolCall("", "")
+	// VoiceTurnSink no-ops
+	voiceWriter := &mockWebSocketWriter{}
+	voiceSink := NewVoiceTurnSink(voiceWriter, "device-noop")
+	voiceSink.OnTurnStarted()
+	voiceSink.OnThinking()
+	voiceSink.OnToolCall("tool", "cmd")
+}
+
+func TestThrowawayTurnSink_ResultContext(t *testing.T) {
+	// 1. Pre-cancelled context
+	sink1 := NewThrowawayTurnSink()
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := sink1.ResultContext(cancelledCtx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+
+	// 2. Result delivered successfully
+	sink2 := NewThrowawayTurnSink()
+	sink2.OnResult(&runner.TurnResult{Response: "hello-ctx"})
+	res, err := sink2.ResultContext(context.Background())
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if res != "hello-ctx" {
+		t.Fatalf("expected 'hello-ctx', got %q", res)
+	}
+
+	// 3. Error delivered successfully
+	sink3 := NewThrowawayTurnSink()
+	expectedErr := errors.New("turn failure")
+	sink3.OnError(expectedErr)
+	_, err = sink3.ResultContext(context.Background())
+	if !errors.Is(err, expectedErr) {
+		t.Fatalf("expected %v, got %v", expectedErr, err)
+	}
+
+	// 4. Cancelled while waiting
+	sink4 := NewThrowawayTurnSink()
+	ctxWait, cancelWait := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		cancelWait()
+	}()
+	_, err = sink4.ResultContext(ctxWait)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled while waiting, got %v", err)
+	}
+}
+
+
+
+
 
