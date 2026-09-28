@@ -12,7 +12,7 @@ Aerial previously operated under a synchronous request-response turn model:
 ### 1.2 Architectural Goals
 This specification establishes a **Layered Streaming Architecture** powered by a unified, transport-agnostic process pool:
 - **Decoupled Asynchronous Streaming**: Ingress writes directly to process `stdin` without blocking. Output streams continuously from `stdout` and is routed asynchronously to destination-specific sinks.
-- **Unified Process Pool**: A single pool infrastructure in [`brain/pkg/runner`](file:///C:/Users/alexz/.gemini/antigravity/scratch/gundam/brain/pkg/runner) serves Discord conversational threads, persistent long-running Voice sessions (keyed by device ID, e.g. `"kiosk"`), and throwaway tasks (classifiers and thread titles), with automated session rotation thresholds managed internally by the pool.
+- **Unified Process Pool**: A single pool infrastructure in [`brain/pkg/runner`](file:///C:/Users/alexz/.gemini/antigravity/scratch/gundam/brain/pkg/runner) serves Discord conversational threads, persistent long-running Voice sessions (keyed by device ID, e.g. `"kiosk"`), and throwaway tasks (classifiers and thread titles), with automated session rotation thresholds managed internally by the pool. This completely replaces and deletes all legacy daemon pool implementations (`DaemonPool`, `voiceDaemonPool`, and `UtilityDaemon`).
 - **Boot-Time Pre-Warming**: Configurable pre-warmed targets (`PrewarmedTargets`, e.g. kiosk voice daemon and classifiers) are spawned immediately on Brain boot, eliminating cold-start latency after container deployments.
 - **Deterministic TurnSink Routing**: Each turn attaches a `TurnSink` (`DiscordTurnSink`, `VoiceTurnSink`, `ThrowawayTurnSink`), ensuring that intermediate tool updates edit a specific Discord status message or stream to a specific open WebSocket connection.
 - **Empirically Proven FIFO Pipelining**: Live container spike testing confirmed that `agy` CLI (`stream-json`) queues sequential turns internally. The Go runtime maintains an in-flight FIFO queue (`inflight []*TurnContext`) mapping incoming events to their originating caller.
@@ -388,3 +388,31 @@ To avoid spawning real OS processes or opening real network ports during unit te
 - **`DiscordMessageEditor` Interface**:
   - Signature: `ChannelMessageEdit(channelID, messageID, content string) error`, `ChannelMessageDelete(channelID, messageID string) error`
   - Guarantees 100% test coverage of intermediate badge lifecycle without touching the Discord gateway API.
+
+---
+
+## 9. Legacy Deprecations & File Deletions
+
+This architecture completely deletes all legacy daemon pools and fragmented worker implementations, replacing them with `UnifiedProcessPool` in [`brain/pkg/runner`](file:///C:/Users/alexz/.gemini/antigravity/scratch/gundam/brain/pkg/runner):
+
+### 9.1 Files Slated for Complete Deletion
+- **Legacy Queue Daemon Pool**:
+  - [`brain/pkg/queue/daemon_pool.go`](file:///C:/Users/alexz/.gemini/antigravity/scratch/gundam/brain/pkg/queue/daemon_pool.go): Fully deleted (removes `DaemonPool`, `parseMeminfo`, `DefaultLinuxMemoryChecker`, `CheckMemoryPressureAndEvict`, and all `/proc/meminfo` inspection logic).
+  - [`brain/pkg/queue/daemon_pool_test.go`](file:///C:/Users/alexz/.gemini/antigravity/scratch/gundam/brain/pkg/queue/daemon_pool_test.go): Fully deleted.
+- **Legacy Utility Daemon & Worker**:
+  - [`brain/pkg/runner/utility_daemon.go`](file:///C:/Users/alexz/.gemini/antigravity/scratch/gundam/brain/pkg/runner/utility_daemon.go): Fully deleted (removes `UtilityDaemon`, `activeWorker`/`standbyWorker` standby rotation, debounced restart, and `WithMaxRSSBytes`).
+  - [`brain/pkg/runner/utility_daemon_test.go`](file:///C:/Users/alexz/.gemini/antigravity/scratch/gundam/brain/pkg/runner/utility_daemon_test.go): Fully deleted.
+  - [`brain/pkg/runner/utility_worker.go`](file:///C:/Users/alexz/.gemini/antigravity/scratch/gundam/brain/pkg/runner/utility_worker.go): Fully deleted (removes `WorkerInstance`).
+  - [`brain/pkg/runner/utility_worker_test.go`](file:///C:/Users/alexz/.gemini/antigravity/scratch/gundam/brain/pkg/runner/utility_worker_test.go): Fully deleted.
+
+### 9.2 Code Modifications & Pruning in Existing Files
+- **[`brain/pkg/queue/pool.go`](file:///C:/Users/alexz/.gemini/antigravity/scratch/gundam/brain/pkg/queue/pool.go)**:
+  - Remove `p.daemonPool` and `p.voiceDaemonPool` fields from `WorkerPool`.
+  - Remove `DaemonPool()` and `VoiceDaemonPool()` accessor methods.
+  - Remove the 30-second periodic background ticker that executed `CheckMemoryPressureAndEvict()`, `PruneIdle()`, and `MonitorZombieTasks()`.
+  - Introduce single unified field `processPool *runner.UnifiedProcessPool`.
+- **[`brain/main.go`](file:///C:/Users/alexz/.gemini/antigravity/scratch/gundam/brain/main.go)**:
+  - Remove `utilityDaemon := runner.NewUtilityDaemon(...)` and `WithUtilityDaemon` reload option.
+  - Wire `UnifiedProcessPool` to provide runner execution functions for classifiers and summarizers via warm ephemeral keys (`"ephemeral:classifier"`, `"ephemeral:summarizer"`).
+- **[`brain/pkg/queue/coverage_boost_test.go`](file:///C:/Users/alexz/.gemini/antigravity/scratch/gundam/brain/pkg/queue/coverage_boost_test.go)**:
+  - Prune tests referencing `meminfoPath` and error branches of deleted legacy pool methods.
