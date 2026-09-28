@@ -12,7 +12,8 @@ Aerial previously operated under a synchronous request-response turn model:
 ### 1.2 Architectural Goals
 This specification establishes a **Layered Streaming Architecture** powered by a unified, transport-agnostic process pool:
 - **Decoupled Asynchronous Streaming**: Ingress writes directly to process `stdin` without blocking. Output streams continuously from `stdout` and is routed asynchronously to destination-specific sinks.
-- **Unified Process Pool**: A single pool infrastructure in [`brain/pkg/runner`](file:///C:/Users/alexz/.gemini/antigravity/scratch/gundam/brain/pkg/runner) serves Discord conversational threads, real-time Voice sessions, and throwaway tasks (classifiers and thread titles), with automated session rotation thresholds managed internally by the pool.
+- **Unified Process Pool**: A single pool infrastructure in [`brain/pkg/runner`](file:///C:/Users/alexz/.gemini/antigravity/scratch/gundam/brain/pkg/runner) serves Discord conversational threads, persistent long-running Voice sessions (keyed by device ID, e.g. `"kiosk"`), and throwaway tasks (classifiers and thread titles), with automated session rotation thresholds managed internally by the pool.
+- **Boot-Time Pre-Warming**: Configurable pre-warmed targets (`PrewarmedTargets`, e.g. kiosk voice daemon and classifiers) are spawned immediately on Brain boot, eliminating cold-start latency after container deployments.
 - **Deterministic TurnSink Routing**: Each turn attaches a `TurnSink` (`DiscordTurnSink`, `VoiceTurnSink`, `ThrowawayTurnSink`), ensuring that intermediate tool updates edit a specific Discord status message or stream to a specific open WebSocket connection.
 - **Empirically Proven FIFO Pipelining**: Live container spike testing confirmed that `agy` CLI (`stream-json`) queues sequential turns internally. The Go runtime maintains an in-flight FIFO queue (`inflight []*TurnContext`) mapping incoming events to their originating caller.
 - **Fair Quota Protection**: When Google Gemini quota exhaustion occurs (429 `RESOURCE_EXHAUSTED`), the pool pauses message dispatch for existing pending messages to be resumed when the block expires, while fast-failing new incoming messages arriving during the lockout.
@@ -202,18 +203,28 @@ A single dedicated background goroutine drains `stdout` line by line:
 
 ### 4.1 Pool Structure
 The `UnifiedProcessPool` in [`brain/pkg/runner`](file:///C:/Users/alexz/.gemini/antigravity/scratch/gundam/brain/pkg/runner) maintains:
-- **Pinned Daemons**: Mapped by `targetID` (thread ID or voice session ID).
-- **Throwaway Executions**: Executed on warm daemons without separate infrastructure.
+- **Pinned Conversational Daemons**: Mapped by `targetKey`:
+  - **Discord**: `threadID` (or `channelID` in channel mode).
+  - **Voice**: `deviceID` (e.g. `"kiosk"` or hardware client ID). Voice processes are long-running and persistent—they are **never** torn down on connection close, ensuring zero-latency conversational continuity.
+- **Throwaway Executions**: Handled via warm shared role keys (e.g. `"ephemeral:classifier"` and `"ephemeral:summarizer"`).
 
-### 4.2 Pool-Managed Rotation Thresholds
-The pool inspects daemon health pre-turn and post-turn:
+### 4.2 Boot-Time Pre-Warming (`PrewarmedTargets`)
+To prevent cold-start latency after container deployments (so the first kiosk voice interaction or first ambient message is immediately responsive):
+- **Configuration**:
+  - `PrewarmedTargets []string`: List of target keys to pre-spawn at startup (e.g. `["kiosk", "ephemeral:classifier", "ephemeral:summarizer"]`).
+- **Startup Protocol**:
+  - When `UnifiedProcessPool.Initialize(ctx)` runs on Brain boot, it launches background goroutines to spawn and perform the initial `init` handshake for all targets in `PrewarmedTargets`.
+  - By the time the Discord gateway connects and voice sockets open, these daemons are already in `StateReady` state.
+
+### 4.3 Pool-Managed Rotation Thresholds
+The pool inspects daemon health pre-turn and post-turn across all daemons (Discord, Voice, and throwaways):
 - **Turn Count**: Rotates after **8 to 10 conversational turns** (`DefaultMaxSessionTurns`).
 - **Tool Step Count**: Rotates after **180 cumulative tool steps** (`DefaultMaxSessionSteps`).
 - **Transcript Byte Ceiling**: Rotates when `.system_generated/logs/transcript.jsonl` exceeds **500 KB** (`DefaultMaxTranscriptBytes`).
 - **Session DB Byte Ceiling**: Rotates when `<session-id>.pb` or SQLite DB exceeds **1.5 MB** (`DefaultMaxSessionDBBytes`).
-- **Idle TTL**: Closes after **24 hours** of zero activity and zero running background tasks (`len(activeTasks) == 0`).
+- **Idle TTL**: Closes after **24 hours** of zero activity and zero running background tasks (`len(activeTasks) == 0`). Note: pre-warmed daemons (like `"kiosk"`) are automatically re-spawned if evicted by idle TTL.
 
-### 4.3 Clean Rotation Flow
+### 4.4 Clean Rotation Flow
 1. Active turn finishes completely.
 2. Pool checks rotation criteria (`ShouldRotateDaemon`).
 3. If rotation required:
@@ -221,7 +232,7 @@ The pool inspects daemon health pre-turn and post-turn:
    - Saves summary to database (`sessions.summary`).
    - Closes old daemon gracefully (killing process group `-pgid`).
    - Clears session ID mapping.
-4. Next turn initializes a fresh daemon with a new session UUID, injecting the compacted summary and lookback history.
+4. Next turn initializes a fresh daemon with a new session UUID, injecting the compacted summary and lookback history. If the target was pre-warmed, a replacement daemon can be spawned immediately in the background.
 
 ---
 
@@ -265,12 +276,13 @@ type TurnSink interface {
 #### 5.2.2 `VoiceTurnSink`
 - **Fields**:
   - `conn *websocket.Conn` (or voice audio pipe)
-  - `sessionID string`
+  - `deviceID string` (e.g. `"kiosk"`)
 - **Behavior**:
   - `OnToolCall`: Sends lightweight JSON control packet over WebSocket for UI animation / chime.
   - `OnTextDelta`: Streams raw token chunks directly into voice pipeline / TTS synthesizer with zero buffering.
   - `OnResult`: Sends end-of-turn audio delimiter frame.
   - `OnError`: Sends error frame over WebSocket.
+  - **Connection Close / Persistence**: When the client disconnects or an utterance finishes, the connection closes and `VoiceTurnSink` is detached, but the underlying `StreamingDaemon` is **never** torn down. It remains warm in `p.daemons[deviceID]`, ready for the next interaction with zero process boot latency.
 
 #### 5.2.3 `ThrowawayTurnSink`
 - **Fields**:
