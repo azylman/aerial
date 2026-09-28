@@ -1361,6 +1361,62 @@ func TestExtractFactsLLM_DefaultModel(t *testing.T) {
 	}
 }
 
+func TestExtractFactsLLM_WithLLMFunc_Success(t *testing.T) {
+	cfg := config.NewFromData(&config.ConfigData{
+		LowEffortModel: "gemini-3.8-flash-low",
+	})
+	var capturedModel, capturedPrompt string
+	sched, err := New(cfg, nil, nil, nil, WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
+		capturedModel = model
+		capturedPrompt = prompt
+		return "raw extracted facts without wrappers", nil
+	}))
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	res, err := sched.ExtractFactsLLM(context.Background(), "extract fact prompt")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res != "raw extracted facts without wrappers" {
+		t.Errorf("expected 'raw extracted facts without wrappers', got %q", res)
+	}
+	if capturedModel != "gemini-3.8-flash-low" {
+		t.Errorf("expected model 'gemini-3.8-flash-low', got %q", capturedModel)
+	}
+	if capturedPrompt != "extract fact prompt" {
+		t.Errorf("expected prompt 'extract fact prompt', got %q", capturedPrompt)
+	}
+}
+
+func TestExtractFactsLLM_MissingModelAndNeitherConfigured(t *testing.T) {
+	// 1. Missing model
+	cfgEmpty := config.NewFromData(&config.ConfigData{})
+	schedEmpty, err := New(cfgEmpty, nil, nil, nil, WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
+		return "ok", nil
+	}))
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+	// Force empty model
+	cfgEmpty.Current().Model = ""
+	cfgEmpty.Current().LowEffortModel = ""
+	if _, err := schedEmpty.ExtractFactsLLM(context.Background(), "prompt"); err == nil {
+		t.Error("expected error when model is not configured")
+	}
+
+	// 2. Neither LLMFunc nor RunnerFunc configured
+	cfgNormal := config.NewFromData(&config.ConfigData{Model: "some-model"})
+	schedNeither, err := New(cfgNormal, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+	if _, err := schedNeither.ExtractFactsLLM(context.Background(), "prompt"); err == nil {
+		t.Error("expected error when neither LLMFunc nor RunnerFunc is configured")
+	}
+}
+
 func TestExtractFactsLLM_Errors(t *testing.T) {
 	// 1. Runner fails with nonzero exit code
 	cfgFail := config.NewFromData(&config.ConfigData{Model: "test-model"})

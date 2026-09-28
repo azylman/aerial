@@ -286,6 +286,9 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 			classifier.WithLLMFunc(classifier.NewAgyLLMFunc(agyBin, apiKey, runnerFn)),
 		)
 	}
+	if cfg.LLMFunc == nil && cfg.ProcessPool != nil {
+		cfg.LLMFunc = cfg.ProcessPool.EphemeralLLMFunc("ephemeral:summarizer")
+	}
 	if cfg.ResolveChannelPolicy == nil {
 		cfg.ResolveChannelPolicy = func(channelID, channelName string) config.ChannelPolicy {
 			if appCfg != nil {

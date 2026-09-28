@@ -75,4 +75,20 @@ func TestWorkerPool_UnifiedProcessPoolWiring(t *testing.T) {
 
 		p.Stop()
 	})
+
+	t.Run("AutoPopulatesLLMFunc_FromProcessPool", func(t *testing.T) {
+		mockSpawner := runner.NewMockDaemonSpawner()
+		unifiedPool := runner.NewUnifiedProcessPool(runner.PoolConfig{
+			DefaultModel: "gemini-2.5-flash",
+		}, mockSpawner)
+		defer unifiedPool.Close()
+
+		p := New(nil, WorkerPoolConfig{
+			ProcessPool: unifiedPool,
+		})
+
+		if p.cfg.LLMFunc == nil {
+			t.Fatalf("expected cfg.LLMFunc to be auto-populated from ProcessPool")
+		}
+	})
 }

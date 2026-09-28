@@ -666,3 +666,217 @@ func TestStreamingDaemon_DispatchNDJSONLine_Scenarios(t *testing.T) {
 	}
 }
 
+func TestUnifiedProcessPool_TargetModels(t *testing.T) {
+	var capturedModel string
+	mock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			capturedModel = cfg.Model
+			outR, outW := io.Pipe()
+			inR, inW := io.Pipe()
+			errR, _ := io.Pipe()
+			go func() {
+				defer outW.Close()
+				_, _ = outW.Write([]byte(`{"event":"init","session_id":"00000000-0000-0000-0000-000000000001"}` + "\n"))
+			}()
+			_ = inR.Close()
+			return inW, outR, errR, &MockProcessHandle{pid: 200}, nil
+		},
+	}
+
+	pool := NewUnifiedProcessPool(PoolConfig{
+		DefaultModel: "primary-model",
+		TargetModels: map[string]string{
+			"ephemeral:classifier": "flash-model",
+		},
+	}, mock)
+	defer pool.Close()
+
+	// 1. Target with custom model
+	_, err := pool.GetOrCreate(context.Background(), "ephemeral:classifier")
+	if err != nil {
+		t.Fatalf("unexpected error getting daemon: %v", err)
+	}
+	if capturedModel != "flash-model" {
+		t.Errorf("expected model flash-model, got %q", capturedModel)
+	}
+
+	// 2. Target without custom model uses DefaultModel
+	_, err = pool.GetOrCreate(context.Background(), "standard-target")
+	if err != nil {
+		t.Fatalf("unexpected error getting standard daemon: %v", err)
+	}
+	if capturedModel != "primary-model" {
+		t.Errorf("expected model primary-model, got %q", capturedModel)
+	}
+}
+
+func TestUnifiedProcessPool_ExecuteEphemeral_Success(t *testing.T) {
+	mock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			outR, outW := io.Pipe()
+			inR, inW := io.Pipe()
+			errR, _ := io.Pipe()
+
+			go func() {
+				defer outW.Close()
+				_, _ = outW.Write([]byte(`{"event":"init","session_id":"00000000-0000-0000-0000-000000000002"}` + "\n"))
+
+				buf := make([]byte, 1024)
+				n, _ := inR.Read(buf)
+				if n > 0 {
+					_, _ = outW.Write([]byte(`{"event":"result","result":{"status":"SUCCESS","response":"ephemeral result ok"}}` + "\n"))
+				}
+			}()
+
+			return inW, outR, errR, &MockProcessHandle{pid: 201}, nil
+		},
+	}
+
+	pool := NewUnifiedProcessPool(PoolConfig{DefaultModel: "test-model"}, mock)
+	defer pool.Close()
+
+	res, err := pool.ExecuteEphemeral(context.Background(), "ephemeral:classifier", "test prompt")
+	if err != nil {
+		t.Fatalf("unexpected error from ExecuteEphemeral: %v", err)
+	}
+	if res != "ephemeral result ok" {
+		t.Errorf("expected 'ephemeral result ok', got %q", res)
+	}
+}
+
+func TestUnifiedProcessPool_ExecuteEphemeral_NilPoolAndInvalidKey(t *testing.T) {
+	var nilPool *UnifiedProcessPool
+	if _, err := nilPool.ExecuteEphemeral(context.Background(), "key", "prompt"); err == nil {
+		t.Error("expected error from nil pool ExecuteEphemeral")
+	}
+
+	mock := &MockDaemonSpawner{}
+	pool := NewUnifiedProcessPool(PoolConfig{}, mock)
+	defer pool.Close()
+
+	if _, err := pool.ExecuteEphemeral(context.Background(), "", "prompt"); err == nil {
+		t.Error("expected error from empty targetKey")
+	}
+	if _, err := pool.ExecuteEphemeral(context.Background(), "   ", "prompt"); err == nil {
+		t.Error("expected error from whitespace targetKey")
+	}
+}
+
+func TestUnifiedProcessPool_ExecuteEphemeral_ContextCancellation(t *testing.T) {
+	mock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			outR, outW := io.Pipe()
+			inR, inW := io.Pipe()
+			errR, _ := io.Pipe()
+			go func() {
+				_, _ = outW.Write([]byte(`{"event":"init","session_id":"00000000-0000-0000-0000-000000000003"}` + "\n"))
+			}()
+			go func() {
+				_, _ = io.ReadAll(inR)
+			}()
+			return inW, outR, errR, &MockProcessHandle{pid: 202}, nil
+		},
+	}
+
+	pool := NewUnifiedProcessPool(PoolConfig{}, mock)
+	defer pool.Close()
+
+	// 1. Context already cancelled before execution
+	ctxCancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := pool.ExecuteEphemeral(ctxCancelled, "target", "prompt"); !errors.Is(err, context.Canceled) {
+		t.Errorf("expected context.Canceled, got %v", err)
+	}
+
+	// 2. Context cancelled while awaiting result
+	ctxTimeout, cancelTimeout := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancelTimeout()
+	if _, err := pool.ExecuteEphemeral(ctxTimeout, "target", "prompt"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("expected context.DeadlineExceeded, got %v", err)
+	}
+}
+
+func TestUnifiedProcessPool_ExecuteEphemeral_DaemonErrors(t *testing.T) {
+	// 1. Daemon spawn error
+	mockSpawnErr := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			return nil, nil, nil, nil, errors.New("daemon spawn failed")
+		},
+	}
+	pool1 := NewUnifiedProcessPool(PoolConfig{}, mockSpawnErr)
+	defer pool1.Close()
+	if _, err := pool1.ExecuteEphemeral(context.Background(), "t1", "p1"); err == nil {
+		t.Error("expected error on spawn failure")
+	}
+
+	// 2. Closed pool error
+	closedPool := NewUnifiedProcessPool(PoolConfig{}, &MockDaemonSpawner{})
+	_ = closedPool.Close()
+	if _, err := closedPool.ExecuteEphemeral(context.Background(), "t2", "p2"); err == nil {
+		t.Error("expected error on closed pool")
+	}
+
+	// 3. Stdin write failure (closed daemon stdin)
+	mockWriteErr := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			outR, outW := io.Pipe()
+			inR, inW := io.Pipe()
+			errR, _ := io.Pipe()
+			go func() {
+				defer outW.Close()
+				_, _ = outW.Write([]byte(`{"event":"init","session_id":"00000000-0000-0000-0000-000000000004"}` + "\n"))
+			}()
+			_ = inR.Close() // Reading will fail/broken pipe on write
+			_ = inW.Close()
+			return inW, outR, errR, &MockProcessHandle{pid: 203}, nil
+		},
+	}
+	pool2 := NewUnifiedProcessPool(PoolConfig{}, mockWriteErr)
+	defer pool2.Close()
+	if _, err := pool2.ExecuteEphemeral(context.Background(), "t3", "p3"); err == nil {
+		t.Error("expected error on stdin write failure")
+	}
+}
+
+func TestUnifiedProcessPool_EphemeralLLMFunc(t *testing.T) {
+	mock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			outR, outW := io.Pipe()
+			inR, inW := io.Pipe()
+			errR, _ := io.Pipe()
+
+			go func() {
+				defer outW.Close()
+				_, _ = outW.Write([]byte(`{"event":"init","session_id":"00000000-0000-0000-0000-000000000005"}` + "\n"))
+
+				buf := make([]byte, 1024)
+				n, _ := inR.Read(buf)
+				if n > 0 {
+					_, _ = outW.Write([]byte(`{"event":"result","result":{"status":"SUCCESS","response":"llm result ok"}}` + "\n"))
+				}
+			}()
+
+			return inW, outR, errR, &MockProcessHandle{pid: 204}, nil
+		},
+	}
+
+	pool := NewUnifiedProcessPool(PoolConfig{DefaultModel: "test-model"}, mock)
+	defer pool.Close()
+
+	llmFn := pool.EphemeralLLMFunc("ephemeral:classifier")
+	res, err := llmFn(context.Background(), "unused-model", "test prompt")
+	if err != nil {
+		t.Fatalf("unexpected error from EphemeralLLMFunc: %v", err)
+	}
+	if res != "llm result ok" {
+		t.Errorf("expected 'llm result ok', got %q", res)
+	}
+
+	// Nil pool guard in EphemeralLLMFunc
+	var nilPool *UnifiedProcessPool
+	nilLLMFn := nilPool.EphemeralLLMFunc("key")
+	if _, err := nilLLMFn(context.Background(), "model", "prompt"); err == nil {
+		t.Error("expected error calling LLMFunc from nil pool")
+	}
+}
+

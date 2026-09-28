@@ -1,9 +1,12 @@
 package classifier
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1697,6 +1700,124 @@ func TestClassifier_ResolveTitleModel(t *testing.T) {
 	c7 := &Classifier{}
 	if got := c7.resolveTitleModel(); got != config.DefaultConfigData().LowEffortModel {
 		t.Errorf("expected default LowEffortModel, got %q", got)
+	}
+}
+
+func TestClassifier_WithProcessPool_AndPrimaryLLMFunc(t *testing.T) {
+	t.Parallel()
+
+	mockSpawner := &runner.MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+			outR, outW := io.Pipe()
+			inR, inW := io.Pipe()
+			errR, _ := io.Pipe()
+
+			go func() {
+				_, _ = fmt.Fprintf(outW, "{\"event\":\"init\",\"session_id\":\"00000000-0000-0000-0000-000000000099\"}\n")
+				scanner := bufio.NewScanner(inR)
+				for scanner.Scan() {
+					if cfg.ThreadID == "ephemeral:classifier" {
+						_, _ = fmt.Fprintf(outW, "{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"{\\\"confidence\\\":0.85,\\\"reason\\\":\\\"needs help\\\"}\"}}\n")
+					} else {
+						_, _ = fmt.Fprintf(outW, "{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"Summary from pool\"}}\n")
+					}
+				}
+			}()
+
+			return inW, outR, errR, runner.NewMockProcessHandle(999), nil
+		},
+	}
+
+	pool := runner.NewUnifiedProcessPool(runner.PoolConfig{
+		DefaultModel: "test-model",
+	}, mockSpawner)
+	defer pool.Close()
+
+	// 1. Classifier configured with WithProcessPool
+	cls := New(nil, nil, WithProcessPool(pool))
+	res := cls.Classify(context.Background(), db.Message{Content: "Can someone help me?"}, nil, "")
+	if res.Confidence != 0.85 || res.Reason != "needs help" {
+		t.Fatalf("unexpected classification result: %+v", res)
+	}
+
+	// 2. Thread title summarizer via pool
+	title, err := cls.SummarizeThreadTitle(context.Background(), "How do I configure nginx?")
+	if err != nil {
+		t.Fatalf("unexpected thread title error: %v", err)
+	}
+	if title != "Summary from pool" {
+		t.Fatalf("expected 'Summary from pool', got %q", title)
+	}
+}
+
+func TestClassifier_WithProcessPool_NilPoolNoOp(t *testing.T) {
+	t.Parallel()
+
+	// Passing nil pool should be a safe no-op
+	cls := New(nil, nil, WithProcessPool(nil))
+	if cls == nil {
+		t.Fatal("expected non-nil classifier")
+	}
+}
+
+func TestSummarizeThreadTitle_WithPrimaryTitleLLMFunc(t *testing.T) {
+	t.Parallel()
+
+	called := false
+	titleFn := func(ctx context.Context, model, prompt string) (string, error) {
+		called = true
+		return "Primary Title Result", nil
+	}
+
+	cls := New(nil, nil, WithPrimaryTitleLLMFunc(titleFn))
+	title, err := cls.SummarizeThreadTitle(context.Background(), "How do I setup redis?")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !called || title != "Primary Title Result" {
+		t.Fatalf("expected 'Primary Title Result', got %q (called=%v)", title, called)
+	}
+}
+
+func TestClassifier_WithPrimaryLLMFunc_OllamaPrecedence(t *testing.T) {
+	t.Parallel()
+
+	var calledPrimary bool
+	primaryFn := func(ctx context.Context, model, prompt string) (string, error) {
+		calledPrimary = true
+		return `{"confidence":0.7,"reason":"from primary"}`, nil
+	}
+
+	// 1. When ClassifierURL is configured, Ollama is invoked, NOT primary
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(ollamaGenerateResponse{
+			Response: `{"confidence":0.9,"reason":"from ollama"}`,
+			Done:     true,
+		})
+	}))
+	defer ts.Close()
+
+	cfgOllama := config.NewFromData(&config.ConfigData{
+		ClassifierURL: ts.URL,
+	})
+	clsOllama := New(cfgOllama, nil, WithPrimaryLLMFunc(primaryFn))
+	resOllama := clsOllama.Classify(context.Background(), db.Message{Content: "test message"}, nil, "")
+	if calledPrimary {
+		t.Error("primaryLLMFunc should NOT be called when ClassifierURL is configured")
+	}
+	if resOllama.Confidence != 0.9 {
+		t.Errorf("expected 0.9 confidence from Ollama, got %f", resOllama.Confidence)
+	}
+
+	// 2. When ClassifierURL is empty, primaryLLMFunc IS invoked
+	cfgNoOllama := config.NewFromData(&config.ConfigData{})
+	clsPrimary := New(cfgNoOllama, nil, WithPrimaryLLMFunc(primaryFn))
+	resPrimary := clsPrimary.Classify(context.Background(), db.Message{Content: "test message"}, nil, "")
+	if !calledPrimary {
+		t.Error("expected primaryLLMFunc to be called when ClassifierURL is empty")
+	}
+	if resPrimary.Confidence != 0.7 {
+		t.Errorf("expected 0.7 confidence from primary, got %f", resPrimary.Confidence)
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/brain/pkg/metrics"
+	"github.com/azylman/aerial/brain/pkg/runner"
 	"github.com/azylman/aerial/brain/pkg/sanitizer"
 	"github.com/bwmarrin/discordgo"
 	"golang.org/x/sync/singleflight"
@@ -360,8 +361,8 @@ func FetchRecentThreadHistory(ctx context.Context, dg *discordgo.Session, dbOrSt
 	return results, nil
 }
 
-// LLMFunc is a function that generates text from a model.
-type LLMFunc func(ctx context.Context, model, prompt string) (string, error)
+// LLMFunc is a function that generates text from a model (aliased to runner.LLMFunc).
+type LLMFunc = runner.LLMFunc
 
 var threadSummaryGroup singleflight.Group
 
