@@ -252,7 +252,7 @@ func TestSyncSkills(t *testing.T) {
 	p.SetSuperpowersDir(tmpSuperpowers)
 
 	// Create a test skill
-	customSkillDir := filepath.Join(tmpCustomSkills, "test-skill")
+	customSkillDir := filepath.Join(tmpCustomSkills, "common", "test-skill")
 	_ = os.MkdirAll(customSkillDir, 0755)
 	_ = os.WriteFile(filepath.Join(customSkillDir, "SKILL.md"), []byte("# Test Skill"), 0644)
 
@@ -319,7 +319,7 @@ func TestSyncSkills_CuratedSkills(t *testing.T) {
 	p.SetAgentsSkillsDir(tmpAgentsSkills)
 
 	// Custom skill
-	customDir := filepath.Join(tmpCustomSkills, "my-custom-skill")
+	customDir := filepath.Join(tmpCustomSkills, "common", "my-custom-skill")
 	_ = os.MkdirAll(customDir, 0755)
 	_ = os.WriteFile(filepath.Join(customDir, "SKILL.md"), []byte("# My Custom Skill"), 0644)
 
@@ -329,7 +329,7 @@ func TestSyncSkills_CuratedSkills(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(tddDir, "SKILL.md"), []byte("# TDD"), 0644)
 
 	// Core built-in skill
-	incidentDir := filepath.Join(tmpAgentsSkills, "incident-triage")
+	incidentDir := filepath.Join(tmpAgentsSkills, "discord", "incident-triage")
 	_ = os.MkdirAll(incidentDir, 0755)
 	_ = os.WriteFile(filepath.Join(incidentDir, "SKILL.md"), []byte("# Incident Triage"), 0644)
 
@@ -2021,6 +2021,263 @@ func TestSyncMCP_DualRuntimeEmission(t *testing.T) {
 		t.Errorf("voice runtime config contains forbidden discord/docker tools: %s", voiceStr)
 	}
 }
+
+func TestLinkTargetSkills_PartitioningAndPruning(t *testing.T) {
+	t.Parallel()
+
+	tmpHome := t.TempDir()
+	tmpData := t.TempDir()
+	tmpCustom := t.TempDir()
+	tmpSuperpowers := t.TempDir()
+
+	p := New(tmpHome, tmpData)
+	p.SetCustomSkillsDir(tmpCustom)
+	p.SetSuperpowersDir(tmpSuperpowers)
+
+	// Create categorized custom skills
+	// common/skill-common
+	commonSkillDir := filepath.Join(tmpCustom, "common", "skill-common")
+	_ = os.MkdirAll(commonSkillDir, 0755)
+	_ = os.WriteFile(filepath.Join(commonSkillDir, "SKILL.md"), []byte("# Skill Common"), 0644)
+
+	// discord/skill-discord
+	discordSkillDir := filepath.Join(tmpCustom, "discord", "skill-discord")
+	_ = os.MkdirAll(discordSkillDir, 0755)
+	_ = os.WriteFile(filepath.Join(discordSkillDir, "SKILL.md"), []byte("# Skill Discord"), 0644)
+
+	// voice/skill-voice
+	voiceSkillDir := filepath.Join(tmpCustom, "voice", "skill-voice")
+	_ = os.MkdirAll(voiceSkillDir, 0755)
+	_ = os.WriteFile(filepath.Join(voiceSkillDir, "SKILL.md"), []byte("# Skill Voice"), 0644)
+
+	// Root-level un-nested skill (must be ignored)
+	rootSkillDir := filepath.Join(tmpCustom, "skill-root")
+	_ = os.MkdirAll(rootSkillDir, 0755)
+	_ = os.WriteFile(filepath.Join(rootSkillDir, "SKILL.md"), []byte("# Skill Root"), 0644)
+
+	// Torn-read empty skill in common (must be ignored)
+	tornSkillDir := filepath.Join(tmpCustom, "common", "skill-torn")
+	_ = os.MkdirAll(tornSkillDir, 0755)
+	_ = os.WriteFile(filepath.Join(tornSkillDir, "SKILL.md"), []byte(""), 0644)
+
+	// Superpowers (discord-only)
+	superpowerDir := filepath.Join(tmpSuperpowers, "superpower-eng")
+	_ = os.MkdirAll(superpowerDir, 0755)
+	_ = os.WriteFile(filepath.Join(superpowerDir, "SKILL.md"), []byte("# Superpower"), 0644)
+
+	// 1. Link Discord Target
+	discordTargetDir := filepath.Join(t.TempDir(), "discord-skills")
+	discordCount := p.LinkTargetSkills(discordTargetDir, TargetDiscord)
+	if discordCount < 3 {
+		t.Errorf("expected at least 3 discord skills (common, discord, superpower), got %d", discordCount)
+	}
+
+	for _, expected := range []string{"skill-common", "skill-discord", "superpower-eng"} {
+		if _, err := os.Stat(filepath.Join(discordTargetDir, expected, "SKILL.md")); err != nil {
+			t.Errorf("expected %s in discord target, but stat failed: %v", expected, err)
+		}
+	}
+	for _, forbidden := range []string{"skill-voice", "skill-root", "skill-torn"} {
+		if _, err := os.Stat(filepath.Join(discordTargetDir, forbidden)); !os.IsNotExist(err) {
+			t.Errorf("forbidden skill %s present in discord target", forbidden)
+		}
+	}
+
+	// 2. Link Voice Target
+	voiceTargetDir := filepath.Join(t.TempDir(), "voice-skills")
+	voiceCount := p.LinkTargetSkills(voiceTargetDir, TargetVoice)
+	if voiceCount != 2 {
+		t.Errorf("expected exactly 2 voice skills (skill-common, skill-voice), got %d", voiceCount)
+	}
+
+	for _, expected := range []string{"skill-common", "skill-voice"} {
+		if _, err := os.Stat(filepath.Join(voiceTargetDir, expected, "SKILL.md")); err != nil {
+			t.Errorf("expected %s in voice target, but stat failed: %v", expected, err)
+		}
+	}
+	for _, forbidden := range []string{"skill-discord", "superpower-eng", "skill-root", "skill-torn"} {
+		if _, err := os.Stat(filepath.Join(voiceTargetDir, forbidden)); !os.IsNotExist(err) {
+			t.Errorf("forbidden skill %s present in voice target", forbidden)
+		}
+	}
+
+	// 3. Test Active Pruning of unauthorized skills
+	// Place a rogue skill or symlink directly into voiceTargetDir
+	rogueSkillPath := filepath.Join(voiceTargetDir, "rogue-skill")
+	_ = os.WriteFile(rogueSkillPath, []byte("unauthorized"), 0644)
+
+	// Re-run LinkTargetSkills on voice target
+	p.LinkTargetSkills(voiceTargetDir, TargetVoice)
+
+	if _, err := os.Stat(rogueSkillPath); !os.IsNotExist(err) {
+		t.Errorf("expected rogue-skill to be actively pruned from voice target, but it still exists")
+	}
+}
+
+func TestSyncSkills_DualRuntimes(t *testing.T) {
+	tmpHome := t.TempDir()
+	tmpData := t.TempDir()
+	tmpCustom := t.TempDir()
+
+	p := New(tmpHome, tmpData)
+	p.SetCustomSkillsDir(tmpCustom)
+
+	// Create common and discord skills
+	_ = os.MkdirAll(filepath.Join(tmpCustom, "common", "c-skill"), 0755)
+	_ = os.WriteFile(filepath.Join(tmpCustom, "common", "c-skill", "SKILL.md"), []byte("# Common"), 0644)
+
+	_ = os.MkdirAll(filepath.Join(tmpCustom, "discord", "d-skill"), 0755)
+	_ = os.WriteFile(filepath.Join(tmpCustom, "discord", "d-skill", "SKILL.md"), []byte("# Discord"), 0644)
+
+	_ = os.MkdirAll(filepath.Join(tmpCustom, "voice", "v-skill"), 0755)
+	_ = os.WriteFile(filepath.Join(tmpCustom, "voice", "v-skill", "SKILL.md"), []byte("# Voice"), 0644)
+
+	if err := p.SyncSkills(); err != nil {
+		t.Fatalf("SyncSkills failed: %v", err)
+	}
+
+	// Primary skills dir
+	primaryDir := filepath.Join(tmpHome, ".gemini", "config", "skills")
+	if _, err := os.Stat(filepath.Join(primaryDir, "c-skill", "SKILL.md")); err != nil {
+		t.Errorf("primary missing c-skill: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(primaryDir, "d-skill", "SKILL.md")); err != nil {
+		t.Errorf("primary missing d-skill: %v", err)
+	}
+
+	// Discord runtime
+	discordDir := filepath.Join(tmpData, "runtimes", "discord", ".gemini", "config", "skills")
+	if _, err := os.Stat(filepath.Join(discordDir, "d-skill", "SKILL.md")); err != nil {
+		t.Errorf("discord runtime missing d-skill: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(discordDir, "v-skill")); !os.IsNotExist(err) {
+		t.Errorf("discord runtime should not have v-skill")
+	}
+
+	// Voice runtime
+	voiceDir := filepath.Join(tmpData, "runtimes", "voice", ".gemini", "config", "skills")
+	if _, err := os.Stat(filepath.Join(voiceDir, "v-skill", "SKILL.md")); err != nil {
+		t.Errorf("voice runtime missing v-skill: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(voiceDir, "d-skill")); !os.IsNotExist(err) {
+		t.Errorf("voice runtime should not have d-skill")
+	}
+}
+
+func TestSkills_TargetBranchesAndCoverage(t *testing.T) {
+	t.Parallel()
+
+	var nilP *Provisioner
+	if count := nilP.LinkTargetSkills("dir", TargetDiscord); count != 0 {
+		t.Errorf("expected 0 from nil provisioner, got %d", count)
+	}
+
+	p := New(t.TempDir(), t.TempDir())
+	if count := p.LinkTargetSkills("", TargetDiscord); count != 0 {
+		t.Errorf("expected 0 for empty targetDir, got %d", count)
+	}
+
+	// MkdirAll error in reconcileTargetSkills
+	blockedDir := filepath.Join(t.TempDir(), "file-blocker")
+	_ = os.WriteFile(blockedDir, []byte("file"), 0644)
+	invalidTarget := filepath.Join(blockedDir, "cannot-create-dir")
+	if count := p.LinkTargetSkills(invalidTarget, TargetDiscord); count != 0 {
+		t.Errorf("expected 0 from blocked target dir, got %d", count)
+	}
+
+	// Reconcile cleans up .tmp files and handles rename overwrite
+	tmpTarget := t.TempDir()
+	_ = os.WriteFile(filepath.Join(tmpTarget, "stale.tmp"), []byte("stale"), 0644)
+
+	customDir := t.TempDir()
+	p.SetCustomSkillsDir(customDir)
+	skillSrc := filepath.Join(customDir, "common", "rename-skill")
+	_ = os.MkdirAll(skillSrc, 0755)
+	_ = os.WriteFile(filepath.Join(skillSrc, "SKILL.md"), []byte("# Rename"), 0644)
+
+	// Pre-create an existing file at destination
+	_ = os.WriteFile(filepath.Join(tmpTarget, "rename-skill"), []byte("existing"), 0644)
+
+	count := p.LinkTargetSkills(tmpTarget, TargetDiscord)
+	if count != 1 {
+		t.Errorf("expected 1 skill linked, got %d", count)
+	}
+	if _, err := os.Stat(filepath.Join(tmpTarget, "stale.tmp")); !os.IsNotExist(err) {
+		t.Errorf("expected stale.tmp to be pruned")
+	}
+
+	// Test fallback when symlink to tmpDest fails
+	// If tmpDest is a non-empty directory, os.Symlink(src, tmpDest) fails
+	tmpBlockTarget := t.TempDir()
+	destTmp := filepath.Join(tmpBlockTarget, "rename-skill.tmp")
+	_ = os.MkdirAll(filepath.Join(destTmp, "sub"), 0755)
+	countSymlinkFallback := p.LinkTargetSkills(tmpBlockTarget, TargetDiscord)
+	if countSymlinkFallback != 1 {
+		t.Errorf("expected 1 from symlink fallback, got %d", countSymlinkFallback)
+	}
+
+	// Test when both symlinks fail
+	bothBlockTarget := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(bothBlockTarget, "rename-skill.tmp", "sub"), 0755)
+	_ = os.MkdirAll(filepath.Join(bothBlockTarget, "rename-skill", "sub"), 0755)
+	_ = p.LinkTargetSkills(bothBlockTarget, TargetDiscord)
+
+	// Exercise SKILL.md is a directory, duplicate skills, and superpowers edge cases
+	agentsDir := t.TempDir()
+	p.SetAgentsSkillsDir(agentsDir)
+	_ = os.MkdirAll(filepath.Join(agentsDir, "common", "rename-skill"), 0755)
+	_ = os.WriteFile(filepath.Join(agentsDir, "common", "rename-skill", "SKILL.md"), []byte("# Dup"), 0644)
+	_ = os.MkdirAll(filepath.Join(agentsDir, "common", "dir-skill", "SKILL.md"), 0755) // SKILL.md is dir!
+
+	superpowersDir := t.TempDir()
+	p.SetSuperpowersDir(superpowersDir)
+	_ = os.MkdirAll(filepath.Join(superpowersDir, "rename-skill"), 0755) // duplicate of custom skill
+	_ = os.WriteFile(filepath.Join(superpowersDir, "rename-skill", "SKILL.md"), []byte("# SP Dup"), 0644)
+	_ = os.MkdirAll(filepath.Join(superpowersDir, "dir-sp", "SKILL.md"), 0755) // SP SKILL.md is dir!
+
+	edgeTarget := t.TempDir()
+	p.LinkTargetSkills(edgeTarget, TargetDiscord)
+}
+
+func TestSyncMCP_ErrorBranches(t *testing.T) {
+	t.Parallel()
+
+	var nilP *Provisioner
+	if err := nilP.SyncMCP(context.Background(), nil); err != nil {
+		t.Errorf("expected nil from nil provisioner, got %v", err)
+	}
+
+	cfg := config.NewTestConfig()
+
+	// 1. Primary write error
+	tmpHome := t.TempDir()
+	_ = os.WriteFile(filepath.Join(tmpHome, ".gemini"), []byte("blocker"), 0644)
+	pPrimaryErr := New(tmpHome, t.TempDir())
+	if err := pPrimaryErr.SyncMCP(context.Background(), cfg); err == nil {
+		t.Errorf("expected error when primary config write fails")
+	}
+
+	// 2. Discord runtime write error
+	tmpHome2 := t.TempDir()
+	tmpData2 := t.TempDir()
+	_ = os.WriteFile(filepath.Join(tmpData2, "runtimes"), []byte("blocker"), 0644)
+	pDiscordErr := New(tmpHome2, tmpData2)
+	if err := pDiscordErr.SyncMCP(context.Background(), cfg); err == nil {
+		t.Errorf("expected error when discord runtime write fails")
+	}
+
+	// 3. Voice runtime write error
+	tmpHome3 := t.TempDir()
+	tmpData3 := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(tmpData3, "runtimes", "discord"), 0755)
+	_ = os.WriteFile(filepath.Join(tmpData3, "runtimes", "voice"), []byte("blocker"), 0644)
+	pVoiceErr := New(tmpHome3, tmpData3)
+	if err := pVoiceErr.SyncMCP(context.Background(), cfg); err == nil {
+		t.Errorf("expected error when voice runtime write fails")
+	}
+}
+
+
 
 
 

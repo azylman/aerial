@@ -316,28 +316,6 @@ func (p *Provisioner) provisionRuntimeSharedAssets(runtimeHome string) {
 		}
 	}
 
-	primarySkills := filepath.Join(primaryGemini, "config", "skills")
-	targetSkills := filepath.Join(runtimeGemini, "config", "skills")
-	if _, err := os.Stat(primarySkills); err == nil {
-		if rErr := os.Remove(targetSkills); rErr != nil && !os.IsNotExist(rErr) {
-			log.Printf("[Env] Warning: failed to remove target skills symlink: %v", rErr)
-		}
-		if err := os.Symlink(primarySkills, targetSkills); err != nil {
-			log.Printf("[Env] Warning: failed to symlink primary skills: %v", err)
-		}
-	}
-
-	legacySkills := filepath.Join(primaryGemini, "skills")
-	targetLegacySkills := filepath.Join(runtimeGemini, "skills")
-	if _, err := os.Stat(legacySkills); err == nil {
-		if rErr := os.Remove(targetLegacySkills); rErr != nil && !os.IsNotExist(rErr) {
-			log.Printf("[Env] Warning: failed to remove target legacy skills symlink: %v", rErr)
-		}
-		if err := os.Symlink(legacySkills, targetLegacySkills); err != nil {
-			log.Printf("[Env] Warning: failed to symlink legacy skills: %v", err)
-		}
-	}
-
 	// Share authentication credentials and CLI state across isolated runtimes
 	sharedCliFiles := []string{
 		"antigravity-oauth-token",
