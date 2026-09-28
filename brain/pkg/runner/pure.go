@@ -68,6 +68,25 @@ func FilterAgyBaseEnv(env []string) []string {
 	return filtered
 }
 
+// filterHomeEnv removes existing HOME, USERPROFILE, and GEMINI_CLI_HOME
+// from an environment slice to prevent duplicate variables.
+func filterHomeEnv(env []string) []string {
+	filtered := make([]string, 0, len(env))
+	for _, e := range env {
+		key, _, ok := strings.Cut(e, "=")
+		if !ok {
+			filtered = append(filtered, e)
+			continue
+		}
+		upper := strings.ToUpper(strings.TrimSpace(key))
+		if upper == "HOME" || upper == "USERPROFILE" || upper == "GEMINI_CLI_HOME" {
+			continue
+		}
+		filtered = append(filtered, e)
+	}
+	return filtered
+}
+
 // BuildAgyEnv constructs the process environment slice for agy execution.
 func BuildAgyEnv(input AgyEnvInput) []string {
 	var cmdEnv []string
@@ -75,6 +94,9 @@ func BuildAgyEnv(input AgyEnvInput) []string {
 		base := input.BaseEnv
 		if strings.TrimSpace(input.APIKey) == "" {
 			base = FilterAgyBaseEnv(base)
+		}
+		if strings.TrimSpace(input.HomeDir) != "" {
+			base = filterHomeEnv(base)
 		}
 		cmdEnv = append(cmdEnv, base...)
 	}
@@ -89,6 +111,7 @@ func BuildAgyEnv(input AgyEnvInput) []string {
 		cmdEnv = append(cmdEnv,
 			"HOME="+home,
 			"USERPROFILE="+home,
+			"GEMINI_CLI_HOME="+home,
 		)
 	}
 
