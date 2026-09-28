@@ -1,6 +1,7 @@
 package queue
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -88,20 +89,27 @@ func TestWorker_WatchTaskCompletion_TickerTrigger(t *testing.T) {
 }
 
 func TestWorker_PoolDaemonAccessors(t *testing.T) {
-	cfg := config.NewTestConfig()
-	pool := NewWorkerPool(WorkerPoolConfig{})
+	mockSpawner := runner.NewMockDaemonSpawner()
+	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, mockSpawner)
+	defer func() {
+		if err := procPool.Close(); err != nil {
+			t.Logf("cleanup unified pool: %v", err)
+		}
+	}()
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		ProcessPool: procPool,
+	})
 	defer pool.Stop()
 
-	if pool.DaemonPool() == nil {
-		t.Errorf("expected non-nil DaemonPool from pool.DaemonPool()")
+	if pool.ProcessPool() == nil {
+		t.Errorf("expected non-nil ProcessPool from pool.ProcessPool()")
 	}
 
 	var nilPool *WorkerPool
-	if nilPool.DaemonPool() != nil {
-		t.Errorf("expected nil DaemonPool for nil WorkerPool")
+	if nilPool.ProcessPool() != nil {
+		t.Errorf("expected nil ProcessPool for nil WorkerPool")
 	}
-
-	_ = cfg
 }
 
 func TestWorker_PersistentDaemonTurnExecution(t *testing.T) {
@@ -109,23 +117,36 @@ func TestWorker_PersistentDaemonTurnExecution(t *testing.T) {
 	tmpHome := t.TempDir()
 	tempData := t.TempDir()
 
-	mockBin := filepath.Join(tmpHome, "mock_agy.sh")
-	script := `#!/bin/sh
-while IFS= read -r line; do
-  echo '{"event":"result","result":{"status":"SUCCESS","response":"Executed via persistent daemon","usage":{"total_tokens":10}}}'
-done
-`
-	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
-		t.Fatalf("failed to write mock script: %v", err)
+	mockSpawner := &runner.MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+			inR, inW := io.Pipe()
+			outR, outW := io.Pipe()
+			errR, errW := io.Pipe()
+			defer errW.Close()
+			go func() {
+				_, _ = outW.Write([]byte("{\"event\":\"init\",\"conversation_id\":\"a1111111-2222-3333-4444-555555555555\"}\n"))
+				scanner := bufio.NewScanner(inR)
+				for scanner.Scan() {
+					_, _ = outW.Write([]byte("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"Executed via persistent daemon\",\"usage\":{\"total_tokens\":10}}}\n"))
+				}
+			}()
+			return inW, outR, errR, runner.NewMockProcessHandle(12345), nil
+		},
 	}
+	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, mockSpawner)
+	defer func() {
+		if err := procPool.Close(); err != nil {
+			t.Logf("cleanup unified pool: %v", err)
+		}
+	}()
 
 	cfg := config.NewTestConfig(func(d *config.ConfigData) {
-		d.AgyBin = mockBin
 		d.DataDir = tempData
 	})
 
 	doneCh := make(chan struct{})
 	pool := New(cfg, WorkerPoolConfig{
+		ProcessPool:    procPool,
 		SessionManager: session.New(tmpHome, tempData),
 		Store:          store,
 		TimeoutMinutes: 1,
@@ -165,7 +186,7 @@ done
 		t.Fatalf("timed out waiting for message completion")
 	}
 
-	if pool.DaemonPool() == nil || !pool.DaemonPool().HasDaemon(threadID) {
+	if pool.ProcessPool() == nil || !pool.ProcessPool().HasDaemon(threadID) {
 		t.Errorf("expected daemon to exist for thread %s in pool", threadID)
 	}
 
@@ -189,18 +210,30 @@ func TestWorker_ThreadWorker_ActiveTasksPreventReap(t *testing.T) {
 	tmpHome := t.TempDir()
 	tempData := t.TempDir()
 
-	mockBin := filepath.Join(tmpHome, "mock_agy.sh")
-	script := `#!/bin/sh
-while IFS= read -r line; do
-  echo '{"event":"result","result":{"status":"SUCCESS","response":"ok","usage":{"total_tokens":5}}}'
-done
-`
-	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
-		t.Fatalf("failed to write mock script: %v", err)
+	mockSpawner := &runner.MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+			inR, inW := io.Pipe()
+			outR, outW := io.Pipe()
+			errR, errW := io.Pipe()
+			defer errW.Close()
+			go func() {
+				_, _ = outW.Write([]byte("{\"event\":\"init\",\"conversation_id\":\"b1111111-2222-3333-4444-555555555555\"}\n"))
+				scanner := bufio.NewScanner(inR)
+				for scanner.Scan() {
+					_, _ = outW.Write([]byte("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"ok\",\"usage\":{\"total_tokens\":5}}}\n"))
+				}
+			}()
+			return inW, outR, errR, runner.NewMockProcessHandle(12345), nil
+		},
 	}
+	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, mockSpawner)
+	defer func() {
+		if err := procPool.Close(); err != nil {
+			t.Logf("cleanup unified pool: %v", err)
+		}
+	}()
 
 	cfg := config.NewTestConfig(func(d *config.ConfigData) {
-		d.AgyBin = mockBin
 		d.DataDir = tempData
 	})
 
@@ -213,6 +246,7 @@ done
 
 	doneCh := make(chan struct{})
 	pool := New(cfg, WorkerPoolConfig{
+		ProcessPool:    procPool,
 		SessionManager: session.New(tmpHome, tempData),
 		Store:          store,
 		TimeoutMinutes: 1,
@@ -230,7 +264,7 @@ done
 
 	// Pre-create daemon with active task
 	ctx := context.Background()
-	daemon, err := pool.DaemonPool().GetOrCreateDaemon(ctx, threadID, sessID, "default-model")
+	daemon, err := pool.ProcessPool().GetOrCreate(ctx, threadID)
 	if err != nil {
 		t.Fatalf("failed to create daemon: %v", err)
 	}
@@ -388,25 +422,37 @@ func TestWorkerPool_PersistentDaemon_ColdStart_Success(t *testing.T) {
 	store := setupTestStore(t)
 
 	validUUID := "c1111111-2222-3333-4444-555555555555"
-	mockBin := filepath.Join(tmpHome, "mock_agy.sh")
-	script := fmt.Sprintf(`#!/bin/sh
-echo '{"event":"init","conversation_id":%q}'
-while IFS= read -r line; do
-  echo '{"event":"result","result":{"status":"SUCCESS","response":"Cold start completed successfully!","usage":{"total_tokens":25}}}'
-done
-`, validUUID)
-	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
-		t.Fatalf("failed to write mock script: %v", err)
+	mockSpawner := &runner.MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+			inR, inW := io.Pipe()
+			outR, outW := io.Pipe()
+			errR, errW := io.Pipe()
+			defer errW.Close()
+			go func() {
+				_, _ = fmt.Fprintf(outW, "{\"event\":\"init\",\"conversation_id\":%q}\n", validUUID)
+				scanner := bufio.NewScanner(inR)
+				for scanner.Scan() {
+					_, _ = outW.Write([]byte("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"Cold start completed successfully!\",\"usage\":{\"total_tokens\":25}}}\n"))
+				}
+			}()
+			return inW, outR, errR, runner.NewMockProcessHandle(12345), nil
+		},
 	}
+	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, mockSpawner)
+	defer func() {
+		if err := procPool.Close(); err != nil {
+			t.Logf("cleanup unified pool: %v", err)
+		}
+	}()
 
 	cfg := config.NewTestConfig(func(d *config.ConfigData) {
-		d.AgyBin = mockBin
 		d.DataDir = tempData
 	})
 
 	var deliveredText string
 	doneCh := make(chan struct{})
 	pool := New(cfg, WorkerPoolConfig{
+		ProcessPool:    procPool,
 		SessionManager: session.New(tmpHome, tempData),
 		Store:          store,
 		TimeoutMinutes: 1,
@@ -463,24 +509,38 @@ func TestWorkerPool_PersistentDaemon_ColdStart_SessionMgrFallback(t *testing.T) 
 	store := setupTestStore(t)
 
 	diskUUID := "f1111111-2222-3333-4444-555555555555"
-	mockBin := filepath.Join(tmpHome, "mock_agy.sh")
-	script := `#!/bin/sh
-while IFS= read -r line; do
-  echo '{"event":"result","result":{"status":"SUCCESS","response":"Turn completed with fallback session","usage":{"total_tokens":15}}}'
-done
-`
-	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
-		t.Fatalf("failed to write mock script: %v", err)
+	mockSpawner := &runner.MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+			inR, inW := io.Pipe()
+			outR, outW := io.Pipe()
+			errR, errW := io.Pipe()
+			defer errW.Close()
+			go func() {
+				// Init event with diskUUID
+				_, _ = fmt.Fprintf(outW, "{\"event\":\"init\",\"conversation_id\":%q}\n", diskUUID)
+				scanner := bufio.NewScanner(inR)
+				for scanner.Scan() {
+					_, _ = outW.Write([]byte("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"Turn completed with fallback session\",\"usage\":{\"total_tokens\":15}}}\n"))
+				}
+			}()
+			return inW, outR, errR, runner.NewMockProcessHandle(12345), nil
+		},
 	}
+	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, mockSpawner)
+	defer func() {
+		if err := procPool.Close(); err != nil {
+			t.Logf("cleanup unified pool: %v", err)
+		}
+	}()
 
 	cfg := config.NewTestConfig(func(d *config.ConfigData) {
-		d.AgyBin = mockBin
 		d.DataDir = tempData
 	})
 
 	var deliveredText string
 	doneCh := make(chan struct{})
 	pool := New(cfg, WorkerPoolConfig{
+		ProcessPool:    procPool,
 		SessionManager: session.New(tmpHome, tempData),
 		Store:          store,
 		TimeoutMinutes: 1,
@@ -544,17 +604,28 @@ func TestWorkerPool_EmptyResponse_TranscriptFallback(t *testing.T) {
 	store := setupTestStore(t)
 
 	validUUID := "e1111111-2222-3333-4444-555555555555"
-	mockBin := filepath.Join(tmpHome, "mock_agy.sh")
-	// Runner returns empty response in result event
-	script := fmt.Sprintf(`#!/bin/sh
-echo '{"event":"init","conversation_id":%q}'
-while IFS= read -r line; do
-  echo '{"event":"result","result":{"status":"SUCCESS","response":"","usage":{"total_tokens":10}}}'
-done
-`, validUUID)
-	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
-		t.Fatalf("failed to write mock script: %v", err)
+	mockSpawner := &runner.MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+			inR, inW := io.Pipe()
+			outR, outW := io.Pipe()
+			errR, errW := io.Pipe()
+			defer errW.Close()
+			go func() {
+				_, _ = fmt.Fprintf(outW, "{\"event\":\"init\",\"conversation_id\":%q}\n", validUUID)
+				scanner := bufio.NewScanner(inR)
+				for scanner.Scan() {
+					_, _ = outW.Write([]byte("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"\",\"usage\":{\"total_tokens\":10}}}\n"))
+				}
+			}()
+			return inW, outR, errR, runner.NewMockProcessHandle(12345), nil
+		},
 	}
+	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, mockSpawner)
+	defer func() {
+		if err := procPool.Close(); err != nil {
+			t.Logf("cleanup unified pool: %v", err)
+		}
+	}()
 
 	// Prepare transcript on disk with substantive text
 	sessDir := filepath.Join(tempData, "brain", validUUID, ".system_generated", "logs")
@@ -563,13 +634,13 @@ done
 	_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(transcriptLine), 0644)
 
 	cfg := config.NewTestConfig(func(d *config.ConfigData) {
-		d.AgyBin = mockBin
 		d.DataDir = tempData
 	})
 
 	var deliveredText string
 	doneCh := make(chan struct{})
 	pool := New(cfg, WorkerPoolConfig{
+		ProcessPool:    procPool,
 		SessionManager: session.New(tmpHome, tempData),
 		Store:          store,
 		TimeoutMinutes: 1,
@@ -618,18 +689,29 @@ func TestWorkerPool_DaemonEmptyResponse_TranscriptFallback(t *testing.T) {
 	store := setupTestStore(t)
 
 	validUUID := "e3333333-4444-5555-6666-777777777777"
-	mockBin := filepath.Join(tmpHome, "mock_agy.sh")
-	// Runner simulates daemon emitting a tool call followed by an empty response on result
-	script := fmt.Sprintf(`#!/bin/sh
-echo '{"event":"init","conversation_id":%q}'
-while IFS= read -r line; do
-  echo '{"event":"step_update","step_update":{"step_index":1,"step_type":"tool","tool_name":"run_command"}}'
-  echo '{"event":"result","result":{"status":"SUCCESS","response":""}}'
-done
-`, validUUID)
-	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
-		t.Fatalf("failed to write mock script: %v", err)
+	mockSpawner := &runner.MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+			inR, inW := io.Pipe()
+			outR, outW := io.Pipe()
+			errR, errW := io.Pipe()
+			defer errW.Close()
+			go func() {
+				_, _ = fmt.Fprintf(outW, "{\"event\":\"init\",\"conversation_id\":%q}\n", validUUID)
+				scanner := bufio.NewScanner(inR)
+				for scanner.Scan() {
+					_, _ = outW.Write([]byte("{\"event\":\"step_update\",\"step_update\":{\"step_index\":1,\"step_type\":\"tool\",\"tool_name\":\"run_command\"}}\n"))
+					_, _ = outW.Write([]byte("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"\"}}\n"))
+				}
+			}()
+			return inW, outR, errR, runner.NewMockProcessHandle(12345), nil
+		},
 	}
+	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, mockSpawner)
+	defer func() {
+		if err := procPool.Close(); err != nil {
+			t.Logf("cleanup unified pool: %v", err)
+		}
+	}()
 
 	// Prepare transcript on disk with substantive text
 	sessDir := filepath.Join(tempData, "brain", validUUID, ".system_generated", "logs")
@@ -638,13 +720,13 @@ done
 	_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(transcriptLine), 0644)
 
 	cfg := config.NewTestConfig(func(d *config.ConfigData) {
-		d.AgyBin = mockBin
 		d.DataDir = tempData
 	})
 
 	var deliveredText string
 	doneCh := make(chan struct{})
 	pool := New(cfg, WorkerPoolConfig{
+		ProcessPool:    procPool,
 		SessionManager: session.New(tmpHome, tempData),
 		Store:          store,
 		TimeoutMinutes: 1,
@@ -694,17 +776,28 @@ func TestWorkerPool_QuotaExhaustion_FromTranscript(t *testing.T) {
 	store := setupTestStore(t)
 
 	validUUID := "f2222222-3333-4444-5555-666666666666"
-	mockBin := filepath.Join(tmpHome, "mock_agy.sh")
-	// Runner returns empty response with exit 0 (emulating agy daemon on 429 quota exhaustion)
-	script := fmt.Sprintf(`#!/bin/sh
-echo '{"event":"init","conversation_id":%q}'
-while IFS= read -r line; do
-  echo '{"event":"result","result":{"status":"SUCCESS","response":"","usage":{"total_tokens":0}}}'
-done
-`, validUUID)
-	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
-		t.Fatalf("failed to write mock script: %v", err)
+	mockSpawner := &runner.MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+			inR, inW := io.Pipe()
+			outR, outW := io.Pipe()
+			errR, errW := io.Pipe()
+			defer errW.Close()
+			go func() {
+				_, _ = fmt.Fprintf(outW, "{\"event\":\"init\",\"conversation_id\":%q}\n", validUUID)
+				scanner := bufio.NewScanner(inR)
+				for scanner.Scan() {
+					_, _ = outW.Write([]byte("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"\",\"usage\":{\"total_tokens\":0}}}\n"))
+				}
+			}()
+			return inW, outR, errR, runner.NewMockProcessHandle(12345), nil
+		},
 	}
+	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, mockSpawner)
+	defer func() {
+		if err := procPool.Close(); err != nil {
+			t.Logf("cleanup unified pool: %v", err)
+		}
+	}()
 
 	// Prepare transcript on disk with Gemini 429 quota exhaustion ERROR_MESSAGE
 	sessDir := filepath.Join(tempData, "brain", validUUID, ".system_generated", "logs")
@@ -714,13 +807,13 @@ done
 	_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(transcriptLine), 0644)
 
 	cfg := config.NewTestConfig(func(d *config.ConfigData) {
-		d.AgyBin = mockBin
 		d.DataDir = tempData
 	})
 
 	var deliveredText string
 	doneCh := make(chan struct{})
 	pool := New(cfg, WorkerPoolConfig{
+		ProcessPool:    procPool,
 		SessionManager: session.New(tmpHome, tempData),
 		Store:          store,
 		TimeoutMinutes: 1,
@@ -802,16 +895,28 @@ func TestWorkerPool_QuotaPause_RotatesBloatedSession(t *testing.T) {
 	store := setupTestStore(t)
 
 	validUUID := "b3333333-4444-5555-6666-777777777777"
-	mockBin := filepath.Join(tmpHome, "mock_agy.sh")
-	script := fmt.Sprintf(`#!/bin/sh
-echo '{"event":"init","conversation_id":%q}'
-while IFS= read -r line; do
-  echo '{"event":"result","result":{"status":"SUCCESS","response":"","usage":{"total_tokens":0}}}'
-done
-`, validUUID)
-	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
-		t.Fatalf("failed to write mock script: %v", err)
+	mockSpawner := &runner.MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+			inR, inW := io.Pipe()
+			outR, outW := io.Pipe()
+			errR, errW := io.Pipe()
+			defer errW.Close()
+			go func() {
+				_, _ = fmt.Fprintf(outW, "{\"event\":\"init\",\"conversation_id\":%q}\n", validUUID)
+				scanner := bufio.NewScanner(inR)
+				for scanner.Scan() {
+					_, _ = outW.Write([]byte("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"\",\"usage\":{\"total_tokens\":0}}}\n"))
+				}
+			}()
+			return inW, outR, errR, runner.NewMockProcessHandle(12345), nil
+		},
 	}
+	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, mockSpawner)
+	defer func() {
+		if err := procPool.Close(); err != nil {
+			t.Logf("cleanup unified pool: %v", err)
+		}
+	}()
 
 	// Prepare transcript on disk with step_index >= DefaultMaxSessionSteps and quota exhaustion error
 	sessDir := filepath.Join(tempData, "brain", validUUID, ".system_generated", "logs")
@@ -823,7 +928,6 @@ done
 	_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(transcriptContent), 0644)
 
 	cfg := config.NewTestConfig(func(d *config.ConfigData) {
-		d.AgyBin = mockBin
 		d.DataDir = tempData
 	})
 
@@ -832,6 +936,7 @@ done
 
 	doneCh := make(chan struct{})
 	pool := New(cfg, WorkerPoolConfig{
+		ProcessPool:    procPool,
 		SessionManager: session.New(tmpHome, tempData),
 		Store:          store,
 		TimeoutMinutes: 1,
@@ -1177,42 +1282,50 @@ func (m *mockErrRecentStore) GetRecentThreadMessages(ctx context.Context, thread
 func TestWorker_RotateSessionID_EvictsDaemons(t *testing.T) {
 	t.Parallel()
 	fakeStore := setupTestStore(t)
-	dPool := NewDaemonPool(nil, "", nil, t.TempDir())
-	vPool := NewDaemonPool(nil, "", nil, t.TempDir())
+	mockSpawner := runner.NewMockDaemonSpawner()
+	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, mockSpawner)
+	defer func() {
+		if err := procPool.Close(); err != nil {
+			t.Logf("cleanup unified pool: %v", err)
+		}
+	}()
 
-	dPool.daemons["thread-evict-1"] = &runner.Daemon{}
-	vPool.daemons["thread-evict-1"] = &runner.Daemon{}
+	ctx := context.Background()
+	_, err := procPool.GetOrCreate(ctx, "thread-evict-1")
+	if err != nil {
+		t.Fatalf("failed to create daemon: %v", err)
+	}
 
 	pool := &WorkerPool{
 		cfg: WorkerPoolConfig{
 			Store: fakeStore,
 		},
-		daemonPool:      dPool,
-		voiceDaemonPool: vPool,
+		processPool: procPool,
 	}
 	te := &turnExecution{
 		pool:     pool,
 		threadID: "thread-evict-1",
 	}
 
-	// 1. When newSessionID != "", daemons are NOT evicted
+	// 1. When newSessionID != "", daemons are NOT evicted/rotated
 	te.rotateSessionID("thread-evict-1", "new-sess-1")
-	if !dPool.HasDaemon("thread-evict-1") || !vPool.HasDaemon("thread-evict-1") {
-		t.Errorf("expected daemons to remain when newSessionID is non-empty")
+	if !procPool.HasDaemon("thread-evict-1") {
+		t.Errorf("expected daemon to remain when newSessionID is non-empty")
 	}
 
-	// 2. When newSessionID == "", daemons ARE evicted
+	// 2. When newSessionID == "", daemon IS rotated
+	oldD, _ := procPool.Get("thread-evict-1")
 	te.rotateSessionID("thread-evict-1", "")
-	if dPool.HasDaemon("thread-evict-1") {
-		t.Errorf("expected daemonPool to evict thread-evict-1")
-	}
-	if vPool.HasDaemon("thread-evict-1") {
-		t.Errorf("expected voiceDaemonPool to evict thread-evict-1")
+	newD, _ := procPool.Get("thread-evict-1")
+	if oldD == newD {
+		t.Errorf("expected daemon instance to change upon rotation")
 	}
 
-	// 3. Nil pool / nil daemon pools safe handling
+	// 3. Nil pool / nil te safe handling
 	teNil := &turnExecution{threadID: "thread-evict-2"}
 	teNil.rotateSessionID("thread-evict-2", "")
+	var teNull *turnExecution
+	teNull.rotateSessionID("thread-evict-3", "")
 }
 
 func TestWorker_SessionDBRotation_PreTurn(t *testing.T) {
@@ -2141,6 +2254,27 @@ func TestWorkerPool_CapacityBlip_WithoutCountdown_Fallback70s(t *testing.T) {
 	}
 	mu.Unlock()
 }
+
+func TestTurnResultSink_Callbacks(t *testing.T) {
+	t.Parallel()
+	sink := &turnResultSink{
+		resCh: make(chan *runner.TurnResult, 1),
+		errCh: make(chan error, 1),
+	}
+	sink.OnTurnStarted()
+	sink.OnThinking()
+	sink.OnTextDelta("some text")
+	sink.OnError(errors.New("test error"))
+	select {
+	case err := <-sink.errCh:
+		if err == nil || err.Error() != "test error" {
+			t.Errorf("unexpected error received: %v", err)
+		}
+	default:
+		t.Fatalf("expected error on errCh")
+	}
+}
+
 
 
 

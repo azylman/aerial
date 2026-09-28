@@ -236,8 +236,17 @@ func TestYieldTrap_DaemonTracker_TriggersAutoResumption(t *testing.T) {
 	doneCh := make(chan struct{})
 	threadID := "thread-audit-1"
 
-	var daemon *runner.Daemon
+	mockSpawner := runner.NewMockDaemonSpawner()
+	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, mockSpawner)
+	defer func() {
+		if err := procPool.Close(); err != nil {
+			t.Logf("cleanup unified pool: %v", err)
+		}
+	}()
+
+	var daemon *runner.StreamingDaemon
 	pool := NewWorkerPool(WorkerPoolConfig{
+		ProcessPool:    procPool,
 		SessionManager: sessMgr,
 		Store:          store,
 		AgyBin:         mockBin,
@@ -276,7 +285,7 @@ func TestYieldTrap_DaemonTracker_TriggersAutoResumption(t *testing.T) {
 
 	// Pre-create daemon with active background task
 	ctx := context.Background()
-	daemon, err = pool.DaemonPool().GetOrCreateDaemon(ctx, threadID, sessID, "")
+	daemon, err = pool.ProcessPool().GetOrCreate(ctx, threadID)
 	if err != nil {
 		t.Fatalf("Failed to create daemon: %v", err)
 	}

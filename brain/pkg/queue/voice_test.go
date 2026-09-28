@@ -3,12 +3,12 @@ package queue
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
@@ -216,30 +216,40 @@ func TestWorkerPool_ExecuteVoiceTurn_VoiceRunnerHook(t *testing.T) {
 	}
 }
 
-func TestWorkerPool_ExecuteVoiceTurn_DaemonPool_Success(t *testing.T) {
-	tempDir := t.TempDir()
-	mockBin := filepath.Join(tempDir, "mock_agy.sh")
-	script := `#!/bin/sh
-echo '{"event":"init","conversation_id":"550e8400-e29b-41d4-a716-446655440000"}'
-while IFS= read -r line; do
-	echo '{"event":"step_update","step_update":{"state":"RUNNING","type":"tool_call","tool_name":"ha_call_service","tool_info":{"parameters":{"CommandLine":""}}}}'
-	echo '{"event":"step_update","step_update":{"state":"RUNNING","type":"tool","tool_name":"","tool_info":{"parameters":{"CommandLine":"system-health"}}}}'
-	echo '{"event":"step_update","step_update":{"state":"DONE","type":"tool_call","tool_name":"ha_call_service"}}'
-	echo '{"event":"step_update","step_update":{"state":"ERROR","type":"tool_call","tool_name":"ha_call_service"}}'
-	echo '{"event":"result","result":{"status":"SUCCESS","response":"daemon voice turn reply","conversation_id":"550e8400-e29b-41d4-a716-446655440000","usage":{"input_tokens":60,"output_tokens":40,"total_tokens":100}}}'
-done
-`
-	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
-		t.Fatalf("failed to write mock binary: %v", err)
+func TestWorkerPool_ExecuteVoiceTurn_ProcessPool_Success(t *testing.T) {
+	mockSpawner := &runner.MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+			inR, inW := io.Pipe()
+			outR, outW := io.Pipe()
+			errR, errW := io.Pipe()
+			go func() {
+				_, _ = io.Copy(io.Discard, inR)
+			}()
+			go func() {
+				defer outW.Close()
+				defer errW.Close()
+				_, _ = outW.Write([]byte("{\"event\":\"init\",\"conversation_id\":\"550e8400-e29b-41d4-a716-446655440000\"}\n"))
+				time.Sleep(10 * time.Millisecond)
+				_, _ = outW.Write([]byte("{\"event\":\"step_update\",\"step_update\":{\"state\":\"RUNNING\",\"type\":\"tool_call\",\"tool_name\":\"ha_call_service\",\"tool_info\":{\"parameters\":{\"CommandLine\":\"\"}}}}\n"))
+				_, _ = outW.Write([]byte("{\"event\":\"step_update\",\"step_update\":{\"state\":\"RUNNING\",\"type\":\"tool\",\"tool_name\":\"\",\"tool_info\":{\"parameters\":{\"CommandLine\":\"system-health\"}}}}\n"))
+				_, _ = outW.Write([]byte("{\"event\":\"step_update\",\"step_update\":{\"state\":\"DONE\",\"type\":\"tool_call\",\"tool_name\":\"ha_call_service\"}}\n"))
+				_, _ = outW.Write([]byte("{\"event\":\"step_update\",\"step_update\":{\"state\":\"ERROR\",\"type\":\"tool_call\",\"tool_name\":\"ha_call_service\"}}\n"))
+				_, _ = outW.Write([]byte("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"daemon voice turn reply\",\"conversation_id\":\"550e8400-e29b-41d4-a716-446655440000\",\"usage\":{\"input_tokens\":60,\"output_tokens\":40,\"total_tokens\":100}}}\n"))
+			}()
+			return inW, outR, errR, runner.NewMockProcessHandle(12345), nil
+		},
 	}
+	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{
+		DefaultModel: "gemini-2.5-flash",
+	}, mockSpawner)
+	defer func() {
+		if err := procPool.Close(); err != nil {
+			t.Logf("cleanup unified pool: %v", err)
+		}
+	}()
 
-	appCfg := config.NewTestConfig(func(d *config.ConfigData) {
-		d.AgyBin = mockBin
-		d.DataDir = tempDir
-	})
-
-	pool := New(appCfg, WorkerPoolConfig{
-		AgyBin: mockBin,
+	pool := New(nil, WorkerPoolConfig{
+		ProcessPool: procPool,
 	})
 	pool.Start()
 	defer pool.Stop()
@@ -294,24 +304,30 @@ done
 	}
 }
 
-func TestWorkerPool_ExecuteVoiceTurn_DaemonPool_Errors(t *testing.T) {
-	// 1. Nil daemonPool error
+func TestWorkerPool_ExecuteVoiceTurn_ProcessPool_Errors(t *testing.T) {
+	// 1. Nil ProcessPool error
 	poolNoDaemon := &WorkerPool{
 		ctx: context.Background(),
 	}
 	_, _, err := poolNoDaemon.ExecuteVoiceTurn(context.Background(), "test", "sess-1", nil)
-	if err == nil || !strings.Contains(err.Error(), "daemon pool unavailable") {
+	if err == nil || !strings.Contains(err.Error(), "voice daemon pool unavailable") {
 		t.Errorf("expected daemon pool unavailable error, got: %v", err)
 	}
 
-	// 2. Daemon acquisition failure (invalid binary)
-	tempDir := t.TempDir()
-	appCfgBad := config.NewTestConfig(func(d *config.ConfigData) {
-		d.AgyBin = filepath.Join(tempDir, "nonexistent-binary")
-		d.DataDir = tempDir
-	})
-	poolBadDaemon := New(appCfgBad, WorkerPoolConfig{
-		AgyBin: filepath.Join(tempDir, "nonexistent-binary"),
+	// 2. Daemon acquisition failure (spawner returns error)
+	spawnerErr := &runner.MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+			return nil, nil, nil, nil, errors.New("spawner failed to start")
+		},
+	}
+	procPoolErr := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, spawnerErr)
+	defer func() {
+		if err := procPoolErr.Close(); err != nil {
+			t.Logf("cleanup unified pool: %v", err)
+		}
+	}()
+	poolBadDaemon := New(nil, WorkerPoolConfig{
+		ProcessPool: procPoolErr,
 	})
 	poolBadDaemon.Start()
 	defer poolBadDaemon.Stop()
@@ -322,22 +338,32 @@ func TestWorkerPool_ExecuteVoiceTurn_DaemonPool_Errors(t *testing.T) {
 	}
 
 	// 3. Daemon execution error
-	mockBinErr := filepath.Join(tempDir, "mock_err.sh")
-	errScript := `#!/bin/sh
-echo '{"event":"init","conversation_id":"550e8400-e29b-41d4-a716-446655440001"}'
-while IFS= read -r line; do
-	echo '{"event":"result","result":{"status":"ERROR","error":"simulated failure in daemon"}}'
-done
-`
-	if writeErr := os.WriteFile(mockBinErr, []byte(errScript), 0755); writeErr != nil {
-		t.Fatalf("failed to write err script: %v", writeErr)
+	spawnerTurnErr := &runner.MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+			inR, inW := io.Pipe()
+			outR, outW := io.Pipe()
+			errR, errW := io.Pipe()
+			go func() {
+				_, _ = io.Copy(io.Discard, inR)
+			}()
+			go func() {
+				defer outW.Close()
+				defer errW.Close()
+				_, _ = outW.Write([]byte("{\"event\":\"init\",\"conversation_id\":\"550e8400-e29b-41d4-a716-446655440001\"}\n"))
+				time.Sleep(10 * time.Millisecond)
+				_, _ = outW.Write([]byte("{\"event\":\"result\",\"result\":{\"status\":\"ERROR\",\"error\":\"simulated failure in daemon\"}}\n"))
+			}()
+			return inW, outR, errR, runner.NewMockProcessHandle(12345), nil
+		},
 	}
-	appCfgErr := config.NewTestConfig(func(d *config.ConfigData) {
-		d.AgyBin = mockBinErr
-		d.DataDir = tempDir
-	})
-	poolTurnErr := New(appCfgErr, WorkerPoolConfig{
-		AgyBin: mockBinErr,
+	procPoolTurnErr := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, spawnerTurnErr)
+	defer func() {
+		if err := procPoolTurnErr.Close(); err != nil {
+			t.Logf("cleanup unified pool: %v", err)
+		}
+	}()
+	poolTurnErr := New(nil, WorkerPoolConfig{
+		ProcessPool: procPoolTurnErr,
 	})
 	poolTurnErr.Start()
 	defer poolTurnErr.Stop()
@@ -427,20 +453,26 @@ func TestContainsToken_TableDriven(t *testing.T) {
 	}
 }
 
-func TestWorkerPool_VoiceDaemonPool_And_MarkDirty(t *testing.T) {
+func TestWorkerPool_ProcessPool_And_MarkDirty(t *testing.T) {
 	var nilPool *WorkerPool
-	if nilPool.VoiceDaemonPool() != nil {
-		t.Errorf("expected nil from nil WorkerPool.VoiceDaemonPool()")
+	if nilPool.ProcessPool() != nil {
+		t.Errorf("expected nil from nil WorkerPool.ProcessPool()")
 	}
 	nilPool.MarkDirty()
 
-	tempDir := t.TempDir()
-	appCfg := config.NewTestConfig(func(d *config.ConfigData) {
-		d.DataDir = tempDir
+	mockSpawner := runner.NewMockDaemonSpawner()
+	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, mockSpawner)
+	defer func() {
+		if err := procPool.Close(); err != nil {
+			t.Logf("cleanup unified pool: %v", err)
+		}
+	}()
+
+	pool := New(nil, WorkerPoolConfig{
+		ProcessPool: procPool,
 	})
-	pool := New(appCfg, WorkerPoolConfig{})
-	if pool.VoiceDaemonPool() == nil {
-		t.Errorf("expected non-nil VoiceDaemonPool")
+	if pool.ProcessPool() == nil {
+		t.Errorf("expected non-nil ProcessPool")
 	}
 	pool.MarkDirty()
 	pool.Stop()
@@ -448,40 +480,192 @@ func TestWorkerPool_VoiceDaemonPool_And_MarkDirty(t *testing.T) {
 
 func TestWorkerPool_ExecuteVoiceTurn_PoolUnavailable(t *testing.T) {
 	pool := New(nil, WorkerPoolConfig{})
-	pool.daemonPool = nil
-	pool.voiceDaemonPool = nil
+	pool.processPool = nil
 	_, _, err := pool.ExecuteVoiceTurn(context.Background(), "hello", "sess-1", nil)
 	if err == nil || !strings.Contains(err.Error(), "voice daemon pool unavailable") {
 		t.Errorf("expected voice daemon pool unavailable error, got %v", err)
 	}
 }
 
-func TestWorkerPool_ExecuteVoiceTurn_VoicePoolFallbackToDaemonPool(t *testing.T) {
-	tempDir := t.TempDir()
-	mockBin := filepath.Join(tempDir, "mock_agy.sh")
-	script := `#!/bin/sh
-echo '{"event":"init"}'
-while IFS= read -r line; do
-	echo '{"event":"result","result":{"status":"SUCCESS","response":"fallback ok"}}'
-done
-`
-	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
-		t.Fatalf("failed to write mock script: %v", err)
+func TestWorkerPool_Stop_ProcessPoolCloseError(t *testing.T) {
+	t.Parallel()
+	mockHandle := runner.NewMockProcessHandle(99999)
+	mockHandle.SetKillErr(errors.New("simulated kill process failure"))
+
+	mockSpawner := &runner.MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+			inR, inW := io.Pipe()
+			outR, outW := io.Pipe()
+			errR, errW := io.Pipe()
+			go func() {
+				_, _ = io.Copy(io.Discard, inR)
+			}()
+			go func() {
+				defer outW.Close()
+				defer errW.Close()
+				_, _ = outW.Write([]byte("{\"event\":\"init\",\"session_id\":\"550e8400-e29b-41d4-a716-446655440001\"}\n"))
+			}()
+			return inW, outR, errR, mockHandle, nil
+		},
 	}
-	appCfg := config.NewTestConfig(func(d *config.ConfigData) {
-		d.AgyBin = mockBin
-		d.DataDir = tempDir
-	})
-	pool := New(appCfg, WorkerPoolConfig{
-		AgyBin: mockBin,
-	})
-	pool.voiceDaemonPool = nil
-	reply, _, err := pool.ExecuteVoiceTurn(context.Background(), "test fallback", "sess-fallback", nil)
+	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{
+		DefaultModel: "gemini-2.5-flash",
+	}, mockSpawner)
+
+	// Pre-spawn a daemon so Close() actually has a daemon to kill
+	_, err := procPool.GetOrCreate(context.Background(), "kiosk")
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("failed to spawn daemon: %v", err)
 	}
-	if reply != "fallback ok" {
-		t.Errorf("expected 'fallback ok', got %q", reply)
-	}
+
+	pool := New(nil, WorkerPoolConfig{
+		ProcessPool: procPool,
+	})
+	pool.Start()
 	pool.Stop()
 }
+
+func TestWorkerPool_ExecuteVoiceTurn_ProcessPool_AdditionalBranches(t *testing.T) {
+	t.Parallel()
+
+	// 1. Send failure: daemon stdin pipe broken
+	t.Run("send_failure", func(t *testing.T) {
+		t.Parallel()
+		mockSpawner := &runner.MockDaemonSpawner{
+			SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+				inR, inW := io.Pipe()
+				outR, outW := io.Pipe()
+				errR, errW := io.Pipe()
+				// Close inR immediately so any write to inW returns io.ErrClosedPipe
+				_ = inR.Close()
+				go func() {
+					defer outW.Close()
+					defer errW.Close()
+					_, _ = outW.Write([]byte("{\"event\":\"init\",\"session_id\":\"550e8400-e29b-41d4-a716-446655440002\"}\n"))
+				}()
+				return inW, outR, errR, runner.NewMockProcessHandle(1234), nil
+			},
+		}
+		procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, mockSpawner)
+		defer procPool.Close()
+
+		pool := New(nil, WorkerPoolConfig{ProcessPool: procPool})
+		pool.Start()
+		defer pool.Stop()
+
+		_, _, err := pool.ExecuteVoiceTurn(context.Background(), "test", "sess-1", nil)
+		if err == nil || !strings.Contains(err.Error(), "failed sending turn to voice daemon") {
+			t.Fatalf("expected failed sending turn error, got: %v", err)
+		}
+	})
+
+	// 2. Caller context cancellation while waiting for turn result
+	t.Run("context_canceled_waiting_for_result", func(t *testing.T) {
+		t.Parallel()
+		doneCh := make(chan struct{})
+		defer close(doneCh)
+
+		mockSpawner := &runner.MockDaemonSpawner{
+			SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+				inR, inW := io.Pipe()
+				outR, outW := io.Pipe()
+				errR, errW := io.Pipe()
+				go func() {
+					_, _ = io.Copy(io.Discard, inR)
+				}()
+				go func() {
+					_, _ = outW.Write([]byte("{\"event\":\"init\",\"session_id\":\"550e8400-e29b-41d4-a716-446655440003\"}\n"))
+					// Keep outW open until test finishes to prevent EOF before cancellation
+					<-doneCh
+					_ = outW.Close()
+					_ = errW.Close()
+				}()
+				return inW, outR, errR, runner.NewMockProcessHandle(1235), nil
+			},
+		}
+		procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, mockSpawner)
+		defer procPool.Close()
+
+		pool := New(nil, WorkerPoolConfig{ProcessPool: procPool})
+		pool.Start()
+		defer pool.Stop()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() {
+			time.Sleep(20 * time.Millisecond)
+			cancel()
+		}()
+
+		_, _, err := pool.ExecuteVoiceTurn(ctx, "test", "sess-cancel", nil)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context.Canceled, got: %v", err)
+		}
+	})
+
+	// 3. Non-zero exit code and empty session ID fallback
+	t.Run("exit_code_nonzero_and_empty_session_fallback", func(t *testing.T) {
+		t.Parallel()
+		mockSpawner := &runner.MockDaemonSpawner{
+			SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+				inR, inW := io.Pipe()
+				outR, outW := io.Pipe()
+				errR, errW := io.Pipe()
+				go func() {
+					_, _ = io.Copy(io.Discard, inR)
+				}()
+				go func() {
+					defer outW.Close()
+					defer errW.Close()
+					_, _ = outW.Write([]byte("{\"event\":\"init\",\"session_id\":\"550e8400-e29b-41d4-a716-446655440004\"}\n"))
+					time.Sleep(10 * time.Millisecond)
+					_, _ = outW.Write([]byte("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"turn failed\",\"exit_code\":1}}\n"))
+				}()
+				return inW, outR, errR, runner.NewMockProcessHandle(1236), nil
+			},
+		}
+		procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, mockSpawner)
+		defer procPool.Close()
+
+		// Pre-spawn and clear session ID to trigger activeSession == "" fallback
+		d, err := procPool.GetOrCreate(context.Background(), "voice-fallback-conv-id")
+		if err != nil {
+			t.Fatalf("failed pre-spawning daemon: %v", err)
+		}
+		d.SetSessionID("")
+
+		pool := New(nil, WorkerPoolConfig{ProcessPool: procPool})
+		pool.Start()
+		defer pool.Stop()
+
+		reply, sessionID, err := pool.ExecuteVoiceTurn(context.Background(), "test", "fallback-conv-id", nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if reply != "turn failed" {
+			t.Errorf("expected 'turn failed', got %q", reply)
+		}
+		if sessionID != "fallback-conv-id" {
+			t.Errorf("expected fallback session ID 'fallback-conv-id', got %q", sessionID)
+		}
+	})
+}
+
+func TestVoiceTurnSink_Callbacks(t *testing.T) {
+	t.Parallel()
+	var statusMsg string
+	sink := &voiceTurnSink{
+		onStatus: func(s string) {
+			statusMsg = s
+		},
+		resCh: make(chan *runner.TurnResult, 1),
+		errCh: make(chan error, 1),
+	}
+	sink.OnTurnStarted()
+	sink.OnThinking()
+	sink.OnTextDelta("delta-test")
+	sink.OnToolCall("ha_call_service", "light.turn_on")
+	if !strings.Contains(statusMsg, "light.turn_on") {
+		t.Errorf("expected statusMsg to contain light.turn_on, got %q", statusMsg)
+	}
+}
+

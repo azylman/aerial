@@ -883,7 +883,6 @@ type reloadConfigOptions struct {
 	reloadSupplier      func(active *config.Config) error
 	skipEnvironmentSync bool
 	provisioner         *env.Provisioner
-	utilityDaemon       *runner.UtilityDaemon
 	workerPool          *queue.WorkerPool
 }
 
@@ -908,12 +907,6 @@ func WithSkipEnvironmentSync() ReloadOption {
 func WithProvisioner(p *env.Provisioner) ReloadOption {
 	return func(o *reloadConfigOptions) {
 		o.provisioner = p
-	}
-}
-
-func WithUtilityDaemon(d *runner.UtilityDaemon) ReloadOption {
-	return func(o *reloadConfigOptions) {
-		o.utilityDaemon = d
 	}
 }
 
@@ -976,10 +969,6 @@ func CreateReloadConfigFunc(cfg *config.Config, opts ...ReloadOption) func(sourc
 				}
 			}
 
-			if options.utilityDaemon != nil {
-				options.utilityDaemon.TriggerRestart(source)
-			}
-
 			if options.workerPool != nil {
 				options.workerPool.MarkDirty()
 			}
@@ -991,13 +980,52 @@ func CreateReloadConfigFunc(cfg *config.Config, opts ...ReloadOption) func(sourc
 type BrainAppOption func(*brainAppOptions)
 
 type brainAppOptions struct {
-	store db.Store
+	store          db.Store
+	processSpawner runner.DaemonSpawner
 }
 
 // WithStore allows injecting a custom Store implementation (e.g. db.FakeStore for tests).
 func WithStore(store db.Store) BrainAppOption {
 	return func(o *brainAppOptions) {
 		o.store = store
+	}
+}
+
+// WithProcessSpawner allows injecting a custom DaemonSpawner (e.g. runner.NewMockDaemonSpawner for tests).
+func WithProcessSpawner(spawner runner.DaemonSpawner) BrainAppOption {
+	return func(o *brainAppOptions) {
+		o.processSpawner = spawner
+	}
+}
+
+func createEphemeralRunner(unifiedPool *runner.UnifiedProcessPool) runner.RunnerFunc {
+	return func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+		if err := ctx.Err(); err != nil {
+			return "", fmt.Sprintf("context cancelled before execution: %v", err), 1, err
+		}
+		targetKey := "ephemeral:classifier"
+		if strings.Contains(prompt, "summarize") || strings.Contains(prompt, "title") {
+			targetKey = "ephemeral:summarizer"
+		}
+		daemon, err := unifiedPool.GetOrCreate(ctx, targetKey)
+		if err != nil {
+			return "", "", 1, fmt.Errorf("failed to acquire ephemeral daemon: %w", err)
+		}
+		sink := queue.NewThrowawayTurnSink()
+		turnCtx := &runner.TurnContext{
+			TurnID:    uuid.New().String(),
+			Prompt:    prompt,
+			Sink:      sink,
+			CreatedAt: time.Now(),
+		}
+		if err := daemon.Send(prompt, turnCtx); err != nil {
+			return "", "", 1, fmt.Errorf("failed sending turn to ephemeral daemon: %w", err)
+		}
+		res, err := sink.ResultContext(ctx)
+		if err != nil {
+			return "", "", 1, err
+		}
+		return res, "", 0, nil
 	}
 }
 
@@ -1057,17 +1085,29 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	sanitizer.RegisterConfigTokens(cfg)
 
 	sessionMgr := session.New(cfg.GeminiHomeDir(), cfg.DataDir())
-	utilityDaemon := runner.NewUtilityDaemon(cfg, runner.WithSessionRoots(sessionMgr.Roots()...))
-	defer utilityDaemon.Close()
 
-	utilityRunner := utilityDaemon.RunnerFunc()
-	cls := classifier.New(cfg, utilityRunner)
+	unifiedPool := runner.NewUnifiedProcessPool(runner.PoolConfig{
+		PrewarmedTargets: []string{"kiosk", "ephemeral:classifier", "ephemeral:summarizer"},
+		DefaultModel:     cur.Model,
+		AgyBin:           cur.AgyBin,
+		Cwd:              cur.DataDir,
+		Env:              os.Environ(),
+	}, appOpts.processSpawner)
+	defer func() {
+		if err := unifiedPool.Close(); err != nil {
+			log.Printf("[WARN] Failed to close unified process pool: %v", err)
+		}
+	}()
+
+	ephemeralRunner := createEphemeralRunner(unifiedPool)
+	cls := classifier.New(cfg, ephemeralRunner)
 
 	pool := queue.New(cfg, queue.WorkerPoolConfig{
 		Store:               store,
 		Classifier:          cls,
 		MemoryRetrieverFunc: memory.RetrieveRelevantFacts,
 		SessionManager:      sessionMgr,
+		ProcessPool:         unifiedPool,
 	})
 	pool.Start()
 
@@ -1091,7 +1131,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		}
 	}()
 
-	reloadConfig := CreateReloadConfigFunc(cfg, WithDiscordSession(dgSession), WithProvisioner(provisioner), WithUtilityDaemon(utilityDaemon), WithWorkerPool(pool))
+	reloadConfig := CreateReloadConfigFunc(cfg, WithDiscordSession(dgSession), WithProvisioner(provisioner), WithWorkerPool(pool))
 
 	// Start background file watcher for atomic hot-reloading of prompts and skills
 	fileWatcher, err := watcher.NewWatcher(
@@ -1134,7 +1174,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	}
 
 	// Start background scheduler monitor for due cron and one-shot routines
-	sched, err := scheduler.New(cfg, store, pool, scheduler.NewDiscordThreadCreator(dgSession), scheduler.WithRunnerFunc(utilityRunner), scheduler.WithSessionRoots(sessionMgr.Roots()...))
+	sched, err := scheduler.New(cfg, store, pool, scheduler.NewDiscordThreadCreator(dgSession), scheduler.WithRunnerFunc(ephemeralRunner), scheduler.WithSessionRoots(sessionMgr.Roots()...))
 	if err != nil {
 		return fmt.Errorf("failed to initialize scheduler: %w", err)
 	}

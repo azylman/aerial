@@ -181,12 +181,12 @@ func (te *turnExecution) saveSessionID(threadID, sessionID string) {
 }
 
 func (te *turnExecution) rotateSessionID(threadID, newSessionID string) {
-	if te.pool != nil && newSessionID == "" {
-		if te.pool.daemonPool != nil {
-			te.pool.daemonPool.Evict(threadID)
-		}
-		if te.pool.voiceDaemonPool != nil {
-			te.pool.voiceDaemonPool.Evict(threadID)
+	if te == nil {
+		return
+	}
+	if te.pool != nil && te.pool.processPool != nil && newSessionID == "" {
+		if _, err := te.pool.processPool.RotateDaemon(context.Background(), threadID, ""); err != nil {
+			log.Printf("[Worker] Warning rotating daemon in process pool for thread %s: %v", threadID, err)
 		}
 	}
 	if s := te.store(); s != nil {
@@ -1385,12 +1385,6 @@ func (te *turnExecution) buildTurnPrompt() {
 }
 
 func (te *turnExecution) executeWithRetries() {
-	defer func() {
-		if te.pool != nil && te.pool.daemonPool != nil {
-			te.pool.daemonPool.ReleaseDaemon(te.threadID)
-		}
-	}()
-
 	maxAttempts := te.pool.cfg.MaxAttempts
 	lastErrDetail := ""
 	lastStderr := ""
@@ -1534,54 +1528,73 @@ func (te *turnExecution) executeWithRetries() {
 		var err error
 		runStart := time.Now()
 
-		if !te.pool.hasCustomRunner && te.pool.daemonPool != nil {
+		if !te.pool.hasCustomRunner && te.pool.processPool != nil {
 			if te.statusUpdater != nil {
 				te.statusUpdater.MarkTurnStarted()
 			}
-			daemon, daemonErr := te.pool.daemonPool.GetOrCreateDaemon(runCtx, te.threadID, te.currentSessionID, currentModel)
+			daemon, daemonErr := te.pool.processPool.GetOrCreate(runCtx, te.threadID)
 			if daemonErr != nil {
 				stdout = ""
 				stderr = daemonErr.Error()
 				exitCode = 1
 				err = daemonErr
 			} else {
-				var stepHandler runner.StepUpdateHandler
-				if te.statusUpdater != nil {
-					stepHandler = te.statusUpdater.HandleStep
+				sink := &turnResultSink{
+					statusUpdater: te.statusUpdater,
+					resCh:         make(chan *runner.TurnResult, 1),
+					errCh:         make(chan error, 1),
 				}
-				turnRes, turnErr := daemon.ExecuteTurnWithHandler(runCtx, promptToSend, stepHandler)
-				if turnErr != nil {
+				turnCtx := &runner.TurnContext{
+					TurnID:    uuid.New().String(),
+					Prompt:    promptToSend,
+					Sink:      sink,
+					CreatedAt: time.Now(),
+				}
+				if sendErr := daemon.Send(promptToSend, turnCtx); sendErr != nil {
 					stdout = ""
-					stderr = turnErr.Error()
+					stderr = sendErr.Error()
 					exitCode = 1
-					err = turnErr
+					err = sendErr
 				} else {
-					convID := daemon.SessionID()
-					if convID == "" && turnRes.ConversationID != "" {
-						convID = turnRes.ConversationID
-					}
-					if convID == "" && te.pool != nil && te.pool.sessionMgr != nil {
-						if latest := te.pool.sessionMgr.FindLatestSessionDir(te.execStart); latest != "" && runner.IsValidUUID(latest) {
-							convID = latest
-							daemon.SetSessionID(latest)
-						}
-					}
-					payload, marshalErr := daemonTurnMarshaler(map[string]interface{}{
-						"conversation_id": convID,
-						"status":          "SUCCESS",
-						"response":        turnRes.Response,
-						"usage":           turnRes.Usage,
-					})
-					if marshalErr != nil {
+					select {
+					case <-runCtx.Done():
 						stdout = ""
-						stderr = marshalErr.Error()
+						stderr = runCtx.Err().Error()
 						exitCode = 1
-						err = marshalErr
-					} else {
-						stdout = string(payload)
-						stderr = turnRes.Stderr
-						exitCode = turnRes.ExitCode
-						err = nil
+						err = runCtx.Err()
+					case tErr := <-sink.errCh:
+						stdout = ""
+						stderr = tErr.Error()
+						exitCode = 1
+						err = tErr
+					case turnRes := <-sink.resCh:
+						convID := daemon.SessionID()
+						if convID == "" && turnRes.ConversationID != "" {
+							convID = turnRes.ConversationID
+						}
+						if convID == "" && te.pool != nil && te.pool.sessionMgr != nil {
+							if latest := te.pool.sessionMgr.FindLatestSessionDir(te.execStart); latest != "" && runner.IsValidUUID(latest) {
+								convID = latest
+								daemon.SetSessionID(latest)
+							}
+						}
+						payload, marshalErr := daemonTurnMarshaler(map[string]interface{}{
+							"conversation_id": convID,
+							"status":          "SUCCESS",
+							"response":        turnRes.Response,
+							"usage":           turnRes.Usage,
+						})
+						if marshalErr != nil {
+							stdout = ""
+							stderr = marshalErr.Error()
+							exitCode = 1
+							err = marshalErr
+						} else {
+							stdout = string(payload)
+							stderr = turnRes.Stderr
+							exitCode = turnRes.ExitCode
+							err = nil
+						}
 					}
 				}
 			}
@@ -1647,8 +1660,8 @@ func (te *turnExecution) executeWithRetries() {
 					targetSess = extSess
 				}
 			}
-			if targetSess == "" && te.pool != nil && te.pool.daemonPool != nil {
-				if d, ok := te.pool.daemonPool.Get(te.threadID); ok && d != nil && d.SessionID() != "" {
+			if targetSess == "" && te.pool != nil && te.pool.processPool != nil {
+				if d, ok := te.pool.processPool.Get(te.threadID); ok && d != nil && d.SessionID() != "" {
 					targetSess = d.SessionID()
 				}
 			}
@@ -1831,8 +1844,10 @@ func (te *turnExecution) executeWithRetries() {
 				te.isQuotaPaused = true
 				te.stopTyping()
 				log.Printf("[WorkerPool] Quota pause detected for thread %s on attempt %d/%d: %s", te.threadID, attempt, maxAttempts, errDetail)
-				if te.pool != nil && te.pool.daemonPool != nil {
-					te.pool.daemonPool.Evict(te.threadID)
+				if te.pool != nil && te.pool.processPool != nil {
+					if _, rotErr := te.pool.processPool.RotateDaemon(context.Background(), te.threadID, ""); rotErr != nil {
+						log.Printf("[WorkerPool] Warning rotating daemon on quota pause: %v", rotErr)
+					}
 				}
 
 				// Circuit breaker: check if this turn was already a quota auto-retry
@@ -2076,10 +2091,12 @@ func (te *turnExecution) executeWithRetries() {
 					isYield, taskCount := runner.IsYieldTrap(exitCode, stdout, stderr)
 					var unfinishedTaskID string
 					detectionSource := "stderr_signature"
-					if !isYield && te.pool != nil && te.pool.daemonPool != nil && te.pool.daemonPool.HasActiveTasks(te.threadID) {
-						isYield = true
-						taskCount = 1
-						detectionSource = "daemon_tracker"
+					if !isYield && te.pool != nil && te.pool.processPool != nil {
+						if d, ok := te.pool.processPool.Get(te.threadID); ok && d != nil && d.TaskTracker().ActiveCount() > 0 {
+							isYield = true
+							taskCount = 1
+							detectionSource = "daemon_tracker"
+						}
 					}
 
 					if isYield {
@@ -2096,19 +2113,21 @@ func (te *turnExecution) executeWithRetries() {
 							// 2. Keep Discord typing heartbeat active without resetting status updater (do not call te.stopTyping())
 
 							// 3. Set prompt for immediate in-session auto-resumption
-							if detectionSource == "daemon_tracker" && te.pool.daemonPool != nil {
-								tasks := te.pool.daemonPool.ActiveTasks(te.threadID)
-								if len(tasks) > 0 {
-									activeTask := tasks[0]
-									unfinishedTaskID = activeTask.TaskID
-									if te.pool.sessionMgr != nil && te.currentSessionID != "" {
-										if sessDir, sErr := te.pool.sessionMgr.GetSessionDir(te.currentSessionID); sErr == nil && sessDir != "" {
-											waitCtx, waitCancel := context.WithTimeout(runCtx, 2*time.Second)
-											exitCode, logPath, wErr := watchTaskCompletion(waitCtx, sessDir, activeTask.TaskID)
-											waitCancel()
-											if wErr == nil {
-												te.pool.daemonPool.RemoveTask(te.threadID, activeTask.TaskID)
-												promptToSend = fmt.Sprintf(TaskCompletionResumePrompt, unfinishedTaskID, exitCode, logPath)
+							if detectionSource == "daemon_tracker" && te.pool.processPool != nil {
+								if d, ok := te.pool.processPool.Get(te.threadID); ok && d != nil {
+									tasks := d.TaskTracker().ActiveTasks()
+									if len(tasks) > 0 {
+										activeTask := tasks[0]
+										unfinishedTaskID = activeTask.TaskID
+										if te.pool.sessionMgr != nil && te.currentSessionID != "" {
+											if sessDir, sErr := te.pool.sessionMgr.GetSessionDir(te.currentSessionID); sErr == nil && sessDir != "" {
+												waitCtx, waitCancel := context.WithTimeout(runCtx, 2*time.Second)
+												exitCode, logPath, wErr := watchTaskCompletion(waitCtx, sessDir, activeTask.TaskID)
+												waitCancel()
+												if wErr == nil {
+													d.TaskTracker().Remove(activeTask.TaskID)
+													promptToSend = fmt.Sprintf(TaskCompletionResumePrompt, unfinishedTaskID, exitCode, logPath)
+												}
 											}
 										}
 									}
@@ -2567,3 +2586,42 @@ func watchTaskCompletion(ctx context.Context, sessionDir, taskID string) (int, s
 		}
 	}
 }
+
+type turnResultSink struct {
+	statusUpdater *StatusUpdater
+	resCh         chan *runner.TurnResult
+	errCh         chan error
+	once          sync.Once
+}
+
+var _ runner.TurnSink = (*turnResultSink)(nil)
+
+func (s *turnResultSink) OnTurnStarted() {}
+func (s *turnResultSink) OnThinking()    {}
+func (s *turnResultSink) OnToolCall(toolName, commandName string) {
+	if s.statusUpdater != nil && (toolName != "" || commandName != "") {
+		s.statusUpdater.HandleStep(&runner.StepUpdateEvent{
+			Event:    "step_update",
+			State:    "RUNNING",
+			Type:     "tool_call",
+			ToolName: toolName,
+			ToolInfo: &runner.StepToolInfo{
+				Parameters: runner.StepToolParameters{
+					CommandLine: commandName,
+				},
+			},
+		})
+	}
+}
+func (s *turnResultSink) OnTextDelta(delta string) {}
+func (s *turnResultSink) OnResult(res *runner.TurnResult) {
+	s.once.Do(func() {
+		s.resCh <- res
+	})
+}
+func (s *turnResultSink) OnError(err error) {
+	s.once.Do(func() {
+		s.errCh <- err
+	})
+}
+
