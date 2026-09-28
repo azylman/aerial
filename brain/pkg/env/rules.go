@@ -316,16 +316,6 @@ func (p *Provisioner) provisionRuntimeSharedAssets(runtimeHome string) {
 		}
 	}
 
-	primaryMcp := filepath.Join(primaryGemini, "config", "mcp_config.json")
-	targetMcp := filepath.Join(runtimeGemini, "config", "mcp_config.json")
-	if _, err := os.Stat(primaryMcp); err == nil {
-		if data, rErr := os.ReadFile(primaryMcp); rErr == nil {
-			if err := p.writeAtomic(targetMcp, string(data)); err != nil {
-				log.Printf("[Env] Warning: failed to write target mcp: %v", err)
-			}
-		}
-	}
-
 	primarySkills := filepath.Join(primaryGemini, "config", "skills")
 	targetSkills := filepath.Join(runtimeGemini, "config", "skills")
 	if _, err := os.Stat(primarySkills); err == nil {

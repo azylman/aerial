@@ -1311,8 +1311,9 @@ func TestProvisionRuntimeSharedAssets_Comprehensive(t *testing.T) {
 	if data, err := os.ReadFile(filepath.Join(targetGemini, "antigravity-cli", "settings.json")); err != nil || string(data) != `{"model":"gemini-test"}` {
 		t.Errorf("settings.json not copied correctly: %v, %s", err, string(data))
 	}
-	if data, err := os.ReadFile(filepath.Join(targetGemini, "config", "mcp_config.json")); err != nil || string(data) != `{"mcpServers":{}}` {
-		t.Errorf("mcp_config.json not copied correctly: %v, %s", err, string(data))
+	// Verify mcp_config.json is NOT copied by provisionRuntimeSharedAssets (preventing cross-contamination)
+	if _, err := os.Stat(filepath.Join(targetGemini, "config", "mcp_config.json")); !os.IsNotExist(err) {
+		t.Errorf("mcp_config.json should NOT be copied by provisionRuntimeSharedAssets; it is managed by SyncMCP")
 	}
 	if data, err := os.ReadFile(filepath.Join(targetGemini, "antigravity-cli", "antigravity-oauth-token")); err != nil || string(data) != `{"token":"secret"}` {
 		t.Errorf("antigravity-oauth-token not provisioned correctly: %v, %s", err, string(data))
@@ -1907,6 +1908,120 @@ func TestRepositorySkills_ValidYAMLFrontmatter(t *testing.T) {
 		t.Errorf("Expected at least one skill across target directories, found 0")
 	}
 }
+
+func TestLoadTargetMCPConfig_Partitioning(t *testing.T) {
+	t.Parallel()
+
+	p := &Provisioner{}
+	cfg := config.NewTestConfig(func(d *config.ConfigData) {
+		d.GitHubPAT = "test-pat"
+		d.OpenObserveUser = "admin"
+		d.OpenObservePassword = "password"
+		d.McpServers.Common = map[string]json.RawMessage{
+			"common-srv": json.RawMessage(`{"url":"http://common"}`),
+		}
+		d.McpServers.Discord = map[string]json.RawMessage{
+			"discord-custom": json.RawMessage(`{"url":"http://discord-only"}`),
+		}
+		d.McpServers.Voice = map[string]json.RawMessage{
+			"voice-custom": json.RawMessage(`{"url":"http://voice-only"}`),
+		}
+	})
+
+	// Discord Target
+	rawDiscord := p.LoadTargetMCPConfig(cfg, TargetDiscord)
+	var discordObj struct {
+		McpServers map[string]interface{} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(rawDiscord, &discordObj); err != nil {
+		t.Fatalf("failed to unmarshal discord MCP config: %v", err)
+	}
+
+	for _, expected := range []string{"scheduler", "discord", "docker", "victoriametrics", "github", "openobserve", "common-srv", "discord-custom"} {
+		if _, ok := discordObj.McpServers[expected]; !ok {
+			t.Errorf("discord MCP config missing expected server %q", expected)
+		}
+	}
+	if _, ok := discordObj.McpServers["voice-custom"]; ok {
+		t.Errorf("discord MCP config should NOT contain voice-custom")
+	}
+
+	// Voice Target
+	rawVoice := p.LoadTargetMCPConfig(cfg, TargetVoice)
+	var voiceObj struct {
+		McpServers map[string]interface{} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(rawVoice, &voiceObj); err != nil {
+		t.Fatalf("failed to unmarshal voice MCP config: %v", err)
+	}
+
+	if _, ok := voiceObj.McpServers["scheduler"]; !ok {
+		t.Errorf("voice MCP config missing 'scheduler'")
+	}
+	if _, ok := voiceObj.McpServers["common-srv"]; !ok {
+		t.Errorf("voice MCP config missing 'common-srv'")
+	}
+	if _, ok := voiceObj.McpServers["voice-custom"]; !ok {
+		t.Errorf("voice MCP config missing 'voice-custom'")
+	}
+
+	// Voice must NOT have any discord/docker/victoriametrics/github/openobserve/discord-custom
+	for _, forbidden := range []string{"discord", "docker", "victoriametrics", "github", "openobserve", "discord-custom"} {
+		if _, ok := voiceObj.McpServers[forbidden]; ok {
+			t.Errorf("voice MCP config contains forbidden server %q", forbidden)
+		}
+	}
+}
+
+func TestSyncMCP_DualRuntimeEmission(t *testing.T) {
+	tmpHome := t.TempDir()
+	tmpData := t.TempDir()
+
+	p := New(tmpHome, tmpData)
+	cfg := config.NewTestConfig(func(d *config.ConfigData) {
+		d.McpServers.Common = map[string]json.RawMessage{
+			"common-srv": json.RawMessage(`{"serverUrl":"http://common"}`),
+		}
+		d.McpServers.Voice = map[string]json.RawMessage{
+			"voice-srv": json.RawMessage(`{"serverUrl":"http://voice"}`),
+		}
+	})
+
+	if err := p.SyncMCP(context.Background(), cfg); err != nil {
+		t.Fatalf("SyncMCP failed: %v", err)
+	}
+
+	// 1. Primary config
+	primaryPath := filepath.Join(tmpHome, ".gemini", "config", "mcp_config.json")
+	if _, err := os.Stat(primaryPath); err != nil {
+		t.Errorf("primary mcp_config.json not found: %v", err)
+	}
+
+	// 2. Discord runtime config
+	discordPath := filepath.Join(tmpData, "runtimes", "discord", ".gemini", "config", "mcp_config.json")
+	discordBytes, err := os.ReadFile(discordPath)
+	if err != nil {
+		t.Fatalf("failed to read discord mcp_config.json: %v", err)
+	}
+	if !strings.Contains(string(discordBytes), "discord-mcp") {
+		t.Errorf("expected discord runtime config to contain discord-mcp")
+	}
+
+	// 3. Voice runtime config
+	voicePath := filepath.Join(tmpData, "runtimes", "voice", ".gemini", "config", "mcp_config.json")
+	voiceBytes, err := os.ReadFile(voicePath)
+	if err != nil {
+		t.Fatalf("failed to read voice mcp_config.json: %v", err)
+	}
+	voiceStr := string(voiceBytes)
+	if !strings.Contains(voiceStr, "scheduler-mcp") {
+		t.Errorf("expected voice runtime config to contain scheduler-mcp")
+	}
+	if strings.Contains(voiceStr, "discord-mcp") || strings.Contains(voiceStr, "docker-mcp") {
+		t.Errorf("voice runtime config contains forbidden discord/docker tools: %s", voiceStr)
+	}
+}
+
 
 
 
