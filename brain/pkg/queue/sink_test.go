@@ -1,11 +1,13 @@
 package queue
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/azylman/aerial/brain/pkg/runner"
 )
@@ -96,6 +98,38 @@ func TestThrowawayTurnSink_OnceGuarded(t *testing.T) {
 	}
 	if res != "first" {
 		t.Fatalf("expected 'first', got %q", res)
+	}
+}
+
+func TestThrowawayTurnSink_ResultContext_Cancelled(t *testing.T) {
+	sink := NewThrowawayTurnSink()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	res, err := sink.ResultContext(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled error, got: %v", err)
+	}
+	if res != "" {
+		t.Fatalf("expected empty string on cancellation, got: %q", res)
+	}
+}
+
+func TestThrowawayTurnSink_ResultContext_Success(t *testing.T) {
+	sink := NewThrowawayTurnSink()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	go func() {
+		sink.OnResult(&runner.TurnResult{Response: "context result ok"})
+	}()
+
+	res, err := sink.ResultContext(ctx)
+	if err != nil {
+		t.Fatalf("expected nil error, got: %v", err)
+	}
+	if res != "context result ok" {
+		t.Fatalf("expected 'context result ok', got: %q", res)
 	}
 }
 

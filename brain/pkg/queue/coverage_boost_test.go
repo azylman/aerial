@@ -1,6 +1,7 @@
 package queue
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"database/sql"
@@ -9,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -2543,27 +2543,47 @@ func TestCoverageBoost_DaemonTurnMarshalError(t *testing.T) {
 	tmpHome := t.TempDir()
 	tempData := t.TempDir()
 
-	mockBin := filepath.Join(tmpHome, "mock_agy.sh")
-	script := `#!/bin/sh
-while IFS= read -r line; do
-  echo '{"event":"result","result":{"status":"SUCCESS","response":"Executed via persistent daemon","usage":{"total_tokens":10}}}'
-done
-`
-	if err := os.WriteFile(mockBin, []byte(script), 0755); err != nil {
-		t.Fatalf("failed to write mock script: %v", err)
+	threadID := "thread-persist-marshal-err"
+	sessID := "b1111111-2222-3333-4444-555555555555"
+
+	mockSpawner := &runner.MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+			inR, inW := io.Pipe()
+			outR, outW := io.Pipe()
+			errR, errW := io.Pipe()
+			defer errW.Close()
+			go func() {
+				if _, err := fmt.Fprintf(outW, "{\"event\":\"init\",\"conversation_id\":%q}\n", sessID); err != nil {
+					t.Logf("write init event: %v", err)
+				}
+				scanner := bufio.NewScanner(inR)
+				for scanner.Scan() {
+					if _, err := outW.Write([]byte("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"Executed via persistent daemon\",\"usage\":{\"total_tokens\":10}}}\n")); err != nil {
+						t.Logf("write result event: %v", err)
+					}
+				}
+			}()
+			return inW, outR, errR, runner.NewMockProcessHandle(12345), nil
+		},
 	}
+	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, mockSpawner)
+	defer func() {
+		if err := procPool.Close(); err != nil {
+			t.Logf("cleanup unified pool: %v", err)
+		}
+	}()
 
 	cfg := config.NewTestConfig(func(d *config.ConfigData) {
-		d.AgyBin = mockBin
 		d.DataDir = tempData
 	})
 
 	doneCh := make(chan struct{})
 	pool := New(cfg, WorkerPoolConfig{
-		SessionManager:       session.New(tmpHome, tempData),
-		Store:                store,
-		TimeoutMinutes:       1,
-		MaxAttempts:          1,
+		ProcessPool:    procPool,
+		SessionManager: session.New(tmpHome, tempData),
+		Store:          store,
+		TimeoutMinutes: 1,
+		MaxAttempts:    1,
 		OnMessageCompleted: func(msg db.Message, status string) {
 			if status == db.StatusFailed {
 				select {
@@ -2576,8 +2596,6 @@ done
 	})
 	defer pool.Stop()
 
-	threadID := "thread-persist-marshal-err"
-	sessID := "b1111111-2222-3333-4444-555555555555"
 	_ = store.SaveSessionID(context.Background(), threadID, sessID)
 
 	msg := db.Message{

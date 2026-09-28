@@ -1,6 +1,7 @@
 package queue
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"strings"
@@ -64,14 +65,21 @@ func (s *ThrowawayTurnSink) OnError(err error) {
 	})
 }
 
-// Result blocks waiting for turn result or error.
-func (s *ThrowawayTurnSink) Result() (string, error) {
+// ResultContext blocks waiting for turn result, error, or context cancellation.
+func (s *ThrowawayTurnSink) ResultContext(ctx context.Context) (string, error) {
 	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
 	case res := <-s.resCh:
 		return res, nil
 	case err := <-s.errCh:
 		return "", err
 	}
+}
+
+// Result blocks waiting for turn result or error without a deadline.
+func (s *ThrowawayTurnSink) Result() (string, error) {
+	return s.ResultContext(context.Background())
 }
 
 // DiscordTurnSink implements runner.TurnSink for interactive Discord turns.

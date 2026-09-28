@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -20,6 +22,7 @@ import (
 	"github.com/azylman/aerial/brain/pkg/env"
 	"github.com/azylman/aerial/brain/pkg/metrics"
 	"github.com/azylman/aerial/brain/pkg/queue"
+	"github.com/azylman/aerial/brain/pkg/runner"
 	"github.com/bwmarrin/discordgo"
 )
 
@@ -1900,7 +1903,7 @@ func TestRunBrainApp_FullLifecycle(t *testing.T) {
 	}()
 
 	mockStore := db.NewFakeStore()
-	err = RunBrainApp(ctx, cfg, WithStore(mockStore))
+	err = RunBrainApp(ctx, cfg, WithStore(mockStore), WithProcessSpawner(runner.NewMockDaemonSpawner()))
 	if err != nil {
 		t.Fatalf("RunBrainApp failed: %v", err)
 	}
@@ -2467,6 +2470,108 @@ func TestHandleVoiceAsk_SSE_CancelledContext(t *testing.T) {
 	req.Header.Set("Accept", "text/event-stream")
 	w := httptest.NewRecorder()
 	handler(w, req)
+}
+
+func TestCreateEphemeralRunner_ClassifierAndSummarizer(t *testing.T) {
+	mockSpawner := &runner.MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+			inR, inW := io.Pipe()
+			outR, outW := io.Pipe()
+			errR, errW := io.Pipe()
+			defer errW.Close()
+			go func() {
+				_, _ = fmt.Fprintf(outW, "{\"event\":\"init\",\"conversation_id\":\"00000000-0000-0000-0000-000000000001\"}\n")
+				scanner := bufio.NewScanner(inR)
+				for scanner.Scan() {
+					line := scanner.Text()
+					var prompt string
+					if strings.Contains(line, "summarize") || strings.Contains(line, "title") {
+						prompt = "title summary ok"
+					} else {
+						prompt = "classification ok"
+					}
+					_, _ = fmt.Fprintf(outW, "{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":%q}}\n", prompt)
+				}
+			}()
+			return inW, outR, errR, runner.NewMockProcessHandle(12345), nil
+		},
+	}
+
+	pool := runner.NewUnifiedProcessPool(runner.PoolConfig{
+		DefaultModel: "gemini-2.5-flash",
+	}, mockSpawner)
+	defer pool.Close()
+
+	runnerFn := createEphemeralRunner(pool)
+
+	// 1. Classifier target
+	ctx := context.Background()
+	res, _, code, err := runnerFn(ctx, "agy", "classify this task", "", "", "gemini-2.5-flash", 1)
+	if err != nil {
+		t.Fatalf("expected nil error on classifier runner, got: %v", err)
+	}
+	if code != 0 || res != "classification ok" {
+		t.Fatalf("expected 'classification ok' with code 0, got %q (code %d)", res, code)
+	}
+
+	// 2. Summarizer target
+	res2, _, code2, err2 := runnerFn(ctx, "agy", "please summarize title", "", "", "gemini-2.5-flash", 1)
+	if err2 != nil {
+		t.Fatalf("expected nil error on summarizer runner, got: %v", err2)
+	}
+	if code2 != 0 || res2 != "title summary ok" {
+		t.Fatalf("expected 'title summary ok' with code 0, got %q (code %d)", res2, code2)
+	}
+
+	// 3. Acquire error when pool is closed
+	closedPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, mockSpawner)
+	_ = closedPool.Close()
+	runnerClosed := createEphemeralRunner(closedPool)
+	_, _, codeErr, errAcq := runnerClosed(ctx, "agy", "classify prompt", "", "", "gemini-2.5-flash", 1)
+	if errAcq == nil || codeErr != 1 {
+		t.Fatalf("expected acquire error with code 1, got code %d, err %v", codeErr, errAcq)
+	}
+
+	// 4. Context cancelled during result wait
+	ctxCancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, _, codeCancel, errCancel := runnerFn(ctxCancelled, "agy", "classify fast", "", "", "gemini-2.5-flash", 1)
+	if errCancel == nil || codeCancel != 1 {
+		t.Fatalf("expected context error with code 1, got code %d, err %v", codeCancel, errCancel)
+	}
+}
+
+func TestCreateEphemeralRunner_DaemonExecutionError(t *testing.T) {
+	mockSpawner := &runner.MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+			inR, inW := io.Pipe()
+			outR, outW := io.Pipe()
+			errR, errW := io.Pipe()
+			defer errW.Close()
+			go func() {
+				_, _ = fmt.Fprintf(outW, "{\"event\":\"init\",\"conversation_id\":\"00000000-0000-0000-0000-000000000002\"}\n")
+				scanner := bufio.NewScanner(inR)
+				for scanner.Scan() {
+					_, _ = fmt.Fprintf(outW, "{\"event\":\"result\",\"result\":{\"status\":\"ERROR\",\"error\":\"daemon turn crashed\"}}\n")
+				}
+			}()
+			return inW, outR, errR, runner.NewMockProcessHandle(12345), nil
+		},
+	}
+
+	pool := runner.NewUnifiedProcessPool(runner.PoolConfig{
+		DefaultModel: "gemini-2.5-flash",
+	}, mockSpawner)
+	defer pool.Close()
+
+	runnerFn := createEphemeralRunner(pool)
+	_, _, code, err := runnerFn(context.Background(), "agy", "classify this task", "", "", "gemini-2.5-flash", 1)
+	if err == nil || !strings.Contains(err.Error(), "daemon turn crashed") {
+		t.Fatalf("expected 'daemon turn crashed' error, got: %v (code %d)", err, code)
+	}
+	if code != 1 {
+		t.Fatalf("expected code 1, got %d", code)
+	}
 }
 
 

@@ -980,13 +980,49 @@ func CreateReloadConfigFunc(cfg *config.Config, opts ...ReloadOption) func(sourc
 type BrainAppOption func(*brainAppOptions)
 
 type brainAppOptions struct {
-	store db.Store
+	store          db.Store
+	processSpawner runner.DaemonSpawner
 }
 
 // WithStore allows injecting a custom Store implementation (e.g. db.FakeStore for tests).
 func WithStore(store db.Store) BrainAppOption {
 	return func(o *brainAppOptions) {
 		o.store = store
+	}
+}
+
+// WithProcessSpawner allows injecting a custom DaemonSpawner (e.g. runner.NewMockDaemonSpawner for tests).
+func WithProcessSpawner(spawner runner.DaemonSpawner) BrainAppOption {
+	return func(o *brainAppOptions) {
+		o.processSpawner = spawner
+	}
+}
+
+func createEphemeralRunner(unifiedPool *runner.UnifiedProcessPool) runner.RunnerFunc {
+	return func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+		targetKey := "ephemeral:classifier"
+		if strings.Contains(prompt, "summarize") || strings.Contains(prompt, "title") {
+			targetKey = "ephemeral:summarizer"
+		}
+		daemon, err := unifiedPool.GetOrCreate(ctx, targetKey)
+		if err != nil {
+			return "", "", 1, fmt.Errorf("failed to acquire ephemeral daemon: %w", err)
+		}
+		sink := queue.NewThrowawayTurnSink()
+		turnCtx := &runner.TurnContext{
+			TurnID:    uuid.New().String(),
+			Prompt:    prompt,
+			Sink:      sink,
+			CreatedAt: time.Now(),
+		}
+		if err := daemon.Send(prompt, turnCtx); err != nil {
+			return "", "", 1, fmt.Errorf("failed sending turn to ephemeral daemon: %w", err)
+		}
+		res, err := sink.ResultContext(ctx)
+		if err != nil {
+			return "", "", 1, err
+		}
+		return res, "", 0, nil
 	}
 }
 
@@ -1053,38 +1089,14 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		AgyBin:           cur.AgyBin,
 		Cwd:              cur.DataDir,
 		Env:              os.Environ(),
-	}, nil)
+	}, appOpts.processSpawner)
 	defer func() {
 		if err := unifiedPool.Close(); err != nil {
 			log.Printf("[WARN] Failed to close unified process pool: %v", err)
 		}
 	}()
 
-	ephemeralRunner := func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-		targetKey := "ephemeral:classifier"
-		if strings.Contains(prompt, "summarize") || strings.Contains(prompt, "title") {
-			targetKey = "ephemeral:summarizer"
-		}
-		daemon, err := unifiedPool.GetOrCreate(ctx, targetKey)
-		if err != nil {
-			return "", "", 1, fmt.Errorf("failed to acquire ephemeral daemon: %w", err)
-		}
-		sink := queue.NewThrowawayTurnSink()
-		turnCtx := &runner.TurnContext{
-			TurnID:    uuid.New().String(),
-			Prompt:    prompt,
-			Sink:      sink,
-			CreatedAt: time.Now(),
-		}
-		if err := daemon.Send(prompt, turnCtx); err != nil {
-			return "", "", 1, fmt.Errorf("failed sending turn to ephemeral daemon: %w", err)
-		}
-		res, err := sink.Result()
-		if err != nil {
-			return "", "", 1, err
-		}
-		return res, "", 0, nil
-	}
+	ephemeralRunner := createEphemeralRunner(unifiedPool)
 	cls := classifier.New(cfg, ephemeralRunner)
 
 	pool := queue.New(cfg, queue.WorkerPoolConfig{
