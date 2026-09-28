@@ -1063,11 +1063,25 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	utilityRunner := utilityDaemon.RunnerFunc()
 	cls := classifier.New(cfg, utilityRunner)
 
+	unifiedPool := runner.NewUnifiedProcessPool(runner.PoolConfig{
+		PrewarmedTargets: []string{"kiosk", "ephemeral:classifier", "ephemeral:summarizer"},
+		DefaultModel:     cur.Model,
+		AgyBin:           cur.AgyBin,
+		Cwd:              cur.DataDir,
+		Env:              os.Environ(),
+	}, nil)
+	defer func() {
+		if err := unifiedPool.Close(); err != nil {
+			log.Printf("[WARN] Failed to close unified process pool: %v", err)
+		}
+	}()
+
 	pool := queue.New(cfg, queue.WorkerPoolConfig{
 		Store:               store,
 		Classifier:          cls,
 		MemoryRetrieverFunc: memory.RetrieveRelevantFacts,
 		SessionManager:      sessionMgr,
+		ProcessPool:         unifiedPool,
 	})
 	pool.Start()
 

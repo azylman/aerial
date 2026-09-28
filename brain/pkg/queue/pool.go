@@ -69,6 +69,8 @@ type WorkerPoolConfig struct {
 	DrainTimeout       time.Duration
 	RetryDelayOverride time.Duration
 	SessionManager     *session.Manager
+	ProcessPool        *runner.UnifiedProcessPool
+	MaintenanceInterval time.Duration
 
 	// Optional hooks for testing/custom overrides
 	RunnerFunc                  func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error)
@@ -112,6 +114,7 @@ type WorkerPool struct {
 	summaryGroup      singleflight.Group
 	daemonPool        *DaemonPool
 	voiceDaemonPool   *DaemonPool
+	processPool       *runner.UnifiedProcessPool
 }
 
 // SummaryGroup returns the singleflight.Group coordinating thread summarizations for this pool instance.
@@ -306,6 +309,7 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 	p := &WorkerPool{
 		appCfg:            appCfg,
 		cfg:               cfg,
+		processPool:       cfg.ProcessPool,
 		hasCustomRunner:   hasCustomRunner,
 		sessionMgr:        sessMgr,
 		threadChs:         make(map[string]*threadWorkerState),
@@ -484,7 +488,11 @@ func (p *WorkerPool) Start() {
 		p.wg.Add(1)
 		go func() {
 			defer p.wg.Done()
-			ticker := time.NewTicker(30 * time.Second)
+			interval := p.cfg.MaintenanceInterval
+			if interval <= 0 {
+				interval = 30 * time.Second
+			}
+			ticker := time.NewTicker(interval)
 			defer ticker.Stop()
 			for {
 				select {
@@ -493,13 +501,10 @@ func (p *WorkerPool) Start() {
 				case <-ticker.C:
 					if p.daemonPool != nil {
 						p.daemonPool.PruneIdle(5 * time.Minute)
-						p.daemonPool.CheckMemoryPressureAndEvict()
 						p.daemonPool.MonitorZombieTasks(1 * time.Hour)
-						p.daemonPool.UpdateMemoryMetrics()
 					}
 					if p.voiceDaemonPool != nil {
 						p.voiceDaemonPool.PruneIdle(5 * time.Minute)
-						p.voiceDaemonPool.CheckMemoryPressureAndEvict()
 						p.voiceDaemonPool.MonitorZombieTasks(1 * time.Hour)
 					}
 				}
@@ -596,7 +601,22 @@ func (p *WorkerPool) Stop() {
 			log.Printf("[WorkerPool] Warning: failed to close voice daemon pool: %v", closeErr)
 		}
 	}
+	if p.processPool != nil {
+		if closeErr := p.processPool.Close(); closeErr != nil {
+			log.Printf("[WorkerPool] Warning: failed to close unified process pool: %v", closeErr)
+		}
+	}
 	log.Printf("[WorkerPool] Queue worker pool stopped cleanly")
+}
+
+// ProcessPool returns the configured runner.UnifiedProcessPool, or nil if unconfigured or p is nil.
+func (p *WorkerPool) ProcessPool() *runner.UnifiedProcessPool {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.processPool
 }
 
 // DaemonPool returns the associated DaemonPool instance.
