@@ -202,7 +202,7 @@ func TestSyncMCP(t *testing.T) {
 		"my-custom-mcp": json.RawMessage(`{"serverUrl":"http://my-host:9000/sse"}`),
 	}
 	cfg := config.NewTestConfig(func(d *config.ConfigData) {
-		d.McpServers = customServers
+		d.McpServers.Discord = customServers
 	})
 
 	if err := p.SyncMCP(context.Background(), cfg); err != nil {
@@ -814,7 +814,7 @@ func TestLoadMCPConfig_FileOverridesAndNormalizations(t *testing.T) {
 
 	// 4. cur.McpServers with unmarshalable JSON value (exercises `mergedServers[k] = v` and json.Marshal error branch)
 	cfgInvalid := config.NewTestConfig(func(d *config.ConfigData) {
-		d.McpServers = map[string]json.RawMessage{
+		d.McpServers.Discord = map[string]json.RawMessage{
 			"raw-invalid": json.RawMessage(`{not-json`),
 		}
 	})
@@ -826,7 +826,7 @@ func TestLoadMCPConfig_FileOverridesAndNormalizations(t *testing.T) {
 	// 5. Custom MCP servers preserve declared serverUrl verbatim without rewrite
 	cfgCustom := config.NewTestConfig(func(d *config.ConfigData) {
 		d.GitHubPAT = "dummy-pat"
-		d.McpServers = map[string]json.RawMessage{
+		d.McpServers.Discord = map[string]json.RawMessage{
 			"docker":          json.RawMessage(`{"serverUrl":"http://docker-mcp:4002/mcp"}`),
 			"custom-sse":      json.RawMessage(`{"serverUrl":"http://custom-server:9000/sse"}`),
 			"victoriametrics": json.RawMessage(`{"serverUrl":"http://victoriametrics-mcp:4004/mcp"}`),

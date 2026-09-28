@@ -101,8 +101,8 @@ func (p *Provisioner) LoadMCPConfig(cfg *config.Config) json.RawMessage {
 	// 3. Overlay custom MCP servers from config.yaml
 	if cfg != nil {
 		cur := cfg.Current()
-		if len(cur.McpServers) > 0 {
-			for k, v := range cur.McpServers {
+		for _, srvMap := range []map[string]json.RawMessage{cur.McpServers.Common, cur.McpServers.Discord} {
+			for k, v := range srvMap {
 				var parsedVal interface{}
 				if err := json.Unmarshal(v, &parsedVal); err == nil {
 					mergedServers[k] = parsedVal
