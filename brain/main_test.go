@@ -2217,6 +2217,12 @@ func TestHandleVoiceAsk_SSE_Success(t *testing.T) {
 	if !strings.Contains(body, "event: done\ndata: {\"conversation_id\":\"sess-test-456\"}\n\n") {
 		t.Errorf("expected done event in SSE stream, got:\n%s", body)
 	}
+
+	mRec := httptest.NewRecorder()
+	metrics.Handler().ServeHTTP(mRec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if !strings.Contains(mRec.Body.String(), `aerial_brain_voice_ttfr_duration_seconds_bucket{mode="sse",status="success"`) {
+		t.Errorf("expected voice TTFR metric for sse/success, got:\n%s", mRec.Body.String())
+	}
 }
 
 func TestHandleVoiceAsk_JSON_Success(t *testing.T) {
@@ -2249,6 +2255,12 @@ func TestHandleVoiceAsk_JSON_Success(t *testing.T) {
 	}
 	if resp.Reply != "JSON voice reply" || resp.ConversationID != "sess-json-123" {
 		t.Errorf("unexpected response: %+v", resp)
+	}
+
+	mRec := httptest.NewRecorder()
+	metrics.Handler().ServeHTTP(mRec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if !strings.Contains(mRec.Body.String(), `aerial_brain_voice_ttfr_duration_seconds_bucket{mode="json",status="success"`) {
+		t.Errorf("expected voice TTFR metric for json/success, got:\n%s", mRec.Body.String())
 	}
 }
 
@@ -2314,6 +2326,15 @@ func TestHandleVoiceAsk_Errors(t *testing.T) {
 	}
 	if !strings.Contains(wNilSSE.Body.String(), "event: error") {
 		t.Errorf("expected error event for nil pool SSE, got:\n%s", wNilSSE.Body.String())
+	}
+
+	mRec := httptest.NewRecorder()
+	metrics.Handler().ServeHTTP(mRec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if !strings.Contains(mRec.Body.String(), `aerial_brain_voice_ttfr_duration_seconds_bucket{mode="sse",status="error"`) {
+		t.Errorf("expected voice TTFR metric for sse/error, got:\n%s", mRec.Body.String())
+	}
+	if !strings.Contains(mRec.Body.String(), `aerial_brain_voice_ttfr_duration_seconds_bucket{mode="json",status="error"`) {
+		t.Errorf("expected voice TTFR metric for json/error, got:\n%s", mRec.Body.String())
 	}
 }
 

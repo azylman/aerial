@@ -136,6 +136,7 @@ type VoiceAskResponse struct {
 
 func handleVoiceAsk(pool *queue.WorkerPool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		reqStart := time.Now()
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", "POST")
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "Method not allowed"})
@@ -182,6 +183,13 @@ func handleVoiceAsk(pool *queue.WorkerPool) http.HandlerFunc {
 			flusher.Flush()
 
 			var writeMu sync.Mutex
+			var ttfrOnce sync.Once
+			recordTTFR := func(status string) {
+				ttfrOnce.Do(func() {
+					metrics.RecordVoiceTTFR("sse", status, time.Since(reqStart))
+				})
+			}
+
 			emitSSE := func(event string, data any) {
 				if r.Context().Err() != nil {
 					return
@@ -198,6 +206,12 @@ func handleVoiceAsk(pool *queue.WorkerPool) http.HandlerFunc {
 					return
 				}
 				flusher.Flush()
+
+				if event == "reply" || event == "delta" {
+					recordTTFR("success")
+				} else if event == "error" {
+					recordTTFR("error")
+				}
 			}
 
 			onStatus := func(status string) {
@@ -227,17 +241,20 @@ func handleVoiceAsk(pool *queue.WorkerPool) http.HandlerFunc {
 
 		// Standard JSON response mode
 		if pool == nil {
+			metrics.RecordVoiceTTFR("json", "error", time.Since(reqStart))
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "worker pool is uninitialized"})
 			return
 		}
 
 		reply, convID, turnErr := pool.ExecuteVoiceTurn(r.Context(), req.Prompt, sessionID, nil)
 		if turnErr != nil {
+			metrics.RecordVoiceTTFR("json", "error", time.Since(reqStart))
 			sanitizedErr := sanitizer.SanitizeString(turnErr.Error())
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": sanitizedErr})
 			return
 		}
 
+		metrics.RecordVoiceTTFR("json", "success", time.Since(reqStart))
 		writeJSON(w, http.StatusOK, VoiceAskResponse{
 			Reply:          reply,
 			ConversationID: convID,
