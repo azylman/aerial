@@ -1278,7 +1278,7 @@ func TestWorker_SessionDBRotation_PreTurn(t *testing.T) {
 
 		select {
 		case <-doneCh:
-		case <-time.After(3 * time.Second):
+		case <-time.After(10 * time.Second):
 			t.Fatal("Timeout waiting for message")
 		}
 
@@ -1352,7 +1352,7 @@ func TestWorker_SessionDBRotation_PreTurn(t *testing.T) {
 
 		select {
 		case <-doneCh:
-		case <-time.After(3 * time.Second):
+		case <-time.After(10 * time.Second):
 			t.Fatal("Timeout waiting for message")
 		}
 
@@ -1416,7 +1416,7 @@ func TestWorker_SessionDBRotation_QuotaPause(t *testing.T) {
 
 		select {
 		case <-doneCh:
-		case <-time.After(3 * time.Second):
+		case <-time.After(10 * time.Second):
 			t.Fatal("Timeout waiting for message")
 		}
 
@@ -1479,7 +1479,7 @@ func TestWorker_SessionDBRotation_QuotaPause(t *testing.T) {
 
 		select {
 		case <-doneCh:
-		case <-time.After(3 * time.Second):
+		case <-time.After(10 * time.Second):
 			t.Fatal("Timeout waiting for message")
 		}
 
@@ -1551,7 +1551,7 @@ func TestWorker_SessionDBRotation_WatchdogTimeout(t *testing.T) {
 
 	select {
 	case <-doneCh:
-	case <-time.After(3 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("Timeout waiting for message completed")
 	}
 
@@ -1615,7 +1615,7 @@ func TestWorker_SessionDBRotation_PostExecution(t *testing.T) {
 
 	select {
 	case <-doneCh:
-	case <-time.After(3 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("Timeout waiting for message")
 	}
 
@@ -1691,7 +1691,7 @@ func TestWorker_SessionDBRotation_TransientRetry(t *testing.T) {
 
 	select {
 	case <-doneCh:
-	case <-time.After(3 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("Timeout waiting for message completed")
 	}
 

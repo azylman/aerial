@@ -2765,5 +2765,125 @@ func TestSessionExistsOnDisk_DBAndWAL(t *testing.T) {
 	}
 }
 
+func TestManager_CoverageBoost_SessionEdgeCases(t *testing.T) {
+	tempHome := t.TempDir()
+	tempData := t.TempDir()
+
+	// 1. Force ENOTDIR on conversation directory by creating it as a regular file
+	convFileAsDir := filepath.Join(tempData, "conversations")
+	if err := os.WriteFile(convFileAsDir, []byte("not-a-dir"), 0644); err != nil {
+		t.Fatalf("failed to create conv file: %v", err)
+	}
+
+	mgr := New(tempHome, tempData)
+
+	// SessionExistsOnDisk encounters ENOTDIR (not ErrNotExist) -> logs warning
+	if mgr.SessionExistsOnDisk("test-session") {
+		t.Errorf("expected false for ENOTDIR conversation dir")
+	}
+
+	// GetSessionDBSize encounters ENOTDIR on .db and .pb -> logs warning
+	if sz := mgr.GetSessionDBSize("test-session"); sz != 0 {
+		t.Errorf("expected 0 for ENOTDIR conversation dir, got %d", sz)
+	}
+
+	// 2. Force ENOTDIR on transcript directory in SessionExistsOnDisk
+	rootBrain := filepath.Join(tempHome, ".gemini", "antigravity", "brain")
+	if err := os.MkdirAll(rootBrain, 0755); err != nil {
+		t.Fatalf("failed to create root brain dir: %v", err)
+	}
+	sessAsFile := filepath.Join(rootBrain, "sess-as-file")
+	if err := os.WriteFile(sessAsFile, []byte("file-not-dir"), 0644); err != nil {
+		t.Fatalf("failed to create sess-as-file: %v", err)
+	}
+	mgrHomeOnly := New(tempHome, "")
+	if mgrHomeOnly.SessionExistsOnDisk("sess-as-file") {
+		t.Errorf("expected false for sess-as-file")
+	}
+
+	// 3. AppendAmbientTurn with transcript.jsonl as a directory
+	ambientSess := "sess-ambient-dir"
+	logsDir := filepath.Join(rootBrain, ambientSess, ".system_generated", "logs")
+	if err := os.MkdirAll(filepath.Join(logsDir, "transcript.jsonl"), 0755); err != nil {
+		t.Fatalf("failed to create transcript.jsonl as dir: %v", err)
+	}
+	err := mgrHomeOnly.AppendAmbientTurn(ambientSess, "#general", "test-user", "hello", time.Now())
+	if err == nil {
+		t.Errorf("expected error when transcript.jsonl is a directory")
+	}
+
+	// 4. ExtractLastTurnError and ExtractFinalSubstantiveResponse with canceled context
+	cancCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, err := mgr.ExtractLastTurnError(cancCtx, "any-session", time.Time{}); !errors.Is(err, context.Canceled) {
+		t.Errorf("expected context.Canceled from ExtractLastTurnError, got %v", err)
+	}
+
+	if _, _, err := mgr.ExtractFinalSubstantiveResponse(cancCtx, "any-session"); !errors.Is(err, context.Canceled) {
+		t.Errorf("expected context.Canceled from ExtractFinalSubstantiveResponse, got %v", err)
+	}
+
+	// 5. ExtractLastTurnError with RFC3339 timestamps (without fractional seconds) older than since
+	rfc3339Sess := "sess-rfc3339"
+	rfcLogsDir := filepath.Join(rootBrain, rfc3339Sess, ".system_generated", "logs")
+	if err := os.MkdirAll(rfcLogsDir, 0755); err != nil {
+		t.Fatalf("failed to create rfc logs dir: %v", err)
+	}
+	oldTime := time.Now().Add(-1 * time.Hour).UTC().Format(time.RFC3339)
+	transcriptContent := fmt.Sprintf("{\"type\":\"ERROR_MESSAGE\",\"status\":\"ERROR\",\"content\":\"some old error\",\"created_at\":%q}\n", oldTime)
+	if err := os.WriteFile(filepath.Join(rfcLogsDir, "transcript.jsonl"), []byte(transcriptContent), 0644); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+	errMsg, err := mgrHomeOnly.ExtractLastTurnError(context.Background(), rfc3339Sess, time.Now())
+	if err != nil {
+		t.Fatalf("unexpected error from ExtractLastTurnError: %v", err)
+	}
+	if errMsg != "" {
+		t.Errorf("expected empty error message for timestamp older than since, got %q", errMsg)
+	}
+
+	// 6. FindLatestSessionDir with ambient-eval- prefix and non-directory files
+	evalDir := filepath.Join(rootBrain, "ambient-eval-12345")
+	_ = os.MkdirAll(evalDir, 0755)
+	dummyFile := filepath.Join(rootBrain, "regular-file-not-dir")
+	_ = os.WriteFile(dummyFile, []byte("test"), 0644)
+	validDir := filepath.Join(rootBrain, "sess-valid-recent")
+	_ = os.MkdirAll(validDir, 0755)
+
+	latest := mgrHomeOnly.FindLatestSessionDir(time.Now().Add(-10 * time.Minute))
+	if latest == "" {
+		t.Errorf("expected to find recent session, got empty")
+	}
+
+	// 7. SaveActiveTasks and GetActiveTasks invalid JSON test
+	tasksSess := "sess-active-tasks"
+	tasksDir := filepath.Join(rootBrain, tasksSess, ".system_generated")
+	if err := os.MkdirAll(tasksDir, 0755); err != nil {
+		t.Fatalf("failed to create tasks dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tasksDir, "active_tasks.json"), []byte("invalid-json"), 0644); err != nil {
+		t.Fatalf("failed to write invalid tasks json: %v", err)
+	}
+	if _, err := mgrHomeOnly.GetActiveTasks(tasksSess); err == nil {
+		t.Errorf("expected unmarshal error for invalid active_tasks.json")
+	}
+
+	// 8. HasUnfinishedBackgroundTask with plain text raw line (non-JSON)
+	plainTextSess := "sess-plaintext-task"
+	ptLogsDir := filepath.Join(rootBrain, plainTextSess, ".system_generated", "logs")
+	if err := os.MkdirAll(ptLogsDir, 0755); err != nil {
+		t.Fatalf("failed to create pt logs dir: %v", err)
+	}
+	ptContent := "Tool is running as a background task with task id: test-task-123\n"
+	if err := os.WriteFile(filepath.Join(ptLogsDir, "transcript.jsonl"), []byte(ptContent), 0644); err != nil {
+		t.Fatalf("failed to write pt transcript: %v", err)
+	}
+	hasTask, taskID, err := mgrHomeOnly.HasUnfinishedBackgroundTask(plainTextSess)
+	if err != nil || !hasTask || taskID != "test-task-123" {
+		t.Errorf("expected unfinished task test-task-123 from plain text line, got hasTask=%v, taskID=%q, err=%v", hasTask, taskID, err)
+	}
+}
+
 
 
