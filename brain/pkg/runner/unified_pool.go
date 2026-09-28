@@ -156,3 +156,58 @@ func (p *UnifiedProcessPool) Close() error {
 	})
 	return p.closeErr
 }
+
+// Session rotation thresholds for memory pressure mitigation and context compaction.
+const (
+	DefaultMaxSessionTurns   = 10
+	DefaultMaxSessionSteps   = 180
+	DefaultMaxTranscriptByte = 500 * 1024
+)
+
+// ShouldRotate evaluates whether a daemon has reached its session lifetime thresholds
+// (10 turns or 180 steps) and is safe to rotate (no in-flight turns).
+func (p *UnifiedProcessPool) ShouldRotate(d *StreamingDaemon) (bool, string) {
+	if d == nil {
+		return false, ""
+	}
+	if d.InflightCount() > 0 {
+		return false, "" // Never rotate during in-flight turn
+	}
+	if d.TurnCount() >= DefaultMaxSessionTurns {
+		return true, fmt.Sprintf("turn count threshold exceeded (%d >= %d)", d.TurnCount(), DefaultMaxSessionTurns)
+	}
+	if d.StepCount() >= DefaultMaxSessionSteps {
+		return true, fmt.Sprintf("step count threshold exceeded (%d >= %d)", d.StepCount(), DefaultMaxSessionSteps)
+	}
+	return false, ""
+}
+
+// RotateDaemon evicts and closes the existing daemon for targetKey, then spawns a fresh
+// replacement daemon via GetOrCreate. If summary is non-empty, context compaction logging is recorded.
+func (p *UnifiedProcessPool) RotateDaemon(ctx context.Context, targetKey string, summary string) (*StreamingDaemon, error) {
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return nil, fmt.Errorf("process pool is closed")
+	}
+	oldDaemon, exists := p.daemons[targetKey]
+	delete(p.daemons, targetKey)
+	p.mu.Unlock()
+
+	if summary != "" {
+		log.Printf("[UnifiedProcessPool] Rotating daemon %q with summary compaction (%d bytes)", targetKey, len(summary))
+	}
+
+	if exists && oldDaemon != nil {
+		if closeErr := oldDaemon.Close(); closeErr != nil {
+			log.Printf("[UnifiedProcessPool] Warning: error closing old daemon %q during rotation: %v", targetKey, closeErr)
+		}
+	}
+
+	newDaemon, err := p.GetOrCreate(ctx, targetKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed creating rotated daemon for %q: %w", targetKey, err)
+	}
+
+	return newDaemon, nil
+}

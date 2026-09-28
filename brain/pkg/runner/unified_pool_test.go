@@ -3,6 +3,7 @@ package runner
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"sync/atomic"
@@ -314,4 +315,168 @@ func TestUnifiedProcessPool_InitializePrewarmFailure(t *testing.T) {
 	}
 	// Give background pre-warm goroutine time to run and log warning
 	time.Sleep(50 * time.Millisecond)
+}
+
+func TestUnifiedProcessPool_ShouldRotate(t *testing.T) {
+	pool := NewUnifiedProcessPool(PoolConfig{}, nil)
+
+	// Case 1: nil daemon
+	shouldRotate, reason := pool.ShouldRotate(nil)
+	if shouldRotate || reason != "" {
+		t.Errorf("expected false for nil daemon, got %v (%s)", shouldRotate, reason)
+	}
+
+	// Case 2: turnCount >= 10
+	d := &StreamingDaemon{
+		turnCount: 10,
+		state:     StateReady,
+	}
+	shouldRotate, reason = pool.ShouldRotate(d)
+	if !shouldRotate || !strings.Contains(reason, "turn count threshold exceeded") {
+		t.Fatalf("expected rotation on turnCount >= 10, got %v (%s)", shouldRotate, reason)
+	}
+
+	// Case 3: stepCount >= 180
+	d.turnCount = 2
+	d.stepCount = 185
+	shouldRotate, reason = pool.ShouldRotate(d)
+	if !shouldRotate || !strings.Contains(reason, "step count threshold exceeded") {
+		t.Fatalf("expected rotation on stepCount >= 180, got %v (%s)", shouldRotate, reason)
+	}
+
+	// Case 4: below threshold
+	d.turnCount = 5
+	d.stepCount = 100
+	shouldRotate, reason = pool.ShouldRotate(d)
+	if shouldRotate || reason != "" {
+		t.Errorf("expected no rotation when below thresholds, got %v (%s)", shouldRotate, reason)
+	}
+
+	// Case 5: inflight turn gating (turnCount/stepCount exceeded, but inflight > 0)
+	d.turnCount = 15
+	d.stepCount = 250
+	d.inflight = []*TurnContext{{TurnID: "turn-inflight"}}
+	shouldRotate, reason = pool.ShouldRotate(d)
+	if shouldRotate || reason != "" {
+		t.Errorf("expected no rotation when inflight turns exist, got %v (%s)", shouldRotate, reason)
+	}
+}
+
+func TestUnifiedProcessPool_RotateDaemon(t *testing.T) {
+	var spawnCounter atomic.Int32
+
+	mock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			count := spawnCounter.Add(1)
+			outR, outW := io.Pipe()
+			inR, inW := io.Pipe()
+			errR, _ := io.Pipe()
+
+			go func() {
+				defer outW.Close()
+				_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":"00000000-0000-0000-0000-%012d"}`+"\n", count)))
+			}()
+			_ = inR.Close()
+
+			return inW, outR, errR, &MockProcessHandle{pid: int(count * 100)}, nil
+		},
+	}
+
+	pool := NewUnifiedProcessPool(PoolConfig{}, mock)
+	defer pool.Close()
+
+	ctx := context.Background()
+
+	// 1. Initial creation
+	d1, err := pool.GetOrCreate(ctx, "target-session")
+	if err != nil {
+		t.Fatalf("failed creating initial daemon: %v", err)
+	}
+	d1.mu.Lock()
+	d1.turnCount = 10
+	d1.stepCount = 185
+	d1.mu.Unlock()
+
+	// 2. Rotate existing daemon with summary compaction
+	d2, err := pool.RotateDaemon(ctx, "target-session", "compacted conversation history summary")
+	if err != nil {
+		t.Fatalf("failed rotating daemon: %v", err)
+	}
+	if d2 == d1 {
+		t.Errorf("expected new daemon instance after rotation")
+	}
+	if d1.State() != StateClosed {
+		t.Errorf("expected old daemon to be closed, got %v", d1.State())
+	}
+	if d2.TurnCount() != 0 || d2.StepCount() != 0 {
+		t.Errorf("expected fresh metrics on rotated daemon, got turns=%d, steps=%d", d2.TurnCount(), d2.StepCount())
+	}
+
+	// 3. Rotate non-existent target key (creates new daemon cleanly)
+	d3, err := pool.RotateDaemon(ctx, "non-existent-target", "")
+	if err != nil {
+		t.Fatalf("failed rotating non-existent target: %v", err)
+	}
+	if d3 == nil {
+		t.Fatalf("expected non-nil daemon for non-existent target rotation")
+	}
+
+	// 4. Rotate on closed pool
+	if err := pool.Close(); err != nil {
+		t.Fatalf("failed closing pool: %v", err)
+	}
+	_, errClosed := pool.RotateDaemon(ctx, "target-session", "")
+	if errClosed == nil || !strings.Contains(errClosed.Error(), "process pool is closed") {
+		t.Errorf("expected error on closed pool rotation, got %v", errClosed)
+	}
+}
+
+func TestUnifiedProcessPool_RotateDaemon_Errors(t *testing.T) {
+	var spawnCounter atomic.Int32
+	var failSpawn atomic.Bool
+
+	mock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			if failSpawn.Load() {
+				return nil, nil, nil, nil, errors.New("simulated spawn failure")
+			}
+			count := spawnCounter.Add(1)
+			outR, outW := io.Pipe()
+			inR, inW := io.Pipe()
+			errR, _ := io.Pipe()
+
+			go func() {
+				defer outW.Close()
+				_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":"00000000-0000-0000-0000-%012d"}`+"\n", count)))
+			}()
+			_ = inR.Close()
+
+			return inW, outR, errR, &MockProcessHandle{pid: int(count * 100), killErr: errors.New("kill failed")}, nil
+		},
+	}
+
+	pool := NewUnifiedProcessPool(PoolConfig{}, mock)
+	defer pool.Close()
+
+	ctx := context.Background()
+
+	// Daemon with failing handle.Kill() should still rotate and log warning without failing
+	d1, err := pool.GetOrCreate(ctx, "kill-err-target")
+	if err != nil {
+		t.Fatalf("failed creating initial daemon: %v", err)
+	}
+	d2, err := pool.RotateDaemon(ctx, "kill-err-target", "")
+	if err != nil {
+		t.Fatalf("expected RotateDaemon to succeed despite kill warning, got %v", err)
+	}
+	if d2 == d1 {
+		t.Errorf("expected new daemon after rotation")
+	}
+
+	// When spawn fails during rotation, RotateDaemon returns formatted error
+	failSpawn.Store(true)
+	_, errFail := pool.RotateDaemon(ctx, "fail-spawn-target", "")
+	if errFail == nil || !strings.Contains(errFail.Error(), "failed creating rotated daemon") {
+		t.Errorf("expected failed creating rotated daemon error, got %v", errFail)
+	}
 }
