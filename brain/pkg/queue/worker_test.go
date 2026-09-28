@@ -1174,3 +1174,538 @@ func (m *mockErrRecentStore) GetRecentThreadMessages(ctx context.Context, thread
 	return nil, errors.New("simulated db failure")
 }
 
+func TestWorker_RotateSessionID_EvictsDaemons(t *testing.T) {
+	t.Parallel()
+	fakeStore := setupTestStore(t)
+	dPool := NewDaemonPool(nil, "", nil, t.TempDir())
+	vPool := NewDaemonPool(nil, "", nil, t.TempDir())
+
+	dPool.daemons["thread-evict-1"] = &runner.Daemon{}
+	vPool.daemons["thread-evict-1"] = &runner.Daemon{}
+
+	pool := &WorkerPool{
+		cfg: WorkerPoolConfig{
+			Store: fakeStore,
+		},
+		daemonPool:      dPool,
+		voiceDaemonPool: vPool,
+	}
+	te := &turnExecution{
+		pool:     pool,
+		threadID: "thread-evict-1",
+	}
+
+	// 1. When newSessionID != "", daemons are NOT evicted
+	te.rotateSessionID("thread-evict-1", "new-sess-1")
+	if !dPool.HasDaemon("thread-evict-1") || !vPool.HasDaemon("thread-evict-1") {
+		t.Errorf("expected daemons to remain when newSessionID is non-empty")
+	}
+
+	// 2. When newSessionID == "", daemons ARE evicted
+	te.rotateSessionID("thread-evict-1", "")
+	if dPool.HasDaemon("thread-evict-1") {
+		t.Errorf("expected daemonPool to evict thread-evict-1")
+	}
+	if vPool.HasDaemon("thread-evict-1") {
+		t.Errorf("expected voiceDaemonPool to evict thread-evict-1")
+	}
+
+	// 3. Nil pool / nil daemon pools safe handling
+	teNil := &turnExecution{threadID: "thread-evict-2"}
+	teNil.rotateSessionID("thread-evict-2", "")
+}
+
+func TestWorker_SessionDBRotation_PreTurn(t *testing.T) {
+	t.Parallel()
+
+	// Channel mode pre-flight DB rotation
+	t.Run("ChannelMode_PreFlight_DBLimit", func(t *testing.T) {
+		t.Parallel()
+		store := setupTestStore(t)
+		tmpDir := t.TempDir()
+		sessMgr := session.New(tmpDir, tmpDir)
+
+		oldSess := "sess-chan-db-rot"
+		convDir := filepath.Join(tmpDir, "conversations")
+		if err := os.MkdirAll(convDir, 0755); err != nil {
+			t.Fatalf("failed to create convDir: %v", err)
+		}
+		// Write .db (1 MB) and .db-wal (600 KB) -> 1.6 MB total >= DefaultMaxSessionDBBytes
+		_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, 1000*1024), 0644)
+		_ = os.WriteFile(filepath.Join(convDir, oldSess+".db-wal"), make([]byte, 600*1024), 0644)
+
+		_ = saveSessionID(store, "chan-db-thread", oldSess)
+		_, _ = incrementSessionTurnCount(store, "chan-db-thread")
+
+		var mu sync.Mutex
+		var gotSessionID string
+		doneCh := make(chan struct{})
+
+		appCfg := config.NewFromData(&config.ConfigData{
+			Channels: map[string]config.ChannelPolicy{
+				"default": {Mode: "channel"},
+			},
+		})
+
+		pool := New(appCfg, WorkerPoolConfig{
+			SessionManager: sessMgr,
+			Store:          store,
+			TimeoutMinutes: 1,
+			BackoffBase:    10 * time.Millisecond,
+			MaxAttempts:    1,
+			RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+				mu.Lock()
+				gotSessionID = sessionID
+				mu.Unlock()
+				return mockJSONResponse(uuid.New().String(), "OK"), "", 0, nil
+			},
+			DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+				return nil
+			},
+			TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+				return func() {}
+			},
+			OnMessageCompleted: func(msg db.Message, finalStatus string) {
+				close(doneCh)
+			},
+		})
+		pool.Start()
+		defer pool.Stop()
+
+		msg := db.Message{ID: "msg-chan-db", ThreadID: "chan-db-thread", Content: "<@aerial> hello"}
+		_ = insertMessage(store, msg)
+		pool.Enqueue(msg)
+
+		select {
+		case <-doneCh:
+		case <-time.After(10 * time.Second):
+			t.Fatal("Timeout waiting for message")
+		}
+
+		mu.Lock()
+		if gotSessionID != "" {
+			t.Errorf("Expected cold start (empty session ID) on DB size limit, got: %q", gotSessionID)
+		}
+		mu.Unlock()
+
+		prevSess, _ := getPreviousSessionID(store, "chan-db-thread")
+		if prevSess != oldSess {
+			t.Errorf("Expected previous session ID %q in store, got %q", oldSess, prevSess)
+		}
+	})
+
+	// Thread mode pre-flight DB rotation
+	t.Run("ThreadMode_PreFlight_DBLimit", func(t *testing.T) {
+		t.Parallel()
+		store := setupTestStore(t)
+		tmpDir := t.TempDir()
+		sessMgr := session.New(tmpDir, tmpDir)
+
+		oldSess := "sess-thread-db-rot"
+		convDir := filepath.Join(tmpDir, "conversations")
+		if err := os.MkdirAll(convDir, 0755); err != nil {
+			t.Fatalf("failed to create convDir: %v", err)
+		}
+		_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, DefaultMaxSessionDBBytes+1024), 0644)
+
+		_ = saveSessionID(store, "thread-db-thread", oldSess)
+		_, _ = incrementSessionTurnCount(store, "thread-db-thread")
+
+		var mu sync.Mutex
+		var gotSessionID string
+		doneCh := make(chan struct{})
+
+		appCfg := config.NewFromData(&config.ConfigData{
+			Channels: map[string]config.ChannelPolicy{
+				"default": {Mode: "thread"},
+			},
+		})
+
+		pool := New(appCfg, WorkerPoolConfig{
+			SessionManager: sessMgr,
+			Store:          store,
+			TimeoutMinutes: 1,
+			BackoffBase:    10 * time.Millisecond,
+			MaxAttempts:    1,
+			RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+				mu.Lock()
+				gotSessionID = sessionID
+				mu.Unlock()
+				return mockJSONResponse(uuid.New().String(), "OK"), "", 0, nil
+			},
+			DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+				return nil
+			},
+			TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+				return func() {}
+			},
+			OnMessageCompleted: func(msg db.Message, finalStatus string) {
+				close(doneCh)
+			},
+		})
+		pool.Start()
+		defer pool.Stop()
+
+		msg := db.Message{ID: "msg-thread-db", ThreadID: "thread-db-thread", Content: "hello"}
+		_ = insertMessage(store, msg)
+		pool.Enqueue(msg)
+
+		select {
+		case <-doneCh:
+		case <-time.After(10 * time.Second):
+			t.Fatal("Timeout waiting for message")
+		}
+
+		mu.Lock()
+		if gotSessionID != "" {
+			t.Errorf("Expected cold start (empty session ID) on thread DB limit, got: %q", gotSessionID)
+		}
+		mu.Unlock()
+	})
+}
+
+func TestWorker_SessionDBRotation_QuotaPause(t *testing.T) {
+	t.Parallel()
+
+	// Rotate on Quota Pause when DB size >= DefaultMaxQuotaPauseDBBytes
+	t.Run("RotateWhenDBSizeExceedsQuotaPauseThreshold", func(t *testing.T) {
+		t.Parallel()
+		store := setupTestStore(t)
+		tmpDir := t.TempDir()
+		sessMgr := session.New(tmpDir, tmpDir)
+
+		oldSess := "sess-quota-pause-db-rot"
+		convDir := filepath.Join(tmpDir, "conversations")
+		_ = os.MkdirAll(convDir, 0755)
+		_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, DefaultMaxQuotaPauseDBBytes+1024), 0644)
+
+		_ = saveSessionID(store, "thread-qp-rot", oldSess)
+
+		doneCh := make(chan struct{})
+		appCfg := config.NewFromData(&config.ConfigData{
+			Channels: map[string]config.ChannelPolicy{
+				"default": {Mode: "thread"},
+			},
+		})
+
+		pool := New(appCfg, WorkerPoolConfig{
+			SessionManager: sessMgr,
+			Store:          store,
+			TimeoutMinutes: 1,
+			BackoffBase:    10 * time.Millisecond,
+			MaxAttempts:    1,
+			RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+				return "", "RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Resets in 30s.", 1, errors.New("exit code 1")
+			},
+			DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+				return nil
+			},
+			TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+				return func() {}
+			},
+			OnMessageCompleted: func(msg db.Message, finalStatus string) {
+				close(doneCh)
+			},
+		})
+		pool.Start()
+		defer pool.Stop()
+
+		msg := db.Message{ID: "msg-qp-rot", ThreadID: "thread-qp-rot", Content: "Trigger quota pause"}
+		_ = insertMessage(store, msg)
+		pool.Enqueue(msg)
+
+		select {
+		case <-doneCh:
+		case <-time.After(10 * time.Second):
+			t.Fatal("Timeout waiting for message")
+		}
+
+		curSess, _ := getSessionID(store, "thread-qp-rot")
+		if curSess != "" {
+			t.Errorf("Expected session to be rotated (empty) on quota pause with large DB, got: %q", curSess)
+		}
+		prevSess, _ := getPreviousSessionID(store, "thread-qp-rot")
+		if prevSess != oldSess {
+			t.Errorf("Expected previous session ID %q, got: %q", oldSess, prevSess)
+		}
+	})
+
+	// Preserve session on Quota Pause when DB size < DefaultMaxQuotaPauseDBBytes
+	t.Run("PreserveWhenDBSizeBelowQuotaPauseThreshold", func(t *testing.T) {
+		t.Parallel()
+		store := setupTestStore(t)
+		tmpDir := t.TempDir()
+		sessMgr := session.New(tmpDir, tmpDir)
+
+		oldSess := "sess-quota-pause-db-keep"
+		convDir := filepath.Join(tmpDir, "conversations")
+		_ = os.MkdirAll(convDir, 0755)
+		_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, 200*1024), 0644)
+
+		_ = saveSessionID(store, "thread-qp-keep", oldSess)
+
+		doneCh := make(chan struct{})
+		appCfg := config.NewFromData(&config.ConfigData{
+			Channels: map[string]config.ChannelPolicy{
+				"default": {Mode: "thread"},
+			},
+		})
+
+		pool := New(appCfg, WorkerPoolConfig{
+			SessionManager: sessMgr,
+			Store:          store,
+			TimeoutMinutes: 1,
+			BackoffBase:    10 * time.Millisecond,
+			MaxAttempts:    1,
+			RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+				return "", "RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Resets in 30s.", 1, errors.New("exit code 1")
+			},
+			DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+				return nil
+			},
+			TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+				return func() {}
+			},
+			OnMessageCompleted: func(msg db.Message, finalStatus string) {
+				close(doneCh)
+			},
+		})
+		pool.Start()
+		defer pool.Stop()
+
+		msg := db.Message{ID: "msg-qp-keep", ThreadID: "thread-qp-keep", Content: "Trigger quota pause"}
+		_ = insertMessage(store, msg)
+		pool.Enqueue(msg)
+
+		select {
+		case <-doneCh:
+		case <-time.After(10 * time.Second):
+			t.Fatal("Timeout waiting for message")
+		}
+
+		curSess, _ := getSessionID(store, "thread-qp-keep")
+		if curSess != oldSess {
+			t.Errorf("Expected session %q to be preserved on quota pause when small, got: %q", oldSess, curSess)
+		}
+	})
+}
+
+func TestWorker_SessionDBRotation_WatchdogTimeout(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	tmpDir := t.TempDir()
+	sessMgr := session.New(tmpDir, tmpDir)
+
+	bloatedSessionID := "sess-wd-db-bloat"
+	convDir := filepath.Join(tmpDir, "conversations")
+	_ = os.MkdirAll(convDir, 0755)
+
+	_ = saveSessionID(store, "thread-wd-db-bloat", bloatedSessionID)
+
+	var mu sync.Mutex
+	var attempts []string
+	doneCh := make(chan struct{}, 1)
+
+	appCfg := config.NewFromData(&config.ConfigData{
+		Channels: map[string]config.ChannelPolicy{
+			"default": {Mode: "thread"},
+		},
+	})
+
+	pool := New(appCfg, WorkerPoolConfig{
+		SessionManager: sessMgr,
+		Store:          store,
+		TimeoutMinutes: 1,
+		BackoffBase:    5 * time.Millisecond,
+		MaxAttempts:    2,
+		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+			mu.Lock()
+			attempts = append(attempts, sessionID)
+			currentAttempt := len(attempts)
+			mu.Unlock()
+
+			if currentAttempt == 1 {
+				// During attempt 1, write a bloated DB (exceeding DefaultMaxSessionDBBytes)
+				_ = os.WriteFile(filepath.Join(convDir, bloatedSessionID+".db"), make([]byte, DefaultMaxSessionDBBytes+1024), 0644)
+				return "", "inactivity timeout exceeded [watchdog]", 124, errors.New("watchdog timeout")
+			}
+
+			return mockJSONResponse(uuid.New().String(), "Recovered on cold retry"), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			doneCh <- struct{}{}
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{ID: "msg-wd-db-bloat", ThreadID: "thread-wd-db-bloat", Content: "Run long task"}
+	_ = insertMessage(store, msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Timeout waiting for message completed")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(attempts) != 2 {
+		t.Fatalf("Expected 2 attempts, got %d", len(attempts))
+	}
+	if attempts[0] != bloatedSessionID {
+		t.Errorf("Expected attempt 1 to use session %q, got %q", bloatedSessionID, attempts[0])
+	}
+	if attempts[1] != "" {
+		t.Errorf("Expected attempt 2 to have rotated to empty session (cold start), got: %q", attempts[1])
+	}
+}
+
+func TestWorker_SessionDBRotation_PostExecution(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	tmpDir := t.TempDir()
+	sessMgr := session.New(tmpDir, tmpDir)
+
+	executedSessionID := uuid.New().String()
+	convDir := filepath.Join(tmpDir, "conversations")
+	_ = os.MkdirAll(convDir, 0755)
+
+	doneCh := make(chan struct{})
+	appCfg := config.NewFromData(&config.ConfigData{
+		Channels: map[string]config.ChannelPolicy{
+			"default": {Mode: "thread"},
+		},
+	})
+
+	pool := New(appCfg, WorkerPoolConfig{
+		SessionManager: sessMgr,
+		Store:          store,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    1,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			// During execution, write a DB that exceeds DefaultMaxSessionDBBytes
+			_ = os.WriteFile(filepath.Join(convDir, executedSessionID+".db"), make([]byte, DefaultMaxSessionDBBytes+500), 0644)
+			return mockJSONResponse(executedSessionID, "Execution heavy DB output"), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			close(doneCh)
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{ID: "msg-post-db", ThreadID: "thread-post-db-test", Content: "Run DB heavy"}
+	_ = insertMessage(store, msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Timeout waiting for message")
+	}
+
+	curSess, _ := getSessionID(store, "thread-post-db-test")
+	if curSess != "" {
+		t.Errorf("Expected session to be rotated (empty) post execution, got: %q", curSess)
+	}
+	prevSess, _ := getPreviousSessionID(store, "thread-post-db-test")
+	if prevSess != executedSessionID {
+		t.Errorf("Expected previous session ID %q post execution, got %q", executedSessionID, prevSess)
+	}
+}
+
+func TestWorker_SessionDBRotation_TransientRetry(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	tmpDir := t.TempDir()
+	sessMgr := session.New(tmpDir, tmpDir)
+
+	transSessionID := "sess-trans-db-rot"
+	convDir := filepath.Join(tmpDir, "conversations")
+	_ = os.MkdirAll(convDir, 0755)
+
+	_ = saveSessionID(store, "thread-trans-db-rot", transSessionID)
+
+	var mu sync.Mutex
+	var attempts []string
+	doneCh := make(chan struct{}, 1)
+
+	appCfg := config.NewFromData(&config.ConfigData{
+		Channels: map[string]config.ChannelPolicy{
+			"default": {Mode: "thread"},
+		},
+	})
+
+	pool := New(appCfg, WorkerPoolConfig{
+		SessionManager: sessMgr,
+		Store:          store,
+		TimeoutMinutes: 1,
+		BackoffBase:    5 * time.Millisecond,
+		MaxAttempts:    2,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			mu.Lock()
+			attempts = append(attempts, sessionID)
+			currentAttempt := len(attempts)
+			mu.Unlock()
+
+			if currentAttempt == 1 {
+				// During attempt 1, write a bloated DB (exceeding DefaultMaxSessionDBBytes)
+				_ = os.WriteFile(filepath.Join(convDir, transSessionID+".db"), make([]byte, DefaultMaxSessionDBBytes+1024), 0644)
+				// Return a transient error
+				return `{"status": "ERROR", "error": "temporary network timeout"}`, "", 0, nil
+			}
+
+			return mockJSONResponse(uuid.New().String(), "Recovered on cold retry"), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			doneCh <- struct{}{}
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{ID: "msg-trans-db", ThreadID: "thread-trans-db-rot", Content: "Run transient task"}
+	_ = insertMessage(store, msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Timeout waiting for message completed")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(attempts) != 2 {
+		t.Fatalf("Expected 2 attempts, got %d", len(attempts))
+	}
+	if attempts[0] != transSessionID {
+		t.Errorf("Expected attempt 1 to use session %q, got %q", transSessionID, attempts[0])
+	}
+	if attempts[1] != "" {
+		t.Errorf("Expected attempt 2 to have rotated to empty session (cold start), got: %q", attempts[1])
+	}
+}
+
+

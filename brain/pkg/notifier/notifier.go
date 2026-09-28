@@ -48,20 +48,34 @@ func FormatQuotaPauseMessage(resetDur time.Duration, runAt time.Time, scheduled 
 		countdown = fmt.Sprintf(" (<t:%d:R>)", runAt.Unix())
 	}
 
+	isCapacity := resetDur <= 60*time.Second
+
 	if isCircuitBreak {
+		if isCapacity {
+			return "Model capacity temporarily reached again following a scheduled retry. I have paused automated retries on this turn to prevent a retry loop. Please try again in a moment."
+		}
 		return "Personal subscription quota limit reached again following a scheduled retry. I have paused automated retries on this turn to prevent a retry loop. Add `GEMINI_API_KEY` into your environment to unlock pay-as-you-go access, or try again once quota resets."
 	}
 
 	if scheduled {
+		if isCapacity {
+			return fmt.Sprintf("Model capacity temporarily reached. Capacity clears in **%s**%s. I have automatically scheduled a retry for when capacity clears.", durHuman, countdown)
+		}
 		return fmt.Sprintf("Personal subscription quota limit reached. Quota resets in **%s**%s. I have automatically scheduled a retry for when quota refreshes. (Alternatively, add `GEMINI_API_KEY` into `.env` to unlock pay-as-you-go access immediately.)", durHuman, countdown)
 	}
 
+	if isCapacity {
+		return fmt.Sprintf("Model capacity temporarily reached. Capacity clears in **%s**%s. Please try again in a moment.", durHuman, countdown)
+	}
 	return fmt.Sprintf("Personal subscription quota limit reached. Quota resets in **%s**%s. Please try again once quota refreshes, or add `GEMINI_API_KEY` into `.env` to unlock direct access.", durHuman, countdown)
 }
 
 // StaticFallback returns a neutral default notification based on the error context.
 func StaticFallback(contextDescription string) string {
 	lower := strings.ToLower(contextDescription)
+	if strings.Contains(lower, "capacity") {
+		return "Model capacity temporarily reached. Please try again in a moment."
+	}
 	if strings.Contains(lower, "quota") || strings.Contains(lower, "individual quota") || strings.Contains(lower, "resource_exhausted") {
 		return "Personal subscription quota limit reached. Please try again once quota refreshes, or add `GEMINI_API_KEY` into `.env` to bypass subscription limits."
 	}

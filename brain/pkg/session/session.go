@@ -23,6 +23,12 @@ const DefaultMaxSessionSteps = 180
 // DefaultMaxTranscriptBytes defines the engine-wide maximum transcript file size in bytes (500 KB) before session rotation.
 const DefaultMaxTranscriptBytes = 500 * 1024
 
+// DefaultMaxSessionDBBytes defines the engine-wide maximum conversation SQLite/protobuf size in bytes (1.5 MB) before session rotation.
+const DefaultMaxSessionDBBytes = 1536 * 1024
+
+// DefaultMaxQuotaPauseDBBytes defines the reactive conversation size threshold in bytes (1.2 MB) to trigger session rotation upon quota exhaustion.
+const DefaultMaxQuotaPauseDBBytes = 1200 * 1024
+
 // SourceAmbient represents ambient chat messages appended to session transcripts.
 const SourceAmbient = "AMBIENT"
 
@@ -1184,8 +1190,32 @@ func getLastStepIndex(filePath string) (int, error) {
 	return -1, nil
 }
 
+// conversationCandidateDirs returns all potential conversation directories across configured roots.
+func (m *Manager) conversationCandidateDirs() []string {
+	if m == nil {
+		return nil
+	}
+	var dirs []string
+	if m.dataDir != "" {
+		dirs = append(dirs, filepath.Join(m.dataDir, "conversations"))
+		for _, runtime := range []string{"discord", "voice"} {
+			dirs = append(dirs,
+				filepath.Join(m.dataDir, "runtimes", runtime, ".gemini", "antigravity-cli", "conversations"),
+				filepath.Join(m.dataDir, "runtimes", runtime, ".gemini", "antigravity", "conversations"),
+			)
+		}
+	}
+	if m.homeDir != "" {
+		dirs = append(dirs,
+			filepath.Join(m.homeDir, ".gemini", "antigravity-cli", "conversations"),
+			filepath.Join(m.homeDir, ".gemini", "antigravity", "conversations"),
+		)
+	}
+	return dirs
+}
+
 // SessionExistsOnDisk checks if the session has a valid agy conversation
-// protobuf or non-empty transcript on disk.
+// SQLite database (.db), protobuf (.pb), or non-empty transcript on disk.
 func (m *Manager) SessionExistsOnDisk(sessionID string) bool {
 	if m == nil {
 		return false
@@ -1195,26 +1225,14 @@ func (m *Manager) SessionExistsOnDisk(sessionID string) bool {
 		return false
 	}
 
-	// 1. Check agy conversation protobufs under homeDir (if configured)
-	if m.homeDir != "" {
-		cliConvPb := filepath.Join(m.homeDir, ".gemini", "antigravity-cli", "conversations", trimmed+".pb")
-		if fi, err := os.Stat(cliConvPb); err == nil && !fi.IsDir() && fi.Size() > 0 {
-			return true
-		}
-		agyConvPb := filepath.Join(m.homeDir, ".gemini", "antigravity", "conversations", trimmed+".pb")
-		if fi, err := os.Stat(agyConvPb); err == nil && !fi.IsDir() && fi.Size() > 0 {
-			return true
-		}
-	}
-	if m.dataDir != "" {
-		dataConvPb := filepath.Join(m.dataDir, "conversations", trimmed+".pb")
-		if fi, err := os.Stat(dataConvPb); err == nil && !fi.IsDir() && fi.Size() > 0 {
-			return true
-		}
-		for _, runtime := range []string{"discord", "voice"} {
-			rtConvPb := filepath.Join(m.dataDir, "runtimes", runtime, ".gemini", "antigravity-cli", "conversations", trimmed+".pb")
-			if fi, err := os.Stat(rtConvPb); err == nil && !fi.IsDir() && fi.Size() > 0 {
+	// 1. Check agy conversation SQLite databases (.db) and protobufs (.pb) under candidate directories
+	for _, dir := range m.conversationCandidateDirs() {
+		for _, ext := range []string{".db", ".pb"} {
+			convPath := filepath.Join(dir, trimmed+ext)
+			if fi, err := os.Stat(convPath); err == nil && !fi.IsDir() && fi.Size() > 0 {
 				return true
+			} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+				log.Printf("[Session] Warning statting conversation candidate %s: %v", convPath, err)
 			}
 		}
 	}
@@ -1224,6 +1242,8 @@ func (m *Manager) SessionExistsOnDisk(sessionID string) bool {
 		tPath := filepath.Join(dir, ".system_generated", "logs", "transcript.jsonl")
 		if fi, err := os.Stat(tPath); err == nil && !fi.IsDir() && fi.Size() > 0 {
 			return true
+		} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+			log.Printf("[Session] Warning statting transcript candidate %s: %v", tPath, err)
 		}
 	}
 	return false
@@ -1276,6 +1296,48 @@ func (m *Manager) GetTranscriptSize(sessionID string) int64 {
 			}
 		}
 	}
+	return maxSize
+}
+
+// GetSessionDBSize returns the maximum file size across candidate conversation SQLite databases
+// (.db + .db-wal) and protobufs (.pb) for the given session ID across configured session roots.
+// Returns 0 if manager is nil, sessionID is empty/invalid, or files do not exist.
+func (m *Manager) GetSessionDBSize(sessionID string) int64 {
+	cleanID := strings.TrimSpace(sessionID)
+	if m == nil || cleanID == "" || strings.ContainsAny(cleanID, `/\:`) || strings.Contains(cleanID, "..") {
+		return 0
+	}
+
+	var maxSize int64
+	for _, dir := range m.conversationCandidateDirs() {
+		// Check SQLite database: .db + .db-wal
+		dbPath := filepath.Join(dir, cleanID+".db")
+		if fi, err := os.Stat(dbPath); err == nil && !fi.IsDir() {
+			candSize := fi.Size()
+			walPath := filepath.Join(dir, cleanID+".db-wal")
+			if walFi, walErr := os.Stat(walPath); walErr == nil && !walFi.IsDir() {
+				candSize += walFi.Size()
+			} else if walErr != nil && !errors.Is(walErr, os.ErrNotExist) {
+				log.Printf("[Session] Warning statting SQLite WAL file %s: %v", walPath, walErr)
+			}
+			if candSize > maxSize {
+				maxSize = candSize
+			}
+		} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+			log.Printf("[Session] Warning statting conversation DB %s: %v", dbPath, err)
+		}
+
+		// Check Protobuf file: .pb
+		pbPath := filepath.Join(dir, cleanID+".pb")
+		if fi, err := os.Stat(pbPath); err == nil && !fi.IsDir() {
+			if fi.Size() > maxSize {
+				maxSize = fi.Size()
+			}
+		} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+			log.Printf("[Session] Warning statting conversation PB %s: %v", pbPath, err)
+		}
+	}
+
 	return maxSize
 }
 

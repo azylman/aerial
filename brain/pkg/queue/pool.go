@@ -32,6 +32,8 @@ const (
 	DefaultMaxSessionTurns     = session.DefaultMaxSessionTurns
 	DefaultMaxSessionSteps     = session.DefaultMaxSessionSteps
 	DefaultMaxTranscriptBytes = session.DefaultMaxTranscriptBytes
+	DefaultMaxSessionDBBytes    = session.DefaultMaxSessionDBBytes
+	DefaultMaxQuotaPauseDBBytes = session.DefaultMaxQuotaPauseDBBytes
 	DefaultMaxSessionIdleTime  = 24 * time.Hour
 	DefaultTimeoutMinutes      = 60
 	DefaultMaxRestarts         = 3
