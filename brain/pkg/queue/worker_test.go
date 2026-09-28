@@ -2058,5 +2058,90 @@ func TestWorkerPool_CapacityBlip_Exhaustion_LocalFailure(t *testing.T) {
 	mu.Unlock()
 }
 
+func TestWorkerPool_CapacityBlip_WithoutCountdown_Fallback70s(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	tmpDir := t.TempDir()
+	sessMgr := session.New(tmpDir, tmpDir)
+
+	var deliveredText string
+	var mu sync.Mutex
+	doneCh := make(chan struct{}, 1)
+
+	appCfg := config.NewFromData(&config.ConfigData{
+		Channels: map[string]config.ChannelPolicy{
+			"default": {Mode: "thread"},
+		},
+	})
+
+	pool := New(appCfg, WorkerPoolConfig{
+		SessionManager: sessMgr,
+		Store:          store,
+		TimeoutMinutes: 1,
+		BackoffBase:    5 * time.Millisecond,
+		MaxAttempts:    1,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			// Model capacity error with NO countdown data
+			return "", "API error: RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model.", 1, errors.New("exit code 1")
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			mu.Lock()
+			deliveredText = text
+			mu.Unlock()
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			select {
+			case doneCh <- struct{}{}:
+			default:
+			}
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{ID: "msg-cap-nocountdown", ThreadID: "thread-cap-nocountdown", Content: "test capacity without countdown"}
+	_ = insertMessage(store, msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Timeout waiting for message completion")
+	}
+
+	dbMsg, err := store.GetMessage(context.Background(), "msg-cap-nocountdown")
+	if err != nil || dbMsg == nil {
+		t.Fatalf("failed to query message: %v", err)
+	}
+	if dbMsg.Status != db.StatusFailed {
+		t.Errorf("Expected StatusFailed, got %s", dbMsg.Status)
+	}
+	if !strings.Contains(dbMsg.ErrorMessage, "[CAPACITY_EXHAUSTED") {
+		t.Errorf("Expected error to contain [CAPACITY_EXHAUSTED], got %q", dbMsg.ErrorMessage)
+	}
+
+	// Verify global queue was NEVER locked
+	if lockedUntil := pool.quotaLockedUntil.Load(); lockedUntil > 0 {
+		t.Errorf("Expected quotaLockedUntil to remain 0, got %d", lockedUntil)
+	}
+
+	// Verify no one-shot schedules were created
+	schedules, _ := store.GetAllOneShotSchedules(context.Background(), "thread-cap-nocountdown")
+	if len(schedules) > 0 {
+		t.Errorf("Expected 0 one-shot schedules on capacity blip exhaustion, got %d", len(schedules))
+	}
+
+	mu.Lock()
+	if !strings.Contains(deliveredText, "Gemini API quota") && !strings.Contains(deliveredText, "Paused") && !strings.Contains(deliveredText, "capacity") {
+		t.Errorf("Expected capacity pause notice in delivered text, got %q", deliveredText)
+	}
+	mu.Unlock()
+}
+
+
 
 
