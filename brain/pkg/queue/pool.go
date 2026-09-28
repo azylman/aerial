@@ -87,6 +87,7 @@ type WorkerPoolConfig struct {
 	LLMFunc                     LLMFunc
 	WebhookDispatcher           WebhookDispatcher
 	VoiceRunnerFunc             func(ctx context.Context, prompt, sessionID string, onStatus func(string)) (reply string, convID string, err error)
+	VoiceStreamRunnerFunc       func(ctx context.Context, prompt, sessionID string, onStatus func(string), onSentence func(string)) (reply string, convID string, err error)
 }
 
 type threadWorkerState struct {
@@ -638,8 +639,8 @@ func (p *WorkerPool) LowEffortModel() string {
 }
 
 // ExecuteVoiceTurn synchronously executes a turn for voice queries, enforcing low effort reasoning
-// and streaming intermediate tool execution status callbacks.
-func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID string, onStatus func(status string)) (string, string, error) {
+// and streaming intermediate tool execution status and sentence callbacks.
+func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID string, onStatus func(status string), onSentence ...func(sentence string)) (string, string, error) {
 	if p == nil {
 		return "", "", fmt.Errorf("worker pool is uninitialized")
 	}
@@ -675,6 +676,23 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 	}
 	scopeLock.Lock()
 	defer scopeLock.Unlock()
+
+	var sentenceCb func(string)
+	if len(onSentence) > 0 {
+		sentenceCb = onSentence[0]
+	}
+
+	// Testing hook: If VoiceStreamRunnerFunc is configured and sentence callback provided, delegate directly
+	if p.cfg.VoiceStreamRunnerFunc != nil && sentenceCb != nil {
+		start := time.Now()
+		reply, conv, err := p.cfg.VoiceStreamRunnerFunc(ctx, prompt, convID, onStatus, sentenceCb)
+		runStatus := "success"
+		if err != nil {
+			runStatus = "error"
+		}
+		metrics.RecordRunnerExecution(runStatus, p.LowEffortModel(), "voice", time.Since(start))
+		return reply, conv, err
+	}
 
 	// Testing hook: If VoiceRunnerFunc is configured, delegate directly
 	if p.cfg.VoiceRunnerFunc != nil {
@@ -736,10 +754,17 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 		return "", convID, fmt.Errorf("failed to acquire voice daemon: %w", dErr)
 	}
 
+	var detector *SentenceDetector
+	if sentenceCb != nil {
+		detector = NewSentenceDetector()
+	}
 	sink := &voiceTurnSink{
-		onStatus: onStatus,
-		resCh:    make(chan *runner.TurnResult, 1),
-		errCh:    make(chan error, 1),
+		ctx:        ctx,
+		onStatus:   onStatus,
+		onSentence: sentenceCb,
+		detector:   detector,
+		resCh:      make(chan *runner.TurnResult, 1),
+		errCh:      make(chan error, 1),
 	}
 	turnCtx := &runner.TurnContext{
 		TurnID:    uuid.New().String(),
@@ -782,10 +807,13 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 }
 
 type voiceTurnSink struct {
-	onStatus func(status string)
-	resCh    chan *runner.TurnResult
-	errCh    chan error
-	once     sync.Once
+	ctx        context.Context
+	onStatus   func(status string)
+	onSentence func(sentence string)
+	detector   *SentenceDetector
+	resCh      chan *runner.TurnResult
+	errCh      chan error
+	once       sync.Once
 }
 
 var _ runner.TurnSink = (*voiceTurnSink)(nil)
@@ -797,9 +825,19 @@ func (s *voiceTurnSink) OnToolCall(toolName, commandName string) {
 		s.onStatus(FormatToolStatus(toolName, commandName, 0))
 	}
 }
-func (s *voiceTurnSink) OnTextDelta(delta string) {}
+func (s *voiceTurnSink) OnTextDelta(delta string) {
+	if s.ctx != nil && s.ctx.Err() != nil {
+		return
+	}
+	if s.onSentence != nil && s.detector != nil {
+		s.detector.Feed(delta, s.onSentence)
+	}
+}
 func (s *voiceTurnSink) OnResult(res *runner.TurnResult) {
 	s.once.Do(func() {
+		if s.onSentence != nil && s.detector != nil {
+			s.detector.Flush(s.onSentence)
+		}
 		s.resCh <- res
 	})
 }

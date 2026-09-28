@@ -791,6 +791,52 @@ func TestTurnSinks_NoopCallbacks(t *testing.T) {
 	vt.OnToolCall("test_tool", "echo")
 }
 
+func TestVoiceTurnSink_SentenceStreaming(t *testing.T) {
+	t.Parallel()
+
+	var sentences []string
+	sink := &voiceTurnSink{
+		onSentence: func(s string) {
+			sentences = append(sentences, s)
+		},
+		detector: NewSentenceDetector(),
+		resCh:    make(chan *runner.TurnResult, 1),
+		errCh:    make(chan error, 1),
+	}
+
+	sink.OnTurnStarted()
+	sink.OnThinking()
+	sink.OnTextDelta("First sentence. ")
+	sink.OnTextDelta("Second incomplete")
+
+	if len(sentences) != 1 || sentences[0] != "First sentence." {
+		t.Fatalf("expected 1 sentence, got: %v", sentences)
+	}
+
+	sink.OnResult(&runner.TurnResult{Response: "First sentence. Second incomplete"})
+	if len(sentences) != 2 || sentences[1] != "Second incomplete" {
+		t.Fatalf("expected 2 sentences after flush on result, got: %v", sentences)
+	}
+
+	// Test cancellation guards
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	cancellingSink := &voiceTurnSink{
+		ctx: ctx,
+		onSentence: func(s string) {
+			sentences = append(sentences, s)
+		},
+		detector: NewSentenceDetector(),
+		resCh:    make(chan *runner.TurnResult, 1),
+		errCh:    make(chan error, 1),
+	}
+	cancellingSink.OnTextDelta("Should not be emitted because context is cancelled. ")
+	if len(sentences) != 2 {
+		t.Fatalf("expected no new sentences on cancelled context, got %d: %v", len(sentences), sentences)
+	}
+}
+
+
 
 
 

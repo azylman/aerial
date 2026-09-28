@@ -207,7 +207,7 @@ func handleVoiceAsk(pool *queue.WorkerPool) http.HandlerFunc {
 				}
 				flusher.Flush()
 
-				if event == "reply" || event == "delta" {
+				if event == "reply" || event == "delta" || event == "sentence" {
 					recordTTFR("success")
 				} else if event == "error" {
 					recordTTFR("error")
@@ -218,13 +218,17 @@ func handleVoiceAsk(pool *queue.WorkerPool) http.HandlerFunc {
 				emitSSE("status", map[string]string{"status": status})
 			}
 
+			onSentence := func(sentence string) {
+				emitSSE("sentence", map[string]string{"text": sentence})
+			}
+
 			if pool == nil {
 				emitSSE("error", map[string]string{"error": "worker pool is uninitialized"})
 				emitSSE("done", map[string]any{})
 				return
 			}
 
-			reply, convID, turnErr := pool.ExecuteVoiceTurn(r.Context(), req.Prompt, sessionID, onStatus)
+			reply, convID, turnErr := pool.ExecuteVoiceTurn(r.Context(), req.Prompt, sessionID, onStatus, onSentence)
 			if turnErr != nil {
 				if r.Context().Err() == nil {
 					sanitizedErr := sanitizer.SanitizeString(turnErr.Error())

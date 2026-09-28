@@ -184,7 +184,7 @@ func (te *turnExecution) rotateSessionID(threadID, newSessionID string) {
 	if te == nil {
 		return
 	}
-	if te.pool != nil && te.pool.processPool != nil && newSessionID == "" {
+	if te.pool != nil && te.pool.processPool != nil && !te.pool.hasCustomRunner && newSessionID == "" {
 		if _, err := te.pool.processPool.RotateDaemon(context.Background(), threadID, ""); err != nil {
 			log.Printf("[Worker] Warning rotating daemon in process pool for thread %s: %v", threadID, err)
 		}
@@ -1844,7 +1844,7 @@ func (te *turnExecution) executeWithRetries() {
 				te.isQuotaPaused = true
 				te.stopTyping()
 				log.Printf("[WorkerPool] Quota pause detected for thread %s on attempt %d/%d: %s", te.threadID, attempt, maxAttempts, errDetail)
-				if te.pool != nil && te.pool.processPool != nil {
+				if te.pool != nil && te.pool.processPool != nil && !te.pool.hasCustomRunner {
 					if _, rotErr := te.pool.processPool.RotateDaemon(context.Background(), te.threadID, ""); rotErr != nil {
 						log.Printf("[WorkerPool] Warning rotating daemon on quota pause: %v", rotErr)
 					}

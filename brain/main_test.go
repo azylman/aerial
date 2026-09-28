@@ -2209,6 +2209,63 @@ func TestHandleVoiceAsk_SSE_Success(t *testing.T) {
 	}
 }
 
+func TestHandleVoiceAsk_SSE_SentenceStreaming(t *testing.T) {
+	store := db.NewFakeStore()
+	pool := queue.NewWorkerPool(queue.WorkerPoolConfig{
+		Store: store,
+		VoiceStreamRunnerFunc: func(ctx context.Context, prompt, sessionID string, onStatus func(string), onSentence func(string)) (string, string, error) {
+			if onStatus != nil {
+				onStatus("⚡ Checking status...")
+			}
+			if onSentence != nil {
+				onSentence("Here is sentence one.")
+				onSentence("And here is sentence two.")
+			}
+			return "Here is sentence one. And here is sentence two.", "sess-stream-789", nil
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	handler := handleVoiceAsk(pool)
+
+	payload := `{"prompt":"tell me two things","session_id":"sess-stream-789"}`
+	req := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(payload))
+	req.Header.Set("Accept", "text/event-stream")
+
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", w.Code)
+	}
+
+	body := w.Body.String()
+	if !strings.Contains(body, "event: status\ndata: {\"status\":\"⚡ Checking status...\"}\n\n") {
+		t.Errorf("expected status event in SSE stream, got:\n%s", body)
+	}
+	if !strings.Contains(body, "event: sentence\ndata: {\"text\":\"Here is sentence one.\"}\n\n") {
+		t.Errorf("expected sentence event 1 in SSE stream, got:\n%s", body)
+	}
+	if !strings.Contains(body, "event: sentence\ndata: {\"text\":\"And here is sentence two.\"}\n\n") {
+		t.Errorf("expected sentence event 2 in SSE stream, got:\n%s", body)
+	}
+	if !strings.Contains(body, "event: reply\ndata: {\"conversation_id\":\"sess-stream-789\",\"reply\":\"Here is sentence one. And here is sentence two.\"}\n\n") {
+		t.Errorf("expected reply event with conversation_id in SSE stream, got:\n%s", body)
+	}
+	if !strings.Contains(body, "event: done\ndata: {\"conversation_id\":\"sess-stream-789\"}\n\n") {
+		t.Errorf("expected done event in SSE stream, got:\n%s", body)
+	}
+
+	// Verify ordering: sentence events must appear before reply event
+	idxSent1 := strings.Index(body, "event: sentence\ndata: {\"text\":\"Here is sentence one.\"}")
+	idxSent2 := strings.Index(body, "event: sentence\ndata: {\"text\":\"And here is sentence two.\"}")
+	idxReply := strings.Index(body, "event: reply\ndata: {\"conversation_id\":\"sess-stream-789\"")
+	if idxSent1 == -1 || idxSent2 == -1 || idxReply == -1 || idxSent1 > idxSent2 || idxSent2 > idxReply {
+		t.Errorf("invalid event ordering: idxSent1=%d, idxSent2=%d, idxReply=%d", idxSent1, idxSent2, idxReply)
+	}
+}
+
 func TestHandleVoiceAsk_JSON_Success(t *testing.T) {
 	store := db.NewFakeStore()
 	pool := queue.NewWorkerPool(queue.WorkerPoolConfig{
