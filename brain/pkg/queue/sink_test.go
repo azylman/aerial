@@ -773,6 +773,24 @@ func TestThrowawayTurnSink_ResultContext(t *testing.T) {
 	}
 }
 
+func TestTurnSinks_NoopCallbacks(t *testing.T) {
+	t.Parallel()
+	tt := NewThrowawayTurnSink()
+	tt.OnTurnStarted()
+	tt.OnThinking()
+	tt.OnToolCall("test_tool", "echo")
+	tt.OnTextDelta("delta")
+
+	dt := NewDiscordTurnSink(nil, "chan", "msg", nil, nil)
+	dt.OnTurnStarted()
+	dt.OnThinking()
+
+	vt := NewVoiceTurnSink(nil, "kiosk")
+	vt.OnTurnStarted()
+	vt.OnThinking()
+	vt.OnToolCall("test_tool", "echo")
+}
+
 
 
 

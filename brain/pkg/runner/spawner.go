@@ -142,6 +142,13 @@ func (m *MockProcessHandle) Wait() error {
 	return m.waitErr
 }
 
+// SetKillErr configures the error returned by Kill().
+func (m *MockProcessHandle) SetKillErr(err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.killErr = err
+}
+
 // NewMockProcessHandle creates a MockProcessHandle with the specified PID.
 func NewMockProcessHandle(pid int) *MockProcessHandle {
 	return &MockProcessHandle{pid: pid}

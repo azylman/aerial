@@ -486,3 +486,186 @@ func TestWorkerPool_ExecuteVoiceTurn_PoolUnavailable(t *testing.T) {
 		t.Errorf("expected voice daemon pool unavailable error, got %v", err)
 	}
 }
+
+func TestWorkerPool_Stop_ProcessPoolCloseError(t *testing.T) {
+	t.Parallel()
+	mockHandle := runner.NewMockProcessHandle(99999)
+	mockHandle.SetKillErr(errors.New("simulated kill process failure"))
+
+	mockSpawner := &runner.MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+			inR, inW := io.Pipe()
+			outR, outW := io.Pipe()
+			errR, errW := io.Pipe()
+			go func() {
+				_, _ = io.Copy(io.Discard, inR)
+			}()
+			go func() {
+				defer outW.Close()
+				defer errW.Close()
+				_, _ = outW.Write([]byte("{\"event\":\"init\",\"session_id\":\"550e8400-e29b-41d4-a716-446655440001\"}\n"))
+			}()
+			return inW, outR, errR, mockHandle, nil
+		},
+	}
+	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{
+		DefaultModel: "gemini-2.5-flash",
+	}, mockSpawner)
+
+	// Pre-spawn a daemon so Close() actually has a daemon to kill
+	_, err := procPool.GetOrCreate(context.Background(), "kiosk")
+	if err != nil {
+		t.Fatalf("failed to spawn daemon: %v", err)
+	}
+
+	pool := New(nil, WorkerPoolConfig{
+		ProcessPool: procPool,
+	})
+	pool.Start()
+	pool.Stop()
+}
+
+func TestWorkerPool_ExecuteVoiceTurn_ProcessPool_AdditionalBranches(t *testing.T) {
+	t.Parallel()
+
+	// 1. Send failure: daemon stdin pipe broken
+	t.Run("send_failure", func(t *testing.T) {
+		t.Parallel()
+		mockSpawner := &runner.MockDaemonSpawner{
+			SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+				inR, inW := io.Pipe()
+				outR, outW := io.Pipe()
+				errR, errW := io.Pipe()
+				// Close inR immediately so any write to inW returns io.ErrClosedPipe
+				_ = inR.Close()
+				go func() {
+					defer outW.Close()
+					defer errW.Close()
+					_, _ = outW.Write([]byte("{\"event\":\"init\",\"session_id\":\"550e8400-e29b-41d4-a716-446655440002\"}\n"))
+				}()
+				return inW, outR, errR, runner.NewMockProcessHandle(1234), nil
+			},
+		}
+		procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, mockSpawner)
+		defer procPool.Close()
+
+		pool := New(nil, WorkerPoolConfig{ProcessPool: procPool})
+		pool.Start()
+		defer pool.Stop()
+
+		_, _, err := pool.ExecuteVoiceTurn(context.Background(), "test", "sess-1", nil)
+		if err == nil || !strings.Contains(err.Error(), "failed sending turn to voice daemon") {
+			t.Fatalf("expected failed sending turn error, got: %v", err)
+		}
+	})
+
+	// 2. Caller context cancellation while waiting for turn result
+	t.Run("context_canceled_waiting_for_result", func(t *testing.T) {
+		t.Parallel()
+		doneCh := make(chan struct{})
+		defer close(doneCh)
+
+		mockSpawner := &runner.MockDaemonSpawner{
+			SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+				inR, inW := io.Pipe()
+				outR, outW := io.Pipe()
+				errR, errW := io.Pipe()
+				go func() {
+					_, _ = io.Copy(io.Discard, inR)
+				}()
+				go func() {
+					_, _ = outW.Write([]byte("{\"event\":\"init\",\"session_id\":\"550e8400-e29b-41d4-a716-446655440003\"}\n"))
+					// Keep outW open until test finishes to prevent EOF before cancellation
+					<-doneCh
+					_ = outW.Close()
+					_ = errW.Close()
+				}()
+				return inW, outR, errR, runner.NewMockProcessHandle(1235), nil
+			},
+		}
+		procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, mockSpawner)
+		defer procPool.Close()
+
+		pool := New(nil, WorkerPoolConfig{ProcessPool: procPool})
+		pool.Start()
+		defer pool.Stop()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() {
+			time.Sleep(20 * time.Millisecond)
+			cancel()
+		}()
+
+		_, _, err := pool.ExecuteVoiceTurn(ctx, "test", "sess-cancel", nil)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context.Canceled, got: %v", err)
+		}
+	})
+
+	// 3. Non-zero exit code and empty session ID fallback
+	t.Run("exit_code_nonzero_and_empty_session_fallback", func(t *testing.T) {
+		t.Parallel()
+		mockSpawner := &runner.MockDaemonSpawner{
+			SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+				inR, inW := io.Pipe()
+				outR, outW := io.Pipe()
+				errR, errW := io.Pipe()
+				go func() {
+					_, _ = io.Copy(io.Discard, inR)
+				}()
+				go func() {
+					defer outW.Close()
+					defer errW.Close()
+					_, _ = outW.Write([]byte("{\"event\":\"init\",\"session_id\":\"550e8400-e29b-41d4-a716-446655440004\"}\n"))
+					time.Sleep(10 * time.Millisecond)
+					_, _ = outW.Write([]byte("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"turn failed\",\"exit_code\":1}}\n"))
+				}()
+				return inW, outR, errR, runner.NewMockProcessHandle(1236), nil
+			},
+		}
+		procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, mockSpawner)
+		defer procPool.Close()
+
+		// Pre-spawn and clear session ID to trigger activeSession == "" fallback
+		d, err := procPool.GetOrCreate(context.Background(), "voice-fallback-conv-id")
+		if err != nil {
+			t.Fatalf("failed pre-spawning daemon: %v", err)
+		}
+		d.SetSessionID("")
+
+		pool := New(nil, WorkerPoolConfig{ProcessPool: procPool})
+		pool.Start()
+		defer pool.Stop()
+
+		reply, sessionID, err := pool.ExecuteVoiceTurn(context.Background(), "test", "fallback-conv-id", nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if reply != "turn failed" {
+			t.Errorf("expected 'turn failed', got %q", reply)
+		}
+		if sessionID != "fallback-conv-id" {
+			t.Errorf("expected fallback session ID 'fallback-conv-id', got %q", sessionID)
+		}
+	})
+}
+
+func TestVoiceTurnSink_Callbacks(t *testing.T) {
+	t.Parallel()
+	var statusMsg string
+	sink := &voiceTurnSink{
+		onStatus: func(s string) {
+			statusMsg = s
+		},
+		resCh: make(chan *runner.TurnResult, 1),
+		errCh: make(chan error, 1),
+	}
+	sink.OnTurnStarted()
+	sink.OnThinking()
+	sink.OnTextDelta("delta-test")
+	sink.OnToolCall("ha_call_service", "light.turn_on")
+	if !strings.Contains(statusMsg, "light.turn_on") {
+		t.Errorf("expected statusMsg to contain light.turn_on, got %q", statusMsg)
+	}
+}
+
