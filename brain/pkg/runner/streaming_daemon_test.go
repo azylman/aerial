@@ -1097,4 +1097,36 @@ func TestStreamingDaemon_SendConcurrency(t *testing.T) {
 	}
 }
 
+func TestStreamingDaemon_StepUpdateNestedTextDeltaAndThinking(t *testing.T) {
+	t.Parallel()
+	daemon := &StreamingDaemon{
+		sessionID: "test-nested-deltas",
+	}
+
+	sink := newMockTurnSink()
+	turn := &TurnContext{
+		TurnID:    "t-1",
+		Sink:      sink,
+		CreatedAt: time.Now(),
+	}
+	daemon.inflight = append(daemon.inflight, turn)
+
+	// Dispatch nested text_delta inside step_update
+	daemon.dispatchNDJSONLine(`{"event":"step_update","step_update":{"step_index":1,"state":"ACTIVE","step_type":"agent_response","text_delta":"nested chunk 1"}}`)
+	daemon.dispatchNDJSONLine(`{"event":"step_update","step_update":{"step_index":1,"state":"ACTIVE","step_type":"agent_response","delta":"nested chunk 2"}}`)
+	daemon.dispatchNDJSONLine(`{"event":"step_update","text_delta":"root text_delta"}`)
+	daemon.dispatchNDJSONLine(`{"event":"step_update","step_update":{"step_index":1,"state":"ACTIVE","step_type":"agent_response","thinking":"internal thought"}}`)
+
+	if len(sink.deltas) != 3 {
+		t.Fatalf("expected 3 deltas, got %d: %v", len(sink.deltas), sink.deltas)
+	}
+	if sink.deltas[0] != "nested chunk 1" || sink.deltas[1] != "nested chunk 2" || sink.deltas[2] != "root text_delta" {
+		t.Errorf("unexpected deltas: %v", sink.deltas)
+	}
+	if sink.thinking != 1 {
+		t.Errorf("expected 1 thinking event, got %d", sink.thinking)
+	}
+}
+
+
 

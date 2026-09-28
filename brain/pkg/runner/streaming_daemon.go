@@ -414,11 +414,27 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 			if toolName != "" || cmdName != "" {
 				activeTurn.Sink.OnToolCall(toolName, cmdName)
 			}
-			if delta, ok := raw["delta"].(string); ok && delta != "" {
+			var delta string
+			if d, ok := raw["delta"].(string); ok && d != "" {
+				delta = d
+			} else if d, ok := raw["text_delta"].(string); ok && d != "" {
+				delta = d
+			} else if su, ok := raw["step_update"].(map[string]any); ok {
+				if d, ok := su["text_delta"].(string); ok && d != "" {
+					delta = d
+				} else if d, ok := su["delta"].(string); ok && d != "" {
+					delta = d
+				}
+			}
+			if delta != "" {
 				activeTurn.Sink.OnTextDelta(delta)
 			}
 			if _, ok := raw["thinking"]; ok {
 				activeTurn.Sink.OnThinking()
+			} else if su, ok := raw["step_update"].(map[string]any); ok {
+				if _, ok := su["thinking"]; ok {
+					activeTurn.Sink.OnThinking()
+				}
 			}
 		}
 

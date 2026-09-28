@@ -2201,6 +2201,10 @@ func TestWorkerPool_CapacityBlip_WithoutCountdown_Fallback70s(t *testing.T) {
 			mu.Lock()
 			deliveredText = text
 			mu.Unlock()
+			select {
+			case doneCh <- struct{}{}:
+			default:
+			}
 			return nil
 		},
 		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {

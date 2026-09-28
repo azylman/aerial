@@ -836,6 +836,28 @@ func TestVoiceTurnSink_SentenceStreaming(t *testing.T) {
 	}
 }
 
+func TestVoiceTurnSink_ResultFallbackWhenNoDeltas(t *testing.T) {
+	t.Parallel()
+	var sentences []string
+	sink := &voiceTurnSink{
+		onSentence: func(s string) {
+			sentences = append(sentences, s)
+		},
+		detector: NewSentenceDetector(),
+		resCh:    make(chan *runner.TurnResult, 1),
+		errCh:    make(chan error, 1),
+	}
+
+	sink.OnResult(&runner.TurnResult{Response: "Hello there. General Kenobi."})
+	if len(sentences) != 2 {
+		t.Fatalf("expected 2 sentences emitted from result fallback, got %d: %v", len(sentences), sentences)
+	}
+	if sentences[0] != "Hello there." || sentences[1] != "General Kenobi." {
+		t.Errorf("unexpected sentences: %v", sentences)
+	}
+}
+
+
 
 
 
