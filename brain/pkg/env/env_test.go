@@ -1861,42 +1861,50 @@ func TestRepositorySkills_ValidYAMLFrontmatter(t *testing.T) {
 		t.Skip("Repository .agents/skills not found (isolated environment)")
 	}
 
-	entries, err := os.ReadDir(skillsDir)
-	if err != nil {
-		t.Fatalf("Failed to read skills directory: %v", err)
-	}
-
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		skillFile := filepath.Join(skillsDir, entry.Name(), "SKILL.md")
-		data, err := os.ReadFile(skillFile)
+	targets := []string{"common", "discord", "voice"}
+	checked := 0
+	for _, target := range targets {
+		targetDir := filepath.Join(skillsDir, target)
+		entries, err := os.ReadDir(targetDir)
 		if err != nil {
-			t.Errorf("Missing or unreadable SKILL.md in %s: %v", entry.Name(), err)
 			continue
 		}
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			skillFile := filepath.Join(targetDir, entry.Name(), "SKILL.md")
+			data, err := os.ReadFile(skillFile)
+			if err != nil {
+				t.Errorf("Missing or unreadable SKILL.md in %s/%s: %v", target, entry.Name(), err)
+				continue
+			}
 
-		parts := strings.SplitN(string(data), "---", 3)
-		if len(parts) < 3 {
-			t.Errorf("SKILL.md in %s does not contain YAML frontmatter enclosed in '---': %v", entry.Name(), err)
-			continue
-		}
+			parts := strings.SplitN(string(data), "---", 3)
+			if len(parts) < 3 {
+				t.Errorf("SKILL.md in %s/%s does not contain YAML frontmatter enclosed in '---': %v", target, entry.Name(), err)
+				continue
+			}
 
-		var meta struct {
-			Name        string `yaml:"name"`
-			Description string `yaml:"description"`
+			var meta struct {
+				Name        string `yaml:"name"`
+				Description string `yaml:"description"`
+			}
+			if err := yaml.Unmarshal([]byte(parts[1]), &meta); err != nil {
+				t.Errorf("SKILL.md in %s/%s has invalid YAML frontmatter: %v", target, entry.Name(), err)
+				continue
+			}
+			if strings.TrimSpace(meta.Name) == "" {
+				t.Errorf("SKILL.md in %s/%s has empty 'name' field", target, entry.Name())
+			}
+			if strings.TrimSpace(meta.Description) == "" {
+				t.Errorf("SKILL.md in %s/%s has empty 'description' field", target, entry.Name())
+			}
+			checked++
 		}
-		if err := yaml.Unmarshal([]byte(parts[1]), &meta); err != nil {
-			t.Errorf("SKILL.md in %s has invalid YAML frontmatter: %v", entry.Name(), err)
-			continue
-		}
-		if strings.TrimSpace(meta.Name) == "" {
-			t.Errorf("SKILL.md in %s has empty 'name' field", entry.Name())
-		}
-		if strings.TrimSpace(meta.Description) == "" {
-			t.Errorf("SKILL.md in %s has empty 'description' field", entry.Name())
-		}
+	}
+	if checked == 0 {
+		t.Errorf("Expected at least one skill across target directories, found 0")
 	}
 }
 

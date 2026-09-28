@@ -5,7 +5,7 @@
    - **Ephemeral Scratch Workspaces**: All configuration, persona, skill, and engine updates must be authored in isolated scratch clones initialized via `scripts/aerial-config-pr.sh init` or `scripts/aerial-pr.sh init`, submitted asynchronously per Continuous Deployment invariants, and verified prior to commit.
 
 2. **Continuous Deployment & Engineering Invariant**:
-   - Whenever asked to modify, enhance, or fix the core engine, Aerial MUST invoke and follow the `self-improvement` skill (`.agents/skills/self-improvement/SKILL.md`).
+   - Whenever asked to modify, enhance, or fix the core engine, Aerial MUST invoke and follow the `self-improvement` skill (`.agents/skills/discord/self-improvement/SKILL.md`).
    - **Asynchronous PR Submission (`scripts/aerial-pr.sh submit`)**: Code modifications must be submitted asynchronously from ephemeral scratch workspaces. Fast pre-flight verification (`scripts/verify.sh --staged`) runs locally in <1s, pushes the branch, enables native auto-merge, and schedules a one-shot follow-up check via `scheduler-mcp`. On scheduled wake-up, Aerial verifies green CI, completes squash-merge via `scripts/aerial-pr.sh merge <pr_num>`, and reports deployment status in plain prose strictly capped at two sentences max.
    - **Mandatory PR Descriptions**: Descriptions are strictly mandatory via workspace `PR_DESCRIPTION.md` or `--body-file` (Inverted Pyramid format, zero markdown tables). Titles must be sanitized to prevent literal `\n` pollution in GitHub titles.
    - **Zero-Bypass Verification**: Under NO circumstance commit or push unverified changes; fresh verification evidence (`scripts/verify.sh --staged`) must be obtained prior to commit. Comprehensive monorepo sweeps and coverage gating are offloaded to GitHub Actions CI.
@@ -21,7 +21,7 @@
    - **Single-Pass Coverage Audit Invariant**: Committing or pushing exploratory single-statement micro-tests to remote CI is strictly prohibited. When statement coverage falls below the required threshold, developers and agents must audit uncovered blocks locally (via scripts/test-linux.ps1 or scripts/check-coverage.sh --gaps) and satisfy the deficit in a single verification pass prior to commit.
 
 4. **Multi-Agent Review Panel & Tiered Engineering Workflow**:
-   - Code changes follow the Tiered Engineering Workflow dynamically scaled across four complexity tiers (Tier 0 through Tier 3) canonically detailed in the `self-improvement` skill (`.agents/skills/self-improvement/SKILL.md`):
+   - Code changes follow the Tiered Engineering Workflow dynamically scaled across four complexity tiers (Tier 0 through Tier 3) canonically detailed in the `self-improvement` skill (`.agents/skills/discord/self-improvement/SKILL.md`):
      - **Tier 0 (≤ 5 LOC, single-line changes, config/doc tweaks)**: Zero review subagents; direct implementation in the root thread with automated pre-flight verification. Negative scope blacklist: strictly forbidden for SQL/database schemas, security/auth, concurrency/mutex logic, Docker topology, or core runner loops (auto-escalates to Tier 1+).
      - **Tier 1 (< 50 LOC, targeted bugfixes & tests)**: Inline root-thread execution with zero review subagents; verified via targeted package unit tests and `./scripts/verify.sh --staged`.
      - **Tier 2 (50–200 LOC, standard features & refactors)**: The Girl Gang review panel audits the plan in an isolated subagent (~45s), followed by autonomous execution and a consolidated Devil's Advocate diff audit before opening the PR (~30s).
