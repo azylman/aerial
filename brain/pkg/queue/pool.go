@@ -811,6 +811,7 @@ type voiceTurnSink struct {
 	onStatus   func(status string)
 	onSentence func(sentence string)
 	detector   *SentenceDetector
+	emittedAny bool
 	resCh      chan *runner.TurnResult
 	errCh      chan error
 	once       sync.Once
@@ -825,18 +826,28 @@ func (s *voiceTurnSink) OnToolCall(toolName, commandName string) {
 		s.onStatus(FormatToolStatus(toolName, commandName, 0))
 	}
 }
+func (s *voiceTurnSink) emitSentence(sentence string) {
+	s.emittedAny = true
+	if s.onSentence != nil {
+		s.onSentence(sentence)
+	}
+}
 func (s *voiceTurnSink) OnTextDelta(delta string) {
 	if s.ctx != nil && s.ctx.Err() != nil {
 		return
 	}
 	if s.onSentence != nil && s.detector != nil {
-		s.detector.Feed(delta, s.onSentence)
+		s.detector.Feed(delta, s.emitSentence)
 	}
 }
 func (s *voiceTurnSink) OnResult(res *runner.TurnResult) {
 	s.once.Do(func() {
 		if s.onSentence != nil && s.detector != nil {
-			s.detector.Flush(s.onSentence)
+			s.detector.Flush(s.emitSentence)
+			if !s.emittedAny && res != nil && strings.TrimSpace(res.Response) != "" {
+				s.detector.Feed(res.Response, s.emitSentence)
+				s.detector.Flush(s.emitSentence)
+			}
 		}
 		s.resCh <- res
 	})
