@@ -1,0 +1,351 @@
+package runner
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+)
+
+var (
+	streamingHandshakeTimeout = 5 * time.Second
+)
+
+// TurnSink receives streaming notifications and results during an active turn.
+type TurnSink interface {
+	OnTurnStarted()
+	OnThinking()
+	OnToolCall(toolName, commandName string)
+	OnTextDelta(delta string)
+	OnResult(res *TurnResult)
+	OnError(err error)
+}
+
+// TurnContext encapsulates the metadata, prompt, and callback sink for a single turn.
+type TurnContext struct {
+	TurnID    string
+	Prompt    string
+	Sink      TurnSink
+	CreatedAt time.Time
+}
+
+// StreamingDaemon manages a long-lived streaming agy subprocess, its lifecycle state,
+// and the stdout NDJSON event streaming loop.
+type StreamingDaemon struct {
+	cfg         DaemonConfig
+	spawner     DaemonSpawner
+	handle      ProcessHandle
+	stdin       io.WriteCloser
+	stdout      io.ReadCloser
+	stderr      *ActivityWriter
+	taskTracker *TaskTracker
+
+	mu        sync.RWMutex
+	state     DaemonState
+	sessionID string
+	lastUsed  time.Time
+	turnCount int
+	stepCount int
+
+	inflightMu sync.Mutex
+	inflight   []*TurnContext
+
+	readerWg  sync.WaitGroup
+	closeOnce sync.Once
+	closed    atomic.Bool
+}
+
+func closeStreamQuietly(c io.Closer, name string) {
+	if c != nil {
+		if err := c.Close(); err != nil {
+			log.Printf("[StreamingDaemon] Warning: failed to close %s: %v", name, err)
+		}
+	}
+}
+
+func (d *StreamingDaemon) closeOnStartupError(reason string) {
+	if err := d.Close(); err != nil {
+		log.Printf("[StreamingDaemon] Warning: failed to close daemon during startup failure (%s): %v", reason, err)
+	}
+}
+
+// StartStreamingDaemon launches a streaming daemon, waits for the initial handshake NDJSON event,
+// latches the session ID, and spawns the background stdout reader loop.
+func StartStreamingDaemon(ctx context.Context, cfg DaemonConfig, spawner DaemonSpawner) (*StreamingDaemon, error) {
+	if spawner == nil {
+		spawner = &DefaultDaemonSpawner{}
+	}
+
+	stdin, stdout, stderr, handle, err := spawner.Spawn(ctx, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed spawning daemon: %w", err)
+	}
+
+	actWriter := NewActivityWriter(cfg.SessionID)
+	if stderr != nil {
+		go func() {
+			defer closeStreamQuietly(stderr, "stderr")
+			if _, copyErr := io.Copy(actWriter, stderr); copyErr != nil && !errors.Is(copyErr, io.EOF) {
+				log.Printf("[StreamingDaemon] Warning: error copying stderr: %v", copyErr)
+			}
+		}()
+	}
+
+	d := &StreamingDaemon{
+		cfg:         cfg,
+		spawner:     spawner,
+		handle:      handle,
+		stdin:       stdin,
+		stdout:      stdout,
+		stderr:      actWriter,
+		taskTracker: NewTaskTracker(),
+		state:       StateStarting,
+		lastUsed:    time.Now(),
+	}
+
+	// Perform synchronous handshake with deadline
+	reader := bufio.NewReader(stdout)
+	lineChan := make(chan string, 1)
+	errChan := make(chan error, 1)
+
+	go func() {
+		line, readErr := reader.ReadString('\n')
+		if readErr != nil {
+			errChan <- readErr
+			return
+		}
+		lineChan <- line
+	}()
+
+	select {
+	case <-ctx.Done():
+		d.closeOnStartupError("cancelled")
+		return nil, fmt.Errorf("daemon startup cancelled: %w", ctx.Err())
+	case <-time.After(streamingHandshakeTimeout):
+		d.closeOnStartupError("timeout")
+		return nil, errors.New("daemon startup timed out waiting for init event")
+	case readErr := <-errChan:
+		d.closeOnStartupError("read error")
+		return nil, fmt.Errorf("daemon stdout closed before init event: %w", readErr)
+	case line := <-lineChan:
+		initSessID, ok := ParseInitEvent(line)
+		if !ok || !IsValidUUID(initSessID) {
+			d.closeOnStartupError("malformed init")
+			return nil, fmt.Errorf("failed parsing init event (%q)", line)
+		}
+		d.mu.Lock()
+		d.sessionID = initSessID
+		d.state = StateReady
+		d.mu.Unlock()
+		d.stderr.SetSessionID(initSessID)
+	}
+
+	d.readerWg.Add(1)
+	go d.readStdoutLoop(reader)
+
+	return d, nil
+}
+
+// State returns the current lifecycle state of the daemon.
+func (d *StreamingDaemon) State() DaemonState {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.state
+}
+
+// SessionID returns the latched session UUID.
+func (d *StreamingDaemon) SessionID() string {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.sessionID
+}
+
+// TurnCount returns the total number of completed turns executed by this daemon.
+func (d *StreamingDaemon) TurnCount() int {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.turnCount
+}
+
+// StepCount returns the total number of step_update events received across all turns.
+func (d *StreamingDaemon) StepCount() int {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.stepCount
+}
+
+// LastUsed returns the timestamp of daemon initialization or the most recent turn completion.
+func (d *StreamingDaemon) LastUsed() time.Time {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.lastUsed
+}
+
+// TaskTracker returns the background task tracker instance for this daemon.
+func (d *StreamingDaemon) TaskTracker() *TaskTracker {
+	return d.taskTracker
+}
+
+// Close gracefully terminates the daemon process, closes streams, and notifies any in-flight turns.
+func (d *StreamingDaemon) Close() error {
+	var closeErr error
+	d.closeOnce.Do(func() {
+		d.closed.Store(true)
+		d.mu.Lock()
+		d.state = StateClosed
+		d.mu.Unlock()
+
+		closeStreamQuietly(d.stdin, "stdin")
+		closeStreamQuietly(d.stdout, "stdout")
+		if d.handle != nil {
+			if err := d.handle.Kill(); err != nil {
+				log.Printf("[StreamingDaemon] Warning: failed to kill process handle: %v", err)
+				closeErr = err
+			}
+		}
+		d.readerWg.Wait()
+
+		// Drain any remaining inflight turns with error
+		d.inflightMu.Lock()
+		remaining := d.inflight
+		d.inflight = nil
+		d.inflightMu.Unlock()
+
+		for _, turn := range remaining {
+			if turn != nil && turn.Sink != nil {
+				turn.Sink.OnError(errors.New("daemon closed while turn was in-flight"))
+			}
+		}
+	})
+	return closeErr
+}
+
+func (d *StreamingDaemon) readStdoutLoop(r *bufio.Reader) {
+	defer d.readerWg.Done()
+
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			if !d.closed.Load() {
+				d.mu.Lock()
+				d.state = StateClosed
+				d.mu.Unlock()
+
+				d.inflightMu.Lock()
+				remaining := d.inflight
+				d.inflight = nil
+				d.inflightMu.Unlock()
+
+				for _, turn := range remaining {
+					if turn != nil && turn.Sink != nil {
+						turn.Sink.OnError(fmt.Errorf("daemon stdout unexpected EOF: %w", err))
+					}
+				}
+			}
+			return
+		}
+
+		d.dispatchNDJSONLine(line)
+	}
+}
+
+func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return
+	}
+
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(trimmed), &raw); err != nil {
+		log.Printf("[StreamingDaemon] Malformed NDJSON line: %v", err)
+		return
+	}
+
+	event, ok := raw["event"].(string)
+	if !ok {
+		log.Printf("[StreamingDaemon] NDJSON line missing string event field: %v", raw["event"])
+		return
+	}
+
+	d.inflightMu.Lock()
+	var activeTurn *TurnContext
+	if len(d.inflight) > 0 {
+		activeTurn = d.inflight[0]
+	}
+	d.inflightMu.Unlock()
+
+	if activeTurn == nil || activeTurn.Sink == nil {
+		return
+	}
+
+	switch event {
+	case "step_update":
+		d.mu.Lock()
+		d.stepCount++
+		d.mu.Unlock()
+
+		if toolCall, ok := raw["tool_call"].(map[string]any); ok {
+			var toolName, cmdName string
+			if n, ok := toolCall["name"].(string); ok {
+				toolName = n
+			}
+			if c, ok := toolCall["command"].(string); ok {
+				cmdName = c
+			}
+			activeTurn.Sink.OnToolCall(toolName, cmdName)
+		}
+		if delta, ok := raw["delta"].(string); ok && delta != "" {
+			activeTurn.Sink.OnTextDelta(delta)
+		}
+		if _, ok := raw["thinking"]; ok {
+			activeTurn.Sink.OnThinking()
+		}
+
+	case "result":
+		d.inflightMu.Lock()
+		if len(d.inflight) > 0 {
+			activeTurn = d.inflight[0]
+			d.inflight = d.inflight[1:]
+		}
+		hasMoreInflight := len(d.inflight) > 0
+		d.inflightMu.Unlock()
+
+		d.mu.Lock()
+		d.turnCount++
+		d.lastUsed = time.Now()
+		if !hasMoreInflight {
+			if d.taskTracker != nil && d.taskTracker.ActiveCount() > 0 {
+				d.state = StateYieldWaiting
+			} else {
+				d.state = StateReady
+			}
+		}
+		d.mu.Unlock()
+
+		res := &TurnResult{
+			ConversationID: d.SessionID(),
+			Response:       extractResponseString(raw),
+			Duration:       time.Since(activeTurn.CreatedAt),
+		}
+		activeTurn.Sink.OnResult(res)
+	}
+}
+
+func extractResponseString(raw map[string]any) string {
+	if resObj, ok := raw["result"].(map[string]any); ok {
+		if resp, ok := resObj["response"].(string); ok {
+			return resp
+		}
+	}
+	if resp, ok := raw["response"].(string); ok {
+		return resp
+	}
+	return ""
+}
