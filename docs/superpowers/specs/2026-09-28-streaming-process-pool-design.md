@@ -215,8 +215,6 @@ To prevent cold-start latency after container deployments (so the first kiosk vo
 - **Startup Protocol & Synchronization**:
   - `UnifiedProcessPool.Initialize(ctx)` launches pre-warming with a 5-second per-target timeout and structured diagnostic logging (non-blocking to HTTP health probes).
   - Uses a `singleflight.Group` keyed by `targetKey`: If an incoming voice or Discord request arrives while a daemon is mid-handshake, `GetOrCreate` safely joins the in-flight initialization rather than spawning a duplicate process.
-- **Memory Pressure Hysteresis**:
-  - Under system memory pressure (available RAM < 15%), automatic background re-spawning of pre-warmed targets is strictly suppressed to prevent thrashing. Re-spawning resumes only after host memory stabilizes above 25% for at least 60 seconds.
 
 ### 4.3 Pool-Managed Rotation Thresholds
 The pool inspects daemon health pre-turn and post-turn across all daemons (Discord, Voice, and throwaways):
