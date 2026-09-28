@@ -48,7 +48,8 @@ func FormatQuotaPauseMessage(resetDur time.Duration, runAt time.Time, scheduled 
 		countdown = fmt.Sprintf(" (<t:%d:R>)", runAt.Unix())
 	}
 
-	isCapacity := resetDur <= 60*time.Second
+	// Model capacity / rate limit throttles include short countdowns (<= 5s) and 70s bucket rollover fallbacks.
+	isCapacity := resetDur <= 90*time.Second
 
 	if isCircuitBreak {
 		if isCapacity {

@@ -951,10 +951,27 @@ func IsQuotaPause(errDetail, stderr string) bool {
 	return false
 }
 
+// hasCapacityPhrases returns true if the error text explicitly mentions model capacity or rate limit exhaustion.
+func hasCapacityPhrases(combined string) bool {
+	if strings.Contains(combined, "individual quota reached") ||
+		strings.Contains(combined, "please upgrade your subscription") ||
+		strings.Contains(combined, "upgrade your subscription") ||
+		strings.Contains(combined, "exceeded your current quota") {
+		return false
+	}
+	return strings.Contains(combined, "exhausted your capacity on this model") ||
+		strings.Contains(combined, "capacity on this model") ||
+		strings.Contains(combined, "rate limit reached")
+}
+
 // IsCapacityBlip detects transient model capacity throttles (e.g. 0s-5s capacity exhaustions,
 // rate limit spikes) distinct from true account subscription exhaustion.
 func IsCapacityBlip(errDetail, stderr string) bool {
 	combined := strings.ToLower(errDetail + "\n" + stderr)
+
+	if hasCapacityPhrases(combined) {
+		return true
+	}
 
 	// True account subscription exhaustion markers take precedence and are NOT capacity blips
 	if strings.Contains(combined, "individual quota reached") ||
@@ -962,13 +979,6 @@ func IsCapacityBlip(errDetail, stderr string) bool {
 		strings.Contains(combined, "upgrade your subscription") ||
 		strings.Contains(combined, "exceeded your current quota") {
 		return false
-	}
-
-	// Direct capacity markers from Google API
-	if strings.Contains(combined, "exhausted your capacity on this model") ||
-		strings.Contains(combined, "capacity on this model") ||
-		strings.Contains(combined, "rate limit reached") {
-		return true
 	}
 
 	// Short reset duration (<= 5s) indicates a transient capacity throttle
@@ -981,10 +991,11 @@ func IsCapacityBlip(errDetail, stderr string) bool {
 
 // ExtractQuotaResetDuration parses compound reset countdowns (e.g. "16m58s", "16m 58s", "1h 15m", "45s", "15 minutes", "0s").
 // Normalizes unit words and strips internal whitespace. Clamps between 0s and 24h.
-// Falls back to (20 * time.Minute, false) if missing or unparseable.
+// Falls back to (70 * time.Second, false) for model capacity blips when countdown is missing from data
+// (Google 60s TPM/RPM bucket rollover + 10s buffer), or (20 * time.Minute, false) for subscription quotas.
 func ExtractQuotaResetDuration(errDetail, stderr string) (time.Duration, bool) {
-	combined := errDetail + "\n" + stderr
-	match := reQuotaResetIn.FindStringSubmatch(combined)
+	combined := strings.ToLower(errDetail + "\n" + stderr)
+	match := reQuotaResetIn.FindStringSubmatch(errDetail + "\n" + stderr)
 	if len(match) > 1 {
 		raw := strings.TrimSpace(match[1])
 		raw = strings.ToLower(raw)
@@ -1012,6 +1023,12 @@ func ExtractQuotaResetDuration(errDetail, stderr string) (time.Duration, bool) {
 			}
 			return d, true
 		}
+	}
+	// Fallback when no duration is specified in data:
+	// For model capacity / rate limit throttles, default to 70s (Google 60s TPM/RPM bucket + 10s buffer).
+	// For account subscription quota exhaustion, default to 20m.
+	if hasCapacityPhrases(combined) {
+		return 70 * time.Second, false
 	}
 	return 20 * time.Minute, false
 }
