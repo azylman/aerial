@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/brain/pkg/config"
+	"github.com/azylman/aerial/brain/pkg/metrics"
 	"github.com/azylman/aerial/brain/pkg/runner"
 )
 
@@ -405,4 +406,46 @@ func TestDaemonPool_IsolatedRuntimesAndCeilings(t *testing.T) {
 		t.Errorf("expected voice-1 to be evicted by LRU under maxDaemons ceiling")
 	}
 }
+
+func TestDaemonPool_GetOrCreateDaemon_Telemetry(t *testing.T) {
+	tempDir := t.TempDir()
+	mockBin := filepath.Join(tempDir, "mock_agy.sh")
+	_ = os.WriteFile(mockBin, []byte("#!/bin/sh\nwhile true; do sleep 1; done\n"), 0755)
+
+	cfg := config.NewTestConfig()
+	pool := NewDaemonPool(cfg, mockBin, nil, tempDir)
+	defer pool.Close()
+
+	ctx := context.Background()
+
+	// Initial cold start
+	d1, err := pool.GetOrCreateDaemon(ctx, "telemetry-thread", "sess-1", "model-a")
+	if err != nil {
+		t.Fatalf("unexpected error creating daemon: %v", err)
+	}
+	if d1 == nil {
+		t.Fatalf("expected non-nil daemon")
+	}
+
+	// Warm hit
+	dWarm, err := pool.GetOrCreateDaemon(ctx, "telemetry-thread", "sess-1", "model-a")
+	if err != nil {
+		t.Fatalf("unexpected error on warm hit: %v", err)
+	}
+	if dWarm != d1 {
+		t.Errorf("expected same daemon instance for warm hit")
+	}
+
+	// Error branch: non-executable binary
+	badPool := NewDaemonPool(cfg, "/nonexistent/binary", nil, tempDir)
+	defer badPool.Close()
+	_, err = badPool.GetOrCreateDaemon(ctx, "telemetry-err", "sess-err", "model-a")
+	if err == nil {
+		t.Fatalf("expected error starting daemon with invalid binary")
+	}
+
+	// Ensure metrics registry has recorded observations without panic
+	metrics.RecordDaemonAcquisition("test", 10*time.Millisecond)
+}
+
 

@@ -148,6 +148,25 @@ var (
 		},
 	)
 
+	DaemonAcquisitionDurationSeconds = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "aerial_brain_daemon_acquisition_duration_seconds",
+			Help:    "Duration to acquire or spawn an agy daemon in seconds.",
+			Buckets: []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0},
+		},
+		[]string{"status"},
+	)
+
+	// Voice Telemetry
+	VoiceTTFRDurationSeconds = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "aerial_brain_voice_ttfr_duration_seconds",
+			Help:    "Time to first response for voice interactions in seconds.",
+			Buckets: []float64{0.05, 0.1, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 5.0, 10.0},
+		},
+		[]string{"mode", "status"},
+	)
+
 	// Classifier Telemetry (Ambient Relevance & Latency)
 	ClassifierDurationSeconds = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
@@ -533,6 +552,8 @@ func init() {
 		ActiveTasksGauge,
 		DaemonMemoryBytes,
 		TaskTimeoutsTotal,
+		DaemonAcquisitionDurationSeconds,
+		VoiceTTFRDurationSeconds,
 		BuildInfo,
 	)
 
@@ -853,5 +874,31 @@ func RecordOllamaInference(model string, promptTokens, evalTokens int, promptEva
 		OllamaEvalDurationSeconds.WithLabelValues(model, "total").Observe(totalDur[0].Seconds())
 	}
 }
+
+// RecordDaemonAcquisition records daemon acquisition latency categorized by status (warm_hit, cold_start, error).
+func RecordDaemonAcquisition(status string, duration time.Duration) {
+	if status == "" {
+		status = "unknown"
+	}
+	if duration < 0 {
+		duration = 0
+	}
+	DaemonAcquisitionDurationSeconds.WithLabelValues(status).Observe(duration.Seconds())
+}
+
+// RecordVoiceTTFR records time to first response latency for voice interactions categorized by mode (sse, json) and status (success, error).
+func RecordVoiceTTFR(mode, status string, duration time.Duration) {
+	if mode == "" {
+		mode = "unknown"
+	}
+	if status == "" {
+		status = "unknown"
+	}
+	if duration < 0 {
+		duration = 0
+	}
+	VoiceTTFRDurationSeconds.WithLabelValues(mode, status).Observe(duration.Seconds())
+}
+
 
 

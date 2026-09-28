@@ -34,6 +34,10 @@ func TestMetricsRegistryAndHandler(t *testing.T) {
 	RecordSessionRotation("pre_flight", "channel", "turns")
 	RecordYieldTrap("resumed", "stderr_signature", "gemini-2.5-pro")
 	RecordOllamaInference("qwen2.5:3b", 25, 150, 200*time.Millisecond, 1500*time.Millisecond, 50*time.Millisecond, 1750*time.Millisecond)
+	RecordDaemonAcquisition("warm_hit", 2*time.Millisecond)
+	RecordDaemonAcquisition("cold_start", 450*time.Millisecond)
+	RecordVoiceTTFR("sse", "success", 380*time.Millisecond)
+	RecordVoiceTTFR("json", "success", 1200*time.Millisecond)
 
 	ActiveWorkers.Set(2)
 	QueueDepth.Set(5)
@@ -111,6 +115,8 @@ func TestMetricsRegistryAndHandler(t *testing.T) {
 		"aerial_brain_ollama_eval_tokens_total",
 		"aerial_brain_ollama_eval_duration_seconds",
 		"aerial_brain_ollama_tokens_per_second",
+		"aerial_brain_daemon_acquisition_duration_seconds",
+		"aerial_brain_voice_ttfr_duration_seconds",
 		"aerial_brain_build_info",
 	}
 
@@ -143,6 +149,10 @@ func TestMetricsDefaultFallbackBranches(t *testing.T) {
 	RecordWebhookDispatch("", "", 10*time.Millisecond)
 	RecordSessionRotation("", "", "")
 	RecordYieldTrap("", "", "")
+	RecordDaemonAcquisition("", 10*time.Millisecond)
+	RecordDaemonAcquisition("", -5*time.Millisecond)
+	RecordVoiceTTFR("", "", 10*time.Millisecond)
+	RecordVoiceTTFR("", "", -5*time.Millisecond)
 }
 
 func TestRecordTokens_AutoCalculatesTotalWhenZero(t *testing.T) {
@@ -251,3 +261,26 @@ func TestRecordRunnerExecution_SourceLabelAndBuckets(t *testing.T) {
 		t.Errorf("expected runner duration bucket le=0.25 to exist, got:\n%s", body)
 	}
 }
+
+func TestRecordDaemonAcquisitionAndVoiceTTFR(t *testing.T) {
+	RecordDaemonAcquisition("warm_hit", 5*time.Millisecond)
+	RecordVoiceTTFR("sse", "success", 250*time.Millisecond)
+
+	handler := Handler()
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rec.Code)
+	}
+
+	body := rec.Body.String()
+	if !strings.Contains(body, `aerial_brain_daemon_acquisition_duration_seconds_bucket{status="warm_hit"`) {
+		t.Errorf("expected daemon acquisition metric, got:\n%s", body)
+	}
+	if !strings.Contains(body, `aerial_brain_voice_ttfr_duration_seconds_bucket{mode="sse",status="success"`) {
+		t.Errorf("expected voice ttfr metric, got:\n%s", body)
+	}
+}
+

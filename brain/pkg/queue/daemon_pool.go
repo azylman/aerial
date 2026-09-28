@@ -153,10 +153,12 @@ func (p *DaemonPool) Evict(threadID string) {
 func (p *DaemonPool) GetOrCreateDaemon(ctx context.Context, threadID string, sessionID string, model string) (*runner.Daemon, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	start := time.Now()
 
 	// Check existing
 	if d, ok := p.daemons[threadID]; ok {
 		if !d.IsDirty() && d.State() != runner.StateClosed && (sessionID == "" || d.SessionID() == "" || d.SessionID() == sessionID) {
+			metrics.RecordDaemonAcquisition("warm_hit", time.Since(start))
 			return d, nil
 		}
 		// Close dirty, dead, or rotated daemon
@@ -200,12 +202,14 @@ func (p *DaemonPool) GetOrCreateDaemon(ctx context.Context, threadID string, ses
 
 	d, err := runner.StartDaemon(ctx, dCfg)
 	if err != nil {
+		metrics.RecordDaemonAcquisition("error", time.Since(start))
 		return nil, fmt.Errorf("failed to start persistent daemon: %w", err)
 	}
 
 	p.daemons[threadID] = d
 	metrics.DaemonsActive.Set(float64(len(p.daemons)))
 	metrics.DaemonSpawnsTotal.WithLabelValues("cold_start").Inc()
+	metrics.RecordDaemonAcquisition("cold_start", time.Since(start))
 
 	return d, nil
 }
