@@ -2917,6 +2917,7 @@ func TestConfig_ClassifierURLAndModel_YAML(t *testing.T) {
 	yamlContent := `
 classifier_url: http://192.168.1.70:11434
 classifier_model: qwen2.5:3b
+classifier_protocol: systemone
 `
 	cfg, err := LoadConfigFromBytes([]byte(yamlContent))
 	if err != nil {
@@ -2930,6 +2931,9 @@ classifier_model: qwen2.5:3b
 	if data.ClassifierModel != "qwen2.5:3b" {
 		t.Errorf("expected ClassifierModel=qwen2.5:3b, got %q", data.ClassifierModel)
 	}
+	if data.ClassifierProtocol != "systemone" {
+		t.Errorf("expected ClassifierProtocol=systemone, got %q", data.ClassifierProtocol)
+	}
 
 	// Verify defaults when omitted
 	defaultCfg, err := LoadConfigFromBytes([]byte("{}"))
@@ -2942,6 +2946,113 @@ classifier_model: qwen2.5:3b
 	}
 	if defData.ClassifierModel != "" {
 		t.Errorf("expected empty default ClassifierModel, got %q", defData.ClassifierModel)
+	}
+	if defData.ClassifierProtocol != "" {
+		t.Errorf("expected empty default ClassifierProtocol, got %q", defData.ClassifierProtocol)
+	}
+}
+
+func TestConfig_ClassifierProtocol_Validation(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		yaml        string
+		expectError bool
+	}{
+		{
+			name: "valid systemone with url",
+			yaml: `
+channels:
+  default:
+    mode: "threads"
+classifier_protocol: "systemone"
+classifier_url: "http://192.168.1.70:8000/v1/systemone"
+`,
+			expectError: false,
+		},
+		{
+			name: "valid ollama with url",
+			yaml: `
+channels:
+  default:
+    mode: "threads"
+classifier_protocol: "ollama"
+classifier_url: "http://192.168.1.70:11434"
+`,
+			expectError: false,
+		},
+		{
+			name: "valid ollama without url",
+			yaml: `
+channels:
+  default:
+    mode: "threads"
+classifier_protocol: "ollama"
+`,
+			expectError: false,
+		},
+		{
+			name: "invalid protocol name",
+			yaml: `
+channels:
+  default:
+    mode: "threads"
+classifier_protocol: "unsupported"
+`,
+			expectError: true,
+		},
+		{
+			name: "systemone missing url",
+			yaml: `
+channels:
+  default:
+    mode: "threads"
+classifier_protocol: "systemone"
+`,
+			expectError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			tmpDir := t.TempDir()
+			configPath := filepath.Join(tmpDir, "config.yaml")
+			if err := os.WriteFile(configPath, []byte(tt.yaml), 0644); err != nil {
+				t.Fatalf("failed to write config: %v", err)
+			}
+			lookup := func(key string) string { return "" }
+			cfg, err := LoadConfigFromLookup(lookup, configPath)
+			if tt.expectError {
+				if err == nil {
+					t.Fatalf("expected validation error, got nil (cfg=%+v)", cfg.Current())
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("unexpected validation error: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestConfig_ClassifierProtocol_Env(t *testing.T) {
+	t.Parallel()
+
+	data := DefaultConfigData()
+	lookup := func(key string) string {
+		switch key {
+		case "CLASSIFIER_PROTOCOL":
+			return "SYSTEMONE"
+		default:
+			return ""
+		}
+	}
+
+	applyEnvironmentOverrides(data, lookup)
+	if data.ClassifierProtocol != "systemone" {
+		t.Errorf("expected ClassifierProtocol=systemone, got %q", data.ClassifierProtocol)
 	}
 }
 
