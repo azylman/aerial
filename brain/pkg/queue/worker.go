@@ -1469,6 +1469,13 @@ func (te *turnExecution) condenseTurnActions(rawActions string) string {
 	} else {
 		trimmed = "<PREVIOUS_TURN_ACTIONS>\n" + trimmed + "\n</PREVIOUS_TURN_ACTIONS>"
 	}
+
+	const maxTotalChars = 2000
+	runes := []rune(trimmed)
+	if len(runes) > maxTotalChars {
+		closing := []rune("\n</PREVIOUS_TURN_ACTIONS>")
+		trimmed = string(runes[:maxTotalChars-len(closing)]) + string(closing)
+	}
 	return trimmed
 }
 

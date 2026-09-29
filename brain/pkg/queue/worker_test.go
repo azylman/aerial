@@ -3322,6 +3322,28 @@ func TestWorkerPool_SessionRotationInjectsToolActions(t *testing.T) {
 		if fallbackEmpty != longActions {
 			t.Errorf("expected fallback to rawActions on empty LLM response, got %q", fallbackEmpty)
 		}
+
+		// 7. Long string (>1500 chars) where mock LLM returns oversized output (>2000 chars)
+		mockLLMOversized := func(ctx context.Context, model, prompt string) (string, error) {
+			return "<PREVIOUS_TURN_ACTIONS>\n" + strings.Repeat("ExtremelyLongSummaryDataPoint-", 150) + "\n</PREVIOUS_TURN_ACTIONS>", nil
+		}
+		teOversized := &turnExecution{
+			pool: &WorkerPool{
+				cfg: WorkerPoolConfig{
+					LLMFunc: mockLLMOversized,
+				},
+			},
+		}
+		clamped := teOversized.condenseTurnActions(longActions)
+		if len(clamped) > 2000 {
+			t.Errorf("expected clamped output <= 2000 chars, got %d", len(clamped))
+		}
+		if !strings.HasPrefix(clamped, "<PREVIOUS_TURN_ACTIONS>") {
+			t.Errorf("missing prefix in clamped output: %s", clamped)
+		}
+		if !strings.HasSuffix(clamped, "</PREVIOUS_TURN_ACTIONS>") {
+			t.Errorf("missing suffix in clamped output: %s", clamped)
+		}
 	})
 
 	t.Run("preparePrompt_DirectHelpers", func(t *testing.T) {

@@ -3146,7 +3146,42 @@ func TestManager_ExtractTranscriptToolActions(t *testing.T) {
 			t.Errorf("missing t_empty in got: %s", got)
 		}
 	})
+
+	// Case 8: Malformed JSON lines and non-NotExist file read errors
+	t.Run("malformed_json_and_read_errors", func(t *testing.T) {
+		t.Parallel()
+		tempHome := t.TempDir()
+		mgr := New(tempHome, t.TempDir())
+		errID := uuid.New().String()
+		errDir := filepath.Join(tempHome, ".gemini", "antigravity", "brain", errID, ".system_generated", "logs")
+		if err := os.MkdirAll(errDir, 0755); err != nil {
+			t.Fatalf("mkdir failed: %v", err)
+		}
+
+		// 1. Create a directory named transcript_full.jsonl to trigger os.ReadFile error that is not os.ErrNotExist
+		badFull := filepath.Join(errDir, "transcript_full.jsonl")
+		if err := os.MkdirAll(badFull, 0755); err != nil {
+			t.Fatalf("mkdir badFull failed: %v", err)
+		}
+
+		// 2. In transcript.jsonl, include malformed JSON lines before and after valid lines
+		transcript := "{invalid json line pass 1\n" +
+			`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"Start error test"}` + "\n" +
+			"{invalid json line pass 2\n" +
+			`{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","tool_calls":[{"name":"run_command","args":{"CommandLine":"echo hello"}}]}` + "\n" +
+			`{"step_index":2,"source":"MODEL","type":"GENERIC","status":"DONE","content":"hello"}` + "\n"
+
+		if err := os.WriteFile(filepath.Join(errDir, "transcript.jsonl"), []byte(transcript), 0644); err != nil {
+			t.Fatalf("write failed: %v", err)
+		}
+
+		got := mgr.ExtractTranscriptToolActions(errID)
+		if !strings.Contains(got, "- Action: run_command | Command/Args: echo hello | Status: DONE | Result: hello") {
+			t.Errorf("expected valid tool action extracted despite malformed lines, got: %s", got)
+		}
+	})
 }
+
 
 
 

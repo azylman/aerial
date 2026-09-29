@@ -783,7 +783,13 @@ func (m *Manager) ExtractTranscriptToolActions(convID string) string {
 		for _, name := range []string{"transcript_full.jsonl", "transcript.jsonl"} {
 			tPath := filepath.Join(dir, ".system_generated", "logs", name)
 			data, err := os.ReadFile(tPath)
-			if err != nil || len(data) == 0 {
+			if err != nil {
+				if !os.IsNotExist(err) {
+					log.Printf("[SessionManager] error reading transcript file %s: %v", tPath, err)
+				}
+				continue
+			}
+			if len(data) == 0 {
 				continue
 			}
 
@@ -799,11 +805,13 @@ func (m *Manager) ExtractTranscriptToolActions(convID string) string {
 					Type    string `json:"type"`
 					Content string `json:"content"`
 				}
-				if err := json.Unmarshal([]byte(line), &step); err == nil {
-					isAmbient := step.Source == SourceAmbient || (step.Type == "USER_INPUT" && strings.HasPrefix(step.Content, "[Chat #") && step.Source != "USER_EXPLICIT")
-					if step.Type == "USER_INPUT" && !isAmbient {
-						lastUserInputIdx = i
-					}
+				if err := json.Unmarshal([]byte(line), &step); err != nil {
+					log.Printf("[SessionManager] error unmarshaling transcript line in pass 1: %v", err)
+					continue
+				}
+				isAmbient := step.Source == SourceAmbient || (step.Type == "USER_INPUT" && strings.HasPrefix(step.Content, "[Chat #") && step.Source != "USER_EXPLICIT")
+				if step.Type == "USER_INPUT" && !isAmbient {
+					lastUserInputIdx = i
 				}
 			}
 
@@ -838,6 +846,7 @@ func (m *Manager) ExtractTranscriptToolActions(convID string) string {
 					} `json:"tool_calls"`
 				}
 				if err := json.Unmarshal([]byte(line), &step); err != nil {
+					log.Printf("[SessionManager] error unmarshaling transcript line in pass 2: %v", err)
 					continue
 				}
 
