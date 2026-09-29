@@ -1842,8 +1842,9 @@ func TestWorkerPool_CapacityBlip_LocalRetry_Success(t *testing.T) {
 		SessionManager: sessMgr,
 		Store:          store,
 		TimeoutMinutes: 1,
-		BackoffBase:    5 * time.Millisecond,
-		MaxAttempts:    2,
+		BackoffBase:        5 * time.Millisecond,
+		RetryDelayOverride: 10 * time.Millisecond,
+		MaxAttempts:        2,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
 			mu.Lock()
 			attemptCount++
@@ -1932,8 +1933,9 @@ func TestWorkerPool_CapacityBlip_DoesNotBlockConcurrentThreads(t *testing.T) {
 		SessionManager: sessMgr,
 		Store:          store,
 		TimeoutMinutes: 1,
-		BackoffBase:    5 * time.Millisecond,
-		MaxAttempts:    2,
+		BackoffBase:        5 * time.Millisecond,
+		RetryDelayOverride: 10 * time.Millisecond,
+		MaxAttempts:        2,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
 			if strings.Contains(prompt, "Thread A") {
 				// Thread A hits capacity blip on attempt 1, succeeds on attempt 2
@@ -2086,6 +2088,143 @@ func TestWorkerPool_CapacityBlip_ContextCancellation(t *testing.T) {
 	if lockedUntil := pool.quotaLockedUntil.Load(); lockedUntil > 0 {
 		t.Errorf("Expected quotaLockedUntil to remain 0, got %d", lockedUntil)
 	}
+}
+
+func TestWorkerPool_ProgressiveCapacityBackoff(t *testing.T) {
+	t.Parallel()
+
+	// 1. Backoff floor calculation tests
+	t.Run("FloorCalculation", func(t *testing.T) {
+		t.Parallel()
+		// Attempt 1 floor >= 30s
+		for i := 0; i < 20; i++ {
+			d1 := calculateCapacityBackoff(1, 0)
+			if d1 < 30*time.Second {
+				t.Fatalf("attempt 1 backoff floor expected >= 30s, got %v", d1)
+			}
+			if d1 > 33*time.Second {
+				t.Fatalf("attempt 1 backoff jitter expected <= 33s, got %v", d1)
+			}
+		}
+
+		// Attempt 2 floor >= 60s
+		for i := 0; i < 20; i++ {
+			d2 := calculateCapacityBackoff(2, 0)
+			if d2 < 60*time.Second {
+				t.Fatalf("attempt 2 backoff floor expected >= 60s, got %v", d2)
+			}
+			if d2 > 63*time.Second {
+				t.Fatalf("attempt 2 backoff jitter expected <= 63s, got %v", d2)
+			}
+		}
+
+		// resetDur override when resetDur > minFloor (e.g. 75s)
+		for i := 0; i < 20; i++ {
+			dOverride := calculateCapacityBackoff(1, 75*time.Second)
+			if dOverride < 75*time.Second {
+				t.Fatalf("resetDur override expected >= 75s, got %v", dOverride)
+			}
+			if dOverride > 78*time.Second {
+				t.Fatalf("resetDur override jitter expected <= 78s, got %v", dOverride)
+			}
+		}
+	})
+
+	// 2. Context cancellation during backoff triggers clean pending status and calls te.stopTyping()
+	t.Run("ContextCancellationDuringBackoff", func(t *testing.T) {
+		t.Parallel()
+		store := setupTestStore(t)
+		tmpDir := t.TempDir()
+		sessMgr := session.New(tmpDir, tmpDir)
+
+		startedCh := make(chan struct{}, 1)
+		var typingMu sync.Mutex
+		var typingActive bool
+		var typingStopped bool
+
+		appCfg := config.NewFromData(&config.ConfigData{
+			Channels: map[string]config.ChannelPolicy{
+				"default": {Mode: "thread"},
+			},
+		})
+
+		pool := New(appCfg, WorkerPoolConfig{
+			SessionManager: sessMgr,
+			Store:          store,
+			TimeoutMinutes: 1,
+			MaxAttempts:    2,
+			RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+				select {
+				case startedCh <- struct{}{}:
+				default:
+				}
+				return "", "RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Your quota will reset after 0s.", 1, errors.New("exit code 1")
+			},
+			DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+				return nil
+			},
+			TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+				typingMu.Lock()
+				typingActive = true
+				typingMu.Unlock()
+				return func() {
+					typingMu.Lock()
+					typingStopped = true
+					typingMu.Unlock()
+				}
+			},
+		})
+		pool.Start()
+		defer pool.Stop()
+
+		msg := db.Message{ID: "msg-cap-prog-cancel", ThreadID: "thread-cap-prog-cancel", Content: "cancel progressive backoff"}
+		_ = insertMessage(store, msg)
+		pool.Enqueue(msg)
+
+		select {
+		case <-startedCh:
+		case <-time.After(5 * time.Second):
+			t.Fatal("Timeout waiting for attempt 1 runner invocation")
+		}
+
+		// Allow worker to enter backoff sleep (which has delay >= 30s)
+		time.Sleep(100 * time.Millisecond)
+
+		typingMu.Lock()
+		if !typingActive {
+			t.Errorf("Expected typing to have started")
+		}
+		if typingStopped {
+			t.Errorf("Expected te.stopTyping() NOT to be called during backoff delay (typing indicator must continue pulsing)")
+		}
+		typingMu.Unlock()
+
+		// Cancel pool context during progressive capacity backoff
+		pool.cancel()
+
+		// Wait for worker goroutine to process pool.ctx.Done()
+		time.Sleep(300 * time.Millisecond)
+
+		typingMu.Lock()
+		if !typingStopped {
+			t.Errorf("Expected te.stopTyping() to be called on context cancellation during backoff")
+		}
+		typingMu.Unlock()
+
+		dbMsg, err := store.GetMessage(context.Background(), "msg-cap-prog-cancel")
+		if err != nil || dbMsg == nil {
+			t.Fatalf("failed to query message: %v", err)
+		}
+		if dbMsg.Status != db.StatusPending {
+			t.Errorf("Expected StatusPending on context cancellation, got %s (err: %s)", dbMsg.Status, dbMsg.ErrorMessage)
+		}
+		if !strings.Contains(dbMsg.ErrorMessage, "interrupted by graceful deployment") {
+			t.Errorf("Expected error to contain 'interrupted by graceful deployment', got %q", dbMsg.ErrorMessage)
+		}
+		if lockedUntil := pool.quotaLockedUntil.Load(); lockedUntil > 0 {
+			t.Errorf("Expected quotaLockedUntil to remain 0, got %d", lockedUntil)
+		}
+	})
 }
 
 func TestWorkerPool_CapacityBlip_Exhaustion_LocalFailure(t *testing.T) {
@@ -2829,6 +2968,407 @@ func TestWorker_QuotaPause_PreservesEffort(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestWorkerPool_SessionRotationInjectsToolActions(t *testing.T) {
+	t.Run("EndToEnd_SessionRotationInjectsAndRetainsActions", func(t *testing.T) {
+		tmpHome := t.TempDir()
+		tempData := t.TempDir()
+		store := setupTestStore(t)
+
+		validUUID := uuid.New().String()
+		sessDir := filepath.Join(tempData, "brain", validUUID, ".system_generated", "logs")
+		if err := os.MkdirAll(sessDir, 0755); err != nil {
+			t.Fatalf("failed to create logs dir: %v", err)
+		}
+
+		// Initial transcript with 1 step so session is warm at turn start
+		initTranscript := `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"investigate memory leak"}` + "\n"
+		if err := os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(initTranscript), 0644); err != nil {
+			t.Fatalf("failed to write initial transcript: %v", err)
+		}
+
+		cfg := config.NewTestConfig(func(d *config.ConfigData) {
+			d.DataDir = tempData
+		})
+
+		threadID := "thread-rotation-actions-" + uuid.New().String()
+		if err := store.SaveSessionID(context.Background(), threadID, validUUID); err != nil {
+			t.Fatalf("failed to save session ID: %v", err)
+		}
+
+		var mu sync.Mutex
+		var recordedPrompts []string
+		var recordedSessions []string
+		doneCh := make(chan struct{})
+
+		pool := New(cfg, WorkerPoolConfig{
+			SessionManager:      session.New(tmpHome, tempData),
+			Store:               store,
+			TimeoutMinutes:      1,
+			MaxAttempts:         3,
+			RetryDelayOverride:  10 * time.Millisecond,
+			BackoffBase:         5 * time.Millisecond,
+			RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+				mu.Lock()
+				recordedPrompts = append(recordedPrompts, prompt)
+				recordedSessions = append(recordedSessions, sessionID)
+				attemptNum := len(recordedPrompts)
+				mu.Unlock()
+
+				if attemptNum == 1 {
+					// During attempt 1, tool calls and step count grew past guardrail before quota pause
+					tNow := time.Now().UTC()
+					transcriptContent := fmt.Sprintf(`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"investigate memory leak"}
+{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","tool_calls":[{"name":"run_command","args":{"command_line":"docker stats --no-stream"}}]}
+{"step_index":2,"source":"TOOL","type":"GENERIC","status":"DONE","content":"CONTAINER ID aerial-brain MEM USAGE 120MiB"}
+{"step_index":%d,"source":"MODEL","type":"ERROR_MESSAGE","status":"ERROR","content":"RESOURCE_EXHAUSTED: Google Gemini API quota reached. resets in 2s.","created_at":%q}
+`, DefaultMaxSessionSteps, tNow.Format(time.RFC3339))
+					if err := os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(transcriptContent), 0644); err != nil {
+						t.Errorf("failed to update transcript during attempt 1: %v", err)
+					}
+
+					// Attempt 1: Capacity throttle error triggering quota pause rotation
+					return "", "RESOURCE_EXHAUSTED: Google Gemini API quota reached. resets in 2s.", 1, errors.New("429 capacity blip")
+				}
+				if attemptNum == 2 {
+					// Attempt 2: Another capacity blip to verify context retention across multiple retries
+					return "", "RESOURCE_EXHAUSTED: Google Gemini API quota reached. resets in 2s.", 1, errors.New("429 capacity blip 2")
+				}
+
+				// Attempt 3: Success
+				return mockJSONResponse(uuid.New().String(), "Diagnosis complete"), "", 0, nil
+			},
+			DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+				return nil
+			},
+			TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+				return func() {}
+			},
+			OnMessageCompleted: func(msg db.Message, status string) {
+				if status == db.StatusCompleted {
+					select {
+					case <-doneCh:
+					default:
+						close(doneCh)
+					}
+				}
+			},
+		})
+		pool.Start()
+		defer pool.Stop()
+
+		msg := db.Message{
+			ID:        "msg-rotation-actions-" + uuid.New().String(),
+			ThreadID:  threadID,
+			Content:   "check system diagnostics",
+			Status:    db.StatusPending,
+			CreatedAt: time.Now(),
+		}
+		if err := store.InsertMessage(context.Background(), msg); err != nil {
+			t.Fatalf("failed to insert message: %v", err)
+		}
+		pool.Enqueue(msg)
+
+		select {
+		case <-doneCh:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("timed out waiting for turn completion")
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+
+		if len(recordedPrompts) != 3 {
+			t.Fatalf("expected 3 runner attempts, got %d", len(recordedPrompts))
+		}
+
+		// Attempt 1: uses initial validUUID session and does NOT have <PREVIOUS_TURN_ACTIONS>
+		if recordedSessions[0] != validUUID {
+			t.Errorf("expected attempt 1 to use session %q, got %q", validUUID, recordedSessions[0])
+		}
+		if strings.Contains(recordedPrompts[0], "<PREVIOUS_TURN_ACTIONS>") {
+			t.Errorf("expected attempt 1 prompt to not contain PREVIOUS_TURN_ACTIONS, got: %s", recordedPrompts[0])
+		}
+
+		// Attempt 2: session was rotated to empty string (cold start) and prompt contains <PREVIOUS_TURN_ACTIONS>
+		if recordedSessions[1] != "" {
+			t.Errorf("expected attempt 2 session to be rotated to empty string, got %q", recordedSessions[1])
+		}
+		if !strings.Contains(recordedPrompts[1], "<PREVIOUS_TURN_ACTIONS>") {
+			t.Errorf("expected attempt 2 prompt to contain <PREVIOUS_TURN_ACTIONS>, got: %s", recordedPrompts[1])
+		}
+		if !strings.Contains(recordedPrompts[1], "docker stats --no-stream") {
+			t.Errorf("expected attempt 2 prompt to contain tool command, got: %s", recordedPrompts[1])
+		}
+
+		// Attempt 3: context retention verified - prompt still contains <PREVIOUS_TURN_ACTIONS> and is not duplicated
+		if recordedSessions[2] != "" {
+			t.Errorf("expected attempt 3 session to be empty string, got %q", recordedSessions[2])
+		}
+		if !strings.Contains(recordedPrompts[2], "<PREVIOUS_TURN_ACTIONS>") {
+			t.Errorf("expected attempt 3 prompt to retain <PREVIOUS_TURN_ACTIONS>, got: %s", recordedPrompts[2])
+		}
+		if count := strings.Count(recordedPrompts[2], "<PREVIOUS_TURN_ACTIONS>"); count != 1 {
+			t.Errorf("expected exactly 1 instance of <PREVIOUS_TURN_ACTIONS> in attempt 3 prompt, got %d", count)
+		}
+	})
+
+	t.Run("EndToEnd_TransientRotationInjectsToolActions", func(t *testing.T) {
+		tmpHome := t.TempDir()
+		tempData := t.TempDir()
+		store := setupTestStore(t)
+
+		validUUID := uuid.New().String()
+		sessDir := filepath.Join(tempData, "brain", validUUID, ".system_generated", "logs")
+		if err := os.MkdirAll(sessDir, 0755); err != nil {
+			t.Fatalf("failed to create logs dir: %v", err)
+		}
+
+		initTranscript := `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"check build logs"}` + "\n"
+		if err := os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(initTranscript), 0644); err != nil {
+			t.Fatalf("failed to write initial transcript: %v", err)
+		}
+
+		cfg := config.NewTestConfig(func(d *config.ConfigData) {
+			d.DataDir = tempData
+		})
+
+		threadID := "thread-transient-rotation-" + uuid.New().String()
+		if err := store.SaveSessionID(context.Background(), threadID, validUUID); err != nil {
+			t.Fatalf("failed to save session ID: %v", err)
+		}
+
+		var mu sync.Mutex
+		var recordedPrompts []string
+		var recordedSessions []string
+		doneCh := make(chan struct{})
+
+		pool := New(cfg, WorkerPoolConfig{
+			SessionManager:     session.New(tmpHome, tempData),
+			Store:              store,
+			TimeoutMinutes:     1,
+			MaxAttempts:        2,
+			BackoffBase:        5 * time.Millisecond,
+			RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+				mu.Lock()
+				recordedPrompts = append(recordedPrompts, prompt)
+				recordedSessions = append(recordedSessions, sessionID)
+				attemptNum := len(recordedPrompts)
+				mu.Unlock()
+
+				if attemptNum == 1 {
+					// Grow step count past guardrail and trigger transient retry error
+					transcriptContent := fmt.Sprintf(`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"check build logs"}
+{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","tool_calls":[{"name":"view_file","args":{"target_file":"/tmp/build.log"}}]}
+{"step_index":2,"source":"TOOL","type":"GENERIC","status":"DONE","content":"build failed at line 42"}
+{"step_index":%d,"source":"MODEL","type":"ERROR_MESSAGE","status":"ERROR","content":"transient network timeout"}
+`, DefaultMaxSessionSteps)
+					if err := os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(transcriptContent), 0644); err != nil {
+						t.Errorf("failed to update transcript during attempt 1: %v", err)
+					}
+					return "", "transient connection reset", 1, errors.New("transient error")
+				}
+
+				return mockJSONResponse(uuid.New().String(), "Retried successfully"), "", 0, nil
+			},
+			DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+				return nil
+			},
+			TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+				return func() {}
+			},
+			OnMessageCompleted: func(msg db.Message, status string) {
+				if status == db.StatusCompleted {
+					select {
+					case <-doneCh:
+					default:
+						close(doneCh)
+					}
+				}
+			},
+		})
+		pool.Start()
+		defer pool.Stop()
+
+		msg := db.Message{
+			ID:        "msg-transient-rotation-" + uuid.New().String(),
+			ThreadID:  threadID,
+			Content:   "check build logs",
+			Status:    db.StatusPending,
+			CreatedAt: time.Now(),
+		}
+		if err := store.InsertMessage(context.Background(), msg); err != nil {
+			t.Fatalf("failed to insert message: %v", err)
+		}
+		pool.Enqueue(msg)
+
+		select {
+		case <-doneCh:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("timed out waiting for turn completion")
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+
+		if len(recordedPrompts) != 2 {
+			t.Fatalf("expected 2 runner attempts, got %d", len(recordedPrompts))
+		}
+		if recordedSessions[0] != validUUID {
+			t.Errorf("expected attempt 1 to use session %q, got %q", validUUID, recordedSessions[0])
+		}
+		if recordedSessions[1] != "" {
+			t.Errorf("expected attempt 2 session to be rotated to empty string, got %q", recordedSessions[1])
+		}
+		if !strings.Contains(recordedPrompts[1], "<PREVIOUS_TURN_ACTIONS>") {
+			t.Errorf("expected attempt 2 prompt to contain <PREVIOUS_TURN_ACTIONS>, got: %s", recordedPrompts[1])
+		}
+		if !strings.Contains(recordedPrompts[1], "view_file") {
+			t.Errorf("expected attempt 2 prompt to contain tool action, got: %s", recordedPrompts[1])
+		}
+	})
+
+	t.Run("condenseTurnActions_DirectHelpers", func(t *testing.T) {
+		te := &turnExecution{}
+
+		// 1. Short string (<1500 chars) returns raw directly
+		shortActions := "<PREVIOUS_TURN_ACTIONS>\n- Action: run_command | Command/Args: ls | Status: DONE | Result: ok\n</PREVIOUS_TURN_ACTIONS>"
+		if got := te.condenseTurnActions(shortActions); got != shortActions {
+			t.Errorf("condenseTurnActions short string failed: got %q, want %q", got, shortActions)
+		}
+
+		// 2. Long string (>1500 chars) with mock LLMFunc returning tagged response
+		longActions := "<PREVIOUS_TURN_ACTIONS>\n" + strings.Repeat("- Action: run_command | Command/Args: test_long_command | Status: DONE | Result: long_output_data\n", 30) + "</PREVIOUS_TURN_ACTIONS>"
+		if len(longActions) <= 1500 {
+			t.Fatalf("expected longActions > 1500 chars, got %d", len(longActions))
+		}
+
+		mockLLMCalled := false
+		mockLLM := func(ctx context.Context, model, prompt string) (string, error) {
+			mockLLMCalled = true
+			if !strings.Contains(prompt, "Condense the following tool actions") {
+				t.Errorf("expected summarizer prompt, got %q", prompt)
+			}
+			return "<PREVIOUS_TURN_ACTIONS>\n- Condensed summary of 30 commands\n</PREVIOUS_TURN_ACTIONS>", nil
+		}
+
+		teWithLLM := &turnExecution{
+			pool: &WorkerPool{
+				cfg: WorkerPoolConfig{
+					LLMFunc: mockLLM,
+				},
+			},
+		}
+
+		condensed := teWithLLM.condenseTurnActions(longActions)
+		if !mockLLMCalled {
+			t.Errorf("expected mock LLMFunc to be called for longActions")
+		}
+		if !strings.Contains(condensed, "- Condensed summary of 30 commands") {
+			t.Errorf("expected condensed output to contain summary, got %q", condensed)
+		}
+
+		// 3. Long string (>1500 chars) where mock LLM returns without tags (should be auto-wrapped)
+		mockLLMUntagged := func(ctx context.Context, model, prompt string) (string, error) {
+			return "- Bare summary without tags", nil
+		}
+		teUntagged := &turnExecution{
+			pool: &WorkerPool{
+				cfg: WorkerPoolConfig{
+					LLMFunc: mockLLMUntagged,
+				},
+			},
+		}
+		condensedUntagged := teUntagged.condenseTurnActions(longActions)
+		if !strings.Contains(condensedUntagged, "<PREVIOUS_TURN_ACTIONS>") || !strings.Contains(condensedUntagged, "- Bare summary without tags") {
+			t.Errorf("expected wrapped tags for untagged response, got %q", condensedUntagged)
+		}
+
+		// 4. Long string (>1500 chars) with mock LLM error fallback (returns raw clamped string)
+		mockLLMErr := func(ctx context.Context, model, prompt string) (string, error) {
+			return "", errors.New("simulated rate limit error")
+		}
+		teErr := &turnExecution{
+			pool: &WorkerPool{
+				cfg: WorkerPoolConfig{
+					LLMFunc: mockLLMErr,
+				},
+			},
+		}
+		fallbackErr := teErr.condenseTurnActions(longActions)
+		if fallbackErr != longActions {
+			t.Errorf("expected fallback to rawActions on LLM error, got %q", fallbackErr)
+		}
+
+		// 5. Long string (>1500 chars) when summarizer is unavailable (nil pool / nil LLMFunc)
+		fallbackNoLLM := te.condenseTurnActions(longActions)
+		if fallbackNoLLM != longActions {
+			t.Errorf("expected fallback to rawActions when summarizer unavailable, got %q", fallbackNoLLM)
+		}
+
+		// 6. Long string (>1500 chars) where mock LLM returns empty string
+		mockLLMEmpty := func(ctx context.Context, model, prompt string) (string, error) {
+			return "   ", nil
+		}
+		teEmpty := &turnExecution{
+			pool: &WorkerPool{
+				cfg: WorkerPoolConfig{
+					LLMFunc: mockLLMEmpty,
+				},
+			},
+		}
+		fallbackEmpty := teEmpty.condenseTurnActions(longActions)
+		if fallbackEmpty != longActions {
+			t.Errorf("expected fallback to rawActions on empty LLM response, got %q", fallbackEmpty)
+		}
+
+		// 7. Long string (>1500 chars) where mock LLM returns oversized output (>2000 chars)
+		mockLLMOversized := func(ctx context.Context, model, prompt string) (string, error) {
+			return "<PREVIOUS_TURN_ACTIONS>\n" + strings.Repeat("ExtremelyLongSummaryDataPoint-", 150) + "\n</PREVIOUS_TURN_ACTIONS>", nil
+		}
+		teOversized := &turnExecution{
+			pool: &WorkerPool{
+				cfg: WorkerPoolConfig{
+					LLMFunc: mockLLMOversized,
+				},
+			},
+		}
+		clamped := teOversized.condenseTurnActions(longActions)
+		if len(clamped) > 2000 {
+			t.Errorf("expected clamped output <= 2000 chars, got %d", len(clamped))
+		}
+		if !strings.HasPrefix(clamped, "<PREVIOUS_TURN_ACTIONS>") {
+			t.Errorf("missing prefix in clamped output: %s", clamped)
+		}
+		if !strings.HasSuffix(clamped, "</PREVIOUS_TURN_ACTIONS>") {
+			t.Errorf("missing suffix in clamped output: %s", clamped)
+		}
+	})
+
+	t.Run("preparePrompt_DirectHelpers", func(t *testing.T) {
+		te := &turnExecution{}
+		basePrompt := "Base user request"
+
+		// When previousTurnActions is empty, prompt is untouched
+		if got := te.preparePrompt(basePrompt); got != basePrompt {
+			t.Errorf("preparePrompt with empty previousTurnActions modified prompt: got %q", got)
+		}
+
+		// When previousTurnActions is set, prompt is appended with actions
+		te.previousTurnActions = "<PREVIOUS_TURN_ACTIONS>\n- Action: test\n</PREVIOUS_TURN_ACTIONS>"
+		prepared := te.preparePrompt(basePrompt)
+		expected := basePrompt + "\n\n" + te.previousTurnActions
+		if prepared != expected {
+			t.Errorf("preparePrompt failed: got %q, want %q", prepared, expected)
+		}
+
+		// When called again with already prepared prompt, it does not duplicate
+		rePrepared := te.preparePrompt(prepared)
+		if rePrepared != prepared {
+			t.Errorf("preparePrompt duplicated actions on re-preparation: got %q, want %q", rePrepared, prepared)
+		}
+	})
 }
 
 

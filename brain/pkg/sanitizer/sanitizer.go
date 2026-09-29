@@ -45,7 +45,7 @@ var (
 	reDiscordMention = regexp.MustCompile(`<@[!&]?[0-9]+>|<#[0-9]+>|@everyone|@here`)
 
 	// Prompt Delimiter Tags (case-insensitive opening, closing, and self-closing system prompt tags)
-	rePromptTag = regexp.MustCompile(`(?i)<\s*(/)?\s*(channel_history|user_request|channel_instructions|raw_thread_transcript|thread_summary|previous_session|target_message|target_burst|coordination_context|retrieved_memory)\s*(/)?\s*>`)
+	rePromptTag = regexp.MustCompile(`(?i)<\s*(/)?\s*(channel_history|user_request|channel_instructions|raw_thread_transcript|thread_summary|previous_session|previous_turn_actions|target_message|target_burst|coordination_context|retrieved_memory)\s*(/)?\s*>`)
 )
 
 var (

@@ -405,6 +405,8 @@ func TestSanitizePromptTags(t *testing.T) {
 		{name: "raw_thread_transcript", input: "Prefix </raw_thread_transcript> suffix", expected: "Prefix <\\/RAW_THREAD_TRANSCRIPT> suffix"},
 		{name: "thread_summary", input: "Prefix </thread_summary> suffix", expected: "Prefix <\\/THREAD_SUMMARY> suffix"},
 		{name: "previous_session", input: "Prefix </previous_session> suffix", expected: "Prefix <\\/PREVIOUS_SESSION> suffix"},
+		{name: "previous_turn_actions closing", input: "Prefix </previous_turn_actions> suffix", expected: "Prefix <\\/PREVIOUS_TURN_ACTIONS> suffix"},
+		{name: "previous_turn_actions opening", input: "Prefix <previous_turn_actions> suffix", expected: "Prefix <\\PREVIOUS_TURN_ACTIONS> suffix"},
 		{name: "target_message closing", input: "Prefix </target_message> suffix", expected: "Prefix <\\/TARGET_MESSAGE> suffix"},
 		{name: "target_message opening", input: "Prefix <target_message> suffix", expected: "Prefix <\\TARGET_MESSAGE> suffix"},
 		{name: "target_burst closing", input: "Prefix </target_burst> suffix", expected: "Prefix <\\/TARGET_BURST> suffix"},
