@@ -129,3 +129,60 @@ func TestWorkerPool_UnifiedProcessPoolWiring(t *testing.T) {
 	})
 }
 
+func TestWorkerPool_DualPoolTurnRouting(t *testing.T) {
+	primarySpawner := runner.NewMockSpawner()
+	primaryPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.7-pro"}, primarySpawner)
+	defer primaryPool.Close()
+
+	lowEffortSpawner := runner.NewMockSpawner()
+	lowEffortPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, lowEffortSpawner)
+	defer lowEffortPool.Close()
+
+	wp := NewWorkerPool(WorkerPoolConfig{
+		ProcessPool:          primaryPool,
+		LowEffortProcessPool: lowEffortPool,
+	})
+	defer wp.Stop()
+
+	if wp.LowEffortProcessPool() != lowEffortPool {
+		t.Fatalf("expected LowEffortProcessPool to match injected pool")
+	}
+
+	t.Run("NilWorkerPool_ReturnsNil", func(t *testing.T) {
+		var p *WorkerPool
+		if got := p.LowEffortProcessPool(); got != nil {
+			t.Fatalf("expected nil from nil WorkerPool.LowEffortProcessPool(), got %v", got)
+		}
+	})
+
+	t.Run("DefaultConfig_LowEffortProcessPoolIsNil", func(t *testing.T) {
+		p := New(nil, WorkerPoolConfig{})
+		if got := p.LowEffortProcessPool(); got != nil {
+			t.Fatalf("expected nil LowEffortProcessPool by default, got %v", got)
+		}
+	})
+
+	t.Run("MarkDirtyAndStop_CleansAllThreePools", func(t *testing.T) {
+		pSpawner := runner.NewMockSpawner()
+		pPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.7-pro"}, pSpawner)
+		defer pPool.Close()
+
+		lSpawner := runner.NewMockSpawner()
+		lPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, lSpawner)
+		defer lPool.Close()
+
+		vSpawner := runner.NewMockSpawner()
+		vPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-2.5-flash"}, vSpawner)
+		defer vPool.Close()
+
+		pool := NewWorkerPool(WorkerPoolConfig{
+			ProcessPool:          pPool,
+			LowEffortProcessPool: lPool,
+			VoiceProcessPool:     vPool,
+		})
+
+		pool.MarkDirty()
+		pool.Stop()
+	})
+}
+

@@ -134,7 +134,7 @@ type ScheduleRecurringArgs struct {
 	Prompt         string `json:"prompt" jsonschema:"Instructions to execute on every occurrence."`
 	TitlePrefix    string `json:"title_prefix,omitempty" jsonschema:"Title prefix for spawned threads (e.g. 'Weekly Meal Plan')."`
 	Timezone       string `json:"timezone,omitempty" jsonschema:"Timezone for evaluation (e.g. 'America/Los_Angeles', 'America/New_York', or 'UTC'). Defaults to configured server timezone."`
-	Effort         string `json:"effort,omitempty" jsonschema:"Effort tier for the routine: 'high' (uses primary high-effort model) or 'low' (uses lightweight low-effort model). Defaults to 'high'."`
+	Effort         string `json:"effort,omitempty" jsonschema:"Effort tier for the routine: 'high' (uses primary high-effort model) or 'low' (uses lightweight low-effort model). Defaults to 'low'."`
 }
 
 type ScheduleRecurringOutput struct {
@@ -147,19 +147,24 @@ type ScheduleRecurringOutput struct {
 	Message        string `json:"message"`
 }
 
-func (h *ToolHandler) ScheduleRecurring(ctx context.Context, args ScheduleRecurringArgs) (ScheduleRecurringOutput, error) {
+func handleScheduleRecurring(ctx context.Context, database *sql.DB, defaultTZ string, args ScheduleRecurringArgs) (ScheduleRecurringOutput, error) {
 	args.ChannelID = strings.TrimSpace(args.ChannelID)
 	args.CronExpression = strings.TrimSpace(args.CronExpression)
 	args.Prompt = strings.TrimSpace(args.Prompt)
 	args.TitlePrefix = strings.TrimSpace(args.TitlePrefix)
 	args.Timezone = strings.TrimSpace(args.Timezone)
 	if args.Timezone == "" {
-		args.Timezone = h.timezone
+		if defaultTZ != "" {
+			args.Timezone = defaultTZ
+		} else {
+			args.Timezone = DefaultTimezone
+		}
 	}
-	args.Effort = strings.ToLower(strings.TrimSpace(args.Effort))
-	if args.Effort != "low" {
-		args.Effort = "high"
+	effort := strings.ToLower(strings.TrimSpace(args.Effort))
+	if effort != "high" {
+		effort = "low"
 	}
+	args.Effort = effort
 
 	if args.ChannelID == "" {
 		return ScheduleRecurringOutput{}, fmt.Errorf("'channel_id' is required")
@@ -191,46 +196,62 @@ func (h *ToolHandler) ScheduleRecurring(ctx context.Context, args ScheduleRecurr
 		Effort:      args.Effort,
 	}
 
-	if err := InsertCronSchedule(ctx, h.db, sched); err != nil {
+	if err := InsertCronSchedule(ctx, database, sched); err != nil {
 		return ScheduleRecurringOutput{}, fmt.Errorf("failed to persist recurring schedule: %w", err)
 	}
 
 	return ScheduleRecurringOutput{
-		Status:          "success",
+		Status:         "success",
 		ScheduleID:     id,
 		CronExpression: args.CronExpression,
 		NextRunAt:      nextRun.Format(time.RFC3339),
 		ChannelID:      args.ChannelID,
-		Effort:          args.Effort,
-		Message:         "Recurring schedule created successfully.",
+		Effort:         args.Effort,
+		Message:        "Recurring schedule created successfully.",
 	}, nil
+}
+
+func (h *ToolHandler) ScheduleRecurring(ctx context.Context, args ScheduleRecurringArgs) (ScheduleRecurringOutput, error) {
+	var tz string
+	var db *sql.DB
+	if h != nil {
+		tz = h.timezone
+		db = h.db
+	}
+	return handleScheduleRecurring(ctx, db, tz, args)
 }
 
 
 type ScheduleOnceArgs struct {
-	TargetID string `json:"target_id" jsonschema:"Target Discord thread ID or channel ID where reminder will be delivered."`
+	TargetID string `json:"target_id,omitempty" jsonschema:"Target Discord thread ID or channel ID where reminder will be delivered."`
+	ThreadID string `json:"thread_id,omitempty" jsonschema:"Target Discord thread ID or channel ID where reminder will be delivered."`
 	RunAt    string `json:"run_at" jsonschema:"ISO 8601 timestamp (e.g. '2026-08-28T21:00:00Z') or relative duration (e.g. '30m', '2h', '1d')."`
 	Prompt   string `json:"prompt" jsonschema:"Content/instructions of the reminder."`
 	Timezone string `json:"timezone,omitempty" jsonschema:"Timezone for absolute timestamp evaluation (e.g. 'America/Los_Angeles', 'America/New_York', or 'UTC'). Defaults to configured server timezone."`
+	Effort   string `json:"effort,omitempty" jsonschema:"Effort tier: 'low' (lightweight low-effort model) or 'high' (primary high-effort model). Defaults to 'low'."`
 }
 
 type ScheduleOnceOutput struct {
 	Status     string `json:"status"`
 	ScheduleID string `json:"schedule_id"`
 	RunAt      string `json:"run_at"`
+	Effort     string `json:"effort"`
 	Message    string `json:"message"`
 }
 
-func (h *ToolHandler) ScheduleOnce(ctx context.Context, args ScheduleOnceArgs) (ScheduleOnceOutput, error) {
-	args.TargetID = strings.TrimSpace(args.TargetID)
+func handleScheduleOnce(ctx context.Context, database *sql.DB, args ScheduleOnceArgs) (ScheduleOnceOutput, error) {
+	targetID := strings.TrimSpace(args.TargetID)
+	if targetID == "" {
+		targetID = strings.TrimSpace(args.ThreadID)
+	}
 	args.RunAt = strings.TrimSpace(args.RunAt)
 	args.Prompt = strings.TrimSpace(args.Prompt)
 	args.Timezone = strings.TrimSpace(args.Timezone)
 	if args.Timezone == "" {
-		args.Timezone = h.timezone
+		args.Timezone = DefaultTimezone
 	}
 
-	if args.TargetID == "" {
+	if targetID == "" {
 		return ScheduleOnceOutput{}, fmt.Errorf("'target_id' is required")
 	}
 	if args.RunAt == "" {
@@ -246,25 +267,43 @@ func (h *ToolHandler) ScheduleOnce(ctx context.Context, args ScheduleOnceArgs) (
 		return ScheduleOnceOutput{}, err
 	}
 
+	effort := strings.ToLower(strings.TrimSpace(args.Effort))
+	if effort != "high" {
+		effort = "low"
+	}
+
 	id := uuid.New().String()
 	sched := OneShotSchedule{
 		ID:        id,
-		ThreadID:  args.TargetID,
+		ThreadID:  targetID,
 		Prompt:    args.Prompt,
 		RunAt:     targetTime,
 		CreatedAt: now,
+		Effort:    effort,
 	}
 
-	if err := InsertOneShotSchedule(ctx, h.db, sched); err != nil {
+	if err := InsertOneShotSchedule(ctx, database, sched); err != nil {
 		return ScheduleOnceOutput{}, fmt.Errorf("failed to persist one-shot schedule: %w", err)
 	}
 
 	return ScheduleOnceOutput{
-		Status:      "success",
+		Status:     "success",
 		ScheduleID: id,
 		RunAt:      targetTime.Format(time.RFC3339),
-		Message:     "One-shot reminder scheduled successfully.",
+		Effort:     effort,
+		Message:    "One-shot reminder scheduled successfully.",
 	}, nil
+}
+
+func (h *ToolHandler) ScheduleOnce(ctx context.Context, args ScheduleOnceArgs) (ScheduleOnceOutput, error) {
+	if args.Timezone == "" && h != nil {
+		args.Timezone = h.timezone
+	}
+	var database *sql.DB
+	if h != nil {
+		database = h.db
+	}
+	return handleScheduleOnce(ctx, database, args)
 }
 
 

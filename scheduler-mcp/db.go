@@ -41,6 +41,7 @@ type OneShotSchedule struct {
 	Prompt    string    `json:"prompt"`
 	RunAt     time.Time `json:"run_at"`
 	CreatedAt time.Time `json:"created_at"`
+	Effort    string    `json:"effort,omitempty"`
 }
 
 const migrationLockID = 849201948201
@@ -179,7 +180,7 @@ func initDB(dsn string) (*sql.DB, error) {
 		timezone TEXT NOT NULL DEFAULT 'America/Los_Angeles',
 		next_run_at TIMESTAMPTZ NOT NULL,
 		enabled BOOLEAN NOT NULL DEFAULT TRUE,
-		effort TEXT NOT NULL DEFAULT 'high',
+		effort TEXT NOT NULL DEFAULT 'low',
 		created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 	);
 	CREATE INDEX IF NOT EXISTS idx_cron_schedules_next_run_at ON cron_schedules(enabled, next_run_at);
@@ -189,7 +190,8 @@ func initDB(dsn string) (*sql.DB, error) {
 		thread_id TEXT NOT NULL,
 		prompt TEXT NOT NULL,
 		run_at TIMESTAMPTZ NOT NULL,
-		created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+		created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		effort TEXT NOT NULL DEFAULT 'low'
 	);
 	CREATE INDEX IF NOT EXISTS idx_one_shot_schedules_run_at ON one_shot_schedules(run_at);
 	`
@@ -197,8 +199,15 @@ func initDB(dsn string) (*sql.DB, error) {
 		return nil, fmt.Errorf("failed to execute postgres schema: %w", err)
 	}
 
-	if _, alterErr := conn.ExecContext(ctx, "ALTER TABLE cron_schedules ADD COLUMN IF NOT EXISTS effort TEXT NOT NULL DEFAULT 'high';"); alterErr != nil {
-		log.Printf("[Scheduler DB] Warning adding postgres effort column: %v", alterErr)
+	for _, migration := range []string{
+		"ALTER TABLE cron_schedules ADD COLUMN IF NOT EXISTS effort TEXT NOT NULL DEFAULT 'low';",
+		"ALTER TABLE cron_schedules ALTER COLUMN effort SET DEFAULT 'low';",
+		"ALTER TABLE one_shot_schedules ADD COLUMN IF NOT EXISTS effort TEXT NOT NULL DEFAULT 'low';",
+		"ALTER TABLE one_shot_schedules ALTER COLUMN effort SET DEFAULT 'low';",
+	} {
+		if _, alterErr := conn.ExecContext(ctx, migration); alterErr != nil {
+			log.Printf("[Scheduler DB] Warning executing postgres migration %q: %v", migration, alterErr)
+		}
 	}
 
 	log.Printf("[Scheduler DB] PostgreSQL initialized successfully at %s", trimmed)
@@ -219,7 +228,7 @@ func InsertCronSchedule(ctx context.Context, database *sql.DB, c CronSchedule) e
 	if c.Timezone == "" {
 		c.Timezone = "America/Los_Angeles"
 	}
-	if strings.ToLower(strings.TrimSpace(c.Effort)) != "low" {
+	if strings.ToLower(strings.TrimSpace(c.Effort)) == "high" {
 		c.Effort = "high"
 	} else {
 		c.Effort = "low"
@@ -243,12 +252,17 @@ func InsertOneShotSchedule(ctx context.Context, database *sql.DB, s OneShotSched
 	if s.CreatedAt.IsZero() {
 		s.CreatedAt = time.Now().UTC()
 	}
+	if strings.ToLower(strings.TrimSpace(s.Effort)) == "high" {
+		s.Effort = "high"
+	} else {
+		s.Effort = "low"
+	}
 	query := `
-	INSERT INTO one_shot_schedules (id, thread_id, prompt, run_at, created_at)
-	VALUES (?, ?, ?, ?, ?)
+	INSERT INTO one_shot_schedules (id, thread_id, prompt, run_at, created_at, effort)
+	VALUES (?, ?, ?, ?, ?, ?)
 	`
 	query = rebindQuery(query, isPostgres(database))
-	_, err := database.ExecContext(ctx, query, s.ID, s.ThreadID, s.Prompt, s.RunAt, s.CreatedAt)
+	_, err := database.ExecContext(ctx, query, s.ID, s.ThreadID, s.Prompt, s.RunAt, s.CreatedAt, s.Effort)
 	return err
 }
 
@@ -260,7 +274,7 @@ func ListCronSchedules(ctx context.Context, database *sql.DB, targetID string) (
 		return nil, fmt.Errorf("database is nil")
 	}
 	query := `
-	SELECT id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, COALESCE(effort, 'high')
+	SELECT id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, COALESCE(NULLIF(effort, ''), 'low')
 	FROM cron_schedules
 	WHERE enabled = TRUE
 	`
@@ -371,7 +385,7 @@ func ListOneShotSchedules(ctx context.Context, database *sql.DB, targetID string
 		return nil, fmt.Errorf("database is nil")
 	}
 	query := `
-	SELECT id, thread_id, prompt, run_at, created_at
+	SELECT id, thread_id, prompt, run_at, created_at, COALESCE(NULLIF(effort, ''), 'low')
 	FROM one_shot_schedules
 	`
 	var rows *sql.Rows
@@ -393,7 +407,7 @@ func ListOneShotSchedules(ctx context.Context, database *sql.DB, targetID string
 	var results []OneShotSchedule
 	for rows.Next() {
 		var s OneShotSchedule
-		if err := rows.Scan(&s.ID, &s.ThreadID, &s.Prompt, &s.RunAt, &s.CreatedAt); err != nil {
+		if err := rows.Scan(&s.ID, &s.ThreadID, &s.Prompt, &s.RunAt, &s.CreatedAt, &s.Effort); err != nil {
 			return nil, err
 		}
 		results = append(results, s)

@@ -2279,6 +2279,558 @@ func TestTurnResultSink_Callbacks(t *testing.T) {
 	}
 }
 
+func TestWorker_DualPoolRouting_LowEffortAndFallback(t *testing.T) {
+	store := setupTestStore(t)
+	tmpHome := t.TempDir()
+	tempData := t.TempDir()
+
+	var primarySpawnCount, lowSpawnCount int
+	var mu sync.Mutex
+
+	primarySpawner := &runner.MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+			mu.Lock()
+			primarySpawnCount++
+			mu.Unlock()
+			inR, inW := io.Pipe()
+			outR, outW := io.Pipe()
+			errR, errW := io.Pipe()
+			defer errW.Close()
+			go func() {
+				_, _ = outW.Write([]byte("{\"event\":\"init\",\"conversation_id\":\"c1111111-2222-3333-4444-555555555555\"}\n"))
+				scanner := bufio.NewScanner(inR)
+				for scanner.Scan() {
+					_, _ = outW.Write([]byte("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"executed on primary\",\"usage\":{\"total_tokens\":10}}}\n"))
+				}
+			}()
+			return inW, outR, errR, runner.NewMockProcessHandle(12345), nil
+		},
+	}
+	lowSpawner := &runner.MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+			mu.Lock()
+			lowSpawnCount++
+			mu.Unlock()
+			inR, inW := io.Pipe()
+			outR, outW := io.Pipe()
+			errR, errW := io.Pipe()
+			defer errW.Close()
+			go func() {
+				_, _ = outW.Write([]byte("{\"event\":\"init\",\"conversation_id\":\"d1111111-2222-3333-4444-555555555555\"}\n"))
+				scanner := bufio.NewScanner(inR)
+				for scanner.Scan() {
+					_, _ = outW.Write([]byte("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"executed on low effort\",\"usage\":{\"total_tokens\":5}}}\n"))
+				}
+			}()
+			return inW, outR, errR, runner.NewMockProcessHandle(12346), nil
+		},
+	}
+
+	primaryPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.7-pro"}, primarySpawner)
+	defer primaryPool.Close()
+
+	lowPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, lowSpawner)
+	defer lowPool.Close()
+
+	cfg := config.NewTestConfig(func(d *config.ConfigData) {
+		d.DataDir = tempData
+		d.LowEffortModel = "gemini-3.8-flash-low"
+	})
+
+	doneCh := make(chan struct{}, 5)
+	pool := New(cfg, WorkerPoolConfig{
+		ProcessPool:          primaryPool,
+		LowEffortProcessPool: lowPool,
+		SessionManager:       session.New(tmpHome, tempData),
+		Store:                store,
+		TimeoutMinutes:       1,
+		OnMessageCompleted: func(msg db.Message, status string) {
+			if status == db.StatusCompleted {
+				doneCh <- struct{}{}
+			}
+		},
+	})
+	defer pool.Stop()
+
+	// 1. Enqueue low-effort message -> should route to lowPool
+	lowMsg := db.Message{
+		ID:        "msg-low-route-1",
+		ThreadID:  "thread-low-route",
+		Content:   "run low task",
+		Effort:    "low",
+		Status:    db.StatusPending,
+		CreatedAt: time.Now(),
+	}
+	_ = store.InsertMessage(context.Background(), lowMsg)
+	pool.Enqueue(lowMsg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timeout waiting for low effort turn completion")
+	}
+
+	mu.Lock()
+	if lowSpawnCount != 1 || primarySpawnCount != 0 {
+		t.Errorf("expected lowSpawnCount=1 and primarySpawnCount=0, got low=%d primary=%d", lowSpawnCount, primarySpawnCount)
+	}
+	mu.Unlock()
+
+	// 2. Enqueue normal message -> should route to primaryPool
+	normMsg := db.Message{
+		ID:        "msg-norm-route-1",
+		ThreadID:  "thread-norm-route",
+		Content:   "run normal task",
+		Status:    db.StatusPending,
+		CreatedAt: time.Now(),
+	}
+	_ = store.InsertMessage(context.Background(), normMsg)
+	pool.Enqueue(normMsg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timeout waiting for normal turn completion")
+	}
+
+	mu.Lock()
+	if primarySpawnCount != 1 {
+		t.Errorf("expected primarySpawnCount=1, got %d", primarySpawnCount)
+	}
+	mu.Unlock()
+
+	// 3. Fallback: pool with LowEffortProcessPool=nil routes low effort message to primaryPool
+	poolFallback := New(cfg, WorkerPoolConfig{
+		ProcessPool:    primaryPool,
+		SessionManager: session.New(tmpHome, tempData),
+		Store:          store,
+		TimeoutMinutes: 1,
+		OnMessageCompleted: func(msg db.Message, status string) {
+			if status == db.StatusCompleted {
+				doneCh <- struct{}{}
+			}
+		},
+	})
+	defer poolFallback.Stop()
+
+	fallbackMsg := db.Message{
+		ID:        "msg-fallback-1",
+		ThreadID:  "thread-fallback",
+		Content:   "run fallback task",
+		Effort:    "low",
+		Status:    db.StatusPending,
+		CreatedAt: time.Now(),
+	}
+	_ = store.InsertMessage(context.Background(), fallbackMsg)
+	poolFallback.Enqueue(fallbackMsg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timeout waiting for fallback turn completion")
+	}
+
+	mu.Lock()
+	if primarySpawnCount != 2 {
+		t.Errorf("expected primarySpawnCount=2 after fallback, got %d", primarySpawnCount)
+	}
+	mu.Unlock()
+}
+
+func TestWorker_SessionAntiFlapping_ProtectsPrimarySession(t *testing.T) {
+	store := setupTestStore(t)
+	tmpHome := t.TempDir()
+	tempData := t.TempDir()
+
+	primarySessUUID := "11111111-1111-1111-1111-111111111111"
+	lowSessUUID := "22222222-2222-2222-2222-222222222222"
+
+	lowSpawner := &runner.MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+			inR, inW := io.Pipe()
+			outR, outW := io.Pipe()
+			errR, errW := io.Pipe()
+			defer errW.Close()
+			go func() {
+				_, _ = outW.Write([]byte(fmt.Sprintf("{\"event\":\"init\",\"conversation_id\":%q}\n", lowSessUUID)))
+				scanner := bufio.NewScanner(inR)
+				for scanner.Scan() {
+					_, _ = outW.Write([]byte(fmt.Sprintf("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"ok low effort\",\"conversation_id\":%q,\"usage\":{\"total_tokens\":5}}}\n", lowSessUUID)))
+				}
+			}()
+			return inW, outR, errR, runner.NewMockProcessHandle(12345), nil
+		},
+	}
+	primarySpawner := runner.NewMockSpawner()
+
+	primaryPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.7-pro"}, primarySpawner)
+	defer primaryPool.Close()
+
+	lowPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, lowSpawner)
+	defer lowPool.Close()
+
+	cfg := config.NewTestConfig(func(d *config.ConfigData) {
+		d.DataDir = tempData
+		d.LowEffortModel = "gemini-3.8-flash-low"
+	})
+
+	doneCh := make(chan struct{}, 1)
+	pool := New(cfg, WorkerPoolConfig{
+		ProcessPool:          primaryPool,
+		LowEffortProcessPool: lowPool,
+		SessionManager:       session.New(tmpHome, tempData),
+		Store:                store,
+		TimeoutMinutes:       1,
+		OnMessageCompleted: func(msg db.Message, status string) {
+			if status == db.StatusCompleted {
+				doneCh <- struct{}{}
+			}
+		},
+	})
+	defer pool.Stop()
+
+	threadID := "thread-antiflap-1"
+	// Seed thread with existing primary session
+	_ = store.SaveSessionID(context.Background(), threadID, primarySessUUID)
+
+	msg := db.Message{
+		ID:        "msg-antiflap-1",
+		ThreadID:  threadID,
+		Content:   "run scheduled low-effort maintenance",
+		Effort:    "low",
+		Status:    db.StatusPending,
+		CreatedAt: time.Now(),
+	}
+	_ = store.InsertMessage(context.Background(), msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timeout waiting for message completion")
+	}
+
+	// Verify that the sessions table was NOT overwritten
+	currentSess, err := store.GetSessionID(context.Background(), threadID)
+	if err != nil {
+		t.Fatalf("failed to get session ID: %v", err)
+	}
+	if currentSess != primarySessUUID {
+		t.Fatalf("ANTI-FLAPPING VIOLATION: expected primary session %s to be preserved, got %s", primarySessUUID, currentSess)
+	}
+}
+
+func TestWorker_ThreadWorker_ActiveTasksInLowEffortPoolPreventReap(t *testing.T) {
+	store := setupTestStore(t)
+	tmpHome := t.TempDir()
+	tempData := t.TempDir()
+
+	lowSpawner := &runner.MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+			inR, inW := io.Pipe()
+			outR, outW := io.Pipe()
+			errR, errW := io.Pipe()
+			defer errW.Close()
+			go func() {
+				_, _ = outW.Write([]byte("{\"event\":\"init\",\"conversation_id\":\"e1111111-2222-3333-4444-555555555555\"}\n"))
+				scanner := bufio.NewScanner(inR)
+				for scanner.Scan() {
+					_, _ = outW.Write([]byte("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"ok\",\"usage\":{\"total_tokens\":5}}}\n"))
+				}
+			}()
+			return inW, outR, errR, runner.NewMockProcessHandle(12345), nil
+		},
+	}
+	primaryPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, runner.NewMockSpawner())
+	defer primaryPool.Close()
+
+	lowPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, lowSpawner)
+	defer lowPool.Close()
+
+	cfg := config.NewTestConfig(func(d *config.ConfigData) {
+		d.DataDir = tempData
+	})
+
+	threadID := "thread-low-reap-test"
+	doneCh := make(chan struct{})
+	pool := New(cfg, WorkerPoolConfig{
+		ProcessPool:          primaryPool,
+		LowEffortProcessPool: lowPool,
+		SessionManager:       session.New(tmpHome, tempData),
+		Store:                store,
+		TimeoutMinutes:       1,
+		MaxAttempts:          1,
+		IdleTimeout:          20 * time.Millisecond,
+		OnMessageCompleted: func(msg db.Message, status string) {
+			select {
+			case <-doneCh:
+			default:
+				close(doneCh)
+			}
+		},
+	})
+	defer pool.Stop()
+
+	// Pre-create daemon in lowPool with active task
+	ctx := context.Background()
+	daemon, err := pool.LowEffortProcessPool().GetOrCreate(ctx, threadID)
+	if err != nil {
+		t.Fatalf("failed to create daemon in low pool: %v", err)
+	}
+	daemon.TaskTracker().Add(runner.TaskMetadata{
+		TaskID:    "task-low-busy-prevent-reap",
+		StartedAt: time.Now(),
+	})
+
+	msg := db.Message{
+		ID:        "msg-low-reap-1",
+		ThreadID:  threadID,
+		Content:   "hello low reap",
+		Effort:    "low",
+		Status:    db.StatusPending,
+		CreatedAt: time.Now(),
+	}
+	_ = store.InsertMessage(context.Background(), msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for message completion")
+	}
+
+	// Verify worker remains active because background task in lowEffortProcessPool is still running
+	time.Sleep(60 * time.Millisecond)
+	pool.mu.Lock()
+	_, workerStillActive := pool.threadChs[threadID]
+	pool.mu.Unlock()
+
+	if !workerStillActive {
+		t.Errorf("expected worker to remain active because background task was running in LowEffortProcessPool")
+	}
+}
+
+func TestWorker_YieldTrap_AlternatePoolFallback(t *testing.T) {
+	store := setupTestStore(t)
+	tmpHome := t.TempDir()
+	tempData := t.TempDir()
+
+	sessID := "f1111111-2222-3333-4444-555555555555"
+	sessDir := filepath.Join(tempData, "brain", sessID, ".system_generated", "logs")
+	_ = os.MkdirAll(sessDir, 0755)
+	_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(`{"step_index":0}`+"\n"), 0644)
+
+	var turnCount int
+	var mu sync.Mutex
+
+	primarySpawner := &runner.MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+			inR, inW := io.Pipe()
+			outR, outW := io.Pipe()
+			errR, errW := io.Pipe()
+			defer errW.Close()
+			go func() {
+				_, _ = outW.Write([]byte(fmt.Sprintf("{\"event\":\"init\",\"conversation_id\":%q}\n", sessID)))
+				scanner := bufio.NewScanner(inR)
+				for scanner.Scan() {
+					mu.Lock()
+					turnCount++
+					tc := turnCount
+					mu.Unlock()
+					if tc == 1 {
+						// Turn 1 completes normally without yield error in output
+						_, _ = outW.Write([]byte("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"waiting for bg task\",\"usage\":{\"total_tokens\":5}}}\n"))
+					} else {
+						// Auto-resumed turn completes with final success
+						_, _ = outW.Write([]byte("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"all tasks done\",\"usage\":{\"total_tokens\":5}}}\n"))
+					}
+				}
+			}()
+			return inW, outR, errR, runner.NewMockProcessHandle(12345), nil
+		},
+	}
+
+	primaryPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.7-pro"}, primarySpawner)
+	defer primaryPool.Close()
+
+	lowSpawner := &runner.MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+			inR, inW := io.Pipe()
+			outR, outW := io.Pipe()
+			errR, errW := io.Pipe()
+			defer errW.Close()
+			go func() {
+				_, _ = outW.Write([]byte("{\"event\":\"init\",\"conversation_id\":\"d1111111-2222-3333-4444-555555555555\"}\n"))
+				scanner := bufio.NewScanner(inR)
+				for scanner.Scan() {
+				}
+			}()
+			return inW, outR, errR, runner.NewMockProcessHandle(12347), nil
+		},
+	}
+	lowPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, lowSpawner)
+	defer lowPool.Close()
+
+	cfg := config.NewTestConfig(func(d *config.ConfigData) {
+		d.DataDir = tempData
+	})
+
+	threadID := "thread-yield-fallback"
+	_ = store.SaveSessionID(context.Background(), threadID, sessID)
+
+	lowSessID := "d1111111-2222-3333-4444-555555555555"
+	taskDir := filepath.Join(tempData, "brain", lowSessID, ".system_generated", "tasks")
+	_ = os.MkdirAll(taskDir, 0755)
+	_ = os.WriteFile(filepath.Join(taskDir, "bg-task-in-low-pool.log"), []byte("done"), 0644)
+
+	doneCh := make(chan struct{})
+	pool := New(cfg, WorkerPoolConfig{
+		ProcessPool:          primaryPool,
+		LowEffortProcessPool: lowPool,
+		SessionManager:       session.New(tmpHome, tempData),
+		Store:                store,
+		TimeoutMinutes:       1,
+		OnMessageCompleted: func(msg db.Message, status string) {
+			if status == db.StatusCompleted {
+				select {
+				case <-doneCh:
+				default:
+					close(doneCh)
+				}
+			}
+		},
+	})
+	defer pool.Stop()
+
+	// Put an active background task in the ALTERNATE pool (lowPool) for this thread
+	ctx := context.Background()
+	lowDaemon, err := lowPool.GetOrCreate(ctx, threadID)
+	if err != nil {
+		t.Fatalf("failed to create low daemon: %v", err)
+	}
+	lowDaemon.TaskTracker().Add(runner.TaskMetadata{
+		TaskID:    "bg-task-in-low-pool",
+		StartedAt: time.Now(),
+	})
+
+	// Enqueue turn on primary pool (high effort)
+	msg := db.Message{
+		ID:        "msg-yield-fb-1",
+		ThreadID:  threadID,
+		Content:   "run command and wait",
+		Status:    db.StatusPending,
+		CreatedAt: time.Now(),
+	}
+	_ = store.InsertMessage(context.Background(), msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for message completion")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if turnCount < 2 {
+		t.Errorf("expected auto-resumption from yield-trap detection in alternate pool, turnCount=%d", turnCount)
+	}
+}
+
+func TestWorker_QuotaPause_PreservesEffort(t *testing.T) {
+	for _, effort := range []string{"low", "high"} {
+		t.Run("Effort_"+effort, func(t *testing.T) {
+			store := setupTestStore(t)
+			tmpHome := t.TempDir()
+			tempData := t.TempDir()
+
+			quotaErrSpawner := &runner.MockDaemonSpawner{
+				SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+					inR, inW := io.Pipe()
+					outR, outW := io.Pipe()
+					errR, errW := io.Pipe()
+					go func() {
+						defer errW.Close()
+						defer outW.Close()
+						_, _ = outW.Write([]byte("{\"event\":\"init\",\"conversation_id\":\"11111111-2222-3333-4444-555555555555\"}\n"))
+						scanner := bufio.NewScanner(inR)
+						for scanner.Scan() {
+							_, _ = errW.Write([]byte("RESOURCE_EXHAUSTED (code 429): Google Gemini API quota reached. Resets in 30m.\n"))
+							_, _ = outW.Write([]byte("{\"event\":\"result\",\"result\":{\"status\":\"ERROR\",\"exit_code\":1,\"error\":\"RESOURCE_EXHAUSTED (code 429): Google Gemini API quota reached. Resets in 30m.\",\"stderr\":\"RESOURCE_EXHAUSTED (code 429): Google Gemini API quota reached. Resets in 30m.\"}}\n"))
+						}
+					}()
+					return inW, outR, errR, runner.NewMockProcessHandle(12345), nil
+				},
+			}
+
+			poolConfig := runner.PoolConfig{Model: "gemini-3.7-pro"}
+			primaryPool := runner.NewUnifiedProcessPool(poolConfig, quotaErrSpawner)
+			defer primaryPool.Close()
+
+			lowPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, quotaErrSpawner)
+			defer lowPool.Close()
+
+			cfg := config.NewTestConfig(func(d *config.ConfigData) {
+				d.DataDir = tempData
+				d.LowEffortModel = "gemini-3.8-flash-low"
+			})
+
+			doneCh := make(chan struct{})
+			pool := New(cfg, WorkerPoolConfig{
+				ProcessPool:          primaryPool,
+				LowEffortProcessPool: lowPool,
+				SessionManager:       session.New(tmpHome, tempData),
+				Store:                store,
+				TimeoutMinutes:       1,
+				MaxAttempts:          1,
+				OnMessageCompleted: func(msg db.Message, status string) {
+					if status == db.StatusFailed {
+						select {
+						case <-doneCh:
+						default:
+							close(doneCh)
+						}
+					}
+				},
+			})
+			defer pool.Stop()
+
+			threadID := "thread-quota-" + effort
+			msg := db.Message{
+				ID:        "msg-quota-" + effort,
+				ThreadID:  threadID,
+				Content:   "run task",
+				Effort:    effort,
+				Status:    db.StatusPending,
+				CreatedAt: time.Now(),
+			}
+			_ = store.InsertMessage(context.Background(), msg)
+			pool.Enqueue(msg)
+
+			select {
+			case <-doneCh:
+			case <-time.After(5 * time.Second):
+				t.Fatalf("timed out waiting for message completion")
+			}
+
+			schedules, err := store.GetAllOneShotSchedules(context.Background(), threadID)
+			if err != nil {
+				t.Fatalf("failed to get one shot schedules: %v", err)
+			}
+			if len(schedules) != 1 {
+				t.Fatalf("expected 1 one-shot schedule, got %d", len(schedules))
+			}
+			expectedEffort := effort
+			if expectedEffort == "" {
+				expectedEffort = "high"
+			}
+			if schedules[0].Effort != expectedEffort {
+				t.Fatalf("expected oneShot.Effort=%q, got %q", expectedEffort, schedules[0].Effort)
+			}
+		})
+	}
+}
+
 
 
 

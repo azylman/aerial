@@ -1,11 +1,17 @@
 package queue
 
 import (
+	"bufio"
+	"context"
+	"io"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
+	"github.com/azylman/aerial/brain/pkg/runner"
+	"github.com/azylman/aerial/brain/pkg/session"
 )
 
 func TestPlanBurstExecution(t *testing.T) {
@@ -600,5 +606,95 @@ func TestEvaluateMessageStaleness(t *testing.T) {
 	stale, reason = EvaluateMessageStaleness(msg, 10*time.Minute, true, time.Time{}, baseTime.Add(15*time.Minute))
 	if !stale {
 		t.Errorf("expected expired single message in cold thread to be stale")
+	}
+}
+
+func TestBurst_ActiveTasksInLowEffortPoolPreventReap(t *testing.T) {
+	store := setupTestStore(t)
+	tmpHome := t.TempDir()
+	tempData := t.TempDir()
+
+	lowSpawner := &runner.MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+			inR, inW := io.Pipe()
+			outR, outW := io.Pipe()
+			errR, errW := io.Pipe()
+			defer errW.Close()
+			go func() {
+				_, _ = outW.Write([]byte("{\"event\":\"init\",\"conversation_id\":\"e1111111-2222-3333-4444-555555555555\"}\n"))
+				scanner := bufio.NewScanner(inR)
+				for scanner.Scan() {
+					_, _ = outW.Write([]byte("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"ok\",\"usage\":{\"total_tokens\":5}}}\n"))
+				}
+			}()
+			return inW, outR, errR, runner.NewMockProcessHandle(12345), nil
+		},
+	}
+	primaryPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, runner.NewMockSpawner())
+	defer primaryPool.Close()
+
+	lowPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, lowSpawner)
+	defer lowPool.Close()
+
+	cfg := config.NewTestConfig(func(d *config.ConfigData) {
+		d.DataDir = tempData
+	})
+
+	threadID := "thread-low-burst-reap"
+	doneCh := make(chan struct{})
+	pool := New(cfg, WorkerPoolConfig{
+		ProcessPool:          primaryPool,
+		LowEffortProcessPool: lowPool,
+		SessionManager:       session.New(tmpHome, tempData),
+		Store:                store,
+		TimeoutMinutes:       1,
+		MaxAttempts:          1,
+		IdleTimeout:          20 * time.Millisecond,
+		OnMessageCompleted: func(msg db.Message, status string) {
+			select {
+			case <-doneCh:
+			default:
+				close(doneCh)
+			}
+		},
+	})
+	defer pool.Stop()
+
+	// Pre-create daemon in lowPool with active task
+	ctx := context.Background()
+	daemon, err := pool.LowEffortProcessPool().GetOrCreate(ctx, threadID)
+	if err != nil {
+		t.Fatalf("failed to create daemon in low pool: %v", err)
+	}
+	daemon.TaskTracker().Add(runner.TaskMetadata{
+		TaskID:    "task-burst-low-busy-prevent-reap",
+		StartedAt: time.Now(),
+	})
+
+	msg := db.Message{
+		ID:        "msg-burst-low-reap-1",
+		ThreadID:  threadID,
+		Content:   "hello low burst reap",
+		Effort:    "low",
+		Status:    db.StatusPending,
+		CreatedAt: time.Now(),
+	}
+	_ = store.InsertMessage(context.Background(), msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for message completion")
+	}
+
+	// Verify worker remains active because background task in lowEffortProcessPool is still running
+	time.Sleep(60 * time.Millisecond)
+	pool.mu.Lock()
+	_, workerStillActive := pool.threadChs[threadID]
+	pool.mu.Unlock()
+
+	if !workerStillActive {
+		t.Errorf("expected worker to remain active because background task was running in LowEffortProcessPool")
 	}
 }

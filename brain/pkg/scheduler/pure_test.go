@@ -601,3 +601,24 @@ func TestPeriodicTickPredicates_TableDriven(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildOneShot_EffortPropagation(t *testing.T) {
+	now := time.Now().UTC()
+	oneShot := db.OneShotSchedule{
+		ID:       "oneshot-1",
+		ThreadID: "thread-1",
+		Prompt:   "reminder test",
+		RunAt:    now,
+		Effort:   "low",
+	}
+
+	run := BuildOneShotScheduleRun("run-1", "msg-1", oneShot, now)
+	if run.Effort != "low" {
+		t.Fatalf("expected run.Effort == 'low', got %q", run.Effort)
+	}
+
+	msg := BuildOneShotMessage("msg-1", "run-1", oneShot, "[Reminder] reminder test", now)
+	if msg.Effort != "low" {
+		t.Fatalf("expected msg.Effort == 'low', got %q", msg.Effort)
+	}
+}

@@ -43,7 +43,8 @@ func initTestSQLite(trimmed string) (*sql.DB, error) {
 	PRAGMA synchronous = NORMAL;
 	`
 	if _, err := database.Exec(pragmas); err != nil {
-		log.Printf("Warning: failed to execute PRAGMAs: %v", err)
+		closeWarn(database, "database on pragma error")
+		return nil, fmt.Errorf("failed to execute PRAGMAs: %w", err)
 	}
 
 	schema := `
@@ -56,7 +57,7 @@ func initTestSQLite(trimmed string) (*sql.DB, error) {
 		timezone TEXT NOT NULL DEFAULT 'America/Los_Angeles',
 		next_run_at TIMESTAMP NOT NULL,
 		enabled BOOLEAN NOT NULL DEFAULT TRUE,
-		effort TEXT NOT NULL DEFAULT 'high',
+		effort TEXT NOT NULL DEFAULT 'low',
 		created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 	);
 	CREATE INDEX IF NOT EXISTS idx_cron_schedules_next_run_at ON cron_schedules(enabled, next_run_at);
@@ -66,7 +67,8 @@ func initTestSQLite(trimmed string) (*sql.DB, error) {
 		thread_id TEXT NOT NULL,
 		prompt TEXT NOT NULL,
 		run_at TIMESTAMP NOT NULL,
-		created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		effort TEXT NOT NULL DEFAULT 'low'
 	);
 	CREATE INDEX IF NOT EXISTS idx_one_shot_schedules_run_at ON one_shot_schedules(run_at);
 	`
@@ -79,9 +81,14 @@ func initTestSQLite(trimmed string) (*sql.DB, error) {
 	for _, alterStmt := range []string{
 		`ALTER TABLE cron_schedules ADD COLUMN title_prefix TEXT NOT NULL DEFAULT '';`,
 		`ALTER TABLE cron_schedules ADD COLUMN timezone TEXT NOT NULL DEFAULT 'America/Los_Angeles';`,
-		`ALTER TABLE cron_schedules ADD COLUMN effort TEXT NOT NULL DEFAULT 'high';`,
+		`ALTER TABLE cron_schedules ADD COLUMN effort TEXT NOT NULL DEFAULT 'low';`,
+		`ALTER TABLE one_shot_schedules ADD COLUMN effort TEXT NOT NULL DEFAULT 'low';`,
 	} {
 		if _, alterErr := database.Exec(alterStmt); alterErr != nil {
+			if !strings.Contains(strings.ToLower(alterErr.Error()), "duplicate column") {
+				closeWarn(database, "database on migration error")
+				return nil, fmt.Errorf("failed to execute migration %q: %w", alterStmt, alterErr)
+			}
 			log.Printf("[Scheduler DB] Column migration notice (safe to ignore if exists): %v", alterErr)
 		}
 	}

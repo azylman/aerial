@@ -194,3 +194,56 @@ func TestDefaultDaemonSpawner_SpawnError(t *testing.T) {
 		t.Errorf("expected all returned values to be nil on spawn error")
 	}
 }
+
+func TestMockSpawner_MethodsAndNilHandling(t *testing.T) {
+	var nilSpawner *MockSpawner
+	if cfg := nilSpawner.LastSpawnCfg(); cfg.Model != "" {
+		t.Errorf("expected empty config from nil spawner, got %+v", cfg)
+	}
+	in, out, errR, handle, err := nilSpawner.Spawn(context.Background(), DaemonConfig{Model: "default-nil"})
+	if err != nil {
+		t.Fatalf("unexpected spawn error from nil spawner: %v", err)
+	}
+	_ = in.Close()
+	_ = out.Close()
+	_ = errR.Close()
+	_ = handle.Kill()
+
+	spawner := NewMockSpawner()
+	in2, out2, errR2, handle2, err2 := spawner.Spawn(context.Background(), DaemonConfig{Model: "test-model-1"})
+	if err2 != nil {
+		t.Fatalf("unexpected spawn error: %v", err2)
+	}
+	_ = in2.Close()
+	_ = out2.Close()
+	_ = errR2.Close()
+	_ = handle2.Kill()
+
+	if spawner.LastSpawnCfg().Model != "test-model-1" {
+		t.Errorf("expected test-model-1, got %s", spawner.LastSpawnCfg().Model)
+	}
+
+	// Custom SpawnFn on MockSpawner
+	customCalled := false
+	spawnerCustom := &MockSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			customCalled = true
+			return nil, nil, nil, nil, errors.New("custom error")
+		},
+	}
+	_, _, _, _, errCustom := spawnerCustom.Spawn(context.Background(), DaemonConfig{})
+	if errCustom == nil || !customCalled {
+		t.Fatalf("expected custom SpawnFn to be called and return error")
+	}
+
+	// NewMockProcessHandle and SetKillErr
+	ph := NewMockProcessHandle(999)
+	if ph.Pid() != 999 {
+		t.Errorf("expected pid 999, got %d", ph.Pid())
+	}
+	ph.SetKillErr(errors.New("custom kill err"))
+	if err := ph.Kill(); err == nil {
+		t.Errorf("expected kill error")
+	}
+}
+

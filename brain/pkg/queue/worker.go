@@ -31,6 +31,7 @@ var daemonTurnMarshaler = json.Marshal
 
 type turnExecution struct {
 	pool                *WorkerPool
+	activePool          *runner.UnifiedProcessPool
 	burst               []db.Message
 	threadID            string
 	triggerType         string
@@ -184,8 +185,12 @@ func (te *turnExecution) rotateSessionID(threadID, newSessionID string) {
 	if te == nil {
 		return
 	}
-	if te.pool != nil && te.pool.processPool != nil && !te.pool.hasCustomRunner && newSessionID == "" {
-		if _, err := te.pool.processPool.RotateDaemon(context.Background(), threadID, ""); err != nil {
+	rotPool := te.activePool
+	if rotPool == nil && te.pool != nil {
+		rotPool = te.pool.processPool
+	}
+	if te.pool != nil && rotPool != nil && !te.pool.hasCustomRunner && newSessionID == "" {
+		if _, err := rotPool.RotateDaemon(context.Background(), threadID, ""); err != nil {
 			log.Printf("[Worker] Warning rotating daemon in process pool for thread %s: %v", threadID, err)
 		}
 	}
@@ -1528,11 +1533,19 @@ func (te *turnExecution) executeWithRetries() {
 		var err error
 		runStart := time.Now()
 
-		if !te.pool.hasCustomRunner && te.pool.processPool != nil {
+		activePool := te.pool.processPool
+		if isLowEffort && te.pool.lowEffortProcessPool != nil {
+			activePool = te.pool.lowEffortProcessPool
+		} else if isLowEffort && te.pool.lowEffortProcessPool == nil {
+			log.Printf("[Worker] Notice: lowEffortProcessPool is nil, falling back to processPool for thread %s", te.threadID)
+		}
+		te.activePool = activePool
+
+		if !te.pool.hasCustomRunner && activePool != nil {
 			if te.statusUpdater != nil {
 				te.statusUpdater.MarkTurnStarted()
 			}
-			daemon, daemonErr := te.pool.processPool.GetOrCreate(runCtx, te.threadID)
+			daemon, daemonErr := activePool.GetOrCreate(runCtx, te.threadID)
 			if daemonErr != nil {
 				stdout = ""
 				stderr = daemonErr.Error()
@@ -1653,14 +1666,27 @@ func (te *turnExecution) executeWithRetries() {
 
 		if isFailure {
 			promptToSend = te.turnPrompt
-			targetSess := te.currentSessionID
+			targetSess := ""
+			if isLowEffort && te.pool != nil && te.pool.lowEffortProcessPool != nil && activePool != nil {
+				if d, ok := activePool.Get(te.threadID); ok && d != nil && d.SessionID() != "" {
+					targetSess = d.SessionID()
+				}
+			}
+			if targetSess == "" {
+				targetSess = te.currentSessionID
+			}
 			if targetSess == "" {
 				combinedOutput := stdout + "\n" + stderr
 				if extSess := runner.ExtractSessionID(combinedOutput, te.execStart); extSess != "" && te.pool.sessionMgr != nil && te.pool.sessionMgr.SessionExistsOnDisk(extSess) {
 					targetSess = extSess
 				}
 			}
-			if targetSess == "" && te.pool != nil && te.pool.processPool != nil {
+			if targetSess == "" && te.pool != nil && activePool != nil {
+				if d, ok := activePool.Get(te.threadID); ok && d != nil && d.SessionID() != "" {
+					targetSess = d.SessionID()
+				}
+			}
+			if targetSess == "" && te.pool != nil && te.pool.processPool != nil && te.pool.processPool != activePool {
 				if d, ok := te.pool.processPool.Get(te.threadID); ok && d != nil && d.SessionID() != "" {
 					targetSess = d.SessionID()
 				}
@@ -1844,8 +1870,8 @@ func (te *turnExecution) executeWithRetries() {
 				te.isQuotaPaused = true
 				te.stopTyping()
 				log.Printf("[WorkerPool] Quota pause detected for thread %s on attempt %d/%d: %s", te.threadID, attempt, maxAttempts, errDetail)
-				if te.pool != nil && te.pool.processPool != nil && !te.pool.hasCustomRunner {
-					if _, rotErr := te.pool.processPool.RotateDaemon(context.Background(), te.threadID, ""); rotErr != nil {
+				if te.pool != nil && activePool != nil && !te.pool.hasCustomRunner {
+					if _, rotErr := activePool.RotateDaemon(context.Background(), te.threadID, ""); rotErr != nil {
 						log.Printf("[WorkerPool] Warning rotating daemon on quota pause: %v", rotErr)
 					}
 				}
@@ -1864,10 +1890,15 @@ func (te *turnExecution) executeWithRetries() {
 				if !isAlreadyRetry {
 					retryPrompt := fmt.Sprintf("[QUOTA_RETRY] %s", te.turnPrompt)
 					oneShotID := uuid.New().String()
+					retryEffort := "high"
+					if isLowEffort {
+						retryEffort = "low"
+					}
 					oneShot := db.OneShotSchedule{
 						ID:        oneShotID,
 						ThreadID:  te.threadID,
 						Prompt:    retryPrompt,
+						Effort:    retryEffort,
 						RunAt:     runAt,
 						CreatedAt: time.Now().UTC(),
 					}
@@ -2082,20 +2113,44 @@ func (te *turnExecution) executeWithRetries() {
 					log.Printf("[Queue] Defensive Failure: %s for thread %s", lastErrDetail, te.threadID)
 				} else {
 					if extSess != "" && extSess != te.currentSessionID {
-						log.Printf("[Queue] Active session synchronized for thread %s: %s -> %s", te.threadID, te.currentSessionID, extSess)
-						te.currentSessionID = extSess
-						te.saveSessionID(te.threadID, te.currentSessionID)
+						if isLowEffort && te.pool.lowEffortProcessPool != nil && te.currentSessionID != "" {
+							log.Printf("[Queue] Anti-flapping: preserving primary session %s for thread %s; not overwriting with low effort session %s", te.currentSessionID, te.threadID, extSess)
+						} else {
+							log.Printf("[Queue] Active session synchronized for thread %s: %s -> %s", te.threadID, te.currentSessionID, extSess)
+							te.currentSessionID = extSess
+							te.saveSessionID(te.threadID, te.currentSessionID)
+						}
 					}
 
 					// Option B Background Command Yield Trap Interception:
 					isYield, taskCount := runner.IsYieldTrap(exitCode, stdout, stderr)
 					var unfinishedTaskID string
 					detectionSource := "stderr_signature"
-					if !isYield && te.pool != nil && te.pool.processPool != nil {
-						if d, ok := te.pool.processPool.Get(te.threadID); ok && d != nil && d.TaskTracker().ActiveCount() > 0 {
-							isYield = true
-							taskCount = 1
-							detectionSource = "daemon_tracker"
+					var trackerDaemon *runner.StreamingDaemon
+					if !isYield && te.pool != nil {
+						if activePool != nil {
+							if d, ok := activePool.Get(te.threadID); ok && d != nil && d.TaskTracker().ActiveCount() > 0 {
+								isYield = true
+								taskCount = 1
+								detectionSource = "daemon_tracker"
+								trackerDaemon = d
+							}
+						}
+						if !isYield {
+							var altPool *runner.UnifiedProcessPool
+							if activePool == te.pool.lowEffortProcessPool {
+								altPool = te.pool.processPool
+							} else {
+								altPool = te.pool.lowEffortProcessPool
+							}
+							if altPool != nil {
+								if d, ok := altPool.Get(te.threadID); ok && d != nil && d.TaskTracker().ActiveCount() > 0 {
+									isYield = true
+									taskCount = 1
+									detectionSource = "daemon_tracker"
+									trackerDaemon = d
+								}
+							}
 						}
 					}
 
@@ -2113,21 +2168,23 @@ func (te *turnExecution) executeWithRetries() {
 							// 2. Keep Discord typing heartbeat active without resetting status updater (do not call te.stopTyping())
 
 							// 3. Set prompt for immediate in-session auto-resumption
-							if detectionSource == "daemon_tracker" && te.pool.processPool != nil {
-								if d, ok := te.pool.processPool.Get(te.threadID); ok && d != nil {
-									tasks := d.TaskTracker().ActiveTasks()
-									if len(tasks) > 0 {
-										activeTask := tasks[0]
-										unfinishedTaskID = activeTask.TaskID
-										if te.pool.sessionMgr != nil && te.currentSessionID != "" {
-											if sessDir, sErr := te.pool.sessionMgr.GetSessionDir(te.currentSessionID); sErr == nil && sessDir != "" {
-												waitCtx, waitCancel := context.WithTimeout(runCtx, 2*time.Second)
-												exitCode, logPath, wErr := watchTaskCompletion(waitCtx, sessDir, activeTask.TaskID)
-												waitCancel()
-												if wErr == nil {
-													d.TaskTracker().Remove(activeTask.TaskID)
-													promptToSend = fmt.Sprintf(TaskCompletionResumePrompt, unfinishedTaskID, exitCode, logPath)
-												}
+							if detectionSource == "daemon_tracker" && trackerDaemon != nil {
+								tasks := trackerDaemon.TaskTracker().ActiveTasks()
+								if len(tasks) > 0 {
+									activeTask := tasks[0]
+									unfinishedTaskID = activeTask.TaskID
+									targetSessID := trackerDaemon.SessionID()
+									if targetSessID == "" {
+										targetSessID = te.currentSessionID
+									}
+									if te.pool.sessionMgr != nil && targetSessID != "" {
+										if sessDir, sErr := te.pool.sessionMgr.GetSessionDir(targetSessID); sErr == nil && sessDir != "" {
+											waitCtx, waitCancel := context.WithTimeout(runCtx, 2*time.Second)
+											exitCode, logPath, wErr := watchTaskCompletion(waitCtx, sessDir, activeTask.TaskID)
+											waitCancel()
+											if wErr == nil {
+												trackerDaemon.TaskTracker().Remove(activeTask.TaskID)
+												promptToSend = fmt.Sprintf(TaskCompletionResumePrompt, unfinishedTaskID, exitCode, logPath)
 											}
 										}
 									}

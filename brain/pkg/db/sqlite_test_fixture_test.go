@@ -57,7 +57,8 @@ CREATE TABLE IF NOT EXISTS one_shot_schedules (
 	thread_id TEXT NOT NULL,
 	prompt TEXT NOT NULL,
 	run_at DATETIME NOT NULL,
-	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	effort TEXT NOT NULL DEFAULT 'low'
 );
 
 CREATE TABLE IF NOT EXISTS cron_schedules (
@@ -69,7 +70,7 @@ CREATE TABLE IF NOT EXISTS cron_schedules (
 	timezone TEXT NOT NULL DEFAULT 'America/Los_Angeles',
 	next_run_at DATETIME NOT NULL,
 	enabled BOOLEAN NOT NULL DEFAULT 1,
-	effort TEXT NOT NULL DEFAULT 'high',
+	effort TEXT NOT NULL DEFAULT 'low',
 	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -86,7 +87,7 @@ CREATE TABLE IF NOT EXISTS schedule_runs (
 	started_at DATETIME NOT NULL,
 	completed_at DATETIME,
 	duration_ms INTEGER DEFAULT 0,
-	effort TEXT NOT NULL DEFAULT 'high',
+	effort TEXT NOT NULL DEFAULT 'low',
 	model TEXT NOT NULL DEFAULT '',
 	error TEXT NOT NULL DEFAULT ''
 );
@@ -139,15 +140,52 @@ func initSchemaSQLite(database *sql.DB) error {
 		}
 	}
 
-	_, _ = database.Exec("ALTER TABLE messages ADD COLUMN effort TEXT NOT NULL DEFAULT ''")
-	_, _ = database.Exec("ALTER TABLE messages ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'")
-	_, _ = database.Exec("ALTER TABLE cron_schedules ADD COLUMN effort TEXT NOT NULL DEFAULT 'high'")
-	_, _ = database.Exec("ALTER TABLE schedule_runs ADD COLUMN effort TEXT NOT NULL DEFAULT 'high'")
-	_, _ = database.Exec("ALTER TABLE schedule_runs ADD COLUMN model TEXT NOT NULL DEFAULT ''")
+	if _, err := database.Exec("ALTER TABLE messages ADD COLUMN effort TEXT NOT NULL DEFAULT ''"); err != nil {
+		if !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("failed to add effort column to messages: %w", err)
+		}
+	}
+	if _, err := database.Exec("ALTER TABLE messages ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'"); err != nil {
+		if !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("failed to add metadata column to messages: %w", err)
+		}
+	}
+	if _, err := database.Exec("ALTER TABLE one_shot_schedules ADD COLUMN effort TEXT NOT NULL DEFAULT 'low'"); err != nil {
+		if !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("failed to add effort column to one_shot_schedules: %w", err)
+		}
+	}
+	if _, err := database.Exec("ALTER TABLE cron_schedules ADD COLUMN effort TEXT NOT NULL DEFAULT 'low'"); err != nil {
+		if !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("failed to add effort column to cron_schedules: %w", err)
+		}
+	}
+	if _, err := database.Exec("ALTER TABLE schedule_runs ADD COLUMN effort TEXT NOT NULL DEFAULT 'low'"); err != nil {
+		if !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("failed to add effort column to schedule_runs: %w", err)
+		}
+	}
+	if _, err := database.Exec("ALTER TABLE schedule_runs ADD COLUMN model TEXT NOT NULL DEFAULT ''"); err != nil {
+		if !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("failed to add model column to schedule_runs: %w", err)
+		}
+	}
 
-	_, _ = database.Exec("ALTER TABLE sessions ADD COLUMN summary TEXT NOT NULL DEFAULT ''")
-	_, _ = database.Exec("ALTER TABLE sessions ADD COLUMN last_summarized_message_id TEXT NOT NULL DEFAULT ''")
-	_, _ = database.Exec("ALTER TABLE sessions ADD COLUMN active_tasks TEXT NOT NULL DEFAULT '[]'")
+	if _, err := database.Exec("ALTER TABLE sessions ADD COLUMN summary TEXT NOT NULL DEFAULT ''"); err != nil {
+		if !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("failed to add summary column to sessions: %w", err)
+		}
+	}
+	if _, err := database.Exec("ALTER TABLE sessions ADD COLUMN last_summarized_message_id TEXT NOT NULL DEFAULT ''"); err != nil {
+		if !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("failed to add last_summarized_message_id column to sessions: %w", err)
+		}
+	}
+	if _, err := database.Exec("ALTER TABLE sessions ADD COLUMN active_tasks TEXT NOT NULL DEFAULT '[]'"); err != nil {
+		if !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("failed to add active_tasks column to sessions: %w", err)
+		}
+	}
 	if _, err := database.Exec("ALTER TABLE sessions ADD COLUMN previous_session_id TEXT NOT NULL DEFAULT ''"); err != nil {
 		if !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 			return fmt.Errorf("failed to add previous_session_id column to sessions: %w", err)
@@ -169,9 +207,15 @@ func initSchemaSQLite(database *sql.DB) error {
 			return fmt.Errorf("failed to add reinforce_count column to facts: %w", err)
 		}
 	}
-	_, _ = database.Exec("CREATE INDEX IF NOT EXISTS idx_facts_last_reinforced_at ON facts(last_reinforced_at DESC)")
-	_, _ = database.Exec("UPDATE facts SET last_reinforced_at = created_at WHERE last_reinforced_at = '' OR (reinforce_count = 1 AND last_reinforced_at > created_at)")
-	_, _ = database.Exec("UPDATE facts SET last_decayed_at = created_at WHERE last_decayed_at = ''")
+	if _, err := database.Exec("CREATE INDEX IF NOT EXISTS idx_facts_last_reinforced_at ON facts(last_reinforced_at DESC)"); err != nil {
+		return fmt.Errorf("failed to create idx_facts_last_reinforced_at index: %w", err)
+	}
+	if _, err := database.Exec("UPDATE facts SET last_reinforced_at = created_at WHERE last_reinforced_at = '' OR (reinforce_count = 1 AND last_reinforced_at > created_at)"); err != nil {
+		return fmt.Errorf("failed to backfill facts last_reinforced_at: %w", err)
+	}
+	if _, err := database.Exec("UPDATE facts SET last_decayed_at = created_at WHERE last_decayed_at = ''"); err != nil {
+		return fmt.Errorf("failed to backfill facts last_decayed_at: %w", err)
+	}
 	return nil
 }
 

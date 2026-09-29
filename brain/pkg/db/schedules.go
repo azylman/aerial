@@ -15,6 +15,7 @@ type OneShotSchedule struct {
 	Prompt    string    `json:"prompt"`
 	RunAt     time.Time `json:"run_at"`
 	CreatedAt time.Time `json:"created_at"`
+	Effort    string    `json:"effort,omitempty"`
 }
 
 type CronSchedule struct {
@@ -69,16 +70,21 @@ type ScheduleSummaryMetrics struct {
 
 func CreateOneShotSchedule(database DBTX, s OneShotSchedule) error {
 	if database == nil {
-		return nil
+		return fmt.Errorf("database is nil")
 	}
 	if s.CreatedAt.IsZero() {
 		s.CreatedAt = time.Now().UTC()
 	}
+	if strings.ToLower(strings.TrimSpace(s.Effort)) != "high" {
+		s.Effort = "low"
+	} else {
+		s.Effort = "high"
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	query := `INSERT INTO one_shot_schedules (id, thread_id, prompt, run_at, created_at) VALUES ($1, $2, $3, $4, $5)`
-	_, err := database.ExecContext(ctx, query, s.ID, s.ThreadID, s.Prompt, s.RunAt, s.CreatedAt)
+	query := `INSERT INTO one_shot_schedules (id, thread_id, prompt, run_at, created_at, effort) VALUES ($1, $2, $3, $4, $5, $6)`
+	_, err := database.ExecContext(ctx, query, s.ID, s.ThreadID, s.Prompt, s.RunAt, s.CreatedAt, s.Effort)
 	return err
 }
 
@@ -89,7 +95,7 @@ func GetDueOneShotSchedules(database DBTX) ([]OneShotSchedule, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	query := `SELECT id, thread_id, prompt, run_at, created_at FROM one_shot_schedules WHERE run_at <= $1`
+	query := `SELECT id, thread_id, prompt, run_at, created_at, COALESCE(NULLIF(effort, ''), 'low') FROM one_shot_schedules WHERE run_at <= $1`
 	rows, err := database.QueryContext(ctx, query, time.Now().UTC())
 	if err != nil {
 		return nil, err
@@ -99,7 +105,7 @@ func GetDueOneShotSchedules(database DBTX) ([]OneShotSchedule, error) {
 	var results []OneShotSchedule
 	for rows.Next() {
 		var s OneShotSchedule
-		if err := rows.Scan(&s.ID, &s.ThreadID, &s.Prompt, &s.RunAt, &s.CreatedAt); err != nil {
+		if err := rows.Scan(&s.ID, &s.ThreadID, &s.Prompt, &s.RunAt, &s.CreatedAt, &s.Effort); err != nil {
 			return nil, err
 		}
 		results = append(results, s)
@@ -186,7 +192,7 @@ func GetAllOneShotSchedules(database DBTX, threadID string) ([]OneShotSchedule, 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	query := `SELECT id, thread_id, prompt, run_at, created_at FROM one_shot_schedules`
+	query := `SELECT id, thread_id, prompt, run_at, created_at, COALESCE(NULLIF(effort, ''), 'low') FROM one_shot_schedules`
 	var rows *sql.Rows
 	var err error
 	if threadID != "" {
@@ -204,7 +210,7 @@ func GetAllOneShotSchedules(database DBTX, threadID string) ([]OneShotSchedule, 
 	var results []OneShotSchedule
 	for rows.Next() {
 		var s OneShotSchedule
-		if err := rows.Scan(&s.ID, &s.ThreadID, &s.Prompt, &s.RunAt, &s.CreatedAt); err != nil {
+		if err := rows.Scan(&s.ID, &s.ThreadID, &s.Prompt, &s.RunAt, &s.CreatedAt, &s.Effort); err != nil {
 			return nil, err
 		}
 		results = append(results, s)
@@ -214,7 +220,7 @@ func GetAllOneShotSchedules(database DBTX, threadID string) ([]OneShotSchedule, 
 
 func CreateCronSchedule(database DBTX, c CronSchedule) error {
 	if database == nil {
-		return nil
+		return fmt.Errorf("database is nil")
 	}
 	if c.CreatedAt.IsZero() {
 		c.CreatedAt = time.Now().UTC()
@@ -222,10 +228,10 @@ func CreateCronSchedule(database DBTX, c CronSchedule) error {
 	if c.Timezone == "" {
 		c.Timezone = "America/Los_Angeles"
 	}
-	if strings.ToLower(strings.TrimSpace(c.Effort)) != "low" {
-		c.Effort = "high"
-	} else {
+	if strings.ToLower(strings.TrimSpace(c.Effort)) != "high" {
 		c.Effort = "low"
+	} else {
+		c.Effort = "high"
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -242,7 +248,7 @@ func GetDueCronSchedules(database DBTX) ([]CronSchedule, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	query := `SELECT id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, COALESCE(effort, 'high') FROM cron_schedules WHERE enabled = TRUE AND next_run_at <= $1`
+	query := `SELECT id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, COALESCE(NULLIF(effort, ''), 'low') FROM cron_schedules WHERE enabled = TRUE AND next_run_at <= $1`
 	rows, err := database.QueryContext(ctx, query, time.Now().UTC())
 	if err != nil {
 		return nil, err
@@ -267,7 +273,7 @@ func GetAllCronSchedules(database DBTX, targetID string) ([]CronSchedule, error)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	query := `SELECT id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, COALESCE(effort, 'high') FROM cron_schedules WHERE enabled = TRUE`
+	query := `SELECT id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, COALESCE(NULLIF(effort, ''), 'low') FROM cron_schedules WHERE enabled = TRUE`
 	var rows *sql.Rows
 	var err error
 	if targetID != "" {
@@ -297,10 +303,10 @@ func UpdateCronScheduleEffort(database DBTX, id, effort string) error {
 	if database == nil || id == "" {
 		return nil
 	}
-	if strings.ToLower(strings.TrimSpace(effort)) != "low" {
-		effort = "high"
-	} else {
+	if strings.ToLower(strings.TrimSpace(effort)) != "high" {
 		effort = "low"
+	} else {
+		effort = "high"
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -349,10 +355,10 @@ func CreateScheduleRun(database DBTX, run ScheduleRun) error {
 	if run.CompletedAt != nil && !run.CompletedAt.IsZero() {
 		completedAtVal = *run.CompletedAt
 	}
-	if strings.ToLower(strings.TrimSpace(run.Effort)) != "low" {
-		run.Effort = "high"
-	} else {
+	if strings.ToLower(strings.TrimSpace(run.Effort)) != "high" {
 		run.Effort = "low"
+	} else {
+		run.Effort = "high"
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -482,7 +488,7 @@ func GetScheduleRunsPaginated(database DBTX, limit, offset int, scheduleID, stat
 	}
 
 	selectQuery := fmt.Sprintf(`
-		SELECT id, schedule_id, schedule_type, message_id, target_id, thread_id, title, prompt, status, started_at, completed_at, duration_ms, error, COALESCE(effort, 'high'), COALESCE(model, '')
+		SELECT id, schedule_id, schedule_type, message_id, target_id, thread_id, title, prompt, status, started_at, completed_at, duration_ms, error, COALESCE(NULLIF(effort, ''), 'low'), COALESCE(model, '')
 		FROM schedule_runs
 		%s
 		ORDER BY started_at DESC, id DESC

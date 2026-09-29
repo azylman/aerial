@@ -499,10 +499,10 @@ func TestUnifiedProcessPool_GetHasDaemonAndMarkDirty(t *testing.T) {
 			inR, inW := io.Pipe()
 			errR, _ := io.Pipe()
 			go func() {
-				defer outW.Close()
 				_, _ = outW.Write([]byte(`{"event":"init","session_id":"00000000-0000-0000-0000-000000000099"}` + "\n"))
+				_, _ = io.ReadAll(inR)
+				_ = outW.Close()
 			}()
-			_ = inR.Close()
 			return inW, outR, errR, &MockProcessHandle{pid: 99}, nil
 		},
 	}
@@ -668,7 +668,7 @@ func TestStreamingDaemon_DispatchNDJSONLine_Scenarios(t *testing.T) {
 	}
 }
 
-func TestUnifiedProcessPool_TargetModels(t *testing.T) {
+func TestUnifiedProcessPool_TargetModelsIgnored(t *testing.T) {
 	var capturedModel string
 	mock := &MockDaemonSpawner{
 		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
@@ -686,23 +686,23 @@ func TestUnifiedProcessPool_TargetModels(t *testing.T) {
 	}
 
 	pool := NewUnifiedProcessPool(PoolConfig{
-		DefaultModel: "primary-model",
+		Model: "primary-model",
 		TargetModels: map[string]string{
 			"ephemeral:classifier": "flash-model",
 		},
 	}, mock)
 	defer pool.Close()
 
-	// 1. Target with custom model
+	// 1. Target with custom TargetModels is ignored; daemon always inherits pool.Model()
 	_, err := pool.GetOrCreate(context.Background(), "ephemeral:classifier")
 	if err != nil {
 		t.Fatalf("unexpected error getting daemon: %v", err)
 	}
-	if capturedModel != "flash-model" {
-		t.Errorf("expected model flash-model, got %q", capturedModel)
+	if capturedModel != "primary-model" {
+		t.Errorf("expected model primary-model (TargetModels ignored), got %q", capturedModel)
 	}
 
-	// 2. Target without custom model uses DefaultModel
+	// 2. Standard target also uses pool.Model()
 	_, err = pool.GetOrCreate(context.Background(), "standard-target")
 	if err != nil {
 		t.Fatalf("unexpected error getting standard daemon: %v", err)
@@ -990,5 +990,144 @@ func TestUnifiedProcessPool_GeminiHomeDirInjection(t *testing.T) {
 		}
 	})
 }
+
+type mockReapProcessHandle struct {
+	pid        int
+	killCalled bool
+	waitCalled bool
+	killErr    error
+	waitErr    error
+}
+
+func (m *mockReapProcessHandle) Pid() int {
+	return m.pid
+}
+
+func (m *mockReapProcessHandle) Kill() error {
+	m.killCalled = true
+	return m.killErr
+}
+
+func (m *mockReapProcessHandle) Wait() error {
+	m.waitCalled = true
+	return m.waitErr
+}
+
+func TestUnifiedProcessPool_ModelBound(t *testing.T) {
+	mock := NewMockSpawner()
+	pool := NewUnifiedProcessPool(PoolConfig{
+		Model: "gemini-3.8-flash-low",
+	}, mock)
+	defer pool.Close()
+
+	if pool.Model() != "gemini-3.8-flash-low" {
+		t.Fatalf("expected pool model gemini-3.8-flash-low, got %s", pool.Model())
+	}
+
+	ctx := context.Background()
+	daemon, err := pool.GetOrCreate(ctx, "target-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if daemon == nil {
+		t.Fatalf("expected non-nil daemon")
+	}
+
+	mock.mu.Lock()
+	spawnCfg := mock.lastSpawnCfg
+	mock.mu.Unlock()
+
+	if spawnCfg.Model != "gemini-3.8-flash-low" {
+		t.Fatalf("expected spawned daemon model gemini-3.8-flash-low, got %s", spawnCfg.Model)
+	}
+}
+
+func TestUnifiedProcessPool_ModelFallback(t *testing.T) {
+	mock := NewMockSpawner()
+	pool := NewUnifiedProcessPool(PoolConfig{
+		DefaultModel: "gemini-2.5-pro",
+	}, mock)
+	defer pool.Close()
+
+	if pool.Model() != "gemini-2.5-pro" {
+		t.Fatalf("expected fallback model gemini-2.5-pro, got %s", pool.Model())
+	}
+}
+
+func TestStreamingDaemon_CloseReapsChildProcess(t *testing.T) {
+	mockHandle := &mockReapProcessHandle{}
+	daemon := &StreamingDaemon{
+		handle: mockHandle,
+		state:  StateReady,
+	}
+	if err := daemon.Close(); err != nil {
+		t.Fatalf("unexpected close error: %v", err)
+	}
+	if !mockHandle.waitCalled {
+		t.Fatalf("expected handle.Wait() to be called on Close")
+	}
+}
+
+func TestUnifiedProcessPool_NilPoolModelAndClose(t *testing.T) {
+	var nilPool *UnifiedProcessPool
+	if nilPool.Model() != "" {
+		t.Errorf("expected empty string from nilPool.Model()")
+	}
+	if err := nilPool.Close(); err != nil {
+		t.Errorf("expected nil error from nilPool.Close(), got %v", err)
+	}
+}
+
+func TestStreamingDaemon_Close_WaitErrorLogged(t *testing.T) {
+	mockHandle := &mockReapProcessHandle{
+		waitErr: errors.New("simulated wait failure"),
+	}
+	daemon := &StreamingDaemon{
+		handle: mockHandle,
+		state:  StateReady,
+	}
+	if err := daemon.Close(); err != nil {
+		t.Fatalf("expected Close() to succeed despite wait warning, got %v", err)
+	}
+	if !mockHandle.waitCalled {
+		t.Fatalf("expected handle.Wait() to be called")
+	}
+}
+
+func TestUnifiedProcessPool_CloseConcurrentMultipleDaemons(t *testing.T) {
+	mock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			outR, outW := io.Pipe()
+			inR, inW := io.Pipe()
+			errR, _ := io.Pipe()
+			go func() {
+				_, _ = outW.Write([]byte(`{"event":"init","session_id":"550e8400-e29b-41d4-a716-446655440000"}` + "\n"))
+				_, _ = io.ReadAll(inR)
+				_ = outW.Close()
+			}()
+			return inW, outR, errR, &MockProcessHandle{pid: 300}, nil
+		},
+	}
+
+	pool := NewUnifiedProcessPool(PoolConfig{Model: "gemini-3.8-flash-low"}, mock)
+	ctx := context.Background()
+
+	d1, err1 := pool.GetOrCreate(ctx, "target-a")
+	d2, err2 := pool.GetOrCreate(ctx, "target-b")
+	d3, err3 := pool.GetOrCreate(ctx, "target-c")
+
+	if err1 != nil || err2 != nil || err3 != nil {
+		t.Fatalf("failed creating daemons: %v, %v, %v", err1, err2, err3)
+	}
+
+	if err := pool.Close(); err != nil {
+		t.Fatalf("unexpected pool.Close() error: %v", err)
+	}
+
+	if d1.State() != StateClosed || d2.State() != StateClosed || d3.State() != StateClosed {
+		t.Errorf("expected all daemons to be closed, got d1=%v, d2=%v, d3=%v", d1.State(), d2.State(), d3.State())
+	}
+}
+
 
 

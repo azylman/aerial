@@ -615,4 +615,241 @@ func TestToolHandlers_ArgumentValidationErrors(t *testing.T) {
 	}
 }
 
+func setupTestDB(t *testing.T) (*sql.DB, error) {
+	t.Helper()
+	cfg := &Config{DatabaseURL: ":memory:", Timezone: DefaultTimezone}
+	return InitDB(cfg)
+}
+
+func TestScheduleOnce_EffortDefaultAndExplicit(t *testing.T) {
+	db, err := setupTestDB(t)
+	if err != nil {
+		t.Fatalf("failed to setup test db: %v", err)
+	}
+
+	// 1. Unspecified effort defaults to "low"
+	out1, err := handleScheduleOnce(context.Background(), db, ScheduleOnceArgs{
+		Prompt:   "remind me",
+		RunAt:    time.Now().UTC().Add(10 * time.Minute).Format(time.RFC3339),
+		ThreadID: "thread-mcp-1",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out1.Effort != "low" {
+		t.Fatalf("expected effort 'low', got %q", out1.Effort)
+	}
+
+	// 2. Explicit "high" effort is preserved
+	out2, err := handleScheduleOnce(context.Background(), db, ScheduleOnceArgs{
+		Prompt:   "remind high",
+		RunAt:    time.Now().UTC().Add(10 * time.Minute).Format(time.RFC3339),
+		ThreadID: "thread-mcp-2",
+		Effort:   "high",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out2.Effort != "high" {
+		t.Fatalf("expected effort 'high', got %q", out2.Effort)
+	}
+}
+
+func TestScheduleRecurring_EffortDefaultAndExplicit(t *testing.T) {
+	db, err := setupTestDB(t)
+	if err != nil {
+		t.Fatalf("failed to setup test db: %v", err)
+	}
+
+	cfg := &Config{DatabaseURL: ":memory:", Timezone: DefaultTimezone}
+	h := NewToolHandler(cfg, db)
+
+	// 1. Unspecified effort defaults to "low"
+	out1, err := h.ScheduleRecurring(context.Background(), ScheduleRecurringArgs{
+		ChannelID:      "chan-rec-1",
+		CronExpression: "0 9 * * *",
+		Prompt:         "routine prompt",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out1.Effort != "low" {
+		t.Fatalf("expected recurring effort 'low', got %q", out1.Effort)
+	}
+
+	// 2. Explicit "high" effort is preserved
+	out2, err := h.ScheduleRecurring(context.Background(), ScheduleRecurringArgs{
+		ChannelID:      "chan-rec-2",
+		CronExpression: "0 9 * * *",
+		Prompt:         "routine prompt high",
+		Effort:         "high",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out2.Effort != "high" {
+		t.Fatalf("expected recurring effort 'high', got %q", out2.Effort)
+	}
+
+	// 3. Untrimmed uppercase "  HIGH  " canonicalizes to "high"
+	out3, err := h.ScheduleRecurring(context.Background(), ScheduleRecurringArgs{
+		ChannelID:      "chan-rec-3",
+		CronExpression: "0 9 * * *",
+		Prompt:         "routine prompt untrimmed",
+		Effort:         "  HIGH  ",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out3.Effort != "high" {
+		t.Fatalf("expected recurring effort 'high', got %q", out3.Effort)
+	}
+
+	// 4. Invalid effort defaults to "low"
+	out4, err := h.ScheduleRecurring(context.Background(), ScheduleRecurringArgs{
+		ChannelID:      "chan-rec-4",
+		CronExpression: "0 9 * * *",
+		Prompt:         "routine prompt invalid",
+		Effort:         "invalid-tier",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out4.Effort != "low" {
+		t.Fatalf("expected recurring effort 'low', got %q", out4.Effort)
+	}
+}
+
+func TestScheduleOnce_TargetIDAndEffortCanonicalization(t *testing.T) {
+	db, err := setupTestDB(t)
+	if err != nil {
+		t.Fatalf("failed to setup test db: %v", err)
+	}
+
+	// 1. Using TargetID and untrimmed uppercase "  HIGH  "
+	out1, err := handleScheduleOnce(context.Background(), db, ScheduleOnceArgs{
+		TargetID: "target-canonical-1",
+		Prompt:   "canonical high",
+		RunAt:    "10m",
+		Effort:   "  HIGH  ",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out1.Effort != "high" {
+		t.Fatalf("expected effort 'high', got %q", out1.Effort)
+	}
+
+	// 2. Using TargetID and invalid effort -> "low"
+	out2, err := handleScheduleOnce(context.Background(), db, ScheduleOnceArgs{
+		TargetID: "target-canonical-2",
+		Prompt:   "canonical invalid",
+		RunAt:    "15m",
+		Effort:   "medium",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out2.Effort != "low" {
+		t.Fatalf("expected effort 'low', got %q", out2.Effort)
+	}
+
+	// Verify persistence in DB
+	schedules, err := ListOneShotSchedules(context.Background(), db, "target-canonical-1")
+	if err != nil || len(schedules) != 1 {
+		t.Fatalf("expected 1 schedule for target-canonical-1, got %v, err: %v", schedules, err)
+	}
+	if schedules[0].Effort != "high" {
+		t.Fatalf("expected persisted effort 'high', got %q", schedules[0].Effort)
+	}
+
+	schedules2, err := ListOneShotSchedules(context.Background(), db, "target-canonical-2")
+	if err != nil || len(schedules2) != 1 {
+		t.Fatalf("expected 1 schedule for target-canonical-2, got %v, err: %v", schedules2, err)
+	}
+	if schedules2[0].Effort != "low" {
+		t.Fatalf("expected persisted effort 'low', got %q", schedules2[0].Effort)
+	}
+}
+
+func TestScheduleOnce_CoalesceNullAndEmptyString(t *testing.T) {
+	db, err := setupTestDB(t)
+	if err != nil {
+		t.Fatalf("failed to setup test db: %v", err)
+	}
+
+	// Raw SQL insert with empty string into one_shot_schedules
+	now := time.Now().UTC()
+	_, err = db.Exec("INSERT INTO one_shot_schedules (id, thread_id, prompt, run_at, created_at, effort) VALUES (?, ?, ?, ?, ?, ?)",
+		"raw-empty-effort", "thread-raw-1", "test empty effort", now, now, "")
+	if err != nil {
+		t.Fatalf("failed raw insert into one_shot_schedules: %v", err)
+	}
+
+	schedules, err := ListOneShotSchedules(context.Background(), db, "thread-raw-1")
+	if err != nil || len(schedules) != 1 {
+		t.Fatalf("expected 1 schedule, got %v, err: %v", schedules, err)
+	}
+	if schedules[0].Effort != "low" {
+		t.Fatalf("expected COALESCE(NULLIF(effort, ''), 'low') to produce 'low', got %q", schedules[0].Effort)
+	}
+
+	// Raw SQL insert with empty string into cron_schedules
+	_, err = db.Exec("INSERT INTO cron_schedules (id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, effort) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		"raw-cron-empty", "chan-raw-1", "", "0 0 * * *", "test empty cron", "America/Los_Angeles", now, true, now, "")
+	if err != nil {
+		t.Fatalf("failed raw insert into cron_schedules: %v", err)
+	}
+
+	crons, err := ListCronSchedules(context.Background(), db, "chan-raw-1")
+	if err != nil || len(crons) != 1 {
+		t.Fatalf("expected 1 cron schedule, got %v, err: %v", crons, err)
+	}
+	if crons[0].Effort != "low" {
+		t.Fatalf("expected cron COALESCE(NULLIF(effort, ''), 'low') to produce 'low', got %q", crons[0].Effort)
+	}
+}
+
+func TestInsertOneShotSchedule_NilDBAndDefaults(t *testing.T) {
+	// Nil DB check
+	err := InsertOneShotSchedule(context.Background(), nil, OneShotSchedule{
+		ID:       "oneshot-nil",
+		ThreadID: "thread-nil",
+		Prompt:   "nil db test",
+		RunAt:    time.Now().UTC(),
+	})
+	if err == nil {
+		t.Fatal("expected error with nil db, got nil")
+	}
+	if err.Error() != "database is nil" {
+		t.Fatalf("expected 'database is nil', got %q", err.Error())
+	}
+
+	// Zero CreatedAt gets auto-populated
+	db, err := setupTestDB(t)
+	if err != nil {
+		t.Fatalf("failed to setup test db: %v", err)
+	}
+	s := OneShotSchedule{
+		ID:       "oneshot-zero-created",
+		ThreadID: "thread-zero-created",
+		Prompt:   "zero created at",
+		RunAt:    time.Now().UTC().Add(time.Hour),
+	}
+	if err := InsertOneShotSchedule(nil, db, s); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	list, err := ListOneShotSchedules(context.Background(), db, "thread-zero-created")
+	if err != nil || len(list) != 1 {
+		t.Fatalf("expected 1 schedule, got %v, err: %v", list, err)
+	}
+	if list[0].CreatedAt.IsZero() {
+		t.Fatal("expected CreatedAt to be auto-populated, got zero")
+	}
+	if list[0].Effort != "low" {
+		t.Fatalf("expected effort 'low', got %q", list[0].Effort)
+	}
+}
+
+
 

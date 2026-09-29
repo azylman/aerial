@@ -79,6 +79,9 @@ func (h *OSProcessHandle) Wait() error {
 type DefaultDaemonSpawner struct{}
 
 func (s *DefaultDaemonSpawner) Spawn(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if cfg.AgyBin == "" {
 		cfg.AgyBin = "agy"
 	}
@@ -194,3 +197,67 @@ func (m *MockDaemonSpawner) Spawn(ctx context.Context, cfg DaemonConfig) (io.Wri
 	}
 	return NewMockDaemonSpawner().Spawn(ctx, cfg)
 }
+
+// MockSpawner records spawned configs and simulates running daemons for testing.
+type MockSpawner struct {
+	mu           sync.Mutex
+	lastSpawnCfg DaemonConfig
+	spawnCount   int
+	SpawnFn      func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error)
+}
+
+// NewMockSpawner creates a new MockSpawner with default pipe behavior.
+func NewMockSpawner() *MockSpawner {
+	m := &MockSpawner{}
+	m.SpawnFn = func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+		inR, inW := io.Pipe()
+		outR, outW := io.Pipe()
+		errR, errW := io.Pipe()
+
+		go func() {
+			if _, err := io.Copy(io.Discard, inR); err != nil && !errors.Is(err, io.ErrClosedPipe) && !errors.Is(err, io.EOF) {
+				log.Printf("[MockSpawner] Warning: failed to discard stdin: %v", err)
+			}
+		}()
+		go func() {
+			defer closeQuietly(errW)
+			defer closeQuietly(outW)
+			sessID := cfg.SessionID
+			if sessID == "" || !IsValidUUID(sessID) {
+				sessID = "550e8400-e29b-41d4-a716-446655440000"
+			}
+			if _, err := fmt.Fprintf(outW, "{\"event\":\"init\",\"conversation_id\":%q}\n", sessID); err != nil {
+				log.Printf("[MockSpawner] Warning: failed to write init event: %v", err)
+			}
+		}()
+
+		handle := &MockProcessHandle{pid: 12345}
+		return inW, outR, errR, handle, nil
+	}
+	return m
+}
+
+func (m *MockSpawner) Spawn(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+	if m == nil {
+		return NewMockSpawner().Spawn(ctx, cfg)
+	}
+	m.mu.Lock()
+	m.lastSpawnCfg = cfg
+	m.spawnCount++
+	m.mu.Unlock()
+
+	if m.SpawnFn != nil {
+		return m.SpawnFn(ctx, cfg)
+	}
+	return NewMockSpawner().Spawn(ctx, cfg)
+}
+
+func (m *MockSpawner) LastSpawnCfg() DaemonConfig {
+	if m == nil {
+		return DaemonConfig{}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lastSpawnCfg
+}
+

@@ -2744,24 +2744,33 @@ func TestDualProcessPool_InitializationAndWiring(t *testing.T) {
 	mockSpawner := runner.NewMockDaemonSpawner()
 	tmpDir := t.TempDir()
 
-	discordPool := runner.NewUnifiedProcessPool(runner.PoolConfig{
+	discordPrimaryPool := runner.NewUnifiedProcessPool(runner.PoolConfig{
+		GeminiHomeDir: filepath.Join(tmpDir, "runtimes", "discord"),
+		Model:         "gemini-3.7-pro",
+	}, mockSpawner)
+	defer discordPrimaryPool.Close()
+
+	discordLowEffortPool := runner.NewUnifiedProcessPool(runner.PoolConfig{
 		GeminiHomeDir:    filepath.Join(tmpDir, "runtimes", "discord"),
 		PrewarmedTargets: []string{"ephemeral:classifier", "ephemeral:summarizer"},
-		DefaultModel:     "gemini-2.5-flash",
+		Model:            "gemini-3.8-flash-low",
 	}, mockSpawner)
-	defer discordPool.Close()
+	defer discordLowEffortPool.Close()
 
 	voicePool := runner.NewUnifiedProcessPool(runner.PoolConfig{
 		GeminiHomeDir:    filepath.Join(tmpDir, "runtimes", "voice"),
 		PrewarmedTargets: []string{"kiosk"},
-		DefaultModel:     "gemini-2.5-flash",
+		Model:            "gemini-3.8-flash-low",
 	}, mockSpawner)
 	defer voicePool.Close()
 
 	initCtx, initCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer initCancel()
-	if err := discordPool.Initialize(initCtx); err != nil {
-		t.Fatalf("failed initializing discord pool: %v", err)
+	if err := discordPrimaryPool.Initialize(initCtx); err != nil {
+		t.Fatalf("failed initializing discord primary pool: %v", err)
+	}
+	if err := discordLowEffortPool.Initialize(initCtx); err != nil {
+		t.Fatalf("failed initializing discord low effort pool: %v", err)
 	}
 	if err := voicePool.Initialize(initCtx); err != nil {
 		t.Fatalf("failed initializing voice pool: %v", err)
@@ -2769,19 +2778,19 @@ func TestDualProcessPool_InitializationAndWiring(t *testing.T) {
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if discordPool.HasDaemon("ephemeral:classifier") &&
-			discordPool.HasDaemon("ephemeral:summarizer") &&
+		if discordLowEffortPool.HasDaemon("ephemeral:classifier") &&
+			discordLowEffortPool.HasDaemon("ephemeral:summarizer") &&
 			voicePool.HasDaemon("kiosk") {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	if !discordPool.HasDaemon("ephemeral:classifier") {
-		t.Errorf("expected discordPool to have ephemeral:classifier pre-warmed")
+	if !discordLowEffortPool.HasDaemon("ephemeral:classifier") {
+		t.Errorf("expected discordLowEffortPool to have ephemeral:classifier pre-warmed")
 	}
-	if !discordPool.HasDaemon("ephemeral:summarizer") {
-		t.Errorf("expected discordPool to have ephemeral:summarizer pre-warmed")
+	if !discordLowEffortPool.HasDaemon("ephemeral:summarizer") {
+		t.Errorf("expected discordLowEffortPool to have ephemeral:summarizer pre-warmed")
 	}
 	if !voicePool.HasDaemon("kiosk") {
 		t.Errorf("expected voicePool to have kiosk pre-warmed")
@@ -2789,14 +2798,18 @@ func TestDualProcessPool_InitializationAndWiring(t *testing.T) {
 
 	store := db.NewFakeStore()
 	pool := queue.New(nil, queue.WorkerPoolConfig{
-		Store:            store,
-		ProcessPool:      discordPool,
-		VoiceProcessPool: voicePool,
+		Store:                store,
+		ProcessPool:          discordPrimaryPool,
+		LowEffortProcessPool: discordLowEffortPool,
+		VoiceProcessPool:     voicePool,
 	})
 	pool.Start()
 
-	if pool.ProcessPool() != discordPool {
-		t.Errorf("expected pool.ProcessPool() to be discordPool")
+	if pool.ProcessPool() != discordPrimaryPool {
+		t.Errorf("expected pool.ProcessPool() to be discordPrimaryPool")
+	}
+	if pool.LowEffortProcessPool() != discordLowEffortPool {
+		t.Errorf("expected pool.LowEffortProcessPool() to be discordLowEffortPool")
 	}
 	if pool.VoiceProcessPool() != voicePool {
 		t.Errorf("expected pool.VoiceProcessPool() to be voicePool")
@@ -2805,15 +2818,17 @@ func TestDualProcessPool_InitializationAndWiring(t *testing.T) {
 	pool.Stop()
 }
 
+func TestMain_DualProcessPoolWiring(t *testing.T) {
+	primarySpawner := runner.NewMockSpawner()
+	lowEffortSpawner := runner.NewMockSpawner()
 
+	p1 := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.7-pro"}, primarySpawner)
+	defer p1.Close()
+	p2 := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, lowEffortSpawner)
+	defer p2.Close()
 
-
-
-
-
-
-
-
-
-
+	if p1.Model() != "gemini-3.7-pro" || p2.Model() != "gemini-3.8-flash-low" {
+		t.Fatalf("expected distinct models in dual pools")
+	}
+}
 

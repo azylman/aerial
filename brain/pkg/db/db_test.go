@@ -2122,7 +2122,7 @@ func TestCronScheduleAndMessageEffortRouting(t *testing.T) {
 	ctx := context.Background()
 	store := NewSQLStore(database)
 
-	// 1. Create CronSchedule with effort: "low"
+	// 1. Create CronSchedule with empty effort (should default to "low")
 	cron1 := CronSchedule{
 		ID:          "cron-low-1",
 		TargetID:    "target-chan-1",
@@ -2131,13 +2131,13 @@ func TestCronScheduleAndMessageEffortRouting(t *testing.T) {
 		Prompt:      "Morning forecast",
 		NextRunAt:   time.Now().UTC().Add(-1 * time.Minute),
 		Enabled:     true,
-		Effort:      "low",
+		Effort:      "",
 	}
 	if err := store.CreateCronSchedule(ctx, cron1); err != nil {
 		t.Fatalf("CreateCronSchedule low failed: %v", err)
 	}
 
-	// 2. Create CronSchedule with empty effort (should default to "high")
+	// 2. Create CronSchedule with explicit "high" effort
 	cron2 := CronSchedule{
 		ID:          "cron-high-1",
 		TargetID:    "target-chan-1",
@@ -2146,7 +2146,7 @@ func TestCronScheduleAndMessageEffortRouting(t *testing.T) {
 		Prompt:      "Morning news",
 		NextRunAt:   time.Now().UTC().Add(-1 * time.Minute),
 		Enabled:     true,
-		Effort:      "",
+		Effort:      "high",
 	}
 	if err := store.CreateCronSchedule(ctx, cron2); err != nil {
 		t.Fatalf("CreateCronSchedule high failed: %v", err)

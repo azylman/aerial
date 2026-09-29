@@ -55,7 +55,8 @@ CREATE TABLE IF NOT EXISTS one_shot_schedules (
 	thread_id TEXT NOT NULL,
 	prompt TEXT NOT NULL,
 	run_at TIMESTAMPTZ NOT NULL,
-	created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+	created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	effort TEXT NOT NULL DEFAULT 'low'
 );
 
 CREATE TABLE IF NOT EXISTS cron_schedules (
@@ -67,7 +68,7 @@ CREATE TABLE IF NOT EXISTS cron_schedules (
 	timezone TEXT NOT NULL DEFAULT 'America/Los_Angeles',
 	next_run_at TIMESTAMPTZ NOT NULL,
 	enabled BOOLEAN NOT NULL DEFAULT TRUE,
-	effort TEXT NOT NULL DEFAULT 'high',
+	effort TEXT NOT NULL DEFAULT 'low',
 	created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -84,7 +85,7 @@ CREATE TABLE IF NOT EXISTS schedule_runs (
 	started_at TIMESTAMPTZ NOT NULL,
 	completed_at TIMESTAMPTZ,
 	duration_ms BIGINT DEFAULT 0,
-	effort TEXT NOT NULL DEFAULT 'high',
+	effort TEXT NOT NULL DEFAULT 'low',
 	model TEXT NOT NULL DEFAULT '',
 	error TEXT NOT NULL DEFAULT ''
 );
@@ -152,8 +153,12 @@ func initSchemaPostgres(ctx context.Context, database *sql.DB) error {
 
 	execNotice("ALTER TABLE messages ADD COLUMN IF NOT EXISTS effort TEXT NOT NULL DEFAULT ''")
 	execNotice("ALTER TABLE messages ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb")
-	execNotice("ALTER TABLE cron_schedules ADD COLUMN IF NOT EXISTS effort TEXT NOT NULL DEFAULT 'high'")
-	execNotice("ALTER TABLE schedule_runs ADD COLUMN IF NOT EXISTS effort TEXT NOT NULL DEFAULT 'high'")
+	execNotice("ALTER TABLE one_shot_schedules ADD COLUMN IF NOT EXISTS effort TEXT NOT NULL DEFAULT 'low'")
+	execNotice("ALTER TABLE one_shot_schedules ALTER COLUMN effort SET DEFAULT 'low'")
+	execNotice("ALTER TABLE cron_schedules ADD COLUMN IF NOT EXISTS effort TEXT NOT NULL DEFAULT 'low'")
+	execNotice("ALTER TABLE cron_schedules ALTER COLUMN effort SET DEFAULT 'low'")
+	execNotice("ALTER TABLE schedule_runs ADD COLUMN IF NOT EXISTS effort TEXT NOT NULL DEFAULT 'low'")
+	execNotice("ALTER TABLE schedule_runs ALTER COLUMN effort SET DEFAULT 'low'")
 	execNotice("ALTER TABLE schedule_runs ADD COLUMN IF NOT EXISTS model TEXT NOT NULL DEFAULT ''")
 
 	execNotice("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS summary TEXT NOT NULL DEFAULT ''")
