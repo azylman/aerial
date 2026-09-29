@@ -480,22 +480,28 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 		}
 
 		if activeTurn.Sink != nil {
+			respStr := extractResponseString(raw)
 			if resObj, ok := raw["result"].(map[string]any); ok {
 				if status, ok := resObj["status"].(string); ok && status == "ERROR" {
-					var errMsg string
-					if em, ok := resObj["error"].(string); ok {
-						errMsg = em
+					if strings.TrimSpace(respStr) == "" || strings.HasPrefix(respStr, "[Tool Call Requested]:") {
+						var errMsg string
+						if em, ok := resObj["error"].(string); ok {
+							errMsg = em
+						}
+						if errMsg == "" {
+							errMsg = "daemon execution failed"
+						}
+						activeTurn.Sink.OnError(errors.New(errMsg))
+						return
 					}
-					if errMsg == "" {
-						errMsg = "daemon execution failed"
+					if em, ok := resObj["error"].(string); ok && em != "" {
+						log.Printf("[StreamingDaemon] Notice: daemon reported error with substantive response: %s", em)
 					}
-					activeTurn.Sink.OnError(errors.New(errMsg))
-					return
 				}
 			}
 			res := &TurnResult{
 				ConversationID: d.SessionID(),
-				Response:       extractResponseString(raw),
+				Response:       respStr,
 				Duration:       time.Since(activeTurn.CreatedAt),
 			}
 			if resObj, ok := raw["result"].(map[string]any); ok {

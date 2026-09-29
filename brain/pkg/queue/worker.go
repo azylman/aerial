@@ -1676,12 +1676,6 @@ func (te *turnExecution) executeWithRetries() {
 						if convID == "" && turnRes.ConversationID != "" {
 							convID = turnRes.ConversationID
 						}
-						if convID == "" && te.pool != nil && te.pool.sessionMgr != nil {
-							if latest := te.pool.sessionMgr.FindLatestSessionDir(te.execStart); latest != "" && runner.IsValidUUID(latest) {
-								convID = latest
-								daemon.SetSessionID(latest)
-							}
-						}
 						payload, marshalErr := daemonTurnMarshaler(map[string]interface{}{
 							"conversation_id": convID,
 							"status":          "SUCCESS",
@@ -1780,11 +1774,6 @@ func (te *turnExecution) executeWithRetries() {
 			if targetSess == "" && te.pool != nil && te.pool.processPool != nil && te.pool.processPool != activePool {
 				if d, ok := te.pool.processPool.Get(te.threadID); ok && d != nil && d.SessionID() != "" {
 					targetSess = d.SessionID()
-				}
-			}
-			if targetSess == "" && te.pool != nil && te.pool.sessionMgr != nil {
-				if latest := te.pool.sessionMgr.FindLatestSessionDir(te.execStart); latest != "" && te.pool.sessionMgr.SessionExistsOnDisk(latest) {
-					targetSess = latest
 				}
 			}
 
@@ -2194,11 +2183,6 @@ func (te *turnExecution) executeWithRetries() {
 				extSess := resp.ConversationID
 				if extSess == "" {
 					extSess = runner.ExtractSessionID(stdout+"\n"+stderr, te.execStart)
-				}
-				if extSess == "" && te.pool != nil && te.pool.sessionMgr != nil {
-					if latest := te.pool.sessionMgr.FindLatestSessionDir(te.execStart); latest != "" && runner.IsValidUUID(latest) {
-						extSess = latest
-					}
 				}
 				if te.currentSessionID == "" && (extSess == "" || !runner.IsValidUUID(extSess)) {
 					isTransient = false
