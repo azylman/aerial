@@ -502,13 +502,14 @@ func TestWorkerPool_PersistentDaemon_ColdStart_Success(t *testing.T) {
 	}
 }
 
-func TestWorkerPool_PersistentDaemon_ColdStart_SessionMgrFallback(t *testing.T) {
+func TestWorkerPool_PersistentDaemon_ColdStart_RejectsForeignSessionOnDisk(t *testing.T) {
 	tmpHome := t.TempDir()
 	tempData := t.TempDir()
 
 	store := setupTestStore(t)
 
-	diskUUID := "f1111111-2222-3333-4444-555555555555"
+	daemonUUID := "d1111111-2222-3333-4444-555555555555"
+	foreignUUID := "f1111111-2222-3333-4444-555555555555"
 	mockSpawner := &runner.MockDaemonSpawner{
 		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
 			inR, inW := io.Pipe()
@@ -516,11 +517,10 @@ func TestWorkerPool_PersistentDaemon_ColdStart_SessionMgrFallback(t *testing.T) 
 			errR, errW := io.Pipe()
 			defer errW.Close()
 			go func() {
-				// Init event with diskUUID
-				_, _ = fmt.Fprintf(outW, "{\"event\":\"init\",\"conversation_id\":%q}\n", diskUUID)
+				_, _ = fmt.Fprintf(outW, "{\"event\":\"init\",\"conversation_id\":%q}\n", daemonUUID)
 				scanner := bufio.NewScanner(inR)
 				for scanner.Scan() {
-					_, _ = outW.Write([]byte("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"Turn completed with fallback session\",\"usage\":{\"total_tokens\":15}}}\n"))
+					_, _ = outW.Write([]byte("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"Turn completed\",\"usage\":{\"total_tokens\":15}}}\n"))
 				}
 			}()
 			return inW, outR, errR, runner.NewMockProcessHandle(12345), nil
@@ -560,19 +560,18 @@ func TestWorkerPool_PersistentDaemon_ColdStart_SessionMgrFallback(t *testing.T) 
 	})
 	defer pool.Stop()
 
-	// Pre-create session directory in session roots after execStart
-	threadID := "thread-cold-persist-fallback"
+	// Pre-create foreign session directory on disk with future modtime (simulating concurrent cron/thread session)
+	threadID := "thread-cold-persist-no-foreign"
 	msg := db.Message{
-		ID:        "msg-cold-fallback",
+		ID:        "msg-cold-no-foreign",
 		ThreadID:  threadID,
-		Content:   "cold start fallback",
+		Content:   "cold start with foreign session on disk",
 		Status:    db.StatusPending,
 		CreatedAt: time.Now(),
 	}
 	_ = store.InsertMessage(context.Background(), msg)
 
-	// Create disk session dir with a future modtime so FindLatestSessionDir picks it up
-	brainDir := filepath.Join(tempData, "brain", diskUUID)
+	brainDir := filepath.Join(tempData, "brain", foreignUUID)
 	_ = os.MkdirAll(brainDir, 0755)
 	futureTime := time.Now().Add(5 * time.Second)
 	_ = os.Chtimes(brainDir, futureTime, futureTime)
@@ -582,17 +581,20 @@ func TestWorkerPool_PersistentDaemon_ColdStart_SessionMgrFallback(t *testing.T) 
 	select {
 	case <-doneCh:
 	case <-time.After(5 * time.Second):
-		t.Fatalf("timed out waiting for fallback session message completion")
+		t.Fatalf("timed out waiting for message completion")
 	}
 
 	savedSess, err := store.GetSessionID(context.Background(), threadID)
 	if err != nil {
 		t.Fatalf("failed to get session id: %v", err)
 	}
-	if savedSess != diskUUID {
-		t.Errorf("expected session synchronized to diskUUID %q, got %q", diskUUID, savedSess)
+	if savedSess == foreignUUID {
+		t.Fatalf("security violation: worker latched newer foreign session %q from disk instead of daemon session", foreignUUID)
 	}
-	if !strings.Contains(deliveredText, "Turn completed with fallback session") {
+	if savedSess != daemonUUID {
+		t.Errorf("expected session synchronized to daemonUUID %q, got %q", daemonUUID, savedSess)
+	}
+	if !strings.Contains(deliveredText, "Turn completed") {
 		t.Errorf("expected delivered text to contain completion response, got: %q", deliveredText)
 	}
 }

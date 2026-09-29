@@ -1176,3 +1176,64 @@ func TestStreamingDaemon_OnTurnFinishedCallback(t *testing.T) {
 		t.Error("expected onTurnFinished NOT to be called when inflight turns remain")
 	}
 }
+
+func TestStreamingDaemon_ResultWithErrorStatusAndSubstantiveResponse(t *testing.T) {
+	daemon := &StreamingDaemon{}
+
+	// Case 1: Substantive response present despite status="ERROR" (e.g. agy internal transient retry)
+	sinkWithResp := newMockTurnSink()
+	turn1 := &TurnContext{
+		TurnID:    "t-err-with-resp",
+		Sink:      sinkWithResp,
+		CreatedAt: time.Now(),
+	}
+	daemon.inflight = []*TurnContext{turn1}
+
+	resultLineWithResp := `{"event":"result","result":{"conversation_id":"conv-1","status":"ERROR","error":"API error (attempt 2): RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Your quota will reset after 1s.","response":"Here is the full and complete answer to your query."}}`
+	daemon.dispatchNDJSONLine(resultLineWithResp)
+
+	select {
+	case <-sinkWithResp.done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("timed out waiting for sink completion")
+	}
+
+	sinkWithResp.mu.Lock()
+	if sinkWithResp.err != nil {
+		t.Errorf("expected nil error when substantive response is present, got %v", sinkWithResp.err)
+	}
+	if sinkWithResp.result == nil {
+		t.Fatal("expected non-nil result when substantive response is present")
+	}
+	if sinkWithResp.result.Response != "Here is the full and complete answer to your query." {
+		t.Errorf("unexpected response: %q", sinkWithResp.result.Response)
+	}
+	sinkWithResp.mu.Unlock()
+
+	// Case 2: Empty response with status="ERROR" should legitimately fail via OnError
+	sinkEmptyResp := newMockTurnSink()
+	turn2 := &TurnContext{
+		TurnID:    "t-err-empty-resp",
+		Sink:      sinkEmptyResp,
+		CreatedAt: time.Now(),
+	}
+	daemon.inflight = []*TurnContext{turn2}
+
+	resultLineEmptyResp := `{"event":"result","result":{"conversation_id":"conv-2","status":"ERROR","error":"hard model failure","response":""}}`
+	daemon.dispatchNDJSONLine(resultLineEmptyResp)
+
+	select {
+	case <-sinkEmptyResp.done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("timed out waiting for sink completion")
+	}
+
+	sinkEmptyResp.mu.Lock()
+	if sinkEmptyResp.err == nil || !strings.Contains(sinkEmptyResp.err.Error(), "hard model failure") {
+		t.Errorf("expected hard model failure error when response is empty, got %v", sinkEmptyResp.err)
+	}
+	if sinkEmptyResp.result != nil {
+		t.Errorf("expected nil result when response is empty, got %+v", sinkEmptyResp.result)
+	}
+	sinkEmptyResp.mu.Unlock()
+}
