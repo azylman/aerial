@@ -64,15 +64,43 @@ When an investigation involves non-core features, external clients, or user-spac
     - `error_message LIKE '[EXHAUSTED_PRE_TURN_RETRIES]'`: Pre-turn webhook failed repeatedly.
     - `status = 'PENDING'` and `created_at < NOW() - INTERVAL '30 minutes'`: Queue starvation or deadlocked worker pool.
 
-### Phase 2: Universal Metric Triage (VictoriaMetrics MCP)
+### Phase 2: Universal Metric Triage (VictoriaMetrics MCP & Grafana Catalog)
 
 VictoriaMetrics is the cluster-wide time-series database (TSDB) collecting metrics from all containers, including Prometheus application endpoints and cAdvisor container metrics.
 
-- **Query Metrics FIRST**: Always query VictoriaMetrics before inspecting log streams. Metrics isolate exact microsecond event timestamps and anomaly durations in <1 second (~200 tokens), preventing context bloat.
-- **Latency & Performance Metrics**:
-  - Voice TTFR duration: `aerial_brain_voice_ttfr_duration_seconds` (or histogram quantiles).
-  - Turn and tool execution durations: `rate(aerial_brain_turn_duration_seconds_sum[5m]) / rate(aerial_brain_turn_duration_seconds_count[5m])`.
-  - API request latencies and queue wait durations.
+- **Metric-First Invariant**: Always query metrics before inspecting log streams. Metrics isolate exact microsecond event timestamps and anomaly durations in <1 second (~200 tokens), preventing context bloat.
+- **Never Guess PromQL Expressions or Metric Types**:
+  - Prometheus metrics can be Gauges, Counters (requiring `rate(...)`), or Histograms.
+  - **The Histogram Trap**: Histograms (such as voice TTFR, runner durations, classifier timings) DO NOT have bare time series. Querying `aerial_brain_voice_ttfr_duration_seconds` directly returns an empty vector `[]`. Histograms only exist as `_bucket`, `_sum`, and `_count`.
+- **Step 1: Check Grafana Dashboards for Production-Validated PromQL**:
+  - Grafana dashboards contain tested PromQL formulas, quantile bucket expressions, and rate windows. Dashboards are stored across two locations:
+    - **PostgreSQL Database (`aerial` DB, `dashboard` table)**: Contains all user-defined and hardware/edge client dashboards (e.g. `🎙️ Voice Telemetry & Kiosk HUD`, `Home Assistant Telemetry & Environmental HUD`, `📡 UniFi Network & Wireless HUD`, `🐘 PostgreSQL Overview`). Query with:
+      ```bash
+      docker exec -i aerial-postgres psql -U aerial -d aerial -t -A -c "
+      SELECT title, uid, substring(data from 1 for 1000)
+      FROM dashboard 
+      WHERE data ILIKE '%<keyword>%' OR title ILIKE '%<keyword>%';
+      "
+      ```
+    - **Git Dashboard Definitions (`grafana/dashboards/*.json`)**: Contains repo-provisioned core dashboards (`core-telemetry.json`, `token-usage.json`, `docker-overview.json`, `host-system-overview.json`). Search with:
+      ```bash
+      grep -i "<keyword>" grafana/dashboards/*.json
+      ```
+  - If a dashboard panel exists, extract and reuse the exact PromQL query directly.
+- **Step 2: Live TSDB Series Discovery (VictoriaMetrics MCP)**:
+  - If no dashboard panel matches, discover the exact live metric names and suffixes using `victoriametrics:series` or `victoriametrics:metrics` with a regex match:
+    - `match[]={__name__=~".*<keyword>.*"}`
+  - Inspect the returned series suffixes:
+    - **Histograms (`_bucket`, `_sum`, `_count`)**:
+      - Latency Quantiles (p50/p90/p99): `histogram_quantile(0.95, sum by (le) (rate(<metric>_bucket[5m])))`
+      - Average Duration: `rate(<metric>_sum[5m]) / rate(<metric>_count[5m])`
+      - Request Volume / Throughput: `sum by (status) (rate(<metric>_count[2m])) * 60`
+    - **Counters (`_total`)**:
+      - Event / Error Rate: `sum by (status) (rate(<metric>_total[2m])) * 60`
+    - **Gauges**:
+      - Instant Value / Queue Depth: `<metric>` or `avg_over_time(<metric>[5m])`
+- **Step 3: Ground-Truth Code Registry Fallback (`brain/pkg/metrics/metrics.go`)**:
+  - If the TSDB is cold or has no recent samples, inspect `brain/pkg/metrics/metrics.go` to look up declared metric types (`HistogramVec`, `Gauge`, `CounterVec`) and label key dimensions.
 - **cAdvisor Container Resource Metrics**:
   - Query container resource metrics for `aerial-brain` or dynamically discovered `<target_services>`:
     - Memory RSS: `container_memory_rss{name="<container_name>"}`
@@ -154,4 +182,6 @@ Deliver the post-mortem directly to the user in clean Markdown (strictly < 1,800
 - **NEVER** inspect host memory directly (`/proc/meminfo`); inspect container cAdvisor metrics via VictoriaMetrics.
 - **NEVER** use `log.*` column prefixes in OpenObserve (Vector promotes fields directly to top-level).
 - **NEVER** pass milliseconds to OpenObserve `_timestamp` (must be converted to microseconds: `ms * 1000`).
+- **NEVER** query a Prometheus histogram by its bare metric name (histograms only exist as `_bucket`, `_sum`, and `_count`; bare names return empty vectors `[]`).
+- **NEVER** guess PromQL formulas without checking Grafana dashboards (PostgreSQL `dashboard` table or `grafana/dashboards/*.json`) or running `victoriametrics:series` first.
 - **NEVER** touch production code without reproducing the failure via a failing unit test in `brain/pkg/...` first.
