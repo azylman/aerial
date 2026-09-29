@@ -678,7 +678,8 @@ EOF
                 arguments: {
                     target_id: $target_id,
                     run_at: $run_at,
-                    prompt: $prompt
+                    prompt: $prompt,
+                    effort: "low"
                 }
             }
         }')
