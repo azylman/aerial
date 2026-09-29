@@ -77,6 +77,9 @@ func (d *StreamingDaemon) closeOnStartupError(reason string) {
 	}
 }
 
+// DefaultHandshakeTimeout is the default maximum duration to wait for the daemon init event.
+const DefaultHandshakeTimeout = 30 * time.Second
+
 // StartStreamingDaemon launches a streaming daemon, waits for the initial handshake NDJSON event,
 // latches the session ID, and spawns the background stdout reader loop.
 func StartStreamingDaemon(ctx context.Context, cfg DaemonConfig, spawner DaemonSpawner) (*StreamingDaemon, error) {
@@ -112,8 +115,8 @@ func StartStreamingDaemon(ctx context.Context, cfg DaemonConfig, spawner DaemonS
 		lastUsed:     time.Now(),
 	}
 
-	// Determine handshake timeout from cfg.Timeout if provided, defaulting to 5s
-	handshakeTimeout := 5 * time.Second
+	// Determine handshake timeout from cfg.Timeout if provided, defaulting to DefaultHandshakeTimeout (30s)
+	handshakeTimeout := DefaultHandshakeTimeout
 	if cfg.Timeout > 0 {
 		handshakeTimeout = cfg.Timeout
 	}
