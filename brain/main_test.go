@@ -2337,7 +2337,7 @@ func TestHandleVoiceAsk_Validation(t *testing.T) {
 		t.Errorf("expected 200 OK for conversation_id fallback, got %d", wConvID.Code)
 	}
 
-	// 7. Missing session_id and conversation_id returns 400 Bad Request
+	// 7. Missing session_id, node_id, and conversation_id returns 400 Bad Request
 	reqNoID := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello"}`))
 	wNoID := httptest.NewRecorder()
 	handler(wNoID, reqNoID)
@@ -2346,6 +2346,42 @@ func TestHandleVoiceAsk_Validation(t *testing.T) {
 	}
 	if !strings.Contains(wNoID.Body.String(), "session_id") {
 		t.Errorf("expected session_id required error message, got %s", wNoID.Body.String())
+	}
+
+	// 8. node_id provided successfully
+	reqNodeID := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello","node_id":"touch-kiosk-kitchen"}`))
+	wNodeID := httptest.NewRecorder()
+	handler(wNodeID, reqNodeID)
+	if wNodeID.Code != http.StatusOK {
+		t.Errorf("expected 200 OK for node_id routing, got %d: %s", wNodeID.Code, wNodeID.Body.String())
+	}
+
+	// 9. node_id priority over session_id and conversation_id
+	reqPriority := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello","node_id":"touch-kiosk-kitchen","session_id":"turn-123","conversation_id":"conv-456"}`))
+	wPriority := httptest.NewRecorder()
+	handler(wPriority, reqPriority)
+	if wPriority.Code != http.StatusOK {
+		t.Errorf("expected 200 OK for node_id priority, got %d", wPriority.Code)
+	}
+
+	// 10. Device identifier length exceeds 128 characters returns 400 Bad Request
+	tooLongID := strings.Repeat("a", 129)
+	reqTooLong := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(fmt.Sprintf(`{"prompt":"hello","node_id":%q}`, tooLongID)))
+	wTooLong := httptest.NewRecorder()
+	handler(wTooLong, reqTooLong)
+	if wTooLong.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 BadRequest for oversized device ID, got %d", wTooLong.Code)
+	}
+	if !strings.Contains(wTooLong.Body.String(), "exceeds 128 characters") {
+		t.Errorf("expected exceeds 128 characters error message, got %s", wTooLong.Body.String())
+	}
+
+	// 11. Device identifier containing control characters returns 400 Bad Request
+	reqInvalidChars := httptest.NewRequest(http.MethodPost, "/voice/ask", strings.NewReader(`{"prompt":"hello","node_id":"dock\ninvalid"}`))
+	wInvalidChars := httptest.NewRecorder()
+	handler(wInvalidChars, reqInvalidChars)
+	if wInvalidChars.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 BadRequest for control characters in device ID, got %d", wInvalidChars.Code)
 	}
 }
 
@@ -2510,8 +2546,25 @@ func TestHandleVoiceAsk_JSON_Success(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
-	if resp.Reply != "JSON voice reply" || resp.ConversationID != "sess-json-123" {
-		t.Errorf("unexpected response: %+v", resp)
+	if resp.Reply != "JSON voice reply" || resp.ConversationID != "sess-json-123" || resp.NodeID != "" {
+		t.Errorf("unexpected response when node_id omitted: %+v", resp)
+	}
+
+	// Request with explicit node_id echoes node_id
+	payloadWithNode := `{"prompt":"what is the weather?","node_id":"touch-kiosk-kitchen"}`
+	reqWithNode := httptest.NewRequest(http.MethodPost, "/api/voice/ask", strings.NewReader(payloadWithNode))
+	reqWithNode.Header.Set("Accept", "application/json")
+	wWithNode := httptest.NewRecorder()
+	handler(wWithNode, reqWithNode)
+	if wWithNode.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for node_id request, got %d", wWithNode.Code)
+	}
+	var respWithNode VoiceAskResponse
+	if err := json.Unmarshal(wWithNode.Body.Bytes(), &respWithNode); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if respWithNode.NodeID != "touch-kiosk-kitchen" {
+		t.Errorf("expected echoed node_id 'touch-kiosk-kitchen', got %q", respWithNode.NodeID)
 	}
 
 	mRec := httptest.NewRecorder()
