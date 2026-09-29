@@ -899,24 +899,53 @@ func (m *Manager) ExtractTranscriptToolActions(convID string) string {
 				continue
 			}
 
-			var sb strings.Builder
-			sb.WriteString("<PREVIOUS_TURN_ACTIONS>\n")
-			sb.WriteString("The previous attempt in this thread executed the following actions before session rotation:\n")
-			for _, act := range actions {
-				sb.WriteString(fmt.Sprintf("- Action: %s | Command/Args: %s | Status: %s | Result: %s\n",
-					act.toolName, act.commandArgs, act.status, act.snippet))
-			}
-			sb.WriteString("Do NOT repeat these exact actions. Use these results to proceed with the request or synthesize the final answer.\n")
-			sb.WriteString("</PREVIOUS_TURN_ACTIONS>")
-
-			res := sb.String()
 			const maxTotalChars = 2000
-			resRunes := []rune(res)
-			if len(resRunes) > maxTotalChars {
-				closing := []rune("\n</PREVIOUS_TURN_ACTIONS>")
-				res = string(resRunes[:maxTotalChars-len(closing)]) + string(closing)
+			const header = "<PREVIOUS_TURN_ACTIONS>\n" +
+				"The previous attempt in this thread executed the following actions before session rotation:\n"
+			const footer = "Do NOT repeat these exact actions. Use these results to proceed with the request or synthesize the final answer.\n" +
+				"</PREVIOUS_TURN_ACTIONS>"
+
+			actionLines := make([]string, len(actions))
+			for i, act := range actions {
+				actionLines[i] = fmt.Sprintf("- Action: %s | Command/Args: %s | Status: %s | Result: %s\n",
+					act.toolName, act.commandArgs, act.status, act.snippet)
 			}
-			return res
+
+			full := header + strings.Join(actionLines, "") + footer
+			if len([]rune(full)) <= maxTotalChars {
+				return full
+			}
+
+			// If oversized and only 1 action exists, clamp that single action to fit budget
+			if len(actions) == 1 {
+				budget := maxTotalChars - len([]rune(header)) - len([]rune(footer))
+				runes := []rune(actionLines[0])
+				if budget > 0 && len(runes) > budget {
+					return header + string(runes[:budget]) + footer
+				}
+				return header + footer
+			}
+
+			// Tail-biased fallback: retain the most recent actions that fit within 2,000 characters,
+			// prepending an omitted notice indicating how many earlier actions were dropped.
+			for k := 1; k < len(actions); k++ {
+				notice := fmt.Sprintf("- [... %d earlier actions omitted ...]\n", k)
+				candidate := header + notice + strings.Join(actionLines[k:], "") + footer
+				if len([]rune(candidate)) <= maxTotalChars {
+					return candidate
+				}
+			}
+
+			// Extreme fallback if even the single most recent action exceeds remaining budget:
+			k := len(actions) - 1
+			notice := fmt.Sprintf("- [... %d earlier actions omitted ...]\n", k)
+			fixedRunes := len([]rune(header)) + len([]rune(notice)) + len([]rune(footer))
+			budget := maxTotalChars - fixedRunes
+			lastRunes := []rune(actionLines[len(actions)-1])
+			if budget > 0 && len(lastRunes) > budget {
+				return header + notice + string(lastRunes[:budget]) + footer
+			}
+			return header + notice + footer
 		}
 	}
 

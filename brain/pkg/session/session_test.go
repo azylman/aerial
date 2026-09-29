@@ -3096,6 +3096,137 @@ func TestManager_ExtractTranscriptToolActions(t *testing.T) {
 		if !strings.HasSuffix(got, "</PREVIOUS_TURN_ACTIONS>") {
 			t.Errorf("missing suffix in clamped output: %s", got)
 		}
+		if !strings.Contains(got, "cmd15") {
+			t.Errorf("expected tail command cmd15 to be preserved in tail-biased fallback: %s", got)
+		}
+		if !strings.Contains(got, "earlier actions omitted") {
+			t.Errorf("expected omitted notice in output, got: %s", got)
+		}
+		if strings.Contains(got, "CommandLine: cmd1 ") || strings.Contains(got, "Command/Args: cmd1 ") || strings.Contains(got, "Command/Args: cmd1 |") {
+			t.Errorf("expected head command cmd1 to be omitted in tail-biased fallback, got: %s", got)
+		}
+	})
+
+	// Case 6b: oversized output tail-biased with exact omitted notice
+	t.Run("oversized_output_tail_biased_with_omitted_notice", func(t *testing.T) {
+		t.Parallel()
+		tempHome := t.TempDir()
+		mgr := New(tempHome, t.TempDir())
+		tailID := uuid.New().String()
+		tailDir := filepath.Join(tempHome, ".gemini", "antigravity", "brain", tailID, ".system_generated", "logs")
+		if err := os.MkdirAll(tailDir, 0755); err != nil {
+			t.Fatalf("mkdir failed: %v", err)
+		}
+		// 25 actions, ~120 chars each -> ~3000 chars total
+		var sb strings.Builder
+		sb.WriteString(`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"Run 25 commands"}` + "\n")
+		for i := 1; i <= 25; i++ {
+			output := fmt.Sprintf("ResultOutputDataForStepNumber%02d-SomePaddingCharactersHere", i)
+			sb.WriteString(fmt.Sprintf(`{"step_index":%d,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","tool_calls":[{"name":"run_command","args":{"CommandLine":"step_command_%02d"}}]}`+"\n", i*2-1, i))
+			sb.WriteString(fmt.Sprintf(`{"step_index":%d,"source":"MODEL","type":"GENERIC","status":"DONE","content":%q}`+"\n", i*2, output))
+		}
+
+		if err := os.WriteFile(filepath.Join(tailDir, "transcript.jsonl"), []byte(sb.String()), 0644); err != nil {
+			t.Fatalf("write failed: %v", err)
+		}
+
+		got := mgr.ExtractTranscriptToolActions(tailID)
+		if len(got) == 0 {
+			t.Fatalf("expected non-empty output")
+		}
+		if len([]rune(got)) > 2000 {
+			t.Errorf("expected rune length <= 2000, got %d", len([]rune(got)))
+		}
+		// Must contain tail command step_command_25
+		if !strings.Contains(got, "step_command_25") {
+			t.Errorf("expected tail command step_command_25 to be in got: %s", got)
+		}
+		// Must not contain head command step_command_01
+		if strings.Contains(got, "step_command_01") {
+			t.Errorf("expected head command step_command_01 to be omitted, got: %s", got)
+		}
+		// Must contain omitted notice
+		if !strings.Contains(got, "- [... ") || !strings.Contains(got, "earlier actions omitted ...]") {
+			t.Errorf("expected omitted notice in got: %s", got)
+		}
+	})
+
+	// Case 6c: single oversized action clamped to budget
+	t.Run("oversized_output_single_action_clamped", func(t *testing.T) {
+		t.Parallel()
+		tempHome := t.TempDir()
+		mgr := New(tempHome, t.TempDir())
+		singleID := uuid.New().String()
+		singleDir := filepath.Join(tempHome, ".gemini", "antigravity", "brain", singleID, ".system_generated", "logs")
+		if err := os.MkdirAll(singleDir, 0755); err != nil {
+			t.Fatalf("mkdir failed: %v", err)
+		}
+		// A single action with a huge command line (> 2500 chars)
+		hugeCmd := strings.Repeat("HugeCommandLineArgumentString-", 100)
+		transcript := `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"Run massive command"}` + "\n" +
+			fmt.Sprintf(`{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","tool_calls":[{"name":"run_command","args":{"CommandLine":%q}}]}`+"\n", hugeCmd) +
+			`{"step_index":2,"source":"MODEL","type":"GENERIC","status":"DONE","content":"output"}` + "\n"
+
+		if err := os.WriteFile(filepath.Join(singleDir, "transcript.jsonl"), []byte(transcript), 0644); err != nil {
+			t.Fatalf("write failed: %v", err)
+		}
+
+		got := mgr.ExtractTranscriptToolActions(singleID)
+		if len(got) == 0 {
+			t.Fatalf("expected non-empty output")
+		}
+		if len([]rune(got)) > 2000 {
+			t.Errorf("expected rune length <= 2000, got %d", len([]rune(got)))
+		}
+		if !strings.HasPrefix(got, "<PREVIOUS_TURN_ACTIONS>") {
+			t.Errorf("missing prefix in got: %s", got)
+		}
+		if !strings.HasSuffix(got, "</PREVIOUS_TURN_ACTIONS>") {
+			t.Errorf("missing suffix in got: %s", got)
+		}
+		if strings.Contains(got, "earlier actions omitted") {
+			t.Errorf("should not contain omitted notice for single action: %s", got)
+		}
+	})
+
+	// Case 6d: multiple actions where the single most recent action itself exceeds budget
+	t.Run("oversized_output_last_action_itself_exceeds_budget", func(t *testing.T) {
+		t.Parallel()
+		tempHome := t.TempDir()
+		mgr := New(tempHome, t.TempDir())
+		multiID := uuid.New().String()
+		multiDir := filepath.Join(tempHome, ".gemini", "antigravity", "brain", multiID, ".system_generated", "logs")
+		if err := os.MkdirAll(multiDir, 0755); err != nil {
+			t.Fatalf("mkdir failed: %v", err)
+		}
+		// Action 1: small command. Action 2: massive command (> 2500 chars)
+		hugeCmd := strings.Repeat("MassiveTailCommandParameter-", 100)
+		transcript := `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"Run massive commands"}` + "\n" +
+			`{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","tool_calls":[{"name":"run_command","args":{"CommandLine":"first_short_cmd"}}]}` + "\n" +
+			`{"step_index":2,"source":"MODEL","type":"GENERIC","status":"DONE","content":"short_result"}` + "\n" +
+			fmt.Sprintf(`{"step_index":3,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","tool_calls":[{"name":"run_command","args":{"CommandLine":%q}}]}`+"\n", hugeCmd) +
+			`{"step_index":4,"source":"MODEL","type":"GENERIC","status":"DONE","content":"tail_result"}` + "\n"
+
+		if err := os.WriteFile(filepath.Join(multiDir, "transcript.jsonl"), []byte(transcript), 0644); err != nil {
+			t.Fatalf("write failed: %v", err)
+		}
+
+		got := mgr.ExtractTranscriptToolActions(multiID)
+		if len(got) == 0 {
+			t.Fatalf("expected non-empty output")
+		}
+		if len([]rune(got)) > 2000 {
+			t.Errorf("expected rune length <= 2000, got %d", len([]rune(got)))
+		}
+		if !strings.Contains(got, "- [... 1 earlier actions omitted ...]") {
+			t.Errorf("expected 1 earlier actions omitted notice, got: %s", got)
+		}
+		if strings.Contains(got, "first_short_cmd") {
+			t.Errorf("expected first action to be omitted, got: %s", got)
+		}
+		if !strings.Contains(got, "MassiveTailCommandParameter") {
+			t.Errorf("expected tail action snippet to be present in got: %s", got)
+		}
 	})
 
 	// Case 7: Diverse tool arguments and status/error branches

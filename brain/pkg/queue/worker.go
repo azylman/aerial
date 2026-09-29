@@ -1442,7 +1442,7 @@ func (te *turnExecution) condenseTurnActions(rawActions string) string {
 	if te.pool != nil && te.pool.ctx != nil {
 		ctx = te.pool.ctx
 	}
-	timeoutCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	timeoutCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 
 	prompt := fmt.Sprintf("Condense the following tool actions executed in the previous attempt into a compact, deduplicated summary of key findings and actions taken. Preserve file paths, commands, exit codes, and core outputs. Output MUST be wrapped in <PREVIOUS_TURN_ACTIONS> and </PREVIOUS_TURN_ACTIONS> tags.\n\n%s", rawActions)
