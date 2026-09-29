@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/azylman/aerial/brain/pkg/sanitizer"
 )
 
 // DefaultMaxSessionTurns defines the engine-wide maximum turn limit before an agy session is rotated.
@@ -762,6 +764,190 @@ func (m *Manager) ExtractFinalSubstantiveResponse(ctx context.Context, convID st
 	}
 
 	return "", false, nil
+}
+
+// ExtractTranscriptToolActions scans the transcript for the specified conversation ID
+// and extracts completed tool calls and outputs from the latest turn into a structured action block.
+func (m *Manager) ExtractTranscriptToolActions(convID string) string {
+	if m == nil {
+		return ""
+	}
+	trimmedID := strings.TrimSpace(convID)
+	if trimmedID == "" || strings.ContainsAny(trimmedID, "/\\:") || strings.Contains(trimmedID, "..") {
+		return ""
+	}
+
+	targetDirs := m.getTargetDirs(trimmedID)
+
+	for _, dir := range targetDirs {
+		for _, name := range []string{"transcript_full.jsonl", "transcript.jsonl"} {
+			tPath := filepath.Join(dir, ".system_generated", "logs", name)
+			data, err := os.ReadFile(tPath)
+			if err != nil || len(data) == 0 {
+				continue
+			}
+
+			lines := strings.Split(string(data), "\n")
+			lastUserInputIdx := -1
+			for i, rawLine := range lines {
+				line := strings.TrimSpace(rawLine)
+				if line == "" {
+					continue
+				}
+				var step struct {
+					Source  string `json:"source"`
+					Type    string `json:"type"`
+					Content string `json:"content"`
+				}
+				if err := json.Unmarshal([]byte(line), &step); err == nil {
+					isAmbient := step.Source == SourceAmbient || (step.Type == "USER_INPUT" && strings.HasPrefix(step.Content, "[Chat #") && step.Source != "USER_EXPLICIT")
+					if step.Type == "USER_INPUT" && !isAmbient {
+						lastUserInputIdx = i
+					}
+				}
+			}
+
+			startIdx := 0
+			if lastUserInputIdx >= 0 {
+				startIdx = lastUserInputIdx + 1
+			}
+
+			type transcriptAction struct {
+				toolName    string
+				commandArgs string
+				status      string
+				snippet     string
+			}
+
+			var actions []*transcriptAction
+			var pendingActions []*transcriptAction
+
+			for i := startIdx; i < len(lines); i++ {
+				line := strings.TrimSpace(lines[i])
+				if line == "" {
+					continue
+				}
+				var step struct {
+					Type      string `json:"type"`
+					Status    string `json:"status"`
+					Content   string `json:"content"`
+					Error     any    `json:"error"`
+					ToolCalls []struct {
+						Name string          `json:"name"`
+						Args json.RawMessage `json:"args"`
+					} `json:"tool_calls"`
+				}
+				if err := json.Unmarshal([]byte(line), &step); err != nil {
+					continue
+				}
+
+				if step.Type == "PLANNER_RESPONSE" && len(step.ToolCalls) > 0 {
+					for _, tc := range step.ToolCalls {
+						cmdArgs := extractCommandOrArgs(tc.Args)
+						cmdArgs = sanitizer.SanitizePromptTags(sanitizer.NormalizeWhitespace(cmdArgs))
+						toolName := sanitizer.SanitizePromptTags(strings.TrimSpace(tc.Name))
+						act := &transcriptAction{
+							toolName:    toolName,
+							commandArgs: cmdArgs,
+							status:      "DONE",
+						}
+						actions = append(actions, act)
+						pendingActions = append(pendingActions, act)
+					}
+				} else if step.Type == "GENERIC" || step.Type == "RUN_COMMAND" || step.Type == "MCP_TOOL" || step.Type == "CODE_ACTION" || step.Type == "WRITE_TO_FILE" {
+					if len(pendingActions) > 0 {
+						act := pendingActions[0]
+						pendingActions = pendingActions[1:]
+
+						st := strings.TrimSpace(step.Status)
+						if st != "" {
+							act.status = sanitizer.SanitizePromptTags(st)
+						} else if step.Error != nil {
+							act.status = "ERROR"
+						}
+
+						errStr := formatStepError(step.Error)
+						var rawSnippet string
+						if step.Content != "" && errStr != "" {
+							rawSnippet = step.Content + " (" + errStr + ")"
+						} else if step.Content != "" {
+							rawSnippet = step.Content
+						} else {
+							rawSnippet = errStr
+						}
+
+						rawSnippet = sanitizer.NormalizeWhitespace(rawSnippet)
+						runes := []rune(rawSnippet)
+						if len(runes) > 300 {
+							rawSnippet = string(runes[:300])
+						}
+						act.snippet = sanitizer.SanitizePromptTags(rawSnippet)
+					}
+				}
+			}
+
+			if len(actions) == 0 {
+				continue
+			}
+
+			var sb strings.Builder
+			sb.WriteString("<PREVIOUS_TURN_ACTIONS>\n")
+			sb.WriteString("The previous attempt in this thread executed the following actions before session rotation:\n")
+			for _, act := range actions {
+				sb.WriteString(fmt.Sprintf("- Action: %s | Command/Args: %s | Status: %s | Result: %s\n",
+					act.toolName, act.commandArgs, act.status, act.snippet))
+			}
+			sb.WriteString("Do NOT repeat these exact actions. Use these results to proceed with the request or synthesize the final answer.\n")
+			sb.WriteString("</PREVIOUS_TURN_ACTIONS>")
+
+			res := sb.String()
+			const maxTotalChars = 2000
+			resRunes := []rune(res)
+			if len(resRunes) > maxTotalChars {
+				closing := []rune("\n</PREVIOUS_TURN_ACTIONS>")
+				res = string(resRunes[:maxTotalChars-len(closing)]) + string(closing)
+			}
+			return res
+		}
+	}
+
+	return ""
+}
+
+func extractCommandOrArgs(rawArgs json.RawMessage) string {
+	if len(rawArgs) == 0 {
+		return ""
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(rawArgs, &m); err == nil {
+		for _, k := range []string{"CommandLine", "command_line", "command", "cmd"} {
+			if v, ok := m[k]; ok {
+				if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+					return strings.TrimSpace(s)
+				}
+			}
+		}
+		if len(m) == 0 {
+			return ""
+		}
+		if len(m) == 1 {
+			for _, v := range m {
+				if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+					return strings.TrimSpace(s)
+				}
+			}
+		}
+		b, err := json.Marshal(m)
+		if err == nil {
+			return string(b)
+		}
+		return fmt.Sprintf("%v", m)
+	}
+	var s string
+	if err := json.Unmarshal(rawArgs, &s); err == nil {
+		return strings.TrimSpace(s)
+	}
+	return strings.TrimSpace(string(rawArgs))
 }
 
 // HasSuccessfulToolCall returns whether the conversation contains any successful tool calls.
