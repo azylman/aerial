@@ -184,5 +184,39 @@ func TestWorkerPool_DualPoolTurnRouting(t *testing.T) {
 		pool.MarkDirty()
 		pool.Stop()
 	})
+
+	t.Run("WorkerPool_MarkDirty_ReconcilesVoicePrewarmedTargets", func(t *testing.T) {
+		vSpawner := runner.NewMockDaemonSpawner()
+		vPool := runner.NewUnifiedProcessPool(runner.PoolConfig{
+			Model:            "gemini-2.5-flash",
+			PrewarmedTargets: []string{"kiosk"},
+		}, vSpawner)
+		defer vPool.Close()
+
+		appCfg := config.NewTestConfig(func(d *config.ConfigData) {
+			d.Voice.PrewarmedTargets = []string{"touch-kiosk-kitchen"}
+		})
+
+		pool := New(appCfg, WorkerPoolConfig{
+			VoiceProcessPool: vPool,
+		})
+		defer pool.Stop()
+
+		// Trigger MarkDirty on WorkerPool
+		pool.MarkDirty()
+
+		// Deterministically wait for background eviction and prewarming without arbitrary sleeps
+		vPool.WaitBackground()
+
+		// Verify voice process pool has updated prewarmed targets
+		targets := vPool.PrewarmedTargets()
+		if len(targets) != 1 || targets[0] != "touch-kiosk-kitchen" {
+			t.Fatalf("expected voice pool targets to be updated to [touch-kiosk-kitchen], got %v", targets)
+		}
+
+		if !vPool.HasDaemon("touch-kiosk-kitchen") {
+			t.Fatalf("expected touch-kiosk-kitchen to be active in process pool")
+		}
+	})
 }
 

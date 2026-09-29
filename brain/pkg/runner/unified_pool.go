@@ -260,6 +260,14 @@ func (p *UnifiedProcessPool) Close() error {
 	return p.closeErr
 }
 
+// WaitBackground waits for all active background eviction and pre-warming operations to complete.
+func (p *UnifiedProcessPool) WaitBackground() {
+	if p == nil {
+		return
+	}
+	p.bgWg.Wait()
+}
+
 // Get returns the active StreamingDaemon for targetKey if present and not closed.
 func (p *UnifiedProcessPool) Get(targetKey string) (*StreamingDaemon, bool) {
 	if p == nil {
@@ -278,6 +286,43 @@ func (p *UnifiedProcessPool) Get(targetKey string) (*StreamingDaemon, bool) {
 func (p *UnifiedProcessPool) HasDaemon(targetKey string) bool {
 	_, ok := p.Get(targetKey)
 	return ok
+}
+
+// PrewarmedTargets returns a defensive copy of configured prewarmed targets.
+func (p *UnifiedProcessPool) PrewarmedTargets() []string {
+	if p == nil {
+		return nil
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.cfg.PrewarmedTargets == nil {
+		return nil
+	}
+	targets := make([]string, len(p.cfg.PrewarmedTargets))
+	copy(targets, p.cfg.PrewarmedTargets)
+	return targets
+}
+
+// UpdatePrewarmedTargets dynamically updates the configured prewarmed targets.
+func (p *UnifiedProcessPool) UpdatePrewarmedTargets(targets []string) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if targets == nil {
+		p.cfg.PrewarmedTargets = nil
+		return
+	}
+	seen := make(map[string]bool, len(targets))
+	newTargets := make([]string, 0, len(targets))
+	for _, t := range targets {
+		if trimmed := strings.TrimSpace(t); trimmed != "" && !seen[trimmed] {
+			seen[trimmed] = true
+			newTargets = append(newTargets, trimmed)
+		}
+	}
+	p.cfg.PrewarmedTargets = newTargets
 }
 
 // MarkDirty marks all active daemons as dirty and optimistically rotates idle daemons.
@@ -317,6 +362,20 @@ func (p *UnifiedProcessPool) MarkDirty() {
 			}
 		} else {
 			d.MarkDirty()
+		}
+	}
+
+	// Reconcile prewarmed targets: ensure newly added or missing prewarmed targets
+	// that are not currently running or already prewarming get eagerly spawned.
+	for _, target := range p.cfg.PrewarmedTargets {
+		target = strings.TrimSpace(target)
+		if target == "" {
+			continue
+		}
+		d, exists := p.daemons[target]
+		if (!exists || d == nil || d.State() == StateClosed) && !p.prewarming[target] {
+			p.prewarming[target] = true
+			toPrewarm = append(toPrewarm, target)
 		}
 	}
 

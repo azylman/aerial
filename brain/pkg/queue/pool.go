@@ -699,6 +699,10 @@ func (p *WorkerPool) MarkDirty() {
 	procPool := p.processPool
 	lowPool := p.lowEffortProcessPool
 	voicePool := p.voiceProcessPool
+	var voiceTargets []string
+	if p.appCfg != nil {
+		voiceTargets = p.appCfg.VoicePrewarmedTargets()
+	}
 	p.mu.Unlock()
 	if procPool != nil {
 		procPool.MarkDirty()
@@ -707,6 +711,9 @@ func (p *WorkerPool) MarkDirty() {
 		lowPool.MarkDirty()
 	}
 	if voicePool != nil {
+		if voiceTargets != nil {
+			voicePool.UpdatePrewarmedTargets(voiceTargets)
+		}
 		voicePool.MarkDirty()
 	}
 }
