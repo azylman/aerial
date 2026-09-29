@@ -1842,8 +1842,9 @@ func TestWorkerPool_CapacityBlip_LocalRetry_Success(t *testing.T) {
 		SessionManager: sessMgr,
 		Store:          store,
 		TimeoutMinutes: 1,
-		BackoffBase:    5 * time.Millisecond,
-		MaxAttempts:    2,
+		BackoffBase:        5 * time.Millisecond,
+		RetryDelayOverride: 10 * time.Millisecond,
+		MaxAttempts:        2,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
 			mu.Lock()
 			attemptCount++
@@ -1932,8 +1933,9 @@ func TestWorkerPool_CapacityBlip_DoesNotBlockConcurrentThreads(t *testing.T) {
 		SessionManager: sessMgr,
 		Store:          store,
 		TimeoutMinutes: 1,
-		BackoffBase:    5 * time.Millisecond,
-		MaxAttempts:    2,
+		BackoffBase:        5 * time.Millisecond,
+		RetryDelayOverride: 10 * time.Millisecond,
+		MaxAttempts:        2,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
 			if strings.Contains(prompt, "Thread A") {
 				// Thread A hits capacity blip on attempt 1, succeeds on attempt 2
@@ -2086,6 +2088,143 @@ func TestWorkerPool_CapacityBlip_ContextCancellation(t *testing.T) {
 	if lockedUntil := pool.quotaLockedUntil.Load(); lockedUntil > 0 {
 		t.Errorf("Expected quotaLockedUntil to remain 0, got %d", lockedUntil)
 	}
+}
+
+func TestWorkerPool_ProgressiveCapacityBackoff(t *testing.T) {
+	t.Parallel()
+
+	// 1. Backoff floor calculation tests
+	t.Run("FloorCalculation", func(t *testing.T) {
+		t.Parallel()
+		// Attempt 1 floor >= 30s
+		for i := 0; i < 20; i++ {
+			d1 := calculateCapacityBackoff(1, 0)
+			if d1 < 30*time.Second {
+				t.Fatalf("attempt 1 backoff floor expected >= 30s, got %v", d1)
+			}
+			if d1 > 33*time.Second {
+				t.Fatalf("attempt 1 backoff jitter expected <= 33s, got %v", d1)
+			}
+		}
+
+		// Attempt 2 floor >= 60s
+		for i := 0; i < 20; i++ {
+			d2 := calculateCapacityBackoff(2, 0)
+			if d2 < 60*time.Second {
+				t.Fatalf("attempt 2 backoff floor expected >= 60s, got %v", d2)
+			}
+			if d2 > 63*time.Second {
+				t.Fatalf("attempt 2 backoff jitter expected <= 63s, got %v", d2)
+			}
+		}
+
+		// resetDur override when resetDur > minFloor (e.g. 75s)
+		for i := 0; i < 20; i++ {
+			dOverride := calculateCapacityBackoff(1, 75*time.Second)
+			if dOverride < 75*time.Second {
+				t.Fatalf("resetDur override expected >= 75s, got %v", dOverride)
+			}
+			if dOverride > 78*time.Second {
+				t.Fatalf("resetDur override jitter expected <= 78s, got %v", dOverride)
+			}
+		}
+	})
+
+	// 2. Context cancellation during backoff triggers clean pending status and calls te.stopTyping()
+	t.Run("ContextCancellationDuringBackoff", func(t *testing.T) {
+		t.Parallel()
+		store := setupTestStore(t)
+		tmpDir := t.TempDir()
+		sessMgr := session.New(tmpDir, tmpDir)
+
+		startedCh := make(chan struct{}, 1)
+		var typingMu sync.Mutex
+		var typingActive bool
+		var typingStopped bool
+
+		appCfg := config.NewFromData(&config.ConfigData{
+			Channels: map[string]config.ChannelPolicy{
+				"default": {Mode: "thread"},
+			},
+		})
+
+		pool := New(appCfg, WorkerPoolConfig{
+			SessionManager: sessMgr,
+			Store:          store,
+			TimeoutMinutes: 1,
+			MaxAttempts:    2,
+			RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+				select {
+				case startedCh <- struct{}{}:
+				default:
+				}
+				return "", "RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Your quota will reset after 0s.", 1, errors.New("exit code 1")
+			},
+			DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+				return nil
+			},
+			TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+				typingMu.Lock()
+				typingActive = true
+				typingMu.Unlock()
+				return func() {
+					typingMu.Lock()
+					typingStopped = true
+					typingMu.Unlock()
+				}
+			},
+		})
+		pool.Start()
+		defer pool.Stop()
+
+		msg := db.Message{ID: "msg-cap-prog-cancel", ThreadID: "thread-cap-prog-cancel", Content: "cancel progressive backoff"}
+		_ = insertMessage(store, msg)
+		pool.Enqueue(msg)
+
+		select {
+		case <-startedCh:
+		case <-time.After(5 * time.Second):
+			t.Fatal("Timeout waiting for attempt 1 runner invocation")
+		}
+
+		// Allow worker to enter backoff sleep (which has delay >= 30s)
+		time.Sleep(100 * time.Millisecond)
+
+		typingMu.Lock()
+		if !typingActive {
+			t.Errorf("Expected typing to have started")
+		}
+		if typingStopped {
+			t.Errorf("Expected te.stopTyping() NOT to be called during backoff delay (typing indicator must continue pulsing)")
+		}
+		typingMu.Unlock()
+
+		// Cancel pool context during progressive capacity backoff
+		pool.cancel()
+
+		// Wait for worker goroutine to process pool.ctx.Done()
+		time.Sleep(300 * time.Millisecond)
+
+		typingMu.Lock()
+		if !typingStopped {
+			t.Errorf("Expected te.stopTyping() to be called on context cancellation during backoff")
+		}
+		typingMu.Unlock()
+
+		dbMsg, err := store.GetMessage(context.Background(), "msg-cap-prog-cancel")
+		if err != nil || dbMsg == nil {
+			t.Fatalf("failed to query message: %v", err)
+		}
+		if dbMsg.Status != db.StatusPending {
+			t.Errorf("Expected StatusPending on context cancellation, got %s (err: %s)", dbMsg.Status, dbMsg.ErrorMessage)
+		}
+		if !strings.Contains(dbMsg.ErrorMessage, "interrupted by graceful deployment") {
+			t.Errorf("Expected error to contain 'interrupted by graceful deployment', got %q", dbMsg.ErrorMessage)
+		}
+		if lockedUntil := pool.quotaLockedUntil.Load(); lockedUntil > 0 {
+			t.Errorf("Expected quotaLockedUntil to remain 0, got %d", lockedUntil)
+		}
+	})
 }
 
 func TestWorkerPool_CapacityBlip_Exhaustion_LocalFailure(t *testing.T) {

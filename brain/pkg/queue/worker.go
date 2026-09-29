@@ -1799,11 +1799,10 @@ func (te *turnExecution) executeWithRetries() {
 							te.incrementMessageRetry(m.ID, errDetail)
 						}
 
-						delay := resetDur
-						if delay < 2*time.Second {
-							delay = 2 * time.Second
+						delay := calculateCapacityBackoff(attempt, resetDur)
+						if te.pool != nil && te.pool.cfg.RetryDelayOverride > 0 {
+							delay = te.pool.cfg.RetryDelayOverride
 						}
-						delay += time.Duration(rand.Intn(1000)) * time.Millisecond
 
 						var cancelChan <-chan struct{}
 						if te.pool != nil && te.pool.ctx != nil {
@@ -2681,4 +2680,17 @@ func (s *turnResultSink) OnError(err error) {
 		s.errCh <- err
 	})
 }
+
+// calculateCapacityBackoff computes progressive capacity backoff:
+// attempt * 30s floor (or resetDur if larger) + up to 3000ms jitter.
+func calculateCapacityBackoff(attempt int, resetDur time.Duration) time.Duration {
+	minFloor := time.Duration(attempt) * 30 * time.Second
+	delay := resetDur
+	if delay < minFloor {
+		delay = minFloor
+	}
+	delay += time.Duration(rand.Intn(3000)) * time.Millisecond
+	return delay
+}
+
 
