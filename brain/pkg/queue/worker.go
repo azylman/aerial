@@ -1666,7 +1666,15 @@ func (te *turnExecution) executeWithRetries() {
 
 		if isFailure {
 			promptToSend = te.turnPrompt
-			targetSess := te.currentSessionID
+			targetSess := ""
+			if isLowEffort && te.pool != nil && te.pool.lowEffortProcessPool != nil && activePool != nil {
+				if d, ok := activePool.Get(te.threadID); ok && d != nil && d.SessionID() != "" {
+					targetSess = d.SessionID()
+				}
+			}
+			if targetSess == "" {
+				targetSess = te.currentSessionID
+			}
 			if targetSess == "" {
 				combinedOutput := stdout + "\n" + stderr
 				if extSess := runner.ExtractSessionID(combinedOutput, te.execStart); extSess != "" && te.pool.sessionMgr != nil && te.pool.sessionMgr.SessionExistsOnDisk(extSess) {
@@ -2165,8 +2173,12 @@ func (te *turnExecution) executeWithRetries() {
 								if len(tasks) > 0 {
 									activeTask := tasks[0]
 									unfinishedTaskID = activeTask.TaskID
-									if te.pool.sessionMgr != nil && te.currentSessionID != "" {
-										if sessDir, sErr := te.pool.sessionMgr.GetSessionDir(te.currentSessionID); sErr == nil && sessDir != "" {
+									targetSessID := trackerDaemon.SessionID()
+									if targetSessID == "" {
+										targetSessID = te.currentSessionID
+									}
+									if te.pool.sessionMgr != nil && targetSessID != "" {
+										if sessDir, sErr := te.pool.sessionMgr.GetSessionDir(targetSessID); sErr == nil && sessDir != "" {
 											waitCtx, waitCancel := context.WithTimeout(runCtx, 2*time.Second)
 											exitCode, logPath, wErr := watchTaskCompletion(waitCtx, sessDir, activeTask.TaskID)
 											waitCancel()

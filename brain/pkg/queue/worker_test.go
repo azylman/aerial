@@ -2678,7 +2678,8 @@ func TestWorker_YieldTrap_AlternatePoolFallback(t *testing.T) {
 	threadID := "thread-yield-fallback"
 	_ = store.SaveSessionID(context.Background(), threadID, sessID)
 
-	taskDir := filepath.Join(tempData, "brain", sessID, ".system_generated", "tasks")
+	lowSessID := "d1111111-2222-3333-4444-555555555555"
+	taskDir := filepath.Join(tempData, "brain", lowSessID, ".system_generated", "tasks")
 	_ = os.MkdirAll(taskDir, 0755)
 	_ = os.WriteFile(filepath.Join(taskDir, "bg-task-in-low-pool.log"), []byte("done"), 0644)
 
