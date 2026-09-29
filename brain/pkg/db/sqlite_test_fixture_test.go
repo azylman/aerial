@@ -57,7 +57,8 @@ CREATE TABLE IF NOT EXISTS one_shot_schedules (
 	thread_id TEXT NOT NULL,
 	prompt TEXT NOT NULL,
 	run_at DATETIME NOT NULL,
-	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	effort TEXT NOT NULL DEFAULT 'low'
 );
 
 CREATE TABLE IF NOT EXISTS cron_schedules (
@@ -69,7 +70,7 @@ CREATE TABLE IF NOT EXISTS cron_schedules (
 	timezone TEXT NOT NULL DEFAULT 'America/Los_Angeles',
 	next_run_at DATETIME NOT NULL,
 	enabled BOOLEAN NOT NULL DEFAULT 1,
-	effort TEXT NOT NULL DEFAULT 'high',
+	effort TEXT NOT NULL DEFAULT 'low',
 	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -86,7 +87,7 @@ CREATE TABLE IF NOT EXISTS schedule_runs (
 	started_at DATETIME NOT NULL,
 	completed_at DATETIME,
 	duration_ms INTEGER DEFAULT 0,
-	effort TEXT NOT NULL DEFAULT 'high',
+	effort TEXT NOT NULL DEFAULT 'low',
 	model TEXT NOT NULL DEFAULT '',
 	error TEXT NOT NULL DEFAULT ''
 );
@@ -141,8 +142,9 @@ func initSchemaSQLite(database *sql.DB) error {
 
 	_, _ = database.Exec("ALTER TABLE messages ADD COLUMN effort TEXT NOT NULL DEFAULT ''")
 	_, _ = database.Exec("ALTER TABLE messages ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'")
-	_, _ = database.Exec("ALTER TABLE cron_schedules ADD COLUMN effort TEXT NOT NULL DEFAULT 'high'")
-	_, _ = database.Exec("ALTER TABLE schedule_runs ADD COLUMN effort TEXT NOT NULL DEFAULT 'high'")
+	_, _ = database.Exec("ALTER TABLE one_shot_schedules ADD COLUMN effort TEXT NOT NULL DEFAULT 'low'")
+	_, _ = database.Exec("ALTER TABLE cron_schedules ADD COLUMN effort TEXT NOT NULL DEFAULT 'low'")
+	_, _ = database.Exec("ALTER TABLE schedule_runs ADD COLUMN effort TEXT NOT NULL DEFAULT 'low'")
 	_, _ = database.Exec("ALTER TABLE schedule_runs ADD COLUMN model TEXT NOT NULL DEFAULT ''")
 
 	_, _ = database.Exec("ALTER TABLE sessions ADD COLUMN summary TEXT NOT NULL DEFAULT ''")
