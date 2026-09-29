@@ -51,8 +51,9 @@ type StreamingDaemon struct {
 	sessionID string
 	dirty     bool
 	lastUsed  time.Time
-	turnCount int
-	stepCount int
+	turnCount      int
+	stepCount      int
+	onTurnFinished func(d *StreamingDaemon)
 
 	inflightMu sync.Mutex
 	inflight   []*TurnContext
@@ -231,6 +232,14 @@ func (d *StreamingDaemon) MarkDirty() {
 	defer d.mu.Unlock()
 	d.dirty = true
 }
+
+// SetOnTurnFinished registers a callback invoked when an in-flight turn finishes and no more in-flight turns remain.
+func (d *StreamingDaemon) SetOnTurnFinished(fn func(d *StreamingDaemon)) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.onTurnFinished = fn
+}
+
 
 // Send serializes prompt input writing to the daemon stdin under stdinMu mutex protection,
 // tracks the TurnContext in the in-flight FIFO queue, and transitions daemon state to StateExecuting.
@@ -460,7 +469,15 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 				d.state = StateReady
 			}
 		}
+		var turnFinishedCb func(d *StreamingDaemon)
+		if !hasMoreInflight {
+			turnFinishedCb = d.onTurnFinished
+		}
 		d.mu.Unlock()
+
+		if turnFinishedCb != nil {
+			go turnFinishedCb(d)
+		}
 
 		if activeTurn.Sink != nil {
 			if resObj, ok := raw["result"].(map[string]any); ok {

@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -34,6 +35,7 @@ type UnifiedProcessPool struct {
 	daemons   map[string]*StreamingDaemon
 	mu        sync.RWMutex
 	sf        singleflight.Group
+	bgWg      sync.WaitGroup
 	closed    bool
 	closeOnce sync.Once
 	closeErr  error
@@ -154,6 +156,31 @@ func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string) 
 			return nil, fmt.Errorf("failed to start daemon for target %q: %w", targetKey, spawnErr)
 		}
 
+		daemon.SetOnTurnFinished(func(d *StreamingDaemon) {
+			p.mu.RLock()
+			if p.closed {
+				p.mu.RUnlock()
+				return
+			}
+			should, _ := p.ShouldRotate(d)
+			tracked := p.daemons[targetKey] == d
+			p.mu.RUnlock()
+
+			if should && tracked {
+				p.bgWg.Add(1)
+				go func(tKey string) {
+					defer p.bgWg.Done()
+					rotCtx, cancel := context.WithTimeout(p.ctx, 15*time.Second)
+					defer cancel()
+					if _, rotErr := p.RotateDaemon(rotCtx, tKey, ""); rotErr != nil {
+						if !errors.Is(rotErr, context.Canceled) {
+							log.Printf("[UnifiedProcessPool] Warning: rotation failed on turn completion for %q: %v", tKey, rotErr)
+						}
+					}
+				}(targetKey)
+			}
+		})
+
 		p.mu.Lock()
 		if p.closed {
 			p.mu.Unlock()
@@ -267,6 +294,9 @@ func (p *UnifiedProcessPool) ShouldRotate(d *StreamingDaemon) (bool, string) {
 	}
 	if d.InflightCount() > 0 {
 		return false, "" // Never rotate during in-flight turn
+	}
+	if d.IsDirty() {
+		return true, "daemon marked dirty during in-flight turn"
 	}
 	if d.TurnCount() >= DefaultMaxSessionTurns {
 		return true, fmt.Sprintf("turn count threshold exceeded (%d >= %d)", d.TurnCount(), DefaultMaxSessionTurns)

@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -1128,5 +1129,50 @@ func TestStreamingDaemon_StepUpdateNestedTextDeltaAndThinking(t *testing.T) {
 	}
 }
 
+func TestStreamingDaemon_OnTurnFinishedCallback(t *testing.T) {
+	daemon := &StreamingDaemon{
+		sessionID: "test-on-turn-finished",
+		state:     StateExecuting,
+	}
 
+	cbCalled := make(chan *StreamingDaemon, 1)
+	daemon.SetOnTurnFinished(func(d *StreamingDaemon) {
+		cbCalled <- d
+	})
 
+	sink := newMockTurnSink()
+	turn := &TurnContext{
+		TurnID:    "t-1",
+		Sink:      sink,
+		CreatedAt: time.Now(),
+	}
+	daemon.inflight = append(daemon.inflight, turn)
+
+	// Dispatch result event
+	daemon.dispatchNDJSONLine(`{"event":"result","result":{"status":"SUCCESS","response":"done"}}`)
+
+	select {
+	case d := <-cbCalled:
+		if d != daemon {
+			t.Errorf("expected callback with daemon instance %p, got %p", daemon, d)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("timed out waiting for onTurnFinished callback")
+	}
+
+	// Also verify that if hasMoreInflight == true, callback is NOT invoked
+	var secondCbCalled atomic.Bool
+	daemon.SetOnTurnFinished(func(d *StreamingDaemon) {
+		secondCbCalled.Store(true)
+	})
+
+	turn1 := &TurnContext{TurnID: "t-1", Sink: newMockTurnSink(), CreatedAt: time.Now()}
+	turn2 := &TurnContext{TurnID: "t-2", Sink: newMockTurnSink(), CreatedAt: time.Now()}
+	daemon.inflight = []*TurnContext{turn1, turn2}
+
+	daemon.dispatchNDJSONLine(`{"event":"result","result":{"status":"SUCCESS","response":"done-1"}}`)
+	time.Sleep(50 * time.Millisecond)
+	if secondCbCalled.Load() {
+		t.Error("expected onTurnFinished NOT to be called when inflight turns remain")
+	}
+}
