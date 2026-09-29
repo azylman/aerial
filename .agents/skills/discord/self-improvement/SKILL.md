@@ -1,13 +1,13 @@
 ---
 name: self-improvement
-description: Mandatory skill whenever Aerial must inspect, modify, enhance, debug, or refactor its own Go codebase, system skills, or configuration repos (aerial / aerial-config), author scratch PRs, OR pull upstream git releases and trigger Hangar container deployment syncs. DO NOT use for managing Home Assistant devices, user tasks, calendar events, recipes, or external domain operations.
+description: Mandatory skill whenever Aerial must inspect, modify, enhance, debug, author PRs, or refactor code across ANY repository (aerial, aerial-config, mirrormere, aerial-sidecars, etc.), author scratch PRs, OR pull upstream git releases and trigger container deployment syncs. DO NOT use for managing Home Assistant devices, user tasks, calendar events, recipes, or day-to-day conversation.
 ---
 
 # Aerial Self-Improvement & Continuous Engineering Workflow
 
 This skill defines how Aerial safely manages its own lifecycle across two operational paths:
 1. **Path A (Operational Maintenance & Rollout)**: Fast-path upstream syncs, container reconciliations, and deployment status checks.
-2. **Path B (Autonomous Self-Engineering)**: Multi-agent tiered review, TDD implementation, and scratch PR automation across the dual-repository architecture.
+2. **Path B (Autonomous Self-Engineering)**: Multi-agent tiered review, TDD implementation, and scratch PR automation across all repositories.
 
 ---
 
@@ -21,9 +21,9 @@ Before running any commands or dispatching review subagents, determine which ope
   - **Subagent Review Overhead**: **None (Bypassed)**. Execute Hangar endpoints directly in root turn.
   - **Execution Reference**: Proceed directly to **Section 2**.
 
-• **Path B: Autonomous Self-Engineering (Code & Configuration Changes)**
-  - **Triggers**: *"Fix bug in X"*, *"Add feature / MCP service"*, *"Modify skill or prompt"*, *"Edit config.yaml / AGENTS.md"*.
-  - **Target Action**: Implement, test, verify, and submit code or configuration changes via scratch PR workflows.
+• **Path B: Autonomous Self-Engineering (Code & Configuration Changes Across Any Repository)**
+  - **Triggers**: *"Fix bug in X"*, *"Add feature / MCP service"*, *"Modify skill or prompt"*, *"Edit config.yaml / AGENTS.md"*, or any coding/refactoring task in ANY repository (`aerial`, `aerial-config`, `mirrormere`, `aerial-sidecars`, etc.).
+  - **Target Action**: Implement, test, verify, and submit code or configuration changes across ANY repository via universal scratch PR workflows.
   - **Subagent Review Overhead**: **Tiered (Tiers 0–3)**. Scaled review panels, TDD, and scratch PR automation.
   - **Execution Reference**: Proceed directly to **Sections 3–5**.
 
@@ -53,12 +53,54 @@ Check active deployment and container swap progress:
 
 ---
 
-## 3. Path B: Dual-Repository Architecture & Ephemeral Workspaces
+## 3. Path B: Universal Multi-Repository Architecture & Target Selection
 
-Code and configuration changes are governed by the two-repository separation and kernel `:ro` immutability defined in `GEMINI.md` ("Decoupled Configuration & Repository Separation"):
-- **Core Engine (`azylman/aerial`)**: Generic execution engine, base skills, and Docker topology. Zero personal data; zero plaintext tokens.
-- **User Configuration (`azylman/aerial-config`)**: Private options, persona overrides, and domain skills.
-- **Ephemeral Scratch Workspaces**: Because `/share/aerial` and `/share/aerial-config` are mounted read-only (`:ro`), all changes must be authored in isolated scratch clones initialized via `scripts/aerial-pr.sh init` or `scripts/aerial-config-pr.sh init`.
+Code and configuration changes across all repositories are governed by ephemeral scratch isolation, kernel `:ro` immutability, and strict separation of concerns.
+
+### Repository Target Selection Decision Matrix
+
+Before initializing a workspace, determine which repository owns the change based on intent and scope:
+
+• **Target 1: User Configuration Repository (`azylman/aerial-config`)**
+  - **Initialize Command**: `scripts/aerial-pr.sh init aerial-config`
+  - **Scope & Contents**:
+    - **Persona, Identity & Tone**: User guidelines, personal preferences, nicknames, household members, communication style (`rules/{common,discord,voice}/*.md`).
+    - **Channel Instructions**: Channel-specific constraints and operating guidelines (`channels/<channel-name>.md`).
+    - **Runtime Options & Toggles**: Non-secret user options (`config.yaml`: LLM models, timezones, channel modes, admin user lists, enabled MCP servers).
+    - **Custom Operational Skills**: Private domain runbooks and workflows (`custom-skills/`: Home Assistant devices, calendar routines, recipes, personal tasks).
+    - **Custom Telemetry Scrapes**: Prometheus scrape configurations (`victoriametrics/*.yml`: Home Assistant metrics, network endpoints).
+    - **User Documentation**: Dynamic Docsify documentation portal (`docs/`).
+    - **Host Container Overrides**: User-defined sidecars or extra local MCP servers (`docker-compose.override.yml`).
+
+• **Target 2: Core Engine Monorepo (`azylman/aerial`)**
+  - **Initialize Command**: `scripts/aerial-pr.sh init aerial` (or `scripts/aerial-pr.sh init`)
+  - **Scope & Contents**:
+    - **Core Backend Engine**: Go execution engine, runner loops, process pools, session management, database migrations (`brain/pkg/...`, `brain/main.go`).
+    - **Built-in MCP Microservices**: Monorepo Go microservices (`discord-mcp/`, `dashboard/`, `sidecars/hangar/`).
+    - **Base System Rules**: Immutable system invariants, architecture constraints, security rules (`rules/{common,discord,voice}/*.md`).
+    - **Built-in System Skills**: Core engineering skills baked into image (`.agents/skills/discord/{self-improvement,incident-triage}`).
+    - **Docker Infrastructure**: Base Docker Compose topology and service Dockerfiles (`docker-compose.yml`, `Dockerfile.*`).
+    - **Monorepo Scripts**: Core CI, verification, and PR automation (`scripts/verify.*`, `scripts/aerial-pr.sh`).
+  - **Strict Engine Invariants**:
+    - **100% Generic & Domain-Agnostic**: All code, prompts, and schemas must remain reusable for any user.
+    - **Zero Personal Data Invariant**: NEVER commit real names, Discord handles, usernames, family members, home addresses, private device/entity IDs, or user-specific business logic into `aerial`.
+    - **Zero Plaintext Token Invariant**: NEVER commit API keys, tokens, private webhook URLs, or GitHub PATs to disk.
+
+• **Target 3: Display Kiosks & Peripherals (`azylman/mirrormere`)**
+  - **Initialize Command**: `scripts/aerial-pr.sh init mirrormere`
+  - **Scope & Contents**: Smart display kiosk UI, frontend dashboard widgets, display hardware integration, touch controls, kiosk voice client.
+
+• **Target 4: Auxiliary Sidecars (`azylman/aerial-sidecars`)**
+  - **Initialize Command**: `scripts/aerial-pr.sh init aerial-sidecars`
+  - **Scope & Contents**: Standalone auxiliary daemon services, hardware bridges, and companion utilities.
+
+### The Two-Step Feature Rule (Engine Capability vs. Configuration)
+When a feature introduces a new engine capability that requires user configuration (e.g. adding a new configuration field like `ignore_bots`):
+- **Step 1 (Engine Capability)**: Implement the schema field, parsing, and runtime behavior in `azylman/aerial` (`brain/pkg/config/types.go` and `brain/pkg/...`), submitted and merged first.
+- **Step 2 (Configuration Value)**: Enable or set the desired configuration value in `azylman/aerial-config` (`config.yaml`), submitted after engine support is deployed.
+
+### Ephemeral Scratch Workspaces
+Because host/container repositories are mounted read-only (`:ro`), all changes across ALL repositories must be authored in isolated scratch clones initialized via `scripts/aerial-pr.sh init [repo]`. Never bypass this with manual clones or raw GitHub MCP tools.
 
 ---
 
@@ -146,7 +188,7 @@ Stage 5: Pre-Flight Verification & Pre-PR Diff Audit
    ▼
 Stage 6: Commit, Push & Asynchronous PR Deployment
          • Fast-path static pre-commit hook (< 1s)
-         • scripts/aerial-pr.sh submit (instant PR creation, scheduled follow-up via scheduler-mcp)
+         • scripts/aerial-pr.sh submit (instant PR creation with auto-merge, scheduled follow-up via scheduler-mcp)
          • Report PR link, diff summary, and verification evidence directly
 ```
 
@@ -156,7 +198,7 @@ Stage 6: Commit, Push & Asynchronous PR Deployment
 1. **Explore Intent & Scope**:
    - Clarify scope, system constraints, persistence schemas, concurrency boundaries, and failure modes before writing code.
 2. **Initialize Workspace**:
-   - Workspaces are initialized into ephemeral scratch directories via `scripts/aerial-pr.sh init` or `scripts/aerial-config-pr.sh init`.
+   - Workspaces are initialized into ephemeral scratch directories via `scripts/aerial-pr.sh init [repo]` (e.g. `scripts/aerial-pr.sh init mirrormere`, `scripts/aerial-pr.sh init aerial-config`, or `scripts/aerial-pr.sh init` for core engine). Never use wrapper scripts or manual clones.
 3. **Draft Implementation Plan & Task Sizing (~15-Minute Granularity)**:
    - Scope and author `implementation_plan.md` per the requirements of your classification tier in `GEMINI.md` Section 8 (omitted for Tier 0, lightweight task list for Tier 1, formal specification for Tiers 2/3).
    - **Task Right-Sizing (~15-Minute Target Length)**:
@@ -254,49 +296,54 @@ Follow the automated scratch PR workflows detailed in **Section 5**.
 
 ---
 
-## 5. Asynchronous Scratch PR Automation
+## 5. Asynchronous Scratch PR Automation (Universal Workflow Across All Repositories)
 
-All code and configuration changes must follow the automated scratch PR workflow per `GEMINI.md` Invariant 6:
+All code and configuration changes across all repositories (`aerial`, `aerial-config`, `mirrormere`, `aerial-sidecars`, etc.) must follow the unified scratch PR workflow via `scripts/aerial-pr.sh`:
 
-### 5.1 Core Engine PR Workflow (`scripts/aerial-pr.sh`)
+### 5.1 Universal Multi-Repository PR Workflow (`scripts/aerial-pr.sh`)
 1. **Initialize Scratch Workspace**:
    ```bash
-   /share/aerial/scripts/aerial-pr.sh init
+   # Syntax: /share/aerial/scripts/aerial-pr.sh init [repo]
+   /share/aerial/scripts/aerial-pr.sh init mirrormere       # Peripheral / display kiosk
+   /share/aerial/scripts/aerial-pr.sh init aerial-config   # User configuration & rules
+   /share/aerial/scripts/aerial-pr.sh init aerial          # Core monorepo (or simply `init`)
    ```
 2. **Implement & Author PR Description**:
    - Write tests and code following TDD.
+   - Run local pre-flight checks (`./scripts/verify.sh --staged` if present in repo).
    - Author mandatory `PR_DESCRIPTION.md` in the scratch root.
 3. **Submit Asynchronously**:
    ```bash
    /share/aerial/scripts/aerial-pr.sh submit <scratch_dir> "feat(module): description"
    ```
-4. **Verify & Merge on Scheduled Wake-up**:
+   - Auto-detects target repository and owner from the scratch git remote.
+   - Pushes branch, arms native GitHub auto-merge (`SQUASH`), and schedules a one-shot follow-up check via `scheduler-mcp`.
+   - **TURN TERMINATION INVARIANT**: The submit command instructs the agent to end the turn immediately (`"turn_action": "end_turn"`). Synchronous foreground polling (`sleep` loops, repeated check inspection) and bypassing `aerial-pr.sh` via raw GitHub MCP tools (`create_pull_request`, `merge_pull_request`) are strictly prohibited.
+4. **Scheduled Wake-Up: PR Verification & Proactive Failure Remediation**:
    ```bash
-   /share/aerial/scripts/aerial-pr.sh merge <pr_num>
+   /share/aerial/scripts/aerial-pr.sh --repo <repo> check <pr_num>
    ```
+   - **Nominal State (Auto-Merged)**: When CI passes, GitHub automatically merges the PR without manual intervention. Aerial verifies deployment and confirms status in plain prose strictly capped at 2 sentences max.
+   - **Pending State**: If checks are still running, quietly reschedule a follow-up check via `scheduler-mcp` (`schedule_once`) and exit silently.
+   - **Failure State (PROACTIVE FAILURE REMEDIATION)**: If CI fails, Aerial **must proactively fix the failure**:
+     1. Inspect failing GitHub check runs and diagnostic logs.
+     2. Checkout the PR branch in an ephemeral scratch workspace:
+        ```bash
+        /share/aerial/scripts/aerial-pr.sh init <repo>
+        git checkout <branch>
+        ```
+     3. Diagnose and resolve the issue (unit test failures, lint errors, coverage deficits, compilation issues).
+     4. Verify locally (`./scripts/verify.sh --staged` or local package tests).
+     5. Commit and push directly to the PR branch (`git push origin <branch>`).
+     6. Quietly reschedule a follow-up check via `scheduler-mcp` (`schedule_once`).
+     7. Auto-merge remains armed and will merge once CI turns green.
+     8. Never report a failure to the user without attempting remediation, unless an unrecoverable architectural conflict exists.
 
-### 5.2 Configuration PR Workflow (`scripts/aerial-config-pr.sh`)
-1. **Initialize Scratch Workspace**:
-   ```bash
-   /share/aerial/scripts/aerial-config-pr.sh init
-   ```
-2. **Implement & Author PR Description**:
-   - Update YAML, prompts, or custom skills.
-   - Author mandatory `PR_DESCRIPTION.md` in the scratch root.
-3. **Submit Asynchronously**:
-   ```bash
-   /share/aerial/scripts/aerial-config-pr.sh submit <scratch_dir> "chore(config): description"
-   ```
-4. **Verify & Merge on Scheduled Wake-up**:
-   ```bash
-   /share/aerial/scripts/aerial-config-pr.sh merge <pr_num>
-   ```
-
-### 5.3 PR Submission, Description & Status Reporting Standards
+### 5.2 PR Submission, Description & Status Reporting Standards
 - **Mandatory PR Descriptions**: Pull Request descriptions are strictly mandatory under all circumstances. Submissions without a description will fail fast with exit code 1. Authors must provide a description via `PR_DESCRIPTION.md` in the scratch root (the recommended path for agents; automatically consumed and deleted before staging) or `--body-file <path>`.
 - **Title Hygiene**: PR titles are automatically sanitized (first non-empty line, stripped of `\r\n`, clamped to 256 characters) to prevent literal `\n` pollution in GitHub titles.
 - **Inverted Pyramid Format**: PR descriptions should follow the Inverted Pyramid format (concise summary first, key changes as bulleted key-value lists, verification evidence last) with zero markdown tables.
-- **Two-Sentence Plain Prose Confirmation**: On PR merge and deployment confirmation, responses must be delivered in plain prose strictly capped at two sentences max, omitting markdown bullet lists and forward-looking checklists for nominal and ongoing states. The sentence limit is lifted only for failures to provide full diagnostic logs and failure context.
+- **Two-Sentence Plain Prose Confirmation**: On PR merge and deployment confirmation, responses must be delivered in plain prose strictly capped at two sentences max, omitting markdown bullet lists and forward-looking checklists for nominal and ongoing states. The sentence limit is lifted only for unrecoverable failures to provide full diagnostic logs and failure context.
 
 ---
 
@@ -304,6 +351,6 @@ All code and configuration changes must follow the automated scratch PR workflow
 
 All engineering operations must strictly adhere to the canonical invariants defined in `GEMINI.md` ("Core Invariants & Operational Rules"):
 • **Scheduling Invariant (Invariant 4)**: Persistent reminders and PR follow-ups exclusively via `scheduler-mcp`. The built-in ephemeral CLI `schedule` tool is strictly prohibited (causes print-mode drain and premature termination).
-• **Asynchronous PR Workflow (Invariant 6)**: Exclusively asynchronous submission with automated follow-up scheduling. Mandatory `PR_DESCRIPTION.md`. Zero-bypass pre-flight verification (`./scripts/verify.sh --staged`). Response confirmations strictly capped at 2 sentences max in plain prose.
+• **Asynchronous PR Workflow (Invariant 6)**: Exclusively asynchronous submission via `scripts/aerial-pr.sh` across ALL repositories with automated follow-up scheduling and armed native auto-merge. Mandatory `PR_DESCRIPTION.md`. Zero-bypass pre-flight verification (`./scripts/verify.sh --staged`). Zero raw MCP PR tools; zero foreground CI polling loops (`sleep` loops). On scheduled wake-up, proactively remediate any failing builds. Response confirmations strictly capped at 2 sentences max in plain prose.
 • **Hermetic Testing & Environment Boundaries (Invariants 7 & 15)**: Host-native test execution; zero arbitrary `time.Sleep`; zero in-container `docker compose` mutations.
 

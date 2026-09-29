@@ -38,11 +38,11 @@ Aerial runs as a multi-container Docker stack supervised by Hangar and Autoheal 
 
 To inspect active container status, port bindings, or environment configuration, query `docker-compose.yml` or check running containers via `docker-mcp`.
 
-## Decoupled Configuration & Repository Separation
+## Decoupled Configuration & Multi-Repository Architecture
 
-Aerial operates on a strict **Two-Repository Separation of Concerns**:
+Aerial operates on a strict **Multi-Repository Architecture & Separation of Concerns**:
 
-### 1. Core Engine Repository (`azylman/aerial` at `/share/aerial`)
+### 1. Core Engine Monorepo (`azylman/aerial` at `/share/aerial`)
 - **Purpose**: Generic, domain-agnostic open-source foundation.
 - **Strict Invariants**:
   - **100% Generic & Domain-Agnostic**: All prompts, code, error handlers, and schemas must remain completely generic and reusable for any user.
@@ -60,6 +60,11 @@ Aerial operates on a strict **Two-Repository Separation of Concerns**:
   - **`docs/`**: Living Docsify documentation portal served dynamically at `/docs/`.
   - **`docker-compose.override.yml`**: User-defined sidecar containers or extra local MCP servers, natively merged by Docker Compose on the host via the top-level `include:` directive.
 
-### 3. Extensibility & Precedence Rules
+### 3. Peripheral Displays & Sidecars
+- **`azylman/mirrormere`**: Smart display kiosk UI, frontend dashboard widgets, and display hardware integration.
+- **`azylman/aerial-sidecars`**: Auxiliary standalone daemon microservices and hardware bridges.
+
+### 4. Repository Target Selection & Precedence Rules
+- Before initializing a scratch workspace (`scripts/aerial-pr.sh init [repo]`), consult the **Repository Target Selection Decision Matrix** and **Two-Step Feature Rule** canonically defined in `.agents/skills/discord/self-improvement/SKILL.md` (Section 3).
 - Rules and persona overrides resolve strictly according to the **Instruction Precedence Hierarchy**.
 - **Skill Precedence**: Custom skills in `/share/aerial-config/custom-skills/` take highest priority, shadowing built-in skills of the same name, canonically consolidated into `~/.gemini/config/skills`.

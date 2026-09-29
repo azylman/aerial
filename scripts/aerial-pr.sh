@@ -645,17 +645,18 @@ schedule_pr_followup() {
     prompt=$(cat <<EOF
 Check on the status of Pull Request #${pr_num} on ${REPO_OWNER}/${REPO_NAME} (${pr_url}) for commit: "${pr_title}".
 1. Inspect CI status, PR state, and deployment state by running:
-   scripts/${script_name} --repo ${REPO_NAME} merge ${pr_num}
-2. If status is "pending":
+   scripts/${script_name} --repo ${REPO_NAME} check ${pr_num}
+2. Note that native GitHub auto-merge is already enabled; if CI checks are green, GitHub merges automatically without manual merge intervention.
+3. If status is "pending":
    Quietly reschedule a ${delay} follow-up check via schedule_once targeting this active thread/channel (target_id: "${target_id}") and suppress response output (empty response) to avoid channel noise while CI is running.
-3. If status is "merged" or "already_merged":
+4. If status is "merged" or "already_merged":
    Report status in plain prose (maximum two sentences). Do NOT output markdown bullet lists, task checklists, or forward-looking promises.
    - If deployment state is "done": confirm merge and completed deployment in 1–2 sentences.
    - If deployment state is "ongoing" (e.g. stage: queued, building, awaiting_pull, swapping) or "pending_registration": state the current deployment stage in 1–2 sentences, and reschedule a ${delay} follow-up check via schedule_once targeting this active thread/channel (target_id: "${target_id}") to track deployment to completion. If status was already merged, report only the deployment stage update.
    - If deployment state is "failed": the two-sentence limit does NOT apply; report full failure details, error logs, and diagnostic context immediately.
-4. If status is "failed" or "conflict", or if the merge command errors:
-   - Be proactive on small, deterministic fixes (e.g. test coverage deficits, linting errors, minor test assertion fixes, formatting): do NOT ask for user confirmation. Inspect failing checks/logs, check out the PR branch in an ephemeral scratch workspace, implement and verify the fix locally (./scripts/verify.sh --staged), push directly to the PR branch, and quietly reschedule a ${delay} follow-up check via schedule_once targeting this active thread/channel (target_id: "${target_id}").
-   - If the failure is a merge conflict, an unrecoverable architectural/design issue, or persists after an attempted fix: the two-sentence limit does NOT apply; report full PR/CI failure details, failing check names, and error logs to the user immediately.
+5. If status is "failed" or "conflict", or if checks fail:
+   - PROACTIVELY FIX THE FAILURE: do NOT stop or ask for user confirmation. Inspect failing checks/logs, check out the PR branch in an ephemeral scratch workspace (scripts/${script_name} init ${REPO_NAME}), diagnose and fix the build/test/lint issue locally (e.g. ./scripts/verify.sh --staged), push directly to the PR branch, and quietly reschedule a ${delay} follow-up check via schedule_once targeting this active thread/channel (target_id: "${target_id}"). Auto-merge remains armed and will merge once CI is green.
+   - If the failure is a merge conflict or an unrecoverable architectural issue that persists after attempted remediation: the two-sentence limit does NOT apply; report full failure details, failing check names, and error logs to the user immediately.
 
 (Note: target_id "${target_id}" represents the active thread/channel for this conversation; never hardcode or generalize this ID across other threads or sessions.)
 EOF
@@ -1104,14 +1105,14 @@ case "$cmd" in
     submit)
         submit_scratch "$@"
         ;;
-    merge|monitor)
+    check|status|merge|monitor)
         merge_pr "$@"
         ;;
     deploy-status|deployment-status|deployment)
         get_deploy_status "$@"
         ;;
     *)
-        echo "Usage: $0 [--repo <name>] {init [repo]|submit [-d <delay>] [--no-schedule] [-b <body>|--body <body>|-f <file>|--body-file <file>] <scratch_dir> [commit_msg]|merge <pr_num> [branch] [commit_sha]|deploy-status <pr_num|commit_sha>}" >&2
+        echo "Usage: $0 [--repo <name>] {init [repo]|submit [-d <delay>] [--no-schedule] [-b <body>|--body <body>|-f <file>|--body-file <file>] <scratch_dir> [commit_msg]|check <pr_num>|deploy-status <pr_num|commit_sha>}" >&2
         exit 1
         ;;
 esac
