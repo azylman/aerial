@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -29,16 +30,18 @@ type PoolConfig struct {
 
 // UnifiedProcessPool manages pinned daemons and singleflight pre-warming.
 type UnifiedProcessPool struct {
-	cfg       PoolConfig
-	spawner   DaemonSpawner
-	daemons   map[string]*StreamingDaemon
-	mu        sync.RWMutex
-	sf        singleflight.Group
-	closed    bool
-	closeOnce sync.Once
-	closeErr  error
-	ctx       context.Context
-	cancel    context.CancelFunc
+	cfg        PoolConfig
+	spawner    DaemonSpawner
+	daemons    map[string]*StreamingDaemon
+	prewarming map[string]bool
+	mu         sync.RWMutex
+	sf         singleflight.Group
+	bgWg       sync.WaitGroup
+	closed     bool
+	closeOnce  sync.Once
+	closeErr   error
+	ctx        context.Context
+	cancel     context.CancelFunc
 }
 
 // NewUnifiedProcessPool creates a new process pool with the given configuration and spawner.
@@ -57,11 +60,12 @@ func NewUnifiedProcessPool(cfg PoolConfig, spawner DaemonSpawner) *UnifiedProces
 	cfg.Model = resolvedModel
 	cfg.DefaultModel = resolvedModel
 	return &UnifiedProcessPool{
-		cfg:     cfg,
-		spawner: spawner,
-		daemons: make(map[string]*StreamingDaemon),
-		ctx:     ctx,
-		cancel:  cancel,
+		cfg:        cfg,
+		spawner:    spawner,
+		daemons:    make(map[string]*StreamingDaemon),
+		prewarming: make(map[string]bool),
+		ctx:        ctx,
+		cancel:     cancel,
 	}
 }
 
@@ -104,23 +108,33 @@ func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string) 
 		p.mu.RUnlock()
 		return nil, fmt.Errorf("process pool is closed")
 	}
-	if d, exists := p.daemons[targetKey]; exists && d != nil && d.State() != StateClosed {
+	if d, exists := p.daemons[targetKey]; exists && d != nil && d.State() != StateClosed && !d.IsDirty() {
 		p.mu.RUnlock()
 		return d, nil
 	}
 	p.mu.RUnlock()
 
 	res, err, _ := p.sf.Do(targetKey, func() (any, error) {
-		p.mu.RLock()
+		p.mu.Lock()
 		if p.closed {
-			p.mu.RUnlock()
+			p.mu.Unlock()
 			return nil, fmt.Errorf("process pool is closed")
 		}
-		if d, exists := p.daemons[targetKey]; exists && d != nil && d.State() != StateClosed {
-			p.mu.RUnlock()
-			return d, nil
+		if d, exists := p.daemons[targetKey]; exists && d != nil {
+			if d.State() != StateClosed && !d.IsDirty() {
+				p.mu.Unlock()
+				return d, nil
+			}
+			delete(p.daemons, targetKey)
+			p.bgWg.Add(1)
+			go func(oldD *StreamingDaemon, tKey string) {
+				defer p.bgWg.Done()
+				if closeErr := oldD.Close(); closeErr != nil {
+					log.Printf("[UnifiedProcessPool] Warning: error closing dirty daemon %q: %v", tKey, closeErr)
+				}
+			}(d, targetKey)
 		}
-		p.mu.RUnlock()
+		p.mu.Unlock()
 
 		daemonEnv := p.cfg.Env
 		if home := strings.TrimSpace(p.cfg.GeminiHomeDir); home != "" {
@@ -153,6 +167,32 @@ func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string) 
 			}
 			return nil, fmt.Errorf("failed to start daemon for target %q: %w", targetKey, spawnErr)
 		}
+
+		daemon.SetOnTurnFinished(func(d *StreamingDaemon) {
+			p.mu.RLock()
+			if p.closed {
+				p.mu.RUnlock()
+				return
+			}
+			tracked := p.daemons[targetKey] == d
+			should, _ := p.ShouldRotate(d)
+			if should && tracked {
+				p.bgWg.Add(1)
+				p.mu.RUnlock()
+				go func(tKey string) {
+					defer p.bgWg.Done()
+					rotCtx, cancel := context.WithTimeout(p.ctx, 15*time.Second)
+					defer cancel()
+					if _, rotErr := p.RotateDaemon(rotCtx, tKey, ""); rotErr != nil {
+						if !errors.Is(rotErr, context.Canceled) {
+							log.Printf("[UnifiedProcessPool] Warning: rotation failed on turn completion for %q: %v", tKey, rotErr)
+						}
+					}
+				}(targetKey)
+				return
+			}
+			p.mu.RUnlock()
+		})
 
 		p.mu.Lock()
 		if p.closed {
@@ -193,6 +233,8 @@ func (p *UnifiedProcessPool) Close() error {
 		if p.cancel != nil {
 			p.cancel()
 		}
+
+		p.bgWg.Wait()
 
 		var wg sync.WaitGroup
 		var errMu sync.Mutex
@@ -238,17 +280,79 @@ func (p *UnifiedProcessPool) HasDaemon(targetKey string) bool {
 	return ok
 }
 
-// MarkDirty marks all active daemons as dirty.
+// MarkDirty marks all active daemons as dirty and optimistically rotates idle daemons.
 func (p *UnifiedProcessPool) MarkDirty() {
 	if p == nil {
 		return
 	}
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	for _, d := range p.daemons {
-		if d != nil {
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return
+	}
+
+	type evictedEntry struct {
+		targetKey string
+		daemon    *StreamingDaemon
+	}
+	var toClose []evictedEntry
+	var toPrewarm []string
+
+	prewarmedSet := make(map[string]bool, len(p.cfg.PrewarmedTargets))
+	for _, target := range p.cfg.PrewarmedTargets {
+		prewarmedSet[target] = true
+	}
+
+	for target, d := range p.daemons {
+		if d == nil {
+			continue
+		}
+		if d.InflightCount() == 0 {
+			delete(p.daemons, target)
+			toClose = append(toClose, evictedEntry{targetKey: target, daemon: d})
+			d.MarkDirty()
+			if prewarmedSet[target] && !p.prewarming[target] {
+				p.prewarming[target] = true
+				toPrewarm = append(toPrewarm, target)
+			}
+		} else {
 			d.MarkDirty()
 		}
+	}
+
+	for range toClose {
+		p.bgWg.Add(1)
+	}
+	for range toPrewarm {
+		p.bgWg.Add(1)
+	}
+	p.mu.Unlock()
+
+	for _, entry := range toClose {
+		go func(e evictedEntry) {
+			defer p.bgWg.Done()
+			if closeErr := e.daemon.Close(); closeErr != nil {
+				log.Printf("[UnifiedProcessPool] Warning: error closing evicted daemon %q: %v", e.targetKey, closeErr)
+			}
+		}(entry)
+	}
+
+	for _, target := range toPrewarm {
+		go func(tKey string) {
+			defer p.bgWg.Done()
+			defer func() {
+				p.mu.Lock()
+				delete(p.prewarming, tKey)
+				p.mu.Unlock()
+			}()
+			initCtx, cancel := context.WithTimeout(p.ctx, 15*time.Second)
+			defer cancel()
+			if _, err := p.GetOrCreate(initCtx, tKey); err != nil {
+				if !errors.Is(err, context.Canceled) {
+					log.Printf("[UnifiedProcessPool] Warning: re-warming prewarmed target %q failed: %v", tKey, err)
+				}
+			}
+		}(target)
 	}
 }
 
@@ -267,6 +371,9 @@ func (p *UnifiedProcessPool) ShouldRotate(d *StreamingDaemon) (bool, string) {
 	}
 	if d.InflightCount() > 0 {
 		return false, "" // Never rotate during in-flight turn
+	}
+	if d.IsDirty() {
+		return true, "daemon marked dirty during in-flight turn"
 	}
 	if d.TurnCount() >= DefaultMaxSessionTurns {
 		return true, fmt.Sprintf("turn count threshold exceeded (%d >= %d)", d.TurnCount(), DefaultMaxSessionTurns)
