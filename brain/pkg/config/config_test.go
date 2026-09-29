@@ -97,8 +97,9 @@ git_sync:
     - "/custom/path1"
     - "/custom/path2"
 mcp_servers:
-  weather:
-    serverUrl: "http://weather:8080/mcp"
+  discord:
+    weather:
+      serverUrl: "http://weather:8080/mcp"
 `
 	if err := os.WriteFile(yamlPath, []byte(yamlContent), 0644); err != nil {
 		t.Fatalf("Failed to write test yaml: %v", err)
@@ -119,8 +120,8 @@ mcp_servers:
 	if c.SystemChannel != "my-alerts" {
 		t.Errorf("Expected system channel 'my-alerts', got %q", c.SystemChannel)
 	}
-	if len(c.McpServers) != 1 || c.McpServers["weather"] == nil {
-		t.Errorf("Unexpected McpServers: %v", c.McpServers)
+	if len(c.McpServers.Discord) != 1 || c.McpServers.Discord["weather"] == nil {
+		t.Errorf("Unexpected McpServers.Discord: %v", c.McpServers.Discord)
 	}
 
 	// Verify getters
@@ -1819,7 +1820,9 @@ func TestConfig_ExhaustiveDeepClone_OCP(t *testing.T) {
 		Model:      "test-model",
 		AdminUsers: []string{"admin1", "admin2"},
 		Channels:   map[string]ChannelPolicy{"default": {Mode: "threads"}},
-		McpServers: map[string]json.RawMessage{"srv": json.RawMessage(`{"url":"http://localhost"}`)},
+		McpServers: TargetMcpConfig{
+			Discord: map[string]json.RawMessage{"srv": json.RawMessage(`{"url":"http://localhost"}`)},
+		},
 	}
 
 	cloned := cloneConfigData(orig)
@@ -1835,8 +1838,8 @@ func TestConfig_ExhaustiveDeepClone_OCP(t *testing.T) {
 		t.Fatalf("OCP violation: Channels map was shallow-copied")
 	}
 
-	orig.McpServers["mutated"] = json.RawMessage(`{}`)
-	if _, exists := cloned.McpServers["mutated"]; exists {
+	orig.McpServers.Discord["mutated"] = json.RawMessage(`{}`)
+	if _, exists := cloned.McpServers.Discord["mutated"]; exists {
 		t.Fatalf("OCP violation: McpServers map was shallow-copied")
 	}
 }
@@ -2997,4 +3000,104 @@ func TestConfig_ThreadTitleURLAndModel_Env(t *testing.T) {
 		t.Errorf("expected ThreadTitleModel=llama3.2:1b, got %q", data.ThreadTitleModel)
 	}
 }
+
+func TestTargetMcpConfig_UnmarshalAndValidation(t *testing.T) {
+	t.Run("ValidCategorizedTargets", func(t *testing.T) {
+		yamlContent := `
+channels:
+  default:
+    mode: "threads"
+mcp_servers:
+  common:
+    scheduler:
+      serverUrl: "http://scheduler:8080/mcp"
+  discord:
+    docker:
+      serverUrl: "http://docker:4002/mcp"
+  voice:
+    kiosk:
+      serverUrl: "http://kiosk:4003/mcp"
+`
+		cfg, err := LoadConfigFromBytes([]byte(yamlContent))
+		if err != nil {
+			t.Fatalf("unexpected error parsing categorized mcp_servers: %v", err)
+		}
+		cur := cfg.Current()
+		if len(cur.McpServers.Common) != 1 || cur.McpServers.Common["scheduler"] == nil {
+			t.Errorf("expected common scheduler server, got: %v", cur.McpServers.Common)
+		}
+		if len(cur.McpServers.Discord) != 1 || cur.McpServers.Discord["docker"] == nil {
+			t.Errorf("expected discord docker server, got: %v", cur.McpServers.Discord)
+		}
+		if len(cur.McpServers.Voice) != 1 || cur.McpServers.Voice["kiosk"] == nil {
+			t.Errorf("expected voice kiosk server, got: %v", cur.McpServers.Voice)
+		}
+	})
+
+	t.Run("RejectLegacyFlatKeys", func(t *testing.T) {
+		yamlContent := `
+channels:
+  default:
+    mode: "threads"
+mcp_servers:
+  weather:
+    serverUrl: "http://weather:8080/mcp"
+`
+		_, err := LoadConfigFromBytes([]byte(yamlContent))
+		if err == nil {
+			t.Fatal("expected error parsing flat legacy mcp_servers, got nil")
+		}
+		if !strings.Contains(err.Error(), "weather") && !strings.Contains(err.Error(), "unrecognized target category") {
+			t.Errorf("expected error mentioning unrecognized target category or weather, got: %v", err)
+		}
+	})
+
+	t.Run("RejectNonMappingCategory", func(t *testing.T) {
+		yamlContent := `
+channels:
+  default:
+    mode: "threads"
+mcp_servers:
+  common: "invalid-string"
+`
+		_, err := LoadConfigFromBytes([]byte(yamlContent))
+		if err == nil {
+			t.Fatal("expected error parsing non-mapping category, got nil")
+		}
+	})
+
+	t.Run("DeepCloneIndependence", func(t *testing.T) {
+		orig := &ConfigData{
+			McpServers: TargetMcpConfig{
+				Common:  map[string]json.RawMessage{"srv1": json.RawMessage(`{"url":"http://c"}`)},
+				Discord: map[string]json.RawMessage{"srv2": json.RawMessage(`{"url":"http://d"}`)},
+				Voice:   map[string]json.RawMessage{"srv3": json.RawMessage(`{"url":"http://v"}`)},
+			},
+		}
+
+		cloned := cloneConfigData(orig)
+
+		// Mutate original maps
+		orig.McpServers.Common["new"] = json.RawMessage(`{}`)
+		orig.McpServers.Discord["new"] = json.RawMessage(`{}`)
+		orig.McpServers.Voice["new"] = json.RawMessage(`{}`)
+
+		if _, exists := cloned.McpServers.Common["new"]; exists {
+			t.Errorf("OCP violation: Common map was shallow-copied")
+		}
+		if _, exists := cloned.McpServers.Discord["new"]; exists {
+			t.Errorf("OCP violation: Discord map was shallow-copied")
+		}
+		if _, exists := cloned.McpServers.Voice["new"]; exists {
+			t.Errorf("OCP violation: Voice map was shallow-copied")
+		}
+
+		// Mutate byte slice
+		orig.McpServers.Common["srv1"][0] = 'X'
+		if cloned.McpServers.Common["srv1"][0] == 'X' {
+			t.Errorf("OCP violation: RawMessage byte slice backing array was not cloned")
+		}
+	})
+}
+
 

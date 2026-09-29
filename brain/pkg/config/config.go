@@ -141,13 +141,19 @@ type OllamaConfig struct {
 	NumCtx      int    `yaml:"num_ctx" json:"num_ctx"`
 }
 
+type TargetMcpConfig struct {
+	Common  map[string]json.RawMessage `yaml:"common,omitempty" json:"common,omitempty"`
+	Discord map[string]json.RawMessage `yaml:"discord,omitempty" json:"discord,omitempty"`
+	Voice   map[string]json.RawMessage `yaml:"voice,omitempty" json:"voice,omitempty"`
+}
+
 type ConfigData struct {
 	Model           string                     `yaml:"model" json:"model"`
 	Timezone        string                     `yaml:"timezone" json:"timezone"`
 	SystemChannel   string                     `yaml:"system_channel" json:"system_channel"`
 	AdminUsers      []string                   `yaml:"admin_users" json:"admin_users"`
 	Channels        map[string]ChannelPolicy   `yaml:"channels" json:"channels"`
-	McpServers      map[string]json.RawMessage `yaml:"mcp_servers,omitempty" json:"mcp_servers,omitempty"`
+	McpServers      TargetMcpConfig            `yaml:"mcp_servers,omitempty" json:"mcp_servers,omitempty"`
 	DatabaseURL     string                     `yaml:"database_url" json:"database_url"`
 	Port            string                     `yaml:"port" json:"port"`
 	AgyBin          string                     `yaml:"agy_bin" json:"agy_bin"`
@@ -268,14 +274,40 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 		}
 	}
 
+	c.McpServers = TargetMcpConfig{
+		Common:  make(map[string]json.RawMessage),
+		Discord: make(map[string]json.RawMessage),
+		Voice:   make(map[string]json.RawMessage),
+	}
 	if raw.McpServers != nil {
-		c.McpServers = make(map[string]json.RawMessage)
-		for k, v := range raw.McpServers {
-			b, err := json.Marshal(v)
-			if err != nil {
-				return fmt.Errorf("failed to marshal mcp_server %q to JSON: %w", k, err)
+		for targetKey, targetVal := range raw.McpServers {
+			normalizedKey := strings.ToLower(strings.TrimSpace(targetKey))
+			var targetMap map[string]json.RawMessage
+			switch normalizedKey {
+			case "common":
+				targetMap = c.McpServers.Common
+			case "discord":
+				targetMap = c.McpServers.Discord
+			case "voice":
+				targetMap = c.McpServers.Voice
+			default:
+				return fmt.Errorf("mcp_servers contains unrecognized target category %q: only 'common', 'discord', and 'voice' are allowed", targetKey)
 			}
-			c.McpServers[k] = json.RawMessage(b)
+
+			if targetVal == nil {
+				continue
+			}
+			subMap, ok := targetVal.(map[string]interface{})
+			if !ok {
+				return fmt.Errorf("mcp_servers category %q must be a mapping of server names to configurations", targetKey)
+			}
+			for srvName, srvConf := range subMap {
+				b, err := json.Marshal(srvConf)
+				if err != nil {
+					return fmt.Errorf("failed to marshal mcp_server %s/%s to JSON: %w", targetKey, srvName, err)
+				}
+				targetMap[srvName] = json.RawMessage(b)
+			}
 		}
 	}
 	return nil
@@ -326,10 +358,23 @@ func cloneConfigData(src *ConfigData) *ConfigData {
 			dst.Channels[k] = cloneChannelPolicy(v)
 		}
 	}
-	if src.McpServers != nil {
-		dst.McpServers = make(map[string]json.RawMessage, len(src.McpServers))
-		for k, v := range src.McpServers {
-			dst.McpServers[k] = append(json.RawMessage(nil), v...)
+	dst.McpServers = TargetMcpConfig{}
+	if src.McpServers.Common != nil {
+		dst.McpServers.Common = make(map[string]json.RawMessage, len(src.McpServers.Common))
+		for k, v := range src.McpServers.Common {
+			dst.McpServers.Common[k] = append(json.RawMessage(nil), v...)
+		}
+	}
+	if src.McpServers.Discord != nil {
+		dst.McpServers.Discord = make(map[string]json.RawMessage, len(src.McpServers.Discord))
+		for k, v := range src.McpServers.Discord {
+			dst.McpServers.Discord[k] = append(json.RawMessage(nil), v...)
+		}
+	}
+	if src.McpServers.Voice != nil {
+		dst.McpServers.Voice = make(map[string]json.RawMessage, len(src.McpServers.Voice))
+		for k, v := range src.McpServers.Voice {
+			dst.McpServers.Voice[k] = append(json.RawMessage(nil), v...)
 		}
 	}
 	return &dst
@@ -348,7 +393,11 @@ func DefaultConfigData() *ConfigData {
 				IgnoreBots: &defaultIgnoreBots,
 			},
 		},
-		McpServers:      make(map[string]json.RawMessage),
+		McpServers: TargetMcpConfig{
+			Common:  make(map[string]json.RawMessage),
+			Discord: make(map[string]json.RawMessage),
+			Voice:   make(map[string]json.RawMessage),
+		},
 		Port:            "8080",
 		AgyBin:          "agy",
 		LowEffortModel:  "gemini-3.8-flash-low",

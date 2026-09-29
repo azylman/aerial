@@ -308,7 +308,7 @@ func TestWorkerPool_ExecuteVoiceTurn_ProcessPool_Success(t *testing.T) {
 	defer pool.Stop()
 
 	var statuses []string
-	reply, convID, err := pool.ExecuteVoiceTurn(context.Background(), "turn on living room light", "", func(status string) {
+	reply, convID, err := pool.ExecuteVoiceTurn(context.Background(), "turn on living room light", "kiosk", func(status string) {
 		statuses = append(statuses, status)
 	})
 
@@ -442,7 +442,7 @@ func TestWorkerPool_ExecuteVoiceTurn_ContextCancellations(t *testing.T) {
 	cancelCtx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, _, err := pool.ExecuteVoiceTurn(cancelCtx, "test", "", nil)
+	_, _, err := pool.ExecuteVoiceTurn(cancelCtx, "test", "sess-cancel", nil)
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("expected context.Canceled, got: %v", err)
 	}
@@ -455,14 +455,14 @@ func TestWorkerPool_ExecuteVoiceTurn_ContextCancellations(t *testing.T) {
 	deadCancel()
 	poolDeadCtx.ctx = deadCtx
 
-	_, _, err = poolDeadCtx.ExecuteVoiceTurn(context.Background(), "test", "", nil)
+	_, _, err = poolDeadCtx.ExecuteVoiceTurn(context.Background(), "test", "sess-dead", nil)
 	if err == nil || !strings.Contains(err.Error(), "brain is shutting down") {
 		t.Errorf("expected brain is shutting down error, got: %v", err)
 	}
 
 	// 3. Pool nil receiver
 	var nilPool *WorkerPool
-	_, _, err = nilPool.ExecuteVoiceTurn(context.Background(), "test", "", nil)
+	_, _, err = nilPool.ExecuteVoiceTurn(context.Background(), "test", "sess-nil", nil)
 	if err == nil || !strings.Contains(err.Error(), "worker pool is uninitialized") {
 		t.Errorf("expected uninitialized error, got: %v", err)
 	}
@@ -471,11 +471,74 @@ func TestWorkerPool_ExecuteVoiceTurn_ContextCancellations(t *testing.T) {
 	poolStopped := &WorkerPool{
 		stopped: true,
 	}
-	_, _, err = poolStopped.ExecuteVoiceTurn(context.Background(), "test", "", nil)
+	_, _, err = poolStopped.ExecuteVoiceTurn(context.Background(), "test", "sess-stopped", nil)
 	if err == nil || !strings.Contains(err.Error(), "brain is shutting down") {
 		t.Errorf("expected brain is shutting down error, got: %v", err)
 	}
 }
+
+func TestWorkerPool_ExecuteVoiceTurn_RequiresSessionID(t *testing.T) {
+	t.Parallel()
+	pool := New(nil, WorkerPoolConfig{})
+	_, _, err := pool.ExecuteVoiceTurn(context.Background(), "hello", "", nil)
+	if err == nil || !strings.Contains(err.Error(), "session_id is required") {
+		t.Fatalf("expected session_id required error for empty sessionID, got %v", err)
+	}
+	_, _, err = pool.ExecuteVoiceTurn(context.Background(), "hello", "   ", nil)
+	if err == nil || !strings.Contains(err.Error(), "session_id is required") {
+		t.Fatalf("expected session_id required error for whitespace sessionID, got %v", err)
+	}
+}
+
+func TestWorkerPool_ExecuteVoiceTurn_VoiceProcessPool_DeviceRouting(t *testing.T) {
+	t.Parallel()
+	var spawnedTarget string
+	mockSpawner := runner.NewMockDaemonSpawner()
+	mockSpawner.SpawnFn = func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+		spawnedTarget = cfg.ThreadID
+		inR, inW := io.Pipe()
+		outR, outW := io.Pipe()
+		errR, errW := io.Pipe()
+		go func() {
+			defer inR.Close()
+			_, _ = io.Copy(io.Discard, inR)
+		}()
+		go func() {
+			defer outW.Close()
+			defer errW.Close()
+			_, _ = outW.Write([]byte("{\"event\":\"init\",\"conversation_id\":\"550e8400-e29b-41d4-a716-446655440000\"}\n"))
+			time.Sleep(5 * time.Millisecond)
+			_, _ = outW.Write([]byte("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"kiosk device reply\",\"conversation_id\":\"550e8400-e29b-41d4-a716-446655440000\"}}\n"))
+		}()
+		return inW, outR, errR, runner.NewMockProcessHandle(8888), nil
+	}
+
+	voicePool := runner.NewUnifiedProcessPool(runner.PoolConfig{
+		DefaultModel: "gemini-2.5-flash",
+	}, mockSpawner)
+	defer voicePool.Close()
+
+	pool := New(nil, WorkerPoolConfig{
+		VoiceProcessPool: voicePool,
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	reply, convID, err := pool.ExecuteVoiceTurn(context.Background(), "what is the weather", "kiosk", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if reply != "kiosk device reply" {
+		t.Errorf("expected reply 'kiosk device reply', got %q", reply)
+	}
+	if convID != "550e8400-e29b-41d4-a716-446655440000" {
+		t.Errorf("expected convID '550e8400-e29b-41d4-a716-446655440000', got %q", convID)
+	}
+	if spawnedTarget != "kiosk" {
+		t.Errorf("expected daemon spawned with target 'kiosk', got %q", spawnedTarget)
+	}
+}
+
 
 func TestContainsToken_TableDriven(t *testing.T) {
 	t.Parallel()
@@ -680,7 +743,7 @@ func TestWorkerPool_ExecuteVoiceTurn_ProcessPool_AdditionalBranches(t *testing.T
 		defer procPool.Close()
 
 		// Pre-spawn and clear session ID to trigger activeSession == "" fallback
-		d, err := procPool.GetOrCreate(context.Background(), "voice-fallback-conv-id")
+		d, err := procPool.GetOrCreate(context.Background(), "fallback-conv-id")
 		if err != nil {
 			t.Fatalf("failed pre-spawning daemon: %v", err)
 		}

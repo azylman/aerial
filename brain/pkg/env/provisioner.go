@@ -28,11 +28,13 @@ type Provisioner struct {
 	mu sync.Mutex
 }
 
+var statOptSkills = os.Stat
+
 // New creates a Provisioner targeting the given homeDir and dataDir.
 func New(homeDir, dataDir string) *Provisioner {
 	skillsDir := "/opt/skills"
-	if _, err := os.Stat(skillsDir); err != nil {
-		if _, errLegacy := os.Stat("/opt/superpowers/skills"); errLegacy == nil {
+	if _, err := statOptSkills(skillsDir); err != nil {
+		if _, errLegacy := statOptSkills("/opt/superpowers/skills"); errLegacy == nil {
 			skillsDir = "/opt/superpowers/skills"
 		}
 	}

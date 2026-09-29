@@ -241,6 +241,55 @@ func TestBuildAgyEnv(t *testing.T) {
 	}
 }
 
+func TestBuildAgyEnv_HomeDirSanitization(t *testing.T) {
+	t.Parallel()
+
+	input := AgyEnvInput{
+		BaseEnv: []string{
+			"PATH=/usr/bin",
+			"HOME=/root",
+			"USERPROFILE=C:\\Users\\Default",
+			"GEMINI_CLI_HOME=/etc/gemini",
+			"CUSTOM=1",
+		},
+		HomeDir: "/custom/runtime",
+	}
+
+	env := BuildAgyEnv(input)
+
+	var homeCount, userProfileCount, geminiCliHomeCount int
+	for _, entry := range env {
+		if strings.HasPrefix(entry, "HOME=") {
+			homeCount++
+			if entry != "HOME=/custom/runtime" {
+				t.Errorf("unexpected HOME entry: %q", entry)
+			}
+		}
+		if strings.HasPrefix(entry, "USERPROFILE=") {
+			userProfileCount++
+			if entry != "USERPROFILE=/custom/runtime" {
+				t.Errorf("unexpected USERPROFILE entry: %q", entry)
+			}
+		}
+		if strings.HasPrefix(entry, "GEMINI_CLI_HOME=") {
+			geminiCliHomeCount++
+			if entry != "GEMINI_CLI_HOME=/custom/runtime" {
+				t.Errorf("unexpected GEMINI_CLI_HOME entry: %q", entry)
+			}
+		}
+	}
+
+	if homeCount != 1 {
+		t.Errorf("expected exactly 1 HOME entry, got %d", homeCount)
+	}
+	if userProfileCount != 1 {
+		t.Errorf("expected exactly 1 USERPROFILE entry, got %d", userProfileCount)
+	}
+	if geminiCliHomeCount != 1 {
+		t.Errorf("expected exactly 1 GEMINI_CLI_HOME entry, got %d", geminiCliHomeCount)
+	}
+}
+
 func TestFilterAgyBaseEnv(t *testing.T) {
 	t.Parallel()
 	input := []string{

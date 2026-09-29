@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -22,10 +24,10 @@ func TestUnifiedProcessPool_SingleflightPrewarming(t *testing.T) {
 			errR, _ := io.Pipe()
 
 			go func() {
-				defer outW.Close()
 				_, _ = outW.Write([]byte(`{"event":"init","session_id":"00000000-0000-0000-0000-000000000010"}` + "\n"))
+				_, _ = io.ReadAll(inR)
+				_ = outW.Close()
 			}()
-			_ = inR.Close()
 
 			return inW, outR, errR, &MockProcessHandle{pid: 100}, nil
 		},
@@ -82,8 +84,8 @@ func TestUnifiedProcessPool_GetOrCreate_ReusesExistingAndReplacesClosed(t *testi
 			go func() {
 				defer outW.Close()
 				_, _ = outW.Write([]byte(`{"event":"init","session_id":"00000000-0000-0000-0000-000000000001"}` + "\n"))
+				_, _ = io.Copy(io.Discard, inR)
 			}()
-			_ = inR.Close()
 
 			return inW, outR, errR, &MockProcessHandle{pid: 200}, nil
 		},
@@ -879,4 +881,114 @@ func TestUnifiedProcessPool_EphemeralLLMFunc(t *testing.T) {
 		t.Error("expected error calling LLMFunc from nil pool")
 	}
 }
+
+func TestUnifiedProcessPool_GeminiHomeDirInjection(t *testing.T) {
+	t.Run("CreatesGeminiDirAndSanitizesEnv", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		var capturedEnv []string
+
+		mock := &MockDaemonSpawner{
+			SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+				capturedEnv = cfg.Env
+				outR, outW := io.Pipe()
+				inR, inW := io.Pipe()
+				errR, _ := io.Pipe()
+
+				go func() {
+					defer outW.Close()
+					_, _ = outW.Write([]byte(`{"event":"init","session_id":"00000000-0000-0000-0000-000000000099"}` + "\n"))
+				}()
+				_ = inR.Close()
+
+				return inW, outR, errR, &MockProcessHandle{pid: 301}, nil
+			},
+		}
+
+		poolCfg := PoolConfig{
+			DefaultModel:  "test-model",
+			GeminiHomeDir: tmpDir,
+			Env: []string{
+				"PATH=/usr/bin",
+				"HOME=/root",
+				"USERPROFILE=/root",
+				"GEMINI_CLI_HOME=/root",
+			},
+		}
+
+		pool := NewUnifiedProcessPool(poolCfg, mock)
+		defer pool.Close()
+
+		_, err := pool.GetOrCreate(context.Background(), "kiosk")
+		if err != nil {
+			t.Fatalf("unexpected error from GetOrCreate: %v", err)
+		}
+
+		// Verify .gemini folder was created
+		geminiPath := filepath.Join(tmpDir, ".gemini")
+		if fi, statErr := os.Stat(geminiPath); statErr != nil || !fi.IsDir() {
+			t.Errorf("expected .gemini directory at %s, err: %v", geminiPath, statErr)
+		}
+
+		// Verify capturedEnv contains sanitized variables
+		var homeCount, userProfileCount, geminiCliHomeCount int
+		for _, e := range capturedEnv {
+			if strings.HasPrefix(e, "HOME=") {
+				homeCount++
+				if e != "HOME="+tmpDir {
+					t.Errorf("expected HOME=%s, got %q", tmpDir, e)
+				}
+			}
+			if strings.HasPrefix(e, "USERPROFILE=") {
+				userProfileCount++
+				if e != "USERPROFILE="+tmpDir {
+					t.Errorf("expected USERPROFILE=%s, got %q", tmpDir, e)
+				}
+			}
+			if strings.HasPrefix(e, "GEMINI_CLI_HOME=") {
+				geminiCliHomeCount++
+				if e != "GEMINI_CLI_HOME="+tmpDir {
+					t.Errorf("expected GEMINI_CLI_HOME=%s, got %q", tmpDir, e)
+				}
+			}
+		}
+
+		if homeCount != 1 {
+			t.Errorf("expected exactly 1 HOME in env, got %d", homeCount)
+		}
+		if userProfileCount != 1 {
+			t.Errorf("expected exactly 1 USERPROFILE in env, got %d", userProfileCount)
+		}
+		if geminiCliHomeCount != 1 {
+			t.Errorf("expected exactly 1 GEMINI_CLI_HOME in env, got %d", geminiCliHomeCount)
+		}
+	})
+
+	t.Run("MkdirFailureReturnsError", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		blockerFile := filepath.Join(tmpDir, "file_blocker")
+		if err := os.WriteFile(blockerFile, []byte("blocker"), 0644); err != nil {
+			t.Fatalf("failed to write blocker file: %v", err)
+		}
+
+		invalidHome := filepath.Join(blockerFile, "subhome")
+
+		mock := &MockDaemonSpawner{}
+		poolCfg := PoolConfig{
+			DefaultModel:  "test-model",
+			GeminiHomeDir: invalidHome,
+		}
+
+		pool := NewUnifiedProcessPool(poolCfg, mock)
+		defer pool.Close()
+
+		_, err := pool.GetOrCreate(context.Background(), "kiosk")
+		if err == nil {
+			t.Fatal("expected error from GetOrCreate when mkdir fails, got nil")
+		}
+		if !strings.Contains(err.Error(), "failed to create runtime home directory") {
+			t.Errorf("expected error mentioning 'failed to create runtime home directory', got: %v", err)
+		}
+	})
+}
+
 

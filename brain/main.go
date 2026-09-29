@@ -165,6 +165,12 @@ func handleVoiceAsk(pool *queue.WorkerPool) http.HandlerFunc {
 		if sessionID == "" {
 			sessionID = strings.TrimSpace(req.ConversationID)
 		}
+		if sessionID == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "Invalid payload: 'session_id' (or 'conversation_id') is required to identify the device",
+			})
+			return
+		}
 
 		isSSE := strings.Contains(r.Header.Get("Accept"), "text/event-stream") || r.URL.Query().Get("stream") == "true"
 
@@ -1064,31 +1070,59 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		lowEffortModel = "gemini-3.8-flash-low"
 	}
 
-	unifiedPool := runner.NewUnifiedProcessPool(runner.PoolConfig{
-		PrewarmedTargets: []string{"kiosk", "ephemeral:classifier", "ephemeral:summarizer"},
+	discordPool := runner.NewUnifiedProcessPool(runner.PoolConfig{
+		GeminiHomeDir:    filepath.Join(cur.DataDir, "runtimes", "discord"),
+		PrewarmedTargets: []string{"ephemeral:classifier", "ephemeral:summarizer"},
 		TargetModels: map[string]string{
 			"ephemeral:classifier": lowEffortModel,
 			"ephemeral:summarizer": lowEffortModel,
 		},
-		DefaultModel:     cur.Model,
-		AgyBin:           cur.AgyBin,
-		Cwd:              cur.DataDir,
-		Env:              os.Environ(),
+		DefaultModel: cur.Model,
+		AgyBin:       cur.AgyBin,
+		Cwd:          cur.DataDir,
+		Env:          os.Environ(),
 	}, appOpts.processSpawner)
 	defer func() {
-		if err := unifiedPool.Close(); err != nil {
-			log.Printf("[WARN] Failed to close unified process pool: %v", err)
+		if err := discordPool.Close(); err != nil {
+			log.Printf("[WARN] Failed to close discord process pool: %v", err)
 		}
 	}()
 
-	cls := classifier.New(cfg, nil, classifier.WithProcessPool(unifiedPool))
+	voicePool := runner.NewUnifiedProcessPool(runner.PoolConfig{
+		GeminiHomeDir:    filepath.Join(cur.DataDir, "runtimes", "voice"),
+		PrewarmedTargets: []string{"kiosk"},
+		TargetModels: map[string]string{
+			"kiosk": lowEffortModel,
+		},
+		DefaultModel: cur.Model,
+		AgyBin:       cur.AgyBin,
+		Cwd:          cur.DataDir,
+		Env:          os.Environ(),
+	}, appOpts.processSpawner)
+	defer func() {
+		if err := voicePool.Close(); err != nil {
+			log.Printf("[WARN] Failed to close voice process pool: %v", err)
+		}
+	}()
+
+	initCtx, initCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer initCancel()
+	if err := discordPool.Initialize(initCtx); err != nil {
+		log.Printf("[WARN] Failed to eagerly pre-warm discord process pool: %v", err)
+	}
+	if err := voicePool.Initialize(initCtx); err != nil {
+		log.Printf("[WARN] Failed to eagerly pre-warm voice process pool: %v", err)
+	}
+
+	cls := classifier.New(cfg, nil, classifier.WithProcessPool(discordPool))
 
 	pool := queue.New(cfg, queue.WorkerPoolConfig{
 		Store:               store,
 		Classifier:          cls,
 		MemoryRetrieverFunc: memory.RetrieveRelevantFacts,
 		SessionManager:      sessionMgr,
-		ProcessPool:         unifiedPool,
+		ProcessPool:         discordPool,
+		VoiceProcessPool:    voicePool,
 	})
 	pool.Start()
 
@@ -1155,7 +1189,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	}
 
 	// Start background scheduler monitor for due cron and one-shot routines
-	sched, err := scheduler.New(cfg, store, pool, scheduler.NewDiscordThreadCreator(dgSession), scheduler.WithLLMFunc(unifiedPool.EphemeralLLMFunc("ephemeral:summarizer")), scheduler.WithSessionRoots(sessionMgr.Roots()...))
+	sched, err := scheduler.New(cfg, store, pool, scheduler.NewDiscordThreadCreator(dgSession), scheduler.WithLLMFunc(discordPool.EphemeralLLMFunc("ephemeral:summarizer")), scheduler.WithSessionRoots(sessionMgr.Roots()...))
 	if err != nil {
 		return fmt.Errorf("failed to initialize scheduler: %w", err)
 	}

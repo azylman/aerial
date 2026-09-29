@@ -91,4 +91,41 @@ func TestWorkerPool_UnifiedProcessPoolWiring(t *testing.T) {
 			t.Fatalf("expected cfg.LLMFunc to be auto-populated from ProcessPool")
 		}
 	})
+
+	t.Run("VoiceProcessPool_WiringAndAccessors", func(t *testing.T) {
+		var nilP *WorkerPool
+		if got := nilP.VoiceProcessPool(); got != nil {
+			t.Fatalf("expected nil from nil WorkerPool.VoiceProcessPool(), got %v", got)
+		}
+		nilP.MarkDirty() // Should not panic
+
+		pDefault := New(nil, WorkerPoolConfig{})
+		if got := pDefault.VoiceProcessPool(); got != nil {
+			t.Fatalf("expected nil VoiceProcessPool by default, got %v", got)
+		}
+
+		mockSpawner := runner.NewMockDaemonSpawner()
+		voicePool := runner.NewUnifiedProcessPool(runner.PoolConfig{
+			DefaultModel: "gemini-2.5-flash",
+		}, mockSpawner)
+		defer voicePool.Close()
+
+		procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{
+			DefaultModel: "gemini-2.5-flash",
+		}, mockSpawner)
+		defer procPool.Close()
+
+		p := New(nil, WorkerPoolConfig{
+			ProcessPool:      procPool,
+			VoiceProcessPool: voicePool,
+		})
+
+		if got := p.VoiceProcessPool(); got != voicePool {
+			t.Fatalf("expected VoiceProcessPool to return %p, got %p", voicePool, got)
+		}
+
+		p.MarkDirty()
+		p.Stop()
+	})
 }
+

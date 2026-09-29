@@ -69,6 +69,7 @@ type WorkerPoolConfig struct {
 	RetryDelayOverride time.Duration
 	SessionManager     *session.Manager
 	ProcessPool        *runner.UnifiedProcessPool
+	VoiceProcessPool   *runner.UnifiedProcessPool
 	MaintenanceInterval time.Duration
 
 	// Optional hooks for testing/custom overrides
@@ -113,6 +114,7 @@ type WorkerPool struct {
 	webhookDispatcher WebhookDispatcher
 	summaryGroup      singleflight.Group
 	processPool       *runner.UnifiedProcessPool
+	voiceProcessPool  *runner.UnifiedProcessPool
 }
 
 // SummaryGroup returns the singleflight.Group coordinating thread summarizations for this pool instance.
@@ -311,6 +313,7 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 		appCfg:            appCfg,
 		cfg:               cfg,
 		processPool:       cfg.ProcessPool,
+		voiceProcessPool:  cfg.VoiceProcessPool,
 		hasCustomRunner:   hasCustomRunner,
 		sessionMgr:        sessMgr,
 		threadChs:         make(map[string]*threadWorkerState),
@@ -590,10 +593,16 @@ func (p *WorkerPool) Stop() {
 	p.StopWithTimeout(p.cfg.DrainTimeout)
 	p.mu.Lock()
 	procPool := p.processPool
+	voicePool := p.voiceProcessPool
 	p.mu.Unlock()
 	if procPool != nil {
 		if closeErr := procPool.Close(); closeErr != nil {
 			log.Printf("[WorkerPool] Warning: failed to close unified process pool: %v", closeErr)
+		}
+	}
+	if voicePool != nil {
+		if closeErr := voicePool.Close(); closeErr != nil {
+			log.Printf("[WorkerPool] Warning: failed to close voice process pool: %v", closeErr)
 		}
 	}
 	log.Printf("[WorkerPool] Queue worker pool stopped cleanly")
@@ -609,16 +618,30 @@ func (p *WorkerPool) ProcessPool() *runner.UnifiedProcessPool {
 	return p.processPool
 }
 
-// MarkDirty notifies the process pool to mark active daemons dirty and evict idle daemons.
+// VoiceProcessPool returns the configured runner.UnifiedProcessPool for voice turns, or nil if unconfigured or p is nil.
+func (p *WorkerPool) VoiceProcessPool() *runner.UnifiedProcessPool {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.voiceProcessPool
+}
+
+// MarkDirty notifies the process pools to mark active daemons dirty and evict idle daemons.
 func (p *WorkerPool) MarkDirty() {
 	if p == nil {
 		return
 	}
 	p.mu.Lock()
 	procPool := p.processPool
+	voicePool := p.voiceProcessPool
 	p.mu.Unlock()
 	if procPool != nil {
 		procPool.MarkDirty()
+	}
+	if voicePool != nil {
+		voicePool.MarkDirty()
 	}
 }
 
@@ -661,11 +684,11 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 	default:
 	}
 
-	convID := strings.TrimSpace(sessionID)
-	if convID == "" {
-		convID = uuid.New().String()
+	deviceKey := strings.TrimSpace(sessionID)
+	if deviceKey == "" {
+		return "", "", fmt.Errorf("queue: session_id is required for voice turn routing")
 	}
-	threadID := "voice-" + convID
+	threadID := "voice-" + deviceKey
 
 	// Mutual exclusion on session / threadID to prevent concurrent turn collisions
 	lockVal, _ := p.scopeLocks.LoadOrStore(threadID, &sync.Mutex{})
@@ -685,7 +708,7 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 	// Testing hook: If VoiceStreamRunnerFunc is configured and sentence callback provided, delegate directly
 	if p.cfg.VoiceStreamRunnerFunc != nil && sentenceCb != nil {
 		start := time.Now()
-		reply, conv, err := p.cfg.VoiceStreamRunnerFunc(ctx, prompt, convID, onStatus, sentenceCb)
+		reply, conv, err := p.cfg.VoiceStreamRunnerFunc(ctx, prompt, deviceKey, onStatus, sentenceCb)
 		runStatus := "success"
 		if err != nil {
 			runStatus = "error"
@@ -697,7 +720,7 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 	// Testing hook: If VoiceRunnerFunc is configured, delegate directly
 	if p.cfg.VoiceRunnerFunc != nil {
 		start := time.Now()
-		reply, conv, err := p.cfg.VoiceRunnerFunc(ctx, prompt, convID, onStatus)
+		reply, conv, err := p.cfg.VoiceRunnerFunc(ctx, prompt, deviceKey, onStatus)
 		runStatus := "success"
 		if err != nil {
 			runStatus = "error"
@@ -717,41 +740,44 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 			timeout = DefaultTimeoutMinutes
 		}
 		start := time.Now()
-		stdout, stderr, exitCode, err := p.cfg.RunnerWithOptionsFunc(ctx, p.cfg.AgyBin, prompt, convID, p.cfg.APIKey, model, runner.DefaultWatchdogOptions(timeout))
+		stdout, stderr, exitCode, err := p.cfg.RunnerWithOptionsFunc(ctx, p.cfg.AgyBin, prompt, deviceKey, p.cfg.APIKey, model, runner.DefaultWatchdogOptions(timeout))
 		runStatus := "success"
 		if err != nil || exitCode != 0 {
 			runStatus = "error"
 		}
 		metrics.RecordRunnerExecution(runStatus, model, "voice", time.Since(start))
 		if err != nil {
-			return "", convID, err
+			return "", deviceKey, err
 		}
 		if exitCode != 0 {
-			return "", convID, fmt.Errorf("runner failed with exit code %d: %s", exitCode, stderr)
+			return "", deviceKey, fmt.Errorf("runner failed with exit code %d: %s", exitCode, stderr)
 		}
 		resp, parseErr := runner.ParseAgyOutput(stdout)
 		if parseErr != nil {
-			return strings.TrimSpace(stdout), convID, nil
+			return strings.TrimSpace(stdout), deviceKey, nil
 		}
 		if resp.Response != "" {
-			return strings.TrimSpace(resp.Response), convID, nil
+			return strings.TrimSpace(resp.Response), deviceKey, nil
 		}
-		return strings.TrimSpace(stdout), convID, nil
+		return strings.TrimSpace(stdout), deviceKey, nil
 	}
 
 	p.mu.Lock()
-	procPool := p.processPool
+	procPool := p.voiceProcessPool
+	if procPool == nil {
+		procPool = p.processPool
+	}
 	p.mu.Unlock()
 	if procPool == nil {
-		return "", convID, fmt.Errorf("voice daemon pool unavailable")
+		return "", deviceKey, fmt.Errorf("voice daemon pool unavailable")
 	}
 
 	model := p.LowEffortModel()
 	start := time.Now()
-	daemon, dErr := procPool.GetOrCreate(ctx, threadID)
+	daemon, dErr := procPool.GetOrCreate(ctx, deviceKey)
 	if dErr != nil {
 		metrics.RecordRunnerExecution("error", model, "voice", time.Since(start))
-		return "", convID, fmt.Errorf("failed to acquire voice daemon: %w", dErr)
+		return "", deviceKey, fmt.Errorf("failed to acquire voice daemon: %w", dErr)
 	}
 
 	var detector *SentenceDetector
@@ -775,16 +801,20 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 
 	if sendErr := daemon.Send(prompt, turnCtx); sendErr != nil {
 		metrics.RecordRunnerExecution("error", model, "voice", time.Since(start))
-		return "", convID, fmt.Errorf("failed sending turn to voice daemon: %w", sendErr)
+		return "", deviceKey, fmt.Errorf("failed sending turn to voice daemon: %w", sendErr)
 	}
 
 	select {
 	case <-ctx.Done():
 		metrics.RecordRunnerExecution("error", model, "voice", time.Since(start))
-		return "", convID, ctx.Err()
+		return "", deviceKey, ctx.Err()
 	case err := <-sink.errCh:
 		metrics.RecordRunnerExecution("error", model, "voice", time.Since(start))
-		return "", daemon.SessionID(), err
+		activeSession := daemon.SessionID()
+		if activeSession == "" {
+			activeSession = deviceKey
+		}
+		return "", activeSession, err
 	case turnRes := <-sink.resCh:
 		runStatus := "success"
 		if turnRes != nil && turnRes.ExitCode != 0 {
@@ -793,7 +823,7 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 		metrics.RecordRunnerExecution(runStatus, model, "voice", time.Since(start))
 		activeSession := daemon.SessionID()
 		if activeSession == "" {
-			activeSession = convID
+			activeSession = deviceKey
 		}
 		if turnRes != nil && turnRes.Usage.TotalTokens > 0 {
 			metrics.RecordTokens(model, "voice", turnRes.Usage.InputTokens, turnRes.Usage.OutputTokens, turnRes.Usage.ThinkingTokens, turnRes.Usage.CacheReadTokens, turnRes.Usage.TotalTokens)

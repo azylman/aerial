@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +21,7 @@ type PoolConfig struct {
 	TargetModels     map[string]string
 	AgyBin           string
 	Cwd              string
+	GeminiHomeDir    string
 	Env              []string
 	MaxIdle          time.Duration
 }
@@ -106,12 +109,25 @@ func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string) 
 			}
 		}
 
+		daemonEnv := p.cfg.Env
+		if home := strings.TrimSpace(p.cfg.GeminiHomeDir); home != "" {
+			geminiDir := filepath.Join(home, ".gemini")
+			if err := os.MkdirAll(geminiDir, 0755); err != nil {
+				return nil, fmt.Errorf("failed to create runtime home directory %q: %w", geminiDir, err)
+			}
+			daemonEnv = BuildAgyEnv(AgyEnvInput{
+				BaseEnv:  p.cfg.Env,
+				HomeDir:  home,
+				TargetID: targetKey,
+			})
+		}
+
 		daemonCfg := DaemonConfig{
 			ThreadID: targetKey,
 			Model:    targetModel,
 			AgyBin:   p.cfg.AgyBin,
 			Cwd:      p.cfg.Cwd,
-			Env:      p.cfg.Env,
+			Env:      daemonEnv,
 		}
 
 		daemon, spawnErr := StartStreamingDaemon(ctx, daemonCfg, p.spawner)
