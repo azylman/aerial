@@ -1283,7 +1283,7 @@ func main() {
 
 	cfg, err := config.New()
 	if err != nil {
-		log.Printf("Warning: initial LoadConfig error: %v", err)
+		log.Fatalf("Fatal: failed to load configuration: %v", err)
 	}
 
 	cur := cfg.Current()
