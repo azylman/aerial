@@ -4,7 +4,7 @@
 
 **Goal:** Eliminate turn latency and stale skills by optimistically recycling and re-warming idle daemons at `MarkDirty()` time and rotating busy daemons immediately upon turn completion.
 
-**Architecture:** Extend `UnifiedProcessPool.MarkDirty()` to immediately evict idle daemons and asynchronously re-warm `PrewarmedTargets` (`kiosk`, `ephemeral:classifier`, `ephemeral:summarizer`) in the background. For in-flight daemons, preserve active execution, mark `dirty = true`, and hook turn completion to rotate the instant the turn finishes. Guard `GetOrCreate` against returning dirty daemons.
+**Architecture:** Extend `UnifiedProcessPool.MarkDirty()` to immediately evict idle daemons and asynchronously re-warm `PrewarmedTargets` (`kiosk`, `ephemeral:classifier`, `ephemeral:summarizer`) in the background. For in-flight daemons, preserve active execution, mark `dirty = true`, and hook turn completion to rotate the instant the turn finishes. Guard `GetOrCreate` against returning dirty daemons. Track background goroutines with `p.bgWg` and bind lifecycles to `p.ctx` to prevent zombie processes.
 
 **Tech Stack:** Go standard library (`sync`, `time`, `os`, `context`).
 
@@ -31,8 +31,8 @@
 - Test: `brain/pkg/runner/unified_pool_test.go`
 
 **Interfaces:**
-- Consumes: `d.IsDirty()`, `d.InflightCount()`, `d.State()`.
-- Produces: `d.onTurnFinished` callback in `StreamingDaemon`; `ShouldRotate` recognizing dirty state.
+- Consumes: `d.IsDirty()`, `d.InflightCount()`, `d.State()`, `p.ctx`.
+- Produces: `d.onTurnFinished` callback in `StreamingDaemon`; `ShouldRotate` recognizing dirty state; safe asynchronous rotation on turn completion.
 
 - [ ] **Step 1: Write failing unit test for ShouldRotate dirty detection and onTurnFinished hook**
   - In `brain/pkg/runner/unified_pool_test.go`:
@@ -47,13 +47,30 @@
 - [ ] **Step 3: Implement onTurnFinished in StreamingDaemon and dirty check in ShouldRotate**
   - In `brain/pkg/runner/streaming_daemon.go`:
     - Add `onTurnFinished func(d *StreamingDaemon)` field to `StreamingDaemon`.
-    - Add `SetOnTurnFinished(fn func(d *StreamingDaemon))` setter under mutex protection.
+    - Add `SetOnTurnFinished(fn func(d *StreamingDaemon))` setter under `d.mu` mutex protection.
     - In `readLoop()` when processing `"result"` event: if `!hasMoreInflight`, retrieve `onTurnFinished` and invoke it in a non-blocking goroutine if non-nil.
   - In `brain/pkg/runner/unified_pool.go`:
+    - Add `bgWg sync.WaitGroup` to `UnifiedProcessPool`.
     - In `ShouldRotate(d)`:
       - Add check: `if d.IsDirty() { return true, "daemon marked dirty during in-flight turn" }` immediately after `d.InflightCount() > 0` check.
     - In `GetOrCreate()` singleflight creation:
-      - Set `daemon.SetOnTurnFinished` to evaluate `p.ShouldRotate(d)`: if true and targetKey is tracked, trigger asynchronous background rotation via `p.RotateDaemon(rotCtx, targetKey, "")` and pre-warm if in `p.cfg.PrewarmedTargets`.
+      - Set `daemon.SetOnTurnFinished(func(d *StreamingDaemon) { ... })`:
+        - Under `p.mu.RLock()`: check if `p.closed`. If closed, return.
+        - Evaluate `p.ShouldRotate(d)`. If true and targetKey is tracked:
+          - Increment `p.bgWg.Add(1)`.
+          - Launch background goroutine:
+            ```go
+            go func(tKey string) {
+                defer p.bgWg.Done()
+                rotCtx, cancel := context.WithTimeout(p.ctx, 15*time.Second)
+                defer cancel()
+                if _, rotErr := p.RotateDaemon(rotCtx, tKey, ""); rotErr != nil {
+                    if !errors.Is(rotErr, context.Canceled) {
+                        log.Printf("[UnifiedProcessPool] Warning: rotation failed on turn completion for %q: %v", tKey, rotErr)
+                    }
+                }
+            }(targetKey)
+            ```
 
 - [ ] **Step 4: Run tests to verify GREEN pass and statement coverage >= 95.0%**
   - Run: `go test -C brain -v -cover ./pkg/runner`
@@ -72,8 +89,8 @@
 - Test: `brain/pkg/runner/unified_pool_test.go`
 
 **Interfaces:**
-- Consumes: `p.cfg.PrewarmedTargets`, `d.InflightCount()`, `d.IsDirty()`.
-- Produces: Optimistic background rotation of idle daemons at `MarkDirty()` call; clean rejection of dirty daemons in `GetOrCreate()`.
+- Consumes: `p.cfg.PrewarmedTargets`, `d.InflightCount()`, `d.IsDirty()`, `p.ctx`, `p.bgWg`.
+- Produces: Optimistic background rotation of idle daemons at `MarkDirty()` call; duplicate pre-warming suppression; clean rejection of dirty daemons in `GetOrCreate()`.
 
 - [ ] **Step 1: Write failing unit tests for optimistic MarkDirty and GetOrCreate dirty guard**
   - In `brain/pkg/runner/unified_pool_test.go`:
@@ -81,6 +98,7 @@
       - Subtest 1: Idle pre-warmed daemon (`kiosk`) is immediately evicted and asynchronously replaced with a fresh daemon upon `MarkDirty()`.
       - Subtest 2: Idle non-prewarmed daemon is evicted and closed upon `MarkDirty()`.
       - Subtest 3: In-flight daemon (`InflightCount() > 0`) is not closed mid-flight, marked dirty, and rotated upon turn completion.
+      - Subtest 4: Rapid successive `MarkDirty()` calls do not launch duplicate concurrent pre-warming goroutines for the same target.
     - Add `TestUnifiedProcessPool_GetOrCreate_RejectsDirtyDaemon`:
       - Verify that if a dirty daemon is in `p.daemons` with 0 in-flight turns, `GetOrCreate` evicts it, closes it, and spawns a fresh daemon rather than returning the dirty instance.
 
@@ -90,39 +108,84 @@
 
 - [ ] **Step 3: Implement optimistic rotation in MarkDirty and dirty guard in GetOrCreate**
   - In `brain/pkg/runner/unified_pool.go`:
+    - Add `prewarming map[string]bool` to `UnifiedProcessPool` (initialized in `NewUnifiedProcessPool`).
     - Overhaul `MarkDirty()`:
       - Lock `p.mu`.
       - If `p.closed`, unlock and return.
-      - Create slices: `toClose []*StreamingDaemon`, `toPrewarm []string`.
+      - Create maps/slices:
+        ```go
+        type evictedEntry struct {
+            targetKey string
+            daemon    *StreamingDaemon
+        }
+        var toClose []evictedEntry
+        var toPrewarm []string
+        ```
       - Pre-warmed targets set lookup map from `p.cfg.PrewarmedTargets`.
       - Iterate over `p.daemons`:
         - If `d == nil`: continue.
         - If `d.InflightCount() == 0`:
           - Evict from map: `delete(p.daemons, target)`.
-          - Append `d` to `toClose`.
-          - If `prewarmedSet[target]`: append `target` to `toPrewarm`.
+          - Append to `toClose`: `evictedEntry{targetKey: target, daemon: d}`.
+          - If `prewarmedSet[target]` and `!p.prewarming[target]`:
+            - `p.prewarming[target] = true`
+            - `toPrewarm = append(toPrewarm, target)`
         - Else:
           - Daemon has in-flight turns: call `d.MarkDirty()`.
       - Unlock `p.mu`.
-      - For each `daemon` in `toClose`:
-        - Close asynchronously: `go func(d *StreamingDaemon) { _ = d.Close() }(daemon)`.
+      - For each `entry` in `toClose`:
+        - Increment `p.bgWg.Add(1)`.
+        - Close asynchronously with structured error logging (strictly zero swallowed errors):
+          ```go
+          go func(e evictedEntry) {
+              defer p.bgWg.Done()
+              if closeErr := e.daemon.Close(); closeErr != nil {
+                  log.Printf("[UnifiedProcessPool] Warning: error closing evicted daemon %q: %v", e.targetKey, closeErr)
+              }
+          }(entry)
+          ```
       - For each `target` in `toPrewarm`:
-        - Re-warm asynchronously:
+        - Increment `p.bgWg.Add(1)`.
+        - Re-warm asynchronously using `p.ctx` (15s timeout):
           ```go
           go func(tKey string) {
-              initCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+              defer p.bgWg.Done()
+              defer func() {
+                  p.mu.Lock()
+                  delete(p.prewarming, tKey)
+                  p.mu.Unlock()
+              }()
+              initCtx, cancel := context.WithTimeout(p.ctx, 15*time.Second)
               defer cancel()
               if _, err := p.GetOrCreate(initCtx, tKey); err != nil {
-                  log.Printf("[UnifiedProcessPool] Warning: re-warming prewarmed target %q failed: %v", tKey, err)
+                  if !errors.Is(err, context.Canceled) {
+                      log.Printf("[UnifiedProcessPool] Warning: re-warming prewarmed target %q failed: %v", tKey, err)
+                  }
               }
           }(target)
           ```
+    - In `Close()`:
+      - When `p.closeOnce.Do` executes:
+        - `p.cancel()` cancels `p.ctx`, immediately halting pending pre-warmings.
+        - Await `p.bgWg.Wait()` to ensure all background routines finish cleanly before tearing down daemons.
     - In `GetOrCreate()`:
       - Fast-path: `if d, exists := p.daemons[targetKey]; exists && d != nil && d.State() != StateClosed && !d.IsDirty()`
       - In singleflight closure:
         - If `d, exists := p.daemons[targetKey]; exists && d != nil`:
           - If `d.State() != StateClosed && !d.IsDirty()`: return `d`.
-          - Else: delete `targetKey` from `p.daemons`, asynchronously close `d`, and proceed to spawn a fresh daemon.
+          - Else:
+            - Delete `targetKey` from `p.daemons`.
+            - Asynchronously close `d` with logging:
+              ```go
+              p.bgWg.Add(1)
+              go func(oldD *StreamingDaemon, tKey string) {
+                  defer p.bgWg.Done()
+                  if closeErr := oldD.Close(); closeErr != nil {
+                      log.Printf("[UnifiedProcessPool] Warning: error closing dirty daemon %q: %v", tKey, closeErr)
+                  }
+              }(d, targetKey)
+              ```
+            - Proceed to spawn a fresh daemon.
 
 - [ ] **Step 4: Run tests to verify GREEN pass and statement coverage >= 95.0%**
   - Run: `go test -C brain -v -cover ./pkg/runner`
@@ -139,7 +202,7 @@
 **Files:**
 - Verify across: `brain/pkg/runner`, `brain/pkg/queue`, `brain/pkg/env`.
 
-- [ ] **Step 1: Run race detection and unit test verification across modified packages**
+- [ ] **Step 1: Run unit tests across modified packages**
   - Run: `go test -C brain -v ./pkg/runner ./pkg/queue ./pkg/env`
   - Expected: PASS with 0 failures.
 
