@@ -6,6 +6,15 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+)
+
+var (
+	skillsMu        sync.Mutex
+	symlinkSkill    = os.Symlink
+	renameSkill     = os.Rename
+	removeSkill     = os.Remove
+	removeAllSkills = os.RemoveAll
 )
 
 // SyncSkills symlinks target-partitioned skills into:
@@ -21,7 +30,7 @@ func (p *Provisioner) SyncSkills() error {
 	legacySkillsDir := filepath.Join(p.homeDir, ".gemini", "skills")
 	if fi, err := os.Lstat(legacySkillsDir); err == nil {
 		if fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 {
-			if rmErr := os.RemoveAll(legacySkillsDir); rmErr != nil {
+			if rmErr := removeAllSkills(legacySkillsDir); rmErr != nil {
 				log.Printf("[Skills] Warning removing legacy skills directory %s: %v", legacySkillsDir, rmErr)
 			}
 		}
@@ -31,7 +40,7 @@ func (p *Provisioner) SyncSkills() error {
 	legacyPluginDir := filepath.Join(p.homeDir, ".gemini", "config", "plugins", "superpowers")
 	if fi, err := os.Lstat(legacyPluginDir); err == nil {
 		if fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 {
-			if rmErr := os.RemoveAll(legacyPluginDir); rmErr != nil {
+			if rmErr := removeAllSkills(legacyPluginDir); rmErr != nil {
 				log.Printf("[Skills] Warning removing legacy plugin directory %s: %v", legacyPluginDir, rmErr)
 			}
 		}
@@ -154,14 +163,14 @@ func reconcileTargetSkills(targetDir string, allowedSkills map[string]string) in
 		for _, entry := range entries {
 			name := entry.Name()
 			if strings.HasSuffix(name, ".tmp") {
-				if rmErr := os.Remove(filepath.Join(targetDir, name)); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
+				if rmErr := removeSkill(filepath.Join(targetDir, name)); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
 					log.Printf("[Skills] Warning removing stale temp skill %s: %v", filepath.Join(targetDir, name), rmErr)
 				}
 				continue
 			}
 			if _, ok := allowedSkills[name]; !ok {
 				entryPath := filepath.Join(targetDir, name)
-				if err := os.Remove(entryPath); err != nil && !os.IsNotExist(err) {
+				if err := removeSkill(entryPath); err != nil && !os.IsNotExist(err) {
 					log.Printf("[Skills] Warning: failed removing unauthorized skill %s: %v", entryPath, err)
 				} else {
 					log.Printf("[Skills] Pruned unauthorized skill %s from %s", name, targetDir)
@@ -174,26 +183,26 @@ func reconcileTargetSkills(targetDir string, allowedSkills map[string]string) in
 	for skillName, srcPath := range allowedSkills {
 		destPath := filepath.Join(targetDir, skillName)
 		tmpDest := destPath + ".tmp"
-		if rmErr := os.Remove(tmpDest); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
+		if rmErr := removeSkill(tmpDest); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
 			log.Printf("[Skills] Warning removing stale temp skill %s: %v", tmpDest, rmErr)
 		}
 
-		if err := os.Symlink(srcPath, tmpDest); err != nil {
+		if err := symlinkSkill(srcPath, tmpDest); err != nil {
 			// Fallback: remove dest and symlink directly
-			if err := os.Remove(destPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			if err := removeSkill(destPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 				log.Printf("[Skills] Warning removing existing destination skill %s: %v", destPath, err)
 			}
-			if err := os.Symlink(srcPath, destPath); err != nil {
+			if err := symlinkSkill(srcPath, destPath); err != nil {
 				log.Printf("[Skills] Warning: failed to symlink skill %s -> %s: %v", srcPath, destPath, err)
 			} else {
 				installedCount++
 			}
 		} else {
-			if err := os.Rename(tmpDest, destPath); err != nil {
-				if err := os.Remove(destPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			if err := renameSkill(tmpDest, destPath); err != nil {
+				if err := removeSkill(destPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 					log.Printf("[Skills] Warning removing destination skill %s prior to rename: %v", destPath, err)
 				}
-				if err := os.Rename(tmpDest, destPath); err != nil {
+				if err := renameSkill(tmpDest, destPath); err != nil {
 					log.Printf("[Skills] Warning renaming %s -> %s: %v", tmpDest, destPath, err)
 				} else {
 					installedCount++
@@ -243,24 +252,24 @@ func LinkSkills(targetSkillDirs, sourceDirs []string) int {
 			for _, targetDir := range targetSkillDirs {
 				destPath := filepath.Join(targetDir, skillName)
 				tmpDest := destPath + ".tmp"
-				if err := os.Remove(tmpDest); err != nil && !errors.Is(err, os.ErrNotExist) {
+				if err := removeSkill(tmpDest); err != nil && !errors.Is(err, os.ErrNotExist) {
 					log.Printf("[Skills] Warning removing stale temp skill %s: %v", tmpDest, err)
 				}
-				if err := os.Symlink(srcPath, tmpDest); err != nil {
-					if err := os.Remove(destPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+				if err := symlinkSkill(srcPath, tmpDest); err != nil {
+					if err := removeSkill(destPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 						log.Printf("[Skills] Warning removing existing destination skill %s: %v", destPath, err)
 					}
-					if err := os.Symlink(srcPath, destPath); err != nil {
+					if err := symlinkSkill(srcPath, destPath); err != nil {
 						log.Printf("Warning: failed to symlink skill %s -> %s: %v", srcPath, destPath, err)
 					} else {
 						installedCount++
 					}
 				} else {
-					if err := os.Rename(tmpDest, destPath); err != nil {
-						if err := os.Remove(destPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+					if err := renameSkill(tmpDest, destPath); err != nil {
+						if err := removeSkill(destPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 							log.Printf("[Skills] Warning removing destination skill %s prior to rename: %v", destPath, err)
 						}
-						if err := os.Rename(tmpDest, destPath); err != nil {
+						if err := renameSkill(tmpDest, destPath); err != nil {
 							log.Printf("[Skills] Warning renaming %s -> %s: %v", tmpDest, destPath, err)
 						}
 					}
@@ -286,7 +295,7 @@ func sweepOrphanedSymlinks(targetSkillDirs []string) {
 			}
 			if fi.Mode()&os.ModeSymlink != 0 {
 				if _, err := os.Stat(linkPath); os.IsNotExist(err) {
-					if err := os.Remove(linkPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+					if err := removeSkill(linkPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 						log.Printf("[Skills] Warning removing orphaned symlink %s: %v", linkPath, err)
 					}
 				}

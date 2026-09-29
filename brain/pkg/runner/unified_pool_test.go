@@ -24,10 +24,10 @@ func TestUnifiedProcessPool_SingleflightPrewarming(t *testing.T) {
 			errR, _ := io.Pipe()
 
 			go func() {
-				defer outW.Close()
 				_, _ = outW.Write([]byte(`{"event":"init","session_id":"00000000-0000-0000-0000-000000000010"}` + "\n"))
+				_, _ = io.ReadAll(inR)
+				_ = outW.Close()
 			}()
-			_ = inR.Close()
 
 			return inW, outR, errR, &MockProcessHandle{pid: 100}, nil
 		},

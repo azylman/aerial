@@ -1583,6 +1583,9 @@ func TestDiscoverRuleFiles_NotADirectory(t *testing.T) {
 }
 
 func TestLinkSkills_DestinationCollision(t *testing.T) {
+	skillsMu.Lock()
+	defer skillsMu.Unlock()
+
 	targetDir := t.TempDir()
 	srcDir := t.TempDir()
 	skillDir := filepath.Join(srcDir, "my-skill")
@@ -1595,6 +1598,38 @@ func TestLinkSkills_DestinationCollision(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(destPath, "nested", "file"), []byte("data"), 0644)
 
 	LinkSkills([]string{targetDir}, []string{srcDir})
+
+	// Test symlink fallback and rename fallback branches in LinkSkills
+	origSymlink := symlinkSkill
+	origRename := renameSkill
+	defer func() {
+		symlinkSkill = origSymlink
+		renameSkill = origRename
+	}()
+
+	// 1. Fallback symlink in LinkSkills
+	symlinkSkill = func(oldname, newname string) error {
+		if strings.HasSuffix(newname, ".tmp") {
+			return errors.New("simulated tmp symlink error")
+		}
+		return origSymlink(oldname, newname)
+	}
+	LinkSkills([]string{t.TempDir()}, []string{srcDir})
+
+	// 2. Retry rename in LinkSkills
+	symlinkSkill = origSymlink
+	tries := 0
+	renameSkill = func(oldname, newname string) error {
+		tries++
+		if tries == 1 {
+			return errors.New("simulated initial rename error")
+		}
+		return origRename(oldname, newname)
+	}
+	LinkSkills([]string{t.TempDir()}, []string{srcDir})
+
+	symlinkSkill = origSymlink
+	renameSkill = origRename
 }
 
 func TestSync_AdditionalErrorBranches(t *testing.T) {
@@ -1624,6 +1659,9 @@ func TestSync_AdditionalErrorBranches(t *testing.T) {
 }
 
 func TestSweepOrphanedSymlinks_Coverage(t *testing.T) {
+	skillsMu.Lock()
+	defer skillsMu.Unlock()
+
 	tmpDir := t.TempDir()
 	targetDir := filepath.Join(tmpDir, "skills")
 	_ = os.MkdirAll(targetDir, 0755)
@@ -1633,6 +1671,18 @@ func TestSweepOrphanedSymlinks_Coverage(t *testing.T) {
 
 	// Non-existent directory handling
 	sweepOrphanedSymlinks([]string{filepath.Join(tmpDir, "nonexistent"), targetDir})
+
+	// Orphaned symlink with removeSkill error
+	orphanedPath := filepath.Join(targetDir, "broken-link")
+	_ = symlinkSkill(filepath.Join(tmpDir, "nonexistent-target"), orphanedPath)
+
+	origRemove := removeSkill
+	defer func() { removeSkill = origRemove }()
+	removeSkill = func(name string) error {
+		return errors.New("simulated remove error")
+	}
+	sweepOrphanedSymlinks([]string{targetDir})
+	removeSkill = origRemove
 }
 
 func TestAtomicSwapRulesDir_RollbackAndErrors_Extended(t *testing.T) {
@@ -2023,8 +2073,6 @@ func TestSyncMCP_DualRuntimeEmission(t *testing.T) {
 }
 
 func TestLinkTargetSkills_PartitioningAndPruning(t *testing.T) {
-	t.Parallel()
-
 	tmpHome := t.TempDir()
 	tmpData := t.TempDir()
 	tmpCustom := t.TempDir()
@@ -2033,6 +2081,7 @@ func TestLinkTargetSkills_PartitioningAndPruning(t *testing.T) {
 	p := New(tmpHome, tmpData)
 	p.SetCustomSkillsDir(tmpCustom)
 	p.SetSuperpowersDir(tmpSuperpowers)
+	p.SetAgentsSkillsDir(t.TempDir())
 
 	// Create categorized custom skills
 	// common/skill-common
@@ -2121,6 +2170,8 @@ func TestSyncSkills_DualRuntimes(t *testing.T) {
 
 	p := New(tmpHome, tmpData)
 	p.SetCustomSkillsDir(tmpCustom)
+	p.SetAgentsSkillsDir(t.TempDir())
+	p.SetSuperpowersDir(t.TempDir())
 
 	// Create common and discord skills
 	_ = os.MkdirAll(filepath.Join(tmpCustom, "common", "c-skill"), 0755)
@@ -2165,7 +2216,8 @@ func TestSyncSkills_DualRuntimes(t *testing.T) {
 }
 
 func TestSkills_TargetBranchesAndCoverage(t *testing.T) {
-	t.Parallel()
+	skillsMu.Lock()
+	defer skillsMu.Unlock()
 
 	var nilP *Provisioner
 	if count := nilP.LinkTargetSkills("dir", TargetDiscord); count != 0 {
@@ -2173,6 +2225,8 @@ func TestSkills_TargetBranchesAndCoverage(t *testing.T) {
 	}
 
 	p := New(t.TempDir(), t.TempDir())
+	p.SetAgentsSkillsDir(t.TempDir())
+	p.SetSuperpowersDir(t.TempDir())
 	if count := p.LinkTargetSkills("", TargetDiscord); count != 0 {
 		t.Errorf("expected 0 for empty targetDir, got %d", count)
 	}
@@ -2206,21 +2260,73 @@ func TestSkills_TargetBranchesAndCoverage(t *testing.T) {
 		t.Errorf("expected stale.tmp to be pruned")
 	}
 
-	// Test fallback when symlink to tmpDest fails
-	// If tmpDest is a non-empty directory, os.Symlink(src, tmpDest) fails
-	tmpBlockTarget := t.TempDir()
-	destTmp := filepath.Join(tmpBlockTarget, "rename-skill.tmp")
-	_ = os.MkdirAll(filepath.Join(destTmp, "sub"), 0755)
-	countSymlinkFallback := p.LinkTargetSkills(tmpBlockTarget, TargetDiscord)
+	// Test fallback when symlink to tmpDest fails, but fallback symlink to destPath succeeds
+	origSymlink := symlinkSkill
+	origRename := renameSkill
+	origRemove := removeSkill
+	defer func() {
+		symlinkSkill = origSymlink
+		renameSkill = origRename
+		removeSkill = origRemove
+	}()
+
+	mockTarget := t.TempDir()
+	symlinkSkill = func(oldname, newname string) error {
+		if strings.HasSuffix(newname, ".tmp") {
+			return errors.New("simulated tmp symlink error")
+		}
+		return origSymlink(oldname, newname)
+	}
+	countSymlinkFallback := p.LinkTargetSkills(mockTarget, TargetDiscord)
 	if countSymlinkFallback != 1 {
 		t.Errorf("expected 1 from symlink fallback, got %d", countSymlinkFallback)
 	}
 
 	// Test when both symlinks fail
-	bothBlockTarget := t.TempDir()
-	_ = os.MkdirAll(filepath.Join(bothBlockTarget, "rename-skill.tmp", "sub"), 0755)
-	_ = os.MkdirAll(filepath.Join(bothBlockTarget, "rename-skill", "sub"), 0755)
-	_ = p.LinkTargetSkills(bothBlockTarget, TargetDiscord)
+	symlinkSkill = func(oldname, newname string) error {
+		return errors.New("simulated total symlink error")
+	}
+	countBothSymlinkFail := p.LinkTargetSkills(t.TempDir(), TargetDiscord)
+	if countBothSymlinkFail != 0 {
+		t.Errorf("expected 0 when both symlinks fail, got %d", countBothSymlinkFail)
+	}
+
+	// Test rename retry fallback: first rename fails (exercising remove destPath), second rename succeeds
+	symlinkSkill = origSymlink
+	renameTries := 0
+	renameSkill = func(oldname, newname string) error {
+		renameTries++
+		if renameTries == 1 {
+			return errors.New("simulated initial rename error")
+		}
+		return origRename(oldname, newname)
+	}
+	countRenameRetry := p.LinkTargetSkills(t.TempDir(), TargetDiscord)
+	if countRenameRetry != 1 {
+		t.Errorf("expected 1 from rename retry fallback, got %d", countRenameRetry)
+	}
+
+	// Test rename total fail
+	renameSkill = func(oldname, newname string) error {
+		return errors.New("simulated total rename error")
+	}
+	countRenameFail := p.LinkTargetSkills(t.TempDir(), TargetDiscord)
+	if countRenameFail != 0 {
+		t.Errorf("expected 0 from total rename fail, got %d", countRenameFail)
+	}
+
+	// Test pruning error branches in reconcileTargetSkills
+	pruneTarget := t.TempDir()
+	_ = os.WriteFile(filepath.Join(pruneTarget, "stale.tmp"), []byte("stale"), 0644)
+	_ = os.WriteFile(filepath.Join(pruneTarget, "unauthorized-skill"), []byte("unauth"), 0644)
+	removeSkill = func(name string) error {
+		return errors.New("simulated prune remove error")
+	}
+	_ = p.LinkTargetSkills(pruneTarget, TargetDiscord)
+	removeSkill = origRemove
+
+	symlinkSkill = origSymlink
+	renameSkill = origRename
 
 	// Exercise SKILL.md is a directory, duplicate skills, and superpowers edge cases
 	agentsDir := t.TempDir()
@@ -2274,6 +2380,53 @@ func TestSyncMCP_ErrorBranches(t *testing.T) {
 	pVoiceErr := New(tmpHome3, tmpData3)
 	if err := pVoiceErr.SyncMCP(context.Background(), cfg); err == nil {
 		t.Errorf("expected error when voice runtime write fails")
+	}
+}
+
+func TestNew_OptSuperpowersSkills(t *testing.T) {
+	origStat := statOptSkills
+	defer func() { statOptSkills = origStat }()
+
+	mockDir := t.TempDir()
+	statOptSkills = func(name string) (os.FileInfo, error) {
+		if name == "/opt/skills" {
+			return nil, os.ErrNotExist
+		}
+		if name == "/opt/superpowers/skills" {
+			return os.Stat(mockDir)
+		}
+		return origStat(name)
+	}
+
+	p := New(t.TempDir(), t.TempDir())
+	if p.superpowersDir != "/opt/superpowers/skills" {
+		t.Errorf("expected superpowersDir to be /opt/superpowers/skills, got %s", p.superpowersDir)
+	}
+}
+
+func TestSyncSkills_LegacyCleanupErrors(t *testing.T) {
+	skillsMu.Lock()
+	defer skillsMu.Unlock()
+
+	homeDir := t.TempDir()
+	p := New(homeDir, t.TempDir())
+	p.SetAgentsSkillsDir(t.TempDir())
+	p.SetSuperpowersDir(t.TempDir())
+
+	// Create legacy dirs
+	legacySkillsDir := filepath.Join(homeDir, ".gemini", "skills")
+	_ = os.MkdirAll(legacySkillsDir, 0755)
+	legacyPluginDir := filepath.Join(homeDir, ".gemini", "config", "plugins", "superpowers")
+	_ = os.MkdirAll(legacyPluginDir, 0755)
+
+	origRemoveAll := removeAllSkills
+	defer func() { removeAllSkills = origRemoveAll }()
+	removeAllSkills = func(path string) error {
+		return errors.New("simulated removeAll error")
+	}
+
+	if err := p.SyncSkills(); err != nil {
+		t.Errorf("expected SyncSkills to handle removeAll errors gracefully, got: %v", err)
 	}
 }
 
