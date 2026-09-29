@@ -355,24 +355,25 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 
 	var lastAlertMu sync.Mutex
 	var lastClassifierAlertTime time.Time
+	var lastSystemAlertTime time.Time
 
 	if p.cfg.Classifier != nil && p.cfg.Classifier.OnParseError == nil {
 		p.cfg.Classifier.OnParseError = func(model, raw string, parseErr error) {
+			lastAlertMu.Lock()
+			if !lastClassifierAlertTime.IsZero() && time.Since(lastClassifierAlertTime) < 15*time.Second {
+				lastAlertMu.Unlock()
+				log.Printf("[WorkerPool] Debouncing rapid classifier JSON parse alert to prevent system channel flooding: %v", parseErr)
+				return
+			}
+			lastClassifierAlertTime = time.Now()
+			lastAlertMu.Unlock()
+
 			go func(model, raw string, parseErr error) {
 				defer func() {
 					if r := recover(); r != nil {
 						log.Printf("[WorkerPool] Panic in classifier OnParseError alert handler: %v", r)
 					}
 				}()
-
-				lastAlertMu.Lock()
-				if !lastClassifierAlertTime.IsZero() && time.Since(lastClassifierAlertTime) < 15*time.Second {
-					lastAlertMu.Unlock()
-					log.Printf("[WorkerPool] Debouncing rapid classifier JSON parse alert to prevent system channel flooding: %v", parseErr)
-					return
-				}
-				lastClassifierAlertTime = time.Now()
-				lastAlertMu.Unlock()
 
 				sess := p.getDiscordSession()
 				if sess == nil {
@@ -405,6 +406,48 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 					log.Printf("[WorkerPool] Warning: failed to send JSON parse error alert to system channel %q: %v", sysChan, err)
 				}
 			}(model, raw, parseErr)
+		}
+	}
+
+	if p.cfg.Classifier != nil && p.cfg.Classifier.OnSystemAlert == nil {
+		p.cfg.Classifier.OnSystemAlert = func(endpoint string, endpointErr error) {
+			lastAlertMu.Lock()
+			if !lastSystemAlertTime.IsZero() && time.Since(lastSystemAlertTime) < 15*time.Second {
+				lastAlertMu.Unlock()
+				log.Printf("[WorkerPool] Debouncing rapid classifier endpoint alert to prevent system channel flooding: %v", endpointErr)
+				return
+			}
+			lastSystemAlertTime = time.Now()
+			lastAlertMu.Unlock()
+
+			go func(endpoint string, endpointErr error) {
+				defer func() {
+					if r := recover(); r != nil {
+						log.Printf("[WorkerPool] Panic in classifier OnSystemAlert alert handler: %v", r)
+					}
+				}()
+
+				sess := p.getDiscordSession()
+				if sess == nil {
+					return
+				}
+				sysChan := ""
+				if p.appCfg != nil {
+					if cur := p.appCfg.Current(); cur != nil {
+						sysChan = cur.SystemChannel
+					}
+				}
+				if sysChan == "" {
+					sysChan = config.DefaultConfigData().SystemChannel
+				}
+
+				alertMsg := fmt.Sprintf("**Endpoint**: `%s`\n**Status**: Failed after 3 retry attempts with exponential backoff (failing closed to strict mention-only mode).\n**Error Trace**:\n```\n%v\n```",
+					endpoint, endpointErr)
+				sanitizedAlert := sanitizeErrorText(alertMsg)
+				if err := p.cfg.SystemAlertFunc(sess, sysChan, "Classifier Endpoint Failure", sanitizedAlert); err != nil {
+					log.Printf("[WorkerPool] Warning: failed to send classifier endpoint alert to system channel %q: %v", sysChan, err)
+				}
+			}(endpoint, endpointErr)
 		}
 	}
 

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -39,6 +40,15 @@ var defaultOllamaHTTPClient = &http.Client{
 	},
 }
 
+var defaultSystemOneHTTPClient = &http.Client{
+	Timeout: 4 * time.Second,
+	Transport: &http.Transport{
+		MaxIdleConns:        20,
+		MaxIdleConnsPerHost: 10,
+		IdleConnTimeout:     90 * time.Second,
+	},
+}
+
 type ollamaGenerateRequest struct {
 	Model  string `json:"model"`
 	Prompt string `json:"prompt"`
@@ -56,6 +66,29 @@ type ollamaGenerateResponse struct {
 	PromptEvalDuration int64  `json:"prompt_eval_duration,omitempty"`
 	EvalCount          int    `json:"eval_count,omitempty"`
 	EvalDuration       int64  `json:"eval_duration,omitempty"`
+}
+
+type systemOneQuestion struct {
+	Type         string `json:"type"`
+	Instructions string `json:"instructions"`
+}
+
+type systemOneRequest struct {
+	State     string                       `json:"state"`
+	Questions map[string]systemOneQuestion `json:"questions"`
+}
+
+type systemOneAnswer struct {
+	Type             string   `json:"type"`
+	Noul             *float64 `json:"noul,omitempty"`
+	Confidence       float64  `json:"confidence,omitempty"`
+	AnswerConfidence float64  `json:"answer_confidence,omitempty"`
+}
+
+type systemOneResponse struct {
+	Model   string                     `json:"model,omitempty"`
+	Answers map[string]systemOneAnswer `json:"answers"`
+	Error   string                     `json:"error,omitempty"`
 }
 
 var (
@@ -82,6 +115,11 @@ type Classifier struct {
 	CooldownDuration    time.Duration
 	Clock               func() time.Time
 	OnParseError        func(model, raw string, err error)
+	OnSystemAlert       func(endpoint string, err error)
+
+	systemOneHTTPClient *http.Client
+	retryDelayFunc      func(attempt int) time.Duration
+	retrySleepFunc      func(ctx context.Context, d time.Duration) error
 
 	mu                  sync.Mutex
 	consecutiveFailures int
@@ -96,6 +134,34 @@ type Option func(*Classifier)
 func WithOnParseError(fn func(model, raw string, err error)) Option {
 	return func(c *Classifier) {
 		c.OnParseError = fn
+	}
+}
+
+// WithOnSystemAlert sets the callback invoked when classifier endpoint fails across all retries.
+func WithOnSystemAlert(fn func(endpoint string, err error)) Option {
+	return func(c *Classifier) {
+		c.OnSystemAlert = fn
+	}
+}
+
+// WithSystemOneHTTPClient sets the HTTP client used for System 1 requests.
+func WithSystemOneHTTPClient(client *http.Client) Option {
+	return func(c *Classifier) {
+		c.systemOneHTTPClient = client
+	}
+}
+
+// WithRetrySleepFunc overrides the sleep function between retry attempts for hermetic testing.
+func WithRetrySleepFunc(fn func(ctx context.Context, d time.Duration) error) Option {
+	return func(c *Classifier) {
+		c.retrySleepFunc = fn
+	}
+}
+
+// WithRetryDelayFunc overrides the retry delay calculation for hermetic testing.
+func WithRetryDelayFunc(fn func(attempt int) time.Duration) Option {
+	return func(c *Classifier) {
+		c.retryDelayFunc = fn
 	}
 }
 
@@ -188,7 +254,7 @@ func New(cfg *config.Config, runnerFn runner.RunnerFunc, opts ...Option) *Classi
 	}
 	c.LLMFunc = func(ctx context.Context, model, prompt string) (string, error) {
 		cur := c.cfg.Current()
-		if cur != nil && cur.ClassifierURL != "" {
+		if cur != nil && cur.ClassifierURL != "" && !strings.EqualFold(cur.ClassifierProtocol, "systemone") {
 			ollamaFn, err := NewOllamaLLMFunc(cur.ClassifierURL, nil)
 			if err != nil {
 				return "", fmt.Errorf("failed to initialize ollama client: %w", err)
@@ -217,7 +283,7 @@ func New(cfg *config.Config, runnerFn runner.RunnerFunc, opts ...Option) *Classi
 		if cur != nil {
 			if cur.ThreadTitleURL != "" {
 				targetURL = cur.ThreadTitleURL
-			} else if cur.ClassifierURL != "" {
+			} else if cur.ClassifierURL != "" && !strings.EqualFold(cur.ClassifierProtocol, "systemone") {
 				targetURL = cur.ClassifierURL
 			}
 		}
@@ -231,7 +297,7 @@ func New(cfg *config.Config, runnerFn runner.RunnerFunc, opts ...Option) *Classi
 		if c.primaryTitleLLMFunc != nil {
 			return c.primaryTitleLLMFunc(ctx, model, prompt)
 		}
-		if c.LLMFunc != nil {
+		if c.LLMFunc != nil && (cur == nil || !strings.EqualFold(cur.ClassifierProtocol, "systemone")) {
 			return c.LLMFunc(ctx, model, prompt)
 		}
 		if runnerFn == nil {
@@ -698,7 +764,7 @@ func (c *Classifier) resolveTitleModel() string {
 				}
 				return DefaultOllamaClassifierModel
 			}
-			if cur.ClassifierURL != "" {
+			if cur.ClassifierURL != "" && !strings.EqualFold(cur.ClassifierProtocol, "systemone") {
 				if cur.ClassifierModel != "" {
 					return cur.ClassifierModel
 				}
@@ -799,8 +865,272 @@ func (c *Classifier) classifyWithPrompt(ctx context.Context, prompt string) Clas
 	return result
 }
 
+// BuildSystemOneState formats target message(s) and recent channel context into clean dialogue
+// for non-autoregressive encoder models like ModernBERT (Laya).
+// It strips XML tags and RFC3339 timestamps to avoid degrading attention weights,
+// while preserving speaker identity and replying-to relationships.
+func BuildSystemOneState(targetBurst []db.Message, recentContext []db.Message) string {
+	var sb strings.Builder
+
+	appendMessage := func(m db.Message) {
+		author := SanitizeAuthor(m.AuthorName)
+		if author == "" {
+			author = SanitizeAuthor(m.AuthorID)
+		}
+		if author == "" {
+			author = "unknown"
+		}
+		replyTo := ""
+		if targetAuthor := ExtractReplyingToAuthor(m); targetAuthor != "" {
+			cleanTarget := SanitizeAuthor(targetAuthor)
+			if cleanTarget != "" {
+				if !strings.HasPrefix(cleanTarget, "@") && !strings.EqualFold(cleanTarget, "unknown") {
+					cleanTarget = "@" + cleanTarget
+				}
+				replyTo = fmt.Sprintf(" (replying to %s)", cleanTarget)
+			}
+		}
+		bodyText := SanitizeContent(m.BodyText())
+		if len(m.Metadata.MentionUserIDs) > 0 && len(m.Metadata.Mentions) > 0 {
+			for i, uID := range m.Metadata.MentionUserIDs {
+				if i < len(m.Metadata.Mentions) && uID != "" {
+					name := m.Metadata.Mentions[i]
+					if name != "" {
+						bodyText = strings.ReplaceAll(bodyText, "<@"+uID+">", "@"+name)
+						bodyText = strings.ReplaceAll(bodyText, "<@!"+uID+">", "@"+name)
+					}
+				}
+			}
+		}
+		if len(m.Metadata.MentionRoleIDs) > 0 && len(m.Metadata.Mentions) > 0 {
+			userCount := len(m.Metadata.MentionUserIDs)
+			for i, rID := range m.Metadata.MentionRoleIDs {
+				roleIdx := userCount + i
+				if roleIdx < len(m.Metadata.Mentions) && rID != "" {
+					name := m.Metadata.Mentions[roleIdx]
+					if name != "" {
+						bodyText = strings.ReplaceAll(bodyText, "<@&"+rID+">", "@"+name)
+					}
+				}
+			}
+		}
+		sb.WriteString(fmt.Sprintf("%s%s: %s\n", author, replyTo, bodyText))
+	}
+
+	for _, m := range recentContext {
+		appendMessage(m)
+	}
+	for _, m := range targetBurst {
+		appendMessage(m)
+	}
+
+	state := strings.TrimSpace(sb.String())
+	// ModernBERT truncation guard (cap at 4000 runes to prevent payload-too-large or token overflow)
+	runes := []rune(state)
+	if len(runes) > 4000 {
+		state = string(runes[len(runes)-4000:])
+	}
+	return state
+}
+
+func (c *Classifier) isSystemOne() bool {
+	if c.cfg == nil {
+		return false
+	}
+	cur := c.cfg.Current()
+	if cur == nil {
+		return false
+	}
+	return strings.EqualFold(cur.ClassifierProtocol, "systemone") && cur.ClassifierURL != ""
+}
+
+func (c *Classifier) classifySystemOne(ctx context.Context, targetBurst []db.Message, recentContext []db.Message, customInstruction string) ClassificationResult {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	cur := c.cfg.Current()
+	endpointURL := ""
+	if cur != nil {
+		endpointURL = cur.ClassifierURL
+	}
+	if strings.TrimSpace(endpointURL) == "" {
+		return ClassificationResult{
+			Confidence: 0.0,
+			Reason:     "classifier error: classifier_url is empty for systemone protocol",
+		}
+	}
+
+	instruction := DefaultAmbientWakePrompt
+	if trimmed := strings.TrimSpace(customInstruction); trimmed != "" {
+		instruction = trimmed
+	}
+
+	state := BuildSystemOneState(targetBurst, recentContext)
+
+	reqPayload := systemOneRequest{
+		State: state,
+		Questions: map[string]systemOneQuestion{
+			"should_wake": {
+				Type:         "noul",
+				Instructions: instruction,
+			},
+		},
+	}
+
+	reqBytes, err := json.Marshal(reqPayload)
+	if err != nil {
+		return ClassificationResult{
+			Confidence: 0.0,
+			Reason:     fmt.Sprintf("failed to marshal systemone request: %v", err),
+		}
+	}
+
+	httpClient := c.systemOneHTTPClient
+	if httpClient == nil {
+		httpClient = defaultSystemOneHTTPClient
+	}
+
+	sleepFn := c.retrySleepFunc
+	if sleepFn == nil {
+		sleepFn = func(ctx context.Context, d time.Duration) error {
+			timer := time.NewTimer(d)
+			defer timer.Stop()
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-timer.C:
+				return nil
+			}
+		}
+	}
+
+	delayFn := c.retryDelayFunc
+	if delayFn == nil {
+		delayFn = func(attempt int) time.Duration {
+			return time.Duration(100*(1<<attempt)) * time.Millisecond // 100ms, 200ms, 400ms
+		}
+	}
+
+	const maxAttempts = 3
+	var lastErr error
+	var duration time.Duration
+	var respPayload systemOneResponse
+
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if attempt > 0 {
+			delay := delayFn(attempt - 1)
+			if sleepErr := sleepFn(ctx, delay); sleepErr != nil {
+				lastErr = fmt.Errorf("context cancelled during retry backoff: %w", sleepErr)
+				break
+			}
+		}
+
+		start := time.Now()
+		req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, endpointURL, bytes.NewReader(reqBytes))
+		if reqErr != nil {
+			lastErr = fmt.Errorf("failed to create http request: %w", reqErr)
+			break
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json")
+
+		httpResp, doErr := httpClient.Do(req)
+		duration = time.Since(start)
+		if doErr != nil {
+			lastErr = fmt.Errorf("systemone request failed: %w", doErr)
+			continue
+		}
+
+		bodyBytes, readErr := io.ReadAll(io.LimitReader(httpResp.Body, 1<<20))
+		_ = httpResp.Body.Close()
+		if readErr != nil {
+			lastErr = fmt.Errorf("failed to read systemone response body: %w", readErr)
+			continue
+		}
+
+		if httpResp.StatusCode != http.StatusOK {
+			errMsg := strings.TrimSpace(string(bodyBytes))
+			if len(errMsg) > 200 {
+				errMsg = errMsg[:200] + "..."
+			}
+			lastErr = fmt.Errorf("systemone HTTP %d: %s", httpResp.StatusCode, errMsg)
+			continue
+		}
+
+		var parsedResp systemOneResponse
+		if unmarshalErr := json.Unmarshal(bodyBytes, &parsedResp); unmarshalErr != nil {
+			lastErr = fmt.Errorf("failed to parse systemone json: %w", unmarshalErr)
+			continue
+		}
+
+		if parsedResp.Error != "" {
+			lastErr = fmt.Errorf("systemone returned error: %s", parsedResp.Error)
+			continue
+		}
+
+		respPayload = parsedResp
+		lastErr = nil
+		break
+	}
+
+	modelName := "systemone"
+	if cur != nil && cur.ClassifierModel != "" {
+		modelName = cur.ClassifierModel
+	} else if respPayload.Model != "" {
+		modelName = respPayload.Model
+	}
+
+	if lastErr != nil {
+		c.recordFailure()
+		metrics.RecordClassifierRun("error", modelName, duration, -1, "error")
+		log.Printf("[Classifier] System 1 endpoint %s failed after %d attempts: %v", endpointURL, maxAttempts, lastErr)
+		if c.OnSystemAlert != nil {
+			c.OnSystemAlert(endpointURL, lastErr)
+		}
+		return ClassificationResult{
+			Confidence: 0.0,
+			Reason:     fmt.Sprintf("systemone error after %d attempts: %v", maxAttempts, lastErr),
+		}
+	}
+
+	ans, ok := respPayload.Answers["should_wake"]
+	if !ok {
+		c.recordFailure()
+		metrics.RecordClassifierRun("parse_error", modelName, duration, -1, "missing_answer")
+		err := errors.New("systemone response missing 'should_wake' answer")
+		if c.OnSystemAlert != nil {
+			c.OnSystemAlert(endpointURL, err)
+		}
+		return ClassificationResult{
+			Confidence: 0.0,
+			Reason:     err.Error(),
+		}
+	}
+
+	confidence := ans.Confidence
+	if ans.Noul != nil {
+		confidence = *ans.Noul
+	}
+	if confidence < 0.0 {
+		confidence = 0.0
+	} else if confidence > 1.0 {
+		confidence = 1.0
+	}
+
+	c.recordSuccess()
+	metrics.RecordClassifierRun("success", modelName, duration, confidence, "evaluated")
+	return ClassificationResult{
+		Confidence: confidence,
+		Reason:     fmt.Sprintf("systemone (%s) evaluated with confidence %.4f", modelName, confidence),
+	}
+}
+
 // Classify evaluates a single target message against recentContext.
 func (c *Classifier) Classify(ctx context.Context, target db.Message, recentContext []db.Message, customInstruction string) ClassificationResult {
+	if c.isSystemOne() {
+		return c.classifySystemOne(ctx, []db.Message{target}, recentContext, customInstruction)
+	}
 	prompt := BuildPrompt(target, recentContext, customInstruction)
 	return c.classifyWithPrompt(ctx, prompt)
 }
@@ -809,6 +1139,9 @@ func (c *Classifier) Classify(ctx context.Context, target db.Message, recentCont
 func (c *Classifier) ClassifyBurst(ctx context.Context, targetBurst []db.Message, recentContext []db.Message, customInstruction string) ClassificationResult {
 	if len(targetBurst) == 0 {
 		return ClassificationResult{Confidence: 0.0, Reason: "empty target burst"}
+	}
+	if c.isSystemOne() {
+		return c.classifySystemOne(ctx, targetBurst, recentContext, customInstruction)
 	}
 	prompt := BuildBurstPrompt(targetBurst, recentContext, customInstruction)
 	return c.classifyWithPrompt(ctx, prompt)

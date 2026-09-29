@@ -171,6 +171,7 @@ type ConfigData struct {
 	LowEffortModel  string                     `yaml:"low_effort_model" json:"low_effort_model"`
 	ClassifierURL   string                     `yaml:"classifier_url,omitempty" json:"classifier_url,omitempty"`
 	ClassifierModel string                     `yaml:"classifier_model,omitempty" json:"classifier_model,omitempty"`
+	ClassifierProtocol string                 `yaml:"classifier_protocol,omitempty" json:"classifier_protocol,omitempty"`
 	ThreadTitleURL   string                     `yaml:"thread_title_url,omitempty" json:"thread_title_url,omitempty"`
 	ThreadTitleModel string                     `yaml:"thread_title_model,omitempty" json:"thread_title_model,omitempty"`
 	GeminiHomeDir       string                     `yaml:"gemini_home_dir,omitempty" json:"gemini_home_dir,omitempty"`
@@ -207,6 +208,7 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 		LowEffortModel            string                   `yaml:"low_effort_model"`
 		ClassifierURL             string                   `yaml:"classifier_url"`
 		ClassifierModel           string                   `yaml:"classifier_model"`
+		ClassifierProtocol        string                   `yaml:"classifier_protocol"`
 		ThreadTitleURL             string                   `yaml:"thread_title_url"`
 		ThreadTitleModel           string                   `yaml:"thread_title_model"`
 		MCPConfig                 interface{}              `yaml:"mcp_config"`
@@ -241,6 +243,7 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 	c.LowEffortModel = strings.TrimSpace(raw.LowEffortModel)
 	c.ClassifierURL = strings.TrimSpace(raw.ClassifierURL)
 	c.ClassifierModel = strings.TrimSpace(raw.ClassifierModel)
+	c.ClassifierProtocol = strings.ToLower(strings.TrimSpace(raw.ClassifierProtocol))
 	c.ThreadTitleURL = strings.TrimSpace(raw.ThreadTitleURL)
 	c.ThreadTitleModel = strings.TrimSpace(raw.ThreadTitleModel)
 	c.GeminiHomeDir = raw.GeminiHomeDir
@@ -412,8 +415,9 @@ func DefaultConfigData() *ConfigData {
 		Port:            "8080",
 		AgyBin:          "agy",
 		LowEffortModel:  "gemini-3.8-flash-low",
-		ClassifierURL:   "",
-		ClassifierModel: "",
+		ClassifierURL:      "",
+		ClassifierModel:    "",
+		ClassifierProtocol: "",
 		ThreadTitleURL:   "",
 		ThreadTitleModel: "",
 		DataDir:         "",
@@ -615,6 +619,9 @@ func applyEnvironmentOverrides(data *ConfigData, lookup func(string) string) {
 	}
 	if cm := getEnvFromLookup(lookup, "CLASSIFIER_MODEL", ""); cm != "" {
 		data.ClassifierModel = cm
+	}
+	if cp := getEnvFromLookup(lookup, "CLASSIFIER_PROTOCOL", ""); cp != "" {
+		data.ClassifierProtocol = strings.ToLower(strings.TrimSpace(cp))
 	}
 	if tu := getEnvFromLookup(lookup, "THREAD_TITLE_URL", ""); tu != "" {
 		data.ThreadTitleURL = tu
@@ -836,6 +843,19 @@ func validateChannels(parsed *ConfigData, targetPath string) error {
 	}
 	if strings.TrimSpace(parsed.LowEffortModel) == "" {
 		parsed.LowEffortModel = DefaultConfigData().LowEffortModel
+	}
+
+	if parsed.ClassifierProtocol != "" {
+		pLower := strings.ToLower(strings.TrimSpace(parsed.ClassifierProtocol))
+		if pLower != "systemone" && pLower != "ollama" {
+			log.Printf("[Config] Validation error: classifier_protocol must be 'systemone' or 'ollama', got %q in %s.", parsed.ClassifierProtocol, targetPath)
+			return fmt.Errorf("classifier_protocol must be 'systemone' or 'ollama', got %q", parsed.ClassifierProtocol)
+		}
+		if pLower == "systemone" && strings.TrimSpace(parsed.ClassifierURL) == "" {
+			log.Printf("[Config] Validation error: classifier_url is required when classifier_protocol is 'systemone' in %s.", targetPath)
+			return fmt.Errorf("classifier_url is required when classifier_protocol is 'systemone'")
+		}
+		parsed.ClassifierProtocol = pLower
 	}
 
 	if parsed.Channels == nil {

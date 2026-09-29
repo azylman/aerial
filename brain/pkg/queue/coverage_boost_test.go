@@ -1459,13 +1459,48 @@ func TestWorkerPool_NewPermutations(t *testing.T) {
 			t.Fatal("timed out waiting for parse error alert")
 		}
 
-		// Second call within 15s debounced
+		// Second call within 15s debounced synchronously
 		pool5.cfg.Classifier.OnParseError("gemini-flash", "short", errors.New("parse error 2"))
-		time.Sleep(5 * time.Millisecond)
 
 		if alertSent.Load() != 1 {
 			t.Errorf("expected exactly 1 alert sent due to debouncing, got %d", alertSent.Load())
 		}
+	}
+
+	// 5b. Classifier OnSystemAlert callback testing
+	var systemAlertSent atomic.Int32
+	systemAlertReceived := make(chan struct{}, 1)
+	pool5b := New(appCfg, WorkerPoolConfig{
+		DiscordSession: dg,
+		SystemAlertFunc: func(s *discordgo.Session, channelNameOrID, title, alertBody string) error {
+			systemAlertSent.Add(1)
+			if title != "Classifier Endpoint Failure" {
+				t.Errorf("expected alert title 'Classifier Endpoint Failure', got %q", title)
+			}
+			select {
+			case systemAlertReceived <- struct{}{}:
+			default:
+			}
+			return nil
+		},
+	})
+
+	if pool5b.cfg.Classifier != nil && pool5b.cfg.Classifier.OnSystemAlert != nil {
+		pool5b.cfg.Classifier.OnSystemAlert("http://192.168.1.70:8000/v1/systemone", errors.New("connection refused"))
+		select {
+		case <-systemAlertReceived:
+		case <-time.After(1 * time.Second):
+			t.Fatal("timed out waiting for classifier system alert")
+		}
+
+		// Second call within 15s debounced synchronously
+		pool5b.cfg.Classifier.OnSystemAlert("http://192.168.1.70:8000/v1/systemone", errors.New("connection refused 2"))
+
+		if systemAlertSent.Load() != 1 {
+			t.Errorf("expected exactly 1 system alert sent due to debouncing, got %d", systemAlertSent.Load())
+		}
+	} else {
+		t.Fatal("expected pool5b.cfg.Classifier.OnSystemAlert to be initialized")
 	}
 
 	// 6. ResolveChannelPolicy defaulting with appCfg and without appCfg
