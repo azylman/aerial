@@ -185,24 +185,36 @@ func (p *Provisioner) compileTargetRules(target RuleTarget, customPrompt string)
 		return nil, fmt.Errorf("rules compilation aborted: common rules directory has 0 files (potential mount or git sync failure)")
 	}
 
-	// For TargetEphemeral, strictly whitelist 01-identity.md for user common rules (omitting persona, style, etc.)
-	if target == TargetEphemeral {
+	// 3. Persona rules from aerial and aerial-config:
+	// Loaded for conversational runtimes (Discord, Voice), omitted for Ephemeral to maintain lean execution.
+	var aerialPersona, configPersona []ruleSourceFile
+	if target != TargetEphemeral {
+		aerialPersona, err = discoverRuleFiles(aerialDir, "persona", "05_aerial_persona_")
+		if err != nil {
+			return nil, err
+		}
+		configPersona, err = discoverRuleFiles(configDir, "persona", "15_user_persona_")
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		// Transitional backward compatibility: if legacy persona file still resides in common, omit it for ephemeral
 		var filteredConfigCommon []ruleSourceFile
 		for _, r := range configCommon {
-			if r.filename == "01-identity.md" {
+			if !strings.Contains(r.filename, "persona") {
 				filteredConfigCommon = append(filteredConfigCommon, r)
 			}
 		}
 		configCommon = filteredConfigCommon
 	}
 
-	// 3. Target rules from aerial: prefix 20_aerial_<target>_
+	// 4. Target rules from aerial: prefix 20_aerial_<target>_
 	aerialTarget, err := discoverRuleFiles(aerialDir, string(target), fmt.Sprintf("20_aerial_%s_", target))
 	if err != nil {
 		return nil, err
 	}
 
-	// 4. Target rules from aerial-config: prefix 30_user_<target>_
+	// 5. Target rules from aerial-config: prefix 30_user_<target>_
 	configTarget, err := discoverRuleFiles(configDir, string(target), fmt.Sprintf("30_user_%s_", target))
 	if err != nil {
 		return nil, err
@@ -210,7 +222,9 @@ func (p *Provisioner) compileTargetRules(target RuleTarget, customPrompt string)
 
 	var allRules []ruleSourceFile
 	allRules = append(allRules, aerialCommon...)
+	allRules = append(allRules, aerialPersona...)
 	allRules = append(allRules, configCommon...)
+	allRules = append(allRules, configPersona...)
 	allRules = append(allRules, aerialTarget...)
 	allRules = append(allRules, configTarget...)
 
