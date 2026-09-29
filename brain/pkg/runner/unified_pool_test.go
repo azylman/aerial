@@ -1225,6 +1225,453 @@ func TestUnifiedProcessPool_TurnCompletionRotationHook(t *testing.T) {
 	rotatedDaemon.onTurnFinished(rotatedDaemon)
 }
 
+func TestUnifiedProcessPool_OptimisticMarkDirty(t *testing.T) {
+	t.Run("IdlePrewarmedEvictedAndReplaced", func(t *testing.T) {
+		var spawnCounter atomic.Int32
+		mock := &MockDaemonSpawner{
+			SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+				count := spawnCounter.Add(1)
+				outR, outW := io.Pipe()
+				inR, inW := io.Pipe()
+				errR, _ := io.Pipe()
+				go func() {
+					defer outW.Close()
+					_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":"00000000-0000-0000-0000-%012d"}`+"\n", count)))
+					_, _ = io.Copy(io.Discard, inR)
+				}()
+				return inW, outR, errR, &MockProcessHandle{pid: int(count * 100)}, nil
+			},
+		}
 
+		pool := NewUnifiedProcessPool(PoolConfig{
+			PrewarmedTargets: []string{"kiosk"},
+		}, mock)
+		defer pool.Close()
 
+		ctx := context.Background()
+		d1, err := pool.GetOrCreate(ctx, "kiosk")
+		if err != nil {
+			t.Fatalf("failed creating initial kiosk daemon: %v", err)
+		}
+		if spawnCounter.Load() != 1 {
+			t.Fatalf("expected 1 initial spawn, got %d", spawnCounter.Load())
+		}
+		if d1.InflightCount() != 0 {
+			t.Fatalf("expected d1 to have 0 inflight turns, got %d", d1.InflightCount())
+		}
 
+		// Optimistic rotation at MarkDirty() time
+		pool.MarkDirty()
+
+		// d1 should be closed asynchronously and evicted from pool.daemons
+		deadline := time.Now().Add(2 * time.Second)
+		var d2 *StreamingDaemon
+		for time.Now().Before(deadline) {
+			cur, ok := pool.Get("kiosk")
+			if ok && cur != d1 && cur.State() != StateClosed {
+				d2 = cur
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+
+		if d2 == nil {
+			t.Fatalf("timed out waiting for kiosk daemon to be asynchronously re-warmed and replaced")
+		}
+		if d2 == d1 {
+			t.Errorf("expected d2 to be a distinct instance from d1")
+		}
+		if d2.IsDirty() {
+			t.Errorf("expected replacement daemon d2 to not be dirty")
+		}
+		if d1.State() != StateClosed {
+			t.Errorf("expected evicted daemon d1 to be closed, got state: %v", d1.State())
+		}
+		if spawnCounter.Load() < 2 {
+			t.Errorf("expected at least 2 spawns, got %d", spawnCounter.Load())
+		}
+	})
+
+	t.Run("IdleNonPrewarmedEvictedAndClosed", func(t *testing.T) {
+		var spawnCounter atomic.Int32
+		mock := &MockDaemonSpawner{
+			SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+				count := spawnCounter.Add(1)
+				outR, outW := io.Pipe()
+				inR, inW := io.Pipe()
+				errR, _ := io.Pipe()
+				go func() {
+					defer outW.Close()
+					_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":"00000000-0000-0000-0000-%012d"}`+"\n", count)))
+					_, _ = io.Copy(io.Discard, inR)
+				}()
+				return inW, outR, errR, &MockProcessHandle{pid: int(count * 100)}, nil
+			},
+		}
+
+		pool := NewUnifiedProcessPool(PoolConfig{
+			PrewarmedTargets: []string{"kiosk"},
+		}, mock)
+		defer pool.Close()
+
+		ctx := context.Background()
+		d1, err := pool.GetOrCreate(ctx, "thread-nonprewarmed")
+		if err != nil {
+			t.Fatalf("failed creating initial daemon: %v", err)
+		}
+		if d1.InflightCount() != 0 {
+			t.Fatalf("expected 0 inflight turns, got %d", d1.InflightCount())
+		}
+
+		pool.MarkDirty()
+
+		// Daemon should be evicted from pool and closed, but NOT re-warmed
+		deadline := time.Now().Add(1 * time.Second)
+		for time.Now().Before(deadline) && d1.State() != StateClosed {
+			time.Sleep(10 * time.Millisecond)
+		}
+		if d1.State() != StateClosed {
+			t.Errorf("expected idle non-prewarmed daemon d1 to be closed after MarkDirty")
+		}
+		if _, ok := pool.Get("thread-nonprewarmed"); ok {
+			t.Errorf("expected thread-nonprewarmed to be evicted from pool")
+		}
+		// Confirm no new daemon spawned after small grace period
+		time.Sleep(50 * time.Millisecond)
+		if spawnCounter.Load() != 1 {
+			t.Errorf("expected exactly 1 spawn for non-prewarmed target, got %d", spawnCounter.Load())
+		}
+	})
+
+	t.Run("InflightPreservedAndRotatedOnCompletion", func(t *testing.T) {
+		var spawnCounter atomic.Int32
+		mock := &MockDaemonSpawner{
+			SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+				count := spawnCounter.Add(1)
+				outR, outW := io.Pipe()
+				inR, inW := io.Pipe()
+				errR, _ := io.Pipe()
+				go func() {
+					defer outW.Close()
+					_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":"00000000-0000-0000-0000-%012d"}`+"\n", count)))
+					_, _ = io.Copy(io.Discard, inR)
+				}()
+				return inW, outR, errR, &MockProcessHandle{pid: int(count * 100)}, nil
+			},
+		}
+
+		pool := NewUnifiedProcessPool(PoolConfig{}, mock)
+		defer pool.Close()
+
+		ctx := context.Background()
+		d1, err := pool.GetOrCreate(ctx, "thread-inflight")
+		if err != nil {
+			t.Fatalf("failed creating initial daemon: %v", err)
+		}
+
+		// Simulate an in-flight turn
+		sink := newMockTurnSink()
+		turn := &TurnContext{TurnID: "t-inflight", Sink: sink, CreatedAt: time.Now()}
+		d1.inflight = append(d1.inflight, turn)
+
+		if d1.InflightCount() != 1 {
+			t.Fatalf("expected 1 inflight turn, got %d", d1.InflightCount())
+		}
+
+		pool.MarkDirty()
+
+		// Daemon must NOT be closed mid-flight and must still be tracked
+		if d1.State() == StateClosed {
+			t.Fatalf("in-flight daemon was closed prematurely on MarkDirty")
+		}
+		cur, ok := pool.Get("thread-inflight")
+		if !ok || cur != d1 {
+			t.Fatalf("expected d1 to remain tracked in pool during in-flight turn")
+		}
+		if !d1.IsDirty() {
+			t.Fatalf("expected in-flight daemon to be marked dirty")
+		}
+
+		// Now finish turn via NDJSON result event
+		d1.dispatchNDJSONLine(`{"event":"result","result":{"status":"SUCCESS","response":"finished"}}`)
+
+		// Daemon should rotate upon turn completion
+		deadline := time.Now().Add(2 * time.Second)
+		var rotatedDaemon *StreamingDaemon
+		for time.Now().Before(deadline) {
+			d, ok := pool.Get("thread-inflight")
+			if ok && d != d1 && d.State() != StateClosed {
+				rotatedDaemon = d
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		if rotatedDaemon == nil {
+			t.Fatalf("timed out waiting for daemon rotation after in-flight turn completion")
+		}
+		if spawnCounter.Load() != 2 {
+			t.Errorf("expected spawn count 2, got %d", spawnCounter.Load())
+		}
+		if d1.State() != StateClosed {
+			t.Errorf("expected old daemon d1 to be closed after rotation")
+		}
+	})
+
+	t.Run("RapidSuccessiveMarkDirtySuppressesDuplicatePrewarming", func(t *testing.T) {
+		var concurrentSpawns atomic.Int32
+		var maxConcurrentSpawns atomic.Int32
+		var totalSpawns atomic.Int32
+		spawnGate := make(chan struct{})
+
+		mock := &MockDaemonSpawner{
+			SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+				cur := concurrentSpawns.Add(1)
+				defer concurrentSpawns.Add(-1)
+				for {
+					oldMax := maxConcurrentSpawns.Load()
+					if cur <= oldMax || maxConcurrentSpawns.CompareAndSwap(oldMax, cur) {
+						break
+					}
+				}
+				count := totalSpawns.Add(1)
+				if count > 1 {
+					select {
+					case <-spawnGate:
+					case <-ctx.Done():
+						return nil, nil, nil, nil, ctx.Err()
+					}
+				}
+				outR, outW := io.Pipe()
+				inR, inW := io.Pipe()
+				errR, _ := io.Pipe()
+				go func() {
+					defer outW.Close()
+					_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":"00000000-0000-0000-0000-%012d"}`+"\n", count)))
+					_, _ = io.Copy(io.Discard, inR)
+				}()
+				return inW, outR, errR, &MockProcessHandle{pid: int(count * 100)}, nil
+			},
+		}
+
+		pool := NewUnifiedProcessPool(PoolConfig{
+			PrewarmedTargets: []string{"kiosk"},
+		}, mock)
+		defer pool.Close()
+
+		ctx := context.Background()
+		d1, err := pool.GetOrCreate(ctx, "kiosk")
+		if err != nil {
+			t.Fatalf("failed creating initial daemon: %v", err)
+		}
+		if d1.InflightCount() != 0 {
+			t.Fatalf("expected 0 inflight turns, got %d", d1.InflightCount())
+		}
+
+		// Fire rapid successive MarkDirty calls
+		for i := 0; i < 10; i++ {
+			pool.MarkDirty()
+		}
+
+		// Unblock the gated spawn
+		close(spawnGate)
+
+		// Wait for replacement daemon
+		deadline := time.Now().Add(2 * time.Second)
+		var d2 *StreamingDaemon
+		for time.Now().Before(deadline) {
+			cur, ok := pool.Get("kiosk")
+			if ok && cur != d1 && cur.State() != StateClosed {
+				d2 = cur
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+
+		if d2 == nil {
+			t.Fatalf("timed out waiting for kiosk daemon replacement")
+		}
+		if maxConcurrentSpawns.Load() > 1 {
+			t.Errorf("expected at most 1 concurrent spawn during pre-warming, got %d", maxConcurrentSpawns.Load())
+		}
+		if totalSpawns.Load() != 2 {
+			t.Errorf("expected exactly 2 total spawns (1 initial + 1 pre-warm), got %d", totalSpawns.Load())
+		}
+	})
+
+	t.Run("ClosedPoolMarkDirtyReturnsEarly", func(t *testing.T) {
+		pool := NewUnifiedProcessPool(PoolConfig{}, nil)
+		if err := pool.Close(); err != nil {
+			t.Fatalf("unexpected Close() error: %v", err)
+		}
+		pool.MarkDirty() // Should safely return early under lock
+	})
+
+	t.Run("EvictedDaemonCloseErrorLogged", func(t *testing.T) {
+		mock := &MockDaemonSpawner{
+			SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+				outR, outW := io.Pipe()
+				inR, inW := io.Pipe()
+				errR, _ := io.Pipe()
+				go func() {
+					defer outW.Close()
+					_, _ = outW.Write([]byte(`{"event":"init","session_id":"00000000-0000-0000-0000-000000000088"}` + "\n"))
+					_, _ = io.Copy(io.Discard, inR)
+				}()
+				return inW, outR, errR, &MockProcessHandle{pid: 88, killErr: errors.New("simulated eviction kill error")}, nil
+			},
+		}
+
+		pool := NewUnifiedProcessPool(PoolConfig{}, mock)
+		defer pool.Close()
+
+		ctx := context.Background()
+		d, err := pool.GetOrCreate(ctx, "thread-evict-err")
+		if err != nil {
+			t.Fatalf("failed creating daemon: %v", err)
+		}
+
+		pool.MarkDirty()
+
+		deadline := time.Now().Add(1 * time.Second)
+		for time.Now().Before(deadline) && d.State() != StateClosed {
+			time.Sleep(10 * time.Millisecond)
+		}
+		if d.State() != StateClosed {
+			t.Errorf("expected daemon to be closed despite kill error")
+		}
+	})
+
+	t.Run("RewarmingFailureLogged", func(t *testing.T) {
+		var spawnCount atomic.Int32
+		mock := &MockDaemonSpawner{
+			SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+				count := spawnCount.Add(1)
+				if count > 1 {
+					return nil, nil, nil, nil, errors.New("simulated re-warming spawn failure")
+				}
+				outR, outW := io.Pipe()
+				inR, inW := io.Pipe()
+				errR, _ := io.Pipe()
+				go func() {
+					defer outW.Close()
+					_, _ = outW.Write([]byte(`{"event":"init","session_id":"00000000-0000-0000-0000-000000000077"}` + "\n"))
+					_, _ = io.Copy(io.Discard, inR)
+				}()
+				return inW, outR, errR, &MockProcessHandle{pid: 77}, nil
+			},
+		}
+
+		pool := NewUnifiedProcessPool(PoolConfig{
+			PrewarmedTargets: []string{"kiosk"},
+		}, mock)
+		defer pool.Close()
+
+		ctx := context.Background()
+		d1, err := pool.GetOrCreate(ctx, "kiosk")
+		if err != nil {
+			t.Fatalf("failed creating initial kiosk: %v", err)
+		}
+
+		pool.MarkDirty()
+
+		deadline := time.Now().Add(1 * time.Second)
+		for time.Now().Before(deadline) && d1.State() != StateClosed {
+			time.Sleep(10 * time.Millisecond)
+		}
+		if d1.State() != StateClosed {
+			t.Errorf("expected d1 to be closed")
+		}
+	})
+}
+
+func TestUnifiedProcessPool_GetOrCreate_RejectsDirtyDaemon(t *testing.T) {
+	t.Run("SpawnsFreshAndClosesDirty", func(t *testing.T) {
+		var spawnCounter atomic.Int32
+		mock := &MockDaemonSpawner{
+			SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+				count := spawnCounter.Add(1)
+				outR, outW := io.Pipe()
+				inR, inW := io.Pipe()
+				errR, _ := io.Pipe()
+				go func() {
+					defer outW.Close()
+					_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":"00000000-0000-0000-0000-%012d"}`+"\n", count)))
+					_, _ = io.Copy(io.Discard, inR)
+				}()
+				return inW, outR, errR, &MockProcessHandle{pid: int(count * 100)}, nil
+			},
+		}
+
+		pool := NewUnifiedProcessPool(PoolConfig{}, mock)
+		defer pool.Close()
+
+		ctx := context.Background()
+		d1, err := pool.GetOrCreate(ctx, "thread-dirty")
+		if err != nil {
+			t.Fatalf("initial GetOrCreate failed: %v", err)
+		}
+
+		d1.MarkDirty()
+		if !d1.IsDirty() {
+			t.Fatalf("expected d1 to be marked dirty")
+		}
+
+		// Calling GetOrCreate for thread-dirty must reject dirty d1, close d1, and spawn a fresh replacement d2
+		d2, err := pool.GetOrCreate(ctx, "thread-dirty")
+		if err != nil {
+			t.Fatalf("second GetOrCreate failed: %v", err)
+		}
+		if d2 == d1 {
+			t.Errorf("expected GetOrCreate to reject dirty daemon and return a fresh daemon")
+		}
+		if d2.IsDirty() {
+			t.Errorf("expected fresh daemon d2 not to be dirty")
+		}
+
+		deadline := time.Now().Add(1 * time.Second)
+		for time.Now().Before(deadline) && d1.State() != StateClosed {
+			time.Sleep(10 * time.Millisecond)
+		}
+		if d1.State() != StateClosed {
+			t.Errorf("expected dirty daemon d1 to be closed, got state: %v", d1.State())
+		}
+		if spawnCounter.Load() != 2 {
+			t.Errorf("expected exactly 2 spawns, got %d", spawnCounter.Load())
+		}
+	})
+
+	t.Run("DirtyDaemonCloseErrorLogged", func(t *testing.T) {
+		mock := &MockDaemonSpawner{
+			SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+				outR, outW := io.Pipe()
+				inR, inW := io.Pipe()
+				errR, _ := io.Pipe()
+				go func() {
+					defer outW.Close()
+					_, _ = outW.Write([]byte(`{"event":"init","session_id":"00000000-0000-0000-0000-000000000066"}` + "\n"))
+					_, _ = io.Copy(io.Discard, inR)
+				}()
+				return inW, outR, errR, &MockProcessHandle{pid: 66, killErr: errors.New("simulated dirty daemon kill error")}, nil
+			},
+		}
+
+		pool := NewUnifiedProcessPool(PoolConfig{}, mock)
+		defer pool.Close()
+
+		ctx := context.Background()
+		d1, err := pool.GetOrCreate(ctx, "target-dirty-err")
+		if err != nil {
+			t.Fatalf("failed creating initial daemon: %v", err)
+		}
+
+		d1.MarkDirty()
+
+		d2, err := pool.GetOrCreate(ctx, "target-dirty-err")
+		if err != nil {
+			t.Fatalf("failed creating replacement daemon: %v", err)
+		}
+		if d2 == d1 {
+			t.Errorf("expected replacement daemon")
+		}
+	})
+}
