@@ -3247,6 +3247,15 @@ func TestWorkerPool_SessionRotationInjectsToolActions(t *testing.T) {
 		mockLLMCalled := false
 		mockLLM := func(ctx context.Context, model, prompt string) (string, error) {
 			mockLLMCalled = true
+			deadline, ok := ctx.Deadline()
+			if !ok {
+				t.Errorf("expected context to have a deadline")
+			} else {
+				remaining := time.Until(deadline)
+				if remaining < 15*time.Second {
+					t.Errorf("expected deadline remaining >= 15s (20s timeout), got %v", remaining)
+				}
+			}
 			if !strings.Contains(prompt, "Condense the following tool actions") {
 				t.Errorf("expected summarizer prompt, got %q", prompt)
 			}
