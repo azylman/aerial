@@ -56,6 +56,26 @@ func TestOneShotSchedule_EffortDefaultAndCoalesce(t *testing.T) {
 	if err := CreateOneShotSchedule(nil, oneShot); err == nil {
 		t.Fatalf("expected error on nil database, got nil")
 	}
+
+	// 4. Uppercase and untrimmed effort is canonicalized to trimmed lowercase "high"
+	oneShotUntrimmed := OneShotSchedule{
+		ID:       "oneshot-untrimmed-high",
+		ThreadID: "thread-3",
+		Prompt:   "untrimmed reasoning",
+		RunAt:    time.Now().UTC().Add(-1 * time.Minute),
+		Effort:   "  HIGH  ",
+	}
+	if err := CreateOneShotSchedule(db, oneShotUntrimmed); err != nil {
+		t.Fatalf("failed to create untrimmed high one shot: %v", err)
+	}
+
+	allUntrimmed, err := GetAllOneShotSchedules(db, "thread-3")
+	if err != nil {
+		t.Fatalf("failed to get untrimmed: %v", err)
+	}
+	if len(allUntrimmed) == 0 || allUntrimmed[0].Effort != "high" {
+		t.Fatalf("expected canonicalized effort 'high', got %q", allUntrimmed[0].Effort)
+	}
 }
 
 func TestSchedules_CoalesceNullAndEmptyStringEffort(t *testing.T) {

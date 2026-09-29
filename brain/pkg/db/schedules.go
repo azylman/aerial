@@ -77,6 +77,8 @@ func CreateOneShotSchedule(database DBTX, s OneShotSchedule) error {
 	}
 	if strings.ToLower(strings.TrimSpace(s.Effort)) != "high" {
 		s.Effort = "low"
+	} else {
+		s.Effort = "high"
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
