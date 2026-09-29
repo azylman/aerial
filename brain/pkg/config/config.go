@@ -148,6 +148,10 @@ type TargetMcpConfig struct {
 	Ephemeral map[string]json.RawMessage `yaml:"ephemeral,omitempty" json:"ephemeral,omitempty"`
 }
 
+type VoiceConfig struct {
+	PrewarmedTargets []string `yaml:"prewarmed_targets,omitempty" json:"prewarmed_targets,omitempty"`
+}
+
 type ConfigData struct {
 	Model           string                     `yaml:"model" json:"model"`
 	Timezone        string                     `yaml:"timezone" json:"timezone"`
@@ -155,6 +159,7 @@ type ConfigData struct {
 	AdminUsers      []string                   `yaml:"admin_users" json:"admin_users"`
 	Channels        map[string]ChannelPolicy   `yaml:"channels" json:"channels"`
 	McpServers      TargetMcpConfig            `yaml:"mcp_servers,omitempty" json:"mcp_servers,omitempty"`
+	Voice           VoiceConfig                `yaml:"voice,omitempty" json:"voice,omitempty"`
 	DatabaseURL     string                     `yaml:"database_url" json:"database_url"`
 	Port            string                     `yaml:"port" json:"port"`
 	AgyBin          string                     `yaml:"agy_bin" json:"agy_bin"`
@@ -192,6 +197,7 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 		AdminUsers                []string                 `yaml:"admin_users"`
 		Channels                  map[string]ChannelPolicy `yaml:"channels"`
 		McpServers                map[string]interface{}   `yaml:"mcp_servers"`
+		Voice                     VoiceConfig              `yaml:"voice"`
 		DatabaseURL               string                   `yaml:"database_url"`
 		Port                      string                   `yaml:"port"`
 		AgyBin                    string                   `yaml:"agy_bin"`
@@ -227,6 +233,19 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 	c.SystemChannel = raw.SystemChannel
 	c.AdminUsers = raw.AdminUsers
 	c.Channels = raw.Channels
+	c.Voice = raw.Voice
+	if raw.Voice.PrewarmedTargets != nil {
+		cleanTargets := make([]string, 0, len(c.Voice.PrewarmedTargets))
+		for _, t := range c.Voice.PrewarmedTargets {
+			trimmed := strings.TrimSpace(t)
+			if trimmed != "" {
+				cleanTargets = append(cleanTargets, trimmed)
+			}
+		}
+		c.Voice.PrewarmedTargets = cleanTargets
+	} else {
+		c.Voice.PrewarmedTargets = []string{"kiosk"}
+	}
 	c.DatabaseURL = raw.DatabaseURL
 	c.Port = raw.Port
 	c.AgyBin = raw.AgyBin
@@ -390,6 +409,13 @@ func cloneConfigData(src *ConfigData) *ConfigData {
 			dst.McpServers.Ephemeral[k] = append(json.RawMessage(nil), v...)
 		}
 	}
+	dst.Voice = VoiceConfig{}
+	if src.Voice.PrewarmedTargets != nil {
+		dst.Voice.PrewarmedTargets = make([]string, len(src.Voice.PrewarmedTargets))
+		copy(dst.Voice.PrewarmedTargets, src.Voice.PrewarmedTargets)
+	} else {
+		dst.Voice.PrewarmedTargets = []string{}
+	}
 	return &dst
 }
 
@@ -411,6 +437,9 @@ func DefaultConfigData() *ConfigData {
 			Discord:   make(map[string]json.RawMessage),
 			Voice:     make(map[string]json.RawMessage),
 			Ephemeral: make(map[string]json.RawMessage),
+		},
+		Voice: VoiceConfig{
+			PrewarmedTargets: []string{"kiosk"},
 		},
 		Port:            "8080",
 		AgyBin:          "agy",
@@ -448,6 +477,20 @@ func (c *Config) Current() *ConfigData {
 // Get returns the current ConfigData pointer (alias for Current).
 func (c *Config) Get() *ConfigData {
 	return c.Current()
+}
+
+// VoicePrewarmedTargets returns a defensive copy of configured voice daemon targets to eagerly pre-warm.
+func (c *Config) VoicePrewarmedTargets() []string {
+	if c == nil {
+		return []string{}
+	}
+	cur := c.Current()
+	if cur == nil || len(cur.Voice.PrewarmedTargets) == 0 {
+		return []string{}
+	}
+	targets := make([]string, len(cur.Voice.PrewarmedTargets))
+	copy(targets, cur.Voice.PrewarmedTargets)
+	return targets
 }
 
 // LoadConfigFromBytes parses YAML bytes into a Config instance.

@@ -3330,6 +3330,7 @@ func TestLoadConfigFromPaths_CorruptedWithCorruptedDiskLKGC_FailsFast(t *testing
 }
 
 func TestLoadConfigFromPaths_OnDiskLKGCFallback_Success(t *testing.T) {
+	t.Setenv("AGY_MODEL", "")
 	tmpDir := t.TempDir()
 	primary := filepath.Join(tmpDir, "primary.yaml")
 	lkgc := filepath.Join(tmpDir, "lkgc.yaml")
@@ -3360,6 +3361,7 @@ channels:
 }
 
 func TestReload_CorruptedYAML_RetainsActiveLKGC(t *testing.T) {
+	t.Setenv("AGY_MODEL", "")
 	tmpDir := t.TempDir()
 	cfgPath := filepath.Join(tmpDir, "config.yaml")
 
@@ -3405,6 +3407,7 @@ channels:
 }
 
 func TestExampleConfig_Valid(t *testing.T) {
+	t.Setenv("AGY_MODEL", "")
 	dir, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("failed to get working directory: %v", err)
@@ -3439,6 +3442,109 @@ func TestExampleConfig_Valid(t *testing.T) {
 	if defPolicy, ok := cfg.Current().Channels["default"]; !ok || defPolicy.Mode != "threads" {
 		t.Errorf("expected channels.default.mode to be 'threads', got %+v", defPolicy)
 	}
+}
+
+func TestVoiceConfig_UnmarshalAndValidation(t *testing.T) {
+	t.Parallel()
+
+	t.Run("ValidPrewarmedTargets", func(t *testing.T) {
+		t.Parallel()
+		yamlContent := `
+voice:
+  prewarmed_targets:
+    - "kiosk"
+    - " touch-kiosk-kitchen "
+    - ""
+    - "   "
+    - "livingroom-dock"
+`
+		cfg, err := LoadConfigFromBytes([]byte(yamlContent))
+		if err != nil {
+			t.Fatalf("unexpected error parsing voice config: %v", err)
+		}
+		targets := cfg.VoicePrewarmedTargets()
+		expected := []string{"kiosk", "touch-kiosk-kitchen", "livingroom-dock"}
+		if len(targets) != len(expected) {
+			t.Fatalf("expected %d targets, got %d: %v", len(expected), len(targets), targets)
+		}
+		for i, exp := range expected {
+			if targets[i] != exp {
+				t.Errorf("at index %d: expected %q, got %q", i, exp, targets[i])
+			}
+		}
+	})
+
+	t.Run("EmptyAndNilVoiceConfig", func(t *testing.T) {
+		t.Parallel()
+		// Omitted voice block defaults to kiosk for backwards compatibility
+		cfgDefault, err := LoadConfigFromBytes([]byte("model: test-model\n"))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		targetsDefault := cfgDefault.VoicePrewarmedTargets()
+		if len(targetsDefault) != 1 || targetsDefault[0] != "kiosk" {
+			t.Errorf("expected default ['kiosk'] targets for unspecified voice config, got: %v", targetsDefault)
+		}
+
+		// Explicitly empty prewarmed_targets yields empty slice
+		cfgEmpty, err := LoadConfigFromBytes([]byte("model: test-model\nvoice:\n  prewarmed_targets: []\n"))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		targetsEmpty := cfgEmpty.VoicePrewarmedTargets()
+		if len(targetsEmpty) != 0 {
+			t.Errorf("expected empty targets for explicit empty list, got: %v", targetsEmpty)
+		}
+
+		var nilCfg *Config
+		if nilTargets := nilCfg.VoicePrewarmedTargets(); len(nilTargets) != 0 {
+			t.Errorf("expected empty targets for nil *Config, got: %v", nilTargets)
+		}
+	})
+
+	t.Run("DeepCloneIndependence", func(t *testing.T) {
+		t.Parallel()
+		orig := &ConfigData{
+			Voice: VoiceConfig{
+				PrewarmedTargets: []string{"kiosk", "dock"},
+			},
+		}
+		cloned := cloneConfigData(orig)
+		if len(cloned.Voice.PrewarmedTargets) != 2 {
+			t.Fatalf("expected 2 cloned targets, got %d", len(cloned.Voice.PrewarmedTargets))
+		}
+
+		// Mutate cloned slice
+		cloned.Voice.PrewarmedTargets[0] = "mutated"
+		cloned.Voice.PrewarmedTargets = append(cloned.Voice.PrewarmedTargets, "extra")
+
+		if orig.Voice.PrewarmedTargets[0] != "kiosk" {
+			t.Errorf("OCP violation: mutating cloned targets affected original[0]: got %q, want 'kiosk'", orig.Voice.PrewarmedTargets[0])
+		}
+		if len(orig.Voice.PrewarmedTargets) != 2 {
+			t.Errorf("OCP violation: appending to cloned targets affected original length: got %d, want 2", len(orig.Voice.PrewarmedTargets))
+		}
+	})
+
+	t.Run("DefensiveGetterCopy", func(t *testing.T) {
+		t.Parallel()
+		yamlContent := `
+voice:
+  prewarmed_targets:
+    - "kiosk"
+`
+		cfg, err := LoadConfigFromBytes([]byte(yamlContent))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		t1 := cfg.VoicePrewarmedTargets()
+		t1[0] = "modified"
+
+		t2 := cfg.VoicePrewarmedTargets()
+		if t2[0] != "kiosk" {
+			t.Errorf("expected getter to return defensive copy: got %q, want 'kiosk'", t2[0])
+		}
+	})
 }
 
 

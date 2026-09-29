@@ -126,12 +126,14 @@ type VoiceAskRequest struct {
 	SessionID      string `json:"session_id,omitempty"`
 	ConversationID string `json:"conversation_id,omitempty"`
 	Effort         string `json:"effort,omitempty"`
+	NodeID         string `json:"node_id,omitempty"`
 }
 
 type VoiceAskResponse struct {
 	Reply          string `json:"reply"`
 	ConversationID string `json:"conversation_id,omitempty"`
 	SessionID      string `json:"session_id,omitempty"`
+	NodeID         string `json:"node_id,omitempty"`
 }
 
 func handleVoiceAsk(pool *queue.WorkerPool) http.HandlerFunc {
@@ -161,13 +163,22 @@ func handleVoiceAsk(pool *queue.WorkerPool) http.HandlerFunc {
 			return
 		}
 
-		sessionID := strings.TrimSpace(req.SessionID)
+		sessionID := strings.TrimSpace(req.NodeID)
+		if sessionID == "" {
+			sessionID = strings.TrimSpace(req.SessionID)
+		}
 		if sessionID == "" {
 			sessionID = strings.TrimSpace(req.ConversationID)
 		}
 		if sessionID == "" {
 			writeJSON(w, http.StatusBadRequest, map[string]string{
-				"error": "Invalid payload: 'session_id' (or 'conversation_id') is required to identify the device",
+				"error": "Invalid payload: 'session_id' (or 'node_id' / 'conversation_id') is required to identify the device",
+			})
+			return
+		}
+		if len(sessionID) > 128 || strings.ContainsAny(sessionID, "\r\n\x00") {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "Invalid payload: device identifier exceeds 128 characters or contains invalid characters",
 			})
 			return
 		}
@@ -269,6 +280,7 @@ func handleVoiceAsk(pool *queue.WorkerPool) http.HandlerFunc {
 			Reply:          reply,
 			ConversationID: convID,
 			SessionID:      convID,
+			NodeID:         req.NodeID,
 		})
 	}
 }
@@ -1097,7 +1109,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		AgyBin:           cur.AgyBin,
 		Cwd:              cur.DataDir,
 		Env:              os.Environ(),
-		PrewarmedTargets: []string{"kiosk"},
+		PrewarmedTargets: cfg.VoicePrewarmedTargets(),
 	}, appOpts.processSpawner)
 	defer func() {
 		if err := voicePool.Close(); err != nil {
