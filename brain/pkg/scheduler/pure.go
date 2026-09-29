@@ -213,6 +213,7 @@ func BuildOneShotScheduleRun(
 		Prompt:       oneShot.Prompt,
 		Status:       "enqueued",
 		StartedAt:    now,
+		Effort:       oneShot.Effort,
 	}
 }
 
@@ -235,6 +236,7 @@ func BuildOneShotMessage(
 		ScheduleRunID: runID,
 		CreatedAt:     now,
 		UpdatedAt:     now,
+		Effort:        oneShot.Effort,
 	}
 }
 

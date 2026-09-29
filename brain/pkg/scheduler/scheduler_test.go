@@ -495,6 +495,59 @@ func TestProcessDueOneShotSchedules(t *testing.T) {
 	}
 }
 
+func TestProcessDueOneShotSchedules_EffortPropagation(t *testing.T) {
+	store := setupTestStore(t)
+	defer store.Close()
+
+	now := time.Now().UTC()
+
+	oneShot := db.OneShotSchedule{
+		ID:        "oneshot-effort-test",
+		ThreadID:  "thread-effort-456",
+		Prompt:    "Check oven reminder",
+		RunAt:     now.Add(-1 * time.Minute),
+		CreatedAt: now.Add(-5 * time.Minute),
+		Effort:    "low",
+	}
+	if err := createOneShotSchedule(store, oneShot); err != nil {
+		t.Fatalf("Failed to create one shot schedule: %v", err)
+	}
+
+	threadCreator := newMockThreadCreator()
+	enqueuer := newMockEnqueuer()
+
+	if err := ProcessDueSchedules(context.Background(), newTestConfig(), store, enqueuer, threadCreator); err != nil {
+		t.Fatalf("ProcessDueSchedules error: %v", err)
+	}
+
+	msgs := enqueuer.getMessages()
+	if len(msgs) != 1 {
+		t.Fatalf("Expected 1 enqueued message, got %d", len(msgs))
+	}
+	if msgs[0].Effort != "low" {
+		t.Errorf("Expected enqueued message Effort 'low', got %q", msgs[0].Effort)
+	}
+
+	dbMsg, err := getMessage(store, msgs[0].ID)
+	if err != nil || dbMsg == nil {
+		t.Fatalf("Message not found in DB: %v", err)
+	}
+	if dbMsg.Effort != "low" {
+		t.Errorf("Expected DB message Effort 'low', got %q", dbMsg.Effort)
+	}
+
+	runs, _, err := getScheduleRunsPaginated(store, 10, 0, "oneshot-effort-test", "")
+	if err != nil {
+		t.Fatalf("Failed to query schedule runs: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("Expected 1 schedule run, got %d", len(runs))
+	}
+	if runs[0].Effort != "low" {
+		t.Errorf("Expected DB schedule run Effort 'low', got %q", runs[0].Effort)
+	}
+}
+
 func TestSchedulerStartAndStop(t *testing.T) {
 	store := setupTestStore(t)
 	defer store.Close()
