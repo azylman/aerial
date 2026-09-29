@@ -2140,6 +2140,211 @@ func TestClassifier_SystemOne_DecoupledThreadTitle(t *testing.T) {
 	}
 }
 
+func TestClassifier_SystemOne_AdditionalBranches(t *testing.T) {
+	t.Parallel()
 
+	// 1. Missing should_wake in answers
+	tsMissing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := systemOneResponse{
+			Model:   "orin-laya",
+			Answers: map[string]systemOneAnswer{},
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer tsMissing.Close()
 
+	var alertCalled bool
+	cfgMissing := config.NewFromData(&config.ConfigData{
+		ClassifierURL:      tsMissing.URL,
+		ClassifierProtocol: "systemone",
+	})
+	clsMissing := New(cfgMissing, nil, WithOnSystemAlert(func(endpoint string, err error) {
+		alertCalled = true
+	}))
+	resMissing := clsMissing.Classify(context.Background(), db.Message{AuthorName: "alex", Content: "Hi"}, nil, "")
+	if resMissing.Confidence != 0.0 || !strings.Contains(resMissing.Reason, "missing 'should_wake'") {
+		t.Errorf("expected missing answer failure, got %+v", resMissing)
+	}
+	if !alertCalled {
+		t.Error("expected alert callback to be invoked for missing answer")
+	}
 
+	// 2. Response error field returned from endpoint
+	tsErr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := systemOneResponse{
+			Error: "model out of memory",
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer tsErr.Close()
+
+	cfgErr := config.NewFromData(&config.ConfigData{
+		ClassifierURL:      tsErr.URL,
+		ClassifierProtocol: "systemone",
+	})
+	clsErr := New(cfgErr, nil,
+		WithRetryDelayFunc(func(attempt int) time.Duration { return 0 }),
+		WithRetrySleepFunc(func(ctx context.Context, d time.Duration) error { return nil }),
+	)
+	resErr := clsErr.Classify(context.Background(), db.Message{AuthorName: "alex", Content: "Hi"}, nil, "")
+	if resErr.Confidence != 0.0 || !strings.Contains(resErr.Reason, "model out of memory") {
+		t.Errorf("expected error response propagation, got %+v", resErr)
+	}
+
+	// 3. Invalid JSON payload response
+	tsBadJSON := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("not valid json {"))
+	}))
+	defer tsBadJSON.Close()
+
+	cfgBadJSON := config.NewFromData(&config.ConfigData{
+		ClassifierURL:      tsBadJSON.URL,
+		ClassifierProtocol: "systemone",
+	})
+	clsBadJSON := New(cfgBadJSON, nil,
+		WithRetryDelayFunc(func(attempt int) time.Duration { return 0 }),
+		WithRetrySleepFunc(func(ctx context.Context, d time.Duration) error { return nil }),
+	)
+	resBadJSON := clsBadJSON.Classify(context.Background(), db.Message{AuthorName: "alex", Content: "Hi"}, nil, "")
+	if resBadJSON.Confidence != 0.0 {
+		t.Errorf("expected confidence 0.0 on bad json, got %+v", resBadJSON)
+	}
+
+	// 4. Clamping < 0.0 and > 1.0
+	tsClampLow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := systemOneResponse{
+			Answers: map[string]systemOneAnswer{
+				"should_wake": {Confidence: -0.5},
+			},
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer tsClampLow.Close()
+	cfgClampLow := config.NewFromData(&config.ConfigData{
+		ClassifierURL:      tsClampLow.URL,
+		ClassifierProtocol: "systemone",
+	})
+	clsClampLow := New(cfgClampLow, nil)
+	resClampLow := clsClampLow.Classify(context.Background(), db.Message{AuthorName: "alex", Content: "Hi"}, nil, "")
+	if resClampLow.Confidence != 0.0 {
+		t.Errorf("expected clamped confidence 0.0, got %f", resClampLow.Confidence)
+	}
+
+	tsClampHigh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := systemOneResponse{
+			Answers: map[string]systemOneAnswer{
+				"should_wake": {Confidence: 1.5},
+			},
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer tsClampHigh.Close()
+	cfgClampHigh := config.NewFromData(&config.ConfigData{
+		ClassifierURL:      tsClampHigh.URL,
+		ClassifierProtocol: "systemone",
+	})
+	clsClampHigh := New(cfgClampHigh, nil)
+	resClampHigh := clsClampHigh.Classify(context.Background(), db.Message{AuthorName: "alex", Content: "Hi"}, nil, "")
+	if resClampHigh.Confidence != 1.0 {
+		t.Errorf("expected clamped confidence 1.0, got %f", resClampHigh.Confidence)
+	}
+
+	// 5. Empty ClassifierURL with systemone protocol
+	cfgEmptyURL := config.NewFromData(&config.ConfigData{
+		ClassifierURL:      "",
+		ClassifierProtocol: "systemone",
+	})
+	clsEmptyURL := New(cfgEmptyURL, nil)
+	resEmptyURL := clsEmptyURL.classifySystemOne(context.Background(), []db.Message{{AuthorName: "alex", Content: "Hi"}}, nil, "")
+	if resEmptyURL.Confidence != 0.0 || !strings.Contains(resEmptyURL.Reason, "classifier_url is empty") {
+		t.Errorf("expected error for empty classifier_url, got %+v", resEmptyURL)
+	}
+
+	// 6. Burst classification with System 1
+	tsBurst := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req systemOneRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if !strings.Contains(req.State, "msg1") || !strings.Contains(req.State, "msg2") {
+			t.Errorf("burst state missing messages: %s", req.State)
+		}
+		val := 0.88
+		resp := systemOneResponse{
+			Answers: map[string]systemOneAnswer{
+				"should_wake": {Noul: &val},
+			},
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer tsBurst.Close()
+	cfgBurst := config.NewFromData(&config.ConfigData{
+		ClassifierURL:      tsBurst.URL,
+		ClassifierProtocol: "systemone",
+	})
+	clsBurst := New(cfgBurst, nil)
+	resBurst := clsBurst.ClassifyBurst(context.Background(), []db.Message{
+		{AuthorName: "alex", Content: "msg1"},
+		{AuthorName: "alex", Content: "msg2"},
+	}, nil, "Custom instructions")
+	if resBurst.Confidence != 0.88 {
+		t.Errorf("expected burst confidence 0.88, got %f", resBurst.Confidence)
+	}
+
+	// 7. Role mention resolution & Author ID fallbacks in BuildSystemOneState
+	stateMsg := db.Message{
+		AuthorID: "123456",
+		Content:  "<@111> check <@&222>",
+		Metadata: db.MessageMetadata{
+			MentionUserIDs: []string{"111"},
+			MentionRoleIDs: []string{"222"},
+			Mentions:       []string{"Alice", "Admins"},
+		},
+	}
+	stateRes := BuildSystemOneState([]db.Message{stateMsg}, nil)
+	if !strings.Contains(stateRes, "@Alice") || !strings.Contains(stateRes, "@Admins") {
+		t.Errorf("state resolution missing user/role mentions: %s", stateRes)
+	}
+
+	// 8. Default System 1 retry delay / sleep functions and unconfigured runner fallback
+	clsDefaultRetries := New(nil, nil)
+	clsDefaultRetries.cfg = nil
+	if clsDefaultRetries.isSystemOne() {
+		t.Error("expected isSystemOne to be false for nil config")
+	}
+
+	// 9. ClassifierModel override and empty author
+	tsModelOverride := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		val := 0.77
+		resp := systemOneResponse{
+			Answers: map[string]systemOneAnswer{
+				"should_wake": {Noul: &val},
+			},
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer tsModelOverride.Close()
+
+	cfgModelOverride := config.NewFromData(&config.ConfigData{
+		ClassifierURL:      tsModelOverride.URL,
+		ClassifierProtocol: "systemone",
+		ClassifierModel:    "custom-modernbert",
+	})
+	clsModelOverride := New(cfgModelOverride, nil)
+	resModelOverride := clsModelOverride.Classify(context.Background(), db.Message{Content: "msg without author"}, nil, "")
+	if resModelOverride.Confidence != 0.77 {
+		t.Errorf("expected confidence 0.77, got %f", resModelOverride.Confidence)
+	}
+
+	// 10. Fallback runner for TitleLLMFunc when LLMFunc is nil and systemone protocol
+	cfgSystemOneOnly := config.NewFromData(&config.ConfigData{
+		ClassifierProtocol: "systemone",
+		AgyBin:             "echo",
+		APIKey:             "secret",
+	})
+	clsTitleRunner := New(cfgSystemOneOnly, func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+		return `{"status":"completed","response":"Generated Title"}`, "", 0, nil
+	})
+	titleRun, errRun := clsTitleRunner.TitleLLMFunc(context.Background(), "gemini", "summarize")
+	if errRun != nil || titleRun != "Generated Title" {
+		t.Errorf("expected runner-generated title, got %q, err: %v", titleRun, errRun)
+	}
+}
