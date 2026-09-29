@@ -69,6 +69,7 @@ type WorkerPoolConfig struct {
 	RetryDelayOverride time.Duration
 	SessionManager     *session.Manager
 	ProcessPool        *runner.UnifiedProcessPool
+	LowEffortProcessPool *runner.UnifiedProcessPool
 	VoiceProcessPool   *runner.UnifiedProcessPool
 	MaintenanceInterval time.Duration
 
@@ -113,8 +114,9 @@ type WorkerPool struct {
 	scopeLocks        sync.Map
 	webhookDispatcher WebhookDispatcher
 	summaryGroup      singleflight.Group
-	processPool       *runner.UnifiedProcessPool
-	voiceProcessPool  *runner.UnifiedProcessPool
+	processPool          *runner.UnifiedProcessPool
+	lowEffortProcessPool *runner.UnifiedProcessPool
+	voiceProcessPool     *runner.UnifiedProcessPool
 }
 
 // SummaryGroup returns the singleflight.Group coordinating thread summarizations for this pool instance.
@@ -312,8 +314,9 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 	p := &WorkerPool{
 		appCfg:            appCfg,
 		cfg:               cfg,
-		processPool:       cfg.ProcessPool,
-		voiceProcessPool:  cfg.VoiceProcessPool,
+		processPool:          cfg.ProcessPool,
+		lowEffortProcessPool: cfg.LowEffortProcessPool,
+		voiceProcessPool:     cfg.VoiceProcessPool,
 		hasCustomRunner:   hasCustomRunner,
 		sessionMgr:        sessMgr,
 		threadChs:         make(map[string]*threadWorkerState),
@@ -593,11 +596,17 @@ func (p *WorkerPool) Stop() {
 	p.StopWithTimeout(p.cfg.DrainTimeout)
 	p.mu.Lock()
 	procPool := p.processPool
+	lowPool := p.lowEffortProcessPool
 	voicePool := p.voiceProcessPool
 	p.mu.Unlock()
 	if procPool != nil {
 		if closeErr := procPool.Close(); closeErr != nil {
 			log.Printf("[WorkerPool] Warning: failed to close unified process pool: %v", closeErr)
+		}
+	}
+	if lowPool != nil {
+		if closeErr := lowPool.Close(); closeErr != nil {
+			log.Printf("[WorkerPool] Warning: failed to close low effort process pool: %v", closeErr)
 		}
 	}
 	if voicePool != nil {
@@ -618,6 +627,16 @@ func (p *WorkerPool) ProcessPool() *runner.UnifiedProcessPool {
 	return p.processPool
 }
 
+// LowEffortProcessPool returns the configured runner.UnifiedProcessPool for low effort turns, or nil if unconfigured or p is nil.
+func (p *WorkerPool) LowEffortProcessPool() *runner.UnifiedProcessPool {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.lowEffortProcessPool
+}
+
 // VoiceProcessPool returns the configured runner.UnifiedProcessPool for voice turns, or nil if unconfigured or p is nil.
 func (p *WorkerPool) VoiceProcessPool() *runner.UnifiedProcessPool {
 	if p == nil {
@@ -635,10 +654,14 @@ func (p *WorkerPool) MarkDirty() {
 	}
 	p.mu.Lock()
 	procPool := p.processPool
+	lowPool := p.lowEffortProcessPool
 	voicePool := p.voiceProcessPool
 	p.mu.Unlock()
 	if procPool != nil {
 		procPool.MarkDirty()
+	}
+	if lowPool != nil {
+		lowPool.MarkDirty()
 	}
 	if voicePool != nil {
 		voicePool.MarkDirty()

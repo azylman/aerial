@@ -126,12 +126,21 @@ func (p *WorkerPool) runThreadWorker(threadID string, state *threadWorkerState) 
 		case <-idleTimer.C:
 			p.mu.Lock()
 			if len(state.ch) == 0 && state.activeEnqueuers == 0 {
+				hasActiveTasks := false
 				if p.processPool != nil {
 					if d, ok := p.processPool.Get(threadID); ok && d != nil && d.TaskTracker().ActiveCount() > 0 {
-						p.mu.Unlock()
-						idleTimer.Reset(idleTimeout)
-						continue
+						hasActiveTasks = true
 					}
+				}
+				if !hasActiveTasks && p.lowEffortProcessPool != nil {
+					if d, ok := p.lowEffortProcessPool.Get(threadID); ok && d != nil && d.TaskTracker().ActiveCount() > 0 {
+						hasActiveTasks = true
+					}
+				}
+				if hasActiveTasks {
+					p.mu.Unlock()
+					idleTimer.Reset(idleTimeout)
+					continue
 				}
 				delete(p.threadChs, threadID)
 				p.scopeLocks.Delete(threadID)
