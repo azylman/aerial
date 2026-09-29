@@ -71,12 +71,12 @@ Whenever undertaking feature development, architectural changes, bug fixes, or s
 Code review and execution are structured dynamically across four complexity tiers:
 
 • **Tier 0 (≤ 5 LOC, single-line changes, config tweaks, doc typos)**:
-  - **Review Overhead**: Zero review. Both plan review and diff review subagents are completely bypassed. Direct implementation in the root thread with automated pre-flight syntax/YAML verification.
+  - **Review Overhead**: Zero review. Both plan review and diff review subagents are completely bypassed. Direct implementation with automated pre-flight syntax/YAML verification.
   - **Negative Scope Blacklist**: Strictly forbidden from Tier 0: SQL/database schemas, security/auth primitives, concurrency/mutex logic, Docker topology, or core runner loops (any touch auto-escalates to Tier 1+).
 
 • **Tier 1 (< 50 LOC, targeted bugfixes & test additions)**:
-  - **Review Overhead**: Inline root-thread execution. Plan and diff review subagents are completely bypassed to eliminate delegation overhead and premature yield chatter.
-  - **Execution**: Autonomous continuous execution (no mandatory stop) directly in the root thread, verified via targeted package unit tests and local pre-flight verification (`./scripts/verify.sh --staged`).
+  - **Review Overhead**: Zero review overhead. Plan and diff review subagents are completely bypassed to eliminate delegation overhead and premature yield chatter.
+  - **Execution**: Autonomous continuous execution (no mandatory stop). Simple single-file changes execute directly inline; multi-step fixes or test expansions can be delegated to a scoped subagent to keep the root transcript featherweight. Verified via targeted package unit tests and local pre-flight verification (`./scripts/verify.sh --staged`).
 
 • **Tier 2 (50–200 LOC, standard features & multi-package refactors)**:
   - **Plan Review**: The Girl Gang review panel audits the plan in an isolated subagent across 4 disciplines (~45s).
@@ -105,9 +105,11 @@ Code review and execution are structured dynamically across four complexity tier
   - **Zero Human Check-In Stalls**: For Tiers 0–2 (and approved Tier 3), execution is continuous without stopping to prompt the user for permission between individual tasks.
   - **Consolidated Pre-PR Review**: Code review panel audits are performed on the consolidated pre-PR diff before submission, rather than pausing to run full review panels after every micro-task.
 
-• **Orchestration & Subagent Delegation Invariant**:
-  - For Tier 2+ multi-file edits, test triage, and lint remediation loops exceeding tool budget thresholds, the primary agent acts as an orchestrator, delegating heavy tool loops to scoped, isolated subagents (for implementation/execution only).
-  - Tier 0 and Tier 1 changes execute directly inline in the root thread. Root transcript must remain featherweight (<50 steps) to prevent quadratic token compounding.
+• **Orchestration & Proactive Subagent-Driven Development (SDD) Invariant**:
+  - For Tier 2+ features, refactors, and complex multi-task implementations, the root agent acts primarily as an **orchestrator** rather than a monolithic implementer.
+  - **Proactive Subagent-Per-Task Execution**: Instead of executing long, monolithic tool loops in the root thread until quota or context limits are exhausted, the orchestrator proactively delegates each discrete implementation task to a dedicated, scoped subagent by default.
+  - **Token Isolation & Transcript Health**: Offloading implementation, test cycles, and lint remediation to isolated subagents keeps the root transcript featherweight (<50 steps), preventing quadratic token compounding across tool calls and eliminating the risk of runaway root-thread loops.
+  - **Tier 0 & Simple Tier 1**: Simple, single-step Tier 0 or Tier 1 changes (≤ 1–2 tool operations) may execute directly inline. If a Tier 1 fix expands into iterative debugging or multi-file remediation, delegate to an isolated subagent immediately.
 
 • **Subagent Model Allocation Matrix**:
   - **Implementation Subagents (Low-Effort Tier)**: When dispatching subagents to write code or tests per an implementation plan, always specify `Model: "flash"` (or `"flash_lite"`). Implementing code from an approved plan is transcription and verification, not open-ended reasoning. Using high-effort models for routine coding burns quota and increases turn latency.
@@ -155,8 +157,12 @@ Stage 6: Commit, Push & Asynchronous PR Deployment
    - Clarify scope, system constraints, persistence schemas, concurrency boundaries, and failure modes before writing code.
 2. **Initialize Workspace**:
    - Workspaces are initialized into ephemeral scratch directories via `scripts/aerial-pr.sh init` or `scripts/aerial-config-pr.sh init`.
-3. **Draft Implementation Plan**:
+3. **Draft Implementation Plan & Task Sizing (~15-Minute Granularity)**:
    - Scope and author `implementation_plan.md` per the requirements of your classification tier in `GEMINI.md` Section 8 (omitted for Tier 0, lightweight task list for Tier 1, formal specification for Tiers 2/3).
+   - **Task Right-Sizing (~15-Minute Target Length)**:
+     - Decompose the implementation plan into discrete, self-contained tasks sized to approximately **15 minutes of execution length** (typically: 1 failing test + minimal code to pass + local verification + atomic commit).
+     - Avoid monolithic, sprawling tasks as well as microscopic trivialities.
+     - **Session Rotation Synergy**: Sizing tasks to ~15 minutes creates natural turn boundaries between tasks. This allows the root orchestrator or process pool (`UnifiedProcessPool`) clean opportunities to rotate sessions (`ShouldRotate` evaluated when `InflightCount() == 0`) and compact context between tasks without risking context rot or token exhaustion.
 
 ---
 
@@ -174,10 +180,14 @@ Before modifying source code, Aerial MUST audit the plan according to the classi
 ---
 
 ### Stage 4: Autonomous Continuous Implementation (TDD)
-1. **Modular Task Execution (TDD)**:
-   - Break implementation into discrete, sequential components/tasks.
-   - Implement following Test-Driven Development (write tests first, then implementation).
-   - Verify task unit tests pass with race detection (`-race`).
+1. **Subagent-Driven Development (SDD) & Modular Task Execution**:
+   - **Orchestrator Workflow**: For Tier 2+ features, refactors, and multi-task implementations, the root agent drives implementation sequentially through the planned ~15-minute tasks:
+     - For each task, dispatch a dedicated, scoped implementation subagent equipped with the task specification, acceptance criteria, and hermetic testing instructions.
+     - The subagent follows strict TDD: writes the failing test first, runs it to confirm RED, writes minimal code to pass, verifies GREEN, checks test coverage and lint, and creates an atomic commit.
+     - The subagent reports back a concise execution summary and verification evidence.
+     - The root orchestrator inspects the subagent's report, confirms task completion, and advances to the next task.
+   - **Turn-Boundary Session Rotation**: Because tasks are right-sized to ~15 minutes, each subagent completes within a small, isolated context (<15–20 steps). Between tasks, when no subagents or turns are in flight, the root agent or process pool can safely rotate sessions or compact memory without interrupting active operations.
+   - **TDD Rigor**: All new functionality and bug fixes must follow Test-Driven Development (tests first, then implementation), verified with race detection (`-race`).
 2. **Coding & Architectural Review Standards**:
    - **No Change Detectors & Hand-Derived Literals**: Tests must verify observable behavior, never internal constants, private struct fields, or exact log wording. Expected values must be hand-derived literals or static fixtures—never computed using the same builder or helper logic under test.
    - **Defense-in-Depth Validation**: When designing or validating input handling, validate across all layers (API entry point, domain business logic, environment guards) so invalid states become structurally impossible to reach.
