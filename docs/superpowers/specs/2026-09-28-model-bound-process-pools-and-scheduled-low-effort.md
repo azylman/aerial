@@ -2,15 +2,16 @@
 
 ## 1. Executive Summary & Goals
 
-This specification formalizes the architectural separation of process pools by model and establishes low effort as the default execution tier for all scheduled operations across Aerial.
+This specification formalizes the architectural separation of process pools by model and establishes low effort as the universal default execution tier for all scheduled operations across Aerial.
 
 Prior to this design, `UnifiedProcessPool` attempted to multiplex multiple models within a single pool via a static `TargetModels map[string]string` table while defaulting dynamic keys (such as Discord thread IDs) to `DefaultModel`. This caused all scheduled cron turns and one-shot reminders running in Discord threads to execute on the primary high-effort model (`gemini-3.7-pro`), dropping the worker's resolved `lowEffortModel` before process execution while falsely recording low-effort telemetry in Prometheus and the database. Furthermore, one-shot reminders (`schedule_once`) lacked an `effort` field entirely, and recurring crons (`schedule_recurring`) defaulted to high effort.
 
-This design achieves four primary goals:
+This design achieves five primary architectural goals:
 - **Homogeneous Model-Bound Process Pools**: Every `UnifiedProcessPool` instance is bound to a single immutable model (via `PoolConfig.Model`), matching its bound `GeminiHomeDir`. Internal multi-model multiplexing (`TargetModels` and `DefaultModel`) is completely eliminated.
 - **Dual Process Pool Routing in Discord**: `brain/main.go` instantiates dual process pools for Discord (`discordPrimaryPool` using `cur.Model` and `discordLowEffortPool` using `cur.LowEffortModel`). `WorkerPool` selectively routes incoming turns to the appropriate pool based on turn effort.
+- **Subprocess Lifecycle & Zombie Reaping Hardening**: Daemon subprocess lifecycles are decoupled from transient caller request contexts, preventing accidental `SIGKILL` on turn completion. Process exit reaping via `handle.Wait()` is strictly mandated to eliminate zombie (`<defunct>`) processes.
+- **Dual-Pool Session Isolation & Anti-Flapping**: Discord threads running scheduled low-effort turns maintain independent transcripts without corrupting or ping-ponging the primary conversation's `sessions` table record.
 - **Universal Low-Effort Scheduled Default**: All scheduled operations—both recurring cron routines (`schedule_recurring`) and one-shot reminders/PR checks (`schedule_once`)—default to `"low"` effort across `scheduler-mcp`, SQLite/Postgres schemas, and event dispatch.
-- **Zero Process Mutation**: Daemons in a pool never undergo process-level model restarts or argument mutation. If a thread requires a different effort tier, turns are routed to the corresponding pool cleanly.
 
 ---
 
@@ -41,9 +42,9 @@ The system instantiates three model-bound singleton process pools in `brain/main
                                         |              |
                     Discord Interactive |              | Scheduled / Low-Effort / Voice
                                         v              v
-               +---------------------------+   +-------------------------------+
-               | WorkerPool (Standard)     |   | WorkerPool (Low Effort)       |
-               +---------------------------+   +-------------------------------+
+               +----------------------------+   +-------------------------------+
+               | WorkerPool (Standard)      |   | WorkerPool (Low Effort)       |
+               +----------------------------+   +-------------------------------+
                             |                                  |
                             v                                  v
              +------------------------------+   +-------------------------------+
@@ -68,20 +69,36 @@ The system instantiates three model-bound singleton process pools in `brain/main
 
 #### Configuration Changes in `unified_pool.go`
 - In `PoolConfig`:
-  - Delete `DefaultModel string`.
+  - Replace `DefaultModel string` with `Model string` (required).
   - Delete `TargetModels map[string]string`.
-  - Add `Model string` (required). If empty, return an error on `NewUnifiedProcessPool` or validation.
+  - For backward compatibility during migration, if `Model` is empty, fallback to `DefaultModel`. If both are empty, return an error on `NewUnifiedProcessPool`.
 - In `UnifiedProcessPool`:
+  - Add pool lifecycle context `ctx context.Context` and `cancel context.CancelFunc` initialized in `NewUnifiedProcessPool` to bound long-lived daemon subprocesses.
   - Add method `Model() string` returning `p.cfg.Model`.
   - In `GetOrCreate(ctx context.Context, targetKey string)`:
     - Eliminate all `TargetModels` and `DefaultModel` resolution logic.
     - Set `daemonCfg.Model = p.cfg.Model`.
     - Every spawned `StreamingDaemon` is started with `p.cfg.Model`.
+    - Pass pool lifecycle context `p.ctx` to `StartStreamingDaemon` for process lifetime bounding, while caller's `ctx` bounds only the startup handshake timeout.
+  - In `Close()`:
+    - Cancel pool lifecycle context `p.cancel()`.
+    - Close daemons concurrently using `sync.WaitGroup` to avoid sequential head-of-line blocking on shutdown.
+
+#### Subprocess Lifecycle & Spawner Hardening in `spawner.go`
+- Context Decoupling in `DefaultDaemonSpawner.Spawn`:
+  - `exec.CommandContext(ctx, ...)` must NOT be bound to a transient request or turn context.
+  - Pass the pool's long-lived lifecycle context to `exec.CommandContext` (or manage explicit termination on pool shutdown), ensuring that when a single turn context cancels or times out, Go does not send `SIGKILL` to the persistent daemon subprocess.
+  - Caller's handshake context strictly bounds the initial ready signal read loop in `StartStreamingDaemon`.
+- Process Handle Reaping in `streaming_daemon.go`:
+  - In `StreamingDaemon.Close()`:
+    - After calling `d.handle.Kill()`, explicitly call `d.handle.Wait()` (or await completion in a supervised reaper goroutine) to reap child process exit status and avoid `<defunct>` zombie process accumulation in Linux containers.
 
 #### Testing in `brain/pkg/runner`
-- Update unit tests in `unified_pool_test.go` to construct pools with `Model: "model-name"` instead of `DefaultModel` / `TargetModels`.
+- Update unit tests in `unified_pool_test.go` to construct pools with `Model: "model-name"`.
 - Verify `p.Model()` returns the configured model.
 - Verify daemons spawned under any `targetKey` inherit `p.cfg.Model`.
+- Verify concurrent `Close()` terminates daemons cleanly without deadlocks.
+- Verify zombie reaping on daemon termination.
 
 ---
 
@@ -95,26 +112,76 @@ The system instantiates three model-bound singleton process pools in `brain/main
 - In `WorkerPool`:
   - Add field `lowEffortProcessPool *runner.UnifiedProcessPool`.
   - Add accessor method `LowEffortProcessPool() *runner.UnifiedProcessPool`.
-  - In `Stop()` and `StopWithTimeout(timeout time.Duration)`:
+  - In `MarkDirty()`:
+    - Notify `p.processPool.MarkDirty()`, `p.lowEffortProcessPool.MarkDirty()`, and `p.voiceProcessPool.MarkDirty()`.
+  - In `StopWithTimeout(drainTimeout time.Duration)`:
+    - Preserve queue draining in Stage 1 without prematurely closing pools.
+  - In `Stop()`:
     - Gracefully close `p.processPool`, `p.lowEffortProcessPool`, and `p.voiceProcessPool`.
 
 #### Turn Routing in `worker.go`
 - Model and Effort Resolution:
-  - Worker computes `isLowEffort` as before by scanning `te.burst` for `strings.EqualFold(m.Effort, "low")`.
-  - Sets `currentModel = lowEffortModel` if `isLowEffort`.
+  - Worker computes `isLowEffort` by inspecting burst messages for `strings.EqualFold(m.Effort, "low")`.
+  - Sets `currentModel = lowEffortModel` if `isLowEffort`, otherwise `cur.Model`.
 - Process Pool Selection:
-  - If `isLowEffort && te.pool.lowEffortProcessPool != nil`:
-    - `activePool = te.pool.lowEffortProcessPool`
-  - Else:
-    - `activePool = te.pool.processPool`
+  - Select active pool:
+    ```go
+    activePool := te.pool.processPool
+    if isLowEffort && te.pool.lowEffortProcessPool != nil {
+        activePool = te.pool.lowEffortProcessPool
+    }
+    ```
+  - Fail-safe fallback: If `te.pool.lowEffortProcessPool` is nil (e.g. in legacy tests), log structured warning and fall back safely to `te.pool.processPool`.
 - Daemon Acquisition and Execution:
   - `daemon, daemonErr := activePool.GetOrCreate(runCtx, te.threadID)`
-  - Turn is executed via `daemon.Send(promptToSend, turnCtx)`.
+  - Execute turn via `daemon.Send(promptToSend, turnCtx)`.
+- Session ID Coordination & Anti-Flapping:
+  - When executing on `lowEffortProcessPool` for a thread that has an existing primary session, the low-effort daemon maintains its own session ID and transcript locally.
+  - To prevent database session ID flapping and race conditions with active interactive conversations, `te.saveSessionID(te.threadID, sessionID)` must NOT overwrite the primary `sessions` table record when running a low-effort scheduled turn on a thread with an existing primary session.
+  - The low-effort session ID is recorded in message metadata and schedule run records.
 - Error and Quota Rotation:
-  - If rotation is triggered by quota pause or session reset:
-    - Rotate on `activePool.RotateDaemon(context.Background(), te.threadID, "")`.
-- Yield Trap Detection:
-  - Check active tasks on `activePool` first; fall back to checking `processPool` if needed to ensure no background task completion is missed.
+  - When rotation is triggered by quota pause or session reset:
+    - Call `RotateDaemon` on `activePool.RotateDaemon(context.Background(), te.threadID, "")`.
+- Quota Retry Effort Preservation:
+  - In `worker.go` quota pause handling, when creating `db.OneShotSchedule` for an auto-retry, explicitly preserve the active turn's effort:
+    ```go
+    retryEffort := "high"
+    if isLowEffort {
+        retryEffort = "low"
+    }
+    oneShot := db.OneShotSchedule{
+        ID:        oneShotID,
+        ThreadID:  te.threadID,
+        Prompt:    retryPrompt,
+        RunAt:     runAt,
+        CreatedAt: time.Now().UTC(),
+        Effort:    retryEffort,
+    }
+    ```
+- Yield Trap & Eviction Protection:
+  - In `burst.go` (idle eviction loop), inspect BOTH pools before evicting thread workers:
+    ```go
+    hasActiveTasks := false
+    if p.processPool != nil {
+        if d, ok := p.processPool.Get(threadID); ok && d != nil && d.TaskTracker().ActiveCount() > 0 {
+            hasActiveTasks = true
+        }
+    }
+    if !hasActiveTasks && p.lowEffortProcessPool != nil {
+        if d, ok := p.lowEffortProcessPool.Get(threadID); ok && d != nil && d.TaskTracker().ActiveCount() > 0 {
+            hasActiveTasks = true
+        }
+    }
+    if hasActiveTasks {
+        p.mu.Unlock()
+        idleTimer.Reset(idleTimeout)
+        continue
+    }
+    ```
+  - In `worker.go` yield-trap detection:
+    - Check `activePool` for active tasks.
+    - If `activePool` has zero active tasks, check the alternate pool as fallback.
+    - Latch the specific daemon that owns the active tasks (`trackerDaemon`) to ensure task status and logs resolve to the correct session.
 
 ---
 
@@ -147,20 +214,29 @@ The system instantiates three model-bound singleton process pools in `brain/main
   - Update `ScheduleRecurringArgs` validation:
     - Normalize: `effort := strings.ToLower(strings.TrimSpace(args.Effort))`
     - If `effort != "high"` -> default to `"low"`.
+    - Persist `sched.Effort = effort`.
 - `update_cron_schedule`:
   - Retain ability to switch effort explicitly between `"low"` and `"high"`.
 - `OneShotSchedule` Struct in `db.go`:
   - Add `Effort string` field.
 
 #### Database Persistence in `scheduler-mcp/db.go`
-- In `InitDB`:
-  - SQLite: `CREATE TABLE IF NOT EXISTS one_shot_schedules (id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, prompt TEXT NOT NULL, run_at TIMESTAMPTZ NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP, effort TEXT NOT NULL DEFAULT 'low');`
-  - Postgres: Add migration `ALTER TABLE one_shot_schedules ADD COLUMN IF NOT EXISTS effort TEXT NOT NULL DEFAULT 'low';`.
-  - Update `cron_schedules` table default: `effort TEXT NOT NULL DEFAULT 'low'`.
-- In `InsertOneShotSchedule`:
-  - Insert `effort` column.
-- In `ListOneShotSchedules`:
-  - Query and scan `COALESCE(effort, 'low')`.
+- Schema Definition:
+  - SQLite Schema:
+    - In `InitDB` / `sqlite_test_fixture_test.go`:
+      `CREATE TABLE IF NOT EXISTS one_shot_schedules (id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, prompt TEXT NOT NULL, run_at TIMESTAMPTZ NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP, effort TEXT NOT NULL DEFAULT 'low');`
+      `CREATE TABLE IF NOT EXISTS cron_schedules (..., effort TEXT NOT NULL DEFAULT 'low', ...);`
+  - Postgres Schema Migrations:
+    - `ALTER TABLE one_shot_schedules ADD COLUMN IF NOT EXISTS effort TEXT NOT NULL DEFAULT 'low';`
+    - `ALTER TABLE one_shot_schedules ALTER COLUMN effort SET DEFAULT 'low';`
+    - `ALTER TABLE cron_schedules ADD COLUMN IF NOT EXISTS effort TEXT NOT NULL DEFAULT 'low';`
+    - `ALTER TABLE cron_schedules ALTER COLUMN effort SET DEFAULT 'low';`
+- Queries and Scans:
+  - In `InsertOneShotSchedule`:
+    - Insert `effort` column (`$6` / `?`).
+    - If `sched.Effort == ""` or `sched.Effort != "high"`, normalize to `"low"`.
+  - In `ListOneShotSchedules`:
+    - Query and scan `COALESCE(NULLIF(effort, ''), 'low')`.
 
 ---
 
@@ -175,29 +251,49 @@ The system instantiates three model-bound singleton process pools in `brain/main
   - Change default from `'high'` to `'low'`: `effort TEXT NOT NULL DEFAULT 'low'`.
 - Postgres schema notices:
   - `ALTER TABLE one_shot_schedules ADD COLUMN IF NOT EXISTS effort TEXT NOT NULL DEFAULT 'low'`
+  - `ALTER TABLE one_shot_schedules ALTER COLUMN effort SET DEFAULT 'low'`
+  - `ALTER TABLE cron_schedules ADD COLUMN IF NOT EXISTS effort TEXT NOT NULL DEFAULT 'low'`
   - `ALTER TABLE cron_schedules ALTER COLUMN effort SET DEFAULT 'low'`
+  - `ALTER TABLE schedule_runs ADD COLUMN IF NOT EXISTS effort TEXT NOT NULL DEFAULT 'low'`
   - `ALTER TABLE schedule_runs ALTER COLUMN effort SET DEFAULT 'low'`
 
 #### Query and Scan Updates in `schedules.go`
 - Update `OneShotSchedule` struct:
   - Add `Effort string` field.
-- Update `InsertOneShotSchedule`:
+- Update `CreateOneShotSchedule`:
+  - If `database == nil`, return `fmt.Errorf("database is nil")` (strictly zero swallowed errors).
+  - Normalize: if `strings.ToLower(strings.TrimSpace(s.Effort)) != "high"`, set `s.Effort = "low"`.
   - Insert `effort` column (`$6`).
 - Update `GetDueOneShotSchedules` and `GetAllOneShotSchedules`:
-  - Select `COALESCE(effort, 'low')` and scan into `s.Effort`.
+  - Select `COALESCE(NULLIF(effort, ''), 'low')` and scan into `s.Effort`.
+- Update `CreateCronSchedule`:
+  - If `database == nil`, return `fmt.Errorf("database is nil")`.
+  - Normalize: if `strings.ToLower(strings.TrimSpace(c.Effort)) != "high"`, set `c.Effort = "low"`.
+- Update `GetDueCronSchedules` and `GetAllCronSchedules`:
+  - Select `COALESCE(NULLIF(effort, ''), 'low')` and scan into `c.Effort`.
+- Update `CreateScheduleRun`:
+  - If `database == nil`, return `fmt.Errorf("database is nil")`.
+  - Normalize: if `strings.ToLower(strings.TrimSpace(run.Effort)) != "high"`, set `run.Effort = "low"`.
+- Update `GetScheduleRunsPaginated`:
+  - Select `COALESCE(NULLIF(effort, ''), 'low')` and scan into `r.Effort`.
+
+#### SQLite Test Fixtures Updates
+- In `brain/pkg/db/sqlite_test_fixture_test.go` and `scheduler-mcp/sqlite_test_fixture_test.go`:
+  - Update `sqliteSchema` table definitions for `one_shot_schedules`, `cron_schedules`, and `schedule_runs` with `effort TEXT NOT NULL DEFAULT 'low'`.
+  - In migration loops, add `ALTER TABLE one_shot_schedules ADD COLUMN effort TEXT NOT NULL DEFAULT 'low';` ignoring duplicate column errors.
 
 ---
 
 ### 3.6. Scheduler Event Dispatch (`brain/pkg/scheduler`)
 
 #### Pure Constructor Updates in `pure.go`
-- In `BuildOneShotMessage`:
-  - Map `Effort: oneShot.Effort`.
 - In `BuildOneShotScheduleRun`:
-  - Map `Effort: oneShot.Effort`.
-- In `BuildCronMessage`:
-  - Retain `Effort: cron.Effort` (which now defaults to `"low"`).
+  - Set `Effort: oneShot.Effort`.
+- In `BuildOneShotMessage`:
+  - Set `Effort: oneShot.Effort`.
 - In `BuildCronScheduleRun`:
+  - Retain `Effort: cron.Effort` (which now defaults to `"low"`).
+- In `BuildCronMessage`:
   - Retain `Effort: cron.Effort` (which now defaults to `"low"`).
 
 ---
@@ -212,7 +308,8 @@ The system instantiates three model-bound singleton process pools in `brain/main
 ## 4. Invariants & Guardrails
 
 - **Zero Markdown Tables**: All artifacts, commit messages, code comments, and summaries strictly use bulleted lists.
-- **Zero Swallowed Errors**: Every error path in pool acquisition, database scan, and daemon lifecycle must be logged with structured context or propagated.
+- **Zero Swallowed Errors**: Every error path in pool acquisition, database scan, spawner failure, and daemon lifecycle must be logged with structured context or propagated.
 - **Coverage Floor**: Maintain strictly >= 95.0% statement coverage across all modified packages (`brain/pkg/runner`, `brain/pkg/queue`, `brain/pkg/db`, `brain/pkg/scheduler`, `scheduler-mcp`, and root `brain`).
 - **Hermetic Testing**: All unit tests must use in-memory pipes, mock spawners, or SQLite test fixtures without spawning live OS processes or external network calls.
 - **Fail-Safe Fallbacks**: If `LowEffortProcessPool` is nil in unit tests, `WorkerPool` falls back safely to `ProcessPool` with structured logging.
+- **Clean Zombie Reaping**: All terminated process handles must be waited on to reclaim OS resources and avoid `<defunct>` process leaks.
