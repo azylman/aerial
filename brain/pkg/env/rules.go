@@ -27,8 +27,9 @@ const (
 type RuleTarget string
 
 const (
-	TargetDiscord RuleTarget = "discord"
-	TargetVoice   RuleTarget = "voice"
+	TargetDiscord   RuleTarget = "discord"
+	TargetVoice     RuleTarget = "voice"
+	TargetEphemeral RuleTarget = "ephemeral"
 )
 
 var (
@@ -182,6 +183,17 @@ func (p *Provisioner) compileTargetRules(target RuleTarget, customPrompt string)
 	// Lobotomy Guardrail: if 0 common rule files discovered across both, abort!
 	if len(aerialCommon)+len(configCommon) == 0 {
 		return nil, fmt.Errorf("rules compilation aborted: common rules directory has 0 files (potential mount or git sync failure)")
+	}
+
+	// For TargetEphemeral, strictly whitelist 01-identity.md for user common rules (omitting persona, style, etc.)
+	if target == TargetEphemeral {
+		var filteredConfigCommon []ruleSourceFile
+		for _, r := range configCommon {
+			if r.filename == "01-identity.md" {
+				filteredConfigCommon = append(filteredConfigCommon, r)
+			}
+		}
+		configCommon = filteredConfigCommon
 	}
 
 	// 3. Target rules from aerial: prefix 20_aerial_<target>_
@@ -456,7 +468,14 @@ func (p *Provisioner) SyncRules(customPrompt string) error {
 		return vErr
 	}
 
-	// 3. Sync to primary homeDir (.gemini) with Discord target as default
+	// 3. Compile Ephemeral target rules
+	ephemeralRules, eErr := p.compileTargetRules(TargetEphemeral, "")
+	if eErr != nil {
+		log.Printf("[Env] ERROR: Failed to compile Ephemeral rules: %v; retaining existing rules", eErr)
+		return eErr
+	}
+
+	// 4. Sync to primary homeDir (.gemini) with Discord target as default
 	primaryGemini := filepath.Join(p.homeDir, ".gemini")
 	if err := p.syncRulesToDir(discordRules, primaryGemini); err != nil {
 		return fmt.Errorf("failed to sync rules to primary home: %w", err)
@@ -474,7 +493,7 @@ func (p *Provisioner) SyncRules(customPrompt string) error {
 		p.linkSharedSessionStorage(primaryGemini, canonicalBrain, canonicalConversations)
 	}
 
-	// 4. If dataDir is configured, provision isolated runtimes for discord and voice
+	// 5. If dataDir is configured, provision isolated runtimes for discord, voice, and ephemeral
 	if p.dataDir != "" {
 		runtimesRoot := filepath.Join(p.dataDir, "runtimes")
 
@@ -492,6 +511,14 @@ func (p *Provisioner) SyncRules(customPrompt string) error {
 			log.Printf("[Env] Warning: failed to sync rules to voice runtime: %v", err)
 		} else {
 			p.provisionRuntimeSharedAssets(voiceHome)
+		}
+
+		ephemeralHome := filepath.Join(runtimesRoot, string(TargetEphemeral))
+		ephemeralGemini := filepath.Join(ephemeralHome, ".gemini")
+		if err := p.syncRulesToDir(ephemeralRules, ephemeralGemini); err != nil {
+			log.Printf("[Env] Warning: failed to sync rules to ephemeral runtime: %v", err)
+		} else {
+			p.provisionRuntimeSharedAssets(ephemeralHome)
 		}
 	}
 

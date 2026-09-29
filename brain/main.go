@@ -865,24 +865,6 @@ func InitializeBrainEnvironment(ctx context.Context, cfg *config.Config) error {
 		log.Printf("Warning: env sync error: %v", err)
 		return err
 	}
-
-	dataDir := cfg.DataDir()
-	if _, err := os.Stat(dataDir); err == nil {
-		brainDir := filepath.Join(dataDir, "brain")
-		if err := os.MkdirAll(brainDir, 0755); err != nil {
-			log.Printf("Warning: MkdirAll %s error: %v", brainDir, err)
-		}
-		homeDir := cfg.GeminiHomeDir()
-		cliBrainDir := filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain")
-		if err := os.MkdirAll(filepath.Dir(cliBrainDir), 0755); err != nil {
-			log.Printf("Warning: MkdirAll cliBrainDir parent error: %v", err)
-		}
-		if _, err := os.Lstat(cliBrainDir); err != nil {
-			if err := os.Symlink(brainDir, cliBrainDir); err != nil {
-				log.Printf("Warning: Symlink %s error: %v", brainDir, err)
-			}
-		}
-	}
 	return nil
 }
 
@@ -1070,8 +1052,17 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		lowEffortModel = "gemini-3.8-flash-low"
 	}
 
-	discordHome := filepath.Join(cur.DataDir, "runtimes", "discord")
-	voiceHome := filepath.Join(cur.DataDir, "runtimes", "voice")
+	runtimeBase := cur.DataDir
+	if runtimeBase == "" {
+		runtimeBase = cfg.DataDir()
+	}
+	if runtimeBase == "" {
+		runtimeBase = cfg.GeminiHomeDir()
+	}
+
+	discordHome := filepath.Join(runtimeBase, "runtimes", "discord")
+	voiceHome := filepath.Join(runtimeBase, "runtimes", "voice")
+	ephemeralHome := filepath.Join(runtimeBase, "runtimes", "ephemeral")
 
 	discordPrimaryPool := runner.NewUnifiedProcessPool(runner.PoolConfig{
 		GeminiHomeDir: discordHome,
@@ -1087,7 +1078,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	}()
 
 	discordLowEffortPool := runner.NewUnifiedProcessPool(runner.PoolConfig{
-		GeminiHomeDir:    discordHome,
+		GeminiHomeDir:    ephemeralHome,
 		Model:            lowEffortModel,
 		AgyBin:           cur.AgyBin,
 		Cwd:              cur.DataDir,

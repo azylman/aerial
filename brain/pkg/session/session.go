@@ -316,7 +316,7 @@ func (m *Manager) getTargetDirs(convID string) []string {
 			}
 		}
 		if m.dataDir != "" {
-			for _, runtime := range []string{"discord", "voice"} {
+			for _, runtime := range []string{"discord", "voice", "ephemeral"} {
 				p := filepath.Join(m.dataDir, "runtimes", runtime, ".gemini", "antigravity-cli", "brain", convID)
 				if !seen[p] {
 					res = append(res, p)
@@ -1422,7 +1422,7 @@ func (m *Manager) conversationCandidateDirs() []string {
 	var dirs []string
 	if m.dataDir != "" {
 		dirs = append(dirs, filepath.Join(m.dataDir, "conversations"))
-		for _, runtime := range []string{"discord", "voice"} {
+		for _, runtime := range []string{"discord", "voice", "ephemeral"} {
 			dirs = append(dirs,
 				filepath.Join(m.dataDir, "runtimes", runtime, ".gemini", "antigravity-cli", "conversations"),
 				filepath.Join(m.dataDir, "runtimes", runtime, ".gemini", "antigravity", "conversations"),

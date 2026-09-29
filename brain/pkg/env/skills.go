@@ -57,14 +57,18 @@ func (p *Provisioner) SyncSkills() error {
 
 		voiceRuntimeDir := filepath.Join(p.dataDir, "runtimes", "voice", ".gemini", "config", "skills")
 		voiceCount := p.LinkTargetSkills(voiceRuntimeDir, TargetVoice)
-		log.Printf("[Skills] Synchronized skills: %d discord skills, %d voice skills", discordCount, voiceCount)
+
+		ephemeralRuntimeDir := filepath.Join(p.dataDir, "runtimes", "ephemeral", ".gemini", "config", "skills")
+		ephemeralCount := p.LinkTargetSkills(ephemeralRuntimeDir, TargetEphemeral)
+
+		log.Printf("[Skills] Synchronized skills: %d discord skills, %d voice skills, %d ephemeral skills", discordCount, voiceCount, ephemeralCount)
 	}
 
 	return nil
 }
 
-// LinkTargetSkills links categorized skills for the specified target (discord or voice) into targetDir.
-// It scans {source}/common/ and {source}/{target}/, rejects flat un-nested skills with a warning,
+// LinkTargetSkills links categorized skills for the specified target (discord, voice, or ephemeral) into targetDir.
+// It scans {source}/common/ and {source}/{target}/ (or only {source}/ephemeral/ for TargetEphemeral), rejects flat un-nested skills with a warning,
 // validates that SKILL.md is non-empty (>0 bytes), and actively prunes unauthorized symlinks.
 func (p *Provisioner) LinkTargetSkills(targetDir string, target RuleTarget) int {
 	if p == nil || targetDir == "" {
@@ -83,6 +87,9 @@ func (p *Provisioner) LinkTargetSkills(targetDir string, target RuleTarget) int 
 	}
 
 	targetSubdirs := []string{"common", string(target)}
+	if target == TargetEphemeral {
+		targetSubdirs = []string{string(target)}
+	}
 
 	for _, srcBase := range sourceDirs {
 		if srcBase == "" {
@@ -96,12 +103,12 @@ func (p *Provisioner) LinkTargetSkills(targetDir string, target RuleTarget) int 
 					continue
 				}
 				name := entry.Name()
-				if name == "common" || name == "discord" || name == "voice" {
+				if name == "common" || name == "discord" || name == "voice" || name == "ephemeral" {
 					continue
 				}
 				candidateMD := filepath.Join(srcBase, name, "SKILL.md")
 				if fi, err := os.Stat(candidateMD); err == nil && !fi.IsDir() {
-					log.Printf("[Skills] Warning: ignoring root-level skill %q in %s; skills must be categorized under 'common', 'discord', or 'voice'", name, srcBase)
+					log.Printf("[Skills] Warning: ignoring root-level skill %q in %s; skills must be categorized under 'common', 'discord', 'voice', or 'ephemeral'", name, srcBase)
 				}
 			}
 		}

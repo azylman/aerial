@@ -1,54 +1,72 @@
-# Implementation Plan - Streaming Sentence SSE Events for Voice Kiosk
+# Implementation Plan - TargetEphemeral Runtime Isolation
 
-## Overview
-Enable real-time sentence streaming in Aerial Brain's `POST /voice/ask` and `POST /api/voice/ask` SSE endpoints to feed the Mirrormere Voice Hub with `event: sentence` payloads. This allows the local wall kiosk to synthesize audio via Kokoro sentence-by-sentence in real time with sub-second TTFB, rather than waiting for the entire turn to complete.
+## 1. Overview & Architectural Objective
+Introduce `TargetEphemeral` runtime profile (`runtimes/ephemeral`) to decouple fast-path LLM operations (ambient message classification, thread titling, session rotation, action summarization) from the heavy Discord runtime. This strips persona, death metal, emojis, UI/visual rules, voice constraints, MCP schemas, and skill definitions (~20k tokens per prompt) while retaining core technical domain rules (Aerial identity, invariants, user identity) and enforcing strict JSON/XML/plain-text output constraints.
 
-## Proposed Changes
+---
 
-### 1. `brain/pkg/queue/sentence_detector.go`
-- Pure, deterministic `SentenceDetector` struct:
-  - Accumulates incoming token deltas from `OnTextDelta`.
-  - Scans for sentence boundaries: terminal punctuation (`.`, `!`, `?`), accounting for quotes/brackets (`."`, `!'`, `?)`) followed by whitespace.
-  - Guards against false positives:
-    - Decimal numbers (e.g. `3.14`, `1.5`)
-    - Ellipses (`...`)
-    - Abbreviations (`Mr.`, `Mrs.`, `Dr.`, `e.g.`, `i.e.`, `vs.`, `etc.`, `a.m.`, `p.m.`)
-  - Methods:
-    - `Feed(delta string, emit func(string))`
-    - `Flush(emit func(string))`
+## 2. Review Recommendations Incorporated (The Girl Gang Feedback)
+1. **Strict Common Rule Whitelisting**: For `10_user_common_` rules under `TargetEphemeral`, explicitly whitelist `01-identity.md` (only identity and core facts), strictly omitting all persona, communication style, or behavior rules rather than relying on brittle substring filtering.
+2. **Precedence-Enforcing Output Constraints**: Author the ephemeral constraints rule as `rules/ephemeral/99-output-constraints.md` so its lexical sorting ensures it loads last, superseding any latent conversational traits.
+3. **Graceful Directory Missing Semantics**: Ensure `discoverRuleFiles` cleanly handles non-existent `rules/ephemeral/` directories in `aerial-config` (`os.IsNotExist` returns `nil, nil`).
+4. **Defensive Nil Safety**: In `cloneConfigData` and `rawConfigHelper`, defensively guard against `nil` or `null` `mcp_servers.ephemeral` entries.
+5. **Execution Order & Invariant Protection**: In `brain/main.go`, ensure `envProvisioner.Sync()` fully completes before `discordLowEffortPool` is constructed. Guard `DataDir` resolution when constructing `ephemeralHome`.
 
-### 2. `brain/pkg/queue/sentence_detector_test.go`
-- Hermetic table-driven tests for `SentenceDetector`:
-  - Standard sentence splits across multiple token chunks.
-  - Multi-sentence deltas.
-  - Abbreviations, decimals, and ellipses.
-  - Incomplete sentences flushed at EOF/turn end.
-  - Quotes and punctuation edge cases.
+---
 
-### 3. `brain/pkg/queue/pool.go`
-- Update `voiceTurnSink`:
-  - Store `onSentence func(sentence string)` and initialize `SentenceDetector`.
-  - In `OnTextDelta(delta string)`: call `detector.Feed(delta, s.onSentence)`.
-  - In `OnResult(res *runner.TurnResult)`: call `detector.Flush(s.onSentence)`.
-- Update `ExecuteVoiceTurn`:
-  - Accept optional variadic `onSentence ...func(sentence string)`.
-  - Wire into `voiceTurnSink`.
-  - Support `VoiceStreamRunnerFunc` in `WorkerPoolConfig` for mock injection in tests.
+## 3. Tasks & Implementation Steps (~15-Minute Granularity)
 
-### 4. `brain/main.go`
-- In `handleVoiceAsk`:
-  - When `isSSE` is active:
-    - Define `onSentence := func(sentence string) { emitSSE("sentence", map[string]string{"text": sentence}) }`.
-    - Pass `onSentence` into `pool.ExecuteVoiceTurn(r.Context(), req.Prompt, sessionID, onStatus, onSentence)`.
-    - Record TTFR metric on first `sentence` event (`event == "sentence"`).
+### Task 1: Core Target Rules & Rule Profile (`brain/pkg/env/rules.go` & `rules/ephemeral/`)
+- Add `TargetEphemeral RuleTarget = "ephemeral"` to `brain/pkg/env/rules.go`.
+- In `compileTargetRules(target RuleTarget, customPrompt string)`:
+  - If `target == TargetEphemeral`:
+    - For `10_user_common_`, only allow files matching the whitelist (specifically `01-identity.md`).
+    - Discover `rules/ephemeral/` from aerial and aerial-config roots (`20_aerial_ephemeral_`, `30_user_ephemeral_`).
+  - In `SyncRules`:
+    - Compile `ephemeralRules` via `p.compileTargetRules(TargetEphemeral, "")`.
+    - When `p.dataDir != ""`, sync to `filepath.Join(p.dataDir, "runtimes", "ephemeral", ".gemini")` and call `p.provisionRuntimeSharedAssets(ephemeralHome)`.
+- Create `rules/ephemeral/99-output-constraints.md` in `azylman/aerial`:
+  - Enforce raw JSON/XML or single-line plain text output, zero markdown wrappers unless explicitly requested, zero conversational filler/pleasantries.
 
-### 5. `brain/main_test.go` & `brain/pkg/queue/sink_test.go`
-- Verify `voiceTurnSink` feeds and flushes sentences.
-- Verify `handleVoiceAsk` emits `event: sentence` chunks in order before `event: reply` and `event: done`.
-- Verify TTFR metric records on sentence emission.
+### Task 2: Target MCP Configuration & Schema (`brain/pkg/config/` & `brain/pkg/env/mcp.go`)
+- In `brain/pkg/config/config.go`:
+  - Add `Ephemeral map[string]json.RawMessage` to `TargetMcpConfig`.
+  - Update `cloneConfigData` to safely deep copy `Ephemeral` (checking for `src.McpServers.Ephemeral != nil`).
+  - Update unmarshaler to accept `ephemeral` in `mcp_servers` mapping (`common`, `discord`, `voice`, `ephemeral`).
+  - Update `DefaultConfigData` to initialize `Ephemeral: make(map[string]json.RawMessage)`.
+- In `brain/pkg/env/mcp.go`:
+  - In `LoadTargetMCPConfig(cfg *config.Config, target RuleTarget)`:
+    - Only add default `scheduler` MCP if `target != TargetEphemeral`.
+    - If `target == TargetEphemeral`, only include `cur.McpServers.Ephemeral` (do not inherit `cur.McpServers.Common`).
+  - In `SyncMCP`:
+    - Compile `ephemeralConfig := p.LoadTargetMCPConfig(cfg, TargetEphemeral)`.
+    - Sync to `runtimes/ephemeral/.gemini/config/mcp_config.json` via `EnsureTargetMcpConfig`.
 
-## Verification & Quality Gates
-- `go test -v -race ./pkg/queue/...`
-- `go test -v -race ./...` (inside `brain/`)
-- `./scripts/verify.sh --staged`
-- `./scripts/check-coverage.sh --service brain --check --gaps` (>= 95.0% floor)
+### Task 3: Target Skills Isolation (`brain/pkg/env/skills.go`)
+- In `brain/pkg/env/skills.go`:
+  - In `LinkTargetSkills(targetDir string, target RuleTarget)`:
+    - If `target == TargetEphemeral`, scan only `[]string{string(target)}` (only `ephemeral`, strictly excluding `common`, `discord`, and `voice`).
+    - Superpowers are excluded.
+  - In `SyncSkills`:
+    - Link skills into `runtimes/ephemeral/.gemini/config/skills` via `LinkTargetSkills(ephemeralRuntimeDir, TargetEphemeral)`.
+
+### Task 4: Session Storage Discovery & Process Pool Wiring (`brain/pkg/session/` & `brain/main.go`)
+- In `brain/pkg/session/session.go`:
+  - Include `"ephemeral"` in runtime lists for `getTargetDirs` and `Roots` (`"discord"`, `"voice"`, `"ephemeral"`).
+- In `brain/main.go`:
+  - Define `ephemeralHome := filepath.Join(cur.DataDir, "runtimes", "ephemeral")` (fallback to `p.homeDir` if `cur.DataDir` empty).
+  - Ensure `envProvisioner.Sync()` has executed.
+  - Wire `discordLowEffortPool` (`runner.PoolConfig.GeminiHomeDir`) to `ephemeralHome`.
+
+### Task 5: Hermetic Unit Tests & Coverage Validation
+- `brain/pkg/config/config_test.go`:
+  - Test `mcp_servers.ephemeral` unmarshaling, rejection of invalid categories, null category handling, and deep copy isolation.
+- `brain/pkg/env/env_test.go`:
+  - Test `compileTargetRules` for `TargetEphemeral`: confirm persona exclusion, inclusion of `99-output-constraints.md`, and retention of common identity/invariants.
+  - Test `LoadTargetMCPConfig` for `TargetEphemeral`: verify 0 MCP servers by default (no scheduler, no common tools).
+  - Test `LinkTargetSkills` for `TargetEphemeral`: verify 0 skills linked by default.
+  - Test `SyncRules`, `SyncMCP`, `SyncSkills` creating isolated files in `runtimes/ephemeral/.gemini`.
+- `brain/pkg/session/session_test.go`:
+  - Test session and transcript discovery under `runtimes/ephemeral`.
+- `brain/main_test.go`:
+  - Verify `discordLowEffortPool` receives `ephemeralHome`.
