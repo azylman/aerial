@@ -176,11 +176,20 @@ model: [broken yaml invalid syntax: ::: {
 	if errAfter == nil {
 		t.Fatal("Expected error on corrupted YAML, got nil")
 	}
+	if cfgAfter != nil {
+		t.Errorf("Expected nil *Config on LoadConfigFromPaths error, got %+v", cfgAfter)
+	}
 
-	// Verify LKGC is retained
-	if cfgAfter.Current().Model != "gemini-2.5-flash" {
+	// Verify Reload returns error and retains LKGC on the active instance
+	errReload := ReloadWithSupplier(cfg, func() (*Config, error) {
+		return LoadConfigFromPaths(yamlPath)
+	})
+	if errReload == nil {
+		t.Fatal("Expected error on corrupted YAML reload, got nil")
+	}
+	if cfg.Current().Model != "gemini-2.5-flash" {
 		t.Errorf("Expected retained LKGC model 'gemini-2.5-flash', got model=%q",
-			cfgAfter.Current().Model)
+			cfg.Current().Model)
 	}
 	rtCfg := GetRuntimeConfig()
 	if rtCfg.Model != "gemini-2.5-flash" || rtCfg.SystemChannel != "dev-channel-1" {
@@ -248,18 +257,11 @@ func TestLoadConfigMissingFileFallbacks(t *testing.T) {
 	}
 
 	cfg, err := LoadConfigFromLookup(mockLookup, "/non/existent/file/for/sure/config.yaml")
-	if err != nil {
-		t.Fatalf("LoadConfigFromLookup failed for missing file: %v", err)
+	if err == nil {
+		t.Fatalf("expected LoadConfigFromLookup to fail for missing file, got nil error")
 	}
-
-	if cfg.Current().Model != "env-model-fallback" {
-		t.Errorf("Expected fallback to env model 'env-model-fallback', got %q", cfg.Current().Model)
-	}
-	if cfg.Current().Timezone != "Europe/London" {
-		t.Errorf("Expected fallback timezone 'Europe/London', got %q", cfg.Current().Timezone)
-	}
-	if cfg.Current().SystemChannel != "env-system-chan" {
-		t.Errorf("Expected fallback channel 'env-system-chan', got %q", cfg.Current().SystemChannel)
+	if cfg != nil {
+		t.Fatalf("expected nil *Config when loading missing file, got %+v", cfg)
 	}
 }
 
@@ -3098,6 +3100,172 @@ mcp_servers:
 			t.Errorf("OCP violation: RawMessage byte slice backing array was not cloned")
 		}
 	})
+}
+
+func TestLoadConfigFromPaths_MissingFiles_FailsFast(t *testing.T) {
+	nonExistent := filepath.Join(t.TempDir(), "does_not_exist.yaml")
+	cfg, err := LoadConfigFromPaths(nonExistent)
+	if err == nil {
+		t.Fatalf("expected error when config file does not exist, got nil")
+	}
+	if cfg != nil {
+		t.Fatalf("expected nil *Config when loading fails, got %+v", cfg)
+	}
+	if !strings.Contains(err.Error(), "no configuration file found in search paths") {
+		t.Errorf("expected error message to indicate missing search paths, got: %v", err)
+	}
+}
+
+func TestLoadConfigFromPaths_CorruptedYAML_FailsFast(t *testing.T) {
+	tmpDir := t.TempDir()
+	corruptPath := filepath.Join(tmpDir, "broken.yaml")
+	if err := os.WriteFile(corruptPath, []byte("model: [invalid yaml {::"), 0644); err != nil {
+		t.Fatalf("failed to write test file: %v", err)
+	}
+
+	cfg, err := LoadConfigFromPaths(corruptPath)
+	if err == nil {
+		t.Fatalf("expected error on corrupted YAML, got nil")
+	}
+	if cfg != nil {
+		t.Fatalf("expected nil *Config when loading corrupted YAML, got %+v", cfg)
+	}
+	if !strings.Contains(err.Error(), "failed to load configuration from any path") {
+		t.Errorf("expected error message to indicate failure to load from any path, got: %v", err)
+	}
+}
+
+func TestLoadConfigFromPaths_CorruptedWithCorruptedDiskLKGC_FailsFast(t *testing.T) {
+	tmpDir := t.TempDir()
+	primary := filepath.Join(tmpDir, "primary.yaml")
+	lkgc := filepath.Join(tmpDir, "lkgc.yaml")
+
+	if err := os.WriteFile(primary, []byte("model: [invalid primary yaml"), 0644); err != nil {
+		t.Fatalf("failed to write primary: %v", err)
+	}
+	if err := os.WriteFile(lkgc, []byte("model: [invalid lkgc yaml"), 0644); err != nil {
+		t.Fatalf("failed to write lkgc: %v", err)
+	}
+
+	cfg, err := LoadConfigFromPaths(primary, lkgc)
+	if err == nil {
+		t.Fatalf("expected error when both primary and disk LKGC fail, got nil")
+	}
+	if cfg != nil {
+		t.Fatalf("expected nil *Config when both files fail, got %+v", cfg)
+	}
+}
+
+func TestLoadConfigFromPaths_OnDiskLKGCFallback_Success(t *testing.T) {
+	tmpDir := t.TempDir()
+	primary := filepath.Join(tmpDir, "primary.yaml")
+	lkgc := filepath.Join(tmpDir, "lkgc.yaml")
+
+	if err := os.WriteFile(primary, []byte("model: [invalid primary yaml"), 0644); err != nil {
+		t.Fatalf("failed to write primary: %v", err)
+	}
+	validLKGC := `
+model: "gemini-disk-lkgc"
+channels:
+  default:
+    mode: "threads"
+`
+	if err := os.WriteFile(lkgc, []byte(validLKGC), 0644); err != nil {
+		t.Fatalf("failed to write lkgc: %v", err)
+	}
+
+	cfg, err := LoadConfigFromPaths(primary, lkgc)
+	if err != nil {
+		t.Fatalf("expected successful fallback to on-disk LKGC, got error: %v", err)
+	}
+	if cfg == nil || cfg.Current() == nil {
+		t.Fatalf("expected non-nil config loaded from disk LKGC")
+	}
+	if cfg.Current().Model != "gemini-disk-lkgc" {
+		t.Errorf("expected model 'gemini-disk-lkgc', got %q", cfg.Current().Model)
+	}
+}
+
+func TestReload_CorruptedYAML_RetainsActiveLKGC(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+
+	validYAML := `
+model: "gemini-initial-valid"
+system_channel: "valid-alerts"
+channels:
+  default:
+    mode: "threads"
+`
+	if err := os.WriteFile(cfgPath, []byte(validYAML), 0644); err != nil {
+		t.Fatalf("failed to write valid yaml: %v", err)
+	}
+
+	cfg, err := LoadConfigFromPaths(cfgPath)
+	if err != nil {
+		t.Fatalf("initial load failed: %v", err)
+	}
+	if cfg.Current().Model != "gemini-initial-valid" {
+		t.Fatalf("unexpected initial model: %q", cfg.Current().Model)
+	}
+
+	// Corrupt file on disk
+	if err := os.WriteFile(cfgPath, []byte("corrupt: [invalid yaml:::"), 0644); err != nil {
+		t.Fatalf("failed to overwrite with corrupt yaml: %v", err)
+	}
+
+	// Using custom reload supplier pointing to cfgPath
+	errReload := ReloadWithSupplier(cfg, func() (*Config, error) {
+		return LoadConfigFromPaths(cfgPath)
+	})
+	if errReload == nil {
+		t.Fatalf("expected Reload to fail on corrupt file, got nil")
+	}
+
+	// Verify active config retains previous valid model
+	if cfg.Current().Model != "gemini-initial-valid" {
+		t.Errorf("expected active config to retain 'gemini-initial-valid', got %q", cfg.Current().Model)
+	}
+	if cfg.Current().SystemChannel != "valid-alerts" {
+		t.Errorf("expected system channel 'valid-alerts', got %q", cfg.Current().SystemChannel)
+	}
+}
+
+func TestExampleConfig_Valid(t *testing.T) {
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	var examplePath string
+	for {
+		candidate := filepath.Join(dir, "config.example.yaml")
+		if _, err := os.Stat(candidate); err == nil {
+			examplePath = candidate
+			break
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatalf("could not find config.example.yaml in parent directories from %s", dir)
+		}
+		dir = parent
+	}
+
+	cfg, err := LoadConfigFromPaths(examplePath)
+	if err != nil {
+		t.Fatalf("failed to load config.example.yaml: %v", err)
+	}
+	if cfg == nil || cfg.Current() == nil {
+		t.Fatalf("expected non-nil config loaded from config.example.yaml")
+	}
+	if cfg.Current().Model != "gemini-2.5-flash" {
+		t.Errorf("expected model 'gemini-2.5-flash', got %q", cfg.Current().Model)
+	}
+	if cfg.Current().SystemChannel != "aerial-dev" {
+		t.Errorf("expected system channel 'aerial-dev', got %q", cfg.Current().SystemChannel)
+	}
+	if defPolicy, ok := cfg.Current().Channels["default"]; !ok || defPolicy.Mode != "threads" {
+		t.Errorf("expected channels.default.mode to be 'threads', got %+v", defPolicy)
+	}
 }
 
 

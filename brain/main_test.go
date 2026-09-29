@@ -1696,7 +1696,7 @@ func TestInitializeBrainEnvironment_Errors(t *testing.T) {
 	conflictFile := filepath.Join(tmpDir, "brain")
 	_ = os.WriteFile(conflictFile, []byte("file-not-dir"), 0644)
 
-	cfg, _ := config.LoadConfigFromPaths()
+	cfg := config.NewTestConfig()
 	cur := cfg.Current()
 	cur.DataDir = tmpDir
 	cur.GeminiHomeDir = tmpDir
@@ -1812,7 +1812,7 @@ func TestRunBrainApp_EarlyReturns(t *testing.T) {
 }
 
 func TestCreateReloadConfigFunc_ProvisionerError(t *testing.T) {
-	cfg, _ := config.LoadConfigFromPaths()
+	cfg := config.NewTestConfig()
 	cur := cfg.Current()
 	tmpFile := filepath.Join(t.TempDir(), "blocking_file")
 	_ = os.WriteFile(tmpFile, []byte("file"), 0644)
@@ -1880,10 +1880,7 @@ func TestRunBrainApp_FullLifecycle(t *testing.T) {
 	tmpDir := t.TempDir()
 	_ = os.MkdirAll(filepath.Join(tmpDir, ".gemini", "config", "skills"), 0755)
 
-	cfg, err := config.LoadConfigFromPaths()
-	if err != nil {
-		t.Fatalf("LoadConfigFromPaths failed: %v", err)
-	}
+	cfg := config.NewTestConfig()
 	cur := cfg.Current()
 	cur.DataDir = tmpDir
 	cur.GeminiHomeDir = tmpDir
@@ -1910,7 +1907,7 @@ func TestRunBrainApp_FullLifecycle(t *testing.T) {
 	}()
 
 	mockStore := db.NewFakeStore()
-	err = RunBrainApp(ctx, cfg, WithStore(mockStore), WithProcessSpawner(runner.NewMockDaemonSpawner()))
+	err := RunBrainApp(ctx, cfg, WithStore(mockStore), WithProcessSpawner(runner.NewMockDaemonSpawner()))
 	if err != nil {
 		t.Fatalf("RunBrainApp failed: %v", err)
 	}
@@ -2679,7 +2676,7 @@ func TestUnifiedPool_EphemeralLLMFuncIntegration(t *testing.T) {
 	}
 
 	// 3. Classifier integration with WithProcessPool
-	cfg, _ := config.LoadConfigFromPaths()
+	cfg := config.NewTestConfig()
 	cur := cfg.Current()
 	cur.Ollama.BaseURL = "" // Ensure primary LLMFunc is used
 	cfg.Update(cur)

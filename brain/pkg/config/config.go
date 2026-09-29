@@ -507,16 +507,23 @@ func LoadConfig() (*Config, error) {
 	return New()
 }
 
-func Reload(activeCfg *Config) error {
+func ReloadWithSupplier(activeCfg *Config, supplier func() (*Config, error)) error {
 	if activeCfg == nil {
 		return fmt.Errorf("config: activeCfg cannot be nil")
 	}
-	fresh, err := New()
+	if supplier == nil {
+		supplier = New
+	}
+	fresh, err := supplier()
 	if err != nil {
 		return err
 	}
 	activeCfg.update(fresh.Current())
 	return nil
+}
+
+func Reload(activeCfg *Config) error {
+	return ReloadWithSupplier(activeCfg, New)
 }
 
 func buildPostgresDSN(lookup func(string) string) string {
@@ -743,9 +750,9 @@ func LoadConfigFromLookup(lookup func(string) string, paths ...string) (*Config,
 	if lookup == nil {
 		lookup = func(string) string { return "" }
 	}
-	data := DefaultConfigData()
 	var loadedPath string
 	var lastErr error
+	var data *ConfigData
 
 	for _, p := range paths {
 		rawData, err := os.ReadFile(p)
@@ -783,15 +790,9 @@ func LoadConfigFromLookup(lookup func(string) string, paths ...string) (*Config,
 
 	if loadedPath == "" {
 		if lastErr != nil {
-			log.Printf("[Config] Retaining Last Known Good Configuration (LKGC) due to load error: %v", lastErr)
-			fallback := activeGlobalConfig.Current()
-			cloned := cloneConfigData(fallback)
-			applyEnvironmentOverrides(cloned, lookup)
-			return NewFromData(cloned), lastErr
+			return nil, fmt.Errorf("failed to load configuration from any path in %v: %w", paths, lastErr)
 		}
-		// No files found and no parse errors: apply defaults + env overrides
-		applyEnvironmentOverrides(data, lookup)
-		return NewFromData(data), nil
+		return nil, fmt.Errorf("no configuration file found in search paths: %v", paths)
 	}
 
 	applyEnvironmentOverrides(data, lookup)
@@ -811,10 +812,11 @@ func LoadConfigFromPaths(paths ...string) (*Config, error) {
 	}
 
 	fresh, err := LoadConfigFromLookup(os.Getenv, paths...)
-	if fresh != nil {
-		activeGlobalConfig.update(fresh.Current())
+	if err != nil {
+		return nil, err
 	}
-	return activeGlobalConfig, err
+	activeGlobalConfig.update(fresh.Current())
+	return activeGlobalConfig, nil
 }
 
 func validateChannels(parsed *ConfigData, targetPath string) error {
