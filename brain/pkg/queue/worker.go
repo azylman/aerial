@@ -3,6 +3,7 @@ package queue
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math/rand"
@@ -49,6 +50,7 @@ type turnExecution struct {
 	trailingMsgs        []db.Message
 	trailingInfos       []wakeInfo
 	turnPrompt          string
+	previousTurnActions string
 	isQuotaPaused       bool
 	statusUpdater       *StatusUpdater
 	stopTyping          func()
@@ -1387,6 +1389,87 @@ func (te *turnExecution) buildTurnPrompt() {
 		ChannelInstructions: instructions,
 		InjectedHookContext: te.injectedHookContext,
 	})
+	te.turnPrompt = te.preparePrompt(te.turnPrompt)
+}
+
+func (te *turnExecution) preparePrompt(prompt string) string {
+	if te.previousTurnActions != "" && !strings.Contains(prompt, te.previousTurnActions) {
+		prompt = prompt + "\n\n" + te.previousTurnActions
+	}
+	return prompt
+}
+
+func (te *turnExecution) condenseTurnActions(rawActions string) string {
+	if len(rawActions) <= 1500 {
+		return rawActions
+	}
+
+	lowEffortModel := ""
+	if te.pool != nil {
+		if te.pool.appCfg != nil {
+			if cur := te.pool.appCfg.Current(); cur != nil {
+				lowEffortModel = cur.LowEffortModel
+			}
+		}
+		if lowEffortModel == "" {
+			te.pool.mu.Lock()
+			lowEffortModel = te.pool.cfg.LowEffortModel
+			te.pool.mu.Unlock()
+		}
+	}
+	if lowEffortModel == "" {
+		lowEffortModel = config.GetRuntimeConfig().LowEffortModel
+	}
+
+	var llmFn LLMFunc
+	if te.pool != nil {
+		if te.pool.lowEffortProcessPool != nil {
+			llmFn = te.pool.lowEffortProcessPool.EphemeralLLMFunc("ephemeral:summarizer")
+		} else if te.pool.cfg.LLMFunc != nil {
+			llmFn = te.pool.cfg.LLMFunc
+		} else if te.pool.processPool != nil {
+			llmFn = te.pool.processPool.EphemeralLLMFunc("ephemeral:summarizer")
+		}
+	}
+
+	if llmFn == nil {
+		err := errors.New("summarizer unavailable")
+		log.Printf("[WorkerPool] Warning: failed to condense turn actions with low-effort model: %v. Falling back to clamped raw actions.", err)
+		return rawActions
+	}
+
+	ctx := context.Background()
+	if te.pool != nil && te.pool.ctx != nil {
+		ctx = te.pool.ctx
+	}
+	timeoutCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	prompt := fmt.Sprintf("Condense the following tool actions executed in the previous attempt into a compact, deduplicated summary of key findings and actions taken. Preserve file paths, commands, exit codes, and core outputs. Output MUST be wrapped in <PREVIOUS_TURN_ACTIONS> and </PREVIOUS_TURN_ACTIONS> tags.\n\n%s", rawActions)
+
+	result, err := llmFn(timeoutCtx, lowEffortModel, prompt)
+	if err != nil {
+		log.Printf("[WorkerPool] Warning: failed to condense turn actions with low-effort model: %v. Falling back to clamped raw actions.", err)
+		return rawActions
+	}
+
+	trimmed := strings.TrimSpace(result)
+	if trimmed == "" {
+		err := errors.New("empty response from summarizer")
+		log.Printf("[WorkerPool] Warning: failed to condense turn actions with low-effort model: %v. Falling back to clamped raw actions.", err)
+		return rawActions
+	}
+
+	if strings.Contains(trimmed, "<PREVIOUS_TURN_ACTIONS>") && strings.Contains(trimmed, "</PREVIOUS_TURN_ACTIONS>") {
+		startIdx := strings.Index(trimmed, "<PREVIOUS_TURN_ACTIONS>")
+		endIdx := strings.Index(trimmed, "</PREVIOUS_TURN_ACTIONS>")
+		if startIdx <= endIdx {
+			trimmed = trimmed[startIdx : endIdx+len("</PREVIOUS_TURN_ACTIONS>")]
+		}
+	} else {
+		trimmed = "<PREVIOUS_TURN_ACTIONS>\n" + trimmed + "\n</PREVIOUS_TURN_ACTIONS>"
+	}
+	return trimmed
 }
 
 func (te *turnExecution) executeWithRetries() {
@@ -1524,6 +1607,7 @@ func (te *turnExecution) executeWithRetries() {
 				promptToSend = fmt.Sprintf(ContinuationPromptTemplate, te.turnPrompt)
 			}
 		}
+		promptToSend = te.preparePrompt(promptToSend)
 
 		// Pad Go context by +1 minute relative to runner watchdog ceiling so the runner watchdog always fires cleanly
 		runCtx, runCancel := context.WithTimeout(te.pool.ctx, time.Duration(currentTimeout+1)*time.Minute)
@@ -1776,6 +1860,10 @@ func (te *turnExecution) executeWithRetries() {
 						log.Printf("[WorkerPool] Quota paused session %s exceeded guardrails (steps=%d/%d, bytes=%d/%d, db_bytes=%d/%d). Resetting session for fresh retry.",
 							te.currentSessionID, pauseSteps, DefaultMaxSessionSteps, pauseBytes, DefaultMaxTranscriptBytes, pauseDBBytes, DefaultMaxQuotaPauseDBBytes)
 						metrics.RecordSessionRotation("quota_pause", scope, reason)
+						if toolActions := te.pool.sessionMgr.ExtractTranscriptToolActions(te.currentSessionID); toolActions != "" {
+							te.previousTurnActions = te.condenseTurnActions(toolActions)
+							log.Printf("[WorkerPool] Preserved %d bytes of turn actions for rotated session %s", len(te.previousTurnActions), te.currentSessionID)
+						}
 						te.previousSessionID = te.currentSessionID
 						te.rotateSessionID(te.threadID, "")
 						te.currentSessionID = ""
@@ -2451,6 +2539,10 @@ func (te *turnExecution) executeWithRetries() {
 						log.Printf("[WorkerPool] Transient failure session %s exceeded guardrails (steps=%d/%d, bytes=%d/%d, db_bytes=%d/%d). Resetting session for cold retry.",
 							te.currentSessionID, transSteps, DefaultMaxSessionSteps, transBytes, DefaultMaxTranscriptBytes, transDBBytes, DefaultMaxSessionDBBytes)
 						metrics.RecordSessionRotation("transient_retry", scope, reason)
+						if toolActions := te.pool.sessionMgr.ExtractTranscriptToolActions(te.currentSessionID); toolActions != "" {
+							te.previousTurnActions = te.condenseTurnActions(toolActions)
+							log.Printf("[WorkerPool] Preserved %d bytes of turn actions for rotated session %s", len(te.previousTurnActions), te.currentSessionID)
+						}
 						te.previousSessionID = te.currentSessionID
 						te.rotateSessionID(te.threadID, "")
 						te.currentSessionID = ""
