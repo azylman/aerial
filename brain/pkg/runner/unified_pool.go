@@ -16,13 +16,14 @@ import (
 
 // PoolConfig specifies parameters for initializing and configuring UnifiedProcessPool.
 type PoolConfig struct {
-	PrewarmedTargets []string
-	DefaultModel     string
-	TargetModels     map[string]string
 	AgyBin           string
+	Model            string
+	DefaultModel     string            // Deprecated: use Model instead. Preserved for backward compatibility.
+	TargetModels     map[string]string // Deprecated: pools are now model-bound. Ignored.
 	Cwd              string
-	GeminiHomeDir    string
 	Env              []string
+	GeminiHomeDir    string
+	PrewarmedTargets []string
 	MaxIdle          time.Duration
 }
 
@@ -36,6 +37,8 @@ type UnifiedProcessPool struct {
 	closed    bool
 	closeOnce sync.Once
 	closeErr  error
+	ctx       context.Context
+	cancel    context.CancelFunc
 }
 
 // NewUnifiedProcessPool creates a new process pool with the given configuration and spawner.
@@ -46,11 +49,28 @@ func NewUnifiedProcessPool(cfg PoolConfig, spawner DaemonSpawner) *UnifiedProces
 	if cfg.MaxIdle <= 0 {
 		cfg.MaxIdle = 24 * time.Hour
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	resolvedModel := cfg.Model
+	if resolvedModel == "" {
+		resolvedModel = cfg.DefaultModel
+	}
+	cfg.Model = resolvedModel
+	cfg.DefaultModel = resolvedModel
 	return &UnifiedProcessPool{
 		cfg:     cfg,
 		spawner: spawner,
 		daemons: make(map[string]*StreamingDaemon),
+		ctx:     ctx,
+		cancel:  cancel,
 	}
+}
+
+// Model returns the immutable model name bound to this process pool.
+func (p *UnifiedProcessPool) Model() string {
+	if p == nil {
+		return ""
+	}
+	return p.cfg.Model
 }
 
 // Initialize pre-warms configured target daemons in background goroutines.
@@ -102,13 +122,6 @@ func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string) 
 		}
 		p.mu.RUnlock()
 
-		targetModel := p.cfg.DefaultModel
-		if p.cfg.TargetModels != nil {
-			if m, ok := p.cfg.TargetModels[targetKey]; ok && m != "" {
-				targetModel = m
-			}
-		}
-
 		daemonEnv := p.cfg.Env
 		if home := strings.TrimSpace(p.cfg.GeminiHomeDir); home != "" {
 			geminiDir := filepath.Join(home, ".gemini")
@@ -124,14 +137,20 @@ func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string) 
 
 		daemonCfg := DaemonConfig{
 			ThreadID: targetKey,
-			Model:    targetModel,
+			Model:    p.cfg.Model,
 			AgyBin:   p.cfg.AgyBin,
 			Cwd:      p.cfg.Cwd,
 			Env:      daemonEnv,
 		}
 
-		daemon, spawnErr := StartStreamingDaemon(ctx, daemonCfg, p.spawner)
+		daemon, spawnErr := StartStreamingDaemon(p.ctx, daemonCfg, p.spawner)
 		if spawnErr != nil {
+			p.mu.RLock()
+			closed := p.closed
+			p.mu.RUnlock()
+			if closed {
+				return nil, fmt.Errorf("process pool is closed")
+			}
 			return nil, fmt.Errorf("failed to start daemon for target %q: %w", targetKey, spawnErr)
 		}
 
@@ -161,6 +180,9 @@ func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string) 
 
 // Close gracefully terminates all daemons tracked by the pool.
 func (p *UnifiedProcessPool) Close() error {
+	if p == nil {
+		return nil
+	}
 	p.closeOnce.Do(func() {
 		p.mu.Lock()
 		p.closed = true
@@ -168,14 +190,27 @@ func (p *UnifiedProcessPool) Close() error {
 		p.daemons = make(map[string]*StreamingDaemon)
 		p.mu.Unlock()
 
+		if p.cancel != nil {
+			p.cancel()
+		}
+
+		var wg sync.WaitGroup
+		var errMu sync.Mutex
 		var errs []error
 		for target, d := range toClose {
 			if d != nil {
-				if err := d.Close(); err != nil {
-					errs = append(errs, fmt.Errorf("error closing daemon %q: %w", target, err))
-				}
+				wg.Add(1)
+				go func(tKey string, daemon *StreamingDaemon) {
+					defer wg.Done()
+					if err := daemon.Close(); err != nil {
+						errMu.Lock()
+						errs = append(errs, fmt.Errorf("error closing daemon %q: %w", tKey, err))
+						errMu.Unlock()
+					}
+				}(target, d)
 			}
 		}
+		wg.Wait()
 		if len(errs) > 0 {
 			p.closeErr = fmt.Errorf("errors closing pool daemons: %v", errs)
 		}

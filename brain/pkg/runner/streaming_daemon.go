@@ -298,6 +298,9 @@ func (d *StreamingDaemon) Close() error {
 				log.Printf("[StreamingDaemon] Warning: failed to kill process handle: %v", err)
 				closeErr = err
 			}
+			if waitErr := d.handle.Wait(); waitErr != nil {
+				log.Printf("[StreamingDaemon] Process wait finished with: %v", waitErr)
+			}
 		}
 		d.readerWg.Wait()
 
