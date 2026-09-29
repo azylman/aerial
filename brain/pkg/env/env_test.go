@@ -1580,6 +1580,31 @@ func TestDiscoverRuleFiles_NotADirectory(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "failed to read rules directory") {
 		t.Errorf("expected error when aerial target rules dir is a file, got: %v", err)
 	}
+
+	// Test compileTargetRules when aerial persona rules dir is a file
+	validAerialPersonaBad := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(validAerialPersonaBad, "common"), 0755)
+	_ = os.WriteFile(filepath.Join(validAerialPersonaBad, "common", "01.md"), []byte("aerial common"), 0644)
+	_ = os.WriteFile(filepath.Join(validAerialPersonaBad, "persona"), []byte("file-not-dir"), 0644)
+	p.SetAerialRulesDir(validAerialPersonaBad)
+	p.SetConfigRulesDir(t.TempDir())
+	_, err = p.compileTargetRules(TargetDiscord, "")
+	if err == nil || !strings.Contains(err.Error(), "failed to read rules directory") {
+		t.Errorf("expected error when aerial persona rules dir is a file, got: %v", err)
+	}
+
+	// Test compileTargetRules when user persona rules dir is a file
+	validAerialGood := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(validAerialGood, "common"), 0755)
+	_ = os.WriteFile(filepath.Join(validAerialGood, "common", "01.md"), []byte("aerial common"), 0644)
+	p.SetAerialRulesDir(validAerialGood)
+	badConfigPersona := t.TempDir()
+	_ = os.WriteFile(filepath.Join(badConfigPersona, "persona"), []byte("file-not-dir"), 0644)
+	p.SetConfigRulesDir(badConfigPersona)
+	_, err = p.compileTargetRules(TargetDiscord, "")
+	if err == nil || !strings.Contains(err.Error(), "failed to read rules directory") {
+		t.Errorf("expected error when user persona rules dir is a file, got: %v", err)
+	}
 }
 
 func TestLinkSkills_DestinationCollision(t *testing.T) {
@@ -2436,17 +2461,21 @@ func TestCompileTargetRules_TargetEphemeral(t *testing.T) {
 	aerialDir := t.TempDir()
 	configDir := t.TempDir()
 
-	// 1. Aerial common & ephemeral rules
+	// 1. Aerial common, persona & ephemeral rules
 	_ = os.MkdirAll(filepath.Join(aerialDir, "common"), 0755)
 	_ = os.WriteFile(filepath.Join(aerialDir, "common", "01-identity.md"), []byte("aerial identity"), 0644)
 	_ = os.WriteFile(filepath.Join(aerialDir, "common", "02-invariants.md"), []byte("aerial invariants"), 0644)
+	_ = os.MkdirAll(filepath.Join(aerialDir, "persona"), 0755)
+	_ = os.WriteFile(filepath.Join(aerialDir, "persona", "01-persona.md"), []byte("aerial base persona"), 0644)
 	_ = os.MkdirAll(filepath.Join(aerialDir, "ephemeral"), 0755)
 	_ = os.WriteFile(filepath.Join(aerialDir, "ephemeral", "99-output-constraints.md"), []byte("output constraints"), 0644)
 
-	// 2. Config common & discord rules
+	// 2. Config common, persona & discord rules
 	_ = os.MkdirAll(filepath.Join(configDir, "common"), 0755)
 	_ = os.WriteFile(filepath.Join(configDir, "common", "01-identity.md"), []byte("user identity"), 0644)
-	_ = os.WriteFile(filepath.Join(configDir, "common", "02-persona.md"), []byte("user persona style"), 0644)
+	_ = os.WriteFile(filepath.Join(configDir, "common", "02-persona.md"), []byte("legacy persona in common"), 0644)
+	_ = os.MkdirAll(filepath.Join(configDir, "persona"), 0755)
+	_ = os.WriteFile(filepath.Join(configDir, "persona", "01-persona.md"), []byte("user persona style"), 0644)
 	_ = os.MkdirAll(filepath.Join(configDir, "discord"), 0755)
 	_ = os.WriteFile(filepath.Join(configDir, "discord", "01-messaging.md"), []byte("discord messaging"), 0644)
 
@@ -2454,6 +2483,7 @@ func TestCompileTargetRules_TargetEphemeral(t *testing.T) {
 	p.SetAerialRulesDir(aerialDir)
 	p.SetConfigRulesDir(configDir)
 
+	// A. TargetEphemeral: strictly excludes persona rules (both new directory and legacy common)
 	rules, err := p.compileTargetRules(TargetEphemeral, "custom prompt override")
 	if err != nil {
 		t.Fatalf("compileTargetRules(TargetEphemeral) failed: %v", err)
@@ -2472,7 +2502,7 @@ func TestCompileTargetRules_TargetEphemeral(t *testing.T) {
 		t.Errorf("missing 00_aerial_common_02-invariants.md")
 	}
 
-	// Must include whitelisted user common identity
+	// Must include user common identity
 	if !foundMap["10_user_common_01-identity.md"] {
 		t.Errorf("missing 10_user_common_01-identity.md")
 	}
@@ -2482,9 +2512,15 @@ func TestCompileTargetRules_TargetEphemeral(t *testing.T) {
 		t.Errorf("missing 20_aerial_ephemeral_99-output-constraints.md")
 	}
 
-	// Must NOT include user common persona
+	// Must NOT include persona rules (aerial, user directory, or legacy common)
+	if foundMap["05_aerial_persona_01-persona.md"] {
+		t.Errorf("TargetEphemeral must omit 05_aerial_persona_01-persona.md")
+	}
+	if foundMap["15_user_persona_01-persona.md"] {
+		t.Errorf("TargetEphemeral must omit 15_user_persona_01-persona.md")
+	}
 	if foundMap["10_user_common_02-persona.md"] {
-		t.Errorf("TargetEphemeral must omit 10_user_common_02-persona.md")
+		t.Errorf("TargetEphemeral must omit legacy 10_user_common_02-persona.md")
 	}
 
 	// Must NOT include discord rules or custom prompt
@@ -2493,6 +2529,31 @@ func TestCompileTargetRules_TargetEphemeral(t *testing.T) {
 	}
 	if foundMap["99_custom_prompt.md"] {
 		t.Errorf("TargetEphemeral must not append custom prompt override")
+	}
+
+	// B. TargetDiscord: includes persona rules and target rules
+	discordRules, dErr := p.compileTargetRules(TargetDiscord, "custom prompt override")
+	if dErr != nil {
+		t.Fatalf("compileTargetRules(TargetDiscord) failed: %v", dErr)
+	}
+	discordMap := make(map[string]bool)
+	for _, r := range discordRules {
+		discordMap[r.prefix+r.filename] = true
+	}
+	if !discordMap["05_aerial_persona_01-persona.md"] {
+		t.Errorf("TargetDiscord must include 05_aerial_persona_01-persona.md")
+	}
+	if !discordMap["15_user_persona_01-persona.md"] {
+		t.Errorf("TargetDiscord must include 15_user_persona_01-persona.md")
+	}
+	if !discordMap["30_user_discord_01-messaging.md"] {
+		t.Errorf("TargetDiscord must include 30_user_discord_01-messaging.md")
+	}
+	if !discordMap["99_custom_prompt.md"] {
+		t.Errorf("TargetDiscord must include 99_custom_prompt.md")
+	}
+	if discordMap["20_aerial_ephemeral_99-output-constraints.md"] {
+		t.Errorf("TargetDiscord must not include ephemeral rules")
 	}
 }
 

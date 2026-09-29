@@ -99,6 +99,7 @@ func TestShouldIgnore(t *testing.T) {
 	allowedPaths := []string{
 		"/share/aerial/rules/common/01-identity.md",
 		"/share/aerial-config/rules/common/01-identity.md",
+		"/share/aerial-config/rules/persona/01-persona.md",
 		"/share/aerial/rules/discord/01-messaging.md",
 		"/share/aerial/rules/discord/06-architecture.md",
 		"/share/aerial/rules/voice/01-spoken-output.md",

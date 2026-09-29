@@ -53,7 +53,7 @@ Aerial operates on a strict **Multi-Repository Architecture & Separation of Conc
 - **Purpose**: Private user customization, personal persona, user identity/aliases, domain skills, and environment-specific integrations. Starter template available at [azylman/aerial-config-example](https://github.com/azylman/aerial-config-example).
 - **Contents**:
   - **`config.yaml`**: Non-secret user options (`model`, `timezone`, `system_channel`, `mcp_servers`, `channels`).
-  - **`rules/`**: User persona overrides, personal preferences, communication style, and user identity/alias definitions structured into `common/`, `discord/`, and `voice/`.
+  - **`rules/`**: User persona overrides, personal preferences, communication style, and user identity/alias definitions structured into `common/`, `persona/`, `discord/`, and `voice/`.
   - **`channels/<channel-name>.md`**: Dedicated instructions and operating constraints for specific Discord channels (auto-discovered; inherited by threads).
   - **`custom-skills/`**: Private operational runbooks and domain-specific workflows (e.g., smart home).
   - **`victoriametrics/`**: Custom Prometheus scrape configurations (e.g., Home Assistant metrics).
