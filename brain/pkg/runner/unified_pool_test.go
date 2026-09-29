@@ -1336,10 +1336,23 @@ func TestUnifiedProcessPool_OptimisticMarkDirty(t *testing.T) {
 		if _, ok := pool.Get("thread-nonprewarmed"); ok {
 			t.Errorf("expected thread-nonprewarmed to be evicted from pool")
 		}
-		// Confirm no new daemon spawned after small grace period
-		time.Sleep(50 * time.Millisecond)
-		if spawnCounter.Load() != 1 {
-			t.Errorf("expected exactly 1 spawn for non-prewarmed target, got %d", spawnCounter.Load())
+
+		// Prewarmed target "kiosk" should be reconciled and spawned
+		var kioskDaemon *StreamingDaemon
+		for time.Now().Before(deadline) {
+			if kd, ok := pool.Get("kiosk"); ok && kd != nil {
+				kioskDaemon = kd
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		if kioskDaemon == nil {
+			t.Errorf("expected prewarmed kiosk to be spawned on MarkDirty")
+		}
+
+		// Exactly 2 spawns: 1 for thread-nonprewarmed, 1 for reconciled kiosk
+		if spawnCounter.Load() != 2 {
+			t.Errorf("expected exactly 2 spawns (initial non-prewarmed + reconciled kiosk), got %d", spawnCounter.Load())
 		}
 	})
 
@@ -1674,4 +1687,113 @@ func TestUnifiedProcessPool_GetOrCreate_RejectsDirtyDaemon(t *testing.T) {
 			t.Errorf("expected replacement daemon")
 		}
 	})
+
+	t.Run("ReconcilesNewlyAddedPrewarmedTargets", func(t *testing.T) {
+		var spawnCounter atomic.Int32
+		mock := &MockDaemonSpawner{
+			SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+				count := spawnCounter.Add(1)
+				outR, outW := io.Pipe()
+				inR, inW := io.Pipe()
+				errR, _ := io.Pipe()
+				go func() {
+					defer outW.Close()
+					_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":"00000000-0000-0000-0000-%012d"}`+"\n", count)))
+					_, _ = io.Copy(io.Discard, inR)
+				}()
+				return inW, outR, errR, &MockProcessHandle{pid: int(count * 100)}, nil
+			},
+		}
+
+		pool := NewUnifiedProcessPool(PoolConfig{
+			PrewarmedTargets: []string{"kiosk"},
+		}, mock)
+		defer pool.Close()
+
+		ctx := context.Background()
+		kioskDaemon, err := pool.GetOrCreate(ctx, "kiosk")
+		if err != nil {
+			t.Fatalf("failed creating initial kiosk daemon: %v", err)
+		}
+		if spawnCounter.Load() != 1 {
+			t.Fatalf("expected 1 initial spawn, got %d", spawnCounter.Load())
+		}
+
+		pool.UpdatePrewarmedTargets([]string{"touch-kiosk-kitchen"})
+		pool.MarkDirty()
+		pool.WaitBackground()
+
+		// 1. "kiosk" should be evicted and closed
+		if kioskDaemon.State() != StateClosed {
+			t.Errorf("expected removed prewarmed target kiosk to be closed, got state: %v", kioskDaemon.State())
+		}
+		if _, ok := pool.Get("kiosk"); ok {
+			t.Errorf("expected kiosk to be evicted from pool")
+		}
+
+		// 2. "touch-kiosk-kitchen" should be eagerly prewarmed
+		newDaemon, ok := pool.Get("touch-kiosk-kitchen")
+		if !ok || newDaemon == nil || newDaemon.State() == StateClosed {
+			t.Fatalf("expected active touch-kiosk-kitchen daemon in pool")
+		}
+		if newDaemon.IsDirty() {
+			t.Errorf("expected touch-kiosk-kitchen daemon to not be dirty")
+		}
+	})
 }
+
+func TestUnifiedProcessPool_PrewarmedTargets_DynamicUpdate(t *testing.T) {
+	t.Run("NilPool_ReturnsNil", func(t *testing.T) {
+		var p *UnifiedProcessPool
+		if got := p.PrewarmedTargets(); got != nil {
+			t.Errorf("expected nil from nil pool, got %v", got)
+		}
+		p.UpdatePrewarmedTargets([]string{"test"}) // Should not panic
+	})
+
+	t.Run("InitialAndDefensiveCopy", func(t *testing.T) {
+		pool := NewUnifiedProcessPool(PoolConfig{
+			PrewarmedTargets: []string{"a", "b"},
+		}, &MockDaemonSpawner{})
+		defer pool.Close()
+
+		targets := pool.PrewarmedTargets()
+		if len(targets) != 2 || targets[0] != "a" || targets[1] != "b" {
+			t.Fatalf("unexpected targets: %v", targets)
+		}
+
+		targets[0] = "mutated"
+		fresh := pool.PrewarmedTargets()
+		if fresh[0] != "a" {
+			t.Errorf("defensive copy violated: pool target mutated to %q", fresh[0])
+		}
+	})
+
+	t.Run("UpdateFiltersWhitespaceAndEmpty", func(t *testing.T) {
+		pool := NewUnifiedProcessPool(PoolConfig{}, &MockDaemonSpawner{})
+		defer pool.Close()
+
+		pool.UpdatePrewarmedTargets([]string{"  target1  ", "", "   ", "target2"})
+		targets := pool.PrewarmedTargets()
+		if len(targets) != 2 || targets[0] != "target1" || targets[1] != "target2" {
+			t.Fatalf("expected [target1, target2], got %v", targets)
+		}
+
+		pool.UpdatePrewarmedTargets(nil)
+		if got := pool.PrewarmedTargets(); got != nil {
+			t.Errorf("expected nil after setting nil targets, got %v", got)
+		}
+	})
+
+	t.Run("UpdateDeduplicatesTargets", func(t *testing.T) {
+		pool := NewUnifiedProcessPool(PoolConfig{}, &MockDaemonSpawner{})
+		defer pool.Close()
+
+		pool.UpdatePrewarmedTargets([]string{"kiosk", "kiosk", "touch-kiosk-kitchen", "  kiosk  "})
+		targets := pool.PrewarmedTargets()
+		if len(targets) != 2 || targets[0] != "kiosk" || targets[1] != "touch-kiosk-kitchen" {
+			t.Fatalf("expected [kiosk, touch-kiosk-kitchen], got %v", targets)
+		}
+	})
+}
+
