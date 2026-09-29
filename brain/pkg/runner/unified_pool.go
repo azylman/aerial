@@ -89,7 +89,7 @@ func (p *UnifiedProcessPool) Initialize(ctx context.Context) error {
 	for _, target := range p.cfg.PrewarmedTargets {
 		targetKey := target
 		go func() {
-			initCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			initCtx, cancel := context.WithTimeout(p.ctx, 35*time.Second)
 			defer cancel()
 			if _, err := p.GetOrCreate(initCtx, targetKey); err != nil {
 				log.Printf("[UnifiedProcessPool] Warning: pre-warming target %q failed: %v", targetKey, err)
@@ -181,7 +181,7 @@ func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string) 
 				p.mu.RUnlock()
 				go func(tKey string) {
 					defer p.bgWg.Done()
-					rotCtx, cancel := context.WithTimeout(p.ctx, 15*time.Second)
+					rotCtx, cancel := context.WithTimeout(p.ctx, 35*time.Second)
 					defer cancel()
 					if _, rotErr := p.RotateDaemon(rotCtx, tKey, ""); rotErr != nil {
 						if !errors.Is(rotErr, context.Canceled) {
@@ -345,7 +345,7 @@ func (p *UnifiedProcessPool) MarkDirty() {
 				delete(p.prewarming, tKey)
 				p.mu.Unlock()
 			}()
-			initCtx, cancel := context.WithTimeout(p.ctx, 15*time.Second)
+			initCtx, cancel := context.WithTimeout(p.ctx, 35*time.Second)
 			defer cancel()
 			if _, err := p.GetOrCreate(initCtx, tKey); err != nil {
 				if !errors.Is(err, context.Canceled) {
@@ -449,7 +449,7 @@ func (p *UnifiedProcessPool) ExecuteEphemeral(ctx context.Context, targetKey, pr
 	// Context hygiene: rotate ephemeral daemon if turn limits reached
 	if should, _ := p.ShouldRotate(daemon); should {
 		go func() {
-			rotCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			rotCtx, cancel := context.WithTimeout(p.ctx, 35*time.Second)
 			defer cancel()
 			if _, rotErr := p.RotateDaemon(rotCtx, targetKey, ""); rotErr != nil {
 				log.Printf("[UnifiedProcessPool] Warning: ephemeral daemon rotation failed for %q: %v", targetKey, rotErr)

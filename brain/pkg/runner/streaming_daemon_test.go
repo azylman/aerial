@@ -1237,3 +1237,47 @@ func TestStreamingDaemon_ResultWithErrorStatusAndSubstantiveResponse(t *testing.
 	}
 	sinkEmptyResp.mu.Unlock()
 }
+
+func TestStreamingDaemon_DefaultHandshakeTimeout(t *testing.T) {
+	if DefaultHandshakeTimeout != 30*time.Second {
+		t.Fatalf("expected DefaultHandshakeTimeout to be 30s, got %v", DefaultHandshakeTimeout)
+	}
+
+	// Verify that when cfg.Timeout is 0 (default), StartStreamingDaemon allows handshakes taking longer than old 5s limit
+	outR, outW := io.Pipe()
+	inR, inW := io.Pipe()
+	errR, errW := io.Pipe()
+	defer closeQuietly(inR)
+	defer closeQuietly(errW)
+
+	mockHandle := &MockProcessHandle{pid: 999}
+	mock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			return inW, outR, errR, mockHandle, nil
+		},
+	}
+
+	go func() {
+		// Emit init event after a slight delay
+		time.Sleep(100 * time.Millisecond)
+		_, _ = outW.Write([]byte("{\"event\":\"init\",\"conversation_id\":\"00000000-0000-0000-0000-000000000099\"}\n"))
+	}()
+
+	cfg := DaemonConfig{
+		SessionID: "00000000-0000-0000-0000-000000000099",
+		Timeout:   0, // Default timeout (30s)
+	}
+	daemon, err := StartStreamingDaemon(context.Background(), cfg, mock)
+	if err != nil {
+		t.Fatalf("expected successful daemon startup with default 30s timeout, got error: %v", err)
+	}
+	if daemon == nil {
+		t.Fatal("expected non-nil daemon")
+	}
+	defer daemon.Close()
+
+	if daemon.SessionID() != "00000000-0000-0000-0000-000000000099" {
+		t.Errorf("expected session ID 00000000-0000-0000-0000-000000000099, got: %s", daemon.SessionID())
+	}
+}
+
