@@ -19,9 +19,11 @@ func (p *Provisioner) LoadTargetMCPConfig(cfg *config.Config, target RuleTarget)
 	mergedServers := make(map[string]interface{})
 
 	// 1. Start with built-in default MCP microservices
-	// Scheduler is common across all runtimes
-	mergedServers["scheduler"] = map[string]interface{}{
-		"serverUrl": "http://scheduler-mcp:8080/mcp",
+	// Scheduler is common across all runtimes except ephemeral
+	if target != TargetEphemeral {
+		mergedServers["scheduler"] = map[string]interface{}{
+			"serverUrl": "http://scheduler-mcp:8080/mcp",
+		}
 	}
 
 	if target == TargetDiscord {
@@ -107,11 +109,24 @@ func (p *Provisioner) LoadTargetMCPConfig(cfg *config.Config, target RuleTarget)
 	// 3. Overlay custom MCP servers from config.yaml
 	if cfg != nil {
 		cur := cfg.Current()
-		targetServers := []map[string]json.RawMessage{cur.McpServers.Common}
-		if target == TargetDiscord {
-			targetServers = append(targetServers, cur.McpServers.Discord)
-		} else if target == TargetVoice {
-			targetServers = append(targetServers, cur.McpServers.Voice)
+		var targetServers []map[string]json.RawMessage
+		if target == TargetEphemeral {
+			if cur.McpServers.Ephemeral != nil {
+				targetServers = append(targetServers, cur.McpServers.Ephemeral)
+			}
+		} else {
+			if cur.McpServers.Common != nil {
+				targetServers = append(targetServers, cur.McpServers.Common)
+			}
+			if target == TargetDiscord {
+				if cur.McpServers.Discord != nil {
+					targetServers = append(targetServers, cur.McpServers.Discord)
+				}
+			} else if target == TargetVoice {
+				if cur.McpServers.Voice != nil {
+					targetServers = append(targetServers, cur.McpServers.Voice)
+				}
+			}
 		}
 
 		for _, srvMap := range targetServers {
@@ -148,6 +163,7 @@ func (p *Provisioner) LoadMCPConfig(cfg *config.Config) json.RawMessage {
 // 1. Primary ~/.gemini/config/mcp_config.json
 // 2. Discord runtime <dataDir>/runtimes/discord/.gemini/config/mcp_config.json
 // 3. Voice runtime <dataDir>/runtimes/voice/.gemini/config/mcp_config.json
+// 4. Ephemeral runtime <dataDir>/runtimes/ephemeral/.gemini/config/mcp_config.json
 func (p *Provisioner) SyncMCP(ctx context.Context, cfg *config.Config) error {
 	if p == nil {
 		return nil
@@ -155,6 +171,7 @@ func (p *Provisioner) SyncMCP(ctx context.Context, cfg *config.Config) error {
 
 	discordConfig := p.LoadTargetMCPConfig(cfg, TargetDiscord)
 	voiceConfig := p.LoadTargetMCPConfig(cfg, TargetVoice)
+	ephemeralConfig := p.LoadTargetMCPConfig(cfg, TargetEphemeral)
 
 	if p.homeDir != "" {
 		if err := p.EnsureTargetMcpConfig(filepath.Join(p.homeDir, ".gemini"), discordConfig); err != nil {
@@ -171,6 +188,11 @@ func (p *Provisioner) SyncMCP(ctx context.Context, cfg *config.Config) error {
 		voiceGemini := filepath.Join(p.dataDir, "runtimes", "voice", ".gemini")
 		if err := p.EnsureTargetMcpConfig(voiceGemini, voiceConfig); err != nil {
 			return fmt.Errorf("failed to sync voice runtime mcp config: %w", err)
+		}
+
+		ephemeralGemini := filepath.Join(p.dataDir, "runtimes", "ephemeral", ".gemini")
+		if err := p.EnsureTargetMcpConfig(ephemeralGemini, ephemeralConfig); err != nil {
+			return fmt.Errorf("failed to sync ephemeral runtime mcp config: %w", err)
 		}
 	}
 

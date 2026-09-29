@@ -3019,6 +3019,9 @@ mcp_servers:
   voice:
     kiosk:
       serverUrl: "http://kiosk:4003/mcp"
+  ephemeral:
+    custom_ephemeral:
+      serverUrl: "http://custom-ephemeral:4005/mcp"
 `
 		cfg, err := LoadConfigFromBytes([]byte(yamlContent))
 		if err != nil {
@@ -3033,6 +3036,39 @@ mcp_servers:
 		}
 		if len(cur.McpServers.Voice) != 1 || cur.McpServers.Voice["kiosk"] == nil {
 			t.Errorf("expected voice kiosk server, got: %v", cur.McpServers.Voice)
+		}
+		if len(cur.McpServers.Ephemeral) != 1 || cur.McpServers.Ephemeral["custom_ephemeral"] == nil {
+			t.Errorf("expected ephemeral custom_ephemeral server, got: %v", cur.McpServers.Ephemeral)
+		}
+	})
+
+	t.Run("NullCategoryHandling", func(t *testing.T) {
+		yamlContent := `
+channels:
+  default:
+    mode: "threads"
+mcp_servers:
+  common: null
+  discord: null
+  voice: null
+  ephemeral: null
+`
+		cfg, err := LoadConfigFromBytes([]byte(yamlContent))
+		if err != nil {
+			t.Fatalf("unexpected error parsing null categorized mcp_servers: %v", err)
+		}
+		cur := cfg.Current()
+		if cur.McpServers.Common == nil || len(cur.McpServers.Common) != 0 {
+			t.Errorf("expected initialized empty common map, got: %v", cur.McpServers.Common)
+		}
+		if cur.McpServers.Discord == nil || len(cur.McpServers.Discord) != 0 {
+			t.Errorf("expected initialized empty discord map, got: %v", cur.McpServers.Discord)
+		}
+		if cur.McpServers.Voice == nil || len(cur.McpServers.Voice) != 0 {
+			t.Errorf("expected initialized empty voice map, got: %v", cur.McpServers.Voice)
+		}
+		if cur.McpServers.Ephemeral == nil || len(cur.McpServers.Ephemeral) != 0 {
+			t.Errorf("expected initialized empty ephemeral map, got: %v", cur.McpServers.Ephemeral)
 		}
 	})
 
@@ -3051,6 +3087,9 @@ mcp_servers:
 		}
 		if !strings.Contains(err.Error(), "weather") && !strings.Contains(err.Error(), "unrecognized target category") {
 			t.Errorf("expected error mentioning unrecognized target category or weather, got: %v", err)
+		}
+		if !strings.Contains(err.Error(), "ephemeral") {
+			t.Errorf("expected error message to mention 'ephemeral' allowed category, got: %v", err)
 		}
 	})
 
@@ -3071,9 +3110,10 @@ mcp_servers:
 	t.Run("DeepCloneIndependence", func(t *testing.T) {
 		orig := &ConfigData{
 			McpServers: TargetMcpConfig{
-				Common:  map[string]json.RawMessage{"srv1": json.RawMessage(`{"url":"http://c"}`)},
-				Discord: map[string]json.RawMessage{"srv2": json.RawMessage(`{"url":"http://d"}`)},
-				Voice:   map[string]json.RawMessage{"srv3": json.RawMessage(`{"url":"http://v"}`)},
+				Common:    map[string]json.RawMessage{"srv1": json.RawMessage(`{"url":"http://c"}`)},
+				Discord:   map[string]json.RawMessage{"srv2": json.RawMessage(`{"url":"http://d"}`)},
+				Voice:     map[string]json.RawMessage{"srv3": json.RawMessage(`{"url":"http://v"}`)},
+				Ephemeral: map[string]json.RawMessage{"srv4": json.RawMessage(`{"url":"http://e"}`)},
 			},
 		}
 
@@ -3083,6 +3123,7 @@ mcp_servers:
 		orig.McpServers.Common["new"] = json.RawMessage(`{}`)
 		orig.McpServers.Discord["new"] = json.RawMessage(`{}`)
 		orig.McpServers.Voice["new"] = json.RawMessage(`{}`)
+		orig.McpServers.Ephemeral["new"] = json.RawMessage(`{}`)
 
 		if _, exists := cloned.McpServers.Common["new"]; exists {
 			t.Errorf("OCP violation: Common map was shallow-copied")
@@ -3093,11 +3134,32 @@ mcp_servers:
 		if _, exists := cloned.McpServers.Voice["new"]; exists {
 			t.Errorf("OCP violation: Voice map was shallow-copied")
 		}
+		if _, exists := cloned.McpServers.Ephemeral["new"]; exists {
+			t.Errorf("OCP violation: Ephemeral map was shallow-copied")
+		}
 
 		// Mutate byte slice
 		orig.McpServers.Common["srv1"][0] = 'X'
 		if cloned.McpServers.Common["srv1"][0] == 'X' {
 			t.Errorf("OCP violation: RawMessage byte slice backing array was not cloned")
+		}
+	})
+
+	t.Run("DeepCloneNilSafety", func(t *testing.T) {
+		orig := &ConfigData{
+			McpServers: TargetMcpConfig{
+				Common:    nil,
+				Discord:   nil,
+				Voice:     nil,
+				Ephemeral: nil,
+			},
+		}
+		cloned := cloneConfigData(orig)
+		if cloned == nil {
+			t.Fatal("expected non-nil clone")
+		}
+		if cloned.McpServers.Ephemeral != nil {
+			t.Errorf("expected nil Ephemeral map for nil src, got: %v", cloned.McpServers.Ephemeral)
 		}
 	})
 }

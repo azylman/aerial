@@ -142,9 +142,10 @@ type OllamaConfig struct {
 }
 
 type TargetMcpConfig struct {
-	Common  map[string]json.RawMessage `yaml:"common,omitempty" json:"common,omitempty"`
-	Discord map[string]json.RawMessage `yaml:"discord,omitempty" json:"discord,omitempty"`
-	Voice   map[string]json.RawMessage `yaml:"voice,omitempty" json:"voice,omitempty"`
+	Common    map[string]json.RawMessage `yaml:"common,omitempty" json:"common,omitempty"`
+	Discord   map[string]json.RawMessage `yaml:"discord,omitempty" json:"discord,omitempty"`
+	Voice     map[string]json.RawMessage `yaml:"voice,omitempty" json:"voice,omitempty"`
+	Ephemeral map[string]json.RawMessage `yaml:"ephemeral,omitempty" json:"ephemeral,omitempty"`
 }
 
 type ConfigData struct {
@@ -275,9 +276,10 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 	}
 
 	c.McpServers = TargetMcpConfig{
-		Common:  make(map[string]json.RawMessage),
-		Discord: make(map[string]json.RawMessage),
-		Voice:   make(map[string]json.RawMessage),
+		Common:    make(map[string]json.RawMessage),
+		Discord:   make(map[string]json.RawMessage),
+		Voice:     make(map[string]json.RawMessage),
+		Ephemeral: make(map[string]json.RawMessage),
 	}
 	if raw.McpServers != nil {
 		for targetKey, targetVal := range raw.McpServers {
@@ -290,8 +292,10 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 				targetMap = c.McpServers.Discord
 			case "voice":
 				targetMap = c.McpServers.Voice
+			case "ephemeral":
+				targetMap = c.McpServers.Ephemeral
 			default:
-				return fmt.Errorf("mcp_servers contains unrecognized target category %q: only 'common', 'discord', and 'voice' are allowed", targetKey)
+				return fmt.Errorf("mcp_servers contains unrecognized target category %q: only 'common', 'discord', 'voice', and 'ephemeral' are allowed", targetKey)
 			}
 
 			if targetVal == nil {
@@ -377,6 +381,12 @@ func cloneConfigData(src *ConfigData) *ConfigData {
 			dst.McpServers.Voice[k] = append(json.RawMessage(nil), v...)
 		}
 	}
+	if src.McpServers.Ephemeral != nil {
+		dst.McpServers.Ephemeral = make(map[string]json.RawMessage, len(src.McpServers.Ephemeral))
+		for k, v := range src.McpServers.Ephemeral {
+			dst.McpServers.Ephemeral[k] = append(json.RawMessage(nil), v...)
+		}
+	}
 	return &dst
 }
 
@@ -394,9 +404,10 @@ func DefaultConfigData() *ConfigData {
 			},
 		},
 		McpServers: TargetMcpConfig{
-			Common:  make(map[string]json.RawMessage),
-			Discord: make(map[string]json.RawMessage),
-			Voice:   make(map[string]json.RawMessage),
+			Common:    make(map[string]json.RawMessage),
+			Discord:   make(map[string]json.RawMessage),
+			Voice:     make(map[string]json.RawMessage),
+			Ephemeral: make(map[string]json.RawMessage),
 		},
 		Port:            "8080",
 		AgyBin:          "agy",

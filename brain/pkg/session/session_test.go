@@ -2580,6 +2580,65 @@ func TestManager_UnifiedRuntimeTranscriptDiscovery(t *testing.T) {
 	}
 }
 
+func TestRuntimeEphemeralStorageDiscovery(t *testing.T) {
+	t.Parallel()
+	tempHome := t.TempDir()
+	tempData := t.TempDir()
+
+	mgr := New(tempHome, tempData)
+	ephemeralConvID := uuid.New().String()
+
+	// 1. Create transcript inside dataDir/runtimes/ephemeral/.gemini/antigravity-cli/brain/<ephemeralConvID>
+	sessDir := filepath.Join(tempData, "runtimes", "ephemeral", ".gemini", "antigravity-cli", "brain", ephemeralConvID)
+	logsDir := filepath.Join(sessDir, ".system_generated", "logs")
+	if err := os.MkdirAll(logsDir, 0755); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+
+	transcriptContent := fmt.Sprintf(`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"classify this"}` + "\n" +
+		`{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","content":"{\"category\":\"action\"}"}` + "\n")
+	if err := os.WriteFile(filepath.Join(logsDir, "transcript.jsonl"), []byte(transcriptContent), 0644); err != nil {
+		t.Fatalf("write transcript failed: %v", err)
+	}
+
+	// 2. Create conversation db in runtimes/ephemeral/.gemini/antigravity-cli/conversations/<ephemeralConvID>.db
+	convDir := filepath.Join(tempData, "runtimes", "ephemeral", ".gemini", "antigravity-cli", "conversations")
+	if err := os.MkdirAll(convDir, 0755); err != nil {
+		t.Fatalf("mkdir ephemeral conversations failed: %v", err)
+	}
+	dbContent := make([]byte, 128*1024)
+	if err := os.WriteFile(filepath.Join(convDir, ephemeralConvID+".db"), dbContent, 0644); err != nil {
+		t.Fatalf("write ephemeral db failed: %v", err)
+	}
+
+	// 3. Verify discovery across session manager methods
+	steps := mgr.CountTranscriptSteps(ephemeralConvID)
+	if steps != 2 {
+		t.Errorf("expected 2 transcript steps from ephemeral runtime, got %d", steps)
+	}
+
+	size := mgr.GetTranscriptSize(ephemeralConvID)
+	if size != int64(len(transcriptContent)) {
+		t.Errorf("expected size %d, got %d", len(transcriptContent), size)
+	}
+
+	if !mgr.SessionExistsOnDisk(ephemeralConvID) {
+		t.Errorf("expected SessionExistsOnDisk to return true for ephemeral runtime session")
+	}
+
+	if sz := mgr.GetSessionDBSize(ephemeralConvID); sz != int64(len(dbContent)) {
+		t.Errorf("expected db size %d, got %d", len(dbContent), sz)
+	}
+
+	resp, errStr := mgr.ExtractResponseAndError(ephemeralConvID)
+	if resp != `{"category":"action"}` {
+		t.Errorf("expected response '{\"category\":\"action\"}', got: %q", resp)
+	}
+	if errStr != "" {
+		t.Errorf("expected empty error, got: %q", errStr)
+	}
+}
+
 func TestManager_GetSessionDBSize(t *testing.T) {
 	tempHome := t.TempDir()
 	tempData := t.TempDir()

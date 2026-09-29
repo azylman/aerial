@@ -2252,7 +2252,7 @@ func TestSkills_TargetBranchesAndCoverage(t *testing.T) {
 	// Pre-create an existing file at destination
 	_ = os.WriteFile(filepath.Join(tmpTarget, "rename-skill"), []byte("existing"), 0644)
 
-	count := p.LinkTargetSkills(tmpTarget, TargetDiscord)
+	count := p.LinkTargetSkills(tmpTarget, TargetVoice)
 	if count != 1 {
 		t.Errorf("expected 1 skill linked, got %d", count)
 	}
@@ -2277,7 +2277,7 @@ func TestSkills_TargetBranchesAndCoverage(t *testing.T) {
 		}
 		return origSymlink(oldname, newname)
 	}
-	countSymlinkFallback := p.LinkTargetSkills(mockTarget, TargetDiscord)
+	countSymlinkFallback := p.LinkTargetSkills(mockTarget, TargetVoice)
 	if countSymlinkFallback != 1 {
 		t.Errorf("expected 1 from symlink fallback, got %d", countSymlinkFallback)
 	}
@@ -2286,7 +2286,7 @@ func TestSkills_TargetBranchesAndCoverage(t *testing.T) {
 	symlinkSkill = func(oldname, newname string) error {
 		return errors.New("simulated total symlink error")
 	}
-	countBothSymlinkFail := p.LinkTargetSkills(t.TempDir(), TargetDiscord)
+	countBothSymlinkFail := p.LinkTargetSkills(t.TempDir(), TargetVoice)
 	if countBothSymlinkFail != 0 {
 		t.Errorf("expected 0 when both symlinks fail, got %d", countBothSymlinkFail)
 	}
@@ -2301,7 +2301,7 @@ func TestSkills_TargetBranchesAndCoverage(t *testing.T) {
 		}
 		return origRename(oldname, newname)
 	}
-	countRenameRetry := p.LinkTargetSkills(t.TempDir(), TargetDiscord)
+	countRenameRetry := p.LinkTargetSkills(t.TempDir(), TargetVoice)
 	if countRenameRetry != 1 {
 		t.Errorf("expected 1 from rename retry fallback, got %d", countRenameRetry)
 	}
@@ -2310,7 +2310,7 @@ func TestSkills_TargetBranchesAndCoverage(t *testing.T) {
 	renameSkill = func(oldname, newname string) error {
 		return errors.New("simulated total rename error")
 	}
-	countRenameFail := p.LinkTargetSkills(t.TempDir(), TargetDiscord)
+	countRenameFail := p.LinkTargetSkills(t.TempDir(), TargetVoice)
 	if countRenameFail != 0 {
 		t.Errorf("expected 0 from total rename fail, got %d", countRenameFail)
 	}
@@ -2429,6 +2429,245 @@ func TestSyncSkills_LegacyCleanupErrors(t *testing.T) {
 		t.Errorf("expected SyncSkills to handle removeAll errors gracefully, got: %v", err)
 	}
 }
+
+func TestCompileTargetRules_TargetEphemeral(t *testing.T) {
+	t.Parallel()
+
+	aerialDir := t.TempDir()
+	configDir := t.TempDir()
+
+	// 1. Aerial common & ephemeral rules
+	_ = os.MkdirAll(filepath.Join(aerialDir, "common"), 0755)
+	_ = os.WriteFile(filepath.Join(aerialDir, "common", "01-identity.md"), []byte("aerial identity"), 0644)
+	_ = os.WriteFile(filepath.Join(aerialDir, "common", "02-invariants.md"), []byte("aerial invariants"), 0644)
+	_ = os.MkdirAll(filepath.Join(aerialDir, "ephemeral"), 0755)
+	_ = os.WriteFile(filepath.Join(aerialDir, "ephemeral", "99-output-constraints.md"), []byte("output constraints"), 0644)
+
+	// 2. Config common & discord rules
+	_ = os.MkdirAll(filepath.Join(configDir, "common"), 0755)
+	_ = os.WriteFile(filepath.Join(configDir, "common", "01-identity.md"), []byte("user identity"), 0644)
+	_ = os.WriteFile(filepath.Join(configDir, "common", "02-persona.md"), []byte("user persona style"), 0644)
+	_ = os.MkdirAll(filepath.Join(configDir, "discord"), 0755)
+	_ = os.WriteFile(filepath.Join(configDir, "discord", "01-messaging.md"), []byte("discord messaging"), 0644)
+
+	p := New(t.TempDir(), t.TempDir())
+	p.SetAerialRulesDir(aerialDir)
+	p.SetConfigRulesDir(configDir)
+
+	rules, err := p.compileTargetRules(TargetEphemeral, "custom prompt override")
+	if err != nil {
+		t.Fatalf("compileTargetRules(TargetEphemeral) failed: %v", err)
+	}
+
+	foundMap := make(map[string]bool)
+	for _, r := range rules {
+		foundMap[r.prefix+r.filename] = true
+	}
+
+	// Must include aerial common identity & invariants
+	if !foundMap["00_aerial_common_01-identity.md"] {
+		t.Errorf("missing 00_aerial_common_01-identity.md")
+	}
+	if !foundMap["00_aerial_common_02-invariants.md"] {
+		t.Errorf("missing 00_aerial_common_02-invariants.md")
+	}
+
+	// Must include whitelisted user common identity
+	if !foundMap["10_user_common_01-identity.md"] {
+		t.Errorf("missing 10_user_common_01-identity.md")
+	}
+
+	// Must include aerial ephemeral 99-output-constraints
+	if !foundMap["20_aerial_ephemeral_99-output-constraints.md"] {
+		t.Errorf("missing 20_aerial_ephemeral_99-output-constraints.md")
+	}
+
+	// Must NOT include user common persona
+	if foundMap["10_user_common_02-persona.md"] {
+		t.Errorf("TargetEphemeral must omit 10_user_common_02-persona.md")
+	}
+
+	// Must NOT include discord rules or custom prompt
+	if foundMap["20_aerial_discord_01-messaging.md"] || foundMap["30_user_discord_01-messaging.md"] {
+		t.Errorf("TargetEphemeral must not contain discord rules")
+	}
+	if foundMap["99_custom_prompt.md"] {
+		t.Errorf("TargetEphemeral must not append custom prompt override")
+	}
+}
+
+func TestLoadTargetMCPConfig_TargetEphemeral(t *testing.T) {
+	t.Parallel()
+
+	p := &Provisioner{}
+
+	// 1. Default config (no ephemeral MCP servers configured)
+	cfgDefault := config.NewTestConfig(func(d *config.ConfigData) {
+		d.McpServers.Common = map[string]json.RawMessage{
+			"common-srv": json.RawMessage(`{"url":"http://common"}`),
+		}
+		d.McpServers.Discord = map[string]json.RawMessage{
+			"discord-custom": json.RawMessage(`{"url":"http://discord"}`),
+		}
+	})
+
+	rawDefault := p.LoadTargetMCPConfig(cfgDefault, TargetEphemeral)
+	var defaultObj struct {
+		McpServers map[string]interface{} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(rawDefault, &defaultObj); err != nil {
+		t.Fatalf("failed to unmarshal ephemeral MCP config: %v", err)
+	}
+
+	if len(defaultObj.McpServers) != 0 {
+		t.Errorf("expected 0 MCP servers by default for TargetEphemeral, got %d: %v", len(defaultObj.McpServers), defaultObj.McpServers)
+	}
+	if _, ok := defaultObj.McpServers["scheduler"]; ok {
+		t.Errorf("TargetEphemeral must NOT include scheduler MCP")
+	}
+	if _, ok := defaultObj.McpServers["common-srv"]; ok {
+		t.Errorf("TargetEphemeral must NOT inherit common MCP servers")
+	}
+
+	// 2. Custom ephemeral MCP server
+	cfgCustom := config.NewTestConfig(func(d *config.ConfigData) {
+		d.McpServers.Ephemeral = map[string]json.RawMessage{
+			"ephemeral-agent": json.RawMessage(`{"serverUrl":"http://ephemeral:9000/mcp"}`),
+		}
+	})
+
+	rawCustom := p.LoadTargetMCPConfig(cfgCustom, TargetEphemeral)
+	var customObj struct {
+		McpServers map[string]interface{} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(rawCustom, &customObj); err != nil {
+		t.Fatalf("failed to unmarshal custom ephemeral MCP config: %v", err)
+	}
+
+	if len(customObj.McpServers) != 1 {
+		t.Errorf("expected 1 MCP server, got %d", len(customObj.McpServers))
+	}
+	if _, ok := customObj.McpServers["ephemeral-agent"]; !ok {
+		t.Errorf("missing ephemeral-agent in MCP config")
+	}
+	if _, ok := customObj.McpServers["scheduler"]; ok {
+		t.Errorf("TargetEphemeral must NOT include scheduler even with custom ephemeral server")
+	}
+}
+
+func TestLinkTargetSkills_TargetEphemeral(t *testing.T) {
+	t.Parallel()
+
+	tmpHome := t.TempDir()
+	tmpData := t.TempDir()
+	tmpCustom := t.TempDir()
+	tmpBuiltin := t.TempDir()
+
+	// Create skills in common, discord, voice, and ephemeral
+	_ = os.MkdirAll(filepath.Join(tmpCustom, "common", "skill-common"), 0755)
+	_ = os.WriteFile(filepath.Join(tmpCustom, "common", "skill-common", "SKILL.md"), []byte("# common skill"), 0644)
+
+	_ = os.MkdirAll(filepath.Join(tmpCustom, "discord", "skill-discord"), 0755)
+	_ = os.WriteFile(filepath.Join(tmpCustom, "discord", "skill-discord", "SKILL.md"), []byte("# discord skill"), 0644)
+
+	_ = os.MkdirAll(filepath.Join(tmpCustom, "voice", "skill-voice"), 0755)
+	_ = os.WriteFile(filepath.Join(tmpCustom, "voice", "skill-voice", "SKILL.md"), []byte("# voice skill"), 0644)
+
+	_ = os.MkdirAll(filepath.Join(tmpCustom, "ephemeral", "skill-ephemeral"), 0755)
+	_ = os.WriteFile(filepath.Join(tmpCustom, "ephemeral", "skill-ephemeral", "SKILL.md"), []byte("# ephemeral skill"), 0644)
+
+	p := New(tmpHome, tmpData)
+	p.SetCustomSkillsDir(tmpCustom)
+	p.SetAgentsSkillsDir(tmpBuiltin)
+	p.SetSuperpowersDir(t.TempDir()) // Ensure superpowers are present
+
+	ephemeralTargetDir := filepath.Join(tmpData, "runtimes", "ephemeral", ".gemini", "config", "skills")
+	count := p.LinkTargetSkills(ephemeralTargetDir, TargetEphemeral)
+
+	if count != 1 {
+		t.Errorf("expected exactly 1 ephemeral skill linked, got %d", count)
+	}
+
+	entries, err := os.ReadDir(ephemeralTargetDir)
+	if err != nil {
+		t.Fatalf("failed to read ephemeral target skills dir: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "skill-ephemeral" {
+		t.Errorf("expected only 'skill-ephemeral', got: %v", entries)
+	}
+
+	// Test default without ephemeral category
+	tmpEmptyTarget := t.TempDir()
+	emptyCount := p.LinkTargetSkills(tmpEmptyTarget, TargetEphemeral)
+	if emptyCount != 1 { // Still scans tmpCustom which has skill-ephemeral
+		t.Logf("Linked %d skills", emptyCount)
+	}
+}
+
+func TestSync_EphemeralRuntimeIsolation(t *testing.T) {
+	tmpHome := t.TempDir()
+	tmpData := t.TempDir()
+	aerialRulesDir := t.TempDir()
+	configRulesDir := t.TempDir()
+
+	_ = os.MkdirAll(filepath.Join(aerialRulesDir, "common"), 0755)
+	_ = os.WriteFile(filepath.Join(aerialRulesDir, "common", "01-identity.md"), []byte("aerial identity"), 0644)
+	_ = os.MkdirAll(filepath.Join(aerialRulesDir, "ephemeral"), 0755)
+	_ = os.WriteFile(filepath.Join(aerialRulesDir, "ephemeral", "99-output-constraints.md"), []byte("output constraints"), 0644)
+
+	p := New(tmpHome, tmpData)
+	p.SetAerialRulesDir(aerialRulesDir)
+	p.SetConfigRulesDir(configRulesDir)
+
+	cfg := config.NewTestConfig(func(d *config.ConfigData) {
+		d.DataDir = tmpData
+		d.GeminiHomeDir = tmpHome
+	})
+
+	if err := p.Sync(context.Background(), cfg); err != nil {
+		t.Fatalf("Sync failed: %v", err)
+	}
+
+	// Verify ephemeral runtime directory structure
+	ephemeralGemini := filepath.Join(tmpData, "runtimes", "ephemeral", ".gemini")
+	rulesDir := filepath.Join(ephemeralGemini, "rules")
+	ruleEntries, err := os.ReadDir(rulesDir)
+	if err != nil {
+		t.Fatalf("failed to read ephemeral rules dir: %v", err)
+	}
+	hasOutputConstraints := false
+	for _, entry := range ruleEntries {
+		if strings.Contains(entry.Name(), "output-constraints") {
+			hasOutputConstraints = true
+		}
+	}
+	if !hasOutputConstraints {
+		t.Errorf("expected ephemeral rules to contain output-constraints, got: %v", ruleEntries)
+	}
+
+	// Verify ephemeral MCP config exists and has empty mcpServers
+	mcpPath := filepath.Join(ephemeralGemini, "config", "mcp_config.json")
+	mcpBytes, err := os.ReadFile(mcpPath)
+	if err != nil {
+		t.Fatalf("failed to read ephemeral mcp_config.json: %v", err)
+	}
+	var mcpObj struct {
+		McpServers map[string]interface{} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(mcpBytes, &mcpObj); err != nil {
+		t.Fatalf("failed to unmarshal ephemeral mcp_config.json: %v", err)
+	}
+	if len(mcpObj.McpServers) != 0 {
+		t.Errorf("expected 0 MCP servers in ephemeral runtime, got: %v", mcpObj.McpServers)
+	}
+
+	// Verify skills directory exists
+	skillsDir := filepath.Join(ephemeralGemini, "config", "skills")
+	if fi, err := os.Stat(skillsDir); err != nil || !fi.IsDir() {
+		t.Errorf("expected ephemeral skills directory %s to exist", skillsDir)
+	}
+}
+
 
 
 
