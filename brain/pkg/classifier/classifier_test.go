@@ -1844,17 +1844,28 @@ func TestBuildSystemOneState(t *testing.T) {
 		t.Errorf("state must NOT contain XML channel_history tags")
 	}
 
-	// Truncation test (> 4000 runes)
-	longContent := strings.Repeat("x", 5000)
-	longBurst := []db.Message{
+	// Truncation test (> MaxSystemOneStateRunes, tail-style preservation)
+	oldHistory := []db.Message{
 		{
-			AuthorName: "spammer",
-			Content:    longContent,
+			AuthorName: "ancient_alice",
+			Content:    strings.Repeat("a", 1500),
 		},
 	}
-	longState := BuildSystemOneState(longBurst, nil)
-	if len([]rune(longState)) > 4000 {
-		t.Errorf("expected state to be clamped to 4000 runes, got %d", len([]rune(longState)))
+	newBurst := []db.Message{
+		{
+			AuthorName: "recent_bob",
+			Content:    "Crucial recent message!",
+		},
+	}
+	truncatedState := BuildSystemOneState(newBurst, oldHistory)
+	if len([]rune(truncatedState)) > MaxSystemOneStateRunes {
+		t.Errorf("expected state to be clamped to %d runes, got %d", MaxSystemOneStateRunes, len([]rune(truncatedState)))
+	}
+	if !strings.Contains(truncatedState, "recent_bob: Crucial recent message!") {
+		t.Errorf("expected state to preserve the newest message (tail-style truncation), got: %s", truncatedState)
+	}
+	if strings.Contains(truncatedState, "ancient_alice:") {
+		t.Errorf("expected oldest message prefix to be trimmed away, got: %s", truncatedState)
 	}
 }
 
