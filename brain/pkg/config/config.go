@@ -62,38 +62,80 @@ type ChannelPolicy struct {
 	Hooks                ChannelHooksConfig `yaml:"hooks,omitempty" json:"hooks,omitempty"`
 }
 
+// IsThread reports whether the channel policy specifies thread-based interaction.
+func (p ChannelPolicy) IsThread() bool {
+	m := strings.ToLower(strings.TrimSpace(p.Mode))
+	return m == "thread" || m == "threads"
+}
+
 // IsIgnored reports whether the channel policy specifies an ignored/disabled channel.
 func (p ChannelPolicy) IsIgnored() bool {
 	m := strings.ToLower(strings.TrimSpace(p.Mode))
 	return m == "ignore" || m == "disabled"
 }
 
+// Normalize canonicalizes legacy mode and wake_mode combinations into the unified mode enum.
+func (p *ChannelPolicy) Normalize() {
+	if p == nil {
+		return
+	}
+	rawMode := strings.ToLower(strings.TrimSpace(p.Mode))
+	rawWake := strings.ToLower(strings.TrimSpace(p.WakeMode))
+
+	switch rawMode {
+	case "threads", "thread":
+		p.Mode = "thread"
+	case "channel":
+		switch rawWake {
+		case "mention", "mentions", "direct":
+			p.Mode = "mention"
+		default:
+			p.Mode = "classifier"
+		}
+	case "ignore", "disabled":
+		p.Mode = "ignore"
+	case "mention", "mentions", "direct":
+		p.Mode = "mention"
+	case "classifier", "ambient":
+		p.Mode = "classifier"
+	}
+}
+
 // GetWakeMode returns the effective wake mode for this channel policy.
 // Supported canonical values: "mention", "classifier", "all".
-// Accepted aliases: "mentions"/"direct" -> "mention", "ambient" -> "classifier", "always" -> "all".
-// If unspecified, defaults to "classifier" for channel mode and "all" for threads mode.
 func (p ChannelPolicy) GetWakeMode() string {
-	m := strings.ToLower(strings.TrimSpace(p.WakeMode))
-	switch m {
-	case "mention", "mentions", "direct":
-		return "mention"
-	case "classifier", "ambient":
-		return "classifier"
-	case "all", "always":
-		return "all"
+	if p.WakeMode != "" {
+		wm := strings.ToLower(strings.TrimSpace(p.WakeMode))
+		switch wm {
+		case "mention", "mentions", "direct":
+			return "mention"
+		case "classifier", "ambient":
+			return "classifier"
+		case "all", "always":
+			return "all"
+		}
 	}
-	if strings.ToLower(strings.TrimSpace(p.Mode)) == "channel" {
+	m := strings.ToLower(strings.TrimSpace(p.Mode))
+	switch m {
+	case "mention":
+		return "mention"
+	case "classifier", "channel":
 		return "classifier"
+	case "thread", "threads":
+		return "all"
+	case "ignore", "disabled":
+		return "ignore"
 	}
 	return "all"
 }
 
-// GetAmbientWakeThreshold returns the ambient wake threshold, defaulting to 0.80 for channel mode and 0.0 otherwise.
+// GetAmbientWakeThreshold returns the ambient wake threshold, defaulting to 0.80 for classifier mode and 0.0 otherwise.
 func (p ChannelPolicy) GetAmbientWakeThreshold() float64 {
 	if p.AmbientWakeThreshold != nil {
 		return *p.AmbientWakeThreshold
 	}
-	if strings.ToLower(strings.TrimSpace(p.Mode)) == "channel" {
+	m := strings.ToLower(strings.TrimSpace(p.Mode))
+	if m == "classifier" || m == "channel" {
 		return 0.80
 	}
 	return 0.0
@@ -989,8 +1031,8 @@ func validateChannels(parsed *ConfigData, targetPath string) error {
 	}
 
 	defMode := strings.ToLower(strings.TrimSpace(defPolicy.Mode))
-	if defMode != "threads" && defMode != "channel" && defMode != "ignore" && defMode != "disabled" {
-		log.Printf("[Config] Validation error: channels.default mode must be 'threads', 'channel', 'ignore', or 'disabled', got %q in %s.", defPolicy.Mode, targetPath)
+	if defMode != "thread" && defMode != "threads" && defMode != "classifier" && defMode != "mention" && defMode != "ignore" && defMode != "channel" && defMode != "disabled" {
+		log.Printf("[Config] Validation error: channels.default mode must be 'threads', 'channel', 'ignore', or 'disabled' (or 'thread', 'classifier', 'mention'), got %q in %s.", defPolicy.Mode, targetPath)
 		return fmt.Errorf("channels.default mode must be 'threads', 'channel', 'ignore', or 'disabled', got %q", defPolicy.Mode)
 	}
 
@@ -1024,8 +1066,8 @@ func validateChannels(parsed *ConfigData, targetPath string) error {
 		}
 		if policy.Mode != "" {
 			modeLower := strings.ToLower(strings.TrimSpace(policy.Mode))
-			if modeLower != "threads" && modeLower != "channel" && modeLower != "ignore" && modeLower != "disabled" {
-				log.Printf("[Config] Validation error: channel %q mode must be 'threads', 'channel', 'ignore', or 'disabled', got %q in %s.", k, policy.Mode, targetPath)
+			if modeLower != "thread" && modeLower != "threads" && modeLower != "classifier" && modeLower != "mention" && modeLower != "ignore" && modeLower != "channel" && modeLower != "disabled" {
+				log.Printf("[Config] Validation error: channel %q mode must be 'threads', 'channel', 'ignore', or 'disabled' (or 'thread', 'classifier', 'mention'), got %q in %s.", k, policy.Mode, targetPath)
 				return fmt.Errorf("channel %q mode must be 'threads', 'channel', 'ignore', or 'disabled', got %q", k, policy.Mode)
 			}
 			policy.Mode = modeLower
