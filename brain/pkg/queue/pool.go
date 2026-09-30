@@ -867,7 +867,7 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 
 	model := p.LowEffortModel()
 	start := time.Now()
-	daemon, dErr := procPool.GetOrCreateSession(ctx, deviceKey)
+	daemon, dErr := procPool.GetOrCreateSession(ctx, deviceKey, "")
 	if dErr != nil {
 		metrics.RecordRunnerExecution("error", model, "voice", time.Since(start))
 		return "", deviceKey, fmt.Errorf("failed to acquire voice daemon: %w", dErr)

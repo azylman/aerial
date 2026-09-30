@@ -43,7 +43,7 @@ func newMockAgentPool() *mockAgentPool {
 	}
 }
 
-func (m *mockAgentPool) GetOrCreateSession(ctx context.Context, targetKey string) (AgentSession, error) {
+func (m *mockAgentPool) GetOrCreateSession(ctx context.Context, targetKey string, sessionID string) (AgentSession, error) {
 	if m.closed {
 		return nil, errors.New("mock pool is closed")
 	}
@@ -53,7 +53,11 @@ func (m *mockAgentPool) GetOrCreateSession(ctx context.Context, targetKey string
 	if s, ok := m.sessions[targetKey]; ok {
 		return s, nil
 	}
-	sess := &mockAgentSession{sessionID: "sess-" + targetKey}
+	sessID := "sess-" + targetKey
+	if sessionID != "" {
+		sessID = sessionID
+	}
+	sess := &mockAgentSession{sessionID: sessID}
 	m.sessions[targetKey] = sess
 	return sess, nil
 }
@@ -109,7 +113,7 @@ func TestUnifiedProcessPool_GetOrCreateSession(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	sess, err := pool.GetOrCreateSession(ctx, "kiosk-voice")
+	sess, err := pool.GetOrCreateSession(ctx, "kiosk-voice", "")
 	if err != nil {
 		t.Fatalf("unexpected error from GetOrCreateSession: %v", err)
 	}
@@ -135,7 +139,7 @@ func TestUnifiedProcessPool_GetOrCreateSession(t *testing.T) {
 		t.Fatalf("failed to close pool: %v", err)
 	}
 
-	_, closedErr := pool.GetOrCreateSession(ctx, "kiosk-voice")
+	_, closedErr := pool.GetOrCreateSession(ctx, "kiosk-voice", "")
 	if closedErr == nil {
 		t.Fatalf("expected error from GetOrCreateSession on closed pool, got nil")
 	}
@@ -154,7 +158,7 @@ func TestMockAgentPool_Behavior(t *testing.T) {
 		t.Fatalf("expected initCalled to be true")
 	}
 
-	sess1, err := pool.GetOrCreateSession(ctx, "device-a")
+	sess1, err := pool.GetOrCreateSession(ctx, "device-a", "")
 	if err != nil {
 		t.Fatalf("unexpected error getting session: %v", err)
 	}
@@ -163,7 +167,7 @@ func TestMockAgentPool_Behavior(t *testing.T) {
 	}
 
 	// Calling again should return the same session
-	sess2, err := pool.GetOrCreateSession(ctx, "device-a")
+	sess2, err := pool.GetOrCreateSession(ctx, "device-a", "")
 	if err != nil {
 		t.Fatalf("unexpected error getting existing session: %v", err)
 	}
@@ -189,7 +193,7 @@ func TestMockAgentPool_Behavior(t *testing.T) {
 	if err := pool.Close(); err != nil {
 		t.Fatalf("unexpected close error: %v", err)
 	}
-	if _, err := pool.GetOrCreateSession(ctx, "device-b"); err == nil {
+	if _, err := pool.GetOrCreateSession(ctx, "device-b", ""); err == nil {
 		t.Fatalf("expected error from GetOrCreateSession on closed mock pool")
 	}
 }

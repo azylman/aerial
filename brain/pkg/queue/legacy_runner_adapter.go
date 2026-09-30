@@ -36,26 +36,31 @@ func (p *legacyRunnerAgentPool) Get(threadID string) (*runner.StreamingDaemon, b
 	return nil, false
 }
 
-func (p *legacyRunnerAgentPool) GetOrCreate(ctx context.Context, threadID string) (*runner.StreamingDaemon, error) {
+func (p *legacyRunnerAgentPool) GetOrCreate(ctx context.Context, threadID string, sessionID string) (*runner.StreamingDaemon, error) {
 	if p.trackerPool != nil {
 		if tp, ok := p.trackerPool.(interface {
-			GetOrCreate(context.Context, string) (*runner.StreamingDaemon, error)
+			GetOrCreate(context.Context, string, string) (*runner.StreamingDaemon, error)
 		}); ok {
-			return tp.GetOrCreate(ctx, threadID)
+			return tp.GetOrCreate(ctx, threadID, sessionID)
 		}
 	}
 	return nil, fmt.Errorf("no underlying process pool")
 }
 
-func (p *legacyRunnerAgentPool) GetOrCreateSession(ctx context.Context, targetKey string) (runner.AgentSession, error) {
+func (p *legacyRunnerAgentPool) GetOrCreateSession(ctx context.Context, targetKey string, sessionID string) (runner.AgentSession, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	trimmed := strings.TrimSpace(sessionID)
 	if s, ok := p.sessions[targetKey]; ok {
+		s.mu.Lock()
+		s.sessionID = trimmed
+		s.mu.Unlock()
 		return s, nil
 	}
 	s := &legacyRunnerAgentSession{
 		pool:      p,
 		targetKey: targetKey,
+		sessionID: trimmed,
 	}
 	p.sessions[targetKey] = s
 	return s, nil

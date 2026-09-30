@@ -285,7 +285,7 @@ func TestYieldTrap_DaemonTracker_TriggersAutoResumption(t *testing.T) {
 
 	// Pre-create daemon with active background task
 	ctx := context.Background()
-	daemon, err = pool.ProcessPool().GetOrCreate(ctx, threadID)
+	daemon, err = pool.ProcessPool().GetOrCreate(ctx, threadID, "")
 	if err != nil {
 		t.Fatalf("Failed to create daemon: %v", err)
 	}

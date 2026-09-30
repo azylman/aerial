@@ -662,7 +662,7 @@ func TestBurst_ActiveTasksInLowEffortPoolPreventReap(t *testing.T) {
 
 	// Pre-create daemon in lowPool with active task
 	ctx := context.Background()
-	daemon, err := pool.LowEffortProcessPool().GetOrCreate(ctx, threadID)
+	daemon, err := pool.LowEffortProcessPool().GetOrCreate(ctx, threadID, "")
 	if err != nil {
 		t.Fatalf("failed to create daemon in low pool: %v", err)
 	}

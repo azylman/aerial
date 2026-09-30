@@ -2701,11 +2701,11 @@ func TestCoverageBoost_SinkAndLegacyAdapterMethods(t *testing.T) {
 		t.Errorf("unexpected error on Close: %v", err)
 	}
 	_, _ = lp.Get("thread-1")
-	_, _ = lp.GetOrCreate(context.Background(), "thread-1")
+	_, _ = lp.GetOrCreate(context.Background(), "thread-1", "")
 
 	lpNoTracker := newLegacyRunnerAgentPool(WorkerPoolConfig{}, nil)
 	_, _ = lpNoTracker.Get("thread-1")
-	_, err := lpNoTracker.GetOrCreate(context.Background(), "thread-1")
+	_, err := lpNoTracker.GetOrCreate(context.Background(), "thread-1", "")
 	if err == nil {
 		t.Errorf("expected error from GetOrCreate without tracker pool")
 	}
@@ -2730,7 +2730,7 @@ func TestCoverageBoost_LegacyAdapterSendBranches(t *testing.T) {
 			return "", "critical failure", 1, errors.New("underlying error")
 		},
 	}, nil)
-	s1, _ := lp1.GetOrCreateSession(context.Background(), "voice-test-key")
+	s1, _ := lp1.GetOrCreateSession(context.Background(), "voice-test-key", "")
 	sink1 := newDiscordTurnSink(nil)
 	err1 := s1.Send("hello", &runner.TurnContext{Sink: sink1})
 	if err1 == nil {
@@ -2743,7 +2743,7 @@ func TestCoverageBoost_LegacyAdapterSendBranches(t *testing.T) {
 			return "", "exit 42", 42, nil
 		},
 	}, nil)
-	s2, _ := lp2.GetOrCreateSession(context.Background(), "t2")
+	s2, _ := lp2.GetOrCreateSession(context.Background(), "t2", "")
 	sink2 := newDiscordTurnSink(nil)
 	if err := s2.Send("hello", &runner.TurnContext{Sink: sink2}); err == nil {
 		t.Errorf("expected error on non-zero exit code")
@@ -2755,7 +2755,7 @@ func TestCoverageBoost_LegacyAdapterSendBranches(t *testing.T) {
 			return `{"status":"ERROR","error":"stream was interrupted"}`, "", 0, nil
 		},
 	}, nil)
-	s3, _ := lp3.GetOrCreateSession(context.Background(), "t3")
+	s3, _ := lp3.GetOrCreateSession(context.Background(), "t3", "")
 	sink3 := newDiscordTurnSink(nil)
 	if err := s3.Send("hello", &runner.TurnContext{Sink: sink3}); err == nil {
 		t.Errorf("expected error on parsed.Error")
@@ -2767,7 +2767,7 @@ func TestCoverageBoost_LegacyAdapterSendBranches(t *testing.T) {
 			return `{"status":"FAILED"}`, "", 0, nil
 		},
 	}, nil)
-	s4, _ := lp4.GetOrCreateSession(context.Background(), "t4")
+	s4, _ := lp4.GetOrCreateSession(context.Background(), "t4", "")
 	sink4 := newDiscordTurnSink(nil)
 	if err := s4.Send("hello", &runner.TurnContext{Sink: sink4}); err == nil {
 		t.Errorf("expected error on non-success status")
@@ -2779,7 +2779,7 @@ func TestCoverageBoost_LegacyAdapterSendBranches(t *testing.T) {
 			return `{"status":"SUCCESS","response":"ok"}`, "", 0, nil
 		},
 	}, nil)
-	s5, _ := lp5.GetOrCreateSession(context.Background(), "t5")
+	s5, _ := lp5.GetOrCreateSession(context.Background(), "t5", "")
 	if err := s5.Send("hello", nil); err != nil {
 		t.Errorf("unexpected error on nil turn: %v", err)
 	}
