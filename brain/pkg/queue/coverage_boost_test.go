@@ -2531,6 +2531,9 @@ func TestTurnExecution_BuildTurnPrompt_CachedSummary(t *testing.T) {
 	if !strings.Contains(te.turnPrompt, "<THREAD_SUMMARY>hi</THREAD_SUMMARY>") {
 		t.Errorf("expected cached summary in prompt, got %q", te.turnPrompt)
 	}
+	if !strings.Contains(te.turnPrompt, "<CHANNEL_HISTORY>") || !strings.Contains(te.turnPrompt, "hello") {
+		t.Errorf("expected channel history lookback in prompt on cold start even with summary, got %q", te.turnPrompt)
+	}
 }
 
 func TestCoverageBoost_ExtraHits(t *testing.T) {

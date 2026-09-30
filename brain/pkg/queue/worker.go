@@ -1294,14 +1294,7 @@ func (te *turnExecution) buildTurnPrompt() {
 		}
 	}
 
-	hasHistoryNeed := false
-	if isChannelMode {
-		hasHistoryNeed = true
-	} else if isColdStart && summary == "" {
-		hasHistoryNeed = true
-	} else if te.wakeIdx > 0 || len(te.burst) > 1 {
-		hasHistoryNeed = true
-	}
+	hasHistoryNeed := isChannelMode || isColdStart || te.wakeIdx > 0 || len(te.burst) > 1
 
 	var lookbackMsgs []HistoryMessage
 	if hasHistoryNeed {
