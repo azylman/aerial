@@ -180,12 +180,9 @@ func TestWorkerPool_ExecuteVoiceTurn_CustomRunner_Branches(t *testing.T) {
 	poolEmptyResp.Start()
 	defer poolEmptyResp.Stop()
 
-	reply, _, err = poolEmptyResp.ExecuteVoiceTurn(context.Background(), "test", "sess-1", nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !strings.Contains(reply, "event") {
-		t.Errorf("expected raw stdout fallback on empty response, got %q", reply)
+	_, _, err = poolEmptyResp.ExecuteVoiceTurn(context.Background(), "test", "sess-1", nil)
+	if err == nil || !strings.Contains(err.Error(), "empty response") {
+		t.Errorf("expected empty response error on empty result, got %v", err)
 	}
 }
 
@@ -919,7 +916,6 @@ func (s *queueMockVoiceSession) Send(prompt string, turn *runner.TurnContext) er
 		turn.Sink.OnTextDelta("Hello from mock voice.")
 		turn.Sink.OnResult(&runner.TurnResult{
 			Response: "Hello from mock voice.",
-			ExitCode: 0,
 		})
 	}
 	return nil

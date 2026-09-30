@@ -29,7 +29,7 @@ type wakeInfo = WakeInfo
 
 type turnExecution struct {
 	pool                *WorkerPool
-	activePool          *runner.UnifiedProcessPool
+	activePool          runner.AgentPool
 	burst               []db.Message
 	threadID            string
 	triggerType         string
@@ -188,9 +188,13 @@ func (te *turnExecution) rotateSessionID(threadID, newSessionID string) {
 	if rotPool == nil && te.pool != nil {
 		rotPool = te.pool.processPool
 	}
-	if te.pool != nil && rotPool != nil && !te.pool.hasCustomRunner && newSessionID == "" {
-		if _, err := rotPool.RotateDaemon(context.Background(), threadID, ""); err != nil {
-			log.Printf("[Worker] Warning rotating daemon in process pool for thread %s: %v", threadID, err)
+	if te.pool != nil && rotPool != nil && newSessionID == "" {
+		if rp, ok := rotPool.(interface {
+			RotateDaemon(context.Context, string, string) (*runner.StreamingDaemon, error)
+		}); ok {
+			if _, err := rp.RotateDaemon(context.Background(), threadID, ""); err != nil {
+				log.Printf("[Worker] Warning rotating daemon in process pool for thread %s: %v", threadID, err)
+			}
 		}
 	}
 	if s := te.store(); s != nil {
@@ -1414,11 +1418,20 @@ func (te *turnExecution) condenseTurnActions(rawActions string) string {
 	var llmFn LLMFunc
 	if te.pool != nil {
 		if te.pool.lowEffortProcessPool != nil {
-			llmFn = te.pool.lowEffortProcessPool.EphemeralLLMFunc("ephemeral:summarizer")
-		} else if te.pool.cfg.LLMFunc != nil {
+			if ep, ok := te.pool.lowEffortProcessPool.(interface {
+				EphemeralLLMFunc(string) runner.LLMFunc
+			}); ok {
+				llmFn = ep.EphemeralLLMFunc("ephemeral:summarizer")
+			}
+		}
+		if llmFn == nil && te.pool.cfg.LLMFunc != nil {
 			llmFn = te.pool.cfg.LLMFunc
-		} else if te.pool.processPool != nil {
-			llmFn = te.pool.processPool.EphemeralLLMFunc("ephemeral:summarizer")
+		} else if llmFn == nil && te.pool.processPool != nil {
+			if ep, ok := te.pool.processPool.(interface {
+				EphemeralLLMFunc(string) runner.LLMFunc
+			}); ok {
+				llmFn = ep.EphemeralLLMFunc("ephemeral:summarizer")
+			}
 		}
 	}
 
@@ -1626,31 +1639,40 @@ func (te *turnExecution) executeWithRetries() {
 
 		var resp *runner.AgyResponse
 		var outcome runner.TurnOutcome
-		isDaemonTurn := !te.pool.hasCustomRunner && activePool != nil
+		var turnRes *runner.TurnResult
+		var execSession runner.AgentSession
 
-		if isDaemonTurn {
+		if activePool != nil {
 			if te.statusUpdater != nil {
 				te.statusUpdater.MarkTurnStarted()
 			}
-			daemon, daemonErr := activePool.GetOrCreate(runCtx, te.threadID)
-			if daemonErr != nil {
-				err = daemonErr
-				outcome = runner.NewTurnResolver(te.pool.sessionMgr).Resolve(runCtx, nil, daemonErr, te.currentSessionID)
+			var sessionErr error
+			execSession, sessionErr = activePool.GetOrCreateSession(runCtx, te.threadID)
+			if sessionErr != nil {
+				err = sessionErr
+				outcome = runner.NewTurnResolver(te.pool.sessionMgr).Resolve(runCtx, nil, sessionErr, te.currentSessionID)
 			} else {
 				sink := newDiscordTurnSink(te.statusUpdater)
 				turnCtx := &runner.TurnContext{
 					TurnID:    uuid.New().String(),
+					SessionID: te.currentSessionID,
+					Model:     currentModel,
 					Prompt:    promptToSend,
 					Sink:      sink,
 					CreatedAt: time.Now(),
+					Ctx:       runCtx,
 				}
-				if sendErr := daemon.Send(promptToSend, turnCtx); sendErr != nil {
+				if sendErr := execSession.Send(promptToSend, turnCtx); sendErr != nil {
 					err = sendErr
-					outcome = runner.NewTurnResolver(te.pool.sessionMgr).Resolve(runCtx, nil, sendErr, daemon.SessionID())
+					outcome = runner.NewTurnResolver(te.pool.sessionMgr).Resolve(runCtx, nil, sendErr, execSession.SessionID())
 				} else {
-					turnRes, turnErr := sink.Wait(runCtx)
+					var turnErr error
+					turnRes, turnErr = sink.Wait(runCtx)
 					err = turnErr
-					targetSess := daemon.SessionID()
+					if turnRes != nil {
+						stderr = turnRes.Stderr
+					}
+					targetSess := execSession.SessionID()
 					if targetSess == "" {
 						targetSess = te.currentSessionID
 					}
@@ -1658,95 +1680,59 @@ func (te *turnExecution) executeWithRetries() {
 					outcome = resolver.Resolve(runCtx, turnRes, turnErr, targetSess)
 				}
 			}
-
-			if outcome.IsSuccess {
-				isFailure = false
-				isTransient = false
-				isSessionCorruption = false
-				errDetail = ""
-				lastErrDetail = ""
-				lastStderr = ""
-				resp = &runner.AgyResponse{
-					ConversationID: outcome.SessionID,
-					Status:         "SUCCESS",
-					Response:       outcome.Response,
-					Usage:          outcome.Usage,
-				}
-				stdout = outcome.Response
-			} else {
-				isFailure = true
-				isTransient = outcome.IsTransient
-				isSessionCorruption = outcome.IsSessionCorruption
-				errDetail = outcome.ErrorDetail
-				lastErrDetail = errDetail
-				if err != nil {
-					lastStderr = err.Error()
-				} else {
-					lastStderr = outcome.ErrorDetail
-				}
-			}
-		} else if te.pool.cfg.RunnerWithOptionsFunc != nil {
-			watchdogOpts := runner.DefaultWatchdogOptions(currentTimeout)
-			if te.pool.sessionMgr != nil {
-				watchdogOpts.TranscriptDirs = te.pool.sessionMgr.Roots()
-				watchdogOpts.HomeDir = te.pool.sessionMgr.HomeDir()
-			}
-			if te.statusUpdater != nil {
-				te.statusUpdater.MarkTurnStarted()
-				watchdogOpts.StepUpdateHandler = te.statusUpdater.HandleStep
-			}
-			if strings.TrimSpace(te.threadID) != "" {
-				watchdogOpts.TargetID = strings.TrimSpace(te.threadID)
-			}
-			stdout, stderr, exitCode, err = te.pool.cfg.RunnerWithOptionsFunc(
-				runCtx,
-				currentAgyBin,
-				promptToSend,
-				te.currentSessionID,
-				currentAPIKey,
-				currentModel,
-				watchdogOpts,
-			)
-		} else if te.pool.cfg.RunnerFunc != nil {
-			stdout, stderr, exitCode, err = te.pool.cfg.RunnerFunc(
-				runCtx,
-				currentAgyBin,
-				promptToSend,
-				te.currentSessionID,
-				currentAPIKey,
-				currentModel,
-				currentTimeout,
-			)
+		} else {
+			err = fmt.Errorf("queue: no agent execution pool available for thread %s", te.threadID)
+			outcome = runner.NewTurnResolver(te.pool.sessionMgr).Resolve(runCtx, nil, err, te.currentSessionID)
 		}
 		runCancel()
 
-		if !isDaemonTurn {
-			isFailure, isTransient, isSessionCorruption, errDetail = runner.ClassifyError(exitCode, stdout, stderr)
-			if err != nil && errDetail == "" {
-				errDetail = err.Error()
+		if outcome.IsSuccess {
+			isFailure = false
+			isTransient = false
+			isSessionCorruption = false
+			errDetail = ""
+			lastErrDetail = ""
+			lastStderr = ""
+			if turnRes != nil && turnRes.Stderr != "" {
+				stderr = turnRes.Stderr
 			}
-
-			if isFailure && isSessionCorruption && te.currentSessionID == "" {
-				lowerErr := strings.ToLower(errDetail + " " + stderr + " " + stdout)
-				if strings.Contains(lowerErr, "context window") || strings.Contains(lowerErr, "context length") || strings.Contains(lowerErr, "maximum context length") || strings.Contains(lowerErr, "token limit exceeded") || strings.Contains(lowerErr, "prompt is too long") || strings.Contains(lowerErr, "request too large") {
-					isSessionCorruption = false
-					isTransient = false
-					errDetail = "prompt length exceeds maximum model context window (hard failure)"
-					log.Printf("[Queue] Cold start context window exceeded for thread %s; converting to non-transient fail-fast", te.threadID)
-				}
+			resp = &runner.AgyResponse{
+				ConversationID: outcome.SessionID,
+				Status:         "SUCCESS",
+				Response:       outcome.Response,
+				Usage:          outcome.Usage,
 			}
-
+			stdout = outcome.Response
+		} else {
+			isFailure = true
+			isTransient = outcome.IsTransient
+			isSessionCorruption = outcome.IsSessionCorruption
+			errDetail = outcome.ErrorDetail
 			lastErrDetail = errDetail
-			lastStderr = stderr
+			if err != nil {
+				lastStderr = err.Error()
+			} else {
+				lastStderr = outcome.ErrorDetail
+			}
 		}
 
 		if isFailure {
 			promptToSend = te.turnPrompt
 			targetSess := ""
 			if isLowEffort && te.pool != nil && te.pool.lowEffortProcessPool != nil && activePool != nil {
-				if d, ok := activePool.Get(te.threadID); ok && d != nil && d.SessionID() != "" {
-					targetSess = d.SessionID()
+				if dPool, ok := activePool.(interface {
+					Get(string) (*runner.StreamingDaemon, bool)
+				}); ok {
+					if d, ok := dPool.Get(te.threadID); ok && d != nil && d.SessionID() != "" {
+						targetSess = d.SessionID()
+					}
 				}
+			}
+			if targetSess == "" && outcome.SessionID != "" {
+				targetSess = outcome.SessionID
+			}
+			if targetSess == "" && execSession != nil && execSession.SessionID() != "" {
+				targetSess = execSession.SessionID()
 			}
 			if targetSess == "" {
 				targetSess = te.currentSessionID
@@ -1758,31 +1744,20 @@ func (te *turnExecution) executeWithRetries() {
 				}
 			}
 			if targetSess == "" && te.pool != nil && activePool != nil {
-				if d, ok := activePool.Get(te.threadID); ok && d != nil && d.SessionID() != "" {
-					targetSess = d.SessionID()
+				if dPool, ok := activePool.(interface {
+					Get(string) (*runner.StreamingDaemon, bool)
+				}); ok {
+					if d, ok := dPool.Get(te.threadID); ok && d != nil && d.SessionID() != "" {
+						targetSess = d.SessionID()
+					}
 				}
 			}
 			if targetSess == "" && te.pool != nil && te.pool.processPool != nil && te.pool.processPool != activePool {
-				if d, ok := te.pool.processPool.Get(te.threadID); ok && d != nil && d.SessionID() != "" {
-					targetSess = d.SessionID()
-				}
-			}
-
-			// Transcript Recovery on Exit Code 0 or Daemon Empty Response:
-			// For non-daemon subprocess runs, check if the session transcript on disk contains a valid PLANNER_RESPONSE turn.
-			if !isDaemonTurn {
-				isDaemonEmpty := isFailure && (strings.Contains(errDetail, "daemon turn completed with empty response") || strings.Contains(stderr, "daemon turn completed with empty response"))
-				if (exitCode == 0 || isDaemonEmpty) && targetSess != "" && te.pool.sessionMgr != nil && te.pool.sessionMgr.SessionExistsOnDisk(targetSess) {
-					if respText, _ := te.pool.sessionMgr.ExtractResponseAndError(targetSess); respText != "" && !strings.HasPrefix(respText, "[Tool Call Requested]:") {
-						log.Printf("[Queue] Recovered response directly from session %s transcript after runner failure (exit %d, isDaemonEmpty=%v)", targetSess, exitCode, isDaemonEmpty)
-						isFailure = false
-						isSessionCorruption = false
-						isTransient = false
-						if te.currentSessionID == "" {
-							te.currentSessionID = targetSess
-							te.saveSessionID(te.threadID, te.currentSessionID)
-						}
-						stdout = fmt.Sprintf(`{"conversation_id":%q,"status":"SUCCESS","response":%q}`, te.currentSessionID, respText)
+				if dPool, ok := te.pool.processPool.(interface {
+					Get(string) (*runner.StreamingDaemon, bool)
+				}); ok {
+					if d, ok := dPool.Get(te.threadID); ok && d != nil && d.SessionID() != "" {
+						targetSess = d.SessionID()
 					}
 				}
 			}
@@ -1945,9 +1920,13 @@ func (te *turnExecution) executeWithRetries() {
 				te.isQuotaPaused = true
 				te.stopTyping()
 				log.Printf("[WorkerPool] Quota pause detected for thread %s on attempt %d/%d: %s", te.threadID, attempt, maxAttempts, errDetail)
-				if te.pool != nil && activePool != nil && !te.pool.hasCustomRunner {
-					if _, rotErr := activePool.RotateDaemon(context.Background(), te.threadID, ""); rotErr != nil {
-						log.Printf("[WorkerPool] Warning rotating daemon on quota pause: %v", rotErr)
+				if te.pool != nil && activePool != nil {
+					if rp, ok := activePool.(interface {
+						RotateDaemon(context.Context, string, string) (*runner.StreamingDaemon, error)
+					}); ok {
+						if _, rotErr := rp.RotateDaemon(context.Background(), te.threadID, ""); rotErr != nil {
+							log.Printf("[WorkerPool] Warning rotating daemon on quota pause: %v", rotErr)
+						}
 					}
 				}
 
@@ -2205,26 +2184,34 @@ func (te *turnExecution) executeWithRetries() {
 					var trackerDaemon *runner.StreamingDaemon
 					if !isYield && te.pool != nil {
 						if activePool != nil {
-							if d, ok := activePool.Get(te.threadID); ok && d != nil && d.TaskTracker().ActiveCount() > 0 {
-								isYield = true
-								taskCount = 1
-								detectionSource = "daemon_tracker"
-								trackerDaemon = d
+							if dPool, ok := activePool.(interface {
+								Get(string) (*runner.StreamingDaemon, bool)
+							}); ok {
+								if d, ok := dPool.Get(te.threadID); ok && d != nil && d.TaskTracker().ActiveCount() > 0 {
+									isYield = true
+									taskCount = 1
+									detectionSource = "daemon_tracker"
+									trackerDaemon = d
+								}
 							}
 						}
 						if !isYield {
-							var altPool *runner.UnifiedProcessPool
+							var altPool runner.AgentPool
 							if activePool == te.pool.lowEffortProcessPool {
 								altPool = te.pool.processPool
 							} else {
 								altPool = te.pool.lowEffortProcessPool
 							}
 							if altPool != nil {
-								if d, ok := altPool.Get(te.threadID); ok && d != nil && d.TaskTracker().ActiveCount() > 0 {
-									isYield = true
-									taskCount = 1
-									detectionSource = "daemon_tracker"
-									trackerDaemon = d
+								if dPool, ok := altPool.(interface {
+									Get(string) (*runner.StreamingDaemon, bool)
+								}); ok {
+									if d, ok := dPool.Get(te.threadID); ok && d != nil && d.TaskTracker().ActiveCount() > 0 {
+										isYield = true
+										taskCount = 1
+										detectionSource = "daemon_tracker"
+										trackerDaemon = d
+									}
 								}
 							}
 						}

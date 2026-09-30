@@ -73,6 +73,10 @@ var _ VoiceProcessPool = (*mockVoiceProcessPool)(nil)
 func TestVoiceInterfaces_Satisfaction(t *testing.T) {
 	t.Parallel()
 
+	var _ AgentPool = (*UnifiedProcessPool)(nil)
+	var _ AgentSession = (*StreamingDaemon)(nil)
+	var _ AgentPool = (*mockVoiceProcessPool)(nil)
+	var _ AgentSession = (*mockVoiceSession)(nil)
 	var _ VoiceProcessPool = (*UnifiedProcessPool)(nil)
 	var _ VoiceSession = (*StreamingDaemon)(nil)
 	var _ VoiceProcessPool = (*mockVoiceProcessPool)(nil)
@@ -192,4 +196,14 @@ func TestMockVoiceProcessPool_Behavior(t *testing.T) {
 	if _, err := pool.GetOrCreateSession(ctx, "device-b"); err == nil {
 		t.Fatalf("expected error from GetOrCreateSession on closed mock pool")
 	}
+}
+
+func TestNewGeminiAPIPool(t *testing.T) {
+	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
+		APIKey: "fake-key",
+	})
+	if pool == nil {
+		t.Fatal("expected non-nil GeminiAPIPool")
+	}
+	var _ AgentPool = pool
 }

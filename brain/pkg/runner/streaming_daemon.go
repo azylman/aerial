@@ -28,6 +28,8 @@ type TurnSink interface {
 // TurnContext encapsulates the metadata, prompt, and callback sink for a single turn.
 type TurnContext struct {
 	TurnID    string
+	SessionID string
+	Model     string
 	Prompt    string
 	Sink      TurnSink
 	CreatedAt time.Time
@@ -523,13 +525,6 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 				ConversationID: d.SessionID(),
 				Response:       respStr,
 				Duration:       time.Since(activeTurn.CreatedAt),
-			}
-			if resObj, ok := raw["result"].(map[string]any); ok {
-				if exitCode, ok := resObj["exit_code"].(float64); ok {
-					res.ExitCode = int(exitCode)
-				}
-			} else if exitCode, ok := raw["exit_code"].(float64); ok {
-				res.ExitCode = int(exitCode)
 			}
 
 			var usageObj map[string]any
