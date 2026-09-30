@@ -2133,36 +2133,13 @@ func (te *turnExecution) executeWithRetries() {
 						te.statusUpdater.DeleteStatusMessage()
 					}
 
-					var poolCtx context.Context
-					if te.pool != nil {
-						poolCtx = te.pool.ctx
-					}
-					if poolCtx == nil {
-						poolCtx = context.Background()
-					}
-
 					responseText := resp.Response
 					baseDir := "/root/.gemini/antigravity-cli/brain"
 					if te.currentSessionID != "" {
 						baseDir = filepath.Join(baseDir, te.currentSessionID)
 					}
 
-					// Pre-extract attachments from full response to ensure media generated in earlier turns is never lost
-					_, fullAttachments := delivery.ExtractAndSanitizeMedia(resp.Response, baseDir)
-
-					// Attempt to extract strictly the final substantive turn from transcript
-					if te.pool != nil && te.pool.sessionMgr != nil && te.currentSessionID != "" {
-						if finalText, isSilent, err := te.pool.sessionMgr.ExtractFinalSubstantiveResponse(poolCtx, te.currentSessionID); err == nil {
-							if isSilent {
-								responseText = ""
-							} else if strings.TrimSpace(finalText) != "" {
-								responseText = finalText
-							}
-						}
-					}
-
-					cleanText, finalAttachments := delivery.ExtractAndSanitizeMedia(responseText, baseDir)
-					attachments := delivery.MergeAttachments(finalAttachments, fullAttachments)
+					cleanText, attachments := delivery.ExtractAndSanitizeMedia(responseText, baseDir)
 					attachments = delivery.AutoAttachNewMedia(baseDir, te.execStart, attachments)
 
 					if strings.TrimSpace(cleanText) == "" && len(attachments) == 0 {
