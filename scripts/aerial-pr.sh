@@ -648,7 +648,7 @@ Check on the status of Pull Request #${pr_num} on ${REPO_OWNER}/${REPO_NAME} (${
    scripts/${script_name} --repo ${REPO_NAME} check ${pr_num}
 2. Note that native GitHub auto-merge is already enabled; if CI checks are green, GitHub merges automatically without manual merge intervention.
 3. If status is "pending":
-   Quietly reschedule a ${delay} follow-up check via schedule_once targeting this active thread/channel (target_id: "${target_id}") and suppress response output (empty response) to avoid channel noise while CI is running.
+   Inform the user and reschedule a ${delay} follow-up check via schedule_once targeting this active thread/channel (target_id: "${target_id}").
 4. If status is "merged" or "already_merged":
    Report status in plain prose (maximum two sentences). Do NOT output markdown bullet lists, task checklists, or forward-looking promises.
    - If deployment state is "done": confirm merge and completed deployment in 1–2 sentences.

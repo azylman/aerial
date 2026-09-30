@@ -174,8 +174,9 @@ FOLLOWUP_PROMPT_CHECK=$(bash -c "
 ")
 assert_eq "true" "$(echo "$FOLLOWUP_PROMPT_CHECK" | grep -Fq 'targeting this active thread/channel (target_id: "test-target-channel")' && echo true || echo false)" "schedule_pr_followup prompt specifies targeting this active thread/channel"
 assert_eq "true" "$(echo "$FOLLOWUP_PROMPT_CHECK" | grep -Fq 'never hardcode or generalize this ID across other threads or sessions' && echo true || echo false)" "schedule_pr_followup prompt includes negative generalization disclaimer"
-assert_eq "true" "$(echo "$FOLLOWUP_PROMPT_CHECK" | grep -Fq 'Be proactive on small, deterministic fixes' && echo true || echo false)" "schedule_pr_followup prompt instructs proactive fixing on small failures"
-assert_eq "true" "$(echo "$FOLLOWUP_PROMPT_CHECK" | grep -Fq 'do NOT ask for user confirmation' && echo true || echo false)" "schedule_pr_followup prompt instructs not asking for confirmation"
+assert_eq "true" "$(echo "$FOLLOWUP_PROMPT_CHECK" | grep -Fq 'Inform the user and reschedule a 2m follow-up check' && echo true || echo false)" "schedule_pr_followup prompt instructs informing user and rescheduling follow-up"
+assert_eq "true" "$(echo "$FOLLOWUP_PROMPT_CHECK" | grep -Fq 'PROACTIVELY FIX THE FAILURE' && echo true || echo false)" "schedule_pr_followup prompt instructs proactive fixing on failures"
+assert_eq "true" "$(echo "$FOLLOWUP_PROMPT_CHECK" | grep -Fq 'do NOT stop or ask for user confirmation' && echo true || echo false)" "schedule_pr_followup prompt instructs not asking for confirmation"
 
 # Case 6E: Target ID environment precedence
 TARGET_PRECEDENCE_CHECK=$(bash -c "
