@@ -1867,6 +1867,47 @@ func TestBuildSystemOneState(t *testing.T) {
 	if strings.Contains(truncatedState, "ancient_alice:") {
 		t.Errorf("expected oldest message prefix to be trimmed away, got: %s", truncatedState)
 	}
+
+	// Whole message preservation test:
+	// msg1: 400 runes
+	// msg2: 400 runes
+	// msg3: 400 runes
+	// Total: > MaxSystemOneStateRunes (1000).
+	// Expectation: msg1 dropped completely, msg2 and msg3 preserved in full.
+	historyMulti := []db.Message{
+		{AuthorName: "user1", Content: strings.Repeat("1", 400)},
+		{AuthorName: "user2", Content: strings.Repeat("2", 400)},
+	}
+	burstMulti := []db.Message{
+		{AuthorName: "user3", Content: strings.Repeat("3", 400)},
+	}
+	multiState := BuildSystemOneState(burstMulti, historyMulti)
+	if strings.Contains(multiState, "user1:") {
+		t.Errorf("expected user1 message to be dropped completely to preserve whole message boundaries, got: %s", multiState)
+	}
+	if !strings.Contains(multiState, "user2: "+strings.Repeat("2", 400)) {
+		t.Errorf("expected user2 message to be preserved whole, got: %s", multiState)
+	}
+	if !strings.Contains(multiState, "user3: "+strings.Repeat("3", 400)) {
+		t.Errorf("expected user3 message to be preserved whole, got: %s", multiState)
+	}
+
+	// Single most recent message exceeding MaxSystemOneStateRunes:
+	// Expectation: head preserved, tail truncated, ModernBERTTruncationSuffix appended, total rune count == MaxSystemOneStateRunes
+	giantBurst := []db.Message{
+		{AuthorName: "giant_speaker", Content: strings.Repeat("g", 1200)},
+	}
+	giantState := BuildSystemOneState(giantBurst, nil)
+	giantRunes := []rune(giantState)
+	if len(giantRunes) != MaxSystemOneStateRunes {
+		t.Errorf("expected giant state to be exactly %d runes, got %d", MaxSystemOneStateRunes, len(giantRunes))
+	}
+	if !strings.HasPrefix(giantState, "giant_speaker: gggg") {
+		t.Errorf("expected head of message to be preserved, got: %s", giantState[:50])
+	}
+	if !strings.HasSuffix(giantState, ModernBERTTruncationSuffix) {
+		t.Errorf("expected giant state to end with %q, got: %s", ModernBERTTruncationSuffix, giantState[len(giantState)-30:])
+	}
 }
 
 func TestClassifier_SystemOne_Success(t *testing.T) {
