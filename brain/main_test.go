@@ -1968,11 +1968,11 @@ func TestRunBrainApp_DiscordLowEffortPool_EphemeralHome(t *testing.T) {
 	spawnedConfigsMu.Lock()
 	defer spawnedConfigsMu.Unlock()
 
-	foundClassifier := false
-	foundSummarizer := false
+	foundWorker0 := false
+	foundWorker1 := false
 	for _, sc := range spawnedConfigs {
-		if sc.ThreadID == "ephemeral:classifier" {
-			foundClassifier = true
+		if sc.ThreadID == "ephemeral:worker-0" {
+			foundWorker0 = true
 			foundHome := false
 			for _, e := range sc.Env {
 				if e == "HOME="+expectedEphemeralHome {
@@ -1981,11 +1981,11 @@ func TestRunBrainApp_DiscordLowEffortPool_EphemeralHome(t *testing.T) {
 				}
 			}
 			if !foundHome {
-				t.Errorf("ephemeral:classifier expected HOME=%q in Env, got: %v", expectedEphemeralHome, sc.Env)
+				t.Errorf("ephemeral:worker-0 expected HOME=%q in Env, got: %v", expectedEphemeralHome, sc.Env)
 			}
 		}
-		if sc.ThreadID == "ephemeral:summarizer" {
-			foundSummarizer = true
+		if sc.ThreadID == "ephemeral:worker-1" {
+			foundWorker1 = true
 			foundHome := false
 			for _, e := range sc.Env {
 				if e == "HOME="+expectedEphemeralHome {
@@ -1994,16 +1994,16 @@ func TestRunBrainApp_DiscordLowEffortPool_EphemeralHome(t *testing.T) {
 				}
 			}
 			if !foundHome {
-				t.Errorf("ephemeral:summarizer expected HOME=%q in Env, got: %v", expectedEphemeralHome, sc.Env)
+				t.Errorf("ephemeral:worker-1 expected HOME=%q in Env, got: %v", expectedEphemeralHome, sc.Env)
 			}
 		}
 	}
 
-	if !foundClassifier {
-		t.Errorf("expected pre-warmed daemon for ephemeral:classifier")
+	if !foundWorker0 {
+		t.Errorf("expected pre-warmed daemon for ephemeral:worker-0")
 	}
-	if !foundSummarizer {
-		t.Errorf("expected pre-warmed daemon for ephemeral:summarizer")
+	if !foundWorker1 {
+		t.Errorf("expected pre-warmed daemon for ephemeral:worker-1")
 	}
 }
 

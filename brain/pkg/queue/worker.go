@@ -1537,6 +1537,7 @@ func (te *turnExecution) executeWithRetries() {
 			var sessionErr error
 			execSession, sessionErr = activePool.GetOrCreateSession(runCtx, te.threadID, te.currentSessionID)
 			if sessionErr != nil {
+				execSession = nil
 				err = sessionErr
 				outcome = runner.NewTurnResolver().Resolve(runCtx, nil, sessionErr, te.currentSessionID)
 			} else {

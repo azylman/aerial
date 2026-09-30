@@ -246,7 +246,11 @@ func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string, 
 
 // GetOrCreateSession retrieves an active AgentSession for targetKey, satisfying runner.AgentPool.
 func (p *UnifiedProcessPool) GetOrCreateSession(ctx context.Context, targetKey string, sessionID string) (AgentSession, error) {
-	return p.GetOrCreate(ctx, targetKey, sessionID)
+	d, err := p.GetOrCreate(ctx, targetKey, sessionID)
+	if err != nil {
+		return nil, err // return untyped nil interface
+	}
+	return d, nil
 }
 
 // Close gracefully terminates all daemons tracked by the pool.

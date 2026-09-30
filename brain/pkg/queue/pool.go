@@ -710,6 +710,11 @@ func (p *WorkerPool) LowEffortProcessPool() *runner.UnifiedProcessPool {
 	if up, ok := p.lowEffortProcessPool.(*runner.UnifiedProcessPool); ok {
 		return up
 	}
+	if ip, ok := p.lowEffortProcessPool.(interface {
+		Underlying() *runner.UnifiedProcessPool
+	}); ok {
+		return ip.Underlying()
+	}
 	return nil
 }
 
