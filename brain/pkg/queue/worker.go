@@ -765,10 +765,10 @@ func (te *turnExecution) evaluateAmbientWake() (shouldExit bool) {
 				return 0.0, "no classifier configured"
 			}
 			if len(msgs) == 1 {
-				res := te.pool.cfg.Classifier.Classify(te.pool.ctx, msgs[0], recentContext, te.policy.GetAmbientWakePrompt())
+				res := te.pool.cfg.Classifier.Classify(te.pool.ctx, msgs[0], recentContext)
 				return res.Confidence, res.Reason
 			}
-			res := te.pool.cfg.Classifier.ClassifyBurst(te.pool.ctx, msgs, recentContext, te.policy.GetAmbientWakePrompt())
+			res := te.pool.cfg.Classifier.ClassifyBurst(te.pool.ctx, msgs, recentContext)
 			log.Printf("[AmbientClassifier] Channel %s | BurstSize %d | Score: %.2f (Threshold: %.2f) | Wake: %t | Reason: %s",
 				te.threadID, len(msgs), res.Confidence, te.policy.GetAmbientWakeThreshold(), res.Confidence >= te.policy.GetAmbientWakeThreshold(), res.Reason)
 			return res.Confidence, res.Reason

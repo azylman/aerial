@@ -3179,14 +3179,12 @@ func TestProcessBurst_TrailingAmbient(t *testing.T) {
 	}
 }
 
-func TestProcessBurst_CustomAmbientWakePrompt(t *testing.T) {
+func TestProcessBurst_AmbientWakePromptDefault(t *testing.T) {
 	t.Parallel()
 	store := setupTestStore(t)
 
 	var capturedPrompt string
 	var mu sync.Mutex
-
-	customPrompt := "Wake up only when aerospace or aviation topics are discussed."
 
 	cls := classifier.NewClassifier(classifier.WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
 		mu.Lock()
@@ -3197,7 +3195,7 @@ func TestProcessBurst_CustomAmbientWakePrompt(t *testing.T) {
 
 	runnerCalls := 0
 	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store,
+		Store:          store,
 		TimeoutMinutes: 1,
 		Classifier:     cls,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
@@ -3216,7 +3214,6 @@ func TestProcessBurst_CustomAmbientWakePrompt(t *testing.T) {
 			return config.ChannelPolicy{
 				Mode:                 "channel",
 				AmbientWakeThreshold: ptrFloat(0.80),
-				AmbientWakePrompt:    customPrompt,
 			}
 		},
 	})
@@ -3237,11 +3234,8 @@ func TestProcessBurst_CustomAmbientWakePrompt(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 
-	if !strings.Contains(capturedPrompt, customPrompt) {
-		t.Errorf("Expected classifier prompt to contain custom prompt %q, got:\n%s", customPrompt, capturedPrompt)
-	}
-	if strings.Contains(capturedPrompt, classifier.DefaultAmbientWakePrompt) {
-		t.Errorf("Expected classifier prompt NOT to contain DefaultAmbientWakePrompt when custom directive is provided")
+	if !strings.Contains(capturedPrompt, classifier.DefaultAmbientWakePrompt) {
+		t.Errorf("Expected classifier prompt to contain DefaultAmbientWakePrompt, got:\n%s", capturedPrompt)
 	}
 	if runnerCalls != 1 {
 		t.Errorf("Expected 1 runner call, got %d", runnerCalls)

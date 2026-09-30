@@ -53,7 +53,6 @@ admin_users:
 #
 # Ambient Wake & Classification (for wake_mode: classifier):
 #   - ambient_wake_threshold: Confidence score threshold (0.0 to 1.0) for ambient messages to wake Aerial (default: 0.80).
-#   - ambient_wake_prompt: Custom criteria/prompt directive for the ambient relevance classifier in this channel.
 #   - ignore_bots: Ignore messages from bot users (default: true). Set to false to allow peer bot interactions.
 #
 # Whitelisting / Default-Deny:
@@ -79,7 +78,6 @@ channels:
     wake_mode: classifier
     ignore_bots: true
     ambient_wake_threshold: 0.80
-    ambient_wake_prompt: "Determine whether the target message is relevant to Aerial and warrants Aerial waking up and responding, based on the recent channel context."
 
   # Example channel with mention-only wake (listens ambiently, responds ONLY on explicit @mention or direct reply):
   lounge:
@@ -87,13 +85,12 @@ channels:
     wake_mode: mention
     ignore_bots: false
 
-  # Example channel with custom wake prompt:
+  # Example channel with custom wake threshold:
   dev-alerts:
     mode: channel
     wake_mode: classifier
     ignore_bots: false # Allow alerts from bot integrations
     ambient_wake_threshold: 0.70
-    ambient_wake_prompt: "Only wake up and respond if the user is asking about Kubernetes deployments, CI/CD pipeline failures, or production outages."
 
   # Example channel-specific override to completely ignore a channel:
   memes:

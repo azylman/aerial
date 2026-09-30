@@ -76,7 +76,7 @@ func TestClassifier_PromptFormatting(t *testing.T) {
 		}),
 	)
 
-	res := c.Classify(context.Background(), target, recentContext, "")
+	res := c.Classify(context.Background(), target, recentContext)
 	if res.Confidence != 0.9 {
 		t.Fatalf("expected confidence 0.9, got %f", res.Confidence)
 	}
@@ -262,7 +262,7 @@ func TestClassifier_PromptFormatting_WithReplies(t *testing.T) {
 		},
 	}
 
-	prompt := BuildBurstPrompt([]db.Message{target}, recent, "")
+	prompt := BuildBurstPrompt([]db.Message{target}, recent)
 	if !strings.Contains(prompt, "[@ryan] (replying to @amos)") {
 		t.Errorf("expected prompt to contain reply metadata, got:\n%s", prompt)
 	}
@@ -332,7 +332,7 @@ func TestClassifier_JSONParsing(t *testing.T) {
 					return tc.llmOutput, nil
 				}),
 			)
-			res := c.Classify(context.Background(), db.Message{Content: "test"}, nil, "")
+			res := c.Classify(context.Background(), db.Message{Content: "test"}, nil)
 			if tc.wantSuccess {
 				if res.Confidence != tc.wantConfidence {
 					t.Errorf("expected confidence %f, got %f", tc.wantConfidence, res.Confidence)
@@ -370,7 +370,7 @@ func TestClassifier_OnParseErrorCallback(t *testing.T) {
 		}),
 	)
 
-	res := c.Classify(context.Background(), db.Message{Content: "test"}, nil, "")
+	res := c.Classify(context.Background(), db.Message{Content: "test"}, nil)
 	if res.Confidence != 0.0 {
 		t.Errorf("expected confidence 0.0 on parse error, got %f", res.Confidence)
 	}
@@ -394,7 +394,7 @@ func TestClassifier_InvalidJSON(t *testing.T) {
 			return `This is not valid json at all`, nil
 		}),
 	)
-	res := c.Classify(context.Background(), db.Message{Content: "hello"}, nil, "")
+	res := c.Classify(context.Background(), db.Message{Content: "hello"}, nil)
 	if res.Confidence != 0.0 {
 		t.Errorf("expected confidence 0.0 on invalid json, got %f", res.Confidence)
 	}
@@ -418,7 +418,7 @@ func TestClassifier_NilContext(t *testing.T) {
 
 	// Passing nil context must not panic (defensive nil check)
 	var nilCtx context.Context
-	res := c.Classify(nilCtx, db.Message{Content: "test"}, nil, "") //nolint:staticcheck // intentionally testing nil context resilience
+	res := c.Classify(nilCtx, db.Message{Content: "test"}, nil) //nolint:staticcheck // intentionally testing nil context resilience
 	if res.Confidence != 0.5 {
 		t.Errorf("expected confidence 0.5, got %f", res.Confidence)
 	}
@@ -459,7 +459,7 @@ func TestClassifier_ConfidenceClamping(t *testing.T) {
 					return tc.llmOutput, nil
 				}),
 			)
-			res := c.Classify(context.Background(), db.Message{Content: "test"}, nil, "")
+			res := c.Classify(context.Background(), db.Message{Content: "test"}, nil)
 			if res.Confidence != tc.wantConfidence {
 				t.Errorf("expected confidence %f, got %f", tc.wantConfidence, res.Confidence)
 			}
@@ -481,7 +481,7 @@ func TestClassifier_TimeoutHandling(t *testing.T) {
 	)
 
 	start := time.Now()
-	res := c.Classify(context.Background(), db.Message{Content: "ping"}, nil, "")
+	res := c.Classify(context.Background(), db.Message{Content: "ping"}, nil)
 	duration := time.Since(start)
 
 	if duration > 150*time.Millisecond {
@@ -528,7 +528,7 @@ func TestClassifier_CircuitBreaker(t *testing.T) {
 	target := db.Message{Content: "hello"}
 
 	// 1st failure
-	res1 := c.Classify(context.Background(), target, nil, "")
+	res1 := c.Classify(context.Background(), target, nil)
 	if res1.Confidence != 0.0 || !strings.Contains(res1.Reason, "classifier error") {
 		t.Fatalf("call 1: expected classifier error, got %v", res1)
 	}
@@ -543,7 +543,7 @@ func TestClassifier_CircuitBreaker(t *testing.T) {
 	}
 
 	// 2nd failure
-	res2 := c.Classify(context.Background(), target, nil, "")
+	res2 := c.Classify(context.Background(), target, nil)
 	if res2.Confidence != 0.0 || !strings.Contains(res2.Reason, "classifier error") {
 		t.Fatalf("call 2: expected classifier error, got %v", res2)
 	}
@@ -558,7 +558,7 @@ func TestClassifier_CircuitBreaker(t *testing.T) {
 	}
 
 	// 3rd failure - this should trip the circuit breaker
-	res3 := c.Classify(context.Background(), target, nil, "")
+	res3 := c.Classify(context.Background(), target, nil)
 	if res3.Confidence != 0.0 || !strings.Contains(res3.Reason, "classifier error") {
 		t.Fatalf("call 3: expected classifier error, got %v", res3)
 	}
@@ -573,7 +573,7 @@ func TestClassifier_CircuitBreaker(t *testing.T) {
 	}
 
 	// 4th call: circuit breaker is open! Should return immediately without calling LLM
-	res4 := c.Classify(context.Background(), target, nil, "")
+	res4 := c.Classify(context.Background(), target, nil)
 	if res4.Confidence != 0.0 {
 		t.Errorf("call 4: expected confidence 0.0, got %f", res4.Confidence)
 	}
@@ -586,7 +586,7 @@ func TestClassifier_CircuitBreaker(t *testing.T) {
 
 	// Advance time within cooldown (30s out of 60s)
 	advanceTime(30 * time.Second)
-	res4b := c.Classify(context.Background(), target, nil, "")
+	res4b := c.Classify(context.Background(), target, nil)
 	if res4b.Reason != "circuit breaker open" {
 		t.Errorf("call 4b: expected circuit to still be open at +30s, got %q", res4b.Reason)
 	}
@@ -600,7 +600,7 @@ func TestClassifier_CircuitBreaker(t *testing.T) {
 	atomic.StoreInt32(&shouldFail, 0)
 
 	// 5th call: half-open probe should call LLM and succeed
-	res5 := c.Classify(context.Background(), target, nil, "")
+	res5 := c.Classify(context.Background(), target, nil)
 	if atomic.LoadInt32(&callCount) != 4 {
 		t.Fatalf("expected callCount to be 4 after recovery probe, got %d", atomic.LoadInt32(&callCount))
 	}
@@ -618,7 +618,7 @@ func TestClassifier_CircuitBreaker(t *testing.T) {
 	}
 
 	// 6th call: circuit breaker should be fully reset and continue to succeed
-	res6 := c.Classify(context.Background(), target, nil, "")
+	res6 := c.Classify(context.Background(), target, nil)
 	if atomic.LoadInt32(&callCount) != 5 {
 		t.Fatalf("expected callCount to be 5, got %d", atomic.LoadInt32(&callCount))
 	}
@@ -646,7 +646,7 @@ func TestClassifier_CircuitBreaker_ParseErrors(t *testing.T) {
 
 	// 3 parse errors in a row must trip the circuit breaker
 	for i := 1; i <= 3; i++ {
-		res := c.Classify(context.Background(), target, nil, "")
+		res := c.Classify(context.Background(), target, nil)
 		if res.Confidence != 0.0 || !strings.Contains(res.Reason, "classifier error") {
 			t.Fatalf("call %d: expected classifier error, got %v", i, res)
 		}
@@ -660,7 +660,7 @@ func TestClassifier_CircuitBreaker_ParseErrors(t *testing.T) {
 	}
 
 	// 4th call should immediately return circuit breaker open
-	res4 := c.Classify(context.Background(), target, nil, "")
+	res4 := c.Classify(context.Background(), target, nil)
 	if res4.Reason != "circuit breaker open" {
 		t.Errorf("expected reason 'circuit breaker open', got %q", res4.Reason)
 	}
@@ -682,7 +682,7 @@ func TestClassifier_ConcurrentAccess(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < iterations; j++ {
-				_ = c.Classify(context.Background(), db.Message{Content: "ping"}, nil, "")
+				_ = c.Classify(context.Background(), db.Message{Content: "ping"}, nil)
 				_ = c.IsCircuitOpen()
 				_ = c.ConsecutiveFailures()
 			}
@@ -692,8 +692,7 @@ func TestClassifier_ConcurrentAccess(t *testing.T) {
 	wg.Wait()
 }
 
-func TestClassifier_CustomWakePrompt(t *testing.T) {
-	customDirective := "Only wake up if user explicitly mentions aerial combat or dogfights."
+func TestClassifier_PromptStructure(t *testing.T) {
 	target := db.Message{
 		ID:         "msg-custom",
 		AuthorName: "Pilot",
@@ -717,16 +716,13 @@ func TestClassifier_CustomWakePrompt(t *testing.T) {
 		}),
 	)
 
-	// 1. Verify custom directive is used instead of DefaultAmbientWakePrompt
-	res := c.Classify(context.Background(), target, recentContext, customDirective)
+	// 1. Verify prompt contains DefaultAmbientWakePrompt
+	res := c.Classify(context.Background(), target, recentContext)
 	if res.Confidence != 0.85 {
 		t.Fatalf("expected confidence 0.85, got %f", res.Confidence)
 	}
-	if !strings.Contains(capturedPrompt, customDirective) {
-		t.Errorf("prompt missing custom directive %q", customDirective)
-	}
-	if strings.Contains(capturedPrompt, DefaultAmbientWakePrompt) {
-		t.Errorf("prompt should not contain DefaultAmbientWakePrompt when custom directive is provided")
+	if !strings.Contains(capturedPrompt, DefaultAmbientWakePrompt) {
+		t.Errorf("prompt missing DefaultAmbientWakePrompt")
 	}
 
 	// Verify guardrails, delimiters, and JSON output schema are retained
@@ -744,24 +740,13 @@ func TestClassifier_CustomWakePrompt(t *testing.T) {
 		t.Errorf("prompt missing JSON output instructions")
 	}
 
-	// 2. Verify empty / whitespace custom directive falls back to DefaultAmbientWakePrompt
-	capturedPrompt = ""
-	_ = c.Classify(context.Background(), target, recentContext, "   ")
-	if !strings.Contains(capturedPrompt, DefaultAmbientWakePrompt) {
-		t.Errorf("expected prompt to contain DefaultAmbientWakePrompt when custom instruction is whitespace")
-	}
-
 	// Also verify direct BuildPrompt helper behavior
-	pDefault := BuildPrompt(target, recentContext, "")
+	pDefault := BuildPrompt(target, recentContext)
 	if !strings.Contains(pDefault, DefaultAmbientWakePrompt) {
-		t.Errorf("BuildPrompt with empty string should contain DefaultAmbientWakePrompt")
+		t.Errorf("BuildPrompt should contain DefaultAmbientWakePrompt")
 	}
-	pCustom := BuildPrompt(target, recentContext, customDirective)
-	if !strings.Contains(pCustom, customDirective) {
-		t.Errorf("BuildPrompt with custom directive should contain custom directive")
-	}
-	if strings.Contains(pCustom, DefaultAmbientWakePrompt) {
-		t.Errorf("BuildPrompt with custom directive should not contain DefaultAmbientWakePrompt")
+	if !strings.Contains(pDefault, guardrail) {
+		t.Errorf("BuildPrompt should contain guardrail")
 	}
 }
 
@@ -858,7 +843,7 @@ func TestClassifier_ClassifyBurst(t *testing.T) {
 		{AuthorName: "Bob", Content: "brb grabbing coffee", CreatedAt: time.Now()},
 	}
 
-	res := c.ClassifyBurst(context.Background(), burst, nil, "")
+	res := c.ClassifyBurst(context.Background(), burst, nil)
 	if res.Confidence != 0.88 {
 		t.Fatalf("expected confidence 0.88, got %f", res.Confidence)
 	}
@@ -884,7 +869,7 @@ func TestClassifier_ConfigInjection(t *testing.T) {
 	}
 	c := New(appCfg, runnerFn)
 
-	res := c.Classify(context.Background(), db.Message{Content: "Help!"}, nil, "")
+	res := c.Classify(context.Background(), db.Message{Content: "Help!"}, nil)
 	if res.Confidence != 0.95 {
 		t.Fatalf("expected confidence 0.95, got %f", res.Confidence)
 	}
@@ -1105,7 +1090,7 @@ func TestClassifier_RecordFailure_CircuitTrip(t *testing.T) {
 
 func TestClassifyBurst_Empty(t *testing.T) {
 	c := &Classifier{}
-	res := c.ClassifyBurst(context.Background(), nil, nil, "")
+	res := c.ClassifyBurst(context.Background(), nil, nil)
 	if res.Confidence != 0.0 || res.Reason != "empty target burst" {
 		t.Errorf("expected 0.0 confidence on empty burst, got %+v", res)
 	}
@@ -1327,7 +1312,7 @@ func TestClassifier_WithClassifierURL_AndFallback(t *testing.T) {
 		Content:    "Hey Aerial, check system metrics",
 		CreatedAt:  time.Now(),
 	}
-	res1 := cls1.Classify(context.Background(), msg1, nil, "")
+	res1 := cls1.Classify(context.Background(), msg1, nil)
 	if res1.Confidence != 0.95 {
 		t.Errorf("expected confidence 0.95, got %v", res1.Confidence)
 	}
@@ -1341,7 +1326,7 @@ func TestClassifier_WithClassifierURL_AndFallback(t *testing.T) {
 	cfg2 := config.NewFromData(cfgData2)
 
 	cls2 := New(cfg2, nil)
-	res2 := cls2.Classify(context.Background(), msg1, nil, "")
+	res2 := cls2.Classify(context.Background(), msg1, nil)
 	if res2.Confidence != 0.95 {
 		t.Errorf("expected confidence 0.95, got %v", res2.Confidence)
 	}
@@ -1360,7 +1345,7 @@ func TestClassifier_WithClassifierURL_AndFallback(t *testing.T) {
 	cfg3 := config.NewFromData(cfgData3)
 
 	cls3 := New(cfg3, runnerFn)
-	res3 := cls3.Classify(context.Background(), msg1, nil, "")
+	res3 := cls3.Classify(context.Background(), msg1, nil)
 	if !runnerCalled {
 		t.Error("expected runnerFn to be called when ClassifierURL is unset")
 	}
@@ -1601,8 +1586,7 @@ func TestSummarizeThreadTitle_WithThreadTitleURL(t *testing.T) {
 		t.Errorf("expected prompt to contain question, got %q", receivedPrompt)
 	}
 
-	// 2. Ambient relevance classification should hit mockRunner (cloud Flash)
-	res := cls.Classify(context.Background(), db.Message{Content: "Hey Aerial"}, nil, "")
+	res := cls.Classify(context.Background(), db.Message{Content: "Hey Aerial"}, nil)
 	if !runnerCalled {
 		t.Error("expected ambient classifier to call mockRunner when ClassifierURL is unset")
 	}
@@ -1735,7 +1719,7 @@ func TestClassifier_WithProcessPool_AndPrimaryLLMFunc(t *testing.T) {
 
 	// 1. Classifier configured with WithProcessPool
 	cls := New(nil, nil, WithProcessPool(pool))
-	res := cls.Classify(context.Background(), db.Message{Content: "Can someone help me?"}, nil, "")
+	res := cls.Classify(context.Background(), db.Message{Content: "Can someone help me?"}, nil)
 	if res.Confidence != 0.85 || res.Reason != "needs help" {
 		t.Fatalf("unexpected classification result: %+v", res)
 	}
@@ -1801,7 +1785,7 @@ func TestClassifier_WithPrimaryLLMFunc_OllamaPrecedence(t *testing.T) {
 		ClassifierURL: ts.URL,
 	})
 	clsOllama := New(cfgOllama, nil, WithPrimaryLLMFunc(primaryFn))
-	resOllama := clsOllama.Classify(context.Background(), db.Message{Content: "test message"}, nil, "")
+	resOllama := clsOllama.Classify(context.Background(), db.Message{Content: "test message"}, nil)
 	if calledPrimary {
 		t.Error("primaryLLMFunc should NOT be called when ClassifierURL is configured")
 	}
@@ -1812,7 +1796,7 @@ func TestClassifier_WithPrimaryLLMFunc_OllamaPrecedence(t *testing.T) {
 	// 2. When ClassifierURL is empty, primaryLLMFunc IS invoked
 	cfgNoOllama := config.NewFromData(&config.ConfigData{})
 	clsPrimary := New(cfgNoOllama, nil, WithPrimaryLLMFunc(primaryFn))
-	resPrimary := clsPrimary.Classify(context.Background(), db.Message{Content: "test message"}, nil, "")
+	resPrimary := clsPrimary.Classify(context.Background(), db.Message{Content: "test message"}, nil)
 	if !calledPrimary {
 		t.Error("expected primaryLLMFunc to be called when ClassifierURL is empty")
 	}
@@ -1913,7 +1897,7 @@ func TestClassifier_SystemOne_Success(t *testing.T) {
 		AuthorName: "alex",
 		Content:    "Aerial, what is the server status?",
 	}
-	res := cls.Classify(context.Background(), target, nil, "custom wake rubric")
+	res := cls.Classify(context.Background(), target, nil)
 
 	if res.Confidence != 0.88 {
 		t.Errorf("expected confidence 0.88, got %f", res.Confidence)
@@ -1930,8 +1914,8 @@ func TestClassifier_SystemOne_Success(t *testing.T) {
 	if q.Type != "noul" {
 		t.Errorf("expected question type 'noul', got %q", q.Type)
 	}
-	if q.Instructions != "custom wake rubric" {
-		t.Errorf("expected custom instructions in request, got %q", q.Instructions)
+	if q.Instructions != DefaultAmbientWakePrompt {
+		t.Errorf("expected DefaultAmbientWakePrompt in request, got %q", q.Instructions)
 	}
 	if !strings.Contains(receivedReq.State, "alex: Aerial, what is the server status?") {
 		t.Errorf("expected state to contain formatted message, got %q", receivedReq.State)
@@ -1966,7 +1950,7 @@ func TestClassifier_SystemOne_ConfidenceFallback(t *testing.T) {
 		AuthorName: "bob",
 		Content:    "Hello world",
 	}
-	res := cls.Classify(context.Background(), target, nil, "")
+	res := cls.Classify(context.Background(), target, nil)
 	if res.Confidence != 0.65 {
 		t.Errorf("expected fallback confidence 0.65, got %f", res.Confidence)
 	}
@@ -2011,7 +1995,7 @@ func TestClassifier_SystemOne_RetriesAndSuccess(t *testing.T) {
 	)
 
 	target := db.Message{AuthorName: "alex", Content: "Aerial status check"}
-	res := cls.Classify(context.Background(), target, nil, "")
+	res := cls.Classify(context.Background(), target, nil)
 
 	if res.Confidence != 0.95 {
 		t.Errorf("expected confidence 0.95 after retries, got %f", res.Confidence)
@@ -2051,7 +2035,7 @@ func TestClassifier_SystemOne_ExhaustionAndAlert(t *testing.T) {
 	)
 
 	target := db.Message{AuthorName: "alex", Content: "Critical query"}
-	res := cls.Classify(context.Background(), target, nil, "")
+	res := cls.Classify(context.Background(), target, nil)
 
 	// Invariant: Fail closed on exhaustion (confidence = 0.0)
 	if res.Confidence != 0.0 {
@@ -2092,7 +2076,7 @@ func TestClassifier_SystemOne_ContextCancellation(t *testing.T) {
 	)
 
 	target := db.Message{AuthorName: "alex", Content: "Test cancel"}
-	res := cls.Classify(ctx, target, nil, "")
+	res := cls.Classify(ctx, target, nil)
 
 	if res.Confidence != 0.0 {
 		t.Errorf("expected confidence 0.0 on cancelled context, got %f", res.Confidence)
@@ -2161,7 +2145,7 @@ func TestClassifier_SystemOne_AdditionalBranches(t *testing.T) {
 	clsMissing := New(cfgMissing, nil, WithOnSystemAlert(func(endpoint string, err error) {
 		alertCalled = true
 	}))
-	resMissing := clsMissing.Classify(context.Background(), db.Message{AuthorName: "alex", Content: "Hi"}, nil, "")
+	resMissing := clsMissing.Classify(context.Background(), db.Message{AuthorName: "alex", Content: "Hi"}, nil)
 	if resMissing.Confidence != 0.0 || !strings.Contains(resMissing.Reason, "missing 'should_wake'") {
 		t.Errorf("expected missing answer failure, got %+v", resMissing)
 	}
@@ -2186,7 +2170,7 @@ func TestClassifier_SystemOne_AdditionalBranches(t *testing.T) {
 		WithRetryDelayFunc(func(attempt int) time.Duration { return 0 }),
 		WithRetrySleepFunc(func(ctx context.Context, d time.Duration) error { return nil }),
 	)
-	resErr := clsErr.Classify(context.Background(), db.Message{AuthorName: "alex", Content: "Hi"}, nil, "")
+	resErr := clsErr.Classify(context.Background(), db.Message{AuthorName: "alex", Content: "Hi"}, nil)
 	if resErr.Confidence != 0.0 || !strings.Contains(resErr.Reason, "model out of memory") {
 		t.Errorf("expected error response propagation, got %+v", resErr)
 	}
@@ -2205,7 +2189,7 @@ func TestClassifier_SystemOne_AdditionalBranches(t *testing.T) {
 		WithRetryDelayFunc(func(attempt int) time.Duration { return 0 }),
 		WithRetrySleepFunc(func(ctx context.Context, d time.Duration) error { return nil }),
 	)
-	resBadJSON := clsBadJSON.Classify(context.Background(), db.Message{AuthorName: "alex", Content: "Hi"}, nil, "")
+	resBadJSON := clsBadJSON.Classify(context.Background(), db.Message{AuthorName: "alex", Content: "Hi"}, nil)
 	if resBadJSON.Confidence != 0.0 {
 		t.Errorf("expected confidence 0.0 on bad json, got %+v", resBadJSON)
 	}
@@ -2225,7 +2209,7 @@ func TestClassifier_SystemOne_AdditionalBranches(t *testing.T) {
 		ClassifierProtocol: "systemone",
 	})
 	clsClampLow := New(cfgClampLow, nil)
-	resClampLow := clsClampLow.Classify(context.Background(), db.Message{AuthorName: "alex", Content: "Hi"}, nil, "")
+	resClampLow := clsClampLow.Classify(context.Background(), db.Message{AuthorName: "alex", Content: "Hi"}, nil)
 	if resClampLow.Confidence != 0.0 {
 		t.Errorf("expected clamped confidence 0.0, got %f", resClampLow.Confidence)
 	}
@@ -2244,7 +2228,7 @@ func TestClassifier_SystemOne_AdditionalBranches(t *testing.T) {
 		ClassifierProtocol: "systemone",
 	})
 	clsClampHigh := New(cfgClampHigh, nil)
-	resClampHigh := clsClampHigh.Classify(context.Background(), db.Message{AuthorName: "alex", Content: "Hi"}, nil, "")
+	resClampHigh := clsClampHigh.Classify(context.Background(), db.Message{AuthorName: "alex", Content: "Hi"}, nil)
 	if resClampHigh.Confidence != 1.0 {
 		t.Errorf("expected clamped confidence 1.0, got %f", resClampHigh.Confidence)
 	}
@@ -2255,7 +2239,7 @@ func TestClassifier_SystemOne_AdditionalBranches(t *testing.T) {
 		ClassifierProtocol: "systemone",
 	})
 	clsEmptyURL := New(cfgEmptyURL, nil)
-	resEmptyURL := clsEmptyURL.classifySystemOne(context.Background(), []db.Message{{AuthorName: "alex", Content: "Hi"}}, nil, "")
+	resEmptyURL := clsEmptyURL.classifySystemOne(context.Background(), []db.Message{{AuthorName: "alex", Content: "Hi"}}, nil)
 	if resEmptyURL.Confidence != 0.0 || !strings.Contains(resEmptyURL.Reason, "classifier_url is empty") {
 		t.Errorf("expected error for empty classifier_url, got %+v", resEmptyURL)
 	}
@@ -2284,7 +2268,7 @@ func TestClassifier_SystemOne_AdditionalBranches(t *testing.T) {
 	resBurst := clsBurst.ClassifyBurst(context.Background(), []db.Message{
 		{AuthorName: "alex", Content: "msg1"},
 		{AuthorName: "alex", Content: "msg2"},
-	}, nil, "Custom instructions")
+	}, nil)
 	if resBurst.Confidence != 0.88 {
 		t.Errorf("expected burst confidence 0.88, got %f", resBurst.Confidence)
 	}
@@ -2329,7 +2313,7 @@ func TestClassifier_SystemOne_AdditionalBranches(t *testing.T) {
 		ClassifierModel:    "custom-modernbert",
 	})
 	clsModelOverride := New(cfgModelOverride, nil)
-	resModelOverride := clsModelOverride.Classify(context.Background(), db.Message{Content: "msg without author"}, nil, "")
+	resModelOverride := clsModelOverride.Classify(context.Background(), db.Message{Content: "msg without author"}, nil)
 	if resModelOverride.Confidence != 0.77 {
 		t.Errorf("expected confidence 0.77, got %f", resModelOverride.Confidence)
 	}

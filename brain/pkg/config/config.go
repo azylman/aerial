@@ -59,7 +59,6 @@ type ChannelPolicy struct {
 	WakeMode             string             `yaml:"wake_mode,omitempty" json:"wake_mode,omitempty"`
 	IgnoreBots           *bool              `yaml:"ignore_bots,omitempty" json:"ignore_bots,omitempty"`
 	AmbientWakeThreshold *float64           `yaml:"ambient_wake_threshold,omitempty" json:"ambient_wake_threshold,omitempty"`
-	AmbientWakePrompt    string             `yaml:"ambient_wake_prompt,omitempty" json:"ambient_wake_prompt,omitempty"`
 	Hooks                ChannelHooksConfig `yaml:"hooks,omitempty" json:"hooks,omitempty"`
 }
 
@@ -100,10 +99,6 @@ func (p ChannelPolicy) GetAmbientWakeThreshold() float64 {
 	return 0.0
 }
 
-// GetAmbientWakePrompt returns the trimmed ambient wake prompt for this channel policy.
-func (p ChannelPolicy) GetAmbientWakePrompt() string {
-	return strings.TrimSpace(p.AmbientWakePrompt)
-}
 
 // IsBotIgnored reports whether bot messages should be ignored for this channel policy.
 func (p ChannelPolicy) IsBotIgnored() bool {
@@ -1095,9 +1090,6 @@ func ResolveChannelPolicy(channels map[string]ChannelPolicy, channelID, channelN
 	if res.AmbientWakeThreshold == nil && def.AmbientWakeThreshold != nil {
 		val := *def.AmbientWakeThreshold
 		res.AmbientWakeThreshold = &val
-	}
-	if res.AmbientWakePrompt == "" && def.AmbientWakePrompt != "" {
-		res.AmbientWakePrompt = def.AmbientWakePrompt
 	}
 	if res.Hooks.OnWake != nil {
 		w := *res.Hooks.OnWake
