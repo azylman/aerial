@@ -49,6 +49,11 @@ func RecoverInterrupted(dbOrStore any, pool *WorkerPool) {
 		maxAttempts = 3
 	}
 
+	stalenessTTL := pool.cfg.StalenessTTL
+	if stalenessTTL <= 0 {
+		stalenessTTL = 30 * time.Minute
+	}
+
 	log.Printf("[Startup Recovery] Resuming %d interrupted message(s) in chronological FIFO order...", len(messages))
 	for _, m := range messages {
 		isInstantCrashLoop := m.Status == db.StatusProcessing && time.Since(m.UpdatedAt) < CrashLoopVelocityThreshold
@@ -91,6 +96,42 @@ func RecoverInterrupted(dbOrStore any, pool *WorkerPool) {
 			}
 			if err := store.UpdateMessageStatus(ctx, m.ID, db.StatusFailed, reason); err != nil {
 				log.Printf("[Startup Recovery] Failed to update message %s status to failed: %v", m.ID, err)
+			}
+			continue
+		}
+
+		// Check for superseding completed turns or expired stranded pending messages
+		var isStale bool
+		var staleReason string
+
+		stats, statsErr := store.GetSessionActivityStats(ctx, m.ThreadID)
+		if statsErr == nil && stats != nil && !stats.LastCompletedMessageCreatedAt.IsZero() && stats.LastCompletedMessageCreatedAt.After(m.CreatedAt) {
+			isStale = true
+			staleReason = fmt.Sprintf("superseded by newer completed message in thread (completed created_at %s > msg %s)",
+				stats.LastCompletedMessageCreatedAt.Format(time.RFC3339), m.CreatedAt.Format(time.RFC3339))
+		} else if m.Status == db.StatusPending && !m.CreatedAt.IsZero() && time.Since(m.CreatedAt) > stalenessTTL {
+			isStale = true
+			staleReason = fmt.Sprintf("stranded pending message age %v exceeds staleness TTL %v",
+				time.Since(m.CreatedAt).Round(time.Second), stalenessTTL)
+		}
+
+		if isStale {
+			log.Printf("[Startup Recovery] Dropping stale message %s (thread: %s): %s. Marked [EXPIRED_STALE].",
+				m.ID, m.ThreadID, staleReason)
+			if err := store.UpdateMessageCompleted(ctx, m.ID, "[EXPIRED_STALE]"); err != nil {
+				log.Printf("[Startup Recovery] Failed to update message %s status to [EXPIRED_STALE]: %v", m.ID, err)
+			}
+			if m.ScheduleRunID != "" {
+				if err := store.UpdateScheduleRunStatus(ctx, db.UpdateRunParams{
+					RunID:       m.ScheduleRunID,
+					MessageID:   m.ID,
+					Status:      "completed",
+					CompletedAt: time.Now().UTC(),
+					DurationMs:  0,
+					Error:       "[EXPIRED_STALE]",
+				}); err != nil {
+					log.Printf("[Startup Recovery] Failed to update schedule run %s status: %v", m.ScheduleRunID, err)
+				}
 			}
 			continue
 		}

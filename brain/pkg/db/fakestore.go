@@ -684,6 +684,7 @@ func (f *FakeStore) GetSessionActivityStats(ctx context.Context, threadID string
 
 	var completedCount int64
 	var maxUpdated time.Time
+	var maxCreated time.Time
 	for _, id := range f.messageOrder {
 		m := f.messages[id]
 		if m != nil && m.ThreadID == threadID && m.Status == StatusCompleted {
@@ -694,11 +695,15 @@ func (f *FakeStore) GetSessionActivityStats(ctx context.Context, threadID string
 				if m.UpdatedAt.After(maxUpdated) {
 					maxUpdated = m.UpdatedAt
 				}
+				if m.CreatedAt.After(maxCreated) {
+					maxCreated = m.CreatedAt
+				}
 			}
 		}
 	}
 	stats.CompletedTurns = completedCount
 	stats.LastMessageAt = maxUpdated
+	stats.LastCompletedMessageCreatedAt = maxCreated
 	return stats, nil
 }
 

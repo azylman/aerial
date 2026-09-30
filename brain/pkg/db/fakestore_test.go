@@ -360,6 +360,9 @@ func TestFakeStoreSessionOperations(t *testing.T) {
 	if stats.LastMessageAt.IsZero() {
 		t.Errorf("expected non-zero LastMessageAt")
 	}
+	if stats.LastCompletedMessageCreatedAt.IsZero() {
+		t.Errorf("expected non-zero LastCompletedMessageCreatedAt")
+	}
 
 	// DeleteSessionID
 	if err := s.DeleteSessionID(ctx, "th-1"); err != nil {

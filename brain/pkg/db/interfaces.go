@@ -22,11 +22,12 @@ var (
 
 // SessionActivityStats summarizes database-level activity timestamps for session lifecycle decisions.
 type SessionActivityStats struct {
-	InternalSessionID string    `json:"internal_session_id"`
-	TurnCount         int       `json:"turn_count"`
-	SessionUpdatedAt  time.Time `json:"session_updated_at"`
-	CompletedTurns    int64     `json:"completed_turns"`
-	LastMessageAt     time.Time `json:"last_message_at"`
+	InternalSessionID             string    `json:"internal_session_id"`
+	TurnCount                     int       `json:"turn_count"`
+	SessionUpdatedAt              time.Time `json:"session_updated_at"`
+	CompletedTurns                int64     `json:"completed_turns"`
+	LastMessageAt                 time.Time `json:"last_message_at"`
+	LastCompletedMessageCreatedAt time.Time `json:"last_completed_message_created_at"`
 }
 
 // FactStore handles persistence and semantic search for conversation facts.

@@ -507,14 +507,14 @@ func TestRecoverInterrupted(t *testing.T) {
 	t.Parallel()
 	store := setupTestStore(t)
 
+	t0 := time.Now().UTC().Add(-15 * time.Minute)
 	t1 := time.Now().UTC().Add(-10 * time.Minute)
 	t2 := time.Now().UTC().Add(-5 * time.Minute)
-	t3 := time.Now().UTC().Add(-1 * time.Minute)
 
 	// Same thread to test strict FIFO recovery
 	msg1 := db.Message{ID: "m1", ThreadID: "thread-same", GuildID: "g1", Status: db.StatusPending, CreatedAt: t1}
 	msg2 := db.Message{ID: "m2", ThreadID: "thread-same", GuildID: "g1", Status: db.StatusProcessing, CreatedAt: t2}
-	msg3 := db.Message{ID: "m3", ThreadID: "thread-same", GuildID: "g1", Status: db.StatusCompleted, CreatedAt: t3}
+	msg3 := db.Message{ID: "m3", ThreadID: "thread-same", GuildID: "g1", Status: db.StatusCompleted, CreatedAt: t0}
 
 	_ = insertMessage(store, msg1)
 	_ = insertMessage(store, msg2)
@@ -9313,6 +9313,130 @@ func TestRecoverInterrupted_CoverageEdgeCases(t *testing.T) {
 	updated, _ := getMessage(store, "msg-edge-case-cov")
 	if updated.Status != db.StatusFailed {
 		t.Errorf("expected status FAILED, got %s", updated.Status)
+	}
+}
+
+func TestRecoverInterrupted_DropsSupersededMessages(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+
+	t1 := time.Now().UTC().Add(-20 * time.Minute)
+	t2 := time.Now().UTC().Add(-10 * time.Minute)
+
+	// msgOld was stranded in PENDING at t1
+	msgOld := db.Message{
+		ID:        "msg-stranded-old",
+		ThreadID:  "thread-superseded",
+		GuildID:   "g1",
+		Status:    db.StatusPending,
+		CreatedAt: t1,
+	}
+	// msgNewer was sent at t2 and already COMPLETED
+	msgNewer := db.Message{
+		ID:           "msg-completed-newer",
+		ThreadID:     "thread-superseded",
+		GuildID:      "g1",
+		Status:       db.StatusCompleted,
+		ResponseText: "Already answered newer question!",
+		CreatedAt:    t2,
+	}
+
+	_ = insertMessage(store, msgOld)
+	_ = insertMessage(store, msgNewer)
+
+	var recoveredIDs []string
+	var mu sync.Mutex
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		Store:          store,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    1,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			return mockJSONResponse("sess-1", "OK"), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) func() {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			mu.Lock()
+			recoveredIDs = append(recoveredIDs, msg.ID)
+			mu.Unlock()
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	RecoverInterrupted(store, pool)
+
+	mu.Lock()
+	recCount := len(recoveredIDs)
+	mu.Unlock()
+
+	if recCount != 0 {
+		t.Fatalf("expected 0 recovered messages, got %d (%v)", recCount, recoveredIDs)
+	}
+
+	updated, err := getMessage(store, "msg-stranded-old")
+	if err != nil {
+		t.Fatalf("failed to get message: %v", err)
+	}
+	if updated.Status != db.StatusCompleted {
+		t.Errorf("expected status %s, got %s", db.StatusCompleted, updated.Status)
+	}
+	if updated.ResponseText != "[EXPIRED_STALE]" {
+		t.Errorf("expected response_text '[EXPIRED_STALE]', got %q", updated.ResponseText)
+	}
+}
+
+func TestRecoverInterrupted_DropsStrandedPendingOlderThanTTL(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+
+	// Pending message created 45 minutes ago (exceeds default 30m TTL)
+	msgPending := db.Message{
+		ID:            "msg-stranded-pending",
+		ThreadID:      "thread-expired-pending",
+		GuildID:       "g1",
+		Status:        db.StatusPending,
+		ScheduleRunID: "run-stranded-1",
+		CreatedAt:     time.Now().UTC().Add(-45 * time.Minute),
+	}
+	_ = insertMessage(store, msgPending)
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		Store:          store,
+		StalenessTTL:   30 * time.Minute,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    1,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			return mockJSONResponse("sess-1", "OK"), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) func() {
+			return func() {}
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	RecoverInterrupted(store, pool)
+
+	updated, err := getMessage(store, "msg-stranded-pending")
+	if err != nil {
+		t.Fatalf("failed to get message: %v", err)
+	}
+	if updated.Status != db.StatusCompleted {
+		t.Errorf("expected status %s, got %s", db.StatusCompleted, updated.Status)
+	}
+	if updated.ResponseText != "[EXPIRED_STALE]" {
+		t.Errorf("expected response_text '[EXPIRED_STALE]', got %q", updated.ResponseText)
 	}
 }
 
