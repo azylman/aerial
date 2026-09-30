@@ -44,6 +44,11 @@ type UnifiedProcessPool struct {
 	cancel     context.CancelFunc
 }
 
+var (
+	_ VoiceProcessPool = (*UnifiedProcessPool)(nil)
+	_ VoiceSession     = (*StreamingDaemon)(nil)
+)
+
 // NewUnifiedProcessPool creates a new process pool with the given configuration and spawner.
 func NewUnifiedProcessPool(cfg PoolConfig, spawner DaemonSpawner) *UnifiedProcessPool {
 	if spawner == nil {
@@ -216,6 +221,11 @@ func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string) 
 		return nil, fmt.Errorf("unexpected nil daemon from singleflight")
 	}
 	return daemon, nil
+}
+
+// GetOrCreateSession retrieves an active VoiceSession for targetKey, satisfying runner.VoiceProcessPool.
+func (p *UnifiedProcessPool) GetOrCreateSession(ctx context.Context, targetKey string) (VoiceSession, error) {
+	return p.GetOrCreate(ctx, targetKey)
 }
 
 // Close gracefully terminates all daemons tracked by the pool.

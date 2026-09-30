@@ -144,6 +144,8 @@ type TargetMcpConfig struct {
 }
 
 type VoiceConfig struct {
+	Engine           string   `yaml:"engine,omitempty" json:"engine,omitempty"`
+	Model            string   `yaml:"model,omitempty" json:"model,omitempty"`
 	PrewarmedTargets []string `yaml:"prewarmed_targets,omitempty" json:"prewarmed_targets,omitempty"`
 }
 
@@ -229,6 +231,7 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 	c.AdminUsers = raw.AdminUsers
 	c.Channels = raw.Channels
 	c.Voice = raw.Voice
+	c.Voice.Engine = strings.TrimSpace(raw.Voice.Engine)
 	if raw.Voice.PrewarmedTargets != nil {
 		cleanTargets := make([]string, 0, len(c.Voice.PrewarmedTargets))
 		for _, t := range c.Voice.PrewarmedTargets {
@@ -405,6 +408,8 @@ func cloneConfigData(src *ConfigData) *ConfigData {
 		}
 	}
 	dst.Voice = VoiceConfig{}
+	dst.Voice.Engine = src.Voice.Engine
+	dst.Voice.Model = src.Voice.Model
 	if src.Voice.PrewarmedTargets != nil {
 		dst.Voice.PrewarmedTargets = make([]string, len(src.Voice.PrewarmedTargets))
 		copy(dst.Voice.PrewarmedTargets, src.Voice.PrewarmedTargets)
@@ -434,6 +439,7 @@ func DefaultConfigData() *ConfigData {
 			Ephemeral: make(map[string]json.RawMessage),
 		},
 		Voice: VoiceConfig{
+			Engine:           "agy",
 			PrewarmedTargets: []string{"kiosk"},
 		},
 		Port:            "8080",
@@ -486,6 +492,71 @@ func (c *Config) VoicePrewarmedTargets() []string {
 	targets := make([]string, len(cur.Voice.PrewarmedTargets))
 	copy(targets, cur.Voice.PrewarmedTargets)
 	return targets
+}
+
+// VoiceEngine returns the configured voice engine ("agy" or "gemini_api"), defaulting to "agy".
+func (c *Config) VoiceEngine() string {
+	if c == nil {
+		return "agy"
+	}
+	cur := c.Current()
+	if cur == nil {
+		return "agy"
+	}
+	engine := strings.ToLower(strings.TrimSpace(cur.Voice.Engine))
+	switch engine {
+	case "gemini_api", "gemini", "direct_api":
+		return "gemini_api"
+	default:
+		return "agy"
+	}
+}
+
+// VoiceEngine returns the configured voice engine ("agy" or "gemini_api"), defaulting to "agy".
+func (c *ConfigData) VoiceEngine() string {
+	if c == nil {
+		return "agy"
+	}
+	engine := strings.ToLower(strings.TrimSpace(c.Voice.Engine))
+	switch engine {
+	case "gemini_api", "gemini", "direct_api":
+		return "gemini_api"
+	default:
+		return "agy"
+	}
+}
+
+// VoiceModel returns the configured voice model override, or empty string if not set.
+func (c *Config) VoiceModel() string {
+	if c == nil {
+		return ""
+	}
+	cur := c.Current()
+	if cur == nil {
+		return ""
+	}
+	return strings.TrimSpace(cur.Voice.Model)
+}
+
+// VoiceModel returns the configured voice model override, or empty string if not set.
+func (c *ConfigData) VoiceModel() string {
+	if c == nil {
+		return ""
+	}
+	return strings.TrimSpace(c.Voice.Model)
+}
+
+// Clone returns a deep copy of ConfigData.
+func (c *ConfigData) Clone() *ConfigData {
+	return cloneConfigData(c)
+}
+
+// Clone returns a new Config with a deep copy of the current configuration.
+func (c *Config) Clone() *Config {
+	if c == nil {
+		return nil
+	}
+	return NewFromData(c.Current())
 }
 
 // LoadConfigFromBytes parses YAML bytes into a Config instance.

@@ -31,6 +31,7 @@ type TurnContext struct {
 	Prompt    string
 	Sink      TurnSink
 	CreatedAt time.Time
+	Ctx       context.Context
 }
 
 // StreamingDaemon manages a long-lived streaming agy subprocess, its lifecycle state,

@@ -70,7 +70,7 @@ type WorkerPoolConfig struct {
 	SessionManager     *session.Manager
 	ProcessPool        *runner.UnifiedProcessPool
 	LowEffortProcessPool *runner.UnifiedProcessPool
-	VoiceProcessPool   *runner.UnifiedProcessPool
+	VoiceProcessPool   runner.VoiceProcessPool
 	MaintenanceInterval time.Duration
 
 	// Optional hooks for testing/custom overrides
@@ -116,7 +116,7 @@ type WorkerPool struct {
 	summaryGroup      singleflight.Group
 	processPool          *runner.UnifiedProcessPool
 	lowEffortProcessPool *runner.UnifiedProcessPool
-	voiceProcessPool     *runner.UnifiedProcessPool
+	voiceProcessPool     runner.VoiceProcessPool
 }
 
 // SummaryGroup returns the singleflight.Group coordinating thread summarizations for this pool instance.
@@ -680,8 +680,8 @@ func (p *WorkerPool) LowEffortProcessPool() *runner.UnifiedProcessPool {
 	return p.lowEffortProcessPool
 }
 
-// VoiceProcessPool returns the configured runner.UnifiedProcessPool for voice turns, or nil if unconfigured or p is nil.
-func (p *WorkerPool) VoiceProcessPool() *runner.UnifiedProcessPool {
+// VoiceProcessPool returns the configured runner.VoiceProcessPool for voice turns, or nil if unconfigured or p is nil.
+func (p *WorkerPool) VoiceProcessPool() runner.VoiceProcessPool {
 	if p == nil {
 		return nil
 	}
@@ -711,10 +711,14 @@ func (p *WorkerPool) MarkDirty() {
 		lowPool.MarkDirty()
 	}
 	if voicePool != nil {
-		if voiceTargets != nil {
-			voicePool.UpdatePrewarmedTargets(voiceTargets)
+		if targetUpdater, ok := voicePool.(interface{ UpdatePrewarmedTargets([]string) }); ok {
+			if voiceTargets != nil {
+				targetUpdater.UpdatePrewarmedTargets(voiceTargets)
+			}
 		}
-		voicePool.MarkDirty()
+		if dirtyMarker, ok := voicePool.(interface{ MarkDirty() }); ok {
+			dirtyMarker.MarkDirty()
+		}
 	}
 }
 
@@ -836,8 +840,10 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 	}
 
 	p.mu.Lock()
-	procPool := p.voiceProcessPool
-	if procPool == nil {
+	var procPool runner.VoiceProcessPool
+	if p.voiceProcessPool != nil {
+		procPool = p.voiceProcessPool
+	} else if p.processPool != nil {
 		procPool = p.processPool
 	}
 	p.mu.Unlock()
@@ -847,7 +853,7 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 
 	model := p.LowEffortModel()
 	start := time.Now()
-	daemon, dErr := procPool.GetOrCreate(ctx, deviceKey)
+	daemon, dErr := procPool.GetOrCreateSession(ctx, deviceKey)
 	if dErr != nil {
 		metrics.RecordRunnerExecution("error", model, "voice", time.Since(start))
 		return "", deviceKey, fmt.Errorf("failed to acquire voice daemon: %w", dErr)

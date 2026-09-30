@@ -3093,3 +3093,181 @@ func TestMain_DualProcessPoolWiring(t *testing.T) {
 	}
 }
 
+func TestVoicePool_FactoryWiring(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	voiceHome := filepath.Join(tmpDir, "voice")
+	spawner := runner.NewMockSpawner()
+
+	t.Run("GeminiAPI_WithHarnessAPIKey", func(t *testing.T) {
+		t.Parallel()
+		data := &config.ConfigData{
+			HarnessAPIKey: "test-harness-key",
+			Voice: config.VoiceConfig{
+				Engine:           "gemini_api",
+				Model:            "gemini-2.5-flash",
+				PrewarmedTargets: []string{"kiosk"},
+			},
+			SystemPrompt: "Test System Prompt",
+		}
+		cfg := config.NewFromData(data)
+
+		pool := createVoiceProcessPool(cfg, voiceHome, "fallback-model", spawner)
+		defer pool.Close()
+
+		geminiPool, ok := pool.(*runner.GeminiVoicePool)
+		if !ok {
+			t.Fatalf("expected *runner.GeminiVoicePool, got %T", pool)
+		}
+		if geminiPool.Model() != "gemini-2.5-flash" {
+			t.Errorf("expected model 'gemini-2.5-flash', got %q", geminiPool.Model())
+		}
+		if geminiPool.APIKey() != "test-harness-key" {
+			t.Errorf("expected APIKey 'test-harness-key', got %q", geminiPool.APIKey())
+		}
+	})
+
+	t.Run("GeminiAPI_WithAPIKeyFallback", func(t *testing.T) {
+		t.Parallel()
+		data := &config.ConfigData{
+			APIKey: "test-standard-key",
+			Voice: config.VoiceConfig{
+				Engine: "gemini_api",
+			},
+		}
+		cfg := config.NewFromData(data)
+
+		pool := createVoiceProcessPool(cfg, voiceHome, "fallback-model", spawner)
+		defer pool.Close()
+
+		geminiPool, ok := pool.(*runner.GeminiVoicePool)
+		if !ok {
+			t.Fatalf("expected *runner.GeminiVoicePool, got %T", pool)
+		}
+		if geminiPool.Model() != "fallback-model" {
+			t.Errorf("expected fallback model 'fallback-model', got %q", geminiPool.Model())
+		}
+		if geminiPool.APIKey() != "test-standard-key" {
+			t.Errorf("expected APIKey 'test-standard-key', got %q", geminiPool.APIKey())
+		}
+	})
+
+	t.Run("GeminiAPI_EmptyKeyFallbackToAgy", func(t *testing.T) {
+		t.Parallel()
+		data := &config.ConfigData{
+			Voice: config.VoiceConfig{
+				Engine: "gemini_api",
+			},
+		}
+		cfg := config.NewFromData(data)
+
+		pool := createVoiceProcessPool(cfg, voiceHome, "fallback-model", spawner)
+		defer pool.Close()
+
+		unifiedPool, ok := pool.(*runner.UnifiedProcessPool)
+		if !ok {
+			t.Fatalf("expected *runner.UnifiedProcessPool when API keys are empty, got %T", pool)
+		}
+		if unifiedPool.Model() != "fallback-model" {
+			t.Errorf("expected model 'fallback-model', got %q", unifiedPool.Model())
+		}
+	})
+
+	t.Run("AgyEngine", func(t *testing.T) {
+		t.Parallel()
+		data := &config.ConfigData{
+			HarnessAPIKey: "some-key",
+			Voice: config.VoiceConfig{
+				Engine: "agy",
+			},
+		}
+		cfg := config.NewFromData(data)
+
+		pool := createVoiceProcessPool(cfg, voiceHome, "fallback-model", spawner)
+		defer pool.Close()
+
+		unifiedPool, ok := pool.(*runner.UnifiedProcessPool)
+		if !ok {
+			t.Fatalf("expected *runner.UnifiedProcessPool for engine=agy, got %T", pool)
+		}
+		if unifiedPool.Model() != "fallback-model" {
+			t.Errorf("expected model 'fallback-model', got %q", unifiedPool.Model())
+		}
+	})
+
+	t.Run("Alias_createVoicePool", func(t *testing.T) {
+		t.Parallel()
+		data := &config.ConfigData{
+			HarnessAPIKey: "key-123",
+			Voice: config.VoiceConfig{
+				Engine: "gemini_api",
+			},
+		}
+		cfg := config.NewFromData(data)
+
+		pool := createVoicePool(cfg, voiceHome, "model-xyz", spawner)
+		defer pool.Close()
+
+		if _, ok := pool.(*runner.GeminiVoicePool); !ok {
+			t.Fatalf("expected *runner.GeminiVoicePool from createVoicePool alias, got %T", pool)
+		}
+	})
+
+	t.Run("NilConfig", func(t *testing.T) {
+		t.Parallel()
+		pool := createVoiceProcessPool(nil, voiceHome, "fallback-model", spawner)
+		defer pool.Close()
+
+		unifiedPool, ok := pool.(*runner.UnifiedProcessPool)
+		if !ok {
+			t.Fatalf("expected *runner.UnifiedProcessPool for nil config, got %T", pool)
+		}
+		if unifiedPool.Model() != "fallback-model" {
+			t.Errorf("expected model 'fallback-model', got %q", unifiedPool.Model())
+		}
+	})
+}
+
+func TestRunBrainApp_VoiceEngineGeminiAPI(t *testing.T) {
+	tmpDir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(tmpDir, ".gemini", "config", "skills"), 0755)
+
+	cfg := config.NewTestConfig()
+	cur := cfg.Current()
+	cur.DataDir = tmpDir
+	cur.GeminiHomeDir = tmpDir
+	cur.DiscordToken = "mock-discord-token"
+	cur.Port = "0"
+	cur.AgyBin = "/bin/true"
+	cur.HarnessAPIKey = "gemini-test-key"
+	cur.Voice = config.VoiceConfig{
+		Engine:           "gemini_api",
+		Model:            "gemini-2.5-flash",
+		PrewarmedTargets: []string{"kiosk"},
+	}
+	cfg.Update(cur)
+
+	ready := make(chan struct{})
+	oldReady := onServerReady
+	onServerReady = func(addr string) {
+		close(ready)
+	}
+	defer func() { onServerReady = oldReady }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		<-ready
+		time.Sleep(30 * time.Millisecond)
+		cancel()
+	}()
+
+	mockStore := db.NewFakeStore()
+	err := RunBrainApp(ctx, cfg, WithStore(mockStore), WithProcessSpawner(runner.NewMockDaemonSpawner()))
+	if err != nil {
+		t.Fatalf("RunBrainApp with gemini_api voice engine failed: %v", err)
+	}
+}
+

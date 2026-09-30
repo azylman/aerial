@@ -1002,6 +1002,62 @@ func WithProcessSpawner(spawner runner.DaemonSpawner) BrainAppOption {
 	}
 }
 
+// createVoiceProcessPool constructs a runner.VoiceProcessPool based on cfg.VoiceEngine().
+func createVoiceProcessPool(cfg *config.Config, voiceHome string, lowEffortModel string, spawner runner.DaemonSpawner) runner.VoiceProcessPool {
+	var cur *config.ConfigData
+	var voiceEngine string
+	var prewarmedTargets []string
+	if cfg != nil {
+		cur = cfg.Current()
+		voiceEngine = cfg.VoiceEngine()
+		prewarmedTargets = cfg.VoicePrewarmedTargets()
+	} else {
+		cur = config.DefaultConfigData()
+		voiceEngine = "agy"
+		prewarmedTargets = []string{}
+	}
+
+	var voicePool runner.VoiceProcessPool
+	if voiceEngine == "gemini_api" {
+		apiKey := cur.HarnessAPIKey
+		if apiKey == "" {
+			apiKey = cur.APIKey
+		}
+		if apiKey == "" {
+			log.Printf("[WARN] voice.engine is configured as 'gemini_api' but neither harness_api_key nor api_key is set; safely falling back to 'agy'")
+			voiceEngine = "agy"
+		} else {
+			geminiModel := lowEffortModel
+			if strings.TrimSpace(cur.Voice.Model) != "" {
+				geminiModel = strings.TrimSpace(cur.Voice.Model)
+			}
+			voicePool = runner.NewGeminiVoicePool(runner.GeminiVoicePoolConfig{
+				APIKey:           apiKey,
+				Model:            geminiModel,
+				PrewarmedTargets: prewarmedTargets,
+				SystemPrompt:     cur.SystemPrompt,
+			})
+			log.Printf("[INIT] Voice engine initialized with 'gemini_api' (model=%s, prewarmed=%v)", geminiModel, prewarmedTargets)
+		}
+	}
+	if voiceEngine != "gemini_api" {
+		voicePool = runner.NewUnifiedProcessPool(runner.PoolConfig{
+			GeminiHomeDir:    voiceHome,
+			Model:            lowEffortModel,
+			AgyBin:           cur.AgyBin,
+			Cwd:              cur.DataDir,
+			Env:              os.Environ(),
+			PrewarmedTargets: prewarmedTargets,
+		}, spawner)
+	}
+	return voicePool
+}
+
+// createVoicePool is an alias for createVoiceProcessPool.
+func createVoicePool(cfg *config.Config, voiceHome string, lowEffortModel string, spawner runner.DaemonSpawner) runner.VoiceProcessPool {
+	return createVoiceProcessPool(cfg, voiceHome, lowEffortModel, spawner)
+}
+
 var onServerReady func(addr string)
 
 func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption) error {
@@ -1103,14 +1159,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		}
 	}()
 
-	voicePool := runner.NewUnifiedProcessPool(runner.PoolConfig{
-		GeminiHomeDir:    voiceHome,
-		Model:            lowEffortModel,
-		AgyBin:           cur.AgyBin,
-		Cwd:              cur.DataDir,
-		Env:              os.Environ(),
-		PrewarmedTargets: cfg.VoicePrewarmedTargets(),
-	}, appOpts.processSpawner)
+	var voicePool runner.VoiceProcessPool = createVoiceProcessPool(cfg, voiceHome, lowEffortModel, appOpts.processSpawner)
 	defer func() {
 		if err := voicePool.Close(); err != nil {
 			log.Printf("[WARN] Failed to close voice process pool: %v", err)

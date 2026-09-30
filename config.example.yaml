@@ -97,6 +97,23 @@ channels:
     mode: ignore
 
 # ------------------------------------------------------------------------------
+# Voice Interface Configuration
+# ------------------------------------------------------------------------------
+# Configures the voice process pool engine, model override, and pre-warmed sessions.
+#
+# Available Engines:
+#   - agy: Uses the local Antigravity CLI daemon process pool (default).
+#   - gemini_api: Direct Gemini Live/REST API calls with SSE streaming (~200ms latency).
+#     Requires HARNESS_API_KEY or API_KEY to be set in environment or config.
+#
+voice:
+  engine: agy # or gemini_api
+  # model: gemini-2.5-flash # Optional model override for voice turns (defaults to low_effort_model)
+  # prewarmed_targets:
+  #   - kiosk
+  #   - dock
+
+# ------------------------------------------------------------------------------
 # Custom MCP Servers
 # ------------------------------------------------------------------------------
 # Additional MCP servers to merge into ~/.gemini/config/mcp_config.json
