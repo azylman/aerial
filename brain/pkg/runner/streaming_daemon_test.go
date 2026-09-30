@@ -1335,3 +1335,281 @@ func TestStreamingDaemon_DefaultHandshakeTimeout(t *testing.T) {
 	}
 }
 
+func TestStreamingDaemon_TranscriptRescue_EmptyResponse(t *testing.T) {
+	outR, outW := io.Pipe()
+	inR, inW := io.Pipe()
+	errR, errW := io.Pipe()
+	defer closeQuietly(inR)
+	defer closeQuietly(errW)
+
+	mockHandle := &MockProcessHandle{pid: 1001}
+	mock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			return inW, outR, errR, mockHandle, nil
+		},
+	}
+
+	go func() {
+		_, _ = io.Copy(io.Discard, inR)
+	}()
+	go func() {
+		_, _ = outW.Write([]byte("{\"event\":\"init\",\"session_id\":\"00000000-0000-0000-0000-000000000101\"}\n"))
+	}()
+
+	rescuedCalled := false
+	cfg := DaemonConfig{
+		SessionID: "00000000-0000-0000-0000-000000000101",
+		TranscriptRescuer: func(convID string, since time.Time) string {
+			rescuedCalled = true
+			return "Rescued substantive response from transcript"
+		},
+	}
+	daemon, err := StartStreamingDaemon(context.Background(), cfg, mock)
+	if err != nil {
+		t.Fatalf("failed starting daemon: %v", err)
+	}
+	defer daemon.Close()
+
+	sink := newMockTurnSink()
+	turnCtx := &TurnContext{
+		TurnID:    "t-1",
+		Prompt:    "hello",
+		Sink:      sink,
+		CreatedAt: time.Now(),
+	}
+	if err := daemon.Send("hello", turnCtx); err != nil {
+		t.Fatalf("send failed: %v", err)
+	}
+
+	// Emit result event with empty response
+	_, _ = outW.Write([]byte("{\"event\":\"result\",\"result\":{\"response\":\"\"}}\n"))
+
+	select {
+	case <-sink.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for sink result")
+	}
+
+	if !rescuedCalled {
+		t.Errorf("expected TranscriptRescuer to be called")
+	}
+	if sink.err != nil {
+		t.Errorf("expected nil error, got %v", sink.err)
+	}
+	if sink.result == nil || sink.result.Response != "Rescued substantive response from transcript" {
+		t.Errorf("expected rescued response, got %+v", sink.result)
+	}
+}
+
+func TestStreamingDaemon_TranscriptRescue_ErrorSuppression(t *testing.T) {
+	outR, outW := io.Pipe()
+	inR, inW := io.Pipe()
+	errR, errW := io.Pipe()
+	defer closeQuietly(inR)
+	defer closeQuietly(errW)
+
+	mockHandle := &MockProcessHandle{pid: 1002}
+	mock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			return inW, outR, errR, mockHandle, nil
+		},
+	}
+
+	go func() {
+		_, _ = io.Copy(io.Discard, inR)
+	}()
+	go func() {
+		_, _ = outW.Write([]byte("{\"event\":\"init\",\"session_id\":\"00000000-0000-0000-0000-000000000102\"}\n"))
+	}()
+
+	cfg := DaemonConfig{
+		SessionID: "00000000-0000-0000-0000-000000000102",
+		TranscriptRescuer: func(convID string, since time.Time) string {
+			return "Rescued substantive response after error"
+		},
+	}
+	daemon, err := StartStreamingDaemon(context.Background(), cfg, mock)
+	if err != nil {
+		t.Fatalf("failed starting daemon: %v", err)
+	}
+	defer daemon.Close()
+
+	sink := newMockTurnSink()
+	turnCtx := &TurnContext{
+		TurnID:    "t-2",
+		Prompt:    "hello",
+		Sink:      sink,
+		CreatedAt: time.Now(),
+	}
+	if err := daemon.Send("hello", turnCtx); err != nil {
+		t.Fatalf("send failed: %v", err)
+	}
+
+	// Emit ERROR event
+	_, _ = outW.Write([]byte("{\"event\":\"result\",\"result\":{\"status\":\"ERROR\",\"error\":\"quota exhausted\"}}\n"))
+
+	select {
+	case <-sink.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for sink result")
+	}
+
+	if sink.err != nil {
+		t.Errorf("expected error to be suppressed when rescued, got %v", sink.err)
+	}
+	if sink.result == nil || sink.result.Response != "Rescued substantive response after error" {
+		t.Errorf("expected rescued response, got %+v", sink.result)
+	}
+}
+
+func TestStreamingDaemon_TranscriptRescue_EOFRescue(t *testing.T) {
+	outR, outW := io.Pipe()
+	inR, inW := io.Pipe()
+	errR, errW := io.Pipe()
+	defer closeQuietly(inR)
+	defer closeQuietly(errW)
+
+	mockHandle := &MockProcessHandle{pid: 1003}
+	mock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			return inW, outR, errR, mockHandle, nil
+		},
+	}
+
+	go func() {
+		_, _ = io.Copy(io.Discard, inR)
+	}()
+	go func() {
+		_, _ = outW.Write([]byte("{\"event\":\"init\",\"session_id\":\"00000000-0000-0000-0000-000000000103\"}\n"))
+	}()
+
+	cfg := DaemonConfig{
+		SessionID: "00000000-0000-0000-0000-000000000103",
+		TranscriptRescuer: func(convID string, since time.Time) string {
+			return "Rescued substantive response on EOF"
+		},
+	}
+	daemon, err := StartStreamingDaemon(context.Background(), cfg, mock)
+	if err != nil {
+		t.Fatalf("failed starting daemon: %v", err)
+	}
+	defer daemon.Close()
+
+	sink := newMockTurnSink()
+	turnCtx := &TurnContext{
+		TurnID:    "t-3",
+		Prompt:    "hello",
+		Sink:      sink,
+		CreatedAt: time.Now(),
+	}
+	if err := daemon.Send("hello", turnCtx); err != nil {
+		t.Fatalf("send failed: %v", err)
+	}
+
+	// Close stdout to trigger unexpected EOF
+	_ = outW.Close()
+
+	select {
+	case <-sink.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for sink result")
+	}
+
+	if sink.err != nil {
+		t.Errorf("expected error to be suppressed on EOF when rescued, got %v", sink.err)
+	}
+	if sink.result == nil || sink.result.Response != "Rescued substantive response on EOF" {
+		t.Errorf("expected rescued response on EOF, got %+v", sink.result)
+	}
+}
+
+func TestStreamingDaemon_TranscriptRescue_FallbackOnError(t *testing.T) {
+	outR, outW := io.Pipe()
+	inR, inW := io.Pipe()
+	errR, errW := io.Pipe()
+	defer closeQuietly(inR)
+	defer closeQuietly(errW)
+
+	mockHandle := &MockProcessHandle{pid: 1004}
+	mock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			return inW, outR, errR, mockHandle, nil
+		},
+	}
+
+	go func() {
+		_, _ = io.Copy(io.Discard, inR)
+	}()
+	go func() {
+		_, _ = outW.Write([]byte("{\"event\":\"init\",\"session_id\":\"00000000-0000-0000-0000-000000000104\"}\n"))
+	}()
+
+	cfg := DaemonConfig{
+		SessionID: "00000000-0000-0000-0000-000000000104",
+		TranscriptRescuer: func(convID string, since time.Time) string {
+			return "" // No substantive response available in transcript
+		},
+	}
+	daemon, err := StartStreamingDaemon(context.Background(), cfg, mock)
+	if err != nil {
+		t.Fatalf("failed starting daemon: %v", err)
+	}
+	defer daemon.Close()
+
+	// Case 1: Result event with ERROR and empty response falls back to OnError
+	sink1 := newMockTurnSink()
+	turn1 := &TurnContext{
+		TurnID:    "t-fallback-1",
+		Prompt:    "hello",
+		Sink:      sink1,
+		CreatedAt: time.Now(),
+	}
+	if err := daemon.Send("hello", turn1); err != nil {
+		t.Fatalf("send failed: %v", err)
+	}
+
+	_, _ = outW.Write([]byte("{\"event\":\"result\",\"result\":{\"status\":\"ERROR\",\"error\":\"quota limit reached\",\"response\":\"\"}}\n"))
+
+	select {
+	case <-sink1.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for sink1 error")
+	}
+
+	if sink1.err == nil || !strings.Contains(sink1.err.Error(), "quota limit reached") {
+		t.Errorf("expected quota limit reached error, got %v", sink1.err)
+	}
+	if sink1.result != nil {
+		t.Errorf("expected nil result on unrescued error, got %+v", sink1.result)
+	}
+
+	// Case 2: Unexpected EOF when TranscriptRescuer returns "" falls back to OnError
+	sink2 := newMockTurnSink()
+	turn2 := &TurnContext{
+		TurnID:    "t-fallback-2",
+		Prompt:    "hello again",
+		Sink:      sink2,
+		CreatedAt: time.Now(),
+	}
+	if err := daemon.Send("hello again", turn2); err != nil {
+		t.Fatalf("send failed: %v", err)
+	}
+
+	_ = outW.Close()
+
+	select {
+	case <-sink2.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for sink2 error")
+	}
+
+	if sink2.err == nil || !strings.Contains(sink2.err.Error(), "unexpected EOF") {
+		t.Errorf("expected unexpected EOF error on unrescued EOF, got %v", sink2.err)
+	}
+	if sink2.result != nil {
+		t.Errorf("expected nil result on unrescued EOF, got %+v", sink2.result)
+	}
+}
+
+
+

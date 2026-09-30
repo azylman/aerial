@@ -18,14 +18,15 @@ const (
 )
 
 type DaemonConfig struct {
-	SessionID     string
-	ThreadID      string
-	Model         string
-	AgyBin        string
-	Cwd           string
-	Env           []string
-	GeminiHomeDir string
-	Timeout       time.Duration
+	SessionID         string
+	ThreadID          string
+	Model             string
+	AgyBin            string
+	Cwd               string
+	Env               []string
+	GeminiHomeDir     string
+	Timeout           time.Duration
+	TranscriptRescuer func(convID string, since time.Time) string
 }
 
 type TurnResult struct {

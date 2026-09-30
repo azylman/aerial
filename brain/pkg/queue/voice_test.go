@@ -3,6 +3,7 @@ package queue
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -843,13 +844,6 @@ func TestWorkerPool_ExecuteVoiceTurn_TranscriptRecoveryOnError(t *testing.T) {
 		t.Fatalf("mkdir logs failed: %v", err)
 	}
 
-	transcript := `{"type":"USER_INPUT","source":"USER_EXPLICIT","content":"What is the status?"}
-{"type":"PLANNER_RESPONSE","status":"DONE","content":"All systems operational and nominal."}
-`
-	if err := os.WriteFile(filepath.Join(logsDir, "transcript.jsonl"), []byte(transcript), 0644); err != nil {
-		t.Fatalf("write transcript failed: %v", err)
-	}
-
 	mockSpawner := &runner.MockDaemonSpawner{
 		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
 			inR, inW := io.Pipe()
@@ -861,15 +855,23 @@ func TestWorkerPool_ExecuteVoiceTurn_TranscriptRecoveryOnError(t *testing.T) {
 			go func() {
 				defer outW.Close()
 				defer errW.Close()
-				_, _ = outW.Write([]byte("{\"event\":\"init\",\"conversation_id\":\"" + convID + "\"}\n"))
+				_, _ = outW.Write([]byte("{\"event\":\"init\",\"session_id\":\"" + convID + "\"}\n"))
 				time.Sleep(10 * time.Millisecond)
+				now := time.Now().UTC().Format(time.RFC3339Nano)
+				transcript := fmt.Sprintf(`{"type":"USER_INPUT","source":"USER_EXPLICIT","content":"What is the status?","created_at":%q}
+{"type":"PLANNER_RESPONSE","status":"DONE","content":"All systems operational and nominal.","created_at":%q}
+`, now, now)
+				_ = os.WriteFile(filepath.Join(logsDir, "transcript.jsonl"), []byte(transcript), 0644)
 				// Daemon returns ERROR with empty response (e.g. CLI aborted or dropped result line)
 				_, _ = outW.Write([]byte("{\"event\":\"result\",\"result\":{\"status\":\"ERROR\",\"error\":\"RESOURCE_EXHAUSTED (code 429)\",\"response\":\"\"}}\n"))
 			}()
 			return inW, outR, errR, runner.NewMockProcessHandle(12345), nil
 		},
 	}
-	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, mockSpawner)
+	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{
+		DefaultModel:      "gemini-2.5-flash",
+		TranscriptRescuer: sessMgr.ExtractResponseSince,
+	}, mockSpawner)
 	defer procPool.Close()
 
 	pool := New(nil, WorkerPoolConfig{
@@ -927,7 +929,7 @@ type queueMockVoiceProcessPool struct {
 	closeCalled bool
 }
 
-func (p *queueMockVoiceProcessPool) GetOrCreateSession(ctx context.Context, targetKey string) (runner.VoiceSession, error) {
+func (p *queueMockVoiceProcessPool) GetOrCreateSession(ctx context.Context, targetKey string) (runner.AgentSession, error) {
 	if p.closeCalled {
 		return nil, errors.New("pool closed")
 	}
@@ -949,8 +951,8 @@ func (p *queueMockVoiceProcessPool) Close() error {
 	return nil
 }
 
-var _ runner.VoiceProcessPool = (*queueMockVoiceProcessPool)(nil)
-var _ runner.VoiceSession = (*queueMockVoiceSession)(nil)
+var _ runner.AgentPool = (*queueMockVoiceProcessPool)(nil)
+var _ runner.AgentSession = (*queueMockVoiceSession)(nil)
 
 func TestWorkerPool_ExecuteVoiceTurn_MockVoiceProcessPool(t *testing.T) {
 	t.Parallel()

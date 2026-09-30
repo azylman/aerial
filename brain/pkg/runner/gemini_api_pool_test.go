@@ -16,14 +16,14 @@ import (
 	"time"
 )
 
-func TestGeminiVoiceInterfaces_Satisfaction(t *testing.T) {
+func TestGeminiAPIInterfaces_Satisfaction(t *testing.T) {
 	t.Parallel()
 
-	var _ VoiceProcessPool = (*GeminiVoicePool)(nil)
-	var _ VoiceSession = (*GeminiVoiceSession)(nil)
+	var _ AgentPool = (*GeminiAPIPool)(nil)
+	var _ AgentSession = (*GeminiAPISession)(nil)
 }
 
-func TestGeminiVoicePool_StreamingSuccess(t *testing.T) {
+func TestGeminiAPIPool_StreamingSuccess(t *testing.T) {
 	t.Parallel()
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -53,7 +53,7 @@ func TestGeminiVoicePool_StreamingSuccess(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	pool := NewGeminiVoicePool(GeminiVoicePoolConfig{
+	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
 		APIKey:     "test-key",
 		Model:      "gemini-2.5-flash",
 		BaseURL:    ts.URL,
@@ -114,7 +114,7 @@ func TestGeminiVoicePool_StreamingSuccess(t *testing.T) {
 	}
 
 	// Verify history updated
-	geminiSess := sess.(*GeminiVoiceSession)
+	geminiSess := sess.(*GeminiAPISession)
 	history := geminiSess.History()
 	if len(history) != 2 {
 		t.Fatalf("expected history length 2, got %d", len(history))
@@ -127,7 +127,7 @@ func TestGeminiVoicePool_StreamingSuccess(t *testing.T) {
 	}
 }
 
-func TestGeminiVoicePool_ZeroThinkingBudget(t *testing.T) {
+func TestGeminiAPIPool_ZeroThinkingBudget(t *testing.T) {
 	t.Parallel()
 
 	var receivedBody []byte
@@ -145,7 +145,7 @@ func TestGeminiVoicePool_ZeroThinkingBudget(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	pool := NewGeminiVoicePool(GeminiVoicePoolConfig{
+	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
 		APIKey:       "key-abc",
 		Model:        "gemini-2.5-flash",
 		BaseURL:      ts.URL,
@@ -212,7 +212,7 @@ func TestGeminiVoicePool_ZeroThinkingBudget(t *testing.T) {
 	}
 }
 
-func TestGeminiVoicePool_SlidingWindowHistory(t *testing.T) {
+func TestGeminiAPIPool_SlidingWindowHistory(t *testing.T) {
 	t.Parallel()
 
 	turnCounter := int32(0)
@@ -227,7 +227,7 @@ func TestGeminiVoicePool_SlidingWindowHistory(t *testing.T) {
 	defer ts.Close()
 
 	// Default MaxHistoryTurns = 10, meaning max 20 messages (10 user + 10 model)
-	pool := NewGeminiVoicePool(GeminiVoicePoolConfig{
+	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
 		APIKey:          "history-key",
 		Model:           "gemini-2.5-flash",
 		BaseURL:         ts.URL,
@@ -255,7 +255,7 @@ func TestGeminiVoicePool_SlidingWindowHistory(t *testing.T) {
 		}
 	}
 
-	geminiSess := sess.(*GeminiVoiceSession)
+	geminiSess := sess.(*GeminiAPISession)
 	history := geminiSess.History()
 
 	// 10 turns * 2 = 20 messages maximum
@@ -276,7 +276,7 @@ func TestGeminiVoicePool_SlidingWindowHistory(t *testing.T) {
 	}
 }
 
-func TestGeminiVoicePool_ContextCancellation(t *testing.T) {
+func TestGeminiAPIPool_ContextCancellation(t *testing.T) {
 	t.Parallel()
 
 	releaseServer := make(chan struct{})
@@ -300,7 +300,7 @@ func TestGeminiVoicePool_ContextCancellation(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	pool := NewGeminiVoicePool(GeminiVoicePoolConfig{
+	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
 		APIKey:     "cancel-key",
 		Model:      "gemini-2.5-flash",
 		BaseURL:    ts.URL,
@@ -360,7 +360,7 @@ func TestGeminiVoicePool_ContextCancellation(t *testing.T) {
 	}
 }
 
-func TestGeminiVoicePool_RateLimit429(t *testing.T) {
+func TestGeminiAPIPool_RateLimit429(t *testing.T) {
 	t.Parallel()
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -369,7 +369,7 @@ func TestGeminiVoicePool_RateLimit429(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	pool := NewGeminiVoicePool(GeminiVoicePoolConfig{
+	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
 		APIKey:     "ratelimit-key",
 		Model:      "gemini-2.5-flash",
 		BaseURL:    ts.URL,
@@ -411,7 +411,7 @@ func TestGeminiVoicePool_RateLimit429(t *testing.T) {
 	}
 }
 
-func TestGeminiVoicePool_EmptyPrompt(t *testing.T) {
+func TestGeminiAPIPool_EmptyPrompt(t *testing.T) {
 	t.Parallel()
 
 	var requestCount int32
@@ -421,7 +421,7 @@ func TestGeminiVoicePool_EmptyPrompt(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	pool := NewGeminiVoicePool(GeminiVoicePoolConfig{
+	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
 		APIKey:     "test-key",
 		Model:      "gemini-2.5-flash",
 		BaseURL:    ts.URL,
@@ -459,11 +459,11 @@ func TestGeminiVoicePool_EmptyPrompt(t *testing.T) {
 	}
 }
 
-func TestGeminiVoicePool_PrewarmedAndClose(t *testing.T) {
+func TestGeminiAPIPool_PrewarmedAndClose(t *testing.T) {
 	t.Parallel()
 
 	targets := []string{"living-room", "kitchen", "office"}
-	pool := NewGeminiVoicePool(GeminiVoicePoolConfig{
+	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
 		APIKey:           "prewarm-key",
 		Model:            "gemini-2.5-flash",
 		PrewarmedTargets: targets,
@@ -514,7 +514,7 @@ func TestGeminiVoicePool_PrewarmedAndClose(t *testing.T) {
 	}
 }
 
-func TestGeminiVoicePool_SanitizeAPIKey(t *testing.T) {
+func TestGeminiAPIPool_SanitizeAPIKey(t *testing.T) {
 	t.Parallel()
 
 	secretKey := "AIzaSySuperSecretKey123456789"
@@ -525,7 +525,7 @@ func TestGeminiVoicePool_SanitizeAPIKey(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	pool := NewGeminiVoicePool(GeminiVoicePoolConfig{
+	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
 		APIKey:     secretKey,
 		Model:      "gemini-2.5-flash",
 		BaseURL:    ts.URL,
@@ -584,10 +584,10 @@ func TestGeminiVoicePool_SanitizeAPIKey(t *testing.T) {
 	}
 }
 
-func TestGeminiVoicePool_Accessors(t *testing.T) {
+func TestGeminiAPIPool_Accessors(t *testing.T) {
 	t.Parallel()
 
-	var nilPool *GeminiVoicePool
+	var nilPool *GeminiAPIPool
 	if nilPool.Model() != "" {
 		t.Errorf("expected empty string from nilPool.Model()")
 	}
@@ -595,7 +595,7 @@ func TestGeminiVoicePool_Accessors(t *testing.T) {
 		t.Errorf("expected empty string from nilPool.APIKey()")
 	}
 
-	pool := NewGeminiVoicePool(GeminiVoicePoolConfig{
+	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
 		APIKey: "my-api-key",
 		Model:  "gemini-2.5-pro",
 	})
@@ -610,9 +610,9 @@ func TestGeminiVoicePool_Accessors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error creating session: %v", err)
 	}
-	geminiSess, ok := sess.(*GeminiVoiceSession)
+	geminiSess, ok := sess.(*GeminiAPISession)
 	if !ok {
-		t.Fatalf("expected *GeminiVoiceSession, got %T", sess)
+		t.Fatalf("expected *GeminiAPISession, got %T", sess)
 	}
 	if geminiSess.TargetKey() != "target-123" {
 		t.Errorf("expected TargetKey 'target-123', got %q", geminiSess.TargetKey())
@@ -773,7 +773,7 @@ func TestMCPDispatcher_Execute_SuccessAndError(t *testing.T) {
 	}
 }
 
-func TestGeminiVoicePool_WithMCPToolCalling(t *testing.T) {
+func TestGeminiAPIPool_WithMCPToolCalling(t *testing.T) {
 	t.Parallel()
 
 	// Mock MCP Server
@@ -848,7 +848,7 @@ func TestGeminiVoicePool_WithMCPToolCalling(t *testing.T) {
 	}))
 	defer tsGemini.Close()
 
-	pool := NewGeminiVoicePool(GeminiVoicePoolConfig{
+	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
 		APIKey:     "test-key",
 		Model:      "gemini-2.5-flash",
 		BaseURL:    tsGemini.URL,
@@ -890,7 +890,7 @@ func TestGeminiVoicePool_WithMCPToolCalling(t *testing.T) {
 	}
 }
 
-func TestGeminiVoicePool_WithMCPToolCalling_ErrorRecovery(t *testing.T) {
+func TestGeminiAPIPool_WithMCPToolCalling_ErrorRecovery(t *testing.T) {
 	t.Parallel()
 
 	tsMCP := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -926,7 +926,7 @@ func TestGeminiVoicePool_WithMCPToolCalling_ErrorRecovery(t *testing.T) {
 	}))
 	defer tsGemini.Close()
 
-	pool := NewGeminiVoicePool(GeminiVoicePoolConfig{
+	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
 		APIKey:     "test-key",
 		Model:      "gemini-2.5-flash",
 		BaseURL:    tsGemini.URL,
@@ -960,7 +960,7 @@ func TestGeminiVoicePool_WithMCPToolCalling_ErrorRecovery(t *testing.T) {
 	}
 }
 
-func TestGeminiVoiceSession_TranscriptPersistenceAndHydration(t *testing.T) {
+func TestGeminiAPISession_TranscriptPersistenceAndHydration(t *testing.T) {
 	t.Parallel()
 
 	tmpDir := t.TempDir()
@@ -971,7 +971,7 @@ func TestGeminiVoiceSession_TranscriptPersistenceAndHydration(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	pool := NewGeminiVoicePool(GeminiVoicePoolConfig{
+	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
 		APIKey:     "test-key",
 		Model:      "gemini-2.5-flash",
 		BaseURL:    ts.URL,
@@ -1009,7 +1009,7 @@ func TestGeminiVoiceSession_TranscriptPersistenceAndHydration(t *testing.T) {
 	}
 
 	// Test hydration: create a brand new session with empty in-memory history pointing to same dataDir
-	freshSession := &GeminiVoiceSession{
+	freshSession := &GeminiAPISession{
 		targetKey: sessID,
 		sessionID: sessID,
 		pool:      pool,
@@ -1029,17 +1029,17 @@ func TestGeminiVoiceSession_TranscriptPersistenceAndHydration(t *testing.T) {
 	}
 }
 
-func TestGeminiVoicePool_EdgeCasesAndCoverage(t *testing.T) {
+func TestGeminiAPIPool_EdgeCasesAndCoverage(t *testing.T) {
 	t.Parallel()
 
 	// 1. sanitizeError with nil
-	pool := NewGeminiVoicePool(GeminiVoicePoolConfig{})
+	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{})
 	if err := pool.sanitizeError(nil); err != nil {
 		t.Errorf("expected sanitizeError(nil) == nil, got %v", err)
 	}
 
 	// 2. SessionID fallback when sessionID is empty
-	sess := &GeminiVoiceSession{targetKey: "fallback-target"}
+	sess := &GeminiAPISession{targetKey: "fallback-target"}
 	if sess.SessionID() != "fallback-target" {
 		t.Errorf("expected 'fallback-target', got %q", sess.SessionID())
 	}
@@ -1186,7 +1186,7 @@ func TestMCPDispatcher_Execute_ErrorPaths(t *testing.T) {
 	}
 }
 
-func TestGeminiVoicePool_Send_WithNilSinkAndErrors(t *testing.T) {
+func TestGeminiAPIPool_Send_WithNilSinkAndErrors(t *testing.T) {
 	t.Parallel()
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1194,7 +1194,7 @@ func TestGeminiVoicePool_Send_WithNilSinkAndErrors(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	pool := NewGeminiVoicePool(GeminiVoicePoolConfig{
+	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
 		APIKey:     "test-key",
 		Model:      "gemini-2.5-flash",
 		BaseURL:    ts.URL,
@@ -1233,7 +1233,7 @@ func TestGeminiVoicePool_Send_WithNilSinkAndErrors(t *testing.T) {
 	}
 }
 
-func TestGeminiVoicePool_Send_SSEMalformedChunk(t *testing.T) {
+func TestGeminiAPIPool_Send_SSEMalformedChunk(t *testing.T) {
 	t.Parallel()
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1243,7 +1243,7 @@ func TestGeminiVoicePool_Send_SSEMalformedChunk(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	pool := NewGeminiVoicePool(GeminiVoicePoolConfig{
+	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
 		APIKey:     "test-key",
 		Model:      "gemini-2.5-flash",
 		BaseURL:    ts.URL,
@@ -1279,7 +1279,7 @@ func (d *errMockDispatcher) Execute(ctx context.Context, name string, args map[s
 	return "", errors.New("execute failed")
 }
 
-func TestGeminiVoicePool_Send_DispatcherErrors(t *testing.T) {
+func TestGeminiAPIPool_Send_DispatcherErrors(t *testing.T) {
 	t.Parallel()
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1289,7 +1289,7 @@ func TestGeminiVoicePool_Send_DispatcherErrors(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	pool := NewGeminiVoicePool(GeminiVoicePoolConfig{
+	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
 		APIKey:        "test-key",
 		Model:         "gemini-2.5-flash",
 		BaseURL:       ts.URL,
@@ -1316,7 +1316,7 @@ func TestGeminiVoicePool_Send_DispatcherErrors(t *testing.T) {
 	}
 }
 
-func TestGeminiVoiceSession_HistoryPruningLongTranscript(t *testing.T) {
+func TestGeminiAPISession_HistoryPruningLongTranscript(t *testing.T) {
 	t.Parallel()
 
 	tmpDir := t.TempDir()
@@ -1342,10 +1342,10 @@ func TestGeminiVoiceSession_HistoryPruningLongTranscript(t *testing.T) {
 	}
 	_ = f.Close()
 
-	pool := NewGeminiVoicePool(GeminiVoicePoolConfig{
+	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
 		DataDir: tmpDir,
 	})
-	sess := &GeminiVoiceSession{
+	sess := &GeminiAPISession{
 		targetKey: sessID,
 		sessionID: sessID,
 		pool:      pool,
@@ -1362,15 +1362,15 @@ func TestGeminiVoiceSession_HistoryPruningLongTranscript(t *testing.T) {
 	}
 }
 
-func TestGeminiVoiceSession_AppendTranscript_BranchCoverage(t *testing.T) {
+func TestGeminiAPISession_AppendTranscript_BranchCoverage(t *testing.T) {
 	t.Parallel()
 
 	// 1. Empty dataDir -> immediate return (p == "")
-	sess1 := &GeminiVoiceSession{dataDir: ""}
+	sess1 := &GeminiAPISession{dataDir: ""}
 	sess1.appendTranscript("prompt", "response")
 
 	// 2. Uncreatable directory -> os.MkdirAll error
-	sess2 := &GeminiVoiceSession{
+	sess2 := &GeminiAPISession{
 		sessionID: "test-err-dir",
 		dataDir:   "/dev/null/forbidden",
 	}
@@ -1378,7 +1378,7 @@ func TestGeminiVoiceSession_AppendTranscript_BranchCoverage(t *testing.T) {
 
 	// 3. File exists as directory -> os.OpenFile error
 	tmp := t.TempDir()
-	sess3 := &GeminiVoiceSession{
+	sess3 := &GeminiAPISession{
 		sessionID: "test-err-file",
 		dataDir:   tmp,
 	}
@@ -1493,7 +1493,7 @@ func TestMCPDispatcher_AllEdgeCases(t *testing.T) {
 	}
 }
 
-func TestGeminiVoiceSession_Send_ToolCallWithoutDispatcher(t *testing.T) {
+func TestGeminiAPISession_Send_ToolCallWithoutDispatcher(t *testing.T) {
 	t.Parallel()
 
 	step := 0
@@ -1510,7 +1510,7 @@ func TestGeminiVoiceSession_Send_ToolCallWithoutDispatcher(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	pool := NewGeminiVoicePool(GeminiVoicePoolConfig{
+	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
 		APIKey:     "test-key",
 		BaseURL:    ts.URL,
 		HTTPClient: ts.Client(),
@@ -1537,7 +1537,7 @@ func TestGeminiVoiceSession_Send_ToolCallWithoutDispatcher(t *testing.T) {
 	}
 }
 
-func TestGeminiVoiceSession_Send_MalformedSSEChunk(t *testing.T) {
+func TestGeminiAPISession_Send_MalformedSSEChunk(t *testing.T) {
 	t.Parallel()
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1546,7 +1546,7 @@ func TestGeminiVoiceSession_Send_MalformedSSEChunk(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	pool := NewGeminiVoicePool(GeminiVoicePoolConfig{
+	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
 		APIKey:     "test-key",
 		BaseURL:    ts.URL,
 		HTTPClient: ts.Client(),
@@ -1615,7 +1615,7 @@ func TestMCPDispatcher_HeadersAndMultiPart(t *testing.T) {
 	}
 }
 
-func TestGeminiVoiceSession_HydrateHistory_BlankLines(t *testing.T) {
+func TestGeminiAPISession_HydrateHistory_BlankLines(t *testing.T) {
 	t.Parallel()
 
 	tmpDir := t.TempDir()
@@ -1628,7 +1628,7 @@ func TestGeminiVoiceSession_HydrateHistory_BlankLines(t *testing.T) {
 		t.Fatalf("failed to write transcript: %v", err)
 	}
 
-	sess := &GeminiVoiceSession{
+	sess := &GeminiAPISession{
 		targetKey: sessID,
 		sessionID: sessID,
 		dataDir:   tmpDir,
@@ -1641,12 +1641,12 @@ func TestGeminiVoiceSession_HydrateHistory_BlankLines(t *testing.T) {
 	}
 }
 
-func TestGeminiVoiceSession_Send_NetworkAndContextErrors(t *testing.T) {
+func TestGeminiAPISession_Send_NetworkAndContextErrors(t *testing.T) {
 	t.Parallel()
 
 	t.Run("PreCancelledContext", func(t *testing.T) {
 		t.Parallel()
-		pool := NewGeminiVoicePool(GeminiVoicePoolConfig{
+		pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
 			APIKey: "test-key",
 		})
 		sess, err := pool.GetOrCreateSession(context.Background(), "precancel-device")
@@ -1674,7 +1674,7 @@ func TestGeminiVoiceSession_Send_NetworkAndContextErrors(t *testing.T) {
 
 	t.Run("NetworkDoError", func(t *testing.T) {
 		t.Parallel()
-		pool := NewGeminiVoicePool(GeminiVoicePoolConfig{
+		pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
 			APIKey:  "test-key",
 			BaseURL: "http://127.0.0.1:1", // closed port causes Do() failure
 		})
@@ -1709,7 +1709,7 @@ func TestGeminiVoiceSession_Send_NetworkAndContextErrors(t *testing.T) {
 		}))
 		defer ts.Close()
 
-		pool := NewGeminiVoicePool(GeminiVoicePoolConfig{
+		pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
 			APIKey:     "test-key",
 			BaseURL:    ts.URL,
 			HTTPClient: ts.Client(),

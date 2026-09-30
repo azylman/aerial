@@ -182,6 +182,16 @@ func (d *StreamingDaemon) SessionID() string {
 	return d.sessionID
 }
 
+// SetTranscriptRescuer dynamically updates the transcript rescuer callback on the daemon.
+func (d *StreamingDaemon) SetTranscriptRescuer(rescuer func(convID string, since time.Time) string) {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.cfg.TranscriptRescuer = rescuer
+}
+
 // TurnCount returns the total number of completed turns executed by this daemon.
 func (d *StreamingDaemon) TurnCount() int {
 	d.mu.RLock()
@@ -352,6 +362,17 @@ func (d *StreamingDaemon) readStdoutLoop(r *bufio.Reader) {
 
 				for _, turn := range remaining {
 					if turn != nil && turn.Sink != nil {
+						if d.cfg.TranscriptRescuer != nil && d.SessionID() != "" {
+							if rescued := d.cfg.TranscriptRescuer(d.SessionID(), turn.CreatedAt); IsSubstantiveResponse(rescued) && !strings.HasPrefix(rescued, "[Tool Call Requested]:") {
+								log.Printf("[StreamingDaemon] Recovered substantive response directly from session %s transcript after unexpected EOF", d.SessionID())
+								turn.Sink.OnResult(&TurnResult{
+									ConversationID: d.SessionID(),
+									Response:       strings.TrimSpace(rescued),
+									Duration:       time.Since(turn.CreatedAt),
+								})
+								continue
+							}
+						}
 						turn.Sink.OnError(fmt.Errorf("daemon stdout unexpected EOF: %w", err))
 					}
 				}
@@ -508,16 +529,32 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 				}
 			}
 
-			if strings.EqualFold(status, "ERROR") {
-				if strings.TrimSpace(respStr) == "" || strings.HasPrefix(respStr, "[Tool Call Requested]:") {
-					if errMsg == "" {
-						errMsg = "daemon execution failed"
+			if strings.TrimSpace(respStr) == "" || strings.HasPrefix(respStr, "[Tool Call Requested]:") || strings.EqualFold(status, "ERROR") {
+				if d.cfg.TranscriptRescuer != nil && d.SessionID() != "" {
+					rescued := d.cfg.TranscriptRescuer(d.SessionID(), activeTurn.CreatedAt)
+					if rescued != "" && IsSubstantiveResponse(rescued) && !strings.HasPrefix(rescued, "[Tool Call Requested]:") {
+						log.Printf("[StreamingDaemon] Recovered substantive response directly from session %s transcript after error/empty result: %s", d.SessionID(), rescued)
+						res := &TurnResult{
+							ConversationID: d.SessionID(),
+							Response:       strings.TrimSpace(rescued),
+							Duration:       time.Since(activeTurn.CreatedAt),
+						}
+						populateUsage(res, raw)
+						activeTurn.Sink.OnResult(res)
+						return
 					}
-					activeTurn.Sink.OnError(errors.New(errMsg))
-					return
 				}
-				if errMsg != "" {
-					log.Printf("[StreamingDaemon] Notice: daemon reported error with substantive response: %s", errMsg)
+				if strings.EqualFold(status, "ERROR") {
+					if strings.TrimSpace(respStr) == "" || strings.HasPrefix(respStr, "[Tool Call Requested]:") {
+						if errMsg == "" {
+							errMsg = "daemon execution failed"
+						}
+						activeTurn.Sink.OnError(errors.New(errMsg))
+						return
+					}
+					if errMsg != "" {
+						log.Printf("[StreamingDaemon] Notice: daemon reported error with substantive response: %s", errMsg)
+					}
 				}
 			}
 
@@ -526,33 +563,7 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 				Response:       respStr,
 				Duration:       time.Since(activeTurn.CreatedAt),
 			}
-
-			var usageObj map[string]any
-			if u, ok := raw["usage"].(map[string]any); ok {
-				usageObj = u
-			}
-			if resObj, ok := raw["result"].(map[string]any); ok {
-				if u, ok := resObj["usage"].(map[string]any); ok {
-					usageObj = u
-				}
-			}
-			if usageObj != nil {
-				if it, ok := usageObj["input_tokens"].(float64); ok {
-					res.Usage.InputTokens = int(it)
-				}
-				if ot, ok := usageObj["output_tokens"].(float64); ok {
-					res.Usage.OutputTokens = int(ot)
-				}
-				if tt, ok := usageObj["thinking_tokens"].(float64); ok {
-					res.Usage.ThinkingTokens = int(tt)
-				}
-				if crt, ok := usageObj["cache_read_tokens"].(float64); ok {
-					res.Usage.CacheReadTokens = int(crt)
-				}
-				if tot, ok := usageObj["total_tokens"].(float64); ok {
-					res.Usage.TotalTokens = int(tot)
-				}
-			}
+			populateUsage(res, raw)
 			activeTurn.Sink.OnResult(res)
 		}
 	}
@@ -584,3 +595,36 @@ func extractResponseString(raw map[string]any) string {
 	}
 	return ""
 }
+
+func populateUsage(res *TurnResult, raw map[string]any) {
+	if res == nil || raw == nil {
+		return
+	}
+	var usageObj map[string]any
+	if u, ok := raw["usage"].(map[string]any); ok {
+		usageObj = u
+	}
+	if resObj, ok := raw["result"].(map[string]any); ok {
+		if u, ok := resObj["usage"].(map[string]any); ok {
+			usageObj = u
+		}
+	}
+	if usageObj != nil {
+		if it, ok := usageObj["input_tokens"].(float64); ok {
+			res.Usage.InputTokens = int(it)
+		}
+		if ot, ok := usageObj["output_tokens"].(float64); ok {
+			res.Usage.OutputTokens = int(ot)
+		}
+		if tt, ok := usageObj["thinking_tokens"].(float64); ok {
+			res.Usage.ThinkingTokens = int(tt)
+		}
+		if crt, ok := usageObj["cache_read_tokens"].(float64); ok {
+			res.Usage.CacheReadTokens = int(crt)
+		}
+		if tot, ok := usageObj["total_tokens"].(float64); ok {
+			res.Usage.TotalTokens = int(tot)
+		}
+	}
+}
+

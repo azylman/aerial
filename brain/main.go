@@ -1036,8 +1036,8 @@ func extractVoiceMCPServers(cur *config.ConfigData) []runner.MCPServerConfig {
 	return result
 }
 
-// createVoiceProcessPool constructs a runner.VoiceProcessPool based on cfg.VoiceEngine().
-func createVoiceProcessPool(cfg *config.Config, voiceHome string, lowEffortModel string, spawner runner.DaemonSpawner) runner.VoiceProcessPool {
+// createVoiceProcessPool constructs a runner.AgentPool based on cfg.VoiceEngine().
+func createVoiceProcessPool(cfg *config.Config, voiceHome string, lowEffortModel string, spawner runner.DaemonSpawner) runner.AgentPool {
 	var cur *config.ConfigData
 	var voiceEngine string
 	var prewarmedTargets []string
@@ -1051,7 +1051,7 @@ func createVoiceProcessPool(cfg *config.Config, voiceHome string, lowEffortModel
 		prewarmedTargets = []string{}
 	}
 
-	var voicePool runner.VoiceProcessPool
+	var voicePool runner.AgentPool
 	if voiceEngine == "gemini_api" {
 		apiKey := cur.HarnessAPIKey
 		if apiKey == "" {
@@ -1066,7 +1066,7 @@ func createVoiceProcessPool(cfg *config.Config, voiceHome string, lowEffortModel
 				geminiModel = strings.TrimSpace(cur.Voice.Model)
 			}
 			mcpServers := extractVoiceMCPServers(cur)
-			voicePool = runner.NewGeminiVoicePool(runner.GeminiVoicePoolConfig{
+			voicePool = runner.NewGeminiAPIPool(runner.GeminiAPIPoolConfig{
 				APIKey:           apiKey,
 				Model:            geminiModel,
 				PrewarmedTargets: prewarmedTargets,
@@ -1091,7 +1091,7 @@ func createVoiceProcessPool(cfg *config.Config, voiceHome string, lowEffortModel
 }
 
 // createVoicePool is an alias for createVoiceProcessPool.
-func createVoicePool(cfg *config.Config, voiceHome string, lowEffortModel string, spawner runner.DaemonSpawner) runner.VoiceProcessPool {
+func createVoicePool(cfg *config.Config, voiceHome string, lowEffortModel string, spawner runner.DaemonSpawner) runner.AgentPool {
 	return createVoiceProcessPool(cfg, voiceHome, lowEffortModel, spawner)
 }
 
@@ -1170,11 +1170,12 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	ephemeralHome := filepath.Join(runtimeBase, "runtimes", "ephemeral")
 
 	discordPrimaryPool := runner.NewUnifiedProcessPool(runner.PoolConfig{
-		GeminiHomeDir: discordHome,
-		Model:         cur.Model,
-		AgyBin:        cur.AgyBin,
-		Cwd:           cur.DataDir,
-		Env:           os.Environ(),
+		GeminiHomeDir:     discordHome,
+		Model:             cur.Model,
+		AgyBin:            cur.AgyBin,
+		Cwd:               cur.DataDir,
+		Env:               os.Environ(),
+		TranscriptRescuer: sessionMgr.ExtractResponseSince,
 	}, appOpts.processSpawner)
 	defer func() {
 		if err := discordPrimaryPool.Close(); err != nil {
@@ -1183,12 +1184,13 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	}()
 
 	discordLowEffortPool := runner.NewUnifiedProcessPool(runner.PoolConfig{
-		GeminiHomeDir:    ephemeralHome,
-		Model:            lowEffortModel,
-		AgyBin:           cur.AgyBin,
-		Cwd:              cur.DataDir,
-		Env:              os.Environ(),
-		PrewarmedTargets: []string{"ephemeral:classifier", "ephemeral:summarizer"},
+		GeminiHomeDir:     ephemeralHome,
+		Model:             lowEffortModel,
+		AgyBin:            cur.AgyBin,
+		Cwd:               cur.DataDir,
+		Env:               os.Environ(),
+		PrewarmedTargets:  []string{"ephemeral:classifier", "ephemeral:summarizer"},
+		TranscriptRescuer: sessionMgr.ExtractResponseSince,
 	}, appOpts.processSpawner)
 	defer func() {
 		if err := discordLowEffortPool.Close(); err != nil {
@@ -1196,7 +1198,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		}
 	}()
 
-	var voicePool runner.VoiceProcessPool = createVoiceProcessPool(cfg, voiceHome, lowEffortModel, appOpts.processSpawner)
+	var voicePool runner.AgentPool = createVoiceProcessPool(cfg, voiceHome, lowEffortModel, appOpts.processSpawner)
 	defer func() {
 		if err := voicePool.Close(); err != nil {
 			log.Printf("[WARN] Failed to close voice process pool: %v", err)

@@ -1715,26 +1715,25 @@ func TestQueueTurnCountSessionRotation(t *testing.T) {
 	pool.Enqueue(msg2)
 	<-completedCh
 
-	// Verify post-rotation state:
-	// Session ID should be rotated to cold state ""
-	// turn_count should be reset to 0
+	// Verify post-execution state:
+	// Worker preserves session and turn count continues to increment
 	finalSessionID, err := getSessionID(store, channelID)
 	if err != nil {
 		t.Fatalf("Failed to query session ID: %v", err)
 	}
-	if finalSessionID != "" {
-		t.Errorf("Expected session ID to be reset to cold state \"\", got: %s", finalSessionID)
+	if finalSessionID != initialSessionID {
+		t.Errorf("Expected session ID to be preserved as %q, got: %s", initialSessionID, finalSessionID)
 	}
 
 	finalTurnCount, err := getSessionTurnCount(store, channelID)
 	if err != nil {
 		t.Fatalf("Failed to query turn count: %v", err)
 	}
-	if finalTurnCount != 0 {
-		t.Errorf("Expected turn_count=0 after rotation, got %d", finalTurnCount)
+	if finalTurnCount != DefaultMaxSessionTurns {
+		t.Errorf("Expected turn_count=%d after turn %d, got %d", DefaultMaxSessionTurns, DefaultMaxSessionTurns, finalTurnCount)
 	}
 
-	// Send turn DefaultMaxSessionTurns + 1 (Turn 11, starts cold)
+	// Send turn DefaultMaxSessionTurns + 1 (Turn 11, preserves session)
 	completedCh = make(chan struct{}, 1)
 	msg3 := db.Message{ID: "m-rot-3", ThreadID: channelID, Content: fmt.Sprintf("<@aerial> Turn %d", DefaultMaxSessionTurns+1), CreatedAt: time.Now().UTC()}
 	_ = insertMessage(store, msg3)
@@ -1745,15 +1744,15 @@ func TestQueueTurnCountSessionRotation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to query turn count after turn 11: %v", err)
 	}
-	if turn11Count != 1 {
-		t.Errorf("Expected turn_count=1 after cold restart on turn 11, got %d", turn11Count)
+	if turn11Count != DefaultMaxSessionTurns+1 {
+		t.Errorf("Expected turn_count=%d on turn 11, got %d", DefaultMaxSessionTurns+1, turn11Count)
 	}
 	turn11SessionID, err := getSessionID(store, channelID)
 	if err != nil {
 		t.Fatalf("Failed to query session ID after turn 11: %v", err)
 	}
-	if turn11SessionID == "" || turn11SessionID == initialSessionID {
-		t.Errorf("Expected fresh new session ID after turn 11, got %q", turn11SessionID)
+	if turn11SessionID != initialSessionID {
+		t.Errorf("Expected session ID to remain %q, got: %s", initialSessionID, turn11SessionID)
 	}
 }
 
@@ -1855,21 +1854,21 @@ func TestChannelSession_RotationOnIdleTimeout(t *testing.T) {
 	if len(capturedSessionIDs) != 1 {
 		t.Fatalf("Expected 1 execution, got %d", len(capturedSessionIDs))
 	}
-	// The runner should have received sessionID == "" because the 25h idle session rotated pre-execution!
-	if capturedSessionIDs[0] != "" {
-		t.Errorf("Expected cold start (sessionID == \"\") due to 25h idle timeout, got: %q", capturedSessionIDs[0])
+	// The runner should have received initialSessionID because worker does not rotate on idle timeout
+	if capturedSessionIDs[0] != initialSessionID {
+		t.Errorf("Expected session %q preserved, got: %q", initialSessionID, capturedSessionIDs[0])
 	}
 	mu.Unlock()
 
-	// Turn count should now be 1
+	// Turn count should now be 2
 	c1, _ := getSessionTurnCount(store, channelID)
-	if c1 != 1 {
-		t.Errorf("Expected turn_count=1 after cold start, got %d", c1)
+	if c1 != 2 {
+		t.Errorf("Expected turn_count=2, got %d", c1)
 	}
 
-	newSessID, _ := getSessionID(store, channelID)
-	if newSessID == "" || newSessID == initialSessionID {
-		t.Errorf("Expected a fresh session ID, got: %s", newSessID)
+	currSessID, _ := getSessionID(store, channelID)
+	if currSessID != initialSessionID {
+		t.Errorf("Expected session %q, got: %s", initialSessionID, currSessID)
 	}
 
 	// 2. Send Turn 2 immediately (5 seconds later). It should NOT rotate!
@@ -1883,14 +1882,14 @@ func TestChannelSession_RotationOnIdleTimeout(t *testing.T) {
 	if len(capturedSessionIDs) != 2 {
 		t.Fatalf("Expected 2 executions, got %d", len(capturedSessionIDs))
 	}
-	if capturedSessionIDs[1] != newSessID {
-		t.Errorf("Expected Turn 2 to retain new session ID %q, got: %q", newSessID, capturedSessionIDs[1])
+	if capturedSessionIDs[1] != initialSessionID {
+		t.Errorf("Expected Turn 2 to retain session ID %q, got: %q", initialSessionID, capturedSessionIDs[1])
 	}
 	mu.Unlock()
 
 	c2, _ := getSessionTurnCount(store, channelID)
-	if c2 != 2 {
-		t.Errorf("Expected turn_count=2 after Turn 2, got %d", c2)
+	if c2 != 3 {
+		t.Errorf("Expected turn_count=3 after Turn 2, got %d", c2)
 	}
 }
 
@@ -1988,22 +1987,22 @@ func TestThreadSession_RotationOnIdleTimeout(t *testing.T) {
 	if len(capturedSessionIDs) != 1 {
 		t.Fatalf("Expected 1 execution, got %d", len(capturedSessionIDs))
 	}
-	if capturedSessionIDs[0] != "" {
-		t.Errorf("Expected cold start (sessionID == \"\") in thread mode due to 25h idle timeout, got: %q", capturedSessionIDs[0])
+	if capturedSessionIDs[0] != initialSessionID {
+		t.Errorf("Expected session %q preserved, got: %q", initialSessionID, capturedSessionIDs[0])
 	}
 	mu.Unlock()
 
 	c1, _ := getSessionTurnCount(store, threadID)
-	if c1 != 1 {
-		t.Errorf("Expected turn_count=1 after cold start, got %d", c1)
+	if c1 != 2 {
+		t.Errorf("Expected turn_count=2, got %d", c1)
 	}
 
-	newSessID, _ := getSessionID(store, threadID)
-	if newSessID == "" || newSessID == initialSessionID {
-		t.Errorf("Expected a fresh session ID, got: %s", newSessID)
+	currSessID, _ := getSessionID(store, threadID)
+	if currSessID != initialSessionID {
+		t.Errorf("Expected session %q, got: %s", initialSessionID, currSessID)
 	}
 
-	// 2. Send Turn 2 immediately. It should retain the new session ID.
+	// 2. Send Turn 2 immediately. It should retain the session ID.
 	completedCh = make(chan struct{}, 1)
 	msg2 := db.Message{ID: "m-th-idle-2", ThreadID: threadID, Content: "Hello thread again", CreatedAt: time.Now().UTC()}
 	_ = insertMessage(store, msg2)
@@ -2014,14 +2013,14 @@ func TestThreadSession_RotationOnIdleTimeout(t *testing.T) {
 	if len(capturedSessionIDs) != 2 {
 		t.Fatalf("Expected 2 executions, got %d", len(capturedSessionIDs))
 	}
-	if capturedSessionIDs[1] != newSessID {
-		t.Errorf("Expected Turn 2 in thread mode to retain session ID %q, got: %q", newSessID, capturedSessionIDs[1])
+	if capturedSessionIDs[1] != initialSessionID {
+		t.Errorf("Expected Turn 2 in thread mode to retain session ID %q, got: %q", initialSessionID, capturedSessionIDs[1])
 	}
 	mu.Unlock()
 
 	c2, _ := getSessionTurnCount(store, threadID)
-	if c2 != 2 {
-		t.Errorf("Expected turn_count=2 after Turn 2, got %d", c2)
+	if c2 != 3 {
+		t.Errorf("Expected turn_count=3 after Turn 2, got %d", c2)
 	}
 }
 
@@ -3067,8 +3066,8 @@ func TestProcessBurst_SessionRotationBeforeLeadingAmbient(t *testing.T) {
 		t.Errorf("Expected 1 runner call, got %d", runnerCalls)
 	}
 
-	if passedSessID != "" {
-		t.Errorf("Expected RunnerFunc to be called with empty session ID on rotated turn, got %q", passedSessID)
+	if passedSessID != initialSessionID {
+		t.Errorf("Expected RunnerFunc to be called with session ID %q, got %q", initialSessionID, passedSessID)
 	}
 
 	// Verify that Ambient1 was NOT written to the old session directory, but marked COMPLETED in DB!
@@ -4365,9 +4364,12 @@ func TestProcessBurst_SessionRotation_ResetsToColdState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to get session ID after turn 2: %v", err)
 	}
-	if s2 != "" {
-		t.Errorf("Expected db.GetSessionID to be empty \"\" after Turn 2 rotation, got %q", s2)
+	if s2 != "c9b5e679-7425-40de-944b-e07fc1f90ae7" {
+		t.Errorf("Expected session preserved after Turn 2, got %q", s2)
 	}
+
+	// Rotate session to cold state to test Turn 3 cold bootstrap
+	_ = rotateSessionID(store, channelID, "")
 
 	// 3. Process Turn 3 -> executes as Turn 1 cold bootstrap (fetches history, passes sessionID = "")
 	msg3 := db.Message{
@@ -4504,6 +4506,9 @@ func TestProcessBurst_SessionRotation_SeedsPreviousSessionID(t *testing.T) {
 		t.Errorf("Turn 10 in existing session should NOT contain <PREVIOUS_SESSION>, got:\n%s", capturedPrompts[1])
 	}
 	mu.Unlock()
+
+	// Rotate session to cold state to test Turn 3 cold bootstrap and previous session seeding
+	_ = rotateSessionID(store, channelID, "")
 
 	// Verify DB state after rotation
 	currentSess, err := getSessionID(store, channelID)
@@ -5893,9 +5898,10 @@ func TestProcessBurst_EmptyStdout_TranscriptRecovery(t *testing.T) {
 	sessDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", testSessID)
 	_ = os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs"), 0755)
 
-	transcriptContent := `{"step_index":1,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-09-06T12:00:00Z","content":"Finish it"}
-{"step_index":2,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-09-06T12:01:00Z","content":"Finished the task with 100% coverage!"}
-`
+	tNow := time.Now().UTC()
+	transcriptContent := fmt.Sprintf(`{"step_index":1,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":%q,"content":"Finish it"}
+{"step_index":2,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":%q,"content":"Finished the task with 100%% coverage!"}
+`, tNow.Format(time.RFC3339Nano), tNow.Add(time.Second).Format(time.RFC3339Nano))
 	if err := os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte(transcriptContent), 0600); err != nil {
 		t.Fatalf("failed to write mock transcript: %v", err)
 	}
@@ -5983,10 +5989,11 @@ func TestProcessBurst_StreamInterrupted_TranscriptRecovery(t *testing.T) {
 	sessDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", testSessID)
 	_ = os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs"), 0755)
 
-	transcriptContent := `{"step_index":1,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-09-07T21:24:20Z","content":"Have the gang review"}
-{"step_index":2,"source":"MODEL","type":"ERROR_MESSAGE","status":"DONE","created_at":"2026-09-07T21:25:06Z","content":"Error: The stream was interrupted. Please continue the task you were working on."}
-{"step_index":3,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-09-07T21:26:39Z","content":"Here is the complete gang review with high consensus!"}
-`
+	tNow := time.Now().UTC()
+	transcriptContent := fmt.Sprintf(`{"step_index":1,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":%q,"content":"Have the gang review"}
+{"step_index":2,"source":"MODEL","type":"ERROR_MESSAGE","status":"DONE","created_at":%q,"content":"Error: The stream was interrupted. Please continue the task you were working on."}
+{"step_index":3,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":%q,"content":"Here is the complete gang review with high consensus!"}
+`, tNow.Format(time.RFC3339Nano), tNow.Add(time.Second).Format(time.RFC3339Nano), tNow.Add(2*time.Second).Format(time.RFC3339Nano))
 	if err := os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte(transcriptContent), 0600); err != nil {
 		t.Fatalf("failed to write mock transcript: %v", err)
 	}
@@ -7155,8 +7162,8 @@ func TestThreadSession_RotationAtTurnLimit(t *testing.T) {
 	}
 
 	mu.Lock()
-	if gotSessionID != "" {
-		t.Errorf("Expected cold start (empty session ID) after %d turns for thread mode, got: %q", DefaultMaxSessionTurns, gotSessionID)
+	if gotSessionID != "old-session-id" {
+		t.Errorf("Expected session %q preserved after %d turns, got: %q", "old-session-id", DefaultMaxSessionTurns, gotSessionID)
 	}
 	mu.Unlock()
 }
@@ -12206,14 +12213,14 @@ func TestSession_RotationAtStepLimit_PreFlight(t *testing.T) {
 	}
 
 	mu.Lock()
-	if gotSessionID != "" {
-		t.Errorf("Expected cold start (empty session ID) after %d steps, got: %q", DefaultMaxSessionSteps, gotSessionID)
+	if gotSessionID != oldSessionID {
+		t.Errorf("Expected session to be preserved as %q after %d steps, got: %q", oldSessionID, DefaultMaxSessionSteps, gotSessionID)
 	}
 	mu.Unlock()
 
 	prevSess, _ := getPreviousSessionID(store, "thread-step-limit-test")
-	if prevSess != oldSessionID {
-		t.Errorf("Expected previous session ID %q in store, got %q", oldSessionID, prevSess)
+	if prevSess != "" {
+		t.Errorf("Expected previous session ID to be empty, got %q", prevSess)
 	}
 }
 
@@ -12289,14 +12296,14 @@ func TestSession_RotationAtByteLimit_PreFlight(t *testing.T) {
 	}
 
 	mu.Lock()
-	if gotSessionID != "" {
-		t.Errorf("Expected cold start (empty session ID) after %d bytes, got: %q", DefaultMaxTranscriptBytes, gotSessionID)
+	if gotSessionID != oldSessionID {
+		t.Errorf("Expected session to be preserved as %q after %d bytes, got: %q", oldSessionID, DefaultMaxTranscriptBytes, gotSessionID)
 	}
 	mu.Unlock()
 
 	prevSess, _ := getPreviousSessionID(store, "thread-byte-limit-test")
-	if prevSess != oldSessionID {
-		t.Errorf("Expected previous session ID %q in store, got %q", oldSessionID, prevSess)
+	if prevSess != "" {
+		t.Errorf("Expected previous session ID to be empty, got %q", prevSess)
 	}
 }
 
@@ -12357,15 +12364,15 @@ func TestSession_RotationAtLimit_PostExecution(t *testing.T) {
 		t.Fatal("Timeout waiting for message")
 	}
 
-	// In post-execution, since steps exceeded DefaultMaxSessionSteps, session should be rotated to ""
+	// In post-execution, worker no longer rotates sessions based on step limit
 	curSess, _ := getSessionID(store, "thread-post-rot-test")
-	if curSess != "" {
-		t.Errorf("Expected session to be rotated (empty) post execution, got: %q", curSess)
+	if curSess != executedSessionID {
+		t.Errorf("Expected session %q to be preserved post execution, got: %q", executedSessionID, curSess)
 	}
 
 	prevSess, _ := getPreviousSessionID(store, "thread-post-rot-test")
-	if prevSess != executedSessionID {
-		t.Errorf("Expected previous session ID %q post execution, got %q", executedSessionID, prevSess)
+	if prevSess != "" {
+		t.Errorf("Expected previous session ID to be empty post execution, got %q", prevSess)
 	}
 }
 
@@ -12448,8 +12455,8 @@ func TestWatchdog_RotationCircuitBreaker_OnBloat(t *testing.T) {
 	if attempts[0] != bloatedSessionID {
 		t.Errorf("Expected attempt 1 to use session %q, got %q", bloatedSessionID, attempts[0])
 	}
-	if attempts[1] != "" {
-		t.Errorf("Expected attempt 2 to have rotated to empty session (cold start), got: %q", attempts[1])
+	if attempts[1] != bloatedSessionID {
+		t.Errorf("Expected attempt 2 to preserve session %q, got: %q", bloatedSessionID, attempts[1])
 	}
 }
 
@@ -12517,8 +12524,8 @@ func TestSession_Rotation_ChannelModeAndRemainingBranches(t *testing.T) {
 		}
 
 		mu.Lock()
-		if gotSessionID != "" {
-			t.Errorf("Expected cold start (empty session ID) in channel mode byte limit, got: %q", gotSessionID)
+		if gotSessionID != "sess-chan-byte" {
+			t.Errorf("Expected session to be preserved as %q in channel mode byte limit, got: %q", "sess-chan-byte", gotSessionID)
 		}
 		mu.Unlock()
 	})
@@ -12585,8 +12592,8 @@ func TestSession_Rotation_ChannelModeAndRemainingBranches(t *testing.T) {
 		}
 
 		mu.Lock()
-		if gotSessionID != "" {
-			t.Errorf("Expected cold start (empty session ID) in channel mode step limit, got: %q", gotSessionID)
+		if gotSessionID != oldSess {
+			t.Errorf("Expected session to be preserved as %q in channel mode step limit, got: %q", oldSess, gotSessionID)
 		}
 		mu.Unlock()
 	})
@@ -12643,8 +12650,8 @@ func TestSession_Rotation_ChannelModeAndRemainingBranches(t *testing.T) {
 		}
 
 		curSess, _ := getSessionID(store, "thread-post-byte-test")
-		if curSess != "" {
-			t.Errorf("Expected rotated session ID, got: %q", curSess)
+		if curSess != executedSessionID {
+			t.Errorf("Expected session %q to be preserved post execution, got: %q", executedSessionID, curSess)
 		}
 	})
 
@@ -12718,8 +12725,8 @@ func TestSession_Rotation_ChannelModeAndRemainingBranches(t *testing.T) {
 		if len(attempts) != 2 {
 			t.Fatalf("Expected 2 attempts, got %d", len(attempts))
 		}
-		if attempts[1] != "" {
-			t.Errorf("Expected attempt 2 to have rotated to empty session (cold start), got: %q", attempts[1])
+		if attempts[1] != bloatedSessionID {
+			t.Errorf("Expected attempt 2 to preserve session %q, got: %q", bloatedSessionID, attempts[1])
 		}
 	})
 }

@@ -2670,6 +2670,123 @@ func TestCoverageBoost_PoolStoreResolutionAndOptions(t *testing.T) {
 	}
 }
 
+func TestCoverageBoost_SinkAndLegacyAdapterMethods(t *testing.T) {
+	// 1. Sinks
+	ds := &DiscordTurnSink{}
+	ds.OnTurnStarted()
+	ds.OnThinking()
+
+	vs := NewVoiceTurnSink(nil, "dev-1")
+	vs.OnTurnStarted()
+	vs.OnThinking()
+	vs.OnToolCall("run_command", "ls")
+
+	// 2. WorkerPool AgentPool
+	var nilP *WorkerPool
+	if nilP.AgentPool() != nil {
+		t.Errorf("expected nil for nil WorkerPool.AgentPool")
+	}
+	p := &WorkerPool{processPool: &legacyRunnerAgentPool{}}
+	if p.AgentPool() == nil {
+		t.Errorf("expected non-nil AgentPool")
+	}
+
+	// 3. legacyRunnerAgentPool methods
+	tracker := runner.NewUnifiedProcessPool(runner.PoolConfig{}, nil)
+	lp := newLegacyRunnerAgentPool(WorkerPoolConfig{}, tracker)
+	if err := lp.Initialize(context.Background()); err != nil {
+		t.Errorf("unexpected error on Initialize: %v", err)
+	}
+	if err := lp.Close(); err != nil {
+		t.Errorf("unexpected error on Close: %v", err)
+	}
+	_, _ = lp.Get("thread-1")
+	_, _ = lp.GetOrCreate(context.Background(), "thread-1")
+
+	lpNoTracker := newLegacyRunnerAgentPool(WorkerPoolConfig{}, nil)
+	_, _ = lpNoTracker.Get("thread-1")
+	_, err := lpNoTracker.GetOrCreate(context.Background(), "thread-1")
+	if err == nil {
+		t.Errorf("expected error from GetOrCreate without tracker pool")
+	}
+}
+
+func TestCoverageBoost_LegacyAdapterSendBranches(t *testing.T) {
+	// Branch 1: err != nil with stderr
+	lp1 := newLegacyRunnerAgentPool(WorkerPoolConfig{
+		LowEffortModel: "low-model",
+		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+			if opts.StepUpdateHandler != nil {
+				opts.StepUpdateHandler(&runner.StepUpdateEvent{
+					Type:     "tool_call",
+					ToolName: "bash",
+					ToolInfo: &runner.StepToolInfo{
+						Parameters: runner.StepToolParameters{
+							CommandLine: "echo 1",
+						},
+					},
+				})
+			}
+			return "", "critical failure", 1, errors.New("underlying error")
+		},
+	}, nil)
+	s1, _ := lp1.GetOrCreateSession(context.Background(), "voice-test-key")
+	sink1 := newDiscordTurnSink(nil)
+	err1 := s1.Send("hello", &runner.TurnContext{Sink: sink1})
+	if err1 == nil {
+		t.Errorf("expected error from Send")
+	}
+
+	// Branch 2: exitCode != 0
+	lp2 := newLegacyRunnerAgentPool(WorkerPoolConfig{
+		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+			return "", "exit 42", 42, nil
+		},
+	}, nil)
+	s2, _ := lp2.GetOrCreateSession(context.Background(), "t2")
+	sink2 := newDiscordTurnSink(nil)
+	if err := s2.Send("hello", &runner.TurnContext{Sink: sink2}); err == nil {
+		t.Errorf("expected error on non-zero exit code")
+	}
+
+	// Branch 3: parsed.Error != ""
+	lp3 := newLegacyRunnerAgentPool(WorkerPoolConfig{
+		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+			return `{"status":"ERROR","error":"stream was interrupted"}`, "", 0, nil
+		},
+	}, nil)
+	s3, _ := lp3.GetOrCreateSession(context.Background(), "t3")
+	sink3 := newDiscordTurnSink(nil)
+	if err := s3.Send("hello", &runner.TurnContext{Sink: sink3}); err == nil {
+		t.Errorf("expected error on parsed.Error")
+	}
+
+	// Branch 4: parsed.Status != "SUCCESS"
+	lp4 := newLegacyRunnerAgentPool(WorkerPoolConfig{
+		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+			return `{"status":"FAILED"}`, "", 0, nil
+		},
+	}, nil)
+	s4, _ := lp4.GetOrCreateSession(context.Background(), "t4")
+	sink4 := newDiscordTurnSink(nil)
+	if err := s4.Send("hello", &runner.TurnContext{Sink: sink4}); err == nil {
+		t.Errorf("expected error on non-success status")
+	}
+
+	// Branch 5: turn == nil
+	lp5 := newLegacyRunnerAgentPool(WorkerPoolConfig{
+		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+			return `{"status":"SUCCESS","response":"ok"}`, "", 0, nil
+		},
+	}, nil)
+	s5, _ := lp5.GetOrCreateSession(context.Background(), "t5")
+	if err := s5.Send("hello", nil); err != nil {
+		t.Errorf("unexpected error on nil turn: %v", err)
+	}
+}
+
+
+
 
 
 

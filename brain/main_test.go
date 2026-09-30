@@ -3116,9 +3116,9 @@ func TestVoicePool_FactoryWiring(t *testing.T) {
 		pool := createVoiceProcessPool(cfg, voiceHome, "fallback-model", spawner)
 		defer pool.Close()
 
-		geminiPool, ok := pool.(*runner.GeminiVoicePool)
+		geminiPool, ok := pool.(*runner.GeminiAPIPool)
 		if !ok {
-			t.Fatalf("expected *runner.GeminiVoicePool, got %T", pool)
+			t.Fatalf("expected *runner.GeminiAPIPool, got %T", pool)
 		}
 		if geminiPool.Model() != "gemini-2.5-flash" {
 			t.Errorf("expected model 'gemini-2.5-flash', got %q", geminiPool.Model())
@@ -3141,9 +3141,9 @@ func TestVoicePool_FactoryWiring(t *testing.T) {
 		pool := createVoiceProcessPool(cfg, voiceHome, "fallback-model", spawner)
 		defer pool.Close()
 
-		geminiPool, ok := pool.(*runner.GeminiVoicePool)
+		geminiPool, ok := pool.(*runner.GeminiAPIPool)
 		if !ok {
-			t.Fatalf("expected *runner.GeminiVoicePool, got %T", pool)
+			t.Fatalf("expected *runner.GeminiAPIPool, got %T", pool)
 		}
 		if geminiPool.Model() != "fallback-model" {
 			t.Errorf("expected fallback model 'fallback-model', got %q", geminiPool.Model())
@@ -3209,8 +3209,8 @@ func TestVoicePool_FactoryWiring(t *testing.T) {
 		pool := createVoicePool(cfg, voiceHome, "model-xyz", spawner)
 		defer pool.Close()
 
-		if _, ok := pool.(*runner.GeminiVoicePool); !ok {
-			t.Fatalf("expected *runner.GeminiVoicePool from createVoicePool alias, got %T", pool)
+		if _, ok := pool.(*runner.GeminiAPIPool); !ok {
+			t.Fatalf("expected *runner.GeminiAPIPool from createVoicePool alias, got %T", pool)
 		}
 	})
 

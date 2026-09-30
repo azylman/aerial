@@ -24,8 +24,9 @@ type PoolConfig struct {
 	Cwd              string
 	Env              []string
 	GeminiHomeDir    string
-	PrewarmedTargets []string
-	MaxIdle          time.Duration
+	PrewarmedTargets  []string
+	MaxIdle           time.Duration
+	TranscriptRescuer func(convID string, since time.Time) string
 }
 
 // UnifiedProcessPool manages pinned daemons and singleflight pre-warming.
@@ -45,10 +46,8 @@ type UnifiedProcessPool struct {
 }
 
 var (
-	_ AgentPool        = (*UnifiedProcessPool)(nil)
-	_ AgentSession     = (*StreamingDaemon)(nil)
-	_ VoiceProcessPool = (*UnifiedProcessPool)(nil)
-	_ VoiceSession     = (*StreamingDaemon)(nil)
+	_ AgentPool    = (*UnifiedProcessPool)(nil)
+	_ AgentSession = (*StreamingDaemon)(nil)
 )
 
 // NewUnifiedProcessPool creates a new process pool with the given configuration and spawner.
@@ -82,6 +81,19 @@ func (p *UnifiedProcessPool) Model() string {
 		return ""
 	}
 	return p.cfg.Model
+}
+
+// SetTranscriptRescuer updates the transcript rescuer callback on the pool and active daemons.
+func (p *UnifiedProcessPool) SetTranscriptRescuer(rescuer func(convID string, since time.Time) string) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.cfg.TranscriptRescuer = rescuer
+	for _, d := range p.daemons {
+		d.SetTranscriptRescuer(rescuer)
+	}
 }
 
 // Initialize pre-warms configured target daemons in background goroutines.
@@ -157,11 +169,13 @@ func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string) 
 		}
 
 		daemonCfg := DaemonConfig{
-			ThreadID: targetKey,
-			Model:    p.cfg.Model,
-			AgyBin:   p.cfg.AgyBin,
-			Cwd:      p.cfg.Cwd,
-			Env:      daemonEnv,
+			ThreadID:          targetKey,
+			Model:             p.cfg.Model,
+			AgyBin:            p.cfg.AgyBin,
+			Cwd:               p.cfg.Cwd,
+			Env:               daemonEnv,
+			GeminiHomeDir:     p.cfg.GeminiHomeDir,
+			TranscriptRescuer: p.cfg.TranscriptRescuer,
 		}
 
 		daemon, spawnErr := StartStreamingDaemon(p.ctx, daemonCfg, p.spawner)
@@ -225,8 +239,8 @@ func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string) 
 	return daemon, nil
 }
 
-// GetOrCreateSession retrieves an active VoiceSession for targetKey, satisfying runner.VoiceProcessPool.
-func (p *UnifiedProcessPool) GetOrCreateSession(ctx context.Context, targetKey string) (VoiceSession, error) {
+// GetOrCreateSession retrieves an active AgentSession for targetKey, satisfying runner.AgentPool.
+func (p *UnifiedProcessPool) GetOrCreateSession(ctx context.Context, targetKey string) (AgentSession, error) {
 	return p.GetOrCreate(ctx, targetKey)
 }
 
