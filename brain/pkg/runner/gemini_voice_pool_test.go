@@ -1362,4 +1362,385 @@ func TestGeminiVoiceSession_HistoryPruningLongTranscript(t *testing.T) {
 	}
 }
 
+func TestGeminiVoiceSession_AppendTranscript_BranchCoverage(t *testing.T) {
+	t.Parallel()
+
+	// 1. Empty dataDir -> immediate return (p == "")
+	sess1 := &GeminiVoiceSession{dataDir: ""}
+	sess1.appendTranscript("prompt", "response")
+
+	// 2. Uncreatable directory -> os.MkdirAll error
+	sess2 := &GeminiVoiceSession{
+		sessionID: "test-err-dir",
+		dataDir:   "/dev/null/forbidden",
+	}
+	sess2.appendTranscript("prompt", "response")
+
+	// 3. File exists as directory -> os.OpenFile error
+	tmp := t.TempDir()
+	sess3 := &GeminiVoiceSession{
+		sessionID: "test-err-file",
+		dataDir:   tmp,
+	}
+	p := sess3.transcriptPath()
+	_ = os.MkdirAll(p, 0755)
+	sess3.appendTranscript("prompt", "response")
+}
+
+func TestMCPDispatcher_AllEdgeCases(t *testing.T) {
+	t.Parallel()
+
+	// 1. Nil dispatcher ListDeclarations
+	var nilDisp *DefaultMCPDispatcher
+	decls, err := nilDisp.ListDeclarations(context.Background())
+	if err != nil || decls != nil {
+		t.Fatalf("expected nil, nil for nil dispatcher")
+	}
+
+	// 2. Empty server list ListDeclarations
+	emptyDisp := NewDefaultMCPDispatcher(nil, nil)
+	decls, err = emptyDisp.ListDeclarations(context.Background())
+	if err != nil || decls != nil {
+		t.Fatalf("expected nil, nil for empty server list")
+	}
+
+	// 3. Server with empty ServerURL
+	skipDisp := NewDefaultMCPDispatcher([]MCPServerConfig{
+		{Name: "empty-url", ServerURL: "   "},
+	}, http.DefaultClient)
+	decls, err = skipDisp.ListDeclarations(context.Background())
+	if err != nil || len(decls) != 0 {
+		t.Fatalf("expected empty decls for empty server URL")
+	}
+
+	// 4. Server with non-200 status code
+	errServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+	}))
+	defer errServer.Close()
+
+	errDisp := NewDefaultMCPDispatcher([]MCPServerConfig{
+		{Name: "err-srv", ServerURL: errServer.URL},
+	}, errServer.Client())
+	decls, err = errDisp.ListDeclarations(context.Background())
+	if err != nil || len(decls) != 0 {
+		t.Fatalf("expected empty decls on server error")
+	}
+
+	// 5. Server returning JSON-RPC error
+	rpcErrServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"error":{"code":-32600,"message":"Invalid Request"}}`))
+	}))
+	defer rpcErrServer.Close()
+
+	rpcErrDisp := NewDefaultMCPDispatcher([]MCPServerConfig{
+		{Name: "rpc-err-srv", ServerURL: rpcErrServer.URL},
+	}, rpcErrServer.Client())
+	decls, err = rpcErrDisp.ListDeclarations(context.Background())
+	if err != nil || len(decls) != 0 {
+		t.Fatalf("expected empty decls on rpc error")
+	}
+
+	// 6. Server returning unparseable tools result & tool with empty name
+	malformedToolsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"jsonrpc": "2.0",
+			"id": 1,
+			"result": {
+				"tools": [
+					{"name": "", "description": "unnamed tool"},
+					{"name": "valid_tool", "description": "valid"}
+				]
+			}
+		}`))
+	}))
+	defer malformedToolsServer.Close()
+
+	malformedDisp := NewDefaultMCPDispatcher([]MCPServerConfig{
+		{Name: "malformed-tools", ServerURL: malformedToolsServer.URL},
+	}, malformedToolsServer.Client())
+	decls, err = malformedDisp.ListDeclarations(context.Background())
+	if err != nil || len(decls) != 1 {
+		t.Fatalf("expected exactly 1 decl, got %d", len(decls))
+	}
+
+	// 7. Execute on nil dispatcher
+	_, err = nilDisp.Execute(context.Background(), "any_tool", nil)
+	if err == nil {
+		t.Fatalf("expected error executing on nil dispatcher")
+	}
+
+	// 8. Execute with unknown tool that fails JIT discovery
+	_, err = malformedDisp.Execute(context.Background(), "completely_unknown_tool", nil)
+	if err == nil {
+		t.Fatalf("expected error executing unknown tool")
+	}
+
+	// 9. Execute with nil args on server returning HTTP 500
+	errDisp.toolRoutes["err_tool"] = MCPServerConfig{Name: "err-srv", ServerURL: errServer.URL}
+	_, err = errDisp.Execute(context.Background(), "err_tool", nil)
+	if err == nil {
+		t.Fatalf("expected error executing on error server")
+	}
+
+	// 10. Execute on server returning JSON-RPC error
+	rpcErrDisp.toolRoutes["failing_tool"] = MCPServerConfig{Name: "rpc-err", ServerURL: rpcErrServer.URL}
+	_, err = rpcErrDisp.Execute(context.Background(), "failing_tool", nil)
+	if err == nil {
+		t.Fatalf("expected error on rpc error response")
+	}
+}
+
+func TestGeminiVoiceSession_Send_ToolCallWithoutDispatcher(t *testing.T) {
+	t.Parallel()
+
+	step := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		step++
+		if step == 1 {
+			// Model issues function call, but no dispatcher is configured on pool
+			_, _ = w.Write([]byte("data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"mystery_tool\",\"args\":{\"x\":1}}}]}}]}\n\n"))
+		} else {
+			// Final response after tool execution error returned
+			_, _ = w.Write([]byte("data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Tool failed as expected\"}]}}],\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":5}}\n\n"))
+		}
+	}))
+	defer ts.Close()
+
+	pool := NewGeminiVoicePool(GeminiVoicePoolConfig{
+		APIKey:     "test-key",
+		BaseURL:    ts.URL,
+		HTTPClient: ts.Client(),
+	})
+
+	sess, err := pool.GetOrCreateSession(context.Background(), "no-disp-device")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	sink := newMockTurnSink()
+	turn := &TurnContext{
+		TurnID: "turn-no-disp",
+		Prompt: "call tool please",
+		Sink:   sink,
+	}
+
+	err = sess.Send("call tool please", turn)
+	if err != nil {
+		t.Fatalf("expected success with error recovery, got: %v", err)
+	}
+	if sink.result == nil || sink.result.Response != "Tool failed as expected" {
+		t.Errorf("expected final response 'Tool failed as expected', got: %v", sink.result)
+	}
+}
+
+func TestGeminiVoiceSession_Send_MalformedSSEChunk(t *testing.T) {
+	t.Parallel()
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {malformed_json\n\n"))
+	}))
+	defer ts.Close()
+
+	pool := NewGeminiVoicePool(GeminiVoicePoolConfig{
+		APIKey:     "test-key",
+		BaseURL:    ts.URL,
+		HTTPClient: ts.Client(),
+	})
+
+	sess, err := pool.GetOrCreateSession(context.Background(), "malformed-sse-device")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	sink := newMockTurnSink()
+	turn := &TurnContext{
+		TurnID: "turn-malformed-sse",
+		Prompt: "trigger error",
+		Sink:   sink,
+	}
+
+	err = sess.Send("trigger error", turn)
+	if err == nil {
+		t.Fatalf("expected error on malformed SSE chunk")
+	}
+}
+
+func TestMCPDispatcher_HeadersAndMultiPart(t *testing.T) {
+	t.Parallel()
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Custom-Auth") != "Bearer secret123" {
+			http.Error(w, "missing header", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"jsonrpc": "2.0",
+			"id": 1,
+			"result": {
+				"content": [
+					{"type": "text", "text": "line one"},
+					{"type": "text", "text": "line two"}
+				]
+			}
+		}`))
+	}))
+	defer ts.Close()
+
+	disp := NewDefaultMCPDispatcher([]MCPServerConfig{
+		{
+			Name:      "auth-srv",
+			ServerURL: ts.URL,
+			Headers:   map[string]string{"X-Custom-Auth": "Bearer secret123"},
+		},
+	}, ts.Client())
+	disp.toolRoutes["multi_tool"] = MCPServerConfig{
+		Name:      "auth-srv",
+		ServerURL: ts.URL,
+		Headers:   map[string]string{"X-Custom-Auth": "Bearer secret123"},
+	}
+
+	res, err := disp.Execute(context.Background(), "multi_tool", map[string]interface{}{"foo": "bar"})
+	if err != nil {
+		t.Fatalf("unexpected execute error: %v", err)
+	}
+	expected := "line one\nline two"
+	if res != expected {
+		t.Errorf("expected %q, got %q", expected, res)
+	}
+}
+
+func TestGeminiVoiceSession_HydrateHistory_BlankLines(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	sessID := "blank-lines-sess"
+	p := filepath.Join(tmpDir, "brain", sessID, ".system_generated", "logs", "transcript.jsonl")
+	_ = os.MkdirAll(filepath.Dir(p), 0755)
+
+	content := "\n\n  \n{\"type\":\"USER_INPUT\",\"content\":\"hello\"}\n\n{\"type\":\"PLANNER_RESPONSE\",\"content\":\"world\"}\n\n"
+	if err := os.WriteFile(p, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+
+	sess := &GeminiVoiceSession{
+		targetKey: sessID,
+		sessionID: sessID,
+		dataDir:   tmpDir,
+	}
+	sess.hydrateHistory()
+
+	hist := sess.History()
+	if len(hist) != 2 {
+		t.Fatalf("expected 2 history entries, got %d", len(hist))
+	}
+}
+
+func TestGeminiVoiceSession_Send_NetworkAndContextErrors(t *testing.T) {
+	t.Parallel()
+
+	t.Run("PreCancelledContext", func(t *testing.T) {
+		t.Parallel()
+		pool := NewGeminiVoicePool(GeminiVoicePoolConfig{
+			APIKey: "test-key",
+		})
+		sess, err := pool.GetOrCreateSession(context.Background(), "precancel-device")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		sink := newMockTurnSink()
+		turn := &TurnContext{
+			TurnID: "turn-cancel",
+			Prompt: "hi",
+			Ctx:    ctx,
+			Sink:   sink,
+		}
+		err = sess.Send("hi", turn)
+		if err == nil {
+			t.Fatalf("expected error on pre-cancelled context")
+		}
+		if sink.err == nil {
+			t.Errorf("expected sink.OnError to be called")
+		}
+	})
+
+	t.Run("NetworkDoError", func(t *testing.T) {
+		t.Parallel()
+		pool := NewGeminiVoicePool(GeminiVoicePoolConfig{
+			APIKey:  "test-key",
+			BaseURL: "http://127.0.0.1:1", // closed port causes Do() failure
+		})
+		sess, err := pool.GetOrCreateSession(context.Background(), "net-err-device")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		sink := newMockTurnSink()
+		turn := &TurnContext{
+			TurnID: "turn-net-err",
+			Prompt: "hi",
+			Sink:   sink,
+		}
+		err = sess.Send("hi", turn)
+		if err == nil {
+			t.Fatalf("expected error on network failure")
+		}
+		if sink.err == nil {
+			t.Errorf("expected sink.OnError to be called")
+		}
+	})
+
+	t.Run("CancelledDuringStream", func(t *testing.T) {
+		t.Parallel()
+		streamStarted := make(chan struct{})
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.(http.Flusher).Flush()
+			close(streamStarted)
+			<-r.Context().Done()
+		}))
+		defer ts.Close()
+
+		pool := NewGeminiVoicePool(GeminiVoicePoolConfig{
+			APIKey:     "test-key",
+			BaseURL:    ts.URL,
+			HTTPClient: ts.Client(),
+		})
+		sess, err := pool.GetOrCreateSession(context.Background(), "stream-cancel-device")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() {
+			<-streamStarted
+			cancel()
+		}()
+
+		sink := newMockTurnSink()
+		turn := &TurnContext{
+			TurnID: "turn-stream-cancel",
+			Prompt: "hi",
+			Ctx:    ctx,
+			Sink:   sink,
+		}
+		err = sess.Send("hi", turn)
+		if err == nil {
+			t.Fatalf("expected error on cancelled stream")
+		}
+		if sink.err == nil {
+			t.Errorf("expected sink.OnError to be called")
+		}
+	})
+}
+
+
 
