@@ -360,7 +360,7 @@ All code and configuration changes across all repositories (`aerial`, `aerial-co
    /share/aerial/scripts/aerial-pr.sh --repo <repo> check <pr_num>
    ```
    - **Nominal State (Auto-Merged)**: When CI passes, GitHub automatically merges the PR without manual intervention. Aerial verifies deployment and confirms status in plain prose strictly capped at 2 sentences max.
-   - **Pending State**: If checks are still running, quietly reschedule a follow-up check via `scheduler-mcp` (`schedule_once`) and exit silently.
+   - **Pending State**: If checks are still running, inform the user and reschedule a follow-up check via `scheduler-mcp` (`schedule_once`).
    - **Failure State (PROACTIVE FAILURE REMEDIATION)**: If CI fails, Aerial **must proactively fix the failure**:
      1. Inspect failing GitHub check runs and diagnostic logs.
      2. Checkout the PR branch in an ephemeral scratch workspace:
