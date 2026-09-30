@@ -14,7 +14,10 @@ import (
 	"github.com/google/uuid"
 )
 
-var deployProgressDelay = 3 * time.Second
+var (
+	deployProgressDelay = 3 * time.Second
+	pollerTimeout       = 14*time.Minute + 30*time.Second
+)
 
 func (r *Router) handleStatus(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -323,8 +326,8 @@ func (r *Router) trackDeployProgress(s *discordgo.Session, interaction *discordg
 	r.configCommitMu.Lock()
 	defer r.configCommitMu.Unlock()
 
-	// 14m 30s hard poller cutoff to prevent Discord interaction token expiration
-	pollerCtx, cancel := context.WithTimeout(context.Background(), 14*time.Minute+30*time.Second)
+	// Hard poller cutoff to prevent Discord interaction token expiration
+	pollerCtx, cancel := context.WithTimeout(context.Background(), pollerTimeout)
 	defer cancel()
 
 	initialMsg := fmt.Sprintf("⚙️ Applying channel policy change for <#%s> (`%s: %s`)... `[1/5: Commit Trigger]` (elapsed: 1s)", channelID, key, val)
