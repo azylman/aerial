@@ -8,28 +8,28 @@ import (
 	"time"
 )
 
-// mockVoiceSession implements VoiceSession for testing.
-type mockVoiceSession struct {
+// mockAgentSession implements AgentSession for testing.
+type mockAgentSession struct {
 	sessionID string
 	sendFn    func(prompt string, turn *TurnContext) error
 }
 
-func (m *mockVoiceSession) SessionID() string {
+func (m *mockAgentSession) SessionID() string {
 	return m.sessionID
 }
 
-func (m *mockVoiceSession) Send(prompt string, turn *TurnContext) error {
+func (m *mockAgentSession) Send(prompt string, turn *TurnContext) error {
 	if m.sendFn != nil {
 		return m.sendFn(prompt, turn)
 	}
 	return nil
 }
 
-var _ VoiceSession = (*mockVoiceSession)(nil)
+var _ AgentSession = (*mockAgentSession)(nil)
 
-// mockVoiceProcessPool implements VoiceProcessPool for testing.
-type mockVoiceProcessPool struct {
-	sessions   map[string]*mockVoiceSession
+// mockAgentPool implements AgentPool for testing.
+type mockAgentPool struct {
+	sessions   map[string]*mockAgentSession
 	initCalled bool
 	closed     bool
 	getErr     error
@@ -37,13 +37,13 @@ type mockVoiceProcessPool struct {
 	closeErr   error
 }
 
-func newMockVoiceProcessPool() *mockVoiceProcessPool {
-	return &mockVoiceProcessPool{
-		sessions: make(map[string]*mockVoiceSession),
+func newMockAgentPool() *mockAgentPool {
+	return &mockAgentPool{
+		sessions: make(map[string]*mockAgentSession),
 	}
 }
 
-func (m *mockVoiceProcessPool) GetOrCreateSession(ctx context.Context, targetKey string) (VoiceSession, error) {
+func (m *mockAgentPool) GetOrCreateSession(ctx context.Context, targetKey string) (AgentSession, error) {
 	if m.closed {
 		return nil, errors.New("mock pool is closed")
 	}
@@ -53,34 +53,30 @@ func (m *mockVoiceProcessPool) GetOrCreateSession(ctx context.Context, targetKey
 	if s, ok := m.sessions[targetKey]; ok {
 		return s, nil
 	}
-	sess := &mockVoiceSession{sessionID: "sess-" + targetKey}
+	sess := &mockAgentSession{sessionID: "sess-" + targetKey}
 	m.sessions[targetKey] = sess
 	return sess, nil
 }
 
-func (m *mockVoiceProcessPool) Initialize(ctx context.Context) error {
+func (m *mockAgentPool) Initialize(ctx context.Context) error {
 	m.initCalled = true
 	return m.initErr
 }
 
-func (m *mockVoiceProcessPool) Close() error {
+func (m *mockAgentPool) Close() error {
 	m.closed = true
 	return m.closeErr
 }
 
-var _ VoiceProcessPool = (*mockVoiceProcessPool)(nil)
+var _ AgentPool = (*mockAgentPool)(nil)
 
-func TestVoiceInterfaces_Satisfaction(t *testing.T) {
+func TestAgentInterfaces_Satisfaction(t *testing.T) {
 	t.Parallel()
 
 	var _ AgentPool = (*UnifiedProcessPool)(nil)
 	var _ AgentSession = (*StreamingDaemon)(nil)
-	var _ AgentPool = (*mockVoiceProcessPool)(nil)
-	var _ AgentSession = (*mockVoiceSession)(nil)
-	var _ VoiceProcessPool = (*UnifiedProcessPool)(nil)
-	var _ VoiceSession = (*StreamingDaemon)(nil)
-	var _ VoiceProcessPool = (*mockVoiceProcessPool)(nil)
-	var _ VoiceSession = (*mockVoiceSession)(nil)
+	var _ AgentPool = (*mockAgentPool)(nil)
+	var _ AgentSession = (*mockAgentSession)(nil)
 }
 
 func TestUnifiedProcessPool_GetOrCreateSession(t *testing.T) {
@@ -118,7 +114,7 @@ func TestUnifiedProcessPool_GetOrCreateSession(t *testing.T) {
 		t.Fatalf("unexpected error from GetOrCreateSession: %v", err)
 	}
 	if sess == nil {
-		t.Fatalf("expected non-nil VoiceSession")
+		t.Fatalf("expected non-nil AgentSession")
 	}
 
 	if sess.SessionID() != "00000000-0000-0000-0000-000000000099" {
@@ -131,7 +127,7 @@ func TestUnifiedProcessPool_GetOrCreateSession(t *testing.T) {
 		CreatedAt: time.Now(),
 	}
 	if err := sess.Send("hello", turnCtx); err != nil {
-		t.Fatalf("failed sending prompt via VoiceSession: %v", err)
+		t.Fatalf("failed sending prompt via AgentSession: %v", err)
 	}
 
 	// Verify GetOrCreateSession on closed pool
@@ -145,10 +141,10 @@ func TestUnifiedProcessPool_GetOrCreateSession(t *testing.T) {
 	}
 }
 
-func TestMockVoiceProcessPool_Behavior(t *testing.T) {
+func TestMockAgentPool_Behavior(t *testing.T) {
 	t.Parallel()
 
-	pool := newMockVoiceProcessPool()
+	pool := newMockAgentPool()
 	ctx := context.Background()
 
 	if err := pool.Initialize(ctx); err != nil {
@@ -177,7 +173,7 @@ func TestMockVoiceProcessPool_Behavior(t *testing.T) {
 
 	// Test Send
 	var receivedPrompt string
-	mockSess := sess1.(*mockVoiceSession)
+	mockSess := sess1.(*mockAgentSession)
 	mockSess.sendFn = func(prompt string, turn *TurnContext) error {
 		receivedPrompt = prompt
 		return nil

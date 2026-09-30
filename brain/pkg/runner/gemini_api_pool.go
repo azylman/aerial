@@ -319,8 +319,8 @@ func (d *DefaultMCPDispatcher) Execute(ctx context.Context, name string, args ma
 	return string(rpcResp.Result), nil
 }
 
-// GeminiVoicePoolConfig holds configuration for the GeminiVoicePool.
-type GeminiVoicePoolConfig struct {
+// GeminiAPIPoolConfig holds configuration for the GeminiAPIPool.
+type GeminiAPIPoolConfig struct {
 	APIKey           string
 	Model            string
 	BaseURL          string // defaults to "https://generativelanguage.googleapis.com"
@@ -407,32 +407,18 @@ type geminiStreamChunk struct {
 	UsageMetadata *geminiUsageMetadata `json:"usageMetadata,omitempty"`
 }
 
-// GeminiVoicePool manages direct REST-based voice sessions for target devices.
-type GeminiVoicePool struct {
-	cfg      GeminiVoicePoolConfig
-	sessions map[string]*GeminiVoiceSession
+// GeminiAPIPool manages direct REST-based sessions for target devices.
+type GeminiAPIPool struct {
+	cfg      GeminiAPIPoolConfig
+	sessions map[string]*GeminiAPISession
 	mu       sync.RWMutex
 	closed   bool
 }
 
-var (
-	_ AgentPool        = (*GeminiVoicePool)(nil)
-	_ VoiceProcessPool = (*GeminiVoicePool)(nil)
-)
+var _ AgentPool = (*GeminiAPIPool)(nil)
 
-// GeminiAPIPool is an alias for GeminiVoicePool as a general-purpose execution pool.
-type GeminiAPIPool = GeminiVoicePool
-
-// GeminiAPIPoolConfig is an alias for GeminiVoicePoolConfig.
-type GeminiAPIPoolConfig = GeminiVoicePoolConfig
-
-// NewGeminiAPIPool instantiates a GeminiAPIPool.
+// NewGeminiAPIPool instantiates a GeminiAPIPool with sensible defaults.
 func NewGeminiAPIPool(cfg GeminiAPIPoolConfig) *GeminiAPIPool {
-	return NewGeminiVoicePool(cfg)
-}
-
-// NewGeminiVoicePool instantiates a GeminiVoicePool with sensible defaults.
-func NewGeminiVoicePool(cfg GeminiVoicePoolConfig) *GeminiVoicePool {
 	if cfg.BaseURL == "" {
 		cfg.BaseURL = "https://generativelanguage.googleapis.com"
 	}
@@ -446,14 +432,14 @@ func NewGeminiVoicePool(cfg GeminiVoicePoolConfig) *GeminiVoicePool {
 	if cfg.MCPDispatcher == nil && len(cfg.MCPServers) > 0 {
 		cfg.MCPDispatcher = NewDefaultMCPDispatcher(cfg.MCPServers, cfg.HTTPClient)
 	}
-	return &GeminiVoicePool{
+	return &GeminiAPIPool{
 		cfg:      cfg,
-		sessions: make(map[string]*GeminiVoiceSession),
+		sessions: make(map[string]*GeminiAPISession),
 	}
 }
 
-// Model returns the configured model for Gemini API voice generation.
-func (p *GeminiVoicePool) Model() string {
+// Model returns the configured model for Gemini API generation.
+func (p *GeminiAPIPool) Model() string {
 	if p == nil {
 		return ""
 	}
@@ -461,7 +447,7 @@ func (p *GeminiVoicePool) Model() string {
 }
 
 // APIKey returns the configured API key.
-func (p *GeminiVoicePool) APIKey() string {
+func (p *GeminiAPIPool) APIKey() string {
 	if p == nil {
 		return ""
 	}
@@ -469,7 +455,7 @@ func (p *GeminiVoicePool) APIKey() string {
 }
 
 // sanitizeError replaces API keys and secret query parameters with [REDACTED].
-func (p *GeminiVoicePool) sanitizeError(err error) error {
+func (p *GeminiAPIPool) sanitizeError(err error) error {
 	if err == nil {
 		return nil
 	}
@@ -482,19 +468,19 @@ func (p *GeminiVoicePool) sanitizeError(err error) error {
 }
 
 // GetOrCreateSession retrieves an existing session or initializes a new one for targetKey.
-func (p *GeminiVoicePool) GetOrCreateSession(ctx context.Context, targetKey string) (VoiceSession, error) {
+func (p *GeminiAPIPool) GetOrCreateSession(ctx context.Context, targetKey string) (AgentSession, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	if p.closed {
-		return nil, errors.New("gemini voice pool is closed")
+		return nil, errors.New("gemini api pool is closed")
 	}
 
 	if sess, ok := p.sessions[targetKey]; ok {
 		return sess, nil
 	}
 
-	sess := &GeminiVoiceSession{
+	sess := &GeminiAPISession{
 		targetKey: targetKey,
 		sessionID: targetKey,
 		pool:      p,
@@ -506,17 +492,17 @@ func (p *GeminiVoicePool) GetOrCreateSession(ctx context.Context, targetKey stri
 }
 
 // Initialize pre-warms configured target sessions.
-func (p *GeminiVoicePool) Initialize(ctx context.Context) error {
+func (p *GeminiAPIPool) Initialize(ctx context.Context) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	if p.closed {
-		return errors.New("gemini voice pool is closed")
+		return errors.New("gemini api pool is closed")
 	}
 
 	for _, target := range p.cfg.PrewarmedTargets {
 		if _, ok := p.sessions[target]; !ok {
-			p.sessions[target] = &GeminiVoiceSession{
+			p.sessions[target] = &GeminiAPISession{
 				targetKey: target,
 				sessionID: target,
 				pool:      p,
@@ -529,7 +515,7 @@ func (p *GeminiVoicePool) Initialize(ctx context.Context) error {
 }
 
 // Close terminates the pool and marks it as closed.
-func (p *GeminiVoicePool) Close() error {
+func (p *GeminiAPIPool) Close() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -537,26 +523,20 @@ func (p *GeminiVoicePool) Close() error {
 	return nil
 }
 
-// GeminiVoiceSession represents an active conversation session with sliding window history and transcript logging.
-type GeminiVoiceSession struct {
+// GeminiAPISession represents an active conversation session with sliding window history and transcript logging.
+type GeminiAPISession struct {
 	targetKey string
 	sessionID string
-	pool      *GeminiVoicePool
+	pool      *GeminiAPIPool
 	mu        sync.Mutex
 	history   []geminiContent
 	dataDir   string
 }
 
-var (
-	_ AgentSession = (*GeminiVoiceSession)(nil)
-	_ VoiceSession = (*GeminiVoiceSession)(nil)
-)
+var _ AgentSession = (*GeminiAPISession)(nil)
 
-// GeminiAPISession is an alias for GeminiVoiceSession.
-type GeminiAPISession = GeminiVoiceSession
-
-// SessionID returns the identifier for this voice session.
-func (s *GeminiVoiceSession) SessionID() string {
+// SessionID returns the identifier for this session.
+func (s *GeminiAPISession) SessionID() string {
 	if s.sessionID != "" {
 		return s.sessionID
 	}
@@ -564,12 +544,12 @@ func (s *GeminiVoiceSession) SessionID() string {
 }
 
 // TargetKey returns the target device key for this session.
-func (s *GeminiVoiceSession) TargetKey() string {
+func (s *GeminiAPISession) TargetKey() string {
 	return s.targetKey
 }
 
 // History returns a copy of the session's conversation history.
-func (s *GeminiVoiceSession) History() []geminiContent {
+func (s *GeminiAPISession) History() []geminiContent {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -578,7 +558,7 @@ func (s *GeminiVoiceSession) History() []geminiContent {
 	return cp
 }
 
-func (s *GeminiVoiceSession) transcriptPath() string {
+func (s *GeminiAPISession) transcriptPath() string {
 	if s.dataDir == "" {
 		return ""
 	}
@@ -586,7 +566,7 @@ func (s *GeminiVoiceSession) transcriptPath() string {
 }
 
 // hydrateHistory populates in-memory history from persistent transcript if available.
-func (s *GeminiVoiceSession) hydrateHistory() {
+func (s *GeminiAPISession) hydrateHistory() {
 	p := s.transcriptPath()
 	if p == "" {
 		return
@@ -633,14 +613,14 @@ func (s *GeminiVoiceSession) hydrateHistory() {
 }
 
 // appendTranscript logs turns to transcript.jsonl for state persistence and recovery.
-func (s *GeminiVoiceSession) appendTranscript(userPrompt, modelResponse string) {
+func (s *GeminiAPISession) appendTranscript(userPrompt, modelResponse string) {
 	p := s.transcriptPath()
 	if p == "" {
 		return
 	}
 	dir := filepath.Dir(p)
 	if err := os.MkdirAll(dir, 0755); err != nil {
-		log.Printf("[GeminiVoiceSession] Warning creating transcript directory %s: %v", dir, err)
+		log.Printf("[GeminiAPISession] Warning creating transcript directory %s: %v", dir, err)
 		return
 	}
 
@@ -666,31 +646,31 @@ func (s *GeminiVoiceSession) appendTranscript(userPrompt, modelResponse string) 
 
 	f, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
-		log.Printf("[GeminiVoiceSession] Warning opening transcript file %s: %v", p, err)
+		log.Printf("[GeminiAPISession] Warning opening transcript file %s: %v", p, err)
 		return
 	}
 	defer func() {
 		if cErr := f.Close(); cErr != nil {
-			log.Printf("[GeminiVoiceSession] Warning closing transcript file: %v", cErr)
+			log.Printf("[GeminiAPISession] Warning closing transcript file: %v", cErr)
 		}
 	}()
 
 	if _, wErr := f.Write(append(userEntry, '\n')); wErr != nil {
-		log.Printf("[GeminiVoiceSession] Warning writing user transcript: %v", wErr)
+		log.Printf("[GeminiAPISession] Warning writing user transcript: %v", wErr)
 	}
 	if _, wErr := f.Write(append(modelEntry, '\n')); wErr != nil {
-		log.Printf("[GeminiVoiceSession] Warning writing model transcript: %v", wErr)
+		log.Printf("[GeminiAPISession] Warning writing model transcript: %v", wErr)
 	}
 }
 
 // Send submits a prompt to Gemini via streamGenerateContent SSE, handling function calling and streaming deltas.
-func (s *GeminiVoiceSession) Send(prompt string, turn *TurnContext) error {
+func (s *GeminiAPISession) Send(prompt string, turn *TurnContext) error {
 	if s.pool != nil {
 		s.pool.mu.RLock()
 		closed := s.pool.closed
 		s.pool.mu.RUnlock()
 		if closed {
-			err := errors.New("gemini voice pool is closed")
+			err := errors.New("gemini api pool is closed")
 			if turn != nil && turn.Sink != nil {
 				turn.Sink.OnError(err)
 			}
@@ -733,7 +713,7 @@ func (s *GeminiVoiceSession) Send(prompt string, turn *TurnContext) error {
 		dispatcher = s.pool.cfg.MCPDispatcher
 		decls, dErr := dispatcher.ListDeclarations(ctx)
 		if dErr != nil {
-			log.Printf("[GeminiVoiceSession] Warning: failed to list MCP declarations: %v", dErr)
+			log.Printf("[GeminiAPISession] Warning: failed to list MCP declarations: %v", dErr)
 		} else if len(decls) > 0 {
 			tools = []geminiTool{{FunctionDeclarations: decls}}
 		}

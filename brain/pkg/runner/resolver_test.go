@@ -7,23 +7,8 @@ import (
 	"time"
 )
 
-type mockTranscriptExtractor struct {
-	existsOnDisk bool
-	resp         string
-	errDetail    string
-}
-
-func (m *mockTranscriptExtractor) SessionExistsOnDisk(convID string) bool {
-	return m.existsOnDisk
-}
-
-func (m *mockTranscriptExtractor) ExtractResponseAndError(convID string) (string, string) {
-	return m.resp, m.errDetail
-}
-
 func TestTurnResolver_NominalSuccess(t *testing.T) {
-	extractor := &mockTranscriptExtractor{existsOnDisk: false}
-	resolver := NewTurnResolver(extractor)
+	resolver := NewTurnResolver()
 
 	res := &TurnResult{
 		ConversationID: "conv-nominal",
@@ -43,9 +28,6 @@ func TestTurnResolver_NominalSuccess(t *testing.T) {
 	if outcome.Response != "Nominal response from daemon." {
 		t.Errorf("expected response %q, got %q", "Nominal response from daemon.", outcome.Response)
 	}
-	if outcome.RecoveredFromTranscript {
-		t.Errorf("expected RecoveredFromTranscript=false for nominal turn")
-	}
 	if outcome.Usage.TotalTokens != 30 {
 		t.Errorf("expected total tokens 30, got %d", outcome.Usage.TotalTokens)
 	}
@@ -54,71 +36,8 @@ func TestTurnResolver_NominalSuccess(t *testing.T) {
 	}
 }
 
-func TestTurnResolver_TranscriptRescueOnError(t *testing.T) {
-	extractor := &mockTranscriptExtractor{
-		existsOnDisk: true,
-		resp:         "Recovered transcript response after daemon crash.",
-	}
-	resolver := NewTurnResolver(extractor)
-
-	daemonErr := errors.New("daemon connection dropped unexpectedly")
-	outcome := resolver.Resolve(context.Background(), nil, daemonErr, "conv-crash")
-
-	if !outcome.IsSuccess {
-		t.Fatalf("expected transcript rescue to succeed, got: %+v", outcome)
-	}
-	if !outcome.RecoveredFromTranscript {
-		t.Errorf("expected RecoveredFromTranscript=true")
-	}
-	if outcome.Response != "Recovered transcript response after daemon crash." {
-		t.Errorf("expected recovered transcript, got %q", outcome.Response)
-	}
-}
-
-func TestTurnResolver_TranscriptRescueOnEmptyResult(t *testing.T) {
-	extractor := &mockTranscriptExtractor{
-		existsOnDisk: true,
-		resp:         "Recovered response after empty result event.",
-	}
-	resolver := NewTurnResolver(extractor)
-
-	res := &TurnResult{
-		Response: "",
-	}
-	outcome := resolver.Resolve(context.Background(), res, nil, "conv-empty")
-
-	if !outcome.IsSuccess {
-		t.Fatalf("expected transcript rescue to succeed, got: %+v", outcome)
-	}
-	if !outcome.RecoveredFromTranscript {
-		t.Errorf("expected RecoveredFromTranscript=true")
-	}
-	if outcome.Response != "Recovered response after empty result event." {
-		t.Errorf("expected recovered response, got %q", outcome.Response)
-	}
-}
-
-func TestTurnResolver_ToolCallOnlyInTranscriptNotRescued(t *testing.T) {
-	extractor := &mockTranscriptExtractor{
-		existsOnDisk: true,
-		resp:         "[Tool Call Requested]: run_command",
-	}
-	resolver := NewTurnResolver(extractor)
-
-	daemonErr := errors.New("daemon process terminated")
-	outcome := resolver.Resolve(context.Background(), nil, daemonErr, "conv-tool")
-
-	if outcome.IsSuccess {
-		t.Fatalf("expected failure when transcript only has tool call request, got success: %+v", outcome)
-	}
-	if outcome.ErrorDetail != "daemon process terminated" {
-		t.Errorf("expected error detail 'daemon process terminated', got %q", outcome.ErrorDetail)
-	}
-}
-
 func TestTurnResolver_ContextWindowColdStartClassification(t *testing.T) {
-	extractor := &mockTranscriptExtractor{existsOnDisk: false}
-	resolver := NewTurnResolver(extractor)
+	resolver := NewTurnResolver()
 
 	err := errors.New("maximum context length exceeded: prompt too large")
 	outcome := resolver.Resolve(context.Background(), nil, err, "conv-ctx-limit")
@@ -138,8 +57,7 @@ func TestTurnResolver_ContextWindowColdStartClassification(t *testing.T) {
 }
 
 func TestTurnResolver_SessionCorruptionClassification(t *testing.T) {
-	extractor := &mockTranscriptExtractor{existsOnDisk: false}
-	resolver := NewTurnResolver(extractor)
+	resolver := NewTurnResolver()
 
 	err := errors.New("corrupted session state: failed to parse session json")
 	outcome := resolver.Resolve(context.Background(), nil, err, "conv-corrupt")
@@ -156,8 +74,7 @@ func TestTurnResolver_SessionCorruptionClassification(t *testing.T) {
 }
 
 func TestTurnResolver_QuotaPauseClassification(t *testing.T) {
-	extractor := &mockTranscriptExtractor{existsOnDisk: false}
-	resolver := NewTurnResolver(extractor)
+	resolver := NewTurnResolver()
 
 	err := errors.New("API error: 429 RESOURCE_EXHAUSTED rate limit exceeded")
 	outcome := resolver.Resolve(context.Background(), nil, err, "conv-quota")
@@ -171,8 +88,7 @@ func TestTurnResolver_QuotaPauseClassification(t *testing.T) {
 }
 
 func TestTurnResolver_FatalStderrClassification(t *testing.T) {
-	extractor := &mockTranscriptExtractor{existsOnDisk: false}
-	resolver := NewTurnResolver(extractor)
+	resolver := NewTurnResolver()
 
 	err := errors.New("fatal: unrecoverable crash in runtime")
 	outcome := resolver.Resolve(context.Background(), nil, err, "conv-fatal")
@@ -185,17 +101,50 @@ func TestTurnResolver_FatalStderrClassification(t *testing.T) {
 	}
 }
 
-func TestTurnResolver_EmptyResultWithoutTranscript(t *testing.T) {
-	extractor := &mockTranscriptExtractor{existsOnDisk: false}
-	resolver := NewTurnResolver(extractor)
+func TestTurnResolver_EmptyResultClassification(t *testing.T) {
+	resolver := NewTurnResolver()
 
 	res := &TurnResult{Response: ""}
-	outcome := resolver.Resolve(context.Background(), res, nil, "conv-no-trans")
+	outcome := resolver.Resolve(context.Background(), res, nil, "conv-empty")
 
 	if outcome.IsSuccess {
 		t.Fatalf("expected failure, got success")
 	}
 	if outcome.ErrorDetail != "daemon turn completed with empty response" {
 		t.Errorf("unexpected error detail: %q", outcome.ErrorDetail)
+	}
+	if !outcome.IsTransient {
+		t.Errorf("expected empty response to be transient")
+	}
+}
+
+func TestTurnResolver_WhitespaceOnlyResponse(t *testing.T) {
+	resolver := NewTurnResolver()
+
+	res := &TurnResult{Response: "   \n\t  "}
+	outcome := resolver.Resolve(context.Background(), res, nil, "conv-ws")
+
+	if outcome.IsSuccess {
+		t.Fatalf("expected failure for whitespace-only response, got success")
+	}
+	if outcome.ErrorDetail != "daemon turn completed with empty response" {
+		t.Errorf("unexpected error detail: %q", outcome.ErrorDetail)
+	}
+}
+
+func TestTurnResolver_DaemonErrorClassification(t *testing.T) {
+	resolver := NewTurnResolver()
+
+	err := errors.New("daemon connection dropped unexpectedly")
+	outcome := resolver.Resolve(context.Background(), nil, err, "conv-crash")
+
+	if outcome.IsSuccess {
+		t.Fatalf("expected failure, got success")
+	}
+	if outcome.ErrorDetail != "daemon connection dropped unexpectedly" {
+		t.Errorf("expected error detail 'daemon connection dropped unexpectedly', got %q", outcome.ErrorDetail)
+	}
+	if !outcome.IsTransient {
+		t.Errorf("expected generic daemon connection error to be transient")
 	}
 }

@@ -3372,6 +3372,160 @@ func TestManager_ExtractTranscriptToolActions(t *testing.T) {
 	})
 }
 
+func TestExtractResponseSince(t *testing.T) {
+	mgr, tmpDir := setupTestManager(t)
+
+	baseTime := time.Date(2026, 9, 30, 10, 0, 0, 0, time.UTC)
+	t0 := baseTime
+	t1 := baseTime.Add(5 * time.Minute)
+	t2 := baseTime.Add(10 * time.Minute)
+	t3 := baseTime.Add(15 * time.Minute)
+
+	tests := []struct {
+		name       string
+		convID     string
+		transcript string
+		since      time.Time
+		cancelCtx  bool
+		expected   string
+	}{
+		{
+			name:   "Rescues response created after since",
+			convID: "conv-after-since",
+			transcript: fmt.Sprintf(`{"type":"USER_INPUT","content":"Turn 1","created_at":%q}
+{"type":"PLANNER_RESPONSE","content":"Turn 1 substantive response","created_at":%q}
+`, t0.Format(time.RFC3339Nano), t1.Format(time.RFC3339Nano)),
+			since:    t0,
+			expected: "Turn 1 substantive response",
+		},
+		{
+			name:   "Rescues response created exactly at since",
+			convID: "conv-exact-since",
+			transcript: fmt.Sprintf(`{"type":"PLANNER_RESPONSE","content":"Exact match response","created_at":%q}
+`, t1.Format(time.RFC3339Nano)),
+			since:    t1,
+			expected: "Exact match response",
+		},
+		{
+			name:   "Does NOT rescue response created before since (strict monotonic cutoff prevents stale Turn N-1 replay)",
+			convID: "conv-before-since",
+			transcript: fmt.Sprintf(`{"type":"PLANNER_RESPONSE","content":"Stale Turn N-1 response","created_at":%q}
+{"type":"USER_INPUT","content":"Turn N prompt","created_at":%q}
+{"type":"SYSTEM_MESSAGE","content":"Daemon crashed","created_at":%q}
+`, t0.Format(time.RFC3339Nano), t1.Format(time.RFC3339Nano), t2.Format(time.RFC3339Nano)),
+			since:    t1,
+			expected: "",
+		},
+		{
+			name:   "Ignores tool-call-only turns and empty steps",
+			convID: "conv-tool-and-empty",
+			transcript: fmt.Sprintf(`{"type":"PLANNER_RESPONSE","content":"[Tool Call Requested]: run_command","created_at":%q}
+{"type":"PLANNER_RESPONSE","content":"","tool_calls":[{"name":"run_command"}],"created_at":%q}
+{"type":"PLANNER_RESPONSE","content":"   \n\t  ","created_at":%q}
+`, t1.Format(time.RFC3339Nano), t2.Format(time.RFC3339Nano), t3.Format(time.RFC3339Nano)),
+			since:    t0,
+			expected: "",
+		},
+		{
+			name:   "Ignores tool-call turns and rescues substantive response",
+			convID: "conv-tool-then-substantive",
+			transcript: fmt.Sprintf(`{"type":"PLANNER_RESPONSE","content":"[Tool Call Requested]: grep_search","created_at":%q}
+{"type":"GENERIC","content":"search results...","created_at":%q}
+{"type":"PLANNER_RESPONSE","content":"Final substantive answer after tools","created_at":%q}
+`, t1.Format(time.RFC3339Nano), t2.Format(time.RFC3339Nano), t3.Format(time.RFC3339Nano)),
+			since:    t0,
+			expected: "Final substantive answer after tools",
+		},
+		{
+			name:       "Handles missing transcript file",
+			convID:     "conv-nonexistent",
+			transcript: "",
+			since:      t0,
+			expected:   "",
+		},
+		{
+			name:   "Handles corrupt json interspersed with valid steps",
+			convID: "conv-corrupt-json",
+			transcript: fmt.Sprintf(`{not valid json at all
+{"broken json line
+{"type":"PLANNER_RESPONSE","content":"Rescued despite corrupt JSON","created_at":%q}
+not json either
+`, t2.Format(time.RFC3339Nano)),
+			since:    t1,
+			expected: "Rescued despite corrupt JSON",
+		},
+		{
+			name:   "Handles completely corrupt json",
+			convID: "conv-all-corrupt-json",
+			transcript: `not json at all
+{also not json
+`,
+			since:    t0,
+			expected: "",
+		},
+		{
+			name:   "Handles RFC3339 timestamps without fractional seconds",
+			convID: "conv-rfc3339",
+			transcript: fmt.Sprintf(`{"type":"PLANNER_RESPONSE","content":"RFC3339 standard response","created_at":%q}
+`, t2.Format(time.RFC3339)),
+			since:    t1,
+			expected: "RFC3339 standard response",
+		},
+		{
+			name:   "Handles canceled context",
+			convID: "conv-canceled-ctx",
+			transcript: fmt.Sprintf(`{"type":"PLANNER_RESPONSE","content":"Should not be read","created_at":%q}
+`, t2.Format(time.RFC3339Nano)),
+			since:     t0,
+			cancelCtx: true,
+			expected:  "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.transcript != "" {
+				logsDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", tt.convID, ".system_generated", "logs")
+				if err := os.MkdirAll(logsDir, 0755); err != nil {
+					t.Fatalf("Failed to create logs dir: %v", err)
+				}
+				tPath := filepath.Join(logsDir, "transcript.jsonl")
+				if err := os.WriteFile(tPath, []byte(tt.transcript), 0644); err != nil {
+					t.Fatalf("Failed to write transcript: %v", err)
+				}
+			}
+
+			var got string
+			if tt.cancelCtx {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				got = mgr.ExtractResponseSinceContext(ctx, tt.convID, tt.since)
+			} else {
+				got = mgr.ExtractResponseSince(tt.convID, tt.since)
+			}
+
+			if got != tt.expected {
+				t.Errorf("ExtractResponseSince(%q, %v) = %q; want %q", tt.convID, tt.since, got, tt.expected)
+			}
+		})
+	}
+
+	// Test nil manager, empty ID, directory traversal
+	t.Run("Edge cases", func(t *testing.T) {
+		var nilMgr *Manager
+		if got := nilMgr.ExtractResponseSince("any", t0); got != "" {
+			t.Errorf("expected empty string for nil manager, got %q", got)
+		}
+		if got := mgr.ExtractResponseSince("", t0); got != "" {
+			t.Errorf("expected empty string for empty ID, got %q", got)
+		}
+		if got := mgr.ExtractResponseSince("../escaped", t0); got != "" {
+			t.Errorf("expected empty string for directory traversal, got %q", got)
+		}
+	})
+}
+
+
 
 
 

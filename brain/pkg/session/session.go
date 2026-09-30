@@ -766,6 +766,116 @@ func (m *Manager) ExtractFinalSubstantiveResponse(ctx context.Context, convID st
 	return "", false, nil
 }
 
+// ExtractResponseSince parses transcript files for convID and returns the latest substantive
+// PLANNER_RESPONSE turn strictly at or after 'since', or empty string if not found.
+// It searches transcript files (transcript_full.jsonl, transcript.jsonl) from newest to oldest,
+// applies a strict monotonic cutoff (step.CreatedAt >= since), ignores tool-call-only turns
+// and empty steps, and returns the trimmed substantive response.
+func (m *Manager) ExtractResponseSince(convID string, since time.Time) string {
+	return m.ExtractResponseSinceContext(context.Background(), convID, since)
+}
+
+// ExtractResponseSinceContext parses transcript files for convID with context cancellation support.
+func (m *Manager) ExtractResponseSinceContext(ctx context.Context, convID string, since time.Time) string {
+	if m == nil {
+		return ""
+	}
+	if ctx != nil && ctx.Err() != nil {
+		return ""
+	}
+	trimmedID := strings.TrimSpace(convID)
+	if trimmedID == "" || strings.ContainsAny(trimmedID, "/\\:") || strings.Contains(trimmedID, "..") {
+		return ""
+	}
+
+	targetDirs := m.getTargetDirs(trimmedID)
+
+	for _, dir := range targetDirs {
+		for _, name := range []string{"transcript_full.jsonl", "transcript.jsonl"} {
+			if ctx != nil && ctx.Err() != nil {
+				return ""
+			}
+			tPath := filepath.Join(dir, ".system_generated", "logs", name)
+			data, err := os.ReadFile(tPath)
+			if err != nil || len(data) == 0 {
+				continue
+			}
+
+			lines := strings.Split(string(data), "\n")
+			for i := len(lines) - 1; i >= 0; i-- {
+				if ctx != nil && ctx.Err() != nil {
+					return ""
+				}
+				line := strings.TrimSpace(lines[i])
+				if line == "" {
+					continue
+				}
+
+				var step struct {
+					Type      string            `json:"type"`
+					Status    string            `json:"status"`
+					Content   string            `json:"content"`
+					CreatedAt string            `json:"created_at"`
+					ToolCalls []json.RawMessage `json:"tool_calls"`
+				}
+				if err := json.Unmarshal([]byte(line), &step); err != nil {
+					continue
+				}
+
+				if !since.IsZero() && step.CreatedAt != "" {
+					var stepTime time.Time
+					var parsed bool
+					if t, pErr := time.Parse(time.RFC3339Nano, step.CreatedAt); pErr == nil {
+						stepTime = t
+						parsed = true
+					} else if t, pErr := time.Parse(time.RFC3339, step.CreatedAt); pErr == nil {
+						stepTime = t
+						parsed = true
+					}
+
+					if parsed && stepTime.Before(since) {
+						break
+					}
+				}
+
+				if step.Type != "PLANNER_RESPONSE" {
+					continue
+				}
+
+				trimmedContent := strings.TrimSpace(step.Content)
+				if trimmedContent == "" {
+					continue
+				}
+				if strings.HasPrefix(trimmedContent, "[Tool Call Requested]:") {
+					continue
+				}
+				if len(step.ToolCalls) > 0 && trimmedContent == "" {
+					continue
+				}
+
+				if !since.IsZero() && step.CreatedAt != "" {
+					var stepTime time.Time
+					var parsed bool
+					if t, pErr := time.Parse(time.RFC3339Nano, step.CreatedAt); pErr == nil {
+						stepTime = t
+						parsed = true
+					} else if t, pErr := time.Parse(time.RFC3339, step.CreatedAt); pErr == nil {
+						stepTime = t
+						parsed = true
+					}
+					if parsed && stepTime.Before(since) {
+						continue
+					}
+				}
+
+				return trimmedContent
+			}
+		}
+	}
+
+	return ""
+}
+
 // ExtractTranscriptToolActions scans the transcript for the specified conversation ID
 // and extracts completed tool calls and outputs from the latest turn into a structured action block.
 func (m *Manager) ExtractTranscriptToolActions(convID string) string {

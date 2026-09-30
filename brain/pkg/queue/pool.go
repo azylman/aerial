@@ -343,12 +343,29 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 		if defaultModel == "" && appCfg.Current() != nil {
 			defaultModel = appCfg.Current().Model
 		}
-		p.processPool = runner.NewUnifiedProcessPool(runner.PoolConfig{
+		poolCfg := runner.PoolConfig{
 			AgyBin:       daemonBin,
 			Cwd:          daemonDataDir,
 			Env:          os.Environ(),
 			DefaultModel: defaultModel,
-		}, nil)
+		}
+		if p.sessionMgr != nil {
+			poolCfg.TranscriptRescuer = p.sessionMgr.ExtractResponseSince
+		}
+		p.processPool = runner.NewUnifiedProcessPool(poolCfg, nil)
+	}
+
+	if p.sessionMgr != nil {
+		if tr, ok := p.processPool.(interface {
+			SetTranscriptRescuer(func(convID string, since time.Time) string)
+		}); ok {
+			tr.SetTranscriptRescuer(p.sessionMgr.ExtractResponseSince)
+		}
+		if tr, ok := p.lowEffortProcessPool.(interface {
+			SetTranscriptRescuer(func(convID string, since time.Time) string)
+		}); ok {
+			tr.SetTranscriptRescuer(p.sessionMgr.ExtractResponseSince)
+		}
 	}
 
 	if p.cfg.HistoryFetcher == nil {
@@ -696,8 +713,8 @@ func (p *WorkerPool) LowEffortProcessPool() *runner.UnifiedProcessPool {
 	return nil
 }
 
-// VoiceProcessPool returns the configured runner.VoiceProcessPool for voice turns, or nil if unconfigured or p is nil.
-func (p *WorkerPool) VoiceProcessPool() runner.VoiceProcessPool {
+// VoiceProcessPool returns the configured runner.AgentPool for voice turns, or nil if unconfigured or p is nil.
+func (p *WorkerPool) VoiceProcessPool() runner.AgentPool {
 	if p == nil {
 		return nil
 	}
@@ -837,7 +854,7 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 	}
 
 	p.mu.Lock()
-	var procPool runner.VoiceProcessPool
+	var procPool runner.AgentPool
 	if p.voiceProcessPool != nil {
 		procPool = p.voiceProcessPool
 	} else if p.processPool != nil {
@@ -882,7 +899,7 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 		activeSession = deviceKey
 	}
 
-	resolver := runner.NewTurnResolver(p.sessionMgr)
+	resolver := runner.NewTurnResolver()
 	outcome := resolver.Resolve(ctx, turnRes, turnErr, activeSession)
 
 	if outcome.IsSuccess {
@@ -950,208 +967,5 @@ func newVoiceTurnSink(ctx context.Context, onStatus func(string), onSentence fun
 	})
 	return sink
 }
-
-type legacyRunnerAgentPool struct {
-	cfg         WorkerPoolConfig
-	trackerPool runner.AgentPool
-	mu          sync.Mutex
-	sessions    map[string]*legacyRunnerAgentSession
-}
-
-func newLegacyRunnerAgentPool(cfg WorkerPoolConfig, trackerPool runner.AgentPool) *legacyRunnerAgentPool {
-	return &legacyRunnerAgentPool{
-		cfg:         cfg,
-		trackerPool: trackerPool,
-		sessions:    make(map[string]*legacyRunnerAgentSession),
-	}
-}
-
-func (p *legacyRunnerAgentPool) Get(threadID string) (*runner.StreamingDaemon, bool) {
-	if p.trackerPool != nil {
-		if tp, ok := p.trackerPool.(interface {
-			Get(string) (*runner.StreamingDaemon, bool)
-		}); ok {
-			return tp.Get(threadID)
-		}
-	}
-	return nil, false
-}
-
-func (p *legacyRunnerAgentPool) GetOrCreate(ctx context.Context, threadID string) (*runner.StreamingDaemon, error) {
-	if p.trackerPool != nil {
-		if tp, ok := p.trackerPool.(interface {
-			GetOrCreate(context.Context, string) (*runner.StreamingDaemon, error)
-		}); ok {
-			return tp.GetOrCreate(ctx, threadID)
-		}
-	}
-	return nil, fmt.Errorf("no underlying process pool")
-}
-
-func (p *legacyRunnerAgentPool) GetOrCreateSession(ctx context.Context, targetKey string) (runner.AgentSession, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if s, ok := p.sessions[targetKey]; ok {
-		return s, nil
-	}
-	s := &legacyRunnerAgentSession{
-		pool:      p,
-		targetKey: targetKey,
-	}
-	p.sessions[targetKey] = s
-	return s, nil
-}
-
-func (p *legacyRunnerAgentPool) Initialize(ctx context.Context) error {
-	return nil
-}
-
-func (p *legacyRunnerAgentPool) RotateDaemon(ctx context.Context, targetKey string, newSess string) (*runner.StreamingDaemon, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if s, ok := p.sessions[targetKey]; ok {
-		s.mu.Lock()
-		s.sessionID = newSess
-		s.mu.Unlock()
-	}
-	delete(p.sessions, targetKey)
-	return nil, nil
-}
-
-func (p *legacyRunnerAgentPool) Close() error {
-	return nil
-}
-
-var _ runner.AgentPool = (*legacyRunnerAgentPool)(nil)
-
-type legacyRunnerAgentSession struct {
-	pool      *legacyRunnerAgentPool
-	targetKey string
-	sessionID string
-	mu        sync.Mutex
-}
-
-func (s *legacyRunnerAgentSession) SessionID() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.sessionID
-}
-
-func (s *legacyRunnerAgentSession) Send(prompt string, turn *runner.TurnContext) error {
-	if turn != nil && turn.Sink != nil {
-		turn.Sink.OnTurnStarted()
-		turn.Sink.OnToolCall("processing", "")
-	}
-	timeout := s.pool.cfg.TimeoutMinutes
-	if timeout <= 0 {
-		timeout = DefaultTimeoutMinutes
-	}
-	watchdogOpts := runner.DefaultWatchdogOptions(timeout)
-	if s.pool.cfg.SessionManager != nil {
-		watchdogOpts.TranscriptDirs = s.pool.cfg.SessionManager.Roots()
-		watchdogOpts.HomeDir = s.pool.cfg.SessionManager.HomeDir()
-	}
-	if strings.TrimSpace(s.targetKey) != "" {
-		watchdogOpts.TargetID = strings.TrimSpace(s.targetKey)
-	}
-	ctx := context.Background()
-	if turn != nil && turn.Ctx != nil {
-		ctx = turn.Ctx
-	}
-	if turn != nil && turn.Sink != nil {
-		watchdogOpts.StepUpdateHandler = func(event *runner.StepUpdateEvent) {
-			if event != nil && event.Type == "tool_call" {
-				cmd := ""
-				if event.ToolInfo != nil {
-					cmd = event.ToolInfo.Parameters.CommandLine
-				}
-				turn.Sink.OnToolCall(event.ToolName, cmd)
-			}
-		}
-	}
-	model := s.pool.cfg.Model
-	if turn != nil && turn.Model != "" {
-		model = turn.Model
-	} else if s.pool.cfg.LowEffortModel != "" && strings.HasPrefix(s.targetKey, "voice-") {
-		model = s.pool.cfg.LowEffortModel
-	}
-	var sessID string
-	if turn != nil {
-		sessID = turn.SessionID
-	} else {
-		sessID = s.SessionID()
-	}
-	stdout, stderr, exitCode, err := s.pool.cfg.RunnerWithOptionsFunc(
-		ctx,
-		s.pool.cfg.AgyBin,
-		prompt,
-		sessID,
-		s.pool.cfg.APIKey,
-		model,
-		watchdogOpts,
-	)
-	if extSess := runner.ExtractSessionID(stdout+"\n"+stderr, time.Time{}); extSess != "" {
-		s.mu.Lock()
-		s.sessionID = extSess
-		s.mu.Unlock()
-	}
-	if err != nil {
-		combinedErr := err
-		if stderr != "" && !strings.Contains(err.Error(), stderr) {
-			combinedErr = fmt.Errorf("%w: %s", err, stderr)
-		}
-		if turn != nil && turn.Sink != nil {
-			turn.Sink.OnError(combinedErr)
-		}
-		return combinedErr
-	}
-	if exitCode != 0 {
-		runErr := fmt.Errorf("runner failed with exit code %d: %s", exitCode, stderr)
-		if turn != nil && turn.Sink != nil {
-			turn.Sink.OnError(runErr)
-		}
-		return runErr
-	}
-	respText := stdout
-	var parsedUsage runner.AgyUsage
-	if parsed, pErr := runner.ParseAgyOutput(stdout); pErr == nil {
-		respText = parsed.Response
-		if parsed.ConversationID != "" {
-			s.mu.Lock()
-			s.sessionID = parsed.ConversationID
-			s.mu.Unlock()
-		}
-		parsedUsage = parsed.Usage
-		if parsed.Error != "" {
-			runErr := fmt.Errorf("%s", parsed.Error)
-			if turn != nil && turn.Sink != nil {
-				turn.Sink.OnError(runErr)
-			}
-			return runErr
-		}
-		if parsed.Status != "" && strings.ToUpper(parsed.Status) != "SUCCESS" {
-			runErr := fmt.Errorf("runner status: %s", parsed.Status)
-			if turn != nil && turn.Sink != nil {
-				turn.Sink.OnError(runErr)
-			}
-			return runErr
-		}
-	}
-	if turn != nil && turn.Sink != nil {
-		resSess := s.SessionID()
-		if resSess == "" && turn.SessionID != "" {
-			resSess = turn.SessionID
-		}
-		turn.Sink.OnResult(&runner.TurnResult{
-			ConversationID: resSess,
-			Response:       strings.TrimSpace(respText),
-			Stderr:         stderr,
-			Usage:          parsedUsage,
-		})
-	}
-	return nil
-}
-
-var _ runner.AgentSession = (*legacyRunnerAgentSession)(nil)
 
 

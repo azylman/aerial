@@ -14,7 +14,3 @@ type AgentPool interface {
 	Initialize(ctx context.Context) error
 	Close() error
 }
-
-// Backward-compatibility aliases during transition
-type VoiceSession = AgentSession
-type VoiceProcessPool = AgentPool
