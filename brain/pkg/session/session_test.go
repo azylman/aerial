@@ -1267,282 +1267,6 @@ func TestDefaultMaxSessionTurnsConstant(t *testing.T) {
 	}
 }
 
-func TestExtractFinalSubstantiveResponse_MultiTurnExcludesChatter(t *testing.T) {
-	mgr, tmpDir := setupTestManager(t)
-	convID := "multi-turn-chatter-123"
-	logsDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", convID, ".system_generated", "logs")
-	if err := os.MkdirAll(logsDir, 0755); err != nil {
-		t.Fatalf("Failed to create temp logs dir: %v", err)
-	}
-
-	transcript := `{"type":"USER_INPUT","source":"USER_EXPLICIT","content":"revert the orrery"}
-{"type":"PLANNER_RESPONSE","status":"DONE","content":"Reverting the orrery in PR #225.","tool_calls":[{"name":"schedule","args":{}}]}
-{"type":"GENERIC","status":"DONE","content":"tool result 1"}
-{"type":"PLANNER_RESPONSE","status":"DONE","content":"Waiting for unit test suite completion on PR #225.","tool_calls":[{"name":"run_command","args":{}}]}
-{"type":"GENERIC","status":"DONE","content":"tool result 2"}
-{"type":"PLANNER_RESPONSE","status":"DONE","content":"Waiting on Docker image builds for dashboard on PR #225.","tool_calls":[{"name":"schedule","args":{}}]}
-{"type":"GENERIC","status":"DONE","content":"tool result 3"}
-{"type":"PLANNER_RESPONSE","status":"DONE","content":"Handled, boss—PR #225 is merged and synced. 🍵"}
-`
-	if err := os.WriteFile(filepath.Join(logsDir, "transcript.jsonl"), []byte(transcript), 0644); err != nil {
-		t.Fatalf("Failed to write transcript: %v", err)
-	}
-
-	finalText, isSilent, err := mgr.ExtractFinalSubstantiveResponse(nil, convID)
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
-	if isSilent {
-		t.Errorf("Expected isSilent to be false, got true")
-	}
-	expected := "Handled, boss—PR #225 is merged and synced. 🍵"
-	if finalText != expected {
-		t.Errorf("Expected %q, got %q", expected, finalText)
-	}
-}
-
-func TestExtractFinalSubstantiveResponse_WaitNoticesDelivered(t *testing.T) {
-	mgr, tmpDir := setupTestManager(t)
-	convID := "wait-notice-delivered-123"
-	logsDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", convID, ".system_generated", "logs")
-	if err := os.MkdirAll(logsDir, 0755); err != nil {
-		t.Fatalf("Failed to create temp logs dir: %v", err)
-	}
-
-	transcript := `{"type":"USER_INPUT","source":"USER_EXPLICIT","content":"run long task"}
-{"type":"PLANNER_RESPONSE","status":"DONE","content":"Running step 1...","tool_calls":[{"name":"run_command","args":{}}]}
-{"type":"GENERIC","status":"DONE","content":"task scheduled"}
-{"type":"PLANNER_RESPONSE","status":"DONE","content":"wait for background task 123 to complete"}
-`
-	if err := os.WriteFile(filepath.Join(logsDir, "transcript.jsonl"), []byte(transcript), 0644); err != nil {
-		t.Fatalf("Failed to write transcript: %v", err)
-	}
-
-	finalText, isSilent, err := mgr.ExtractFinalSubstantiveResponse(nil, convID)
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
-	if isSilent {
-		t.Errorf("Expected isSilent to be false, got true")
-	}
-	expected := "wait for background task 123 to complete"
-	if finalText != expected {
-		t.Errorf("Expected %q, got %q", expected, finalText)
-	}
-}
-
-func TestExtractFinalSubstantiveResponse_EmptyTerminalResponse(t *testing.T) {
-	mgr, tmpDir := setupTestManager(t)
-	convID := "empty-terminal-123"
-	logsDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", convID, ".system_generated", "logs")
-	if err := os.MkdirAll(logsDir, 0755); err != nil {
-		t.Fatalf("Failed to create temp logs dir: %v", err)
-	}
-
-	transcript := `{"type":"USER_INPUT","source":"USER_EXPLICIT","content":"run command"}
-{"type":"PLANNER_RESPONSE","status":"DONE","content":"Starting command...","tool_calls":[{"name":"run_command","args":{}}]}
-{"type":"GENERIC","status":"DONE","content":"success"}
-{"type":"PLANNER_RESPONSE","status":"DONE","content":"   "}
-`
-	if err := os.WriteFile(filepath.Join(logsDir, "transcript.jsonl"), []byte(transcript), 0644); err != nil {
-		t.Fatalf("Failed to write transcript: %v", err)
-	}
-
-	finalText, isSilent, err := mgr.ExtractFinalSubstantiveResponse(nil, convID)
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
-	if isSilent {
-		t.Errorf("Expected isSilent to be false for empty terminal response, got true")
-	}
-	if finalText != "" {
-		t.Errorf("Expected empty finalText, got %q", finalText)
-	}
-}
-
-func TestExtractFinalSubstantiveResponse_TerminalToolStubDoesNotResurrectChatter(t *testing.T) {
-	mgr, tmpDir := setupTestManager(t)
-	convID := "terminal-stub-123"
-	logsDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", convID, ".system_generated", "logs")
-	if err := os.MkdirAll(logsDir, 0755); err != nil {
-		t.Fatalf("Failed to create temp logs dir: %v", err)
-	}
-
-	transcript := `{"type":"USER_INPUT","source":"USER_EXPLICIT","content":"deploy"}
-{"type":"PLANNER_RESPONSE","status":"DONE","content":"Deploying now...","tool_calls":[{"name":"run_command","args":{}}]}
-{"type":"GENERIC","status":"DONE","content":"tool running"}
-{"type":"PLANNER_RESPONSE","status":"DONE","content":"","tool_calls":[{"name":"schedule","args":{}}]}
-`
-	if err := os.WriteFile(filepath.Join(logsDir, "transcript.jsonl"), []byte(transcript), 0644); err != nil {
-		t.Fatalf("Failed to write transcript: %v", err)
-	}
-
-	finalText, isSilent, err := mgr.ExtractFinalSubstantiveResponse(nil, convID)
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
-	if isSilent {
-		t.Errorf("Expected isSilent to be false, got true")
-	}
-	if finalText != "" {
-		t.Errorf("Expected empty finalText so caller falls back safely, got %q", finalText)
-	}
-}
-
-func TestExtractFinalSubstantiveResponse_TrailingEmptyStep_FindsSubstantiveStep(t *testing.T) {
-	mgr, tmpDir := setupTestManager(t)
-	convID := "trailing-empty-123"
-	logsDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", convID, ".system_generated", "logs")
-	if err := os.MkdirAll(logsDir, 0755); err != nil {
-		t.Fatalf("Failed to create temp logs dir: %v", err)
-	}
-
-	transcript := `{"type":"USER_INPUT","source":"USER_EXPLICIT","content":"deploy"}
-{"type":"PLANNER_RESPONSE","status":"DONE","content":"Deploying now...","tool_calls":[{"name":"run_command","args":{}}]}
-{"type":"GENERIC","status":"DONE","content":"tool running"}
-{"type":"PLANNER_RESPONSE","status":"DONE","content":"Deployment completed successfully!"}
-{"type":"PLANNER_RESPONSE","status":"DONE","content":"   "}
-`
-	if err := os.WriteFile(filepath.Join(logsDir, "transcript.jsonl"), []byte(transcript), 0644); err != nil {
-		t.Fatalf("Failed to write transcript: %v", err)
-	}
-
-	finalText, isSilent, err := mgr.ExtractFinalSubstantiveResponse(nil, convID)
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
-	if isSilent {
-		t.Errorf("Expected isSilent to be false, got true")
-	}
-	if finalText != "Deployment completed successfully!" {
-		t.Errorf("Expected 'Deployment completed successfully!', got %q", finalText)
-	}
-}
-
-func TestExtractFinalSubstantiveResponse_AmbientInterleaving(t *testing.T) {
-	mgr, tmpDir := setupTestManager(t)
-	convID := "ambient-interleave-123"
-	logsDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", convID, ".system_generated", "logs")
-	if err := os.MkdirAll(logsDir, 0755); err != nil {
-		t.Fatalf("Failed to create temp logs dir: %v", err)
-	}
-
-	transcript := `{"type":"USER_INPUT","source":"USER_EXPLICIT","content":"check status"}
-{"type":"PLANNER_RESPONSE","status":"DONE","content":"Checking system...","tool_calls":[{"name":"run_command","args":{}}]}
-{"type":"USER_INPUT","source":"AMBIENT","content":"[Chat #lounge] @ryan: hello world"}
-{"type":"GENERIC","status":"DONE","content":"all green"}
-{"type":"PLANNER_RESPONSE","status":"DONE","content":"All systems green and operational. ⚡"}
-`
-	if err := os.WriteFile(filepath.Join(logsDir, "transcript.jsonl"), []byte(transcript), 0644); err != nil {
-		t.Fatalf("Failed to write transcript: %v", err)
-	}
-
-	finalText, isSilent, err := mgr.ExtractFinalSubstantiveResponse(nil, convID)
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
-	if isSilent {
-		t.Errorf("Expected isSilent to be false, got true")
-	}
-	expected := "All systems green and operational. ⚡"
-	if finalText != expected {
-		t.Errorf("Expected %q, got %q", expected, finalText)
-	}
-}
-
-func TestExtractFinalSubstantiveResponse_SecurityAndErrors(t *testing.T) {
-	mgr, _ := setupTestManager(t)
-
-	// Path traversal protection
-	text, silent, err := mgr.ExtractFinalSubstantiveResponse(nil, "../evil/path")
-	if err != nil || text != "" || silent {
-		t.Errorf("Expected empty result for traversal path, got (%q, %v, %v)", text, silent, err)
-	}
-
-	// Empty conversation ID
-	text, silent, err = mgr.ExtractFinalSubstantiveResponse(nil, "   ")
-	if err != nil || text != "" || silent {
-		t.Errorf("Expected empty result for empty ID, got (%q, %v, %v)", text, silent, err)
-	}
-
-	// Nil manager
-	var nilMgr *Manager
-	text, silent, err = nilMgr.ExtractFinalSubstantiveResponse(nil, "some-id")
-	if err != nil || text != "" || silent {
-		t.Errorf("Expected empty result for nil manager, got (%q, %v, %v)", text, silent, err)
-	}
-}
-
-func TestExtractFinalSubstantiveResponse_CoverageBoost(t *testing.T) {
-	mgr, tmpDir := setupTestManager(t)
-
-	// 1. Cancelled context at start
-	ctxCancel, cancel := context.WithCancel(context.Background())
-	cancel()
-	_, _, err := mgr.ExtractFinalSubstantiveResponse(ctxCancel, "some-conv")
-	if !errors.Is(err, context.Canceled) {
-		t.Errorf("expected context.Canceled, got %v", err)
-	}
-
-	// 2. Empty transcript file (size 0)
-	convEmpty := "empty-conv-123"
-	emptyLogs := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", convEmpty, ".system_generated", "logs")
-	_ = os.MkdirAll(emptyLogs, 0755)
-	_ = os.WriteFile(filepath.Join(emptyLogs, "transcript.jsonl"), []byte(""), 0644)
-	text, silent, err := mgr.ExtractFinalSubstantiveResponse(context.Background(), convEmpty)
-	if err != nil || text != "" || silent {
-		t.Errorf("expected empty result for empty file, got (%q, %v, %v)", text, silent, err)
-	}
-
-	// 3. Large transcript file (> 1MB) with offset > 0 and user input in tail chunk
-	convLarge1 := "large-conv-tail"
-	largeLogs1 := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", convLarge1, ".system_generated", "logs")
-	_ = os.MkdirAll(largeLogs1, 0755)
-
-	padding := strings.Repeat(`{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","content":"padding"}
-`, 15000) // ~1.2MB of padding
-	tailWithInput := `{"step_index":20000,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"run command"}
-{"step_index":20001,"source":"MODEL","type":"PLANNER_RESPONSE","content":"Done with large run!"}
-`
-	_ = os.WriteFile(filepath.Join(largeLogs1, "transcript.jsonl"), []byte(padding+tailWithInput), 0644)
-	text, silent, err = mgr.ExtractFinalSubstantiveResponse(context.Background(), convLarge1)
-	if err != nil || text != "Done with large run!" || silent {
-		t.Errorf("expected 'Done with large run!', got (%q, %v, %v)", text, silent, err)
-	}
-
-	// 4. Large transcript file (> 1MB) where user input is at beginning (not in tail chunk, lastUserInputIdx == -1 with offset > 0)
-	convLarge2 := "large-conv-head"
-	largeLogs2 := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", convLarge2, ".system_generated", "logs")
-	_ = os.MkdirAll(largeLogs2, 0755)
-
-	headWithInput := `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"start long process"}
-`
-	tailOnlyPlanner := `{"step_index":20001,"source":"MODEL","type":"PLANNER_RESPONSE","content":"Final response from head input!"}
-`
-	_ = os.WriteFile(filepath.Join(largeLogs2, "transcript.jsonl"), []byte(headWithInput+padding+tailOnlyPlanner), 0644)
-	text, silent, err = mgr.ExtractFinalSubstantiveResponse(context.Background(), convLarge2)
-	if err != nil || text != "Final response from head input!" || silent {
-		t.Errorf("expected 'Final response from head input!', got (%q, %v, %v)", text, silent, err)
-	}
-
-	// 5. Corrupted JSON and non-PLANNER_RESPONSE in tail steps
-	convCorrupt := "corrupt-conv-steps"
-	corruptLogs := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", convCorrupt, ".system_generated", "logs")
-	_ = os.MkdirAll(corruptLogs, 0755)
-
-	corruptContent := `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"hello"}
-{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","content":"Valid earlier response"}
-{bad json line that fails unmarshal}
-{"step_index":2,"source":"SYSTEM","type":"USER_INPUT","content":"system event"}
-{"step_index":3,"source":"MODEL","type":"PLANNER_RESPONSE","content":"Recovered successfully"}
-`
-	_ = os.WriteFile(filepath.Join(corruptLogs, "transcript.jsonl"), []byte(corruptContent), 0644)
-	text, silent, err = mgr.ExtractFinalSubstantiveResponse(context.Background(), convCorrupt)
-	if err != nil || text != "Recovered successfully" || silent {
-		t.Errorf("expected 'Recovered successfully', got (%q, %v, %v)", text, silent, err)
-	}
-}
-
 func TestSession_RemediatedBranchesAndEdges(t *testing.T) {
 	mgr, tmpDir := setupTestManager(t)
 
@@ -1561,35 +1285,7 @@ func TestSession_RemediatedBranchesAndEdges(t *testing.T) {
 		t.Errorf("expected '[Tool Call Requested]:', got %q", resp)
 	}
 
-	// 2. ExtractFinalSubstantiveResponse with loop-time context cancellation
-	ctxCancel, cancel := context.WithCancel(context.Background())
-	convCancel := "conv-cancel-loop"
-	logsDirCancel := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", convCancel, ".system_generated", "logs")
-	_ = os.MkdirAll(logsDirCancel, 0755)
-	_ = os.WriteFile(filepath.Join(logsDirCancel, "transcript_full.jsonl"), []byte(`{"step_index":0,"type":"USER_INPUT"}`), 0644)
-	_ = os.WriteFile(filepath.Join(logsDirCancel, "transcript.jsonl"), []byte(`{"step_index":0,"type":"USER_INPUT"}`), 0644)
-	cancel()
-	_, _, err := mgr.ExtractFinalSubstantiveResponse(ctxCancel, convCancel)
-	if !errors.Is(err, context.Canceled) {
-		t.Errorf("expected context.Canceled, got %v", err)
-	}
-
-	// 3. ExtractFinalSubstantiveResponse with non-PLANNER_RESPONSE and unmarshal error traversed in reverse
-	convReverse := "conv-reverse-edge"
-	logsDirReverse := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", convReverse, ".system_generated", "logs")
-	_ = os.MkdirAll(logsDirReverse, 0755)
-	revContent := `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"hello"}
-{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","content":"Valid response"}
-{malformed json line}
-{"step_index":2,"source":"SYSTEM","type":"SYSTEM_NOTIFICATION","content":"info"}
-`
-	_ = os.WriteFile(filepath.Join(logsDirReverse, "transcript.jsonl"), []byte(revContent), 0644)
-	text, silent, err := mgr.ExtractFinalSubstantiveResponse(context.Background(), convReverse)
-	if err != nil || text != "Valid response" || silent {
-		t.Errorf("expected 'Valid response', got (%q, %v, %v)", text, silent, err)
-	}
-
-	// 4. HasSuccessfulToolCall with empty lines between steps
+	// 2. HasSuccessfulToolCall with empty lines between steps
 	convEmptyLine := "conv-empty-line"
 	logsDirEmpty := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", convEmptyLine, ".system_generated", "logs")
 	_ = os.MkdirAll(logsDirEmpty, 0755)
@@ -1608,7 +1304,7 @@ func TestSession_RemediatedBranchesAndEdges(t *testing.T) {
 	cand2Logs := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", convCand2, convCand2, ".system_generated", "logs")
 	_ = os.MkdirAll(cand2Logs, 0755)
 	_ = os.WriteFile(filepath.Join(cand2Logs, "transcript.jsonl"), []byte(`{"step_index":0,"source":"USER_INPUT","content":"hello"}`+"\n"), 0644)
-	err = mgr.AppendAmbientTurn(convCand2, "general", "alice", "hello from cand2", time.Now())
+	err := mgr.AppendAmbientTurn(convCand2, "general", "alice", "hello from cand2", time.Now())
 	if err != nil {
 		t.Errorf("expected nil error appending to cand2 logs, got %v", err)
 	}
@@ -2473,54 +2169,6 @@ func TestExtractResponseAndError_ErrorMessageOnly(t *testing.T) {
 	}
 }
 
-func TestExtractFinalSubstantiveResponse_LargeFileAndEmpty(t *testing.T) {
-	tempHome := t.TempDir()
-	mgr := New(tempHome, "")
-
-	convID := "final-subst-large"
-	logsDir := filepath.Join(tempHome, ".gemini", "antigravity-cli", "brain", convID, ".system_generated", "logs")
-	if err := os.MkdirAll(logsDir, 0755); err != nil {
-		t.Fatalf("mkdir failed: %v", err)
-	}
-
-	// 1. Write empty transcript_full.jsonl
-	if err := os.WriteFile(filepath.Join(logsDir, "transcript_full.jsonl"), []byte(""), 0644); err != nil {
-		t.Fatalf("write empty failed: %v", err)
-	}
-
-	// 2. Write large transcript.jsonl (> 1MB)
-	tPath := filepath.Join(logsDir, "transcript.jsonl")
-	f, err := os.Create(tPath)
-	if err != nil {
-		t.Fatalf("create failed: %v", err)
-	}
-
-	// First line: user input
-	userStep := `{"source":"USER_EXPLICIT","type":"USER_INPUT","content":"Start"}` + "\n"
-	_, _ = f.WriteString(userStep)
-
-	filler := `{"source":"MODEL","type":"PLANNER_RESPONSE","content":"working..."}` + "\n"
-	for i := 0; i < 18000; i++ {
-		_, _ = f.WriteString(filler)
-	}
-
-	finalStep := `{"source":"MODEL","type":"PLANNER_RESPONSE","content":"Final substantive message"}` + "\n"
-	_, _ = f.WriteString(finalStep)
-	_ = f.Close()
-
-	resp, isSilent, err := mgr.ExtractFinalSubstantiveResponse(context.Background(), convID)
-	if err != nil || isSilent || !strings.Contains(resp, "Final substantive message") {
-		t.Errorf("unexpected: resp=%q, isSilent=%v, err=%v", resp, isSilent, err)
-	}
-
-	// Canceled context inside loop
-	canceledCtx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if _, _, err := mgr.ExtractFinalSubstantiveResponse(canceledCtx, convID); err == nil {
-		t.Errorf("expected context canceled error")
-	}
-}
-
 func TestManager_UnifiedRuntimeTranscriptDiscovery(t *testing.T) {
 	t.Parallel()
 	tempHome := t.TempDir()
@@ -2871,16 +2519,12 @@ func TestManager_CoverageBoost_SessionEdgeCases(t *testing.T) {
 		t.Errorf("expected error when transcript.jsonl is a directory")
 	}
 
-	// 4. ExtractLastTurnError and ExtractFinalSubstantiveResponse with canceled context
+	// 4. ExtractLastTurnError with canceled context
 	cancCtx, cancel := context.WithCancel(context.Background())
 	cancel()
 
 	if _, err := mgr.ExtractLastTurnError(cancCtx, "any-session", time.Time{}); !errors.Is(err, context.Canceled) {
 		t.Errorf("expected context.Canceled from ExtractLastTurnError, got %v", err)
-	}
-
-	if _, _, err := mgr.ExtractFinalSubstantiveResponse(cancCtx, "any-session"); !errors.Is(err, context.Canceled) {
-		t.Errorf("expected context.Canceled from ExtractFinalSubstantiveResponse, got %v", err)
 	}
 
 	// 5. ExtractLastTurnError with RFC3339 timestamps (without fractional seconds) older than since
