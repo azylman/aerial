@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +16,7 @@ import (
 	"github.com/azylman/aerial/brain/pkg/db"
 	"github.com/azylman/aerial/brain/pkg/metrics"
 	"github.com/azylman/aerial/brain/pkg/runner"
+	"github.com/azylman/aerial/brain/pkg/session"
 )
 
 func TestWorkerPool_LowEffortModelResolution(t *testing.T) {
@@ -782,6 +785,143 @@ func TestVoiceTurnSink_Callbacks(t *testing.T) {
 	sink.OnToolCall("ha_call_service", "light.turn_on")
 	if !strings.Contains(statusMsg, "light.turn_on") {
 		t.Errorf("expected statusMsg to contain light.turn_on, got %q", statusMsg)
+	}
+}
+
+func TestVoiceTurnSink_DeltaAccumulationAndErrorRecovery(t *testing.T) {
+	t.Parallel()
+
+	// Case 1: Streamed deltas with empty terminal response falls back to accumulated text
+	var sentences []string
+	sink := &voiceTurnSink{
+		onSentence: func(s string) {
+			sentences = append(sentences, s)
+		},
+		detector: NewSentenceDetector(),
+		resCh:    make(chan *runner.TurnResult, 1),
+		errCh:    make(chan error, 1),
+	}
+	sink.OnTextDelta("Hello ")
+	sink.OnTextDelta("world.")
+	sink.OnResult(&runner.TurnResult{Response: ""})
+
+	select {
+	case res := <-sink.resCh:
+		if res.Response != "Hello world." {
+			t.Errorf("expected accumulated 'Hello world.', got %q", res.Response)
+		}
+	default:
+		t.Fatal("expected result on resCh")
+	}
+
+	// Case 2: Streamed deltas followed by OnError recovers substantive deltas on resCh
+	var sentences2 []string
+	sink2 := &voiceTurnSink{
+		onSentence: func(s string) {
+			sentences2 = append(sentences2, s)
+		},
+		detector: NewSentenceDetector(),
+		resCh:    make(chan *runner.TurnResult, 1),
+		errCh:    make(chan error, 1),
+	}
+	sink2.OnTextDelta("The quick brown fox jumps over the lazy dog.")
+	sink2.OnError(errors.New("API error (attempt 2): RESOURCE_EXHAUSTED (code 429)"))
+
+	select {
+	case res := <-sink2.resCh:
+		if res.Response != "The quick brown fox jumps over the lazy dog." {
+			t.Errorf("expected recovered deltas on resCh, got %q", res.Response)
+		}
+	case err := <-sink2.errCh:
+		t.Fatalf("expected resCh recovery, got errCh: %v", err)
+	default:
+		t.Fatal("expected result on resCh")
+	}
+
+	// Case 3: Empty deltas with OnError properly forwards to errCh
+	sink3 := &voiceTurnSink{
+		resCh: make(chan *runner.TurnResult, 1),
+		errCh: make(chan error, 1),
+	}
+	expectedErr := errors.New("hard failure without deltas")
+	sink3.OnError(expectedErr)
+
+	select {
+	case err := <-sink3.errCh:
+		if !errors.Is(err, expectedErr) {
+			t.Errorf("expected %v on errCh, got %v", expectedErr, err)
+		}
+	case res := <-sink3.resCh:
+		t.Fatalf("unexpected result on resCh: %+v", res)
+	default:
+		t.Fatal("expected error on errCh")
+	}
+}
+
+func TestWorkerPool_ExecuteVoiceTurn_TranscriptRecoveryOnError(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	sessMgr := session.New(tempDir, tempDir)
+	convID := "550e8400-e29b-41d4-a716-446655449999"
+
+	logsDir := filepath.Join(tempDir, ".gemini", "antigravity-cli", "brain", convID, ".system_generated", "logs")
+	if err := os.MkdirAll(logsDir, 0755); err != nil {
+		t.Fatalf("mkdir logs failed: %v", err)
+	}
+
+	transcript := `{"type":"USER_INPUT","source":"USER_EXPLICIT","content":"What is the status?"}
+{"type":"PLANNER_RESPONSE","status":"DONE","content":"All systems operational and nominal."}
+`
+	if err := os.WriteFile(filepath.Join(logsDir, "transcript.jsonl"), []byte(transcript), 0644); err != nil {
+		t.Fatalf("write transcript failed: %v", err)
+	}
+
+	mockSpawner := &runner.MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+			inR, inW := io.Pipe()
+			outR, outW := io.Pipe()
+			errR, errW := io.Pipe()
+			go func() {
+				_, _ = io.Copy(io.Discard, inR)
+			}()
+			go func() {
+				defer outW.Close()
+				defer errW.Close()
+				_, _ = outW.Write([]byte("{\"event\":\"init\",\"conversation_id\":\"" + convID + "\"}\n"))
+				time.Sleep(10 * time.Millisecond)
+				// Daemon returns ERROR with empty response (e.g. CLI aborted or dropped result line)
+				_, _ = outW.Write([]byte("{\"event\":\"result\",\"result\":{\"status\":\"ERROR\",\"error\":\"RESOURCE_EXHAUSTED (code 429)\",\"response\":\"\"}}\n"))
+			}()
+			return inW, outR, errR, runner.NewMockProcessHandle(12345), nil
+		},
+	}
+	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, mockSpawner)
+	defer procPool.Close()
+
+	pool := New(nil, WorkerPoolConfig{
+		ProcessPool:    procPool,
+		SessionManager: sessMgr,
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	var sentences []string
+	reply, sessionID, err := pool.ExecuteVoiceTurn(context.Background(), "What is the status?", convID, nil, func(s string) {
+		sentences = append(sentences, s)
+	})
+
+	if err != nil {
+		t.Fatalf("expected transcript recovery without error, got: %v", err)
+	}
+	if reply != "All systems operational and nominal." {
+		t.Errorf("expected recovered transcript reply, got %q", reply)
+	}
+	if sessionID != convID {
+		t.Errorf("expected sessionID %q, got %q", convID, sessionID)
+	}
+	if len(sentences) == 0 {
+		t.Errorf("expected sentences emitted to voice callback on transcript recovery, got 0")
 	}
 }
 
