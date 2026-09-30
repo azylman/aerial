@@ -2552,7 +2552,7 @@
         "type": "prometheus",
         "uid": "VictoriaMetrics"
       },
-      "description": "Rolling per-minute rate of upstream LLM quota and capacity exhaustion errors partitioned by model and error type.",
+      "description": "Rolling 10-minute sum of upstream LLM quota and capacity exhaustion errors partitioned by model and error type.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -2562,7 +2562,7 @@
             "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
-            "axisLabel": "Errors / Min",
+            "axisLabel": "Errors (10m)",
             "axisPlacement": "auto",
             "barAlignment": 0,
             "drawStyle": "line",
@@ -2629,7 +2629,7 @@
       "pluginVersion": "11.1.0",
       "targets": [
         {
-          "expr": "sum by (model, error_type) (rate(aerial_brain_model_quota_errors_total[5m])) * 60",
+          "expr": "sum by (model, error_type) (increase(aerial_brain_model_quota_errors_total[10m]))",
           "legendFormat": "{{error_type}} ({{model}})",
           "refId": "A"
         }
@@ -2642,7 +2642,7 @@
         "type": "prometheus",
         "uid": "VictoriaMetrics"
       },
-      "description": "Distribution of upstream model capacity and quota exhaustion events categorized by reset backoff window.",
+      "description": "Rolling 10-minute sum of upstream model capacity and quota exhaustion events categorized by reset backoff window.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -2652,7 +2652,7 @@
             "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
-            "axisLabel": "Events / Min",
+            "axisLabel": "Events (10m)",
             "axisPlacement": "auto",
             "barAlignment": 0,
             "drawStyle": "line",
@@ -2719,7 +2719,7 @@
       "pluginVersion": "11.1.0",
       "targets": [
         {
-          "expr": "sum by (reset_bucket) (rate(aerial_brain_model_quota_error_events[5m])) * 60",
+          "expr": "sum by (reset_bucket) (increase(aerial_brain_model_quota_error_events[10m]))",
           "legendFormat": "Reset: {{reset_bucket}}",
           "refId": "A"
         }
@@ -2761,6 +2761,6 @@
   "timezone": "browser",
   "title": "\u26a1 Aerial Brain & GitSync Operations",
   "uid": "aerial-core-telemetry",
-  "version": 3,
+  "version": 4,
   "weekStart": ""
 }
