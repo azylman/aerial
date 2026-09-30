@@ -125,7 +125,14 @@ Code review and execution are structured dynamically across four complexity tier
   - **Execution**: Autonomous execution (no mandatory stop; directly incorporates plan feedback). Zero mid-task pauses during coding.
   - **Diff Review**: Consolidated Devil's Advocate audits the unified `git diff` via isolated review subagent before opening the PR (~30s).
 
-• **Tier 3 (> 200 LOC, core architecture, database migrations, breaking changes)**:
+• **Tier 3 (> 200 LOC, core architecture, core queue/runner logic, database migrations, breaking changes)**:
+  - **Scope & Explicit Examples**:
+    - Any changes totaling **> 200 LOC** (additions + deletions).
+    - Touches to **core queue logic** (`brain/pkg/queue`, `WorkerPool`, worker turn loops, queue partitioning, burst scheduling).
+    - Touches to **core runner logic and turn resolution** (`brain/pkg/runner`, streaming daemons, process pools, turn sinks, turn resolvers, error recovery cascades).
+    - Database schema migrations or ORM persistence routing (`pkg/session`, database models, SQL migrations).
+    - Service topology expansions or Docker infrastructure refactors (`docker-compose.yml`, multi-arch sidecar pipelines).
+    - Any cross-cutting architectural unification or public API breaking change.
   - **Plan Review**: The Girl Gang review panel audits the plan in an isolated subagent across 4 disciplines (~45s).
   - **Human Checkpoint**: **MANDATORY HUMAN REVIEW CHECKPOINT (STOP)**: synthesize panel findings and wait for explicit user approval before touching code.
   - **Execution**: Continuous implementation once approved (zero mid-task pauses).
@@ -180,15 +187,22 @@ Stage 4: Autonomous Continuous Implementation (TDD)
    │     • Implement tasks continuously in flow per GEMINI.md Section 8
    │
    ▼
-Stage 5: Pre-Flight Verification & Pre-PR Diff Audit
+Stage 5: Dynamic Scope Reconciliation & Post-Implementation Re-Tiering Gate
+   │     • Calculate actual git diff LOC (`git diff --stat`) & touched packages
+   │     • If diff expanded past initial tier (e.g. >200 LOC or core queue/runner logic), escalate tier immediately
+   │     • Tier 3 Escalation: MANDATORY HUMAN STOP before auto-merge / submission
+   │     • Ensure review panel rigor matches final escalated blast radius
+   │
+   ▼
+Stage 6: Pre-Flight Verification & Pre-PR Diff Audit
    │     • Execute local verification runner (./scripts/verify.sh --staged)
-   │     • Audit diff per GEMINI.md Section 8 classification tiers
+   │     • Audit diff per final escalated tier
    │     • ZERO-BYPASS INVARIANT: --no-verify strictly forbidden
    │
    ▼
-Stage 6: Commit, Push & Asynchronous PR Deployment
+Stage 7: Commit, Push & Asynchronous PR Deployment
          • Fast-path static pre-commit hook (< 1s)
-         • scripts/aerial-pr.sh submit (instant PR creation with auto-merge, scheduled follow-up via scheduler-mcp)
+         • scripts/aerial-pr.sh submit (PR creation; auto-merge restricted if escalated to Tier 3)
          • Report PR link, diff summary, and verification evidence directly
 ```
 
@@ -217,7 +231,7 @@ Before modifying source code, Aerial MUST audit the plan according to the classi
 
 ### Stage 3: Human Review Checkpoint (Tier 3 ONLY)
 - **Tiers 0–2 Tasks**: **Bypassed autonomously**. If the user requested an implementation/fix, Aerial directly incorporates review feedback and transitions immediately to Stage 4 without asking for permission.
-- **Tier 3 Tasks**: **MANDATORY STOP**. For database schema migrations, service topology changes, breaking API updates, or high-blast-radius changes, present the synthesized panel findings and **STOP execution to obtain explicit user approval before touching code** per `GEMINI.md` Section 8.
+- **Tier 3 Tasks**: **MANDATORY STOP**. For database schema migrations, service topology changes, breaking API updates, core queue/runner execution overhauls, or high-blast-radius changes, present the synthesized panel findings and **STOP execution to obtain explicit user approval before touching code** per `GEMINI.md` Section 8.
 
 ---
 
@@ -247,7 +261,29 @@ Before modifying source code, Aerial MUST audit the plan according to the classi
 
 ---
 
-### Stage 5: Pre-Flight Verification & Pre-PR Diff Audit
+### Stage 5: Dynamic Scope Reconciliation & Post-Implementation Re-Tiering Gate
+*MANDATORY GATE: Never open a PR based solely on upfront tier estimations. Always reconcile against actual diff metrics.*
+
+1. **Calculate Actual Staged Metrics**:
+   - Immediately upon concluding implementation (before diff audit and PR creation), run `git diff --stat` (or `git diff --cached --stat` / `git diff HEAD~1..HEAD --stat`) to inspect the true cumulative line count and touched packages.
+2. **Evaluate Scope Expansion & Trigger Re-Tiering**:
+   - Compare the actual diff statistics against the initial classification tier:
+     - **Tier 0 Escalation**: If a task started as Tier 0 (expected ≤5 LOC) but expanded past 5 LOC, it auto-escalates to Tier 1 (or Tier 2 if >50 LOC).
+     - **Tier 1 Escalation**: If a task started as Tier 1 (expected <50 LOC) but expanded past 50 LOC, it auto-escalates to Tier 2 (or Tier 3 if >200 LOC or touching core queue/runner logic).
+     - **Tier 2 to Tier 3 Escalation**: If a task started as Tier 2 (expected 50–200 LOC) but:
+       - Cumulative diff exceeds **200 LOC** (additions + deletions), OR
+       - Touched files include **core queue logic** (`pkg/queue`, `WorkerPool`, worker loops), **core runner logic** (`pkg/runner`, streaming daemons, turn sinks, turn resolvers), or schema migrations,
+       - **IT IMMEDIATELY AUTO-ESCALATES TO TIER 3**.
+3. **Enforce Escalated Review Rigor**:
+   - **Retroactive Plan & Architecture Audit**: If the initial plan review was bypassed (e.g. started as Tier 1) or used a narrower scope, dispatch The Girl Gang to audit the implementation architecture.
+   - **Diff Review Panel Escalation**: If escalated to Tier 3, the diff review MUST be performed by the full **Girl Gang** panel (4 disciplines), not just a single Devil's Advocate.
+   - **MANDATORY HUMAN ESCALATION CHECKPOINT (STOP BEFORE AUTO-MERGE)**:
+     - **If a task escalates to Tier 3 during or after implementation, the agent MUST NOT open the PR with auto-merge armed without explicit human authorization!**
+     - The agent MUST pause and report the scope escalation to Discord: synthesize the panel's review findings, summarize the unexpected diff growth and why it expanded, and provide the PR / diff for explicit user review. Auto-merge must NOT be armed without user authorization when scope has escalated to Tier 3.
+
+---
+
+### Stage 6: Pre-Flight Verification & Pre-PR Diff Audit
 *MANDATORY: Never commit or push unverified code.*
 
 1. **Local Pre-Flight Verification Runner (`--staged`)**:
@@ -263,7 +299,7 @@ Before modifying source code, Aerial MUST audit the plan according to the classi
    - Run targeted package tests (`go test -v ./pkg/...`).
 
 2. **Pre-PR Diff Audit**:
-   - Audit the unified `git diff` against the approved plan strictly according to your classification tiers in `GEMINI.md` Section 8. Resolve any identified regressions before commit.
+   - Audit the unified `git diff` against the approved plan strictly according to your final escalated classification tier. Resolve any identified regressions before commit.
 
 3. **ZERO-BYPASS INVARIANT**:
    - Fresh verification evidence must exist in the turn transcript prior to commit.
@@ -291,8 +327,8 @@ Before modifying source code, Aerial MUST audit the plan according to the classi
 
 ---
 
-### Stage 6: Commit, Push & Continuous Deployment
-Follow the automated scratch PR workflows detailed in **Section 5**.
+### Stage 7: Commit, Push & Continuous Deployment
+Follow the automated scratch PR workflows detailed in **Section 5**. If the task escalated to Tier 3, auto-merge must NOT be armed without explicit user authorization.
 
 ---
 
