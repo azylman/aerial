@@ -110,7 +110,7 @@ func (p *UnifiedProcessPool) Initialize(ctx context.Context) error {
 		go func() {
 			initCtx, cancel := context.WithTimeout(p.ctx, 35*time.Second)
 			defer cancel()
-			if _, err := p.GetOrCreate(initCtx, targetKey); err != nil {
+			if _, err := p.GetOrCreate(initCtx, targetKey, ""); err != nil {
 				log.Printf("[UnifiedProcessPool] Warning: pre-warming target %q failed: %v", targetKey, err)
 			} else {
 				log.Printf("[UnifiedProcessPool] Pre-warmed target %q successfully", targetKey)
@@ -121,15 +121,19 @@ func (p *UnifiedProcessPool) Initialize(ctx context.Context) error {
 }
 
 // GetOrCreate retrieves an active StreamingDaemon for targetKey, or starts one via singleflight.
-func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string) (*StreamingDaemon, error) {
+// If sessionID is non-empty, it is passed to the daemon config to resume an existing conversation.
+func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string, sessionID string) (*StreamingDaemon, error) {
+	trimmedSess := strings.TrimSpace(sessionID)
 	p.mu.RLock()
 	if p.closed {
 		p.mu.RUnlock()
 		return nil, fmt.Errorf("process pool is closed")
 	}
 	if d, exists := p.daemons[targetKey]; exists && d != nil && d.State() != StateClosed && !d.IsDirty() {
-		p.mu.RUnlock()
-		return d, nil
+		if trimmedSess == "" || d.SessionID() == "" || d.SessionID() == trimmedSess {
+			p.mu.RUnlock()
+			return d, nil
+		}
 	}
 	p.mu.RUnlock()
 
@@ -140,7 +144,7 @@ func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string) 
 			return nil, fmt.Errorf("process pool is closed")
 		}
 		if d, exists := p.daemons[targetKey]; exists && d != nil {
-			if d.State() != StateClosed && !d.IsDirty() {
+			if d.State() != StateClosed && !d.IsDirty() && (trimmedSess == "" || d.SessionID() == "" || d.SessionID() == trimmedSess) {
 				p.mu.Unlock()
 				return d, nil
 			}
@@ -170,6 +174,7 @@ func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string) 
 
 		daemonCfg := DaemonConfig{
 			ThreadID:          targetKey,
+			SessionID:         trimmedSess,
 			Model:             p.cfg.Model,
 			AgyBin:            p.cfg.AgyBin,
 			Cwd:               p.cfg.Cwd,
@@ -240,8 +245,8 @@ func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string) 
 }
 
 // GetOrCreateSession retrieves an active AgentSession for targetKey, satisfying runner.AgentPool.
-func (p *UnifiedProcessPool) GetOrCreateSession(ctx context.Context, targetKey string) (AgentSession, error) {
-	return p.GetOrCreate(ctx, targetKey)
+func (p *UnifiedProcessPool) GetOrCreateSession(ctx context.Context, targetKey string, sessionID string) (AgentSession, error) {
+	return p.GetOrCreate(ctx, targetKey, sessionID)
 }
 
 // Close gracefully terminates all daemons tracked by the pool.
@@ -432,7 +437,7 @@ func (p *UnifiedProcessPool) MarkDirty() {
 			}()
 			initCtx, cancel := context.WithTimeout(p.ctx, 35*time.Second)
 			defer cancel()
-			if _, err := p.GetOrCreate(initCtx, tKey); err != nil {
+			if _, err := p.GetOrCreate(initCtx, tKey, ""); err != nil {
 				if !errors.Is(err, context.Canceled) {
 					log.Printf("[UnifiedProcessPool] Warning: re-warming prewarmed target %q failed: %v", tKey, err)
 				}
@@ -491,7 +496,7 @@ func (p *UnifiedProcessPool) RotateDaemon(ctx context.Context, targetKey string,
 		}
 	}
 
-	newDaemon, err := p.GetOrCreate(ctx, targetKey)
+	newDaemon, err := p.GetOrCreate(ctx, targetKey, "")
 	if err != nil {
 		return nil, fmt.Errorf("failed creating rotated daemon for %q: %w", targetKey, err)
 	}
@@ -512,7 +517,7 @@ func (p *UnifiedProcessPool) ExecuteEphemeral(ctx context.Context, targetKey, pr
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	daemon, err := p.GetOrCreate(ctx, targetKey)
+	daemon, err := p.GetOrCreate(ctx, targetKey, "")
 	if err != nil {
 		return "", fmt.Errorf("failed to acquire ephemeral daemon for %q: %w", targetKey, err)
 	}

@@ -10,7 +10,7 @@ type AgentSession interface {
 
 // AgentPool manages pinned daemons and session retrieval for conversational interactions.
 type AgentPool interface {
-	GetOrCreateSession(ctx context.Context, targetKey string) (AgentSession, error)
+	GetOrCreateSession(ctx context.Context, targetKey string, sessionID string) (AgentSession, error)
 	Initialize(ctx context.Context) error
 	Close() error
 }

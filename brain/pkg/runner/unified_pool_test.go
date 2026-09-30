@@ -47,8 +47,8 @@ func TestUnifiedProcessPool_SingleflightPrewarming(t *testing.T) {
 	}
 
 	// Concurrent callers requesting "kiosk" should join the same daemon, not re-spawn
-	d1, err1 := pool.GetOrCreate(context.Background(), "kiosk")
-	d2, err2 := pool.GetOrCreate(context.Background(), "kiosk")
+	d1, err1 := pool.GetOrCreate(context.Background(), "kiosk", "")
+	d2, err2 := pool.GetOrCreate(context.Background(), "kiosk", "")
 
 	if err1 != nil || err2 != nil {
 		t.Fatalf("errors getting kiosk daemon: %v, %v", err1, err2)
@@ -94,13 +94,13 @@ func TestUnifiedProcessPool_GetOrCreate_ReusesExistingAndReplacesClosed(t *testi
 	pool := NewUnifiedProcessPool(PoolConfig{}, mock)
 	defer pool.Close()
 
-	d1, err := pool.GetOrCreate(context.Background(), "thread-1")
+	d1, err := pool.GetOrCreate(context.Background(), "thread-1", "")
 	if err != nil {
 		t.Fatalf("first GetOrCreate failed: %v", err)
 	}
 
 	// Reusing live daemon
-	d2, err := pool.GetOrCreate(context.Background(), "thread-1")
+	d2, err := pool.GetOrCreate(context.Background(), "thread-1", "")
 	if err != nil {
 		t.Fatalf("second GetOrCreate failed: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestUnifiedProcessPool_GetOrCreate_ReusesExistingAndReplacesClosed(t *testi
 	}
 
 	// Calling GetOrCreate on closed daemon should spawn a replacement
-	d3, err := pool.GetOrCreate(context.Background(), "thread-1")
+	d3, err := pool.GetOrCreate(context.Background(), "thread-1", "")
 	if err != nil {
 		t.Fatalf("third GetOrCreate failed: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestUnifiedProcessPool_GetOrCreate_SpawnFailure(t *testing.T) {
 	pool := NewUnifiedProcessPool(PoolConfig{}, mock)
 	defer pool.Close()
 
-	d, err := pool.GetOrCreate(context.Background(), "failed-target")
+	d, err := pool.GetOrCreate(context.Background(), "failed-target", "")
 	if err == nil {
 		t.Fatalf("expected error from failed spawn, got nil daemon: %v", d)
 	}
@@ -171,8 +171,8 @@ func TestUnifiedProcessPool_MultipleTargets(t *testing.T) {
 	pool := NewUnifiedProcessPool(PoolConfig{}, mock)
 	defer pool.Close()
 
-	d1, err1 := pool.GetOrCreate(context.Background(), "thread-alpha")
-	d2, err2 := pool.GetOrCreate(context.Background(), "device-voice")
+	d1, err1 := pool.GetOrCreate(context.Background(), "thread-alpha", "")
+	d2, err2 := pool.GetOrCreate(context.Background(), "device-voice", "")
 
 	if err1 != nil || err2 != nil {
 		t.Fatalf("failed getting targets: %v, %v", err1, err2)
@@ -211,7 +211,7 @@ func TestUnifiedProcessPool_ClosedPoolRejections(t *testing.T) {
 		t.Error("expected error calling Initialize on closed pool")
 	}
 
-	if _, err := pool.GetOrCreate(context.Background(), "any"); err == nil {
+	if _, err := pool.GetOrCreate(context.Background(), "any", ""); err == nil {
 		t.Error("expected error calling GetOrCreate on closed pool")
 	}
 }
@@ -243,7 +243,7 @@ func TestUnifiedProcessPool_CloseDuringSpawn(t *testing.T) {
 
 	errChan := make(chan error, 1)
 	go func() {
-		_, err := pool.GetOrCreate(context.Background(), "slow-target")
+		_, err := pool.GetOrCreate(context.Background(), "slow-target", "")
 		errChan <- err
 	}()
 
@@ -279,7 +279,7 @@ func TestUnifiedProcessPool_CloseErrorAndIdempotent(t *testing.T) {
 	}
 
 	pool := NewUnifiedProcessPool(PoolConfig{}, mock)
-	_, err := pool.GetOrCreate(context.Background(), "error-target")
+	_, err := pool.GetOrCreate(context.Background(), "error-target", "")
 	if err != nil {
 		t.Fatalf("failed GetOrCreate: %v", err)
 	}
@@ -411,7 +411,7 @@ func TestUnifiedProcessPool_RotateDaemon(t *testing.T) {
 	ctx := context.Background()
 
 	// 1. Initial creation
-	d1, err := pool.GetOrCreate(ctx, "target-session")
+	d1, err := pool.GetOrCreate(ctx, "target-session", "")
 	if err != nil {
 		t.Fatalf("failed creating initial daemon: %v", err)
 	}
@@ -484,7 +484,7 @@ func TestUnifiedProcessPool_RotateDaemon_Errors(t *testing.T) {
 	ctx := context.Background()
 
 	// Daemon with failing handle.Kill() should still rotate and log warning without failing
-	d1, err := pool.GetOrCreate(ctx, "kill-err-target")
+	d1, err := pool.GetOrCreate(ctx, "kill-err-target", "")
 	if err != nil {
 		t.Fatalf("failed creating initial daemon: %v", err)
 	}
@@ -535,7 +535,7 @@ func TestUnifiedProcessPool_GetHasDaemonAndMarkDirty(t *testing.T) {
 		t.Errorf("expected false for unspawned target")
 	}
 
-	d, err := pool.GetOrCreate(context.Background(), "kiosk")
+	d, err := pool.GetOrCreate(context.Background(), "kiosk", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -715,7 +715,7 @@ func TestUnifiedProcessPool_TargetModelsIgnored(t *testing.T) {
 	defer pool.Close()
 
 	// 1. Target with custom TargetModels is ignored; daemon always inherits pool.Model()
-	_, err := pool.GetOrCreate(context.Background(), "ephemeral:classifier")
+	_, err := pool.GetOrCreate(context.Background(), "ephemeral:classifier", "")
 	if err != nil {
 		t.Fatalf("unexpected error getting daemon: %v", err)
 	}
@@ -724,7 +724,7 @@ func TestUnifiedProcessPool_TargetModelsIgnored(t *testing.T) {
 	}
 
 	// 2. Standard target also uses pool.Model()
-	_, err = pool.GetOrCreate(context.Background(), "standard-target")
+	_, err = pool.GetOrCreate(context.Background(), "standard-target", "")
 	if err != nil {
 		t.Fatalf("unexpected error getting standard daemon: %v", err)
 	}
@@ -939,7 +939,7 @@ func TestUnifiedProcessPool_GeminiHomeDirInjection(t *testing.T) {
 		pool := NewUnifiedProcessPool(poolCfg, mock)
 		defer pool.Close()
 
-		_, err := pool.GetOrCreate(context.Background(), "kiosk")
+		_, err := pool.GetOrCreate(context.Background(), "kiosk", "")
 		if err != nil {
 			t.Fatalf("unexpected error from GetOrCreate: %v", err)
 		}
@@ -1002,7 +1002,7 @@ func TestUnifiedProcessPool_GeminiHomeDirInjection(t *testing.T) {
 		pool := NewUnifiedProcessPool(poolCfg, mock)
 		defer pool.Close()
 
-		_, err := pool.GetOrCreate(context.Background(), "kiosk")
+		_, err := pool.GetOrCreate(context.Background(), "kiosk", "")
 		if err == nil {
 			t.Fatal("expected error from GetOrCreate when mkdir fails, got nil")
 		}
@@ -1046,7 +1046,7 @@ func TestUnifiedProcessPool_ModelBound(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	daemon, err := pool.GetOrCreate(ctx, "target-1")
+	daemon, err := pool.GetOrCreate(ctx, "target-1", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1133,9 +1133,9 @@ func TestUnifiedProcessPool_CloseConcurrentMultipleDaemons(t *testing.T) {
 	pool := NewUnifiedProcessPool(PoolConfig{Model: "gemini-3.8-flash-low"}, mock)
 	ctx := context.Background()
 
-	d1, err1 := pool.GetOrCreate(ctx, "target-a")
-	d2, err2 := pool.GetOrCreate(ctx, "target-b")
-	d3, err3 := pool.GetOrCreate(ctx, "target-c")
+	d1, err1 := pool.GetOrCreate(ctx, "target-a", "")
+	d2, err2 := pool.GetOrCreate(ctx, "target-b", "")
+	d3, err3 := pool.GetOrCreate(ctx, "target-c", "")
 
 	if err1 != nil || err2 != nil || err3 != nil {
 		t.Fatalf("failed creating daemons: %v, %v, %v", err1, err2, err3)
@@ -1174,7 +1174,7 @@ func TestUnifiedProcessPool_TurnCompletionRotationHook(t *testing.T) {
 	defer pool.Close()
 
 	ctx := context.Background()
-	d1, err := pool.GetOrCreate(ctx, "target-turn-hook")
+	d1, err := pool.GetOrCreate(ctx, "target-turn-hook", "")
 	if err != nil {
 		t.Fatalf("failed creating initial daemon: %v", err)
 	}
@@ -1249,7 +1249,7 @@ func TestUnifiedProcessPool_OptimisticMarkDirty(t *testing.T) {
 		defer pool.Close()
 
 		ctx := context.Background()
-		d1, err := pool.GetOrCreate(ctx, "kiosk")
+		d1, err := pool.GetOrCreate(ctx, "kiosk", "")
 		if err != nil {
 			t.Fatalf("failed creating initial kiosk daemon: %v", err)
 		}
@@ -1315,7 +1315,7 @@ func TestUnifiedProcessPool_OptimisticMarkDirty(t *testing.T) {
 		defer pool.Close()
 
 		ctx := context.Background()
-		d1, err := pool.GetOrCreate(ctx, "thread-nonprewarmed")
+		d1, err := pool.GetOrCreate(ctx, "thread-nonprewarmed", "")
 		if err != nil {
 			t.Fatalf("failed creating initial daemon: %v", err)
 		}
@@ -1377,7 +1377,7 @@ func TestUnifiedProcessPool_OptimisticMarkDirty(t *testing.T) {
 		defer pool.Close()
 
 		ctx := context.Background()
-		d1, err := pool.GetOrCreate(ctx, "thread-inflight")
+		d1, err := pool.GetOrCreate(ctx, "thread-inflight", "")
 		if err != nil {
 			t.Fatalf("failed creating initial daemon: %v", err)
 		}
@@ -1472,7 +1472,7 @@ func TestUnifiedProcessPool_OptimisticMarkDirty(t *testing.T) {
 		defer pool.Close()
 
 		ctx := context.Background()
-		d1, err := pool.GetOrCreate(ctx, "kiosk")
+		d1, err := pool.GetOrCreate(ctx, "kiosk", "")
 		if err != nil {
 			t.Fatalf("failed creating initial daemon: %v", err)
 		}
@@ -1538,7 +1538,7 @@ func TestUnifiedProcessPool_OptimisticMarkDirty(t *testing.T) {
 		defer pool.Close()
 
 		ctx := context.Background()
-		d, err := pool.GetOrCreate(ctx, "thread-evict-err")
+		d, err := pool.GetOrCreate(ctx, "thread-evict-err", "")
 		if err != nil {
 			t.Fatalf("failed creating daemon: %v", err)
 		}
@@ -1580,7 +1580,7 @@ func TestUnifiedProcessPool_OptimisticMarkDirty(t *testing.T) {
 		defer pool.Close()
 
 		ctx := context.Background()
-		d1, err := pool.GetOrCreate(ctx, "kiosk")
+		d1, err := pool.GetOrCreate(ctx, "kiosk", "")
 		if err != nil {
 			t.Fatalf("failed creating initial kiosk: %v", err)
 		}
@@ -1619,7 +1619,7 @@ func TestUnifiedProcessPool_GetOrCreate_RejectsDirtyDaemon(t *testing.T) {
 		defer pool.Close()
 
 		ctx := context.Background()
-		d1, err := pool.GetOrCreate(ctx, "thread-dirty")
+		d1, err := pool.GetOrCreate(ctx, "thread-dirty", "")
 		if err != nil {
 			t.Fatalf("initial GetOrCreate failed: %v", err)
 		}
@@ -1630,7 +1630,7 @@ func TestUnifiedProcessPool_GetOrCreate_RejectsDirtyDaemon(t *testing.T) {
 		}
 
 		// Calling GetOrCreate for thread-dirty must reject dirty d1, close d1, and spawn a fresh replacement d2
-		d2, err := pool.GetOrCreate(ctx, "thread-dirty")
+		d2, err := pool.GetOrCreate(ctx, "thread-dirty", "")
 		if err != nil {
 			t.Fatalf("second GetOrCreate failed: %v", err)
 		}
@@ -1672,14 +1672,14 @@ func TestUnifiedProcessPool_GetOrCreate_RejectsDirtyDaemon(t *testing.T) {
 		defer pool.Close()
 
 		ctx := context.Background()
-		d1, err := pool.GetOrCreate(ctx, "target-dirty-err")
+		d1, err := pool.GetOrCreate(ctx, "target-dirty-err", "")
 		if err != nil {
 			t.Fatalf("failed creating initial daemon: %v", err)
 		}
 
 		d1.MarkDirty()
 
-		d2, err := pool.GetOrCreate(ctx, "target-dirty-err")
+		d2, err := pool.GetOrCreate(ctx, "target-dirty-err", "")
 		if err != nil {
 			t.Fatalf("failed creating replacement daemon: %v", err)
 		}
@@ -1711,7 +1711,7 @@ func TestUnifiedProcessPool_GetOrCreate_RejectsDirtyDaemon(t *testing.T) {
 		defer pool.Close()
 
 		ctx := context.Background()
-		kioskDaemon, err := pool.GetOrCreate(ctx, "kiosk")
+		kioskDaemon, err := pool.GetOrCreate(ctx, "kiosk", "")
 		if err != nil {
 			t.Fatalf("failed creating initial kiosk daemon: %v", err)
 		}
@@ -1795,5 +1795,166 @@ func TestUnifiedProcessPool_PrewarmedTargets_DynamicUpdate(t *testing.T) {
 			t.Fatalf("expected [kiosk, touch-kiosk-kitchen], got %v", targets)
 		}
 	})
+}
+
+func TestUnifiedProcessPool_GetOrCreate_PropagatesSessionID(t *testing.T) {
+	var capturedCfg DaemonConfig
+	var spawnCount atomic.Int32
+
+	mock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			spawnCount.Add(1)
+			capturedCfg = cfg
+			outR, outW := io.Pipe()
+			inR, inW := io.Pipe()
+			errR, _ := io.Pipe()
+
+			go func() {
+				defer outW.Close()
+				sessID := cfg.SessionID
+				if sessID == "" {
+					sessID = "550e8400-e29b-41d4-a716-446655440000"
+				}
+				_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":%q}`+"\n", sessID)))
+				_, _ = io.Copy(io.Discard, inR)
+			}()
+
+			return inW, outR, errR, &MockProcessHandle{pid: 200}, nil
+		},
+	}
+
+	pool := NewUnifiedProcessPool(PoolConfig{}, mock)
+	defer pool.Close()
+
+	ctx := context.Background()
+
+	// 1. Non-empty session ID should be passed to DaemonConfig and daemon
+	customSessID := "11111111-2222-3333-4444-555555555555"
+	d1, err := pool.GetOrCreate(ctx, "target-prop", customSessID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if capturedCfg.SessionID != customSessID {
+		t.Errorf("expected DaemonConfig.SessionID %q, got %q", customSessID, capturedCfg.SessionID)
+	}
+	if d1.SessionID() != customSessID {
+		t.Errorf("expected daemon SessionID %q, got %q", customSessID, d1.SessionID())
+	}
+
+	// 2. Calling GetOrCreate with same session ID reuses existing live daemon
+	d1Repeat, err := pool.GetOrCreate(ctx, "target-prop", customSessID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if d1Repeat != d1 {
+		t.Errorf("expected same daemon instance returned")
+	}
+	if spawnCount.Load() != 1 {
+		t.Errorf("expected exactly 1 spawn, got %d", spawnCount.Load())
+	}
+
+	// 3. Empty session ID on new target creates fresh session
+	d2, err := pool.GetOrCreate(ctx, "target-fresh", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if capturedCfg.SessionID != "" {
+		t.Errorf("expected empty DaemonConfig.SessionID for fresh target, got %q", capturedCfg.SessionID)
+	}
+	if d2.SessionID() != "550e8400-e29b-41d4-a716-446655440000" {
+		t.Errorf("expected fresh session ID from mock, got %q", d2.SessionID())
+	}
+}
+
+func TestUnifiedProcessPool_GetOrCreate_MismatchedSessionIDRotates(t *testing.T) {
+	mock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			outR, outW := io.Pipe()
+			inR, inW := io.Pipe()
+			errR, _ := io.Pipe()
+
+			go func() {
+				defer outW.Close()
+				sessID := cfg.SessionID
+				if sessID == "" {
+					sessID = "550e8400-e29b-41d4-a716-446655440000"
+				}
+				_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":%q}`+"\n", sessID)))
+				_, _ = io.Copy(io.Discard, inR)
+			}()
+
+			return inW, outR, errR, &MockProcessHandle{pid: 201}, nil
+		},
+	}
+
+	pool := NewUnifiedProcessPool(PoolConfig{}, mock)
+	defer pool.Close()
+
+	ctx := context.Background()
+
+	sess1 := "11111111-1111-1111-1111-111111111111"
+	d1, err := pool.GetOrCreate(ctx, "target-switch", sess1)
+	if err != nil {
+		t.Fatalf("unexpected error spawning d1: %v", err)
+	}
+	if d1.SessionID() != sess1 {
+		t.Fatalf("expected d1 session %q, got %q", sess1, d1.SessionID())
+	}
+
+	// Calling with different session ID should evict and close d1, returning d2
+	sess2 := "22222222-2222-2222-2222-222222222222"
+	d2, err := pool.GetOrCreate(ctx, "target-switch", sess2)
+	if err != nil {
+		t.Fatalf("unexpected error spawning d2: %v", err)
+	}
+	if d2 == d1 {
+		t.Errorf("expected new daemon instance after session mismatch")
+	}
+	if d2.SessionID() != sess2 {
+		t.Errorf("expected d2 session %q, got %q", sess2, d2.SessionID())
+	}
+
+	deadline := time.Now().Add(1 * time.Second)
+	for time.Now().Before(deadline) && d1.State() != StateClosed {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if d1.State() != StateClosed {
+		t.Errorf("expected old daemon d1 to be closed after session mismatch, got %v", d1.State())
+	}
+}
+
+func TestUnifiedProcessPool_GetOrCreateSession_PropagatesSessionID(t *testing.T) {
+	mock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			outR, outW := io.Pipe()
+			inR, inW := io.Pipe()
+			errR, _ := io.Pipe()
+
+			go func() {
+				defer outW.Close()
+				sessID := cfg.SessionID
+				if sessID == "" {
+					sessID = "550e8400-e29b-41d4-a716-446655440000"
+				}
+				_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":%q}`+"\n", sessID)))
+				_, _ = io.Copy(io.Discard, inR)
+			}()
+
+			return inW, outR, errR, &MockProcessHandle{pid: 202}, nil
+		},
+	}
+
+	pool := NewUnifiedProcessPool(PoolConfig{}, mock)
+	defer pool.Close()
+
+	ctx := context.Background()
+	customSessID := "33333333-3333-3333-3333-333333333333"
+	sess, err := pool.GetOrCreateSession(ctx, "target-sess", customSessID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if sess.SessionID() != customSessID {
+		t.Errorf("expected session ID %q, got %q", customSessID, sess.SessionID())
+	}
 }
 

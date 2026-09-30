@@ -205,6 +205,124 @@ func TestWorker_PersistentDaemonTurnExecution(t *testing.T) {
 	}
 }
 
+func TestWorker_PassesSessionIDToAgentPool(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	tmpHome := t.TempDir()
+	tempData := t.TempDir()
+
+	var mu sync.Mutex
+	capturedConfigs := make([]runner.DaemonConfig, 0)
+
+	mockSpawner := &runner.MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+			mu.Lock()
+			capturedConfigs = append(capturedConfigs, cfg)
+			mu.Unlock()
+
+			inR, inW := io.Pipe()
+			outR, outW := io.Pipe()
+			errR, errW := io.Pipe()
+			defer errW.Close()
+			go func() {
+				sessID := cfg.SessionID
+				if sessID == "" {
+					sessID = "c1111111-2222-3333-4444-555555555555"
+				}
+				_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","conversation_id":%q}`+"\n", sessID)))
+				scanner := bufio.NewScanner(inR)
+				for scanner.Scan() {
+					_, _ = outW.Write([]byte(`{"event":"result","result":{"status":"SUCCESS","response":"ok","usage":{"total_tokens":5}}}` + "\n"))
+				}
+			}()
+			return inW, outR, errR, runner.NewMockProcessHandle(12346), nil
+		},
+	}
+	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, mockSpawner)
+	defer procPool.Close()
+
+	cfg := config.NewTestConfig(func(d *config.ConfigData) {
+		d.DataDir = tempData
+	})
+
+	completedCh := make(chan string, 10)
+	pool := New(cfg, WorkerPoolConfig{
+		ProcessPool:    procPool,
+		SessionManager: session.New(tmpHome, tempData),
+		Store:          store,
+		TimeoutMinutes: 1,
+		OnMessageCompleted: func(msg db.Message, status string) {
+			if status == db.StatusCompleted {
+				completedCh <- msg.ID
+			}
+		},
+	})
+	defer pool.Stop()
+
+	// Case 1: Thread with existing session in store passes sessionID to daemon
+	threadWithSess := "thread-with-sess"
+	expectedSessID := "a1111111-2222-3333-4444-555555555555"
+	_ = store.SaveSessionID(context.Background(), threadWithSess, expectedSessID)
+
+	msg1 := db.Message{
+		ID:        "msg-with-sess",
+		ThreadID:  threadWithSess,
+		Content:   "Resume turn",
+		Status:    db.StatusPending,
+		CreatedAt: time.Now(),
+	}
+	_ = store.InsertMessage(context.Background(), msg1)
+	pool.Enqueue(msg1)
+
+	select {
+	case id := <-completedCh:
+		if id != "msg-with-sess" {
+			t.Fatalf("unexpected message completed: %s", id)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timeout waiting for msg-with-sess")
+	}
+
+	mu.Lock()
+	if len(capturedConfigs) != 1 {
+		t.Fatalf("expected 1 daemon spawn, got %d", len(capturedConfigs))
+	}
+	if capturedConfigs[0].SessionID != expectedSessID {
+		t.Errorf("expected DaemonConfig.SessionID %q, got %q", expectedSessID, capturedConfigs[0].SessionID)
+	}
+	mu.Unlock()
+
+	// Case 2: Fresh thread without session in store passes empty string
+	freshThread := "thread-fresh"
+	msg2 := db.Message{
+		ID:        "msg-fresh",
+		ThreadID:  freshThread,
+		Content:   "First turn",
+		Status:    db.StatusPending,
+		CreatedAt: time.Now(),
+	}
+	_ = store.InsertMessage(context.Background(), msg2)
+	pool.Enqueue(msg2)
+
+	select {
+	case id := <-completedCh:
+		if id != "msg-fresh" {
+			t.Fatalf("unexpected message completed: %s", id)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timeout waiting for msg-fresh")
+	}
+
+	mu.Lock()
+	if len(capturedConfigs) != 2 {
+		t.Fatalf("expected 2 daemon spawns, got %d", len(capturedConfigs))
+	}
+	if capturedConfigs[1].SessionID != "" {
+		t.Errorf("expected DaemonConfig.SessionID empty for fresh thread, got %q", capturedConfigs[1].SessionID)
+	}
+	mu.Unlock()
+}
+
 func TestWorker_ThreadWorker_ActiveTasksPreventReap(t *testing.T) {
 	store := setupTestStore(t)
 	tmpHome := t.TempDir()
@@ -264,7 +382,7 @@ func TestWorker_ThreadWorker_ActiveTasksPreventReap(t *testing.T) {
 
 	// Pre-create daemon with active task
 	ctx := context.Background()
-	daemon, err := pool.ProcessPool().GetOrCreate(ctx, threadID)
+	daemon, err := pool.ProcessPool().GetOrCreate(ctx, threadID, "")
 	if err != nil {
 		t.Fatalf("failed to create daemon: %v", err)
 	}
@@ -1293,7 +1411,7 @@ func TestWorker_RotateSessionID_EvictsDaemons(t *testing.T) {
 	}()
 
 	ctx := context.Background()
-	_, err := procPool.GetOrCreate(ctx, "thread-evict-1")
+	_, err := procPool.GetOrCreate(ctx, "thread-evict-1", "")
 	if err != nil {
 		t.Fatalf("failed to create daemon: %v", err)
 	}
@@ -2797,7 +2915,7 @@ func TestWorker_ThreadWorker_ActiveTasksInLowEffortPoolPreventReap(t *testing.T)
 
 	// Pre-create daemon in lowPool with active task
 	ctx := context.Background()
-	daemon, err := pool.LowEffortProcessPool().GetOrCreate(ctx, threadID)
+	daemon, err := pool.LowEffortProcessPool().GetOrCreate(ctx, threadID, "")
 	if err != nil {
 		t.Fatalf("failed to create daemon in low pool: %v", err)
 	}
@@ -2928,7 +3046,7 @@ func TestWorker_YieldTrap_AlternatePoolFallback(t *testing.T) {
 
 	// Put an active background task in the ALTERNATE pool (lowPool) for this thread
 	ctx := context.Background()
-	lowDaemon, err := lowPool.GetOrCreate(ctx, threadID)
+	lowDaemon, err := lowPool.GetOrCreate(ctx, threadID, "")
 	if err != nil {
 		t.Fatalf("failed to create low daemon: %v", err)
 	}

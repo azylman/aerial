@@ -62,7 +62,7 @@ func TestGeminiAPIPool_StreamingSuccess(t *testing.T) {
 	defer pool.Close()
 
 	ctx := context.Background()
-	sess, err := pool.GetOrCreateSession(ctx, "kiosk-living-room")
+	sess, err := pool.GetOrCreateSession(ctx, "kiosk-living-room", "")
 	if err != nil {
 		t.Fatalf("unexpected GetOrCreateSession error: %v", err)
 	}
@@ -154,7 +154,7 @@ func TestGeminiAPIPool_ZeroThinkingBudget(t *testing.T) {
 	})
 	defer pool.Close()
 
-	sess, err := pool.GetOrCreateSession(context.Background(), "voice-device")
+	sess, err := pool.GetOrCreateSession(context.Background(), "voice-device", "")
 	if err != nil {
 		t.Fatalf("unexpected error getting session: %v", err)
 	}
@@ -236,7 +236,7 @@ func TestGeminiAPIPool_SlidingWindowHistory(t *testing.T) {
 	})
 	defer pool.Close()
 
-	sess, err := pool.GetOrCreateSession(context.Background(), "history-device")
+	sess, err := pool.GetOrCreateSession(context.Background(), "history-device", "")
 	if err != nil {
 		t.Fatalf("unexpected GetOrCreateSession error: %v", err)
 	}
@@ -308,7 +308,7 @@ func TestGeminiAPIPool_ContextCancellation(t *testing.T) {
 	})
 	defer pool.Close()
 
-	sess, err := pool.GetOrCreateSession(context.Background(), "cancel-device")
+	sess, err := pool.GetOrCreateSession(context.Background(), "cancel-device", "")
 	if err != nil {
 		t.Fatalf("unexpected error getting session: %v", err)
 	}
@@ -377,7 +377,7 @@ func TestGeminiAPIPool_RateLimit429(t *testing.T) {
 	})
 	defer pool.Close()
 
-	sess, err := pool.GetOrCreateSession(context.Background(), "rate-limited-device")
+	sess, err := pool.GetOrCreateSession(context.Background(), "rate-limited-device", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -429,7 +429,7 @@ func TestGeminiAPIPool_EmptyPrompt(t *testing.T) {
 	})
 	defer pool.Close()
 
-	sess, err := pool.GetOrCreateSession(context.Background(), "device-empty")
+	sess, err := pool.GetOrCreateSession(context.Background(), "device-empty", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -476,7 +476,7 @@ func TestGeminiAPIPool_PrewarmedAndClose(t *testing.T) {
 
 	// Verify all prewarmed targets are initialized
 	for _, target := range targets {
-		sess, err := pool.GetOrCreateSession(ctx, target)
+		sess, err := pool.GetOrCreateSession(ctx, target, "")
 		if err != nil {
 			t.Errorf("expected session for prewarmed target %s, got error: %v", target, err)
 		}
@@ -491,7 +491,7 @@ func TestGeminiAPIPool_PrewarmedAndClose(t *testing.T) {
 	}
 
 	// Verify GetOrCreateSession on closed pool fails
-	if _, err := pool.GetOrCreateSession(ctx, "new-target"); err == nil {
+	if _, err := pool.GetOrCreateSession(ctx, "new-target", ""); err == nil {
 		t.Errorf("expected error on closed pool GetOrCreateSession, got nil")
 	}
 
@@ -533,7 +533,7 @@ func TestGeminiAPIPool_SanitizeAPIKey(t *testing.T) {
 	})
 	defer pool.Close()
 
-	sess, err := pool.GetOrCreateSession(context.Background(), "sanitize-device")
+	sess, err := pool.GetOrCreateSession(context.Background(), "sanitize-device", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -606,7 +606,7 @@ func TestGeminiAPIPool_Accessors(t *testing.T) {
 		t.Errorf("expected APIKey 'my-api-key', got %q", pool.APIKey())
 	}
 
-	sess, err := pool.GetOrCreateSession(context.Background(), "target-123")
+	sess, err := pool.GetOrCreateSession(context.Background(), "target-123", "")
 	if err != nil {
 		t.Fatalf("unexpected error creating session: %v", err)
 	}
@@ -859,7 +859,7 @@ func TestGeminiAPIPool_WithMCPToolCalling(t *testing.T) {
 	})
 	defer pool.Close()
 
-	sess, err := pool.GetOrCreateSession(context.Background(), "voice-kiosk")
+	sess, err := pool.GetOrCreateSession(context.Background(), "voice-kiosk", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -937,7 +937,7 @@ func TestGeminiAPIPool_WithMCPToolCalling_ErrorRecovery(t *testing.T) {
 	})
 	defer pool.Close()
 
-	sess, err := pool.GetOrCreateSession(context.Background(), "voice-kiosk-err")
+	sess, err := pool.GetOrCreateSession(context.Background(), "voice-kiosk-err", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -981,7 +981,7 @@ func TestGeminiAPISession_TranscriptPersistenceAndHydration(t *testing.T) {
 	defer pool.Close()
 
 	sessID := "persisted-session"
-	sess, err := pool.GetOrCreateSession(context.Background(), sessID)
+	sess, err := pool.GetOrCreateSession(context.Background(), sessID, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1202,7 +1202,7 @@ func TestGeminiAPIPool_Send_WithNilSinkAndErrors(t *testing.T) {
 	})
 	defer pool.Close()
 
-	sess, err := pool.GetOrCreateSession(context.Background(), "nil-sink-device")
+	sess, err := pool.GetOrCreateSession(context.Background(), "nil-sink-device", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1251,7 +1251,7 @@ func TestGeminiAPIPool_Send_SSEMalformedChunk(t *testing.T) {
 	})
 	defer pool.Close()
 
-	sess, err := pool.GetOrCreateSession(context.Background(), "malformed-sse")
+	sess, err := pool.GetOrCreateSession(context.Background(), "malformed-sse", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1298,7 +1298,7 @@ func TestGeminiAPIPool_Send_DispatcherErrors(t *testing.T) {
 	})
 	defer pool.Close()
 
-	sess, err := pool.GetOrCreateSession(context.Background(), "dispatcher-err-device")
+	sess, err := pool.GetOrCreateSession(context.Background(), "dispatcher-err-device", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1516,7 +1516,7 @@ func TestGeminiAPISession_Send_ToolCallWithoutDispatcher(t *testing.T) {
 		HTTPClient: ts.Client(),
 	})
 
-	sess, err := pool.GetOrCreateSession(context.Background(), "no-disp-device")
+	sess, err := pool.GetOrCreateSession(context.Background(), "no-disp-device", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1552,7 +1552,7 @@ func TestGeminiAPISession_Send_MalformedSSEChunk(t *testing.T) {
 		HTTPClient: ts.Client(),
 	})
 
-	sess, err := pool.GetOrCreateSession(context.Background(), "malformed-sse-device")
+	sess, err := pool.GetOrCreateSession(context.Background(), "malformed-sse-device", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1649,7 +1649,7 @@ func TestGeminiAPISession_Send_NetworkAndContextErrors(t *testing.T) {
 		pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
 			APIKey: "test-key",
 		})
-		sess, err := pool.GetOrCreateSession(context.Background(), "precancel-device")
+		sess, err := pool.GetOrCreateSession(context.Background(), "precancel-device", "")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -1678,7 +1678,7 @@ func TestGeminiAPISession_Send_NetworkAndContextErrors(t *testing.T) {
 			APIKey:  "test-key",
 			BaseURL: "http://127.0.0.1:1", // closed port causes Do() failure
 		})
-		sess, err := pool.GetOrCreateSession(context.Background(), "net-err-device")
+		sess, err := pool.GetOrCreateSession(context.Background(), "net-err-device", "")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -1714,7 +1714,7 @@ func TestGeminiAPISession_Send_NetworkAndContextErrors(t *testing.T) {
 			BaseURL:    ts.URL,
 			HTTPClient: ts.Client(),
 		})
-		sess, err := pool.GetOrCreateSession(context.Background(), "stream-cancel-device")
+		sess, err := pool.GetOrCreateSession(context.Background(), "stream-cancel-device", "")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -1740,6 +1740,22 @@ func TestGeminiAPISession_Send_NetworkAndContextErrors(t *testing.T) {
 			t.Errorf("expected sink.OnError to be called")
 		}
 	})
+}
+
+func TestGeminiAPIPool_GetOrCreateSession_CustomSessionID(t *testing.T) {
+	t.Parallel()
+	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
+		APIKey: "test-key",
+	})
+	defer pool.Close()
+
+	sess, err := pool.GetOrCreateSession(context.Background(), "custom-target", "custom-sess-uuid")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if sess.SessionID() != "custom-sess-uuid" {
+		t.Errorf("expected session ID 'custom-sess-uuid', got %q", sess.SessionID())
+	}
 }
 
 

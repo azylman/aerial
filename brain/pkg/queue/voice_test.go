@@ -630,7 +630,7 @@ func TestWorkerPool_Stop_ProcessPoolCloseError(t *testing.T) {
 	}, mockSpawner)
 
 	// Pre-spawn a daemon so Close() actually has a daemon to kill
-	_, err := procPool.GetOrCreate(context.Background(), "kiosk")
+	_, err := procPool.GetOrCreate(context.Background(), "kiosk", "")
 	if err != nil {
 		t.Fatalf("failed to spawn daemon: %v", err)
 	}
@@ -744,7 +744,7 @@ func TestWorkerPool_ExecuteVoiceTurn_ProcessPool_AdditionalBranches(t *testing.T
 		defer procPool.Close()
 
 		// Pre-spawn and clear session ID to trigger activeSession == "" fallback
-		d, err := procPool.GetOrCreate(context.Background(), "fallback-conv-id")
+		d, err := procPool.GetOrCreate(context.Background(), "fallback-conv-id", "")
 		if err != nil {
 			t.Fatalf("failed pre-spawning daemon: %v", err)
 		}
@@ -929,7 +929,7 @@ type queueMockVoiceProcessPool struct {
 	closeCalled bool
 }
 
-func (p *queueMockVoiceProcessPool) GetOrCreateSession(ctx context.Context, targetKey string) (runner.AgentSession, error) {
+func (p *queueMockVoiceProcessPool) GetOrCreateSession(ctx context.Context, targetKey string, sessionID string) (runner.AgentSession, error) {
 	if p.closeCalled {
 		return nil, errors.New("pool closed")
 	}

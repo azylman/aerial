@@ -468,7 +468,7 @@ func (p *GeminiAPIPool) sanitizeError(err error) error {
 }
 
 // GetOrCreateSession retrieves an existing session or initializes a new one for targetKey.
-func (p *GeminiAPIPool) GetOrCreateSession(ctx context.Context, targetKey string) (AgentSession, error) {
+func (p *GeminiAPIPool) GetOrCreateSession(ctx context.Context, targetKey string, sessionID string) (AgentSession, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -480,9 +480,14 @@ func (p *GeminiAPIPool) GetOrCreateSession(ctx context.Context, targetKey string
 		return sess, nil
 	}
 
+	sessID := targetKey
+	if trimmed := strings.TrimSpace(sessionID); trimmed != "" {
+		sessID = trimmed
+	}
+
 	sess := &GeminiAPISession{
 		targetKey: targetKey,
-		sessionID: targetKey,
+		sessionID: sessID,
 		pool:      p,
 		history:   make([]geminiContent, 0),
 		dataDir:   p.cfg.DataDir,
