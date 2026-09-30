@@ -8,14 +8,316 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 )
 
 var apiKeyQueryRegex = regexp.MustCompile(`(?i)(key=)[^& \t\r\n"']+`)
+
+// MCPServerConfig represents an endpoint configuration for an MCP microservice.
+type MCPServerConfig struct {
+	Name      string            `json:"name"`
+	ServerURL string            `json:"serverUrl"`
+	Headers   map[string]string `json:"headers,omitempty"`
+}
+
+// MCPTool represents a tool definition returned by an MCP server tools/list call.
+type MCPTool struct {
+	Name        string                 `json:"name"`
+	Description string                 `json:"description,omitempty"`
+	InputSchema map[string]interface{} `json:"inputSchema,omitempty"`
+}
+
+// MCPDispatcher abstracts tool discovery and tool execution across MCP servers.
+type MCPDispatcher interface {
+	ListDeclarations(ctx context.Context) ([]geminiFunctionDeclaration, error)
+	Execute(ctx context.Context, name string, args map[string]interface{}) (string, error)
+}
+
+// jsonRPCResponse models a generic JSON-RPC 2.0 response.
+type jsonRPCResponse struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      interface{}     `json:"id"`
+	Result  json.RawMessage `json:"result,omitempty"`
+	Error   *jsonRPCError   `json:"error,omitempty"`
+}
+
+// jsonRPCError models a JSON-RPC 2.0 error block.
+type jsonRPCError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
+// parseJSONRPCBody parses JSON-RPC bodies, transparently handling both SSE streams and standard JSON.
+func parseJSONRPCBody(body []byte) (*jsonRPCResponse, error) {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 {
+		return nil, errors.New("empty response body")
+	}
+
+	// Check if this is an SSE stream (e.g. ha-mcp)
+	if bytes.HasPrefix(trimmed, []byte("event:")) || bytes.HasPrefix(trimmed, []byte("data:")) || bytes.Contains(trimmed, []byte("\ndata:")) {
+		lines := bytes.Split(trimmed, []byte("\n"))
+		for _, rawLine := range lines {
+			line := bytes.TrimSpace(rawLine)
+			if bytes.HasPrefix(line, []byte("data:")) {
+				dataPayload := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
+				if len(dataPayload) > 0 && dataPayload[0] == '{' {
+					var resp jsonRPCResponse
+					if err := json.Unmarshal(dataPayload, &resp); err == nil {
+						return &resp, nil
+					}
+				}
+			}
+		}
+	}
+
+	var resp jsonRPCResponse
+	if err := json.Unmarshal(trimmed, &resp); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal JSON-RPC response: %w", err)
+	}
+	return &resp, nil
+}
+
+// cleanParameters sanitizes inputSchema for Gemini function calling.
+func cleanParameters(schema map[string]interface{}) map[string]interface{} {
+	if schema == nil {
+		return map[string]interface{}{
+			"type":       "OBJECT",
+			"properties": map[string]interface{}{},
+		}
+	}
+	cp := make(map[string]interface{}, len(schema))
+	for k, v := range schema {
+		if k == "$schema" {
+			continue
+		}
+		cp[k] = v
+	}
+	if t, ok := cp["type"].(string); ok {
+		cp["type"] = strings.ToUpper(t)
+	} else if _, ok := cp["type"]; !ok {
+		cp["type"] = "OBJECT"
+	}
+	if _, ok := cp["properties"]; !ok {
+		cp["properties"] = map[string]interface{}{}
+	}
+	return cp
+}
+
+// DefaultMCPDispatcher discovers and dispatches tools across configured HTTP/SSE MCP servers.
+type DefaultMCPDispatcher struct {
+	servers    []MCPServerConfig
+	httpClient *http.Client
+	toolRoutes map[string]MCPServerConfig
+	mu         sync.RWMutex
+}
+
+var _ MCPDispatcher = (*DefaultMCPDispatcher)(nil)
+
+// NewDefaultMCPDispatcher constructs a DefaultMCPDispatcher.
+func NewDefaultMCPDispatcher(servers []MCPServerConfig, client *http.Client) *DefaultMCPDispatcher {
+	if client == nil {
+		client = &http.Client{Timeout: 15 * time.Second}
+	}
+	return &DefaultMCPDispatcher{
+		servers:    servers,
+		httpClient: client,
+		toolRoutes: make(map[string]MCPServerConfig),
+	}
+}
+
+// ListDeclarations queries all configured MCP servers via tools/list and returns Gemini function declarations.
+func (d *DefaultMCPDispatcher) ListDeclarations(ctx context.Context) ([]geminiFunctionDeclaration, error) {
+	if d == nil || len(d.servers) == 0 {
+		return nil, nil
+	}
+
+	var allDecls []geminiFunctionDeclaration
+	reqBody, err := json.Marshal(map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/list",
+		"params":  map[string]interface{}{},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal tools/list payload: %w", err)
+	}
+
+	for _, srv := range d.servers {
+		if strings.TrimSpace(srv.ServerURL) == "" {
+			continue
+		}
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, srv.ServerURL, bytes.NewReader(reqBody))
+		if err != nil {
+			log.Printf("[MCPDispatcher] Failed to create request for %s: %v", srv.Name, err)
+			continue
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("Accept", "application/json, text/event-stream")
+		for k, v := range srv.Headers {
+			httpReq.Header.Set(k, v)
+		}
+
+		resp, err := d.httpClient.Do(httpReq)
+		if err != nil {
+			log.Printf("[MCPDispatcher] Failed to query tools/list on %s: %v", srv.Name, err)
+			continue
+		}
+		respBytes, rErr := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
+		_ = resp.Body.Close()
+		if rErr != nil || resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			log.Printf("[MCPDispatcher] Non-200 or read error from %s: status=%d err=%v", srv.Name, resp.StatusCode, rErr)
+			continue
+		}
+
+		rpcResp, err := parseJSONRPCBody(respBytes)
+		if err != nil || rpcResp == nil {
+			log.Printf("[MCPDispatcher] Failed to parse JSON-RPC response from %s: %v", srv.Name, err)
+			continue
+		}
+		if rpcResp.Error != nil {
+			log.Printf("[MCPDispatcher] MCP server %s returned error: %s (code %d)", srv.Name, rpcResp.Error.Message, rpcResp.Error.Code)
+			continue
+		}
+
+		var listResult struct {
+			Tools []MCPTool `json:"tools"`
+		}
+		if err := json.Unmarshal(rpcResp.Result, &listResult); err != nil {
+			log.Printf("[MCPDispatcher] Failed to unmarshal tools from %s: %v", srv.Name, err)
+			continue
+		}
+
+		d.mu.Lock()
+		for _, tool := range listResult.Tools {
+			if tool.Name == "" {
+				continue
+			}
+			d.toolRoutes[tool.Name] = srv
+			decl := geminiFunctionDeclaration{
+				Name:        tool.Name,
+				Description: tool.Description,
+				Parameters:  cleanParameters(tool.InputSchema),
+			}
+			allDecls = append(allDecls, decl)
+		}
+		d.mu.Unlock()
+	}
+
+	return allDecls, nil
+}
+
+// Execute calls a named tool on the corresponding MCP server with the provided arguments.
+func (d *DefaultMCPDispatcher) Execute(ctx context.Context, name string, args map[string]interface{}) (string, error) {
+	if d == nil {
+		return "", errors.New("mcp dispatcher is nil")
+	}
+
+	d.mu.RLock()
+	srv, ok := d.toolRoutes[name]
+	d.mu.RUnlock()
+
+	if !ok {
+		// Attempt JIT discovery if route is unknown
+		if _, listErr := d.ListDeclarations(ctx); listErr != nil {
+			log.Printf("[MCPDispatcher] JIT ListDeclarations warning: %v", listErr)
+		}
+		d.mu.RLock()
+		srv, ok = d.toolRoutes[name]
+		d.mu.RUnlock()
+		if !ok {
+			return "", fmt.Errorf("tool %q not found on any configured MCP server", name)
+		}
+	}
+
+	if args == nil {
+		args = make(map[string]interface{})
+	}
+
+	reqBody, err := json.Marshal(map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/call",
+		"params": map[string]interface{}{
+			"name":      name,
+			"arguments": args,
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal tools/call request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, srv.ServerURL, bytes.NewReader(reqBody))
+	if err != nil {
+		return "", fmt.Errorf("failed to create http request for tool %q: %w", name, err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "application/json, text/event-stream")
+	for k, v := range srv.Headers {
+		httpReq.Header.Set(k, v)
+	}
+
+	resp, err := d.httpClient.Do(httpReq)
+	if err != nil {
+		return "", fmt.Errorf("failed to call tool %q on %s: %w", name, srv.Name, err)
+	}
+	defer resp.Body.Close()
+
+	respBytes, rErr := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
+	if rErr != nil {
+		return "", fmt.Errorf("failed to read response for tool %q: %w", name, rErr)
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("mcp server %s returned status %d: %s", srv.Name, resp.StatusCode, string(respBytes))
+	}
+
+	rpcResp, err := parseJSONRPCBody(respBytes)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse tool response for %q: %w", name, err)
+	}
+	if rpcResp == nil {
+		return "", fmt.Errorf("empty JSON-RPC response for tool %q", name)
+	}
+	if rpcResp.Error != nil {
+		return "", fmt.Errorf("mcp tool %q error: %s (code %d)", name, rpcResp.Error.Message, rpcResp.Error.Code)
+	}
+
+	var callResult struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text,omitempty"`
+		} `json:"content,omitempty"`
+		IsError bool `json:"isError,omitempty"`
+	}
+
+	if err := json.Unmarshal(rpcResp.Result, &callResult); err == nil && len(callResult.Content) > 0 {
+		var sb strings.Builder
+		for _, c := range callResult.Content {
+			if c.Text != "" {
+				if sb.Len() > 0 {
+					sb.WriteString("\n")
+				}
+				sb.WriteString(c.Text)
+			}
+		}
+		resText := sb.String()
+		if callResult.IsError {
+			return resText, fmt.Errorf("tool %q returned error: %s", name, resText)
+		}
+		return resText, nil
+	}
+
+	return string(rpcResp.Result), nil
+}
 
 // GeminiVoicePoolConfig holds configuration for the GeminiVoicePool.
 type GeminiVoicePoolConfig struct {
@@ -26,17 +328,46 @@ type GeminiVoicePoolConfig struct {
 	PrewarmedTargets []string
 	SystemPrompt     string
 	MaxHistoryTurns  int // defaults to 10 (20 messages)
+	MCPServers       []MCPServerConfig
+	MCPDispatcher    MCPDispatcher
+	DataDir          string
+}
+
+// geminiFunctionCall represents a function call requested by the model.
+type geminiFunctionCall struct {
+	Name string                 `json:"name"`
+	Args map[string]interface{} `json:"args,omitempty"`
+}
+
+// geminiFunctionResp represents the execution outcome of a function call.
+type geminiFunctionResp struct {
+	Name     string                 `json:"name"`
+	Response map[string]interface{} `json:"response"`
 }
 
 // geminiPart represents a content part in the Gemini REST API.
 type geminiPart struct {
-	Text string `json:"text,omitempty"`
+	Text             string              `json:"text,omitempty"`
+	FunctionCall     *geminiFunctionCall `json:"functionCall,omitempty"`
+	FunctionResponse *geminiFunctionResp `json:"functionResponse,omitempty"`
 }
 
 // geminiContent represents a message content block in the Gemini REST API.
 type geminiContent struct {
 	Role  string       `json:"role,omitempty"`
 	Parts []geminiPart `json:"parts"`
+}
+
+// geminiFunctionDeclaration models a callable tool schema for the model.
+type geminiFunctionDeclaration struct {
+	Name        string                 `json:"name"`
+	Description string                 `json:"description,omitempty"`
+	Parameters  map[string]interface{} `json:"parameters,omitempty"`
+}
+
+// geminiTool wraps declarations in the Gemini REST API tools array.
+type geminiTool struct {
+	FunctionDeclarations []geminiFunctionDeclaration `json:"functionDeclarations,omitempty"`
 }
 
 // geminiThinkingConfig controls thinking budget in generationConfig.
@@ -52,6 +383,7 @@ type geminiGenerationConfig struct {
 // geminiStreamRequest is the JSON payload sent to streamGenerateContent.
 type geminiStreamRequest struct {
 	Contents          []geminiContent         `json:"contents"`
+	Tools             []geminiTool            `json:"tools,omitempty"`
 	SystemInstruction *geminiContent          `json:"systemInstruction,omitempty"`
 	GenerationConfig  *geminiGenerationConfig `json:"generationConfig,omitempty"`
 }
@@ -96,6 +428,9 @@ func NewGeminiVoicePool(cfg GeminiVoicePoolConfig) *GeminiVoicePool {
 	}
 	if cfg.MaxHistoryTurns <= 0 {
 		cfg.MaxHistoryTurns = 10
+	}
+	if cfg.MCPDispatcher == nil && len(cfg.MCPServers) > 0 {
+		cfg.MCPDispatcher = NewDefaultMCPDispatcher(cfg.MCPServers, cfg.HTTPClient)
 	}
 	return &GeminiVoicePool{
 		cfg:      cfg,
@@ -150,6 +485,7 @@ func (p *GeminiVoicePool) GetOrCreateSession(ctx context.Context, targetKey stri
 		sessionID: targetKey,
 		pool:      p,
 		history:   make([]geminiContent, 0),
+		dataDir:   p.cfg.DataDir,
 	}
 	p.sessions[targetKey] = sess
 	return sess, nil
@@ -171,6 +507,7 @@ func (p *GeminiVoicePool) Initialize(ctx context.Context) error {
 				sessionID: target,
 				pool:      p,
 				history:   make([]geminiContent, 0),
+				dataDir:   p.cfg.DataDir,
 			}
 		}
 	}
@@ -186,13 +523,14 @@ func (p *GeminiVoicePool) Close() error {
 	return nil
 }
 
-// GeminiVoiceSession represents an active conversation session with sliding window history.
+// GeminiVoiceSession represents an active conversation session with sliding window history and transcript logging.
 type GeminiVoiceSession struct {
 	targetKey string
 	sessionID string
 	pool      *GeminiVoicePool
 	mu        sync.Mutex
 	history   []geminiContent
+	dataDir   string
 }
 
 var _ VoiceSession = (*GeminiVoiceSession)(nil)
@@ -220,7 +558,112 @@ func (s *GeminiVoiceSession) History() []geminiContent {
 	return cp
 }
 
-// Send submits a prompt to Gemini via streamGenerateContent SSE and notifies the sink.
+func (s *GeminiVoiceSession) transcriptPath() string {
+	if s.dataDir == "" {
+		return ""
+	}
+	return filepath.Join(s.dataDir, "brain", s.SessionID(), ".system_generated", "logs", "transcript.jsonl")
+}
+
+// hydrateHistory populates in-memory history from persistent transcript if available.
+func (s *GeminiVoiceSession) hydrateHistory() {
+	p := s.transcriptPath()
+	if p == "" {
+		return
+	}
+	data, err := os.ReadFile(p)
+	if err != nil || len(data) == 0 {
+		return
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	var loaded []geminiContent
+	for _, l := range lines {
+		trimmed := strings.TrimSpace(l)
+		if trimmed == "" {
+			continue
+		}
+		var entry struct {
+			Type    string `json:"type"`
+			Content string `json:"content"`
+		}
+		if err := json.Unmarshal([]byte(trimmed), &entry); err == nil {
+			if entry.Type == "USER_INPUT" && entry.Content != "" {
+				loaded = append(loaded, geminiContent{
+					Role:  "user",
+					Parts: []geminiPart{{Text: entry.Content}},
+				})
+			} else if entry.Type == "PLANNER_RESPONSE" && entry.Content != "" {
+				loaded = append(loaded, geminiContent{
+					Role:  "model",
+					Parts: []geminiPart{{Text: entry.Content}},
+				})
+			}
+		}
+	}
+	if len(loaded) > 0 {
+		maxMessages := 20
+		if s.pool != nil && s.pool.cfg.MaxHistoryTurns > 0 {
+			maxMessages = s.pool.cfg.MaxHistoryTurns * 2
+		}
+		if len(loaded) > maxMessages {
+			loaded = loaded[len(loaded)-maxMessages:]
+		}
+		s.history = loaded
+	}
+}
+
+// appendTranscript logs turns to transcript.jsonl for state persistence and recovery.
+func (s *GeminiVoiceSession) appendTranscript(userPrompt, modelResponse string) {
+	p := s.transcriptPath()
+	if p == "" {
+		return
+	}
+	dir := filepath.Dir(p)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		log.Printf("[GeminiVoiceSession] Warning creating transcript directory %s: %v", dir, err)
+		return
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	userEntry, err := json.Marshal(map[string]interface{}{
+		"source":     "USER_EXPLICIT",
+		"type":       "USER_INPUT",
+		"content":    userPrompt,
+		"created_at": now,
+	})
+	if err != nil {
+		return
+	}
+	modelEntry, err := json.Marshal(map[string]interface{}{
+		"source":     "MODEL",
+		"type":       "PLANNER_RESPONSE",
+		"content":    modelResponse,
+		"created_at": now,
+	})
+	if err != nil {
+		return
+	}
+
+	f, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		log.Printf("[GeminiVoiceSession] Warning opening transcript file %s: %v", p, err)
+		return
+	}
+	defer func() {
+		if cErr := f.Close(); cErr != nil {
+			log.Printf("[GeminiVoiceSession] Warning closing transcript file: %v", cErr)
+		}
+	}()
+
+	if _, wErr := f.Write(append(userEntry, '\n')); wErr != nil {
+		log.Printf("[GeminiVoiceSession] Warning writing user transcript: %v", wErr)
+	}
+	if _, wErr := f.Write(append(modelEntry, '\n')); wErr != nil {
+		log.Printf("[GeminiVoiceSession] Warning writing model transcript: %v", wErr)
+	}
+}
+
+// Send submits a prompt to Gemini via streamGenerateContent SSE, handling function calling and streaming deltas.
 func (s *GeminiVoiceSession) Send(prompt string, turn *TurnContext) error {
 	if s.pool != nil {
 		s.pool.mu.RLock()
@@ -258,10 +701,28 @@ func (s *GeminiVoiceSession) Send(prompt string, turn *TurnContext) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Formulate request contents: previous history + current user prompt
-	contents := make([]geminiContent, len(s.history), len(s.history)+1)
-	copy(contents, s.history)
-	contents = append(contents, geminiContent{
+	// Hydrate history from persistent transcript if in-memory history is empty
+	if len(s.history) == 0 {
+		s.hydrateHistory()
+	}
+
+	// Retrieve function declarations from MCPDispatcher if available
+	var tools []geminiTool
+	var dispatcher MCPDispatcher
+	if s.pool != nil && s.pool.cfg.MCPDispatcher != nil {
+		dispatcher = s.pool.cfg.MCPDispatcher
+		decls, dErr := dispatcher.ListDeclarations(ctx)
+		if dErr != nil {
+			log.Printf("[GeminiVoiceSession] Warning: failed to list MCP declarations: %v", dErr)
+		} else if len(decls) > 0 {
+			tools = []geminiTool{{FunctionDeclarations: decls}}
+		}
+	}
+
+	// Prepare conversation contents with user prompt
+	workingContents := make([]geminiContent, len(s.history), len(s.history)+1)
+	copy(workingContents, s.history)
+	workingContents = append(workingContents, geminiContent{
 		Role:  "user",
 		Parts: []geminiPart{{Text: prompt}},
 	})
@@ -273,25 +734,6 @@ func (s *GeminiVoiceSession) Send(prompt string, turn *TurnContext) error {
 				{Text: s.pool.cfg.SystemPrompt},
 			},
 		}
-	}
-
-	reqPayload := geminiStreamRequest{
-		Contents:          contents,
-		SystemInstruction: systemInstruction,
-		GenerationConfig: &geminiGenerationConfig{
-			ThinkingConfig: &geminiThinkingConfig{
-				ThinkingBudget: 0,
-			},
-		},
-	}
-
-	bodyBytes, err := json.Marshal(reqPayload)
-	if err != nil {
-		sanitizedErr := s.pool.sanitizeError(fmt.Errorf("failed to marshal request: %w", err))
-		if turn != nil && turn.Sink != nil {
-			turn.Sink.OnError(sanitizedErr)
-		}
-		return sanitizedErr
 	}
 
 	baseURL := "https://generativelanguage.googleapis.com"
@@ -306,133 +748,216 @@ func (s *GeminiVoiceSession) Send(prompt string, turn *TurnContext) error {
 	}
 
 	reqURL := fmt.Sprintf("%s/v1beta/models/%s:streamGenerateContent?key=%s&alt=sse", baseURL, model, url.QueryEscape(apiKey))
-
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(bodyBytes))
-	if err != nil {
-		sanitizedErr := s.pool.sanitizeError(fmt.Errorf("failed to create http request: %w", err))
-		if turn != nil && turn.Sink != nil {
-			turn.Sink.OnError(sanitizedErr)
-		}
-		return sanitizedErr
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-
 	client := http.DefaultClient
 	if s.pool != nil && s.pool.cfg.HTTPClient != nil {
 		client = s.pool.cfg.HTTPClient
 	}
 
-	resp, err := client.Do(httpReq)
-	if err != nil {
-		if ctx.Err() != nil {
-			err = ctx.Err()
-		}
-		sanitizedErr := s.pool.sanitizeError(err)
-		if turn != nil && turn.Sink != nil {
-			turn.Sink.OnError(sanitizedErr)
-		}
-		return sanitizedErr
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusTooManyRequests {
-		rateLimitErr := errors.New("rate limit exceeded: please try again shortly")
-		if turn != nil && turn.Sink != nil {
-			turn.Sink.OnError(rateLimitErr)
-		}
-		return rateLimitErr
-	}
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, rErr := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		var bodyStr string
-		if rErr != nil {
-			bodyStr = fmt.Sprintf("<error reading response body: %v>", rErr)
-		} else {
-			bodyStr = string(body)
-		}
-		rawErr := fmt.Errorf("gemini api returned status %d: %s", resp.StatusCode, bodyStr)
-		sanitizedErr := s.pool.sanitizeError(rawErr)
-		if turn != nil && turn.Sink != nil {
-			turn.Sink.OnError(sanitizedErr)
-		}
-		return sanitizedErr
-	}
-
-	reader := bufio.NewReader(resp.Body)
+	const maxToolIterations = 5
 	var fullText strings.Builder
-	var usage AgyUsage
+	var totalUsage AgyUsage
 	started := false
 
-	for {
-		line, rErr := reader.ReadBytes('\n')
-		if len(line) > 0 {
-			trimmed := strings.TrimRight(string(line), "\r\n")
-			if strings.HasPrefix(trimmed, "data:") {
-				data := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
-				if data != "" && data != "[DONE]" {
-					var chunk geminiStreamChunk
-					if uErr := json.Unmarshal([]byte(data), &chunk); uErr != nil {
-						sanitizedErr := s.pool.sanitizeError(fmt.Errorf("failed to unmarshal SSE chunk: %w", uErr))
-						if turn != nil && turn.Sink != nil {
-							turn.Sink.OnError(sanitizedErr)
-						}
-						return sanitizedErr
-					}
-
-					for _, cand := range chunk.Candidates {
-						if cand.Content != nil {
-							for _, part := range cand.Content.Parts {
-								if part.Text != "" {
-									if !started {
-										started = true
-										if turn != nil && turn.Sink != nil {
-											turn.Sink.OnTurnStarted()
-										}
-									}
-									if turn != nil && turn.Sink != nil {
-										turn.Sink.OnTextDelta(part.Text)
-									}
-									fullText.WriteString(part.Text)
-								}
-							}
-						}
-					}
-
-					if chunk.UsageMetadata != nil {
-						usage.InputTokens = chunk.UsageMetadata.PromptTokenCount
-						usage.OutputTokens = chunk.UsageMetadata.CandidatesTokenCount
-						usage.TotalTokens = chunk.UsageMetadata.TotalTokenCount
-						if usage.TotalTokens == 0 && (usage.InputTokens > 0 || usage.OutputTokens > 0) {
-							usage.TotalTokens = usage.InputTokens + usage.OutputTokens
-						}
-					}
-				}
-			}
+	for iteration := 0; iteration < maxToolIterations; iteration++ {
+		reqPayload := geminiStreamRequest{
+			Contents:          workingContents,
+			Tools:             tools,
+			SystemInstruction: systemInstruction,
+			GenerationConfig: &geminiGenerationConfig{
+				ThinkingConfig: &geminiThinkingConfig{
+					ThinkingBudget: 0,
+				},
+			},
 		}
 
-		if rErr != nil {
-			if errors.Is(rErr, io.EOF) {
-				break
-			}
-			readErr := rErr
-			if ctx.Err() != nil {
-				readErr = ctx.Err()
-			}
-			sanitizedErr := s.pool.sanitizeError(readErr)
+		bodyBytes, err := json.Marshal(reqPayload)
+		if err != nil {
+			sanitizedErr := s.pool.sanitizeError(fmt.Errorf("failed to marshal request: %w", err))
 			if turn != nil && turn.Sink != nil {
 				turn.Sink.OnError(sanitizedErr)
 			}
 			return sanitizedErr
 		}
-	}
 
-	if ctx.Err() != nil {
-		sanitizedErr := s.pool.sanitizeError(ctx.Err())
-		if turn != nil && turn.Sink != nil {
-			turn.Sink.OnError(sanitizedErr)
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(bodyBytes))
+		if err != nil {
+			sanitizedErr := s.pool.sanitizeError(fmt.Errorf("failed to create http request: %w", err))
+			if turn != nil && turn.Sink != nil {
+				turn.Sink.OnError(sanitizedErr)
+			}
+			return sanitizedErr
 		}
-		return sanitizedErr
+		httpReq.Header.Set("Content-Type", "application/json")
+
+		resp, err := client.Do(httpReq)
+		if err != nil {
+			if ctx.Err() != nil {
+				err = ctx.Err()
+			}
+			sanitizedErr := s.pool.sanitizeError(err)
+			if turn != nil && turn.Sink != nil {
+				turn.Sink.OnError(sanitizedErr)
+			}
+			return sanitizedErr
+		}
+
+		if resp.StatusCode == http.StatusTooManyRequests {
+			_ = resp.Body.Close()
+			rateLimitErr := errors.New("rate limit exceeded: please try again shortly")
+			if turn != nil && turn.Sink != nil {
+				turn.Sink.OnError(rateLimitErr)
+			}
+			return rateLimitErr
+		}
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			body, rErr := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			_ = resp.Body.Close()
+			var bodyStr string
+			if rErr != nil {
+				bodyStr = fmt.Sprintf("<error reading response body: %v>", rErr)
+			} else {
+				bodyStr = string(body)
+			}
+			rawErr := fmt.Errorf("gemini api returned status %d: %s", resp.StatusCode, bodyStr)
+			sanitizedErr := s.pool.sanitizeError(rawErr)
+			if turn != nil && turn.Sink != nil {
+				turn.Sink.OnError(sanitizedErr)
+			}
+			return sanitizedErr
+		}
+
+		reader := bufio.NewReader(resp.Body)
+		var pendingCalls []*geminiFunctionCall
+		var currentTurnText strings.Builder
+
+		for {
+			line, rErr := reader.ReadBytes('\n')
+			if len(line) > 0 {
+				trimmed := strings.TrimRight(string(line), "\r\n")
+				if strings.HasPrefix(trimmed, "data:") {
+					data := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
+					if data != "" && data != "[DONE]" {
+						var chunk geminiStreamChunk
+						if uErr := json.Unmarshal([]byte(data), &chunk); uErr != nil {
+							_ = resp.Body.Close()
+							sanitizedErr := s.pool.sanitizeError(fmt.Errorf("failed to unmarshal SSE chunk: %w", uErr))
+							if turn != nil && turn.Sink != nil {
+								turn.Sink.OnError(sanitizedErr)
+							}
+							return sanitizedErr
+						}
+
+						for _, cand := range chunk.Candidates {
+							if cand.Content != nil {
+								for _, part := range cand.Content.Parts {
+									if part.FunctionCall != nil {
+										pendingCalls = append(pendingCalls, part.FunctionCall)
+									}
+									if part.Text != "" {
+										if !started {
+											started = true
+											if turn != nil && turn.Sink != nil {
+												turn.Sink.OnTurnStarted()
+											}
+										}
+										if turn != nil && turn.Sink != nil {
+											turn.Sink.OnTextDelta(part.Text)
+										}
+										currentTurnText.WriteString(part.Text)
+										fullText.WriteString(part.Text)
+									}
+								}
+							}
+						}
+
+						if chunk.UsageMetadata != nil {
+							totalUsage.InputTokens += chunk.UsageMetadata.PromptTokenCount
+							totalUsage.OutputTokens += chunk.UsageMetadata.CandidatesTokenCount
+							totalUsage.TotalTokens += chunk.UsageMetadata.TotalTokenCount
+							if totalUsage.TotalTokens == 0 && (totalUsage.InputTokens > 0 || totalUsage.OutputTokens > 0) {
+								totalUsage.TotalTokens = totalUsage.InputTokens + totalUsage.OutputTokens
+							}
+						}
+					}
+				}
+			}
+
+			if rErr != nil {
+				_ = resp.Body.Close()
+				if errors.Is(rErr, io.EOF) {
+					break
+				}
+				readErr := rErr
+				if ctx.Err() != nil {
+					readErr = ctx.Err()
+				}
+				sanitizedErr := s.pool.sanitizeError(readErr)
+				if turn != nil && turn.Sink != nil {
+					turn.Sink.OnError(sanitizedErr)
+				}
+				return sanitizedErr
+			}
+		}
+
+		if ctx.Err() != nil {
+			sanitizedErr := s.pool.sanitizeError(ctx.Err())
+			if turn != nil && turn.Sink != nil {
+				turn.Sink.OnError(sanitizedErr)
+			}
+			return sanitizedErr
+		}
+
+		// If no function calls were requested, the model turn is complete
+		if len(pendingCalls) == 0 {
+			break
+		}
+
+		// Dispatch function calls via MCPDispatcher
+		for _, fc := range pendingCalls {
+			argsDesc := ""
+			if len(fc.Args) > 0 {
+				if b, bErr := json.Marshal(fc.Args); bErr == nil {
+					argsDesc = string(b)
+				}
+			}
+			if turn != nil && turn.Sink != nil {
+				turn.Sink.OnToolCall(fc.Name, argsDesc)
+			}
+
+			var toolOutput string
+			var execErr error
+			if dispatcher != nil {
+				toolOutput, execErr = dispatcher.Execute(ctx, fc.Name, fc.Args)
+			} else {
+				execErr = errors.New("no mcp dispatcher configured")
+			}
+
+			respMap := map[string]interface{}{"output": toolOutput}
+			if execErr != nil {
+				respMap = map[string]interface{}{"error": execErr.Error()}
+			}
+
+			workingContents = append(workingContents,
+				geminiContent{
+					Role: "model",
+					Parts: []geminiPart{
+						{FunctionCall: fc},
+					},
+				},
+				geminiContent{
+					Role: "function",
+					Parts: []geminiPart{
+						{
+							FunctionResponse: &geminiFunctionResp{
+								Name:     fc.Name,
+								Response: respMap,
+							},
+						},
+					},
+				},
+			)
+		}
 	}
 
 	resText := fullText.String()
@@ -459,10 +984,13 @@ func (s *GeminiVoiceSession) Send(prompt string, turn *TurnContext) error {
 		s.history = s.history[len(s.history)-maxMessages:]
 	}
 
+	// Persist turn transcript to disk
+	s.appendTranscript(prompt, resText)
+
 	if turn != nil && turn.Sink != nil {
 		turn.Sink.OnResult(&TurnResult{
 			Response: resText,
-			Usage:    usage,
+			Usage:    totalUsage,
 		})
 	}
 

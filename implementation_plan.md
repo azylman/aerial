@@ -101,24 +101,36 @@ voice:
 - Update `ExecuteVoiceTurn` to call `GetOrCreateSession`.
 - Ensure all existing unit tests in `pkg/queue` compile and pass.
 
-### Task 4: Direct Gemini API Voice Pool (`GeminiVoicePool`)
+### Task 4: Direct Gemini API Voice Pool (`GeminiVoicePool`) with MCP Tool Dispatcher
 - File: `brain/pkg/runner/gemini_voice_pool.go`, `brain/pkg/runner/gemini_voice_pool_test.go`
 - Implement `GeminiVoicePool` and `GeminiVoiceSession`:
   - HTTP streaming client to `generativelanguage.googleapis.com` with API key auth (`HarnessAPIKey` fallback to `APIKey`).
   - Zero thinking budget (`thinking_budget: 0`).
-  - Session message history buffer.
+  - Session message history buffer with sliding window history clamping.
   - Streaming event dispatch to `TurnSink` (`OnTurnStarted`, `OnTextDelta`, `OnResult`, `OnError`).
-  - Optional `ToolDispatcher` hook for tool calls.
-- Table-driven unit tests using `httptest.Server` covering streaming, zero thinking config, errors, and session isolation.
+  - **MCP Tool Calling & Dispatcher**:
+    - `MCPDispatcher` interface and `DefaultMCPDispatcher` discovery (`tools/list`) and execution (`tools/call`).
+    - Transparent support for both standard JSON and SSE Streamable HTTP (Home Assistant `ha-mcp`).
+    - Tool schema parameter cleanup (`$schema` stripping, uppercase OpenAPI types).
+    - Multi-turn tool calling loop (up to 5 iterations) feeding `functionCall` to dispatcher and `functionResponse` back to model.
+    - Sink notification of tool execution via `turn.Sink.OnToolCall(name, args)`.
+  - **State Persistence & Recovery**:
+    - Disk transcript logging to `<DataDir>/brain/<SessionID>/.system_generated/logs/transcript.jsonl`.
+    - Auto-hydration of recent history on session startup to prevent state drift.
+  - **Security & Hygiene**:
+    - Strict redaction of API keys from query parameters and headers in all logs and error messages.
+- Table-driven unit tests using `httptest.Server` covering streaming, zero thinking config, errors, MCP discovery, function calling, tool errors, transcript logging, and hydration.
 
 ### Task 5: Application Wiring & Example Configuration
 - File: `brain/main.go`, `config.example.yaml`, `brain/main_test.go`
 - Factory switch in `brain/main.go` selecting between `agy` and `gemini_api` based on `cfg.VoiceEngine()`.
+- Helper `extractVoiceMCPServers` extracting `scheduler`, `ha-mcp` (from `Common` and `Voice`), and custom voice servers.
 - **Fail-Safe Fallback**: If `gemini_api` is selected but no API key is configured (`harness_api_key` and `api_key` are both empty), log a warning and fall back to `UnifiedProcessPool` (`agy`).
-- Document `voice.engine` in `config.example.yaml`.
-- Update `main_test.go` with tests for both engine configurations.
+- Document `voice.engine` and partitioned `mcp_servers` (`voice:`, `common:`) in `config.example.yaml`.
+- Update `main_test.go` with tests for engine configurations and voice MCP extraction.
 
 ### Task 6: Pre-flight Verification & Diff Review
 - Run `./scripts/verify.sh --staged` and package test sweeps.
 - Consolidated Girl Gang / Devil's Advocate diff review.
-- Create `PR_DESCRIPTION.md` and submit via `scripts/aerial-pr.sh submit`.
+- Create `PR_DESCRIPTION.md` and push updates to PR branch.
+

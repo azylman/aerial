@@ -3271,3 +3271,61 @@ func TestRunBrainApp_VoiceEngineGeminiAPI(t *testing.T) {
 	}
 }
 
+func TestExtractVoiceMCPServers(t *testing.T) {
+	t.Parallel()
+
+	// 1. Nil config
+	nilResult := extractVoiceMCPServers(nil)
+	if len(nilResult) != 1 || nilResult[0].Name != "scheduler" {
+		t.Fatalf("expected scheduler default for nil config, got: %+v", nilResult)
+	}
+
+	// 2. Populated config with Common and Voice servers
+	cur := &config.ConfigData{
+		McpServers: config.TargetMcpConfig{
+			Common: map[string]json.RawMessage{
+				"ha-mcp": json.RawMessage(`{"serverUrl":"http://homeassistant:8123/api/webhook/test","headers":{"Authorization":"Bearer secret"}}`),
+			},
+			Voice: map[string]json.RawMessage{
+				"kiosk-mcp": json.RawMessage(`{"serverUrl":"http://kiosk:4000/mcp"}`),
+			},
+			Discord: map[string]json.RawMessage{
+				"discord-only": json.RawMessage(`{"serverUrl":"http://discord:4000/mcp"}`),
+			},
+		},
+	}
+
+	servers := extractVoiceMCPServers(cur)
+	serverMap := make(map[string]runner.MCPServerConfig)
+	for _, s := range servers {
+		serverMap[s.Name] = s
+	}
+
+	if len(serverMap) != 3 {
+		t.Fatalf("expected 3 voice servers (scheduler, ha-mcp, kiosk-mcp), got %d: %+v", len(serverMap), servers)
+	}
+
+	if _, ok := serverMap["scheduler"]; !ok {
+		t.Errorf("missing scheduler in voice servers")
+	}
+	if ha, ok := serverMap["ha-mcp"]; !ok {
+		t.Errorf("missing ha-mcp in voice servers")
+	} else {
+		if ha.ServerURL != "http://homeassistant:8123/api/webhook/test" {
+			t.Errorf("unexpected ServerURL for ha-mcp: %q", ha.ServerURL)
+		}
+		if ha.Headers["Authorization"] != "Bearer secret" {
+			t.Errorf("unexpected headers for ha-mcp: %+v", ha.Headers)
+		}
+	}
+	if kiosk, ok := serverMap["kiosk-mcp"]; !ok {
+		t.Errorf("missing kiosk-mcp in voice servers")
+	} else if kiosk.ServerURL != "http://kiosk:4000/mcp" {
+		t.Errorf("unexpected ServerURL for kiosk-mcp: %q", kiosk.ServerURL)
+	}
+	if _, ok := serverMap["discord-only"]; ok {
+		t.Errorf("discord-only server should not be in voice servers")
+	}
+}
+
+

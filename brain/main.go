@@ -1002,6 +1002,40 @@ func WithProcessSpawner(spawner runner.DaemonSpawner) BrainAppOption {
 	}
 }
 
+// extractVoiceMCPServers extracts voice-relevant MCP servers (scheduler, common, voice) from config.
+func extractVoiceMCPServers(cur *config.ConfigData) []runner.MCPServerConfig {
+	serverMap := make(map[string]runner.MCPServerConfig)
+	serverMap["scheduler"] = runner.MCPServerConfig{
+		Name:      "scheduler",
+		ServerURL: "http://scheduler-mcp:8080/mcp",
+	}
+	if cur != nil {
+		type srvJSON struct {
+			ServerURL string            `json:"serverUrl"`
+			Headers   map[string]string `json:"headers,omitempty"`
+		}
+		parseMap := func(m map[string]json.RawMessage) {
+			for name, raw := range m {
+				var sj srvJSON
+				if err := json.Unmarshal(raw, &sj); err == nil && strings.TrimSpace(sj.ServerURL) != "" {
+					serverMap[name] = runner.MCPServerConfig{
+						Name:      name,
+						ServerURL: strings.TrimSpace(sj.ServerURL),
+						Headers:   sj.Headers,
+					}
+				}
+			}
+		}
+		parseMap(cur.McpServers.Common)
+		parseMap(cur.McpServers.Voice)
+	}
+	result := make([]runner.MCPServerConfig, 0, len(serverMap))
+	for _, s := range serverMap {
+		result = append(result, s)
+	}
+	return result
+}
+
 // createVoiceProcessPool constructs a runner.VoiceProcessPool based on cfg.VoiceEngine().
 func createVoiceProcessPool(cfg *config.Config, voiceHome string, lowEffortModel string, spawner runner.DaemonSpawner) runner.VoiceProcessPool {
 	var cur *config.ConfigData
@@ -1031,13 +1065,16 @@ func createVoiceProcessPool(cfg *config.Config, voiceHome string, lowEffortModel
 			if strings.TrimSpace(cur.Voice.Model) != "" {
 				geminiModel = strings.TrimSpace(cur.Voice.Model)
 			}
+			mcpServers := extractVoiceMCPServers(cur)
 			voicePool = runner.NewGeminiVoicePool(runner.GeminiVoicePoolConfig{
 				APIKey:           apiKey,
 				Model:            geminiModel,
 				PrewarmedTargets: prewarmedTargets,
 				SystemPrompt:     cur.SystemPrompt,
+				MCPServers:       mcpServers,
+				DataDir:          cur.DataDir,
 			})
-			log.Printf("[INIT] Voice engine initialized with 'gemini_api' (model=%s, prewarmed=%v)", geminiModel, prewarmedTargets)
+			log.Printf("[INIT] Voice engine initialized with 'gemini_api' (model=%s, prewarmed=%v, mcp_servers=%d)", geminiModel, prewarmedTargets, len(mcpServers))
 		}
 	}
 	if voiceEngine != "gemini_api" {

@@ -116,8 +116,20 @@ voice:
 # ------------------------------------------------------------------------------
 # Custom MCP Servers
 # ------------------------------------------------------------------------------
-# Additional MCP servers to merge into ~/.gemini/config/mcp_config.json
-mcp_servers: {}
+# Additional MCP servers to merge into target-partitioned mcp_config.json:
+#   - common: Loaded across all targets (Discord, Voice, and sidecars).
+#   - discord: Loaded only for primary Discord bot interactions.
+#   - voice: Loaded for voice device interactions (e.g. Home Assistant ha-mcp).
+#   - ephemeral: Loaded for transient lightweight turns.
+#
+mcp_servers:
+  # common:
+  #   ha-mcp:
+  #     serverUrl: "http://homeassistant:8123/api/webhook/..."
+  # voice:
+  #   ha-mcp:
+  #     serverUrl: "http://homeassistant:8123/api/webhook/..."
+
 
 # ------------------------------------------------------------------------------
 # Dashboard Configuration
