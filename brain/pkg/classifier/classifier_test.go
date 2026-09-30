@@ -1869,26 +1869,26 @@ func TestBuildSystemOneState(t *testing.T) {
 	}
 
 	// Whole message preservation test:
-	// msg1: 400 runes
-	// msg2: 400 runes
-	// msg3: 400 runes
-	// Total: > MaxSystemOneStateRunes (1000).
+	// msg1: 250 runes
+	// msg2: 250 runes
+	// msg3: 250 runes
+	// Total: > MaxSystemOneStateRunes (600).
 	// Expectation: msg1 dropped completely, msg2 and msg3 preserved in full.
 	historyMulti := []db.Message{
-		{AuthorName: "user1", Content: strings.Repeat("1", 400)},
-		{AuthorName: "user2", Content: strings.Repeat("2", 400)},
+		{AuthorName: "user1", Content: strings.Repeat("1", 250)},
+		{AuthorName: "user2", Content: strings.Repeat("2", 250)},
 	}
 	burstMulti := []db.Message{
-		{AuthorName: "user3", Content: strings.Repeat("3", 400)},
+		{AuthorName: "user3", Content: strings.Repeat("3", 250)},
 	}
 	multiState := BuildSystemOneState(burstMulti, historyMulti)
 	if strings.Contains(multiState, "user1:") {
 		t.Errorf("expected user1 message to be dropped completely to preserve whole message boundaries, got: %s", multiState)
 	}
-	if !strings.Contains(multiState, "user2: "+strings.Repeat("2", 400)) {
+	if !strings.Contains(multiState, "user2: "+strings.Repeat("2", 250)) {
 		t.Errorf("expected user2 message to be preserved whole, got: %s", multiState)
 	}
-	if !strings.Contains(multiState, "user3: "+strings.Repeat("3", 400)) {
+	if !strings.Contains(multiState, "user3: "+strings.Repeat("3", 250)) {
 		t.Errorf("expected user3 message to be preserved whole, got: %s", multiState)
 	}
 
