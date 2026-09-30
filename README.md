@@ -109,7 +109,6 @@ User configuration and persona rules live in your private configuration reposito
        wake_mode: "classifier"   # "classifier" | "mention" | "all"
        ignore_bots: true
        ambient_wake_threshold: 0.80
-       ambient_wake_prompt: "Determine whether the target message is relevant to Aerial and warrants waking up."
        # Optional Channel Lifecycle Webhook Interceptors
        hooks:
          on_wake:
@@ -131,13 +130,12 @@ User configuration and persona rules live in your private configuration reposito
        wake_mode: "mention"
        ignore_bots: false
 
-     # Custom ambient prompt per channel
+     # Custom ambient threshold per channel
      dev-alerts:
        mode: "channel"
        wake_mode: "classifier"
        ignore_bots: false # Allow bot alerts
        ambient_wake_threshold: 0.70
-       ambient_wake_prompt: "Only wake up and respond if the user is asking about Kubernetes deployments, CI/CD pipeline failures, or production outages."
 
      # Ignore specific noisy channels
      memes:
@@ -149,7 +147,7 @@ User configuration and persona rules live in your private configuration reposito
      - `ignore` (or `disabled`): Channel is completely ignored (no messages evaluated, no startup sweeps).
    - **Wake Sensitivity Modes (`wake_mode`)**:
      - `mention` (or `mentions`, `direct`): Aerial responds strictly to explicit user pings (`@Aerial`) and direct replies. Keyword triggers and LLM classification are bypassed with zero token cost. Ambient channel chatter is silently appended into `transcript.jsonl` so Aerial retains complete conversational lookback when subsequently pinged.
-     - `classifier` (or `ambient`): Tier 1 wakes strictly on direct mentions and direct replies; Tier 2 ambient messages are scored (0.0 to 1.0) by `Gemini 3.8 Flash (Low)` against `ambient_wake_prompt` using recent channel context. Plaintext keywords do not trigger Tier 1 wakes.
+     - `classifier` (or `ambient`): Tier 1 wakes strictly on direct mentions and direct replies; Tier 2 ambient messages are scored (0.0 to 1.0) by `Gemini 3.8 Flash (Low)` using recent channel context. Plaintext keywords do not trigger Tier 1 wakes.
      - `all` (or `always`): Responds to every incoming message (default inside active threads).
    - **Channel Lifecycle Webhook Interceptors (`hooks:`)**:
      - Generic harness extension points allowing user services or sidecars to programmatically modify turn behavior:
