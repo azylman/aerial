@@ -1345,8 +1345,8 @@ func TestWorker_SessionDBRotation_PreTurn(t *testing.T) {
 		if err := os.MkdirAll(convDir, 0755); err != nil {
 			t.Fatalf("failed to create convDir: %v", err)
 		}
-		// Write .db (1 MB) and .db-wal (600 KB) -> 1.6 MB total >= DefaultMaxSessionDBBytes
-		_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, 1000*1024), 0644)
+		// Write .db alone (1.6 MB) >= DefaultMaxSessionDBBytes (1.5 MB)
+		_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, 1600*1024), 0644)
 		_ = os.WriteFile(filepath.Join(convDir, oldSess+".db-wal"), make([]byte, 600*1024), 0644)
 
 		_ = saveSessionID(store, "chan-db-thread", oldSess)
@@ -1406,6 +1406,82 @@ func TestWorker_SessionDBRotation_PreTurn(t *testing.T) {
 		prevSess, _ := getPreviousSessionID(store, "chan-db-thread")
 		if prevSess != oldSess {
 			t.Errorf("Expected previous session ID %q in store, got %q", oldSess, prevSess)
+		}
+	})
+
+	// Channel mode pre-flight WAL ignored (does not rotate when DB alone is below limit)
+	t.Run("ChannelMode_PreFlight_DBLimit_WALIgnored", func(t *testing.T) {
+		t.Parallel()
+		store := setupTestStore(t)
+		tmpDir := t.TempDir()
+		sessMgr := session.New(tmpDir, tmpDir)
+
+		oldSess := "sess-chan-db-wal"
+		convDir := filepath.Join(tmpDir, "conversations")
+		if err := os.MkdirAll(convDir, 0755); err != nil {
+			t.Fatalf("failed to create convDir: %v", err)
+		}
+		// Write .db (1 MB) and .db-wal (600 KB) -> DB alone (1 MB) < DefaultMaxSessionDBBytes (1.5 MB)
+		_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, 1000*1024), 0644)
+		_ = os.WriteFile(filepath.Join(convDir, oldSess+".db-wal"), make([]byte, 600*1024), 0644)
+
+		_ = saveSessionID(store, "chan-db-wal-thread", oldSess)
+		_, _ = incrementSessionTurnCount(store, "chan-db-wal-thread")
+
+		var mu sync.Mutex
+		var gotSessionID string
+		doneCh := make(chan struct{})
+
+		appCfg := config.NewFromData(&config.ConfigData{
+			Channels: map[string]config.ChannelPolicy{
+				"default": {Mode: "channel"},
+			},
+		})
+
+		pool := New(appCfg, WorkerPoolConfig{
+			SessionManager: sessMgr,
+			Store:          store,
+			TimeoutMinutes: 1,
+			BackoffBase:    10 * time.Millisecond,
+			MaxAttempts:    1,
+			RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+				mu.Lock()
+				gotSessionID = sessionID
+				mu.Unlock()
+				return mockJSONResponse(uuid.New().String(), "OK"), "", 0, nil
+			},
+			DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+				return nil
+			},
+			TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+				return func() {}
+			},
+			OnMessageCompleted: func(msg db.Message, finalStatus string) {
+				close(doneCh)
+			},
+		})
+		pool.Start()
+		defer pool.Stop()
+
+		msg := db.Message{ID: "msg-chan-db-wal", ThreadID: "chan-db-wal-thread", Content: "<@aerial> hello"}
+		_ = insertMessage(store, msg)
+		pool.Enqueue(msg)
+
+		select {
+		case <-doneCh:
+		case <-time.After(10 * time.Second):
+			t.Fatal("Timeout waiting for message")
+		}
+
+		mu.Lock()
+		if gotSessionID != oldSess {
+			t.Errorf("Expected session ID %q preserved when WAL is ignored, got: %q", oldSess, gotSessionID)
+		}
+		mu.Unlock()
+
+		prevSess, _ := getPreviousSessionID(store, "chan-db-wal-thread")
+		if prevSess != "" {
+			t.Errorf("Expected no rotation (empty previous session ID), got %q", prevSess)
 		}
 	})
 
@@ -3386,6 +3462,84 @@ func TestWorkerPool_SessionRotationInjectsToolActions(t *testing.T) {
 		}
 	})
 }
+
+func TestWorker_ColdStart_RetainsLookbackWithSummary(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	tmpDir := t.TempDir()
+	sessMgr := session.New(tmpDir, tmpDir)
+
+	threadID := "thread-cold-with-summary"
+	_ = store.SaveThreadSummary(context.Background(), threadID, "<THREAD_SUMMARY>Previously discussed OAuth</THREAD_SUMMARY>", "msg-recent-1")
+
+	CacheDiscordChannel(&discordgo.Channel{
+		ID:       threadID,
+		GuildID:  "g1",
+		ParentID: "parent-chan",
+		Type:     discordgo.ChannelTypeGuildPublicThread,
+	})
+
+	var mu sync.Mutex
+	var capturedPrompt string
+	doneCh := make(chan struct{})
+
+	appCfg := config.NewFromData(&config.ConfigData{
+		Channels: map[string]config.ChannelPolicy{
+			"default": {Mode: "thread"},
+		},
+	})
+
+	pool := New(appCfg, WorkerPoolConfig{
+		SessionManager: sessMgr,
+		Store:          store,
+		TimeoutMinutes: 1,
+		BackoffBase:    10 * time.Millisecond,
+		MaxAttempts:    1,
+		HistoryFetcher: func(ctx context.Context, tid, beforeID string, limit int) ([]HistoryMessage, error) {
+			return []HistoryMessage{
+				{ID: "msg-recent-1", AuthorName: "alex", Content: "where is the link?", CreatedAt: time.Now()},
+			}, nil
+		},
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
+			mu.Lock()
+			capturedPrompt = prompt
+			mu.Unlock()
+			return mockJSONResponse(uuid.New().String(), "OK"), "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
+			return func() {}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			close(doneCh)
+		},
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	msg := db.Message{ID: "msg-trigger", ThreadID: threadID, Content: "what link did you give me"}
+	_ = insertMessage(store, msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-doneCh:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Timeout waiting for message")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if !strings.Contains(capturedPrompt, "<THREAD_SUMMARY>Previously discussed OAuth</THREAD_SUMMARY>") {
+		t.Errorf("Expected prompt to contain thread summary, got: %s", capturedPrompt)
+	}
+	if !strings.Contains(capturedPrompt, "<CHANNEL_HISTORY>") || !strings.Contains(capturedPrompt, "where is the link?") {
+		t.Errorf("Expected prompt to contain channel history lookback on cold start, got: %s", capturedPrompt)
+	}
+}
+
 
 
 

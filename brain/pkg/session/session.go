@@ -1524,7 +1524,9 @@ func (m *Manager) GetTranscriptSize(sessionID string) int64 {
 }
 
 // GetSessionDBSize returns the maximum file size across candidate conversation SQLite databases
-// (.db + .db-wal) and protobufs (.pb) for the given session ID across configured session roots.
+// (.db) and protobufs (.pb) for the given session ID across configured session roots.
+// Ephemeral SQLite WAL files (.db-wal) are intentionally excluded so transient uncheckpointed
+// write buffers do not trigger premature session rotation.
 // Returns 0 if manager is nil, sessionID is empty/invalid, or files do not exist.
 func (m *Manager) GetSessionDBSize(sessionID string) int64 {
 	cleanID := strings.TrimSpace(sessionID)
@@ -1534,16 +1536,10 @@ func (m *Manager) GetSessionDBSize(sessionID string) int64 {
 
 	var maxSize int64
 	for _, dir := range m.conversationCandidateDirs() {
-		// Check SQLite database: .db + .db-wal
+		// Check SQLite database: .db (excluding transient .db-wal)
 		dbPath := filepath.Join(dir, cleanID+".db")
 		if fi, err := os.Stat(dbPath); err == nil && !fi.IsDir() {
 			candSize := fi.Size()
-			walPath := filepath.Join(dir, cleanID+".db-wal")
-			if walFi, walErr := os.Stat(walPath); walErr == nil && !walFi.IsDir() {
-				candSize += walFi.Size()
-			} else if walErr != nil && !errors.Is(walErr, os.ErrNotExist) {
-				log.Printf("[Session] Warning statting SQLite WAL file %s: %v", walPath, walErr)
-			}
 			if candSize > maxSize {
 				maxSize = candSize
 			}

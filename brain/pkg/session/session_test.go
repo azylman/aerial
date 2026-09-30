@@ -782,7 +782,7 @@ func TestFindLatestSessionDir_WithRegularFiles(t *testing.T) {
 }
 
 func TestAppendTranscriptStep_Errors(t *testing.T) {
-	err := appendTranscriptStep("/dev/null/impossible/transcript.jsonl", []byte("data"))
+	err := appendTranscriptStep(filepath.Join(t.TempDir(), "nonexistent", "transcript.jsonl"), []byte("data"))
 	if err == nil {
 		t.Error("expected error for impossible transcript path")
 	}
@@ -2693,14 +2693,14 @@ func TestManager_GetSessionDBSize(t *testing.T) {
 		t.Errorf("expected %d bytes, got %d", len(db1Content), sz)
 	}
 
-	// 7. SQLite .db file + .db-wal file (summed)
+	// 7. SQLite .db file + .db-wal file (.db-wal ignored to prevent WAL bloat rotation)
 	wal1Content := make([]byte, 300*1024) // 300 KB
 	if err := os.WriteFile(filepath.Join(dataConvDir, sess1+".db-wal"), wal1Content, 0644); err != nil {
 		t.Fatalf("write sess1.db-wal failed: %v", err)
 	}
-	expectedTotal := int64(len(db1Content) + len(wal1Content))
+	expectedTotal := int64(len(db1Content))
 	if sz := mgr.GetSessionDBSize(sess1); sz != expectedTotal {
-		t.Errorf("expected %d bytes (db+wal), got %d", expectedTotal, sz)
+		t.Errorf("expected %d bytes (ignoring wal), got %d", expectedTotal, sz)
 	}
 
 	// 8. Protobuf (.pb) file
