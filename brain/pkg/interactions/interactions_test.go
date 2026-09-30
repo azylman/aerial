@@ -985,8 +985,8 @@ func TestRouter_HandleRotate_StoreFailure_And_Pool(t *testing.T) {
 	mockSpawner := runner.NewMockDaemonSpawner()
 	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, mockSpawner)
 	lowPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, mockSpawner)
-	_, _ = procPool.GetOrCreate(context.Background(), "chan-rotate-err")
-	_, _ = lowPool.GetOrCreate(context.Background(), "chan-rotate-err")
+	_, _ = procPool.GetOrCreate(context.Background(), "chan-rotate-err", "")
+	_, _ = lowPool.GetOrCreate(context.Background(), "chan-rotate-err", "")
 
 	router.deps.Pool = queue.NewWorkerPool(queue.WorkerPoolConfig{
 		ProcessPool:          procPool,
@@ -1027,8 +1027,8 @@ func TestRouter_HandleInterrupt_AllFlagsAndFailures(t *testing.T) {
 	mockSpawner := runner.NewMockDaemonSpawner()
 	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, mockSpawner)
 	lowPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, mockSpawner)
-	_, _ = procPool.GetOrCreate(context.Background(), "chan-interrupt-noflags")
-	_, _ = lowPool.GetOrCreate(context.Background(), "chan-interrupt-noflags")
+	_, _ = procPool.GetOrCreate(context.Background(), "chan-interrupt-noflags", "")
+	_, _ = lowPool.GetOrCreate(context.Background(), "chan-interrupt-noflags", "")
 
 	router.deps.Store = store
 	router.deps.Pool = queue.NewWorkerPool(queue.WorkerPoolConfig{
