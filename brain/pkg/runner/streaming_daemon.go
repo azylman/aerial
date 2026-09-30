@@ -485,46 +485,77 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 
 		if activeTurn.Sink != nil {
 			respStr := extractResponseString(raw)
+
+			var status, errMsg string
 			if resObj, ok := raw["result"].(map[string]any); ok {
-				if status, ok := resObj["status"].(string); ok && status == "ERROR" {
-					if strings.TrimSpace(respStr) == "" || strings.HasPrefix(respStr, "[Tool Call Requested]:") {
-						var errMsg string
-						if em, ok := resObj["error"].(string); ok {
-							errMsg = em
-						}
-						if errMsg == "" {
-							errMsg = "daemon execution failed"
-						}
-						activeTurn.Sink.OnError(errors.New(errMsg))
-						return
-					}
-					if em, ok := resObj["error"].(string); ok && em != "" {
-						log.Printf("[StreamingDaemon] Notice: daemon reported error with substantive response: %s", em)
-					}
+				if s, ok := resObj["status"].(string); ok {
+					status = s
+				}
+				if em, ok := resObj["error"].(string); ok {
+					errMsg = em
 				}
 			}
+			if status == "" {
+				if s, ok := raw["status"].(string); ok {
+					status = s
+				}
+			}
+			if errMsg == "" {
+				if em, ok := raw["error"].(string); ok {
+					errMsg = em
+				}
+			}
+
+			if strings.EqualFold(status, "ERROR") {
+				if strings.TrimSpace(respStr) == "" || strings.HasPrefix(respStr, "[Tool Call Requested]:") {
+					if errMsg == "" {
+						errMsg = "daemon execution failed"
+					}
+					activeTurn.Sink.OnError(errors.New(errMsg))
+					return
+				}
+				if errMsg != "" {
+					log.Printf("[StreamingDaemon] Notice: daemon reported error with substantive response: %s", errMsg)
+				}
+			}
+
 			res := &TurnResult{
 				ConversationID: d.SessionID(),
 				Response:       respStr,
 				Duration:       time.Since(activeTurn.CreatedAt),
 			}
 			if resObj, ok := raw["result"].(map[string]any); ok {
+				if exitCode, ok := resObj["exit_code"].(float64); ok {
+					res.ExitCode = int(exitCode)
+				}
+			} else if exitCode, ok := raw["exit_code"].(float64); ok {
+				res.ExitCode = int(exitCode)
+			}
+
+			var usageObj map[string]any
+			if u, ok := raw["usage"].(map[string]any); ok {
+				usageObj = u
+			}
+			if resObj, ok := raw["result"].(map[string]any); ok {
 				if u, ok := resObj["usage"].(map[string]any); ok {
-					if it, ok := u["input_tokens"].(float64); ok {
-						res.Usage.InputTokens = int(it)
-					}
-					if ot, ok := u["output_tokens"].(float64); ok {
-						res.Usage.OutputTokens = int(ot)
-					}
-					if tt, ok := u["thinking_tokens"].(float64); ok {
-						res.Usage.ThinkingTokens = int(tt)
-					}
-					if crt, ok := u["cache_read_tokens"].(float64); ok {
-						res.Usage.CacheReadTokens = int(crt)
-					}
-					if tot, ok := u["total_tokens"].(float64); ok {
-						res.Usage.TotalTokens = int(tot)
-					}
+					usageObj = u
+				}
+			}
+			if usageObj != nil {
+				if it, ok := usageObj["input_tokens"].(float64); ok {
+					res.Usage.InputTokens = int(it)
+				}
+				if ot, ok := usageObj["output_tokens"].(float64); ok {
+					res.Usage.OutputTokens = int(ot)
+				}
+				if tt, ok := usageObj["thinking_tokens"].(float64); ok {
+					res.Usage.ThinkingTokens = int(tt)
+				}
+				if crt, ok := usageObj["cache_read_tokens"].(float64); ok {
+					res.Usage.CacheReadTokens = int(crt)
+				}
+				if tot, ok := usageObj["total_tokens"].(float64); ok {
+					res.Usage.TotalTokens = int(tot)
 				}
 			}
 			activeTurn.Sink.OnResult(res)
@@ -534,11 +565,26 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 
 func extractResponseString(raw map[string]any) string {
 	if resObj, ok := raw["result"].(map[string]any); ok {
-		if resp, ok := resObj["response"].(string); ok {
+		if resp, ok := resObj["response"].(string); ok && strings.TrimSpace(resp) != "" {
+			return resp
+		}
+		if resp, ok := resObj["result"].(string); ok && strings.TrimSpace(resp) != "" {
+			return resp
+		}
+		if resp, ok := resObj["content"].(string); ok && strings.TrimSpace(resp) != "" {
+			return resp
+		}
+		if resp, ok := resObj["text"].(string); ok && strings.TrimSpace(resp) != "" {
 			return resp
 		}
 	}
-	if resp, ok := raw["response"].(string); ok {
+	if resp, ok := raw["response"].(string); ok && strings.TrimSpace(resp) != "" {
+		return resp
+	}
+	if resp, ok := raw["content"].(string); ok && strings.TrimSpace(resp) != "" {
+		return resp
+	}
+	if resp, ok := raw["text"].(string); ok && strings.TrimSpace(resp) != "" {
 		return resp
 	}
 	return ""

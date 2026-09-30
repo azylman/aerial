@@ -1236,6 +1236,60 @@ func TestStreamingDaemon_ResultWithErrorStatusAndSubstantiveResponse(t *testing.
 		t.Errorf("expected nil result when response is empty, got %+v", sinkEmptyResp.result)
 	}
 	sinkEmptyResp.mu.Unlock()
+
+	// Case 3: Flat format with lowercase status="error" and substantive response
+	sinkFlatResult := newMockTurnSink()
+	turn3 := &TurnContext{
+		TurnID:    "t-err-flat-result",
+		Sink:      sinkFlatResult,
+		CreatedAt: time.Now(),
+	}
+	daemon.inflight = []*TurnContext{turn3}
+
+	flatLineResult := `{"event":"result","status":"error","error":"429 quota exhaustion","response":"Here is the flat result string."}`
+	daemon.dispatchNDJSONLine(flatLineResult)
+
+	select {
+	case <-sinkFlatResult.done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("timed out waiting for sink completion")
+	}
+
+	sinkFlatResult.mu.Lock()
+	if sinkFlatResult.err != nil {
+		t.Errorf("expected nil error for flat result string with error status, got %v", sinkFlatResult.err)
+	}
+	if sinkFlatResult.result == nil || sinkFlatResult.result.Response != "Here is the flat result string." {
+		t.Errorf("unexpected result: %+v", sinkFlatResult.result)
+	}
+	sinkFlatResult.mu.Unlock()
+
+	// Case 4: Nested format with lowercase status="error" and response in "result"
+	sinkNestedResult := newMockTurnSink()
+	turn4 := &TurnContext{
+		TurnID:    "t-err-nested-result",
+		Sink:      sinkNestedResult,
+		CreatedAt: time.Now(),
+	}
+	daemon.inflight = []*TurnContext{turn4}
+
+	nestedLineResult := `{"event":"result","result":{"status":"error","error":"model retry notice","result":"Here is nested result string."}}`
+	daemon.dispatchNDJSONLine(nestedLineResult)
+
+	select {
+	case <-sinkNestedResult.done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("timed out waiting for sink completion")
+	}
+
+	sinkNestedResult.mu.Lock()
+	if sinkNestedResult.err != nil {
+		t.Errorf("expected nil error for nested result with error status, got %v", sinkNestedResult.err)
+	}
+	if sinkNestedResult.result == nil || sinkNestedResult.result.Response != "Here is nested result string." {
+		t.Errorf("unexpected result: %+v", sinkNestedResult.result)
+	}
+	sinkNestedResult.mu.Unlock()
 }
 
 func TestStreamingDaemon_DefaultHandshakeTimeout(t *testing.T) {
