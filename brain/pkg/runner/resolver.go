@@ -63,8 +63,13 @@ func (r *TurnResolver) Resolve(ctx context.Context, res *TurnResult, err error, 
 
 	// 2. Transcript Rescue
 	// If error occurred or result response was non-substantive, check transcript on disk.
-	if r.Extractor != nil && outcome.SessionID != "" && r.Extractor.SessionExistsOnDisk(outcome.SessionID) {
-		if transcriptResp, _ := r.Extractor.ExtractResponseAndError(outcome.SessionID); IsSubstantiveResponse(transcriptResp) {
+	// Never perform transcript rescue on service unavailable (503) or quota pauses (429),
+	// which are transient service errors that must be retried.
+	isServiceUnavailable := err != nil && (strings.Contains(strings.ToLower(err.Error()), "503") ||
+		strings.Contains(strings.ToLower(err.Error()), "service unavailable") ||
+		IsQuotaPause(err.Error(), ""))
+	if !isServiceUnavailable && r.Extractor != nil && outcome.SessionID != "" && r.Extractor.SessionExistsOnDisk(outcome.SessionID) {
+		if transcriptResp, _ := r.Extractor.ExtractResponseAndError(outcome.SessionID); IsSubstantiveResponse(transcriptResp) && !strings.HasPrefix(transcriptResp, "[Tool Call Requested]:") {
 			log.Printf("[TurnResolver] Recovered substantive response directly from session %s transcript after runner error/empty result: %v", outcome.SessionID, err)
 			outcome.IsSuccess = true
 			outcome.RecoveredFromTranscript = true
@@ -123,12 +128,12 @@ func (r *TurnResolver) Resolve(ctx context.Context, res *TurnResult, err error, 
 	}
 
 	// Check quota pauses and rate limits
-	if IsQuotaPause(errDetail, "") || strings.Contains(lowerErr, "resource_exhausted") || strings.Contains(lowerErr, "429") || strings.Contains(lowerErr, "rate limit") {
+	if IsQuotaPause(errDetail, "") || strings.Contains(lowerErr, "resource_exhausted") || strings.Contains(lowerErr, "429") || strings.Contains(lowerErr, "rate limit") || strings.Contains(lowerErr, "out of memory") || strings.Contains(lowerErr, "transient") {
 		outcome.IsTransient = true
 		return outcome
 	}
 
-	if containsFatalStderrError(errDetail) || isNonTransientError(errDetail) {
+	if isNonTransientError(errDetail) || strings.Contains(lowerErr, "unrecoverable") {
 		outcome.IsTransient = false
 		return outcome
 	}

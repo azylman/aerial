@@ -67,10 +67,10 @@ type WorkerPoolConfig struct {
 	IdleTimeout    time.Duration
 	DrainTimeout       time.Duration
 	RetryDelayOverride time.Duration
-	SessionManager     *session.Manager
-	ProcessPool        *runner.UnifiedProcessPool
-	LowEffortProcessPool *runner.UnifiedProcessPool
-	VoiceProcessPool   runner.VoiceProcessPool
+	SessionManager       *session.Manager
+	ProcessPool          runner.AgentPool
+	LowEffortProcessPool runner.AgentPool
+	VoiceProcessPool     runner.AgentPool
 	MaintenanceInterval time.Duration
 
 	// Optional hooks for testing/custom overrides
@@ -102,7 +102,6 @@ type WorkerPool struct {
 	appCfg            *config.Config
 	overrideModel     string
 	cfg               WorkerPoolConfig
-	hasCustomRunner   bool
 	sessionMgr        *session.Manager
 	mu                sync.Mutex
 	threadChs         map[string]*threadWorkerState
@@ -114,9 +113,9 @@ type WorkerPool struct {
 	scopeLocks        sync.Map
 	webhookDispatcher WebhookDispatcher
 	summaryGroup      singleflight.Group
-	processPool          *runner.UnifiedProcessPool
-	lowEffortProcessPool *runner.UnifiedProcessPool
-	voiceProcessPool     runner.VoiceProcessPool
+	processPool          runner.AgentPool
+	lowEffortProcessPool runner.AgentPool
+	voiceProcessPool     runner.AgentPool
 }
 
 // SummaryGroup returns the singleflight.Group coordinating thread summarizations for this pool instance.
@@ -227,6 +226,9 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 			return "", "", 1, fmt.Errorf("queue: RunnerWithOptionsFunc not configured on WorkerPool")
 		}
 	}
+	if hasCustomRunner {
+		cfg.ProcessPool = newLegacyRunnerAgentPool(cfg, cfg.ProcessPool)
+	}
 	if cfg.NotifierFunc == nil {
 		notifierRunner := cfg.NotifierRunnerFunc
 		if notifierRunner == nil && isExplicitAppCfg {
@@ -292,7 +294,11 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 		)
 	}
 	if cfg.LLMFunc == nil && cfg.ProcessPool != nil {
-		cfg.LLMFunc = cfg.ProcessPool.EphemeralLLMFunc("ephemeral:summarizer")
+		if ep, ok := cfg.ProcessPool.(interface {
+			EphemeralLLMFunc(string) runner.LLMFunc
+		}); ok {
+			cfg.LLMFunc = ep.EphemeralLLMFunc("ephemeral:summarizer")
+		}
 	}
 	if cfg.ResolveChannelPolicy == nil {
 		cfg.ResolveChannelPolicy = func(channelID, channelName string) config.ChannelPolicy {
@@ -317,7 +323,6 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 		processPool:          cfg.ProcessPool,
 		lowEffortProcessPool: cfg.LowEffortProcessPool,
 		voiceProcessPool:     cfg.VoiceProcessPool,
-		hasCustomRunner:   hasCustomRunner,
 		sessionMgr:        sessMgr,
 		threadChs:         make(map[string]*threadWorkerState),
 		ctx:               ctx,
@@ -667,7 +672,15 @@ func (p *WorkerPool) ProcessPool() *runner.UnifiedProcessPool {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.processPool
+	if up, ok := p.processPool.(*runner.UnifiedProcessPool); ok {
+		return up
+	}
+	if lp, ok := p.processPool.(*legacyRunnerAgentPool); ok {
+		if up, ok := lp.trackerPool.(*runner.UnifiedProcessPool); ok {
+			return up
+		}
+	}
+	return nil
 }
 
 // LowEffortProcessPool returns the configured runner.UnifiedProcessPool for low effort turns, or nil if unconfigured or p is nil.
@@ -677,7 +690,10 @@ func (p *WorkerPool) LowEffortProcessPool() *runner.UnifiedProcessPool {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.lowEffortProcessPool
+	if up, ok := p.lowEffortProcessPool.(*runner.UnifiedProcessPool); ok {
+		return up
+	}
+	return nil
 }
 
 // VoiceProcessPool returns the configured runner.VoiceProcessPool for voice turns, or nil if unconfigured or p is nil.
@@ -688,6 +704,16 @@ func (p *WorkerPool) VoiceProcessPool() runner.VoiceProcessPool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.voiceProcessPool
+}
+
+// AgentPool returns the configured primary runner.AgentPool.
+func (p *WorkerPool) AgentPool() runner.AgentPool {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.processPool
 }
 
 // MarkDirty notifies the process pools to mark active daemons dirty and evict idle daemons.
@@ -705,10 +731,14 @@ func (p *WorkerPool) MarkDirty() {
 	}
 	p.mu.Unlock()
 	if procPool != nil {
-		procPool.MarkDirty()
+		if md, ok := procPool.(interface{ MarkDirty() }); ok {
+			md.MarkDirty()
+		}
 	}
 	if lowPool != nil {
-		lowPool.MarkDirty()
+		if md, ok := lowPool.(interface{ MarkDirty() }); ok {
+			md.MarkDirty()
+		}
 	}
 	if voicePool != nil {
 		if targetUpdater, ok := voicePool.(interface{ UpdatePrewarmedTargets([]string) }); ok {
@@ -806,39 +836,6 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 		return reply, conv, err
 	}
 
-	// Custom runner fallback (for unit tests using legacy RunnerFunc / RunnerWithOptionsFunc)
-	if p.hasCustomRunner {
-		if onStatus != nil {
-			onStatus(FormatToolStatus("processing", "", 0))
-		}
-		model := p.LowEffortModel()
-		timeout := p.cfg.TimeoutMinutes
-		if timeout <= 0 {
-			timeout = DefaultTimeoutMinutes
-		}
-		start := time.Now()
-		stdout, stderr, exitCode, err := p.cfg.RunnerWithOptionsFunc(ctx, p.cfg.AgyBin, prompt, deviceKey, p.cfg.APIKey, model, runner.DefaultWatchdogOptions(timeout))
-		runStatus := "success"
-		if err != nil || exitCode != 0 {
-			runStatus = "error"
-		}
-		metrics.RecordRunnerExecution(runStatus, model, "voice", time.Since(start))
-		if err != nil {
-			return "", deviceKey, err
-		}
-		if exitCode != 0 {
-			return "", deviceKey, fmt.Errorf("runner failed with exit code %d: %s", exitCode, stderr)
-		}
-		resp, parseErr := runner.ParseAgyOutput(stdout)
-		if parseErr != nil {
-			return strings.TrimSpace(stdout), deviceKey, nil
-		}
-		if resp.Response != "" {
-			return strings.TrimSpace(resp.Response), deviceKey, nil
-		}
-		return strings.TrimSpace(stdout), deviceKey, nil
-	}
-
 	p.mu.Lock()
 	var procPool runner.VoiceProcessPool
 	if p.voiceProcessPool != nil {
@@ -866,9 +863,12 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 	sink := newVoiceTurnSink(ctx, onStatus, sentenceCb, detector)
 	turnCtx := &runner.TurnContext{
 		TurnID:    uuid.New().String(),
+		SessionID: deviceKey,
+		Model:     model,
 		Prompt:    prompt,
 		Sink:      sink,
 		CreatedAt: time.Now(),
+		Ctx:       ctx,
 	}
 
 	if sendErr := daemon.Send(prompt, turnCtx); sendErr != nil {
@@ -950,4 +950,208 @@ func newVoiceTurnSink(ctx context.Context, onStatus func(string), onSentence fun
 	})
 	return sink
 }
+
+type legacyRunnerAgentPool struct {
+	cfg         WorkerPoolConfig
+	trackerPool runner.AgentPool
+	mu          sync.Mutex
+	sessions    map[string]*legacyRunnerAgentSession
+}
+
+func newLegacyRunnerAgentPool(cfg WorkerPoolConfig, trackerPool runner.AgentPool) *legacyRunnerAgentPool {
+	return &legacyRunnerAgentPool{
+		cfg:         cfg,
+		trackerPool: trackerPool,
+		sessions:    make(map[string]*legacyRunnerAgentSession),
+	}
+}
+
+func (p *legacyRunnerAgentPool) Get(threadID string) (*runner.StreamingDaemon, bool) {
+	if p.trackerPool != nil {
+		if tp, ok := p.trackerPool.(interface {
+			Get(string) (*runner.StreamingDaemon, bool)
+		}); ok {
+			return tp.Get(threadID)
+		}
+	}
+	return nil, false
+}
+
+func (p *legacyRunnerAgentPool) GetOrCreate(ctx context.Context, threadID string) (*runner.StreamingDaemon, error) {
+	if p.trackerPool != nil {
+		if tp, ok := p.trackerPool.(interface {
+			GetOrCreate(context.Context, string) (*runner.StreamingDaemon, error)
+		}); ok {
+			return tp.GetOrCreate(ctx, threadID)
+		}
+	}
+	return nil, fmt.Errorf("no underlying process pool")
+}
+
+func (p *legacyRunnerAgentPool) GetOrCreateSession(ctx context.Context, targetKey string) (runner.AgentSession, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if s, ok := p.sessions[targetKey]; ok {
+		return s, nil
+	}
+	s := &legacyRunnerAgentSession{
+		pool:      p,
+		targetKey: targetKey,
+	}
+	p.sessions[targetKey] = s
+	return s, nil
+}
+
+func (p *legacyRunnerAgentPool) Initialize(ctx context.Context) error {
+	return nil
+}
+
+func (p *legacyRunnerAgentPool) RotateDaemon(ctx context.Context, targetKey string, newSess string) (*runner.StreamingDaemon, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if s, ok := p.sessions[targetKey]; ok {
+		s.mu.Lock()
+		s.sessionID = newSess
+		s.mu.Unlock()
+	}
+	delete(p.sessions, targetKey)
+	return nil, nil
+}
+
+func (p *legacyRunnerAgentPool) Close() error {
+	return nil
+}
+
+var _ runner.AgentPool = (*legacyRunnerAgentPool)(nil)
+
+type legacyRunnerAgentSession struct {
+	pool      *legacyRunnerAgentPool
+	targetKey string
+	sessionID string
+	mu        sync.Mutex
+}
+
+func (s *legacyRunnerAgentSession) SessionID() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sessionID
+}
+
+func (s *legacyRunnerAgentSession) Send(prompt string, turn *runner.TurnContext) error {
+	if turn != nil && turn.Sink != nil {
+		turn.Sink.OnTurnStarted()
+		turn.Sink.OnToolCall("processing", "")
+	}
+	timeout := s.pool.cfg.TimeoutMinutes
+	if timeout <= 0 {
+		timeout = DefaultTimeoutMinutes
+	}
+	watchdogOpts := runner.DefaultWatchdogOptions(timeout)
+	if s.pool.cfg.SessionManager != nil {
+		watchdogOpts.TranscriptDirs = s.pool.cfg.SessionManager.Roots()
+		watchdogOpts.HomeDir = s.pool.cfg.SessionManager.HomeDir()
+	}
+	if strings.TrimSpace(s.targetKey) != "" {
+		watchdogOpts.TargetID = strings.TrimSpace(s.targetKey)
+	}
+	ctx := context.Background()
+	if turn != nil && turn.Ctx != nil {
+		ctx = turn.Ctx
+	}
+	if turn != nil && turn.Sink != nil {
+		watchdogOpts.StepUpdateHandler = func(event *runner.StepUpdateEvent) {
+			if event != nil && event.Type == "tool_call" {
+				cmd := ""
+				if event.ToolInfo != nil {
+					cmd = event.ToolInfo.Parameters.CommandLine
+				}
+				turn.Sink.OnToolCall(event.ToolName, cmd)
+			}
+		}
+	}
+	model := s.pool.cfg.Model
+	if turn != nil && turn.Model != "" {
+		model = turn.Model
+	} else if s.pool.cfg.LowEffortModel != "" && strings.HasPrefix(s.targetKey, "voice-") {
+		model = s.pool.cfg.LowEffortModel
+	}
+	var sessID string
+	if turn != nil {
+		sessID = turn.SessionID
+	} else {
+		sessID = s.SessionID()
+	}
+	stdout, stderr, exitCode, err := s.pool.cfg.RunnerWithOptionsFunc(
+		ctx,
+		s.pool.cfg.AgyBin,
+		prompt,
+		sessID,
+		s.pool.cfg.APIKey,
+		model,
+		watchdogOpts,
+	)
+	if extSess := runner.ExtractSessionID(stdout+"\n"+stderr, time.Time{}); extSess != "" {
+		s.mu.Lock()
+		s.sessionID = extSess
+		s.mu.Unlock()
+	}
+	if err != nil {
+		combinedErr := err
+		if stderr != "" && !strings.Contains(err.Error(), stderr) {
+			combinedErr = fmt.Errorf("%w: %s", err, stderr)
+		}
+		if turn != nil && turn.Sink != nil {
+			turn.Sink.OnError(combinedErr)
+		}
+		return combinedErr
+	}
+	if exitCode != 0 {
+		runErr := fmt.Errorf("runner failed with exit code %d: %s", exitCode, stderr)
+		if turn != nil && turn.Sink != nil {
+			turn.Sink.OnError(runErr)
+		}
+		return runErr
+	}
+	respText := stdout
+	var parsedUsage runner.AgyUsage
+	if parsed, pErr := runner.ParseAgyOutput(stdout); pErr == nil {
+		respText = parsed.Response
+		if parsed.ConversationID != "" {
+			s.mu.Lock()
+			s.sessionID = parsed.ConversationID
+			s.mu.Unlock()
+		}
+		parsedUsage = parsed.Usage
+		if parsed.Error != "" {
+			runErr := fmt.Errorf("%s", parsed.Error)
+			if turn != nil && turn.Sink != nil {
+				turn.Sink.OnError(runErr)
+			}
+			return runErr
+		}
+		if parsed.Status != "" && strings.ToUpper(parsed.Status) != "SUCCESS" {
+			runErr := fmt.Errorf("runner status: %s", parsed.Status)
+			if turn != nil && turn.Sink != nil {
+				turn.Sink.OnError(runErr)
+			}
+			return runErr
+		}
+	}
+	if turn != nil && turn.Sink != nil {
+		resSess := s.SessionID()
+		if resSess == "" && turn.SessionID != "" {
+			resSess = turn.SessionID
+		}
+		turn.Sink.OnResult(&runner.TurnResult{
+			ConversationID: resSess,
+			Response:       strings.TrimSpace(respText),
+			Stderr:         stderr,
+			Usage:          parsedUsage,
+		})
+	}
+	return nil
+}
+
+var _ runner.AgentSession = (*legacyRunnerAgentSession)(nil)
+
 

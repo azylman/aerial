@@ -415,7 +415,21 @@ type GeminiVoicePool struct {
 	closed   bool
 }
 
-var _ VoiceProcessPool = (*GeminiVoicePool)(nil)
+var (
+	_ AgentPool        = (*GeminiVoicePool)(nil)
+	_ VoiceProcessPool = (*GeminiVoicePool)(nil)
+)
+
+// GeminiAPIPool is an alias for GeminiVoicePool as a general-purpose execution pool.
+type GeminiAPIPool = GeminiVoicePool
+
+// GeminiAPIPoolConfig is an alias for GeminiVoicePoolConfig.
+type GeminiAPIPoolConfig = GeminiVoicePoolConfig
+
+// NewGeminiAPIPool instantiates a GeminiAPIPool.
+func NewGeminiAPIPool(cfg GeminiAPIPoolConfig) *GeminiAPIPool {
+	return NewGeminiVoicePool(cfg)
+}
 
 // NewGeminiVoicePool instantiates a GeminiVoicePool with sensible defaults.
 func NewGeminiVoicePool(cfg GeminiVoicePoolConfig) *GeminiVoicePool {
@@ -533,7 +547,13 @@ type GeminiVoiceSession struct {
 	dataDir   string
 }
 
-var _ VoiceSession = (*GeminiVoiceSession)(nil)
+var (
+	_ AgentSession = (*GeminiVoiceSession)(nil)
+	_ VoiceSession = (*GeminiVoiceSession)(nil)
+)
+
+// GeminiAPISession is an alias for GeminiVoiceSession.
+type GeminiAPISession = GeminiVoiceSession
 
 // SessionID returns the identifier for this voice session.
 func (s *GeminiVoiceSession) SessionID() string {

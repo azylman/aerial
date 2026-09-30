@@ -35,7 +35,6 @@ type TurnResult struct {
 	Usage          AgyUsage
 	ActiveTasks    []TaskMetadata
 	IsYieldTrap    bool
-	ExitCode       int
 	Duration       time.Duration
 }
 

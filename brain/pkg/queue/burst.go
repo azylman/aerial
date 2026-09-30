@@ -10,6 +10,7 @@ import (
 	"github.com/azylman/aerial/brain/pkg/db"
 	"github.com/azylman/aerial/brain/pkg/memory"
 	"github.com/azylman/aerial/brain/pkg/metrics"
+	"github.com/azylman/aerial/brain/pkg/runner"
 	"github.com/azylman/aerial/brain/pkg/sanitizer"
 )
 
@@ -128,13 +129,21 @@ func (p *WorkerPool) runThreadWorker(threadID string, state *threadWorkerState) 
 			if len(state.ch) == 0 && state.activeEnqueuers == 0 {
 				hasActiveTasks := false
 				if p.processPool != nil {
-					if d, ok := p.processPool.Get(threadID); ok && d != nil && d.TaskTracker().ActiveCount() > 0 {
-						hasActiveTasks = true
+					if gp, ok := p.processPool.(interface {
+						Get(string) (*runner.StreamingDaemon, bool)
+					}); ok {
+						if d, ok := gp.Get(threadID); ok && d != nil && d.TaskTracker().ActiveCount() > 0 {
+							hasActiveTasks = true
+						}
 					}
 				}
 				if !hasActiveTasks && p.lowEffortProcessPool != nil {
-					if d, ok := p.lowEffortProcessPool.Get(threadID); ok && d != nil && d.TaskTracker().ActiveCount() > 0 {
-						hasActiveTasks = true
+					if gp, ok := p.lowEffortProcessPool.(interface {
+						Get(string) (*runner.StreamingDaemon, bool)
+					}); ok {
+						if d, ok := gp.Get(threadID); ok && d != nil && d.TaskTracker().ActiveCount() > 0 {
+							hasActiveTasks = true
+						}
 					}
 				}
 				if hasActiveTasks {

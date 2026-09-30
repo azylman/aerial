@@ -45,6 +45,8 @@ type UnifiedProcessPool struct {
 }
 
 var (
+	_ AgentPool        = (*UnifiedProcessPool)(nil)
+	_ AgentSession     = (*StreamingDaemon)(nil)
 	_ VoiceProcessPool = (*UnifiedProcessPool)(nil)
 	_ VoiceSession     = (*StreamingDaemon)(nil)
 )

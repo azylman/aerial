@@ -114,3 +114,5 @@ func rotateSessionID(store db.Store, sessionKey, newSessionID string) error {
 	}
 	return store.RotateSessionID(context.Background(), sessionKey, newSessionID)
 }
+
+
