@@ -1611,5 +1611,28 @@ func TestStreamingDaemon_TranscriptRescue_FallbackOnError(t *testing.T) {
 	}
 }
 
+func TestStreamingDaemon_SetTranscriptRescuer(t *testing.T) {
+	t.Parallel()
+
+	var nilDaemon *StreamingDaemon
+	nilDaemon.SetTranscriptRescuer(nil)
+
+	d := &StreamingDaemon{}
+	var called bool
+	rescuer := func(convID string, since time.Time) string {
+		called = true
+		return "rescued"
+	}
+	d.SetTranscriptRescuer(rescuer)
+	if d.cfg.TranscriptRescuer == nil {
+		t.Fatalf("expected TranscriptRescuer to be set")
+	}
+	d.cfg.TranscriptRescuer("conv", time.Now())
+	if !called {
+		t.Fatalf("expected rescuer function to be executed")
+	}
+}
+
+
 
 

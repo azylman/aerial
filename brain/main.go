@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1033,61 +1036,109 @@ func extractVoiceMCPServers(cur *config.ConfigData) []runner.MCPServerConfig {
 	for _, s := range serverMap {
 		result = append(result, s)
 	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Name < result[j].Name
+	})
 	return result
 }
 
-// createVoiceProcessPool constructs a runner.AgentPool based on cfg.VoiceEngine().
+// createVoiceProcessPool constructs a runner.AgentPool based on cfg.VoiceEngine()
+// wrapped in runner.DynamicVoicePool with a factory closure evaluating cfg.Current() dynamically.
 func createVoiceProcessPool(cfg *config.Config, voiceHome string, lowEffortModel string, spawner runner.DaemonSpawner) runner.AgentPool {
-	var cur *config.ConfigData
-	var voiceEngine string
-	var prewarmedTargets []string
-	if cfg != nil {
-		cur = cfg.Current()
-		voiceEngine = cfg.VoiceEngine()
-		prewarmedTargets = cfg.VoicePrewarmedTargets()
-	} else {
-		cur = config.DefaultConfigData()
-		voiceEngine = "agy"
-		prewarmedTargets = []string{}
+	buildPool := func() (runner.AgentPool, string, error) {
+		var cur *config.ConfigData
+		var voiceEngine string
+		var prewarmedTargets []string
+		if cfg != nil {
+			cur = cfg.Current()
+			voiceEngine = cfg.VoiceEngine()
+			prewarmedTargets = cfg.VoicePrewarmedTargets()
+		} else {
+			cur = config.DefaultConfigData()
+			voiceEngine = "agy"
+			prewarmedTargets = []string{}
+		}
+
+		var voicePool runner.AgentPool
+		var effectiveModel string
+		var effectiveAPIKey string
+		var mcpServers []runner.MCPServerConfig
+
+		if voiceEngine == "gemini_api" {
+			apiKey := cur.HarnessAPIKey
+			if apiKey == "" {
+				apiKey = cur.APIKey
+			}
+			if apiKey == "" {
+				log.Printf("[WARN] voice.engine is configured as 'gemini_api' but neither harness_api_key nor api_key is set; safely falling back to 'agy'")
+				voiceEngine = "agy"
+			} else {
+				geminiModel := lowEffortModel
+				if strings.TrimSpace(cur.Voice.Model) != "" {
+					geminiModel = strings.TrimSpace(cur.Voice.Model)
+				}
+				effectiveModel = geminiModel
+				effectiveAPIKey = apiKey
+				mcpServers = extractVoiceMCPServers(cur)
+				voicePool = runner.NewGeminiAPIPool(runner.GeminiAPIPoolConfig{
+					APIKey:           apiKey,
+					Model:            geminiModel,
+					PrewarmedTargets: prewarmedTargets,
+					SystemPrompt:     cur.SystemPrompt,
+					MCPServers:       mcpServers,
+					DataDir:          cur.DataDir,
+				})
+				log.Printf("[INIT] Voice engine initialized with 'gemini_api' (model=%s, prewarmed=%v, mcp_servers=%d)", geminiModel, prewarmedTargets, len(mcpServers))
+			}
+		}
+		if voiceEngine != "gemini_api" {
+			effectiveModel = lowEffortModel
+			voicePool = runner.NewUnifiedProcessPool(runner.PoolConfig{
+				GeminiHomeDir:    voiceHome,
+				Model:            lowEffortModel,
+				AgyBin:           cur.AgyBin,
+				Cwd:              cur.DataDir,
+				Env:              os.Environ(),
+				PrewarmedTargets: prewarmedTargets,
+			}, spawner)
+		}
+
+		// Compute deterministic configuration fingerprint
+		var b strings.Builder
+		b.WriteString("engine:")
+		b.WriteString(voiceEngine)
+		b.WriteString("\nmodel:")
+		b.WriteString(effectiveModel)
+		b.WriteString("\n")
+		if effectiveAPIKey != "" {
+			keyHash := sha256.Sum256([]byte(effectiveAPIKey))
+			b.WriteString("apiKeyHash:")
+			b.WriteString(hex.EncodeToString(keyHash[:]))
+			b.WriteString("\n")
+		}
+		for _, target := range prewarmedTargets {
+			b.WriteString("prewarmed:")
+			b.WriteString(target)
+			b.WriteString("\n")
+		}
+		for _, s := range mcpServers {
+			b.WriteString("mcp:")
+			b.WriteString(s.Name)
+			b.WriteString("=")
+			b.WriteString(s.ServerURL)
+			b.WriteString("\n")
+		}
+		b.WriteString("systemPrompt:")
+		b.WriteString(cur.SystemPrompt)
+		b.WriteString("\n")
+
+		h := sha256.Sum256([]byte(b.String()))
+		fingerprint := hex.EncodeToString(h[:])
+
+		return voicePool, fingerprint, nil
 	}
 
-	var voicePool runner.AgentPool
-	if voiceEngine == "gemini_api" {
-		apiKey := cur.HarnessAPIKey
-		if apiKey == "" {
-			apiKey = cur.APIKey
-		}
-		if apiKey == "" {
-			log.Printf("[WARN] voice.engine is configured as 'gemini_api' but neither harness_api_key nor api_key is set; safely falling back to 'agy'")
-			voiceEngine = "agy"
-		} else {
-			geminiModel := lowEffortModel
-			if strings.TrimSpace(cur.Voice.Model) != "" {
-				geminiModel = strings.TrimSpace(cur.Voice.Model)
-			}
-			mcpServers := extractVoiceMCPServers(cur)
-			voicePool = runner.NewGeminiAPIPool(runner.GeminiAPIPoolConfig{
-				APIKey:           apiKey,
-				Model:            geminiModel,
-				PrewarmedTargets: prewarmedTargets,
-				SystemPrompt:     cur.SystemPrompt,
-				MCPServers:       mcpServers,
-				DataDir:          cur.DataDir,
-			})
-			log.Printf("[INIT] Voice engine initialized with 'gemini_api' (model=%s, prewarmed=%v, mcp_servers=%d)", geminiModel, prewarmedTargets, len(mcpServers))
-		}
-	}
-	if voiceEngine != "gemini_api" {
-		voicePool = runner.NewUnifiedProcessPool(runner.PoolConfig{
-			GeminiHomeDir:    voiceHome,
-			Model:            lowEffortModel,
-			AgyBin:           cur.AgyBin,
-			Cwd:              cur.DataDir,
-			Env:              os.Environ(),
-			PrewarmedTargets: prewarmedTargets,
-		}, spawner)
-	}
-	return voicePool
+	return runner.NewDynamicVoicePool(buildPool)
 }
 
 // createVoicePool is an alias for createVoiceProcessPool.

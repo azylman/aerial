@@ -519,6 +519,49 @@ func (p *GeminiAPIPool) Initialize(ctx context.Context) error {
 	return nil
 }
 
+// PrewarmedTargets returns a defensive copy of configured prewarmed targets.
+func (p *GeminiAPIPool) PrewarmedTargets() []string {
+	if p == nil {
+		return nil
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.cfg.PrewarmedTargets == nil {
+		return nil
+	}
+	targets := make([]string, len(p.cfg.PrewarmedTargets))
+	copy(targets, p.cfg.PrewarmedTargets)
+	return targets
+}
+
+// UpdatePrewarmedTargets updates the prewarmed targets list in configuration.
+func (p *GeminiAPIPool) UpdatePrewarmedTargets(targets []string) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.closed {
+		return
+	}
+	p.cfg.PrewarmedTargets = targets
+}
+
+// MarkDirty resets active sessions so subsequent requests create fresh sessions.
+func (p *GeminiAPIPool) MarkDirty() {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.closed {
+		return
+	}
+	p.sessions = make(map[string]*GeminiAPISession)
+}
+
 // Close terminates the pool and marks it as closed.
 func (p *GeminiAPIPool) Close() error {
 	p.mu.Lock()
