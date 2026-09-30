@@ -861,6 +861,11 @@ func (c *Classifier) classifyWithPrompt(ctx context.Context, prompt string) Clas
 	return result
 }
 
+// MaxSystemOneStateRunes is the maximum number of runes preserved in ModernBERT dialogue state.
+// Capped at 1,000 runes (~200-250 tokens) to ensure edge inference comfortably completes
+// well below the 4.0s client timeout on host E-cores while maintaining recent dialogue turns.
+const MaxSystemOneStateRunes = 1000
+
 // BuildSystemOneState formats target message(s) and recent channel context into clean dialogue
 // for non-autoregressive encoder models like ModernBERT (Laya).
 // It strips XML tags and RFC3339 timestamps to avoid degrading attention weights,
@@ -921,10 +926,11 @@ func BuildSystemOneState(targetBurst []db.Message, recentContext []db.Message) s
 	}
 
 	state := strings.TrimSpace(sb.String())
-	// ModernBERT truncation guard (cap at 4000 runes to prevent payload-too-large or token overflow)
+	// ModernBERT truncation guard: cap at MaxSystemOneStateRunes tail-style to preserve
+	// the newest messages and prevent latency spikes on host E-cores.
 	runes := []rune(state)
-	if len(runes) > 4000 {
-		state = string(runes[len(runes)-4000:])
+	if len(runes) > MaxSystemOneStateRunes {
+		state = string(runes[len(runes)-MaxSystemOneStateRunes:])
 	}
 	return state
 }
