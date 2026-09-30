@@ -1758,5 +1758,103 @@ func TestGeminiAPIPool_GetOrCreateSession_CustomSessionID(t *testing.T) {
 	}
 }
 
+func TestGeminiAPIPool_MarkDirty(t *testing.T) {
+	t.Parallel()
+
+	// Nil receiver safety
+	var nilPool *GeminiAPIPool
+	nilPool.MarkDirty() // Should not panic
+
+	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
+		APIKey: "test-key",
+		Model:  "gemini-2.5-flash",
+	})
+	defer pool.Close()
+
+	ctx := context.Background()
+	sess1, err := pool.GetOrCreateSession(ctx, "kiosk-1", "sess-1")
+	if err != nil {
+		t.Fatalf("unexpected error creating session: %v", err)
+	}
+
+	// Session reuse before MarkDirty
+	sess1Again, err := pool.GetOrCreateSession(ctx, "kiosk-1", "")
+	if err != nil {
+		t.Fatalf("unexpected error getting existing session: %v", err)
+	}
+	if sess1 != sess1Again {
+		t.Fatalf("expected identical session instance before MarkDirty")
+	}
+
+	// Trigger MarkDirty
+	pool.MarkDirty()
+
+	// After MarkDirty, requesting the targetKey should yield a brand new session instance
+	sess1AfterDirty, err := pool.GetOrCreateSession(ctx, "kiosk-1", "sess-new")
+	if err != nil {
+		t.Fatalf("unexpected error getting session after MarkDirty: %v", err)
+	}
+	if sess1 == sess1AfterDirty {
+		t.Fatalf("expected new session instance after MarkDirty, but got same instance")
+	}
+	if sess1AfterDirty.SessionID() != "sess-new" {
+		t.Errorf("expected new session ID 'sess-new', got %q", sess1AfterDirty.SessionID())
+	}
+
+	// MarkDirty on closed pool
+	if err := pool.Close(); err != nil {
+		t.Fatalf("unexpected error closing pool: %v", err)
+	}
+	pool.MarkDirty() // Should not panic
+}
+
+func TestGeminiAPIPool_UpdatePrewarmedTargets(t *testing.T) {
+	t.Parallel()
+
+	// Nil receiver safety
+	var nilPool *GeminiAPIPool
+	nilPool.UpdatePrewarmedTargets([]string{"target-x"}) // Should not panic
+	if targets := nilPool.PrewarmedTargets(); targets != nil {
+		t.Errorf("expected nil PrewarmedTargets for nil pool, got %v", targets)
+	}
+
+	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
+		APIKey:           "test-key",
+		Model:            "gemini-2.5-flash",
+		PrewarmedTargets: []string{"initial-1", "initial-2"},
+	})
+	defer pool.Close()
+
+	initialTargets := pool.PrewarmedTargets()
+	if len(initialTargets) != 2 || initialTargets[0] != "initial-1" || initialTargets[1] != "initial-2" {
+		t.Fatalf("unexpected initial targets: %v", initialTargets)
+	}
+
+	newTargets := []string{"target-alpha", "target-beta", "target-gamma"}
+	pool.UpdatePrewarmedTargets(newTargets)
+
+	updated := pool.PrewarmedTargets()
+	if len(updated) != 3 || updated[0] != "target-alpha" || updated[1] != "target-beta" || updated[2] != "target-gamma" {
+		t.Fatalf("unexpected updated targets: %v", updated)
+	}
+
+	// Defensively check that mutating caller's slice doesn't mutate pool's internal state
+	poolCopy := pool.PrewarmedTargets()
+	poolCopy[0] = "mutated"
+	if pool.PrewarmedTargets()[0] == "mutated" {
+		t.Errorf("expected PrewarmedTargets to return a defensive copy")
+	}
+
+	// Closed pool safety
+	if err := pool.Close(); err != nil {
+		t.Fatalf("unexpected error closing pool: %v", err)
+	}
+	pool.UpdatePrewarmedTargets([]string{"should-not-apply"})
+	if pool.PrewarmedTargets()[0] == "should-not-apply" {
+		t.Errorf("UpdatePrewarmedTargets should be noop on closed pool")
+	}
+}
+
+
 
 

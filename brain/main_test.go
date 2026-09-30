@@ -3116,12 +3116,16 @@ func TestVoicePool_FactoryWiring(t *testing.T) {
 		pool := createVoiceProcessPool(cfg, voiceHome, "fallback-model", spawner)
 		defer pool.Close()
 
-		geminiPool, ok := pool.(*runner.GeminiAPIPool)
+		dynPool, ok := pool.(*runner.DynamicVoicePool)
 		if !ok {
-			t.Fatalf("expected *runner.GeminiAPIPool, got %T", pool)
+			t.Fatalf("expected *runner.DynamicVoicePool, got %T", pool)
 		}
-		if geminiPool.Model() != "gemini-2.5-flash" {
-			t.Errorf("expected model 'gemini-2.5-flash', got %q", geminiPool.Model())
+		geminiPool, ok := dynPool.CurrentPool().(*runner.GeminiAPIPool)
+		if !ok {
+			t.Fatalf("expected *runner.GeminiAPIPool, got %T", dynPool.CurrentPool())
+		}
+		if dynPool.Model() != "gemini-2.5-flash" {
+			t.Errorf("expected model 'gemini-2.5-flash', got %q", dynPool.Model())
 		}
 		if geminiPool.APIKey() != "test-harness-key" {
 			t.Errorf("expected APIKey 'test-harness-key', got %q", geminiPool.APIKey())
@@ -3141,12 +3145,16 @@ func TestVoicePool_FactoryWiring(t *testing.T) {
 		pool := createVoiceProcessPool(cfg, voiceHome, "fallback-model", spawner)
 		defer pool.Close()
 
-		geminiPool, ok := pool.(*runner.GeminiAPIPool)
+		dynPool, ok := pool.(*runner.DynamicVoicePool)
 		if !ok {
-			t.Fatalf("expected *runner.GeminiAPIPool, got %T", pool)
+			t.Fatalf("expected *runner.DynamicVoicePool, got %T", pool)
 		}
-		if geminiPool.Model() != "fallback-model" {
-			t.Errorf("expected fallback model 'fallback-model', got %q", geminiPool.Model())
+		geminiPool, ok := dynPool.CurrentPool().(*runner.GeminiAPIPool)
+		if !ok {
+			t.Fatalf("expected *runner.GeminiAPIPool, got %T", dynPool.CurrentPool())
+		}
+		if dynPool.Model() != "fallback-model" {
+			t.Errorf("expected fallback model 'fallback-model', got %q", dynPool.Model())
 		}
 		if geminiPool.APIKey() != "test-standard-key" {
 			t.Errorf("expected APIKey 'test-standard-key', got %q", geminiPool.APIKey())
@@ -3165,9 +3173,16 @@ func TestVoicePool_FactoryWiring(t *testing.T) {
 		pool := createVoiceProcessPool(cfg, voiceHome, "fallback-model", spawner)
 		defer pool.Close()
 
-		unifiedPool, ok := pool.(*runner.UnifiedProcessPool)
+		dynPool, ok := pool.(*runner.DynamicVoicePool)
 		if !ok {
-			t.Fatalf("expected *runner.UnifiedProcessPool when API keys are empty, got %T", pool)
+			t.Fatalf("expected *runner.DynamicVoicePool when API keys are empty, got %T", pool)
+		}
+		unifiedPool, ok := dynPool.CurrentPool().(*runner.UnifiedProcessPool)
+		if !ok {
+			t.Fatalf("expected *runner.UnifiedProcessPool when API keys are empty, got %T", dynPool.CurrentPool())
+		}
+		if dynPool.Model() != "fallback-model" {
+			t.Errorf("expected model 'fallback-model', got %q", dynPool.Model())
 		}
 		if unifiedPool.Model() != "fallback-model" {
 			t.Errorf("expected model 'fallback-model', got %q", unifiedPool.Model())
@@ -3187,9 +3202,16 @@ func TestVoicePool_FactoryWiring(t *testing.T) {
 		pool := createVoiceProcessPool(cfg, voiceHome, "fallback-model", spawner)
 		defer pool.Close()
 
-		unifiedPool, ok := pool.(*runner.UnifiedProcessPool)
+		dynPool, ok := pool.(*runner.DynamicVoicePool)
 		if !ok {
-			t.Fatalf("expected *runner.UnifiedProcessPool for engine=agy, got %T", pool)
+			t.Fatalf("expected *runner.DynamicVoicePool for engine=agy, got %T", pool)
+		}
+		unifiedPool, ok := dynPool.CurrentPool().(*runner.UnifiedProcessPool)
+		if !ok {
+			t.Fatalf("expected *runner.UnifiedProcessPool for engine=agy, got %T", dynPool.CurrentPool())
+		}
+		if dynPool.Model() != "fallback-model" {
+			t.Errorf("expected model 'fallback-model', got %q", dynPool.Model())
 		}
 		if unifiedPool.Model() != "fallback-model" {
 			t.Errorf("expected model 'fallback-model', got %q", unifiedPool.Model())
@@ -3209,8 +3231,12 @@ func TestVoicePool_FactoryWiring(t *testing.T) {
 		pool := createVoicePool(cfg, voiceHome, "model-xyz", spawner)
 		defer pool.Close()
 
-		if _, ok := pool.(*runner.GeminiAPIPool); !ok {
-			t.Fatalf("expected *runner.GeminiAPIPool from createVoicePool alias, got %T", pool)
+		dynPool, ok := pool.(*runner.DynamicVoicePool)
+		if !ok {
+			t.Fatalf("expected *runner.DynamicVoicePool from createVoicePool alias, got %T", pool)
+		}
+		if _, ok := dynPool.CurrentPool().(*runner.GeminiAPIPool); !ok {
+			t.Fatalf("expected *runner.GeminiAPIPool from createVoicePool alias, got %T", dynPool.CurrentPool())
 		}
 	})
 
@@ -3219,12 +3245,60 @@ func TestVoicePool_FactoryWiring(t *testing.T) {
 		pool := createVoiceProcessPool(nil, voiceHome, "fallback-model", spawner)
 		defer pool.Close()
 
-		unifiedPool, ok := pool.(*runner.UnifiedProcessPool)
+		dynPool, ok := pool.(*runner.DynamicVoicePool)
 		if !ok {
-			t.Fatalf("expected *runner.UnifiedProcessPool for nil config, got %T", pool)
+			t.Fatalf("expected *runner.DynamicVoicePool for nil config, got %T", pool)
+		}
+		unifiedPool, ok := dynPool.CurrentPool().(*runner.UnifiedProcessPool)
+		if !ok {
+			t.Fatalf("expected *runner.UnifiedProcessPool for nil config, got %T", dynPool.CurrentPool())
+		}
+		if dynPool.Model() != "fallback-model" {
+			t.Errorf("expected model 'fallback-model', got %q", dynPool.Model())
 		}
 		if unifiedPool.Model() != "fallback-model" {
 			t.Errorf("expected model 'fallback-model', got %q", unifiedPool.Model())
+		}
+	})
+
+	t.Run("DynamicHotReload_EngineSwitch", func(t *testing.T) {
+		t.Parallel()
+		data := &config.ConfigData{
+			HarnessAPIKey: "harness-key",
+			Voice: config.VoiceConfig{
+				Engine: "agy",
+				Model:  "agy-model",
+			},
+		}
+		cfg := config.NewFromData(data)
+
+		pool := createVoiceProcessPool(cfg, voiceHome, "fallback-model", spawner)
+		defer pool.Close()
+
+		dynPool, ok := pool.(*runner.DynamicVoicePool)
+		if !ok {
+			t.Fatalf("expected *runner.DynamicVoicePool, got %T", pool)
+		}
+		if _, ok := dynPool.CurrentPool().(*runner.UnifiedProcessPool); !ok {
+			t.Fatalf("expected initial pool to be UnifiedProcessPool, got %T", dynPool.CurrentPool())
+		}
+
+		// Update config to gemini_api
+		fresh := cfg.Current().Clone()
+		fresh.Voice.Engine = "gemini_api"
+		fresh.Voice.Model = "gemini-2.5-pro"
+		cfg.Update(fresh)
+
+		// Trigger MarkDirty on pool
+		dynPool.MarkDirty()
+
+		// Verify pool swapped to GeminiAPIPool with updated model
+		geminiPool, ok := dynPool.CurrentPool().(*runner.GeminiAPIPool)
+		if !ok {
+			t.Fatalf("expected swapped pool to be GeminiAPIPool, got %T", dynPool.CurrentPool())
+		}
+		if geminiPool.Model() != "gemini-2.5-pro" {
+			t.Errorf("expected model 'gemini-2.5-pro', got %q", geminiPool.Model())
 		}
 	})
 }
