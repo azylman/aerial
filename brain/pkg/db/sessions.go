@@ -454,18 +454,19 @@ func GetSessionActivityStatsWithContext(ctx context.Context, database DBTX, thre
 	var (
 		completedCount int64
 		rawMsgUpdated  any
+		rawMsgCreated  any
 	)
 
 	msgErr := database.QueryRowContext(
 		ctx,
-		`SELECT COUNT(*), MAX(updated_at) FROM messages 
+		`SELECT COUNT(*), MAX(updated_at), MAX(created_at) FROM messages 
 		 WHERE thread_id = $1 
 		   AND status = 'COMPLETED' 
 		   AND response_text NOT LIKE '[EXPIRED_STALE]%' 
 		   AND response_text NOT LIKE '[AMBIENT%' 
 		   AND response_text NOT LIKE '[IGNORED%'`,
 		threadID,
-	).Scan(&completedCount, &rawMsgUpdated)
+	).Scan(&completedCount, &rawMsgUpdated, &rawMsgCreated)
 
 	if msgErr != nil && !errors.Is(msgErr, sql.ErrNoRows) {
 		return nil, fmt.Errorf("querying completed messages for thread %s: %w", threadID, msgErr)
@@ -481,6 +482,9 @@ func GetSessionActivityStatsWithContext(ctx context.Context, database DBTX, thre
 	}
 	if t, ok := ParseDBTime(rawMsgUpdated); ok {
 		stats.LastMessageAt = t
+	}
+	if t, ok := ParseDBTime(rawMsgCreated); ok {
+		stats.LastCompletedMessageCreatedAt = t
 	}
 
 	return stats, nil

@@ -298,6 +298,9 @@ func TestSQLStoreHoistedMethods(t *testing.T) {
 	if stats.CompletedTurns != 1 {
 		t.Fatalf("expected 1 completed turn, got %d", stats.CompletedTurns)
 	}
+	if stats.LastCompletedMessageCreatedAt.IsZero() {
+		t.Errorf("expected non-zero LastCompletedMessageCreatedAt")
+	}
 
 	// 3. Facts missing embeddings & UpdateFactEmbedding
 	factID, err := store.InsertFact(ctx, "test", "Fact without embedding", 1.0, "thread-test-1", nil)

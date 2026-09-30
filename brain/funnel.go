@@ -924,6 +924,14 @@ func RunStartupCatchUpSweep(ctx context.Context, store db.Store, pool *queue.Wor
 			m.GuildID = resolvedGuildID
 			metadata := extractDiscordMetadata(s, m, targetThreadID)
 
+			stats, statsErr := store.GetSessionActivityStats(sweepCtx, targetThreadID)
+			if statsErr == nil && stats != nil && !stats.LastCompletedMessageCreatedAt.IsZero() && stats.LastCompletedMessageCreatedAt.After(msgTime) {
+				log.Printf("[CatchUpSweep] Skipping missed message %s in thread %s: newer completed message exists in thread (completed created_at %s > msg %s).",
+					m.ID, targetThreadID, stats.LastCompletedMessageCreatedAt.Format(time.RFC3339), msgTime.Format(time.RFC3339))
+				skippedCount++
+				continue
+			}
+
 			authorID := m.Author.ID
 			authorName := m.Author.Username
 

@@ -2430,6 +2430,85 @@ channels:
 	RunStartupCatchUpSweep(context.Background(), closedStore, pool, sFull)
 }
 
+func TestRunStartupCatchUpSweep_SkipsSupersededMessage(t *testing.T) {
+	setupTestConfig(t, `
+model: "gemini-2.5-flash"
+channels:
+  default:
+    mode: "channel"
+`)
+	resetFunnelGlobals(t)
+	defer resetFunnelGlobals(t)
+
+	store := db.NewFakeStore()
+	pool := newTestWorkerPool(store)
+	pool.Start()
+	defer pool.Stop()
+
+	// A completed message exists in thread with created_at = -10m
+	_ = store.InsertMessage(context.Background(), db.Message{
+		ID:           "msg-completed-later",
+		ThreadID:     "ch-superseded",
+		GuildID:      "g-sweep-super",
+		Status:       db.StatusCompleted,
+		ResponseText: "Already replied",
+		CreatedAt:    time.Now().UTC().Add(-10 * time.Minute),
+		UpdatedAt:    time.Now().UTC(),
+	})
+
+	s, _ := discordgo.New("Bot mock-sweep-token")
+	s.State.User = &discordgo.User{ID: "bot-sweep-id", Username: "AerialBot"}
+
+	g := &discordgo.Guild{
+		ID: "g-sweep-super",
+		Channels: []*discordgo.Channel{
+			{ID: "ch-superseded", Name: "general", GuildID: "g-sweep-super", Type: discordgo.ChannelTypeGuildText},
+		},
+	}
+	_ = s.State.GuildAdd(g)
+
+	// An older missed message from 20 minutes ago (superseded by msg-completed-later from 10 minutes ago)
+	mockMessages := []*discordgo.Message{
+		{
+			ID:        "msg-missed-superseded",
+			ChannelID: "ch-superseded",
+			GuildID:   "g-sweep-super",
+			Author:    &discordgo.User{ID: "u-alex", Username: "alex", Bot: false},
+			Content:   "Missed older message",
+			Timestamp: time.Now().UTC().Add(-20 * time.Minute),
+		},
+	}
+
+	s.Client = &http.Client{
+		Transport: mockCatchUpRoundTripper(func(req *http.Request) (*http.Response, error) {
+			if strings.Contains(req.URL.Path, "/messages") {
+				respBody, _ := json.Marshal(mockMessages)
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(bytes.NewReader(respBody)),
+				}, nil
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(bytes.NewReader([]byte("[]"))),
+			}, nil
+		}),
+	}
+
+	RunStartupCatchUpSweep(context.Background(), store, pool, s)
+
+	// Verify msg-missed-superseded was skipped and never inserted into DB
+	exists, err := store.MessageExists(context.Background(), "msg-missed-superseded")
+	if err != nil {
+		t.Fatalf("MessageExists error: %v", err)
+	}
+	if exists {
+		t.Errorf("expected superseded message msg-missed-superseded to be skipped, but it was inserted")
+	}
+}
+
 func TestCreateThread_EdgeCases(t *testing.T) {
 	setupTestConfig(t, `
 model: "gemini-2.5-flash"
