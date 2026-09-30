@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
@@ -866,14 +867,17 @@ func (c *Classifier) classifyWithPrompt(ctx context.Context, prompt string) Clas
 // well below the 4.0s client timeout on host E-cores while maintaining recent dialogue turns.
 const MaxSystemOneStateRunes = 1000
 
+// ModernBERTTruncationSuffix is appended when the single most recent message exceeds MaxSystemOneStateRunes.
+const ModernBERTTruncationSuffix = " ... [truncated]"
+
 // BuildSystemOneState formats target message(s) and recent channel context into clean dialogue
 // for non-autoregressive encoder models like ModernBERT (Laya).
 // It strips XML tags and RFC3339 timestamps to avoid degrading attention weights,
 // while preserving speaker identity and replying-to relationships.
+// It preserves whole messages tail-style; mid-message truncation occurs only if the single most
+// recent message exceeds MaxSystemOneStateRunes, in which case the head is preserved with a truncation indicator.
 func BuildSystemOneState(targetBurst []db.Message, recentContext []db.Message) string {
-	var sb strings.Builder
-
-	appendMessage := func(m db.Message) {
+	formatMessage := func(m db.Message) string {
 		author := SanitizeAuthor(m.AuthorName)
 		if author == "" {
 			author = SanitizeAuthor(m.AuthorID)
@@ -915,24 +919,65 @@ func BuildSystemOneState(targetBurst []db.Message, recentContext []db.Message) s
 				}
 			}
 		}
-		sb.WriteString(fmt.Sprintf("%s%s: %s\n", author, replyTo, bodyText))
+		return fmt.Sprintf("%s%s: %s", author, replyTo, bodyText)
 	}
 
-	for _, m := range recentContext {
-		appendMessage(m)
-	}
-	for _, m := range targetBurst {
-		appendMessage(m)
+	allMessages := make([]db.Message, 0, len(recentContext)+len(targetBurst))
+	allMessages = append(allMessages, recentContext...)
+	allMessages = append(allMessages, targetBurst...)
+	if len(allMessages) == 0 {
+		return ""
 	}
 
-	state := strings.TrimSpace(sb.String())
-	// ModernBERT truncation guard: cap at MaxSystemOneStateRunes tail-style to preserve
-	// the newest messages and prevent latency spikes on host E-cores.
-	runes := []rune(state)
-	if len(runes) > MaxSystemOneStateRunes {
-		state = string(runes[len(runes)-MaxSystemOneStateRunes:])
+	formatted := make([]string, 0, len(allMessages))
+	for _, m := range allMessages {
+		f := strings.TrimSpace(formatMessage(m))
+		if f != "" {
+			formatted = append(formatted, f)
+		}
 	}
-	return state
+	if len(formatted) == 0 {
+		return ""
+	}
+
+	// If the single most recent message exceeds MaxSystemOneStateRunes,
+	// keep the beginning (head) and truncate the tail with a truncation indicator.
+	newest := formatted[len(formatted)-1]
+	newestRuneCount := utf8.RuneCountInString(newest)
+	if newestRuneCount > MaxSystemOneStateRunes {
+		newestRunes := []rune(newest)
+		suffixRunes := []rune(ModernBERTTruncationSuffix)
+		if len(suffixRunes) < MaxSystemOneStateRunes {
+			return string(newestRunes[:MaxSystemOneStateRunes-len(suffixRunes)]) + ModernBERTTruncationSuffix
+		}
+		return string(newestRunes[:MaxSystemOneStateRunes])
+	}
+
+	// Preserve whole messages tail-style (from newest backwards to oldest).
+	// Only full messages that fit within MaxSystemOneStateRunes are included.
+	var kept []string
+	currentRunes := 0
+
+	for i := len(formatted) - 1; i >= 0; i-- {
+		msg := formatted[i]
+		msgRunes := utf8.RuneCountInString(msg)
+		needed := msgRunes
+		if len(kept) > 0 {
+			needed += 1 // account for "\n" separator
+		}
+		if currentRunes+needed > MaxSystemOneStateRunes {
+			break
+		}
+		kept = append(kept, msg)
+		currentRunes += needed
+	}
+
+	// Reverse kept to restore chronological order (oldest to newest)
+	for i, j := 0, len(kept)-1; i < j; i, j = i+1, j-1 {
+		kept[i], kept[j] = kept[j], kept[i]
+	}
+
+	return strings.Join(kept, "\n")
 }
 
 func (c *Classifier) isSystemOne() bool {
