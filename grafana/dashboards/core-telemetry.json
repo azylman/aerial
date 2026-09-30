@@ -2586,7 +2586,7 @@
               "mode": "none"
             },
             "thresholdsStyle": {
-              "mode": "line"
+              "mode": "off"
             }
           },
           "mappings": [],
@@ -2596,18 +2596,6 @@
               {
                 "color": "green",
                 "value": null
-              },
-              {
-                "color": "#EAB839",
-                "value": 5
-              },
-              {
-                "color": "#EF843C",
-                "value": 20
-              },
-              {
-                "color": "#E24D42",
-                "value": 50
               }
             ]
           },
@@ -2773,6 +2761,6 @@
   "timezone": "browser",
   "title": "\u26a1 Aerial Brain & GitSync Operations",
   "uid": "aerial-core-telemetry",
-  "version": 2,
+  "version": 3,
   "weekStart": ""
 }
