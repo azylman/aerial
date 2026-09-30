@@ -857,14 +857,7 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 	if sentenceCb != nil {
 		detector = NewSentenceDetector()
 	}
-	sink := &voiceTurnSink{
-		ctx:        ctx,
-		onStatus:   onStatus,
-		onSentence: sentenceCb,
-		detector:   detector,
-		resCh:      make(chan *runner.TurnResult, 1),
-		errCh:      make(chan error, 1),
-	}
+	sink := newVoiceTurnSink(ctx, onStatus, sentenceCb, detector)
 	turnCtx := &runner.TurnContext{
 		TurnID:    uuid.New().String(),
 		Prompt:    prompt,
@@ -877,136 +870,78 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 		return "", deviceKey, fmt.Errorf("failed sending turn to voice daemon: %w", sendErr)
 	}
 
-	select {
-	case <-ctx.Done():
-		metrics.RecordRunnerExecution("error", model, "voice", time.Since(start))
-		return "", deviceKey, ctx.Err()
-	case err := <-sink.errCh:
-		activeSession := daemon.SessionID()
-		if activeSession == "" {
-			activeSession = deviceKey
+	turnRes, turnErr := sink.Wait(ctx)
+	activeSession := daemon.SessionID()
+	if activeSession == "" {
+		activeSession = deviceKey
+	}
+
+	resolver := runner.NewTurnResolver(p.sessionMgr)
+	outcome := resolver.Resolve(ctx, turnRes, turnErr, activeSession)
+
+	if outcome.IsSuccess {
+		metrics.RecordRunnerExecution("success", model, "voice", time.Since(start))
+		if outcome.Usage.TotalTokens > 0 {
+			metrics.RecordTokens(model, "voice", outcome.Usage.InputTokens, outcome.Usage.OutputTokens, outcome.Usage.ThinkingTokens, outcome.Usage.CacheReadTokens, outcome.Usage.TotalTokens)
 		}
-		// Transcript recovery: check if session transcript contains a valid response for this turn
-		if p.sessionMgr != nil && activeSession != "" && p.sessionMgr.SessionExistsOnDisk(activeSession) {
-			if respText, _ := p.sessionMgr.ExtractResponseAndError(activeSession); respText != "" && !strings.HasPrefix(respText, "[Tool Call Requested]:") {
-				log.Printf("[ExecuteVoiceTurn] Recovered voice response directly from session %s transcript after daemon error: %v", activeSession, err)
-				metrics.RecordRunnerExecution("success", model, "voice", time.Since(start))
-				sink.mu.Lock()
-				emitted := sink.emittedAny
-				sink.mu.Unlock()
-				if !emitted && sentenceCb != nil && detector != nil {
-					detector.Feed(respText, sink.emitSentence)
-					detector.Flush(sink.emitSentence)
+		if !sink.EmittedAny() && sentenceCb != nil && detector != nil && outcome.Response != "" {
+			emitSentence := func(s string) {
+				sink.MarkEmitted()
+				if sentenceCb != nil {
+					sentenceCb(s)
 				}
-				return strings.TrimSpace(respText), activeSession, nil
 			}
+			detector.Feed(outcome.Response, emitSentence)
+			detector.Flush(emitSentence)
 		}
-		metrics.RecordRunnerExecution("error", model, "voice", time.Since(start))
-		return "", activeSession, err
-	case turnRes := <-sink.resCh:
-		runStatus := "success"
-		if turnRes != nil && turnRes.ExitCode != 0 {
-			runStatus = "error"
-		}
-		metrics.RecordRunnerExecution(runStatus, model, "voice", time.Since(start))
-		activeSession := daemon.SessionID()
-		if activeSession == "" {
-			activeSession = deviceKey
-		}
-		if turnRes != nil && turnRes.Usage.TotalTokens > 0 {
-			metrics.RecordTokens(model, "voice", turnRes.Usage.InputTokens, turnRes.Usage.OutputTokens, turnRes.Usage.ThinkingTokens, turnRes.Usage.CacheReadTokens, turnRes.Usage.TotalTokens)
-		}
-		var reply string
-		if turnRes != nil {
-			reply = strings.TrimSpace(turnRes.Response)
-		}
-		return reply, activeSession, nil
+		return outcome.Response, outcome.SessionID, nil
 	}
+
+	metrics.RecordRunnerExecution("error", model, "voice", time.Since(start))
+	if turnErr != nil {
+		return "", activeSession, turnErr
+	}
+	if ctx.Err() != nil {
+		return "", activeSession, ctx.Err()
+	}
+	return "", activeSession, fmt.Errorf("%s", outcome.ErrorDetail)
 }
 
-type voiceTurnSink struct {
-	ctx        context.Context
-	onStatus   func(status string)
-	onSentence func(sentence string)
-	detector   *SentenceDetector
-	emittedAny bool
-	builder    strings.Builder
-	mu         sync.Mutex
-	resCh      chan *runner.TurnResult
-	errCh      chan error
-	once       sync.Once
-}
-
-var _ runner.TurnSink = (*voiceTurnSink)(nil)
-
-func (s *voiceTurnSink) OnTurnStarted() {}
-func (s *voiceTurnSink) OnThinking()    {}
-func (s *voiceTurnSink) OnToolCall(toolName, commandName string) {
-	if s.onStatus != nil && (toolName != "" || commandName != "") {
-		s.onStatus(FormatToolStatus(toolName, commandName, 0))
-	}
-}
-func (s *voiceTurnSink) emitSentence(sentence string) {
-	s.mu.Lock()
-	s.emittedAny = true
-	s.mu.Unlock()
-	if s.onSentence != nil {
-		s.onSentence(sentence)
-	}
-}
-func (s *voiceTurnSink) OnTextDelta(delta string) {
-	if s.ctx != nil && s.ctx.Err() != nil {
-		return
-	}
-	s.mu.Lock()
-	s.builder.WriteString(delta)
-	s.mu.Unlock()
-	if s.onSentence != nil && s.detector != nil {
-		s.detector.Feed(delta, s.emitSentence)
-	}
-}
-func (s *voiceTurnSink) OnResult(res *runner.TurnResult) {
-	s.once.Do(func() {
-		s.mu.Lock()
-		accumulated := s.builder.String()
-		emitted := s.emittedAny
-		s.mu.Unlock()
-
-		if res != nil && strings.TrimSpace(res.Response) == "" && strings.TrimSpace(accumulated) != "" {
-			res.Response = accumulated
+func newVoiceTurnSink(ctx context.Context, onStatus func(string), onSentence func(string), detector *SentenceDetector) *runner.BufferingTurnSink {
+	var sink *runner.BufferingTurnSink
+	emitSentence := func(sentence string) {
+		if sink != nil {
+			sink.MarkEmitted()
 		}
+		if onSentence != nil {
+			onSentence(sentence)
+		}
+	}
 
-		if s.onSentence != nil && s.detector != nil {
-			s.detector.Flush(s.emitSentence)
-			if !emitted && res != nil && strings.TrimSpace(res.Response) != "" {
-				s.detector.Feed(res.Response, s.emitSentence)
-				s.detector.Flush(s.emitSentence)
+	sink = runner.NewBufferingTurnSink(runner.BufferingTurnSinkConfig{
+		OnToolCall: func(toolName, commandName string) {
+			if onStatus != nil && (toolName != "" || commandName != "") {
+				onStatus(FormatToolStatus(toolName, commandName, 0))
 			}
-		}
-		s.resCh <- res
+		},
+		OnTextDelta: func(delta string) {
+			if ctx != nil && ctx.Err() != nil {
+				return
+			}
+			if onSentence != nil && detector != nil {
+				detector.Feed(delta, emitSentence)
+			}
+		},
+		OnComplete: func(res *runner.TurnResult) {
+			if onSentence != nil && detector != nil {
+				detector.Flush(emitSentence)
+				if !sink.EmittedAny() && res != nil && strings.TrimSpace(res.Response) != "" {
+					detector.Feed(res.Response, emitSentence)
+					detector.Flush(emitSentence)
+				}
+			}
+		},
 	})
-}
-func (s *voiceTurnSink) OnError(err error) {
-	s.once.Do(func() {
-		s.mu.Lock()
-		accumulated := strings.TrimSpace(s.builder.String())
-		emitted := s.emittedAny
-		s.mu.Unlock()
-
-		// If a substantive response was accumulated from deltas or sentences were already emitted,
-		// recover and deliver the substantive response instead of failing the voice turn.
-		if accumulated != "" || emitted {
-			if s.onSentence != nil && s.detector != nil {
-				s.detector.Flush(s.emitSentence)
-			}
-			log.Printf("[voiceTurnSink] Notice: recovering substantive response despite daemon error: %v", err)
-			s.resCh <- &runner.TurnResult{
-				Response: accumulated,
-			}
-			return
-		}
-
-		s.errCh <- err
-	})
+	return sink
 }
 

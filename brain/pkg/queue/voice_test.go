@@ -772,13 +772,9 @@ func TestWorkerPool_ExecuteVoiceTurn_ProcessPool_AdditionalBranches(t *testing.T
 func TestVoiceTurnSink_Callbacks(t *testing.T) {
 	t.Parallel()
 	var statusMsg string
-	sink := &voiceTurnSink{
-		onStatus: func(s string) {
-			statusMsg = s
-		},
-		resCh: make(chan *runner.TurnResult, 1),
-		errCh: make(chan error, 1),
-	}
+	sink := newVoiceTurnSink(context.Background(), func(s string) {
+		statusMsg = s
+	}, nil, nil)
 	sink.OnTurnStarted()
 	sink.OnThinking()
 	sink.OnTextDelta("delta-test")
@@ -793,68 +789,48 @@ func TestVoiceTurnSink_DeltaAccumulationAndErrorRecovery(t *testing.T) {
 
 	// Case 1: Streamed deltas with empty terminal response falls back to accumulated text
 	var sentences []string
-	sink := &voiceTurnSink{
-		onSentence: func(s string) {
-			sentences = append(sentences, s)
-		},
-		detector: NewSentenceDetector(),
-		resCh:    make(chan *runner.TurnResult, 1),
-		errCh:    make(chan error, 1),
-	}
+	sink := newVoiceTurnSink(context.Background(), nil, func(s string) {
+		sentences = append(sentences, s)
+	}, NewSentenceDetector())
 	sink.OnTextDelta("Hello ")
 	sink.OnTextDelta("world.")
 	sink.OnResult(&runner.TurnResult{Response: ""})
 
-	select {
-	case res := <-sink.resCh:
-		if res.Response != "Hello world." {
-			t.Errorf("expected accumulated 'Hello world.', got %q", res.Response)
-		}
-	default:
-		t.Fatal("expected result on resCh")
+	res, err := sink.Wait(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Response != "Hello world." {
+		t.Errorf("expected accumulated 'Hello world.', got %q", res.Response)
 	}
 
 	// Case 2: Streamed deltas followed by OnError recovers substantive deltas on resCh
 	var sentences2 []string
-	sink2 := &voiceTurnSink{
-		onSentence: func(s string) {
-			sentences2 = append(sentences2, s)
-		},
-		detector: NewSentenceDetector(),
-		resCh:    make(chan *runner.TurnResult, 1),
-		errCh:    make(chan error, 1),
-	}
+	sink2 := newVoiceTurnSink(context.Background(), nil, func(s string) {
+		sentences2 = append(sentences2, s)
+	}, NewSentenceDetector())
 	sink2.OnTextDelta("The quick brown fox jumps over the lazy dog.")
 	sink2.OnError(errors.New("API error (attempt 2): RESOURCE_EXHAUSTED (code 429)"))
 
-	select {
-	case res := <-sink2.resCh:
-		if res.Response != "The quick brown fox jumps over the lazy dog." {
-			t.Errorf("expected recovered deltas on resCh, got %q", res.Response)
-		}
-	case err := <-sink2.errCh:
-		t.Fatalf("expected resCh recovery, got errCh: %v", err)
-	default:
-		t.Fatal("expected result on resCh")
+	res2, err2 := sink2.Wait(context.Background())
+	if err2 != nil {
+		t.Fatalf("expected resCh recovery, got errCh: %v", err2)
+	}
+	if res2.Response != "The quick brown fox jumps over the lazy dog." {
+		t.Errorf("expected recovered deltas on resCh, got %q", res2.Response)
 	}
 
 	// Case 3: Empty deltas with OnError properly forwards to errCh
-	sink3 := &voiceTurnSink{
-		resCh: make(chan *runner.TurnResult, 1),
-		errCh: make(chan error, 1),
-	}
+	sink3 := newVoiceTurnSink(context.Background(), nil, nil, nil)
 	expectedErr := errors.New("hard failure without deltas")
 	sink3.OnError(expectedErr)
 
-	select {
-	case err := <-sink3.errCh:
-		if !errors.Is(err, expectedErr) {
-			t.Errorf("expected %v on errCh, got %v", expectedErr, err)
-		}
-	case res := <-sink3.resCh:
-		t.Fatalf("unexpected result on resCh: %+v", res)
-	default:
-		t.Fatal("expected error on errCh")
+	res3, err3 := sink3.Wait(context.Background())
+	if res3 != nil {
+		t.Fatalf("unexpected result on resCh: %+v", res3)
+	}
+	if !errors.Is(err3, expectedErr) {
+		t.Errorf("expected %v on errCh, got %v", expectedErr, err3)
 	}
 }
 

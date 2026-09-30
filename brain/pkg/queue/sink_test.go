@@ -689,11 +689,7 @@ func TestTurnSinks_NoopInterfaceMethods(t *testing.T) {
 
 	// voiceTurnSink
 	var voiceStatus string
-	vSink := &voiceTurnSink{
-		resCh:    make(chan *runner.TurnResult, 2),
-		errCh:    make(chan error, 2),
-		onStatus: func(s string) { voiceStatus = s },
-	}
+	vSink := newVoiceTurnSink(context.Background(), func(s string) { voiceStatus = s }, nil, nil)
 	vSink.OnTurnStarted()
 	vSink.OnThinking()
 	vSink.OnTextDelta("voice-delta")
@@ -702,21 +698,13 @@ func TestTurnSinks_NoopInterfaceMethods(t *testing.T) {
 		t.Errorf("expected non-empty voice status")
 	}
 	vSink.OnToolCall("", "")
-	vSinkNilStatus := &voiceTurnSink{
-		resCh: make(chan *runner.TurnResult, 2),
-		errCh: make(chan error, 2),
-	}
+	vSinkNilStatus := newVoiceTurnSink(context.Background(), nil, nil, nil)
 	vSinkNilStatus.OnToolCall("tool", "cmd")
 	vSink.OnResult(&runner.TurnResult{Response: "voice-1"})
-	vSink.OnResult(&runner.TurnResult{Response: "voice-2"})
 	vSink.OnError(errors.New("err-1"))
-	vSink.OnError(errors.New("err-2"))
 
-	// turnResultSink
-	rSink := &turnResultSink{
-		resCh: make(chan *runner.TurnResult, 2),
-		errCh: make(chan error, 2),
-	}
+	// discordTurnSink
+	rSink := newDiscordTurnSink(nil)
 	rSink.OnTurnStarted()
 	rSink.OnThinking()
 	rSink.OnTextDelta("turn-delta")
@@ -795,14 +783,9 @@ func TestVoiceTurnSink_SentenceStreaming(t *testing.T) {
 	t.Parallel()
 
 	var sentences []string
-	sink := &voiceTurnSink{
-		onSentence: func(s string) {
-			sentences = append(sentences, s)
-		},
-		detector: NewSentenceDetector(),
-		resCh:    make(chan *runner.TurnResult, 1),
-		errCh:    make(chan error, 1),
-	}
+	sink := newVoiceTurnSink(context.Background(), nil, func(s string) {
+		sentences = append(sentences, s)
+	}, NewSentenceDetector())
 
 	sink.OnTurnStarted()
 	sink.OnThinking()
@@ -821,15 +804,9 @@ func TestVoiceTurnSink_SentenceStreaming(t *testing.T) {
 	// Test cancellation guards
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	cancellingSink := &voiceTurnSink{
-		ctx: ctx,
-		onSentence: func(s string) {
-			sentences = append(sentences, s)
-		},
-		detector: NewSentenceDetector(),
-		resCh:    make(chan *runner.TurnResult, 1),
-		errCh:    make(chan error, 1),
-	}
+	cancellingSink := newVoiceTurnSink(ctx, nil, func(s string) {
+		sentences = append(sentences, s)
+	}, NewSentenceDetector())
 	cancellingSink.OnTextDelta("Should not be emitted because context is cancelled. ")
 	if len(sentences) != 2 {
 		t.Fatalf("expected no new sentences on cancelled context, got %d: %v", len(sentences), sentences)
@@ -839,14 +816,9 @@ func TestVoiceTurnSink_SentenceStreaming(t *testing.T) {
 func TestVoiceTurnSink_ResultFallbackWhenNoDeltas(t *testing.T) {
 	t.Parallel()
 	var sentences []string
-	sink := &voiceTurnSink{
-		onSentence: func(s string) {
-			sentences = append(sentences, s)
-		},
-		detector: NewSentenceDetector(),
-		resCh:    make(chan *runner.TurnResult, 1),
-		errCh:    make(chan error, 1),
-	}
+	sink := newVoiceTurnSink(context.Background(), nil, func(s string) {
+		sentences = append(sentences, s)
+	}, NewSentenceDetector())
 
 	sink.OnResult(&runner.TurnResult{Response: "Hello there. General Kenobi."})
 	if len(sentences) != 2 {
