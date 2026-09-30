@@ -901,3 +901,107 @@ func TestWorkerPool_ExecuteVoiceTurn_TranscriptRecoveryOnError(t *testing.T) {
 	}
 }
 
+type queueMockVoiceSession struct {
+	sessionID string
+	sendFn    func(prompt string, turn *runner.TurnContext) error
+}
+
+func (s *queueMockVoiceSession) SessionID() string {
+	return s.sessionID
+}
+
+func (s *queueMockVoiceSession) Send(prompt string, turn *runner.TurnContext) error {
+	if s.sendFn != nil {
+		return s.sendFn(prompt, turn)
+	}
+	if turn != nil && turn.Sink != nil {
+		turn.Sink.OnTurnStarted()
+		turn.Sink.OnTextDelta("Hello from mock voice.")
+		turn.Sink.OnResult(&runner.TurnResult{
+			Response: "Hello from mock voice.",
+			ExitCode: 0,
+		})
+	}
+	return nil
+}
+
+type queueMockVoiceProcessPool struct {
+	sessions    map[string]*queueMockVoiceSession
+	initCalled  bool
+	closeCalled bool
+}
+
+func (p *queueMockVoiceProcessPool) GetOrCreateSession(ctx context.Context, targetKey string) (runner.VoiceSession, error) {
+	if p.closeCalled {
+		return nil, errors.New("pool closed")
+	}
+	if s, ok := p.sessions[targetKey]; ok {
+		return s, nil
+	}
+	sess := &queueMockVoiceSession{sessionID: "sess-" + targetKey}
+	p.sessions[targetKey] = sess
+	return sess, nil
+}
+
+func (p *queueMockVoiceProcessPool) Initialize(ctx context.Context) error {
+	p.initCalled = true
+	return nil
+}
+
+func (p *queueMockVoiceProcessPool) Close() error {
+	p.closeCalled = true
+	return nil
+}
+
+var _ runner.VoiceProcessPool = (*queueMockVoiceProcessPool)(nil)
+var _ runner.VoiceSession = (*queueMockVoiceSession)(nil)
+
+func TestWorkerPool_ExecuteVoiceTurn_MockVoiceProcessPool(t *testing.T) {
+	t.Parallel()
+
+	mockPool := &queueMockVoiceProcessPool{
+		sessions: make(map[string]*queueMockVoiceSession),
+	}
+
+	pool := New(nil, WorkerPoolConfig{
+		VoiceProcessPool: mockPool,
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	if pool.VoiceProcessPool() != mockPool {
+		t.Fatalf("expected VoiceProcessPool to return mockPool")
+	}
+
+	var sentenceReceived string
+	reply, sessID, err := pool.ExecuteVoiceTurn(
+		context.Background(),
+		"ping",
+		"mock-dev-1",
+		nil,
+		func(sentence string) {
+			sentenceReceived = sentence
+		},
+	)
+	if err != nil {
+		t.Fatalf("ExecuteVoiceTurn failed with mock VoiceProcessPool: %v", err)
+	}
+	if reply != "Hello from mock voice." {
+		t.Errorf("expected 'Hello from mock voice.', got %q", reply)
+	}
+	if sessID != "sess-mock-dev-1" {
+		t.Errorf("expected session ID 'sess-mock-dev-1', got %q", sessID)
+	}
+	if sentenceReceived != "Hello from mock voice." {
+		t.Errorf("expected sentence callback 'Hello from mock voice.', got %q", sentenceReceived)
+	}
+
+	// Verify MarkDirty handles mock pool without panic
+	pool.MarkDirty()
+
+	// Verify Stop closes the voice process pool
+	pool.Stop()
+	if !mockPool.closeCalled {
+		t.Errorf("expected mockPool.Close() to be called on Stop")
+	}
+}

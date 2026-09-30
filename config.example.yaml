@@ -97,10 +97,39 @@ channels:
     mode: ignore
 
 # ------------------------------------------------------------------------------
+# Voice Interface Configuration
+# ------------------------------------------------------------------------------
+# Configures the voice process pool engine, model override, and pre-warmed sessions.
+#
+# Available Engines:
+#   - agy: Uses the local Antigravity CLI daemon process pool (default).
+#   - gemini_api: Direct Gemini Live/REST API calls with SSE streaming (~200ms latency).
+#     Requires HARNESS_API_KEY or API_KEY to be set in environment or config.
+#
+voice:
+  engine: agy # or gemini_api
+  # model: gemini-2.5-flash # Optional model override for voice turns (defaults to low_effort_model)
+  # prewarmed_targets:
+  #   - kiosk
+  #   - dock
+
+# ------------------------------------------------------------------------------
 # Custom MCP Servers
 # ------------------------------------------------------------------------------
-# Additional MCP servers to merge into ~/.gemini/config/mcp_config.json
-mcp_servers: {}
+# Additional MCP servers to merge into target-partitioned mcp_config.json:
+#   - common: Loaded across all targets (Discord, Voice, and sidecars).
+#   - discord: Loaded only for primary Discord bot interactions.
+#   - voice: Loaded for voice device interactions (e.g. Home Assistant ha-mcp).
+#   - ephemeral: Loaded for transient lightweight turns.
+#
+mcp_servers:
+  # common:
+  #   ha-mcp:
+  #     serverUrl: "http://homeassistant:8123/api/webhook/..."
+  # voice:
+  #   ha-mcp:
+  #     serverUrl: "http://homeassistant:8123/api/webhook/..."
+
 
 # ------------------------------------------------------------------------------
 # Dashboard Configuration

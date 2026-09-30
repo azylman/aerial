@@ -3446,6 +3446,8 @@ voice:
 		t.Parallel()
 		orig := &ConfigData{
 			Voice: VoiceConfig{
+				Engine:           "gemini_api",
+				Model:            "gemini-2.5-flash",
 				PrewarmedTargets: []string{"kiosk", "dock"},
 			},
 		}
@@ -3453,16 +3455,30 @@ voice:
 		if len(cloned.Voice.PrewarmedTargets) != 2 {
 			t.Fatalf("expected 2 cloned targets, got %d", len(cloned.Voice.PrewarmedTargets))
 		}
+		if cloned.Voice.Engine != "gemini_api" {
+			t.Fatalf("expected cloned engine 'gemini_api', got %q", cloned.Voice.Engine)
+		}
+		if cloned.Voice.Model != "gemini-2.5-flash" {
+			t.Fatalf("expected cloned model 'gemini-2.5-flash', got %q", cloned.Voice.Model)
+		}
 
-		// Mutate cloned slice
+		// Mutate cloned slice and fields
 		cloned.Voice.PrewarmedTargets[0] = "mutated"
 		cloned.Voice.PrewarmedTargets = append(cloned.Voice.PrewarmedTargets, "extra")
+		cloned.Voice.Engine = "agy"
+		cloned.Voice.Model = "gemini-2.5-pro"
 
 		if orig.Voice.PrewarmedTargets[0] != "kiosk" {
 			t.Errorf("OCP violation: mutating cloned targets affected original[0]: got %q, want 'kiosk'", orig.Voice.PrewarmedTargets[0])
 		}
 		if len(orig.Voice.PrewarmedTargets) != 2 {
 			t.Errorf("OCP violation: appending to cloned targets affected original length: got %d, want 2", len(orig.Voice.PrewarmedTargets))
+		}
+		if orig.Voice.Engine != "gemini_api" {
+			t.Errorf("OCP violation: mutating cloned engine affected original: got %q, want 'gemini_api'", orig.Voice.Engine)
+		}
+		if orig.Voice.Model != "gemini-2.5-flash" {
+			t.Errorf("OCP violation: mutating cloned model affected original: got %q, want 'gemini-2.5-flash'", orig.Voice.Model)
 		}
 	})
 
@@ -3486,5 +3502,245 @@ voice:
 		}
 	})
 }
+
+func TestVoiceEngine(t *testing.T) {
+	t.Parallel()
+
+	t.Run("NilConfig", func(t *testing.T) {
+		t.Parallel()
+		var cfg *Config
+		if got := cfg.VoiceEngine(); got != "agy" {
+			t.Errorf("expected VoiceEngine() for nil *Config to be 'agy', got %q", got)
+		}
+
+		var data *ConfigData
+		if got := data.VoiceEngine(); got != "agy" {
+			t.Errorf("expected VoiceEngine() for nil *ConfigData to be 'agy', got %q", got)
+		}
+	})
+
+	t.Run("TableDrivenResolution", func(t *testing.T) {
+		t.Parallel()
+
+		tests := []struct {
+			name        string
+			yamlContent string
+			cfgData     *ConfigData
+			expected    string
+		}{
+			{
+				name:        "omitted_voice_block",
+				yamlContent: "model: test-model\n",
+				expected:    "agy",
+			},
+			{
+				name:        "empty_voice_block",
+				yamlContent: "model: test-model\nvoice: {}\n",
+				expected:    "agy",
+			},
+			{
+				name:        "empty_engine_string",
+				yamlContent: "model: test-model\nvoice:\n  engine: \"\"\n",
+				expected:    "agy",
+			},
+			{
+				name:        "whitespace_engine_string",
+				yamlContent: "model: test-model\nvoice:\n  engine: \"   \"\n",
+				expected:    "agy",
+			},
+			{
+				name:        "explicit_agy_lowercase",
+				yamlContent: "voice:\n  engine: \"agy\"\n",
+				expected:    "agy",
+			},
+			{
+				name:        "explicit_agy_uppercase",
+				yamlContent: "voice:\n  engine: \"AGY\"\n",
+				expected:    "agy",
+			},
+			{
+				name:        "explicit_agy_with_spaces",
+				yamlContent: "voice:\n  engine: \"  agy  \"\n",
+				expected:    "agy",
+			},
+			{
+				name:        "gemini_api_exact",
+				yamlContent: "voice:\n  engine: \"gemini_api\"\n",
+				expected:    "gemini_api",
+			},
+			{
+				name:        "gemini_api_uppercase",
+				yamlContent: "voice:\n  engine: \"GEMINI_API\"\n",
+				expected:    "gemini_api",
+			},
+			{
+				name:        "gemini_api_with_spaces",
+				yamlContent: "voice:\n  engine: \" gemini_api \"\n",
+				expected:    "gemini_api",
+			},
+			{
+				name:        "gemini_alias",
+				yamlContent: "voice:\n  engine: \"gemini\"\n",
+				expected:    "gemini_api",
+			},
+			{
+				name:        "gemini_alias_uppercase",
+				yamlContent: "voice:\n  engine: \"GEMINI\"\n",
+				expected:    "gemini_api",
+			},
+			{
+				name:        "gemini_alias_with_spaces",
+				yamlContent: "voice:\n  engine: \"  gemini  \"\n",
+				expected:    "gemini_api",
+			},
+			{
+				name:        "direct_api_alias",
+				yamlContent: "voice:\n  engine: \"direct_api\"\n",
+				expected:    "gemini_api",
+			},
+			{
+				name:        "direct_api_alias_uppercase",
+				yamlContent: "voice:\n  engine: \"DIRECT_API\"\n",
+				expected:    "gemini_api",
+			},
+			{
+				name:        "direct_api_alias_with_spaces",
+				yamlContent: "voice:\n  engine: \" direct_api \"\n",
+				expected:    "gemini_api",
+			},
+			{
+				name:        "unrecognized_fallback_custom",
+				yamlContent: "voice:\n  engine: \"custom_engine\"\n",
+				expected:    "agy",
+			},
+			{
+				name:        "unrecognized_fallback_openai",
+				yamlContent: "voice:\n  engine: \"openai\"\n",
+				expected:    "agy",
+			},
+			{
+				name:        "unrecognized_fallback_numeric",
+				yamlContent: "voice:\n  engine: \"12345\"\n",
+				expected:    "agy",
+			},
+			{
+				name:        "default_config_data",
+				cfgData:     DefaultConfigData(),
+				expected:    "agy",
+			},
+		}
+
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				var cfg *Config
+				if tc.cfgData != nil {
+					cfg = NewFromData(tc.cfgData)
+				} else {
+					var err error
+					cfg, err = LoadConfigFromBytes([]byte(tc.yamlContent))
+					if err != nil {
+						t.Fatalf("failed to load config from bytes: %v", err)
+					}
+				}
+
+				if got := cfg.VoiceEngine(); got != tc.expected {
+					t.Errorf("cfg.VoiceEngine() = %q, want %q", got, tc.expected)
+				}
+				if got := cfg.Current().VoiceEngine(); got != tc.expected {
+					t.Errorf("cfg.Current().VoiceEngine() = %q, want %q", got, tc.expected)
+				}
+			})
+		}
+	})
+
+	t.Run("CloningPreservesEngineWithoutCrossMutation", func(t *testing.T) {
+		t.Parallel()
+
+		orig := &ConfigData{
+			Voice: VoiceConfig{
+				Engine:           "gemini_api",
+				PrewarmedTargets: []string{"kiosk"},
+			},
+		}
+
+		cloned := cloneConfigData(orig)
+		if cloned.Voice.Engine != "gemini_api" {
+			t.Fatalf("expected cloned.Voice.Engine to be 'gemini_api', got %q", cloned.Voice.Engine)
+		}
+
+		// Mutate cloned struct
+		cloned.Voice.Engine = "agy"
+		if orig.Voice.Engine != "gemini_api" {
+			t.Errorf("OCP violation: mutating cloned.Voice.Engine altered orig.Voice.Engine: got %q, want 'gemini_api'", orig.Voice.Engine)
+		}
+
+		// Mutate orig struct
+		orig.Voice.Engine = "direct_api"
+		if cloned.Voice.Engine != "agy" {
+			t.Errorf("OCP violation: mutating orig.Voice.Engine altered cloned.Voice.Engine: got %q, want 'agy'", cloned.Voice.Engine)
+		}
+
+		// Test through Config wrapper
+		cfg := NewFromData(orig)
+		if cfg.VoiceEngine() != "gemini_api" {
+			t.Fatalf("expected cfg.VoiceEngine() to reflect updated orig 'gemini_api', got %q", cfg.VoiceEngine())
+		}
+
+		clonedCfg := cfg.Clone()
+		if clonedCfg.VoiceEngine() != "gemini_api" {
+			t.Fatalf("expected clonedCfg.VoiceEngine() to be 'gemini_api', got %q", clonedCfg.VoiceEngine())
+		}
+
+		// Update clonedCfg with new data
+		clonedCfg.Update(&ConfigData{
+			Voice: VoiceConfig{
+				Engine: "agy",
+			},
+		})
+		if clonedCfg.VoiceEngine() != "agy" {
+			t.Errorf("expected clonedCfg.VoiceEngine() to be 'agy' after update, got %q", clonedCfg.VoiceEngine())
+		}
+		if cfg.VoiceEngine() != "gemini_api" {
+			t.Errorf("OCP violation: updating clonedCfg affected original cfg: got %q, want 'gemini_api'", cfg.VoiceEngine())
+		}
+	})
+}
+
+func TestVoiceModel(t *testing.T) {
+	t.Parallel()
+
+	t.Run("NilConfig", func(t *testing.T) {
+		t.Parallel()
+		var cfg *Config
+		if got := cfg.VoiceModel(); got != "" {
+			t.Errorf("expected VoiceModel() for nil *Config to be empty, got %q", got)
+		}
+
+		var data *ConfigData
+		if got := data.VoiceModel(); got != "" {
+			t.Errorf("expected VoiceModel() for nil *ConfigData to be empty, got %q", got)
+		}
+	})
+
+	t.Run("ConfiguredModel", func(t *testing.T) {
+		t.Parallel()
+		yamlContent := `
+voice:
+  model: " gemini-2.5-flash "
+`
+		cfg, err := LoadConfigFromBytes([]byte(yamlContent))
+		if err != nil {
+			t.Fatalf("failed to load config: %v", err)
+		}
+		if got := cfg.VoiceModel(); got != "gemini-2.5-flash" {
+			t.Errorf("cfg.VoiceModel() = %q, want 'gemini-2.5-flash'", got)
+		}
+		if got := cfg.Current().VoiceModel(); got != "gemini-2.5-flash" {
+			t.Errorf("cfg.Current().VoiceModel() = %q, want 'gemini-2.5-flash'", got)
+		}
+	})
+}
+
 
 

@@ -1002,6 +1002,99 @@ func WithProcessSpawner(spawner runner.DaemonSpawner) BrainAppOption {
 	}
 }
 
+// extractVoiceMCPServers extracts voice-relevant MCP servers (scheduler, common, voice) from config.
+func extractVoiceMCPServers(cur *config.ConfigData) []runner.MCPServerConfig {
+	serverMap := make(map[string]runner.MCPServerConfig)
+	serverMap["scheduler"] = runner.MCPServerConfig{
+		Name:      "scheduler",
+		ServerURL: "http://scheduler-mcp:8080/mcp",
+	}
+	if cur != nil {
+		type srvJSON struct {
+			ServerURL string            `json:"serverUrl"`
+			Headers   map[string]string `json:"headers,omitempty"`
+		}
+		parseMap := func(m map[string]json.RawMessage) {
+			for name, raw := range m {
+				var sj srvJSON
+				if err := json.Unmarshal(raw, &sj); err == nil && strings.TrimSpace(sj.ServerURL) != "" {
+					serverMap[name] = runner.MCPServerConfig{
+						Name:      name,
+						ServerURL: strings.TrimSpace(sj.ServerURL),
+						Headers:   sj.Headers,
+					}
+				}
+			}
+		}
+		parseMap(cur.McpServers.Common)
+		parseMap(cur.McpServers.Voice)
+	}
+	result := make([]runner.MCPServerConfig, 0, len(serverMap))
+	for _, s := range serverMap {
+		result = append(result, s)
+	}
+	return result
+}
+
+// createVoiceProcessPool constructs a runner.VoiceProcessPool based on cfg.VoiceEngine().
+func createVoiceProcessPool(cfg *config.Config, voiceHome string, lowEffortModel string, spawner runner.DaemonSpawner) runner.VoiceProcessPool {
+	var cur *config.ConfigData
+	var voiceEngine string
+	var prewarmedTargets []string
+	if cfg != nil {
+		cur = cfg.Current()
+		voiceEngine = cfg.VoiceEngine()
+		prewarmedTargets = cfg.VoicePrewarmedTargets()
+	} else {
+		cur = config.DefaultConfigData()
+		voiceEngine = "agy"
+		prewarmedTargets = []string{}
+	}
+
+	var voicePool runner.VoiceProcessPool
+	if voiceEngine == "gemini_api" {
+		apiKey := cur.HarnessAPIKey
+		if apiKey == "" {
+			apiKey = cur.APIKey
+		}
+		if apiKey == "" {
+			log.Printf("[WARN] voice.engine is configured as 'gemini_api' but neither harness_api_key nor api_key is set; safely falling back to 'agy'")
+			voiceEngine = "agy"
+		} else {
+			geminiModel := lowEffortModel
+			if strings.TrimSpace(cur.Voice.Model) != "" {
+				geminiModel = strings.TrimSpace(cur.Voice.Model)
+			}
+			mcpServers := extractVoiceMCPServers(cur)
+			voicePool = runner.NewGeminiVoicePool(runner.GeminiVoicePoolConfig{
+				APIKey:           apiKey,
+				Model:            geminiModel,
+				PrewarmedTargets: prewarmedTargets,
+				SystemPrompt:     cur.SystemPrompt,
+				MCPServers:       mcpServers,
+				DataDir:          cur.DataDir,
+			})
+			log.Printf("[INIT] Voice engine initialized with 'gemini_api' (model=%s, prewarmed=%v, mcp_servers=%d)", geminiModel, prewarmedTargets, len(mcpServers))
+		}
+	}
+	if voiceEngine != "gemini_api" {
+		voicePool = runner.NewUnifiedProcessPool(runner.PoolConfig{
+			GeminiHomeDir:    voiceHome,
+			Model:            lowEffortModel,
+			AgyBin:           cur.AgyBin,
+			Cwd:              cur.DataDir,
+			Env:              os.Environ(),
+			PrewarmedTargets: prewarmedTargets,
+		}, spawner)
+	}
+	return voicePool
+}
+
+// createVoicePool is an alias for createVoiceProcessPool.
+func createVoicePool(cfg *config.Config, voiceHome string, lowEffortModel string, spawner runner.DaemonSpawner) runner.VoiceProcessPool {
+	return createVoiceProcessPool(cfg, voiceHome, lowEffortModel, spawner)
+}
+
 var onServerReady func(addr string)
 
 func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption) error {
@@ -1103,14 +1196,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		}
 	}()
 
-	voicePool := runner.NewUnifiedProcessPool(runner.PoolConfig{
-		GeminiHomeDir:    voiceHome,
-		Model:            lowEffortModel,
-		AgyBin:           cur.AgyBin,
-		Cwd:              cur.DataDir,
-		Env:              os.Environ(),
-		PrewarmedTargets: cfg.VoicePrewarmedTargets(),
-	}, appOpts.processSpawner)
+	var voicePool runner.VoiceProcessPool = createVoiceProcessPool(cfg, voiceHome, lowEffortModel, appOpts.processSpawner)
 	defer func() {
 		if err := voicePool.Close(); err != nil {
 			log.Printf("[WARN] Failed to close voice process pool: %v", err)
