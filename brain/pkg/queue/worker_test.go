@@ -2400,23 +2400,28 @@ func TestWorkerPool_CapacityBlip_WithoutCountdown_Fallback70s(t *testing.T) {
 	mu.Unlock()
 }
 
-func TestTurnResultSink_Callbacks(t *testing.T) {
+func TestDiscordTurnSink_Callbacks(t *testing.T) {
 	t.Parallel()
-	sink := &turnResultSink{
-		resCh: make(chan *runner.TurnResult, 1),
-		errCh: make(chan error, 1),
-	}
+	sink := newDiscordTurnSink(nil)
 	sink.OnTurnStarted()
 	sink.OnThinking()
 	sink.OnTextDelta("some text")
 	sink.OnError(errors.New("test error"))
-	select {
-	case err := <-sink.errCh:
-		if err == nil || err.Error() != "test error" {
-			t.Errorf("unexpected error received: %v", err)
-		}
-	default:
-		t.Fatalf("expected error on errCh")
+	res, err := sink.Wait(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Response != "some text" {
+		t.Errorf("expected recovered text 'some text', got %q", res.Response)
+	}
+
+	// When no substantive deltas were streamed, error is delivered
+	sinkNoDeltas := newDiscordTurnSink(nil)
+	expectedErr := errors.New("hard failure")
+	sinkNoDeltas.OnError(expectedErr)
+	_, err = sinkNoDeltas.Wait(context.Background())
+	if err == nil || !errors.Is(err, expectedErr) {
+		t.Errorf("unexpected error received: %v", err)
 	}
 }
 

@@ -2568,12 +2568,6 @@ func TestCoverageBoost_ExtraHits(t *testing.T) {
 }
 
 func TestCoverageBoost_DaemonTurnMarshalError(t *testing.T) {
-	orig := daemonTurnMarshaler
-	daemonTurnMarshaler = func(v any) ([]byte, error) {
-		return nil, errors.New("simulated marshal error")
-	}
-	defer func() { daemonTurnMarshaler = orig }()
-
 	store := setupTestStore(t)
 	tmpHome := t.TempDir()
 	tempData := t.TempDir()
@@ -2593,7 +2587,7 @@ func TestCoverageBoost_DaemonTurnMarshalError(t *testing.T) {
 				}
 				scanner := bufio.NewScanner(inR)
 				for scanner.Scan() {
-					if _, err := outW.Write([]byte("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"Executed via persistent daemon\",\"usage\":{\"total_tokens\":10}}}\n")); err != nil {
+					if _, err := outW.Write([]byte("{\"event\":\"result\",\"result\":{\"status\":\"ERROR\",\"error\":\"simulated daemon failure\"}}\n")); err != nil {
 						t.Logf("write result event: %v", err)
 					}
 				}

@@ -2,7 +2,6 @@ package queue
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -27,8 +26,6 @@ import (
 )
 
 type wakeInfo = WakeInfo
-
-var daemonTurnMarshaler = json.Marshal
 
 type turnExecution struct {
 	pool                *WorkerPool
@@ -1622,6 +1619,8 @@ func (te *turnExecution) executeWithRetries() {
 		var stdout, stderr string
 		var exitCode int
 		var err error
+		var isFailure, isTransient, isSessionCorruption bool
+		var errDetail string
 		runStart := time.Now()
 
 		activePool := te.pool.processPool
@@ -1632,22 +1631,20 @@ func (te *turnExecution) executeWithRetries() {
 		}
 		te.activePool = activePool
 
-		if !te.pool.hasCustomRunner && activePool != nil {
+		var resp *runner.AgyResponse
+		var outcome runner.TurnOutcome
+		isDaemonTurn := !te.pool.hasCustomRunner && activePool != nil
+
+		if isDaemonTurn {
 			if te.statusUpdater != nil {
 				te.statusUpdater.MarkTurnStarted()
 			}
 			daemon, daemonErr := activePool.GetOrCreate(runCtx, te.threadID)
 			if daemonErr != nil {
-				stdout = ""
-				stderr = daemonErr.Error()
-				exitCode = 1
 				err = daemonErr
+				outcome = runner.NewTurnResolver(te.pool.sessionMgr).Resolve(runCtx, nil, daemonErr, te.currentSessionID)
 			} else {
-				sink := &turnResultSink{
-					statusUpdater: te.statusUpdater,
-					resCh:         make(chan *runner.TurnResult, 1),
-					errCh:         make(chan error, 1),
-				}
+				sink := newDiscordTurnSink(te.statusUpdater)
 				turnCtx := &runner.TurnContext{
 					TurnID:    uuid.New().String(),
 					Prompt:    promptToSend,
@@ -1655,45 +1652,44 @@ func (te *turnExecution) executeWithRetries() {
 					CreatedAt: time.Now(),
 				}
 				if sendErr := daemon.Send(promptToSend, turnCtx); sendErr != nil {
-					stdout = ""
-					stderr = sendErr.Error()
-					exitCode = 1
 					err = sendErr
+					outcome = runner.NewTurnResolver(te.pool.sessionMgr).Resolve(runCtx, nil, sendErr, daemon.SessionID())
 				} else {
-					select {
-					case <-runCtx.Done():
-						stdout = ""
-						stderr = runCtx.Err().Error()
-						exitCode = 1
-						err = runCtx.Err()
-					case tErr := <-sink.errCh:
-						stdout = ""
-						stderr = tErr.Error()
-						exitCode = 1
-						err = tErr
-					case turnRes := <-sink.resCh:
-						convID := daemon.SessionID()
-						if convID == "" && turnRes.ConversationID != "" {
-							convID = turnRes.ConversationID
-						}
-						payload, marshalErr := daemonTurnMarshaler(map[string]interface{}{
-							"conversation_id": convID,
-							"status":          "SUCCESS",
-							"response":        turnRes.Response,
-							"usage":           turnRes.Usage,
-						})
-						if marshalErr != nil {
-							stdout = ""
-							stderr = marshalErr.Error()
-							exitCode = 1
-							err = marshalErr
-						} else {
-							stdout = string(payload)
-							stderr = turnRes.Stderr
-							exitCode = turnRes.ExitCode
-							err = nil
-						}
+					turnRes, turnErr := sink.Wait(runCtx)
+					err = turnErr
+					targetSess := daemon.SessionID()
+					if targetSess == "" {
+						targetSess = te.currentSessionID
 					}
+					resolver := runner.NewTurnResolver(te.pool.sessionMgr)
+					outcome = resolver.Resolve(runCtx, turnRes, turnErr, targetSess)
+				}
+			}
+
+			if outcome.IsSuccess {
+				isFailure = false
+				isTransient = false
+				isSessionCorruption = false
+				errDetail = ""
+				lastErrDetail = ""
+				lastStderr = ""
+				resp = &runner.AgyResponse{
+					ConversationID: outcome.SessionID,
+					Status:         "SUCCESS",
+					Response:       outcome.Response,
+					Usage:          outcome.Usage,
+				}
+				stdout = outcome.Response
+			} else {
+				isFailure = true
+				isTransient = outcome.IsTransient
+				isSessionCorruption = outcome.IsSessionCorruption
+				errDetail = outcome.ErrorDetail
+				lastErrDetail = errDetail
+				if err != nil {
+					lastStderr = err.Error()
+				} else {
+					lastStderr = outcome.ErrorDetail
 				}
 			}
 		} else if te.pool.cfg.RunnerWithOptionsFunc != nil {
@@ -1731,23 +1727,25 @@ func (te *turnExecution) executeWithRetries() {
 		}
 		runCancel()
 
-		isFailure, isTransient, isSessionCorruption, errDetail := runner.ClassifyError(exitCode, stdout, stderr)
-		if err != nil && errDetail == "" {
-			errDetail = err.Error()
-		}
-
-		if isFailure && isSessionCorruption && te.currentSessionID == "" {
-			lowerErr := strings.ToLower(errDetail + " " + stderr + " " + stdout)
-			if strings.Contains(lowerErr, "context window") || strings.Contains(lowerErr, "context length") || strings.Contains(lowerErr, "maximum context length") || strings.Contains(lowerErr, "token limit exceeded") || strings.Contains(lowerErr, "prompt is too long") || strings.Contains(lowerErr, "request too large") {
-				isSessionCorruption = false
-				isTransient = false
-				errDetail = "prompt length exceeds maximum model context window (hard failure)"
-				log.Printf("[Queue] Cold start context window exceeded for thread %s; converting to non-transient fail-fast", te.threadID)
+		if !isDaemonTurn {
+			isFailure, isTransient, isSessionCorruption, errDetail = runner.ClassifyError(exitCode, stdout, stderr)
+			if err != nil && errDetail == "" {
+				errDetail = err.Error()
 			}
-		}
 
-		lastErrDetail = errDetail
-		lastStderr = stderr
+			if isFailure && isSessionCorruption && te.currentSessionID == "" {
+				lowerErr := strings.ToLower(errDetail + " " + stderr + " " + stdout)
+				if strings.Contains(lowerErr, "context window") || strings.Contains(lowerErr, "context length") || strings.Contains(lowerErr, "maximum context length") || strings.Contains(lowerErr, "token limit exceeded") || strings.Contains(lowerErr, "prompt is too long") || strings.Contains(lowerErr, "request too large") {
+					isSessionCorruption = false
+					isTransient = false
+					errDetail = "prompt length exceeds maximum model context window (hard failure)"
+					log.Printf("[Queue] Cold start context window exceeded for thread %s; converting to non-transient fail-fast", te.threadID)
+				}
+			}
+
+			lastErrDetail = errDetail
+			lastStderr = stderr
+		}
 
 		if isFailure {
 			promptToSend = te.turnPrompt
@@ -1778,20 +1776,21 @@ func (te *turnExecution) executeWithRetries() {
 			}
 
 			// Transcript Recovery on Exit Code 0 or Daemon Empty Response:
-			// If agy completed with exit code 0 or failed with an empty response / aborted turn from daemon buffering,
-			// check if the session transcript on disk contains a valid PLANNER_RESPONSE turn.
-			isDaemonEmpty := isFailure && (strings.Contains(errDetail, "daemon turn completed with empty response") || strings.Contains(stderr, "daemon turn completed with empty response"))
-			if (exitCode == 0 || isDaemonEmpty) && targetSess != "" && te.pool.sessionMgr != nil && te.pool.sessionMgr.SessionExistsOnDisk(targetSess) {
-				if respText, _ := te.pool.sessionMgr.ExtractResponseAndError(targetSess); respText != "" && !strings.HasPrefix(respText, "[Tool Call Requested]:") {
-					log.Printf("[Queue] Recovered response directly from session %s transcript after runner failure (exit %d, isDaemonEmpty=%v)", targetSess, exitCode, isDaemonEmpty)
-					isFailure = false
-					isSessionCorruption = false
-					isTransient = false
-					if te.currentSessionID == "" {
-						te.currentSessionID = targetSess
-						te.saveSessionID(te.threadID, te.currentSessionID)
+			// For non-daemon subprocess runs, check if the session transcript on disk contains a valid PLANNER_RESPONSE turn.
+			if !isDaemonTurn {
+				isDaemonEmpty := isFailure && (strings.Contains(errDetail, "daemon turn completed with empty response") || strings.Contains(stderr, "daemon turn completed with empty response"))
+				if (exitCode == 0 || isDaemonEmpty) && targetSess != "" && te.pool.sessionMgr != nil && te.pool.sessionMgr.SessionExistsOnDisk(targetSess) {
+					if respText, _ := te.pool.sessionMgr.ExtractResponseAndError(targetSess); respText != "" && !strings.HasPrefix(respText, "[Tool Call Requested]:") {
+						log.Printf("[Queue] Recovered response directly from session %s transcript after runner failure (exit %d, isDaemonEmpty=%v)", targetSess, exitCode, isDaemonEmpty)
+						isFailure = false
+						isSessionCorruption = false
+						isTransient = false
+						if te.currentSessionID == "" {
+							te.currentSessionID = targetSess
+							te.saveSessionID(te.threadID, te.currentSessionID)
+						}
+						stdout = fmt.Sprintf(`{"conversation_id":%q,"status":"SUCCESS","response":%q}`, te.currentSessionID, respText)
 					}
-					stdout = fmt.Sprintf(`{"conversation_id":%q,"status":"SUCCESS","response":%q}`, te.currentSessionID, respText)
 				}
 			}
 
@@ -2175,10 +2174,16 @@ func (te *turnExecution) executeWithRetries() {
 		}
 
 		if !isFailure {
-			resp, parseErr := runner.ParseAgyOutput(stdout)
-			if parseErr != nil {
-				log.Printf("[Queue] Failed to parse runner output despite exit 0: %v", parseErr)
-				lastErrDetail = parseErr.Error()
+			if resp == nil {
+				var parseErr error
+				resp, parseErr = runner.ParseAgyOutput(stdout)
+				if parseErr != nil {
+					log.Printf("[Queue] Failed to parse runner output despite exit 0: %v", parseErr)
+					lastErrDetail = parseErr.Error()
+				}
+			}
+			if resp == nil {
+				// Failed to obtain valid response from runner
 			} else {
 				extSess := resp.ConversationID
 				if extSess == "" {
@@ -2726,41 +2731,23 @@ func watchTaskCompletion(ctx context.Context, sessionDir, taskID string) (int, s
 	}
 }
 
-type turnResultSink struct {
-	statusUpdater *StatusUpdater
-	resCh         chan *runner.TurnResult
-	errCh         chan error
-	once          sync.Once
-}
-
-var _ runner.TurnSink = (*turnResultSink)(nil)
-
-func (s *turnResultSink) OnTurnStarted() {}
-func (s *turnResultSink) OnThinking()    {}
-func (s *turnResultSink) OnToolCall(toolName, commandName string) {
-	if s.statusUpdater != nil && (toolName != "" || commandName != "") {
-		s.statusUpdater.HandleStep(&runner.StepUpdateEvent{
-			Event:    "step_update",
-			State:    "RUNNING",
-			Type:     "tool_call",
-			ToolName: toolName,
-			ToolInfo: &runner.StepToolInfo{
-				Parameters: runner.StepToolParameters{
-					CommandLine: commandName,
-				},
-			},
-		})
-	}
-}
-func (s *turnResultSink) OnTextDelta(delta string) {}
-func (s *turnResultSink) OnResult(res *runner.TurnResult) {
-	s.once.Do(func() {
-		s.resCh <- res
-	})
-}
-func (s *turnResultSink) OnError(err error) {
-	s.once.Do(func() {
-		s.errCh <- err
+func newDiscordTurnSink(statusUpdater *StatusUpdater) *runner.BufferingTurnSink {
+	return runner.NewBufferingTurnSink(runner.BufferingTurnSinkConfig{
+		OnToolCall: func(toolName, commandName string) {
+			if statusUpdater != nil && (toolName != "" || commandName != "") {
+				statusUpdater.HandleStep(&runner.StepUpdateEvent{
+					Event:    "step_update",
+					State:    "RUNNING",
+					Type:     "tool_call",
+					ToolName: toolName,
+					ToolInfo: &runner.StepToolInfo{
+						Parameters: runner.StepToolParameters{
+							CommandLine: commandName,
+						},
+					},
+				})
+			}
+		},
 	})
 }
 
