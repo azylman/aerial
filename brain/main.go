@@ -1234,15 +1234,19 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		}
 	}()
 
-	discordLowEffortPool := runner.NewUnifiedProcessPool(runner.PoolConfig{
+	discordLowEffortUnderlying := runner.NewUnifiedProcessPool(runner.PoolConfig{
 		GeminiHomeDir:     ephemeralHome,
 		Model:             lowEffortModel,
 		AgyBin:            cur.AgyBin,
 		Cwd:               cur.DataDir,
 		Env:               os.Environ(),
-		PrewarmedTargets:  []string{"ephemeral:classifier", "ephemeral:summarizer"},
+		PrewarmedTargets:  []string{"ephemeral:worker-0", "ephemeral:worker-1"},
 		TranscriptRescuer: sessionMgr.ExtractResponseSince,
 	}, appOpts.processSpawner)
+
+	discordLowEffortPool := runner.NewInterchangeablePool(discordLowEffortUnderlying, runner.InterchangeablePoolConfig{
+		WorkerCount: 2,
+	})
 	defer func() {
 		if err := discordLowEffortPool.Close(); err != nil {
 			log.Printf("[WARN] Failed to close discord low effort process pool: %v", err)

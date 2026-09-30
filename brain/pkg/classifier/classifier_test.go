@@ -1734,6 +1734,57 @@ func TestClassifier_WithProcessPool_AndPrimaryLLMFunc(t *testing.T) {
 	}
 }
 
+func TestClassifier_WithInterchangeablePool(t *testing.T) {
+	t.Parallel()
+
+	mockSpawner := &runner.MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+			outR, outW := io.Pipe()
+			inR, inW := io.Pipe()
+			errR, _ := io.Pipe()
+
+			go func() {
+				_, _ = fmt.Fprintf(outW, "{\"event\":\"init\",\"session_id\":\"00000000-0000-0000-0000-000000000099\"}\n")
+				scanner := bufio.NewScanner(inR)
+				for scanner.Scan() {
+					line := scanner.Text()
+					if strings.Contains(line, "summarize") || strings.Contains(line, "nginx") {
+						_, _ = fmt.Fprintf(outW, "{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"Summary from interchangeable pool\"}}\n")
+					} else {
+						_, _ = fmt.Fprintf(outW, "{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"{\\\"confidence\\\":0.92,\\\"reason\\\":\\\"needs assistance\\\"}\"}}\n")
+					}
+				}
+			}()
+
+			return inW, outR, errR, runner.NewMockProcessHandle(999), nil
+		},
+	}
+
+	underlying := runner.NewUnifiedProcessPool(runner.PoolConfig{
+		DefaultModel: "test-model",
+	}, mockSpawner)
+	defer underlying.Close()
+
+	interPool := runner.NewInterchangeablePool(underlying, runner.InterchangeablePoolConfig{
+		WorkerCount: 2,
+	})
+	defer interPool.Close()
+
+	cls := New(nil, nil, WithProcessPool(interPool))
+	res := cls.Classify(context.Background(), db.Message{Content: "Can someone help me?"}, nil)
+	if res.Confidence != 0.92 || res.Reason != "needs assistance" {
+		t.Fatalf("unexpected classification result: %+v", res)
+	}
+
+	title, err := cls.SummarizeThreadTitle(context.Background(), "How do I configure nginx?")
+	if err != nil {
+		t.Fatalf("unexpected thread title error: %v", err)
+	}
+	if title != "Summary from interchangeable pool" {
+		t.Fatalf("expected 'Summary from interchangeable pool', got %q", title)
+	}
+}
+
 func TestClassifier_WithProcessPool_NilPoolNoOp(t *testing.T) {
 	t.Parallel()
 

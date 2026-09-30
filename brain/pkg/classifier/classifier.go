@@ -180,8 +180,13 @@ func WithPrimaryTitleLLMFunc(fn runner.LLMFunc) Option {
 	}
 }
 
-// WithProcessPool configures primary LLM functions backed by the given UnifiedProcessPool.
-func WithProcessPool(pool *runner.UnifiedProcessPool) Option {
+// EphemeralProcessPool abstracts process pools that can generate EphemeralLLMFuncs.
+type EphemeralProcessPool interface {
+	EphemeralLLMFunc(targetKey string) runner.LLMFunc
+}
+
+// WithProcessPool configures primary LLM functions backed by the given EphemeralProcessPool.
+func WithProcessPool(pool EphemeralProcessPool) Option {
 	return func(c *Classifier) {
 		if pool == nil {
 			return

@@ -177,6 +177,9 @@ func (d *StreamingDaemon) State() DaemonState {
 
 // SessionID returns the latched session UUID.
 func (d *StreamingDaemon) SessionID() string {
+	if d == nil {
+		return ""
+	}
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	return d.sessionID

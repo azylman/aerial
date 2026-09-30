@@ -162,6 +162,26 @@ func TestWorkerPool_DualPoolTurnRouting(t *testing.T) {
 		}
 	})
 
+	t.Run("InterchangeablePool_ReturnsUnderlying", func(t *testing.T) {
+		mockSpawner := runner.NewMockDaemonSpawner()
+		underlying := runner.NewUnifiedProcessPool(runner.PoolConfig{
+			Model: "gemini-3.8-flash-low",
+		}, mockSpawner)
+		defer underlying.Close()
+
+		interPool := runner.NewInterchangeablePool(underlying, runner.InterchangeablePoolConfig{
+			WorkerCount: 2,
+		})
+		defer interPool.Close()
+
+		p := New(nil, WorkerPoolConfig{
+			LowEffortProcessPool: interPool,
+		})
+		if got := p.LowEffortProcessPool(); got != underlying {
+			t.Fatalf("expected LowEffortProcessPool to return underlying pool %p, got %p", underlying, got)
+		}
+	})
+
 	t.Run("MarkDirtyAndStop_CleansAllThreePools", func(t *testing.T) {
 		pSpawner := runner.NewMockSpawner()
 		pPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.7-pro"}, pSpawner)
