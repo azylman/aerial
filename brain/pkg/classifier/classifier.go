@@ -863,9 +863,9 @@ func (c *Classifier) classifyWithPrompt(ctx context.Context, prompt string) Clas
 }
 
 // MaxSystemOneStateRunes is the maximum number of runes preserved in ModernBERT dialogue state.
-// Capped at 1,000 runes (~200-250 tokens) to ensure edge inference comfortably completes
+// Capped at 600 runes (~200-250 tokens) to ensure edge inference comfortably completes
 // well below the 4.0s client timeout on host E-cores while maintaining recent dialogue turns.
-const MaxSystemOneStateRunes = 1000
+const MaxSystemOneStateRunes = 600
 
 // ModernBERTTruncationSuffix is appended when the single most recent message exceeds MaxSystemOneStateRunes.
 const ModernBERTTruncationSuffix = " ... [truncated]"
