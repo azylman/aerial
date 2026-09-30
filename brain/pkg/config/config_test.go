@@ -3742,5 +3742,132 @@ voice:
 	})
 }
 
+func TestChannelPolicy_CanonicalModes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name              string
+		mode              string
+		wakeMode          string
+		wantThread        bool
+		wantIgnored       bool
+		wantWakeMode      string
+		wantThresholdZero bool
+	}{
+		{
+			name:              "canonical_thread",
+			mode:              "thread",
+			wantThread:        true,
+			wantIgnored:       false,
+			wantWakeMode:      "all",
+			wantThresholdZero: true,
+		},
+		{
+			name:              "canonical_classifier",
+			mode:              "classifier",
+			wantThread:        false,
+			wantIgnored:       false,
+			wantWakeMode:      "classifier",
+			wantThresholdZero: false,
+		},
+		{
+			name:              "canonical_mention",
+			mode:              "mention",
+			wantThread:        false,
+			wantIgnored:       false,
+			wantWakeMode:      "mention",
+			wantThresholdZero: true,
+		},
+		{
+			name:              "canonical_ignore",
+			mode:              "ignore",
+			wantThread:        false,
+			wantIgnored:       true,
+			wantWakeMode:      "ignore",
+			wantThresholdZero: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			p := ChannelPolicy{Mode: tt.mode, WakeMode: tt.wakeMode}
+			if got := p.IsThread(); got != tt.wantThread {
+				t.Errorf("IsThread() = %v, want %v", got, tt.wantThread)
+			}
+			if got := p.IsIgnored(); got != tt.wantIgnored {
+				t.Errorf("IsIgnored() = %v, want %v", got, tt.wantIgnored)
+			}
+			if got := p.GetWakeMode(); got != tt.wantWakeMode {
+				t.Errorf("GetWakeMode() = %q, want %q", got, tt.wantWakeMode)
+			}
+			thresh := p.GetAmbientWakeThreshold()
+			if tt.wantThresholdZero && thresh != 0.0 {
+				t.Errorf("GetAmbientWakeThreshold() = %f, want 0.0", thresh)
+			}
+			if !tt.wantThresholdZero && thresh != 0.80 {
+				t.Errorf("GetAmbientWakeThreshold() = %f, want 0.80", thresh)
+			}
+		})
+	}
+}
+
+func TestChannelPolicy_Normalize(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		input    ChannelPolicy
+		expected ChannelPolicy
+	}{
+		{
+			name:     "legacy_threads",
+			input:    ChannelPolicy{Mode: "threads"},
+			expected: ChannelPolicy{Mode: "thread"},
+		},
+		{
+			name:     "legacy_channel_mention",
+			input:    ChannelPolicy{Mode: "channel", WakeMode: "mention"},
+			expected: ChannelPolicy{Mode: "mention", WakeMode: "mention"},
+		},
+		{
+			name:     "legacy_channel_classifier",
+			input:    ChannelPolicy{Mode: "channel", WakeMode: "classifier"},
+			expected: ChannelPolicy{Mode: "classifier", WakeMode: "classifier"},
+		},
+		{
+			name:     "legacy_channel_default_wake",
+			input:    ChannelPolicy{Mode: "channel"},
+			expected: ChannelPolicy{Mode: "classifier"},
+		},
+		{
+			name:     "legacy_disabled",
+			input:    ChannelPolicy{Mode: "disabled"},
+			expected: ChannelPolicy{Mode: "ignore"},
+		},
+		{
+			name:     "canonical_thread",
+			input:    ChannelPolicy{Mode: "thread"},
+			expected: ChannelPolicy{Mode: "thread"},
+		},
+		{
+			name:     "canonical_mention",
+			input:    ChannelPolicy{Mode: "mention"},
+			expected: ChannelPolicy{Mode: "mention"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			p := tt.input
+			p.Normalize()
+			if p.Mode != tt.expected.Mode {
+				t.Errorf("Normalize() Mode = %q, want %q", p.Mode, tt.expected.Mode)
+			}
+		})
+	}
+}
+
 
 

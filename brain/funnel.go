@@ -13,6 +13,7 @@ import (
 	"github.com/azylman/aerial/brain/pkg/classifier"
 	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
+	"github.com/azylman/aerial/brain/pkg/interactions"
 	"github.com/azylman/aerial/brain/pkg/metrics"
 	"github.com/azylman/aerial/brain/pkg/queue"
 	"github.com/bwmarrin/discordgo"
@@ -20,6 +21,7 @@ import (
 
 var funnelCfg atomic.Pointer[config.Config]
 var funnelPool atomic.Pointer[queue.WorkerPool]
+var activeInteractionRouter atomic.Pointer[interactions.Router]
 var titleSummarizeSem = make(chan struct{}, 2)
 var discordSessionOpener = func(dg *discordgo.Session) error {
 	return dg.Open()
@@ -169,7 +171,7 @@ func getOrCreateThreadID(s *discordgo.Session, m *discordgo.Message, allowSummar
 	}
 
 	policy := config.ResolveChannelPolicy(currentFunnelConfig().Current().Channels, m.ChannelID, channelName)
-	if policy.Mode == "channel" {
+	if !policy.IsThread() {
 		return m.ChannelID, false
 	}
 
@@ -448,7 +450,7 @@ func isFunnelBotTargeted(s *discordgo.Session, m *discordgo.MessageCreate) bool 
 		return true
 	}
 
-	if policy.Mode == "channel" {
+	if !policy.IsThread() {
 		return true
 	}
 
@@ -492,6 +494,13 @@ func handleDiscordReady(ctx context.Context, s *discordgo.Session, r *discordgo.
 				}
 				for _, th := range g.Threads {
 					queue.CacheDiscordChannel(th)
+				}
+				if r.User != nil && g.ID != "" {
+					go func(guildID string) {
+						if _, err := interactions.RegisterGuildCommandsOnce(s, r.User.ID, guildID); err != nil {
+							log.Printf("[Interactions] Failed to register guild commands for guild %s: %v", guildID, err)
+						}
+					}(g.ID)
 				}
 			}
 		}
@@ -540,6 +549,21 @@ func connectDiscordFunnel(ctx context.Context, store db.Store, pool *queue.Worke
 		SetFunnelPool(pool)
 	}
 
+	interactionRouter := interactions.NewRouter(interactions.InteractionDeps{
+		Store:          store,
+		Pool:           pool,
+		PoolProvider:   funnelPool.Load,
+		Config:         currentFunnelConfig(),
+		ConfigProvider: currentFunnelConfig,
+	})
+	activeInteractionRouter.Store(interactionRouter)
+
+	dg.AddHandler(func(s *discordgo.Session, i *discordgo.InteractionCreate) {
+		if r := activeInteractionRouter.Load(); r != nil {
+			r.Handle(s, i)
+		}
+	})
+
 	dg.AddHandler(func(s *discordgo.Session, r *discordgo.Ready) {
 		handleDiscordReady(ctx, s, r, store, pool)
 	})
@@ -555,6 +579,11 @@ func connectDiscordFunnel(ctx context.Context, store db.Store, pool *queue.Worke
 			}
 			if s.State != nil && s.State.User != nil && s.State.User.ID != "" && g.ID != "" {
 				go syncBotMemberRoles(ctx, s, g.ID, s.State.User.ID)
+				go func(guildID string) {
+					if _, err := interactions.RegisterGuildCommandsOnce(s, s.State.User.ID, guildID); err != nil {
+						log.Printf("[Interactions] Failed to register guild commands for guild %s: %v", guildID, err)
+					}
+				}(g.ID)
 			}
 		}
 	})
