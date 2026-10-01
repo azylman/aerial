@@ -2445,3 +2445,289 @@ func TestGeminiAPIPool_MultipleToolCallsGrouping(t *testing.T) {
 		t.Errorf("expected funcContent.Parts[1] to be tool_b, got %+v", funcContent.Parts[1])
 	}
 }
+
+func TestGeminiAPIPool_CleanParametersAndSchemaCoverage(t *testing.T) {
+	t.Parallel()
+
+	// 1. Nil schema
+	res := cleanParameters(nil)
+	if res["type"] != "OBJECT" {
+		t.Errorf("expected OBJECT, got %v", res["type"])
+	}
+
+	// 2. Schema with empty type or missing type
+	res2 := cleanParameters(map[string]interface{}{})
+	if res2["type"] != "OBJECT" {
+		t.Errorf("expected OBJECT, got %v", res2["type"])
+	}
+
+	// 3. Various types and polymorphic type arrays
+	testCases := []struct {
+		input    map[string]interface{}
+		expected string
+		nullable bool
+	}{
+		{
+			input:    map[string]interface{}{"type": "int"},
+			expected: "INTEGER",
+		},
+		{
+			input:    map[string]interface{}{"type": "bool"},
+			expected: "BOOLEAN",
+		},
+		{
+			input:    map[string]interface{}{"type": "float"},
+			expected: "NUMBER",
+		},
+		{
+			input:    map[string]interface{}{"type": "double"},
+			expected: "NUMBER",
+		},
+		{
+			input:    map[string]interface{}{"type": "null"},
+			expected: "OBJECT",
+			nullable: true,
+		},
+		{
+			input:    map[string]interface{}{"type": []interface{}{"null", "string"}},
+			expected: "STRING",
+			nullable: true,
+		},
+		{
+			input:    map[string]interface{}{"type": []interface{}{"null"}},
+			expected: "OBJECT",
+			nullable: true,
+		},
+		{
+			input:    map[string]interface{}{"type": []string{"null", "int"}},
+			expected: "INTEGER",
+			nullable: true,
+		},
+		{
+			input:    map[string]interface{}{"type": []string{"null"}},
+			expected: "OBJECT",
+			nullable: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		cleaned := cleanParameters(tc.input)
+		if cleaned["type"] != tc.expected {
+			t.Errorf("input %v: expected type %q, got %q", tc.input, tc.expected, cleaned["type"])
+		}
+		if tc.nullable && cleaned["nullable"] != true {
+			t.Errorf("input %v: expected nullable true, got %v", tc.input, cleaned["nullable"])
+		}
+	}
+
+	// 4. Nested properties and items
+	complexSchema := map[string]interface{}{
+		"$schema":              "http://json-schema.org/draft-07/schema#",
+		"title":                "TestSchema",
+		"additionalProperties": false,
+		"default":              "val",
+		"$ref":                 "#/defs",
+		"$id":                  "id1",
+		"definitions":          map[string]interface{}{},
+		"type":                 "object",
+		"properties": map[string]interface{}{
+			"str_field": map[string]interface{}{
+				"type": "string",
+			},
+			"raw_field": "not-a-map",
+			"items_slice": map[string]interface{}{
+				"type": "array",
+				"items": []interface{}{
+					map[string]interface{}{"type": "int"},
+					"not-a-map",
+				},
+			},
+			"items_map": map[string]interface{}{
+				"type": "array",
+				"items": map[string]interface{}{
+					"type": "bool",
+				},
+			},
+		},
+		"allOf": []map[string]interface{}{
+			{"type": "string"},
+		},
+		"anyOf": []interface{}{
+			map[string]interface{}{"type": "null"},
+			map[string]interface{}{"type": "string"},
+		},
+	}
+
+	cleanedComplex := cleanParameters(complexSchema)
+	if _, exists := cleanedComplex["$schema"]; exists {
+		t.Errorf("expected $schema to be stripped")
+	}
+	if _, exists := cleanedComplex["additionalProperties"]; exists {
+		t.Errorf("expected additionalProperties to be stripped")
+	}
+
+	// 5. Test oneOf nullable flattening
+	oneOfSchema := map[string]interface{}{
+		"oneOf": []interface{}{
+			map[string]interface{}{"type": "int"},
+			map[string]interface{}{"type": "null"},
+		},
+	}
+	cleanedOneOf := cleanParameters(oneOfSchema)
+	if cleanedOneOf["type"] != "INTEGER" || cleanedOneOf["nullable"] != true {
+		t.Errorf("expected INTEGER nullable, got %+v", cleanedOneOf)
+	}
+
+	// 6. Test oneOf with []map[string]interface{}
+	oneOfMapSchema := map[string]interface{}{
+		"oneOf": []map[string]interface{}{
+			{"type": "null"},
+			{"type": "bool"},
+		},
+	}
+	cleanedOneOfMap := cleanParameters(oneOfMapSchema)
+	if cleanedOneOfMap["type"] != "BOOLEAN" || cleanedOneOfMap["nullable"] != true {
+		t.Errorf("expected BOOLEAN nullable, got %+v", cleanedOneOfMap)
+	}
+
+	// 7. Test unflattenable anyOf (3 items)
+	threeItemsAnyOf := map[string]interface{}{
+		"anyOf": []interface{}{
+			map[string]interface{}{"type": "string"},
+			map[string]interface{}{"type": "int"},
+			map[string]interface{}{"type": "null"},
+		},
+	}
+	cleanedThree := cleanParameters(threeItemsAnyOf)
+	if _, exists := cleanedThree["anyOf"]; !exists {
+		t.Errorf("expected anyOf to remain when len != 2")
+	}
+
+	// 8. Test isMissingSessionIDErr helper
+	if !isMissingSessionIDErr(400, nil, nil) {
+		t.Errorf("expected true for 400 status")
+	}
+	if !isMissingSessionIDErr(200, []byte("missing session ID"), nil) {
+		t.Errorf("expected true for body containing missing session id")
+	}
+	rpcErr := &jsonRPCResponse{
+		Error: &jsonRPCError{
+			Code:    -32600,
+			Message: "Bad Request",
+		},
+	}
+	if !isMissingSessionIDErr(200, nil, rpcErr) {
+		t.Errorf("expected true for RPC error code -32600")
+	}
+	rpcMsgErr := &jsonRPCResponse{
+		Error: &jsonRPCError{
+			Code:    -32000,
+			Message: "Missing session ID required",
+		},
+	}
+	if !isMissingSessionIDErr(200, nil, rpcMsgErr) {
+		t.Errorf("expected true for RPC error message containing missing session id")
+	}
+	if isMissingSessionIDErr(500, []byte("internal server error"), nil) {
+		t.Errorf("expected false for 500 internal server error")
+	}
+}
+
+func TestMCPDispatcher_Execute_MissingSessionRetry(t *testing.T) {
+	t.Parallel()
+
+	initCalls := int32(0)
+	execCalls := int32(0)
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Method string `json:"method"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+
+		switch req.Method {
+		case "initialize":
+			atomic.AddInt32(&initCalls, 1)
+			w.Header().Set("mcp-session-id", "new-sess-123")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05"}}`))
+		case "notifications/initialized":
+			w.WriteHeader(http.StatusOK)
+		case "tools/list":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"test_exec","description":"Test Exec"}]}}`))
+		case "tools/call":
+			callNum := atomic.AddInt32(&execCalls, 1)
+			sess := r.Header.Get("mcp-session-id")
+			if callNum == 1 || sess != "new-sess-123" {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"code":-32600,"message":"Missing session ID"}`))
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"Success after retry"}]}}`))
+		default:
+			http.Error(w, "not found", http.StatusNotFound)
+		}
+	}))
+	defer ts.Close()
+
+	dispatcher := NewDefaultMCPDispatcher([]MCPServerConfig{
+		{Name: "exec-retry-srv", ServerURL: ts.URL},
+	}, ts.Client())
+
+	ctx := context.Background()
+	res, err := dispatcher.Execute(ctx, "test_exec", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res != "Success after retry" {
+		t.Errorf("expected 'Success after retry', got %q", res)
+	}
+	if atomic.LoadInt32(&initCalls) != 1 {
+		t.Errorf("expected 1 initialize call, got %d", atomic.LoadInt32(&initCalls))
+	}
+	if atomic.LoadInt32(&execCalls) != 2 {
+		t.Errorf("expected 2 tools/call calls (initial fail + retry), got %d", atomic.LoadInt32(&execCalls))
+	}
+}
+
+func TestMCPDispatcher_ListDeclarations_ErrorAndRetryBranches(t *testing.T) {
+	t.Parallel()
+
+	// 1. Dispatcher is nil
+	var nilDisp *DefaultMCPDispatcher
+	nilDecls, err := nilDisp.ListDeclarations(context.Background())
+	if err != nil || nilDecls != nil {
+		t.Errorf("expected nil, nil for nil dispatcher, got %v, %v", nilDecls, err)
+	}
+
+	// 2. Server where retry fails
+	tsRetryFail := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"code":-32600,"message":"Missing session ID"}`))
+	}))
+	defer tsRetryFail.Close()
+
+	dispFail := NewDefaultMCPDispatcher([]MCPServerConfig{
+		{Name: "retry-fail-srv", ServerURL: tsRetryFail.URL},
+	}, tsRetryFail.Client())
+
+	decls, err := dispFail.ListDeclarations(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(decls) != 0 {
+		t.Errorf("expected 0 decls from failing srv, got %d", len(decls))
+	}
+
+	// 3. Execute with unknown tool
+	if _, err := dispFail.Execute(context.Background(), "non_existent_tool", nil); err == nil {
+		t.Errorf("expected error executing non-existent tool")
+	}
+}
+
+
+

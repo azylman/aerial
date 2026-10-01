@@ -664,3 +664,50 @@ func TestDefaultWatchdogOptions(t *testing.T) {
 		t.Errorf("expected non-zero MaxDuration")
 	}
 }
+
+func TestPureHelpers_Coverage(t *testing.T) {
+	t.Parallel()
+
+	// 1. filterHomeEnv
+	envList := []string{
+		"PATH=/usr/bin",
+		"HOME=/root",
+		"USERPROFILE=C:\\Users\\root",
+		"GEMINI_CLI_HOME=/gemini",
+		"OTHER=val",
+		"NO_EQUALS_ENV",
+	}
+	filtered := filterHomeEnv(envList)
+	for _, env := range filtered {
+		if strings.HasPrefix(env, "HOME=") || strings.HasPrefix(env, "USERPROFILE=") || strings.HasPrefix(env, "GEMINI_CLI_HOME=") {
+			t.Errorf("expected HOME, USERPROFILE, and GEMINI_CLI_HOME to be filtered, found %s", env)
+		}
+	}
+	if len(filtered) != 3 {
+		t.Errorf("expected 3 filtered items (PATH, OTHER, NO_EQUALS_ENV), got %d: %v", len(filtered), filtered)
+	}
+
+	// 2. IsResultEvent
+	if IsResultEvent("") {
+		t.Errorf("expected empty string to be false")
+	}
+	if IsResultEvent("some random log") {
+		t.Errorf("expected non-json log to be false")
+	}
+	if !IsResultEvent(`{"event":"result","data":"foo"}`) {
+		t.Errorf("expected valid result JSON to be true")
+	}
+	if !IsResultEvent(`prefix log {"event":"result"} suffix`) {
+		t.Errorf("expected embedded result JSON to be true")
+	}
+
+	// 3. WriteWorkerTurn success
+	var buf bytes.Buffer
+	if err := WriteWorkerTurn(&buf, "test prompt"); err != nil {
+		t.Fatalf("WriteWorkerTurn failed: %v", err)
+	}
+	if !strings.Contains(buf.String(), "test prompt") {
+		t.Errorf("expected buffer to contain prompt, got %s", buf.String())
+	}
+}
+
