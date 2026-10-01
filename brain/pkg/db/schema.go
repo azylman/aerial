@@ -9,7 +9,7 @@ import (
 
 const migrationLockID = 849201948201
 
-// WARNING: Any indexes on columns added via downstream ALTER TABLE migrations (e.g. idx_facts_last_reinforced_at)
+// WARNING: Any indexes on columns added via downstream ALTER TABLE migrations (e.g. idx_facts_last_reinforced_at, idx_facts_fts)
 // must NOT be defined here in postgresSchema. Doing so breaks migrations on existing databases where the table exists
 // but the column has not yet been added. Define such indexes in initSchemaPostgres after the ALTER TABLE statements.
 const postgresSchema = `
@@ -117,7 +117,6 @@ CREATE INDEX IF NOT EXISTS idx_facts_category ON facts(category);
 CREATE INDEX IF NOT EXISTS idx_facts_created_at ON facts(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_facts_importance_created_at ON facts(importance DESC, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_facts_embedding_hnsw ON facts USING hnsw (embedding vector_cosine_ops);
-CREATE INDEX IF NOT EXISTS idx_facts_fts ON facts USING gin(fts_tokens);
 `
 
 

@@ -2327,7 +2327,7 @@ func TestInitSchema_LegacyFactsUpgrade(t *testing.T) {
 
 func TestSchemaContract_NoPrematureIndexes(t *testing.T) {
 	// Any index on columns added in downstream migrations (ALTER TABLE) must NOT be declared in postgresSchema or sqliteSchema constants
-	downstreamColumns := []string{"last_reinforced_at", "last_decayed_at", "reinforce_count", "restart_count", "previous_session_id"}
+	downstreamColumns := []string{"last_reinforced_at", "last_decayed_at", "reinforce_count", "restart_count", "previous_session_id", "fts_tokens"}
 
 	for _, col := range downstreamColumns {
 		pattern := " " + col + " "
