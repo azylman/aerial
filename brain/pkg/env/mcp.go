@@ -33,6 +33,9 @@ func (p *Provisioner) LoadTargetMCPConfig(cfg *config.Config, target RuleTarget)
 		mergedServers["docker"] = map[string]interface{}{
 			"serverUrl": "http://docker-mcp:4002/mcp",
 		}
+		mergedServers["nomad"] = map[string]interface{}{
+			"serverUrl": "http://nomad-mcp:4006/mcp",
+		}
 		mergedServers["victoriametrics"] = map[string]interface{}{
 			"serverUrl": "http://victoriametrics-mcp:4004/mcp",
 		}

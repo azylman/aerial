@@ -97,6 +97,8 @@ services:
         condition: service_started
       discord-mcp:
         condition: service_started
+      nomad-mcp:
+        condition: service_started
       victoriametrics-mcp:
         condition: service_started
       openobserve:
@@ -277,7 +279,37 @@ services:
       start_interval: 2s
 
   # ----------------------------------------------------------------------------
-  # 8. Local LLM / Embeddings: Ollama Service
+  # 8. Outbound MCP: HashiCorp Nomad MCP Server
+  #    Provides native Nomad cluster operations and job management over MCP.
+  # ----------------------------------------------------------------------------
+  nomad-mcp:
+    image: ghcr.io/azylman/aerial-nomad-mcp:latest
+    build: ./nomad-mcp
+    container_name: aerial-nomad-mcp
+    restart: unless-stopped
+    init: true
+    labels:
+      autoheal: "true"
+    environment:
+      - PORT=4006
+      - NOMAD_ADDR=${NOMAD_ADDR:-http://host.docker.internal:4646}
+      - NOMAD_TOKEN=${NOMAD_TOKEN:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "${NOMAD_MCP_HOST_PORT:-4006}:4006"
+    networks:
+      - aerial-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -X OPTIONS http://127.0.0.1:4006/mcp || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+      start_interval: 2s
+
+  # ----------------------------------------------------------------------------
+  # 9. Local LLM / Embeddings: Ollama Service
   #    Provides local AI models & embedding generations with persistent storage.
   # ----------------------------------------------------------------------------
   ollama:
