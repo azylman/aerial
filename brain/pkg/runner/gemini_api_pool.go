@@ -782,6 +782,7 @@ type GeminiAPIPoolConfig struct {
 
 // geminiFunctionCall represents a function call requested by the model.
 type geminiFunctionCall struct {
+	ID   string                 `json:"id,omitempty"`
 	Name string                 `json:"name"`
 	Args map[string]interface{} `json:"args,omitempty"`
 }
@@ -797,6 +798,7 @@ type geminiPart struct {
 	Text             string              `json:"text,omitempty"`
 	FunctionCall     *geminiFunctionCall `json:"functionCall,omitempty"`
 	FunctionResponse *geminiFunctionResp `json:"functionResponse,omitempty"`
+	ThoughtSignature string              `json:"thoughtSignature,omitempty"`
 }
 
 // geminiContent represents a message content block in the Gemini REST API.
@@ -1323,7 +1325,7 @@ func (s *GeminiAPISession) Send(prompt string, turn *TurnContext) error {
 		}
 
 		reader := bufio.NewReader(resp.Body)
-		var pendingCalls []*geminiFunctionCall
+		var pendingParts []geminiPart
 		var currentTurnText strings.Builder
 
 		for {
@@ -1347,7 +1349,7 @@ func (s *GeminiAPISession) Send(prompt string, turn *TurnContext) error {
 							if cand.Content != nil {
 								for _, part := range cand.Content.Parts {
 									if part.FunctionCall != nil {
-										pendingCalls = append(pendingCalls, part.FunctionCall)
+										pendingParts = append(pendingParts, part)
 									}
 									if part.Text != "" {
 										if !started {
@@ -1404,16 +1406,17 @@ func (s *GeminiAPISession) Send(prompt string, turn *TurnContext) error {
 		}
 
 		// If no function calls were requested, the model turn is complete
-		if len(pendingCalls) == 0 {
+		if len(pendingParts) == 0 {
 			break
 		}
 
 		// Dispatch function calls via MCPDispatcher
-		modelParts := make([]geminiPart, 0, len(pendingCalls))
-		funcParts := make([]geminiPart, 0, len(pendingCalls))
+		modelParts := make([]geminiPart, 0, len(pendingParts))
+		funcParts := make([]geminiPart, 0, len(pendingParts))
 
-		for _, fc := range pendingCalls {
-			modelParts = append(modelParts, geminiPart{FunctionCall: fc})
+		for _, p := range pendingParts {
+			fc := p.FunctionCall
+			modelParts = append(modelParts, p)
 
 			argsDesc := ""
 			if len(fc.Args) > 0 {
@@ -1452,7 +1455,7 @@ func (s *GeminiAPISession) Send(prompt string, turn *TurnContext) error {
 				Parts: modelParts,
 			},
 			geminiContent{
-				Role:  "function",
+				Role:  "user",
 				Parts: funcParts,
 			},
 		)

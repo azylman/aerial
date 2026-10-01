@@ -2355,8 +2355,8 @@ func TestGeminiAPIPool_MultipleToolCallsGrouping(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 
 		if reqNum == 1 {
-			// First call: Gemini returns two function calls in a single candidate turn
-			chunk := `data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"tool_a","args":{"arg":"1"}}},{"functionCall":{"name":"tool_b","args":{"arg":"2"}}}],"role":"model"}}],"index":0}` + "\n\n"
+			// First call: Gemini returns two function calls in a single candidate turn with thoughtSignature
+			chunk := `data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"tool_a","args":{"arg":"1"}},"thoughtSignature":"sig_tool_a"},{"functionCall":{"name":"tool_b","args":{"arg":"2"}},"thoughtSignature":"sig_tool_b"}],"role":"model"}}],"index":0}` + "\n\n"
 			_, _ = w.Write([]byte(chunk))
 		} else {
 			// Second call: read body to verify grouping
@@ -2411,8 +2411,8 @@ func TestGeminiAPIPool_MultipleToolCallsGrouping(t *testing.T) {
 	// Verify that Turn 2 request grouped calls and responses:
 	// Contents should be:
 	// [0] user: "run tools"
-	// [1] model: parts with FunctionCall tool_a and FunctionCall tool_b (grouped in 1 message)
-	// [2] function: parts with FunctionResponse tool_a and FunctionResponse tool_b (grouped in 1 message)
+	// [1] model: parts with FunctionCall tool_a and FunctionCall tool_b (grouped in 1 message, preserving thoughtSignature)
+	// [2] user: parts with FunctionResponse tool_a and FunctionResponse tool_b (grouped in 1 message)
 	if len(capturedTurn2Contents) != 3 {
 		t.Fatalf("expected 3 contents in Turn 2 request, got %d: %+v", len(capturedTurn2Contents), capturedTurn2Contents)
 	}
@@ -2427,13 +2427,19 @@ func TestGeminiAPIPool_MultipleToolCallsGrouping(t *testing.T) {
 	if modelContent.Parts[0].FunctionCall == nil || modelContent.Parts[0].FunctionCall.Name != "tool_a" {
 		t.Errorf("expected modelContent.Parts[0] to be tool_a, got %+v", modelContent.Parts[0])
 	}
+	if modelContent.Parts[0].ThoughtSignature != "sig_tool_a" {
+		t.Errorf("expected modelContent.Parts[0].ThoughtSignature == 'sig_tool_a', got %q", modelContent.Parts[0].ThoughtSignature)
+	}
 	if modelContent.Parts[1].FunctionCall == nil || modelContent.Parts[1].FunctionCall.Name != "tool_b" {
 		t.Errorf("expected modelContent.Parts[1] to be tool_b, got %+v", modelContent.Parts[1])
 	}
+	if modelContent.Parts[1].ThoughtSignature != "sig_tool_b" {
+		t.Errorf("expected modelContent.Parts[1].ThoughtSignature == 'sig_tool_b', got %q", modelContent.Parts[1].ThoughtSignature)
+	}
 
 	funcContent := capturedTurn2Contents[2]
-	if funcContent.Role != "function" {
-		t.Errorf("expected content[2].Role == 'function', got %q", funcContent.Role)
+	if funcContent.Role != "user" {
+		t.Errorf("expected content[2].Role == 'user', got %q", funcContent.Role)
 	}
 	if len(funcContent.Parts) != 2 {
 		t.Fatalf("expected 2 parts in funcContent, got %d", len(funcContent.Parts))
