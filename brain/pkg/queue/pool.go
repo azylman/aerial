@@ -834,10 +834,29 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 		sentenceCb = onSentence[0]
 	}
 
+	turnPrompt := prompt
+	if p.cfg.MemoryRetrieverFunc != nil && strings.TrimSpace(prompt) != "" {
+		st := p.Store()
+		if st != nil {
+			retrievalCtx, retrievalCancel := context.WithTimeout(ctx, 1500*time.Millisecond)
+			facts, err := p.cfg.MemoryRetrieverFunc(retrievalCtx, st, p.cfg.MemoryClient, prompt, 5)
+			retrievalCancel()
+			if err != nil {
+				log.Printf("[WorkerPool] Warning: Semantic memory retrieval failed for voice turn on %s: %v. Proceeding without injected facts.", deviceKey, err)
+			} else if len(facts) > 0 {
+				memContext := memory.FormatMemoryContext(facts)
+				if memContext != "" {
+					turnPrompt = memContext + "\n\n" + prompt
+					log.Printf("[WorkerPool] Injected %d semantic memory fact(s) into voice prompt for %s", len(facts), deviceKey)
+				}
+			}
+		}
+	}
+
 	// Testing hook: If VoiceStreamRunnerFunc is configured and sentence callback provided, delegate directly
 	if p.cfg.VoiceStreamRunnerFunc != nil && sentenceCb != nil {
 		start := time.Now()
-		reply, conv, err := p.cfg.VoiceStreamRunnerFunc(ctx, prompt, deviceKey, onStatus, sentenceCb)
+		reply, conv, err := p.cfg.VoiceStreamRunnerFunc(ctx, turnPrompt, deviceKey, onStatus, sentenceCb)
 		runStatus := "success"
 		if err != nil {
 			runStatus = "error"
@@ -849,7 +868,7 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 	// Testing hook: If VoiceRunnerFunc is configured, delegate directly
 	if p.cfg.VoiceRunnerFunc != nil {
 		start := time.Now()
-		reply, conv, err := p.cfg.VoiceRunnerFunc(ctx, prompt, deviceKey, onStatus)
+		reply, conv, err := p.cfg.VoiceRunnerFunc(ctx, turnPrompt, deviceKey, onStatus)
 		runStatus := "success"
 		if err != nil {
 			runStatus = "error"
@@ -887,13 +906,13 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 		TurnID:    uuid.New().String(),
 		SessionID: deviceKey,
 		Model:     model,
-		Prompt:    prompt,
+		Prompt:    turnPrompt,
 		Sink:      sink,
 		CreatedAt: time.Now(),
 		Ctx:       ctx,
 	}
 
-	if sendErr := daemon.Send(prompt, turnCtx); sendErr != nil {
+	if sendErr := daemon.Send(turnPrompt, turnCtx); sendErr != nil {
 		metrics.RecordRunnerExecution("error", model, "voice", time.Since(start))
 		return "", deviceKey, fmt.Errorf("failed sending turn to voice daemon: %w", sendErr)
 	}
