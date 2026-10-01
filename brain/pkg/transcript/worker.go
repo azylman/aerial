@@ -311,15 +311,6 @@ func syncSingleSession(
 		})
 	}
 
-	if len(stepsToInsert) > 0 {
-		if err := store.BatchInsertTranscriptSteps(ctx, stepsToInsert); err != nil {
-			stats.Errors++
-			log.Printf("[Transcript] BatchInsertTranscriptSteps error for session %s: %v", sessionID, err)
-		} else {
-			stats.StepsInserted += len(stepsToInsert)
-		}
-	}
-
 	// Debounced Macro Summary Generation
 	isSettled := time.Since(mtime) > opts.IdleThreshold
 	shouldSummarize := false
@@ -328,6 +319,9 @@ func syncSingleSession(
 	} else if isSettled && (!state.IsSettled || (maxStepIndex >= 0 && maxStepIndex-state.LastIndexedStep > 10)) {
 		shouldSummarize = true
 	}
+
+	var summaryRecord db.SessionSummary
+	hasSummaryRecord := false
 
 	if shouldSummarize {
 		summaryText := ""
@@ -361,7 +355,7 @@ func syncSingleSession(
 			lastIndexedStepToSave = -2
 		}
 
-		summaryRecord := db.SessionSummary{
+		summaryRecord = db.SessionSummary{
 			SessionID:            sessionID,
 			Summary:              summaryText,
 			Embedding:            emb,
@@ -372,23 +366,42 @@ func syncSingleSession(
 			CreatedAt:            firstStepTime,
 			UpdatedAt:            time.Now().UTC(),
 		}
-		if err := store.UpsertSessionSummary(ctx, summaryRecord); err != nil {
-			stats.Errors++
-			log.Printf("[Transcript] UpsertSessionSummary error for session %s: %v", sessionID, err)
-		} else {
-			stats.SummariesGenerated++
-		}
+		hasSummaryRecord = true
 	} else if exists {
-		summaryRecord := db.SessionSummary{
+		summaryRecord = db.SessionSummary{
 			SessionID:       sessionID,
 			LastIndexedStep: maxStepIndex,
 			LastMtime:       mtime,
 			IsSettled:       false,
 			UpdatedAt:       time.Now().UTC(),
 		}
+		hasSummaryRecord = true
+	}
+
+	// 1. Ensure parent session summary exists before inserting child transcript steps to satisfy foreign key.
+	if hasSummaryRecord {
 		if err := store.UpsertSessionSummary(ctx, summaryRecord); err != nil {
+			log.Printf("[Transcript] UpsertSessionSummary error for session %s: %v", sessionID, err)
+			return err
+		}
+		if shouldSummarize {
+			stats.SummariesGenerated++
+		}
+	}
+
+	// 2. Batch insert child transcript steps now that parent session summary is guaranteed to exist.
+	if len(stepsToInsert) > 0 {
+		if err := store.BatchInsertTranscriptSteps(ctx, stepsToInsert); err != nil {
 			stats.Errors++
-			log.Printf("[Transcript] UpsertSessionSummary active progress error for session %s: %v", sessionID, err)
+			log.Printf("[Transcript] BatchInsertTranscriptSteps error for session %s: %v", sessionID, err)
+			if hasSummaryRecord {
+				summaryRecord.LastIndexedStep = watermark
+				if revertErr := store.UpsertSessionSummary(ctx, summaryRecord); revertErr != nil {
+					log.Printf("[Transcript] Failed to revert session summary watermark for session %s: %v", sessionID, revertErr)
+				}
+			}
+		} else {
+			stats.StepsInserted += len(stepsToInsert)
 		}
 	}
 
