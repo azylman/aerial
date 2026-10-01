@@ -25,7 +25,6 @@ import (
 	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
 	"github.com/azylman/aerial/brain/pkg/delivery"
-	"github.com/azylman/aerial/brain/pkg/memory"
 	"github.com/azylman/aerial/brain/pkg/metrics"
 	"github.com/azylman/aerial/brain/pkg/notifier"
 	"github.com/azylman/aerial/brain/pkg/runner"
@@ -1160,18 +1159,12 @@ func TestRecoverInterrupted_ReconcilesOrphanedScheduleRuns(t *testing.T) {
 	}
 }
 
-func TestWorkerPool_InjectsSemanticMemoryFacts(t *testing.T) {
+func TestWorkerPool_PromptPreservedWithoutMemoryInjection(t *testing.T) {
 	t.Parallel()
 	store := setupTestStore(t)
 
 	var capturedPrompt string
 	doneCh := make(chan struct{})
-
-	mockRetriever := func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
-		return []db.Fact{
-			{Category: "system_config", FactText: "Server runs on port 8080", Importance: 1.0},
-		}, nil
-	}
 
 	mockRunner := func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
 		capturedPrompt = prompt
@@ -1179,9 +1172,8 @@ func TestWorkerPool_InjectsSemanticMemoryFacts(t *testing.T) {
 	}
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store,
-		MemoryRetrieverFunc: mockRetriever,
-		RunnerFunc:          mockRunner,
+		Store:      store,
+		RunnerFunc: mockRunner,
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
 			return nil
 		},
@@ -1213,10 +1205,9 @@ func TestWorkerPool_InjectsSemanticMemoryFacts(t *testing.T) {
 		t.Fatal("Timeout waiting for message execution")
 	}
 
-	// Verify capturedPrompt contains memory block
-	expectedBlock := "<retrieved_memory>\n- [system_config] Server runs on port 8080\n</retrieved_memory>"
-	if !strings.Contains(capturedPrompt, expectedBlock) {
-		t.Errorf("Expected capturedPrompt to contain %q, got: %s", expectedBlock, capturedPrompt)
+	// Verify capturedPrompt preserves original content and does NOT contain <retrieved_memory>
+	if strings.Contains(capturedPrompt, "<retrieved_memory>") {
+		t.Errorf("Expected capturedPrompt without <retrieved_memory>, got: %s", capturedPrompt)
 	}
 	if !strings.Contains(capturedPrompt, originalContent) {
 		t.Errorf("Expected capturedPrompt to contain %q, got: %s", originalContent, capturedPrompt)
@@ -1226,63 +1217,6 @@ func TestWorkerPool_InjectsSemanticMemoryFacts(t *testing.T) {
 	dbMsg, _ := getMessage(store, "msg-mem-1")
 	if dbMsg.Content != originalContent {
 		t.Errorf("Expected DB message content to be %q, got %q", originalContent, dbMsg.Content)
-	}
-}
-
-func TestWorkerPool_SemanticMemoryGracefulFallbackOnError(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
-
-	var capturedPrompt string
-	doneCh := make(chan struct{})
-
-	mockRetriever := func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
-		return nil, fmt.Errorf("ollama connection refused")
-	}
-
-	mockRunner := func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
-		capturedPrompt = prompt
-		return mockJSONResponse("e1111111-2222-3333-4444-555555555555", "Response text"), "", 0, nil
-	}
-
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store,
-		MemoryRetrieverFunc: mockRetriever,
-		RunnerFunc:          mockRunner,
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			return nil
-		},
-		TypingFunc: func(s *discordgo.Session, channelID string) func() {
-			return func() {}
-		},
-		OnMessageCompleted: func(msg db.Message, finalStatus string) {
-			close(doneCh)
-		},
-	})
-	pool.Start()
-	defer pool.Stop()
-
-	originalContent := "What port does the server run on?"
-	msg := db.Message{
-		ID:        "msg-mem-2",
-		ThreadID:  "thread-mem-2",
-		AuthorID:  "user-1",
-		Content:   originalContent,
-		Status:    db.StatusPending,
-		CreatedAt: time.Now().UTC(),
-	}
-	_ = insertMessage(store, msg)
-	pool.Enqueue(msg)
-
-	select {
-	case <-doneCh:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Timeout waiting for message execution")
-	}
-
-	// Verify capturedPrompt equals originalContent without injected block
-	if !strings.Contains(capturedPrompt, originalContent) || strings.Contains(capturedPrompt, "<FACTS>") {
-		t.Errorf("Expected capturedPrompt to contain %q without <FACTS>, got: %s", originalContent, capturedPrompt)
 	}
 }
 
@@ -1299,9 +1233,6 @@ func TestQueueEmptyResponseFailure(t *testing.T) {
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    1,
-		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
-			return nil, nil
-		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
 			return mockJSONResponse("", ""), "", 0, nil
 		},
@@ -1369,9 +1300,6 @@ func TestQueueBurstCoalescing(t *testing.T) {
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    1,
-		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
-			return nil, nil
-		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
 			mu.Lock()
 			capturedPrompt = prompt
@@ -1468,9 +1396,6 @@ func TestQueueStalenessDrop(t *testing.T) {
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    1,
-		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
-			return nil, nil
-		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
 			mu.Lock()
 			runnerCalls++
@@ -1664,9 +1589,6 @@ func TestQueueTurnCountSessionRotation(t *testing.T) {
 				Mode: "channel",
 			}
 		},
-		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
-			return nil, nil
-		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
 			if sessionID == "" {
 				sessionID = uuid.New().String()
@@ -1806,9 +1728,6 @@ func TestChannelSession_RotationOnIdleTimeout(t *testing.T) {
 			return config.ChannelPolicy{
 				Mode: "channel",
 			}
-		},
-		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
-			return nil, nil
 		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
 			mu.Lock()
@@ -2051,9 +1970,6 @@ func TestQueueUniversalActiveTurnTyping(t *testing.T) {
 			mu.Lock()
 			defer mu.Unlock()
 			return currentPolicy
-		},
-		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
-			return nil, nil
 		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
 			return mockJSONResponse("", "OK"), "", 0, nil
@@ -2643,9 +2559,6 @@ func TestProcessBurst_Tier1Wake(t *testing.T) {
 			mu.Unlock()
 			return func() {}
 		},
-		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
-			return nil, nil
-		},
 		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
 			return config.ChannelPolicy{
 				Mode:                 "channel",
@@ -2745,9 +2658,6 @@ func TestProcessBurst_Tier2Wake(t *testing.T) {
 			mu.Unlock()
 			return func() {}
 		},
-		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
-			return nil, nil
-		},
 		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
 			return config.ChannelPolicy{
 				Mode:                 "channel",
@@ -2840,9 +2750,6 @@ func TestProcessBurst_MixedBurst(t *testing.T) {
 		},
 		TypingFunc: func(sess *discordgo.Session, channelID string) func() {
 			return func() {}
-		},
-		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
-			return nil, nil
 		},
 		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
 			return config.ChannelPolicy{
@@ -3026,9 +2933,6 @@ func TestProcessBurst_SessionRotationBeforeLeadingAmbient(t *testing.T) {
 		TypingFunc: func(sess *discordgo.Session, channelID string) func() {
 			return func() {}
 		},
-		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
-			return nil, nil
-		},
 		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
 			return config.ChannelPolicy{
 				Mode:                 "channel",
@@ -3123,9 +3027,6 @@ func TestProcessBurst_TrailingAmbient(t *testing.T) {
 		},
 		TypingFunc: func(sess *discordgo.Session, channelID string) func() {
 			return func() {}
-		},
-		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
-			return nil, nil
 		},
 		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
 			return config.ChannelPolicy{
@@ -3855,9 +3756,6 @@ func TestProcessBurst_GhostSessionRecovery(t *testing.T) {
 	pool := NewWorkerPool(WorkerPoolConfig{
 		SessionManager: session.New(tmpDir, ""),
 		Store: store,
-		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
-			return nil, nil
-		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			mu.Lock()
 			runnerCalls++
@@ -3921,9 +3819,6 @@ func TestProcessBurst_MultiTurnContinuity_AfterRecovery(t *testing.T) {
 	pool := NewWorkerPool(WorkerPoolConfig{
 		SessionManager: session.New(tmpDir, ""),
 		Store: store,
-		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
-			return nil, nil
-		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			mu.Lock()
 			receivedSessionIDs = append(receivedSessionIDs, sessionID)
@@ -3996,9 +3891,6 @@ func TestProcessBurst_ColdChannel_NoStubDirectory(t *testing.T) {
 		SessionManager: session.New(tmpDir, ""),
 		Store: store,
 		Classifier: cls,
-		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
-			return nil, nil
-		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			runnerCalls++
 			return mockJSONResponse("", ""), "", 0, nil
@@ -4069,9 +3961,6 @@ func TestProcessBurst_Turn1ContextInjection(t *testing.T) {
 	pool := NewWorkerPool(WorkerPoolConfig{
 		SessionManager: session.New(tmpDir, ""),
 		Store: store,
-		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
-			return nil, nil
-		},
 		HistoryFetcher: func(ctx context.Context, cID string, beforeID string, limit int) ([]HistoryMessage, error) {
 			return []HistoryMessage{
 				{
@@ -4279,9 +4168,6 @@ func TestProcessBurst_SessionRotation_ResetsToColdState(t *testing.T) {
 	pool := NewWorkerPool(WorkerPoolConfig{
 		SessionManager: session.New(tmpDir, ""),
 		Store: store,
-		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
-			return nil, nil
-		},
 		HistoryFetcher: func(ctx context.Context, cID string, beforeID string, limit int) ([]HistoryMessage, error) {
 			mu.Lock()
 			historyFetchCalls++
@@ -4584,9 +4470,6 @@ func TestProcessBurst_Turn1Crash_DoesNotPersistGhostUUID(t *testing.T) {
 		SessionManager: session.New(tmpDir, ""),
 		Store: store,
 		MaxAttempts: 1,
-		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
-			return nil, nil
-		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			runnerCalls++
 			stderr := "Starting conversation update stream for crash-uuid-999\nError: fatal process crash\n"
@@ -5078,9 +4961,6 @@ func TestWorkerPoolShutdown_PreservesProcessingMessageWithoutApology(t *testing.
 		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
 			return func() {}
 		},
-		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
-			return nil, nil
-		},
 	})
 	pool.Start()
 
@@ -5151,9 +5031,6 @@ func TestWorkerPoolShutdown_PreservesProcessingMessageWithoutApology(t *testing.
 		},
 		TypingFunc: func(s *discordgo.Session, channelID string) (stop func()) {
 			return func() {}
-		},
-		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
-			return nil, nil
 		},
 		OnMessageCompleted: func(m db.Message, finalStatus string) {
 			close(newDoneCh)
@@ -5575,9 +5452,6 @@ func TestProcessBurst_ColdStartWatchdogRecoveryAndContinuation(t *testing.T) {
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
-		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
-			return nil, nil
-		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
 			call := atomic.AddInt32(&runnerCalls, 1)
 			mu.Lock()
@@ -5701,9 +5575,6 @@ func TestProcessBurst_ColdStartStreamJsonInitLatchingOnFailure(t *testing.T) {
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
-		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
-			return nil, nil
-		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
 			call := atomic.AddInt32(&runnerCalls, 1)
 			mu.Lock()
@@ -5806,9 +5677,6 @@ func TestProcessBurst_ColdStartTransientRecoveryAndContinuation(t *testing.T) {
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
-		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
-			return nil, nil
-		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
 			call := atomic.AddInt32(&runnerCalls, 1)
 			mu.Lock()
@@ -5918,9 +5786,6 @@ func TestProcessBurst_EmptyStdout_TranscriptRecovery(t *testing.T) {
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
-		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
-			return nil, nil
-		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
 			// agy exits 0 with empty stdout (buffering or background task yield), but response is on disk
 			return "", "", 0, nil
@@ -6011,9 +5876,6 @@ func TestProcessBurst_StreamInterrupted_TranscriptRecovery(t *testing.T) {
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
-		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
-			return nil, nil
-		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
 			atomic.AddInt32(&runnerCalls, 1)
 			// agy exits 0, but stream-json emits error status with "stream was interrupted"
@@ -6111,9 +5973,6 @@ func TestProcessBurst_StreamInterrupted_NoResponse_RotatesSessionCorrupt(t *test
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
-		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
-			return nil, nil
-		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
 			call := atomic.AddInt32(&runnerCalls, 1)
 			mu.Lock()
@@ -6225,9 +6084,6 @@ func TestProcessBurst_EmptyStdout_TransientRetryAndContinuation(t *testing.T) {
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
-		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
-			return nil, nil
-		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
 			call := atomic.AddInt32(&runnerCalls, 1)
 			mu.Lock()
@@ -6332,9 +6188,6 @@ func TestProcessBurst_GeneralFailure_PreservesSessionOnDisk(t *testing.T) {
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    3,
-		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
-			return nil, nil
-		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
 			call := atomic.AddInt32(&runnerCalls, 1)
 			mu.Lock()
@@ -6424,9 +6277,6 @@ func TestWorkerPool_FullBuffer_NoEvictionZombieRace(t *testing.T) {
 		TimeoutMinutes: 1,
 		IdleTimeout:    20 * time.Millisecond,
 		MaxAttempts:    1,
-		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
-			return nil, nil
-		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
 			return mockJSONResponse(sessionID, "OK"), "", 0, nil
 		},
@@ -6501,9 +6351,6 @@ func TestProcessBurst_TransientError_RetainsOriginalPrompt(t *testing.T) {
 		TimeoutMinutes: 1,
 		BackoffBase:    5 * time.Millisecond,
 		MaxAttempts:    2,
-		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
-			return nil, nil
-		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error) {
 			call := runnerCalls.Add(1)
 			mu.Lock()
@@ -8404,9 +8251,6 @@ func TestRecoverInterrupted_PreservesExecutionRetryBudget(t *testing.T) {
 		},
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
 		TypingFunc:   func(s *discordgo.Session, channelID string) func() { return func() {} },
-		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
-			return nil, nil
-		},
 		OnMessageCompleted: func(msg db.Message, finalStatus string) {
 			close(doneCh)
 		},
@@ -8499,9 +8343,6 @@ func TestRecoverInterrupted_RestartPoisonPill_Boundaries(t *testing.T) {
 			return nil
 		},
 		TypingFunc: func(s *discordgo.Session, channelID string) func() { return func() {} },
-		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
-			return nil, nil
-		},
 		OnMessageCompleted: func(msg db.Message, finalStatus string) {
 			mu.Lock()
 			completedIDs = append(completedIDs, msg.ID)
@@ -8572,9 +8413,6 @@ func TestProcessBurst_Staleness_RestartedMessage_Retained(t *testing.T) {
 		},
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
 		TypingFunc:   func(s *discordgo.Session, channelID string) func() { return func() {} },
-		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
-			return nil, nil
-		},
 		OnMessageCompleted: func(msg db.Message, finalStatus string) {
 			close(doneCh)
 		},
@@ -8638,9 +8476,6 @@ func TestProcessBurst_Staleness_RestartedMessage_HardCeiling_Dropped(t *testing.
 		},
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
 		TypingFunc:   func(s *discordgo.Session, channelID string) func() { return func() {} },
-		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
-			return nil, nil
-		},
 		OnMessageCompleted: func(msg db.Message, finalStatus string) {
 			close(doneCh)
 		},
@@ -8941,9 +8776,6 @@ func TestThreadStatusQueueIntegration(t *testing.T) {
 		TimeoutMinutes: 1,
 		BackoffBase:    10 * time.Millisecond,
 		MaxAttempts:    1,
-		MemoryRetrieverFunc: func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
-			return nil, nil
-		},
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
 			finalDelivered.Add(1)
 			return nil
@@ -8980,11 +8812,6 @@ func TestThreadStatusQueueIntegration(t *testing.T) {
 
 func TestWorkerPool_HermeticByDefaultWithoutRetriever(t *testing.T) {
 	t.Parallel()
-	pool := NewWorkerPool(WorkerPoolConfig{})
-	if pool.cfg.MemoryRetrieverFunc != nil {
-		t.Errorf("Expected MemoryRetrieverFunc to be nil by default for hermetic test isolation, got non-nil func")
-	}
-
 	store := setupTestStore(t)
 
 	var runnerCalled bool
@@ -9010,48 +8837,6 @@ func TestWorkerPool_HermeticByDefaultWithoutRetriever(t *testing.T) {
 	poolWithDB.processBurst([]db.Message{msg})
 	if !runnerCalled {
 		t.Errorf("Expected runner to be called cleanly without error")
-	}
-}
-
-func TestWorkerPool_ExplicitMemoryRetrieverWiring(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
-
-	var retrieverCalled bool
-	mockRetriever := func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
-		retrieverCalled = true
-		return []db.Fact{
-			{Category: "test_cat", FactText: "Explicit retriever fact", Importance: 1.0},
-		}, nil
-	}
-
-	var capturedPrompt string
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store,
-		MemoryRetrieverFunc: mockRetriever,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			capturedPrompt = prompt
-			return mockJSONResponse("sess-test-2", "Response with facts"), "", 0, nil
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
-		TypingFunc:   func(s *discordgo.Session, channelID string) func() { return func() {} },
-	})
-
-	msg := db.Message{
-		ID:        "msg-explicit-1",
-		ThreadID:  "thread-explicit-1",
-		AuthorID:  "user-1",
-		Content:   "Question requiring facts",
-		CreatedAt: time.Now().UTC(),
-	}
-	_ = insertMessage(store, msg)
-
-	pool.processBurst([]db.Message{msg})
-	if !retrieverCalled {
-		t.Errorf("Expected injected MemoryRetrieverFunc to be called")
-	}
-	if !strings.Contains(capturedPrompt, "Explicit retriever fact") {
-		t.Errorf("Expected prompt to contain injected fact, got: %s", capturedPrompt)
 	}
 }
 

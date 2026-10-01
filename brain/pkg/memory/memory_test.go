@@ -1399,6 +1399,83 @@ func TestMemory_SwallowedErrorsBranches(t *testing.T) {
 	}
 }
 
+func TestRetrieveFormattedContext(t *testing.T) {
+	ctx := context.Background()
+
+	client := newMockClient(func(req *http.Request) (*http.Response, error) {
+		return mockEmbeddingResponse(makeDimVector(1.0, 0.0)), nil
+	})
+
+	store := setupTestStore(t)
+	defer store.Close()
+
+	// 1. nil factStore, nil client, empty query
+	res, err := RetrieveFormattedContext(ctx, nil, client, "query", 5)
+	if err != nil || res != "" {
+		t.Errorf("expected empty string and nil error for nil factStore, got %q, %v", res, err)
+	}
+
+	res, err = RetrieveFormattedContext(ctx, store, nil, "query", 5)
+	if err != nil || res != "" {
+		t.Errorf("expected empty string and nil error for nil client, got %q, %v", res, err)
+	}
+
+	res, err = RetrieveFormattedContext(ctx, store, client, "", 5)
+	if err != nil || res != "" {
+		t.Errorf("expected empty string and nil error for empty query, got %q, %v", res, err)
+	}
+
+	res, err = RetrieveFormattedContext(ctx, store, client, "   \t\n", 5)
+	if err != nil || res != "" {
+		t.Errorf("expected empty string and nil error for whitespace query, got %q, %v", res, err)
+	}
+
+	// 2. retrieval error fallback (returns "", nil)
+	errStore := &errFactStore{}
+	res, err = RetrieveFormattedContext(ctx, errStore, client, "query", 5)
+	if err != nil {
+		t.Errorf("expected nil error on retrieval error fallback, got %v", err)
+	}
+	if res != "" {
+		t.Errorf("expected empty string on retrieval error fallback, got %q", res)
+	}
+
+	// 3. zero facts (returns "", nil)
+	emptyStore := setupTestStore(t)
+	defer emptyStore.Close()
+	res, err = RetrieveFormattedContext(ctx, emptyStore, client, "nonexistent query", 5)
+	if err != nil {
+		t.Errorf("expected nil error for zero facts, got %v", err)
+	}
+	if res != "" {
+		t.Errorf("expected empty string for zero facts, got %q", res)
+	}
+
+	// 4. successful fact retrieval and XML formatting
+	validStore := setupTestStore(t)
+	defer validStore.Close()
+	_, err = validStore.InsertFact(ctx, "user_preference", "User prefers dark mode", 1.0, "thread-1", makeDimVector(0.9, 0.1))
+	if err != nil {
+		t.Fatalf("failed to insert fact: %v", err)
+	}
+
+	res, err = RetrieveFormattedContext(ctx, validStore, client, "dark mode", 5)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	expectedSubstrings := []string{
+		"<retrieved_memory>",
+		"- [user_preference] User prefers dark mode",
+		"</retrieved_memory>",
+	}
+	for _, sub := range expectedSubstrings {
+		if !strings.Contains(res, sub) {
+			t.Errorf("expected context to contain %q, got: %s", sub, res)
+		}
+	}
+}
+
+
 
 
 

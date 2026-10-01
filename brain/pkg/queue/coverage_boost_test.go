@@ -2408,14 +2408,6 @@ func TestAssembleTurnPrompt_EmptyBase(t *testing.T) {
 		t.Errorf("expected prev session block, got %q", p4)
 	}
 
-	// 4. Layer 3 only
-	p3 := AssembleTurnPrompt(TurnPromptInput{
-		SemanticMemoryFacts: []db.Fact{{FactText: "fact 1"}},
-	})
-	if !strings.Contains(p3, "fact 1") {
-		t.Errorf("expected memory facts, got %q", p3)
-	}
-
 	// 5. Layer 2 only
 	p2 := AssembleTurnPrompt(TurnPromptInput{
 		ChannelInstructions: "instructions",

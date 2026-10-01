@@ -27,6 +27,7 @@ type DaemonConfig struct {
 	GeminiHomeDir     string
 	Timeout           time.Duration
 	TranscriptRescuer func(convID string, since time.Time) string
+	MemoryRetriever   MemoryRetriever
 }
 
 type TurnResult struct {

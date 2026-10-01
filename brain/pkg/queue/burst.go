@@ -8,7 +8,6 @@ import (
 
 	"github.com/azylman/aerial/brain/pkg/classifier"
 	"github.com/azylman/aerial/brain/pkg/db"
-	"github.com/azylman/aerial/brain/pkg/memory"
 	"github.com/azylman/aerial/brain/pkg/metrics"
 	"github.com/azylman/aerial/brain/pkg/runner"
 	"github.com/azylman/aerial/brain/pkg/sanitizer"
@@ -551,12 +550,11 @@ type TurnPromptInput struct {
 	LookbackHistory     []HistoryMessage
 	PreviousSessionID   string
 	IsColdStart         bool
-	SemanticMemoryFacts []db.Fact
 	ChannelInstructions string
 	InjectedHookContext string
 }
 
-// AssembleTurnPrompt deterministically composes the 7-layer turn prompt in exact top-to-bottom document order.
+// AssembleTurnPrompt deterministically composes the turn prompt in exact top-to-bottom document order.
 func AssembleTurnPrompt(input TurnPromptInput) string {
 	basePrompt := CoalesceBurstPrompt(input.Burst)
 
@@ -591,17 +589,6 @@ func AssembleTurnPrompt(input TurnPromptInput) string {
 				basePrompt = prevBlock + "\n\n" + basePrompt
 			} else {
 				basePrompt = prevBlock
-			}
-		}
-	}
-
-	// Layer 3: Semantic Memory Facts (if present)
-	if len(input.SemanticMemoryFacts) > 0 {
-		if memoryBlock := memory.FormatMemoryContext(input.SemanticMemoryFacts); memoryBlock != "" {
-			if basePrompt != "" {
-				basePrompt = memoryBlock + "\n\n" + basePrompt
-			} else {
-				basePrompt = memoryBlock
 			}
 		}
 	}
