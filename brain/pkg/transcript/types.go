@@ -42,10 +42,15 @@ type SearchResult struct {
 	Total    int                 `json:"total"`
 }
 
+const (
+	// DefaultBatchLimit is the default maximum number of sessions processed per sync sweep.
+	DefaultBatchLimit = 1000
+)
+
 // DefaultSyncOptions returns safe defaults for transcript syncing.
 func DefaultSyncOptions() SyncOptions {
 	return SyncOptions{
-		BatchLimit:    100,
+		BatchLimit:    DefaultBatchLimit,
 		IdleThreshold: 10 * time.Minute,
 		HeadLimit:     15000,
 		TailLimit:     35000,

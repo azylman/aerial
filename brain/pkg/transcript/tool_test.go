@@ -405,8 +405,8 @@ func TestSearchTranscripts(t *testing.T) {
 func TestDefaultSyncOptions(t *testing.T) {
 	t.Parallel()
 	opts := DefaultSyncOptions()
-	if opts.BatchLimit != 100 {
-		t.Errorf("expected BatchLimit = 100, got %d", opts.BatchLimit)
+	if opts.BatchLimit != DefaultBatchLimit {
+		t.Errorf("expected BatchLimit = %d, got %d", DefaultBatchLimit, opts.BatchLimit)
 	}
 	if opts.IdleThreshold != 10*time.Minute {
 		t.Errorf("expected IdleThreshold = 10m, got %v", opts.IdleThreshold)

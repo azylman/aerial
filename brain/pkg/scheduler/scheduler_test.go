@@ -2309,6 +2309,56 @@ func TestScheduler_TranscriptOptions(t *testing.T) {
 	}
 }
 
+func TestScheduler_RunTranscriptSync_Method(t *testing.T) {
+	tempBrain := t.TempDir()
+	store := setupTestStore(t)
+	cfg := newTestConfig()
+
+	sched, err := New(
+		cfg,
+		store,
+		nil,
+		nil,
+		WithBrainDir(tempBrain),
+		WithTranscriptEmbedder(func(ctx context.Context, text string) ([]float32, error) {
+			return make([]float32, db.ExpectedEmbeddingDim), nil
+		}),
+	)
+	if err != nil {
+		t.Fatalf("New scheduler failed: %v", err)
+	}
+
+	// 1. With empty brainDir
+	emptySched := &Scheduler{}
+	emptySched.runTranscriptSync(context.Background())
+	emptySched.wg.Wait()
+
+	// 2. With valid brainDir but empty dir (0 synced -> breaks immediately)
+	ctx := context.Background()
+	sched.runTranscriptSync(ctx)
+	sched.wg.Wait()
+
+	// 3. With default embedder created from cfg
+	schedNoEmbedder, err := New(
+		cfg,
+		store,
+		nil,
+		nil,
+		WithBrainDir(tempBrain),
+	)
+	if err != nil {
+		t.Fatalf("New scheduler failed: %v", err)
+	}
+	schedNoEmbedder.runTranscriptSync(ctx)
+	schedNoEmbedder.wg.Wait()
+
+	// 4. Test break on context cancellation
+	cancelCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	sched.runTranscriptSync(cancelCtx)
+	sched.wg.Wait()
+}
+
 
 
 
