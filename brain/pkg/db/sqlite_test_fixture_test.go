@@ -97,7 +97,6 @@ CREATE TABLE IF NOT EXISTS facts (
 	category TEXT NOT NULL DEFAULT 'general',
 	fact_text TEXT NOT NULL,
 	importance REAL NOT NULL DEFAULT 1.0,
-	thread_id TEXT NOT NULL DEFAULT '',
 	embedding BLOB,
 	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 	last_reinforced_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -114,7 +113,6 @@ CREATE INDEX IF NOT EXISTS idx_schedule_runs_started_at ON schedule_runs(started
 CREATE INDEX IF NOT EXISTS idx_schedule_runs_schedule_started ON schedule_runs(schedule_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_schedule_runs_status_started ON schedule_runs(status, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_schedule_runs_message_id ON schedule_runs(message_id);
-CREATE INDEX IF NOT EXISTS idx_facts_thread_id ON facts(thread_id);
 CREATE INDEX IF NOT EXISTS idx_facts_category ON facts(category);
 CREATE INDEX IF NOT EXISTS idx_facts_created_at ON facts(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_facts_importance_created_at ON facts(importance DESC, created_at DESC);

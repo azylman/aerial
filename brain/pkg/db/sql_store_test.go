@@ -13,7 +13,7 @@ func TestWithTxCommit(t *testing.T) {
 	ctx := context.Background()
 
 	err := store.WithTx(ctx, func(txStore Store) error {
-		_, err := txStore.InsertFact(ctx, "test", "Transactional fact", 1.0, "thread-tx-1", nil)
+		_, err := txStore.InsertFact(ctx, "test", "Transactional fact", 1.0, nil)
 		return err
 	})
 	if err != nil {
@@ -38,7 +38,7 @@ func TestWithTxRollback(t *testing.T) {
 
 	expectedErr := errors.New("simulated transaction failure")
 	err := store.WithTx(ctx, func(txStore Store) error {
-		_, err := txStore.InsertFact(ctx, "test", "Uncommitted fact", 1.0, "thread-tx-2", nil)
+		_, err := txStore.InsertFact(ctx, "test", "Uncommitted fact", 1.0, nil)
 		if err != nil {
 			return err
 		}
@@ -67,7 +67,7 @@ func TestNewTxStoreTypedNil(t *testing.T) {
 
 	var nilStore *SQLStore = nil
 	ctx := context.Background()
-	_, err := nilStore.InsertFact(ctx, "cat", "text", 1.0, "th", nil)
+	_, err := nilStore.InsertFact(ctx, "cat", "text", 1.0, nil)
 	if err == nil {
 		t.Fatalf("Expected error when calling InsertFact on nil *SQLStore, got nil")
 	}
@@ -85,10 +85,10 @@ func TestSQLStoreNilDatabaseBranchCoverage(t *testing.T) {
 		t.Errorf("expected error calling WithTx on nil SQLStore, got nil")
 	}
 
-	if _, err := s.InsertFact(ctx, "c", "f", 1.0, "t", nil); err == nil {
+	if _, err := s.InsertFact(ctx, "c", "f", 1.0, nil); err == nil {
 		t.Errorf("expected error on InsertFact nil store")
 	}
-	if _, err := s.SearchSimilarFacts(ctx, nil, 10, 0.1, "t"); err == nil {
+	if _, err := s.SearchSimilarFacts(ctx, nil, "", 10, 0.1); err == nil {
 		t.Errorf("expected error on SearchSimilarFacts nil store")
 	}
 	if _, err := s.GetFactsPaginated(ctx, FactsFilter{}); err == nil {
@@ -303,7 +303,7 @@ func TestSQLStoreHoistedMethods(t *testing.T) {
 	}
 
 	// 3. Facts missing embeddings & UpdateFactEmbedding
-	factID, err := store.InsertFact(ctx, "test", "Fact without embedding", 1.0, "thread-test-1", nil)
+	factID, err := store.InsertFact(ctx, "test", "Fact without embedding", 1.0, nil)
 	if err != nil {
 		t.Fatalf("InsertFact failed: %v", err)
 	}

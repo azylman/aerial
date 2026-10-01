@@ -22,7 +22,7 @@ func TestFactReinforceAndDecay(t *testing.T) {
 	emb1[0] = 1.0 // normalized vector along dim 0
 
 	// 1. Insert initial fact
-	id, err := InsertFact(database, "system_config", "Postgres runs on port 5432", 0.50, "th-1", emb1)
+	id, err := InsertFact(database, "system_config", "Postgres runs on port 5432", 0.50, emb1)
 	if err != nil {
 		t.Fatalf("InsertFact failed: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestSQLStoreReinforceAndDecay(t *testing.T) {
 	emb := make([]float32, ExpectedEmbeddingDim)
 	emb[0] = 1.0
 
-	id, err := store.InsertFact(ctx, "routine", "Daily backup at midnight", 0.60, "th-daily", emb)
+	id, err := store.InsertFact(ctx, "routine", "Daily backup at midnight", 0.60, emb)
 	if err != nil {
 		t.Fatalf("store.InsertFact failed: %v", err)
 	}
@@ -317,6 +317,7 @@ func (r testCustomResult) RowsAffected() (int64, error) { return r.rows, r.err }
 type testMockDBTX struct {
 	execFn     func(ctx context.Context, query string, args ...any) (sql.Result, error)
 	queryRowFn func(ctx context.Context, query string, args ...any) *sql.Row
+	queryFn    func(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 }
 
 func (m testMockDBTX) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
@@ -334,6 +335,9 @@ func (m testMockDBTX) QueryRowContext(ctx context.Context, query string, args ..
 }
 
 func (m testMockDBTX) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	if m.queryFn != nil {
+		return m.queryFn(ctx, query, args...)
+	}
 	return nil, nil
 }
 
@@ -478,7 +482,7 @@ func TestFacts_Postgres_FindDuplicateFactCoverage(t *testing.T) {
 	// 3. Match found with sim >= minSim
 	mockMatch := testMockDBTX{
 		queryRowFn: func(ctx context.Context, query string, args ...any) *sql.Row {
-			return dbMem.QueryRowContext(ctx, "SELECT 42, 'cat', 'fact', 0.9, 'th1', '2026-09-13 22:00:00', '2026-09-13 22:00:00', '2026-09-13 22:00:00', 2, 0.95")
+			return dbMem.QueryRowContext(ctx, "SELECT 42, 'cat', 'fact', 0.9, '2026-09-13 22:00:00', '2026-09-13 22:00:00', '2026-09-13 22:00:00', 2, 0.95")
 		},
 	}
 	dup, sim, err = FindDuplicateFactWithContext(ctx, mockMatch, true, emb, 0.88)
@@ -489,7 +493,7 @@ func TestFacts_Postgres_FindDuplicateFactCoverage(t *testing.T) {
 	// 4. Match found with sim < minSim
 	mockLowSim := testMockDBTX{
 		queryRowFn: func(ctx context.Context, query string, args ...any) *sql.Row {
-			return dbMem.QueryRowContext(ctx, "SELECT 43, 'cat', 'fact', 0.9, 'th1', '2026-09-13 22:00:00', '2026-09-13 22:00:00', '2026-09-13 22:00:00', 1, 0.50")
+			return dbMem.QueryRowContext(ctx, "SELECT 43, 'cat', 'fact', 0.9, '2026-09-13 22:00:00', '2026-09-13 22:00:00', '2026-09-13 22:00:00', 1, 0.50")
 		},
 	}
 	dup, sim, err = FindDuplicateFactWithContext(ctx, mockLowSim, true, emb, 0.88)
@@ -497,5 +501,105 @@ func TestFacts_Postgres_FindDuplicateFactCoverage(t *testing.T) {
 		t.Errorf("expected nil duplicate with sim=0.50, got dup=%v sim=%f err=%v", dup, sim, err)
 	}
 }
+
+func TestSearchSimilarFacts_HybridAndPostgresBranches(t *testing.T) {
+	dbMem, err := InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer dbMem.Close()
+
+	ctx := context.Background()
+	emb := make([]float32, ExpectedEmbeddingDim)
+	emb[0] = 1.0
+
+	// 1. Nil embedding and empty queryText returns nil
+	resNil, errNil := SearchSimilarFactsWithContext(ctx, dbMem, false, nil, "", 10, 0.2)
+	if resNil != nil || errNil != nil {
+		t.Errorf("expected nil, nil for empty embedding and queryText, got %v, %v", resNil, errNil)
+	}
+
+	// 2. Insert facts for SQLite in-memory hybrid evaluation
+	_, err = InsertFact(dbMem, "pref", "User loves matcha latte", 1.0, emb)
+	if err != nil {
+		t.Fatalf("InsertFact failed: %v", err)
+	}
+	embOther := make([]float32, ExpectedEmbeddingDim)
+	embOther[1] = 1.0
+	_, err = InsertFact(dbMem, "pref", "User hates bitter coffee", 0.8, embOther)
+	if err != nil {
+		t.Fatalf("InsertFact failed: %v", err)
+	}
+
+	// Test SQLite hybrid: matches both embedding and text query
+	hybridRes, err := SearchSimilarFactsWithContext(ctx, dbMem, false, emb, "matcha", 10, 0.2)
+	if err != nil || len(hybridRes) != 1 {
+		t.Fatalf("expected 1 hybrid match, got %d, err: %v", len(hybridRes), err)
+	}
+	if hybridRes[0].FactText != "User loves matcha latte" {
+		t.Errorf("expected 'User loves matcha latte', got %q", hybridRes[0].FactText)
+	}
+
+	// Test SQLite sparse only (nil embedding)
+	sparseRes, err := SearchSimilarFactsWithContext(ctx, dbMem, false, nil, "bitter coffee", 10, 0.2)
+	if err != nil || len(sparseRes) != 1 {
+		t.Fatalf("expected 1 sparse match, got %d, err: %v", len(sparseRes), err)
+	}
+	if sparseRes[0].FactText != "User hates bitter coffee" {
+		t.Errorf("expected 'User hates bitter coffee', got %q", sparseRes[0].FactText)
+	}
+
+	// 3. Test Postgres query generation branches using testMockDBTX
+	// a. Hybrid branch (both embedding and queryText)
+	var capturedQuery string
+	mockHybrid := testMockDBTX{
+		queryFn: func(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+			capturedQuery = query
+			return dbMem.QueryContext(ctx, "SELECT 1 WHERE 1 = 0")
+		},
+	}
+	_, _ = SearchSimilarFactsWithContext(ctx, mockHybrid, true, emb, "search text", 10, 0.2)
+	if !strings.Contains(capturedQuery, "vector_hits") || !strings.Contains(capturedQuery, "text_hits") || !strings.Contains(capturedQuery, "FULL OUTER JOIN") {
+		t.Errorf("expected hybrid RRF query with vector_hits and text_hits, got: %s", capturedQuery)
+	}
+
+	// b. Dense-only branch (has embedding, empty queryText)
+	capturedQuery = ""
+	mockDense := testMockDBTX{
+		queryFn: func(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+			capturedQuery = query
+			return dbMem.QueryContext(ctx, "SELECT 1 WHERE 1 = 0")
+		},
+	}
+	_, _ = SearchSimilarFactsWithContext(ctx, mockDense, true, emb, "", 10, 0.2)
+	if !strings.Contains(capturedQuery, "WITH candidates AS") || !strings.Contains(capturedQuery, "similarity * importance") {
+		t.Errorf("expected dense-only query with candidates CTE, got: %s", capturedQuery)
+	}
+
+	// c. Sparse-only branch (no embedding, has queryText)
+	capturedQuery = ""
+	mockSparse := testMockDBTX{
+		queryFn: func(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+			capturedQuery = query
+			return dbMem.QueryContext(ctx, "SELECT 1 WHERE 1 = 0")
+		},
+	}
+	_, _ = SearchSimilarFactsWithContext(ctx, mockSparse, true, nil, "only text", 10, 0.2)
+	if !strings.Contains(capturedQuery, "WITH text_hits AS") || !strings.Contains(capturedQuery, "websearch_to_tsquery") {
+		t.Errorf("expected sparse-only query with text_hits CTE, got: %s", capturedQuery)
+	}
+
+	// d. Postgres query failure error propagation
+	mockErr := testMockDBTX{
+		queryFn: func(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+			return nil, errors.New("simulated pg query failure")
+		},
+	}
+	_, err = SearchSimilarFactsWithContext(ctx, mockErr, true, emb, "test", 10, 0.2)
+	if err == nil || !strings.Contains(err.Error(), "hybrid search failed") {
+		t.Errorf("expected 'hybrid search failed' error, got %v", err)
+	}
+}
+
 
 

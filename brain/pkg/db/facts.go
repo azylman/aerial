@@ -24,7 +24,6 @@ type Fact struct {
 	Category         string    `json:"category"`
 	FactText         string    `json:"fact_text"`
 	Importance       float64   `json:"importance"`
-	ThreadID         string    `json:"thread_id"`
 	CreatedAt        time.Time `json:"created_at"`
 	LastReinforcedAt time.Time `json:"last_reinforced_at"`
 	LastDecayedAt    time.Time `json:"last_decayed_at"`
@@ -36,11 +35,11 @@ type FactWithEmbedding struct {
 	Embedding []float32
 }
 
-func InsertFact(database DBTX, category, factText string, importance float64, threadID string, embedding []float32) (id int64, err error) {
-	return InsertFactWithContext(context.Background(), database, false, category, factText, importance, threadID, embedding)
+func InsertFact(database DBTX, category, factText string, importance float64, embedding []float32) (id int64, err error) {
+	return InsertFactWithContext(context.Background(), database, false, category, factText, importance, embedding)
 }
 
-func InsertFactWithContext(ctx context.Context, database DBTX, isPg bool, category, factText string, importance float64, threadID string, embedding []float32) (id int64, err error) {
+func InsertFactWithContext(ctx context.Context, database DBTX, isPg bool, category, factText string, importance float64, embedding []float32) (id int64, err error) {
 	start := time.Now()
 	defer func() {
 		status := "success"
@@ -74,9 +73,9 @@ func InsertFactWithContext(ctx context.Context, database DBTX, isPg bool, catego
 	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	query := `INSERT INTO facts (category, fact_text, importance, thread_id, embedding, created_at, last_reinforced_at, last_decayed_at, reinforce_count) VALUES ($1, $2, $3, $4, $5, $6, $6, $6, 1) RETURNING id`
+	query := `INSERT INTO facts (category, fact_text, importance, embedding, created_at, last_reinforced_at, last_decayed_at, reinforce_count) VALUES ($1, $2, $3, $4, $5, $5, $5, 1) RETURNING id`
 	var insertedID int64
-	err = database.QueryRowContext(queryCtx, query, category, factText, importance, threadID, vecVal, now).Scan(&insertedID)
+	err = database.QueryRowContext(queryCtx, query, category, factText, importance, vecVal, now).Scan(&insertedID)
 	if err != nil {
 		return 0, err
 	}
@@ -216,7 +215,7 @@ func GetFactsMissingEmbeddingsWithContext(ctx context.Context, database DBTX, li
 	if database == nil {
 		return nil, nil
 	}
-	query := "SELECT id, category, fact_text, importance, thread_id, created_at, COALESCE(last_reinforced_at, created_at), COALESCE(last_decayed_at, created_at), COALESCE(reinforce_count, 1) FROM facts WHERE embedding IS NULL ORDER BY id ASC"
+	query := "SELECT id, category, fact_text, importance, created_at, COALESCE(last_reinforced_at, created_at), COALESCE(last_decayed_at, created_at), COALESCE(reinforce_count, 1) FROM facts WHERE embedding IS NULL ORDER BY id ASC"
 	if limit > 0 {
 		query += fmt.Sprintf(" LIMIT %d", limit)
 	}
@@ -230,7 +229,7 @@ func GetFactsMissingEmbeddingsWithContext(ctx context.Context, database DBTX, li
 	for rows.Next() {
 		var f Fact
 		var createdAt, lastReinforced, lastDecayed FactTime
-		if err := rows.Scan(&f.ID, &f.Category, &f.FactText, &f.Importance, &f.ThreadID, &createdAt, &lastReinforced, &lastDecayed, &f.ReinforceCount); err != nil {
+		if err := rows.Scan(&f.ID, &f.Category, &f.FactText, &f.Importance, &createdAt, &lastReinforced, &lastDecayed, &f.ReinforceCount); err != nil {
 			return nil, err
 		}
 		f.CreatedAt = createdAt.Time
@@ -248,7 +247,7 @@ func GetAllFactsWithEmbeddings(database DBTX) ([]FactWithEmbedding, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	query := `SELECT id, category, fact_text, importance, thread_id, embedding, created_at, COALESCE(last_reinforced_at, created_at), COALESCE(last_decayed_at, created_at), COALESCE(reinforce_count, 1) FROM facts ORDER BY created_at DESC`
+	query := `SELECT id, category, fact_text, importance, embedding, created_at, COALESCE(last_reinforced_at, created_at), COALESCE(last_decayed_at, created_at), COALESCE(reinforce_count, 1) FROM facts ORDER BY created_at DESC`
 	rows, err := database.QueryContext(ctx, query)
 	if err != nil {
 		return nil, err
@@ -260,7 +259,7 @@ func GetAllFactsWithEmbeddings(database DBTX) ([]FactWithEmbedding, error) {
 		var f Fact
 		var nv NullVector
 		var createdAt, lastReinforced, lastDecayed FactTime
-		if err := rows.Scan(&f.ID, &f.Category, &f.FactText, &f.Importance, &f.ThreadID, &nv, &createdAt, &lastReinforced, &lastDecayed, &f.ReinforceCount); err != nil {
+		if err := rows.Scan(&f.ID, &f.Category, &f.FactText, &f.Importance, &nv, &createdAt, &lastReinforced, &lastDecayed, &f.ReinforceCount); err != nil {
 			return nil, err
 		}
 		f.CreatedAt = createdAt.Time
@@ -279,57 +278,29 @@ func GetAllFactsWithEmbeddings(database DBTX) ([]FactWithEmbedding, error) {
 }
 
 func GetFactsByThreadWithEmbeddings(database DBTX, threadID string) ([]FactWithEmbedding, error) {
+	return GetAllFactsWithEmbeddings(database)
+}
+
+const (
+	DefaultDenseWeight  = 0.70
+	DefaultSparseWeight = 0.30
+	DefaultRRFK         = 60.0
+)
+
+// SearchSimilarFacts executes a hybrid search combining dense vector embeddings with sparse full-text search using Weighted Reciprocal Rank Fusion (RRF).
+func SearchSimilarFacts(database DBTX, embedding []float32, queryText string, limit int, minScore float64) ([]Fact, error) {
+	return SearchSimilarFactsWithContext(context.Background(), database, false, embedding, queryText, limit, minScore)
+}
+
+func SearchSimilarFactsWithContext(ctx context.Context, database DBTX, isPg bool, embedding []float32, queryText string, limit int, minScore float64) ([]Fact, error) {
 	if database == nil {
 		return nil, nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	hasEmbedding := len(embedding) == ExpectedEmbeddingDim
+	queryText = strings.TrimSpace(queryText)
+	hasText := queryText != ""
 
-	query := `SELECT id, category, fact_text, importance, thread_id, embedding, created_at, COALESCE(last_reinforced_at, created_at), COALESCE(last_decayed_at, created_at), COALESCE(reinforce_count, 1) FROM facts`
-	var rows *sql.Rows
-	var err error
-	if threadID != "" {
-		query += ` WHERE thread_id = $1 ORDER BY created_at DESC`
-		rows, err = database.QueryContext(ctx, query, threadID)
-	} else {
-		query += ` ORDER BY created_at DESC`
-		rows, err = database.QueryContext(ctx, query)
-	}
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var results []FactWithEmbedding
-	for rows.Next() {
-		var f Fact
-		var nv NullVector
-		var createdAt, lastReinforced, lastDecayed FactTime
-		if err := rows.Scan(&f.ID, &f.Category, &f.FactText, &f.Importance, &f.ThreadID, &nv, &createdAt, &lastReinforced, &lastDecayed, &f.ReinforceCount); err != nil {
-			return nil, err
-		}
-		f.CreatedAt = createdAt.Time
-		f.LastReinforcedAt = lastReinforced.Time
-		f.LastDecayedAt = lastDecayed.Time
-		var emb []float32
-		if nv.Valid {
-			emb = nv.Vector
-		}
-		results = append(results, FactWithEmbedding{
-			Fact:      f,
-			Embedding: emb,
-		})
-	}
-	return results, nil
-}
-
-// SearchSimilarFacts executes an HNSW index-accelerated candidate fetch followed by importance-weighted scoring.
-func SearchSimilarFacts(database DBTX, embedding []float32, limit int, minScore float64, threadID string) ([]Fact, error) {
-	return SearchSimilarFactsWithContext(context.Background(), database, false, embedding, limit, minScore, threadID)
-}
-
-func SearchSimilarFactsWithContext(ctx context.Context, database DBTX, isPg bool, embedding []float32, limit int, minScore float64, threadID string) ([]Fact, error) {
-	if database == nil || len(embedding) != ExpectedEmbeddingDim {
+	if !hasEmbedding && !hasText {
 		return nil, nil
 	}
 	if limit <= 0 {
@@ -350,15 +321,29 @@ func SearchSimilarFactsWithContext(ctx context.Context, database DBTX, isPg bool
 			score float64
 		}
 		var scored []scoredFact
+		qLower := strings.ToLower(queryText)
+
 		for _, fwe := range allFacts {
-			if threadID != "" && fwe.Fact.ThreadID != "" && fwe.Fact.ThreadID != threadID {
-				continue
+			var sim float64
+			if hasEmbedding && len(fwe.Embedding) == ExpectedEmbeddingDim {
+				sim = cosineSimilarity(embedding, fwe.Embedding)
 			}
-			if len(fwe.Embedding) != ExpectedEmbeddingDim {
-				continue
+			var textScore float64
+			if hasText {
+				if strings.Contains(strings.ToLower(fwe.Fact.FactText), qLower) {
+					textScore = 1.0
+				}
 			}
-			sim := cosineSimilarity(embedding, fwe.Embedding)
-			totalScore := sim * fwe.Fact.Importance
+
+			var totalScore float64
+			if hasEmbedding && hasText {
+				totalScore = (DefaultDenseWeight*sim + DefaultSparseWeight*textScore) * fwe.Fact.Importance
+			} else if hasEmbedding {
+				totalScore = sim * fwe.Fact.Importance
+			} else if hasText {
+				totalScore = textScore * fwe.Fact.Importance
+			}
+
 			if totalScore >= minScore {
 				scored = append(scored, scoredFact{fact: fwe.Fact, score: totalScore})
 			}
@@ -384,45 +369,108 @@ func SearchSimilarFactsWithContext(ctx context.Context, database DBTX, isPg bool
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	query := `
-	WITH candidates AS (
+	var query string
+	var rows *sql.Rows
+	var err error
+
+	if hasEmbedding && hasText {
+		// Hybrid RRF query: combining dense HNSW vector search with sparse FTS using 70/30 weighting
+		query = `
+		WITH vector_hits AS (
+			SELECT id, ROW_NUMBER() OVER (ORDER BY embedding <=> $1) AS rank
+			FROM facts
+			WHERE embedding IS NOT NULL
+			ORDER BY embedding <=> $1
+			LIMIT $2
+		),
+		text_hits AS (
+			SELECT id, ROW_NUMBER() OVER (ORDER BY ts_rank_cd(fts_tokens, websearch_to_tsquery('simple', $3)) DESC) AS rank
+			FROM facts
+			WHERE fts_tokens @@ websearch_to_tsquery('simple', $3)
+			LIMIT $2
+		)
+		SELECT 
+			f.id, 
+			f.category, 
+			f.fact_text, 
+			f.importance, 
+			f.created_at,
+			COALESCE(f.last_reinforced_at, f.created_at) AS last_reinforced_at,
+			COALESCE(f.last_decayed_at, f.created_at) AS last_decayed_at,
+			COALESCE(f.reinforce_count, 1) AS reinforce_count
+		FROM vector_hits v
+		FULL OUTER JOIN text_hits t ON v.id = t.id
+		JOIN facts f ON f.id = COALESCE(v.id, t.id)
+		WHERE (((COALESCE($4 / ($6 + v.rank), 0.0) + COALESCE($5 / ($6 + t.rank), 0.0)) * $6) * f.importance) >= $7
+		ORDER BY (((COALESCE($4 / ($6 + v.rank), 0.0) + COALESCE($5 / ($6 + t.rank), 0.0)) * $6) * f.importance) DESC
+		LIMIT $8;
+		`
+		vec := pgvector.NewVector(embedding)
+		rows, err = database.QueryContext(ctx, query, vec, candidateLimit, queryText, DefaultDenseWeight, DefaultSparseWeight, DefaultRRFK, minScore, limit)
+	} else if hasEmbedding {
+		// Dense vector only query
+		query = `
+		WITH candidates AS (
+			SELECT 
+				id, 
+				category, 
+				fact_text, 
+				importance, 
+				created_at,
+				COALESCE(last_reinforced_at, created_at) AS last_reinforced_at,
+				COALESCE(last_decayed_at, created_at) AS last_decayed_at,
+				COALESCE(reinforce_count, 1) AS reinforce_count,
+				(1.0 - (embedding <=> $1)) AS similarity
+			FROM facts
+			WHERE embedding IS NOT NULL
+			ORDER BY embedding <=> $1
+			LIMIT $2
+		)
 		SELECT 
 			id, 
 			category, 
 			fact_text, 
 			importance, 
-			thread_id, 
 			created_at,
-			COALESCE(last_reinforced_at, created_at) AS last_reinforced_at,
-			COALESCE(last_decayed_at, created_at) AS last_decayed_at,
-			COALESCE(reinforce_count, 1) AS reinforce_count,
-			(1.0 - (embedding <=> $1)) AS similarity
-		FROM facts
-		WHERE ($2 = '' OR thread_id = $2 OR thread_id = '')
-		  AND embedding IS NOT NULL
-		ORDER BY embedding <=> $1
-		LIMIT $3
-	)
-	SELECT 
-		id, 
-		category, 
-		fact_text, 
-		importance, 
-		thread_id, 
-		created_at,
-		last_reinforced_at,
-		last_decayed_at,
-		reinforce_count
-	FROM candidates
-	WHERE (similarity * importance) >= $4
-	ORDER BY (similarity * importance) DESC
-	LIMIT $5;
-	`
+			last_reinforced_at,
+			last_decayed_at,
+			reinforce_count
+		FROM candidates
+		WHERE (similarity * importance) >= $3
+		ORDER BY (similarity * importance) DESC
+		LIMIT $4;
+		`
+		vec := pgvector.NewVector(embedding)
+		rows, err = database.QueryContext(ctx, query, vec, candidateLimit, minScore, limit)
+	} else {
+		// Sparse full-text search only query
+		query = `
+		WITH text_hits AS (
+			SELECT id, ROW_NUMBER() OVER (ORDER BY ts_rank_cd(fts_tokens, websearch_to_tsquery('simple', $1)) DESC) AS rank
+			FROM facts
+			WHERE fts_tokens @@ websearch_to_tsquery('simple', $1)
+			LIMIT $2
+		)
+		SELECT 
+			f.id, 
+			f.category, 
+			f.fact_text, 
+			f.importance, 
+			f.created_at,
+			COALESCE(f.last_reinforced_at, f.created_at) AS last_reinforced_at,
+			COALESCE(f.last_decayed_at, f.created_at) AS last_decayed_at,
+			COALESCE(f.reinforce_count, 1) AS reinforce_count
+		FROM text_hits t
+		JOIN facts f ON f.id = t.id
+		WHERE ((($3 / ($4 + t.rank)) * $4) * f.importance) >= $5
+		ORDER BY ((($3 / ($4 + t.rank)) * $4) * f.importance) DESC
+		LIMIT $6;
+		`
+		rows, err = database.QueryContext(ctx, query, queryText, candidateLimit, 1.0, DefaultRRFK, minScore, limit)
+	}
 
-	vec := pgvector.NewVector(embedding)
-	rows, err := database.QueryContext(ctx, query, vec, threadID, candidateLimit, minScore, limit)
 	if err != nil {
-		return nil, fmt.Errorf("vector search failed: %w", err)
+		return nil, fmt.Errorf("hybrid search failed: %w", err)
 	}
 	defer rows.Close()
 
@@ -430,7 +478,7 @@ func SearchSimilarFactsWithContext(ctx context.Context, database DBTX, isPg bool
 	for rows.Next() {
 		var f Fact
 		var createdAt, lastReinforced, lastDecayed FactTime
-		if err := rows.Scan(&f.ID, &f.Category, &f.FactText, &f.Importance, &f.ThreadID, &createdAt, &lastReinforced, &lastDecayed, &f.ReinforceCount); err != nil {
+		if err := rows.Scan(&f.ID, &f.Category, &f.FactText, &f.Importance, &createdAt, &lastReinforced, &lastDecayed, &f.ReinforceCount); err != nil {
 			return nil, fmt.Errorf("scan fact error: %w", err)
 		}
 		f.CreatedAt = createdAt.Time
@@ -599,7 +647,7 @@ func GetFactsPaginatedWithContext(ctx context.Context, database DBTX, isPg bool,
 	}
 
 	selectQuery := fmt.Sprintf(`
-		SELECT id, category, fact_text, COALESCE(importance, 1.0) AS importance, thread_id, created_at,
+		SELECT id, category, fact_text, COALESCE(importance, 1.0) AS importance, created_at,
 		       COALESCE(last_reinforced_at, created_at) AS last_reinforced_at,
 		       COALESCE(last_decayed_at, created_at) AS last_decayed_at,
 		       COALESCE(reinforce_count, 1) AS reinforce_count
@@ -619,7 +667,7 @@ func GetFactsPaginatedWithContext(ctx context.Context, database DBTX, isPg bool,
 	for rows.Next() {
 		var f Fact
 		var createdAt, lastReinforced, lastDecayed FactTime
-		if err := rows.Scan(&f.ID, &f.Category, &f.FactText, &f.Importance, &f.ThreadID, &createdAt, &lastReinforced, &lastDecayed, &f.ReinforceCount); err != nil {
+		if err := rows.Scan(&f.ID, &f.Category, &f.FactText, &f.Importance, &createdAt, &lastReinforced, &lastDecayed, &f.ReinforceCount); err != nil {
 			return nil, fmt.Errorf("failed to scan fact: %w", err)
 		}
 		f.CreatedAt = createdAt.Time
@@ -678,7 +726,7 @@ func FindDuplicateFactWithContext(ctx context.Context, database DBTX, isPg bool,
 	defer cancel()
 
 	query := `
-	SELECT id, category, fact_text, importance, thread_id, created_at,
+	SELECT id, category, fact_text, importance, created_at,
 	       COALESCE(last_reinforced_at, created_at), COALESCE(last_decayed_at, created_at), COALESCE(reinforce_count, 1),
 	       (1.0 - (embedding <=> $1)) AS similarity
 	FROM facts
@@ -691,7 +739,7 @@ func FindDuplicateFactWithContext(ctx context.Context, database DBTX, isPg bool,
 	var sim float64
 	var createdAt, lastReinforced, lastDecayed FactTime
 	err := database.QueryRowContext(queryCtx, query, vec).Scan(
-		&f.ID, &f.Category, &f.FactText, &f.Importance, &f.ThreadID, &createdAt,
+		&f.ID, &f.Category, &f.FactText, &f.Importance, &createdAt,
 		&lastReinforced, &lastDecayed, &f.ReinforceCount, &sim,
 	)
 	if errors.Is(err, sql.ErrNoRows) {

@@ -83,18 +83,18 @@ func (s *SQLStore) WithTx(ctx context.Context, fn func(txStore Store) error) err
 }
 
 // FactStore implementation
-func (s *SQLStore) InsertFact(ctx context.Context, category, factText string, importance float64, threadID string, embedding []float32) (int64, error) {
+func (s *SQLStore) InsertFact(ctx context.Context, category, factText string, importance float64, embedding []float32) (int64, error) {
 	if s == nil || isDBTXNil(s.db) {
 		return 0, fmt.Errorf("database is nil")
 	}
-	return InsertFactWithContext(ctx, s.db, s.isPostgres, category, factText, importance, threadID, embedding)
+	return InsertFactWithContext(ctx, s.db, s.isPostgres, category, factText, importance, embedding)
 }
 
-func (s *SQLStore) SearchSimilarFacts(ctx context.Context, embedding []float32, limit int, minScore float64, threadID string) ([]Fact, error) {
+func (s *SQLStore) SearchSimilarFacts(ctx context.Context, embedding []float32, queryText string, limit int, minScore float64) ([]Fact, error) {
 	if s == nil || isDBTXNil(s.db) {
 		return nil, fmt.Errorf("database is nil")
 	}
-	return SearchSimilarFactsWithContext(ctx, s.db, s.isPostgres, embedding, limit, minScore, threadID)
+	return SearchSimilarFactsWithContext(ctx, s.db, s.isPostgres, embedding, queryText, limit, minScore)
 }
 
 func (s *SQLStore) GetFactsPaginated(ctx context.Context, filter FactsFilter) (*FactsResult, error) {
@@ -104,11 +104,18 @@ func (s *SQLStore) GetFactsPaginated(ctx context.Context, filter FactsFilter) (*
 	return GetFactsPaginatedWithContext(ctx, s.db, s.isPostgres, filter)
 }
 
+func (s *SQLStore) GetAllFactsWithEmbeddings(ctx context.Context) ([]FactWithEmbedding, error) {
+	if s == nil || isDBTXNil(s.db) {
+		return nil, fmt.Errorf("database is nil")
+	}
+	return GetAllFactsWithEmbeddings(s.db)
+}
+
 func (s *SQLStore) GetFactsByThreadWithEmbeddings(ctx context.Context, threadID string) ([]FactWithEmbedding, error) {
 	if s == nil || isDBTXNil(s.db) {
 		return nil, fmt.Errorf("database is nil")
 	}
-	return GetFactsByThreadWithEmbeddings(s.db, threadID)
+	return s.GetAllFactsWithEmbeddings(ctx)
 }
 
 func (s *SQLStore) GetActiveConversationsForExtraction(ctx context.Context, activeHours int) ([]string, error) {

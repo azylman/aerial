@@ -950,8 +950,7 @@ function applyFilters() {
         if (!query) return true;
         const text = (f.fact_text || '').toLowerCase();
         const category = (f.category || '').toLowerCase();
-        const thread = (f.thread_id || '').toLowerCase();
-        return text.includes(query) || category.includes(query) || thread.includes(query);
+        return text.includes(query) || category.includes(query);
     }).sort(compareFactsImportanceDesc);
 
     const counterEl = document.getElementById('results-count-text');
@@ -989,12 +988,6 @@ function renderFactCards() {
         const highlightedText = query ? highlightSearch(rawText, query) : escapeHtml(rawText);
         const importancePct = Math.min(100, Math.max(0, Math.round(importance * 100)));
 
-        let threadMarkup = '';
-        if (f.thread_id && /^\d+$/.test(f.thread_id.trim())) {
-            const safeThread = escapeHtml(f.thread_id.trim());
-            threadMarkup = ` • <a href="/agentsview/?thread=${safeThread}" class="fact-thread-link" target="_blank" rel="noopener">#${safeThread.slice(0, 8)} ↗</a>`;
-        }
-
         return `
             <div class="fact-card ${isHigh ? 'high-importance' : ''}">
                 <div class="fact-card-header">
@@ -1008,7 +1001,7 @@ function renderFactCards() {
                 </div>
                 <div class="fact-body">${highlightedText}</div>
                 <div class="fact-footer">
-                    <span>⏱ ${timeAgo}${threadMarkup}</span>
+                    <span>⏱ ${timeAgo}</span>
                     <button class="fact-copy-btn" onclick="copyFactText(${idx}, this)" aria-label="Copy fact text">
                         📋 COPY
                     </button>
