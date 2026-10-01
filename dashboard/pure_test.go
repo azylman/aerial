@@ -546,6 +546,7 @@ func TestExtractServiceNameFromJobName_TableDriven(t *testing.T) {
 		{name: "discord mcp", jobName: "discord-mcp Tests", expected: "discord-mcp"},
 		{name: "docker mcp", jobName: "docker-mcp Unit", expected: "docker-mcp"},
 		{name: "github mcp", jobName: "github-mcp Deploy", expected: "github-mcp"},
+		{name: "nomad mcp", jobName: "nomad-mcp Build", expected: "nomad-mcp"},
 		{name: "ollama service", jobName: "Setup ollama image", expected: "ollama"},
 		{name: "agentsview service", jobName: "agentsview container", expected: "agentsview"},
 		{name: "unit test generic", jobName: "Unit Test Matrix", expected: "unit-tests"},

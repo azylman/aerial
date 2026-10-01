@@ -30,6 +30,7 @@ jobs:
       discord-mcp: ${{ steps.filter.outputs.discord-mcp }}
       docker-mcp: ${{ steps.filter.outputs.docker-mcp }}
       github-mcp: ${{ steps.filter.outputs.github-mcp }}
+      nomad-mcp: ${{ steps.filter.outputs.nomad-mcp }}
       dashboard: ${{ steps.filter.outputs.dashboard }}
       docs: ${{ steps.filter.outputs.docs }}
       proxy: ${{ steps.filter.outputs.proxy }}
@@ -55,6 +56,8 @@ jobs:
               - 'docker-mcp/**'
             github-mcp:
               - 'github-mcp/**'
+            nomad-mcp:
+              - 'nomad-mcp/**'
             dashboard:
               - 'dashboard/**'
             docs:
@@ -74,6 +77,7 @@ jobs:
               "discord-mcp": "${{ steps.filter.outputs.discord-mcp }}",
               "docker-mcp": "${{ steps.filter.outputs.docker-mcp }}",
               "github-mcp": "${{ steps.filter.outputs.github-mcp }}",
+              "nomad-mcp": "${{ steps.filter.outputs.nomad-mcp }}",
               dashboard: "${{ steps.filter.outputs.dashboard }}",
               docs: "${{ steps.filter.outputs.docs }}",
               proxy: "${{ steps.filter.outputs.proxy }}",
@@ -86,6 +90,7 @@ jobs:
               { service: "discord-mcp", context: "./discord-mcp", file: "./discord-mcp/Dockerfile", image_name: "aerial-discord-mcp" },
               { service: "docker-mcp", context: "./docker-mcp", file: "./docker-mcp/Dockerfile", image_name: "aerial-docker-mcp" },
               { service: "github-mcp", context: "./github-mcp", file: "./github-mcp/Dockerfile", image_name: "aerial-github-mcp" },
+              { service: "nomad-mcp", context: "./nomad-mcp", file: "./nomad-mcp/Dockerfile", image_name: "aerial-nomad-mcp" },
               { service: "dashboard", context: "./dashboard", file: "./dashboard/Dockerfile", image_name: "aerial-dashboard" },
               { service: "docs", context: "./docs-service", file: "./docs-service/Dockerfile", image_name: "aerial-docs" },
               { service: "proxy", context: "./proxy", file: "./proxy/Dockerfile", image_name: "aerial-proxy" },
