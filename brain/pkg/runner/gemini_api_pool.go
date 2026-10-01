@@ -1410,6 +1410,24 @@ func (s *GeminiAPISession) Send(prompt string, turn *TurnContext) error {
 			break
 		}
 
+		// Propagate turn-level thoughtSignature to any function call parts lacking one.
+		// Gemini SSE streams emit thoughtSignature on the first functionCall part, but
+		// subsequent request validation requires all functionCall parts in the turn to carry it.
+		var turnThoughtSignature string
+		for _, p := range pendingParts {
+			if p.ThoughtSignature != "" {
+				turnThoughtSignature = p.ThoughtSignature
+				break
+			}
+		}
+		if turnThoughtSignature != "" {
+			for i := range pendingParts {
+				if pendingParts[i].ThoughtSignature == "" {
+					pendingParts[i].ThoughtSignature = turnThoughtSignature
+				}
+			}
+		}
+
 		// Dispatch function calls via MCPDispatcher
 		modelParts := make([]geminiPart, 0, len(pendingParts))
 		funcParts := make([]geminiPart, 0, len(pendingParts))
@@ -1463,17 +1481,20 @@ func (s *GeminiAPISession) Send(prompt string, turn *TurnContext) error {
 
 	resText := fullText.String()
 
-	// Append user prompt and model response to history
-	s.history = append(s.history,
-		geminiContent{
-			Role:  "user",
-			Parts: []geminiPart{{Text: prompt}},
-		},
-		geminiContent{
-			Role:  "model",
-			Parts: []geminiPart{{Text: resText}},
-		},
-	)
+	// Append user prompt and model response to history only if non-empty,
+	// preventing empty part serialization ({}) which corrupts future Gemini requests.
+	if strings.TrimSpace(resText) != "" {
+		s.history = append(s.history,
+			geminiContent{
+				Role:  "user",
+				Parts: []geminiPart{{Text: prompt}},
+			},
+			geminiContent{
+				Role:  "model",
+				Parts: []geminiPart{{Text: resText}},
+			},
+		)
+	}
 
 	// Trim history to MaxHistoryTurns*2 messages
 	maxTurns := 10

@@ -2355,8 +2355,8 @@ func TestGeminiAPIPool_MultipleToolCallsGrouping(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 
 		if reqNum == 1 {
-			// First call: Gemini returns two function calls in a single candidate turn with thoughtSignature
-			chunk := `data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"tool_a","args":{"arg":"1"}},"thoughtSignature":"sig_tool_a"},{"functionCall":{"name":"tool_b","args":{"arg":"2"}},"thoughtSignature":"sig_tool_b"}],"role":"model"}}],"index":0}` + "\n\n"
+			// First call: Gemini returns two function calls in a single candidate turn, with thoughtSignature on only the first part
+			chunk := `data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"tool_a","args":{"arg":"1"}},"thoughtSignature":"sig_shared"},{"functionCall":{"name":"tool_b","args":{"arg":"2"}}}],"role":"model"}}],"index":0}` + "\n\n"
 			_, _ = w.Write([]byte(chunk))
 		} else {
 			// Second call: read body to verify grouping
@@ -2427,14 +2427,14 @@ func TestGeminiAPIPool_MultipleToolCallsGrouping(t *testing.T) {
 	if modelContent.Parts[0].FunctionCall == nil || modelContent.Parts[0].FunctionCall.Name != "tool_a" {
 		t.Errorf("expected modelContent.Parts[0] to be tool_a, got %+v", modelContent.Parts[0])
 	}
-	if modelContent.Parts[0].ThoughtSignature != "sig_tool_a" {
-		t.Errorf("expected modelContent.Parts[0].ThoughtSignature == 'sig_tool_a', got %q", modelContent.Parts[0].ThoughtSignature)
+	if modelContent.Parts[0].ThoughtSignature != "sig_shared" {
+		t.Errorf("expected modelContent.Parts[0].ThoughtSignature == 'sig_shared', got %q", modelContent.Parts[0].ThoughtSignature)
 	}
 	if modelContent.Parts[1].FunctionCall == nil || modelContent.Parts[1].FunctionCall.Name != "tool_b" {
 		t.Errorf("expected modelContent.Parts[1] to be tool_b, got %+v", modelContent.Parts[1])
 	}
-	if modelContent.Parts[1].ThoughtSignature != "sig_tool_b" {
-		t.Errorf("expected modelContent.Parts[1].ThoughtSignature == 'sig_tool_b', got %q", modelContent.Parts[1].ThoughtSignature)
+	if modelContent.Parts[1].ThoughtSignature != "sig_shared" {
+		t.Errorf("expected modelContent.Parts[1].ThoughtSignature == 'sig_shared' (propagated), got %q", modelContent.Parts[1].ThoughtSignature)
 	}
 
 	funcContent := capturedTurn2Contents[2]
@@ -2449,6 +2449,53 @@ func TestGeminiAPIPool_MultipleToolCallsGrouping(t *testing.T) {
 	}
 	if funcContent.Parts[1].FunctionResponse == nil || funcContent.Parts[1].FunctionResponse.Name != "tool_b" {
 		t.Errorf("expected funcContent.Parts[1] to be tool_b, got %+v", funcContent.Parts[1])
+	}
+}
+
+func TestGeminiAPIPool_EmptyResponseHistoryNotPoisoned(t *testing.T) {
+	t.Parallel()
+
+	tsGemini := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		// Empty chunk with STOP finish reason
+		chunk := `data: {"candidates":[{"content":{"parts":[{"text":""}],"role":"model"}}],"finishReason":"STOP","index":0}` + "\n\n"
+		_, _ = w.Write([]byte(chunk))
+	}))
+	defer tsGemini.Close()
+
+	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
+		APIKey:     "test-key",
+		Model:      "gemini-2.5-flash",
+		BaseURL:    tsGemini.URL,
+		HTTPClient: tsGemini.Client(),
+	})
+	defer pool.Close()
+
+	sess, err := pool.GetOrCreateSession(context.Background(), "voice-kiosk-empty", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	sink := newMockTurnSink()
+	turn := &TurnContext{
+		TurnID: "turn-empty",
+		Prompt: "hello",
+		Sink:   sink,
+	}
+
+	if err := sess.Send("hello", turn); err != nil {
+		t.Fatalf("Send failed: %v", err)
+	}
+
+	apiSess, ok := sess.(*GeminiAPISession)
+	if !ok {
+		t.Fatalf("expected *GeminiAPISession, got %T", sess)
+	}
+
+	// Verify history is empty and not poisoned with empty model parts
+	if len(apiSess.history) != 0 {
+		t.Errorf("expected history to be empty, got %d items: %+v", len(apiSess.history), apiSess.history)
 	}
 }
 
