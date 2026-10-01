@@ -7,7 +7,7 @@ RUN apk add --no-cache nodejs npm tini docker-cli curl
 # Install universal stdio-to-HTTP MCP translation gateway and purge npm CLI/caches
 RUN --mount=type=cache,target=/root/.npm \
     npm install -g supergateway@^3.4.0 && \
-    rm -rf /root/.npm /usr/lib/node_modules/npm /usr/bin/npm /usr/bin/npx
+    rm -rf /usr/lib/node_modules/npm /usr/bin/npm /usr/bin/npx
 
 # Install official mcp-server-docker using BuildKit pip cache mount
 RUN --mount=type=cache,target=/root/.cache/pip \
