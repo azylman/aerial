@@ -77,6 +77,8 @@ services:
       - ${AERIAL_HOST_PROJECT_DIR:-${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}}:/share/aerial:ro
     ports:
       - "${AERIAL_BRAIN_HOST_PORT:-8088}:8080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks:
       - aerial-net
     healthcheck:
@@ -96,10 +98,6 @@ services:
       github-mcp:
         condition: service_started
       discord-mcp:
-        condition: service_started
-      nomad-mcp:
-        condition: service_started
-      infisical-mcp:
         condition: service_started
       victoriametrics-mcp:
         condition: service_started
@@ -281,70 +279,7 @@ services:
       start_interval: 2s
 
   # ----------------------------------------------------------------------------
-  # 8. Outbound MCP: HashiCorp Nomad MCP Server
-  #    Provides native Nomad cluster operations and job management over MCP.
-  # ----------------------------------------------------------------------------
-  nomad-mcp:
-    image: ghcr.io/azylman/aerial-nomad-mcp:latest
-    build: ./nomad-mcp
-    container_name: aerial-nomad-mcp
-    restart: unless-stopped
-    init: true
-    labels:
-      autoheal: "true"
-    environment:
-      - PORT=4006
-      - NOMAD_ADDR=${NOMAD_ADDR:-http://host.docker.internal:4646}
-      - NOMAD_TOKEN=${NOMAD_TOKEN:-}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    ports:
-      - "${NOMAD_MCP_HOST_PORT:-4006}:4006"
-    networks:
-      - aerial-net
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS -X OPTIONS http://127.0.0.1:4006/mcp || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-      start_interval: 2s
-
-  # ----------------------------------------------------------------------------
-  # 9. Outbound MCP: Infisical Secret Management MCP Server
-  #    Provides native Infisical secret management and rotation over MCP.
-  # ----------------------------------------------------------------------------
-  infisical-mcp:
-    image: ghcr.io/azylman/aerial-infisical-mcp:latest
-    build: ./infisical-mcp
-    container_name: aerial-infisical-mcp
-    restart: unless-stopped
-    init: true
-    labels:
-      autoheal: "true"
-    environment:
-      - PORT=4007
-      - INFISICAL_HOST_URL=${INFISICAL_HOST_URL:-https://app.infisical.com}
-      - INFISICAL_AUTH_METHOD=${INFISICAL_AUTH_METHOD:-universal-auth}
-      - INFISICAL_UNIVERSAL_AUTH_CLIENT_ID=${INFISICAL_UNIVERSAL_AUTH_CLIENT_ID:-}
-      - INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET=${INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET:-}
-      - INFISICAL_TOKEN=${INFISICAL_TOKEN:-}
-      - INFISICAL_PROJECT_ID=${INFISICAL_PROJECT_ID:-}
-      - INFISICAL_MASK_SECRET_VALUES=${INFISICAL_MASK_SECRET_VALUES:-false}
-    ports:
-      - "${INFISICAL_MCP_HOST_PORT:-4007}:4007"
-    networks:
-      - aerial-net
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS -X OPTIONS http://127.0.0.1:4007/mcp || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-      start_interval: 2s
-
-  # ----------------------------------------------------------------------------
-  # 10. Local LLM / Embeddings: Ollama Service
+  # 8. Local LLM / Embeddings: Ollama Service
   #    Provides local AI models & embedding generations with persistent storage.
   # ----------------------------------------------------------------------------
   ollama:

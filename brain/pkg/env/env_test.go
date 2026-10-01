@@ -834,7 +834,7 @@ func TestLoadMCPConfig_FileOverridesAndNormalizations(t *testing.T) {
 	})
 	raw = p.LoadMCPConfig(cfgCustom)
 	rawStr := string(raw)
-	for _, svc := range []string{"docker-mcp:4002/mcp", "nomad-mcp:4006/mcp", "infisical-mcp:4007/mcp", "custom-server:9000/sse", "victoriametrics-mcp:4004/mcp"} {
+	for _, svc := range []string{"docker-mcp:4002/mcp", "host.docker.internal:4006/mcp", "host.docker.internal:4007/mcp", "custom-server:9000/sse", "victoriametrics-mcp:4004/mcp"} {
 		if !strings.Contains(rawStr, svc) {
 			t.Errorf("Expected endpoint %q preserved in config, got: %s", svc, rawStr)
 		}
