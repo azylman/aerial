@@ -189,6 +189,7 @@ type VoiceConfig struct {
 	Engine           string   `yaml:"engine,omitempty" json:"engine,omitempty"`
 	Model            string   `yaml:"model,omitempty" json:"model,omitempty"`
 	PrewarmedTargets []string `yaml:"prewarmed_targets,omitempty" json:"prewarmed_targets,omitempty"`
+	AllowedTools     []string `yaml:"allowed_tools,omitempty" json:"allowed_tools,omitempty"`
 }
 
 type ConfigData struct {
@@ -458,6 +459,12 @@ func cloneConfigData(src *ConfigData) *ConfigData {
 	} else {
 		dst.Voice.PrewarmedTargets = []string{}
 	}
+	if src.Voice.AllowedTools != nil {
+		dst.Voice.AllowedTools = make([]string, len(src.Voice.AllowedTools))
+		copy(dst.Voice.AllowedTools, src.Voice.AllowedTools)
+	} else {
+		dst.Voice.AllowedTools = nil
+	}
 	return &dst
 }
 
@@ -483,6 +490,7 @@ func DefaultConfigData() *ConfigData {
 		Voice: VoiceConfig{
 			Engine:           "agy",
 			PrewarmedTargets: []string{"kiosk"},
+			AllowedTools:     nil,
 		},
 		Port:            "8080",
 		AgyBin:          "agy",
@@ -534,6 +542,27 @@ func (c *Config) VoicePrewarmedTargets() []string {
 	targets := make([]string, len(cur.Voice.PrewarmedTargets))
 	copy(targets, cur.Voice.PrewarmedTargets)
 	return targets
+}
+
+// VoiceAllowedTools returns a defensive copy of configured voice allowed tools.
+// A nil return indicates unconstrained (all tools allowed); an empty non-nil slice indicates zero tools allowed.
+func (c *Config) VoiceAllowedTools() []string {
+	if c == nil {
+		return nil
+	}
+	cur := c.Current()
+	return cur.VoiceAllowedTools()
+}
+
+// VoiceAllowedTools returns a defensive copy of configured voice allowed tools on ConfigData.
+// A nil return indicates unconstrained (all tools allowed); an empty non-nil slice indicates zero tools allowed.
+func (cd *ConfigData) VoiceAllowedTools() []string {
+	if cd == nil || cd.Voice.AllowedTools == nil {
+		return nil
+	}
+	tools := make([]string, len(cd.Voice.AllowedTools))
+	copy(tools, cd.Voice.AllowedTools)
+	return tools
 }
 
 // VoiceEngine returns the configured voice engine ("agy" or "gemini_api"), defaulting to "agy".
