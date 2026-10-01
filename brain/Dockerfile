@@ -12,48 +12,14 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /aerial-brain .
 
-# Install golangci-lint in builder stage for runtime export
-RUN curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b /usr/local/bin v1.64.5
+# Prune Go SDK test, doc, and api directories before exporting to runtime stage
+RUN rm -rf /usr/local/go/test /usr/local/go/doc /usr/local/go/api
 
-# --- Runtime stage -------------------------------------------------------
-FROM ubuntu:24.04
+# --- Superpowers stage ---------------------------------------------------
+FROM alpine:3.20 AS superpowers
 
-# Install base utilities, build tools, certificates, Docker CLI, and CLI prerequisites
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    curl \
-    bash \
-    git \
-    make \
-    jq \
-    tar \
-    gzip \
-    tzdata \
-    docker.io \
-    docker-compose-v2 \
-    python3 \
-    python3-yaml \
-    openssh-client \
-    && rm -rf /var/lib/apt/lists/*
-
-# Configure default SSH client with include for aerial-config
-RUN mkdir -p -m 0700 /root/.ssh && \
-    echo "Include /share/aerial-config/ssh/config" > /root/.ssh/config && \
-    chmod 0600 /root/.ssh/config
-
-# Copy Go SDK, Node.js 20 LTS runtime, and golangci-lint from builders for local tool parity
-COPY --from=builder /usr/local/go /usr/local/go
-COPY --from=builder /usr/local/bin/golangci-lint /usr/local/bin/golangci-lint
-COPY --from=node:20-bookworm-slim /usr/local/bin/node /usr/local/bin/node
-ENV PATH="/usr/local/go/bin:/root/go/bin:${PATH}"
-
-# Install official Antigravity CLI binary
-RUN curl -fsSL https://antigravity.google/cli/install.sh | bash -s -- -d /usr/local/bin
-
-# Clone superpowers and extract only approved engineering methodology skills into /opt/skills
-ARG SUPERPOWERS_CACHEBUST=1
-RUN git clone --depth 1 --branch v6.3.0 https://github.com/obra/superpowers.git /tmp/superpowers && \
-    mkdir -p /opt/skills /opt/superpowers && \
+RUN mkdir -p /tmp/superpowers /opt/skills /opt/superpowers && \
+    wget -qO- https://github.com/obra/superpowers/archive/refs/tags/v6.3.0.tar.gz | tar -xz --strip-components=1 -C /tmp/superpowers && \
     for skill in \
         systematic-debugging \
         test-driven-development \
@@ -68,17 +34,57 @@ RUN git clone --depth 1 --branch v6.3.0 https://github.com/obra/superpowers.git 
     rm -rf /tmp/superpowers && \
     ln -s /opt/skills /opt/superpowers/skills
 
+# --- Runtime stage -------------------------------------------------------
+FROM ubuntu:24.04
+
+# Install base utilities, build tools, certificates, Python, and CLI prerequisites
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    bash \
+    git \
+    make \
+    jq \
+    tar \
+    gzip \
+    tzdata \
+    python3 \
+    openssh-client \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy statically linked Docker CLI and Compose plugin (avoids heavy docker.io/containerd apt packages)
+COPY --link --from=docker:cli /usr/local/bin/docker /usr/local/bin/docker
+COPY --link --from=docker/compose-bin:v2.32.4 /docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
+RUN ln -s /usr/local/lib/docker/cli-plugins/docker-compose /usr/local/bin/docker-compose
+
+# Configure default SSH client with include for aerial-config
+RUN mkdir -p -m 0700 /root/.ssh && \
+    echo "Include /share/aerial-config/ssh/config" > /root/.ssh/config && \
+    chmod 0600 /root/.ssh/config
+
+# Copy Go SDK, golangci-lint, and Node.js 20 LTS runtime from builders/images
+COPY --link --from=builder /usr/local/go /usr/local/go
+COPY --link --from=golangci/golangci-lint:v1.64.5 /usr/bin/golangci-lint /usr/local/bin/golangci-lint
+COPY --link --from=node:20-bookworm-slim /usr/local/bin/node /usr/local/bin/node
+ENV PATH="/usr/local/go/bin:/root/go/bin:${PATH}"
+
+# Install official Antigravity CLI binary
+RUN curl -fsSL https://antigravity.google/cli/install.sh | bash -s -- -d /usr/local/bin
+
+# Copy decoupled superpowers skills
+COPY --link --from=superpowers /opt/skills /opt/skills
+COPY --link --from=superpowers /opt/superpowers /opt/superpowers
+
 WORKDIR /app
 
-COPY --from=builder /aerial-brain /usr/local/bin/aerial-brain
-COPY scripts/ /usr/local/bin/
+COPY --link --from=builder /aerial-brain /usr/local/bin/aerial-brain
+COPY --link scripts/ /usr/local/bin/
 RUN chmod +x /usr/local/bin/*.sh || true
-COPY rules /app/rules
-COPY .agents /app/.agents
+COPY --link rules /app/rules
+COPY --link .agents /app/.agents
 
 ENV GIT_TERMINAL_PROMPT=0
 
 EXPOSE 8080
 
 CMD ["/usr/local/bin/aerial-brain"]
-
