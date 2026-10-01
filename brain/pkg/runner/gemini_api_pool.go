@@ -647,6 +647,14 @@ func (d *DefaultMCPDispatcher) Execute(ctx context.Context, name string, args ma
 		args = make(map[string]interface{})
 	}
 
+	// Normalize dummy user_google_email parameters so Google Workspace MCP uses its default authenticated user
+	if val, ok := args["user_google_email"].(string); ok {
+		trimmed := strings.ToLower(strings.TrimSpace(val))
+		if trimmed == "primary" || trimmed == "me" || trimmed == "default" || trimmed == "" {
+			delete(args, "user_google_email")
+		}
+	}
+
 	reqBody, err := json.Marshal(map[string]interface{}{
 		"jsonrpc": "2.0",
 		"id":      1,
@@ -880,6 +888,24 @@ func NewGeminiAPIPool(cfg GeminiAPIPoolConfig) *GeminiAPIPool {
 	}
 	if cfg.MCPDispatcher == nil && len(cfg.MCPServers) > 0 {
 		cfg.MCPDispatcher = NewDefaultMCPDispatcher(cfg.MCPServers, cfg.HTTPClient)
+	}
+	if strings.TrimSpace(cfg.SystemPrompt) == "" && cfg.DataDir != "" {
+		rulesDir := filepath.Join(cfg.DataDir, "runtimes", "voice", ".gemini", "config", "rules")
+		if entries, err := os.ReadDir(rulesDir); err == nil && len(entries) > 0 {
+			var sb strings.Builder
+			for _, entry := range entries {
+				if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".md") {
+					content, rErr := os.ReadFile(filepath.Join(rulesDir, entry.Name()))
+					if rErr == nil && len(content) > 0 {
+						if sb.Len() > 0 {
+							sb.WriteString("\n\n")
+						}
+						sb.Write(content)
+					}
+				}
+			}
+			cfg.SystemPrompt = sb.String()
+		}
 	}
 	return &GeminiAPIPool{
 		cfg:      cfg,
@@ -1477,6 +1503,74 @@ func (s *GeminiAPISession) Send(prompt string, turn *TurnContext) error {
 				Parts: funcParts,
 			},
 		)
+	}
+
+	// If the loop finished executing tool iterations but no text was produced,
+	// make one final completion pass without tools to prompt the model to speak/summarize.
+	if strings.TrimSpace(fullText.String()) == "" && len(workingContents) > 1 {
+		finalPayload := geminiStreamRequest{
+			Contents:          workingContents,
+			SystemInstruction: systemInstruction,
+			GenerationConfig: &geminiGenerationConfig{
+				ThinkingConfig: &geminiThinkingConfig{
+					ThinkingBudget: 0,
+				},
+			},
+		}
+
+		if finalBytes, err := json.Marshal(finalPayload); err == nil {
+			if finalHttpReq, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(finalBytes)); reqErr == nil {
+				finalHttpReq.Header.Set("Content-Type", "application/json")
+				if finalResp, respErr := client.Do(finalHttpReq); respErr == nil {
+					if finalResp.StatusCode >= 200 && finalResp.StatusCode < 300 {
+						reader := bufio.NewReader(finalResp.Body)
+						for {
+							line, rErr := reader.ReadBytes('\n')
+							if len(line) > 0 {
+								trimmed := strings.TrimRight(string(line), "\r\n")
+								if strings.HasPrefix(trimmed, "data:") {
+									data := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
+									if data != "" && data != "[DONE]" {
+										var chunk geminiStreamChunk
+										if uErr := json.Unmarshal([]byte(data), &chunk); uErr == nil {
+											for _, cand := range chunk.Candidates {
+												if cand.Content != nil {
+													for _, part := range cand.Content.Parts {
+														if part.Text != "" {
+															if !started {
+																started = true
+																if turn != nil && turn.Sink != nil {
+																	turn.Sink.OnTurnStarted()
+																}
+															}
+															if turn != nil && turn.Sink != nil {
+																turn.Sink.OnTextDelta(part.Text)
+															}
+															fullText.WriteString(part.Text)
+														}
+													}
+												}
+											}
+											if chunk.UsageMetadata != nil {
+												totalUsage.InputTokens += chunk.UsageMetadata.PromptTokenCount
+												totalUsage.OutputTokens += chunk.UsageMetadata.CandidatesTokenCount
+												totalUsage.TotalTokens += chunk.UsageMetadata.TotalTokenCount
+											}
+										}
+									}
+								}
+							}
+							if rErr != nil {
+								_ = finalResp.Body.Close()
+								break
+							}
+						}
+					} else {
+						_ = finalResp.Body.Close()
+					}
+				}
+			}
+		}
 	}
 
 	resText := fullText.String()

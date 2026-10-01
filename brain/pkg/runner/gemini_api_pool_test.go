@@ -2782,5 +2782,173 @@ func TestMCPDispatcher_ListDeclarations_ErrorAndRetryBranches(t *testing.T) {
 	}
 }
 
+func TestGeminiAPIPool_NormalizeGoogleUserEmail(t *testing.T) {
+	t.Parallel()
 
+	var receivedParams map[string]interface{}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		var req struct {
+			Method string `json:"method"`
+			Params struct {
+				Arguments map[string]interface{} `json:"arguments"`
+			} `json:"params"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.Method == "tools/list" {
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"get_events","description":"test","inputSchema":{"type":"object"}}]}}`))
+			return
+		}
+		receivedParams = req.Params.Arguments
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"ok"}]}}`))
+	}))
+	defer ts.Close()
+
+	disp := NewDefaultMCPDispatcher([]MCPServerConfig{
+		{Name: "google", ServerURL: ts.URL},
+	}, ts.Client())
+
+	ctx := context.Background()
+	_, _ = disp.ListDeclarations(ctx)
+
+	// Case 1: user_google_email is "primary" -> should be deleted
+	receivedParams = nil
+	_, err := disp.Execute(ctx, "get_events", map[string]interface{}{
+		"user_google_email": "primary",
+		"calendar_id":       "primary",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, exists := receivedParams["user_google_email"]; exists {
+		t.Errorf("expected user_google_email to be deleted when 'primary', got: %v", receivedParams["user_google_email"])
+	}
+	if receivedParams["calendar_id"] != "primary" {
+		t.Errorf("expected calendar_id to remain 'primary', got: %v", receivedParams["calendar_id"])
+	}
+
+	// Case 2: user_google_email is "me" -> should be deleted
+	receivedParams = nil
+	_, _ = disp.Execute(ctx, "get_events", map[string]interface{}{
+		"user_google_email": "me",
+	})
+	if _, exists := receivedParams["user_google_email"]; exists {
+		t.Errorf("expected user_google_email to be deleted when 'me', got: %v", receivedParams["user_google_email"])
+	}
+
+	// Case 3: valid email address -> should be preserved
+	receivedParams = nil
+	_, _ = disp.Execute(ctx, "get_events", map[string]interface{}{
+		"user_google_email": "user@example.com",
+	})
+	if receivedParams["user_google_email"] != "user@example.com" {
+		t.Errorf("expected user_google_email to be preserved, got: %v", receivedParams["user_google_email"])
+	}
+}
+
+func TestGeminiAPIPool_LoadVoiceRulesFromDataDir(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	rulesDir := filepath.Join(tmpDir, "runtimes", "voice", ".gemini", "config", "rules")
+	if err := os.MkdirAll(rulesDir, 0755); err != nil {
+		t.Fatalf("failed to create rules dir: %v", err)
+	}
+	ruleContent := "# Test Voice Rules\nBe succinct and direct."
+	if err := os.WriteFile(filepath.Join(rulesDir, "00_test.md"), []byte(ruleContent), 0644); err != nil {
+		t.Fatalf("failed to write test rule file: %v", err)
+	}
+
+	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
+		DataDir: tmpDir,
+	})
+	defer pool.Close()
+
+	if !strings.Contains(pool.cfg.SystemPrompt, ruleContent) {
+		t.Errorf("expected pool.cfg.SystemPrompt to contain rule content, got: %q", pool.cfg.SystemPrompt)
+	}
+}
+
+type fallbackMockDispatcher struct{}
+
+func (d *fallbackMockDispatcher) ListDeclarations(ctx context.Context) ([]geminiFunctionDeclaration, error) {
+	return []geminiFunctionDeclaration{
+		{Name: "test_tool", Description: "a test tool"},
+	}, nil
+}
+
+func (d *fallbackMockDispatcher) Execute(ctx context.Context, name string, args map[string]interface{}) (string, error) {
+	return `{"status":"ok"}`, nil
+}
+
+func TestGeminiAPIPool_FallbackTextWhenToolIterationsExhausted(t *testing.T) {
+	t.Parallel()
+
+	requestCount := 0
+	var finalReqBody []byte
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		requestCount++
+
+		body, _ := io.ReadAll(r.Body)
+
+		if requestCount == 1 {
+			// First call: returns a function call with empty text
+			sse := "data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"test_tool\",\"args\":{\"foo\":\"bar\"}}}]}}]}\n\n"
+			_, _ = w.Write([]byte(sse))
+		} else if requestCount == 2 {
+			// Second call: tool loop iteration returns empty response without text or tool calls
+			sse := "data: {\"candidates\":[{\"content\":{\"parts\":[]},\"finishReason\":\"STOP\"}]}\n\n"
+			_, _ = w.Write([]byte(sse))
+		} else {
+			// Third call: final fallback call (without tools in request)
+			finalReqBody = body
+			sse := "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Here is your calendar summary.\"}]}}]}\n\n"
+			_, _ = w.Write([]byte(sse))
+		}
+	}))
+	defer ts.Close()
+
+	disp := &fallbackMockDispatcher{}
+
+	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
+		APIKey:        "test-key",
+		Model:         "gemini-2.5-flash",
+		BaseURL:       ts.URL,
+		HTTPClient:    ts.Client(),
+		MCPDispatcher: disp,
+	})
+	defer pool.Close()
+
+	sess, err := pool.GetOrCreateSession(context.Background(), "test-exhaust-device", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	sink := newMockTurnSink()
+	turn := &TurnContext{
+		TurnID:    "turn-exhaust",
+		Prompt:    "what is on my calendar?",
+		Sink:      sink,
+		CreatedAt: time.Now(),
+	}
+
+	if err := sess.Send("what is on my calendar?", turn); err != nil {
+		t.Fatalf("unexpected error from Send: %v", err)
+	}
+
+	sink.mu.Lock()
+	collectedText := strings.Join(sink.deltas, "")
+	sink.mu.Unlock()
+
+	if !strings.Contains(collectedText, "Here is your calendar summary.") {
+		t.Errorf("expected fallback text in sink, got: %q", collectedText)
+	}
+
+	// Verify final request body does not have "tools" declared
+	if strings.Contains(string(finalReqBody), "\"tools\":[") {
+		t.Errorf("expected final fallback request body to not include tools, got: %s", string(finalReqBody))
+	}
+}
 
