@@ -1,4 +1,5 @@
-FROM ghcr.io/github/github-mcp-server:latest AS src
+# syntax=docker/dockerfile:1
+FROM ghcr.io/github/github-mcp-server@sha256:fbec75de11c255213fa08d80fb166abe73d851fff631c51c0079872967720699 AS src
 FROM node:22-alpine
 
 # Install tini init, curl and netcat (no docker-cli needed)

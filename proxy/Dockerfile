@@ -1,4 +1,5 @@
-FROM nginx:alpine
+# syntax=docker/dockerfile:1
+FROM nginx:1.27-alpine
 COPY default.conf /etc/nginx/conf.d/default.conf
 COPY grafana-cyberpunk.css /etc/nginx/grafana-cyberpunk.css
 COPY agentsview-cyberpunk.css /etc/nginx/agentsview-cyberpunk.css

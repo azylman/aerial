@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 FROM python:3.12-alpine
 
 # Install nodejs, npm, tini init, docker-cli, curl and netcat
