@@ -1133,9 +1133,10 @@ func createVoiceProcessPool(cfg *config.Config, voiceHome string, lowEffortModel
 					PrewarmedTargets: prewarmedTargets,
 					SystemPrompt:     cur.SystemPrompt,
 					MCPServers:       mcpServers,
+					AllowedTools:     cur.VoiceAllowedTools(),
 					DataDir:          cur.DataDir,
 				})
-				log.Printf("[INIT] Voice engine initialized with 'gemini_api' (model=%s, prewarmed=%v, mcp_servers=%d)", geminiModel, prewarmedTargets, len(mcpServers))
+				log.Printf("[INIT] Voice engine initialized with 'gemini_api' (model=%s, prewarmed=%v, mcp_servers=%d, allowed_tools=%d)", geminiModel, prewarmedTargets, len(mcpServers), len(cur.VoiceAllowedTools()))
 			}
 		}
 		if voiceEngine != "gemini_api" {

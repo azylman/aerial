@@ -3501,6 +3501,60 @@ voice:
 			t.Errorf("expected getter to return defensive copy: got %q, want 'kiosk'", t2[0])
 		}
 	})
+
+	t.Run("AllowedTools_UnmarshalCloneAndGetter", func(t *testing.T) {
+		t.Parallel()
+		yamlContent := `
+voice:
+  allowed_tools:
+    - "ha_call_read_tool"
+    - "ha_call_write_tool"
+    - "get_events"
+`
+		cfg, err := LoadConfigFromBytes([]byte(yamlContent))
+		if err != nil {
+			t.Fatalf("unexpected error parsing allowed_tools: %v", err)
+		}
+		tools := cfg.VoiceAllowedTools()
+		if len(tools) != 3 {
+			t.Fatalf("expected 3 allowed tools, got %d: %v", len(tools), tools)
+		}
+		if tools[0] != "ha_call_read_tool" || tools[1] != "ha_call_write_tool" || tools[2] != "get_events" {
+			t.Errorf("unexpected allowed tools: %v", tools)
+		}
+
+		// Defensive copy check
+		tools[0] = "mutated"
+		tools2 := cfg.VoiceAllowedTools()
+		if tools2[0] != "ha_call_read_tool" {
+			t.Errorf("mutating getter return mutated internal config: got %q, want 'ha_call_read_tool'", tools2[0])
+		}
+
+		// Nil config returns empty slice
+		var nilCfg *Config
+		if nilTools := nilCfg.VoiceAllowedTools(); len(nilTools) != 0 {
+			t.Errorf("expected empty tools for nil *Config, got: %v", nilTools)
+		}
+
+		// Deep clone independence
+		orig := &ConfigData{
+			Voice: VoiceConfig{
+				AllowedTools: []string{"tool1", "tool2"},
+			},
+		}
+		cloned := cloneConfigData(orig)
+		if len(cloned.Voice.AllowedTools) != 2 {
+			t.Fatalf("expected 2 cloned allowed tools, got %d", len(cloned.Voice.AllowedTools))
+		}
+		cloned.Voice.AllowedTools[0] = "mutated_tool"
+		cloned.Voice.AllowedTools = append(cloned.Voice.AllowedTools, "extra_tool")
+		if orig.Voice.AllowedTools[0] != "tool1" {
+			t.Errorf("mutating cloned AllowedTools affected original: got %q, want 'tool1'", orig.Voice.AllowedTools[0])
+		}
+		if len(orig.Voice.AllowedTools) != 2 {
+			t.Errorf("appending to cloned AllowedTools affected original: got %d, want 2", len(orig.Voice.AllowedTools))
+		}
+	})
 }
 
 func TestVoiceEngine(t *testing.T) {

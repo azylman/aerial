@@ -342,27 +342,41 @@ func isMissingSessionIDErr(statusCode int, bodyBytes []byte, rpcResp *jsonRPCRes
 
 // DefaultMCPDispatcher discovers and dispatches tools across configured HTTP/SSE MCP servers.
 type DefaultMCPDispatcher struct {
-	servers    []MCPServerConfig
-	httpClient *http.Client
-	toolRoutes map[string]MCPServerConfig
-	sessionIDs map[string]string
-	serverMu   map[string]*sync.Mutex
-	mu         sync.RWMutex
+	servers      []MCPServerConfig
+	httpClient   *http.Client
+	toolRoutes   map[string]MCPServerConfig
+	sessionIDs   map[string]string
+	serverMu     map[string]*sync.Mutex
+	allowedTools map[string]struct{}
+	mu           sync.RWMutex
 }
 
 var _ MCPDispatcher = (*DefaultMCPDispatcher)(nil)
 
-// NewDefaultMCPDispatcher constructs a DefaultMCPDispatcher.
-func NewDefaultMCPDispatcher(servers []MCPServerConfig, client *http.Client) *DefaultMCPDispatcher {
+// NewDefaultMCPDispatcher constructs a DefaultMCPDispatcher with optional allowed tools filter.
+// A nil allowedTools slice (or omitted) allows all discovered tools.
+// An empty non-nil slice ([]string{}) blocks all tools.
+func NewDefaultMCPDispatcher(servers []MCPServerConfig, client *http.Client, allowedTools ...[]string) *DefaultMCPDispatcher {
 	if client == nil {
 		client = &http.Client{Timeout: 15 * time.Second}
 	}
+	var allowedMap map[string]struct{}
+	if len(allowedTools) > 0 && allowedTools[0] != nil {
+		allowedMap = make(map[string]struct{}, len(allowedTools[0]))
+		for _, t := range allowedTools[0] {
+			trimmed := strings.TrimSpace(t)
+			if trimmed != "" {
+				allowedMap[trimmed] = struct{}{}
+			}
+		}
+	}
 	return &DefaultMCPDispatcher{
-		servers:    servers,
-		httpClient: client,
-		toolRoutes: make(map[string]MCPServerConfig),
-		sessionIDs: make(map[string]string),
-		serverMu:   make(map[string]*sync.Mutex),
+		servers:      servers,
+		httpClient:   client,
+		toolRoutes:   make(map[string]MCPServerConfig),
+		sessionIDs:   make(map[string]string),
+		serverMu:     make(map[string]*sync.Mutex),
+		allowedTools: allowedMap,
 	}
 }
 
@@ -606,6 +620,11 @@ func (d *DefaultMCPDispatcher) ListDeclarations(ctx context.Context) ([]geminiFu
 			if tool.Name == "" {
 				continue
 			}
+			if d.allowedTools != nil {
+				if _, allowed := d.allowedTools[tool.Name]; !allowed {
+					continue
+				}
+			}
 			d.toolRoutes[tool.Name] = srv
 			decl := geminiFunctionDeclaration{
 				Name:        tool.Name,
@@ -627,6 +646,12 @@ func (d *DefaultMCPDispatcher) Execute(ctx context.Context, name string, args ma
 	}
 
 	d.mu.RLock()
+	if d.allowedTools != nil {
+		if _, allowed := d.allowedTools[name]; !allowed {
+			d.mu.RUnlock()
+			return "", fmt.Errorf("tool %q is not in the allowed voice tools list", name)
+		}
+	}
 	srv, ok := d.toolRoutes[name]
 	d.mu.RUnlock()
 
@@ -636,6 +661,12 @@ func (d *DefaultMCPDispatcher) Execute(ctx context.Context, name string, args ma
 			log.Printf("[MCPDispatcher] JIT ListDeclarations warning: %v", listErr)
 		}
 		d.mu.RLock()
+		if d.allowedTools != nil {
+			if _, allowed := d.allowedTools[name]; !allowed {
+				d.mu.RUnlock()
+				return "", fmt.Errorf("tool %q is not in the allowed voice tools list", name)
+			}
+		}
 		srv, ok = d.toolRoutes[name]
 		d.mu.RUnlock()
 		if !ok {
@@ -785,6 +816,7 @@ type GeminiAPIPoolConfig struct {
 	MaxHistoryTurns  int // defaults to 10 (20 messages)
 	MCPServers       []MCPServerConfig
 	MCPDispatcher    MCPDispatcher
+	AllowedTools     []string
 	DataDir          string
 }
 
@@ -887,7 +919,7 @@ func NewGeminiAPIPool(cfg GeminiAPIPoolConfig) *GeminiAPIPool {
 		cfg.MaxHistoryTurns = 10
 	}
 	if cfg.MCPDispatcher == nil && len(cfg.MCPServers) > 0 {
-		cfg.MCPDispatcher = NewDefaultMCPDispatcher(cfg.MCPServers, cfg.HTTPClient)
+		cfg.MCPDispatcher = NewDefaultMCPDispatcher(cfg.MCPServers, cfg.HTTPClient, cfg.AllowedTools)
 	}
 	if strings.TrimSpace(cfg.SystemPrompt) == "" && cfg.DataDir != "" {
 		rulesDir := filepath.Join(cfg.DataDir, "runtimes", "voice", ".gemini", "config", "rules")

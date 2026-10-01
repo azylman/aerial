@@ -2952,3 +2952,186 @@ func TestGeminiAPIPool_FallbackTextWhenToolIterationsExhausted(t *testing.T) {
 	}
 }
 
+func newAllowedToolsMockServer() *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			Method string `json:"method"`
+			Params struct {
+				Name      string                 `json:"name"`
+				Arguments map[string]interface{} `json:"arguments"`
+			} `json:"params"`
+		}
+		_ = json.Unmarshal(body, &req)
+
+		if req.Method == "tools/list" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"jsonrpc": "2.0",
+				"id": 1,
+				"result": {
+					"tools": [
+						{"name": "ha_call_read_tool", "description": "Read HA entities"},
+						{"name": "get_events", "description": "Get calendar events"},
+						{"name": "batch_modify_gmail_message_labels", "description": "Batch modify labels"}
+					]
+				}
+			}`))
+			return
+		}
+
+		if req.Method == "tools/call" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"jsonrpc": "2.0",
+				"id": 2,
+				"result": {
+					"content": [{"type": "text", "text": "executed: ` + req.Params.Name + `"}]
+				}
+			}`))
+			return
+		}
+
+		http.Error(w, "unknown method", http.StatusBadRequest)
+	}))
+}
+
+func TestDefaultMCPDispatcher_AllowedToolsFilteringAndExecution(t *testing.T) {
+	t.Parallel()
+
+	t.Run("FilteringAndGatingActive", func(t *testing.T) {
+		t.Parallel()
+		ts := newAllowedToolsMockServer()
+		defer ts.Close()
+
+		ctx := context.Background()
+		disp := NewDefaultMCPDispatcher(
+			[]MCPServerConfig{{Name: "test-mcp", ServerURL: ts.URL}},
+			ts.Client(),
+			[]string{"ha_call_read_tool", "get_events"},
+		)
+
+		decls, err := disp.ListDeclarations(ctx)
+		if err != nil {
+			t.Fatalf("unexpected error listing declarations: %v", err)
+		}
+		if len(decls) != 2 {
+			t.Fatalf("expected exactly 2 allowed declarations, got %d", len(decls))
+		}
+		names := map[string]bool{decls[0].Name: true, decls[1].Name: true}
+		if !names["ha_call_read_tool"] || !names["get_events"] {
+			t.Errorf("expected ha_call_read_tool and get_events, got: %v", names)
+		}
+		if names["batch_modify_gmail_message_labels"] {
+			t.Errorf("disallowed tool batch_modify_gmail_message_labels was not filtered out")
+		}
+
+		// Allowed execution should succeed
+		res, err := disp.Execute(ctx, "ha_call_read_tool", nil)
+		if err != nil {
+			t.Fatalf("unexpected error executing allowed tool: %v", err)
+		}
+		if !strings.Contains(res, "executed: ha_call_read_tool") {
+			t.Errorf("unexpected execute result: %q", res)
+		}
+
+		// Disallowed execution must be gated and rejected
+		_, err = disp.Execute(ctx, "batch_modify_gmail_message_labels", nil)
+		if err == nil {
+			t.Fatalf("expected error executing disallowed tool, got nil")
+		}
+		if !strings.Contains(err.Error(), "not in the allowed voice tools list") {
+			t.Errorf("expected 'not in the allowed voice tools list' error, got: %v", err)
+		}
+	})
+
+	t.Run("OmittedOrNilAllowedToolsAllowsAll", func(t *testing.T) {
+		t.Parallel()
+		ts := newAllowedToolsMockServer()
+		defer ts.Close()
+
+		ctx := context.Background()
+		// Omitted or nil allowedTools allows all tools (backward compatibility)
+		disp := NewDefaultMCPDispatcher(
+			[]MCPServerConfig{{Name: "test-mcp", ServerURL: ts.URL}},
+			ts.Client(),
+			nil,
+		)
+
+		decls, err := disp.ListDeclarations(ctx)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(decls) != 3 {
+			t.Fatalf("expected 3 declarations with unconstrained allowlist, got %d", len(decls))
+		}
+
+		res, err := disp.Execute(ctx, "batch_modify_gmail_message_labels", nil)
+		if err != nil {
+			t.Fatalf("unexpected error executing tool: %v", err)
+		}
+		if !strings.Contains(res, "executed: batch_modify_gmail_message_labels") {
+			t.Errorf("unexpected execute result: %q", res)
+		}
+	})
+
+	t.Run("ExplicitEmptyAllowedToolsBlocksAll", func(t *testing.T) {
+		t.Parallel()
+		ts := newAllowedToolsMockServer()
+		defer ts.Close()
+
+		ctx := context.Background()
+		// Explicit empty slice ([]string{}) blocks all tools (lockdown)
+		disp := NewDefaultMCPDispatcher(
+			[]MCPServerConfig{{Name: "test-mcp", ServerURL: ts.URL}},
+			ts.Client(),
+			[]string{},
+		)
+
+		decls, err := disp.ListDeclarations(ctx)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(decls) != 0 {
+			t.Fatalf("expected 0 declarations for explicit empty allowlist, got %d", len(decls))
+		}
+
+		_, err = disp.Execute(ctx, "ha_call_read_tool", nil)
+		if err == nil {
+			t.Fatalf("expected error executing tool when allowlist is empty, got nil")
+		}
+		if !strings.Contains(err.Error(), "not in the allowed voice tools list") {
+			t.Errorf("expected 'not in the allowed voice tools list' error, got: %v", err)
+		}
+	})
+
+	t.Run("NewGeminiAPIPoolWiring", func(t *testing.T) {
+		t.Parallel()
+		ts := newAllowedToolsMockServer()
+		defer ts.Close()
+
+		ctx := context.Background()
+		pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
+			APIKey:       "key",
+			Model:        "gemini-2.5-flash",
+			HTTPClient:   ts.Client(),
+			MCPServers:   []MCPServerConfig{{Name: "test-mcp", ServerURL: ts.URL}},
+			AllowedTools: []string{"get_events"},
+		})
+		defer pool.Close()
+
+		disp, ok := pool.cfg.MCPDispatcher.(*DefaultMCPDispatcher)
+		if !ok {
+			t.Fatalf("expected DefaultMCPDispatcher in pool")
+		}
+		decls, err := disp.ListDeclarations(ctx)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(decls) != 1 || decls[0].Name != "get_events" {
+			t.Errorf("expected 1 declaration for get_events, got: %v", decls)
+		}
+	})
+}
+
+
