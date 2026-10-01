@@ -10,4 +10,5 @@ env "local" {
     dir    = "file://pkg/db/migrations"
     format = atlas
   }
+  schemas = ["public"]
 }

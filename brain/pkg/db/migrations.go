@@ -187,6 +187,10 @@ func applyMigrationFile(ctx context.Context, conn *sql.Conn, m migrationEntry, h
 	}
 
 	stmts := SplitSQLStatements(string(content))
+	return applyMigrationStatements(ctx, conn, m, stmts, hash)
+}
+
+func applyMigrationStatements(ctx context.Context, conn *sql.Conn, m migrationEntry, stmts []string, hash string) error {
 	start := time.Now()
 
 	for _, stmt := range stmts {
@@ -221,7 +225,7 @@ func applyMigrationFile(ctx context.Context, conn *sql.Conn, m migrationEntry, h
 		hash = "unknown"
 	}
 
-	_, err = conn.ExecContext(ctx, `
+	_, err := conn.ExecContext(ctx, `
 		INSERT INTO atlas_schema_revisions.atlas_schema_revisions 
 		(version, description, type, applied, total, executed_at, execution_time, hash, operator_version)
 		VALUES ($1, $2, 2, $3, $3, $4, $5, $6, $7)

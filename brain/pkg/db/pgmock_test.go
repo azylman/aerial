@@ -15,7 +15,16 @@ import (
 	"github.com/azylman/aerial/brain/pkg/config"
 )
 
+type mockPgOptions struct {
+	factsExist     bool
+	revisionExists bool
+}
+
 func startMockPostgres(t *testing.T) string {
+	return startMockPostgresWithOptions(t, mockPgOptions{factsExist: true, revisionExists: true})
+}
+
+func startMockPostgresWithOptions(t *testing.T, opts mockPgOptions) string {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("failed to listen on mock pg: %v", err)
@@ -27,7 +36,7 @@ func startMockPostgres(t *testing.T) string {
 			if err != nil {
 				return
 			}
-			go handlePgConn(conn)
+			go handlePgConnWithOptions(conn, opts)
 		}
 	}()
 
@@ -38,7 +47,7 @@ func startMockPostgres(t *testing.T) string {
 	return listener.Addr().String()
 }
 
-func handlePgConn(conn net.Conn) {
+func handlePgConnWithOptions(conn net.Conn, opts mockPgOptions) {
 	defer conn.Close()
 
 	// 1. Read first packet length
@@ -229,6 +238,20 @@ func handlePgConn(conn net.Conn) {
 			val := byte('t')
 			if strings.Contains(lastQuery, "COUNT") {
 				val = '0'
+			}
+			if strings.Contains(lastQuery, "to_regclass") {
+				if opts.factsExist {
+					val = 't'
+				} else {
+					val = 'f'
+				}
+			}
+			if strings.Contains(lastQuery, "EXISTS") {
+				if opts.revisionExists {
+					val = 't'
+				} else {
+					val = 'f'
+				}
 			}
 			dataRow := []byte{'D', 0, 0, 0, 11, 0, 1, 0, 0, 0, 1, val}
 			_, _ = conn.Write(dataRow)

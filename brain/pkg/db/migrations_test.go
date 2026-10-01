@@ -225,3 +225,100 @@ func TestRunMigrations_AgainstDevPostgresIfAvailable(t *testing.T) {
 		t.Errorf("expected baseline version %s to be stamped, got count=%d, err=%v", baselineVersion, stampedCount, err)
 	}
 }
+
+func TestRunMigrations_MockFreshInstall(t *testing.T) {
+	addr := startMockPostgresWithOptions(t, mockPgOptions{factsExist: false, revisionExists: false})
+	dsn := fmt.Sprintf("postgres://mock:mock@%s/testdb?sslmode=disable", addr)
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open failed: %v", err)
+	}
+	defer db.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := RunMigrations(ctx, db); err != nil {
+		t.Fatalf("RunMigrations fresh install against mock failed: %v", err)
+	}
+}
+
+func TestApplyMigrationFile_ErrorCases(t *testing.T) {
+	addr := startMockPostgres(t)
+	dsn := fmt.Sprintf("postgres://mock:mock@%s/testdb?sslmode=disable", addr)
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open failed: %v", err)
+	}
+	defer db.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("conn failed: %v", err)
+	}
+	defer conn.Close()
+
+	// 1. Non-existent migration file
+	err = applyMigrationFile(ctx, conn, migrationEntry{
+		filename:    "nonexistent.sql",
+		version:     "999999",
+		description: "fake",
+	}, "")
+	if err == nil || !strings.Contains(err.Error(), "read file error") {
+		t.Errorf("expected read file error for non-existent migration, got: %v", err)
+	}
+
+	// 2. Statements with CONCURRENTLY and whitespace
+	err = applyMigrationStatements(ctx, conn, migrationEntry{
+		filename:    "test_concurrently.sql",
+		version:     "999998",
+		description: "concurrent_idx",
+	}, []string{
+		"   ", // empty whitespace statement
+		"CREATE INDEX CONCURRENTLY idx_test ON test(col);",
+		"CREATE TABLE test (id int);",
+	}, "test-hash")
+	if err != nil {
+		t.Errorf("unexpected error applying migration statements: %v", err)
+	}
+}
+
+func TestResyncSequences_ErrorLogging(t *testing.T) {
+	addr := startMockPostgres(t)
+	dsn := fmt.Sprintf("postgres://mock:mock@%s/testdb?sslmode=disable", addr)
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open failed: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("conn failed: %v", err)
+	}
+	// Close connection before calling resync to trigger error branch
+	_ = conn.Close()
+	resyncSequences(ctx, conn)
+}
+
+func TestRunMigrations_CanceledContext(t *testing.T) {
+	addr := startMockPostgres(t)
+	dsn := fmt.Sprintf("postgres://mock:mock@%s/testdb?sslmode=disable", addr)
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open failed: %v", err)
+	}
+	defer db.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Cancel immediately
+
+	err = RunMigrations(ctx, db)
+	if err == nil {
+		t.Errorf("expected error running migrations with canceled context, got nil")
+	}
+}
