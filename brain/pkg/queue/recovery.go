@@ -89,7 +89,7 @@ func RecoverInterrupted(dbOrStore any, pool *WorkerPool) {
 				desc = fmt.Sprintf("a message caused repeated crashes and had to be dropped (message snippet: %q)", snippet)
 			}
 			notif := pool.cfg.NotifierFunc(agyBin, apiKey, desc)
-			if m.AuthorID != "http-client" {
+			if m.AuthorID != "http-client" && pool.cfg.DeliveryFunc != nil {
 				if err := pool.cfg.DeliveryFunc(pool.getDiscordSession(), m.ThreadID, notif); err != nil {
 					log.Printf("[Startup Recovery] Failed to deliver poison pill notice for message %s: %v", m.ID, err)
 				}
