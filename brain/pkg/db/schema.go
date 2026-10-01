@@ -240,6 +240,12 @@ func initSchemaPostgres(ctx context.Context, database *sql.DB) error {
 	execNotice("CREATE INDEX IF NOT EXISTS idx_transcript_steps_fts ON transcript_steps USING GIN(fts_tokens)")
 	execNotice("CREATE INDEX IF NOT EXISTS idx_transcript_steps_tool ON transcript_steps(tool_name)")
 
+	// Reconcile any session summaries that missed transcript_steps due to FK insertion order
+	execNotice(`UPDATE session_summaries 
+		SET last_indexed_step = -1, last_mtime = '1970-01-01 00:00:00+00' 
+		WHERE last_indexed_step >= 0 
+		  AND NOT EXISTS (SELECT 1 FROM transcript_steps ts WHERE ts.session_id = session_summaries.session_id)`)
+
 	// Idempotent sequence resynchronization in case of manual data restoration
 	execNotice(`
 		SELECT setval(pg_get_serial_sequence('facts', 'id'), COALESCE((SELECT MAX(id) FROM facts), 1), (SELECT COUNT(*) > 0 FROM facts));
