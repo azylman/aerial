@@ -49,24 +49,22 @@ func TestInitDBErrorBranchesAndSQLitePathCreation(t *testing.T) {
 }
 
 func TestSearchSimilarFactsFilterBranches(t *testing.T) {
-	database := setupTestDB(t)
-	defer database.Close()
-
+	store := NewFakeStore()
 	ctx := context.Background()
 
 	embValid := make([]float32, ExpectedEmbeddingDim)
 	embValid[0] = 1.0
 
 	// Fact 1: matching fact
-	_, _ = InsertFactWithContext(ctx, database, false, "cat", "Matching fact", 1.0, embValid)
+	_, _ = store.InsertFact(ctx, "cat", "Matching fact", 1.0, embValid)
 
 	// Fact 2: low importance fact
-	_, _ = InsertFactWithContext(ctx, database, false, "cat", "Other fact", 0.05, embValid)
+	_, _ = store.InsertFact(ctx, "cat", "Other fact", 0.05, embValid)
 
 	// Fact 3: no embedding (nil)
-	_, _ = InsertFactWithContext(ctx, database, false, "cat", "No embedding fact", 1.0, nil)
+	_, _ = store.InsertFact(ctx, "cat", "No embedding fact", 1.0, nil)
 
-	res, err := SearchSimilarFactsWithContext(ctx, database, false, embValid, "Matching", 10, 0.1)
+	res, err := store.SearchSimilarFacts(ctx, embValid, "Matching", 10, 0.1)
 	if err != nil || len(res) != 1 {
 		t.Fatalf("SearchSimilarFacts filter branches failed: %v, len=%d", err, len(res))
 	}
@@ -133,9 +131,7 @@ func TestGetFactsPaginatedWithContextOffsetVariants(t *testing.T) {
 }
 
 func TestSearchSimilarFactsAllBranchPaths(t *testing.T) {
-	database := setupTestDB(t)
-	defer database.Close()
-
+	store := NewFakeStore()
 	ctx := context.Background()
 
 	embValid := make([]float32, ExpectedEmbeddingDim)
@@ -144,20 +140,20 @@ func TestSearchSimilarFactsAllBranchPaths(t *testing.T) {
 	embInvalid := []float32{0.1, 0.2, 0.3}
 
 	// 1. Fact matching high score
-	_, _ = InsertFactWithContext(ctx, database, false, "cat", "High score fact", 1.0, embValid)
+	_, _ = store.InsertFact(ctx, "cat", "High score fact", 1.0, embValid)
 
 	// 2. Fact matching low importance (filtered out by minScore=0.5)
-	_, _ = InsertFactWithContext(ctx, database, false, "cat", "Low score fact", 0.001, embValid)
+	_, _ = store.InsertFact(ctx, "cat", "Low score fact", 0.001, embValid)
 
 	// 3. Fact with orthogonal embedding (filtered out by minScore=0.5)
 	embOrthogonal := make([]float32, ExpectedEmbeddingDim)
 	embOrthogonal[1] = 1.0
-	_, _ = InsertFactWithContext(ctx, database, false, "cat", "Other fact", 0.5, embOrthogonal)
+	_, _ = store.InsertFact(ctx, "cat", "Other fact", 0.5, embOrthogonal)
 
 	// 4. Fact with invalid embedding dimension
-	_, _ = InsertFactWithContext(ctx, database, false, "cat", "Invalid dim fact", 1.0, embInvalid)
+	_, _ = store.InsertFact(ctx, "cat", "Invalid dim fact", 1.0, embInvalid)
 
-	res, err := SearchSimilarFactsWithContext(ctx, database, false, embValid, "", 10, 0.5)
+	res, err := store.SearchSimilarFacts(ctx, embValid, "", 10, 0.5)
 	if err != nil || len(res) != 1 {
 		t.Fatalf("SearchSimilarFactsAllBranchPaths failed: %v, len=%d", err, len(res))
 	}

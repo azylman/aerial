@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -276,94 +275,6 @@ func SearchSessionSummariesWithContext(ctx context.Context, database DBTX, isPg 
 	queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	// SQLite in-memory fallback for hermetic unit testing
-	if !isPg && !isPostgres(database) {
-		query := `
-		SELECT session_id, thread_id, summary, embedding, last_indexed_step, last_mtime, 
-		       summary_step_watermark, is_settled, created_at, updated_at 
-		FROM session_summaries;
-		`
-		rows, err := database.QueryContext(queryCtx, query)
-		if err != nil {
-			return nil, fmt.Errorf("sqlite search session summaries query: %w", err)
-		}
-		defer rows.Close()
-
-		var scored []SessionSummary
-		qLower := strings.ToLower(queryText)
-
-		for rows.Next() {
-			var s SessionSummary
-			var nv NullVector
-			var rawMtime, rawCreatedAt, rawUpdatedAt any
-			if err := rows.Scan(
-				&s.SessionID, &s.ThreadID, &s.Summary, &nv, &s.LastIndexedStep,
-				&rawMtime, &s.SummaryStepWatermark, &s.IsSettled, &rawCreatedAt, &rawUpdatedAt,
-			); err != nil {
-				return nil, fmt.Errorf("sqlite scan session summary: %w", err)
-			}
-			if nv.Valid {
-				s.Embedding = nv.Vector
-			}
-			if t, ok := ParseDBTime(rawMtime); ok {
-				s.LastMtime = t
-			}
-			if t, ok := ParseDBTime(rawCreatedAt); ok {
-				s.CreatedAt = t
-			}
-			if t, ok := ParseDBTime(rawUpdatedAt); ok {
-				s.UpdatedAt = t
-			}
-
-			var sim float64
-			if hasEmbedding && len(s.Embedding) == ExpectedEmbeddingDim {
-				sim = cosineSimilarity(embedding, s.Embedding)
-			}
-			var textScore float64
-			if hasText {
-				if strings.Contains(strings.ToLower(s.Summary), qLower) {
-					textScore = 1.0
-				} else {
-					words := strings.Fields(qLower)
-					matchedWords := 0
-					for _, w := range words {
-						if strings.Contains(strings.ToLower(s.Summary), w) {
-							matchedWords++
-						}
-					}
-					if len(words) > 0 && matchedWords > 0 {
-						textScore = float64(matchedWords) / float64(len(words))
-					}
-				}
-			}
-
-			var score float64
-			if hasEmbedding && hasText {
-				score = 0.50*sim + 0.50*textScore
-			} else if hasEmbedding {
-				score = sim
-			} else if hasText {
-				score = textScore
-			}
-
-			if score >= minScore {
-				s.Score = score
-				scored = append(scored, s)
-			}
-		}
-		if err := rows.Err(); err != nil {
-			return nil, fmt.Errorf("sqlite iterate session summaries: %w", err)
-		}
-
-		sort.Slice(scored, func(i, j int) bool {
-			return scored[i].Score > scored[j].Score
-		})
-		if len(scored) > limit {
-			scored = scored[:limit]
-		}
-		return scored, nil
-	}
-
 	candidateLimit := limit * 3
 	if candidateLimit < 30 {
 		candidateLimit = 30
@@ -511,67 +422,6 @@ func SearchTranscriptStepsWithContext(ctx context.Context, database DBTX, isPg b
 	}
 	queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-
-	// SQLite in-memory fallback for hermetic unit testing
-	if !isPg && !isPostgres(database) {
-		query := `
-		SELECT session_id, step_index, step_type, tool_name, content, created_at
-		FROM transcript_steps
-		WHERE ($1 = '' OR session_id = $1)
-		  AND ($2 = '' OR tool_name = $2)
-		ORDER BY created_at DESC;
-		`
-		rows, err := database.QueryContext(queryCtx, query, sessionFilter, toolFilter)
-		if err != nil {
-			return nil, fmt.Errorf("sqlite search transcript steps query: %w", err)
-		}
-		defer rows.Close()
-
-		var matched []TranscriptStep
-		qLower := strings.ToLower(queryText)
-
-		for rows.Next() {
-			var step TranscriptStep
-			var rawCreatedAt any
-			if err := rows.Scan(
-				&step.SessionID, &step.StepIndex, &step.StepType, &step.ToolName, &step.Content, &rawCreatedAt,
-			); err != nil {
-				return nil, fmt.Errorf("sqlite scan transcript step: %w", err)
-			}
-			if t, ok := ParseDBTime(rawCreatedAt); ok {
-				step.CreatedAt = t
-			}
-
-			isMatch := queryText == ""
-			if !isMatch {
-				if strings.Contains(strings.ToLower(step.Content), qLower) {
-					isMatch = true
-				} else {
-					words := strings.Fields(qLower)
-					allMatch := len(words) > 0
-					for _, w := range words {
-						if !strings.Contains(strings.ToLower(step.Content), w) {
-							allMatch = false
-							break
-						}
-					}
-					isMatch = allMatch
-				}
-			}
-
-			if isMatch {
-				step.RankScore = 1.0
-				matched = append(matched, step)
-				if len(matched) >= limit {
-					break
-				}
-			}
-		}
-		if err := rows.Err(); err != nil {
-			return nil, fmt.Errorf("sqlite iterate transcript steps: %w", err)
-		}
-		return matched, nil
-	}
 
 	var rows *sql.Rows
 	if queryText != "" {

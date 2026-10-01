@@ -1206,6 +1206,13 @@ func (f *FakeStore) SearchSimilarFacts(ctx context.Context, embedding []float32,
 		return nil, err
 	}
 
+	if limit <= 0 {
+		limit = 10
+	}
+	if minScore <= 0 {
+		minScore = 0.20
+	}
+
 	type scored struct {
 		fact  Fact
 		score float64
@@ -1214,6 +1221,10 @@ func (f *FakeStore) SearchSimilarFacts(ctx context.Context, embedding []float32,
 	qLower := strings.ToLower(strings.TrimSpace(queryText))
 	hasVec := len(embedding) > 0
 	hasText := qLower != ""
+
+	if !hasVec && !hasText {
+		return nil, nil
+	}
 
 	for _, fe := range f.facts {
 		if fe == nil {
@@ -1230,13 +1241,18 @@ func (f *FakeStore) SearchSimilarFacts(ctx context.Context, embedding []float32,
 			}
 		}
 
+		imp := fe.Fact.Importance
+		if imp <= 0 {
+			imp = 1.0
+		}
+
 		var score float64
 		if hasVec && hasText {
-			score = 0.70*sim + 0.30*textScore
+			score = (0.70*sim + 0.30*textScore) * imp
 		} else if hasVec {
-			score = sim
+			score = sim * imp
 		} else if hasText {
-			score = textScore
+			score = textScore * imp
 		}
 
 		if score >= minScore {
@@ -1248,9 +1264,6 @@ func (f *FakeStore) SearchSimilarFacts(ctx context.Context, embedding []float32,
 		return matches[i].score > matches[j].score
 	})
 
-	if limit <= 0 {
-		limit = 5
-	}
 	if len(matches) > limit {
 		matches = matches[:limit]
 	}

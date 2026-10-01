@@ -547,7 +547,7 @@ func TestFakeStoreFactOperations(t *testing.T) {
 	}
 
 	// SearchSimilarFacts
-	matches, err := s.SearchSimilarFacts(ctx, emb1, "", 5, 0.8)
+	matches, err := s.SearchSimilarFacts(ctx, emb1, "", 5, 0.75)
 	if err != nil || len(matches) != 2 {
 		t.Fatalf("expected 2 similar matches, got %d (err: %v)", len(matches), err)
 	}

@@ -464,7 +464,12 @@ func TestFactsAndTasksEdgeCases(t *testing.T) {
 	_, _ = GetFactsPaginatedWithContext(context.Background(), database, true, FactsFilter{Offset: 2})
 
 	// 4. SearchSimilarFactsWithContext candidateLimit >= 30 (limit = 20)
-	facts, err := SearchSimilarFactsWithContext(context.Background(), database, false, embValid, "", 20, 0.1)
+	mockCandidate := testMockDBTX{
+		queryFn: func(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+			return database.QueryContext(ctx, "SELECT 1 WHERE 1 = 0")
+		},
+	}
+	facts, err := SearchSimilarFactsWithContext(context.Background(), mockCandidate, true, embValid, "", 20, 0.1)
 	if err != nil {
 		t.Fatalf("SearchSimilarFactsWithContext limit=20 failed: %v", err)
 	}
