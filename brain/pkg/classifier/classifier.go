@@ -867,21 +867,44 @@ func (c *Classifier) classifyWithPrompt(ctx context.Context, prompt string) Clas
 	return result
 }
 
-// MaxSystemOneStateRunes is the maximum number of runes preserved in ModernBERT dialogue state.
-// Capped at 600 runes (~200-250 tokens) to ensure edge inference comfortably completes
-// well below the 4.0s client timeout on host E-cores while maintaining recent dialogue turns.
-const MaxSystemOneStateRunes = 600
+// MaxSystemOneMessageRunes is the maximum number of runes preserved in any single message within ModernBERT dialogue state.
+// Messages exceeding this length have their center snipped to preserve both the opener (head) and the final ask (tail).
+const MaxSystemOneMessageRunes = 250
 
-// ModernBERTTruncationSuffix is appended when the single most recent message exceeds MaxSystemOneStateRunes.
+// MaxSystemOneStateRunes is the maximum number of runes preserved across all formatted messages in ModernBERT dialogue state.
+// Capped at 800 runes (~200-240 tokens) to ensure edge inference comfortably completes
+// well below the 4.0s client timeout on host E-cores while maintaining 3-4 recent dialogue turns.
+const MaxSystemOneStateRunes = 800
+
+// ModernBERTTruncationIndicator is inserted into the middle of a message when it exceeds MaxSystemOneMessageRunes,
+// preserving both the conversational opener/speaker context (head) and the final punchline/ask (tail).
+const ModernBERTTruncationIndicator = " ... [snip] ... "
+
+// ModernBERTTruncationSuffix is maintained for backwards compatibility.
 const ModernBERTTruncationSuffix = " ... [truncated]"
 
 // BuildSystemOneState formats target message(s) and recent channel context into clean dialogue
 // for non-autoregressive encoder models like ModernBERT (Laya).
 // It strips XML tags and RFC3339 timestamps to avoid degrading attention weights,
 // while preserving speaker identity and replying-to relationships.
-// It preserves whole messages tail-style; mid-message truncation occurs only if the single most
-// recent message exceeds MaxSystemOneStateRunes, in which case the head is preserved with a truncation indicator.
+// Each individual message is capped at MaxSystemOneMessageRunes using head+tail slicing,
+// and whole messages are accumulated backwards (tail-style) up to MaxSystemOneStateRunes.
 func BuildSystemOneState(targetBurst []db.Message, recentContext []db.Message) string {
+	truncateMessage := func(s string) string {
+		r := []rune(s)
+		if len(r) <= MaxSystemOneMessageRunes {
+			return s
+		}
+		indicator := []rune(ModernBERTTruncationIndicator)
+		avail := MaxSystemOneMessageRunes - len(indicator)
+		if avail <= 0 {
+			return string(r[:MaxSystemOneMessageRunes])
+		}
+		headLen := avail / 2
+		tailLen := avail - headLen
+		return string(r[:headLen]) + ModernBERTTruncationIndicator + string(r[len(r)-tailLen:])
+	}
+
 	formatMessage := func(m db.Message) string {
 		author := SanitizeAuthor(m.AuthorName)
 		if author == "" {
@@ -938,28 +961,16 @@ func BuildSystemOneState(targetBurst []db.Message, recentContext []db.Message) s
 	for _, m := range allMessages {
 		f := strings.TrimSpace(formatMessage(m))
 		if f != "" {
-			formatted = append(formatted, f)
+			formatted = append(formatted, truncateMessage(f))
 		}
 	}
 	if len(formatted) == 0 {
 		return ""
 	}
 
-	// If the single most recent message exceeds MaxSystemOneStateRunes,
-	// keep the beginning (head) and truncate the tail with a truncation indicator.
-	newest := formatted[len(formatted)-1]
-	newestRuneCount := utf8.RuneCountInString(newest)
-	if newestRuneCount > MaxSystemOneStateRunes {
-		newestRunes := []rune(newest)
-		suffixRunes := []rune(ModernBERTTruncationSuffix)
-		if len(suffixRunes) < MaxSystemOneStateRunes {
-			return string(newestRunes[:MaxSystemOneStateRunes-len(suffixRunes)]) + ModernBERTTruncationSuffix
-		}
-		return string(newestRunes[:MaxSystemOneStateRunes])
-	}
-
 	// Preserve whole messages tail-style (from newest backwards to oldest).
-	// Only full messages that fit within MaxSystemOneStateRunes are included.
+	// Each individual message is already capped at MaxSystemOneMessageRunes, so
+	// only full messages that fit within MaxSystemOneStateRunes are included.
 	var kept []string
 	currentRunes := 0
 
