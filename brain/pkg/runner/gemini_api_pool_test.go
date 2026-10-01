@@ -3134,4 +3134,29 @@ func TestDefaultMCPDispatcher_AllowedToolsFilteringAndExecution(t *testing.T) {
 	})
 }
 
+func TestGeminiAPIPool_NilReceiverAndDefaultClient(t *testing.T) {
+	t.Parallel()
+
+	var nilPool *GeminiAPIPool
+	if nilPool.Model() != "" {
+		t.Errorf("expected empty Model() for nil pool")
+	}
+	if nilPool.APIKey() != "" {
+		t.Errorf("expected empty APIKey() for nil pool")
+	}
+	if targets := nilPool.PrewarmedTargets(); targets != nil {
+		t.Errorf("expected nil PrewarmedTargets() for nil pool")
+	}
+
+	// Default HTTPClient coverage
+	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
+		APIKey: "key",
+		Model:  "gemini-2.5-flash",
+	})
+	if pool.cfg.HTTPClient == nil {
+		t.Errorf("expected default HTTPClient to be initialized")
+	}
+	_ = pool.Close()
+}
+
 

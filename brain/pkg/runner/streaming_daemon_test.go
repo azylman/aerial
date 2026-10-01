@@ -1633,6 +1633,65 @@ func TestStreamingDaemon_SetTranscriptRescuer(t *testing.T) {
 	}
 }
 
+func TestExtractResponseStringAndPopulateUsage(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		raw  map[string]any
+		want string
+	}{
+		{raw: map[string]any{"result": map[string]any{"response": "res-resp"}}, want: "res-resp"},
+		{raw: map[string]any{"result": map[string]any{"result": "res-res"}}, want: "res-res"},
+		{raw: map[string]any{"result": map[string]any{"content": "res-content"}}, want: "res-content"},
+		{raw: map[string]any{"result": map[string]any{"text": "res-text"}}, want: "res-text"},
+		{raw: map[string]any{"response": "root-resp"}, want: "root-resp"},
+		{raw: map[string]any{"content": "root-content"}, want: "root-content"},
+		{raw: map[string]any{"text": "root-text"}, want: "root-text"},
+		{raw: map[string]any{"unknown": "val"}, want: ""},
+		{raw: nil, want: ""},
+	}
+
+	for _, tc := range cases {
+		got := extractResponseString(tc.raw)
+		if got != tc.want {
+			t.Errorf("extractResponseString(%v) = %q, want %q", tc.raw, got, tc.want)
+		}
+	}
+
+	// Test populateUsage edge cases
+	res := &TurnResult{}
+	populateUsage(nil, nil)
+	populateUsage(res, nil)
+	populateUsage(nil, map[string]any{"usage": map[string]any{}})
+
+	// Root usage
+	populateUsage(res, map[string]any{
+		"usage": map[string]any{
+			"input_tokens":  float64(10),
+			"output_tokens": float64(20),
+			"total_tokens":  float64(30),
+		},
+	})
+	if res.Usage.InputTokens != 10 || res.Usage.OutputTokens != 20 || res.Usage.TotalTokens != 30 {
+		t.Errorf("unexpected usage from root: %+v", res.Usage)
+	}
+
+	// Result nested usage
+	res2 := &TurnResult{}
+	populateUsage(res2, map[string]any{
+		"result": map[string]any{
+			"usage": map[string]any{
+				"input_tokens":  float64(40),
+				"output_tokens": float64(50),
+				"total_tokens":  float64(90),
+			},
+		},
+	})
+	if res2.Usage.InputTokens != 40 || res2.Usage.OutputTokens != 50 || res2.Usage.TotalTokens != 90 {
+		t.Errorf("unexpected usage from nested: %+v", res2.Usage)
+	}
+}
+
 
 
 

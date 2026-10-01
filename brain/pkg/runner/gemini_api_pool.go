@@ -661,12 +661,6 @@ func (d *DefaultMCPDispatcher) Execute(ctx context.Context, name string, args ma
 			log.Printf("[MCPDispatcher] JIT ListDeclarations warning: %v", listErr)
 		}
 		d.mu.RLock()
-		if d.allowedTools != nil {
-			if _, allowed := d.allowedTools[name]; !allowed {
-				d.mu.RUnlock()
-				return "", fmt.Errorf("tool %q is not in the allowed voice tools list", name)
-			}
-		}
 		srv, ok = d.toolRoutes[name]
 		d.mu.RUnlock()
 		if !ok {
