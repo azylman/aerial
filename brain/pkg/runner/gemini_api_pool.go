@@ -94,22 +94,250 @@ func cleanParameters(schema map[string]interface{}) map[string]interface{} {
 			"properties": map[string]interface{}{},
 		}
 	}
+	res := cleanSchemaNode(schema)
+	if res == nil {
+		return map[string]interface{}{
+			"type":       "OBJECT",
+			"properties": map[string]interface{}{},
+		}
+	}
+	if t, ok := res["type"].(string); !ok || t == "" {
+		res["type"] = "OBJECT"
+	}
+	if res["type"] == "OBJECT" {
+		if _, ok := res["properties"]; !ok {
+			res["properties"] = map[string]interface{}{}
+		}
+	}
+	return res
+}
+
+func normalizeSchemaType(t string) string {
+	upper := strings.ToUpper(t)
+	switch upper {
+	case "INT":
+		return "INTEGER"
+	case "BOOL":
+		return "BOOLEAN"
+	case "FLOAT", "DOUBLE":
+		return "NUMBER"
+	default:
+		return upper
+	}
+}
+
+func cleanSchemaNode(schema map[string]interface{}) map[string]interface{} {
+	if schema == nil {
+		return map[string]interface{}{
+			"type": "OBJECT",
+		}
+	}
+
 	cp := make(map[string]interface{}, len(schema))
 	for k, v := range schema {
-		if k == "$schema" {
+		switch strings.ToLower(k) {
+		case "additionalproperties", "$schema", "title", "default", "$ref", "$id", "definitions":
 			continue
 		}
 		cp[k] = v
 	}
-	if t, ok := cp["type"].(string); ok {
-		cp["type"] = strings.ToUpper(t)
-	} else if _, ok := cp["type"]; !ok {
-		cp["type"] = "OBJECT"
+
+	// Polymorphic type arrays & scalar type normalization
+	if types, ok := cp["type"].([]interface{}); ok {
+		isNullable := false
+		var primaryType string
+		for _, item := range types {
+			if s, ok := item.(string); ok {
+				if strings.EqualFold(s, "null") {
+					isNullable = true
+				} else if primaryType == "" {
+					primaryType = normalizeSchemaType(s)
+				}
+			}
+		}
+		if primaryType != "" {
+			cp["type"] = primaryType
+		} else {
+			cp["type"] = "OBJECT"
+		}
+		if isNullable {
+			cp["nullable"] = true
+		}
+	} else if types, ok := cp["type"].([]string); ok {
+		isNullable := false
+		var primaryType string
+		for _, s := range types {
+			if strings.EqualFold(s, "null") {
+				isNullable = true
+			} else if primaryType == "" {
+				primaryType = normalizeSchemaType(s)
+			}
+		}
+		if primaryType != "" {
+			cp["type"] = primaryType
+		} else {
+			cp["type"] = "OBJECT"
+		}
+		if isNullable {
+			cp["nullable"] = true
+		}
+	} else if t, ok := cp["type"].(string); ok {
+		if strings.EqualFold(t, "null") {
+			cp["type"] = "OBJECT"
+			cp["nullable"] = true
+		} else {
+			cp["type"] = normalizeSchemaType(t)
+		}
 	}
-	if _, ok := cp["properties"]; !ok {
-		cp["properties"] = map[string]interface{}{}
+
+	// Flatten simple nullable unions in anyOf / oneOf
+	flattenNullableUnion := func(unionKey string) bool {
+		val, ok := cp[unionKey]
+		if !ok {
+			return false
+		}
+		var items []map[string]interface{}
+		switch v := val.(type) {
+		case []interface{}:
+			for _, elem := range v {
+				if m, ok := elem.(map[string]interface{}); ok {
+					items = append(items, m)
+				}
+			}
+			if len(items) != len(v) {
+				return false
+			}
+		case []map[string]interface{}:
+			items = v
+		default:
+			return false
+		}
+		if len(items) != 2 {
+			return false
+		}
+		isNull := func(m map[string]interface{}) bool {
+			if t, ok := m["type"].(string); ok && strings.EqualFold(t, "null") {
+				return true
+			}
+			return false
+		}
+		var nonNull map[string]interface{}
+		if isNull(items[0]) && !isNull(items[1]) {
+			nonNull = items[1]
+		} else if isNull(items[1]) && !isNull(items[0]) {
+			nonNull = items[0]
+		} else {
+			return false
+		}
+
+		delete(cp, unionKey)
+		cleanedNonNull := cleanSchemaNode(nonNull)
+		for k, v := range cleanedNonNull {
+			if _, exists := cp[k]; !exists {
+				cp[k] = v
+			} else if k == "type" {
+				cp[k] = v
+			}
+		}
+		if t, ok := cleanedNonNull["type"]; ok {
+			cp["type"] = t
+		}
+		cp["nullable"] = true
+		return true
 	}
+
+	for _, unionKey := range []string{"anyOf", "oneOf"} {
+		flattenNullableUnion(unionKey)
+	}
+
+	// Recurse through properties
+	if propsVal, ok := cp["properties"]; ok {
+		if propsMap, ok := propsVal.(map[string]interface{}); ok {
+			cleanedProps := make(map[string]interface{}, len(propsMap))
+			for propName, propSchema := range propsMap {
+				if propMap, ok := propSchema.(map[string]interface{}); ok {
+					cleanedProps[propName] = cleanSchemaNode(propMap)
+				} else {
+					cleanedProps[propName] = propSchema
+				}
+			}
+			cp["properties"] = cleanedProps
+		}
+	}
+
+	// Recurse through items
+	if itemsVal, ok := cp["items"]; ok {
+		if itemsMap, ok := itemsVal.(map[string]interface{}); ok {
+			cp["items"] = cleanSchemaNode(itemsMap)
+		} else if itemsSlice, ok := itemsVal.([]interface{}); ok {
+			cleanedItems := make([]interface{}, 0, len(itemsSlice))
+			for _, elem := range itemsSlice {
+				if elemMap, ok := elem.(map[string]interface{}); ok {
+					cleanedItems = append(cleanedItems, cleanSchemaNode(elemMap))
+				} else {
+					cleanedItems = append(cleanedItems, elem)
+				}
+			}
+			cp["items"] = cleanedItems
+		}
+	}
+
+	// Recurse through remaining unflattened anyOf, oneOf, allOf
+	for _, unionKey := range []string{"anyOf", "oneOf", "allOf"} {
+		if val, ok := cp[unionKey]; ok {
+			if slice, ok := val.([]interface{}); ok {
+				cleanedSlice := make([]interface{}, 0, len(slice))
+				for _, elem := range slice {
+					if elemMap, ok := elem.(map[string]interface{}); ok {
+						cleanedSlice = append(cleanedSlice, cleanSchemaNode(elemMap))
+					} else {
+						cleanedSlice = append(cleanedSlice, elem)
+					}
+				}
+				cp[unionKey] = cleanedSlice
+			} else if slice, ok := val.([]map[string]interface{}); ok {
+				cleanedSlice := make([]interface{}, 0, len(slice))
+				for _, elemMap := range slice {
+					cleanedSlice = append(cleanedSlice, cleanSchemaNode(elemMap))
+				}
+				cp[unionKey] = cleanedSlice
+			}
+		}
+	}
+
+	// Default empty schemas or missing types to OBJECT
+	if t, ok := cp["type"].(string); !ok || t == "" {
+		if _, hasAnyOf := cp["anyOf"]; !hasAnyOf {
+			if _, hasOneOf := cp["oneOf"]; !hasOneOf {
+				if _, hasAllOf := cp["allOf"]; !hasAllOf {
+					cp["type"] = "OBJECT"
+				}
+			}
+		}
+	}
+	if cp["type"] == "OBJECT" {
+		if _, ok := cp["properties"]; !ok {
+			cp["properties"] = map[string]interface{}{}
+		}
+	}
+
 	return cp
+}
+
+// isMissingSessionIDErr determines if a response indicates a missing or expired MCP session ID.
+func isMissingSessionIDErr(statusCode int, bodyBytes []byte, rpcResp *jsonRPCResponse) bool {
+	if statusCode == http.StatusBadRequest {
+		return true
+	}
+	if rpcResp != nil && rpcResp.Error != nil {
+		if rpcResp.Error.Code == -32600 || strings.Contains(strings.ToLower(rpcResp.Error.Message), "missing session id") {
+			return true
+		}
+	}
+	if bytes.Contains(bytes.ToLower(bodyBytes), []byte("missing session id")) {
+		return true
+	}
+	return false
 }
 
 // DefaultMCPDispatcher discovers and dispatches tools across configured HTTP/SSE MCP servers.
@@ -117,6 +345,8 @@ type DefaultMCPDispatcher struct {
 	servers    []MCPServerConfig
 	httpClient *http.Client
 	toolRoutes map[string]MCPServerConfig
+	sessionIDs map[string]string
+	serverMu   map[string]*sync.Mutex
 	mu         sync.RWMutex
 }
 
@@ -131,7 +361,135 @@ func NewDefaultMCPDispatcher(servers []MCPServerConfig, client *http.Client) *De
 		servers:    servers,
 		httpClient: client,
 		toolRoutes: make(map[string]MCPServerConfig),
+		sessionIDs: make(map[string]string),
+		serverMu:   make(map[string]*sync.Mutex),
 	}
+}
+
+func (d *DefaultMCPDispatcher) getServerMutex(serverName string) *sync.Mutex {
+	d.mu.RLock()
+	mu, ok := d.serverMu[serverName]
+	d.mu.RUnlock()
+	if ok {
+		return mu
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if mu, ok = d.serverMu[serverName]; ok {
+		return mu
+	}
+	mu = &sync.Mutex{}
+	d.serverMu[serverName] = mu
+	return mu
+}
+
+// ensureSession performs the standard MCP initialize handshake and caches the session ID.
+func (d *DefaultMCPDispatcher) ensureSession(ctx context.Context, srv MCPServerConfig) (string, error) {
+	d.mu.RLock()
+	sessID, ok := d.sessionIDs[srv.Name]
+	d.mu.RUnlock()
+	if ok && sessID != "" {
+		return sessID, nil
+	}
+
+	// Acquire per-server mutex to serialize handshake per server without stalling global dispatcher
+	sMu := d.getServerMutex(srv.Name)
+	sMu.Lock()
+	defer sMu.Unlock()
+
+	// Re-check after acquiring per-server lock
+	d.mu.RLock()
+	sessID, ok = d.sessionIDs[srv.Name]
+	d.mu.RUnlock()
+	if ok && sessID != "" {
+		return sessID, nil
+	}
+
+	initReqBody, err := json.Marshal(map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "initialize",
+		"params": map[string]interface{}{
+			"protocolVersion": "2024-11-05",
+			"capabilities":    map[string]interface{}{},
+			"clientInfo": map[string]interface{}{
+				"name":    "aerial",
+				"version": "1.0.0",
+			},
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal initialize request: %w", err)
+	}
+
+	initReq, err := http.NewRequestWithContext(ctx, http.MethodPost, srv.ServerURL, bytes.NewReader(initReqBody))
+	if err != nil {
+		return "", fmt.Errorf("failed to create initialize request for %s: %w", srv.Name, err)
+	}
+	initReq.Header.Set("Content-Type", "application/json")
+	initReq.Header.Set("Accept", "application/json, text/event-stream")
+	for k, v := range srv.Headers {
+		initReq.Header.Set(k, v)
+	}
+
+	initResp, err := d.httpClient.Do(initReq)
+	if err != nil {
+		return "", fmt.Errorf("failed to send initialize to %s: %w", srv.Name, err)
+	}
+	defer initResp.Body.Close()
+
+	initRespBytes, rErr := io.ReadAll(io.LimitReader(initResp.Body, 512*1024))
+	if rErr != nil || initResp.StatusCode < 200 || initResp.StatusCode >= 300 {
+		return "", fmt.Errorf("mcp server %s initialize returned status %d: %s", srv.Name, initResp.StatusCode, string(initRespBytes))
+	}
+
+	sessID = initResp.Header.Get("mcp-session-id")
+	if sessID == "" {
+		sessID = initResp.Header.Get("Mcp-Session-Id")
+	}
+	if sessID == "" {
+		for k, v := range initResp.Header {
+			if strings.EqualFold(k, "mcp-session-id") && len(v) > 0 {
+				sessID = v[0]
+				break
+			}
+		}
+	}
+
+	if sessID != "" {
+		d.mu.Lock()
+		d.sessionIDs[srv.Name] = sessID
+		d.mu.Unlock()
+	}
+
+	// Send notifications/initialized notification
+	notifyReqBody, err := json.Marshal(map[string]interface{}{
+		"jsonrpc": "2.0",
+		"method":  "notifications/initialized",
+	})
+	if err == nil {
+		notifyReq, err := http.NewRequestWithContext(ctx, http.MethodPost, srv.ServerURL, bytes.NewReader(notifyReqBody))
+		if err == nil {
+			notifyReq.Header.Set("Content-Type", "application/json")
+			notifyReq.Header.Set("Accept", "application/json, text/event-stream")
+			for k, v := range srv.Headers {
+				notifyReq.Header.Set(k, v)
+			}
+			if sessID != "" {
+				notifyReq.Header.Set("mcp-session-id", sessID)
+			}
+			notifyResp, nErr := d.httpClient.Do(notifyReq)
+			if nErr == nil && notifyResp != nil {
+				if _, drainErr := io.Copy(io.Discard, notifyResp.Body); drainErr != nil {
+					log.Printf("[MCPDispatcher] Warning reading notification body: %v", drainErr)
+				}
+				_ = notifyResp.Body.Close()
+			}
+		}
+	}
+
+	return sessID, nil
 }
 
 // ListDeclarations queries all configured MCP servers via tools/list and returns Gemini function declarations.
@@ -155,6 +513,11 @@ func (d *DefaultMCPDispatcher) ListDeclarations(ctx context.Context) ([]geminiFu
 		if strings.TrimSpace(srv.ServerURL) == "" {
 			continue
 		}
+
+		d.mu.RLock()
+		sessID := d.sessionIDs[srv.Name]
+		d.mu.RUnlock()
+
 		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, srv.ServerURL, bytes.NewReader(reqBody))
 		if err != nil {
 			log.Printf("[MCPDispatcher] Failed to create request for %s: %v", srv.Name, err)
@@ -165,6 +528,9 @@ func (d *DefaultMCPDispatcher) ListDeclarations(ctx context.Context) ([]geminiFu
 		for k, v := range srv.Headers {
 			httpReq.Header.Set(k, v)
 		}
+		if sessID != "" {
+			httpReq.Header.Set("mcp-session-id", sessID)
+		}
 
 		resp, err := d.httpClient.Do(httpReq)
 		if err != nil {
@@ -173,14 +539,53 @@ func (d *DefaultMCPDispatcher) ListDeclarations(ctx context.Context) ([]geminiFu
 		}
 		respBytes, rErr := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
 		_ = resp.Body.Close()
+
+		rpcResp, parseErr := parseJSONRPCBody(respBytes)
+		if rErr == nil && isMissingSessionIDErr(resp.StatusCode, respBytes, rpcResp) {
+			d.mu.Lock()
+			if d.sessionIDs[srv.Name] == sessID {
+				delete(d.sessionIDs, srv.Name)
+			}
+			d.mu.Unlock()
+
+			newSessID, sErr := d.ensureSession(ctx, srv)
+			if sErr != nil {
+				log.Printf("[MCPDispatcher] Failed to ensure session for %s: %v", srv.Name, sErr)
+				continue
+			}
+
+			retryReq, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, srv.ServerURL, bytes.NewReader(reqBody))
+			if reqErr != nil {
+				log.Printf("[MCPDispatcher] Failed to create retry request for %s: %v", srv.Name, reqErr)
+				continue
+			}
+			retryReq.Header.Set("Content-Type", "application/json")
+			retryReq.Header.Set("Accept", "application/json, text/event-stream")
+			for k, v := range srv.Headers {
+				retryReq.Header.Set(k, v)
+			}
+			if newSessID != "" {
+				retryReq.Header.Set("mcp-session-id", newSessID)
+			}
+
+			retryResp, doErr := d.httpClient.Do(retryReq)
+			if doErr != nil {
+				log.Printf("[MCPDispatcher] Failed to query tools/list on retry for %s: %v", srv.Name, doErr)
+				continue
+			}
+			resp = retryResp
+			respBytes, rErr = io.ReadAll(io.LimitReader(retryResp.Body, 512*1024))
+			_ = retryResp.Body.Close()
+			rpcResp, parseErr = parseJSONRPCBody(respBytes)
+		}
+
 		if rErr != nil || resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			log.Printf("[MCPDispatcher] Non-200 or read error from %s: status=%d err=%v", srv.Name, resp.StatusCode, rErr)
 			continue
 		}
 
-		rpcResp, err := parseJSONRPCBody(respBytes)
-		if err != nil || rpcResp == nil {
-			log.Printf("[MCPDispatcher] Failed to parse JSON-RPC response from %s: %v", srv.Name, err)
+		if parseErr != nil || rpcResp == nil {
+			log.Printf("[MCPDispatcher] Empty or invalid JSON-RPC response from %s: %v", srv.Name, parseErr)
 			continue
 		}
 		if rpcResp.Error != nil {
@@ -255,6 +660,10 @@ func (d *DefaultMCPDispatcher) Execute(ctx context.Context, name string, args ma
 		return "", fmt.Errorf("failed to marshal tools/call request: %w", err)
 	}
 
+	d.mu.RLock()
+	sessID := d.sessionIDs[srv.Name]
+	d.mu.RUnlock()
+
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, srv.ServerURL, bytes.NewReader(reqBody))
 	if err != nil {
 		return "", fmt.Errorf("failed to create http request for tool %q: %w", name, err)
@@ -264,28 +673,66 @@ func (d *DefaultMCPDispatcher) Execute(ctx context.Context, name string, args ma
 	for k, v := range srv.Headers {
 		httpReq.Header.Set(k, v)
 	}
+	if sessID != "" {
+		httpReq.Header.Set("mcp-session-id", sessID)
+	}
 
 	resp, err := d.httpClient.Do(httpReq)
 	if err != nil {
 		return "", fmt.Errorf("failed to call tool %q on %s: %w", name, srv.Name, err)
 	}
-	defer resp.Body.Close()
 
 	respBytes, rErr := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
+	_ = resp.Body.Close()
 	if rErr != nil {
 		return "", fmt.Errorf("failed to read response for tool %q: %w", name, rErr)
+	}
+
+	rpcResp, parseErr := parseJSONRPCBody(respBytes)
+	if isMissingSessionIDErr(resp.StatusCode, respBytes, rpcResp) {
+		d.mu.Lock()
+		if d.sessionIDs[srv.Name] == sessID {
+			delete(d.sessionIDs, srv.Name)
+		}
+		d.mu.Unlock()
+
+		newSessID, sErr := d.ensureSession(ctx, srv)
+		if sErr != nil {
+			return "", fmt.Errorf("failed to establish session with %s for tool %q: %w", srv.Name, name, sErr)
+		}
+
+		retryReq, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, srv.ServerURL, bytes.NewReader(reqBody))
+		if reqErr != nil {
+			return "", fmt.Errorf("failed to create retry request for tool %q: %w", name, reqErr)
+		}
+		retryReq.Header.Set("Content-Type", "application/json")
+		retryReq.Header.Set("Accept", "application/json, text/event-stream")
+		for k, v := range srv.Headers {
+			retryReq.Header.Set(k, v)
+		}
+		if newSessID != "" {
+			retryReq.Header.Set("mcp-session-id", newSessID)
+		}
+
+		retryResp, doErr := d.httpClient.Do(retryReq)
+		if doErr != nil {
+			return "", fmt.Errorf("failed to retry tool %q on %s: %w", name, srv.Name, doErr)
+		}
+		resp = retryResp
+		respBytes, rErr = io.ReadAll(io.LimitReader(retryResp.Body, 1024*1024))
+		_ = retryResp.Body.Close()
+		if rErr != nil {
+			return "", fmt.Errorf("failed to read retry response for tool %q: %w", name, rErr)
+		}
+		rpcResp, parseErr = parseJSONRPCBody(respBytes)
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", fmt.Errorf("mcp server %s returned status %d: %s", srv.Name, resp.StatusCode, string(respBytes))
 	}
 
-	rpcResp, err := parseJSONRPCBody(respBytes)
-	if err != nil {
-		return "", fmt.Errorf("failed to parse tool response for %q: %w", name, err)
-	}
-	if rpcResp == nil {
-		return "", fmt.Errorf("empty JSON-RPC response for tool %q", name)
+	if parseErr != nil || rpcResp == nil {
+		return "", fmt.Errorf("empty or invalid JSON-RPC response for tool %q: %w", name, parseErr)
 	}
 	if rpcResp.Error != nil {
 		return "", fmt.Errorf("mcp tool %q error: %s (code %d)", name, rpcResp.Error.Message, rpcResp.Error.Code)
@@ -962,7 +1409,12 @@ func (s *GeminiAPISession) Send(prompt string, turn *TurnContext) error {
 		}
 
 		// Dispatch function calls via MCPDispatcher
+		modelParts := make([]geminiPart, 0, len(pendingCalls))
+		funcParts := make([]geminiPart, 0, len(pendingCalls))
+
 		for _, fc := range pendingCalls {
+			modelParts = append(modelParts, geminiPart{FunctionCall: fc})
+
 			argsDesc := ""
 			if len(fc.Args) > 0 {
 				if b, bErr := json.Marshal(fc.Args); bErr == nil {
@@ -986,26 +1438,24 @@ func (s *GeminiAPISession) Send(prompt string, turn *TurnContext) error {
 				respMap = map[string]interface{}{"error": execErr.Error()}
 			}
 
-			workingContents = append(workingContents,
-				geminiContent{
-					Role: "model",
-					Parts: []geminiPart{
-						{FunctionCall: fc},
-					},
+			funcParts = append(funcParts, geminiPart{
+				FunctionResponse: &geminiFunctionResp{
+					Name:     fc.Name,
+					Response: respMap,
 				},
-				geminiContent{
-					Role: "function",
-					Parts: []geminiPart{
-						{
-							FunctionResponse: &geminiFunctionResp{
-								Name:     fc.Name,
-								Response: respMap,
-							},
-						},
-					},
-				},
-			)
+			})
 		}
+
+		workingContents = append(workingContents,
+			geminiContent{
+				Role:  "model",
+				Parts: modelParts,
+			},
+			geminiContent{
+				Role:  "function",
+				Parts: funcParts,
+			},
+		)
 	}
 
 	resText := fullText.String()
