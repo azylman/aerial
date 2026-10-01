@@ -471,7 +471,7 @@ func RunTranscriptSync(ctx context.Context, store db.Store, brainDir string, emb
 	}
 	defer transcriptSyncMutex.Unlock()
 
-	syncCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+	syncCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 
 	opts := transcript.DefaultSyncOptions()
@@ -539,13 +539,22 @@ func (s *Scheduler) runTranscriptSync(ctx context.Context) {
 		}
 
 		llmFunc := s.transcriptLLMFunc
-		if llmFunc == nil {
-			llmFunc = s.ExtractFactsLLM
-		}
 
-		if _, err := RunTranscriptSync(ctx, s.getStore(), brainDir, embedder, llmFunc); err != nil {
-			if ctx.Err() == nil {
-				log.Printf("[Scheduler] Background transcript sync error: %v", err)
+		for {
+			stats, err := RunTranscriptSync(ctx, s.getStore(), brainDir, embedder, llmFunc)
+			if err != nil {
+				if ctx.Err() == nil {
+					log.Printf("[Scheduler] Background transcript sync error: %v", err)
+				}
+				break
+			}
+			if stats.Synced < transcript.DefaultBatchLimit || ctx.Err() != nil {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(2 * time.Second):
 			}
 		}
 	}()
