@@ -236,6 +236,21 @@ func TestSQLStoreNilDatabaseBranchCoverage(t *testing.T) {
 	if err := s.UpdateFactEmbedding(ctx, 1, nil); err == nil {
 		t.Errorf("expected error on UpdateFactEmbedding nil store")
 	}
+	if _, err := s.GetSessionSyncStates(ctx); err == nil {
+		t.Errorf("expected error on GetSessionSyncStates nil store")
+	}
+	if err := s.UpsertSessionSummary(ctx, SessionSummary{}); err == nil {
+		t.Errorf("expected error on UpsertSessionSummary nil store")
+	}
+	if err := s.BatchInsertTranscriptSteps(ctx, nil); err == nil {
+		t.Errorf("expected error on BatchInsertTranscriptSteps nil store")
+	}
+	if _, err := s.SearchSessionSummaries(ctx, nil, "q", 10, 0.1); err == nil {
+		t.Errorf("expected error on SearchSessionSummaries nil store")
+	}
+	if _, err := s.SearchTranscriptSteps(ctx, "q", "s", "t", 10); err == nil {
+		t.Errorf("expected error on SearchTranscriptSteps nil store")
+	}
 }
 
 func TestSQLStoreHoistedMethods(t *testing.T) {

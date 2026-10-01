@@ -20,6 +20,7 @@ import (
 	"github.com/azylman/aerial/brain/pkg/db"
 	"github.com/azylman/aerial/brain/pkg/memory"
 	"github.com/azylman/aerial/brain/pkg/queue"
+	"github.com/azylman/aerial/brain/pkg/transcript"
 	"github.com/bwmarrin/discordgo"
 	"github.com/google/uuid"
 )
@@ -2200,6 +2201,111 @@ func TestRunMemoryDecay(t *testing.T) {
 	}
 	if facts.Facts[0].Importance >= 0.50 {
 		t.Errorf("Expected decayed importance < 0.50, got %f", facts.Facts[0].Importance)
+	}
+}
+
+func TestRunTranscriptSync(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. Nil store returns empty stats and nil
+	stats, err := RunTranscriptSync(ctx, nil, "/tmp", nil, nil)
+	if err != nil || stats.Scanned != 0 {
+		t.Fatalf("expected nil error and 0 scanned for nil store, got err=%v, stats=%+v", err, stats)
+	}
+
+	// 2. Empty brain dir returns error
+	store := setupTestStore(t)
+	defer store.Close()
+
+	_, err = RunTranscriptSync(ctx, store, "", nil, nil)
+	if err == nil {
+		t.Fatalf("expected error for empty brain dir")
+	}
+
+	// 3. Valid store and temp brain directory with transcript
+	tempBrain := t.TempDir()
+	sessID := "sched-sess-001"
+	logDir := filepath.Join(tempBrain, sessID, ".system_generated", "logs")
+	_ = os.MkdirAll(logDir, 0755)
+	tContent := `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"Verify transcript sync integration"}` + "\n"
+	_ = os.WriteFile(filepath.Join(logDir, "transcript.jsonl"), []byte(tContent), 0644)
+	oldMtime := time.Now().Add(-1 * time.Hour)
+	_ = os.Chtimes(filepath.Join(logDir, "transcript.jsonl"), oldMtime, oldMtime)
+
+	mockEmbedder := transcript.EmbedderFunc(func(ctx context.Context, text string) ([]float32, error) {
+		vec := make([]float32, db.ExpectedEmbeddingDim)
+		return vec, nil
+	})
+	mockLLM := transcript.LLMClientFunc(func(ctx context.Context, prompt string) (string, error) {
+		return "Transcript sync integration verified.", nil
+	})
+
+	stats, err = RunTranscriptSync(ctx, store, tempBrain, mockEmbedder, mockLLM)
+	if err != nil {
+		t.Fatalf("RunTranscriptSync failed: %v", err)
+	}
+	if stats.Synced != 1 {
+		t.Errorf("expected 1 session synced, got %d", stats.Synced)
+	}
+	if stats.StepsInserted != 1 {
+		t.Errorf("expected 1 step inserted, got %d", stats.StepsInserted)
+	}
+	if stats.SummariesGenerated != 1 {
+		t.Errorf("expected 1 summary generated, got %d", stats.SummariesGenerated)
+	}
+
+	// 4. Overlapping invocation while mutex is held
+	transcriptSyncMutex.Lock()
+	statsOverlap, errOverlap := RunTranscriptSync(ctx, store, tempBrain, nil, nil)
+	transcriptSyncMutex.Unlock()
+	if errOverlap != nil || statsOverlap.Synced != 0 {
+		t.Errorf("expected overlapping sweep to skip cleanly, got err=%v, stats=%+v", errOverlap, statsOverlap)
+	}
+}
+
+func TestScheduler_TranscriptOptions(t *testing.T) {
+	tempBrain := t.TempDir()
+	var embedderCalled bool
+	mockEmbedder := func(ctx context.Context, text string) ([]float32, error) {
+		embedderCalled = true
+		return make([]float32, db.ExpectedEmbeddingDim), nil
+	}
+	var llmCalled bool
+	mockLLM := func(ctx context.Context, prompt string) (string, error) {
+		llmCalled = true
+		return "summary", nil
+	}
+
+	sched, err := New(
+		newTestConfig(),
+		setupTestStore(t),
+		nil,
+		nil,
+		WithBrainDir(tempBrain),
+		WithTranscriptEmbedder(mockEmbedder),
+		WithTranscriptLLMFunc(mockLLM),
+	)
+	if err != nil {
+		t.Fatalf("New scheduler failed: %v", err)
+	}
+	if sched.brainDir != tempBrain {
+		t.Errorf("expected brainDir %s, got %s", tempBrain, sched.brainDir)
+	}
+	if sched.transcriptEmbedder == nil {
+		t.Errorf("expected transcriptEmbedder to be set")
+	} else {
+		_, _ = sched.transcriptEmbedder(context.Background(), "test")
+		if !embedderCalled {
+			t.Errorf("expected embedder to be invoked")
+		}
+	}
+	if sched.transcriptLLMFunc == nil {
+		t.Errorf("expected transcriptLLMFunc to be set")
+	} else {
+		_, _ = sched.transcriptLLMFunc(context.Background(), "prompt")
+		if !llmCalled {
+			t.Errorf("expected LLM func to be invoked")
+		}
 	}
 }
 

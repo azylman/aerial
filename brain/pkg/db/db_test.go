@@ -2335,6 +2335,9 @@ func TestSchemaContract_NoPrematureIndexes(t *testing.T) {
 		for _, line := range strings.Split(postgresSchema, "\n") {
 			trimmed := strings.TrimSpace(line)
 			if strings.HasPrefix(trimmed, "CREATE INDEX") {
+				if col == "fts_tokens" && !strings.Contains(trimmed, "facts") {
+					continue
+				}
 				if strings.Contains(trimmed, pattern) || strings.Contains(trimmed, patternDesc) || strings.Contains(trimmed, "("+col) {
 					t.Errorf("postgresSchema contains premature index definition for downstream column %q: %s", col, trimmed)
 				}

@@ -117,6 +117,38 @@ CREATE INDEX IF NOT EXISTS idx_facts_category ON facts(category);
 CREATE INDEX IF NOT EXISTS idx_facts_created_at ON facts(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_facts_importance_created_at ON facts(importance DESC, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_facts_embedding_hnsw ON facts USING hnsw (embedding vector_cosine_ops);
+
+CREATE TABLE IF NOT EXISTS session_summaries (
+	session_id TEXT PRIMARY KEY,
+	thread_id TEXT NOT NULL DEFAULT '',
+	summary TEXT NOT NULL DEFAULT '',
+	fts_tokens tsvector GENERATED ALWAYS AS (to_tsvector('simple', summary)) STORED,
+	embedding vector(384),
+	last_indexed_step INT NOT NULL DEFAULT -1,
+	last_mtime TIMESTAMPTZ,
+	summary_step_watermark INT NOT NULL DEFAULT -1,
+	is_settled BOOLEAN NOT NULL DEFAULT FALSE,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS transcript_steps (
+	session_id TEXT NOT NULL REFERENCES session_summaries(session_id) ON DELETE CASCADE,
+	step_index INT NOT NULL,
+	step_type TEXT NOT NULL DEFAULT '',
+	tool_name TEXT NOT NULL DEFAULT '',
+	content TEXT NOT NULL DEFAULT '',
+	fts_tokens tsvector GENERATED ALWAYS AS (to_tsvector('simple', LEFT(content, 50000))) STORED,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY (session_id, step_index)
+);
+
+CREATE INDEX IF NOT EXISTS idx_session_summaries_fts ON session_summaries USING GIN(fts_tokens);
+CREATE INDEX IF NOT EXISTS idx_session_summaries_mtime ON session_summaries(last_mtime);
+CREATE INDEX IF NOT EXISTS idx_session_summaries_thread ON session_summaries(thread_id);
+CREATE INDEX IF NOT EXISTS idx_session_summaries_embedding ON session_summaries USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX IF NOT EXISTS idx_transcript_steps_fts ON transcript_steps USING GIN(fts_tokens);
+CREATE INDEX IF NOT EXISTS idx_transcript_steps_tool ON transcript_steps(tool_name);
 `
 
 
@@ -177,6 +209,36 @@ func initSchemaPostgres(ctx context.Context, database *sql.DB) error {
 	execNotice("ALTER TABLE facts ADD COLUMN IF NOT EXISTS reinforce_count INTEGER NOT NULL DEFAULT 1")
 	execNotice("CREATE INDEX IF NOT EXISTS idx_facts_last_reinforced_at ON facts(last_reinforced_at DESC)")
 	execNotice("UPDATE facts SET last_reinforced_at = created_at WHERE reinforce_count = 1 AND last_reinforced_at > created_at")
+
+	execNotice(`CREATE TABLE IF NOT EXISTS session_summaries (
+		session_id TEXT PRIMARY KEY,
+		thread_id TEXT NOT NULL DEFAULT '',
+		summary TEXT NOT NULL DEFAULT '',
+		fts_tokens tsvector GENERATED ALWAYS AS (to_tsvector('simple', summary)) STORED,
+		embedding vector(384),
+		last_indexed_step INT NOT NULL DEFAULT -1,
+		last_mtime TIMESTAMPTZ,
+		summary_step_watermark INT NOT NULL DEFAULT -1,
+		is_settled BOOLEAN NOT NULL DEFAULT FALSE,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+	)`)
+	execNotice(`CREATE TABLE IF NOT EXISTS transcript_steps (
+		session_id TEXT NOT NULL REFERENCES session_summaries(session_id) ON DELETE CASCADE,
+		step_index INT NOT NULL,
+		step_type TEXT NOT NULL DEFAULT '',
+		tool_name TEXT NOT NULL DEFAULT '',
+		content TEXT NOT NULL DEFAULT '',
+		fts_tokens tsvector GENERATED ALWAYS AS (to_tsvector('simple', LEFT(content, 50000))) STORED,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		PRIMARY KEY (session_id, step_index)
+	)`)
+	execNotice("CREATE INDEX IF NOT EXISTS idx_session_summaries_fts ON session_summaries USING GIN(fts_tokens)")
+	execNotice("CREATE INDEX IF NOT EXISTS idx_session_summaries_mtime ON session_summaries(last_mtime)")
+	execNotice("CREATE INDEX IF NOT EXISTS idx_session_summaries_thread ON session_summaries(thread_id)")
+	execNotice("CREATE INDEX IF NOT EXISTS idx_session_summaries_embedding ON session_summaries USING hnsw (embedding vector_cosine_ops)")
+	execNotice("CREATE INDEX IF NOT EXISTS idx_transcript_steps_fts ON transcript_steps USING GIN(fts_tokens)")
+	execNotice("CREATE INDEX IF NOT EXISTS idx_transcript_steps_tool ON transcript_steps(tool_name)")
 
 	// Idempotent sequence resynchronization in case of manual data restoration
 	execNotice(`

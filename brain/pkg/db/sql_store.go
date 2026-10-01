@@ -512,3 +512,39 @@ func (s *SQLStore) SaveConversationMapping(ctx context.Context, externalID, inte
 	return SaveConversationMapping(s.db, externalID, internalID)
 }
 
+// TranscriptStore implementation
+func (s *SQLStore) GetSessionSyncStates(ctx context.Context) (map[string]SessionSyncState, error) {
+	if s == nil || isDBTXNil(s.db) {
+		return nil, fmt.Errorf("database is nil")
+	}
+	return GetSessionSyncStatesWithContext(ctx, s.db, s.isPostgres)
+}
+
+func (s *SQLStore) UpsertSessionSummary(ctx context.Context, summary SessionSummary) error {
+	if s == nil || isDBTXNil(s.db) {
+		return fmt.Errorf("database is nil")
+	}
+	return UpsertSessionSummaryWithContext(ctx, s.db, s.isPostgres, summary)
+}
+
+func (s *SQLStore) BatchInsertTranscriptSteps(ctx context.Context, steps []TranscriptStep) error {
+	if s == nil || isDBTXNil(s.db) {
+		return fmt.Errorf("database is nil")
+	}
+	return BatchInsertTranscriptStepsWithContext(ctx, s.db, s.isPostgres, steps)
+}
+
+func (s *SQLStore) SearchSessionSummaries(ctx context.Context, embedding []float32, queryText string, limit int, minScore float64) ([]SessionSummary, error) {
+	if s == nil || isDBTXNil(s.db) {
+		return nil, fmt.Errorf("database is nil")
+	}
+	return SearchSessionSummariesWithContext(ctx, s.db, s.isPostgres, embedding, queryText, limit, minScore)
+}
+
+func (s *SQLStore) SearchTranscriptSteps(ctx context.Context, queryText, sessionFilter, toolFilter string, limit int) ([]TranscriptStep, error) {
+	if s == nil || isDBTXNil(s.db) {
+		return nil, fmt.Errorf("database is nil")
+	}
+	return SearchTranscriptStepsWithContext(ctx, s.db, s.isPostgres, queryText, sessionFilter, toolFilter, limit)
+}
+
