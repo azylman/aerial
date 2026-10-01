@@ -1775,6 +1775,123 @@ func TestStreamingDaemon_Send_WithMemoryRetriever(t *testing.T) {
 	}
 }
 
+func TestStreamingDaemon_Send_WithAmbientContextRetriever(t *testing.T) {
+	outR, outW := io.Pipe()
+	inR, inW := io.Pipe()
+	errR, _ := io.Pipe()
+
+	mock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			return inW, outR, errR, &MockProcessHandle{pid: 889}, nil
+		},
+	}
+
+	go func() {
+		_, _ = outW.Write([]byte(`{"event":"init","session_id":"00000000-0000-0000-0000-000000000003"}` + "\n"))
+	}()
+
+	retriever := func(ctx context.Context) (string, error) {
+		return "<ambient_context>\nLiving Room: ON\n</ambient_context>", nil
+	}
+
+	cfg := DaemonConfig{
+		SessionID:               "00000000-0000-0000-0000-000000000003",
+		AmbientContextRetriever: retriever,
+	}
+	daemon, err := StartStreamingDaemon(context.Background(), cfg, mock)
+	if err != nil {
+		t.Fatalf("failed to start daemon: %v", err)
+	}
+	defer inR.Close()
+	defer daemon.Close()
+
+	var receivedStdin bytes.Buffer
+	readDone := make(chan struct{})
+	go func() {
+		defer close(readDone)
+		buf := make([]byte, 2048)
+		n, _ := inR.Read(buf)
+		receivedStdin.Write(buf[:n])
+	}()
+
+	sink := newMockTurnSink()
+	turn := &TurnContext{TurnID: "turn-amb-1", Prompt: "Turn off lights", Sink: sink, CreatedAt: time.Now()}
+	if err := daemon.Send(turn.Prompt, turn); err != nil {
+		t.Fatalf("failed sending turn: %v", err)
+	}
+
+	<-readDone
+	var payload streamInputPayload
+	if err := json.Unmarshal(receivedStdin.Bytes(), &payload); err != nil {
+		t.Fatalf("failed unmarshaling stdin JSON: %v, raw: %s", err, receivedStdin.String())
+	}
+	if !strings.Contains(payload.Message.Content, "<ambient_context>") || !strings.Contains(payload.Message.Content, "Living Room: ON") {
+		t.Errorf("expected stdin to contain ambient context, got: %s", payload.Message.Content)
+	}
+	if !strings.Contains(payload.Message.Content, "Turn off lights") {
+		t.Errorf("expected stdin to contain prompt, got: %s", payload.Message.Content)
+	}
+
+	// Verify no double injection
+	calledAgain := false
+	daemon.cfg.AmbientContextRetriever = func(ctx context.Context) (string, error) {
+		calledAgain = true
+		return "<ambient_context>second</ambient_context>", nil
+	}
+	turn2 := &TurnContext{TurnID: "turn-amb-2", Prompt: "<ambient_context>first</ambient_context>\nHello", Sink: newMockTurnSink(), CreatedAt: time.Now()}
+	readDone2 := make(chan struct{})
+	var receivedStdin2 bytes.Buffer
+	go func() {
+		defer close(readDone2)
+		buf := make([]byte, 2048)
+		n, _ := inR.Read(buf)
+		receivedStdin2.Write(buf[:n])
+	}()
+	if err := daemon.Send(turn2.Prompt, turn2); err != nil {
+		t.Fatalf("failed sending turn2: %v", err)
+	}
+	<-readDone2
+	if calledAgain {
+		t.Errorf("expected AmbientContextRetriever not to be called when prompt already has <ambient_context>")
+	}
+
+	// Verify no injection on subsequent turns (turnCount > 0) to prevent transcript bloat
+	daemon.mu.Lock()
+	daemon.turnCount = 1
+	daemon.mu.Unlock()
+	calledOnSubsequentTurn := false
+	daemon.cfg.AmbientContextRetriever = func(ctx context.Context) (string, error) {
+		calledOnSubsequentTurn = true
+		return "<ambient_context>subsequent</ambient_context>", nil
+	}
+	turn3 := &TurnContext{TurnID: "turn-amb-3", Prompt: "Clean prompt turn 3", Sink: newMockTurnSink(), CreatedAt: time.Now()}
+	readDone3 := make(chan struct{})
+	var receivedStdin3 bytes.Buffer
+	go func() {
+		defer close(readDone3)
+		buf := make([]byte, 2048)
+		n, _ := inR.Read(buf)
+		receivedStdin3.Write(buf[:n])
+	}()
+	if err := daemon.Send(turn3.Prompt, turn3); err != nil {
+		t.Fatalf("failed sending turn3: %v", err)
+	}
+	<-readDone3
+	if calledOnSubsequentTurn {
+		t.Errorf("expected AmbientContextRetriever NOT to be called on subsequent turn (turnCount > 0)")
+	}
+	var payload3 streamInputPayload
+	if err := json.Unmarshal(receivedStdin3.Bytes(), &payload3); err != nil {
+		t.Fatalf("failed unmarshaling stdin JSON: %v, raw: %s", err, receivedStdin3.String())
+	}
+	if strings.Contains(payload3.Message.Content, "<ambient_context>") {
+		t.Errorf("expected turn 3 stdin NOT to contain ambient context, got: %s", payload3.Message.Content)
+	}
+	if payload3.Message.Content != "Clean prompt turn 3" {
+		t.Errorf("expected clean prompt on turn 3, got: %s", payload3.Message.Content)
+	}
+}
+
 
 
 

@@ -6,6 +6,10 @@ import "context"
 // for a given query text. Returns empty string if no memory is found or on error.
 type MemoryRetriever func(ctx context.Context, query string) (string, error)
 
+// AmbientContextRetriever retrieves formatted ambient context (e.g. <ambient_context>...</ambient_context>).
+// Returns empty string if disabled, empty, or on error.
+type AmbientContextRetriever func(ctx context.Context) (string, error)
+
 // AgentSession defines the interface for communicating with an active conversation session.
 type AgentSession interface {
 	Send(prompt string, turn *TurnContext) error

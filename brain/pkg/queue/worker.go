@@ -1091,7 +1091,11 @@ func (te *turnExecution) buildTurnPrompt() {
 			}
 			return turnHistory
 		}
-		fetchCtx, fetchCancel := context.WithTimeout(te.pool.ctx, 3*time.Second)
+		baseCtx := context.Background()
+		if te.pool != nil && te.pool.ctx != nil {
+			baseCtx = te.pool.ctx
+		}
+		fetchCtx, fetchCancel := context.WithTimeout(baseCtx, 3*time.Second)
 		defer fetchCancel()
 		var err error
 		if te.pool.cfg.HistoryFetcher != nil {
@@ -1223,7 +1227,23 @@ func (te *turnExecution) buildTurnPrompt() {
 		log.Printf("[WorkerPool] Injected coordination context into prompt for thread %s", te.threadID)
 	}
 
+	var ambientCtx string
+	if te.policy.AmbientContext != nil && te.pool != nil && te.pool.cfg.AmbientResolver != nil {
+		ctx := context.Background()
+		if te.pool.ctx != nil {
+			ctx = te.pool.ctx
+		}
+		var ambErr error
+		ambientCtx, ambErr = te.pool.cfg.AmbientResolver(ctx, te.policy.AmbientContext)
+		if ambErr != nil {
+			log.Printf("[WorkerPool] Warning resolving ambient context for channel %s: %v", te.effectiveName, ambErr)
+		} else if strings.TrimSpace(ambientCtx) != "" {
+			log.Printf("[WorkerPool] Injected ambient context into prompt for #%s", te.effectiveName)
+		}
+	}
+
 	te.turnPrompt = AssembleTurnPrompt(TurnPromptInput{
+		AmbientContext:      ambientCtx,
 		Burst:               te.burst,
 		ThreadSummary:       summary,
 		LookbackHistory:     lookbackMsgs,

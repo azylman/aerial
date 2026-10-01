@@ -3923,5 +3923,238 @@ func TestChannelPolicy_Normalize(t *testing.T) {
 	}
 }
 
+func TestAmbientContext_YAMLUnmarshal(t *testing.T) {
+	t.Parallel()
+	yamlContent := `
+voice:
+  engine: "gemini_api"
+  ambient_context:
+    cache_ttl: "45s"
+    timeout_ms: 300
+    template_path: "/path/to/template.tmpl"
+    template: "Voice template: {{.now}}"
+    tools:
+      - name: "ha"
+        server: "ha-mcp"
+        tool: "get_state"
+        arguments:
+          entity_id: "light.living_room"
+channels:
+  home:
+    mode: "thread"
+    ambient_context:
+      cache_ttl: "1m"
+      timeout_ms: 500
+      template: "Channel template: {{.now}}"
+      tools:
+        - name: "weather"
+          tool: "current_weather"
+          arguments:
+            city: "San Francisco"
+`
+	var cfg ConfigData
+	if err := yaml.Unmarshal([]byte(yamlContent), &cfg); err != nil {
+		t.Fatalf("yaml.Unmarshal failed: %v", err)
+	}
 
+	// Verify voice ambient_context
+	if cfg.Voice.AmbientContext == nil {
+		t.Fatal("expected cfg.Voice.AmbientContext to be non-nil")
+	}
+	vac := cfg.Voice.AmbientContext
+	if vac.CacheTTL != "45s" {
+		t.Errorf("expected CacheTTL '45s', got %q", vac.CacheTTL)
+	}
+	if vac.TimeoutMs != 300 {
+		t.Errorf("expected TimeoutMs 300, got %d", vac.TimeoutMs)
+	}
+	if vac.TemplatePath != "/path/to/template.tmpl" {
+		t.Errorf("expected TemplatePath '/path/to/template.tmpl', got %q", vac.TemplatePath)
+	}
+	if vac.Template != "Voice template: {{.now}}" {
+		t.Errorf("expected Template 'Voice template: {{.now}}', got %q", vac.Template)
+	}
+	if len(vac.Tools) != 1 {
+		t.Fatalf("expected 1 tool in Voice AmbientContext, got %d", len(vac.Tools))
+	}
+	if vac.Tools[0].Name != "ha" || vac.Tools[0].Server != "ha-mcp" || vac.Tools[0].Tool != "get_state" {
+		t.Errorf("unexpected tool config: %+v", vac.Tools[0])
+	}
+	if vac.Tools[0].Arguments["entity_id"] != "light.living_room" {
+		t.Errorf("unexpected tool argument: %+v", vac.Tools[0].Arguments)
+	}
 
+	// Verify channels ambient_context
+	homeCh, ok := cfg.Channels["home"]
+	if !ok {
+		t.Fatal("expected channel 'home' in cfg.Channels")
+	}
+	if homeCh.AmbientContext == nil {
+		t.Fatal("expected homeCh.AmbientContext to be non-nil")
+	}
+	cac := homeCh.AmbientContext
+	if cac.CacheTTL != "1m" || cac.TimeoutMs != 500 {
+		t.Errorf("unexpected channel ambient context: %+v", cac)
+	}
+	if len(cac.Tools) != 1 || cac.Tools[0].Name != "weather" {
+		t.Errorf("unexpected channel tools: %+v", cac.Tools)
+	}
+	if cac.Tools[0].Arguments["city"] != "San Francisco" {
+		t.Errorf("unexpected channel tool argument: %+v", cac.Tools[0].Arguments)
+	}
+}
+
+func TestAmbientContext_DeepCloneIndependence(t *testing.T) {
+	t.Parallel()
+	src := &AmbientContextConfig{
+		CacheTTL:  "20s",
+		TimeoutMs: 150,
+		Template:  "Test {{.now}}",
+		Tools: []AmbientToolConfig{
+			{
+				Name:   "ha",
+				Server: "ha-mcp",
+				Tool:   "get_state",
+				Arguments: map[string]interface{}{
+					"entity_id": "light.kitchen",
+					"nested": map[string]interface{}{
+						"key": "val",
+					},
+					"tags": []interface{}{"a", "b"},
+				},
+			},
+		},
+	}
+
+	cloned := cloneAmbientContextConfig(src)
+	if cloned == nil {
+		t.Fatal("expected non-nil clone")
+	}
+
+	// Mutate clone
+	cloned.CacheTTL = "99s"
+	cloned.Tools[0].Name = "mutated"
+	cloned.Tools[0].Arguments["entity_id"] = "light.bedroom"
+	cloned.Tools[0].Arguments["new_key"] = 123
+	nestedMap := cloned.Tools[0].Arguments["nested"].(map[string]interface{})
+	nestedMap["key"] = "mutated_val"
+	tagsSlice := cloned.Tools[0].Arguments["tags"].([]interface{})
+	tagsSlice[0] = "mutated_tag"
+
+	// Verify src was untouched
+	if src.CacheTTL != "20s" {
+		t.Errorf("src.CacheTTL mutated: got %q, want '20s'", src.CacheTTL)
+	}
+	if src.Tools[0].Name != "ha" {
+		t.Errorf("src.Tools[0].Name mutated: got %q, want 'ha'", src.Tools[0].Name)
+	}
+	if src.Tools[0].Arguments["entity_id"] != "light.kitchen" {
+		t.Errorf("src.Tools[0].Arguments entity_id mutated: got %v", src.Tools[0].Arguments["entity_id"])
+	}
+	if _, ok := src.Tools[0].Arguments["new_key"]; ok {
+		t.Errorf("src.Tools[0].Arguments contains new_key from clone")
+	}
+	srcNested := src.Tools[0].Arguments["nested"].(map[string]interface{})
+	if srcNested["key"] != "val" {
+		t.Errorf("src nested map mutated: got %v, want 'val'", srcNested["key"])
+	}
+	srcTags := src.Tools[0].Arguments["tags"].([]interface{})
+	if srcTags[0] != "a" {
+		t.Errorf("src tags slice mutated: got %v, want 'a'", srcTags[0])
+	}
+
+	// Test cloneChannelPolicy
+	cp := ChannelPolicy{
+		Mode:           "thread",
+		AmbientContext: src,
+	}
+	clonedCP := cloneChannelPolicy(cp)
+	clonedCP.AmbientContext.CacheTTL = "88s"
+	if src.CacheTTL != "20s" {
+		t.Errorf("src.CacheTTL mutated via cloneChannelPolicy: got %q", src.CacheTTL)
+	}
+
+	// Test cloneConfigData
+	cd := &ConfigData{
+		Voice: VoiceConfig{
+			AmbientContext: src,
+		},
+	}
+	clonedCD := cloneConfigData(cd)
+	clonedCD.Voice.AmbientContext.CacheTTL = "77s"
+	if src.CacheTTL != "20s" {
+		t.Errorf("src.CacheTTL mutated via cloneConfigData: got %q", src.CacheTTL)
+	}
+
+	// Test ResolveChannelPolicy inheritance
+	channels := map[string]ChannelPolicy{
+		"default": {
+			Mode:           "thread",
+			AmbientContext: src,
+		},
+	}
+	resolved := ResolveChannelPolicy(channels, "custom", "custom")
+	if resolved.AmbientContext == nil {
+		t.Fatal("expected resolved.AmbientContext to inherit from default")
+	}
+	resolved.AmbientContext.CacheTTL = "66s"
+	if src.CacheTTL != "20s" {
+		t.Errorf("src.CacheTTL mutated via ResolveChannelPolicy: got %q", src.CacheTTL)
+	}
+}
+
+func TestAmbientContext_GetterNilSafety(t *testing.T) {
+	t.Parallel()
+
+	// Nil *Config
+	var nilCfg *Config
+	if nilCfg.VoiceAmbientContext() != nil {
+		t.Errorf("expected nil for nilCfg.VoiceAmbientContext()")
+	}
+
+	// Nil *ConfigData
+	var nilData *ConfigData
+	if nilData.VoiceAmbientContext() != nil {
+		t.Errorf("expected nil for nilData.VoiceAmbientContext()")
+	}
+
+	// Empty Config / ConfigData without Voice.AmbientContext
+	cfgData := &ConfigData{}
+	if cfgData.VoiceAmbientContext() != nil {
+		t.Errorf("expected nil for empty ConfigData.VoiceAmbientContext()")
+	}
+
+	cfg := &Config{}
+	cfg.current.Store(cfgData)
+	if cfg.VoiceAmbientContext() != nil {
+		t.Errorf("expected nil for empty Config.VoiceAmbientContext()")
+	}
+
+	// ConfigData with Voice.AmbientContext set
+	cfgData.Voice.AmbientContext = &AmbientContextConfig{
+		CacheTTL: "10s",
+		Template: "Hello",
+	}
+	ret := cfgData.VoiceAmbientContext()
+	if ret == nil || ret.CacheTTL != "10s" {
+		t.Fatalf("unexpected return from cfgData.VoiceAmbientContext(): %+v", ret)
+	}
+
+	// Defensive copy check
+	ret.CacheTTL = "mutated"
+	ret2 := cfgData.VoiceAmbientContext()
+	if ret2.CacheTTL != "10s" {
+		t.Errorf("VoiceAmbientContext did not return a defensive copy: got %q", ret2.CacheTTL)
+	}
+
+	// Config wrapper check
+	cfgRet := cfg.VoiceAmbientContext()
+	if cfgRet == nil || cfgRet.CacheTTL != "10s" {
+		t.Fatalf("unexpected return from cfg.VoiceAmbientContext(): %+v", cfgRet)
+	}
+	cfgRet.CacheTTL = "mutated2"
+	cfgRet2 := cfg.VoiceAmbientContext()
+	if cfgRet2.CacheTTL != "10s" {
+		t.Errorf("cfg.VoiceAmbientContext did not return a defensive copy: got %q", cfgRet2.CacheTTL)
+	}
+}

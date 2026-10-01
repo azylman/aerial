@@ -26,8 +26,9 @@ type PoolConfig struct {
 	GeminiHomeDir    string
 	PrewarmedTargets  []string
 	MaxIdle           time.Duration
-	TranscriptRescuer func(convID string, since time.Time) string
-	MemoryRetriever   MemoryRetriever
+	TranscriptRescuer       func(convID string, since time.Time) string
+	MemoryRetriever         MemoryRetriever
+	AmbientContextRetriever AmbientContextRetriever
 }
 
 // UnifiedProcessPool manages pinned daemons and singleflight pre-warming.
@@ -181,8 +182,9 @@ func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string, 
 			Cwd:               p.cfg.Cwd,
 			Env:               daemonEnv,
 			GeminiHomeDir:     p.cfg.GeminiHomeDir,
-			TranscriptRescuer: p.cfg.TranscriptRescuer,
-			MemoryRetriever:   p.cfg.MemoryRetriever,
+			TranscriptRescuer:       p.cfg.TranscriptRescuer,
+			MemoryRetriever:         p.cfg.MemoryRetriever,
+			AmbientContextRetriever: p.cfg.AmbientContextRetriever,
 		}
 
 		daemon, spawnErr := StartStreamingDaemon(p.ctx, daemonCfg, p.spawner)

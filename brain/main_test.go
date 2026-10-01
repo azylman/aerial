@@ -3132,6 +3132,39 @@ func TestVoicePool_FactoryWiring(t *testing.T) {
 		}
 	})
 
+	t.Run("GeminiAPI_WithAmbientContext", func(t *testing.T) {
+		t.Parallel()
+		data := &config.ConfigData{
+			APIKey: "test-ambient-key",
+			Voice: config.VoiceConfig{
+				Engine: "gemini_api",
+				AmbientContext: &config.AmbientContextConfig{
+					CacheTTL: "30s",
+					Template: "Status: {{.ha.state}}",
+					Tools: []config.AmbientToolConfig{
+						{Name: "ha", Tool: "get_state"},
+					},
+				},
+			},
+		}
+		cfg := config.NewFromData(data)
+
+		pool := createVoiceProcessPool(cfg, voiceHome, "fallback-model", spawner)
+		defer pool.Close()
+
+		dynPool, ok := pool.(*runner.DynamicVoicePool)
+		if !ok {
+			t.Fatalf("expected *runner.DynamicVoicePool, got %T", pool)
+		}
+		geminiPool, ok := dynPool.CurrentPool().(*runner.GeminiAPIPool)
+		if !ok {
+			t.Fatalf("expected *runner.GeminiAPIPool, got %T", dynPool.CurrentPool())
+		}
+		if geminiPool == nil {
+			t.Fatalf("expected non-nil geminiPool")
+		}
+	})
+
 	t.Run("GeminiAPI_WithAPIKeyFallback", func(t *testing.T) {
 		t.Parallel()
 		data := &config.ConfigData{

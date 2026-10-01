@@ -54,12 +54,28 @@ type ChannelHooksConfig struct {
 	PostTurn *WebhookEndpoint `yaml:"post_turn,omitempty" json:"post_turn,omitempty"`
 }
 
+type AmbientToolConfig struct {
+	Name      string                 `yaml:"name" json:"name"`
+	Server    string                 `yaml:"server,omitempty" json:"server,omitempty"`
+	Tool      string                 `yaml:"tool" json:"tool"`
+	Arguments map[string]interface{} `yaml:"arguments,omitempty" json:"arguments,omitempty"`
+}
+
+type AmbientContextConfig struct {
+	CacheTTL     string              `yaml:"cache_ttl,omitempty" json:"cache_ttl,omitempty"`
+	TimeoutMs    int                 `yaml:"timeout_ms,omitempty" json:"timeout_ms,omitempty"`
+	TemplatePath string              `yaml:"template_path,omitempty" json:"template_path,omitempty"`
+	Template     string              `yaml:"template,omitempty" json:"template,omitempty"`
+	Tools        []AmbientToolConfig `yaml:"tools,omitempty" json:"tools,omitempty"`
+}
+
 type ChannelPolicy struct {
-	Mode                 string             `yaml:"mode" json:"mode"`
-	WakeMode             string             `yaml:"wake_mode,omitempty" json:"wake_mode,omitempty"`
-	IgnoreBots           *bool              `yaml:"ignore_bots,omitempty" json:"ignore_bots,omitempty"`
-	AmbientWakeThreshold *float64           `yaml:"ambient_wake_threshold,omitempty" json:"ambient_wake_threshold,omitempty"`
-	Hooks                ChannelHooksConfig `yaml:"hooks,omitempty" json:"hooks,omitempty"`
+	Mode                 string                `yaml:"mode" json:"mode"`
+	WakeMode             string                `yaml:"wake_mode,omitempty" json:"wake_mode,omitempty"`
+	IgnoreBots           *bool                 `yaml:"ignore_bots,omitempty" json:"ignore_bots,omitempty"`
+	AmbientWakeThreshold *float64              `yaml:"ambient_wake_threshold,omitempty" json:"ambient_wake_threshold,omitempty"`
+	Hooks                ChannelHooksConfig    `yaml:"hooks,omitempty" json:"hooks,omitempty"`
+	AmbientContext       *AmbientContextConfig `yaml:"ambient_context,omitempty" json:"ambient_context,omitempty"`
 }
 
 // IsThread reports whether the channel policy specifies thread-based interaction.
@@ -186,10 +202,11 @@ type TargetMcpConfig struct {
 }
 
 type VoiceConfig struct {
-	Engine           string   `yaml:"engine,omitempty" json:"engine,omitempty"`
-	Model            string   `yaml:"model,omitempty" json:"model,omitempty"`
-	PrewarmedTargets []string `yaml:"prewarmed_targets,omitempty" json:"prewarmed_targets,omitempty"`
-	AllowedTools     []string `yaml:"allowed_tools,omitempty" json:"allowed_tools,omitempty"`
+	Engine           string                `yaml:"engine,omitempty" json:"engine,omitempty"`
+	Model            string                `yaml:"model,omitempty" json:"model,omitempty"`
+	PrewarmedTargets []string              `yaml:"prewarmed_targets,omitempty" json:"prewarmed_targets,omitempty"`
+	AllowedTools     []string              `yaml:"allowed_tools,omitempty" json:"allowed_tools,omitempty"`
+	AmbientContext   *AmbientContextConfig `yaml:"ambient_context,omitempty" json:"ambient_context,omitempty"`
 }
 
 type ConfigData struct {
@@ -384,6 +401,50 @@ type Config struct {
 	current atomic.Pointer[ConfigData]
 }
 
+func cloneAmbientContextConfig(src *AmbientContextConfig) *AmbientContextConfig {
+	if src == nil {
+		return nil
+	}
+	dst := *src
+	if src.Tools != nil {
+		dst.Tools = make([]AmbientToolConfig, len(src.Tools))
+		for i, t := range src.Tools {
+			tool := t
+			if t.Arguments != nil {
+				tool.Arguments = cloneInterfaceMap(t.Arguments)
+			}
+			dst.Tools[i] = tool
+		}
+	}
+	return &dst
+}
+
+func cloneValue(v interface{}) interface{} {
+	switch val := v.(type) {
+	case map[string]interface{}:
+		return cloneInterfaceMap(val)
+	case []interface{}:
+		res := make([]interface{}, len(val))
+		for i, item := range val {
+			res[i] = cloneValue(item)
+		}
+		return res
+	default:
+		return val
+	}
+}
+
+func cloneInterfaceMap(m map[string]interface{}) map[string]interface{} {
+	if m == nil {
+		return nil
+	}
+	res := make(map[string]interface{}, len(m))
+	for k, v := range m {
+		res[k] = cloneValue(v)
+	}
+	return res
+}
+
 func cloneChannelPolicy(p ChannelPolicy) ChannelPolicy {
 	cp := p
 	if p.IgnoreBots != nil {
@@ -405,6 +466,9 @@ func cloneChannelPolicy(p ChannelPolicy) ChannelPolicy {
 	if p.Hooks.PostTurn != nil {
 		w := *p.Hooks.PostTurn
 		cp.Hooks.PostTurn = &w
+	}
+	if p.AmbientContext != nil {
+		cp.AmbientContext = cloneAmbientContextConfig(p.AmbientContext)
 	}
 	return cp
 }
@@ -464,6 +528,9 @@ func cloneConfigData(src *ConfigData) *ConfigData {
 		copy(dst.Voice.AllowedTools, src.Voice.AllowedTools)
 	} else {
 		dst.Voice.AllowedTools = nil
+	}
+	if src.Voice.AmbientContext != nil {
+		dst.Voice.AmbientContext = cloneAmbientContextConfig(src.Voice.AmbientContext)
 	}
 	return &dst
 }
@@ -615,6 +682,26 @@ func (c *ConfigData) VoiceModel() string {
 		return ""
 	}
 	return strings.TrimSpace(c.Voice.Model)
+}
+
+// VoiceAmbientContext returns a deep copy of the configured voice ambient context, or nil if unset.
+func (c *ConfigData) VoiceAmbientContext() *AmbientContextConfig {
+	if c == nil || c.Voice.AmbientContext == nil {
+		return nil
+	}
+	return cloneAmbientContextConfig(c.Voice.AmbientContext)
+}
+
+// VoiceAmbientContext returns a deep copy of the configured voice ambient context, or nil if unset.
+func (c *Config) VoiceAmbientContext() *AmbientContextConfig {
+	if c == nil {
+		return nil
+	}
+	cur := c.Current()
+	if cur == nil {
+		return nil
+	}
+	return cur.VoiceAmbientContext()
 }
 
 // Clone returns a deep copy of ConfigData.
@@ -1212,7 +1299,7 @@ func ResolveChannelPolicy(channels map[string]ChannelPolicy, channelID, channelN
 	}
 
 	if !found {
-		return def
+		return cloneChannelPolicy(def)
 	}
 
 	res := matched
@@ -1253,6 +1340,11 @@ func ResolveChannelPolicy(channels map[string]ChannelPolicy, channelID, channelN
 	} else if def.Hooks.PostTurn != nil {
 		w := *def.Hooks.PostTurn
 		res.Hooks.PostTurn = &w
+	}
+	if res.AmbientContext != nil {
+		res.AmbientContext = cloneAmbientContextConfig(res.AmbientContext)
+	} else if def.AmbientContext != nil {
+		res.AmbientContext = cloneAmbientContextConfig(def.AmbientContext)
 	}
 	return res
 }

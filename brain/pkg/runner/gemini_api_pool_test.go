@@ -3294,4 +3294,139 @@ func TestGeminiAPISession_Send_MemoryRetriever_NoDoubleInject(t *testing.T) {
 	}
 }
 
+func TestGeminiAPISession_Send_WithAmbientContextRetriever(t *testing.T) {
+	t.Parallel()
+
+	retriever := func(ctx context.Context) (string, error) {
+		return "<ambient_context>\nLiving Room: lights are ON\n</ambient_context>", nil
+	}
+
+	var receivedBody []byte
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		receivedBody = b
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Turned them off!\"}],\"role\":\"model\"}}]}\n\n"))
+	}))
+	defer ts.Close()
+
+	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
+		APIKey:                  "test-key",
+		Model:                   "gemini-2.5-flash",
+		BaseURL:                 ts.URL,
+		HTTPClient:              ts.Client(),
+		AmbientContextRetriever: retriever,
+	})
+	defer pool.Close()
+
+	sess, err := pool.GetOrCreateSession(context.Background(), "test-sess-ambient", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	geminiSess := sess.(*GeminiAPISession)
+	sink := newMockTurnSink()
+	turn := &TurnContext{
+		TurnID: "turn-amb-1",
+		Prompt: "turn off the living room lights",
+		Sink:   sink,
+	}
+	err = sess.Send("turn off the living room lights", turn)
+	if err != nil {
+		t.Fatalf("unexpected Send error: %v", err)
+	}
+
+	// 1. Verify wire payload sent to API contains <ambient_context>
+	var req geminiStreamRequest
+	if err := json.Unmarshal(receivedBody, &req); err != nil {
+		t.Fatalf("failed to unmarshal request body: %v", err)
+	}
+	if len(req.Contents) == 0 || len(req.Contents[0].Parts) == 0 {
+		t.Fatalf("expected at least 1 content part in request")
+	}
+	firstText := req.Contents[0].Parts[0].Text
+	if !strings.Contains(firstText, "<ambient_context>") || !strings.Contains(firstText, "Living Room: lights are ON") {
+		t.Errorf("expected payload to contain ambient context, got: %s", firstText)
+	}
+	if !strings.Contains(firstText, "turn off the living room lights") {
+		t.Errorf("expected payload to contain user prompt, got: %s", firstText)
+	}
+
+	// 2. Verify s.History() contains clean prompt without <ambient_context>
+	hist := geminiSess.History()
+	if len(hist) != 2 {
+		t.Fatalf("expected 2 history items, got %d", len(hist))
+	}
+	if hist[0].Role != "user" || strings.Contains(hist[0].Parts[0].Text, "<ambient_context>") || hist[0].Parts[0].Text != "turn off the living room lights" {
+		t.Errorf("expected clean prompt in user history, got: %+v", hist[0])
+	}
+	if hist[1].Role != "model" || hist[1].Parts[0].Text != "Turned them off!" {
+		t.Errorf("expected model response in history, got: %+v", hist[1])
+	}
+}
+
+func TestGeminiAPISession_Send_AmbientContextRetriever_NoDoubleInject(t *testing.T) {
+	t.Parallel()
+
+	retrieverCalled := false
+	retriever := func(ctx context.Context) (string, error) {
+		retrieverCalled = true
+		return "<ambient_context>\nLiving Room: lights are ON\n</ambient_context>", nil
+	}
+
+	var receivedBody []byte
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		receivedBody = b
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Acknowledged\"}],\"role\":\"model\"}}]}\n\n"))
+	}))
+	defer ts.Close()
+
+	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
+		APIKey:                  "test-key",
+		Model:                   "gemini-2.5-flash",
+		BaseURL:                 ts.URL,
+		HTTPClient:              ts.Client(),
+		AmbientContextRetriever: retriever,
+	})
+	defer pool.Close()
+
+	sess, err := pool.GetOrCreateSession(context.Background(), "test-sess-amb-no-double", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	promptWithAmbient := "<ambient_context>\nExisting ambient\n</ambient_context>\n\nHello"
+	sink := newMockTurnSink()
+	turn := &TurnContext{
+		TurnID: "turn-amb-no-double",
+		Prompt: promptWithAmbient,
+		Sink:   sink,
+	}
+	if err := sess.Send(promptWithAmbient, turn); err != nil {
+		t.Fatalf("unexpected Send error: %v", err)
+	}
+
+	if retrieverCalled {
+		t.Errorf("expected AmbientContextRetriever not to be called when prompt already has <ambient_context>")
+	}
+	var noDoubleReq geminiStreamRequest
+	if err := json.Unmarshal(receivedBody, &noDoubleReq); err != nil {
+		t.Fatalf("failed to unmarshal request body: %v", err)
+	}
+	if len(noDoubleReq.Contents) == 0 || len(noDoubleReq.Contents[0].Parts) == 0 {
+		t.Fatalf("expected at least 1 content part in request")
+	}
+	firstReqText := noDoubleReq.Contents[0].Parts[0].Text
+	if strings.Count(firstReqText, "<ambient_context>") != 1 {
+		t.Errorf("expected exactly 1 <ambient_context> block, got: %s", firstReqText)
+	}
+}
+
 
