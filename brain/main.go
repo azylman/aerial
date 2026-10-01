@@ -114,13 +114,23 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 			UpdatedAt:  time.Now().UTC(),
 		}
 
-		if store != nil {
-			insertCtx, insertCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			if err := store.InsertMessage(insertCtx, msg); err != nil {
-				log.Printf("Failed to insert HTTP prompt message %s to DB: %v", msgID, err)
-			}
-			insertCancel()
+		if store == nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{
+				"error": "Database store not configured",
+			})
+			return
 		}
+
+		insertCtx, insertCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := store.InsertMessage(insertCtx, msg); err != nil {
+			insertCancel()
+			log.Printf("Failed to insert HTTP prompt message %s to DB: %v", msgID, err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{
+				"error": fmt.Sprintf("Failed to persist prompt message: %v", err),
+			})
+			return
+		}
+		insertCancel()
 
 		if pool != nil {
 			pool.Enqueue(msg)

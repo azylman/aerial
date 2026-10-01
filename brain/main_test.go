@@ -923,24 +923,33 @@ func TestHandlePrompt_ErrorBranches(t *testing.T) {
 		t.Errorf("Expected 202 for auto prompt, got %d", wAuto.Code)
 	}
 
-	// 4. Closed DB non-fatal handling
+	// 4. Closed DB returns 500
 	closedStore := db.NewFakeStore()
 	_ = closedStore.Close()
 	handlerClosed := handlePrompt(closedStore, pool)
 	reqClosed := httptest.NewRequest(http.MethodPost, "/prompt", strings.NewReader(`{"prompt":"hello fallback","channel_id":"1542423172400291873"}`))
 	wClosed := httptest.NewRecorder()
 	handlerClosed(wClosed, reqClosed)
-	if wClosed.Code != http.StatusAccepted {
-		t.Errorf("Expected 202 even with closed DB insert failure, got %d", wClosed.Code)
+	if wClosed.Code != http.StatusInternalServerError {
+		t.Errorf("Expected 500 for closed DB insert failure, got %d", wClosed.Code)
 	}
 
-	// 5. Nil pool handling
+	// 5. Nil store returns 500
+	handlerNilStore := handlePrompt(nil, pool)
+	reqNilStore := httptest.NewRequest(http.MethodPost, "/prompt", strings.NewReader(`{"prompt":"hello nil store","channel_id":"1542423172400291873"}`))
+	wNilStore := httptest.NewRecorder()
+	handlerNilStore(wNilStore, reqNilStore)
+	if wNilStore.Code != http.StatusInternalServerError {
+		t.Errorf("Expected 500 for nil store, got %d", wNilStore.Code)
+	}
+
+	// 6. Nil pool handling (store succeeds, pool nil returns 202)
 	handlerNilPool := handlePrompt(store, nil)
 	reqNilPool := httptest.NewRequest(http.MethodPost, "/prompt", strings.NewReader(`{"prompt":"hello nil pool","channel_id":"1542423172400291873"}`))
 	wNilPool := httptest.NewRecorder()
 	handlerNilPool(wNilPool, reqNilPool)
 	if wNilPool.Code != http.StatusAccepted {
-		t.Errorf("Expected 202 for nil pool, got %d", wNilPool.Code)
+		t.Errorf("Expected 202 for nil pool when store succeeds, got %d", wNilPool.Code)
 	}
 }
 
