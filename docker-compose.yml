@@ -205,7 +205,7 @@ services:
     networks:
       - aerial-net
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:4001/health"]
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:4001/health || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 3
