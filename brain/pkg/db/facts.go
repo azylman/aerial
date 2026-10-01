@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log"
 	"math"
-	"sort"
 	"strings"
 	"time"
 
@@ -308,54 +307,6 @@ func SearchSimilarFactsWithContext(ctx context.Context, database DBTX, isPg bool
 	}
 	if minScore <= 0 {
 		minScore = 0.20
-	}
-
-	if !isPg && !isPostgres(database) {
-		// SQLite in-memory fallback for unit tests: rank in memory
-		allFacts, err := GetAllFactsWithEmbeddings(database)
-		if err != nil {
-			return nil, err
-		}
-		type scoredFact struct {
-			fact  Fact
-			score float64
-		}
-		var scored []scoredFact
-		qLower := strings.ToLower(queryText)
-
-		for _, fwe := range allFacts {
-			var sim float64
-			if hasEmbedding && len(fwe.Embedding) == ExpectedEmbeddingDim {
-				sim = cosineSimilarity(embedding, fwe.Embedding)
-			}
-			var textScore float64
-			if hasText {
-				if strings.Contains(strings.ToLower(fwe.Fact.FactText), qLower) {
-					textScore = 1.0
-				}
-			}
-
-			var totalScore float64
-			if hasEmbedding && hasText {
-				totalScore = (DefaultDenseWeight*sim + DefaultSparseWeight*textScore) * fwe.Fact.Importance
-			} else if hasEmbedding {
-				totalScore = sim * fwe.Fact.Importance
-			} else if hasText {
-				totalScore = textScore * fwe.Fact.Importance
-			}
-
-			if totalScore >= minScore {
-				scored = append(scored, scoredFact{fact: fwe.Fact, score: totalScore})
-			}
-		}
-		sort.Slice(scored, func(i, j int) bool {
-			return scored[i].score > scored[j].score
-		})
-		var facts []Fact
-		for i := 0; i < len(scored) && i < limit; i++ {
-			facts = append(facts, scored[i].fact)
-		}
-		return facts, nil
 	}
 
 	candidateLimit := limit * 3
@@ -684,11 +635,6 @@ func GetFactsPaginatedWithContext(ctx context.Context, database DBTX, isPg bool,
 	}, nil
 }
 
-// FindDuplicateFact searches the facts table globally for an existing fact with cosine similarity >= minSim.
-func FindDuplicateFact(database DBTX, embedding []float32, minSim float64) (*Fact, float64, error) {
-	return FindDuplicateFactWithContext(context.Background(), database, false, embedding, minSim)
-}
-
 func FindDuplicateFactWithContext(ctx context.Context, database DBTX, isPg bool, embedding []float32, minSim float64) (*Fact, float64, error) {
 	if database == nil || len(embedding) != ExpectedEmbeddingDim {
 		return nil, 0, nil
@@ -697,31 +643,9 @@ func FindDuplicateFactWithContext(ctx context.Context, database DBTX, isPg bool,
 		minSim = 0.88
 	}
 
-	if !isPg && !isPostgres(database) {
-		// SQLite in-memory fallback for unit tests
-		allFacts, err := GetAllFactsWithEmbeddings(database)
-		if err != nil {
-			return nil, 0, err
-		}
-		var bestFact *Fact
-		var bestSim float64
-		for _, fwe := range allFacts {
-			if len(fwe.Embedding) != ExpectedEmbeddingDim {
-				continue
-			}
-			sim := cosineSimilarity(embedding, fwe.Embedding)
-			if sim > bestSim {
-				bestSim = sim
-				f := fwe.Fact
-				bestFact = &f
-			}
-		}
-		if bestSim >= minSim && bestFact != nil {
-			return bestFact, bestSim, nil
-		}
-		return nil, bestSim, nil
+	if ctx == nil {
+		ctx = context.Background()
 	}
-
 	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
@@ -757,11 +681,6 @@ func FindDuplicateFactWithContext(ctx context.Context, database DBTX, isPg bool,
 	return nil, sim, nil
 }
 
-// ReinforceFact updates an existing fact with an importance boost, touching last_reinforced_at and updating text/embedding if provided.
-func ReinforceFact(database DBTX, id int64, newText string, newEmbedding []float32, boost float64) error {
-	return ReinforceFactWithContext(context.Background(), database, false, id, newText, newEmbedding, boost)
-}
-
 func ReinforceFactWithContext(ctx context.Context, database DBTX, isPg bool, id int64, newText string, newEmbedding []float32, boost float64) error {
 	if database == nil {
 		return fmt.Errorf("database is nil")
@@ -783,71 +702,32 @@ func ReinforceFactWithContext(ctx context.Context, database DBTX, isPg bool, id 
 		vecVal = pgvector.NewVector(newEmbedding)
 	}
 
-	if isPg || isPostgres(database) {
-		var query string
-		var res sql.Result
-		var err error
-		if updateText {
-			query = `
-				UPDATE facts
-				SET importance = LEAST(1.0, GREATEST(0.70, ROUND((importance + $1)::numeric, 2))),
-				    fact_text = $2,
-				    embedding = $3,
-				    last_reinforced_at = $4,
-				    reinforce_count = reinforce_count + 1
-				WHERE id = $5
-			`
-			res, err = database.ExecContext(queryCtx, query, boost, newText, vecVal, now, id)
-		} else {
-			query = `
-				UPDATE facts
-				SET importance = LEAST(1.0, GREATEST(0.70, ROUND((importance + $1)::numeric, 2))),
-				    last_reinforced_at = $2,
-				    reinforce_count = reinforce_count + 1
-				WHERE id = $3
-			`
-			res, err = database.ExecContext(queryCtx, query, boost, now, id)
-		}
-		if err != nil {
-			return fmt.Errorf("failed to reinforce fact: %w", err)
-		}
-		rows, err := res.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if rows == 0 {
-			return ErrFactNotFound
-		}
-		return nil
-	}
-
-	// SQLite branch
 	var query string
 	var res sql.Result
 	var err error
 	if updateText {
 		query = `
 			UPDATE facts
-			SET importance = MIN(1.0, MAX(0.70, ROUND(importance + ?, 2))),
-			    fact_text = ?,
-			    embedding = ?,
-			    last_reinforced_at = ?,
+			SET importance = LEAST(1.0, GREATEST(0.70, ROUND((importance + $1)::numeric, 2))),
+			    fact_text = $2,
+			    embedding = $3,
+			    last_reinforced_at = $4,
 			    reinforce_count = reinforce_count + 1
-			WHERE id = ?
+			WHERE id = $5
 		`
 		res, err = database.ExecContext(queryCtx, query, boost, newText, vecVal, now, id)
 	} else {
 		query = `
 			UPDATE facts
-			SET importance = MIN(1.0, MAX(0.70, ROUND(importance + ?, 2))),
-			    last_reinforced_at = ?,
+			SET importance = LEAST(1.0, GREATEST(0.70, ROUND((importance + $1)::numeric, 2))),
+			    last_reinforced_at = $2,
 			    reinforce_count = reinforce_count + 1
-			WHERE id = ?
+			WHERE id = $3
 		`
 		res, err = database.ExecContext(queryCtx, query, boost, now, id)
 	}
 	if err != nil {
-		return fmt.Errorf("failed to reinforce fact in sqlite: %w", err)
+		return fmt.Errorf("failed to reinforce fact: %w", err)
 	}
 	rows, err := res.RowsAffected()
 	if err != nil {
@@ -857,11 +737,6 @@ func ReinforceFactWithContext(ctx context.Context, database DBTX, isPg bool, id 
 		return ErrFactNotFound
 	}
 	return nil
-}
-
-// DecayAndPruneFacts applies scheduled daily importance decay to unreinforced facts and prunes dead facts.
-func DecayAndPruneFacts(database DBTX, decayStep float64, pruneFloor float64, pruneAgeDays int) (int64, int64, error) {
-	return DecayAndPruneFactsWithContext(context.Background(), database, false, decayStep, pruneFloor, pruneAgeDays)
 }
 
 func DecayAndPruneFactsWithContext(ctx context.Context, database DBTX, isPg bool, decayStep float64, pruneFloor float64, pruneAgeDays int) (int64, int64, error) {
@@ -890,55 +765,17 @@ func DecayAndPruneFactsWithContext(ctx context.Context, database DBTX, isPg bool
 
 	var decayedCount, prunedCount int64
 
-	if isPg || isPostgres(database) {
-		decayQuery := `
-			UPDATE facts
-			SET importance = GREATEST(0.0, ROUND((importance - $1)::numeric, 2)),
-			    last_decayed_at = $2
-			WHERE (last_decayed_at IS NULL OR last_decayed_at < $3)
-			  AND (last_reinforced_at IS NULL OR last_reinforced_at < $3)
-			  AND importance > 0.0
-		`
-		resDecay, err := database.ExecContext(queryCtx, decayQuery, decayStep, now, decayCutoff)
-		if err != nil {
-			return 0, 0, fmt.Errorf("failed to decay facts: %w", err)
-		}
-		if n, err := resDecay.RowsAffected(); err == nil {
-			decayedCount = n
-		} else {
-			log.Printf("[DB] Warning getting rows affected for decay: %v", err)
-		}
-
-		pruneQuery := `
-			DELETE FROM facts
-			WHERE importance <= $1
-			  AND (last_reinforced_at IS NULL OR last_reinforced_at < $2)
-		`
-		resPrune, err := database.ExecContext(queryCtx, pruneQuery, pruneFloor, cutoffDate)
-		if err != nil {
-			return decayedCount, 0, fmt.Errorf("failed to prune facts: %w", err)
-		}
-		if n, err := resPrune.RowsAffected(); err == nil {
-			prunedCount = n
-		} else {
-			log.Printf("[DB] Warning getting rows affected for prune: %v", err)
-		}
-
-		return decayedCount, prunedCount, nil
-	}
-
-	// SQLite branch
 	decayQuery := `
 		UPDATE facts
-		SET importance = MAX(0.0, ROUND(importance - ?, 2)),
-		    last_decayed_at = ?
-		WHERE (last_decayed_at IS NULL OR last_decayed_at < ?)
-		  AND (last_reinforced_at IS NULL OR last_reinforced_at < ?)
+		SET importance = GREATEST(0.0, ROUND((importance - $1)::numeric, 2)),
+		    last_decayed_at = $2
+		WHERE (last_decayed_at IS NULL OR last_decayed_at < $3)
+		  AND (last_reinforced_at IS NULL OR last_reinforced_at < $3)
 		  AND importance > 0.0
 	`
-	resDecay, err := database.ExecContext(queryCtx, decayQuery, decayStep, now, decayCutoff, decayCutoff)
+	resDecay, err := database.ExecContext(queryCtx, decayQuery, decayStep, now, decayCutoff)
 	if err != nil {
-		return 0, 0, fmt.Errorf("failed to decay facts in sqlite: %w", err)
+		return 0, 0, fmt.Errorf("failed to decay facts: %w", err)
 	}
 	if n, err := resDecay.RowsAffected(); err == nil {
 		decayedCount = n
@@ -948,12 +785,12 @@ func DecayAndPruneFactsWithContext(ctx context.Context, database DBTX, isPg bool
 
 	pruneQuery := `
 		DELETE FROM facts
-		WHERE importance <= ?
-		  AND (last_reinforced_at IS NULL OR last_reinforced_at < ?)
+		WHERE importance <= $1
+		  AND (last_reinforced_at IS NULL OR last_reinforced_at < $2)
 	`
 	resPrune, err := database.ExecContext(queryCtx, pruneQuery, pruneFloor, cutoffDate)
 	if err != nil {
-		return decayedCount, 0, fmt.Errorf("failed to prune facts in sqlite: %w", err)
+		return decayedCount, 0, fmt.Errorf("failed to prune facts: %w", err)
 	}
 	if n, err := resPrune.RowsAffected(); err == nil {
 		prunedCount = n

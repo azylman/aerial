@@ -12,7 +12,6 @@ import (
 
 	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/session"
-	"github.com/pgvector/pgvector-go"
 )
 
 func TestNew_ConfigPointerInjection(t *testing.T) {
@@ -933,8 +932,8 @@ func TestScheduleRunsCRUD(t *testing.T) {
 }
 
 func TestNativeVectorSearchHNSW(t *testing.T) {
-	database := setupTestDB(t)
-	defer func() { _ = database.Close() }()
+	store := NewFakeStore()
+	ctx := context.Background()
 
 	// Create 3 vectors
 	vecAlex := make([]float32, 384)
@@ -946,21 +945,21 @@ func TestNativeVectorSearchHNSW(t *testing.T) {
 	vecMusic := make([]float32, 384)
 	vecMusic[0] = 0.9 // Close to Alex preference
 
-	_, err := InsertFact(database, "preference", "Alex likes dark roast coffee", 1.0, vecAlex)
+	_, err := store.InsertFact(ctx, "preference", "Alex likes dark roast coffee", 1.0, vecAlex)
 	if err != nil {
 		t.Fatalf("InsertFact 1 failed: %v", err)
 	}
-	_, err = InsertFact(database, "routine", "Daily weather forecast at 8am", 1.0, vecWeather)
+	_, err = store.InsertFact(ctx, "routine", "Daily weather forecast at 8am", 1.0, vecWeather)
 	if err != nil {
 		t.Fatalf("InsertFact 2 failed: %v", err)
 	}
-	_, err = InsertFact(database, "preference", "Alex listens to synthwave while coding", 0.8, vecMusic)
+	_, err = store.InsertFact(ctx, "preference", "Alex listens to synthwave while coding", 0.8, vecMusic)
 	if err != nil {
 		t.Fatalf("InsertFact 3 failed: %v", err)
 	}
 
 	// Search for query vector close to Alex (vecAlex)
-	results, err := SearchSimilarFacts(database, vecAlex, "", 5, 0.5)
+	results, err := store.SearchSimilarFacts(ctx, vecAlex, "", 5, 0.5)
 	if err != nil {
 		t.Fatalf("SearchSimilarFacts failed: %v", err)
 	}
@@ -1311,14 +1310,6 @@ func TestSQLiteExplicitSchemaAndMigrations(t *testing.T) {
 	}
 	if factID <= 0 {
 		t.Errorf("expected positive factID, got %d", factID)
-	}
-
-	simFacts, err := SearchSimilarFacts(database, vec, "", 5, 0.5)
-	if err != nil {
-		t.Fatalf("SearchSimilarFacts on SQLite failed: %v", err)
-	}
-	if len(simFacts) == 0 {
-		t.Errorf("expected similar facts returned on SQLite")
 	}
 
 	// Test SQLite active tasks query
@@ -1693,27 +1684,30 @@ func TestDB_SearchSimilarFacts_EdgeCases(t *testing.T) {
 		t.Errorf("expected nil, nil for mismatched dimensions, got %v, %v", res, err)
 	}
 
-	// 2. limit <= 0 and minScore <= 0 defaults
+	// 2. limit <= 0 and minScore <= 0 defaults on FakeStore
+	store := NewFakeStore()
+	ctx := context.Background()
+
 	vec1 := make([]float32, ExpectedEmbeddingDim)
 	vec1[0] = 1.0
-	_, _ = InsertFact(database, "cat1", "Fact text 1", 1.0, vec1)
+	_, _ = store.InsertFact(ctx, "cat1", "Fact text 1", 1.0, vec1)
 
 	vec2 := make([]float32, ExpectedEmbeddingDim)
 	vec2[0] = 0.5
 	vec2[1] = 0.5
-	_, _ = InsertFact(database, "cat2", "Fact text 2", 0.8, vec2)
+	_, _ = store.InsertFact(ctx, "cat2", "Fact text 2", 0.8, vec2)
 
 	vec3 := make([]float32, ExpectedEmbeddingDim)
 	vec3[0] = 0.1
-	_, _ = InsertFact(database, "cat3", "Fact text 3", 0.1, vec3)
+	_, _ = store.InsertFact(ctx, "cat3", "Fact text 3", 0.1, vec3)
 
-	res2, err := SearchSimilarFacts(database, vec1, "", -1, -1)
+	res2, err := store.SearchSimilarFacts(ctx, vec1, "", -1, -1)
 	if err != nil || len(res2) < 1 {
 		t.Errorf("expected >=1 fact returned with default limit/score, got %d, err: %v", len(res2), err)
 	}
 
 	// 3. Search by text query
-	resText, err := SearchSimilarFacts(database, nil, "Fact text 1", 10, 0.2)
+	resText, err := store.SearchSimilarFacts(ctx, nil, "Fact text 1", 10, 0.2)
 	if err != nil {
 		t.Fatalf("unexpected error searching facts by text: %v", err)
 	}
@@ -1722,7 +1716,7 @@ func TestDB_SearchSimilarFacts_EdgeCases(t *testing.T) {
 	}
 
 	// 4. High minScore filter
-	resHigh, err := SearchSimilarFacts(database, vec1, "", 10, 0.95)
+	resHigh, err := store.SearchSimilarFacts(ctx, vec1, "", 10, 0.95)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1814,29 +1808,24 @@ func TestDB_GetScheduleSummaryMetrics_NextRunVariants(t *testing.T) {
 }
 
 func TestDB_SearchSimilarFacts_SQLite_InvalidEmbeddingDimensions(t *testing.T) {
-	database, err := InitDB(filepath.Join(t.TempDir(), "sqlite_embed_dim.db"))
-	if err != nil {
-		t.Fatalf("failed to init SQLite DB: %v", err)
-	}
-	defer database.Close()
+	store := NewFakeStore()
+	ctx := context.Background()
 
 	vecValid := make([]float32, ExpectedEmbeddingDim)
 	vecValid[0] = 0.9
 
 	// Insert fact with valid embedding
-	f1ID, err := InsertFact(database, "cat", "Valid fact", 0.9, vecValid)
+	f1ID, err := store.InsertFact(ctx, "cat", "Valid fact", 0.9, vecValid)
 	if err != nil {
 		t.Fatalf("failed to insert fact: %v", err)
 	}
 
-	// Update embedding bytes to valid vector of mismatched dimension (10 != ExpectedEmbeddingDim)
-	shortVec := pgvector.NewVector(make([]float32, 10))
-	_, err = database.Exec("UPDATE facts SET embedding = $1 WHERE id = $2", shortVec, f1ID)
-	if err != nil {
-		t.Fatalf("failed to update embedding: %v", err)
-	}
+	// Update embedding to valid vector of mismatched dimension (10 != ExpectedEmbeddingDim)
+	store.mu.Lock()
+	store.facts[f1ID].Embedding = make([]float32, 10)
+	store.mu.Unlock()
 
-	res, err := SearchSimilarFacts(database, vecValid, "", 10, 0.1)
+	res, err := store.SearchSimilarFacts(ctx, vecValid, "", 10, 0.1)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

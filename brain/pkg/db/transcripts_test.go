@@ -281,7 +281,7 @@ func TestTranscriptStore_CascadeDelete(t *testing.T) {
 }
 
 func TestTranscriptStore_SearchSessionSummaries(t *testing.T) {
-	store := NewTestStore(t)
+	store := NewFakeStore()
 	ctx := context.Background()
 
 	embVector := make([]float32, ExpectedEmbeddingDim)
@@ -410,7 +410,7 @@ func TestTranscriptStore_SearchSessionSummaries(t *testing.T) {
 }
 
 func TestTranscriptStore_SearchTranscriptSteps(t *testing.T) {
-	store := NewTestStore(t)
+	store := NewFakeStore()
 	ctx := context.Background()
 
 	_ = store.UpsertSessionSummary(ctx, SessionSummary{SessionID: "sess-steps-a"})
@@ -1241,7 +1241,6 @@ func TestFakeStore_CloneTranscriptSteps_WithTx(t *testing.T) {
 
 func TestTranscriptStore_EdgeCases_And_Fallbacks(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
 	dbMem, err := InitDB(":memory:")
 	if err != nil {
 		t.Fatalf("InitDB failed: %v", err)
@@ -1276,55 +1275,6 @@ func TestTranscriptStore_EdgeCases_And_Fallbacks(t *testing.T) {
 	}
 	if err := BatchInsertTranscriptStepsWithContext(nil, dbMem, false, steps); err != nil {
 		t.Errorf("expected nil error on BatchInsertTranscriptStepsWithContext(nil ctx), got %v", err)
-	}
-
-	// 2. SearchSessionSummariesWithContext: nil ctx, limit <= 0, minScore < 0
-	sumResults, err := SearchSessionSummariesWithContext(nil, dbMem, false, emb, "Edge case", -5, -1.0)
-	if err != nil || len(sumResults) != 1 {
-		t.Fatalf("expected 1 summary result, got %d, err: %v", len(sumResults), err)
-	}
-
-	// 3. SearchTranscriptStepsWithContext: nil ctx, limit <= 0, and SQLite early break when len(matched) >= limit
-	stepResults, err := SearchTranscriptStepsWithContext(nil, dbMem, false, "edge", "", "", 1)
-	if err != nil || len(stepResults) != 1 {
-		t.Fatalf("expected 1 step hit on limit 1, got %d, err: %v", len(stepResults), err)
-	}
-
-	// SearchTranscriptStepsWithContext with negative limit
-	stepResultsNeg, err := SearchTranscriptStepsWithContext(ctx, dbMem, false, "edge", "", "", -1)
-	if err != nil || len(stepResultsNeg) != 3 {
-		t.Fatalf("expected 3 step hits with default limit, got %d, err: %v", len(stepResultsNeg), err)
-	}
-
-	// 4. SQLite query and scan errors using mockDBTX with isPg=false
-	mockSqliteErr := testMockDBTX{
-		queryFn: func(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
-			return nil, errors.New("simulated sqlite query error")
-		},
-	}
-	_, err = SearchSessionSummariesWithContext(ctx, mockSqliteErr, false, emb, "query", 10, 0.0)
-	if err == nil || !strings.Contains(err.Error(), "sqlite search session summaries query") {
-		t.Errorf("expected sqlite search summaries query error, got: %v", err)
-	}
-
-	_, err = SearchTranscriptStepsWithContext(ctx, mockSqliteErr, false, "query", "", "", 10)
-	if err == nil || !strings.Contains(err.Error(), "sqlite search transcript steps query") {
-		t.Errorf("expected sqlite search transcript steps query error, got: %v", err)
-	}
-
-	mockSqliteScanErr := testMockDBTX{
-		queryFn: func(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
-			return dbMem.QueryContext(ctx, "SELECT 's-1' AS col1")
-		},
-	}
-	_, err = SearchSessionSummariesWithContext(ctx, mockSqliteScanErr, false, emb, "query", 10, 0.0)
-	if err == nil || !strings.Contains(err.Error(), "sqlite scan session summary") {
-		t.Errorf("expected sqlite scan summary error, got: %v", err)
-	}
-
-	_, err = SearchTranscriptStepsWithContext(ctx, mockSqliteScanErr, false, "query", "", "", 10)
-	if err == nil || !strings.Contains(err.Error(), "sqlite scan transcript step") {
-		t.Errorf("expected sqlite scan step error, got: %v", err)
 	}
 }
 
