@@ -597,3 +597,58 @@ func TestSQLStoreActiveTasksAndConversationMapping(t *testing.T) {
 	}
 }
 
+func TestNullVectorScanBranches(t *testing.T) {
+	var nv NullVector
+
+	// Nil source
+	if err := nv.Scan(nil); err != nil || nv.Valid || nv.Vector != nil {
+		t.Errorf("expected nil Vector and Valid=false on nil Scan, got %v, valid=%v", err, nv.Valid)
+	}
+
+	// Invalid type
+	if err := nv.Scan(12345); err == nil {
+		t.Errorf("expected error scanning int into NullVector, got nil")
+	}
+
+	// Valid string
+	if err := nv.Scan("[0.1,0.2,0.3]"); err != nil || !nv.Valid || len(nv.Vector) != 3 {
+		t.Errorf("expected valid vector scan, got err=%v, valid=%v, len=%d", err, nv.Valid, len(nv.Vector))
+	}
+
+	// Valid byte slice
+	if err := nv.Scan([]byte("[0.1,0.2]")); err != nil || !nv.Valid || len(nv.Vector) != 2 {
+		t.Errorf("expected valid vector scan from bytes, got err=%v, valid=%v, len=%d", err, nv.Valid, len(nv.Vector))
+	}
+
+	// FactTime Scan branches
+	var ft FactTime
+	if err := ft.Scan(nil); err != nil || ft.Valid {
+		t.Errorf("expected Valid=false on nil FactTime scan")
+	}
+	now := time.Now()
+	if err := ft.Scan(now); err != nil || !ft.Valid {
+		t.Errorf("expected Valid=true on valid FactTime scan")
+	}
+}
+
+func TestSearchSimilarFactsInputValidation(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. Nil database
+	facts, err := SearchSimilarFactsWithContext(ctx, nil, true, []float32{0.1}, "test", 10, 0.2)
+	if err != nil || facts != nil {
+		t.Errorf("expected nil, nil for nil database, got %v, %v", facts, err)
+	}
+
+	// 2. No embedding and no text
+	facts, err = SearchSimilarFactsWithContext(ctx, dummyDBTXNoDriver{}, true, nil, "", 10, 0.2)
+	if err != nil || facts != nil {
+		t.Errorf("expected nil, nil for empty query and embedding, got %v, %v", facts, err)
+	}
+
+	// 3. Clamping and nil context with empty embedding/text
+	facts, err = SearchSimilarFactsWithContext(nil, dummyDBTXNoDriver{}, true, nil, "   ", -1, -0.5)
+	if err != nil || facts != nil {
+		t.Errorf("expected nil, nil for clamped query, got %v, %v", facts, err)
+	}
+}

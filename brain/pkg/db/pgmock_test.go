@@ -15,7 +15,16 @@ import (
 	"github.com/azylman/aerial/brain/pkg/config"
 )
 
+type mockPgOptions struct {
+	factsExist     bool
+	revisionExists bool
+}
+
 func startMockPostgres(t *testing.T) string {
+	return startMockPostgresWithOptions(t, mockPgOptions{factsExist: true, revisionExists: true})
+}
+
+func startMockPostgresWithOptions(t *testing.T, opts mockPgOptions) string {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("failed to listen on mock pg: %v", err)
@@ -27,7 +36,7 @@ func startMockPostgres(t *testing.T) string {
 			if err != nil {
 				return
 			}
-			go handlePgConn(conn)
+			go handlePgConnWithOptions(conn, opts)
 		}
 	}()
 
@@ -38,7 +47,7 @@ func startMockPostgres(t *testing.T) string {
 	return listener.Addr().String()
 }
 
-func handlePgConn(conn net.Conn) {
+func handlePgConnWithOptions(conn net.Conn, opts mockPgOptions) {
 	defer conn.Close()
 
 	// 1. Read first packet length
@@ -96,6 +105,10 @@ func handlePgConn(conn net.Conn) {
 	}
 
 	// Message loop
+	statements := make(map[string]string)
+	portals := make(map[string]string)
+	var lastQuery string
+
 	for {
 		var typeBuf [1]byte
 		if _, err := io.ReadFull(conn, typeBuf[:]); err != nil {
@@ -129,16 +142,69 @@ func handlePgConn(conn net.Conn) {
 			_, _ = conn.Write(ready)
 
 		case 'P': // Parse
+			s := string(msgBody)
+			if idx := strings.IndexByte(s, 0); idx != -1 {
+				stmtName := s[:idx]
+				rem := s[idx+1:]
+				if endIdx := strings.IndexByte(rem, 0); endIdx != -1 {
+					statements[stmtName] = rem[:endIdx]
+					lastQuery = rem[:endIdx]
+				} else {
+					statements[stmtName] = rem
+					lastQuery = rem
+				}
+			} else {
+				lastQuery = s
+			}
 			_, _ = conn.Write([]byte{'1', 0, 0, 0, 4})
+
 		case 'B': // Bind
+			s := string(msgBody)
+			if idx := strings.IndexByte(s, 0); idx != -1 {
+				portalName := s[:idx]
+				rem := s[idx+1:]
+				if endIdx := strings.IndexByte(rem, 0); endIdx != -1 {
+					stmtName := rem[:endIdx]
+					if q, ok := statements[stmtName]; ok {
+						portals[portalName] = q
+						lastQuery = q
+					}
+				}
+			}
 			_, _ = conn.Write([]byte{'2', 0, 0, 0, 4})
+
 		case 'D': // Describe
 			describeType := msgBody[0]
-			if describeType == 'S' { // describe statement
-				// ParameterDescription: 't', len (4 + 2 + 4 = 10), num_params=1, oid=20 (int8)
-				paramDesc := []byte{'t', 0, 0, 0, 10, 0, 1, 0, 0, 0, 20}
-				_, _ = conn.Write(paramDesc)
+			name := strings.TrimRight(string(msgBody[1:]), "\x00")
+			if describeType == 'S' {
+				if q, ok := statements[name]; ok {
+					lastQuery = q
+				}
+				numParams := 0
+				for p := 1; p <= 32; p++ {
+					if strings.Contains(lastQuery, fmt.Sprintf("$%d", p)) {
+						numParams = p
+					}
+				}
+				if numParams > 0 {
+					paramDesc := make([]byte, 7+numParams*4)
+					paramDesc[0] = 't'
+					binary.BigEndian.PutUint32(paramDesc[1:5], uint32(len(paramDesc)-1))
+					binary.BigEndian.PutUint16(paramDesc[5:7], uint16(numParams))
+					for k := 0; k < numParams; k++ {
+						binary.BigEndian.PutUint32(paramDesc[7+k*4:], 0) // unspecified OID
+					}
+					_, _ = conn.Write(paramDesc)
+				} else {
+					paramDesc := []byte{'t', 0, 0, 0, 6, 0, 0}
+					_, _ = conn.Write(paramDesc)
+				}
+			} else if describeType == 'P' {
+				if q, ok := portals[name]; ok {
+					lastQuery = q
+				}
 			}
+
 			// RowDescription: 'T', 1 field
 			fieldName := "res\x00"
 			rowDesc := make([]byte, 7+len(fieldName)+18)
@@ -147,18 +213,47 @@ func handlePgConn(conn net.Conn) {
 			binary.BigEndian.PutUint16(rowDesc[5:7], 1) // 1 column
 			copy(rowDesc[7:], fieldName)
 			offset := 7 + len(fieldName)
-			// table oid (4), col idx (2), type oid (4, bool=16), type size (2, 1), type mod (4, -1), format (2, 0)
+			colType := uint32(16) // bool
+			typeSize := uint16(1)
+			if strings.Contains(lastQuery, "COUNT") {
+				colType = 20 // int8
+				typeSize = 8
+			}
 			binary.BigEndian.PutUint32(rowDesc[offset:], 0)
 			binary.BigEndian.PutUint16(rowDesc[offset+4:], 0)
-			binary.BigEndian.PutUint32(rowDesc[offset+6:], 16)
-			binary.BigEndian.PutUint16(rowDesc[offset+10:], 1)
+			binary.BigEndian.PutUint32(rowDesc[offset+6:], colType)
+			binary.BigEndian.PutUint16(rowDesc[offset+10:], typeSize)
 			binary.BigEndian.PutUint32(rowDesc[offset+12:], 0xffffffff)
 			binary.BigEndian.PutUint16(rowDesc[offset+16:], 0)
 			_, _ = conn.Write(rowDesc)
 
 		case 'E': // Execute
-			// DataRow 'D', len 11: 1 col, len 1, 't'
-			dataRow := []byte{'D', 0, 0, 0, 11, 0, 1, 0, 0, 0, 1, 't'}
+			s := string(msgBody)
+			if idx := strings.IndexByte(s, 0); idx != -1 {
+				portalName := s[:idx]
+				if q, ok := portals[portalName]; ok {
+					lastQuery = q
+				}
+			}
+			val := byte('t')
+			if strings.Contains(lastQuery, "COUNT") {
+				val = '0'
+			}
+			if strings.Contains(lastQuery, "to_regclass") {
+				if opts.factsExist {
+					val = 't'
+				} else {
+					val = 'f'
+				}
+			}
+			if strings.Contains(lastQuery, "EXISTS") {
+				if opts.revisionExists {
+					val = 't'
+				} else {
+					val = 'f'
+				}
+			}
+			dataRow := []byte{'D', 0, 0, 0, 11, 0, 1, 0, 0, 0, 1, val}
 			_, _ = conn.Write(dataRow)
 			cmdBytes := []byte{'C', 0, 0, 0, 13, 'S', 'E', 'L', 'E', 'C', 'T', ' ', '1', 0}
 			_, _ = conn.Write(cmdBytes)
