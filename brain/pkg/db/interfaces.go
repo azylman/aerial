@@ -106,12 +106,56 @@ type SessionStore interface {
 	SaveConversationMapping(ctx context.Context, externalID, internalID string) error
 }
 
+// SessionSummary encapsulates macro-level session summaries, embeddings, and sync metadata.
+type SessionSummary struct {
+	SessionID            string    `json:"session_id"`
+	ThreadID             string    `json:"thread_id"`
+	Summary              string    `json:"summary"`
+	Embedding            []float32 `json:"embedding,omitempty"`
+	LastIndexedStep      int       `json:"last_indexed_step"`
+	LastMtime            time.Time `json:"last_mtime,omitempty"`
+	SummaryStepWatermark int       `json:"summary_step_watermark"`
+	IsSettled            bool      `json:"is_settled"`
+	CreatedAt            time.Time `json:"created_at"`
+	UpdatedAt            time.Time `json:"updated_at"`
+	Score                float64   `json:"score,omitempty"`
+}
+
+// SessionSyncState tracks ingestion progress and modification times for disk-to-DB reconciliation.
+type SessionSyncState struct {
+	SessionID       string    `json:"session_id"`
+	LastMtime       time.Time `json:"last_mtime"`
+	LastIndexedStep int       `json:"last_indexed_step"`
+	IsSettled       bool      `json:"is_settled"`
+}
+
+// TranscriptStep captures granular execution step details and tool receipts.
+type TranscriptStep struct {
+	SessionID string    `json:"session_id"`
+	StepIndex int       `json:"step_index"`
+	StepType  string    `json:"step_type"`
+	ToolName  string    `json:"tool_name"`
+	Content   string    `json:"content"`
+	CreatedAt time.Time `json:"created_at"`
+	RankScore float64   `json:"rank_score,omitempty"`
+}
+
+// TranscriptStore handles persistence, reconciliation, and search for session summaries and transcript steps.
+type TranscriptStore interface {
+	GetSessionSyncStates(ctx context.Context) (map[string]SessionSyncState, error)
+	UpsertSessionSummary(ctx context.Context, summary SessionSummary) error
+	BatchInsertTranscriptSteps(ctx context.Context, steps []TranscriptStep) error
+	SearchSessionSummaries(ctx context.Context, embedding []float32, queryText string, limit int, minScore float64) ([]SessionSummary, error)
+	SearchTranscriptSteps(ctx context.Context, queryText, sessionFilter, toolFilter string, limit int) ([]TranscriptStep, error)
+}
+
 // Store unifies all repository capabilities under a single interface.
 type Store interface {
 	FactStore
 	ScheduleStore
 	MessageStore
 	SessionStore
+	TranscriptStore
 	WithTx(ctx context.Context, fn func(txStore Store) error) error
 	Close() error
 }

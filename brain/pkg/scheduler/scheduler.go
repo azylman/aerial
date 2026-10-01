@@ -15,6 +15,7 @@ import (
 	"github.com/azylman/aerial/brain/pkg/metrics"
 	"github.com/azylman/aerial/brain/pkg/queue"
 	"github.com/azylman/aerial/brain/pkg/runner"
+	"github.com/azylman/aerial/brain/pkg/transcript"
 	"github.com/bwmarrin/discordgo"
 	"github.com/google/uuid"
 )
@@ -50,14 +51,17 @@ type MessageEnqueuer interface {
 }
 
 type Scheduler struct {
-	cfg           *config.Config
-	store         db.Store
-	enqueuer      MessageEnqueuer
-	threadCreator ThreadCreator
-	runnerFn      runner.RunnerFunc
-	llmFn         runner.LLMFunc
-	sessionRoots  []string
-	wg            sync.WaitGroup
+	cfg                *config.Config
+	store              db.Store
+	enqueuer           MessageEnqueuer
+	threadCreator      ThreadCreator
+	runnerFn           runner.RunnerFunc
+	llmFn              runner.LLMFunc
+	sessionRoots       []string
+	brainDir           string
+	transcriptEmbedder transcript.EmbedderFunc
+	transcriptLLMFunc  transcript.LLMClientFunc
+	wg                 sync.WaitGroup
 }
 
 // Option configures Scheduler options.
@@ -87,6 +91,27 @@ func WithSessionRoots(roots ...string) Option {
 			}
 		}
 		s.sessionRoots = clean
+	}
+}
+
+// WithBrainDir sets the brain directory used for transcript synchronization.
+func WithBrainDir(dir string) Option {
+	return func(s *Scheduler) {
+		s.brainDir = strings.TrimSpace(dir)
+	}
+}
+
+// WithTranscriptEmbedder sets the embedder function used for transcript synchronization.
+func WithTranscriptEmbedder(fn transcript.EmbedderFunc) Option {
+	return func(s *Scheduler) {
+		s.transcriptEmbedder = fn
+	}
+}
+
+// WithTranscriptLLMFunc sets the LLM summarization function used for transcript synchronization.
+func WithTranscriptLLMFunc(fn transcript.LLMClientFunc) Option {
+	return func(s *Scheduler) {
+		s.transcriptLLMFunc = fn
 	}
 }
 
@@ -433,6 +458,42 @@ func RunMemoryDecayWithContext(ctx context.Context, factStore db.FactStore) {
 	}
 }
 
+var transcriptSyncMutex sync.Mutex
+
+// RunTranscriptSync executes the background transcript synchronization routine.
+func RunTranscriptSync(ctx context.Context, store db.Store, brainDir string, embedder transcript.EmbedderFunc, llmFunc transcript.LLMClientFunc) (transcript.SyncStats, error) {
+	if store == nil {
+		return transcript.SyncStats{}, nil
+	}
+	if !transcriptSyncMutex.TryLock() {
+		log.Printf("[Scheduler] Transcript sync already in progress, skipping overlapping sweep.")
+		return transcript.SyncStats{}, nil
+	}
+	defer transcriptSyncMutex.Unlock()
+
+	syncCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+	defer cancel()
+
+	opts := transcript.DefaultSyncOptions()
+	targetBrainDir := strings.TrimSpace(brainDir)
+	if targetBrainDir != "" {
+		opts.BrainDir = targetBrainDir
+	}
+
+	stats, err := transcript.SyncTranscripts(syncCtx, store, targetBrainDir, embedder, llmFunc, opts)
+	if err != nil {
+		if ctx.Err() == nil {
+			log.Printf("[Scheduler] Transcript sync error: %v", err)
+		}
+		return stats, err
+	}
+	if stats.Synced > 0 || stats.StepsInserted > 0 {
+		log.Printf("[Scheduler] Transcript sync complete: %d sessions synced, %d steps inserted, %d summaries generated (%v)",
+			stats.Synced, stats.StepsInserted, stats.SummariesGenerated, stats.Duration)
+	}
+	return stats, nil
+}
+
 func (s *Scheduler) runPruneRetention(ctx context.Context) {
 	s.wg.Add(1)
 	go func() {
@@ -457,6 +518,39 @@ func (s *Scheduler) runFactExtraction(ctx context.Context, ollamaClient *memory.
 	}()
 }
 
+func (s *Scheduler) runTranscriptSync(ctx context.Context) {
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		brainDir := s.brainDir
+		if brainDir == "" && len(s.sessionRoots) > 0 {
+			brainDir = s.sessionRoots[0]
+		}
+		if brainDir == "" {
+			return
+		}
+
+		embedder := s.transcriptEmbedder
+		if embedder == nil && s.cfg != nil {
+			memClient := memory.New(s.cfg, s.sessionRoots...)
+			embedder = func(eCtx context.Context, text string) ([]float32, error) {
+				return memClient.GenerateEmbedding(eCtx, text, false, 1)
+			}
+		}
+
+		llmFunc := s.transcriptLLMFunc
+		if llmFunc == nil {
+			llmFunc = s.ExtractFactsLLM
+		}
+
+		if _, err := RunTranscriptSync(ctx, s.getStore(), brainDir, embedder, llmFunc); err != nil {
+			if ctx.Err() == nil {
+				log.Printf("[Scheduler] Background transcript sync error: %v", err)
+			}
+		}
+	}()
+}
+
 // handleTick executes periodic evaluations for a single ticker event.
 func (s *Scheduler) handleTick(ctx context.Context, tickCount int, ollamaClient *memory.Client, llmFunc memory.LLMClientFunc) {
 	if s == nil {
@@ -464,6 +558,11 @@ func (s *Scheduler) handleTick(ctx context.Context, tickCount int, ollamaClient 
 	}
 	if err := s.ProcessDueSchedules(ctx); err != nil {
 		log.Printf("[Scheduler] Error in schedule tick evaluation: %v", err)
+	}
+
+	// Run transcript sync every 5 minutes (every 10 ticks at 30s interval = 5 minutes)
+	if ShouldRunTranscriptSync(tickCount) {
+		s.runTranscriptSync(ctx)
 	}
 
 	// Run fact extraction hourly (every 120 ticks at 30s interval = 1 hour)
@@ -500,6 +599,7 @@ func (s *Scheduler) Run(ctx context.Context, interval time.Duration) {
 	}
 	s.runPruneRetention(ctx)
 	s.runFactExtraction(ctx, ollamaClient, llmFunc)
+	s.runTranscriptSync(ctx)
 
 	var tickCount int
 	for {

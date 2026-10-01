@@ -116,10 +116,39 @@ CREATE INDEX IF NOT EXISTS idx_schedule_runs_message_id ON schedule_runs(message
 CREATE INDEX IF NOT EXISTS idx_facts_category ON facts(category);
 CREATE INDEX IF NOT EXISTS idx_facts_created_at ON facts(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_facts_importance_created_at ON facts(importance DESC, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS session_summaries (
+	session_id TEXT PRIMARY KEY,
+	thread_id TEXT NOT NULL DEFAULT '',
+	summary TEXT NOT NULL DEFAULT '',
+	embedding BLOB,
+	last_indexed_step INTEGER NOT NULL DEFAULT -1,
+	last_mtime DATETIME,
+	summary_step_watermark INTEGER NOT NULL DEFAULT -1,
+	is_settled BOOLEAN NOT NULL DEFAULT 0,
+	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS transcript_steps (
+	session_id TEXT NOT NULL,
+	step_index INTEGER NOT NULL,
+	step_type TEXT NOT NULL DEFAULT '',
+	tool_name TEXT NOT NULL DEFAULT '',
+	content TEXT NOT NULL DEFAULT '',
+	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY (session_id, step_index),
+	FOREIGN KEY (session_id) REFERENCES session_summaries(session_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_session_summaries_mtime ON session_summaries(last_mtime);
+CREATE INDEX IF NOT EXISTS idx_session_summaries_thread ON session_summaries(thread_id);
+CREATE INDEX IF NOT EXISTS idx_transcript_steps_tool ON transcript_steps(tool_name);
 `
 
 func initSchemaSQLite(database *sql.DB) error {
 	pragmas := `
+	PRAGMA foreign_keys = ON;
 	PRAGMA journal_mode = WAL;
 	PRAGMA busy_timeout = 5000;
 	PRAGMA synchronous = NORMAL;
@@ -234,9 +263,9 @@ func initTestSQLite(dsn string) (*sql.DB, error) {
 	sqliteDSN := trimmed
 	if trimmed != ":memory:" && !strings.Contains(trimmed, "_pragma") {
 		if strings.Contains(trimmed, "?") {
-			sqliteDSN += "&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"
+			sqliteDSN += "&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(1)"
 		} else {
-			sqliteDSN += "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"
+			sqliteDSN += "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(1)"
 		}
 	}
 

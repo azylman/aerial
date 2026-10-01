@@ -622,3 +622,26 @@ func TestBuildOneShot_EffortPropagation(t *testing.T) {
 		t.Fatalf("expected msg.Effort == 'low', got %q", msg.Effort)
 	}
 }
+
+func TestShouldRunTranscriptSync(t *testing.T) {
+	tests := []struct {
+		tickCount int
+		expected  bool
+	}{
+		{tickCount: -10, expected: false},
+		{tickCount: 0, expected: false},
+		{tickCount: 1, expected: false},
+		{tickCount: 9, expected: false},
+		{tickCount: 10, expected: true},
+		{tickCount: 11, expected: false},
+		{tickCount: 20, expected: true},
+		{tickCount: 120, expected: true},
+		{tickCount: 2880, expected: true},
+	}
+	for _, tc := range tests {
+		got := ShouldRunTranscriptSync(tc.tickCount)
+		if got != tc.expected {
+			t.Errorf("tick %d: ShouldRunTranscriptSync expected %v, got %v", tc.tickCount, tc.expected, got)
+		}
+	}
+}

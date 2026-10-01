@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"math"
 	"sort"
 	"strings"
@@ -12,11 +13,12 @@ import (
 )
 
 var (
-	_ Store         = (*FakeStore)(nil)
-	_ MessageStore  = (*FakeStore)(nil)
-	_ ScheduleStore = (*FakeStore)(nil)
-	_ SessionStore  = (*FakeStore)(nil)
-	_ FactStore     = (*FakeStore)(nil)
+	_ Store           = (*FakeStore)(nil)
+	_ MessageStore    = (*FakeStore)(nil)
+	_ ScheduleStore   = (*FakeStore)(nil)
+	_ SessionStore    = (*FakeStore)(nil)
+	_ FactStore       = (*FakeStore)(nil)
+	_ TranscriptStore = (*FakeStore)(nil)
 )
 
 type threadSummaryRecord struct {
@@ -51,22 +53,28 @@ type FakeStore struct {
 	nextFactID   int64
 	watermarks   map[string]int64
 	extractedAt  map[string]time.Time
+
+	// TranscriptStore state
+	sessionSummaries map[string]*SessionSummary
+	transcriptSteps  map[string][]TranscriptStep
 }
 
 // NewFakeStore constructs an initialized, empty in-memory FakeStore.
 func NewFakeStore() *FakeStore {
 	return &FakeStore{
-		failNext:        make(map[string]error),
-		messages:        make(map[string]*Message),
-		messageOrder:    make([]string, 0),
-		sessions:        make(map[string]*SessionInfo),
-		threadSummaries: make(map[string]threadSummaryRecord),
-		oneShots:        make(map[string]*OneShotSchedule),
-		crons:           make(map[string]*CronSchedule),
-		runs:            make(map[string]*ScheduleRun),
-		facts:           make(map[int64]*FactWithEmbedding),
-		watermarks:      make(map[string]int64),
-		extractedAt:     make(map[string]time.Time),
+		failNext:         make(map[string]error),
+		messages:         make(map[string]*Message),
+		messageOrder:     make([]string, 0),
+		sessions:         make(map[string]*SessionInfo),
+		threadSummaries:  make(map[string]threadSummaryRecord),
+		oneShots:         make(map[string]*OneShotSchedule),
+		crons:            make(map[string]*CronSchedule),
+		runs:             make(map[string]*ScheduleRun),
+		facts:            make(map[int64]*FactWithEmbedding),
+		watermarks:       make(map[string]int64),
+		extractedAt:      make(map[string]time.Time),
+		sessionSummaries: make(map[string]*SessionSummary),
+		transcriptSteps:  make(map[string][]TranscriptStep),
 	}
 }
 
@@ -163,6 +171,26 @@ func cloneFactWithEmbedding(fe *FactWithEmbedding) *FactWithEmbedding {
 		copy(cp.Embedding, fe.Embedding)
 	}
 	return &cp
+}
+
+func cloneSessionSummary(s *SessionSummary) *SessionSummary {
+	if s == nil {
+		return nil
+	}
+	cp := *s
+	if s.Embedding != nil {
+		cp.Embedding = append([]float32(nil), s.Embedding...)
+	}
+	return &cp
+}
+
+func cloneTranscriptSteps(steps []TranscriptStep) []TranscriptStep {
+	if steps == nil {
+		return nil
+	}
+	cp := make([]TranscriptStep, len(steps))
+	copy(cp, steps)
+	return cp
 }
 
 // =========================================================================
@@ -1487,19 +1515,21 @@ func (f *FakeStore) WithTx(ctx context.Context, fn func(txStore Store) error) er
 
 	// Create an isolated snapshot copy of current state
 	txCopy := &FakeStore{
-		failNext:        make(map[string]error),
-		messages:        make(map[string]*Message, len(f.messages)),
-		messageOrder:    make([]string, len(f.messageOrder)),
-		nextRowID:       f.nextRowID,
-		sessions:        make(map[string]*SessionInfo, len(f.sessions)),
-		threadSummaries: make(map[string]threadSummaryRecord, len(f.threadSummaries)),
-		oneShots:        make(map[string]*OneShotSchedule, len(f.oneShots)),
-		crons:           make(map[string]*CronSchedule, len(f.crons)),
-		runs:            make(map[string]*ScheduleRun, len(f.runs)),
-		facts:           make(map[int64]*FactWithEmbedding, len(f.facts)),
-		nextFactID:      f.nextFactID,
-		watermarks:      make(map[string]int64, len(f.watermarks)),
-		extractedAt:     make(map[string]time.Time, len(f.extractedAt)),
+		failNext:         make(map[string]error),
+		messages:         make(map[string]*Message, len(f.messages)),
+		messageOrder:     make([]string, len(f.messageOrder)),
+		nextRowID:        f.nextRowID,
+		sessions:         make(map[string]*SessionInfo, len(f.sessions)),
+		threadSummaries:  make(map[string]threadSummaryRecord, len(f.threadSummaries)),
+		oneShots:         make(map[string]*OneShotSchedule, len(f.oneShots)),
+		crons:            make(map[string]*CronSchedule, len(f.crons)),
+		runs:             make(map[string]*ScheduleRun, len(f.runs)),
+		facts:            make(map[int64]*FactWithEmbedding, len(f.facts)),
+		nextFactID:       f.nextFactID,
+		watermarks:       make(map[string]int64, len(f.watermarks)),
+		extractedAt:      make(map[string]time.Time, len(f.extractedAt)),
+		sessionSummaries: make(map[string]*SessionSummary, len(f.sessionSummaries)),
+		transcriptSteps:  make(map[string][]TranscriptStep, len(f.transcriptSteps)),
 	}
 
 	copy(txCopy.messageOrder, f.messageOrder)
@@ -1530,6 +1560,12 @@ func (f *FakeStore) WithTx(ctx context.Context, fn func(txStore Store) error) er
 	for k, v := range f.extractedAt {
 		txCopy.extractedAt[k] = v
 	}
+	for k, v := range f.sessionSummaries {
+		txCopy.sessionSummaries[k] = cloneSessionSummary(v)
+	}
+	for k, v := range f.transcriptSteps {
+		txCopy.transcriptSteps[k] = cloneTranscriptSteps(v)
+	}
 	f.mu.Unlock()
 
 	// Execute transaction function on isolated copy (no outer locks held = zero deadlocks)
@@ -1557,5 +1593,260 @@ func (f *FakeStore) WithTx(ctx context.Context, fn func(txStore Store) error) er
 	f.nextFactID = txCopy.nextFactID
 	f.watermarks = txCopy.watermarks
 	f.extractedAt = txCopy.extractedAt
+	f.sessionSummaries = txCopy.sessionSummaries
+	f.transcriptSteps = txCopy.transcriptSteps
 	return nil
+}
+
+// =========================================================================
+// TranscriptStore implementation
+// =========================================================================
+
+func (f *FakeStore) GetSessionSyncStates(ctx context.Context) (map[string]SessionSyncState, error) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if err := f.checkClosedAndFail("GetSessionSyncStates"); err != nil {
+		return nil, err
+	}
+
+	res := make(map[string]SessionSyncState, len(f.sessionSummaries))
+	for id, s := range f.sessionSummaries {
+		if s == nil {
+			continue
+		}
+		res[id] = SessionSyncState{
+			SessionID:       id,
+			LastMtime:       s.LastMtime,
+			LastIndexedStep: s.LastIndexedStep,
+			IsSettled:       s.IsSettled,
+		}
+	}
+	return res, nil
+}
+
+func (f *FakeStore) UpsertSessionSummary(ctx context.Context, summary SessionSummary) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.checkClosedAndFail("UpsertSessionSummary"); err != nil {
+		return err
+	}
+
+	if strings.TrimSpace(summary.SessionID) == "" {
+		return fmt.Errorf("session ID cannot be empty")
+	}
+
+	now := time.Now().UTC()
+	if existing, ok := f.sessionSummaries[summary.SessionID]; ok && existing != nil {
+		if summary.ThreadID != "" {
+			existing.ThreadID = summary.ThreadID
+		}
+		if summary.Summary != "" {
+			existing.Summary = summary.Summary
+		}
+		if len(summary.Embedding) > 0 {
+			existing.Embedding = append([]float32(nil), summary.Embedding...)
+		}
+		if summary.LastIndexedStep >= 0 {
+			existing.LastIndexedStep = summary.LastIndexedStep
+		} else if summary.LastIndexedStep == -2 {
+			existing.LastIndexedStep = -1
+		}
+		if !summary.LastMtime.IsZero() {
+			existing.LastMtime = summary.LastMtime
+		}
+		if summary.SummaryStepWatermark >= 0 {
+			existing.SummaryStepWatermark = summary.SummaryStepWatermark
+		}
+		if summary.IsSettled {
+			existing.IsSettled = true
+		} else if summary.LastIndexedStep > existing.SummaryStepWatermark && existing.SummaryStepWatermark >= 0 {
+			existing.IsSettled = false
+		}
+		existing.UpdatedAt = now
+		return nil
+	}
+
+	cp := summary
+	if cp.CreatedAt.IsZero() {
+		cp.CreatedAt = now
+	}
+	cp.UpdatedAt = now
+	f.sessionSummaries[summary.SessionID] = cloneSessionSummary(&cp)
+	return nil
+}
+
+func (f *FakeStore) BatchInsertTranscriptSteps(ctx context.Context, steps []TranscriptStep) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.checkClosedAndFail("BatchInsertTranscriptSteps"); err != nil {
+		return err
+	}
+
+	now := time.Now().UTC()
+	for _, s := range steps {
+		if strings.TrimSpace(s.SessionID) == "" {
+			continue
+		}
+		cp := s
+		if cp.CreatedAt.IsZero() {
+			cp.CreatedAt = now
+		}
+
+		existingSteps := f.transcriptSteps[s.SessionID]
+		found := false
+		for _, existing := range existingSteps {
+			if existing.StepIndex == s.StepIndex {
+				found = true
+				break
+			}
+		}
+		if !found {
+			f.transcriptSteps[s.SessionID] = append(f.transcriptSteps[s.SessionID], cp)
+		}
+	}
+	return nil
+}
+
+func (f *FakeStore) SearchSessionSummaries(ctx context.Context, embedding []float32, queryText string, limit int, minScore float64) ([]SessionSummary, error) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if err := f.checkClosedAndFail("SearchSessionSummaries"); err != nil {
+		return nil, err
+	}
+
+	hasEmbedding := len(embedding) == ExpectedEmbeddingDim
+	queryText = strings.TrimSpace(queryText)
+	hasText := queryText != ""
+
+	if !hasEmbedding && !hasText {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 10
+	}
+	if minScore < 0 {
+		minScore = 0.0
+	}
+
+	qLower := strings.ToLower(queryText)
+	var scored []SessionSummary
+
+	for _, s := range f.sessionSummaries {
+		if s == nil {
+			continue
+		}
+		var sim float64
+		if hasEmbedding && len(s.Embedding) == ExpectedEmbeddingDim {
+			sim = cosineSimilarity(embedding, s.Embedding)
+		}
+		var textScore float64
+		if hasText {
+			if strings.Contains(strings.ToLower(s.Summary), qLower) {
+				textScore = 1.0
+			} else {
+				words := strings.Fields(qLower)
+				matchedWords := 0
+				for _, w := range words {
+					if strings.Contains(strings.ToLower(s.Summary), w) {
+						matchedWords++
+					}
+				}
+				if len(words) > 0 && matchedWords > 0 {
+					textScore = float64(matchedWords) / float64(len(words))
+				}
+			}
+		}
+		var score float64
+		if hasEmbedding && hasText {
+			score = 0.50*sim + 0.50*textScore
+		} else if hasEmbedding {
+			score = sim
+		} else if hasText {
+			score = textScore
+		}
+
+		if score >= minScore {
+			cp := *cloneSessionSummary(s)
+			cp.Score = score
+			scored = append(scored, cp)
+		}
+	}
+
+	sort.Slice(scored, func(i, j int) bool {
+		return scored[i].Score > scored[j].Score
+	})
+	if len(scored) > limit {
+		scored = scored[:limit]
+	}
+	return scored, nil
+}
+
+func (f *FakeStore) SearchTranscriptSteps(ctx context.Context, queryText, sessionFilter, toolFilter string, limit int) ([]TranscriptStep, error) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if err := f.checkClosedAndFail("SearchTranscriptSteps"); err != nil {
+		return nil, err
+	}
+
+	queryText = strings.TrimSpace(queryText)
+	sessionFilter = strings.TrimSpace(sessionFilter)
+	toolFilter = strings.TrimSpace(toolFilter)
+
+	if queryText == "" && sessionFilter == "" && toolFilter == "" {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+
+	qLower := strings.ToLower(queryText)
+	var matched []TranscriptStep
+
+	for sid, steps := range f.transcriptSteps {
+		if sessionFilter != "" && sid != sessionFilter {
+			continue
+		}
+		for _, s := range steps {
+			if toolFilter != "" && s.ToolName != toolFilter {
+				continue
+			}
+			isMatch := queryText == ""
+			if !isMatch {
+				if strings.Contains(strings.ToLower(s.Content), qLower) {
+					isMatch = true
+				} else {
+					words := strings.Fields(qLower)
+					allMatch := len(words) > 0
+					for _, w := range words {
+						if !strings.Contains(strings.ToLower(s.Content), w) {
+							allMatch = false
+							break
+						}
+					}
+					isMatch = allMatch
+				}
+			}
+			if isMatch {
+				cp := s
+				cp.RankScore = 1.0
+				matched = append(matched, cp)
+			}
+		}
+	}
+
+	sort.Slice(matched, func(i, j int) bool {
+		return matched[i].CreatedAt.After(matched[j].CreatedAt)
+	})
+	if len(matched) > limit {
+		matched = matched[:limit]
+	}
+	return matched, nil
+}
+
+// DeleteSessionSummary removes a session summary and cascades deletion of its transcript steps.
+func (f *FakeStore) DeleteSessionSummary(sessionID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.sessionSummaries, sessionID)
+	delete(f.transcriptSteps, sessionID)
 }

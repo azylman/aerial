@@ -254,3 +254,8 @@ func ShouldRunPruneRetention(tickCount int) bool {
 func ShouldRunMemoryDecay(tickCount int) bool {
 	return tickCount > 0 && tickCount%2880 == 60
 }
+
+// ShouldRunTranscriptSync returns true when tickCount represents a 5-minute interval (every 10 ticks at 30s).
+func ShouldRunTranscriptSync(tickCount int) bool {
+	return tickCount > 0 && tickCount%10 == 0
+}
