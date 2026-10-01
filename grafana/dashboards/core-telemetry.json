@@ -2629,7 +2629,7 @@
       "pluginVersion": "11.1.0",
       "targets": [
         {
-          "expr": "sum by (model, error_type) (increase(aerial_brain_model_quota_errors_total[10m]))",
+          "expr": "sum by (model, error_type) (increase(aerial_brain_runner_errors_total{error_type=~\"capacity_.*|quota_.*|resource_exhausted|individual_quota_reached\"}[10m]))",
           "legendFormat": "{{error_type}} ({{model}})",
           "refId": "A"
         }
@@ -2873,7 +2873,7 @@
       "pluginVersion": "11.1.0",
       "targets": [
         {
-          "expr": "sum(increase(aerial_brain_model_quota_errors_total[10m]))",
+          "expr": "sum(increase(aerial_brain_runner_errors_total{error_type=~\"capacity_.*|quota_.*|resource_exhausted|individual_quota_reached\"}[10m]))",
           "legendFormat": "Rate Limiting Errors",
           "refId": "A"
         },
@@ -2920,6 +2920,6 @@
   "timezone": "browser",
   "title": "\u26a1 Aerial Brain & GitSync Operations",
   "uid": "aerial-core-telemetry",
-  "version": 5,
+  "version": 6,
   "weekStart": ""
 }
