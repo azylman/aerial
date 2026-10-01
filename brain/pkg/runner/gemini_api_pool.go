@@ -17,23 +17,17 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/azylman/aerial/brain/pkg/mcp"
 )
 
 var apiKeyQueryRegex = regexp.MustCompile(`(?i)(key=)[^& \t\r\n"']+`)
 
 // MCPServerConfig represents an endpoint configuration for an MCP microservice.
-type MCPServerConfig struct {
-	Name      string            `json:"name"`
-	ServerURL string            `json:"serverUrl"`
-	Headers   map[string]string `json:"headers,omitempty"`
-}
+type MCPServerConfig = mcp.ServerConfig
 
 // MCPTool represents a tool definition returned by an MCP server tools/list call.
-type MCPTool struct {
-	Name        string                 `json:"name"`
-	Description string                 `json:"description,omitempty"`
-	InputSchema map[string]interface{} `json:"inputSchema,omitempty"`
-}
+type MCPTool = mcp.Tool
 
 // MCPDispatcher abstracts tool discovery and tool execution across MCP servers.
 type MCPDispatcher interface {
@@ -342,461 +336,62 @@ func isMissingSessionIDErr(statusCode int, bodyBytes []byte, rpcResp *jsonRPCRes
 
 // DefaultMCPDispatcher discovers and dispatches tools across configured HTTP/SSE MCP servers.
 type DefaultMCPDispatcher struct {
-	servers      []MCPServerConfig
-	httpClient   *http.Client
-	toolRoutes   map[string]MCPServerConfig
-	sessionIDs   map[string]string
-	serverMu     map[string]*sync.Mutex
-	allowedTools map[string]struct{}
-	mu           sync.RWMutex
+	d          *mcp.DefaultDispatcher
+	toolRoutes map[string]MCPServerConfig
 }
 
 var _ MCPDispatcher = (*DefaultMCPDispatcher)(nil)
 
-// NewDefaultMCPDispatcher constructs a DefaultMCPDispatcher with optional allowed tools filter.
-// A nil allowedTools slice (or omitted) allows all discovered tools.
-// An empty non-nil slice ([]string{}) blocks all tools.
 func NewDefaultMCPDispatcher(servers []MCPServerConfig, client *http.Client, allowedTools ...[]string) *DefaultMCPDispatcher {
-	if client == nil {
-		client = &http.Client{Timeout: 15 * time.Second}
-	}
-	var allowedMap map[string]struct{}
-	if len(allowedTools) > 0 && allowedTools[0] != nil {
-		allowedMap = make(map[string]struct{}, len(allowedTools[0]))
-		for _, t := range allowedTools[0] {
-			trimmed := strings.TrimSpace(t)
-			if trimmed != "" {
-				allowedMap[trimmed] = struct{}{}
-			}
-		}
-	}
 	return &DefaultMCPDispatcher{
-		servers:      servers,
-		httpClient:   client,
-		toolRoutes:   make(map[string]MCPServerConfig),
-		sessionIDs:   make(map[string]string),
-		serverMu:     make(map[string]*sync.Mutex),
-		allowedTools: allowedMap,
+		d:          mcp.NewDispatcher(servers, client, allowedTools...),
+		toolRoutes: make(map[string]MCPServerConfig),
 	}
 }
 
-func (d *DefaultMCPDispatcher) getServerMutex(serverName string) *sync.Mutex {
-	d.mu.RLock()
-	mu, ok := d.serverMu[serverName]
-	d.mu.RUnlock()
-	if ok {
-		return mu
-	}
-
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if mu, ok = d.serverMu[serverName]; ok {
-		return mu
-	}
-	mu = &sync.Mutex{}
-	d.serverMu[serverName] = mu
-	return mu
-}
-
-// ensureSession performs the standard MCP initialize handshake and caches the session ID.
-func (d *DefaultMCPDispatcher) ensureSession(ctx context.Context, srv MCPServerConfig) (string, error) {
-	d.mu.RLock()
-	sessID, ok := d.sessionIDs[srv.Name]
-	d.mu.RUnlock()
-	if ok && sessID != "" {
-		return sessID, nil
-	}
-
-	// Acquire per-server mutex to serialize handshake per server without stalling global dispatcher
-	sMu := d.getServerMutex(srv.Name)
-	sMu.Lock()
-	defer sMu.Unlock()
-
-	// Re-check after acquiring per-server lock
-	d.mu.RLock()
-	sessID, ok = d.sessionIDs[srv.Name]
-	d.mu.RUnlock()
-	if ok && sessID != "" {
-		return sessID, nil
-	}
-
-	initReqBody, err := json.Marshal(map[string]interface{}{
-		"jsonrpc": "2.0",
-		"id":      1,
-		"method":  "initialize",
-		"params": map[string]interface{}{
-			"protocolVersion": "2024-11-05",
-			"capabilities":    map[string]interface{}{},
-			"clientInfo": map[string]interface{}{
-				"name":    "aerial",
-				"version": "1.0.0",
-			},
-		},
-	})
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal initialize request: %w", err)
-	}
-
-	initReq, err := http.NewRequestWithContext(ctx, http.MethodPost, srv.ServerURL, bytes.NewReader(initReqBody))
-	if err != nil {
-		return "", fmt.Errorf("failed to create initialize request for %s: %w", srv.Name, err)
-	}
-	initReq.Header.Set("Content-Type", "application/json")
-	initReq.Header.Set("Accept", "application/json, text/event-stream")
-	for k, v := range srv.Headers {
-		initReq.Header.Set(k, v)
-	}
-
-	initResp, err := d.httpClient.Do(initReq)
-	if err != nil {
-		return "", fmt.Errorf("failed to send initialize to %s: %w", srv.Name, err)
-	}
-	defer initResp.Body.Close()
-
-	initRespBytes, rErr := io.ReadAll(io.LimitReader(initResp.Body, 512*1024))
-	if rErr != nil || initResp.StatusCode < 200 || initResp.StatusCode >= 300 {
-		return "", fmt.Errorf("mcp server %s initialize returned status %d: %s", srv.Name, initResp.StatusCode, string(initRespBytes))
-	}
-
-	sessID = initResp.Header.Get("mcp-session-id")
-	if sessID == "" {
-		sessID = initResp.Header.Get("Mcp-Session-Id")
-	}
-	if sessID == "" {
-		for k, v := range initResp.Header {
-			if strings.EqualFold(k, "mcp-session-id") && len(v) > 0 {
-				sessID = v[0]
-				break
-			}
-		}
-	}
-
-	if sessID != "" {
-		d.mu.Lock()
-		d.sessionIDs[srv.Name] = sessID
-		d.mu.Unlock()
-	}
-
-	// Send notifications/initialized notification
-	notifyReqBody, err := json.Marshal(map[string]interface{}{
-		"jsonrpc": "2.0",
-		"method":  "notifications/initialized",
-	})
-	if err == nil {
-		notifyReq, err := http.NewRequestWithContext(ctx, http.MethodPost, srv.ServerURL, bytes.NewReader(notifyReqBody))
-		if err == nil {
-			notifyReq.Header.Set("Content-Type", "application/json")
-			notifyReq.Header.Set("Accept", "application/json, text/event-stream")
-			for k, v := range srv.Headers {
-				notifyReq.Header.Set(k, v)
-			}
-			if sessID != "" {
-				notifyReq.Header.Set("mcp-session-id", sessID)
-			}
-			notifyResp, nErr := d.httpClient.Do(notifyReq)
-			if nErr == nil && notifyResp != nil {
-				if _, drainErr := io.Copy(io.Discard, notifyResp.Body); drainErr != nil {
-					log.Printf("[MCPDispatcher] Warning reading notification body: %v", drainErr)
-				}
-				_ = notifyResp.Body.Close()
-			}
-		}
-	}
-
-	return sessID, nil
-}
-
-// ListDeclarations queries all configured MCP servers via tools/list and returns Gemini function declarations.
 func (d *DefaultMCPDispatcher) ListDeclarations(ctx context.Context) ([]geminiFunctionDeclaration, error) {
-	if d == nil || len(d.servers) == 0 {
+	if d == nil || d.d == nil {
 		return nil, nil
 	}
-
-	var allDecls []geminiFunctionDeclaration
-	reqBody, err := json.Marshal(map[string]interface{}{
-		"jsonrpc": "2.0",
-		"id":      1,
-		"method":  "tools/list",
-		"params":  map[string]interface{}{},
-	})
+	tools, err := d.d.ListTools(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal tools/list payload: %w", err)
+		return nil, err
 	}
-
-	for _, srv := range d.servers {
-		if strings.TrimSpace(srv.ServerURL) == "" {
-			continue
-		}
-
-		d.mu.RLock()
-		sessID := d.sessionIDs[srv.Name]
-		d.mu.RUnlock()
-
-		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, srv.ServerURL, bytes.NewReader(reqBody))
-		if err != nil {
-			log.Printf("[MCPDispatcher] Failed to create request for %s: %v", srv.Name, err)
-			continue
-		}
-		httpReq.Header.Set("Content-Type", "application/json")
-		httpReq.Header.Set("Accept", "application/json, text/event-stream")
-		for k, v := range srv.Headers {
-			httpReq.Header.Set(k, v)
-		}
-		if sessID != "" {
-			httpReq.Header.Set("mcp-session-id", sessID)
-		}
-
-		resp, err := d.httpClient.Do(httpReq)
-		if err != nil {
-			log.Printf("[MCPDispatcher] Failed to query tools/list on %s: %v", srv.Name, err)
-			continue
-		}
-		respBytes, rErr := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
-		_ = resp.Body.Close()
-
-		rpcResp, parseErr := parseJSONRPCBody(respBytes)
-		if rErr == nil && isMissingSessionIDErr(resp.StatusCode, respBytes, rpcResp) {
-			d.mu.Lock()
-			if d.sessionIDs[srv.Name] == sessID {
-				delete(d.sessionIDs, srv.Name)
-			}
-			d.mu.Unlock()
-
-			newSessID, sErr := d.ensureSession(ctx, srv)
-			if sErr != nil {
-				log.Printf("[MCPDispatcher] Failed to ensure session for %s: %v", srv.Name, sErr)
-				continue
-			}
-
-			retryReq, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, srv.ServerURL, bytes.NewReader(reqBody))
-			if reqErr != nil {
-				log.Printf("[MCPDispatcher] Failed to create retry request for %s: %v", srv.Name, reqErr)
-				continue
-			}
-			retryReq.Header.Set("Content-Type", "application/json")
-			retryReq.Header.Set("Accept", "application/json, text/event-stream")
-			for k, v := range srv.Headers {
-				retryReq.Header.Set(k, v)
-			}
-			if newSessID != "" {
-				retryReq.Header.Set("mcp-session-id", newSessID)
-			}
-
-			retryResp, doErr := d.httpClient.Do(retryReq)
-			if doErr != nil {
-				log.Printf("[MCPDispatcher] Failed to query tools/list on retry for %s: %v", srv.Name, doErr)
-				continue
-			}
-			resp = retryResp
-			respBytes, rErr = io.ReadAll(io.LimitReader(retryResp.Body, 512*1024))
-			_ = retryResp.Body.Close()
-			rpcResp, parseErr = parseJSONRPCBody(respBytes)
-		}
-
-		if rErr != nil || resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			log.Printf("[MCPDispatcher] Non-200 or read error from %s: status=%d err=%v", srv.Name, resp.StatusCode, rErr)
-			continue
-		}
-
-		if parseErr != nil || rpcResp == nil {
-			log.Printf("[MCPDispatcher] Empty or invalid JSON-RPC response from %s: %v", srv.Name, parseErr)
-			continue
-		}
-		if rpcResp.Error != nil {
-			log.Printf("[MCPDispatcher] MCP server %s returned error: %s (code %d)", srv.Name, rpcResp.Error.Message, rpcResp.Error.Code)
-			continue
-		}
-
-		var listResult struct {
-			Tools []MCPTool `json:"tools"`
-		}
-		if err := json.Unmarshal(rpcResp.Result, &listResult); err != nil {
-			log.Printf("[MCPDispatcher] Failed to unmarshal tools from %s: %v", srv.Name, err)
-			continue
-		}
-
-		d.mu.Lock()
-		for _, tool := range listResult.Tools {
-			if tool.Name == "" {
-				continue
-			}
-			if d.allowedTools != nil {
-				if _, allowed := d.allowedTools[tool.Name]; !allowed {
-					continue
-				}
-			}
-			d.toolRoutes[tool.Name] = srv
-			decl := geminiFunctionDeclaration{
-				Name:        tool.Name,
-				Description: tool.Description,
-				Parameters:  cleanParameters(tool.InputSchema),
-			}
-			allDecls = append(allDecls, decl)
-		}
-		d.mu.Unlock()
+	var decls []geminiFunctionDeclaration
+	for _, t := range tools {
+		decls = append(decls, geminiFunctionDeclaration{
+			Name:        t.Name,
+			Description: t.Description,
+			Parameters:  cleanParameters(t.InputSchema),
+		})
 	}
-
-	return allDecls, nil
+	return decls, nil
 }
 
-// Execute calls a named tool on the corresponding MCP server with the provided arguments.
 func (d *DefaultMCPDispatcher) Execute(ctx context.Context, name string, args map[string]interface{}) (string, error) {
-	if d == nil {
+	if d == nil || d.d == nil {
 		return "", errors.New("mcp dispatcher is nil")
 	}
-
-	d.mu.RLock()
-	if d.allowedTools != nil {
-		if _, allowed := d.allowedTools[name]; !allowed {
-			d.mu.RUnlock()
+	if d.toolRoutes != nil {
+		if srv, ok := d.toolRoutes[name]; ok {
+			d.d.RegisterToolRoute(name, srv)
+		}
+	}
+	res, err := d.d.Execute(ctx, name, args)
+	if err != nil {
+		if strings.Contains(err.Error(), "is not in the allowed tools list") {
 			return "", fmt.Errorf("tool %q is not in the allowed voice tools list", name)
 		}
+		return res, err
 	}
-	srv, ok := d.toolRoutes[name]
-	d.mu.RUnlock()
+	return res, nil
+}
 
-	if !ok {
-		// Attempt JIT discovery if route is unknown
-		if _, listErr := d.ListDeclarations(ctx); listErr != nil {
-			log.Printf("[MCPDispatcher] JIT ListDeclarations warning: %v", listErr)
-		}
-		d.mu.RLock()
-		srv, ok = d.toolRoutes[name]
-		d.mu.RUnlock()
-		if !ok {
-			return "", fmt.Errorf("tool %q not found on any configured MCP server", name)
-		}
+func (d *DefaultMCPDispatcher) Prime(ctx context.Context) error {
+	if d == nil || d.d == nil {
+		return nil
 	}
-
-	if args == nil {
-		args = make(map[string]interface{})
-	}
-
-	// Normalize dummy user_google_email parameters so Google Workspace MCP uses its default authenticated user
-	if val, ok := args["user_google_email"].(string); ok {
-		trimmed := strings.ToLower(strings.TrimSpace(val))
-		if trimmed == "primary" || trimmed == "me" || trimmed == "default" || trimmed == "" {
-			delete(args, "user_google_email")
-		}
-	}
-
-	reqBody, err := json.Marshal(map[string]interface{}{
-		"jsonrpc": "2.0",
-		"id":      1,
-		"method":  "tools/call",
-		"params": map[string]interface{}{
-			"name":      name,
-			"arguments": args,
-		},
-	})
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal tools/call request: %w", err)
-	}
-
-	d.mu.RLock()
-	sessID := d.sessionIDs[srv.Name]
-	d.mu.RUnlock()
-
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, srv.ServerURL, bytes.NewReader(reqBody))
-	if err != nil {
-		return "", fmt.Errorf("failed to create http request for tool %q: %w", name, err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Accept", "application/json, text/event-stream")
-	for k, v := range srv.Headers {
-		httpReq.Header.Set(k, v)
-	}
-	if sessID != "" {
-		httpReq.Header.Set("mcp-session-id", sessID)
-	}
-
-	resp, err := d.httpClient.Do(httpReq)
-	if err != nil {
-		return "", fmt.Errorf("failed to call tool %q on %s: %w", name, srv.Name, err)
-	}
-
-	respBytes, rErr := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
-	_ = resp.Body.Close()
-	if rErr != nil {
-		return "", fmt.Errorf("failed to read response for tool %q: %w", name, rErr)
-	}
-
-	rpcResp, parseErr := parseJSONRPCBody(respBytes)
-	if isMissingSessionIDErr(resp.StatusCode, respBytes, rpcResp) {
-		d.mu.Lock()
-		if d.sessionIDs[srv.Name] == sessID {
-			delete(d.sessionIDs, srv.Name)
-		}
-		d.mu.Unlock()
-
-		newSessID, sErr := d.ensureSession(ctx, srv)
-		if sErr != nil {
-			return "", fmt.Errorf("failed to establish session with %s for tool %q: %w", srv.Name, name, sErr)
-		}
-
-		retryReq, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, srv.ServerURL, bytes.NewReader(reqBody))
-		if reqErr != nil {
-			return "", fmt.Errorf("failed to create retry request for tool %q: %w", name, reqErr)
-		}
-		retryReq.Header.Set("Content-Type", "application/json")
-		retryReq.Header.Set("Accept", "application/json, text/event-stream")
-		for k, v := range srv.Headers {
-			retryReq.Header.Set(k, v)
-		}
-		if newSessID != "" {
-			retryReq.Header.Set("mcp-session-id", newSessID)
-		}
-
-		retryResp, doErr := d.httpClient.Do(retryReq)
-		if doErr != nil {
-			return "", fmt.Errorf("failed to retry tool %q on %s: %w", name, srv.Name, doErr)
-		}
-		resp = retryResp
-		respBytes, rErr = io.ReadAll(io.LimitReader(retryResp.Body, 1024*1024))
-		_ = retryResp.Body.Close()
-		if rErr != nil {
-			return "", fmt.Errorf("failed to read retry response for tool %q: %w", name, rErr)
-		}
-		rpcResp, parseErr = parseJSONRPCBody(respBytes)
-	}
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("mcp server %s returned status %d: %s", srv.Name, resp.StatusCode, string(respBytes))
-	}
-
-	if parseErr != nil || rpcResp == nil {
-		return "", fmt.Errorf("empty or invalid JSON-RPC response for tool %q: %w", name, parseErr)
-	}
-	if rpcResp.Error != nil {
-		return "", fmt.Errorf("mcp tool %q error: %s (code %d)", name, rpcResp.Error.Message, rpcResp.Error.Code)
-	}
-
-	var callResult struct {
-		Content []struct {
-			Type string `json:"type"`
-			Text string `json:"text,omitempty"`
-		} `json:"content,omitempty"`
-		IsError bool `json:"isError,omitempty"`
-	}
-
-	if err := json.Unmarshal(rpcResp.Result, &callResult); err == nil && len(callResult.Content) > 0 {
-		var sb strings.Builder
-		for _, c := range callResult.Content {
-			if c.Text != "" {
-				if sb.Len() > 0 {
-					sb.WriteString("\n")
-				}
-				sb.WriteString(c.Text)
-			}
-		}
-		resText := sb.String()
-		if callResult.IsError {
-			return resText, fmt.Errorf("tool %q returned error: %s", name, resText)
-		}
-		return resText, nil
-	}
-
-	return string(rpcResp.Result), nil
+	return d.d.Prime(ctx)
 }
 
 // GeminiAPIPoolConfig holds configuration for the GeminiAPIPool.
@@ -916,6 +511,15 @@ func NewGeminiAPIPool(cfg GeminiAPIPoolConfig) *GeminiAPIPool {
 	}
 	if cfg.MCPDispatcher == nil && len(cfg.MCPServers) > 0 {
 		cfg.MCPDispatcher = NewDefaultMCPDispatcher(cfg.MCPServers, cfg.HTTPClient, cfg.AllowedTools)
+	}
+	if disp, ok := cfg.MCPDispatcher.(*DefaultMCPDispatcher); ok && disp != nil {
+		go func() {
+			primeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := disp.Prime(primeCtx); err != nil {
+				log.Printf("[MCPDispatcher] Prime warning: %v", err)
+			}
+		}()
 	}
 	if strings.TrimSpace(cfg.SystemPrompt) == "" && cfg.DataDir != "" {
 		rulesDir := filepath.Join(cfg.DataDir, "runtimes", "voice", ".gemini", "config", "rules")

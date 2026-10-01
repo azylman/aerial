@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"text/template"
 	"time"
 
@@ -28,16 +30,18 @@ type ProviderConfig = config.AmbientContextConfig
 
 // Provider fetches tool data and renders ambient context using Go templates.
 type Provider struct {
-	cfg         config.AmbientContextConfig
-	invoker     MCPInvoker
-	cache       string
-	expiresAt   time.Time
-	mu          sync.RWMutex
-	sf          singleflight.Group
-	templateStr string
-	parsedTmpl  *template.Template
-	nowFunc     func() time.Time
-	cacheTTL    time.Duration
+	cfg           config.AmbientContextConfig
+	invoker       MCPInvoker
+	cache         string
+	expiresAt     time.Time
+	hardExpiresAt time.Time
+	refreshing    int32
+	mu            sync.RWMutex
+	sf            singleflight.Group
+	templateStr   string
+	parsedTmpl    *template.Template
+	nowFunc       func() time.Time
+	cacheTTL      time.Duration
 }
 
 // NewProvider creates and initializes a new ambient context Provider.
@@ -163,17 +167,13 @@ func (p *Provider) now() time.Time {
 	return p.nowFunc()
 }
 
-// Retrieve returns the rendered ambient context string, caching results in RAM for CacheTTL.
-func (p *Provider) Retrieve(ctx context.Context) (string, error) {
-	now := p.now()
-	p.mu.RLock()
-	if !p.expiresAt.IsZero() && now.Before(p.expiresAt) {
-		cached := p.cache
-		p.mu.RUnlock()
-		return cached, nil
-	}
-	p.mu.RUnlock()
+// Prime warms the ambient context cache eagerly.
+func (p *Provider) Prime(ctx context.Context) error {
+	_, err := p.fetchAndRender(ctx)
+	return err
+}
 
+func (p *Provider) fetchAndRender(ctx context.Context) (string, error) {
 	res, err, _ := p.sf.Do("ambient_fetch", func() (interface{}, error) {
 		curNow := p.now()
 		p.mu.RLock()
@@ -240,7 +240,9 @@ func (p *Provider) Retrieve(ctx context.Context) (string, error) {
 
 		p.mu.Lock()
 		p.cache = formatted
-		p.expiresAt = p.now().Add(p.cacheTTL)
+		now := p.now()
+		p.expiresAt = now.Add(p.cacheTTL)
+		p.hardExpiresAt = now.Add(2 * p.cacheTTL)
 		p.mu.Unlock()
 
 		return formatted, nil
@@ -254,4 +256,38 @@ func (p *Provider) Retrieve(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("unexpected ambient result type: %T", res)
 	}
 	return resStr, nil
+}
+
+// Retrieve returns the rendered ambient context string, caching results in RAM for CacheTTL.
+func (p *Provider) Retrieve(ctx context.Context) (string, error) {
+	now := p.now()
+	p.mu.RLock()
+	cached := p.cache
+	fresh := !p.expiresAt.IsZero() && now.Before(p.expiresAt)
+	withinHardTTL := !p.hardExpiresAt.IsZero() && now.Before(p.hardExpiresAt)
+	p.mu.RUnlock()
+
+	if fresh {
+		return cached, nil
+	}
+
+	if withinHardTTL && cached != "" {
+		if atomic.CompareAndSwapInt32(&p.refreshing, 0, 1) {
+			go func() {
+				defer atomic.StoreInt32(&p.refreshing, 0)
+				timeout := 250 * time.Millisecond
+				if p.cfg.TimeoutMs > 0 {
+					timeout = time.Duration(p.cfg.TimeoutMs) * time.Millisecond
+				}
+				bgCtx, cancel := context.WithTimeout(context.Background(), timeout)
+				defer cancel()
+				if _, err := p.fetchAndRender(bgCtx); err != nil {
+					log.Printf("[Ambient] SWR background refresh warning: %v", err)
+				}
+			}()
+		}
+		return cached, nil
+	}
+
+	return p.fetchAndRender(ctx)
 }

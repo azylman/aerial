@@ -401,8 +401,8 @@ func SearchSimilarFactsWithContext(ctx context.Context, database DBTX, isPg bool
 		FROM vector_hits v
 		FULL OUTER JOIN text_hits t ON v.id = t.id
 		JOIN facts f ON f.id = COALESCE(v.id, t.id)
-		WHERE (((COALESCE($4 / ($6 + v.rank), 0.0) + COALESCE($5 / ($6 + t.rank), 0.0)) * $6) * f.importance) >= $7
-		ORDER BY (((COALESCE($4 / ($6 + v.rank), 0.0) + COALESCE($5 / ($6 + t.rank), 0.0)) * $6) * f.importance) DESC
+		WHERE (((COALESCE($4::float8 / ($6::float8 + v.rank::float8), 0.0) + COALESCE($5::float8 / ($6::float8 + t.rank::float8), 0.0)) * $6::float8) * f.importance) >= $7
+		ORDER BY (((COALESCE($4::float8 / ($6::float8 + v.rank::float8), 0.0) + COALESCE($5::float8 / ($6::float8 + t.rank::float8), 0.0)) * $6::float8) * f.importance) DESC
 		LIMIT $8;
 		`
 		vec := pgvector.NewVector(embedding)
@@ -462,8 +462,8 @@ func SearchSimilarFactsWithContext(ctx context.Context, database DBTX, isPg bool
 			COALESCE(f.reinforce_count, 1) AS reinforce_count
 		FROM text_hits t
 		JOIN facts f ON f.id = t.id
-		WHERE ((($3 / ($4 + t.rank)) * $4) * f.importance) >= $5
-		ORDER BY ((($3 / ($4 + t.rank)) * $4) * f.importance) DESC
+		WHERE ((($3::float8 / ($4::float8 + t.rank::float8)) * $4::float8) * f.importance) >= $5
+		ORDER BY ((($3::float8 / ($4::float8 + t.rank::float8)) * $4::float8) * f.importance) DESC
 		LIMIT $6;
 		`
 		rows, err = database.QueryContext(ctx, query, queryText, candidateLimit, 1.0, DefaultRRFK, minScore, limit)

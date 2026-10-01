@@ -28,6 +28,7 @@ import (
 	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
 	"github.com/azylman/aerial/brain/pkg/delivery"
+	"github.com/azylman/aerial/brain/pkg/mcp"
 	"github.com/azylman/aerial/brain/pkg/memory"
 	"github.com/azylman/aerial/brain/pkg/metrics"
 	"github.com/azylman/aerial/brain/pkg/queue"
@@ -1157,11 +1158,18 @@ func createVoiceProcessPool(cfg *config.Config, voiceHome string, lowEffortModel
 		var ambRetriever runner.AmbientContextRetriever
 		if ambCfg := cur.VoiceAmbientContext(); ambCfg != nil {
 			voiceServers := extractVoiceMCPServers(cur)
-			disp := runner.NewDefaultMCPDispatcher(voiceServers, nil)
+			disp := mcp.NewDispatcher(voiceServers, nil)
 			p, pErr := ambient.NewProvider(*ambCfg, disp)
 			if pErr != nil {
 				log.Printf("[INIT] Warning: failed to initialize voice ambient provider: %v", pErr)
 			} else {
+				go func() {
+					primeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					defer cancel()
+					if err := p.Prime(primeCtx); err != nil {
+						log.Printf("[INIT] Ambient context prime warning: %v", err)
+					}
+				}()
 				ambRetriever = p.Retrieve
 				log.Printf("[INIT] Voice ambient context provider initialized (tools=%d, cache_ttl=%s)", len(ambCfg.Tools), ambCfg.CacheTTL)
 			}
@@ -1438,12 +1446,19 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 				curData = cfg.Current()
 			}
 			servers := extractAllMCPServers(curData)
-			disp := runner.NewDefaultMCPDispatcher(servers, nil)
+			disp := mcp.NewDispatcher(servers, nil)
 			var pErr error
 			prov, pErr = ambient.NewProvider(*ambCfg, disp)
 			if pErr != nil {
 				return "", fmt.Errorf("failed to create ambient provider: %w", pErr)
 			}
+			go func() {
+				primeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				if err := prov.Prime(primeCtx); err != nil {
+					log.Printf("[WorkerPool] Ambient context prime warning: %v", err)
+				}
+			}()
 			ambientProviders.Store(key, prov)
 		}
 		return prov.Retrieve(ctx)

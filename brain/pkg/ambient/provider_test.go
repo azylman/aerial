@@ -3,6 +3,7 @@ package ambient
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -392,9 +393,9 @@ func TestProvider_ExpiredCacheRefresh(t *testing.T) {
 		t.Errorf("expected 'Val: 1', got: %q", res1)
 	}
 
-	// Advance past TTL (6s > 5s)
+	// Advance past hard TTL (12s > 10s)
 	timeMu.Lock()
-	simulatedTime = simulatedTime.Add(6 * time.Second)
+	simulatedTime = simulatedTime.Add(12 * time.Second)
 	timeMu.Unlock()
 
 	// Call after expiration
@@ -659,6 +660,327 @@ func TestProvider_TemplateExecutionError(t *testing.T) {
 	_, err = p.Retrieve(context.Background())
 	if err == nil {
 		t.Errorf("expected template execution error, got nil")
+	}
+}
+
+func TestProvider_Prime(t *testing.T) {
+	t.Parallel()
+
+	inv := &mockInvoker{
+		execFunc: func(ctx context.Context, name string, args map[string]interface{}) (string, error) {
+			return `{"state": "primed"}`, nil
+		},
+	}
+
+	cfg := config.AmbientContextConfig{
+		CacheTTL: "30s",
+		Template: "State: {{.tool.state}}",
+		Tools: []config.AmbientToolConfig{
+			{Name: "tool", Tool: "state_tool"},
+		},
+	}
+
+	p, err := NewProvider(cfg, inv)
+	if err != nil {
+		t.Fatalf("NewProvider failed: %v", err)
+	}
+
+	// Prime upfront
+	if err := p.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime failed: %v", err)
+	}
+	if inv.CallCount() != 1 {
+		t.Fatalf("expected 1 call after Prime, got %d", inv.CallCount())
+	}
+
+	// Retrieve should hit cache immediately without extra tool invocation
+	res, err := p.Retrieve(context.Background())
+	if err != nil {
+		t.Fatalf("Retrieve failed: %v", err)
+	}
+	if !strings.Contains(res, "State: primed") {
+		t.Errorf("expected 'State: primed', got %q", res)
+	}
+	if inv.CallCount() != 1 {
+		t.Errorf("expected invoker call count to remain 1, got %d", inv.CallCount())
+	}
+}
+
+func TestProvider_StaleWhileRevalidate(t *testing.T) {
+	t.Parallel()
+
+	var counter int
+	var counterMu sync.Mutex
+	refreshDone := make(chan struct{})
+
+	inv := &mockInvoker{
+		execFunc: func(ctx context.Context, name string, args map[string]interface{}) (string, error) {
+			counterMu.Lock()
+			counter++
+			c := counter
+			counterMu.Unlock()
+			if c == 2 {
+				defer func() {
+					select {
+					case <-refreshDone:
+					default:
+						close(refreshDone)
+					}
+				}()
+			}
+			return fmt.Sprintf(`{"val": %d}`, c), nil
+		},
+	}
+
+	cfg := config.AmbientContextConfig{
+		CacheTTL:  "5s",
+		TimeoutMs: 1000,
+		Template:  "Val: {{.tool.val}}",
+		Tools: []config.AmbientToolConfig{
+			{Name: "tool", Tool: "val_tool"},
+		},
+	}
+
+	p, err := NewProvider(cfg, inv)
+	if err != nil {
+		t.Fatalf("NewProvider failed: %v", err)
+	}
+
+	simulatedTime := time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)
+	var timeMu sync.Mutex
+	p.SetNowFunc(func() time.Time {
+		timeMu.Lock()
+		defer timeMu.Unlock()
+		return simulatedTime
+	})
+
+	// 1. Initial Retrieve populates cache
+	res1, err := p.Retrieve(context.Background())
+	if err != nil {
+		t.Fatalf("first Retrieve failed: %v", err)
+	}
+	if !strings.Contains(res1, "Val: 1") {
+		t.Fatalf("expected 'Val: 1', got %q", res1)
+	}
+	if inv.CallCount() != 1 {
+		t.Fatalf("expected 1 call, got %d", inv.CallCount())
+	}
+
+	// 2. Advance time past expiresAt (5s) but within hardExpiresAt (10s) -> 6s
+	timeMu.Lock()
+	simulatedTime = simulatedTime.Add(6 * time.Second)
+	timeMu.Unlock()
+
+	// 3. Second Retrieve should return stale cache ("Val: 1") immediately
+	start := time.Now()
+	res2, err := p.Retrieve(context.Background())
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("second Retrieve failed: %v", err)
+	}
+	if elapsed > 100*time.Millisecond {
+		t.Errorf("Retrieve blocked for %v, expected non-blocking SWR return", elapsed)
+	}
+	if !strings.Contains(res2, "Val: 1") {
+		t.Errorf("expected stale 'Val: 1', got %q", res2)
+	}
+
+	// 4. Wait for background refresh to finish
+	select {
+	case <-refreshDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for background refresh")
+	}
+
+	for i := 0; i < 50; i++ {
+		time.Sleep(10 * time.Millisecond)
+		p.mu.RLock()
+		cached := p.cache
+		p.mu.RUnlock()
+		if strings.Contains(cached, "Val: 2") {
+			break
+		}
+	}
+
+	if inv.CallCount() != 2 {
+		t.Fatalf("expected 2 calls after background refresh, got %d", inv.CallCount())
+	}
+
+	// 5. Advance simulated clock to match when the background refresh completed
+	timeMu.Lock()
+	simulatedTime = simulatedTime.Add(1 * time.Second)
+	timeMu.Unlock()
+
+	// 6. Subsequent Retrieve should return updated cache ("Val: 2")
+	res3, err := p.Retrieve(context.Background())
+	if err != nil {
+		t.Fatalf("third Retrieve failed: %v", err)
+	}
+	if !strings.Contains(res3, "Val: 2") {
+		t.Errorf("expected refreshed 'Val: 2', got %q", res3)
+	}
+}
+
+func TestProvider_HardExpiredForcesSyncRevalidation(t *testing.T) {
+	t.Parallel()
+
+	var counter int
+	var counterMu sync.Mutex
+
+	inv := &mockInvoker{
+		execFunc: func(ctx context.Context, name string, args map[string]interface{}) (string, error) {
+			counterMu.Lock()
+			counter++
+			c := counter
+			counterMu.Unlock()
+			return fmt.Sprintf(`{"val": %d}`, c), nil
+		},
+	}
+
+	cfg := config.AmbientContextConfig{
+		CacheTTL: "5s",
+		Template: "Val: {{.tool.val}}",
+		Tools: []config.AmbientToolConfig{
+			{Name: "tool", Tool: "val_tool"},
+		},
+	}
+
+	p, err := NewProvider(cfg, inv)
+	if err != nil {
+		t.Fatalf("NewProvider failed: %v", err)
+	}
+
+	simulatedTime := time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)
+	var timeMu sync.Mutex
+	p.SetNowFunc(func() time.Time {
+		timeMu.Lock()
+		defer timeMu.Unlock()
+		return simulatedTime
+	})
+
+	// Initial fetch
+	res1, err := p.Retrieve(context.Background())
+	if err != nil {
+		t.Fatalf("first Retrieve failed: %v", err)
+	}
+	if !strings.Contains(res1, "Val: 1") {
+		t.Fatalf("expected 'Val: 1', got %q", res1)
+	}
+
+	// Advance time past hardExpiresAt (10s) -> 12s
+	timeMu.Lock()
+	simulatedTime = simulatedTime.Add(12 * time.Second)
+	timeMu.Unlock()
+
+	// Should synchronously revalidate and return "Val: 2"
+	res2, err := p.Retrieve(context.Background())
+	if err != nil {
+		t.Fatalf("second Retrieve failed: %v", err)
+	}
+	if !strings.Contains(res2, "Val: 2") {
+		t.Errorf("expected synchronous 'Val: 2', got %q", res2)
+	}
+	if inv.CallCount() != 2 {
+		t.Errorf("expected 2 calls, got %d", inv.CallCount())
+	}
+}
+
+func TestProvider_AtomicCAS_PreventsConcurrentRefresh(t *testing.T) {
+	t.Parallel()
+
+	var toolCalls int32
+	toolStarted := make(chan struct{})
+	blockTool := make(chan struct{})
+
+	inv := &mockInvoker{
+		execFunc: func(ctx context.Context, name string, args map[string]interface{}) (string, error) {
+			count := atomic.AddInt32(&toolCalls, 1)
+			if count == 2 {
+				// Signal second invocation (background refresh) started
+				close(toolStarted)
+				<-blockTool
+			}
+			return fmt.Sprintf(`{"val": %d}`, count), nil
+		},
+	}
+
+	cfg := config.AmbientContextConfig{
+		CacheTTL:  "5s",
+		TimeoutMs: 2000,
+		Template:  "Val: {{.tool.val}}",
+		Tools: []config.AmbientToolConfig{
+			{Name: "tool", Tool: "val_tool"},
+		},
+	}
+
+	p, err := NewProvider(cfg, inv)
+	if err != nil {
+		t.Fatalf("NewProvider failed: %v", err)
+	}
+
+	simulatedTime := time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)
+	var timeMu sync.Mutex
+	p.SetNowFunc(func() time.Time {
+		timeMu.Lock()
+		defer timeMu.Unlock()
+		return simulatedTime
+	})
+
+	// Warm cache
+	res1, err := p.Retrieve(context.Background())
+	if err != nil {
+		t.Fatalf("first Retrieve failed: %v", err)
+	}
+	if !strings.Contains(res1, "Val: 1") {
+		t.Fatalf("expected 'Val: 1', got %q", res1)
+	}
+
+	// Advance past TTL (5s) but within hard TTL (10s) -> 6s
+	timeMu.Lock()
+	simulatedTime = simulatedTime.Add(6 * time.Second)
+	timeMu.Unlock()
+
+	// Launch multiple concurrent Retrieve calls while in SWR window
+	const concurrent = 10
+	var wg sync.WaitGroup
+	results := make([]string, concurrent)
+
+	for i := 0; i < concurrent; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			r, rErr := p.Retrieve(context.Background())
+			if rErr != nil {
+				t.Errorf("concurrent Retrieve %d failed: %v", idx, rErr)
+			}
+			results[idx] = r
+		}(i)
+	}
+
+	// Wait for the background refresh to begin
+	select {
+	case <-toolStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for background refresh to start")
+	}
+
+	// All concurrent callers should immediately receive the stale cache
+	wg.Wait()
+	for i, r := range results {
+		if !strings.Contains(r, "Val: 1") {
+			t.Errorf("caller %d expected stale 'Val: 1', got %q", i, r)
+		}
+	}
+
+	// Unblock the tool execution
+	close(blockTool)
+
+	// Wait a moment for refreshing flag to clear and cache to update
+	time.Sleep(50 * time.Millisecond)
+
+	// Only 2 total calls to the tool: 1 initial + 1 background refresh (no duplicates spawned)
+	if total := atomic.LoadInt32(&toolCalls); total != 2 {
+		t.Errorf("expected exactly 2 tool calls (1 initial + 1 bg refresh), got %d", total)
 	}
 }
 
