@@ -43,9 +43,9 @@ import (
 )
 
 type PromptRequest struct {
-	Prompt         string `json:"prompt"`
-	ConversationID string `json:"conversation_id"`
-	MessageID      string `json:"message_id,omitempty"`
+	Prompt    string `json:"prompt"`
+	ChannelID string `json:"channel_id"`
+	MessageID string `json:"message_id,omitempty"`
 }
 
 func writeJSON(w http.ResponseWriter, status int, data any) {
@@ -82,19 +82,28 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 			return
 		}
 
+		channelID := strings.TrimSpace(req.ChannelID)
+		if channelID == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "Invalid payload: 'channel_id' field is required and cannot be empty",
+			})
+			return
+		}
+		if !queue.IsNumericSnowflake(channelID) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "Invalid payload: 'channel_id' must be a valid numeric Discord snowflake",
+			})
+			return
+		}
+
 		msgID := strings.TrimSpace(req.MessageID)
 		if msgID == "" {
 			msgID = uuid.New().String()
 		}
 
-		threadID := strings.TrimSpace(req.ConversationID)
-		if threadID == "" {
-			threadID = uuid.New().String()
-		}
-
 		msg := db.Message{
 			ID:         msgID,
-			ThreadID:   threadID,
+			ThreadID:   channelID,
 			GuildID:    "",
 			AuthorID:   "http-client",
 			AuthorName: "HTTP Client",
@@ -118,10 +127,10 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 		}
 
 		writeJSON(w, http.StatusAccepted, map[string]string{
-			"status":          "accepted",
-			"conversation_id": threadID,
-			"message_id":      msgID,
-			"message":         "Prompt execution enqueued in background",
+			"status":     "accepted",
+			"channel_id": channelID,
+			"message_id": msgID,
+			"message":    "Prompt execution enqueued in background",
 		})
 	}
 }

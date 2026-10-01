@@ -67,11 +67,34 @@ func TestHandlePromptValidation(t *testing.T) {
 		t.Errorf("Expected status 400 BadRequest for invalid JSON, got %d", w.Code)
 	}
 
+	// Test missing channel_id payload rejected
+	missingChPayload, _ := json.Marshal(map[string]string{
+		"prompt": "Test prompt",
+	})
+	req = httptest.NewRequest(http.MethodPost, "/prompt", bytes.NewReader(missingChPayload))
+	w = httptest.NewRecorder()
+	handler(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("Expected status 400 BadRequest for missing channel_id, got %d", w.Code)
+	}
+
+	// Test invalid non-numeric snowflake channel_id rejected
+	invalidChPayload, _ := json.Marshal(map[string]string{
+		"prompt":     "Test prompt",
+		"channel_id": "not-a-snowflake",
+	})
+	req = httptest.NewRequest(http.MethodPost, "/prompt", bytes.NewReader(invalidChPayload))
+	w = httptest.NewRecorder()
+	handler(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("Expected status 400 BadRequest for non-snowflake channel_id, got %d", w.Code)
+	}
+
 	// Test valid prompt payload accepted
 	validPayload, _ := json.Marshal(map[string]string{
-		"prompt":          "Test valid prompt",
-		"conversation_id": "test-conv-1",
-		"message_id":      "msg-123",
+		"prompt":     "Test valid prompt",
+		"channel_id": "1542423172400291873",
+		"message_id": "msg-123",
 	})
 	req = httptest.NewRequest(http.MethodPost, "/prompt", bytes.NewReader(validPayload))
 	w = httptest.NewRecorder()
@@ -81,12 +104,20 @@ func TestHandlePromptValidation(t *testing.T) {
 		t.Errorf("Expected status 202 StatusAccepted, got %d", w.Code)
 	}
 
+	var respBody map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &respBody); err != nil {
+		t.Fatalf("Failed to decode response: %v", err)
+	}
+	if respBody["channel_id"] != "1542423172400291873" {
+		t.Errorf("Expected channel_id in response, got %+v", respBody)
+	}
+
 	// Verify message persisted to DB
 	msg, err := store.GetMessage(context.Background(), "msg-123")
 	if err != nil || msg == nil {
 		t.Fatalf("Failed to retrieve persisted message: %v", err)
 	}
-	if msg.ThreadID != "test-conv-1" || msg.Content != "Test valid prompt" {
+	if msg.ThreadID != "1542423172400291873" || msg.Content != "Test valid prompt" {
 		t.Errorf("Unexpected message fields in DB: %+v", msg)
 	}
 }
@@ -885,7 +916,7 @@ func TestHandlePrompt_ErrorBranches(t *testing.T) {
 	}
 
 	// 3. Auto-generated UUIDs when omitted
-	reqAuto := httptest.NewRequest(http.MethodPost, "/prompt", strings.NewReader(`{"prompt":"hello world"}`))
+	reqAuto := httptest.NewRequest(http.MethodPost, "/prompt", strings.NewReader(`{"prompt":"hello world","channel_id":"1542423172400291873"}`))
 	wAuto := httptest.NewRecorder()
 	handler(wAuto, reqAuto)
 	if wAuto.Code != http.StatusAccepted {
@@ -896,7 +927,7 @@ func TestHandlePrompt_ErrorBranches(t *testing.T) {
 	closedStore := db.NewFakeStore()
 	_ = closedStore.Close()
 	handlerClosed := handlePrompt(closedStore, pool)
-	reqClosed := httptest.NewRequest(http.MethodPost, "/prompt", strings.NewReader(`{"prompt":"hello fallback"}`))
+	reqClosed := httptest.NewRequest(http.MethodPost, "/prompt", strings.NewReader(`{"prompt":"hello fallback","channel_id":"1542423172400291873"}`))
 	wClosed := httptest.NewRecorder()
 	handlerClosed(wClosed, reqClosed)
 	if wClosed.Code != http.StatusAccepted {
@@ -905,7 +936,7 @@ func TestHandlePrompt_ErrorBranches(t *testing.T) {
 
 	// 5. Nil pool handling
 	handlerNilPool := handlePrompt(store, nil)
-	reqNilPool := httptest.NewRequest(http.MethodPost, "/prompt", strings.NewReader(`{"prompt":"hello nil pool"}`))
+	reqNilPool := httptest.NewRequest(http.MethodPost, "/prompt", strings.NewReader(`{"prompt":"hello nil pool","channel_id":"1542423172400291873"}`))
 	wNilPool := httptest.NewRecorder()
 	handlerNilPool(wNilPool, reqNilPool)
 	if wNilPool.Code != http.StatusAccepted {
@@ -1917,7 +1948,7 @@ func TestRunBrainApp_FullLifecycle(t *testing.T) {
 
 	go func() {
 		<-ready
-		reqBody := `{"prompt": "Hello test prompt", "conversation_id": "test-conv", "message_id": "msg-1"}`
+		reqBody := `{"prompt": "Hello test prompt", "channel_id": "1542423172400291873", "message_id": "msg-1"}`
 		resp, err := http.Post(fmt.Sprintf("http://%s/prompt", serverAddr), "application/json", strings.NewReader(reqBody))
 		if err == nil {
 			_ = resp.Body.Close()
@@ -2206,7 +2237,8 @@ func TestHandlePrompt_BodyCloseError(t *testing.T) {
 	handler := handlePrompt(store, pool)
 
 	validPayload, _ := json.Marshal(map[string]string{
-		"prompt": "Test prompt",
+		"prompt":     "Test prompt",
+		"channel_id": "1542423172400291873",
 	})
 	req := httptest.NewRequest(http.MethodPost, "/prompt", &errCloserReader{Reader: bytes.NewReader(validPayload)})
 	w := httptest.NewRecorder()

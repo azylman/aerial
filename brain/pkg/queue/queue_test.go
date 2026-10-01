@@ -703,7 +703,7 @@ func TestQueueSkipDiscordLogic(t *testing.T) {
 		Content:    "Scheduled routine prompt",
 	}
 
-	// 2. HTTP client message (should SKIP Discord delivery)
+	// 2. HTTP client message (should be delivered to Discord)
 	msgHTTP := db.Message{
 		ID:         "msg-http-1",
 		ThreadID:   "thread-http-1",
@@ -736,7 +736,7 @@ func TestQueueSkipDiscordLogic(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 
-	// Delivered channels should contain thread-scheduled-1 and thread-user-1, but NOT thread-http-1
+	// Delivered channels should contain thread-scheduled-1, thread-http-1, and thread-user-1
 	deliveredMap := make(map[string]bool)
 	for _, ch := range deliveredTo {
 		deliveredMap[ch] = true
@@ -745,8 +745,8 @@ func TestQueueSkipDiscordLogic(t *testing.T) {
 	if !deliveredMap["thread-scheduled-1"] {
 		t.Errorf("Expected scheduler message to be delivered to Discord, but it was skipped: %v", deliveredTo)
 	}
-	if deliveredMap["thread-http-1"] {
-		t.Errorf("Expected http-client message to SKIP Discord delivery, but it was delivered: %v", deliveredTo)
+	if !deliveredMap["thread-http-1"] {
+		t.Errorf("Expected http-client message to be delivered to Discord, but it was skipped: %v", deliveredTo)
 	}
 	if !deliveredMap["thread-user-1"] {
 		t.Errorf("Expected user message to be delivered to Discord, but it was skipped: %v", deliveredTo)
@@ -2084,7 +2084,7 @@ func TestQueueUniversalActiveTurnTyping(t *testing.T) {
 	}
 	mu.Unlock()
 
-	// 6. HTTP client request (skipDiscord: true) -> typing indicator NOT invoked
+	// 6. HTTP client request -> typing indicator invoked
 	mu.Lock()
 	currentPolicy = config.ChannelPolicy{Mode: "threads"}
 	typingCalls = 0
@@ -2098,8 +2098,8 @@ func TestQueueUniversalActiveTurnTyping(t *testing.T) {
 	<-doneCh6
 
 	mu.Lock()
-	if typingCalls != 0 {
-		t.Errorf("Expected 0 typing calls for HTTP client request, got %d", typingCalls)
+	if typingCalls != 1 {
+		t.Errorf("Expected 1 typing call for HTTP client request, got %d", typingCalls)
 	}
 	mu.Unlock()
 }
