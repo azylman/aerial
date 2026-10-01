@@ -260,7 +260,7 @@ func TestDBFactInsertionAndRetrieval(t *testing.T) {
 
 	ctx := context.Background()
 	emb := makeDimVector(0.5, 0.5)
-	id, err := store.InsertFact(ctx, "user_pref", "User prefers dark mode", 1.0, "thread-123", emb)
+	id, err := store.InsertFact(ctx, "user_pref", "User prefers dark mode", 1.0, emb)
 	if err != nil {
 		t.Fatalf("failed to insert fact: %v", err)
 	}
@@ -308,7 +308,7 @@ func TestProcessThreadFactsDeduplicationAndWatermark(t *testing.T) {
 	})
 
 	// Pre-insert an existing identical/similar fact with same vector
-	_, _ = store.InsertFact(ctx, "user_pref", "User likes matcha", 1.0, "thread-test-1", makeDimVector(1.0, 0.0))
+	_, _ = store.InsertFact(ctx, "user_pref", "User likes matcha", 1.0, makeDimVector(1.0, 0.0))
 
 	// Create a dummy transcript file for thread-test-1 in a hermetic temp directory
 	logDir := filepath.Join(tmpDir, "thread-test-1", ".system_generated", "logs")
@@ -360,7 +360,7 @@ func TestProcessThreadFactsGlobalDeduplicationAndReinforce(t *testing.T) {
 	})
 
 	// Pre-insert fact in thread-alpha with lower importance (0.50)
-	origID, err := store.InsertFact(ctx, "user_preference", "Alex likes oat milk in matcha", 0.50, "thread-alpha", makeDimVector(1.0, 0.0))
+	origID, err := store.InsertFact(ctx, "user_preference", "Alex likes oat milk in matcha", 0.50, makeDimVector(1.0, 0.0))
 	if err != nil {
 		t.Fatalf("InsertFact failed: %v", err)
 	}
@@ -465,10 +465,10 @@ func TestBackfillMissingEmbeddings(t *testing.T) {
 
 	ctx := context.Background()
 	// Insert facts: 1 with embedding, 2 without embedding, 1 empty text
-	_, _ = store.InsertFact(ctx, "system_config", "Fact 1 with emb", 1.0, "thread-1", makeDimVector(0.1, 0.2))
-	_, _ = store.InsertFact(ctx, "system_config", "Fact 2 missing emb", 1.0, "thread-1", nil)
-	_, _ = store.InsertFact(ctx, "user_pref", "Fact 3 missing emb", 0.9, "thread-1", nil)
-	_, _ = store.InsertFact(ctx, "empty_cat", "   ", 0.5, "thread-1", nil)
+	_, _ = store.InsertFact(ctx, "system_config", "Fact 1 with emb", 1.0, makeDimVector(0.1, 0.2))
+	_, _ = store.InsertFact(ctx, "system_config", "Fact 2 missing emb", 1.0, nil)
+	_, _ = store.InsertFact(ctx, "user_pref", "Fact 3 missing emb", 0.9, nil)
+	_, _ = store.InsertFact(ctx, "empty_cat", "   ", 0.5, nil)
 
 	backfilled, err := BackfillMissingEmbeddings(ctx, store, client)
 	if err != nil {
@@ -492,7 +492,7 @@ func TestBackfillMissingEmbeddings(t *testing.T) {
 		return mockEmbeddingResponse([]float32{}), nil
 	})
 	storeEmptyEmb := setupTestStore(t)
-	_, _ = storeEmptyEmb.InsertFact(ctx, "cat", "valid text", 1.0, "thread-e", nil)
+	_, _ = storeEmptyEmb.InsertFact(ctx, "cat", "valid text", 1.0, nil)
 	nEmpty, errEmpty := BackfillMissingEmbeddings(ctx, storeEmptyEmb, emptyEmbClient)
 	if errEmpty != nil || nEmpty != 0 {
 		t.Errorf("expected 0 backfilled on empty embedding, got %d, %v", nEmpty, errEmpty)
@@ -509,8 +509,8 @@ func TestRetrieveRelevantFacts(t *testing.T) {
 
 	ctx := context.Background()
 	// Insert facts into DB
-	_, _ = store.InsertFact(ctx, "system_config", "Server port is 8080", 1.0, "thread-1", makeDimVector(0.9, 0.1))
-	_, _ = store.InsertFact(ctx, "routine", "Low scoring fact", 1.0, "thread-1", makeDimVector(0.1, 0.9))
+	_, _ = store.InsertFact(ctx, "system_config", "Server port is 8080", 1.0, makeDimVector(0.9, 0.1))
+	_, _ = store.InsertFact(ctx, "routine", "Low scoring fact", 1.0, makeDimVector(0.1, 0.9))
 
 	facts, err := RetrieveRelevantFacts(ctx, store, client, "What port is the server?", 5)
 	if err != nil {
@@ -721,7 +721,7 @@ func TestMemory_BackfillMissingEmbeddings_EdgeCases(t *testing.T) {
 	}
 
 	// 4. Backfill with embedding error (should continue without panic)
-	_, _ = memStore.InsertFact(context.Background(), "user_pref", "Test fact", 1.0, "th-1", nil)
+	_, _ = memStore.InsertFact(context.Background(), "user_pref", "Test fact", 1.0, nil)
 	nFail, _ := BackfillMissingEmbeddings(context.Background(), memStore, c)
 	if nFail != 0 {
 		t.Errorf("expected 0 backfilled on ollama failure, got %d", nFail)
@@ -867,7 +867,7 @@ func TestMemory_ProcessThreadFacts_EdgeCases(t *testing.T) {
 
 	// 8. ReinforceFact error
 	storeReinfFail := db.NewFakeStore()
-	_, _ = storeReinfFail.InsertFact(context.Background(), "user_pref", "Fact 1", 1.0, "th-orig", makeDimVector(1.0, 0.0))
+	_, _ = storeReinfFail.InsertFact(context.Background(), "user_pref", "Fact 1", 1.0, makeDimVector(1.0, 0.0))
 	_ = storeReinfFail.InsertMessage(context.Background(), db.Message{ID: "m-reinf-fail", ThreadID: "th-pf-dup-fail", Status: db.StatusCompleted, CreatedAt: now, UpdatedAt: now})
 	storeReinfFail.FailNext("ReinforceFact", errors.New("reinforce error"))
 	err = processThreadFacts(context.Background(), storeReinfFail, cValid, func(ctx context.Context, prompt string) (string, error) {
@@ -974,8 +974,8 @@ func TestMemory_Search_EdgeCases(t *testing.T) {
 		return nil, errors.New("connection refused")
 	})
 	resFail, errFail := RetrieveRelevantFacts(context.Background(), memStore, cFail, "What is my name?", 5)
-	if resFail != nil || errFail != nil {
-		t.Errorf("expected nil, nil on vector embedding failure, got %v, %v", resFail, errFail)
+	if len(resFail) != 0 || errFail != nil {
+		t.Errorf("expected empty results and nil error on vector embedding failure fallback, got %v, %v", resFail, errFail)
 	}
 
 	// 6. FormatMemoryContext with empty category defaulting to 'general'
@@ -1069,7 +1069,7 @@ type errFactStore struct {
 	db.FactStore
 }
 
-func (e *errFactStore) SearchSimilarFacts(ctx context.Context, queryVector []float32, maxFacts int, minScore float64, category string) ([]db.Fact, error) {
+func (e *errFactStore) SearchSimilarFacts(ctx context.Context, embedding []float32, queryText string, limit int, minScore float64) ([]db.Fact, error) {
 	return nil, fmt.Errorf("search failed")
 }
 
@@ -1086,7 +1086,7 @@ func (e *errInsertFactStore) UpdateConversationFactWatermark(ctx context.Context
 func (e *errInsertFactStore) GetFactsByThreadWithEmbeddings(ctx context.Context, threadID string) ([]db.FactWithEmbedding, error) {
 	return nil, nil
 }
-func (e *errInsertFactStore) InsertFact(ctx context.Context, category, factText string, importance float64, threadID string, embedding []float32) (int64, error) {
+func (e *errInsertFactStore) InsertFact(ctx context.Context, category, factText string, importance float64, embedding []float32) (int64, error) {
 	return 0, fmt.Errorf("simulated insert error")
 }
 
@@ -1123,8 +1123,8 @@ func TestMemory_RetrieveRelevantFacts_TypesAndErrors(t *testing.T) {
 
 	// 3. Nil client
 	facts, err = RetrieveRelevantFacts(context.Background(), memStore, nil, "hello", 5)
-	if facts != nil || err != nil {
-		t.Errorf("expected nil, nil for nil client, got %v, %v", facts, err)
+	if len(facts) != 0 || err != nil {
+		t.Errorf("expected empty results and nil error for nil client, got %v, %v", facts, err)
 	}
 
 	// 4. FactStore interface directly
@@ -1210,8 +1210,8 @@ func TestMemory_AdditionalCoverage(t *testing.T) {
 	// 5. extractor.go BackfillMissingEmbeddings with cancelled context during iteration
 	memStore2 := db.NewFakeStore()
 	defer memStore2.Close()
-	_, _ = memStore2.InsertFact(context.Background(), "test", "fact 1", 1.0, "", nil)
-	_, _ = memStore2.InsertFact(context.Background(), "test", "fact 2", 1.0, "", nil)
+	_, _ = memStore2.InsertFact(context.Background(), "test", "fact 1", 1.0, nil)
+	_, _ = memStore2.InsertFact(context.Background(), "test", "fact 2", 1.0, nil)
 	cancelCtx, cancel := context.WithCancel(context.Background())
 	cCancel := newMockClient(func(req *http.Request) (*http.Response, error) {
 		cancel()
@@ -1224,7 +1224,7 @@ func TestMemory_AdditionalCoverage(t *testing.T) {
 
 	// 6. extractor.go BackfillMissingEmbeddings UpdateFactEmbedding error
 	memStore3 := db.NewFakeStore()
-	_, _ = memStore3.InsertFact(context.Background(), "test", "fact 1", 1.0, "", nil)
+	_, _ = memStore3.InsertFact(context.Background(), "test", "fact 1", 1.0, nil)
 	cUpdateErr := newMockClient(func(req *http.Request) (*http.Response, error) {
 		_ = memStore3.Close()
 		return mockEmbeddingResponse(make([]float32, 384)), nil
@@ -1454,7 +1454,7 @@ func TestRetrieveFormattedContext(t *testing.T) {
 	// 4. successful fact retrieval and XML formatting
 	validStore := setupTestStore(t)
 	defer validStore.Close()
-	_, err = validStore.InsertFact(ctx, "user_preference", "User prefers dark mode", 1.0, "thread-1", makeDimVector(0.9, 0.1))
+	_, err = validStore.InsertFact(ctx, "user_preference", "User prefers dark mode", 1.0, makeDimVector(0.9, 0.1))
 	if err != nil {
 		t.Fatalf("failed to insert fact: %v", err)
 	}

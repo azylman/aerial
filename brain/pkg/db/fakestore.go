@@ -1145,7 +1145,7 @@ func (f *FakeStore) PruneScheduleRuns(ctx context.Context, maxCount int, maxAge 
 // FactStore implementation
 // =========================================================================
 
-func (f *FakeStore) InsertFact(ctx context.Context, category, factText string, importance float64, threadID string, embedding []float32) (int64, error) {
+func (f *FakeStore) InsertFact(ctx context.Context, category, factText string, importance float64, embedding []float32) (int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err := f.checkClosedAndFail("InsertFact"); err != nil {
@@ -1160,7 +1160,6 @@ func (f *FakeStore) InsertFact(ctx context.Context, category, factText string, i
 			Category:         category,
 			FactText:         factText,
 			Importance:       importance,
-			ThreadID:         threadID,
 			CreatedAt:        now,
 			LastReinforcedAt: now,
 			LastDecayedAt:    now,
@@ -1172,7 +1171,7 @@ func (f *FakeStore) InsertFact(ctx context.Context, category, factText string, i
 	return id, nil
 }
 
-func (f *FakeStore) SearchSimilarFacts(ctx context.Context, embedding []float32, limit int, minScore float64, threadID string) ([]Fact, error) {
+func (f *FakeStore) SearchSimilarFacts(ctx context.Context, embedding []float32, queryText string, limit int, minScore float64) ([]Fact, error) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 	if err := f.checkClosedAndFail("SearchSimilarFacts"); err != nil {
@@ -1184,16 +1183,36 @@ func (f *FakeStore) SearchSimilarFacts(ctx context.Context, embedding []float32,
 		score float64
 	}
 	var matches []scored
+	qLower := strings.ToLower(strings.TrimSpace(queryText))
+	hasVec := len(embedding) > 0
+	hasText := qLower != ""
+
 	for _, fe := range f.facts {
-		if fe == nil || len(fe.Embedding) == 0 {
+		if fe == nil {
 			continue
 		}
-		if threadID != "" && fe.Fact.ThreadID != threadID {
-			continue
+		var sim float64
+		if hasVec && len(embedding) == len(fe.Embedding) {
+			sim = cosineSimilarity(embedding, fe.Embedding)
 		}
-		sim := cosineSimilarity(embedding, fe.Embedding)
-		if sim >= minScore {
-			matches = append(matches, scored{fact: fe.Fact, score: sim})
+		var textScore float64
+		if hasText {
+			if strings.Contains(strings.ToLower(fe.Fact.FactText), qLower) {
+				textScore = 1.0
+			}
+		}
+
+		var score float64
+		if hasVec && hasText {
+			score = 0.70*sim + 0.30*textScore
+		} else if hasVec {
+			score = sim
+		} else if hasText {
+			score = textScore
+		}
+
+		if score >= minScore {
+			matches = append(matches, scored{fact: fe.Fact, score: score})
 		}
 	}
 
@@ -1256,16 +1275,16 @@ func (f *FakeStore) GetFactsPaginated(ctx context.Context, filter FactsFilter) (
 	return &FactsResult{Facts: list[offset:end], Total: total, Limit: filter.Limit, Offset: filter.Offset}, nil
 }
 
-func (f *FakeStore) GetFactsByThreadWithEmbeddings(ctx context.Context, threadID string) ([]FactWithEmbedding, error) {
+func (f *FakeStore) GetAllFactsWithEmbeddings(ctx context.Context) ([]FactWithEmbedding, error) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
-	if err := f.checkClosedAndFail("GetFactsByThreadWithEmbeddings"); err != nil {
+	if err := f.checkClosedAndFail("GetAllFactsWithEmbeddings"); err != nil {
 		return nil, err
 	}
 
 	var results []FactWithEmbedding
 	for _, fe := range f.facts {
-		if fe != nil && (threadID == "" || fe.Fact.ThreadID == threadID) {
+		if fe != nil {
 			results = append(results, *cloneFactWithEmbedding(fe))
 		}
 	}
@@ -1276,6 +1295,10 @@ func (f *FakeStore) GetFactsByThreadWithEmbeddings(ctx context.Context, threadID
 		return results[i].Fact.CreatedAt.Before(results[j].Fact.CreatedAt)
 	})
 	return results, nil
+}
+
+func (f *FakeStore) GetFactsByThreadWithEmbeddings(ctx context.Context, threadID string) ([]FactWithEmbedding, error) {
+	return f.GetAllFactsWithEmbeddings(ctx)
 }
 
 func (f *FakeStore) GetActiveConversationsForExtraction(ctx context.Context, activeHours int) ([]string, error) {

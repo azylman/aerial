@@ -104,12 +104,12 @@ func RankFacts(queryVector []float32, facts []db.FactWithEmbedding, minScore flo
 	return result
 }
 
-// RetrieveRelevantFacts fetches relevant stored facts for a given query string.
-// Accepts either a db.FactStore interface or a legacy *sql.DB pointer.
-// If vector embedding generation fails or times out (1s timeout + 1 retry), logs warning and returns empty slice gracefully.
+// RetrieveRelevantFacts fetches relevant stored facts for a given query string using hybrid RRF search.
+// Accepts a db.FactStore interface.
+// If vector embedding generation fails or times out, falls back gracefully to sparse full-text search.
 func RetrieveRelevantFacts(ctx context.Context, factStore db.FactStore, client *Client, queryText string, maxFacts int) ([]db.Fact, error) {
 	queryText = strings.TrimSpace(queryText)
-	if factStore == nil || client == nil || queryText == "" {
+	if factStore == nil || queryText == "" {
 		return nil, nil
 	}
 	if len(queryText) > 1000 {
@@ -121,15 +121,18 @@ func RetrieveRelevantFacts(ctx context.Context, factStore db.FactStore, client *
 		metrics.MemorySearchDurationSeconds.Observe(time.Since(start).Seconds())
 	}()
 
-	// Generate query embedding with BGE query prefix and 1 retry
-	queryVector, err := client.GenerateEmbedding(ctx, queryText, true, 1)
-	if err != nil {
-		metrics.MemoryOperationsTotal.WithLabelValues("search", "error").Inc()
-		log.Printf("[Memory] Warning: Vector search embedding failed/timed out: %v. Proceeding without RAG context.", err)
-		return nil, nil
+	var queryVector []float32
+	if client != nil {
+		vec, err := client.GenerateEmbedding(ctx, queryText, true, 1)
+		if err != nil {
+			metrics.MemoryOperationsTotal.WithLabelValues("search", "warning").Inc()
+			log.Printf("[Memory] Warning: Vector search embedding failed/timed out: %v. Falling back to sparse text search.", err)
+		} else {
+			queryVector = vec
+		}
 	}
 
-	ranked, err := factStore.SearchSimilarFacts(ctx, queryVector, maxFacts, DefaultMinScoreThreshold, "")
+	ranked, err := factStore.SearchSimilarFacts(ctx, queryVector, queryText, maxFacts, DefaultMinScoreThreshold)
 	if err != nil {
 		metrics.MemoryOperationsTotal.WithLabelValues("search", "error").Inc()
 		return nil, fmt.Errorf("failed to search similar facts: %w", err)

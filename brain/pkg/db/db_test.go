@@ -137,7 +137,7 @@ func TestDBInitializationAndMigrations(t *testing.T) {
 	}
 
 	// Verify facts table with pgvector column
-	_, err = database.Exec("SELECT id, category, fact_text, importance, thread_id, embedding, created_at FROM facts LIMIT 0")
+	_, err = database.Exec("SELECT id, category, fact_text, importance, embedding, created_at FROM facts LIMIT 0")
 	if err != nil {
 		t.Fatalf("Facts table schema error: %v", err)
 	}
@@ -710,7 +710,7 @@ func TestGetFactsPaginatedCaseInsensitive(t *testing.T) {
 	emb := make([]float32, 384)
 	emb[0] = 0.5
 
-	_, err := InsertFact(database, "user_preference", "Alex loves Matcha and Dark Roast Coffee", 1.0, "thread-1", emb)
+	_, err := InsertFact(database, "user_preference", "Alex loves Matcha and Dark Roast Coffee", 1.0, emb)
 	if err != nil {
 		t.Fatalf("InsertFact failed: %v", err)
 	}
@@ -740,27 +740,27 @@ func TestGetFactsPaginatedImportanceDescending(t *testing.T) {
 	emb := make([]float32, 384)
 
 	// Insert facts with different importance and timestamps
-	idLow, err := InsertFact(database, "general", "Low importance fact", 0.2, "t1", emb)
+	idLow, err := InsertFact(database, "general", "Low importance fact", 0.2, emb)
 	if err != nil {
 		t.Fatalf("InsertFact failed: %v", err)
 	}
-	idMax, err := InsertFact(database, "core", "Max importance fact", 1.0, "t1", emb)
+	idMax, err := InsertFact(database, "core", "Max importance fact", 1.0, emb)
 	if err != nil {
 		t.Fatalf("InsertFact failed: %v", err)
 	}
-	idMid, err := InsertFact(database, "infra", "Mid importance fact", 0.5, "t1", emb)
+	idMid, err := InsertFact(database, "infra", "Mid importance fact", 0.5, emb)
 	if err != nil {
 		t.Fatalf("InsertFact failed: %v", err)
 	}
-	idHigh1, err := InsertFact(database, "preference", "High importance fact 1", 0.8, "t1", emb)
+	idHigh1, err := InsertFact(database, "preference", "High importance fact 1", 0.8, emb)
 	if err != nil {
 		t.Fatalf("InsertFact failed: %v", err)
 	}
-	idHigh2, err := InsertFact(database, "preference", "High importance fact 2", 0.8, "t1", emb)
+	idHigh2, err := InsertFact(database, "preference", "High importance fact 2", 0.8, emb)
 	if err != nil {
 		t.Fatalf("InsertFact failed: %v", err)
 	}
-	idVeryHigh, err := InsertFact(database, "system", "Very high importance fact", 0.95, "t1", emb)
+	idVeryHigh, err := InsertFact(database, "system", "Very high importance fact", 0.95, emb)
 	if err != nil {
 		t.Fatalf("InsertFact failed: %v", err)
 	}
@@ -946,21 +946,21 @@ func TestNativeVectorSearchHNSW(t *testing.T) {
 	vecMusic := make([]float32, 384)
 	vecMusic[0] = 0.9 // Close to Alex preference
 
-	_, err := InsertFact(database, "preference", "Alex likes dark roast coffee", 1.0, "thread-1", vecAlex)
+	_, err := InsertFact(database, "preference", "Alex likes dark roast coffee", 1.0, vecAlex)
 	if err != nil {
 		t.Fatalf("InsertFact 1 failed: %v", err)
 	}
-	_, err = InsertFact(database, "routine", "Daily weather forecast at 8am", 1.0, "", vecWeather)
+	_, err = InsertFact(database, "routine", "Daily weather forecast at 8am", 1.0, vecWeather)
 	if err != nil {
 		t.Fatalf("InsertFact 2 failed: %v", err)
 	}
-	_, err = InsertFact(database, "preference", "Alex listens to synthwave while coding", 0.8, "thread-1", vecMusic)
+	_, err = InsertFact(database, "preference", "Alex listens to synthwave while coding", 0.8, vecMusic)
 	if err != nil {
 		t.Fatalf("InsertFact 3 failed: %v", err)
 	}
 
 	// Search for query vector close to Alex (vecAlex)
-	results, err := SearchSimilarFacts(database, vecAlex, 5, 0.5, "thread-1")
+	results, err := SearchSimilarFacts(database, vecAlex, "", 5, 0.5)
 	if err != nil {
 		t.Fatalf("SearchSimilarFacts failed: %v", err)
 	}
@@ -1188,7 +1188,7 @@ func TestFactEmbeddingAndThreadLookup(t *testing.T) {
 	vec[0] = 0.8
 	vec[1] = 0.2
 
-	id, err := InsertFact(database, "category", "Fact with emb", 1.0, "thread-lookup-1", vec)
+	id, err := InsertFact(database, "category", "Fact with emb", 1.0, vec)
 	if err != nil {
 		t.Fatalf("InsertFact failed: %v", err)
 	}
@@ -1305,7 +1305,7 @@ func TestSQLiteExplicitSchemaAndMigrations(t *testing.T) {
 	// Test SQLite facts insert and vector search
 	vec := make([]float32, ExpectedEmbeddingDim)
 	vec[0] = 1.0
-	factID, err := InsertFact(database, "pref", "User likes tea", 0.9, "th-sqlite-1", vec)
+	factID, err := InsertFact(database, "pref", "User likes tea", 0.9, vec)
 	if err != nil {
 		t.Fatalf("InsertFact on SQLite failed: %v", err)
 	}
@@ -1313,7 +1313,7 @@ func TestSQLiteExplicitSchemaAndMigrations(t *testing.T) {
 		t.Errorf("expected positive factID, got %d", factID)
 	}
 
-	simFacts, err := SearchSimilarFacts(database, vec, 5, 0.5, "th-sqlite-1")
+	simFacts, err := SearchSimilarFacts(database, vec, "", 5, 0.5)
 	if err != nil {
 		t.Fatalf("SearchSimilarFacts on SQLite failed: %v", err)
 	}
@@ -1418,11 +1418,11 @@ func TestDB_NilDatabaseHandling_All(t *testing.T) {
 	_, _ = GetInterruptedTurns(nil)
 
 	// Facts
-	_, _ = InsertFact(nil, "cat", "fact", 1.0, "th1", nil)
+	_, _ = InsertFact(nil, "cat", "fact", 1.0, nil)
 	_ = UpdateFactEmbedding(nil, 1, nil)
 	_, _ = GetAllFactsWithEmbeddings(nil)
 	_, _ = GetFactsByThreadWithEmbeddings(nil, "th1")
-	_, _ = SearchSimilarFacts(nil, nil, 10, 0.5, "")
+	_, _ = SearchSimilarFacts(nil, nil, "", 10, 0.5)
 	_, _ = GetActiveConversationsForExtraction(nil, 1)
 	_ = UpdateConversationFactWatermark(nil, "th1", 1)
 	_ = UpdateConversationFactExtractedAt(nil, "th1")
@@ -1489,11 +1489,11 @@ func TestDB_ClosedDatabaseHandling_All(t *testing.T) {
 	_, _ = GetInterruptedTurns(closedDB)
 
 	// Facts
-	_, _ = InsertFact(closedDB, "cat", "fact", 1.0, "th1", vec)
+	_, _ = InsertFact(closedDB, "cat", "fact", 1.0, vec)
 	_ = UpdateFactEmbedding(closedDB, 1, vec)
 	_, _ = GetAllFactsWithEmbeddings(closedDB)
 	_, _ = GetFactsByThreadWithEmbeddings(closedDB, "th1")
-	_, _ = SearchSimilarFacts(closedDB, vec, 10, 0.5, "th1")
+	_, _ = SearchSimilarFacts(closedDB, vec, "", 10, 0.5)
 	_, _ = GetActiveConversationsForExtraction(closedDB, 1)
 	_ = UpdateConversationFactWatermark(closedDB, "th1", 1)
 	_ = UpdateConversationFactExtractedAt(closedDB, "th1")
@@ -1605,9 +1605,9 @@ func TestDB_GetFactsPaginated_Filters(t *testing.T) {
 	vec := make([]float32, ExpectedEmbeddingDim)
 	vec[0] = 1.0
 
-	_, _ = InsertFact(database, "user_pref", "User likes espresso", 1.0, "th-fact-1", vec)
-	_, _ = InsertFact(database, "system_config", "Server running on port 8080", 0.9, "th-fact-2", vec)
-	_, _ = InsertFact(database, "user_pref", "User likes tea", 0.8, "th-fact-1", vec)
+	_, _ = InsertFact(database, "user_pref", "User likes espresso", 1.0, vec)
+	_, _ = InsertFact(database, "system_config", "Server running on port 8080", 0.9, vec)
+	_, _ = InsertFact(database, "user_pref", "User likes tea", 0.8, vec)
 
 	// 1. Filter by category
 	resCat, err := GetFactsPaginated(database, FactsFilter{Category: "user_pref", Limit: 10, Offset: 0})
@@ -1688,7 +1688,7 @@ func TestDB_SearchSimilarFacts_EdgeCases(t *testing.T) {
 	defer database.Close()
 
 	// 1. nil embedding / mismatched embedding dimension
-	res, err := SearchSimilarFacts(database, []float32{1.0, 2.0}, 10, 0.5, "")
+	res, err := SearchSimilarFacts(database, []float32{1.0, 2.0}, "", 10, 0.5)
 	if res != nil || err != nil {
 		t.Errorf("expected nil, nil for mismatched dimensions, got %v, %v", res, err)
 	}
@@ -1696,35 +1696,33 @@ func TestDB_SearchSimilarFacts_EdgeCases(t *testing.T) {
 	// 2. limit <= 0 and minScore <= 0 defaults
 	vec1 := make([]float32, ExpectedEmbeddingDim)
 	vec1[0] = 1.0
-	_, _ = InsertFact(database, "cat1", "Fact text 1", 1.0, "th-1", vec1)
+	_, _ = InsertFact(database, "cat1", "Fact text 1", 1.0, vec1)
 
 	vec2 := make([]float32, ExpectedEmbeddingDim)
 	vec2[0] = 0.5
 	vec2[1] = 0.5
-	_, _ = InsertFact(database, "cat2", "Fact text 2", 0.8, "th-2", vec2)
+	_, _ = InsertFact(database, "cat2", "Fact text 2", 0.8, vec2)
 
 	vec3 := make([]float32, ExpectedEmbeddingDim)
 	vec3[0] = 0.1
-	_, _ = InsertFact(database, "cat3", "Fact text 3", 0.1, "", vec3)
+	_, _ = InsertFact(database, "cat3", "Fact text 3", 0.1, vec3)
 
-	res2, err := SearchSimilarFacts(database, vec1, -1, -1, "")
+	res2, err := SearchSimilarFacts(database, vec1, "", -1, -1)
 	if err != nil || len(res2) < 1 {
 		t.Errorf("expected >=1 fact returned with default limit/score, got %d, err: %v", len(res2), err)
 	}
 
-	// 3. Filter by specific thread
-	resThread, err := SearchSimilarFacts(database, vec1, 10, 0.2, "th-1")
+	// 3. Search by text query
+	resText, err := SearchSimilarFacts(database, nil, "Fact text 1", 10, 0.2)
 	if err != nil {
-		t.Fatalf("unexpected error searching facts by thread: %v", err)
+		t.Fatalf("unexpected error searching facts by text: %v", err)
 	}
-	for _, f := range resThread {
-		if f.ThreadID != "" && f.ThreadID != "th-1" {
-			t.Errorf("expected thread th-1 or empty, got %s", f.ThreadID)
-		}
+	if len(resText) != 1 || resText[0].FactText != "Fact text 1" {
+		t.Errorf("expected 1 fact matching text 'Fact text 1', got %v", resText)
 	}
 
 	// 4. High minScore filter
-	resHigh, err := SearchSimilarFacts(database, vec1, 10, 0.95, "")
+	resHigh, err := SearchSimilarFacts(database, vec1, "", 10, 0.95)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1826,7 +1824,7 @@ func TestDB_SearchSimilarFacts_SQLite_InvalidEmbeddingDimensions(t *testing.T) {
 	vecValid[0] = 0.9
 
 	// Insert fact with valid embedding
-	f1ID, err := InsertFact(database, "cat", "Valid fact", 0.9, "th-match", vecValid)
+	f1ID, err := InsertFact(database, "cat", "Valid fact", 0.9, vecValid)
 	if err != nil {
 		t.Fatalf("failed to insert fact: %v", err)
 	}
@@ -1838,7 +1836,7 @@ func TestDB_SearchSimilarFacts_SQLite_InvalidEmbeddingDimensions(t *testing.T) {
 		t.Fatalf("failed to update embedding: %v", err)
 	}
 
-	res, err := SearchSimilarFacts(database, vecValid, 10, 0.1, "th-match")
+	res, err := SearchSimilarFacts(database, vecValid, "", 10, 0.1)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1947,13 +1945,13 @@ func TestDB_Fact_InsertAndEmbedding_EdgeCases(t *testing.T) {
 	defer database.Close()
 
 	// 1. Empty fact text error
-	_, err := InsertFact(database, "cat", "", 1.0, "th-1", nil)
+	_, err := InsertFact(database, "cat", "", 1.0, nil)
 	if err == nil {
 		t.Error("expected error for empty fact text")
 	}
 
 	// 2. Defaults for category and importance
-	fID, err := InsertFact(database, "", "Default cat and imp", -1.0, "th-1", nil)
+	fID, err := InsertFact(database, "", "Default cat and imp", -1.0, nil)
 	if err != nil {
 		t.Fatalf("failed to insert fact with defaults: %v", err)
 	}

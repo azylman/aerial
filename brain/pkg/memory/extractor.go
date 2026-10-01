@@ -211,7 +211,7 @@ func processThreadFacts(ctx context.Context, store db.Store, client *Client, llm
 				log.Printf("[Memory] Error reinforcing fact id=%d: %v", dupFact.ID, rErr)
 			}
 		} else {
-			id, err := store.InsertFact(ctx, item.Category, item.FactText, item.Importance, threadID, emb)
+			id, err := store.InsertFact(ctx, item.Category, item.FactText, item.Importance, emb)
 			if err != nil {
 				metrics.MemoryOperationsTotal.WithLabelValues("extract", "error").Inc()
 				log.Printf("[Memory] Error inserting fact into DB: %v", err)

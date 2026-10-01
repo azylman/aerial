@@ -533,21 +533,21 @@ func TestFakeStoreFactOperations(t *testing.T) {
 	emb2 := []float32{0.9, 0.1, 0.0}
 	emb3 := []float32{0.0, 1.0, 0.0}
 
-	id1, err := s.InsertFact(ctx, "personal", "Likes matcha latte", 0.9, "th-facts", emb1)
+	id1, err := s.InsertFact(ctx, "personal", "Likes matcha latte", 0.9, emb1)
 	if err != nil || id1 != 1 {
 		t.Fatalf("InsertFact 1 failed: %v, id=%d", err, id1)
 	}
-	id2, err := s.InsertFact(ctx, "tech", "Gundam pilot", 0.8, "th-facts", emb2)
+	id2, err := s.InsertFact(ctx, "tech", "Gundam pilot", 0.8, emb2)
 	if err != nil || id2 != 2 {
 		t.Fatalf("InsertFact 2 failed: %v, id=%d", err, id2)
 	}
-	id3, err := s.InsertFact(ctx, "tech", "Missing embedding fact", 0.5, "th-facts", nil)
+	id3, err := s.InsertFact(ctx, "tech", "Missing embedding fact", 0.5, nil)
 	if err != nil || id3 != 3 {
 		t.Fatalf("InsertFact 3 failed: %v, id=%d", err, id3)
 	}
 
 	// SearchSimilarFacts
-	matches, err := s.SearchSimilarFacts(ctx, emb1, 5, 0.8, "th-facts")
+	matches, err := s.SearchSimilarFacts(ctx, emb1, "", 5, 0.8)
 	if err != nil || len(matches) != 2 {
 		t.Fatalf("expected 2 similar matches, got %d (err: %v)", len(matches), err)
 	}
@@ -727,8 +727,8 @@ func TestFakeStoreClosedCoverage(t *testing.T) {
 	_, _ = s.ReconcileOrphanedScheduleRuns(ctx)
 	_, _ = s.PruneScheduleRuns(ctx, 10, time.Hour)
 
-	_, _ = s.InsertFact(ctx, "c", "f", 1.0, "t", nil)
-	_, _ = s.SearchSimilarFacts(ctx, nil, 10, 0.5, "t")
+	_, _ = s.InsertFact(ctx, "c", "f", 1.0, nil)
+	_, _ = s.SearchSimilarFacts(ctx, nil, "", 10, 0.5)
 	_, _ = s.GetFactsPaginated(ctx, FactsFilter{})
 	_, _ = s.GetFactsByThreadWithEmbeddings(ctx, "t")
 	_, _ = s.GetActiveConversationsForExtraction(ctx, 24)
@@ -754,7 +754,7 @@ func TestFakeStoreWithTxFullState(t *testing.T) {
 	_ = s.CreateOneShotSchedule(ctx, OneShotSchedule{ID: "os-tx", ThreadID: "th-tx", RunAt: now})
 	_ = s.CreateCronSchedule(ctx, CronSchedule{ID: "cron-tx", TargetID: "tgt-tx", Enabled: true, NextRunAt: now})
 	_ = s.CreateScheduleRun(ctx, ScheduleRun{ID: "run-tx", ScheduleID: "cron-tx", Status: "running", StartedAt: now})
-	_, _ = s.InsertFact(ctx, "cat", "Fact text", 0.9, "th-tx", []float32{1.0, 0.0})
+	_, _ = s.InsertFact(ctx, "cat", "Fact text", 0.9, []float32{1.0, 0.0})
 	_ = s.UpdateConversationFactWatermark(ctx, "th-tx", 10)
 	_ = s.UpdateConversationFactExtractedAt(ctx, "th-tx")
 

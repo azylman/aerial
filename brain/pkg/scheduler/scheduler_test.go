@@ -2048,7 +2048,7 @@ func TestRunFactExtraction_BackfilledAndMockErrors(t *testing.T) {
 	defer ts.Close()
 
 	// Insert fact without embedding
-	_, err := store.InsertFact(context.Background(), "user_pref", "Test fact for backfill", 0.8, "th-backfill", nil)
+	_, err := store.InsertFact(context.Background(), "user_pref", "Test fact for backfill", 0.8, nil)
 	if err != nil {
 		t.Fatalf("failed to insert fact for backfill: %v", err)
 	}
@@ -2187,7 +2187,7 @@ func TestRunMemoryDecay(t *testing.T) {
 	emb[0] = 1.0
 
 	// Insert fact and artificially age it
-	_, err := store.InsertFact(context.Background(), "general", "Temporary notice", 0.50, "th-1", emb)
+	_, err := store.InsertFact(context.Background(), "general", "Temporary notice", 0.50, emb)
 	if err != nil {
 		t.Fatalf("InsertFact failed: %v", err)
 	}

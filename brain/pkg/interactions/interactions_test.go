@@ -338,7 +338,7 @@ func TestRouter_HandleStatus(t *testing.T) {
 	ctx := context.Background()
 
 	// Seed facts
-	_, err := store.InsertFact(ctx, "architecture", "Aerial runs on PostgreSQL 16 with pgvector", 0.9, "thread-1", nil)
+	_, err := store.InsertFact(ctx, "architecture", "Aerial runs on PostgreSQL 16 with pgvector", 0.9, nil)
 	if err != nil {
 		t.Fatalf("InsertFact failed: %v", err)
 	}

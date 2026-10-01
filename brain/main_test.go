@@ -603,8 +603,8 @@ func TestHandleFacts_Comprehensive(t *testing.T) {
 	store := db.NewFakeStore()
 
 	// Seed some facts
-	_, _ = store.InsertFact(context.Background(), "system", "Fact 1", 1.0, "t1", nil)
-	_, _ = store.InsertFact(context.Background(), "user_preference", "Fact 2", 1.0, "t2", nil)
+	_, _ = store.InsertFact(context.Background(), "system", "Fact 1", 1.0, nil)
+	_, _ = store.InsertFact(context.Background(), "user_preference", "Fact 2", 1.0, nil)
 
 	handler := handleFacts(store)
 

@@ -57,16 +57,16 @@ func TestSearchSimilarFactsFilterBranches(t *testing.T) {
 	embValid := make([]float32, ExpectedEmbeddingDim)
 	embValid[0] = 1.0
 
-	// Fact 1: matching threadID
-	_, _ = InsertFactWithContext(ctx, database, false, "cat", "Matching fact", 1.0, "t-match", embValid)
+	// Fact 1: matching fact
+	_, _ = InsertFactWithContext(ctx, database, false, "cat", "Matching fact", 1.0, embValid)
 
-	// Fact 2: mismatched threadID
-	_, _ = InsertFactWithContext(ctx, database, false, "cat", "Other thread fact", 1.0, "t-other", embValid)
+	// Fact 2: low importance fact
+	_, _ = InsertFactWithContext(ctx, database, false, "cat", "Other fact", 0.05, embValid)
 
 	// Fact 3: no embedding (nil)
-	_, _ = InsertFactWithContext(ctx, database, false, "cat", "No embedding fact", 1.0, "t-match", nil)
+	_, _ = InsertFactWithContext(ctx, database, false, "cat", "No embedding fact", 1.0, nil)
 
-	res, err := SearchSimilarFactsWithContext(ctx, database, false, embValid, 10, 0.1, "t-match")
+	res, err := SearchSimilarFactsWithContext(ctx, database, false, embValid, "Matching", 10, 0.1)
 	if err != nil || len(res) != 1 {
 		t.Fatalf("SearchSimilarFacts filter branches failed: %v, len=%d", err, len(res))
 	}
@@ -111,7 +111,7 @@ func TestGetFactsPaginatedWithContextOffsetVariants(t *testing.T) {
 
 	ctx := context.Background()
 
-	_, _ = InsertFactWithContext(ctx, database, false, "cat1", "Fact item 1", 1.0, "t1", nil)
+	_, _ = InsertFactWithContext(ctx, database, false, "cat1", "Fact item 1", 1.0, nil)
 
 	res1, err1 := GetFactsPaginatedWithContext(ctx, database, false, FactsFilter{
 		Limit:  0,
@@ -143,19 +143,21 @@ func TestSearchSimilarFactsAllBranchPaths(t *testing.T) {
 
 	embInvalid := []float32{0.1, 0.2, 0.3}
 
-	// 1. Fact matching threadID and high score
-	_, _ = InsertFactWithContext(ctx, database, false, "cat", "High score fact", 1.0, "t-filter-1", embValid)
+	// 1. Fact matching high score
+	_, _ = InsertFactWithContext(ctx, database, false, "cat", "High score fact", 1.0, embValid)
 
-	// 2. Fact matching threadID but very low importance (filtered out by minScore=0.5)
-	_, _ = InsertFactWithContext(ctx, database, false, "cat", "Low score fact", 0.001, "t-filter-1", embValid)
+	// 2. Fact matching low importance (filtered out by minScore=0.5)
+	_, _ = InsertFactWithContext(ctx, database, false, "cat", "Low score fact", 0.001, embValid)
 
-	// 3. Fact with mismatched threadID
-	_, _ = InsertFactWithContext(ctx, database, false, "cat", "Other thread fact", 1.0, "t-filter-2", embValid)
+	// 3. Fact with orthogonal embedding (filtered out by minScore=0.5)
+	embOrthogonal := make([]float32, ExpectedEmbeddingDim)
+	embOrthogonal[1] = 1.0
+	_, _ = InsertFactWithContext(ctx, database, false, "cat", "Other fact", 0.5, embOrthogonal)
 
 	// 4. Fact with invalid embedding dimension
-	_, _ = InsertFactWithContext(ctx, database, false, "cat", "Invalid dim fact", 1.0, "t-filter-1", embInvalid)
+	_, _ = InsertFactWithContext(ctx, database, false, "cat", "Invalid dim fact", 1.0, embInvalid)
 
-	res, err := SearchSimilarFactsWithContext(ctx, database, false, embValid, 10, 0.5, "t-filter-1")
+	res, err := SearchSimilarFactsWithContext(ctx, database, false, embValid, "", 10, 0.5)
 	if err != nil || len(res) != 1 {
 		t.Fatalf("SearchSimilarFactsAllBranchPaths failed: %v, len=%d", err, len(res))
 	}
@@ -325,12 +327,12 @@ func TestSQLStoreMethodsCoverage(t *testing.T) {
 	ctx := context.Background()
 
 	// 1. FactStore methods
-	_, err := store.InsertFact(ctx, "cat", "fact text", 1.0, "th1", nil)
+	_, err := store.InsertFact(ctx, "cat", "fact text", 1.0, nil)
 	if err != nil {
 		t.Fatalf("SQLStore.InsertFact failed: %v", err)
 	}
 
-	_, err = store.SearchSimilarFacts(ctx, []float32{1.0}, 10, 0.1, "th1")
+	_, err = store.SearchSimilarFacts(ctx, []float32{1.0}, "", 10, 0.1)
 	if err != nil {
 		t.Fatalf("SQLStore.SearchSimilarFacts failed: %v", err)
 	}
@@ -600,7 +602,7 @@ func TestSearchSimilarFactsWithContextPgBranch(t *testing.T) {
 	embValid[0] = 1.0
 
 	// Trigger isPg = true branch of SearchSimilarFactsWithContext on non-pg DB to force error path
-	res, err := SearchSimilarFactsWithContext(ctx, database, true, embValid, 10, 0.2, "th1")
+	res, err := SearchSimilarFactsWithContext(ctx, database, true, embValid, "", 10, 0.2)
 	if err == nil && res != nil {
 		t.Errorf("expected error or nil response when searching pg branch on sqlite db, got %v, %v", res, err)
 	}

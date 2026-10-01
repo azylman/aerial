@@ -32,9 +32,10 @@ type SessionActivityStats struct {
 
 // FactStore handles persistence and semantic search for conversation facts.
 type FactStore interface {
-	InsertFact(ctx context.Context, category, factText string, importance float64, threadID string, embedding []float32) (int64, error)
-	SearchSimilarFacts(ctx context.Context, embedding []float32, limit int, minScore float64, threadID string) ([]Fact, error)
+	InsertFact(ctx context.Context, category, factText string, importance float64, embedding []float32) (int64, error)
+	SearchSimilarFacts(ctx context.Context, embedding []float32, queryText string, limit int, minScore float64) ([]Fact, error)
 	GetFactsPaginated(ctx context.Context, filter FactsFilter) (*FactsResult, error)
+	GetAllFactsWithEmbeddings(ctx context.Context) ([]FactWithEmbedding, error)
 	GetFactsByThreadWithEmbeddings(ctx context.Context, threadID string) ([]FactWithEmbedding, error)
 	GetActiveConversationsForExtraction(ctx context.Context, activeHours int) ([]string, error)
 	UpdateConversationFactWatermark(ctx context.Context, threadID string, maxRowID int64) error

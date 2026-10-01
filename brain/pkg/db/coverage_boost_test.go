@@ -448,7 +448,7 @@ func TestFactsAndTasksEdgeCases(t *testing.T) {
 	embValid[0] = 1.0
 
 	// 1. InsertFactWithContext with nil ctx
-	id1, err := InsertFactWithContext(nil, database, false, "cat", "fact text nil ctx", 1.0, "th1", embValid)
+	id1, err := InsertFactWithContext(nil, database, false, "cat", "fact text nil ctx", 1.0, embValid)
 	if err != nil || id1 <= 0 {
 		t.Fatalf("InsertFactWithContext with nil ctx failed: %v, id=%d", err, id1)
 	}
@@ -464,7 +464,7 @@ func TestFactsAndTasksEdgeCases(t *testing.T) {
 	_, _ = GetFactsPaginatedWithContext(context.Background(), database, true, FactsFilter{Offset: 2})
 
 	// 4. SearchSimilarFactsWithContext candidateLimit >= 30 (limit = 20)
-	facts, err := SearchSimilarFactsWithContext(context.Background(), database, false, embValid, 20, 0.1, "th1")
+	facts, err := SearchSimilarFactsWithContext(context.Background(), database, false, embValid, "", 20, 0.1)
 	if err != nil {
 		t.Fatalf("SearchSimilarFactsWithContext limit=20 failed: %v", err)
 	}

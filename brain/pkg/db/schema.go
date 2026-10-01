@@ -95,8 +95,8 @@ CREATE TABLE IF NOT EXISTS facts (
 	category TEXT NOT NULL DEFAULT 'general',
 	fact_text TEXT NOT NULL,
 	importance REAL NOT NULL DEFAULT 1.0,
-	thread_id TEXT NOT NULL DEFAULT '',
 	embedding vector(384),
+	fts_tokens tsvector GENERATED ALWAYS AS (to_tsvector('simple', fact_text)) STORED,
 	created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
 	last_reinforced_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
 	last_decayed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -113,11 +113,11 @@ CREATE INDEX IF NOT EXISTS idx_schedule_runs_started_at ON schedule_runs(started
 CREATE INDEX IF NOT EXISTS idx_schedule_runs_schedule_started ON schedule_runs(schedule_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_schedule_runs_status_started ON schedule_runs(status, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_schedule_runs_message_id ON schedule_runs(message_id);
-CREATE INDEX IF NOT EXISTS idx_facts_thread_id ON facts(thread_id);
 CREATE INDEX IF NOT EXISTS idx_facts_category ON facts(category);
 CREATE INDEX IF NOT EXISTS idx_facts_created_at ON facts(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_facts_importance_created_at ON facts(importance DESC, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_facts_embedding_hnsw ON facts USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX IF NOT EXISTS idx_facts_fts ON facts USING gin(fts_tokens);
 `
 
 
@@ -167,6 +167,11 @@ func initSchemaPostgres(ctx context.Context, database *sql.DB) error {
 	if _, err := conn.ExecContext(ctx, "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS previous_session_id TEXT NOT NULL DEFAULT ''"); err != nil {
 		return fmt.Errorf("failed to add previous_session_id column to sessions: %w", err)
 	}
+
+	execNotice("ALTER TABLE facts DROP COLUMN IF EXISTS thread_id")
+	execNotice("DROP INDEX IF EXISTS idx_facts_thread_id")
+	execNotice("ALTER TABLE facts ADD COLUMN IF NOT EXISTS fts_tokens tsvector GENERATED ALWAYS AS (to_tsvector('simple', fact_text)) STORED")
+	execNotice("CREATE INDEX IF NOT EXISTS idx_facts_fts ON facts USING gin(fts_tokens)")
 
 	execNotice("ALTER TABLE facts ADD COLUMN IF NOT EXISTS last_reinforced_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP")
 	execNotice("ALTER TABLE facts ADD COLUMN IF NOT EXISTS last_decayed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP")
