@@ -258,6 +258,17 @@ Before modifying source code, Aerial MUST audit the plan according to the classi
    - **Interface Abstraction at External Boundaries**: Abstract external system boundaries (git commands, Docker sockets, Discord REST, database drivers) behind interfaces (e.g. `GitExecutor`) so packages can be tested hermetically with in-memory mocks without disk or subprocess overhead.
 4. **Orchestration & Workflow Standards**:
    - Strictly adhere to the Tiered Engineering Workflow, Orchestration Invariants, and Subagent Model Allocation Matrix detailed above (mandatory `Model: "flash"` or `Model: "flash_lite"` for all implementer subagent dispatches).
+5. **Declarative Database Schema Migrations Runbook (Atlas)**:
+   - **Step 1: Declarative Schema Definition (`schema.sql`)**:
+     - Modify the repository's canonical schema file (`brain/pkg/db/schema.sql` for `aerial`, `db/schema.sql` for `aerial-sidecars`).
+     - Never hand-write migration files or imperative DDL (`ALTER TABLE`, `DROP TABLE`) in Go/Python/TypeScript application code. All DDL is mechanically blocked by `scripts/verify.sh`.
+   - **Step 2: Generate Migration Diff (`scripts/atlas-diff.sh <migration_name>`)**:
+     - Run `./scripts/atlas-diff.sh <migration_name>` (e.g., `./scripts/atlas-diff.sh add_effort_column`).
+     - The script automatically provisions an ephemeral PostgreSQL + pgvector container, calculates the declarative schema diff, writes the versioned migration SQL file, updates `atlas.sum`, and deterministically cleans up the container.
+   - **Step 3: Verify Integrity & Code Hygiene (`./scripts/verify.sh --staged`)**:
+     - Staged pre-flight checks automatically run `check_no_imperative_ddl` to ensure no raw DDL leaked into application code, and validate migration directory checksums via `atlas migrate validate`.
+   - **Step 4: Hermetic Tests & Migration Runner**:
+     - Run target database tests (`go test -v ./brain/pkg/db/...`). Ensure migration runners apply cleanly and hermetic tests pass without live database dependencies.
 
 ---
 

@@ -2315,23 +2315,12 @@ func TestInitSchema_LegacyFactsUpgrade(t *testing.T) {
 }
 
 func TestSchemaContract_NoPrematureIndexes(t *testing.T) {
-	// Any index on columns added in downstream migrations (ALTER TABLE) must NOT be declared in postgresSchema or sqliteSchema constants
+	// Any index on columns added in downstream migrations (ALTER TABLE) must NOT be declared in sqliteSchema constants
 	downstreamColumns := []string{"last_reinforced_at", "last_decayed_at", "reinforce_count", "restart_count", "previous_session_id", "fts_tokens"}
 
 	for _, col := range downstreamColumns {
 		pattern := " " + col + " "
 		patternDesc := " " + col + ")"
-		for _, line := range strings.Split(postgresSchema, "\n") {
-			trimmed := strings.TrimSpace(line)
-			if strings.HasPrefix(trimmed, "CREATE INDEX") {
-				if col == "fts_tokens" && !strings.Contains(trimmed, "facts") {
-					continue
-				}
-				if strings.Contains(trimmed, pattern) || strings.Contains(trimmed, patternDesc) || strings.Contains(trimmed, "("+col) {
-					t.Errorf("postgresSchema contains premature index definition for downstream column %q: %s", col, trimmed)
-				}
-			}
-		}
 		for _, line := range strings.Split(sqliteSchema, "\n") {
 			trimmed := strings.TrimSpace(line)
 			if strings.HasPrefix(trimmed, "CREATE INDEX") {

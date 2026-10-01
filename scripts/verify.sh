@@ -299,24 +299,64 @@ run_vector_syntax() {
     fi
 }
 
-run_atlas_validate() {
-    if [ -d "brain/pkg/db/migrations" ] && has_cmd atlas; then
-        echo "   [atlas validate] Validating migration integrity..."
-        (cd brain && atlas migrate validate --dir "file://pkg/db/migrations")
+check_no_imperative_ddl() {
+    local files=""
+    if [ "$MODE" = "staged" ]; then
+        files=$(echo "$STAGED_FILES" | grep -E '\.(go|py|ts)$' | grep -v -E '(_test\.go|\.test\.ts|test_.*\.py|/testdata/)' || true)
+    else
+        files=$(find . -maxdepth 4 -type f \( -name "*.go" -o -name "*.py" -o -name "*.ts" \) \
+            ! -name "*_test.go" ! -name "*.test.ts" ! -name "test_*.py" \
+            ! -path "*/vendor/*" ! -path "*/node_modules/*" ! -path "*/.git/*" ! -path "*/scripts/*" 2>/dev/null || true)
     fi
+
+    [ -z "$files" ] && return 0
+
+    local violations=""
+    violations=$(echo "$files" | while read -r f; do
+        [ -f "$f" ] || continue
+        # Ignore comments and check for raw DDL
+        grep -H -n -i -E '\b(ALTER|DROP)[[:space:]]+TABLE\b' "$f" 2>/dev/null | grep -v -E '^[[:space:]]*(//|#|\*)' || true
+    done)
+
+    if [ -n "$violations" ]; then
+        echo "🚨 [Aerial Verify] Imperative DDL detected in application code:" >&2
+        echo "$violations" | sed 's/^/   • /' >&2
+        echo "   Database schema changes must be declared in schema.sql and generated via scripts/atlas-diff.sh." >&2
+        return 1
+    fi
+    return 0
+}
+
+run_atlas_validate() {
+    has_cmd atlas || return 0
+    find . -maxdepth 3 -name "atlas.hcl" 2>/dev/null | sort | while IFS= read -r hcl; do
+        [ -f "$hcl" ] || continue
+        local target_dir
+        target_dir="$(dirname "$hcl")"
+        local mig_dir
+        mig_dir=$(grep -E 'dir\s*=' "$hcl" 2>/dev/null | head -n1 | sed -E 's/.*dir\s*=\s*"([^"]+)".*/\1/' || true)
+        if [ -z "$mig_dir" ]; then
+            mig_dir="file://migrations"
+        elif [ "${mig_dir#file://}" = "$mig_dir" ]; then
+            mig_dir="file://${mig_dir}"
+        fi
+        echo "   [atlas validate] Validating migration integrity in ${target_dir} (${mig_dir})..."
+        (cd "$target_dir" && atlas migrate validate --dir "$mig_dir")
+    done
 }
 
 if [ "$MODE" = "staged" ]; then
     # Fast path: check only services that have staged changes
-    check_utf8_bom
-    check_no_main_in_tests
-    check_rule_file_sizes
-
     STAGED_FILES=$(git diff --cached --name-only 2>/dev/null || true)
     if [ -z "$STAGED_FILES" ]; then
         echo "✅ [Aerial Verify] No staged files to verify."
         exit 0
     fi
+
+    check_utf8_bom
+    check_no_main_in_tests
+    check_rule_file_sizes
+    check_no_imperative_ddl
 
     # Check Go microservices
     for svc in $GO_SERVICES; do
@@ -338,7 +378,7 @@ if [ "$MODE" = "staged" ]; then
     done
 
     # Check Atlas migrations
-    if echo "$STAGED_FILES" | grep -q -E "^brain/pkg/db/migrations/|^brain/atlas\.hcl|^brain/pkg/db/schema\.sql"; then
+    if echo "$STAGED_FILES" | grep -q -E "migrations/|atlas\.hcl|schema\.sql"; then
         run_atlas_validate
     fi
 
@@ -388,6 +428,7 @@ for svc in $GO_SERVICES; do
     run_golangci_lint "$svc"
     run_deadcode "$svc"
 done
+check_no_imperative_ddl
 run_atlas_validate
 
 echo "=== 2. Frontend & Script Syntax Checks ==="
