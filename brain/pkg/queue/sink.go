@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/azylman/aerial/brain/pkg/runner"
 )
@@ -96,6 +97,12 @@ func (d *DiscordTurnSink) OnToolCall(toolName, commandName string) {
 	}
 }
 
+// OnToolCompleted is a no-op for DiscordTurnSink.
+func (d *DiscordTurnSink) OnToolCompleted(toolName, mcpServer string, duration time.Duration, status string) {}
+
+// OnSkillActivated is a no-op for DiscordTurnSink.
+func (d *DiscordTurnSink) OnSkillActivated(skillName, source string) {}
+
 // OnTextDelta accumulates streaming text deltas under lock.
 func (d *DiscordTurnSink) OnTextDelta(delta string) {
 	d.mu.Lock()
@@ -179,6 +186,12 @@ func (v *VoiceTurnSink) OnThinking() {}
 
 // OnToolCall is called when a tool invocation begins.
 func (v *VoiceTurnSink) OnToolCall(toolName, commandName string) {}
+
+// OnToolCompleted is a no-op for VoiceTurnSink.
+func (v *VoiceTurnSink) OnToolCompleted(toolName, mcpServer string, duration time.Duration, status string) {}
+
+// OnSkillActivated is a no-op for VoiceTurnSink.
+func (v *VoiceTurnSink) OnSkillActivated(skillName, source string) {}
 
 // OnTextDelta increments the sequence number, appends the token chunk to the
 // sliding replay ring buffer, and streams it to the active WebSocket connection.

@@ -717,3 +717,182 @@ func TestPureHelpers_Coverage(t *testing.T) {
 	}
 }
 
+func TestCleanUnescapedString(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{input: `"github"`, want: "github"},
+		{input: `"\"github\""`, want: "github"},
+		{input: `  "unifi"  `, want: "unifi"},
+		{input: `plain`, want: "plain"},
+		{input: `""`, want: ""},
+		{input: `"a"`, want: "a"},
+		{input: `"`, want: `"`},
+	}
+	for _, tc := range tests {
+		got := CleanUnescapedString(tc.input)
+		if got != tc.want {
+			t.Errorf("CleanUnescapedString(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
+func TestExtractMCPToolInfo(t *testing.T) {
+	tests := []struct {
+		name       string
+		toolName   string
+		params     map[string]any
+		wantTool   string
+		wantServer string
+	}{
+		{
+			name:       "empty tool name",
+			toolName:   "",
+			params:     nil,
+			wantTool:   "unknown",
+			wantServer: "native",
+		},
+		{
+			name:       "standard native tool",
+			toolName:   "run_command",
+			params:     map[string]any{"CommandLine": "ls"},
+			wantTool:   "run_command",
+			wantServer: "native",
+		},
+		{
+			name:       "lazy call_mcp_tool with valid params",
+			toolName:   "call_mcp_tool",
+			params:     map[string]any{"ServerName": "github", "ToolName": "list_pull_requests"},
+			wantTool:   "list_pull_requests",
+			wantServer: "github",
+		},
+		{
+			name:       "lazy call_mcp_tool with escaped quotes",
+			toolName:   "call_mcp_tool",
+			params:     map[string]any{"ServerName": `"\"unifi\""`, "ToolName": `"\"unifi_execute\""`},
+			wantTool:   "unifi_execute",
+			wantServer: "unifi",
+		},
+		{
+			name:       "lazy call_mcp_tool with nil params",
+			toolName:   "call_mcp_tool",
+			params:     nil,
+			wantTool:   "call_mcp_tool",
+			wantServer: "unknown",
+		},
+		{
+			name:       "lazy call_mcp_tool with missing ToolName",
+			toolName:   "call_mcp_tool",
+			params:     map[string]any{"ServerName": "docker"},
+			wantTool:   "call_mcp_tool",
+			wantServer: "docker",
+		},
+		{
+			name:       "lazy call_mcp_tool with missing ServerName",
+			toolName:   "call_mcp_tool",
+			params:     map[string]any{"ToolName": "list_containers"},
+			wantTool:   "list_containers",
+			wantServer: "unknown",
+		},
+		{
+			name:       "lazy call_mcp_tool with invalid types (panic safety check)",
+			toolName:   "call_mcp_tool",
+			params:     map[string]any{"ServerName": 12345, "ToolName": []any{"bad"}},
+			wantTool:   "call_mcp_tool",
+			wantServer: "unknown",
+		},
+		{
+			name:       "eager mcp tool",
+			toolName:   "mcp_github_create_pull_request",
+			params:     nil,
+			wantTool:   "create_pull_request",
+			wantServer: "github",
+		},
+		{
+			name:       "eager mcp tool without second underscore",
+			toolName:   "mcp_docker",
+			params:     nil,
+			wantTool:   "docker",
+			wantServer: "unknown",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotTool, gotServer := ExtractMCPToolInfo(tc.toolName, tc.params)
+			if gotTool != tc.wantTool || gotServer != tc.wantServer {
+				t.Errorf("ExtractMCPToolInfo(%q, %v) = (%q, %q), want (%q, %q)",
+					tc.toolName, tc.params, gotTool, gotServer, tc.wantTool, tc.wantServer)
+			}
+		})
+	}
+}
+
+func TestExtractSkillFromTarget(t *testing.T) {
+	tests := []struct {
+		name      string
+		target    string
+		wantSkill string
+		wantOk    bool
+	}{
+		{
+			name:      "empty target",
+			target:    "",
+			wantSkill: "",
+			wantOk:    false,
+		},
+		{
+			name:      "unrelated file path",
+			target:    "/share/aerial/pkg/runner/pure.go",
+			wantSkill: "",
+			wantOk:    false,
+		},
+		{
+			name:      "system skill view_file path",
+			target:    "/share/aerial/.agents/skills/discord/self-improvement/SKILL.md",
+			wantSkill: "self-improvement",
+			wantOk:    true,
+		},
+		{
+			name:      "custom skill path",
+			target:    "/share/aerial-config/custom-skills/ha-operations/SKILL.md",
+			wantSkill: "ha-operations",
+			wantOk:    true,
+		},
+		{
+			name:      "runtime skill path with file URI scheme",
+			target:    "file:///data/runtimes/discord/.gemini/config/skills/culinary-recipes/SKILL.md",
+			wantSkill: "culinary-recipes",
+			wantOk:    true,
+		},
+		{
+			name:      "shell command reading SKILL.md",
+			target:    "cat /root/.gemini/config/skills/antigravity-guide/SKILL.md | grep title",
+			wantSkill: "antigravity-guide",
+			wantOk:    true,
+		},
+		{
+			name:      "bare SKILL.md without directory",
+			target:    "SKILL.md",
+			wantSkill: "",
+			wantOk:    false,
+		},
+		{
+			name:      "target where skill name is 'skills' keyword",
+			target:    "/foo/skills/SKILL.md",
+			wantSkill: "",
+			wantOk:    false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotSkill, gotOk := ExtractSkillFromTarget(tc.target)
+			if gotSkill != tc.wantSkill || gotOk != tc.wantOk {
+				t.Errorf("ExtractSkillFromTarget(%q) = (%q, %t), want (%q, %t)",
+					tc.target, gotSkill, gotOk, tc.wantSkill, tc.wantOk)
+			}
+		})
+	}
+}

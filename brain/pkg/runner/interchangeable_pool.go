@@ -424,6 +424,18 @@ func (s *releaseTurnSink) OnToolCall(toolName, commandName string) {
 	}
 }
 
+func (s *releaseTurnSink) OnToolCompleted(toolName, mcpServer string, duration time.Duration, status string) {
+	if s.inner != nil {
+		s.inner.OnToolCompleted(toolName, mcpServer, duration, status)
+	}
+}
+
+func (s *releaseTurnSink) OnSkillActivated(skillName, source string) {
+	if s.inner != nil {
+		s.inner.OnSkillActivated(skillName, source)
+	}
+}
+
 func (s *releaseTurnSink) OnTextDelta(delta string) {
 	if s.inner != nil {
 		s.inner.OnTextDelta(delta)

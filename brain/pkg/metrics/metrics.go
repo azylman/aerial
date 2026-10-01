@@ -490,6 +490,40 @@ var (
 		},
 		[]string{"version", "goversion"},
 	)
+
+	// Agent Tool & Skill Execution Telemetry
+	ToolCallsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "aerial_brain_tool_calls_total",
+			Help: "Total number of tool calls executed by Aerial Brain turns.",
+		},
+		[]string{"tool", "mcp_server", "status"},
+	)
+
+	ToolDurationSeconds = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "aerial_brain_tool_duration_seconds",
+			Help:    "Execution duration of individual tool calls in seconds.",
+			Buckets: []float64{0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0},
+		},
+		[]string{"tool", "mcp_server"},
+	)
+
+	SkillInvocationsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "aerial_brain_skill_invocations_total",
+			Help: "Total number of skill activations observed via SKILL.md reads or dispatches.",
+		},
+		[]string{"skill", "source"},
+	)
+
+	SubagentInvocationsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "aerial_brain_subagent_invocations_total",
+			Help: "Total number of subagent dispatches executed by Aerial Brain.",
+		},
+		[]string{"type_name", "role"},
+	)
 )
 
 func init() {
@@ -499,6 +533,10 @@ func init() {
 
 	// Register Aerial Brain application metrics
 	Registry.MustRegister(
+		ToolCallsTotal,
+		ToolDurationSeconds,
+		SkillInvocationsTotal,
+		SubagentInvocationsTotal,
 		TurnsTotal,
 		TurnDurationSeconds,
 		TokensTotal,
@@ -900,5 +938,49 @@ func RecordVoiceTTFR(mode, status string, duration time.Duration) {
 	VoiceTTFRDurationSeconds.WithLabelValues(mode, status).Observe(duration.Seconds())
 }
 
+// RecordToolExecution records an individual tool execution count, status, and duration.
+func RecordToolExecution(tool, mcpServer, status string, duration time.Duration) {
+	tool = strings.TrimSpace(tool)
+	if tool == "" {
+		tool = "unknown"
+	}
+	mcpServer = strings.TrimSpace(mcpServer)
+	if mcpServer == "" {
+		mcpServer = "native"
+	}
+	status = strings.TrimSpace(status)
+	if status == "" {
+		status = "ok"
+	}
+	if duration < 0 {
+		duration = 0
+	}
+	ToolCallsTotal.WithLabelValues(tool, mcpServer, status).Inc()
+	ToolDurationSeconds.WithLabelValues(tool, mcpServer).Observe(duration.Seconds())
+}
 
+// RecordSkillActivation records when a skill is activated during a turn.
+func RecordSkillActivation(skill, source string) {
+	skill = strings.TrimSpace(skill)
+	if skill == "" {
+		skill = "unknown"
+	}
+	source = strings.TrimSpace(source)
+	if source == "" {
+		source = "unknown"
+	}
+	SkillInvocationsTotal.WithLabelValues(skill, source).Inc()
+}
 
+// RecordSubagentInvocation records when a subagent is dispatched.
+func RecordSubagentInvocation(typeName, role string) {
+	typeName = strings.TrimSpace(typeName)
+	if typeName == "" {
+		typeName = "unknown"
+	}
+	role = strings.TrimSpace(role)
+	if role == "" {
+		role = "unknown"
+	}
+	SubagentInvocationsTotal.WithLabelValues(typeName, role).Inc()
+}

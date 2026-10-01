@@ -5,6 +5,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"time"
 )
 
 // IsSubstantiveResponse returns true if the response contains substantive text,
@@ -49,6 +50,12 @@ func (s *ThrowawayTurnSink) OnThinking() {}
 
 // OnToolCall is a no-op for throwaway turns.
 func (s *ThrowawayTurnSink) OnToolCall(toolName, commandName string) {}
+
+// OnToolCompleted is a no-op for throwaway turns.
+func (s *ThrowawayTurnSink) OnToolCompleted(toolName, mcpServer string, duration time.Duration, status string) {}
+
+// OnSkillActivated is a no-op for throwaway turns.
+func (s *ThrowawayTurnSink) OnSkillActivated(skillName, source string) {}
 
 // OnTextDelta is a no-op for throwaway turns.
 func (s *ThrowawayTurnSink) OnTextDelta(delta string) {}
@@ -102,6 +109,8 @@ type BufferingTurnSinkConfig struct {
 	OnTurnStarted      func()
 	OnThinking         func()
 	OnToolCall         func(toolName, commandName string)
+	OnToolCompleted    func(toolName, mcpServer string, duration time.Duration, status string)
+	OnSkillActivated   func(skillName, source string)
 	OnTextDelta        func(delta string)
 	OnComplete         func(res *TurnResult)
 	OnError            func(err error)
@@ -149,6 +158,20 @@ func (s *BufferingTurnSink) OnThinking() {
 func (s *BufferingTurnSink) OnToolCall(toolName, commandName string) {
 	if s.cfg.OnToolCall != nil {
 		s.cfg.OnToolCall(toolName, commandName)
+	}
+}
+
+// OnToolCompleted invokes the OnToolCompleted hook if configured.
+func (s *BufferingTurnSink) OnToolCompleted(toolName, mcpServer string, duration time.Duration, status string) {
+	if s.cfg.OnToolCompleted != nil {
+		s.cfg.OnToolCompleted(toolName, mcpServer, duration, status)
+	}
+}
+
+// OnSkillActivated invokes the OnSkillActivated hook if configured.
+func (s *BufferingTurnSink) OnSkillActivated(skillName, source string) {
+	if s.cfg.OnSkillActivated != nil {
+		s.cfg.OnSkillActivated(skillName, source)
 	}
 }
 

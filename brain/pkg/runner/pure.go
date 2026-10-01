@@ -245,3 +245,89 @@ func WriteWorkerTurn(w io.Writer, prompt string) error {
 	}
 	return nil
 }
+
+// CleanUnescapedString strips surrounding quotes and whitespace from an unmarshaled string.
+func CleanUnescapedString(s string) string {
+	s = strings.TrimSpace(s)
+	for len(s) >= 2 && (s[0] == '"' || s[0] == '\\') {
+		trimmed := strings.Trim(s, "\\\" \t\r\n")
+		if trimmed == s {
+			break
+		}
+		s = trimmed
+	}
+	return s
+}
+
+// ExtractMCPToolInfo extracts the canonical tool name and MCP server namespace.
+func ExtractMCPToolInfo(toolName string, params map[string]any) (canonicalTool, mcpServer string) {
+	toolName = strings.TrimSpace(toolName)
+	if toolName == "" {
+		return "unknown", "native"
+	}
+
+	if toolName == "call_mcp_tool" {
+		if params != nil {
+			var sName, tName string
+			if s, ok := params["ServerName"].(string); ok {
+				sName = CleanUnescapedString(s)
+			}
+			if t, ok := params["ToolName"].(string); ok {
+				tName = CleanUnescapedString(t)
+			}
+			if tName != "" && sName != "" {
+				return tName, sName
+			} else if tName != "" {
+				return tName, "unknown"
+			} else if sName != "" {
+				return "call_mcp_tool", sName
+			}
+		}
+		return "call_mcp_tool", "unknown"
+	}
+
+	if strings.HasPrefix(toolName, "mcp_") {
+		parts := strings.SplitN(toolName[4:], "_", 2)
+		if len(parts) == 2 && parts[0] != "" && parts[1] != "" {
+			return parts[1], parts[0]
+		}
+		if len(parts) == 1 && parts[0] != "" {
+			return parts[0], "unknown"
+		}
+	}
+
+	return toolName, "native"
+}
+
+// ExtractSkillFromTarget extracts a skill name from a file path or command string referencing SKILL.md.
+func ExtractSkillFromTarget(target string) (skillName string, ok bool) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return "", false
+	}
+
+	idx := strings.Index(target, "SKILL.md")
+	if idx == -1 {
+		return "", false
+	}
+
+	// Examine prefix up to "SKILL.md"
+	prefix := strings.TrimRight(target[:idx], "/\\ \t\"'`")
+	if prefix == "" {
+		return "", false
+	}
+
+	lastSlash := strings.LastIndexAny(prefix, "/\\")
+	var skill string
+	if lastSlash != -1 {
+		skill = prefix[lastSlash+1:]
+	} else {
+		skill = prefix
+	}
+	skill = strings.Trim(skill, "\"'` ")
+	if skill != "" && skill != "skills" && skill != "custom-skills" {
+		return skill, true
+	}
+
+	return "", false
+}

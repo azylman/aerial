@@ -2468,6 +2468,12 @@ func newDiscordTurnSink(statusUpdater *StatusUpdater) *runner.BufferingTurnSink 
 				})
 			}
 		},
+		OnToolCompleted: func(toolName, mcpServer string, duration time.Duration, status string) {
+			metrics.RecordToolExecution(toolName, mcpServer, status, duration)
+		},
+		OnSkillActivated: func(skillName, source string) {
+			metrics.RecordSkillActivation(skillName, source)
+		},
 	})
 }
 

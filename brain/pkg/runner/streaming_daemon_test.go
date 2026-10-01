@@ -14,15 +14,25 @@ import (
 	"time"
 )
 
+type mockCompletedTool struct {
+	ToolName  string
+	MCPServer string
+	Duration  time.Duration
+	Status    string
+}
+
 type mockTurnSink struct {
-	mu        sync.Mutex
-	started   bool
-	thinking  int
-	toolCalls []string
-	deltas    []string
-	result    *TurnResult
-	err       error
-	done      chan struct{}
+	mu                   sync.Mutex
+	started              bool
+	thinking             int
+	toolCalls            []string
+	completedTools       []string
+	completedToolDetails []mockCompletedTool
+	activatedSkills      []string
+	deltas               []string
+	result               *TurnResult
+	err                  error
+	done                 chan struct{}
 }
 
 func newMockTurnSink() *mockTurnSink {
@@ -45,6 +55,24 @@ func (s *mockTurnSink) OnToolCall(toolName, commandName string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.toolCalls = append(s.toolCalls, toolName+":"+commandName)
+}
+
+func (s *mockTurnSink) OnToolCompleted(toolName, mcpServer string, duration time.Duration, status string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.completedTools = append(s.completedTools, toolName+":"+mcpServer+":"+status)
+	s.completedToolDetails = append(s.completedToolDetails, mockCompletedTool{
+		ToolName:  toolName,
+		MCPServer: mcpServer,
+		Duration:  duration,
+		Status:    status,
+	})
+}
+
+func (s *mockTurnSink) OnSkillActivated(skillName, source string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.activatedSkills = append(s.activatedSkills, skillName+":"+source)
 }
 
 func (s *mockTurnSink) OnTextDelta(delta string) {
@@ -1887,6 +1915,179 @@ func TestStreamingDaemon_Send_WithAmbientContextRetriever(t *testing.T) {
 	expectedContent := "<ambient_context>subsequent</ambient_context>\n\nClean prompt turn 3"
 	if payload3.Message.Content != expectedContent {
 		t.Errorf("expected turn 3 content %q, got: %s", expectedContent, payload3.Message.Content)
+	}
+}
+
+func TestStreamingDaemon_ToolAndSkillLifecycleEvents(t *testing.T) {
+	outR, outW := io.Pipe()
+	inR, inW := io.Pipe()
+	errR, errW := io.Pipe()
+	defer closeQuietly(inR)
+	defer closeQuietly(errW)
+
+	mockHandle := &MockProcessHandle{pid: 2001}
+	mock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			return inW, outR, errR, mockHandle, nil
+		},
+	}
+
+	go func() {
+		_, _ = io.Copy(io.Discard, inR)
+	}()
+	go func() {
+		_, _ = outW.Write([]byte("{\"event\":\"init\",\"session_id\":\"00000000-0000-0000-0000-000000000201\"}\n"))
+	}()
+
+	cfg := DaemonConfig{
+		SessionID: "00000000-0000-0000-0000-000000000201",
+	}
+	daemon, err := StartStreamingDaemon(context.Background(), cfg, mock)
+	if err != nil {
+		t.Fatalf("failed starting daemon: %v", err)
+	}
+	defer daemon.Close()
+
+	sink := newMockTurnSink()
+	turn := &TurnContext{
+		TurnID:    "turn-tools-1",
+		Prompt:    "run tool check",
+		Sink:      sink,
+		CreatedAt: time.Now(),
+	}
+	if err := daemon.Send(turn.Prompt, turn); err != nil {
+		t.Fatalf("send failed: %v", err)
+	}
+	// 1. Native tool: run_command RUNNING -> DONE
+	_, _ = outW.Write([]byte("{\"event\":\"step_update\",\"step_update\":{\"state\":\"RUNNING\",\"type\":\"tool_call\",\"step_index\":1,\"tool_name\":\"run_command\",\"tool_info\":{\"parameters\":{\"CommandLine\":\"echo hello\"}}}}\n"))
+	time.Sleep(10 * time.Millisecond)
+	_, _ = outW.Write([]byte("{\"event\":\"step_update\",\"step_update\":{\"state\":\"DONE\",\"type\":\"tool_call\",\"step_index\":1,\"tool_name\":\"run_command\"}}\n"))
+
+	// 2. MCP tool: call_mcp_tool RUNNING -> DONE
+	_, _ = outW.Write([]byte("{\"event\":\"step_update\",\"step_update\":{\"state\":\"RUNNING\",\"type\":\"tool_call\",\"step_index\":2,\"tool_name\":\"call_mcp_tool\",\"tool_info\":{\"parameters\":{\"ServerName\":\"github\",\"ToolName\":\"get_me\"}}}}\n"))
+	time.Sleep(10 * time.Millisecond)
+	_, _ = outW.Write([]byte("{\"event\":\"step_update\",\"step_update\":{\"state\":\"DONE\",\"type\":\"tool_call\",\"step_index\":2,\"tool_name\":\"call_mcp_tool\"}}\n"))
+
+	// 3. Skill activation via view_file: RUNNING -> DONE
+	_, _ = outW.Write([]byte("{\"event\":\"step_update\",\"step_update\":{\"state\":\"RUNNING\",\"type\":\"tool_call\",\"step_index\":3,\"tool_name\":\"view_file\",\"tool_info\":{\"parameters\":{\"AbsolutePath\":\"/share/aerial-config/custom-skills/home-assistant/SKILL.md\"}}}}\n"))
+	time.Sleep(10 * time.Millisecond)
+	_, _ = outW.Write([]byte("{\"event\":\"step_update\",\"step_update\":{\"state\":\"DONE\",\"type\":\"tool_call\",\"step_index\":3,\"tool_name\":\"view_file\"}}\n"))
+
+	// 4. In-flight tool aborted on result
+	_, _ = outW.Write([]byte("{\"event\":\"step_update\",\"step_update\":{\"state\":\"RUNNING\",\"type\":\"tool_call\",\"step_index\":4,\"tool_name\":\"manage_task\",\"tool_info\":{\"parameters\":{}}}}\n"))
+	time.Sleep(10 * time.Millisecond)
+	_, _ = outW.Write([]byte("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"done\"}}\n"))
+
+	select {
+	case <-sink.done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for turn completion")
+	}
+
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+
+	if len(sink.completedToolDetails) != 4 {
+		t.Fatalf("expected 4 completed tool records, got %d: %+v", len(sink.completedToolDetails), sink.completedToolDetails)
+	}
+
+	// Verify run_command
+	c0 := sink.completedToolDetails[0]
+	if c0.ToolName != "run_command" || c0.MCPServer != "native" || c0.Status != "ok" {
+		t.Errorf("unexpected record 0: %+v", c0)
+	}
+
+	// Verify MCP get_me
+	c1 := sink.completedToolDetails[1]
+	if c1.ToolName != "get_me" || c1.MCPServer != "github" || c1.Status != "ok" {
+		t.Errorf("unexpected record 1: %+v", c1)
+	}
+
+	// Verify view_file
+	c2 := sink.completedToolDetails[2]
+	if c2.ToolName != "view_file" || c2.MCPServer != "native" || c2.Status != "ok" {
+		t.Errorf("unexpected record 2: %+v", c2)
+	}
+
+	// Verify aborted tool
+	c3 := sink.completedToolDetails[3]
+	if c3.ToolName != "manage_task" || c3.MCPServer != "native" || c3.Status != "aborted" {
+		t.Errorf("unexpected record 3: %+v", c3)
+	}
+
+	// Verify skill activation
+	if len(sink.activatedSkills) != 1 {
+		t.Fatalf("expected 1 skill activation, got %d: %+v", len(sink.activatedSkills), sink.activatedSkills)
+	}
+	expectedSkill := "home-assistant:discord"
+	if sink.activatedSkills[0] != expectedSkill {
+		t.Errorf("expected skill activation %q, got %q", expectedSkill, sink.activatedSkills[0])
+	}
+}
+
+func TestStreamingDaemon_ToolDrainingOnUnexpectedEOF(t *testing.T) {
+	outR, outW := io.Pipe()
+	inR, inW := io.Pipe()
+	errR, errW := io.Pipe()
+	defer closeQuietly(inR)
+	defer closeQuietly(errW)
+
+	mockHandle := &MockProcessHandle{pid: 2002}
+	mock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			return inW, outR, errR, mockHandle, nil
+		},
+	}
+
+	go func() {
+		_, _ = io.Copy(io.Discard, inR)
+	}()
+	go func() {
+		_, _ = outW.Write([]byte("{\"event\":\"init\",\"session_id\":\"00000000-0000-0000-0000-000000000202\"}\n"))
+	}()
+
+	cfg := DaemonConfig{
+		SessionID: "00000000-0000-0000-0000-000000000202",
+	}
+	daemon, err := StartStreamingDaemon(context.Background(), cfg, mock)
+	if err != nil {
+		t.Fatalf("failed starting daemon: %v", err)
+	}
+	defer daemon.Close()
+
+	sink := newMockTurnSink()
+	turn := &TurnContext{
+		TurnID:    "turn-eof-1",
+		Prompt:    "run tool until crash",
+		Sink:      sink,
+		CreatedAt: time.Now(),
+	}
+	if err := daemon.Send(turn.Prompt, turn); err != nil {
+		t.Fatalf("send failed: %v", err)
+	}
+
+	// Tool started
+	_, _ = outW.Write([]byte("{\"event\":\"step_update\",\"step_update\":{\"state\":\"RUNNING\",\"type\":\"tool_call\",\"step_index\":10,\"tool_name\":\"long_job\",\"tool_info\":{\"parameters\":{}}}}\n"))
+	time.Sleep(10 * time.Millisecond)
+
+	// Unexpected EOF
+	_ = outW.Close()
+
+	select {
+	case <-sink.done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for sink to finalize on EOF")
+	}
+
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+
+	if len(sink.completedToolDetails) != 1 {
+		t.Fatalf("expected 1 aborted tool drained, got %d", len(sink.completedToolDetails))
+	}
+	c := sink.completedToolDetails[0]
+	if c.ToolName != "long_job" || c.Status != "aborted" {
+		t.Errorf("expected long_job aborted, got %+v", c)
 	}
 }
 

@@ -686,6 +686,8 @@ func TestTurnSinks_NoopInterfaceMethods(t *testing.T) {
 	dSink := NewDiscordTurnSink(nil, "chan-1", "msg-1", nil, nil)
 	dSink.OnTurnStarted()
 	dSink.OnThinking()
+	dSink.OnToolCompleted("tool", "native", 10*time.Millisecond, "ok")
+	dSink.OnSkillActivated("skill", "discord")
 
 	// voiceTurnSink
 	var voiceStatus string
@@ -694,6 +696,8 @@ func TestTurnSinks_NoopInterfaceMethods(t *testing.T) {
 	vSink.OnThinking()
 	vSink.OnTextDelta("voice-delta")
 	vSink.OnToolCall("run_cmd", "sleep 1")
+	vSink.OnToolCompleted("run_cmd", "native", 10*time.Millisecond, "ok")
+	vSink.OnSkillActivated("skill", "voice")
 	if voiceStatus == "" {
 		t.Errorf("expected non-empty voice status")
 	}
@@ -716,6 +720,8 @@ func TestTurnSinks_NoopInterfaceMethods(t *testing.T) {
 	voiceSink.OnTurnStarted()
 	voiceSink.OnThinking()
 	voiceSink.OnToolCall("tool", "cmd")
+	voiceSink.OnToolCompleted("tool", "native", 10*time.Millisecond, "ok")
+	voiceSink.OnSkillActivated("skill", "voice")
 }
 
 func TestThrowawayTurnSink_ResultContext(t *testing.T) {
