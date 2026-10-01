@@ -13,6 +13,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/azylman/aerial/brain/pkg/metrics"
 )
 
 // TurnSink receives streaming notifications and results during an active turn.
@@ -673,66 +675,97 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 			go turnFinishedCb(d)
 		}
 
-		if activeTurn.Sink != nil {
-			respStr := extractResponseString(raw)
-
-			var status, errMsg string
-			if resObj, ok := raw["result"].(map[string]any); ok {
-				if s, ok := resObj["status"].(string); ok {
-					status = s
-				}
-				if em, ok := resObj["error"].(string); ok {
-					errMsg = em
-				}
-			}
-			if status == "" {
-				if s, ok := raw["status"].(string); ok {
-					status = s
-				}
-			}
-			if errMsg == "" {
-				if em, ok := raw["error"].(string); ok {
-					errMsg = em
-				}
-			}
-
-			if strings.TrimSpace(respStr) == "" || strings.HasPrefix(respStr, "[Tool Call Requested]:") || strings.EqualFold(status, "ERROR") {
-				if d.cfg.TranscriptRescuer != nil && d.SessionID() != "" {
-					rescued := d.cfg.TranscriptRescuer(d.SessionID(), activeTurn.CreatedAt)
-					if rescued != "" && IsSubstantiveResponse(rescued) && !strings.HasPrefix(rescued, "[Tool Call Requested]:") {
-						log.Printf("[StreamingDaemon] Recovered substantive response directly from session %s transcript after error/empty result: %s", d.SessionID(), rescued)
-						res := &TurnResult{
-							ConversationID: d.SessionID(),
-							Response:       strings.TrimSpace(rescued),
-							Duration:       time.Since(activeTurn.CreatedAt),
-						}
-						populateUsage(res, raw)
-						activeTurn.Sink.OnResult(res)
-						return
-					}
-				}
-				if strings.EqualFold(status, "ERROR") {
-					if strings.TrimSpace(respStr) == "" || strings.HasPrefix(respStr, "[Tool Call Requested]:") {
-						if errMsg == "" {
-							errMsg = "daemon execution failed"
-						}
-						activeTurn.Sink.OnError(errors.New(errMsg))
-						return
-					}
-					if errMsg != "" {
-						log.Printf("[StreamingDaemon] Notice: daemon reported error with substantive response: %s", errMsg)
-					}
-				}
-			}
-
-			res := &TurnResult{
-				ConversationID: d.SessionID(),
-				Response:       respStr,
-				Duration:       time.Since(activeTurn.CreatedAt),
-			}
-			populateUsage(res, raw)
-			activeTurn.Sink.OnResult(res)
+		if activeTurn == nil || activeTurn.Sink == nil {
+			return
 		}
+
+		currentModel := d.cfg.Model
+		if activeTurn != nil && strings.TrimSpace(activeTurn.Model) != "" {
+			currentModel = strings.TrimSpace(activeTurn.Model)
+		}
+		if currentModel == "" {
+			currentModel = "default"
+		}
+
+		respStr := extractResponseString(raw)
+
+		var status, errMsg string
+		if resObj, ok := raw["result"].(map[string]any); ok {
+			if s, ok := resObj["status"].(string); ok {
+				status = s
+			}
+			if em, ok := resObj["error"].(string); ok {
+				errMsg = em
+			}
+		}
+		if status == "" {
+			if s, ok := raw["status"].(string); ok {
+				status = s
+			}
+		}
+		if errMsg == "" {
+			if em, ok := raw["error"].(string); ok {
+				errMsg = em
+			}
+		}
+
+		if strings.TrimSpace(respStr) == "" || strings.HasPrefix(respStr, "[Tool Call Requested]:") || strings.EqualFold(status, "ERROR") {
+			if d.cfg.TranscriptRescuer != nil && d.SessionID() != "" {
+				rescued := d.cfg.TranscriptRescuer(d.SessionID(), activeTurn.CreatedAt)
+				if rescued != "" && IsSubstantiveResponse(rescued) && !strings.HasPrefix(rescued, "[Tool Call Requested]:") {
+					log.Printf("[StreamingDaemon] Recovered substantive response directly from session %s transcript after error/empty result: %s", d.SessionID(), rescued)
+					if errMsg != "" {
+						if IsCapacityBlip(errMsg, "") {
+							metrics.RecordRunnerError("capacity_throttle", currentModel)
+						} else if IsQuotaPause(errMsg, "") {
+							metrics.RecordRunnerError("quota_paused", currentModel)
+						}
+					}
+					res := &TurnResult{
+						ConversationID: d.SessionID(),
+						Response:       strings.TrimSpace(rescued),
+						Stderr:         errMsg,
+						Duration:       time.Since(activeTurn.CreatedAt),
+					}
+					populateUsage(res, raw)
+					activeTurn.Sink.OnResult(res)
+					return
+				}
+			}
+			if strings.EqualFold(status, "ERROR") {
+				if strings.TrimSpace(respStr) == "" || strings.HasPrefix(respStr, "[Tool Call Requested]:") {
+					if IsCapacityBlip(errMsg, "") {
+						metrics.RecordRunnerError("capacity_throttle", currentModel)
+					} else if IsQuotaPause(errMsg, "") {
+						metrics.RecordRunnerError("quota_paused", currentModel)
+					} else {
+						metrics.RecordRunnerError("process_error", currentModel)
+					}
+					if errMsg == "" {
+						errMsg = "daemon execution failed"
+					}
+					activeTurn.Sink.OnError(errors.New(errMsg))
+					return
+				}
+				if errMsg != "" {
+					log.Printf("[StreamingDaemon] Notice: daemon reported error with substantive response: %s", errMsg)
+					if IsCapacityBlip(errMsg, "") {
+						metrics.RecordRunnerError("capacity_throttle", currentModel)
+					} else if IsQuotaPause(errMsg, "") {
+						metrics.RecordRunnerError("quota_paused", currentModel)
+					}
+				}
+			}
+		}
+
+		res := &TurnResult{
+			ConversationID: d.SessionID(),
+			Response:       respStr,
+			Stderr:         errMsg,
+			Duration:       time.Since(activeTurn.CreatedAt),
+		}
+		populateUsage(res, raw)
+		activeTurn.Sink.OnResult(res)
 	}
 }
 

@@ -1709,7 +1709,6 @@ func (te *turnExecution) executeWithRetries() {
 						te.threadID, attempt, maxAttempts, resetDur, errDetail)
 
 					if attempt < maxAttempts {
-						metrics.RecordRunnerError("capacity_throttle", currentModel)
 						for _, m := range te.burst {
 							te.incrementMessageRetry(m.ID, errDetail)
 						}
@@ -1821,7 +1820,6 @@ func (te *turnExecution) executeWithRetries() {
 					log.Printf("[WorkerPool] Circuit breaker: turn for thread %s was already an auto-retry. Skipping further scheduling.", te.threadID)
 				}
 
-				metrics.RecordRunnerError("quota_paused", currentModel)
 				metrics.RecordTurnCompleted("quota_paused", te.triggerType, currentModel, time.Since(te.execStart))
 
 				te.stopTyping()

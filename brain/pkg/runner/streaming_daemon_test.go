@@ -2091,6 +2091,168 @@ func TestStreamingDaemon_ToolDrainingOnUnexpectedEOF(t *testing.T) {
 	}
 }
 
+func TestStreamingDaemon_ResultWithErrorStatus_RecordsCapacityThrottle(t *testing.T) {
+	outR, outW := io.Pipe()
+	inR, inW := io.Pipe()
+	errR, errW := io.Pipe()
+	defer closeQuietly(inR)
+	defer closeQuietly(errW)
+
+	mock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			return inW, outR, errR, &MockProcessHandle{pid: 3001}, nil
+		},
+	}
+
+	go func() {
+		_, _ = outW.Write([]byte("{\"event\":\"init\",\"session_id\":\"00000000-0000-0000-0000-000000000301\"}\n"))
+	}()
+
+	daemon, err := StartStreamingDaemon(context.Background(), DaemonConfig{
+		SessionID: "00000000-0000-0000-0000-000000000301",
+		Model:     "test-model",
+	}, mock)
+	if err != nil {
+		t.Fatalf("failed creating daemon: %v", err)
+	}
+	defer daemon.Close()
+
+	sink := newMockTurnSink()
+	turn := &TurnContext{
+		Ctx:       context.Background(),
+		Model:     "test-model-turn",
+		Prompt:    "test prompt",
+		CreatedAt: time.Now(),
+		Sink:      sink,
+	}
+
+	daemon.inflightMu.Lock()
+	daemon.inflight = append(daemon.inflight, turn)
+	daemon.inflightMu.Unlock()
+
+	expectedErr := "RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Your quota will reset after 1s."
+	payload := fmt.Sprintf(`{"event":"result","result":{"status":"ERROR","error":%q,"response":"Recovered test text."}}`+"\n", expectedErr)
+	daemon.dispatchNDJSONLine(payload)
+
+	select {
+	case <-sink.done:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for turn result")
+	}
+
+	sink.mu.Lock()
+	res := sink.result
+	sink.mu.Unlock()
+
+	if res == nil {
+		t.Fatalf("expected non-nil result from daemon with substantive response")
+	}
+	if res.Response != "Recovered test text." {
+		t.Errorf("expected response 'Recovered test text.', got %q", res.Response)
+	}
+	if res.Stderr != expectedErr {
+		t.Errorf("expected stderr %q, got %q", expectedErr, res.Stderr)
+	}
+}
+
+func TestStreamingDaemon_NilActiveTurn_NoPanic(t *testing.T) {
+	outR, outW := io.Pipe()
+	inR, inW := io.Pipe()
+	errR, errW := io.Pipe()
+	defer closeQuietly(inR)
+	defer closeQuietly(errW)
+
+	mock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			return inW, outR, errR, &MockProcessHandle{pid: 3002}, nil
+		},
+	}
+
+	go func() {
+		_, _ = outW.Write([]byte("{\"event\":\"init\",\"session_id\":\"00000000-0000-0000-0000-000000000302\"}\n"))
+	}()
+
+	daemon, err := StartStreamingDaemon(context.Background(), DaemonConfig{
+		SessionID: "00000000-0000-0000-0000-000000000302",
+		Model:     "test-model",
+	}, mock)
+	if err != nil {
+		t.Fatalf("failed creating daemon: %v", err)
+	}
+	defer daemon.Close()
+
+	// Dispatch line without active inflight turns
+	daemon.dispatchNDJSONLine(`{"event":"result","result":{"status":"OK","response":"Unsolicited"}}`)
+}
+
+func TestStreamingDaemon_TranscriptRescue_RecordsCapacityThrottle(t *testing.T) {
+	outR, outW := io.Pipe()
+	inR, inW := io.Pipe()
+	errR, errW := io.Pipe()
+	defer closeQuietly(inR)
+	defer closeQuietly(errW)
+
+	mock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			return inW, outR, errR, &MockProcessHandle{pid: 3003}, nil
+		},
+	}
+
+	go func() {
+		_, _ = outW.Write([]byte("{\"event\":\"init\",\"session_id\":\"00000000-0000-0000-0000-000000000303\"}\n"))
+	}()
+
+	daemon, err := StartStreamingDaemon(context.Background(), DaemonConfig{
+		SessionID: "00000000-0000-0000-0000-000000000303",
+		Model:     "test-model",
+		TranscriptRescuer: func(convID string, since time.Time) string {
+			return "Rescued from transcript successfully."
+		},
+	}, mock)
+	if err != nil {
+		t.Fatalf("failed creating daemon: %v", err)
+	}
+	defer daemon.Close()
+
+	sink := newMockTurnSink()
+	turn := &TurnContext{
+		Ctx:       context.Background(),
+		Model:     "gemini-3.8-flash-high",
+		Prompt:    "test rescue prompt",
+		CreatedAt: time.Now(),
+		Sink:      sink,
+	}
+
+	daemon.inflightMu.Lock()
+	daemon.inflight = append(daemon.inflight, turn)
+	daemon.inflightMu.Unlock()
+
+	expectedErr := "RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Your quota will reset after 0s."
+	payload := fmt.Sprintf(`{"event":"result","result":{"status":"ERROR","error":%q,"response":""}}`+"\n", expectedErr)
+	daemon.dispatchNDJSONLine(payload)
+
+	select {
+	case <-sink.done:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for turn result")
+	}
+
+	sink.mu.Lock()
+	res := sink.result
+	sink.mu.Unlock()
+
+	if res == nil {
+		t.Fatalf("expected non-nil result rescued from transcript")
+	}
+	if res.Response != "Rescued from transcript successfully." {
+		t.Errorf("expected rescued response, got %q", res.Response)
+	}
+	if res.Stderr != expectedErr {
+		t.Errorf("expected stderr %q, got %q", expectedErr, res.Stderr)
+	}
+}
+
+
 
 
 
