@@ -1042,6 +1042,53 @@ func extractVoiceMCPServers(cur *config.ConfigData) []runner.MCPServerConfig {
 	return result
 }
 
+// buildPoolEnv returns a process environment slice with unified compiler and module
+// cache directories under runtimeBase/cache when not already explicitly set.
+func buildPoolEnv(baseEnv []string, runtimeBase string) []string {
+	if runtimeBase == "" {
+		return baseEnv
+	}
+	cacheBase := filepath.Join(runtimeBase, "cache")
+	for _, dir := range []string{
+		filepath.Join(cacheBase, "go-build"),
+		filepath.Join(cacheBase, "go", "pkg", "mod"),
+		filepath.Join(cacheBase, "golangci-lint"),
+	} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			log.Printf("[WARN] Failed to create cache directory %q: %v", dir, err)
+		}
+	}
+
+	envMap := make(map[string]bool)
+	for _, e := range baseEnv {
+		if k, _, ok := strings.Cut(e, "="); ok {
+			envMap[k] = true
+		}
+	}
+
+	var extra []string
+	if !envMap["GOCACHE"] {
+		extra = append(extra, "GOCACHE="+filepath.Join(cacheBase, "go-build"))
+	}
+	if !envMap["GOPATH"] {
+		extra = append(extra, "GOPATH="+filepath.Join(cacheBase, "go"))
+	}
+	if !envMap["GOMODCACHE"] {
+		extra = append(extra, "GOMODCACHE="+filepath.Join(cacheBase, "go", "pkg", "mod"))
+	}
+	if !envMap["GOLANGCI_LINT_CACHE"] {
+		extra = append(extra, "GOLANGCI_LINT_CACHE="+filepath.Join(cacheBase, "golangci-lint"))
+	}
+
+	if len(extra) == 0 {
+		return baseEnv
+	}
+	result := make([]string, len(baseEnv)+len(extra))
+	copy(result, baseEnv)
+	copy(result[len(baseEnv):], extra)
+	return result
+}
+
 // createVoiceProcessPool constructs a runner.AgentPool based on cfg.VoiceEngine()
 // wrapped in runner.DynamicVoicePool with a factory closure evaluating cfg.Current() dynamically.
 func createVoiceProcessPool(cfg *config.Config, voiceHome string, lowEffortModel string, spawner runner.DaemonSpawner) runner.AgentPool {
@@ -1093,12 +1140,19 @@ func createVoiceProcessPool(cfg *config.Config, voiceHome string, lowEffortModel
 		}
 		if voiceEngine != "gemini_api" {
 			effectiveModel = lowEffortModel
+			runtimeBase := cur.DataDir
+			if runtimeBase == "" && cfg != nil {
+				runtimeBase = cfg.DataDir()
+			}
+			if runtimeBase == "" && cfg != nil {
+				runtimeBase = cfg.GeminiHomeDir()
+			}
 			voicePool = runner.NewUnifiedProcessPool(runner.PoolConfig{
 				GeminiHomeDir:    voiceHome,
 				Model:            lowEffortModel,
 				AgyBin:           cur.AgyBin,
 				Cwd:              cur.DataDir,
-				Env:              os.Environ(),
+				Env:              buildPoolEnv(os.Environ(), runtimeBase),
 				PrewarmedTargets: prewarmedTargets,
 			}, spawner)
 		}
@@ -1220,12 +1274,14 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	voiceHome := filepath.Join(runtimeBase, "runtimes", "voice")
 	ephemeralHome := filepath.Join(runtimeBase, "runtimes", "ephemeral")
 
+	poolEnv := buildPoolEnv(os.Environ(), runtimeBase)
+
 	discordPrimaryPool := runner.NewUnifiedProcessPool(runner.PoolConfig{
 		GeminiHomeDir:     discordHome,
 		Model:             cur.Model,
 		AgyBin:            cur.AgyBin,
 		Cwd:               cur.DataDir,
-		Env:               os.Environ(),
+		Env:               poolEnv,
 		TranscriptRescuer: sessionMgr.ExtractResponseSince,
 	}, appOpts.processSpawner)
 	defer func() {
@@ -1239,7 +1295,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		Model:             lowEffortModel,
 		AgyBin:            cur.AgyBin,
 		Cwd:               cur.DataDir,
-		Env:               os.Environ(),
+		Env:               poolEnv,
 		PrewarmedTargets:  []string{"ephemeral:worker-0", "ephemeral:worker-1"},
 		TranscriptRescuer: sessionMgr.ExtractResponseSince,
 	}, appOpts.processSpawner)
