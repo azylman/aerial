@@ -3183,6 +3183,23 @@ func TestVoicePool_FactoryWiring(t *testing.T) {
 		}
 	})
 
+	t.Run("GeminiAPI_WithAmbientContext_InvalidTemplate", func(t *testing.T) {
+		t.Parallel()
+		data := &config.ConfigData{
+			APIKey: "test-ambient-key",
+			Voice: config.VoiceConfig{
+				Engine: "gemini_api",
+				AmbientContext: &config.AmbientContextConfig{
+					CacheTTL: "30s",
+					Template: "{{.invalid template syntax",
+				},
+			},
+		}
+		cfg := config.NewFromData(data)
+		pool := createVoiceProcessPool(cfg, voiceHome, "fallback-model", spawner)
+		defer pool.Close()
+	})
+
 	t.Run("GeminiAPI_WithAPIKeyFallback", func(t *testing.T) {
 		t.Parallel()
 		data := &config.ConfigData{
