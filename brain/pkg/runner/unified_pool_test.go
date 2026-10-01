@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -315,8 +316,106 @@ func TestUnifiedProcessPool_InitializePrewarmFailure(t *testing.T) {
 	if err := pool.Initialize(context.Background()); err != nil {
 		t.Fatalf("unexpected Initialize error: %v", err)
 	}
-	// Give background pre-warm goroutine time to run and log warning
-	time.Sleep(50 * time.Millisecond)
+}
+
+func TestUnifiedProcessPool_Initialize_Sequential(t *testing.T) {
+	var mu sync.Mutex
+	var activeSpawns int
+	maxConcurrentSpawns := 0
+	var order []string
+
+	mock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			mu.Lock()
+			activeSpawns++
+			if activeSpawns > maxConcurrentSpawns {
+				maxConcurrentSpawns = activeSpawns
+			}
+			order = append(order, cfg.ThreadID)
+			mu.Unlock()
+
+			// Simulate work during startup
+			select {
+			case <-ctx.Done():
+				mu.Lock()
+				activeSpawns--
+				mu.Unlock()
+				return nil, nil, nil, nil, ctx.Err()
+			case <-time.After(15 * time.Millisecond):
+			}
+
+			mu.Lock()
+			activeSpawns--
+			mu.Unlock()
+
+			outR, outW := io.Pipe()
+			inR, inW := io.Pipe()
+			errR, _ := io.Pipe()
+
+			go func() {
+				_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":"00000000-0000-0000-0000-0000000000%02d"}`+"\n", activeSpawns+10)))
+				_, _ = io.ReadAll(inR)
+				_ = outW.Close()
+			}()
+
+			return inW, outR, errR, &MockProcessHandle{pid: 100}, nil
+		},
+	}
+
+	cfg := PoolConfig{
+		PrewarmedTargets: []string{"seq-target-1", "seq-target-2", "seq-target-3"},
+	}
+	pool := NewUnifiedProcessPool(cfg, mock)
+	defer pool.Close()
+
+	if err := pool.Initialize(context.Background()); err != nil {
+		t.Fatalf("unexpected Initialize error: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if maxConcurrentSpawns != 1 {
+		t.Errorf("expected max concurrent spawns to be exactly 1, got %d", maxConcurrentSpawns)
+	}
+	if len(order) != 3 {
+		t.Fatalf("expected 3 targets spawned, got %d", len(order))
+	}
+	if order[0] != "seq-target-1" || order[1] != "seq-target-2" || order[2] != "seq-target-3" {
+		t.Errorf("expected sequential order [seq-target-1, seq-target-2, seq-target-3], got %v", order)
+	}
+}
+
+func TestUnifiedProcessPool_Initialize_ContextCancellation(t *testing.T) {
+	mock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			outR, outW := io.Pipe()
+			inR, inW := io.Pipe()
+			errR, _ := io.Pipe()
+
+			go func() {
+				_, _ = outW.Write([]byte(`{"event":"init","session_id":"00000000-0000-0000-0000-000000000010"}` + "\n"))
+				_, _ = io.ReadAll(inR)
+				_ = outW.Close()
+			}()
+
+			return inW, outR, errR, &MockProcessHandle{pid: 100}, nil
+		},
+	}
+
+	cfg := PoolConfig{
+		PrewarmedTargets: []string{"cancel-target-1", "cancel-target-2"},
+	}
+	pool := NewUnifiedProcessPool(cfg, mock)
+	defer pool.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // pre-cancelled
+
+	err := pool.Initialize(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected context.Canceled error, got %v", err)
+	}
 }
 
 func TestUnifiedProcessPool_ShouldRotate(t *testing.T) {

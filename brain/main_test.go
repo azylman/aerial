@@ -3645,5 +3645,96 @@ func TestBuildPoolEnv(t *testing.T) {
 	})
 }
 
+type mockSequentialPool struct {
+	name       string
+	initCalled bool
+	onInit     func(name string)
+}
+
+func (m *mockSequentialPool) GetOrCreateSession(ctx context.Context, targetKey string, sessionID string) (runner.AgentSession, error) {
+	return nil, nil
+}
+
+func (m *mockSequentialPool) Initialize(ctx context.Context) error {
+	m.initCalled = true
+	if m.onInit != nil {
+		m.onInit(m.name)
+	}
+	return nil
+}
+
+func (m *mockSequentialPool) Close() error {
+	return nil
+}
+
+func TestPrewarmProcessPoolsSequentially(t *testing.T) {
+	var mu sync.Mutex
+	var order []string
+
+	p1 := &mockSequentialPool{
+		name: "pool1",
+		onInit: func(name string) {
+			mu.Lock()
+			order = append(order, name)
+			mu.Unlock()
+			time.Sleep(10 * time.Millisecond)
+		},
+	}
+	p2 := &mockSequentialPool{
+		name: "pool2",
+		onInit: func(name string) {
+			mu.Lock()
+			order = append(order, name)
+			mu.Unlock()
+			time.Sleep(10 * time.Millisecond)
+		},
+	}
+	p3 := &mockSequentialPool{
+		name: "pool3",
+		onInit: func(name string) {
+			mu.Lock()
+			order = append(order, name)
+			mu.Unlock()
+			time.Sleep(10 * time.Millisecond)
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	PrewarmProcessPoolsSequentially(ctx, p1, nil, p2, p3)
+
+	deadline := time.Now().Add(1 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		count := len(order)
+		mu.Unlock()
+		if count == 3 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if len(order) != 3 {
+		t.Fatalf("expected 3 pools initialized, got %d (%v)", len(order), order)
+	}
+	if order[0] != "pool1" || order[1] != "pool2" || order[2] != "pool3" {
+		t.Errorf("expected sequential order [pool1, pool2, pool3], got %v", order)
+	}
+}
+
+func TestPrewarmProcessPoolsSequentially_CancelledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancelled upfront
+
+	p1 := &mockSequentialPool{name: "p1"}
+	PrewarmProcessPoolsSequentially(ctx, p1)
+
+	time.Sleep(15 * time.Millisecond)
+}
+
 
 
