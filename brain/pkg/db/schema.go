@@ -3,11 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
-	"fmt"
-	"log"
 )
-
-const migrationLockID = 849201948201
 
 // WARNING: Any indexes on columns added via downstream ALTER TABLE migrations (e.g. idx_facts_last_reinforced_at, idx_facts_fts)
 // must NOT be defined here in postgresSchema. Doing so breaks migrations on existing databases where the table exists
@@ -153,104 +149,6 @@ CREATE INDEX IF NOT EXISTS idx_transcript_steps_tool ON transcript_steps(tool_na
 
 
 func initSchemaPostgres(ctx context.Context, database *sql.DB) error {
-	conn, err := database.Conn(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to acquire db connection for migrations: %w", err)
-	}
-	defer closeWarn(conn, "migration connection")
-
-	if _, err := conn.ExecContext(ctx, "SELECT pg_advisory_lock($1);", migrationLockID); err != nil {
-		return fmt.Errorf("failed to acquire migration advisory lock: %w", err)
-	}
-	defer func() {
-		if _, err := conn.ExecContext(context.Background(), "SELECT pg_advisory_unlock($1);", migrationLockID); err != nil {
-			log.Printf("[DB] Warning releasing migration advisory lock: %v", err)
-		}
-	}()
-
-	if _, err := conn.ExecContext(ctx, postgresSchema); err != nil {
-		return fmt.Errorf("failed to run postgres migrations: %w", err)
-	}
-
-	if _, err := conn.ExecContext(ctx, "ALTER TABLE messages ADD COLUMN IF NOT EXISTS restart_count INTEGER NOT NULL DEFAULT 0;"); err != nil {
-		return fmt.Errorf("failed to add restart_count column to messages: %w", err)
-	}
-
-	execNotice := func(query string) {
-		if _, err := conn.ExecContext(ctx, query); err != nil {
-			log.Printf("[DB] Notice executing schema migration (%s): %v", query, err)
-		}
-	}
-
-	execNotice("ALTER TABLE messages ADD COLUMN IF NOT EXISTS effort TEXT NOT NULL DEFAULT ''")
-	execNotice("ALTER TABLE messages ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb")
-	execNotice("ALTER TABLE one_shot_schedules ADD COLUMN IF NOT EXISTS effort TEXT NOT NULL DEFAULT 'low'")
-	execNotice("ALTER TABLE one_shot_schedules ALTER COLUMN effort SET DEFAULT 'low'")
-	execNotice("ALTER TABLE cron_schedules ADD COLUMN IF NOT EXISTS effort TEXT NOT NULL DEFAULT 'low'")
-	execNotice("ALTER TABLE cron_schedules ALTER COLUMN effort SET DEFAULT 'low'")
-	execNotice("ALTER TABLE schedule_runs ADD COLUMN IF NOT EXISTS effort TEXT NOT NULL DEFAULT 'low'")
-	execNotice("ALTER TABLE schedule_runs ALTER COLUMN effort SET DEFAULT 'low'")
-	execNotice("ALTER TABLE schedule_runs ADD COLUMN IF NOT EXISTS model TEXT NOT NULL DEFAULT ''")
-
-	execNotice("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS summary TEXT NOT NULL DEFAULT ''")
-	execNotice("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS last_summarized_message_id TEXT NOT NULL DEFAULT ''")
-	execNotice("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS active_tasks TEXT NOT NULL DEFAULT '[]'")
-	if _, err := conn.ExecContext(ctx, "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS previous_session_id TEXT NOT NULL DEFAULT ''"); err != nil {
-		return fmt.Errorf("failed to add previous_session_id column to sessions: %w", err)
-	}
-
-	execNotice("ALTER TABLE facts DROP COLUMN IF EXISTS thread_id")
-	execNotice("DROP INDEX IF EXISTS idx_facts_thread_id")
-	execNotice("ALTER TABLE facts ADD COLUMN IF NOT EXISTS fts_tokens tsvector GENERATED ALWAYS AS (to_tsvector('simple', fact_text)) STORED")
-	execNotice("CREATE INDEX IF NOT EXISTS idx_facts_fts ON facts USING gin(fts_tokens)")
-
-	execNotice("ALTER TABLE facts ADD COLUMN IF NOT EXISTS last_reinforced_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP")
-	execNotice("ALTER TABLE facts ADD COLUMN IF NOT EXISTS last_decayed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP")
-	execNotice("ALTER TABLE facts ADD COLUMN IF NOT EXISTS reinforce_count INTEGER NOT NULL DEFAULT 1")
-	execNotice("CREATE INDEX IF NOT EXISTS idx_facts_last_reinforced_at ON facts(last_reinforced_at DESC)")
-	execNotice("UPDATE facts SET last_reinforced_at = created_at WHERE reinforce_count = 1 AND last_reinforced_at > created_at")
-
-	execNotice(`CREATE TABLE IF NOT EXISTS session_summaries (
-		session_id TEXT PRIMARY KEY,
-		thread_id TEXT NOT NULL DEFAULT '',
-		summary TEXT NOT NULL DEFAULT '',
-		fts_tokens tsvector GENERATED ALWAYS AS (to_tsvector('simple', summary)) STORED,
-		embedding vector(384),
-		last_indexed_step INT NOT NULL DEFAULT -1,
-		last_mtime TIMESTAMPTZ,
-		summary_step_watermark INT NOT NULL DEFAULT -1,
-		is_settled BOOLEAN NOT NULL DEFAULT FALSE,
-		created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-		updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-	)`)
-	execNotice(`CREATE TABLE IF NOT EXISTS transcript_steps (
-		session_id TEXT NOT NULL REFERENCES session_summaries(session_id) ON DELETE CASCADE,
-		step_index INT NOT NULL,
-		step_type TEXT NOT NULL DEFAULT '',
-		tool_name TEXT NOT NULL DEFAULT '',
-		content TEXT NOT NULL DEFAULT '',
-		fts_tokens tsvector GENERATED ALWAYS AS (to_tsvector('simple', LEFT(content, 50000))) STORED,
-		created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-		PRIMARY KEY (session_id, step_index)
-	)`)
-	execNotice("CREATE INDEX IF NOT EXISTS idx_session_summaries_fts ON session_summaries USING GIN(fts_tokens)")
-	execNotice("CREATE INDEX IF NOT EXISTS idx_session_summaries_mtime ON session_summaries(last_mtime)")
-	execNotice("CREATE INDEX IF NOT EXISTS idx_session_summaries_thread ON session_summaries(thread_id)")
-	execNotice("CREATE INDEX IF NOT EXISTS idx_session_summaries_embedding ON session_summaries USING hnsw (embedding vector_cosine_ops)")
-	execNotice("CREATE INDEX IF NOT EXISTS idx_transcript_steps_fts ON transcript_steps USING GIN(fts_tokens)")
-	execNotice("CREATE INDEX IF NOT EXISTS idx_transcript_steps_tool ON transcript_steps(tool_name)")
-
-	// Reconcile any session summaries that missed transcript_steps due to FK insertion order
-	execNotice(`UPDATE session_summaries 
-		SET last_indexed_step = -1, last_mtime = '1970-01-01 00:00:00+00' 
-		WHERE last_indexed_step >= 0 
-		  AND NOT EXISTS (SELECT 1 FROM transcript_steps ts WHERE ts.session_id = session_summaries.session_id)`)
-
-	// Idempotent sequence resynchronization in case of manual data restoration
-	execNotice(`
-		SELECT setval(pg_get_serial_sequence('facts', 'id'), COALESCE((SELECT MAX(id) FROM facts), 1), (SELECT COUNT(*) > 0 FROM facts));
-		SELECT setval(pg_get_serial_sequence('messages', 'row_id'), COALESCE((SELECT MAX(row_id) FROM messages), 1), (SELECT COUNT(*) > 0 FROM messages));
-	`)
-	return nil
+	return RunMigrations(ctx, database)
 }
 

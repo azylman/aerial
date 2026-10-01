@@ -295,9 +295,14 @@ run_vector_syntax() {
             docker exec aerial-vector rm -f /tmp/verify-vector.yaml >/dev/null 2>&1
         elif has_cmd vector; then
             OPENOBSERVE_ROOT_USER_PASSWORD=dummy OPENOBSERVE_ROOT_USER_EMAIL=dummy@local vector validate --skip-healthchecks "$file"
-        elif has_docker; then
-            cat "$file" | docker run --rm -i -e OPENOBSERVE_ROOT_USER_PASSWORD=dummy -e OPENOBSERVE_ROOT_USER_EMAIL=dummy@local --entrypoint sh timberio/vector:0.40.0-alpine -c 'cat > /tmp/v.yaml && vector validate --skip-healthchecks /tmp/v.yaml'
         fi
+    fi
+}
+
+run_atlas_validate() {
+    if [ -d "brain/pkg/db/migrations" ] && has_cmd atlas; then
+        echo "   [atlas validate] Validating migration integrity..."
+        (cd brain && atlas migrate validate --dir "file://pkg/db/migrations")
     fi
 }
 
@@ -331,6 +336,11 @@ if [ "$MODE" = "staged" ]; then
             fi
         fi
     done
+
+    # Check Atlas migrations
+    if echo "$STAGED_FILES" | grep -q -E "^brain/pkg/db/migrations/|^brain/atlas\.hcl|^brain/pkg/db/schema\.sql"; then
+        run_atlas_validate
+    fi
 
     # Check dashboard JS syntax
     if echo "$STAGED_FILES" | grep -q "^dashboard/"; then
@@ -378,6 +388,7 @@ for svc in $GO_SERVICES; do
     run_golangci_lint "$svc"
     run_deadcode "$svc"
 done
+run_atlas_validate
 
 echo "=== 2. Frontend & Script Syntax Checks ==="
 run_node_syntax "dashboard/static/app.js"
