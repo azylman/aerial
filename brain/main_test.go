@@ -3402,4 +3402,92 @@ func TestExtractVoiceMCPServers(t *testing.T) {
 	}
 }
 
+func TestBuildPoolEnv(t *testing.T) {
+	t.Parallel()
+
+	t.Run("EmptyRuntimeBaseReturnsBaseEnv", func(t *testing.T) {
+		t.Parallel()
+		base := []string{"FOO=bar", "BAZ=qux"}
+		res := buildPoolEnv(base, "")
+		if len(res) != 2 || res[0] != "FOO=bar" || res[1] != "BAZ=qux" {
+			t.Errorf("expected unmodified env, got %v", res)
+		}
+	})
+
+	t.Run("InjectsUnifiedCacheDirectories", func(t *testing.T) {
+		t.Parallel()
+		tmpDir := t.TempDir()
+		base := []string{"EXISTING=1"}
+		res := buildPoolEnv(base, tmpDir)
+
+		envMap := make(map[string]string)
+		for _, e := range res {
+			if k, v, ok := strings.Cut(e, "="); ok {
+				envMap[k] = v
+			}
+		}
+
+		expectedGoCache := filepath.Join(tmpDir, "cache", "go-build")
+		expectedGoPath := filepath.Join(tmpDir, "cache", "go")
+		expectedGoModCache := filepath.Join(tmpDir, "cache", "go", "pkg", "mod")
+		expectedLintCache := filepath.Join(tmpDir, "cache", "golangci-lint")
+
+		if envMap["GOCACHE"] != expectedGoCache {
+			t.Errorf("expected GOCACHE=%q, got %q", expectedGoCache, envMap["GOCACHE"])
+		}
+		if envMap["GOPATH"] != expectedGoPath {
+			t.Errorf("expected GOPATH=%q, got %q", expectedGoPath, envMap["GOPATH"])
+		}
+		if envMap["GOMODCACHE"] != expectedGoModCache {
+			t.Errorf("expected GOMODCACHE=%q, got %q", expectedGoModCache, envMap["GOMODCACHE"])
+		}
+		if envMap["GOLANGCI_LINT_CACHE"] != expectedLintCache {
+			t.Errorf("expected GOLANGCI_LINT_CACHE=%q, got %q", expectedLintCache, envMap["GOLANGCI_LINT_CACHE"])
+		}
+		if envMap["EXISTING"] != "1" {
+			t.Errorf("expected EXISTING=1 to be preserved, got %q", envMap["EXISTING"])
+		}
+
+		// Verify directories were created
+		for _, d := range []string{expectedGoCache, expectedGoModCache, expectedLintCache} {
+			if fi, err := os.Stat(d); err != nil || !fi.IsDir() {
+				t.Errorf("expected directory %q to exist, err: %v", d, err)
+			}
+		}
+	})
+
+	t.Run("PreservesExplicitCacheEnv", func(t *testing.T) {
+		t.Parallel()
+		tmpDir := t.TempDir()
+		base := []string{
+			"GOCACHE=/custom/gocache",
+			"GOPATH=/custom/gopath",
+			"GOMODCACHE=/custom/modcache",
+			"GOLANGCI_LINT_CACHE=/custom/lintcache",
+		}
+		res := buildPoolEnv(base, tmpDir)
+
+		envMap := make(map[string]string)
+		for _, e := range res {
+			if k, v, ok := strings.Cut(e, "="); ok {
+				envMap[k] = v
+			}
+		}
+
+		if envMap["GOCACHE"] != "/custom/gocache" {
+			t.Errorf("expected custom GOCACHE, got %q", envMap["GOCACHE"])
+		}
+		if envMap["GOPATH"] != "/custom/gopath" {
+			t.Errorf("expected custom GOPATH, got %q", envMap["GOPATH"])
+		}
+		if envMap["GOMODCACHE"] != "/custom/modcache" {
+			t.Errorf("expected custom GOMODCACHE, got %q", envMap["GOMODCACHE"])
+		}
+		if envMap["GOLANGCI_LINT_CACHE"] != "/custom/lintcache" {
+			t.Errorf("expected custom GOLANGCI_LINT_CACHE, got %q", envMap["GOLANGCI_LINT_CACHE"])
+		}
+	})
+}
+
+
 

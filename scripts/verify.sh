@@ -206,6 +206,8 @@ run_go_test() {
                 ${GOROOT:+GOROOT="$GOROOT"} \
                 ${GOPATH:+GOPATH="$GOPATH"} \
                 ${GOCACHE:+GOCACHE="$GOCACHE"} \
+                ${GOMODCACHE:+GOMODCACHE="$GOMODCACHE"} \
+                ${GOLANGCI_LINT_CACHE:+GOLANGCI_LINT_CACHE="$GOLANGCI_LINT_CACHE"} \
                 ${TMPDIR:+TMPDIR="$TMPDIR"} \
                 ${SystemRoot:+SystemRoot="$SystemRoot"} \
                 ${SYSTEMROOT:+SYSTEMROOT="$SYSTEMROOT"} \

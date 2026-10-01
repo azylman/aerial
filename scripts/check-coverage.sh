@@ -184,6 +184,8 @@ for svc in $ALL_GO_SERVICES; do
                 ${GOROOT:+GOROOT="$GOROOT"} \
                 ${GOPATH:+GOPATH="$GOPATH"} \
                 ${GOCACHE:+GOCACHE="$GOCACHE"} \
+                ${GOMODCACHE:+GOMODCACHE="$GOMODCACHE"} \
+                ${GOLANGCI_LINT_CACHE:+GOLANGCI_LINT_CACHE="$GOLANGCI_LINT_CACHE"} \
                 ${TMPDIR:+TMPDIR="$TMPDIR"} \
                 ${SystemRoot:+SystemRoot="$SystemRoot"} \
                 ${SYSTEMROOT:+SYSTEMROOT="$SYSTEMROOT"} \
