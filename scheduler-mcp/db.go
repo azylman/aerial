@@ -199,17 +199,6 @@ func initDB(dsn string) (*sql.DB, error) {
 		return nil, fmt.Errorf("failed to execute postgres schema: %w", err)
 	}
 
-	for _, migration := range []string{
-		"ALTER TABLE cron_schedules ADD COLUMN IF NOT EXISTS effort TEXT NOT NULL DEFAULT 'low';",
-		"ALTER TABLE cron_schedules ALTER COLUMN effort SET DEFAULT 'low';",
-		"ALTER TABLE one_shot_schedules ADD COLUMN IF NOT EXISTS effort TEXT NOT NULL DEFAULT 'low';",
-		"ALTER TABLE one_shot_schedules ALTER COLUMN effort SET DEFAULT 'low';",
-	} {
-		if _, alterErr := conn.ExecContext(ctx, migration); alterErr != nil {
-			log.Printf("[Scheduler DB] Warning executing postgres migration %q: %v", migration, alterErr)
-		}
-	}
-
 	log.Printf("[Scheduler DB] PostgreSQL initialized successfully at %s", trimmed)
 	success = true
 	return database, nil
