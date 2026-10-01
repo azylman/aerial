@@ -885,27 +885,32 @@ services:
         condition: service_healthy
 
   # ----------------------------------------------------------------------------
-  # 19. Cluster Orchestrator: HashiCorp Nomad Server
-  #     Dedicated single-node control plane managing remote worker allocations.
+  # 21. Cluster Orchestrator & Local Worker: HashiCorp Nomad
+  #     Dedicated single-node control plane and local HAOS client node.
   # ----------------------------------------------------------------------------
   nomad-server:
     image: hashicorp/nomad:1.8.4
     container_name: aerial-nomad-server
     restart: unless-stopped
     network_mode: host
+    privileged: true
     environment:
       - NOMAD_SKIP_DOCKER_IMAGE_WARN=1
-    command: ["agent", "-server", "-bootstrap-expect=1", "-data-dir=/nomad/data", "-bind=0.0.0.0", "-client=false"]
+    command: ["agent", "-config=/nomad/config/nomad.hcl"]
     volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /mnt/data/nomad/client:/mnt/data/nomad/client
       - aerial-nomad-server-data:/nomad/data
+      - ${AERIAL_HOST_PROJECT_DIR:-${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}}/nomad/nomad.hcl:/nomad/config/nomad.hcl:ro
     labels:
       autoheal: "true"
     healthcheck:
-      test: ["CMD", "nomad", "server", "members"]
+      test: ["CMD-SHELL", "nomad server members && nomad node status -self || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 3
-      start_period: 10s
+      start_period: 15s
       start_interval: 2s
 
 networks:
