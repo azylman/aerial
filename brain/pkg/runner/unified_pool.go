@@ -98,7 +98,7 @@ func (p *UnifiedProcessPool) SetTranscriptRescuer(rescuer func(convID string, si
 	}
 }
 
-// Initialize pre-warms configured target daemons in background goroutines.
+// Initialize pre-warms configured target daemons sequentially in the caller's context.
 func (p *UnifiedProcessPool) Initialize(ctx context.Context) error {
 	p.mu.RLock()
 	if p.closed {
@@ -107,17 +107,31 @@ func (p *UnifiedProcessPool) Initialize(ctx context.Context) error {
 	}
 	p.mu.RUnlock()
 
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	for _, target := range p.cfg.PrewarmedTargets {
-		targetKey := target
-		go func() {
-			initCtx, cancel := context.WithTimeout(p.ctx, 35*time.Second)
-			defer cancel()
-			if _, err := p.GetOrCreate(initCtx, targetKey, ""); err != nil {
-				log.Printf("[UnifiedProcessPool] Warning: pre-warming target %q failed: %v", targetKey, err)
-			} else {
-				log.Printf("[UnifiedProcessPool] Pre-warmed target %q successfully", targetKey)
-			}
-		}()
+		p.mu.RLock()
+		closed := p.closed
+		p.mu.RUnlock()
+		if closed {
+			return fmt.Errorf("process pool is closed")
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		initCtx, cancel := context.WithTimeout(ctx, 35*time.Second)
+		if _, err := p.GetOrCreate(initCtx, target, ""); err != nil {
+			log.Printf("[UnifiedProcessPool] Warning: pre-warming target %q failed: %v", target, err)
+		} else {
+			log.Printf("[UnifiedProcessPool] Pre-warmed target %q successfully", target)
+		}
+		cancel()
 	}
 	return nil
 }

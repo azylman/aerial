@@ -1299,6 +1299,34 @@ func createVoicePool(cfg *config.Config, voiceHome string, lowEffortModel string
 	return createVoiceProcessPool(cfg, voiceHome, lowEffortModel, spawner)
 }
 
+// PrewarmProcessPoolsSequentially pre-warms process pool targets in series in the background,
+// ensuring only one daemon is in the CPU-intensive startup phase at a time across all pools.
+func PrewarmProcessPoolsSequentially(ctx context.Context, pools ...runner.AgentPool) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	go func() {
+		prewarmCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		defer cancel()
+
+		log.Printf("[INIT] Pre-warming process pools sequentially...")
+		for _, p := range pools {
+			if p == nil {
+				continue
+			}
+			if err := p.Initialize(prewarmCtx); err != nil && !errors.Is(err, context.Canceled) {
+				log.Printf("[WARN] Failed pre-warming pool: %v", err)
+			}
+			select {
+			case <-prewarmCtx.Done():
+				return
+			default:
+			}
+		}
+		log.Printf("[INIT] Process pool pre-warming completed.")
+	}()
+}
+
 var onServerReady func(addr string)
 
 func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption) error {
@@ -1428,17 +1456,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		}
 	}()
 
-	initCtx, initCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer initCancel()
-	if err := discordPrimaryPool.Initialize(initCtx); err != nil {
-		log.Printf("[WARN] Failed to eagerly pre-warm discord primary process pool: %v", err)
-	}
-	if err := discordLowEffortPool.Initialize(initCtx); err != nil {
-		log.Printf("[WARN] Failed to eagerly pre-warm discord low effort process pool: %v", err)
-	}
-	if err := voicePool.Initialize(initCtx); err != nil {
-		log.Printf("[WARN] Failed to eagerly pre-warm voice process pool: %v", err)
-	}
+	PrewarmProcessPoolsSequentially(ctx, discordPrimaryPool, discordLowEffortPool, voicePool)
 
 	cls := classifier.New(cfg, nil, classifier.WithProcessPool(discordLowEffortPool))
 
