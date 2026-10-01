@@ -1,0 +1,38 @@
+# Version control
+.git/
+.gitignore
+
+# CI/CD
+.github/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Root documentation and repo metadata (preserve rules/ and .agents/ markdown)
+/*.md
+LICENSE
+
+# Test, coverage, and temp artifacts
+**/*.out
+**/*.tmp
+**/*.test
+coverage/
+.coverage
+htmlcov/
+coverage.*
+
+# Node / Python build caches
+**/node_modules/
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+.venv/
+venv/
+dist/
+build/

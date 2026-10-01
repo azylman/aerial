@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 FROM nginx:1.27-alpine
 
 # Install curl for healthchecking and clean default Nginx files
