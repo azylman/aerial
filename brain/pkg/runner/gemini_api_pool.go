@@ -1126,12 +1126,22 @@ func (s *GeminiAPISession) Send(prompt string, turn *TurnContext) error {
 				turn.Sink.OnToolCall(fc.Name, argsDesc)
 			}
 
+			start := time.Now()
 			var toolOutput string
 			var execErr error
 			if dispatcher != nil {
 				toolOutput, execErr = dispatcher.Execute(ctx, fc.Name, fc.Args)
 			} else {
 				execErr = errors.New("no mcp dispatcher configured")
+			}
+			duration := time.Since(start)
+			status := "ok"
+			if execErr != nil {
+				status = "error"
+			}
+			canonicalTool, mcpServer := ExtractMCPToolInfo(fc.Name, fc.Args)
+			if turn != nil && turn.Sink != nil {
+				turn.Sink.OnToolCompleted(canonicalTool, mcpServer, duration, status)
 			}
 
 			respMap := map[string]interface{}{"output": toolOutput}

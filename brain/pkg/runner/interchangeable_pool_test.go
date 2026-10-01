@@ -801,6 +801,10 @@ func (s *testEventSink) OnToolCall(name, cmd string) {
 	}
 }
 
+func (s *testEventSink) OnToolCompleted(toolName, mcpServer string, duration time.Duration, status string) {}
+
+func (s *testEventSink) OnSkillActivated(skillName, source string) {}
+
 func (s *testEventSink) OnTextDelta(delta string) {
 	if s.onDelta != nil {
 		s.onDelta(delta)
@@ -894,5 +898,25 @@ func TestInterchangeablePool_ExtraCoverage(t *testing.T) {
 	if err := nilSess.Send("prompt", &TurnContext{}); err == nil {
 		t.Error("expected error sending to nil daemon leasedSession with turnCtx")
 	}
+}
+
+func TestReleaseTurnSink_ToolAndSkillForwarding(t *testing.T) {
+	mockInner := &mockTurnSink{}
+	rs := &releaseTurnSink{
+		inner: mockInner,
+	}
+	rs.OnToolCompleted("bash", "native", 10*time.Millisecond, "ok")
+	if len(mockInner.completedTools) != 1 {
+		t.Errorf("expected 1 completed tool forwarded, got %d", len(mockInner.completedTools))
+	}
+	rs.OnSkillActivated("self-improvement", "discord")
+	if len(mockInner.activatedSkills) != 1 {
+		t.Errorf("expected 1 activated skill forwarded, got %d", len(mockInner.activatedSkills))
+	}
+
+	// nil inner does not panic
+	nilRS := &releaseTurnSink{inner: nil}
+	nilRS.OnToolCompleted("bash", "native", 10*time.Millisecond, "ok")
+	nilRS.OnSkillActivated("self-improvement", "discord")
 }
 

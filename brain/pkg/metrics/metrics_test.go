@@ -284,3 +284,56 @@ func TestRecordDaemonAcquisitionAndVoiceTTFR(t *testing.T) {
 	}
 }
 
+func TestRecordToolAndSkillExecution(t *testing.T) {
+	RecordToolExecution("run_command", "native", "ok", 150*time.Millisecond)
+	RecordToolExecution("", "", "", -5*time.Millisecond)
+	RecordToolExecution("create_pull_request", "github", "error", 1200*time.Millisecond)
+
+	RecordSkillActivation("self-improvement", "discord")
+	RecordSkillActivation("", "")
+
+	RecordSubagentInvocation("research", "TheGirlGangReviewer")
+	RecordSubagentInvocation("", "")
+
+	handler := Handler()
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rec.Code)
+	}
+
+	body := rec.Body.String()
+	if !strings.Contains(body, `aerial_brain_tool_calls_total{mcp_server="native",status="ok",tool="run_command"}`) &&
+		!strings.Contains(body, `aerial_brain_tool_calls_total{tool="run_command",mcp_server="native",status="ok"}`) {
+		t.Errorf("expected tool_calls_total for run_command, got:\n%s", body)
+	}
+	if !strings.Contains(body, `aerial_brain_tool_calls_total{mcp_server="github",status="error",tool="create_pull_request"}`) &&
+		!strings.Contains(body, `aerial_brain_tool_calls_total{tool="create_pull_request",mcp_server="github",status="error"}`) {
+		t.Errorf("expected tool_calls_total for create_pull_request, got:\n%s", body)
+	}
+	if !strings.Contains(body, `aerial_brain_tool_calls_total{mcp_server="native",status="ok",tool="unknown"}`) &&
+		!strings.Contains(body, `aerial_brain_tool_calls_total{tool="unknown",mcp_server="native",status="ok"}`) {
+		t.Errorf("expected tool_calls_total for unknown fallback, got:\n%s", body)
+	}
+
+	if !strings.Contains(body, `aerial_brain_tool_duration_seconds_bucket{mcp_server="native",tool="run_command",le="0.25"}`) &&
+		!strings.Contains(body, `aerial_brain_tool_duration_seconds_bucket{tool="run_command",mcp_server="native",le="0.25"}`) {
+		t.Errorf("expected tool_duration_seconds_bucket le=0.25, got:\n%s", body)
+	}
+
+	if !strings.Contains(body, `aerial_brain_skill_invocations_total{skill="self-improvement",source="discord"}`) {
+		t.Errorf("expected skill_invocations_total for self-improvement, got:\n%s", body)
+	}
+	if !strings.Contains(body, `aerial_brain_skill_invocations_total{skill="unknown",source="unknown"}`) {
+		t.Errorf("expected skill_invocations_total for unknown fallback, got:\n%s", body)
+	}
+
+	if !strings.Contains(body, `aerial_brain_subagent_invocations_total{role="TheGirlGangReviewer",type_name="research"}`) {
+		t.Errorf("expected subagent_invocations_total for TheGirlGangReviewer, got:\n%s", body)
+	}
+	if !strings.Contains(body, `aerial_brain_subagent_invocations_total{role="unknown",type_name="unknown"}`) {
+		t.Errorf("expected subagent_invocations_total for unknown fallback, got:\n%s", body)
+	}
+}

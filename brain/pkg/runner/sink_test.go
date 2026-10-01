@@ -14,6 +14,8 @@ func TestThrowawayTurnSink_AllMethodsAndSuccess(t *testing.T) {
 	sink.OnTurnStarted()
 	sink.OnThinking()
 	sink.OnToolCall("bash", "echo hi")
+	sink.OnToolCompleted("bash", "native", 10*time.Millisecond, "ok")
+	sink.OnSkillActivated("self-improvement", "discord")
 	sink.OnTextDelta("some text")
 
 	// Test successful result delivery
@@ -286,4 +288,42 @@ func TestBufferingTurnSink_WaitContextCancelled(t *testing.T) {
 			t.Fatalf("expected context.DeadlineExceeded, got %v", err)
 		}
 	})
+}
+
+func TestBufferingTurnSink_ToolAndSkillHooks(t *testing.T) {
+	var (
+		completedTool string
+		mcp           string
+		dur           time.Duration
+		st            string
+		actSkill      string
+		src           string
+	)
+	sink := NewBufferingTurnSink(BufferingTurnSinkConfig{
+		OnToolCompleted: func(toolName, mcpServer string, duration time.Duration, status string) {
+			completedTool = toolName
+			mcp = mcpServer
+			dur = duration
+			st = status
+		},
+		OnSkillActivated: func(skillName, source string) {
+			actSkill = skillName
+			src = source
+		},
+	})
+
+	sink.OnToolCompleted("bash", "native", 50*time.Millisecond, "ok")
+	if completedTool != "bash" || mcp != "native" || dur != 50*time.Millisecond || st != "ok" {
+		t.Fatalf("unexpected tool completed hook args")
+	}
+
+	sink.OnSkillActivated("self-improvement", "discord")
+	if actSkill != "self-improvement" || src != "discord" {
+		t.Fatalf("unexpected skill activated hook args")
+	}
+
+	// Test nil callbacks don't panic
+	nilSink := NewBufferingTurnSink(BufferingTurnSinkConfig{})
+	nilSink.OnToolCompleted("bash", "native", 10*time.Millisecond, "ok")
+	nilSink.OnSkillActivated("self-improvement", "discord")
 }

@@ -944,6 +944,12 @@ func newVoiceTurnSink(ctx context.Context, onStatus func(string), onSentence fun
 				onStatus(FormatToolStatus(toolName, commandName, 0))
 			}
 		},
+		OnToolCompleted: func(toolName, mcpServer string, duration time.Duration, status string) {
+			metrics.RecordToolExecution(toolName, mcpServer, status, duration)
+		},
+		OnSkillActivated: func(skillName, source string) {
+			metrics.RecordSkillActivation(skillName, source)
+		},
 		OnTextDelta: func(delta string) {
 			if ctx != nil && ctx.Err() != nil {
 				return

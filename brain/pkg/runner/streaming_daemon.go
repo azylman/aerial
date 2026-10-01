@@ -20,6 +20,8 @@ type TurnSink interface {
 	OnTurnStarted()
 	OnThinking()
 	OnToolCall(toolName, commandName string)
+	OnToolCompleted(toolName, mcpServer string, duration time.Duration, status string)
+	OnSkillActivated(skillName, source string)
 	OnTextDelta(delta string)
 	OnResult(res *TurnResult)
 	OnError(err error)
@@ -34,6 +36,13 @@ type TurnContext struct {
 	Sink      TurnSink
 	CreatedAt time.Time
 	Ctx       context.Context
+}
+
+type inFlightToolCall struct {
+	stepIndex int
+	toolName  string
+	mcpServer string
+	startedAt time.Time
 }
 
 // StreamingDaemon manages a long-lived streaming agy subprocess, its lifecycle state,
@@ -58,8 +67,9 @@ type StreamingDaemon struct {
 	stepCount      int
 	onTurnFinished func(d *StreamingDaemon)
 
-	inflightMu sync.Mutex
-	inflight   []*TurnContext
+	inflightMu    sync.Mutex
+	inflight      []*TurnContext
+	inFlightTools map[int]inFlightToolCall
 
 	readerWg  sync.WaitGroup
 	closeOnce sync.Once
@@ -113,9 +123,10 @@ func StartStreamingDaemon(ctx context.Context, cfg DaemonConfig, spawner DaemonS
 		stdout:       stdout,
 		stderrCloser: stderr,
 		stderr:       actWriter,
-		taskTracker:  NewTaskTracker(),
-		state:        StateStarting,
-		lastUsed:     time.Now(),
+		taskTracker:   NewTaskTracker(),
+		state:         StateStarting,
+		lastUsed:      time.Now(),
+		inFlightTools: make(map[int]inFlightToolCall),
 	}
 
 	// Determine handshake timeout from cfg.Timeout if provided, defaulting to DefaultHandshakeTimeout (30s)
@@ -391,7 +402,18 @@ func (d *StreamingDaemon) readStdoutLoop(r *bufio.Reader) {
 				d.inflightMu.Lock()
 				remaining := d.inflight
 				d.inflight = nil
+				var dangling []inFlightToolCall
+				for _, rec := range d.inFlightTools {
+					dangling = append(dangling, rec)
+				}
+				d.inFlightTools = make(map[int]inFlightToolCall)
 				d.inflightMu.Unlock()
+
+				for _, rec := range dangling {
+					if len(remaining) > 0 && remaining[0] != nil && remaining[0].Sink != nil {
+						remaining[0].Sink.OnToolCompleted(rec.toolName, rec.mcpServer, time.Since(rec.startedAt), "aborted")
+					}
+				}
 
 				for _, turn := range remaining {
 					if turn != nil && turn.Sink != nil {
@@ -453,7 +475,21 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 		d.mu.Unlock()
 
 		if activeTurn.Sink != nil {
-			var toolName, cmdName string
+			var (
+				toolName           string
+				cmdName            string
+				stepIdx            int
+				hasStepIdx         bool
+				isToolStart        bool
+				isToolEnd          bool
+				toolEndStatus      string
+				completedRecord    inFlightToolCall
+				hasCompletedRecord bool
+				activatedSkill     string
+				hasSkill           bool
+				toolParams         map[string]any
+			)
+
 			if toolCall, ok := raw["tool_call"].(map[string]any); ok {
 				if n, ok := toolCall["name"].(string); ok {
 					toolName = n
@@ -465,26 +501,114 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 			if su, ok := raw["step_update"].(map[string]any); ok {
 				var state, typ string
 				if s, ok := su["state"].(string); ok {
-					state = s
+					state = strings.ToUpper(s)
+				} else if s, ok := su["status"].(string); ok {
+					state = strings.ToUpper(s)
 				}
 				if t, ok := su["type"].(string); ok {
-					typ = t
+					typ = strings.ToLower(t)
+				} else if t, ok := su["step_type"].(string); ok {
+					typ = strings.ToLower(t)
 				}
-				if (typ == "tool_call" || typ == "tool") && state != "DONE" && state != "ERROR" {
-					if tn, ok := su["tool_name"].(string); ok && tn != "" {
-						toolName = tn
+				if idx, ok := su["step_index"].(float64); ok {
+					stepIdx = int(idx)
+					hasStepIdx = true
+				} else if idx, ok := su["step_index"].(int); ok {
+					stepIdx = idx
+					hasStepIdx = true
+				}
+
+				if tn, ok := su["tool_name"].(string); ok && tn != "" {
+					toolName = tn
+				}
+				if info, ok := su["tool_info"].(map[string]any); ok {
+					if params, ok := info["parameters"].(map[string]any); ok {
+						toolParams = params
+						if cl, ok := params["CommandLine"].(string); ok && cl != "" {
+							cmdName = cl
+						}
 					}
-					if info, ok := su["tool_info"].(map[string]any); ok {
-						if params, ok := info["parameters"].(map[string]any); ok {
-							if cl, ok := params["CommandLine"].(string); ok && cl != "" {
+				}
+				if tcs, ok := su["tool_calls"].([]any); ok && len(tcs) > 0 {
+					if firstTc, ok := tcs[0].(map[string]any); ok {
+						if n, ok := firstTc["name"].(string); ok && toolName == "" {
+							toolName = n
+						}
+						if args, ok := firstTc["args"].(map[string]any); ok && toolParams == nil {
+							toolParams = args
+							if cl, ok := args["CommandLine"].(string); ok && cl != "" {
 								cmdName = cl
 							}
 						}
 					}
 				}
+
+				if typ == "tool_call" || typ == "tool" {
+					if state != "DONE" && state != "ERROR" {
+						isToolStart = true
+					} else {
+						isToolEnd = true
+						if state == "DONE" {
+							toolEndStatus = "ok"
+						} else {
+							toolEndStatus = "error"
+						}
+					}
+				}
 			}
+
+			if isToolStart {
+				canonicalTool, mcpServer := ExtractMCPToolInfo(toolName, toolParams)
+				if toolParams != nil {
+					if path, ok := toolParams["AbsolutePath"].(string); ok && path != "" {
+						if skill, ok := ExtractSkillFromTarget(path); ok {
+							activatedSkill = skill
+							hasSkill = true
+						}
+					}
+				}
+				if !hasSkill && cmdName != "" {
+					if skill, ok := ExtractSkillFromTarget(cmdName); ok {
+						activatedSkill = skill
+						hasSkill = true
+					}
+				}
+
+				d.inflightMu.Lock()
+				if d.inFlightTools == nil {
+					d.inFlightTools = make(map[int]inFlightToolCall)
+				}
+				if hasStepIdx {
+					if _, exists := d.inFlightTools[stepIdx]; !exists {
+						d.inFlightTools[stepIdx] = inFlightToolCall{
+							stepIndex: stepIdx,
+							toolName:  canonicalTool,
+							mcpServer: mcpServer,
+							startedAt: time.Now(),
+						}
+					}
+				}
+				d.inflightMu.Unlock()
+			} else if isToolEnd && hasStepIdx {
+				d.inflightMu.Lock()
+				if d.inFlightTools != nil {
+					if rec, exists := d.inFlightTools[stepIdx]; exists {
+						completedRecord = rec
+						hasCompletedRecord = true
+						delete(d.inFlightTools, stepIdx)
+					}
+				}
+				d.inflightMu.Unlock()
+			}
+
 			if toolName != "" || cmdName != "" {
 				activeTurn.Sink.OnToolCall(toolName, cmdName)
+			}
+			if hasSkill {
+				activeTurn.Sink.OnSkillActivated(activatedSkill, "discord")
+			}
+			if hasCompletedRecord {
+				activeTurn.Sink.OnToolCompleted(completedRecord.toolName, completedRecord.mcpServer, time.Since(completedRecord.startedAt), toolEndStatus)
 			}
 			var delta string
 			if d, ok := raw["delta"].(string); ok && d != "" {
@@ -517,7 +641,17 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 			d.inflight = d.inflight[1:]
 		}
 		hasMoreInflight := len(d.inflight) > 0
+
+		var dangling []inFlightToolCall
+		for _, rec := range d.inFlightTools {
+			dangling = append(dangling, rec)
+		}
+		d.inFlightTools = make(map[int]inFlightToolCall)
 		d.inflightMu.Unlock()
+
+		for _, rec := range dangling {
+			activeTurn.Sink.OnToolCompleted(rec.toolName, rec.mcpServer, time.Since(rec.startedAt), "aborted")
+		}
 
 		d.mu.Lock()
 		d.turnCount++

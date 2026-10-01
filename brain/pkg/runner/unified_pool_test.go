@@ -581,6 +581,8 @@ func (s *mockSinkCapture) OnToolCall(tool, cmd string) {
 	s.toolName = tool
 	s.commandName = cmd
 }
+func (s *mockSinkCapture) OnToolCompleted(tool, server string, d time.Duration, status string) {}
+func (s *mockSinkCapture) OnSkillActivated(skill, source string)                               {}
 func (s *mockSinkCapture) OnTextDelta(delta string) { s.delta += delta }
 func (s *mockSinkCapture) OnResult(res *TurnResult) { s.result = res }
 func (s *mockSinkCapture) OnError(err error)        { s.err = err }
