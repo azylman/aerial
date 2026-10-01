@@ -271,11 +271,10 @@ func (d *StreamingDaemon) Send(prompt string, turnCtx *TurnContext) error {
 		d.mu.RUnlock()
 		return errors.New("cannot send to closed streaming daemon")
 	}
-	isInitialTurn := d.turnCount == 0
 	d.mu.RUnlock()
 
 	payloadPrompt := prompt
-	if isInitialTurn && d.cfg.AmbientContextRetriever != nil && !strings.Contains(prompt, "<ambient_context>") {
+	if d.cfg.AmbientContextRetriever != nil && !strings.Contains(prompt, "<ambient_context>") {
 		ctx := context.Background()
 		if turnCtx != nil && turnCtx.Ctx != nil {
 			ctx = turnCtx.Ctx

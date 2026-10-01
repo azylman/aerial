@@ -1855,7 +1855,7 @@ func TestStreamingDaemon_Send_WithAmbientContextRetriever(t *testing.T) {
 		t.Errorf("expected AmbientContextRetriever not to be called when prompt already has <ambient_context>")
 	}
 
-	// Verify no injection on subsequent turns (turnCount > 0) to prevent transcript bloat
+	// Verify injection on subsequent turns (turnCount > 0) when prompt lacks <ambient_context>
 	daemon.mu.Lock()
 	daemon.turnCount = 1
 	daemon.mu.Unlock()
@@ -1877,18 +1877,16 @@ func TestStreamingDaemon_Send_WithAmbientContextRetriever(t *testing.T) {
 		t.Fatalf("failed sending turn3: %v", err)
 	}
 	<-readDone3
-	if calledOnSubsequentTurn {
-		t.Errorf("expected AmbientContextRetriever NOT to be called on subsequent turn (turnCount > 0)")
+	if !calledOnSubsequentTurn {
+		t.Errorf("expected AmbientContextRetriever to be called on subsequent turn (turnCount > 0)")
 	}
 	var payload3 streamInputPayload
 	if err := json.Unmarshal(receivedStdin3.Bytes(), &payload3); err != nil {
 		t.Fatalf("failed unmarshaling stdin JSON: %v, raw: %s", err, receivedStdin3.String())
 	}
-	if strings.Contains(payload3.Message.Content, "<ambient_context>") {
-		t.Errorf("expected turn 3 stdin NOT to contain ambient context, got: %s", payload3.Message.Content)
-	}
-	if payload3.Message.Content != "Clean prompt turn 3" {
-		t.Errorf("expected clean prompt on turn 3, got: %s", payload3.Message.Content)
+	expectedContent := "<ambient_context>subsequent</ambient_context>\n\nClean prompt turn 3"
+	if payload3.Message.Content != expectedContent {
+		t.Errorf("expected turn 3 content %q, got: %s", expectedContent, payload3.Message.Content)
 	}
 }
 

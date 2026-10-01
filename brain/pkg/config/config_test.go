@@ -4158,3 +4158,60 @@ func TestAmbientContext_GetterNilSafety(t *testing.T) {
 		t.Errorf("cfg.VoiceAmbientContext did not return a defensive copy: got %q", cfgRet2.CacheTTL)
 	}
 }
+
+func TestCloneAmbientContextConfig_NestedArgumentsAndSlices(t *testing.T) {
+	src := &AmbientContextConfig{
+		CacheTTL: "30s",
+		Tools: []AmbientToolConfig{
+			{
+				Name: "test_tool",
+				Arguments: map[string]interface{}{
+					"list": []interface{}{"a", map[string]interface{}{"nested": 123}},
+					"val":  42,
+				},
+			},
+		},
+	}
+	dst := cloneAmbientContextConfig(src)
+	if dst == nil || len(dst.Tools) != 1 {
+		t.Fatalf("expected cloned config with 1 tool")
+	}
+	src.Tools[0].Arguments["val"] = 99
+	if dst.Tools[0].Arguments["val"] == 99 {
+		t.Errorf("mutation leaked into cloned arguments map")
+	}
+	if cloneAmbientContextConfig(nil) != nil {
+		t.Errorf("expected nil for nil input")
+	}
+	if cloneInterfaceMap(nil) != nil {
+		t.Errorf("expected nil for nil interface map")
+	}
+}
+
+func TestConfig_CloneAndNilAccessors(t *testing.T) {
+	var nilCfg *Config
+	if nilCfg.Clone() != nil {
+		t.Errorf("expected nil from nil Config.Clone()")
+	}
+	if nilCfg.VoiceAmbientContext() != nil {
+		t.Errorf("expected nil from nil Config.VoiceAmbientContext()")
+	}
+
+	data := &ConfigData{
+		Model: "gemini-test",
+		Voice: VoiceConfig{
+			Engine: "agy",
+		},
+	}
+	clonedData := data.Clone()
+	if clonedData == nil || clonedData.Model != "gemini-test" {
+		t.Fatalf("unexpected clone from ConfigData.Clone()")
+	}
+
+	cfg := NewFromData(data)
+	clonedCfg := cfg.Clone()
+	if clonedCfg == nil || clonedCfg.Current().Model != "gemini-test" {
+		t.Fatalf("unexpected clone from Config.Clone()")
+	}
+}
+
