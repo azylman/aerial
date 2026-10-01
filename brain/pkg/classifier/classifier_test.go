@@ -1895,69 +1895,84 @@ func TestBuildSystemOneState(t *testing.T) {
 		t.Errorf("state must NOT contain XML channel_history tags")
 	}
 
-	// Truncation test (> MaxSystemOneStateRunes, tail-style preservation)
-	oldHistory := []db.Message{
+	// Per-message truncation test (head+tail slicing with ModernBERTTruncationIndicator)
+	longMessage := db.Message{
+		AuthorName: "alex",
+		Content:    "START_OF_MESSAGE " + strings.Repeat("x", 500) + " END_OF_MESSAGE",
+	}
+	longState := BuildSystemOneState([]db.Message{longMessage}, nil)
+	longRunes := []rune(longState)
+	if len(longRunes) != MaxSystemOneMessageRunes {
+		t.Errorf("expected single long message to be capped at %d runes, got %d", MaxSystemOneMessageRunes, len(longRunes))
+	}
+	if !strings.Contains(longState, "START_OF_MESSAGE") {
+		t.Errorf("expected head of message to be preserved, got: %s", longState)
+	}
+	if !strings.Contains(longState, "END_OF_MESSAGE") {
+		t.Errorf("expected tail of message to be preserved, got: %s", longState)
+	}
+	if !strings.Contains(longState, ModernBERTTruncationIndicator) {
+		t.Errorf("expected truncation indicator %q in state, got: %s", ModernBERTTruncationIndicator, longState)
+	}
+
+	// Huge history message gets capped to MaxSystemOneMessageRunes, enabling both messages to fit within MaxSystemOneStateRunes
+	hugeHistory := []db.Message{
 		{
-			AuthorName: "ancient_alice",
-			Content:    strings.Repeat("a", 1500),
+			AuthorName: "alice",
+			Content:    "OLD_START " + strings.Repeat("a", 1500) + " OLD_END",
 		},
 	}
-	newBurst := []db.Message{
+	crucialBurst := []db.Message{
 		{
-			AuthorName: "recent_bob",
+			AuthorName: "bob",
 			Content:    "Crucial recent message!",
 		},
 	}
-	truncatedState := BuildSystemOneState(newBurst, oldHistory)
-	if len([]rune(truncatedState)) > MaxSystemOneStateRunes {
-		t.Errorf("expected state to be clamped to %d runes, got %d", MaxSystemOneStateRunes, len([]rune(truncatedState)))
+	combinedState := BuildSystemOneState(crucialBurst, hugeHistory)
+	if len([]rune(combinedState)) > MaxSystemOneStateRunes {
+		t.Errorf("expected combined state to be clamped to %d runes, got %d", MaxSystemOneStateRunes, len([]rune(combinedState)))
 	}
-	if !strings.Contains(truncatedState, "recent_bob: Crucial recent message!") {
-		t.Errorf("expected state to preserve the newest message (tail-style truncation), got: %s", truncatedState)
+	if !strings.Contains(combinedState, "bob: Crucial recent message!") {
+		t.Errorf("expected recent burst message to be preserved, got: %s", combinedState)
 	}
-	if strings.Contains(truncatedState, "ancient_alice:") {
-		t.Errorf("expected oldest message prefix to be trimmed away, got: %s", truncatedState)
+	if !strings.Contains(combinedState, "alice:") || !strings.Contains(combinedState, "OLD_START") || !strings.Contains(combinedState, "OLD_END") {
+		t.Errorf("expected alice's huge message to be head+tail capped and retained alongside bob's message, got: %s", combinedState)
 	}
 
-	// Whole message preservation test:
-	// msg1: 250 runes
-	// msg2: 250 runes
-	// msg3: 250 runes
-	// Total: > MaxSystemOneStateRunes (600).
-	// Expectation: msg1 dropped completely, msg2 and msg3 preserved in full.
+	// Multi-message accumulation and state ceiling test:
+	// 5 messages of 300 runes each (each gets capped at 250 runes).
+	// Total: 5 * 250 = 1250 > MaxSystemOneStateRunes (800).
+	// With 250 runes per message + 1 newline separator, 3 messages take 752 runes (<= 800).
+	// A 4th message would require 752 + 1 + 250 = 1003 runes (> 800).
+	// Expectation: user1 and user2 dropped completely, user3, user4, and user5 preserved in chronological order.
 	historyMulti := []db.Message{
-		{AuthorName: "user1", Content: strings.Repeat("1", 250)},
-		{AuthorName: "user2", Content: strings.Repeat("2", 250)},
+		{AuthorName: "user1", Content: strings.Repeat("1", 300)},
+		{AuthorName: "user2", Content: strings.Repeat("2", 300)},
+		{AuthorName: "user3", Content: strings.Repeat("3", 300)},
+		{AuthorName: "user4", Content: strings.Repeat("4", 300)},
 	}
 	burstMulti := []db.Message{
-		{AuthorName: "user3", Content: strings.Repeat("3", 250)},
+		{AuthorName: "user5", Content: strings.Repeat("5", 300)},
 	}
 	multiState := BuildSystemOneState(burstMulti, historyMulti)
+	multiRunes := []rune(multiState)
+	if len(multiRunes) > MaxSystemOneStateRunes {
+		t.Errorf("expected multi-message state to be clamped to %d runes, got %d", MaxSystemOneStateRunes, len(multiRunes))
+	}
 	if strings.Contains(multiState, "user1:") {
-		t.Errorf("expected user1 message to be dropped completely to preserve whole message boundaries, got: %s", multiState)
+		t.Errorf("expected user1 to be dropped completely, got: %s", multiState)
 	}
-	if !strings.Contains(multiState, "user2: "+strings.Repeat("2", 250)) {
-		t.Errorf("expected user2 message to be preserved whole, got: %s", multiState)
+	if strings.Contains(multiState, "user2:") {
+		t.Errorf("expected user2 to be dropped completely, got: %s", multiState)
 	}
-	if !strings.Contains(multiState, "user3: "+strings.Repeat("3", 250)) {
-		t.Errorf("expected user3 message to be preserved whole, got: %s", multiState)
+	if !strings.Contains(multiState, "user3:") {
+		t.Errorf("expected user3 to be preserved, got: %s", multiState)
 	}
-
-	// Single most recent message exceeding MaxSystemOneStateRunes:
-	// Expectation: head preserved, tail truncated, ModernBERTTruncationSuffix appended, total rune count == MaxSystemOneStateRunes
-	giantBurst := []db.Message{
-		{AuthorName: "giant_speaker", Content: strings.Repeat("g", 1200)},
+	if !strings.Contains(multiState, "user4:") {
+		t.Errorf("expected user4 to be preserved, got: %s", multiState)
 	}
-	giantState := BuildSystemOneState(giantBurst, nil)
-	giantRunes := []rune(giantState)
-	if len(giantRunes) != MaxSystemOneStateRunes {
-		t.Errorf("expected giant state to be exactly %d runes, got %d", MaxSystemOneStateRunes, len(giantRunes))
-	}
-	if !strings.HasPrefix(giantState, "giant_speaker: gggg") {
-		t.Errorf("expected head of message to be preserved, got: %s", giantState[:50])
-	}
-	if !strings.HasSuffix(giantState, ModernBERTTruncationSuffix) {
-		t.Errorf("expected giant state to end with %q, got: %s", ModernBERTTruncationSuffix, giantState[len(giantState)-30:])
+	if !strings.Contains(multiState, "user5:") {
+		t.Errorf("expected user5 to be preserved, got: %s", multiState)
 	}
 }
 
