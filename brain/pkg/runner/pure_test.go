@@ -700,8 +700,14 @@ func TestPureHelpers_Coverage(t *testing.T) {
 	if !IsResultEvent(`prefix log {"event":"result"} suffix`) {
 		t.Errorf("expected embedded result JSON to be true")
 	}
+	if IsResultEvent("prefix log {not valid json result") {
+		t.Errorf("expected broken embedded json to be false")
+	}
 
-	// 3. WriteWorkerTurn success
+	// 3. WriteWorkerTurn
+	if err := WriteWorkerTurn(nil, "test prompt"); err == nil {
+		t.Errorf("expected error when writer is nil")
+	}
 	var buf bytes.Buffer
 	if err := WriteWorkerTurn(&buf, "test prompt"); err != nil {
 		t.Fatalf("WriteWorkerTurn failed: %v", err)
