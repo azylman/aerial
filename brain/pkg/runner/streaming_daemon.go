@@ -274,6 +274,20 @@ func (d *StreamingDaemon) Send(prompt string, turnCtx *TurnContext) error {
 	d.mu.RUnlock()
 
 	payloadPrompt := prompt
+	if d.cfg.AmbientContextRetriever != nil && !strings.Contains(prompt, "<ambient_context>") {
+		ctx := context.Background()
+		if turnCtx != nil && turnCtx.Ctx != nil {
+			ctx = turnCtx.Ctx
+		}
+		ambCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+		ambBlock, aErr := d.cfg.AmbientContextRetriever(ambCtx)
+		cancel()
+		if aErr != nil {
+			log.Printf("[StreamingDaemon] Warning: AmbientContextRetriever failed: %v", aErr)
+		} else if strings.TrimSpace(ambBlock) != "" {
+			payloadPrompt = strings.TrimSpace(ambBlock) + "\n\n" + payloadPrompt
+		}
+	}
 	if d.cfg.MemoryRetriever != nil && !strings.Contains(prompt, "<retrieved_memory>") {
 		ctx := context.Background()
 		if turnCtx != nil && turnCtx.Ctx != nil {
@@ -285,7 +299,7 @@ func (d *StreamingDaemon) Send(prompt string, turnCtx *TurnContext) error {
 		if mErr != nil {
 			log.Printf("[StreamingDaemon] Warning: MemoryRetriever failed: %v", mErr)
 		} else if strings.TrimSpace(memBlock) != "" {
-			payloadPrompt = strings.TrimSpace(memBlock) + "\n\n" + prompt
+			payloadPrompt = strings.TrimSpace(memBlock) + "\n\n" + payloadPrompt
 		}
 	}
 

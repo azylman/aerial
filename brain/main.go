@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/azylman/aerial/brain/pkg/ambient"
 	"github.com/azylman/aerial/brain/pkg/classifier"
 	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
@@ -1042,6 +1043,44 @@ func extractVoiceMCPServers(cur *config.ConfigData) []runner.MCPServerConfig {
 	return result
 }
 
+// extractAllMCPServers extracts MCP servers across common, discord, and voice targets from config.
+func extractAllMCPServers(cur *config.ConfigData) []runner.MCPServerConfig {
+	serverMap := make(map[string]runner.MCPServerConfig)
+	serverMap["scheduler"] = runner.MCPServerConfig{
+		Name:      "scheduler",
+		ServerURL: "http://scheduler-mcp:8080/mcp",
+	}
+	if cur != nil {
+		type srvJSON struct {
+			ServerURL string            `json:"serverUrl"`
+			Headers   map[string]string `json:"headers,omitempty"`
+		}
+		parseMap := func(m map[string]json.RawMessage) {
+			for name, raw := range m {
+				var sj srvJSON
+				if err := json.Unmarshal(raw, &sj); err == nil && strings.TrimSpace(sj.ServerURL) != "" {
+					serverMap[name] = runner.MCPServerConfig{
+						Name:      name,
+						ServerURL: strings.TrimSpace(sj.ServerURL),
+						Headers:   sj.Headers,
+					}
+				}
+			}
+		}
+		parseMap(cur.McpServers.Common)
+		parseMap(cur.McpServers.Discord)
+		parseMap(cur.McpServers.Voice)
+	}
+	result := make([]runner.MCPServerConfig, 0, len(serverMap))
+	for _, s := range serverMap {
+		result = append(result, s)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Name < result[j].Name
+	})
+	return result
+}
+
 // buildPoolEnv returns a process environment slice with unified compiler and module
 // cache directories under runtimeBase/cache when not already explicitly set.
 func buildPoolEnv(baseEnv []string, runtimeBase string) []string {
@@ -1115,6 +1154,19 @@ func createVoiceProcessPool(cfg *config.Config, voiceHome string, lowEffortModel
 		var effectiveAPIKey string
 		var mcpServers []runner.MCPServerConfig
 
+		var ambRetriever runner.AmbientContextRetriever
+		if ambCfg := cur.VoiceAmbientContext(); ambCfg != nil {
+			voiceServers := extractVoiceMCPServers(cur)
+			disp := runner.NewDefaultMCPDispatcher(voiceServers, nil)
+			p, pErr := ambient.NewProvider(*ambCfg, disp)
+			if pErr != nil {
+				log.Printf("[INIT] Warning: failed to initialize voice ambient provider: %v", pErr)
+			} else {
+				ambRetriever = p.Retrieve
+				log.Printf("[INIT] Voice ambient context provider initialized (tools=%d, cache_ttl=%s)", len(ambCfg.Tools), ambCfg.CacheTTL)
+			}
+		}
+
 		if voiceEngine == "gemini_api" {
 			apiKey := cur.HarnessAPIKey
 			if apiKey == "" {
@@ -1132,14 +1184,15 @@ func createVoiceProcessPool(cfg *config.Config, voiceHome string, lowEffortModel
 				effectiveAPIKey = apiKey
 				mcpServers = extractVoiceMCPServers(cur)
 				voicePool = runner.NewGeminiAPIPool(runner.GeminiAPIPoolConfig{
-					APIKey:           apiKey,
-					Model:            geminiModel,
-					PrewarmedTargets: prewarmedTargets,
-					SystemPrompt:     cur.SystemPrompt,
-					MCPServers:       mcpServers,
-					AllowedTools:     cur.VoiceAllowedTools(),
-					DataDir:          cur.DataDir,
-					MemoryRetriever:  memoryRetriever,
+					APIKey:                  apiKey,
+					Model:                   geminiModel,
+					PrewarmedTargets:        prewarmedTargets,
+					SystemPrompt:            cur.SystemPrompt,
+					MCPServers:              mcpServers,
+					AllowedTools:            cur.VoiceAllowedTools(),
+					DataDir:                 cur.DataDir,
+					MemoryRetriever:         memoryRetriever,
+					AmbientContextRetriever: ambRetriever,
 				})
 				log.Printf("[INIT] Voice engine initialized with 'gemini_api' (model=%s, prewarmed=%v, mcp_servers=%d, allowed_tools=%d)", geminiModel, prewarmedTargets, len(mcpServers), len(cur.VoiceAllowedTools()))
 			}
@@ -1154,13 +1207,14 @@ func createVoiceProcessPool(cfg *config.Config, voiceHome string, lowEffortModel
 				runtimeBase = cfg.GeminiHomeDir()
 			}
 			voicePool = runner.NewUnifiedProcessPool(runner.PoolConfig{
-				GeminiHomeDir:    voiceHome,
-				Model:            lowEffortModel,
-				AgyBin:           cur.AgyBin,
-				Cwd:              cur.DataDir,
-				Env:              buildPoolEnv(os.Environ(), runtimeBase),
-				PrewarmedTargets: prewarmedTargets,
-				MemoryRetriever:  memoryRetriever,
+				GeminiHomeDir:           voiceHome,
+				Model:                   lowEffortModel,
+				AgyBin:                  cur.AgyBin,
+				Cwd:                     cur.DataDir,
+				Env:                     buildPoolEnv(os.Environ(), runtimeBase),
+				PrewarmedTargets:        prewarmedTargets,
+				MemoryRetriever:         memoryRetriever,
+				AmbientContextRetriever: ambRetriever,
 			}, spawner)
 		}
 
@@ -1175,6 +1229,17 @@ func createVoiceProcessPool(cfg *config.Config, voiceHome string, lowEffortModel
 			keyHash := sha256.Sum256([]byte(effectiveAPIKey))
 			b.WriteString("apiKeyHash:")
 			b.WriteString(hex.EncodeToString(keyHash[:]))
+			b.WriteString("\n")
+		}
+		if ambCfg := cur.VoiceAmbientContext(); ambCfg != nil {
+			b.WriteString("ambient_context_tools:")
+			b.WriteString(fmt.Sprintf("%d", len(ambCfg.Tools)))
+			b.WriteString("\nambient_context_ttl:")
+			b.WriteString(ambCfg.CacheTTL)
+			b.WriteString("\nambient_context_template:")
+			b.WriteString(ambCfg.Template)
+			b.WriteString("\nambient_context_template_path:")
+			b.WriteString(ambCfg.TemplatePath)
 			b.WriteString("\n")
 		}
 		for _, target := range prewarmedTargets {
@@ -1350,6 +1415,40 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 
 	cls := classifier.New(cfg, nil, classifier.WithProcessPool(discordLowEffortPool))
 
+	var ambientProviders sync.Map
+	ambientResolver := func(ctx context.Context, ambCfg *config.AmbientContextConfig) (string, error) {
+		if ambCfg == nil {
+			return "", nil
+		}
+		toolsJSON, err := json.Marshal(ambCfg.Tools)
+		if err != nil {
+			log.Printf("[WorkerPool] Warning: failed to marshal ambient tools for cache key: %v", err)
+		}
+		key := fmt.Sprintf("%s:%s:%s:%s", ambCfg.TemplatePath, ambCfg.Template, string(toolsJSON), ambCfg.CacheTTL)
+		val, ok := ambientProviders.Load(key)
+		var prov *ambient.Provider
+		if ok {
+			if p, ok := val.(*ambient.Provider); ok {
+				prov = p
+			}
+		}
+		if prov == nil {
+			var curData *config.ConfigData
+			if cfg != nil {
+				curData = cfg.Current()
+			}
+			servers := extractAllMCPServers(curData)
+			disp := runner.NewDefaultMCPDispatcher(servers, nil)
+			var pErr error
+			prov, pErr = ambient.NewProvider(*ambCfg, disp)
+			if pErr != nil {
+				return "", fmt.Errorf("failed to create ambient provider: %w", pErr)
+			}
+			ambientProviders.Store(key, prov)
+		}
+		return prov.Retrieve(ctx)
+	}
+
 	pool := queue.New(cfg, queue.WorkerPoolConfig{
 		Store:                store,
 		Classifier:           cls,
@@ -1357,6 +1456,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		ProcessPool:          discordPrimaryPool,
 		LowEffortProcessPool: discordLowEffortPool,
 		VoiceProcessPool:     voicePool,
+		AmbientResolver:      ambientResolver,
 	})
 	pool.Start()
 

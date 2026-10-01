@@ -85,6 +85,7 @@ type WorkerPoolConfig struct {
 	WebhookDispatcher           WebhookDispatcher
 	VoiceRunnerFunc             func(ctx context.Context, prompt, sessionID string, onStatus func(string)) (reply string, convID string, err error)
 	VoiceStreamRunnerFunc       func(ctx context.Context, prompt, sessionID string, onStatus func(string), onSentence func(string)) (reply string, convID string, err error)
+	AmbientResolver             func(ctx context.Context, cfg *config.AmbientContextConfig) (string, error)
 }
 
 type threadWorkerState struct {

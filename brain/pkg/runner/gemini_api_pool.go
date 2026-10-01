@@ -811,8 +811,9 @@ type GeminiAPIPoolConfig struct {
 	MCPServers       []MCPServerConfig
 	MCPDispatcher    MCPDispatcher
 	AllowedTools     []string
-	DataDir          string
-	MemoryRetriever  MemoryRetriever
+	DataDir                 string
+	MemoryRetriever         MemoryRetriever
+	AmbientContextRetriever AmbientContextRetriever
 }
 
 // geminiFunctionCall represents a function call requested by the model.
@@ -1271,6 +1272,16 @@ func (s *GeminiAPISession) Send(prompt string, turn *TurnContext) error {
 
 	// Prepare conversation contents with user prompt
 	payloadPrompt := prompt
+	if s.pool != nil && s.pool.cfg.AmbientContextRetriever != nil && !strings.Contains(prompt, "<ambient_context>") {
+		ambCtx, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
+		ambBlock, aErr := s.pool.cfg.AmbientContextRetriever(ambCtx)
+		cancel()
+		if aErr != nil {
+			log.Printf("[GeminiAPISession] Warning: AmbientContextRetriever failed: %v", aErr)
+		} else if strings.TrimSpace(ambBlock) != "" {
+			payloadPrompt = strings.TrimSpace(ambBlock) + "\n\n" + payloadPrompt
+		}
+	}
 	if s.pool != nil && s.pool.cfg.MemoryRetriever != nil && !strings.Contains(prompt, "<retrieved_memory>") {
 		memCtx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
 		memBlock, mErr := s.pool.cfg.MemoryRetriever(memCtx, prompt)
@@ -1278,7 +1289,7 @@ func (s *GeminiAPISession) Send(prompt string, turn *TurnContext) error {
 		if mErr != nil {
 			log.Printf("[GeminiAPISession] Warning: MemoryRetriever failed: %v", mErr)
 		} else if strings.TrimSpace(memBlock) != "" {
-			payloadPrompt = strings.TrimSpace(memBlock) + "\n\n" + prompt
+			payloadPrompt = strings.TrimSpace(memBlock) + "\n\n" + payloadPrompt
 		}
 	}
 

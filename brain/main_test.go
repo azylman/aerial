@@ -1884,17 +1884,30 @@ func TestRunBrainApp_FullLifecycle(t *testing.T) {
 
 	cfg := config.NewTestConfig()
 	cur := cfg.Current()
-	cur.DataDir = tmpDir
-	cur.GeminiHomeDir = tmpDir
-	cur.DiscordToken = "mock-discord-token"
 	cur.Port = "0"
 	cur.AgyBin = "/bin/true"
 	cur.LowEffortModel = ""
+	cur.Voice.AmbientContext = &config.AmbientContextConfig{
+		Template: "Time: {{.now}}",
+		CacheTTL: "5s",
+	}
+	if cur.Channels == nil {
+		cur.Channels = make(map[string]config.ChannelPolicy)
+	}
+	cur.Channels["default"] = config.ChannelPolicy{
+		Mode: "thread",
+		AmbientContext: &config.AmbientContextConfig{
+			Template: "Time: {{.now}}",
+			CacheTTL: "5s",
+		},
+	}
 	cfg.Update(cur)
 
+	var serverAddr string
 	ready := make(chan struct{})
 	oldReady := onServerReady
 	onServerReady = func(addr string) {
+		serverAddr = addr
 		close(ready)
 	}
 	defer func() { onServerReady = oldReady }()
@@ -1904,7 +1917,12 @@ func TestRunBrainApp_FullLifecycle(t *testing.T) {
 
 	go func() {
 		<-ready
-		time.Sleep(30 * time.Millisecond)
+		reqBody := `{"prompt": "Hello test prompt", "conversation_id": "test-conv", "message_id": "msg-1"}`
+		resp, err := http.Post(fmt.Sprintf("http://%s/prompt", serverAddr), "application/json", strings.NewReader(reqBody))
+		if err == nil {
+			_ = resp.Body.Close()
+		}
+		time.Sleep(100 * time.Millisecond)
 		cancel()
 	}()
 
@@ -3132,6 +3150,39 @@ func TestVoicePool_FactoryWiring(t *testing.T) {
 		}
 	})
 
+	t.Run("GeminiAPI_WithAmbientContext", func(t *testing.T) {
+		t.Parallel()
+		data := &config.ConfigData{
+			APIKey: "test-ambient-key",
+			Voice: config.VoiceConfig{
+				Engine: "gemini_api",
+				AmbientContext: &config.AmbientContextConfig{
+					CacheTTL: "30s",
+					Template: "Status: {{.ha.state}}",
+					Tools: []config.AmbientToolConfig{
+						{Name: "ha", Tool: "get_state"},
+					},
+				},
+			},
+		}
+		cfg := config.NewFromData(data)
+
+		pool := createVoiceProcessPool(cfg, voiceHome, "fallback-model", spawner)
+		defer pool.Close()
+
+		dynPool, ok := pool.(*runner.DynamicVoicePool)
+		if !ok {
+			t.Fatalf("expected *runner.DynamicVoicePool, got %T", pool)
+		}
+		geminiPool, ok := dynPool.CurrentPool().(*runner.GeminiAPIPool)
+		if !ok {
+			t.Fatalf("expected *runner.GeminiAPIPool, got %T", dynPool.CurrentPool())
+		}
+		if geminiPool == nil {
+			t.Fatalf("expected non-nil geminiPool")
+		}
+	})
+
 	t.Run("GeminiAPI_WithAPIKeyFallback", func(t *testing.T) {
 		t.Parallel()
 		data := &config.ConfigData{
@@ -3399,6 +3450,53 @@ func TestExtractVoiceMCPServers(t *testing.T) {
 	}
 	if _, ok := serverMap["discord-only"]; ok {
 		t.Errorf("discord-only server should not be in voice servers")
+	}
+}
+
+func TestExtractAllMCPServers(t *testing.T) {
+	t.Parallel()
+
+	// 1. Nil config
+	nilResult := extractAllMCPServers(nil)
+	if len(nilResult) != 1 || nilResult[0].Name != "scheduler" {
+		t.Fatalf("expected scheduler default for nil config, got: %+v", nilResult)
+	}
+
+	// 2. Populated config with Common, Discord, and Voice servers
+	cur := &config.ConfigData{
+		McpServers: config.TargetMcpConfig{
+			Common: map[string]json.RawMessage{
+				"ha-mcp": json.RawMessage(`{"serverUrl":"http://homeassistant:8123/api/webhook/test","headers":{"Authorization":"Bearer secret"}}`),
+			},
+			Voice: map[string]json.RawMessage{
+				"kiosk-mcp": json.RawMessage(`{"serverUrl":"http://kiosk:4000/mcp"}`),
+			},
+			Discord: map[string]json.RawMessage{
+				"discord-only": json.RawMessage(`{"serverUrl":"http://discord:4000/mcp"}`),
+			},
+		},
+	}
+
+	servers := extractAllMCPServers(cur)
+	serverMap := make(map[string]runner.MCPServerConfig)
+	for _, s := range servers {
+		serverMap[s.Name] = s
+	}
+
+	if len(serverMap) != 4 {
+		t.Fatalf("expected 4 servers (scheduler, ha-mcp, kiosk-mcp, discord-only), got %d: %+v", len(serverMap), servers)
+	}
+	if _, ok := serverMap["scheduler"]; !ok {
+		t.Errorf("missing scheduler")
+	}
+	if _, ok := serverMap["ha-mcp"]; !ok {
+		t.Errorf("missing ha-mcp")
+	}
+	if _, ok := serverMap["kiosk-mcp"]; !ok {
+		t.Errorf("missing kiosk-mcp")
+	}
+	if _, ok := serverMap["discord-only"]; !ok {
+		t.Errorf("missing discord-only")
 	}
 }
 

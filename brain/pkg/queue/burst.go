@@ -552,6 +552,7 @@ type TurnPromptInput struct {
 	IsColdStart         bool
 	ChannelInstructions string
 	InjectedHookContext string
+	AmbientContext      string
 }
 
 // AssembleTurnPrompt deterministically composes the turn prompt in exact top-to-bottom document order.
@@ -616,6 +617,19 @@ func AssembleTurnPrompt(input TurnPromptInput) string {
 			basePrompt = hookText + "\n\n" + basePrompt
 		} else {
 			basePrompt = hookText
+		}
+	}
+
+	// Layer 0: Ambient Context (if present)
+	if strings.TrimSpace(input.AmbientContext) != "" {
+		ambText := strings.TrimSpace(input.AmbientContext)
+		if !strings.HasPrefix(ambText, "<ambient_context>") {
+			ambText = fmt.Sprintf("<ambient_context>\n%s\n</ambient_context>", ambText)
+		}
+		if basePrompt != "" {
+			basePrompt = ambText + "\n\n" + basePrompt
+		} else {
+			basePrompt = ambText
 		}
 	}
 

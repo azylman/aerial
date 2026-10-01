@@ -3642,6 +3642,108 @@ func TestWorker_ColdStart_RetainsLookbackWithSummary(t *testing.T) {
 	}
 }
 
+func TestBuildTurnPrompt_AmbientResolver(t *testing.T) {
+	t.Parallel()
+
+	// 1. Configured channel with AmbientContext
+	resolverCalled := false
+	ambCfg := &config.AmbientContextConfig{
+		Template: "Kitchen Temp: {{.temp}}",
+	}
+	pool := &WorkerPool{
+		ctx: context.Background(),
+		cfg: WorkerPoolConfig{
+			AmbientResolver: func(ctx context.Context, cfg *config.AmbientContextConfig) (string, error) {
+				resolverCalled = true
+				if cfg != ambCfg {
+					t.Errorf("expected ambCfg passed to resolver")
+				}
+				return "<ambient_context>\nKitchen Temp: 71F\n</ambient_context>", nil
+			},
+		},
+	}
+
+	te := &turnExecution{
+		pool:             pool,
+		effectiveName:    "kitchen",
+		threadID:         "t-amb-1",
+		currentSessionID: "sess-amb-1",
+		policy: config.ChannelPolicy{
+			AmbientContext: ambCfg,
+		},
+		burst: []db.Message{{ID: "m1", ThreadID: "t-amb-1", Content: "turn off kitchen lights"}},
+	}
+	te.buildTurnPrompt()
+
+	if !resolverCalled {
+		t.Errorf("expected AmbientResolver to be called for channel with AmbientContext")
+	}
+	if !strings.Contains(te.turnPrompt, "<ambient_context>") || !strings.Contains(te.turnPrompt, "Kitchen Temp: 71F") {
+		t.Errorf("expected ambient context in turnPrompt, got: %q", te.turnPrompt)
+	}
+	if !strings.Contains(te.turnPrompt, "turn off kitchen lights") {
+		t.Errorf("expected user prompt in turnPrompt, got: %q", te.turnPrompt)
+	}
+
+	// 2. Unconfigured channel with nil AmbientContext (0ms, 0 tokens bypass)
+	resolverCalledUnconfigured := false
+	poolUnconfigured := &WorkerPool{
+		ctx: context.Background(),
+		cfg: WorkerPoolConfig{
+			AmbientResolver: func(ctx context.Context, cfg *config.AmbientContextConfig) (string, error) {
+				resolverCalledUnconfigured = true
+				return "<ambient_context>should not appear</ambient_context>", nil
+			},
+		},
+	}
+	teUnconfigured := &turnExecution{
+		pool:             poolUnconfigured,
+		effectiveName:    "general",
+		threadID:         "t-amb-2",
+		currentSessionID: "sess-amb-2",
+		policy: config.ChannelPolicy{
+			AmbientContext: nil,
+		},
+		burst: []db.Message{{ID: "m2", ThreadID: "t-amb-2", Content: "hello general"}},
+	}
+	teUnconfigured.buildTurnPrompt()
+
+	if resolverCalledUnconfigured {
+		t.Errorf("expected AmbientResolver NOT to be called when AmbientContext is nil")
+	}
+	if strings.Contains(teUnconfigured.turnPrompt, "<ambient_context>") {
+		t.Errorf("expected no ambient context in turnPrompt for unconfigured channel, got: %q", teUnconfigured.turnPrompt)
+	}
+
+	// 3. Resolver error tolerance
+	poolErr := &WorkerPool{
+		ctx: context.Background(),
+		cfg: WorkerPoolConfig{
+			AmbientResolver: func(ctx context.Context, cfg *config.AmbientContextConfig) (string, error) {
+				return "", errors.New("mcp tool timed out")
+			},
+		},
+	}
+	teErr := &turnExecution{
+		pool:             poolErr,
+		effectiveName:    "living-room",
+		threadID:         "t-amb-3",
+		currentSessionID: "sess-amb-3",
+		policy: config.ChannelPolicy{
+			AmbientContext: ambCfg,
+		},
+		burst: []db.Message{{ID: "m3", ThreadID: "t-amb-3", Content: "status"}},
+	}
+	teErr.buildTurnPrompt()
+
+	if strings.Contains(teErr.turnPrompt, "<ambient_context>") {
+		t.Errorf("expected no ambient context on error, got: %q", teErr.turnPrompt)
+	}
+	if !strings.Contains(teErr.turnPrompt, "status") {
+		t.Errorf("expected user prompt to be preserved on resolver error, got: %q", teErr.turnPrompt)
+	}
+}
+
 
 
 
