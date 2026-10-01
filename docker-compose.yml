@@ -817,6 +817,30 @@ services:
       openobserve:
         condition: service_healthy
 
+  # ----------------------------------------------------------------------------
+  # 19. Cluster Orchestrator: HashiCorp Nomad Server
+  #     Dedicated single-node control plane managing remote worker allocations.
+  # ----------------------------------------------------------------------------
+  nomad-server:
+    image: hashicorp/nomad:1.8.4
+    container_name: aerial-nomad-server
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - NOMAD_SKIP_DOCKER_IMAGE_WARN=1
+    command: ["agent", "-server", "-bootstrap-expect=1", "-data-dir=/nomad/data", "-bind=0.0.0.0", "-client=false"]
+    volumes:
+      - aerial-nomad-server-data:/nomad/data
+    labels:
+      autoheal: "true"
+    healthcheck:
+      test: ["CMD", "nomad", "server", "members"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+      start_interval: 2s
+
 networks:
   aerial-net:
     name: aerial-net
@@ -839,6 +863,8 @@ volumes:
     name: aerial-openobserve-data
   aerial-vector-data:
     name: aerial-vector-data
+  aerial-nomad-server-data:
+    name: aerial-nomad-server-data
 
 
 
