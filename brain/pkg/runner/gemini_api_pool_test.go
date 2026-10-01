@@ -1855,6 +1855,593 @@ func TestGeminiAPIPool_UpdatePrewarmedTargets(t *testing.T) {
 	}
 }
 
+func TestCleanParameters(t *testing.T) {
+	t.Parallel()
 
+	t.Run("Strips_AdditionalProperties_And_Disallowed_Keys", func(t *testing.T) {
+		t.Parallel()
+		input := map[string]interface{}{
+			"$schema":              "http://json-schema.org/draft-07/schema#",
+			"title":                "TestSchema",
+			"type":                 "object",
+			"additionalProperties": false,
+			"$ref":                 "#/definitions/foo",
+			"$id":                  "https://example.com/schema.json",
+			"definitions":          map[string]interface{}{"foo": "bar"},
+			"default":              "default_val",
+			"properties": map[string]interface{}{
+				"prompt": map[string]interface{}{
+					"type":                 "string",
+					"title":                "Prompt Title",
+					"additionalProperties": false,
+					"default":              "hello",
+					"$id":                  "prompt-id",
+				},
+				"items_list": map[string]interface{}{
+					"type":                 "array",
+					"additionalProperties": false,
+					"items": map[string]interface{}{
+						"type":                 "object",
+						"additionalProperties": false,
+						"title":                "Item Object",
+						"properties": map[string]interface{}{
+							"sub": map[string]interface{}{
+								"type":                 "string",
+								"additionalProperties": false,
+							},
+						},
+					},
+				},
+				"union_prop": map[string]interface{}{
+					"anyOf": []interface{}{
+						map[string]interface{}{
+							"type":                 "object",
+							"additionalProperties": false,
+							"properties": map[string]interface{}{
+								"branch1": map[string]interface{}{
+									"type":                 "integer",
+									"additionalProperties": false,
+								},
+							},
+						},
+						map[string]interface{}{
+							"type":                 "object",
+							"additionalProperties": false,
+							"properties": map[string]interface{}{
+								"branch2": map[string]interface{}{
+									"type":                 "boolean",
+									"additionalProperties": false,
+								},
+							},
+						},
+					},
+				},
+			},
+		}
 
+		res := cleanParameters(input)
 
+		// Helper to recursively check that no disallowed keys exist
+		disallowed := []string{"additionalproperties", "$schema", "title", "default", "$ref", "$id", "definitions"}
+		var checkKeys func(m map[string]interface{}, path string)
+		checkKeys = func(m map[string]interface{}, path string) {
+			for k, v := range m {
+				for _, dis := range disallowed {
+					if strings.EqualFold(k, dis) {
+						t.Errorf("found disallowed key %q at path %s", k, path)
+					}
+				}
+				if childMap, ok := v.(map[string]interface{}); ok {
+					checkKeys(childMap, path+"."+k)
+				} else if childSlice, ok := v.([]interface{}); ok {
+					for idx, elem := range childSlice {
+						if elemMap, ok := elem.(map[string]interface{}); ok {
+							checkKeys(elemMap, fmt.Sprintf("%s.%s[%d]", path, k, idx))
+						}
+					}
+				}
+			}
+		}
+
+		checkKeys(res, "root")
+
+		// Verify structure remains intact
+		if res["type"] != "OBJECT" {
+			t.Errorf("expected root type OBJECT, got %v", res["type"])
+		}
+		props, ok := res["properties"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("expected properties map, got %T", res["properties"])
+		}
+		promptProp := props["prompt"].(map[string]interface{})
+		if promptProp["type"] != "STRING" {
+			t.Errorf("expected prompt type STRING, got %v", promptProp["type"])
+		}
+	})
+
+	t.Run("Polymorphic_NullString", func(t *testing.T) {
+		t.Parallel()
+		input := map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"optional_text": map[string]interface{}{
+					"type": []interface{}{"null", "string"},
+				},
+				"reversed_null": map[string]interface{}{
+					"type": []string{"string", "null"},
+				},
+			},
+		}
+		res := cleanParameters(input)
+		props := res["properties"].(map[string]interface{})
+
+		opt := props["optional_text"].(map[string]interface{})
+		if opt["type"] != "STRING" {
+			t.Errorf("expected optional_text type STRING, got %v", opt["type"])
+		}
+		if opt["nullable"] != true {
+			t.Errorf("expected optional_text nullable true, got %v", opt["nullable"])
+		}
+
+		rev := props["reversed_null"].(map[string]interface{})
+		if rev["type"] != "STRING" {
+			t.Errorf("expected reversed_null type STRING, got %v", rev["type"])
+		}
+		if rev["nullable"] != true {
+			t.Errorf("expected reversed_null nullable true, got %v", rev["nullable"])
+		}
+	})
+
+	t.Run("Polymorphic_NullArray", func(t *testing.T) {
+		t.Parallel()
+		input := map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"optional_list": map[string]interface{}{
+					"type": []interface{}{"null", "array"},
+					"items": map[string]interface{}{
+						"type": "string",
+					},
+				},
+			},
+		}
+		res := cleanParameters(input)
+		props := res["properties"].(map[string]interface{})
+		opt := props["optional_list"].(map[string]interface{})
+		if opt["type"] != "ARRAY" {
+			t.Errorf("expected optional_list type ARRAY, got %v", opt["type"])
+		}
+		if opt["nullable"] != true {
+			t.Errorf("expected optional_list nullable true, got %v", opt["nullable"])
+		}
+		items := opt["items"].(map[string]interface{})
+		if items["type"] != "STRING" {
+			t.Errorf("expected items type STRING, got %v", items["type"])
+		}
+	})
+
+	t.Run("Flatten_Simple_Nullable_Unions", func(t *testing.T) {
+		t.Parallel()
+		input := map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"anyof_field": map[string]interface{}{
+					"description": "AnyOf field",
+					"anyOf": []interface{}{
+						map[string]interface{}{"type": "string"},
+						map[string]interface{}{"type": "null"},
+					},
+				},
+				"oneof_field": map[string]interface{}{
+					"description": "OneOf field",
+					"oneOf": []interface{}{
+						map[string]interface{}{"type": "null"},
+						map[string]interface{}{"type": "integer"},
+					},
+				},
+			},
+		}
+		res := cleanParameters(input)
+		props := res["properties"].(map[string]interface{})
+
+		anyOfField := props["anyof_field"].(map[string]interface{})
+		if anyOfField["type"] != "STRING" {
+			t.Errorf("expected anyof_field type STRING, got %v", anyOfField["type"])
+		}
+		if anyOfField["nullable"] != true {
+			t.Errorf("expected anyof_field nullable true, got %v", anyOfField["nullable"])
+		}
+		if _, exists := anyOfField["anyOf"]; exists {
+			t.Errorf("expected anyOf to be removed after flattening")
+		}
+
+		oneOfField := props["oneof_field"].(map[string]interface{})
+		if oneOfField["type"] != "INTEGER" {
+			t.Errorf("expected oneof_field type INTEGER, got %v", oneOfField["type"])
+		}
+		if oneOfField["nullable"] != true {
+			t.Errorf("expected oneof_field nullable true, got %v", oneOfField["nullable"])
+		}
+		if _, exists := oneOfField["oneOf"]; exists {
+			t.Errorf("expected oneOf to be removed after flattening")
+		}
+	})
+
+	t.Run("DeeplyNestedSchema_Preserved", func(t *testing.T) {
+		t.Parallel()
+		// Build a 20-level deeply nested schema object
+		root := map[string]interface{}{
+			"type": "object",
+			"additionalProperties": false,
+		}
+		curr := root
+		for i := 0; i < 20; i++ {
+			child := map[string]interface{}{
+				"type": "object",
+				"additionalProperties": false,
+			}
+			curr["properties"] = map[string]interface{}{
+				"nested": child,
+			}
+			curr = child
+		}
+		curr["properties"] = map[string]interface{}{
+			"leaf": map[string]interface{}{
+				"type": "string",
+				"additionalProperties": false,
+			},
+		}
+
+		res := cleanParameters(root)
+		if res == nil {
+			t.Fatalf("expected non-nil result from deeply nested schema")
+		}
+
+		// Traverse and verify all 20 levels are preserved without truncation
+		probe := res
+		for level := 0; level < 20; level++ {
+			if _, hasAddl := probe["additionalProperties"]; hasAddl {
+				t.Fatalf("level %d still had additionalProperties", level)
+			}
+			props, ok := probe["properties"].(map[string]interface{})
+			if !ok {
+				t.Fatalf("level %d missing properties map", level)
+			}
+			child, ok := props["nested"].(map[string]interface{})
+			if !ok {
+				t.Fatalf("level %d missing nested child", level)
+			}
+			probe = child
+		}
+		leafProps, ok := probe["properties"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("leaf parent missing properties")
+		}
+		leaf, ok := leafProps["leaf"].(map[string]interface{})
+		if !ok || leaf["type"] != "STRING" {
+			t.Fatalf("leaf not preserved at depth 20: %+v", leaf)
+		}
+	})
+
+	t.Run("Defaults_EmptySchemas", func(t *testing.T) {
+		t.Parallel()
+
+		nilRes := cleanParameters(nil)
+		if nilRes["type"] != "OBJECT" {
+			t.Errorf("expected nil input to default to OBJECT, got %v", nilRes["type"])
+		}
+		if nilRes["properties"] == nil {
+			t.Errorf("expected non-nil properties map for nil input")
+		}
+
+		emptyRes := cleanParameters(map[string]interface{}{})
+		if emptyRes["type"] != "OBJECT" {
+			t.Errorf("expected empty input to default to OBJECT, got %v", emptyRes["type"])
+		}
+		if emptyRes["properties"] == nil {
+			t.Errorf("expected non-nil properties map for empty input")
+		}
+
+		nestedEmpty := map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"empty_child": map[string]interface{}{},
+			},
+		}
+		nestedRes := cleanParameters(nestedEmpty)
+		props := nestedRes["properties"].(map[string]interface{})
+		child := props["empty_child"].(map[string]interface{})
+		if child["type"] != "OBJECT" {
+			t.Errorf("expected empty child to default to OBJECT, got %v", child["type"])
+		}
+	})
+}
+
+func TestDefaultMCPDispatcher_SessionHandshake(t *testing.T) {
+	t.Parallel()
+
+	initCount := int32(0)
+	notifyCount := int32(0)
+	listCount := int32(0)
+	callCount := int32(0)
+
+	const validSessID = "sess-handshake-12345"
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Method string                 `json:"method"`
+			ID     interface{}            `json:"id"`
+			Params map[string]interface{} `json:"params"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+
+		switch req.Method {
+		case "initialize":
+			atomic.AddInt32(&initCount, 1)
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("mcp-session-id", validSessID)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{}}}`))
+
+		case "notifications/initialized":
+			atomic.AddInt32(&notifyCount, 1)
+			sessHdr := r.Header.Get("mcp-session-id")
+			if sessHdr != validSessID {
+				http.Error(w, "missing or invalid session header", http.StatusBadRequest)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+
+		case "tools/list":
+			atomic.AddInt32(&listCount, 1)
+			sessHdr := r.Header.Get("mcp-session-id")
+			if sessHdr != validSessID {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"code":-32600,"message":"Bad Request: Missing session ID"}`))
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{
+				"jsonrpc": "2.0",
+				"id": 1,
+				"result": {
+					"tools": [
+						{"name": "test_tool", "description": "A test tool", "inputSchema": {"type": "object"}}
+					]
+				}
+			}`))
+
+		case "tools/call":
+			atomic.AddInt32(&callCount, 1)
+			sessHdr := r.Header.Get("mcp-session-id")
+			if sessHdr != validSessID {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"code":-32600,"message":"Bad Request: Missing session ID"}`))
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{
+				"jsonrpc": "2.0",
+				"id": 1,
+				"result": {
+					"content": [{"type": "text", "text": "Executed successfully"}]
+				}
+			}`))
+
+		default:
+			http.Error(w, "unknown method", http.StatusNotFound)
+		}
+	}))
+	defer ts.Close()
+
+	dispatcher := NewDefaultMCPDispatcher([]MCPServerConfig{
+		{Name: "stateful-mcp", ServerURL: ts.URL},
+	}, ts.Client())
+
+	ctx := context.Background()
+
+	// 1. Initial tools/list triggers 400, then initialize handshake, sets mcp-session-id, receives notifications/initialized, retries and succeeds
+	decls, err := dispatcher.ListDeclarations(ctx)
+	if err != nil {
+		t.Fatalf("ListDeclarations failed: %v", err)
+	}
+	if len(decls) != 1 || decls[0].Name != "test_tool" {
+		t.Fatalf("expected 1 declaration 'test_tool', got %+v", decls)
+	}
+
+	if atomic.LoadInt32(&initCount) != 1 {
+		t.Errorf("expected exactly 1 initialize call, got %d", atomic.LoadInt32(&initCount))
+	}
+	if atomic.LoadInt32(&notifyCount) != 1 {
+		t.Errorf("expected exactly 1 notification call, got %d", atomic.LoadInt32(&notifyCount))
+	}
+	// Initial tools/list failed with 400, then retried and succeeded -> total 2 tools/list calls
+	if atomic.LoadInt32(&listCount) != 2 {
+		t.Errorf("expected 2 tools/list calls (initial + retry), got %d", atomic.LoadInt32(&listCount))
+	}
+
+	// 2. Subsequent tool execution reuses cached session ID without extra initialize
+	out, err := dispatcher.Execute(ctx, "test_tool", map[string]interface{}{})
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+	if out != "Executed successfully" {
+		t.Errorf("expected 'Executed successfully', got %q", out)
+	}
+	if atomic.LoadInt32(&initCount) != 1 {
+		t.Errorf("expected initialize count to remain 1 (reusing session), got %d", atomic.LoadInt32(&initCount))
+	}
+	if atomic.LoadInt32(&callCount) != 1 {
+		t.Errorf("expected 1 tools/call call, got %d", atomic.LoadInt32(&callCount))
+	}
+
+	// 3. Concurrent tool executions are thread-safe and share session without race
+	const concurrency = 10
+	errCh := make(chan error, concurrency)
+	for i := 0; i < concurrency; i++ {
+		go func() {
+			res, e := dispatcher.Execute(ctx, "test_tool", nil)
+			if e != nil {
+				errCh <- e
+				return
+			}
+			if res != "Executed successfully" {
+				errCh <- fmt.Errorf("unexpected result: %q", res)
+				return
+			}
+			errCh <- nil
+		}()
+	}
+
+	for i := 0; i < concurrency; i++ {
+		if e := <-errCh; e != nil {
+			t.Fatalf("concurrent execution failed: %v", e)
+		}
+	}
+
+	// Still only 1 initialize call should have occurred
+	if atomic.LoadInt32(&initCount) != 1 {
+		t.Errorf("expected initialize count to still be 1 after concurrent calls, got %d", atomic.LoadInt32(&initCount))
+	}
+}
+
+func TestGeminiAPIPool_MultipleToolCallsGrouping(t *testing.T) {
+	t.Parallel()
+
+	tsMCP := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Method string `json:"method"`
+			Params struct {
+				Name string `json:"name"`
+			} `json:"params"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+
+		if req.Method == "tools/list" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"jsonrpc": "2.0",
+				"id": 1,
+				"result": {
+					"tools": [
+						{"name": "tool_a", "description": "Tool A"},
+						{"name": "tool_b", "description": "Tool B"}
+					]
+				}
+			}`))
+			return
+		}
+
+		if req.Method == "tools/call" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"Result of %s"}]}}`, req.Params.Name)))
+			return
+		}
+
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	defer tsMCP.Close()
+
+	geminiReqCount := int32(0)
+	var capturedTurn2Contents []geminiContent
+
+	tsGemini := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqNum := atomic.AddInt32(&geminiReqCount, 1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+
+		if reqNum == 1 {
+			// First call: Gemini returns two function calls in a single candidate turn
+			chunk := `data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"tool_a","args":{"arg":"1"}}},{"functionCall":{"name":"tool_b","args":{"arg":"2"}}}],"role":"model"}}],"index":0}` + "\n\n"
+			_, _ = w.Write([]byte(chunk))
+		} else {
+			// Second call: read body to verify grouping
+			body, _ := io.ReadAll(r.Body)
+			var streamReq geminiStreamRequest
+			_ = json.Unmarshal(body, &streamReq)
+			capturedTurn2Contents = streamReq.Contents
+
+			chunk := `data: {"candidates":[{"content":{"parts":[{"text":"Both tools finished."}],"role":"model"}}],"finishReason":"STOP","index":0}` + "\n\n"
+			_, _ = w.Write([]byte(chunk))
+		}
+	}))
+	defer tsGemini.Close()
+
+	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
+		APIKey:     "test-key",
+		Model:      "gemini-2.5-flash",
+		BaseURL:    tsGemini.URL,
+		HTTPClient: tsGemini.Client(),
+		MCPServers: []MCPServerConfig{
+			{Name: "multi-tool-mcp", ServerURL: tsMCP.URL},
+		},
+	})
+	defer pool.Close()
+
+	sess, err := pool.GetOrCreateSession(context.Background(), "voice-kiosk-multi", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	sink := newMockTurnSink()
+	turn := &TurnContext{
+		TurnID: "turn-multi-tool",
+		Prompt: "run tools",
+		Sink:   sink,
+	}
+
+	if err := sess.Send("run tools", turn); err != nil {
+		t.Fatalf("Send failed: %v", err)
+	}
+
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+
+	if len(sink.toolCalls) != 2 {
+		t.Fatalf("expected 2 tool calls, got %d: %v", len(sink.toolCalls), sink.toolCalls)
+	}
+	if sink.result == nil || sink.result.Response != "Both tools finished." {
+		t.Errorf("expected final response 'Both tools finished.', got %+v", sink.result)
+	}
+
+	// Verify that Turn 2 request grouped calls and responses:
+	// Contents should be:
+	// [0] user: "run tools"
+	// [1] model: parts with FunctionCall tool_a and FunctionCall tool_b (grouped in 1 message)
+	// [2] function: parts with FunctionResponse tool_a and FunctionResponse tool_b (grouped in 1 message)
+	if len(capturedTurn2Contents) != 3 {
+		t.Fatalf("expected 3 contents in Turn 2 request, got %d: %+v", len(capturedTurn2Contents), capturedTurn2Contents)
+	}
+
+	modelContent := capturedTurn2Contents[1]
+	if modelContent.Role != "model" {
+		t.Errorf("expected content[1].Role == 'model', got %q", modelContent.Role)
+	}
+	if len(modelContent.Parts) != 2 {
+		t.Fatalf("expected 2 parts in modelContent, got %d", len(modelContent.Parts))
+	}
+	if modelContent.Parts[0].FunctionCall == nil || modelContent.Parts[0].FunctionCall.Name != "tool_a" {
+		t.Errorf("expected modelContent.Parts[0] to be tool_a, got %+v", modelContent.Parts[0])
+	}
+	if modelContent.Parts[1].FunctionCall == nil || modelContent.Parts[1].FunctionCall.Name != "tool_b" {
+		t.Errorf("expected modelContent.Parts[1] to be tool_b, got %+v", modelContent.Parts[1])
+	}
+
+	funcContent := capturedTurn2Contents[2]
+	if funcContent.Role != "function" {
+		t.Errorf("expected content[2].Role == 'function', got %q", funcContent.Role)
+	}
+	if len(funcContent.Parts) != 2 {
+		t.Fatalf("expected 2 parts in funcContent, got %d", len(funcContent.Parts))
+	}
+	if funcContent.Parts[0].FunctionResponse == nil || funcContent.Parts[0].FunctionResponse.Name != "tool_a" {
+		t.Errorf("expected funcContent.Parts[0] to be tool_a, got %+v", funcContent.Parts[0])
+	}
+	if funcContent.Parts[1].FunctionResponse == nil || funcContent.Parts[1].FunctionResponse.Name != "tool_b" {
+		t.Errorf("expected funcContent.Parts[1] to be tool_b, got %+v", funcContent.Parts[1])
+	}
+}
