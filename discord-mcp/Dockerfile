@@ -53,7 +53,7 @@ ENV APP_PATH=build/app.js
 
 EXPOSE 4001
 
-HEALTHCHECK --interval=10s --timeout=5s --start-period=5s --retries=3 \
+HEALTHCHECK --interval=10s --timeout=5s --start-period=5s --start-interval=2s --retries=3 \
   CMD wget -q --spider http://127.0.0.1:4001/health || exit 1
 
 CMD ["/app/discord-mcp"]

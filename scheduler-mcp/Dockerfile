@@ -21,7 +21,7 @@ COPY --from=builder --link /app/scheduler-mcp /app/scheduler-mcp
 ENV PORT=8080
 EXPOSE 8080
 
-HEALTHCHECK --interval=10s --timeout=5s --start-period=5s --retries=3 \
+HEALTHCHECK --interval=10s --timeout=5s --start-period=5s --start-interval=2s --retries=3 \
   CMD wget -q --spider http://127.0.0.1:8080/health || exit 1
 
 CMD ["/app/scheduler-mcp"]
