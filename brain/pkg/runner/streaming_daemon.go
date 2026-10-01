@@ -273,10 +273,26 @@ func (d *StreamingDaemon) Send(prompt string, turnCtx *TurnContext) error {
 	}
 	d.mu.RUnlock()
 
+	payloadPrompt := prompt
+	if d.cfg.MemoryRetriever != nil && !strings.Contains(prompt, "<retrieved_memory>") {
+		ctx := context.Background()
+		if turnCtx != nil && turnCtx.Ctx != nil {
+			ctx = turnCtx.Ctx
+		}
+		memCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		memBlock, mErr := d.cfg.MemoryRetriever(memCtx, prompt)
+		cancel()
+		if mErr != nil {
+			log.Printf("[StreamingDaemon] Warning: MemoryRetriever failed: %v", mErr)
+		} else if strings.TrimSpace(memBlock) != "" {
+			payloadPrompt = strings.TrimSpace(memBlock) + "\n\n" + prompt
+		}
+	}
+
 	wireMsg := streamInputPayload{
 		Event: "user",
 		Message: streamInputMessage{
-			Content: prompt,
+			Content: payloadPrompt,
 		},
 	}
 	encoded, err := json.Marshal(wireMsg)

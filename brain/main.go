@@ -1091,7 +1091,11 @@ func buildPoolEnv(baseEnv []string, runtimeBase string) []string {
 
 // createVoiceProcessPool constructs a runner.AgentPool based on cfg.VoiceEngine()
 // wrapped in runner.DynamicVoicePool with a factory closure evaluating cfg.Current() dynamically.
-func createVoiceProcessPool(cfg *config.Config, voiceHome string, lowEffortModel string, spawner runner.DaemonSpawner) runner.AgentPool {
+func createVoiceProcessPool(cfg *config.Config, voiceHome string, lowEffortModel string, spawner runner.DaemonSpawner, memRetriever ...runner.MemoryRetriever) runner.AgentPool {
+	var memoryRetriever runner.MemoryRetriever
+	if len(memRetriever) > 0 {
+		memoryRetriever = memRetriever[0]
+	}
 	buildPool := func() (runner.AgentPool, string, error) {
 		var cur *config.ConfigData
 		var voiceEngine string
@@ -1135,6 +1139,7 @@ func createVoiceProcessPool(cfg *config.Config, voiceHome string, lowEffortModel
 					MCPServers:       mcpServers,
 					AllowedTools:     cur.VoiceAllowedTools(),
 					DataDir:          cur.DataDir,
+					MemoryRetriever:  memoryRetriever,
 				})
 				log.Printf("[INIT] Voice engine initialized with 'gemini_api' (model=%s, prewarmed=%v, mcp_servers=%d, allowed_tools=%d)", geminiModel, prewarmedTargets, len(mcpServers), len(cur.VoiceAllowedTools()))
 			}
@@ -1155,6 +1160,7 @@ func createVoiceProcessPool(cfg *config.Config, voiceHome string, lowEffortModel
 				Cwd:              cur.DataDir,
 				Env:              buildPoolEnv(os.Environ(), runtimeBase),
 				PrewarmedTargets: prewarmedTargets,
+				MemoryRetriever:  memoryRetriever,
 			}, spawner)
 		}
 
@@ -1277,12 +1283,25 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 
 	poolEnv := buildPoolEnv(os.Environ(), runtimeBase)
 
+	memClient := memory.New(cfg, sessionMgr.Roots()...)
+	var memoryRetriever runner.MemoryRetriever
+	if store != nil && memClient != nil {
+		memoryRetriever = func(ctx context.Context, query string) (string, error) {
+			queryText := memory.ExtractQueryText(query)
+			if queryText == "" {
+				queryText = query
+			}
+			return memory.RetrieveFormattedContext(ctx, store, memClient, queryText, 5)
+		}
+	}
+
 	discordPrimaryPool := runner.NewUnifiedProcessPool(runner.PoolConfig{
 		GeminiHomeDir:     discordHome,
 		Model:             cur.Model,
 		AgyBin:            cur.AgyBin,
 		Cwd:               cur.DataDir,
 		Env:               poolEnv,
+		MemoryRetriever:   memoryRetriever,
 		TranscriptRescuer: sessionMgr.ExtractResponseSince,
 	}, appOpts.processSpawner)
 	defer func() {
@@ -1310,7 +1329,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		}
 	}()
 
-	var voicePool runner.AgentPool = createVoiceProcessPool(cfg, voiceHome, lowEffortModel, appOpts.processSpawner)
+	var voicePool runner.AgentPool = createVoiceProcessPool(cfg, voiceHome, lowEffortModel, appOpts.processSpawner, memoryRetriever)
 	defer func() {
 		if err := voicePool.Close(); err != nil {
 			log.Printf("[WARN] Failed to close voice process pool: %v", err)
@@ -1334,7 +1353,6 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	pool := queue.New(cfg, queue.WorkerPoolConfig{
 		Store:                store,
 		Classifier:           cls,
-		MemoryRetrieverFunc:  memory.RetrieveRelevantFacts,
 		SessionManager:       sessionMgr,
 		ProcessPool:          discordPrimaryPool,
 		LowEffortProcessPool: discordLowEffortPool,

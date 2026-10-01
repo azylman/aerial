@@ -384,18 +384,15 @@ func TestAssembleTurnPrompt(t *testing.T) {
 			},
 		},
 		{
-			name: "Exact 7-layer hierarchy verification in top-to-bottom document order",
+			name: "Exact layer hierarchy verification in top-to-bottom document order",
 			input: TurnPromptInput{
 				Burst: []db.Message{
 					{AuthorName: "alice", Content: "user prompt utterance", CreatedAt: now},
 				},
 				InjectedHookContext: "coordinator-override: allow",
 				ChannelInstructions: "Be concise and clear.",
-				SemanticMemoryFacts: []db.Fact{
-					{ID: 1, FactText: "Host IP is 192.168.1.14"},
-				},
-				PreviousSessionID: "sess-old-456",
-				IsColdStart:       true,
+				PreviousSessionID:   "sess-old-456",
+				IsColdStart:         true,
 				LookbackHistory: []HistoryMessage{
 					{AuthorName: "charlie", Content: "previous message in channel", CreatedAt: time.Now().UTC().Add(-time.Minute)},
 				},
@@ -407,8 +404,6 @@ func TestAssembleTurnPrompt(t *testing.T) {
 				idxCoord := strings.Index(prompt, "<COORDINATION_CONTEXT>")
 				// Layer 2: CHANNEL_INSTRUCTIONS
 				idxInst := strings.Index(prompt, "<CHANNEL_INSTRUCTIONS>")
-				// Layer 3: SEMANTIC_MEMORY
-				idxMem := strings.Index(prompt, "192.168.1.14")
 				// Layer 4: PREVIOUS_SESSION
 				idxPrev := strings.Index(prompt, "<PREVIOUS_SESSION>")
 				// Layer 5: CHANNEL_HISTORY
@@ -418,14 +413,14 @@ func TestAssembleTurnPrompt(t *testing.T) {
 				// Layer 7: User Request
 				idxUser := strings.Index(prompt, "user prompt utterance")
 
-				if idxCoord == -1 || idxInst == -1 || idxMem == -1 || idxPrev == -1 || idxHist == -1 || idxSum == -1 || idxUser == -1 {
-					t.Fatalf("missing layer in prompt:\ncoord=%d inst=%d mem=%d prev=%d hist=%d sum=%d user=%d\nFull prompt:\n%s",
-						idxCoord, idxInst, idxMem, idxPrev, idxHist, idxSum, idxUser, prompt)
+				if idxCoord == -1 || idxInst == -1 || idxPrev == -1 || idxHist == -1 || idxSum == -1 || idxUser == -1 {
+					t.Fatalf("missing layer in prompt:\ncoord=%d inst=%d prev=%d hist=%d sum=%d user=%d\nFull prompt:\n%s",
+						idxCoord, idxInst, idxPrev, idxHist, idxSum, idxUser, prompt)
 				}
 
-				if !(idxCoord < idxInst && idxInst < idxMem && idxMem < idxPrev && idxPrev < idxHist && idxHist < idxSum && idxSum < idxUser) {
-					t.Errorf("layer ordering violation:\ncoord=%d\ninst=%d\nmem=%d\nprev=%d\nhist=%d\nsum=%d\nuser=%d",
-						idxCoord, idxInst, idxMem, idxPrev, idxHist, idxSum, idxUser)
+				if !(idxCoord < idxInst && idxInst < idxPrev && idxPrev < idxHist && idxHist < idxSum && idxSum < idxUser) {
+					t.Errorf("layer ordering violation:\ncoord=%d\ninst=%d\nprev=%d\nhist=%d\nsum=%d\nuser=%d",
+						idxCoord, idxInst, idxPrev, idxHist, idxSum, idxUser)
 				}
 			},
 		},

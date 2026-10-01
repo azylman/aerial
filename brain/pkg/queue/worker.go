@@ -16,7 +16,6 @@ import (
 	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
 	"github.com/azylman/aerial/brain/pkg/delivery"
-	"github.com/azylman/aerial/brain/pkg/memory"
 	"github.com/azylman/aerial/brain/pkg/metrics"
 	"github.com/azylman/aerial/brain/pkg/notifier"
 	"github.com/azylman/aerial/brain/pkg/runner"
@@ -1216,43 +1215,6 @@ func (te *turnExecution) buildTurnPrompt() {
 		}
 	}
 
-	var queryText string
-	if len(te.burst) == 1 {
-		queryText = memory.ExtractQueryText(te.burst[0].BodyText())
-	} else {
-		baseCoalesced := CoalesceBurstPrompt(te.burst)
-		queryText = memory.ExtractQueryText(baseCoalesced)
-	}
-	if queryText == "" && summary != "" {
-		queryText = memory.ExtractQueryText(summary)
-	}
-
-	var facts []db.Fact
-	if te.pool != nil && te.pool.cfg.MemoryRetrieverFunc != nil && strings.TrimSpace(queryText) != "" {
-		st := te.store()
-		if st == nil {
-			st = te.pool.Store()
-		}
-		if st != nil {
-			maxFacts := 10
-			if isThreadColdStart {
-				maxFacts = 5
-			}
-			retrievalCtx, retrievalCancel := context.WithTimeout(te.pool.ctx, 2500*time.Millisecond)
-			var err error
-			facts, err = te.pool.cfg.MemoryRetrieverFunc(retrievalCtx, st, te.pool.cfg.MemoryClient, queryText, maxFacts)
-			retrievalCancel()
-			if err != nil {
-				log.Printf("[WorkerPool] Warning: Semantic memory retrieval failed for thread %s: %v. Proceeding without injected facts.", te.threadID, err)
-			} else if len(facts) > 0 {
-				if isThreadColdStart && len(facts) > 5 {
-					facts = facts[:5]
-				}
-				log.Printf("[WorkerPool] Injected %d semantic memory fact(s) into prompt for thread %s", len(facts), te.threadID)
-			}
-		}
-	}
-
 	instructions := config.LoadChannelInstructions(te.effectiveName)
 	if instructions != "" {
 		log.Printf("[WorkerPool] Injected channel instructions for #%s into prompt", te.effectiveName)
@@ -1267,7 +1229,6 @@ func (te *turnExecution) buildTurnPrompt() {
 		LookbackHistory:     lookbackMsgs,
 		PreviousSessionID:   prevID,
 		IsColdStart:         isColdStart,
-		SemanticMemoryFacts: facts,
 		ChannelInstructions: instructions,
 		InjectedHookContext: te.injectedHookContext,
 	})

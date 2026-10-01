@@ -1,7 +1,9 @@
 package runner
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -1691,6 +1693,88 @@ func TestExtractResponseStringAndPopulateUsage(t *testing.T) {
 		t.Errorf("unexpected usage from nested: %+v", res2.Usage)
 	}
 }
+
+func TestStreamingDaemon_Send_WithMemoryRetriever(t *testing.T) {
+	outR, outW := io.Pipe()
+	inR, inW := io.Pipe()
+	errR, _ := io.Pipe()
+
+	mock := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			return inW, outR, errR, &MockProcessHandle{pid: 888}, nil
+		},
+	}
+
+	go func() {
+		_, _ = outW.Write([]byte(`{"event":"init","session_id":"00000000-0000-0000-0000-000000000002"}` + "\n"))
+	}()
+
+	retriever := func(ctx context.Context, query string) (string, error) {
+		return "<retrieved_memory>\n- User prefers dark mode\n</retrieved_memory>", nil
+	}
+
+	cfg := DaemonConfig{
+		SessionID:       "00000000-0000-0000-0000-000000000002",
+		MemoryRetriever: retriever,
+	}
+	daemon, err := StartStreamingDaemon(context.Background(), cfg, mock)
+	if err != nil {
+		t.Fatalf("failed to start daemon: %v", err)
+	}
+	defer inR.Close()
+	defer daemon.Close()
+
+	var receivedStdin bytes.Buffer
+	readDone := make(chan struct{})
+	go func() {
+		defer close(readDone)
+		buf := make([]byte, 2048)
+		n, _ := inR.Read(buf)
+		receivedStdin.Write(buf[:n])
+	}()
+
+	sink := newMockTurnSink()
+	turn := &TurnContext{TurnID: "turn-1", Prompt: "Hello Aerial", Sink: sink, CreatedAt: time.Now()}
+	if err := daemon.Send(turn.Prompt, turn); err != nil {
+		t.Fatalf("failed sending turn: %v", err)
+	}
+
+	<-readDone
+	var payload streamInputPayload
+	if err := json.Unmarshal(receivedStdin.Bytes(), &payload); err != nil {
+		t.Fatalf("failed unmarshaling stdin JSON: %v, raw: %s", err, receivedStdin.String())
+	}
+	if !strings.Contains(payload.Message.Content, "<retrieved_memory>") || !strings.Contains(payload.Message.Content, "User prefers dark mode") {
+		t.Errorf("expected stdin to contain retrieved memory, got: %s", payload.Message.Content)
+	}
+	if !strings.Contains(payload.Message.Content, "Hello Aerial") {
+		t.Errorf("expected stdin to contain prompt, got: %s", payload.Message.Content)
+	}
+
+	// Verify no double injection if prompt already contains <retrieved_memory>
+	calledAgain := false
+	daemon.cfg.MemoryRetriever = func(ctx context.Context, query string) (string, error) {
+		calledAgain = true
+		return "<retrieved_memory>second</retrieved_memory>", nil
+	}
+	turn2 := &TurnContext{TurnID: "turn-2", Prompt: "<retrieved_memory>first</retrieved_memory>\nHello", Sink: newMockTurnSink(), CreatedAt: time.Now()}
+	readDone2 := make(chan struct{})
+	var receivedStdin2 bytes.Buffer
+	go func() {
+		defer close(readDone2)
+		buf := make([]byte, 2048)
+		n, _ := inR.Read(buf)
+		receivedStdin2.Write(buf[:n])
+	}()
+	if err := daemon.Send(turn2.Prompt, turn2); err != nil {
+		t.Fatalf("failed sending turn2: %v", err)
+	}
+	<-readDone2
+	if calledAgain {
+		t.Errorf("expected MemoryRetriever not to be called when prompt already has <retrieved_memory>")
+	}
+}
+
 
 
 

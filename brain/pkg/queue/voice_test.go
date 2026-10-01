@@ -15,7 +15,6 @@ import (
 
 	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
-	"github.com/azylman/aerial/brain/pkg/memory"
 	"github.com/azylman/aerial/brain/pkg/metrics"
 	"github.com/azylman/aerial/brain/pkg/runner"
 	"github.com/azylman/aerial/brain/pkg/session"
@@ -1005,16 +1004,10 @@ func TestWorkerPool_ExecuteVoiceTurn_MockVoiceProcessPool(t *testing.T) {
 	}
 }
 
-func TestWorkerPool_ExecuteVoiceTurn_SemanticMemoryFactsInjection(t *testing.T) {
+func TestWorkerPool_ExecuteVoiceTurn_ForwardCleanPrompt(t *testing.T) {
 	t.Parallel()
 
 	var capturedPrompt string
-	mockRetriever := func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
-		return []db.Fact{
-			{Category: "routine", FactText: "Ayda attends daycare in Emeryville.", Importance: 1.0},
-		}, nil
-	}
-
 	mockRunner := func(ctx context.Context, prompt, sessionID string, onStatus func(string)) (string, string, error) {
 		capturedPrompt = prompt
 		return "Ayda is in Emeryville.", sessionID, nil
@@ -1022,9 +1015,8 @@ func TestWorkerPool_ExecuteVoiceTurn_SemanticMemoryFactsInjection(t *testing.T) 
 
 	store := setupTestStore(t)
 	pool := New(nil, WorkerPoolConfig{
-		Store:               store,
-		MemoryRetrieverFunc: mockRetriever,
-		VoiceRunnerFunc:     mockRunner,
+		Store:           store,
+		VoiceRunnerFunc: mockRunner,
 	})
 	pool.Start()
 	defer pool.Stop()
@@ -1036,31 +1028,8 @@ func TestWorkerPool_ExecuteVoiceTurn_SemanticMemoryFactsInjection(t *testing.T) 
 	if reply != "Ayda is in Emeryville." {
 		t.Errorf("expected 'Ayda is in Emeryville.', got %q", reply)
 	}
-	if !strings.Contains(capturedPrompt, "<retrieved_memory>") {
-		t.Errorf("expected captured prompt to contain <retrieved_memory>, got: %q", capturedPrompt)
-	}
-	if !strings.Contains(capturedPrompt, "Ayda attends daycare in Emeryville.") {
-		t.Errorf("expected captured prompt to contain fact text, got: %q", capturedPrompt)
-	}
-	if !strings.Contains(capturedPrompt, "where does my daughter go to school?") {
-		t.Errorf("expected captured prompt to contain original prompt, got: %q", capturedPrompt)
-	}
-
-	// Test error recovery branch: when retriever returns error, proceed without failure
-	errorRetriever := func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error) {
-		return nil, errors.New("retrieval timeout")
-	}
-	pool.cfg.MemoryRetrieverFunc = errorRetriever
-	capturedPrompt = ""
-	_, _, err = pool.ExecuteVoiceTurn(context.Background(), "what is the weather?", "dev-voice-1", nil)
-	if err != nil {
-		t.Fatalf("expected turn to succeed despite retriever error, got: %v", err)
-	}
-	if strings.Contains(capturedPrompt, "<retrieved_memory>") {
-		t.Errorf("expected prompt without facts on retriever error, got: %q", capturedPrompt)
-	}
-	if capturedPrompt != "what is the weather?" {
-		t.Errorf("expected original prompt 'what is the weather?', got: %q", capturedPrompt)
+	if capturedPrompt != "where does my daughter go to school?" {
+		t.Errorf("expected clean forwarded prompt, got: %q", capturedPrompt)
 	}
 }
 

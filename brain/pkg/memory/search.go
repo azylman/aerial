@@ -155,3 +155,22 @@ func FormatMemoryContext(facts []db.Fact) string {
 	sb.WriteString("</retrieved_memory>\n")
 	return sb.String()
 }
+
+// RetrieveFormattedContext fetches relevant stored facts and formats them into XML context.
+// Returns an empty string if factStore or client is nil, query is empty, or retrieval produces zero facts.
+// Gracefully recovers from retrieval errors by logging a warning and returning empty string.
+func RetrieveFormattedContext(ctx context.Context, factStore db.FactStore, client *Client, query string, maxFacts int) (string, error) {
+	if factStore == nil || client == nil || strings.TrimSpace(query) == "" {
+		return "", nil
+	}
+	facts, err := RetrieveRelevantFacts(ctx, factStore, client, query, maxFacts)
+	if err != nil {
+		log.Printf("[Memory] Warning: RetrieveFormattedContext error: %v. Proceeding without RAG context.", err)
+		return "", nil
+	}
+	if len(facts) == 0 {
+		return "", nil
+	}
+	return FormatMemoryContext(facts), nil
+}
+

@@ -18,7 +18,6 @@ import (
 	"github.com/azylman/aerial/brain/pkg/config"
 	"github.com/azylman/aerial/brain/pkg/db"
 	"github.com/azylman/aerial/brain/pkg/delivery"
-	"github.com/azylman/aerial/brain/pkg/memory"
 	"github.com/azylman/aerial/brain/pkg/metrics"
 	"github.com/azylman/aerial/brain/pkg/notifier"
 	"github.com/azylman/aerial/brain/pkg/runner"
@@ -47,8 +46,6 @@ func sanitizeErrorText(errStr string) string {
 	return sanitizer.SanitizeLog(errStr)
 }
 
-type MemoryRetrieverFunc func(ctx context.Context, factStore db.FactStore, client *memory.Client, queryText string, maxFacts int) ([]db.Fact, error)
-
 type WorkerPoolConfig struct {
 	DB             *sql.DB
 	Store          db.Store
@@ -61,7 +58,6 @@ type WorkerPoolConfig struct {
 	TimeoutMinutes int
 	BackoffBase    time.Duration
 	MaxAttempts    int
-	MemoryClient   *memory.Client
 	Classifier     *classifier.Classifier
 	StalenessTTL   time.Duration
 	IdleTimeout    time.Duration
@@ -82,7 +78,6 @@ type WorkerPoolConfig struct {
 	DeliveryWithAttachmentsFunc func(s *discordgo.Session, channelID, text string, attachments []*delivery.Attachment) error
 	TypingFunc                  func(s *discordgo.Session, channelID string) (stop func())
 	OnMessageCompleted          func(msg db.Message, finalStatus string)
-	MemoryRetrieverFunc         MemoryRetrieverFunc
 	ResolveChannelPolicy        func(channelID, channelName string) config.ChannelPolicy
 	HistoryFetcher              HistoryFetcherFunc
 	SystemAlertFunc             func(s *discordgo.Session, channelNameOrID, title, alertBody string) error
@@ -269,12 +264,6 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 	}
 	cfg.SessionManager = sessMgr
 
-	if cfg.MemoryClient == nil {
-		cfg.MemoryClient = memory.New(appCfg, sessMgr.Roots()...)
-	}
-	// Note: MemoryRetrieverFunc is deliberately NOT defaulted to memory.RetrieveRelevantFacts here.
-	// Production callers (e.g. brain/main.go) explicitly inject memory.RetrieveRelevantFacts, ensuring
-	// unit tests remain strictly hermetic and never attempt live network calls to Ollama.
 	if cfg.Classifier == nil {
 		runnerFn := cfg.RunnerFunc
 		apiKey := cfg.APIKey
@@ -835,23 +824,6 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 	}
 
 	turnPrompt := prompt
-	if p.cfg.MemoryRetrieverFunc != nil && strings.TrimSpace(prompt) != "" {
-		st := p.Store()
-		if st != nil {
-			retrievalCtx, retrievalCancel := context.WithTimeout(ctx, 1500*time.Millisecond)
-			facts, err := p.cfg.MemoryRetrieverFunc(retrievalCtx, st, p.cfg.MemoryClient, prompt, 5)
-			retrievalCancel()
-			if err != nil {
-				log.Printf("[WorkerPool] Warning: Semantic memory retrieval failed for voice turn on %s: %v. Proceeding without injected facts.", deviceKey, err)
-			} else if len(facts) > 0 {
-				memContext := memory.FormatMemoryContext(facts)
-				if memContext != "" {
-					turnPrompt = memContext + "\n\n" + prompt
-					log.Printf("[WorkerPool] Injected %d semantic memory fact(s) into voice prompt for %s", len(facts), deviceKey)
-				}
-			}
-		}
-	}
 
 	// Testing hook: If VoiceStreamRunnerFunc is configured and sentence callback provided, delegate directly
 	if p.cfg.VoiceStreamRunnerFunc != nil && sentenceCb != nil {

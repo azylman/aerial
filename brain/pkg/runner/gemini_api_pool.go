@@ -812,6 +812,7 @@ type GeminiAPIPoolConfig struct {
 	MCPDispatcher    MCPDispatcher
 	AllowedTools     []string
 	DataDir          string
+	MemoryRetriever  MemoryRetriever
 }
 
 // geminiFunctionCall represents a function call requested by the model.
@@ -1269,11 +1270,23 @@ func (s *GeminiAPISession) Send(prompt string, turn *TurnContext) error {
 	}
 
 	// Prepare conversation contents with user prompt
+	payloadPrompt := prompt
+	if s.pool != nil && s.pool.cfg.MemoryRetriever != nil && !strings.Contains(prompt, "<retrieved_memory>") {
+		memCtx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
+		memBlock, mErr := s.pool.cfg.MemoryRetriever(memCtx, prompt)
+		cancel()
+		if mErr != nil {
+			log.Printf("[GeminiAPISession] Warning: MemoryRetriever failed: %v", mErr)
+		} else if strings.TrimSpace(memBlock) != "" {
+			payloadPrompt = strings.TrimSpace(memBlock) + "\n\n" + prompt
+		}
+	}
+
 	workingContents := make([]geminiContent, len(s.history), len(s.history)+1)
 	copy(workingContents, s.history)
 	workingContents = append(workingContents, geminiContent{
 		Role:  "user",
-		Parts: []geminiPart{{Text: prompt}},
+		Parts: []geminiPart{{Text: payloadPrompt}},
 	})
 
 	var systemInstruction *geminiContent
