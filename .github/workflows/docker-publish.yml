@@ -31,6 +31,7 @@ jobs:
       docker-mcp: ${{ steps.filter.outputs.docker-mcp }}
       github-mcp: ${{ steps.filter.outputs.github-mcp }}
       nomad-mcp: ${{ steps.filter.outputs.nomad-mcp }}
+      infisical-mcp: ${{ steps.filter.outputs.infisical-mcp }}
       dashboard: ${{ steps.filter.outputs.dashboard }}
       docs: ${{ steps.filter.outputs.docs }}
       proxy: ${{ steps.filter.outputs.proxy }}
@@ -58,6 +59,8 @@ jobs:
               - 'github-mcp/**'
             nomad-mcp:
               - 'nomad-mcp/**'
+            infisical-mcp:
+              - 'infisical-mcp/**'
             dashboard:
               - 'dashboard/**'
             docs:
@@ -78,6 +81,7 @@ jobs:
               "docker-mcp": "${{ steps.filter.outputs.docker-mcp }}",
               "github-mcp": "${{ steps.filter.outputs.github-mcp }}",
               "nomad-mcp": "${{ steps.filter.outputs.nomad-mcp }}",
+              "infisical-mcp": "${{ steps.filter.outputs.infisical-mcp }}",
               dashboard: "${{ steps.filter.outputs.dashboard }}",
               docs: "${{ steps.filter.outputs.docs }}",
               proxy: "${{ steps.filter.outputs.proxy }}",
@@ -91,6 +95,7 @@ jobs:
               { service: "docker-mcp", context: "./docker-mcp", file: "./docker-mcp/Dockerfile", image_name: "aerial-docker-mcp" },
               { service: "github-mcp", context: "./github-mcp", file: "./github-mcp/Dockerfile", image_name: "aerial-github-mcp" },
               { service: "nomad-mcp", context: "./nomad-mcp", file: "./nomad-mcp/Dockerfile", image_name: "aerial-nomad-mcp" },
+              { service: "infisical-mcp", context: "./infisical-mcp", file: "./infisical-mcp/Dockerfile", image_name: "aerial-infisical-mcp" },
               { service: "dashboard", context: "./dashboard", file: "./dashboard/Dockerfile", image_name: "aerial-dashboard" },
               { service: "docs", context: "./docs-service", file: "./docs-service/Dockerfile", image_name: "aerial-docs" },
               { service: "proxy", context: "./proxy", file: "./proxy/Dockerfile", image_name: "aerial-proxy" },

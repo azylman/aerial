@@ -223,6 +223,7 @@ func ExtractServiceNameFromJobName(jobName string) string {
 		"docker-mcp",
 		"github-mcp",
 		"nomad-mcp",
+		"infisical-mcp",
 		"ollama",
 		"agentsview",
 		"hangar",

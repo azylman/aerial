@@ -18,6 +18,7 @@ Aerial runs as a multi-container Docker stack supervised by Hangar and Autoheal 
   - **`docker-mcp`**: Native Streamable HTTP MCP server for host Docker daemon operations.
   - **`github-mcp`**: Native Streamable HTTP MCP server for GitHub repository, PR, and issue operations.
   - **`nomad-mcp`**: Native Streamable HTTP MCP server for Nomad cluster orchestration, job lifecycles, and allocation diagnostics.
+  - **`infisical-mcp`**: Native Streamable HTTP MCP server for Infisical secret management and rotation.
   - **`victoriametrics-mcp`**: Streamable HTTP MCP server for TSDB metric querying and alert rule inspection.
   - **`openobserve`**: Native Streamable HTTP MCP server for telemetry, structured log exploration, and SQL search.
 

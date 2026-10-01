@@ -834,7 +834,7 @@ func TestLoadMCPConfig_FileOverridesAndNormalizations(t *testing.T) {
 	})
 	raw = p.LoadMCPConfig(cfgCustom)
 	rawStr := string(raw)
-	for _, svc := range []string{"docker-mcp:4002/mcp", "nomad-mcp:4006/mcp", "custom-server:9000/sse", "victoriametrics-mcp:4004/mcp"} {
+	for _, svc := range []string{"docker-mcp:4002/mcp", "nomad-mcp:4006/mcp", "infisical-mcp:4007/mcp", "custom-server:9000/sse", "victoriametrics-mcp:4004/mcp"} {
 		if !strings.Contains(rawStr, svc) {
 			t.Errorf("Expected endpoint %q preserved in config, got: %s", svc, rawStr)
 		}
@@ -2092,8 +2092,8 @@ func TestSyncMCP_DualRuntimeEmission(t *testing.T) {
 	if !strings.Contains(voiceStr, "scheduler-mcp") {
 		t.Errorf("expected voice runtime config to contain scheduler-mcp")
 	}
-	if strings.Contains(voiceStr, "discord-mcp") || strings.Contains(voiceStr, "docker-mcp") || strings.Contains(voiceStr, "nomad-mcp") {
-		t.Errorf("voice runtime config contains forbidden discord/docker/nomad tools: %s", voiceStr)
+	if strings.Contains(voiceStr, "discord-mcp") || strings.Contains(voiceStr, "docker-mcp") || strings.Contains(voiceStr, "nomad-mcp") || strings.Contains(voiceStr, "infisical-mcp") {
+		t.Errorf("voice runtime config contains forbidden discord/docker/nomad/infisical tools: %s", voiceStr)
 	}
 }
 
