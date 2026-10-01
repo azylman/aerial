@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"text/template"
@@ -64,17 +65,20 @@ func NewProvider(cfg config.AmbientContextConfig, invoker MCPInvoker) (*Provider
 				if !v {
 					return def
 				}
-			case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64:
-				if v == 0 {
+			default:
+				rv := reflect.ValueOf(val)
+				if !rv.IsValid() {
 					return def
 				}
-			case []any:
-				if len(v) == 0 {
-					return def
-				}
-			case map[string]any:
-				if len(v) == 0 {
-					return def
+				switch rv.Kind() {
+				case reflect.Array, reflect.Slice, reflect.Map, reflect.String:
+					if rv.Len() == 0 {
+						return def
+					}
+				default:
+					if rv.IsZero() {
+						return def
+					}
 				}
 			}
 			return val
@@ -156,10 +160,7 @@ func (p *Provider) SetNowFunc(fn func() time.Time) {
 }
 
 func (p *Provider) now() time.Time {
-	if p.nowFunc != nil {
-		return p.nowFunc()
-	}
-	return time.Now()
+	return p.nowFunc()
 }
 
 // Retrieve returns the rendered ambient context string, caching results in RAM for CacheTTL.
@@ -226,17 +227,8 @@ func (p *Provider) Retrieve(ctx context.Context) (string, error) {
 		data["now"] = p.now().Format("15:04:05")
 
 		var buf bytes.Buffer
-		var execErr error
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					execErr = fmt.Errorf("ambient template execution panic: %v", r)
-				}
-			}()
-			execErr = p.parsedTmpl.Execute(&buf, data)
-		}()
-		if execErr != nil {
-			return "", execErr
+		if err := p.parsedTmpl.Execute(&buf, data); err != nil {
+			return "", fmt.Errorf("ambient template execution error: %w", err)
 		}
 
 		rendered := strings.ReplaceAll(buf.String(), "<no value>", "")

@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"text/template"
 	"time"
 
 	"github.com/azylman/aerial/brain/pkg/config"
@@ -459,3 +460,206 @@ func TestProvider_TemplatePathLoading(t *testing.T) {
 		t.Fatal("expected error for non-existent TemplatePath, got nil")
 	}
 }
+
+func TestProvider_TemplateHelpersAndEdgeCases(t *testing.T) {
+	t.Parallel()
+
+	tmpl := `
+DefaultStr: {{default "default_val" .missing_str}}
+DefaultEmptyStr: {{default "def_empty" .empty_str}}
+DefaultZeroInt: {{default 42 .tool.count}}
+DefaultFalseBool: {{default true .tool.active}}
+DefaultTrueBool: {{default false .tool.is_true}}
+DefaultEmptyList: {{default "non_empty" .tool.empty_list}}
+DefaultEmptyMap: {{default "non_empty_map" .tool.empty_map}}
+DefaultValidStr: {{default "def" .tool.valid_str}}
+DefaultNonZero: {{default 999 .tool.non_zero}}
+TrimNil: {{trim .missing_nil}}
+TrimNoVal: {{trim "<no value>"}}
+TrimVal: {{trim "  hello world  "}}
+LowerNil: {{lower .missing_nil}}
+LowerNoVal: {{lower "<no value>"}}
+LowerVal: {{lower "HELLO WORLD"}}
+UpperNil: {{upper .missing_nil}}
+UpperNoVal: {{upper "<no value>"}}
+UpperVal: {{upper "hello world"}}
+DefaultNoVal: {{default "def_noval" "<no value>"}}
+JsonNil: {{json .missing_nil}}
+JsonVal: {{json .tool.nested}}
+RawText: {{.raw.text}}
+`
+
+	cfg := config.AmbientContextConfig{
+		Template: tmpl,
+		CacheTTL: "1m",
+		Tools: []config.AmbientToolConfig{
+			{Name: "tool", Tool: "json_tool"},
+			{Name: "raw", Tool: "raw_tool"},
+		},
+	}
+
+	inv := &mockInvoker{
+		execFunc: func(ctx context.Context, name string, args map[string]interface{}) (string, error) {
+			if name == "json_tool" {
+				return `{"nested": {"foo": "bar"}, "count": 0, "active": false, "is_true": true, "valid_str": "custom", "non_zero": 123, "empty_list": [], "empty_map": {}}`, nil
+			}
+			if name == "raw_tool" {
+				return "plain text response", nil
+			}
+			return `{}`, nil
+		},
+	}
+
+	p, err := NewProvider(cfg, inv)
+	if err != nil {
+		t.Fatalf("NewProvider failed: %v", err)
+	}
+
+	p.SetNowFunc(nil) // test resetting to time.Now
+	res, err := p.Retrieve(context.Background())
+	if err != nil {
+		t.Fatalf("Retrieve failed: %v", err)
+	}
+
+	if !strings.Contains(res, "DefaultStr: default_val") {
+		t.Errorf("expected DefaultStr fallback, got %q", res)
+	}
+	if !strings.Contains(res, "DefaultZeroInt: 42") {
+		t.Errorf("expected DefaultZeroInt fallback, got %q", res)
+	}
+	if !strings.Contains(res, "DefaultFalseBool: true") {
+		t.Errorf("expected DefaultFalseBool fallback, got %q", res)
+	}
+	if !strings.Contains(res, "DefaultTrueBool: true") {
+		t.Errorf("expected DefaultTrueBool to retain true, got %q", res)
+	}
+	if !strings.Contains(res, "DefaultValidStr: custom") {
+		t.Errorf("expected DefaultValidStr to retain custom, got %q", res)
+	}
+	if !strings.Contains(res, "DefaultNonZero: 123") {
+		t.Errorf("expected DefaultNonZero to retain 123, got %q", res)
+	}
+	if !strings.Contains(res, "DefaultNoVal: def_noval") {
+		t.Errorf("expected DefaultNoVal fallback, got %q", res)
+	}
+	if !strings.Contains(res, "DefaultEmptyList: non_empty") {
+		t.Errorf("expected DefaultEmptyList fallback, got %q", res)
+	}
+	if !strings.Contains(res, "DefaultEmptyMap: non_empty_map") {
+		t.Errorf("expected DefaultEmptyMap fallback, got %q", res)
+	}
+	if !strings.Contains(res, "TrimVal: hello world") {
+		t.Errorf("expected TrimVal, got %q", res)
+	}
+	if !strings.Contains(res, "LowerVal: hello world") {
+		t.Errorf("expected LowerVal, got %q", res)
+	}
+	if !strings.Contains(res, "UpperVal: HELLO WORLD") {
+		t.Errorf("expected UpperVal, got %q", res)
+	}
+	if !strings.Contains(res, `JsonVal: {"foo":"bar"}`) {
+		t.Errorf("expected JsonVal, got %q", res)
+	}
+	if !strings.Contains(res, "RawText: plain text response") {
+		t.Errorf("expected RawText, got %q", res)
+	}
+}
+
+func TestProvider_JsonMarshalError(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.AmbientContextConfig{
+		Template: "{{json .tool.bad}}",
+		Tools: []config.AmbientToolConfig{
+			{Name: "tool", Tool: "chan_tool"},
+		},
+	}
+	p, err := NewProvider(cfg, nil)
+	if err != nil {
+		t.Fatalf("NewProvider failed: %v", err)
+	}
+	tmpl := p.parsedTmpl
+	var buf strings.Builder
+	badMap := map[string]any{
+		"tool": map[string]any{
+			"bad": make(chan int),
+		},
+	}
+	if err := tmpl.Execute(&buf, badMap); err != nil {
+		t.Fatalf("tmpl.Execute failed: %v", err)
+	}
+	if buf.String() != "" {
+		t.Errorf("expected empty string for json marshal error, got %q", buf.String())
+	}
+}
+
+func TestProvider_RetrieveContextCancelled(t *testing.T) {
+	t.Parallel()
+
+	inv := &mockInvoker{
+		execFunc: func(ctx context.Context, name string, args map[string]interface{}) (string, error) {
+			<-ctx.Done()
+			return "", ctx.Err()
+		},
+	}
+
+	cfg := config.AmbientContextConfig{
+		Template: "Ambient: {{.tool.error}}",
+		Tools: []config.AmbientToolConfig{
+			{Name: "tool", Tool: "slow_tool"},
+		},
+		TimeoutMs: 50,
+	}
+
+	p, err := NewProvider(cfg, inv)
+	if err != nil {
+		t.Fatalf("NewProvider failed: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	res, err := p.Retrieve(ctx)
+	if err != nil {
+		t.Fatalf("unexpected Retrieve error: %v", err)
+	}
+	if !strings.Contains(res, "context canceled") {
+		t.Errorf("expected context canceled in ambient output, got %q", res)
+	}
+}
+
+func TestProvider_TemplateExecutionError(t *testing.T) {
+	t.Parallel()
+
+	inv := &mockInvoker{
+		execFunc: func(ctx context.Context, name string, args map[string]interface{}) (string, error) {
+			return `{}`, nil
+		},
+	}
+
+	cfg := config.AmbientContextConfig{
+		Template: "Ambient: {{.now}}",
+		Tools: []config.AmbientToolConfig{
+			{Name: "tool", Tool: "test_tool"},
+		},
+	}
+
+	p, err := NewProvider(cfg, inv)
+	if err != nil {
+		t.Fatalf("NewProvider failed: %v", err)
+	}
+
+	// Override template with a function that fails during execution
+	tmpl := template.New("ambient").Funcs(template.FuncMap{
+		"fail": func() (string, error) {
+			return "", errors.New("execution failure")
+		},
+	})
+	p.parsedTmpl, _ = tmpl.Parse("{{fail}}")
+	_, err = p.Retrieve(context.Background())
+	if err == nil {
+		t.Errorf("expected template execution error, got nil")
+	}
+}
+
+
