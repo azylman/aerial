@@ -6807,6 +6807,140 @@ func TestExecutors_DirectCoverage(t *testing.T) {
 	_, _, _ = defaultComposeExecutor(ctx, t.TempDir(), "version")
 }
 
+func TestCheckAndReconcileNomadImages_Comprehensive(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	jobsDir := filepath.Join(tmpDir, "jobs")
+	_ = os.MkdirAll(jobsDir, 0755)
+
+	jobFile := filepath.Join(jobsDir, "svc.nomad")
+	content := `
+job "svc" {
+  group "g" {
+    task "t" {
+      driver = "docker"
+      config {
+        image = "ghcr.io/azylman/aerial-brain:latest"
+      }
+    }
+  }
+}
+`
+	_ = os.WriteFile(jobFile, []byte(content), 0644)
+
+	currentDigest := "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+	mockClient := &http.Client{
+		Transport: &roundTripperFunc{
+			fn: func(req *http.Request) (*http.Response, error) {
+				header := make(http.Header)
+				header.Set("Docker-Content-Digest", currentDigest)
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     header,
+					Body:       ioNopCloser(strings.NewReader("")),
+				}, nil
+			},
+		},
+	}
+
+	var restartedJob string
+	mockNomad := func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+		if len(args) >= 4 && args[0] == "job" && args[1] == "restart" && args[2] == "-reschedule" {
+			restartedJob = args[3]
+			return []byte("Restarted"), nil, nil
+		}
+		return nil, nil, nil
+	}
+
+	d := NewDaemon(DaemonConfig{
+		ConfigDir:      tmpDir,
+		NomadExecutor:  mockNomad,
+		RegistryClient: mockClient,
+	})
+
+	// 1. First poll seeds known digest
+	err := d.CheckAndReconcileNomadImages(ctx)
+	if err != nil {
+		t.Fatalf("first poll unexpected error: %v", err)
+	}
+	if restartedJob != "" {
+		t.Fatalf("expected no restart on initial discovery, got %s", restartedJob)
+	}
+
+	// Reset poll throttle
+	d.nomadPollMu.Lock()
+	d.lastNomadImagePoll = time.Time{}
+	d.nomadPollMu.Unlock()
+
+	// 2. Second poll sees same digest (no restart)
+	err = d.CheckAndReconcileNomadImages(ctx)
+	if err != nil {
+		t.Fatalf("second poll unexpected error: %v", err)
+	}
+	if restartedJob != "" {
+		t.Fatalf("expected no restart when digest matches, got %s", restartedJob)
+	}
+
+	// Reset poll throttle
+	d.nomadPollMu.Lock()
+	d.lastNomadImagePoll = time.Time{}
+	d.nomadPollMu.Unlock()
+
+	// 3. Third poll sees new digest -> triggers restart
+	currentDigest = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+	err = d.CheckAndReconcileNomadImages(ctx)
+	if err != nil {
+		t.Fatalf("third poll unexpected error: %v", err)
+	}
+	if restartedJob != "svc" {
+		t.Errorf("expected restart for svc, got %q", restartedJob)
+	}
+
+	// Reset poll throttle
+	d.nomadPollMu.Lock()
+	d.lastNomadImagePoll = time.Time{}
+	d.nomadPollMu.Unlock()
+
+	// 4. Restart fails gracefully
+	currentDigest = "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+	d.nomadExecutor = func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+		return nil, []byte("nomad down"), errors.New("restart fail")
+	}
+	err = d.CheckAndReconcileNomadImages(ctx)
+	if err != nil {
+		t.Fatalf("poll with restart fail returned error: %v", err)
+	}
+}
+
+func TestHasNomadConfigChanges_ContextError(t *testing.T) {
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	d := &SyncDaemon{}
+	got, err := d.HasNomadConfigChanges(canceledCtx, "/some/path", "v1", "v2")
+	if err == nil || got {
+		t.Errorf("expected ctx error, got %v, %v", got, err)
+	}
+
+	d.gitExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+		return nil, []byte("error"), errors.New("fail")
+	}
+	// Fallback path with canceled context
+	got, err = d.HasNomadConfigChanges(canceledCtx, "/some/path", "v1", "v2")
+	if err == nil || got {
+		t.Errorf("expected ctx error in fallback, got %v, %v", got, err)
+	}
+}
+
+func TestValidateNomadConfig_NilExecutor(t *testing.T) {
+	d := &SyncDaemon{}
+	err := d.ValidateNomadConfig(context.Background(), "/path")
+	if err == nil {
+		t.Errorf("expected error for nil nomad executor")
+	}
+}
+
+
 
 
 
