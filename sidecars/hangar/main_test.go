@@ -7890,5 +7890,273 @@ func TestDaemonLoops_GracefulCancel(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 }
 
+func TestReconcileStartupDeployments_TableDriven(t *testing.T) {
+	tests := []struct {
+		name          string
+		nomadJSON     string
+		nomadErr      error
+		gitSHA        string
+		wantEvent     string
+		wantStatus    string
+		wantCommit    string
+		expectEvent   bool
+	}{
+		{
+			name: "fresh successful deployment dispatches deploy_success",
+			nomadJSON: fmt.Sprintf(`{
+				"ID": "hangar",
+				"JobVersion": 4,
+				"SubmitTime": %d,
+				"LatestDeployment": {
+					"ID": "dep-startup-success",
+					"JobVersion": 4,
+					"Status": "successful",
+					"StatusDescription": "Deployment completed successfully"
+				}
+			}`, time.Now().Add(-30*time.Second).UnixNano()),
+			gitSHA:      "commit-startup-1234",
+			wantEvent:   "deploy_success",
+			wantStatus:  "success",
+			wantCommit:  "commit-startup-1234",
+			expectEvent: true,
+		},
+		{
+			name: "fresh failed rollback deployment dispatches deploy_rollback",
+			nomadJSON: fmt.Sprintf(`{
+				"ID": "hangar",
+				"JobVersion": 5,
+				"SubmitTime": %d,
+				"LatestDeployment": {
+					"ID": "dep-startup-rollback",
+					"JobVersion": 5,
+					"Status": "failed",
+					"StatusDescription": "Deployment auto-reverted to version 4",
+					"TaskGroups": {
+						"hangar": { "AutoRevert": true }
+					}
+				}
+			}`, time.Now().Add(-20*time.Second).UnixNano()),
+			gitSHA:      "commit-startup-5678",
+			wantEvent:   "deploy_rollback",
+			wantStatus:  "rollback",
+			wantCommit:  "commit-startup-5678",
+			expectEvent: true,
+		},
+		{
+			name: "fresh failed deployment without rollback dispatches deploy_failed",
+			nomadJSON: fmt.Sprintf(`{
+				"ID": "hangar",
+				"JobVersion": 6,
+				"SubmitTime": %d,
+				"LatestDeployment": {
+					"ID": "dep-startup-failed",
+					"JobVersion": 6,
+					"Status": "failed",
+					"StatusDescription": "Deployment failed due to crash",
+					"TaskGroups": {
+						"hangar": { "AutoRevert": false }
+					}
+				}
+			}`, time.Now().Add(-10*time.Second).UnixNano()),
+			gitSHA:      "commit-startup-9999",
+			wantEvent:   "deploy_failed",
+			wantStatus:  "failed",
+			wantCommit:  "commit-startup-9999",
+			expectEvent: true,
+		},
+		{
+			name: "stale deployment older than 10m is ignored",
+			nomadJSON: fmt.Sprintf(`{
+				"ID": "hangar",
+				"JobVersion": 3,
+				"SubmitTime": %d,
+				"LatestDeployment": {
+					"ID": "dep-startup-stale",
+					"JobVersion": 3,
+					"Status": "successful",
+					"StatusDescription": "Deployment completed successfully"
+				}
+			}`, time.Now().Add(-25*time.Minute).UnixNano()),
+			gitSHA:      "commit-startup-old",
+			expectEvent: false,
+		},
+		{
+			name:      "nomad command error handled gracefully",
+			nomadJSON: "",
+			nomadErr:  fmt.Errorf("connection refused"),
+			expectEvent: false,
+		},
+		{
+			name:        "malformed nomad output handled gracefully",
+			nomadJSON:   "{invalid json output",
+			expectEvent: false,
+		},
+		{
+			name: "missing latest deployment handled gracefully",
+			nomadJSON: `{
+				"ID": "hangar",
+				"JobVersion": 1,
+				"Summary": { "Children": { "Running": 1 } }
+			}`,
+			expectEvent: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var dispatched []HangarDeployEvent
+
+			d := NewDaemon(DaemonConfig{
+				ComposeDir: "/share/aerial",
+				DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
+					mu.Lock()
+					dispatched = append(dispatched, evt)
+					mu.Unlock()
+					return nil
+				},
+				NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+					if tt.nomadErr != nil {
+						return nil, nil, tt.nomadErr
+					}
+					return []byte(tt.nomadJSON), nil, nil
+				},
+				GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+					return []byte(tt.gitSHA + "\x00" + time.Now().Format(time.RFC3339)), nil, nil
+				},
+			})
+
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+
+			d.ReconcileStartupDeployments(ctx)
+			time.Sleep(50 * time.Millisecond)
+
+			mu.Lock()
+			count := len(dispatched)
+			var lastEvt HangarDeployEvent
+			if count > 0 {
+				lastEvt = dispatched[count-1]
+			}
+			mu.Unlock()
+
+			if tt.expectEvent {
+				if count == 0 {
+					t.Fatalf("expected dispatch event, got none")
+				}
+				if lastEvt.Event != tt.wantEvent {
+					t.Errorf("got Event %q, want %q", lastEvt.Event, tt.wantEvent)
+				}
+				if lastEvt.Status != tt.wantStatus {
+					t.Errorf("got Status %q, want %q", lastEvt.Status, tt.wantStatus)
+				}
+				if lastEvt.CommitSHA != tt.wantCommit {
+					t.Errorf("got CommitSHA %q, want %q", lastEvt.CommitSHA, tt.wantCommit)
+				}
+				if lastEvt.JobName != "hangar" {
+					t.Errorf("got JobName %q, want 'hangar'", lastEvt.JobName)
+				}
+			} else {
+				if count > 0 {
+					t.Errorf("expected no dispatch events, but got %d: %+v", count, lastEvt)
+				}
+			}
+		})
+	}
+}
+
+func TestReconcileStartupDeployments_RunningResumesMonitoring(t *testing.T) {
+	var mu sync.Mutex
+	var dispatched []HangarDeployEvent
+	callCount := 0
+
+	d := NewDaemon(DaemonConfig{
+		ComposeDir: "/share/aerial",
+		DeploymentPollInterval: 10 * time.Millisecond,
+		DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
+			mu.Lock()
+			dispatched = append(dispatched, evt)
+			mu.Unlock()
+			return nil
+		},
+		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			mu.Lock()
+			callCount++
+			cur := callCount
+			mu.Unlock()
+
+			if cur == 1 {
+				// Startup check returns running
+				return []byte(fmt.Sprintf(`{
+					"ID": "hangar",
+					"JobVersion": 7,
+					"SubmitTime": %d,
+					"LatestDeployment": {
+						"ID": "dep-startup-running",
+						"JobVersion": 7,
+						"Status": "running",
+						"StatusDescription": "Allocation starting"
+					}
+				}`, time.Now().UnixNano())), nil, nil
+			}
+
+			// Polling check resolves to successful
+			return []byte(`{
+				"ID": "hangar",
+				"JobVersion": 7,
+				"LatestDeployment": {
+					"ID": "dep-startup-running",
+					"JobVersion": 7,
+					"Status": "successful",
+					"StatusDescription": "Deployment completed successfully"
+				}
+			}`), nil, nil
+		},
+		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			return []byte("commit-running-resumed\x00" + time.Now().Format(time.RFC3339)), nil, nil
+		},
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	d.ReconcileStartupDeployments(ctx)
+
+	// Wait up to 1 second for polling to resolve
+	deadline := time.Now().Add(1 * time.Second)
+	var finalEvt HangarDeployEvent
+	found := false
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		for _, e := range dispatched {
+			if e.Event == "deploy_success" {
+				finalEvt = e
+				found = true
+				break
+			}
+		}
+		mu.Unlock()
+		if found {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if !found {
+		t.Fatalf("expected deploy_success event after resumed monitoring, but none received")
+	}
+	if finalEvt.JobName != "hangar" {
+		t.Errorf("got JobName %q, want 'hangar'", finalEvt.JobName)
+	}
+	if finalEvt.DeploymentID != "dep-startup-running" {
+		t.Errorf("got DeploymentID %q, want 'dep-startup-running'", finalEvt.DeploymentID)
+	}
+}
+
+func TestReconcileStartupDeployments_NilDaemon(t *testing.T) {
+	var nilDaemon *SyncDaemon
+	nilDaemon.ReconcileStartupDeployments(context.Background())
+}
+
 
 
