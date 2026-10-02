@@ -1,35 +1,5 @@
 services:
   # ----------------------------------------------------------------------------
-  # 0. Persistence Layer: PostgreSQL with pgvector
-  #    Persistent relational storage, CAS task queues, and vector memory.
-  # ----------------------------------------------------------------------------
-  postgres:
-    image: pgvector/pgvector:pg16
-    container_name: aerial-postgres
-    restart: unless-stopped
-    stop_grace_period: 30s
-    labels:
-      autoheal: "true"
-    environment:
-      - POSTGRES_DB=${POSTGRES_DB:-aerial}
-      - POSTGRES_USER=${POSTGRES_USER:-aerial}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-aerial_secure_pass}
-      - PGDATA=/var/lib/postgresql/data/pgdata
-    volumes:
-      - aerial-postgres-data:/var/lib/postgresql/data
-    ports:
-      - "${POSTGRES_HOST_PORT:-127.0.0.1:5432}:5432"
-    networks:
-      - aerial-net
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-aerial} -d $${POSTGRES_DB:-aerial} || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 15s
-      start_interval: 1s
-
-  # ----------------------------------------------------------------------------
   # 1. Execution Brain: Aerial Brain
   #    Runs headless Antigravity CLI agent prompts with PostgreSQL & pgvector memory,
   #    built-in Discord Gateway funnel with continuous typing indicator refresh,
@@ -48,7 +18,7 @@ services:
       autoheal: "true"
     environment:
       - PORT=8080
-      - DATABASE_URL=${DATABASE_URL:-postgres://${POSTGRES_USER:-aerial}:${POSTGRES_PASSWORD:-aerial_secure_pass}@postgres:5432/${POSTGRES_DB:-aerial}?sslmode=disable}
+      - DATABASE_URL=${DATABASE_URL:-postgres://${POSTGRES_USER:-aerial}:${POSTGRES_PASSWORD:-aerial_secure_pass}@192.168.1.14:5432/${POSTGRES_DB:-aerial}?sslmode=disable}
       - GEMINI_HARNESS_API_KEY=${GEMINI_HARNESS_API_KEY:-${GEMINI_API_KEY}}
       - AGY_GEMINI_API_KEY=${AGY_GEMINI_API_KEY}
       - AGY_MODEL=${AGY_MODEL:-}
@@ -88,9 +58,6 @@ services:
       retries: 3
       start_period: 30s
       start_interval: 2s
-    depends_on:
-      postgres:
-        condition: service_healthy
 
   # ----------------------------------------------------------------------------
   # 1b. Hangar Sidecar: Aerial Hangar
