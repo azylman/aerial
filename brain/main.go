@@ -1600,7 +1600,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		}
 	}()
 
-	discordLowEffortUnderlying := runner.NewUnifiedProcessPool(runner.PoolConfig{
+	ephemeralUnderlying := runner.NewUnifiedProcessPool(runner.PoolConfig{
 		GeminiHomeDir:     ephemeralHome,
 		Model:             lowEffortModel,
 		AgyBin:            cur.AgyBin,
@@ -1610,8 +1610,30 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		TranscriptRescuer: sessionMgr.ExtractResponseSince,
 	}, appOpts.processSpawner)
 
+	ephemeralPool := runner.NewInterchangeablePool(ephemeralUnderlying, runner.InterchangeablePoolConfig{
+		WorkerCount: 2,
+		KeyPrefix:   "ephemeral:worker",
+	})
+	defer func() {
+		if err := ephemeralPool.Close(); err != nil {
+			log.Printf("[WARN] Failed to close ephemeral process pool: %v", err)
+		}
+	}()
+
+	discordLowEffortUnderlying := runner.NewUnifiedProcessPool(runner.PoolConfig{
+		GeminiHomeDir:     discordHome,
+		Model:             lowEffortModel,
+		AgyBin:            cur.AgyBin,
+		Cwd:               cur.DataDir,
+		Env:               poolEnv,
+		MemoryRetriever:   memoryRetriever,
+		TranscriptRescuer: sessionMgr.ExtractResponseSince,
+		PrewarmedTargets:  []string{"discord:worker-0", "discord:worker-1"},
+	}, appOpts.processSpawner)
+
 	discordLowEffortPool := runner.NewInterchangeablePool(discordLowEffortUnderlying, runner.InterchangeablePoolConfig{
 		WorkerCount: 2,
+		KeyPrefix:   "discord:worker",
 	})
 	defer func() {
 		if err := discordLowEffortPool.Close(); err != nil {
@@ -1626,9 +1648,9 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		}
 	}()
 
-	PrewarmProcessPoolsSequentially(ctx, discordPrimaryPool, discordLowEffortPool, voicePool)
+	PrewarmProcessPoolsSequentially(ctx, discordPrimaryPool, ephemeralPool, discordLowEffortPool, voicePool)
 
-	cls := classifier.New(cfg, nil, classifier.WithProcessPool(discordLowEffortPool))
+	cls := classifier.New(cfg, nil, classifier.WithProcessPool(ephemeralPool))
 
 	var ambientProviders sync.Map
 	ambientResolver := func(ctx context.Context, ambCfg *config.AmbientContextConfig) (string, error) {
@@ -1745,7 +1767,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	}
 
 	// Start background scheduler monitor for due cron and one-shot routines
-	sched, err := scheduler.New(cfg, store, pool, scheduler.NewDiscordThreadCreator(dgSession), scheduler.WithLLMFunc(discordLowEffortPool.EphemeralLLMFunc("ephemeral:summarizer")), scheduler.WithSessionRoots(sessionMgr.Roots()...))
+	sched, err := scheduler.New(cfg, store, pool, scheduler.NewDiscordThreadCreator(dgSession), scheduler.WithLLMFunc(ephemeralPool.EphemeralLLMFunc("ephemeral:summarizer")), scheduler.WithSessionRoots(sessionMgr.Roots()...))
 	if err != nil {
 		return fmt.Errorf("failed to initialize scheduler: %w", err)
 	}
