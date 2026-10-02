@@ -18,6 +18,9 @@ import (
 	"time"
 )
 
+// TargetNomadVariable is the hardcoded destination Nomad variable for all synced secrets.
+const TargetNomadVariable = "nomad/jobs/shared"
+
 // Config holds runtime configuration for webhooks-router.
 type Config struct {
 	Port                  string
@@ -28,7 +31,6 @@ type Config struct {
 	InfisicalEnvironment  string
 	NomadAddr             string
 	NomadToken            string
-	DefaultTargetJob      string
 }
 
 // LoadConfigFromEnv initializes configuration from environment variables.
@@ -71,11 +73,6 @@ func LoadConfigFromEnv() Config {
 		nomadAddr = "http://127.0.0.1:4646"
 	}
 
-	defaultJob := os.Getenv("DEFAULT_TARGET_JOB")
-	if defaultJob == "" {
-		defaultJob = "mirrormere-core"
-	}
-
 	return Config{
 		Port:                  port,
 		InfisicalURL:          strings.TrimRight(infURL, "/"),
@@ -85,18 +82,7 @@ func LoadConfigFromEnv() Config {
 		InfisicalEnvironment:  envName,
 		NomadAddr:             strings.TrimRight(nomadAddr, "/"),
 		NomadToken:            os.Getenv("NOMAD_TOKEN"),
-		DefaultTargetJob:      defaultJob,
 	}
-}
-
-// ResolveTargetJob extracts target Nomad job name from secretPath or falls back.
-func ResolveTargetJob(secretPath, fallbackJob string) string {
-	clean := strings.Trim(secretPath, "/")
-	if clean == "" {
-		return fallbackJob
-	}
-	parts := strings.Split(clean, "/")
-	return parts[0]
 }
 
 // InfisicalWebhookPayload captures common payload variants from Infisical webhooks.
@@ -105,12 +91,10 @@ type InfisicalWebhookPayload struct {
 	WorkspaceID string `json:"workspaceId"`
 	ProjectID   string `json:"projectId"`
 	Environment string `json:"environment"`
-	SecretPath  string `json:"secretPath"`
 	Data        *struct {
 		WorkspaceID string `json:"workspaceId"`
 		ProjectID   string `json:"projectId"`
 		Environment string `json:"environment"`
-		SecretPath  string `json:"secretPath"`
 	} `json:"data"`
 }
 
@@ -140,16 +124,6 @@ func (p *InfisicalWebhookPayload) GetEnvironment(fallback string) string {
 		return p.Data.Environment
 	}
 	return fallback
-}
-
-func (p *InfisicalWebhookPayload) GetSecretPath() string {
-	if p.SecretPath != "" {
-		return p.SecretPath
-	}
-	if p.Data != nil && p.Data.SecretPath != "" {
-		return p.Data.SecretPath
-	}
-	return "/"
 }
 
 type UniversalAuthLoginResponse struct {
@@ -231,21 +205,14 @@ func (s *RouterServer) handleInfisicalWebhook(w http.ResponseWriter, r *http.Req
 		}
 	}
 
-	secretPath := payload.GetSecretPath()
 	workspaceID := payload.GetWorkspaceID(s.cfg.InfisicalProjectID)
 	envName := payload.GetEnvironment(s.cfg.InfisicalEnvironment)
 
-	targetJob := r.URL.Query().Get("job")
-	if targetJob == "" {
-		targetJob = ResolveTargetJob(secretPath, s.cfg.DefaultTargetJob)
-	}
-
 	writeJSON(w, http.StatusAccepted, map[string]interface{}{
-		"status":      "accepted",
-		"message":     "Secret sync scheduled",
-		"targetJob":   targetJob,
-		"secretPath":  secretPath,
-		"environment": envName,
+		"status":         "accepted",
+		"message":        "Secret sync scheduled",
+		"targetVariable": TargetNomadVariable,
+		"environment":    envName,
 	})
 
 	go func() {
@@ -256,17 +223,13 @@ func (s *RouterServer) handleInfisicalWebhook(w http.ResponseWriter, r *http.Req
 		}()
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if err := s.SyncSecrets(ctx, workspaceID, envName, secretPath, targetJob); err != nil {
+		if err := s.SyncSecrets(ctx, workspaceID, envName); err != nil {
 			log.Printf("[webhooks-router] Background sync failed: %v", err)
 		}
 	}()
 }
 
 type GenericWebhookPayload struct {
-	TargetJob   string            `json:"targetJob"`
-	Job         string            `json:"job"`
-	SecretPath  string            `json:"secretPath"`
-	Path        string            `json:"path"`
 	WorkspaceID string            `json:"workspaceId"`
 	Environment string            `json:"environment"`
 	Secrets     map[string]string `json:"secrets"`
@@ -287,36 +250,13 @@ func (s *RouterServer) handleGenericWebhook(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
-	targetJob := r.URL.Query().Get("job")
-	if targetJob == "" {
-		targetJob = payload.TargetJob
-	}
-	if targetJob == "" {
-		targetJob = payload.Job
-	}
-
-	secretPath := r.URL.Query().Get("path")
-	if secretPath == "" {
-		secretPath = payload.SecretPath
-	}
-	if secretPath == "" {
-		secretPath = payload.Path
-	}
-	if secretPath == "" {
-		secretPath = "/"
-	}
-
-	if targetJob == "" {
-		targetJob = ResolveTargetJob(secretPath, s.cfg.DefaultTargetJob)
-	}
-
 	// If direct secrets map was supplied in payload, write directly to Nomad variables
 	if len(payload.Secrets) > 0 {
 		writeJSON(w, http.StatusAccepted, map[string]interface{}{
-			"status":    "accepted",
-			"message":   "Direct secret sync scheduled",
-			"targetJob": targetJob,
-			"keyCount":  len(payload.Secrets),
+			"status":         "accepted",
+			"message":        "Direct secret sync scheduled",
+			"targetVariable": TargetNomadVariable,
+			"keyCount":       len(payload.Secrets),
 		})
 
 		go func() {
@@ -327,7 +267,7 @@ func (s *RouterServer) handleGenericWebhook(w http.ResponseWriter, r *http.Reque
 			}()
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
-			if err := s.putNomadVariable(ctx, targetJob, payload.Secrets); err != nil {
+			if err := s.putNomadVariable(ctx, payload.Secrets); err != nil {
 				log.Printf("[webhooks-router] Background direct sync failed: %v", err)
 			}
 		}()
@@ -345,11 +285,10 @@ func (s *RouterServer) handleGenericWebhook(w http.ResponseWriter, r *http.Reque
 	}
 
 	writeJSON(w, http.StatusAccepted, map[string]interface{}{
-		"status":      "accepted",
-		"message":     "Generic secret sync scheduled",
-		"targetJob":   targetJob,
-		"secretPath":  secretPath,
-		"environment": envName,
+		"status":         "accepted",
+		"message":        "Generic secret sync scheduled",
+		"targetVariable": TargetNomadVariable,
+		"environment":    envName,
 	})
 
 	go func() {
@@ -360,7 +299,7 @@ func (s *RouterServer) handleGenericWebhook(w http.ResponseWriter, r *http.Reque
 		}()
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if err := s.SyncSecrets(ctx, workspaceID, envName, secretPath, targetJob); err != nil {
+		if err := s.SyncSecrets(ctx, workspaceID, envName); err != nil {
 			log.Printf("[webhooks-router] Background sync failed: %v", err)
 		}
 	}()
@@ -416,24 +355,18 @@ func (s *RouterServer) getInfisicalToken(ctx context.Context) (string, error) {
 	return token, nil
 }
 
-func (s *RouterServer) fetchInfisicalSecrets(ctx context.Context, token, workspaceID, envName, secretPath string) (map[string]string, error) {
+func (s *RouterServer) fetchInfisicalSecrets(ctx context.Context, token, workspaceID, envName string) (map[string]string, error) {
 	if workspaceID == "" {
 		workspaceID = s.cfg.InfisicalProjectID
 	}
 	if envName == "" {
 		envName = s.cfg.InfisicalEnvironment
 	}
-	if secretPath == "" {
-		secretPath = "/"
-	}
-	if !strings.HasPrefix(secretPath, "/") {
-		secretPath = "/" + secretPath
-	}
 
 	params := url.Values{}
 	params.Set("workspaceId", workspaceID)
 	params.Set("environment", envName)
-	params.Set("secretPath", secretPath)
+	params.Set("secretPath", "/")
 
 	fetchURL := fmt.Sprintf("%s/api/v3/secrets/raw?%s", s.cfg.InfisicalURL, params.Encode())
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fetchURL, nil)
@@ -468,9 +401,8 @@ func (s *RouterServer) fetchInfisicalSecrets(ctx context.Context, token, workspa
 	return items, nil
 }
 
-func (s *RouterServer) getNomadVariable(ctx context.Context, targetJob string) (map[string]string, bool, error) {
-	nomadPath := fmt.Sprintf("nomad/jobs/%s", targetJob)
-	reqURL := fmt.Sprintf("%s/v1/var/%s", s.cfg.NomadAddr, nomadPath)
+func (s *RouterServer) getNomadVariable(ctx context.Context) (map[string]string, bool, error) {
+	reqURL := fmt.Sprintf("%s/v1/var/%s", s.cfg.NomadAddr, TargetNomadVariable)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
@@ -507,12 +439,11 @@ func (s *RouterServer) getNomadVariable(ctx context.Context, targetJob string) (
 	return nomadVar.Items, true, nil
 }
 
-func (s *RouterServer) putNomadVariable(ctx context.Context, targetJob string, items map[string]string) error {
-	nomadPath := fmt.Sprintf("nomad/jobs/%s", targetJob)
-	reqURL := fmt.Sprintf("%s/v1/var/%s", s.cfg.NomadAddr, nomadPath)
+func (s *RouterServer) putNomadVariable(ctx context.Context, items map[string]string) error {
+	reqURL := fmt.Sprintf("%s/v1/var/%s", s.cfg.NomadAddr, TargetNomadVariable)
 
 	nomadVar := NomadVariable{
-		Path:  nomadPath,
+		Path:  TargetNomadVariable,
 		Items: items,
 	}
 	data, err := json.Marshal(nomadVar)
@@ -547,11 +478,8 @@ func (s *RouterServer) putNomadVariable(ctx context.Context, targetJob string, i
 }
 
 // SyncSecrets coordinates fetching secrets from Infisical and synchronizing to Nomad with deep idempotency checking.
-func (s *RouterServer) SyncSecrets(ctx context.Context, workspaceID, envName, secretPath, targetJob string) error {
-	if targetJob == "" {
-		targetJob = s.cfg.DefaultTargetJob
-	}
-	log.Printf("[webhooks-router] Initiating secret sync for job %q (path: %s, env: %s)", targetJob, secretPath, envName)
+func (s *RouterServer) SyncSecrets(ctx context.Context, workspaceID, envName string) error {
+	log.Printf("[webhooks-router] Initiating secret sync to %s (env: %s)", TargetNomadVariable, envName)
 
 	token, err := s.getInfisicalToken(ctx)
 	if err != nil {
@@ -559,30 +487,30 @@ func (s *RouterServer) SyncSecrets(ctx context.Context, workspaceID, envName, se
 		return err
 	}
 
-	newItems, err := s.fetchInfisicalSecrets(ctx, token, workspaceID, envName, secretPath)
+	newItems, err := s.fetchInfisicalSecrets(ctx, token, workspaceID, envName)
 	if err != nil {
 		log.Printf("[webhooks-router] ERROR fetching secrets from infisical: %v", err)
 		return err
 	}
 
-	existingItems, exists, err := s.getNomadVariable(ctx, targetJob)
+	existingItems, exists, err := s.getNomadVariable(ctx)
 	if err != nil {
-		log.Printf("[webhooks-router] ERROR querying existing nomad variable for %q: %v", targetJob, err)
+		log.Printf("[webhooks-router] ERROR querying existing nomad variable %s: %v", TargetNomadVariable, err)
 		return err
 	}
 
 	// Semantic idempotency check: Avoid PUT if items are unchanged to prevent container restarts in Nomad
 	if exists && reflect.DeepEqual(existingItems, newItems) {
-		log.Printf("[webhooks-router] Secrets for nomad/jobs/%s are identical (%d keys); skipping Nomad variable PUT to prevent container restarts", targetJob, len(newItems))
+		log.Printf("[webhooks-router] Secrets for %s are identical (%d keys); skipping Nomad variable PUT to prevent container restarts", TargetNomadVariable, len(newItems))
 		return nil
 	}
 
-	if err := s.putNomadVariable(ctx, targetJob, newItems); err != nil {
-		log.Printf("[webhooks-router] ERROR updating nomad variable for %q: %v", targetJob, err)
+	if err := s.putNomadVariable(ctx, newItems); err != nil {
+		log.Printf("[webhooks-router] ERROR updating nomad variable %s: %v", TargetNomadVariable, err)
 		return err
 	}
 
-	log.Printf("[webhooks-router] Successfully synchronized %d secrets to nomad/jobs/%s", len(newItems), targetJob)
+	log.Printf("[webhooks-router] Successfully synchronized %d secrets to %s", len(newItems), TargetNomadVariable)
 	return nil
 }
 
@@ -608,8 +536,8 @@ func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error
 
 	errChan := make(chan error, 1)
 	go func() {
-		log.Printf("[webhooks-router] Server listening on %s (Infisical: %s, Nomad: %s, DefaultJob: %s)",
-			ln.Addr().String(), cfg.InfisicalURL, cfg.NomadAddr, cfg.DefaultTargetJob)
+		log.Printf("[webhooks-router] Server listening on %s (Infisical: %s, Nomad: %s, TargetVariable: %s)",
+			ln.Addr().String(), cfg.InfisicalURL, cfg.NomadAddr, TargetNomadVariable)
 		if err := httpServer.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errChan <- err
 		}
