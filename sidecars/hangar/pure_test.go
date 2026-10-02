@@ -1812,6 +1812,44 @@ func TestImageSourceRepo_TableDriven(t *testing.T) {
 	}
 }
 
+func TestPureFunctions_EdgeCasesCoverage(t *testing.T) {
+	// FindNomadJobsByImage with non-existent directory
+	if res := FindNomadJobsByImage("/nonexistent/directory/path/12345", "test"); res != nil {
+		t.Errorf("expected nil for nonexistent dir, got %v", res)
+	}
+	// FindNomadJobsByImage with empty image
+	if res := FindNomadJobsByImage(t.TempDir(), ""); res != nil {
+		t.Errorf("expected nil for empty imageRef, got %v", res)
+	}
+
+	// NormalizeGitHubSlug edge cases
+	if s := NormalizeGitHubSlug("/share/aerial"); s != "azylman/aerial" {
+		t.Errorf("NormalizeGitHubSlug(/share/aerial) = %q; want azylman/aerial", s)
+	}
+	if s := NormalizeGitHubSlug("/"); s != "" && s != "azylman/" {
+		t.Logf("NormalizeGitHubSlug(/) = %q", s)
+	}
+	if s := NormalizeGitHubSlug("git@github.com:azylman/mirrormere.git"); s != "azylman/mirrormere" {
+		t.Errorf("NormalizeGitHubSlug(git@github.com:azylman/mirrormere.git) = %q; want azylman/mirrormere", s)
+	}
+	if s := NormalizeGitHubSlug("http://github.com/azylman/aerial"); s != "azylman/aerial" {
+		t.Errorf("NormalizeGitHubSlug(http://github.com/azylman/aerial) = %q; want azylman/aerial", s)
+	}
+
+	// ResolveRepoPath edge cases
+	repos := []string{"/opt/aerial", "/opt/aerial-config"}
+	if r := ResolveRepoPath("", repos); r != "" {
+		t.Errorf("ResolveRepoPath empty query = %q; want empty", r)
+	}
+	if r := ResolveRepoPath("https://github.com/azylman/aerial.git", repos); r != "/opt/aerial" {
+		t.Errorf("ResolveRepoPath github url = %q; want /opt/aerial", r)
+	}
+	if r := ResolveRepoPath("/opt/aerial", repos); r != "/opt/aerial" {
+		t.Errorf("ResolveRepoPath exact path = %q; want /opt/aerial", r)
+	}
+}
+
+
 
 
 

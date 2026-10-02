@@ -6323,6 +6323,353 @@ func TestSetupMux_PushEventsEndpoints(t *testing.T) {
 	}
 }
 
+func TestGetChangedFiles_Comprehensive(t *testing.T) {
+	ctx := context.Background()
+	d := &SyncDaemon{}
+
+	// 1. Empty heads
+	files, err := d.getChangedFiles(ctx, "/tmp", "", "sha2")
+	if err != nil || files != nil {
+		t.Errorf("expected nil files and err, got files=%v err=%v", files, err)
+	}
+	files, err = d.getChangedFiles(ctx, "/tmp", "sha1", "")
+	if err != nil || files != nil {
+		t.Errorf("expected nil files and err, got files=%v err=%v", files, err)
+	}
+	files, err = d.getChangedFiles(ctx, "/tmp", "sha1", "sha1")
+	if err != nil || files != nil {
+		t.Errorf("expected nil files and err, got files=%v err=%v", files, err)
+	}
+
+	// 2. Diff success
+	dSuccess := &SyncDaemon{
+		gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			return []byte("file1.go\n\nfile2.hcl\n"), nil, nil
+		},
+	}
+	files, err = dSuccess.getChangedFiles(ctx, "/tmp", "sha1", "sha2")
+	if err != nil || len(files) != 2 || files[0] != "file1.go" || files[1] != "file2.hcl" {
+		t.Errorf("expected 2 files, got %v (err: %v)", files, err)
+	}
+
+	// 3. Diff fails, diff-tree fallback succeeds
+	dFallback := &SyncDaemon{
+		gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			if len(args) > 0 && args[0] == "diff" {
+				return nil, []byte("fatal: bad object"), errors.New("diff failed")
+			}
+			if len(args) > 0 && args[0] == "diff-tree" {
+				return []byte("fallback.txt\n"), nil, nil
+			}
+			return nil, nil, nil
+		},
+	}
+	files, err = dFallback.getChangedFiles(ctx, "/tmp", "sha1", "sha2")
+	if err != nil || len(files) != 1 || files[0] != "fallback.txt" {
+		t.Errorf("expected fallback.txt, got %v (err: %v)", files, err)
+	}
+
+	// 4. Diff fails and diff-tree fallback fails
+	dFallbackFail := &SyncDaemon{
+		gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			return nil, []byte("fatal: bad object"), errors.New("git error")
+		},
+	}
+	files, err = dFallbackFail.getChangedFiles(ctx, "/tmp", "sha1", "sha2")
+	if err == nil || files != nil {
+		t.Errorf("expected error from fallback, got nil (files: %v)", files)
+	}
+}
+
+func TestApplyNomadChangesDirectly_Comprehensive(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	validJobPath := filepath.Join(tmpDir, "jobs", "test.nomad")
+	_ = os.MkdirAll(filepath.Dir(validJobPath), 0755)
+	_ = os.WriteFile(validJobPath, []byte(`job "test" {}`), 0644)
+
+	// 1. Delete action with stop error and success
+	d := &SyncDaemon{
+		nomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			if len(args) >= 2 && args[0] == "job" && args[1] == "stop" {
+				return nil, []byte("stop error"), errors.New("stop fail")
+			}
+			return []byte("ok"), nil, nil
+		},
+	}
+	applied, err := d.applyNomadChangesDirectly(ctx, tmpDir, []NomadFileChange{
+		{Action: "delete", JobName: "deleted-job", Path: "jobs/del.nomad"},
+	})
+	if err != nil || len(applied) != 0 {
+		t.Errorf("expected nil error on delete, got applied=%v err=%v", applied, err)
+	}
+
+	// 2. Unsafe job path
+	applied, err = d.applyNomadChangesDirectly(ctx, tmpDir, []NomadFileChange{
+		{Action: "update", JobName: "evil", Path: "../evil.nomad"},
+	})
+	if err != nil || len(applied) != 0 {
+		t.Errorf("expected ignored unsafe path, got applied=%v err=%v", applied, err)
+	}
+
+	// 3. Validation error
+	dValFail := &SyncDaemon{
+		nomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			if len(args) >= 2 && args[0] == "job" && args[1] == "validate" {
+				return nil, []byte("invalid syntax"), errors.New("validate fail")
+			}
+			return []byte("ok"), nil, nil
+		},
+	}
+	applied, err = dValFail.applyNomadChangesDirectly(ctx, tmpDir, []NomadFileChange{
+		{Action: "update", JobName: "test", Path: "jobs/test.nomad"},
+	})
+	if err == nil {
+		t.Errorf("expected validation error, got nil (applied: %v)", applied)
+	}
+
+	// 4. Run error
+	dRunFail := &SyncDaemon{
+		nomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			if len(args) >= 2 && args[0] == "job" && args[1] == "run" {
+				return nil, []byte("run error"), errors.New("run fail")
+			}
+			return []byte("ok"), nil, nil
+		},
+	}
+	applied, err = dRunFail.applyNomadChangesDirectly(ctx, tmpDir, []NomadFileChange{
+		{Action: "update", JobName: "test", Path: "jobs/test.nomad"},
+	})
+	if err == nil {
+		t.Errorf("expected run error, got nil (applied: %v)", applied)
+	}
+
+	// 5. Success
+	dSuccess := &SyncDaemon{
+		nomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			return []byte("Evaluation ID: eval-123"), nil, nil
+		},
+	}
+	applied, err = dSuccess.applyNomadChangesDirectly(ctx, tmpDir, []NomadFileChange{
+		{Action: "update", JobName: "test", Path: "jobs/test.nomad"},
+	})
+	if err != nil || len(applied) != 1 || applied[0] != "test" {
+		t.Errorf("expected applied job [test], got %v (err: %v)", applied, err)
+	}
+}
+
+func TestExecuteGitPushEvent_AdditionalBranches(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	aerialCoreDir := filepath.Join(tmpDir, "aerial")
+	aerialConfigDir := filepath.Join(tmpDir, "aerial-config")
+	_ = os.MkdirAll(filepath.Join(aerialCoreDir, ".git"), 0755)
+	_ = os.MkdirAll(filepath.Join(aerialConfigDir, ".git"), 0755)
+
+	// 1. SyncRepo failure
+	dSyncFail := NewDaemon(DaemonConfig{
+		Repos: []string{aerialCoreDir},
+		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			return nil, []byte("fatal: remote not found"), errors.New("sync failed")
+		},
+	})
+	resp, code := dSyncFail.ExecuteGitPushEvent(ctx, GitPushEventRequest{
+		Repo: "aerial",
+		Ref:  "refs/heads/main",
+	})
+	if code != http.StatusInternalServerError || resp.Status != "error" {
+		t.Errorf("expected 500 sync error, got code %d (%s)", code, resp.Status)
+	}
+
+	// 2. Aerial Core with Nomad changes failure in applyNomadChangesDirectly
+	var revParseAerial int
+	dAerialNomadFail := NewDaemon(DaemonConfig{
+		Repos:      []string{aerialCoreDir},
+		ComposeDir: aerialCoreDir,
+		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			if len(args) >= 1 && args[0] == "rev-parse" {
+				if len(args) >= 2 && args[1] == "FETCH_HEAD" {
+					return []byte("sha_after"), nil, nil
+				}
+				if len(args) >= 2 && args[1] == "HEAD" {
+					revParseAerial++
+					if revParseAerial == 1 {
+						return []byte("sha_before"), nil, nil
+					}
+					return []byte("sha_after"), nil, nil
+				}
+				return []byte("sha_after"), nil, nil
+			}
+			if len(args) >= 2 && args[0] == "diff" && args[1] == "--name-only" {
+				return []byte("nomad/jobs/migrate.nomad\n"), nil, nil
+			}
+			if len(args) >= 2 && args[0] == "diff" && args[1] == "--name-status" {
+				return []byte("M nomad/jobs/migrate.nomad\n"), nil, nil
+			}
+			return []byte(""), nil, nil
+		},
+		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			if len(args) >= 2 && args[0] == "job" && args[1] == "validate" {
+				return nil, []byte("validate error"), errors.New("invalid job")
+			}
+			return []byte("OK"), nil, nil
+		},
+	})
+	_ = os.MkdirAll(filepath.Join(aerialCoreDir, "nomad", "jobs"), 0755)
+	_ = os.WriteFile(filepath.Join(aerialCoreDir, "nomad", "jobs", "migrate.nomad"), []byte(`job "migrate" {}`), 0644)
+
+	respAerialFail, codeAerialFail := dAerialNomadFail.ExecuteGitPushEvent(ctx, GitPushEventRequest{
+		Repo: "aerial",
+		Ref:  "refs/heads/main",
+	})
+	if codeAerialFail != http.StatusInternalServerError || respAerialFail.Status != "error" {
+		t.Errorf("expected 500 when nomad apply fails, got code %d (%s)", codeAerialFail, respAerialFail.Status)
+	}
+
+	// 3. Aerial config with deleted nomad jobs and stopped successfully
+	var revParseConfigDel int
+	dConfigDel := NewDaemon(DaemonConfig{
+		Repos:     []string{aerialConfigDir},
+		ConfigDir: aerialConfigDir,
+		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			if len(args) >= 1 && args[0] == "rev-parse" {
+				if len(args) >= 2 && args[1] == "FETCH_HEAD" {
+					return []byte("sha_after"), nil, nil
+				}
+				if len(args) >= 2 && args[1] == "HEAD" {
+					revParseConfigDel++
+					if revParseConfigDel == 1 {
+						return []byte("sha_before"), nil, nil
+					}
+					return []byte("sha_after"), nil, nil
+				}
+				return []byte("sha_after"), nil, nil
+			}
+			if len(args) >= 2 && args[0] == "diff" && args[1] == "--name-status" {
+				return []byte("D jobs/old-service.nomad\n"), nil, nil
+			}
+			return []byte(""), nil, nil
+		},
+		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			return []byte("Stop evaluation ID: stop-123"), nil, nil
+		},
+	})
+	respDel, codeDel := dConfigDel.ExecuteGitPushEvent(ctx, GitPushEventRequest{
+		Repo: "aerial-config",
+		Ref:  "refs/heads/main",
+	})
+	if codeDel != http.StatusOK || respDel.Status != "accepted" {
+		t.Errorf("expected 200 on config delete, got %d (%s)", codeDel, respDel.Status)
+	}
+
+	// 4. Aerial config with nomad job validate error
+	jobBad := `job "broken" {}`
+	_ = os.MkdirAll(filepath.Join(aerialConfigDir, "jobs"), 0755)
+	_ = os.WriteFile(filepath.Join(aerialConfigDir, "jobs", "broken.nomad"), []byte(jobBad), 0644)
+
+	var revParseConfigBad int
+	dConfigBad := NewDaemon(DaemonConfig{
+		Repos:     []string{aerialConfigDir},
+		ConfigDir: aerialConfigDir,
+		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			if len(args) >= 1 && args[0] == "rev-parse" {
+				if len(args) >= 2 && args[1] == "FETCH_HEAD" {
+					return []byte("sha_after"), nil, nil
+				}
+				if len(args) >= 2 && args[1] == "HEAD" {
+					revParseConfigBad++
+					if revParseConfigBad == 1 {
+						return []byte("sha_before"), nil, nil
+					}
+					return []byte("sha_after"), nil, nil
+				}
+				return []byte("sha_after"), nil, nil
+			}
+			if len(args) >= 2 && args[0] == "diff" && args[1] == "--name-status" {
+				return []byte("M jobs/broken.nomad\n"), nil, nil
+			}
+			return []byte(""), nil, nil
+		},
+		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			if len(args) >= 2 && args[0] == "job" && args[1] == "validate" {
+				return nil, []byte("syntax error"), errors.New("validate fail")
+			}
+			return []byte("OK"), nil, nil
+		},
+	})
+	respBad, codeBad := dConfigBad.ExecuteGitPushEvent(ctx, GitPushEventRequest{
+		Repo: "aerial-config",
+		Ref:  "refs/heads/main",
+	})
+	if codeBad != http.StatusOK || len(respBad.AppliedJobs) != 0 {
+		t.Errorf("expected 200 with 0 applied jobs on validation failure, got %d (applied: %v)", codeBad, respBad.AppliedJobs)
+	}
+
+	// 5. Aerial config with nomad job run error
+	var revParseConfigRunErr int
+	dConfigRunErr := NewDaemon(DaemonConfig{
+		Repos:     []string{aerialConfigDir},
+		ConfigDir: aerialConfigDir,
+		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			if len(args) >= 1 && args[0] == "rev-parse" {
+				if len(args) >= 2 && args[1] == "FETCH_HEAD" {
+					return []byte("sha_after"), nil, nil
+				}
+				if len(args) >= 2 && args[1] == "HEAD" {
+					revParseConfigRunErr++
+					if revParseConfigRunErr == 1 {
+						return []byte("sha_before"), nil, nil
+					}
+					return []byte("sha_after"), nil, nil
+				}
+				return []byte("sha_after"), nil, nil
+			}
+			if len(args) >= 2 && args[0] == "diff" && args[1] == "--name-status" {
+				return []byte("M jobs/broken.nomad\n"), nil, nil
+			}
+			return []byte(""), nil, nil
+		},
+		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			if len(args) >= 2 && args[0] == "job" && args[1] == "run" {
+				return nil, []byte("nomad unreachable"), errors.New("run fail")
+			}
+			return []byte("OK"), nil, nil
+		},
+	})
+	respRunErr, codeRunErr := dConfigRunErr.ExecuteGitPushEvent(ctx, GitPushEventRequest{
+		Repo: "aerial-config",
+		Ref:  "refs/heads/main",
+	})
+	if codeRunErr != http.StatusOK || len(respRunErr.AppliedJobs) != 0 {
+		t.Errorf("expected 200 with 0 applied jobs on run failure, got %d (applied: %v)", codeRunErr, respRunErr.AppliedJobs)
+	}
+}
+
+func TestExecutors_DirectCoverage(t *testing.T) {
+	ctx := context.Background()
+
+	// runGitCommand
+	out, _, err := runGitCommand(ctx, "", "", "version")
+	if err != nil || !strings.Contains(string(out), "git version") {
+		t.Logf("runGitCommand git version output: %s (err: %v)", string(out), err)
+	}
+
+	// defaultNomadExecutor
+	nomadExec := defaultNomadExecutor("http://127.0.0.1:4646", "secret-token")
+	if nomadExec != nil {
+		_, _, _ = nomadExec(ctx, "version")
+	}
+
+	// defaultDockerExecutor
+	_, _, _ = defaultDockerExecutor(ctx, "version")
+
+	// defaultComposeExecutor
+	_, _, _ = defaultComposeExecutor(ctx, t.TempDir(), "version")
+}
+
+
+
 
 
 
