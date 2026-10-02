@@ -6940,11 +6940,584 @@ func TestValidateNomadConfig_NilExecutor(t *testing.T) {
 	}
 }
 
+func TestExecuteGitPushEvent_DispatchesDeployStartedAndSuccess(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	aerialConfigDir := filepath.Join(tmpDir, "aerial-config")
+	_ = os.MkdirAll(filepath.Join(aerialConfigDir, "jobs"), 0755)
+	_ = os.MkdirAll(filepath.Join(aerialConfigDir, ".git"), 0755)
 
+	jobFile := filepath.Join(aerialConfigDir, "jobs", "webhooks-router.nomad")
+	_ = os.WriteFile(jobFile, []byte(`job "webhooks-router" {}`), 0644)
 
+	evtCh := make(chan HangarDeployEvent, 10)
+	var revParseCount int
 
+	d := NewDaemon(DaemonConfig{
+		Repos:                  []string{aerialConfigDir},
+		ConfigDir:              aerialConfigDir,
+		DeploymentPollInterval: 10 * time.Millisecond,
+		DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
+			evtCh <- evt
+			return nil
+		},
+		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			if len(args) >= 1 && args[0] == "rev-parse" {
+				if len(args) >= 2 && args[1] == "FETCH_HEAD" {
+					return []byte("sha_after"), nil, nil
+				}
+				if len(args) >= 2 && args[1] == "HEAD" {
+					revParseCount++
+					if revParseCount == 1 {
+						return []byte("sha_before"), nil, nil
+					}
+					return []byte("sha_after"), nil, nil
+				}
+				return []byte("sha_after"), nil, nil
+			}
+			if len(args) >= 2 && args[0] == "diff" && args[1] == "--name-status" {
+				return []byte("M jobs/webhooks-router.nomad\n"), nil, nil
+			}
+			return []byte(""), nil, nil
+		},
+		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			if len(args) >= 2 && args[0] == "job" && args[1] == "run" {
+				return []byte("Evaluation ID: run-ok"), nil, nil
+			}
+			if len(args) >= 2 && args[0] == "job" && args[1] == "status" {
+				return []byte(`{
+					"ID": "webhooks-router",
+					"JobVersion": 1,
+					"LatestDeployment": {
+						"ID": "dep-git-push-1",
+						"JobVersion": 1,
+						"Status": "successful",
+						"StatusDescription": "Deployment completed successfully"
+					}
+				}`), nil, nil
+			}
+			return []byte("OK"), nil, nil
+		},
+	})
 
+	resp, code := d.ExecuteGitPushEvent(ctx, GitPushEventRequest{
+		Repo:   "aerial-config",
+		Ref:    "refs/heads/main",
+		Commit: "commit_abc123",
+	})
+	if code != http.StatusOK || resp.Status != "accepted" {
+		t.Fatalf("expected 200 accepted, got %d (%s)", code, resp.Status)
+	}
 
+	// 1. Wait for deploy_started
+	select {
+	case evt := <-evtCh:
+		if evt.Event != "deploy_started" {
+			t.Errorf("expected deploy_started, got %q", evt.Event)
+		}
+		if evt.JobName != "webhooks-router" {
+			t.Errorf("expected job_name webhooks-router, got %q", evt.JobName)
+		}
+		if evt.Repo != "aerial-config" {
+			t.Errorf("expected repo aerial-config, got %q", evt.Repo)
+		}
+		if evt.CommitSHA != "commit_abc123" {
+			t.Errorf("expected commit_sha commit_abc123, got %q", evt.CommitSHA)
+		}
+		if evt.Status != "started" {
+			t.Errorf("expected status started, got %q", evt.Status)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for deploy_started event")
+	}
 
+	// 2. Wait for deploy_success
+	select {
+	case evt := <-evtCh:
+		if evt.Event != "deploy_success" {
+			t.Errorf("expected deploy_success, got %q", evt.Event)
+		}
+		if evt.JobName != "webhooks-router" {
+			t.Errorf("expected job_name webhooks-router, got %q", evt.JobName)
+		}
+		if evt.DeploymentID != "dep-git-push-1" {
+			t.Errorf("expected deployment_id dep-git-push-1, got %q", evt.DeploymentID)
+		}
+		if evt.Status != "success" {
+			t.Errorf("expected status success, got %q", evt.Status)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for deploy_success event")
+	}
+}
 
+func TestExecuteGitPushEvent_DispatchesDeployFailed(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	aerialConfigDir := filepath.Join(tmpDir, "aerial-config")
+	_ = os.MkdirAll(filepath.Join(aerialConfigDir, "jobs"), 0755)
+	_ = os.MkdirAll(filepath.Join(aerialConfigDir, ".git"), 0755)
+
+	jobFile := filepath.Join(aerialConfigDir, "jobs", "webhooks-router.nomad")
+	_ = os.WriteFile(jobFile, []byte(`job "webhooks-router" {}`), 0644)
+
+	evtCh := make(chan HangarDeployEvent, 10)
+	var revParseCount int
+
+	d := NewDaemon(DaemonConfig{
+		Repos:                  []string{aerialConfigDir},
+		ConfigDir:              aerialConfigDir,
+		DeploymentPollInterval: 10 * time.Millisecond,
+		DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
+			evtCh <- evt
+			return nil
+		},
+		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			if len(args) >= 1 && args[0] == "rev-parse" {
+				if len(args) >= 2 && args[1] == "FETCH_HEAD" {
+					return []byte("sha_after"), nil, nil
+				}
+				if len(args) >= 2 && args[1] == "HEAD" {
+					revParseCount++
+					if revParseCount == 1 {
+						return []byte("sha_before"), nil, nil
+					}
+					return []byte("sha_after"), nil, nil
+				}
+				return []byte("sha_after"), nil, nil
+			}
+			if len(args) >= 2 && args[0] == "diff" && args[1] == "--name-status" {
+				return []byte("M jobs/webhooks-router.nomad\n"), nil, nil
+			}
+			return []byte(""), nil, nil
+		},
+		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			if len(args) >= 2 && args[0] == "job" && args[1] == "run" {
+				return nil, []byte("driver error: failed to place allocation"), errors.New("nomad run failed")
+			}
+			return []byte("OK"), nil, nil
+		},
+	})
+
+	resp, code := d.ExecuteGitPushEvent(ctx, GitPushEventRequest{
+		Repo:   "aerial-config",
+		Ref:    "refs/heads/main",
+		Commit: "fail_commit_123",
+	})
+	if code != http.StatusOK {
+		t.Fatalf("expected 200 accepted response, got %d", code)
+	}
+	if len(resp.AppliedJobs) != 0 {
+		t.Errorf("expected 0 applied jobs on run failure, got %v", resp.AppliedJobs)
+	}
+
+	// Collect both dispatched events
+	var received []HangarDeployEvent
+	for i := 0; i < 2; i++ {
+		select {
+		case evt := <-evtCh:
+			received = append(received, evt)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for event %d", i+1)
+		}
+	}
+
+	hasStarted := false
+	hasFailed := false
+	for _, evt := range received {
+		if evt.Event == "deploy_started" {
+			hasStarted = true
+		}
+		if evt.Event == "deploy_failed" {
+			hasFailed = true
+			if evt.Status != "failed" {
+				t.Errorf("expected status failed, got %q", evt.Status)
+			}
+			if !strings.Contains(evt.Details, "driver error") {
+				t.Errorf("expected details to contain error message, got %q", evt.Details)
+			}
+		}
+	}
+	if !hasStarted {
+		t.Errorf("missing deploy_started event in received: %+v", received)
+	}
+	if !hasFailed {
+		t.Errorf("missing deploy_failed event in received: %+v", received)
+	}
+}
+
+func TestExecuteImageReadyEvent_DispatchesDeployRollback(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	jobsDir := filepath.Join(tmpDir, "jobs")
+	_ = os.MkdirAll(jobsDir, 0755)
+
+	job1 := `job "webhooks-router" {
+		task "router" {
+			config {
+				image = "ghcr.io/azylman/aerial-webhooks-router:latest"
+			}
+		}
+	}`
+	_ = os.WriteFile(filepath.Join(jobsDir, "webhooks-router.nomad"), []byte(job1), 0644)
+
+	evtCh := make(chan HangarDeployEvent, 10)
+
+	d := NewDaemon(DaemonConfig{
+		ConfigDir:              tmpDir,
+		DeploymentPollInterval: 10 * time.Millisecond,
+		DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
+			evtCh <- evt
+			return nil
+		},
+		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			if len(args) >= 2 && args[0] == "job" && args[1] == "run" {
+				return []byte("Evaluation ID: run-123"), nil, nil
+			}
+			if len(args) >= 2 && args[0] == "job" && args[1] == "restart" {
+				return []byte("Restart triggered"), nil, nil
+			}
+			if len(args) >= 2 && args[0] == "job" && args[1] == "status" {
+				return []byte(`{
+					"ID": "webhooks-router",
+					"JobVersion": 2,
+					"LatestDeployment": {
+						"ID": "dep-rollback-uuid",
+						"JobVersion": 2,
+						"Status": "failed",
+						"StatusDescription": "deployment failed: auto-reverting to version 1",
+						"TaskGroups": {
+							"router": {
+								"AutoRevert": true
+							}
+						}
+					}
+				}`), nil, nil
+			}
+			return []byte("OK"), nil, nil
+		},
+	})
+
+	resp, code := d.ExecuteImageReadyEvent(ctx, ImageReadyEventRequest{
+		Image:  "ghcr.io/azylman/aerial-webhooks-router:latest",
+		Digest: "sha256:digest_abc",
+	})
+	if code != http.StatusOK || resp.Status != "accepted" {
+		t.Fatalf("expected 200 accepted, got %d (%s)", code, resp.Status)
+	}
+
+	// 1. Wait for deploy_started
+	select {
+	case evt := <-evtCh:
+		if evt.Event != "deploy_started" {
+			t.Errorf("expected deploy_started, got %q", evt.Event)
+		}
+		if evt.Image != "ghcr.io/azylman/aerial-webhooks-router:latest" {
+			t.Errorf("expected image in event, got %q", evt.Image)
+		}
+		if evt.Digest != "sha256:digest_abc" {
+			t.Errorf("expected digest sha256:digest_abc, got %q", evt.Digest)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for deploy_started")
+	}
+
+	// 2. Wait for deploy_rollback
+	select {
+	case evt := <-evtCh:
+		if evt.Event != "deploy_rollback" {
+			t.Errorf("expected deploy_rollback, got %q", evt.Event)
+		}
+		if evt.Status != "rollback" {
+			t.Errorf("expected status rollback, got %q", evt.Status)
+		}
+		if evt.DeploymentID != "dep-rollback-uuid" {
+			t.Errorf("expected deployment_id dep-rollback-uuid, got %q", evt.DeploymentID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for deploy_rollback")
+	}
+}
+
+func TestMonitorDeploymentAsync_StaleVersionIgnored(t *testing.T) {
+	evtCh := make(chan HangarDeployEvent, 10)
+	var statusCalls int
+	var mu sync.Mutex
+
+	d := NewDaemon(DaemonConfig{
+		DeploymentPollInterval: 10 * time.Millisecond,
+		DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
+			evtCh <- evt
+			return nil
+		},
+		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			if len(args) >= 2 && args[0] == "job" && args[1] == "status" {
+				mu.Lock()
+				statusCalls++
+				calls := statusCalls
+				mu.Unlock()
+
+				if calls < 3 {
+					// Stale deployment: version 2 < minVersion 3
+					return []byte(`{
+						"ID": "webhooks-router",
+						"JobVersion": 2,
+						"LatestDeployment": {
+							"ID": "dep-old-stale",
+							"JobVersion": 2,
+							"Status": "successful",
+							"StatusDescription": "old deployment"
+						}
+					}`), nil, nil
+				}
+
+				// Current deployment: version 3 >= minVersion 3
+				return []byte(`{
+					"ID": "webhooks-router",
+					"JobVersion": 3,
+					"LatestDeployment": {
+						"ID": "dep-new-3",
+						"JobVersion": 3,
+						"Status": "successful",
+						"StatusDescription": "new deployment finished"
+					}
+				}`), nil, nil
+			}
+			return []byte("OK"), nil, nil
+		},
+	})
+
+	baseEvt := HangarDeployEvent{
+		Event:   "deploy_started",
+		JobName: "webhooks-router",
+		Status:  "started",
+	}
+
+	d.MonitorDeploymentAsync("webhooks-router", 3, baseEvt)
+
+	select {
+	case evt := <-evtCh:
+		if evt.Event != "deploy_success" {
+			t.Errorf("expected deploy_success, got %q", evt.Event)
+		}
+		if evt.DeploymentID != "dep-new-3" {
+			t.Errorf("expected deployment_id dep-new-3, got %q", evt.DeploymentID)
+		}
+		mu.Lock()
+		finalCalls := statusCalls
+		mu.Unlock()
+		if finalCalls < 3 {
+			t.Errorf("expected at least 3 status calls before accepting version 3, got %d", finalCalls)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for deploy_success on minVersion")
+	}
+}
+
+func TestMonitorDeploymentAsync_SummaryRunningFallback(t *testing.T) {
+	evtCh := make(chan HangarDeployEvent, 10)
+
+	d := NewDaemon(DaemonConfig{
+		DeploymentPollInterval: 10 * time.Millisecond,
+		DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
+			evtCh <- evt
+			return nil
+		},
+		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			if len(args) >= 2 && args[0] == "job" && args[1] == "status" {
+				return []byte(`{
+					"ID": "batch-job",
+					"JobVersion": 1,
+					"Summary": {
+						"Children": {
+							"Pending": 0,
+							"Running": 1,
+							"Dead": 0
+						}
+					}
+				}`), nil, nil
+			}
+			return []byte("OK"), nil, nil
+		},
+	})
+
+	baseEvt := HangarDeployEvent{
+		Event:   "deploy_started",
+		JobName: "batch-job",
+		Status:  "started",
+	}
+
+	d.MonitorDeploymentAsync("batch-job", 0, baseEvt)
+
+	select {
+	case evt := <-evtCh:
+		if evt.Event != "deploy_success" {
+			t.Errorf("expected deploy_success, got %q", evt.Event)
+		}
+		if evt.Details != "allocations running" {
+			t.Errorf("expected details 'allocations running', got %q", evt.Details)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for fallback deploy_success")
+	}
+}
+
+func TestMonitorDeploymentAsync_CancelledDeployment(t *testing.T) {
+	evtCh := make(chan HangarDeployEvent, 10)
+
+	d := NewDaemon(DaemonConfig{
+		DeploymentPollInterval: 10 * time.Millisecond,
+		DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
+			evtCh <- evt
+			return nil
+		},
+		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			if len(args) >= 2 && args[0] == "job" && args[1] == "status" {
+				return []byte(`{
+					"ID": "cancelled-job",
+					"JobVersion": 1,
+					"LatestDeployment": {
+						"ID": "dep-cancelled-1",
+						"JobVersion": 1,
+						"Status": "cancelled",
+						"StatusDescription": "deployment superseded"
+					}
+				}`), nil, nil
+			}
+			return []byte("OK"), nil, nil
+		},
+	})
+
+	baseEvt := HangarDeployEvent{
+		Event:   "deploy_started",
+		JobName: "cancelled-job",
+		Status:  "started",
+	}
+
+	d.MonitorDeploymentAsync("cancelled-job", 0, baseEvt)
+
+	select {
+	case evt := <-evtCh:
+		if evt.Event != "deploy_failed" {
+			t.Errorf("expected deploy_failed, got %q", evt.Event)
+		}
+		if !strings.Contains(evt.Details, "cancelled") {
+			t.Errorf("expected details to mention cancelled, got %q", evt.Details)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for cancelled deploy_failed")
+	}
+}
+
+func TestDefaultDeployDispatcher_TableDriven(t *testing.T) {
+	var receivedEvt HangarDeployEvent
+	var receivedPath string
+	var returnStatus int = http.StatusOK
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedPath = r.URL.Path
+		_ = json.NewDecoder(r.Body).Decode(&receivedEvt)
+		w.WriteHeader(returnStatus)
+		if returnStatus >= 400 {
+			_, _ = w.Write([]byte("error processing webhook"))
+		}
+	}))
+	defer server.Close()
+
+	d := NewDaemon(DaemonConfig{
+		WebhooksRouterURL: server.URL,
+	})
+
+	testEvt := HangarDeployEvent{
+		Event:     "deploy_started",
+		JobName:   "test-job",
+		Status:    "started",
+		Timestamp: time.Now().UTC(),
+	}
+
+	// 1. Success
+	err := d.defaultDeployDispatcher(context.Background(), testEvt)
+	if err != nil {
+		t.Fatalf("unexpected error in defaultDeployDispatcher: %v", err)
+	}
+	if receivedPath != "/api/webhooks/hangar" {
+		t.Errorf("expected path /api/webhooks/hangar, got %q", receivedPath)
+	}
+	if receivedEvt.JobName != "test-job" {
+		t.Errorf("expected job_name test-job, got %q", receivedEvt.JobName)
+	}
+
+	// 2. HTTP error response
+	returnStatus = http.StatusInternalServerError
+	errFail := d.defaultDeployDispatcher(context.Background(), testEvt)
+	if errFail == nil {
+		t.Errorf("expected error when server returns 500")
+	}
+}
+
+func TestReconcileNomadChanges_LifecycleEvents(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	jobFile := filepath.Join(tmpDir, "server.nomad")
+	_ = os.WriteFile(jobFile, []byte(`job "server" {}`), 0644)
+
+	evtCh := make(chan HangarDeployEvent, 10)
+
+	d := NewDaemon(DaemonConfig{
+		DeploymentPollInterval: 10 * time.Millisecond,
+		DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
+			evtCh <- evt
+			return nil
+		},
+		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			if len(args) >= 2 && args[0] == "job" && args[1] == "run" {
+				return []byte("Evaluation ID: run-rec"), nil, nil
+			}
+			if len(args) >= 2 && args[0] == "job" && args[1] == "status" {
+				return []byte(`{
+					"ID": "server",
+					"JobVersion": 1,
+					"LatestDeployment": {
+						"ID": "dep-rec-1",
+						"JobVersion": 1,
+						"Status": "successful",
+						"StatusDescription": "reconciliation successful"
+					}
+				}`), nil, nil
+			}
+			return []byte("OK"), nil, nil
+		},
+	})
+
+	changes := []NomadFileChange{
+		{
+			Path:    "server.nomad",
+			Action:  "apply",
+			JobName: "server",
+		},
+	}
+
+	err := d.ReconcileNomadJobs(ctx, tmpDir, changes)
+	if err != nil {
+		t.Fatalf("ReconcileNomadJobs failed: %v", err)
+	}
+
+	select {
+	case evt := <-evtCh:
+		if evt.Event != "deploy_started" {
+			t.Errorf("expected deploy_started, got %q", evt.Event)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for deploy_started")
+	}
+
+	select {
+	case evt := <-evtCh:
+		if evt.Event != "deploy_success" {
+			t.Errorf("expected deploy_success, got %q", evt.Event)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for deploy_success")
+	}
+}
 

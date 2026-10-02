@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -1851,3 +1852,346 @@ func TestPostgresPRRegistry_Live(t *testing.T) {
 		t.Errorf("ResolvePRBySHA zero sha: got (%d, %v); expected (0, nil)", resPR, err)
 	}
 }
+
+func TestHandleHangarWebhook_EndpointsAndValidation(t *testing.T) {
+	srv := NewRouterServer(Config{}, nil)
+	routes := srv.Routes()
+
+	// 1. Malformed JSON -> 400 Bad Request
+	for _, path := range []string{"/api/webhooks/hangar", "/webhooks/hangar"} {
+		reqMalformed := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{invalid json`))
+		recMalformed := httptest.NewRecorder()
+		routes.ServeHTTP(recMalformed, reqMalformed)
+		if recMalformed.Code != http.StatusBadRequest {
+			t.Errorf("expected 400 for malformed json on %s, got %d", path, recMalformed.Code)
+		}
+		var errResp map[string]string
+		if err := json.Unmarshal(recMalformed.Body.Bytes(), &errResp); err != nil || errResp["error"] != "invalid json payload" {
+			t.Errorf("unexpected error response on %s: %+v", path, errResp)
+		}
+	}
+
+	// 2. Read error in body -> 400 Bad Request
+	reqErrBody := httptest.NewRequest(http.MethodPost, "/api/webhooks/hangar", errReader{})
+	recErrBody := httptest.NewRecorder()
+	routes.ServeHTTP(recErrBody, reqErrBody)
+	if recErrBody.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 on read error, got %d", recErrBody.Code)
+	}
+
+	// 3. Missing event -> 400 Bad Request
+	reqMissingEvent := httptest.NewRequest(http.MethodPost, "/api/webhooks/hangar", strings.NewReader(`{"job_name":"brain"}`))
+	recMissingEvent := httptest.NewRecorder()
+	routes.ServeHTTP(recMissingEvent, reqMissingEvent)
+	if recMissingEvent.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for missing event, got %d", recMissingEvent.Code)
+	}
+
+	// 4. Missing job_name -> 400 Bad Request
+	reqMissingJob := httptest.NewRequest(http.MethodPost, "/api/webhooks/hangar", strings.NewReader(`{"event":"deploy_started"}`))
+	recMissingJob := httptest.NewRecorder()
+	routes.ServeHTTP(recMissingJob, reqMissingJob)
+	if recMissingJob.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for missing job_name, got %d", recMissingJob.Code)
+	}
+
+	// 5. Missing both -> 400 Bad Request
+	reqMissingBoth := httptest.NewRequest(http.MethodPost, "/api/webhooks/hangar", strings.NewReader(`{}`))
+	recMissingBoth := httptest.NewRecorder()
+	routes.ServeHTTP(recMissingBoth, reqMissingBoth)
+	if recMissingBoth.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for missing both required fields, got %d", recMissingBoth.Code)
+	}
+}
+
+func TestHandleHangarWebhook_ValidPayloads(t *testing.T) {
+	events := []struct {
+		event   string
+		status  string
+		details string
+	}{
+		{"deploy_started", "started", "Nomad job evaluation placed"},
+		{"deploy_success", "success", "Healthy deployment completed"},
+		{"deploy_failed", "failed", "Allocation failed healthcheck"},
+		{"deploy_rollback", "rollback", "Reverted to previous healthy release"},
+	}
+
+	for _, tc := range events {
+		t.Run(tc.event, func(t *testing.T) {
+			srv := NewRouterServer(Config{}, nil)
+			routes := srv.Routes()
+
+			for _, path := range []string{"/api/webhooks/hangar", "/webhooks/hangar"} {
+				body := fmt.Sprintf(`{
+					"event": %q,
+					"job_name": "brain",
+					"repo": "azylman/aerial",
+					"pr_number": 420,
+					"target_id": "thread-999",
+					"image": "ghcr.io/azylman/aerial:latest",
+					"digest": "sha256:abc1234",
+					"status": %q,
+					"deployment_id": "dep-uuid-1",
+					"details": %q,
+					"timestamp": "2026-10-02T20:00:00Z"
+				}`, tc.event, tc.status, tc.details)
+
+				req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+				rec := httptest.NewRecorder()
+				routes.ServeHTTP(rec, req)
+
+				if rec.Code != http.StatusOK {
+					t.Fatalf("expected 200 OK for %s on %s, got %d: %s", tc.event, path, rec.Code, rec.Body.String())
+				}
+
+				var resp map[string]interface{}
+				if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+					t.Fatalf("failed to parse response json: %v", err)
+				}
+				if resp["status"] != "accepted" {
+					t.Errorf("expected status accepted, got %v", resp["status"])
+				}
+				if resp["event"] != tc.event {
+					t.Errorf("expected event %s, got %v", tc.event, resp["event"])
+				}
+				if resp["job_name"] != "brain" {
+					t.Errorf("expected job_name brain, got %v", resp["job_name"])
+				}
+				if int(resp["pr_number"].(float64)) != 420 {
+					t.Errorf("expected pr_number 420, got %v", resp["pr_number"])
+				}
+				if resp["target_id"] != "thread-999" {
+					t.Errorf("expected target_id thread-999, got %v", resp["target_id"])
+				}
+			}
+		})
+	}
+}
+
+func TestHandleHangarWebhook_ResolvePRBySHA(t *testing.T) {
+	mockReg := &mockPRRegistry{
+		resolvePRNum:    789,
+		resolveTargetID: "thread-resolved-789",
+	}
+
+	srv := NewRouterServer(Config{}, nil)
+	srv.SetRegistry(mockReg)
+	routes := srv.Routes()
+
+	// 1. CommitSHA provided without PRNumber: resolves PR and TargetID
+	body := `{
+		"event": "deploy_success",
+		"job_name": "webhooks-router",
+		"repo": "azylman/aerial",
+		"commit_sha": "deploycommit123",
+		"status": "success",
+		"details": "Deployed successfully"
+	}`
+
+	req := httptest.NewRequest(http.MethodPost, "/api/webhooks/hangar", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	routes.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if len(mockReg.resolveBySHACalls) != 1 {
+		t.Fatalf("expected 1 call to ResolvePRBySHA, got %d", len(mockReg.resolveBySHACalls))
+	}
+	if mockReg.resolveBySHACalls[0].sha != "deploycommit123" || mockReg.resolveBySHACalls[0].repo != "azylman/aerial" {
+		t.Errorf("unexpected resolve call: %+v", mockReg.resolveBySHACalls[0])
+	}
+
+	var resp map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if int(resp["pr_number"].(float64)) != 789 {
+		t.Errorf("expected resolved pr_number 789, got %v", resp["pr_number"])
+	}
+	if resp["target_id"] != "thread-resolved-789" {
+		t.Errorf("expected resolved target_id thread-resolved-789, got %v", resp["target_id"])
+	}
+
+	// 2. CommitSHA provided with existing TargetID: preserves existing TargetID
+	mockReg.resolveBySHACalls = nil
+	bodyPreserveTarget := `{
+		"event": "deploy_rollback",
+		"job_name": "webhooks-router",
+		"repo": "azylman/aerial",
+		"commit_sha": "deploycommit123",
+		"target_id": "existing-target-snowflake",
+		"status": "rollback"
+	}`
+	reqPreserve := httptest.NewRequest(http.MethodPost, "/webhooks/hangar", strings.NewReader(bodyPreserveTarget))
+	recPreserve := httptest.NewRecorder()
+	routes.ServeHTTP(recPreserve, reqPreserve)
+
+	if recPreserve.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", recPreserve.Code, recPreserve.Body.String())
+	}
+	var respPreserve map[string]interface{}
+	_ = json.Unmarshal(recPreserve.Body.Bytes(), &respPreserve)
+	if int(respPreserve["pr_number"].(float64)) != 789 {
+		t.Errorf("expected pr_number 789, got %v", respPreserve["pr_number"])
+	}
+	if respPreserve["target_id"] != "existing-target-snowflake" {
+		t.Errorf("expected existing target_id preserved, got %v", respPreserve["target_id"])
+	}
+
+	// 3. PRNumber already provided: does not call ResolvePRBySHA
+	mockReg.resolveBySHACalls = nil
+	bodyWithPR := `{
+		"event": "deploy_started",
+		"job_name": "brain",
+		"repo": "azylman/aerial",
+		"commit_sha": "deploycommit123",
+		"pr_number": 123,
+		"status": "started"
+	}`
+	reqWithPR := httptest.NewRequest(http.MethodPost, "/api/webhooks/hangar", strings.NewReader(bodyWithPR))
+	recWithPR := httptest.NewRecorder()
+	routes.ServeHTTP(recWithPR, reqWithPR)
+
+	if recWithPR.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", recWithPR.Code, recWithPR.Body.String())
+	}
+	if len(mockReg.resolveBySHACalls) != 0 {
+		t.Errorf("expected 0 calls to ResolvePRBySHA when PRNumber already given, got %d", len(mockReg.resolveBySHACalls))
+	}
+
+	// 4. Registry error: logs warning and still accepts event
+	mockRegErr := &mockPRRegistry{resolveErr: errors.New("db error")}
+	srvErr := NewRouterServer(Config{}, nil)
+	srvErr.SetRegistry(mockRegErr)
+
+	reqErr := httptest.NewRequest(http.MethodPost, "/api/webhooks/hangar", strings.NewReader(body))
+	recErr := httptest.NewRecorder()
+	srvErr.Routes().ServeHTTP(recErr, reqErr)
+
+	if recErr.Code != http.StatusOK {
+		t.Errorf("expected 200 OK even when registry resolve errors, got %d", recErr.Code)
+	}
+
+	// 5. Registry nil: handles gracefully without error
+	srvNilReg := NewRouterServer(Config{}, nil)
+	reqNil := httptest.NewRequest(http.MethodPost, "/api/webhooks/hangar", strings.NewReader(body))
+	recNil := httptest.NewRecorder()
+	srvNilReg.Routes().ServeHTTP(recNil, reqNil)
+
+	if recNil.Code != http.StatusOK {
+		t.Errorf("expected 200 OK when registry is nil, got %d", recNil.Code)
+	}
+}
+
+func TestProcessHangarEvent_Direct(t *testing.T) {
+	mockReg := &mockPRRegistry{
+		resolvePRNum:    99,
+		resolveTargetID: "target-99",
+	}
+	srv := NewRouterServer(Config{}, nil)
+	srv.SetRegistry(mockReg)
+
+	ctx := context.Background()
+
+	// 1. deploy_started
+	evtStarted := HangarDeployEvent{
+		Event:     "deploy_started",
+		JobName:   "webhooks-router",
+		Repo:      "azylman/aerial",
+		CommitSHA: "sha111",
+		Status:    "started",
+	}
+	resStarted := srv.ProcessHangarEvent(ctx, evtStarted)
+	if resStarted.PRNumber != 99 || resStarted.TargetID != "target-99" {
+		t.Errorf("unexpected resStarted: %+v", resStarted)
+	}
+
+	// 2. deploy_success with pr_number > 0 logs registry success
+	evtSuccess := HangarDeployEvent{
+		Event:     "deploy_success",
+		JobName:   "webhooks-router",
+		Repo:      "azylman/aerial",
+		PRNumber:  99,
+		Status:    "success",
+		TargetID:  "target-99",
+		Details:   "deployment completed",
+	}
+	resSuccess := srv.ProcessHangarEvent(ctx, evtSuccess)
+	if resSuccess.Event != "deploy_success" {
+		t.Errorf("unexpected event: %s", resSuccess.Event)
+	}
+
+	// 3. deploy_rollback with pr_number > 0 logs registry rollback
+	evtRollback := HangarDeployEvent{
+		Event:     "deploy_rollback",
+		JobName:   "webhooks-router",
+		Repo:      "azylman/aerial",
+		PRNumber:  99,
+		Status:    "rollback",
+		Details:   "rolled back",
+	}
+	resRollback := srv.ProcessHangarEvent(ctx, evtRollback)
+	if resRollback.Event != "deploy_rollback" {
+		t.Errorf("unexpected event: %s", resRollback.Event)
+	}
+
+	// 4. deploy_failed
+	evtFailed := HangarDeployEvent{
+		Event:    "deploy_failed",
+		JobName:  "webhooks-router",
+		Repo:     "azylman/aerial",
+		PRNumber: 99,
+		Status:   "failed",
+		Details:  "deploy unhealthy",
+	}
+	resFailed := srv.ProcessHangarEvent(ctx, evtFailed)
+	if resFailed.Status != "failed" {
+		t.Errorf("unexpected status: %s", resFailed.Status)
+	}
+}
+
+type zeroCallTransport struct {
+	calls atomic.Int32
+}
+
+func (z *zeroCallTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	z.calls.Add(1)
+	return nil, errors.New("unexpected outbound HTTP call")
+}
+
+func TestHangarWebhook_ZeroDownstreamCallsToBrain(t *testing.T) {
+	// STRICT INVARIANT: ZERO downstream dispatch to Brain or Discord!
+	transport := &zeroCallTransport{}
+	client := &http.Client{Transport: transport}
+
+	srv := NewRouterServer(Config{}, client)
+	mockReg := &mockPRRegistry{resolvePRNum: 101, resolveTargetID: "target-101"}
+	srv.SetRegistry(mockReg)
+
+	routes := srv.Routes()
+
+	events := []string{"deploy_started", "deploy_success", "deploy_failed", "deploy_rollback"}
+	for _, evt := range events {
+		body := fmt.Sprintf(`{
+			"event": %q,
+			"job_name": "brain",
+			"repo": "azylman/aerial",
+			"commit_sha": "sha-test",
+			"status": "started"
+		}`, evt)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/webhooks/hangar", strings.NewReader(body))
+		rec := httptest.NewRecorder()
+		routes.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK for %s, got %d", evt, rec.Code)
+		}
+	}
+
+	if calls := transport.calls.Load(); calls != 0 {
+		t.Fatalf("STRICT INVARIANT VIOLATION: expected 0 outbound calls to Brain or Discord, but %d were made", calls)
+	}
+}
+

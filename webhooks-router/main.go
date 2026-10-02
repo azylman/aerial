@@ -501,6 +501,8 @@ func (s *RouterServer) Routes() http.Handler {
 	mux.HandleFunc("POST /webhooks/generic", s.handleGenericWebhook)
 	mux.HandleFunc("POST /api/webhooks/github", s.handleGitHubWebhook)
 	mux.HandleFunc("POST /webhooks/github", s.handleGitHubWebhook)
+	mux.HandleFunc("POST /api/webhooks/hangar", s.handleHangarWebhook)
+	mux.HandleFunc("POST /webhooks/hangar", s.handleHangarWebhook)
 	return mux
 }
 
@@ -625,6 +627,80 @@ func (s *RouterServer) handleGenericWebhook(w http.ResponseWriter, r *http.Reque
 			log.Printf("[webhooks-router] Background sync failed: %v", err)
 		}
 	}()
+}
+
+// Hangar Webhook Payloads and Resolution Types
+
+type HangarDeployEvent struct {
+	Event        string    `json:"event"`                   // "deploy_started", "deploy_success", "deploy_failed", "deploy_rollback"
+	JobName      string    `json:"job_name"`                // Nomad job name (e.g. "webhooks-router", "brain")
+	Repo         string    `json:"repo,omitempty"`          // repository name (e.g. "azylman/aerial", "azylman/aerial-config")
+	CommitSHA    string    `json:"commit_sha,omitempty"`    // git commit SHA (head or merge commit)
+	PRNumber     int       `json:"pr_number,omitempty"`     // PR number if known
+	TargetID     string    `json:"target_id,omitempty"`     // Discord thread / channel snowflake
+	Image        string    `json:"image,omitempty"`         // container image (e.g. ghcr.io/azylman/aerial-webhooks-router:latest)
+	Digest       string    `json:"digest,omitempty"`        // image digest (sha256:...)
+	Status       string    `json:"status"`                  // "started", "success", "failed", "rollback"
+	DeploymentID string    `json:"deployment_id,omitempty"` // Nomad deployment UUID
+	Details      string    `json:"details,omitempty"`       // status description or error message
+	Timestamp    time.Time `json:"timestamp"`
+}
+
+func (s *RouterServer) handleHangarWebhook(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to read body"})
+		return
+	}
+
+	var evt HangarDeployEvent
+	if err := json.Unmarshal(body, &evt); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json payload"})
+		return
+	}
+
+	if strings.TrimSpace(evt.Event) == "" || strings.TrimSpace(evt.JobName) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing required fields"})
+		return
+	}
+
+	processed := s.ProcessHangarEvent(r.Context(), evt)
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status":    "accepted",
+		"event":     processed.Event,
+		"job_name":  processed.JobName,
+		"pr_number": processed.PRNumber,
+		"target_id": processed.TargetID,
+	})
+}
+
+func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployEvent) *HangarDeployEvent {
+	if evt.CommitSHA != "" && evt.PRNumber == 0 && s.registry != nil {
+		prNum, _, targetID, err := s.registry.ResolvePRBySHA(ctx, evt.Repo, evt.CommitSHA)
+		if err != nil {
+			log.Printf("[webhooks-router] [hangar] failed resolving PR by SHA %s: %v", evt.CommitSHA, err)
+		} else if prNum > 0 {
+			evt.PRNumber = prNum
+			if evt.TargetID == "" {
+				evt.TargetID = targetID
+			}
+		}
+	}
+
+	log.Printf("[webhooks-router] [hangar] [deploy] event=%s job=%s repo=%s pr=%d commit=%s status=%s target_id=%s deployment_id=%s details=%q",
+		evt.Event, evt.JobName, evt.Repo, evt.PRNumber, evt.CommitSHA, evt.Status, evt.TargetID, evt.DeploymentID, evt.Details)
+
+	if s.registry != nil && evt.PRNumber > 0 {
+		if evt.Event == "deploy_success" {
+			log.Printf("[webhooks-router] [registry] pr %s#%d deployed successfully for job %s", evt.Repo, evt.PRNumber, evt.JobName)
+		} else if evt.Event == "deploy_rollback" {
+			log.Printf("[webhooks-router] [registry] pr %s#%d deployment rolled back for job %s", evt.Repo, evt.PRNumber, evt.JobName)
+		}
+	}
+
+	// STRICT INVARIANT: ZERO downstream dispatch to Brain or Discord!
+	return &evt
 }
 
 // GitHub Webhook Payloads and Resolution Types

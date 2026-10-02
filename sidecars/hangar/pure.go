@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 )
 
 // ConflictContainer holds metadata for a container identified as a Docker Compose conflict.
@@ -1082,6 +1083,80 @@ func ImageSourceRepo(imageRef string) string {
 	return ""
 }
 
+// HangarDeployEvent represents deployment and rollback lifecycle events.
+type HangarDeployEvent struct {
+	Event        string    `json:"event"`                   // "deploy_started", "deploy_success", "deploy_failed", "deploy_rollback"
+	JobName      string    `json:"job_name"`                // Nomad job name (e.g. "webhooks-router", "brain")
+	Repo         string    `json:"repo,omitempty"`          // repository name (e.g. "azylman/aerial", "azylman/aerial-config")
+	CommitSHA    string    `json:"commit_sha,omitempty"`    // git commit SHA (head or merge commit)
+	PRNumber     int       `json:"pr_number,omitempty"`     // PR number if known
+	TargetID     string    `json:"target_id,omitempty"`     // Discord thread / channel snowflake
+	Image        string    `json:"image,omitempty"`         // container image (e.g. ghcr.io/azylman/aerial-webhooks-router:latest)
+	Digest       string    `json:"digest,omitempty"`        // image digest (sha256:...)
+	Status       string    `json:"status"`                  // "started", "success", "failed", "rollback"
+	DeploymentID string    `json:"deployment_id,omitempty"` // Nomad deployment UUID
+	Details      string    `json:"details,omitempty"`       // status description or error message
+	Timestamp    time.Time `json:"timestamp"`
+}
 
+// NomadJobStatusOutput represents parsed output from nomad job status -json.
+type NomadJobStatusOutput struct {
+	ID               string `json:"ID"`
+	JobVersion       int    `json:"JobVersion"`
+	LatestDeployment *struct {
+		ID                string `json:"ID"`
+		JobVersion        int    `json:"JobVersion"`
+		Status            string `json:"Status"` // "running", "successful", "failed", "cancelled"
+		StatusDescription string `json:"StatusDescription"`
+		TaskGroups        map[string]struct {
+			AutoRevert bool `json:"AutoRevert"`
+		} `json:"TaskGroups"`
+	} `json:"LatestDeployment"`
+	Summary struct {
+		Children struct {
+			Pending int `json:"Pending"`
+			Running int `json:"Running"`
+			Dead    int `json:"Dead"`
+		} `json:"Children"`
+	} `json:"Summary"`
+}
 
+// ParseJobStatusOutput parses JSON output from nomad job status -json,
+// handling both single object and array formats gracefully.
+func ParseJobStatusOutput(raw []byte) (*NomadJobStatusOutput, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return nil, fmt.Errorf("empty job status output")
+	}
 
+	startIdx := bytes.IndexAny(trimmed, "{[")
+	if startIdx == -1 {
+		return nil, fmt.Errorf("no json object or array found in job status output: %q", string(trimmed))
+	}
+	trimmed = trimmed[startIdx:]
+
+	if trimmed[0] == '[' {
+		endIdx := bytes.LastIndexByte(trimmed, ']')
+		if endIdx != -1 {
+			trimmed = trimmed[:endIdx+1]
+		}
+		var list []NomadJobStatusOutput
+		if err := json.Unmarshal(trimmed, &list); err != nil {
+			return nil, fmt.Errorf("failed to parse nomad job status array: %w", err)
+		}
+		if len(list) == 0 {
+			return nil, fmt.Errorf("empty nomad job status array")
+		}
+		return &list[0], nil
+	}
+
+	endIdx := bytes.LastIndexByte(trimmed, '}')
+	if endIdx != -1 {
+		trimmed = trimmed[:endIdx+1]
+	}
+	var single NomadJobStatusOutput
+	if err := json.Unmarshal(trimmed, &single); err != nil {
+		return nil, fmt.Errorf("failed to parse nomad job status object: %w", err)
+	}
+	return &single, nil
+}
