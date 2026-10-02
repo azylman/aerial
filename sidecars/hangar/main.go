@@ -128,10 +128,11 @@ type ImageQuarantineRecord struct {
 
 // ComposeChangeEvent captures a detected configuration change before reconciliation.
 type ComposeChangeEvent struct {
-	RepoPath     string    `json:"repo_path"`
-	PreviousHead string    `json:"previous_head"`
-	CurrentHead  string    `json:"current_head"`
-	Timestamp    time.Time `json:"timestamp"`
+	RepoPath           string    `json:"repo_path"`
+	PreviousHead       string    `json:"previous_head"`
+	CurrentHead        string    `json:"current_head"`
+	Timestamp          time.Time `json:"timestamp"`
+	NomadConfigChanged bool      `json:"nomad_config_changed,omitempty"`
 }
 
 // RepoSyncResult holds telemetry for a single repository sync operation.
@@ -637,6 +638,41 @@ func (d *SyncDaemon) HasComposeChanges(ctx context.Context, repoPath, prevHead, 
 
 	lines := strings.Split(strings.TrimSpace(string(stdout)), "\n")
 	return len(FilterComposeChanges(lines)) > 0, nil
+}
+
+// HasNomadConfigChanges checks whether Nomad daemon configuration files changed between commits.
+func (d *SyncDaemon) HasNomadConfigChanges(ctx context.Context, repoPath, prevHead, currHead string) (bool, error) {
+	if ctx.Err() != nil {
+		return false, ctx.Err()
+	}
+	if prevHead == "" || currHead == "" || prevHead == currHead {
+		return false, nil
+	}
+	if repoPath == "" {
+		return false, nil
+	}
+
+	args := []string{"diff", "--name-only", prevHead, currHead, "--", "nomad"}
+	stdout, _, err := d.getGitExecutor()(ctx, repoPath, args...)
+	if err != nil {
+		if ctx.Err() != nil {
+			return false, ctx.Err()
+		}
+		fallbackArgs := []string{"diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD", "--", "nomad"}
+		stdoutFallback, _, errFallback := d.getGitExecutor()(ctx, repoPath, fallbackArgs...)
+		if errFallback != nil {
+			if ctx.Err() != nil {
+				return false, ctx.Err()
+			}
+			log.Printf("[Hangar] Warning: Failed to inspect nomad diff in %s (%v); failing safe to false", repoPath, errFallback)
+			return false, nil
+		}
+		lines := strings.Split(strings.TrimSpace(string(stdoutFallback)), "\n")
+		return len(FilterNomadConfigFiles(lines)) > 0, nil
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(stdout)), "\n")
+	return len(FilterNomadConfigFiles(lines)) > 0, nil
 }
 
 // HasNomadChanges checks whether any Nomad job specifications changed between commits.
@@ -1710,6 +1746,19 @@ func (d *SyncDaemon) ReconcileCompose(parentCtx context.Context, targetServices 
 	}
 	log.Printf("[Hangar:GitOps] Docker Compose reconciliation successfully applied.")
 
+	hasNomadConfigChange := false
+	for _, p := range pending {
+		if p.NomadConfigChanged {
+			hasNomadConfigChange = true
+			break
+		}
+	}
+	if hasNomadConfigChange {
+		if errNomad := d.reconcileNomadServer(ctx, composeDir); errNomad != nil {
+			log.Printf("[Hangar:GitOps] Warning: reconcileNomadServer encountered error: %v", errNomad)
+		}
+	}
+
 	// Clear quarantine for successful targets
 	for _, svc := range targets {
 		d.clearImageQuarantine(svc)
@@ -1764,6 +1813,51 @@ func (d *SyncDaemon) ValidateNomadJob(ctx context.Context, jobPath string) error
 		combined := string(append(stdout, stderr...))
 		return fmt.Errorf("nomad job validate failed for %s: %s (%w)", jobPath, SanitizeLog(strings.TrimSpace(combined)), err)
 	}
+	return nil
+}
+
+// ValidateNomadConfig validates a Nomad daemon configuration path using nomad config validate.
+func (d *SyncDaemon) ValidateNomadConfig(ctx context.Context, configPath string) error {
+	valCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	nomadExec := d.getNomadExecutor()
+	if nomadExec == nil {
+		return errors.New("nomad executor unavailable, failing safe")
+	}
+	stdout, stderr, err := nomadExec(valCtx, "config", "validate", configPath)
+	if err != nil {
+		combined := string(append(stdout, stderr...))
+		return fmt.Errorf("nomad config validate failed for %s: %s (%w)", configPath, SanitizeLog(strings.TrimSpace(combined)), err)
+	}
+	return nil
+}
+
+// reconcileNomadServer safely restarts the nomad-server container after validating daemon configuration.
+func (d *SyncDaemon) reconcileNomadServer(ctx context.Context, composeDir string) error {
+	nomadDir := filepath.Join(composeDir, "nomad")
+	if _, statErr := os.Stat(nomadDir); statErr != nil {
+		log.Printf("[Hangar:GitOps] Notice: %s not found on disk, skipping nomad-server restart", nomadDir)
+		return nil
+	}
+
+	if errVal := d.ValidateNomadConfig(ctx, nomadDir); errVal != nil {
+		log.Printf("[Hangar:GitOps] ERROR: %v. Aborting nomad-server restart to prevent control plane outage.", errVal)
+		return errVal
+	}
+
+	log.Printf("[Hangar:GitOps] Nomad daemon configuration changes detected and validated. Restarting nomad-server...")
+	restartCtx, restartCancel := context.WithTimeout(ctx, 60*time.Second)
+	defer restartCancel()
+
+	restartArgs := d.getComposeArgs(composeDir, "restart", "nomad-server")
+	out, stderr, err := d.getComposeExecutor()(restartCtx, composeDir, restartArgs...)
+	if err != nil {
+		combined := SanitizeLog(strings.TrimSpace(string(append(out, stderr...))))
+		log.Printf("[Hangar:GitOps] ERROR: Failed to restart nomad-server: %s (%v)", combined, err)
+		return fmt.Errorf("failed to restart nomad-server: %s (%w)", combined, err)
+	}
+	log.Printf("[Hangar:GitOps] Successfully restarted nomad-server for updated daemon configuration.")
 	return nil
 }
 
@@ -2154,11 +2248,16 @@ func (d *SyncDaemon) SyncRepo(ctx context.Context, repoPath string) (res RepoSyn
 		if composeChanged {
 			res.ComposeChanged = true
 			log.Printf("[Hangar:GitOps] Infrastructure/compose changes detected in %s (%s -> %s). Triggering debounced reconciliation.", repoPath, res.PreviousHead, res.CurrentHead)
+			nomadCfgChanged, errNomadCfg := d.HasNomadConfigChanges(opCtx, repoPath, res.PreviousHead, res.CurrentHead)
+			if errNomadCfg != nil {
+				log.Printf("[Hangar] Warning: Failed to check nomad config changes in %s: %v", repoPath, errNomadCfg)
+			}
 			d.recordPendingChange(ComposeChangeEvent{
-				RepoPath:     repoPath,
-				PreviousHead: res.PreviousHead,
-				CurrentHead:  res.CurrentHead,
-				Timestamp:    time.Now(),
+				RepoPath:           repoPath,
+				PreviousHead:       res.PreviousHead,
+				CurrentHead:        res.CurrentHead,
+				Timestamp:          time.Now(),
+				NomadConfigChanged: nomadCfgChanged,
 			})
 			if d.reconcileCh != nil {
 				select {

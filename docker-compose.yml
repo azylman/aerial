@@ -512,13 +512,13 @@ services:
     privileged: true
     environment:
       - NOMAD_SKIP_DOCKER_IMAGE_WARN=1
-    command: ["agent", "-config=/nomad/config/nomad.hcl"]
+    command: ["agent", "-config=/nomad/config"]
     volumes:
       - /sys/fs/cgroup:/sys/fs/cgroup:rw
       - /var/run/docker.sock:/var/run/docker.sock
       - /mnt/data/nomad/client:/mnt/data/nomad/client
       - aerial-nomad-server-data:/nomad/data
-      - ${AERIAL_HOST_PROJECT_DIR:-${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}}/nomad/nomad.hcl:/nomad/config/nomad.hcl:ro
+      - ${AERIAL_HOST_PROJECT_DIR:-${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}}/nomad:/nomad/config:ro
     labels:
       autoheal: "true"
     healthcheck:

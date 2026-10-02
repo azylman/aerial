@@ -2747,6 +2747,145 @@ func TestHasComposeChanges_Coverage(t *testing.T) {
 	}
 }
 
+func TestHasNomadConfigChanges_Coverage(t *testing.T) {
+	d := &SyncDaemon{}
+
+	// 1. Canceled context
+	ctxCancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	changed, err := d.HasNomadConfigChanges(ctxCancelled, "/path", "v1", "v2")
+	if err == nil || changed {
+		t.Errorf("expected context error, got %v, %v", changed, err)
+	}
+
+	// 2. Empty or matching heads / empty repoPath
+	cases := []struct {
+		repo, prev, curr string
+	}{
+		{"/path", "", "v2"},
+		{"/path", "v1", ""},
+		{"/path", "v1", "v1"},
+		{"", "v1", "v2"},
+	}
+	for _, c := range cases {
+		got, err := d.HasNomadConfigChanges(context.Background(), c.repo, c.prev, c.curr)
+		if err != nil || got {
+			t.Errorf("expected false, nil for %v, got %v, %v", c, got, err)
+		}
+	}
+
+	// 3. Diff returns nomad config change
+	d.gitExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+		return []byte("nomad/nomad.hcl\nmain.go\n"), nil, nil
+	}
+	got, err := d.HasNomadConfigChanges(context.Background(), "/path", "v1", "v2")
+	if err != nil || !got {
+		t.Errorf("expected true, nil, got %v, %v", got, err)
+	}
+
+	// 4. Diff returns no nomad config change
+	d.gitExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+		return []byte("README.md\ndocker-compose.yml\n"), nil, nil
+	}
+	got, err = d.HasNomadConfigChanges(context.Background(), "/path", "v1", "v2")
+	if err != nil || got {
+		t.Errorf("expected false, nil, got %v, %v", got, err)
+	}
+
+	// 5. Diff fails, fallback diff-tree succeeds with nomad config changes
+	callCount := 0
+	d.gitExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+		callCount++
+		if callCount == 1 {
+			return nil, []byte("fatal: ambiguous argument"), errors.New("diff failed")
+		}
+		return []byte("nomad/client.hcl\n"), nil, nil
+	}
+	got, err = d.HasNomadConfigChanges(context.Background(), "/path", "v1", "v2")
+	if err != nil || !got {
+		t.Errorf("expected fallback true, nil, got %v, %v", got, err)
+	}
+
+	// 6. Diff fails, fallback diff-tree fails (fail safe to false)
+	d.gitExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+		return nil, []byte("fatal: repo corrupt"), errors.New("diff failed")
+	}
+	got, err = d.HasNomadConfigChanges(context.Background(), "/path", "v1", "v2")
+	if err != nil || got {
+		t.Errorf("expected fail-safe false, nil, got %v, %v", got, err)
+	}
+}
+
+func TestValidateNomadConfig_Coverage(t *testing.T) {
+	d := &SyncDaemon{}
+
+	// 1. Success
+	d.nomadExecutor = func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+		return []byte("Configuration is valid!\n"), nil, nil
+	}
+	if err := d.ValidateNomadConfig(context.Background(), "/tmp/nomad"); err != nil {
+		t.Errorf("expected nil, got %v", err)
+	}
+
+	// 2. Failure
+	d.nomadExecutor = func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+		return nil, []byte("syntax error on line 12"), errors.New("exit 1")
+	}
+	if err := d.ValidateNomadConfig(context.Background(), "/tmp/nomad"); err == nil {
+		t.Errorf("expected validation error, got nil")
+	}
+}
+
+func TestReconcileNomadServer_Coverage(t *testing.T) {
+	tmpDir := t.TempDir()
+	d := &SyncDaemon{}
+
+	// 1. Missing directory (no-op)
+	if err := d.reconcileNomadServer(context.Background(), tmpDir); err != nil {
+		t.Errorf("expected nil for missing nomad dir, got %v", err)
+	}
+
+	// Create nomad dir
+	nomadDir := filepath.Join(tmpDir, "nomad")
+	_ = os.MkdirAll(nomadDir, 0755)
+
+	// 2. Validation failure aborts restart
+	restartCalled := false
+	d.nomadExecutor = func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+		return nil, []byte("invalid config syntax"), errors.New("validation failed")
+	}
+	d.composeExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+		restartCalled = true
+		return []byte("restarted"), nil, nil
+	}
+	if err := d.reconcileNomadServer(context.Background(), tmpDir); err == nil {
+		t.Errorf("expected validation error, got nil")
+	}
+	if restartCalled {
+		t.Errorf("expected restart to be aborted on validation error")
+	}
+
+	// 3. Validation success, restart succeeds
+	d.nomadExecutor = func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+		return []byte("Configuration is valid!\n"), nil, nil
+	}
+	restartCalled = false
+	if err := d.reconcileNomadServer(context.Background(), tmpDir); err != nil {
+		t.Errorf("expected nil, got %v", err)
+	}
+	if !restartCalled {
+		t.Errorf("expected restart to be called on successful validation")
+	}
+
+	// 4. Validation success, restart fails
+	d.composeExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+		return nil, []byte("container restart failed"), errors.New("exit 1")
+	}
+	if err := d.reconcileNomadServer(context.Background(), tmpDir); err == nil {
+		t.Errorf("expected restart error, got nil")
+	}
+}
+
 func TestGetRepoCommit_DetailedCoverage(t *testing.T) {
 	d := &SyncDaemon{}
 
