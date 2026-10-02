@@ -287,46 +287,6 @@ services:
       start_period: 30s
       start_interval: 2s
 
-  # ----------------------------------------------------------------------------
-  # 9. Observability & Visualization: Agentsview Web Dashboard
-  #    Local-first web UI for searching, analyzing, and visually inspecting
-  #    Antigravity agent transcripts and session traces.
-  # ----------------------------------------------------------------------------
-  agentsview:
-    image: ghcr.io/azylman/agentsview:latest
-    container_name: aerial-agentsview
-    restart: unless-stopped
-    labels:
-      autoheal: "true"
-      homepage.group: "Aerial AI & Mission Control"
-      homepage.name: "AgentsView"
-      homepage.icon: "terminal.png"
-      homepage.href: "/agentsview/"
-      homepage.description: "Live Agent Session Transcripts"
-    environment:
-      - AGENTSVIEW_DATA_DIR=/agentsview-data
-    command:
-      - "--host=0.0.0.0"
-      - "--base-path=/agentsview"
-      - "--public-origin=${AGENTSVIEW_PUBLIC_ORIGINS:-http://localhost:8089,http://127.0.0.1:8089}"
-      - "--public-url=${AGENTSVIEW_PUBLIC_URL:-http://localhost:8089}"
-    volumes:
-      - aerial-agentsview-data:/agentsview-data
-      - aerial-brain-data:/data:ro
-      - aerial-brain-gemini:/root/.gemini:ro
-    networks:
-      - aerial-net
-    healthcheck:
-      test:
-        - CMD
-        - /bin/bash
-        - -c
-        - 'exec 3<>/dev/tcp/127.0.0.1/8080 && printf "GET /agentsview/ HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n" >&3 && grep -q "200 OK" <&3'
-      interval: 15s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-      start_interval: 2s
 
   # ----------------------------------------------------------------------------
   # 10. Core Status Dashboard: Aerial Status Microservice
@@ -372,34 +332,6 @@ services:
       start_period: 10s
       start_interval: 2s
 
-  # ----------------------------------------------------------------------------
-  # 11. Documentation Engine: Aerial Docs v1.0.0 (Docsify + Mermaid.js)
-  #     Renders user markdown documentation and Mermaid diagrams from config repo.
-  # ----------------------------------------------------------------------------
-  docs:
-    image: ghcr.io/azylman/aerial-docs:latest
-    build: ./docs-service
-    container_name: aerial-docs
-    restart: unless-stopped
-    labels:
-      autoheal: "true"
-      homepage.group: "Aerial AI & Mission Control"
-      homepage.name: "System Docs"
-      homepage.icon: "docsify.png"
-      homepage.href: "/docs/"
-      homepage.description: "Architecture Specs & Runbooks"
-    volumes:
-      - ${AERIAL_HOST_CONFIG_DIR:-${AERIAL_CONFIG_DIR:-/mnt/data/supervisor/share/aerial-config}}:/share/aerial-config:ro
-      - ${AERIAL_HOST_PROJECT_DIR:-${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}}/docs-service/app:/usr/share/nginx/html:ro
-    networks:
-      - aerial-net
-    healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:80/health || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-      start_interval: 2s
 
   # ----------------------------------------------------------------------------
   # 11.1 Root Landing Portal: Aerial Homepage (Gundam Cyberpunk HUD)
@@ -452,6 +384,8 @@ services:
       - ${AERIAL_HOST_PROJECT_DIR:-${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}}/proxy/openobserve-cyberpunk.css:/etc/nginx/openobserve-cyberpunk.css:ro
     ports:
       - "${AGENTSVIEW_HOST_PORT:-8089}:80"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks:
       - aerial-net
     healthcheck:
@@ -463,10 +397,6 @@ services:
       start_interval: 2s
     depends_on:
       dashboard:
-        condition: service_healthy
-      docs:
-        condition: service_healthy
-      agentsview:
         condition: service_healthy
       grafana:
         condition: service_healthy

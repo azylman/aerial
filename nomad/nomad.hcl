@@ -11,8 +11,9 @@ server {
 }
 
 client {
-  enabled    = true
-  node_class = "haos"
+  enabled           = true
+  node_class        = "haos"
+  cpu_total_compute = 12000
   options = {
     "fingerprint.blacklist" = "env_aws,env_gce,env_azure,env_digitalocean"
   }
