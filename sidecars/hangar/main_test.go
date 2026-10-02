@@ -5507,10 +5507,17 @@ func TestNomadOrchestration_UnitSuite(t *testing.T) {
 		t.Errorf("expected error on canceled ctx in diff-tree fallback")
 	}
 
-	// 8. defaultDockerExecutor & defaultComposeExecutor & runGitCommand
+	// 8. defaultDockerExecutor & defaultComposeExecutor & runGitCommand & defaultNomadExecutor
 	_, _, _ = defaultDockerExecutor(ctx, "version")
 	_, _, _ = defaultComposeExecutor(ctx, "/nonexistent", "version")
 	_, _, _ = runGitCommand(ctx, "/nonexistent", "dummy-pat", "status")
+	execNomad := defaultNomadExecutor("http://127.0.0.1:4646", "dummy-nomad-token")
+	_, _, _ = execNomad(ctx, "version")
+	execNomadNoTok := defaultNomadExecutor("", "")
+	_, _, _ = execNomadNoTok(ctx, "version")
+	cancCtx, cancelNomad := context.WithCancel(context.Background())
+	cancelNomad()
+	_, _, _ = execNomad(cancCtx, "version")
 }
 
 func TestSyncDaemon_RemainingHelpers(t *testing.T) {
@@ -5659,6 +5666,117 @@ func TestSyncDaemon_RemainingHelpers(t *testing.T) {
 	}
 	d.postChannelMessage(ctx, clientErr, "bot-tok", "12345", "hello")
 }
+
+func TestNomadCoverageRemediation(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. StartReconcilerLoop with debounce timer execution and failure branches
+	oldDebounce := reconcilerDebounceDuration
+	reconcilerDebounceDuration = 5 * time.Millisecond
+	defer func() { reconcilerDebounceDuration = oldDebounce }()
+
+	tempDir := t.TempDir()
+	d := NewDaemon(DaemonConfig{
+		ComposeDir: tempDir,
+		ConfigDir:  tempDir,
+		ComposeExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			return nil, nil, errors.New("compose fail")
+		},
+		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			return nil, nil, errors.New("nomad fail")
+		},
+	})
+	d.recordPendingNomadChanges(tempDir, []NomadFileChange{
+		{JobName: "deljob", Action: "delete"},
+		{JobName: "appjob", Action: "apply", Path: "jobs/app.nomad"},
+	})
+	loopCtx, loopCancel := context.WithCancel(context.Background())
+	d.StartReconcilerLoop(loopCtx)
+	d.TriggerReconcile(ctx, true)
+	time.Sleep(30 * time.Millisecond)
+	loopCancel()
+
+	// 2. CheckAndReconcileNomadImages: directory entries, unreadable file, nil cache, restart error, throttle cooldown
+	cfgDir := t.TempDir()
+	jobsDir := filepath.Join(cfgDir, "jobs")
+	_ = os.MkdirAll(jobsDir, 0755)
+	_ = os.MkdirAll(filepath.Join(jobsDir, "nested-dir"), 0755)
+	_ = os.WriteFile(filepath.Join(jobsDir, "readme.txt"), []byte("not a nomad file"), 0644)
+	_ = os.WriteFile(filepath.Join(jobsDir, "job1.nomad"), []byte(`job "job1" { task "t" { config { image = "ghcr.io/test/img1:latest" } } }`), 0644)
+
+	dImages := NewDaemon(DaemonConfig{
+		ConfigDir: cfgDir,
+		RegistryClient: &http.Client{
+			Transport: &roundTripperFunc{
+				fn: func(req *http.Request) (*http.Response, error) {
+					resp := &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     make(http.Header),
+						Body:       ioNopCloser(strings.NewReader("{}")),
+					}
+					resp.Header.Set("Docker-Content-Digest", "sha256:firstdigest111")
+					return resp, nil
+				},
+			},
+		},
+		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			if len(args) > 1 && args[1] == "restart" {
+				return []byte("restart err"), []byte("err details"), errors.New("restart fail")
+			}
+			return []byte("ok"), nil, nil
+		},
+	})
+
+	// Initial poll populates nil map
+	dImages.nomadKnownDigests = nil
+	if err := dImages.CheckAndReconcileNomadImages(ctx); err != nil {
+		t.Errorf("unexpected error on first CheckAndReconcileNomadImages: %v", err)
+	}
+
+	// Immediate second poll triggers 5-minute throttle cooldown
+	if err := dImages.CheckAndReconcileNomadImages(ctx); err != nil {
+		t.Errorf("unexpected error on throttled CheckAndReconcileNomadImages: %v", err)
+	}
+
+	// Reset lastNomadImagePoll to simulate elapsed time, update mock client digest to trigger restart failure path
+	dImages.lastNomadImagePoll = time.Time{}
+	dImages.registryClient = &http.Client{
+		Transport: &roundTripperFunc{
+			fn: func(req *http.Request) (*http.Response, error) {
+				resp := &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       ioNopCloser(strings.NewReader("{}")),
+				}
+				resp.Header.Set("Docker-Content-Digest", "sha256:seconddigest222")
+				return resp, nil
+			},
+		},
+	}
+	if err := dImages.CheckAndReconcileNomadImages(ctx); err != nil {
+		t.Errorf("unexpected error on restart fail CheckAndReconcileNomadImages: %v", err)
+	}
+
+	// 3. HasNomadChanges empty repoPath
+	if ch, err := d.HasNomadChanges(ctx, "", "head1", "head2"); err != nil || ch != nil {
+		t.Errorf("expected nil for empty repoPath in HasNomadChanges")
+	}
+
+	// 4. ParseNomadGitStatus with empty lines and spaces
+	changes := ParseNomadGitStatus("\n\n   \n\t\nM jobs/app.nomad\nD jobs/old.nomad\n")
+	if len(changes) != 2 {
+		t.Errorf("expected 2 changes from ParseNomadGitStatus, got %d", len(changes))
+	}
+
+	// 5. recordPendingTargets with nil map
+	dNilTargets := &SyncDaemon{}
+	dNilTargets.recordPendingTargets([]string{"svc1", "   "})
+
+	// 6. postChannelMessage and sendWebhook with invalid URLs
+	d.postChannelMessage(ctx, http.DefaultClient, "tok", "bad\nchan", "msg")
+	d.sendWebhook(ctx, http.DefaultClient, "http://bad\nurl", "msg")
+}
+
 
 
 
