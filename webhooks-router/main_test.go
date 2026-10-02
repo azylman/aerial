@@ -262,15 +262,10 @@ func TestHandleGenericWebhook(t *testing.T) {
 	}
 }
 
-func TestSyncSecrets_IdempotencyAndFlow(t *testing.T) {
+func TestSyncSecrets_Flow(t *testing.T) {
 	var nomadPutCount atomic.Int32
-	var nomadGetCount atomic.Int32
 	var infisicalLoginCount atomic.Int32
 	var infisicalFetchCount atomic.Int32
-
-	existingSecrets := map[string]string{
-		"API_KEY": "secret123",
-	}
 
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -289,20 +284,6 @@ func TestSyncSecrets_IdempotencyAndFlow(t *testing.T) {
 					{SecretKey: "API_KEY", SecretValue: "secret123"},
 				},
 			})
-
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/var/"+TargetNomadVariable:
-			nomadGetCount.Add(1)
-			if nomadPutCount.Load() == 0 {
-				// First check: does not exist
-				w.WriteHeader(http.StatusNotFound)
-			} else {
-				// Subsequent check: exists with existingSecrets
-				w.Header().Set("Content-Type", "application/json")
-				_ = json.NewEncoder(w).Encode(NomadVariable{
-					Path:  TargetNomadVariable,
-					Items: existingSecrets,
-				})
-			}
 
 		case r.Method == http.MethodPut && r.URL.Path == "/v1/var/"+TargetNomadVariable:
 			nomadPutCount.Add(1)
@@ -328,7 +309,7 @@ func TestSyncSecrets_IdempotencyAndFlow(t *testing.T) {
 
 	ctx := context.Background()
 
-	// 1. Initial sync when variable does not exist -> Issues PUT
+	// 1. Initial sync writes directly to Nomad
 	err := server.SyncSecrets(ctx, "proj-123", "prod")
 	if err != nil {
 		t.Fatalf("SyncSecrets failed: %v", err)
@@ -337,16 +318,7 @@ func TestSyncSecrets_IdempotencyAndFlow(t *testing.T) {
 		t.Errorf("expected 1 Nomad PUT, got %d", nomadPutCount.Load())
 	}
 
-	// 2. Idempotent sync when secrets are identical -> Skips PUT
-	err = server.SyncSecrets(ctx, "proj-123", "prod")
-	if err != nil {
-		t.Fatalf("SyncSecrets failed: %v", err)
-	}
-	if nomadPutCount.Load() != 1 {
-		t.Errorf("expected still 1 Nomad PUT due to semantic idempotency check, got %d", nomadPutCount.Load())
-	}
-
-	// 3. Error branch: Missing Infisical Credentials
+	// 2. Error branch: Missing Infisical Credentials
 	serverBad := NewRouterServer(Config{}, mockServer.Client())
 	if err := serverBad.SyncSecrets(ctx, "", ""); err == nil {
 		t.Errorf("expected error with unconfigured infisical credentials")
@@ -450,54 +422,7 @@ func TestSyncSecrets_ErrorBranches(t *testing.T) {
 		t.Errorf("expected error on invalid secrets json")
 	}
 
-	// 7. Nomad GET returns 500
-	mockServerNomadErr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/v1/auth/universal-auth/login":
-			_ = json.NewEncoder(w).Encode(UniversalAuthLoginResponse{AccessToken: "tok"})
-		case "/api/v3/secrets/raw":
-			_ = json.NewEncoder(w).Encode(InfisicalSecretsResponse{})
-		default:
-			w.WriteHeader(http.StatusInternalServerError)
-		}
-	}))
-	defer mockServerNomadErr.Close()
-
-	cfgNomad := Config{
-		InfisicalURL:          mockServerNomadErr.URL,
-		InfisicalClientID:     "cid",
-		InfisicalClientSecret: "csec",
-		NomadAddr:             mockServerNomadErr.URL,
-	}
-	sNomad := NewRouterServer(cfgNomad, mockServerNomadErr.Client())
-	if err := sNomad.SyncSecrets(context.Background(), "", ""); err == nil {
-		t.Errorf("expected error on nomad get 500")
-	}
-
-	// 8. Nomad GET returns invalid JSON
-	mockServerNomadJSON := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("{invalid-nomad-var"))
-	}))
-	defer mockServerNomadJSON.Close()
-	sNomadJSON := NewRouterServer(Config{NomadAddr: mockServerNomadJSON.URL}, mockServerNomadJSON.Client())
-	if _, _, err := sNomadJSON.getNomadVariable(context.Background()); err == nil {
-		t.Errorf("expected error on invalid nomad var json")
-	}
-
-	// 9. Nomad GET returns nil items -> initializes empty map
-	mockServerNomadNilItems := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"Path":"nomad/jobs/shared"}`))
-	}))
-	defer mockServerNomadNilItems.Close()
-	sNomadNil := NewRouterServer(Config{NomadAddr: mockServerNomadNilItems.URL}, mockServerNomadNilItems.Client())
-	items, exists, err := sNomadNil.getNomadVariable(context.Background())
-	if err != nil || !exists || items == nil {
-		t.Errorf("expected initialized map on nil items, got %+v, exists=%v, err=%v", items, exists, err)
-	}
-
-	// 10. Nomad PUT returns 201 Created and 204 No Content
+	// 7. Nomad PUT returns 201 Created and 204 No Content
 	mockServerNomad201 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusCreated)
 	}))
@@ -516,7 +441,7 @@ func TestSyncSecrets_ErrorBranches(t *testing.T) {
 		t.Errorf("expected success on 204 No Content: %v", err)
 	}
 
-	// 11. Nomad PUT returns 500
+	// 8. Nomad PUT returns 500
 	mockServerPutErr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/v1/auth/universal-auth/login":
@@ -526,11 +451,7 @@ func TestSyncSecrets_ErrorBranches(t *testing.T) {
 				Secrets: []InfisicalSecretItem{{SecretKey: "K", SecretValue: "V"}},
 			})
 		default:
-			if r.Method == http.MethodGet {
-				w.WriteHeader(http.StatusNotFound)
-			} else {
-				w.WriteHeader(http.StatusInternalServerError)
-			}
+			w.WriteHeader(http.StatusInternalServerError)
 		}
 	}))
 	defer mockServerPutErr.Close()
@@ -546,7 +467,7 @@ func TestSyncSecrets_ErrorBranches(t *testing.T) {
 		t.Errorf("expected error on nomad put 500")
 	}
 
-	// 12. HTTP Client connection errors (invalid / unreachable URL)
+	// 9. HTTP Client connection errors (invalid / unreachable URL)
 	badClientServer := NewRouterServer(Config{
 		InfisicalURL:          "http://127.0.0.1:1",
 		InfisicalClientID:     "cid",
@@ -559,9 +480,6 @@ func TestSyncSecrets_ErrorBranches(t *testing.T) {
 	}
 	if _, err := badClientServer.fetchInfisicalSecrets(context.Background(), "tok", "ws", "env"); err == nil {
 		t.Errorf("expected error on bad fetch client URL")
-	}
-	if _, _, err := badClientServer.getNomadVariable(context.Background()); err == nil {
-		t.Errorf("expected error on bad nomad get client URL")
 	}
 	if err := badClientServer.putNomadVariable(context.Background(), map[string]string{"A": "B"}); err == nil {
 		t.Errorf("expected error on bad nomad put client URL")
