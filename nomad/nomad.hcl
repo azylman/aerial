@@ -32,5 +32,8 @@ plugin "docker" {
     volumes {
       enabled = true
     }
+    auth {
+      config = "/mnt/data/nomad/client/docker-auth.json"
+    }
   }
 }
