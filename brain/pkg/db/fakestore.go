@@ -19,6 +19,7 @@ var (
 	_ SessionStore    = (*FakeStore)(nil)
 	_ FactStore       = (*FakeStore)(nil)
 	_ TranscriptStore = (*FakeStore)(nil)
+	_ PRRegistryStore = (*FakeStore)(nil)
 )
 
 type threadSummaryRecord struct {
@@ -57,6 +58,10 @@ type FakeStore struct {
 	// TranscriptStore state
 	sessionSummaries map[string]*SessionSummary
 	transcriptSteps  map[string][]TranscriptStep
+
+	// PRRegistryStore state
+	prRecords map[string]*PRRecord
+	nextPRID  int64
 }
 
 // NewFakeStore constructs an initialized, empty in-memory FakeStore.
@@ -75,6 +80,7 @@ func NewFakeStore() *FakeStore {
 		extractedAt:      make(map[string]time.Time),
 		sessionSummaries: make(map[string]*SessionSummary),
 		transcriptSteps:  make(map[string][]TranscriptStep),
+		prRecords:        make(map[string]*PRRecord),
 	}
 }
 
@@ -1862,4 +1868,277 @@ func (f *FakeStore) DeleteSessionSummary(sessionID string) {
 	defer f.mu.Unlock()
 	delete(f.sessionSummaries, sessionID)
 	delete(f.transcriptSteps, sessionID)
+}
+
+func prKey(repo string, prNumber int) string {
+	return fmt.Sprintf("%s/%d", normalizeRepo(repo), prNumber)
+}
+
+// UpsertPR inserts or updates a Pull Request tracking record in FakeStore.
+func (f *FakeStore) UpsertPR(ctx context.Context, record PRRecord) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.closed {
+		return sql.ErrConnDone
+	}
+	if err, ok := f.failNext["UpsertPR"]; ok {
+		delete(f.failNext, "UpsertPR")
+		return err
+	}
+
+	repo := normalizeRepo(record.Repo)
+	if repo == "" {
+		return fmt.Errorf("repo cannot be empty")
+	}
+	if record.PRNumber <= 0 {
+		return fmt.Errorf("pr_number must be greater than 0")
+	}
+	branch := strings.TrimSpace(record.Branch)
+	if branch == "" {
+		return fmt.Errorf("branch cannot be empty")
+	}
+	headSHA := strings.TrimSpace(record.HeadSHA)
+	if headSHA == "" {
+		return fmt.Errorf("head_sha cannot be empty")
+	}
+	targetID := strings.TrimSpace(record.TargetID)
+	if targetID == "" {
+		return fmt.Errorf("target_id cannot be empty")
+	}
+
+	key := prKey(repo, record.PRNumber)
+	now := time.Now()
+
+	existing, exists := f.prRecords[key]
+	if exists {
+		existing.Branch = branch
+		existing.HeadSHA = headSHA
+		existing.TargetID = targetID
+		if record.Title != "" {
+			existing.Title = record.Title
+		}
+		if record.Status != "" {
+			existing.Status = record.Status
+		}
+		if record.Metadata != "" && record.Metadata != "{}" {
+			existing.Metadata = record.Metadata
+		}
+		existing.UpdatedAt = now
+		return nil
+	}
+
+	f.nextPRID++
+	status := strings.TrimSpace(record.Status)
+	if status == "" {
+		status = "open"
+	}
+	meta := strings.TrimSpace(record.Metadata)
+	if meta == "" {
+		meta = "{}"
+	}
+
+	rec := &PRRecord{
+		ID:        f.nextPRID,
+		Repo:      repo,
+		PRNumber:  record.PRNumber,
+		Branch:    branch,
+		HeadSHA:   headSHA,
+		MergeSHA:  record.MergeSHA,
+		TargetID:  targetID,
+		Status:    status,
+		Title:     record.Title,
+		Metadata:  meta,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	f.prRecords[key] = rec
+	return nil
+}
+
+// GetPRByNumber retrieves a PR record by repository name and PR number.
+func (f *FakeStore) GetPRByNumber(ctx context.Context, repo string, prNumber int) (*PRRecord, error) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+
+	if f.closed {
+		return nil, sql.ErrConnDone
+	}
+	if err, ok := f.failNext["GetPRByNumber"]; ok {
+		delete(f.failNext, "GetPRByNumber")
+		return nil, err
+	}
+
+	key := prKey(repo, prNumber)
+	rec, exists := f.prRecords[key]
+	if !exists {
+		return nil, ErrPRNotFound
+	}
+	cp := *rec
+	return &cp, nil
+}
+
+// GetPRByHeadSHA retrieves the most recent PR record matching repo and head SHA.
+func (f *FakeStore) GetPRByHeadSHA(ctx context.Context, repo string, headSHA string) (*PRRecord, error) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+
+	if f.closed {
+		return nil, sql.ErrConnDone
+	}
+	if err, ok := f.failNext["GetPRByHeadSHA"]; ok {
+		delete(f.failNext, "GetPRByHeadSHA")
+		return nil, err
+	}
+
+	normRepo := normalizeRepo(repo)
+	var latest *PRRecord
+	for _, rec := range f.prRecords {
+		if rec.Repo == normRepo && rec.HeadSHA == headSHA {
+			if latest == nil || rec.UpdatedAt.After(latest.UpdatedAt) {
+				latest = rec
+			}
+		}
+	}
+	if latest == nil {
+		return nil, ErrPRNotFound
+	}
+	cp := *latest
+	return &cp, nil
+}
+
+// GetPRByMergeSHA retrieves the PR record matching repo and squash merge commit SHA.
+func (f *FakeStore) GetPRByMergeSHA(ctx context.Context, repo string, mergeSHA string) (*PRRecord, error) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+
+	if f.closed {
+		return nil, sql.ErrConnDone
+	}
+	if err, ok := f.failNext["GetPRByMergeSHA"]; ok {
+		delete(f.failNext, "GetPRByMergeSHA")
+		return nil, err
+	}
+
+	normRepo := normalizeRepo(repo)
+	var latest *PRRecord
+	for _, rec := range f.prRecords {
+		if rec.Repo == normRepo && rec.MergeSHA == mergeSHA {
+			if latest == nil || rec.UpdatedAt.After(latest.UpdatedAt) {
+				latest = rec
+			}
+		}
+	}
+	if latest == nil {
+		return nil, ErrPRNotFound
+	}
+	cp := *latest
+	return &cp, nil
+}
+
+// UpdatePRMergeSHA records the squash merge commit SHA on main and marks the PR merged.
+func (f *FakeStore) UpdatePRMergeSHA(ctx context.Context, repo string, prNumber int, mergeSHA string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.closed {
+		return sql.ErrConnDone
+	}
+	if err, ok := f.failNext["UpdatePRMergeSHA"]; ok {
+		delete(f.failNext, "UpdatePRMergeSHA")
+		return err
+	}
+
+	key := prKey(repo, prNumber)
+	rec, exists := f.prRecords[key]
+	if !exists {
+		return ErrPRNotFound
+	}
+	rec.MergeSHA = mergeSHA
+	rec.Status = "merged"
+	rec.UpdatedAt = time.Now()
+	return nil
+}
+
+// UpdatePRStatus updates the lifecycle status of a PR.
+func (f *FakeStore) UpdatePRStatus(ctx context.Context, repo string, prNumber int, status string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.closed {
+		return sql.ErrConnDone
+	}
+	if err, ok := f.failNext["UpdatePRStatus"]; ok {
+		delete(f.failNext, "UpdatePRStatus")
+		return err
+	}
+
+	key := prKey(repo, prNumber)
+	rec, exists := f.prRecords[key]
+	if !exists {
+		return ErrPRNotFound
+	}
+	rec.Status = status
+	rec.UpdatedAt = time.Now()
+	return nil
+}
+
+// AtomicTransitionPRStatus conditionally transitions PR status if it is not already in notStatus (CAS gate).
+func (f *FakeStore) AtomicTransitionPRStatus(ctx context.Context, repo string, prNumber int, toStatus, notStatus string) (*PRRecord, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.closed {
+		return nil, sql.ErrConnDone
+	}
+	if err, ok := f.failNext["AtomicTransitionPRStatus"]; ok {
+		delete(f.failNext, "AtomicTransitionPRStatus")
+		return nil, err
+	}
+
+	key := prKey(repo, prNumber)
+	rec, exists := f.prRecords[key]
+	if !exists {
+		return nil, nil
+	}
+	if rec.Status == notStatus {
+		return nil, nil // No transition
+	}
+	rec.Status = toStatus
+	rec.UpdatedAt = time.Now()
+	cp := *rec
+	return &cp, nil
+}
+
+// AtomicTransitionPRStatusByMergeSHA conditionally transitions PR status by merge SHA if not already in notStatus (CAS gate).
+func (f *FakeStore) AtomicTransitionPRStatusByMergeSHA(ctx context.Context, repo string, mergeSHA string, toStatus, notStatus string) (*PRRecord, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.closed {
+		return nil, sql.ErrConnDone
+	}
+	if err, ok := f.failNext["AtomicTransitionPRStatusByMergeSHA"]; ok {
+		delete(f.failNext, "AtomicTransitionPRStatusByMergeSHA")
+		return nil, err
+	}
+
+	normRepo := normalizeRepo(repo)
+	var target *PRRecord
+	for _, rec := range f.prRecords {
+		if rec.Repo == normRepo && rec.MergeSHA == mergeSHA {
+			target = rec
+			break
+		}
+	}
+	if target == nil {
+		return nil, nil
+	}
+	if target.Status == notStatus {
+		return nil, nil // No transition
+	}
+	target.Status = toStatus
+	target.UpdatedAt = time.Now()
+	cp := *target
+	return &cp, nil
 }

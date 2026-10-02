@@ -144,6 +144,27 @@ CREATE TABLE IF NOT EXISTS transcript_steps (
 CREATE INDEX IF NOT EXISTS idx_session_summaries_mtime ON session_summaries(last_mtime);
 CREATE INDEX IF NOT EXISTS idx_session_summaries_thread ON session_summaries(thread_id);
 CREATE INDEX IF NOT EXISTS idx_transcript_steps_tool ON transcript_steps(tool_name);
+
+CREATE TABLE IF NOT EXISTS pr_registry (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	repo TEXT NOT NULL,
+	pr_number INTEGER NOT NULL,
+	branch TEXT NOT NULL,
+	head_sha TEXT NOT NULL,
+	merge_sha TEXT,
+	target_id TEXT NOT NULL,
+	status TEXT NOT NULL DEFAULT 'open',
+	title TEXT NOT NULL DEFAULT '',
+	metadata TEXT NOT NULL DEFAULT '{}',
+	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	CONSTRAINT uq_pr_registry_repo_pr UNIQUE (repo, pr_number)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pr_registry_head_sha ON pr_registry (repo, head_sha);
+CREATE INDEX IF NOT EXISTS idx_pr_registry_merge_sha ON pr_registry (repo, merge_sha);
+CREATE INDEX IF NOT EXISTS idx_pr_registry_status ON pr_registry (status);
+CREATE INDEX IF NOT EXISTS idx_pr_registry_target_id ON pr_registry (target_id);
 `
 
 func initSchemaSQLite(database *sql.DB) error {
