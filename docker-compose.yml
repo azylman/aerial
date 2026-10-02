@@ -18,6 +18,7 @@ services:
       autoheal: "true"
     environment:
       - PORT=8080
+      - AERIAL_HANGAR_URL=${AERIAL_HANGAR_URL:-http://192.168.1.14:8087/sync}
       - DATABASE_URL=${DATABASE_URL:-postgres://${POSTGRES_USER:-aerial}:${POSTGRES_PASSWORD:-aerial_secure_pass}@192.168.1.14:5432/${POSTGRES_DB:-aerial}?sslmode=disable}
       - GEMINI_HARNESS_API_KEY=${GEMINI_HARNESS_API_KEY:-${GEMINI_API_KEY}}
       - AGY_GEMINI_API_KEY=${AGY_GEMINI_API_KEY}

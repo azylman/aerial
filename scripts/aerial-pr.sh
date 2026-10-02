@@ -11,7 +11,24 @@ DEFAULT_REPO="aerial"
 REPO_NAME="${AERIAL_REPO_NAME:-$DEFAULT_REPO}"
 REPO_NAME_EXPLICIT=0
 DEFAULT_BRANCH="main"
-SIDE_SYNC_URL="${AERIAL_HANGAR_URL:-${AERIAL_GITSYNC_URL:-http://aerial-hangar:8080/sync}}"
+resolve_hangar_url() {
+    if [ -n "${AERIAL_HANGAR_URL:-}" ]; then
+        echo "$AERIAL_HANGAR_URL"
+        return
+    fi
+    if [ -n "${AERIAL_GITSYNC_URL:-}" ]; then
+        echo "$AERIAL_GITSYNC_URL"
+        return
+    fi
+    for candidate in "http://192.168.1.14:8087/sync" "http://host.docker.internal:8087/sync" "http://127.0.0.1:8087/sync" "http://aerial-hangar:8080/sync"; do
+        if curl -s --connect-timeout 1 -m 2 -f -X GET "${candidate%/sync}/health" >/dev/null 2>&1; then
+            echo "$candidate"
+            return
+        fi
+    done
+    echo "http://192.168.1.14:8087/sync"
+}
+SIDE_SYNC_URL="$(resolve_hangar_url)"
 DEFAULT_PR_CHECK_DELAY="2m"
 
 normalize_repo() {
