@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,7 +12,29 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/riverqueue/river"
+	"github.com/riverqueue/river/riverdriver/riverpgxv5"
+	"github.com/riverqueue/river/rivertype"
 )
+
+type mockRiverInserter struct {
+	insertedJobs []GitHubWebhookArgs
+	err          error
+}
+
+func (m *mockRiverInserter) Insert(ctx context.Context, args river.JobArgs, opts *river.InsertOpts) (*rivertype.JobInsertResult, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	if ghArgs, ok := args.(GitHubWebhookArgs); ok {
+		m.insertedJobs = append(m.insertedJobs, ghArgs)
+	}
+	return &rivertype.JobInsertResult{
+		Job: &rivertype.JobRow{ID: 1},
+	}, nil
+}
 
 type errReader struct{}
 
@@ -533,5 +556,653 @@ func TestRunServer_LifecycleAndErrors(t *testing.T) {
 	cancelC()
 	if err := runApp(ctxC, Config{Port: "0"}); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		t.Errorf("unexpected error from runApp: %v", err)
+	}
+
+	// 4. Invalid Postgres URL error
+	cfgErrPg := Config{Port: "0", PostgresURL: "postgres://user:pass@invalid%xx/db"}
+	if err := runServer(context.Background(), cfgErrPg, nil); err == nil {
+		t.Errorf("expected error on invalid postgres url")
+	}
+}
+
+func TestIsZeroSHA(t *testing.T) {
+	tests := []struct {
+		sha  string
+		want bool
+	}{
+		{"", true},
+		{"0000000000000000000000000000000000000000", true},
+		{"0", true},
+		{"000", true},
+		{"0000000000000000000000000000000000000001", false},
+		{"ed197571a381920f540e7a3c55b68008a45912a0", false},
+	}
+	for _, tc := range tests {
+		if got := isZeroSHA(tc.sha); got != tc.want {
+			t.Errorf("isZeroSHA(%q) = %v, want %v", tc.sha, got, tc.want)
+		}
+	}
+}
+
+func TestLoadConfigFromEnv_GitHub(t *testing.T) {
+	os.Setenv("GITHUB_PAT", "pat123")
+	os.Setenv("GITHUB_API_URL", "https://api.github.test/")
+	os.Setenv("POSTGRES_URL", "postgres://custom:pass@db:5432/customdb")
+	defer func() {
+		os.Unsetenv("GITHUB_PAT")
+		os.Unsetenv("GITHUB_API_URL")
+		os.Unsetenv("POSTGRES_URL")
+	}()
+
+	cfg := LoadConfigFromEnv()
+	if cfg.GitHubToken != "pat123" {
+		t.Errorf("expected GitHubToken pat123, got %s", cfg.GitHubToken)
+	}
+	if cfg.GitHubAPIURL != "https://api.github.test" {
+		t.Errorf("expected GitHubAPIURL https://api.github.test, got %s", cfg.GitHubAPIURL)
+	}
+	if cfg.PostgresURL != "postgres://custom:pass@db:5432/customdb" {
+		t.Errorf("expected PostgresURL from env, got %s", cfg.PostgresURL)
+	}
+
+	// Test fallback to GITHUB_TOKEN and DATABASE_URL
+	os.Unsetenv("GITHUB_PAT")
+	os.Unsetenv("POSTGRES_URL")
+	os.Setenv("GITHUB_TOKEN", "tok456")
+	os.Setenv("DATABASE_URL", "postgres://dbuser:pass@db:5432/db")
+	defer func() {
+		os.Unsetenv("GITHUB_TOKEN")
+		os.Unsetenv("DATABASE_URL")
+	}()
+	cfg2 := LoadConfigFromEnv()
+	if cfg2.GitHubToken != "tok456" {
+		t.Errorf("expected GitHubToken tok456, got %s", cfg2.GitHubToken)
+	}
+	if cfg2.PostgresURL != "postgres://dbuser:pass@db:5432/db" {
+		t.Errorf("expected PostgresURL from DATABASE_URL, got %s", cfg2.PostgresURL)
+	}
+}
+
+func TestHandleGitHubWebhook_EndpointsAndValidation(t *testing.T) {
+	mockRiver := &mockRiverInserter{}
+	srv := NewRouterServer(Config{}, nil, mockRiver)
+	routes := srv.Routes()
+
+	// 1. Missing X-GitHub-Event header -> 400 Bad Request
+	reqMissingEvent := httptest.NewRequest(http.MethodPost, "/api/webhooks/github", strings.NewReader(`{}`))
+	recMissingEvent := httptest.NewRecorder()
+	routes.ServeHTTP(recMissingEvent, reqMissingEvent)
+	if recMissingEvent.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 Bad Request for missing event header, got %d", recMissingEvent.Code)
+	}
+
+	// 2. Read error in body -> 400 Bad Request
+	reqErrBody := httptest.NewRequest(http.MethodPost, "/api/webhooks/github", errReader{})
+	reqErrBody.Header.Set("X-GitHub-Event", "ping")
+	recErrBody := httptest.NewRecorder()
+	routes.ServeHTTP(recErrBody, reqErrBody)
+	if recErrBody.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 Bad Request on read error, got %d", recErrBody.Code)
+	}
+
+	// 3. River client not initialized (nil) -> 500 Internal Server Error
+	srvNilRiver := NewRouterServer(Config{}, nil)
+	reqNilRiver := httptest.NewRequest(http.MethodPost, "/api/webhooks/github", strings.NewReader(`{"zen":"Keep it simple"}`))
+	reqNilRiver.Header.Set("X-GitHub-Event", "ping")
+	recNilRiver := httptest.NewRecorder()
+	srvNilRiver.Routes().ServeHTTP(recNilRiver, reqNilRiver)
+	if recNilRiver.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 when river client is nil, got %d", recNilRiver.Code)
+	}
+
+	// 4. River client failure (e.g. database error) -> 500 Internal Server Error (never return 200 OK without durable persistence)
+	mockRiverErr := &mockRiverInserter{err: errors.New("simulated database failure")}
+	srvErrRiver := NewRouterServer(Config{}, nil, mockRiverErr)
+	reqErrRiver := httptest.NewRequest(http.MethodPost, "/api/webhooks/github", strings.NewReader(`{"zen":"Keep it simple"}`))
+	reqErrRiver.Header.Set("X-GitHub-Event", "ping")
+	recErrRiver := httptest.NewRecorder()
+	srvErrRiver.Routes().ServeHTTP(recErrRiver, reqErrRiver)
+	if recErrRiver.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 when river persistence fails, got %d", recErrRiver.Code)
+	}
+
+	// 5. Successful durable persistence -> 200 OK on valid request (testing both routes)
+	for _, path := range []string{"/api/webhooks/github", "/webhooks/github"} {
+		mockRiver.insertedJobs = nil
+		reqValid := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"zen":"Keep it simple"}`))
+		reqValid.Header.Set("X-GitHub-Event", "ping")
+		reqValid.Header.Set("X-GitHub-Delivery", "del-1234")
+		recValid := httptest.NewRecorder()
+		routes.ServeHTTP(recValid, reqValid)
+		if recValid.Code != http.StatusOK {
+			t.Errorf("expected 200 OK on %s, got %d", path, recValid.Code)
+		}
+		var resp map[string]interface{}
+		if err := json.Unmarshal(recValid.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("failed to parse json response: %v", err)
+		}
+		if resp["status"] != "accepted" || resp["event"] != "ping" || resp["delivery"] != "del-1234" {
+			t.Errorf("unexpected response body: %+v", resp)
+		}
+		if len(mockRiver.insertedJobs) != 1 {
+			t.Fatalf("expected 1 job inserted into river, got %d", len(mockRiver.insertedJobs))
+		}
+		if mockRiver.insertedJobs[0].Event != "ping" || mockRiver.insertedJobs[0].Delivery != "del-1234" {
+			t.Errorf("unexpected inserted job: %+v", mockRiver.insertedJobs[0])
+		}
+	}
+}
+
+func TestGitHubWebhookWorker_Work(t *testing.T) {
+	srv := NewRouterServer(Config{}, nil)
+	worker := &GitHubWebhookWorker{server: srv}
+
+	// 1. Success on valid ping event
+	jobValid := &river.Job[GitHubWebhookArgs]{
+		JobRow: &rivertype.JobRow{ID: 101},
+		Args: GitHubWebhookArgs{
+			Event:    "ping",
+			Delivery: "del-worker-1",
+			Body:     []byte(`{"zen":"Responsive is better than fast.","hook_id":123,"repository":{"full_name":"azylman/aerial"}}`),
+		},
+	}
+	if err := worker.Work(context.Background(), jobValid); err != nil {
+		t.Fatalf("worker.Work failed on valid job: %v", err)
+	}
+
+	// 2. Error when server is nil
+	nilWorker := &GitHubWebhookWorker{server: nil}
+	if err := nilWorker.Work(context.Background(), jobValid); err == nil {
+		t.Errorf("expected error when worker server is nil")
+	}
+
+	// 3. Error when ProcessGitHubEvent fails (e.g. malformed JSON)
+	jobMalformed := &river.Job[GitHubWebhookArgs]{
+		JobRow: &rivertype.JobRow{ID: 102},
+		Args: GitHubWebhookArgs{
+			Event:    "pull_request",
+			Delivery: "del-worker-2",
+			Body:     []byte(`{malformed`),
+		},
+	}
+	if err := worker.Work(context.Background(), jobMalformed); err == nil {
+		t.Errorf("expected error when event processing fails")
+	}
+}
+
+func TestProcessGitHubEvent_Ping(t *testing.T) {
+	srv := NewRouterServer(Config{}, nil)
+	ctx := context.Background()
+
+	payload := `{
+		"zen": "Responsive is better than fast.",
+		"hook_id": 98765,
+		"repository": {
+			"full_name": "azylman/aerial"
+		}
+	}`
+
+	res, err := srv.ProcessGitHubEvent(ctx, "ping", "del-ping-1", []byte(payload))
+	if err != nil {
+		t.Fatalf("ProcessGitHubEvent ping failed: %v", err)
+	}
+	if res.Event != "ping" || res.Repo != "azylman/aerial" {
+		t.Errorf("unexpected ping result: %+v", res)
+	}
+
+	// Malformed JSON
+	_, err = srv.ProcessGitHubEvent(ctx, "ping", "del-ping-2", []byte(`{invalid`))
+	if err == nil {
+		t.Errorf("expected error on malformed ping json")
+	}
+}
+
+func TestProcessGitHubEvent_PullRequest(t *testing.T) {
+	srv := NewRouterServer(Config{}, nil)
+	ctx := context.Background()
+
+	payload := `{
+		"action": "closed",
+		"number": 512,
+		"pull_request": {
+			"number": 512,
+			"title": "feat: test pr",
+			"head": {
+				"ref": "feat/test",
+				"sha": "headsha123"
+			},
+			"base": {
+				"ref": "main",
+				"sha": "basesha456"
+			},
+			"merged": true,
+			"merge_commit_sha": "mergesha789"
+		},
+		"repository": {
+			"full_name": "azylman/aerial"
+		},
+		"sender": {
+			"login": "arcane103"
+		}
+	}`
+
+	res, err := srv.ProcessGitHubEvent(ctx, "pull_request", "del-pr-1", []byte(payload))
+	if err != nil {
+		t.Fatalf("ProcessGitHubEvent pull_request failed: %v", err)
+	}
+	if res.Repo != "azylman/aerial" || res.PRNumber != 512 || res.Action != "closed" ||
+		res.HeadSHA != "headsha123" || res.MergeSHA != "mergesha789" || res.Branch != "feat/test" ||
+		res.ResolutionSource != "pull_request_payload" || res.Sender != "arcane103" {
+		t.Errorf("unexpected pull_request result: %+v", res)
+	}
+
+	// Malformed JSON
+	_, err = srv.ProcessGitHubEvent(ctx, "pull_request", "del-pr-2", []byte(`{invalid`))
+	if err == nil {
+		t.Errorf("expected error on malformed pull_request json")
+	}
+}
+
+func TestProcessGitHubEvent_CheckRun(t *testing.T) {
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/commits/commit-fallback/pulls") {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"number": 777, "state": "open", "head": {"ref": "feat/fallback", "sha": "commit-fallback"}}]`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer mockServer.Close()
+
+	srv := NewRouterServer(Config{GitHubAPIURL: mockServer.URL}, mockServer.Client())
+	ctx := context.Background()
+
+	// 1. CheckRun with pull_requests array
+	payloadWithPR := `{
+		"action": "completed",
+		"check_run": {
+			"id": 111,
+			"name": "Unit Tests",
+			"head_sha": "headsha111",
+			"status": "completed",
+			"conclusion": "success",
+			"pull_requests": [
+				{
+					"number": 515,
+					"head": {"ref": "feat/awesome", "sha": "headsha111"}
+				}
+			]
+		},
+		"repository": {
+			"full_name": "azylman/aerial"
+		}
+	}`
+
+	res, err := srv.ProcessGitHubEvent(ctx, "check_run", "del-cr-1", []byte(payloadWithPR))
+	if err != nil {
+		t.Fatalf("ProcessGitHubEvent check_run failed: %v", err)
+	}
+	if res.PRNumber != 515 || res.Branch != "feat/awesome" || res.ResolutionSource != "check_run_payload" || res.Conclusion != "success" {
+		t.Errorf("unexpected check_run result: %+v", res)
+	}
+
+	// 2. CheckRun without pull_requests array (e.g. fork PR) -> resolves via commit SHA lookup
+	payloadFallback := `{
+		"action": "completed",
+		"check_run": {
+			"id": 222,
+			"name": "Integration Tests",
+			"head_sha": "commit-fallback",
+			"status": "completed",
+			"conclusion": "failure",
+			"pull_requests": []
+		},
+		"repository": {
+			"full_name": "azylman/aerial"
+		}
+	}`
+
+	resFallback, err := srv.ProcessGitHubEvent(ctx, "check_run", "del-cr-2", []byte(payloadFallback))
+	if err != nil {
+		t.Fatalf("ProcessGitHubEvent check_run fallback failed: %v", err)
+	}
+	if resFallback.PRNumber != 777 || resFallback.Branch != "feat/fallback" || resFallback.ResolutionSource != "commit_sha_lookup" || resFallback.Conclusion != "failure" {
+		t.Errorf("unexpected check_run fallback result: %+v", resFallback)
+	}
+
+	// Malformed JSON
+	_, err = srv.ProcessGitHubEvent(ctx, "check_run", "del-cr-3", []byte(`{invalid`))
+	if err == nil {
+		t.Errorf("expected error on malformed check_run json")
+	}
+}
+
+func TestProcessGitHubEvent_WorkflowRun(t *testing.T) {
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/commits/wf-fallback/pulls") {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"number": 888, "state": "open", "head": {"ref": "feat/wf-branch", "sha": "wf-fallback"}}]`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer mockServer.Close()
+
+	srv := NewRouterServer(Config{GitHubAPIURL: mockServer.URL}, mockServer.Client())
+	ctx := context.Background()
+
+	// 1. WorkflowRun with PR array
+	payloadWithPR := `{
+		"action": "completed",
+		"workflow_run": {
+			"id": 333,
+			"name": "Continuous Delivery",
+			"head_sha": "headsha333",
+			"head_branch": "feat/cd",
+			"status": "completed",
+			"conclusion": "success",
+			"pull_requests": [
+				{
+					"number": 516,
+					"head": {"ref": "feat/cd", "sha": "headsha333"}
+				}
+			]
+		},
+		"repository": {
+			"full_name": "azylman/aerial"
+		}
+	}`
+
+	res, err := srv.ProcessGitHubEvent(ctx, "workflow_run", "del-wf-1", []byte(payloadWithPR))
+	if err != nil {
+		t.Fatalf("ProcessGitHubEvent workflow_run failed: %v", err)
+	}
+	if res.PRNumber != 516 || res.Branch != "feat/cd" || res.ResolutionSource != "workflow_run_payload" {
+		t.Errorf("unexpected workflow_run result: %+v", res)
+	}
+
+	// 2. WorkflowRun fallback to commit lookup
+	payloadFallback := `{
+		"action": "completed",
+		"workflow_run": {
+			"id": 444,
+			"name": "Continuous Delivery",
+			"head_sha": "wf-fallback",
+			"status": "completed",
+			"conclusion": "success",
+			"pull_requests": []
+		},
+		"repository": {
+			"full_name": "azylman/aerial"
+		}
+	}`
+
+	resFallback, err := srv.ProcessGitHubEvent(ctx, "workflow_run", "del-wf-2", []byte(payloadFallback))
+	if err != nil {
+		t.Fatalf("ProcessGitHubEvent workflow_run fallback failed: %v", err)
+	}
+	if resFallback.PRNumber != 888 || resFallback.Branch != "feat/wf-branch" || resFallback.ResolutionSource != "commit_sha_lookup" {
+		t.Errorf("unexpected workflow_run fallback result: %+v", resFallback)
+	}
+
+	// Malformed JSON
+	_, err = srv.ProcessGitHubEvent(ctx, "workflow_run", "del-wf-3", []byte(`{invalid`))
+	if err == nil {
+		t.Errorf("expected error on malformed workflow_run json")
+	}
+}
+
+func TestProcessGitHubEvent_Push(t *testing.T) {
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/commits/squash123/pulls") {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"number": 999, "state": "closed", "head": {"ref": "feat/squash", "sha": "squash123"}}]`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer mockServer.Close()
+
+	srv := NewRouterServer(Config{GitHubAPIURL: mockServer.URL}, mockServer.Client())
+	ctx := context.Background()
+
+	// 1. Standard push to main with commit resolution
+	payloadMain := `{
+		"ref": "refs/heads/main",
+		"before": "prev111",
+		"after": "squash123",
+		"deleted": false,
+		"head_commit": {
+			"id": "squash123",
+			"message": "feat: merged feature (#999)"
+		},
+		"repository": {
+			"full_name": "azylman/aerial"
+		}
+	}`
+
+	res, err := srv.ProcessGitHubEvent(ctx, "push", "del-push-1", []byte(payloadMain))
+	if err != nil {
+		t.Fatalf("ProcessGitHubEvent push failed: %v", err)
+	}
+	if res.PRNumber != 999 || res.MergeSHA != "squash123" || res.ResolutionSource != "commit_sha_lookup" {
+		t.Errorf("unexpected push result: %+v", res)
+	}
+
+	// 2. Branch deletion push (deleted: true or zero SHA)
+	payloadDeleted := `{
+		"ref": "refs/heads/feat/temp",
+		"before": "temp111",
+		"after": "0000000000000000000000000000000000000000",
+		"deleted": true,
+		"repository": {
+			"full_name": "azylman/aerial"
+		}
+	}`
+
+	resDel, err := srv.ProcessGitHubEvent(ctx, "push", "del-push-2", []byte(payloadDeleted))
+	if err != nil {
+		t.Fatalf("ProcessGitHubEvent push deleted failed: %v", err)
+	}
+	if resDel.ResolutionSource != "branch_deleted" || resDel.PRNumber != 0 {
+		t.Errorf("unexpected push deletion result: %+v", resDel)
+	}
+
+	// 3. Tag push (non-branch ref)
+	payloadTag := `{
+		"ref": "refs/tags/v1.0.0",
+		"after": "tagsha111",
+		"repository": {
+			"full_name": "azylman/aerial"
+		}
+	}`
+
+	resTag, err := srv.ProcessGitHubEvent(ctx, "push", "del-push-3", []byte(payloadTag))
+	if err != nil {
+		t.Fatalf("ProcessGitHubEvent push tag failed: %v", err)
+	}
+	if resTag.ResolutionSource != "non_branch_ref" || resTag.PRNumber != 0 {
+		t.Errorf("unexpected push tag result: %+v", resTag)
+	}
+
+	// Malformed JSON
+	_, err = srv.ProcessGitHubEvent(ctx, "push", "del-push-4", []byte(`{invalid`))
+	if err == nil {
+		t.Errorf("expected error on malformed push json")
+	}
+}
+
+func TestProcessGitHubEvent_Unhandled(t *testing.T) {
+	srv := NewRouterServer(Config{}, nil)
+	ctx := context.Background()
+
+	res, err := srv.ProcessGitHubEvent(ctx, "star", "del-star-1", []byte(`{"action":"created"}`))
+	if err != nil {
+		t.Fatalf("unexpected error on unhandled event: %v", err)
+	}
+	if res.ResolutionSource != "unhandled_event" {
+		t.Errorf("expected unhandled_event, got %s", res.ResolutionSource)
+	}
+}
+
+func TestResolvePRFromCommitSHA_ErrorHandling(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. Validation errors
+	srv := NewRouterServer(Config{}, nil)
+	if _, _, err := srv.resolvePRFromCommitSHA(ctx, "", "sha"); err == nil {
+		t.Errorf("expected error on empty repo")
+	}
+	if _, _, err := srv.resolvePRFromCommitSHA(ctx, "repo", ""); err == nil {
+		t.Errorf("expected error on empty sha")
+	}
+	if _, _, err := srv.resolvePRFromCommitSHA(ctx, "repo", "0000000000000000000000000000000000000000"); err == nil {
+		t.Errorf("expected error on zero sha")
+	}
+
+	// 2. HTTP 403 Rate Limited
+	rateLimitServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer rateLimitServer.Close()
+
+	srvRateLimit := NewRouterServer(Config{GitHubAPIURL: rateLimitServer.URL, GitHubToken: "secret-token"}, rateLimitServer.Client())
+	if _, _, err := srvRateLimit.resolvePRFromCommitSHA(ctx, "aerial", "sha123"); err == nil {
+		t.Errorf("expected error on 403 rate limit")
+	}
+
+	// 3. HTTP 404 Not Found
+	notFoundServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer notFoundServer.Close()
+
+	srvNotFound := NewRouterServer(Config{GitHubAPIURL: notFoundServer.URL}, notFoundServer.Client())
+	if _, _, err := srvNotFound.resolvePRFromCommitSHA(ctx, "aerial", "sha123"); err == nil {
+		t.Errorf("expected error on 404 status")
+	}
+
+	// 4. Malformed JSON response
+	malformedServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{not-an-array`))
+	}))
+	defer malformedServer.Close()
+
+	srvMalformed := NewRouterServer(Config{GitHubAPIURL: malformedServer.URL}, malformedServer.Client())
+	if _, _, err := srvMalformed.resolvePRFromCommitSHA(ctx, "aerial", "sha123"); err == nil {
+		t.Errorf("expected error on malformed json")
+	}
+
+	// 5. Empty PR list returned
+	emptyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer emptyServer.Close()
+
+	srvEmpty := NewRouterServer(Config{GitHubAPIURL: emptyServer.URL}, emptyServer.Client())
+	if _, _, err := srvEmpty.resolvePRFromCommitSHA(ctx, "aerial", "sha123"); err == nil {
+		t.Errorf("expected error on empty pr list")
+	}
+}
+
+func TestRiverLiveIntegration(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping live River integration test in short mode")
+	}
+
+	pgURL := os.Getenv("POSTGRES_URL")
+	if pgURL == "" {
+		pgURL = os.Getenv("DATABASE_URL")
+	}
+	if pgURL == "" {
+		if _, err := net.LookupHost("aerial-postgres"); err == nil {
+			pgURL = "postgres://aerial:aerial_secure_pass@aerial-postgres:5432/aerial?sslmode=disable"
+		} else if _, err := net.LookupHost("postgres"); err == nil {
+			pgURL = "postgres://aerial:aerial_secure_pass@postgres:5432/aerial?sslmode=disable"
+		} else {
+			pgURL = "postgres://aerial:aerial_secure_pass@127.0.0.1:5432/aerial?sslmode=disable"
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	poolConfig, err := pgxpool.ParseConfig(pgURL)
+	if err != nil {
+		t.Skipf("cannot parse postgres url: %v", err)
+	}
+	poolConfig.MaxConns = 5
+	if poolConfig.ConnConfig.RuntimeParams == nil {
+		poolConfig.ConnConfig.RuntimeParams = make(map[string]string)
+	}
+	if _, ok := poolConfig.ConnConfig.RuntimeParams["search_path"]; !ok {
+		poolConfig.ConnConfig.RuntimeParams["search_path"] = "sidecars, public"
+	}
+
+	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
+	if err != nil {
+		t.Skipf("skipping live test, could not create pool: %v", err)
+	}
+	defer pool.Close()
+
+	if err := pool.Ping(ctx); err != nil {
+		t.Skipf("skipping live test, postgres ping failed: %v", err)
+	}
+
+	server := NewRouterServer(Config{PostgresURL: pgURL}, nil)
+	processedCh := make(chan string, 1)
+	server.onProcessed = func(event, delivery string) {
+		if delivery == "live-integration-delivery" {
+			processedCh <- event
+		}
+	}
+
+	workers := river.NewWorkers()
+	river.AddWorker(workers, &GitHubWebhookWorker{server: server})
+
+	riverClient, err := river.NewClient(riverpgxv5.New(pool), &river.Config{
+		Queues: map[string]river.QueueConfig{
+			river.QueueDefault: {MaxWorkers: 5},
+		},
+		Workers: workers,
+	})
+	if err != nil {
+		t.Fatalf("failed to create river client: %v", err)
+	}
+	server.SetRiverClient(riverClient)
+
+	if err := riverClient.Start(ctx); err != nil {
+		t.Fatalf("failed to start river client: %v", err)
+	}
+	defer func() {
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer stopCancel()
+		_ = riverClient.Stop(stopCtx)
+	}()
+
+	// Perform HTTP request to server route
+	reqBody := `{"zen":"Responsive is better than fast.","hook_id":9999,"repository":{"full_name":"azylman/aerial"}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/webhooks/github", strings.NewReader(reqBody))
+	req.Header.Set("X-GitHub-Event", "ping")
+	req.Header.Set("X-GitHub-Delivery", "live-integration-delivery")
+	rec := httptest.NewRecorder()
+
+	server.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from handleGitHubWebhook, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify asynchronous worker picked up and processed job from PostgreSQL
+	select {
+	case event := <-processedCh:
+		if event != "ping" {
+			t.Errorf("expected processed event ping, got %s", event)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timeout waiting for River worker to process live job from postgres")
 	}
 }
