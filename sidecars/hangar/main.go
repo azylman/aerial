@@ -381,6 +381,11 @@ type SyncDaemon struct {
 	alertDedupeMu     sync.Mutex
 	lastAlertTimes    map[string]time.Time
 	alertHTTPClient   *http.Client
+
+	// Webhooks & Deploy Lifecycle
+	webhooksRouterURL      string
+	deployDispatcher       func(ctx context.Context, evt HangarDeployEvent) error
+	deploymentPollInterval time.Duration
 }
 
 func (d *SyncDaemon) getComposeExecutor() ComposeExecutor {
@@ -428,6 +433,167 @@ func (d *SyncDaemon) getRegistryClient() *http.Client {
 		return d.registryClient
 	}
 	return &http.Client{Timeout: 10 * time.Second}
+}
+
+func (d *SyncDaemon) getDeployDispatcher() func(ctx context.Context, evt HangarDeployEvent) error {
+	if d != nil && d.deployDispatcher != nil {
+		return d.deployDispatcher
+	}
+	return d.defaultDeployDispatcher
+}
+
+func (d *SyncDaemon) defaultDeployDispatcher(ctx context.Context, evt HangarDeployEvent) error {
+	routerURL := "http://127.0.0.1:4020"
+	if d != nil && strings.TrimSpace(d.webhooksRouterURL) != "" {
+		routerURL = strings.TrimRight(strings.TrimSpace(d.webhooksRouterURL), "/")
+	}
+	targetURL := routerURL + "/api/webhooks/hangar"
+
+	body, err := json.Marshal(evt)
+	if err != nil {
+		return fmt.Errorf("failed to marshal deploy event: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("failed to create deploy event request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("deploy event post failed: %s (%w)", SanitizeLog(err.Error()), err)
+	}
+	defer closeWarn(resp.Body, "deploy event response body")
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		if readErr != nil {
+			return fmt.Errorf("deploy event endpoint returned status %d (read error: %w)", resp.StatusCode, readErr)
+		}
+		return fmt.Errorf("deploy event endpoint returned status %d: %s", resp.StatusCode, SanitizeLog(strings.TrimSpace(string(respBody))))
+	}
+	return nil
+}
+
+func (d *SyncDaemon) DispatchDeployEvent(evt HangarDeployEvent) {
+	if d == nil {
+		return
+	}
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[Hangar:Deploy] PANIC recovered in deploy dispatcher: %v", r)
+			}
+		}()
+		bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := d.getDeployDispatcher()(bgCtx, evt); err != nil {
+			log.Printf("[Hangar:Deploy] Warning: failed to dispatch %s for %s: %v", evt.Event, evt.JobName, err)
+		}
+	}()
+}
+
+func (d *SyncDaemon) MonitorDeploymentAsync(jobName string, minVersion int, baseEvt HangarDeployEvent) {
+	if d == nil {
+		return
+	}
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[Hangar:Deploy] PANIC recovered in deployment monitor for %s: %v", jobName, r)
+			}
+		}()
+		monCtx, cancel := context.WithTimeout(context.Background(), 65*time.Second)
+		defer cancel()
+
+		pollInterval := d.deploymentPollInterval
+		if pollInterval <= 0 {
+			pollInterval = 2 * time.Second
+		}
+		ticker := time.NewTicker(pollInterval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-monCtx.Done():
+				log.Printf("[Hangar:Deploy] Deployment monitor timed out for %s", jobName)
+				return
+			case <-ticker.C:
+				out, errBytes, err := d.getNomadExecutor()(monCtx, "job", "status", "-json", jobName)
+				if err != nil {
+					continue
+				}
+				status, errParse := ParseJobStatusOutput(append(out, errBytes...))
+				if errParse != nil {
+					continue
+				}
+				if status.LatestDeployment != nil {
+					// Critical invariant: Prevent stale deployment race by checking JobVersion >= minVersion
+					if status.LatestDeployment.JobVersion < minVersion {
+						continue
+					}
+					dep := status.LatestDeployment
+					if dep.Status == "successful" {
+						evt := baseEvt
+						evt.Event = "deploy_success"
+						evt.Status = "success"
+						evt.DeploymentID = dep.ID
+						evt.Details = dep.StatusDescription
+						evt.Timestamp = time.Now().UTC()
+						d.DispatchDeployEvent(evt)
+						return
+					} else if dep.Status == "failed" {
+						evt := baseEvt
+						isRollback := false
+						for _, tg := range dep.TaskGroups {
+							if tg.AutoRevert {
+								isRollback = true
+								break
+							}
+						}
+						if strings.Contains(strings.ToLower(dep.StatusDescription), "revert") {
+							isRollback = true
+						}
+						if isRollback {
+							evt.Event = "deploy_rollback"
+							evt.Status = "rollback"
+						} else {
+							evt.Event = "deploy_failed"
+							evt.Status = "failed"
+						}
+						evt.DeploymentID = dep.ID
+						evt.Details = dep.StatusDescription
+						evt.Timestamp = time.Now().UTC()
+						d.DispatchDeployEvent(evt)
+						return
+					} else if dep.Status == "cancelled" {
+						evt := baseEvt
+						evt.Event = "deploy_failed"
+						evt.Status = "failed"
+						evt.DeploymentID = dep.ID
+						evt.Details = "deployment cancelled: " + dep.StatusDescription
+						evt.Timestamp = time.Now().UTC()
+						d.DispatchDeployEvent(evt)
+						return
+					}
+					// Still running, continue loop
+				} else {
+					// No deployment stanza: check running allocations
+					if status.Summary.Children.Running > 0 {
+						evt := baseEvt
+						evt.Event = "deploy_success"
+						evt.Status = "success"
+						evt.Details = "allocations running"
+						evt.Timestamp = time.Now().UTC()
+						d.DispatchDeployEvent(evt)
+						return
+					}
+				}
+			}
+		}
+	}()
 }
 
 const (
@@ -1900,17 +2066,37 @@ func (d *SyncDaemon) ReconcileNomadChanges(ctx context.Context, repoPath string,
 				return valErr
 			}
 
+			baseEvt := HangarDeployEvent{
+				Event:     "deploy_started",
+				JobName:   change.JobName,
+				Status:    "started",
+				Timestamp: time.Now().UTC(),
+			}
+			d.DispatchDeployEvent(baseEvt)
+
 			log.Printf("[Hangar:Nomad] Applying job %s (%s)...", change.JobName, change.Path)
 			out, errBytes, err := d.getNomadExecutor()(recCtx, "job", "run", "-detach=false", fullPath)
 			if err != nil {
 				combined := string(append(out, errBytes...))
+				failEvt := baseEvt
+				failEvt.Event = "deploy_failed"
+				failEvt.Status = "failed"
+				failEvt.Details = SanitizeLog(strings.TrimSpace(combined))
+				failEvt.Timestamp = time.Now().UTC()
+				d.DispatchDeployEvent(failEvt)
 				return fmt.Errorf("nomad job run failed for %s: %s (%w)", change.Path, SanitizeLog(strings.TrimSpace(combined)), err)
 			}
+			d.MonitorDeploymentAsync(change.JobName, 0, baseEvt)
 			log.Printf("[Hangar:Nomad] Successfully applied job %s: %s", change.JobName, SanitizeLog(strings.TrimSpace(string(out))))
 		}
 	}
 
 	return nil
+}
+
+// ReconcileNomadJobs is an alias for ReconcileNomadChanges.
+func (d *SyncDaemon) ReconcileNomadJobs(ctx context.Context, repoPath string, changes []NomadFileChange) error {
+	return d.ReconcileNomadChanges(ctx, repoPath, changes)
 }
 
 // ExecuteNomadTeardowns runs nomad job stop -purge for any deleted jobs across pending changes.
@@ -2540,26 +2726,29 @@ func (d *SyncDaemon) GetStatus(ctx context.Context) GitSyncStatusResponse {
 
 // DaemonConfig holds configuration options for the GitSync daemon.
 type DaemonConfig struct {
-	Port              string
-	Repos             []string
-	RepoURLs          map[string]string
-	Interval          time.Duration
-	PAT               string
-	ComposeDir        string
-	ConfigDir         string
-	DiscordToken      string
-	DiscordChannel    string
-	DiscordWebhookURL string
-	BrainInternalURL  string
-	ExtraSecrets      []string
-	ComposeExecutor   ComposeExecutor
-	DockerExecutor    DockerExecutor
-	GitExecutor       GitExecutor
-	NomadExecutor     NomadExecutor
-	NomadAddr         string
-	NomadToken        string
-	RegistryClient    *http.Client
-	ComposePullTimeout time.Duration
+	Port                   string
+	Repos                  []string
+	RepoURLs               map[string]string
+	Interval               time.Duration
+	PAT                    string
+	ComposeDir             string
+	ConfigDir              string
+	DiscordToken           string
+	DiscordChannel         string
+	DiscordWebhookURL      string
+	BrainInternalURL       string
+	ExtraSecrets           []string
+	ComposeExecutor        ComposeExecutor
+	DockerExecutor         DockerExecutor
+	GitExecutor            GitExecutor
+	NomadExecutor          NomadExecutor
+	NomadAddr              string
+	NomadToken             string
+	RegistryClient         *http.Client
+	ComposePullTimeout     time.Duration
+	WebhooksRouterURL      string
+	DeployDispatcher       func(ctx context.Context, evt HangarDeployEvent) error
+	DeploymentPollInterval time.Duration
 }
 
 // NewDaemon initializes a new SyncDaemon from config.
@@ -2587,38 +2776,53 @@ func NewDaemon(cfg DaemonConfig) *SyncDaemon {
 	if pullTimeout <= 0 {
 		pullTimeout = defaultComposePullTimeout
 	}
+	webhooksRouterURL := cfg.WebhooksRouterURL
+	if webhooksRouterURL == "" {
+		if envVal := os.Getenv("WEBHOOKS_ROUTER_URL"); envVal != "" {
+			webhooksRouterURL = envVal
+		} else {
+			webhooksRouterURL = "http://127.0.0.1:4020"
+		}
+	}
+	pollInterval := cfg.DeploymentPollInterval
+	if pollInterval <= 0 {
+		pollInterval = 2 * time.Second
+	}
 	return &SyncDaemon{
-		repos:              cfg.Repos,
-		repoUrls:           cfg.RepoURLs,
-		interval:           cfg.Interval,
-		pat:                cfg.PAT,
-		composeDir:         cfg.ComposeDir,
-		configDir:          cfg.ConfigDir,
-		discordToken:       cfg.DiscordToken,
-		discordChannel:     cfg.DiscordChannel,
-		discordWebhookURL:  cfg.DiscordWebhookURL,
-		brainInternalURL:   cfg.BrainInternalURL,
-		extraSecrets:       cfg.ExtraSecrets,
-		composeExecutor:    cfg.ComposeExecutor,
-		dockerExecutor:     cfg.DockerExecutor,
-		gitExecutor:        cfg.GitExecutor,
-		nomadExecutor:      cfg.NomadExecutor,
-		nomadAddr:          cfg.NomadAddr,
-		nomadToken:         cfg.NomadToken,
-		nomadKnownDigests:  make(map[string]string),
-		registryClient:     cfg.RegistryClient,
-		composePullTimeout: pullTimeout,
-		reconcileCh:        make(chan struct{}, 1),
-		repoLocks:          make(map[string]*sync.Mutex),
-		quarantinedCommits: make(map[QuarantineKey]QuarantineRecord),
-		imageQuarantine:    make(map[string]ImageQuarantineRecord),
+		repos:                  cfg.Repos,
+		repoUrls:               cfg.RepoURLs,
+		interval:               cfg.Interval,
+		pat:                    cfg.PAT,
+		composeDir:             cfg.ComposeDir,
+		configDir:              cfg.ConfigDir,
+		discordToken:           cfg.DiscordToken,
+		discordChannel:         cfg.DiscordChannel,
+		discordWebhookURL:      cfg.DiscordWebhookURL,
+		brainInternalURL:       cfg.BrainInternalURL,
+		extraSecrets:           cfg.ExtraSecrets,
+		composeExecutor:        cfg.ComposeExecutor,
+		dockerExecutor:         cfg.DockerExecutor,
+		gitExecutor:            cfg.GitExecutor,
+		nomadExecutor:          cfg.NomadExecutor,
+		nomadAddr:              cfg.NomadAddr,
+		nomadToken:             cfg.NomadToken,
+		nomadKnownDigests:      make(map[string]string),
+		registryClient:         cfg.RegistryClient,
+		composePullTimeout:     pullTimeout,
+		webhooksRouterURL:      webhooksRouterURL,
+		deployDispatcher:       cfg.DeployDispatcher,
+		deploymentPollInterval: pollInterval,
+		reconcileCh:            make(chan struct{}, 1),
+		repoLocks:              make(map[string]*sync.Mutex),
+		quarantinedCommits:     make(map[QuarantineKey]QuarantineRecord),
+		imageQuarantine:        make(map[string]ImageQuarantineRecord),
 		reconcileStatus: ReconciliationStatus{
 			State: "idle",
 			Stage: "idle",
 		},
-		pendingTargets:     make(map[string]struct{}),
-		lastAlertTimes:     make(map[string]time.Time),
-		repoGitHubSlugs:    make(map[string]string),
+		pendingTargets:  make(map[string]struct{}),
+		lastAlertTimes:  make(map[string]time.Time),
+		repoGitHubSlugs: make(map[string]string),
 	}
 }
 
@@ -2785,7 +2989,15 @@ func splitLines(s string) []string {
 	return lines
 }
 
-func (d *SyncDaemon) applyNomadChangesDirectly(ctx context.Context, repoPath string, changes []NomadFileChange) ([]string, error) {
+func (d *SyncDaemon) applyNomadChangesDirectly(ctx context.Context, repoPath string, changes []NomadFileChange, meta ...string) ([]string, error) {
+	var repo, commit string
+	if len(meta) >= 1 {
+		repo = meta[0]
+	}
+	if len(meta) >= 2 {
+		commit = meta[1]
+	}
+
 	var applied []string
 	for _, ch := range changes {
 		if ch.Action == "delete" {
@@ -2802,10 +3014,29 @@ func (d *SyncDaemon) applyNomadChangesDirectly(ctx context.Context, repoPath str
 		if errVal := d.ValidateNomadJob(ctx, fullPath); errVal != nil {
 			return applied, errVal
 		}
-		_, _, errRun := d.getNomadExecutor()(ctx, "job", "run", "-detach=false", fullPath)
+
+		baseEvt := HangarDeployEvent{
+			Event:     "deploy_started",
+			JobName:   ch.JobName,
+			Repo:      repo,
+			CommitSHA: commit,
+			Status:    "started",
+			Timestamp: time.Now().UTC(),
+		}
+		d.DispatchDeployEvent(baseEvt)
+
+		out, errBytes, errRun := d.getNomadExecutor()(ctx, "job", "run", "-detach=false", fullPath)
 		if errRun != nil {
+			failEvt := baseEvt
+			failEvt.Event = "deploy_failed"
+			failEvt.Status = "failed"
+			failEvt.Details = SanitizeLog(strings.TrimSpace(string(append(out, errBytes...))))
+			failEvt.Timestamp = time.Now().UTC()
+			d.DispatchDeployEvent(failEvt)
 			return applied, errRun
 		}
+
+		d.MonitorDeploymentAsync(ch.JobName, 0, baseEvt)
 		applied = append(applied, ch.JobName)
 	}
 	return applied, nil
@@ -2874,7 +3105,7 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 		nomadChanges, errNomad := d.HasNomadChanges(ctx, repoPath, res.PreviousHead, res.CurrentHead)
 		if errNomad == nil && len(nomadChanges) > 0 {
 			resp.NomadChanged = true
-			applied, errRec := d.applyNomadChangesDirectly(ctx, repoPath, nomadChanges)
+			applied, errRec := d.applyNomadChangesDirectly(ctx, repoPath, nomadChanges, req.Repo, req.Commit)
 			resp.AppliedJobs = applied
 			if errRec != nil {
 				resp.Status = "error"
@@ -2945,10 +3176,27 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 					resp.ContainersBuilding = true
 				} else {
 					if errVal := d.ValidateNomadJob(ctx, fullPath); errVal == nil {
+						baseEvt := HangarDeployEvent{
+							Event:     "deploy_started",
+							JobName:   ch.JobName,
+							Repo:      req.Repo,
+							CommitSHA: req.Commit,
+							Status:    "started",
+							Timestamp: time.Now().UTC(),
+						}
+						d.DispatchDeployEvent(baseEvt)
+
 						out, errBytes, errRun := d.getNomadExecutor()(ctx, "job", "run", "-detach=false", fullPath)
 						if errRun != nil {
 							log.Printf("[Hangar:GitPush] nomad job run failed for %s: %s (%v)", ch.JobName, SanitizeLog(strings.TrimSpace(string(append(out, errBytes...)))), errRun)
+							failEvt := baseEvt
+							failEvt.Event = "deploy_failed"
+							failEvt.Status = "failed"
+							failEvt.Details = SanitizeLog(strings.TrimSpace(string(append(out, errBytes...))))
+							failEvt.Timestamp = time.Now().UTC()
+							d.DispatchDeployEvent(failEvt)
 						} else {
+							d.MonitorDeploymentAsync(ch.JobName, 0, baseEvt)
 							appliedJobs = append(appliedJobs, ch.JobName)
 						}
 					} else {
@@ -3011,10 +3259,27 @@ func (d *SyncDaemon) ExecuteImageReadyEvent(ctx context.Context, req ImageReadyE
 			continue
 		}
 
+		baseEvt := HangarDeployEvent{
+			Event:     "deploy_started",
+			JobName:   job.JobName,
+			Image:     req.Image,
+			Digest:    req.Digest,
+			Status:    "started",
+			Timestamp: time.Now().UTC(),
+		}
+		d.DispatchDeployEvent(baseEvt)
+
 		log.Printf("[Hangar:ImageReady] Applying Nomad job %s from %s...", job.JobName, job.JobPath)
 		outRun, errRunBytes, errRun := d.getNomadExecutor()(ctx, "job", "run", "-detach=false", job.JobPath)
 		if errRun != nil {
 			log.Printf("[Hangar:ImageReady] Warning: job run failed for %s: %s (%v)", job.JobName, SanitizeLog(strings.TrimSpace(string(append(outRun, errRunBytes...)))), errRun)
+			failEvt := baseEvt
+			failEvt.Event = "deploy_failed"
+			failEvt.Status = "failed"
+			failEvt.Details = SanitizeLog(strings.TrimSpace(string(append(outRun, errRunBytes...))))
+			failEvt.Timestamp = time.Now().UTC()
+			d.DispatchDeployEvent(failEvt)
+			continue
 		}
 
 		log.Printf("[Hangar:ImageReady] Rescheduling allocation restart for job %s...", job.JobName)
@@ -3023,6 +3288,7 @@ func (d *SyncDaemon) ExecuteImageReadyEvent(ctx context.Context, req ImageReadyE
 			log.Printf("[Hangar:ImageReady] Warning: job restart -reschedule failed for %s: %s (%v)", job.JobName, SanitizeLog(strings.TrimSpace(string(append(outRest, errRestBytes...)))), errRest)
 		}
 
+		d.MonitorDeploymentAsync(job.JobName, 0, baseEvt)
 		appliedJobs = append(appliedJobs, job.JobName)
 
 		if req.Digest != "" {
@@ -3342,6 +3608,11 @@ func NewConfigFromLookup(lookup func(string) string) DaemonConfig {
 	}
 	nomadToken := lookup("NOMAD_TOKEN")
 
+	webhooksRouterURL := lookup("WEBHOOKS_ROUTER_URL")
+	if webhooksRouterURL == "" {
+		webhooksRouterURL = "http://127.0.0.1:4020"
+	}
+
 	return DaemonConfig{
 		Port:              port,
 		Repos:             repos,
@@ -3357,6 +3628,7 @@ func NewConfigFromLookup(lookup func(string) string) DaemonConfig {
 		ExtraSecrets:      extraSecrets,
 		NomadAddr:         nomadAddr,
 		NomadToken:        nomadToken,
+		WebhooksRouterURL: webhooksRouterURL,
 	}
 }
 

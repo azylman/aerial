@@ -1911,10 +1911,189 @@ func TestPureFunctions_EdgeCasesCoverage(t *testing.T) {
 	}
 }
 
+func TestParseJobStatusOutput_TableDriven(t *testing.T) {
+	tests := []struct {
+		name          string
+		raw           []byte
+		wantErr       bool
+		wantID        string
+		wantVersion   int
+		hasDep        bool
+		wantDepID     string
+		wantDepStatus string
+		wantAutoRev   bool
+		wantRunning   int
+	}{
+		{
+			name: "single object with successful deployment",
+			raw: []byte(`{
+				"ID": "webhooks-router",
+				"JobVersion": 3,
+				"LatestDeployment": {
+					"ID": "dep-uuid-111",
+					"JobVersion": 3,
+					"Status": "successful",
+					"StatusDescription": "Deployment completed successfully",
+					"TaskGroups": {
+						"router": { "AutoRevert": false }
+					}
+				},
+				"Summary": {
+					"Children": { "Pending": 0, "Running": 1, "Dead": 0 }
+				}
+			}`),
+			wantErr:       false,
+			wantID:        "webhooks-router",
+			wantVersion:   3,
+			hasDep:        true,
+			wantDepID:     "dep-uuid-111",
+			wantDepStatus: "successful",
+			wantAutoRev:   false,
+			wantRunning:   1,
+		},
+		{
+			name: "array format with failed auto-revert deployment",
+			raw: []byte(`[
+				{
+					"ID": "brain",
+					"JobVersion": 5,
+					"LatestDeployment": {
+						"ID": "dep-uuid-222",
+						"JobVersion": 5,
+						"Status": "failed",
+						"StatusDescription": "failed: reverting to prior version",
+						"TaskGroups": {
+							"brain": { "AutoRevert": true }
+						}
+					},
+					"Summary": {
+						"Children": { "Pending": 0, "Running": 0, "Dead": 1 }
+					}
+				}
+			]`),
+			wantErr:       false,
+			wantID:        "brain",
+			wantVersion:   5,
+			hasDep:        true,
+			wantDepID:     "dep-uuid-222",
+			wantDepStatus: "failed",
+			wantAutoRev:   true,
+			wantRunning:   0,
+		},
+		{
+			name: "object without deployment stanza but running allocations",
+			raw: []byte(`{
+				"ID": "nomad-mcp",
+				"JobVersion": 1,
+				"Summary": {
+					"Children": { "Pending": 0, "Running": 2, "Dead": 0 }
+				}
+			}`),
+			wantErr:     false,
+			wantID:      "nomad-mcp",
+			wantVersion: 1,
+			hasDep:      false,
+			wantRunning: 2,
+		},
+		{
+			name: "wrapped with leading and trailing cli warning noise",
+			raw: []byte(`
+				WARNING: CLI token expiring soon
+				{
+					"ID": "infisical-mcp",
+					"JobVersion": 2,
+					"LatestDeployment": {
+						"ID": "dep-uuid-333",
+						"JobVersion": 2,
+						"Status": "running",
+						"StatusDescription": "Allocation placed"
+					}
+				}
+				INFO: Evaluation ongoing
+			`),
+			wantErr:       false,
+			wantID:        "infisical-mcp",
+			wantVersion:   2,
+			hasDep:        true,
+			wantDepID:     "dep-uuid-333",
+			wantDepStatus: "running",
+		},
+		{
+			name:    "empty byte slice",
+			raw:     []byte(""),
+			wantErr: true,
+		},
+		{
+			name:    "whitespace only",
+			raw:     []byte("   \n\t  "),
+			wantErr: true,
+		},
+		{
+			name:    "non-json output",
+			raw:     []byte("Evaluation ID: 12345678-abcd"),
+			wantErr: true,
+		},
+		{
+			name:    "empty json array",
+			raw:     []byte("[]"),
+			wantErr: true,
+		},
+		{
+			name:    "malformed json object",
+			raw:     []byte(`{"ID": "unfinished`),
+			wantErr: true,
+		},
+	}
 
-
-
-
-
-
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseJobStatusOutput(tt.raw)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("ParseJobStatusOutput() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				return
+			}
+			if got == nil {
+				t.Fatalf("expected non-nil output")
+			}
+			if got.ID != tt.wantID {
+				t.Errorf("got ID %q, want %q", got.ID, tt.wantID)
+			}
+			if got.JobVersion != tt.wantVersion {
+				t.Errorf("got JobVersion %d, want %d", got.JobVersion, tt.wantVersion)
+			}
+			if tt.hasDep {
+				if got.LatestDeployment == nil {
+					t.Fatalf("expected non-nil LatestDeployment")
+				}
+				if got.LatestDeployment.ID != tt.wantDepID {
+					t.Errorf("got LatestDeployment.ID %q, want %q", got.LatestDeployment.ID, tt.wantDepID)
+				}
+				if got.LatestDeployment.Status != tt.wantDepStatus {
+					t.Errorf("got LatestDeployment.Status %q, want %q", got.LatestDeployment.Status, tt.wantDepStatus)
+				}
+				if tt.wantAutoRev {
+					hasAutoRev := false
+					for _, tg := range got.LatestDeployment.TaskGroups {
+						if tg.AutoRevert {
+							hasAutoRev = true
+							break
+						}
+					}
+					if !hasAutoRev {
+						t.Errorf("expected AutoRevert=true in TaskGroups")
+					}
+				}
+			} else {
+				if got.LatestDeployment != nil {
+					t.Errorf("expected nil LatestDeployment, got %+v", got.LatestDeployment)
+				}
+			}
+			if got.Summary.Children.Running != tt.wantRunning {
+				t.Errorf("got Summary.Children.Running %d, want %d", got.Summary.Children.Running, tt.wantRunning)
+			}
+		})
+	}
+}
 
