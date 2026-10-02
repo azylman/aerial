@@ -231,12 +231,13 @@ func normalizeRepo(repo string) string {
 
 // PRRegistryUpdater defines the interface for updating PR lifecycle state in PostgreSQL pr_registry.
 type PRRegistryUpdater interface {
-	UpdatePRMerged(ctx context.Context, repo string, prNumber int, mergeSHA string) error
-	UpdatePRSync(ctx context.Context, repo string, prNumber int, headSHA string) error
-	UpdatePRClosedUnmerged(ctx context.Context, repo string, prNumber int) error
+	UpdatePRMerged(ctx context.Context, repo string, prNumber int, mergeSHA string) (targetID string, err error)
+	UpdatePRSync(ctx context.Context, repo string, prNumber int, headSHA string) (targetID string, err error)
+	UpdatePRClosedUnmerged(ctx context.Context, repo string, prNumber int) (targetID string, err error)
 	AtomicTransitionCIFailed(ctx context.Context, repo string, prNumber int) (targetID string, updated bool, err error)
 	AtomicTransitionCIFailedByHeadSHA(ctx context.Context, repo string, headSHA string) (targetID string, prNumber int, updated bool, err error)
-	BackfillPushMergeSHA(ctx context.Context, repo string, prNumber int, mergeSHA string) error
+	BackfillPushMergeSHA(ctx context.Context, repo string, prNumber int, mergeSHA string) (targetID string, err error)
+	ResolvePRBySHA(ctx context.Context, repo string, sha string) (prNumber int, branch, targetID string, err error)
 }
 
 // PostgresPRRegistry implements PRRegistryUpdater backed by a pgxpool.Pool.
@@ -249,10 +250,10 @@ func NewPostgresPRRegistry(pool *pgxpool.Pool) *PostgresPRRegistry {
 	return &PostgresPRRegistry{pool: pool}
 }
 
-func (r *PostgresPRRegistry) UpdatePRMerged(ctx context.Context, repo string, prNumber int, mergeSHA string) error {
+func (r *PostgresPRRegistry) UpdatePRMerged(ctx context.Context, repo string, prNumber int, mergeSHA string) (string, error) {
 	repo = normalizeRepo(repo)
 	if repo == "" || prNumber <= 0 {
-		return nil
+		return "", nil
 	}
 	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -262,22 +263,25 @@ func (r *PostgresPRRegistry) UpdatePRMerged(ctx context.Context, repo string, pr
 		SET status = 'merged',
 			merge_sha = CASE WHEN $1 != '' THEN $1 ELSE merge_sha END,
 			updated_at = CURRENT_TIMESTAMP
-		WHERE repo = $2 AND pr_number = $3;
+		WHERE repo = $2 AND pr_number = $3
+		RETURNING target_id;
 	`
-	tag, err := r.pool.Exec(qCtx, query, strings.TrimSpace(mergeSHA), repo, prNumber)
-	if err != nil {
-		return fmt.Errorf("update pr merged: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
+	var targetID string
+	err := r.pool.QueryRow(qCtx, query, strings.TrimSpace(mergeSHA), repo, prNumber).Scan(&targetID)
+	if errors.Is(err, pgx.ErrNoRows) {
 		log.Printf("[webhooks-router] [registry] pr not found in registry (untracked): repo=%s pr=%d", repo, prNumber)
+		return "", nil
 	}
-	return nil
+	if err != nil {
+		return "", fmt.Errorf("update pr merged: %w", err)
+	}
+	return targetID, nil
 }
 
-func (r *PostgresPRRegistry) UpdatePRClosedUnmerged(ctx context.Context, repo string, prNumber int) error {
+func (r *PostgresPRRegistry) UpdatePRClosedUnmerged(ctx context.Context, repo string, prNumber int) (string, error) {
 	repo = normalizeRepo(repo)
 	if repo == "" || prNumber <= 0 {
-		return nil
+		return "", nil
 	}
 	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -286,22 +290,25 @@ func (r *PostgresPRRegistry) UpdatePRClosedUnmerged(ctx context.Context, repo st
 		UPDATE pr_registry
 		SET status = 'closed',
 			updated_at = CURRENT_TIMESTAMP
-		WHERE repo = $1 AND pr_number = $2;
+		WHERE repo = $1 AND pr_number = $2
+		RETURNING target_id;
 	`
-	tag, err := r.pool.Exec(qCtx, query, repo, prNumber)
-	if err != nil {
-		return fmt.Errorf("update pr closed unmerged: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
+	var targetID string
+	err := r.pool.QueryRow(qCtx, query, repo, prNumber).Scan(&targetID)
+	if errors.Is(err, pgx.ErrNoRows) {
 		log.Printf("[webhooks-router] [registry] pr not found in registry (untracked): repo=%s pr=%d", repo, prNumber)
+		return "", nil
 	}
-	return nil
+	if err != nil {
+		return "", fmt.Errorf("update pr closed unmerged: %w", err)
+	}
+	return targetID, nil
 }
 
-func (r *PostgresPRRegistry) UpdatePRSync(ctx context.Context, repo string, prNumber int, headSHA string) error {
+func (r *PostgresPRRegistry) UpdatePRSync(ctx context.Context, repo string, prNumber int, headSHA string) (string, error) {
 	repo = normalizeRepo(repo)
 	if repo == "" || prNumber <= 0 {
-		return nil
+		return "", nil
 	}
 	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -311,16 +318,19 @@ func (r *PostgresPRRegistry) UpdatePRSync(ctx context.Context, repo string, prNu
 		SET head_sha = $1,
 			status = 'open',
 			updated_at = CURRENT_TIMESTAMP
-		WHERE repo = $2 AND pr_number = $3;
+		WHERE repo = $2 AND pr_number = $3
+		RETURNING target_id;
 	`
-	tag, err := r.pool.Exec(qCtx, query, strings.TrimSpace(headSHA), repo, prNumber)
-	if err != nil {
-		return fmt.Errorf("update pr sync: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
+	var targetID string
+	err := r.pool.QueryRow(qCtx, query, strings.TrimSpace(headSHA), repo, prNumber).Scan(&targetID)
+	if errors.Is(err, pgx.ErrNoRows) {
 		log.Printf("[webhooks-router] [registry] pr not found in registry (untracked): repo=%s pr=%d", repo, prNumber)
+		return "", nil
 	}
-	return nil
+	if err != nil {
+		return "", fmt.Errorf("update pr sync: %w", err)
+	}
+	return targetID, nil
 }
 
 func (r *PostgresPRRegistry) AtomicTransitionCIFailed(ctx context.Context, repo string, prNumber int) (string, bool, error) {
@@ -384,10 +394,10 @@ func (r *PostgresPRRegistry) AtomicTransitionCIFailedByHeadSHA(ctx context.Conte
 	return targetID, prNumber, true, nil
 }
 
-func (r *PostgresPRRegistry) BackfillPushMergeSHA(ctx context.Context, repo string, prNumber int, mergeSHA string) error {
+func (r *PostgresPRRegistry) BackfillPushMergeSHA(ctx context.Context, repo string, prNumber int, mergeSHA string) (string, error) {
 	repo = normalizeRepo(repo)
 	if repo == "" || prNumber <= 0 {
-		return nil
+		return "", nil
 	}
 	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -397,16 +407,47 @@ func (r *PostgresPRRegistry) BackfillPushMergeSHA(ctx context.Context, repo stri
 		SET merge_sha = $1,
 			status = 'merged',
 			updated_at = CURRENT_TIMESTAMP
-		WHERE repo = $2 AND pr_number = $3;
+		WHERE repo = $2 AND pr_number = $3
+		RETURNING target_id;
 	`
-	tag, err := r.pool.Exec(qCtx, query, strings.TrimSpace(mergeSHA), repo, prNumber)
-	if err != nil {
-		return fmt.Errorf("backfill push merge_sha: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
+	var targetID string
+	err := r.pool.QueryRow(qCtx, query, strings.TrimSpace(mergeSHA), repo, prNumber).Scan(&targetID)
+	if errors.Is(err, pgx.ErrNoRows) {
 		log.Printf("[webhooks-router] [registry] pr not found in registry (untracked): repo=%s pr=%d", repo, prNumber)
+		return "", nil
 	}
-	return nil
+	if err != nil {
+		return "", fmt.Errorf("backfill push merge_sha: %w", err)
+	}
+	return targetID, nil
+}
+
+func (r *PostgresPRRegistry) ResolvePRBySHA(ctx context.Context, repo string, sha string) (int, string, string, error) {
+	repo = normalizeRepo(repo)
+	sha = strings.TrimSpace(sha)
+	if repo == "" || sha == "" || isZeroSHA(sha) {
+		return 0, "", "", nil
+	}
+	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	query := `
+		SELECT pr_number, branch, target_id
+		FROM pr_registry
+		WHERE repo = $1 AND (merge_sha = $2 OR head_sha = $2)
+		ORDER BY updated_at DESC
+		LIMIT 1;
+	`
+	var prNum int
+	var branch, targetID string
+	err := r.pool.QueryRow(qCtx, query, repo, sha).Scan(&prNum, &branch, &targetID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, "", "", nil
+	}
+	if err != nil {
+		return 0, "", "", fmt.Errorf("resolve pr by sha: %w", err)
+	}
+	return prNum, branch, targetID, nil
 }
 
 // RouterServer handles webhook requests and orchestrates secret synchronization.
@@ -685,6 +726,7 @@ type ResolvedGitHubEvent struct {
 	Branch           string `json:"branch,omitempty"`
 	HeadSHA          string `json:"head_sha,omitempty"`
 	MergeSHA         string `json:"merge_sha,omitempty"`
+	TargetID         string `json:"target_id,omitempty"`
 	CheckName        string `json:"check_name,omitempty"`
 	Status           string `json:"status,omitempty"`
 	Conclusion       string `json:"conclusion,omitempty"`
@@ -799,24 +841,36 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 		if s.registry != nil && res.PRNumber > 0 {
 			if res.Action == "closed" {
 				if p.PullRequest.Merged {
-					if err := s.registry.UpdatePRMerged(ctx, res.Repo, res.PRNumber, res.MergeSHA); err != nil {
+					targetID, err := s.registry.UpdatePRMerged(ctx, res.Repo, res.PRNumber, res.MergeSHA)
+					if err != nil {
 						log.Printf("[webhooks-router] [registry] error updating pr merged: %v", err)
 						return nil, err
 					}
-					log.Printf("[webhooks-router] [registry] pr %s#%d updated to merged (merge_sha=%s)", res.Repo, res.PRNumber, res.MergeSHA)
+					if targetID != "" && res.TargetID == "" {
+						res.TargetID = targetID
+					}
+					log.Printf("[webhooks-router] [registry] pr %s#%d updated to merged (merge_sha=%s, target_id=%s)", res.Repo, res.PRNumber, res.MergeSHA, res.TargetID)
 				} else {
-					if err := s.registry.UpdatePRClosedUnmerged(ctx, res.Repo, res.PRNumber); err != nil {
+					targetID, err := s.registry.UpdatePRClosedUnmerged(ctx, res.Repo, res.PRNumber)
+					if err != nil {
 						log.Printf("[webhooks-router] [registry] error updating pr closed: %v", err)
 						return nil, err
 					}
-					log.Printf("[webhooks-router] [registry] pr %s#%d updated to closed (unmerged)", res.Repo, res.PRNumber)
+					if targetID != "" && res.TargetID == "" {
+						res.TargetID = targetID
+					}
+					log.Printf("[webhooks-router] [registry] pr %s#%d updated to closed (unmerged, target_id=%s)", res.Repo, res.PRNumber, res.TargetID)
 				}
 			} else if res.Action == "synchronize" {
-				if err := s.registry.UpdatePRSync(ctx, res.Repo, res.PRNumber, res.HeadSHA); err != nil {
+				targetID, err := s.registry.UpdatePRSync(ctx, res.Repo, res.PRNumber, res.HeadSHA)
+				if err != nil {
 					log.Printf("[webhooks-router] [registry] error updating pr synchronize: %v", err)
 					return nil, err
 				}
-				log.Printf("[webhooks-router] [registry] pr %s#%d synchronized (head_sha=%s, status=open)", res.Repo, res.PRNumber, res.HeadSHA)
+				if targetID != "" && res.TargetID == "" {
+					res.TargetID = targetID
+				}
+				log.Printf("[webhooks-router] [registry] pr %s#%d synchronized (head_sha=%s, status=open, target_id=%s)", res.Repo, res.PRNumber, res.HeadSHA, res.TargetID)
 			}
 		}
 		return res, nil
@@ -837,18 +891,37 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 			res.PRNumber = p.CheckRun.PullRequests[0].Number
 			res.Branch = p.CheckRun.PullRequests[0].Head.Ref
 			res.ResolutionSource = "check_run_payload"
+			if s.registry != nil && res.HeadSHA != "" && !isZeroSHA(res.HeadSHA) {
+				if _, _, targetID, err := s.registry.ResolvePRBySHA(ctx, res.Repo, res.HeadSHA); err == nil && targetID != "" {
+					res.TargetID = targetID
+				}
+			}
 		} else if res.HeadSHA != "" && !isZeroSHA(res.HeadSHA) {
-			prNum, branch, err := s.resolvePRFromCommitSHA(ctx, res.Repo, res.HeadSHA)
-			if err != nil {
-				log.Printf("[webhooks-router] [github] check_run failed resolving PR for commit %s: %v", res.HeadSHA, err)
-			} else {
-				res.PRNumber = prNum
-				res.Branch = branch
-				res.ResolutionSource = "commit_sha_lookup"
+			if s.registry != nil {
+				prNum, branch, targetID, err := s.registry.ResolvePRBySHA(ctx, res.Repo, res.HeadSHA)
+				if err != nil {
+					log.Printf("[webhooks-router] [registry] check_run failed resolving PR by SHA %s locally: %v", res.HeadSHA, err)
+				} else if prNum > 0 {
+					res.PRNumber = prNum
+					res.Branch = branch
+					res.TargetID = targetID
+					res.ResolutionSource = "local_pr_registry"
+				}
+			}
+
+			if res.PRNumber == 0 {
+				prNum, branch, err := s.resolvePRFromCommitSHA(ctx, res.Repo, res.HeadSHA)
+				if err != nil {
+					log.Printf("[webhooks-router] [github] check_run failed resolving PR for commit %s: %v", res.HeadSHA, err)
+				} else {
+					res.PRNumber = prNum
+					res.Branch = branch
+					res.ResolutionSource = "commit_sha_lookup"
+				}
 			}
 		}
-		log.Printf("[webhooks-router] [github] [check_run] repo=%s check=%q head_sha=%s pr=%d branch=%s status=%s conclusion=%s source=%s delivery=%s",
-			res.Repo, res.CheckName, res.HeadSHA, res.PRNumber, res.Branch, res.Status, res.Conclusion, res.ResolutionSource, delivery)
+		log.Printf("[webhooks-router] [github] [check_run] repo=%s check=%q head_sha=%s pr=%d branch=%s status=%s conclusion=%s source=%s target_id=%s delivery=%s",
+			res.Repo, res.CheckName, res.HeadSHA, res.PRNumber, res.Branch, res.Status, res.Conclusion, res.ResolutionSource, res.TargetID, delivery)
 
 		if s.registry != nil && (res.Conclusion == "failure" || res.Conclusion == "timed_out") {
 			if res.PRNumber > 0 {
@@ -856,6 +929,9 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 				if err != nil {
 					log.Printf("[webhooks-router] [registry] error transitioning pr ci_failed: %v", err)
 					return nil, err
+				}
+				if targetID != "" && res.TargetID == "" {
+					res.TargetID = targetID
 				}
 				if updated {
 					log.Printf("[webhooks-router] [registry] pr %s#%d transitioned to ci_failed (check=%s, target_id=%s)", res.Repo, res.PRNumber, res.CheckName, targetID)
@@ -865,6 +941,12 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 				if err != nil {
 					log.Printf("[webhooks-router] [registry] error transitioning head_sha ci_failed: %v", err)
 					return nil, err
+				}
+				if targetID != "" && res.TargetID == "" {
+					res.TargetID = targetID
+				}
+				if prNum > 0 && res.PRNumber == 0 {
+					res.PRNumber = prNum
 				}
 				if updated {
 					log.Printf("[webhooks-router] [registry] commit %s (pr %s#%d) transitioned to ci_failed (check=%s, target_id=%s)", res.HeadSHA, res.Repo, prNum, res.CheckName, targetID)
@@ -889,20 +971,41 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 		if len(p.WorkflowRun.PullRequests) > 0 {
 			res.PRNumber = p.WorkflowRun.PullRequests[0].Number
 			res.ResolutionSource = "workflow_run_payload"
-		} else if res.HeadSHA != "" && !isZeroSHA(res.HeadSHA) {
-			prNum, branch, err := s.resolvePRFromCommitSHA(ctx, res.Repo, res.HeadSHA)
-			if err != nil {
-				log.Printf("[webhooks-router] [github] workflow_run failed resolving PR for commit %s: %v", res.HeadSHA, err)
-			} else {
-				res.PRNumber = prNum
-				if res.Branch == "" {
-					res.Branch = branch
+			if s.registry != nil && res.HeadSHA != "" && !isZeroSHA(res.HeadSHA) {
+				if _, _, targetID, err := s.registry.ResolvePRBySHA(ctx, res.Repo, res.HeadSHA); err == nil && targetID != "" {
+					res.TargetID = targetID
 				}
-				res.ResolutionSource = "commit_sha_lookup"
+			}
+		} else if res.HeadSHA != "" && !isZeroSHA(res.HeadSHA) {
+			if s.registry != nil {
+				prNum, branch, targetID, err := s.registry.ResolvePRBySHA(ctx, res.Repo, res.HeadSHA)
+				if err != nil {
+					log.Printf("[webhooks-router] [registry] workflow_run failed resolving PR by SHA %s locally: %v", res.HeadSHA, err)
+				} else if prNum > 0 {
+					res.PRNumber = prNum
+					if res.Branch == "" {
+						res.Branch = branch
+					}
+					res.TargetID = targetID
+					res.ResolutionSource = "local_pr_registry"
+				}
+			}
+
+			if res.PRNumber == 0 {
+				prNum, branch, err := s.resolvePRFromCommitSHA(ctx, res.Repo, res.HeadSHA)
+				if err != nil {
+					log.Printf("[webhooks-router] [github] workflow_run failed resolving PR for commit %s: %v", res.HeadSHA, err)
+				} else {
+					res.PRNumber = prNum
+					if res.Branch == "" {
+						res.Branch = branch
+					}
+					res.ResolutionSource = "commit_sha_lookup"
+				}
 			}
 		}
-		log.Printf("[webhooks-router] [github] [workflow_run] repo=%s workflow=%q head_sha=%s pr=%d branch=%s status=%s conclusion=%s source=%s delivery=%s",
-			res.Repo, res.CheckName, res.HeadSHA, res.PRNumber, res.Branch, res.Status, res.Conclusion, res.ResolutionSource, delivery)
+		log.Printf("[webhooks-router] [github] [workflow_run] repo=%s workflow=%q head_sha=%s pr=%d branch=%s status=%s conclusion=%s source=%s target_id=%s delivery=%s",
+			res.Repo, res.CheckName, res.HeadSHA, res.PRNumber, res.Branch, res.Status, res.Conclusion, res.ResolutionSource, res.TargetID, delivery)
 
 		if s.registry != nil && (res.Conclusion == "failure" || res.Conclusion == "timed_out") {
 			if res.PRNumber > 0 {
@@ -910,6 +1013,9 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 				if err != nil {
 					log.Printf("[webhooks-router] [registry] error transitioning pr ci_failed: %v", err)
 					return nil, err
+				}
+				if targetID != "" && res.TargetID == "" {
+					res.TargetID = targetID
 				}
 				if updated {
 					log.Printf("[webhooks-router] [registry] pr %s#%d transitioned to ci_failed (workflow=%s, target_id=%s)", res.Repo, res.PRNumber, res.CheckName, targetID)
@@ -919,6 +1025,12 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 				if err != nil {
 					log.Printf("[webhooks-router] [registry] error transitioning head_sha ci_failed: %v", err)
 					return nil, err
+				}
+				if targetID != "" && res.TargetID == "" {
+					res.TargetID = targetID
+				}
+				if prNum > 0 && res.PRNumber == 0 {
+					res.PRNumber = prNum
 				}
 				if updated {
 					log.Printf("[webhooks-router] [registry] commit %s (pr %s#%d) transitioned to ci_failed (workflow=%s, target_id=%s)", res.HeadSHA, res.Repo, prNum, res.CheckName, targetID)
@@ -955,27 +1067,48 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 		}
 
 		if res.HeadSHA != "" && !isZeroSHA(res.HeadSHA) {
-			prNum, branch, err := s.resolvePRFromCommitSHA(ctx, res.Repo, res.HeadSHA)
-			if err != nil {
-				log.Printf("[webhooks-router] [github] push failed resolving PR for commit %s: %v", res.HeadSHA, err)
-			} else {
-				res.PRNumber = prNum
-				res.MergeSHA = res.HeadSHA
-				if branch != "" {
-					res.Branch = branch
+			if s.registry != nil {
+				prNum, branch, targetID, err := s.registry.ResolvePRBySHA(ctx, res.Repo, res.HeadSHA)
+				if err != nil {
+					log.Printf("[webhooks-router] [registry] push failed resolving PR by SHA %s locally: %v", res.HeadSHA, err)
+				} else if prNum > 0 {
+					res.PRNumber = prNum
+					res.MergeSHA = res.HeadSHA
+					res.TargetID = targetID
+					if branch != "" {
+						res.Branch = branch
+					}
+					res.ResolutionSource = "local_pr_registry"
 				}
-				res.ResolutionSource = "commit_sha_lookup"
+			}
+
+			if res.PRNumber == 0 {
+				prNum, branch, err := s.resolvePRFromCommitSHA(ctx, res.Repo, res.HeadSHA)
+				if err != nil {
+					log.Printf("[webhooks-router] [github] push failed resolving PR for commit %s: %v", res.HeadSHA, err)
+				} else {
+					res.PRNumber = prNum
+					res.MergeSHA = res.HeadSHA
+					if branch != "" {
+						res.Branch = branch
+					}
+					res.ResolutionSource = "commit_sha_lookup"
+				}
 			}
 		}
-		log.Printf("[webhooks-router] [github] [push] repo=%s ref=%s head_sha=%s resolved_pr=%d source=%s delivery=%s",
-			res.Repo, p.Ref, res.HeadSHA, res.PRNumber, res.ResolutionSource, delivery)
+		log.Printf("[webhooks-router] [github] [push] repo=%s ref=%s head_sha=%s resolved_pr=%d branch=%s source=%s target_id=%s delivery=%s",
+			res.Repo, p.Ref, res.HeadSHA, res.PRNumber, res.Branch, res.ResolutionSource, res.TargetID, delivery)
 
 		if s.registry != nil && res.PRNumber > 0 && res.MergeSHA != "" {
-			if err := s.registry.BackfillPushMergeSHA(ctx, res.Repo, res.PRNumber, res.MergeSHA); err != nil {
+			targetID, err := s.registry.BackfillPushMergeSHA(ctx, res.Repo, res.PRNumber, res.MergeSHA)
+			if err != nil {
 				log.Printf("[webhooks-router] [registry] error backfilling push merge_sha: %v", err)
 				return nil, err
 			}
-			log.Printf("[webhooks-router] [registry] pr %s#%d backfilled merge_sha (%s)", res.Repo, res.PRNumber, res.MergeSHA)
+			if targetID != "" && res.TargetID == "" {
+				res.TargetID = targetID
+			}
+			log.Printf("[webhooks-router] [registry] pr %s#%d backfilled merge_sha (%s, target_id=%s)", res.Repo, res.PRNumber, res.MergeSHA, res.TargetID)
 		}
 		return res, nil
 
