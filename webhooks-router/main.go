@@ -217,11 +217,204 @@ func (w *GitHubWebhookWorker) Work(ctx context.Context, job *river.Job[GitHubWeb
 	return nil
 }
 
+// normalizeRepo ensures repository names are normalized with the owner prefix.
+func normalizeRepo(repo string) string {
+	repo = strings.TrimSpace(repo)
+	if repo == "" {
+		return ""
+	}
+	if !strings.Contains(repo, "/") {
+		return "azylman/" + repo
+	}
+	return repo
+}
+
+// PRRegistryUpdater defines the interface for updating PR lifecycle state in PostgreSQL pr_registry.
+type PRRegistryUpdater interface {
+	UpdatePRMerged(ctx context.Context, repo string, prNumber int, mergeSHA string) error
+	UpdatePRSync(ctx context.Context, repo string, prNumber int, headSHA string) error
+	UpdatePRClosedUnmerged(ctx context.Context, repo string, prNumber int) error
+	AtomicTransitionCIFailed(ctx context.Context, repo string, prNumber int) (targetID string, updated bool, err error)
+	AtomicTransitionCIFailedByHeadSHA(ctx context.Context, repo string, headSHA string) (targetID string, prNumber int, updated bool, err error)
+	BackfillPushMergeSHA(ctx context.Context, repo string, prNumber int, mergeSHA string) error
+}
+
+// PostgresPRRegistry implements PRRegistryUpdater backed by a pgxpool.Pool.
+type PostgresPRRegistry struct {
+	pool *pgxpool.Pool
+}
+
+// NewPostgresPRRegistry constructs a new PostgresPRRegistry.
+func NewPostgresPRRegistry(pool *pgxpool.Pool) *PostgresPRRegistry {
+	return &PostgresPRRegistry{pool: pool}
+}
+
+func (r *PostgresPRRegistry) UpdatePRMerged(ctx context.Context, repo string, prNumber int, mergeSHA string) error {
+	repo = normalizeRepo(repo)
+	if repo == "" || prNumber <= 0 {
+		return nil
+	}
+	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	query := `
+		UPDATE pr_registry
+		SET status = 'merged',
+			merge_sha = CASE WHEN $1 != '' THEN $1 ELSE merge_sha END,
+			updated_at = CURRENT_TIMESTAMP
+		WHERE repo = $2 AND pr_number = $3;
+	`
+	tag, err := r.pool.Exec(qCtx, query, strings.TrimSpace(mergeSHA), repo, prNumber)
+	if err != nil {
+		return fmt.Errorf("update pr merged: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		log.Printf("[webhooks-router] [registry] pr not found in registry (untracked): repo=%s pr=%d", repo, prNumber)
+	}
+	return nil
+}
+
+func (r *PostgresPRRegistry) UpdatePRClosedUnmerged(ctx context.Context, repo string, prNumber int) error {
+	repo = normalizeRepo(repo)
+	if repo == "" || prNumber <= 0 {
+		return nil
+	}
+	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	query := `
+		UPDATE pr_registry
+		SET status = 'closed',
+			updated_at = CURRENT_TIMESTAMP
+		WHERE repo = $1 AND pr_number = $2;
+	`
+	tag, err := r.pool.Exec(qCtx, query, repo, prNumber)
+	if err != nil {
+		return fmt.Errorf("update pr closed unmerged: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		log.Printf("[webhooks-router] [registry] pr not found in registry (untracked): repo=%s pr=%d", repo, prNumber)
+	}
+	return nil
+}
+
+func (r *PostgresPRRegistry) UpdatePRSync(ctx context.Context, repo string, prNumber int, headSHA string) error {
+	repo = normalizeRepo(repo)
+	if repo == "" || prNumber <= 0 {
+		return nil
+	}
+	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	query := `
+		UPDATE pr_registry
+		SET head_sha = $1,
+			status = 'open',
+			updated_at = CURRENT_TIMESTAMP
+		WHERE repo = $2 AND pr_number = $3;
+	`
+	tag, err := r.pool.Exec(qCtx, query, strings.TrimSpace(headSHA), repo, prNumber)
+	if err != nil {
+		return fmt.Errorf("update pr sync: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		log.Printf("[webhooks-router] [registry] pr not found in registry (untracked): repo=%s pr=%d", repo, prNumber)
+	}
+	return nil
+}
+
+func (r *PostgresPRRegistry) AtomicTransitionCIFailed(ctx context.Context, repo string, prNumber int) (string, bool, error) {
+	repo = normalizeRepo(repo)
+	if repo == "" || prNumber <= 0 {
+		return "", false, nil
+	}
+	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	query := `
+		UPDATE pr_registry
+		SET status = 'ci_failed',
+			updated_at = CURRENT_TIMESTAMP
+		WHERE repo = $1 AND pr_number = $2 AND status NOT IN ('ci_failed', 'merged', 'closed')
+		RETURNING target_id;
+	`
+	var targetID string
+	err := r.pool.QueryRow(qCtx, query, repo, prNumber).Scan(&targetID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		log.Printf("[webhooks-router] [registry] ci_failed transition skipped (already terminal or untracked): repo=%s pr=%d", repo, prNumber)
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("atomic transition ci_failed: %w", err)
+	}
+	return targetID, true, nil
+}
+
+func (r *PostgresPRRegistry) AtomicTransitionCIFailedByHeadSHA(ctx context.Context, repo string, headSHA string) (string, int, bool, error) {
+	repo = normalizeRepo(repo)
+	headSHA = strings.TrimSpace(headSHA)
+	if repo == "" || headSHA == "" || isZeroSHA(headSHA) {
+		return "", 0, false, nil
+	}
+	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	query := `
+		UPDATE pr_registry
+		SET status = 'ci_failed',
+			updated_at = CURRENT_TIMESTAMP
+		WHERE id = (
+			SELECT id FROM pr_registry
+			WHERE repo = $1 AND head_sha = $2 AND status NOT IN ('ci_failed', 'merged', 'closed')
+			ORDER BY updated_at DESC
+			LIMIT 1
+		)
+		RETURNING target_id, pr_number;
+	`
+	var targetID string
+	var prNumber int
+	err := r.pool.QueryRow(qCtx, query, repo, headSHA).Scan(&targetID, &prNumber)
+	if errors.Is(err, pgx.ErrNoRows) {
+		log.Printf("[webhooks-router] [registry] ci_failed by head_sha skipped (already terminal or untracked): repo=%s sha=%s", repo, headSHA)
+		return "", 0, false, nil
+	}
+	if err != nil {
+		return "", 0, false, fmt.Errorf("atomic transition ci_failed by head_sha: %w", err)
+	}
+	return targetID, prNumber, true, nil
+}
+
+func (r *PostgresPRRegistry) BackfillPushMergeSHA(ctx context.Context, repo string, prNumber int, mergeSHA string) error {
+	repo = normalizeRepo(repo)
+	if repo == "" || prNumber <= 0 {
+		return nil
+	}
+	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	query := `
+		UPDATE pr_registry
+		SET merge_sha = $1,
+			status = 'merged',
+			updated_at = CURRENT_TIMESTAMP
+		WHERE repo = $2 AND pr_number = $3;
+	`
+	tag, err := r.pool.Exec(qCtx, query, strings.TrimSpace(mergeSHA), repo, prNumber)
+	if err != nil {
+		return fmt.Errorf("backfill push merge_sha: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		log.Printf("[webhooks-router] [registry] pr not found in registry (untracked): repo=%s pr=%d", repo, prNumber)
+	}
+	return nil
+}
+
 // RouterServer handles webhook requests and orchestrates secret synchronization.
 type RouterServer struct {
 	cfg         Config
 	httpClient  *http.Client
 	riverClient RiverInserter
+	registry    PRRegistryUpdater
 	onProcessed func(event, delivery string)
 }
 
@@ -243,6 +436,11 @@ func NewRouterServer(cfg Config, client *http.Client, riverClient ...RiverInsert
 // SetRiverClient assigns the RiverInserter instance to RouterServer.
 func (s *RouterServer) SetRiverClient(rc RiverInserter) {
 	s.riverClient = rc
+}
+
+// SetRegistry assigns the PRRegistryUpdater instance to RouterServer.
+func (s *RouterServer) SetRegistry(reg PRRegistryUpdater) {
+	s.registry = reg
 }
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
@@ -597,6 +795,30 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 		res.ResolutionSource = "pull_request_payload"
 		log.Printf("[webhooks-router] [github] [pull_request] repo=%s pr=%d action=%s head_sha=%s merge_sha=%s branch=%s merged=%v sender=%s delivery=%s",
 			res.Repo, res.PRNumber, res.Action, res.HeadSHA, res.MergeSHA, res.Branch, p.PullRequest.Merged, res.Sender, delivery)
+
+		if s.registry != nil && res.PRNumber > 0 {
+			if res.Action == "closed" {
+				if p.PullRequest.Merged {
+					if err := s.registry.UpdatePRMerged(ctx, res.Repo, res.PRNumber, res.MergeSHA); err != nil {
+						log.Printf("[webhooks-router] [registry] error updating pr merged: %v", err)
+						return nil, err
+					}
+					log.Printf("[webhooks-router] [registry] pr %s#%d updated to merged (merge_sha=%s)", res.Repo, res.PRNumber, res.MergeSHA)
+				} else {
+					if err := s.registry.UpdatePRClosedUnmerged(ctx, res.Repo, res.PRNumber); err != nil {
+						log.Printf("[webhooks-router] [registry] error updating pr closed: %v", err)
+						return nil, err
+					}
+					log.Printf("[webhooks-router] [registry] pr %s#%d updated to closed (unmerged)", res.Repo, res.PRNumber)
+				}
+			} else if res.Action == "synchronize" {
+				if err := s.registry.UpdatePRSync(ctx, res.Repo, res.PRNumber, res.HeadSHA); err != nil {
+					log.Printf("[webhooks-router] [registry] error updating pr synchronize: %v", err)
+					return nil, err
+				}
+				log.Printf("[webhooks-router] [registry] pr %s#%d synchronized (head_sha=%s, status=open)", res.Repo, res.PRNumber, res.HeadSHA)
+			}
+		}
 		return res, nil
 
 	case "check_run":
@@ -627,6 +849,28 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 		}
 		log.Printf("[webhooks-router] [github] [check_run] repo=%s check=%q head_sha=%s pr=%d branch=%s status=%s conclusion=%s source=%s delivery=%s",
 			res.Repo, res.CheckName, res.HeadSHA, res.PRNumber, res.Branch, res.Status, res.Conclusion, res.ResolutionSource, delivery)
+
+		if s.registry != nil && (res.Conclusion == "failure" || res.Conclusion == "timed_out") {
+			if res.PRNumber > 0 {
+				targetID, updated, err := s.registry.AtomicTransitionCIFailed(ctx, res.Repo, res.PRNumber)
+				if err != nil {
+					log.Printf("[webhooks-router] [registry] error transitioning pr ci_failed: %v", err)
+					return nil, err
+				}
+				if updated {
+					log.Printf("[webhooks-router] [registry] pr %s#%d transitioned to ci_failed (check=%s, target_id=%s)", res.Repo, res.PRNumber, res.CheckName, targetID)
+				}
+			} else if res.HeadSHA != "" && !isZeroSHA(res.HeadSHA) {
+				targetID, prNum, updated, err := s.registry.AtomicTransitionCIFailedByHeadSHA(ctx, res.Repo, res.HeadSHA)
+				if err != nil {
+					log.Printf("[webhooks-router] [registry] error transitioning head_sha ci_failed: %v", err)
+					return nil, err
+				}
+				if updated {
+					log.Printf("[webhooks-router] [registry] commit %s (pr %s#%d) transitioned to ci_failed (check=%s, target_id=%s)", res.HeadSHA, res.Repo, prNum, res.CheckName, targetID)
+				}
+			}
+		}
 		return res, nil
 
 	case "workflow_run":
@@ -659,6 +903,28 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 		}
 		log.Printf("[webhooks-router] [github] [workflow_run] repo=%s workflow=%q head_sha=%s pr=%d branch=%s status=%s conclusion=%s source=%s delivery=%s",
 			res.Repo, res.CheckName, res.HeadSHA, res.PRNumber, res.Branch, res.Status, res.Conclusion, res.ResolutionSource, delivery)
+
+		if s.registry != nil && (res.Conclusion == "failure" || res.Conclusion == "timed_out") {
+			if res.PRNumber > 0 {
+				targetID, updated, err := s.registry.AtomicTransitionCIFailed(ctx, res.Repo, res.PRNumber)
+				if err != nil {
+					log.Printf("[webhooks-router] [registry] error transitioning pr ci_failed: %v", err)
+					return nil, err
+				}
+				if updated {
+					log.Printf("[webhooks-router] [registry] pr %s#%d transitioned to ci_failed (workflow=%s, target_id=%s)", res.Repo, res.PRNumber, res.CheckName, targetID)
+				}
+			} else if res.HeadSHA != "" && !isZeroSHA(res.HeadSHA) {
+				targetID, prNum, updated, err := s.registry.AtomicTransitionCIFailedByHeadSHA(ctx, res.Repo, res.HeadSHA)
+				if err != nil {
+					log.Printf("[webhooks-router] [registry] error transitioning head_sha ci_failed: %v", err)
+					return nil, err
+				}
+				if updated {
+					log.Printf("[webhooks-router] [registry] commit %s (pr %s#%d) transitioned to ci_failed (workflow=%s, target_id=%s)", res.HeadSHA, res.Repo, prNum, res.CheckName, targetID)
+				}
+			}
+		}
 		return res, nil
 
 	case "push":
@@ -703,6 +969,14 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 		}
 		log.Printf("[webhooks-router] [github] [push] repo=%s ref=%s head_sha=%s resolved_pr=%d source=%s delivery=%s",
 			res.Repo, p.Ref, res.HeadSHA, res.PRNumber, res.ResolutionSource, delivery)
+
+		if s.registry != nil && res.PRNumber > 0 && res.MergeSHA != "" {
+			if err := s.registry.BackfillPushMergeSHA(ctx, res.Repo, res.PRNumber, res.MergeSHA); err != nil {
+				log.Printf("[webhooks-router] [registry] error backfilling push merge_sha: %v", err)
+				return nil, err
+			}
+			log.Printf("[webhooks-router] [registry] pr %s#%d backfilled merge_sha (%s)", res.Repo, res.PRNumber, res.MergeSHA)
+		}
 		return res, nil
 
 	default:
@@ -956,6 +1230,7 @@ func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error
 		}
 		defer pool.Close()
 		dbPool = pool
+		server.SetRegistry(NewPostgresPRRegistry(dbPool))
 
 		workers := river.NewWorkers()
 		river.AddWorker(workers, &GitHubWebhookWorker{server: server})

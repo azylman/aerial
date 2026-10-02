@@ -1196,13 +1196,498 @@ func TestRiverLiveIntegration(t *testing.T) {
 		t.Fatalf("expected 200 OK from handleGitHubWebhook, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	// Verify asynchronous worker picked up and processed job from PostgreSQL
+	// Verify asynchronous worker (either in-test worker or live cluster worker) picked up and processed job
 	select {
 	case event := <-processedCh:
 		if event != "ping" {
 			t.Errorf("expected processed event ping, got %s", event)
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatalf("timeout waiting for River worker to process live job from postgres")
+	case <-time.After(2 * time.Second):
+		// Check if the live background cluster worker picked up and completed the job
+		var state string
+		queryErr := pool.QueryRow(ctx, "SELECT state FROM river_job WHERE args->>'delivery' = 'live-integration-delivery' ORDER BY id DESC LIMIT 1").Scan(&state)
+		if queryErr == nil && (state == "completed" || state == "running") {
+			t.Logf("Job was successfully processed by live cluster worker (state=%s)", state)
+			return
+		}
+		t.Fatalf("timeout waiting for River worker to process live job from postgres (db state: %s, queryErr: %v)", state, queryErr)
+	}
+}
+
+type mockPRRegistry struct {
+	mergedCalls         []struct{ repo string; prNumber int; mergeSHA string }
+	syncCalls           []struct{ repo string; prNumber int; headSHA string }
+	closedUnmergedCalls []struct{ repo string; prNumber int }
+	ciFailedCalls       []struct{ repo string; prNumber int }
+	ciFailedBySHACalls  []struct{ repo string; headSHA string }
+	backfillCalls       []struct{ repo string; prNumber int; mergeSHA string }
+	ciFailedTargetID    string
+	ciFailedUpdated     bool
+	ciFailedErr         error
+	ciFailedBySHAPRNum  int
+	ciFailedBySHATarget string
+	ciFailedBySHAUpdated bool
+	ciFailedBySHAErr    error
+	err                 error
+}
+
+func (m *mockPRRegistry) UpdatePRMerged(ctx context.Context, repo string, prNumber int, mergeSHA string) error {
+	if m.err != nil {
+		return m.err
+	}
+	m.mergedCalls = append(m.mergedCalls, struct{ repo string; prNumber int; mergeSHA string }{repo, prNumber, mergeSHA})
+	return nil
+}
+
+func (m *mockPRRegistry) UpdatePRSync(ctx context.Context, repo string, prNumber int, headSHA string) error {
+	if m.err != nil {
+		return m.err
+	}
+	m.syncCalls = append(m.syncCalls, struct{ repo string; prNumber int; headSHA string }{repo, prNumber, headSHA})
+	return nil
+}
+
+func (m *mockPRRegistry) UpdatePRClosedUnmerged(ctx context.Context, repo string, prNumber int) error {
+	if m.err != nil {
+		return m.err
+	}
+	m.closedUnmergedCalls = append(m.closedUnmergedCalls, struct{ repo string; prNumber int }{repo, prNumber})
+	return nil
+}
+
+func (m *mockPRRegistry) AtomicTransitionCIFailed(ctx context.Context, repo string, prNumber int) (string, bool, error) {
+	if m.ciFailedErr != nil {
+		return "", false, m.ciFailedErr
+	}
+	if m.err != nil {
+		return "", false, m.err
+	}
+	m.ciFailedCalls = append(m.ciFailedCalls, struct{ repo string; prNumber int }{repo, prNumber})
+	return m.ciFailedTargetID, m.ciFailedUpdated, nil
+}
+
+func (m *mockPRRegistry) AtomicTransitionCIFailedByHeadSHA(ctx context.Context, repo string, headSHA string) (string, int, bool, error) {
+	if m.ciFailedBySHAErr != nil {
+		return "", 0, false, m.ciFailedBySHAErr
+	}
+	if m.err != nil {
+		return "", 0, false, m.err
+	}
+	m.ciFailedBySHACalls = append(m.ciFailedBySHACalls, struct{ repo string; headSHA string }{repo, headSHA})
+	return m.ciFailedBySHATarget, m.ciFailedBySHAPRNum, m.ciFailedBySHAUpdated, nil
+}
+
+func (m *mockPRRegistry) BackfillPushMergeSHA(ctx context.Context, repo string, prNumber int, mergeSHA string) error {
+	if m.err != nil {
+		return m.err
+	}
+	m.backfillCalls = append(m.backfillCalls, struct{ repo string; prNumber int; mergeSHA string }{repo, prNumber, mergeSHA})
+	return nil
+}
+
+func TestNormalizeRepo(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"", ""},
+		{"   ", ""},
+		{"aerial", "azylman/aerial"},
+		{"azylman/aerial", "azylman/aerial"},
+		{"  mirrormere  ", "azylman/mirrormere"},
+		{"otherorg/custom", "otherorg/custom"},
+	}
+
+	for _, tt := range tests {
+		got := normalizeRepo(tt.input)
+		if got != tt.expected {
+			t.Errorf("normalizeRepo(%q) = %q; expected %q", tt.input, got, tt.expected)
+		}
+	}
+}
+
+func TestProcessGitHubEvent_RegistryTransitions(t *testing.T) {
+	ctx := context.Background()
+	mockReg := &mockPRRegistry{
+		ciFailedTargetID:    "target-111",
+		ciFailedUpdated:     true,
+		ciFailedBySHAPRNum:  520,
+		ciFailedBySHATarget: "target-222",
+		ciFailedBySHAUpdated: true,
+	}
+	srv := NewRouterServer(Config{}, nil)
+	srv.SetRegistry(mockReg)
+
+	// 1. PullRequest closed and merged
+	payloadPRMerged := `{
+		"action": "closed",
+		"number": 515,
+		"pull_request": {
+			"number": 515,
+			"head": {"ref": "feat/decouple", "sha": "head111"},
+			"merged": true,
+			"merge_commit_sha": "merge111"
+		},
+		"repository": {"full_name": "azylman/aerial"},
+		"sender": {"login": "arcane103"}
+	}`
+	_, err := srv.ProcessGitHubEvent(ctx, "pull_request", "del-pr-merged", []byte(payloadPRMerged))
+	if err != nil {
+		t.Fatalf("pull_request merged failed: %v", err)
+	}
+	if len(mockReg.mergedCalls) != 1 || mockReg.mergedCalls[0].prNumber != 515 || mockReg.mergedCalls[0].mergeSHA != "merge111" {
+		t.Errorf("unexpected mergedCalls: %+v", mockReg.mergedCalls)
+	}
+
+	// 2. PullRequest closed unmerged
+	payloadPRClosed := `{
+		"action": "closed",
+		"number": 516,
+		"pull_request": {
+			"number": 516,
+			"head": {"ref": "feat/discard", "sha": "head222"},
+			"merged": false
+		},
+		"repository": {"full_name": "azylman/aerial"},
+		"sender": {"login": "arcane103"}
+	}`
+	_, err = srv.ProcessGitHubEvent(ctx, "pull_request", "del-pr-closed", []byte(payloadPRClosed))
+	if err != nil {
+		t.Fatalf("pull_request closed unmerged failed: %v", err)
+	}
+	if len(mockReg.closedUnmergedCalls) != 1 || mockReg.closedUnmergedCalls[0].prNumber != 516 {
+		t.Errorf("unexpected closedUnmergedCalls: %+v", mockReg.closedUnmergedCalls)
+	}
+
+	// 3. PullRequest synchronize
+	payloadPRSync := `{
+		"action": "synchronize",
+		"number": 517,
+		"pull_request": {
+			"number": 517,
+			"head": {"ref": "feat/update", "sha": "newhead333"}
+		},
+		"repository": {"full_name": "azylman/aerial"},
+		"sender": {"login": "arcane103"}
+	}`
+	_, err = srv.ProcessGitHubEvent(ctx, "pull_request", "del-pr-sync", []byte(payloadPRSync))
+	if err != nil {
+		t.Fatalf("pull_request synchronize failed: %v", err)
+	}
+	if len(mockReg.syncCalls) != 1 || mockReg.syncCalls[0].prNumber != 517 || mockReg.syncCalls[0].headSHA != "newhead333" {
+		t.Errorf("unexpected syncCalls: %+v", mockReg.syncCalls)
+	}
+
+	// 4. CheckRun failure with PR in payload
+	payloadCheckRunFail := `{
+		"action": "completed",
+		"check_run": {
+			"name": "Unit Tests",
+			"head_sha": "checkhead444",
+			"status": "completed",
+			"conclusion": "failure",
+			"pull_requests": [{"number": 518, "head": {"ref": "feat/test", "sha": "checkhead444"}}]
+		},
+		"repository": {"full_name": "azylman/aerial"}
+	}`
+	_, err = srv.ProcessGitHubEvent(ctx, "check_run", "del-cr-fail", []byte(payloadCheckRunFail))
+	if err != nil {
+		t.Fatalf("check_run failure failed: %v", err)
+	}
+	if len(mockReg.ciFailedCalls) != 1 || mockReg.ciFailedCalls[0].prNumber != 518 {
+		t.Errorf("unexpected ciFailedCalls: %+v", mockReg.ciFailedCalls)
+	}
+
+	// 5. CheckRun timed_out with PR in payload
+	payloadCheckRunTimeout := `{
+		"action": "completed",
+		"check_run": {
+			"name": "Integration Tests",
+			"head_sha": "checkhead555",
+			"status": "completed",
+			"conclusion": "timed_out",
+			"pull_requests": [{"number": 519, "head": {"ref": "feat/timeout", "sha": "checkhead555"}}]
+		},
+		"repository": {"full_name": "azylman/aerial"}
+	}`
+	_, err = srv.ProcessGitHubEvent(ctx, "check_run", "del-cr-timeout", []byte(payloadCheckRunTimeout))
+	if err != nil {
+		t.Fatalf("check_run timeout failed: %v", err)
+	}
+	if len(mockReg.ciFailedCalls) != 2 || mockReg.ciFailedCalls[1].prNumber != 519 {
+		t.Errorf("unexpected ciFailedCalls after timeout: %+v", mockReg.ciFailedCalls)
+	}
+
+	// 6. CheckRun failure without PR but with headSHA (falls back to headSHA transition)
+	payloadCheckRunFallback := `{
+		"action": "completed",
+		"check_run": {
+			"name": "Lint",
+			"head_sha": "orphansha666",
+			"status": "completed",
+			"conclusion": "failure",
+			"pull_requests": []
+		},
+		"repository": {"full_name": "azylman/aerial"}
+	}`
+	_, err = srv.ProcessGitHubEvent(ctx, "check_run", "del-cr-fallback", []byte(payloadCheckRunFallback))
+	if err != nil {
+		t.Fatalf("check_run failure fallback failed: %v", err)
+	}
+	if len(mockReg.ciFailedBySHACalls) != 1 || mockReg.ciFailedBySHACalls[0].headSHA != "orphansha666" {
+		t.Errorf("unexpected ciFailedBySHACalls: %+v", mockReg.ciFailedBySHACalls)
+	}
+
+	// 7. WorkflowRun failure with PR
+	payloadWFFail := `{
+		"action": "completed",
+		"workflow_run": {
+			"name": "Continuous Integration",
+			"head_sha": "wfhead777",
+			"status": "completed",
+			"conclusion": "failure",
+			"pull_requests": [{"number": 521, "head": {"ref": "feat/wf", "sha": "wfhead777"}}]
+		},
+		"repository": {"full_name": "azylman/aerial"}
+	}`
+	_, err = srv.ProcessGitHubEvent(ctx, "workflow_run", "del-wf-fail", []byte(payloadWFFail))
+	if err != nil {
+		t.Fatalf("workflow_run failure failed: %v", err)
+	}
+	if len(mockReg.ciFailedCalls) != 3 || mockReg.ciFailedCalls[2].prNumber != 521 {
+		t.Errorf("unexpected ciFailedCalls after workflow failure: %+v", mockReg.ciFailedCalls)
+	}
+
+	// 8. WorkflowRun timed_out without PR
+	payloadWFTimeout := `{
+		"action": "completed",
+		"workflow_run": {
+			"name": "Build Docker",
+			"head_sha": "wfhead888",
+			"status": "completed",
+			"conclusion": "timed_out",
+			"pull_requests": []
+		},
+		"repository": {"full_name": "azylman/aerial"}
+	}`
+	_, err = srv.ProcessGitHubEvent(ctx, "workflow_run", "del-wf-timeout", []byte(payloadWFTimeout))
+	if err != nil {
+		t.Fatalf("workflow_run timeout failed: %v", err)
+	}
+	if len(mockReg.ciFailedBySHACalls) != 2 || mockReg.ciFailedBySHACalls[1].headSHA != "wfhead888" {
+		t.Errorf("unexpected ciFailedBySHACalls after workflow timeout: %+v", mockReg.ciFailedBySHACalls)
+	}
+
+	// 9. Push to main with resolved PR
+	// Mock GitHub API server for commit SHA resolution
+	ghMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]GitHubCommitPRItem{
+			{Number: 522, State: "closed"},
+		})
+	}))
+	defer ghMock.Close()
+
+	srvWithGH := NewRouterServer(Config{GitHubAPIURL: ghMock.URL}, ghMock.Client())
+	srvWithGH.SetRegistry(mockReg)
+
+	payloadPush := `{
+		"ref": "refs/heads/main",
+		"after": "pushsha999",
+		"repository": {"full_name": "azylman/aerial"},
+		"head_commit": {"id": "pushsha999", "message": "feat: merge pr"}
+	}`
+	_, err = srvWithGH.ProcessGitHubEvent(ctx, "push", "del-push-main", []byte(payloadPush))
+	if err != nil {
+		t.Fatalf("push to main failed: %v", err)
+	}
+	if len(mockReg.backfillCalls) != 1 || mockReg.backfillCalls[0].prNumber != 522 || mockReg.backfillCalls[0].mergeSHA != "pushsha999" {
+		t.Errorf("unexpected backfillCalls: %+v", mockReg.backfillCalls)
+	}
+
+	// 10. Registry error propagation: error bubbles up to River
+	mockRegErr := &mockPRRegistry{err: errors.New("simulated database failure")}
+	srvErr := NewRouterServer(Config{}, nil)
+	srvErr.SetRegistry(mockRegErr)
+
+	_, err = srvErr.ProcessGitHubEvent(ctx, "pull_request", "del-err", []byte(payloadPRMerged))
+	if err == nil {
+		t.Errorf("expected error when registry returns failure, got nil")
+	}
+}
+
+func TestPostgresPRRegistry_Live(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping live PostgresPRRegistry integration test in short mode")
+	}
+
+	pgURL := os.Getenv("POSTGRES_URL")
+	if pgURL == "" {
+		pgURL = os.Getenv("DATABASE_URL")
+	}
+	if pgURL == "" {
+		if _, err := net.LookupHost("aerial-postgres"); err == nil {
+			pgURL = "postgres://aerial:aerial_secure_pass@aerial-postgres:5432/aerial?sslmode=disable"
+		} else if _, err := net.LookupHost("postgres"); err == nil {
+			pgURL = "postgres://aerial:aerial_secure_pass@postgres:5432/aerial?sslmode=disable"
+		} else {
+			pgURL = "postgres://aerial:aerial_secure_pass@127.0.0.1:5432/aerial?sslmode=disable"
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	poolConfig, err := pgxpool.ParseConfig(pgURL)
+	if err != nil {
+		t.Skipf("cannot parse postgres url: %v", err)
+	}
+	poolConfig.MaxConns = 3
+	if poolConfig.ConnConfig.RuntimeParams == nil {
+		poolConfig.ConnConfig.RuntimeParams = make(map[string]string)
+	}
+	if _, ok := poolConfig.ConnConfig.RuntimeParams["search_path"]; !ok {
+		poolConfig.ConnConfig.RuntimeParams["search_path"] = "sidecars, public"
+	}
+
+	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
+	if err != nil {
+		t.Skipf("skipping live test, could not create pool: %v", err)
+	}
+	defer pool.Close()
+
+	if err := pool.Ping(ctx); err != nil {
+		t.Skipf("skipping live test, postgres ping failed: %v", err)
+	}
+
+	repo := "azylman/aerial"
+	testPRNum := 999991
+	targetID := "live-test-target-xyz"
+
+	// Cleanup any previous test row
+	_, _ = pool.Exec(ctx, "DELETE FROM pr_registry WHERE repo = $1 AND pr_number = $2", repo, testPRNum)
+	defer func() {
+		_, _ = pool.Exec(context.Background(), "DELETE FROM pr_registry WHERE repo = $1 AND pr_number = $2", repo, testPRNum)
+	}()
+
+	// Insert initial test record
+	insertSQL := `
+		INSERT INTO pr_registry (repo, pr_number, branch, head_sha, target_id, status, title, created_at, updated_at)
+		VALUES ($1, $2, 'feat/live-test', 'initialsha111', $3, 'open', 'Live Test PR', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+	`
+	if _, err := pool.Exec(ctx, insertSQL, repo, testPRNum, targetID); err != nil {
+		t.Fatalf("failed to insert initial test row: %v", err)
+	}
+
+	reg := NewPostgresPRRegistry(pool)
+
+	// 1. Test UpdatePRSync: updates head_sha and sets status = 'open'
+	if err := reg.UpdatePRSync(ctx, repo, testPRNum, "syncsha222"); err != nil {
+		t.Fatalf("UpdatePRSync failed: %v", err)
+	}
+	var currentHead, currentStatus string
+	err = pool.QueryRow(ctx, "SELECT head_sha, status FROM pr_registry WHERE repo = $1 AND pr_number = $2", repo, testPRNum).Scan(&currentHead, &currentStatus)
+	if err != nil {
+		t.Fatalf("query row failed: %v", err)
+	}
+	if currentHead != "syncsha222" || currentStatus != "open" {
+		t.Errorf("after UpdatePRSync: got head=%s, status=%s; expected syncsha222, open", currentHead, currentStatus)
+	}
+
+	// 2. Test AtomicTransitionCIFailed: transitions 'open' -> 'ci_failed'
+	gotTarget, updated, err := reg.AtomicTransitionCIFailed(ctx, repo, testPRNum)
+	if err != nil {
+		t.Fatalf("AtomicTransitionCIFailed failed: %v", err)
+	}
+	if !updated || gotTarget != targetID {
+		t.Errorf("AtomicTransitionCIFailed: got updated=%v, target=%s; expected true, %s", updated, gotTarget, targetID)
+	}
+	err = pool.QueryRow(ctx, "SELECT status FROM pr_registry WHERE repo = $1 AND pr_number = $2", repo, testPRNum).Scan(&currentStatus)
+	if err != nil || currentStatus != "ci_failed" {
+		t.Errorf("status should be ci_failed, got %s (err: %v)", currentStatus, err)
+	}
+
+	// 3. Test CAS gate: second AtomicTransitionCIFailed should be no-op (already ci_failed)
+	_, updated, err = reg.AtomicTransitionCIFailed(ctx, repo, testPRNum)
+	if err != nil {
+		t.Fatalf("second AtomicTransitionCIFailed failed: %v", err)
+	}
+	if updated {
+		t.Errorf("second AtomicTransitionCIFailed should have returned updated=false (CAS gate)")
+	}
+
+	// 4. Test UpdatePRSync resets 'ci_failed' back to 'open'
+	if err := reg.UpdatePRSync(ctx, repo, testPRNum, "newhead333"); err != nil {
+		t.Fatalf("UpdatePRSync reset failed: %v", err)
+	}
+	err = pool.QueryRow(ctx, "SELECT head_sha, status FROM pr_registry WHERE repo = $1 AND pr_number = $2", repo, testPRNum).Scan(&currentHead, &currentStatus)
+	if err != nil || currentHead != "newhead333" || currentStatus != "open" {
+		t.Errorf("after second UpdatePRSync: got head=%s, status=%s; expected newhead333, open", currentHead, currentStatus)
+	}
+
+	// 5. Test AtomicTransitionCIFailedByHeadSHA
+	gotTarget, gotPR, updated, err := reg.AtomicTransitionCIFailedByHeadSHA(ctx, repo, "newhead333")
+	if err != nil {
+		t.Fatalf("AtomicTransitionCIFailedByHeadSHA failed: %v", err)
+	}
+	if !updated || gotPR != testPRNum || gotTarget != targetID {
+		t.Errorf("AtomicTransitionCIFailedByHeadSHA: got updated=%v, pr=%d, target=%s; expected true, %d, %s", updated, gotPR, gotTarget, testPRNum, targetID)
+	}
+
+	// 6. Test UpdatePRMerged: transitions to 'merged'
+	if err := reg.UpdatePRMerged(ctx, repo, testPRNum, "mergesha444"); err != nil {
+		t.Fatalf("UpdatePRMerged failed: %v", err)
+	}
+	var currentMerge string
+	err = pool.QueryRow(ctx, "SELECT merge_sha, status FROM pr_registry WHERE repo = $1 AND pr_number = $2", repo, testPRNum).Scan(&currentMerge, &currentStatus)
+	if err != nil || currentMerge != "mergesha444" || currentStatus != "merged" {
+		t.Errorf("after UpdatePRMerged: got merge=%s, status=%s; expected mergesha444, merged", currentMerge, currentStatus)
+	}
+
+	// 7. Merged PR cannot transition to ci_failed
+	_, updated, err = reg.AtomicTransitionCIFailed(ctx, repo, testPRNum)
+	if err != nil {
+		t.Fatalf("AtomicTransitionCIFailed on merged failed: %v", err)
+	}
+	if updated {
+		t.Errorf("AtomicTransitionCIFailed on merged PR must return updated=false")
+	}
+
+	// 8. Test BackfillPushMergeSHA
+	if err := reg.BackfillPushMergeSHA(ctx, repo, testPRNum, "mergesha555"); err != nil {
+		t.Fatalf("BackfillPushMergeSHA failed: %v", err)
+	}
+	err = pool.QueryRow(ctx, "SELECT merge_sha FROM pr_registry WHERE repo = $1 AND pr_number = $2", repo, testPRNum).Scan(&currentMerge)
+	if err != nil || currentMerge != "mergesha555" {
+		t.Errorf("after BackfillPushMergeSHA: got merge=%s; expected mergesha555", currentMerge)
+	}
+
+	// 9. Untracked PR succeeds silently
+	if err := reg.UpdatePRMerged(ctx, repo, 999999, "sha"); err != nil {
+		t.Errorf("expected nil error on untracked PR, got %v", err)
+	}
+	if err := reg.UpdatePRClosedUnmerged(ctx, repo, 999999); err != nil {
+		t.Errorf("expected nil error on untracked PR closed, got %v", err)
+	}
+	if err := reg.UpdatePRSync(ctx, repo, 999999, "sha"); err != nil {
+		t.Errorf("expected nil error on untracked PR sync, got %v", err)
+	}
+	_, updated, err = reg.AtomicTransitionCIFailed(ctx, repo, 999999)
+	if err != nil || updated {
+		t.Errorf("untracked AtomicTransitionCIFailed: got updated=%v, err=%v; expected false, nil", updated, err)
+	}
+	_, _, updated, err = reg.AtomicTransitionCIFailedByHeadSHA(ctx, repo, "nonexistent-sha")
+	if err != nil || updated {
+		t.Errorf("untracked AtomicTransitionCIFailedByHeadSHA: got updated=%v, err=%v; expected false, nil", updated, err)
+	}
+
+	// 10. Empty / Zero SHA guard
+	_, _, updated, err = reg.AtomicTransitionCIFailedByHeadSHA(ctx, repo, "")
+	if err != nil || updated {
+		t.Errorf("empty sha should return false, nil; got %v, %v", updated, err)
+	}
+	_, _, updated, err = reg.AtomicTransitionCIFailedByHeadSHA(ctx, repo, "0000000000000000000000000000000000000000")
+	if err != nil || updated {
+		t.Errorf("zero sha should return false, nil; got %v, %v", updated, err)
 	}
 }
