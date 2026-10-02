@@ -93,13 +93,9 @@ services:
         condition: service_healthy
       scheduler-mcp:
         condition: service_healthy
-      docker-mcp:
-        condition: service_started
       github-mcp:
         condition: service_started
       discord-mcp:
-        condition: service_started
-      victoriametrics-mcp:
         condition: service_started
       openobserve:
         condition: service_started
@@ -227,33 +223,6 @@ services:
       start_period: 10s
       start_interval: 2s
 
-  # ----------------------------------------------------------------------------
-  # 6. Outbound MCP: Docker Host MCP Server
-  #    Wraps the official mcp/docker image with supergateway translation proxy.
-  # ----------------------------------------------------------------------------
-  docker-mcp:
-    image: ghcr.io/azylman/aerial-docker-mcp:latest
-    build: ./docker-mcp
-    container_name: aerial-docker-mcp
-    restart: unless-stopped
-    init: true
-    labels:
-      autoheal: "true"
-    environment:
-      - PORT=4002
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-    ports:
-      - "${DOCKER_MCP_HOST_PORT:-4002}:4002"
-    networks:
-      - aerial-net
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS -X OPTIONS http://127.0.0.1:4002/mcp || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-      start_interval: 2s
 
   # ----------------------------------------------------------------------------
   # 7. Outbound MCP: GitHub MCP Server
@@ -505,73 +474,6 @@ services:
         condition: service_healthy
 
   # ----------------------------------------------------------------------------
-  # 13. Observability: cAdvisor Container Metrics Collector
-  #     Gathers per-container CPU, memory, network, and disk telemetry.
-  # ----------------------------------------------------------------------------
-  cadvisor:
-    image: gcr.io/cadvisor/cadvisor:v0.49.1
-    container_name: aerial-cadvisor
-    restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
-    labels:
-      autoheal: "true"
-    command:
-      - "--docker_only=true"
-      - "--housekeeping_interval=15s"
-      - "--disable_metrics=percpu,sched,tcp,udp,advtcp,process,referenced_memory,hugetlb,memory_numa,cpu_topology,resctrl,cpuset"
-      - "--store_container_labels=false"
-    volumes:
-      - /:/rootfs:ro
-      - /var/run:/var/run:ro
-      - /sys:/sys:ro
-      - /sys/fs/cgroup:/sys/fs/cgroup:ro
-      - /var/lib/docker/:/var/lib/docker:ro
-      - /dev/disk/:/dev/disk:ro
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-    networks:
-      - aerial-net
-    healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:8080/healthz || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-      start_period: 15s
-      start_interval: 2s
-
-  # ----------------------------------------------------------------------------
-  # 14. Observability: Node Exporter Host Telemetry
-  #     Gathers host CPU loads, memory, storage, thermals, and network metrics.
-  # ----------------------------------------------------------------------------
-  node-exporter:
-    image: prom/node-exporter:v1.8.2
-    container_name: aerial-node-exporter
-    restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
-    labels:
-      autoheal: "true"
-    command:
-      - "--path.procfs=/host/proc"
-      - "--path.sysfs=/host/sys"
-      - "--path.rootfs=/rootfs"
-      - "--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)"
-      - "--log.format=json"
-    volumes:
-      - /proc:/host/proc:ro
-      - /sys:/host/sys:ro
-      - /:/rootfs:ro
-    networks:
-      - aerial-net
-    healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:9100/ || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-      start_interval: 2s
-
-  # ----------------------------------------------------------------------------
   # 15. Observability: VictoriaMetrics Single-Node TSDB
   #     Lightweight time-series database with long-term retention & downsampling.
   # ----------------------------------------------------------------------------
@@ -596,6 +498,8 @@ services:
       - aerial-victoriametrics-data:/victoria-metrics-data
       - ${AERIAL_HOST_PROJECT_DIR:-${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}}:/share/aerial:ro
       - ${AERIAL_HOST_CONFIG_DIR:-${AERIAL_CONFIG_DIR:-/mnt/data/supervisor/share/aerial-config}}:/share/aerial-config:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks:
       - aerial-net
     healthcheck:
@@ -605,13 +509,7 @@ services:
       retries: 3
       start_period: 10s
       start_interval: 2s
-    depends_on:
-      cadvisor:
-        condition: service_healthy
-      node-exporter:
-        condition: service_healthy
-      postgres-exporter:
-        condition: service_healthy
+
 
   # ----------------------------------------------------------------------------
   # 16. Observability: Grafana Visual Dashboards
@@ -676,68 +574,6 @@ services:
       victoriametrics:
         condition: service_healthy
 
-  # ----------------------------------------------------------------------------
-  # 17. Observability: PostgreSQL Metrics Exporter
-  #     Gathers database connection pools, locks, query stats, and buffer metrics.
-  # ----------------------------------------------------------------------------
-  postgres-exporter:
-    image: prometheuscommunity/postgres-exporter:v0.16.0
-    container_name: aerial-postgres-exporter
-    restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
-    labels:
-      autoheal: "true"
-    command:
-      - "--log.format=json"
-    environment:
-      - DATA_SOURCE_NAME=postgresql://${POSTGRES_USER:-aerial}:${POSTGRES_PASSWORD:-aerial_secure_pass}@postgres:5432/${POSTGRES_DB:-aerial}?sslmode=disable
-      - PG_EXPORTER_DISABLE_SETTINGS_METRICS=true
-      - PG_EXPORTER_AUTO_DISCOVER_DATABASES=false
-    networks:
-      - aerial-net
-    healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:9187/ || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-      start_interval: 2s
-    depends_on:
-      postgres:
-        condition: service_healthy
-
-  # ----------------------------------------------------------------------------
-  # 18. Outbound MCP: VictoriaMetrics MCP Server
-  #     Exposes VictoriaMetrics TSDB metrics querying, rule checks, and telemetry
-  #     inspection tools to Aerial agent prompts over Streamable HTTP.
-  # ----------------------------------------------------------------------------
-  victoriametrics-mcp:
-    image: ghcr.io/victoriametrics/mcp-victoriametrics:latest
-    container_name: aerial-victoriametrics-mcp
-    restart: unless-stopped
-    labels:
-      autoheal: "true"
-    environment:
-      - MCP_SERVER_MODE=http
-      - MCP_LISTEN_ADDR=:4004
-      - VM_INSTANCE_ENTRYPOINT=http://victoriametrics:8428
-      - VM_INSTANCE_TYPE=single
-      - MCP_DISABLED_TOOLS=documentation,export,metric_relabel_debug
-    ports:
-      - "${VICTORIAMETRICS_MCP_HOST_PORT:-127.0.0.1:4044}:4004"
-    networks:
-      - aerial-net
-    healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:4004/health/liveness || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-      start_interval: 2s
-    depends_on:
-      victoriametrics:
-        condition: service_started
 
   # ----------------------------------------------------------------------------
   # 19. Observability: OpenObserve Cloud-Native Telemetry & Log Engine
