@@ -15,8 +15,35 @@ import (
 
 type ReloadCallback func()
 
+type fsWatcherBackend interface {
+	Add(name string) error
+	Close() error
+	Events() <-chan fsnotify.Event
+	Errors() <-chan error
+}
+
+type realFsnotifyWatcher struct {
+	w *fsnotify.Watcher
+}
+
+func (r *realFsnotifyWatcher) Add(name string) error {
+	return r.w.Add(name)
+}
+
+func (r *realFsnotifyWatcher) Close() error {
+	return r.w.Close()
+}
+
+func (r *realFsnotifyWatcher) Events() <-chan fsnotify.Event {
+	return r.w.Events
+}
+
+func (r *realFsnotifyWatcher) Errors() <-chan error {
+	return r.w.Errors
+}
+
 type Watcher struct {
-	fsw         *fsnotify.Watcher
+	fsw         fsWatcherBackend
 	debounce    time.Duration
 	callbacks   []ReloadCallback
 	mu          sync.Mutex
@@ -40,15 +67,15 @@ func WithCallback(cb ReloadCallback) Option {
 	}
 }
 
+func withBackend(b fsWatcherBackend) Option {
+	return func(w *Watcher) {
+		w.fsw = b
+	}
+}
+
 // NewWatcher initializes a new fsnotify file watcher with default 500ms debounce.
 func NewWatcher(opts ...Option) (*Watcher, error) {
-	fsw, err := fsnotify.NewWatcher()
-	if err != nil {
-		return nil, err
-	}
-
 	w := &Watcher{
-		fsw:         fsw,
 		debounce:    500 * time.Millisecond,
 		callbacks:   make([]ReloadCallback, 0),
 		watchedDirs: make(map[string]bool),
@@ -56,6 +83,14 @@ func NewWatcher(opts ...Option) (*Watcher, error) {
 
 	for _, opt := range opts {
 		opt(w)
+	}
+
+	if w.fsw == nil {
+		fsw, err := fsnotify.NewWatcher()
+		if err != nil {
+			return nil, err
+		}
+		w.fsw = &realFsnotifyWatcher{w: fsw}
 	}
 
 	return w, nil
@@ -185,6 +220,8 @@ func (w *Watcher) executeCallbacks() {
 
 // Start runs the background event listening loop until ctx is cancelled or watcher is closed.
 func (w *Watcher) Start(ctx context.Context) {
+	eventsChan := w.fsw.Events()
+	errorsChan := w.fsw.Errors()
 	for {
 		select {
 		case <-ctx.Done():
@@ -193,7 +230,7 @@ func (w *Watcher) Start(ctx context.Context) {
 			}
 			return
 
-		case event, ok := <-w.fsw.Events:
+		case event, ok := <-eventsChan:
 			if !ok {
 				return
 			}
@@ -229,7 +266,7 @@ func (w *Watcher) Start(ctx context.Context) {
 				w.triggerDebounced()
 			}
 
-		case err, ok := <-w.fsw.Errors:
+		case err, ok := <-errorsChan:
 			if !ok {
 				return
 			}
