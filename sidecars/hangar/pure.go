@@ -804,5 +804,257 @@ func ParseNomadGitStatus(gitStatusOutput string) []NomadFileChange {
 	return changes
 }
 
+// GitPushEventRequest represents an incoming git push event.
+type GitPushEventRequest struct {
+	Repo   string `json:"repo"`
+	Ref    string `json:"ref"`
+	Commit string `json:"commit"`
+}
+
+// GitPushEventResponse represents the acknowledgment for a git push event.
+type GitPushEventResponse struct {
+	Status             string   `json:"status"` // "accepted", "ignored", "error"
+	Repo               string   `json:"repo,omitempty"`
+	Ref                string   `json:"ref,omitempty"`
+	Commit             string   `json:"commit,omitempty"`
+	ContainersBuilding bool     `json:"containers_building,omitempty"`
+	NomadChanged       bool     `json:"nomad_changed,omitempty"`
+	AppliedJobs        []string `json:"applied_jobs,omitempty"`
+	Message            string   `json:"message,omitempty"`
+}
+
+// ImageReadyEventRequest represents an incoming notification of a published container image.
+type ImageReadyEventRequest struct {
+	Image  string `json:"image"`
+	Digest string `json:"digest,omitempty"`
+}
+
+// ImageReadyEventResponse represents the acknowledgment for an image ready event.
+type ImageReadyEventResponse struct {
+	Status      string   `json:"status"` // "accepted", "not_found", "error"
+	Image       string   `json:"image,omitempty"`
+	MatchedJobs []string `json:"matched_jobs,omitempty"`
+	Message     string   `json:"message,omitempty"`
+}
+
+// CoreBuildPaths contains path prefixes in azylman/aerial that trigger container builds in CI.
+var CoreBuildPaths = []string{
+	"brain/",
+	"scheduler-mcp/",
+	"discord-mcp/",
+	"docker-mcp/",
+	"github-mcp/",
+	"nomad-mcp/",
+	"infisical-mcp/",
+	"dashboard/",
+	"docs-service/",
+	"proxy/",
+	"sidecars/",
+	"webhooks-router/",
+	"Dockerfile",
+	"go.mod",
+	"go.sum",
+	".dockerignore",
+}
+
+// HasContainerBuildChanges evaluates if any changed file in a repository touches paths that trigger container builds.
+// For aerial-config, it always returns false. For aerial, it matches against CoreBuildPaths.
+func HasContainerBuildChanges(repoPath string, changedFiles []string) bool {
+	cleanRepo := strings.ToLower(filepath.Clean(repoPath))
+	if strings.Contains(cleanRepo, "aerial-config") {
+		return false
+	}
+	for _, file := range changedFiles {
+		cleanFile := strings.TrimPrefix(filepath.Clean(file), "/")
+		cleanFile = strings.ReplaceAll(cleanFile, "\\", "/")
+		for _, buildPath := range CoreBuildPaths {
+			if strings.HasSuffix(buildPath, "/") {
+				if strings.HasPrefix(cleanFile, buildPath) {
+					return true
+				}
+			} else {
+				if cleanFile == buildPath {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// ImageMatches compares an incoming image reference with an image declared in a Nomad job specification.
+func ImageMatches(query, target string) bool {
+	q := strings.TrimSpace(strings.ToLower(query))
+	t := strings.TrimSpace(strings.ToLower(target))
+	if q == "" || t == "" {
+		return false
+	}
+	if q == t {
+		return true
+	}
+	cleanQ := stripImageTag(q)
+	cleanT := stripImageTag(t)
+	if cleanQ == cleanT {
+		return true
+	}
+	baseQ := path.Base(cleanQ)
+	baseT := path.Base(cleanT)
+	return baseQ == baseT
+}
+
+func stripImageTag(img string) string {
+	if idx := strings.Index(img, "@"); idx != -1 {
+		img = img[:idx]
+	}
+	lastSlash := strings.LastIndex(img, "/")
+	if lastColon := strings.LastIndex(img, ":"); lastColon > lastSlash {
+		img = img[:lastColon]
+	}
+	return img
+}
+
+// IsSafeJobPath validates that targetPath resides strictly within baseDir and ends with .nomad or .nomad.hcl.
+func IsSafeJobPath(baseDir, targetPath string) bool {
+	if baseDir == "" || targetPath == "" {
+		return false
+	}
+	cleanBase := filepath.Clean(baseDir)
+	cleanTarget := filepath.Clean(targetPath)
+	rel, err := filepath.Rel(cleanBase, cleanTarget)
+	if err != nil || strings.HasPrefix(rel, "..") || rel == "." {
+		return false
+	}
+	return IsNomadJobFile(cleanTarget)
+}
+
+// MatchedNomadJob holds metadata for a Nomad job matching an image reference.
+type MatchedNomadJob struct {
+	JobName string
+	JobPath string
+}
+
+// FindNomadJobsByImage searches a directory for Nomad job specifications referencing the target image.
+func FindNomadJobsByImage(jobsDir, imageRef string) []MatchedNomadJob {
+	var matches []MatchedNomadJob
+	if jobsDir == "" || imageRef == "" {
+		return nil
+	}
+	entries, err := os.ReadDir(jobsDir)
+	if err != nil {
+		return nil
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !IsNomadJobFile(entry.Name()) {
+			continue
+		}
+		fullPath := filepath.Join(jobsDir, entry.Name())
+		if !IsSafeJobPath(jobsDir, fullPath) {
+			continue
+		}
+		content, err := os.ReadFile(fullPath)
+		if err != nil {
+			continue
+		}
+		images := ExtractNomadJobImages(string(content))
+		for _, img := range images {
+			if ImageMatches(imageRef, img) {
+				matches = append(matches, MatchedNomadJob{
+					JobName: ExtractJobName(string(content), entry.Name()),
+					JobPath: fullPath,
+				})
+				break
+			}
+		}
+	}
+	return matches
+}
+
+// NormalizeGitHubSlug normalizes an input repository name or URL to an "owner/repo" slug.
+// Defaults to "azylman" as the owner if none is specified.
+func NormalizeGitHubSlug(input string) string {
+	s := strings.TrimSpace(input)
+	if s == "" {
+		return ""
+	}
+	s = strings.TrimPrefix(s, "https://github.com/")
+	s = strings.TrimPrefix(s, "http://github.com/")
+	s = strings.TrimPrefix(s, "git@github.com:")
+	s = strings.TrimSuffix(s, ".git")
+	s = strings.TrimPrefix(s, "/")
+
+	// Handle local paths like /share/aerial
+	if strings.HasPrefix(input, "/") {
+		base := filepath.Base(filepath.Clean(input))
+		if base != "" && base != "." && base != "/" {
+			return "azylman/" + base
+		}
+	}
+
+	parts := strings.Split(s, "/")
+	if len(parts) >= 2 {
+		return parts[len(parts)-2] + "/" + parts[len(parts)-1]
+	}
+	if len(parts) == 1 && parts[0] != "" {
+		return "azylman/" + parts[0]
+	}
+	return s
+}
+
+// ResolveRepoPath matches an incoming repository query (slug, URL, or short name)
+// against the daemon's configured repository paths on disk.
+func ResolveRepoPath(query string, configuredRepos []string) string {
+	q := strings.TrimSpace(strings.ToLower(query))
+	if q == "" {
+		return ""
+	}
+	q = strings.TrimSuffix(q, ".git")
+	baseQ := path.Base(q)
+	cleanQ := filepath.Clean(q)
+
+	for _, repo := range configuredRepos {
+		cleanRepo := filepath.Clean(repo)
+		cleanLower := strings.ToLower(cleanRepo)
+		baseRepo := strings.ToLower(filepath.Base(cleanRepo))
+
+		if cleanLower == cleanQ || cleanLower == q {
+			return repo
+		}
+		if baseRepo == q || baseRepo == baseQ {
+			return repo
+		}
+		if strings.HasSuffix(cleanLower, "/"+baseQ) {
+			return repo
+		}
+	}
+	return ""
+}
+
+// ImageSourceRepo resolves which GitHub source repository is responsible for building a container image.
+// Returns an "owner/repo" slug (e.g. "azylman/aerial", "azylman/mirrormere", "azylman/aerial-sidecars")
+// or "" if the image is third-party/external.
+func ImageSourceRepo(imageRef string) string {
+	ref := strings.TrimSpace(strings.ToLower(imageRef))
+	if ref == "" {
+		return ""
+	}
+	if !strings.Contains(ref, "azylman/") && !strings.Contains(ref, "aerial") && !strings.Contains(ref, "mirrormere") && !strings.Contains(ref, "orin-voice") {
+		return ""
+	}
+	// Check sidecars first
+	if strings.Contains(ref, "aerial-sidecar-") || strings.Contains(ref, "orin-voice") {
+		return "azylman/aerial-sidecars"
+	}
+	// Check mirrormere
+	if strings.Contains(ref, "mirrormere") {
+		return "azylman/mirrormere"
+	}
+	// Check core aerial images (webhooks-router, infisical-mcp, nomad-mcp, brain, hangar, etc.)
+	if strings.Contains(ref, "aerial-") || strings.Contains(ref, "/aerial:") || strings.HasSuffix(ref, "/aerial") {
+		return "azylman/aerial"
+	}
+	return ""
+}
+
+
 
 

@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -1559,6 +1560,297 @@ func TestPureSlugAndDigestHelpers(t *testing.T) {
 		t.Errorf("expected false for nil slice")
 	}
 }
+
+func TestHasContainerBuildChanges_TableDriven(t *testing.T) {
+	tests := []struct {
+		name     string
+		repoPath string
+		files    []string
+		expected bool
+	}{
+		{
+			name:     "aerial-config always false",
+			repoPath: "/share/aerial-config",
+			files:    []string{"jobs/brain.nomad", "rules/common.md", "Dockerfile"},
+			expected: false,
+		},
+		{
+			name:     "aerial core brain touched",
+			repoPath: "/share/aerial",
+			files:    []string{"brain/main.go"},
+			expected: true,
+		},
+		{
+			name:     "aerial core webhooks-router touched",
+			repoPath: "/share/aerial",
+			files:    []string{"webhooks-router/main.go"},
+			expected: true,
+		},
+		{
+			name:     "aerial core Dockerfile touched",
+			repoPath: "/share/aerial",
+			files:    []string{"Dockerfile"},
+			expected: true,
+		},
+		{
+			name:     "aerial core go.mod touched",
+			repoPath: "/share/aerial",
+			files:    []string{"go.mod"},
+			expected: true,
+		},
+		{
+			name:     "aerial core non-build files (docs, nomad, rules)",
+			repoPath: "/share/aerial",
+			files:    []string{"nomad/jobs/migrate.nomad", "README.md", "rules/discord/foo.md", "docs/spec.md"},
+			expected: false,
+		},
+		{
+			name:     "aerial core empty files",
+			repoPath: "/share/aerial",
+			files:    nil,
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := HasContainerBuildChanges(tt.repoPath, tt.files)
+			if got != tt.expected {
+				t.Errorf("HasContainerBuildChanges(%q, %v) = %v, want %v", tt.repoPath, tt.files, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestImageMatches_TableDriven(t *testing.T) {
+	tests := []struct {
+		name     string
+		query    string
+		target   string
+		expected bool
+	}{
+		{"exact match with tag", "ghcr.io/azylman/aerial-brain:latest", "ghcr.io/azylman/aerial-brain:latest", true},
+		{"short name matches full ref", "aerial-brain", "ghcr.io/azylman/aerial-brain:latest", true},
+		{"full ref matches without tag", "ghcr.io/azylman/aerial-brain:latest", "ghcr.io/azylman/aerial-brain", true},
+		{"case insensitive match", "GHCR.IO/AZYLMAN/AERIAL-BRAIN:LATEST", "ghcr.io/azylman/aerial-brain:latest", true},
+		{"digest stripped match", "ghcr.io/azylman/aerial-brain@sha256:12345", "ghcr.io/azylman/aerial-brain:latest", true},
+		{"different images false", "aerial-hangar", "ghcr.io/azylman/aerial-brain:latest", false},
+		{"empty query false", "", "ghcr.io/azylman/aerial-brain:latest", false},
+		{"empty target false", "aerial-brain", "", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ImageMatches(tt.query, tt.target)
+			if got != tt.expected {
+				t.Errorf("ImageMatches(%q, %q) = %v, want %v", tt.query, tt.target, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestIsSafeJobPath_TableDriven(t *testing.T) {
+	baseDir := "/share/aerial-config/jobs"
+	tests := []struct {
+		name     string
+		path     string
+		expected bool
+	}{
+		{"valid nomad file in base", "/share/aerial-config/jobs/webhooks-edge.nomad", true},
+		{"valid nested nomad file", "/share/aerial-config/jobs/edge/webhooks.nomad.hcl", true},
+		{"path traversal escape false", "/share/aerial-config/jobs/../secret.nomad", false},
+		{"outside directory false", "/etc/passwd", false},
+		{"base directory itself false", "/share/aerial-config/jobs", false},
+		{"non-nomad file false", "/share/aerial-config/jobs/README.md", false},
+		{"empty path false", "", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := IsSafeJobPath(baseDir, tt.path)
+			if got != tt.expected {
+				t.Errorf("IsSafeJobPath(%q, %q) = %v, want %v", baseDir, tt.path, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestFindNomadJobsByImage_TableDriven(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	job1 := `job "webhooks-router" {
+		task "router" {
+			config {
+				image = "ghcr.io/azylman/aerial-webhooks-router:latest"
+			}
+		}
+	}`
+	job2 := `job "infisical-mcp" {
+		task "mcp" {
+			config {
+				image = "ghcr.io/azylman/aerial-infisical-mcp:latest"
+			}
+		}
+	}`
+	job3 := `job "multi-task" {
+		task "first" {
+			config {
+				image = "ghcr.io/azylman/aerial-webhooks-router:latest"
+			}
+		}
+	}`
+
+	_ = os.WriteFile(filepath.Join(tmpDir, "webhooks-router.nomad"), []byte(job1), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "infisical-mcp.nomad"), []byte(job2), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "multi-task.nomad"), []byte(job3), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "README.md"), []byte("non-nomad"), 0644)
+
+	matches := FindNomadJobsByImage(tmpDir, "aerial-webhooks-router")
+	if len(matches) != 2 {
+		t.Fatalf("expected 2 matches for aerial-webhooks-router, got %d", len(matches))
+	}
+
+	foundJobNames := make(map[string]bool)
+	for _, m := range matches {
+		foundJobNames[m.JobName] = true
+	}
+	if !foundJobNames["webhooks-router"] || !foundJobNames["multi-task"] {
+		t.Errorf("expected webhooks-router and multi-task, got %v", foundJobNames)
+	}
+
+	noMatches := FindNomadJobsByImage(tmpDir, "nonexistent-image")
+	if len(noMatches) != 0 {
+		t.Errorf("expected 0 matches for nonexistent-image, got %d", len(noMatches))
+	}
+
+	emptyMatches := FindNomadJobsByImage("", "aerial-webhooks-router")
+	if len(emptyMatches) != 0 {
+		t.Errorf("expected 0 matches for empty dir, got %d", len(emptyMatches))
+	}
+}
+
+func TestNormalizeGitHubSlug_TableDriven(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{"empty string", "", ""},
+		{"short name", "aerial", "azylman/aerial"},
+		{"owner/repo slug", "azylman/aerial-config", "azylman/aerial-config"},
+		{"https github url", "https://github.com/azylman/aerial.git", "azylman/aerial"},
+		{"git ssh url", "git@github.com:azylman/mirrormere.git", "azylman/mirrormere"},
+		{"local absolute path", "/share/aerial-sidecars", "azylman/aerial-sidecars"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := NormalizeGitHubSlug(tt.input)
+			if got != tt.expected {
+				t.Errorf("NormalizeGitHubSlug(%q) = %q, want %q", tt.input, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestResolveRepoPath_TableDriven(t *testing.T) {
+	configuredRepos := []string{
+		"/share/aerial",
+		"/share/aerial-config",
+		"/share/mirrormere",
+	}
+
+	tests := []struct {
+		name     string
+		query    string
+		expected string
+	}{
+		{"exact full path", "/share/aerial-config", "/share/aerial-config"},
+		{"short name aerial", "aerial", "/share/aerial"},
+		{"short name aerial-config", "aerial-config", "/share/aerial-config"},
+		{"github slug azylman/mirrormere", "azylman/mirrormere", "/share/mirrormere"},
+		{"github url", "https://github.com/azylman/aerial.git", "/share/aerial"},
+		{"unknown repo", "unknown-repo", ""},
+		{"empty query", "", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ResolveRepoPath(tt.query, configuredRepos)
+			if got != tt.expected {
+				t.Errorf("ResolveRepoPath(%q) = %q, want %q", tt.query, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestImageSourceRepo_TableDriven(t *testing.T) {
+	tests := []struct {
+		name     string
+		imageRef string
+		expected string
+	}{
+		{"core aerial webhooks-router", "ghcr.io/azylman/aerial-webhooks-router:latest", "azylman/aerial"},
+		{"core aerial infisical-mcp", "ghcr.io/azylman/aerial-infisical-mcp:latest", "azylman/aerial"},
+		{"core aerial brain", "ghcr.io/azylman/aerial-brain:latest", "azylman/aerial"},
+		{"mirrormere core", "ghcr.io/azylman/mirrormere:latest", "azylman/mirrormere"},
+		{"mirrormere voice fingerprinter", "ghcr.io/azylman/mirrormere-voice-fingerprinter:latest", "azylman/mirrormere"},
+		{"sidecar banana", "ghcr.io/azylman/aerial-sidecar-banana:latest", "azylman/aerial-sidecars"},
+		{"orin voice sidecar", "ghcr.io/azylman/orin-voice:latest", "azylman/aerial-sidecars"},
+		{"third party go2rtc", "alexxit/go2rtc:1.9.8", ""},
+		{"third party redis", "redis:7-alpine", ""},
+		{"empty string", "", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ImageSourceRepo(tt.imageRef)
+			if got != tt.expected {
+				t.Errorf("ImageSourceRepo(%q) = %q, want %q", tt.imageRef, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestPureFunctions_EdgeCasesCoverage(t *testing.T) {
+	// FindNomadJobsByImage with non-existent directory
+	if res := FindNomadJobsByImage("/nonexistent/directory/path/12345", "test"); res != nil {
+		t.Errorf("expected nil for nonexistent dir, got %v", res)
+	}
+	// FindNomadJobsByImage with empty image
+	if res := FindNomadJobsByImage(t.TempDir(), ""); res != nil {
+		t.Errorf("expected nil for empty imageRef, got %v", res)
+	}
+
+	// NormalizeGitHubSlug edge cases
+	if s := NormalizeGitHubSlug("/share/aerial"); s != "azylman/aerial" {
+		t.Errorf("NormalizeGitHubSlug(/share/aerial) = %q; want azylman/aerial", s)
+	}
+	if s := NormalizeGitHubSlug("/"); s != "" && s != "azylman/" {
+		t.Logf("NormalizeGitHubSlug(/) = %q", s)
+	}
+	if s := NormalizeGitHubSlug("git@github.com:azylman/mirrormere.git"); s != "azylman/mirrormere" {
+		t.Errorf("NormalizeGitHubSlug(git@github.com:azylman/mirrormere.git) = %q; want azylman/mirrormere", s)
+	}
+	if s := NormalizeGitHubSlug("http://github.com/azylman/aerial"); s != "azylman/aerial" {
+		t.Errorf("NormalizeGitHubSlug(http://github.com/azylman/aerial) = %q; want azylman/aerial", s)
+	}
+
+	// ResolveRepoPath edge cases
+	repos := []string{"/opt/aerial", "/opt/aerial-config"}
+	if r := ResolveRepoPath("", repos); r != "" {
+		t.Errorf("ResolveRepoPath empty query = %q; want empty", r)
+	}
+	if r := ResolveRepoPath("https://github.com/azylman/aerial.git", repos); r != "/opt/aerial" {
+		t.Errorf("ResolveRepoPath github url = %q; want /opt/aerial", r)
+	}
+	if r := ResolveRepoPath("/opt/aerial", repos); r != "/opt/aerial" {
+		t.Errorf("ResolveRepoPath exact path = %q; want /opt/aerial", r)
+	}
+}
+
+
+
 
 
 

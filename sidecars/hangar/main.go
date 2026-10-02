@@ -2596,6 +2596,363 @@ func EnsureDockerAuthPath(
 	return nil
 }
 
+// CheckGitHubRepoBuildInProgress checks if any GitHub Actions workflow runs are queued or in progress for a repo.
+func (d *SyncDaemon) CheckGitHubRepoBuildInProgress(ctx context.Context, repoSlug string) bool {
+	if d == nil {
+		return false
+	}
+	slug := NormalizeGitHubSlug(repoSlug)
+	if slug == "" {
+		return false
+	}
+
+	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/actions/runs?status=in_progress&per_page=5", slug)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+	if err != nil {
+		log.Printf("[Hangar:GitHub] Warning: failed to create actions request for %s: %v", slug, err)
+		return false
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	if strings.TrimSpace(d.pat) != "" {
+		req.Header.Set("Authorization", "Bearer "+d.pat)
+	}
+
+	client := d.getRegistryClient()
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("[Hangar:GitHub] Warning: actions API request failed for %s: %v", slug, err)
+		return false
+	}
+	defer closeWarn(resp.Body, "github actions response body")
+
+	if resp.StatusCode == http.StatusOK {
+		var data struct {
+			TotalCount int `json:"total_count"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&data); err == nil && data.TotalCount > 0 {
+			log.Printf("[Hangar:GitHub] %d active workflow run(s) in progress for %s", data.TotalCount, slug)
+			return true
+		}
+	}
+
+	// Also check queued runs
+	apiQueuedURL := fmt.Sprintf("https://api.github.com/repos/%s/actions/runs?status=queued&per_page=5", slug)
+	reqQ, errQ := http.NewRequestWithContext(ctx, http.MethodGet, apiQueuedURL, nil)
+	if errQ == nil {
+		reqQ.Header.Set("Accept", "application/vnd.github+json")
+		if strings.TrimSpace(d.pat) != "" {
+			reqQ.Header.Set("Authorization", "Bearer "+d.pat)
+		}
+		if respQ, errQDo := client.Do(reqQ); errQDo == nil {
+			defer closeWarn(respQ.Body, "github queued actions response body")
+			if respQ.StatusCode == http.StatusOK {
+				var dataQ struct {
+					TotalCount int `json:"total_count"`
+				}
+				if err := json.NewDecoder(respQ.Body).Decode(&dataQ); err == nil && dataQ.TotalCount > 0 {
+					log.Printf("[Hangar:GitHub] %d queued workflow run(s) for %s", dataQ.TotalCount, slug)
+					return true
+				}
+			}
+		}
+	}
+
+	return false
+}
+
+func (d *SyncDaemon) getChangedFiles(ctx context.Context, repoPath, prevHead, currHead string) ([]string, error) {
+	if prevHead == "" || currHead == "" || prevHead == currHead {
+		return nil, nil
+	}
+	out, _, err := d.getGitExecutor()(ctx, repoPath, "diff", "--name-only", prevHead, currHead)
+	if err != nil {
+		outFallback, _, errFallback := d.getGitExecutor()(ctx, repoPath, "diff-tree", "--no-commit-id", "--name-only", "-r", currHead)
+		if errFallback != nil {
+			return nil, errFallback
+		}
+		return splitLines(string(outFallback)), nil
+	}
+	return splitLines(string(out)), nil
+}
+
+func splitLines(s string) []string {
+	var lines []string
+	for _, line := range strings.Split(s, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" {
+			lines = append(lines, trimmed)
+		}
+	}
+	return lines
+}
+
+func (d *SyncDaemon) applyNomadChangesDirectly(ctx context.Context, repoPath string, changes []NomadFileChange) ([]string, error) {
+	var applied []string
+	for _, ch := range changes {
+		if ch.Action == "delete" {
+			out, errBytes, err := d.getNomadExecutor()(ctx, "job", "stop", "-purge", ch.JobName)
+			if err != nil {
+				log.Printf("[Hangar:Nomad] Warning: failed to stop deleted job %s: %s (%v)", ch.JobName, SanitizeLog(strings.TrimSpace(string(append(out, errBytes...)))), err)
+			}
+			continue
+		}
+		fullPath := filepath.Join(repoPath, ch.Path)
+		if !IsSafeJobPath(repoPath, fullPath) {
+			continue
+		}
+		if errVal := d.ValidateNomadJob(ctx, fullPath); errVal != nil {
+			return applied, errVal
+		}
+		_, _, errRun := d.getNomadExecutor()(ctx, "job", "run", "-detach=false", fullPath)
+		if errRun != nil {
+			return applied, errRun
+		}
+		applied = append(applied, ch.JobName)
+	}
+	return applied, nil
+}
+
+// ExecuteGitPushEvent processes an incoming git push webhook event.
+func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRequest) (GitPushEventResponse, int) {
+	if req.Repo == "" {
+		return GitPushEventResponse{
+			Status:  "error",
+			Message: "missing required field: repo",
+		}, http.StatusBadRequest
+	}
+
+	// Filter out non-main branch pushes
+	ref := strings.TrimSpace(req.Ref)
+	if ref != "" && ref != "refs/heads/main" && ref != "main" && !strings.HasSuffix(ref, "/main") {
+		return GitPushEventResponse{
+			Status:  "ignored",
+			Repo:    req.Repo,
+			Ref:     req.Ref,
+			Commit:  req.Commit,
+			Message: fmt.Sprintf("push to non-main ref %q ignored", req.Ref),
+		}, http.StatusOK
+	}
+
+	repoPath := ResolveRepoPath(req.Repo, d.repos)
+	if repoPath == "" {
+		return GitPushEventResponse{
+			Status:  "error",
+			Repo:    req.Repo,
+			Message: fmt.Sprintf("repository %q is not managed by hangar", req.Repo),
+		}, http.StatusNotFound
+	}
+
+	res := d.SyncRepo(ctx, repoPath)
+	if res.Error != "" {
+		return GitPushEventResponse{
+			Status:  "error",
+			Repo:    req.Repo,
+			Commit:  res.CurrentHead,
+			Message: fmt.Sprintf("git sync failed: %s", res.Error),
+		}, http.StatusInternalServerError
+	}
+
+	resp := GitPushEventResponse{
+		Status: "accepted",
+		Repo:   req.Repo,
+		Ref:    req.Ref,
+		Commit: res.CurrentHead,
+	}
+
+	cleanRepo := strings.ToLower(filepath.Clean(repoPath))
+	isAerialConfig := strings.Contains(cleanRepo, "aerial-config")
+	isAerialCore := strings.HasSuffix(cleanRepo, "/aerial") || cleanRepo == "aerial"
+
+	if isAerialCore {
+		changedFiles, errDiff := d.getChangedFiles(ctx, repoPath, res.PreviousHead, res.CurrentHead)
+		if errDiff == nil && HasContainerBuildChanges(repoPath, changedFiles) {
+			resp.ContainersBuilding = true
+			resp.Message = "repository synced; container build changes detected, deferring rollout until image_ready"
+			log.Printf("[Hangar:GitPush] Container build changes detected in %s (%d files). Deferring Nomad rollout.", repoPath, len(changedFiles))
+			return resp, http.StatusOK
+		}
+
+		nomadChanges, errNomad := d.HasNomadChanges(ctx, repoPath, res.PreviousHead, res.CurrentHead)
+		if errNomad == nil && len(nomadChanges) > 0 {
+			resp.NomadChanged = true
+			applied, errRec := d.applyNomadChangesDirectly(ctx, repoPath, nomadChanges)
+			resp.AppliedJobs = applied
+			if errRec != nil {
+				resp.Status = "error"
+				resp.Message = fmt.Sprintf("failed applying nomad changes: %v", errRec)
+				return resp, http.StatusInternalServerError
+			}
+			resp.Message = fmt.Sprintf("repository synced; applied %d nomad job(s)", len(applied))
+			return resp, http.StatusOK
+		}
+
+		resp.Message = "repository synced; no container build or nomad changes"
+		return resp, http.StatusOK
+	}
+
+	if isAerialConfig {
+		nomadChanges, errNomad := d.HasNomadChanges(ctx, repoPath, res.PreviousHead, res.CurrentHead)
+		if errNomad != nil {
+			log.Printf("[Hangar:GitPush] Warning: HasNomadChanges failed for %s: %v", repoPath, errNomad)
+		}
+
+		if len(nomadChanges) > 0 {
+			resp.NomadChanged = true
+			var appliedJobs []string
+			var deferredJobs []string
+
+			for _, ch := range nomadChanges {
+				if ch.Action == "delete" {
+					out, errBytes, err := d.getNomadExecutor()(ctx, "job", "stop", "-purge", ch.JobName)
+					if err != nil {
+						log.Printf("[Hangar:GitPush] Warning stopping deleted job %s: %s (%v)", ch.JobName, SanitizeLog(strings.TrimSpace(string(append(out, errBytes...)))), err)
+					} else {
+						log.Printf("[Hangar:GitPush] Successfully stopped deleted job %s", ch.JobName)
+					}
+					continue
+				}
+
+				fullPath := filepath.Join(repoPath, ch.Path)
+				if !IsSafeJobPath(repoPath, fullPath) {
+					continue
+				}
+				content, readErr := os.ReadFile(fullPath)
+				if readErr != nil {
+					continue
+				}
+
+				images := ExtractNomadJobImages(string(content))
+				jobDeferred := false
+
+				for _, img := range images {
+					srcRepo := ImageSourceRepo(img)
+					if srcRepo != "" {
+						if d.CheckGitHubRepoBuildInProgress(ctx, srcRepo) {
+							jobDeferred = true
+							log.Printf("[Hangar:GitPush] Job %s deferred: source repo %s has builds in progress", ch.JobName, srcRepo)
+							break
+						}
+						dgst, dgstErr := d.GetRemoteImageDigest(ctx, img)
+						if dgstErr != nil || dgst == "" {
+							jobDeferred = true
+							log.Printf("[Hangar:GitPush] Job %s deferred: image %s not ready in registry (%v)", ch.JobName, img, dgstErr)
+							break
+						}
+					}
+				}
+
+				if jobDeferred {
+					deferredJobs = append(deferredJobs, ch.JobName)
+					resp.ContainersBuilding = true
+				} else {
+					if errVal := d.ValidateNomadJob(ctx, fullPath); errVal == nil {
+						out, errBytes, errRun := d.getNomadExecutor()(ctx, "job", "run", "-detach=false", fullPath)
+						if errRun != nil {
+							log.Printf("[Hangar:GitPush] nomad job run failed for %s: %s (%v)", ch.JobName, SanitizeLog(strings.TrimSpace(string(append(out, errBytes...)))), errRun)
+						} else {
+							appliedJobs = append(appliedJobs, ch.JobName)
+						}
+					} else {
+						log.Printf("[Hangar:GitPush] Validation failed for %s: %v", ch.JobName, errVal)
+					}
+				}
+			}
+
+			resp.AppliedJobs = appliedJobs
+			if len(deferredJobs) > 0 {
+				resp.Message = fmt.Sprintf("applied %d job(s); deferred %d job(s) pending container builds", len(appliedJobs), len(deferredJobs))
+			} else {
+				resp.Message = fmt.Sprintf("applied %d nomad job(s)", len(appliedJobs))
+			}
+		} else {
+			resp.Message = "configuration synced; no nomad job changes"
+		}
+
+		go d.notifyBrainReload()
+		return resp, http.StatusOK
+	}
+
+	resp.Message = "repository synced"
+	return resp, http.StatusOK
+}
+
+// ExecuteImageReadyEvent processes an incoming image ready event by deploying matching Nomad jobs.
+func (d *SyncDaemon) ExecuteImageReadyEvent(ctx context.Context, req ImageReadyEventRequest) (ImageReadyEventResponse, int) {
+	imgRef := strings.TrimSpace(req.Image)
+	if imgRef == "" {
+		return ImageReadyEventResponse{
+			Status:  "error",
+			Message: "missing required field: image",
+		}, http.StatusBadRequest
+	}
+
+	jobsDir := filepath.Join(d.configDir, "jobs")
+	matches := FindNomadJobsByImage(jobsDir, imgRef)
+	if len(matches) == 0 && d.composeDir != "" {
+		coreJobsDir := filepath.Join(d.composeDir, "nomad", "jobs")
+		matches = append(matches, FindNomadJobsByImage(coreJobsDir, imgRef)...)
+	}
+
+	if len(matches) == 0 {
+		log.Printf("[Hangar:ImageReady] No Nomad jobs found referencing image %s", imgRef)
+		return ImageReadyEventResponse{
+			Status:  "not_found",
+			Image:   imgRef,
+			Message: fmt.Sprintf("no nomad jobs found using image %s", imgRef),
+		}, http.StatusNotFound
+	}
+
+	d.nomadMu.Lock()
+	defer d.nomadMu.Unlock()
+
+	var appliedJobs []string
+	for _, job := range matches {
+		if errVal := d.ValidateNomadJob(ctx, job.JobPath); errVal != nil {
+			log.Printf("[Hangar:ImageReady] Validation failed for job %s (%s): %v", job.JobName, job.JobPath, errVal)
+			continue
+		}
+
+		log.Printf("[Hangar:ImageReady] Applying Nomad job %s from %s...", job.JobName, job.JobPath)
+		outRun, errRunBytes, errRun := d.getNomadExecutor()(ctx, "job", "run", "-detach=false", job.JobPath)
+		if errRun != nil {
+			log.Printf("[Hangar:ImageReady] Warning: job run failed for %s: %s (%v)", job.JobName, SanitizeLog(strings.TrimSpace(string(append(outRun, errRunBytes...)))), errRun)
+		}
+
+		log.Printf("[Hangar:ImageReady] Rescheduling allocation restart for job %s...", job.JobName)
+		outRest, errRestBytes, errRest := d.getNomadExecutor()(ctx, "job", "restart", "-reschedule", job.JobName)
+		if errRest != nil {
+			log.Printf("[Hangar:ImageReady] Warning: job restart -reschedule failed for %s: %s (%v)", job.JobName, SanitizeLog(strings.TrimSpace(string(append(outRest, errRestBytes...)))), errRest)
+		}
+
+		appliedJobs = append(appliedJobs, job.JobName)
+
+		if req.Digest != "" {
+			key := job.JobName + ":" + imgRef
+			d.nomadDigestsMu.Lock()
+			if d.nomadKnownDigests == nil {
+				d.nomadKnownDigests = make(map[string]string)
+			}
+			d.nomadKnownDigests[key] = req.Digest
+			d.nomadDigestsMu.Unlock()
+		}
+	}
+
+	if len(appliedJobs) == 0 {
+		return ImageReadyEventResponse{
+			Status:  "error",
+			Image:   imgRef,
+			Message: "failed to apply or restart any matching nomad jobs",
+		}, http.StatusInternalServerError
+	}
+
+	return ImageReadyEventResponse{
+		Status:      "accepted",
+		Image:       imgRef,
+		MatchedJobs: appliedJobs,
+		Message:     fmt.Sprintf("successfully applied and rescheduled %d job(s)", len(appliedJobs)),
+	}, http.StatusOK
+}
+
 // SetupMux configures HTTP handlers for metrics, health, status, and sync.
 func SetupMux(daemon *SyncDaemon) http.Handler {
 	mux := http.NewServeMux()
@@ -2681,6 +3038,59 @@ func SetupMux(daemon *SyncDaemon) http.Handler {
 			"debounce_seconds": int(reconcilerDebounceDuration.Seconds()),
 		})
 	})
+
+	mux.HandleFunc("/events/git_push", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
+			return
+		}
+		if r.Body != nil {
+			defer closeWarn(r.Body, "git_push request body")
+		}
+
+		var req GitPushEventRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, r, http.StatusBadRequest, GitPushEventResponse{
+				Status:  "error",
+				Message: fmt.Sprintf("invalid JSON payload: %v", err),
+			})
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+		defer cancel()
+
+		resp, code := daemon.ExecuteGitPushEvent(ctx, req)
+		metrics.RecordSyncRequest("git_push", resp.Status)
+		writeJSON(w, r, code, resp)
+	})
+
+	mux.HandleFunc("/events/image_ready", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
+			return
+		}
+		if r.Body != nil {
+			defer closeWarn(r.Body, "image_ready request body")
+		}
+
+		var req ImageReadyEventRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, r, http.StatusBadRequest, ImageReadyEventResponse{
+				Status:  "error",
+				Message: fmt.Sprintf("invalid JSON payload: %v", err),
+			})
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+		defer cancel()
+
+		resp, code := daemon.ExecuteImageReadyEvent(ctx, req)
+		metrics.RecordSyncRequest("image_ready", resp.Status)
+		writeJSON(w, r, code, resp)
+	})
+
 
 	return mux
 }
