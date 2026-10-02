@@ -1490,7 +1490,77 @@ R100	jobs/old.nomad	jobs/new.nomad
 	if changes[3].Path != "jobs/new.nomad" || changes[3].Action != "apply" || changes[3].JobName != "new" {
 		t.Errorf("unexpected change[3]: %+v", changes[3])
 	}
+
+	// Additional ParseNomadGitStatus cases
+	emptyStatus := ParseNomadGitStatus("")
+	if len(emptyStatus) != 0 {
+		t.Errorf("expected 0 changes for empty status")
+	}
+
+	renameStatus := ParseNomadGitStatus("R090\tjobs/old.nomad\tjobs/renamed.nomad\n")
+	if len(renameStatus) != 1 || renameStatus[0].Action != "apply" || renameStatus[0].JobName != "renamed" {
+		t.Errorf("expected 1 change (apply renamed) for rename status, got %+v", renameStatus)
+	}
+
+	nonNomadStatus := ParseNomadGitStatus("M\tdocker-compose.yml\nA\tREADME.md\n")
+	if len(nonNomadStatus) != 0 {
+		t.Errorf("expected 0 changes for non-nomad files")
+	}
 }
+
+func TestPureSlugAndDigestHelpers(t *testing.T) {
+	// ParseGitHubSlug test cases
+	slugCases := []struct {
+		input string
+		want  string
+	}{
+		{"https://github.com/azylman/aerial.git?ref=main#hash", "azylman/aerial"},
+		{"git@github.com:azylman/aerial.git", "azylman/aerial"},
+		{"git@github.com:azylman/aerial", "azylman/aerial"},
+		{"git@gitlab.com:azylman/aerial.git", ""},
+		{"git@malformed", ""},
+		{"https://gitlab.com/azylman/aerial.git", ""},
+		{"https://github.com/invalid/path/extra/parts", ""},
+		{"https://github.com/singlepart", ""},
+		{"https://github.com/ /aerial", ""},
+		{"https://github.com/azylman/ ", ""},
+		{"http://github.com/azylman/aerial.git", "azylman/aerial"},
+		{"ssh://git@github.com/azylman/aerial.git", "azylman/aerial"},
+		{"", ""},
+		{"   ", ""},
+		{"http://:invalid-url", ""},
+	}
+	for _, tc := range slugCases {
+		got := ParseGitHubSlug(tc.input)
+		if got != tc.want {
+			t.Errorf("ParseGitHubSlug(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+
+	if cleanSlugPath("azylman/aerial?query#hash") != "azylman/aerial" {
+		t.Errorf("expected clean slug with query/hash")
+	}
+	if cleanSlugPath("too/many/parts") != "" {
+		t.Errorf("expected empty for too many parts")
+	}
+	if cleanSlugPath(" / ") != "" {
+		t.Errorf("expected empty for blank parts")
+	}
+
+
+	// ContainsDigest test cases
+	if !ContainsDigest([]string{"sha256:abc", "sha256:def"}, "sha256:abc") {
+		t.Errorf("expected true for existing digest")
+	}
+	if ContainsDigest([]string{"sha256:abc"}, "sha256:xyz") {
+		t.Errorf("expected false for nonexistent digest")
+	}
+	if ContainsDigest(nil, "sha256:abc") {
+		t.Errorf("expected false for nil slice")
+	}
+}
+
+
 
 
 
