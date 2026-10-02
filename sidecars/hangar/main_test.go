@@ -5064,5 +5064,176 @@ func TestGetStatus_PopulatesAndCachesGitHubRepo(t *testing.T) {
 	}
 }
 
+func TestNomadValidationAndReconciliation_Hermetic(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	jobFile := filepath.Join(tmpDir, "test.nomad")
+	jobContent := `job "test" { group "g" { task "t" { config { image = "test:latest" } } } }`
+	if err := os.WriteFile(jobFile, []byte(jobContent), 0644); err != nil {
+		t.Fatalf("failed to write job file: %v", err)
+	}
+
+	var executedArgs [][]string
+	mockNomad := func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+		executedArgs = append(executedArgs, args)
+		if len(args) >= 2 && args[0] == "job" && args[1] == "validate" {
+			if strings.Contains(args[len(args)-1], "invalid") {
+				return nil, []byte("syntax error on line 1"), errors.New("exit 1")
+			}
+			return []byte("Job validation successful\n"), nil, nil
+		}
+		if len(args) >= 2 && args[0] == "job" && args[1] == "run" {
+			return []byte("Evaluation ID: abc-123\n"), nil, nil
+		}
+		if len(args) >= 2 && args[0] == "job" && args[1] == "stop" {
+			return []byte("Job stop scheduled\n"), nil, nil
+		}
+		return nil, nil, nil
+	}
+
+	d := NewDaemon(DaemonConfig{
+		NomadExecutor: mockNomad,
+		ConfigDir:     tmpDir,
+	})
+
+	// 1. Validation test
+	if err := d.ValidateNomadJob(context.Background(), jobFile); err != nil {
+		t.Errorf("expected ValidateNomadJob to succeed, got %v", err)
+	}
+
+	invalidJobFile := filepath.Join(tmpDir, "invalid.nomad")
+	if err := d.ValidateNomadJob(context.Background(), invalidJobFile); err == nil {
+		t.Errorf("expected ValidateNomadJob to fail for invalid job, got nil")
+	}
+
+	// 2. Reconciliation test (apply + delete)
+	changes := []NomadFileChange{
+		{Path: "test.nomad", Action: "apply", JobName: "test"},
+		{Path: "old.nomad", Action: "delete", JobName: "old-job"},
+	}
+
+	if err := d.ReconcileNomadChanges(context.Background(), tmpDir, changes); err != nil {
+		t.Fatalf("expected ReconcileNomadChanges to succeed, got %v", err)
+	}
+
+	// Verify executed commands: stop should run before apply (teardown first)
+	var foundStop, foundRun bool
+	var stopIdx, runIdx int
+	for idx, call := range executedArgs {
+		if len(call) >= 2 && call[0] == "job" && call[1] == "stop" && call[len(call)-1] == "old-job" {
+			foundStop = true
+			stopIdx = idx
+		}
+		if len(call) >= 2 && call[0] == "job" && call[1] == "run" && strings.HasSuffix(call[len(call)-1], "test.nomad") {
+			foundRun = true
+			runIdx = idx
+		}
+	}
+
+	if !foundStop {
+		t.Errorf("expected nomad job stop to be called for old-job")
+	}
+	if !foundRun {
+		t.Errorf("expected nomad job run to be called for test.nomad")
+	}
+	if foundStop && foundRun && stopIdx > runIdx {
+		t.Errorf("expected teardown (stop) to execute before application (run), stopIdx=%d, runIdx=%d", stopIdx, runIdx)
+	}
+}
+
+func TestNomadHasChanges_Hermetic(t *testing.T) {
+	t.Parallel()
+
+	mockGit := func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+		output := "M\tjobs/infisical.nomad\nD\tjobs/legacy.nomad\nM\tdocker-compose.yml\n"
+		return []byte(output), nil, nil
+	}
+
+	d := NewDaemon(DaemonConfig{
+		GitExecutor: mockGit,
+	})
+
+	changes, err := d.HasNomadChanges(context.Background(), "/share/aerial-config", "HEAD~1", "HEAD")
+	if err != nil {
+		t.Fatalf("HasNomadChanges returned error: %v", err)
+	}
+
+	if len(changes) != 2 {
+		t.Fatalf("expected 2 nomad changes, got %d: %+v", len(changes), changes)
+	}
+
+	if changes[0].Path != "jobs/infisical.nomad" || changes[0].Action != "apply" {
+		t.Errorf("unexpected change 0: %+v", changes[0])
+	}
+	if changes[1].Path != "jobs/legacy.nomad" || changes[1].Action != "delete" {
+		t.Errorf("unexpected change 1: %+v", changes[1])
+	}
+}
+
+func TestNomadImagePollingAndRestart_Hermetic(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	jobsDir := filepath.Join(tmpDir, "jobs")
+	if err := os.MkdirAll(jobsDir, 0755); err != nil {
+		t.Fatalf("failed to create jobs dir: %v", err)
+	}
+
+	jobFile := filepath.Join(jobsDir, "mirrormere-core.nomad")
+	jobContent := `job "mirrormere-core" { group "core" { task "core" { config { image = "ghcr.io/azylman/mirrormere:latest" } } } }`
+	if err := os.WriteFile(jobFile, []byte(jobContent), 0644); err != nil {
+		t.Fatalf("failed to write job file: %v", err)
+	}
+
+	currentDigest := "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+	var restartCalled bool
+	var restartedJob string
+
+	mockNomad := func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+		if len(args) >= 4 && args[0] == "job" && args[1] == "restart" && args[2] == "-reschedule" {
+			restartCalled = true
+			restartedJob = args[3]
+			return []byte("Job restart scheduled\n"), nil, nil
+		}
+		return nil, nil, nil
+	}
+
+	mockClient := &http.Client{
+		Transport: &roundTripperFunc{
+			fn: func(req *http.Request) (*http.Response, error) {
+				header := make(http.Header)
+				header.Set("Docker-Content-Digest", currentDigest)
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     header,
+					Body:       ioNopCloser(strings.NewReader("")),
+				}, nil
+			},
+		},
+	}
+
+	d := NewDaemon(DaemonConfig{
+		ConfigDir:      tmpDir,
+		NomadExecutor:  mockNomad,
+		RegistryClient: mockClient,
+	})
+
+	// Pre-seed known digest with older hash so new digest triggers restart
+	d.nomadKnownDigests["mirrormere-core:ghcr.io/azylman/mirrormere:latest"] = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+
+	if err := d.CheckAndReconcileNomadImages(context.Background()); err != nil {
+		t.Errorf("CheckAndReconcileNomadImages returned error: %v", err)
+	}
+
+	if !restartCalled {
+		t.Errorf("expected nomad job restart to be called")
+	}
+	if restartedJob != "mirrormere-core" {
+		t.Errorf("expected restarted job 'mirrormere-core', got %q", restartedJob)
+	}
+}
+
+
 
 

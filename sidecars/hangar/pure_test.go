@@ -1295,4 +1295,202 @@ func TestParseGitHubSlug_TableDriven(t *testing.T) {
 	}
 }
 
+func TestIsNomadJobFile_TableDriven(t *testing.T) {
+	tests := []struct {
+		name     string
+		path     string
+		expected bool
+	}{
+		{"root nomad file", "app.nomad", true},
+		{"jobs dir nomad file", "jobs/infisical.nomad", true},
+		{"nested jobs nomad file", "jobs/edge/kiosk.nomad", true},
+		{"nomad hcl extension", "jobs/voice.nomad.hcl", true},
+		{"uppercase nomad extension", "jobs/TEST.NOMAD", true},
+		{"compose file false", "docker-compose.yml", false},
+		{"yaml file false", "services/mirrormere/voice.yaml", false},
+		{"go file false", "main.go", false},
+		{"nomad in dir name but not file", "nomad/server.hcl", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsNomadJobFile(tt.path); got != tt.expected {
+				t.Errorf("IsNomadJobFile(%q) = %v, want %v", tt.path, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestFilterNomadChanges_TableDriven(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    []string
+		expected []string
+	}{
+		{
+			name:     "mixed file list",
+			input:    []string{"docker-compose.yml", "jobs/infisical.nomad", "README.md", "jobs/voice.nomad"},
+			expected: []string{"jobs/infisical.nomad", "jobs/voice.nomad"},
+		},
+		{
+			name:     "no nomad files",
+			input:    []string{"docker-compose.yml", "services/voice.yaml"},
+			expected: nil,
+		},
+		{
+			name:     "empty list",
+			input:    []string{},
+			expected: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := FilterNomadChanges(tt.input)
+			if len(got) != len(tt.expected) {
+				t.Fatalf("FilterNomadChanges() returned %d items, want %d", len(got), len(tt.expected))
+			}
+			for i := range got {
+				if got[i] != tt.expected[i] {
+					t.Errorf("FilterNomadChanges()[%d] = %q, want %q", i, got[i], tt.expected[i])
+				}
+			}
+		})
+	}
+}
+
+func TestExtractJobName_TableDriven(t *testing.T) {
+	tests := []struct {
+		name             string
+		content          string
+		fallbackFileName string
+		expected         string
+	}{
+		{
+			name: "standard job definition",
+			content: `
+job "infisical" {
+  datacenters = ["dc1"]
+  type        = "service"
+}`,
+			fallbackFileName: "jobs/infisical.nomad",
+			expected:         "infisical",
+		},
+		{
+			name: "job with comments above",
+			content: `
+# Comment about job
+// Another comment
+job "mirrormere-core" {
+  type = "service"
+}`,
+			fallbackFileName: "jobs/mirrormere-core.nomad",
+			expected:         "mirrormere-core",
+		},
+		{
+			name:             "fallback when content has no job block",
+			content:          `some random hcl without job declaration`,
+			fallbackFileName: "jobs/kiosk-client.nomad.hcl",
+			expected:         "kiosk-client",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ExtractJobName(tt.content, tt.fallbackFileName); got != tt.expected {
+				t.Errorf("ExtractJobName() = %q, want %q", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestExtractNomadJobImages_TableDriven(t *testing.T) {
+	tests := []struct {
+		name     string
+		content  string
+		expected []string
+	}{
+		{
+			name: "multi-task job spec",
+			content: `
+job "infisical" {
+  group "infisical" {
+    task "redis" {
+      config {
+        image = "redis:7-alpine"
+      }
+    }
+    task "server" {
+      config {
+        image = "infisical/infisical:latest"
+      }
+    }
+  }
+}`,
+			expected: []string{"redis:7-alpine", "infisical/infisical:latest"},
+		},
+		{
+			name: "single task with quotes and spaces",
+			content: `
+task "voice" {
+  config {
+    image = "ghcr.io/azylman/orin-voice:latest"
+  }
+}`,
+			expected: []string{"ghcr.io/azylman/orin-voice:latest"},
+		},
+		{
+			name: "no images",
+			content: `
+job "raw-exec-job" {
+  task "script" {
+    driver = "raw_exec"
+  }
+}`,
+			expected: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ExtractNomadJobImages(tt.content)
+			if len(got) != len(tt.expected) {
+				t.Fatalf("ExtractNomadJobImages() returned %d items, want %d", len(got), len(tt.expected))
+			}
+			for i := range got {
+				if got[i] != tt.expected[i] {
+					t.Errorf("ExtractNomadJobImages()[%d] = %q, want %q", i, got[i], tt.expected[i])
+				}
+			}
+		})
+	}
+}
+
+func TestParseNomadGitStatus_TableDriven(t *testing.T) {
+	statusOutput := `M	jobs/infisical.nomad
+A	jobs/mirrormere-core.nomad
+D	jobs/deprecated.nomad
+M	docker-compose.yml
+R100	jobs/old.nomad	jobs/new.nomad
+`
+	changes := ParseNomadGitStatus(statusOutput)
+	if len(changes) != 4 {
+		t.Fatalf("expected 4 nomad changes, got %d: %+v", len(changes), changes)
+	}
+
+	if changes[0].Path != "jobs/infisical.nomad" || changes[0].Action != "apply" || changes[0].JobName != "infisical" {
+		t.Errorf("unexpected change[0]: %+v", changes[0])
+	}
+	if changes[1].Path != "jobs/mirrormere-core.nomad" || changes[1].Action != "apply" || changes[1].JobName != "mirrormere-core" {
+		t.Errorf("unexpected change[1]: %+v", changes[1])
+	}
+	if changes[2].Path != "jobs/deprecated.nomad" || changes[2].Action != "delete" || changes[2].JobName != "deprecated" {
+		t.Errorf("unexpected change[2]: %+v", changes[2])
+	}
+	if changes[3].Path != "jobs/new.nomad" || changes[3].Action != "apply" || changes[3].JobName != "new" {
+		t.Errorf("unexpected change[3]: %+v", changes[3])
+	}
+}
+
+
 
