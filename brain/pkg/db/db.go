@@ -137,15 +137,6 @@ func initDB(dsn string) (*sql.DB, error) {
 	database.SetConnMaxLifetime(5 * time.Minute)
 	database.SetConnMaxIdleTime(2 * time.Minute)
 
-	// 3. Serialize schema creation using PostgreSQL advisory lock
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	if err := initSchemaPostgres(ctx, database); err != nil {
-		closeWarn(database, "database")
-		return nil, err
-	}
-
 	log.Printf("[DB] PostgreSQL initialized successfully with pgvector at %s", trimmed)
 	metrics.RegisterDBStats(database)
 	return database, nil

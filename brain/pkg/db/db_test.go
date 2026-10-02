@@ -1757,12 +1757,8 @@ func TestDB_InitDB_SQLiteSuccessAndSchemaError(t *testing.T) {
 	closedDB, err := sql.Open("sqlite", ":memory:")
 	if err == nil && closedDB != nil {
 		_ = closedDB.Close()
-		ctx := context.Background()
 		if err := initSchemaSQLite(closedDB); err == nil {
 			t.Error("expected error calling initSchemaSQLite on closed db")
-		}
-		if err := initSchemaPostgres(ctx, closedDB); err == nil {
-			t.Error("expected error calling initSchemaPostgres on closed db")
 		}
 	}
 }

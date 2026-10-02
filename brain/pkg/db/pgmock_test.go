@@ -318,13 +318,6 @@ func TestPostgresWireMockAndInitDB(t *testing.T) {
 		t.Errorf("expected isPostgres(db) to be true for pgx driver, got false")
 	}
 
-	// Verify initSchemaPostgres runs cleanly on connected database
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := initSchemaPostgres(ctx, db); err != nil {
-		t.Errorf("initSchemaPostgres on mock postgres failed: %v", err)
-	}
-
 	// Test New with *config.Config wrapping postgres DSN
 	cfg := config.NewFromData(&config.ConfigData{DatabaseURL: dsn})
 	dbCfg, err := New(cfg)
@@ -362,31 +355,5 @@ func TestIsPostgresDriverBranches(t *testing.T) {
 	defer sqliteDB.Close()
 	if isPostgres(sqliteDB) {
 		t.Errorf("expected isPostgres(sqliteDB) to be false")
-	}
-}
-
-func TestInitSchemaPostgresAcquireConnError(t *testing.T) {
-	// Acquire conn error by passing a closed DB
-	addr := startMockPostgres(t)
-	origAttempts := postgresMaxAttempts
-	origRetryBase := postgresRetryBase
-	postgresMaxAttempts = 1
-	postgresRetryBase = 1 * time.Millisecond
-	defer func() {
-		postgresMaxAttempts = origAttempts
-		postgresRetryBase = origRetryBase
-	}()
-
-	dsn := fmt.Sprintf("postgres://mock:mock@%s/testdb?sslmode=disable", addr)
-	db, err := InitDB(dsn)
-	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
-	}
-	_ = db.Close() // Close database so Conn() fails
-
-	ctx := context.Background()
-	err = initSchemaPostgres(ctx, db)
-	if err == nil {
-		t.Errorf("expected error from initSchemaPostgres on closed DB, got nil")
 	}
 }

@@ -267,8 +267,8 @@ Before modifying source code, Aerial MUST audit the plan according to the classi
      - The script automatically provisions an ephemeral PostgreSQL + pgvector container, calculates the declarative schema diff, writes the versioned migration SQL file, updates `atlas.sum`, and deterministically cleans up the container.
    - **Step 3: Verify Integrity & Code Hygiene (`./scripts/verify.sh --staged`)**:
      - Staged pre-flight checks automatically run `check_no_imperative_ddl` to ensure no raw DDL leaked into application code, and validate migration directory checksums via `atlas migrate validate`.
-   - **Step 4: Hermetic Tests & Migration Runner**:
-     - Run target database tests (`go test -v ./brain/pkg/db/...`). Ensure migration runners apply cleanly and hermetic tests pass without live database dependencies.
+   - **Step 4: Hermetic Tests & Nomad Batch Migration Execution**:
+     - Run target database tests (`go test -v ./brain/pkg/db/...`). Ensure application code does not embed migration runners on startup, and that schema provisioning cluster-wide is handled via the colocated Nomad batch job (`nomad/jobs/migrate.nomad`).
 
 ---
 
