@@ -1108,25 +1108,37 @@ func TestResolvePRFromCommitSHA_ErrorHandling(t *testing.T) {
 	}
 }
 
+func getTestPostgresURL() string {
+	pgURL := os.Getenv("POSTGRES_URL")
+	if pgURL == "" {
+		pgURL = os.Getenv("DATABASE_URL")
+	}
+	if pgURL != "" {
+		return pgURL
+	}
+	if _, err := net.LookupHost("aerial-postgres"); err == nil {
+		return "postgres://aerial:aerial_secure_pass@aerial-postgres:5432/aerial?sslmode=disable"
+	}
+	if _, err := net.LookupHost("postgres"); err == nil {
+		return "postgres://aerial:aerial_secure_pass@postgres:5432/aerial?sslmode=disable"
+	}
+	if conn, err := net.DialTimeout("tcp", "127.0.0.1:5432", 150*time.Millisecond); err == nil {
+		conn.Close()
+		return "postgres://aerial:aerial_secure_pass@127.0.0.1:5432/aerial?sslmode=disable"
+	}
+	if conn, err := net.DialTimeout("tcp", "192.168.1.14:5432", 150*time.Millisecond); err == nil {
+		conn.Close()
+		return "postgres://aerial:aerial_secure_pass@192.168.1.14:5432/aerial?sslmode=disable"
+	}
+	return "postgres://aerial:aerial_secure_pass@127.0.0.1:5432/aerial?sslmode=disable"
+}
+
 func TestRiverLiveIntegration(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping live River integration test in short mode")
 	}
 
-	pgURL := os.Getenv("POSTGRES_URL")
-	if pgURL == "" {
-		pgURL = os.Getenv("DATABASE_URL")
-	}
-	if pgURL == "" {
-		if _, err := net.LookupHost("aerial-postgres"); err == nil {
-			pgURL = "postgres://aerial:aerial_secure_pass@aerial-postgres:5432/aerial?sslmode=disable"
-		} else if _, err := net.LookupHost("postgres"); err == nil {
-			pgURL = "postgres://aerial:aerial_secure_pass@postgres:5432/aerial?sslmode=disable"
-		} else {
-			pgURL = "postgres://aerial:aerial_secure_pass@127.0.0.1:5432/aerial?sslmode=disable"
-		}
-	}
-
+	pgURL := getTestPostgresURL()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -1221,38 +1233,50 @@ type mockPRRegistry struct {
 	ciFailedCalls       []struct{ repo string; prNumber int }
 	ciFailedBySHACalls  []struct{ repo string; headSHA string }
 	backfillCalls       []struct{ repo string; prNumber int; mergeSHA string }
-	ciFailedTargetID    string
-	ciFailedUpdated     bool
-	ciFailedErr         error
-	ciFailedBySHAPRNum  int
-	ciFailedBySHATarget string
+	resolveBySHACalls   []struct{ repo string; sha string }
+
+	mergedTargetID      string
+	syncTargetID        string
+	closedTargetID      string
+	backfillTargetID    string
+
+	resolvePRNum        int
+	resolveBranch       string
+	resolveTargetID     string
+	resolveErr          error
+
+	ciFailedTargetID     string
+	ciFailedUpdated      bool
+	ciFailedErr          error
+	ciFailedBySHAPRNum   int
+	ciFailedBySHATarget  string
 	ciFailedBySHAUpdated bool
-	ciFailedBySHAErr    error
-	err                 error
+	ciFailedBySHAErr     error
+	err                  error
 }
 
-func (m *mockPRRegistry) UpdatePRMerged(ctx context.Context, repo string, prNumber int, mergeSHA string) error {
+func (m *mockPRRegistry) UpdatePRMerged(ctx context.Context, repo string, prNumber int, mergeSHA string) (string, error) {
 	if m.err != nil {
-		return m.err
+		return "", m.err
 	}
 	m.mergedCalls = append(m.mergedCalls, struct{ repo string; prNumber int; mergeSHA string }{repo, prNumber, mergeSHA})
-	return nil
+	return m.mergedTargetID, nil
 }
 
-func (m *mockPRRegistry) UpdatePRSync(ctx context.Context, repo string, prNumber int, headSHA string) error {
+func (m *mockPRRegistry) UpdatePRSync(ctx context.Context, repo string, prNumber int, headSHA string) (string, error) {
 	if m.err != nil {
-		return m.err
+		return "", m.err
 	}
 	m.syncCalls = append(m.syncCalls, struct{ repo string; prNumber int; headSHA string }{repo, prNumber, headSHA})
-	return nil
+	return m.syncTargetID, nil
 }
 
-func (m *mockPRRegistry) UpdatePRClosedUnmerged(ctx context.Context, repo string, prNumber int) error {
+func (m *mockPRRegistry) UpdatePRClosedUnmerged(ctx context.Context, repo string, prNumber int) (string, error) {
 	if m.err != nil {
-		return m.err
+		return "", m.err
 	}
 	m.closedUnmergedCalls = append(m.closedUnmergedCalls, struct{ repo string; prNumber int }{repo, prNumber})
-	return nil
+	return m.closedTargetID, nil
 }
 
 func (m *mockPRRegistry) AtomicTransitionCIFailed(ctx context.Context, repo string, prNumber int) (string, bool, error) {
@@ -1277,12 +1301,23 @@ func (m *mockPRRegistry) AtomicTransitionCIFailedByHeadSHA(ctx context.Context, 
 	return m.ciFailedBySHATarget, m.ciFailedBySHAPRNum, m.ciFailedBySHAUpdated, nil
 }
 
-func (m *mockPRRegistry) BackfillPushMergeSHA(ctx context.Context, repo string, prNumber int, mergeSHA string) error {
+func (m *mockPRRegistry) BackfillPushMergeSHA(ctx context.Context, repo string, prNumber int, mergeSHA string) (string, error) {
 	if m.err != nil {
-		return m.err
+		return "", m.err
 	}
 	m.backfillCalls = append(m.backfillCalls, struct{ repo string; prNumber int; mergeSHA string }{repo, prNumber, mergeSHA})
-	return nil
+	return m.backfillTargetID, nil
+}
+
+func (m *mockPRRegistry) ResolvePRBySHA(ctx context.Context, repo string, sha string) (int, string, string, error) {
+	if m.resolveErr != nil {
+		return 0, "", "", m.resolveErr
+	}
+	if m.err != nil {
+		return 0, "", "", m.err
+	}
+	m.resolveBySHACalls = append(m.resolveBySHACalls, struct{ repo string; sha string }{repo, sha})
+	return m.resolvePRNum, m.resolveBranch, m.resolveTargetID, nil
 }
 
 func TestNormalizeRepo(t *testing.T) {
@@ -1309,10 +1344,13 @@ func TestNormalizeRepo(t *testing.T) {
 func TestProcessGitHubEvent_RegistryTransitions(t *testing.T) {
 	ctx := context.Background()
 	mockReg := &mockPRRegistry{
-		ciFailedTargetID:    "target-111",
-		ciFailedUpdated:     true,
-		ciFailedBySHAPRNum:  520,
-		ciFailedBySHATarget: "target-222",
+		mergedTargetID:       "target-merged-1",
+		closedTargetID:       "target-closed-1",
+		syncTargetID:         "target-sync-1",
+		ciFailedTargetID:     "target-111",
+		ciFailedUpdated:      true,
+		ciFailedBySHAPRNum:   520,
+		ciFailedBySHATarget:  "target-222",
 		ciFailedBySHAUpdated: true,
 	}
 	srv := NewRouterServer(Config{}, nil)
@@ -1331,12 +1369,15 @@ func TestProcessGitHubEvent_RegistryTransitions(t *testing.T) {
 		"repository": {"full_name": "azylman/aerial"},
 		"sender": {"login": "arcane103"}
 	}`
-	_, err := srv.ProcessGitHubEvent(ctx, "pull_request", "del-pr-merged", []byte(payloadPRMerged))
+	resPRMerged, err := srv.ProcessGitHubEvent(ctx, "pull_request", "del-pr-merged", []byte(payloadPRMerged))
 	if err != nil {
 		t.Fatalf("pull_request merged failed: %v", err)
 	}
 	if len(mockReg.mergedCalls) != 1 || mockReg.mergedCalls[0].prNumber != 515 || mockReg.mergedCalls[0].mergeSHA != "merge111" {
 		t.Errorf("unexpected mergedCalls: %+v", mockReg.mergedCalls)
+	}
+	if resPRMerged.TargetID != "target-merged-1" {
+		t.Errorf("expected TargetID %q, got %q", "target-merged-1", resPRMerged.TargetID)
 	}
 
 	// 2. PullRequest closed unmerged
@@ -1351,12 +1392,15 @@ func TestProcessGitHubEvent_RegistryTransitions(t *testing.T) {
 		"repository": {"full_name": "azylman/aerial"},
 		"sender": {"login": "arcane103"}
 	}`
-	_, err = srv.ProcessGitHubEvent(ctx, "pull_request", "del-pr-closed", []byte(payloadPRClosed))
+	resPRClosed, err := srv.ProcessGitHubEvent(ctx, "pull_request", "del-pr-closed", []byte(payloadPRClosed))
 	if err != nil {
 		t.Fatalf("pull_request closed unmerged failed: %v", err)
 	}
 	if len(mockReg.closedUnmergedCalls) != 1 || mockReg.closedUnmergedCalls[0].prNumber != 516 {
 		t.Errorf("unexpected closedUnmergedCalls: %+v", mockReg.closedUnmergedCalls)
+	}
+	if resPRClosed.TargetID != "target-closed-1" {
+		t.Errorf("expected TargetID %q, got %q", "target-closed-1", resPRClosed.TargetID)
 	}
 
 	// 3. PullRequest synchronize
@@ -1370,12 +1414,15 @@ func TestProcessGitHubEvent_RegistryTransitions(t *testing.T) {
 		"repository": {"full_name": "azylman/aerial"},
 		"sender": {"login": "arcane103"}
 	}`
-	_, err = srv.ProcessGitHubEvent(ctx, "pull_request", "del-pr-sync", []byte(payloadPRSync))
+	resPRSync, err := srv.ProcessGitHubEvent(ctx, "pull_request", "del-pr-sync", []byte(payloadPRSync))
 	if err != nil {
 		t.Fatalf("pull_request synchronize failed: %v", err)
 	}
 	if len(mockReg.syncCalls) != 1 || mockReg.syncCalls[0].prNumber != 517 || mockReg.syncCalls[0].headSHA != "newhead333" {
 		t.Errorf("unexpected syncCalls: %+v", mockReg.syncCalls)
+	}
+	if resPRSync.TargetID != "target-sync-1" {
+		t.Errorf("expected TargetID %q, got %q", "target-sync-1", resPRSync.TargetID)
 	}
 
 	// 4. CheckRun failure with PR in payload
@@ -1514,6 +1561,94 @@ func TestProcessGitHubEvent_RegistryTransitions(t *testing.T) {
 	if err == nil {
 		t.Errorf("expected error when registry returns failure, got nil")
 	}
+
+	// 11. Local PR resolution priority: ResolvePRBySHA succeeds, avoiding GitHub API
+	var ghHit bool
+	ghSpy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ghHit = true
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]GitHubCommitPRItem{
+			{Number: 999, State: "closed"},
+		})
+	}))
+	defer ghSpy.Close()
+
+	mockLocalReg := &mockPRRegistry{
+		resolvePRNum:    530,
+		resolveBranch:   "feat/local-resolved",
+		resolveTargetID: "thread-local-530",
+	}
+	srvLocal := NewRouterServer(Config{GitHubAPIURL: ghSpy.URL}, ghSpy.Client())
+	srvLocal.SetRegistry(mockLocalReg)
+
+	// a. check_run without pull_requests resolves locally
+	crPayload := `{
+		"action": "completed",
+		"check_run": {
+			"name": "Integration Tests",
+			"head_sha": "localsha123",
+			"status": "completed",
+			"conclusion": "success",
+			"pull_requests": []
+		},
+		"repository": {"full_name": "azylman/aerial"}
+	}`
+	resCR, err := srvLocal.ProcessGitHubEvent(ctx, "check_run", "del-cr-local", []byte(crPayload))
+	if err != nil {
+		t.Fatalf("local check_run resolution failed: %v", err)
+	}
+	if ghHit {
+		t.Errorf("GitHub API was hit despite local resolution succeeding")
+	}
+	if resCR.ResolutionSource != "local_pr_registry" || resCR.PRNumber != 530 || resCR.Branch != "feat/local-resolved" || resCR.TargetID != "thread-local-530" {
+		t.Errorf("unexpected resCR: %+v", resCR)
+	}
+
+	// b. workflow_run without pull_requests resolves locally
+	ghHit = false
+	wfPayload := `{
+		"action": "completed",
+		"workflow_run": {
+			"name": "Build Pipeline",
+			"head_sha": "localsha123",
+			"status": "completed",
+			"conclusion": "success",
+			"pull_requests": []
+		},
+		"repository": {"full_name": "azylman/aerial"}
+	}`
+	resWF, err := srvLocal.ProcessGitHubEvent(ctx, "workflow_run", "del-wf-local", []byte(wfPayload))
+	if err != nil {
+		t.Fatalf("local workflow_run resolution failed: %v", err)
+	}
+	if ghHit {
+		t.Errorf("GitHub API was hit despite local resolution succeeding")
+	}
+	if resWF.ResolutionSource != "local_pr_registry" || resWF.PRNumber != 530 || resWF.Branch != "feat/local-resolved" || resWF.TargetID != "thread-local-530" {
+		t.Errorf("unexpected resWF: %+v", resWF)
+	}
+
+	// c. push resolves locally and backfills
+	ghHit = false
+	pushPayloadLocal := `{
+		"ref": "refs/heads/main",
+		"after": "localsha123",
+		"repository": {"full_name": "azylman/aerial"},
+		"head_commit": {"id": "localsha123", "message": "feat: merged commit"}
+	}`
+	resPush, err := srvLocal.ProcessGitHubEvent(ctx, "push", "del-push-local", []byte(pushPayloadLocal))
+	if err != nil {
+		t.Fatalf("local push resolution failed: %v", err)
+	}
+	if ghHit {
+		t.Errorf("GitHub API was hit despite local resolution succeeding")
+	}
+	if resPush.ResolutionSource != "local_pr_registry" || resPush.PRNumber != 530 || resPush.MergeSHA != "localsha123" || resPush.TargetID != "thread-local-530" {
+		t.Errorf("unexpected resPush: %+v", resPush)
+	}
+	if len(mockLocalReg.backfillCalls) != 1 || mockLocalReg.backfillCalls[0].prNumber != 530 || mockLocalReg.backfillCalls[0].mergeSHA != "localsha123" {
+		t.Errorf("unexpected backfillCalls on local push: %+v", mockLocalReg.backfillCalls)
+	}
 }
 
 func TestPostgresPRRegistry_Live(t *testing.T) {
@@ -1521,20 +1656,7 @@ func TestPostgresPRRegistry_Live(t *testing.T) {
 		t.Skip("skipping live PostgresPRRegistry integration test in short mode")
 	}
 
-	pgURL := os.Getenv("POSTGRES_URL")
-	if pgURL == "" {
-		pgURL = os.Getenv("DATABASE_URL")
-	}
-	if pgURL == "" {
-		if _, err := net.LookupHost("aerial-postgres"); err == nil {
-			pgURL = "postgres://aerial:aerial_secure_pass@aerial-postgres:5432/aerial?sslmode=disable"
-		} else if _, err := net.LookupHost("postgres"); err == nil {
-			pgURL = "postgres://aerial:aerial_secure_pass@postgres:5432/aerial?sslmode=disable"
-		} else {
-			pgURL = "postgres://aerial:aerial_secure_pass@127.0.0.1:5432/aerial?sslmode=disable"
-		}
-	}
-
+	pgURL := getTestPostgresURL()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -1582,8 +1704,8 @@ func TestPostgresPRRegistry_Live(t *testing.T) {
 	reg := NewPostgresPRRegistry(pool)
 
 	// 1. Test UpdatePRSync: updates head_sha and sets status = 'open'
-	if err := reg.UpdatePRSync(ctx, repo, testPRNum, "syncsha222"); err != nil {
-		t.Fatalf("UpdatePRSync failed: %v", err)
+	if target, err := reg.UpdatePRSync(ctx, repo, testPRNum, "syncsha222"); err != nil || target != targetID {
+		t.Fatalf("UpdatePRSync failed (target=%s): %v", target, err)
 	}
 	var currentHead, currentStatus string
 	err = pool.QueryRow(ctx, "SELECT head_sha, status FROM pr_registry WHERE repo = $1 AND pr_number = $2", repo, testPRNum).Scan(&currentHead, &currentStatus)
@@ -1617,8 +1739,8 @@ func TestPostgresPRRegistry_Live(t *testing.T) {
 	}
 
 	// 4. Test UpdatePRSync resets 'ci_failed' back to 'open'
-	if err := reg.UpdatePRSync(ctx, repo, testPRNum, "newhead333"); err != nil {
-		t.Fatalf("UpdatePRSync reset failed: %v", err)
+	if target, err := reg.UpdatePRSync(ctx, repo, testPRNum, "newhead333"); err != nil || target != targetID {
+		t.Fatalf("UpdatePRSync reset failed (target=%s): %v", target, err)
 	}
 	err = pool.QueryRow(ctx, "SELECT head_sha, status FROM pr_registry WHERE repo = $1 AND pr_number = $2", repo, testPRNum).Scan(&currentHead, &currentStatus)
 	if err != nil || currentHead != "newhead333" || currentStatus != "open" {
@@ -1635,8 +1757,8 @@ func TestPostgresPRRegistry_Live(t *testing.T) {
 	}
 
 	// 6. Test UpdatePRMerged: transitions to 'merged'
-	if err := reg.UpdatePRMerged(ctx, repo, testPRNum, "mergesha444"); err != nil {
-		t.Fatalf("UpdatePRMerged failed: %v", err)
+	if target, err := reg.UpdatePRMerged(ctx, repo, testPRNum, "mergesha444"); err != nil || target != targetID {
+		t.Fatalf("UpdatePRMerged failed (target=%s): %v", target, err)
 	}
 	var currentMerge string
 	err = pool.QueryRow(ctx, "SELECT merge_sha, status FROM pr_registry WHERE repo = $1 AND pr_number = $2", repo, testPRNum).Scan(&currentMerge, &currentStatus)
@@ -1654,8 +1776,8 @@ func TestPostgresPRRegistry_Live(t *testing.T) {
 	}
 
 	// 8. Test BackfillPushMergeSHA
-	if err := reg.BackfillPushMergeSHA(ctx, repo, testPRNum, "mergesha555"); err != nil {
-		t.Fatalf("BackfillPushMergeSHA failed: %v", err)
+	if target, err := reg.BackfillPushMergeSHA(ctx, repo, testPRNum, "mergesha555"); err != nil || target != targetID {
+		t.Fatalf("BackfillPushMergeSHA failed (target=%s): %v", target, err)
 	}
 	err = pool.QueryRow(ctx, "SELECT merge_sha FROM pr_registry WHERE repo = $1 AND pr_number = $2", repo, testPRNum).Scan(&currentMerge)
 	if err != nil || currentMerge != "mergesha555" {
@@ -1663,14 +1785,14 @@ func TestPostgresPRRegistry_Live(t *testing.T) {
 	}
 
 	// 9. Untracked PR succeeds silently
-	if err := reg.UpdatePRMerged(ctx, repo, 999999, "sha"); err != nil {
-		t.Errorf("expected nil error on untracked PR, got %v", err)
+	if target, err := reg.UpdatePRMerged(ctx, repo, 999999, "sha"); err != nil || target != "" {
+		t.Errorf("expected nil error and empty target on untracked PR, got %v, %q", err, target)
 	}
-	if err := reg.UpdatePRClosedUnmerged(ctx, repo, 999999); err != nil {
-		t.Errorf("expected nil error on untracked PR closed, got %v", err)
+	if target, err := reg.UpdatePRClosedUnmerged(ctx, repo, 999999); err != nil || target != "" {
+		t.Errorf("expected nil error and empty target on untracked PR closed, got %v, %q", err, target)
 	}
-	if err := reg.UpdatePRSync(ctx, repo, 999999, "sha"); err != nil {
-		t.Errorf("expected nil error on untracked PR sync, got %v", err)
+	if target, err := reg.UpdatePRSync(ctx, repo, 999999, "sha"); err != nil || target != "" {
+		t.Errorf("expected nil error and empty target on untracked PR sync, got %v, %q", err, target)
 	}
 	_, updated, err = reg.AtomicTransitionCIFailed(ctx, repo, 999999)
 	if err != nil || updated {
@@ -1689,5 +1811,43 @@ func TestPostgresPRRegistry_Live(t *testing.T) {
 	_, _, updated, err = reg.AtomicTransitionCIFailedByHeadSHA(ctx, repo, "0000000000000000000000000000000000000000")
 	if err != nil || updated {
 		t.Errorf("zero sha should return false, nil; got %v, %v", updated, err)
+	}
+
+	// 11. Test ResolvePRBySHA
+	// a. Resolve by head_sha
+	resPR, resBranch, resTarget, err := reg.ResolvePRBySHA(ctx, repo, "newhead333")
+	if err != nil {
+		t.Fatalf("ResolvePRBySHA by head_sha failed: %v", err)
+	}
+	if resPR != testPRNum || resBranch != "feat/live-test" || resTarget != targetID {
+		t.Errorf("ResolvePRBySHA by head_sha: got (%d, %s, %s); expected (%d, feat/live-test, %s)", resPR, resBranch, resTarget, testPRNum, targetID)
+	}
+
+	// b. Resolve by merge_sha
+	resPR, resBranch, resTarget, err = reg.ResolvePRBySHA(ctx, repo, "mergesha555")
+	if err != nil {
+		t.Fatalf("ResolvePRBySHA by merge_sha failed: %v", err)
+	}
+	if resPR != testPRNum || resBranch != "feat/live-test" || resTarget != targetID {
+		t.Errorf("ResolvePRBySHA by merge_sha: got (%d, %s, %s); expected (%d, feat/live-test, %s)", resPR, resBranch, resTarget, testPRNum, targetID)
+	}
+
+	// c. Untracked SHA returns 0, "", "", nil
+	resPR, resBranch, resTarget, err = reg.ResolvePRBySHA(ctx, repo, "untracked-sha-999")
+	if err != nil {
+		t.Fatalf("ResolvePRBySHA on untracked SHA failed: %v", err)
+	}
+	if resPR != 0 || resBranch != "" || resTarget != "" {
+		t.Errorf("ResolvePRBySHA on untracked SHA: got (%d, %s, %s); expected (0, \"\", \"\")", resPR, resBranch, resTarget)
+	}
+
+	// d. Empty / Zero SHA returns 0, "", "", nil
+	resPR, _, _, err = reg.ResolvePRBySHA(ctx, repo, "")
+	if err != nil || resPR != 0 {
+		t.Errorf("ResolvePRBySHA empty sha: got (%d, %v); expected (0, nil)", resPR, err)
+	}
+	resPR, _, _, err = reg.ResolvePRBySHA(ctx, repo, "0000000000000000000000000000000000000000")
+	if err != nil || resPR != 0 {
+		t.Errorf("ResolvePRBySHA zero sha: got (%d, %v); expected (0, nil)", resPR, err)
 	}
 }
