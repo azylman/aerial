@@ -12,7 +12,6 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
-	"reflect"
 	"strings"
 	"syscall"
 	"time"
@@ -401,44 +400,6 @@ func (s *RouterServer) fetchInfisicalSecrets(ctx context.Context, token, workspa
 	return items, nil
 }
 
-func (s *RouterServer) getNomadVariable(ctx context.Context) (map[string]string, bool, error) {
-	reqURL := fmt.Sprintf("%s/v1/var/%s", s.cfg.NomadAddr, TargetNomadVariable)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
-	if err != nil {
-		return nil, false, err
-	}
-	if s.cfg.NomadToken != "" {
-		req.Header.Set("X-Nomad-Token", s.cfg.NomadToken)
-	}
-
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		return nil, false, fmt.Errorf("nomad get variable request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusNotFound {
-		return make(map[string]string), false, nil
-	}
-	if resp.StatusCode != http.StatusOK {
-		body, readErr := io.ReadAll(resp.Body)
-		if readErr != nil {
-			return nil, false, fmt.Errorf("reading nomad var response: %w", readErr)
-		}
-		return nil, false, fmt.Errorf("nomad get variable returned status %d: %s", resp.StatusCode, string(body))
-	}
-
-	var nomadVar NomadVariable
-	if err := json.NewDecoder(resp.Body).Decode(&nomadVar); err != nil {
-		return nil, false, fmt.Errorf("decoding nomad variable: %w", err)
-	}
-	if nomadVar.Items == nil {
-		nomadVar.Items = make(map[string]string)
-	}
-	return nomadVar.Items, true, nil
-}
-
 func (s *RouterServer) putNomadVariable(ctx context.Context, items map[string]string) error {
 	reqURL := fmt.Sprintf("%s/v1/var/%s", s.cfg.NomadAddr, TargetNomadVariable)
 
@@ -477,7 +438,7 @@ func (s *RouterServer) putNomadVariable(ctx context.Context, items map[string]st
 	return nil
 }
 
-// SyncSecrets coordinates fetching secrets from Infisical and synchronizing to Nomad with deep idempotency checking.
+// SyncSecrets coordinates fetching secrets from Infisical and synchronizing directly to Nomad.
 func (s *RouterServer) SyncSecrets(ctx context.Context, workspaceID, envName string) error {
 	log.Printf("[webhooks-router] Initiating secret sync to %s (env: %s)", TargetNomadVariable, envName)
 
@@ -491,18 +452,6 @@ func (s *RouterServer) SyncSecrets(ctx context.Context, workspaceID, envName str
 	if err != nil {
 		log.Printf("[webhooks-router] ERROR fetching secrets from infisical: %v", err)
 		return err
-	}
-
-	existingItems, exists, err := s.getNomadVariable(ctx)
-	if err != nil {
-		log.Printf("[webhooks-router] ERROR querying existing nomad variable %s: %v", TargetNomadVariable, err)
-		return err
-	}
-
-	// Semantic idempotency check: Avoid PUT if items are unchanged to prevent container restarts in Nomad
-	if exists && reflect.DeepEqual(existingItems, newItems) {
-		log.Printf("[webhooks-router] Secrets for %s are identical (%d keys); skipping Nomad variable PUT to prevent container restarts", TargetNomadVariable, len(newItems))
-		return nil
 	}
 
 	if err := s.putNomadVariable(ctx, newItems); err != nil {
