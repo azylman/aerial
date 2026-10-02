@@ -2,11 +2,11 @@ job "aerial-core-db-migrate" {
   datacenters = ["dc1"]
   type        = "batch"
 
-  # Strictly target HAOS host node where PostgreSQL is hosted
+  # Target quiet-zero core server node
   constraint {
-    attribute = "${node.unique.name}"
+    attribute = "${node.class}"
     operator  = "regexp"
-    value     = "haos.*"
+    value     = "quiet-zero|haos"
   }
 
   reschedule {

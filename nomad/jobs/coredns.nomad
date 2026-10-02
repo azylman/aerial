@@ -2,6 +2,13 @@ job "coredns" {
   datacenters = ["dc1"]
   type        = "service"
 
+  # Target quiet-zero core server node
+  constraint {
+    attribute = "${node.class}"
+    operator  = "regexp"
+    value     = "quiet-zero|haos"
+  }
+
   update {
     max_parallel      = 1
     canary            = 0
