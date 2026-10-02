@@ -857,6 +857,104 @@ func handleTasks(store db.Store) http.HandlerFunc {
 	}
 }
 
+type PRRegisterRequest struct {
+	Repo     string `json:"repo"`
+	PRNumber int    `json:"pr_number"`
+	Branch   string `json:"branch"`
+	HeadSHA  string `json:"head_sha"`
+	TargetID string `json:"target_id"`
+	Title    string `json:"title,omitempty"`
+	Metadata string `json:"metadata,omitempty"`
+}
+
+func handlePRRegister(store db.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "Method not allowed"})
+			return
+		}
+
+		if store == nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Database not available"})
+			return
+		}
+
+		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Failed to read request body"})
+			return
+		}
+
+		var req PRRegisterRequest
+		if err := json.Unmarshal(body, &req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid JSON payload"})
+			return
+		}
+
+		req.Repo = strings.TrimSpace(req.Repo)
+		req.Branch = strings.TrimSpace(req.Branch)
+		req.HeadSHA = strings.TrimSpace(req.HeadSHA)
+		req.TargetID = strings.TrimSpace(req.TargetID)
+		req.Title = strings.TrimSpace(req.Title)
+
+		if req.Repo == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "repo cannot be empty"})
+			return
+		}
+		if req.PRNumber <= 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "pr_number must be greater than 0"})
+			return
+		}
+		if req.Branch == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "branch cannot be empty"})
+			return
+		}
+		if req.HeadSHA == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "head_sha cannot be empty"})
+			return
+		}
+		if req.TargetID == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target_id cannot be empty"})
+			return
+		}
+
+		if len(req.TargetID) < 17 || len(req.TargetID) > 20 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target_id must be a valid Discord snowflake (17-20 digits)"})
+			return
+		}
+		for _, c := range req.TargetID {
+			if c < '0' || c > '9' {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target_id must contain only numeric digits"})
+				return
+			}
+		}
+
+		rec := db.PRRecord{
+			Repo:     req.Repo,
+			PRNumber: req.PRNumber,
+			Branch:   req.Branch,
+			HeadSHA:  req.HeadSHA,
+			TargetID: req.TargetID,
+			Title:    req.Title,
+			Status:   "open",
+			Metadata: req.Metadata,
+		}
+
+		if err := store.UpsertPR(r.Context(), rec); err != nil {
+			log.Printf("[HTTP] Failed to register PR #%d (%s): %v", req.PRNumber, req.Repo, err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to register PR"})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"status":    "registered",
+			"repo":      req.Repo,
+			"pr_number": req.PRNumber,
+			"target_id": req.TargetID,
+		})
+	}
+}
+
 type statusRecorder struct {
 	http.ResponseWriter
 	statusCode int
@@ -939,6 +1037,7 @@ func SetupBrainMuxWithEmbedder(store db.Store, pool *queue.WorkerPool, reloadFn 
 	mux.HandleFunc("/facts", handleFacts(store))
 	mux.HandleFunc("/schedules", handleSchedules(store))
 	mux.HandleFunc("/schedules/runs", handleScheduleRuns(store))
+	mux.HandleFunc("/internal/pr/register", handlePRRegister(store))
 	mux.HandleFunc("/internal/reload", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)

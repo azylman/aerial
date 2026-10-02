@@ -3923,5 +3923,107 @@ func TestPrewarmProcessPoolsSequentially_CancelledContext(t *testing.T) {
 	time.Sleep(15 * time.Millisecond)
 }
 
+func TestHandlePRRegister(t *testing.T) {
+	store := db.NewFakeStore()
+	handler := handlePRRegister(store)
+
+	// 1. Method Not Allowed
+	{
+		req := httptest.NewRequest(http.MethodGet, "/internal/pr/register", nil)
+		rec := httptest.NewRecorder()
+		handler(rec, req)
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Errorf("Expected 405 Method Not Allowed, got %d", rec.Code)
+		}
+	}
+
+	// 2. Nil store returns 500
+	{
+		nilHandler := handlePRRegister(nil)
+		req := httptest.NewRequest(http.MethodPost, "/internal/pr/register", strings.NewReader(`{}`))
+		rec := httptest.NewRecorder()
+		nilHandler(rec, req)
+		if rec.Code != http.StatusInternalServerError {
+			t.Errorf("Expected 500 when store is nil, got %d", rec.Code)
+		}
+	}
+
+	// 3. Invalid JSON
+	{
+		req := httptest.NewRequest(http.MethodPost, "/internal/pr/register", strings.NewReader(`{invalid-json`))
+		rec := httptest.NewRecorder()
+		handler(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("Expected 400 Bad Request on invalid JSON, got %d", rec.Code)
+		}
+	}
+
+	// 4. Validation errors
+	testCases := []struct {
+		name    string
+		payload string
+	}{
+		{"empty repo", `{"repo":"","pr_number":1,"branch":"feat","head_sha":"sha","target_id":"1555405874565091380"}`},
+		{"zero pr_number", `{"repo":"aerial","pr_number":0,"branch":"feat","head_sha":"sha","target_id":"1555405874565091380"}`},
+		{"empty branch", `{"repo":"aerial","pr_number":1,"branch":"","head_sha":"sha","target_id":"1555405874565091380"}`},
+		{"empty head_sha", `{"repo":"aerial","pr_number":1,"branch":"feat","head_sha":"","target_id":"1555405874565091380"}`},
+		{"empty target_id", `{"repo":"aerial","pr_number":1,"branch":"feat","head_sha":"sha","target_id":""}`},
+		{"too short target_id", `{"repo":"aerial","pr_number":1,"branch":"feat","head_sha":"sha","target_id":"12345"}`},
+		{"too long target_id", `{"repo":"aerial","pr_number":1,"branch":"feat","head_sha":"sha","target_id":"123456789012345678901"}`},
+		{"non-numeric target_id", `{"repo":"aerial","pr_number":1,"branch":"feat","head_sha":"sha","target_id":"155540587456509138A"}`},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/internal/pr/register", strings.NewReader(tc.payload))
+			rec := httptest.NewRecorder()
+			handler(rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("[%s] Expected 400 Bad Request, got %d (%s)", tc.name, rec.Code, rec.Body.String())
+			}
+		})
+	}
+
+	// 5. Successful Registration
+	{
+		payload := `{"repo":"aerial","pr_number":508,"branch":"feat/push-pipeline","head_sha":"head1234","target_id":"1555405874565091380","title":"feat: push pipeline"}`
+		req := httptest.NewRequest(http.MethodPost, "/internal/pr/register", strings.NewReader(payload))
+		rec := httptest.NewRecorder()
+		handler(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("Expected 200 OK, got %d (%s)", rec.Code, rec.Body.String())
+		}
+
+		var resp map[string]interface{}
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("Failed to decode response JSON: %v", err)
+		}
+		if resp["status"] != "registered" || resp["repo"] != "aerial" || resp["target_id"] != "1555405874565091380" {
+			t.Errorf("Unexpected response payload: %+v", resp)
+		}
+
+		// Verify persisted in store
+		recInDB, err := store.GetPRByNumber(context.Background(), "aerial", 508)
+		if err != nil {
+			t.Fatalf("Failed to retrieve registered PR from store: %v", err)
+		}
+		if recInDB.Branch != "feat/push-pipeline" || recInDB.HeadSHA != "head1234" || recInDB.Title != "feat: push pipeline" {
+			t.Errorf("Stored PR mismatch: %+v", recInDB)
+		}
+	}
+
+	// 6. DB failure returns 500
+	{
+		store.FailNext("UpsertPR", errors.New("simulated DB failure"))
+		payload := `{"repo":"aerial","pr_number":509,"branch":"feat/push-pipeline","head_sha":"head5678","target_id":"1555405874565091380"}`
+		req := httptest.NewRequest(http.MethodPost, "/internal/pr/register", strings.NewReader(payload))
+		rec := httptest.NewRecorder()
+		handler(rec, req)
+		if rec.Code != http.StatusInternalServerError {
+			t.Errorf("Expected 500 on store failure, got %d", rec.Code)
+		}
+	}
+}
+
+
 
 

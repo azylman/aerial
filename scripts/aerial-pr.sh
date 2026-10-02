@@ -1070,6 +1070,29 @@ submit_scratch() {
     # Enable native GitHub auto-merge (SQUASH)
     enable_github_auto_merge "$pr_node_id" "$pr_num"
 
+    # Register PR in PostgreSQL pr_registry via Aerial Brain internal endpoint
+    local brain_reg_url="${AERIAL_BRAIN_URL:-http://127.0.0.1:8080}/internal/pr/register"
+    local reg_payload
+    reg_payload=$(jq -n \
+        --arg repo "${REPO_NAME}" \
+        --argjson pr_num "$pr_num" \
+        --arg branch "$branch" \
+        --arg head_sha "$commit_sha" \
+        --arg target_id "$target_id" \
+        --arg title "$clean_title" \
+        '{repo: $repo, pr_number: $pr_num, branch: $branch, head_sha: $head_sha, target_id: $target_id, title: $title}')
+
+    local reg_resp
+    reg_resp=$(curl -s --connect-timeout 2 -m 5 -X POST \
+        -H "Content-Type: application/json" \
+        -d "$reg_payload" \
+        "$brain_reg_url" 2>/dev/null || true)
+    if [ -n "$reg_resp" ] && echo "$reg_resp" | jq -e '.status == "registered"' >/dev/null 2>&1; then
+        echo "🗄️ [aerial-pr] Registered PR #${pr_num} in PostgreSQL pr_registry (target: ${target_id})." >&2
+    else
+        echo "⚠️ [aerial-pr] Warning: Could not register PR in brain pr_registry (${brain_reg_url}): ${reg_resp:-unreachable}" >&2
+    fi
+
     # Asynchronous Submission: Disarm cleanup trap and remove scratch workspace immediately
     if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
         rm -rf "${SCRATCH_DIR_CLEANUP}"
