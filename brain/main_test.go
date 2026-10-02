@@ -238,6 +238,39 @@ func TestHandleTranscriptSearchAndStats(t *testing.T) {
 		}
 	})
 
+	t.Run("Search_QueryParamAlias", func(t *testing.T) {
+		fake := db.NewFakeStore()
+		handler := handleTranscriptSearch(fake, nil)
+		req := httptest.NewRequest(http.MethodGet, "/api/transcripts/search?query=fallback-query&limit=abc", nil)
+		w := httptest.NewRecorder()
+		handler(w, req)
+		if w.Code != http.StatusOK {
+			t.Errorf("expected 200 OK, got %d", w.Code)
+		}
+	})
+
+	t.Run("Search_Error", func(t *testing.T) {
+		errStore := &errTranscriptStore{FakeStore: db.NewFakeStore()}
+		handler := handleTranscriptSearch(errStore, nil)
+		req := httptest.NewRequest(http.MethodGet, "/api/transcripts/search?q=test&mode=semantic", nil)
+		w := httptest.NewRecorder()
+		handler(w, req)
+		if w.Code != http.StatusInternalServerError {
+			t.Errorf("expected 500 on search store error, got %d", w.Code)
+		}
+	})
+
+	t.Run("Stats_Error", func(t *testing.T) {
+		errStore := &errTranscriptStore{FakeStore: db.NewFakeStore()}
+		handler := handleTranscriptStats(errStore)
+		req := httptest.NewRequest(http.MethodGet, "/api/transcripts/stats", nil)
+		w := httptest.NewRecorder()
+		handler(w, req)
+		if w.Code != http.StatusInternalServerError {
+			t.Errorf("expected 500 on store error, got %d", w.Code)
+		}
+	})
+
 	t.Run("SetupBrainMuxWithEmbedder_Endpoints", func(t *testing.T) {
 		fake := db.NewFakeStore()
 		mux := SetupBrainMuxWithEmbedder(fake, nil, nil, nil)
@@ -258,6 +291,22 @@ func TestHandleTranscriptSearchAndStats(t *testing.T) {
 			t.Errorf("expected 200 from /api/transcripts/stats route, got %d", w.Code)
 		}
 	})
+}
+
+type errTranscriptStore struct {
+	*db.FakeStore
+}
+
+func (e *errTranscriptStore) GetSessionSyncStates(ctx context.Context) (map[string]db.SessionSyncState, error) {
+	return nil, errors.New("simulated sync states db error")
+}
+
+func (e *errTranscriptStore) SearchTranscriptSteps(ctx context.Context, query, sessionFilter, toolFilter string, limit int) ([]db.TranscriptStep, error) {
+	return nil, errors.New("simulated search transcript steps error")
+}
+
+func (e *errTranscriptStore) SearchSessionSummaries(ctx context.Context, queryEmbedding []float32, textQuery string, limit int, threshold float64) ([]db.SessionSummary, error) {
+	return nil, errors.New("simulated search session summaries error")
 }
 
 func TestFormatCronDescription(t *testing.T) {

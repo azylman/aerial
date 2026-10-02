@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -392,6 +393,22 @@ func TestHTTPErrors(t *testing.T) {
 		}
 	})
 
+	t.Run("ExecuteSearchHTTP_NetworkError", func(t *testing.T) {
+		cfg := CLIConfig{BaseURL: "http://127.0.0.1:59996", Query: "test"}
+		_, err := executeSearchHTTP(context.Background(), cfg)
+		if err == nil {
+			t.Fatal("expected network error")
+		}
+	})
+
+	t.Run("ExecuteStatsHTTP_NetworkError", func(t *testing.T) {
+		cfg := CLIConfig{BaseURL: "http://127.0.0.1:59996"}
+		_, err := executeStatsHTTP(context.Background(), cfg)
+		if err == nil {
+			t.Fatal("expected network error")
+		}
+	})
+
 	t.Run("RunCLI_StatsError", func(t *testing.T) {
 		var buf bytes.Buffer
 		err := runCLI(context.Background(), []string{"stats", "--url", errServer.URL}, &buf)
@@ -458,4 +475,82 @@ func TestDirectStoreAndRunCLIEdges(t *testing.T) {
 			t.Fatal("expected error on invalid flag to runCLI")
 		}
 	})
+
+	t.Run("RunCLI_WriterErrors", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if strings.Contains(r.URL.Path, "stats") {
+				_ = json.NewEncoder(w).Encode(map[string]any{"total_sessions": 5, "status": "ok"})
+			} else {
+				_ = json.NewEncoder(w).Encode(transcript.SearchResult{Query: "test", Mode: "auto"})
+			}
+		}))
+		defer server.Close()
+
+		badWriter := &failingWriter{}
+
+		// stats text writer error
+		err := runCLI(context.Background(), []string{"stats", "--url", server.URL}, badWriter)
+		if err == nil {
+			t.Errorf("expected error on failing writer for stats text")
+		}
+
+		// stats json writer error
+		err = runCLI(context.Background(), []string{"stats", "--json", "--url", server.URL}, badWriter)
+		if err == nil {
+			t.Errorf("expected error on failing writer for stats json")
+		}
+
+		// search text writer error
+		err = runCLI(context.Background(), []string{"search", "test", "--url", server.URL}, badWriter)
+		if err == nil {
+			t.Errorf("expected error on failing writer for search text")
+		}
+
+		// search json writer error
+		err = runCLI(context.Background(), []string{"search", "test", "--json", "--url", server.URL}, badWriter)
+		if err == nil {
+			t.Errorf("expected error on failing writer for search json")
+		}
+	})
+
+	t.Run("ExecuteSearchDirectDB_DefaultEnv", func(t *testing.T) {
+		oldFn := newDirectStoreFn
+		defer func() { newDirectStoreFn = oldFn }()
+
+		calledWithURL := ""
+		closedCalled := false
+		newDirectStoreFn = func(pgURL string) (db.Store, func(), error) {
+			calledWithURL = pgURL
+			fake := db.NewFakeStore()
+			return fake, func() { closedCalled = true }, nil
+		}
+
+		t.Setenv("POSTGRES_URL", "")
+		cfg := CLIConfig{
+			Command:  "search",
+			Query:    "hello",
+			Mode:     "auto",
+			DirectDB: true,
+		}
+		res, err := executeSearchDirectDB(context.Background(), cfg)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !closedCalled {
+			t.Errorf("expected closeFn to be called")
+		}
+		if !strings.Contains(calledWithURL, "aerial-postgres:5432") {
+			t.Errorf("expected default postgres url, got %s", calledWithURL)
+		}
+		if res.Query != "hello" {
+			t.Errorf("unexpected query in res: %+v", res)
+		}
+	})
+}
+
+type failingWriter struct{}
+
+func (f *failingWriter) Write(p []byte) (n int, err error) {
+	return 0, errors.New("simulated disk full write error")
 }
