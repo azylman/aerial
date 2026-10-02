@@ -52,6 +52,3 @@ volumes:
     name: aerial-vector-data
   aerial-nomad-server-data:
     name: aerial-nomad-server-data
-
-
-
