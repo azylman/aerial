@@ -225,3 +225,124 @@ func TestPRRegistry_FakeStore_Failures(t *testing.T) {
 		t.Errorf("Expected %v, got %v", simErr, err)
 	}
 }
+
+func TestPRRegistry_SQLStore_NilAndValidationBranches(t *testing.T) {
+	ctx := context.Background()
+	var nilStore *SQLStore
+	storeNilDB := &SQLStore{db: nil}
+
+	stores := []*SQLStore{nilStore, storeNilDB}
+	for i, s := range stores {
+		if err := s.UpsertPR(ctx, PRRecord{Repo: "aerial", PRNumber: 1, Branch: "b", HeadSHA: "h", TargetID: "t"}); err == nil {
+			t.Errorf("[%d] expected error on UpsertPR with nil store/db", i)
+		}
+		if _, err := s.GetPRByNumber(ctx, "aerial", 1); err == nil {
+			t.Errorf("[%d] expected error on GetPRByNumber with nil store/db", i)
+		}
+		if _, err := s.GetPRByHeadSHA(ctx, "aerial", "h"); err == nil {
+			t.Errorf("[%d] expected error on GetPRByHeadSHA with nil store/db", i)
+		}
+		if _, err := s.GetPRByMergeSHA(ctx, "aerial", "m"); err == nil {
+			t.Errorf("[%d] expected error on GetPRByMergeSHA with nil store/db", i)
+		}
+		if err := s.UpdatePRMergeSHA(ctx, "aerial", 1, "m"); err == nil {
+			t.Errorf("[%d] expected error on UpdatePRMergeSHA with nil store/db", i)
+		}
+		if err := s.UpdatePRStatus(ctx, "aerial", 1, "open"); err == nil {
+			t.Errorf("[%d] expected error on UpdatePRStatus with nil store/db", i)
+		}
+		if _, err := s.AtomicTransitionPRStatus(ctx, "aerial", 1, "s1", "s2"); err == nil {
+			t.Errorf("[%d] expected error on AtomicTransitionPRStatus with nil store/db", i)
+		}
+		if _, err := s.AtomicTransitionPRStatusByMergeSHA(ctx, "aerial", "m", "s1", "s2"); err == nil {
+			t.Errorf("[%d] expected error on AtomicTransitionPRStatusByMergeSHA with nil store/db", i)
+		}
+	}
+
+	store := NewTestStore(t)
+	sqlStore, ok := store.(*SQLStore)
+	if !ok {
+		t.Fatalf("expected *SQLStore")
+	}
+
+	// Empty repo validation
+	if _, err := sqlStore.GetPRByNumber(ctx, "", 1); err == nil {
+		t.Errorf("expected error on empty repo GetPRByNumber")
+	}
+	if _, err := sqlStore.GetPRByHeadSHA(ctx, "", "h"); err == nil {
+		t.Errorf("expected error on empty repo GetPRByHeadSHA")
+	}
+	if _, err := sqlStore.GetPRByMergeSHA(ctx, "", "m"); err == nil {
+		t.Errorf("expected error on empty repo GetPRByMergeSHA")
+	}
+	if err := sqlStore.UpdatePRMergeSHA(ctx, "", 1, "m"); err == nil {
+		t.Errorf("expected error on empty repo UpdatePRMergeSHA")
+	}
+	if err := sqlStore.UpdatePRStatus(ctx, "", 1, "open"); err == nil {
+		t.Errorf("expected error on empty repo UpdatePRStatus")
+	}
+	if _, err := sqlStore.AtomicTransitionPRStatus(ctx, "", 1, "s1", "s2"); err == nil {
+		t.Errorf("expected error on empty repo AtomicTransitionPRStatus")
+	}
+	if _, err := sqlStore.AtomicTransitionPRStatusByMergeSHA(ctx, "", "m", "s1", "s2"); err == nil {
+		t.Errorf("expected error on empty repo AtomicTransitionPRStatusByMergeSHA")
+	}
+
+	// Upsert with explicit status and non-empty metadata
+	recExplicit := PRRecord{
+		Repo:     "azylman/aerial",
+		PRNumber: 202,
+		Branch:   "feat/custom",
+		HeadSHA:  "headcustom",
+		TargetID: "1555405874565091380",
+		Status:   "custom_status",
+		Metadata: `{"custom":"value"}`,
+	}
+	if err := sqlStore.UpsertPR(ctx, recExplicit); err != nil {
+		t.Fatalf("UpsertPR explicit failed: %v", err)
+	}
+}
+
+func TestPRRegistry_SQLStore_ClosedDBBranches(t *testing.T) {
+	ctx := context.Background()
+	tmpPath := t.TempDir() + "/closed_pr.db"
+	closedDB, err := initTestSQLite(tmpPath)
+	if err != nil {
+		t.Fatalf("failed to init db: %v", err)
+	}
+	closedStore := NewSQLStore(closedDB)
+	_ = closedDB.Close()
+
+	rec := PRRecord{
+		Repo:     "aerial",
+		PRNumber: 1,
+		Branch:   "b",
+		HeadSHA:  "h",
+		TargetID: "t",
+	}
+
+	if err := closedStore.UpsertPR(ctx, rec); err == nil {
+		t.Errorf("expected error on closed db UpsertPR")
+	}
+	if _, err := closedStore.GetPRByNumber(ctx, "aerial", 1); err == nil {
+		t.Errorf("expected error on closed db GetPRByNumber")
+	}
+	if _, err := closedStore.GetPRByHeadSHA(ctx, "aerial", "h"); err == nil {
+		t.Errorf("expected error on closed db GetPRByHeadSHA")
+	}
+	if _, err := closedStore.GetPRByMergeSHA(ctx, "aerial", "m"); err == nil {
+		t.Errorf("expected error on closed db GetPRByMergeSHA")
+	}
+	if err := closedStore.UpdatePRMergeSHA(ctx, "aerial", 1, "m"); err == nil {
+		t.Errorf("expected error on closed db UpdatePRMergeSHA")
+	}
+	if err := closedStore.UpdatePRStatus(ctx, "aerial", 1, "open"); err == nil {
+		t.Errorf("expected error on closed db UpdatePRStatus")
+	}
+	if _, err := closedStore.AtomicTransitionPRStatus(ctx, "aerial", 1, "s1", "s2"); err == nil {
+		t.Errorf("expected error on closed db AtomicTransitionPRStatus")
+	}
+	if _, err := closedStore.AtomicTransitionPRStatusByMergeSHA(ctx, "aerial", "m", "s1", "s2"); err == nil {
+		t.Errorf("expected error on closed db AtomicTransitionPRStatusByMergeSHA")
+	}
+}
