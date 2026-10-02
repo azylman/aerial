@@ -28,6 +28,7 @@ Aerial runs as a multi-container Docker stack supervised by Hangar and Autoheal 
   - **`aerial-dashboard`**: Web status HUD rendering live queue state and turn health.
   - **`aerial-docs`**: Living documentation portal serving architectural specifications and runbooks.
   - **`agentsview`**: Web observability dashboard rendering agent session transcripts and tool traces.
+  - **`webhooks-router`**: Secret sync router dispatching Infisical webhook events to Nomad variables.
 
 - **Observability & Supporting Services**:
   - **`aerial-vector`**: High-performance log collector and transform pipeline shipping container stdout/stderr into OpenObserve.
