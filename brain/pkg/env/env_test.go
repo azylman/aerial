@@ -594,7 +594,7 @@ func TestLoadMCPConfig_ConfigDataPropagation(t *testing.T) {
 	}
 
 	// 1. Built-in defaults must be present
-	for _, name := range []string{"scheduler", "discord", "docker", "victoriametrics"} {
+	for _, name := range []string{"scheduler", "discord"} {
 		if _, exists := servers[name]; !exists {
 			t.Errorf("expected built-in server %q to be present", name)
 		}
@@ -842,11 +842,13 @@ func TestLoadMCPConfig_FileOverridesAndNormalizations(t *testing.T) {
 		}
 	}
 
-	// 6. Verify that nomad and infisical are omitted from default MCP config when not declared
+	// 6. Verify that nomad, infisical, docker, and victoriametrics are omitted from default MCP config when not declared
 	cfgDefault := config.NewTestConfig(func(d *config.ConfigData) {})
 	rawDef := string(p.LoadMCPConfig(cfgDefault))
-	if strings.Contains(rawDef, "\"nomad\"") || strings.Contains(rawDef, "\"infisical\"") {
-		t.Errorf("Expected unconfigured nomad and infisical omitted from default MCP config, got: %s", rawDef)
+	for _, unconfigured := range []string{"\"nomad\"", "\"infisical\"", "\"docker\"", "\"victoriametrics\""} {
+		if strings.Contains(rawDef, unconfigured) {
+			t.Errorf("Expected unconfigured %s omitted from default MCP config, got: %s", unconfigured, rawDef)
+		}
 	}
 }
 
@@ -2021,7 +2023,7 @@ func TestLoadTargetMCPConfig_Partitioning(t *testing.T) {
 		t.Fatalf("failed to unmarshal discord MCP config: %v", err)
 	}
 
-	for _, expected := range []string{"scheduler", "discord", "docker", "victoriametrics", "github", "openobserve", "common-srv", "discord-custom"} {
+	for _, expected := range []string{"scheduler", "discord", "github", "openobserve", "common-srv", "discord-custom"} {
 		if _, ok := discordObj.McpServers[expected]; !ok {
 			t.Errorf("discord MCP config missing expected server %q", expected)
 		}
