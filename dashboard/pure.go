@@ -224,6 +224,7 @@ func ExtractServiceNameFromJobName(jobName string) string {
 		"github-mcp",
 		"nomad-mcp",
 		"infisical-mcp",
+		"webhooks-router",
 		"ollama",
 		"agentsview",
 		"hangar",

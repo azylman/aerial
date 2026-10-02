@@ -36,6 +36,7 @@ jobs:
       docs: ${{ steps.filter.outputs.docs }}
       proxy: ${{ steps.filter.outputs.proxy }}
       hangar: ${{ steps.filter.outputs.hangar }}
+      webhooks-router: ${{ steps.filter.outputs.webhooks-router }}
       matrix: ${{ steps.set-matrix.outputs.matrix }}
       has_builds: ${{ steps.set-matrix.outputs.has_builds }}
     steps:
@@ -69,6 +70,8 @@ jobs:
               - 'proxy/**'
             hangar:
               - 'sidecars/hangar/**'
+            webhooks-router:
+              - 'webhooks-router/**'
 
       - name: Compute Dynamic Build Matrix
         id: set-matrix
@@ -85,7 +88,8 @@ jobs:
               dashboard: "${{ steps.filter.outputs.dashboard }}",
               docs: "${{ steps.filter.outputs.docs }}",
               proxy: "${{ steps.filter.outputs.proxy }}",
-              hangar: "${{ steps.filter.outputs.hangar }}"
+              hangar: "${{ steps.filter.outputs.hangar }}",
+              "webhooks-router": "${{ steps.filter.outputs.webhooks-router }}"
             };
 
             const catalog = [
@@ -99,7 +103,8 @@ jobs:
               { service: "dashboard", context: "./dashboard", file: "./dashboard/Dockerfile", image_name: "aerial-dashboard" },
               { service: "docs", context: "./docs-service", file: "./docs-service/Dockerfile", image_name: "aerial-docs" },
               { service: "proxy", context: "./proxy", file: "./proxy/Dockerfile", image_name: "aerial-proxy" },
-              { service: "hangar", context: ".", file: "./sidecars/hangar/Dockerfile", image_name: "aerial-hangar" }
+              { service: "hangar", context: ".", file: "./sidecars/hangar/Dockerfile", image_name: "aerial-hangar" },
+              { service: "webhooks-router", context: "./webhooks-router", file: "./webhooks-router/Dockerfile", image_name: "aerial-webhooks-router" }
             ];
 
             const forceAll = "${{ inputs.force_all }}" === "true";
@@ -135,6 +140,12 @@ jobs:
       - name: Verify Monorepo Test Coverage & Gating
         run: |
           sh scripts/check-coverage.sh --check --summary
+
+      - name: Test Webhooks Router
+        if: needs.changes.outputs.webhooks-router == 'true'
+        run: |
+          cd webhooks-router
+          go test -v -race ./...
 
   lint:
     name: Lint Microservices & Frontend
@@ -276,6 +287,23 @@ jobs:
           DEAD=$(deadcode -test ./...)
           if [ -n "$DEAD" ]; then
             echo "::error::Unreachable dead code detected in sidecars/hangar:"
+            echo "$DEAD"
+            exit 1
+          fi
+
+      - name: Lint Webhooks Router
+        if: needs.changes.outputs.webhooks-router == 'true'
+        run: |
+          cd webhooks-router
+          golangci-lint run --path-prefix=webhooks-router/ ./...
+
+      - name: Check Dead Code in Webhooks Router
+        if: needs.changes.outputs.webhooks-router == 'true'
+        run: |
+          cd webhooks-router
+          DEAD=$(deadcode -test ./...)
+          if [ -n "$DEAD" ]; then
+            echo "::error::Unreachable dead code detected in webhooks-router:"
             echo "$DEAD"
             exit 1
           fi
