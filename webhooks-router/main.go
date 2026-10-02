@@ -15,6 +15,12 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/riverqueue/river"
+	"github.com/riverqueue/river/riverdriver/riverpgxv5"
+	"github.com/riverqueue/river/rivertype"
 )
 
 // TargetNomadVariable is the hardcoded destination Nomad variable for all synced secrets.
@@ -30,6 +36,9 @@ type Config struct {
 	InfisicalEnvironment  string
 	NomadAddr             string
 	NomadToken            string
+	GitHubToken           string
+	GitHubAPIURL          string
+	PostgresURL           string
 }
 
 // LoadConfigFromEnv initializes configuration from environment variables.
@@ -72,6 +81,30 @@ func LoadConfigFromEnv() Config {
 		nomadAddr = "http://127.0.0.1:4646"
 	}
 
+	ghToken := os.Getenv("GITHUB_PAT")
+	if ghToken == "" {
+		ghToken = os.Getenv("GITHUB_TOKEN")
+	}
+
+	ghAPI := os.Getenv("GITHUB_API_URL")
+	if ghAPI == "" {
+		ghAPI = "https://api.github.com"
+	}
+
+	pgURL := os.Getenv("POSTGRES_URL")
+	if pgURL == "" {
+		pgURL = os.Getenv("DATABASE_URL")
+	}
+	if pgURL == "" {
+		if _, err := net.LookupHost("aerial-postgres"); err == nil {
+			pgURL = "postgres://aerial:aerial_secure_pass@aerial-postgres:5432/aerial?sslmode=disable"
+		} else if _, err := net.LookupHost("postgres"); err == nil {
+			pgURL = "postgres://aerial:aerial_secure_pass@postgres:5432/aerial?sslmode=disable"
+		} else {
+			pgURL = "postgres://aerial:aerial_secure_pass@127.0.0.1:5432/aerial?sslmode=disable"
+		}
+	}
+
 	return Config{
 		Port:                  port,
 		InfisicalURL:          strings.TrimRight(infURL, "/"),
@@ -81,6 +114,9 @@ func LoadConfigFromEnv() Config {
 		InfisicalEnvironment:  envName,
 		NomadAddr:             strings.TrimRight(nomadAddr, "/"),
 		NomadToken:            os.Getenv("NOMAD_TOKEN"),
+		GitHubToken:           ghToken,
+		GitHubAPIURL:          strings.TrimRight(ghAPI, "/"),
+		PostgresURL:           pgURL,
 	}
 }
 
@@ -146,21 +182,67 @@ type NomadVariable struct {
 	ModifyIndex uint64            `json:"ModifyIndex,omitempty"`
 }
 
+// RiverInserter defines the interface for inserting jobs into River.
+type RiverInserter interface {
+	Insert(ctx context.Context, args river.JobArgs, opts *river.InsertOpts) (*rivertype.JobInsertResult, error)
+}
+
+// GitHubWebhookArgs contains payload data for durable background processing of GitHub webhooks.
+type GitHubWebhookArgs struct {
+	Event    string `json:"event"`
+	Delivery string `json:"delivery"`
+	Body     []byte `json:"body"`
+}
+
+func (GitHubWebhookArgs) Kind() string {
+	return "github_webhook"
+}
+
+// GitHubWebhookWorker processes GitHub webhook events asynchronously from River.
+type GitHubWebhookWorker struct {
+	river.WorkerDefaults[GitHubWebhookArgs]
+	server *RouterServer
+}
+
+func (w *GitHubWebhookWorker) Work(ctx context.Context, job *river.Job[GitHubWebhookArgs]) error {
+	if w.server == nil {
+		return errors.New("router server not configured on worker")
+	}
+	log.Printf("[webhooks-router] [river] processing job id=%d event=%s delivery=%s", job.ID, job.Args.Event, job.Args.Delivery)
+	_, err := w.server.ProcessGitHubEvent(ctx, job.Args.Event, job.Args.Delivery, job.Args.Body)
+	if err != nil {
+		log.Printf("[webhooks-router] [river] error processing job id=%d event=%s delivery=%s: %v", job.ID, job.Args.Event, job.Args.Delivery, err)
+		return err
+	}
+	return nil
+}
+
 // RouterServer handles webhook requests and orchestrates secret synchronization.
 type RouterServer struct {
-	cfg        Config
-	httpClient *http.Client
+	cfg         Config
+	httpClient  *http.Client
+	riverClient RiverInserter
+	onProcessed func(event, delivery string)
 }
 
 // NewRouterServer constructs a new RouterServer instance.
-func NewRouterServer(cfg Config, client *http.Client) *RouterServer {
+func NewRouterServer(cfg Config, client *http.Client, riverClient ...RiverInserter) *RouterServer {
 	if client == nil {
 		client = &http.Client{Timeout: 15 * time.Second}
 	}
-	return &RouterServer{
+	s := &RouterServer{
 		cfg:        cfg,
 		httpClient: client,
 	}
+	if len(riverClient) > 0 {
+		s.riverClient = riverClient[0]
+	}
+	return s
+}
+
+// SetRiverClient assigns the RiverInserter instance to RouterServer.
+func (s *RouterServer) SetRiverClient(rc RiverInserter) {
+	s.riverClient = rc
 }
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
@@ -178,6 +260,8 @@ func (s *RouterServer) Routes() http.Handler {
 	mux.HandleFunc("GET /health", s.handleHealthz)
 	mux.HandleFunc("POST /webhooks/infisical", s.handleInfisicalWebhook)
 	mux.HandleFunc("POST /webhooks/generic", s.handleGenericWebhook)
+	mux.HandleFunc("POST /api/webhooks/github", s.handleGitHubWebhook)
+	mux.HandleFunc("POST /webhooks/github", s.handleGitHubWebhook)
 	return mux
 }
 
@@ -302,6 +386,388 @@ func (s *RouterServer) handleGenericWebhook(w http.ResponseWriter, r *http.Reque
 			log.Printf("[webhooks-router] Background sync failed: %v", err)
 		}
 	}()
+}
+
+// GitHub Webhook Payloads and Resolution Types
+
+type GitHubPingPayload struct {
+	Zen    string `json:"zen"`
+	HookID int64  `json:"hook_id"`
+	Repo   *struct {
+		FullName string `json:"full_name"`
+	} `json:"repository"`
+}
+
+type GitHubPRRef struct {
+	Ref string `json:"ref"`
+	SHA string `json:"sha"`
+}
+
+type GitHubPullRequest struct {
+	Number         int         `json:"number"`
+	Title          string      `json:"title"`
+	Head           GitHubPRRef `json:"head"`
+	Base           GitHubPRRef `json:"base"`
+	Merged         bool        `json:"merged"`
+	MergeCommitSHA string      `json:"merge_commit_sha"`
+}
+
+type GitHubPullRequestPayload struct {
+	Action      string            `json:"action"`
+	Number      int               `json:"number"`
+	PullRequest GitHubPullRequest `json:"pull_request"`
+	Repository  struct {
+		FullName string `json:"full_name"`
+	} `json:"repository"`
+	Sender struct {
+		Login string `json:"login"`
+	} `json:"sender"`
+}
+
+type GitHubCheckRunPR struct {
+	Number int         `json:"number"`
+	Head   GitHubPRRef `json:"head"`
+	Base   GitHubPRRef `json:"base"`
+}
+
+type GitHubCheckRunPayload struct {
+	Action   string `json:"action"`
+	CheckRun struct {
+		ID           int64              `json:"id"`
+		Name         string             `json:"name"`
+		HeadSHA      string             `json:"head_sha"`
+		Status       string             `json:"status"`
+		Conclusion   string             `json:"conclusion"`
+		DetailsURL   string             `json:"details_url"`
+		PullRequests []GitHubCheckRunPR `json:"pull_requests"`
+	} `json:"check_run"`
+	Repository struct {
+		FullName string `json:"full_name"`
+	} `json:"repository"`
+}
+
+type GitHubWorkflowRunPayload struct {
+	Action      string `json:"action"`
+	WorkflowRun struct {
+		ID           int64              `json:"id"`
+		Name         string             `json:"name"`
+		HeadSHA      string             `json:"head_sha"`
+		HeadBranch   string             `json:"head_branch"`
+		Status       string             `json:"status"`
+		Conclusion   string             `json:"conclusion"`
+		PullRequests []GitHubCheckRunPR `json:"pull_requests"`
+	} `json:"workflow_run"`
+	Repository struct {
+		FullName string `json:"full_name"`
+	} `json:"repository"`
+}
+
+type GitHubCommit struct {
+	ID      string `json:"id"`
+	Message string `json:"message"`
+}
+
+type GitHubPushPayload struct {
+	Ref        string        `json:"ref"`
+	Before     string        `json:"before"`
+	After      string        `json:"after"`
+	Deleted    bool          `json:"deleted"`
+	HeadCommit *GitHubCommit `json:"head_commit"`
+	Repository struct {
+		FullName string `json:"full_name"`
+	} `json:"repository"`
+}
+
+type ResolvedGitHubEvent struct {
+	Event            string `json:"event"`
+	Delivery         string `json:"delivery"`
+	Action           string `json:"action,omitempty"`
+	Repo             string `json:"repo,omitempty"`
+	PRNumber         int    `json:"pr_number,omitempty"`
+	Branch           string `json:"branch,omitempty"`
+	HeadSHA          string `json:"head_sha,omitempty"`
+	MergeSHA         string `json:"merge_sha,omitempty"`
+	CheckName        string `json:"check_name,omitempty"`
+	Status           string `json:"status,omitempty"`
+	Conclusion       string `json:"conclusion,omitempty"`
+	Sender           string `json:"sender,omitempty"`
+	ResolutionSource string `json:"resolution_source,omitempty"`
+}
+
+type GitHubCommitPRItem struct {
+	Number int    `json:"number"`
+	State  string `json:"state"`
+	Head   struct {
+		Ref string `json:"ref"`
+		SHA string `json:"sha"`
+	} `json:"head"`
+}
+
+func isZeroSHA(sha string) bool {
+	if sha == "" {
+		return true
+	}
+	for i := 0; i < len(sha); i++ {
+		if sha[i] != '0' {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *RouterServer) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
+	event := r.Header.Get("X-GitHub-Event")
+	if strings.TrimSpace(event) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing X-GitHub-Event header"})
+		return
+	}
+	delivery := r.Header.Get("X-GitHub-Delivery")
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, 5<<20))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to read body"})
+		return
+	}
+
+	if s.riverClient == nil {
+		log.Printf("[webhooks-router] [github] ERROR: river client not initialized")
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "river queue not initialized"})
+		return
+	}
+
+	args := GitHubWebhookArgs{
+		Event:    event,
+		Delivery: delivery,
+		Body:     body,
+	}
+
+	// Synchronously persist to durable storage (PostgreSQL river_job table)
+	// before acknowledging to GitHub (transactional outbox invariant).
+	if _, err := s.riverClient.Insert(r.Context(), args, nil); err != nil {
+		log.Printf("[webhooks-router] [github] ERROR: failed to insert job into river: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to persist webhook"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status":   "accepted",
+		"event":    event,
+		"delivery": delivery,
+	})
+}
+
+func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery string, body []byte) (*ResolvedGitHubEvent, error) {
+	if s.onProcessed != nil {
+		defer s.onProcessed(event, delivery)
+	}
+	res := &ResolvedGitHubEvent{
+		Event:    event,
+		Delivery: delivery,
+	}
+
+	switch event {
+	case "ping":
+		var p GitHubPingPayload
+		if err := json.Unmarshal(body, &p); err != nil {
+			return nil, fmt.Errorf("unmarshal ping payload: %w", err)
+		}
+		repo := ""
+		if p.Repo != nil {
+			repo = p.Repo.FullName
+		}
+		res.Repo = repo
+		log.Printf("[webhooks-router] [github] [ping] hook_id=%d repo=%s zen=%q delivery=%s", p.HookID, repo, p.Zen, delivery)
+		return res, nil
+
+	case "pull_request":
+		var p GitHubPullRequestPayload
+		if err := json.Unmarshal(body, &p); err != nil {
+			return nil, fmt.Errorf("unmarshal pull_request payload: %w", err)
+		}
+		res.Repo = p.Repository.FullName
+		res.Action = p.Action
+		res.PRNumber = p.Number
+		if res.PRNumber == 0 {
+			res.PRNumber = p.PullRequest.Number
+		}
+		res.Branch = p.PullRequest.Head.Ref
+		res.HeadSHA = p.PullRequest.Head.SHA
+		res.MergeSHA = p.PullRequest.MergeCommitSHA
+		res.Sender = p.Sender.Login
+		res.ResolutionSource = "pull_request_payload"
+		log.Printf("[webhooks-router] [github] [pull_request] repo=%s pr=%d action=%s head_sha=%s merge_sha=%s branch=%s merged=%v sender=%s delivery=%s",
+			res.Repo, res.PRNumber, res.Action, res.HeadSHA, res.MergeSHA, res.Branch, p.PullRequest.Merged, res.Sender, delivery)
+		return res, nil
+
+	case "check_run":
+		var p GitHubCheckRunPayload
+		if err := json.Unmarshal(body, &p); err != nil {
+			return nil, fmt.Errorf("unmarshal check_run payload: %w", err)
+		}
+		res.Repo = p.Repository.FullName
+		res.Action = p.Action
+		res.CheckName = p.CheckRun.Name
+		res.HeadSHA = p.CheckRun.HeadSHA
+		res.Status = p.CheckRun.Status
+		res.Conclusion = p.CheckRun.Conclusion
+
+		if len(p.CheckRun.PullRequests) > 0 {
+			res.PRNumber = p.CheckRun.PullRequests[0].Number
+			res.Branch = p.CheckRun.PullRequests[0].Head.Ref
+			res.ResolutionSource = "check_run_payload"
+		} else if res.HeadSHA != "" && !isZeroSHA(res.HeadSHA) {
+			prNum, branch, err := s.resolvePRFromCommitSHA(ctx, res.Repo, res.HeadSHA)
+			if err != nil {
+				log.Printf("[webhooks-router] [github] check_run failed resolving PR for commit %s: %v", res.HeadSHA, err)
+			} else {
+				res.PRNumber = prNum
+				res.Branch = branch
+				res.ResolutionSource = "commit_sha_lookup"
+			}
+		}
+		log.Printf("[webhooks-router] [github] [check_run] repo=%s check=%q head_sha=%s pr=%d branch=%s status=%s conclusion=%s source=%s delivery=%s",
+			res.Repo, res.CheckName, res.HeadSHA, res.PRNumber, res.Branch, res.Status, res.Conclusion, res.ResolutionSource, delivery)
+		return res, nil
+
+	case "workflow_run":
+		var p GitHubWorkflowRunPayload
+		if err := json.Unmarshal(body, &p); err != nil {
+			return nil, fmt.Errorf("unmarshal workflow_run payload: %w", err)
+		}
+		res.Repo = p.Repository.FullName
+		res.Action = p.Action
+		res.CheckName = p.WorkflowRun.Name
+		res.HeadSHA = p.WorkflowRun.HeadSHA
+		res.Branch = p.WorkflowRun.HeadBranch
+		res.Status = p.WorkflowRun.Status
+		res.Conclusion = p.WorkflowRun.Conclusion
+
+		if len(p.WorkflowRun.PullRequests) > 0 {
+			res.PRNumber = p.WorkflowRun.PullRequests[0].Number
+			res.ResolutionSource = "workflow_run_payload"
+		} else if res.HeadSHA != "" && !isZeroSHA(res.HeadSHA) {
+			prNum, branch, err := s.resolvePRFromCommitSHA(ctx, res.Repo, res.HeadSHA)
+			if err != nil {
+				log.Printf("[webhooks-router] [github] workflow_run failed resolving PR for commit %s: %v", res.HeadSHA, err)
+			} else {
+				res.PRNumber = prNum
+				if res.Branch == "" {
+					res.Branch = branch
+				}
+				res.ResolutionSource = "commit_sha_lookup"
+			}
+		}
+		log.Printf("[webhooks-router] [github] [workflow_run] repo=%s workflow=%q head_sha=%s pr=%d branch=%s status=%s conclusion=%s source=%s delivery=%s",
+			res.Repo, res.CheckName, res.HeadSHA, res.PRNumber, res.Branch, res.Status, res.Conclusion, res.ResolutionSource, delivery)
+		return res, nil
+
+	case "push":
+		var p GitHubPushPayload
+		if err := json.Unmarshal(body, &p); err != nil {
+			return nil, fmt.Errorf("unmarshal push payload: %w", err)
+		}
+		res.Repo = p.Repository.FullName
+		res.Branch = p.Ref
+
+		// Guard: Devil's Advocate requirements:
+		// 1. Branch deletion / zero SHA guard
+		// 2. Non-branch push (e.g. tag pushes)
+		if p.Deleted || isZeroSHA(p.After) {
+			log.Printf("[webhooks-router] [github] [push] branch deletion detected on ref %s (repo %s), skipping PR resolution", p.Ref, res.Repo)
+			res.ResolutionSource = "branch_deleted"
+			return res, nil
+		}
+		if !strings.HasPrefix(p.Ref, "refs/heads/") {
+			log.Printf("[webhooks-router] [github] [push] non-branch push on ref %s (repo %s), skipping PR resolution", p.Ref, res.Repo)
+			res.ResolutionSource = "non_branch_ref"
+			return res, nil
+		}
+
+		res.HeadSHA = p.After
+		if p.HeadCommit != nil && p.HeadCommit.ID != "" {
+			res.HeadSHA = p.HeadCommit.ID
+		}
+
+		if res.HeadSHA != "" && !isZeroSHA(res.HeadSHA) {
+			prNum, branch, err := s.resolvePRFromCommitSHA(ctx, res.Repo, res.HeadSHA)
+			if err != nil {
+				log.Printf("[webhooks-router] [github] push failed resolving PR for commit %s: %v", res.HeadSHA, err)
+			} else {
+				res.PRNumber = prNum
+				res.MergeSHA = res.HeadSHA
+				if branch != "" {
+					res.Branch = branch
+				}
+				res.ResolutionSource = "commit_sha_lookup"
+			}
+		}
+		log.Printf("[webhooks-router] [github] [push] repo=%s ref=%s head_sha=%s resolved_pr=%d source=%s delivery=%s",
+			res.Repo, p.Ref, res.HeadSHA, res.PRNumber, res.ResolutionSource, delivery)
+		return res, nil
+
+	default:
+		log.Printf("[webhooks-router] [github] [unhandled] event=%s delivery=%s payload_size=%d bytes", event, delivery, len(body))
+		res.ResolutionSource = "unhandled_event"
+		return res, nil
+	}
+}
+
+func (s *RouterServer) resolvePRFromCommitSHA(ctx context.Context, repo, sha string) (int, string, error) {
+	if repo == "" || sha == "" || isZeroSHA(sha) {
+		return 0, "", fmt.Errorf("invalid repo or sha for pr resolution")
+	}
+
+	if !strings.Contains(repo, "/") {
+		repo = "azylman/" + repo
+	}
+
+	apiURL := s.cfg.GitHubAPIURL
+	if apiURL == "" {
+		apiURL = "https://api.github.com"
+	}
+
+	endpoint := fmt.Sprintf("%s/repos/%s/commits/%s/pulls", apiURL, repo, url.PathEscape(sha))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return 0, "", fmt.Errorf("create github api request: %w", err)
+	}
+
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+	if s.cfg.GitHubToken != "" {
+		req.Header.Set("Authorization", "token "+s.cfg.GitHubToken)
+	}
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return 0, "", fmt.Errorf("github api request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusForbidden {
+		remaining := resp.Header.Get("X-RateLimit-Remaining")
+		log.Printf("[webhooks-router] [github] WARN: GitHub API 403 Forbidden (rate-limited? X-RateLimit-Remaining=%s)", remaining)
+		return 0, "", fmt.Errorf("github api rate limit or forbidden (remaining: %s)", remaining)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return 0, "", fmt.Errorf("github api returned status %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return 0, "", fmt.Errorf("read github api response: %w", err)
+	}
+
+	var prs []GitHubCommitPRItem
+	if err := json.Unmarshal(body, &prs); err != nil {
+		return 0, "", fmt.Errorf("unmarshal github api prs: %w", err)
+	}
+
+	if len(prs) == 0 {
+		return 0, "", fmt.Errorf("no pull requests associated with commit %s", sha)
+	}
+
+	return prs[0].Number, prs[0].Head.Ref, nil
 }
 
 func (s *RouterServer) getInfisicalToken(ctx context.Context) (string, error) {
@@ -467,6 +933,51 @@ func (s *RouterServer) SyncSecrets(ctx context.Context, workspaceID, envName str
 func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error {
 	server := NewRouterServer(cfg, nil)
 
+	var riverClient *river.Client[pgx.Tx]
+	var dbPool *pgxpool.Pool
+
+	if cfg.PostgresURL != "" {
+		poolConfig, err := pgxpool.ParseConfig(cfg.PostgresURL)
+		if err != nil {
+			return fmt.Errorf("parse postgres url: %w", err)
+		}
+		poolConfig.MaxConns = 10
+		poolConfig.MinConns = 2
+		if poolConfig.ConnConfig.RuntimeParams == nil {
+			poolConfig.ConnConfig.RuntimeParams = make(map[string]string)
+		}
+		if _, ok := poolConfig.ConnConfig.RuntimeParams["search_path"]; !ok {
+			poolConfig.ConnConfig.RuntimeParams["search_path"] = "sidecars, public"
+		}
+
+		pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
+		if err != nil {
+			return fmt.Errorf("create pgxpool: %w", err)
+		}
+		defer pool.Close()
+		dbPool = pool
+
+		workers := river.NewWorkers()
+		river.AddWorker(workers, &GitHubWebhookWorker{server: server})
+
+		rc, err := river.NewClient(riverpgxv5.New(dbPool), &river.Config{
+			Queues: map[string]river.QueueConfig{
+				river.QueueDefault: {MaxWorkers: 10},
+			},
+			Workers: workers,
+		})
+		if err != nil {
+			return fmt.Errorf("create river client: %w", err)
+		}
+		riverClient = rc
+		server.SetRiverClient(riverClient)
+
+		if err := riverClient.Start(ctx); err != nil {
+			return fmt.Errorf("start river client: %w", err)
+		}
+		log.Println("[webhooks-router] River worker pool started successfully")
+	}
+
 	ln, err := net.Listen("tcp", ":"+cfg.Port)
 	if err != nil {
 		return fmt.Errorf("listening on port %s: %w", cfg.Port, err)
@@ -505,7 +1016,13 @@ func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error
 	defer shutdownCancel()
 
 	if shutErr := httpServer.Shutdown(shutdownCtx); shutErr != nil && !errors.Is(shutErr, http.ErrServerClosed) {
-		log.Printf("[webhooks-router] Shutdown error: %v", shutErr)
+		log.Printf("[webhooks-router] HTTP shutdown error: %v", shutErr)
+	}
+
+	if riverClient != nil {
+		if stopErr := riverClient.Stop(shutdownCtx); stopErr != nil && !errors.Is(stopErr, context.Canceled) {
+			log.Printf("[webhooks-router] River client stop error: %v", stopErr)
+		}
 	}
 
 	log.Println("[webhooks-router] Server stopped")
