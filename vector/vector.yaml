@@ -492,7 +492,7 @@ sinks:
     type: http
     inputs:
       - normalize_logs
-    uri: "http://openobserve:5080/openobserve/api/default/docker-logs/_json"
+    uri: "${OPENOBSERVE_ENDPOINT:-http://openobserve:5080}/openobserve/api/default/docker-logs/_json"
     method: post
     auth:
       strategy: basic
@@ -511,5 +511,5 @@ sinks:
       when_full: block
     healthcheck:
       enabled: true
-      uri: "http://openobserve:5080/openobserve/healthz"
+      uri: "${OPENOBSERVE_ENDPOINT:-http://openobserve:5080}/openobserve/healthz"
 
