@@ -5777,6 +5777,553 @@ func TestNomadCoverageRemediation(t *testing.T) {
 	d.sendWebhook(ctx, http.DefaultClient, "http://bad\nurl", "msg")
 }
 
+func TestCheckGitHubRepoBuildInProgress_TableDriven(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. Nil daemon
+	var dNil *SyncDaemon
+	if dNil.CheckGitHubRepoBuildInProgress(ctx, "aerial") {
+		t.Errorf("expected false for nil daemon")
+	}
+
+	// 2. Empty repo slug
+	dEmpty := &SyncDaemon{}
+	if dEmpty.CheckGitHubRepoBuildInProgress(ctx, "") {
+		t.Errorf("expected false for empty slug")
+	}
+
+	// 3. In-progress workflow run exists
+	dInProgress := &SyncDaemon{
+		pat: "test-pat",
+		registryClient: &http.Client{
+			Transport: &roundTripperFunc{
+				fn: func(req *http.Request) (*http.Response, error) {
+					if strings.Contains(req.URL.String(), "status=in_progress") {
+						return &http.Response{
+							StatusCode: http.StatusOK,
+							Header:     make(http.Header),
+							Body:       ioNopCloser(strings.NewReader(`{"total_count": 1, "workflow_runs": [{}]}`)),
+						}, nil
+					}
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     make(http.Header),
+						Body:       ioNopCloser(strings.NewReader(`{"total_count": 0, "workflow_runs": []}`)),
+					}, nil
+				},
+			},
+		},
+	}
+	if !dInProgress.CheckGitHubRepoBuildInProgress(ctx, "azylman/aerial") {
+		t.Errorf("expected true when in_progress workflow run exists")
+	}
+
+	// 4. Queued workflow run exists (in_progress is 0)
+	dQueued := &SyncDaemon{
+		pat: "test-pat",
+		registryClient: &http.Client{
+			Transport: &roundTripperFunc{
+				fn: func(req *http.Request) (*http.Response, error) {
+					if strings.Contains(req.URL.String(), "status=queued") {
+						return &http.Response{
+							StatusCode: http.StatusOK,
+							Header:     make(http.Header),
+							Body:       ioNopCloser(strings.NewReader(`{"total_count": 2, "workflow_runs": [{},{}]}`)),
+						}, nil
+					}
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     make(http.Header),
+						Body:       ioNopCloser(strings.NewReader(`{"total_count": 0, "workflow_runs": []}`)),
+					}, nil
+				},
+			},
+		},
+	}
+	if !dQueued.CheckGitHubRepoBuildInProgress(ctx, "aerial") {
+		t.Errorf("expected true when queued workflow run exists")
+	}
+
+	// 5. Zero runs
+	dZero := &SyncDaemon{
+		registryClient: &http.Client{
+			Transport: &roundTripperFunc{
+				fn: func(req *http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     make(http.Header),
+						Body:       ioNopCloser(strings.NewReader(`{"total_count": 0, "workflow_runs": []}`)),
+					}, nil
+				},
+			},
+		},
+	}
+	if dZero.CheckGitHubRepoBuildInProgress(ctx, "azylman/mirrormere") {
+		t.Errorf("expected false when no runs exist")
+	}
+
+	// 6. HTTP Error from API
+	dErr := &SyncDaemon{
+		registryClient: &http.Client{
+			Transport: &roundTripperFunc{
+				fn: func(req *http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: http.StatusBadGateway,
+						Header:     make(http.Header),
+						Body:       ioNopCloser(strings.NewReader(`error`)),
+					}, nil
+				},
+			},
+		},
+	}
+	if dErr.CheckGitHubRepoBuildInProgress(ctx, "aerial") {
+		t.Errorf("expected false on HTTP 502 error")
+	}
+
+	// 7. Client transport error
+	dNetErr := &SyncDaemon{
+		registryClient: &http.Client{
+			Transport: &roundTripperFunc{
+				fn: func(req *http.Request) (*http.Response, error) {
+					return nil, errors.New("network timeout")
+				},
+			},
+		},
+	}
+	if dNetErr.CheckGitHubRepoBuildInProgress(ctx, "aerial") {
+		t.Errorf("expected false on network error")
+	}
+}
+
+func TestExecuteGitPushEvent_TableDriven(t *testing.T) {
+	ctx := context.Background()
+
+	tmpDir := t.TempDir()
+	aerialDir := filepath.Join(tmpDir, "aerial")
+	aerialConfigDir := filepath.Join(tmpDir, "aerial-config")
+	mirrormereDir := filepath.Join(tmpDir, "mirrormere")
+	_ = os.MkdirAll(aerialDir, 0755)
+	_ = os.MkdirAll(filepath.Join(aerialConfigDir, "jobs"), 0755)
+	_ = os.MkdirAll(mirrormereDir, 0755)
+	_ = os.MkdirAll(filepath.Join(aerialDir, ".git"), 0755)
+	_ = os.MkdirAll(filepath.Join(aerialConfigDir, ".git"), 0755)
+	_ = os.MkdirAll(filepath.Join(mirrormereDir, ".git"), 0755)
+
+	repos := []string{aerialDir, aerialConfigDir, mirrormereDir}
+	var revParseCount int
+
+	d := NewDaemon(DaemonConfig{
+		Repos:      repos,
+		ComposeDir: aerialDir,
+		ConfigDir:  aerialConfigDir,
+		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			if len(args) >= 1 && args[0] == "rev-parse" {
+				if len(args) >= 2 && args[1] == "FETCH_HEAD" {
+					return []byte("sha_after"), nil, nil
+				}
+				if len(args) >= 2 && args[1] == "HEAD" {
+					revParseCount++
+					if revParseCount == 1 {
+						return []byte("sha_before"), nil, nil
+					}
+					return []byte("sha_after"), nil, nil
+				}
+				return []byte("sha_after"), nil, nil
+			}
+			if len(args) >= 2 && args[0] == "fetch" {
+				return []byte(""), nil, nil
+			}
+			if len(args) >= 2 && args[0] == "merge" {
+				return []byte(""), nil, nil
+			}
+			if len(args) >= 2 && args[0] == "diff" && args[1] == "--name-only" {
+				if strings.Contains(dir, "aerial") && !strings.Contains(dir, "aerial-config") {
+					return []byte("brain/main.go\n"), nil, nil
+				}
+				return []byte(""), nil, nil
+			}
+			return []byte(""), nil, nil
+		},
+		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			return []byte("Evaluation ID: 12345"), nil, nil
+		},
+	})
+
+	// 1. Missing repo
+	resp, code := d.ExecuteGitPushEvent(ctx, GitPushEventRequest{})
+	if code != http.StatusBadRequest || resp.Status != "error" {
+		t.Errorf("expected 400 Bad Request for missing repo, got %d (%s)", code, resp.Status)
+	}
+
+	// 2. Non-main branch
+	respIgnored, codeIgnored := d.ExecuteGitPushEvent(ctx, GitPushEventRequest{
+		Repo: "aerial",
+		Ref:  "refs/heads/feature-branch",
+	})
+	if codeIgnored != http.StatusOK || respIgnored.Status != "ignored" {
+		t.Errorf("expected 200 ignored for non-main branch, got %d (%s)", codeIgnored, respIgnored.Status)
+	}
+
+	// 3. Unmanaged repository
+	respNotFound, codeNotFound := d.ExecuteGitPushEvent(ctx, GitPushEventRequest{
+		Repo: "nonexistent-repo",
+		Ref:  "refs/heads/main",
+	})
+	if codeNotFound != http.StatusNotFound || respNotFound.Status != "error" {
+		t.Errorf("expected 404 for unmanaged repo, got %d (%s)", codeNotFound, respNotFound.Status)
+	}
+
+	// 4. Aerial monorepo push with container build changes (brain/main.go)
+	respAerialBuild, codeAerialBuild := d.ExecuteGitPushEvent(ctx, GitPushEventRequest{
+		Repo: "aerial",
+		Ref:  "refs/heads/main",
+	})
+	if codeAerialBuild != http.StatusOK || respAerialBuild.Status != "accepted" || !respAerialBuild.ContainersBuilding {
+		t.Errorf("expected accepted with ContainersBuilding=true for aerial monorepo build changes, got code %d, status %s, building %v", codeAerialBuild, respAerialBuild.Status, respAerialBuild.ContainersBuilding)
+	}
+
+	// 5. Aerial monorepo push with non-build changes only (nomad job changed)
+	var revParseAerialNomad int
+	dNomadAerial := NewDaemon(DaemonConfig{
+		Repos:      repos,
+		ComposeDir: aerialDir,
+		ConfigDir:  aerialConfigDir,
+		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			if len(args) >= 1 && args[0] == "rev-parse" {
+				if len(args) >= 2 && args[1] == "FETCH_HEAD" {
+					return []byte("sha_after"), nil, nil
+				}
+				if len(args) >= 2 && args[1] == "HEAD" {
+					revParseAerialNomad++
+					if revParseAerialNomad == 1 {
+						return []byte("sha_before"), nil, nil
+					}
+					return []byte("sha_after"), nil, nil
+				}
+				return []byte("sha_after"), nil, nil
+			}
+			if len(args) >= 2 && args[0] == "diff" && args[1] == "--name-only" {
+				return []byte("nomad/jobs/migrate.nomad\n"), nil, nil
+			}
+			if len(args) >= 2 && args[0] == "diff" && args[1] == "--name-status" {
+				return []byte("M nomad/jobs/migrate.nomad\n"), nil, nil
+			}
+			return []byte(""), nil, nil
+		},
+		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			return []byte("Evaluation ID: migrate-123"), nil, nil
+		},
+	})
+	_ = os.MkdirAll(filepath.Join(aerialDir, "nomad", "jobs"), 0755)
+	_ = os.WriteFile(filepath.Join(aerialDir, "nomad", "jobs", "migrate.nomad"), []byte(`job "migrate" {}`), 0644)
+
+	respAerialNomad, codeAerialNomad := dNomadAerial.ExecuteGitPushEvent(ctx, GitPushEventRequest{
+		Repo: "aerial",
+		Ref:  "refs/heads/main",
+	})
+	if codeAerialNomad != http.StatusOK || respAerialNomad.Status != "accepted" || respAerialNomad.ContainersBuilding || !respAerialNomad.NomadChanged {
+		t.Errorf("expected accepted with NomadChanged=true for aerial nomad change, got code %d, status %s, nomadChanged %v", codeAerialNomad, respAerialNomad.Status, respAerialNomad.NomadChanged)
+	}
+
+	// 6. Aerial-config push with deferred nomad job due to active build
+	jobWithAerialImg := `job "webhooks-router" {
+		task "router" {
+			config {
+				image = "ghcr.io/azylman/aerial-webhooks-router:latest"
+			}
+		}
+	}`
+	_ = os.WriteFile(filepath.Join(aerialConfigDir, "jobs", "webhooks-router.nomad"), []byte(jobWithAerialImg), 0644)
+
+	var revParseConfigDef int
+	dConfigDeferred := NewDaemon(DaemonConfig{
+		Repos:      repos,
+		ComposeDir: aerialDir,
+		ConfigDir:  aerialConfigDir,
+		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			if len(args) >= 1 && args[0] == "rev-parse" {
+				if len(args) >= 2 && args[1] == "FETCH_HEAD" {
+					return []byte("sha_after"), nil, nil
+				}
+				if len(args) >= 2 && args[1] == "HEAD" {
+					revParseConfigDef++
+					if revParseConfigDef == 1 {
+						return []byte("sha_before"), nil, nil
+					}
+					return []byte("sha_after"), nil, nil
+				}
+				return []byte("sha_after"), nil, nil
+			}
+			if len(args) >= 2 && args[0] == "diff" && args[1] == "--name-status" {
+				return []byte("M jobs/webhooks-router.nomad\n"), nil, nil
+			}
+			return []byte(""), nil, nil
+		},
+		RegistryClient: &http.Client{
+			Transport: &roundTripperFunc{
+				fn: func(req *http.Request) (*http.Response, error) {
+					if strings.Contains(req.URL.String(), "actions/runs") {
+						return &http.Response{
+							StatusCode: http.StatusOK,
+							Header:     make(http.Header),
+							Body:       ioNopCloser(strings.NewReader(`{"total_count": 1, "workflow_runs": [{}]}`)),
+						}, nil
+					}
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     make(http.Header),
+						Body:       ioNopCloser(strings.NewReader(`{}`)),
+					}, nil
+				},
+			},
+		},
+		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			return []byte("Evaluation ID: 12345"), nil, nil
+		},
+	})
+
+	respConfigDef, codeConfigDef := dConfigDeferred.ExecuteGitPushEvent(ctx, GitPushEventRequest{
+		Repo: "aerial-config",
+		Ref:  "refs/heads/main",
+	})
+	if codeConfigDef != http.StatusOK || !respConfigDef.ContainersBuilding || len(respConfigDef.AppliedJobs) != 0 {
+		t.Errorf("expected job deferred when image source repo is building, got code %d, building %v, applied %v", codeConfigDef, respConfigDef.ContainersBuilding, respConfigDef.AppliedJobs)
+	}
+
+	// 7. Aerial-config push with image ready (applies Nomad job)
+	var revParseConfigApp int
+	dConfigApplied := NewDaemon(DaemonConfig{
+		Repos:      repos,
+		ComposeDir: aerialDir,
+		ConfigDir:  aerialConfigDir,
+		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			if len(args) >= 1 && args[0] == "rev-parse" {
+				if len(args) >= 2 && args[1] == "FETCH_HEAD" {
+					return []byte("sha_after"), nil, nil
+				}
+				if len(args) >= 2 && args[1] == "HEAD" {
+					revParseConfigApp++
+					if revParseConfigApp == 1 {
+						return []byte("sha_before"), nil, nil
+					}
+					return []byte("sha_after"), nil, nil
+				}
+				return []byte("sha_after"), nil, nil
+			}
+			if len(args) >= 2 && args[0] == "diff" && args[1] == "--name-status" {
+				return []byte("M jobs/webhooks-router.nomad\n"), nil, nil
+			}
+			return []byte(""), nil, nil
+		},
+		RegistryClient: &http.Client{
+			Transport: &roundTripperFunc{
+				fn: func(req *http.Request) (*http.Response, error) {
+					if strings.Contains(req.URL.String(), "actions/runs") {
+						return &http.Response{
+							StatusCode: http.StatusOK,
+							Header:     make(http.Header),
+							Body:       ioNopCloser(strings.NewReader(`{"total_count": 0, "workflow_runs": []}`)),
+						}, nil
+					}
+					resp := &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     make(http.Header),
+						Body:       ioNopCloser(strings.NewReader(`{}`)),
+					}
+					resp.Header.Set("Docker-Content-Digest", "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+					return resp, nil
+				},
+			},
+		},
+		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			return []byte("Evaluation ID: applied-123"), nil, nil
+		},
+	})
+
+	respConfigApp, codeConfigApp := dConfigApplied.ExecuteGitPushEvent(ctx, GitPushEventRequest{
+		Repo: "aerial-config",
+		Ref:  "refs/heads/main",
+	})
+	if codeConfigApp != http.StatusOK || respConfigApp.ContainersBuilding || len(respConfigApp.AppliedJobs) != 1 {
+		t.Errorf("expected job applied when image ready, got code %d, building %v, applied %v", codeConfigApp, respConfigApp.ContainersBuilding, respConfigApp.AppliedJobs)
+	}
+
+	// 8. Push to peripheral repo (mirrormere)
+	respMirror, codeMirror := d.ExecuteGitPushEvent(ctx, GitPushEventRequest{
+		Repo: "mirrormere",
+		Ref:  "refs/heads/main",
+	})
+	if codeMirror != http.StatusOK || respMirror.Status != "accepted" {
+		t.Errorf("expected 200 accepted for mirrormere push, got %d (%s)", codeMirror, respMirror.Status)
+	}
+}
+
+func TestExecuteImageReadyEvent_TableDriven(t *testing.T) {
+	ctx := context.Background()
+
+	tmpDir := t.TempDir()
+	jobsDir := filepath.Join(tmpDir, "jobs")
+	_ = os.MkdirAll(jobsDir, 0755)
+
+	job1 := `job "webhooks-router" {
+		task "router" {
+			config {
+				image = "ghcr.io/azylman/aerial-webhooks-router:latest"
+			}
+		}
+	}`
+	_ = os.WriteFile(filepath.Join(jobsDir, "webhooks-router.nomad"), []byte(job1), 0644)
+
+	var runCalled bool
+	var restartCalled bool
+
+	d := NewDaemon(DaemonConfig{
+		ConfigDir: tmpDir,
+		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			if len(args) >= 2 && args[0] == "job" && args[1] == "run" {
+				runCalled = true
+				return []byte("Evaluation ID: run-123"), nil, nil
+			}
+			if len(args) >= 2 && args[0] == "job" && args[1] == "restart" {
+				restartCalled = true
+				return []byte("Restart triggered"), nil, nil
+			}
+			return []byte("OK"), nil, nil
+		},
+	})
+
+	// 1. Missing image
+	respEmpty, codeEmpty := d.ExecuteImageReadyEvent(ctx, ImageReadyEventRequest{})
+	if codeEmpty != http.StatusBadRequest || respEmpty.Status != "error" {
+		t.Errorf("expected 400 for empty image, got %d (%s)", codeEmpty, respEmpty.Status)
+	}
+
+	// 2. Unknown image
+	respUnknown, codeUnknown := d.ExecuteImageReadyEvent(ctx, ImageReadyEventRequest{
+		Image: "ghcr.io/azylman/nonexistent-service:latest",
+	})
+	if codeUnknown != http.StatusNotFound || respUnknown.Status != "not_found" {
+		t.Errorf("expected 404 for unknown image, got %d (%s)", codeUnknown, respUnknown.Status)
+	}
+
+	// 3. Matching image
+	respMatch, codeMatch := d.ExecuteImageReadyEvent(ctx, ImageReadyEventRequest{
+		Image:  "ghcr.io/azylman/aerial-webhooks-router:latest",
+		Digest: "sha256:newdigest999",
+	})
+	if codeMatch != http.StatusOK || respMatch.Status != "accepted" || len(respMatch.MatchedJobs) != 1 {
+		t.Errorf("expected 200 accepted for matching image, got %d (%s), matches: %v", codeMatch, respMatch.Status, respMatch.MatchedJobs)
+	}
+	if !runCalled || !restartCalled {
+		t.Errorf("expected both job run and restart to be invoked, run: %v, restart: %v", runCalled, restartCalled)
+	}
+
+	// Check digest cache was updated
+	d.nomadDigestsMu.RLock()
+	cachedDigest := d.nomadKnownDigests["webhooks-router:ghcr.io/azylman/aerial-webhooks-router:latest"]
+	d.nomadDigestsMu.RUnlock()
+	if cachedDigest != "sha256:newdigest999" {
+		t.Errorf("expected cached digest sha256:newdigest999, got %q", cachedDigest)
+	}
+
+	// 4. Validation error on all matches
+	dFail := NewDaemon(DaemonConfig{
+		ConfigDir: tmpDir,
+		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			if len(args) >= 2 && args[0] == "job" && args[1] == "validate" {
+				return nil, []byte("syntax error"), errors.New("validate error")
+			}
+			return []byte("OK"), nil, nil
+		},
+	})
+	respFail, codeFail := dFail.ExecuteImageReadyEvent(ctx, ImageReadyEventRequest{
+		Image: "ghcr.io/azylman/aerial-webhooks-router:latest",
+	})
+	if codeFail != http.StatusInternalServerError || respFail.Status != "error" {
+		t.Errorf("expected 500 when all jobs fail validation, got %d (%s)", codeFail, respFail.Status)
+	}
+}
+
+func TestSetupMux_PushEventsEndpoints(t *testing.T) {
+	tmpDir := t.TempDir()
+	jobsDir := filepath.Join(tmpDir, "jobs")
+	_ = os.MkdirAll(jobsDir, 0755)
+	_ = os.MkdirAll(filepath.Join(tmpDir, ".git"), 0755)
+
+	job1 := `job "webhooks-router" {
+		task "router" {
+			config {
+				image = "ghcr.io/azylman/aerial-webhooks-router:latest"
+			}
+		}
+	}`
+	_ = os.WriteFile(filepath.Join(jobsDir, "webhooks-router.nomad"), []byte(job1), 0644)
+
+	d := NewDaemon(DaemonConfig{
+		Repos:     []string{tmpDir},
+		ConfigDir: tmpDir,
+		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			return []byte("abc1234"), nil, nil
+		},
+		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			return []byte("OK"), nil, nil
+		},
+	})
+
+	mux := SetupMux(d)
+
+	// 1. POST /events/git_push
+	wPush := httptest.NewRecorder()
+	rPush := httptest.NewRequest(http.MethodPost, "/events/git_push", strings.NewReader(`{"repo":"`+tmpDir+`","ref":"refs/heads/main"}`))
+	rPush.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(wPush, rPush)
+	if wPush.Code != http.StatusOK {
+		t.Errorf("POST /events/git_push returned %d; want 200", wPush.Code)
+	}
+
+	// 2. GET /events/git_push -> 405
+	wPushGet := httptest.NewRecorder()
+	rPushGet := httptest.NewRequest(http.MethodGet, "/events/git_push", nil)
+	mux.ServeHTTP(wPushGet, rPushGet)
+	if wPushGet.Code != http.StatusMethodNotAllowed {
+		t.Errorf("GET /events/git_push returned %d; want 405", wPushGet.Code)
+	}
+
+	// 3. POST /events/git_push bad JSON -> 400
+	wPushBad := httptest.NewRecorder()
+	rPushBad := httptest.NewRequest(http.MethodPost, "/events/git_push", strings.NewReader(`invalid-json`))
+	mux.ServeHTTP(wPushBad, rPushBad)
+	if wPushBad.Code != http.StatusBadRequest {
+		t.Errorf("POST /events/git_push bad JSON returned %d; want 400", wPushBad.Code)
+	}
+
+	// 4. POST /events/image_ready
+	wImg := httptest.NewRecorder()
+	rImg := httptest.NewRequest(http.MethodPost, "/events/image_ready", strings.NewReader(`{"image":"ghcr.io/azylman/aerial-webhooks-router:latest"}`))
+	rImg.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(wImg, rImg)
+	if wImg.Code != http.StatusOK {
+		t.Errorf("POST /events/image_ready returned %d; want 200", wImg.Code)
+	}
+
+	// 5. GET /events/image_ready -> 405
+	wImgGet := httptest.NewRecorder()
+	rImgGet := httptest.NewRequest(http.MethodGet, "/events/image_ready", nil)
+	mux.ServeHTTP(wImgGet, rImgGet)
+	if wImgGet.Code != http.StatusMethodNotAllowed {
+		t.Errorf("GET /events/image_ready returned %d; want 405", wImgGet.Code)
+	}
+
+	// 6. POST /events/image_ready bad JSON -> 400
+	wImgBad := httptest.NewRecorder()
+	rImgBad := httptest.NewRequest(http.MethodPost, "/events/image_ready", strings.NewReader(`{invalid`))
+	mux.ServeHTTP(wImgBad, rImgBad)
+	if wImgBad.Code != http.StatusBadRequest {
+		t.Errorf("POST /events/image_ready bad JSON returned %d; want 400", wImgBad.Code)
+	}
+}
+
+
 
 
 
