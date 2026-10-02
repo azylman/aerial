@@ -64,7 +64,7 @@ services:
       - GOPATH=${GOPATH:-/data/cache/go}
       - GOMODCACHE=${GOMODCACHE:-/data/cache/go/pkg/mod}
       - GOLANGCI_LINT_CACHE=${GOLANGCI_LINT_CACHE:-/data/cache/golangci-lint}
-      - OPENOBSERVE_URL=${OPENOBSERVE_URL:-http://openobserve:5080/openobserve}
+      - OPENOBSERVE_URL=${OPENOBSERVE_URL:-http://host.docker.internal:5080/openobserve}
       - OPENOBSERVE_ORG=${OPENOBSERVE_ORG:-default}
       - OPENOBSERVE_ROOT_USER_EMAIL=${OPENOBSERVE_ROOT_USER_EMAIL:-admin@aerial.local}
       - OPENOBSERVE_ROOT_USER_PASSWORD=${OPENOBSERVE_ROOT_USER_PASSWORD:-Aerial!Logs2026#}
@@ -91,8 +91,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      openobserve:
-        condition: service_started
 
   # ----------------------------------------------------------------------------
   # 1b. Hangar Sidecar: Aerial Hangar
@@ -124,6 +122,8 @@ services:
       - ${AERIAL_HOST_CONFIG_DIR:-${AERIAL_CONFIG_DIR:-/mnt/data/supervisor/share/aerial-config}}:/share/aerial-config:rw
       - ${AERIAL_HOST_PROJECT_DIR:-${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}}:/share/aerial:rw
       - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "${HANGAR_HOST_PORT:-8087}:8080"
     networks:
       aerial-net:
         aliases:
@@ -309,196 +309,9 @@ services:
     depends_on:
       dashboard:
         condition: service_healthy
-      grafana:
-        condition: service_healthy
       homepage:
         condition: service_healthy
 
-  # ----------------------------------------------------------------------------
-  # 15. Observability: VictoriaMetrics Single-Node TSDB
-  #     Lightweight time-series database with long-term retention & downsampling.
-  # ----------------------------------------------------------------------------
-  victoriametrics:
-    image: victoriametrics/victoria-metrics:v1.101.0
-    container_name: aerial-victoriametrics
-    restart: unless-stopped
-    stop_grace_period: 30s
-    security_opt:
-      - no-new-privileges:true
-    labels:
-      autoheal: "true"
-    command:
-      - "-storageDataPath=/victoria-metrics-data"
-      - "-promscrape.config=/share/aerial/victoriametrics/scrape.yml"
-      - "-promscrape.configCheckInterval=15s"
-      - "-retentionPeriod=${VICTORIAMETRICS_RETENTION_PERIOD:-5y}"
-      - "-loggerFormat=json"
-    environment:
-      - HA_METRICS_TOKEN=${HA_METRICS_TOKEN:-}
-    volumes:
-      - aerial-victoriametrics-data:/victoria-metrics-data
-      - ${AERIAL_HOST_PROJECT_DIR:-${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}}:/share/aerial:ro
-      - ${AERIAL_HOST_CONFIG_DIR:-${AERIAL_CONFIG_DIR:-/mnt/data/supervisor/share/aerial-config}}:/share/aerial-config:ro
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    networks:
-      - aerial-net
-    healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:8428/health || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-      start_interval: 2s
-
-
-  # ----------------------------------------------------------------------------
-  # 16. Observability: Grafana Visual Dashboards
-  #     Serves system HUD & container metrics with PostgreSQL persistent backend.
-  # ----------------------------------------------------------------------------
-  grafana:
-    image: grafana/grafana:11.1.0
-    container_name: aerial-grafana
-    restart: unless-stopped
-    stop_grace_period: 20s
-    security_opt:
-      - no-new-privileges:true
-    labels:
-      autoheal: "true"
-      homepage.group: "Observability"
-      homepage.name: "Grafana Telemetry"
-      homepage.icon: "grafana.png"
-      homepage.href: "/grafana/"
-      homepage.description: "Timeseries & Container Metrics"
-      homepage.widget.type: "grafana"
-      homepage.widget.version: "2"
-      homepage.widget.url: "http://aerial-grafana:3000"
-      homepage.widget.username: "${GRAFANA_ADMIN_USER:-admin}"
-      homepage.widget.password: "${GRAFANA_ADMIN_PASSWORD:-aerial_metrics_pass}"
-    environment:
-      - GF_PATHS_PROVISIONING=/share/aerial/grafana/provisioning
-      - GF_DATABASE_TYPE=postgres
-      - GF_DATABASE_HOST=postgres:5432
-      - GF_DATABASE_NAME=${POSTGRES_DB:-aerial}
-      - GF_DATABASE_USER=${POSTGRES_USER:-aerial}
-      - GF_DATABASE_PASSWORD=${POSTGRES_PASSWORD:-aerial_secure_pass}
-      - GF_DATABASE_SSL_MODE=disable
-      - GF_SERVER_ROOT_URL=%(protocol)s://%(domain)s:%(http_port)s/grafana/
-      - GF_SERVER_SERVE_FROM_SUB_PATH=true
-      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
-      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-aerial_metrics_pass}
-      - GF_USERS_ALLOW_SIGN_UP=false
-      - GF_AUTH_ANONYMOUS_ENABLED=${GRAFANA_ANONYMOUS_ENABLED:-true}
-      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
-      - GF_AUTH_ANONYMOUS_ORG_NAME=Main Org.
-      - GF_AUTH_ANONYMOUS_HIDE_VERSION=true
-      - GF_AUTH_DISABLE_LOGIN_FORM=true
-      - GF_AUTH_DISABLE_SIGNOUT_MENU=true
-      - GF_PANELS_DISABLE_SANITIZE_HTML=true
-      - GF_LOG_MODE=console
-      - GF_LOG_CONSOLE_FORMAT=json
-    volumes:
-      - ${AERIAL_HOST_PROJECT_DIR:-${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}}:/share/aerial:ro
-      - ${AERIAL_HOST_CONFIG_DIR:-${AERIAL_CONFIG_DIR:-/mnt/data/supervisor/share/aerial-config}}:/share/aerial-config:ro
-    networks:
-      - aerial-net
-    healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:3000/api/health || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-      start_period: 20s
-      start_interval: 2s
-    depends_on:
-      postgres:
-        condition: service_healthy
-      victoriametrics:
-        condition: service_healthy
-
-
-  # ----------------------------------------------------------------------------
-  # 19. Observability: OpenObserve Cloud-Native Telemetry & Log Engine
-  #     Full-stack search, SQL/Lucene querying, and real-time dashboarding.
-  # ----------------------------------------------------------------------------
-  openobserve:
-    image: public.ecr.aws/zinclabs/openobserve:v1.0.2-debug
-    container_name: aerial-openobserve
-    restart: unless-stopped
-    stop_grace_period: 30s
-    mem_limit: 2g
-    cpus: 1.5
-    labels:
-      autoheal: "true"
-      homepage.group: "Observability"
-      homepage.name: "OpenObserve Logs"
-      homepage.icon: "open-observe.png"
-      homepage.description: "Full-Stack Log & Telemetry Explorer"
-      homepage.href: "/openobserve/web/logs"
-    environment:
-      - ZO_ROOT_USER_EMAIL=${OPENOBSERVE_ROOT_USER_EMAIL:-admin@aerial.local}
-      - ZO_ROOT_USER_PASSWORD=${OPENOBSERVE_ROOT_USER_PASSWORD:-Aerial!Logs2026#}
-      - ZO_DATA_DIR=/data
-      - ZO_BASE_URI=/openobserve
-      - ZO_TELEMETRY=false
-      - ZO_AUTO_QUERY_ENABLED=true
-      - ZO_COLS_PER_RECORD_LIMIT=5000
-      - ZO_INGEST_FLATTEN_LEVEL=2
-      - ZO_WIDENING_SCHEMA_EVOLUTION=true
-      - ZO_MEMORY_CACHE_MAX_SIZE=512
-      - ZO_QUICK_MODE_ENABLED=false
-      - ZO_QUICK_MODE_FORCE_ENABLED=false
-      - ZO_QUICK_MODE_NUM_FIELDS=2000
-      - ZO_QUICK_MODE_STRATEGY=both
-    volumes:
-      - aerial-openobserve-data:/data
-    ports:
-      - "${OPENOBSERVE_HOST_PORT:-127.0.0.1:5080}:5080"
-    networks:
-      - aerial-net
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:5080/openobserve/healthz"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-      start_period: 20s
-      start_interval: 2s
-
-  # ----------------------------------------------------------------------------
-  # 20. Observability: Vector Log Shipper & Transformation Pipeline
-  #     Scrapes Docker container stdout/stderr, normalizes logs via VRL, and ships to OpenObserve.
-  # ----------------------------------------------------------------------------
-  vector:
-    image: timberio/vector:0.40.0-alpine
-    container_name: aerial-vector
-    restart: unless-stopped
-    stop_grace_period: 15s
-    labels:
-      autoheal: "true"
-    environment:
-      - VECTOR_LOG_FORMAT=json
-      - VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION=true
-      - VECTOR_WATCH_CONFIG=true
-      - OPENOBSERVE_ROOT_USER_EMAIL=${OPENOBSERVE_ROOT_USER_EMAIL:-admin@aerial.local}
-      - OPENOBSERVE_ROOT_USER_PASSWORD=${OPENOBSERVE_ROOT_USER_PASSWORD:-Aerial!Logs2026#}
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - /var/lib/docker/containers:/var/lib/docker/containers:ro
-      - aerial-vector-data:/var/lib/vector
-      - ${AERIAL_HOST_PROJECT_DIR:-${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}}/vector:/etc/vector:ro
-    ports:
-      - "${VECTOR_API_PORT:-8686}:8686"
-    networks:
-      - aerial-net
-    healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:8686/health || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-      start_interval: 2s
-    depends_on:
-      openobserve:
-        condition: service_healthy
 
   # ----------------------------------------------------------------------------
   # 21. Cluster Orchestrator & Local Worker: HashiCorp Nomad
