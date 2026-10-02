@@ -597,9 +597,97 @@ func (d *SyncDaemon) MonitorDeploymentAsync(jobName string, minVersion int, base
 }
 
 const (
-	imageQuarantineTTL        = 60 * time.Minute
-	defaultComposePullTimeout = 10 * time.Minute
+	startupDeploymentStaleThreshold = 10 * time.Minute
+	imageQuarantineTTL              = 60 * time.Minute
+	defaultComposePullTimeout       = 10 * time.Minute
 )
+
+// ReconcileStartupDeployments checks Nomad on daemon boot to detect if Hangar itself
+// (or other jobs) completed a deployment while the daemon was restarting, emitting deploy_success or deploy_rollback.
+func (d *SyncDaemon) ReconcileStartupDeployments(ctx context.Context) {
+	if d == nil {
+		return
+	}
+
+	jobName := "hangar"
+	out, errBytes, err := d.getNomadExecutor()(ctx, "job", "status", "-json", jobName)
+	if err != nil {
+		log.Printf("[Hangar:Startup] Notice: could not query nomad job status for %s: %v", jobName, SanitizeLog(err.Error()))
+		return
+	}
+
+	status, errParse := ParseJobStatusOutput(append(out, errBytes...))
+	if errParse != nil {
+		log.Printf("[Hangar:Startup] Warning: failed to parse nomad job status for %s: %v", jobName, SanitizeLog(errParse.Error()))
+		return
+	}
+
+	if status.LatestDeployment == nil {
+		return
+	}
+
+	dep := status.LatestDeployment
+
+	// Filter out stale deployments from prior restarts/boots (older than 10m)
+	if status.SubmitTime > 0 {
+		submitTime := time.Unix(0, status.SubmitTime)
+		if time.Since(submitTime) > startupDeploymentStaleThreshold {
+			log.Printf("[Hangar:Startup] Skipping deployment reconcile for %s: latest deployment submit time was %v ago (exceeds %v threshold)",
+				jobName, time.Since(submitTime).Round(time.Second), startupDeploymentStaleThreshold)
+			return
+		}
+	}
+
+	commit := ""
+	if d.composeDir != "" {
+		if c, _, errCommit := d.getRepoCommit(ctx, d.composeDir, "HEAD"); errCommit == nil {
+			commit = c
+		}
+	}
+
+	baseEvt := HangarDeployEvent{
+		JobName:      jobName,
+		Repo:         "azylman/aerial",
+		CommitSHA:    commit,
+		DeploymentID: dep.ID,
+		Details:      dep.StatusDescription,
+		Timestamp:    time.Now().UTC(),
+	}
+
+	if dep.Status == "successful" {
+		evt := baseEvt
+		evt.Event = "deploy_success"
+		evt.Status = "success"
+		log.Printf("[Hangar:Startup] Reconciled successful deployment for %s (deployment %s)", jobName, dep.ID)
+		d.DispatchDeployEvent(evt)
+	} else if dep.Status == "failed" {
+		isRollback := false
+		for _, tg := range dep.TaskGroups {
+			if tg.AutoRevert {
+				isRollback = true
+				break
+			}
+		}
+		if strings.Contains(strings.ToLower(dep.StatusDescription), "revert") {
+			isRollback = true
+		}
+		evt := baseEvt
+		if isRollback {
+			evt.Event = "deploy_rollback"
+			evt.Status = "rollback"
+		} else {
+			evt.Event = "deploy_failed"
+			evt.Status = "failed"
+		}
+		log.Printf("[Hangar:Startup] Reconciled %s for %s deployment (deployment %s)", evt.Event, jobName, dep.ID)
+		d.DispatchDeployEvent(evt)
+	} else if dep.Status == "running" {
+		log.Printf("[Hangar:Startup] Detected in-progress deployment for %s (deployment %s); resuming monitoring", jobName, dep.ID)
+		baseEvt.Event = "deploy_started"
+		baseEvt.Status = "started"
+		d.MonitorDeploymentAsync(jobName, dep.JobVersion, baseEvt)
+	}
+}
 
 func (d *SyncDaemon) quarantineImage(service, digest, reason string) {
 	d.imageQuarantineMu.Lock()
@@ -3478,6 +3566,12 @@ func RunDaemon(ctx context.Context, cfg DaemonConfig) error {
 		if _, err := daemon.TriggerSync(); err != nil {
 			log.Printf("[Hangar] Initial startup sync completed with notice: %v", err)
 		}
+	}()
+
+	go func() {
+		startupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		daemon.ReconcileStartupDeployments(startupCtx)
 	}()
 
 	mux := SetupMux(daemon)

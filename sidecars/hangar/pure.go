@@ -1103,6 +1103,7 @@ type HangarDeployEvent struct {
 type NomadJobStatusOutput struct {
 	ID               string `json:"ID"`
 	JobVersion       int    `json:"JobVersion"`
+	SubmitTime       int64  `json:"SubmitTime"`
 	LatestDeployment *struct {
 		ID                string `json:"ID"`
 		JobVersion        int    `json:"JobVersion"`

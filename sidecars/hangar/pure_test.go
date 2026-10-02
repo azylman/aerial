@@ -1923,6 +1923,7 @@ func TestParseJobStatusOutput_TableDriven(t *testing.T) {
 		wantDepStatus string
 		wantAutoRev   bool
 		wantRunning   int
+		wantSubmitTime int64
 	}{
 		{
 			name: "single object with successful deployment",
@@ -2019,6 +2020,27 @@ func TestParseJobStatusOutput_TableDriven(t *testing.T) {
 			wantDepStatus: "running",
 		},
 		{
+			name: "single object with SubmitTime",
+			raw: []byte(`{
+				"ID": "hangar",
+				"JobVersion": 5,
+				"SubmitTime": 1790970821854773316,
+				"LatestDeployment": {
+					"ID": "dep-uuid-submit",
+					"JobVersion": 5,
+					"Status": "successful",
+					"StatusDescription": "Deployment completed successfully"
+				}
+			}`),
+			wantErr:        false,
+			wantID:         "hangar",
+			wantVersion:    5,
+			wantSubmitTime: 1790970821854773316,
+			hasDep:         true,
+			wantDepID:      "dep-uuid-submit",
+			wantDepStatus:  "successful",
+		},
+		{
 			name:    "empty byte slice",
 			raw:     []byte(""),
 			wantErr: true,
@@ -2062,6 +2084,9 @@ func TestParseJobStatusOutput_TableDriven(t *testing.T) {
 			}
 			if got.JobVersion != tt.wantVersion {
 				t.Errorf("got JobVersion %d, want %d", got.JobVersion, tt.wantVersion)
+			}
+			if tt.wantSubmitTime > 0 && got.SubmitTime != tt.wantSubmitTime {
+				t.Errorf("got SubmitTime %d, want %d", got.SubmitTime, tt.wantSubmitTime)
 			}
 			if tt.hasDep {
 				if got.LatestDeployment == nil {
