@@ -3432,4 +3432,44 @@ func TestGeminiAPISession_Send_AmbientContextRetriever_NoDoubleInject(t *testing
 	}
 }
 
+func TestParseJSONRPCBody_Coverage(t *testing.T) {
+	t.Parallel()
 
+	// 1. Empty body
+	if _, err := parseJSONRPCBody(nil); err == nil {
+		t.Errorf("expected error on nil body")
+	}
+	if _, err := parseJSONRPCBody([]byte("   \n\t  ")); err == nil {
+		t.Errorf("expected error on whitespace body")
+	}
+
+	// 2. Standard JSON
+	resp, err := parseJSONRPCBody([]byte(`{"jsonrpc":"2.0","id":1,"result":{"status":"ok"}}`))
+	if err != nil {
+		t.Fatalf("unexpected error on standard json: %v", err)
+	}
+	if resp == nil {
+		t.Fatalf("expected non-nil response")
+	}
+
+	// 3. SSE Stream with data: prefix and valid JSON
+	sseBody := []byte("event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":[]}}\n\n")
+	respSSE, err := parseJSONRPCBody(sseBody)
+	if err != nil {
+		t.Fatalf("unexpected error on SSE body: %v", err)
+	}
+	if respSSE == nil {
+		t.Fatalf("expected non-nil response from SSE")
+	}
+
+	// 4. SSE Stream with non-JSON data line falling through to standard unmarshal error
+	sseInvalid := []byte("event: message\ndata: not json\n\n")
+	if _, err := parseJSONRPCBody(sseInvalid); err == nil {
+		t.Errorf("expected error on invalid SSE json data")
+	}
+
+	// 5. Standard invalid JSON
+	if _, err := parseJSONRPCBody([]byte("not json at all")); err == nil {
+		t.Errorf("expected error on completely invalid json")
+	}
+}
