@@ -2162,10 +2162,24 @@ func TestRunBrainApp_DiscordLowEffortPool_EphemeralHome(t *testing.T) {
 	var spawnedConfigs []runner.DaemonConfig
 
 	baseMock := runner.NewMockDaemonSpawner()
+	allSpawned := make(chan struct{})
+	var spawnedOnce sync.Once
 	trackingSpawner := &runner.MockDaemonSpawner{
 		SpawnFn: func(ctx context.Context, dCfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
 			spawnedConfigsMu.Lock()
 			spawnedConfigs = append(spawnedConfigs, dCfg)
+			has0, has1 := false, false
+			for _, sc := range spawnedConfigs {
+				if sc.ThreadID == "ephemeral:worker-0" {
+					has0 = true
+				}
+				if sc.ThreadID == "ephemeral:worker-1" {
+					has1 = true
+				}
+			}
+			if has0 && has1 {
+				spawnedOnce.Do(func() { close(allSpawned) })
+			}
 			spawnedConfigsMu.Unlock()
 			return baseMock.Spawn(ctx, dCfg)
 		},
@@ -2183,6 +2197,10 @@ func TestRunBrainApp_DiscordLowEffortPool_EphemeralHome(t *testing.T) {
 
 	go func() {
 		<-ready
+		select {
+		case <-allSpawned:
+		case <-time.After(2 * time.Second):
+		}
 		cancel()
 	}()
 
