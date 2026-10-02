@@ -26,6 +26,7 @@ import (
 	"github.com/azylman/aerial/brain/pkg/queue"
 	"github.com/azylman/aerial/brain/pkg/runner"
 	"github.com/azylman/aerial/brain/pkg/scheduler"
+	"github.com/azylman/aerial/brain/pkg/transcript"
 	"github.com/bwmarrin/discordgo"
 	_ "modernc.org/sqlite"
 )
@@ -138,6 +139,125 @@ func TestHandleTranscripts(t *testing.T) {
 	if strings.TrimSpace(w.Body.String()) != "[]" {
 		t.Errorf("Expected empty JSON array '[]', got %q", w.Body.String())
 	}
+}
+
+func TestHandleTranscriptSearchAndStats(t *testing.T) {
+	t.Run("Search_MethodNotAllowed", func(t *testing.T) {
+		handler := handleTranscriptSearch(db.NewFakeStore(), nil)
+		req := httptest.NewRequest(http.MethodPost, "/api/transcripts/search", nil)
+		w := httptest.NewRecorder()
+		handler(w, req)
+		if w.Code != http.StatusMethodNotAllowed {
+			t.Errorf("expected 405, got %d", w.Code)
+		}
+	})
+
+	t.Run("Search_NilStore", func(t *testing.T) {
+		handler := handleTranscriptSearch(nil, nil)
+		req := httptest.NewRequest(http.MethodGet, "/api/transcripts/search?q=test", nil)
+		w := httptest.NewRecorder()
+		handler(w, req)
+		if w.Code != http.StatusInternalServerError {
+			t.Errorf("expected 500, got %d", w.Code)
+		}
+	})
+
+	t.Run("Search_Success", func(t *testing.T) {
+		fake := db.NewFakeStore()
+		_ = fake.UpsertSessionSummary(context.Background(), db.SessionSummary{
+			SessionID: "sess-mux-1",
+			Summary:   "Triaged container restart in aerial",
+		})
+		embedderCalled := false
+		embedder := func(ctx context.Context, text string) ([]float32, error) {
+			embedderCalled = true
+			return make([]float32, 384), nil
+		}
+		handler := handleTranscriptSearch(fake, embedder)
+
+		req := httptest.NewRequest(http.MethodGet, "/api/transcripts/search?q=container&mode=auto&limit=5&tool=run_command&session=sess-mux-1", nil)
+		w := httptest.NewRecorder()
+		handler(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d: %s", w.Code, w.Body.String())
+		}
+		if !embedderCalled {
+			t.Error("expected embedder to be invoked")
+		}
+		var res transcript.SearchResult
+		if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
+			t.Fatalf("failed unmarshaling search response: %v", err)
+		}
+		if len(res.Sessions) != 1 || res.Sessions[0].SessionID != "sess-mux-1" {
+			t.Errorf("unexpected search result: %+v", res)
+		}
+	})
+
+	t.Run("Stats_MethodNotAllowed", func(t *testing.T) {
+		handler := handleTranscriptStats(db.NewFakeStore())
+		req := httptest.NewRequest(http.MethodPost, "/api/transcripts/stats", nil)
+		w := httptest.NewRecorder()
+		handler(w, req)
+		if w.Code != http.StatusMethodNotAllowed {
+			t.Errorf("expected 405, got %d", w.Code)
+		}
+	})
+
+	t.Run("Stats_NilStore", func(t *testing.T) {
+		handler := handleTranscriptStats(nil)
+		req := httptest.NewRequest(http.MethodGet, "/api/transcripts/stats", nil)
+		w := httptest.NewRecorder()
+		handler(w, req)
+		if w.Code != http.StatusInternalServerError {
+			t.Errorf("expected 500, got %d", w.Code)
+		}
+	})
+
+	t.Run("Stats_Success", func(t *testing.T) {
+		fake := db.NewFakeStore()
+		_ = fake.UpsertSessionSummary(context.Background(), db.SessionSummary{
+			SessionID: "sess-stat-1",
+			Summary:   "Session 1",
+		})
+		handler := handleTranscriptStats(fake)
+
+		req := httptest.NewRequest(http.MethodGet, "/api/transcripts/stats", nil)
+		w := httptest.NewRecorder()
+		handler(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d: %s", w.Code, w.Body.String())
+		}
+		var stats map[string]any
+		if err := json.Unmarshal(w.Body.Bytes(), &stats); err != nil {
+			t.Fatalf("failed unmarshaling stats response: %v", err)
+		}
+		if stats["total_sessions"] != float64(1) || stats["status"] != "ok" {
+			t.Errorf("unexpected stats: %+v", stats)
+		}
+	})
+
+	t.Run("SetupBrainMuxWithEmbedder_Endpoints", func(t *testing.T) {
+		fake := db.NewFakeStore()
+		mux := SetupBrainMuxWithEmbedder(fake, nil, nil, nil)
+
+		// Test /api/transcripts/search route
+		req := httptest.NewRequest(http.MethodGet, "/api/transcripts/search?q=test", nil)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Errorf("expected 200 from /api/transcripts/search route, got %d", w.Code)
+		}
+
+		// Test /api/transcripts/stats route
+		req = httptest.NewRequest(http.MethodGet, "/api/transcripts/stats", nil)
+		w = httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Errorf("expected 200 from /api/transcripts/stats route, got %d", w.Code)
+		}
+	})
 }
 
 func TestFormatCronDescription(t *testing.T) {
