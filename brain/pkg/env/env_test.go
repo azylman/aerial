@@ -830,14 +830,23 @@ func TestLoadMCPConfig_FileOverridesAndNormalizations(t *testing.T) {
 			"docker":          json.RawMessage(`{"serverUrl":"http://docker-mcp:4002/mcp"}`),
 			"custom-sse":      json.RawMessage(`{"serverUrl":"http://custom-server:9000/sse"}`),
 			"victoriametrics": json.RawMessage(`{"serverUrl":"http://victoriametrics-mcp:4004/mcp"}`),
+			"nomad":           json.RawMessage(`{"serverUrl":"http://192.168.1.14:4006/mcp"}`),
+			"infisical":       json.RawMessage(`{"serverUrl":"http://192.168.1.14:4007/mcp"}`),
 		}
 	})
 	raw = p.LoadMCPConfig(cfgCustom)
 	rawStr := string(raw)
-	for _, svc := range []string{"docker-mcp:4002/mcp", "host.docker.internal:4006/mcp", "host.docker.internal:4007/mcp", "custom-server:9000/sse", "victoriametrics-mcp:4004/mcp"} {
+	for _, svc := range []string{"docker-mcp:4002/mcp", "custom-server:9000/sse", "victoriametrics-mcp:4004/mcp", "192.168.1.14:4006/mcp", "192.168.1.14:4007/mcp"} {
 		if !strings.Contains(rawStr, svc) {
 			t.Errorf("Expected endpoint %q preserved in config, got: %s", svc, rawStr)
 		}
+	}
+
+	// 6. Verify that nomad and infisical are omitted from default MCP config when not declared
+	cfgDefault := config.NewTestConfig(func(d *config.ConfigData) {})
+	rawDef := string(p.LoadMCPConfig(cfgDefault))
+	if strings.Contains(rawDef, "\"nomad\"") || strings.Contains(rawDef, "\"infisical\"") {
+		t.Errorf("Expected unconfigured nomad and infisical omitted from default MCP config, got: %s", rawDef)
 	}
 }
 
