@@ -689,4 +689,120 @@ func cleanSlugPath(p string) string {
 	return strings.ToLower(fmt.Sprintf("%s/%s", owner, repo))
 }
 
+// IsNomadJobFile returns true if the given path or filename corresponds to a Nomad job specification file.
+func IsNomadJobFile(p string) bool {
+	cleanPath := strings.ReplaceAll(strings.TrimSpace(p), "\\", "/")
+	base := path.Base(cleanPath)
+	lower := strings.ToLower(base)
+	return strings.HasSuffix(lower, ".nomad") || strings.HasSuffix(lower, ".nomad.hcl")
+}
+
+// FilterNomadChanges filters a list of changed file paths and returns only those that affect Nomad jobs.
+func FilterNomadChanges(changedFiles []string) []string {
+	var result []string
+	for _, f := range changedFiles {
+		if IsNomadJobFile(f) {
+			result = append(result, f)
+		}
+	}
+	return result
+}
+
+// ExtractJobName extracts the Nomad job name from job specification content (e.g. job "name" { ... }).
+// If parsing fails, it falls back to the file basename stripped of .nomad extensions.
+func ExtractJobName(content string, fallbackFileName string) string {
+	scanner := bufio.NewScanner(strings.NewReader(content))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") {
+			continue
+		}
+		if strings.HasPrefix(line, "job ") {
+			parts := strings.SplitN(line, "\"", 3)
+			if len(parts) >= 2 {
+				name := strings.TrimSpace(parts[1])
+				if name != "" {
+					return name
+				}
+			}
+		}
+	}
+	base := path.Base(strings.ReplaceAll(strings.TrimSpace(fallbackFileName), "\\", "/"))
+	base = strings.TrimSuffix(base, ".nomad.hcl")
+	base = strings.TrimSuffix(base, ".nomad")
+	return base
+}
+
+// ExtractNomadJobImages extracts all Docker container image references from a Nomad job specification.
+func ExtractNomadJobImages(content string) []string {
+	var images []string
+	seen := make(map[string]struct{})
+	scanner := bufio.NewScanner(strings.NewReader(content))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") {
+			continue
+		}
+		if idx := strings.Index(line, "image"); idx != -1 {
+			sub := strings.TrimSpace(line[idx+len("image"):])
+			if strings.HasPrefix(sub, "=") {
+				val := strings.TrimSpace(sub[1:])
+				if qStart := strings.IndexAny(val, `"'`); qStart != -1 {
+					quote := val[qStart]
+					rest := val[qStart+1:]
+					if qEnd := strings.IndexByte(rest, quote); qEnd != -1 {
+						img := strings.TrimSpace(rest[:qEnd])
+						if img != "" {
+							if _, exists := seen[img]; !exists {
+								seen[img] = struct{}{}
+								images = append(images, img)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	return images
+}
+
+// NomadFileChange represents a changed Nomad job specification with its git action (apply or delete).
+type NomadFileChange struct {
+	Path    string
+	Action  string // "apply" or "delete"
+	JobName string
+}
+
+// ParseNomadGitStatus parses git diff --name-status output and classifies changed Nomad jobs.
+func ParseNomadGitStatus(gitStatusOutput string) []NomadFileChange {
+	var changes []NomadFileChange
+	scanner := bufio.NewScanner(strings.NewReader(gitStatusOutput))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		parts := strings.Fields(line)
+		if len(parts) < 2 {
+			continue
+		}
+		status := parts[0]
+		filePath := parts[len(parts)-1]
+		if !IsNomadJobFile(filePath) {
+			continue
+		}
+		action := "apply"
+		if strings.HasPrefix(status, "D") {
+			action = "delete"
+		}
+		changes = append(changes, NomadFileChange{
+			Path:    filePath,
+			Action:  action,
+			JobName: ExtractJobName("", filePath),
+		})
+	}
+	return changes
+}
+
+
 

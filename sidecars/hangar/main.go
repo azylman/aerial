@@ -244,6 +244,52 @@ func defaultComposeExecutor(ctx context.Context, dir string, args ...string) ([]
 // GitExecutor executes git CLI commands.
 type GitExecutor func(ctx context.Context, dir string, args ...string) (stdout []byte, stderr []byte, err error)
 
+// NomadExecutor executes nomad CLI commands.
+type NomadExecutor func(ctx context.Context, args ...string) (stdout []byte, stderr []byte, err error)
+
+func defaultNomadExecutor(nomadAddr, nomadToken string) NomadExecutor {
+	return func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+		opCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+
+		cmd := exec.CommandContext(opCtx, "nomad", args...)
+		cmd.Env = scrubComposeEnv(os.Environ())
+		if nomadAddr != "" {
+			cmd.Env = append(cmd.Env, "NOMAD_ADDR="+nomadAddr)
+		}
+		if nomadToken != "" {
+			cmd.Env = append(cmd.Env, "NOMAD_TOKEN="+nomadToken)
+		}
+		cmd.Cancel = func() error {
+			if cmd.Process != nil {
+				if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+					return cmd.Process.Kill()
+				}
+				return nil
+			}
+			return nil
+		}
+		cmd.WaitDelay = 5 * time.Second
+
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		err := cmd.Run()
+		sanitizedStderr := SanitizeLog(stderr.String())
+		if nomadToken != "" {
+			sanitizedStderr = strings.ReplaceAll(sanitizedStderr, nomadToken, "[REDACTED_NOMAD_TOKEN]")
+		}
+		return stdout.Bytes(), []byte(sanitizedStderr), err
+	}
+}
+
+// NomadChangeEvent holds metadata for a git update affecting Nomad job specifications.
+type NomadChangeEvent struct {
+	RepoPath  string
+	Changes   []NomadFileChange
+	Timestamp time.Time
+}
+
 func runGitCommand(ctx context.Context, dir, pat string, args ...string) ([]byte, []byte, error) {
 	gitBin := ResolveGitBin(os.Getenv)
 	cmd := exec.CommandContext(ctx, gitBin, args...)
@@ -296,6 +342,18 @@ type SyncDaemon struct {
 	gitExecutor      GitExecutor
 	composePullTimeout time.Duration
 
+	// Nomad Orchestration
+	nomadAddr           string
+	nomadToken          string
+	nomadExecutor       NomadExecutor
+	nomadMu             sync.Mutex
+	pendingNomadMu      sync.Mutex
+	pendingNomadChanges []NomadChangeEvent
+	nomadKnownDigests   map[string]string
+	nomadDigestsMu      sync.RWMutex
+	lastNomadImagePoll  time.Time
+	nomadPollMu         sync.Mutex
+
 	// Concurrency & Quarantine
 	repoLocksMu        sync.Mutex
 	repoLocks          map[string]*sync.Mutex
@@ -336,6 +394,19 @@ func (d *SyncDaemon) getDockerExecutor() DockerExecutor {
 		return d.dockerExecutor
 	}
 	return defaultDockerExecutor
+}
+
+func (d *SyncDaemon) getNomadExecutor() NomadExecutor {
+	if d != nil && d.nomadExecutor != nil {
+		return d.nomadExecutor
+	}
+	nomadAddr := ""
+	nomadToken := ""
+	if d != nil {
+		nomadAddr = d.nomadAddr
+		nomadToken = d.nomadToken
+	}
+	return defaultNomadExecutor(nomadAddr, nomadToken)
 }
 
 func (d *SyncDaemon) getGitExecutor() GitExecutor {
@@ -566,6 +637,57 @@ func (d *SyncDaemon) HasComposeChanges(ctx context.Context, repoPath, prevHead, 
 
 	lines := strings.Split(strings.TrimSpace(string(stdout)), "\n")
 	return len(FilterComposeChanges(lines)) > 0, nil
+}
+
+// HasNomadChanges checks whether any Nomad job specifications changed between commits.
+func (d *SyncDaemon) HasNomadChanges(ctx context.Context, repoPath, prevHead, currHead string) ([]NomadFileChange, error) {
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if prevHead == "" || currHead == "" || prevHead == currHead {
+		return nil, nil
+	}
+	if repoPath == "" {
+		return nil, nil
+	}
+
+	args := []string{"diff", "--name-status", prevHead, currHead, "--"}
+	stdout, _, err := d.getGitExecutor()(ctx, repoPath, args...)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		fallbackArgs := []string{"diff-tree", "--no-commit-id", "--name-status", "-r", "HEAD", "--"}
+		stdoutFallback, _, errFallback := d.getGitExecutor()(ctx, repoPath, fallbackArgs...)
+		if errFallback != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			log.Printf("[Hangar:Nomad] Warning: Failed to inspect diff in %s (%v)", repoPath, errFallback)
+			return nil, nil
+		}
+		return ParseNomadGitStatus(string(stdoutFallback)), nil
+	}
+
+	return ParseNomadGitStatus(string(stdout)), nil
+}
+
+func (d *SyncDaemon) recordPendingNomadChanges(repoPath string, changes []NomadFileChange) {
+	d.pendingNomadMu.Lock()
+	defer d.pendingNomadMu.Unlock()
+	d.pendingNomadChanges = append(d.pendingNomadChanges, NomadChangeEvent{
+		RepoPath:  repoPath,
+		Changes:   changes,
+		Timestamp: time.Now(),
+	})
+}
+
+func (d *SyncDaemon) drainPendingNomadChanges() []NomadChangeEvent {
+	d.pendingNomadMu.Lock()
+	defer d.pendingNomadMu.Unlock()
+	out := d.pendingNomadChanges
+	d.pendingNomadChanges = nil
+	return out
 }
 
 // getComposeArgs constructs the compose CLI flags with base docker-compose.yml and any present overrides.
@@ -923,6 +1045,12 @@ func (d *SyncDaemon) GetServicesWithNewImages(
 // CheckAndReconcileNewImages checks if any running services have newer images available in their registry,
 // and triggers an asynchronous, debounced reconciliation if new images are detected.
 func (d *SyncDaemon) CheckAndReconcileNewImages(ctx context.Context) error {
+	defer func() {
+		if nomadErr := d.CheckAndReconcileNomadImages(ctx); nomadErr != nil {
+			log.Printf("[Hangar:NomadImagePoll] Warning: checking nomad images: %v", nomadErr)
+		}
+	}()
+
 	pollCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
@@ -1626,6 +1754,177 @@ var (
 	reconcilerMinCooldown      = 15 * time.Second
 )
 
+// ValidateNomadJob validates a Nomad job specification using nomad job validate.
+func (d *SyncDaemon) ValidateNomadJob(ctx context.Context, jobPath string) error {
+	valCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	stdout, stderr, err := d.getNomadExecutor()(valCtx, "job", "validate", jobPath)
+	if err != nil {
+		combined := string(append(stdout, stderr...))
+		return fmt.Errorf("nomad job validate failed for %s: %s (%w)", jobPath, SanitizeLog(strings.TrimSpace(combined)), err)
+	}
+	return nil
+}
+
+// ReconcileNomadChanges validates and applies or stops Nomad job specifications.
+func (d *SyncDaemon) ReconcileNomadChanges(ctx context.Context, repoPath string, changes []NomadFileChange) error {
+	if len(changes) == 0 {
+		return nil
+	}
+
+	d.nomadMu.Lock()
+	defer d.nomadMu.Unlock()
+
+	recCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
+	defer cancel()
+
+	// Phase 1: Teardowns (stop deleted jobs)
+	for _, change := range changes {
+		if change.Action == "delete" {
+			log.Printf("[Hangar:Nomad] Stopping deleted job %s...", change.JobName)
+			out, errBytes, err := d.getNomadExecutor()(recCtx, "job", "stop", "-purge", change.JobName)
+			if err != nil {
+				log.Printf("[Hangar:Nomad] Warning: failed to stop deleted job %s: %s (%v)", change.JobName, SanitizeLog(strings.TrimSpace(string(append(out, errBytes...)))), err)
+			} else {
+				log.Printf("[Hangar:Nomad] Successfully stopped deleted job %s", change.JobName)
+			}
+		}
+	}
+
+	// Phase 2: Applications (validate, then run)
+	for _, change := range changes {
+		if change.Action != "delete" {
+			fullPath := filepath.Join(repoPath, change.Path)
+			if _, statErr := os.Stat(fullPath); statErr != nil {
+				log.Printf("[Hangar:Nomad] Notice: job file %s not found on disk, skipping", fullPath)
+				continue
+			}
+
+			if valErr := d.ValidateNomadJob(recCtx, fullPath); valErr != nil {
+				log.Printf("[Hangar:Nomad] ERROR: Validation failed for %s: %v", change.Path, valErr)
+				return valErr
+			}
+
+			log.Printf("[Hangar:Nomad] Applying job %s (%s)...", change.JobName, change.Path)
+			out, errBytes, err := d.getNomadExecutor()(recCtx, "job", "run", "-detach=false", fullPath)
+			if err != nil {
+				combined := string(append(out, errBytes...))
+				return fmt.Errorf("nomad job run failed for %s: %s (%w)", change.Path, SanitizeLog(strings.TrimSpace(combined)), err)
+			}
+			log.Printf("[Hangar:Nomad] Successfully applied job %s: %s", change.JobName, SanitizeLog(strings.TrimSpace(string(out))))
+		}
+	}
+
+	return nil
+}
+
+// ExecuteNomadTeardowns runs nomad job stop -purge for any deleted jobs across pending changes.
+func (d *SyncDaemon) ExecuteNomadTeardowns(ctx context.Context, pending []NomadChangeEvent) {
+	if len(pending) == 0 {
+		return
+	}
+	for _, evt := range pending {
+		for _, change := range evt.Changes {
+			if change.Action == "delete" {
+				log.Printf("[Hangar:Nomad] Pre-flight teardown for deleted job %s...", change.JobName)
+				out, errBytes, err := d.getNomadExecutor()(ctx, "job", "stop", "-purge", change.JobName)
+				if err != nil {
+					log.Printf("[Hangar:Nomad] Warning: pre-flight stop of %s: %s (%v)", change.JobName, SanitizeLog(strings.TrimSpace(string(append(out, errBytes...)))), err)
+				} else {
+					log.Printf("[Hangar:Nomad] Successfully stopped %s", change.JobName)
+				}
+			}
+		}
+	}
+}
+
+// ReconcilePendingNomad applies all pending Nomad changes.
+func (d *SyncDaemon) ReconcilePendingNomad(ctx context.Context) error {
+	pending := d.drainPendingNomadChanges()
+	if len(pending) == 0 {
+		return nil
+	}
+	var errs []error
+	for _, evt := range pending {
+		if err := d.ReconcileNomadChanges(ctx, evt.RepoPath, evt.Changes); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// CheckAndReconcileNomadImages scans jobs/*.nomad in configDir for updated image digests and triggers rolling restarts.
+func (d *SyncDaemon) CheckAndReconcileNomadImages(ctx context.Context) error {
+	d.nomadPollMu.Lock()
+	if !d.lastNomadImagePoll.IsZero() && time.Since(d.lastNomadImagePoll) < 5*time.Minute {
+		d.nomadPollMu.Unlock()
+		return nil
+	}
+	d.lastNomadImagePoll = time.Now()
+	d.nomadPollMu.Unlock()
+
+	pollCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	jobsDir := filepath.Join(d.configDir, "jobs")
+	entries, err := os.ReadDir(jobsDir)
+	if err != nil {
+		return nil
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() || !IsNomadJobFile(entry.Name()) {
+			continue
+		}
+		jobPath := filepath.Join(jobsDir, entry.Name())
+		content, readErr := os.ReadFile(jobPath)
+		if readErr != nil {
+			continue
+		}
+		jobName := ExtractJobName(string(content), entry.Name())
+		images := ExtractNomadJobImages(string(content))
+
+		for _, imgRef := range images {
+			remoteDigest, digestErr := d.GetRemoteImageDigest(pollCtx, imgRef)
+			if digestErr != nil || remoteDigest == "" {
+				continue
+			}
+
+			key := jobName + ":" + imgRef
+			d.nomadDigestsMu.RLock()
+			lastDigest, seen := d.nomadKnownDigests[key]
+			d.nomadDigestsMu.RUnlock()
+
+			if !seen {
+				d.nomadDigestsMu.Lock()
+				if d.nomadKnownDigests == nil {
+					d.nomadKnownDigests = make(map[string]string)
+				}
+				d.nomadKnownDigests[key] = remoteDigest
+				d.nomadDigestsMu.Unlock()
+				continue
+			}
+
+			if lastDigest != remoteDigest {
+				log.Printf("[Hangar:NomadImagePoll] New image digest %s detected for Nomad job %s (image %s, previous %s). Rescheduling allocation.", remoteDigest, jobName, imgRef, lastDigest)
+				d.nomadDigestsMu.Lock()
+				d.nomadKnownDigests[key] = remoteDigest
+				d.nomadDigestsMu.Unlock()
+
+				out, errBytes, runErr := d.getNomadExecutor()(pollCtx, "job", "restart", "-reschedule", jobName)
+				if runErr != nil {
+					log.Printf("[Hangar:NomadImagePoll] Warning: nomad job restart failed for %s: %s (%v)", jobName, SanitizeLog(strings.TrimSpace(string(append(out, errBytes...)))), runErr)
+				} else {
+					log.Printf("[Hangar:NomadImagePoll] Successfully triggered reschedule restart for Nomad job %s", jobName)
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
 // StartReconcilerLoop runs the background debounced worker goroutine.
 func (d *SyncDaemon) StartReconcilerLoop(ctx context.Context) {
 	if d.reconcileCh == nil {
@@ -1647,8 +1946,21 @@ func (d *SyncDaemon) StartReconcilerLoop(ctx context.Context) {
 					if elapsed := time.Since(d.GetLastReconcile()); elapsed < reconcilerMinCooldown {
 						time.Sleep(reconcilerMinCooldown - elapsed)
 					}
+
+					// Phase 1: Teardowns for any deleted Nomad jobs (releases ports)
+					d.pendingNomadMu.Lock()
+					pendingNomad := append([]NomadChangeEvent(nil), d.pendingNomadChanges...)
+					d.pendingNomadMu.Unlock()
+					d.ExecuteNomadTeardowns(context.Background(), pendingNomad)
+
+					// Phase 2: Docker Compose reconciliation
 					if recErr := d.ReconcileCompose(context.Background()); recErr != nil {
 						log.Printf("[Hangar:GitOps] Debounced background reconcile failed: %v", recErr)
+					}
+
+					// Phase 3: Nomad reconciliation (job applications)
+					if nomadErr := d.ReconcilePendingNomad(context.Background()); nomadErr != nil {
+						log.Printf("[Hangar:GitOps] Debounced Nomad reconcile failed: %v", nomadErr)
 					}
 				})
 			}
@@ -1848,6 +2160,21 @@ func (d *SyncDaemon) SyncRepo(ctx context.Context, repoPath string) (res RepoSyn
 				CurrentHead:  res.CurrentHead,
 				Timestamp:    time.Now(),
 			})
+			if d.reconcileCh != nil {
+				select {
+				case d.reconcileCh <- struct{}{}:
+				default:
+				}
+			}
+		}
+
+		nomadChanges, errNomad := d.HasNomadChanges(opCtx, repoPath, res.PreviousHead, res.CurrentHead)
+		if errNomad != nil {
+			log.Printf("[Hangar] Warning: Failed to check Nomad changes in %s: %v", repoPath, errNomad)
+		}
+		if len(nomadChanges) > 0 {
+			log.Printf("[Hangar:GitOps] Nomad job changes detected in %s (%d changes). Triggering debounced reconciliation.", repoPath, len(nomadChanges))
+			d.recordPendingNomadChanges(repoPath, nomadChanges)
 			if d.reconcileCh != nil {
 				select {
 				case d.reconcileCh <- struct{}{}:
@@ -2129,6 +2456,9 @@ type DaemonConfig struct {
 	ComposeExecutor   ComposeExecutor
 	DockerExecutor    DockerExecutor
 	GitExecutor       GitExecutor
+	NomadExecutor     NomadExecutor
+	NomadAddr         string
+	NomadToken        string
 	RegistryClient    *http.Client
 	ComposePullTimeout time.Duration
 }
@@ -2173,6 +2503,10 @@ func NewDaemon(cfg DaemonConfig) *SyncDaemon {
 		composeExecutor:    cfg.ComposeExecutor,
 		dockerExecutor:     cfg.DockerExecutor,
 		gitExecutor:        cfg.GitExecutor,
+		nomadExecutor:      cfg.NomadExecutor,
+		nomadAddr:          cfg.NomadAddr,
+		nomadToken:         cfg.NomadToken,
+		nomadKnownDigests:  make(map[string]string),
 		registryClient:     cfg.RegistryClient,
 		composePullTimeout: pullTimeout,
 		reconcileCh:        make(chan struct{}, 1),
@@ -2481,6 +2815,7 @@ func NewConfigFromLookup(lookup func(string) string) DaemonConfig {
 		lookup("AERIAL_GEMINI_API_KEY"),
 		lookup("GEMINI_API_KEY"),
 		lookup("GITHUB_PAT"),
+		lookup("NOMAD_TOKEN"),
 	}
 	var extraSecrets []string
 	seenSecrets := make(map[string]bool)
@@ -2491,6 +2826,12 @@ func NewConfigFromLookup(lookup func(string) string) DaemonConfig {
 			extraSecrets = append(extraSecrets, s)
 		}
 	}
+
+	nomadAddr := lookup("NOMAD_ADDR")
+	if nomadAddr == "" {
+		nomadAddr = "http://host.docker.internal:4646"
+	}
+	nomadToken := lookup("NOMAD_TOKEN")
 
 	return DaemonConfig{
 		Port:              port,
@@ -2505,6 +2846,8 @@ func NewConfigFromLookup(lookup func(string) string) DaemonConfig {
 		DiscordWebhookURL: discordWebhookURL,
 		BrainInternalURL:  brainInternalURL,
 		ExtraSecrets:      extraSecrets,
+		NomadAddr:         nomadAddr,
+		NomadToken:        nomadToken,
 	}
 }
 

@@ -126,6 +126,10 @@ services:
       - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN}
       - SYNC_INTERVAL=60s
       - SYNC_REPOS=/share/aerial-config,/share/aerial
+      - NOMAD_ADDR=${NOMAD_ADDR:-http://host.docker.internal:4646}
+      - NOMAD_TOKEN=${NOMAD_TOKEN:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ${AERIAL_HOST_CONFIG_DIR:-${AERIAL_CONFIG_DIR:-/mnt/data/supervisor/share/aerial-config}}:/share/aerial-config:rw
       - ${AERIAL_HOST_PROJECT_DIR:-${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}}:/share/aerial:rw
