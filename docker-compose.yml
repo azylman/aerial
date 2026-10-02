@@ -91,8 +91,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      scheduler-mcp:
-        condition: service_healthy
       openobserve:
         condition: service_started
 
@@ -162,35 +160,6 @@ services:
     networks:
       - aerial-net
 
-  # ----------------------------------------------------------------------------
-  # 4. Outbound MCP: Scheduler MCP Server
-  #    Provides persistent schedule registration & management tools over HTTP.
-  # ----------------------------------------------------------------------------
-  scheduler-mcp:
-    image: ghcr.io/azylman/aerial-scheduler-mcp:latest
-    build: ./scheduler-mcp
-    container_name: aerial-scheduler-mcp
-    restart: unless-stopped
-    labels:
-      autoheal: "true"
-    environment:
-      - DATABASE_URL=${DATABASE_URL:-postgres://${POSTGRES_USER:-aerial}:${POSTGRES_PASSWORD:-aerial_secure_pass}@postgres:5432/${POSTGRES_DB:-aerial}?sslmode=disable}
-      - DEFAULT_TIMEZONE=${DEFAULT_TIMEZONE:-America/Los_Angeles}
-      - TZ=${DEFAULT_TIMEZONE:-America/Los_Angeles}
-    ports:
-      - "${SCHEDULER_MCP_HOST_PORT:-4005}:8080"
-    networks:
-      - aerial-net
-    healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:8080/health || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-      start_period: 30s
-      start_interval: 2s
-    depends_on:
-      postgres:
-        condition: service_healthy
 
 
   # ----------------------------------------------------------------------------
