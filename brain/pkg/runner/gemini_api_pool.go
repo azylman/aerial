@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/brain/pkg/mcp"
+	"github.com/azylman/aerial/brain/pkg/metrics"
 )
 
 var apiKeyQueryRegex = regexp.MustCompile(`(?i)(key=)[^& \t\r\n"']+`)
@@ -979,7 +980,21 @@ func (s *GeminiAPISession) Send(prompt string, turn *TurnContext) error {
 		}
 
 		if resp.StatusCode == http.StatusTooManyRequests {
+			body, rErr := io.ReadAll(io.LimitReader(resp.Body, 4096))
 			_ = resp.Body.Close()
+			targetModel := s.pool.cfg.Model
+			if targetModel == "" {
+				targetModel = "default"
+			}
+			var bodyStr string
+			if rErr == nil {
+				bodyStr = string(body)
+			}
+			if IsQuotaPause(bodyStr, "") {
+				metrics.RecordRunnerError("quota_paused", targetModel)
+			} else {
+				metrics.RecordRunnerError("capacity_throttle", targetModel)
+			}
 			rateLimitErr := errors.New("rate limit exceeded: please try again shortly")
 			if turn != nil && turn.Sink != nil {
 				turn.Sink.OnError(rateLimitErr)
