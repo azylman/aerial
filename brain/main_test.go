@@ -2157,6 +2157,7 @@ func TestRunBrainApp_DiscordLowEffortPool_EphemeralHome(t *testing.T) {
 	cfg.Update(cur)
 
 	expectedEphemeralHome := filepath.Join(tmpDir, "runtimes", "ephemeral")
+	expectedDiscordHome := filepath.Join(tmpDir, "runtimes", "discord")
 
 	var spawnedConfigsMu sync.Mutex
 	var spawnedConfigs []runner.DaemonConfig
@@ -2168,16 +2169,22 @@ func TestRunBrainApp_DiscordLowEffortPool_EphemeralHome(t *testing.T) {
 		SpawnFn: func(ctx context.Context, dCfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
 			spawnedConfigsMu.Lock()
 			spawnedConfigs = append(spawnedConfigs, dCfg)
-			has0, has1 := false, false
+			hasEph0, hasEph1, hasDisc0, hasDisc1 := false, false, false, false
 			for _, sc := range spawnedConfigs {
 				if sc.ThreadID == "ephemeral:worker-0" {
-					has0 = true
+					hasEph0 = true
 				}
 				if sc.ThreadID == "ephemeral:worker-1" {
-					has1 = true
+					hasEph1 = true
+				}
+				if sc.ThreadID == "discord:worker-0" {
+					hasDisc0 = true
+				}
+				if sc.ThreadID == "discord:worker-1" {
+					hasDisc1 = true
 				}
 			}
-			if has0 && has1 {
+			if hasEph0 && hasEph1 && hasDisc0 && hasDisc1 {
 				spawnedOnce.Do(func() { close(allSpawned) })
 			}
 			spawnedConfigsMu.Unlock()
@@ -2213,11 +2220,13 @@ func TestRunBrainApp_DiscordLowEffortPool_EphemeralHome(t *testing.T) {
 	spawnedConfigsMu.Lock()
 	defer spawnedConfigsMu.Unlock()
 
-	foundWorker0 := false
-	foundWorker1 := false
+	foundEph0 := false
+	foundEph1 := false
+	foundDisc0 := false
+	foundDisc1 := false
 	for _, sc := range spawnedConfigs {
 		if sc.ThreadID == "ephemeral:worker-0" {
-			foundWorker0 = true
+			foundEph0 = true
 			foundHome := false
 			for _, e := range sc.Env {
 				if e == "HOME="+expectedEphemeralHome {
@@ -2230,7 +2239,7 @@ func TestRunBrainApp_DiscordLowEffortPool_EphemeralHome(t *testing.T) {
 			}
 		}
 		if sc.ThreadID == "ephemeral:worker-1" {
-			foundWorker1 = true
+			foundEph1 = true
 			foundHome := false
 			for _, e := range sc.Env {
 				if e == "HOME="+expectedEphemeralHome {
@@ -2242,13 +2251,45 @@ func TestRunBrainApp_DiscordLowEffortPool_EphemeralHome(t *testing.T) {
 				t.Errorf("ephemeral:worker-1 expected HOME=%q in Env, got: %v", expectedEphemeralHome, sc.Env)
 			}
 		}
+		if sc.ThreadID == "discord:worker-0" {
+			foundDisc0 = true
+			foundHome := false
+			for _, e := range sc.Env {
+				if e == "HOME="+expectedDiscordHome {
+					foundHome = true
+					break
+				}
+			}
+			if !foundHome {
+				t.Errorf("discord:worker-0 expected HOME=%q in Env, got: %v", expectedDiscordHome, sc.Env)
+			}
+		}
+		if sc.ThreadID == "discord:worker-1" {
+			foundDisc1 = true
+			foundHome := false
+			for _, e := range sc.Env {
+				if e == "HOME="+expectedDiscordHome {
+					foundHome = true
+					break
+				}
+			}
+			if !foundHome {
+				t.Errorf("discord:worker-1 expected HOME=%q in Env, got: %v", expectedDiscordHome, sc.Env)
+			}
+		}
 	}
 
-	if !foundWorker0 {
+	if !foundEph0 {
 		t.Errorf("expected pre-warmed daemon for ephemeral:worker-0")
 	}
-	if !foundWorker1 {
+	if !foundEph1 {
 		t.Errorf("expected pre-warmed daemon for ephemeral:worker-1")
+	}
+	if !foundDisc0 {
+		t.Errorf("expected pre-warmed daemon for discord:worker-0")
+	}
+	if !foundDisc1 {
+		t.Errorf("expected pre-warmed daemon for discord:worker-1")
 	}
 }
 
