@@ -1,68 +1,4 @@
 services:
-
-  # ----------------------------------------------------------------------------
-  # 2. Container Auto-Healing: Autoheal
-  #    Monitors Docker healthchecks and restarts unhealthy containers automatically.
-  # ----------------------------------------------------------------------------
-  autoheal:
-    image: willfarrell/autoheal:latest
-    container_name: aerial-autoheal
-    restart: unless-stopped
-    labels:
-      autoheal: "true"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-    environment:
-      - AUTOHEAL_CONTAINER_LABEL=autoheal
-      - AUTOHEAL_INTERVAL=15
-      - AUTOHEAL_START_PERIOD=0
-      - AUTOHEAL_DEFAULT_STOP_TIMEOUT=20
-      - DOCKER_API_VERSION=1.45
-    networks:
-      - aerial-net
-
-
-
-  # ----------------------------------------------------------------------------
-  # 8. Local LLM / Embeddings: Ollama Service
-  #    Provides local AI models & embedding generations with persistent storage.
-  # ----------------------------------------------------------------------------
-  ollama:
-    image: ollama/ollama:latest
-    container_name: aerial-ollama
-    restart: unless-stopped
-    labels:
-      autoheal: "true"
-    volumes:
-      - aerial-ollama-data:/root/.ollama
-    ports:
-      - "${OLLAMA_HOST_PORT:-11434}:11434"
-    networks:
-      - aerial-net
-    entrypoint:
-      - /bin/sh
-      - -c
-      - |
-        /bin/ollama serve &
-        pid=$$!
-        trap 'kill -TERM $$pid' TERM INT
-        (
-          until /bin/ollama list >/dev/null 2>&1; do sleep 1; done
-          /bin/ollama pull all-minilm
-        ) &
-        wait $$pid
-    healthcheck:
-      test: ["CMD", "/bin/ollama", "list"]
-      interval: 30s
-      timeout: 10s
-      retries: 4
-      start_period: 30s
-      start_interval: 2s
-
-
-
-
-
   # ----------------------------------------------------------------------------
   # 21. Cluster Orchestrator & Local Worker: HashiCorp Nomad
   #     Dedicated single-node control plane and local HAOS client node.
@@ -116,6 +52,3 @@ volumes:
     name: aerial-vector-data
   aerial-nomad-server-data:
     name: aerial-nomad-server-data
-
-
-
