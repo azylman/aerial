@@ -182,6 +182,8 @@ func TestIsComposeFile_TableDriven(t *testing.T) {
 		{".env.example", true},
 		{"/root/deploy/docker-compose.yml", true},
 		{"C:\\Users\\alexz\\.env", true},
+		{"nomad/nomad.hcl", true},
+		{"nomad/server.hcl", true},
 		{"main.go", false},
 		{"README.md", false},
 		{"docker-compose.sh", false},
@@ -199,6 +201,66 @@ func TestIsComposeFile_TableDriven(t *testing.T) {
 	}
 }
 
+func TestIsNomadConfigFile_TableDriven(t *testing.T) {
+	tests := []struct {
+		path     string
+		expected bool
+	}{
+		{"nomad/nomad.hcl", true},
+		{"nomad/server.hcl", true},
+		{"nomad/client.hcl", true},
+		{"/share/aerial/nomad/nomad.hcl", true},
+		{"nomad.hcl", true},
+		{"jobs/laya.nomad", false},
+		{"jobs/laya.nomad.hcl", false},
+		{"nomad/README.md", false},
+		{"main.go", false},
+		{"", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			got := IsNomadConfigFile(tt.path)
+			if got != tt.expected {
+				t.Errorf("IsNomadConfigFile(%q) = %v, want %v", tt.path, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestFilterNomadConfigFiles_TableDriven(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    []string
+		expected []string
+	}{
+		{
+			name:     "mixed list",
+			input:    []string{"brain/main.go", "nomad/nomad.hcl", "README.md", "nomad/client.hcl", "docker-compose.yml"},
+			expected: []string{"nomad/nomad.hcl", "nomad/client.hcl"},
+		},
+		{
+			name:     "no nomad configs",
+			input:    []string{"docker-compose.yml", "jobs/server.nomad"},
+			expected: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := FilterNomadConfigFiles(tt.input)
+			if len(got) != len(tt.expected) {
+				t.Fatalf("expected %d matches, got %d: %v", len(tt.expected), len(got), got)
+			}
+			for i := range got {
+				if got[i] != tt.expected[i] {
+					t.Errorf("[%d] = %q, want %q", i, got[i], tt.expected[i])
+				}
+			}
+		})
+	}
+}
+
 func TestFilterComposeChanges_TableDriven(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -207,8 +269,8 @@ func TestFilterComposeChanges_TableDriven(t *testing.T) {
 	}{
 		{
 			name:     "mixed list",
-			input:    []string{"brain/main.go", "docker-compose.yml", "README.md", "deploy/.env"},
-			expected: []string{"docker-compose.yml", "deploy/.env"},
+			input:    []string{"brain/main.go", "docker-compose.yml", "README.md", "deploy/.env", "nomad/nomad.hcl"},
+			expected: []string{"docker-compose.yml", "deploy/.env", "nomad/nomad.hcl"},
 		},
 		{
 			name:     "no compose files",

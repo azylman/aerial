@@ -138,10 +138,37 @@ var composeFileTargets = []string{
 	"compose.override.yml",
 	".env",
 	".env.example",
+	"nomad",
+}
+
+// IsNomadConfigFile returns true if the given path corresponds to a Nomad daemon configuration file
+// (e.g. nomad/nomad.hcl or any .hcl file located under a nomad directory).
+func IsNomadConfigFile(p string) bool {
+	cleanPath := strings.ReplaceAll(strings.TrimSpace(p), "\\", "/")
+	base := path.Base(cleanPath)
+	dir := path.Dir(cleanPath)
+	if !strings.HasSuffix(strings.ToLower(base), ".hcl") {
+		return false
+	}
+	return dir == "nomad" || strings.HasSuffix(dir, "/nomad") || strings.EqualFold(base, "nomad.hcl")
+}
+
+// FilterNomadConfigFiles filters a list of changed file paths and returns only those that affect Nomad daemon configuration.
+func FilterNomadConfigFiles(changedFiles []string) []string {
+	var result []string
+	for _, f := range changedFiles {
+		if IsNomadConfigFile(f) {
+			result = append(result, f)
+		}
+	}
+	return result
 }
 
 // IsComposeFile returns true if the given path or filename corresponds to a compose or environment configuration file.
 func IsComposeFile(p string) bool {
+	if IsNomadConfigFile(p) {
+		return true
+	}
 	cleanPath := strings.ReplaceAll(strings.TrimSpace(p), "\\", "/")
 	base := path.Base(cleanPath)
 	for _, target := range composeFileTargets {
