@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/azylman/aerial/brain/pkg/classifier"
@@ -2450,8 +2451,20 @@ func watchTaskCompletion(ctx context.Context, sessionDir, taskID string) (int, s
 }
 
 func newDiscordTurnSink(statusUpdater *StatusUpdater) *runner.BufferingTurnSink {
+	var respondingNotified atomic.Bool
+
 	return runner.NewBufferingTurnSink(runner.BufferingTurnSinkConfig{
+		OnThinking: func() {
+			respondingNotified.Store(false)
+			if statusUpdater != nil {
+				statusUpdater.HandleStep(&runner.StepUpdateEvent{
+					Event:    "step_update",
+					StepType: "thinking",
+				})
+			}
+		},
 		OnToolCall: func(toolName, commandName string) {
+			respondingNotified.Store(false)
 			if statusUpdater != nil && (toolName != "" || commandName != "") {
 				statusUpdater.HandleStep(&runner.StepUpdateEvent{
 					Event:    "step_update",
@@ -2468,9 +2481,31 @@ func newDiscordTurnSink(statusUpdater *StatusUpdater) *runner.BufferingTurnSink 
 		},
 		OnToolCompleted: func(toolName, mcpServer string, duration time.Duration, status string) {
 			metrics.RecordToolExecution(toolName, mcpServer, status, duration)
+			if statusUpdater != nil && toolName != "" {
+				state := "DONE"
+				if status != "ok" {
+					state = "ERROR"
+				}
+				statusUpdater.HandleStep(&runner.StepUpdateEvent{
+					Event:    "step_update",
+					State:    state,
+					Type:     "tool_call",
+					ToolName: toolName,
+				})
+			}
 		},
 		OnSkillActivated: func(skillName, source string) {
 			metrics.RecordSkillActivation(skillName, source)
+		},
+		OnTextDelta: func(delta string) {
+			if statusUpdater != nil && !respondingNotified.Load() && strings.TrimSpace(delta) != "" {
+				if respondingNotified.CompareAndSwap(false, true) {
+					statusUpdater.HandleStep(&runner.StepUpdateEvent{
+						Event:    "step_update",
+						StepType: "agent_response",
+					})
+				}
+			}
 		},
 	})
 }

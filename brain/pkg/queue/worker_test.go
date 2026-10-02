@@ -2621,6 +2621,92 @@ func TestDiscordTurnSink_Callbacks(t *testing.T) {
 	}
 }
 
+func TestDiscordTurnSink_StatusUpdaterLifecycle(t *testing.T) {
+	t.Parallel()
+
+	updater := NewStatusUpdater(nil, "thread-123", true, WithStatusMockFuncs(
+		func(channelID, text string) (string, error) { return "msg-1", nil },
+		func(channelID, messageID, text string) error { return nil },
+		func(channelID, messageID string) error { return nil },
+	))
+	defer updater.Stop()
+
+	sink := newDiscordTurnSink(updater)
+
+	// 1. Thinking phase
+	sink.OnThinking()
+	updater.mu.Lock()
+	if updater.phase != "thinking" {
+		t.Errorf("expected phase 'thinking', got %q", updater.phase)
+	}
+	updater.mu.Unlock()
+
+	// 2. Tool call running
+	sink.OnToolCall("run_command", "echo hello")
+	updater.mu.Lock()
+	if updater.phase != "tool" {
+		t.Errorf("expected phase 'tool', got %q", updater.phase)
+	}
+	if updater.activeTool != "run_command" {
+		t.Errorf("expected activeTool 'run_command', got %q", updater.activeTool)
+	}
+	if updater.activeCommand != "echo" {
+		t.Errorf("expected activeCommand 'echo', got %q", updater.activeCommand)
+	}
+	updater.mu.Unlock()
+
+	// 3. Tool completed -> transitions back to thinking
+	sink.OnToolCompleted("run_command", "native", 100*time.Millisecond, "ok")
+	updater.mu.Lock()
+	if updater.phase != "thinking" {
+		t.Errorf("expected phase 'thinking' after tool completion, got %q", updater.phase)
+	}
+	if updater.activeTool != "" {
+		t.Errorf("expected activeTool empty after completion, got %q", updater.activeTool)
+	}
+	updater.mu.Unlock()
+
+	// 4. Text delta -> transitions to responding
+	sink.OnTextDelta("Streaming response token")
+	updater.mu.Lock()
+	if updater.phase != "responding" {
+		t.Errorf("expected phase 'responding', got %q", updater.phase)
+	}
+	updater.mu.Unlock()
+
+	// Whitespace-only delta does not change phase
+	sink.OnThinking()
+	sink.OnTextDelta("   \n\t  ")
+	updater.mu.Lock()
+	if updater.phase != "thinking" {
+		t.Errorf("expected phase to remain 'thinking' on whitespace delta, got %q", updater.phase)
+	}
+	updater.mu.Unlock()
+
+	// 5. Tool call error status handling
+	sink.OnToolCall("get_me", "")
+	updater.mu.Lock()
+	if updater.phase != "tool" || updater.activeTool != "get_me" {
+		t.Errorf("expected phase 'tool' and activeTool 'get_me', got %s / %s", updater.phase, updater.activeTool)
+	}
+	updater.mu.Unlock()
+
+	sink.OnToolCompleted("get_me", "github", 50*time.Millisecond, "error")
+	updater.mu.Lock()
+	if updater.phase != "thinking" || updater.activeTool != "" {
+		t.Errorf("expected phase 'thinking' after tool error, got %s / %s", updater.phase, updater.activeTool)
+	}
+	updater.mu.Unlock()
+
+	// 6. Verify nil status updater does not panic
+	nilSink := newDiscordTurnSink(nil)
+	nilSink.OnThinking()
+	nilSink.OnToolCall("run_command", "ls")
+	nilSink.OnToolCompleted("run_command", "native", time.Millisecond, "ok")
+	nilSink.OnTextDelta("delta")
+	nilSink.OnSkillActivated("skill", "source")
+}
+
 func TestWorker_DualPoolRouting_LowEffortAndFallback(t *testing.T) {
 	store := setupTestStore(t)
 	tmpHome := t.TempDir()
