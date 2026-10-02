@@ -30,20 +30,6 @@ func (p *Provisioner) LoadTargetMCPConfig(cfg *config.Config, target RuleTarget)
 		mergedServers["discord"] = map[string]interface{}{
 			"serverUrl": "http://discord-mcp:4001/mcp",
 		}
-		dockerURL := os.Getenv("DOCKER_MCP_URL")
-		if dockerURL == "" {
-			dockerURL = "http://host.docker.internal:4002/mcp"
-		}
-		mergedServers["docker"] = map[string]interface{}{
-			"serverUrl": dockerURL,
-		}
-		vmMCPURL := os.Getenv("VICTORIAMETRICS_MCP_URL")
-		if vmMCPURL == "" {
-			vmMCPURL = "http://host.docker.internal:4044/mcp"
-		}
-		mergedServers["victoriametrics"] = map[string]interface{}{
-			"serverUrl": vmMCPURL,
-		}
 
 		var gitHubPAT string
 		if cfg != nil && cfg.Current().GitHubPAT != "" {
