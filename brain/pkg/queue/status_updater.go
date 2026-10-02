@@ -13,9 +13,11 @@ import (
 )
 
 const (
-	DefaultStatusTickerInterval = 1500 * time.Millisecond
-	DefaultStatusDebounceDelay   = 1500 * time.Millisecond
-	MaxStatusTextLength          = 100
+	DefaultStatusTickerInterval    = 1500 * time.Millisecond
+	DefaultStatusDebounceDelay      = 1500 * time.Millisecond
+	DefaultStatusToolLatchDuration = 2000 * time.Millisecond
+	DefaultStatusMinEditInterval   = 1000 * time.Millisecond
+	MaxStatusTextLength             = 100
 )
 
 // FormatToolStatus dynamically formats an active tool status badge without hardcoded dictionaries.
@@ -55,26 +57,35 @@ func FormatToolStatus(toolName, commandName string, elapsed time.Duration) strin
 
 // StatusUpdater manages real-time intermediate progress updates in Discord thread mode.
 type StatusUpdater struct {
-	mu              sync.Mutex
-	s               *discordgo.Session
-	threadID        string
-	statusMessageID string
-	activeTool      string
-	activeCommand   string
-	phase           string // "thinking", "tool", "responding"
-	toolStart       time.Time
-	turnStart       time.Time
-	dirty           bool
-	disabled        bool
-	enabled         bool
-	tickerInterval  time.Duration
-	debounceDelay   time.Duration
-	lastDelivered   string
+	mu                   sync.Mutex
+	s                    *discordgo.Session
+	threadID             string
+	statusMessageID      string
+	activeTool           string
+	activeCommand        string
+	lastCompletedTool    string
+	lastCompletedCommand string
+	lastCompletedAt      time.Time
+	lastCompletedElapsed time.Duration
+	phase                string // "thinking", "tool", "responding"
+	toolStart            time.Time
+	turnStart            time.Time
+	lastEditAt           time.Time
+	inFlightREST         bool
+	dirty                bool
+	disabled             bool
+	enabled              bool
+	tickerInterval       time.Duration
+	debounceDelay        time.Duration
+	toolLatchDuration    time.Duration
+	minEditInterval      time.Duration
+	lastDelivered        string
 
-	done      chan struct{}
-	startOnce sync.Once
-	stopOnce  sync.Once
-	wg        sync.WaitGroup
+	done        chan struct{}
+	flushNotify chan struct{}
+	startOnce   sync.Once
+	stopOnce    sync.Once
+	wg          sync.WaitGroup
 
 	// Dependency injection hooks for hermetic unit testing
 	sendFunc   func(channelID, text string) (string, error)
@@ -101,6 +112,15 @@ func WithStatusDebounce(debounce time.Duration) StatusUpdaterOption {
 	}
 }
 
+// WithStatusToolLatch sets a custom duration to latch completed tool status before reverting to thinking.
+func WithStatusToolLatch(duration time.Duration) StatusUpdaterOption {
+	return func(u *StatusUpdater) {
+		if duration > 0 {
+			u.toolLatchDuration = duration
+		}
+	}
+}
+
 // WithStatusMockFuncs injects mock REST handlers for hermetic unit tests.
 func WithStatusMockFuncs(
 	send func(channelID, text string) (string, error),
@@ -123,13 +143,16 @@ func WithStatusMockFuncs(
 // NewStatusUpdater constructs a thread status updater.
 func NewStatusUpdater(s *discordgo.Session, threadID string, enabled bool, opts ...StatusUpdaterOption) *StatusUpdater {
 	u := &StatusUpdater{
-		s:              s,
-		threadID:       threadID,
-		enabled:        enabled && threadID != "",
-		tickerInterval: DefaultStatusTickerInterval,
-		debounceDelay:  DefaultStatusDebounceDelay,
-		turnStart:      time.Now(),
-		done:           make(chan struct{}),
+		s:                 s,
+		threadID:          threadID,
+		enabled:           enabled && threadID != "",
+		tickerInterval:    DefaultStatusTickerInterval,
+		debounceDelay:     DefaultStatusDebounceDelay,
+		toolLatchDuration: DefaultStatusToolLatchDuration,
+		minEditInterval:   DefaultStatusMinEditInterval,
+		turnStart:         time.Now(),
+		done:              make(chan struct{}),
+		flushNotify:       make(chan struct{}, 1),
 	}
 
 	// Default REST implementations via delivery / discordgo
@@ -166,6 +189,17 @@ func NewStatusUpdater(s *discordgo.Session, threadID string, enabled bool, opts 
 	return u
 }
 
+// triggerFlush signals the background runner to perform an event-driven flush.
+func (u *StatusUpdater) triggerFlush() {
+	if !u.enabled {
+		return
+	}
+	select {
+	case u.flushNotify <- struct{}{}:
+	default:
+	}
+}
+
 // HandleStep processes incoming intermediate events from runner.activityTap.
 func (u *StatusUpdater) HandleStep(ev *runner.StepUpdateEvent) {
 	if u == nil || !u.enabled {
@@ -173,13 +207,14 @@ func (u *StatusUpdater) HandleStep(ev *runner.StepUpdateEvent) {
 	}
 
 	u.mu.Lock()
-	defer u.mu.Unlock()
-
 	if u.disabled {
+		u.mu.Unlock()
 		return
 	}
 
 	typ := ev.ResolvedType()
+	var shouldTriggerFlush bool
+
 	switch {
 	case typ == "thinking":
 		u.phase = "thinking"
@@ -189,6 +224,12 @@ func (u *StatusUpdater) HandleStep(ev *runner.StepUpdateEvent) {
 		toolName := ev.ResolvedToolName()
 		if ev.State == "DONE" || ev.State == "ERROR" {
 			if u.activeTool == toolName || toolName == "" {
+				if u.activeTool != "" {
+					u.lastCompletedTool = u.activeTool
+					u.lastCompletedCommand = u.activeCommand
+					u.lastCompletedAt = time.Now()
+					u.lastCompletedElapsed = time.Since(u.toolStart)
+				}
 				u.activeTool = ""
 				u.activeCommand = ""
 				u.phase = "thinking"
@@ -198,15 +239,24 @@ func (u *StatusUpdater) HandleStep(ev *runner.StepUpdateEvent) {
 			u.activeTool = toolName
 			u.activeCommand = ev.ResolvedCommandName()
 			u.toolStart = time.Now()
+			u.lastCompletedTool = ""
+			u.lastCompletedCommand = ""
 			u.phase = "tool"
 			u.dirty = true
+			shouldTriggerFlush = true
 		}
 	case typ == "agent_response" || typ == "text_delta":
 		u.activeCommand = ""
 		if u.phase != "responding" {
 			u.phase = "responding"
 			u.dirty = true
+			shouldTriggerFlush = true
 		}
+	}
+	u.mu.Unlock()
+
+	if shouldTriggerFlush {
+		u.triggerFlush()
 	}
 }
 
@@ -238,6 +288,13 @@ func (u *StatusUpdater) Start() {
 					return
 				case <-ticker.C:
 					u.flush()
+				case <-u.flushNotify:
+					u.mu.Lock()
+					canFlush := u.statusMessageID == "" || u.minEditInterval <= 0 || time.Since(u.lastEditAt) >= u.minEditInterval
+					u.mu.Unlock()
+					if canFlush {
+						u.flush()
+					}
 				}
 			}
 		}()
@@ -260,12 +317,18 @@ func (u *StatusUpdater) currentStatusText() string {
 		}
 		return fmt.Sprintf("✍️ Generating response... (%.1fs)", sec)
 	case "thinking":
+		if u.activeTool == "" && u.lastCompletedTool != "" && time.Since(u.lastCompletedAt) < u.toolLatchDuration {
+			return FormatToolStatus(u.lastCompletedTool, u.lastCompletedCommand, u.lastCompletedElapsed)
+		}
 		sec := time.Since(u.turnStart).Seconds()
 		if sec < 0.1 {
 			sec = 0.1
 		}
 		return fmt.Sprintf("💭 Thinking... (%.1fs)", sec)
 	default:
+		if u.lastCompletedTool != "" && time.Since(u.lastCompletedAt) < u.toolLatchDuration {
+			return FormatToolStatus(u.lastCompletedTool, u.lastCompletedCommand, u.lastCompletedElapsed)
+		}
 		sec := time.Since(u.turnStart).Seconds()
 		if sec < 0.1 {
 			sec = 0.1
@@ -276,20 +339,21 @@ func (u *StatusUpdater) currentStatusText() string {
 
 func (u *StatusUpdater) flush() {
 	u.mu.Lock()
-	if u.disabled {
+	if u.disabled || u.inFlightREST {
 		u.mu.Unlock()
 		return
 	}
 
-	hasActivePhase := u.activeTool != "" || u.phase == "thinking" || u.phase == "responding"
+	hasToolActivity := u.activeTool != "" || (u.lastCompletedTool != "" && time.Since(u.lastCompletedAt) < u.toolLatchDuration)
+	hasActivePhase := hasToolActivity || u.phase == "thinking" || u.phase == "responding"
 	if !u.dirty && (u.statusMessageID == "" || !hasActivePhase) {
 		u.mu.Unlock()
 		return
 	}
 
 	// Debounce check: on initial message creation, hold off until debounceDelay has elapsed
-	// unless a tool is actively executing.
-	if u.statusMessageID == "" && u.activeTool == "" && time.Since(u.turnStart) < u.debounceDelay {
+	// unless a tool is actively executing or was recently completed.
+	if u.statusMessageID == "" && !hasToolActivity && time.Since(u.turnStart) < u.debounceDelay {
 		u.mu.Unlock()
 		return
 	}
@@ -302,20 +366,24 @@ func (u *StatusUpdater) flush() {
 	}
 
 	msgID := u.statusMessageID
+	u.inFlightREST = true
 	u.dirty = false
 	u.mu.Unlock()
 
 	if msgID == "" {
 		newID, err := u.sendFunc(u.threadID, text)
+		u.mu.Lock()
+		u.inFlightREST = false
 		if err != nil {
-			u.mu.Lock()
 			if delivery.IsThreadArchivedOrLockedError(err) || delivery.IsPermissionError(err) {
 				u.disabled = true
+			} else {
+				// Transient error: re-mark dirty so next tick can self-heal
+				u.dirty = true
 			}
 			u.mu.Unlock()
 			return
 		}
-		u.mu.Lock()
 		if u.disabled {
 			// Turn completed, cancelled, or deleted while sendFunc was in flight.
 			// Delete immediately to prevent permanent zombie message leak.
@@ -327,11 +395,13 @@ func (u *StatusUpdater) flush() {
 		}
 		u.statusMessageID = newID
 		u.lastDelivered = text
+		u.lastEditAt = time.Now()
 		u.mu.Unlock()
 	} else {
 		err := u.editFunc(u.threadID, msgID, text)
+		u.mu.Lock()
+		u.inFlightREST = false
 		if err != nil {
-			u.mu.Lock()
 			if delivery.IsMessageNotFoundError(err) {
 				u.statusMessageID = ""
 				u.disabled = true
@@ -343,8 +413,8 @@ func (u *StatusUpdater) flush() {
 			}
 			u.mu.Unlock()
 		} else {
-			u.mu.Lock()
 			u.lastDelivered = text
+			u.lastEditAt = time.Now()
 			u.mu.Unlock()
 		}
 	}
@@ -371,6 +441,8 @@ func (u *StatusUpdater) Reset() {
 	u.statusMessageID = ""
 	u.activeTool = ""
 	u.activeCommand = ""
+	u.lastCompletedTool = ""
+	u.lastCompletedCommand = ""
 	u.phase = ""
 	u.dirty = false
 	u.lastDelivered = ""
@@ -397,6 +469,8 @@ func (u *StatusUpdater) DeleteStatusMessage() {
 	u.statusMessageID = ""
 	u.activeTool = ""
 	u.activeCommand = ""
+	u.lastCompletedTool = ""
+	u.lastCompletedCommand = ""
 	u.disabled = true
 	u.mu.Unlock()
 

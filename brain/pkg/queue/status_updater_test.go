@@ -436,4 +436,225 @@ func TestStatusUpdater_RunCommandDisplaysCommandName(t *testing.T) {
 	updater.DeleteStatusMessage()
 }
 
+func TestStatusUpdater_FastToolLatchAndRecovery(t *testing.T) {
+	t.Parallel()
+	var sends atomic.Int32
+	var edits atomic.Int32
+	var lastText atomic.Pointer[string]
+
+	updater := NewStatusUpdater(nil, "thread-latch", true,
+		WithStatusInterval(1*time.Hour),
+		WithStatusDebounce(0),
+		WithStatusToolLatch(500*time.Millisecond),
+		WithStatusMockFuncs(
+			func(channelID, text string) (string, error) {
+				sends.Add(1)
+				lastText.Store(&text)
+				return "msg-latch", nil
+			},
+			func(channelID, messageID, text string) error {
+				edits.Add(1)
+				lastText.Store(&text)
+				return nil
+			},
+			func(channelID, messageID string) error {
+				return nil
+			},
+		),
+	)
+
+	// 1. Tool starts and finishes fast
+	updater.HandleStep(&runner.StepUpdateEvent{
+		StepType: "tool",
+		ToolName: "view_file",
+		State:    "ACTIVE",
+	})
+	updater.flush()
+
+	if sends.Load() != 1 {
+		t.Fatalf("expected 1 send, got %d", sends.Load())
+	}
+	if last := lastText.Load(); last == nil || !strings.Contains(*last, "view_file") {
+		t.Fatalf("expected text to mention view_file, got %v", last)
+	}
+
+	// Tool completes immediately (<10ms)
+	updater.HandleStep(&runner.StepUpdateEvent{
+		StepType: "tool",
+		ToolName: "view_file",
+		State:    "DONE",
+	})
+
+	// 2. Synchronous flush while within latch duration (500ms)
+	// Even though activeTool is "", the latched completed tool should still be rendered.
+	updater.mu.Lock()
+	textWhileLatched := updater.currentStatusText()
+	updater.mu.Unlock()
+
+	if !strings.Contains(textWhileLatched, "view_file") {
+		t.Errorf("expected text during latch to still mention view_file, got: %s", textWhileLatched)
+	}
+
+	// 3. Simulate passage of time beyond latch duration (600ms)
+	updater.mu.Lock()
+	updater.lastCompletedAt = time.Now().Add(-600 * time.Millisecond)
+	textExpired := updater.currentStatusText()
+	updater.mu.Unlock()
+
+	if !strings.Contains(textExpired, "Thinking") {
+		t.Errorf("expected text after latch expiration to revert to Thinking, got: %s", textExpired)
+	}
+
+	updater.Stop()
+	updater.DeleteStatusMessage()
+}
+
+func TestStatusUpdater_ImmediateFlushOnToolStart(t *testing.T) {
+	t.Parallel()
+	sendDone := make(chan string, 1)
+
+	updater := NewStatusUpdater(nil, "thread-immediate", true,
+		WithStatusInterval(1*time.Hour),  // Ticker will never fire during test
+		WithStatusDebounce(1*time.Hour),  // Debounce would block non-tool flush for 1h
+		WithStatusMockFuncs(
+			func(channelID, text string) (string, error) {
+				select {
+				case sendDone <- text:
+				default:
+				}
+				return "msg-immediate", nil
+			},
+			func(channelID, messageID, text string) error {
+				return nil
+			},
+			func(channelID, messageID string) error {
+				return nil
+			},
+		),
+	)
+
+	// Emitting an active tool step should trigger an immediate flush in the background runner
+	updater.HandleStep(&runner.StepUpdateEvent{
+		StepType: "tool_call",
+		ToolName: "grep_search",
+		State:    "RUNNING",
+	})
+
+	select {
+	case text := <-sendDone:
+		if !strings.Contains(text, "grep_search") {
+			t.Errorf("expected immediate message to mention grep_search, got: %s", text)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("timed out waiting for event-driven immediate flush on tool start")
+	}
+
+	updater.Stop()
+	updater.DeleteStatusMessage()
+}
+
+func TestStatusUpdater_SequentialToolsLatchOverride(t *testing.T) {
+	t.Parallel()
+	var lastText atomic.Pointer[string]
+
+	updater := NewStatusUpdater(nil, "thread-seq", true,
+		WithStatusInterval(1*time.Hour),
+		WithStatusDebounce(0),
+		WithStatusToolLatch(1*time.Hour), // Long latch
+		WithStatusMockFuncs(
+			func(channelID, text string) (string, error) {
+				lastText.Store(&text)
+				return "msg-seq", nil
+			},
+			func(channelID, messageID, text string) error {
+				lastText.Store(&text)
+				return nil
+			},
+			func(channelID, messageID string) error {
+				return nil
+			},
+		),
+	)
+
+	// Tool 1 runs and completes
+	updater.HandleStep(&runner.StepUpdateEvent{StepType: "tool", ToolName: "tool_one", State: "ACTIVE"})
+	updater.flush()
+	updater.HandleStep(&runner.StepUpdateEvent{StepType: "tool", ToolName: "tool_one", State: "DONE"})
+
+	// Tool 1 is currently latched
+	updater.mu.Lock()
+	if txt := updater.currentStatusText(); !strings.Contains(txt, "tool_one") {
+		t.Errorf("expected tool_one latched, got %s", txt)
+	}
+	updater.mu.Unlock()
+
+	// Tool 2 starts -> should immediately override tool 1 latch
+	updater.HandleStep(&runner.StepUpdateEvent{StepType: "tool", ToolName: "tool_two", State: "ACTIVE"})
+	updater.mu.Lock()
+	if txt := updater.currentStatusText(); !strings.Contains(txt, "tool_two") {
+		t.Errorf("expected tool_two to override latch, got %s", txt)
+	}
+	if updater.lastCompletedTool != "" {
+		t.Errorf("expected lastCompletedTool to be cleared on new tool start, got %s", updater.lastCompletedTool)
+	}
+	updater.mu.Unlock()
+
+	updater.Stop()
+	updater.DeleteStatusMessage()
+}
+
+func TestStatusUpdater_TransientSendErrorSelfHeals(t *testing.T) {
+	t.Parallel()
+	var attempts atomic.Int32
+
+	updater := NewStatusUpdater(nil, "thread-transient", true,
+		WithStatusInterval(1*time.Hour),
+		WithStatusDebounce(0),
+		WithStatusMockFuncs(
+			func(channelID, text string) (string, error) {
+				if attempts.Add(1) == 1 {
+					return "", errors.New("connection reset by peer")
+				}
+				return "msg-healed", nil
+			},
+			func(channelID, messageID, text string) error {
+				return nil
+			},
+			func(channelID, messageID string) error {
+				return nil
+			},
+		),
+	)
+
+	updater.HandleStep(&runner.StepUpdateEvent{StepType: "tool", ToolName: "heal_tool", State: "ACTIVE"})
+	updater.flush() // First attempt fails with transient error
+
+	updater.mu.Lock()
+	isDirty := updater.dirty
+	msgID := updater.statusMessageID
+	updater.mu.Unlock()
+
+	if !isDirty {
+		t.Errorf("expected dirty=true after transient send failure for self-healing")
+	}
+	if msgID != "" {
+		t.Errorf("expected statusMessageID to be empty after failed send, got %s", msgID)
+	}
+
+	// Next flush retries and succeeds
+	updater.flush()
+
+	updater.mu.Lock()
+	healedID := updater.statusMessageID
+	updater.mu.Unlock()
+
+	if healedID != "msg-healed" {
+		t.Errorf("expected statusMessageID to be msg-healed on retry, got %s", healedID)
+	}
+
+	updater.Stop()
+	updater.DeleteStatusMessage()
+}
+
+
 
