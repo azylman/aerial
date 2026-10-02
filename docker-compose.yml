@@ -61,53 +61,6 @@ services:
       start_interval: 2s
 
   # ----------------------------------------------------------------------------
-  # 1b. Hangar Sidecar: Aerial Hangar
-  #     Performs automated, single-flight Git synchronization and OCI container
-  #     reconciliation for live services. Holds write volume mounts to prevent
-  #     unpushed commits from ever touching the execution brain.
-  # ----------------------------------------------------------------------------
-  hangar:
-    image: ghcr.io/azylman/aerial-hangar:latest
-    build:
-      context: .
-      dockerfile: sidecars/hangar/Dockerfile
-    container_name: aerial-hangar
-    restart: unless-stopped
-    labels:
-      autoheal: "true"
-    environment:
-      - PORT=8080
-      - GITHUB_PAT=${GITHUB_PAT}
-      - AERIAL_CONFIG_REPO_URL=${AERIAL_CONFIG_REPO_URL}
-      - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN}
-      - SYNC_INTERVAL=60s
-      - SYNC_REPOS=/share/aerial-config,/share/aerial
-      - NOMAD_ADDR=${NOMAD_ADDR:-http://host.docker.internal:4646}
-      - NOMAD_TOKEN=${NOMAD_TOKEN:-}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    volumes:
-      - ${AERIAL_HOST_CONFIG_DIR:-${AERIAL_CONFIG_DIR:-/mnt/data/supervisor/share/aerial-config}}:/share/aerial-config:rw
-      - ${AERIAL_HOST_PROJECT_DIR:-${AERIAL_PROJECT_DIR:-/mnt/data/supervisor/share/aerial}}:/share/aerial:rw
-      - /var/run/docker.sock:/var/run/docker.sock
-    ports:
-      - "${HANGAR_HOST_PORT:-8087}:8080"
-    networks:
-      aerial-net:
-        aliases:
-          - hangar
-          - aerial-hangar
-          - gitsync
-          - aerial-gitsync
-    healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:8080/health || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-      start_interval: 2s
-
-  # ----------------------------------------------------------------------------
   # 2. Container Auto-Healing: Autoheal
   #    Monitors Docker healthchecks and restarts unhealthy containers automatically.
   # ----------------------------------------------------------------------------
