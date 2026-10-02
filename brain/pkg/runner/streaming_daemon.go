@@ -477,6 +477,8 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 		if activeTurn.Sink != nil {
 			var (
 				toolName           string
+				canonicalTool      string
+				mcpServer          string
 				cmdName            string
 				stepIdx            int
 				hasStepIdx         bool
@@ -497,6 +499,7 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 				if c, ok := toolCall["command"].(string); ok {
 					cmdName = c
 				}
+				isToolStart = true
 			}
 			if su, ok := raw["step_update"].(map[string]any); ok {
 				var state, typ string
@@ -547,6 +550,7 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 					if state != "DONE" && state != "ERROR" {
 						isToolStart = true
 					} else {
+						isToolStart = false
 						isToolEnd = true
 						if state == "DONE" {
 							toolEndStatus = "ok"
@@ -557,8 +561,10 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 				}
 			}
 
+			var isNewToolStart bool
+
 			if isToolStart {
-				canonicalTool, mcpServer := ExtractMCPToolInfo(toolName, toolParams)
+				canonicalTool, mcpServer = ExtractMCPToolInfo(toolName, toolParams)
 				if toolParams != nil {
 					if path, ok := toolParams["AbsolutePath"].(string); ok && path != "" {
 						if skill, ok := ExtractSkillFromTarget(path); ok {
@@ -586,28 +592,60 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 							mcpServer: mcpServer,
 							startedAt: time.Now(),
 						}
+						isNewToolStart = true
+					}
+				} else {
+					alreadyInFlight := false
+					for _, rec := range d.inFlightTools {
+						if rec.toolName == canonicalTool {
+							alreadyInFlight = true
+							break
+						}
+					}
+					if !alreadyInFlight {
+						d.inFlightTools[-1] = inFlightToolCall{
+							stepIndex: -1,
+							toolName:  canonicalTool,
+							mcpServer: mcpServer,
+							startedAt: time.Now(),
+						}
+						isNewToolStart = true
 					}
 				}
 				d.inflightMu.Unlock()
-			} else if isToolEnd && hasStepIdx {
+			} else if isToolEnd {
 				d.inflightMu.Lock()
 				if d.inFlightTools != nil {
-					if rec, exists := d.inFlightTools[stepIdx]; exists {
-						completedRecord = rec
-						hasCompletedRecord = true
-						delete(d.inFlightTools, stepIdx)
+					if hasStepIdx {
+						if rec, exists := d.inFlightTools[stepIdx]; exists {
+							completedRecord = rec
+							hasCompletedRecord = true
+							delete(d.inFlightTools, stepIdx)
+						}
+					}
+					// If not matched by stepIdx, match any in-flight record by canonicalTool or toolName
+					if !hasCompletedRecord && len(d.inFlightTools) > 0 {
+						cTool, _ := ExtractMCPToolInfo(toolName, toolParams)
+						for idx, rec := range d.inFlightTools {
+							if rec.toolName == toolName || rec.toolName == cTool || toolName == "call_mcp_tool" || len(d.inFlightTools) == 1 {
+								completedRecord = rec
+								hasCompletedRecord = true
+								delete(d.inFlightTools, idx)
+								break
+							}
+						}
 					}
 				}
 				d.inflightMu.Unlock()
 			}
 
-			if toolName != "" || cmdName != "" {
-				activeTurn.Sink.OnToolCall(toolName, cmdName)
+			if isNewToolStart && (canonicalTool != "" || cmdName != "") {
+				activeTurn.Sink.OnToolCall(canonicalTool, cmdName)
 			}
 			if hasSkill {
 				activeTurn.Sink.OnSkillActivated(activatedSkill, "discord")
 			}
-			if hasCompletedRecord {
+			if isToolEnd && hasCompletedRecord {
 				activeTurn.Sink.OnToolCompleted(completedRecord.toolName, completedRecord.mcpServer, time.Since(completedRecord.startedAt), toolEndStatus)
 			}
 			var delta string

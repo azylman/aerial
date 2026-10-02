@@ -731,6 +731,18 @@ func TestStreamingDaemon_DispatchEdgeCases(t *testing.T) {
 		t.Errorf("expected 0 deltas for empty string, got %d", len(sink.deltas))
 	}
 
+	// 5b. Dispatch tool start and completion without step_index
+	daemon.dispatchNDJSONLine(`{"event":"step_update","step_update":{"state":"RUNNING","type":"tool_call","tool_name":"no_idx_tool"}}`)
+	if len(sink.toolCalls) != 1 || sink.toolCalls[0] != "no_idx_tool:" {
+		t.Errorf("expected tool start for no_idx_tool, got %+v", sink.toolCalls)
+	}
+	daemon.dispatchNDJSONLine(`{"event":"step_update","step_update":{"state":"DONE","type":"tool_call","tool_name":"no_idx_tool"}}`)
+	if len(sink.completedToolDetails) != 1 || sink.completedToolDetails[0].ToolName != "no_idx_tool" {
+		t.Errorf("expected tool completion for no_idx_tool, got %+v", sink.completedToolDetails)
+	}
+
+
+
 	// 6. Test extractResponseString with different shapes
 	if res := extractResponseString(map[string]any{}); res != "" {
 		t.Errorf("expected empty string for empty map, got %q", res)
@@ -2022,6 +2034,17 @@ func TestStreamingDaemon_ToolAndSkillLifecycleEvents(t *testing.T) {
 	expectedSkill := "home-assistant:discord"
 	if sink.activatedSkills[0] != expectedSkill {
 		t.Errorf("expected skill activation %q, got %q", expectedSkill, sink.activatedSkills[0])
+	}
+
+	// Verify tool calls (only tool starts, canonical MCP names, no DONE duplicates)
+	expectedToolCalls := []string{"run_command:echo hello", "get_me:", "view_file:", "manage_task:"}
+	if len(sink.toolCalls) != len(expectedToolCalls) {
+		t.Fatalf("expected %d tool calls, got %d: %+v", len(expectedToolCalls), len(sink.toolCalls), sink.toolCalls)
+	}
+	for i, tc := range expectedToolCalls {
+		if sink.toolCalls[i] != tc {
+			t.Errorf("expected tool call %d to be %q, got %q", i, tc, sink.toolCalls[i])
+		}
 	}
 }
 
