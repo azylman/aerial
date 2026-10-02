@@ -93,10 +93,6 @@ services:
         condition: service_healthy
       scheduler-mcp:
         condition: service_healthy
-      github-mcp:
-        condition: service_started
-      discord-mcp:
-        condition: service_started
       openobserve:
         condition: service_started
 
@@ -196,60 +192,6 @@ services:
       postgres:
         condition: service_healthy
 
-  # ----------------------------------------------------------------------------
-  # 5. Outbound MCP: Discord MCP Server
-  #    Provides Discord tools (send message, create thread, read history) over HTTP.
-  # ----------------------------------------------------------------------------
-  discord-mcp:
-    image: ghcr.io/azylman/aerial-discord-mcp:latest
-    build: ./discord-mcp
-    container_name: aerial-discord-mcp
-    restart: unless-stopped
-    labels:
-      autoheal: "true"
-    environment:
-      - PORT=4001
-      - DISCORD_TOKEN=${DISCORD_BOT_TOKEN}
-      - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN}
-    ports:
-      - "${DISCORD_MCP_HOST_PORT:-4001}:4001"
-    networks:
-      - aerial-net
-    healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:4001/health || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-      start_interval: 2s
-
-
-  # ----------------------------------------------------------------------------
-  # 7. Outbound MCP: GitHub MCP Server
-  #    Wraps the official GitHub MCP server with supergateway translation proxy.
-  # ----------------------------------------------------------------------------
-  github-mcp:
-    image: ghcr.io/azylman/aerial-github-mcp:latest
-    build: ./github-mcp
-    container_name: aerial-github-mcp
-    restart: unless-stopped
-    init: true
-    labels:
-      autoheal: "true"
-    environment:
-      - PORT=4003
-      - GITHUB_PERSONAL_ACCESS_TOKEN=${GITHUB_PAT}
-    ports:
-      - "${GITHUB_MCP_HOST_PORT:-4003}:4003"
-    networks:
-      - aerial-net
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS -X OPTIONS http://127.0.0.1:4003/mcp || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-      start_interval: 2s
 
   # ----------------------------------------------------------------------------
   # 8. Local LLM / Embeddings: Ollama Service
