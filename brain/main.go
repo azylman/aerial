@@ -37,6 +37,7 @@ import (
 	"github.com/azylman/aerial/brain/pkg/env"
 	"github.com/azylman/aerial/brain/pkg/sanitizer"
 	"github.com/azylman/aerial/brain/pkg/session"
+	"github.com/azylman/aerial/brain/pkg/transcript"
 	"github.com/azylman/aerial/brain/pkg/watcher"
 	"github.com/bwmarrin/discordgo"
 	"github.com/google/uuid"
@@ -453,6 +454,68 @@ func handleTranscripts(store db.Store, searchPaths ...string) http.HandlerFunc {
 	}
 }
 
+func handleTranscriptSearch(store db.TranscriptStore, embedder transcript.EmbedderFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "Method not allowed"})
+			return
+		}
+
+		if store == nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Database not available"})
+			return
+		}
+
+		q := r.URL.Query().Get("q")
+		if q == "" {
+			q = r.URL.Query().Get("query")
+		}
+		mode := r.URL.Query().Get("mode")
+		tool := r.URL.Query().Get("tool")
+		session := r.URL.Query().Get("session")
+		limitStr := r.URL.Query().Get("limit")
+		limit := 10
+		if limitStr != "" {
+			if l, err := strconv.Atoi(limitStr); err == nil && l > 0 {
+				limit = l
+			}
+		}
+
+		res, err := transcript.SearchTranscripts(r.Context(), store, embedder, q, mode, session, tool, limit)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, res)
+	}
+}
+
+func handleTranscriptStats(store db.TranscriptStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "Method not allowed"})
+			return
+		}
+
+		if store == nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Database not available"})
+			return
+		}
+
+		syncStates, err := store.GetSessionSyncStates(r.Context())
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"total_sessions": len(syncStates),
+			"status":         "ok",
+		})
+	}
+}
+
 func handleFacts(store db.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -858,12 +921,20 @@ func metricsMiddleware(next http.Handler) http.Handler {
 }
 
 func SetupBrainMux(store db.Store, pool *queue.WorkerPool, reloadFn func(string), searchPaths ...string) *http.ServeMux {
+	return SetupBrainMuxWithEmbedder(store, pool, reloadFn, nil, searchPaths...)
+}
+
+func SetupBrainMuxWithEmbedder(store db.Store, pool *queue.WorkerPool, reloadFn func(string), embedder transcript.EmbedderFunc, searchPaths ...string) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", metrics.Handler())
 	mux.HandleFunc("/prompt", handlePrompt(store, pool))
 	mux.HandleFunc("/voice/ask", handleVoiceAsk(pool))
 	mux.HandleFunc("/api/voice/ask", handleVoiceAsk(pool))
 	mux.HandleFunc("/transcripts", handleTranscripts(store, searchPaths...))
+	mux.HandleFunc("/transcripts/search", handleTranscriptSearch(store, embedder))
+	mux.HandleFunc("/api/transcripts/search", handleTranscriptSearch(store, embedder))
+	mux.HandleFunc("/transcripts/stats", handleTranscriptStats(store))
+	mux.HandleFunc("/api/transcripts/stats", handleTranscriptStats(store))
 	mux.HandleFunc("/tasks", handleTasks(store))
 	mux.HandleFunc("/facts", handleFacts(store))
 	mux.HandleFunc("/schedules", handleSchedules(store))
@@ -1581,8 +1652,14 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	}
 	stopScheduler := sched.Start(ctx)
 	defer stopScheduler()
-
-	mux := SetupBrainMux(store, pool, reloadConfig, sessionMgr.Roots()...)
+	var embedder transcript.EmbedderFunc
+	if cfg != nil {
+		memClient := memory.New(cfg, sessionMgr.Roots()...)
+		embedder = func(eCtx context.Context, text string) ([]float32, error) {
+			return memClient.GenerateEmbedding(eCtx, text, false, 1)
+		}
+	}
+	mux := SetupBrainMuxWithEmbedder(store, pool, reloadConfig, embedder, sessionMgr.Roots()...)
 
 	port := cur.Port
 	ln, err := net.Listen("tcp", ":"+port)
