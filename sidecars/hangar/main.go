@@ -386,6 +386,7 @@ type SyncDaemon struct {
 	webhooksRouterURL      string
 	deployDispatcher       func(ctx context.Context, evt HangarDeployEvent) error
 	deploymentPollInterval time.Duration
+	deploymentTimeout      time.Duration
 }
 
 func (d *SyncDaemon) getComposeExecutor() ComposeExecutor {
@@ -505,7 +506,11 @@ func (d *SyncDaemon) MonitorDeploymentAsync(jobName string, minVersion int, base
 				log.Printf("[Hangar:Deploy] PANIC recovered in deployment monitor for %s: %v", jobName, r)
 			}
 		}()
-		monCtx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+		deployTimeout := d.deploymentTimeout
+		if deployTimeout <= 0 {
+			deployTimeout = 180 * time.Second
+		}
+		monCtx, cancel := context.WithTimeout(context.Background(), deployTimeout)
 		defer cancel()
 
 		pollInterval := d.deploymentPollInterval
@@ -2888,6 +2893,7 @@ type DaemonConfig struct {
 	WebhooksRouterURL      string
 	DeployDispatcher       func(ctx context.Context, evt HangarDeployEvent) error
 	DeploymentPollInterval time.Duration
+	DeploymentTimeout      time.Duration
 }
 
 // NewDaemon initializes a new SyncDaemon from config.
@@ -2927,6 +2933,10 @@ func NewDaemon(cfg DaemonConfig) *SyncDaemon {
 	if pollInterval <= 0 {
 		pollInterval = 2 * time.Second
 	}
+	deployTimeout := cfg.DeploymentTimeout
+	if deployTimeout <= 0 {
+		deployTimeout = 180 * time.Second
+	}
 	return &SyncDaemon{
 		repos:                  cfg.Repos,
 		repoUrls:               cfg.RepoURLs,
@@ -2951,6 +2961,7 @@ func NewDaemon(cfg DaemonConfig) *SyncDaemon {
 		webhooksRouterURL:      webhooksRouterURL,
 		deployDispatcher:       cfg.DeployDispatcher,
 		deploymentPollInterval: pollInterval,
+		deploymentTimeout:      deployTimeout,
 		reconcileCh:            make(chan struct{}, 1),
 		repoLocks:              make(map[string]*sync.Mutex),
 		quarantinedCommits:     make(map[QuarantineKey]QuarantineRecord),

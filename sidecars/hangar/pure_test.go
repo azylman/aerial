@@ -2224,5 +2224,30 @@ func TestParseJobStatusOutput_RealNomadSummary(t *testing.T) {
 	}
 }
 
+func TestNomadJobStatusOutput_TotalRunning_NilAndFallback(t *testing.T) {
+	var nilOut *NomadJobStatusOutput
+	if nilOut.TotalRunning() != 0 {
+		t.Errorf("expected 0 for nil receiver, got %d", nilOut.TotalRunning())
+	}
+
+	out := &NomadJobStatusOutput{}
+	out.Summary.Children.Running = 4
+	if out.TotalRunning() != 4 {
+		t.Errorf("expected 4 from Children.Running fallback, got %d", out.TotalRunning())
+	}
+}
+
+func TestNomadJobSummary_UnmarshalJSON_Errors(t *testing.T) {
+	var s NomadJobSummary
+	if err := s.UnmarshalJSON([]byte("not valid json at all")); err == nil {
+		t.Error("expected error for invalid json, got nil")
+	}
+
+	if err := s.UnmarshalJSON([]byte(`{"Children": "not an object"}`)); err == nil {
+		t.Error("expected error for malformed Children, got nil")
+	}
+}
+
+
 
 

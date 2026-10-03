@@ -7142,6 +7142,39 @@ func TestExecuteGitPushEvent_DispatchesSyncSuccessAndFailure(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for sync_failed event")
 	}
+
+	// 3. Successful sync with empty CurrentHead falls back to req.Commit
+	dFallback := NewDaemon(DaemonConfig{
+		Repos:     []string{aerialDir},
+		ConfigDir: aerialDir,
+		DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
+			evtCh <- evt
+			return nil
+		},
+		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+			return []byte(""), nil, nil
+		},
+	})
+
+	respFallback, codeFallback := dFallback.ExecuteGitPushEvent(ctx, GitPushEventRequest{
+		Repo:     "aerial",
+		Ref:      "refs/heads/main",
+		Commit:   "commit_req_fallback",
+		TargetID: "1555405874565091380",
+		PRNumber: 542,
+	})
+	if codeFallback != http.StatusOK || respFallback.Status != "accepted" {
+		t.Fatalf("expected 200 accepted, got %d (%s)", codeFallback, respFallback.Status)
+	}
+
+	select {
+	case evt := <-evtCh:
+		if evt.CommitSHA != "commit_req_fallback" {
+			t.Errorf("expected CommitSHA commit_req_fallback, got %q", evt.CommitSHA)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for fallback commit sync_success event")
+	}
 }
 
 func TestExecuteGitPushEvent_DispatchesDeployFailed(t *testing.T) {
@@ -7597,6 +7630,64 @@ func TestMonitorDeploymentAsync_CancelledDeployment(t *testing.T) {
 	}
 }
 
+func TestMonitorDeploymentAsync_Timeout(t *testing.T) {
+	evtCh := make(chan HangarDeployEvent, 10)
+
+	d := NewDaemon(DaemonConfig{
+		DeploymentPollInterval: 100 * time.Millisecond,
+		DeploymentTimeout:      20 * time.Millisecond,
+		DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
+			evtCh <- evt
+			return nil
+		},
+		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+			return []byte(`{"ID": "timeout-job", "JobVersion": 1}`), nil, nil
+		},
+	})
+
+	baseEvt := HangarDeployEvent{
+		Event:   "deploy_started",
+		JobName: "timeout-job",
+		Status:  "started",
+	}
+
+	d.MonitorDeploymentAsync("timeout-job", 2, baseEvt)
+
+	select {
+	case evt := <-evtCh:
+		if evt.Event != "deploy_failed" {
+			t.Errorf("expected deploy_failed, got %q", evt.Event)
+		}
+		if evt.Status != "failed" {
+			t.Errorf("expected status failed, got %q", evt.Status)
+		}
+		if !strings.Contains(evt.Details, "timed out") {
+			t.Errorf("expected details to mention timed out, got %q", evt.Details)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for timeout deploy_failed event")
+	}
+}
+
+func TestDispatchDeployEvent_DispatcherError(t *testing.T) {
+	errCh := make(chan struct{}, 1)
+	d := NewDaemon(DaemonConfig{
+		DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
+			errCh <- struct{}{}
+			return fmt.Errorf("simulated dispatch error")
+		},
+	})
+	d.DispatchDeployEvent(HangarDeployEvent{
+		Event:   "deploy_started",
+		JobName: "err-job",
+	})
+	select {
+	case <-errCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for deploy dispatcher error invocation")
+	}
+}
+
 func TestDefaultDeployDispatcher_TableDriven(t *testing.T) {
 	var receivedEvt HangarDeployEvent
 	var receivedPath string
@@ -7640,6 +7731,15 @@ func TestDefaultDeployDispatcher_TableDriven(t *testing.T) {
 	errFail := d.defaultDeployDispatcher(context.Background(), testEvt)
 	if errFail == nil {
 		t.Errorf("expected error when server returns 500")
+	}
+
+	// 3. Network error (connection refused / closed port)
+	dClosed := NewDaemon(DaemonConfig{
+		WebhooksRouterURL: "http://127.0.0.1:59999",
+	})
+	errNetwork := dClosed.defaultDeployDispatcher(context.Background(), testEvt)
+	if errNetwork == nil {
+		t.Errorf("expected network error when connecting to closed port")
 	}
 }
 
