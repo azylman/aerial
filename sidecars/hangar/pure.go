@@ -1025,3 +1025,126 @@ func SortMatchedJobsHangarLast(matches []MatchedNomadJob) {
 	})
 }
 
+// IsValidGitCommitSHA returns true if s is 7 to 40 characters and contains only hexadecimal characters.
+func IsValidGitCommitSHA(s string) bool {
+	if len(s) < 7 || len(s) > 40 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
+// ExtractRevisionFromAnnotations extracts and validates a git commit SHA from image or manifest annotations.
+// It checks standard and aerial-specific keys: org.opencontainers.image.revision, aerial.commit_sha, org.label-schema.vcs-ref.
+func ExtractRevisionFromAnnotations(annotations map[string]string) string {
+	if len(annotations) == 0 {
+		return ""
+	}
+	keys := []string{
+		"org.opencontainers.image.revision",
+		"aerial.commit_sha",
+		"org.label-schema.vcs-ref",
+	}
+	for _, k := range keys {
+		if val, ok := annotations[k]; ok {
+			trimmed := strings.TrimSpace(val)
+			if IsValidGitCommitSHA(trimmed) {
+				return trimmed
+			}
+		}
+	}
+	return ""
+}
+
+// ExtractRevisionFromConfigJSON extracts and validates a git commit SHA from an OCI/Docker container image configuration blob JSON.
+// Parses JSON config labels and returns the first valid commit SHA.
+func ExtractRevisionFromConfigJSON(configJSON []byte) string {
+	if len(configJSON) == 0 {
+		return ""
+	}
+	var doc struct {
+		Config struct {
+			Labels map[string]string `json:"Labels"`
+		} `json:"config"`
+		Labels map[string]string `json:"labels"`
+	}
+	if err := json.Unmarshal(configJSON, &doc); err != nil {
+		return ""
+	}
+	if rev := ExtractRevisionFromAnnotations(doc.Config.Labels); rev != "" {
+		return rev
+	}
+	return ExtractRevisionFromAnnotations(doc.Labels)
+}
+
+// ExtractPlatformManifestDigest parses an OCI Image Index or Docker Manifest List and returns
+// the digest of the manifest matching targetOS and targetArch. If none matches, returns first entry's Digest.
+func ExtractPlatformManifestDigest(indexJSON []byte, targetOS, targetArch string) string {
+	if len(indexJSON) == 0 {
+		return ""
+	}
+	var doc struct {
+		Manifests []struct {
+			Digest   string `json:"digest"`
+			Platform struct {
+				Architecture string `json:"architecture"`
+				OS           string `json:"os"`
+			} `json:"platform"`
+		} `json:"manifests"`
+	}
+	if err := json.Unmarshal(indexJSON, &doc); err != nil || len(doc.Manifests) == 0 {
+		return ""
+	}
+
+	targetOS = strings.TrimSpace(strings.ToLower(targetOS))
+	targetArch = strings.TrimSpace(strings.ToLower(targetArch))
+
+	if targetOS != "" || targetArch != "" {
+		for _, m := range doc.Manifests {
+			matchOS := targetOS == "" || strings.EqualFold(m.Platform.OS, targetOS)
+			matchArch := targetArch == "" || strings.EqualFold(m.Platform.Architecture, targetArch)
+			if matchOS && matchArch && strings.TrimSpace(m.Digest) != "" {
+				return strings.TrimSpace(m.Digest)
+			}
+		}
+	}
+
+	return strings.TrimSpace(doc.Manifests[0].Digest)
+}
+
+// ExtractConfigBlobDigest parses OCI/Docker Manifest JSON and returns the configuration blob digest.
+func ExtractConfigBlobDigest(manifestJSON []byte) string {
+	if len(manifestJSON) == 0 {
+		return ""
+	}
+	var doc struct {
+		Config struct {
+			Digest string `json:"digest"`
+		} `json:"config"`
+		Annotations map[string]string `json:"annotations"`
+	}
+	if err := json.Unmarshal(manifestJSON, &doc); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(doc.Config.Digest)
+}
+
+// ExtractManifestAnnotations parses an OCI/Docker manifest or index JSON and extracts its annotations map.
+func ExtractManifestAnnotations(manifestJSON []byte) map[string]string {
+	if len(manifestJSON) == 0 {
+		return nil
+	}
+	var doc struct {
+		Annotations map[string]string `json:"annotations"`
+	}
+	if err := json.Unmarshal(manifestJSON, &doc); err != nil {
+		return nil
+	}
+	return doc.Annotations
+}
+
