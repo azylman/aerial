@@ -152,70 +152,42 @@ assert_eq "true" "$(echo "$SUBMIT_TARGET_ERR" | grep -q "ERROR: Target ID cannot
 SUBMIT_TARGET_ID_ERR=$(bash "${AERIAL_PR}" submit --target-id=1234567890 2>&1 || true)
 assert_eq "true" "$(echo "$SUBMIT_TARGET_ID_ERR" | grep -q "ERROR: Target ID cannot be specified manually (--target-id=1234567890 is removed)" && echo true || echo false)" "submit --target-id= rejects with explicit error"
 
-# Case 6D: schedule_pr_followup prompt contains active thread notation and negative generalization disclaimer
-FOLLOWUP_PROMPT_CHECK=$(bash -c "
+# Case 6D: schedule_pr_followup is completely eliminated
+FOLLOWUP_FUNC_EXISTS=$(bash -c "
     REPO_TEST_MODE=1
     source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
-    curl() {
-        while [ \$# -gt 0 ]; do
-            if [ \"\$1\" = \"-d\" ]; then
-                echo \"\$2\" > /tmp/test_followup_payload.json
-                break
-            fi
-            shift
-        done
-        echo '{\"jsonrpc\":\"2.0\",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"schedule_id\\\":\\\"sched-123\\\"}\"}]}}'
-    }
-    export -f curl
-    AERIAL_TARGET_ID=\"test-target-channel\"
-    schedule_pr_followup 999 \"https://github.com/azylman/aerial/pull/999\" \"\" \"2m\" \"test: commit title\" >/dev/null 2>&1
-    jq -r .params.arguments.prompt /tmp/test_followup_payload.json
-    rm -f /tmp/test_followup_payload.json
+    type schedule_pr_followup 2>&1 || true
 ")
-assert_eq "true" "$(echo "$FOLLOWUP_PROMPT_CHECK" | grep -Fq 'targeting this active thread/channel (target_id: "test-target-channel")' && echo true || echo false)" "schedule_pr_followup prompt specifies targeting this active thread/channel"
-assert_eq "true" "$(echo "$FOLLOWUP_PROMPT_CHECK" | grep -Fq 'never hardcode or generalize this ID across other threads or sessions' && echo true || echo false)" "schedule_pr_followup prompt includes negative generalization disclaimer"
-assert_eq "true" "$(echo "$FOLLOWUP_PROMPT_CHECK" | grep -Fq 'Inform the user and reschedule a 2m follow-up check' && echo true || echo false)" "schedule_pr_followup prompt instructs informing user and rescheduling follow-up"
-assert_eq "true" "$(echo "$FOLLOWUP_PROMPT_CHECK" | grep -Fq 'PROACTIVELY FIX THE FAILURE' && echo true || echo false)" "schedule_pr_followup prompt instructs proactive fixing on failures"
-assert_eq "true" "$(echo "$FOLLOWUP_PROMPT_CHECK" | grep -Fq 'do NOT stop or ask for user confirmation' && echo true || echo false)" "schedule_pr_followup prompt instructs not asking for confirmation"
+assert_eq "true" "$(echo "$FOLLOWUP_FUNC_EXISTS" | grep -Fq 'not found' && echo true || echo false)" "schedule_pr_followup is eliminated"
 
-# Case 6E: Target ID environment precedence
+SUBMIT_USAGE_CHECK=$(bash "${AERIAL_PR}" --help 2>&1 || true)
+assert_eq "true" "$(echo "$SUBMIT_USAGE_CHECK" | grep -Fq 'scheduler-mcp' && echo false || echo true)" "Usage text does not reference scheduler-mcp"
+assert_eq "true" "$(echo "$SUBMIT_USAGE_CHECK" | grep -Fq -- '--no-schedule' && echo false || echo true)" "Usage text does not reference --no-schedule"
+assert_eq "true" "$(echo "$SUBMIT_USAGE_CHECK" | grep -Fq '[-d <delay>]' && echo false || echo true)" "Usage text does not reference delay options"
+
+SCHEDULE_MCP_REFS=$(grep -n "scheduler-mcp" "${AERIAL_PR}" || true)
+assert_eq "" "$SCHEDULE_MCP_REFS" "aerial-pr.sh contains zero references to scheduler-mcp"
+
+# Case 6E: Target ID environment precedence via resolve_target_id
 TARGET_PRECEDENCE_CHECK=$(bash -c "
     REPO_TEST_MODE=1
     source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
-    curl() {
-        while [ \$# -gt 0 ]; do
-            if [ \"\$1\" = \"-d\" ]; then
-                echo \"\$2\" > /tmp/target_test.payload
-                break
-            fi
-            shift
-        done
-        echo '{\"jsonrpc\":\"2.0\",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"schedule_id\\\":\\\"sched-1\\\"}\"}]}}'
-    }
-    export -f curl
 
     # Subtest 1: AERIAL_TARGET_ID wins
-    AERIAL_TARGET_ID=\"target_aerial\" DISCORD_THREAD_ID=\"target_thread\" DISCORD_CHANNEL_ID=\"target_channel\" \
-        schedule_pr_followup 1 \"url\" \"\" \"2m\" \"title\" >/dev/null 2>&1
-    [ \"\$(jq -r .params.arguments.target_id /tmp/target_test.payload)\" = \"target_aerial\" ] && echo \"target1:ok\" || echo \"target1:fail\"
+    res1=\$(AERIAL_TARGET_ID=\"target_aerial\" DISCORD_THREAD_ID=\"target_thread\" DISCORD_CHANNEL_ID=\"target_channel\" resolve_target_id)
+    [ \"\$res1\" = \"target_aerial\" ] && echo \"target1:ok\" || echo \"target1:fail\"
 
     # Subtest 2: DISCORD_THREAD_ID wins when AERIAL_TARGET_ID is unset
-    unset AERIAL_TARGET_ID
-    DISCORD_THREAD_ID=\"target_thread\" DISCORD_CHANNEL_ID=\"target_channel\" \
-        schedule_pr_followup 1 \"url\" \"\" \"2m\" \"title\" >/dev/null 2>&1
-    [ \"\$(jq -r .params.arguments.target_id /tmp/target_test.payload)\" = \"target_thread\" ] && echo \"target2:ok\" || echo \"target2:fail\"
+    res2=\$(unset AERIAL_TARGET_ID; DISCORD_THREAD_ID=\"target_thread\" DISCORD_CHANNEL_ID=\"target_channel\" resolve_target_id)
+    [ \"\$res2\" = \"target_thread\" ] && echo \"target2:ok\" || echo \"target2:fail\"
 
     # Subtest 3: DISCORD_CHANNEL_ID wins when thread is unset
-    unset AERIAL_TARGET_ID DISCORD_THREAD_ID
-    DISCORD_CHANNEL_ID=\"target_channel\" \
-        schedule_pr_followup 1 \"url\" \"\" \"2m\" \"title\" >/dev/null 2>&1
-    [ \"\$(jq -r .params.arguments.target_id /tmp/target_test.payload)\" = \"target_channel\" ] && echo \"target3:ok\" || echo \"target3:fail\"
+    res3=\$(unset AERIAL_TARGET_ID DISCORD_THREAD_ID; DISCORD_CHANNEL_ID=\"target_channel\" resolve_target_id)
+    [ \"\$res3\" = \"target_channel\" ] && echo \"target3:ok\" || echo \"target3:fail\"
 
     # Subtest 4: fallback to system dev channel
-    unset AERIAL_TARGET_ID DISCORD_THREAD_ID DISCORD_CHANNEL_ID
-    schedule_pr_followup 1 \"url\" \"\" \"2m\" \"title\" >/dev/null 2>&1
-    [ \"\$(jq -r .params.arguments.target_id /tmp/target_test.payload)\" = \"1542423172400291873\" ] && echo \"target4:ok\" || echo \"target4:fail\"
-    rm -f /tmp/target_test.payload
+    res4=\$(unset AERIAL_TARGET_ID DISCORD_THREAD_ID DISCORD_CHANNEL_ID; resolve_target_id)
+    [ \"\$res4\" = \"1542423172400291873\" ] && echo \"target4:ok\" || echo \"target4:fail\"
 ")
 assert_eq "true" "$(echo "$TARGET_PRECEDENCE_CHECK" | grep -q 'target1:ok' && echo true || echo false)" "Target precedence: AERIAL_TARGET_ID takes first priority"
 assert_eq "true" "$(echo "$TARGET_PRECEDENCE_CHECK" | grep -q 'target2:ok' && echo true || echo false)" "Target precedence: DISCORD_THREAD_ID takes second priority"
