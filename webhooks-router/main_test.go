@@ -791,6 +791,20 @@ func TestHangarWebhookWorker_Work(t *testing.T) {
 }
 
 func TestNomadEventWorker_Work(t *testing.T) {
+	nomadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/deployments") {
+			_, _ = w.Write([]byte(`[{"ID":"dep-1","Status":"successful"}]`))
+			return
+		}
+		if strings.Contains(r.URL.Path, "/allocations") {
+			_, _ = w.Write([]byte(`[{"ID":"alloc-1","DesiredStatus":"run","ClientStatus":"running"}]`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer nomadServer.Close()
+
 	mockReg := &mockPRRegistry{
 		deployedTargetID: "1555405874565091380",
 		deployedPRNum:    552,
@@ -799,7 +813,7 @@ func TestNomadEventWorker_Work(t *testing.T) {
 		deployedUpdated:  true,
 	}
 	mockDisp := &mockOutboundDispatcher{}
-	srv := NewRouterServer(Config{}, nil)
+	srv := NewRouterServer(Config{NomadAddr: nomadServer.URL}, nil)
 	srv.SetRegistry(mockReg)
 	srv.SetDispatcher(mockDisp)
 	worker := &NomadEventWorker{server: srv}
