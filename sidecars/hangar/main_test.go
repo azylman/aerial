@@ -7017,7 +7017,7 @@ func TestValidateNomadConfig_NilExecutor(t *testing.T) {
 	}
 }
 
-func TestExecuteGitPushEvent_DispatchesDeployStartedAndSuccess(t *testing.T) {
+func TestExecuteGitPushEvent_DispatchesDeployStarted(t *testing.T) {
 	ctx := context.Background()
 	tmpDir := t.TempDir()
 	aerialConfigDir := filepath.Join(tmpDir, "aerial-config")
@@ -7108,23 +7108,12 @@ func TestExecuteGitPushEvent_DispatchesDeployStartedAndSuccess(t *testing.T) {
 		t.Fatal("timed out waiting for deploy_started event")
 	}
 
-	// 2. Wait for deploy_success
+	// 2. Ensure deployment observation is delegated to webhooks-router
 	select {
 	case evt := <-evtCh:
-		if evt.Event != "deploy_success" {
-			t.Errorf("expected deploy_success, got %q", evt.Event)
-		}
-		if evt.JobName != "webhooks-router" {
-			t.Errorf("expected job_name webhooks-router, got %q", evt.JobName)
-		}
-		if evt.DeploymentID != "dep-git-push-1" {
-			t.Errorf("expected deployment_id dep-git-push-1, got %q", evt.DeploymentID)
-		}
-		if evt.Status != "success" {
-			t.Errorf("expected status success, got %q", evt.Status)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for deploy_success event")
+		t.Fatalf("unexpected event from Hangar: %+v (deploy observation is delegated to webhooks-router)", evt)
+	case <-time.After(50 * time.Millisecond):
+		// Expected: no further events dispatched
 	}
 }
 
@@ -7349,7 +7338,7 @@ func TestExecuteGitPushEvent_DispatchesDeployFailed(t *testing.T) {
 	}
 }
 
-func TestExecuteImageReadyEvent_DispatchesDeployRollback(t *testing.T) {
+func TestExecuteImageReadyEvent_DispatchesDeployStartedOnly(t *testing.T) {
 	ctx := context.Background()
 	tmpDir := t.TempDir()
 	jobsDir := filepath.Join(tmpDir, "jobs")
@@ -7425,24 +7414,16 @@ func TestExecuteImageReadyEvent_DispatchesDeployRollback(t *testing.T) {
 		t.Fatal("timed out waiting for deploy_started")
 	}
 
-	// 2. Wait for deploy_rollback
+	// 2. Ensure deployment observation is delegated to webhooks-router
 	select {
 	case evt := <-evtCh:
-		if evt.Event != "deploy_rollback" {
-			t.Errorf("expected deploy_rollback, got %q", evt.Event)
-		}
-		if evt.Status != "rollback" {
-			t.Errorf("expected status rollback, got %q", evt.Status)
-		}
-		if evt.DeploymentID != "dep-rollback-uuid" {
-			t.Errorf("expected deployment_id dep-rollback-uuid, got %q", evt.DeploymentID)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for deploy_rollback")
+		t.Fatalf("unexpected event from Hangar: %+v (deploy observation is delegated to webhooks-router)", evt)
+	case <-time.After(50 * time.Millisecond):
+		// Expected: no further events dispatched
 	}
 }
 
-func TestExecuteImageReadyEvent_PropagatesMetadataAndDispatchesDeploySuccess(t *testing.T) {
+func TestExecuteImageReadyEvent_PropagatesMetadataInDeployStarted(t *testing.T) {
 	ctx := context.Background()
 	tmpDir := t.TempDir()
 	jobsDir := filepath.Join(tmpDir, "jobs")
@@ -7517,232 +7498,12 @@ func TestExecuteImageReadyEvent_PropagatesMetadataAndDispatchesDeploySuccess(t *
 		t.Fatal("timed out waiting for deploy_started")
 	}
 
-	// 2. Wait for deploy_success
+	// 2. Ensure deployment observation is delegated to webhooks-router
 	select {
 	case evt := <-evtCh:
-		if evt.Event != "deploy_success" {
-			t.Errorf("expected deploy_success, got %q", evt.Event)
-		}
-		if evt.Status != "success" {
-			t.Errorf("expected status success, got %q", evt.Status)
-		}
-		if evt.DeploymentID != "dep-success-uuid" {
-			t.Errorf("expected deployment_id dep-success-uuid, got %q", evt.DeploymentID)
-		}
-		if evt.Repo != "azylman/aerial" || evt.CommitSHA != "headsha777" || evt.PRNumber != 535 || evt.TargetID != "1555405874565091380" {
-			t.Errorf("metadata missing in deploy_success: %+v", evt)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for deploy_success")
-	}
-}
-
-func TestMonitorDeploymentAsync_StaleVersionIgnored(t *testing.T) {
-	evtCh := make(chan HangarDeployEvent, 10)
-	var statusCalls int
-	var mu sync.Mutex
-
-	d := NewDaemon(DaemonConfig{
-		DeploymentPollInterval: 10 * time.Millisecond,
-		DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
-			evtCh <- evt
-			return nil
-		},
-		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-			if len(args) >= 2 && args[0] == "job" && args[1] == "status" {
-				mu.Lock()
-				statusCalls++
-				calls := statusCalls
-				mu.Unlock()
-
-				if calls < 3 {
-					// Stale deployment: version 2 < minVersion 3
-					return []byte(`{
-						"ID": "webhooks-router",
-						"JobVersion": 2,
-						"LatestDeployment": {
-							"ID": "dep-old-stale",
-							"JobVersion": 2,
-							"Status": "successful",
-							"StatusDescription": "old deployment"
-						}
-					}`), nil, nil
-				}
-
-				// Current deployment: version 3 >= minVersion 3
-				return []byte(`{
-					"ID": "webhooks-router",
-					"JobVersion": 3,
-					"LatestDeployment": {
-						"ID": "dep-new-3",
-						"JobVersion": 3,
-						"Status": "successful",
-						"StatusDescription": "new deployment finished"
-					}
-				}`), nil, nil
-			}
-			return []byte("OK"), nil, nil
-		},
-	})
-
-	baseEvt := HangarDeployEvent{
-		Event:   "deploy_started",
-		JobName: "webhooks-router",
-		Status:  "started",
-	}
-
-	d.MonitorDeploymentAsync("webhooks-router", 3, baseEvt)
-
-	select {
-	case evt := <-evtCh:
-		if evt.Event != "deploy_success" {
-			t.Errorf("expected deploy_success, got %q", evt.Event)
-		}
-		if evt.DeploymentID != "dep-new-3" {
-			t.Errorf("expected deployment_id dep-new-3, got %q", evt.DeploymentID)
-		}
-		mu.Lock()
-		finalCalls := statusCalls
-		mu.Unlock()
-		if finalCalls < 3 {
-			t.Errorf("expected at least 3 status calls before accepting version 3, got %d", finalCalls)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for deploy_success on minVersion")
-	}
-}
-
-func TestMonitorDeploymentAsync_SummaryRunningFallback(t *testing.T) {
-	evtCh := make(chan HangarDeployEvent, 10)
-
-	d := NewDaemon(DaemonConfig{
-		DeploymentPollInterval: 10 * time.Millisecond,
-		DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
-			evtCh <- evt
-			return nil
-		},
-		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-			if len(args) >= 2 && args[0] == "job" && args[1] == "status" {
-				return []byte(`{
-					"ID": "batch-job",
-					"JobVersion": 1,
-					"Summary": {
-						"Children": {
-							"Pending": 0,
-							"Running": 1,
-							"Dead": 0
-						}
-					}
-				}`), nil, nil
-			}
-			return []byte("OK"), nil, nil
-		},
-	})
-
-	baseEvt := HangarDeployEvent{
-		Event:   "deploy_started",
-		JobName: "batch-job",
-		Status:  "started",
-	}
-
-	d.MonitorDeploymentAsync("batch-job", 0, baseEvt)
-
-	select {
-	case evt := <-evtCh:
-		if evt.Event != "deploy_success" {
-			t.Errorf("expected deploy_success, got %q", evt.Event)
-		}
-		if evt.Details != "allocations running" {
-			t.Errorf("expected details 'allocations running', got %q", evt.Details)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for fallback deploy_success")
-	}
-}
-
-func TestMonitorDeploymentAsync_CancelledDeployment(t *testing.T) {
-	evtCh := make(chan HangarDeployEvent, 10)
-
-	d := NewDaemon(DaemonConfig{
-		DeploymentPollInterval: 10 * time.Millisecond,
-		DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
-			evtCh <- evt
-			return nil
-		},
-		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-			if len(args) >= 2 && args[0] == "job" && args[1] == "status" {
-				return []byte(`{
-					"ID": "cancelled-job",
-					"JobVersion": 1,
-					"LatestDeployment": {
-						"ID": "dep-cancelled-1",
-						"JobVersion": 1,
-						"Status": "cancelled",
-						"StatusDescription": "deployment superseded"
-					}
-				}`), nil, nil
-			}
-			return []byte("OK"), nil, nil
-		},
-	})
-
-	baseEvt := HangarDeployEvent{
-		Event:   "deploy_started",
-		JobName: "cancelled-job",
-		Status:  "started",
-	}
-
-	d.MonitorDeploymentAsync("cancelled-job", 0, baseEvt)
-
-	select {
-	case evt := <-evtCh:
-		if evt.Event != "deploy_failed" {
-			t.Errorf("expected deploy_failed, got %q", evt.Event)
-		}
-		if !strings.Contains(evt.Details, "cancelled") {
-			t.Errorf("expected details to mention cancelled, got %q", evt.Details)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for cancelled deploy_failed")
-	}
-}
-
-func TestMonitorDeploymentAsync_Timeout(t *testing.T) {
-	evtCh := make(chan HangarDeployEvent, 10)
-
-	d := NewDaemon(DaemonConfig{
-		DeploymentPollInterval: 100 * time.Millisecond,
-		DeploymentTimeout:      20 * time.Millisecond,
-		DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
-			evtCh <- evt
-			return nil
-		},
-		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-			return []byte(`{"ID": "timeout-job", "JobVersion": 1}`), nil, nil
-		},
-	})
-
-	baseEvt := HangarDeployEvent{
-		Event:   "deploy_started",
-		JobName: "timeout-job",
-		Status:  "started",
-	}
-
-	d.MonitorDeploymentAsync("timeout-job", 2, baseEvt)
-
-	select {
-	case evt := <-evtCh:
-		if evt.Event != "deploy_failed" {
-			t.Errorf("expected deploy_failed, got %q", evt.Event)
-		}
-		if evt.Status != "failed" {
-			t.Errorf("expected status failed, got %q", evt.Status)
-		}
-		if !strings.Contains(evt.Details, "timed out") {
-			t.Errorf("expected details to mention timed out, got %q", evt.Details)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for timeout deploy_failed event")
+		t.Fatalf("unexpected event from Hangar: %+v (deploy observation is delegated to webhooks-router)", evt)
+	case <-time.After(50 * time.Millisecond):
+		// Expected: no further events dispatched
 	}
 }
 
@@ -7876,13 +7637,12 @@ func TestReconcileNomadChanges_LifecycleEvents(t *testing.T) {
 		t.Fatal("timed out waiting for deploy_started")
 	}
 
+	// 2. Ensure deployment observation is delegated to webhooks-router
 	select {
 	case evt := <-evtCh:
-		if evt.Event != "deploy_success" {
-			t.Errorf("expected deploy_success, got %q", evt.Event)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for deploy_success")
+		t.Fatalf("unexpected event from Hangar: %+v (deploy observation is delegated to webhooks-router)", evt)
+	case <-time.After(50 * time.Millisecond):
+		// Expected: no further events dispatched
 	}
 }
 
@@ -8229,7 +7989,6 @@ func TestExecutorsAndDispatchers_EdgeCoverage(t *testing.T) {
 	// 3. DispatchDeployEvent & MonitorDeploymentAsync nil / panic safeguards
 	var nilDaemon *SyncDaemon
 	nilDaemon.DispatchDeployEvent(HangarDeployEvent{})
-	nilDaemon.MonitorDeploymentAsync("job", 0, HangarDeployEvent{})
 
 	dPanic := NewDaemon(DaemonConfig{
 		DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
@@ -8240,7 +7999,6 @@ func TestExecutorsAndDispatchers_EdgeCoverage(t *testing.T) {
 		},
 	})
 	dPanic.DispatchDeployEvent(HangarDeployEvent{JobName: "test-panic"})
-	dPanic.MonitorDeploymentAsync("test-panic", 0, HangarDeployEvent{JobName: "test-panic"})
 	time.Sleep(50 * time.Millisecond)
 }
 
@@ -8253,274 +8011,6 @@ func TestDaemonLoops_GracefulCancel(t *testing.T) {
 	d.StartReconcilerLoop(ctx)
 	cancel()
 	time.Sleep(50 * time.Millisecond)
-}
-
-func TestReconcileStartupDeployments_TableDriven(t *testing.T) {
-	tests := []struct {
-		name          string
-		nomadJSON     string
-		nomadErr      error
-		gitSHA        string
-		wantEvent     string
-		wantStatus    string
-		wantCommit    string
-		expectEvent   bool
-	}{
-		{
-			name: "fresh successful deployment dispatches deploy_success",
-			nomadJSON: fmt.Sprintf(`{
-				"ID": "hangar",
-				"JobVersion": 4,
-				"SubmitTime": %d,
-				"LatestDeployment": {
-					"ID": "dep-startup-success",
-					"JobVersion": 4,
-					"Status": "successful",
-					"StatusDescription": "Deployment completed successfully"
-				}
-			}`, time.Now().Add(-30*time.Second).UnixNano()),
-			gitSHA:      "commit-startup-1234",
-			wantEvent:   "deploy_success",
-			wantStatus:  "success",
-			wantCommit:  "commit-startup-1234",
-			expectEvent: true,
-		},
-		{
-			name: "fresh failed rollback deployment dispatches deploy_rollback",
-			nomadJSON: fmt.Sprintf(`{
-				"ID": "hangar",
-				"JobVersion": 5,
-				"SubmitTime": %d,
-				"LatestDeployment": {
-					"ID": "dep-startup-rollback",
-					"JobVersion": 5,
-					"Status": "failed",
-					"StatusDescription": "Deployment auto-reverted to version 4",
-					"TaskGroups": {
-						"hangar": { "AutoRevert": true }
-					}
-				}
-			}`, time.Now().Add(-20*time.Second).UnixNano()),
-			gitSHA:      "commit-startup-5678",
-			wantEvent:   "deploy_rollback",
-			wantStatus:  "rollback",
-			wantCommit:  "commit-startup-5678",
-			expectEvent: true,
-		},
-		{
-			name: "fresh failed deployment without rollback dispatches deploy_failed",
-			nomadJSON: fmt.Sprintf(`{
-				"ID": "hangar",
-				"JobVersion": 6,
-				"SubmitTime": %d,
-				"LatestDeployment": {
-					"ID": "dep-startup-failed",
-					"JobVersion": 6,
-					"Status": "failed",
-					"StatusDescription": "Deployment failed due to crash",
-					"TaskGroups": {
-						"hangar": { "AutoRevert": false }
-					}
-				}
-			}`, time.Now().Add(-10*time.Second).UnixNano()),
-			gitSHA:      "commit-startup-9999",
-			wantEvent:   "deploy_failed",
-			wantStatus:  "failed",
-			wantCommit:  "commit-startup-9999",
-			expectEvent: true,
-		},
-		{
-			name: "stale deployment older than 10m is ignored",
-			nomadJSON: fmt.Sprintf(`{
-				"ID": "hangar",
-				"JobVersion": 3,
-				"SubmitTime": %d,
-				"LatestDeployment": {
-					"ID": "dep-startup-stale",
-					"JobVersion": 3,
-					"Status": "successful",
-					"StatusDescription": "Deployment completed successfully"
-				}
-			}`, time.Now().Add(-25*time.Minute).UnixNano()),
-			gitSHA:      "commit-startup-old",
-			expectEvent: false,
-		},
-		{
-			name:      "nomad command error handled gracefully",
-			nomadJSON: "",
-			nomadErr:  fmt.Errorf("connection refused"),
-			expectEvent: false,
-		},
-		{
-			name:        "malformed nomad output handled gracefully",
-			nomadJSON:   "{invalid json output",
-			expectEvent: false,
-		},
-		{
-			name: "missing latest deployment handled gracefully",
-			nomadJSON: `{
-				"ID": "hangar",
-				"JobVersion": 1,
-				"Summary": { "Children": { "Running": 1 } }
-			}`,
-			expectEvent: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var mu sync.Mutex
-			var dispatched []HangarDeployEvent
-
-			d := NewDaemon(DaemonConfig{
-				ComposeDir: "/share/aerial",
-				DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
-					mu.Lock()
-					dispatched = append(dispatched, evt)
-					mu.Unlock()
-					return nil
-				},
-				NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-					if tt.nomadErr != nil {
-						return nil, nil, tt.nomadErr
-					}
-					return []byte(tt.nomadJSON), nil, nil
-				},
-				GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-					return []byte(tt.gitSHA + "\x00" + time.Now().Format(time.RFC3339)), nil, nil
-				},
-			})
-
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			defer cancel()
-
-			d.ReconcileStartupDeployments(ctx)
-			time.Sleep(50 * time.Millisecond)
-
-			mu.Lock()
-			count := len(dispatched)
-			var lastEvt HangarDeployEvent
-			if count > 0 {
-				lastEvt = dispatched[count-1]
-			}
-			mu.Unlock()
-
-			if tt.expectEvent {
-				if count == 0 {
-					t.Fatalf("expected dispatch event, got none")
-				}
-				if lastEvt.Event != tt.wantEvent {
-					t.Errorf("got Event %q, want %q", lastEvt.Event, tt.wantEvent)
-				}
-				if lastEvt.Status != tt.wantStatus {
-					t.Errorf("got Status %q, want %q", lastEvt.Status, tt.wantStatus)
-				}
-				if lastEvt.CommitSHA != tt.wantCommit {
-					t.Errorf("got CommitSHA %q, want %q", lastEvt.CommitSHA, tt.wantCommit)
-				}
-				if lastEvt.JobName != "hangar" {
-					t.Errorf("got JobName %q, want 'hangar'", lastEvt.JobName)
-				}
-			} else {
-				if count > 0 {
-					t.Errorf("expected no dispatch events, but got %d: %+v", count, lastEvt)
-				}
-			}
-		})
-	}
-}
-
-func TestReconcileStartupDeployments_RunningResumesMonitoring(t *testing.T) {
-	var mu sync.Mutex
-	var dispatched []HangarDeployEvent
-	callCount := 0
-
-	d := NewDaemon(DaemonConfig{
-		ComposeDir: "/share/aerial",
-		DeploymentPollInterval: 10 * time.Millisecond,
-		DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
-			mu.Lock()
-			dispatched = append(dispatched, evt)
-			mu.Unlock()
-			return nil
-		},
-		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-			mu.Lock()
-			callCount++
-			cur := callCount
-			mu.Unlock()
-
-			if cur == 1 {
-				// Startup check returns running
-				return []byte(fmt.Sprintf(`{
-					"ID": "hangar",
-					"JobVersion": 7,
-					"SubmitTime": %d,
-					"LatestDeployment": {
-						"ID": "dep-startup-running",
-						"JobVersion": 7,
-						"Status": "running",
-						"StatusDescription": "Allocation starting"
-					}
-				}`, time.Now().UnixNano())), nil, nil
-			}
-
-			// Polling check resolves to successful
-			return []byte(`{
-				"ID": "hangar",
-				"JobVersion": 7,
-				"LatestDeployment": {
-					"ID": "dep-startup-running",
-					"JobVersion": 7,
-					"Status": "successful",
-					"StatusDescription": "Deployment completed successfully"
-				}
-			}`), nil, nil
-		},
-		GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			return []byte("commit-running-resumed\x00" + time.Now().Format(time.RFC3339)), nil, nil
-		},
-	})
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	d.ReconcileStartupDeployments(ctx)
-
-	// Wait up to 1 second for polling to resolve
-	deadline := time.Now().Add(1 * time.Second)
-	var finalEvt HangarDeployEvent
-	found := false
-	for time.Now().Before(deadline) {
-		mu.Lock()
-		for _, e := range dispatched {
-			if e.Event == "deploy_success" {
-				finalEvt = e
-				found = true
-				break
-			}
-		}
-		mu.Unlock()
-		if found {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-
-	if !found {
-		t.Fatalf("expected deploy_success event after resumed monitoring, but none received")
-	}
-	if finalEvt.JobName != "hangar" {
-		t.Errorf("got JobName %q, want 'hangar'", finalEvt.JobName)
-	}
-	if finalEvt.DeploymentID != "dep-startup-running" {
-		t.Errorf("got DeploymentID %q, want 'dep-startup-running'", finalEvt.DeploymentID)
-	}
-}
-
-func TestReconcileStartupDeployments_NilDaemon(t *testing.T) {
-	var nilDaemon *SyncDaemon
-	nilDaemon.ReconcileStartupDeployments(context.Background())
 }
 
 func TestReconcileNomadChanges_SkipPurgeWhenDefinedInOtherRepo(t *testing.T) {
