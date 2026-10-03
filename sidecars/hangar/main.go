@@ -3410,6 +3410,10 @@ func (d *SyncDaemon) ExecuteImageReadyEvent(ctx context.Context, req ImageReadyE
 		baseEvt := HangarDeployEvent{
 			Event:     "deploy_started",
 			JobName:   job.JobName,
+			Repo:      req.Repo,
+			CommitSHA: req.CommitSHA,
+			PRNumber:  req.PRNumber,
+			TargetID:  req.TargetID,
 			Image:     req.Image,
 			Digest:    req.Digest,
 			Status:    "started",

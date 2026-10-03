@@ -2201,6 +2201,7 @@ type mockOutboundDispatcher struct {
 	mu                 sync.Mutex
 	gitPushCalls       []GitPushEventRequest
 	imageReadyCalls    []ImageReadyEventRequest
+	imageReadyCh       chan ImageReadyEventRequest
 	promptCalls        []PromptRequest
 	directMessageCalls []DirectMessageRequest
 	gitPushErr         error
@@ -2218,8 +2219,15 @@ func (m *mockOutboundDispatcher) DispatchGitPush(ctx context.Context, req GitPus
 
 func (m *mockOutboundDispatcher) DispatchImageReady(ctx context.Context, req ImageReadyEventRequest) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.imageReadyCalls = append(m.imageReadyCalls, req)
+	ch := m.imageReadyCh
+	m.mu.Unlock()
+	if ch != nil {
+		select {
+		case ch <- req:
+		default:
+		}
+	}
 	return m.imageReadyErr
 }
 
@@ -2242,6 +2250,14 @@ func (m *mockOutboundDispatcher) GitPushCalls() []GitPushEventRequest {
 	defer m.mu.Unlock()
 	copied := make([]GitPushEventRequest, len(m.gitPushCalls))
 	copy(copied, m.gitPushCalls)
+	return copied
+}
+
+func (m *mockOutboundDispatcher) ImageReadyCalls() []ImageReadyEventRequest {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	copied := make([]ImageReadyEventRequest, len(m.imageReadyCalls))
+	copy(copied, m.imageReadyCalls)
 	return copied
 }
 
@@ -2612,5 +2628,252 @@ func TestProcessHangarEvent_OutboundDispatch(t *testing.T) {
 	// 5. STRICT INVARIANT: Deployment events must NEVER invoke DispatchPrompt!
 	if pCalls := mockDisp.PromptCalls(); len(pCalls) != 0 {
 		t.Fatalf("STRICT INVARIANT VIOLATION: expected 0 prompt calls from deployment events, got %d", len(pCalls))
+	}
+}
+
+func TestResolveWorkflowRunImages(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. Successful jobs resolution mapping
+	mockJobs := GitHubWorkflowJobsResponse{
+		TotalCount: 7,
+		Jobs: []GitHubWorkflowJobItem{
+			{ID: 1, Name: "Detect Changed Microservices", Status: "completed", Conclusion: "success"},
+			{ID: 2, Name: "Run Service Unit Tests", Status: "completed", Conclusion: "success"},
+			{ID: 3, Name: "Build & Push Images to GHCR (brain)", Status: "completed", Conclusion: "success"},
+			{ID: 4, Name: "Build & Push Images to GHCR (webhooks-router)", Status: "completed", Conclusion: "success"},
+			{ID: 5, Name: "Build & Push Images to GHCR (custom-microservice)", Status: "completed", Conclusion: "success"},
+			{ID: 6, Name: "Build & Push Images to GHCR (failed-service)", Status: "completed", Conclusion: "failure"},
+			{ID: 7, Name: "Build & Push Images to GHCR (running-service)", Status: "in_progress", Conclusion: ""},
+		},
+	}
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/actions/runs/12345/jobs") {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(mockJobs)
+			return
+		}
+		if strings.Contains(r.URL.Path, "/actions/runs/403/jobs") {
+			w.Header().Set("X-RateLimit-Remaining", "0")
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		if strings.Contains(r.URL.Path, "/actions/runs/500/jobs") {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		if strings.Contains(r.URL.Path, "/actions/runs/999/jobs") {
+			w.Write([]byte("malformed json"))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer ts.Close()
+
+	srv := NewRouterServer(Config{GitHubAPIURL: ts.URL}, ts.Client())
+
+	// Success case
+	images, err := srv.resolveWorkflowRunImages(ctx, "azylman/aerial", 12345)
+	if err != nil {
+		t.Fatalf("expected resolution to succeed, got %v", err)
+	}
+	expected := []string{
+		"ghcr.io/azylman/aerial-brain:latest",
+		"ghcr.io/azylman/aerial-webhooks-router:latest",
+		"ghcr.io/azylman/aerial-custom-microservice:latest",
+	}
+	if len(images) != len(expected) {
+		t.Fatalf("expected %d images, got %d: %v", len(expected), len(images), images)
+	}
+	for i, exp := range expected {
+		if images[i] != exp {
+			t.Errorf("image[%d] expected %q, got %q", i, exp, images[i])
+		}
+	}
+
+	// Unprefixed repo normalization
+	imagesNorm, errNorm := srv.resolveWorkflowRunImages(ctx, "aerial", 12345)
+	if errNorm != nil || len(imagesNorm) != len(expected) {
+		t.Fatalf("expected normalized repo to resolve, got images=%v, err=%v", imagesNorm, errNorm)
+	}
+
+	// Invalid input cases
+	if _, err := srv.resolveWorkflowRunImages(ctx, "", 12345); err == nil {
+		t.Errorf("expected error for empty repo")
+	}
+	if _, err := srv.resolveWorkflowRunImages(ctx, "aerial", 0); err == nil {
+		t.Errorf("expected error for zero runID")
+	}
+
+	// Rate limit / Forbidden case
+	if _, err := srv.resolveWorkflowRunImages(ctx, "aerial", 403); err == nil {
+		t.Errorf("expected error on 403 rate limit")
+	}
+
+	// 500 Server error
+	if _, err := srv.resolveWorkflowRunImages(ctx, "aerial", 500); err == nil {
+		t.Errorf("expected error on 500 server error")
+	}
+
+	// Malformed JSON
+	if _, err := srv.resolveWorkflowRunImages(ctx, "aerial", 999); err == nil {
+		t.Errorf("expected error on malformed json")
+	}
+}
+
+func TestDispatchWorkflowRunImages_Integration(t *testing.T) {
+	mockJobs := GitHubWorkflowJobsResponse{
+		TotalCount: 2,
+		Jobs: []GitHubWorkflowJobItem{
+			{ID: 1, Name: "Build & Push Images to GHCR (brain)", Status: "completed", Conclusion: "success"},
+			{ID: 2, Name: "Build & Push Images to GHCR (webhooks-router)", Status: "completed", Conclusion: "success"},
+		},
+	}
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(mockJobs)
+	}))
+	defer ts.Close()
+
+	imageReadyCh := make(chan ImageReadyEventRequest, 10)
+	mockDisp := &mockOutboundDispatcher{
+		imageReadyCh: imageReadyCh,
+	}
+	srv := NewRouterServer(Config{GitHubAPIURL: ts.URL}, ts.Client())
+	srv.SetDispatcher(mockDisp)
+
+	mockReg := &mockPRRegistry{
+		resolvePRNum:    534,
+		resolveBranch:   "main",
+		resolveTargetID: "1555405874565091380",
+	}
+	srv.SetRegistry(mockReg)
+
+	ctx := context.Background()
+
+	// 1. Successful workflow_run on main dispatches image_ready for both images with metadata
+	wfSuccessPayload := `{
+		"action": "completed",
+		"workflow_run": {
+			"id": 8888,
+			"name": "Continuous Delivery",
+			"head_sha": "mainsha123",
+			"head_branch": "main",
+			"status": "completed",
+			"conclusion": "success",
+			"pull_requests": []
+		},
+		"repository": {"full_name": "azylman/aerial"}
+	}`
+
+	_, err := srv.ProcessGitHubEvent(ctx, "workflow_run", "del-wf-cd-success", []byte(wfSuccessPayload))
+	if err != nil {
+		t.Fatalf("ProcessGitHubEvent failed: %v", err)
+	}
+
+	for i := 0; i < 2; i++ {
+		select {
+		case <-imageReadyCh:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for image_ready dispatch %d/2", i+1)
+		}
+	}
+
+	calls := mockDisp.ImageReadyCalls()
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 image_ready dispatches, got %d: %+v", len(calls), calls)
+	}
+	if calls[0].Image != "ghcr.io/azylman/aerial-brain:latest" || calls[0].Repo != "azylman/aerial" || calls[0].CommitSHA != "mainsha123" || calls[0].PRNumber != 534 || calls[0].TargetID != "1555405874565091380" {
+		t.Errorf("unexpected calls[0]: %+v", calls[0])
+	}
+	if calls[1].Image != "ghcr.io/azylman/aerial-webhooks-router:latest" || calls[1].Repo != "azylman/aerial" || calls[1].CommitSHA != "mainsha123" || calls[1].PRNumber != 534 || calls[1].TargetID != "1555405874565091380" {
+		t.Errorf("unexpected calls[1]: %+v", calls[1])
+	}
+
+	// 2. Non-main branch does NOT dispatch
+	mockDisp.mu.Lock()
+	mockDisp.imageReadyCalls = nil
+	mockDisp.mu.Unlock()
+
+	wfBranchPayload := `{
+		"action": "completed",
+		"workflow_run": {
+			"id": 8889,
+			"name": "Continuous Delivery",
+			"head_sha": "featsha456",
+			"head_branch": "feat/my-feature",
+			"status": "completed",
+			"conclusion": "success",
+			"pull_requests": []
+		},
+		"repository": {"full_name": "azylman/aerial"}
+	}`
+	_, err = srv.ProcessGitHubEvent(ctx, "workflow_run", "del-wf-branch", []byte(wfBranchPayload))
+	if err != nil {
+		t.Fatalf("ProcessGitHubEvent failed: %v", err)
+	}
+	select {
+	case req := <-imageReadyCh:
+		t.Fatalf("unexpected image_ready dispatch on non-main branch: %+v", req)
+	default:
+	}
+	if len(mockDisp.ImageReadyCalls()) != 0 {
+		t.Errorf("expected 0 image_ready calls for non-main branch, got %d", len(mockDisp.ImageReadyCalls()))
+	}
+
+	// 3. Failed workflow_run does NOT dispatch image_ready
+	wfFailPayload := `{
+		"action": "completed",
+		"workflow_run": {
+			"id": 8890,
+			"name": "Continuous Delivery",
+			"head_sha": "failsha789",
+			"head_branch": "main",
+			"status": "completed",
+			"conclusion": "failure",
+			"pull_requests": []
+		},
+		"repository": {"full_name": "azylman/aerial"}
+	}`
+	_, err = srv.ProcessGitHubEvent(ctx, "workflow_run", "del-wf-fail", []byte(wfFailPayload))
+	if err != nil {
+		t.Fatalf("ProcessGitHubEvent failed: %v", err)
+	}
+	select {
+	case req := <-imageReadyCh:
+		t.Fatalf("unexpected image_ready dispatch on failed workflow: %+v", req)
+	default:
+	}
+	if len(mockDisp.ImageReadyCalls()) != 0 {
+		t.Errorf("expected 0 image_ready calls for failed workflow run, got %d", len(mockDisp.ImageReadyCalls()))
+	}
+
+	// 4. In-progress workflow_run does NOT dispatch image_ready
+	wfProgressPayload := `{
+		"action": "in_progress",
+		"workflow_run": {
+			"id": 8891,
+			"name": "Continuous Delivery",
+			"head_sha": "progsha111",
+			"head_branch": "main",
+			"status": "in_progress",
+			"conclusion": "",
+			"pull_requests": []
+		},
+		"repository": {"full_name": "azylman/aerial"}
+	}`
+	_, err = srv.ProcessGitHubEvent(ctx, "workflow_run", "del-wf-prog", []byte(wfProgressPayload))
+	if err != nil {
+		t.Fatalf("ProcessGitHubEvent failed: %v", err)
+	}
+	select {
+	case req := <-imageReadyCh:
+		t.Fatalf("unexpected image_ready dispatch on in_progress workflow: %+v", req)
+	default:
+	}
+	if len(mockDisp.ImageReadyCalls()) != 0 {
+		t.Errorf("expected 0 image_ready calls for in_progress workflow run, got %d", len(mockDisp.ImageReadyCalls()))
 	}
 }

@@ -911,8 +911,12 @@ type GitPushEventResponse struct {
 
 // ImageReadyEventRequest represents an incoming notification of a published container image.
 type ImageReadyEventRequest struct {
-	Image  string `json:"image"`
-	Digest string `json:"digest,omitempty"`
+	Image     string `json:"image"`
+	Digest    string `json:"digest,omitempty"`
+	Repo      string `json:"repo,omitempty"`
+	CommitSHA string `json:"commit_sha,omitempty"`
+	PRNumber  int    `json:"pr_number,omitempty"`
+	TargetID  string `json:"target_id,omitempty"`
 }
 
 // ImageReadyEventResponse represents the acknowledgment for an image ready event.

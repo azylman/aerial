@@ -483,8 +483,12 @@ type GitPushEventRequest struct {
 }
 
 type ImageReadyEventRequest struct {
-	Image  string `json:"image"`
-	Digest string `json:"digest,omitempty"`
+	Image     string `json:"image"`
+	Digest    string `json:"digest,omitempty"`
+	Repo      string `json:"repo,omitempty"`
+	CommitSHA string `json:"commit_sha,omitempty"`
+	PRNumber  int    `json:"pr_number,omitempty"`
+	TargetID  string `json:"target_id,omitempty"`
 }
 
 type PromptRequest struct {
@@ -1106,6 +1110,48 @@ func (s *RouterServer) dispatchGitPush(repo, ref, commit string) {
 	}(repo, ref, commit)
 }
 
+func (s *RouterServer) dispatchWorkflowRunImages(repo string, runID int64, headBranch, conclusion, headSHA, targetID string, prNum int) {
+	if s.dispatcher == nil {
+		return
+	}
+	if conclusion != "success" || !(headBranch == "main" || strings.HasPrefix(headBranch, "refs/heads/main")) {
+		return
+	}
+	go func(rp string, rID int64, sha, tID string, pr int) {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[webhooks-router] [dispatcher] PANIC recovered in dispatchWorkflowRunImages: %v", r)
+			}
+		}()
+		dispCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		images, err := s.resolveWorkflowRunImages(dispCtx, rp, rID)
+		if err != nil {
+			log.Printf("[webhooks-router] [dispatcher] error resolving images for workflow run %d (%s): %v", rID, rp, err)
+			return
+		}
+		if len(images) == 0 {
+			log.Printf("[webhooks-router] [dispatcher] no built images detected for workflow run %d (%s)", rID, rp)
+			return
+		}
+		for _, img := range images {
+			req := ImageReadyEventRequest{
+				Image:     img,
+				Repo:      rp,
+				CommitSHA: sha,
+				PRNumber:  pr,
+				TargetID:  tID,
+			}
+			if err := s.dispatcher.DispatchImageReady(dispCtx, req); err != nil {
+				log.Printf("[webhooks-router] [dispatcher] error dispatching image_ready to hangar for %s: %v", img, err)
+			} else {
+				log.Printf("[webhooks-router] [dispatcher] successfully dispatched image_ready to hangar for %s", img)
+			}
+		}
+	}(repo, runID, headSHA, targetID, prNum)
+}
+
 // GitHub Webhook Payloads and Resolution Types
 
 type GitHubPingPayload struct {
@@ -1178,6 +1224,35 @@ type GitHubWorkflowRunPayload struct {
 	Repository struct {
 		FullName string `json:"full_name"`
 	} `json:"repository"`
+}
+
+type GitHubWorkflowJobItem struct {
+	ID         int64  `json:"id"`
+	Name       string `json:"name"`
+	Status     string `json:"status"`
+	Conclusion string `json:"conclusion"`
+}
+
+type GitHubWorkflowJobsResponse struct {
+	TotalCount int                     `json:"total_count"`
+	Jobs       []GitHubWorkflowJobItem `json:"jobs"`
+}
+
+var buildJobRegex = regexp.MustCompile(`(?i)Build\s*(?:&|and)\s*Push(?:\s+Images\s+to\s+GHCR)?\s*\(([^)]+)\)`)
+
+var aerialServiceImageMap = map[string]string{
+	"brain":           "ghcr.io/azylman/aerial-brain:latest",
+	"scheduler-mcp":   "ghcr.io/azylman/aerial-scheduler-mcp:latest",
+	"discord-mcp":     "ghcr.io/azylman/aerial-discord-mcp:latest",
+	"docker-mcp":      "ghcr.io/azylman/aerial-docker-mcp:latest",
+	"github-mcp":      "ghcr.io/azylman/aerial-github-mcp:latest",
+	"nomad-mcp":       "ghcr.io/azylman/aerial-nomad-mcp:latest",
+	"infisical-mcp":   "ghcr.io/azylman/aerial-infisical-mcp:latest",
+	"dashboard":       "ghcr.io/azylman/aerial-dashboard:latest",
+	"docs":           "ghcr.io/azylman/aerial-docs:latest",
+	"proxy":           "ghcr.io/azylman/aerial-proxy:latest",
+	"hangar":          "ghcr.io/azylman/aerial-hangar:latest",
+	"webhooks-router": "ghcr.io/azylman/aerial-webhooks-router:latest",
 }
 
 type GitHubCommit struct {
@@ -1528,6 +1603,11 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 				}
 			}
 		}
+
+		if p.Action == "completed" && p.WorkflowRun.Status == "completed" && p.WorkflowRun.Conclusion == "success" && (p.WorkflowRun.HeadBranch == "main" || strings.HasPrefix(p.WorkflowRun.HeadBranch, "refs/heads/main")) {
+			s.dispatchWorkflowRunImages(res.Repo, p.WorkflowRun.ID, p.WorkflowRun.HeadBranch, p.WorkflowRun.Conclusion, res.HeadSHA, res.TargetID, res.PRNumber)
+		}
+
 		return res, nil
 
 	case "push":
@@ -1668,6 +1748,86 @@ func (s *RouterServer) resolvePRFromCommitSHA(ctx context.Context, repo, sha str
 	}
 
 	return prs[0].Number, prs[0].Head.Ref, nil
+}
+
+func (s *RouterServer) resolveWorkflowRunImages(ctx context.Context, repo string, runID int64) ([]string, error) {
+	if repo == "" || runID <= 0 {
+		return nil, fmt.Errorf("invalid repo or runID for workflow run images resolution")
+	}
+
+	repo = normalizeRepo(repo)
+
+	apiURL := s.cfg.GitHubAPIURL
+	if apiURL == "" {
+		apiURL = "https://api.github.com"
+	}
+
+	endpoint := fmt.Sprintf("%s/repos/%s/actions/runs/%d/jobs?per_page=100", apiURL, repo, runID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create github api request: %w", err)
+	}
+
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+	if s.cfg.GitHubToken != "" {
+		req.Header.Set("Authorization", "token "+s.cfg.GitHubToken)
+	}
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("github api request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusForbidden {
+		remaining := resp.Header.Get("X-RateLimit-Remaining")
+		log.Printf("[webhooks-router] [github] WARN: GitHub API 403 Forbidden in resolveWorkflowRunImages (rate-limited? X-RateLimit-Remaining=%s)", remaining)
+		return nil, fmt.Errorf("github api rate limit or forbidden (remaining: %s)", remaining)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("github api returned status %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 5<<20))
+	if err != nil {
+		return nil, fmt.Errorf("read github api response: %w", err)
+	}
+
+	var jobsResp GitHubWorkflowJobsResponse
+	if err := json.Unmarshal(body, &jobsResp); err != nil {
+		return nil, fmt.Errorf("unmarshal github api workflow jobs: %w", err)
+	}
+
+	owner := "azylman"
+	parts := strings.Split(repo, "/")
+	if len(parts) == 2 {
+		owner = strings.ToLower(parts[0])
+	}
+
+	seen := make(map[string]struct{})
+	var images []string
+
+	for _, job := range jobsResp.Jobs {
+		if job.Status != "completed" || job.Conclusion != "success" {
+			continue
+		}
+		m := buildJobRegex.FindStringSubmatch(job.Name)
+		if len(m) < 2 {
+			continue
+		}
+		service := strings.TrimSpace(m[1])
+		img, ok := aerialServiceImageMap[service]
+		if !ok {
+			img = fmt.Sprintf("ghcr.io/%s/aerial-%s:latest", owner, service)
+		}
+		if _, exists := seen[img]; !exists {
+			seen[img] = struct{}{}
+			images = append(images, img)
+		}
+	}
+
+	return images, nil
 }
 
 func (s *RouterServer) getInfisicalToken(ctx context.Context) (string, error) {
