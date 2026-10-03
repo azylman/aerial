@@ -5330,9 +5330,9 @@ func TestNomadImagePollingAndRestart_Hermetic(t *testing.T) {
 	var restartedJob string
 
 	mockNomad := func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-		if len(args) >= 4 && args[0] == "job" && args[1] == "restart" && args[2] == "-reschedule" {
+		if len(args) >= 4 && args[0] == "job" && args[1] == "restart" {
 			restartCalled = true
-			restartedJob = args[3]
+			restartedJob = args[len(args)-1]
 			return []byte("Job restart scheduled\n"), nil, nil
 		}
 		return nil, nil, nil
@@ -6845,8 +6845,8 @@ job "svc" {
 
 	var restartedJob string
 	mockNomad := func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-		if len(args) >= 4 && args[0] == "job" && args[1] == "restart" && args[2] == "-reschedule" {
-			restartedJob = args[3]
+		if len(args) >= 4 && args[0] == "job" && args[1] == "restart" {
+			restartedJob = args[len(args)-1]
 			return []byte("Restarted"), nil, nil
 		}
 		return nil, nil, nil
