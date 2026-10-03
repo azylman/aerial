@@ -33,6 +33,9 @@ job "aerial-core-db-migrate" {
       config {
         image        = "arigaio/atlas:latest"
         network_mode = "host"
+        healthchecks {
+          disable = true
+        }
         command      = "migrate"
         args = [
           "apply",

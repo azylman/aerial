@@ -36,6 +36,9 @@ job "cadvisor" {
         dns_search_domains = ["aerial"]
         image        = "gcr.io/cadvisor/cadvisor:v0.49.1"
         network_mode = "host"
+        healthchecks {
+          disable = true
+        }
         security_opt = ["no-new-privileges:true"]
         volumes = [
           "/:/rootfs:ro",

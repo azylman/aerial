@@ -38,6 +38,9 @@ job "postgres" {
         dns_search_domains = ["aerial"]
         image        = "pgvector/pgvector:pg16"
         network_mode = "host"
+        healthchecks {
+          disable = true
+        }
         mounts = [
           {
             type     = "volume"

@@ -55,6 +55,9 @@ job "brain" {
         force_pull   = true
         network_mode = "host"
         shm_size     = 536870912
+        healthchecks {
+          disable = true
+        }
 
         mounts = [
           {

@@ -36,6 +36,9 @@ job "docs" {
         dns_search_domains = ["aerial"]
         image        = "ghcr.io/azylman/aerial-docs:latest"
         network_mode = "host"
+        healthchecks {
+          disable = true
+        }
         command      = "nginx"
         args         = ["-g", "daemon off;", "-c", "/local/nginx.conf"]
         volumes = [

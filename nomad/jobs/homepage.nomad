@@ -36,6 +36,9 @@ job "homepage" {
         dns_search_domains = ["aerial"]
         image        = "ghcr.io/gethomepage/homepage:latest"
         network_mode = "host"
+        healthchecks {
+          disable = true
+        }
         entrypoint   = ["/bin/sh", "/app/core-homepage/entrypoint.sh"]
         volumes = [
           "/var/run/docker.sock:/var/run/docker.sock:ro",

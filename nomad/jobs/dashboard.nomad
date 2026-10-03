@@ -37,6 +37,9 @@ job "dashboard" {
         image        = "ghcr.io/azylman/aerial-dashboard:latest"
         force_pull   = true
         network_mode = "host"
+        healthchecks {
+          disable = true
+        }
         volumes = [
           "/var/run/docker.sock:/var/run/docker.sock:ro",
           "/mnt/data/supervisor/share/aerial-config:/share/aerial-config:ro"
@@ -45,6 +48,7 @@ job "dashboard" {
 
       env {
         CONFIG_PATH = "/share/aerial-config/services/dashboard/dashboard.yaml"
+        NOMAD_ADDR  = "http://127.0.0.1:4646"
       }
 
       template {

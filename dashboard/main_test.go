@@ -4596,3 +4596,266 @@ func TestGitHubPoller_DynamicHangarDiscovery(t *testing.T) {
 	nilPoller.SetHangarURL("http://example.com")
 }
 
+
+
+func TestFetchNomadClusterState(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("success", func(t *testing.T) {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				http.Error(w, "bad method", http.StatusMethodNotAllowed)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/v1/jobs":
+				if !strings.Contains(r.URL.RawQuery, "Type") {
+					t.Errorf("expected filter query on jobs: %s", r.URL.RawQuery)
+				}
+				w.Write([]byte(`[{"ID":"brain","Type":"service","Status":"running"}]`))
+			case "/v1/allocations":
+				if !strings.Contains(r.URL.RawQuery, "ClientStatus") {
+					t.Errorf("expected filter query on allocs: %s", r.URL.RawQuery)
+				}
+				w.Write([]byte(`[{"ID":"alloc-1","JobID":"brain","ClientStatus":"running","CreateTime":1775240000000000000,"DeploymentStatus":{"Healthy":true}}]`))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer ts.Close()
+
+		services, err := fetchNomadClusterState(ctx, ts.URL)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(services) != 1 {
+			t.Fatalf("expected 1 service, got %d", len(services))
+		}
+		if services[0].Name != "brain" || services[0].Status != "healthy" {
+			t.Errorf("unexpected service: %+v", services[0])
+		}
+	})
+
+	t.Run("empty nomad address", func(t *testing.T) {
+		_, err := fetchNomadClusterState(ctx, "   ")
+		if err == nil {
+			t.Fatal("expected error for empty address")
+		}
+	})
+
+	t.Run("invalid url", func(t *testing.T) {
+		_, err := fetchNomadClusterState(ctx, "http://")
+		if err == nil {
+			t.Fatal("expected error for invalid url")
+		}
+	})
+
+	t.Run("jobs 500 error", func(t *testing.T) {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+		}))
+		defer ts.Close()
+
+		_, err := fetchNomadClusterState(ctx, ts.URL)
+		if err == nil || !strings.Contains(err.Error(), "nomad jobs returned HTTP 500") {
+			t.Fatalf("expected jobs 500 error, got: %v", err)
+		}
+	})
+
+	t.Run("allocs 500 error", func(t *testing.T) {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if r.URL.Path == "/v1/jobs" {
+				w.Write([]byte(`[{"ID":"brain","Type":"service"}]`))
+				return
+			}
+			http.Error(w, "allocs failure", http.StatusInternalServerError)
+		}))
+		defer ts.Close()
+
+		_, err := fetchNomadClusterState(ctx, ts.URL)
+		if err == nil || !strings.Contains(err.Error(), "nomad allocs returned HTTP 500") {
+			t.Fatalf("expected allocs 500 error, got: %v", err)
+		}
+	})
+
+	t.Run("jobs malformed json", func(t *testing.T) {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if r.URL.Path == "/v1/jobs" {
+				w.Write([]byte(`not json`))
+				return
+			}
+			w.Write([]byte(`[]`))
+		}))
+		defer ts.Close()
+
+		_, err := fetchNomadClusterState(ctx, ts.URL)
+		if err == nil {
+			t.Fatal("expected error on malformed jobs json")
+		}
+	})
+
+	t.Run("network error", func(t *testing.T) {
+		_, err := fetchNomadClusterState(ctx, "http://127.0.0.1:59999")
+		if err == nil {
+			t.Fatal("expected network error")
+		}
+	})
+}
+
+func TestStatusHandler_NomadAndFallback(t *testing.T) {
+	t.Run("uses nomad services on success", func(t *testing.T) {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/v1/jobs":
+				w.Write([]byte(`[{"ID":"nomad-brain","Type":"service","Status":"running"},{"ID":"nomad-proxy","Type":"service","Status":"running"}]`))
+			case "/v1/allocations":
+				w.Write([]byte(`[
+					{"ID":"a1","JobID":"nomad-brain","ClientStatus":"running","DeploymentStatus":{"Healthy":true}},
+					{"ID":"a2","JobID":"nomad-proxy","ClientStatus":"running","DeploymentStatus":{"Healthy":true}}
+				]`))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer ts.Close()
+
+		handler := statusHandler("", "", "", "testcommit", ts.URL)
+		req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected HTTP 200, got %d", rec.Code)
+		}
+
+		var resp ClusterResponse
+		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			t.Fatalf("failed to decode response: %v", err)
+		}
+
+		if len(resp.Services) != 2 {
+			t.Fatalf("expected 2 services from Nomad, got %d: %+v", len(resp.Services), resp.Services)
+		}
+		if resp.Services[0].Name != "nomad-brain" || resp.Services[1].Name != "nomad-proxy" {
+			t.Errorf("unexpected services: %+v", resp.Services)
+		}
+	})
+
+	t.Run("falls back to docker when nomad fails", func(t *testing.T) {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "server error", http.StatusInternalServerError)
+		}))
+		defer ts.Close()
+
+		handler := statusHandler("", "", "", "testcommit", ts.URL)
+		req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected HTTP 200, got %d", rec.Code)
+		}
+
+		var resp ClusterResponse
+		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			t.Fatalf("failed to decode response: %v", err)
+		}
+
+		// Because Docker socket is unreachable in unit test environment, fallback list is used
+		if len(resp.Services) == 0 {
+			t.Fatal("expected fallback services, got empty")
+		}
+		foundBrain := false
+		for _, s := range resp.Services {
+			if s.Name == "brain" {
+				foundBrain = true
+				break
+			}
+		}
+		if !foundBrain {
+			t.Errorf("expected fallback to include brain, got: %+v", resp.Services)
+		}
+	})
+
+	t.Run("falls back to docker when nomad returns empty services", func(t *testing.T) {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`[]`))
+		}))
+		defer ts.Close()
+
+		handler := statusHandler("", "", "", "testcommit", ts.URL)
+		req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected HTTP 200, got %d", rec.Code)
+		}
+
+		var resp ClusterResponse
+		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			t.Fatalf("failed to decode response: %v", err)
+		}
+		if len(resp.Services) == 0 {
+			t.Fatal("expected fallback services when nomad returns 0 services")
+		}
+	})
+}
+
+func TestNomadAddrConfigResolution(t *testing.T) {
+	t.Run("resolves from env lookup", func(t *testing.T) {
+		lookup := func(k string) string {
+			if k == "NOMAD_ADDR" {
+				return "http://10.1.2.3:4646"
+			}
+			return ""
+		}
+		cfg := NewDashboardConfigFromLookup(lookup)
+		if cfg.NomadAddr != "http://10.1.2.3:4646" {
+			t.Errorf("expected NomadAddr http://10.1.2.3:4646, got %q", cfg.NomadAddr)
+		}
+	})
+
+	t.Run("resolves from yaml config", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		cfgFile := filepath.Join(tmpDir, "dashboard.yaml")
+		if err := os.WriteFile(cfgFile, []byte("nomad_addr: http://10.9.8.7:4646\n"), 0644); err != nil {
+			t.Fatalf("failed to write test yaml: %v", err)
+		}
+
+		lookup := func(k string) string {
+			if k == "CONFIG_PATH" {
+				return cfgFile
+			}
+			return ""
+		}
+		cfg := NewDashboardConfigFromLookup(lookup)
+		if cfg.NomadAddr != "http://10.9.8.7:4646" {
+			t.Errorf("expected NomadAddr http://10.9.8.7:4646 from yaml, got %q", cfg.NomadAddr)
+		}
+	})
+
+	t.Run("defaults to empty string under test.v", func(t *testing.T) {
+		lookup := func(k string) string { return "" }
+		cfg := NewDashboardConfigFromLookup(lookup)
+		if cfg.NomadAddr != "" {
+			t.Errorf("expected empty NomadAddr under test, got %q", cfg.NomadAddr)
+		}
+	})
+
+	t.Run("setup dashboard mux passes nomadAddr", func(t *testing.T) {
+		cfg := DashboardConfig{
+			Port:      "8080",
+			NomadAddr: "http://127.0.0.1:4646",
+		}
+		handler := SetupDashboardMux(cfg, nil)
+		if handler == nil {
+			t.Fatal("expected non-nil mux handler")
+		}
+	})
+}

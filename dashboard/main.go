@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -341,6 +342,11 @@ var dockerSocketClient = &http.Client{
 			return (&net.Dialer{Timeout: 1 * time.Second}).DialContext(ctx, "unix", "/var/run/docker.sock")
 		},
 	},
+}
+
+// HTTP client for Nomad cluster state inspection
+var nomadHTTPClient = &http.Client{
+	Timeout: 3 * time.Second,
 }
 
 type DockerContainerHealth = struct {
@@ -984,6 +990,64 @@ func fetchDockerClusterState(ctx context.Context) ([]ServiceStatus, []DockerCont
 	return services, rawContainers, nil
 }
 
+func fetchNomadClusterState(ctx context.Context, nomadAddr string) ([]ServiceStatus, error) {
+	cleanNomadAddr := strings.TrimRight(strings.TrimSpace(nomadAddr), "/")
+	if cleanNomadAddr == "" {
+		return nil, fmt.Errorf("empty nomad address")
+	}
+
+	reqCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	jobsURL := cleanNomadAddr + "/v1/jobs?filter=" + url.QueryEscape(`Type=="service"`)
+	reqJobs, err := http.NewRequestWithContext(reqCtx, http.MethodGet, jobsURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	reqJobs.Header.Set("Accept", "application/json")
+
+	respJobs, err := nomadHTTPClient.Do(reqJobs)
+	if err != nil {
+		return nil, err
+	}
+	defer respJobs.Body.Close()
+	defer drainAndClose(respJobs.Body, "nomad jobs response body")
+
+	if respJobs.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("nomad jobs returned HTTP %d", respJobs.StatusCode)
+	}
+
+	jobsData, err := io.ReadAll(respJobs.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	allocsURL := cleanNomadAddr + "/v1/allocations?filter=" + url.QueryEscape(`ClientStatus=="running"`)
+	reqAllocs, err := http.NewRequestWithContext(reqCtx, http.MethodGet, allocsURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	reqAllocs.Header.Set("Accept", "application/json")
+
+	respAllocs, err := nomadHTTPClient.Do(reqAllocs)
+	if err != nil {
+		return nil, err
+	}
+	defer respAllocs.Body.Close()
+	defer drainAndClose(respAllocs.Body, "nomad allocs response body")
+
+	if respAllocs.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("nomad allocs returned HTTP %d", respAllocs.StatusCode)
+	}
+
+	allocsData, err := io.ReadAll(respAllocs.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	return ParseNomadClusterState(jobsData, allocsData, time.Now().UTC())
+}
+
 func fetchActiveTasksFromBrain(ctx context.Context, brainURL string) ([]ActiveTaskStatus, error) {
 	if brainURL == "" {
 		return []ActiveTaskStatus{}, nil
@@ -1180,14 +1244,18 @@ func fetchGitSyncStatus(ctx context.Context, gitsyncURL string) GitSyncStatusRes
 	return status
 }
 
-func statusHandler(brainURL, gitsyncURL, configPath, gitCommit string) http.HandlerFunc {
+func statusHandler(brainURL, gitsyncURL, configPath, gitCommit string, optionalNomadAddr ...string) http.HandlerFunc {
+	nomadAddr := ""
+	if len(optionalNomadAddr) > 0 {
+		nomadAddr = strings.TrimSpace(optionalNomadAddr[0])
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 			return
 		}
 
-		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(r.Context(), 4*time.Second)
 		defer cancel()
 
 		now := time.Now().UTC()
@@ -1237,6 +1305,15 @@ func statusHandler(brainURL, gitsyncURL, configPath, gitCommit string) http.Hand
 				{Name: "autoheal", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
 				{Name: "proxy", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
 				{Name: "dashboard", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
+			}
+		}
+
+		if nomadAddr != "" {
+			nomadServices, nomadErr := fetchNomadClusterState(ctx, nomadAddr)
+			if nomadErr == nil && len(nomadServices) > 0 {
+				services = nomadServices
+			} else if nomadErr != nil {
+				log.Printf("[dashboard] Warning: Failed to fetch Nomad cluster state (%s): %v, falling back to Docker", nomadAddr, nomadErr)
 			}
 		}
 
@@ -1677,6 +1754,7 @@ type DashboardConfig struct {
 	HangarURL  string
 	ConfigPath string
 	APIBaseURL string
+	NomadAddr  string
 }
 
 // DashboardYAMLConfig defines the declarative file schema for dashboard.yaml.
@@ -1688,6 +1766,7 @@ type DashboardYAMLConfig struct {
 	GHRepo     string   `yaml:"github_repo"`
 	GHRepos    []string `yaml:"github_repos"`
 	ConfigPath string   `yaml:"config_path"`
+	NomadAddr  string   `yaml:"nomad_addr"`
 }
 
 // NewDashboardConfigFromLookup parses DashboardConfig using a key lookup function with YAML config file support.
@@ -1792,6 +1871,14 @@ func NewDashboardConfigFromLookup(lookup func(string) string) DashboardConfig {
 		gitCommit = "latest"
 	}
 
+	nomadAddr := strings.TrimSpace(lookup("NOMAD_ADDR"))
+	if nomadAddr == "" && ycfg.NomadAddr != "" {
+		nomadAddr = strings.TrimSpace(ycfg.NomadAddr)
+	}
+	if nomadAddr == "" && flag.Lookup("test.v") == nil {
+		nomadAddr = "http://127.0.0.1:4646"
+	}
+
 	return DashboardConfig{
 		Port:       port,
 		BrainURL:   brainURL,
@@ -1802,6 +1889,7 @@ func NewDashboardConfigFromLookup(lookup func(string) string) DashboardConfig {
 		HangarURL:  hangarURL,
 		ConfigPath: configPath,
 		GitCommit:  gitCommit,
+		NomadAddr:  nomadAddr,
 	}
 }
 
@@ -1819,8 +1907,8 @@ func SetupDashboardMux(cfg DashboardConfig, assetReg *AssetRegistry) http.Handle
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/dashboard/health", healthHandler)
-	mux.HandleFunc("/api/status", statusHandler(cfg.BrainURL, cfg.GitSyncURL, cfg.ConfigPath, cfg.GitCommit))
-	mux.HandleFunc("/dashboard/api/status", statusHandler(cfg.BrainURL, cfg.GitSyncURL, cfg.ConfigPath, cfg.GitCommit))
+	mux.HandleFunc("/api/status", statusHandler(cfg.BrainURL, cfg.GitSyncURL, cfg.ConfigPath, cfg.GitCommit, cfg.NomadAddr))
+	mux.HandleFunc("/dashboard/api/status", statusHandler(cfg.BrainURL, cfg.GitSyncURL, cfg.ConfigPath, cfg.GitCommit, cfg.NomadAddr))
 	mux.HandleFunc("/api/facts", factsHandler(cfg.BrainURL))
 	mux.HandleFunc("/dashboard/api/facts", factsHandler(cfg.BrainURL))
 	mux.HandleFunc("/api/schedules", schedulesHandler(cfg.BrainURL))

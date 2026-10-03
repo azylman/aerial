@@ -36,6 +36,9 @@ job "node-exporter" {
         dns_search_domains = ["aerial"]
         image        = "prom/node-exporter:v1.8.2"
         network_mode = "host"
+        healthchecks {
+          disable = true
+        }
         security_opt = ["no-new-privileges:true"]
         volumes = [
           "/proc:/host/proc:ro",

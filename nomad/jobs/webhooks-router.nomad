@@ -37,6 +37,9 @@ job "webhooks-router" {
         image        = "ghcr.io/azylman/aerial-webhooks-router:latest"
         network_mode = "host"
         force_pull   = true
+        healthchecks {
+          disable = true
+        }
       }
 
       env {

@@ -36,6 +36,9 @@ job "postgres-backup" {
         dns_search_domains = ["aerial"]
         image        = "prodrigestivill/postgres-backup-local:16"
         network_mode = "host"
+        healthchecks {
+          disable = true
+        }
         volumes = [
           "/mnt/data/supervisor/share/Aerial/backups/postgres:/backups"
         ]

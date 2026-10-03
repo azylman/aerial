@@ -36,6 +36,9 @@ job "grafana" {
         dns_search_domains = ["aerial"]
         image        = "grafana/grafana:11.1.0"
         network_mode = "host"
+        healthchecks {
+          disable = true
+        }
         security_opt = ["no-new-privileges:true"]
         volumes = [
           "/mnt/data/supervisor/share/aerial:/share/aerial:ro",
