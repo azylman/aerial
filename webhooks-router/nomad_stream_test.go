@@ -199,6 +199,78 @@ func TestNomadStreamSubscriber_AllocationRunning(t *testing.T) {
 	}
 }
 
+func TestNomadStreamSubscriber_DeploymentFailure(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	streamData := strings.Join([]string{
+		`{"Index":1003,"Events":[{"Topic":"Deployment","Type":"DeploymentStatusUpdate","Payload":{"Deployment":{"ID":"dep-fail-1","JobID":"brain","Status":"failed","StatusDescription":"Allocation failed health check: connection refused on port 8080"}}}]}`,
+	}, "\n") + "\n"
+
+	nomadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(streamData))
+	}))
+	defer nomadServer.Close()
+
+	mockReg := &mockPRRegistry{
+		deployFailedJobTargetID: "1555405874565091380",
+		deployFailedJobPRNum:    553,
+		deployFailedJobMergeSHA: "sha123456",
+		deployFailedJobRepo:     "azylman/aerial",
+		deployFailedJobUpdated:  true,
+	}
+	mockDisp := &mockOutboundDispatcher{}
+
+	srv := NewRouterServer(Config{NomadAddr: nomadServer.URL}, nil)
+	srv.SetRegistry(mockReg)
+	srv.SetDispatcher(mockDisp)
+
+	sub := NewNomadStreamSubscriber(srv)
+	sub.SetReconnectDelay(10*time.Millisecond, 50*time.Millisecond)
+
+	err := sub.consumeStream(ctx)
+	if err != nil && !strings.Contains(err.Error(), "EOF") {
+		t.Fatalf("unexpected stream error: %v", err)
+	}
+
+	if len(mockReg.deployFailedJobCalls) != 1 || mockReg.deployFailedJobCalls[0] != "brain" {
+		t.Fatalf("expected deployFailedJobCalls [brain], got %v", mockReg.deployFailedJobCalls)
+	}
+
+	// Verify prompt was dispatched (NOT direct message)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		mockDisp.mu.Lock()
+		count := len(mockDisp.promptCalls)
+		mockDisp.mu.Unlock()
+		if count > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	pCalls := mockDisp.PromptCalls()
+	if len(pCalls) != 1 {
+		t.Fatalf("expected 1 prompt call, got %d", len(pCalls))
+	}
+	if pCalls[0].ChannelID != "1555405874565091380" {
+		t.Errorf("expected target ID 1555405874565091380, got %s", pCalls[0].ChannelID)
+	}
+	if !strings.Contains(pCalls[0].Prompt, "Nomad deployment for job brain failed") {
+		t.Errorf("unexpected prompt content: %s", pCalls[0].Prompt)
+	}
+	if !strings.Contains(pCalls[0].Prompt, "Allocation failed health check: connection refused on port 8080") {
+		t.Errorf("expected error details in prompt: %s", pCalls[0].Prompt)
+	}
+	if !strings.Contains(pCalls[0].Prompt, "Please investigate and fix the deployment failure.") {
+		t.Errorf("expected directive in prompt: %s", pCalls[0].Prompt)
+	}
+	if len(mockDisp.DirectMessageCalls()) != 0 {
+		t.Fatalf("expected 0 direct message calls on failure, got %d", len(mockDisp.DirectMessageCalls()))
+	}
+}
+
 func TestNomadStreamSubscriber_IndexResetOnOutOfBounds(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
