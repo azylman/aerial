@@ -325,6 +325,8 @@ type PRRegistryUpdater interface {
 	AtomicTransitionConflict(ctx context.Context, repo string, prNumber int) (targetID string, updated bool, err error)
 	TransitionDeploying(ctx context.Context, repo string, prNumber int, jobs []string) (targetID string, err error)
 	AtomicTransitionDeployedByJob(ctx context.Context, jobName string) (targetID string, prNumber int, mergeSHA, repo string, updated bool, err error)
+	AtomicTransitionDeployFailed(ctx context.Context, repo string, prNumber int) (targetID string, updated bool, err error)
+	AtomicTransitionDeployFailedByJob(ctx context.Context, jobName string) (targetID string, prNumber int, mergeSHA, repo string, updated bool, err error)
 	ListDeployingPRs(ctx context.Context) ([]DeployingPR, error)
 }
 
@@ -724,6 +726,74 @@ func (r *PostgresPRRegistry) AtomicTransitionDeployedByJob(ctx context.Context, 
 		return "", 0, "", "", false, fmt.Errorf("commit pr deployed tx: %w", err)
 	}
 
+	return targetID, prNum, mergeSHA, repoOut, true, nil
+}
+
+func (r *PostgresPRRegistry) AtomicTransitionDeployFailed(ctx context.Context, repo string, prNumber int) (string, bool, error) {
+	repo = normalizeRepo(repo)
+	if repo == "" || prNumber <= 0 {
+		return "", false, nil
+	}
+	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	query := `
+		UPDATE pr_registry
+		SET status = 'deploy_failed',
+			updated_at = CURRENT_TIMESTAMP
+		WHERE repo = $1 AND pr_number = $2 AND status = 'deploying'
+		RETURNING target_id;
+	`
+	var targetID string
+	err := r.pool.QueryRow(qCtx, query, repo, prNumber).Scan(&targetID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("atomic transition deploy_failed: %w", err)
+	}
+	return targetID, true, nil
+}
+
+func (r *PostgresPRRegistry) AtomicTransitionDeployFailedByJob(ctx context.Context, jobName string) (string, int, string, string, bool, error) {
+	jobName = strings.TrimSpace(jobName)
+	if jobName == "" {
+		return "", 0, "", "", false, nil
+	}
+	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	selectQuery := `
+		SELECT id, target_id, pr_number, COALESCE(merge_sha, ''), repo
+		FROM pr_registry
+		WHERE status = 'deploying' AND (metadata->'jobs' ? $1 OR metadata->>'job' = $1)
+		ORDER BY updated_at DESC
+		LIMIT 1;
+	`
+	var id int64
+	var targetID, mergeSHA, repoOut string
+	var prNum int
+	err := r.pool.QueryRow(qCtx, selectQuery, jobName).Scan(&id, &targetID, &prNum, &mergeSHA, &repoOut)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", 0, "", "", false, nil
+	}
+	if err != nil {
+		return "", 0, "", "", false, fmt.Errorf("select deploying pr for failure: %w", err)
+	}
+
+	updateQuery := `
+		UPDATE pr_registry
+		SET status = 'deploy_failed',
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE id = $1 AND status = 'deploying';
+	`
+	tag, err := r.pool.Exec(qCtx, updateQuery, id)
+	if err != nil {
+		return "", 0, "", "", false, fmt.Errorf("update pr deploy_failed: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return "", 0, "", "", false, nil
+	}
 	return targetID, prNum, mergeSHA, repoOut, true, nil
 }
 
@@ -1313,50 +1383,74 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 		}(targetID, msg)
 	} else if evt.Event == "deploy_rollback" && IsValidDiscordSnowflake(evt.TargetID) && s.dispatcher != nil {
 		targetID := evt.TargetID
-		details := evt.Details
-		runes := []rune(details)
-		if len(runes) > 500 {
-			details = string(runes[:500])
+		if s.registry != nil && evt.PRNumber > 0 {
+			tID, updated, err := s.registry.AtomicTransitionDeployFailed(ctx, evt.Repo, evt.PRNumber)
+			if err != nil {
+				log.Printf("[webhooks-router] [registry] error transitioning deploy_rollback: %v", err)
+			} else if !updated {
+				return &evt
+			} else if tID != "" {
+				targetID = tID
+			}
 		}
-		msg := fmt.Sprintf("Deployment failed and rolled back for job %s (PR #%d, commit %s): %s.", evt.JobName, evt.PRNumber, evt.CommitSHA, details)
-		go func(tID, m string) {
+		lines := []string{
+			fmt.Sprintf("Deployment failed and rolled back for job %s on %s (PR #%d, commit: %s).", evt.JobName, evt.Repo, evt.PRNumber, evt.CommitSHA),
+		}
+		if cleanDetails := strings.TrimSpace(evt.Details); cleanDetails != "" {
+			lines = append(lines, fmt.Sprintf("Error details:\n```\n%s\n```", truncatePromptDetails(cleanDetails)))
+		}
+		lines = append(lines, "Please investigate and fix the deployment rollback failure.")
+		prompt := strings.Join(lines, "\n")
+		go func(tID, p string) {
 			defer func() {
 				if r := recover(); r != nil {
-					log.Printf("[webhooks-router] [dispatcher] PANIC recovered in DispatchDirectMessage (deploy_rollback): %v", r)
+					log.Printf("[webhooks-router] [dispatcher] PANIC recovered in DispatchPrompt (deploy_rollback): %v", r)
 				}
 			}()
-			dispCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			dispCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			if err := s.dispatcher.DispatchDirectMessage(dispCtx, DirectMessageRequest{
+			if err := s.dispatcher.DispatchPrompt(dispCtx, PromptRequest{
 				ChannelID: tID,
-				Content:   m,
+				Prompt:    p,
 			}); err != nil {
-				log.Printf("[webhooks-router] [dispatcher] error dispatching deploy_rollback direct message: %v", err)
+				log.Printf("[webhooks-router] [dispatcher] error dispatching deploy_rollback prompt: %v", err)
 			}
-		}(targetID, msg)
+		}(targetID, prompt)
 	} else if evt.Event == "deploy_failed" && IsValidDiscordSnowflake(evt.TargetID) && s.dispatcher != nil {
 		targetID := evt.TargetID
-		details := evt.Details
-		runes := []rune(details)
-		if len(runes) > 500 {
-			details = string(runes[:500])
+		if s.registry != nil && evt.PRNumber > 0 {
+			tID, updated, err := s.registry.AtomicTransitionDeployFailed(ctx, evt.Repo, evt.PRNumber)
+			if err != nil {
+				log.Printf("[webhooks-router] [registry] error transitioning deploy_failed: %v", err)
+			} else if !updated {
+				return &evt
+			} else if tID != "" {
+				targetID = tID
+			}
 		}
-		msg := fmt.Sprintf("Deployment failed for job %s (PR #%d, commit %s): %s.", evt.JobName, evt.PRNumber, evt.CommitSHA, details)
-		go func(tID, m string) {
+		lines := []string{
+			fmt.Sprintf("Deployment failed for job %s on %s (PR #%d, commit: %s).", evt.JobName, evt.Repo, evt.PRNumber, evt.CommitSHA),
+		}
+		if cleanDetails := strings.TrimSpace(evt.Details); cleanDetails != "" {
+			lines = append(lines, fmt.Sprintf("Error details:\n```\n%s\n```", truncatePromptDetails(cleanDetails)))
+		}
+		lines = append(lines, "Please investigate and fix the deployment failure.")
+		prompt := strings.Join(lines, "\n")
+		go func(tID, p string) {
 			defer func() {
 				if r := recover(); r != nil {
-					log.Printf("[webhooks-router] [dispatcher] PANIC recovered in DispatchDirectMessage (deploy_failed): %v", r)
+					log.Printf("[webhooks-router] [dispatcher] PANIC recovered in DispatchPrompt (deploy_failed): %v", r)
 				}
 			}()
-			dispCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			dispCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			if err := s.dispatcher.DispatchDirectMessage(dispCtx, DirectMessageRequest{
+			if err := s.dispatcher.DispatchPrompt(dispCtx, PromptRequest{
 				ChannelID: tID,
-				Content:   m,
+				Prompt:    p,
 			}); err != nil {
-				log.Printf("[webhooks-router] [dispatcher] error dispatching deploy_failed direct message: %v", err)
+				log.Printf("[webhooks-router] [dispatcher] error dispatching deploy_failed prompt: %v", err)
 			}
-		}(targetID, msg)
+		}(targetID, prompt)
 	} else if evt.Event == "sync_success" && IsValidDiscordSnowflake(evt.TargetID) && s.dispatcher != nil {
 		targetID := evt.TargetID
 		msg := fmt.Sprintf("Git sync completed for %s (commit %s). Mounted rules, skills, and configs updated.", evt.Repo, evt.CommitSHA)
@@ -1380,35 +1474,64 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 		}(targetID, msg)
 	} else if evt.Event == "sync_failed" && IsValidDiscordSnowflake(evt.TargetID) && s.dispatcher != nil {
 		targetID := evt.TargetID
-		msg := fmt.Sprintf("Git sync failed for %s (commit %s): %s.", evt.Repo, evt.CommitSHA, evt.Details)
-		if evt.PRNumber > 0 {
-			msg = fmt.Sprintf("Git sync failed for %s (PR #%d, commit %s): %s.", evt.Repo, evt.PRNumber, evt.CommitSHA, evt.Details)
+		lines := []string{
+			fmt.Sprintf("Git sync failed for repo %s (commit: %s, PR #%d).", evt.Repo, evt.CommitSHA, evt.PRNumber),
 		}
-		go func(tID, m string) {
+		if evt.PRNumber == 0 {
+			lines[0] = fmt.Sprintf("Git sync failed for repo %s (commit: %s).", evt.Repo, evt.CommitSHA)
+		}
+		if cleanDetails := strings.TrimSpace(evt.Details); cleanDetails != "" {
+			lines = append(lines, fmt.Sprintf("Error details:\n```\n%s\n```", truncatePromptDetails(cleanDetails)))
+		}
+		lines = append(lines, "Please investigate and fix the git sync failure.")
+		prompt := strings.Join(lines, "\n")
+		go func(tID, p string) {
 			defer func() {
 				if r := recover(); r != nil {
-					log.Printf("[webhooks-router] [dispatcher] PANIC recovered in DispatchDirectMessage (sync_failed): %v", r)
+					log.Printf("[webhooks-router] [dispatcher] PANIC recovered in DispatchPrompt (sync_failed): %v", r)
 				}
 			}()
-			dispCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			dispCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			if err := s.dispatcher.DispatchDirectMessage(dispCtx, DirectMessageRequest{
+			if err := s.dispatcher.DispatchPrompt(dispCtx, PromptRequest{
 				ChannelID: tID,
-				Content:   m,
+				Prompt:    p,
 			}); err != nil {
-				log.Printf("[webhooks-router] [dispatcher] error dispatching sync_failed direct message: %v", err)
+				log.Printf("[webhooks-router] [dispatcher] error dispatching sync_failed prompt: %v", err)
 			}
-		}(targetID, msg)
+		}(targetID, prompt)
 	}
 
 	return &evt
 }
 
-func (s *RouterServer) dispatchCIFailurePrompt(targetID, checkName, repo, headSHA string, prNum int) {
+const maxPromptRunes = 1500
+
+func truncatePromptDetails(s string) string {
+	s = strings.ReplaceAll(s, "```", "'''")
+	runes := []rune(s)
+	if len(runes) <= maxPromptRunes {
+		return s
+	}
+	return string(runes[:maxPromptRunes]) + "... (truncated)"
+}
+
+func (s *RouterServer) dispatchCIFailurePrompt(targetID, checkName, repo, headSHA string, prNum int, details, checkURL string) {
 	if s.dispatcher == nil || !IsValidDiscordSnowflake(targetID) {
 		return
 	}
-	prompt := fmt.Sprintf("CI check %q failed for PR #%d on %s (head: %s). Please diagnose and fix the failure.", checkName, prNum, repo, headSHA)
+	lines := []string{
+		fmt.Sprintf("CI check %q failed for PR #%d on %s (head commit: %s).", checkName, prNum, repo, headSHA),
+	}
+	if cleanDetails := strings.TrimSpace(details); cleanDetails != "" {
+		lines = append(lines, fmt.Sprintf("Error details:\n```\n%s\n```", truncatePromptDetails(cleanDetails)))
+	}
+	if cleanURL := strings.TrimSpace(checkURL); cleanURL != "" {
+		lines = append(lines, fmt.Sprintf("Check URL: %s", cleanURL))
+	}
+	lines = append(lines, "Please investigate and fix the failure by inspecting the failing logs, diagnosing the issue, verifying with local checks, and pushing a fix.")
+	prompt := strings.Join(lines, "\n")
+
 	go func(tID, p string) {
 		defer func() {
 			if r := recover(); r != nil {
@@ -1450,28 +1573,6 @@ func (s *RouterServer) dispatchConflictPrompt(targetID, repo, branch, headSHA st
 			log.Printf("[webhooks-router] [dispatcher] successfully dispatched conflict prompt for PR #%d to %s", prNum, tID)
 		}
 	}(targetID, prompt)
-}
-
-func (s *RouterServer) dispatchConflictDirectMessage(targetID, repo, branch string, prNum int) {
-	if s.dispatcher == nil || !IsValidDiscordSnowflake(targetID) {
-		return
-	}
-	msg := fmt.Sprintf("PR #%d on %s (branch %s) has merge conflicts with main. Initiating automatic conflict resolution.", prNum, repo, branch)
-	go func(tID, m string) {
-		defer func() {
-			if r := recover(); r != nil {
-				log.Printf("[webhooks-router] [dispatcher] PANIC recovered in DispatchDirectMessage (conflict): %v", r)
-			}
-		}()
-		dispCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := s.dispatcher.DispatchDirectMessage(dispCtx, DirectMessageRequest{
-			ChannelID: tID,
-			Content:   m,
-		}); err != nil {
-			log.Printf("[webhooks-router] [dispatcher] error dispatching conflict direct message: %v", err)
-		}
-	}(targetID, msg)
 }
 
 // GitHubPRDetails encapsulates mergeability information returned by GitHub's Pull Request API.
@@ -1586,7 +1687,6 @@ func (s *RouterServer) checkOpenPRConflicts(ctx context.Context, repo string) er
 				}
 				log.Printf("[webhooks-router] [registry] pr %s#%d transitioned to conflict (target_id=%s)", repo, pr.PRNumber, targetID)
 				s.dispatchConflictPrompt(targetID, repo, pr.Branch, pr.HeadSHA, pr.PRNumber)
-				s.dispatchConflictDirectMessage(targetID, repo, pr.Branch, pr.PRNumber)
 			}
 		}
 	}
@@ -1766,6 +1866,12 @@ type GitHubCheckRunPayload struct {
 		Status       string             `json:"status"`
 		Conclusion   string             `json:"conclusion"`
 		DetailsURL   string             `json:"details_url"`
+		HTMLURL      string             `json:"html_url"`
+		Output       struct {
+			Title   string `json:"title"`
+			Summary string `json:"summary"`
+			Text    string `json:"text"`
+		} `json:"output"`
 		PullRequests []GitHubCheckRunPR `json:"pull_requests"`
 	} `json:"check_run"`
 	Repository struct {
@@ -1782,6 +1888,7 @@ type GitHubWorkflowRunPayload struct {
 		HeadBranch   string             `json:"head_branch"`
 		Status       string             `json:"status"`
 		Conclusion   string             `json:"conclusion"`
+		HTMLURL      string             `json:"html_url"`
 		PullRequests []GitHubCheckRunPR `json:"pull_requests"`
 	} `json:"workflow_run"`
 	Repository struct {
@@ -2019,7 +2126,6 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 				if updated {
 					log.Printf("[webhooks-router] [registry] pr %s#%d auto_merge_disabled transitioned to conflict (target_id=%s)", res.Repo, res.PRNumber, res.TargetID)
 					s.dispatchConflictPrompt(res.TargetID, res.Repo, res.Branch, res.HeadSHA, res.PRNumber)
-					s.dispatchConflictDirectMessage(res.TargetID, res.Repo, res.Branch, res.PRNumber)
 				}
 			}
 		}
@@ -2074,6 +2180,19 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 			res.Repo, res.CheckName, res.HeadSHA, res.PRNumber, res.Branch, res.Status, res.Conclusion, res.ResolutionSource, res.TargetID, delivery)
 
 		if s.registry != nil && (res.Conclusion == "failure" || res.Conclusion == "timed_out") {
+			var details string
+			if strings.TrimSpace(p.CheckRun.Output.Text) != "" {
+				details = strings.TrimSpace(p.CheckRun.Output.Text)
+			} else if strings.TrimSpace(p.CheckRun.Output.Summary) != "" {
+				details = strings.TrimSpace(p.CheckRun.Output.Summary)
+			} else if strings.TrimSpace(p.CheckRun.Output.Title) != "" {
+				details = strings.TrimSpace(p.CheckRun.Output.Title)
+			}
+			checkURL := strings.TrimSpace(p.CheckRun.HTMLURL)
+			if checkURL == "" {
+				checkURL = strings.TrimSpace(p.CheckRun.DetailsURL)
+			}
+
 			if res.PRNumber > 0 {
 				targetID, updated, err := s.registry.AtomicTransitionCIFailed(ctx, res.Repo, res.PRNumber)
 				if err != nil {
@@ -2085,7 +2204,7 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 				}
 				if updated {
 					log.Printf("[webhooks-router] [registry] pr %s#%d transitioned to ci_failed (check=%s, target_id=%s)", res.Repo, res.PRNumber, res.CheckName, targetID)
-					s.dispatchCIFailurePrompt(res.TargetID, res.CheckName, res.Repo, res.HeadSHA, res.PRNumber)
+					s.dispatchCIFailurePrompt(res.TargetID, res.CheckName, res.Repo, res.HeadSHA, res.PRNumber, details, checkURL)
 				}
 			} else if res.HeadSHA != "" && !isZeroSHA(res.HeadSHA) {
 				targetID, prNum, updated, err := s.registry.AtomicTransitionCIFailedByHeadSHA(ctx, res.Repo, res.HeadSHA)
@@ -2105,7 +2224,7 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 					if pr == 0 {
 						pr = prNum
 					}
-					s.dispatchCIFailurePrompt(res.TargetID, res.CheckName, res.Repo, res.HeadSHA, pr)
+					s.dispatchCIFailurePrompt(res.TargetID, res.CheckName, res.Repo, res.HeadSHA, pr, details, checkURL)
 				}
 			}
 		}
@@ -2164,6 +2283,9 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 			res.Repo, res.CheckName, res.HeadSHA, res.PRNumber, res.Branch, res.Status, res.Conclusion, res.ResolutionSource, res.TargetID, delivery)
 
 		if s.registry != nil && (res.Conclusion == "failure" || res.Conclusion == "timed_out") {
+			details := fmt.Sprintf("Workflow %q concluded with %s", p.WorkflowRun.Name, p.WorkflowRun.Conclusion)
+			checkURL := strings.TrimSpace(p.WorkflowRun.HTMLURL)
+
 			if res.PRNumber > 0 {
 				targetID, updated, err := s.registry.AtomicTransitionCIFailed(ctx, res.Repo, res.PRNumber)
 				if err != nil {
@@ -2175,7 +2297,7 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 				}
 				if updated {
 					log.Printf("[webhooks-router] [registry] pr %s#%d transitioned to ci_failed (workflow=%s, target_id=%s)", res.Repo, res.PRNumber, res.CheckName, targetID)
-					s.dispatchCIFailurePrompt(res.TargetID, res.CheckName, res.Repo, res.HeadSHA, res.PRNumber)
+					s.dispatchCIFailurePrompt(res.TargetID, res.CheckName, res.Repo, res.HeadSHA, res.PRNumber, details, checkURL)
 				}
 			} else if res.HeadSHA != "" && !isZeroSHA(res.HeadSHA) {
 				targetID, prNum, updated, err := s.registry.AtomicTransitionCIFailedByHeadSHA(ctx, res.Repo, res.HeadSHA)
@@ -2195,7 +2317,7 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 					if pr == 0 {
 						pr = prNum
 					}
-					s.dispatchCIFailurePrompt(res.TargetID, res.CheckName, res.Repo, res.HeadSHA, pr)
+					s.dispatchCIFailurePrompt(res.TargetID, res.CheckName, res.Repo, res.HeadSHA, pr, details, checkURL)
 				}
 			}
 		}

@@ -1280,6 +1280,19 @@ type mockPRRegistry struct {
 	deployedUpdated  bool
 	deployedErr      error
 
+	deployFailedCalls    []struct{ repo string; prNumber int }
+	deployFailedTargetID string
+	deployFailedUpdated  bool
+	deployFailedErr      error
+
+	deployFailedJobCalls    []string
+	deployFailedJobTargetID string
+	deployFailedJobPRNum    int
+	deployFailedJobMergeSHA string
+	deployFailedJobRepo     string
+	deployFailedJobUpdated  bool
+	deployFailedJobErr      error
+
 	listDeployingPRs []DeployingPR
 	listDeployingErr error
 
@@ -1310,6 +1323,28 @@ func (m *mockPRRegistry) AtomicTransitionDeployedByJob(ctx context.Context, jobN
 	}
 	m.deployedJobCalls = append(m.deployedJobCalls, jobName)
 	return m.deployedTargetID, m.deployedPRNum, m.deployedMergeSHA, m.deployedRepo, m.deployedUpdated, nil
+}
+
+func (m *mockPRRegistry) AtomicTransitionDeployFailed(ctx context.Context, repo string, prNumber int) (string, bool, error) {
+	if m.deployFailedErr != nil {
+		return "", false, m.deployFailedErr
+	}
+	if m.err != nil {
+		return "", false, m.err
+	}
+	m.deployFailedCalls = append(m.deployFailedCalls, struct{ repo string; prNumber int }{repo, prNumber})
+	return m.deployFailedTargetID, m.deployFailedUpdated, nil
+}
+
+func (m *mockPRRegistry) AtomicTransitionDeployFailedByJob(ctx context.Context, jobName string) (string, int, string, string, bool, error) {
+	if m.deployFailedJobErr != nil {
+		return "", 0, "", "", false, m.deployFailedJobErr
+	}
+	if m.err != nil {
+		return "", 0, "", "", false, m.err
+	}
+	m.deployFailedJobCalls = append(m.deployFailedJobCalls, jobName)
+	return m.deployFailedJobTargetID, m.deployFailedJobPRNum, m.deployFailedJobMergeSHA, m.deployFailedJobRepo, m.deployFailedJobUpdated, nil
 }
 
 func (m *mockPRRegistry) ListDeployingPRs(ctx context.Context) ([]DeployingPR, error) {
@@ -2617,6 +2652,11 @@ func TestProcessGitHubEvent_OutboundDispatch(t *testing.T) {
 			"head_sha": "headsha789",
 			"status": "completed",
 			"conclusion": "failure",
+			"html_url": "https://github.com/azylman/aerial/actions/runs/123",
+			"output": {
+				"title": "Build Failed",
+				"summary": "Compilation error in brain/main.go:42"
+			},
 			"pull_requests": [{"number": 530, "head": {"ref": "feat/test"}}]
 		}
 	}`)
@@ -2632,6 +2672,15 @@ func TestProcessGitHubEvent_OutboundDispatch(t *testing.T) {
 	}
 	if pCalls[0].ChannelID != "1555405874565091380" || !strings.Contains(pCalls[0].Prompt, "Service Unit Tests") {
 		t.Errorf("unexpected prompt call: %+v", pCalls[0])
+	}
+	if !strings.Contains(pCalls[0].Prompt, "Compilation error in brain/main.go:42") {
+		t.Errorf("expected error details in prompt: %s", pCalls[0].Prompt)
+	}
+	if !strings.Contains(pCalls[0].Prompt, "https://github.com/azylman/aerial/actions/runs/123") {
+		t.Errorf("expected check URL in prompt: %s", pCalls[0].Prompt)
+	}
+	if !strings.Contains(pCalls[0].Prompt, "Please investigate and fix") {
+		t.Errorf("expected investigate and fix directive in prompt: %s", pCalls[0].Prompt)
 	}
 
 	// 4. Duplicate check_run failure (ciFailedUpdated = false) does NOT trigger DispatchPrompt
@@ -2674,8 +2723,11 @@ func TestProcessHangarEvent_OutboundDispatch(t *testing.T) {
 	if dmCalls[0].ChannelID != "1555405874565091380" || !strings.Contains(dmCalls[0].Content, "Deployment succeeded") {
 		t.Errorf("unexpected deploy_success direct message: %+v", dmCalls[0])
 	}
+	if len(mockDisp.PromptCalls()) != 0 {
+		t.Fatalf("expected 0 prompt calls on deploy_success, got %d", len(mockDisp.PromptCalls()))
+	}
 
-	// 2. deploy_rollback with valid snowflake targetID triggers direct message with truncation
+	// 2. deploy_rollback with valid snowflake targetID triggers prompt with error details and directive (NOT direct message!)
 	longDetails := strings.Repeat("error detail line\n", 50)
 	rollbackEvt := HangarDeployEvent{
 		Event:     "deploy_rollback",
@@ -2690,18 +2742,25 @@ func TestProcessHangarEvent_OutboundDispatch(t *testing.T) {
 	srv.ProcessHangarEvent(ctx, rollbackEvt)
 
 	time.Sleep(50 * time.Millisecond)
-	dmCalls = mockDisp.DirectMessageCalls()
-	if len(dmCalls) != 2 {
-		t.Fatalf("expected 2 direct message dispatches after rollback, got %d", len(dmCalls))
+	pCalls := mockDisp.PromptCalls()
+	if len(pCalls) != 1 {
+		t.Fatalf("expected 1 prompt dispatch after rollback, got %d", len(pCalls))
 	}
-	if dmCalls[1].ChannelID != "1555405874565091380" || !strings.Contains(dmCalls[1].Content, "Deployment failed and rolled back") {
-		t.Errorf("unexpected deploy_rollback direct message: %+v", dmCalls[1])
+	if pCalls[0].ChannelID != "1555405874565091380" || !strings.Contains(pCalls[0].Prompt, "Deployment failed and rolled back") {
+		t.Errorf("unexpected deploy_rollback prompt: %+v", pCalls[0])
 	}
-	if len(dmCalls[1].Content) > 1000 {
-		t.Errorf("direct message should be truncated, but length is %d", len(dmCalls[1].Content))
+	if !strings.Contains(pCalls[0].Prompt, "Please investigate and fix") {
+		t.Errorf("expected investigate and fix directive in prompt: %s", pCalls[0].Prompt)
+	}
+	if !strings.Contains(pCalls[0].Prompt, "```") {
+		t.Errorf("expected codeblock in prompt: %s", pCalls[0].Prompt)
+	}
+	// direct message count should still be 1 (only deploy_success)
+	if len(mockDisp.DirectMessageCalls()) != 1 {
+		t.Fatalf("expected still 1 direct message dispatch, got %d", len(mockDisp.DirectMessageCalls()))
 	}
 
-	// 3. deploy_failed with valid snowflake targetID triggers direct message
+	// 3. deploy_failed with valid snowflake targetID triggers prompt
 	failedEvt := HangarDeployEvent{
 		Event:     "deploy_failed",
 		JobName:   "hangar",
@@ -2715,15 +2774,58 @@ func TestProcessHangarEvent_OutboundDispatch(t *testing.T) {
 	srv.ProcessHangarEvent(ctx, failedEvt)
 
 	time.Sleep(50 * time.Millisecond)
-	dmCalls = mockDisp.DirectMessageCalls()
-	if len(dmCalls) != 3 {
-		t.Fatalf("expected 3 direct message dispatches after deploy_failed, got %d", len(dmCalls))
+	pCalls = mockDisp.PromptCalls()
+	if len(pCalls) != 2 {
+		t.Fatalf("expected 2 prompt dispatches after deploy_failed, got %d", len(pCalls))
 	}
-	if dmCalls[2].ChannelID != "1555405874565091380" || !strings.Contains(dmCalls[2].Content, "Deployment failed for job hangar") {
-		t.Errorf("unexpected deploy_failed direct message: %+v", dmCalls[2])
+	if pCalls[1].ChannelID != "1555405874565091380" || !strings.Contains(pCalls[1].Prompt, "Deployment failed for job hangar") {
+		t.Errorf("unexpected deploy_failed prompt: %+v", pCalls[1])
+	}
+	if !strings.Contains(pCalls[1].Prompt, "Please investigate and fix") {
+		t.Errorf("expected investigate and fix directive in prompt: %s", pCalls[1].Prompt)
 	}
 
-	// 4. deploy_success with non-snowflake targetID does NOT trigger direct message
+	// 4. sync_success with valid snowflake targetID triggers direct message
+	syncSuccessEvt := HangarDeployEvent{
+		Event:     "sync_success",
+		Repo:      "azylman/aerial-config",
+		CommitSHA: "sha999",
+		TargetID:  "1555405874565091380",
+	}
+	srv.ProcessHangarEvent(ctx, syncSuccessEvt)
+
+	time.Sleep(50 * time.Millisecond)
+	dmCalls = mockDisp.DirectMessageCalls()
+	if len(dmCalls) != 2 {
+		t.Fatalf("expected 2 direct message dispatches after sync_success, got %d", len(dmCalls))
+	}
+	if dmCalls[1].ChannelID != "1555405874565091380" || !strings.Contains(dmCalls[1].Content, "Git sync completed") {
+		t.Errorf("unexpected sync_success direct message: %+v", dmCalls[1])
+	}
+
+	// 5. sync_failed with valid snowflake targetID triggers prompt
+	syncFailedEvt := HangarDeployEvent{
+		Event:     "sync_failed",
+		Repo:      "azylman/aerial-config",
+		CommitSHA: "sha888",
+		TargetID:  "1555405874565091380",
+		Details:   "merge conflict in rules/persona",
+	}
+	srv.ProcessHangarEvent(ctx, syncFailedEvt)
+
+	time.Sleep(50 * time.Millisecond)
+	pCalls = mockDisp.PromptCalls()
+	if len(pCalls) != 3 {
+		t.Fatalf("expected 3 prompt dispatches after sync_failed, got %d", len(pCalls))
+	}
+	if pCalls[2].ChannelID != "1555405874565091380" || !strings.Contains(pCalls[2].Prompt, "Git sync failed") {
+		t.Errorf("unexpected sync_failed prompt: %+v", pCalls[2])
+	}
+	if !strings.Contains(pCalls[2].Prompt, "Please investigate and fix") {
+		t.Errorf("expected investigate and fix directive in prompt: %s", pCalls[2].Prompt)
+	}
+
+	// 6. deploy_success with non-snowflake targetID does NOT trigger direct message or prompt
 	invalidTargetEvt := HangarDeployEvent{
 		Event:    "deploy_success",
 		JobName:  "hangar",
@@ -2732,13 +2834,11 @@ func TestProcessHangarEvent_OutboundDispatch(t *testing.T) {
 	srv.ProcessHangarEvent(ctx, invalidTargetEvt)
 
 	time.Sleep(50 * time.Millisecond)
-	if len(mockDisp.DirectMessageCalls()) != 3 {
-		t.Fatalf("expected still 3 direct message dispatches after invalid target, got %d", len(mockDisp.DirectMessageCalls()))
+	if len(mockDisp.DirectMessageCalls()) != 2 {
+		t.Fatalf("expected still 2 direct message dispatches after invalid target, got %d", len(mockDisp.DirectMessageCalls()))
 	}
-
-	// 5. STRICT INVARIANT: Deployment events must NEVER invoke DispatchPrompt!
-	if pCalls := mockDisp.PromptCalls(); len(pCalls) != 0 {
-		t.Fatalf("STRICT INVARIANT VIOLATION: expected 0 prompt calls from deployment events, got %d", len(pCalls))
+	if len(mockDisp.PromptCalls()) != 3 {
+		t.Fatalf("expected still 3 prompt dispatches after invalid target, got %d", len(mockDisp.PromptCalls()))
 	}
 }
 
@@ -3104,6 +3204,7 @@ func TestProcessHangarEvent_SyncSuccessAndFailure(t *testing.T) {
 	ctx := context.Background()
 	mockDisp := &mockOutboundDispatcher{
 		directMessageCh: make(chan DirectMessageRequest, 5),
+		promptCh:        make(chan PromptRequest, 5),
 	}
 	srv := NewRouterServer(Config{}, nil)
 	srv.SetDispatcher(mockDisp)
@@ -3128,7 +3229,7 @@ func TestProcessHangarEvent_SyncSuccessAndFailure(t *testing.T) {
 		t.Fatal("timed out waiting for sync_success direct message")
 	}
 
-	// 2. sync_failed
+	// 2. sync_failed triggers prompt with directive and context
 	syncFailedEvt := HangarDeployEvent{
 		Event:     "sync_failed",
 		Repo:      "azylman/aerial",
@@ -3141,12 +3242,15 @@ func TestProcessHangarEvent_SyncSuccessAndFailure(t *testing.T) {
 	srv.ProcessHangarEvent(ctx, syncFailedEvt)
 
 	select {
-	case dm := <-mockDisp.directMessageCh:
-		if !strings.Contains(dm.Content, "Git sync failed for azylman/aerial") || !strings.Contains(dm.Content, "merge conflict") {
-			t.Errorf("unexpected fail direct message content: %s", dm.Content)
+	case p := <-mockDisp.promptCh:
+		if !strings.Contains(p.Prompt, "Git sync failed for repo azylman/aerial") || !strings.Contains(p.Prompt, "merge conflict in rules/foo.md") {
+			t.Errorf("unexpected fail prompt content: %s", p.Prompt)
+		}
+		if !strings.Contains(p.Prompt, "Please investigate and fix the git sync failure.") {
+			t.Errorf("expected investigate and fix directive: %s", p.Prompt)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for sync_failed direct message")
+		t.Fatal("timed out waiting for sync_failed prompt")
 	}
 }
 
@@ -3303,16 +3407,8 @@ func TestCheckOpenPRConflicts_Detected(t *testing.T) {
 		t.Fatal("timed out waiting for conflict prompt dispatch")
 	}
 
-	select {
-	case dm := <-mockDisp.directMessageCh:
-		if dm.ChannelID != "1555405874565091380" {
-			t.Errorf("expected ChannelID 1555405874565091380, got %s", dm.ChannelID)
-		}
-		if !strings.Contains(dm.Content, "has merge conflicts with main") {
-			t.Errorf("unexpected dm content: %s", dm.Content)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for conflict direct message")
+	if len(mockDisp.DirectMessageCalls()) != 0 {
+		t.Errorf("expected 0 direct message calls on conflict, got %d", len(mockDisp.DirectMessageCalls()))
 	}
 }
 
@@ -3565,6 +3661,37 @@ func TestDispatchWorkflowRunImages_ParallelDispatch(t *testing.T) {
 	}
 	if !imagesSeen["ghcr.io/azylman/aerial-scheduler-mcp:latest"] {
 		t.Errorf("missing scheduler-mcp image dispatch")
+	}
+}
+
+func TestTruncatePromptDetails(t *testing.T) {
+	// 1. Backtick sanitization
+	withBackticks := "error occurred:\n```json\n{\"error\":\"broken\"}\n```\nend"
+	sanitized := truncatePromptDetails(withBackticks)
+	if strings.Contains(sanitized, "```") {
+		t.Errorf("expected backticks to be sanitized, got: %s", sanitized)
+	}
+	if !strings.Contains(sanitized, "'''json") {
+		t.Errorf("expected backticks replaced with single quotes, got: %s", sanitized)
+	}
+
+	// 2. Short string unchanged
+	short := "short error message"
+	if truncatePromptDetails(short) != short {
+		t.Errorf("expected short string unchanged, got: %s", truncatePromptDetails(short))
+	}
+
+	// 3. Long string truncated
+	long := strings.Repeat("a", 2000)
+	truncated := truncatePromptDetails(long)
+	if !strings.HasSuffix(truncated, "... (truncated)") {
+		t.Errorf("expected truncation suffix, got: %s", truncated[len(truncated)-20:])
+	}
+	runes := []rune(truncated)
+	// 1500 runes + len("... (truncated)")
+	expectedLen := maxPromptRunes + len([]rune("... (truncated)"))
+	if len(runes) != expectedLen {
+		t.Errorf("expected %d runes, got %d", expectedLen, len(runes))
 	}
 }
 
