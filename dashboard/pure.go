@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"mime"
 	"net/url"
@@ -1289,4 +1290,164 @@ func MergeClusterDeploymentsWithHangar(
 	}
 	return result
 }
+
+type NomadJobSummaryGroup struct {
+	Queued   int `json:"Queued"`
+	Complete int `json:"Complete"`
+	Failed   int `json:"Failed"`
+	Running  int `json:"Running"`
+	Starting int `json:"Starting"`
+}
+
+type NomadJobItem struct {
+	ID         string `json:"ID"`
+	Name       string `json:"Name"`
+	Status     string `json:"Status"`
+	Type       string `json:"Type"`
+	JobSummary struct {
+		Summary map[string]NomadJobSummaryGroup `json:"Summary"`
+	} `json:"JobSummary"`
+	SubmitTime int64 `json:"SubmitTime"`
+}
+
+type NomadDeploymentStatus struct {
+	Healthy   bool   `json:"Healthy"`
+	Timestamp string `json:"Timestamp"`
+}
+
+type NomadTaskState struct {
+	State     string     `json:"State"`
+	Failed    bool       `json:"Failed"`
+	Restarts  int        `json:"Restarts"`
+	StartedAt *time.Time `json:"StartedAt"`
+}
+
+type NomadAllocItem struct {
+	ID               string                    `json:"ID"`
+	JobID            string                    `json:"JobID"`
+	Name             string                    `json:"Name"`
+	ClientStatus     string                    `json:"ClientStatus"`
+	DesiredStatus    string                    `json:"DesiredStatus"`
+	DeploymentStatus *NomadDeploymentStatus    `json:"DeploymentStatus"`
+	CreateTime       int64                     `json:"CreateTime"`
+	ModifyTime       int64                     `json:"ModifyTime"`
+	TaskStates       map[string]NomadTaskState `json:"TaskStates"`
+}
+
+// ParseNomadClusterState parses Nomad jobs and allocations into unified ServiceStatus items.
+func ParseNomadClusterState(jobsData, allocsData []byte, now time.Time) ([]ServiceStatus, error) {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+
+	var jobs []NomadJobItem
+	if err := json.Unmarshal(jobsData, &jobs); err != nil {
+		return nil, fmt.Errorf("failed to parse nomad jobs: %w", err)
+	}
+
+	var allocs []NomadAllocItem
+	if err := json.Unmarshal(allocsData, &allocs); err != nil {
+		return nil, fmt.Errorf("failed to parse nomad allocations: %w", err)
+	}
+
+	runningAllocs := make(map[string]NomadAllocItem)
+	for _, alloc := range allocs {
+		if alloc.ClientStatus != "running" {
+			continue
+		}
+		existing, exists := runningAllocs[alloc.JobID]
+		if !exists || alloc.CreateTime > existing.CreateTime {
+			runningAllocs[alloc.JobID] = alloc
+		}
+	}
+
+	services := make([]ServiceStatus, 0)
+	for _, job := range jobs {
+		if job.Type != "" && job.Type != "service" {
+			continue
+		}
+
+		jobID := job.ID
+		if jobID == "" {
+			jobID = job.Name
+		}
+		if jobID == "" {
+			continue
+		}
+
+		alloc, hasAlloc := runningAllocs[jobID]
+		if !hasAlloc && job.Name != "" {
+			alloc, hasAlloc = runningAllocs[job.Name]
+		}
+
+		var uptimeSec int64
+		var status string
+
+		if hasAlloc {
+			if alloc.CreateTime > 0 {
+				uptimeSec = int64(now.Sub(time.Unix(0, alloc.CreateTime).UTC()).Seconds())
+				if uptimeSec < 0 {
+					uptimeSec = 0
+				}
+			}
+
+			if alloc.DeploymentStatus != nil {
+				if alloc.DeploymentStatus.Healthy {
+					status = "healthy"
+				} else {
+					hasRunningOrPending := false
+					for _, task := range alloc.TaskStates {
+						if task.State == "running" || task.State == "pending" {
+							hasRunningOrPending = true
+							break
+						}
+					}
+					if hasRunningOrPending {
+						status = "starting"
+					} else {
+						status = "unhealthy"
+					}
+				}
+			} else {
+				hasFailedOrNotRunning := false
+				for _, task := range alloc.TaskStates {
+					if task.Failed || task.State != "running" {
+						hasFailedOrNotRunning = true
+						break
+					}
+				}
+				if hasFailedOrNotRunning {
+					status = "unhealthy"
+				} else {
+					status = "healthy"
+				}
+			}
+		} else {
+			uptimeSec = 0
+			startingCount := 0
+			for _, grp := range job.JobSummary.Summary {
+				startingCount += grp.Starting
+			}
+			if job.Status == "pending" || startingCount > 0 {
+				status = "starting"
+			} else {
+				status = "unhealthy"
+			}
+		}
+
+		services = append(services, ServiceStatus{
+			Name:          jobID,
+			Status:        status,
+			UptimeSeconds: uptimeSec,
+			LastCheckTime: now,
+		})
+	}
+
+	sort.Slice(services, func(i, j int) bool {
+		return services[i].Name < services[j].Name
+	})
+
+	return services, nil
+}
+
 

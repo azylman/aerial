@@ -36,6 +36,9 @@ job "victoriametrics-mcp" {
         dns_search_domains = ["aerial"]
         image        = "ghcr.io/victoriametrics/mcp-victoriametrics:latest"
         network_mode = "host"
+        healthchecks {
+          disable = true
+        }
       }
 
       env {

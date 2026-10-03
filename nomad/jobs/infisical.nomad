@@ -52,6 +52,9 @@ job "infisical" {
         dns_search_domains = ["aerial"]
         image        = "redis:7-alpine"
         network_mode = "host"
+        healthchecks {
+          disable = true
+        }
         args         = ["--port", "6380", "--bind", "0.0.0.0", "--protected-mode", "no", "--save", ""]
       }
 
@@ -89,6 +92,9 @@ job "infisical" {
         dns_search_domains = ["aerial"]
         image        = "infisical/infisical:latest"
         network_mode = "host"
+        healthchecks {
+          disable = true
+        }
       }
 
       env {

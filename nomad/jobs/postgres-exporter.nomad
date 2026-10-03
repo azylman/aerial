@@ -36,6 +36,9 @@ job "postgres-exporter" {
         dns_search_domains = ["aerial"]
         image        = "prometheuscommunity/postgres-exporter:v0.16.0"
         network_mode = "host"
+        healthchecks {
+          disable = true
+        }
         security_opt = ["no-new-privileges:true"]
         args = [
           "--log.format=json"

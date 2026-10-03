@@ -39,6 +39,9 @@ job "proxy" {
         dns_search_domains = ["aerial"]
         image        = "ghcr.io/azylman/aerial-proxy:latest"
         network_mode = "host"
+        healthchecks {
+          disable = true
+        }
         volumes = [
           "/mnt/data/supervisor/share/aerial-config/proxy/default.conf:/etc/nginx/conf.d/default.conf:ro",
           "/mnt/data/supervisor/share/aerial/proxy/grafana-cyberpunk.css:/etc/nginx/grafana-cyberpunk.css:ro",

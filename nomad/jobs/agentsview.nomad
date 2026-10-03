@@ -36,6 +36,9 @@ job "agentsview" {
         dns_search_domains = ["aerial"]
         image        = "ghcr.io/azylman/agentsview:latest"
         network_mode = "host"
+        healthchecks {
+          disable = true
+        }
         command      = "/bin/sh"
         args         = ["/local/run-agentsview.sh"]
         mounts = [

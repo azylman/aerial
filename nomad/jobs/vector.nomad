@@ -36,6 +36,9 @@ job "vector" {
         dns_search_domains = ["aerial"]
         image        = "timberio/vector:0.40.0-alpine"
         network_mode = "host"
+        healthchecks {
+          disable = true
+        }
         mounts = [
           {
             type     = "volume"

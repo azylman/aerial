@@ -37,6 +37,9 @@ job "discord-mcp" {
         image        = "ghcr.io/azylman/aerial-discord-mcp:latest"
         force_pull   = true
         network_mode = "host"
+        healthchecks {
+          disable = true
+        }
       }
 
       template {

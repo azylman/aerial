@@ -36,6 +36,9 @@ job "victoriametrics" {
         dns_search_domains = ["aerial"]
         image        = "victoriametrics/victoria-metrics:v1.101.0"
         network_mode = "host"
+        healthchecks {
+          disable = true
+        }
         security_opt = ["no-new-privileges:true"]
         mounts = [
           {

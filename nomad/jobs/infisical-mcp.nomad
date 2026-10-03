@@ -37,6 +37,9 @@ job "infisical-mcp" {
         image        = "ghcr.io/azylman/aerial-infisical-mcp:latest"
         force_pull   = true
         network_mode = "host"
+        healthchecks {
+          disable = true
+        }
       }
 
       template {

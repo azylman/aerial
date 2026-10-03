@@ -37,6 +37,9 @@ job "github-mcp" {
         image        = "ghcr.io/azylman/aerial-github-mcp:latest"
         force_pull   = true
         network_mode = "host"
+        healthchecks {
+          disable = true
+        }
       }
 
       template {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"strings"
@@ -2380,4 +2381,286 @@ func TestBuildContainerChips_NomadContainers(t *testing.T) {
 	} else if vmChip.Status != "completed" {
 		t.Errorf("unexpected victoriametrics chip status: %+v", vmChip)
 	}
+}
+
+
+func TestParseNomadClusterState(t *testing.T) {
+	now := time.Date(2026, 10, 3, 20, 0, 0, 0, time.UTC)
+
+	t.Run("Healthy services with deployment", func(t *testing.T) {
+		jobs := []NomadJobItem{
+			{ID: "brain", Type: "service", Status: "running"},
+		}
+		allocs := []NomadAllocItem{
+			{
+				ID:           "alloc-brain",
+				JobID:        "brain",
+				ClientStatus: "running",
+				CreateTime:   now.Add(-60 * time.Second).UnixNano(),
+				DeploymentStatus: &NomadDeploymentStatus{
+					Healthy: true,
+				},
+			},
+		}
+		jobsData, _ := json.Marshal(jobs)
+		allocsData, _ := json.Marshal(allocs)
+
+		services, err := ParseNomadClusterState(jobsData, allocsData, now)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(services) != 1 {
+			t.Fatalf("expected 1 service, got %d", len(services))
+		}
+		if services[0].Name != "brain" || services[0].Status != "healthy" || services[0].UptimeSeconds != 60 {
+			t.Errorf("unexpected service status: %+v", services[0])
+		}
+	})
+
+	t.Run("Starting service with deployment healthy=false", func(t *testing.T) {
+		jobs := []NomadJobItem{
+			{ID: "hangar", Type: "service", Status: "running"},
+		}
+		allocs := []NomadAllocItem{
+			{
+				ID:           "alloc-hangar",
+				JobID:        "hangar",
+				ClientStatus: "running",
+				CreateTime:   now.Add(-10 * time.Second).UnixNano(),
+				DeploymentStatus: &NomadDeploymentStatus{
+					Healthy: false,
+				},
+				TaskStates: map[string]NomadTaskState{
+					"task1": {State: "running"},
+				},
+			},
+		}
+		jobsData, _ := json.Marshal(jobs)
+		allocsData, _ := json.Marshal(allocs)
+
+		services, err := ParseNomadClusterState(jobsData, allocsData, now)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(services) != 1 || services[0].Status != "starting" || services[0].UptimeSeconds != 10 {
+			t.Errorf("expected starting service with 10s uptime, got: %+v", services)
+		}
+
+		// Also test pending state in task
+		allocs[0].TaskStates = map[string]NomadTaskState{
+			"task1": {State: "pending"},
+		}
+		allocsData, _ = json.Marshal(allocs)
+		services, err = ParseNomadClusterState(jobsData, allocsData, now)
+		if err != nil || len(services) != 1 || services[0].Status != "starting" {
+			t.Errorf("expected starting for pending task, got: %+v", services)
+		}
+
+		// Also test no running or pending tasks (e.g. dead)
+		allocs[0].TaskStates = map[string]NomadTaskState{
+			"task1": {State: "dead"},
+		}
+		allocsData, _ = json.Marshal(allocs)
+		services, err = ParseNomadClusterState(jobsData, allocsData, now)
+		if err != nil || len(services) != 1 || services[0].Status != "unhealthy" {
+			t.Errorf("expected unhealthy for dead task, got: %+v", services)
+		}
+	})
+
+	t.Run("Unhealthy service with failed task or no allocs", func(t *testing.T) {
+		jobs := []NomadJobItem{
+			{ID: "svc-failed", Type: "service", Status: "running"},
+			{ID: "svc-no-alloc", Type: "service", Status: "dead"},
+		}
+		allocs := []NomadAllocItem{
+			{
+				ID:           "alloc-failed",
+				JobID:        "svc-failed",
+				ClientStatus: "running",
+				CreateTime:   now.Add(-30 * time.Second).UnixNano(),
+				TaskStates: map[string]NomadTaskState{
+					"task1": {State: "running", Failed: true},
+				},
+			},
+		}
+		jobsData, _ := json.Marshal(jobs)
+		allocsData, _ := json.Marshal(allocs)
+
+		services, err := ParseNomadClusterState(jobsData, allocsData, now)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(services) != 2 {
+			t.Fatalf("expected 2 services, got %d", len(services))
+		}
+		if services[0].Name != "svc-failed" || services[0].Status != "unhealthy" {
+			t.Errorf("unexpected svc-failed status: %+v", services[0])
+		}
+		if services[1].Name != "svc-no-alloc" || services[1].Status != "unhealthy" || services[1].UptimeSeconds != 0 {
+			t.Errorf("unexpected svc-no-alloc status: %+v", services[1])
+		}
+	})
+
+	t.Run("Nil deployment status with healthy/unhealthy tasks", func(t *testing.T) {
+		jobs := []NomadJobItem{
+			{ID: "proxy", Type: "service", Status: "running"},
+			{ID: "gateway", Type: "service", Status: "running"},
+		}
+		allocs := []NomadAllocItem{
+			{
+				ID:           "alloc-proxy",
+				JobID:        "proxy",
+				ClientStatus: "running",
+				CreateTime:   now.Add(-100 * time.Second).UnixNano(),
+				DeploymentStatus: nil,
+				TaskStates: map[string]NomadTaskState{
+					"proxy-task": {State: "running", Failed: false},
+				},
+			},
+			{
+				ID:           "alloc-gateway",
+				JobID:        "gateway",
+				ClientStatus: "running",
+				CreateTime:   now.Add(-100 * time.Second).UnixNano(),
+				DeploymentStatus: nil,
+				TaskStates: map[string]NomadTaskState{
+					"gateway-task": {State: "pending", Failed: false},
+				},
+			},
+		}
+		jobsData, _ := json.Marshal(jobs)
+		allocsData, _ := json.Marshal(allocs)
+
+		services, err := ParseNomadClusterState(jobsData, allocsData, now)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(services) != 2 {
+			t.Fatalf("expected 2 services, got %d", len(services))
+		}
+		// Alphabetical sort: gateway, proxy
+		if services[0].Name != "gateway" || services[0].Status != "unhealthy" {
+			t.Errorf("expected gateway unhealthy, got: %+v", services[0])
+		}
+		if services[1].Name != "proxy" || services[1].Status != "healthy" || services[1].UptimeSeconds != 100 {
+			t.Errorf("expected proxy healthy, got: %+v", services[1])
+		}
+	})
+
+	t.Run("No running alloc with pending status or starting group", func(t *testing.T) {
+		jobs := []NomadJobItem{
+			{
+				ID:     "pending-svc",
+				Type:   "service",
+				Status: "pending",
+			},
+			{
+				ID:     "starting-svc",
+				Type:   "service",
+				Status: "running",
+				JobSummary: struct {
+					Summary map[string]NomadJobSummaryGroup `json:"Summary"`
+				}{
+					Summary: map[string]NomadJobSummaryGroup{
+						"web": {Starting: 1},
+					},
+				},
+			},
+		}
+		jobsData, _ := json.Marshal(jobs)
+		allocsData := []byte("[]")
+
+		services, err := ParseNomadClusterState(jobsData, allocsData, now)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(services) != 2 {
+			t.Fatalf("expected 2 services, got %d", len(services))
+		}
+		if services[0].Name != "pending-svc" || services[0].Status != "starting" {
+			t.Errorf("expected pending-svc starting, got: %+v", services[0])
+		}
+		if services[1].Name != "starting-svc" || services[1].Status != "starting" {
+			t.Errorf("expected starting-svc starting, got: %+v", services[1])
+		}
+	})
+
+	t.Run("Multiple running allocs selects highest CreateTime and filters batch", func(t *testing.T) {
+		jobs := []NomadJobItem{
+			{ID: "svc-multi", Type: "service", Status: "running"},
+			{ID: "batch-ignored", Type: "batch", Status: "running"},
+			{ID: "", Name: "named-only", Type: "service", Status: "running"},
+			{ID: "", Name: "", Type: "service", Status: "running"},
+		}
+		allocs := []NomadAllocItem{
+			{
+				ID:           "alloc-old",
+				JobID:        "svc-multi",
+				ClientStatus: "running",
+				CreateTime:   now.Add(-200 * time.Second).UnixNano(),
+				DeploymentStatus: &NomadDeploymentStatus{
+					Healthy: false,
+				},
+			},
+			{
+				ID:           "alloc-new",
+				JobID:        "svc-multi",
+				ClientStatus: "running",
+				CreateTime:   now.Add(-40 * time.Second).UnixNano(),
+				DeploymentStatus: &NomadDeploymentStatus{
+					Healthy: true,
+				},
+			},
+			{
+				ID:           "alloc-batch",
+				JobID:        "batch-ignored",
+				ClientStatus: "running",
+				CreateTime:   now.Add(-10 * time.Second).UnixNano(),
+			},
+			{
+				ID:           "alloc-named",
+				JobID:        "named-only",
+				ClientStatus: "running",
+				CreateTime:   now.Add(-15 * time.Second).UnixNano(),
+				DeploymentStatus: &NomadDeploymentStatus{
+					Healthy: true,
+				},
+			},
+			{
+				ID:           "alloc-nonrunning",
+				JobID:        "svc-multi",
+				ClientStatus: "complete",
+				CreateTime:   now.Add(-5 * time.Second).UnixNano(),
+			},
+		}
+		jobsData, _ := json.Marshal(jobs)
+		allocsData, _ := json.Marshal(allocs)
+
+		services, err := ParseNomadClusterState(jobsData, allocsData, time.Time{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(services) != 2 {
+			t.Fatalf("expected 2 services, got %d", len(services))
+		}
+		// Alphabetical: named-only, svc-multi
+		if services[0].Name != "named-only" || services[0].Status != "healthy" {
+			t.Errorf("unexpected named-only: %+v", services[0])
+		}
+		if services[1].Name != "svc-multi" || services[1].Status != "healthy" {
+			t.Errorf("unexpected svc-multi: %+v", services[1])
+		}
+	})
+
+	t.Run("Malformed JSON handling", func(t *testing.T) {
+		validData := []byte("[]")
+		badData := []byte("not valid json")
+
+		if _, err := ParseNomadClusterState(badData, validData, now); err == nil {
+			t.Error("expected error for malformed jobsData")
+		}
+		if _, err := ParseNomadClusterState(validData, badData, now); err == nil {
+			t.Error("expected error for malformed allocsData")
+		}
+	})
 }

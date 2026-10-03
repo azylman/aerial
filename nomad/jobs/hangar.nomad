@@ -40,6 +40,9 @@ job "hangar" {
         image        = "ghcr.io/azylman/aerial-hangar:latest"
         network_mode = "host"
         force_pull   = true
+        healthchecks {
+          disable = true
+        }
         volumes = [
           "/mnt/data/supervisor/share/aerial-config:/share/aerial-config:rw",
           "/mnt/data/supervisor/share/aerial:/share/aerial:rw",

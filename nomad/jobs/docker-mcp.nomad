@@ -37,6 +37,9 @@ job "docker-mcp" {
         image        = "ghcr.io/azylman/aerial-docker-mcp:latest"
         force_pull   = true
         network_mode = "host"
+        healthchecks {
+          disable = true
+        }
         volumes = [
           "/var/run/docker.sock:/var/run/docker.sock"
         ]

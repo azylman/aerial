@@ -36,6 +36,9 @@ job "openobserve" {
         dns_search_domains = ["aerial"]
         image        = "public.ecr.aws/zinclabs/openobserve:v1.0.2-debug"
         network_mode = "host"
+        healthchecks {
+          disable = true
+        }
         mounts = [
           {
             type     = "volume"

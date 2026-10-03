@@ -37,6 +37,9 @@ job "coredns" {
       config {
         image        = "coredns/coredns:latest"
         network_mode = "host"
+        healthchecks {
+          disable = true
+        }
         args         = ["-conf", "/local/Corefile"]
       }
 
